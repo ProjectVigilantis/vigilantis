@@ -62,6 +62,14 @@ vigilantis/
 │   └── security-soar/       # [김세혁 - SecOps] EventBridge/Lambda 0.5초 차단
 ├── packages/
 │   ├── schemas/             # [공통] Pydantic Models (Guardrail, Runbook Schema)
+│   │   ├── __init__.py      # 외부 모듈(core-api, ai-engine 등)로 노출할 스키마 Export
+│   │   ├── pyproject.toml   # Pydantic v2 라이브러리 의존성 정의
+│   │   ├── assets.py        # 자산 메타데이터 & Terraform Drift 스키마
+│   │   ├── events.py        # GuardDuty/CloudTrail 위협 이벤트 스키마
+│   │   ├── guardrails.py    # 4단계 Guardrail 요청/응답 DTO
+│   │   ├── runbooks.py      # Runbook 실행 매개변수 스키마
+│   │   └── tests/           # 스키마 직렬화/검증 단위 테스트
+│   │       └── test_schemas.py
 │   ├── telemetry/           # [공통] OpenTelemetry W3C Trace Context Setup
 │   └── iac/                 # [김승철 - Infra] Terraform Core Code & tfstate
 ├── docker-compose.yml
@@ -116,4 +124,3 @@ dev (Integration Test Branch)
 2. 최소 1명 이상(특히 백엔드↔AI↔프론트 간 API 접점 담당자)의 Code Review 및 승인(Approve)을 받아야 Merge 가능.
 
 3. CI/CD Pipeline (GitHub Actions)에서 Linting & Pydantic Schema Validation Test가 통과해야 함.
->>>>>>> f4ffbf52b6f7507d29ba991433e8280b59c97bda
