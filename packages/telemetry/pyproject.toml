@@ -3,13 +3,11 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "schemas"
+name = "telemetry"
 version = "0.1.0"
-description = "Vigilantis Common Pydantic Schemas Package"
+description = "Vigilantis OpenTelemetry Setup Package"
 requires-python = ">=3.11"
-dependencies = [
-    "pydantic>=2.0.0",
-]
+dependencies = []
 
 [tool.hatch.build.targets.wheel]
 packages = ["."]

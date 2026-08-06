@@ -1,0 +1,26 @@
+[project]
+name = "vigilantis"
+version = "0.1.0"
+description = "Vigilantis Multi-Cloud DevSecOps Platform"
+readme = "README.md"
+authors = [
+    { name = "Se Hyeok Kim", email = "kimseh0418@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0.0",
+]
+
+[tool.uv.workspace]
+members = [
+    "apps/core-api",
+    "apps/ai-engine",
+    "apps/scan-worker",
+    "apps/security-soar",
+    "packages/schemas",
+    "packages/telemetry",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

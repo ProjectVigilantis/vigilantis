@@ -1,2 +1,10 @@
 Docs/
 .DS_Store
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+.pytest_cache/
+.python-version
