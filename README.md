@@ -3,7 +3,7 @@
 ```
 vigilantis/
 ├── .github/                  # GitHub Actions CI/CD (PR 자동검증, Lint)
-├── .gitignore/
+├── .gitignore
 ├── apps/
 │   ├── web/                  # [유건희] Frontend (Next.js 14, Shadcn, Recharts)
 │   ├── core-api/             # [박지현] Core Backend (FastAPI, GitOps, Boto3 Engine)
