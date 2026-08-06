@@ -65,9 +65,6 @@ vigilantis/
 │   ├── telemetry/           # [공통] OpenTelemetry W3C Trace Context Setup
 │   └── iac/                 # [김승철 - Infra] Terraform Core Code & tfstate
 ├── docker-compose.yml
-<<<<<<< HEAD
-└── README.md
-=======
 └── README.md
 ```
 
