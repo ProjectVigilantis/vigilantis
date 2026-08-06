@@ -1,0 +1,14 @@
+{
+  "//": "파일 설명: Next.js 14, Shadcn UI, Recharts 기반 대시보드 웹 애플리케이션의 패키지 의존성 및 스크립트를 관리하는 package.json 파일입니다. | 수행해야 할 작업: Next.js 14, React, Tailwind CSS, Shadcn UI, Recharts 등 프론트엔드 패키지 의존성을 정의하고 dev, build, lint 스크립트를 구성합니다.",
+  "name": "web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
