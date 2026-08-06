@@ -1,8 +1,9 @@
 ## Directory & Monorepo 구조
 
 ```
-vigilantis-monorepo/
+vigilantis/
 ├── .github/                  # GitHub Actions CI/CD (PR 자동검증, Lint)
+├── .gitignore/
 ├── apps/
 │   ├── web/                  # [유건희] Frontend (Next.js 14, Shadcn, Recharts)
 │   ├── core-api/             # [박지현] Core Backend (FastAPI, GitOps, Boto3 Engine)
@@ -24,7 +25,7 @@ vigilantis-monorepo/
 main (Production / Stable)
   ▲
   │  (PR & CI/CD Pass + 1인 이상 Code Review 승인)
-develop (Integration Test Branch)
+dev (Integration Test Branch)
   ▲
   ├── feat/web/dashboard-cot         [유건희 - FE]
   ├── feat/core/gitops-pr-engine     [박지현 - BE]
@@ -59,7 +60,7 @@ develop (Integration Test Branch)
 
 ## Pull Request (PR) & Code Review 규칙
 
-1. `feat/*` 브랜치에서 작업 후 develop 브랜치로 PR 제출.
+1. `feat/*` 브랜치에서 작업 후 dev 브랜치로 PR 제출.
 
 2. 최소 1명 이상(특히 백엔드↔AI↔프론트 간 API 접점 담당자)의 Code Review 및 승인(Approve)을 받아야 Merge 가능.
 
