@@ -1,11 +1,96 @@
-# ==============================================================================
-# [파일 설명]
-# 이 파일은 Vigilantis 공통 Pydantic 데이터 스키마 패키지의 초기화 파일 (__init__.py)입니다.
-# AI Engine, Core API, Scan Worker 등 전역 서비스에서 사용하는 Guardrail, Runbook,
-# Drift Event, Evidence ID 스키마 모듈을 Export합니다.
-#
-# [수행해야 할 작업]
-# 1. Pydantic v2 기반 공통 Data Model 정의 및 내보내기 (Export)
-# 2. Guardrail Schema (Input/Output Filter, Action Whitelist 등) 모듈 정의
-# 3. Runbook Schema 및 Drift Event Schema, Evidence Trace Schema 구성
-# ==============================================================================
+"""
+Vigilantis Common Pydantic Schemas Package.
+Exporting all data transfer objects (DTOs) for assets, events, guardrails, and runbooks.
+"""
+
+try:
+    from packages.schemas.assets import (
+        AssetMetadata,
+        AssetType,
+        DriftStatus,
+        TerraformDrift,
+        TerraformResource,
+    )
+    from packages.schemas.events import (
+        CloudTrailEvent,
+        EventSource,
+        GuardDutyFinding,
+        ThreatEvent,
+        ThreatSeverity,
+    )
+    from packages.schemas.guardrails import (
+        GuardrailEvaluation,
+        GuardrailRequest,
+        GuardrailResponse,
+        GuardrailStatus,
+        GuardrailStep,
+    )
+    from packages.schemas.runbooks import (
+        ExecutionMode,
+        ExecutionStatus,
+        RunbookDefinition,
+        RunbookExecutionRequest,
+        RunbookExecutionResult,
+        RunbookParameter,
+        RunbookRiskLevel,
+    )
+except ImportError:
+    from assets import (
+        AssetMetadata,
+        AssetType,
+        DriftStatus,
+        TerraformDrift,
+        TerraformResource,
+    )
+    from events import (
+        CloudTrailEvent,
+        EventSource,
+        GuardDutyFinding,
+        ThreatEvent,
+        ThreatSeverity,
+    )
+    from guardrails import (
+        GuardrailEvaluation,
+        GuardrailRequest,
+        GuardrailResponse,
+        GuardrailStatus,
+        GuardrailStep,
+    )
+    from runbooks import (
+        ExecutionMode,
+        ExecutionStatus,
+        RunbookDefinition,
+        RunbookExecutionRequest,
+        RunbookExecutionResult,
+        RunbookParameter,
+        RunbookRiskLevel,
+    )
+
+__all__ = [
+    # Assets
+    "AssetType",
+    "DriftStatus",
+    "AssetMetadata",
+    "TerraformResource",
+    "TerraformDrift",
+    # Events
+    "EventSource",
+    "ThreatSeverity",
+    "GuardDutyFinding",
+    "CloudTrailEvent",
+    "ThreatEvent",
+    # Guardrails
+    "GuardrailStep",
+    "GuardrailStatus",
+    "GuardrailEvaluation",
+    "GuardrailRequest",
+    "GuardrailResponse",
+    # Runbooks",
+    "RunbookRiskLevel",
+    "ExecutionMode",
+    "ExecutionStatus",
+    "RunbookParameter",
+    "RunbookDefinition",
+    "RunbookExecutionRequest",
+    "RunbookExecutionResult",
+]
