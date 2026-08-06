@@ -8,9 +8,10 @@
 
 * **팀명**: 서버룸 난방공사
 * **개발 배경**: Multi-Account/Region 환경 확산에 따른 인프라 파편화와 초단위 보안 위협에 대응하고, AI 자동화 도입 시 발생하는 환각(Hallucination) 및 과도한 권한 실행(Excessive Agency) 위험을 해결하기 위해 구축되었습니다.
+* **MVP 범위**: AWS EC2·Security Group 중심. RDS·S3는 Post-MVP 확장 범위이며, GCP·Azure는 Phase 3 로드맵에서 다룹니다.
 * **핵심 가치**:
   * **Observability**: 24/7 365일 상시 인프라 관제 및 Terraform IaC 기반 Drift 감지
-  * **Safety & Resilience**: Runbook ID 기반 실행 제어 및 4단계 Execution Guardrail + 양방향 Auto-Rollback Engine
+  * **Safety & Resilience**: Runbook ID 기반 실행 제어, Input Sanitization과 4단계 Execution Guardrail, 자산 자동 원복·보안 원클릭 해제로 구성된 양방향 회복 엔진
   * **Actionability**: 대시보드 내 One-Click 실행 및 Dual-Path State Sync (GitOps & Boto3)
   * **Transparency**: Evidence ID 기반 Decision Trace 및 OpenTelemetry 전 구간 Tracing
 
@@ -24,7 +25,7 @@
 | **김승철** | Cloud Architect | Step Functions/ECS Fargate 분산 스캔, Terraform IaC, tfstate 관리 |
 | **박지현** | Backend Engineer | FastAPI Core API, Dual-Path (GitOps PR / Boto3) 실행 엔진, State Sync |
 | **안성일** | AI System Engineer | LangGraph Multi-Agent, 4단계 Execution Guardrail, Golden Dataset Evals |
-| **유건희** | Frontend Engineer | Next.js 14 대시보드, CoT Timeline 시각화, 헬스 스코어 Gauge Bar |
+| **유건희** | Frontend Engineer | Next.js 14 대시보드, Evidence ID 기반 Decision Trace·판단 근거 요약 타임라인, 헬스 스코어 Gauge Bar |
 
 ---
 
@@ -34,16 +35,19 @@
 * **Backend**: FastAPI (Python 3.11+), Boto3, PostgreSQL, Redis, OpenTelemetry (W3C Trace Context)
 * **AI & Safety**: LangGraph, OpenAI GPT-4o, Pydantic v2, Pytest (Golden Dataset Evals)
 * **Infra & Security**: AWS Step Functions, ECS Fargate, Lambda, EventBridge, GuardDuty, Terraform
+* **Identity & Access**: OIDC SSO, TOTP/FIDO2 MFA, Admin/Approver/Viewer RBAC
+* **Audit & Reporting**: HIS-001 Audit Trail, CSV/JSON 내보내기, PDF 보고서
 
 ---
 
 ## ✨ Key Features
 
-1. **24/7 자산 관제 & Terraform Drift 감지**: Terraform `plan/show` JSON 파싱을 통해 코드로 정의된 상태(.tfstate)와 실제 AWS 리소스 간의 무단 변경을 100% 식별.
-2. **0.5초 초단위 선제 차단 & 3단계 위협 대응**: High Risk 발생 시 Lambda 기반 즉시 차단, Medium Risk 시 Agentic AI 가이드 제공 및 1분 타임아웃 격리.
-3. **Capability-Restricted AI & 4단계 Guardrail**: LLM 권한을 사전 등록된 Runbook ID 추천으로 제한하고, `Input Sanitization ➔ Schema ➔ Whitelist ➔ ARN Match ➔ Dry-Run` 다층 필터로 RCE 차단.
-4. **Actionable One-Click & 양방향 Auto-Rollback**: 스펙 다운사이징 후 기동 실패(Status Check Fail) 시 이전 스냅샷으로 자동 원복 및 긴급 조치 후 `terraform import/refresh` 상태 맞춤.
-5. **Evidence 기반 Decision Trace & OpenTelemetry**: raw CoT 노출을 지양하고 Evidence ID 기반 감사 증거 제공 및 전 구간 `trace_id` 관통.
+1. **24/7 자산 관제 & Terraform Drift·FinOps 분석**: MVP 범위인 EC2·Security Group을 상시 관제하고 Terraform `plan/show` JSON 파싱으로 코드 상태(.tfstate)와 실제 AWS 리소스 간 Drift를 100% 식별. AWS Price List API를 비용 추정의 주 원천으로, Cost Explorer T-2 확정치를 참고·보정용으로 사용.
+2. **0.5초 초단위 선제 차단 & 3단계 위협 대응**: High Risk 발생 시 Lambda 기반 즉시 차단하고, Medium Risk에는 Agentic AI 가이드와 관제자 승인 흐름을 제공하며 1분 미응답 시 자동 격리. CloudTrail S3 로그로 사후 재검증하여 차단 유지 또는 관제자 원클릭 해제로 전환.
+3. **Capability-Restricted AI & 4단계 Guardrail**: LLM 권한을 사전 등록된 Runbook ID 추천으로 제한하고, 입력 측 `Input Sanitization` 후 `Schema ➔ Action Whitelist ➔ ARN Matching ➔ AWS Dry-Run`의 4단계 출력 검증으로 RCE 차단.
+4. **Actionable One-Click & 양방향 회복 엔진**: Idempotency Key로 중복 실행을 막고 Production 자원은 조직·Scope별 정족수(기본 2인)를 적용. 승인 요청은 만료시키지 않으며 실행 직전 스펙 해시를 재검증하고, 자산 Post-Check 실패 시 이전 스냅샷으로 자동 원복. 긴급 Boto3 조치 후 `terraform import/refresh`로 상태 동기화.
+5. **Evidence 기반 Decision Trace & OpenTelemetry**: raw CoT 노출을 지양하고 Evidence ID 기반 감사 증거와 전 구간 `trace_id`, LLM 토큰·지연 시간 기록을 제공. HIS-001에서 생애주기 Audit Trail을 조회하고 CSV/JSON/PDF로 출력.
+6. **Enterprise Identity & Access Control**: OIDC SSO와 TOTP/FIDO2 MFA로 인증하고 Admin/Approver/Viewer RBAC로 조회·승인·관리 권한을 분리.
 
 ---
 
