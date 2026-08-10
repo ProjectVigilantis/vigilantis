@@ -1,12 +1,12 @@
 # Vigilantis 🛡️
 
-> **24/7 클라우드 자산·보안 상시 관제 및 4단계 AI 가드레일 기반 원클릭 자율 조치·자동 롤백(Auto-Rollback) DevSecOps 파이프라인**
+> **24/7 클라우드 자산·보안 상시 관제 및 4단계 AI 가드레일 기반 Agentic AI 원클릭 자율 대응 FinSecOps 시스템**
 
 ---
 
 ## 📌 Project Overview
 
-* **팀명**: 서버룸 난방공사
+* **팀명**: 딸깍 인프라
 * **개발 배경**: Multi-Account/Region 환경 확산에 따른 인프라 파편화와 초단위 보안 위협에 대응하고, AI 자동화 도입 시 발생하는 환각(Hallucination) 및 과도한 권한 실행(Excessive Agency) 위험을 해결하기 위해 구축되었습니다.
 * **MVP 범위**: AWS EC2·Security Group 중심. RDS·S3는 Post-MVP 확장 범위이며, GCP·Azure는 Phase 3 로드맵에서 다룹니다.
 * **핵심 가치**:
@@ -32,21 +32,22 @@
 ## 🛠 Tech Stack
 
 * **Frontend**: Next.js 14 (App Router), TypeScript, Shadcn UI, Tailwind CSS, Recharts
+* **Mobile**: Native App, Push Notifications, REST API
 * **Backend**: FastAPI (Python 3.11+), Boto3, PostgreSQL, Redis, OpenTelemetry (W3C Trace Context)
 * **AI & Safety**: LangGraph, OpenAI GPT-4o, Pydantic v2, Pytest (Golden Dataset Evals)
 * **Infra & Security**: AWS Step Functions, ECS Fargate, Lambda, EventBridge, GuardDuty, Terraform
 * **Identity & Access**: OIDC SSO, TOTP/FIDO2 MFA, Admin/Approver/Viewer RBAC
-* **Audit & Reporting**: HIS-001 Audit Trail, CSV/JSON 내보내기, PDF 보고서
+* **Audit & Reporting**: HIS-001 Audit Trail, CSV/JSON 내보내기, 조치 결과 PDF 자동 생성·발송
 
 ---
 
 ## ✨ Key Features
 
 1. **24/7 자산 관제 & Terraform Drift·FinOps 분석**: MVP 범위인 EC2·Security Group을 상시 관제하고 Terraform `plan/show` JSON 파싱으로 코드 상태(.tfstate)와 실제 AWS 리소스 간 Drift를 100% 식별. AWS Price List API를 비용 추정의 주 원천으로, Cost Explorer T-2 확정치를 참고·보정용으로 사용.
-2. **0.5초 초단위 선제 차단 & 3단계 위협 대응**: High Risk 발생 시 Lambda 기반 즉시 차단하고, Medium Risk에는 Agentic AI 가이드와 관제자 승인 흐름을 제공하며 1분 미응답 시 자동 격리. CloudTrail S3 로그로 사후 재검증하여 차단 유지 또는 관제자 원클릭 해제로 전환.
+2. **0.5초 초단위 선제 차단 & 3단계 위협 대응**: High Risk 발생 시 Lambda 기반 즉시 차단하고, Medium Risk에는 Agentic AI 가이드와 관제자 승인 흐름을 제공하며 1분 미응답 시 자동 격리. CloudTrail S3 로그로 사후 재검증하여 차단 유지 또는 관제자 원클릭 해제로 전환. 보안 이벤트와 상태 변경은 Native App Push로 알림.
 3. **Capability-Restricted AI & 4단계 Guardrail**: LLM 권한을 사전 등록된 Runbook ID 추천으로 제한하고, 입력 측 `Input Sanitization` 후 `Schema ➔ Action Whitelist ➔ ARN Matching ➔ AWS Dry-Run`의 4단계 출력 검증으로 RCE 차단.
-4. **Actionable One-Click & 양방향 회복 엔진**: Idempotency Key로 중복 실행을 막고 Production 자원은 조직·Scope별 정족수(기본 2인)를 적용. 승인 요청은 만료시키지 않으며 실행 직전 스펙 해시를 재검증하고, 자산 Post-Check 실패 시 이전 스냅샷으로 자동 원복. 긴급 Boto3 조치 후 `terraform import/refresh`로 상태 동기화.
-5. **Evidence 기반 Decision Trace & OpenTelemetry**: raw CoT 노출을 지양하고 Evidence ID 기반 감사 증거와 전 구간 `trace_id`, LLM 토큰·지연 시간 기록을 제공. HIS-001에서 생애주기 Audit Trail을 조회하고 CSV/JSON/PDF로 출력.
+4. **Actionable One-Click & 양방향 회복 엔진**: 웹 대시보드의 AI 제안과 Native App의 보안 대응 요청에 One-Click 실행 흐름을 적용하고, Idempotency Key로 중복 실행을 방지. Production 자원은 조직·Scope별 정족수(기본 2인)를 적용. 승인 요청은 만료시키지 않으며 실행 직전 스펙 해시를 재검증하고, 자산 Post-Check 실패 시 이전 스냅샷으로 자동 원복. 긴급 Boto3 조치 후 `terraform import/refresh`로 상태 동기화.
+5. **Evidence 기반 Decision Trace & OpenTelemetry**: raw CoT 노출을 지양하고 Evidence ID 기반 감사 증거와 전 구간 `trace_id`, LLM 토큰·지연 시간 기록을 제공. HIS-001에서 생애주기 Audit Trail을 조회하고 CSV/JSON으로 내보내며, 조치 결과 PDF를 자동 생성·발송.
 6. **Enterprise Identity & Access Control**: OIDC SSO와 TOTP/FIDO2 MFA로 인증하고 Admin/Approver/Viewer RBAC로 조회·승인·관리 권한을 분리.
 
 ---
