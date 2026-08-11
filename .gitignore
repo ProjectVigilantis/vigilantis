@@ -1,4 +1,3 @@
-Docs/
 .DS_Store
 __pycache__/
 *.py[cod]
@@ -8,3 +7,9 @@ env/
 venv/
 .pytest_cache/
 .python-version
+
+# 로컬 환경변수 (예시는 .env.example 로 커밋)
+.env
+
+# 개인용 프로젝트 컨텍스트 (Claude Code 참고, 커밋 제외)
+CLAUDE.local.md
