@@ -1,0 +1,47 @@
+# ==============================================================================
+# Vigilantis MVP 로컬 개발 환경
+#   db      : PostgreSQL 16
+#   api     : Core API (단일 FastAPI 백엔드)
+#   adminer : DB 웹 관리 UI (http://localhost:8080)
+# 사용: cp .env.example .env  →  docker compose up
+# ==============================================================================
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-vigilantis}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vigilantis}
+      POSTGRES_DB: ${POSTGRES_DB:-vigilantis}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vigilantis}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/core-api/Dockerfile
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    volumes:
+      - ./apps/core-api:/app/apps/core-api
+      - ./packages:/app/packages
+
+  adminer:
+    image: adminer:latest
+    ports:
+      - "8080:8080"
+    depends_on:
+      - db
+
+volumes:
+  pgdata:
