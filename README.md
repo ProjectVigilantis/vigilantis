@@ -92,7 +92,8 @@ vigilantis/
 │   └── golden/                # [박지현] Golden Dataset 20여 건 (*.json)
 ├── tests/                     # [박지현] pytest 회귀·E2E (guardrails/rollback/e2e)
 └── docs/
-    └── adr/                   # Architecture Decision Records
+    └── adr/                   # [박지현] 아키텍처 의사결정 기록 (결정 1건 = 파일 1개)
+        └── 0001-mvp-monorepo-structure.md   # MVP 단일 백엔드 구조 재정비 결정
 ```
 
 ### 디렉토리 설명
@@ -112,7 +113,7 @@ vigilantis/
 | `packages/telemetry` · `packages/iac` | Post-MVP 자리표시자(관측/Terraform) | — |
 | `datasets/golden` | 팀 공통 테스트 정답지(위협/자산 더미 20여 건) | 박지현 |
 | `tests` | pytest 회귀·E2E 시나리오 테스트 | 박지현 |
-| `docs/adr` | 아키텍처 의사결정 기록(ADR) | 박지현 |
+| `docs/adr` | 아키텍처 의사결정 기록(ADR). 되돌리기 어려운 기술 결정(무엇을/왜/대안/결과)을 번호순 `.md` 1건씩 기록·추적. 예: `0001-mvp-monorepo-structure.md`(4앱→단일 core-api 통합 결정) | 박지현 (Technical Writer) |
 
 ### 로컬 실행
 
