@@ -51,6 +51,7 @@ class Asset(Base):
     open_to_world: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)  # 전체개방 위협
 
     # --- rule_engine 이 채우는 자리(수집 단계선 NULL) ---
+    verdict: Mapped[Optional[str]] = mapped_column(String(32), index=True, nullable=True)  # COST_CANDIDATE/THREAT/UNUSED/SKIP
     health_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     skip_reason: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
