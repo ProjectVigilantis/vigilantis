@@ -13,3 +13,6 @@ venv/
 
 # 개인용 프로젝트 컨텍스트 (Claude Code 참고, 커밋 제외)
 CLAUDE.local.md
+
+# Claude Code 로컬 설정 (스킬 .claude/skills/ 는 공유, 개인 설정만 제외)
+.claude/settings.local.json
