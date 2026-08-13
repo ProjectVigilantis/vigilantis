@@ -7,4 +7,6 @@
 # 1. 확정 10종 Runbook 실행 함수 (예: RUNBOOK_EC2_RIGHTSIZING —
 #    변경 전 SpecSnapshot 저장 후 인스턴스 타입 변경)
 # 2. 실행 전 AWS Dry-Run(DryRun=True) 유효성 검증 연동
+# 3. 롤백 3종 실행도 executor 경유 — 트리거 판단·감시는 rollback.py 담당
+#    (예: REVERT_SIZE 실행은 executor 경유, Status Check 실패 감지·발동은 rollback.py)
 # ==============================================================================

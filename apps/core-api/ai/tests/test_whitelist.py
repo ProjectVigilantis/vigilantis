@@ -76,3 +76,16 @@ def test_rollback_runbooks_not_ai_recommendable(runbook_id):
 def test_unlisted_runbooks_rejected(runbook_id):
     assert is_allowed_runbook(runbook_id) is False
     assert is_ai_recommendable(runbook_id) is False
+
+
+def test_reexport_is_same_objects_as_schemas_source():
+    # 원천은 packages/schemas/runbooks.py — ai.whitelist는 같은 객체의 재노출이어야 한다
+    import ai.whitelist as reexport
+    from schemas import runbooks as source
+
+    assert reexport.RunbookId is source.RunbookId
+    assert reexport.ALLOWED_RUNBOOK_IDS is source.ALLOWED_RUNBOOK_IDS
+    assert reexport.ROLLBACK_RUNBOOK_IDS is source.ROLLBACK_RUNBOOK_IDS
+    assert reexport.AI_RECOMMENDABLE_RUNBOOK_IDS is source.AI_RECOMMENDABLE_RUNBOOK_IDS
+    assert reexport.is_allowed_runbook is source.is_allowed_runbook
+    assert reexport.is_ai_recommendable is source.is_ai_recommendable
