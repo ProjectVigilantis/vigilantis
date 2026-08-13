@@ -41,3 +41,7 @@ desktop.ini
 CLAUDE.local.md
 # 로컬 설정 (스킬 .claude/skills/ 는 공유, 개인 설정만 제외)
 .claude/settings.local.json
+
+# ---- 로컬 전용 문서 (Obsidian vault) ----
+# 기획·명세 원본 보관용. GitHub에는 올리지 않음 (공식 기준은 docs/ 참조)
+/vigilantis-docs/

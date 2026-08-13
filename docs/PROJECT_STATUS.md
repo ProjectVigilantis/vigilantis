@@ -84,8 +84,7 @@
 2. **LocalStack 팀 표준 환경** (김세혁) — docker-compose `localstack` 서비스 + EC2/SG 시드 스크립트 + `.env.example`. 현재는 개인 로컬 환경에만 존재해 수집 테스트를 타 팀원이 재현 불가. 6~7주차 실 AWS 스모크 테스트 일정 포함해 전략 수립 중.
 3. **PR #29 후속 보완** (김승철) — 머지된 raw 수집 테스트가 `collector.py`를 호출하지 않고 자체 boto3 로직 사용(`_open_to_world` 중복 구현), LocalStack 시드 없으면 빈 결과로 통과. 실제 collector 경로를 검증하도록 재작성 필요.
 4. **코드 스텁 주석 갱신** — `apps/core-api/ai/whitelist.py`·`services/aws/executor.py`의 구버전 런북 2종 주석 → 확정 10종으로.
-5. **RIGHTSIZING 트리거 문구** — "CPU/메모리"에서 메모리는 기본 CloudWatch 미수집(Agent 필요). CPU(/Network) 기준으로 정리.
-6. README·기획서의 역할 표, 팀명("서버룸 난방공사" → **"딸깍 인프라"**) 및 `apps/*` 오너 주석 최신화.
+5. README·기획서의 역할 표, 팀명("서버룸 난방공사" → **"딸깍 인프라"**) 및 `apps/*` 오너 주석 최신화.
 
 ## 일정 리스크 & 권고 컷라인 (제안 — 팀 합의 필요)
 
@@ -105,4 +104,4 @@
 6. `README.md` — 프로젝트 소개용 (※ 역할 표·오너 주석 구버전)
 7. `vigilantis-docs/기획서/*.docx` — **풀비전 비전 문서(동결)**. 구현 기준 아님.
 
-> ※ `vigilantis-docs/`는 현재 저장소 밖 폴더. 팀 공유가 필요하면 repo `docs/`로 이전 검토.
+> ※ `vigilantis-docs/`는 작업 폴더 내 **로컬 전용 문서**(`.gitignore` 등록, GitHub 미공유). 팀이 참조할 확정 결정은 `docs/PROJECT_STATUS.md`와 `docs/adr/`에 기록한다.
