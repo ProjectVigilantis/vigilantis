@@ -28,4 +28,4 @@ jobs:
         run: uv sync --all-packages
 
       - name: Run pytest
-        run: uv run pytest tests apps/core-api/services/tests -q
+        run: uv run pytest tests apps/core-api/services/tests apps/core-api/ai/tests -q
