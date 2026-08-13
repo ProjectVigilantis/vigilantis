@@ -1,0 +1,12 @@
+{
+  "name": "Vigilantis 와이어프레임 생성기",
+  "id": "vigilantis-wireframe-generator",
+  "api": "1.0.0",
+  "main": "code.js",
+  "editorType": ["figma"],
+  "documentAccess": "dynamic-page",
+  "networkAccess": {
+    "allowedDomains": ["none"],
+    "reasoning": "로컬에서 도형만 생성합니다. 외부 통신이 없습니다."
+  }
+}

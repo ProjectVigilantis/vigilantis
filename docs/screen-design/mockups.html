@@ -1,0 +1,1262 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>Vigilantis 화면 목업</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0B0E14; --sf:#131823; --sf2:#1A2130; --sf3:#212A3B;
+  --bd:#242C3D; --bd2:#33405A;
+  --tx:#E4E8F0; --mu:#8B95A9; --mu2:#5C6579;
+  --pri:#4C8DFF; --grn:#35C77E; --ylw:#E8B33A; --org:#F08A3C; --red:#F2585F; --pur:#9B7BF0;
+}
+html{background:#05070B}
+body{font-family:"Pretendard","Apple SD Gothic Neo",-apple-system,"Segoe UI",sans-serif;
+  color:var(--tx);-webkit-font-smoothing:antialiased}
+section{height:100vh;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:10px;padding:14px 0}
+/* #s1 … #s13 으로 열면 해당 화면만 렌더 (캡처용). 해시 없이 열면 전체 스크롤 */
+body:has(section:target) section:not(:target){display:none}
+.cap{width:1340px;display:flex;align-items:baseline;gap:10px;color:var(--mu)}
+.cap b{color:var(--pri);font:600 13px/1 ui-monospace,Menlo,monospace;letter-spacing:.06em}
+.cap span{font-size:13px}
+.cap i{margin-left:auto;font-style:normal;font-size:11px;color:var(--mu2)}
+.frame{width:1340px;height:790px;background:var(--bg);border:1px solid var(--bd);
+  border-radius:10px;overflow:hidden;display:flex;flex-direction:column;position:relative;
+  box-shadow:0 18px 50px rgba(0,0,0,.55)}
+
+/* ---- GNB ---- */
+.gnb{height:52px;flex:none;display:flex;align-items:center;gap:26px;padding:0 22px;
+  border-bottom:1px solid var(--bd);background:var(--sf)}
+.logo{font:800 15px/1 system-ui;letter-spacing:.14em;color:var(--tx)}
+.logo em{color:var(--pri);font-style:normal}
+.nav{display:flex;gap:22px;font-size:13.5px;color:var(--mu)}
+.nav .on{color:var(--tx);font-weight:600;position:relative}
+.nav .on:after{content:"";position:absolute;left:0;right:0;bottom:-18px;height:2px;background:var(--pri)}
+.conn{margin-left:auto;display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--mu)}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--grn);box-shadow:0 0 0 3px rgba(53,199,126,.16)}
+.dot.y{background:var(--ylw);box-shadow:0 0 0 3px rgba(232,179,58,.16)}
+.dot.g{background:var(--mu2);box-shadow:none}
+
+/* ---- layout ---- */
+.body{flex:1;padding:20px 22px;overflow:hidden;display:flex;flex-direction:column;gap:16px}
+.row{display:flex;gap:16px}
+.col{display:flex;flex-direction:column;gap:16px}
+.card{background:var(--sf);border:1px solid var(--bd);border-radius:9px;padding:16px 18px}
+.card.p0{padding:0}
+.ch{display:flex;align-items:center;gap:9px;margin-bottom:13px}
+.ch h3{font-size:13px;font-weight:600;color:var(--tx);letter-spacing:-.01em}
+.ch .more{margin-left:auto;font-size:11.5px;color:var(--mu)}
+.ttl{font-size:19px;font-weight:700;letter-spacing:-.02em}
+.sub{font-size:11.5px;color:var(--mu2);font-family:ui-monospace,Menlo,monospace}
+
+/* ---- badges ---- */
+.b{display:inline-flex;align-items:center;gap:5px;height:20px;padding:0 8px;border-radius:5px;
+  font-size:11px;font-weight:600;letter-spacing:-.01em;white-space:nowrap}
+.b.n{background:var(--sf3);color:var(--mu)}
+.b.pri{background:rgba(76,141,255,.15);color:#8FB6FF}
+.b.grn{background:rgba(53,199,126,.14);color:#5FD79B}
+.b.ylw{background:rgba(232,179,58,.14);color:#F0C662}
+.b.org{background:rgba(240,138,60,.15);color:#F7A768}
+.b.red{background:rgba(242,88,95,.15);color:#FF858A}
+.b.pur{background:rgba(155,123,240,.15);color:#B79BF7}
+.b:before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor;opacity:.85}
+.b.nodot:before{display:none}
+
+/* ---- signal ---- */
+.sig{flex:1;display:flex;flex-direction:column;justify-content:center;gap:14px;
+  background:linear-gradient(135deg,rgba(53,199,126,.10),rgba(19,24,35,0) 62%),var(--sf)}
+.sigrow{display:flex;align-items:center;gap:12px}
+.pulse{width:11px;height:11px;border-radius:50%;background:var(--grn);
+  box-shadow:0 0 0 5px rgba(53,199,126,.14),0 0 0 11px rgba(53,199,126,.06)}
+.sigrow h2{font-size:23px;font-weight:700;letter-spacing:-.02em}
+.stats{display:flex;gap:34px}
+.stat .k{font-size:11.5px;color:var(--mu);margin-bottom:5px}
+.stat .v{font-size:23px;font-weight:700;letter-spacing:-.03em;font-variant-numeric:tabular-nums}
+.stat .v.sm{font-size:15px;font-weight:600;color:var(--mu);font-family:ui-monospace,Menlo,monospace}
+.stat .v em{font-size:12px;font-weight:500;color:var(--mu);font-style:normal;margin-left:3px}
+
+/* ---- gauge ---- */
+.gauge{display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;gap:9px}
+.gwrap{position:relative;width:172px;height:92px;overflow:hidden}
+.gtxt{position:absolute;left:0;right:0;bottom:2px;text-align:center}
+.gtxt .n{font-size:32px;font-weight:700;color:var(--mu2);letter-spacing:-.03em}
+
+/* ---- donut ---- */
+.donut{width:132px;height:132px;border-radius:50%;
+  background:conic-gradient(var(--pri) 0 66.6%,var(--pur) 66.6% 100%);
+  position:relative;display:grid;place-items:center;margin:2px auto 0}
+.donut:after{content:"";width:88px;height:88px;border-radius:50%;background:var(--sf)}
+.donut .c{position:absolute;text-align:center;z-index:1}
+.donut .c b{display:block;font-size:25px;font-weight:700;letter-spacing:-.03em}
+.donut .c span{font-size:10.5px;color:var(--mu)}
+.lgd{display:flex;flex-direction:column;gap:8px;margin-top:14px}
+.lgd div{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--mu)}
+.lgd i{width:8px;height:8px;border-radius:2px;font-style:normal}
+.lgd b{margin-left:auto;color:var(--tx);font-variant-numeric:tabular-nums;font-weight:600}
+
+/* ---- incident card ---- */
+.inc{border:1px solid var(--bd);border-radius:8px;padding:13px 15px;background:var(--sf2);
+  display:flex;flex-direction:column;gap:9px;position:relative;overflow:hidden}
+.inc:before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--pri)}
+.inc.sec:before{background:var(--red)}
+.inc .r1{display:flex;align-items:center;gap:9px}
+.inc .r1 h4{font-size:13.5px;font-weight:600;letter-spacing:-.01em}
+.inc .r1 .rt{margin-left:auto;display:flex;gap:6px;align-items:center}
+.inc .r2{display:flex;align-items:center;gap:16px;font-size:11.5px;color:var(--mu)}
+.inc .r2 b{color:var(--tx);font-weight:500}
+.inc .r2 .tm{margin-left:auto;color:var(--mu2);font-family:ui-monospace,Menlo,monospace}
+.risk{display:inline-flex;align-items:center;gap:6px;font-size:11.5px}
+.risk .ar{color:var(--mu2)}
+
+/* ---- table ---- */
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+thead th{text-align:left;font-weight:500;font-size:11px;color:var(--mu);
+  padding:0 14px 10px;border-bottom:1px solid var(--bd);letter-spacing:.02em}
+tbody td{padding:12px 14px;border-bottom:1px solid rgba(36,44,61,.55);color:var(--mu)}
+tbody tr:last-child td{border-bottom:0}
+tbody tr.sel td{background:rgba(76,141,255,.07)}
+td.nm{color:var(--tx);font-weight:600}
+td.mono{font-family:ui-monospace,Menlo,monospace;font-size:11.5px}
+.dash{color:var(--mu2)}
+
+/* ---- toolbar ---- */
+.tb{display:flex;align-items:center;gap:10px}
+.seg{display:flex;background:var(--sf2);border:1px solid var(--bd);border-radius:7px;padding:3px}
+.seg span{padding:5px 14px;font-size:12px;border-radius:5px;color:var(--mu)}
+.seg span.on{background:var(--sf3);color:var(--tx);font-weight:600}
+.sel2{display:flex;align-items:center;gap:8px;height:30px;padding:0 11px;background:var(--sf2);
+  border:1px solid var(--bd);border-radius:7px;font-size:12px;color:var(--mu)}
+.sel2 b{color:var(--tx);font-weight:500}
+.sel2:after{content:"▾";font-size:9px;color:var(--mu2)}
+.chk{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--mu)}
+.chk i{width:13px;height:13px;border:1px solid var(--bd2);border-radius:3px;font-style:normal}
+.tb .rt{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--mu2);
+  font-family:ui-monospace,Menlo,monospace}
+
+/* ---- buttons ---- */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;height:34px;padding:0 17px;
+  border-radius:7px;font-size:12.5px;font-weight:600;border:1px solid var(--bd2);
+  background:var(--sf2);color:var(--tx)}
+.btn.pri{background:var(--pri);border-color:var(--pri);color:#fff}
+.btn.red{background:var(--red);border-color:var(--red);color:#fff}
+.btn.gho{background:transparent;color:var(--mu)}
+.btn.dis{background:var(--sf2);border-color:var(--bd);color:var(--mu2)}
+.btn.sm{height:29px;padding:0 13px;font-size:11.5px}
+
+/* ---- topology ---- */
+.topo{flex:1;position:relative;background:
+  radial-gradient(circle at 1px 1px,rgba(255,255,255,.045) 1px,transparent 0) 0 0/26px 26px,var(--sf)}
+.node{position:absolute;width:158px;background:var(--sf2);border:1px solid var(--bd2);
+  border-radius:9px;padding:11px 13px;display:flex;flex-direction:column;gap:7px}
+.node .t{display:flex;align-items:center;gap:7px}
+.node .t b{font-size:12.5px;font-weight:600}
+.node .ty{font-size:10.5px;color:var(--mu2)}
+.node.idle{border-color:rgba(240,138,60,.6);box-shadow:0 0 0 3px rgba(240,138,60,.10)}
+.node.thr{border-color:rgba(242,88,95,.65);box-shadow:0 0 0 3px rgba(242,88,95,.12)}
+.node.un{border-color:rgba(240,138,60,.45);border-style:dashed}
+.elabel{position:absolute;font-size:10px;color:var(--mu2);background:var(--sf);padding:2px 7px;
+  border-radius:4px;font-family:ui-monospace,Menlo,monospace}
+.legend{position:absolute;left:18px;bottom:16px;display:flex;gap:18px;background:rgba(11,14,20,.9);
+  border:1px solid var(--bd);border-radius:7px;padding:9px 14px;font-size:11px;color:var(--mu)}
+.legend div{display:flex;align-items:center;gap:7px}
+.legend i{width:9px;height:9px;border-radius:3px;font-style:normal}
+
+/* ---- drawer ---- */
+.scrim{position:absolute;inset:52px 0 0 0;background:rgba(5,7,11,.62)}
+.drawer{position:absolute;top:52px;right:0;bottom:0;width:430px;background:var(--sf);
+  border-left:1px solid var(--bd);display:flex;flex-direction:column}
+.dh{padding:18px 20px 15px;border-bottom:1px solid var(--bd);display:flex;flex-direction:column;gap:7px}
+.dh .x{position:absolute;right:16px;top:16px;color:var(--mu2);font-size:15px}
+.dsec{padding:16px 20px;border-bottom:1px solid var(--bd);display:flex;flex-direction:column;gap:12px}
+.dsec>h4{font-size:11px;color:var(--mu);font-weight:600;letter-spacing:.04em}
+.kv{display:flex;align-items:flex-start;gap:12px;font-size:12.5px}
+.kv .k{width:64px;flex:none;color:var(--mu2);font-size:12px}
+.kv .v{color:var(--tx);word-break:break-all}
+.kv .v.mono{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--mu)}
+.rsn{display:flex;flex-direction:column;gap:7px;padding-left:2px}
+.rsn div{display:flex;gap:8px;font-size:12px;color:var(--mu)}
+.rsn div:before{content:"·";color:var(--mu2)}
+
+/* ---- detail ---- */
+.dtl{flex:1;display:flex;flex-direction:column;gap:14px;overflow:hidden}
+.dtop{display:flex;align-items:center;gap:11px}
+.back{font-size:12px;color:var(--mu);display:flex;align-items:center;gap:6px}
+.summ{display:flex;flex-direction:column;gap:11px}
+.summ .li{display:flex;gap:12px;font-size:13px;line-height:1.55;color:#CBD3E1}
+.summ .li i{width:19px;height:19px;flex:none;border-radius:5px;background:var(--sf3);color:var(--mu);
+  font:600 10.5px/19px ui-monospace,Menlo,monospace;text-align:center;font-style:normal;margin-top:1px}
+.evd{border:1px solid var(--bd);border-radius:8px;padding:12px 14px;background:var(--sf2);
+  display:flex;flex-direction:column;gap:7px}
+.evd .e1{display:flex;align-items:center;gap:9px}
+.evd .e1 code{font-size:11px;color:var(--pri);font-family:ui-monospace,Menlo,monospace}
+.evd .e1 .tp{font-size:10.5px;color:var(--mu2);font-family:ui-monospace,Menlo,monospace}
+.evd .e1 .tm{margin-left:auto;font-size:10.5px;color:var(--mu2);font-family:ui-monospace,Menlo,monospace}
+.evd .e2{font-size:12.5px;color:var(--mu)}
+
+/* risk pair */
+.rp{display:flex;gap:14px}
+.rpc{flex:1;border:1px solid var(--bd);border-radius:8px;padding:14px 16px;background:var(--sf2);
+  display:flex;flex-direction:column;gap:10px}
+.rpc.hi{border-color:rgba(242,88,95,.4)}
+.rpc.md{border-color:rgba(240,138,60,.35)}
+.rpc .h{font-size:11px;color:var(--mu);display:flex;align-items:center;gap:7px}
+.rpc .lv{font-size:24px;font-weight:700;letter-spacing:-.03em}
+.rpc.hi .lv{color:#FF858A}.rpc.md .lv{color:#F7A768}
+.rpc .cd{font-size:10.5px;color:var(--mu2);font-family:ui-monospace,Menlo,monospace;line-height:1.5}
+.rpc .tm{font-size:10.5px;color:var(--mu2);font-family:ui-monospace,Menlo,monospace}
+.note{display:flex;gap:9px;font-size:11.5px;color:var(--mu);background:var(--sf2);
+  border:1px solid var(--bd);border-radius:7px;padding:10px 13px;line-height:1.5}
+.note i{color:var(--pri);font-style:normal}
+
+/* spec diff */
+.diff{display:flex;align-items:center;gap:18px;justify-content:center;padding:8px 0}
+.spec{border:1px solid var(--bd2);border-radius:8px;padding:13px 26px;text-align:center;background:var(--sf2)}
+.spec .k{font-size:10.5px;color:var(--mu2);margin-bottom:6px}
+.spec .v{font-size:17px;font-weight:700;font-family:ui-monospace,Menlo,monospace;letter-spacing:-.02em}
+.spec.to{border-color:rgba(76,141,255,.55);background:rgba(76,141,255,.07)}
+.spec.to .v{color:#8FB6FF}
+.arw{color:var(--mu2);font-size:17px}
+
+/* ---- modal ---- */
+.modal{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:492px;
+  background:var(--sf);border:1px solid var(--bd2);border-radius:11px;overflow:hidden;
+  box-shadow:0 26px 70px rgba(0,0,0,.7)}
+.mh{padding:19px 22px 15px;border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:11px}
+.mh h3{font-size:15px;font-weight:700;letter-spacing:-.02em}
+.mb{padding:18px 22px;display:flex;flex-direction:column;gap:15px}
+.mf{padding:14px 22px;border-top:1px solid var(--bd);display:flex;justify-content:flex-end;gap:9px;
+  background:var(--sf2)}
+.warn{display:flex;gap:10px;font-size:12px;line-height:1.55;color:var(--mu);
+  background:rgba(232,179,58,.07);border:1px solid rgba(232,179,58,.22);border-radius:7px;padding:11px 13px}
+.warn i{color:var(--ylw);font-style:normal}
+.idk{display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--mu2);
+  font-family:ui-monospace,Menlo,monospace}
+
+/* ---- progress ---- */
+.steps{display:flex;align-items:flex-start;padding:6px 8px 0}
+.stp{flex:1;display:flex;flex-direction:column;align-items:center;gap:9px;position:relative}
+.stp .cir{width:22px;height:22px;border-radius:50%;border:2px solid var(--bd2);background:var(--sf);
+  display:grid;place-items:center;font-size:10px;color:var(--mu2);z-index:1}
+.stp.dn .cir{background:var(--pri);border-color:var(--pri);color:#fff}
+.stp.cu .cir{border-color:var(--pri);background:var(--sf);box-shadow:0 0 0 4px rgba(76,141,255,.15)}
+.stp.cu .cir:after{content:"";width:9px;height:9px;border-radius:50%;background:var(--pri)}
+.stp .lb{font-size:11px;color:var(--mu2)}
+.stp.dn .lb,.stp.cu .lb{color:var(--tx);font-weight:600}
+.stp .ln{position:absolute;top:10px;left:50%;width:100%;height:2px;background:var(--bd)}
+.stp.dn .ln{background:var(--pri)}
+.stp:last-child .ln{display:none}
+.grd{display:grid;grid-template-columns:1fr 1fr;gap:11px 26px}
+.grd .g{display:flex;align-items:center;gap:9px;font-size:12px;color:var(--mu)}
+.grd .g i{width:16px;height:16px;border-radius:4px;background:rgba(53,199,126,.16);color:var(--grn);
+  font:700 10px/16px system-ui;text-align:center;font-style:normal}
+.grd .g b{color:var(--tx);font-weight:500;font-family:ui-monospace,Menlo,monospace;font-size:11.5px}
+.tl{display:flex;flex-direction:column;gap:0}
+.tl .t{display:flex;gap:14px;font-size:12px;padding:8px 0;position:relative}
+.tl .t time{color:var(--mu2);font-family:ui-monospace,Menlo,monospace;font-size:11px;width:58px;flex:none}
+.tl .t span{color:var(--mu)}
+.tl .t.now span{color:var(--tx)}
+.tl .t:before{content:"";position:absolute;left:66px;top:0;bottom:0;width:1px;background:var(--bd)}
+.tl .t:after{content:"";position:absolute;left:63px;top:13px;width:7px;height:7px;border-radius:50%;
+  background:var(--bd2)}
+.tl .t.now:after{background:var(--pri);box-shadow:0 0 0 3px rgba(76,141,255,.2)}
+.tl .t:first-child:before{top:13px}
+.tl .t:last-child:before{bottom:auto;height:13px}
+
+/* ---- toast ---- */
+.toasts{position:absolute;right:20px;bottom:20px;display:flex;flex-direction:column;gap:11px;width:352px}
+.toast{background:var(--sf2);border:1px solid var(--bd2);border-radius:9px;padding:13px 15px;
+  display:flex;flex-direction:column;gap:9px;box-shadow:0 12px 34px rgba(0,0,0,.5);position:relative;
+  overflow:hidden}
+.toast:before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--red)}
+.toast.ok:before{background:var(--grn)}
+.toast.wr:before{background:var(--org)}
+.toast.gy:before{background:var(--mu2)}
+.toast .t1{display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:600}
+.toast .t2{font-size:12px;color:var(--mu);line-height:1.5}
+.toast .t3{display:flex;justify-content:flex-end}
+
+/* ---- states board ---- */
+.board{flex:1;display:grid;grid-template-columns:1fr 1fr 1fr;grid-template-rows:1fr 1fr;gap:16px}
+.st{border:1px solid var(--bd);border-radius:9px;background:var(--sf);padding:16px 18px;
+  display:flex;flex-direction:column;gap:13px;min-height:0}
+.st>.h{font-size:11px;color:var(--mu);font-weight:600;letter-spacing:.03em;
+  display:flex;align-items:center;gap:8px}
+.st>.h code{margin-left:auto;font-size:10px;color:var(--mu2);font-family:ui-monospace,Menlo,monospace;
+  font-weight:400}
+.st .mid{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:9px;text-align:center}
+.st .mid .ic{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;font-size:15px}
+.st .mid .m1{font-size:12.5px;font-weight:600}
+.st .mid .m2{font-size:11.5px;color:var(--mu);line-height:1.5}
+.sk{background:var(--sf3);border-radius:4px;height:11px}
+.sk.w1{width:100%}.sk.w2{width:74%}.sk.w3{width:52%}.sk.w4{width:88%}
+</style>
+</head>
+<body>
+
+<!-- ══════════ 1. DSH-001 ══════════ -->
+<section id="s1">
+<div class="cap"><b>DSH-001</b><span>메인 대시보드</span><i>GET /assets · WS STATE_SNAPSHOT</i></div>
+<div class="frame">
+  <div class="gnb">
+    <div class="logo">VIGIL<em>A</em>NTIS</div>
+    <div class="nav"><span class="on">대시보드</span><span>자산</span><span>인시던트</span></div>
+    <div class="conn"><i class="dot"></i>실시간 연결됨</div>
+  </div>
+  <div class="body">
+    <div class="row" style="height:194px">
+      <div class="card sig" style="flex:1.45">
+        <div class="sigrow"><i class="pulse"></i><h2>All Systems Operational</h2></div>
+        <div class="stats">
+          <div class="stat"><div class="k">관제 자산</div><div class="v">12<em>건</em></div></div>
+          <div class="stat"><div class="k">미조치 인시던트</div><div class="v">2<em>건</em></div></div>
+          <div class="stat"><div class="k">낭비 후보</div><div class="v">3<em>건</em></div></div>
+          <div class="stat"><div class="k">최근 수집</div><div class="v sm">09:09:30</div></div>
+        </div>
+      </div>
+      <div class="card" style="flex:1;display:flex;flex-direction:column">
+        <div class="ch"><h3>인프라 헬스 스코어</h3><span class="b n nodot">확인 불가</span></div>
+        <div class="gauge">
+          <div class="gwrap">
+            <svg width="172" height="92" viewBox="0 0 172 92">
+              <path d="M14 88 A72 72 0 0 1 158 88" fill="none" stroke="#242C3D" stroke-width="13" stroke-linecap="round"/>
+              <path d="M14 88 A72 72 0 0 1 158 88" fill="none" stroke="#33405A" stroke-width="13"
+                    stroke-linecap="round" stroke-dasharray="4 9" opacity=".8"/>
+            </svg>
+            <div class="gtxt"><div class="n">—</div></div>
+          </div>
+          <div style="font-size:11px;color:var(--mu2)">health_score 공식 확정 대기</div>
+        </div>
+      </div>
+    </div>
+    <div class="row" style="flex:1;min-height:0">
+      <div class="card" style="width:286px">
+        <div class="ch"><h3>자산 분포</h3></div>
+        <div class="donut"><div class="c"><b>12</b><span>총 자산</span></div></div>
+        <div class="lgd">
+          <div><i style="background:var(--pri)"></i>EC2<b>8</b></div>
+          <div><i style="background:var(--pur)"></i>보안 그룹<b>4</b></div>
+          <div style="border-top:1px solid var(--bd);padding-top:9px;margin-top:2px">
+            <i style="background:var(--org)"></i>낭비 후보<b>3</b></div>
+        </div>
+        <div style="margin-top:auto;padding-top:14px;border-top:1px solid var(--bd);
+          display:flex;flex-direction:column;gap:9px">
+          <div style="font-size:11px;color:var(--mu);font-weight:600">리전</div>
+          <div class="lgd" style="margin:0">
+            <div><i style="background:var(--bd2)"></i>ap-northeast-2<b>12</b></div>
+          </div>
+          <div style="font-size:10.5px;color:var(--mu2);line-height:1.5">
+            MVP 범위: 단일 계정 · 1~2 리전<br>EC2 · Security Group</div>
+        </div>
+      </div>
+      <div class="card" style="flex:1">
+        <div class="ch"><h3>처리 대기 인시던트</h3><span class="more">전체 보기 →</span></div>
+        <div class="col" style="gap:11px">
+          <div class="inc sec">
+            <div class="r1"><span class="b red">보안</span>
+              <h4>SSH Brute Force 선제 차단</h4>
+              <div class="rt"><span class="b pri">조치됨</span></div></div>
+            <div class="r2">
+              <span class="risk">위험도 <span class="b red nodot" style="height:18px">높음</span>
+                <em class="ar">→</em> <span class="b org nodot" style="height:18px">중간</span></span>
+              <span>대상 <b>demo-api-sg</b></span>
+              <span class="tm">08-12 09:12</span></div>
+          </div>
+          <div class="inc">
+            <div class="r1"><span class="b pri">최적화</span>
+              <h4>Idle EC2 다운사이징 후보</h4>
+              <div class="rt"><span class="b ylw">미조치</span></div></div>
+            <div class="r2">
+              <span>조치 <b>RUNBOOK_EC2_DOWNSIZE</b></span>
+              <span>대상 <b>demo-api</b></span>
+              <span class="tm">08-12 09:11</span></div>
+          </div>
+          <div class="inc sec">
+            <div class="r1"><span class="b red">보안</span>
+              <h4>0.0.0.0/0 인바운드 개방 탐지</h4>
+              <div class="rt"><span class="b pri">조치됨</span></div></div>
+            <div class="r2">
+              <span class="risk">위험도 <span class="b red nodot" style="height:18px">높음</span>
+                <em class="ar">→</em> <span style="color:var(--mu2)">평가 중</span></span>
+              <span>대상 <b>web-front-sg</b></span>
+              <span class="tm">08-12 09:04</span></div>
+          </div>
+          <div class="inc">
+            <div class="r1"><span class="b pri">최적화</span>
+              <h4>미사용 보안 그룹 탐지</h4>
+              <div class="rt"><span class="b n">조치 없음</span></div></div>
+            <div class="r2">
+              <span>사유 <b>실행 가능한 조치 없음</b></span>
+              <span>대상 <b>orphan-sg</b></span>
+              <span class="tm">08-12 08:58</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ══════════ 2. AST-001 목록 ══════════ -->
+<section id="s2">
+<div class="cap"><b>AST-001</b><span>자산 관제 — 목록 뷰</span><i>GET /assets → items[]</i></div>
+<div class="frame">
+  <div class="gnb">
+    <div class="logo">VIGIL<em>A</em>NTIS</div>
+    <div class="nav"><span>대시보드</span><span class="on">자산</span><span>인시던트</span></div>
+    <div class="conn"><i class="dot"></i>실시간 연결됨</div>
+  </div>
+  <div class="body">
+    <div class="tb">
+      <div class="ttl">자산 관제</div>
+      <div class="seg" style="margin-left:14px"><span class="on">목록</span><span>토폴로지</span></div>
+      <div class="sel2" style="margin-left:12px">유형 <b>전체</b></div>
+      <div class="sel2">리전 <b>ap-northeast-2</b></div>
+      <div class="chk"><i></i>낭비 후보만</div>
+      <div class="rt">⟳ generated_at 00:15:30</div>
+    </div>
+    <div class="card p0" style="flex:1;overflow:hidden">
+      <table>
+        <thead><tr>
+          <th style="width:180px">이름</th><th style="width:104px">유형</th>
+          <th style="width:140px">리전</th><th style="width:108px">상태</th>
+          <th style="width:210px">Rule 판정</th><th style="width:96px">헬스</th>
+          <th>인시던트</th><th style="width:120px">수집</th>
+        </tr></thead>
+        <tbody>
+          <tr>
+            <td class="nm">demo-api</td><td>EC2</td><td class="mono">ap-northeast-2</td>
+            <td><span class="b grn">실행 중</span></td>
+            <td><span class="b org">Idle 판정됨</span></td>
+            <td class="dash">—</td>
+            <td><span class="b pri">최적화</span></td><td class="mono">09:09:30</td>
+          </tr>
+          <tr>
+            <td class="nm">demo-api-sg</td><td>보안 그룹</td><td class="mono">ap-northeast-2</td>
+            <td><span class="b n">사용 중</span></td>
+            <td><span class="b n nodot">실행 가능한 조치 없음</span></td>
+            <td class="dash">—</td>
+            <td><span class="b red">보안</span></td><td class="mono">09:09:30</td>
+          </tr>
+          <tr>
+            <td class="nm">batch-runner</td><td>EC2</td><td class="mono">ap-northeast-2</td>
+            <td><span class="b grn">실행 중</span></td>
+            <td><span class="b n nodot">지표 부족</span></td>
+            <td class="dash">—</td>
+            <td class="dash">—</td><td class="mono">09:09:30</td>
+          </tr>
+          <tr>
+            <td class="nm">orphan-sg</td><td>보안 그룹</td><td class="mono">ap-northeast-2</td>
+            <td><span class="b org">미사용</span></td>
+            <td><span class="b org">미사용 판정됨</span></td>
+            <td class="dash">—</td>
+            <td class="dash">—</td><td class="mono">09:09:30</td>
+          </tr>
+          <tr>
+            <td class="nm">web-front-01</td><td>EC2</td><td class="mono">ap-northeast-2</td>
+            <td><span class="b grn">실행 중</span></td>
+            <td><span class="b n nodot">Idle 조건 미충족</span></td>
+            <td class="dash">—</td>
+            <td class="dash">—</td><td class="mono">09:09:30</td>
+          </tr>
+          <tr>
+            <td class="nm">web-front-sg</td><td>보안 그룹</td><td class="mono">ap-northeast-2</td>
+            <td><span class="b n">사용 중</span></td>
+            <td><span class="b n nodot">실행 가능한 조치 없음</span></td>
+            <td class="dash">—</td>
+            <td class="dash">—</td><td class="mono">09:09:30</td>
+          </tr>
+          <tr>
+            <td class="nm">legacy-db-01</td><td>EC2</td><td class="mono">ap-northeast-2</td>
+            <td><span class="b n">중지됨</span></td>
+            <td><span class="b n nodot">지표 부족</span></td>
+            <td class="dash">—</td>
+            <td class="dash">—</td><td class="mono">09:09:30</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ══════════ 3. AST-001 토폴로지 ══════════ -->
+<section id="s3">
+<div class="cap"><b>AST-001</b><span>자산 관제 — 토폴로지 뷰 (재조회 없이 전환)</span><i>items[] + relations[]</i></div>
+<div class="frame">
+  <div class="gnb">
+    <div class="logo">VIGIL<em>A</em>NTIS</div>
+    <div class="nav"><span>대시보드</span><span class="on">자산</span><span>인시던트</span></div>
+    <div class="conn"><i class="dot"></i>실시간 연결됨</div>
+  </div>
+  <div class="body">
+    <div class="tb">
+      <div class="ttl">자산 관제</div>
+      <div class="seg" style="margin-left:14px"><span>목록</span><span class="on">토폴로지</span></div>
+      <div class="sel2" style="margin-left:12px">유형 <b>전체</b></div>
+      <div class="sel2">리전 <b>ap-northeast-2</b></div>
+      <div class="chk"><i></i>낭비 후보만</div>
+      <div class="rt">⟳ generated_at 00:15:30</div>
+    </div>
+    <div class="card p0 topo">
+      <svg style="position:absolute;inset:0;width:100%;height:100%" fill="none">
+        <path d="M338 175 H480" stroke="#F2585F" stroke-width="1.5" opacity=".7"/>
+        <path d="M338 345 H480" stroke="#33405A" stroke-width="1.5"/>
+        <path d="M338 515 H480" stroke="#33405A" stroke-width="1.5"/>
+      </svg>
+      <div class="node idle" style="left:180px;top:130px">
+        <div class="t"><b>demo-api</b></div>
+        <div class="ty">EC2 · t3.medium</div>
+        <div><span class="b org" style="height:18px">Idle 판정됨</span></div>
+      </div>
+      <div class="node thr" style="left:480px;top:130px">
+        <div class="t"><b>demo-api-sg</b></div>
+        <div class="ty">SECURITY_GROUP</div>
+        <div><span class="b red" style="height:18px">선제 차단됨</span></div>
+      </div>
+      <div class="node" style="left:180px;top:300px">
+        <div class="t"><b>web-front-01</b></div>
+        <div class="ty">EC2 · t3.small</div>
+        <div><span class="b grn" style="height:18px">실행 중</span></div>
+      </div>
+      <div class="node" style="left:480px;top:300px">
+        <div class="t"><b>web-front-sg</b></div>
+        <div class="ty">SECURITY_GROUP</div>
+        <div><span class="b n" style="height:18px">사용 중</span></div>
+      </div>
+      <div class="node" style="left:180px;top:470px">
+        <div class="t"><b>batch-runner</b></div>
+        <div class="ty">EC2 · t3.large</div>
+        <div><span class="b n" style="height:18px">지표 부족</span></div>
+      </div>
+      <div class="node" style="left:480px;top:470px">
+        <div class="t"><b>batch-sg</b></div>
+        <div class="ty">SECURITY_GROUP</div>
+        <div><span class="b n" style="height:18px">사용 중</span></div>
+      </div>
+      <div class="node un" style="left:820px;top:300px">
+        <div class="t"><b>orphan-sg</b></div>
+        <div class="ty">SECURITY_GROUP</div>
+        <div><span class="b org" style="height:18px">미사용</span></div>
+      </div>
+      <div class="elabel" style="left:352px;top:162px">ATTACHED_TO</div>
+      <div class="elabel" style="left:352px;top:332px">ATTACHED_TO</div>
+      <div class="elabel" style="left:352px;top:502px">ATTACHED_TO</div>
+      <div class="elabel" style="left:820px;top:404px;background:none;color:var(--mu2)">
+        연결 없음 · relations[] 미포함</div>
+      <div class="legend">
+        <div><i style="background:var(--org)"></i>Idle EC2</div>
+        <div><i style="background:var(--org);opacity:.55"></i>미사용 SG</div>
+        <div><i style="background:var(--red)"></i>보안 인시던트 대상</div>
+        <div><i style="background:var(--bd2)"></i>정상</div>
+      </div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ══════════ 4. AST-002 ══════════ -->
+<section id="s4">
+<div class="cap"><b>AST-002</b><span>자산 상세 패널 (Drawer · 별도 API 없이 items[] 단건 재사용)</span><i>실행 버튼 없음</i></div>
+<div class="frame">
+  <div class="gnb">
+    <div class="logo">VIGIL<em>A</em>NTIS</div>
+    <div class="nav"><span>대시보드</span><span class="on">자산</span><span>인시던트</span></div>
+    <div class="conn"><i class="dot"></i>실시간 연결됨</div>
+  </div>
+  <div class="body">
+    <div class="tb">
+      <div class="ttl">자산 관제</div>
+      <div class="seg" style="margin-left:14px"><span class="on">목록</span><span>토폴로지</span></div>
+      <div class="rt">⟳ generated_at 00:15:30</div>
+    </div>
+    <div class="card p0" style="flex:1;overflow:hidden">
+      <table>
+        <thead><tr><th style="width:180px">이름</th><th style="width:104px">유형</th>
+          <th style="width:140px">리전</th><th style="width:108px">상태</th>
+          <th style="width:210px">Rule 판정</th><th style="width:96px">헬스</th><th>인시던트</th></tr></thead>
+        <tbody>
+          <tr class="sel"><td class="nm">demo-api</td><td>EC2</td><td class="mono">ap-northeast-2</td>
+            <td><span class="b grn">실행 중</span></td><td><span class="b org">Idle 판정됨</span></td>
+            <td class="dash">—</td><td><span class="b pri">최적화</span></td></tr>
+          <tr><td class="nm">demo-api-sg</td><td>보안 그룹</td><td class="mono">ap-northeast-2</td>
+            <td><span class="b n">사용 중</span></td>
+            <td><span class="b n nodot">실행 가능한 조치 없음</span></td>
+            <td class="dash">—</td><td><span class="b red">보안</span></td></tr>
+          <tr><td class="nm">batch-runner</td><td>EC2</td><td class="mono">ap-northeast-2</td>
+            <td><span class="b grn">실행 중</span></td><td><span class="b n nodot">지표 부족</span></td>
+            <td class="dash">—</td><td class="dash">—</td></tr>
+          <tr><td class="nm">orphan-sg</td><td>보안 그룹</td><td class="mono">ap-northeast-2</td>
+            <td><span class="b org">미사용</span></td><td><span class="b org">미사용 판정됨</span></td>
+            <td class="dash">—</td><td class="dash">—</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <div class="scrim"></div>
+  <div class="drawer">
+    <div class="dh">
+      <div class="x">✕</div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <div style="font-size:17px;font-weight:700;letter-spacing:-.02em">demo-api</div>
+        <span class="b grn">실행 중</span>
+      </div>
+      <div class="sub">EC2 · ap-northeast-2 · 123456789012</div>
+    </div>
+    <div class="dsec">
+      <div class="kv"><div class="k">헬스</div>
+        <div class="v"><span class="dash">—</span> <span class="b n nodot"
+          style="margin-left:6px">확인 불가</span></div></div>
+      <div class="kv"><div class="k">스펙</div>
+        <div class="v mono">instance_type&nbsp;&nbsp;t3.medium</div></div>
+      <div class="kv"><div class="k">ARN</div>
+        <div class="v mono">arn:aws:ec2:ap-northeast-2:123456789012:<br>instance/i-0123456789abcdef0 ⧉</div></div>
+      <div class="kv"><div class="k">수집</div><div class="v mono">2026-08-12 09:09:30</div></div>
+    </div>
+    <div class="dsec">
+      <h4>RULE 판정</h4>
+      <div style="display:flex;align-items:center;gap:10px">
+        <span class="b org">Idle 판정됨</span>
+        <span style="font-size:11px;color:var(--mu2);font-family:ui-monospace,Menlo,monospace">
+          evaluated_at 09:10:00</span>
+      </div>
+      <div class="rsn">
+        <div>CPU_BELOW_THRESHOLD</div>
+        <div>NETWORK_BELOW_THRESHOLD</div>
+      </div>
+    </div>
+    <div class="dsec" style="border-bottom:0">
+      <h4>연결된 인시던트</h4>
+      <div class="inc" style="padding:11px 13px">
+        <div class="r1"><span class="b pri">최적화</span>
+          <h4 style="font-size:12.5px">Idle EC2 다운사이징 후보</h4>
+          <div class="rt" style="color:var(--mu2)">→</div></div>
+        <div class="r2"><span class="tm" style="margin-left:0">inc-opt-001</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ══════════ 5. INC-001 ══════════ -->
+<section id="s5">
+<div class="cap"><b>INC-001</b><span>인시던트 목록</span>
+  <i>⚠ 전용 목록 API 부재 — incident_refs + STATE_SNAPSHOT 합집합 임시 구현</i></div>
+<div class="frame">
+  <div class="gnb">
+    <div class="logo">VIGIL<em>A</em>NTIS</div>
+    <div class="nav"><span>대시보드</span><span>자산</span><span class="on">인시던트</span></div>
+    <div class="conn"><i class="dot"></i>실시간 연결됨</div>
+  </div>
+  <div class="body">
+    <div class="tb">
+      <div class="ttl">인시던트</div>
+      <div class="sel2" style="margin-left:14px">유형 <b>전체</b></div>
+      <div class="sel2">상태 <b>전체</b></div>
+      <div class="rt">updated_at 내림차순 · 미조치 보안 상단 고정</div>
+    </div>
+    <div class="col" style="gap:12px;flex:1">
+      <div class="inc sec">
+        <div class="r1"><span class="b red">보안</span>
+          <h4>SSH Brute Force 선제 차단</h4>
+          <div class="rt"><span class="b pri">조치됨</span><span class="b n nodot">해제 가능</span></div></div>
+        <div class="r2">
+          <span class="risk">위험도 <span class="b red nodot" style="height:18px">높음</span>
+            <em class="ar">→</em> <span class="b org nodot" style="height:18px">중간</span></span>
+          <span>대상 <b>demo-api-sg</b></span>
+          <span>조치 <b>선제 차단됨</b></span>
+          <span class="tm">08-12 09:12</span></div>
+      </div>
+      <div class="inc">
+        <div class="r1"><span class="b pri">최적화</span>
+          <h4>Idle EC2 다운사이징 후보</h4>
+          <div class="rt"><span class="b ylw">미조치</span></div></div>
+        <div class="r2">
+          <span>대상 <b>demo-api</b></span>
+          <span>조치 <b>조치 제안</b></span>
+          <span class="tm">08-12 09:11</span></div>
+      </div>
+      <div class="inc sec">
+        <div class="r1"><span class="b red">보안</span>
+          <h4>0.0.0.0/0 인바운드 개방 탐지</h4>
+          <div class="rt"><span class="b pri">조치됨</span></div></div>
+        <div class="r2">
+          <span class="risk">위험도 <span class="b red nodot" style="height:18px">높음</span>
+            <em class="ar">→</em> <span style="color:var(--mu2)">평가 중</span></span>
+          <span>대상 <b>web-front-sg</b></span>
+          <span class="tm">08-12 09:04</span></div>
+      </div>
+      <div class="inc">
+        <div class="r1"><span class="b pri">최적화</span>
+          <h4>미사용 보안 그룹 탐지</h4>
+          <div class="rt"><span class="b n">조치 없음</span></div></div>
+        <div class="r2">
+          <span>대상 <b>orphan-sg</b></span>
+          <span>사유 <b>실행 가능한 조치 없음</b></span>
+          <span class="tm">08-12 08:58</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ══════════ 6. INC-002 A ══════════ -->
+<section id="s6">
+<div class="cap"><b>INC-002</b><span>인시던트 상세 — A 변형 (OPTIMIZATION)</span>
+  <i>action.mode = RECOMMENDED</i></div>
+<div class="frame">
+  <div class="gnb">
+    <div class="logo">VIGIL<em>A</em>NTIS</div>
+    <div class="nav"><span>대시보드</span><span>자산</span><span class="on">인시던트</span></div>
+    <div class="conn"><i class="dot"></i>실시간 연결됨</div>
+  </div>
+  <div class="body dtl">
+    <div class="back">← 인시던트</div>
+    <div class="dtop">
+      <span class="b pri">최적화</span>
+      <div class="ttl">Idle EC2 다운사이징 후보</div>
+      <span class="b ylw">미조치</span>
+      <div style="margin-left:auto" class="sub">inc-opt-001 · 생성 09:11:00 · 갱신 09:11:10</div>
+    </div>
+    <div class="row" style="flex:1;min-height:0;align-items:flex-start">
+      <div class="col" style="flex:1.25">
+        <div class="card">
+          <div class="ch"><h3>판단 근거</h3>
+            <span class="more">decision_summary[3]</span></div>
+          <div class="summ">
+            <div class="li"><i>1</i>최근 관측 구간의 CPU와 Network 사용량이 Idle 기준 이하입니다.</div>
+            <div class="li"><i>2</i>현재 t3.medium에서 t3.small로 축소할 수 있습니다.</div>
+            <div class="li"><i>3</i>실행 전 Guardrail과 현재 스펙 백업을 거칩니다.</div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="ch"><h3>근거 데이터</h3><span class="more">evidence[1]</span></div>
+          <div class="evd">
+            <div class="e1"><code>evd-cw-001</code><span class="tp">CLOUDWATCH_METRIC</span>
+              <span class="tm">09:10:00</span></div>
+            <div class="e2">평균 CPU 1.8%, NetworkIn 0.4MB</div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="ch"><h3>대상 자산</h3></div>
+          <div class="kv"><div class="k" style="width:74px">자산</div>
+            <div class="v">demo-api <span style="color:var(--mu2);font-size:11px">· ast-ec2-001 →</span></div></div>
+          <div class="kv" style="margin-top:10px"><div class="k" style="width:74px">ARN</div>
+            <div class="v mono">arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0123456789abcdef0</div></div>
+        </div>
+      </div>
+      <div class="col" style="width:452px">
+        <div class="card">
+          <div class="ch"><h3>제안 조치</h3><span class="b pri" style="margin-left:auto">조치 제안</span></div>
+          <div class="kv"><div class="k">Runbook</div><div class="v mono"
+            style="color:var(--tx);font-size:12px">RUNBOOK_EC2_DOWNSIZE</div></div>
+          <div class="diff">
+            <div class="spec"><div class="k">현재</div><div class="v">t3.medium</div></div>
+            <div class="arw">▶</div>
+            <div class="spec to"><div class="k">제안</div><div class="v">t3.small</div></div>
+          </div>
+          <div class="note" style="margin-top:2px"><i>ⓘ</i>
+            <div>실행 전 Guardrail 4단계 검증과 현재 스펙 백업을 수행합니다.
+              변경 후 상태 점검에 실패하면 이전 스펙으로 자동 복구합니다.</div></div>
+          <div style="display:flex;justify-content:flex-end;margin-top:15px">
+            <button class="btn pri">이 조치 실행</button></div>
+        </div>
+        <div class="card">
+          <div class="ch"><h3>실행 이력</h3></div>
+          <div style="font-size:12px;color:var(--mu2);padding:14px 0;text-align:center">
+            execution_id = null · 아직 실행되지 않았습니다</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ══════════ 7. INC-002 B ══════════ -->
+<section id="s7">
+<div class="cap"><b>INC-002</b><span>인시던트 상세 — B 변형 (SECURITY)</span>
+  <i>action.mode = PREEMPTIVE_EXECUTED · rollback_available = true</i></div>
+<div class="frame">
+  <div class="gnb">
+    <div class="logo">VIGIL<em>A</em>NTIS</div>
+    <div class="nav"><span>대시보드</span><span>자산</span><span class="on">인시던트</span></div>
+    <div class="conn"><i class="dot"></i>실시간 연결됨</div>
+  </div>
+  <div class="body dtl">
+    <div class="back">← 인시던트</div>
+    <div class="dtop">
+      <span class="b red">보안</span>
+      <div class="ttl">SSH Brute Force 선제 차단</div>
+      <span class="b pri">조치됨</span>
+      <div style="margin-left:auto" class="sub">inc-sec-001 · 생성 09:12:00 · 갱신 09:12:04</div>
+    </div>
+    <div class="row" style="flex:1;min-height:0;align-items:flex-start">
+      <div class="col" style="flex:1.25">
+        <div class="card">
+          <div class="ch"><h3>위험도 판정</h3>
+            <span class="more">initial_risk · reviewed_risk (병렬 유지)</span></div>
+          <div class="rp">
+            <div class="rpc hi">
+              <div class="h">초기 판정 <span class="b n nodot" style="height:17px">규칙 기반</span></div>
+              <div class="lv">높음</div>
+              <div class="cd">SSH_BRUTE_FORCE_THRESHOLD_EXCEEDED<br>security-policy-v1</div>
+              <div class="tm">09:12:01</div>
+            </div>
+            <div class="rpc md">
+              <div class="h">정밀 평가 <span class="b pur nodot" style="height:17px">AI</span></div>
+              <div class="lv">중간</div>
+              <div class="cd">SOURCE_REPUTATION_UNCONFIRMED</div>
+              <div class="tm">09:12:04</div>
+            </div>
+          </div>
+          <div class="note" style="margin-top:13px"><i>ⓘ</i>
+            <div>정밀 평가는 초기 판정을 대체하지 않으며, 결과가 달라도 차단은 자동 해제되지 않습니다.</div></div>
+        </div>
+        <div class="card">
+          <div class="ch"><h3>판단 근거</h3><span class="more">decision_summary[3]</span></div>
+          <div class="summ">
+            <div class="li"><i>1</i>동일 Source IP에서 반복적인 SSH 접근 시도가 탐지됐습니다.</div>
+            <div class="li"><i>2</i>초기 위험등급 HIGH 정책에 따라 사전 승인된 IP 차단을 수행했습니다.</div>
+            <div class="li"><i>3</i>정밀평가 결과와 실제 차단 상태를 확인한 뒤 해제 여부를 선택할 수 있습니다.</div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="ch"><h3>근거 데이터</h3><span class="more">evidence[1]</span></div>
+          <div class="evd">
+            <div class="e1"><code>evd-sec-001</code><span class="tp">MOCK_SECURITY_EVENT</span>
+              <span class="tm">09:12:00</span></div>
+            <div class="e2">203.0.113.10에서 5분간 SSH 실패 30회</div>
+          </div>
+        </div>
+      </div>
+      <div class="col" style="width:452px">
+        <div class="card">
+          <div class="ch"><h3>수행된 조치</h3>
+            <span class="b red" style="margin-left:auto">선제 차단됨</span></div>
+          <div class="kv"><div class="k">Runbook</div>
+            <div class="v mono" style="color:var(--tx);font-size:12px">RUNBOOK_IP_BLOCK</div></div>
+          <div class="kv" style="margin-top:10px"><div class="k">실행</div>
+            <div class="v mono">exe-block-001</div></div>
+          <div class="kv" style="margin-top:10px"><div class="k">대상 SG</div>
+            <div class="v mono">sg-0123456789abcdef0</div></div>
+          <div class="kv" style="margin-top:10px"><div class="k">차단 IP</div>
+            <div class="v mono" style="color:#FF858A">203.0.113.10/32</div></div>
+          <div class="kv" style="margin-top:10px"><div class="k">결과</div>
+            <div class="v"><span class="b grn">차단 완료</span></div></div>
+          <div style="display:flex;justify-content:flex-end;gap:9px;margin-top:17px">
+            <button class="btn gho">차단 유지</button>
+            <button class="btn red">차단 해제</button></div>
+        </div>
+        <div class="card">
+          <div class="ch"><h3>대상 자산</h3></div>
+          <div class="kv"><div class="k" style="width:74px">자산</div>
+            <div class="v">demo-api-sg <span style="color:var(--mu2);font-size:11px">· ast-sg-001 →</span></div></div>
+          <div class="kv" style="margin-top:10px"><div class="k" style="width:74px">ARN</div>
+            <div class="v mono">arn:aws:ec2:ap-northeast-2:123456789012:<br>security-group/sg-0123456789abcdef0</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ══════════ 8. ACT-001 ══════════ -->
+<section id="s8">
+<div class="cap"><b>ACT-001</b><span>원클릭 실행 확인 (Modal)</span>
+  <i>표시값 ≠ 전송값 · idempotency_key는 모달 오픈 시 1회 생성</i></div>
+<div class="frame">
+  <div class="gnb">
+    <div class="logo">VIGIL<em>A</em>NTIS</div>
+    <div class="nav"><span>대시보드</span><span>자산</span><span class="on">인시던트</span></div>
+    <div class="conn"><i class="dot"></i>실시간 연결됨</div>
+  </div>
+  <div class="body dtl" style="opacity:.45">
+    <div class="back">← 인시던트</div>
+    <div class="dtop"><span class="b pri">최적화</span>
+      <div class="ttl">Idle EC2 다운사이징 후보</div><span class="b ylw">미조치</span></div>
+    <div class="row" style="flex:1;align-items:flex-start">
+      <div class="col" style="flex:1.25">
+        <div class="card"><div class="ch"><h3>판단 근거</h3></div>
+          <div class="summ">
+            <div class="li"><i>1</i>최근 관측 구간의 CPU와 Network 사용량이 Idle 기준 이하입니다.</div>
+            <div class="li"><i>2</i>현재 t3.medium에서 t3.small로 축소할 수 있습니다.</div>
+            <div class="li"><i>3</i>실행 전 Guardrail과 현재 스펙 백업을 거칩니다.</div></div></div>
+      </div>
+      <div class="col" style="width:452px">
+        <div class="card"><div class="ch"><h3>제안 조치</h3></div>
+          <div class="diff"><div class="spec"><div class="k">현재</div><div class="v">t3.medium</div></div>
+            <div class="arw">▶</div>
+            <div class="spec to"><div class="k">제안</div><div class="v">t3.small</div></div></div></div>
+      </div>
+    </div>
+  </div>
+  <div class="scrim"></div>
+  <div class="modal">
+    <div class="mh"><span class="b pri">최적화</span><h3>조치를 실행합니다</h3></div>
+    <div class="mb">
+      <div class="kv"><div class="k" style="width:70px">대상</div>
+        <div class="v">demo-api<br><span class="mono" style="font-size:10.5px;color:var(--mu2)">
+          arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0123456789abcdef0</span></div></div>
+      <div class="kv"><div class="k" style="width:70px">조치</div>
+        <div class="v mono" style="font-size:12px">RUNBOOK_EC2_DOWNSIZE</div></div>
+      <div class="diff" style="padding:2px 0 4px">
+        <div class="spec" style="padding:10px 22px"><div class="k">현재</div><div class="v"
+          style="font-size:15px">t3.medium</div></div>
+        <div class="arw">▶</div>
+        <div class="spec to" style="padding:10px 22px"><div class="k">변경</div><div class="v"
+          style="font-size:15px">t3.small</div></div>
+      </div>
+      <div class="warn"><i>⚠</i>
+        <div>실행 전 Guardrail 4단계 검증과 현재 스펙 백업을 수행합니다.
+          변경 후 상태 점검에 실패하면 이전 스펙으로 자동 복구합니다.</div></div>
+      <div class="idk">idempotency_key &nbsp;01K2EXAMPLEA000000000000001</div>
+    </div>
+    <div class="mf"><button class="btn gho">취소</button><button class="btn pri">실행</button></div>
+  </div>
+</div>
+</section>
+
+<!-- ══════════ 9. ACT-001 B ══════════ -->
+<section id="s9">
+<div class="cap"><b>ACT-001</b><span>원클릭 실행 확인 — B 해제 변형</span>
+  <i>ROLLBACK_EXECUTION · 사전 승인이 아니라 이미 수행된 차단의 해제</i></div>
+<div class="frame">
+  <div class="gnb">
+    <div class="logo">VIGIL<em>A</em>NTIS</div>
+    <div class="nav"><span>대시보드</span><span>자산</span><span class="on">인시던트</span></div>
+    <div class="conn"><i class="dot"></i>실시간 연결됨</div>
+  </div>
+  <div class="body dtl" style="opacity:.45">
+    <div class="back">← 인시던트</div>
+    <div class="dtop"><span class="b red">보안</span>
+      <div class="ttl">SSH Brute Force 선제 차단</div><span class="b pri">조치됨</span></div>
+    <div class="row" style="flex:1;align-items:flex-start">
+      <div class="col" style="flex:1.25">
+        <div class="card"><div class="ch"><h3>위험도 판정</h3></div>
+          <div class="rp">
+            <div class="rpc hi"><div class="h">초기 판정</div><div class="lv">높음</div></div>
+            <div class="rpc md"><div class="h">정밀 평가</div><div class="lv">중간</div></div></div></div>
+      </div>
+      <div class="col" style="width:452px">
+        <div class="card"><div class="ch"><h3>수행된 조치</h3></div>
+          <div class="kv"><div class="k">차단 IP</div>
+            <div class="v mono">203.0.113.10/32</div></div></div>
+      </div>
+    </div>
+  </div>
+  <div class="scrim"></div>
+  <div class="modal">
+    <div class="mh"><span class="b red">보안</span><h3>선제 차단을 해제합니다</h3></div>
+    <div class="mb">
+      <div class="kv"><div class="k" style="width:82px">대상 SG</div>
+        <div class="v mono" style="font-size:12px">sg-0123456789abcdef0</div></div>
+      <div class="kv"><div class="k" style="width:82px">해제 대상</div>
+        <div class="v"><span class="mono" style="font-size:12px;color:#FF858A">203.0.113.10/32</span>
+          차단 규칙</div></div>
+      <div class="kv"><div class="k" style="width:82px">원본 실행</div>
+        <div class="v mono" style="font-size:12px">exe-block-001</div></div>
+      <div class="kv"><div class="k" style="width:82px">Runbook</div>
+        <div class="v mono" style="font-size:12px">RUNBOOK_IP_BLOCK 의 Rollback</div></div>
+      <div class="warn"><i>⚠</i>
+        <div>해제하면 해당 IP의 접근이 다시 허용됩니다.
+          원본 차단 이력은 보존되며 해제는 별도 실행으로 기록됩니다.</div></div>
+      <div class="idk">idempotency_key &nbsp;01K2EXAMPLEB000000000000001</div>
+    </div>
+    <div class="mf"><button class="btn gho">취소</button><button class="btn red">해제 실행</button></div>
+  </div>
+</div>
+</section>
+
+<!-- ══════════ 10. ACT-002 ══════════ -->
+<section id="s10">
+<div class="cap"><b>ACT-002</b><span>실행 상태 패널 (INC-002 인라인)</span>
+  <i>REST 202 → WS ACTION_EXECUTION_UPDATED · phase는 정상 6칸</i></div>
+<div class="frame">
+  <div class="gnb">
+    <div class="logo">VIGIL<em>A</em>NTIS</div>
+    <div class="nav"><span>대시보드</span><span>자산</span><span class="on">인시던트</span></div>
+    <div class="conn"><i class="dot"></i>실시간 연결됨</div>
+  </div>
+  <div class="body dtl">
+    <div class="dtop"><span class="b pri">최적화</span>
+      <div class="ttl">Idle EC2 다운사이징 후보</div>
+      <span class="b n">조치 진행 중</span>
+      <div style="margin-left:auto" class="sub">inc-opt-001</div></div>
+    <div class="card" style="flex:none">
+      <div class="ch"><h3>실행 상태</h3>
+        <span class="b pri" style="margin-left:auto">진행 중</span>
+        <span class="sub" style="margin-left:8px">exe-action-001</span></div>
+      <div class="steps">
+        <div class="stp dn"><div class="ln"></div><div class="cir">✓</div><div class="lb">예약</div></div>
+        <div class="stp dn"><div class="ln"></div><div class="cir">✓</div><div class="lb">검증</div></div>
+        <div class="stp dn"><div class="ln"></div><div class="cir">✓</div><div class="lb">백업</div></div>
+        <div class="stp cu"><div class="ln"></div><div class="cir"></div><div class="lb">실행</div></div>
+        <div class="stp"><div class="ln"></div><div class="cir"></div><div class="lb">점검</div></div>
+        <div class="stp"><div class="cir"></div><div class="lb">완료</div></div>
+      </div>
+      <div style="text-align:center;font-size:12.5px;color:var(--tx);margin-top:15px">
+        EC2 변경을 실행하고 있습니다.</div>
+    </div>
+    <div class="row" style="flex:1;min-height:0;align-items:flex-start">
+      <div class="card" style="flex:1">
+        <div class="ch"><h3>Guardrail 검증</h3>
+          <span class="b grn" style="margin-left:auto">4단계 통과</span></div>
+        <div class="grd">
+          <div class="g"><i>✓</i><b>1. Schema Check</b></div>
+          <div class="g"><i>✓</i><b>3. ARN Match</b></div>
+          <div class="g"><i>✓</i><b>2. Action Whitelist</b></div>
+          <div class="g"><i>✓</i><b>4. AWS Dry-Run</b></div>
+        </div>
+        <div class="note" style="margin-top:15px"><i>ⓘ</i>
+          <div>계약에 단계별 PASS/FAIL 필드가 없어 phase 진행으로 통과 여부만 표시합니다.
+            <span style="color:var(--ylw)">(백엔드 확인 #3)</span></div></div>
+      </div>
+      <div class="card" style="flex:1.2">
+        <div class="ch"><h3>진행 기록</h3><span class="more">WS data.message</span></div>
+        <div class="tl">
+          <div class="t"><time>09:15:30</time><span>요청이 접수됐습니다.</span></div>
+          <div class="t"><time>09:15:31</time><span>Guardrail 검증을 통과했습니다.</span></div>
+          <div class="t"><time>09:15:32</time><span>변경 전 스펙을 저장했습니다.</span></div>
+          <div class="t now"><time>09:15:33</time><span>EC2 변경을 실행하고 있습니다.</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ══════════ 11. ACT-002 상태 ══════════ -->
+<section id="s11">
+<div class="cap"><b>ACT-002</b><span>실행 최종 상태 6종</span>
+  <i>비최종 상태에서는 같은 Incident의 실행 버튼을 전부 비활성</i></div>
+<div class="frame">
+  <div class="gnb">
+    <div class="logo">VIGIL<em>A</em>NTIS</div>
+    <div class="nav"><span>대시보드</span><span>자산</span><span class="on">인시던트</span></div>
+    <div class="conn"><i class="dot"></i>실시간 연결됨</div>
+  </div>
+  <div class="body">
+    <div class="ttl" style="font-size:16px">실행 상태별 화면 표현</div>
+    <div class="board">
+      <div class="st">
+        <div class="h">진행 중 <code>IN_PROGRESS</code></div>
+        <div class="mid">
+          <div class="ic" style="background:rgba(76,141,255,.14);color:#8FB6FF">◐</div>
+          <div class="m1" style="color:#8FB6FF">실행 중입니다</div>
+          <div class="m2">진행 바 + 스피너<br>실행 버튼 비활성</div></div>
+        <div class="steps" style="padding:0">
+          <div class="stp dn"><div class="ln"></div><div class="cir" style="width:15px;height:15px"></div></div>
+          <div class="stp dn"><div class="ln"></div><div class="cir" style="width:15px;height:15px"></div></div>
+          <div class="stp cu"><div class="ln"></div><div class="cir" style="width:15px;height:15px"></div></div>
+          <div class="stp"><div class="ln"></div><div class="cir" style="width:15px;height:15px"></div></div>
+          <div class="stp"><div class="ln"></div><div class="cir" style="width:15px;height:15px"></div></div>
+          <div class="stp"><div class="cir" style="width:15px;height:15px"></div></div>
+        </div>
+      </div>
+      <div class="st">
+        <div class="h">성공 <code>SUCCESS</code></div>
+        <div class="mid">
+          <div class="ic" style="background:rgba(53,199,126,.15);color:var(--grn)">✓</div>
+          <div class="m1" style="color:#5FD79B">조치가 완료됐습니다</div>
+          <div class="m2">t3.medium → t3.small<br>상태 점검 통과</div></div>
+        <div style="display:flex;justify-content:center"><span class="b grn">최종 상태</span></div>
+      </div>
+      <div class="st">
+        <div class="h">실패 <code>FAILED</code></div>
+        <div class="mid">
+          <div class="ic" style="background:rgba(242,88,95,.15);color:var(--red)">✕</div>
+          <div class="m1" style="color:#FF858A">실행하지 못했습니다</div>
+          <div class="m2"><code style="font-family:ui-monospace,Menlo,monospace;font-size:11px">
+            GUARDRAIL_FAILED</code><br>AWS 변경은 발생하지 않았습니다</div></div>
+        <div style="display:flex;justify-content:center"><span class="b red">최종 상태</span></div>
+      </div>
+      <div class="st">
+        <div class="h">복구 시작 <code>ROLLBACK_INITIATED</code></div>
+        <div class="mid">
+          <div class="ic" style="background:rgba(240,138,60,.15);color:var(--org)">⟲</div>
+          <div class="m1" style="color:#F7A768">복구를 시작했습니다</div>
+          <div class="m2"><code style="font-family:ui-monospace,Menlo,monospace;font-size:11px">
+            POST_CHECK_FAILED</code><br>이전 스펙으로 자동 복구 중</div></div>
+        <div style="display:flex;justify-content:center"><span class="b org">비최종 · 계속 수신</span></div>
+      </div>
+      <div class="st">
+        <div class="h">복구 완료 <code>ROLLED_BACK</code></div>
+        <div class="mid">
+          <div class="ic" style="background:rgba(76,141,255,.14);color:#8FB6FF">⟲</div>
+          <div class="m1" style="color:#8FB6FF">이전 상태로 복구했습니다</div>
+          <div class="m2">t3.small → t3.medium<br>복구 후 점검 통과</div></div>
+        <div style="display:flex;justify-content:center">
+          <span class="b ylw">⚠ 추가 제안 상태 (확인 #2)</span></div>
+      </div>
+      <div class="st">
+        <div class="h">복구 실패 <code>ROLLBACK_FAILED</code></div>
+        <div class="mid">
+          <div class="ic" style="background:rgba(242,88,95,.15);color:var(--red)">⚠</div>
+          <div class="m1" style="color:#FF858A">복구에 실패했습니다</div>
+          <div class="m2">수동 확인이 필요합니다<br>자동 재시도 버튼 없음</div></div>
+        <div style="display:flex;justify-content:center">
+          <span class="b ylw">⚠ 추가 제안 상태 (확인 #2)</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ══════════ 12. CMN-001 ══════════ -->
+<section id="s12">
+<div class="cap"><b>CMN-001</b><span>실시간 알림 · 연결 상태</span>
+  <i>WS 수명주기를 전역 1개가 소유 · 페이지가 각자 연결하지 않음</i></div>
+<div class="frame">
+  <div class="gnb">
+    <div class="logo">VIGIL<em>A</em>NTIS</div>
+    <div class="nav"><span class="on">대시보드</span><span>자산</span><span>인시던트</span></div>
+    <div class="conn"><i class="dot"></i>실시간 연결됨</div>
+  </div>
+  <div class="body">
+    <div class="row" style="flex:none">
+      <div class="card" style="flex:1">
+        <div class="ch"><h3>연결 인디케이터 (GNB 우측)</h3></div>
+        <div style="display:flex;gap:34px;padding:6px 0">
+          <div class="conn" style="margin:0"><i class="dot"></i>실시간 연결됨</div>
+          <div class="conn" style="margin:0"><i class="dot y"></i>재연결 중…</div>
+          <div class="conn" style="margin:0"><i class="dot g"></i>연결 끊김
+            <button class="btn sm" style="margin-left:4px">재연결</button></div>
+        </div>
+        <div class="note" style="margin-top:14px"><i>ⓘ</i>
+          <div>지수 백오프 1s → 2s → 4s → 8s → 최대 30s.
+            재연결 성공 시 <b style="color:var(--tx)">STATE_SNAPSHOT</b>을 기다려 상태를 교체합니다.
+            누락 이벤트 재생은 계약에 없습니다.</div></div>
+      </div>
+      <div class="card" style="width:428px">
+        <div class="ch"><h3>Toast 정책</h3></div>
+        <div class="rsn" style="gap:9px">
+          <div>SECURITY_INCIDENT_UPDATED → 항상 표시, 8초</div>
+          <div>ACTION_EXECUTION_UPDATED → <b style="color:var(--tx)">최종 상태에서만</b></div>
+          <div>동일 incident_id는 최신 1건으로 대체</div>
+          <div>최대 3개 스택, 초과 시 오래된 것부터 제거</div>
+          <div>STATE_SNAPSHOT → Toast 없음 (스토어만 교체)</div>
+        </div>
+      </div>
+    </div>
+    <div class="card" style="flex:1">
+      <div class="ch"><h3>이벤트 종류별 처리</h3><span class="more">WS event_type</span></div>
+      <div style="width:820px">
+        <table>
+          <thead><tr><th style="width:290px">event_type</th><th style="width:120px">Toast</th>
+            <th>화면 처리</th></tr></thead>
+          <tbody>
+            <tr><td class="mono" style="color:var(--tx)">STATE_SNAPSHOT</td>
+              <td><span class="b n nodot">없음</span></td>
+              <td>전역 스토어를 통째로 교체. 최초 연결·재연결</td></tr>
+            <tr><td class="mono" style="color:var(--tx)">SECURITY_INCIDENT_UPDATED</td>
+              <td><span class="b red">항상</span></td>
+              <td>해당 incident_id 갱신. 상세를 보고 있으면 인플레이스</td></tr>
+            <tr><td class="mono" style="color:var(--tx)">ACTION_EXECUTION_UPDATED</td>
+              <td><span class="b ylw">최종만</span></td>
+              <td>ACT-002 갱신. 중간 phase는 Toast 없음</td></tr>
+            <tr><td class="mono" style="color:var(--tx)">ERROR</td>
+              <td><span class="b n">회색</span></td>
+              <td>연결·구독 오류. 실행 상태와 문구를 구분</td></tr>
+          </tbody>
+        </table>
+        <div class="note" style="margin-top:16px;width:600px"><i>ⓘ</i>
+          <div>WS 이벤트는 알림이며 상태의 Source of Truth가 아닙니다.
+            최종 상태 수신 후 REST 재조회로 화면 값을 확정합니다.</div></div>
+      </div>
+    </div>
+  </div>
+  <div class="toasts">
+    <div class="toast">
+      <div class="t1"><span class="b red">보안</span>보안 위협 감지</div>
+      <div class="t2">허용된 범위에서 Source IP 선제 차단을 완료했습니다.</div>
+      <div class="t3"><button class="btn sm">상세 보기</button></div>
+    </div>
+    <div class="toast ok">
+      <div class="t1"><span class="b grn nodot">✓</span>조치가 완료됐습니다</div>
+      <div class="t2">demo-api · t3.medium → t3.small</div>
+      <div class="t3"><button class="btn sm">실행 보기</button></div>
+    </div>
+    <div class="toast wr">
+      <div class="t1"><span class="b org nodot">⟲</span>복구를 시작했습니다</div>
+      <div class="t2">변경 후 상태 확인에 실패해 원래 스펙 복구를 시작했습니다.</div>
+    </div>
+    <div class="toast gy">
+      <div class="t1"><span class="b n nodot">WS</span>연결 오류</div>
+      <div class="t2">실시간 연결에 문제가 있습니다. 실행 상태와는 무관합니다.</div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ══════════ 13. CMN-002 ══════════ -->
+<section id="s13">
+<div class="cap"><b>CMN-002</b><span>로딩 · 빈 · 오류 상태</span>
+  <i>공통 오류 응답 error.code 기준 분기 · request_id 항상 복사 가능</i></div>
+<div class="frame">
+  <div class="gnb">
+    <div class="logo">VIGIL<em>A</em>NTIS</div>
+    <div class="nav"><span>대시보드</span><span>자산</span><span>인시던트</span></div>
+    <div class="conn"><i class="dot g"></i>연결 끊김</div>
+  </div>
+  <div class="body">
+    <div class="board">
+      <div class="st">
+        <div class="h">로딩 <code>skeleton</code></div>
+        <div style="display:flex;flex-direction:column;gap:11px;flex:1;justify-content:center">
+          <div class="sk w1"></div><div class="sk w4"></div>
+          <div class="sk w2"></div><div class="sk w3"></div><div class="sk w2"></div>
+        </div>
+        <div style="font-size:11px;color:var(--mu2);text-align:center">
+          레이아웃 형태 유지 · 전체 스피너 금지</div>
+      </div>
+      <div class="st">
+        <div class="h">빈 상태 — 자산 <code>items = []</code></div>
+        <div class="mid">
+          <div class="ic" style="background:var(--sf3);color:var(--mu2)">▤</div>
+          <div class="m1">관제 중인 자산이 없습니다</div>
+          <div class="m2">수집이 완료되면 자동으로 표시됩니다</div></div>
+      </div>
+      <div class="st">
+        <div class="h">빈 상태 — 인시던트 <code>정상 신호</code></div>
+        <div class="mid">
+          <div class="ic" style="background:rgba(53,199,126,.15);color:var(--grn)">✓</div>
+          <div class="m1" style="color:#5FD79B">처리할 인시던트가 없습니다</div>
+          <div class="m2">전체 인프라를 정상 관제 중입니다</div></div>
+        <div style="display:flex;justify-content:center">
+          <span class="b grn">오류 아님 · 정상 신호</span></div>
+      </div>
+      <div class="st">
+        <div class="h">404 <code>INCIDENT_NOT_FOUND</code></div>
+        <div class="mid">
+          <div class="ic" style="background:var(--sf3);color:var(--mu)">?</div>
+          <div class="m1">요청한 Incident를 찾을 수 없습니다</div>
+          <div class="m2 mono" style="font-family:ui-monospace,Menlo,monospace;font-size:10.5px;
+            color:var(--mu2)">incident_id: inc-opt-001</div></div>
+        <div style="display:flex;justify-content:center"><button class="btn sm">목록으로</button></div>
+      </div>
+      <div class="st">
+        <div class="h">503 <code>STATE_STORE_UNAVAILABLE</code></div>
+        <div class="mid">
+          <div class="ic" style="background:rgba(240,138,60,.15);color:var(--org)">⚠</div>
+          <div class="m1" style="color:#F7A768">상태를 읽을 수 없습니다</div>
+          <div class="m2">잠시 후 다시 시도해 주세요</div></div>
+        <div style="display:flex;justify-content:center"><button class="btn sm">다시 시도</button></div>
+      </div>
+      <div class="st">
+        <div class="h">500 <code>INTERNAL_ERROR</code></div>
+        <div class="mid">
+          <div class="ic" style="background:rgba(242,88,95,.15);color:var(--red)">✕</div>
+          <div class="m1" style="color:#FF858A">예상하지 못한 오류입니다</div>
+          <div class="m2" style="font-family:ui-monospace,Menlo,monospace;font-size:10.5px;
+            color:var(--mu2)">request_id: req-001 ⧉</div></div>
+        <div style="display:flex;justify-content:center"><button class="btn sm">다시 시도</button></div>
+      </div>
+    </div>
+  </div>
+</div>
+</section>
+
+</body>
+</html>
