@@ -4,7 +4,7 @@
 > 다른 문서(README, 기획서, MVP 범위 명세 등)와 충돌하면 **이 문서가 이긴다.**
 > 범위·API 계약·역할이 바뀌는 PR은 이 문서 갱신을 포함할 것.
 >
-> **최종 갱신**: 2026-08-13 (유건희)
+> **최종 갱신**: 2026-08-13 (안성일)
 
 ---
 
@@ -74,10 +74,9 @@
 
 1. **롤백 런북 3종 미등록** — `RUNBOOK_EC2_UNISOLATE`·`RUNBOOK_SG_RECREATE`·`RUNBOOK_EC2_REVERT_SIZE`가 `rollback_runbook_id`로 참조만 되고 Whitelist에 없음 → 이대로 구현하면 **자동 원복이 가드레일에 차단됨**. 명세 추가 또는 "롤백은 Whitelist 검증 우회" 정책 명문화 필요(김세혁·안성일).
 2. **API 계약 3종 스키마 확정** (안성일·유건희) — FE 병렬 개발의 전제.
-3. **코드 스텁 주석 갱신** — `apps/core-api/ai/whitelist.py`·`services/aws/executor.py`의 구버전 런북 2종 주석 → 확정 7종으로.
-4. **RIGHTSIZING 트리거 문구** — "CPU/메모리"에서 메모리는 기본 CloudWatch 미수집(Agent 필요). CPU(/Network) 기준으로 정리.
-5. **팀명 확정** — 기획서 "딸깍 인프라" vs README "서버룸 난방공사".
-6. README·기획서 역할 표 및 `apps/*` 오너 주석 최신화.
+3. **RIGHTSIZING 트리거 문구** — "CPU/메모리"에서 메모리는 기본 CloudWatch 미수집(Agent 필요). CPU(/Network) 기준으로 정리.
+4. **팀명 확정** — 기획서 "딸깍 인프라" vs README "서버룸 난방공사".
+5. README·기획서 역할 표 및 `apps/*` 오너 주석 최신화.
 
 ## 일정 리스크 & 권고 컷라인 (제안 — 팀 합의 필요)
 
