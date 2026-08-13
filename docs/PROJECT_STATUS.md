@@ -22,7 +22,7 @@
 
 - **관제**: AWS 단일 계정 / 1~2개 리전. **EC2·SG 중심** + 런북 조치 대상 리소스(NACL, EBS, ASG·Launch Template, ALB Target Group).
 - **위협**: OpenIP(0.0.0.0/0)·SSH 브루트포스 — Golden Dataset 기반 **모의(Mock) 주입** (실환경 GuardDuty 연동은 Post-MVP).
-- **AI**: OpenAI GPT-4o + Pydantic v2 Structured Output. CoT 3줄 요약 + Runbook ID 추천. (LangGraph는 MVP 미사용)
+- **AI**: OpenAI GPT-4o + Pydantic v2 Structured Output + **LangGraph 오케스트레이션**. CoT 3줄 요약 + Runbook ID 추천. LangGraph는 프로젝트 정체성으로 MVP 구현 확정(2026-08-13) — 출력 계약(Pydantic 스키마)은 동일하게 유지.
 - **4단계 가드레일(순서 고정)**: ① Schema Check ➔ ② Action Whitelist ➔ ③ ARN Match ➔ ④ AWS Dry-Run.
 - **양방향 회복**: 자산 = 스펙 JSON 백업 ➔ `get_waiter` Status Check(2/2) ➔ 자동 원복 / 보안 = 선제 차단 ➔ 관제자 [원클릭 해제].
 - **3단계 위험 대응**: High `PRE_MITIGATION_0_5S`(0.5초 선차단 시뮬레이션) / Medium·Low `AGENT_WAIT`(승인 대기) / **1분 미응답 `TIMEOUT_ISOLATION_1M`(자동 격리)**.
@@ -59,6 +59,8 @@
 | 2026-08-13 | **개발 환경 = LocalStack, 발표 직전 실 AWS 전환** — `AWS_ENDPOINT_URL` 유무로 전환. 팀 표준 환경(compose·시드·env) 구성은 전략 수립 후 진행 | (전략 문서 예정) |
 | 2026-08-13 | **롤백 런북 3종 Whitelist 정식 등록(7→10종)** — 우회 정책 기각, `ai_recommendable: false`·백업 레코드 기반 복원·가드레일 실패 시 수동 개입 정책 채택 (미해결 #1 해소) | [ADR-0004](adr/0004-rollback-runbook-whitelist-registration.md) |
 | 2026-08-13 | **팀명 = "딸깍 인프라" 확정** — README의 "서버룸 난방공사" 표기는 구버전(갱신 필요) | — |
+| 2026-08-13 | **런북 10종 전부 실구현 방침** — mock/영상 대체 컷라인 기각(팀장 결정). P0/P1/P2는 착수 순서로만 운용, 9/13은 중간 점검 시점 | 본 문서 §일정 리스크 |
+| 2026-08-13 | **LangGraph MVP 도입 확정** — 프로젝트 정체성 사유(팀장 결정, "미확정" 상태 종료). AI 파이프라인을 LangGraph 그래프로 구현하되 GPT-4o + Pydantic Structured Output 출력 계약은 불변. 그래프 설계는 안성일 주관(ADR 후보) | 본 문서 §MVP 확정 범위 |
 
 ## API 계약 (최우선 확정 대상 — FE↔BE Mock 병렬 개발 기준)
 
@@ -83,16 +85,16 @@
 1. **API 계약 3종 스키마 확정** (안성일·유건희) — FE 병렬 개발의 전제.
 2. **LocalStack 팀 표준 환경** (김세혁) — docker-compose `localstack` 서비스 + EC2/SG 시드 스크립트 + `.env.example`. 현재는 개인 로컬 환경에만 존재해 수집 테스트를 타 팀원이 재현 불가. 6~7주차 실 AWS 스모크 테스트 일정 포함해 전략 수립 중.
 3. **PR #29 후속 보완** (김승철) — 머지된 raw 수집 테스트가 `collector.py`를 호출하지 않고 자체 boto3 로직 사용(`_open_to_world` 중복 구현), LocalStack 시드 없으면 빈 결과로 통과. 실제 collector 경로를 검증하도록 재작성 필요.
-4. **RIGHTSIZING 트리거 문구** — "CPU/메모리"에서 메모리는 기본 CloudWatch 미수집(Agent 필요). CPU(/Network) 기준으로 정리.
-5. README·기획서의 역할 표, 팀명("서버룸 난방공사" → **"딸깍 인프라"**) 및 `apps/*` 오너 주석 최신화.
+4. README·기획서의 역할 표, 팀명("서버룸 난방공사" → **"딸깍 인프라"**) 및 `apps/*` 오너 주석 최신화.
 
-## 일정 리스크 & 권고 컷라인 (제안 — 팀 합의 필요)
+## 일정 리스크 & 구현 우선순위 (2026-08-13 방침 확정)
 
-런북이 2종 → 7종(+롤백 3종)으로 늘었는데 기간(9주)은 그대로. 전부 실환경 완성도는 위험 → 우선순위 컷라인 제안:
+**런북 10종 전부 실구현이 원칙이다** — mock/영상 대체를 전제한 컷라인("P2 자동 컷")은 채택하지 않는다(팀장 결정). P0/P1/P2는 범위 축소선이 아니라 **구현 착수 순서**로만 사용한다.
 
-- **P0 (시연 필수, 3~5주차 내)**: `RIGHTSIZING`+`REVERT_SIZE`(자산 자동 원복), `NACL_ADD_DENY`+`NACL_RESTORE`(차단→원클릭 해제). 이 4개로 "양방향 회복" 스토리 완성.
-- **P1**: `SG_DELETE_ISOLATED`, `EBS_DELETE_UNATTACHED` — 난도 낮음, P0 후 순차.
-- **P2 (mock/영상 대체 허용)**: `EC2_ISOLATE`(ALB 시연 인프라 필요), `ENABLE_AUTOSCALING`(구현량 최대). **9/13까지 P0 미완이면 P2 자동 컷.**
+- **P0 (최우선 착수, 3~5주차)**: `RIGHTSIZING`+`REVERT_SIZE`(자산 자동 원복), `NACL_ADD_DENY`+`NACL_RESTORE`(차단→원클릭 해제) — "양방향 회복" 스토리의 골격.
+- **P1 (P0 후 순차)**: `SG_DELETE_ISOLATED`(+`SG_RECREATE`), `EBS_DELETE_UNATTACHED` — 난도 낮음.
+- **P2 (조기 준비 병행)**: `EC2_ISOLATE`(+`UNISOLATE`)는 ALB·다중 EC2 시연 인프라가 선행 조건 → 인프라 준비를 앞당긴다. `ENABLE_AUTOSCALING`은 구현량 최대 → 설계 선행.
+- **9/13 중간 점검**: P0 4종 실동작 여부 점검. 미달 시 범위 축소가 아니라 **인력 재배치·범위 외 작업 중단**으로 대응한다.
 
 ## 문서 지도 (신뢰 우선순위 — 충돌 시 위가 이김)
 
@@ -104,4 +106,4 @@
 6. `README.md` — 프로젝트 소개용 (※ 역할 표·오너 주석 구버전)
 7. `vigilantis-docs/기획서/*.docx` — **풀비전 비전 문서(동결)**. 구현 기준 아님.
 
-> ※ `vigilantis-docs/`는 현재 저장소 밖 폴더. 팀 공유가 필요하면 repo `docs/`로 이전 검토.
+> ※ `vigilantis-docs/`는 작업 폴더 내 **로컬 전용 문서**(`.gitignore` 등록, GitHub 미공유). 팀이 참조할 확정 결정은 `docs/PROJECT_STATUS.md`와 `docs/adr/`에 기록한다.
