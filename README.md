@@ -8,7 +8,7 @@
 
 * **팀명**: 딸깍 인프라
 * **개발 배경**: Multi-Account/Region 환경 확산에 따른 인프라 파편화와 초단위 보안 위협에 대응하고, AI 자동화 도입 시 발생하는 환각(Hallucination) 및 과도한 권한 실행(Excessive Agency) 위험을 해결하기 위해 구축되었습니다.
-* **MVP 범위**: **AWS 단일 계정 / 1~2개 리전 / EC2·Security Group 중심**(런북 조치 대상: NACL·EBS·ASG·ALB Target Group 포함). CloudWatch(CPU/Network) 기반 Idle EC2 판별, OpenIP·SSH 브루트포스 **모의 위협** 대응, GPT-4o 4단계 가드레일 + **런북 7종 Action Whitelist**, 양방향 회복 엔진, Next.js 대시보드까지를 1차 발표 대상으로 한다.
+* **MVP 범위**: **AWS 단일 계정 / 1~2개 리전 / EC2·Security Group 중심**(런북 조치 대상: NACL·EBS·ASG·ALB Target Group 포함). CloudWatch(CPU/Network) 기반 Idle EC2 판별, OpenIP·SSH 브루트포스 **모의 위협** 대응, GPT-4o 4단계 가드레일 + **런북 10종(본편 7 + 롤백 3) Action Whitelist**, 양방향 회복 엔진, Next.js 대시보드까지를 1차 발표 대상으로 한다.
 * **현황·결정 기준(SSOT)**: [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) — 확정 범위·결정 로그·미해결 이슈의 단일 기준. 본 README와 충돌 시 PROJECT_STATUS.md가 우선한다.
 * **Post-MVP (로드맵)**: RDS·S3 확장, Multi-Account/Region, OpenTelemetry 전 구간 트레이싱, Step Functions/ECS Fargate/Lambda, Terraform Drift 감지·GitOps PR, 모바일 푸시(FCM), GCP·Azure. (아래 Tech Stack 참고)
 
@@ -32,10 +32,10 @@
 
 * **Frontend**: Next.js 16 (App Router), TypeScript, Shadcn UI, Tailwind CSS, Recharts/Tremor, WebSocket/SSE
 * **Backend**: FastAPI (Python 3.11+), Boto3, PostgreSQL, SQLAlchemy · Alembic, APScheduler, pydantic-settings
-* **AI & Safety**: OpenAI GPT-4o, Pydantic v2 (Structured Output), pytest (Golden Dataset Evals)
+* **AI & Safety**: OpenAI GPT-4o, LangGraph (오케스트레이션), Pydantic v2 (Structured Output), pytest (Golden Dataset Evals)
 * **Infra/Dev**: Docker Compose (FastAPI + PostgreSQL), GitHub Actions (pytest CI · Lint/Schema Validation 확장 예정)
 
-**Post-MVP (로드맵)**: OpenTelemetry(W3C Trace Context) · AWS Step Functions/ECS Fargate/Lambda/EventBridge/GuardDuty · Terraform(Drift·GitOps) · Redis(ElastiCache) · LangGraph Multi-Agent · OIDC SSO·MFA·RBAC · 모바일 푸시(FCM) · GCP/Azure
+**Post-MVP (로드맵)**: OpenTelemetry(W3C Trace Context) · AWS Step Functions/ECS Fargate/Lambda/EventBridge/GuardDuty · Terraform(Drift·GitOps) · Redis(ElastiCache) · LangGraph **Multi-Agent 확장**(MVP는 단일 그래프 오케스트레이션) · OIDC SSO·MFA·RBAC · 모바일 푸시(FCM) · GCP/Azure
 
 ---
 
@@ -74,7 +74,7 @@ vigilantis/
 │       │   └── actions.py     #     POST /api/v1/actions/execute (idempotency)
 │       ├── services/
 │       │   ├── aws/
-│       │   │   ├── executor.py#     [김세혁] Boto3 런북 실행 엔진 (RIGHTSIZING 등 7종)
+│       │   │   ├── executor.py#     [김세혁] Boto3 런북 실행 엔진 (RIGHTSIZING 등 10종)
 │       │   │   └── rollback.py#     [김세혁] get_waiter 감시 + 스냅샷 자동 원복
 │       │   ├── collector.py   #     [김승철] EC2/SG + CloudWatch 수집
 │       │   ├── rule_engine.py #     [김승철] Idle/미사용 판별 + Skip 코드 적재
@@ -82,7 +82,7 @@ vigilantis/
 │       ├── ai/
 │       │   ├── agent.py       #     [안성일] GPT-4o CoT 3줄 + Runbook 추천
 │       │   ├── guardrails.py  #     [안성일] 4단계 Execution Guardrail
-│       │   └── whitelist.py   #     [안성일/김세혁] 허용 Runbook 7종 (런북 명세서 기준)
+│       │   └── whitelist.py   #     [안성일/김세혁] 허용 Runbook 10종 (실행 10 · AI 추천 7)
 │       └── security/
 │           └── soar.py        #     [김세혁] (모의) 위협 선제 차단 / 원클릭 해제
 ├── packages/
@@ -96,7 +96,9 @@ vigilantis/
     ├── PROJECT_STATUS.md      # [공통] 프로젝트 현황·확정 결정 단일 기준(SSOT)
     └── adr/                   # [박지현] 아키텍처 의사결정 기록 (결정 1건 = 파일 1개)
         ├── 0001-mvp-monorepo-structure.md       # MVP 단일 백엔드 구조 재정비 결정
-        └── 0002-runbook-whitelist-mvp-scope.md  # 런북 7종 Whitelist MVP 확정
+        ├── 0002-runbook-whitelist-mvp-scope.md  # 런북 7종 Whitelist MVP 확정
+        ├── 0003-fe-stack-nextjs-16.md           # FE 스택 Next.js 16 상향
+        └── 0004-rollback-runbook-whitelist-registration.md  # 롤백 3종 등록(총 10종)
 ```
 
 ### 디렉토리 설명
