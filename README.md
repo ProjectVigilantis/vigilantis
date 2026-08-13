@@ -33,7 +33,7 @@
 * **Frontend**: Next.js 14 (App Router), TypeScript, Shadcn UI, Tailwind CSS, Recharts/Tremor, WebSocket/SSE
 * **Backend**: FastAPI (Python 3.11+), Boto3, PostgreSQL, SQLAlchemy · Alembic, APScheduler, pydantic-settings
 * **AI & Safety**: OpenAI GPT-4o, Pydantic v2 (Structured Output), pytest (Golden Dataset Evals)
-* **Infra/Dev**: Docker Compose (FastAPI + PostgreSQL), GitHub Actions (Lint · Schema Validation)
+* **Infra/Dev**: Docker Compose (FastAPI + PostgreSQL), GitHub Actions (pytest CI · Lint/Schema Validation 확장 예정)
 
 **Post-MVP (로드맵)**: OpenTelemetry(W3C Trace Context) · AWS Step Functions/ECS Fargate/Lambda/EventBridge/GuardDuty · Terraform(Drift·GitOps) · Redis(ElastiCache) · LangGraph Multi-Agent · OIDC SSO·MFA·RBAC · 모바일 푸시(FCM) · GCP/Azure
 
@@ -160,4 +160,4 @@ dev (Integration)
 
 1. `feat/*` 등 작업 브랜치에서 **`dev`로 PR** 제출 (`main` 직접 PR 금지).
 2. 최소 1명 이상(특히 백엔드↔AI↔프론트 API 접점 담당자)의 Approve 후 Merge.
-3. GitHub Actions(Lint · Pydantic Schema Validation) 통과 필수.
+3. GitHub Actions CI(pytest) 통과 필수. (Lint·Pydantic Schema Validation은 도입 예정)

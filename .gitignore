@@ -1,18 +1,43 @@
-.DS_Store
+# ---- Python ----
 __pycache__/
 *.py[cod]
 *$py.class
-.venv/
-env/
-venv/
-.pytest_cache/
 .python-version
 
-# 로컬 환경변수 (예시는 .env.example 로 커밋)
+# ---- Virtual environments ----
+.venv/
+venv/
+env/
+
+# ---- Environment variables / secrets ----
+# 예시는 .env.example 로 커밋
 .env
+.env.*
+!.env.example
 
-# 개인용 프로젝트 컨텍스트 (Claude Code 참고, 커밋 제외)
+# ---- Testing ----
+.pytest_cache/
+
+# ---- Frontend (apps/web: Next.js) ----
+node_modules/
+.next/
+
+# ---- Docker ----
+# 로컬 개인 오버라이드는 커밋하지 않음 (기준은 docker-compose.yml)
+docker-compose.override.yml
+
+# ---- IDE / editor ----
+.vscode/
+.idea/
+*.swp
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Claude Code ----
+# 개인용 프로젝트 컨텍스트 (커밋 제외)
 CLAUDE.local.md
-
-# Claude Code 로컬 설정 (스킬 .claude/skills/ 는 공유, 개인 설정만 제외)
+# 로컬 설정 (스킬 .claude/skills/ 는 공유, 개인 설정만 제외)
 .claude/settings.local.json
