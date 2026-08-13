@@ -22,7 +22,7 @@
 | **안성일** | **AI/Guardrail · Architect** | 전체 아키텍처·DB 스키마(`db`), FastAPI 메인·라우터(`main.py`,`routers`), GPT-4o + 4단계 가드레일(`ai`) |
 | **김승철** | **Data & Rule Engine** | CloudWatch 수집·정형화(`services/collector`), Idle EC2·미사용 SG 판별 및 Skip 사유 코드(`services/rule_engine`) |
 | **박지현** | **QA & Scenario / Technical Writer** | Golden Dataset(`datasets/golden`), pytest 회귀·E2E 시나리오(`tests`), 문서·ADR(`docs`) |
-| **유건희** | **Frontend Engineer** | Next.js 14 + Shadcn 대시보드, REST/WebSocket 연동, Recharts/Tremor 시각화(`apps/web`) |
+| **유건희** | **Frontend Engineer** | Next.js 16 + Shadcn 대시보드, REST/WebSocket 연동, Recharts/Tremor 시각화(`apps/web`) |
 
 ---
 
@@ -30,7 +30,7 @@
 
 **MVP (실사용)**
 
-* **Frontend**: Next.js 14 (App Router), TypeScript, Shadcn UI, Tailwind CSS, Recharts/Tremor, WebSocket/SSE
+* **Frontend**: Next.js 16 (App Router), TypeScript, Shadcn UI, Tailwind CSS, Recharts/Tremor, WebSocket/SSE
 * **Backend**: FastAPI (Python 3.11+), Boto3, PostgreSQL, SQLAlchemy · Alembic, APScheduler, pydantic-settings
 * **AI & Safety**: OpenAI GPT-4o, Pydantic v2 (Structured Output), pytest (Golden Dataset Evals)
 * **Infra/Dev**: Docker Compose (FastAPI + PostgreSQL), GitHub Actions (pytest CI · Lint/Schema Validation 확장 예정)
@@ -59,7 +59,7 @@ vigilantis/
 ├── .env.example               # 환경변수 템플릿 (복사 → .env)
 ├── pyproject.toml             # uv workspace 루트(virtual, aggregator)
 ├── apps/
-│   ├── web/                   # [유건희·FE] Next.js 14 + Shadcn + Recharts 대시보드
+│   ├── web/                   # [유건희·FE] Next.js 16 + Shadcn + Recharts 대시보드
 │   └── core-api/              # [안성일·BE/AI · 김세혁·Infra] 단일 FastAPI 백엔드
 │       ├── Dockerfile         #   개발용 이미지 (uv 기반)
 │       ├── main.py            #   앱 생성 · 라우터 등록 · APScheduler 기동
@@ -103,7 +103,7 @@ vigilantis/
 
 | 경로 | 설명 | 담당 |
 | :--- | :--- | :--- |
-| `apps/web` | Next.js 14 대시보드(SSR/CSR), 자산·위협 시각화, 원클릭 조치 UI | 유건희 |
+| `apps/web` | Next.js 16 대시보드(SSR/CSR), 자산·위협 시각화, 원클릭 조치 UI | 유건희 |
 | `apps/core-api` | MVP 단일 FastAPI 백엔드. 아래 하위 모듈로 전 파이프라인을 담는다 | 안성일/김세혁/김승철 |
 | `apps/core-api/main.py` · `config.py` | 앱 엔트리포인트(라우터 등록·스케줄러 기동)와 환경설정 로더 | 안성일 |
 | `apps/core-api/db` | PostgreSQL ORM 모델·세션·Alembic 마이그레이션 | 안성일 |
