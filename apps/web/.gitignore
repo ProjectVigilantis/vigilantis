@@ -39,3 +39,8 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# claude 개인 하네스 (팀 미공유)
+/.claude/
+CLAUDE.local.md
+/_workspace/
