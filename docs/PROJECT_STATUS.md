@@ -4,7 +4,7 @@
 > 다른 문서(README, 기획서, MVP 범위 명세 등)와 충돌하면 **이 문서가 이긴다.**
 > 범위·API 계약·역할이 바뀌는 PR은 이 문서 갱신을 포함할 것.
 >
-> **최종 갱신**: 2026-08-13 (안성일)
+> **최종 갱신**: 2026-08-13 (김세혁)
 
 ---
 
@@ -12,11 +12,11 @@
 
 24/7 AWS 자산·보안 상시 관제 + 4단계 AI 가드레일 기반 원클릭 자율 조치 + 양방향 회복(자동 원복/원클릭 해제)을 제공하는 FinSecOps 플랫폼. **1차 발표(10/15) MVP 시연**이 목표다.
 
-## 현재 위치 (2026-08-12 기준)
+## 현재 위치 (2026-08-13 기준)
 
 - **마일스톤**: 1~2주차(8/11~8/23) — 시스템 설계 & 개발 환경 구축 단계.
-- **완료**: 모노레포 단일 백엔드 재편([ADR-0001](adr/0001-mvp-monorepo-structure.md)), docker-compose, **런북 명세서(Action Whitelist) 확정**([ADR-0002](adr/0002-runbook-whitelist-mvp-scope.md)), 시스템 흐름도 MVP 기준 갱신.
-- **진행 중**: DB 스키마 설계(안성일), API 계약 확정, Golden Dataset 1차(박지현), FE 와이어프레임(유건희).
+- **완료**: 모노레포 단일 백엔드 재편([ADR-0001](adr/0001-mvp-monorepo-structure.md)), docker-compose, **런북 명세서(Action Whitelist) 10종 확정**([ADR-0002](adr/0002-runbook-whitelist-mvp-scope.md) + 롤백 3종), 시스템 흐름도 MVP 기준 갱신, 자산 수집·Rule Engine 1차(PR #22), CI 가동(GitHub Actions pytest, PR #28), EC2/SG raw 수집 테스트(PR #29), FE Next.js 16 스캐폴딩(PR #30, [ADR-0003](adr/0003-fe-stack-nextjs-16.md)).
+- **진행 중**: DB 스키마 설계(안성일), API 계약 확정(최우선), Golden Dataset 1차(박지현), LocalStack 팀 표준 환경 전략(김세혁).
 
 ## MVP 확정 범위
 
@@ -29,7 +29,7 @@
 - **FE**: Next.js 16 + Shadcn UI, 위협 토폴로지 맵(붉은색 노드), One-Click + Idempotency Key.
 - **아키텍처**: 단일 FastAPI 백엔드(`apps/core-api`) + PostgreSQL + APScheduler.
 
-### Action Whitelist — 런북 7종 (전부 MVP, 확정본: `vigilantis-docs/런북 명세서.md`)
+### Action Whitelist — 런북 10종 = 본편 7 + 롤백 3 (전부 MVP, 확정본: `vigilantis-docs/런북 명세서.md`)
 
 | 분류 | Runbook ID | 위험도 / 승인 |
 | --- | --- | --- |
@@ -40,6 +40,11 @@
 | FinOps | `RUNBOOK_EC2_RIGHTSIZING` | Medium / 관제자 승인 (자동 원복 시연 대상) |
 | FinOps | `RUNBOOK_EC2_ENABLE_AUTOSCALING` | Medium / 관제자 승인 (stateless 한정 구조 전환) |
 | FinOps | `RUNBOOK_EBS_DELETE_UNATTACHED` | Low / 관제자 승인 |
+| SecOps (롤백) | `RUNBOOK_EC2_UNISOLATE` | Medium / 관제자 승인 (원클릭 해제) · AI 추천 불가 |
+| SecOps (롤백) | `RUNBOOK_SG_RECREATE` | Low / 관제자 승인 · AI 추천 불가 |
+| FinOps (롤백) | `RUNBOOK_EC2_REVERT_SIZE` | High / 시스템 자동 발동 (Status Check 실패 시) · AI 추천 불가 |
+
+**롤백 런북 공통 정책 (2026-08-13 확정)**: ① Whitelist 정식 등록 — 가드레일 우회 경로 없음. ② `ai_recommendable: false` — AI 추천 목록에서 제외, 트리거는 시스템/관제자만. ③ 원복 파라미터는 DB 백업 레코드(`backup_record_id`)에서만 로드. ④ 롤백이 가드레일에서 거절되면 자동 재시도 없이 CRITICAL 알림 + 수동 개입.
 
 ## 확정 결정 로그
 
@@ -51,6 +56,9 @@
 | 2026-08-12 | 관제자 미응답 타임아웃 **1분**(`TIMEOUT_ISOLATION_1M`)으로 통일 (3분 폐기) | 런북 명세서.md |
 | 2026-08-12 | 구 Whitelist 예시(`RUNBOOK_EC2_DOWNSIZE`, `RUNBOOK_IP_BLOCK`) 폐기 | 런북 명세서.md |
 | 2026-08-13 | **FE 스택 Next.js 14 → 16 상향** — 14 라인은 14.2.35에서 동결, 로컬 Node 26 지원 범위 밖, shadcn CLI 4.x가 Tailwind v4/Next 15+ 기준. `apps/web` = Next 16.3.0 + React 19 + Tailwind v4 + shadcn(radix-nova) | [ADR-0003](adr/0003-fe-stack-nextjs-16.md) |
+| 2026-08-13 | **개발 환경 = LocalStack, 발표 직전 실 AWS 전환** — `AWS_ENDPOINT_URL` 유무로 전환. 팀 표준 환경(compose·시드·env) 구성은 전략 수립 후 진행 | (전략 문서 예정) |
+| 2026-08-13 | **롤백 런북 3종 Whitelist 정식 등록(7→10종)** — 우회 정책 기각, `ai_recommendable: false`·백업 레코드 기반 복원·가드레일 실패 시 수동 개입 정책 채택 (미해결 #1 해소) | [ADR-0004](adr/0004-rollback-runbook-whitelist-registration.md) |
+| 2026-08-13 | **팀명 = "딸깍 인프라" 확정** — README의 "서버룸 난방공사" 표기는 구버전(갱신 필요) | — |
 
 ## API 계약 (최우선 확정 대상 — FE↔BE Mock 병렬 개발 기준)
 
@@ -72,11 +80,12 @@
 
 ## 미해결 이슈 / 할 일 (블로커 순)
 
-1. **롤백 런북 3종 미등록** — `RUNBOOK_EC2_UNISOLATE`·`RUNBOOK_SG_RECREATE`·`RUNBOOK_EC2_REVERT_SIZE`가 `rollback_runbook_id`로 참조만 되고 Whitelist에 없음 → 이대로 구현하면 **자동 원복이 가드레일에 차단됨**. 명세 추가 또는 "롤백은 Whitelist 검증 우회" 정책 명문화 필요(김세혁·안성일).
-2. **API 계약 3종 스키마 확정** (안성일·유건희) — FE 병렬 개발의 전제.
-3. **RIGHTSIZING 트리거 문구** — "CPU/메모리"에서 메모리는 기본 CloudWatch 미수집(Agent 필요). CPU(/Network) 기준으로 정리.
-4. **팀명 확정** — 기획서 "딸깍 인프라" vs README "서버룸 난방공사".
-5. README·기획서 역할 표 및 `apps/*` 오너 주석 최신화.
+1. **API 계약 3종 스키마 확정** (안성일·유건희) — FE 병렬 개발의 전제.
+2. **LocalStack 팀 표준 환경** (김세혁) — docker-compose `localstack` 서비스 + EC2/SG 시드 스크립트 + `.env.example`. 현재는 개인 로컬 환경에만 존재해 수집 테스트를 타 팀원이 재현 불가. 6~7주차 실 AWS 스모크 테스트 일정 포함해 전략 수립 중.
+3. **PR #29 후속 보완** (김승철) — 머지된 raw 수집 테스트가 `collector.py`를 호출하지 않고 자체 boto3 로직 사용(`_open_to_world` 중복 구현), LocalStack 시드 없으면 빈 결과로 통과. 실제 collector 경로를 검증하도록 재작성 필요.
+4. **코드 스텁 주석 갱신** — `apps/core-api/ai/whitelist.py`·`services/aws/executor.py`의 구버전 런북 2종 주석 → 확정 10종으로.
+5. **RIGHTSIZING 트리거 문구** — "CPU/메모리"에서 메모리는 기본 CloudWatch 미수집(Agent 필요). CPU(/Network) 기준으로 정리.
+6. README·기획서의 역할 표, 팀명("서버룸 난방공사" → **"딸깍 인프라"**) 및 `apps/*` 오너 주석 최신화.
 
 ## 일정 리스크 & 권고 컷라인 (제안 — 팀 합의 필요)
 
@@ -89,7 +98,7 @@
 ## 문서 지도 (신뢰 우선순위 — 충돌 시 위가 이김)
 
 1. **`docs/PROJECT_STATUS.md`** (이 문서) — 범위·결정·역할·현황
-2. `vigilantis-docs/런북 명세서.md` — Action Whitelist 확정 규격 (7종)
+2. `vigilantis-docs/런북 명세서.md` — Action Whitelist 확정 규격 (10종: 본편 7 + 롤백 3)
 3. `vigilantis-docs/시스템 흐름도.md` — MVP 아키텍처·파이프라인
 4. `docs/adr/` — 결정 배경(왜 그렇게 했나)
 5. `vigilantis-docs/1차 발표까지의 마일스톤 및 MVP 범위 명세.md` — 주차별 마일스톤 (※ 범위 서술 일부 구버전: EC2·SG 한정, 런북 2종 예시)
