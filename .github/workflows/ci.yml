@@ -1,7 +1,6 @@
 # ==============================================================================
 # Vigilantis CI — push/PR(dev·main) 시 자동 실행
 # 현재 범위: uv 의존성 설치 + pytest (통과 가능한 경로만)
-# TODO: packages/schemas/tests 는 runbooks/guardrails 모델 구현 후 경로에 추가
 # TODO: 린터(ruff 등) 도입 확정 시 lint job 추가
 # ==============================================================================
 name: CI
@@ -28,4 +27,4 @@ jobs:
         run: uv sync --all-packages
 
       - name: Run pytest
-        run: uv run pytest tests apps/core-api/services/tests -q
+        run: uv run pytest tests apps/core-api/services/tests packages/schemas/tests -q
