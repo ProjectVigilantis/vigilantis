@@ -4,7 +4,7 @@
 > 다른 문서(README, 기획서, MVP 범위 명세 등)와 충돌하면 **이 문서가 이긴다.**
 > 범위·API 계약·역할이 바뀌는 PR은 이 문서 갱신을 포함할 것.
 >
-> **최종 갱신**: 2026-08-13 (안성일)
+> **최종 갱신**: 2026-08-14 (안성일)
 
 ---
 
@@ -61,14 +61,17 @@
 | 2026-08-13 | **팀명 = "딸깍 인프라" 확정** — README의 "서버룸 난방공사" 표기는 구버전(갱신 필요) | — |
 | 2026-08-13 | **런북 10종 전부 실구현 방침** — mock/영상 대체 컷라인 기각(팀장 결정). P0/P1/P2는 착수 순서로만 운용, 9/13은 중간 점검 시점 | 본 문서 §일정 리스크 |
 | 2026-08-13 | **LangGraph MVP 도입 확정** — 프로젝트 정체성 사유(팀장 결정, "미확정" 상태 종료). AI 파이프라인을 LangGraph 그래프로 구현하되 GPT-4o + Pydantic Structured Output 출력 계약은 불변. 그래프 설계는 안성일 주관(ADR 후보) | 본 문서 §MVP 확정 범위 |
+| 2026-08-14 | **API 계약 확정** — Incident·Execute·WebSocket·오류 봉투 DTO 코드화(`packages/schemas/api/`), 실행 상태 4→6종(`ROLLED_BACK`·`ROLLBACK_FAILED` = 복구 최종 결과 추가), health_score 0~100 **정수** 확정 | 이슈 #32 |
 
-## API 계약 (최우선 확정 대상 — FE↔BE Mock 병렬 개발 기준)
+## API 계약 (확정 — FE↔BE 공개 계약, 코드 원천: `packages/schemas/api/`)
 
-- `GET /api/v1/assets` — EC2/SG 상태·스펙·연결관계·헬스 스코어·Skip 사유 코드
-- `GET /api/v1/incidents/{id}` — AI CoT 3줄 요약, Evidence ID, 추천 Runbook ID
+- `GET /api/v1/assets` — EC2/SG 상태·스펙·연결관계·헬스 스코어(**0~100 정수**)·Skip 사유 코드
+- `GET /api/v1/incidents/{id}` — AI CoT 3줄 요약, Evidence ID, 추천 Runbook(본편 7종만)·실행 요약(관제자 복구 조치는 롤백 3종만)
 - `POST /api/v1/actions/execute`
-  - Request: `{ incident_id, runbook_id, idempotency_key }`
-  - Response status: `SUCCESS | FAILED | IN_PROGRESS | ROLLBACK_INITIATED`
+  - Request: `{ incident_id, runbook_id, idempotency_key }` — 추가 필드 거부, Target ARN·AWS 파라미터는 받지 않음
+  - Response status: `IN_PROGRESS | SUCCESS | FAILED | ROLLBACK_INITIATED | ROLLED_BACK | ROLLBACK_FAILED` (마지막 2종 = 복구 최종 결과, 원본 Execution에만 기록)
+- WebSocket `/api/v1/ws` — `INCIDENT_CREATED | INCIDENT_UPDATED | EXECUTION_UPDATED` 이벤트 봉투 (DB commit 이후 전송, 상태 원본 아님)
+- REST 공통 오류 봉투 `{"error": {code, message, request_id}}` — 코드 5종(404·409×2·422·500)
 
 ## 팀 & 역할 (최신 — README·기획서의 역할 표는 구버전)
 
@@ -82,10 +85,9 @@
 
 ## 미해결 이슈 / 할 일 (블로커 순)
 
-1. **API 계약 3종 스키마 확정** (안성일·유건희) — FE 병렬 개발의 전제.
-2. **LocalStack 팀 표준 환경** (김세혁) — docker-compose `localstack` 서비스 + EC2/SG 시드 스크립트 + `.env.example`. 현재는 개인 로컬 환경에만 존재해 수집 테스트를 타 팀원이 재현 불가. 6~7주차 실 AWS 스모크 테스트 일정 포함해 전략 수립 중.
-3. **PR #29 후속 보완** (김승철) — 머지된 raw 수집 테스트가 `collector.py`를 호출하지 않고 자체 boto3 로직 사용(`_open_to_world` 중복 구현), LocalStack 시드 없으면 빈 결과로 통과. 실제 collector 경로를 검증하도록 재작성 필요.
-4. ~~README 최신화~~ ✅ 해소(팀명·역할 표·런북 10종·LangGraph 반영). 기획서 docx는 동결 방침이라 갱신 대상 아님.
+1. **LocalStack 팀 표준 환경** (김세혁) — docker-compose `localstack` 서비스 + EC2/SG 시드 스크립트 + `.env.example`. 현재는 개인 로컬 환경에만 존재해 수집 테스트를 타 팀원이 재현 불가. 6~7주차 실 AWS 스모크 테스트 일정 포함해 전략 수립 중.
+2. **PR #29 후속 보완** (김승철) — 머지된 raw 수집 테스트가 `collector.py`를 호출하지 않고 자체 boto3 로직 사용(`_open_to_world` 중복 구현), LocalStack 시드 없으면 빈 결과로 통과. 실제 collector 경로를 검증하도록 재작성 필요.
+3. ~~README 최신화~~ ✅ 해소(팀명·역할 표·런북 10종·LangGraph 반영). 기획서 docx는 동결 방침이라 갱신 대상 아님.
 
 ## 일정 리스크 & 구현 우선순위 (2026-08-13 방침 확정)
 

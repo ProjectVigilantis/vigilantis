@@ -199,9 +199,9 @@ class AssetItem(BaseModel):
     spec: AssetSpec
     relationships: list[AssetRelationship] = Field(default_factory=list)
     evaluation_status: EvaluationStatus
-    health_score: Optional[float] = Field(
+    health_score: Optional[int] = Field(
         None, ge=0, le=100,
-        description="EC2 전용. 현재 스펙 대비 이용률 적정성(0~100, 낮을수록 최적화 후보).",
+        description="EC2 전용. 현재 스펙 대비 이용률 적정성(0~100 정수, 낮을수록 최적화 후보).",
     )
     verdict: Optional[Verdict] = None
     skip_reason_code: Optional[SkipReasonCode] = None
