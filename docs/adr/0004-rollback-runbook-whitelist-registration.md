@@ -2,6 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-08-13
+- **Amended**: 2026-08-14 — 실행 축 어휘 정리(하단 "개정 이력" 참조, 핵심 결정 불변)
 - **Deciders**: 김세혁(PM/Infra) 확정, 안성일(AI/Guardrail) 공유 대상
 
 ## Context (배경)
@@ -27,11 +28,11 @@
 
 **ⓐ 채택 — 롤백 런북 3종을 Whitelist에 정식 등록한다. Action Whitelist는 총 10종(본편 7 + 롤백 3)이 된다.**
 
-| 분류 | Runbook ID | 위험도 / 트리거 |
-| --- | --- | --- |
-| SecOps (롤백) | `RUNBOOK_EC2_UNISOLATE` | Medium / 관제자 [원클릭 해제] (`AGENT_WAIT`, `HUMAN_ONLY`) |
-| SecOps (롤백) | `RUNBOOK_SG_RECREATE` | Low / 관제자 원복 요청 (`AGENT_WAIT`, `HUMAN_ONLY`) |
-| FinOps (롤백) | `RUNBOOK_EC2_REVERT_SIZE` | High / Status Check(2/2) 실패 시 시스템 자동 발동 (`AUTO_ON_FAILURE`, `SYSTEM_OR_HUMAN`) |
+| 분류 | Runbook ID | 위험도 | trigger_source (시작 사유) | approval_mode (승인 정책) |
+| --- | --- | --- | --- | --- |
+| SecOps (롤백) | `RUNBOOK_EC2_UNISOLATE` | Medium | `USER_APPROVAL` — 관제자 [원클릭 해제] | `HUMAN_ONLY` |
+| SecOps (롤백) | `RUNBOOK_SG_RECREATE` | Low | `USER_APPROVAL` — 관제자 원복 요청 | `HUMAN_ONLY` |
+| FinOps (롤백) | `RUNBOOK_EC2_REVERT_SIZE` | High | `AUTO_ON_FAILURE` — Status Check(2/2) 실패 시 시스템 자동 발동 | `SYSTEM_OR_HUMAN` |
 
 **롤백 런북 공통 정책 4항**:
 
@@ -40,7 +41,7 @@
 3. **백업 레코드 기반 복원** — 원복 파라미터(원본 SG 규칙·인스턴스 스펙 등)는 요청 페이로드가 아니라 실행 시점에 DB 백업 레코드(`backup_record_id`)에서만 로드한다.
 4. **가드레일 거절 시** — 자동 재시도 없이 CRITICAL 알림 후 수동 개입으로 전환한다. (긴급 원복이 차단된 채 방치되는 것을 방지)
 
-상세 명세(파라미터 스키마·target_api·`approval_mode: AUTO_ON_FAILURE` 신설 포함)는 `vigilantis-docs/런북 명세서.md` [SecOps-05]·[SecOps-06]·[FinOps-04]에 작성 완료.
+상세 명세(파라미터 스키마·target_api·`trigger_source: AUTO_ON_FAILURE` 신설 포함)는 `vigilantis-docs/런북 명세서.md` [SecOps-05]·[SecOps-06]·[FinOps-04]에 작성 완료.
 
 ## Consequences (결과·트레이드오프)
 
@@ -53,7 +54,7 @@
 - Whitelist 구현(코드 enum·Pydantic Literal)은 10종 기준이어야 한다 — **7종 기준 구현·테스트는 이 ADR로 구버전이 됨** (예: `RUNBOOK_EC2_UNISOLATE` 차단을 기대하는 테스트는 반전 필요)
 - AI 추천 검증용 7종 목록(`ai_recommendable` 분리)이 별도로 필요 — 실행 Whitelist와 원천을 공유하되 파생 목록으로 관리
 - 자동 원복(`REVERT_SIZE`)이 가드레일에서 거절되는 경우의 CRITICAL 알림 경로 구현 필요
-- 신규 규격 필드(`trigger_source`, `ai_recommendable`, `approval_mode: AUTO_ON_FAILURE`, `backup_record_id`)의 스키마 반영 필요
+- 신규 규격 필드(`trigger_source` — 신규 값 `AUTO_ON_FAILURE` 포함, `approval_mode`, `ai_recommendable`, `backup_record_id`)의 스키마 반영 필요
 
 ## Related
 
@@ -61,3 +62,16 @@
 - 현황 기준: `docs/PROJECT_STATUS.md`
 - 선행 결정: [ADR-0002](0002-runbook-whitelist-mvp-scope.md) — 미해결로 남겼던 항목의 해소
 - 영향 범위: `apps/core-api/ai/whitelist.py`(PR #35 재작업), `packages/schemas/runbooks.py`, API 계약(`action_type=ROLLBACK_EXECUTION` 논의)
+
+## 개정 이력
+
+- **2026-08-14 (1차 개정)** — 실행 축 어휘 정리. 원문의 결정 표와 본문 두 곳이 실행
+  "시작 사유"와 "승인 정책" 두 축을 한 필드처럼 표기해(`approval_mode: AUTO_ON_FAILURE`,
+  표의 무라벨 튜플) 스키마 코드화 시 두 갈래로 읽히는 문제가 있었다. 다음과 같이 정리한다.
+  - `trigger_source` (실행 시작 사유): `USER_APPROVAL` | `PRE_MITIGATION_0_5S` |
+    `TIMEOUT_ISOLATION_1M` | `AUTO_ON_FAILURE`
+  - `approval_mode` (사람 승인 없이 실행 가능한지): `HUMAN_ONLY` | `SYSTEM_OR_HUMAN`
+  - `AUTO_ON_FAILURE`는 `trigger_source` 값이다. 결정 표의 튜플을 두 축 라벨로
+    분리했고, 표에 있던 `AGENT_WAIT` 표기는 위험 대응 경로(ResponseMode) 값이라
+    시작 사유 자리에서 제거했다.
+  - 핵심 결정(롤백 3종 Whitelist 등록·공통 정책 4항)은 변경 없다.
