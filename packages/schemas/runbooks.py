@@ -58,3 +58,45 @@ def is_allowed_runbook(runbook_id: str) -> bool:
 def is_ai_recommendable(runbook_id: str) -> bool:
     """AI 추천 가능 여부: 본편 7종만 True, 롤백 3종·미등록 ID는 False."""
     return runbook_id in AI_RECOMMENDABLE_RUNBOOK_IDS
+
+
+# ------------------------------------------------------------------------------
+# ID 수준 분류 (Issue #55) — 파라미터·호출 순서 같은 상세 계약은 여전히 별도 층이다.
+# ------------------------------------------------------------------------------
+
+
+@unique
+class RunbookDomain(str, Enum):
+    """Runbook Registry 분류 축 — Incident 분류(FINOPS·SECOPS)와 별개로 ROLLBACK을 가진다."""
+
+    FINOPS = "FINOPS"
+    SECOPS = "SECOPS"
+    ROLLBACK = "ROLLBACK"
+
+
+# Runbook → 도메인 분류 (본편 7종: SSOT Whitelist 표 / 롤백 3종: ADR-0004)
+RUNBOOK_DOMAIN_BY_ID: dict[str, RunbookDomain] = {
+    RunbookId.RUNBOOK_EC2_ISOLATE.value: RunbookDomain.SECOPS,
+    RunbookId.RUNBOOK_NACL_ADD_DENY.value: RunbookDomain.SECOPS,
+    RunbookId.RUNBOOK_NACL_RESTORE.value: RunbookDomain.SECOPS,
+    RunbookId.RUNBOOK_SG_DELETE_ISOLATED.value: RunbookDomain.SECOPS,
+    RunbookId.RUNBOOK_EC2_RIGHTSIZING.value: RunbookDomain.FINOPS,
+    RunbookId.RUNBOOK_EC2_ENABLE_AUTOSCALING.value: RunbookDomain.FINOPS,
+    RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED.value: RunbookDomain.FINOPS,
+    RunbookId.RUNBOOK_EC2_UNISOLATE.value: RunbookDomain.ROLLBACK,
+    RunbookId.RUNBOOK_SG_RECREATE.value: RunbookDomain.ROLLBACK,
+    RunbookId.RUNBOOK_EC2_REVERT_SIZE.value: RunbookDomain.ROLLBACK,
+}
+
+# 주 조치 → 등록 롤백 Runbook 연결 (ADR-0002 명세의 rollback_runbook_id 참조 관계,
+# ADR-0004로 정식 등록). NACL 차단 해제는 주 조치 RUNBOOK_NACL_RESTORE 경로라 여기 없다.
+ROLLBACK_RUNBOOK_BY_MAIN_ID: dict[str, str] = {
+    RunbookId.RUNBOOK_EC2_ISOLATE.value: RunbookId.RUNBOOK_EC2_UNISOLATE.value,
+    RunbookId.RUNBOOK_SG_DELETE_ISOLATED.value: RunbookId.RUNBOOK_SG_RECREATE.value,
+    RunbookId.RUNBOOK_EC2_RIGHTSIZING.value: RunbookId.RUNBOOK_EC2_REVERT_SIZE.value,
+}
+
+
+def domain_of(runbook_id: str) -> RunbookDomain | None:
+    """등록 Runbook의 도메인 분류. 미등록 ID는 None."""
+    return RUNBOOK_DOMAIN_BY_ID.get(runbook_id)
