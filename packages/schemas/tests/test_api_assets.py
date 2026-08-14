@@ -7,7 +7,7 @@
 import pytest
 from pydantic import ValidationError
 
-from packages.schemas.api import (
+from schemas.api import (
     AssetItem,
     AssetsResponse,
     CollectionStatus,

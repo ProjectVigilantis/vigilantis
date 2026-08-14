@@ -1,7 +1,11 @@
 from pydantic import BaseModel, Field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 from enum import Enum
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 class SeverityLevel(str, Enum):
     HIGH = "HIGH"
@@ -20,5 +24,5 @@ class ThreatEvent(BaseModel):
     action_type: MitigationAction = Field(..., description="대응 방식 유형")
     target_arn: str = Field(..., description="격리/차단 대상 AWS 리소스 ARN")
     source_ip: Optional[str] = Field(None, description="공격자 IP 주소 (있는 경우)")
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=_utcnow)
     raw_payload: Optional[Dict[str, Any]] = Field(None, description="CloudTrail/GuardDuty Raw JSON")

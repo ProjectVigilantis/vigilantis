@@ -11,7 +11,9 @@ COPY packages ./packages
 COPY apps/core-api ./apps/core-api
 
 # 의존성 동기화 (lock 우선, 실패 시 재해석)
-RUN uv sync --frozen || uv sync
+# --all-packages: core-api 등 워크스페이스 멤버 의존성(fastapi/uvicorn 등)을
+# 빌드 시점에 설치한다. 없으면 컨테이너 시작 시 uv run이 뒤늦게 설치해 기동이 느려짐.
+RUN uv sync --frozen --all-packages || uv sync --all-packages
 
 WORKDIR /app/apps/core-api
 EXPOSE 8000
