@@ -1,10 +1,24 @@
 # ==============================================================================
 # [파일 설명]  담당: 안성일 / 김세혁
-# 가드레일 허용 Runbook 목록(Action Whitelist)입니다. AI가 낼 수 있는 조치 범위와
-# 필수 파라미터를 고정 정의합니다.
-#
-# [수행해야 할 작업]
-# 1. RUNBOOK_EC2_DOWNSIZE (필수: Target ARN, Target Spec)
-# 2. RUNBOOK_IP_BLOCK (필수: Target SG ID, Block IP/CIDR)
-# 3. 미등록 Runbook/파라미터 차단용 조회 헬퍼 제공
+# 가드레일 2단계 Action Whitelist의 앱 내 진입점입니다. 목록·판정의 원천은
+# packages/schemas/runbooks.py(공용 계약)이며, 이 파일은 재노출(re-export)만 합니다
+# — 같은 목록이 두 곳에 복사되지 않도록 원천은 한 곳만 둡니다(PR #35 리뷰 합의).
 # ==============================================================================
+
+from schemas.runbooks import (
+    AI_RECOMMENDABLE_RUNBOOK_IDS,
+    ALLOWED_RUNBOOK_IDS,
+    ROLLBACK_RUNBOOK_IDS,
+    RunbookId,
+    is_ai_recommendable,
+    is_allowed_runbook,
+)
+
+__all__ = [
+    "AI_RECOMMENDABLE_RUNBOOK_IDS",
+    "ALLOWED_RUNBOOK_IDS",
+    "ROLLBACK_RUNBOOK_IDS",
+    "RunbookId",
+    "is_ai_recommendable",
+    "is_allowed_runbook",
+]
