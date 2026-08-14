@@ -46,3 +46,4 @@ next-env.d.ts
 /.claude/
 CLAUDE.local.md
 /_workspace/
+/_workspace_prev/
