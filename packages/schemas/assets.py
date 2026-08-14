@@ -18,14 +18,14 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, computed_field
 
+# 공개 계약(api/assets.py) 7종 Enum의 재노출 — 축소판(EC2·SG 2종) 중복 정의를
+# 제거하고 단일 원천을 유지한다. 기존 `from schemas.assets import AssetType`
+# 소비 경로는 그대로 동작한다. (Issue #48)
+from .api.assets import AssetType as AssetType
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
-
-class AssetType(str, Enum):
-    EC2 = "EC2"
-    SG = "SG"
 
 
 class MetricName(str, Enum):
