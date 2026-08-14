@@ -41,7 +41,7 @@ def make_ec2_item(**over):
             }
         ],
         "evaluation_status": "COMPLETED",
-        "health_score": 2.8,
+        "health_score": 3,
         "verdict": "COST_CANDIDATE",
         "skip_reason_code": None,
         "collected_at": "2026-08-12T09:00:00Z",
@@ -99,7 +99,8 @@ def test_sg_threat_and_ebs_unused_valid():
     {"verdict": "SKIP", "skip_reason_code": None},                # SKIP인데 사유 없음
     {"verdict": "COST_CANDIDATE", "skip_reason_code": "SKIP_ACTIVE"},  # SKIP 아닌데 사유 있음
     {"evaluation_status": "PENDING"},                             # PENDING인데 verdict·score 잔존
-    {"health_score": 150.0},                                      # 범위 밖
+    {"health_score": 150},                                        # 범위 밖
+    {"health_score": 2.8},                                        # 소수점 — 계약은 0~100 정수
     {"asset_type": "SG", "resource_id": "sg-1", "spec": {"attached": True}},  # SG인데 health_score 잔존
     {"resource_role": "RUNBOOK_SUPPORT"},                         # EC2 role 불일치
     {"unknown_field": 1},                                         # extra 거부
