@@ -9,7 +9,9 @@ from pydantic import ValidationError
 
 from schemas.api.incidents import (
     IncidentCategory,
+    IncidentListItem,
     IncidentResponse,
+    IncidentsResponse,
     IncidentStatus,
     RecommendationItem,
     ResponseMode,
@@ -187,3 +189,91 @@ def test_recovery_ids_reject_main_runbooks():
             "available_recovery_runbook_ids": ["RUNBOOK_NACL_RESTORE"],
             "updated_at": "2026-08-12T09:04:00Z",
         }]))
+
+
+# --- title (Issue #45 코멘트 확정: nullable, null이면 FE가 category+ARN 축약 fallback) ---
+
+def test_title_nullable_default_and_roundtrip():
+    without = IncidentResponse.model_validate(make_secops_incident())
+    assert without.title is None
+    with_title = IncidentResponse.model_validate(
+        make_secops_incident(title="SSH 브루트포스 — i-0123")
+    )
+    assert with_title.title == "SSH 브루트포스 — i-0123"
+    assert IncidentResponse.model_validate_json(with_title.model_dump_json()) == with_title
+
+
+def test_title_rejects_empty_string():
+    # 빈 문자열 대신 null을 쓴다 — fallback 규칙이 null 기준이라 빈 문자열은 계약 위반
+    with pytest.raises(ValidationError):
+        IncidentResponse.model_validate(make_secops_incident(title=""))
+
+
+# --- 목록 (GET /api/v1/incidents — Issue #45 코멘트 확정) ---
+
+LIST_ITEM_FIELDS = {
+    "incident_id", "title", "subject_arn", "category", "status",
+    "initial_risk_level", "reviewed_risk_level", "response_mode",
+    "created_at", "updated_at",
+}
+
+
+def make_list_item(**over):
+    base = {
+        "incident_id": "inc-20260812-001",
+        "title": "SSH 브루트포스 — i-0123",
+        "subject_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0123",
+        "category": "SECOPS",
+        "status": "AWAITING_APPROVAL",
+        "initial_risk_level": "HIGH",
+        "reviewed_risk_level": "HIGH",
+        "response_mode": "PRE_MITIGATION_0_5S",
+        "created_at": "2026-08-12T09:01:00Z",
+        "updated_at": "2026-08-12T09:01:02Z",
+    }
+    base.update(over)
+    return base
+
+
+def test_list_item_is_exact_subset_of_detail():
+    # 부분집합 계약: 목록 10필드는 정확히 이 목록이고, 전부 상세 모델에도 존재한다
+    assert set(IncidentListItem.model_fields) == LIST_ITEM_FIELDS
+    assert LIST_ITEM_FIELDS <= set(IncidentResponse.model_fields)
+
+
+def test_list_envelope_roundtrip():
+    resp = IncidentsResponse.model_validate({"items": [
+        make_list_item(),
+        make_list_item(
+            incident_id="inc-20260812-002", title=None, category="FINOPS",
+            status="ANALYZING", initial_risk_level=None,
+            reviewed_risk_level=None, response_mode=None,
+        ),
+    ]})
+    assert len(resp.items) == 2 and resp.items[1].title is None
+    dumped = resp.model_dump_json()
+    assert '"items"' in dumped
+    assert IncidentsResponse.model_validate_json(dumped) == resp
+
+
+def test_list_envelope_empty_items_valid():
+    assert IncidentsResponse.model_validate({"items": []}).items == []
+
+
+@pytest.mark.parametrize("over", [
+    {"category": "FINOPS", "initial_risk_level": "HIGH",
+     "reviewed_risk_level": None, "response_mode": None},  # FINOPS인데 위험도 잔존
+    {"title": ""},                                          # 빈 제목 — null을 써야 함
+    {"unknown_field": 1},                                   # extra 거부
+])
+def test_list_item_contract_violations(over):
+    with pytest.raises(ValidationError):
+        IncidentListItem.model_validate(make_list_item(**over))
+
+
+def test_list_envelope_rejects_bare_array_shape():
+    # 계약은 봉투다 — bare 배열이나 봉투 층 추가 필드는 거부
+    with pytest.raises(ValidationError):
+        IncidentsResponse.model_validate([make_list_item()])
+    with pytest.raises(ValidationError):
+        IncidentsResponse.model_validate({"items": [], "total": 0})
