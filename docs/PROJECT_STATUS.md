@@ -12,11 +12,11 @@
 
 24/7 AWS 자산·보안 상시 관제 + 4단계 AI 가드레일 기반 원클릭 자율 조치 + 양방향 회복(자동 원복/원클릭 해제)을 제공하는 FinSecOps 플랫폼. **1차 발표(10/15) MVP 시연**이 목표다.
 
-## 현재 위치 (2026-08-13 기준)
+## 현재 위치 (2026-08-14 기준)
 
 - **마일스톤**: 1~2주차(8/11~8/23) — 시스템 설계 & 개발 환경 구축 단계.
-- **완료**: 모노레포 단일 백엔드 재편([ADR-0001](adr/0001-mvp-monorepo-structure.md)), docker-compose, **런북 명세서(Action Whitelist) 10종 확정**([ADR-0002](adr/0002-runbook-whitelist-mvp-scope.md) + 롤백 3종), 시스템 흐름도 MVP 기준 갱신, 자산 수집·Rule Engine 1차(PR #22), CI 가동(GitHub Actions pytest, PR #28), EC2/SG raw 수집 테스트(PR #29), FE Next.js 16 스캐폴딩(PR #30, [ADR-0003](adr/0003-fe-stack-nextjs-16.md)).
-- **진행 중**: DB 스키마 설계(안성일), API 계약 확정(최우선), Golden Dataset 1차(박지현), LocalStack 팀 표준 환경 전략(김세혁).
+- **완료**: 모노레포 단일 백엔드 재편([ADR-0001](adr/0001-mvp-monorepo-structure.md)), docker-compose, **런북 명세서(Action Whitelist) 10종 확정**([ADR-0002](adr/0002-runbook-whitelist-mvp-scope.md) + 롤백 3종), 시스템 흐름도 MVP 기준 갱신, 자산 수집·Rule Engine 1차(PR #22), CI 가동(GitHub Actions pytest, PR #28), EC2/SG raw 수집 테스트(PR #29), FE Next.js 16 스캐폴딩(PR #30, [ADR-0003](adr/0003-fe-stack-nextjs-16.md)), **Action Whitelist 코드화**(10종·AI 추천 분리, PR #35), **API 계약 DTO 확정**(assets·incidents·actions·WS·오류 봉투, PR #34·#44 — 목록·title은 이슈 #46).
+- **진행 중**: DB 스키마 설계(안성일), Golden Dataset 1차(박지현), LocalStack 팀 표준 환경 전략(김세혁), LangGraph 그래프 설계(안성일 — ADR-0005 예정), FE 계약 타입·mock 계층(유건희, #45).
 
 ## MVP 확정 범위
 
@@ -66,7 +66,8 @@
 ## API 계약 (확정 — FE↔BE 공개 계약, 코드 원천: `packages/schemas/api/`)
 
 - `GET /api/v1/assets` — EC2/SG 상태·스펙·연결관계·헬스 스코어(**0~100 정수**)·Skip 사유 코드
-- `GET /api/v1/incidents/{id}` — AI CoT 3줄 요약, Evidence ID, 추천 Runbook(본편 7종만)·실행 요약(관제자 복구 조치는 롤백 3종만)
+- `GET /api/v1/incidents` — 목록(상세의 부분집합 10필드 + nullable `title`). `status`·`category` 필터, `created_at` 내림차순 전체 반환(페이지네이션 Post-MVP)
+- `GET /api/v1/incidents/{id}` — nullable `title`, AI CoT 3줄 요약, Evidence ID, 추천 Runbook(본편 7종만)·실행 요약(관제자 복구 조치는 롤백 3종만)
 - `POST /api/v1/actions/execute`
   - Request: `{ incident_id, runbook_id, idempotency_key }` — 추가 필드 거부, Target ARN·AWS 파라미터는 받지 않음
   - Response status: `IN_PROGRESS | SUCCESS | FAILED | ROLLBACK_INITIATED | ROLLED_BACK | ROLLBACK_FAILED` (마지막 2종 = 복구 최종 결과, 원본 Execution에만 기록)
