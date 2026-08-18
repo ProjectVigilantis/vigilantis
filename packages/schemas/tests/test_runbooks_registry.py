@@ -29,8 +29,8 @@ def test_rollback_domain_matches_rollback_ids():
     assert set(finops) | set(secops) == AI_RECOMMENDABLE_RUNBOOK_IDS
 
 
-def test_rollback_link_pairs_match_adr0002_references():
-    # ADR-0002 명세의 rollback_runbook_id 참조 관계 3쌍 고정
+def test_rollback_link_pairs_are_fixed():
+    # 주 조치 → 롤백 연결 3쌍 고정 (ADR-0004 등록 대상)
     assert ROLLBACK_RUNBOOK_BY_MAIN_ID == {
         "RUNBOOK_EC2_ISOLATE": "RUNBOOK_EC2_UNISOLATE",
         "RUNBOOK_SG_DELETE_ISOLATED": "RUNBOOK_SG_RECREATE",
