@@ -110,5 +110,3 @@
 5. `vigilantis-docs/1차 발표까지의 마일스톤 및 MVP 범위 명세.md` — 주차별 마일스톤 (※ 범위 서술 일부 구버전: EC2·SG 한정, 런북 2종 예시)
 6. `README.md` — 프로젝트 소개용 (※ 역할 표·오너 주석 구버전)
 7. `vigilantis-docs/기획서/*.docx` — **풀비전 비전 문서(동결)**. 구현 기준 아님.
-
-> ※ `vigilantis-docs/`는 작업 폴더 내 **로컬 전용 문서**(`.gitignore` 등록, GitHub 미공유). 팀이 참조할 확정 결정은 `docs/PROJECT_STATUS.md`와 `docs/adr/`에 기록한다.
