@@ -26,6 +26,8 @@ from .api.assets import UtcDateTime
 @unique
 class GuardrailValidationContext(str, Enum):
     AI_CANDIDATE = "AI_CANDIDATE"
+    # 서버가 사람 승인 없이 시작한 격리 전부 — High 즉시 선차단과 1분 미응답 만료
+    # 자동 격리를 모두 포함한다. 둘의 구분은 Execution의 trigger_source가 담는다.
     AUTO_ISOLATION = "AUTO_ISOLATION"
     ROLLBACK_EXECUTION = "ROLLBACK_EXECUTION"
 
