@@ -4,8 +4,9 @@
 #
 #   - import 경로: services/tests와 같은 방식(apps/core-api·packages 삽입,
 #     저장소 루트 삽입 금지 — schemas identity 분열 방지).
-#   - PostgreSQL 통합 테스트: 일회용 DB(vigilantis_test)를 만들고 Alembic
-#     upgrade head로 스키마를 적용한다 — create_all을 쓰지 않는다.
+#   - PostgreSQL 통합 테스트: 실행마다 고유 이름의 일회용 DB를 새로 만들고
+#     Alembic upgrade head로 스키마를 적용한다 — create_all을 쓰지 않는다.
+#     기존 DB를 DROP하지 않는다(고정 이름 선-DROP은 수동 생성 DB를 지울 수 있음).
 #   - DB 미기동 시 통합 테스트만 skip한다(collector의 LocalStack skip과 동일
 #     방식). Mapper·메타데이터 테스트는 DB 없이 항상 실행된다.
 #   - 테스트 격리: 테스트마다 외부 트랜잭션을 열고 끝나면 rollback한다
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import os
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -26,7 +28,8 @@ for p in (str(CORE_API), str(REPO_ROOT / "packages")):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-TEST_DB_NAME = "vigilantis_test"
+# 실행마다 고유 이름 — 이미 존재하는 어떤 DB와도 충돌·삭제가 일어나지 않는다
+TEST_DB_NAME = f"vigilantis_test_{uuid.uuid4().hex[:8]}"
 # compose db 서비스(localhost:5432) 기본값 — 환경변수로 재지정 가능
 ADMIN_URL = os.getenv(
     "TEST_DATABASE_ADMIN_URL",
@@ -58,7 +61,6 @@ def pg_engine():
 
     admin = create_engine(ADMIN_URL, isolation_level="AUTOCOMMIT")
     with admin.connect() as conn:
-        conn.execute(text(f'DROP DATABASE IF EXISTS "{TEST_DB_NAME}"'))
         conn.execute(text(f'CREATE DATABASE "{TEST_DB_NAME}"'))
 
     os.environ["DATABASE_URL"] = TEST_URL
