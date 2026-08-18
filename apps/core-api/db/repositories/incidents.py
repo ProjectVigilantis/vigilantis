@@ -1,5 +1,5 @@
 # ==============================================================================
-# [파일 설명]  담당: 안성일 (AI/Guardrail · Architect)
+# [파일 설명]
 # 위협·인시던트·근거·후보 저장소 — ThreatEvent·Incident·Evidence·RunbookCandidate.
 # (Issue #60)
 #

@@ -1,5 +1,5 @@
 # ==============================================================================
-# [파일 설명]  담당: 안성일 (AI/Guardrail · Architect)
+# [파일 설명]
 # SQLAlchemy 엔진·세션 구성입니다. (Issue #60)
 #
 #   - DATABASE_URL은 config.get_settings() 경유로만 읽는다 — SQLite 기본값·

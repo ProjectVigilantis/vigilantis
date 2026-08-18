@@ -1,5 +1,5 @@
 # ==============================================================================
-# [파일 설명]  담당: 안성일 (AI/Guardrail · Architect)
+# [파일 설명]
 # 실행·단계·백업 저장소 — ActionExecution·ExecutionStep·BackupRecord. (Issue #60)
 #
 #   - idempotency_key·deduplication_key 중복은 유니크 제약이 flush 시점에 거절한다
