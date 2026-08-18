@@ -58,3 +58,64 @@ def is_allowed_runbook(runbook_id: str) -> bool:
 def is_ai_recommendable(runbook_id: str) -> bool:
     """AI 추천 가능 여부: 본편 7종만 True, 롤백 3종·미등록 ID는 False."""
     return runbook_id in AI_RECOMMENDABLE_RUNBOOK_IDS
+
+
+# ------------------------------------------------------------------------------
+# ID 수준 분류 (Issue #55) — 파라미터·호출 순서 같은 상세 계약은 여전히 별도 층이다.
+# ------------------------------------------------------------------------------
+
+
+@unique
+class RunbookDomain(str, Enum):
+    """Runbook Registry 분류 축 — Incident 분류(FINOPS·SECOPS)와 별개로 ROLLBACK을 가진다."""
+
+    FINOPS = "FINOPS"
+    SECOPS = "SECOPS"
+    ROLLBACK = "ROLLBACK"
+
+
+@unique
+class TriggerSource(str, Enum):
+    """실행을 시작한 사유. Execution 레코드에 개별 기록한다. (ADR-0004 1차 개정)"""
+
+    USER_APPROVAL = "USER_APPROVAL"                    # 관제자 승인 실행
+    PRE_MITIGATION_0_5S = "PRE_MITIGATION_0_5S"        # High 위협 즉시 선차단
+    TIMEOUT_ISOLATION_1M = "TIMEOUT_ISOLATION_1M"      # 1분 미응답 만료 자동 격리
+    AUTO_ON_FAILURE = "AUTO_ON_FAILURE"                # 주 조치 실패 시 자동 복구
+
+
+@unique
+class ApprovalMode(str, Enum):
+    """Runbook별 승인 정책. 사람 승인 없이 실행될 수 있는지를 나타낸다. (ADR-0004 1차 개정)"""
+
+    HUMAN_ONLY = "HUMAN_ONLY"              # 관제자 승인 필수
+    SYSTEM_OR_HUMAN = "SYSTEM_OR_HUMAN"    # 시스템 자동 시작 허용
+
+
+# Runbook → 도메인 분류 (본편 7종: SSOT Whitelist 표 / 롤백 3종: ADR-0004)
+RUNBOOK_DOMAIN_BY_ID: dict[str, RunbookDomain] = {
+    RunbookId.RUNBOOK_EC2_ISOLATE.value: RunbookDomain.SECOPS,
+    RunbookId.RUNBOOK_NACL_ADD_DENY.value: RunbookDomain.SECOPS,
+    RunbookId.RUNBOOK_NACL_RESTORE.value: RunbookDomain.SECOPS,
+    RunbookId.RUNBOOK_SG_DELETE_ISOLATED.value: RunbookDomain.SECOPS,
+    RunbookId.RUNBOOK_EC2_RIGHTSIZING.value: RunbookDomain.FINOPS,
+    RunbookId.RUNBOOK_EC2_ENABLE_AUTOSCALING.value: RunbookDomain.FINOPS,
+    RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED.value: RunbookDomain.FINOPS,
+    RunbookId.RUNBOOK_EC2_UNISOLATE.value: RunbookDomain.ROLLBACK,
+    RunbookId.RUNBOOK_SG_RECREATE.value: RunbookDomain.ROLLBACK,
+    RunbookId.RUNBOOK_EC2_REVERT_SIZE.value: RunbookDomain.ROLLBACK,
+}
+
+# 주 조치 → 등록 롤백 Runbook 연결. Runbook 명세의 참조 관계 전체가 아니라 ROLLBACK
+# 도메인 대상 연결만 추린 파생 맵이다(ADR-0004로 정식 등록된 3종). NACL 차단 해제는
+# 주 조치 RUNBOOK_NACL_RESTORE 경로라 여기 없다.
+ROLLBACK_RUNBOOK_BY_MAIN_ID: dict[str, str] = {
+    RunbookId.RUNBOOK_EC2_ISOLATE.value: RunbookId.RUNBOOK_EC2_UNISOLATE.value,
+    RunbookId.RUNBOOK_SG_DELETE_ISOLATED.value: RunbookId.RUNBOOK_SG_RECREATE.value,
+    RunbookId.RUNBOOK_EC2_RIGHTSIZING.value: RunbookId.RUNBOOK_EC2_REVERT_SIZE.value,
+}
+
+
+def domain_of(runbook_id: str) -> RunbookDomain | None:
+    """등록 Runbook의 도메인 분류. 미등록 ID는 None."""
+    return RUNBOOK_DOMAIN_BY_ID.get(runbook_id)
