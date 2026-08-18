@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-08-13
-- **Amended**: 2026-08-14 — 실행 축 어휘 정리(하단 "개정 이력" 참조, 핵심 결정 불변)
+- **Amended**: 2026-08-18 — 실행 축 어휘 교체(하단 "개정 이력" 참조, 핵심 결정 불변)
 - **Deciders**: 김세혁(PM/Infra) 확정, 안성일(AI/Guardrail) 공유 대상
 
 ## Context (배경)
@@ -32,7 +32,7 @@
 | --- | --- | --- | --- | --- |
 | SecOps (롤백) | `RUNBOOK_EC2_UNISOLATE` | Medium | `USER_APPROVAL` — 관제자 [원클릭 해제] | `HUMAN_ONLY` |
 | SecOps (롤백) | `RUNBOOK_SG_RECREATE` | Low | `USER_APPROVAL` — 관제자 원복 요청 | `HUMAN_ONLY` |
-| FinOps (롤백) | `RUNBOOK_EC2_REVERT_SIZE` | High | `AUTO_ON_FAILURE` — Status Check(2/2) 실패 시 시스템 자동 발동 | `SYSTEM_OR_HUMAN` |
+| FinOps (롤백) | `RUNBOOK_EC2_REVERT_SIZE` | High | `AUTO_ON_FAILURE` — Status Check(2/2) 실패 시 자동 원복 엔진 · `USER_APPROVAL` — 관제자 수동 요청 | `SYSTEM_OR_HUMAN` |
 
 **롤백 런북 공통 정책 4항**:
 
@@ -65,13 +65,24 @@
 
 ## 개정 이력
 
-- **2026-08-14 (1차 개정)** — 실행 축 어휘 정리. 원문의 결정 표와 본문 두 곳이 실행
-  "시작 사유"와 "승인 정책" 두 축을 한 필드처럼 표기해(`approval_mode: AUTO_ON_FAILURE`,
-  표의 무라벨 튜플) 스키마 코드화 시 두 갈래로 읽히는 문제가 있었다. 다음과 같이 정리한다.
-  - `trigger_source` (실행 시작 사유): `USER_APPROVAL` | `PRE_MITIGATION_0_5S` |
-    `TIMEOUT_ISOLATION_1M` | `AUTO_ON_FAILURE`
-  - `approval_mode` (사람 승인 없이 실행 가능한지): `HUMAN_ONLY` | `SYSTEM_OR_HUMAN`
-  - `AUTO_ON_FAILURE`는 `trigger_source` 값이다. 결정 표의 튜플을 두 축 라벨로
-    분리했고, 표에 있던 `AGENT_WAIT` 표기는 위험 대응 경로(ResponseMode) 값이라
-    시작 사유 자리에서 제거했다.
-  - 핵심 결정(롤백 3종 Whitelist 등록·공통 정책 4항)은 변경 없다.
+- **2026-08-18 (1차 개정)** — 실행 축 어휘 교체. 확정본 런북 명세서가 두 축의 이름을
+  서로 바꿔 쓰고 있었고, 구 어휘에 세 결함이 있었다. ① `approval_mode`가 ResponseMode
+  값(`PRE_MITIGATION_0_5S`·`AGENT_WAIT`)을 재사용해 한 어휘가 두 개념에 걸침
+  ② `RUNBOOK_EC2_REVERT_SIZE`의 "엔진 자동 시작 vs 관제자 수동 요청"을 실행 기록에
+  남길 자리가 없음 ③ 가드레일 2단계의 "시작 주체 ∈ 허용 정책" 대조에 두 축 분리가 전제.
+  두 축을 의도적으로 교체(swap)한다.
+
+  | 구 (명세서 원문) | 신 |
+  | --- | --- |
+  | `approval_mode: PRE_MITIGATION_0_5S \| AGENT_WAIT \| AUTO_ON_FAILURE` | `trigger_source`로 이동 (`AGENT_WAIT`→`USER_APPROVAL`, `TIMEOUT_ISOLATION_1M` 추가) |
+  | `trigger_source: HUMAN_ONLY \| SYSTEM_OR_HUMAN` | `approval_mode`로 이동 (값 동일) |
+
+  보완 결정 2건:
+  - `RUNBOOK_EC2_ISOLATE`(본편)의 `trigger_source`에 `USER_APPROVAL` 포함 — AI 추천
+    가능 7종이라 관제자 승인 실행 경로가 존재. 본 ADR 결정 표는 롤백 3종 범위이므로
+    표에는 반영하지 않는다.
+  - `RUNBOOK_EC2_REVERT_SIZE`의 `trigger_source`는 `AUTO_ON_FAILURE`·`USER_APPROVAL` —
+    명세서 원문 "자동 원복 엔진 또는 관제자 수동 요청".
+
+  런타임 의미가 변하지 않아 supersede 없이 1차 개정으로 종결한다. 핵심 결정(롤백 3종
+  Whitelist 등록·공통 정책 4항)은 불변.
