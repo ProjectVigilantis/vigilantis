@@ -6,7 +6,9 @@ from schemas.runbooks import (
     ROLLBACK_RUNBOOK_BY_MAIN_ID,
     ROLLBACK_RUNBOOK_IDS,
     RUNBOOK_DOMAIN_BY_ID,
+    ApprovalMode,
     RunbookDomain,
+    TriggerSource,
     domain_of,
 )
 
@@ -45,3 +47,23 @@ def test_domain_of_lookup():
     assert domain_of("RUNBOOK_EC2_RIGHTSIZING") is RunbookDomain.FINOPS
     assert domain_of("RUNBOOK_EC2_UNISOLATE") is RunbookDomain.ROLLBACK
     assert domain_of("RUNBOOK_NOT_REGISTERED") is None
+
+
+def test_trigger_source_values():
+    """실행 시작 사유 4종 — ADR-0004 1차 개정으로 확정된 어휘."""
+    assert {t.value for t in TriggerSource} == {
+        "USER_APPROVAL",
+        "PRE_MITIGATION_0_5S",
+        "TIMEOUT_ISOLATION_1M",
+        "AUTO_ON_FAILURE",
+    }
+
+
+def test_approval_mode_values():
+    """런북별 승인 정책 2종 — 구 어휘(AGENT_WAIT 등)를 재사용하지 않는다."""
+    assert {a.value for a in ApprovalMode} == {"HUMAN_ONLY", "SYSTEM_OR_HUMAN"}
+
+
+def test_two_axes_do_not_share_values():
+    """두 축이 같은 문자열을 쓰면 코드화 시 다시 섞인다."""
+    assert not {t.value for t in TriggerSource} & {a.value for a in ApprovalMode}

@@ -18,7 +18,25 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .api.actions import ExecutionStatus
 from .api.assets import UtcDateTime
+
+
+# ExecutionStatus(공개 계약 api/actions.py)에서 파생한 진행/종료 집합.
+# Candidate 예약 검사·Dispatcher 회수 인덱스·Incident 전이 조건이 모두 이 집합을
+# 사용하고 각 모듈에서 상태를 다시 열거하지 않는다.
+EXECUTION_NON_TERMINAL_STATUSES: frozenset[ExecutionStatus] = frozenset(
+    {ExecutionStatus.IN_PROGRESS, ExecutionStatus.ROLLBACK_INITIATED}
+)
+
+EXECUTION_TERMINAL_STATUSES: frozenset[ExecutionStatus] = frozenset(
+    {
+        ExecutionStatus.SUCCESS,
+        ExecutionStatus.FAILED,
+        ExecutionStatus.ROLLED_BACK,
+        ExecutionStatus.ROLLBACK_FAILED,
+    }
+)
 
 
 @unique

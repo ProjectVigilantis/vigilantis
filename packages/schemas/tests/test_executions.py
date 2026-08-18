@@ -3,7 +3,10 @@
 import pytest
 from pydantic import ValidationError
 
+from schemas.api.actions import ExecutionStatus
 from schemas.executions import (
+    EXECUTION_NON_TERMINAL_STATUSES,
+    EXECUTION_TERMINAL_STATUSES,
     ExecutionEffect,
     ExecutionStepResult,
     ExecutionStepStatus,
@@ -70,3 +73,16 @@ def test_status_effect_pairs(status, effect, ok):
 def test_contract_violations(over):
     with pytest.raises(ValidationError):
         ExecutionStepResult.model_validate(make_step(**over))
+
+
+def test_status_sets_partition_execution_status():
+    """두 집합이 ExecutionStatus 6종을 겹침 없이 정확히 나눈다."""
+    assert not EXECUTION_NON_TERMINAL_STATUSES & EXECUTION_TERMINAL_STATUSES
+    assert EXECUTION_NON_TERMINAL_STATUSES | EXECUTION_TERMINAL_STATUSES == set(ExecutionStatus)
+
+
+def test_rollback_initiated_is_non_terminal():
+    """Rollback 자식이 도는 동안 원본은 진행 중이다.
+    이 값이 종료 집합에 들어가면 Dispatcher 회수와 Incident RESOLVED 전이가 어긋난다."""
+    assert ExecutionStatus.ROLLBACK_INITIATED in EXECUTION_NON_TERMINAL_STATUSES
+    assert ExecutionStatus.ROLLBACK_FAILED in EXECUTION_TERMINAL_STATUSES

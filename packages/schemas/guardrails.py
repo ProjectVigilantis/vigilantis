@@ -75,6 +75,12 @@ class GuardrailStepResult(BaseModel):
             raise ValueError("reason_code는 FAIL 단계에만 기록합니다")
         return self
 
+    @model_validator(mode="after")
+    def _verification_summary_only_on_dry_run(self):
+        if self.step != GuardrailStep.AWS_DRY_RUN and self.verification_summary is not None:
+            raise ValueError("verification_summary는 AWS_DRY_RUN 단계에만 기록합니다")
+        return self
+
 
 class GuardrailValidationRequest(BaseModel):
     """Guardrail 진입 요청 — 서버가 저장된 문맥으로 구성한다(외부 요청 DTO 아님)."""

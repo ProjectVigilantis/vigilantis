@@ -122,3 +122,21 @@ def test_step_reason_only_on_fail():
         GuardrailStepResult.model_validate({
             "step": "SCHEMA_CHECK", "result": "PASS", "reason_code": "SOME_CODE",
         })
+
+
+def test_verification_summary_only_on_dry_run():
+    """검증 방식·한계 요약은 AWS 사전검증 단계에만 남긴다.
+    다른 단계에 붙으면 어느 단계가 실제 AWS를 확인했는지 감사에서 구분되지 않는다."""
+    ok = GuardrailStepResult(
+        step=GuardrailStep.AWS_DRY_RUN,
+        result=GuardrailStepStatus.PASS,
+        verification_summary="DryRun=True 지원 API로 사전검증",
+    )
+    assert ok.verification_summary is not None
+
+    with pytest.raises(ValidationError):
+        GuardrailStepResult(
+            step=GuardrailStep.ARN_MATCH,
+            result=GuardrailStepStatus.PASS,
+            verification_summary="여기 쓰면 안 됨",
+        )
