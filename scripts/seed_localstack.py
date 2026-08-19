@@ -35,6 +35,9 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+# Windows 콘솔(cp949)은 em dash 등 출력 시 UnicodeEncodeError로 죽는다 — UTF-8로 강제
+sys.stdout.reconfigure(encoding="utf-8")
+
 # import 경로: services(core-api) + schemas(packages) — 통합 테스트와 동일한 부트스트랩
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 for _p in (str(_REPO_ROOT / "apps" / "core-api"), str(_REPO_ROOT / "packages")):
