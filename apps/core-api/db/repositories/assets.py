@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional, Sequence
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from schemas.api.assets import AssetType, RelationType
@@ -61,6 +61,22 @@ def finish_collection_run(
         .values(status=status, finished_at=finished_at, error_summary=error_summary)
     )
     return result.rowcount == 1
+
+
+def latest_collection_run(db: Session) -> Optional[models.CollectionRun]:
+    """가장 최근에 시작된 수집 실행 — 목록 응답의 collection_status 원천. (Issue #68)"""
+    return db.execute(
+        select(models.CollectionRun)
+        .order_by(models.CollectionRun.started_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+
+def last_finished_collection_at(db: Session) -> Optional[datetime]:
+    """마지막으로 종료된 수집 시각 — 목록 응답의 last_collected_at 원천. (Issue #68)"""
+    return db.execute(
+        select(func.max(models.CollectionRun.finished_at))
+    ).scalar_one()
 
 
 # --- Asset ---------------------------------------------------------------------
@@ -168,6 +184,20 @@ def list_relationships_by_target(
     )
 
 
+def list_all_relationships(db: Session) -> list[models.AssetRelationship]:
+    """전 자산의 정방향 연결 일괄 조회 — 목록 응답 조립용. 자산별 반복 질의를
+    피하고 호출부가 source_asset_id로 묶는다. (Issue #68)"""
+    return list(
+        db.execute(
+            select(models.AssetRelationship).order_by(
+                models.AssetRelationship.source_asset_id,
+                models.AssetRelationship.relation_type,
+                models.AssetRelationship.target_arn,
+            )
+        ).scalars()
+    )
+
+
 # --- MetricSummary -------------------------------------------------------------
 
 
@@ -223,3 +253,18 @@ def latest_rule_evaluation(
         .order_by(models.RuleEvaluation.evaluated_at.desc())
         .limit(1)
     ).scalar_one_or_none()
+
+
+def latest_rule_evaluation_by_asset(db: Session) -> dict[str, models.RuleEvaluation]:
+    """자산별 최신 판정 1건 일괄 조회(PostgreSQL DISTINCT ON) — 자산마다
+    latest_rule_evaluation()을 반복 호출하는 N+1을 피한다. (Issue #68)"""
+    rows = db.execute(
+        select(models.RuleEvaluation)
+        .distinct(models.RuleEvaluation.asset_id)
+        .order_by(
+            models.RuleEvaluation.asset_id,
+            models.RuleEvaluation.evaluated_at.desc(),
+            models.RuleEvaluation.rule_evaluation_id.desc(),
+        )
+    ).scalars()
+    return {row.asset_id: row for row in rows}
