@@ -23,8 +23,18 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str
     LOG_LEVEL: str = "INFO"
-    # 콤마 구분 허용 출처 목록 — 기본값은 FE 개발 서버(create_app이 분리 해석)
+    # 콤마 구분 허용 출처 목록 — 기본값은 FE 개발 서버. CORS와 WebSocket
+    # Handshake Origin 검증이 같은 목록을 쓴다
     CORS_ALLOW_ORIGINS: str = "http://localhost:3000"
+    # WebSocket 연결별 전송 제한시간(초) — 초과한 연결은 발행에서 제거
+    WS_SEND_TIMEOUT_SECONDS: float = 5.0
+
+    def cors_allow_origins_list(self) -> list[str]:
+        return [
+            origin.strip()
+            for origin in self.CORS_ALLOW_ORIGINS.split(",")
+            if origin.strip()
+        ]
 
 
 @lru_cache
