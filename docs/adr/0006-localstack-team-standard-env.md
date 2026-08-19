@@ -23,6 +23,7 @@
 - `docker-compose.yml`에 `localstack` 서비스 추가(포트 4566). 별도 compose 파일·profile을 만들지 않는다 — 팀 표준 진입로는 `cp .env.example .env && docker compose up` 하나다.
 - **이미지 버전 고정**(minor까지 태그 고정). 팀원 간 "내 로컬에선 되는데" 편차의 최대 원인이 이미지 드리프트이므로, 업그레이드는 PR로만 한다.
 - **Community(무료) 기능만 사용한다.** Pro 전용 기능에 의존하는 테스트·시드를 금지한다 — 5인 전원 무료 재현이 목적이다.
+  - (2026-08-19 구현 중 확인) LocalStack 캘린더 버전(2026.x)부터는 무료 사용에도 `LOCALSTACK_AUTH_TOKEN`(계정 가입) 필수 — 토큰 없이 기동 가능한 마지막 라인인 **4.x(4.14.0)에 고정**한다. 상향은 토큰 정책(계정 배포 부담) 재검토 후에만.
 
 ### 2. 시드 = Boto3 스크립트 단일 원천 (`scripts/seed_localstack.py`)
 
@@ -60,6 +61,8 @@ LocalStack 통과를 "검증 완료"로 간주하지 않는 경로를 고정 목
 | 4 | ALB Target Group·ASG(Launch Template) 경로 (P2 런북) | Community 에뮬레이션 커버리지 제한 가능 — 구현 시점에 확인, 미동작 시 이 목록에 확정 편입 |
 
 이 목록은 **6~7주차 실 AWS 스모크 테스트**에서 해소한다: P0 런북 4종(`RIGHTSIZING`+`REVERT_SIZE`, `NACL_ADD_DENY`+`NACL_RESTORE`) 실동작 + Dry-Run·Status Check 경로 각 1회 검증. 비용 통제 — 단일 계정, 최소 스펙(t3.micro급), 검증 직후 리소스 정리. P2 시연 인프라(ALB·다중 EC2)는 마일스톤대로 조기 준비하되 실 AWS에 구성한다.
+
+**실 AWS 전환 절차(스모크·발표 직전 공통)** — `.env` 편집 두 가지를 반드시 **함께** 한다: ① 더미 자격증명(`test`)을 실제 키로 교체, ② `AWS_ENDPOINT_URL` 줄 삭제. 하나라도 빠지면 — ② 누락 시 모든 호출이 **조용히 LocalStack으로 가서 스모크가 가짜 AWS를 검증**하고(무증상 — 가장 위험), ① 누락 시 실 AWS가 `AuthFailure`로 시끄럽게 실패한다(인지 용이). 전환 여부는 편집 직후 `aws sts get-caller-identity`(또는 boto3 동일 호출)로 확인한다 — **계정 ID가 `000000000000`이면 아직 LocalStack이다.**
 
 ### 5. 단계 편성 (마일스톤 정합)
 

@@ -1,9 +1,11 @@
 # ==============================================================================
 # Vigilantis MVP 로컬 개발 환경
-#   db      : PostgreSQL 16
-#   api     : Core API (단일 FastAPI 백엔드)
-#   adminer : DB 웹 관리 UI (http://localhost:8080)
+#   db         : PostgreSQL 16
+#   api        : Core API (단일 FastAPI 백엔드)
+#   adminer    : DB 웹 관리 UI (http://localhost:8080)
+#   localstack : 가짜 AWS (팀 표준 개발 환경 — ADR-0006, http://localhost:4566)
 # 사용: cp .env.example .env  →  docker compose up
+#       → 시드 주입: scripts/seed_localstack.py (파일 docstring 참고)
 # ==============================================================================
 services:
   db:
@@ -22,11 +24,31 @@ services:
       timeout: 3s
       retries: 5
 
+  # 가짜 AWS — 개발 표준(ADR-0006). Community 기능만 사용.
+  # 재시작 시 상태가 초기화되므로(비영속) 기동 후 시드 스크립트를 재실행할 것.
+  # 버전 고정 — 상향 금지 사유·토큰 정책: ADR-0006 §1 (업그레이드는 PR로만)
+  localstack:
+    image: localstack/localstack:4.14.0
+    ports:
+      - "4566:4566"
+    environment:
+      # 현재 사용 서비스만 명시 기동(수집: ec2·cloudwatch, 계정 식별: sts).
+      # 런북 구현이 넓어지면 여기에 추가 (예: elbv2·autoscaling — Community 커버리지 확인 필요, ADR-0006 §4)
+      SERVICES: ec2,cloudwatch,sts
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+
   api:
     build:
       context: .
       dockerfile: apps/core-api/Dockerfile
     env_file: .env
+    # localstack 은 의존성으로 걸지 않는다 — api 는 기동 시점에 AWS 가 필요 없고(수집은
+    # 스케줄 주기 호출), 실 AWS 전환 시에도 compose 편집 없이 env 하나로 끝나야 한다(ADR-0006 §3).
     depends_on:
       db:
         condition: service_healthy
