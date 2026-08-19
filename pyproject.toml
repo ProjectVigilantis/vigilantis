@@ -14,6 +14,8 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    # FastAPI TestClient 기반 — 테스트 전용, 런타임 코드는 import하지 않음 (Issue #68)
+    "httpx>=0.27",
 ]
 
 # 루트는 가상(virtual) 워크스페이스 루트입니다. [build-system]을 두지 않아 자체
