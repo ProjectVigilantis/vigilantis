@@ -56,69 +56,22 @@ uv workspace 모노레포. **MVP는 단일 FastAPI 백엔드(`apps/core-api`)** 
 ```text
 vigilantis/
 ├── docker-compose.yml         # 로컬 개발 환경: FastAPI(api) + PostgreSQL(db) + adminer
-├── .env.example               # 환경변수 템플릿 (복사 → .env)
-├── pyproject.toml             # uv workspace 루트(virtual, aggregator)
 ├── apps/
 │   ├── web/                   # [유건희·FE] Next.js 16 + Shadcn + Recharts 대시보드
 │   └── core-api/              # [안성일·BE/AI · 김세혁·Infra] 단일 FastAPI 백엔드
-│       ├── Dockerfile         #   개발용 이미지 (uv 기반)
-│       ├── main.py            #   앱 생성 · 라우터 등록 · APScheduler 기동
-│       ├── config.py          #   pydantic-settings 환경설정 로더
-│       ├── db/                #   [안성일] PostgreSQL 계층
-│       │   ├── session.py     #     SQLAlchemy 엔진/세션
-│       │   ├── models.py      #     ORM 모델 (Asset/Incident/ActionLog/SpecSnapshot)
-│       │   └── migrations/    #     Alembic 마이그레이션
-│       ├── routers/           #   [안성일] API 계약 구현
-│       │   ├── assets.py      #     GET  /api/v1/assets
-│       │   ├── incidents.py   #     GET  /api/v1/incidents/{id}
-│       │   └── actions.py     #     POST /api/v1/actions/execute (idempotency)
-│       ├── services/
-│       │   ├── aws/
-│       │   │   ├── executor.py#     [김세혁] Boto3 런북 실행 엔진 (RIGHTSIZING 등 10종)
-│       │   │   └── rollback.py#     [김세혁] get_waiter 감시 + 스냅샷 자동 원복
-│       │   ├── collector.py   #     [김승철] EC2/SG + CloudWatch 수집
-│       │   ├── rule_engine.py #     [김승철] Idle/미사용 판별 + Skip 코드 적재
-│       │   └── scheduler.py   #     [김세혁/김승철] APScheduler 주기 스캔
-│       ├── ai/
-│       │   ├── agent.py       #     [안성일] GPT-4o CoT 3줄 + Runbook 추천
-│       │   ├── guardrails.py  #     [안성일] 4단계 Execution Guardrail
-│       │   └── whitelist.py   #     [안성일/김세혁] 허용 Runbook 10종 (실행 10 · AI 추천 7)
-│       └── security/
-│           └── soar.py        #     [김세혁] (모의) 위협 선제 차단 / 원클릭 해제
+│       ├── db/                #   [안성일] PostgreSQL ORM 모델·세션·migrations
+│       ├── routers/           #   [안성일] 3대 API 계약 구현 (assets/incidents/actions)
+│       ├── services/          #   [김세혁/김승철] Boto3 AWS 실행·원복(aws) · 수집·Rule Engine·스케줄러
+│       ├── ai/                #   [안성일/김세혁] GPT-4o Agent + 4단계 Guardrail + Whitelist 10종
+│       └── security/          #   [김세혁] 위협 선제 차단 / 원클릭 해제 (SOAR)
 ├── packages/
-│   ├── schemas/               # [공통] Pydantic DTO (assets/events/guardrails/runbooks) + tests
-│   ├── telemetry/             # (Post-MVP) OpenTelemetry 셋업 자리표시자
-│   └── iac/                   # (Post-MVP) Terraform Core (mock 위주)
-├── datasets/
-│   └── golden/                # [박지현] Golden Dataset 20여 건 (*.json)
-├── tests/                     # [박지현] pytest 회귀·E2E (guardrails/rollback/e2e)
-└── docs/
-    ├── PROJECT_STATUS.md      # [공통] 프로젝트 현황·확정 결정 단일 기준(SSOT)
-    └── adr/                   # [박지현] 아키텍처 의사결정 기록 (결정 1건 = 파일 1개)
-        ├── 0001-mvp-monorepo-structure.md       # MVP 단일 백엔드 구조 재정비 결정
-        ├── 0002-runbook-whitelist-mvp-scope.md  # 런북 7종 Whitelist MVP 확정
-        ├── 0003-fe-stack-nextjs-16.md           # FE 스택 Next.js 16 상향
-        └── 0004-rollback-runbook-whitelist-registration.md  # 롤백 3종 등록(총 10종)
+│   ├── schemas/               # [공통] Pydantic DTO (assets/events/guardrails/runbooks)
+│   ├── telemetry/             # (Post-MVP 자리표시자) OpenTelemetry 셋업
+│   └── iac/                   # (Post-MVP 자리표시자) Terraform Core
+├── datasets/golden/           # [박지현] Golden Dataset 테스트 정답지 (*.json)
+├── tests/                     # [박지현] pytest 회귀·E2E 시나리오 테스트
+└── docs/                      # PROJECT_STATUS.md (SSOT) + adr/ (아키텍처 의사결정 기록)
 ```
-
-### 디렉토리 설명
-
-| 경로 | 설명 | 담당 |
-| :--- | :--- | :--- |
-| `apps/web` | Next.js 16 대시보드(SSR/CSR), 자산·위협 시각화, 원클릭 조치 UI | 유건희 |
-| `apps/core-api` | MVP 단일 FastAPI 백엔드. 아래 하위 모듈로 전 파이프라인을 담는다 | 안성일/김세혁/김승철 |
-| `apps/core-api/main.py` · `config.py` | 앱 엔트리포인트(라우터 등록·스케줄러 기동)와 환경설정 로더 | 안성일 |
-| `apps/core-api/db` | PostgreSQL ORM 모델·세션·Alembic 마이그레이션 | 안성일 |
-| `apps/core-api/routers` | 3대 API 계약(`assets`/`incidents`/`actions`) 구현 | 안성일 |
-| `apps/core-api/services/aws` | Boto3 EC2/SG 제어(`executor`)와 자동 원복(`rollback`) | 김세혁 |
-| `apps/core-api/services/collector·rule_engine·scheduler` | 수집·사전 필터링·APScheduler 주기 스캔 (구 scan-worker 흡수) | 김승철/김세혁 |
-| `apps/core-api/ai` | GPT-4o 추론(`agent`), 4단계 가드레일(`guardrails`), 허용 Runbook(`whitelist`) | 안성일 |
-| `apps/core-api/security` | (모의) 위협 선제 차단·원클릭 해제 (구 security-soar 흡수) | 김세혁 |
-| `packages/schemas` | 앱 간 공유 Pydantic DTO 및 스키마 단위 테스트 | 공통 |
-| `packages/telemetry` · `packages/iac` | Post-MVP 자리표시자(관측/Terraform) | — |
-| `datasets/golden` | 팀 공통 테스트 정답지(위협/자산 더미 20여 건) | 박지현 |
-| `tests` | pytest 회귀·E2E 시나리오 테스트 | 박지현 |
-| `docs/adr` | 아키텍처 의사결정 기록(ADR). 되돌리기 어려운 기술 결정(무엇을/왜/대안/결과)을 번호순 `.md` 1건씩 기록·추적. 예: `0001-mvp-monorepo-structure.md`(4앱→단일 core-api 통합 결정) | 박지현 (Technical Writer) |
 
 ### 로컬 실행
 

@@ -77,37 +77,28 @@
 
 ### 예시
 
-| 이슈 (제목) | 브랜치명 |
+| 이슈 | 브랜치명 |
 | --- | --- |
-| INFRA #4 · `[INFRA/CHORE] Docker Compose 환경 구성` | `chore/INFRA-4-docker-compose-setup` |
-| BE #5 · `[BE/FEAT] PostgreSQL 연동 및 스키마 정의` | `feat/BE-5-postgresql-schema` |
 | BE #7 · `[BE/FEAT] EC2/SG 자산 조회 API` | `feat/BE-7-assets-list-api` |
-| AI #8 · `[AI/FEAT] 4단계 가드레일 Action Whitelist 필터` | `feat/AI-8-guardrail-action-whitelist` |
-| DATA #11 · `[DATA/FEAT] CloudWatch 기반 Idle EC2 판별` | `feat/DATA-11-idle-ec2-rule` |
-| SEC #12 · `[SEC/FEAT] SSH 브루트포스 모의 위협 수집` | `feat/SEC-12-ssh-bruteforce-mock` |
-| FE #3 · `[FE/FEAT] 위협 토폴로지 맵 시각화` | `feat/FE-3-threat-topology-map` |
-| DOCS #6 · `[DOCS/DOCS] 4단계 가드레일 ADR 작성` | `docs/DOCS-6-guardrail-adr` |
+| 이슈 없음 · `[INFRA/CHORE] Docker Compose 구성` | `chore/INFRA-docker-compose-setup` |
 
 ---
 
 ## Gitmoji (커밋·PR 제목 접두)
 
 - 커밋과 PR **제목 맨 앞**에 변경 성격을 나타내는 gitmoji **이모지 1개**를 붙인다. (전체 목록: https://gitmoji.dev)
-- **이모지 문자**(예: ✨)를 그대로 사용한다. `:sparkles:` 형태의 단축 코드는 `git log`에서 렌더링되지 않으므로 지양한다.
-- TYPE을 먼저 정하고, 그 TYPE 안에서 가장 구체적으로 들어맞는 gitmoji를 고른다. 애매하면 해당 TYPE의 "대표" 이모지를 쓴다.
-- **브랜치명에는 이모지를 넣지 않는다**(ASCII만).
+- **이모지 문자**(예: ✨)를 그대로 사용한다 (`:sparkles:` 단축 코드 사용 지양).
+- 브랜치명에는 이모지를 넣지 않는다(ASCII만).
 
-### TYPE별 gitmoji 매핑
+### TYPE별 gitmoji 대표 예시
 
-| TYPE | 대표 | 세부 상황별 |
-| --- | --- | --- |
-| `FEAT` | ✨ | 🎉 프로젝트/모듈 시작 · 🏗️ 아키텍처 변경 · 🗃️ DB 스키마/쿼리 · 🛂 인증·권한(RBAC) · 🦺 검증 로직(Pydantic·가드레일) · 🔊 로그 추가 · 💄 UI/스타일 · 📱 반응형 · 🚩 feature flag · 🏷️ 타입 정의 |
-| `FIX` | 🐛 | 🚑️ 치명적 핫픽스 · 🩹 사소한 수정 · 🔒️ 보안 취약점 · 🥅 예외/에러 처리(AWS API) · 🚨 린터 경고 · 💚 CI 빌드 수정 |
-| `REFACTOR` | ♻️ | 🎨 구조/포맷 정리 · ⚡️ 성능 개선 · 🔥 코드/파일 제거 · ⚰️ 데드코드 제거 · 🚚 이동·이름 변경 |
-| `CHORE` | 🔧 | 👷 CI 빌드 시스템(`.github`) · 🧱 인프라(Docker·IaC) · ⬆️/⬇️ 의존성 업/다운그레이드 · ➕/➖ 의존성 추가/제거 · 📌 의존성 버전 고정 · 🔨 개발 스크립트 · 🙈 `.gitignore` · 🚀 배포 · 🔖 릴리스 태그 |
-| `DOCS` | 📝 | 💡 소스 주석 · 📄 라이선스 |
+- `FEAT` ✨ (기능/DB `🗃️`/검증 `🦺`/타입 `🏷️`/로그 `🔊`)
+- `FIX` 🐛 (핫픽스 `🚑️`/사소한수정 `🩹`/보안 `🔒️`/예외 `🥅`)
+- `REFACTOR` ♻️ (구조 `🎨`/성능 `⚡️`/제거 `🔥`/이동 `🚚`)
+- `CHORE` 🔧 (CI `👷`/인프라 `🧱`/의존성 `⬆️` `➕`/스크립트 `🔨`)
+- `DOCS` 📝 (문서/주석 `💡`)
 
-> 표에 없는 상황은 https://gitmoji.dev 에서 가장 가까운 이모지를 선택한다. TYPE(대문자 대괄호)은 gitmoji와 별개로 **항상 유지**한다.
+> 표에 없는 상황은 https://gitmoji.dev 에서 선택하며, TYPE(대문자 대괄호)은 항상 유지한다.
 
 ---
 
