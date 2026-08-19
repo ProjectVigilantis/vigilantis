@@ -160,7 +160,7 @@ Refs #7
 Closes #<이슈번호>
 ```
 
-- **리뷰/머지**: 최소 1명 이상(특히 백엔드↔AI↔프론트 API 접점 담당자)의 승인과 CI(GitHub Actions: Lint·Pydantic Schema Validation) 통과 후 머지한다.
+- **리뷰/머지**: 최소 1명 이상(특히 백엔드↔AI↔프론트 API 접점 담당자)의 승인과 CI(GitHub Actions: pytest — Lint·Schema Validation은 도입 예정) 통과 후 머지한다.
 
 ---
 

@@ -11,6 +11,11 @@ dependencies = [
     "pydantic>=2.0.0",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
 # 루트는 가상(virtual) 워크스페이스 루트입니다. [build-system]을 두지 않아 자체
 # 빌드 대상이 아니며, 아래 멤버 패키지들을 묶는 aggregator 역할만 합니다.
 [tool.uv.workspace]

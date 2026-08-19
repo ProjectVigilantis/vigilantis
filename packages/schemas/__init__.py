@@ -1,3 +1,11 @@
+# ==============================================================================
+# [파일 설명]  담당: 안성일 (AI/Guardrail · Architect)
+# 내부 공통 계약 네임스페이스입니다. 최신 계약만 재노출한다. (Issue #48·#49)
+# 구 events 계약(SeverityLevel·MitigationAction·ThreatEvent)은 저장소 내 소비처가
+# 없어 Mock 위협 입력·정규화 계약으로 교체했다.
+# 공개 API DTO는 schemas.api 네임스페이스를 사용한다.
+# ==============================================================================
+
 from .assets import (
     AssetInventory,
     AssetType,
@@ -8,18 +16,139 @@ from .assets import (
     OpenPort,
     SecurityGroupAsset,
 )
-from .events import MitigationAction, SeverityLevel, ThreatEvent
+from .agents import (
+    AGENT_GRAPH_INPUT_ADAPTER,
+    AgentAssetContext,
+    AgentEvidenceInput,
+    AgentExecutionContext,
+    AgentGraphInput,
+    AgentGraphOutput,
+    FinOpsGraphInput,
+    RunbookCandidateDraft,
+    RunbookCapability,
+    SecOpsGraphInput,
+)
+from .candidates import CandidateStatus, RunbookCandidateData
+from .collections import CollectionRunStatus
+from .events import (
+    InitialRiskEvaluationResult,
+    MockThreatEventInput,
+    NormalizedThreatEvent,
+    OpenIpThreatInput,
+    OpenIpThreatPayload,
+    SshBruteForceThreatInput,
+    SshBruteForceThreatPayload,
+    ThreatEventType,
+)
+from .evidence import (
+    EVIDENCE_CONTENT_MODELS,
+    EvidenceContent,
+    EvidenceItem,
+    EvidenceType,
+    ExecutionEvidence,
+    MetricEvidence,
+    RuleEvidence,
+    ThreatEvidence,
+)
+from .executions import (
+    EXECUTION_NON_TERMINAL_STATUSES,
+    EXECUTION_TERMINAL_STATUSES,
+    ExecutionEffect,
+    ExecutionStepResult,
+    ExecutionStepStatus,
+)
+from .guardrails import (
+    GUARDRAIL_STEP_ORDER,
+    GuardrailDecision,
+    GuardrailStep,
+    GuardrailStepResult,
+    GuardrailStepStatus,
+    GuardrailValidationContext,
+    GuardrailValidationRequest,
+    GuardrailValidationResult,
+)
+from .incidents import AGENT_TERMINAL_STATUSES, AgentInvocationStatus, AgentWaitSchedule
+from .rules import RuleEvaluationResult
+from .runbooks import (
+    AI_RECOMMENDABLE_RUNBOOK_IDS,
+    ALLOWED_RUNBOOK_IDS,
+    ROLLBACK_RUNBOOK_BY_MAIN_ID,
+    ROLLBACK_RUNBOOK_IDS,
+    RUNBOOK_DOMAIN_BY_ID,
+    ApprovalMode,
+    RunbookDomain,
+    RunbookId,
+    TriggerSource,
+    domain_of,
+    is_ai_recommendable,
+    is_allowed_runbook,
+)
 
 __all__ = [
-    "SeverityLevel",
-    "MitigationAction",
-    "ThreatEvent",
+    "AGENT_GRAPH_INPUT_ADAPTER",
+    "AGENT_TERMINAL_STATUSES",
+    "AgentAssetContext",
+    "AgentEvidenceInput",
+    "AgentExecutionContext",
+    "AgentGraphInput",
+    "AgentGraphOutput",
+    "AgentInvocationStatus",
+    "AgentWaitSchedule",
+    "AI_RECOMMENDABLE_RUNBOOK_IDS",
+    "ALLOWED_RUNBOOK_IDS",
+    "ApprovalMode",
+    "AssetInventory",
     "AssetType",
+    "CandidateStatus",
+    "CollectionRunStatus",
+    "domain_of",
+    "Ec2Asset",
+    "EVIDENCE_CONTENT_MODELS",
+    "EvidenceContent",
+    "EvidenceItem",
+    "EvidenceType",
+    "EXECUTION_NON_TERMINAL_STATUSES",
+    "EXECUTION_TERMINAL_STATUSES",
+    "ExecutionEffect",
+    "ExecutionEvidence",
+    "ExecutionStepResult",
+    "ExecutionStepStatus",
+    "FinOpsGraphInput",
+    "GUARDRAIL_STEP_ORDER",
+    "GuardrailDecision",
+    "GuardrailStep",
+    "GuardrailStepResult",
+    "GuardrailStepStatus",
+    "GuardrailValidationContext",
+    "GuardrailValidationRequest",
+    "GuardrailValidationResult",
+    "InitialRiskEvaluationResult",
+    "is_ai_recommendable",
+    "is_allowed_runbook",
+    "MetricEvidence",
     "MetricName",
     "MetricSeries",
     "MetricSummary",
-    "Ec2Asset",
+    "MockThreatEventInput",
+    "NormalizedThreatEvent",
+    "OpenIpThreatInput",
+    "OpenIpThreatPayload",
     "OpenPort",
+    "ROLLBACK_RUNBOOK_BY_MAIN_ID",
+    "ROLLBACK_RUNBOOK_IDS",
+    "RuleEvaluationResult",
+    "RuleEvidence",
+    "RUNBOOK_DOMAIN_BY_ID",
+    "RunbookCandidateData",
+    "RunbookCandidateDraft",
+    "RunbookCapability",
+    "RunbookDomain",
+    "RunbookId",
+    "SecOpsGraphInput",
     "SecurityGroupAsset",
-    "AssetInventory",
+    "SshBruteForceThreatInput",
+    "SshBruteForceThreatPayload",
+    "ThreatEventType",
+    "ThreatEvidence",
+    "TriggerSource",
 ]

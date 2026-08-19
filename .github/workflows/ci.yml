@@ -1,0 +1,30 @@
+# ==============================================================================
+# Vigilantis CI — push/PR(dev·main) 시 자동 실행
+# 현재 범위: uv 의존성 설치 + pytest (통과 가능한 경로만)
+# TODO: 린터(ruff 등) 도입 확정 시 lint job 추가
+# ==============================================================================
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv (Python 3.11)
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: uv sync --all-packages
+
+      - name: Run pytest
+        run: uv run pytest tests apps/core-api/services/tests apps/core-api/ai/tests packages/schemas/tests -q

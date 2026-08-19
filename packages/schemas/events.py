@@ -1,24 +1,162 @@
-from pydantic import BaseModel, Field
-from datetime import datetime
-from typing import Optional, Dict, Any
-from enum import Enum
+# ==============================================================================
+# [파일 설명]  담당: 안성일 (AI/Guardrail · Architect)
+# Mock 위협 입력·정규화·초기 위험 판정의 내부 계약입니다. (Issue #49)
+# 구 계약(SeverityLevel·MitigationAction·ThreatEvent — EventBridge/GuardDuty 전제)은
+# 저장소 내 소비처가 없어 이 계약으로 교체했다.
+#
+# 계약 원칙
+#   - Mock 입력은 severity·response_mode를 받지 않는다. Pydantic은 형식만 검증하고
+#     초기 위험도·대응 경로는 Risk Evaluator가 생성한다(extra=forbid로 거부).
+#   - 입력 event_id는 외부 원본 식별자다. 정규화 이후에는 서버가 발급한
+#     threat_event_id를 쓰고, 입력 event_id는 source_event_id로 옮겨 보존한다.
+#     중복 판정은 source_event_id·deduplication_key로 한다.
+#   - 초기 판정 High→PRE_MITIGATION_0_5S, Medium·Low→AGENT_WAIT.
+#     TIMEOUT_ISOLATION_1M은 초기 판정 결과가 아니다(응답 기한 만료 시 전환).
+#   - reason_codes 값 Enum은 Risk 판정 규칙 확정 시 교체한다(#49 확정 — 값을
+#     지어내지 않기 위해 우선 문자열로 둔다).
+# ==============================================================================
 
-class SeverityLevel(str, Enum):
-    HIGH = "HIGH"
-    MEDIUM = "MEDIUM"
-    LOW = "LOW"
+from __future__ import annotations
 
-class MitigationAction(str, Enum):
-    PRE_MITIGATION_0_5S = "PRE_MITIGATION_0_5S"  # 0.5초 즉시 선 차단
-    AGENT_WAIT = "AGENT_WAIT"                    # AI 분석 & 관제자 승인 대기
-    TIMEOUT_ISOLATION_1M = "TIMEOUT_ISOLATION_1M" # 1분 미응답 시 자동 격리
+from enum import Enum, unique
+from typing import Annotated, Literal, Optional, Union
 
-class ThreatEvent(BaseModel):
-    event_id: str = Field(..., description="EventBridge 고유 이벤트 ID")
-    rule_arn: str = Field(..., description="감지된 GuardDuty/EventBridge 규칙 ARN")
-    severity: SeverityLevel = Field(..., description="위험도 (HIGH, MEDIUM, LOW)")
-    action_type: MitigationAction = Field(..., description="대응 방식 유형")
-    target_arn: str = Field(..., description="격리/차단 대상 AWS 리소스 ARN")
-    source_ip: Optional[str] = Field(None, description="공격자 IP 주소 (있는 경우)")
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
-    raw_payload: Optional[Dict[str, Any]] = Field(None, description="CloudTrail/GuardDuty Raw JSON")
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from .api.assets import UtcDateTime
+from .api.incidents import ResponseMode, RiskLevel
+
+
+@unique
+class ThreatEventType(str, Enum):
+    OPEN_IP = "OPEN_IP"
+    SSH_BRUTE_FORCE = "SSH_BRUTE_FORCE"
+
+
+class OpenIpThreatInput(BaseModel):
+    """SG 인그레스 전체개방 Mock 이벤트 — 비공개 Threat Ingress 입력."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str = Field(min_length=1)
+    event_type: Literal[ThreatEventType.OPEN_IP] = ThreatEventType.OPEN_IP
+    target_arn: str = Field(min_length=1)  # 대상 SG ARN
+    occurred_at: UtcDateTime
+    protocol: str = Field(min_length=1)
+    from_port: Optional[int] = Field(None, ge=0, le=65535)
+    to_port: Optional[int] = Field(None, ge=0, le=65535)
+    source_cidr: str = Field(min_length=1)
+
+
+class SshBruteForceThreatInput(BaseModel):
+    """SSH 브루트포스 Mock 이벤트 — 비공개 Threat Ingress 입력."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str = Field(min_length=1)
+    event_type: Literal[ThreatEventType.SSH_BRUTE_FORCE] = ThreatEventType.SSH_BRUTE_FORCE
+    target_arn: str = Field(min_length=1)  # 대상 EC2 ARN
+    source_ip: str = Field(min_length=1)   # 공격 IP — 이 유형에서는 필수
+    occurred_at: UtcDateTime
+    failed_attempt_count: int = Field(ge=1)
+    window_seconds: int = Field(ge=1)
+
+
+MockThreatEventInput = Annotated[
+    Union[OpenIpThreatInput, SshBruteForceThreatInput],
+    Field(discriminator="event_type"),
+]
+
+
+class OpenIpThreatPayload(BaseModel):
+    """정규화 후 유형별 세부 필드 — 공통 필드는 NormalizedThreatEvent 명시 컬럼."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    protocol: str = Field(min_length=1)
+    from_port: Optional[int] = Field(None, ge=0, le=65535)
+    to_port: Optional[int] = Field(None, ge=0, le=65535)
+    source_cidr: str = Field(min_length=1)
+
+
+class SshBruteForceThreatPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_ip: str = Field(min_length=1)
+    failed_attempt_count: int = Field(ge=1)
+    window_seconds: int = Field(ge=1)
+
+
+_PAYLOAD_BY_TYPE: dict[ThreatEventType, type[BaseModel]] = {
+    ThreatEventType.OPEN_IP: OpenIpThreatPayload,
+    ThreatEventType.SSH_BRUTE_FORCE: SshBruteForceThreatPayload,
+}
+
+
+class NormalizedThreatEvent(BaseModel):
+    """검증·정규화된 위협 이벤트 — Threat Ingress → PostgreSQL·Security Workflow."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    threat_event_id: str = Field(min_length=1)  # 서버 발급 식별자
+    source_event_id: str = Field(min_length=1)  # 입력 event_id 보존
+    event_type: ThreatEventType
+    target_arn: str = Field(min_length=1)
+    occurred_at: UtcDateTime
+    payload: Union[OpenIpThreatPayload, SshBruteForceThreatPayload]
+    deduplication_key: str = Field(min_length=1)
+    collected_at: UtcDateTime
+
+    @model_validator(mode="before")
+    @classmethod
+    def _bind_payload_to_event_type(cls, data):
+        # smart-union 오매칭 방지: event_type이 지정한 payload 모델로만 검증한다
+        if isinstance(data, dict) and isinstance(data.get("payload"), dict):
+            try:
+                event_type = ThreatEventType(data.get("event_type"))
+            except (ValueError, TypeError):
+                return data  # event_type 오류는 필드 검증이 보고한다
+            data = dict(data)
+            data["payload"] = _PAYLOAD_BY_TYPE[event_type].model_validate(data["payload"])
+        return data
+
+    @model_validator(mode="after")
+    def _enforce_payload_shape(self):
+        expected = _PAYLOAD_BY_TYPE[self.event_type]
+        if not isinstance(self.payload, expected):
+            raise ValueError(
+                f"{self.event_type.value} 이벤트의 payload는 {expected.__name__}이어야 합니다"
+            )
+        return self
+
+
+_EXPECTED_MODE_BY_RISK: dict[RiskLevel, ResponseMode] = {
+    RiskLevel.HIGH: ResponseMode.PRE_MITIGATION_0_5S,
+    RiskLevel.MEDIUM: ResponseMode.AGENT_WAIT,
+    RiskLevel.LOW: ResponseMode.AGENT_WAIT,
+}
+
+
+class InitialRiskEvaluationResult(BaseModel):
+    """결정적 초기 위험 판정 — Risk Evaluator → PostgreSQL·Security Workflow.
+
+    initial_risk_level은 생성 후 불변이며 AI 사후 평가(reviewed_risk_level)와
+    분리된다 — 서로 덮어쓰지 않는다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    threat_event_id: str = Field(min_length=1)
+    initial_risk_level: RiskLevel
+    response_mode: ResponseMode
+    reason_codes: list[Annotated[str, Field(min_length=1)]] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _mode_matches_risk(self):
+        expected = _EXPECTED_MODE_BY_RISK[self.initial_risk_level]
+        if self.response_mode != expected:
+            raise ValueError(
+                f"초기 판정 {self.initial_risk_level.value}의 response_mode는 "
+                f"{expected.value}이어야 합니다 (TIMEOUT_ISOLATION_1M은 초기 판정 결과가 아님)"
+            )
+        return self

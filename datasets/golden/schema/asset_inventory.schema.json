@@ -1,0 +1,467 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-source-model": "packages/schemas/assets.py :: AssetInventory",
+  "x-note": "낭비 자원 시나리오의 양식 — 한 리전 1회 수집 결과(rule_engine 입력 단위). Idle/미사용 판정·SKIP_*·health_score는 넣지 않음(rule_engine 산출).",
+  "$defs": {
+    "AssetType": {
+      "enum": [
+        "EC2",
+        "SG",
+        "NACL",
+        "EBS",
+        "AUTO_SCALING_GROUP",
+        "LAUNCH_TEMPLATE",
+        "ALB_TARGET_GROUP"
+      ],
+      "title": "AssetType",
+      "type": "string"
+    },
+    "Ec2Asset": {
+      "properties": {
+        "asset_type": {
+          "$ref": "#/$defs/AssetType",
+          "default": "EC2"
+        },
+        "arn": {
+          "description": "인스턴스 ARN (안정 키)",
+          "title": "Arn",
+          "type": "string"
+        },
+        "instance_id": {
+          "description": "i-xxxx",
+          "title": "Instance Id",
+          "type": "string"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Name 태그",
+          "title": "Name"
+        },
+        "instance_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "예: t3.large",
+          "title": "Instance Type"
+        },
+        "state": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "running/stopped 등",
+          "title": "State"
+        },
+        "region": {
+          "description": "리전",
+          "title": "Region",
+          "type": "string"
+        },
+        "availability_zone": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Availability Zone"
+        },
+        "vpc_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Vpc Id"
+        },
+        "subnet_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subnet Id"
+        },
+        "private_ip": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Private Ip"
+        },
+        "launch_time": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Launch Time"
+        },
+        "security_group_ids": {
+          "description": "부착된 SG id",
+          "items": {
+            "type": "string"
+          },
+          "title": "Security Group Ids",
+          "type": "array"
+        },
+        "tags": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Tags",
+          "type": "object"
+        },
+        "metrics": {
+          "additionalProperties": {
+            "$ref": "#/$defs/MetricSeries"
+          },
+          "description": "메트릭 이름 → 시계열",
+          "propertyNames": {
+            "$ref": "#/$defs/MetricName"
+          },
+          "title": "Metrics",
+          "type": "object"
+        },
+        "metric_summary": {
+          "$ref": "#/$defs/MetricSummary"
+        }
+      },
+      "required": [
+        "arn",
+        "instance_id",
+        "region"
+      ],
+      "title": "Ec2Asset",
+      "type": "object"
+    },
+    "MetricName": {
+      "enum": [
+        "CPUUtilization",
+        "NetworkIn",
+        "NetworkOut"
+      ],
+      "title": "MetricName",
+      "type": "string"
+    },
+    "MetricSeries": {
+      "description": "단일 메트릭의 시계열. timestamps[i] 와 values[i] 가 짝을 이룬다.",
+      "properties": {
+        "metric_name": {
+          "$ref": "#/$defs/MetricName",
+          "description": "CloudWatch 메트릭 이름"
+        },
+        "timestamps": {
+          "description": "정렬된 관측 시각(UTC)",
+          "items": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "title": "Timestamps",
+          "type": "array"
+        },
+        "values": {
+          "description": "관측값(period 별 Average)",
+          "items": {
+            "type": "number"
+          },
+          "title": "Values",
+          "type": "array"
+        }
+      },
+      "required": [
+        "metric_name"
+      ],
+      "title": "MetricSeries",
+      "type": "object"
+    },
+    "MetricSummary": {
+      "description": "rule_engine 이 임계치 판정에 바로 쓰도록 뽑아둔 요약 통계.",
+      "properties": {
+        "cpu_datapoints": {
+          "default": 0,
+          "description": "CPU 데이터포인트 수(데이터부족 판정 근거)",
+          "title": "Cpu Datapoints",
+          "type": "integer"
+        },
+        "cpu_avg": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "CPU 평균(%)",
+          "title": "Cpu Avg"
+        },
+        "cpu_max": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "CPU 최대(%) — 스파이크 워크로드 식별용",
+          "title": "Cpu Max"
+        },
+        "net_in_avg": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "NetworkIn 평균(bytes)",
+          "title": "Net In Avg"
+        },
+        "net_out_avg": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "NetworkOut 평균(bytes)",
+          "title": "Net Out Avg"
+        }
+      },
+      "title": "MetricSummary",
+      "type": "object"
+    },
+    "OpenPort": {
+      "description": "0.0.0.0/0 또는 ::/0 로 열린 인그레스 규칙(전체개방 위협 판정 근거).",
+      "properties": {
+        "protocol": {
+          "description": "tcp/udp/all",
+          "title": "Protocol",
+          "type": "string"
+        },
+        "from_port": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "From Port"
+        },
+        "to_port": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "To Port"
+        },
+        "ipv6": {
+          "default": false,
+          "description": "::/0 로 열렸는지 여부",
+          "title": "Ipv6",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "protocol"
+      ],
+      "title": "OpenPort",
+      "type": "object"
+    },
+    "SecurityGroupAsset": {
+      "properties": {
+        "asset_type": {
+          "$ref": "#/$defs/AssetType",
+          "default": "SG"
+        },
+        "arn": {
+          "description": "SG ARN (안정 키)",
+          "title": "Arn",
+          "type": "string"
+        },
+        "group_id": {
+          "description": "sg-xxxx",
+          "title": "Group Id",
+          "type": "string"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "GroupName",
+          "title": "Name"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "region": {
+          "description": "리전",
+          "title": "Region",
+          "type": "string"
+        },
+        "vpc_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Vpc Id"
+        },
+        "attached": {
+          "description": "어떤 ENI/인스턴스에도 안 붙었으면 False(미사용 후보)",
+          "title": "Attached",
+          "type": "boolean"
+        },
+        "open_to_world": {
+          "description": "전체개방 포트 목록. 비어있지 않으면 위협 후보",
+          "items": {
+            "$ref": "#/$defs/OpenPort"
+          },
+          "title": "Open To World",
+          "type": "array"
+        }
+      },
+      "required": [
+        "arn",
+        "group_id",
+        "region",
+        "attached"
+      ],
+      "title": "SecurityGroupAsset",
+      "type": "object"
+    }
+  },
+  "description": "한 리전 1회 수집 결과. rule_engine 파이프라인의 입력 단위.",
+  "properties": {
+    "account_id": {
+      "description": "AWS 계정 ID",
+      "title": "Account Id",
+      "type": "string"
+    },
+    "region": {
+      "description": "수집 리전",
+      "title": "Region",
+      "type": "string"
+    },
+    "mode": {
+      "description": "localstack | aws",
+      "title": "Mode",
+      "type": "string"
+    },
+    "collected_at": {
+      "description": "수집 시각(UTC)",
+      "format": "date-time",
+      "title": "Collected At",
+      "type": "string"
+    },
+    "lookback_days": {
+      "description": "메트릭 조회 기간(일)",
+      "title": "Lookback Days",
+      "type": "integer"
+    },
+    "period_seconds": {
+      "description": "메트릭 집계 주기(초)",
+      "title": "Period Seconds",
+      "type": "integer"
+    },
+    "ec2_instances": {
+      "items": {
+        "$ref": "#/$defs/Ec2Asset"
+      },
+      "title": "Ec2 Instances",
+      "type": "array"
+    },
+    "security_groups": {
+      "items": {
+        "$ref": "#/$defs/SecurityGroupAsset"
+      },
+      "title": "Security Groups",
+      "type": "array"
+    }
+  },
+  "required": [
+    "account_id",
+    "region",
+    "mode",
+    "lookback_days",
+    "period_seconds"
+  ],
+  "title": "AssetInventory",
+  "type": "object"
+}
