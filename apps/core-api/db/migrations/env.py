@@ -27,7 +27,9 @@ from db.models import Base  # noqa: E402  (모델 등록 포함)
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # 기본값(disable_existing_loggers=True)은 앱이 이미 만든 로거를 꺼 버려
+    # 같은 프로세스에서 migration 후 앱 로그가 유실된다(compose migrate·테스트)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

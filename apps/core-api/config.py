@@ -1,10 +1,10 @@
 # ==============================================================================
 # [파일 설명]
-# pydantic-settings 기반 런타임 환경설정 로더입니다. (Issue #60, ADR-0001)
+# pydantic-settings 기반 런타임 환경설정 로더입니다. (Issue #60·#68, ADR-0001)
 #
-# 현재 범위: DATABASE_URL 1개 — 기본값 없는 필수 설정. 누락 시 get_settings()
-# 호출 단계에서 검증 오류가 난다. SQLite 등으로 조용히 대체하지 않는다
-# (SSOT 확정 범위가 PostgreSQL). OPENAI_API_KEY·AWS 리전 등 나머지 설정은
+# 현재 범위: DATABASE_URL(필수) + 로깅·CORS(기본값 있음). 필수 설정 누락 시
+# get_settings() 호출 단계에서 검증 오류가 난다. SQLite 등으로 조용히 대체하지
+# 않는다(SSOT 확정 범위가 PostgreSQL). OPENAI_API_KEY·AWS 리전 등 나머지 설정은
 # 해당 기능을 붙이는 단계에서 추가한다.
 # ==============================================================================
 
@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     DATABASE_URL: str
+    LOG_LEVEL: str = "INFO"
+    # 콤마 구분 허용 출처 목록 — 기본값은 FE 개발 서버(create_app이 분리 해석)
+    CORS_ALLOW_ORIGINS: str = "http://localhost:3000"
 
 
 @lru_cache
