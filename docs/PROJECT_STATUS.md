@@ -90,7 +90,7 @@
 ## 미해결 이슈 / 할 일 (블로커 순)
 
 1. ~~LocalStack 팀 표준 환경~~ ✅ 해소(#62) — [ADR-0006](adr/0006-localstack-team-standard-env.md) 전략 + compose `localstack` 서비스 + `scripts/seed_localstack.py` + `.env.example` 스위치 활성화. 잔여 후속: CI LocalStack service container(3주차 별도 CHORE), 6~7주차 실 AWS 스모크 테스트(ADR-0006 §4).
-2. **PR #29 후속 보완** (김승철) — (2026-08-19 현행화) 당초 우려("자체 boto3 로직·시드 없으면 빈 결과 통과")는 현행 `test_collector_raw.py`에서 이미 해소됨 — `collect_region()` 직접 호출, 시드 없으면 실패(assert). 잔여는 **CI에서 LocalStack 미기동 시 통합 테스트 상시 skip** — 3주차 CI LocalStack service container(별도 CHORE, #62 후속)로 해소 예정. 항목 종결 여부는 김승철 확인 후 판단.
+2. ~~PR #29 후속 보완~~ ✅ 종결(2026-08-19, PM 대행 판단 — 김승철 부재, 기록: 이슈 #67 댓글) — 당초 우려("자체 boto3 로직·시드 없으면 빈 결과 통과")는 현행 `test_collector_raw.py`에서 해소 확인(`collect_region()` 직접 호출, 시드 없으면 assert 실패). dev 머지본(#64) 기준 작성자 외 로컬에서 표준 절차(compose→시드→pytest) 통합 테스트 3건 통과 재현. 잔여 **CI LocalStack service container**는 3주차 별도 CHORE(#62 후속)로 이월. 김승철 복귀 후 이견 시 재오픈.
 3. ~~README 최신화~~ ✅ 해소(팀명·역할 표·런북 10종·LangGraph 반영). 기획서 docx는 동결 방침이라 갱신 대상 아님.
 
 ## 일정 리스크 & 구현 우선순위 (2026-08-13 방침 확정)
