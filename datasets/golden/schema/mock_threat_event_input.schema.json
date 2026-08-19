@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-source-model": "packages/schemas/events.py :: MockThreatEventInput (OpenIpThreatInput | SshBruteForceThreatInput)",
+  "x-note": "보안 위협 시나리오 1건의 양식. event_type이 OPEN_IP | SSH_BRUTE_FORCE 분기 키. severity·response_mode는 입력에 없음 — Risk Evaluator가 판정(extra=forbid).",
+  "$defs": {
+    "OpenIpThreatInput": {
+      "additionalProperties": false,
+      "description": "SG 인그레스 전체개방 Mock 이벤트 — 비공개 Threat Ingress 입력.",
+      "properties": {
+        "event_id": {
+          "minLength": 1,
+          "title": "Event Id",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "OPEN_IP",
+          "default": "OPEN_IP",
+          "title": "Event Type",
+          "type": "string"
+        },
+        "target_arn": {
+          "minLength": 1,
+          "title": "Target Arn",
+          "type": "string"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "protocol": {
+          "minLength": 1,
+          "title": "Protocol",
+          "type": "string"
+        },
+        "from_port": {
+          "anyOf": [
+            {
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "From Port"
+        },
+        "to_port": {
+          "anyOf": [
+            {
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "To Port"
+        },
+        "source_cidr": {
+          "minLength": 1,
+          "title": "Source Cidr",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event_id",
+        "target_arn",
+        "occurred_at",
+        "protocol",
+        "source_cidr"
+      ],
+      "title": "OpenIpThreatInput",
+      "type": "object"
+    },
+    "SshBruteForceThreatInput": {
+      "additionalProperties": false,
+      "description": "SSH 브루트포스 Mock 이벤트 — 비공개 Threat Ingress 입력.",
+      "properties": {
+        "event_id": {
+          "minLength": 1,
+          "title": "Event Id",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "SSH_BRUTE_FORCE",
+          "default": "SSH_BRUTE_FORCE",
+          "title": "Event Type",
+          "type": "string"
+        },
+        "target_arn": {
+          "minLength": 1,
+          "title": "Target Arn",
+          "type": "string"
+        },
+        "source_ip": {
+          "minLength": 1,
+          "title": "Source Ip",
+          "type": "string"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "failed_attempt_count": {
+          "minimum": 1,
+          "title": "Failed Attempt Count",
+          "type": "integer"
+        },
+        "window_seconds": {
+          "minimum": 1,
+          "title": "Window Seconds",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "event_id",
+        "target_arn",
+        "source_ip",
+        "occurred_at",
+        "failed_attempt_count",
+        "window_seconds"
+      ],
+      "title": "SshBruteForceThreatInput",
+      "type": "object"
+    }
+  },
+  "discriminator": {
+    "mapping": {
+      "OPEN_IP": "#/$defs/OpenIpThreatInput",
+      "SSH_BRUTE_FORCE": "#/$defs/SshBruteForceThreatInput"
+    },
+    "propertyName": "event_type"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/OpenIpThreatInput"
+    },
+    {
+      "$ref": "#/$defs/SshBruteForceThreatInput"
+    }
+  ]
+}
