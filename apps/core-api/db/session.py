@@ -1,44 +1,54 @@
 # ==============================================================================
 # [파일 설명]
-# SQLAlchemy 엔진 및 세션 구성 파일입니다. PostgreSQL 연결과 FastAPI 의존성
-# 주입용 세션 제너레이터를 제공합니다.
+# SQLAlchemy 엔진·세션 구성입니다. (Issue #60)
 #
-# 구현: DeclarativeBase(Base), engine, SessionLocal, get_db(), init_db().
-#   DATABASE_URL 은 임시로 환경변수에서 읽는다(기본값 sqlite, 로컬/LocalStack 개발용).
-#   config.get_settings() 확정 시 DATABASE_URL 주입부만 교체하면 된다. (TODO: config)
+#   - DATABASE_URL은 config.get_settings() 경유로만 읽는다 — SQLite 기본값·
+#     자동 대체 없음.
+#   - 엔진·세션 팩토리는 import 시점이 아니라 첫 호출 시 생성한다.
+#   - 스키마 생성·변경은 Alembic 마이그레이션 전용이다 — create_all 경로
+#     (구 init_db)를 두지 않는다.
 # ==============================================================================
 
 from __future__ import annotations
 
-import os
+from functools import lru_cache
 
-from sqlalchemy import create_engine
+from sqlalchemy import Engine, MetaData, create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
-# TODO(config): get_settings().DATABASE_URL 로 교체. Postgres 예:
-#   postgresql+psycopg://user:pass@localhost:5432/vigilantis
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./vigilantis_dev.db")
+from config import get_settings
 
-_connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-engine = create_engine(DATABASE_URL, future=True, pool_pre_ping=True, connect_args=_connect_args)
-
-SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, class_=Session)
+# Alembic 마이그레이션에서 제약 이름이 결정적으로 나오도록 명명 규칙을 고정한다
+NAMING_CONVENTION = {
+    "ix": "ix_%(column_0_label)s",
+    "uq": "uq_%(table_name)s_%(column_0_N_name)s",
+    "ck": "ck_%(table_name)s_%(constraint_name)s",
+    "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
+    "pk": "pk_%(table_name)s",
+}
 
 
 class Base(DeclarativeBase):
     """models.py 의 모든 ORM 모델이 상속하는 declarative base."""
 
+    metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
-def init_db() -> None:
-    """등록된 모든 테이블을 생성한다(개발/테스트용). 운영은 Alembic 마이그레이션 사용."""
-    from . import models  # noqa: F401  (모델 등록을 위해 import)
 
-    Base.metadata.create_all(bind=engine)
+@lru_cache
+def get_engine() -> Engine:
+    """프로세스당 1개 엔진. 첫 호출 시 Settings를 읽어 생성한다."""
+    return create_engine(get_settings().DATABASE_URL, pool_pre_ping=True)
+
+
+@lru_cache
+def get_session_factory() -> sessionmaker[Session]:
+    """get_engine()에 바인딩된 세션 팩토리. 세션은 호출부가 만들고 닫는다."""
+    return sessionmaker(bind=get_engine(), autoflush=False, expire_on_commit=False)
 
 
 def get_db():
     """FastAPI 의존성 주입용 세션 제너레이터."""
-    db = SessionLocal()
+    db = get_session_factory()()
     try:
         yield db
     finally:
