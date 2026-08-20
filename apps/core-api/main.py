@@ -1,11 +1,12 @@
 # ==============================================================================
 # [파일 설명]
-# Vigilantis Core API 서버 진입점 — create_app()과 모듈 수준 app. (Issue #68)
+# Vigilantis Core API 서버 진입점 — create_app()과 모듈 수준 app. (Issue #68·#73)
 #
 #   - 오류는 exceptions의 공통 봉투로, 접근 로그는 request_context 미들웨어가
 #     구조화 로그(logging_config)로 남긴다.
-#   - 조회 라우터만 등록한다 — actions(조치 실행)·WebSocket은 후속 작업에서,
-#     Scheduler(주기 수집) 기동은 수집·판정 연결 작업(#67)에서 배선한다.
+#   - 실시간 전송(realtime.RealtimeManager)은 앱 수명주기에 묶어 기동·종료한다.
+#   - actions(조치 실행) 라우터는 후속 작업에서, Scheduler(주기 수집) 기동은
+#     수집·판정 연결 작업(#67)에서 배선한다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -26,14 +27,18 @@ for _p in (str(_CORE_API), str(_PACKAGES)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from contextlib import asynccontextmanager  # noqa: E402
+
 from fastapi import FastAPI, Request  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
 from config import get_settings  # noqa: E402
 from exceptions import register_error_handlers, unexpected_error_response  # noqa: E402
 from logging_config import request_id_var, setup_logging  # noqa: E402
+from realtime import RealtimeManager  # noqa: E402
 from routers import assets as assets_router  # noqa: E402
 from routers import incidents as incidents_router  # noqa: E402
+from routers import ws as ws_router  # noqa: E402
 
 _http_logger = logging.getLogger("vigilantis.http")
 
@@ -45,7 +50,19 @@ _REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 def create_app() -> FastAPI:
     settings = get_settings()
     setup_logging(settings.LOG_LEVEL)
-    app = FastAPI(title="Vigilantis Core API")
+
+    realtime = RealtimeManager(send_timeout_seconds=settings.WS_SEND_TIMEOUT_SECONDS)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        await realtime.start()
+        try:
+            yield
+        finally:
+            await realtime.stop()
+
+    app = FastAPI(title="Vigilantis Core API", lifespan=lifespan)
+    app.state.realtime = realtime
 
     @app.middleware("http")
     async def request_context(request: Request, call_next):
@@ -81,11 +98,7 @@ def create_app() -> FastAPI:
     # 미들웨어가 만든 오류 봉투 응답에도 CORS 헤더가 붙는다
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            origin.strip()
-            for origin in settings.CORS_ALLOW_ORIGINS.split(",")
-            if origin.strip()
-        ],
+        allow_origins=settings.cors_allow_origins_list(),
         allow_methods=["*"],
         allow_headers=["*"],
         expose_headers=["X-Request-ID"],
@@ -94,6 +107,7 @@ def create_app() -> FastAPI:
     register_error_handlers(app)
     app.include_router(assets_router.router)
     app.include_router(incidents_router.router)
+    app.include_router(ws_router.router)
 
     @app.get("/health")
     def health() -> dict:
