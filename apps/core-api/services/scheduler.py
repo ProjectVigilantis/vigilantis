@@ -60,8 +60,7 @@ def build_scheduler() -> AsyncIOScheduler:
 
 
 def start_scheduler() -> AsyncIOScheduler:
-    """FastAPI startup 훅에서 호출. 스케줄러를 구성·기동해 반환한다.
-    예) @app.on_event("startup") 에서 app.state.scheduler = start_scheduler()"""
+    """main의 lifespan에서 기동(#67에서 배선). 스케줄러를 구성·기동해 반환한다."""
     scheduler = build_scheduler()
     scheduler.start()
     logger.info("scheduler started: job=%s interval=%ss", JOB_ID, _interval_seconds())
