@@ -1,0 +1,185 @@
+# ==============================================================================
+# [파일 설명]  담당: 박지현 (QA & Scenario)
+# datasets/golden/ 의 Golden Dataset 회귀 테스트.
+#
+#   1) 입력 JSON 이 packages/schemas 의 Pydantic 모델로 검증되는가
+#   2) 자산 입력이 rule_engine 판정을 거쳤을 때 expected 와 일치하는가
+#   3) expected 에 기록된 임계값이 현재 rule_engine 상수와 같은가 (드리프트 감지)
+#
+# 3번이 ADR-0006 의 "임계값을 바꾸는 PR은 데이터 갱신을 포함해야 한다" 를
+# 코드로 강제하는 장치다. JSON 은 상수를 import 할 수 없으므로 테스트가 대조한다.
+# ==============================================================================
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+from pydantic import TypeAdapter
+
+# import 경로 추가 (apps/core-api/services/tests/test_rule_engine.py 와 동일 관례)
+ROOT = Path(__file__).resolve().parents[1]
+for _path in (ROOT / "apps" / "core-api", ROOT / "packages"):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
+
+from schemas.assets import AssetInventory  # noqa: E402
+from schemas.events import MockThreatEventInput  # noqa: E402
+from services.rule_engine import (  # noqa: E402
+    IDLE_CPU_AVG,
+    MIN_DATAPOINTS,
+    SPIKE_CPU_MAX,
+    evaluate_ec2,
+    evaluate_sg,
+)
+
+GOLDEN = ROOT / "datasets" / "golden"
+
+FINOPS_INPUT = GOLDEN / "finops" / "input"
+FINOPS_EXPECTED = GOLDEN / "finops" / "expected"
+SECOPS_INPUT = GOLDEN / "secops" / "input"
+
+_THREAT_ADAPTER = TypeAdapter(MockThreatEventInput)
+
+
+def _load(path: Path) -> dict:
+    with path.open(encoding="utf-8") as fp:
+        data = json.load(fp)
+    # 에디터 자동완성을 위한 $schema 는 계약 필드가 아니므로 제거한다.
+    data.pop("$schema", None)
+    return data
+
+
+def _finops_pairs() -> list[tuple[Path, Path]]:
+    pairs = []
+    for src in sorted(FINOPS_INPUT.glob("*.json")):
+        expected = FINOPS_EXPECTED / src.name
+        assert expected.exists(), f"정답 파일 누락: {expected}"
+        pairs.append((src, expected))
+    return pairs
+
+
+# ---------------------------------------------------------------- 입력 계약 검증
+
+
+@pytest.mark.parametrize("path", sorted(SECOPS_INPUT.glob("*.json")), ids=lambda p: p.name)
+def test_secops_input_validates(path: Path) -> None:
+    """위협 입력이 MockThreatEventInput 으로 검증된다 (extra=forbid)."""
+    _THREAT_ADAPTER.validate_python(_load(path))
+
+
+@pytest.mark.parametrize("path", sorted(FINOPS_INPUT.glob("*.json")), ids=lambda p: p.name)
+def test_finops_input_validates(path: Path) -> None:
+    """자산 입력이 AssetInventory 로 검증된다."""
+    AssetInventory.model_validate(_load(path))
+
+
+@pytest.mark.parametrize("path", sorted(FINOPS_INPUT.glob("*.json")), ids=lambda p: p.name)
+def test_finops_input_has_no_verdict_fields(path: Path) -> None:
+    """자산 입력에 판정 결과가 섞여 있지 않다.
+
+    AssetInventory 는 extra=forbid 가 아니라 모르는 필드를 '조용히 무시'하므로
+    Pydantic 검증만으로는 잡히지 않는다. 원문 JSON 을 직접 본다.
+    """
+    forbidden = {
+        "verdict", "skip_reason", "skip_reason_code", "health_score",
+        "is_idle", "is_unused", "evaluation_status",
+    }
+    raw = _load(path)
+
+    def walk(node, trail="") -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                assert key not in forbidden, (
+                    f"{path.name}: 판정 결과 필드 '{key}' 가 입력에 들어 있습니다 "
+                    f"(위치 {trail or 'root'}). 정답은 expected/ 에 둡니다."
+                )
+                walk(value, f"{trail}.{key}" if trail else key)
+        elif isinstance(node, list):
+            for i, item in enumerate(node):
+                walk(item, f"{trail}[{i}]")
+
+    walk(raw)
+
+
+# ---------------------------------------------------------------- 임계값 드리프트
+
+
+@pytest.mark.parametrize("_, expected_path", _finops_pairs(), ids=lambda p: getattr(p, "name", ""))
+def test_thresholds_not_drifted(_: Path, expected_path: Path) -> None:
+    """expected 에 기록된 임계값이 현재 rule_engine 상수와 같다.
+
+    실패하면 임계값이 바뀐 것이다. Golden Dataset 의 경계값 케이스를 함께
+    갱신해야 한다 (ADR-0006 임계값 결합 원칙).
+    """
+    recorded = _load(expected_path)["thresholds_at_authoring"]
+    current = {
+        "IDLE_CPU_AVG": IDLE_CPU_AVG,
+        "SPIKE_CPU_MAX": SPIKE_CPU_MAX,
+        "MIN_DATAPOINTS": MIN_DATAPOINTS,
+    }
+    for name, value in current.items():
+        assert recorded[name] == value, (
+            f"{name} 이 {recorded[name]} → {value} 로 변경됐습니다. "
+            f"{expected_path.name} 의 경계값 케이스를 갱신하세요."
+        )
+
+
+# ---------------------------------------------------------------- 판정 대조
+
+
+def _evaluate_inventory(inventory: AssetInventory) -> dict[str, tuple[str, str | None]]:
+    """자산별 (verdict, skip_reason_code) 를 ARN 기준으로 반환."""
+    results: dict[str, tuple[str, str | None]] = {}
+
+    for ec2 in inventory.ec2_instances:
+        summary = ec2.metric_summary
+        verdict, skip, _health = evaluate_ec2(
+            summary.cpu_avg, summary.cpu_max, summary.cpu_datapoints, ec2.name, ec2.tags
+        )
+        results[ec2.arn] = (verdict.value, skip.value if skip else None)
+
+    for sg in inventory.security_groups:
+        # collector.py 가 open_to_world(list) → bool 로 넘기는 규약과 동일하게 맞춘다.
+        verdict, skip = evaluate_sg(sg.name, sg.attached, bool(sg.open_to_world))
+        results[sg.arn] = (verdict.value, skip.value if skip else None)
+
+    return results
+
+
+@pytest.mark.parametrize("input_path, expected_path", _finops_pairs(), ids=lambda p: getattr(p, "name", ""))
+def test_finops_verdicts_match_expected(input_path: Path, expected_path: Path) -> None:
+    """rule_engine 판정 결과가 정답과 일치한다."""
+    inventory = AssetInventory.model_validate(_load(input_path))
+    actual = _evaluate_inventory(inventory)
+    expected = _load(expected_path)
+
+    covered = set()
+    for case in expected["evaluations"]:
+        arn = case["asset_arn"]
+        assert arn in actual, f"{case['case_id']}: 입력에 없는 ARN {arn}"
+        covered.add(arn)
+
+        verdict, skip = actual[arn]
+        assert verdict == case["verdict"], (
+            f"{case['case_id']} verdict 불일치: 기대 {case['verdict']} / 실제 {verdict}\n"
+            f"  목적: {case['purpose']}"
+        )
+        assert skip == case["skip_reason_code"], (
+            f"{case['case_id']} skip_reason_code 불일치: "
+            f"기대 {case['skip_reason_code']} / 실제 {skip}"
+        )
+
+    missing = set(actual) - covered
+    assert not missing, f"정답이 없는 자산이 있습니다: {sorted(missing)}"
+
+
+def test_finops_expected_has_no_runtime_fields() -> None:
+    """정답에 런타임 값·미확정 값이 섞여 있지 않다."""
+    excluded = {"collection_run_id", "evaluated_at", "health_score", "reason", "runbook_id"}
+    for _, expected_path in _finops_pairs():
+        for case in _load(expected_path)["evaluations"]:
+            leaked = excluded & set(case)
+            assert not leaked, f"{case['case_id']}: 제외 대상 필드가 있습니다 {sorted(leaked)}"
