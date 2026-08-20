@@ -75,27 +75,100 @@ def evaluate_sg(name: Optional[str], attached: Optional[bool],
     return Verdict.SKIP, SkipReason.SKIP_ACTIVE
 
 
-def run_rule_engine(db) -> dict:
-    """assets 테이블 전체를 읽어 판정 결과(verdict/skip_reason/health_score)를 기록한다.
-    반환: verdict 별 집계 + 각 자산 판정 목록."""
+def run_rule_engine(db, collection_run_id: str | None = None) -> dict:
+    """assets 및 metric_summaries 테이블을 읽어 RuleEvaluation 결과(RuleEvaluationResult 계약)를 기록한다.
+    반환: verdict 별 집계 + 각 자산 판정 목록.
+    """
+    from datetime import datetime, timezone
+
     from sqlalchemy import select
 
-    from db.models import Asset
+    from db import models
+    from db.repositories import assets as assets_repo
+    from schemas.api.assets import (
+        AssetType,
+        EvaluationStatus,
+        SkipReasonCode,
+    )
+    from schemas.api.assets import (
+        Verdict as ApiVerdict,
+    )
+    from schemas.rules import RuleEvaluationResult
 
-    assets = db.execute(select(Asset)).scalars().all()
+    assets = assets_repo.list_assets(db)
     results = []
     counts: dict[str, int] = {}
+    now = datetime.now(timezone.utc)
+
     for a in assets:
-        if a.asset_type == "EC2":
-            tags = (a.attributes or {}).get("tags", {})
-            verdict, skip, health = evaluate_ec2(a.cpu_avg, a.cpu_max, a.cpu_datapoints, a.name, tags)
-            a.health_score = health
-        else:  # SG
-            verdict, skip = evaluate_sg(a.name, a.attached, a.open_to_world)
-        a.verdict = verdict.value
-        a.skip_reason = skip.value if skip else None
-        counts[verdict.value] = counts.get(verdict.value, 0) + 1
-        results.append({"name": a.name, "type": a.asset_type,
-                        "verdict": a.verdict, "skip_reason": a.skip_reason})
-    db.commit()
+        run_id = collection_run_id or a.last_collection_run_id
+        if not run_id:
+            continue
+
+        if a.asset_type == AssetType.EC2:
+            metric_row = db.execute(
+                select(models.MetricSummary).where(
+                    models.MetricSummary.asset_id == a.asset_id,
+                    models.MetricSummary.collection_run_id == run_id,
+                )
+            ).scalar_one_or_none()
+
+            cpu_avg = metric_row.cpu_avg if metric_row else None
+            cpu_max = metric_row.cpu_max if metric_row else None
+            cpu_dp = metric_row.cpu_datapoints if metric_row else None
+
+            verdict, skip, health = evaluate_ec2(cpu_avg, cpu_max, cpu_dp, a.name, {})
+            health_int = int(round(health)) if health is not None else None
+        elif a.asset_type == AssetType.SG:
+            attached = (a.spec or {}).get("attached")
+            open_to_world = bool((a.spec or {}).get("open_to_world"))
+            verdict, skip = evaluate_sg(a.name, attached, open_to_world)
+            health_int = None
+        else:
+            continue
+
+        api_verdict = ApiVerdict(verdict.value)
+        api_skip = SkipReasonCode(skip.value) if skip else None
+
+        contract = RuleEvaluationResult(
+            asset_arn=a.arn,
+            collection_run_id=run_id,
+            evaluation_status=EvaluationStatus.COMPLETED,
+            verdict=api_verdict,
+            health_score=health_int,
+            skip_reason_code=api_skip,
+            reason=f"{a.asset_type.value} rule evaluation: verdict={api_verdict.value}",
+            evaluated_at=now,
+        )
+
+        existing_eval = db.execute(
+            select(models.RuleEvaluation).where(
+                models.RuleEvaluation.asset_id == a.asset_id,
+                models.RuleEvaluation.collection_run_id == run_id,
+            )
+        ).scalar_one_or_none()
+
+        if existing_eval is None:
+            assets_repo.add_rule_evaluation(db, contract)
+        else:
+            existing_eval.evaluation_status = contract.evaluation_status.value
+            existing_eval.verdict = contract.verdict.value if contract.verdict else None
+            existing_eval.health_score = contract.health_score
+            existing_eval.skip_reason_code = (
+                contract.skip_reason_code.value if contract.skip_reason_code else None
+            )
+            existing_eval.reason = contract.reason
+            existing_eval.evaluated_at = contract.evaluated_at
+
+        counts[api_verdict.value] = counts.get(api_verdict.value, 0) + 1
+        results.append(
+            {
+                "name": a.name,
+                "type": a.asset_type.value if hasattr(a.asset_type, "value") else str(a.asset_type),
+                "verdict": api_verdict.value,
+                "skip_reason": api_skip.value if api_skip else None,
+            }
+        )
+
     return {"counts": counts, "results": results}
+

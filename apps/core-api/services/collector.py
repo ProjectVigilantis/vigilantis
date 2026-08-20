@@ -255,81 +255,137 @@ def collect() -> list[AssetInventory]:
 
 
 # ------------------------------------------------------------------ DB 적재
-def _ec2_row(a: Ec2Asset) -> dict:
-    s = a.metric_summary
+def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = None) -> dict:
+    """AssetInventory 를 DB(CollectionRun, Asset, MetricSummary, AssetRelationship)에 적재한다.
+    Repository는 commit하지 않으므로 호출부에서 트랜잭션을 관리한다.
+    """
+    from datetime import timedelta
+
+    from db.repositories import assets as assets_repo
+    from schemas.api.assets import AssetType, RelationType
+    from schemas.collections import CollectionRunStatus
+
+    started_own_run = False
+    if collection_run_id is None:
+        run = assets_repo.start_collection_run(
+            db,
+            account_id=inv.account_id,
+            region=inv.region,
+            mode=inv.mode,
+            lookback_days=inv.lookback_days,
+            period_seconds=inv.period_seconds,
+        )
+        collection_run_id = run.collection_run_id
+        started_own_run = True
+
+    ec2_count = len(inv.ec2_instances)
+    sg_count = len(inv.security_groups)
+    total = ec2_count + sg_count
+
+    window_end = inv.collected_at
+    window_start = window_end - timedelta(days=inv.lookback_days)
+
+    # 1. EC2 적재
+    for a in inv.ec2_instances:
+        ec2_spec = {
+            "instance_type": a.instance_type,
+            "availability_zone": a.availability_zone,
+            "vpc_id": a.vpc_id,
+            "subnet_id": a.subnet_id,
+            "private_ip": a.private_ip,
+        }
+        asset = assets_repo.upsert_asset(
+            db,
+            arn=a.arn,
+            asset_type=AssetType.EC2,
+            resource_id=a.instance_id,
+            account_id=inv.account_id,
+            region=inv.region,
+            spec=ec2_spec,
+            collection_run_id=collection_run_id,
+            collected_at=inv.collected_at,
+            name=a.name,
+            state=a.state,
+        )
+        assets_repo.add_metric_summary(
+            db,
+            asset_id=asset.asset_id,
+            collection_run_id=collection_run_id,
+            summary=a.metric_summary,
+            window_start=window_start,
+            window_end=window_end,
+            collected_at=inv.collected_at,
+        )
+        if a.security_group_ids:
+            rel_items = [
+                (RelationType.SECURED_BY, f"arn:aws:ec2:{inv.region}:{inv.account_id}:security-group/{sg_id}")
+                for sg_id in a.security_group_ids
+            ]
+            assets_repo.replace_relationships(
+                db,
+                source_asset_id=asset.asset_id,
+                items=rel_items,
+                collection_run_id=collection_run_id,
+            )
+
+    # 2. SG 적재
+    for g in inv.security_groups:
+        sg_spec = {
+            "description": g.description,
+            "vpc_id": g.vpc_id,
+            "attached": g.attached,
+            "open_to_world": [p.model_dump(mode="json") for p in g.open_to_world],
+        }
+        assets_repo.upsert_asset(
+            db,
+            arn=g.arn,
+            asset_type=AssetType.SG,
+            resource_id=g.group_id,
+            account_id=inv.account_id,
+            region=inv.region,
+            spec=sg_spec,
+            collection_run_id=collection_run_id,
+            collected_at=inv.collected_at,
+            name=g.name,
+            state=None,
+        )
+
+    if started_own_run:
+        assets_repo.finish_collection_run(
+            db,
+            collection_run_id=collection_run_id,
+            status=CollectionRunStatus.SUCCESS,
+            finished_at=inv.collected_at,
+        )
+
     return {
-        "arn": a.arn,
-        "asset_type": a.asset_type.value,
-        "resource_id": a.instance_id,
-        "name": a.name,
-        "account_id": None,  # persist_inventory 에서 채움
-        "region": a.region,
-        "state": a.state,
-        "vpc_id": a.vpc_id,
-        "cpu_datapoints": s.cpu_datapoints,
-        "cpu_avg": s.cpu_avg,
-        "cpu_max": s.cpu_max,
-        "net_in_avg": s.net_in_avg,
-        "net_out_avg": s.net_out_avg,
-        "attached": None,
-        "open_to_world": None,
-        "attributes": a.model_dump(mode="json"),  # 메트릭 시계열·태그 등 원본 보존
+        "region": inv.region,
+        "collection_run_id": collection_run_id,
+        "ec2_count": ec2_count,
+        "sg_count": sg_count,
+        "total": total,
     }
-
-
-def _sg_row(g: SecurityGroupAsset) -> dict:
-    return {
-        "arn": g.arn,
-        "asset_type": g.asset_type.value,
-        "resource_id": g.group_id,
-        "name": g.name,
-        "account_id": None,
-        "region": g.region,
-        "state": None,
-        "vpc_id": g.vpc_id,
-        "attached": g.attached,
-        "open_to_world": bool(g.open_to_world),
-        "attributes": g.model_dump(mode="json"),  # 개방포트·description 등 보존
-    }
-
-
-def persist_inventory(inv: AssetInventory, db) -> dict:
-    """AssetInventory 를 assets 테이블에 arn 기준 upsert 한다.
-    health_score/skip_reason 은 건드리지 않는다(rule_engine 의 몫)."""
-    from sqlalchemy import select
-
-    from db.models import Asset
-
-    rows = [_ec2_row(a) for a in inv.ec2_instances] + [_sg_row(g) for g in inv.security_groups]
-    inserted = updated = 0
-    for row in rows:
-        row["account_id"] = inv.account_id
-        existing = db.execute(select(Asset).where(Asset.arn == row["arn"])).scalar_one_or_none()
-        if existing is None:
-            db.add(Asset(collected_at=inv.collected_at, **row))
-            inserted += 1
-        else:
-            for k, v in row.items():
-                setattr(existing, k, v)
-            existing.collected_at = inv.collected_at
-            updated += 1
-    db.commit()
-    return {"region": inv.region, "inserted": inserted, "updated": updated, "total": len(rows)}
 
 
 def collect_and_store() -> list[dict]:
     """수집 → 정형화 → DB 적재까지. scheduler 가 이 함수를 주기 호출한다.
-    (판정은 이후 rule_engine 이 assets 테이블을 읽어 수행)"""
-    from db.session import SessionLocal, init_db
+    (판정은 이후 rule_engine 이 assets 테이블 및 metric_summaries 를 읽어 수행)"""
+    from db.session import get_session_factory
 
-    init_db()  # 개발/테스트 편의. 운영은 Alembic.
     cfg = _runtime_config()
     summaries = []
-    db = SessionLocal()
+    session_factory = get_session_factory()
+    db = session_factory()
     try:
         for region in cfg["regions"]:
             inv = collect_region(region, cfg)
-            summaries.append(persist_inventory(inv, db))
+            summary = persist_inventory(inv, db)
+            summaries.append(summary)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
     return summaries
+
