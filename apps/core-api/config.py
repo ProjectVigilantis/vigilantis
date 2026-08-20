@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,8 +27,10 @@ class Settings(BaseSettings):
     # 콤마 구분 허용 출처 목록 — 기본값은 FE 개발 서버. CORS와 WebSocket
     # Handshake Origin 검증이 같은 목록을 쓴다
     CORS_ALLOW_ORIGINS: str = "http://localhost:3000"
-    # WebSocket 연결별 전송 제한시간(초) — 초과한 연결은 발행에서 제거
-    WS_SEND_TIMEOUT_SECONDS: float = 5.0
+    # WebSocket 연결별 전송 제한시간(초) — 초과한 연결은 발행에서 제거.
+    # 제거·종료 시 연결 close() 정리도 같은 값을 상한으로 쓴다.
+    # 0 이하면 모든 연결이 즉시 제거되므로 양수만 허용한다 (Issue #75)
+    WS_SEND_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0)
 
     def cors_allow_origins_list(self) -> list[str]:
         return [
