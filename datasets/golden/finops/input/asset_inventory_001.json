@@ -1,0 +1,106 @@
+{
+  "$schema": "../../schema/asset_inventory.schema.json",
+  "account_id": "123456789012",
+  "region": "ap-northeast-2",
+  "mode": "localstack",
+  "collected_at": "2026-08-19T06:00:00Z",
+  "lookback_days": 14,
+  "period_seconds": 3600,
+  "ec2_instances": [
+    {
+      "asset_type": "EC2",
+      "arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00001",
+      "instance_id": "i-0a1b2c3d4e5f00001",
+      "name": "golden-ec2-idle-boundary",
+      "instance_type": "t3.xlarge",
+      "state": "running",
+      "region": "ap-northeast-2",
+      "availability_zone": "ap-northeast-2a",
+      "vpc_id": "vpc-0a1b2c3d4e5f0f001",
+      "subnet_id": "subnet-0a1b2c3d4e5f0f001",
+      "private_ip": "10.0.1.11",
+      "launch_time": "2026-07-20T02:00:00Z",
+      "security_group_ids": ["sg-0a1b2c3d4e5f00005"],
+      "tags": { "Name": "golden-ec2-idle-boundary", "Environment": "staging", "Owner": "qa" },
+      "metric_summary": {
+        "cpu_datapoints": 336, "cpu_avg": 4.9, "cpu_max": 10.0,
+        "net_in_avg": 1024.0, "net_out_avg": 768.0
+      }
+    },
+    {
+      "asset_type": "EC2",
+      "arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00002",
+      "instance_id": "i-0a1b2c3d4e5f00002",
+      "name": "golden-ec2-active-boundary",
+      "instance_type": "t3.large",
+      "state": "running",
+      "region": "ap-northeast-2",
+      "availability_zone": "ap-northeast-2a",
+      "vpc_id": "vpc-0a1b2c3d4e5f0f001",
+      "subnet_id": "subnet-0a1b2c3d4e5f0f001",
+      "private_ip": "10.0.1.12",
+      "launch_time": "2026-07-20T02:05:00Z",
+      "security_group_ids": ["sg-0a1b2c3d4e5f00006"],
+      "tags": { "Name": "golden-ec2-active-boundary", "Environment": "staging", "Owner": "qa" },
+      "metric_summary": {
+        "cpu_datapoints": 336, "cpu_avg": 5.0, "cpu_max": 10.0,
+        "net_in_avg": 52428.0, "net_out_avg": 41943.0
+      }
+    },
+    {
+      "asset_type": "EC2",
+      "arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00003",
+      "instance_id": "i-0a1b2c3d4e5f00003",
+      "name": "golden-ec2-spike-boundary",
+      "instance_type": "t3.large",
+      "state": "running",
+      "region": "ap-northeast-2",
+      "availability_zone": "ap-northeast-2c",
+      "vpc_id": "vpc-0a1b2c3d4e5f0f001",
+      "subnet_id": "subnet-0a1b2c3d4e5f0f002",
+      "private_ip": "10.0.2.13",
+      "launch_time": "2026-07-21T09:30:00Z",
+      "security_group_ids": ["sg-0a1b2c3d4e5f00006"],
+      "tags": { "Name": "golden-ec2-spike-boundary", "Environment": "staging", "Owner": "qa", "Workload": "nightly-batch" },
+      "metric_summary": {
+        "cpu_datapoints": 336, "cpu_avg": 2.0, "cpu_max": 40.0,
+        "net_in_avg": 8192.0, "net_out_avg": 6144.0
+      }
+    },
+    {
+      "asset_type": "EC2",
+      "arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00004",
+      "instance_id": "i-0a1b2c3d4e5f00004",
+      "name": "golden-ec2-newborn",
+      "instance_type": "t3.medium",
+      "state": "running",
+      "region": "ap-northeast-2",
+      "availability_zone": "ap-northeast-2c",
+      "vpc_id": "vpc-0a1b2c3d4e5f0f001",
+      "subnet_id": "subnet-0a1b2c3d4e5f0f002",
+      "private_ip": "10.0.2.14",
+      "launch_time": "2026-08-17T07:00:00Z",
+      "security_group_ids": ["sg-0a1b2c3d4e5f00006"],
+      "tags": { "Name": "golden-ec2-newborn", "Environment": "staging", "Owner": "qa" },
+      "metric_summary": {
+        "cpu_datapoints": 47, "cpu_avg": 1.0, "cpu_max": 2.0,
+        "net_in_avg": 512.0, "net_out_avg": 384.0
+      }
+    }
+  ],
+  "security_groups": [
+    {
+      "asset_type": "SG",
+      "arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00005",
+      "group_id": "sg-0a1b2c3d4e5f00005",
+      "name": "golden-sg-open-ssh",
+      "description": "Golden Dataset: SSH open to the world",
+      "region": "ap-northeast-2",
+      "vpc_id": "vpc-0a1b2c3d4e5f0f001",
+      "attached": true,
+      "open_to_world": [
+        { "protocol": "tcp", "from_port": 22, "to_port": 22, "ipv6": false }
+      ]
+    }
+  ]
+}
