@@ -293,6 +293,7 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
             "vpc_id": a.vpc_id,
             "subnet_id": a.subnet_id,
             "private_ip": a.private_ip,
+            "tags": a.tags or {},
         }
         asset = assets_repo.upsert_asset(
             db,

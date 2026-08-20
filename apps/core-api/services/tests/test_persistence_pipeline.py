@@ -107,6 +107,9 @@ def test_persist_inventory_and_run_rule_engine(db, mock_inventory):
     # spec에 metric_summary가 섞여 들지 않았는지 확인
     assert "metric_summary" not in ec2.spec
     assert "attributes" not in ec2.spec
+    # EC2 tags가 spec에 올바르게 저장되었는지 확인
+    assert "tags" in ec2.spec
+    assert ec2.spec["tags"] == {"Name": "dev-idle-ec2", "Environment": "dev"}
 
     # MetricSummary 적재 확인
     ms = db.execute(

@@ -117,7 +117,8 @@ def run_rule_engine(db, collection_run_id: str | None = None) -> dict:
             cpu_max = metric_row.cpu_max if metric_row else None
             cpu_dp = metric_row.cpu_datapoints if metric_row else None
 
-            verdict, skip, health = evaluate_ec2(cpu_avg, cpu_max, cpu_dp, a.name, {})
+            tags = (a.spec or {}).get("tags", {})
+            verdict, skip, health = evaluate_ec2(cpu_avg, cpu_max, cpu_dp, a.name, tags)
             health_int = int(round(health)) if health is not None else None
         elif a.asset_type == AssetType.SG:
             attached = (a.spec or {}).get("attached")
