@@ -24,7 +24,9 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html
       lang="ko"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      // 다크 고정. 라이트 모드는 MVP 범위 밖이라(화면설계서 v1.5 §0.3) 테마 전환
+      // 라이브러리를 두지 않고 클래스 하나로 끝낸다.
+      className={`dark ${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">
         <Gnb />
