@@ -38,12 +38,9 @@ class SkipReason(str, Enum):
     SKIP_ACTIVE = "SKIP_ACTIVE"                        # 정상 가동(낭비 아님)
 
 
-def _is_prod(name: Optional[str], tags: dict) -> bool:
-    hay = (name or "").lower()
-    if any(h in hay for h in PROD_HINTS):
-        return True
-    env = str(tags.get("Environment", tags.get("env", ""))).lower()
-    return any(h in env for h in PROD_HINTS)
+def _is_prod(tags: dict) -> bool:
+    env = str(tags.get("Environment", "")).lower()
+    return env == "production"
 
 
 def evaluate_ec2(cpu_avg: Optional[float], cpu_max: Optional[float], cpu_datapoints: Optional[int],
@@ -54,7 +51,7 @@ def evaluate_ec2(cpu_avg: Optional[float], cpu_max: Optional[float], cpu_datapoi
 
     if cpu_datapoints is None or cpu_datapoints < MIN_DATAPOINTS:
         return Verdict.SKIP, SkipReason.SKIP_INSUFFICIENT_DATA, health
-    if _is_prod(name, tags):
+    if _is_prod(tags):
         return Verdict.SKIP, SkipReason.SKIP_PROD_PROTECTED, health
     if cpu_avg is not None and cpu_avg < IDLE_CPU_AVG:
         if cpu_max is not None and cpu_max >= SPIKE_CPU_MAX:

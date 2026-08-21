@@ -79,11 +79,11 @@ SG_OPEN = "vigilantis-seed-open-ssh"
 SG_USED = "vigilantis-seed-used"
 SG_UNUSED = "vigilantis-seed-unused"
 
-# (Name 태그, 인스턴스 타입, SG 이름, CPU 프로필) — idle은 OpenIP SG를 달아 붉은 노드도 겸한다
+# (Name 태그, 인스턴스 타입, SG 이름, CPU 프로필, Environment 태그) — idle은 OpenIP SG를 달아 붉은 노드도 겸한다
 INSTANCES = (
-    ("vigilantis-seed-idle", "t3.xlarge", SG_OPEN, "idle"),
-    ("vigilantis-seed-normal", "t3.micro", SG_USED, "normal"),
-    ("vigilantis-seed-spike", "t3.small", SG_USED, "spike"),
+    ("vigilantis-seed-idle", "t3.xlarge", SG_OPEN, "idle", "production"),
+    ("vigilantis-seed-normal", "t3.micro", SG_USED, "normal", "staging"),
+    ("vigilantis-seed-spike", "t3.small", SG_USED, "spike", "development"),
 )
 VOLUME_NAME = "vigilantis-seed-unattached"
 FALLBACK_AMI = "ami-00000000000000000"  # LocalStack 기본 AMI 조회 실패 시 폴백
@@ -112,8 +112,11 @@ def _require_localstack() -> None:
 
 
 # ------------------------------------------------------------------ 리소스 ensure
-def _seed_tags(name: str) -> list[dict]:
-    return [{"Key": "Name", "Value": name}, {"Key": SEED_TAG_KEY, "Value": SEED_TAG_VALUE}]
+def _seed_tags(name: str, environment: str | None = None) -> list[dict]:
+    tags = [{"Key": "Name", "Value": name}, {"Key": SEED_TAG_KEY, "Value": SEED_TAG_VALUE}]
+    if environment:
+        tags.insert(1, {"Key": "Environment", "Value": environment})
+    return tags
 
 
 def _ensure_sg(ec2, name: str, open_ssh: bool) -> tuple[str, bool]:
@@ -123,7 +126,7 @@ def _ensure_sg(ec2, name: str, open_ssh: bool) -> tuple[str, bool]:
     sg_id = ec2.create_security_group(
         GroupName=name,
         Description=f"vigilantis seed: {name}",
-        TagSpecifications=[{"ResourceType": "security-group", "Tags": _seed_tags(name)}],
+        TagSpecifications=[{"ResourceType": "security-group", "Tags": _seed_tags(name, None)}],
     )["GroupId"]
     if open_ssh:  # OpenIP 위협 시나리오 — 22/tcp 전세계 개방
         ec2.authorize_security_group_ingress(
@@ -150,14 +153,14 @@ def _find_instance(ec2, name: str) -> str | None:
     return found[0]["Instances"][0]["InstanceId"] if found else None
 
 
-def _ensure_instance(ec2, ami: str, name: str, itype: str, sg_id: str) -> tuple[str, bool]:
+def _ensure_instance(ec2, ami: str, name: str, itype: str, sg_id: str, environment: str | None = None) -> tuple[str, bool]:
     iid = _find_instance(ec2, name)
     if iid:
         return iid, False
     iid = ec2.run_instances(
         ImageId=ami, InstanceType=itype, MinCount=1, MaxCount=1,
         SecurityGroupIds=[sg_id],
-        TagSpecifications=[{"ResourceType": "instance", "Tags": _seed_tags(name)}],
+        TagSpecifications=[{"ResourceType": "instance", "Tags": _seed_tags(name, environment)}],
     )["Instances"][0]["InstanceId"]
     return iid, True
 
@@ -231,8 +234,8 @@ def seed_all(ec2, cw, region: str) -> None:
         print(f"[seed] SG {sg_name}: {sg_id} ({'생성' if created else '존재 — skip'})")
 
     ami = _default_ami(ec2)
-    for name, itype, sg_name, profile in INSTANCES:
-        iid, created = _ensure_instance(ec2, ami, name, itype, sg_ids[sg_name])
+    for name, itype, sg_name, profile, environment in INSTANCES:
+        iid, created = _ensure_instance(ec2, ami, name, itype, sg_ids[sg_name], environment)
         print(f"[seed] EC2 {name}({itype}): {iid} ({'생성' if created else '존재 — skip'})")
         # 신규 생성 또는 메트릭 부재 시 주입 — 이전 실행이 중간에 죽었어도 재실행으로 복구된다
         if created or not _has_metrics(cw, iid):
@@ -244,7 +247,7 @@ def seed_all(ec2, cw, region: str) -> None:
 
 
 def reinject_metrics(ec2, cw) -> None:
-    for name, _itype, _sg_name, profile in INSTANCES:
+    for name, _itype, _sg_name, profile, _environment in INSTANCES:
         iid = _find_instance(ec2, name)
         if not iid:
             sys.exit(f"[seed] {name} 없음(pending·running 기준) — 전체 시드를 먼저 실행할 것")

@@ -18,13 +18,13 @@ from services.rule_engine import (  # noqa: E402
     evaluate_sg,
 )
 
-# (name, cpu_avg, cpu_max, datapoints) -> (verdict, skip_reason)
+# (name, cpu_avg, cpu_max, datapoints, tags) -> (verdict, skip_reason)
 EC2_CASES = [
-    ("dev-idle-api-01", 1.95, 3.5, 332, Verdict.COST_CANDIDATE, None),
-    ("dev-idle-batch-02", 2.04, 3.5, 332, Verdict.COST_CANDIDATE, None),
-    ("prod-web-01", 54.5, 71.9, 332, Verdict.SKIP, SkipReason.SKIP_PROD_PROTECTED),
-    ("dev-spiky-worker-03", 4.9, 91.82, 332, Verdict.SKIP, SkipReason.SKIP_LOW_UTIL),
-    ("dev-new-04", 3.23, 4.98, 24, Verdict.SKIP, SkipReason.SKIP_INSUFFICIENT_DATA),
+    ("dev-idle-api-01", 1.95, 3.5, 332, {}, Verdict.COST_CANDIDATE, None),
+    ("dev-idle-batch-02", 2.04, 3.5, 332, {}, Verdict.COST_CANDIDATE, None),
+    ("prod-web-01", 54.5, 71.9, 332, {"Environment": "production"}, Verdict.SKIP, SkipReason.SKIP_PROD_PROTECTED),
+    ("dev-spiky-worker-03", 4.9, 91.82, 332, {}, Verdict.SKIP, SkipReason.SKIP_LOW_UTIL),
+    ("dev-new-04", 3.23, 4.98, 24, {}, Verdict.SKIP, SkipReason.SKIP_INSUFFICIENT_DATA),
 ]
 
 # (name, attached, open_to_world) -> (verdict, skip_reason)
@@ -37,9 +37,9 @@ SG_CASES = [
 ]
 
 
-@pytest.mark.parametrize("name,avg,mx,dp,exp_v,exp_s", EC2_CASES)
-def test_ec2_verdicts(name, avg, mx, dp, exp_v, exp_s):
-    verdict, skip, health = evaluate_ec2(avg, mx, dp, name)
+@pytest.mark.parametrize("name,avg,mx,dp,tags,exp_v,exp_s", EC2_CASES)
+def test_ec2_verdicts(name, avg, mx, dp, tags, exp_v, exp_s):
+    verdict, skip, health = evaluate_ec2(avg, mx, dp, name, tags)
     assert verdict == exp_v
     assert skip == exp_s
     assert health == round(avg, 2)
