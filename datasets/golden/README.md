@@ -100,8 +100,9 @@ import할 수 없으므로 `tests/test_golden_dataset.py`가 현재 상수와 �
 | A9 | SG | `attached false` / 개방 없음 | `UNUSED` | 미사용 SG 정리 후보 |
 | A10 | SG | `attached true` / 개방 없음 | `SKIP_ACTIVE` | 정상 SG — 오탐 방지 음성 대조군 |
 
-A6은 이름을 `golden-ec2-billing-worker`로 잡았다. `_is_prod`는 이름을 먼저 검사해 참이면
-즉시 반환하므로, 이름에 `prod`를 넣으면 태그 경로가 실행되지 않아 검증이 무의미해진다.
+A6은 이름을 `golden-ec2-billing-worker`로 잡았다. `_is_prod`는 `Environment` 태그 정확 매칭만
+본다(#88). 이름에 `prod`를 넣으면 이름 부분 매칭으로 되돌아가는 회귀가 생겨도 정답이 그대로
+나와 태그 경로 검증이 무의미해지므로, 이름에서 `prod`를 뺀다.
 
 **판정 커버리지**: 1차 5건 + 2차 5건으로 `Verdict` 4종·`SkipReasonCode` 5종 전부 커버(미커버 0).
 
