@@ -18,7 +18,9 @@
 #   재실행만으로 자가 복구된다.
 #
 # 시드 데이터셋 (ADR-0006 §2 표 — rule_engine 임계값을 import해 결합을 코드로 강제):
-#   idle EC2(t3.xlarge, CPU<IDLE_CPU_AVG)  → RIGHTSIZING 후보
+#   idle EC2(t3.xlarge, prod 태그, CPU<IDLE_CPU_AVG)     → SKIP_PROD_PROTECTED 경로
+#     (저활성 대형 인스턴스라도 운영 자산이면 조치하지 않는다 — 보호 규칙 확인용)
+#   idle-dev EC2(m5.2xlarge, non-prod, CPU<IDLE_CPU_AVG) → RIGHTSIZING 후보(COST_CANDIDATE)
 #   normal EC2(t3.micro, CPU≥IDLE_CPU_AVG) → 오탐 방지(후보 미선정)
 #   spike EC2(t3.small, 평균<IDLE, 최대≥SPIKE) → SKIP_LOW_UTIL 경로
 #   OpenIP SG(0.0.0.0/0 22/tcp)            → 위협 탐지·토폴로지 붉은 노드
@@ -80,10 +82,14 @@ SG_USED = "vigilantis-seed-used"
 SG_UNUSED = "vigilantis-seed-unused"
 
 # (Name 태그, 인스턴스 타입, SG 이름, CPU 프로필, Environment 태그) — idle은 OpenIP SG를 달아 붉은 노드도 겸한다
+# idle 은 Environment=production 이라 판정이 SKIP_PROD_PROTECTED 로 흡수된다(보호 규칙이 idle 검사보다
+# 우선). 그래서 절감 후보는 idle-dev 를 non-prod 대형 타입으로 따로 둔다 — 이 한 대가 빠지면 시드
+# 전체에서 COST_CANDIDATE 가 0대가 되어 FinOps 경로(RIGHTSIZING)가 통째로 시연 불가가 된다.
 INSTANCES = (
     ("vigilantis-seed-idle", "t3.xlarge", SG_OPEN, "idle", "production"),
     ("vigilantis-seed-normal", "t3.micro", SG_USED, "normal", "staging"),
     ("vigilantis-seed-spike", "t3.small", SG_USED, "spike", "development"),
+    ("vigilantis-seed-idle-dev", "m5.2xlarge", SG_USED, "idle", "development"),
 )
 VOLUME_NAME = "vigilantis-seed-unattached"
 FALLBACK_AMI = "ami-00000000000000000"  # LocalStack 기본 AMI 조회 실패 시 폴백

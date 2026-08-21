@@ -33,13 +33,15 @@
 
 | 시드 리소스 | 목적 (검증 대상) |
 | --- | --- |
-| Idle EC2 (CPU 평균 < 5.0 메트릭 주입) | `RUNBOOK_EC2_RIGHTSIZING` 후보 판별 |
+| Idle EC2 · non-prod (CPU 평균 < 5.0 메트릭 주입, 대형 타입) | `RUNBOOK_EC2_RIGHTSIZING` 후보 판별 |
+| Idle EC2 · `Environment=production` (CPU 평균 < 5.0, 대형 타입) | `SKIP_PROD_PROTECTED` — 저활성 대형이라도 운영 자산은 미조치 |
 | 정상 EC2 (CPU 평균 ≥ 5.0) | 오탐 방지 — 후보 미선정 확인 |
 | 스파이크 EC2 (평균 < 5.0, 최대 ≥ 40.0) | `SKIP_LOW_UTIL` Skip 경로 |
 | OpenIP SG (0.0.0.0/0, 22/tcp) | 위협 탐지(OpenIP)·토폴로지 붉은 노드 |
 | 사용 중 SG / 미사용 SG 각 1개 | 미사용 SG 판별 |
 | 미연결(available) EBS 볼륨 | `RUNBOOK_EBS_DELETE_UNATTACHED` (P1) |
 
+- **Idle EC2는 prod / non-prod 두 대가 모두 필요하다.** `_is_prod` 검사가 idle 검사보다 앞서므로 idle 인스턴스가 prod 하나뿐이면 시드 전체의 `COST_CANDIDATE`가 0대가 되고 FinOps 경로가 시연 불가가 된다. 판정 분포는 `apps/core-api/services/tests/test_seed_dataset_verdicts.py`가 고정한다(AWS 불필요).
 - 임계값(5.0 / 40.0)은 `rule_engine.py`의 `IDLE_CPU_AVG`·`SPIKE_CPU_MAX`와 결합돼 있다 — **임계값을 바꾸는 PR은 시드 스크립트 갱신을 포함해야 한다** (시드 스크립트가 상수를 rule_engine에서 import해 결합을 코드로 강제하는 것을 우선안으로 한다).
 - CloudWatch 메트릭은 `put_metric_data`로 `AWS/EC2` 네임스페이스에 직접 주입한다. **이는 LocalStack에서만 가능한 경로다**(실 AWS는 `AWS/` 네임스페이스 커스텀 주입 불가) — 스크립트 주석에 명시하고, 실 AWS 대상 실행을 스크립트 스스로 거부하게 한다(`AWS_ENDPOINT_URL` 미설정 시 즉시 종료).
 
