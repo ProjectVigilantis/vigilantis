@@ -1,6 +1,6 @@
 # ==============================================================================
 # Vigilantis CI — push/PR(dev·main) 시 자동 실행
-# 현재 범위: uv 의존성 설치 + pytest(수동 관리 경로 목록 — DB 통합분은 PostgreSQL 미기동으로 skip 수집)
+# 현재 범위: LocalStack service container + 시드 + uv 의존성 설치 + pytest
 # TODO: 린터(ruff 등) 도입 확정 시 lint job 추가
 # ==============================================================================
 name: CI
@@ -14,6 +14,13 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      localstack:
+        image: localstack/localstack:4.14.0
+        ports:
+          - "4566:4566"
+        env:
+          SERVICES: ec2,cloudwatch,sts
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,6 +32,11 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --all-packages
+
+      - name: Seed LocalStack
+        run: uv run python scripts/seed_localstack.py
+        env:
+          AWS_ENDPOINT_URL: http://localhost:4566
 
       - name: Run pytest
         run: uv run pytest tests apps/core-api/services/tests apps/core-api/ai/tests packages/schemas/tests apps/core-api/db/tests apps/core-api/tests -q
