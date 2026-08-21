@@ -4,7 +4,7 @@
   "excluded_fields": {
     "collection_run_id": "실행 시점에 생성되는 런타임 값 — 정답 대조 대상 아님",
     "evaluated_at": "실행 시점에 생성되는 런타임 값 — 정답 대조 대상 아님",
-    "health_score": "계약·DB는 0~100 정수인데 rule_engine.py:53이 round(cpu_avg, 2) 소수를 반환 — 불일치 해소 전까지 제외",
+    "health_score": "정수 변환은 run_rule_engine(rule_engine.py:122) 소관 — 골든셋은 evaluate_* 직접 호출이라 검증 범위 밖. 변환 자체는 test_persistence_pipeline과 스키마 계약(0~100 정수)이 커버",
     "reason": "사람이 읽는 자유 서술 — 문자열 대조 대상 아님"
   },
   "thresholds_at_authoring": {

@@ -55,7 +55,7 @@ datasets/golden/
 | `skip_reason_code` | 포함 | SKIP 사유 |
 | `collection_run_id` | 제외 | 실행 시점 생성 런타임 값 |
 | `evaluated_at` | 제외 | 실행 시점 생성 런타임 값 |
-| `health_score` | 제외 | 계약·DB는 0~100 정수인데 `rule_engine.py:53`이 소수 반환 — 불일치 해소 전까지 제외 |
+| `health_score` | 제외 | 정수 변환은 `run_rule_engine`(`rule_engine.py:122`) 소관 — 골든셋은 `evaluate_*` 직접 호출이라 검증 범위 밖. 변환 자체는 `test_persistence_pipeline`과 스키마 계약(0~100 정수)이 커버 |
 | `reason` | 제외 | 사람이 읽는 자유 서술 — 문자열 대조 대상 아님 |
 
 `runbook_id`도 넣지 않는다. 판정→런북 매핑 코드가 저장소에 없어 적으면 추측이 된다.
@@ -85,5 +85,60 @@ import할 수 없으므로 `tests/test_golden_dataset.py`가 현재 상수와 �
 | S3 | `evt_ssh_bruteforce_001.json` | 120회 / 300초 — 고강도 |
 | S4 | `evt_ssh_bruteforce_002.json` | 5회 / 3600초 — 저강도(오탐 후보) |
 
-2차(11건)로 미룬 분기: `SKIP_PROD_PROTECTED`, SG `UNUSED`, SG `default` 화이트리스트,
-SG `SKIP_ACTIVE`, EBS, 복합 조건.
+## 2차 작성 케이스 (11건 — 누적 20건)
+
+**자산 5건** — `finops/input/asset_inventory_002.json`
+
+1차 파일은 수정하지 않는다. `AssetInventory`가 "한 리전 1회 수집" 단위이므로 002는 두 번째
+수집 회차로 성립하고, 1차 정답지가 그대로 얼려져 회귀 기준이 유지된다.
+
+| ID | 자산 | 입력 | 판정 | 목적 |
+| --- | --- | --- | --- | --- |
+| A6 | EC2 | 이름에 `prod` 없음 / `Environment: production` 태그 / `cpu_avg 1.0` · `dp 336` | `SKIP_PROD_PROTECTED` | 태그 경로 검증 + prod 보호가 idle보다 우선 |
+| A7 | EC2 | `dp 48` (경계 정확히) / `cpu_avg 4.9` / `cpu_max` **null** | `COST_CANDIDATE` | `<`를 `<=`로 쓰면 실패 + `cpu_max` null 가드 |
+| A8 | SG | 이름 `default` / `attached false` / `tcp 22` 전체개방 | `SKIP_WHITELISTED` | 화이트리스트가 `THREAT`·`UNUSED`를 모두 이김 |
+| A9 | SG | `attached false` / 개방 없음 | `UNUSED` | 미사용 SG 정리 후보 |
+| A10 | SG | `attached true` / 개방 없음 | `SKIP_ACTIVE` | 정상 SG — 오탐 방지 음성 대조군 |
+
+A6은 이름을 `golden-ec2-billing-worker`로 잡았다. `_is_prod`는 이름을 먼저 검사해 참이면
+즉시 반환하므로, 이름에 `prod`를 넣으면 태그 경로가 실행되지 않아 검증이 무의미해진다.
+
+**판정 커버리지**: 1차 5건 + 2차 5건으로 `Verdict` 4종·`SkipReasonCode` 5종 전부 커버(미커버 0).
+
+**위협 6건** — `secops/input/` (정답은 Risk 규칙 확정 후 별도 PR)
+
+| ID | 파일 | 입력 |
+| --- | --- | --- |
+| S5 | `evt_open_ip_003.json` | `tcp 0–65535` 전 범위 / `0.0.0.0/0` — 대상은 A8의 `default` SG |
+| S6 | `evt_open_ip_004.json` | `tcp 3389` (RDP) / `0.0.0.0/0` |
+| S7 | `evt_open_ip_005.json` | `tcp 22` / `::/0` — IPv6 전체개방 |
+| S8 | `evt_ssh_bruteforce_003.json` | 1회 / 1초 — 계약 최소값(`ge=1`) |
+| S9 | `evt_ssh_bruteforce_004.json` | 1000회 / 60초 — 초고강도 |
+| S10 | `evt_ssh_bruteforce_005.json` | 120회 / 300초 — 대상은 A6의 prod 보호 EC2 |
+
+각 케이스가 강제하는 판정 논점은 `secops/expected/README.md` 표에 기록했다.
+
+## 3차 이후로 미룬 분기
+
+| 항목 | 사유 |
+| --- | --- |
+| EBS | 입력 스키마(`AssetInventory`)에 `ebs_volumes`가 없고 `rule_engine`에도 판정 분기가 없다 — 지금 채우면 규칙을 지어내는 셈. 3~5주차에 collector(`describe_volumes`)·schema·rule을 함께 도입 예정(김승철, P1 `RUNBOOK_EBS_DELETE_UNATTACHED` 전 완료). 확정 규칙은 아래 참고 |
+| 화이트리스트 태그(`finops:ignore` 등) | `feat/DATA-27-rule-engine-handoff`가 stale(dev가 47커밋 앞섬). 담당자가 현재 dev로 rebase·재작업 예정이며 **2차는 이를 기다리지 않는다** |
+| 이름 기반 prod 탐지 / 미부착+개방 → `THREAT` 우선순위 / `dp` 부족 + prod 우선순위 | 슬롯 부족 |
+| `non-prod` 부분 문자열 오탐 | `"prod" in "non-prod"`가 참이라 `SKIP_PROD_PROTECTED`가 된다. 버그 가능성이 있어 정답지로 굳히지 않음 — 별도 이슈로 제기 |
+
+### EBS 판정 규칙 (도입 확정 — 3차 골든셋 작성 근거)
+
+| 입력 | 판정 |
+| --- | --- |
+| 미연결 (`attached_instance_ids` 비어있음 / `state: available`) | `UNUSED` → `RUNBOOK_EBS_DELETE_UNATTACHED` 후보 |
+| 연결됨 (`state: in-use`) | `SKIP` / `SKIP_ACTIVE` |
+
+새 `Verdict`·`SkipReasonCode` 값은 추가되지 않는다(기존 값 재사용). `health_score`는 EBS에서
+`null`이어야 한다 — 계약상 EC2 전용이다. `resource_role`은 `RUNBOOK_SUPPORT`다(`_PRIMARY_TYPES`에
+EBS가 없음). 세 항목 모두 `AssetItem` 계약이 위반 시 거부하는 것을 확인했다.
+
+**작성 시 선행 조건**: `AssetInventory`에 `ebs_volumes`가 추가되면
+`tests/test_golden_dataset.py`의 `_evaluate_inventory`에 순회를 함께 추가해야 한다.
+빠뜨리면 EBS 자산이 판정도 대조도 없이 무시되는데,
+`test_finops_expected_covers_every_input_asset`이 이를 감지한다.

@@ -4,7 +4,7 @@
 > 다른 문서(README, 기획서, MVP 범위 명세 등)와 충돌하면 **이 문서가 이긴다.**
 > 범위·API 계약·역할이 바뀌는 PR은 이 문서 갱신을 포함할 것.
 >
-> **최종 갱신**: 2026-08-19 (김세혁)
+> **최종 갱신**: 2026-08-20 (박지현)
 
 ---
 
@@ -12,11 +12,11 @@
 
 24/7 AWS 자산·보안 상시 관제 + 4단계 AI 가드레일 기반 원클릭 자율 조치 + 양방향 회복(자동 원복/원클릭 해제)을 제공하는 FinSecOps 플랫폼. **1차 발표(10/15) MVP 시연**이 목표다.
 
-## 현재 위치 (2026-08-19 기준)
+## 현재 위치 (2026-08-20 기준)
 
 - **마일스톤**: 1~2주차(8/11~8/23) — 시스템 설계 & 개발 환경 구축 단계.
-- **완료**: 모노레포 단일 백엔드 재편([ADR-0001](adr/0001-mvp-monorepo-structure.md)), docker-compose, **런북 명세서(Action Whitelist) 10종 확정**([ADR-0002](adr/0002-runbook-whitelist-mvp-scope.md) + 롤백 3종), 시스템 흐름도 MVP 기준 갱신, 자산 수집·Rule Engine 1차(PR #22), CI 가동(GitHub Actions pytest, PR #28), EC2/SG raw 수집 테스트(PR #29), FE Next.js 16 스캐폴딩(PR #30, [ADR-0003](adr/0003-fe-stack-nextjs-16.md)), **Action Whitelist 코드화**(10종·AI 추천 분리, PR #35), **API 계약 DTO 확정**(assets·incidents·actions·WS·오류 봉투, PR #34·#44 — 목록·title은 이슈 #46), **FE 계약 타입·mock 계층**(PR #50)과 공통 레이아웃·enum 표기 사전·상태 컴포넌트(PR #54), **내부 공통 계약 코드화**(수집·자산 PR #52 / Incident·위협·AI PR #53 / 실행 계열 PR #56·#58), **LangGraph 그래프 구조 확정**([ADR-0005](adr/0005-langgraph-stateless-domain-graphs.md)), **LocalStack 팀 표준 환경**([ADR-0006](adr/0006-localstack-team-standard-env.md) 전략 + compose `localstack`·시드 스크립트·`.env.example`, #62).
-- **진행 중**: Core API 기반 구조(안성일) — DB 엔티티·Alembic → FastAPI 앱·조회·로깅 → 실시간 상태 전송, Golden Dataset 1차(박지현).
+- **완료**: 모노레포 단일 백엔드 재편([ADR-0001](adr/0001-mvp-monorepo-structure.md)), docker-compose, **런북 명세서(Action Whitelist) 10종 확정**([ADR-0002](adr/0002-runbook-whitelist-mvp-scope.md) + 롤백 3종), 시스템 흐름도 MVP 기준 갱신, 자산 수집·Rule Engine 1차(PR #22), CI 가동(GitHub Actions pytest, PR #28), EC2/SG raw 수집 테스트(PR #29), FE Next.js 16 스캐폴딩(PR #30, [ADR-0003](adr/0003-fe-stack-nextjs-16.md)), **Action Whitelist 코드화**(10종·AI 추천 분리, PR #35), **API 계약 DTO 확정**(assets·incidents·actions·WS·오류 봉투, PR #34·#44 — 목록·title은 이슈 #46), **FE 계약 타입·mock 계층**(PR #50)과 공통 레이아웃·enum 표기 사전·상태 컴포넌트(PR #54), **내부 공통 계약 코드화**(수집·자산 PR #52 / Incident·위협·AI PR #53 / 실행 계열 PR #56·#58), **LangGraph 그래프 구조 확정**([ADR-0005](adr/0005-langgraph-stateless-domain-graphs.md)), **LocalStack 팀 표준 환경**([ADR-0006](adr/0006-localstack-team-standard-env.md) 전략 + compose `localstack`·시드 스크립트·`.env.example`, #62), **Golden Dataset 20건 완료**(박지현 — 1차 9건 PR #76, 2차 11건. `Verdict` 4종·`SkipReasonCode` 5종 전량 커버, 회귀 테스트 21건).
+- **진행 중**: Core API 기반 구조(안성일) — DB 엔티티·Alembic → FastAPI 앱·조회·로깅 → 실시간 상태 전송.
 
 ## MVP 확정 범위
 
@@ -92,6 +92,9 @@
 1. ~~LocalStack 팀 표준 환경~~ ✅ 해소(#62) — [ADR-0006](adr/0006-localstack-team-standard-env.md) 전략 + compose `localstack` 서비스 + `scripts/seed_localstack.py` + `.env.example` 스위치 활성화. 잔여 후속: CI LocalStack service container(3주차 별도 CHORE), 6~7주차 실 AWS 스모크 테스트(ADR-0006 §4).
 2. ~~PR #29 후속 보완~~ ✅ 종결(2026-08-19, PM 대행 판단 — 김승철 부재, 기록: 이슈 #67 댓글) — 당초 우려("자체 boto3 로직·시드 없으면 빈 결과 통과")는 현행 `test_collector_raw.py`에서 해소 확인(`collect_region()` 직접 호출, 시드 없으면 assert 실패). dev 머지본(#64) 기준 작성자 외 로컬에서 표준 절차(compose→시드→pytest) 통합 테스트 3건 통과 재현. 잔여 **CI LocalStack service container**는 3주차 별도 CHORE(#62 후속)로 이월. 김승철 복귀 후 이견 시 재오픈.
 3. ~~README 최신화~~ ✅ 해소(팀명·역할 표·런북 10종·LangGraph 반영). 기획서 docx는 동결 방침이라 갱신 대상 아님.
+4. **`_is_prod` 운영 자산 보호 오탐·미탐** (박지현 제기, 2026-08-20 — #81) — `rule_engine.py`의 `_is_prod`가 부분 문자열로 판정해 `product-service`류 이름이 전부 `SKIP_PROD_PROTECTED`가 된다(오탐: 절감 기회 상실). 더 중요하게, 태그 키를 `Environment`·`env`만 보므로 `environment`·`Env`·`Stage` 등을 쓰면 **운영 서버가 다운사이징 후보로 올라간다**(미탐). `RUNBOOK_EC2_RIGHTSIZING`이 관제자 승인이라 자동 실행은 없으나 시연 리스크. 판정 규칙 소유자(김승철) 확인 후 Golden Dataset에 경계 케이스 추가 예정.
+5. **CI에 PostgreSQL service container 없음** (박지현 제기, 2026-08-20) — `test_persistence_pipeline`이 CI에서 항상 skip된다(`ci.yml` 주석에도 명시). `health_score` 정수 변환 등 DB 경유 계약을 CI가 검증하지 못한다. 미해결 1번의 잔여 후속(CI LocalStack service container, 3주차 CHORE)에 함께 처리 제안.
+6. **Golden Dataset SecOps 정답 보류** (박지현) — 위협 입력 10건은 작성 완료했으나 `initial_risk_level`·`response_mode`·`reason_codes` 판정 규칙이 미확정이라 정답을 채우면 추측이 된다. Risk Evaluator 구현과 `RiskReasonCode` 값 목록 확정 시 별도 PR. 각 케이스가 강제하는 판정 논점은 `datasets/golden/secops/expected/README.md`에 기록.
 
 ## 일정 리스크 & 구현 우선순위 (2026-08-13 방침 확정)
 

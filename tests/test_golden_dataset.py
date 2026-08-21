@@ -183,3 +183,45 @@ def test_finops_expected_has_no_runtime_fields() -> None:
         for case in _load(expected_path)["evaluations"]:
             leaked = excluded & set(case)
             assert not leaked, f"{case['case_id']}: 제외 대상 필드가 있습니다 {sorted(leaked)}"
+
+
+# ---------------------------------------------------------------- 자산 누락 감지
+
+
+def _count_asset_arns(raw: dict) -> int:
+    """입력 JSON 원문에서 자산 ARN 개수를 센다(중첩 포함)."""
+    count = 0
+
+    def walk(node) -> None:
+        nonlocal count
+        if isinstance(node, dict):
+            if "arn" in node:
+                count += 1
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(raw)
+    return count
+
+
+@pytest.mark.parametrize("input_path, expected_path", _finops_pairs(), ids=lambda p: getattr(p, "name", ""))
+def test_finops_expected_covers_every_input_asset(input_path: Path, expected_path: Path) -> None:
+    """입력의 모든 자산에 정답이 있다.
+
+    _evaluate_inventory 는 ec2_instances·security_groups 만 순회한다. AssetInventory 에
+    자산 리스트가 새로 생겼는데(예: ebs_volumes) 순회 추가를 빼먹으면, 그 자산은
+    판정도 정답 대조도 없이 조용히 무시된다. AssetInventory 는 extra=forbid 가 아니라
+    Pydantic 도 걸러주지 않으므로 원문 ARN 수를 직접 센다.
+
+    test_finops_verdicts_match_expected 는 '정답에 있는데 입력에 없는' 방향만 잡는다.
+    이 테스트가 반대 방향('입력에 있는데 정답에 없는')을 막는다.
+    """
+    asset_count = _count_asset_arns(_load(input_path))
+    case_count = len(_load(expected_path)["evaluations"])
+    assert asset_count == case_count, (
+        f"{input_path.name}: 입력 자산 {asset_count}건 / 정답 {case_count}건.\n"
+        f"  자산 유형이 추가됐다면 _evaluate_inventory 의 순회와 정답을 함께 갱신하세요."
+    )
