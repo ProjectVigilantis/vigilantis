@@ -137,7 +137,7 @@ def _evaluate_inventory(inventory: AssetInventory) -> dict[str, tuple[str, str |
     for ec2 in inventory.ec2_instances:
         summary = ec2.metric_summary
         verdict, skip, _health = evaluate_ec2(
-            summary.cpu_avg, summary.cpu_max, summary.cpu_datapoints, ec2.name, ec2.tags
+            summary.cpu_avg, summary.cpu_max, summary.cpu_datapoints, ec2.tags
         )
         results[ec2.arn] = (verdict.value, skip.value if skip else None)
 

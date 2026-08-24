@@ -53,7 +53,7 @@ def _is_prod(tags: dict) -> bool:
 
 
 def evaluate_ec2(cpu_avg: Optional[float], cpu_max: Optional[float], cpu_datapoints: Optional[int],
-                 name: Optional[str], tags: dict | None = None) -> tuple[Verdict, Optional[SkipReason], Optional[float]]:
+                 tags: dict | None = None) -> tuple[Verdict, Optional[SkipReason], Optional[float]]:
     """EC2 1대 판정 → (verdict, skip_reason, health_score). 판정 우선순위대로 검사."""
     tags = tags or {}
     health = round(cpu_avg, 2) if cpu_avg is not None else None
@@ -124,7 +124,7 @@ def run_rule_engine(db, collection_run_id: str | None = None) -> dict:
             cpu_dp = metric_row.cpu_datapoints if metric_row else None
 
             tags = (a.spec or {}).get("tags", {})
-            verdict, skip, health = evaluate_ec2(cpu_avg, cpu_max, cpu_dp, a.name, tags)
+            verdict, skip, health = evaluate_ec2(cpu_avg, cpu_max, cpu_dp, tags)
             health_int = int(round(health)) if health is not None else None
         elif a.asset_type == AssetType.SG:
             attached = (a.spec or {}).get("attached")

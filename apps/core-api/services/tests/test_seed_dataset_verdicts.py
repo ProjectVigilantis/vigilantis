@@ -47,7 +47,7 @@ def _evaluate(name, profile, environment):
     tags = {"Name": name}
     if environment:
         tags["Environment"] = environment
-    return evaluate_ec2(sum(series) / len(series), max(series), len(series), name, tags)
+    return evaluate_ec2(sum(series) / len(series), max(series), len(series), tags)
 
 
 def test_expected_covers_every_seed_instance():
