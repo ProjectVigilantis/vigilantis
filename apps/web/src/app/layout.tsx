@@ -20,8 +20,9 @@ export const metadata: Metadata = {
   description: "AWS 자산 최적화·보안 위협 대응 관제 대시보드",
 };
 
-// 다크 고정(#87)의 마감. CSS가 아니라 meta로 선언해야 CSS 로드 전에 적용돼
-// 첫 페인트에서 스크롤바가 흰색으로 번쩍이지 않는다.
+// 다크 고정(#87)의 마감. 이슈 #89 권장안이자 Next 16 표준 API이고, CSS 로드가
+// 실패·지연되는 경로에서도 문서 color scheme이 유효하다. 테마 선언을 dark 클래스
+// 옆 한 곳에 모아둔다.
 export const viewport: Viewport = { colorScheme: "dark" };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
