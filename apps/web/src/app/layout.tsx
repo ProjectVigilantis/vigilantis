@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 
 import { Gnb } from "@/components/gnb";
@@ -19,6 +19,10 @@ export const metadata: Metadata = {
   title: "Vigilantis",
   description: "AWS 자산 최적화·보안 위협 대응 관제 대시보드",
 };
+
+// 다크 고정(#87)의 마감. CSS가 아니라 meta로 선언해야 CSS 로드 전에 적용돼
+// 첫 페인트에서 스크롤바가 흰색으로 번쩍이지 않는다.
+export const viewport: Viewport = { colorScheme: "dark" };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
