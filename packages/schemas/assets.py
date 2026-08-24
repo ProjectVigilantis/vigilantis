@@ -93,6 +93,19 @@ class SecurityGroupAsset(BaseModel):
     )
 
 
+class NaclAsset(BaseModel):
+    """Network ACL. 토폴로지 EC2→NACL(PROTECTED_BY, subnet 연관 기반) 산출용."""
+    asset_type: AssetType = Field(default=AssetType.NACL, frozen=True)
+    arn: str = Field(..., description="NACL ARN (안정 키)")
+    nacl_id: str = Field(..., description="acl-xxxx")
+    region: str = Field(..., description="리전")
+    vpc_id: Optional[str] = None
+    is_default: bool = Field(False, description="VPC 기본 NACL 여부")
+    associated_subnet_ids: list[str] = Field(
+        default_factory=list, description="이 NACL 이 연관된 subnet 목록"
+    )
+
+
 class AssetInventory(BaseModel):
     """한 리전 1회 수집 결과. rule_engine 파이프라인의 입력 단위."""
     account_id: str = Field(..., description="AWS 계정 ID")
@@ -103,6 +116,7 @@ class AssetInventory(BaseModel):
     period_seconds: int = Field(..., description="메트릭 집계 주기(초)")
     ec2_instances: list[Ec2Asset] = Field(default_factory=list)
     security_groups: list[SecurityGroupAsset] = Field(default_factory=list)
+    nacls: list[NaclAsset] = Field(default_factory=list)
 
     @computed_field  # type: ignore[prop-decorator]
     @property
