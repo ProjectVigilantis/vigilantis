@@ -52,13 +52,15 @@
 
 모노레포 구조 기준. 하나의 작업이 여러 영역에 걸치면 **주된 영역** 하나를 고른다.
 
+> ADR-0001(단일 FastAPI 백엔드)로 구 `apps/ai-engine`·`apps/scan-worker`·`apps/security-soar`는 `apps/core-api` 하위 모듈로 흡수됐다. DOMAIN은 디렉터리가 아니라 **작업 영역** 축이므로 `AI`·`DATA`·`SEC`는 그대로 유지한다.
+
 | DOMAIN | 범위 | 주요 경로 |
 | --- | --- | --- |
 | `FE` | 프론트엔드 대시보드 | `apps/web` |
-| `BE` | 코어 백엔드 API | `apps/core-api` |
-| `AI` | AI 엔진·4단계 가드레일 | `apps/ai-engine` |
-| `DATA` | 자산/메트릭 수집·Rule Engine | `apps/scan-worker` |
-| `SEC` | 보안 위협 대응(SOAR) | `apps/security-soar` |
+| `BE` | 코어 백엔드 API·DB·실행 | `apps/core-api` (`routers`·`db`·`services/aws`) |
+| `AI` | AI 추론·4단계 가드레일 | `apps/core-api/ai` |
+| `DATA` | 자산/메트릭 수집·Rule Engine | `apps/core-api/services` (`collector`·`rule_engine`·`scheduler`) |
+| `SEC` | 보안 위협 대응(SOAR) | `apps/core-api/security` |
 | `SCHEMA` | 공통 Pydantic 스키마 | `packages/schemas` |
 | `INFRA` | Docker·IaC·CI/CD·배포 | `packages/iac`, `docker-compose.yml`, `.github` |
 | `DOCS` | 문서·ADR | `docs` |
@@ -151,7 +153,7 @@ Refs #7
 Closes #<이슈번호>
 ```
 
-- **리뷰/머지**: 최소 1명 이상(특히 백엔드↔AI↔프론트 API 접점 담당자)의 승인과 CI(GitHub Actions: pytest — Lint·Schema Validation은 도입 예정) 통과 후 머지한다.
+- **리뷰/머지**: 최소 1명 이상(특히 백엔드↔AI↔프론트 API 접점 담당자)의 승인과 CI(GitHub Actions: pytest + LocalStack service container) 통과 후 머지한다. `apps/web` lint·build 잡과 PostgreSQL service container는 추가 예정(#91·#92).
 
 ---
 
