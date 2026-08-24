@@ -166,3 +166,91 @@ def test_persist_inventory_and_run_rule_engine(db, mock_inventory):
     )
     assert item.arn == ec2.arn
     assert item.verdict.value == "COST_CANDIDATE"
+
+
+@pytest.fixture
+def skip_case_inventory() -> AssetInventory:
+    """SKIP 판정(운영 보호)과 비SKIP(후보)을 한 배치에 담아 skip_reason_code 적재를 검증."""
+    now = datetime.now(timezone.utc)
+    idle = dict(
+        cpu_datapoints=336, cpu_avg=1.5, cpu_max=3.2, net_in_avg=100.0, net_out_avg=200.0
+    )
+    return AssetInventory(
+        account_id="123456789012",
+        region="ap-northeast-2",
+        mode="localstack",
+        collected_at=now,
+        lookback_days=14,
+        period_seconds=3600,
+        ec2_instances=[
+            Ec2Asset(
+                arn="arn:aws:ec2:ap-northeast-2:123456789012:instance/i-prod001",
+                instance_id="i-prod001",
+                name="prod-api",
+                instance_type="t3.large",
+                state="running",
+                region="ap-northeast-2",
+                tags={"Name": "prod-api", "Environment": "production"},  # → SKIP_PROD_PROTECTED
+                metric_summary=MetricSummary(**idle),
+            ),
+            Ec2Asset(
+                arn="arn:aws:ec2:ap-northeast-2:123456789012:instance/i-cand001",
+                instance_id="i-cand001",
+                name="dev-idle",
+                instance_type="t3.large",
+                state="running",
+                region="ap-northeast-2",
+                tags={"Name": "dev-idle", "Environment": "dev"},  # → COST_CANDIDATE
+                metric_summary=MetricSummary(**idle),
+            ),
+        ],
+        security_groups=[],
+    )
+
+
+def test_skip_reason_code_persisted(db, skip_case_inventory):
+    """SKIP 판정은 skip_reason_code가 DB에 적재되고, 비SKIP은 null이어야 한다."""
+    res = persist_inventory(skip_case_inventory, db)
+    run_id = res["collection_run_id"]
+
+    run_rule_engine(db, collection_run_id=run_id)
+
+    by_rid = {
+        a.resource_id: a for a in db.execute(select(models.Asset)).scalars().all()
+    }
+    evals = {
+        e.asset_id: e for e in db.execute(select(models.RuleEvaluation)).scalars().all()
+    }
+
+    prod_eval = evals[by_rid["i-prod001"].asset_id]
+    assert prod_eval.verdict == "SKIP"
+    assert prod_eval.skip_reason_code == "SKIP_PROD_PROTECTED"   # 사유 적재 확인
+    assert prod_eval.evaluation_status == "COMPLETED"
+
+    cand_eval = evals[by_rid["i-cand001"].asset_id]
+    assert cand_eval.verdict == "COST_CANDIDATE"
+    assert cand_eval.skip_reason_code is None                    # 비SKIP은 null
+
+    # 계약(SKIP→코드 필수) 위반 없이 AssetItem 변환되는지 라운드트립 검증
+    prod_asset = by_rid["i-prod001"]
+    item = AssetItem.model_validate(
+        {
+            "arn": prod_asset.arn,
+            "resource_id": prod_asset.resource_id,
+            "asset_type": prod_asset.asset_type,
+            "resource_role": "PRIMARY",
+            "name": prod_asset.name,
+            "account_id": prod_asset.account_id,
+            "region": prod_asset.region,
+            "state": prod_asset.state,
+            "spec": prod_asset.spec,
+            "relationships": [],
+            "evaluation_status": prod_eval.evaluation_status,
+            "verdict": prod_eval.verdict,
+            "health_score": prod_eval.health_score,
+            "skip_reason_code": prod_eval.skip_reason_code,
+            "collected_at": prod_asset.collected_at,
+        }
+    )
+    assert item.verdict.value == "SKIP"
+    assert item.skip_reason_code.value == "SKIP_PROD_PROTECTED"
