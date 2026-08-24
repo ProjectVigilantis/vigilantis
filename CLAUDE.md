@@ -153,7 +153,7 @@ Refs #7
 Closes #<이슈번호>
 ```
 
-- **리뷰/머지**: 최소 1명 이상(특히 백엔드↔AI↔프론트 API 접점 담당자)의 승인과 CI(GitHub Actions: pytest + LocalStack service container) 통과 후 머지한다. `apps/web` lint·build 잡과 PostgreSQL service container는 추가 예정(#91·#92).
+- **리뷰/머지**: 최소 1명 이상(특히 백엔드↔AI↔프론트 API 접점 담당자)의 승인과 CI(GitHub Actions: pytest + LocalStack·PostgreSQL service container) 통과 후 머지한다. `apps/web` lint·build 잡은 추가 예정(#91).
 
 ---
 
