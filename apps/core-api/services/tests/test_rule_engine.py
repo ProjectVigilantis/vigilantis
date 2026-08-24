@@ -68,10 +68,12 @@ def test_insufficient_data_takes_precedence():
 
 # _is_prod 태그 인식 (미해결 #4): 키 대소문자 무시 + 값 정확일치
 PROD_TAG_CASES = [
-    {"env": "prod"},          # 키 소문자
-    {"Stage": "PRD"},         # Stage 키 + prd 값
-    {"tier": "Production"},    # tier 키 + 값 대소문자
-    {"ENVIRONMENT": "prod"},  # 키 대문자
+    {"env": "prod"},              # 키 소문자
+    {"Env": "prod"},             # Env 키(#95 명시)
+    {"environment": "production"},  # 소문자 키 + production
+    {"Stage": "PRD"},            # Stage 키 + prd 값
+    {"tier": "Production"},       # tier 키 + 값 대소문자
+    {"ENVIRONMENT": "prod"},     # 키 대문자
 ]
 NON_PROD_TAG_CASES = [
     {"Environment": "staging"},   # staging 은 prod 아님
