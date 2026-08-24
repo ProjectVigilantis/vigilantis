@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 
 import { Gnb } from "@/components/gnb";
@@ -19,6 +19,11 @@ export const metadata: Metadata = {
   title: "Vigilantis",
   description: "AWS 자산 최적화·보안 위협 대응 관제 대시보드",
 };
+
+// 다크 고정(#87)의 마감. 이슈 #89 권장안이자 Next 16 표준 API이고, CSS 로드가
+// 실패·지연되는 경로에서도 문서 color scheme이 유효하다. 테마 선언을 dark 클래스
+// 옆 한 곳에 모아둔다.
+export const viewport: Viewport = { colorScheme: "dark" };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
