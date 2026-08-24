@@ -4,7 +4,7 @@
 > 다른 문서(README, 기획서, MVP 범위 명세 등)와 충돌하면 **이 문서가 이긴다.**
 > 범위·API 계약·역할이 바뀌는 PR은 이 문서 갱신을 포함할 것.
 >
-> **최종 갱신**: 2026-08-21 (김세혁)
+> **최종 갱신**: 2026-08-24 (김세혁)
 
 ---
 
@@ -21,14 +21,14 @@
 - **완료 (구간 요약)**
   - **1–2주차(8/11–8/23) · 설계와 환경 확정** — 모노레포 단일 백엔드 재편, 런북 10종 Action Whitelist 확정·코드화(AI 추천 분리), FE↔BE API 계약 DTO 확정과 내부 공통 계약 코드화, LangGraph 그래프 구조 확정, LocalStack 팀 표준 환경(compose·시드 스크립트·`.env.example`), FE Next.js 16 스캐폴딩·계약 타입·mock 계층·공통 레이아웃, 자산 수집·Rule Engine 1차와 CI(pytest) 가동. 결정 근거는 [ADR-0001](adr/0001-mvp-monorepo-structure.md)–[ADR-0006](adr/0006-localstack-team-standard-env.md).
   - **2주차(8/18–8/23) · 실행 기반 구축** — DB 저장 계층(ORM 13종·Alembic baseline·Repository)과 collector·rule_engine 재연결, Core API 앱 골격·조회 API 3종·로깅, WebSocket 실시간 상태 전송(`/api/v1/ws`), Golden Dataset 20건(`Verdict` 4종·`SkipReasonCode` 5종 전량 커버, 회귀 21건), CI LocalStack service container, FE shadcn 프리미티브·다크 모드 고정.
-  - **3주차(8/24–8/30, 진행 중) · 실행 기반 착수** — 현재까지: CI PostgreSQL service container(#92)로 DB 통합 테스트 28건 상시 skip 해소(미해결 5번 종결), PR 본문 템플릿·리뷰 요청 규칙 코드화(`.github/PULL_REQUEST_TEMPLATE.md`).
+  - **3주차(8/24–8/30, 진행 중) · 실행 기반 착수** — 현재까지: CI PostgreSQL service container(#92)로 DB 통합 테스트 28건 상시 skip 해소(미해결 5번 종결), PR 본문 템플릿·리뷰 요청 규칙 코드화(`.github/PULL_REQUEST_TEMPLATE.md`), `_is_prod` 인식 태그 키·값 집합 확정(#95 → PR #97, 미해결 4번 핵심 해소).
 - **다음 단계 (담당별 1줄)**
   - **김세혁**: Boto3 클라이언트 팩토리·AWS 예외 공통 래퍼 → 스펙 JSON 백업 모듈 → executor 런북 디스패치 테이블. **Dry-Run 호출 시그니처를 안성일과 문서로 합의(8/26 목표)**. CI `apps/web` lint·build 잡 추가(#91).
   - **안성일**: `AIModelClient` 경계(ADR-0005 — 외부 전송 페이로드 마스킹 포함), 가드레일 ①Schema Check ②Action Whitelist, `POST /api/v1/actions/execute` 라우터 골격·Idempotency Key 멱등 처리(김세혁 공동).
-  - **김승철**: `_is_prod` 인식 태그 키·값 집합 확정(#95, **기한 8/27** — 미응답 시 PM 대행 결정), `PROD_HINTS`·`evaluate_ec2` `name` 인자 정리(#96), 자산 연결관계(토폴로지) 산출.
-  - **박지현**: E2E 시연 시나리오 설계서 1차(FinOps·SecOps 2트랙), 실행 계열 테스트 하네스·픽스처 선구축, 회귀 21건 CI 상시 실행 검증. SecOps 정답은 Risk Evaluator 대기(미해결 6번).
+  - **김승철**: ~~`_is_prod` 인식 태그 키·값 집합 확정(#95)~~ ✅ 확정(2026-08-24, PR #97 — 기한 8/27 내 본인 결정, PM 대행 불발동). `evaluate_ec2` `name` 인자 정리(#96 — `PROD_HINTS`는 #97에서 제거돼 잔여 범위 축소), 자산 연결관계(토폴로지) 산출(#101).
+  - **박지현**: E2E 시연 시나리오 설계서 1차(FinOps·SecOps 2트랙), 실행 계열 테스트 하네스·픽스처 선구축, 회귀 21건 CI 상시 실행 검증. **`_is_prod` 확정 기준 반영 Golden 경계 케이스 추가**(#95 확정 후속 — 접미 변형 `prod-us-east`류 미탐은 "부분일치 금지" 의도된 결과임을 케이스로 고정). SecOps 정답은 Risk Evaluator 대기(미해결 6번).
   - **유건희**: 다크 고정 마감(#89)·`--font-sans` 순환 참조 수정(#90), 자산 목록·상세 화면 mock 연동 마감.
-- **주차 종료 판정 기준**: ⓐ executor ↔ 가드레일 ④ Dry-Run 인터페이스 문서 합의 ⓑ `_is_prod` 정책 결정 종결(또는 PM 대행) ⓒ CI에서 DB 통합 테스트 28건 실행(skip 0건) ⓓ `POST /actions/execute` 멱등 처리 동작(실행 스텁 허용) ⓔ FE 자산 화면 mock 100% 렌더 ⓕ LLM 외부 전송 페이로드 마스킹 적용.
+- **주차 종료 판정 기준**: ⓐ executor ↔ 가드레일 ④ Dry-Run 인터페이스 문서 합의 ⓑ ~~`_is_prod` 정책 결정 종결(또는 PM 대행)~~ ✅ 충족(2026-08-24, #95) ⓒ CI에서 DB 통합 테스트 28건 실행(skip 0건) ⓓ `POST /actions/execute` 멱등 처리 동작(실행 스텁 허용) ⓔ FE 자산 화면 mock 100% 렌더 ⓕ LLM 외부 전송 페이로드 마스킹 적용.
 
 ## MVP 확정 범위
 
@@ -77,6 +77,7 @@
 | 2026-08-18 | **실행 축 어휘 교체(ADR-0004 1차 개정)** — 확정본 런북 명세서의 `approval_mode`·`trigger_source` 두 축을 의도적으로 교체. `trigger_source`(실행별 기록) = `USER_APPROVAL`·`PRE_MITIGATION_0_5S`·`TIMEOUT_ISOLATION_1M`·`AUTO_ON_FAILURE`, `approval_mode`(런북별 정책) = `HUMAN_ONLY`·`SYSTEM_OR_HUMAN`. 런타임 의미 무변경이라 supersede 없이 1차 개정으로 종결 | [ADR-0004](adr/0004-rollback-runbook-whitelist-registration.md) |
 | 2026-08-18 | **LangGraph 그래프 구조 확정** — FinOps·SecOps 두 그래프로 분리, Checkpointer 미사용(업무 상태는 PostgreSQL 단일 원천·그래프 내 승인 중단점 없음), Guardrail·DB 저장·AWS 실행·승인은 그래프 밖, 모델 호출은 `AIModelClient` 경계 경유. 판단 근거는 구조화 필드로만 보존(Prompt 전문·내부 추론 텍스트 미보존) | [ADR-0005](adr/0005-langgraph-stateless-domain-graphs.md) |
 | 2026-08-19 | **LocalStack 팀 표준 환경 전략 확정** — 단일 compose(Community 전용·버전 고정), 시드 = Boto3 스크립트 단일 원천(멱등·rule_engine 임계값 결합·실 AWS 실행 거부), `AWS_ENDPOINT_URL` 스위치 규약 전 모듈 승격(환경 감지 분기 금지), 검증 한계 4경로(Dry-Run·Status Check·CloudWatch·ALB TG/ASG)는 6–7주차 실 AWS 스모크로 이월 | [ADR-0006](adr/0006-localstack-team-standard-env.md) |
+| 2026-08-24 | **`_is_prod` 운영 자산 인식 기준 확정** — 규칙 소유자(김승철) 결정. **키**(대소문자 무시) = `environment`·`env`·`stage`·`tier`, **값**(소문자 정확일치·부분일치 금지) = `prod`·`production`·`prd`. 부분 문자열 매칭은 영구 금지(`product-service`류 오탐 방지, #81). 접미 변형(`prod-us-east` 등) 미탐은 의도된 결과이며 Golden 경계 케이스로 고정 | 이슈 #95 / PR #97 |
 
 ## API 계약 (확정 — FE↔BE 공개 계약, 코드 원천: `packages/schemas/api/`)
 
