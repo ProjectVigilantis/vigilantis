@@ -17,7 +17,7 @@
     {
       "case_id": "A6",
       "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00011",
-      "purpose": "Environment=production 태그로만 prod 판정(이름에는 prod 문자열 없음) — _is_prod는 Environment 태그 정확 매칭만 본다(#88). 이름에 prod를 넣으면 이름 부분 매칭으로 되돌아가는 회귀가 생겨도 정답이 그대로 나와 태그 경로 검증이 무의미해지므로 이름에서 prod를 뺀다. 동시에 cpu_avg 1.0으로 명백한 저활성이지만 prod 보호가 idle 판정보다 우선. 순서가 뒤바뀌면 COST_CANDIDATE가 되어 실패",
+      "purpose": "Environment=production 태그로만 prod 판정(이름에는 prod 문자열 없음) — _is_prod는 인식 키(Environment·env·Stage·Tier, 대소문자 무시)의 값이 prod·production·prd(정확일치)일 때 prod로 본다(#95). 이름에 prod를 넣으면 이름 부분 매칭으로 되돌아가는 회귀가 생겨도 정답이 그대로 나와 태그 경로 검증이 무의미해지므로 이름에서 prod를 뺀다. 동시에 cpu_avg 1.0으로 명백한 저활성이지만 prod 보호가 idle 판정보다 우선. 순서가 뒤바뀌면 COST_CANDIDATE가 되어 실패",
       "evaluation_status": "COMPLETED",
       "verdict": "SKIP",
       "skip_reason_code": "SKIP_PROD_PROTECTED"

@@ -74,10 +74,12 @@ PROD_TAG_CASES = [
     {"Stage": "PRD"},            # Stage 키 + prd 값
     {"tier": "Production"},       # tier 키 + 값 대소문자
     {"ENVIRONMENT": "prod"},     # 키 대문자
+    {"Environment": " PROD "},   # 값 공백 트림(.strip) 커버
 ]
 NON_PROD_TAG_CASES = [
     {"Environment": "staging"},   # staging 은 prod 아님
     {"Environment": "dev"},
+    {"Environments": "prod"},     # near-miss 키(오인식 방지)
     {"Name": "product-service"},  # 값 부분일치 오탐 없어야(#81)
     {},
 ]
