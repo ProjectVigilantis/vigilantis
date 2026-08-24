@@ -1,4 +1,4 @@
-// enum 한글 표기 사전 — 화면설계서 v1.4 §3.2 표를 계약 타입(@/types/api)에서 파생해 한 곳에 모읍니다.
+// enum 한글 표기 사전 — 화면설계서 v1.5 §3.2 표를 계약 타입(@/types/api)에서 파생해 한 곳에 모읍니다.
 
 import type {
   AssetType,
@@ -19,7 +19,15 @@ import type {
  * 화면설계서 3.2 표의 "색" 열. 실제 CSS 클래스 매핑은 StatusBadge가 소유한다
  * (사전은 의미만, 스타일은 컴포넌트 — 색 정의가 두 곳에 흩어지지 않게).
  */
-export type LabelTone = 'neutral' | 'gray' | 'yellow' | 'orange' | 'red' | 'blue' | 'green';
+export type LabelTone =
+  | 'neutral'
+  | 'gray'
+  | 'yellow'
+  | 'orange'
+  | 'red'
+  | 'blue'
+  | 'green'
+  | 'purple';
 
 export interface EnumLabel {
   /** 화면에 그대로 출력하는 표시명. */
@@ -77,12 +85,17 @@ export const VERDICT_LABELS: LabelMap<Verdict> = {
   SKIP: { label: '제외', tone: 'gray' }, // 사유는 skip_reason_code 배지를 함께 표시
 };
 
+/**
+ * v1.5에서 5종을 색으로 분리했다(§3.2). 전부 회색이면 "왜 제외됐는지"를 배지 텍스트로만
+ * 읽어야 하는데, 제외 사유는 후속 조치가 서로 다르다 — 데이터 부족은 재수집으로 풀리고
+ * 운영 보호는 정책이라 안 풀린다. 색이 그 차이를 먼저 알려준다.
+ */
 export const SKIP_REASON_LABELS: LabelMap<SkipReasonCode> = {
-  SKIP_INSUFFICIENT_DATA: { label: '데이터 부족', tone: 'gray' },
-  SKIP_PROD_PROTECTED: { label: '운영 보호 대상', tone: 'gray' },
-  SKIP_LOW_UTIL: { label: '저사용 임계 미달', tone: 'gray' },
-  SKIP_WHITELISTED: { label: '예외 등록됨', tone: 'gray' },
-  SKIP_ACTIVE: { label: '활성 자산', tone: 'gray' },
+  SKIP_INSUFFICIENT_DATA: { label: '데이터 부족', tone: 'yellow' }, // 데이터 문제 — 재수집으로 풀림
+  SKIP_PROD_PROTECTED: { label: '운영 보호 대상', tone: 'blue' }, // 정책상 보호
+  SKIP_LOW_UTIL: { label: '저사용 임계 미달', tone: 'orange' }, // 기준만 못 넘음 — 재검토 여지
+  SKIP_WHITELISTED: { label: '예외 등록됨', tone: 'purple' }, // 사람이 등록한 예외
+  SKIP_ACTIVE: { label: '활성 자산', tone: 'green' }, // 정상 사용 중
 };
 
 export const CATEGORY_LABELS: LabelMap<IncidentCategory> = {
