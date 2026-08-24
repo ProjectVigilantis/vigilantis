@@ -20,7 +20,12 @@ from typing import Optional
 IDLE_CPU_AVG = 5.0        # 평균 CPU 이 값 미만이면 저활성 후보
 SPIKE_CPU_MAX = 40.0      # 평균은 낮아도 최대가 이 값 이상이면 스파이크 → 다운사이징 부적합
 MIN_DATAPOINTS = 48       # 최소 관측치(약 2일). 미만이면 데이터부족
-PROD_HINTS = ("prod", "production")
+
+# 운영(prod) 자산 인식 기준 (미해결 #4, 규칙 소유자 확정 2026-08-24)
+#   - 키: 대소문자 무시 비교(소문자로 저장)
+#   - 값: 소문자 정확일치 — 부분 문자열 매칭 금지(product-service류 오탐 방지, #81)
+PROD_TAG_KEYS = ("environment", "env", "stage", "tier")
+PROD_TAG_VALUES = ("prod", "production", "prd")
 
 
 class Verdict(str, Enum):
@@ -39,8 +44,12 @@ class SkipReason(str, Enum):
 
 
 def _is_prod(tags: dict) -> bool:
-    env = str(tags.get("Environment", "")).lower()
-    return env == "production"
+    """운영 자산 여부. 인식 태그 키(PROD_TAG_KEYS)의 값이 PROD_TAG_VALUES 에
+    정확히 들어맞으면 True. 키·값 모두 대소문자 무시, 값은 부분일치 아님."""
+    for key, value in (tags or {}).items():
+        if key.lower() in PROD_TAG_KEYS and str(value).strip().lower() in PROD_TAG_VALUES:
+            return True
+    return False
 
 
 def evaluate_ec2(cpu_avg: Optional[float], cpu_max: Optional[float], cpu_datapoints: Optional[int],
