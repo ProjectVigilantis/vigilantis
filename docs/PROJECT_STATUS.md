@@ -12,21 +12,23 @@
 
 24/7 AWS 자산·보안 상시 관제 + 4단계 AI 가드레일 기반 원클릭 자율 조치 + 양방향 회복(자동 원복/원클릭 해제)을 제공하는 FinSecOps 플랫폼. **1차 발표(10/15) MVP 시연**이 목표다.
 
-## 현재 위치 (2026-08-21 기준)
+## 현재 위치 (2026-08-24 기준)
 
 > 이 섹션은 ⓐ 주차 전환 ⓑ 범위·API 계약·역할·확정 결정 변경 ⓒ 미해결 이슈 상태 변경 시에만 갱신한다.
 > **개별 머지 이력은 이 문서에 복제하지 않는다** — 상세 원천은 [dev 머지 PR 목록](https://github.com/ProjectVigilantis/vigilantis/pulls?q=is%3Apr+is%3Amerged+base%3Adev), 결정 배경은 아래 §확정 결정 변경 로그와 `docs/adr/`다. 일반 기능 PR은 이 문서를 갱신하지 않는다.
 
-- **마일스톤**: 2–3주차(8/18–8/30) — Core API 실행 계층·실시간 상태 전송, 판정 규칙 정밀화.
+- **마일스톤**: 3주차(8/24–8/30) — 실행 기반 착수: 실행 인터페이스 확정(executor ↔ 가드레일 ④ Dry-Run), 판정 규칙 잔여 결정 종결, CI 검증 공백 해소.
 - **완료 (구간 요약)**
   - **1–2주차(8/11–8/23) · 설계와 환경 확정** — 모노레포 단일 백엔드 재편, 런북 10종 Action Whitelist 확정·코드화(AI 추천 분리), FE↔BE API 계약 DTO 확정과 내부 공통 계약 코드화, LangGraph 그래프 구조 확정, LocalStack 팀 표준 환경(compose·시드 스크립트·`.env.example`), FE Next.js 16 스캐폴딩·계약 타입·mock 계층·공통 레이아웃, 자산 수집·Rule Engine 1차와 CI(pytest) 가동. 결정 근거는 [ADR-0001](adr/0001-mvp-monorepo-structure.md)–[ADR-0006](adr/0006-localstack-team-standard-env.md).
-  - **2–3주차(8/18–8/30, 진행 중) · 실행 기반 구축** — 현재까지: DB 저장 계층(ORM 13종·Alembic baseline·Repository)과 collector·rule_engine 재연결, Core API 앱 골격·조회 API 3종·로깅, WebSocket 실시간 상태 전송(`/api/v1/ws`), Golden Dataset 20건(`Verdict` 4종·`SkipReasonCode` 5종 전량 커버, 회귀 21건), CI service container(LocalStack·PostgreSQL), FE shadcn 프리미티브·다크 모드 고정.
+  - **2주차(8/18–8/23) · 실행 기반 구축** — DB 저장 계층(ORM 13종·Alembic baseline·Repository)과 collector·rule_engine 재연결, Core API 앱 골격·조회 API 3종·로깅, WebSocket 실시간 상태 전송(`/api/v1/ws`), Golden Dataset 20건(`Verdict` 4종·`SkipReasonCode` 5종 전량 커버, 회귀 21건), CI LocalStack service container, FE shadcn 프리미티브·다크 모드 고정.
+  - **3주차(8/24–8/30, 진행 중) · 실행 기반 착수** — 현재까지: CI PostgreSQL service container(#92)로 DB 통합 테스트 28건 상시 skip 해소(미해결 5번 종결), PR 본문 템플릿·리뷰 요청 규칙 코드화(`.github/PULL_REQUEST_TEMPLATE.md`).
 - **다음 단계 (담당별 1줄)**
-  - **김세혁**: Boto3 EC2/SG 제어 모듈 + 스펙 JSON 백업·자동 원복 엔진 착수. CI `apps/web` lint·build 잡 추가(#91).
-  - **안성일**: 4단계 가드레일 실행 경로(`POST /api/v1/actions/execute`) → 실행 상태 저장·WebSocket 전파.
-  - **김승철**: `_is_prod` 판정 규칙 잔여 결정(미해결 4번), Skip 사유 적재 검증.
-  - **박지현**: SecOps 정답 확정(Risk Evaluator 구현 대기, 미해결 6번), E2E 시연 시나리오.
-  - **유건희**: 다크 고정 마감(#89)·`--font-sans` 순환 참조 수정(#90), 자산·인시던트 화면 mock 연동.
+  - **김세혁**: Boto3 클라이언트 팩토리·AWS 예외 공통 래퍼 → 스펙 JSON 백업 모듈 → executor 런북 디스패치 테이블. **Dry-Run 호출 시그니처를 안성일과 문서로 합의(8/26 목표)**. CI `apps/web` lint·build 잡 추가(#91).
+  - **안성일**: `AIModelClient` 경계(ADR-0005 — 외부 전송 페이로드 마스킹 포함), 가드레일 ①Schema Check ②Action Whitelist, `POST /api/v1/actions/execute` 라우터 골격·Idempotency Key 멱등 처리(김세혁 공동).
+  - **김승철**: `_is_prod` 인식 태그 키·값 집합 확정(#95, **기한 8/27** — 미응답 시 PM 대행 결정), `PROD_HINTS`·`evaluate_ec2` `name` 인자 정리(#96), 자산 연결관계(토폴로지) 산출.
+  - **박지현**: E2E 시연 시나리오 설계서 1차(FinOps·SecOps 2트랙), 실행 계열 테스트 하네스·픽스처 선구축, 회귀 21건 CI 상시 실행 검증. SecOps 정답은 Risk Evaluator 대기(미해결 6번).
+  - **유건희**: 다크 고정 마감(#89)·`--font-sans` 순환 참조 수정(#90), 자산 목록·상세 화면 mock 연동 마감.
+- **주차 종료 판정 기준**: ⓐ executor ↔ 가드레일 ④ Dry-Run 인터페이스 문서 합의 ⓑ `_is_prod` 정책 결정 종결(또는 PM 대행) ⓒ CI에서 DB 통합 테스트 28건 실행(skip 0건) ⓓ `POST /actions/execute` 멱등 처리 동작(실행 스텁 허용) ⓔ FE 자산 화면 mock 100% 렌더 ⓕ LLM 외부 전송 페이로드 마스킹 적용.
 
 ## MVP 확정 범위
 
@@ -102,7 +104,7 @@
 1. ~~LocalStack 팀 표준 환경~~ ✅ 해소(#62) — [ADR-0006](adr/0006-localstack-team-standard-env.md) 전략 + compose `localstack` 서비스 + `scripts/seed_localstack.py` + `.env.example` 스위치 활성화. 잔여 후속 중 **CI LocalStack service container는 완료**(#65). 남은 것은 6–7주차 실 AWS 스모크 테스트(ADR-0006 §4).
 2. ~~PR #29 후속 보완~~ ✅ 종결(2026-08-19, PM 대행 판단 — 김승철 부재, 기록: 이슈 #67 댓글) — 당초 우려("자체 boto3 로직·시드 없으면 빈 결과 통과")는 현행 `test_collector_raw.py`에서 해소 확인(`collect_region()` 직접 호출, 시드 없으면 assert 실패). dev 머지본(#64) 기준 작성자 외 로컬에서 표준 절차(compose→시드→pytest) 통합 테스트 3건 통과 재현. 잔여였던 **CI LocalStack service container**는 #65로 완료. 김승철 복귀 후 이견 시 재오픈.
 3. ~~README 최신화~~ ✅ 해소(팀명·역할 표·런북 10종·LangGraph 반영). 기획서 docx는 동결 방침이라 갱신 대상 아님.
-4. **`_is_prod` 판정 규칙 — 오탐 해소, 태그 키·값 변형 미탐 잔존** (박지현 제기 #81 → **부분 해소**) — 이름 부분 문자열 매칭을 제거해 `product-service`류 오탐은 해소했고, 판정을 `Environment` 태그 **정확 일치**(`env == "production"`)로 좁혔다. 잔여 두 가지: ① `environment`(소문자)·`Env`·`Stage`·`tier` 등 **다른 태그 키는 여전히 미탐**이며, 종전의 `env` 키 폴백도 함께 제거됐다. ② 값이 `prod`·`Production`이면 불일치라 미탐이다. 시드(`seed_localstack.py`)에 `Environment` 태그를 넣어 **시연 경로는 확보**했으나 규칙 자체의 일반성은 미확정 — 인식할 태그 키·값 집합 확정은 판정 규칙 소유자(김승철) 결정 대기이고, 확정 후 Golden Dataset 경계 케이스를 추가한다. `RUNBOOK_EC2_RIGHTSIZING`은 관제자 승인이라 자동 실행 위험은 없다. 부수: `PROD_HINTS` 상수와 `evaluate_ec2`의 `name` 인자가 미사용으로 남아 정리 대상이다.
+4. **`_is_prod` 판정 규칙 — 오탐 해소, 태그 키·값 변형 미탐 잔존** (박지현 제기 #81 → **부분 해소**) — 이름 부분 문자열 매칭을 제거해 `product-service`류 오탐은 해소했고, 판정을 `Environment` 태그 **정확 일치**(`env == "production"`)로 좁혔다. 잔여 두 가지: ① `environment`(소문자)·`Env`·`Stage`·`tier` 등 **다른 태그 키는 여전히 미탐**이며, 종전의 `env` 키 폴백도 함께 제거됐다. ② 값이 `prod`·`Production`이면 불일치라 미탐이다. 시드(`seed_localstack.py`)에 `Environment` 태그를 넣어 **시연 경로는 확보**했으나 규칙 자체의 일반성은 미확정 — 인식할 태그 키·값 집합 확정은 판정 규칙 소유자(김승철) 결정 대기이고, 확정 후 Golden Dataset 경계 케이스를 추가한다. `RUNBOOK_EC2_RIGHTSIZING`은 관제자 승인이라 자동 실행 위험은 없다. 부수: `PROD_HINTS` 상수와 `evaluate_ec2`의 `name` 인자가 미사용으로 남아 정리 대상이다. **재발행(2026-08-24)**: 원 이슈 #81이 부분 수정 PR(#88)의 `Closes`로 닫혀 잔여 결정이 이 문서 텍스트로만 11일간 남아 있었다. 잔여 항목을 **#95**(태그 키·값 집합 확정, **기한 8/27** — 미응답 시 PM(김세혁) 대행 결정 후 이슈에 근거 기록, 김승철 복귀 후 이견 시 재오픈)와 **#96**(`PROD_HINTS`·`name` 인자 정리, 정책 결정과 무관해 선행 처리 가능)으로 재발행했다. 이후 **부분 수정 PR은 잔여 항목을 반드시 신규 이슈로 재발행한다**(2026-08-24 발효).
 5. ~~CI에 PostgreSQL service container 없음~~ ✅ 해소(#92, 박지현 제기 2026-08-20) — `ci.yml` `test` 잡에 `postgres:16-alpine` service container를 추가했다(이미지·계정·DB명은 compose `db` 서비스와 동일 — 로컬 = CI 동형). 그동안 CI에서 항상 skip되던 **DB 통합 테스트 28건**(`apps/core-api/db/tests` 21 + `apps/core-api/tests` 7)이 실행되며, `health_score` 0–100 정수 변환 등 DB 경유 계약과 Alembic `upgrade head`가 매 PR에서 검증된다. 서비스 장애로 다시 조용히 skip되는 것을 막기 위해 pytest 앞에 접속 확인 스텝을 둔다. **원 제기 문구 정정**: `test_persistence_pipeline`은 저장소에 존재하지 않는 테스트 이름이며(실제 대상은 위 28건), "`ci.yml` 주석에도 명시"는 #65(PR #84)에서 헤더 주석이 교체되며 사라진 서술이다.
 6. **Golden Dataset SecOps 정답 보류** (박지현) — 위협 입력 10건은 작성 완료했으나 `initial_risk_level`·`response_mode`·`reason_codes` 판정 규칙이 미확정이라 정답을 채우면 추측이 된다. Risk Evaluator 구현과 `RiskReasonCode` 값 목록 확정 시 별도 PR. 각 케이스가 강제하는 판정 논점은 `datasets/golden/secops/expected/README.md`에 기록.
 
@@ -121,6 +123,7 @@
 2. `vigilantis-docs/런북 명세서.md` — Action Whitelist 확정 규격 (10종: 본편 7 + 롤백 3)
 3. `vigilantis-docs/시스템 흐름도.md` — MVP 아키텍처·파이프라인
 4. `docs/adr/` — 결정 배경(왜 그렇게 했나)
-5. `vigilantis-docs/1차 발표까지의 마일스톤 및 MVP 범위 명세.md` — 주차별 마일스톤 (※ 범위 서술 일부 구버전: EC2·SG 한정, 런북 2종 예시)
-6. `README.md` — 프로젝트 소개용 (※ 역할 표·오너 주석 구버전)
-7. `vigilantis-docs/기획서/*.docx` — **풀비전 비전 문서(동결)**. 구현 기준 아님.
+5. `vigilantis-docs/마일스톤/` — **주차별 실행 계획(현행)**. 담당별 카드·DoD·주차 종료 판정 기준. 현재 주차: `W03_0824-0830.md`
+6. `vigilantis-docs/1차 발표까지의 마일스톤 및 MVP 범위 명세.md` — 초기 주차 계획 (※ 범위 서술 일부 구버전: EC2·SG 한정, 런북 2종 예시)
+7. `README.md` — 프로젝트 소개용 (※ 역할 표·오너 주석 구버전)
+8. `vigilantis-docs/기획서/*.docx` — **풀비전 비전 문서(동결)**. 구현 기준 아님.
