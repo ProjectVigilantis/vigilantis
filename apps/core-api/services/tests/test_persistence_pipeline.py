@@ -254,3 +254,14 @@ def test_skip_reason_code_persisted(db, skip_case_inventory):
     )
     assert item.verdict.value == "SKIP"
     assert item.skip_reason_code.value == "SKIP_PROD_PROTECTED"
+
+    # update 경로(2회차 run_rule_engine) — 기존 RuleEvaluation 갱신 분기 고정.
+    # SKIP→skip_reason_code 유지, 비SKIP→None 유지(비SKIP 시 코드 지우는 줄 회귀 방어).
+    run_rule_engine(db, collection_run_id=run_id)
+    db.expire_all()
+    evals2 = {
+        e.asset_id: e for e in db.execute(select(models.RuleEvaluation)).scalars().all()
+    }
+    assert len(evals2) == len(evals)  # 중복 insert 아님 = update 경로
+    assert evals2[by_rid["i-prod001"].asset_id].skip_reason_code == "SKIP_PROD_PROTECTED"
+    assert evals2[by_rid["i-cand001"].asset_id].skip_reason_code is None
