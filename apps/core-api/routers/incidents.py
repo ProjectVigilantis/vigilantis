@@ -11,7 +11,6 @@
 
 from __future__ import annotations
 
-import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends
@@ -32,6 +31,7 @@ from db.repositories import executions as executions_repo
 from db.repositories import incidents as incidents_repo
 from db.session import get_db
 from exceptions import ApiError
+from identifiers import canonical_id
 
 router = APIRouter(prefix="/api/v1", tags=["incidents"])
 
@@ -64,9 +64,13 @@ def list_incidents(
 
 
 @router.get("/incidents/{incident_id}", response_model=IncidentResponse)
-def get_incident(incident_id: uuid.UUID, db: Session = Depends(get_db)) -> IncidentResponse:
-    """경로 인자를 UUID로 선언해 형식 오류는 422 봉투로 떨어진다(DB 오류 방지)."""
-    row = incidents_repo.get_incident(db, str(incident_id))
+def get_incident(incident_id: str, db: Session = Depends(get_db)) -> IncidentResponse:
+    """형식이 어긋난 식별자도 404다 — 계약이 UUID를 요구하지 않으므로 계약 위반이
+    아니라 없는 인시던트로 본다. 조회 전 변환은 DB 캐스트 오류(500)를 막는다."""
+    stored_id = canonical_id(incident_id)
+    if stored_id is None:
+        raise ApiError(ErrorCode.INCIDENT_NOT_FOUND)
+    row = incidents_repo.get_incident(db, stored_id)
     if row is None:
         raise ApiError(ErrorCode.INCIDENT_NOT_FOUND)
 

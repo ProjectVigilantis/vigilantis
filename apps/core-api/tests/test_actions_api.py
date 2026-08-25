@@ -124,6 +124,10 @@ def test_unknown_incident_returns_404_envelope(client_pg, incident_id):
     )
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "INCIDENT_NOT_FOUND"
+    # 상세 조회도 같은 값에 같은 코드로 답한다 — FE가 한 갈래로 분기한다
+    detail = client_pg.get(f"/api/v1/incidents/{incident_id}")
+    assert detail.status_code == 404
+    assert detail.json()["error"]["code"] == "INCIDENT_NOT_FOUND"
 
 
 @pytest.mark.parametrize("status", [

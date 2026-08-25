@@ -14,9 +14,7 @@
 
 from __future__ import annotations
 
-import uuid
 from dataclasses import dataclass
-from typing import Optional
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -31,6 +29,7 @@ from db import models
 from db.repositories import executions as executions_repo
 from db.repositories import incidents as incidents_repo
 from exceptions import ApiError
+from identifiers import canonical_id
 
 
 @dataclass(frozen=True)
@@ -51,22 +50,12 @@ def _to_response(row: models.ActionExecution) -> ExecuteActionResponse:
     )
 
 
-def _canonical_incident_id(value: str) -> Optional[str]:
-    """계약상 incident_id는 자유 문자열이지만 저장 컬럼은 uuid다 — 저장 값과 같은
-    정규형(소문자·하이픈)으로 맞춰 조회·재요청 비교가 표기 차이에 흔들리지 않게
-    한다. 형식이 어긋난 값을 그대로 조회하면 캐스트 오류로 500이 된다."""
-    try:
-        return str(uuid.UUID(value))
-    except ValueError:
-        return None
-
-
 def _replay_or_conflict(
     existing: models.ActionExecution, request: ExecuteActionRequest
 ) -> ExecutionReservation:
     """같은 Key가 같은 조치를 가리킬 때만 재요청이다 — 다른 조치면 409."""
     if (
-        existing.incident_id != _canonical_incident_id(request.incident_id)
+        existing.incident_id != canonical_id(request.incident_id)
         or existing.runbook_id != request.runbook_id
     ):
         raise ApiError(ErrorCode.IDEMPOTENCY_KEY_CONFLICT)
@@ -77,7 +66,7 @@ def _executable_candidate(
     db: Session, request: ExecuteActionRequest
 ) -> models.RunbookCandidate:
     """요청한 Runbook과 일치하는 EXECUTABLE 후보. 없으면 409로 거절한다."""
-    incident_id = _canonical_incident_id(request.incident_id)
+    incident_id = canonical_id(request.incident_id)
     if incident_id is None or incidents_repo.get_incident(db, incident_id) is None:
         raise ApiError(ErrorCode.INCIDENT_NOT_FOUND)
 
