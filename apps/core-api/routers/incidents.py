@@ -90,7 +90,7 @@ def get_incident(incident_id: uuid.UUID, db: Session = Depends(get_db)) -> Incid
             "runbook_id": execution.runbook_id,
             "status": execution.status,
             # 복구 가능 목록은 Backup 결속 등 실행 흐름 데이터로 구성한다 —
-            # 그 구현은 조치 실행 작업으로 유예, 조회 단계는 빈 목록(Issue #68 범위 밖)
+            # 그 구현은 Issue #126(롤백 실행 접수·복구 목록)으로 유예, 조회 단계는 빈 목록
             "available_recovery_runbook_ids": [],
             "updated_at": execution.updated_at,
         }
