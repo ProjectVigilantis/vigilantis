@@ -39,7 +39,7 @@ SG_CASES = [
 
 @pytest.mark.parametrize("name,avg,mx,dp,tags,exp_v,exp_s", EC2_CASES)
 def test_ec2_verdicts(name, avg, mx, dp, tags, exp_v, exp_s):
-    verdict, skip, health = evaluate_ec2(avg, mx, dp, name, tags)
+    verdict, skip, health = evaluate_ec2(avg, mx, dp, tags)
     assert verdict == exp_v
     assert skip == exp_s
     assert health == round(avg, 2)
@@ -54,14 +54,14 @@ def test_sg_verdicts(name, attached, openw, exp_v, exp_s):
 
 def test_prod_protected_via_tag():
     # 이름에 prod 가 없어도 태그로 운영 자산이면 보호
-    verdict, skip, _ = evaluate_ec2(1.0, 2.0, 300, "svc-01", {"Environment": "production"})
+    verdict, skip, _ = evaluate_ec2(1.0, 2.0, 300, {"Environment": "production"})
     assert verdict == Verdict.SKIP
     assert skip == SkipReason.SKIP_PROD_PROTECTED
 
 
 def test_insufficient_data_takes_precedence():
     # 데이터부족이 최우선 — idle 처럼 보여도 판정 보류
-    verdict, skip, _ = evaluate_ec2(1.0, 2.0, 10, "dev-brandnew")
+    verdict, skip, _ = evaluate_ec2(1.0, 2.0, 10)
     assert verdict == Verdict.SKIP
     assert skip == SkipReason.SKIP_INSUFFICIENT_DATA
 
@@ -88,7 +88,7 @@ NON_PROD_TAG_CASES = [
 @pytest.mark.parametrize("tags", PROD_TAG_CASES)
 def test_is_prod_recognized(tags):
     # idle 지표라도 운영 태그면 보호 스킵
-    verdict, skip, _ = evaluate_ec2(1.0, 2.0, 300, "x", tags)
+    verdict, skip, _ = evaluate_ec2(1.0, 2.0, 300, tags)
     assert verdict == Verdict.SKIP
     assert skip == SkipReason.SKIP_PROD_PROTECTED
 
@@ -96,6 +96,6 @@ def test_is_prod_recognized(tags):
 @pytest.mark.parametrize("tags", NON_PROD_TAG_CASES)
 def test_non_prod_idle_is_candidate(tags):
     # 비운영 idle 은 다운사이징 후보(오탐 없어야)
-    verdict, skip, _ = evaluate_ec2(1.0, 2.0, 300, "x", tags)
+    verdict, skip, _ = evaluate_ec2(1.0, 2.0, 300, tags)
     assert verdict == Verdict.COST_CANDIDATE
     assert skip is None
