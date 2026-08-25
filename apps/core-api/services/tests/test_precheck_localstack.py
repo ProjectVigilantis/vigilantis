@@ -90,11 +90,15 @@ class Loader:
     def get(self, backup_record_id):
         return self.record if self.record.backup_record_id == backup_record_id else None
 
-    def latest_for_target(self, target_arn, backup_type):
+    def latest_for_target(self, target_arn, backup_type, payload_match=None):
         record = self.record
-        if record.target_arn == target_arn and record.backup_type == backup_type:
-            return record
-        return None
+        if record.target_arn != target_arn or record.backup_type != backup_type:
+            return None
+        if payload_match and any(
+            record.payload.get(key) != value for key, value in payload_match.items()
+        ):
+            return None
+        return record
 
 
 def backup(target_arn, backup_type, payload):

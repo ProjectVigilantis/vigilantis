@@ -188,9 +188,10 @@ class FakeClient:
 @pytest.fixture
 def aws(monkeypatch):
     """executor가 쓰는 클라이언트를 가짜로 갈아 끼운다. 기본은 전부 통과 경로."""
-    state = {"overrides": {}, "calls": []}
+    state = {"overrides": {}, "calls": [], "clients": []}
 
     def factory(service, region=None, **_):
+        state["clients"].append((service, region))
         return FakeClient(state["overrides"], state["calls"])
 
     monkeypatch.setattr(ex, "aws_client", factory)
@@ -199,6 +200,7 @@ def aws(monkeypatch):
         state["overrides"].update(overrides)
 
     configure.calls = state["calls"]
+    configure.clients = state["clients"]
     return configure
 
 
@@ -207,17 +209,27 @@ class Loader:
 
     def __init__(self, record):
         self.record = record
+        self.match_calls = []
 
     def get(self, backup_record_id):
         if self.record and self.record.backup_record_id == backup_record_id:
             return self.record
         return None
 
-    def latest_for_target(self, target_arn, backup_type):
+    def latest_for_target(self, target_arn, backup_type, payload_match=None):
+        self.match_calls.append(payload_match)
         record = self.record
-        if record and record.target_arn == target_arn and record.backup_type == backup_type:
-            return record
-        return None
+        if not (
+            record
+            and record.target_arn == target_arn
+            and record.backup_type == backup_type
+        ):
+            return None
+        if payload_match and any(
+            record.payload.get(key) != value for key, value in payload_match.items()
+        ):
+            return None
+        return record
 
 
 def loader_for(runbook_id: str, *, payload=None, target_arn=None, backup_type=None):
@@ -479,6 +491,8 @@ def test_dry_run_flag_is_always_set(aws):
         "create_snapshot",
         "delete_volume",
         "create_launch_template",
+        "authorize_security_group_ingress",
+        "authorize_security_group_egress",
     }
     calls = [(op, kwargs) for op, kwargs in aws.calls if op in mutating]
     assert calls, "변경 계열 호출이 하나도 없었습니다 — 전제가 깨졌습니다"
@@ -522,11 +536,13 @@ def test_nacl_restore_refuses_to_delete_an_allow_rule(aws):
 
 
 def test_nacl_restore_requires_the_backup_rule_index_to_match(aws):
-    outcome = run(
-        "RUNBOOK_NACL_RESTORE",
-        loader=loader_for("RUNBOOK_NACL_RESTORE", payload={"rule_number": 900, "egress": False}),
+    """다른 규칙의 백업으로는 복원하지 않는다 — 조회 자체가 rule index로 좁혀진다."""
+    loader = loader_for(
+        "RUNBOOK_NACL_RESTORE", payload={"rule_number": 900, "egress": False}
     )
-    assert (outcome.passed, outcome.reason_code) == (False, R.PRECHECK_PARAM_INVALID)
+    outcome = run("RUNBOOK_NACL_RESTORE", loader=loader)
+    assert (outcome.passed, outcome.reason_code) == (False, R.PRECHECK_TARGET_NOT_FOUND)
+    assert loader.match_calls == [{"rule_number": 100, "egress": False}]
 
 
 def test_isolate_requires_the_target_to_be_registered(aws):
@@ -604,3 +620,124 @@ def test_no_input_makes_precheck_raise(runbook_id, params, aws):
     target_arn, _ = VALID[runbook_id]
     outcome = ex.precheck(runbook_id, target_arn, params, backup_loader=Loader(None))
     assert isinstance(outcome, PrecheckOutcome) and not outcome.passed
+
+
+# ------------------------------------------------------------------ 리전
+def test_every_client_is_built_for_the_target_region(aws):
+    """멀티리전 — 기본 리전이 아니라 target_arn의 리전에서 검사해야 한다.
+
+    SSOT의 1-2개 리전 범위에서 두 번째 리전 자산을 기본 리전에서 조회하면
+    자원이 없다고 나오거나(오판정) 같은 ID의 다른 자원을 본다.
+    """
+    for runbook_id in sorted(VALID):
+        run(runbook_id)
+    assert aws.clients, "클라이언트를 하나도 만들지 않았습니다 — 전제가 깨졌습니다"
+    assert {region for _, region in aws.clients} == {REGION}
+
+
+def test_arn_parameter_in_another_region_is_rejected(aws):
+    """ARN 파라미터도 같은 리전이어야 한다 — ③ ARN Match는 target_arn만 본다."""
+    _, params = VALID["RUNBOOK_EC2_ISOLATE"]
+    other = dict(
+        params,
+        target_group_arn=f"arn:aws:elasticloadbalancing:us-east-1:{ACCOUNT}:targetgroup/x/y",
+    )
+    outcome = run("RUNBOOK_EC2_ISOLATE", params=other)
+    assert (outcome.passed, outcome.reason_code) == (False, R.PRECHECK_PARAM_INVALID)
+    assert not aws.calls, "거절은 AWS를 부르기 전에 끝나야 합니다"
+
+
+# ------------------------------------------------------------------ 등록 여부
+def test_isolate_refuses_a_target_that_is_not_registered(aws):
+    """AWS는 미등록 대상에도 설명을 돌려준다 — 목록이 비었는지만 보면 통과한다."""
+    aws(describe_target_health={
+        "TargetHealthDescriptions": [
+            {
+                "Target": {"Id": INSTANCE},
+                "TargetHealth": {"State": "unused", "Reason": "Target.NotRegistered"},
+            }
+        ]
+    })
+    outcome = run("RUNBOOK_EC2_ISOLATE")
+    assert (outcome.passed, outcome.reason_code) == (False, R.PRECHECK_TARGET_NOT_FOUND)
+
+
+def test_isolate_accepts_a_registered_but_unhealthy_target(aws):
+    """등록돼 있으면 헬스 상태와 무관하게 이탈 대상이다."""
+    aws(describe_target_health={
+        "TargetHealthDescriptions": [
+            {
+                "Target": {"Id": INSTANCE},
+                "TargetHealth": {"State": "unhealthy", "Reason": "Target.FailedHealthChecks"},
+            }
+        ]
+    })
+    assert run("RUNBOOK_EC2_ISOLATE").passed
+
+
+# ------------------------------------------------------------------ 백업 선택
+def test_nacl_restore_can_reach_an_older_rule_backup(aws):
+    """같은 NACL에 조치가 누적돼도 대상 규칙의 백업을 고를 수 있어야 한다."""
+
+    class Multi:
+        """규칙마다 백업이 따로 쌓인 로더. 최신은 rule 900이다."""
+
+        def __init__(self):
+            target_arn = VALID["RUNBOOK_NACL_RESTORE"][0]
+            self.records = [
+                ex.BackupRecordView("bk-900", target_arn, ex.BACKUP_NACL_RULE_INDEX,
+                                    {"rule_number": 900, "egress": False}),
+                ex.BackupRecordView("bk-100", target_arn, ex.BACKUP_NACL_RULE_INDEX,
+                                    {"rule_number": 100, "egress": False}),
+            ]
+
+        def get(self, backup_record_id):
+            return None
+
+        def latest_for_target(self, target_arn, backup_type, payload_match=None):
+            for record in self.records:
+                if record.target_arn != target_arn or record.backup_type != backup_type:
+                    continue
+                if payload_match and any(
+                    record.payload.get(key) != value for key, value in payload_match.items()
+                ):
+                    continue
+                return record
+            return None
+
+    assert run("RUNBOOK_NACL_RESTORE", loader=Multi()).passed
+
+
+# ------------------------------------------------------------------ 규칙 재주입 권한
+SG_RULES = {
+    "group_name": "restored",
+    "description": "restored by vigilantis",
+    "vpc_id": "vpc-0abc123456789def0",
+    "ingress_permissions": [{"IpProtocol": "tcp", "FromPort": 443, "ToPort": 443}],
+    "egress_permissions": [{"IpProtocol": "-1"}],
+}
+
+
+def test_sg_recreate_dry_runs_the_rule_reinjection(aws):
+    """create만 확인하면 빈 SG를 만들고 규칙 복원에서 실패하는 경로가 통과한다."""
+    assert run("RUNBOOK_SG_RECREATE", payload=SG_RULES).passed
+    operations = [operation for operation, _ in aws.calls]
+    assert operations == [
+        "create_security_group",
+        "authorize_security_group_ingress",
+        "authorize_security_group_egress",
+    ]
+    assert all(kwargs.get("GroupId") == GROUP for op, kwargs in aws.calls if op.startswith("authorize"))
+
+
+def test_sg_recreate_fails_when_rule_reinjection_is_unauthorized(aws):
+    aws(authorize_security_group_ingress=client_error("UnauthorizedOperation"))
+    outcome = run("RUNBOOK_SG_RECREATE", payload=SG_RULES)
+    assert (outcome.passed, outcome.reason_code) == (False, R.PRECHECK_UNAUTHORIZED)
+
+
+def test_sg_recreate_skips_authorize_for_an_empty_direction(aws):
+    """빈 목록으로 authorize를 부르면 DryRun 이전에 파라미터 오류가 난다."""
+    rules = dict(SG_RULES, egress_permissions=[])
+    assert run("RUNBOOK_SG_RECREATE", payload=rules).passed
+    assert "authorize_security_group_egress" not in [operation for operation, _ in aws.calls]

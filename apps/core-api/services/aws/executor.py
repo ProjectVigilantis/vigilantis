@@ -18,9 +18,11 @@
 # 1. 확정 10종 실행 함수(execute) — 조치 전 스펙 JSON 백업 후 상태 변경
 # 2. 롤백 3종 실행도 executor 경유 — 트리거 판단·감시는 rollback.py 담당
 #
-# 파라미터 형식 검증은 #49(런북별 typed 파라미터 계약)까지의 과도기 코드다. #49가
+# 파라미터 형식 검증은 #154(런북별 typed 파라미터 계약)까지의 과도기 코드다. #154가
 # 확정되면 이 표를 원천으로 packages/schemas에 typed 모델이 생기고, 형식 위반은
-# ④가 아니라 ① Schema Check에서 걸린다.
+# ④가 아니라 ① Schema Check에서 걸린다. 후보(RunbookCandidateDraft)의
+# display_parameters·evidence_ids를 여기 parameters로 바꾸는 변환도 #154 범위다
+# — 그 계약이 서기 전에는 후보를 그대로 이 함수에 넣을 수 없다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -80,12 +82,20 @@ class BackupRecordLoader(Protocol):
         """ID로 백업 레코드 1건. 없으면 None."""
 
     def latest_for_target(
-        self, target_arn: str, backup_type: str
+        self,
+        target_arn: str,
+        backup_type: str,
+        payload_match: Optional[Mapping[str, Any]] = None,
     ) -> Optional[BackupRecordView]:
         """대상 자원의 최신 백업 1건. 없으면 None.
 
         NACL_RESTORE처럼 backup_record_id를 파라미터로 받지 않는 런북이 쓴다
         (런북 명세서 parameters_schema 기준).
+
+        payload_match가 있으면 payload의 해당 키가 전부 같은 레코드만 후보다.
+        한 자원에 조치가 누적되면 대상의 최신 하나만으로는 복원 대상을 고를 수
+        없다 — NACL 하나에 deny 규칙이 둘 이상 쌓이면 오래된 규칙은 복원할 수
+        없게 된다(최신 백업이 항상 다른 규칙을 가리키므로).
         """
 
 
@@ -178,8 +188,10 @@ class _Spec:
     method: VerificationMethod
     operations: tuple[str, ...]
     handler: str                            # 아래 핸들러 함수 이름
-    arn_params: tuple[str, ...] = ()        # 계정·파티션을 대조할 ARN 파라미터
+    arn_params: tuple[str, ...] = ()        # 계정·파티션·리전을 대조할 ARN 파라미터
     backup_type: Optional[str] = None       # 백업 레코드가 필요한 런북만
+    # 대상으로 백업을 찾을 때 payload와 값이 같아야 하는 파라미터 키
+    backup_match_params: tuple[str, ...] = ()
 
 
 _EVIDENCE = {"evidence_id": _non_empty_str}
@@ -230,6 +242,8 @@ RUNBOOK_SPECS: Mapping[str, _Spec] = {
         operations=("ec2.describe_network_acls",),
         handler="_precheck_nacl_restore",
         backup_type=BACKUP_NACL_RULE_INDEX,
+        # backup_record_id를 받지 않는 유일한 롤백 런북이라 rule index로 특정한다
+        backup_match_params=("rule_number", "egress"),
     ),
     RunbookId.RUNBOOK_SG_DELETE_ISOLATED.value: _Spec(
         params={"group_id": _GROUP_ID, **_EVIDENCE},
@@ -301,7 +315,11 @@ RUNBOOK_SPECS: Mapping[str, _Spec] = {
         resource_type="security-group",
         primary_param=None,     # 복원 대상은 백업 레코드가 가리킨다
         method=M.DRY_RUN,
-        operations=("ec2.create_security_group",),
+        operations=(
+            "ec2.create_security_group",
+            "ec2.authorize_security_group_ingress",
+            "ec2.authorize_security_group_egress",
+        ),
         handler="_precheck_sg_recreate",
         backup_type=BACKUP_SG_FULL_RULES,
     ),
@@ -426,6 +444,10 @@ def _validate_scope(spec: _Spec, target: ParsedArn, params: Mapping[str, Any]) -
             return f"{key} ARN 형식 위반"
         if (parsed.partition, parsed.account_id) != (target.partition, target.account_id):
             return f"{key}가 target_arn과 다른 계정을 가리킴"
+        if parsed.region != target.region:
+            # 클라이언트를 target_arn의 리전으로 만들므로, 다른 리전 ARN이 실리면
+            # 그 자원은 조회 자체가 되지 않는다 — 오판정 대신 여기서 거절한다
+            return f"{key}가 target_arn과 다른 리전을 가리킴"
     return None
 
 
@@ -455,9 +477,11 @@ def _dry_run_chain(ctx: _Ctx, calls, *, verified=(), unverified=()) -> PrecheckO
     )
 
 
-def _instance(instance_id: str):
+def _instance(instance_id: str, region: str):
     """인스턴스 1건. (인스턴스, 코드) 짝 — 없으면 코드가 채워진다."""
-    res, code = _call(aws_client("ec2").describe_instances, InstanceIds=[instance_id])
+    res, code = _call(
+        aws_client("ec2", region).describe_instances, InstanceIds=[instance_id]
+    )
     if code is not None:
         return None, code
     for reservation in res.get("Reservations", []):
@@ -478,7 +502,7 @@ def _primary_eni(instance: Mapping[str, Any]) -> Optional[str]:
 
 
 def _precheck_rightsizing(ctx: _Ctx) -> PrecheckOutcome:
-    ec2 = aws_client("ec2")
+    ec2 = aws_client("ec2", ctx.target.region)
     return _dry_run_chain(
         ctx,
         [
@@ -505,7 +529,7 @@ def _precheck_revert_size(ctx: _Ctx) -> PrecheckOutcome:
             verified=["없음(백업 레코드에 instance_type 없음)"],
             unverified=[_DRY_RUN_MISSES],
         )
-    ec2 = aws_client("ec2")
+    ec2 = aws_client("ec2", ctx.target.region)
     return _dry_run_chain(
         ctx,
         [
@@ -522,14 +546,14 @@ def _precheck_revert_size(ctx: _Ctx) -> PrecheckOutcome:
 
 
 def _precheck_sg_delete(ctx: _Ctx) -> PrecheckOutcome:
-    ec2 = aws_client("ec2")
+    ec2 = aws_client("ec2", ctx.target.region)
     return _dry_run_chain(
         ctx, [(ec2.delete_security_group, {"GroupId": ctx.params["group_id"]})]
     )
 
 
 def _precheck_ebs_delete(ctx: _Ctx) -> PrecheckOutcome:
-    ec2 = aws_client("ec2")
+    ec2 = aws_client("ec2", ctx.target.region)
     volume_id = ctx.params["volume_id"]
     return _dry_run_chain(
         ctx,
@@ -567,28 +591,48 @@ def _precheck_sg_recreate(ctx: _Ctx) -> PrecheckOutcome:
             unverified=[_DRY_RUN_MISSES],
         )
 
-    ec2 = aws_client("ec2")
+    ec2 = aws_client("ec2", ctx.target.region)
+    # ADR-0007 §Context 표 4·5행은 authorize 2종도 DryRun 대상으로 뒀다. create만
+    # 보고 통과시키면 빈 SG만 만들어지고 규칙 복원이 권한 부족으로 실패하는 경로를
+    # precheck가 그대로 통과시킨다 — ④가 막아야 할 실패가 실행 중에 난다.
+    # 그룹이 아직 없는 시점에도 성립한다: 존재하지 않는 GroupId로도
+    # DryRunOperation이 돌아온다(#133 ① 실측). 실 AWS 확인은 6-7주차 스모크.
+    calls = [
+        (
+            ec2.create_security_group,
+            {"GroupName": group_name, "Description": description, "VpcId": vpc_id},
+        )
+    ]
+    for operation, permissions in (
+        (ec2.authorize_security_group_ingress, payload["ingress_permissions"]),
+        (ec2.authorize_security_group_egress, payload["egress_permissions"]),
+    ):
+        # 빈 목록으로 authorize를 부르면 DryRun 이전에 파라미터 오류가 난다.
+        # 복원할 규칙이 없는 방향은 실행도 하지 않으므로 검증 대상이 아니다.
+        if permissions:
+            calls.append(
+                (
+                    operation,
+                    {
+                        "GroupId": ctx.target.resource_id,
+                        "IpPermissions": permissions,
+                    },
+                )
+            )
     return _dry_run_chain(
         ctx,
-        [
-            (
-                ec2.create_security_group,
-                {"GroupName": group_name, "Description": description, "VpcId": vpc_id},
-            )
-        ],
+        calls,
         verified=["백업 레코드의 그룹 정의와 규칙 목록 구조"],
-        # authorize_* 는 아직 없는 그룹을 대상으로 하므로 여기서 DryRun하지 않는다.
-        # 실 AWS 동작이 LocalStack과 같다는 보장이 없어 보수적으로 남긴다(6-7주차 스모크).
-        unverified=["규칙 재주입 호출(authorize_ingress/authorize_egress)"],
+        unverified=["재생성된 그룹에 규칙이 실제로 주입된 결과"],
     )
 
 
 # --- 조회 대체 (ADR-0007 §4) ---
 
 
-def _network_acl(acl_id: str):
+def _network_acl(acl_id: str, region: str):
     res, code = _call(
-        aws_client("ec2").describe_network_acls, NetworkAclIds=[acl_id]
+        aws_client("ec2", region).describe_network_acls, NetworkAclIds=[acl_id]
     )
     if code is not None:
         return None, code
@@ -606,7 +650,7 @@ def _find_entry(acl: Mapping[str, Any], rule_number: int, egress: bool):
 
 
 def _precheck_nacl_add_deny(ctx: _Ctx) -> PrecheckOutcome:
-    acl, code = _network_acl(ctx.params["network_acl_id"])
+    acl, code = _network_acl(ctx.params["network_acl_id"], ctx.target.region)
     if code is not None:
         return _fail(
             ctx, code, verified=["없음(NACL 조회 실패)"], unverified=[_DESCRIBE_MISSES]
@@ -627,7 +671,7 @@ def _precheck_nacl_add_deny(ctx: _Ctx) -> PrecheckOutcome:
 
 
 def _precheck_nacl_restore(ctx: _Ctx) -> PrecheckOutcome:
-    acl, code = _network_acl(ctx.params["network_acl_id"])
+    acl, code = _network_acl(ctx.params["network_acl_id"], ctx.target.region)
     if code is not None:
         return _fail(
             ctx, code, verified=["없음(NACL 조회 실패)"], unverified=[_DESCRIBE_MISSES]
@@ -666,7 +710,7 @@ def _precheck_nacl_restore(ctx: _Ctx) -> PrecheckOutcome:
 
 
 def _precheck_isolate(ctx: _Ctx) -> PrecheckOutcome:
-    instance, code = _instance(ctx.params["instance_id"])
+    instance, code = _instance(ctx.params["instance_id"], ctx.target.region)
     if code is not None:
         return _fail(ctx, code, verified=["없음(인스턴스 조회 실패)"], unverified=[_DESCRIBE_MISSES])
     eni = _primary_eni(instance)
@@ -680,7 +724,7 @@ def _precheck_isolate(ctx: _Ctx) -> PrecheckOutcome:
 
     isolation_group_id = ctx.params["isolation_group_id"]
     code = run_dry_run(
-        aws_client("ec2").modify_network_interface_attribute,
+        aws_client("ec2", ctx.target.region).modify_network_interface_attribute,
         NetworkInterfaceId=eni,
         Groups=[isolation_group_id],
     )
@@ -690,7 +734,7 @@ def _precheck_isolate(ctx: _Ctx) -> PrecheckOutcome:
         )
 
     _, code = _call(
-        aws_client("ec2").describe_security_groups, GroupIds=[isolation_group_id]
+        aws_client("ec2", ctx.target.region).describe_security_groups, GroupIds=[isolation_group_id]
     )
     if code is not None:
         return _fail(
@@ -701,7 +745,7 @@ def _precheck_isolate(ctx: _Ctx) -> PrecheckOutcome:
         )
 
     res, code = _call(
-        aws_client("elbv2").describe_target_health,
+        aws_client("elbv2", ctx.target.region).describe_target_health,
         TargetGroupArn=ctx.params["target_group_arn"],
         Targets=[{"Id": ctx.params["instance_id"]}],
     )
@@ -712,7 +756,17 @@ def _precheck_isolate(ctx: _Ctx) -> PrecheckOutcome:
             verified=["인스턴스와 ENI 존재", "ENI 교체 DryRun 통과", "격리용 SG 존재"],
             unverified=[_DESCRIBE_MISSES],
         )
-    if not res.get("TargetHealthDescriptions"):
+    # Targets로 지정한 대상이 등록돼 있지 않아도 AWS는 빈 목록이 아니라
+    # unused / Target.NotRegistered 설명을 돌려준다. 목록이 비었는지만 보면
+    # 수집 이후 이미 이탈한 대상이 등록된 것으로 통과한다 — §4 ISOLATE 통과
+    # 조건 ③이 요구하는 것은 대상이 실제로 등록돼 있는지다.
+    registered = [
+        description
+        for description in res.get("TargetHealthDescriptions") or []
+        if (description.get("TargetHealth") or {}).get("Reason")
+        != "Target.NotRegistered"
+    ]
+    if not registered:
         return _fail(
             ctx,
             R.PRECHECK_TARGET_NOT_FOUND,
@@ -743,7 +797,7 @@ def _precheck_unisolate(ctx: _Ctx) -> PrecheckOutcome:
             unverified=[_DESCRIBE_MISSES],
         )
 
-    instance, code = _instance(ctx.params["instance_id"])
+    instance, code = _instance(ctx.params["instance_id"], ctx.target.region)
     if code is not None:
         return _fail(ctx, code, verified=["없음(인스턴스 조회 실패)"], unverified=[_DESCRIBE_MISSES])
     eni = _primary_eni(instance)
@@ -756,7 +810,7 @@ def _precheck_unisolate(ctx: _Ctx) -> PrecheckOutcome:
         )
 
     code = run_dry_run(
-        aws_client("ec2").modify_network_interface_attribute,
+        aws_client("ec2", ctx.target.region).modify_network_interface_attribute,
         NetworkInterfaceId=eni,
         Groups=restore_groups,
     )
@@ -767,7 +821,7 @@ def _precheck_unisolate(ctx: _Ctx) -> PrecheckOutcome:
 
     # GroupIds에 없는 SG가 하나라도 있으면 InvalidGroup.NotFound가 난다
     _, code = _call(
-        aws_client("ec2").describe_security_groups, GroupIds=list(restore_groups)
+        aws_client("ec2", ctx.target.region).describe_security_groups, GroupIds=list(restore_groups)
     )
     if code is not None:
         return _fail(
@@ -778,7 +832,7 @@ def _precheck_unisolate(ctx: _Ctx) -> PrecheckOutcome:
         )
 
     res, code = _call(
-        aws_client("elbv2").describe_target_groups, TargetGroupArns=[target_group_arn]
+        aws_client("elbv2", ctx.target.region).describe_target_groups, TargetGroupArns=[target_group_arn]
     )
     if code is not None:
         return _fail(
@@ -804,7 +858,7 @@ def _precheck_unisolate(ctx: _Ctx) -> PrecheckOutcome:
 
 def _precheck_enable_autoscaling(ctx: _Ctx) -> PrecheckOutcome:
     instance_id = ctx.params["instance_id"]
-    instance, code = _instance(instance_id)
+    instance, code = _instance(instance_id, ctx.target.region)
     if code is not None:
         return _fail(ctx, code, verified=["없음(인스턴스 조회 실패)"], unverified=[_DESCRIBE_MISSES])
     if instance.get("State", {}).get("Name") != "running":
@@ -816,7 +870,7 @@ def _precheck_enable_autoscaling(ctx: _Ctx) -> PrecheckOutcome:
         )
 
     code = run_dry_run(
-        aws_client("ec2").create_launch_template,
+        aws_client("ec2", ctx.target.region).create_launch_template,
         LaunchTemplateName=_launch_template_name(instance_id),
         LaunchTemplateData={"InstanceType": instance.get("InstanceType")},
     )
@@ -829,7 +883,7 @@ def _precheck_enable_autoscaling(ctx: _Ctx) -> PrecheckOutcome:
         )
 
     res, code = _call(
-        aws_client("autoscaling").describe_auto_scaling_groups,
+        aws_client("autoscaling", ctx.target.region).describe_auto_scaling_groups,
         AutoScalingGroupNames=[_asg_name(instance_id)],
     )
     if code is not None:
@@ -890,11 +944,14 @@ def _load_backup(
         )
 
     record_id = params.get("backup_record_id")
-    record = (
-        loader.get(record_id)
-        if record_id
-        else loader.latest_for_target(target_arn, spec.backup_type)
-    )
+    if record_id:
+        record = loader.get(record_id)
+    else:
+        # 대상으로 찾는 런북은 어느 조치의 백업인지까지 좁혀야 한다
+        match = {key: params[key] for key in spec.backup_match_params}
+        record = loader.latest_for_target(
+            target_arn, spec.backup_type, match or None
+        )
     if record is None:
         return None, _reject(spec, R.PRECHECK_TARGET_NOT_FOUND, "백업 레코드 없음")
     if record.backup_type != spec.backup_type:
