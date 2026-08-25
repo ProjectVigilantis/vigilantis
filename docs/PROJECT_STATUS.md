@@ -26,7 +26,7 @@
   - **김세혁**: ~~Dry-Run 호출 시그니처를 안성일과 문서로 합의(8/26 목표)~~ ✅ 확정(2026-08-24, ADR-0007 / #113 — 기한 내). Boto3 클라이언트 팩토리·AWS 예외 공통 래퍼 → 스펙 JSON 백업 모듈 → executor 런북 디스패치 테이블·`precheck()` 구현. CI `apps/web` lint·build 잡 추가(#91), compose 정리(#94·#111).
   - **안성일**: `AIModelClient` 경계(ADR-0005 — 외부 전송 페이로드 마스킹 포함, #115), 가드레일 ①Schema Check ②Action Whitelist(#114), `POST /api/v1/actions/execute` 라우터 골격·Idempotency Key 멱등 처리(#116, 김세혁 공동).
   - **김승철**: ~~`_is_prod` 인식 태그 키·값 집합 확정(#95)~~ ✅ 확정(2026-08-24, PR #97 — 기한 8/27 내 본인 결정, PM 대행 불발동). `evaluate_ec2` `name` 인자 정리(#96 — `PROD_HINTS`는 #97에서 제거돼 잔여 범위 축소), rule_engine update 경로 SKIP→비SKIP 전이 회귀 테스트(#109 — #99 잔여 재발행). ~~자산 연결관계(토폴로지) 산출(#101)~~ ✅ NACL 축 완료(2026-08-25, PR #101 — subnet 연관 기반 EC2→NACL `PROTECTED_BY`); TG(`REGISTERED_IN`) 축은 `elbv2`가 LocalStack Community 미포함이라 로컬 검증 경로가 없어(ADR-0006 §4) 실 AWS 스모크(6–7주차)로 이월 — 별도 카드 발행 예정.
-  - **박지현**: ~~`_is_prod` 확정 기준 반영 Golden 경계 케이스 추가~~ ✅ 완료(2026-08-25, #124 — 미해결 4번 완전 종결). ~~회귀 CI 상시 실행 검증~~ ✅ 확인(dev CI `419 passed, 5 skipped` — 골든 회귀 21→26건 상시 실행, DB 통합 28건 skip 0건으로 판정 기준 ⓒ 충족. 남은 skip 5건은 전부 미구현 대기 중인 placeholder다). E2E 시연 시나리오 설계서 1차(FinOps·SecOps 2트랙), 실행 계열 테스트 하네스·픽스처 선구축. **가드레일 회귀 테스트 skip 2건 해제**(#114 / PR #123 머지로 선행 조건 해소). SecOps 정답은 Risk Evaluator 대기(미해결 6번).
+  - **박지현**: ~~`_is_prod` 확정 기준 반영 Golden 경계 케이스 추가~~ ✅ 완료(2026-08-25, #124 — 미해결 4번 완전 종결). ~~회귀 CI 상시 실행 검증~~ ✅ 확인(dev CI `419 passed, 5 skipped` — 골든 회귀 21→26건 상시 실행, DB 통합 28건 skip 0건으로 판정 기준 ⓒ 충족. 남은 skip 5건은 전부 미구현 대기 중인 placeholder다). ~~E2E 시연 시나리오 설계서 1차(FinOps·SecOps 2트랙)~~ ✅ 완료(2026-08-25, #132 — `docs/E2E_DEMO_SCENARIOS.md`). 실행 계열 테스트 하네스·픽스처 선구축(#136). **가드레일 회귀 테스트 skip 2건 해제**(#114 / PR #123 머지로 선행 조건 해소). SecOps 정답은 Risk Evaluator 대기(미해결 6번).
   - **유건희**: ~~다크 고정 마감(#89)·`--font-sans` 순환 참조 수정(#90)~~ ✅ 완료(2026-08-24, PR #103·#102). 자산 목록·상세 화면 mock 연동 마감(#106 — 판정 기준 ⓔ), global-error 셸 다크 고정(#112 — #103 잔여 재발행).
 - **주차 종료 판정 기준**: ⓐ ~~executor ↔ 가드레일 ④ Dry-Run 인터페이스 문서 합의~~ ✅ 충족(2026-08-24, ADR-0007 / #113) ⓑ ~~`_is_prod` 정책 결정 종결(또는 PM 대행)~~ ✅ 충족(2026-08-24, #95) ⓒ ~~CI에서 DB 통합 테스트 28건 실행(skip 0건)~~ ✅ 충족(2026-08-25, #92 — dev CI `419 passed, 5 skipped`. 남은 skip 5건은 `test_e2e_scenario` 2 + `test_guardrails` 2 + `test_rollback` 1 로 전부 미구현 대기 QA placeholder이므로 DB 통합 28건은 skip 0건으로 실행 중) ⓓ `POST /actions/execute` 멱등 처리 동작(실행 스텁 허용) ⓔ FE 자산 화면 mock 100% 렌더 ⓕ LLM 외부 전송 페이로드 마스킹 적용.
 
@@ -125,7 +125,8 @@
 2. `vigilantis-docs/런북 명세서.md` — Action Whitelist 확정 규격 (10종: 본편 7 + 롤백 3)
 3. `vigilantis-docs/시스템 흐름도.md` — MVP 아키텍처·파이프라인
 4. `docs/adr/` — 결정 배경(왜 그렇게 했나)
-5. `vigilantis-docs/마일스톤/` — **주차별 실행 계획(현행)**. 담당별 카드·DoD·주차 종료 판정 기준. 현재 주차: `W03_0824-0830.md`
-6. `vigilantis-docs/1차 발표까지의 마일스톤 및 MVP 범위 명세.md` — 초기 주차 계획 (※ 범위 서술 일부 구버전: EC2·SG 한정, 런북 2종 예시)
-7. `README.md` — 프로젝트 소개용 (※ 역할 표·오너 주석 구버전)
-8. `vigilantis-docs/기획서/*.docx` — **풀비전 비전 문서(동결)**. 구현 기준 아님.
+5. [`docs/E2E_DEMO_SCENARIOS.md`](E2E_DEMO_SCENARIOS.md) — **1차 발표 시연 대본의 원천**이자 `tests/test_e2e_scenario.py`의 명세. 위 1–4를 원천으로 삼는 파생 문서라 충돌하면 위가 이긴다. 확정본 대조가 필요한 항목은 문서 내 §대조 필요 목록에 모아둔다
+6. `vigilantis-docs/마일스톤/` — **주차별 실행 계획(현행)**. 담당별 카드·DoD·주차 종료 판정 기준. 현재 주차: `W03_0824-0830.md`
+7. `vigilantis-docs/1차 발표까지의 마일스톤 및 MVP 범위 명세.md` — 초기 주차 계획 (※ 범위 서술 일부 구버전: EC2·SG 한정, 런북 2종 예시)
+8. `README.md` — 프로젝트 소개용 (※ 역할 표·오너 주석 구버전)
+9. `vigilantis-docs/기획서/*.docx` — **풀비전 비전 문서(동결)**. 구현 기준 아님.
