@@ -2,26 +2,18 @@
 
 import { Card } from '@/components/ui/card';
 import { EnumBadge, StatusBadge } from '@/components/status-badge';
-import { ASSET_TYPE_LABELS, NO_VALUE, assetStateLabel } from '@/lib/enum-labels';
+import { ASSET_TYPE_LABELS, NO_VALUE, assetStateEntry } from '@/lib/enum-labels';
 import { cn } from '@/lib/utils';
 import type { AssetItem } from '@/types/api';
 
-/**
- * 미연결 EBS는 비용이 계속 청구되므로 상태에 그 사실을 함께 적는다(§4.2).
- * `state` 원문만으로는 "available = 정상"으로 읽혀 낭비 자산이 정상으로 보인다.
- */
-function stateEntry(asset: AssetItem) {
-  if (asset.asset_type === 'EBS' && asset.spec.attached_instance_ids.length === 0) {
-    return { label: '미연결 (비용 발생)', tone: 'orange' as const };
-  }
-  return assetStateLabel(asset.state);
-}
+/* Row·VerdictArea·HealthArea는 AST-002 상세 패널(asset-detail.tsx)도 그대로 쓴다 —
+   같은 필드를 두 화면이 다르게 그리면 목록과 상세가 어긋난다(§8). */
 
 /**
  * 판정 영역. `evaluation_status`가 COMPLETED가 아니면 그 상태를 그대로 보여준다
  * — 판정 전·실패를 verdict 없음(정상)으로 읽히게 두지 않는다(§6.2).
  */
-function VerdictArea({ asset }: { asset: AssetItem }) {
+export function VerdictArea({ asset }: { asset: AssetItem }) {
   if (asset.evaluation_status !== 'COMPLETED') {
     return <StatusBadge field="evaluation_status" value={asset.evaluation_status} />;
   }
@@ -39,7 +31,7 @@ function VerdictArea({ asset }: { asset: AssetItem }) {
  * 헬스는 EC2 전용 0~100 정수다(계약). 그 외 6종은 항상 null이므로 게이지를 0으로
  * 그리지 않고 `—` + `확인 불가`로 둔다(§3.3).
  */
-function HealthArea({ score }: { score: number | null }) {
+export function HealthArea({ score }: { score: number | null }) {
   if (score === null) {
     return (
       <span className="flex items-center gap-1.5">
@@ -51,7 +43,7 @@ function HealthArea({ score }: { score: number | null }) {
   return <span className="text-foreground tabular-nums">{score}</span>;
 }
 
-function Row({ label, children }: { label: string; children: React.ReactNode }) {
+export function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex items-start justify-between gap-3 text-sm">
       <span className="text-muted-foreground shrink-0">{label}</span>
@@ -69,7 +61,7 @@ export function AssetCard({
   incidentCount: number;
   onSelect?: (asset: AssetItem) => void;
 }) {
-  const state = stateEntry(asset);
+  const state = assetStateEntry(asset);
 
   return (
     <Card

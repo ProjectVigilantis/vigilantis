@@ -1,6 +1,7 @@
 // enum 한글 표기 사전 — 화면설계서 v1.5 §3.2 표를 계약 타입(@/types/api)에서 파생해 한 곳에 모읍니다.
 
 import type {
+  AssetItem,
   AssetType,
   CollectionStatus,
   EvaluationStatus,
@@ -161,3 +162,47 @@ export function assetStateLabel(state: string | null): EnumLabel | null {
   if (state === 'running') return { label: '실행 중', tone: 'green' };
   return { label: state, tone: 'gray' };
 }
+
+/**
+ * 상태 표시 규칙 — 미연결 EBS는 비용이 계속 청구되므로 `available`을 원문대로 두지 않는다(§4.2).
+ * 원문만 보면 "available = 정상"으로 읽혀 낭비 자산이 정상으로 보인다.
+ * 목록 카드와 상세 패널이 같은 문구를 써야 해서 사전에 둔다.
+ */
+export function assetStateEntry(asset: AssetItem): EnumLabel | null {
+  if (asset.asset_type === 'EBS' && asset.spec.attached_instance_ids.length === 0) {
+    return { label: '미연결 (비용 발생)', tone: 'orange' };
+  }
+  return assetStateLabel(asset.state);
+}
+
+/**
+ * 4.3 `spec` key-value 표기명. 자산 유형별 spec 모델(계약)의 필드 합집합이며,
+ * `vpc_id`·`availability_zone`처럼 여러 유형이 공유하는 key는 한 항목으로 둔다.
+ * 사전에 없는 key는 계약이 늘었다는 뜻이라 화면이 key 원문을 그대로 출력한다(누락 은폐 금지).
+ */
+export const SPEC_KEY_LABELS: Record<string, string> = {
+  instance_type: '인스턴스 유형',
+  availability_zone: '가용 영역',
+  vpc_id: 'VPC',
+  subnet_id: '서브넷',
+  private_ip: '사설 IP',
+  description: '설명',
+  attached: 'SG 연결 여부',
+  open_to_world: '전체 개방 포트',
+  is_default: '기본 NACL',
+  associated_subnet_ids: '연결된 서브넷',
+  volume_type: '볼륨 유형',
+  size_gib: '크기 (GiB)',
+  encrypted: '암호화',
+  attached_instance_ids: '연결된 인스턴스',
+  min_size: '최소 용량',
+  max_size: '최대 용량',
+  desired_capacity: '희망 용량',
+  health_check_type: '헬스 체크 유형',
+  latest_version: '최신 버전',
+  default_version: '기본 버전',
+  protocol: '프로토콜',
+  port: '포트',
+  target_type: '대상 유형',
+  health_check_path: '헬스 체크 경로',
+};

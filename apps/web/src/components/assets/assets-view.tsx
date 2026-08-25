@@ -5,28 +5,19 @@
 import { useMemo, useState } from 'react';
 
 import { AssetCard } from '@/components/assets/asset-card';
+import { AssetDetail } from '@/components/assets/asset-detail';
 import { EmptyState } from '@/components/empty-state';
 import { StatusBadge } from '@/components/status-badge';
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { ASSET_TYPE_LABELS, NO_VALUE } from '@/lib/enum-labels';
-import { cn } from '@/lib/utils';
-import type { AssetType, AssetsResponse } from '@/types/api';
+import { ASSET_TYPE_LABELS } from '@/lib/enum-labels';
+import { cn, formatKst } from '@/lib/utils';
+import type { AssetItem, AssetType, AssetsResponse, IncidentListItem } from '@/types/api';
 
 /** §4.2 `낭비 후보만` — Rule이 낭비로 판정한 두 verdict. */
 const WASTE_VERDICTS = ['COST_CANDIDATE', 'UNUSED'] as const;
 
 const ALL = '전체';
-
-/**
- * 타임존을 KST로 고정한다. 고정하지 않으면 SSR(서버 TZ, 보통 UTC)과 하이드레이션(브라우저 TZ)이
- * 서로 다른 문자열을 그려 불일치가 난다 — 로컬은 둘 다 KST라 재현되지 않고 배포에서만 터진다.
- * 관제 대상이 ap-northeast-2이므로 사용자 로컬이 아니라 운영 기준 시각으로 읽는 것이 맞다.
- */
-function formatCollectedAt(iso: string | null): string {
-  if (iso === null) return NO_VALUE;
-  return new Date(iso).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' }) + ' KST';
-}
 
 function Select({
   label,
@@ -59,13 +50,17 @@ function Select({
 
 export function AssetsView({
   data,
-  incidentCountByArn,
+  incidentsByArn,
 }: {
   data: AssetsResponse;
-  /** 인시던트 수는 자산 계약에 없다 — 목록 API의 `subject_arn` 역조인 결과다(§4.2). */
-  incidentCountByArn: Record<string, number>;
+  /** 인시던트는 자산 계약에 없다 — 목록 API의 `subject_arn` 역조인 결과다(§4.2·§4.3). */
+  incidentsByArn: Record<string, IncidentListItem[]>;
 }) {
   const [assetType, setAssetType] = useState<string>(ALL);
+  // AST-002는 이 목록이 이미 받은 단건을 그대로 넘겨 연다 — 신규 페치 없음(§4.3).
+  // 닫아도 selected를 비우지 않는다 — 닫는 애니메이션 도중 본문이 사라지면 빈 패널이 미끄러져 나간다.
+  const [selected, setSelected] = useState<AssetItem | null>(null);
+  const [detailOpen, setDetailOpen] = useState(false);
   const [region, setRegion] = useState<string>(ALL);
   const [wasteOnly, setWasteOnly] = useState(false);
   const [primaryOnly, setPrimaryOnly] = useState(false);
@@ -121,7 +116,7 @@ export function AssetsView({
           확보된 items는 그대로 렌더한다(§4.2 예외). */}
       <div className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs">
         <StatusBadge field="collection_status" value={data.collection_status} />
-        <span>갱신 {formatCollectedAt(data.last_collected_at)}</span>
+        <span>갱신 {formatKst(data.last_collected_at)}</span>
         <span aria-live="polite">
           {visible.length === data.items.length
             ? `${data.items.length}건`
@@ -142,7 +137,11 @@ export function AssetsView({
               <AssetCard
                 key={asset.arn}
                 asset={asset}
-                incidentCount={incidentCountByArn[asset.arn] ?? 0}
+                incidentCount={(incidentsByArn[asset.arn] ?? []).length}
+                onSelect={(a) => {
+                  setSelected(a);
+                  setDetailOpen(true);
+                }}
               />
             ))}
           </div>
@@ -155,6 +154,13 @@ export function AssetsView({
           description="자산 연결관계(relationships) 산출이 선행 조건입니다."
         />
       </TabsContent>
+
+      <AssetDetail
+        asset={selected}
+        incidents={selected ? (incidentsByArn[selected.arn] ?? []) : []}
+        open={detailOpen}
+        onOpenChange={setDetailOpen}
+      />
     </Tabs>
   );
 }
