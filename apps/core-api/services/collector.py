@@ -18,13 +18,18 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
+
+from botocore.exceptions import BotoCoreError, ClientError
 
 from config import get_collector_settings
 from schemas.assets import (
     AssetInventory,
+    AutoScalingGroupAsset,
     EbsAsset,
     Ec2Asset,
+    LaunchTemplateAsset,
     MetricName,
     MetricSeries,
     MetricSummary,
@@ -36,9 +41,27 @@ from schemas.assets import (
 from .aws.client import account_id as _account_id
 from .aws.client import aws_client, deployment_mode, regions
 
+_log = logging.getLogger(__name__)
+
 _METRIC_NAMES = (MetricName.CPU_UTILIZATION, MetricName.NETWORK_IN, MetricName.NETWORK_OUT)
 # get_metric_data 는 호출당 최대 500 쿼리를 받지만 응답 안정성을 위해 보수적으로 끊는다.
 _QUERY_BATCH = 100
+
+
+def _safe_describe(fn, label: str) -> list:
+    """describe 호출 1건을 시도하고, AWS 오류면 빈 목록으로 degrade 한다.
+
+    autoscaling·elbv2 는 LocalStack Community 미포함(ADR-0006 §4)이라 로컬에서
+    `InternalFailure`(ClientError)가 난다. 그 실패가 EC2/SG/EBS/NACL 등 나머지 수집까지
+    무너뜨리면 안 되므로 여기서 흡수한다. 환경(LocalStack 여부)을 보고 분기하지 않고
+    '호출은 시도하되 실패를 잡아 강등'하는 방식이라 ADR-0006 §3(코드 분기 금지)에 저촉되지
+    않는다. 실 AWS 검증은 6~7주차 스모크로 이월(§4). executor._call 과 동일한 결.
+    """
+    try:
+        return fn()
+    except (ClientError, BotoCoreError) as exc:
+        _log.warning("자산 수집 degrade — %s 조회 실패(환경 미지원/권한): %s", label, exc)
+        return []
 
 
 # ------------------------------------------------------------------ 설정
@@ -156,6 +179,22 @@ def _summarize(series_by_metric: dict[MetricName, MetricSeries]) -> MetricSummar
     )
 
 
+def _asg_launch_template(g: dict) -> tuple[str | None, str | None]:
+    """ASG describe 응답에서 (launch_template_id, name) 을 뽑는다(ASG→LT USES 파생용).
+    LaunchTemplate 직접 지정과 MixedInstancesPolicy 두 형태를 모두 본다.
+    LaunchConfiguration 만 쓰는 구형 ASG 는 LT 가 없으므로 (None, None)."""
+    lt = g.get("LaunchTemplate")
+    if not lt:
+        lt = (
+            g.get("MixedInstancesPolicy", {})
+            .get("LaunchTemplate", {})
+            .get("LaunchTemplateSpecification")
+        )
+    if not lt:
+        return None, None
+    return lt.get("LaunchTemplateId"), lt.get("LaunchTemplateName")
+
+
 # ------------------------------------------------------------------ 공개 API
 def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
     """한 리전의 EC2/SG 인벤토리 + 메트릭을 수집해 AssetInventory 로 정형화한다."""
@@ -175,6 +214,15 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
     enis_raw = ec2.describe_network_interfaces()["NetworkInterfaces"]
     nacls_raw = ec2.describe_network_acls()["NetworkAcls"]
     volumes_raw = ec2.describe_volumes()["Volumes"]
+    # Launch Template 은 ec2(Community 지원). ASG 는 autoscaling(Pro 전용)이라 로컬에선
+    # _safe_describe 가 빈 목록으로 degrade 한다(ADR-0006 §4).
+    lts_raw = _safe_describe(
+        lambda: ec2.describe_launch_templates()["LaunchTemplates"], "launch_templates"
+    )
+    asg = aws_client("autoscaling", region)
+    asgs_raw = _safe_describe(
+        lambda: asg.describe_auto_scaling_groups()["AutoScalingGroups"], "auto_scaling_groups"
+    )
     used = _used_sg_ids(instances_raw, enis_raw)
 
     end = datetime.now(timezone.utc)
@@ -251,6 +299,36 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
         for v in volumes_raw
     ]
 
+    lt_assets = [
+        LaunchTemplateAsset(
+            arn=_arn("launch-template", lt["LaunchTemplateId"], region, account_id),
+            launch_template_id=lt["LaunchTemplateId"],
+            name=lt.get("LaunchTemplateName"),
+            region=region,
+            latest_version=lt.get("LatestVersionNumber"),
+            default_version=lt.get("DefaultVersionNumber"),
+        )
+        for lt in lts_raw
+    ]
+
+    asg_assets = []
+    for g in asgs_raw:
+        lt_id, lt_name = _asg_launch_template(g)
+        asg_assets.append(
+            AutoScalingGroupAsset(
+                arn=g["AutoScalingGroupARN"],
+                name=g["AutoScalingGroupName"],
+                region=region,
+                min_size=g["MinSize"],
+                max_size=g["MaxSize"],
+                desired_capacity=g["DesiredCapacity"],
+                health_check_type=g.get("HealthCheckType"),
+                instance_ids=[i["InstanceId"] for i in g.get("Instances", [])],
+                launch_template_id=lt_id,
+                launch_template_name=lt_name,
+            )
+        )
+
     return AssetInventory(
         account_id=account_id,
         region=region,
@@ -261,6 +339,8 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
         security_groups=sg_assets,
         nacls=nacl_assets,
         ebs_volumes=ebs_assets,
+        launch_templates=lt_assets,
+        auto_scaling_groups=asg_assets,
     )
 
 
@@ -298,7 +378,9 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
     sg_count = len(inv.security_groups)
     nacl_count = len(inv.nacls)
     ebs_count = len(inv.ebs_volumes)
-    total = ec2_count + sg_count + nacl_count + ebs_count
+    lt_count = len(inv.launch_templates)
+    asg_count = len(inv.auto_scaling_groups)
+    total = ec2_count + sg_count + nacl_count + ebs_count + lt_count + asg_count
 
     # subnet → NACL ARN (EC2→NACL PROTECTED_BY 파생용)
     subnet_to_nacl = {
@@ -312,6 +394,11 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
     for v in inv.ebs_volumes:
         for iid in v.attached_instance_ids:
             instance_to_volumes.setdefault(iid, []).append(v.arn)
+
+    # instance_id → ASG ARN (EC2→ASG MEMBER_OF 파생용). 인스턴스는 최대 1개 ASG 소속.
+    instance_to_asg = {
+        iid: g.arn for g in inv.auto_scaling_groups for iid in g.instance_ids
+    }
 
     window_end = inv.collected_at
     window_start = window_end - timedelta(days=inv.lookback_days)
@@ -358,6 +445,9 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
             rel_items.append((RelationType.PROTECTED_BY, nacl_arn))
         for vol_arn in instance_to_volumes.get(a.instance_id, []):
             rel_items.append((RelationType.ATTACHED_TO, vol_arn))
+        asg_arn = instance_to_asg.get(a.instance_id)
+        if asg_arn:
+            rel_items.append((RelationType.MEMBER_OF, asg_arn))
         if rel_items:
             assets_repo.replace_relationships(
                 db,
@@ -432,6 +522,57 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
             state=v.state,
         )
 
+    # 5. Launch Template 적재 (판정 비대상)
+    for lt in inv.launch_templates:
+        lt_spec = {
+            "latest_version": lt.latest_version,
+            "default_version": lt.default_version,
+        }
+        assets_repo.upsert_asset(
+            db,
+            arn=lt.arn,
+            asset_type=AssetType.LAUNCH_TEMPLATE,
+            resource_id=lt.launch_template_id,
+            account_id=inv.account_id,
+            region=inv.region,
+            spec=lt_spec,
+            collection_run_id=collection_run_id,
+            collected_at=inv.collected_at,
+            name=lt.name,
+            state=None,
+        )
+
+    # 6. ASG 적재 (판정 비대상) + ASG→LT(USES) 관계. USES 는 source 가 ASG 라
+    #    EC2 관계 루프가 아니라 여기서 산출한다.
+    for g in inv.auto_scaling_groups:
+        asg_spec = {
+            "min_size": g.min_size,
+            "max_size": g.max_size,
+            "desired_capacity": g.desired_capacity,
+            "health_check_type": g.health_check_type,
+        }
+        asset = assets_repo.upsert_asset(
+            db,
+            arn=g.arn,
+            asset_type=AssetType.AUTO_SCALING_GROUP,
+            resource_id=g.name,
+            account_id=inv.account_id,
+            region=inv.region,
+            spec=asg_spec,
+            collection_run_id=collection_run_id,
+            collected_at=inv.collected_at,
+            name=g.name,
+            state=None,
+        )
+        if g.launch_template_id:
+            lt_arn = _arn("launch-template", g.launch_template_id, inv.region, inv.account_id)
+            assets_repo.replace_relationships(
+                db,
+                source_asset_id=asset.asset_id,
+                items=[(RelationType.USES, lt_arn)],
+                collection_run_id=collection_run_id,
+            )
+
     if started_own_run:
         assets_repo.finish_collection_run(
             db,
@@ -447,6 +588,8 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
         "sg_count": sg_count,
         "nacl_count": nacl_count,
         "ebs_count": ebs_count,
+        "lt_count": lt_count,
+        "asg_count": asg_count,
         "total": total,
     }
 

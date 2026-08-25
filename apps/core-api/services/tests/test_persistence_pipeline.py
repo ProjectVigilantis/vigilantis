@@ -26,8 +26,10 @@ from db import models  # noqa: E402
 from schemas.api.assets import AssetItem, AssetType  # noqa: E402
 from schemas.assets import (  # noqa: E402
     AssetInventory,
+    AutoScalingGroupAsset,
     EbsAsset,
     Ec2Asset,
+    LaunchTemplateAsset,
     MetricSummary,
     NaclAsset,
     OpenPort,
@@ -475,3 +477,94 @@ def test_ebs_topology_and_verdict(db):
     )
     assert item.asset_type == AssetType.EBS
     assert item.verdict.value == "UNUSED"
+
+
+def test_asg_launch_template_topology(db):
+    """ASG·Launch Template 적재 + EC2→ASG(MEMBER_OF) + ASG→LT(USES) 관계 (#149).
+
+    - MEMBER_OF: source 는 멤버 EC2 → EC2 관계 루프에서 산출
+    - USES: source 는 ASG → ASG 적재 루프에서 산출(EC2 아님)
+    - ASG/LT 는 판정 비대상 → NOT_APPLICABLE
+    """
+    now = datetime.now(timezone.utc)
+    lt_arn = "arn:aws:ec2:ap-northeast-2:123456789012:launch-template/lt-t1"
+    asg_arn = "arn:aws:autoscaling:ap-northeast-2:123456789012:autoScalingGroup:uuid:autoScalingGroupName/asg-t1"
+    inv = AssetInventory(
+        account_id="123456789012", region="ap-northeast-2", mode="localstack",
+        collected_at=now, lookback_days=14, period_seconds=3600,
+        ec2_instances=[
+            Ec2Asset(
+                arn="arn:aws:ec2:ap-northeast-2:123456789012:instance/i-asg1",
+                instance_id="i-asg1", name="asg-member", instance_type="t3.large",
+                state="running", region="ap-northeast-2", tags={"Environment": "dev"},
+                metric_summary=MetricSummary(cpu_datapoints=336, cpu_avg=1.5, cpu_max=3.0),
+            )
+        ],
+        launch_templates=[
+            LaunchTemplateAsset(
+                arn=lt_arn, launch_template_id="lt-t1", name="web-lt",
+                region="ap-northeast-2", latest_version=3, default_version=1,
+            )
+        ],
+        auto_scaling_groups=[
+            AutoScalingGroupAsset(
+                arn=asg_arn, name="asg-t1", region="ap-northeast-2",
+                min_size=1, max_size=4, desired_capacity=2, health_check_type="EC2",
+                instance_ids=["i-asg1"], launch_template_id="lt-t1", launch_template_name="web-lt",
+            )
+        ],
+    )
+    res = persist_inventory(inv, db)
+    assert res["lt_count"] == 1
+    assert res["asg_count"] == 1
+    assert res["total"] == 3  # EC2 1 + LT 1 + ASG 1
+
+    # LT/ASG 자산 적재 + spec
+    lt = db.execute(
+        select(models.Asset).where(models.Asset.asset_type == AssetType.LAUNCH_TEMPLATE)
+    ).scalar_one()
+    assert lt.resource_id == "lt-t1"
+    assert lt.spec["latest_version"] == 3
+    asg = db.execute(
+        select(models.Asset).where(models.Asset.asset_type == AssetType.AUTO_SCALING_GROUP)
+    ).scalar_one()
+    assert asg.resource_id == "asg-t1"
+    assert asg.spec["desired_capacity"] == 2
+
+    # EC2→ASG MEMBER_OF (source 는 EC2)
+    ec2 = db.execute(
+        select(models.Asset).where(models.Asset.asset_type == AssetType.EC2)
+    ).scalar_one()
+    ec2_pairs = {
+        (_rt(r), r.target_arn)
+        for r in db.execute(
+            select(models.AssetRelationship).where(
+                models.AssetRelationship.source_asset_id == ec2.asset_id
+            )
+        ).scalars().all()
+    }
+    assert ("MEMBER_OF", asg_arn) in ec2_pairs
+
+    # ASG→LT USES (source 는 ASG, EC2 아님)
+    asg_pairs = {
+        (_rt(r), r.target_arn)
+        for r in db.execute(
+            select(models.AssetRelationship).where(
+                models.AssetRelationship.source_asset_id == asg.asset_id
+            )
+        ).scalars().all()
+    }
+    assert ("USES", lt_arn) in asg_pairs
+
+    # AssetItem 계약 라운드트립 — ASG/LT 는 RUNBOOK_SUPPORT + NOT_APPLICABLE
+    for asset in (lt, asg):
+        item = AssetItem.model_validate(
+            {
+                "arn": asset.arn, "resource_id": asset.resource_id, "asset_type": asset.asset_type,
+                "resource_role": "RUNBOOK_SUPPORT", "name": asset.name,
+                "account_id": asset.account_id, "region": asset.region, "spec": asset.spec,
+                "relationships": [], "evaluation_status": "NOT_APPLICABLE",
+                "collected_at": asset.collected_at,
+            }
+        )
+        assert item.evaluation_status.value == "NOT_APPLICABLE"
