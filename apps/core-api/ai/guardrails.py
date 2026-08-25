@@ -27,10 +27,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Annotated, Final, Optional
+from typing import Annotated, Final
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-
 from schemas.agents import RunbookCandidateDraft
 from schemas.guardrails import (
     GuardrailStep,
@@ -59,21 +58,41 @@ WHITELIST_NOT_AI_RECOMMENDABLE: Final[str] = "WHITELIST_NOT_AI_RECOMMENDABLE"
 _MAX_LOGGED_VIOLATIONS: Final[int] = 10
 _MAX_LOGGED_LOC_CHARS: Final[int] = 80
 
-# "빈 문자열은 거절"(#114)의 코드 표현 — 아래 모델의 모든 문자열 자리에 적용한다
+# 필드별 값 제약 — "빈 문자열은 거절"(#114)에 크기 상한을 더한 것이다.
+#
+# 상한이 필요한 이유: payload는 LLM 출력이라 길이·개수를 스스로 정하는데, 뒤 단계가
+# 이걸 막아주지 않는다. ③은 target_arn만 보고 ④는 executor parameters만 본다(ADR-0007
+# §1). display_parameters·evidence_ids는 JSONB 컬럼이라 DB 폭 제한도 없어, 상한이
+# 없으면 LLM이 지은 문자열이 그대로 저장되고 관제자 대시보드까지 간다. (PR #123 리뷰)
+#
+# runbook_id에만 상한이 없다 — 목록에 있는지는 ②가 판정하는 것이고, 여기서 길이로
+# 미리 거절하면 미등록 ID의 거절 기록이 ②가 아니라 ①에 남는다(#114 설계).
 _NonEmptyStr = Annotated[str, Field(min_length=1)]
+_TargetArn = Annotated[str, Field(min_length=1, max_length=512)]  # DB 컬럼 폭과 동일
+_EvidenceId = Annotated[str, Field(min_length=1, max_length=36)]  # DB의 UUID 길이
+# 아래 넷은 별도 typed/display parameter 계약이 확정될 때까지의 잠정 상한이다
+_ParamKey = Annotated[str, Field(min_length=1, max_length=64)]
+_ParamValue = Annotated[str, Field(min_length=1, max_length=256)]
+_MAX_EVIDENCE_IDS: Final[int] = 50
+_MAX_PARAMS: Final[int] = 20
 
 
 class SchemaCheckedCommand(BaseModel):
     """①이 통과시킨 구조 — RunbookCandidateDraft와 필드 집합은 같고, runbook_id는
     문자열이다(확정 목록에 없는 ID도 이 단계는 통과해야 ②가 판정할 수 있다).
-    빈 문자열 거절은 Draft가 제약하지 않는 display_parameters 내부에도 적용한다."""
+    Draft보다 엄격한 지점은 빈 문자열 거절(display_parameters 내부 포함)과
+    크기 상한이다 — 위 제약 별칭·상수가 정의한다."""
 
     model_config = ConfigDict(extra="forbid")
 
     runbook_id: _NonEmptyStr
-    target_arn: _NonEmptyStr
-    display_parameters: dict[_NonEmptyStr, _NonEmptyStr] = Field(default_factory=dict)
-    evidence_ids: list[_NonEmptyStr] = Field(default_factory=list)
+    target_arn: _TargetArn
+    display_parameters: Annotated[
+        dict[_ParamKey, _ParamValue], Field(max_length=_MAX_PARAMS)
+    ] = Field(default_factory=dict)
+    evidence_ids: Annotated[
+        list[_EvidenceId], Field(max_length=_MAX_EVIDENCE_IDS)
+    ] = Field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -81,7 +100,7 @@ class SchemaCheckOutcome:
     """① 결과. command는 PASS일 때만 있다."""
 
     step_result: GuardrailStepResult
-    command: Optional[SchemaCheckedCommand]
+    command: SchemaCheckedCommand | None
 
 
 @dataclass(frozen=True)
@@ -89,7 +108,7 @@ class ActionWhitelistOutcome:
     """② 결과. draft는 PASS일 때만 있다."""
 
     step_result: GuardrailStepResult
-    draft: Optional[RunbookCandidateDraft]
+    draft: RunbookCandidateDraft | None
 
 
 def _step_pass(step: GuardrailStep) -> GuardrailStepResult:
@@ -106,7 +125,8 @@ def run_schema_check(request: GuardrailValidationRequest) -> SchemaCheckOutcome:
     """① Schema Check — command_payload를 SchemaCheckedCommand로 변환한다.
 
     추가 필드·필수 누락·타입 불일치·빈 문자열은 SCHEMA_INVALID_PAYLOAD로 거절한다.
-    Runbook별 파라미터 계약이 아직 없어(#49) 이 단계가 보는 것은 명령 봉투의 모양뿐이다.
+    Runbook별 typed 파라미터 계약은 별도 후속으로 남아 있어, 이 단계가 보는 것은
+    명령 봉투의 모양뿐이다.
     """
     if request.validation_context != GuardrailValidationContext.AI_CANDIDATE:
         raise NotImplementedError(
@@ -161,6 +181,13 @@ def _whitelist_fail(runbook_id: str, reason_code: str) -> ActionWhitelistOutcome
 
 def run_action_whitelist(command: SchemaCheckedCommand) -> ActionWhitelistOutcome:
     """② Action Whitelist — 확정 10종을 대조하고 AI 추천 가능 7종만 통과시킨다.
+
+    **AI_CANDIDATE 문맥 전용이다.** 승격 대상 RunbookCandidateDraft가 "Graph가 출력하는
+    후보 초안"이고, AI 추천 불가 판정(WHITELIST_NOT_AI_RECOMMENDABLE)도 AI가 제안한
+    경우에만 옳다 — 롤백 3종은 ROLLBACK_EXECUTION에서는 정당한 실행 대상이다(ADR-0004
+    정책 ②의 "트리거는 시스템·관제자"). 지금은 ①이 다른 문맥을 앞에서 막지만 이 함수
+    자체는 문맥을 받지 않으므로, 나머지 문맥은 ③④와 함께 붙일 때 문맥 인자를 받는
+    형태로 바꾼다. (PR #123 리뷰)
 
     통과한 명령만 RunbookCandidateDraft로 승격한다. 두 판정을 이미 거쳤으므로 Draft의
     AI 추천 검증(packages/schemas/agents.py)이 여기서 실패할 수는 없다.
