@@ -174,6 +174,13 @@ class AssetInventory(BaseModel):
     ebs_volumes: list[EbsAsset] = Field(default_factory=list)
     launch_templates: list[LaunchTemplateAsset] = Field(default_factory=list)
     auto_scaling_groups: list[AutoScalingGroupAsset] = Field(default_factory=list)
+    degraded_collectors: list[str] = Field(
+        default_factory=list,
+        description=(
+            "수집 실패로 빈 목록 degrade 된 서비스 라벨(예: auto_scaling_groups). "
+            "비어있지 않으면 부분 수집 — persist 가 CollectionRun 을 PARTIAL 로 마감한다."
+        ),
+    )
 
     @computed_field  # type: ignore[prop-decorator]
     @property

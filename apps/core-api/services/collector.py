@@ -48,19 +48,25 @@ _METRIC_NAMES = (MetricName.CPU_UTILIZATION, MetricName.NETWORK_IN, MetricName.N
 _QUERY_BATCH = 100
 
 
-def _safe_describe(fn, label: str) -> list:
-    """describe 호출 1건을 시도하고, AWS 오류면 빈 목록으로 degrade 한다.
+def _safe_describe(fn, label: str, degraded: list[str]) -> list:
+    """describe 호출 1건을 시도하고, AWS 오류면 빈 목록으로 degrade 하며 label 을 degraded 에 남긴다.
 
-    autoscaling·elbv2 는 LocalStack Community 미포함(ADR-0006 §4)이라 로컬에서
-    `InternalFailure`(ClientError)가 난다. 그 실패가 EC2/SG/EBS/NACL 등 나머지 수집까지
-    무너뜨리면 안 되므로 여기서 흡수한다. 환경(LocalStack 여부)을 보고 분기하지 않고
-    '호출은 시도하되 실패를 잡아 강등'하는 방식이라 ADR-0006 §3(코드 분기 금지)에 저촉되지
-    않는다. 실 AWS 검증은 6~7주차 스모크로 이월(§4). executor._call 과 동일한 결.
+    목적은 부분 실패 시 나머지 수집을 살리는 것이다. autoscaling·elbv2 는 LocalStack
+    Community 미포함(ADR-0006 §4)이라 로컬에서 `InternalFailure`(ClientError)가 나는데,
+    그 실패가 EC2/SG/EBS/NACL 등 나머지 수집까지 무너뜨리면 안 되므로 여기서 흡수한다.
+    환경(LocalStack 여부)을 보고 분기하지 않고 '호출은 시도하되 실패를 잡아 강등'하는
+    방식이라 ADR-0006 §3(코드 분기 금지)에 저촉되지 않는다.
+
+    다만 실 AWS 의 AccessDenied·Throttling 도 같은 ClientError 라 함께 흡수된다 — 이를
+    '정상 0건'과 구별하려고 실패 라벨을 degraded 에 모아, persist 단계가 수집을 PARTIAL
+    로 마감하게 한다(라우터가 PARTIAL → collection_status=PARTIAL 로 표면화). 로그만으로는
+    발표 중 degrade 가 화면에 드러나지 않는다. 실 AWS 검증은 6~7주차 스모크로 이월(§4).
     """
     try:
         return fn()
     except (ClientError, BotoCoreError) as exc:
-        _log.warning("자산 수집 degrade — %s 조회 실패(환경 미지원/권한): %s", label, exc)
+        _log.warning("자산 수집 degrade — %s 조회 실패(환경 미지원/권한/스로틀): %s", label, exc)
+        degraded.append(label)
         return []
 
 
@@ -215,13 +221,14 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
     nacls_raw = ec2.describe_network_acls()["NetworkAcls"]
     volumes_raw = ec2.describe_volumes()["Volumes"]
     # Launch Template 은 ec2(Community 지원). ASG 는 autoscaling(Pro 전용)이라 로컬에선
-    # _safe_describe 가 빈 목록으로 degrade 한다(ADR-0006 §4).
+    # _safe_describe 가 빈 목록으로 degrade 하고 degraded 에 라벨을 남긴다(ADR-0006 §4).
+    degraded: list[str] = []
     lts_raw = _safe_describe(
-        lambda: ec2.describe_launch_templates()["LaunchTemplates"], "launch_templates"
+        lambda: ec2.describe_launch_templates()["LaunchTemplates"], "launch_templates", degraded
     )
     asg = aws_client("autoscaling", region)
     asgs_raw = _safe_describe(
-        lambda: asg.describe_auto_scaling_groups()["AutoScalingGroups"], "auto_scaling_groups"
+        lambda: asg.describe_auto_scaling_groups()["AutoScalingGroups"], "auto_scaling_groups", degraded
     )
     used = _used_sg_ids(instances_raw, enis_raw)
 
@@ -341,6 +348,7 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
         ebs_volumes=ebs_assets,
         launch_templates=lt_assets,
         auto_scaling_groups=asg_assets,
+        degraded_collectors=degraded,
     )
 
 
@@ -564,20 +572,30 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
             name=g.name,
             state=None,
         )
-        if g.launch_template_id:
-            lt_arn = _arn("launch-template", g.launch_template_id, inv.region, inv.account_id)
-            assets_repo.replace_relationships(
-                db,
-                source_asset_id=asset.asset_id,
-                items=[(RelationType.USES, lt_arn)],
-                collection_run_id=collection_run_id,
-            )
+        # USES 는 스냅샷 의미론(source 관계 전량 교체)이라 조건 밖에서 호출한다.
+        # LT 를 떼어낸 ASG 는 items=[] 로 이전 수집의 stale USES 엣지가 지워진다.
+        lt_items = (
+            [(RelationType.USES, _arn("launch-template", g.launch_template_id, inv.region, inv.account_id))]
+            if g.launch_template_id
+            else []
+        )
+        assets_repo.replace_relationships(
+            db,
+            source_asset_id=asset.asset_id,
+            items=lt_items,
+            collection_run_id=collection_run_id,
+        )
 
     if started_own_run:
+        # degrade(빈 목록으로 흡수된 수집 실패)가 한 번이라도 있으면 PARTIAL 로 마감한다.
+        # 실 AWS 의 권한 누락·스로틀링이 '정상 0건'으로 오인되지 않게 화면에 표면화된다.
+        run_status = (
+            CollectionRunStatus.PARTIAL if inv.degraded_collectors else CollectionRunStatus.SUCCESS
+        )
         assets_repo.finish_collection_run(
             db,
             collection_run_id=collection_run_id,
-            status=CollectionRunStatus.SUCCESS,
+            status=run_status,
             finished_at=inv.collected_at,
         )
 
@@ -591,6 +609,7 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
         "lt_count": lt_count,
         "asg_count": asg_count,
         "total": total,
+        "degraded_collectors": list(inv.degraded_collectors),
     }
 
 

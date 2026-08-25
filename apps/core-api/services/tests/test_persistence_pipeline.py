@@ -568,3 +568,42 @@ def test_asg_launch_template_topology(db):
             }
         )
         assert item.evaluation_status.value == "NOT_APPLICABLE"
+
+
+def test_degraded_collectors_finish_run_partial(db):
+    """degrade(수집 실패 흡수)가 있으면 CollectionRun 이 PARTIAL 로 마감되고,
+    LT 없는 ASG 는 USES 관계를 만들지 않는다 (#161 리뷰 ①②)."""
+    now = datetime.now(timezone.utc)
+    inv = AssetInventory(
+        account_id="123456789012", region="ap-northeast-2", mode="aws",
+        collected_at=now, lookback_days=14, period_seconds=3600,
+        auto_scaling_groups=[
+            AutoScalingGroupAsset(
+                arn="arn:aws:autoscaling:ap-northeast-2:123456789012:autoScalingGroup:u:autoScalingGroupName/asg-nolt",
+                name="asg-nolt", region="ap-northeast-2",
+                min_size=0, max_size=2, desired_capacity=0, health_check_type="EC2",
+                instance_ids=[], launch_template_id=None,  # LT 없음 → USES 없음
+            )
+        ],
+        degraded_collectors=["auto_scaling_groups"],  # 예: 실 AWS AccessDenied 흡수 상황
+    )
+    res = persist_inventory(inv, db)
+    run_id = res["collection_run_id"]
+    assert res["degraded_collectors"] == ["auto_scaling_groups"]
+
+    # 1) degrade 있으면 PARTIAL 로 마감
+    run = db.execute(
+        select(models.CollectionRun).where(models.CollectionRun.collection_run_id == run_id)
+    ).scalar_one()
+    assert run.status.value == "PARTIAL"
+
+    # 2) LT 없는 ASG 는 USES(및 어떤) 관계도 없다
+    asg = db.execute(
+        select(models.Asset).where(models.Asset.resource_id == "asg-nolt")
+    ).scalar_one()
+    rels = db.execute(
+        select(models.AssetRelationship).where(
+            models.AssetRelationship.source_asset_id == asg.asset_id
+        )
+    ).scalars().all()
+    assert rels == []
