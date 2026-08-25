@@ -126,30 +126,70 @@ def test_rollback_runbooks_are_listed_but_not_ai_recommendable(runbook_id: str) 
 # ---------------------------------------------------------------- Golden 연동
 
 
-def _golden_ec2_arns() -> list[str]:
-    """Golden Dataset 자산 파일에서 EC2 ARN 을 모은다."""
-    arns: list[str] = []
+# 자산 종류마다 그 자산을 대상으로 하는 Runbook 을 짝지어 둔다 — ARN 만 바꾸면
+# SG ARN 이 EC2 Rightsizing 에 붙는 조합이 생기고, Runbook 별 파라미터 계약(#49)이
+# 들어올 때 그 조합부터 깨진다. (PR #141 리뷰 반영)
+_GOLDEN_ASSET_RUNBOOKS = {
+    "ec2_instances": RunbookId.RUNBOOK_EC2_RIGHTSIZING.value,
+    "security_groups": RunbookId.RUNBOOK_SG_DELETE_ISOLATED.value,
+}
+
+
+def _golden_asset_pairs() -> list[tuple[str, str]]:
+    """Golden Dataset 자산 파일에서 (ARN, 그 자산을 대상으로 하는 Runbook) 을 모은다."""
+    pairs: list[tuple[str, str]] = []
     for path in sorted(GOLDEN_FINOPS_INPUT.glob("*.json")):
         with path.open(encoding="utf-8") as fp:
             data = json.load(fp)
-        arns.extend(ec2["arn"] for ec2 in data.get("ec2_instances", []))
-    return arns
+        for key, runbook_id in _GOLDEN_ASSET_RUNBOOKS.items():
+            pairs.extend((asset["arn"], runbook_id) for asset in data.get(key, []))
+    return pairs
 
 
-def test_golden_ec2_arns_pass_the_implemented_steps() -> None:
-    """Golden Dataset 의 실제 EC2 ARN 이 구현된 단계를 통과한다.
+def _golden_asset_kinds() -> set[str]:
+    """골든 파일에 실제로 들어 있는 자산 종류. 매핑이 이걸 전부 덮어야 한다.
 
-    데이터셋과 가드레일이 맞물리는지 확인한다. 골든 자산이 거절되면 시연
-    시나리오가 성립하지 않으므로, 데이터셋 갱신과 가드레일 변경 어느 쪽이
-    깨져도 여기서 드러난다.
+    arn 을 가진 dict 의 리스트를 자산 목록으로 본다 — account_id·region 같은
+    스칼라 키와 갈린다.
     """
-    arns = _golden_ec2_arns()
-    assert arns, "Golden Dataset 에 EC2 자산이 없다 — 경로나 파일 구조가 바뀌었다"
+    kinds: set[str] = set()
+    for path in sorted(GOLDEN_FINOPS_INPUT.glob("*.json")):
+        with path.open(encoding="utf-8") as fp:
+            data = json.load(fp)
+        kinds.update(
+            key
+            for key, value in data.items()
+            if isinstance(value, list)
+            and any(isinstance(item, dict) and "arn" in item for item in value)
+        )
+    return kinds
 
-    for arn in arns:
-        _, whitelist = _run_first_two_steps(_payload(target_arn=arn))
+
+def test_golden_asset_arns_pass_the_implemented_steps() -> None:
+    """Golden Dataset 의 실제 자산 ARN 이 구현된 단계를 통과한다.
+
+    EC2 와 SG 를 모두 본다. SG ARN 은 형식이 security-group/sg-… 로 EC2 의
+    instance/i-… 와 달라, ③ ARN Match 가 붙을 때 가장 먼저 깨질 부류다.
+    지금은 ①② 가 ARN 내용을 보지 않아 동작 차이가 없지만, 이 테스트의 가치는
+    전부 ③ 이후에 있으므로 커버리지를 미리 채워 둔다.
+
+    데이터셋 갱신과 가드레일 변경 어느 쪽이 깨져도 드러나게 하는 것이 목적이며,
+    ③ 이 붙기 전까지 실질 방어값은 골든 파일 경로·구조 가드와 Runbook 등록
+    여부다(PR #141 리뷰 관찰).
+    """
+    pairs = _golden_asset_pairs()
+    assert pairs, "Golden Dataset 에 자산이 없다 — 경로나 파일 구조가 바뀌었다"
+    # 한 종류가 빠져도 나머지가 남아 assert pairs 는 통과한다 — SG 누락이 그렇게
+    # 지나갔다(#134). 건수는 골든이 늘 때마다 바뀌므로(#127) 종류만 고정한다.
+    missing = _golden_asset_kinds() - set(_GOLDEN_ASSET_RUNBOOKS)
+    assert not missing, f"골든에 있는데 매핑에 없는 자산 종류: {sorted(missing)}"
+
+    for arn, runbook_id in pairs:
+        _, whitelist = _run_first_two_steps(
+            _payload(target_arn=arn, runbook_id=runbook_id)
+        )
         assert whitelist is not None and whitelist.draft is not None, (
-            f"골든 자산 {arn} 이 구현된 가드레일 단계에서 거절됐다"
+            f"골든 자산 {arn} ({runbook_id}) 이 구현된 가드레일 단계에서 거절됐다"
         )
 
 
