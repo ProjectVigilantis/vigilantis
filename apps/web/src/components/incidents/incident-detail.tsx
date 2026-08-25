@@ -97,8 +97,12 @@ function RiskArea({
  * `TIMEOUT_ISOLATION_1M`으로 자동 격리한다는 사실을 **대기 중에 미리** 알린다.
  *
  * Low는 같은 `AGENT_WAIT`이지만 타임아웃 자동 격리가 없어 이 블록을 뺀다(§4.5 · SSOT §3단계 위험 대응).
- * ○ FE 판단: 등급은 정밀 평가가 나왔으면 그 값을, 아니면 초기 판정을 쓴다 — 어느 필드가 타임아웃을
- * 가르는지는 계약에 없다(OPEN: BE 확인 필요).
+ *
+ * 기준 등급은 **`initial_risk_level`만** 본다(2026-08-25 확정, SSOT §확정 결정 로그).
+ * `reviewed_risk_level`(AI 정밀 평가)은 초기 판정을 덮어쓰지 않는 관제자 참고값이라 자동 행동을
+ * 가르지 않는다 — `response_mode`도 초기 판정에서만 파생된다(`packages/schemas/events.py`
+ * `_EXPECTED_MODE_BY_RISK`). 정밀 평가가 자동 행동을 바꾸려면 상태 전이 계약이 먼저 필요하다
+ * (Risk Evaluator, SSOT §미해결 6번).
  */
 function TimeoutNotice({
   incident,
@@ -107,7 +111,7 @@ function TimeoutNotice({
   incident: IncidentResponse;
   agentWaitAt: IsoDateTime | null;
 }) {
-  const level = incident.reviewed_risk_level ?? incident.initial_risk_level;
+  const level = incident.initial_risk_level;
   if (
     incident.response_mode !== 'AGENT_WAIT' ||
     level === 'LOW' ||
