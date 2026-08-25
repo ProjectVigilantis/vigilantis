@@ -69,6 +69,12 @@ from .guardrails import (
     GuardrailValidationResult,
 )
 from .incidents import AGENT_TERMINAL_STATUSES, AgentInvocationStatus, AgentWaitSchedule
+from .precheck import (
+    PrecheckOutcome,
+    PrecheckReasonCode,
+    VerificationMethod,
+    build_verification_summary,
+)
 from .rules import RuleEvaluationResult
 from .runbooks import (
     AI_RECOMMENDABLE_RUNBOOK_IDS,
@@ -100,6 +106,7 @@ __all__ = [
     "ApprovalMode",
     "AssetInventory",
     "AssetType",
+    "build_verification_summary",
     "CandidateStatus",
     "CollectionRunStatus",
     "domain_of",
@@ -136,6 +143,8 @@ __all__ = [
     "OpenIpThreatInput",
     "OpenIpThreatPayload",
     "OpenPort",
+    "PrecheckOutcome",
+    "PrecheckReasonCode",
     "ROLLBACK_RUNBOOK_BY_MAIN_ID",
     "ROLLBACK_RUNBOOK_IDS",
     "RuleEvaluationResult",
@@ -153,4 +162,5 @@ __all__ = [
     "ThreatEventType",
     "ThreatEvidence",
     "TriggerSource",
+    "VerificationMethod",
 ]
