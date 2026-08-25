@@ -126,6 +126,40 @@ class EbsAsset(BaseModel):
     )
 
 
+class LaunchTemplateAsset(BaseModel):
+    """Launch Template. ec2 네임스페이스라 LocalStack Community 에서도 수집 가능.
+    토폴로지 ASG→LT(USES) 의 대상. 판정 비대상(NOT_APPLICABLE)."""
+    asset_type: AssetType = Field(default=AssetType.LAUNCH_TEMPLATE, frozen=True)
+    arn: str = Field(..., description="Launch Template ARN (안정 키)")
+    launch_template_id: str = Field(..., description="lt-xxxx")
+    name: Optional[str] = Field(None, description="LaunchTemplateName")
+    region: str = Field(..., description="리전")
+    latest_version: Optional[int] = None
+    default_version: Optional[int] = None
+
+
+class AutoScalingGroupAsset(BaseModel):
+    """Auto Scaling Group. autoscaling 은 Pro 전용이라 LocalStack Community 에선 수집 불가
+    (ADR-0006 §4) — collector 가 호출 실패를 흡수해 빈 목록으로 degrade 한다.
+    토폴로지: EC2→ASG(MEMBER_OF, source 는 각 멤버 EC2) · ASG→LT(USES, source 는 ASG).
+    판정 비대상(NOT_APPLICABLE)."""
+    asset_type: AssetType = Field(default=AssetType.AUTO_SCALING_GROUP, frozen=True)
+    arn: str = Field(..., description="ASG ARN (describe 응답의 AutoScalingGroupARN)")
+    name: str = Field(..., description="AutoScalingGroupName (resource_id)")
+    region: str = Field(..., description="리전")
+    min_size: int = Field(..., description="최소 인스턴스 수")
+    max_size: int = Field(..., description="최대 인스턴스 수")
+    desired_capacity: int = Field(..., description="희망 인스턴스 수")
+    health_check_type: Optional[str] = Field(None, description="EC2/ELB")
+    instance_ids: list[str] = Field(
+        default_factory=list, description="멤버 인스턴스 목록(EC2→ASG MEMBER_OF 파생용)"
+    )
+    launch_template_id: Optional[str] = Field(
+        None, description="사용하는 Launch Template id(ASG→LT USES 파생용)"
+    )
+    launch_template_name: Optional[str] = None
+
+
 class AssetInventory(BaseModel):
     """한 리전 1회 수집 결과. rule_engine 파이프라인의 입력 단위."""
     account_id: str = Field(..., description="AWS 계정 ID")
@@ -138,6 +172,15 @@ class AssetInventory(BaseModel):
     security_groups: list[SecurityGroupAsset] = Field(default_factory=list)
     nacls: list[NaclAsset] = Field(default_factory=list)
     ebs_volumes: list[EbsAsset] = Field(default_factory=list)
+    launch_templates: list[LaunchTemplateAsset] = Field(default_factory=list)
+    auto_scaling_groups: list[AutoScalingGroupAsset] = Field(default_factory=list)
+    degraded_collectors: list[str] = Field(
+        default_factory=list,
+        description=(
+            "수집 실패로 빈 목록 degrade 된 서비스 라벨(예: auto_scaling_groups). "
+            "비어있지 않으면 부분 수집 — persist 가 CollectionRun 을 PARTIAL 로 마감한다."
+        ),
+    )
 
     @computed_field  # type: ignore[prop-decorator]
     @property

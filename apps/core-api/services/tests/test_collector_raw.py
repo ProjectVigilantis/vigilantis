@@ -80,3 +80,25 @@ def test_collect_region_ebs_raw(inventory):
     assert any(not vol.attached_instance_ids for vol in inventory.ebs_volumes), (
         "미부착(available) 볼륨 없음 — 시드 확인"
     )
+
+
+def test_collect_region_launch_template_raw(inventory):
+    # Launch Template 은 ec2 네임스페이스라 Community 에서 수집 가능(ADR-0006 §4).
+    # 시드(_ensure_launch_template)가 1개 만든다.
+    assert len(inventory.launch_templates) >= 1, "LT 0개 — 시드(_ensure_launch_template) 필요"
+    lt = inventory.launch_templates[0]
+    assert lt.launch_template_id.startswith("lt-")
+    assert ":launch-template/" in lt.arn
+
+
+def test_asg_degrades_on_pro_only_service(inventory):
+    # autoscaling 은 LocalStack Community 미포함(Pro 전용, ADR-0006 §4) → InternalFailure.
+    # collector 의 _safe_describe 가 이를 흡수해 빈 목록으로 degrade 하고, 나머지 수집(EC2/SG/
+    # EBS/NACL/LT)은 정상 완료되어야 한다(위 테스트들이 통과하는 것이 곧 그 증거).
+    # 실 AWS 에서의 ASG 수집·MEMBER_OF/USES 검증은 6~7주차 스모크로 이월(§4).
+    assert inventory.auto_scaling_groups == [], (
+        "로컬에서 ASG 가 수집됨 — LocalStack 이 autoscaling(Pro)을 지원하게 되었거나 "
+        "_safe_describe degrade 가 동작하지 않음"
+    )
+    # degrade 사실이 라벨로 기록되어 persist 가 PARTIAL 로 마감할 수 있어야 한다(#161 리뷰 ①).
+    assert "auto_scaling_groups" in inventory.degraded_collectors

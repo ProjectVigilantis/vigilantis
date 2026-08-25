@@ -87,6 +87,9 @@ INSTANCES = (
     ("vigilantis-seed-idle-dev", "m5.2xlarge", SG_USED, "idle", "development"),
 )
 VOLUME_NAME = "vigilantis-seed-unattached"
+# Launch Template — ec2 네임스페이스라 Community 지원(ASG/elbv2 와 달리 로컬 수집 검증 가능).
+# ASG(autoscaling)는 Pro 전용이라 시드 불가 → USES 관계는 실 AWS 스모크에서만 확인된다(ADR-0006 §4).
+LAUNCH_TEMPLATE_NAME = "vigilantis-seed-lt"
 FALLBACK_AMI = "ami-00000000000000000"  # LocalStack 기본 AMI 조회 실패 시 폴백
 
 
@@ -184,6 +187,20 @@ def _ensure_volume(ec2, region: str) -> tuple[str, bool]:
     return vol["VolumeId"], True
 
 
+def _ensure_launch_template(ec2, ami: str) -> tuple[str, bool]:
+    for lt in ec2.describe_launch_templates()["LaunchTemplates"]:
+        if lt.get("LaunchTemplateName") == LAUNCH_TEMPLATE_NAME:
+            return lt["LaunchTemplateId"], False
+    created = ec2.create_launch_template(
+        LaunchTemplateName=LAUNCH_TEMPLATE_NAME,
+        LaunchTemplateData={"ImageId": ami, "InstanceType": "t3.micro"},
+        TagSpecifications=[
+            {"ResourceType": "launch-template", "Tags": _seed_tags(LAUNCH_TEMPLATE_NAME)}
+        ],
+    )["LaunchTemplate"]
+    return created["LaunchTemplateId"], True
+
+
 # ------------------------------------------------------------------ 메트릭 주입
 def _cpu_series(profile: str) -> list[float]:
     if profile == "idle":
@@ -249,6 +266,9 @@ def seed_all(ec2, cw, region: str) -> None:
 
     vol_id, created = _ensure_volume(ec2, region)
     print(f"[seed] EBS {VOLUME_NAME}: {vol_id} ({'생성' if created else '존재 — skip'})")
+
+    lt_id, created = _ensure_launch_template(ec2, ami)
+    print(f"[seed] LaunchTemplate {LAUNCH_TEMPLATE_NAME}: {lt_id} ({'생성' if created else '존재 — skip'})")
 
 
 def reinject_metrics(ec2, cw) -> None:
