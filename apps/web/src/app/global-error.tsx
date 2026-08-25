@@ -2,11 +2,19 @@
 
 // CMN-002 전역 오류 셸 — root layout을 타지 않으므로 html·body·테마·스타일을 자체 선언합니다(이슈 #112).
 
+import { Geist, Geist_Mono } from 'next/font/google';
+
 import { ErrorState } from '@/components/error-state';
 import { Button } from '@/components/ui/button';
 
 // root layout의 import가 이 셸에는 걸리지 않는다. 안 넣으면 Tailwind 클래스가 통째로 죽는다.
 import './globals.css';
+
+// 폰트도 같은 이유로 다시 선언한다. globals.css의 `--font-sans`는 아래 변수를 **참조만** 하고
+// 정의는 layout.tsx의 next/font 클래스가 하므로, 이 셸에서는 미정의가 되어 브라우저 기본
+// 폰트(serif)로 떨어진다. Next 문서도 global-error가 폰트를 자체 선언하도록 명시한다.
+const geistSans = Geist({ variable: '--font-geist-sans', subsets: ['latin'] });
+const geistMono = Geist_Mono({ variable: '--font-geist-mono', subsets: ['latin'] });
 
 export default function GlobalError({
   error,
@@ -17,7 +25,10 @@ export default function GlobalError({
   retry: () => void;
 }) {
   return (
-    <html lang="ko" className="dark h-full antialiased">
+    <html
+      lang="ko"
+      className={`dark ${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+    >
       {/*
         layout.tsx의 `viewport` export는 이 셸에 적용되지 않는다(#112) — 같은 선언을 직접 넣는다.
         #89에서 정한 대로 CSS가 아니라 meta로 선언해, CSS 로드가 실패·지연돼도 문서 color scheme이 산다.
