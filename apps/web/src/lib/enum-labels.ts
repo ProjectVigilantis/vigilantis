@@ -7,6 +7,7 @@ import type {
   EvaluationStatus,
   ExecutionStatus,
   IncidentCategory,
+  IncidentListItem,
   IncidentStatus,
   ResourceRole,
   ResponseMode,
@@ -206,3 +207,13 @@ export const SPEC_KEY_LABELS: Record<string, string> = {
   target_type: '대상 유형',
   health_check_path: '헬스 체크 경로',
 };
+
+/**
+ * 4.4·4.5 확정 — `title`은 nullable이고 빈 문자열은 오지 않는다.
+ * null이면 유형 표시명 + `subject_arn` 축약으로 대체한다. 화면마다 다른 문구를 쓰지 않도록 여기 둔다.
+ */
+export function incidentTitle(incident: IncidentListItem): string {
+  if (incident.title !== null) return incident.title;
+  const label = CATEGORY_LABELS[incident.category]?.label ?? incident.category;
+  return `${label} · ${incident.subject_arn.split(/[:/]/).pop() ?? incident.subject_arn}`;
+}
