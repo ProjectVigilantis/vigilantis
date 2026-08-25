@@ -78,6 +78,28 @@ def test_endpoint_absent_targets_real_aws(settings):
     assert client.meta.endpoint_url.endswith("amazonaws.com")
 
 
+def test_no_module_reads_the_switch_from_the_environment():
+    """전환 스위치는 AwsSettings가 읽고 팩토리가 해석한다 — 그 밖에서는 읽지 않는다.
+
+    ADR-0006 §3(코드 분기 금지)은 조건이 한 곳에 있을 때만 지킬 수 있다. 소비자가
+    환경변수를 각자 읽으면 붙는 대상과 검사 대상이 갈려도 알아챌 수 없다.
+    """
+    offenders = []
+    for root in ("apps", "packages", "scripts"):
+        for path in (REPO_ROOT / root).rglob("*.py"):
+            parts = path.parts
+            if "tests" in parts or "__pycache__" in parts or ".venv" in parts:
+                continue
+            for lineno, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                if "AWS_ENDPOINT_URL" not in line:
+                    continue
+                if "getenv" in line or "environ" in line:
+                    offenders.append(f"{path.relative_to(REPO_ROOT)}:{lineno}")
+    assert not offenders, f"전환 스위치를 직접 읽는 곳이 있습니다: {sorted(offenders)}"
+
+
 # --- 클라이언트 구성 ------------------------------------------------------------
 
 

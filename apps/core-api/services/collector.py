@@ -12,18 +12,15 @@
 #   - DB 적재: 안성일의 db.models.Asset/SpecSnapshot 확정 후 연결 (TODO: persist)
 #   - 판정: Idle/미사용/Skip 사유는 rule_engine 의 몫 (여기선 정형화까지만)
 #
-# 설정 주입: 아직 config.get_settings() 가 미구현이라 임시로 환경변수를 직접 읽는다.
-#   config 가 준비되면 _runtime_config() 를 get_settings() 호출로 교체할 것. (TODO: config)
+# 설정 주입: 리전·엔드포인트·자격증명 해석과 클라이언트 생성은 services/aws/client.py
+#   가 단일 원천이다(ADR-0006 §3, Issue #128). 여기서는 수집 창 설정만 합친다.
 # ==============================================================================
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timedelta, timezone
 
-import boto3
-from botocore.config import Config
-
+from config import get_collector_settings
 from schemas.assets import (
     AssetInventory,
     Ec2Asset,
@@ -34,40 +31,23 @@ from schemas.assets import (
     SecurityGroupAsset,
 )
 
-# 스로틀링(RequestLimitExceeded) 대비. adaptive 모드가 자동으로 속도를 낮춘다.
-_BOTO_CONFIG = Config(
-    retries={"max_attempts": 5, "mode": "adaptive"},
-    user_agent_extra="vigilantis-collector/0.1",
-)
+from .aws.client import account_id as _account_id
+from .aws.client import aws_client, deployment_mode, regions
 
 _METRIC_NAMES = (MetricName.CPU_UTILIZATION, MetricName.NETWORK_IN, MetricName.NETWORK_OUT)
 # get_metric_data 는 호출당 최대 500 쿼리를 받지만 응답 안정성을 위해 보수적으로 끊는다.
 _QUERY_BATCH = 100
 
 
-# ------------------------------------------------------------------ 설정(임시)
+# ------------------------------------------------------------------ 설정
 def _runtime_config() -> dict:
-    """TODO(config): apps/core-api/config.py 의 get_settings() 확정 시 이 함수를 대체.
-    LocalStack ↔ 실 AWS 전환은 AWS_ENDPOINT_URL 유무로 갈린다(있으면 LocalStack)."""
-    regions = [r.strip() for r in os.getenv("AWS_REGIONS", os.getenv("AWS_REGION", "ap-northeast-2")).split(",") if r.strip()]
-    endpoint = os.getenv("AWS_ENDPOINT_URL") or None
-    # LocalStack 은 자격증명을 검사하지 않지만 boto3 는 키가 아예 없으면 예외를 낸다.
-    if endpoint and not os.getenv("AWS_ACCESS_KEY_ID"):
-        os.environ.setdefault("AWS_ACCESS_KEY_ID", "test")
-        os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "test")
+    """수집 1회에 필요한 설정. 리전은 클라이언트 팩토리가 해석한 목록을 그대로 쓴다."""
+    settings = get_collector_settings()
     return {
-        "regions": regions,
-        "endpoint_url": endpoint,
-        "lookback_days": int(os.getenv("METRIC_LOOKBACK_DAYS", "14")),
-        "period_seconds": int(os.getenv("METRIC_PERIOD_SECONDS", "3600")),
+        "regions": regions(),
+        "lookback_days": settings.METRIC_LOOKBACK_DAYS,
+        "period_seconds": settings.METRIC_PERIOD_SECONDS,
     }
-
-
-def _client(service: str, region: str, endpoint: str | None):
-    kwargs = {"region_name": region, "config": _BOTO_CONFIG}
-    if endpoint:
-        kwargs["endpoint_url"] = endpoint
-    return boto3.client(service, **kwargs)
 
 
 def _arn(resource_type: str, resource_id: str, region: str, account_id: str) -> str:
@@ -178,11 +158,10 @@ def _summarize(series_by_metric: dict[MetricName, MetricSeries]) -> MetricSummar
 def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
     """한 리전의 EC2/SG 인벤토리 + 메트릭을 수집해 AssetInventory 로 정형화한다."""
     cfg = cfg or _runtime_config()
-    endpoint = cfg["endpoint_url"]
 
-    ec2 = _client("ec2", region, endpoint)
-    cw = _client("cloudwatch", region, endpoint)
-    account_id = _client("sts", region, endpoint).get_caller_identity()["Account"]
+    ec2 = aws_client("ec2", region)
+    cw = aws_client("cloudwatch", region)
+    account_id = _account_id(region)
 
     instances_raw = [
         i
@@ -240,7 +219,7 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
     return AssetInventory(
         account_id=account_id,
         region=region,
-        mode="localstack" if endpoint else "aws",
+        mode=deployment_mode(),
         lookback_days=cfg["lookback_days"],
         period_seconds=cfg["period_seconds"],
         ec2_instances=ec2_assets,
