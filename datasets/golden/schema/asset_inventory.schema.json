@@ -3,6 +3,95 @@
   "x-source-model": "packages/schemas/assets.py :: AssetInventory",
   "x-note": "낭비 자원 시나리오의 양식 — 한 리전 1회 수집 결과(rule_engine 입력 단위). Idle/미사용 판정·SKIP_*·health_score는 넣지 않음(rule_engine 산출).",
   "$defs": {
+    "AlbTargetGroupAsset": {
+      "description": "ALB Target Group. elbv2 는 Pro 전용이라 LocalStack Community 에선 수집 불가\n(ADR-0006 §4) — collector 가 호출 실패를 흡수해 빈 목록으로 degrade 한다.\n토폴로지: EC2→ALB TG(REGISTERED_IN, source 는 등록된 각 EC2). 판정 비대상(NOT_APPLICABLE).",
+      "properties": {
+        "asset_type": {
+          "$ref": "#/$defs/AssetType",
+          "default": "ALB_TARGET_GROUP"
+        },
+        "arn": {
+          "description": "TargetGroup ARN (describe 응답의 TargetGroupArn)",
+          "title": "Arn",
+          "type": "string"
+        },
+        "name": {
+          "description": "TargetGroupName (resource_id)",
+          "title": "Name",
+          "type": "string"
+        },
+        "region": {
+          "description": "리전",
+          "title": "Region",
+          "type": "string"
+        },
+        "protocol": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "HTTP/HTTPS/TCP 등",
+          "title": "Protocol"
+        },
+        "port": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Port"
+        },
+        "target_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "instance/ip/lambda/alb",
+          "title": "Target Type"
+        },
+        "health_check_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Health Check Path"
+        },
+        "target_instance_ids": {
+          "description": "등록된 인스턴스 목록(EC2→TG REGISTERED_IN 파생용, target_type=instance 만)",
+          "items": {
+            "type": "string"
+          },
+          "title": "Target Instance Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "arn",
+        "name",
+        "region"
+      ],
+      "title": "AlbTargetGroupAsset",
+      "type": "object"
+    },
     "AssetType": {
       "enum": [
         "EC2",
@@ -802,6 +891,13 @@
         "$ref": "#/$defs/AutoScalingGroupAsset"
       },
       "title": "Auto Scaling Groups",
+      "type": "array"
+    },
+    "alb_target_groups": {
+      "items": {
+        "$ref": "#/$defs/AlbTargetGroupAsset"
+      },
+      "title": "Alb Target Groups",
       "type": "array"
     },
     "degraded_collectors": {

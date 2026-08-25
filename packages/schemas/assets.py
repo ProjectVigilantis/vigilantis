@@ -160,6 +160,24 @@ class AutoScalingGroupAsset(BaseModel):
     launch_template_name: Optional[str] = None
 
 
+class AlbTargetGroupAsset(BaseModel):
+    """ALB Target Group. elbv2 는 Pro 전용이라 LocalStack Community 에선 수집 불가
+    (ADR-0006 §4) — collector 가 호출 실패를 흡수해 빈 목록으로 degrade 한다.
+    토폴로지: EC2→ALB TG(REGISTERED_IN, source 는 등록된 각 EC2). 판정 비대상(NOT_APPLICABLE)."""
+    asset_type: AssetType = Field(default=AssetType.ALB_TARGET_GROUP, frozen=True)
+    arn: str = Field(..., description="TargetGroup ARN (describe 응답의 TargetGroupArn)")
+    name: str = Field(..., description="TargetGroupName (resource_id)")
+    region: str = Field(..., description="리전")
+    protocol: Optional[str] = Field(None, description="HTTP/HTTPS/TCP 등")
+    port: Optional[int] = None
+    target_type: Optional[str] = Field(None, description="instance/ip/lambda/alb")
+    health_check_path: Optional[str] = None
+    target_instance_ids: list[str] = Field(
+        default_factory=list,
+        description="등록된 인스턴스 목록(EC2→TG REGISTERED_IN 파생용, target_type=instance 만)",
+    )
+
+
 class AssetInventory(BaseModel):
     """한 리전 1회 수집 결과. rule_engine 파이프라인의 입력 단위."""
     account_id: str = Field(..., description="AWS 계정 ID")
@@ -174,6 +192,7 @@ class AssetInventory(BaseModel):
     ebs_volumes: list[EbsAsset] = Field(default_factory=list)
     launch_templates: list[LaunchTemplateAsset] = Field(default_factory=list)
     auto_scaling_groups: list[AutoScalingGroupAsset] = Field(default_factory=list)
+    alb_target_groups: list[AlbTargetGroupAsset] = Field(default_factory=list)
     degraded_collectors: list[str] = Field(
         default_factory=list,
         description=(

@@ -25,6 +25,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from config import get_collector_settings
 from schemas.assets import (
+    AlbTargetGroupAsset,
     AssetInventory,
     AutoScalingGroupAsset,
     EbsAsset,
@@ -245,6 +246,12 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
         lambda: _paginate(asg, "describe_auto_scaling_groups", "AutoScalingGroups"),
         "auto_scaling_groups", degraded,
     )
+    # ALB Target Group 도 elbv2(Pro 전용)라 로컬에선 degrade 된다(ADR-0006 §4).
+    elbv2 = aws_client("elbv2", region)
+    tgs_raw = _safe_describe(
+        lambda: _paginate(elbv2, "describe_target_groups", "TargetGroups"),
+        "alb_target_groups", degraded,
+    )
     used = _used_sg_ids(instances_raw, enis_raw)
 
     end = datetime.now(timezone.utc)
@@ -351,6 +358,34 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
             )
         )
 
+    tg_assets = []
+    for tg in tgs_raw:
+        tg_arn = tg["TargetGroupArn"]
+        # 등록 인스턴스는 describe_target_health(elbv2, Pro 전용)로만 얻는다. TG describe 가
+        # 성공한 실 AWS 에서만 호출되며(로컬은 tgs_raw 가 비어 루프 자체가 안 돈다),
+        # target_type=instance 의 Target.Id(i-xxxx)만 REGISTERED_IN 대상이다.
+        health = _safe_describe(
+            lambda arn=tg_arn: elbv2.describe_target_health(TargetGroupArn=arn)["TargetHealthDescriptions"],
+            "alb_target_health", degraded,
+        )
+        target_instance_ids = [
+            d["Target"]["Id"]
+            for d in health
+            if str(d.get("Target", {}).get("Id", "")).startswith("i-")
+        ]
+        tg_assets.append(
+            AlbTargetGroupAsset(
+                arn=tg_arn,
+                name=tg["TargetGroupName"],
+                region=region,
+                protocol=tg.get("Protocol"),
+                port=tg.get("Port"),
+                target_type=tg.get("TargetType"),
+                health_check_path=tg.get("HealthCheckPath"),
+                target_instance_ids=target_instance_ids,
+            )
+        )
+
     return AssetInventory(
         account_id=account_id,
         region=region,
@@ -363,6 +398,7 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
         ebs_volumes=ebs_assets,
         launch_templates=lt_assets,
         auto_scaling_groups=asg_assets,
+        alb_target_groups=tg_assets,
         degraded_collectors=degraded,
     )
 
@@ -403,7 +439,8 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
     ebs_count = len(inv.ebs_volumes)
     lt_count = len(inv.launch_templates)
     asg_count = len(inv.auto_scaling_groups)
-    total = ec2_count + sg_count + nacl_count + ebs_count + lt_count + asg_count
+    tg_count = len(inv.alb_target_groups)
+    total = ec2_count + sg_count + nacl_count + ebs_count + lt_count + asg_count + tg_count
 
     # subnet → NACL ARN (EC2→NACL PROTECTED_BY 파생용)
     subnet_to_nacl = {
@@ -422,6 +459,12 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
     instance_to_asg = {
         iid: g.arn for g in inv.auto_scaling_groups for iid in g.instance_ids
     }
+
+    # instance_id → [TG ARN] (EC2→ALB TG REGISTERED_IN 파생용). 한 인스턴스가 여러 TG 등록 가능.
+    instance_to_tgs: dict[str, list[str]] = {}
+    for tg in inv.alb_target_groups:
+        for iid in tg.target_instance_ids:
+            instance_to_tgs.setdefault(iid, []).append(tg.arn)
 
     window_end = inv.collected_at
     window_start = window_end - timedelta(days=inv.lookback_days)
@@ -471,6 +514,8 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
         asg_arn = instance_to_asg.get(a.instance_id)
         if asg_arn:
             rel_items.append((RelationType.MEMBER_OF, asg_arn))
+        for tg_arn in instance_to_tgs.get(a.instance_id, []):
+            rel_items.append((RelationType.REGISTERED_IN, tg_arn))
         if rel_items:
             assets_repo.replace_relationships(
                 db,
@@ -601,6 +646,28 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
             collection_run_id=collection_run_id,
         )
 
+    # 7. ALB Target Group 적재 (판정 비대상)
+    for tg in inv.alb_target_groups:
+        tg_spec = {
+            "protocol": tg.protocol,
+            "port": tg.port,
+            "target_type": tg.target_type,
+            "health_check_path": tg.health_check_path,
+        }
+        assets_repo.upsert_asset(
+            db,
+            arn=tg.arn,
+            asset_type=AssetType.ALB_TARGET_GROUP,
+            resource_id=tg.name,
+            account_id=inv.account_id,
+            region=inv.region,
+            spec=tg_spec,
+            collection_run_id=collection_run_id,
+            collected_at=inv.collected_at,
+            name=tg.name,
+            state=None,
+        )
+
     if started_own_run:
         # degrade(빈 목록으로 흡수된 수집 실패)가 한 번이라도 있으면 PARTIAL 로 마감한다.
         # 실 AWS 의 권한 누락·스로틀링이 '정상 0건'으로 오인되지 않게 화면에 표면화된다.
@@ -623,6 +690,7 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
         "ebs_count": ebs_count,
         "lt_count": lt_count,
         "asg_count": asg_count,
+        "tg_count": tg_count,
         "total": total,
         "degraded_collectors": list(inv.degraded_collectors),
     }

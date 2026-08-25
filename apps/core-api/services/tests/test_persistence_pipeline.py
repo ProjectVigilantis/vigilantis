@@ -25,6 +25,7 @@ for p in (str(CORE_API), str(REPO_ROOT / "packages")):
 from db import models  # noqa: E402
 from schemas.api.assets import AssetItem, AssetType  # noqa: E402
 from schemas.assets import (  # noqa: E402
+    AlbTargetGroupAsset,
     AssetInventory,
     AutoScalingGroupAsset,
     EbsAsset,
@@ -607,3 +608,69 @@ def test_degraded_collectors_finish_run_partial(db):
         )
     ).scalars().all()
     assert rels == []
+
+
+def test_alb_target_group_topology(db):
+    """ALB Target Group 적재 + EC2→TG(REGISTERED_IN) 관계 (#149).
+
+    - REGISTERED_IN: source 는 등록된 EC2 → EC2 관계 루프에서 산출
+    - TG 는 판정 비대상 → NOT_APPLICABLE
+    """
+    now = datetime.now(timezone.utc)
+    tg_arn = "arn:aws:elasticloadbalancing:ap-northeast-2:123456789012:targetgroup/web-tg/abc123"
+    inv = AssetInventory(
+        account_id="123456789012", region="ap-northeast-2", mode="aws",
+        collected_at=now, lookback_days=14, period_seconds=3600,
+        ec2_instances=[
+            Ec2Asset(
+                arn="arn:aws:ec2:ap-northeast-2:123456789012:instance/i-tg1",
+                instance_id="i-tg1", name="tg-member", instance_type="t3.large",
+                state="running", region="ap-northeast-2", tags={"Environment": "dev"},
+                metric_summary=MetricSummary(cpu_datapoints=336, cpu_avg=1.5, cpu_max=3.0),
+            )
+        ],
+        alb_target_groups=[
+            AlbTargetGroupAsset(
+                arn=tg_arn, name="web-tg", region="ap-northeast-2",
+                protocol="HTTP", port=80, target_type="instance",
+                health_check_path="/health", target_instance_ids=["i-tg1"],
+            )
+        ],
+    )
+    res = persist_inventory(inv, db)
+    assert res["tg_count"] == 1
+    assert res["total"] == 2  # EC2 1 + TG 1
+
+    # TG 자산 적재 + spec
+    tg = db.execute(
+        select(models.Asset).where(models.Asset.asset_type == AssetType.ALB_TARGET_GROUP)
+    ).scalar_one()
+    assert tg.resource_id == "web-tg"
+    assert tg.spec["protocol"] == "HTTP"
+    assert tg.spec["target_type"] == "instance"
+
+    # EC2→TG REGISTERED_IN (source 는 EC2)
+    ec2 = db.execute(
+        select(models.Asset).where(models.Asset.asset_type == AssetType.EC2)
+    ).scalar_one()
+    ec2_pairs = {
+        (_rt(r), r.target_arn)
+        for r in db.execute(
+            select(models.AssetRelationship).where(
+                models.AssetRelationship.source_asset_id == ec2.asset_id
+            )
+        ).scalars().all()
+    }
+    assert ("REGISTERED_IN", tg_arn) in ec2_pairs
+
+    # AssetItem 계약 라운드트립 — TG 는 RUNBOOK_SUPPORT + NOT_APPLICABLE
+    item = AssetItem.model_validate(
+        {
+            "arn": tg.arn, "resource_id": tg.resource_id, "asset_type": tg.asset_type,
+            "resource_role": "RUNBOOK_SUPPORT", "name": tg.name,
+            "account_id": tg.account_id, "region": tg.region, "spec": tg.spec,
+            "relationships": [], "evaluation_status": "NOT_APPLICABLE",
+            "collected_at": tg.collected_at,
+        }
+    )
+    assert item.evaluation_status.value == "NOT_APPLICABLE"

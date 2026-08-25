@@ -7,6 +7,7 @@
 # ==============================================================================
 
 from .assets import (
+    AlbTargetGroupAsset,
     AssetInventory,
     AssetType,
     AutoScalingGroupAsset,
@@ -106,6 +107,7 @@ __all__ = [
     "AgentInvocationStatus",
     "AgentWaitSchedule",
     "AI_RECOMMENDABLE_RUNBOOK_IDS",
+    "AlbTargetGroupAsset",
     "ALLOWED_RUNBOOK_IDS",
     "ApprovalMode",
     "AssetInventory",
