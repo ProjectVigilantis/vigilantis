@@ -99,8 +99,14 @@ function validateRequest(body: unknown): ExecuteActionRequest | string {
   if (typeof incident_id !== 'string' || incident_id.length === 0) {
     return 'incident_id는 1자 이상 문자열이어야 합니다';
   }
-  if (typeof idempotency_key !== 'string' || idempotency_key.length === 0) {
-    return 'idempotency_key는 1자 이상 문자열이어야 합니다';
+  // 상한은 계약(packages/schemas/api/actions.py, PR #119)에 맞춘다 — 없으면 검증을 통과한 값이
+  // 실 BE 저장 단계에서 깨진다. FE가 만드는 키는 randomUUID(36자)라 화면 동작에는 닿지 않는다.
+  if (
+    typeof idempotency_key !== 'string' ||
+    idempotency_key.length === 0 ||
+    idempotency_key.length > 128
+  ) {
+    return 'idempotency_key는 1자 이상 128자 이하 문자열이어야 합니다';
   }
   if (typeof runbook_id !== 'string' || !(RUNBOOK_IDS as readonly string[]).includes(runbook_id)) {
     return 'runbook_id는 확정 Runbook 10종 중 하나여야 합니다';

@@ -2,6 +2,7 @@
 
 - **Status**: Accepted (2026-08-24 — 안성일(AI/Guardrail) 확인 완료, PR #117 승인)
 - **Date**: 2026-08-24
+- **Amended**: 2026-08-25 — precheck 구현(#129)에서 드러난 실측 반영. 하단 "개정 이력" 참조, 핵심 결정 불변
 - **Deciders**: 김세혁(PM/Infra, executor 소유자) 결정, 안성일(AI/Guardrail) 합의 완료
 - **Refs**: #113
 
@@ -74,10 +75,23 @@ class PrecheckOutcome(BaseModel):
 
 
 # apps/core-api/services/aws/executor.py
+class BackupRecordLoader(Protocol):
+    def get(self, backup_record_id: str) -> Optional[BackupRecordView]: ...
+
+    def latest_for_target(
+        self,
+        target_arn: str,
+        backup_type: str,
+        payload_match: Optional[Mapping[str, Any]] = None,
+    ) -> Optional[BackupRecordView]: ...
+
+
 def precheck(
     runbook_id: RunbookId,
     target_arn: str,
     parameters: Mapping[str, Any],
+    *,
+    backup_loader: Optional[BackupRecordLoader] = None,
 ) -> PrecheckOutcome: ...
 ```
 
@@ -85,10 +99,13 @@ def precheck(
 | --- | --- | --- |
 | 호출 시점 | AI 제안 생성 **직후 1회** | 후보가 `EXECUTABLE`이 되려면 4단계를 통과해야 한다(`packages/schemas/candidates.py` 상태 전이). 승인·실행 시점의 재검증은 가드레일 4단계 밖의 별도 사안이다 |
 | 동기/비동기 | **동기** | boto3가 동기이고 collector의 기존 클라이언트 규약과 같다. async 문맥에서는 호출부가 threadpool로 감싼다 |
-| 예외 | **던지지 않는다** | AWS 오류·미구현·파라미터 문제를 모두 `PrecheckOutcome`으로 반환한다. 가드레일 쪽에 `try/except`를 요구하면 사유 코드 분류가 두 곳으로 갈라진다 |
+| 예외 | **던지지 않는다** (예외 1건: 아래) | AWS 오류·미구현·파라미터 문제를 모두 `PrecheckOutcome`으로 반환한다. 가드레일 쪽에 `try/except`를 요구하면 사유 코드 분류가 두 곳으로 갈라진다 |
+| 백업 레코드 조회 | 키워드 전용 `backup_loader` **주입** | 롤백 계열 4종(`NACL_RESTORE`·`UNISOLATE`·`SG_RECREATE`·`REVERT_SIZE`)의 통과 조건이 백업 레코드의 **내용**을 필요로 한다. executor는 DB 트랜잭션을 소유하지 않으므로 조회를 주입받고, 그래야 `precheck()`가 DB 없이 단위 테스트된다 |
 | 미구현 런북 | executor가 `PRECHECK_NOT_IMPLEMENTED` 반환 | 디스패치 테이블이 executor에 있으므로 판정 소유권도 같은 쪽에 둔다. 호출 전 필터가 필요하면 `IMPLEMENTED_RUNBOOK_IDS: frozenset[str]`를 함께 export한다 |
 
 `GuardrailStepResult` 매핑은 1:1이다 — `passed` → `result`, `reason_code` → `reason_code`, `verification_summary` → `verification_summary`.
+
+**"예외를 던지지 않는다"의 유일한 예외는 `backup_loader` 미배선이다.** 이 규칙은 `precheck()`가 **받은 페이로드에 대해** 내리는 판정의 규칙이다. 백업 조회가 필요한 런북인데 loader가 배선되지 않은 것은 페이로드 문제가 아니라 **호출부의 배선 오류**이고, `RuntimeError`로 즉시 드러내야 한다. FAIL로 남기면 멀쩡한 원복 요청에 거절 기록이 붙어 관제 화면에 남는다. `ai/guardrails.py`가 미배선 검증 문맥을 `NotImplementedError`로 막는 것과 같은 구분이다.
 
 ### 2. 판정 규약 — `DryRunOperation` 예외가 났을 때만 PASS
 
@@ -106,7 +123,7 @@ AWS 오류 → 사유 코드 매핑:
 | `IncorrectInstanceState` · `DependencyViolation` · `*InUse*` | `PRECHECK_INVALID_STATE` |
 | 그 밖의 `ClientError` · **예외 미발생** | `PRECHECK_AWS_ERROR` |
 
-`PRECHECK_PARAM_INVALID`는 #113 제안 5종에 executor가 추가한 코드다. #49로 런북별 typed 파라미터 계약이 미뤄져 있어 파라미터 키 누락·형식 위반이 1단계 Schema Check에서 걸리지 않고 4단계에서 처음 드러난다. 이를 `PRECHECK_AWS_ERROR`에 섞으면 거절 기록에서 "우리 쪽 계약 문제"와 "AWS 문제"가 구분되지 않는다. **#49 확정 시 이 코드는 자연히 쓰이지 않게 된다.**
+`PRECHECK_PARAM_INVALID`는 #113 제안 5종에 executor가 추가한 코드다. #154(런북별 typed 파라미터 계약)가 아직 서지 않아 파라미터 키 누락·형식 위반이 1단계 Schema Check에서 걸리지 않고 4단계에서 처음 드러난다. 이를 `PRECHECK_AWS_ERROR`에 섞으면 거절 기록에서 "우리 쪽 계약 문제"와 "AWS 문제"가 구분되지 않는다. **#154 확정 시 이 코드는 자연히 쓰이지 않게 된다.**
 
 ### 3. `verification_summary` 형식
 
@@ -117,9 +134,21 @@ AWS 오류 → 사유 코드 매핑:
 방식 ∈ DRY_RUN · DESCRIBE · MIXED
 ```
 
-예: `DRY_RUN(ec2.modify_instance_attribute) | 확인: 파라미터·대상 자원 유효 | 미확인: IAM 권한(LocalStack iam disabled)`
+예: `DRY_RUN(ec2.modify_instance_attribute) | 확인: 호출 권한과 파라미터 형식(DryRun) | 미확인: 대상 자원 존재와 현재 상태(DryRun 비검증)`
 
 `미확인:` 항목은 비워 두지 않는다. 확인 범위의 한계를 남기는 것이 이 필드의 존재 이유이며, 조회 대체 경로는 **항상 IAM 권한을 검증하지 못한다.**
+
+**`DryRun` 통과는 대상 자원의 존재를 증명하지 않는다.** LocalStack 4.14.0 실측:
+
+```
+delete_security_group(GroupId='sg-176c22ab493bcb450')   # 존재 -> DryRunOperation
+delete_security_group(GroupId='sg-00000000000000000')   # 부재 -> DryRunOperation
+authorize_security_group_ingress(GroupId='sg-000...0')  # 부재 -> DryRunOperation
+```
+
+`DryRun`이 보는 것은 **호출 권한과 파라미터 형식**이고 자원 조회는 그 뒤 단계다. 따라서 DryRun 전면 6종의 요약에 `대상 자원 유효`를 쓰면 **확인하지 않은 것을 확인했다고 기록**하게 된다 — 거절 근거를 FE가 그대로 노출하는 필드라 그 차이가 관제자에게 그대로 간다.
+
+이 사실을 근거로 **DryRun 전면 6종에 존재 확인 describe를 덧붙이지 않는다.** 제안 생성 시점의 존재 확인은 실행 시점의 존재를 보장하지 못하므로(상태 변화는 본 ADR 범위 밖), 호출 1회를 더 쓰고도 같은 한계가 남는다. 대신 그 한계를 `미확인:`에 남기고, 실제 존재 확인은 실행 직전 단계의 몫으로 둔다.
 
 ### 4. 대체 검증 대상 5종과 확인 방식
 
@@ -127,13 +156,18 @@ AWS 오류 → 사유 코드 매핑:
 
 | 런북 | 범위 | 방식 | 조회 | 통과 조건 |
 | --- | --- | --- | --- | --- |
-| `RUNBOOK_NACL_ADD_DENY` | 전면 | DESCRIBE | `describe_network_acls` | ① ACL 존재 ② `(rule_number, egress)` 조합이 기존 Entries에 없음 ③ `cidr_block` 파싱 가능·`protocol` enum 일치 |
+| `RUNBOOK_NACL_ADD_DENY` | 전면 | DESCRIBE | `describe_network_acls` | ① ACL 존재 ② `rule_number`가 **인바운드**(`egress=False`) Entries에 없음 ③ `cidr_block` 파싱 가능·`protocol` enum 일치 |
 | `RUNBOOK_NACL_RESTORE` | 전면 | DESCRIBE | `describe_network_acls` | ① ACL 존재 ② `(rule_number, egress)` 항목이 있음 ③ 그 항목이 `RuleAction=deny`이고 백업 레코드의 rule index와 일치 |
-| `RUNBOOK_EC2_ISOLATE` | 부분(elbv2만) | MIXED | ENI `DryRun` + `describe_target_health` · `describe_security_groups` | ① `modify_network_interface_attribute` DryRun 통과 ② `isolation_group_id` SG 존재 ③ TG 존재·대상이 등록돼 있음 |
-| `RUNBOOK_EC2_UNISOLATE` | 부분(elbv2만) | MIXED | 위 + `describe_security_groups` | ① DryRun 통과 ② 백업 레코드의 복원 대상 SG가 전부 현존 ③ TG 존재·대상이 같은 VPC |
+| `RUNBOOK_EC2_ISOLATE` | 부분(elbv2만) | MIXED | ENI `DryRun` + `describe_target_health` · `describe_security_groups` | ① `modify_network_interface_attribute` DryRun 통과 ② `isolation_group_id` SG 존재 ③ TG 존재·대상이 등록돼 있음(`Target.NotRegistered` 설명은 미등록으로 본다) |
+| `RUNBOOK_EC2_UNISOLATE` | 부분(elbv2만) | MIXED | ENI `DryRun` + `describe_target_groups` · `describe_security_groups` | ① DryRun 통과 ② 백업 레코드의 복원 대상 SG가 전부 현존 ③ TG 존재·대상이 같은 VPC |
 | `RUNBOOK_EC2_ENABLE_AUTOSCALING` | 부분(asg만) | MIXED | LT `DryRun` + `describe_instances` · `describe_auto_scaling_groups` | ① `create_launch_template` DryRun 통과 ② 원본 EC2 존재·`running` ③ 동명 ASG 부재 ④ `min_size <= max_size <= 4` |
 
 ②③ 실패는 각각 `PRECHECK_TARGET_NOT_FOUND` / `PRECHECK_INVALID_STATE`, 파라미터 형식 위반은 `PRECHECK_PARAM_INVALID`다.
+
+표의 조회 두 곳은 구현(#129) 과정의 실측으로 정정한 것이다.
+
+- **`UNISOLATE`의 조회는 `describe_target_groups`다.** 통과 조건 ③이 요구하는 것은   "대상이 같은 VPC"인데 `describe_target_health`의 응답(`TargetHealthDescriptions`)에는   **`VpcId`가 없다.** Target Group의 VPC를 알 수 있는 조회는 `describe_target_groups`뿐이다.
+- **`ISOLATE`는 등록 여부를 `Target.NotRegistered`로 판별한다.** `Targets`를 명시해   `describe_target_health`를 부르면 **등록되지 않은 대상에도** `unused` /   `Target.NotRegistered` 설명이 채워져 돌아온다. 응답 목록이 비었는지만 보면 수집 이후   이미 이탈한 대상이 "등록됨"으로 통과한다.
 
 **항상 거절되는 런북은 없다** — 5종 모두 통과 경로가 존재한다. 다만 §Context의 Community 제약 때문에 `ISOLATE`·`UNISOLATE`·`ENABLE_AUTOSCALING`의 elbv2·asg 조회는 로컬에서 실행되지 않으며, **이 3행의 통과 조건은 6–7주차 실 AWS 스모크에서 확정한다**(현재는 잠정안).
 
@@ -141,7 +175,7 @@ AWS 오류 → 사유 코드 매핑:
 
 ### 5. 파라미터 계약
 
-`precheck()`의 `parameters`는 런북 명세서의 `parameters_schema`를 따른다. 전부 required이며, typed 계약은 #49 확정 시 이 표를 원천으로 생성한다.
+`precheck()`의 `parameters`는 런북 명세서의 `parameters_schema`를 따른다. 전부 required이며, typed 계약은 #154 확정 시 이 표를 원천으로 생성한다.
 
 | runbook_id | 키 |
 | --- | --- |
@@ -160,6 +194,8 @@ AWS 오류 → 사유 코드 매핑:
 
 1. **롤백 3종은 원복 값을 파라미터로 받지 않는다.** 원본 SG 규칙·인스턴스 타입은 `backup_record_id`로만 로드한다(런북 공통 정책 ③, ADR-0004). 원복 값이 파라미터에 들어오면 `PRECHECK_PARAM_INVALID`로 거절한다.
 2. **`parameters`의 리소스 ID가 `target_arn`과 같은 자원을 가리키는지 재확인한다.** 3단계 ARN Match는 `target_arn` 하나를 보지만 파라미터에는 리소스 ID가 여럿 들어온다(예: `ISOLATE`의 `instance_id`·`target_group_arn`·`isolation_group_id`). 불일치는 `PRECHECK_PARAM_INVALID`로 거절한다 — Scope Escalation 2차 방어다.
+3. **AWS 클라이언트는 `target_arn`이 가리키는 리전으로 만든다.** 기본 리전으로 고정하면 MVP 범위(단일 계정 / 1–2개 리전)의 두 번째 리전 자산이 **없는 자원으로 판정되거나 같은 ID의 다른 자원을 보게 된다.** 같은 이유로 파라미터로 들어오는 ARN(`target_group_arn` 등)도 `target_arn`과 **같은 리전**이어야 하며, 다르면 `PRECHECK_PARAM_INVALID`로 거절한다 — 다른 리전 자원은 조회 자체가 되지 않으므로 오판정 대신 거절이 맞다.
+4. **`NACL_RESTORE`의 백업 레코드는 rule index로 특정한다.** 이 런북만 `backup_record_id`를 파라미터로 받지 않아 대상(`target_arn`)으로 백업을 찾는데, 한 NACL에 차단 조치가 누적되면 "대상의 최신" 하나로는 복원 대상을 고를 수 없다 — 최신 백업이 늘 다른 규칙을 가리켜 **오래된 규칙은 영영 복원되지 않는다.** 조회를 `(rule_number, egress)`로 좁힌다(`latest_for_target(..., payload_match=...)`).
 
 ### 6. 런북 추가 시 `DryRun` 적용 여부를 먼저 실측한다
 
@@ -198,7 +234,7 @@ AWS 오류 → 사유 코드 매핑:
   `RUNBOOK_EC2_ISOLATE`가 `AUTO_ISOLATION`에서도 쓰이는 근거는 `docs/PROJECT_STATUS.md` §3단계 위험 대응이다 — High `PRE_MITIGATION_0_5S`(0.5초 선차단)와 1분 미응답 `TIMEOUT_ISOLATION_1M`(자동 격리) 둘 다 이 런북을 쓰며, 그 구분은 Execution의 `trigger_source`가 담는다. 즉 로컬에서 "실패가 정상"인 경로는 후보 생성 하나가 아니라 **자동 격리·롤백 실행을 포함한 셋**이다.
 - §1 표의 호출 시점("AI 제안 생성 직후 1회")은 `AI_CANDIDATE` 문맥 기준 서술이다. `AUTO_ISOLATION`·`ROLLBACK_EXECUTION`에는 대응하는 후보 생성 시점이 없으므로(검증 요청이 `candidate_id`가 아니라 `execution_id`를 참조한다) 두 문맥의 호출 시점은 본 ADR에서 확정하지 않는다 — 후속 결정 대상이다.
 - 같은 이유로 §4 표의 elbv2·asg 통과 조건은 실 AWS에서 처음 실행된다. 실 AWS 시연 인프라 조기 준비(P2 방침)가 이 3종의 유일한 검증 경로다.
-- `PRECHECK_PARAM_INVALID`는 #49 이전의 과도기 코드다. typed 파라미터 계약이 확정되면 4단계가 아니라 1단계에서 걸리게 되고, 이 코드는 사용되지 않는다.
+- `PRECHECK_PARAM_INVALID`는 #154 이전의 과도기 코드다. typed 파라미터 계약이 확정되면 4단계가 아니라 1단계에서 걸리게 되고, 이 코드는 사용되지 않는다.
 - 승인·실행 시점의 재검증은 본 ADR 범위 밖이다. 제안 생성 시점과 실행 시점 사이에 자원 상태가 바뀔 수 있으며, 그 처리는 가드레일 4단계 밖에서 별도로 결정한다.
 
 ## Related
@@ -208,5 +244,24 @@ AWS 오류 → 사유 코드 매핑:
 - 선행 결정: [ADR-0002](0002-runbook-whitelist-mvp-scope.md)(본편 7종) · [ADR-0004](0004-rollback-runbook-whitelist-registration.md)(롤백 3종·공통 정책) · [ADR-0006](0006-localstack-team-standard-env.md) §3(전환 스위치 규약)·§4(검증 한계)
 - 확정 규격: `vigilantis-docs/런북 명세서.md` — `parameters_schema` · `dry_run_supported`
 - 현황 기준: `docs/PROJECT_STATUS.md` — 3주차 종료 판정 기준 ⓐ, 구현 우선순위 P0/P1/P2
-- 후속: #49(런북별 typed 파라미터 계약) · `AUTO_ISOLATION`·`ROLLBACK_EXECUTION` 문맥의 precheck 호출 시점 · 승인·실행 시점 재검증 정책 · 거절 이후 알림·에스컬레이션
+- 후속: #154(런북별 typed 파라미터 계약 — 후보 `display_parameters`·`evidence_ids` → `precheck(parameters)` 변환 포함) · `AUTO_ISOLATION`·`ROLLBACK_EXECUTION` 문맥의 precheck 호출 시점 · 승인·실행 시점 재검증 정책 · 거절 이후 알림·에스컬레이션
 - 영향 범위: `packages/schemas/precheck.py`(신규), `apps/core-api/services/aws/executor.py`, `apps/core-api/ai/guardrails.py`, `scripts/probe_dryrun.py`(신규), `docs/adr/0006-localstack-team-standard-env.md`
+
+## 개정 이력
+
+- **2026-08-25 (1차 개정)** — precheck 구현(#129, PR #147)에서 드러난 실측을 반영한다.
+  **판정 구조·사유 코드·5종 대체 검증이라는 핵심 결정은 바뀌지 않는다.** 개정 근거는
+  #133이며, 다섯 항목 모두 §6("런북을 추가하거나 `target_api`를 바꾸는 PR은 실측 결과
+  첨부를 머지 조건으로 한다")이 요구하는 종류의 확인이다.
+
+  | # | 절 | 개정 내용 | 근거 |
+  | --- | --- | --- | --- |
+  | ① | §3 | `DryRun` 통과는 **대상 자원 존재를 증명하지 않는다.** 예시 문자열의 `확인: 파라미터·대상 자원 유효`를 `확인: 호출 권한과 파라미터 형식` / `미확인: 대상 자원 존재와 현재 상태`로 정정. DryRun 전면 6종에 존재 확인 describe를 **덧붙이지 않기로** 확정 | 부재 자원에도 `DryRunOperation`이 반환된다(LocalStack 4.14.0 실측 3건) |
+  | ② | §4 | `UNISOLATE`의 조회를 `describe_target_health` → **`describe_target_groups`** 로 정정 | 통과 조건 ③이 요구하는 `VpcId`가 `TargetHealthDescriptions`에 없다 |
+  | ③ | §1 | 시그니처에 키워드 전용 **`backup_loader`** 를 명시하고, "예외를 던지지 않는다"의 예외 범위(**배선 오류만**)를 못 박음 | §4·§5의 통과 조건이 백업 레코드 내용을 요구하는데 §1 시그니처에 조회 경로가 없었다 |
+  | ④ | §4 · §5 | `ISOLATE`의 등록 판별을 **`Target.NotRegistered`** 기준으로 명시. `NACL_ADD_DENY`의 중복 검사를 **인바운드(`egress=False`)** 기준으로 명시. `NACL_RESTORE`의 백업 조회를 **rule index로 좁히도록** 규약화 | 미등록 대상에도 설명이 채워져 돌아온다 / `ADD_DENY`의 `parameters_schema`에 `egress`가 없다 / 한 NACL에 조치가 누적되면 옛 규칙이 복원 불가 |
+  | ⑤ | §5 | **리전 규약 신설** — 클라이언트는 `target_arn`의 리전으로 만들고, ARN 파라미터도 같은 리전이어야 한다 | 기본 리전 고정 시 2번째 리전 자산이 오판정된다(MVP 범위가 1–2개 리전) |
+
+  함께 정리한 것: 후속 이슈 참조를 **#49 → #154**로 교체한다. #49(`[SCHEMA/FEAT] 내부 공통
+  계약 — Incident·위협·AI 계열`)는 2026-08-18 종료됐고, `packages/schemas/agents.py:16-17`이
+  런북별 typed parameters를 **그 이슈의 범위 밖으로 명시**하고 있어 후속 근거가 될 수 없다.
