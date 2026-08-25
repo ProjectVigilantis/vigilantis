@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from schemas.api.actions import ExecuteActionRequest, ExecuteActionResponse
 from schemas.api.errors import ErrorCode
+from schemas.api.incidents import IncidentStatus
 from schemas.candidates import CandidateStatus
 from schemas.runbooks import TriggerSource
 
@@ -92,7 +93,7 @@ def _executable_candidate(
 def reserve_execution(
     db: Session, request: ExecuteActionRequest
 ) -> ExecutionReservation:
-    """조치 실행 예약 — 멱등 확인 → Incident 확인 → 제안 확인 → 예약 → 후보 선점.
+    """조치 실행 예약 — 멱등 확인 → Incident 확인 → 제안 확인 → 예약 → 후보·상태 전이.
 
     멱등 확인이 맨 앞이어야 한다. 재요청 시점에는 후보가 이미 CLAIMED라, 제안
     확인을 먼저 하면 정상 재요청이 200이 아니라 409로 떨어진다.
@@ -148,9 +149,19 @@ def reserve_execution(
         # 조회 이후 다른 요청이 후보를 선점했다. commit하지 않으므로 예약도 남지 않는다
         raise ApiError(ErrorCode.PROPOSAL_NOT_EXECUTABLE)
 
-    # 상세 응답에 포함되는 자식 상태(후보 CLAIMED·실행 추가)가 바뀌었다 —
-    # 부모 updated_at을 함께 올린다(incidents_repo.touch_incident 관례)
-    incidents_repo.touch_incident(db, candidate.incident_id)
+    # 접수와 함께 Incident도 AWAITING_APPROVAL→ACTION_IN_PROGRESS로 옮긴다.
+    # 상태를 두면 상세 응답 계약(api/incidents.py: AWAITING_APPROVAL이면 실행 가능한
+    # 제안 ≥1 · 진행 중 실행 없음)이 즉시 깨져 조회가 500이 된다
+    moved = incidents_repo.update_incident_status(
+        db,
+        candidate.incident_id,
+        expected=IncidentStatus.AWAITING_APPROVAL,
+        next_status=IncidentStatus.ACTION_IN_PROGRESS,
+    )
+    if not moved:
+        # 이미 ACTION_IN_PROGRESS인 두 번째 실행 — 정상 경로다. 상태는 그대로지만
+        # 상세 응답의 자식 목록이 바뀌었으므로 updated_at은 올린다
+        incidents_repo.touch_incident(db, candidate.incident_id)
 
     reserved = _to_response(execution)
     db.commit()

@@ -179,9 +179,50 @@ def test_new_key_reserves_execution_and_claims_candidate(client_pg, db):
     claimed = incidents_repo.get_candidate(db, candidate.candidate_id)
     assert claimed.status is CandidateStatus.CLAIMED
 
-    # 상세 응답의 자식 상태가 바뀌었으므로 부모 updated_at도 올라간다(touch_incident)
+    # 상태 전이 UPDATE의 onupdate가 부모 updated_at을 함께 올린다
     refreshed = incidents_repo.get_incident(db, incident.incident_id)
     assert refreshed.updated_at > seeded_updated_at
+
+
+def test_detail_stays_readable_after_reservation(client_pg, db):
+    """접수와 함께 Incident가 ACTION_IN_PROGRESS로 옮겨가지 않으면, 유일한 후보가
+    CLAIMED로 빠지고 IN_PROGRESS 실행이 생겨 상세 응답 계약이 깨진다(500)."""
+    incident, candidate = _seed_executable(db)
+    detail = f"/api/v1/incidents/{incident.incident_id}"
+
+    assert client_pg.get(detail).status_code == 200
+    assert client_pg.post(URL, json=_body(incident, candidate.runbook_id)).status_code == 202
+
+    after = client_pg.get(detail)
+    assert after.status_code == 200, after.json()
+    body = after.json()
+    assert body["status"] == "ACTION_IN_PROGRESS"
+    assert body["recommendations"] == []
+    assert [item["status"] for item in body["executions"]] == ["IN_PROGRESS"]
+
+
+def test_second_reservation_keeps_action_in_progress(client_pg, db):
+    """이미 ACTION_IN_PROGRESS인 Incident의 두 번째 접수 — 상태 전이 rowcount 0은
+    정상 경로이며, 상세는 계속 200이어야 한다."""
+    incident, first = _seed_executable(db)
+    second = _add_candidate(db, incident, RunbookId.RUNBOOK_SG_DELETE_ISOLATED)
+    detail = f"/api/v1/incidents/{incident.incident_id}"
+
+    assert client_pg.post(URL, json=_body(incident, first.runbook_id)).status_code == 202
+    db.expire_all()
+    after_first = incidents_repo.get_incident(db, incident.incident_id).updated_at
+
+    assert client_pg.post(
+        URL, json=_body(incident, second.runbook_id, key=KEY + "-2")
+    ).status_code == 202
+
+    after = client_pg.get(detail)
+    assert after.status_code == 200, after.json()
+    assert after.json()["status"] == "ACTION_IN_PROGRESS"
+    assert len(after.json()["executions"]) == 2
+    # 상태는 그대로여도(moved=False) touch_incident가 updated_at을 올려야 한다
+    db.expire_all()
+    assert incidents_repo.get_incident(db, incident.incident_id).updated_at > after_first
 
 
 def test_same_key_replay_returns_200_with_same_execution(client_pg, db):
