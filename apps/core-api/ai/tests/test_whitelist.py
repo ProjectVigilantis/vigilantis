@@ -1,16 +1,7 @@
 """Action Whitelist 계약 테스트 — 확정 10종(본편 7 + 롤백 3)의 허용·차단·AI 추천 판정."""
 
-import sys
-from pathlib import Path
-
 import pytest
-
-# apps/core-api 를 import 경로에 추가 (services/tests 와 동일 방식)
-CORE_API = Path(__file__).resolve().parents[2]
-if str(CORE_API) not in sys.path:
-    sys.path.insert(0, str(CORE_API))
-
-from ai.whitelist import (  # noqa: E402
+from ai.whitelist import (
     AI_RECOMMENDABLE_RUNBOOK_IDS,
     ALLOWED_RUNBOOK_IDS,
     ROLLBACK_RUNBOOK_IDS,
