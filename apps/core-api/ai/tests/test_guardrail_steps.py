@@ -16,10 +16,12 @@ from ai.guardrails import (
 from ai.whitelist import AI_RECOMMENDABLE_RUNBOOK_IDS, ROLLBACK_RUNBOOK_IDS, RunbookId
 from schemas.agents import RunbookCandidateDraft
 from schemas.guardrails import (
+    ActionWhitelistReasonCode,
     GuardrailStep,
     GuardrailStepStatus,
     GuardrailValidationContext,
     GuardrailValidationRequest,
+    SchemaCheckReasonCode,
 )
 
 TARGET_ARN = "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0123456789abcdef0"
@@ -272,11 +274,30 @@ def test_unknown_runbook_is_recorded_as_whitelist_failure():
     assert whitelist.step_result.reason_code == WHITELIST_UNKNOWN_RUNBOOK
 
 
-def test_reason_codes_are_distinct_and_prefixed():
-    # ④의 PRECHECK_* 코드와 reason_code 한 필드를 나눠 쓴다 — 접두로 단계를 구분한다
-    codes = {SCHEMA_INVALID_PAYLOAD, WHITELIST_UNKNOWN_RUNBOOK, WHITELIST_NOT_AI_RECOMMENDABLE}
+def test_exposed_reason_codes_are_the_shared_contract_members():
+    """이 파일이 노출하는 세 이름은 공용 계약(packages/schemas/guardrails.py)의
+    멤버여야 한다 — 앱이 같은 값을 따로 정의하면 단계↔코드 정합 검증을 우회한다.
 
-    assert len(codes) == 3
-    assert SCHEMA_INVALID_PAYLOAD.startswith("SCHEMA_")
-    assert WHITELIST_UNKNOWN_RUNBOOK.startswith("WHITELIST_")
-    assert WHITELIST_NOT_AI_RECOMMENDABLE.startswith("WHITELIST_")
+    접두·전역 고유성은 계약 쪽 테스트가 본다
+    (packages/schemas/tests/test_guardrail_contracts.py). 여기서 보는 것은 앱이
+    가리키는 대상이 그 계약인가다.
+    """
+    assert SCHEMA_INVALID_PAYLOAD is SchemaCheckReasonCode.SCHEMA_INVALID_PAYLOAD
+    assert WHITELIST_UNKNOWN_RUNBOOK is (
+        ActionWhitelistReasonCode.WHITELIST_UNKNOWN_RUNBOOK
+    )
+    assert WHITELIST_NOT_AI_RECOMMENDABLE is (
+        ActionWhitelistReasonCode.WHITELIST_NOT_AI_RECOMMENDABLE
+    )
+
+
+def test_step_result_carries_reason_code_of_its_own_step():
+    """②의 거절이 ② 코드로 기록된다 — 계약이 단계↔코드 정합을 강제하므로, 다른
+    단계 코드를 넣었다면 GuardrailStepResult 생성 자체가 실패한다."""
+    schema = run_schema_check(_request({**VALID_PAYLOAD, "runbook_id": "RUNBOOK_EBS_SNAPSHOT"}))
+    assert schema.command is not None
+    result = run_action_whitelist(schema.command).step_result
+
+    assert isinstance(result.reason_code, ActionWhitelistReasonCode)
+    # DB에는 이 문자열이 남는다(apps/core-api/db/repositories/guardrails.py)
+    assert result.model_dump(mode="json")["reason_code"] == "WHITELIST_UNKNOWN_RUNBOOK"

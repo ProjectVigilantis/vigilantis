@@ -10,13 +10,16 @@
 #   - 단계 결과는 항상 4개·고정 순서. 실패 단계 이후는 NOT_RUN, 이전은 PASS.
 #   - PASS 시 저장할 validated_command(불변 실행 명령)는 ADR-0004 어휘
 #     (trigger_source·approval_mode) 승인 후 RunbookCommand 계약과 함께 추가한다.
-#   - reason_code 값 Enum은 Runbook별 실패 조건 확정 시 교체한다(#49와 동일 원칙).
+#   - 거절 사유 코드는 단계별 Enum이며 이 파일이 네 단계 전부의 단일 원천이다.
+#     단계와 맞지 않는 코드는 GuardrailStepResult가 거절한다. 접두(SCHEMA_·
+#     WHITELIST_·ARN_·PRECHECK_)가 단계를 표시하므로 거절 기록만으로 어느 단계가
+#     막았는지 역산할 수 있다. (#125)
 # ==============================================================================
 
 from __future__ import annotations
 
 from enum import Enum, unique
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -62,12 +65,88 @@ class GuardrailStepStatus(str, Enum):
     NOT_RUN = "NOT_RUN"
 
 
+# ------------------------------------------------------------------------------
+# 단계별 거절 사유 코드 — GuardrailStepResult.reason_code에 담는 값
+#
+# 값은 DB에 문자열로 남는다(GuardrailEvaluation.steps는 JSON 직렬화 저장 —
+# apps/core-api/db/repositories/guardrails.py). 값 문자열을 바꾸면 과거 거절 기록의
+# 사유를 읽을 수 없게 되므로, 이름은 늘리되 기존 값은 바꾸지 않는다.
+# ------------------------------------------------------------------------------
+
+
+@unique
+class SchemaCheckReasonCode(str, Enum):
+    """① Schema Check 거절 사유 — 명령 봉투의 모양이 계약과 다르다."""
+
+    SCHEMA_INVALID_PAYLOAD = "SCHEMA_INVALID_PAYLOAD"
+
+
+@unique
+class ActionWhitelistReasonCode(str, Enum):
+    """② Action Whitelist 거절 사유.
+
+    "목록에 없음"과 "목록에는 있으나 AI가 제안하면 안 됨"을 가른다 — 후자는 롤백
+    3종을 AI에게 추천시키려는 인젝션 시도의 신호라 기록에서 섞이면 안 된다
+    (ADR-0004 정책 ②).
+    """
+
+    WHITELIST_UNKNOWN_RUNBOOK = "WHITELIST_UNKNOWN_RUNBOOK"
+    WHITELIST_NOT_AI_RECOMMENDABLE = "WHITELIST_NOT_AI_RECOMMENDABLE"
+
+
+@unique
+class ArnMatchReasonCode(str, Enum):
+    """③ ARN Match 거절 사유 — 대상이 DB에 수집된 자산이 아니다(Scope Escalation).
+
+    판정 로직은 아직 없다(apps/core-api/ai/guardrails.py [남은 작업] 3번). 어휘를
+    먼저 세워 두는 이유는 ③이 구현될 때 사유 코드가 다시 앱 안 문자열로 생기는 것을
+    막기 위해서다.
+    """
+
+    ARN_TARGET_NOT_MANAGED = "ARN_TARGET_NOT_MANAGED"
+
+
+@unique
+class PrecheckReasonCode(str, Enum):
+    """④ AWS Dry-Run 거절 사유. AWS 응답 → 코드 매핑은 ADR-0007 §2 표가 원천이다.
+
+    executor 호출 계약(packages/schemas/precheck.py)이 이 Enum을 재노출하므로
+    schemas.precheck에서 가져오는 기존 import 경로는 그대로다.
+    """
+
+    PRECHECK_UNAUTHORIZED = "PRECHECK_UNAUTHORIZED"
+    PRECHECK_TARGET_NOT_FOUND = "PRECHECK_TARGET_NOT_FOUND"
+    PRECHECK_INVALID_STATE = "PRECHECK_INVALID_STATE"
+    PRECHECK_NOT_IMPLEMENTED = "PRECHECK_NOT_IMPLEMENTED"
+    # #154(런북별 typed 파라미터 계약) 이전의 과도기 코드 — 파라미터 키 누락·형식
+    # 위반이 ① Schema Check에서 걸리지 않고 ④에서 처음 드러나는 동안만 쓰인다.
+    PRECHECK_PARAM_INVALID = "PRECHECK_PARAM_INVALID"
+    PRECHECK_AWS_ERROR = "PRECHECK_AWS_ERROR"
+
+
+GuardrailReasonCode = Union[
+    SchemaCheckReasonCode,
+    ActionWhitelistReasonCode,
+    ArnMatchReasonCode,
+    PrecheckReasonCode,
+]
+
+# 단계 ↔ 그 단계가 쓸 수 있는 코드 목록. GuardrailStepResult가 이 표로 정합을
+# 강제하므로, 단계나 코드를 늘릴 때 여기 등록하지 않으면 계약이 거절한다.
+STEP_REASON_CODES: dict[GuardrailStep, type[Enum]] = {
+    GuardrailStep.SCHEMA_CHECK: SchemaCheckReasonCode,
+    GuardrailStep.ACTION_WHITELIST: ActionWhitelistReasonCode,
+    GuardrailStep.ARN_MATCH: ArnMatchReasonCode,
+    GuardrailStep.AWS_DRY_RUN: PrecheckReasonCode,
+}
+
+
 class GuardrailStepResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     step: GuardrailStep
     result: GuardrailStepStatus
-    reason_code: Optional[str] = Field(None, min_length=1)
+    reason_code: Optional[GuardrailReasonCode] = None
     # AWS_DRY_RUN 단계에서 실제 사용한 검증 방식·한계 요약(Dry-Run 미지원 대체 검증 포함)
     verification_summary: Optional[str] = Field(None, min_length=1)
 
@@ -75,6 +154,20 @@ class GuardrailStepResult(BaseModel):
     def _reason_only_on_fail(self):
         if self.result != GuardrailStepStatus.FAIL and self.reason_code is not None:
             raise ValueError("reason_code는 FAIL 단계에만 기록합니다")
+        return self
+
+    @model_validator(mode="after")
+    def _reason_belongs_to_step(self):
+        # 접두가 단계를 표시하는 성질을 이 검증이 지킨다 — ②에 PRECHECK_*가 들어가면
+        # 거절 기록에서 어느 단계가 막았는지 역산할 수 없게 된다.
+        if self.reason_code is None:
+            return self
+        expected = STEP_REASON_CODES[self.step]
+        if not isinstance(self.reason_code, expected):
+            raise ValueError(
+                f"{self.step.value} 단계의 reason_code는 {expected.__name__}여야 합니다"
+                f" (받은 값: {self.reason_code.value})"
+            )
         return self
 
     @model_validator(mode="after")

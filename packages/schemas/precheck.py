@@ -17,9 +17,9 @@
 #   - "미확인:" 항목은 비워 두지 않는다. 확인 범위의 한계를 남기는 것이 이 필드의
 #     존재 이유이며, 조회 대체 경로는 항상 IAM 권한을 검증하지 못한다.
 #
-# PrecheckReasonCode는 #125가 packages/schemas/guardrails.py의 단계별 공용 목록으로
-# 흡수할 예정이다. 접두 PRECHECK_는 그때도 유지되므로 거절 기록에서 단계를 역산하는
-# 성질은 보존된다.
+# PrecheckReasonCode는 네 단계 공용 목록(packages/schemas/guardrails.py)이 정의하고
+# 이 파일이 재노출한다 — schemas.precheck에서 가져오는 import 경로는 그대로다. 접두
+# PRECHECK_가 유지되므로 거절 기록에서 단계를 역산하는 성질도 보존된다. (#125)
 # ==============================================================================
 
 from __future__ import annotations
@@ -30,19 +30,14 @@ from typing import Optional, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .guardrails import PrecheckReasonCode
 
-@unique
-class PrecheckReasonCode(str, Enum):
-    """④ 거절 사유. AWS 응답 → 코드 매핑은 ADR-0007 §2 표가 원천이다."""
-
-    PRECHECK_UNAUTHORIZED = "PRECHECK_UNAUTHORIZED"
-    PRECHECK_TARGET_NOT_FOUND = "PRECHECK_TARGET_NOT_FOUND"
-    PRECHECK_INVALID_STATE = "PRECHECK_INVALID_STATE"
-    PRECHECK_NOT_IMPLEMENTED = "PRECHECK_NOT_IMPLEMENTED"
-    # #49(런북별 typed 파라미터 계약) 이전의 과도기 코드 — 파라미터 키 누락·형식
-    # 위반이 ① Schema Check에서 걸리지 않고 ④에서 처음 드러나는 동안만 쓰인다.
-    PRECHECK_PARAM_INVALID = "PRECHECK_PARAM_INVALID"
-    PRECHECK_AWS_ERROR = "PRECHECK_AWS_ERROR"
+__all__ = [
+    "PrecheckOutcome",
+    "PrecheckReasonCode",
+    "VerificationMethod",
+    "build_verification_summary",
+]
 
 
 @unique

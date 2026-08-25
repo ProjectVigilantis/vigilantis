@@ -11,8 +11,8 @@
 #     RunbookCandidateDraft로 바로 가면 그 모델이 AI 추천 7종만 받으므로 미등록
 #     ID·롤백 ID가 ①에서 터지고 ②가 걸러낼 것이 남지 않는다. 목록 대조는 ②다.
 #   - ②를 통과한 명령만 RunbookCandidateDraft로 승격한다.
-#   - 거절 사유는 문자열 상수다. Runbook별 실패 조건 확정 시 Enum으로 교체한다
-#     (packages/schemas/guardrails.py 계약 원칙과 동일).
+#   - 거절 사유는 공용 계약이 정의한 단계별 Enum이다(packages/schemas/guardrails.py).
+#     이 파일은 값을 정의하지 않고 ①②가 쓰는 멤버만 짧은 이름으로 다시 노출한다.
 #   - 검증 문맥은 AI_CANDIDATE만 구현한다. 다른 문맥은 payload 모양이 달라 여기서
 #     판정하면 거절 기록이 틀리므로, FAIL이 아니라 예외로 막는다.
 #
@@ -33,11 +33,14 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from schemas.agents import RunbookCandidateDraft
 from schemas.guardrails import (
+    ActionWhitelistReasonCode,
+    GuardrailReasonCode,
     GuardrailStep,
     GuardrailStepResult,
     GuardrailStepStatus,
     GuardrailValidationContext,
     GuardrailValidationRequest,
+    SchemaCheckReasonCode,
 )
 from schemas.runbooks import RunbookId
 
@@ -46,12 +49,15 @@ from .whitelist import is_ai_recommendable, is_allowed_runbook
 logger = logging.getLogger("vigilantis.ai")
 
 # ------------------------------------------------------------------------------
-# 거절 사유 코드 — GuardrailStepResult.reason_code에 담는 값
+# 거절 사유 코드 — 값의 정의는 packages/schemas/guardrails.py에 있고 여기는 ①②가
+# 쓰는 멤버의 짧은 이름이다. 호출부·테스트가 이 이름으로 참조한다.
 # ------------------------------------------------------------------------------
 
-SCHEMA_INVALID_PAYLOAD: Final[str] = "SCHEMA_INVALID_PAYLOAD"
-WHITELIST_UNKNOWN_RUNBOOK: Final[str] = "WHITELIST_UNKNOWN_RUNBOOK"
-WHITELIST_NOT_AI_RECOMMENDABLE: Final[str] = "WHITELIST_NOT_AI_RECOMMENDABLE"
+SCHEMA_INVALID_PAYLOAD: Final = SchemaCheckReasonCode.SCHEMA_INVALID_PAYLOAD
+WHITELIST_UNKNOWN_RUNBOOK: Final = ActionWhitelistReasonCode.WHITELIST_UNKNOWN_RUNBOOK
+WHITELIST_NOT_AI_RECOMMENDABLE: Final = (
+    ActionWhitelistReasonCode.WHITELIST_NOT_AI_RECOMMENDABLE
+)
 
 # 위반 항목 수·위치 문자열은 payload가 키우는 값이다 — 로그 한 줄이 무한정
 # 길어지지 않게 자른다. loc에는 payload가 지은 키 이름(추가 필드명·dict 키)이
@@ -116,7 +122,9 @@ def _step_pass(step: GuardrailStep) -> GuardrailStepResult:
     return GuardrailStepResult(step=step, result=GuardrailStepStatus.PASS)
 
 
-def _step_fail(step: GuardrailStep, reason_code: str) -> GuardrailStepResult:
+def _step_fail(
+    step: GuardrailStep, reason_code: GuardrailReasonCode
+) -> GuardrailStepResult:
     return GuardrailStepResult(
         step=step, result=GuardrailStepStatus.FAIL, reason_code=reason_code
     )
@@ -165,14 +173,19 @@ def run_schema_check(request: GuardrailValidationRequest) -> SchemaCheckOutcome:
     )
 
 
-def _whitelist_fail(runbook_id: str, reason_code: str) -> ActionWhitelistOutcome:
+def _whitelist_fail(
+    runbook_id: str, reason_code: ActionWhitelistReasonCode
+) -> ActionWhitelistOutcome:
     # runbook_id는 거절 원인 파악에 필요한 식별자라 남기되, payload가 지은 문자열이므로
     # 길이는 제한한다(정당한 ID는 전부 이 상한 안이다).
     logger.warning(
         "guardrail_action_whitelist_rejected",
         extra={
             "runbook_id": runbook_id[:_MAX_LOGGED_LOC_CHARS],
-            "reason_code": reason_code,
+            # .value로 남긴다 — str,Enum 멤버를 그대로 넘기면 포매터가 str()을 써서
+            # "ActionWhitelistReasonCode.WHITELIST_UNKNOWN_RUNBOOK"이 찍히고 DB에
+            # 저장되는 문자열과 로그가 어긋난다.
+            "reason_code": reason_code.value,
         },
     )
     return ActionWhitelistOutcome(
