@@ -77,7 +77,7 @@
 | 2026-08-18 | **실행 축 어휘 교체(ADR-0004 1차 개정)** — 확정본 런북 명세서의 `approval_mode`·`trigger_source` 두 축을 의도적으로 교체. `trigger_source`(실행별 기록) = `USER_APPROVAL`·`PRE_MITIGATION_0_5S`·`TIMEOUT_ISOLATION_1M`·`AUTO_ON_FAILURE`, `approval_mode`(런북별 정책) = `HUMAN_ONLY`·`SYSTEM_OR_HUMAN`. 런타임 의미 무변경이라 supersede 없이 1차 개정으로 종결 | [ADR-0004](adr/0004-rollback-runbook-whitelist-registration.md) |
 | 2026-08-18 | **LangGraph 그래프 구조 확정** — FinOps·SecOps 두 그래프로 분리, Checkpointer 미사용(업무 상태는 PostgreSQL 단일 원천·그래프 내 승인 중단점 없음), Guardrail·DB 저장·AWS 실행·승인은 그래프 밖, 모델 호출은 `AIModelClient` 경계 경유. 판단 근거는 구조화 필드로만 보존(Prompt 전문·내부 추론 텍스트 미보존) | [ADR-0005](adr/0005-langgraph-stateless-domain-graphs.md) |
 | 2026-08-19 | **LocalStack 팀 표준 환경 전략 확정** — 단일 compose(Community 전용·버전 고정), 시드 = Boto3 스크립트 단일 원천(멱등·rule_engine 임계값 결합·실 AWS 실행 거부), `AWS_ENDPOINT_URL` 스위치 규약 전 모듈 승격(환경 감지 분기 금지), 검증 한계 4경로(Dry-Run·Status Check·CloudWatch·ALB TG/ASG)는 6–7주차 실 AWS 스모크로 이월 | [ADR-0006](adr/0006-localstack-team-standard-env.md) |
-| 2026-08-24 | **가드레일 ④ AWS Dry-Run = executor `precheck()` 단일 호출로 확정** — 동기·예외 미전파, 반환은 `PrecheckOutcome`(`passed`·`reason_code`·`verification_summary`). `DryRunOperation` **예외 발생만 PASS**(정상 반환은 플래그 미적용으로 보고 FAIL). `DryRun` 미지원 5종은 환경 무관 **조회(describe) 대체 검증**. 실측 결과 `elbv2`·`autoscaling`은 LocalStack Community 미포함(Pro 전용)이라 P2 3종은 로컬 검증 경로 자체가 없음 → ADR-0006 §4 검증 한계 표에 확정 편입 | [ADR-0007](adr/0007-guardrail-dryrun-executor-precheck-contract.md) / 이슈 #113 / PR #117 |
+| 2026-08-24 | **가드레일 ④ AWS Dry-Run = executor `precheck()` 단일 호출로 확정** — 동기·예외 미전파, 반환은 `PrecheckOutcome`(`passed`·`reason_code`·`verification_summary`). `DryRunOperation` **예외 발생만 PASS**(정상 반환은 플래그 미적용으로 보고 FAIL). `DryRun` 미지원 5종(전면 2 = `NACL_ADD_DENY`·`NACL_RESTORE`, 부분 3 = `EC2_ISOLATE`·`EC2_UNISOLATE`의 elbv2 호출·`ENABLE_AUTOSCALING`의 asg 호출)은 환경 무관 **조회(describe) 대체 검증**. 실측 결과 `elbv2`·`autoscaling`은 LocalStack Community 미포함(Pro 전용)이라 P2 3종은 로컬 검증 경로 자체가 없음 → ADR-0006 §4 검증 한계 표에 확정 편입 | [ADR-0007](adr/0007-guardrail-dryrun-executor-precheck-contract.md) / 이슈 #113 / PR #117 |
 | 2026-08-24 | **`_is_prod` 운영 자산 인식 기준 확정** — 규칙 소유자(김승철) 결정. **키**(대소문자 무시) = `environment`·`env`·`stage`·`tier`, **값**(소문자 정확일치·부분일치 금지) = `prod`·`production`·`prd`. 부분 문자열 매칭은 영구 금지(`product-service`류 오탐 방지, #81). 접미 변형(`prod-us-east` 등) 미탐은 의도된 결과이며 Golden 경계 케이스로 고정 | 이슈 #95 / PR #97 |
 
 ## API 계약 (확정 — FE↔BE 공개 계약, 코드 원천: `packages/schemas/api/`)
@@ -116,7 +116,7 @@
 
 - **P0 (최우선 착수, 3–5주차)**: `RIGHTSIZING`+`REVERT_SIZE`(자산 자동 원복), `NACL_ADD_DENY`+`NACL_RESTORE`(차단→원클릭 해제) — "양방향 회복" 스토리의 골격.
 - **P1 (P0 후 순차)**: `SG_DELETE_ISOLATED`(+`SG_RECREATE`), `EBS_DELETE_UNATTACHED` — 난도 낮음.
-- **P2 (조기 준비 병행)**: `EC2_ISOLATE`(+`UNISOLATE`)는 ALB·다중 EC2 시연 인프라가 선행 조건 → 인프라 준비를 앞당긴다. `ENABLE_AUTOSCALING`은 구현량 최대 → 설계 선행.
+- **P2 (조기 준비 병행 — 인프라는 선택이 아니라 전제 조건)**: `EC2_ISOLATE`(+`UNISOLATE`)는 ALB·다중 EC2 시연 인프라가 선행 조건 → 인프라 준비를 앞당긴다. `ENABLE_AUTOSCALING`은 구현량 최대 → 설계 선행. **`elbv2`·`autoscaling`이 LocalStack Community에 없어 이 3종은 Dry-Run 대체 조회조차 로컬에서 돌지 않는다**(ADR-0007 실측, §미해결 1번) → **실 AWS 스모크 환경 확보가 P2 착수의 전제 조건**이며, 지연 시 6–7주차 스모크가 아니라 P2 구현 자체가 막힌다.
 - **9/13 중간 점검**: P0 4종 실동작 여부 점검. 미달 시 범위 축소가 아니라 **인력 재배치·범위 외 작업 중단**으로 대응한다.
 
 ## 문서 지도 (신뢰 우선순위 — 충돌 시 위가 이김)
