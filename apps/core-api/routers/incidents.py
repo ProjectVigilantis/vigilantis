@@ -7,6 +7,9 @@
 #     부분집합 10필드, created_at 내림차순 전체 반환 — SSOT §API 계약.
 #   - SQL은 db.repositories 경유 — 라우터는 응답 조립만 한다.
 #   - recommendations는 Guardrail PASS 제안(EXECUTABLE 후보)만 담는다.
+#   - available_recovery_runbook_ids는 실행 이력에서 파생한다 — 짝(ADR-0004)이
+#     있고, 원본이 복구 가능 상태이며, 아직 복구가 접수되지 않은 실행만 노출한다.
+#     (Issue #126)
 # ==============================================================================
 
 from __future__ import annotations
@@ -25,6 +28,8 @@ from schemas.api.incidents import (
     IncidentStatus,
 )
 from schemas.candidates import CandidateStatus
+from schemas.executions import EXECUTION_RECOVERABLE_STATUSES
+from schemas.runbooks import ROLLBACK_RUNBOOK_BY_MAIN_ID
 
 from db import models
 from db.repositories import executions as executions_repo
@@ -34,6 +39,22 @@ from exceptions import ApiError
 from identifiers import canonical_id
 
 router = APIRouter(prefix="/api/v1", tags=["incidents"])
+
+
+def _recovery_ids(
+    execution: models.ActionExecution, recovered_parent_ids: set[str]
+) -> list[str]:
+    """관제자에게 열어 줄 복구 조치(롤백 3종). 세 조건을 모두 만족할 때만 노출한다.
+
+    조건은 접수 판정(workflows._recoverable_origin)과 같은 것이어야 한다 —
+    목록에 보이는데 누르면 409가 되거나 그 반대가 되면 화면이 거짓말을 한다.
+    """
+    if execution.status not in EXECUTION_RECOVERABLE_STATUSES:
+        return []
+    if execution.execution_id in recovered_parent_ids:
+        return []
+    rollback_id = ROLLBACK_RUNBOOK_BY_MAIN_ID.get(execution.runbook_id.value)
+    return [rollback_id] if rollback_id is not None else []
 
 
 def _to_list_item(row: models.Incident) -> IncidentListItem:
@@ -88,17 +109,23 @@ def get_incident(incident_id: str, db: Session = Depends(get_db)) -> IncidentRes
         }
         for candidate in sorted(executable, key=lambda c: c.created_at)
     ]
+    execution_rows = executions_repo.list_by_incident(db, row.incident_id)
+    recovered_parent_ids = {
+        execution.parent_execution_id
+        for execution in execution_rows
+        if execution.parent_execution_id is not None
+    }
     executions = [
         {
             "execution_id": execution.execution_id,
             "runbook_id": execution.runbook_id,
             "status": execution.status,
-            # 복구 가능 목록은 Backup 결속 등 실행 흐름 데이터로 구성한다 —
-            # 그 구현은 Issue #126(롤백 실행 접수·복구 목록)으로 유예, 조회 단계는 빈 목록
-            "available_recovery_runbook_ids": [],
+            "available_recovery_runbook_ids": _recovery_ids(
+                execution, recovered_parent_ids
+            ),
             "updated_at": execution.updated_at,
         }
-        for execution in executions_repo.list_by_incident(db, row.incident_id)
+        for execution in execution_rows
     ]
     return IncidentResponse.model_validate(
         {

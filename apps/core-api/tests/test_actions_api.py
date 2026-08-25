@@ -487,3 +487,135 @@ def test_concurrent_same_key_requests_reserve_exactly_once(pg_engine, monkeypatc
             cleanup.commit()
         finally:
             cleanup.close()
+
+
+# --- 롤백 3종 접수 (Issue #126) --------------------------------------------------
+
+ROLLBACK_PAIRS = [
+    (RunbookId.RUNBOOK_EC2_ISOLATE, RunbookId.RUNBOOK_EC2_UNISOLATE),
+    (RunbookId.RUNBOOK_SG_DELETE_ISOLATED, RunbookId.RUNBOOK_SG_RECREATE),
+    (RunbookId.RUNBOOK_EC2_RIGHTSIZING, RunbookId.RUNBOOK_EC2_REVERT_SIZE),
+]
+
+
+def _add_execution(
+    db,
+    incident: models.Incident,
+    runbook_id: RunbookId,
+    status: ExecutionStatus = ExecutionStatus.SUCCESS,
+) -> models.ActionExecution:
+    execution = models.ActionExecution(
+        incident_id=incident.incident_id,
+        runbook_id=runbook_id,
+        target_arn=SUBJECT_EC2,
+        status=status,
+        trigger_source=TriggerSource.USER_APPROVAL,
+    )
+    db.add(execution)
+    db.flush()
+    return execution
+
+
+@pytest.mark.parametrize("origin_runbook, rollback_runbook", ROLLBACK_PAIRS)
+def test_rollback_reserves_child_bound_to_origin(
+    client_pg, db, origin_runbook, rollback_runbook
+):
+    """롤백은 후보가 아니라 원본 실행에서 접수된다 — 결속은 parent_execution_id."""
+    incident = _seed_incident(db)
+    origin = _add_execution(db, incident, origin_runbook)
+
+    response = client_pg.post(URL, json=_body(incident, rollback_runbook))
+
+    assert response.status_code == 202
+    child = executions_repo.get_execution(db, response.json()["execution_id"])
+    assert child.parent_execution_id == origin.execution_id
+    assert child.candidate_id is None
+    assert child.runbook_id is rollback_runbook
+    assert child.trigger_source is TriggerSource.USER_APPROVAL
+    assert child.status is ExecutionStatus.IN_PROGRESS
+
+
+@pytest.mark.parametrize(
+    "origin_status",
+    [ExecutionStatus.IN_PROGRESS, ExecutionStatus.FAILED, ExecutionStatus.ROLLED_BACK],
+)
+def test_rollback_without_recoverable_origin_returns_409(client_pg, db, origin_status):
+    """복구를 열어 주지 않는 상태의 원본은 접수 근거가 되지 않는다."""
+    incident = _seed_incident(db)
+    _add_execution(db, incident, RunbookId.RUNBOOK_EC2_ISOLATE, status=origin_status)
+
+    response = client_pg.post(
+        URL, json=_body(incident, RunbookId.RUNBOOK_EC2_UNISOLATE)
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "PROPOSAL_NOT_EXECUTABLE"
+
+
+def test_rollback_without_matching_pair_returns_409(client_pg, db):
+    """짝이 아닌 원본은 복구를 열지 않는다 — NACL_ADD_DENY의 해제는 본편 경로다."""
+    incident = _seed_incident(db)
+    _add_execution(db, incident, RunbookId.RUNBOOK_NACL_ADD_DENY)
+
+    response = client_pg.post(
+        URL, json=_body(incident, RunbookId.RUNBOOK_EC2_UNISOLATE)
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "PROPOSAL_NOT_EXECUTABLE"
+
+
+def test_second_rollback_on_same_origin_returns_409(client_pg, db):
+    """이중 롤백 방지 — 한 원본이 여는 복구는 1회뿐이다."""
+    incident = _seed_incident(db)
+    _add_execution(db, incident, RunbookId.RUNBOOK_EC2_ISOLATE)
+    body = _body(incident, RunbookId.RUNBOOK_EC2_UNISOLATE)
+
+    first = client_pg.post(URL, json=body)
+    second = client_pg.post(URL, json={**body, "idempotency_key": str(uuid.uuid4())})
+
+    assert first.status_code == 202
+    assert second.status_code == 409
+    assert second.json()["error"]["code"] == "PROPOSAL_NOT_EXECUTABLE"
+
+
+def test_rollback_same_key_replay_returns_200(client_pg, db):
+    """멱등 처리는 #116 경로를 그대로 쓴다 — 롤백도 같은 Key면 200 + 같은 실행."""
+    incident = _seed_incident(db)
+    _add_execution(db, incident, RunbookId.RUNBOOK_EC2_ISOLATE)
+    body = _body(incident, RunbookId.RUNBOOK_EC2_UNISOLATE)
+
+    first = client_pg.post(URL, json=body)
+    replay = client_pg.post(URL, json=body)
+
+    assert (first.status_code, replay.status_code) == (202, 200)
+    assert replay.json()["execution_id"] == first.json()["execution_id"]
+
+
+def test_rollback_on_resolved_incident_resumes_action_in_progress(client_pg, db):
+    """종료 상태에서도 관제자 복구는 접수되고, 그 뒤 상세 조회가 200으로 남는다.
+
+    RESOLVED는 "더 진행할 제안·실행 없음"이지 자산이 원복됐다는 뜻이 아니다 —
+    격리된 채 RESOLVED인 인시던트의 [원클릭 해제]가 ADR-0004의 정규 경로다.
+    """
+    incident = _seed_incident(db)
+    incident.status = IncidentStatus.RESOLVED
+    origin = _add_execution(db, incident, RunbookId.RUNBOOK_EC2_ISOLATE)
+    detail_url = f"/api/v1/incidents/{incident.incident_id}"
+
+    before = client_pg.get(detail_url)
+    response = client_pg.post(
+        URL, json=_body(incident, RunbookId.RUNBOOK_EC2_UNISOLATE)
+    )
+    after = client_pg.get(detail_url)
+
+    assert before.status_code == 200
+    assert before.json()["executions"][0]["available_recovery_runbook_ids"] == [
+        "RUNBOOK_EC2_UNISOLATE"
+    ]
+    assert response.status_code == 202
+    assert after.status_code == 200
+    assert after.json()["status"] == IncidentStatus.ACTION_IN_PROGRESS.value
+    # 복구가 접수된 원본은 더 이상 복구를 열지 않는다
+    summaries = {e["execution_id"]: e for e in after.json()["executions"]}
+    assert summaries[origin.execution_id]["available_recovery_runbook_ids"] == []

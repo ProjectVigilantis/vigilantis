@@ -9,6 +9,8 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from schemas.api.actions import ExecutionStatus
 from schemas.api.incidents import (
     IncidentCategory,
@@ -18,6 +20,7 @@ from schemas.api.incidents import (
 )
 from schemas.candidates import CandidateStatus
 from schemas.evidence import EvidenceType
+from schemas.executions import EXECUTION_NON_TERMINAL_STATUSES
 from schemas.runbooks import RunbookId, TriggerSource
 
 from db import models
@@ -159,8 +162,87 @@ def test_detail_assembles_execution_summaries(client_pg, db):
             "execution_id": execution.execution_id,
             "runbook_id": "RUNBOOK_EC2_ISOLATE",
             "status": "SUCCESS",
-            # 복구 가능 목록 구성은 Issue #126으로 유예 — 조회 단계는 빈 목록
-            "available_recovery_runbook_ids": [],
+            "available_recovery_runbook_ids": ["RUNBOOK_EC2_UNISOLATE"],
             "updated_at": "2026-08-19T03:02:00Z",
         }
     ]
+
+
+# --- 복구 가능 목록 파생 (Issue #126) --------------------------------------------
+
+
+def _add_execution(
+    db,
+    incident: models.Incident,
+    runbook_id: RunbookId,
+    status: ExecutionStatus,
+    parent: models.ActionExecution | None = None,
+) -> models.ActionExecution:
+    execution = models.ActionExecution(
+        incident_id=incident.incident_id,
+        runbook_id=runbook_id,
+        target_arn=SUBJECT_EC2,
+        status=status,
+        trigger_source=TriggerSource.USER_APPROVAL,
+        parent_execution_id=None if parent is None else parent.execution_id,
+    )
+    db.add(execution)
+    db.flush()
+    return execution
+
+
+@pytest.mark.parametrize(
+    "runbook_id, status, expected",
+    [
+        # 짝이 있고 원본이 복구 가능 상태 — 노출한다
+        (RunbookId.RUNBOOK_EC2_ISOLATE, ExecutionStatus.SUCCESS, ["RUNBOOK_EC2_UNISOLATE"]),
+        (RunbookId.RUNBOOK_SG_DELETE_ISOLATED, ExecutionStatus.SUCCESS, ["RUNBOOK_SG_RECREATE"]),
+        (
+            RunbookId.RUNBOOK_EC2_RIGHTSIZING,
+            ExecutionStatus.ROLLBACK_INITIATED,
+            ["RUNBOOK_EC2_REVERT_SIZE"],
+        ),
+        # AWS가 아직 안 바뀌었거나(IN_PROGRESS) 바뀌지 않은 채 실패(FAILED) — 되돌릴 것이 없다
+        (RunbookId.RUNBOOK_EC2_ISOLATE, ExecutionStatus.IN_PROGRESS, []),
+        (RunbookId.RUNBOOK_EC2_ISOLATE, ExecutionStatus.FAILED, []),
+        # 복구가 이미 끝난 원본은 다시 열지 않는다
+        (RunbookId.RUNBOOK_EC2_ISOLATE, ExecutionStatus.ROLLED_BACK, []),
+        # 짝이 없는 본편 조치 — NACL 차단 해제는 recommendations 경로다
+        (RunbookId.RUNBOOK_NACL_ADD_DENY, ExecutionStatus.SUCCESS, []),
+        (RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED, ExecutionStatus.SUCCESS, []),
+    ],
+)
+def test_detail_derives_available_recovery(client_pg, db, runbook_id, status, expected):
+    """FE mock(route.ts RECOVERY_BY_RUNBOOK·RECOVERABLE_ORIGIN_STATUSES)과 같은 규칙."""
+    secops, _ = _seed_two_incidents(db)
+    secops.status = (
+        IncidentStatus.ACTION_IN_PROGRESS
+        if status in EXECUTION_NON_TERMINAL_STATUSES
+        else IncidentStatus.RESOLVED
+    )
+    _add_execution(db, secops, runbook_id, status)
+
+    body = client_pg.get(f"/api/v1/incidents/{secops.incident_id}").json()
+
+    assert body["executions"][0]["available_recovery_runbook_ids"] == expected
+
+
+def test_detail_hides_recovery_once_child_execution_exists(client_pg, db):
+    """복구가 접수된 원본은 목록에서 빠진다 — 이중 롤백을 화면에서부터 막는다."""
+    secops, _ = _seed_two_incidents(db)
+    secops.status = IncidentStatus.ACTION_IN_PROGRESS
+    origin = _add_execution(db, secops, RunbookId.RUNBOOK_EC2_ISOLATE, ExecutionStatus.SUCCESS)
+    _add_execution(
+        db,
+        secops,
+        RunbookId.RUNBOOK_EC2_UNISOLATE,
+        ExecutionStatus.IN_PROGRESS,
+        parent=origin,
+    )
+
+    body = client_pg.get(f"/api/v1/incidents/{secops.incident_id}").json()
+
+    summaries = {e["execution_id"]: e for e in body["executions"]}
+    assert summaries[origin.execution_id]["available_recovery_runbook_ids"] == []
+    # 자식(롤백) 자신은 짝이 없어 아무것도 열지 않는다
+    assert all(e["available_recovery_runbook_ids"] == [] for e in body["executions"])
