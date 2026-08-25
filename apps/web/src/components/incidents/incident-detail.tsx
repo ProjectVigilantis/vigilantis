@@ -181,6 +181,46 @@ function ExecutionsArea({ incident }: { incident: IncidentResponse }) {
   );
 }
 
+/**
+ * 제안 조치 버튼(§4.5 버튼 노출 규칙 표) — **계약이 정한 조건 외에는 어떤 실행 버튼도 만들지 않는다.**
+ * 전부 확정 필드로 판정한다(§3.2.3 유도 규칙).
+ *
+ * | 조건 | 버튼 |
+ * | --- | --- |
+ * | `recommendations ≥ 1` · FINOPS | `이 조치 실행` |
+ * | `recommendations ≥ 1` · SECOPS | `승인하고 차단` |
+ * | 〃 + `response_mode = AGENT_WAIT` | `승인하고 차단` `차단 안 함` — 실행 전 상태 |
+ * | `recommendations = []` | 없음(조회 전용) |
+ *
+ * `status = ANALYZING`은 계약이 `recommendations`를 빈 배열로 강제하므로 자연히 버튼이 사라진다.
+ * `ACTION_IN_PROGRESS`면 같은 Incident의 실행 버튼을 전부 비활성화한다.
+ *
+ * 지금은 ACT-001(실행 확인 모달)이 없어 전부 비활성이다 — 요청 3필드 구성·멱등 키·파괴적 조치
+ * 경고가 그 카드 소관이고, 그것 없이 실행을 열면 계약을 어긴 요청이 나간다.
+ */
+function ProposalActions({ incident }: { incident: IncidentResponse }) {
+  if (incident.recommendations.length === 0) return null;
+
+  const isSecOps = incident.category === 'SECOPS';
+  const approveLabel = isSecOps ? '승인하고 차단' : '이 조치 실행';
+  // 반려(`차단 안 함`)는 아직 실행되지 않은 AGENT_WAIT 상태에서만 의미가 있다(§4.5 B-Medium).
+  const canReject = isSecOps && incident.response_mode === 'AGENT_WAIT';
+
+  return (
+    <div className="flex flex-wrap items-center gap-3">
+      <Button type="button" disabled>
+        {approveLabel}
+      </Button>
+      {canReject ? (
+        <Button type="button" variant="outline" disabled>
+          차단 안 함
+        </Button>
+      ) : null}
+      <span className="text-muted-foreground text-xs">실행은 ACT-001 연결 후 활성화됩니다.</span>
+    </div>
+  );
+}
+
 export function IncidentDetail({
   incident,
   subject,
@@ -292,16 +332,7 @@ export function IncidentDetail({
         )}
       </Section>
 
-      {/* 버튼 노출 규칙은 §4.5 표가 기준이다. 여기서는 자리만 두고, 요청 구성·멱등 키·파괴적 조치
-          경고는 ACT-001(#140)에서 붙인다 — 지금 누르면 아무 일도 일어나지 않아야 한다. */}
-      {incident.recommendations.length > 0 ? (
-        <div className="flex items-center gap-3">
-          <Button type="button" disabled>
-            이 조치 실행
-          </Button>
-          <span className="text-muted-foreground text-xs">실행은 ACT-001 연결 후 활성화됩니다.</span>
-        </div>
-      ) : null}
+      <ProposalActions incident={incident} />
     </div>
   );
 }
