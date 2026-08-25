@@ -4,7 +4,7 @@
 > 다른 문서(README, 기획서, MVP 범위 명세 등)와 충돌하면 **이 문서가 이긴다.**
 > 범위·API 계약·역할이 바뀌는 PR은 이 문서 갱신을 포함할 것.
 >
-> **최종 갱신**: 2026-08-24 (김세혁)
+> **최종 갱신**: 2026-08-25 (박지현)
 
 ---
 
@@ -12,7 +12,7 @@
 
 24/7 AWS 자산·보안 상시 관제 + 4단계 AI 가드레일 기반 원클릭 자율 조치 + 양방향 회복(자동 원복/원클릭 해제)을 제공하는 FinSecOps 플랫폼. **1차 발표(10/15) MVP 시연**이 목표다.
 
-## 현재 위치 (2026-08-24 기준)
+## 현재 위치 (2026-08-25 기준)
 
 > 이 섹션은 ⓐ 주차 전환 ⓑ 범위·API 계약·역할·확정 결정 변경 ⓒ 미해결 이슈 상태 변경 시에만 갱신한다.
 > **개별 머지 이력은 이 문서에 복제하지 않는다** — 상세 원천은 [dev 머지 PR 목록](https://github.com/ProjectVigilantis/vigilantis/pulls?q=is%3Apr+is%3Amerged+base%3Adev), 결정 배경은 아래 §확정 결정 변경 로그와 `docs/adr/`다. 일반 기능 PR은 이 문서를 갱신하지 않는다.
@@ -21,14 +21,14 @@
 - **완료 (구간 요약)**
   - **1–2주차(8/11–8/23) · 설계와 환경 확정** — 모노레포 단일 백엔드 재편, 런북 10종 Action Whitelist 확정·코드화(AI 추천 분리), FE↔BE API 계약 DTO 확정과 내부 공통 계약 코드화, LangGraph 그래프 구조 확정, LocalStack 팀 표준 환경(compose·시드 스크립트·`.env.example`), FE Next.js 16 스캐폴딩·계약 타입·mock 계층·공통 레이아웃, 자산 수집·Rule Engine 1차와 CI(pytest) 가동. 결정 근거는 [ADR-0001](adr/0001-mvp-monorepo-structure.md)–[ADR-0006](adr/0006-localstack-team-standard-env.md).
   - **2주차(8/18–8/23) · 실행 기반 구축** — DB 저장 계층(ORM 13종·Alembic baseline·Repository)과 collector·rule_engine 재연결, Core API 앱 골격·조회 API 3종·로깅, WebSocket 실시간 상태 전송(`/api/v1/ws`), Golden Dataset 20건(`Verdict` 4종·`SkipReasonCode` 5종 전량 커버, 회귀 21건), CI LocalStack service container, FE shadcn 프리미티브·다크 모드 고정.
-  - **3주차(8/24–8/30, 진행 중) · 실행 기반 착수** — 현재까지: CI PostgreSQL service container(#92)로 DB 통합 테스트 28건 상시 skip 해소(미해결 5번 종결), PR 본문 템플릿·리뷰 요청 규칙 코드화(`.github/PULL_REQUEST_TEMPLATE.md`), `_is_prod` 인식 태그 키·값 집합 확정(#95 → PR #97, 미해결 4번 핵심 해소).
+  - **3주차(8/24–8/30, 진행 중) · 실행 기반 착수** — 현재까지: CI PostgreSQL service container(#92)로 DB 통합 테스트 28건 상시 skip 해소(미해결 5번 종결), PR 본문 템플릿·리뷰 요청 규칙 코드화(`.github/PULL_REQUEST_TEMPLATE.md`), `_is_prod` 인식 태그 키·값 집합 확정(#95 → PR #97, 미해결 4번 핵심 해소), **executor ↔ 가드레일 ④ Dry-Run 호출 규약 확정([ADR-0007](adr/0007-guardrail-dryrun-executor-precheck-contract.md) — #113 종결, 판정 기준 ⓐ 충족)**.
 - **다음 단계 (담당별 1줄)**
-  - **김세혁**: Boto3 클라이언트 팩토리·AWS 예외 공통 래퍼 → 스펙 JSON 백업 모듈 → executor 런북 디스패치 테이블. **Dry-Run 호출 시그니처를 안성일과 문서로 합의(8/26 목표)**. CI `apps/web` lint·build 잡 추가(#91).
-  - **안성일**: `AIModelClient` 경계(ADR-0005 — 외부 전송 페이로드 마스킹 포함), 가드레일 ①Schema Check ②Action Whitelist, `POST /api/v1/actions/execute` 라우터 골격·Idempotency Key 멱등 처리(김세혁 공동).
-  - **김승철**: ~~`_is_prod` 인식 태그 키·값 집합 확정(#95)~~ ✅ 확정(2026-08-24, PR #97 — 기한 8/27 내 본인 결정, PM 대행 불발동). `evaluate_ec2` `name` 인자 정리(#96 — `PROD_HINTS`는 #97에서 제거돼 잔여 범위 축소), 자산 연결관계(토폴로지) 산출(#101).
+  - **김세혁**: ~~Dry-Run 호출 시그니처를 안성일과 문서로 합의(8/26 목표)~~ ✅ 확정(2026-08-24, ADR-0007 / #113 — 기한 내). Boto3 클라이언트 팩토리·AWS 예외 공통 래퍼 → 스펙 JSON 백업 모듈 → executor 런북 디스패치 테이블·`precheck()` 구현. CI `apps/web` lint·build 잡 추가(#91), compose 정리(#94·#111).
+  - **안성일**: `AIModelClient` 경계(ADR-0005 — 외부 전송 페이로드 마스킹 포함, #115), 가드레일 ①Schema Check ②Action Whitelist(#114), `POST /api/v1/actions/execute` 라우터 골격·Idempotency Key 멱등 처리(#116, 김세혁 공동).
+  - **김승철**: ~~`_is_prod` 인식 태그 키·값 집합 확정(#95)~~ ✅ 확정(2026-08-24, PR #97 — 기한 8/27 내 본인 결정, PM 대행 불발동). `evaluate_ec2` `name` 인자 정리(#96 — `PROD_HINTS`는 #97에서 제거돼 잔여 범위 축소), 자산 연결관계(토폴로지) 산출(#101), rule_engine update 경로 SKIP→비SKIP 전이 회귀 테스트(#109 — #99 잔여 재발행).
   - **박지현**: ~~`_is_prod` 확정 기준 반영 Golden 경계 케이스 추가~~ ✅ 완료(2026-08-25, #124 — 미해결 4번 완전 종결). ~~회귀 CI 상시 실행 검증~~ ✅ 확인(dev CI `419 passed, 5 skipped` — 골든 회귀 21→26건 상시 실행, DB 통합 28건 skip 0건으로 판정 기준 ⓒ 충족. 남은 skip 5건은 전부 미구현 대기 중인 placeholder다). E2E 시연 시나리오 설계서 1차(FinOps·SecOps 2트랙), 실행 계열 테스트 하네스·픽스처 선구축. **가드레일 회귀 테스트 skip 2건 해제**(#114 / PR #123 머지로 선행 조건 해소). SecOps 정답은 Risk Evaluator 대기(미해결 6번).
-  - **유건희**: 다크 고정 마감(#89)·`--font-sans` 순환 참조 수정(#90), 자산 목록·상세 화면 mock 연동 마감.
-- **주차 종료 판정 기준**: ⓐ executor ↔ 가드레일 ④ Dry-Run 인터페이스 문서 합의 ⓑ ~~`_is_prod` 정책 결정 종결(또는 PM 대행)~~ ✅ 충족(2026-08-24, #95) ⓒ CI에서 DB 통합 테스트 28건 실행(skip 0건) ⓓ `POST /actions/execute` 멱등 처리 동작(실행 스텁 허용) ⓔ FE 자산 화면 mock 100% 렌더 ⓕ LLM 외부 전송 페이로드 마스킹 적용.
+  - **유건희**: ~~다크 고정 마감(#89)·`--font-sans` 순환 참조 수정(#90)~~ ✅ 완료(2026-08-24, PR #103·#102). 자산 목록·상세 화면 mock 연동 마감(#106 — 판정 기준 ⓔ), global-error 셸 다크 고정(#112 — #103 잔여 재발행).
+- **주차 종료 판정 기준**: ⓐ ~~executor ↔ 가드레일 ④ Dry-Run 인터페이스 문서 합의~~ ✅ 충족(2026-08-24, ADR-0007 / #113) ⓑ ~~`_is_prod` 정책 결정 종결(또는 PM 대행)~~ ✅ 충족(2026-08-24, #95) ⓒ ~~CI에서 DB 통합 테스트 28건 실행(skip 0건)~~ ✅ 충족(2026-08-25, #92 — dev CI `419 passed, 5 skipped`. 남은 skip 5건은 `test_e2e_scenario` 2 + `test_guardrails` 2 + `test_rollback` 1 로 전부 미구현 대기 QA placeholder이므로 DB 통합 28건은 skip 0건으로 실행 중) ⓓ `POST /actions/execute` 멱등 처리 동작(실행 스텁 허용) ⓔ FE 자산 화면 mock 100% 렌더 ⓕ LLM 외부 전송 페이로드 마스킹 적용.
 
 ## MVP 확정 범위
 
@@ -77,6 +77,7 @@
 | 2026-08-18 | **실행 축 어휘 교체(ADR-0004 1차 개정)** — 확정본 런북 명세서의 `approval_mode`·`trigger_source` 두 축을 의도적으로 교체. `trigger_source`(실행별 기록) = `USER_APPROVAL`·`PRE_MITIGATION_0_5S`·`TIMEOUT_ISOLATION_1M`·`AUTO_ON_FAILURE`, `approval_mode`(런북별 정책) = `HUMAN_ONLY`·`SYSTEM_OR_HUMAN`. 런타임 의미 무변경이라 supersede 없이 1차 개정으로 종결 | [ADR-0004](adr/0004-rollback-runbook-whitelist-registration.md) |
 | 2026-08-18 | **LangGraph 그래프 구조 확정** — FinOps·SecOps 두 그래프로 분리, Checkpointer 미사용(업무 상태는 PostgreSQL 단일 원천·그래프 내 승인 중단점 없음), Guardrail·DB 저장·AWS 실행·승인은 그래프 밖, 모델 호출은 `AIModelClient` 경계 경유. 판단 근거는 구조화 필드로만 보존(Prompt 전문·내부 추론 텍스트 미보존) | [ADR-0005](adr/0005-langgraph-stateless-domain-graphs.md) |
 | 2026-08-19 | **LocalStack 팀 표준 환경 전략 확정** — 단일 compose(Community 전용·버전 고정), 시드 = Boto3 스크립트 단일 원천(멱등·rule_engine 임계값 결합·실 AWS 실행 거부), `AWS_ENDPOINT_URL` 스위치 규약 전 모듈 승격(환경 감지 분기 금지), 검증 한계 4경로(Dry-Run·Status Check·CloudWatch·ALB TG/ASG)는 6–7주차 실 AWS 스모크로 이월 | [ADR-0006](adr/0006-localstack-team-standard-env.md) |
+| 2026-08-24 | **가드레일 ④ AWS Dry-Run = executor `precheck()` 단일 호출로 확정** — 동기·예외 미전파, 반환은 `PrecheckOutcome`(`passed`·`reason_code`·`verification_summary`). `DryRunOperation` **예외 발생만 PASS**(정상 반환은 플래그 미적용으로 보고 FAIL). `DryRun` 미지원 5종(전면 2 = `NACL_ADD_DENY`·`NACL_RESTORE`, 부분 3 = `EC2_ISOLATE`·`EC2_UNISOLATE`의 elbv2 호출·`ENABLE_AUTOSCALING`의 asg 호출)은 환경 무관 **조회(describe) 대체 검증**. 실측 결과 `elbv2`·`autoscaling`은 LocalStack Community 미포함(Pro 전용)이라 P2 3종은 로컬 검증 경로 자체가 없음 → ADR-0006 §4 검증 한계 표에 확정 편입 | [ADR-0007](adr/0007-guardrail-dryrun-executor-precheck-contract.md) / 이슈 #113 / PR #117 |
 | 2026-08-24 | **`_is_prod` 운영 자산 인식 기준 확정** — 규칙 소유자(김승철) 결정. **키**(대소문자 무시) = `environment`·`env`·`stage`·`tier`, **값**(소문자 정확일치·부분일치 금지) = `prod`·`production`·`prd`. 부분 문자열 매칭은 영구 금지(`product-service`류 오탐 방지, #81). 접미 변형(`prod-us-east` 등) 미탐은 의도된 결과이며 Golden 경계 케이스로 고정 | 이슈 #95 / PR #97 |
 
 ## API 계약 (확정 — FE↔BE 공개 계약, 코드 원천: `packages/schemas/api/`)
@@ -102,7 +103,7 @@
 
 ## 미해결 이슈 / 할 일 (블로커 순)
 
-1. ~~LocalStack 팀 표준 환경~~ ✅ 해소(#62) — [ADR-0006](adr/0006-localstack-team-standard-env.md) 전략 + compose `localstack` 서비스 + `scripts/seed_localstack.py` + `.env.example` 스위치 활성화. 잔여 후속 중 **CI LocalStack service container는 완료**(#65). 남은 것은 6–7주차 실 AWS 스모크 테스트(ADR-0006 §4).
+1. ~~LocalStack 팀 표준 환경~~ ✅ 해소(#62) — [ADR-0006](adr/0006-localstack-team-standard-env.md) 전략 + compose `localstack` 서비스 + `scripts/seed_localstack.py` + `.env.example` 스위치 활성화. 잔여 후속 중 **CI LocalStack service container는 완료**(#65). 남은 것은 6–7주차 실 AWS 스모크 테스트(ADR-0006 §4). **범위 확대(2026-08-24, ADR-0007 실측)**: `elbv2`·`autoscaling`이 LocalStack Community에 없어(Pro 전용) `EC2_ISOLATE`·`UNISOLATE`·`ENABLE_AUTOSCALING` **P2 3종은 실행뿐 아니라 Dry-Run 대체 조회조차 로컬에서 돌지 않는다.** 이 3종의 유일한 검증 경로가 실 AWS 스모크이므로, §일정 리스크의 "P2 인프라 조기 준비"가 선택이 아니라 전제 조건이 됐다.
 2. ~~PR #29 후속 보완~~ ✅ 종결(2026-08-19, PM 대행 판단 — 김승철 부재, 기록: 이슈 #67 댓글) — 당초 우려("자체 boto3 로직·시드 없으면 빈 결과 통과")는 현행 `test_collector_raw.py`에서 해소 확인(`collect_region()` 직접 호출, 시드 없으면 assert 실패). dev 머지본(#64) 기준 작성자 외 로컬에서 표준 절차(compose→시드→pytest) 통합 테스트 3건 통과 재현. 잔여였던 **CI LocalStack service container**는 #65로 완료. 김승철 복귀 후 이견 시 재오픈.
 3. ~~README 최신화~~ ✅ 해소(팀명·역할 표·런북 10종·LangGraph 반영). 기획서 docx는 동결 방침이라 갱신 대상 아님.
 4. ~~**`_is_prod` 판정 규칙**~~ ✅ **완전 종결**(2026-08-25) — 박지현 제기 #81 → 규칙 소유자 김승철 확정(#95 / PR #97). 인식 태그 키·값 집합을 확정·구현했다. **키**(대소문자 무시 정확일치): `environment`·`env`·`stage`·`tier`. **값**(`strip` 후 소문자 정확일치, 부분일치 영구 금지): `prod`·`production`·`prd`. 잔여 2건도 닫혔다 — ① `evaluate_ec2`의 `name` 인자 정리 = #96 / PR #110(인자 자체 제거) ② 확정 기준 반영 Golden 경계 케이스 = #124 / 본 PR(`asset_inventory_003.json` A11–A16, 뮤테이션 4종 방어 확인). 접미 변형(`prod-us-east`)·부정 접두(`non-prod`)·부분 포함(`product-service`) 미탐이 **의도된 결과임이 정답지로 고정**됐으므로, 앞으로 이를 버그로 보고 부분일치를 되살리는 변경은 골든 회귀에서 막힌다.
@@ -115,7 +116,7 @@
 
 - **P0 (최우선 착수, 3–5주차)**: `RIGHTSIZING`+`REVERT_SIZE`(자산 자동 원복), `NACL_ADD_DENY`+`NACL_RESTORE`(차단→원클릭 해제) — "양방향 회복" 스토리의 골격.
 - **P1 (P0 후 순차)**: `SG_DELETE_ISOLATED`(+`SG_RECREATE`), `EBS_DELETE_UNATTACHED` — 난도 낮음.
-- **P2 (조기 준비 병행)**: `EC2_ISOLATE`(+`UNISOLATE`)는 ALB·다중 EC2 시연 인프라가 선행 조건 → 인프라 준비를 앞당긴다. `ENABLE_AUTOSCALING`은 구현량 최대 → 설계 선행.
+- **P2 (조기 준비 병행 — 인프라는 선택이 아니라 전제 조건)**: `EC2_ISOLATE`(+`UNISOLATE`)는 ALB·다중 EC2 시연 인프라가 선행 조건 → 인프라 준비를 앞당긴다. `ENABLE_AUTOSCALING`은 구현량 최대 → 설계 선행. **`elbv2`·`autoscaling`이 LocalStack Community에 없어 이 3종은 Dry-Run 대체 조회조차 로컬에서 돌지 않는다**(ADR-0007 실측, §미해결 1번) → **실 AWS 스모크 환경 확보가 P2 착수의 전제 조건**이며, 지연 시 6–7주차 스모크가 아니라 P2 구현 자체가 막힌다.
 - **9/13 중간 점검**: P0 4종 실동작 여부 점검. 미달 시 범위 축소가 아니라 **인력 재배치·범위 외 작업 중단**으로 대응한다.
 
 ## 문서 지도 (신뢰 우선순위 — 충돌 시 위가 이김)
