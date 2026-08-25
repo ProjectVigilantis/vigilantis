@@ -4,6 +4,7 @@ import Link from 'next/link';
 
 import { CopyButton } from '@/components/copy-button';
 import { Row } from '@/components/detail-row';
+import { TimeoutCountdown } from '@/components/incidents/timeout-countdown';
 import { EmptyState } from '@/components/empty-state';
 import { StatusBadge } from '@/components/status-badge';
 import { Button } from '@/components/ui/button';
@@ -11,7 +12,13 @@ import { Card } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { RUNBOOK_LABELS, incidentTitle } from '@/lib/enum-labels';
 import { formatKst } from '@/lib/utils';
-import type { AssetItem, IncidentResponse } from '@/types/api';
+import type { AssetItem, IncidentResponse, IsoDateTime } from '@/types/api';
+
+/**
+ * 계약 합의(2026-08-14): `AGENT_WAIT` 전환 이벤트의 `occurred_at` + 60초.
+ * `'use client'` 모듈에 두면 서버 컴포넌트가 값 대신 클라이언트 참조를 받아 계산이 NaN이 된다.
+ */
+const AGENT_WAIT_TIMEOUT_MS = 60_000;
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -48,7 +55,13 @@ function SummaryLines({ incident }: { incident: IncidentResponse }) {
  * FINOPS는 계약이 세 필드를 전부 null로 강제하므로 **영역 자체를 렌더하지 않는다**(§3.3).
  * 빈 배지를 남기면 "판정을 못 받은 위협"으로 읽힌다.
  */
-function RiskArea({ incident }: { incident: IncidentResponse }) {
+function RiskArea({
+  incident,
+  agentWaitAt,
+}: {
+  incident: IncidentResponse;
+  agentWaitAt: IsoDateTime | null;
+}) {
   if (incident.initial_risk_level === null) return null;
 
   return (
@@ -74,17 +87,65 @@ function RiskArea({ incident }: { incident: IncidentResponse }) {
           </Row>
         ) : null}
       </div>
+      <TimeoutNotice incident={incident} agentWaitAt={agentWaitAt} />
     </Section>
+  );
+}
+
+/**
+ * B-Medium 타임아웃 고지(§4.5) — 승인 전까지 조치는 수행되지 않지만, 1분 미응답이면 서버가
+ * `TIMEOUT_ISOLATION_1M`으로 자동 격리한다는 사실을 **대기 중에 미리** 알린다.
+ *
+ * Low는 같은 `AGENT_WAIT`이지만 타임아웃 자동 격리가 없어 이 블록을 뺀다(§4.5 · SSOT §3단계 위험 대응).
+ * ○ FE 판단: 등급은 정밀 평가가 나왔으면 그 값을, 아니면 초기 판정을 쓴다 — 어느 필드가 타임아웃을
+ * 가르는지는 계약에 없다(OPEN: BE 확인 필요).
+ */
+function TimeoutNotice({
+  incident,
+  agentWaitAt,
+}: {
+  incident: IncidentResponse;
+  agentWaitAt: IsoDateTime | null;
+}) {
+  const level = incident.reviewed_risk_level ?? incident.initial_risk_level;
+  if (
+    incident.response_mode !== 'AGENT_WAIT' ||
+    level === 'LOW' ||
+    incident.status !== 'AWAITING_APPROVAL'
+  ) {
+    return null;
+  }
+
+  return (
+    <p className="border-danger/30 bg-danger/5 flex flex-wrap items-center gap-1 rounded-md border p-3 text-sm">
+      <span>승인 전까지 조치는 수행되지 않습니다.</span>
+      {agentWaitAt !== null ? (
+        // 기준은 `AGENT_WAIT` 전환을 알린 INCIDENT_UPDATED의 occurred_at이다 —
+        // **수신 시각을 쓰지 않는다**(합의 2026-08-14). 수신 기준이면 재접속마다 시간이 늘어난다.
+        <TimeoutCountdown deadline={Date.parse(agentWaitAt) + AGENT_WAIT_TIMEOUT_MS} />
+      ) : (
+        // 전환 이벤트를 받지 못한 인시던트(재접속 등)는 카운트다운 없이 고정 안내문을 쓴다(§4.5).
+        <span className="text-danger font-medium">
+          1분 안에 응답하지 않으면 서버가 자동으로 격리합니다.
+        </span>
+      )}
+    </p>
   );
 }
 
 export function IncidentDetail({
   incident,
   subject,
+  agentWaitAt = null,
 }: {
   incident: IncidentResponse;
   /** `subject_arn` → `GET /assets`의 `arn` 조인 결과(§4.5). 조회 실패·미수집이면 null이다. */
   subject: AssetItem | null;
+  /**
+   * `AGENT_WAIT` 전환을 알린 `INCIDENT_UPDATED`의 `occurred_at`. 카운트다운의 유일한 기준이다.
+   * WS 미연동 구간이라 지금은 항상 null이며, 그때는 고정 안내문으로 대체한다(§4.5).
+   */
+  agentWaitAt?: IsoDateTime | null;
 }) {
   return (
     <div className="flex max-w-3xl flex-col gap-6">
@@ -101,7 +162,7 @@ export function IncidentDetail({
         </p>
       </header>
 
-      <RiskArea incident={incident} />
+      <RiskArea incident={incident} agentWaitAt={agentWaitAt} />
 
       <Separator />
 
