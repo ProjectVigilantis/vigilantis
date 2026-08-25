@@ -7,23 +7,14 @@ test_outbound_payload_drops_secret_originals다 — SSOT 주차 종료 판정 �
 
 import json
 import logging
-import sys
 from datetime import datetime, timezone
-from pathlib import Path
 from types import SimpleNamespace
 
+# httpx2는 openai SDK가 쓰는 전송 라이브러리. SDK 예외를 만들 때 Request/Response가
+# 필요해 테스트에서만 참조한다.
+import httpx2
 import pytest
-from pydantic import BaseModel, ConfigDict, ValidationError
-
-# apps/core-api 를 import 경로에 추가 (ai/tests/test_whitelist.py 와 동일 방식)
-CORE_API = Path(__file__).resolve().parents[2]
-if str(CORE_API) not in sys.path:
-    sys.path.insert(0, str(CORE_API))
-
-# openai SDK가 쓰는 전송 라이브러리. SDK 예외를 만들 때 Request/Response가 필요해
-# 테스트에서만 참조한다.
-import httpx2  # noqa: E402
-from openai import (  # noqa: E402
+from openai import (
     APIConnectionError,
     APIStatusError,
     APITimeoutError,
@@ -31,8 +22,9 @@ from openai import (  # noqa: E402
     InternalServerError,
     RateLimitError,
 )
+from pydantic import BaseModel, ConfigDict, ValidationError
 
-from ai.model_client import (  # noqa: E402
+from ai.model_client import (
     AIModelContractError,
     AIModelRejectedError,
     AIModelRequest,
@@ -42,7 +34,7 @@ from ai.model_client import (  # noqa: E402
     build_outbound_payload,
     mask_outbound,
 )
-from ai.openai_client import OpenAIModelClient, build_openai_model_client  # noqa: E402
+from ai.openai_client import OpenAIModelClient, build_openai_model_client
 
 # --- 픽스처 ---------------------------------------------------------------------
 

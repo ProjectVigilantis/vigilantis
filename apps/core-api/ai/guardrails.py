@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from typing import Annotated, Final
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
 from schemas.agents import RunbookCandidateDraft
 from schemas.guardrails import (
     GuardrailStep,
@@ -70,7 +71,7 @@ _MAX_LOGGED_LOC_CHARS: Final[int] = 80
 _NonEmptyStr = Annotated[str, Field(min_length=1)]
 _TargetArn = Annotated[str, Field(min_length=1, max_length=512)]  # DB 컬럼 폭과 동일
 _EvidenceId = Annotated[str, Field(min_length=1, max_length=36)]  # DB의 UUID 길이
-# 아래 넷은 별도 typed/display parameter 계약이 확정될 때까지의 잠정 상한이다
+# 아래 넷은 런북별 typed 파라미터 계약(#154)이 조일 때까지의 잠정 상한이다
 _ParamKey = Annotated[str, Field(min_length=1, max_length=64)]
 _ParamValue = Annotated[str, Field(min_length=1, max_length=256)]
 _MAX_EVIDENCE_IDS: Final[int] = 50
@@ -125,8 +126,8 @@ def run_schema_check(request: GuardrailValidationRequest) -> SchemaCheckOutcome:
     """① Schema Check — command_payload를 SchemaCheckedCommand로 변환한다.
 
     추가 필드·필수 누락·타입 불일치·빈 문자열은 SCHEMA_INVALID_PAYLOAD로 거절한다.
-    Runbook별 typed 파라미터 계약은 별도 후속으로 남아 있어, 이 단계가 보는 것은
-    명령 봉투의 모양뿐이다.
+    Runbook별 typed 파라미터 계약이 아직 없어(#154) 이 단계가 보는 것은 명령 봉투의
+    모양뿐이다.
     """
     if request.validation_context != GuardrailValidationContext.AI_CANDIDATE:
         raise NotImplementedError(
