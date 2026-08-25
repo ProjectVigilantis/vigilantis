@@ -92,6 +92,17 @@ def get_incident(db: Session, incident_id: str) -> Optional[models.Incident]:
     ).scalar_one_or_none()
 
 
+def lock_incident(db: Session, incident_id: str) -> Optional[models.Incident]:
+    """행 잠금 후 최신 상태로 다시 읽는다. 접수 시 상태 전이가 현재 상태를 전제로
+    하므로, 잠그지 않으면 동시 접수가 서로의 전이를 덮어쓴다 (Issue #126)."""
+    return db.execute(
+        select(models.Incident)
+        .where(models.Incident.incident_id == incident_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+
+
 def list_incidents(
     db: Session,
     *,

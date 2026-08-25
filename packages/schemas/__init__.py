@@ -53,6 +53,7 @@ from .evidence import (
 )
 from .executions import (
     EXECUTION_NON_TERMINAL_STATUSES,
+    EXECUTION_RECOVERABLE_STATUSES,
     EXECUTION_TERMINAL_STATUSES,
     ExecutionEffect,
     ExecutionStepResult,
@@ -117,6 +118,7 @@ __all__ = [
     "EvidenceItem",
     "EvidenceType",
     "EXECUTION_NON_TERMINAL_STATUSES",
+    "EXECUTION_RECOVERABLE_STATUSES",
     "EXECUTION_TERMINAL_STATUSES",
     "ExecutionEffect",
     "ExecutionEvidence",

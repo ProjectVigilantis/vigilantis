@@ -10,6 +10,9 @@
 #   - AWS 실행은 아직 스텁이다 — 예약 레코드를 IN_PROGRESS로 남기는 데까지다.
 #     실행 직전 대상 자산 재확인과 후보 INVALIDATED 전이는 실제 실행이 붙을 때
 #     함께 들어온다.
+#   - 접수 경로는 둘이다. 본편 7종은 Guardrail PASS 후보(EXECUTABLE)에서, 롤백
+#     3종은 복구를 열어 준 원본 실행에서 접수한다 — 롤백은 후보가 될 수 없다
+#     (ADR-0004 정책 ②, packages/schemas/candidates.py). (Issue #126)
 # ==============================================================================
 
 from __future__ import annotations
@@ -23,7 +26,12 @@ from schemas.api.actions import ExecuteActionRequest, ExecuteActionResponse
 from schemas.api.errors import ErrorCode
 from schemas.api.incidents import IncidentStatus
 from schemas.candidates import CandidateStatus
-from schemas.runbooks import TriggerSource
+from schemas.executions import EXECUTION_RECOVERABLE_STATUSES
+from schemas.runbooks import (
+    ROLLBACK_RUNBOOK_BY_MAIN_ID,
+    ROLLBACK_RUNBOOK_IDS,
+    TriggerSource,
+)
 
 from db import models
 from db.repositories import executions as executions_repo
@@ -79,26 +87,89 @@ def _executable_candidate(
     raise ApiError(ErrorCode.PROPOSAL_NOT_EXECUTABLE)
 
 
+def _recoverable_origin(
+    db: Session, request: ExecuteActionRequest
+) -> models.ActionExecution:
+    """요청한 롤백을 열어 준 원본 실행. 없으면 409로 거절한다.
+
+    "열어 준다"의 기준은 상세 응답의 available_recovery_runbook_ids와 같다 —
+    짝(ROLLBACK_RUNBOOK_BY_MAIN_ID)이 맞고, 원본이 복구 가능 상태이며, 아직
+    복구가 접수되지 않은 실행이다. 한 원본에 두 번째 복구는 오지 않는다.
+    """
+    incident_id = canonical_id(request.incident_id)
+    if incident_id is None or incidents_repo.get_incident(db, incident_id) is None:
+        raise ApiError(ErrorCode.INCIDENT_NOT_FOUND)
+
+    requested = request.runbook_id.value
+    for row in executions_repo.list_by_incident(db, incident_id):
+        if ROLLBACK_RUNBOOK_BY_MAIN_ID.get(row.runbook_id.value) != requested:
+            continue
+        if row.status not in EXECUTION_RECOVERABLE_STATUSES:
+            continue
+        # 잠근 뒤 다시 확인한다 — 동시에 들어온 다른 복구 접수가 이미 자식을
+        # 남겼거나 원본 상태를 옮겼을 수 있다. 잠금은 commit까지 유지된다.
+        origin = executions_repo.lock_execution(db, row.execution_id)
+        if origin is None or origin.status not in EXECUTION_RECOVERABLE_STATUSES:
+            continue
+        if executions_repo.list_rollback_children(db, origin.execution_id):
+            continue
+        return origin
+    raise ApiError(ErrorCode.PROPOSAL_NOT_EXECUTABLE)
+
+
+def _move_incident_to_in_progress(db: Session, incident_id: str) -> None:
+    """접수한 실행이 진행 중인 동안 Incident는 반드시 ACTION_IN_PROGRESS다.
+
+    상세 응답 계약(api/incidents.py)이 상태와 자식 목록의 정합을 강제하므로,
+    전이를 빠뜨리면 접수 직후 조회가 500이 된다. 출발 상태를 AWAITING_APPROVAL로
+    전제하지 않고 실제 상태를 잠근 뒤 옮긴다 — 종료 상태(RESOLVED·FAILED)에서
+    오는 관제자 복구 접수도 정규 경로이기 때문이다. RESOLVED는 "더 진행할
+    제안·실행 없음"이지 자산이 원복됐다는 뜻이 아니다 (ADR-0004, Issue #126).
+    """
+    incident = incidents_repo.lock_incident(db, incident_id)
+    if incident is None:
+        raise ApiError(ErrorCode.INCIDENT_NOT_FOUND)
+    if incident.status is IncidentStatus.ACTION_IN_PROGRESS:
+        # 상태는 그대로여도 상세 응답의 자식 목록이 바뀌었으므로 updated_at은 올린다
+        incidents_repo.touch_incident(db, incident_id)
+        return
+    incidents_repo.update_incident_status(
+        db,
+        incident_id,
+        expected=incident.status,
+        next_status=IncidentStatus.ACTION_IN_PROGRESS,
+    )
+
+
 def reserve_execution(
     db: Session, request: ExecuteActionRequest
 ) -> ExecutionReservation:
-    """조치 실행 예약 — 멱등 확인 → Incident 확인 → 제안 확인 → 예약 → 후보·상태 전이.
+    """조치 실행 예약 — 멱등 확인 → Incident 확인 → 접수 근거 확인 → 예약 → 상태 전이.
 
     멱등 확인이 맨 앞이어야 한다. 재요청 시점에는 후보가 이미 CLAIMED라, 제안
     확인을 먼저 하면 정상 재요청이 200이 아니라 409로 떨어진다.
+
+    접수 근거는 Runbook 종류가 가른다 — 본편 7종은 EXECUTABLE 후보, 롤백 3종은
+    복구를 열어 준 원본 실행이다.
     """
     existing = executions_repo.get_by_idempotency_key(db, request.idempotency_key)
     if existing is not None:
         return _replay_or_conflict(existing, request)
 
+    is_rollback = request.runbook_id.value in ROLLBACK_RUNBOOK_IDS
     try:
-        candidate = _executable_candidate(db, request)
+        source = (
+            _recoverable_origin(db, request)
+            if is_rollback
+            else _executable_candidate(db, request)
+        )
     except ApiError as exc:
         if exc.code is ErrorCode.PROPOSAL_NOT_EXECUTABLE:
-            # 최초 멱등 조회와 후보 확인 사이에 같은 Key의 앞선 요청이 commit되면
-            # 후보는 이미 CLAIMED다 — 같은 Key 재요청을 409로 오판하지 않도록
-            # 키를 한 번 더 확인한다. 이 재확인은 INSERT 이전에만 둔다(이후에는
-            # 같은 세션의 자기 미커밋 행이 잡혀 커밋 안 된 실행을 재생하게 된다).
+            # 최초 멱등 조회와 접수 근거 확인 사이에 같은 Key의 앞선 요청이
+            # commit되면 후보는 이미 CLAIMED고 롤백은 원본에 자식이 붙어 있다 —
+            # 같은 Key 재요청을 409로 오판하지 않도록 키를 한 번 더 확인한다.
+            # 이 재확인은 INSERT 이전에만 둔다(이후에는 같은 세션의 자기 미커밋
+            # 행이 잡혀 커밋 안 된 실행을 재생하게 된다).
             raced = executions_repo.get_by_idempotency_key(db, request.idempotency_key)
             if raced is not None:
                 return _replay_or_conflict(raced, request)
@@ -113,11 +184,12 @@ def reserve_execution(
         with db.begin_nested():
             execution = executions_repo.create_execution(
                 db,
-                incident_id=candidate.incident_id,
-                runbook_id=candidate.runbook_id,
-                target_arn=candidate.target_arn,
+                incident_id=source.incident_id,
+                runbook_id=request.runbook_id,
+                target_arn=source.target_arn,
                 trigger_source=TriggerSource.USER_APPROVAL,
-                candidate_id=candidate.candidate_id,
+                candidate_id=None if is_rollback else source.candidate_id,
+                parent_execution_id=source.execution_id if is_rollback else None,
                 idempotency_key=request.idempotency_key,
             )
     except IntegrityError:
@@ -128,31 +200,18 @@ def reserve_execution(
             raise  # 멱등 키가 아닌 다른 제약 위반이다 — 500으로 보고한다
         return _replay_or_conflict(raced, request)
 
-    claimed = incidents_repo.update_candidate_status(
-        db,
-        candidate.candidate_id,
-        expected=CandidateStatus.EXECUTABLE,
-        next_status=CandidateStatus.CLAIMED,
-    )
-    if not claimed:
-        # 조회 이후 다른 요청이 후보를 선점했다. commit하지 않으므로 예약도 남지 않는다
-        raise ApiError(ErrorCode.PROPOSAL_NOT_EXECUTABLE)
+    if not is_rollback:
+        claimed = incidents_repo.update_candidate_status(
+            db,
+            source.candidate_id,
+            expected=CandidateStatus.EXECUTABLE,
+            next_status=CandidateStatus.CLAIMED,
+        )
+        if not claimed:
+            # 조회 이후 다른 요청이 후보를 선점했다. commit하지 않으므로 예약도 남지 않는다
+            raise ApiError(ErrorCode.PROPOSAL_NOT_EXECUTABLE)
 
-    # 접수와 함께 Incident도 AWAITING_APPROVAL→ACTION_IN_PROGRESS로 옮긴다.
-    # 상태를 두면 상세 응답 계약(api/incidents.py: AWAITING_APPROVAL이면 실행 가능한
-    # 제안 ≥1 · 진행 중 실행 없음)이 즉시 깨져 조회가 500이 된다
-    moved = incidents_repo.update_incident_status(
-        db,
-        candidate.incident_id,
-        expected=IncidentStatus.AWAITING_APPROVAL,
-        next_status=IncidentStatus.ACTION_IN_PROGRESS,
-    )
-    if not moved:
-        # AWAITING_APPROVAL이 아니었다는 뜻이다. 현재 도달 경로는 이미
-        # ACTION_IN_PROGRESS인 두 번째 접수뿐이고 정상이다 — 종료 상태 전이가
-        # 붙으면 실제 상태를 보고 갈라야 한다(Issue #126). 상태는 그대로여도
-        # 상세 응답의 자식 목록이 바뀌었으므로 updated_at은 올린다
-        incidents_repo.touch_incident(db, candidate.incident_id)
+    _move_incident_to_in_progress(db, source.incident_id)
 
     reserved = _to_response(execution)
     db.commit()

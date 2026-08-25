@@ -8,11 +8,13 @@ import {
   type AssetsResponse,
   type ErrorCode,
   type ErrorResponse,
+  type ExecutionStatus,
   type ExecutionSummaryItem,
   type IncidentResponse,
   type IncidentStatus,
   type IsoDateTime,
   type ResponseMode,
+  type RollbackRunbookId,
   type RiskLevel,
   type RunbookId,
 } from '@/types/api';
@@ -506,6 +508,43 @@ export function mockIncidentOverrides(params: URLSearchParams): MockIncidentOver
  * 시드 + 런타임 실행을 합친 인시던트 뷰.
  * 이미 실행된 제안은 recommendations에서 빠지고, status는 계약 불변식에 맞춰 재계산한다.
  */
+/**
+ * 원본 실행이 관제자에게 열어 주는 복구 조치(롤백 3종만).
+ * 짝은 ADR-0004 표·SSOT §범위(P0 RIGHTSIZING+REVERT_SIZE, P1 SG_DELETE_ISOLATED+SG_RECREATE) 기준.
+ * NACL_ADD_DENY의 해제(NACL_RESTORE)는 롤백이 아니라 본편 조치라 여기 오지 않는다(recommendations 경로).
+ */
+export const RECOVERY_BY_RUNBOOK: Partial<Record<RunbookId, RollbackRunbookId[]>> = {
+  RUNBOOK_EC2_ISOLATE: ['RUNBOOK_EC2_UNISOLATE'],
+  RUNBOOK_SG_DELETE_ISOLATED: ['RUNBOOK_SG_RECREATE'],
+  RUNBOOK_EC2_RIGHTSIZING: ['RUNBOOK_EC2_REVERT_SIZE'],
+};
+
+/**
+ * 복구를 열어 줄 수 있는 원본 상태 — AWS가 실제로 변경된 뒤여야 되돌릴 게 있다.
+ * FAILED("AWS 변경 없이 실패")·IN_PROGRESS(아직 안 끝남)에는 복구 조치를 노출하지 않는다.
+ * ROLLBACK_INITIATED는 자동 원복이 개시된 상태라 REVERT_SIZE 경로가 열려 있어야 한다.
+ * 실 BE의 `EXECUTION_RECOVERABLE_STATUSES`와 같은 집합이다(PR #158).
+ */
+export const RECOVERABLE_ORIGIN_STATUSES = [
+  'SUCCESS',
+  'ROLLBACK_INITIATED',
+] as const satisfies readonly ExecutionStatus[];
+
+/**
+ * 복구 목록은 **조회할 때마다 파생한다** — 저장해 두면 롤백이 끝난 원본에 값이 남아
+ * "버튼은 보이는데 누르면 409"가 된다(PR #158 리뷰 포인트 4). 실 BE도 매 조회 재계산이다.
+ * 조건 3개: 짝이 있고 · 원본이 복구 가능 상태이며 · 그 복구가 아직 접수되지 않았다.
+ */
+function recoveryIds(
+  execution: ExecutionSummaryItem,
+  executed: Set<RunbookId>,
+): RollbackRunbookId[] {
+  if (!(RECOVERABLE_ORIGIN_STATUSES as readonly ExecutionStatus[]).includes(execution.status)) {
+    return [];
+  }
+  return (RECOVERY_BY_RUNBOOK[execution.runbook_id] ?? []).filter((id) => !executed.has(id));
+}
+
 export function incidentView(
   incident: IncidentResponse,
   overrides: MockIncidentOverrides = {},
@@ -515,6 +554,11 @@ export function incidentView(
     .map((e) => e.execution);
   const executions = [...incident.executions, ...runtime];
   const executed = new Set<RunbookId>(executions.map((e) => e.runbook_id));
+  // 저장값이 아니라 지금 상태로 다시 계산한다. 항목을 복사하지 않고 제자리에서 갱신해야
+  // 실행 라우터가 원본 상태를 갱신할 때 같은 객체를 잡는다.
+  for (const execution of executions) {
+    execution.available_recovery_runbook_ids = recoveryIds(execution, executed);
+  }
   const recommendations = incident.recommendations.filter(
     (r) => !executed.has(r.runbook_id),
   );

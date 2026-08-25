@@ -4,17 +4,8 @@
 대조는 ②가 한다. 미등록 ID가 ①에서 터지면 거절 기록에 실제로 막힌 단계가 남지 않는다.
 """
 
-import sys
-from pathlib import Path
-
 import pytest
-
-# apps/core-api 를 import 경로에 추가 (test_whitelist.py 와 동일 방식)
-CORE_API = Path(__file__).resolve().parents[2]
-if str(CORE_API) not in sys.path:
-    sys.path.insert(0, str(CORE_API))
-
-from ai.guardrails import (  # noqa: E402
+from ai.guardrails import (
     SCHEMA_INVALID_PAYLOAD,
     WHITELIST_NOT_AI_RECOMMENDABLE,
     WHITELIST_UNKNOWN_RUNBOOK,
@@ -22,13 +13,9 @@ from ai.guardrails import (  # noqa: E402
     run_action_whitelist,
     run_schema_check,
 )
-from ai.whitelist import (  # noqa: E402
-    AI_RECOMMENDABLE_RUNBOOK_IDS,
-    ROLLBACK_RUNBOOK_IDS,
-    RunbookId,
-)
-from schemas.agents import RunbookCandidateDraft  # noqa: E402
-from schemas.guardrails import (  # noqa: E402
+from ai.whitelist import AI_RECOMMENDABLE_RUNBOOK_IDS, ROLLBACK_RUNBOOK_IDS, RunbookId
+from schemas.agents import RunbookCandidateDraft
+from schemas.guardrails import (
     GuardrailStep,
     GuardrailStepStatus,
     GuardrailValidationContext,
@@ -123,6 +110,12 @@ def test_schema_check_allows_empty_collections(payload):
         {**VALID_PAYLOAD, "evidence_ids": [""]},
         {**VALID_PAYLOAD, "display_parameters": {"": "t3.small"}},
         {**VALID_PAYLOAD, "display_parameters": {"target_instance_type": ""}},
+        {**VALID_PAYLOAD, "target_arn": "a" * 513},
+        {**VALID_PAYLOAD, "evidence_ids": ["e" * 37]},
+        {**VALID_PAYLOAD, "evidence_ids": ["ev"] * 51},
+        {**VALID_PAYLOAD, "display_parameters": {"k" * 65: "t3.small"}},
+        {**VALID_PAYLOAD, "display_parameters": {"target_instance_type": "v" * 257}},
+        {**VALID_PAYLOAD, "display_parameters": {f"k{i}": "v" for i in range(21)}},
     ],
     ids=[
         "extra_field",
@@ -137,6 +130,12 @@ def test_schema_check_allows_empty_collections(payload):
         "empty_evidence_id",
         "empty_param_key",
         "empty_param_value",
+        "target_arn_over_column_width",
+        "evidence_id_over_uuid_length",
+        "too_many_evidence_ids",
+        "param_key_too_long",
+        "param_value_too_long",
+        "too_many_params",
     ],
 )
 def test_schema_check_rejects_malformed_payload(payload):
@@ -147,6 +146,43 @@ def test_schema_check_rejects_malformed_payload(payload):
     assert outcome.step_result.result is GuardrailStepStatus.FAIL
     assert outcome.step_result.reason_code == SCHEMA_INVALID_PAYLOAD
     assert outcome.step_result.verification_summary is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {**VALID_PAYLOAD, "target_arn": "a" * 512},
+        {**VALID_PAYLOAD, "evidence_ids": ["e" * 36]},
+        {**VALID_PAYLOAD, "evidence_ids": ["ev"] * 50},
+        {**VALID_PAYLOAD, "display_parameters": {"k" * 64: "t3.small"}},
+        {**VALID_PAYLOAD, "display_parameters": {"target_instance_type": "v" * 256}},
+        {**VALID_PAYLOAD, "display_parameters": {f"k{i}": "v" for i in range(20)}},
+    ],
+    ids=[
+        "target_arn_at_column_width",
+        "evidence_id_at_uuid_length",
+        "evidence_ids_at_count_cap",
+        "param_key_at_cap",
+        "param_value_at_cap",
+        "params_at_count_cap",
+    ],
+)
+def test_schema_check_accepts_values_at_cap(payload):
+    # 상한은 경계값까지 허용한다 — 정당한 값이 한 글자 차이로 막히면 안 된다
+    outcome = run_schema_check(_request(payload))
+
+    assert outcome.step_result.result is GuardrailStepStatus.PASS
+
+
+def test_schema_check_does_not_cap_runbook_id():
+    # runbook_id에만 길이 상한이 없다 — 길이로 미리 막으면 "목록에 없는 조치"라는
+    # 거절 사유가 ②가 아니라 ①에 남는다(#114 설계)
+    outcome = run_schema_check(_request({**VALID_PAYLOAD, "runbook_id": "R" * 5000}))
+
+    assert outcome.step_result.result is GuardrailStepStatus.PASS
+    assert run_action_whitelist(outcome.command).step_result.reason_code == (
+        WHITELIST_UNKNOWN_RUNBOOK
+    )
 
 
 @pytest.mark.parametrize("runbook_id", UNKNOWN_RUNBOOK_IDS + sorted(ROLLBACK_RUNBOOK_IDS))

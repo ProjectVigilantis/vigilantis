@@ -38,6 +38,13 @@ EXECUTION_TERMINAL_STATUSES: frozenset[ExecutionStatus] = frozenset(
     }
 )
 
+# 관제자 복구(롤백 3종)를 열어 주는 원본 실행 상태. AWS가 실제로 바뀐 뒤여야 되돌릴
+# 것이 있으므로 FAILED(변경 없이 실패)·IN_PROGRESS(아직 안 끝남)는 열지 않는다.
+# ROLLBACK_INITIATED는 자동 원복이 개시된 상태라 관제자 경로가 열려 있어야 한다.
+EXECUTION_RECOVERABLE_STATUSES: frozenset[ExecutionStatus] = frozenset(
+    {ExecutionStatus.SUCCESS, ExecutionStatus.ROLLBACK_INITIATED}
+)
+
 
 @unique
 class ExecutionStepStatus(str, Enum):

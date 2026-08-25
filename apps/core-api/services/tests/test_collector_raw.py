@@ -68,3 +68,15 @@ def test_open_to_world_detected_by_collector(inventory):
     assert any(g.open_to_world for g in inventory.security_groups), (
         "전체개방(0.0.0.0/0) SG 없음 — 시드 확인"
     )
+
+
+def test_collect_region_ebs_raw(inventory):
+    # EBS 는 ec2 네임스페이스라 LocalStack Community 에서 수집 가능(ADR-0006 §4).
+    # 시드(_ensure_volume)는 미부착(available) 볼륨을 만든다 → attached_instance_ids 비어야 한다.
+    assert len(inventory.ebs_volumes) >= 1, "EBS 0개 — LocalStack 시드(_ensure_volume) 필요"
+    v = inventory.ebs_volumes[0]
+    assert v.volume_id and v.arn.startswith("arn:aws:ec2:")
+    assert ":volume/" in v.arn
+    assert any(not vol.attached_instance_ids for vol in inventory.ebs_volumes), (
+        "미부착(available) 볼륨 없음 — 시드 확인"
+    )
