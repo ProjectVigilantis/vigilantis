@@ -159,7 +159,9 @@ def reserve_execution(
         next_status=IncidentStatus.ACTION_IN_PROGRESS,
     )
     if not moved:
-        # 이미 ACTION_IN_PROGRESS인 두 번째 실행 — 정상 경로다. 상태는 그대로지만
+        # AWAITING_APPROVAL이 아니었다는 뜻이다. 현재 도달 경로는 이미
+        # ACTION_IN_PROGRESS인 두 번째 접수뿐이고 정상이다 — 종료 상태 전이가
+        # 붙으면 실제 상태를 보고 갈라야 한다(Issue #126). 상태는 그대로여도
         # 상세 응답의 자식 목록이 바뀌었으므로 updated_at은 올린다
         incidents_repo.touch_incident(db, candidate.incident_id)
 
