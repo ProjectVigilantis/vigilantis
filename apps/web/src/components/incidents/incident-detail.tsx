@@ -6,7 +6,7 @@ import { CopyButton } from '@/components/copy-button';
 import { Row } from '@/components/detail-row';
 import { TimeoutCountdown } from '@/components/incidents/timeout-countdown';
 import { EmptyState } from '@/components/empty-state';
-import { StatusBadge } from '@/components/status-badge';
+import { ExecutionStatusBadge, StatusBadge } from '@/components/status-badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
@@ -133,6 +133,54 @@ function TimeoutNotice({
   );
 }
 
+/**
+ * 수행된 조치(§4.5 B 변형) — `executions[]`를 항목별로 그린다.
+ * `executions = []`이면 **영역 자체를 렌더하지 않는다**(§3.3).
+ *
+ * 상태는 `ExecutionStatusBadge`로 그린다 — Incident status와 의미가 달라 배지를 분리했고(§3.2),
+ * `FAILED`(AWS 변경 없음)와 `ROLLBACK_FAILED`(변경된 채 복구 실패·CRITICAL)를 합치지 않는다.
+ *
+ * 복구 버튼은 **항목별 `available_recovery_runbook_ids`로만** 판정한다(§4.5) — 이 목록이 비어 있다고
+ * 비가역인 것이 아니라 "백업 기반 롤백이 붙어 있느냐"만 나타낸다. 실행 요청 구성·멱등 키는
+ * ACT-001 소관이라 여기서는 자리만 둔다.
+ */
+function ExecutionsArea({ incident }: { incident: IncidentResponse }) {
+  if (incident.executions.length === 0) return null;
+
+  return (
+    <Section title="수행된 조치">
+      <ul className="flex flex-col gap-2">
+        {incident.executions.map((execution) => (
+          <li key={execution.execution_id}>
+            <Card className="gap-2 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-medium">{RUNBOOK_LABELS[execution.runbook_id]}</span>
+                <ExecutionStatusBadge value={execution.status} />
+              </div>
+              <p className="text-muted-foreground text-xs">
+                갱신 {formatKst(execution.updated_at)}
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                {/* 차단을 그대로 두는 선택도 조치다 — SECOPS 격리 실행에만 둔다(§4.5 버튼 표). */}
+                {incident.category === 'SECOPS' ? (
+                  <Button type="button" variant="outline" size="sm" disabled>
+                    차단 유지
+                  </Button>
+                ) : null}
+                {execution.available_recovery_runbook_ids.map((runbookId) => (
+                  <Button key={runbookId} type="button" variant="outline" size="sm" disabled>
+                    {RUNBOOK_LABELS[runbookId]}
+                  </Button>
+                ))}
+              </div>
+            </Card>
+          </li>
+        ))}
+      </ul>
+    </Section>
+  );
+}
+
 export function IncidentDetail({
   incident,
   subject,
@@ -211,6 +259,8 @@ export function IncidentDetail({
           </ul>
         )}
       </Section>
+
+      <ExecutionsArea incident={incident} />
 
       <Section title="제안 조치">
         {incident.recommendations.length === 0 ? (
