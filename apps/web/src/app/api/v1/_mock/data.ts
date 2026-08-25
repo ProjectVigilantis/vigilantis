@@ -534,6 +534,14 @@ export const RECOVERABLE_ORIGIN_STATUSES = [
  * 복구 목록은 **조회할 때마다 파생한다** — 저장해 두면 롤백이 끝난 원본에 값이 남아
  * "버튼은 보이는데 누르면 409"가 된다(PR #158 리뷰 포인트 4). 실 BE도 매 조회 재계산이다.
  * 조건 3개: 짝이 있고 · 원본이 복구 가능 상태이며 · 그 복구가 아직 접수되지 않았다.
+ *
+ * 세 번째 조건은 잉여가 아니다 — `SG_RECREATE` 접수 후 원본은 `ROLLBACK_INITIATED`가 되는데
+ * 그 상태는 복구 가능 집합 **안**이라 상태 조건으로 막히지 않는다.
+ *
+ * 실 BE는 원본 실행 단위(`parent_execution_id`)로 판정하고 여기는 인시던트×runbook 단위로
+ * 판정하는데, **같은 runbook의 재실행을 실행 라우터가 막고 있어서**(`execute/route.ts`가 이미
+ * 실행된 runbook을 본편·복구 모두 409로 거절) 원본 결속 없이도 결과가 같다. mock에서 재실행을
+ * 열면(격리 → 해제 → 다시 격리) 이 전제가 깨지므로 그때는 원본 결속을 도입해야 한다(PR #160 리뷰).
  */
 function recoveryIds(
   execution: ExecutionSummaryItem,

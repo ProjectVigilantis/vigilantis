@@ -5,7 +5,8 @@
 import Link from 'next/link';
 
 import { CopyButton } from '@/components/copy-button';
-import { HealthArea, Row, VerdictArea } from '@/components/assets/asset-card';
+import { HealthArea, VerdictArea } from '@/components/assets/asset-card';
+import { Row } from '@/components/detail-row';
 import { EnumBadge, StatusBadge } from '@/components/status-badge';
 import { Separator } from '@/components/ui/separator';
 import {

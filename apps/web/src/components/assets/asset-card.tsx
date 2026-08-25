@@ -1,12 +1,13 @@
 // AST-001 명함 카드 — 자산 1건. 화면설계서 v1.5 §4.2 "명함 카드 그리드" 바인딩 표를 따릅니다.
 
+import { Row } from '@/components/detail-row';
 import { Card } from '@/components/ui/card';
 import { EnumBadge, StatusBadge } from '@/components/status-badge';
 import { ASSET_TYPE_LABELS, NO_VALUE, assetStateEntry } from '@/lib/enum-labels';
 import { cn } from '@/lib/utils';
 import type { AssetItem } from '@/types/api';
 
-/* Row·VerdictArea·HealthArea는 AST-002 상세 패널(asset-detail.tsx)도 그대로 쓴다 —
+/* VerdictArea·HealthArea는 AST-002 상세 패널(asset-detail.tsx)도 그대로 쓴다 —
    같은 필드를 두 화면이 다르게 그리면 목록과 상세가 어긋난다(§8). */
 
 /**
@@ -44,15 +45,6 @@ export function UnknownValue() {
 export function HealthArea({ score }: { score: number | null }) {
   if (score === null) return <UnknownValue />;
   return <span className="text-foreground tabular-nums">{score}</span>;
-}
-
-export function Row({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="flex items-start justify-between gap-3 text-sm">
-      <span className="text-muted-foreground shrink-0">{label}</span>
-      <span className="text-right">{children}</span>
-    </div>
-  );
 }
 
 export function AssetCard({
