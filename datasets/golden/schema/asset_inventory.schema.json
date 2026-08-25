@@ -16,6 +16,203 @@
       "title": "AssetType",
       "type": "string"
     },
+    "AutoScalingGroupAsset": {
+      "description": "Auto Scaling Group. autoscaling 은 Pro 전용이라 LocalStack Community 에선 수집 불가\n(ADR-0006 §4) — collector 가 호출 실패를 흡수해 빈 목록으로 degrade 한다.\n토폴로지: EC2→ASG(MEMBER_OF, source 는 각 멤버 EC2) · ASG→LT(USES, source 는 ASG).\n판정 비대상(NOT_APPLICABLE).",
+      "properties": {
+        "asset_type": {
+          "$ref": "#/$defs/AssetType",
+          "default": "AUTO_SCALING_GROUP"
+        },
+        "arn": {
+          "description": "ASG ARN (describe 응답의 AutoScalingGroupARN)",
+          "title": "Arn",
+          "type": "string"
+        },
+        "name": {
+          "description": "AutoScalingGroupName (resource_id)",
+          "title": "Name",
+          "type": "string"
+        },
+        "region": {
+          "description": "리전",
+          "title": "Region",
+          "type": "string"
+        },
+        "min_size": {
+          "description": "최소 인스턴스 수",
+          "title": "Min Size",
+          "type": "integer"
+        },
+        "max_size": {
+          "description": "최대 인스턴스 수",
+          "title": "Max Size",
+          "type": "integer"
+        },
+        "desired_capacity": {
+          "description": "희망 인스턴스 수",
+          "title": "Desired Capacity",
+          "type": "integer"
+        },
+        "health_check_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "EC2/ELB",
+          "title": "Health Check Type"
+        },
+        "instance_ids": {
+          "description": "멤버 인스턴스 목록(EC2→ASG MEMBER_OF 파생용)",
+          "items": {
+            "type": "string"
+          },
+          "title": "Instance Ids",
+          "type": "array"
+        },
+        "launch_template_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "사용하는 Launch Template id(ASG→LT USES 파생용)",
+          "title": "Launch Template Id"
+        },
+        "launch_template_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Launch Template Name"
+        }
+      },
+      "required": [
+        "arn",
+        "name",
+        "region",
+        "min_size",
+        "max_size",
+        "desired_capacity"
+      ],
+      "title": "AutoScalingGroupAsset",
+      "type": "object"
+    },
+    "EbsAsset": {
+      "description": "EBS Volume. 토폴로지 EC2→EBS(ATTACHED_TO) 산출용이자 미부착 볼륨 정리 판정 대상.\n\nNACL 등과 달리 EBS 는 Rule 판정 대상(`_RULE_TARGET_TYPES`)이라, 미부착(=attached_instance_ids\n비어있음)이면 rule_engine 이 UNUSED, 부착이면 SKIP_ACTIVE 로 판정한다.",
+      "properties": {
+        "asset_type": {
+          "$ref": "#/$defs/AssetType",
+          "default": "EBS"
+        },
+        "arn": {
+          "description": "Volume ARN (안정 키)",
+          "title": "Arn",
+          "type": "string"
+        },
+        "volume_id": {
+          "description": "vol-xxxx",
+          "title": "Volume Id",
+          "type": "string"
+        },
+        "region": {
+          "description": "리전",
+          "title": "Region",
+          "type": "string"
+        },
+        "volume_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "gp3/gp2/io1 등",
+          "title": "Volume Type"
+        },
+        "size_gib": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "크기(GiB)",
+          "title": "Size Gib"
+        },
+        "availability_zone": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Availability Zone"
+        },
+        "encrypted": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Encrypted"
+        },
+        "state": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "available(미부착)/in-use 등",
+          "title": "State"
+        },
+        "attached_instance_ids": {
+          "description": "부착된 인스턴스 목록. 비어있으면 미사용(UNUSED) 후보",
+          "items": {
+            "type": "string"
+          },
+          "title": "Attached Instance Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "arn",
+        "volume_id",
+        "region"
+      ],
+      "title": "EbsAsset",
+      "type": "object"
+    },
     "Ec2Asset": {
       "properties": {
         "asset_type": {
@@ -175,6 +372,74 @@
       "title": "Ec2Asset",
       "type": "object"
     },
+    "LaunchTemplateAsset": {
+      "description": "Launch Template. ec2 네임스페이스라 LocalStack Community 에서도 수집 가능.\n토폴로지 ASG→LT(USES) 의 대상. 판정 비대상(NOT_APPLICABLE).",
+      "properties": {
+        "asset_type": {
+          "$ref": "#/$defs/AssetType",
+          "default": "LAUNCH_TEMPLATE"
+        },
+        "arn": {
+          "description": "Launch Template ARN (안정 키)",
+          "title": "Arn",
+          "type": "string"
+        },
+        "launch_template_id": {
+          "description": "lt-xxxx",
+          "title": "Launch Template Id",
+          "type": "string"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "LaunchTemplateName",
+          "title": "Name"
+        },
+        "region": {
+          "description": "리전",
+          "title": "Region",
+          "type": "string"
+        },
+        "latest_version": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Latest Version"
+        },
+        "default_version": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Default Version"
+        }
+      },
+      "required": [
+        "arn",
+        "launch_template_id",
+        "region"
+      ],
+      "title": "LaunchTemplateAsset",
+      "type": "object"
+    },
     "MetricName": {
       "enum": [
         "CPUUtilization",
@@ -278,6 +543,63 @@
         }
       },
       "title": "MetricSummary",
+      "type": "object"
+    },
+    "NaclAsset": {
+      "description": "Network ACL. 토폴로지 EC2→NACL(PROTECTED_BY, subnet 연관 기반) 산출용.",
+      "properties": {
+        "asset_type": {
+          "$ref": "#/$defs/AssetType",
+          "default": "NACL"
+        },
+        "arn": {
+          "description": "NACL ARN (안정 키)",
+          "title": "Arn",
+          "type": "string"
+        },
+        "nacl_id": {
+          "description": "acl-xxxx",
+          "title": "Nacl Id",
+          "type": "string"
+        },
+        "region": {
+          "description": "리전",
+          "title": "Region",
+          "type": "string"
+        },
+        "vpc_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Vpc Id"
+        },
+        "is_default": {
+          "default": false,
+          "description": "VPC 기본 NACL 여부",
+          "title": "Is Default",
+          "type": "boolean"
+        },
+        "associated_subnet_ids": {
+          "description": "이 NACL 이 연관된 subnet 목록",
+          "items": {
+            "type": "string"
+          },
+          "title": "Associated Subnet Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "arn",
+        "nacl_id",
+        "region"
+      ],
+      "title": "NaclAsset",
       "type": "object"
     },
     "OpenPort": {
@@ -452,6 +774,42 @@
         "$ref": "#/$defs/SecurityGroupAsset"
       },
       "title": "Security Groups",
+      "type": "array"
+    },
+    "nacls": {
+      "items": {
+        "$ref": "#/$defs/NaclAsset"
+      },
+      "title": "Nacls",
+      "type": "array"
+    },
+    "ebs_volumes": {
+      "items": {
+        "$ref": "#/$defs/EbsAsset"
+      },
+      "title": "Ebs Volumes",
+      "type": "array"
+    },
+    "launch_templates": {
+      "items": {
+        "$ref": "#/$defs/LaunchTemplateAsset"
+      },
+      "title": "Launch Templates",
+      "type": "array"
+    },
+    "auto_scaling_groups": {
+      "items": {
+        "$ref": "#/$defs/AutoScalingGroupAsset"
+      },
+      "title": "Auto Scaling Groups",
+      "type": "array"
+    },
+    "degraded_collectors": {
+      "description": "수집 실패로 빈 목록 degrade 된 서비스 라벨(예: auto_scaling_groups). 비어있지 않으면 부분 수집 — persist 가 CollectionRun 을 PARTIAL 로 마감한다.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Degraded Collectors",
       "type": "array"
     }
   },

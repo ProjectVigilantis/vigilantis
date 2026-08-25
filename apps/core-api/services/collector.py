@@ -70,6 +70,19 @@ def _safe_describe(fn, label: str, degraded: list[str]) -> list:
         return []
 
 
+def _paginate(client, operation_name: str, key: str) -> list:
+    """페이지네이션 describe 를 전 페이지 순회해 key 리스트를 평탄화한다.
+
+    단일 호출은 첫 페이지만 받아 계정에 자산이 많으면 뒤 페이지가 조용히 누락된다.
+    describe_instances(collect_region)와 동일하게 paginator 로 전량 수집한다.
+    """
+    return [
+        item
+        for page in client.get_paginator(operation_name).paginate()
+        for item in page[key]
+    ]
+
+
 # ------------------------------------------------------------------ 설정
 def _runtime_config() -> dict:
     """수집 1회에 필요한 설정. 리전은 클라이언트 팩토리가 해석한 목록을 그대로 쓴다."""
@@ -224,11 +237,13 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
     # _safe_describe 가 빈 목록으로 degrade 하고 degraded 에 라벨을 남긴다(ADR-0006 §4).
     degraded: list[str] = []
     lts_raw = _safe_describe(
-        lambda: ec2.describe_launch_templates()["LaunchTemplates"], "launch_templates", degraded
+        lambda: _paginate(ec2, "describe_launch_templates", "LaunchTemplates"),
+        "launch_templates", degraded,
     )
     asg = aws_client("autoscaling", region)
     asgs_raw = _safe_describe(
-        lambda: asg.describe_auto_scaling_groups()["AutoScalingGroups"], "auto_scaling_groups", degraded
+        lambda: _paginate(asg, "describe_auto_scaling_groups", "AutoScalingGroups"),
+        "auto_scaling_groups", degraded,
     )
     used = _used_sg_ids(instances_raw, enis_raw)
 
