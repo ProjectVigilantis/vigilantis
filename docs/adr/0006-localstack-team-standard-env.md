@@ -2,6 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-08-19
+- **Amended**: 2026-08-24 — §4 검증 한계 목록 갱신(하단 "개정 이력" 참조, 핵심 결정 불변)
 - **Deciders**: 김세혁(PM/Infra) 수립 — 2026-08-13 확정 결정(개발 = LocalStack, 발표 직전 실 AWS 전환)의 구체화
 
 ## Context (배경)
@@ -60,7 +61,8 @@ LocalStack 통과를 "검증 완료"로 간주하지 않는 경로를 고정 목
 | 1 | 가드레일 4단계 `DryRun=True` | LocalStack은 실제 IAM 권한을 검증하지 않음 |
 | 2 | `get_waiter` Status Check(2/2) 감시·자동 원복 | 실제 부팅·헬스체크가 없어 대기·실패 시나리오가 재현되지 않음 |
 | 3 | CloudWatch 메트릭 수집 | 실 AWS는 EC2가 자동 발행, LocalStack은 시드 주입 — 지연·해상도 특성이 다름 |
-| 4 | ALB Target Group·ASG(Launch Template) 경로 (P2 런북) | Community 에뮬레이션 커버리지 제한 가능 — 구현 시점에 확인, 미동작 시 이 목록에 확정 편입 |
+| 4 | ALB Target Group·ASG 경로 (P2 런북 3종) | **확정 편입(2026-08-24 실측)** — `elbv2`·`autoscaling`은 Community 미포함(Pro 전용, `InternalFailure: not included within your LocalStack license`). `ISOLATE`·`UNISOLATE`·`ENABLE_AUTOSCALING`은 실행뿐 아니라 Dry-Run 대체용 describe 조회도 로컬 불가 |
+| 5 | `ec2.create_network_acl_entry` · `ec2.delete_network_acl_entry`의 `DryRun=True` | **LocalStack이 플래그를 무시하고 실제로 규칙을 생성·삭제한다**(예외 미발생). 실 AWS는 정상 지원하므로 `DryRun` 경로는 실 AWS에서 처음 검증된다 — 그때까지 두 런북은 조회 대체 검증으로 동작한다([ADR-0007](0007-guardrail-dryrun-executor-precheck-contract.md) §4) |
 
 이 목록은 **6~7주차 실 AWS 스모크 테스트**에서 해소한다: P0 런북 4종(`RIGHTSIZING`+`REVERT_SIZE`, `NACL_ADD_DENY`+`NACL_RESTORE`) 실동작 + Dry-Run·Status Check 경로 각 1회 검증. 비용 통제 — 단일 계정, 최소 스펙(t3.micro급), 검증 직후 리소스 정리. P2 시연 인프라(ALB·다중 EC2)는 마일스톤대로 조기 준비하되 실 AWS에 구성한다.
 
@@ -90,7 +92,7 @@ LocalStack 통과를 "검증 완료"로 간주하지 않는 경로를 고정 목
 **비용/유의**
 
 - LocalStack ≠ 실 AWS 격차(§4)는 구조적으로 남는다 — **6~7주차 스모크가 유일한 방어선**이므로 해당 주차 일정에서 빠지면 시연 직전 리스크로 직결
-- Community 커버리지가 P2 런북 리소스(ALB TG·ASG)에서 부족할 수 있음 — 구현 착수 시점(3~5주차)에 확인해 §4 목록을 갱신해야 함
+- ~~Community 커버리지가 P2 런북 리소스(ALB TG·ASG)에서 부족할 수 있음 — 구현 착수 시점(3~5주차)에 확인해 §4 목록을 갱신해야 함~~ → **확인 완료(2026-08-24)**: `elbv2`·`autoscaling`은 Community 미포함으로 확정, §4 4행 편입(1차 개정)
 - 시드 데이터와 rule_engine 임계값의 결합 — 임계값 변경 PR에 시드 갱신 누락 시 통합 테스트가 조용히 무의미해짐
 - 이미지 버전 고정 관리 부담(업그레이드는 PR로만)
 - 시연 데이터(Golden Dataset·mock GuardDuty 위협 주입)는 본 ADR 범위 밖 — 시드는 자산·메트릭까지만 책임지며, 위협 이벤트 주입 방식은 별도 결정 대상
@@ -102,3 +104,17 @@ LocalStack 통과를 "검증 완료"로 간주하지 않는 경로를 고정 목
 - 마일스톤: `vigilantis-docs/1차 발표까지의 마일스톤 및 MVP 범위 명세.md` — 3~5주차 집중 개발, 6~7주차 통합, P0/P1/P2 착수 순서
 - 기존 구현: `apps/core-api/services/collector.py`(`_runtime_config`/`_client` — 스위치 규약 원형), `apps/core-api/services/tests/test_collector_raw.py`(skip 규약), `.env.example`
 - 영향 범위: `docker-compose.yml`, `scripts/seed_localstack.py`(신규), `.env.example`, `.github/workflows/ci.yml`(3주차), 이후 `services/aws`·`security/`의 클라이언트 생성 규약
+
+## 개정 이력
+
+- **2026-08-24 (1차 개정)** — §4 검증 한계 목록 갱신. 확정 10종 Runbook이 사용하는 AWS 작업
+  전수를 LocalStack 4.14.0에서 실측한 결과 두 가지가 확인됐다(#113, [ADR-0007](0007-guardrail-dryrun-executor-precheck-contract.md) §Context).
+
+  | 대상 | 변경 |
+  | --- | --- |
+  | 4행 (ALB TG·ASG 경로) | "커버리지 제한 **가능** — 구현 시점에 확인" → **확정 편입**. `elbv2`·`autoscaling`은 Community 미포함(Pro 전용)이라 §1의 Community 전용 방침 아래에서는 해소 불가 |
+  | 5행 (신규) | `create_network_acl_entry`·`delete_network_acl_entry`가 `DryRun=True`를 무시하고 실제 수행 — 실 AWS는 정상 지원 |
+
+  §3(전환 스위치 규약 — 코드 분기 금지)은 그대로 유지한다. 두 NACL 작업을 "LocalStack일 때만
+  조회"로 나누지 않고 환경 무관 조회 대체 검증으로 처리하는 근거가 그 조항이다. 핵심 결정
+  (단일 compose·Boto3 시드 단일 원천·전환 스위치·이월 목록 운용)은 불변.
