@@ -31,7 +31,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -46,14 +45,10 @@ for _p in (str(_REPO_ROOT / "apps" / "core-api"), str(_REPO_ROOT / "packages")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-import boto3  # noqa: E402
-from botocore.config import Config  # noqa: E402
-
 from schemas.assets import MetricName  # noqa: E402
 
-# 리전·엔드포인트·자격증명 해석과 클라이언트 생성은 collector와 단일 원천(ADR-0006 §3).
-# config.get_settings() 확정 시 collector와 함께 그쪽으로 이관한다.
-from services.collector import _client, _runtime_config  # noqa: E402
+# 리전·엔드포인트·자격증명 해석과 클라이언트 생성의 단일 원천(ADR-0006 §3, Issue #128).
+from services.aws.client import aws_client, endpoint_url, regions  # noqa: E402
 from services.rule_engine import IDLE_CPU_AVG, MIN_DATAPOINTS, SPIKE_CPU_MAX  # noqa: E402
 
 SEED_TAG_KEY = "vigilantis:seed"
@@ -96,9 +91,12 @@ FALLBACK_AMI = "ami-00000000000000000"  # LocalStack 기본 AMI 조회 실패 �
 
 
 # ------------------------------------------------------------------ 안전 가드
-def _require_localstack() -> None:
-    """실 AWS 실행 거부(ADR-0006 §2). 엔드포인트 필수 + LocalStack 헬스체크 확인."""
-    endpoint = os.getenv("AWS_ENDPOINT_URL")
+def _require_localstack() -> str:
+    """실 AWS 실행 거부(ADR-0006 §2). 엔드포인트 필수 + LocalStack 헬스체크 확인.
+
+    엔드포인트 해석은 클라이언트 팩토리가 단일 원천이다 — 여기서 환경변수를 다시
+    읽으면 시드가 붙는 대상과 검사 대상이 갈릴 수 있다."""
+    endpoint = endpoint_url()
     if not endpoint:
         sys.exit(
             "AWS_ENDPOINT_URL 미설정 — 이 스크립트는 LocalStack 전용이다.\n"
@@ -115,6 +113,7 @@ def _require_localstack() -> None:
             f"LocalStack 헬스체크 실패({endpoint}): {e}\n"
             "  docker compose up 으로 localstack 서비스가 기동됐는지 확인할 것."
         )
+    return endpoint
 
 
 # ------------------------------------------------------------------ 리소스 ensure
@@ -267,20 +266,16 @@ def main() -> None:
     parser.add_argument("--metrics-only", action="store_true", help="자산 생성 없이 메트릭만 재주입")
     args = parser.parse_args()
 
-    _require_localstack()
-    cfg = _runtime_config()  # 리전·엔드포인트·자격증명 해석 = collector와 동일 규약
-    if not cfg["regions"]:
+    endpoint = _require_localstack()
+    resolved = regions()
+    if not resolved:
         sys.exit("[seed] 리전 해석 실패 — AWS_REGION / AWS_REGIONS 값을 확인할 것")
-    region, endpoint = cfg["regions"][0], cfg["endpoint_url"]
+    region = resolved[0]
 
-    ec2 = _client("ec2", region, endpoint)
-    # cloudwatch 만 직접 생성: botocore가 10KB 초과 PutMetricData 본문을 gzip 압축하는데
-    # LocalStack 구버전이 압축 본문을 못 읽는 사례가 있어("Missing Action") 방어적으로 끈다.
-    # _client() 는 config 주입을 지원하지 않음 — 공용 헬퍼 이관(get_settings) 시 함께 정리.
-    cw = boto3.client(
-        "cloudwatch", region_name=region, endpoint_url=endpoint,
-        config=Config(disable_request_compression=True),
-    )
+    ec2 = aws_client("ec2", region)
+    # cloudwatch 만 압축을 끈다: botocore가 10KB 초과 PutMetricData 본문을 gzip 압축하는데
+    # LocalStack 구버전이 압축 본문을 못 읽는 사례가 있다("Missing Action").
+    cw = aws_client("cloudwatch", region, disable_request_compression=True)
     print(f"[seed] endpoint={endpoint} region={region}")
 
     if args.metrics_only:

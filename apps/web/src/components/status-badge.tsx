@@ -1,4 +1,4 @@
-// enum 표시 배지 — enum-labels 사전만 참조합니다(화면설계서 v1.4 §8: 매핑을 화면마다 복제하지 않는다).
+// enum 표시 배지 — enum-labels 사전만 참조합니다(화면설계서 v1.5 §8: 매핑을 화면마다 복제하지 않는다).
 
 import { Loader2 } from 'lucide-react';
 
@@ -33,15 +33,22 @@ import type {
   Verdict,
 } from '@/types/api';
 
-/** 사전의 tone(의미) → 실제 색. 색 정의는 여기 한 곳뿐이다. */
+/**
+ * 사전의 tone(의미) → 실제 색. 색 정의는 여기 한 곳뿐이다.
+ *
+ * red만 `--danger` 토큰을 쓴다 — 설계서 §0.3이 "빨강 토큰은 하나"로 못박았고, 토폴로지
+ * THREAT 노드·공격 경로 엣지가 같은 값을 참조해야 하기 때문이다. 나머지 tone은 그런
+ * 제약이 없어 팔레트 클래스를 그대로 둔다(토큰을 늘리면 정의처만 흩어진다).
+ */
 const TONE_CLASS: Record<LabelTone, string> = {
   neutral: 'bg-muted text-foreground',
   gray: 'bg-muted text-muted-foreground',
   yellow: 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300',
   orange: 'bg-orange-100 text-orange-800 dark:bg-orange-950 dark:text-orange-300',
-  red: 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300',
+  red: 'bg-danger/15 text-danger',
   blue: 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300',
   green: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300',
+  purple: 'bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300',
 };
 
 /**
