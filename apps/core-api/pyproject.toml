@@ -17,7 +17,10 @@ dependencies = [
     "alembic>=1.13",
     "apscheduler>=3.10",
     "boto3>=1.34",
-    "openai>=1.30",
+    # 3.x 하한 — ai/openai_client.py가 비-beta chat.completions.parse를 쓰고,
+    # ADR-0005 Prompt 미출력을 위해 전송 라이브러리 로거를 이름으로 막는다. 그 이름이
+    # 3.x에서 httpx2라 1.x·2.x(httpx)에서는 차단이 조용히 빗나간다.
+    "openai>=3.0",
 ]
 
 [tool.uv.sources]

@@ -8,6 +8,7 @@ test_outbound_payload_drops_secret_originals다 — SSOT 주차 종료 판정 �
 import json
 import logging
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -53,8 +54,8 @@ INSTANCE_ARN = "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0abc1234def56
 _REQUEST = httpx2.Request("POST", "https://api.openai.com/v1/chat/completions")
 
 
-def _status_response(code):
-    return httpx2.Response(code, request=_REQUEST)
+def _status_response(code, headers=None):
+    return httpx2.Response(code, request=_REQUEST, headers=headers or {})
 
 
 class Answer(BaseModel):
@@ -94,7 +95,7 @@ def _completion(parsed, refusal=None, usage=(11, 7, 18), model="gpt-4o"):
     )
 
 
-def _client(results, max_attempts=3):
+def _client(results, max_attempts=3, max_retry_after_seconds=60.0):
     completions = _FakeCompletions(results)
     sdk = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     client = OpenAIModelClient(
@@ -103,6 +104,7 @@ def _client(results, max_attempts=3):
         timeout_seconds=1.0,
         max_attempts=max_attempts,
         retry_backoff_seconds=0.0,  # 테스트에서 실제로 대기하지 않는다
+        max_retry_after_seconds=max_retry_after_seconds,
     )
     return client, completions
 
@@ -178,6 +180,20 @@ def test_authorization_masking_stops_at_line_end():
     assert "Host: api.example.com" in masked  # 다음 줄은 판단 근거로 보존
 
 
+def test_masking_keeps_the_rest_of_a_single_line_json_record():
+    # CloudTrail·VPC flow log는 한 줄 JSON이다 — 비밀값만 지우고 판단 재료는 남겨야 한다
+    record = (
+        '{"authorization": "Bearer abc12345", "password": "hunter2", '
+        '"src_ip": "203.0.113.9", "errorCode": "AccessDenied"}'
+    )
+    masked = mask_outbound(record)
+
+    assert "abc12345" not in masked
+    assert "hunter2" not in masked
+    assert '"src_ip": "203.0.113.9"' in masked
+    assert '"errorCode": "AccessDenied"' in masked
+
+
 # --- 마스킹 비대상 ---------------------------------------------------------------
 
 
@@ -219,6 +235,32 @@ def test_masking_walks_nested_structures_and_keeps_keys():
     assert masked["evidences"][1]["content"]["raw"] == "정상 트래픽"
     # 키는 계약 필드명이라 건드리지 않는다
     assert set(masked["asset_context"]) == {"arn", "account_id", "spec"}
+
+
+def test_non_serializable_payload_is_a_contract_error():
+    # AssetItem.collected_at의 UtcDateTime은 when_used="json"이라 python 모드
+    # model_dump()에서 datetime으로 남는다 — 경계 밖으로 TypeError가 나가면 안 된다
+    request = AIModelRequest(
+        system_prompt="분석",
+        user_payload={"collected_at": datetime(2026, 8, 25, tzinfo=timezone.utc)},
+    )
+    with pytest.raises(AIModelContractError) as exc_info:
+        build_outbound_payload(request)
+
+    assert "직렬화" in str(exc_info.value)
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
+
+
+def test_fake_client_also_rejects_non_serializable_payload():
+    # 주입 구현이 이 검사를 건너뛰면 Fake로 통과한 배선이 실제 호출에서 터진다
+    fake = FakeAIModelClient([Answer(verdict="ok")])
+    request = AIModelRequest(
+        system_prompt="분석",
+        user_payload={"collected_at": datetime(2026, 8, 25, tzinfo=timezone.utc)},
+    )
+    with pytest.raises(AIModelContractError):
+        fake.complete(request, Answer)
 
 
 def test_outbound_payload_drops_secret_originals():
@@ -369,6 +411,76 @@ def test_transient_error_then_success():
 
     assert response.output.verdict == "ok"
     assert len(completions.calls) == 2
+
+
+def test_server_directed_retry_after_is_honored(monkeypatch):
+    # SDK 재시도를 껐으므로 Retry-After 존중은 래퍼가 승계한다
+    error = RateLimitError(
+        "429", response=_status_response(429, {"retry-after": "20"}), body=None
+    )
+    client, _ = _client([error, _completion(Answer(verdict="ok"))])
+    slept = []
+    monkeypatch.setattr("ai.openai_client.time.sleep", slept.append)
+
+    client.complete(_request(), Answer)
+
+    assert slept == [20.0]
+
+
+def test_retry_after_ms_header_is_honored(monkeypatch):
+    error = RateLimitError(
+        "429", response=_status_response(429, {"retry-after-ms": "1500"}), body=None
+    )
+    client, _ = _client([error, _completion(Answer(verdict="ok"))])
+    slept = []
+    monkeypatch.setattr("ai.openai_client.time.sleep", slept.append)
+
+    client.complete(_request(), Answer)
+
+    assert slept == [1.5]
+
+
+def test_retry_after_beyond_cap_falls_back_to_backoff(monkeypatch):
+    # 요청 경로에서 부르는 호출이라 서버가 과하게 길게 지시하면 따르지 않는다
+    error = RateLimitError(
+        "429", response=_status_response(429, {"retry-after": "600"}), body=None
+    )
+    client, _ = _client(
+        [error, _completion(Answer(verdict="ok"))], max_retry_after_seconds=60.0
+    )
+    slept = []
+    monkeypatch.setattr("ai.openai_client.time.sleep", slept.append)
+
+    client.complete(_request(), Answer)
+
+    assert slept != [600.0]
+
+
+def test_backoff_carries_jitter(monkeypatch):
+    # 지터가 없으면 동시에 실패한 호출이 같은 시각에 다시 몰린다
+    client, _ = _client(
+        [APITimeoutError(_REQUEST), _completion(Answer(verdict="ok"))]
+    )
+    client._retry_backoff_seconds = 4.0
+    slept = []
+    monkeypatch.setattr("ai.openai_client.time.sleep", slept.append)
+    monkeypatch.setattr("ai.openai_client.random.random", lambda: 1.0)
+
+    client.complete(_request(), Answer)
+
+    assert slept == [3.0]  # 4.0 * 1회 * (1 - 0.25)
+
+
+def test_connection_error_without_response_uses_backoff(monkeypatch):
+    client, _ = _client(
+        [APIConnectionError(request=_REQUEST), _completion(Answer(verdict="ok"))]
+    )
+    slept = []
+    monkeypatch.setattr("ai.openai_client.time.sleep", slept.append)
+
+    client.complete(_request(), Answer)
+
+    assert slept == [0.0]  # retry_backoff_seconds=0 → 지터를 곱해도 0
 
 
 def test_max_attempts_one_means_no_retry():

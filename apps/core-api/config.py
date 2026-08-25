@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     # 재시도 대상은 일시 오류뿐이다(ai/openai_client.py). 1이면 재시도 없음
     OPENAI_MAX_ATTEMPTS: int = Field(default=3, ge=1)
     OPENAI_RETRY_BACKOFF_SECONDS: float = Field(default=1.0, ge=0)
+    # 서버가 Retry-After로 지시한 대기의 상한. 이보다 길게 지시하면 따르지 않고
+    # backoff로 간다 — 요청 경로에서 부르는 호출이라 무한정 붙잡지 않는다
+    OPENAI_MAX_RETRY_AFTER_SECONDS: float = Field(default=60.0, ge=0)
 
     def cors_allow_origins_list(self) -> list[str]:
         return [
