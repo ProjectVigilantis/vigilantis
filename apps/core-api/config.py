@@ -1,9 +1,10 @@
 # ==============================================================================
 # [파일 설명]
-# pydantic-settings 기반 런타임 환경설정 로더입니다. (Issue #60·#68·#128, ADR-0001)
+# pydantic-settings 기반 런타임 환경설정 로더입니다. (Issue #60·#68·#115·#128, ADR-0001)
 #
 # 설정 단위를 셋으로 나눈다 — 필수 항목이 서로 다르기 때문이다.
-#   Settings          : Core API 프로세스 설정. DATABASE_URL 필수.
+#   Settings          : Core API 프로세스 설정. DATABASE_URL 필수이고
+#                       로깅·CORS·WebSocket·OpenAI는 기본값이 있다.
 #   AwsSettings       : AWS 접근 설정(리전·엔드포인트). DB와 무관.
 #   CollectorSettings : CloudWatch 조회 창 설정.
 #
@@ -12,13 +13,13 @@
 # 하나 만드는 데 DATABASE_URL이 필요해진다.
 #
 # 필수 설정 누락 시 get_*() 호출 단계에서 검증 오류가 난다. SQLite 등으로 조용히
-# 대체하지 않는다(SSOT 확정 범위가 PostgreSQL). OPENAI_API_KEY 등 나머지 설정은
-# 해당 기능을 붙이는 단계에서 추가한다.
+# 대체하지 않는다(SSOT 확정 범위가 PostgreSQL).
 # ==============================================================================
 
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -49,6 +50,19 @@ class Settings(BaseSettings):
     # 제거·종료 시 연결 close() 정리도 같은 값을 상한으로 쓴다.
     # 0 이하면 모든 연결이 즉시 제거되므로 양수만 허용한다 (Issue #75)
     WS_SEND_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0)
+
+    # --- AI 모델 호출 (Issue #115) ---
+    # 키는 Optional이다 — AI 호출 경로가 앱에 배선되기 전이라 키 없이도 기동해야 하고,
+    # 누락은 실제 클라이언트를 만드는 build_openai_model_client()가 거절한다.
+    OPENAI_API_KEY: Optional[str] = None
+    OPENAI_MODEL: str = "gpt-4o"
+    OPENAI_TIMEOUT_SECONDS: float = Field(default=30.0, gt=0)
+    # 재시도 대상은 일시 오류뿐이다(ai/openai_client.py). 1이면 재시도 없음
+    OPENAI_MAX_ATTEMPTS: int = Field(default=3, ge=1)
+    OPENAI_RETRY_BACKOFF_SECONDS: float = Field(default=1.0, ge=0)
+    # 서버가 Retry-After로 지시한 대기의 상한. 이보다 길게 지시하면 따르지 않고
+    # backoff로 간다 — 요청 경로에서 부르는 호출이라 무한정 붙잡지 않는다
+    OPENAI_MAX_RETRY_AFTER_SECONDS: float = Field(default=60.0, ge=0)
 
     def cors_allow_origins_list(self) -> list[str]:
         return [

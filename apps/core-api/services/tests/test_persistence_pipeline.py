@@ -23,11 +23,12 @@ for p in (str(CORE_API), str(REPO_ROOT / "packages")):
         sys.path.insert(0, p)
 
 from db import models  # noqa: E402
-from schemas.api.assets import AssetItem  # noqa: E402
+from schemas.api.assets import AssetItem, AssetType  # noqa: E402
 from schemas.assets import (  # noqa: E402
     AssetInventory,
     Ec2Asset,
     MetricSummary,
+    NaclAsset,
     OpenPort,
     SecurityGroupAsset,
 )
@@ -265,3 +266,70 @@ def test_skip_reason_code_persisted(db, skip_case_inventory):
     assert len(evals2) == len(evals)  # 중복 insert 아님 = update 경로
     assert evals2[by_rid["i-prod001"].asset_id].skip_reason_code == "SKIP_PROD_PROTECTED"
     assert evals2[by_rid["i-cand001"].asset_id].skip_reason_code is None
+
+
+def _rt(rel) -> str:
+    return getattr(rel.relation_type, "value", rel.relation_type)
+
+
+def test_nacl_topology_relationship(db):
+    """NACL 자산 적재 + EC2→NACL(PROTECTED_BY, subnet 연관) + EC2→SG(SECURED_BY) 동시 산출."""
+    now = datetime.now(timezone.utc)
+    sg_arn = "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-t1"
+    nacl_arn = "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-t1"
+    inv = AssetInventory(
+        account_id="123456789012", region="ap-northeast-2", mode="localstack",
+        collected_at=now, lookback_days=14, period_seconds=3600,
+        ec2_instances=[
+            Ec2Asset(
+                arn="arn:aws:ec2:ap-northeast-2:123456789012:instance/i-topo1",
+                instance_id="i-topo1", name="topo-ec2", instance_type="t3.large",
+                state="running", region="ap-northeast-2", subnet_id="subnet-aaa",
+                security_group_ids=["sg-t1"], tags={"Environment": "dev"},
+                metric_summary=MetricSummary(cpu_datapoints=336, cpu_avg=1.5, cpu_max=3.0),
+            )
+        ],
+        security_groups=[
+            SecurityGroupAsset(arn=sg_arn, group_id="sg-t1", name="sg-t1",
+                               region="ap-northeast-2", attached=True, open_to_world=[])
+        ],
+        nacls=[
+            NaclAsset(arn=nacl_arn, nacl_id="acl-t1", region="ap-northeast-2",
+                      vpc_id="vpc-1", is_default=True, associated_subnet_ids=["subnet-aaa"])
+        ],
+    )
+    res = persist_inventory(inv, db)
+    assert res["nacl_count"] == 1
+    assert res["total"] == 3
+
+    # NACL 자산 적재
+    nacl = db.execute(
+        select(models.Asset).where(models.Asset.asset_type == AssetType.NACL)
+    ).scalar_one()
+    assert nacl.resource_id == "acl-t1"
+    assert nacl.spec["associated_subnet_ids"] == ["subnet-aaa"]
+    assert nacl.spec["is_default"] is True
+
+    # EC2 관계 = SECURED_BY(sg) + PROTECTED_BY(nacl) 둘 다
+    ec2 = db.execute(
+        select(models.Asset).where(models.Asset.asset_type == AssetType.EC2)
+    ).scalar_one()
+    rels = db.execute(
+        select(models.AssetRelationship).where(
+            models.AssetRelationship.source_asset_id == ec2.asset_id
+        )
+    ).scalars().all()
+    pairs = {(_rt(r), r.target_arn) for r in rels}
+    assert ("SECURED_BY", sg_arn) in pairs
+    assert ("PROTECTED_BY", nacl_arn) in pairs
+
+    # AssetItem(NACL) 계약 라운드트립 — NaclSpec + RUNBOOK_SUPPORT + NOT_APPLICABLE
+    item = AssetItem.model_validate(
+        {
+            "arn": nacl.arn, "resource_id": nacl.resource_id, "asset_type": nacl.asset_type,
+            "resource_role": "RUNBOOK_SUPPORT", "account_id": nacl.account_id,
+            "region": nacl.region, "spec": nacl.spec, "relationships": [],
+            "evaluation_status": "NOT_APPLICABLE", "collected_at": nacl.collected_at,
+        }
+    )
+    assert item.asset_type == AssetType.NACL

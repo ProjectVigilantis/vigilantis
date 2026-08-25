@@ -55,7 +55,7 @@ uv workspace 모노레포. **MVP는 단일 FastAPI 백엔드(`apps/core-api`)** 
 
 ```text
 vigilantis/
-├── docker-compose.yml         # 로컬 개발 환경: FastAPI(api) + PostgreSQL(db) + adminer
+├── docker-compose.yml         # 로컬 개발: api + db + migrate + localstack (+ adminer: --profile tools)
 ├── apps/
 │   ├── web/                   # [유건희·FE] Next.js 16 + Shadcn + Recharts 대시보드
 │   └── core-api/              # [안성일·BE/AI · 김세혁·Infra] 단일 FastAPI 백엔드
@@ -76,9 +76,10 @@ vigilantis/
 ### 로컬 실행
 
 ```bash
-cp .env.example .env      # 값 채우기 (OPENAI_API_KEY, AWS_* 등)
-docker compose up         # api(:8000) + db(:5432) + adminer(:8080)
-uv sync                   # (호스트 개발 시) 워크스페이스 의존성 동기화
+cp .env.example .env                 # 값 채우기 (OPENAI_API_KEY, AWS_* 등)
+docker compose up                    # api(:8000) + db(:5432) + localstack(:4566) [+ migrate 1회]
+docker compose --profile tools up    # ↑ + adminer(:${ADMINER_PORT:-8080}) — 선택 DB 웹 UI
+uv sync                              # (호스트 개발 시) 워크스페이스 의존성 동기화
 ```
 
 ---

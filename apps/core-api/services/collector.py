@@ -27,6 +27,7 @@ from schemas.assets import (
     MetricName,
     MetricSeries,
     MetricSummary,
+    NaclAsset,
     OpenPort,
     SecurityGroupAsset,
 )
@@ -171,6 +172,7 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
     ]
     sgs_raw = ec2.describe_security_groups()["SecurityGroups"]
     enis_raw = ec2.describe_network_interfaces()["NetworkInterfaces"]
+    nacls_raw = ec2.describe_network_acls()["NetworkAcls"]
     used = _used_sg_ids(instances_raw, enis_raw)
 
     end = datetime.now(timezone.utc)
@@ -216,6 +218,20 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
         for sg in sgs_raw
     ]
 
+    nacl_assets = [
+        NaclAsset(
+            arn=_arn("network-acl", n["NetworkAclId"], region, account_id),
+            nacl_id=n["NetworkAclId"],
+            region=region,
+            vpc_id=n.get("VpcId"),
+            is_default=bool(n.get("IsDefault", False)),
+            associated_subnet_ids=[
+                a["SubnetId"] for a in n.get("Associations", []) if a.get("SubnetId")
+            ],
+        )
+        for n in nacls_raw
+    ]
+
     return AssetInventory(
         account_id=account_id,
         region=region,
@@ -224,6 +240,7 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
         period_seconds=cfg["period_seconds"],
         ec2_instances=ec2_assets,
         security_groups=sg_assets,
+        nacls=nacl_assets,
     )
 
 
@@ -259,7 +276,15 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
 
     ec2_count = len(inv.ec2_instances)
     sg_count = len(inv.security_groups)
-    total = ec2_count + sg_count
+    nacl_count = len(inv.nacls)
+    total = ec2_count + sg_count + nacl_count
+
+    # subnet → NACL ARN (EC2→NACL PROTECTED_BY 파생용)
+    subnet_to_nacl = {
+        subnet_id: n.arn
+        for n in inv.nacls
+        for subnet_id in n.associated_subnet_ids
+    }
 
     window_end = inv.collected_at
     window_start = window_end - timedelta(days=inv.lookback_days)
@@ -296,11 +321,15 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
             window_end=window_end,
             collected_at=inv.collected_at,
         )
-        if a.security_group_ids:
-            rel_items = [
-                (RelationType.SECURED_BY, f"arn:aws:ec2:{inv.region}:{inv.account_id}:security-group/{sg_id}")
-                for sg_id in a.security_group_ids
-            ]
+        # SG(SECURED_BY) + NACL(PROTECTED_BY) 를 한 번에 교체(replace 는 덮어쓰기)
+        rel_items = [
+            (RelationType.SECURED_BY, f"arn:aws:ec2:{inv.region}:{inv.account_id}:security-group/{sg_id}")
+            for sg_id in a.security_group_ids
+        ]
+        nacl_arn = subnet_to_nacl.get(a.subnet_id)
+        if nacl_arn:
+            rel_items.append((RelationType.PROTECTED_BY, nacl_arn))
+        if rel_items:
             assets_repo.replace_relationships(
                 db,
                 source_asset_id=asset.asset_id,
@@ -330,6 +359,27 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
             state=None,
         )
 
+    # 3. NACL 적재 (판정 비대상 — role/status 파생은 조회단이 처리)
+    for n in inv.nacls:
+        nacl_spec = {
+            "vpc_id": n.vpc_id,
+            "is_default": n.is_default,
+            "associated_subnet_ids": n.associated_subnet_ids,
+        }
+        assets_repo.upsert_asset(
+            db,
+            arn=n.arn,
+            asset_type=AssetType.NACL,
+            resource_id=n.nacl_id,
+            account_id=inv.account_id,
+            region=inv.region,
+            spec=nacl_spec,
+            collection_run_id=collection_run_id,
+            collected_at=inv.collected_at,
+            name=None,
+            state=None,
+        )
+
     if started_own_run:
         assets_repo.finish_collection_run(
             db,
@@ -343,6 +393,7 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
         "collection_run_id": collection_run_id,
         "ec2_count": ec2_count,
         "sg_count": sg_count,
+        "nacl_count": nacl_count,
         "total": total,
     }
 
