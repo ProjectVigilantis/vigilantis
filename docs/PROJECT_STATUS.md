@@ -4,7 +4,7 @@
 > 다른 문서(README, 기획서, MVP 범위 명세 등)와 충돌하면 **이 문서가 이긴다.**
 > 범위·API 계약·역할이 바뀌는 PR은 이 문서 갱신을 포함할 것.
 >
-> **최종 갱신**: 2026-08-25 (박지현)
+> **최종 갱신**: 2026-08-25 (김세혁)
 
 ---
 
@@ -23,10 +23,10 @@
   - **2주차(8/18–8/23) · 실행 기반 구축** — DB 저장 계층(ORM 13종·Alembic baseline·Repository)과 collector·rule_engine 재연결, Core API 앱 골격·조회 API 3종·로깅, WebSocket 실시간 상태 전송(`/api/v1/ws`), Golden Dataset 20건(`Verdict` 4종·`SkipReasonCode` 5종 전량 커버, 회귀 21건), CI LocalStack service container, FE shadcn 프리미티브·다크 모드 고정.
   - **3주차(8/24–8/30, 진행 중) · 실행 기반 착수** — 현재까지: CI PostgreSQL service container(#92)로 DB 통합 테스트 28건 상시 skip 해소(미해결 5번 종결), PR 본문 템플릿·리뷰 요청 규칙 코드화(`.github/PULL_REQUEST_TEMPLATE.md`), `_is_prod` 인식 태그 키·값 집합 확정(#95 → PR #97, 미해결 4번 핵심 해소), **executor ↔ 가드레일 ④ Dry-Run 호출 규약 확정([ADR-0007](adr/0007-guardrail-dryrun-executor-precheck-contract.md) — #113 종결, 판정 기준 ⓐ 충족)**.
 - **다음 단계 (담당별 1줄)**
-  - **김세혁**: ~~Dry-Run 호출 시그니처를 안성일과 문서로 합의(8/26 목표)~~ ✅ 확정(2026-08-24, ADR-0007 / #113 — 기한 내). Boto3 클라이언트 팩토리·AWS 예외 공통 래퍼 → 스펙 JSON 백업 모듈 → executor 런북 디스패치 테이블·`precheck()` 구현. CI `apps/web` lint·build 잡 추가(#91), compose 정리(#94·#111).
+  - **김세혁**: ~~Dry-Run 호출 시그니처를 안성일과 문서로 합의(8/26 목표)~~ ✅ 확정(2026-08-24, ADR-0007 / #113 — 기한 내). ~~Boto3 클라이언트 팩토리·AWS 예외 공통 래퍼~~ ✅ 완료(2026-08-25, #128 / PR #131). executor 런북 디스패치 테이블·`precheck()` 확정 10종(#129 / PR #147 — 리뷰 반영 완료, [ADR-0007](adr/0007-guardrail-dryrun-executor-precheck-contract.md) 1차 개정(#133) 선행 머지 후 승인 예정). 다음: 스펙 JSON 백업 모듈 → `execute` 본체. 후속으로 런북별 typed 파라미터 계약(#154 — 안성일), `scripts/probe_dryrun.py` 편입(#130). CI `apps/web` lint·build 잡 추가(#91), compose 정리(#94·#111).
   - **안성일**: `AIModelClient` 경계(ADR-0005 — 외부 전송 페이로드 마스킹 포함, #115), 가드레일 ①Schema Check ②Action Whitelist(#114), `POST /api/v1/actions/execute` 라우터 골격·Idempotency Key 멱등 처리(#116, 김세혁 공동).
   - **김승철**: ~~`_is_prod` 인식 태그 키·값 집합 확정(#95)~~ ✅ 확정(2026-08-24, PR #97 — 기한 8/27 내 본인 결정, PM 대행 불발동). `evaluate_ec2` `name` 인자 정리(#96 — `PROD_HINTS`는 #97에서 제거돼 잔여 범위 축소), rule_engine update 경로 SKIP→비SKIP 전이 회귀 테스트(#109 — #99 잔여 재발행). ~~자산 연결관계(토폴로지) 산출(#101)~~ ✅ NACL 축 완료(2026-08-25, PR #101 — subnet 연관 기반 EC2→NACL `PROTECTED_BY`); TG(`REGISTERED_IN`) 축은 `elbv2`가 LocalStack Community 미포함이라 로컬 검증 경로가 없어(ADR-0006 §4) 실 AWS 스모크(6–7주차)로 이월 — 별도 카드 발행 예정.
-  - **박지현**: ~~`_is_prod` 확정 기준 반영 Golden 경계 케이스 추가~~ ✅ 완료(2026-08-25, #124 — 미해결 4번 완전 종결). ~~회귀 CI 상시 실행 검증~~ ✅ 확인(dev CI `419 passed, 5 skipped` — 골든 회귀 21→26건 상시 실행, DB 통합 28건 skip 0건으로 판정 기준 ⓒ 충족. 남은 skip 5건은 전부 미구현 대기 중인 placeholder다). E2E 시연 시나리오 설계서 1차(FinOps·SecOps 2트랙), 실행 계열 테스트 하네스·픽스처 선구축. **가드레일 회귀 테스트 skip 2건 해제**(#114 / PR #123 머지로 선행 조건 해소). SecOps 정답은 Risk Evaluator 대기(미해결 6번).
+  - **박지현**: ~~`_is_prod` 확정 기준 반영 Golden 경계 케이스 추가~~ ✅ 완료(2026-08-25, #124 — 미해결 4번 완전 종결). ~~회귀 CI 상시 실행 검증~~ ✅ 확인(dev CI `419 passed, 5 skipped` — 골든 회귀 21→26건 상시 실행, DB 통합 28건 skip 0건으로 판정 기준 ⓒ 충족. 남은 skip 5건은 전부 미구현 대기 중인 placeholder다). ~~E2E 시연 시나리오 설계서 1차(FinOps·SecOps 2트랙)~~ ✅ 완료(2026-08-25, #132 — `docs/E2E_DEMO_SCENARIOS.md`). 실행 계열 테스트 하네스·픽스처 선구축(#136). **가드레일 회귀 테스트 skip 2건 해제**(#114 / PR #123 머지로 선행 조건 해소). SecOps 정답은 Risk Evaluator 대기(미해결 6번).
   - **유건희**: ~~다크 고정 마감(#89)·`--font-sans` 순환 참조 수정(#90)~~ ✅ 완료(2026-08-24, PR #103·#102). 자산 목록·상세 화면 mock 연동 마감(#106 — 판정 기준 ⓔ), global-error 셸 다크 고정(#112 — #103 잔여 재발행).
 - **주차 종료 판정 기준**: ⓐ ~~executor ↔ 가드레일 ④ Dry-Run 인터페이스 문서 합의~~ ✅ 충족(2026-08-24, ADR-0007 / #113) ⓑ ~~`_is_prod` 정책 결정 종결(또는 PM 대행)~~ ✅ 충족(2026-08-24, #95) ⓒ ~~CI에서 DB 통합 테스트 28건 실행(skip 0건)~~ ✅ 충족(2026-08-25, #92 — dev CI `419 passed, 5 skipped`. 남은 skip 5건은 `test_e2e_scenario` 2 + `test_guardrails` 2 + `test_rollback` 1 로 전부 미구현 대기 QA placeholder이므로 DB 통합 28건은 skip 0건으로 실행 중) ⓓ `POST /actions/execute` 멱등 처리 동작(실행 스텁 허용) ⓔ FE 자산 화면 mock 100% 렌더 ⓕ LLM 외부 전송 페이로드 마스킹 적용.
 
@@ -78,6 +78,7 @@
 | 2026-08-18 | **LangGraph 그래프 구조 확정** — FinOps·SecOps 두 그래프로 분리, Checkpointer 미사용(업무 상태는 PostgreSQL 단일 원천·그래프 내 승인 중단점 없음), Guardrail·DB 저장·AWS 실행·승인은 그래프 밖, 모델 호출은 `AIModelClient` 경계 경유. 판단 근거는 구조화 필드로만 보존(Prompt 전문·내부 추론 텍스트 미보존) | [ADR-0005](adr/0005-langgraph-stateless-domain-graphs.md) |
 | 2026-08-19 | **LocalStack 팀 표준 환경 전략 확정** — 단일 compose(Community 전용·버전 고정), 시드 = Boto3 스크립트 단일 원천(멱등·rule_engine 임계값 결합·실 AWS 실행 거부), `AWS_ENDPOINT_URL` 스위치 규약 전 모듈 승격(환경 감지 분기 금지), 검증 한계 4경로(Dry-Run·Status Check·CloudWatch·ALB TG/ASG)는 6–7주차 실 AWS 스모크로 이월 | [ADR-0006](adr/0006-localstack-team-standard-env.md) |
 | 2026-08-24 | **가드레일 ④ AWS Dry-Run = executor `precheck()` 단일 호출로 확정** — 동기·예외 미전파, 반환은 `PrecheckOutcome`(`passed`·`reason_code`·`verification_summary`). `DryRunOperation` **예외 발생만 PASS**(정상 반환은 플래그 미적용으로 보고 FAIL). `DryRun` 미지원 5종(전면 2 = `NACL_ADD_DENY`·`NACL_RESTORE`, 부분 3 = `EC2_ISOLATE`·`EC2_UNISOLATE`의 elbv2 호출·`ENABLE_AUTOSCALING`의 asg 호출)은 환경 무관 **조회(describe) 대체 검증**. 실측 결과 `elbv2`·`autoscaling`은 LocalStack Community 미포함(Pro 전용)이라 P2 3종은 로컬 검증 경로 자체가 없음 → ADR-0006 §4 검증 한계 표에 확정 편입 | [ADR-0007](adr/0007-guardrail-dryrun-executor-precheck-contract.md) / 이슈 #113 / PR #117 |
+| 2026-08-25 | **ADR-0007 1차 개정 — `precheck()` 구현 실측 반영** — 판정 구조·사유 코드·대체 검증 5종은 **불변**. ① `DryRun` 통과는 대상 자원 존재를 증명하지 않음(부재 자원에도 `DryRunOperation` 반환) → §3 요약 문구 정정, DryRun 전면 6종에 존재 확인 describe **미추가**로 확정 ② `EC2_UNISOLATE` 조회를 `describe_target_health` → **`describe_target_groups`**(전자의 응답에 `VpcId`가 없어 통과 조건 ③을 확인할 수 없음) ③ §1 시그니처에 키워드 전용 **`backup_loader`** 명시, "예외를 던지지 않는다"의 예외를 **배선 오류 1건**으로 한정 ④ `EC2_ISOLATE` 등록 판별 = `Target.NotRegistered` 기준, `NACL_ADD_DENY` 중복 검사 = 인바운드(`egress=False`) 기준, `NACL_RESTORE` 백업 조회 = `(rule_number, egress)`로 특정 ⑤ **리전 규약 신설** — AWS 클라이언트와 ARN 파라미터 모두 `target_arn`의 리전 기준(기본 리전 고정 시 2번째 리전 자산 오판정) | [ADR-0007](adr/0007-guardrail-dryrun-executor-precheck-contract.md) / 이슈 #133 / 구현 PR #147 |
 | 2026-08-24 | **`_is_prod` 운영 자산 인식 기준 확정** — 규칙 소유자(김승철) 결정. **키**(대소문자 무시) = `environment`·`env`·`stage`·`tier`, **값**(소문자 정확일치·부분일치 금지) = `prod`·`production`·`prd`. 부분 문자열 매칭은 영구 금지(`product-service`류 오탐 방지, #81). 접미 변형(`prod-us-east` 등) 미탐은 의도된 결과이며 Golden 경계 케이스로 고정 | 이슈 #95 / PR #97 |
 
 ## API 계약 (확정 — FE↔BE 공개 계약, 코드 원천: `packages/schemas/api/`)
@@ -125,7 +126,8 @@
 2. `vigilantis-docs/런북 명세서.md` — Action Whitelist 확정 규격 (10종: 본편 7 + 롤백 3)
 3. `vigilantis-docs/시스템 흐름도.md` — MVP 아키텍처·파이프라인
 4. `docs/adr/` — 결정 배경(왜 그렇게 했나)
-5. `vigilantis-docs/마일스톤/` — **주차별 실행 계획(현행)**. 담당별 카드·DoD·주차 종료 판정 기준. 현재 주차: `W03_0824-0830.md`
-6. `vigilantis-docs/1차 발표까지의 마일스톤 및 MVP 범위 명세.md` — 초기 주차 계획 (※ 범위 서술 일부 구버전: EC2·SG 한정, 런북 2종 예시)
-7. `README.md` — 프로젝트 소개용 (※ 역할 표·오너 주석 구버전)
-8. `vigilantis-docs/기획서/*.docx` — **풀비전 비전 문서(동결)**. 구현 기준 아님.
+5. [`docs/E2E_DEMO_SCENARIOS.md`](E2E_DEMO_SCENARIOS.md) — **1차 발표 시연 대본의 원천**이자 `tests/test_e2e_scenario.py`의 명세. 위 1–4를 원천으로 삼는 파생 문서라 충돌하면 위가 이긴다. 확정본 대조가 필요한 항목은 문서 내 §대조 필요 목록에 모아둔다
+6. `vigilantis-docs/마일스톤/` — **주차별 실행 계획(현행)**. 담당별 카드·DoD·주차 종료 판정 기준. 현재 주차: `W03_0824-0830.md`
+7. `vigilantis-docs/1차 발표까지의 마일스톤 및 MVP 범위 명세.md` — 초기 주차 계획 (※ 범위 서술 일부 구버전: EC2·SG 한정, 런북 2종 예시)
+8. `README.md` — 프로젝트 소개용 (※ 역할 표·오너 주석 구버전)
+9. `vigilantis-docs/기획서/*.docx` — **풀비전 비전 문서(동결)**. 구현 기준 아님.
