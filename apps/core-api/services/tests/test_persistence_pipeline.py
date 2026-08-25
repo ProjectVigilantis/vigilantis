@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.orm.attributes import flag_modified
 
 CORE_API = Path(__file__).resolve().parents[2]
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -333,3 +334,44 @@ def test_nacl_topology_relationship(db):
         }
     )
     assert item.asset_type == AssetType.NACL
+
+
+def test_skip_to_non_skip_clears_reason_code(db, skip_case_inventory):
+    """SKIP→비SKIP 전이 시 update 경로가 skip_reason_code를 None으로 초기화하는지 (#109).
+
+    rule_engine.py 의 `... if contract.skip_reason_code else None` 초기화 줄이 유일한
+    방어 지점. 그 줄을 제거하면 이 테스트가 실패해야 한다(변이 확인).
+    #99 테스트는 동일 입력 2회차라 이 전이 경로를 타지 않았다.
+    """
+    res = persist_inventory(skip_case_inventory, db)
+    run_id = res["collection_run_id"]
+
+    # 1) 1회차 — prod EC2는 SKIP_PROD_PROTECTED
+    run_rule_engine(db, collection_run_id=run_id)
+    db.expire_all()
+    prod = db.execute(
+        select(models.Asset).where(models.Asset.resource_id == "i-prod001")
+    ).scalar_one()
+    ev = db.execute(
+        select(models.RuleEvaluation).where(models.RuleEvaluation.asset_id == prod.asset_id)
+    ).scalar_one()
+    assert ev.verdict == "SKIP"
+    assert ev.skip_reason_code == "SKIP_PROD_PROTECTED"
+
+    # 2) 운영 태그만 dev로 변경(같은 run_id 유지 → RuleEvaluation update 경로). 메트릭은 그대로.
+    new_tags = {**prod.spec.get("tags", {}), "Environment": "dev"}
+    prod.spec = {**prod.spec, "tags": new_tags}
+    flag_modified(prod, "spec")
+    db.flush()
+
+    # 3) 재판정(update 경로) → flush 로 갱신 반영 후 재조회
+    #    (run_rule_engine 의 update 분기는 dirty 만 만들고 flush 하지 않으므로 여기서 flush)
+    run_rule_engine(db, collection_run_id=run_id)
+    db.flush()
+    ev2 = db.execute(
+        select(models.RuleEvaluation).where(models.RuleEvaluation.asset_id == prod.asset_id)
+    ).scalar_one()
+
+    # 4) 전이: 비SKIP + 이전 사유 코드 초기화(None) — 초기화 줄(else None)이 유일 방어
+    assert ev2.verdict == "COST_CANDIDATE"
+    assert ev2.skip_reason_code is None
