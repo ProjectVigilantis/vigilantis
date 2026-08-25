@@ -78,8 +78,8 @@ services:
 
   adminer:
     # 선택 도구(DB 웹 UI) — 기본 up 제외. 필요 시: docker compose --profile tools up
+    image: adminer:6.0.1          # 버전 고정(다른 이미지와 동일 정책, latest 금지)
     profiles: ["tools"]
-    image: adminer:4.8.1          # 버전 고정(다른 이미지와 동일 정책, latest 금지)
     ports:
       - "${ADMINER_PORT:-8080}:8080"
     depends_on:
