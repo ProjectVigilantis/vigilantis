@@ -14,6 +14,11 @@
 #
 # botocore 자신도 AWS_ENDPOINT_URL을 전역 엔드포인트 설정으로 읽는다 — 팩토리를
 # 거치지 않고 만든 클라이언트도 같은 스위치를 따른다는 뜻이라 §3과 어긋나지 않는다.
+# 다만 반대 방향은 성립하지 않는다. botocore는 서비스별 환경변수
+# (AWS_ENDPOINT_URL_EC2 등)와 ~/.aws/config의 endpoint_url·services 섹션도 엔드포인트
+# 설정으로 읽지만 AwsSettings는 이들을 읽지 않는다. 스위치를 껐는데(= 실 AWS) 그런
+# 설정이 남아 있으면 요청이 조용히 테스트 서버로 흘러간다 — 실 AWS 모드에서는
+# 무시하게 한다(_IGNORE_CONFIGURED_ENDPOINTS).
 #
 # 이 모듈은 DB 설정에 의존하지 않는다(config.AwsSettings). 시드·실측 스크립트가
 # DATABASE_URL 없이 도는 것이 그 이유다.
@@ -34,6 +39,11 @@ _BOTO_CONFIG = Config(
     retries={"max_attempts": 5, "mode": "adaptive"},
     user_agent_extra="vigilantis/0.1",
 )
+
+# 실 AWS 모드 전용. 스위치가 꺼졌는데도 남아 있는 다른 엔드포인트 설정(서비스별
+# 환경변수·~/.aws/config)을 botocore가 집지 못하게 한다. LocalStack 모드에서는
+# 붙이지 않는다 — 그쪽은 endpoint_url을 명시로 넘기므로 무시할 대상이 없다.
+_IGNORE_CONFIGURED_ENDPOINTS = Config(ignore_configured_endpoint_urls=True)
 
 
 def endpoint_url() -> str | None:
@@ -77,7 +87,9 @@ def aws_client(service: str, region: str | None = None, **config_overrides: Any)
     endpoint = endpoint_url()
     _ensure_dummy_credentials(endpoint)
 
-    config = _BOTO_CONFIG.merge(Config(**config_overrides)) if config_overrides else _BOTO_CONFIG
+    config = _BOTO_CONFIG if endpoint else _BOTO_CONFIG.merge(_IGNORE_CONFIGURED_ENDPOINTS)
+    if config_overrides:
+        config = config.merge(Config(**config_overrides))
     kwargs: dict[str, Any] = {
         "region_name": region or default_region(),
         "config": config,

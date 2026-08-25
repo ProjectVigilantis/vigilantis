@@ -78,6 +78,54 @@ def test_endpoint_absent_targets_real_aws(settings):
     assert client.meta.endpoint_url.endswith("amazonaws.com")
 
 
+def test_real_aws_mode_ignores_service_specific_endpoint_env(settings, monkeypatch):
+    """스위치를 껐으면 서비스별 엔드포인트 환경변수가 남아 있어도 실 AWS로 가야 한다.
+
+    AwsSettings는 AWS_ENDPOINT_URL 하나만 읽지만 botocore는 AWS_ENDPOINT_URL_EC2 같은
+    서비스별 변수도 읽는다. 막지 않으면 실 AWS 스모크가 조용히 LocalStack을 때린다.
+    """
+    monkeypatch.setenv("AWS_ENDPOINT_URL_EC2", LOCALSTACK)
+    settings(AWS_ENDPOINT_URL="", AWS_REGION="ap-northeast-2")
+    assert aws_client_module.aws_client("ec2").meta.endpoint_url.endswith("amazonaws.com")
+
+
+def test_real_aws_mode_passes_ignore_configured_endpoints_to_boto3(settings, monkeypatch):
+    """~/.aws/config의 endpoint_url·services 섹션도 서비스별 환경변수와 같은 경로다.
+
+    설정 파일은 boto3 기본 세션에 캐시돼 테스트 중 주입이 불안정하므로, 두 경로를
+    한꺼번에 차단하는 인자가 실 AWS 모드에서만 넘어가는지로 검증한다. botocore가
+    클라이언트 생성 시 Config를 재구성하면서 이 플래그를 meta.config에 남기지 않아
+    (엔드포인트 해석에만 쓰고 버린다) 넘기는 쪽에서 확인한다.
+    """
+    captured: dict = {}
+
+    def _capture(service, **kwargs):
+        captured.clear()
+        captured.update(kwargs, service=service)
+        return object()
+
+    monkeypatch.setattr(aws_client_module.boto3, "client", _capture)
+
+    settings(AWS_ENDPOINT_URL="", AWS_REGION="ap-northeast-2")
+    aws_client_module.aws_client("ec2")
+    assert captured["config"].ignore_configured_endpoint_urls is True
+    # 차단 인자를 붙이면서 공통 재시도 설정이 떨어지지 않아야 한다
+    assert captured["config"].retries["mode"] == "adaptive"
+    assert "endpoint_url" not in captured
+
+    settings(AWS_ENDPOINT_URL=LOCALSTACK)
+    aws_client_module.aws_client("ec2")
+    assert not captured["config"].ignore_configured_endpoint_urls
+    assert captured["endpoint_url"] == LOCALSTACK
+
+
+def test_localstack_mode_is_unaffected_by_stray_endpoint_env(settings, monkeypatch):
+    """스위치가 켜져 있으면 팩토리가 넘긴 엔드포인트가 이긴다 — 기존 동작 유지 확인."""
+    monkeypatch.setenv("AWS_ENDPOINT_URL_EC2", "http://localhost:9999")
+    settings(AWS_ENDPOINT_URL=LOCALSTACK)
+    assert aws_client_module.aws_client("ec2").meta.endpoint_url == LOCALSTACK
+
+
 def test_no_module_reads_the_switch_from_the_environment():
     """전환 스위치는 AwsSettings가 읽고 팩토리가 해석한다 — 그 밖에서는 읽지 않는다.
 
