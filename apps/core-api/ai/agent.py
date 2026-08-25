@@ -1,10 +1,11 @@
 # ==============================================================================
 # [파일 설명]  담당: 안성일 (AI / Guardrail)
-# OpenAI GPT-4o 기반 추론기입니다. CoT 3줄 요약과 추천 Runbook ID를 Pydantic
-# Structured Output으로 산출합니다. (LangGraph 도입 여부는 Post-MVP 미확정)
+# LangGraph 도메인 그래프(FinOps·SecOps)의 진입점이 될 파일입니다. 그래프 구조는
+# ADR-0005가 확정했고, 모델 호출은 ai/model_client.py 경계를 경유합니다(Issue #115).
 #
 # [수행해야 할 작업]
-# 1. GPT-4o 호출 및 Pydantic Structured Output 파싱
-# 2. Evidence ID 대조 기반 Decision Trace 생성
-# 3. 추천 Runbook ID + 파라미터를 guardrails 단계로 전달
+# 1. FinOps·SecOps 두 그래프 구성 — 상태를 보관하지 않고 Terminal 결과 1회 반환
+# 2. 입출력은 packages/schemas/agents.py 계약으로만 주고받기
+# 3. 모델 호출은 AIModelClient 주입으로 수행 — OpenAI SDK를 직접 부르지 않음
+# 4. Guardrail·DB 저장·AWS 실행·승인은 그래프 밖 (ADR-0005 설계 원칙 3)
 # ==============================================================================

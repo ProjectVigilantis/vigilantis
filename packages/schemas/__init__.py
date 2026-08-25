@@ -13,6 +13,7 @@ from .assets import (
     MetricName,
     MetricSeries,
     MetricSummary,
+    NaclAsset,
     OpenPort,
     SecurityGroupAsset,
 )
@@ -103,6 +104,7 @@ __all__ = [
     "CollectionRunStatus",
     "domain_of",
     "Ec2Asset",
+    "NaclAsset",
     "EVIDENCE_CONTENT_MODELS",
     "EvidenceContent",
     "EvidenceItem",
