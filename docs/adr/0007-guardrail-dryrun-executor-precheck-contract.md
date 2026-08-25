@@ -1,8 +1,8 @@
 # ADR-0007: 가드레일 4단계 AWS Dry-Run은 executor의 단일 `precheck()` 호출로 판정한다
 
-- **Status**: Proposed — 안성일(AI/Guardrail) 확인 후 Accepted 전환
+- **Status**: Accepted (2026-08-24 — 안성일(AI/Guardrail) 확인 완료, PR #117 승인)
 - **Date**: 2026-08-24
-- **Deciders**: 김세혁(PM/Infra, executor 소유자) 결정, 안성일(AI/Guardrail) 합의 대상
+- **Deciders**: 김세혁(PM/Infra, executor 소유자) 결정, 안성일(AI/Guardrail) 합의 완료
 - **Refs**: #113
 
 ## Context (배경)
@@ -187,7 +187,16 @@ AWS 오류 → 사유 코드 매핑:
 **비용/유의**
 
 - 조회 대체 경로는 **IAM 권한을 검증하지 못한다.** ADR-0006 §4 1행과 같은 한계이며 실 AWS 스모크가 유일한 방어선이다.
-- `ISOLATE`·`UNISOLATE`·`ENABLE_AUTOSCALING`(P2 3종)은 로컬에서 precheck가 항상 `PRECHECK_AWS_ERROR`로 FAIL이며 후보가 `EXECUTABLE`이 되지 못한다. **이것이 ADR-0006 §3을 지킨 결과의 정상 동작이다** — 가드레일·QA의 테스트 픽스처가 이 전제를 알고 있어야 한다.
+- `ISOLATE`·`UNISOLATE`·`ENABLE_AUTOSCALING`(P2 3종)은 로컬에서 precheck가 항상 `PRECHECK_AWS_ERROR`로 FAIL이다. **이것이 ADR-0006 §3을 지킨 결과의 정상 동작이다.** 다만 그 실패가 드러나는 자리는 런북마다 다르므로, 가드레일·QA의 테스트 픽스처는 후보 경로 하나가 아니라 `GuardrailValidationContext`(`packages/schemas/guardrails.py`) 기준으로 전제를 잡아야 한다.
+
+  | 런북 | 로컬 FAIL이 나타나는 문맥 | 그 문맥에서 관측되는 결과 |
+  | --- | --- | --- |
+  | `RUNBOOK_EC2_ISOLATE` | `AI_CANDIDATE` · `AUTO_ISOLATION` | 후보가 `EXECUTABLE`이 되지 못한다 / 사람 승인 없이 시작한 격리가 4단계에서 거절된다 |
+  | `RUNBOOK_EC2_UNISOLATE` | `ROLLBACK_EXECUTION` | 롤백 3종은 AI 후보가 될 수 없으므로(ADR-0004) 후보 경로가 아니라 원클릭 해제 실행이 거절된다 |
+  | `RUNBOOK_EC2_ENABLE_AUTOSCALING` | `AI_CANDIDATE` | 후보가 `EXECUTABLE`이 되지 못한다 |
+
+  `RUNBOOK_EC2_ISOLATE`가 `AUTO_ISOLATION`에서도 쓰이는 근거는 `docs/PROJECT_STATUS.md` §3단계 위험 대응이다 — High `PRE_MITIGATION_0_5S`(0.5초 선차단)와 1분 미응답 `TIMEOUT_ISOLATION_1M`(자동 격리) 둘 다 이 런북을 쓰며, 그 구분은 Execution의 `trigger_source`가 담는다. 즉 로컬에서 "실패가 정상"인 경로는 후보 생성 하나가 아니라 **자동 격리·롤백 실행을 포함한 셋**이다.
+- §1 표의 호출 시점("AI 제안 생성 직후 1회")은 `AI_CANDIDATE` 문맥 기준 서술이다. `AUTO_ISOLATION`·`ROLLBACK_EXECUTION`에는 대응하는 후보 생성 시점이 없으므로(검증 요청이 `candidate_id`가 아니라 `execution_id`를 참조한다) 두 문맥의 호출 시점은 본 ADR에서 확정하지 않는다 — 후속 결정 대상이다.
 - 같은 이유로 §4 표의 elbv2·asg 통과 조건은 실 AWS에서 처음 실행된다. 실 AWS 시연 인프라 조기 준비(P2 방침)가 이 3종의 유일한 검증 경로다.
 - `PRECHECK_PARAM_INVALID`는 #49 이전의 과도기 코드다. typed 파라미터 계약이 확정되면 4단계가 아니라 1단계에서 걸리게 되고, 이 코드는 사용되지 않는다.
 - 승인·실행 시점의 재검증은 본 ADR 범위 밖이다. 제안 생성 시점과 실행 시점 사이에 자원 상태가 바뀔 수 있으며, 그 처리는 가드레일 4단계 밖에서 별도로 결정한다.
@@ -199,5 +208,5 @@ AWS 오류 → 사유 코드 매핑:
 - 선행 결정: [ADR-0002](0002-runbook-whitelist-mvp-scope.md)(본편 7종) · [ADR-0004](0004-rollback-runbook-whitelist-registration.md)(롤백 3종·공통 정책) · [ADR-0006](0006-localstack-team-standard-env.md) §3(전환 스위치 규약)·§4(검증 한계)
 - 확정 규격: `vigilantis-docs/런북 명세서.md` — `parameters_schema` · `dry_run_supported`
 - 현황 기준: `docs/PROJECT_STATUS.md` — 3주차 종료 판정 기준 ⓐ, 구현 우선순위 P0/P1/P2
-- 후속: #49(런북별 typed 파라미터 계약) · 승인·실행 시점 재검증 정책 · 거절 이후 알림·에스컬레이션
+- 후속: #49(런북별 typed 파라미터 계약) · `AUTO_ISOLATION`·`ROLLBACK_EXECUTION` 문맥의 precheck 호출 시점 · 승인·실행 시점 재검증 정책 · 거절 이후 알림·에스컬레이션
 - 영향 범위: `packages/schemas/precheck.py`(신규), `apps/core-api/services/aws/executor.py`, `apps/core-api/ai/guardrails.py`, `scripts/probe_dryrun.py`(신규), `docs/adr/0006-localstack-team-standard-env.md`
