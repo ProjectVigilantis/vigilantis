@@ -3,7 +3,7 @@
 #   db         : PostgreSQL 16
 #   migrate    : DB 스키마 적용(alembic upgrade head) — 성공 종료 후 api 기동
 #   api        : Core API (단일 FastAPI 백엔드)
-#   adminer    : DB 웹 관리 UI (http://localhost:8080)
+#   adminer    : DB 웹 관리 UI (선택 도구, --profile tools; 기본 ${ADMINER_PORT:-8080})
 #   localstack : 가짜 AWS (팀 표준 개발 환경 — ADR-0006, http://localhost:4566)
 # 사용: cp .env.example .env  →  docker compose up
 #       → 시드 주입: scripts/seed_localstack.py (파일 docstring 참고)
@@ -77,9 +77,11 @@ services:
       - ./packages:/app/packages
 
   adminer:
-    image: adminer:latest
+    # 선택 도구(DB 웹 UI) — 기본 up 제외. 필요 시: docker compose --profile tools up
+    image: adminer:6.0.1          # 버전 고정(다른 이미지와 동일 정책, latest 금지)
+    profiles: ["tools"]
     ports:
-      - "8080:8080"
+      - "${ADMINER_PORT:-8080}:8080"
     depends_on:
       - db
 
