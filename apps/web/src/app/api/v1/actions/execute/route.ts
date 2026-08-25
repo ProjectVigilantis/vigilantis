@@ -45,27 +45,6 @@ const ORIGIN_STATUS_AFTER_ROLLBACK: Record<RollbackRunbookId, ExecutionStatus> =
 };
 
 /**
- * 새 Execution이 관제자에게 열어 주는 복구 조치(롤백 3종만).
- * 짝은 ADR-0004 표·SSOT §범위(P0 RIGHTSIZING+REVERT_SIZE, P1 SG_DELETE_ISOLATED+SG_RECREATE) 기준.
- * NACL_ADD_DENY의 해제(NACL_RESTORE)는 롤백이 아니라 본편 조치라 여기 오지 않는다(recommendations 경로).
- */
-const RECOVERY_BY_RUNBOOK: Partial<Record<RunbookId, RollbackRunbookId[]>> = {
-  RUNBOOK_EC2_ISOLATE: ['RUNBOOK_EC2_UNISOLATE'],
-  RUNBOOK_SG_DELETE_ISOLATED: ['RUNBOOK_SG_RECREATE'],
-  RUNBOOK_EC2_RIGHTSIZING: ['RUNBOOK_EC2_REVERT_SIZE'],
-};
-
-/**
- * 복구를 열어 줄 수 있는 원본 상태 — AWS가 실제로 변경된 뒤여야 되돌릴 게 있다.
- * FAILED("AWS 변경 없이 실패")·IN_PROGRESS(아직 안 끝남)에는 복구 조치를 노출하지 않는다.
- * ROLLBACK_INITIATED는 자동 원복이 개시된 상태라 REVERT_SIZE 경로가 열려 있어야 한다.
- */
-const RECOVERABLE_ORIGIN_STATUSES = [
-  'SUCCESS',
-  'ROLLBACK_INITIATED',
-] as const satisfies readonly ExecutionStatus[];
-
-/**
  * mock 전용 결과 오버라이드(`?mock_result=`) 허용값.
  * ROLLED_BACK·ROLLBACK_FAILED는 원본 Execution 전용이라 새 실행에 강제할 수 없고,
  * 롤백 자식 Execution은 IN_PROGRESS → SUCCESS | FAILED만 쓴다(actions.py 계약).
@@ -202,11 +181,8 @@ export async function POST(request: NextRequest) {
     execution_id: `exec-mock-${crypto.randomUUID().slice(0, 8)}`,
     runbook_id: parsed.runbook_id,
     status,
-    available_recovery_runbook_ids: (
-      RECOVERABLE_ORIGIN_STATUSES as readonly ExecutionStatus[]
-    ).includes(status)
-      ? (RECOVERY_BY_RUNBOOK[parsed.runbook_id] ?? [])
-      : [],
+    // 복구 목록은 저장하지 않는다 — incidentView가 조회마다 파생한다(PR #158 리뷰 포인트 4).
+    available_recovery_runbook_ids: [],
     updated_at: updatedAt,
   };
   executionsByIdempotencyKey.set(parsed.idempotency_key, {
