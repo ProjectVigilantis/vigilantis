@@ -1,5 +1,7 @@
 // INC-002 인시던트 상세 본문 — 화면설계서 v1.5 §4.5. A 변형(FINOPS) 기준으로 세운 공통 골격입니다.
 
+import Link from 'next/link';
+
 import { CopyButton } from '@/components/copy-button';
 import { EmptyState } from '@/components/empty-state';
 import { StatusBadge } from '@/components/status-badge';
@@ -72,9 +74,18 @@ export function IncidentDetail({
         <Card className="gap-1.5 p-4">
           <div className="flex flex-wrap items-center gap-2">
             {subject ? <StatusBadge field="asset_type" value={subject.asset_type} /> : null}
-            <span className="font-medium">
-              {subject ? (subject.name ?? subject.resource_id) : '수집 목록에 없는 자산'}
-            </span>
+            {/* AST-002는 Drawer라 자체 URL이 없다 — 목록 화면에 ARN을 넘겨 그 항목을 연 채로 진입한다(§4.5 액션).
+                수집 목록에 없는 자산이면 열 상세가 없으므로 링크를 걸지 않는다. */}
+            {subject ? (
+              <Link
+                href={`/assets?asset=${encodeURIComponent(subject.arn)}`}
+                className="hover:text-primary font-medium underline-offset-4 hover:underline"
+              >
+                {subject.name ?? subject.resource_id}
+              </Link>
+            ) : (
+              <span className="text-muted-foreground font-medium">수집 목록에 없는 자산</span>
+            )}
           </div>
           <span className="flex items-center gap-1">
             <code className="text-muted-foreground font-mono text-xs break-all">

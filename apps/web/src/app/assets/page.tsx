@@ -11,8 +11,12 @@ import type { IncidentListItem } from '@/types/api';
  * 인시던트는 자산 계약에 없는 값이라 목록 API를 한 번 더 부른다(`subject_arn` 역조인, §4.2·§4.3).
  * 실패해도 자산 화면은 떠야 하므로 역조인 결과만 비우되, **실패와 0건은 구분해서** 넘긴다(null = 조회 실패).
  * 합치면 관제 화면이 "연결된 인시던트 없음"으로 조회 실패를 덮어버린다(PR #137 리뷰).
+ *
+ * `?asset=<arn>`은 INC-002 대상 자산에서 넘어오는 딥링크다(§4.5 액션). AST-002는 Drawer라
+ * 자체 URL이 없어, 목록 화면이 그 항목을 고른 상태로 열어 준다.
  */
-export default async function AssetsPage() {
+export default async function AssetsPage({ searchParams }: PageProps<'/assets'>) {
+  const { asset } = await searchParams;
   const [assets, incidents] = await Promise.all([
     getAssets(),
     getIncidents().catch(() => null),
@@ -29,7 +33,11 @@ export default async function AssetsPage() {
   return (
     <>
       <h1 className="mb-4 text-lg font-semibold">자산 관제</h1>
-      <AssetsView data={assets} incidentsByArn={incidentsByArn} />
+      <AssetsView
+        data={assets}
+        incidentsByArn={incidentsByArn}
+        openArn={typeof asset === 'string' ? asset : undefined}
+      />
     </>
   );
 }

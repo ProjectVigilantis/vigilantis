@@ -2,16 +2,18 @@
 
 // AST-002 자산 상세 패널 — 화면설계서 v1.5 §4.3. 별도 API가 없어 AST-001이 받은 items[] 단건만 씁니다.
 
+import Link from 'next/link';
+
 import { CopyButton } from '@/components/copy-button';
 import { HealthArea, Row, VerdictArea } from '@/components/assets/asset-card';
 import { EnumBadge, StatusBadge } from '@/components/status-badge';
 import { Separator } from '@/components/ui/separator';
 import {
   ASSET_TYPE_LABELS,
-  CATEGORY_LABELS,
   NO_VALUE,
   SPEC_KEY_LABELS,
   assetStateEntry,
+  incidentTitle,
 } from '@/lib/enum-labels';
 import {
   Sheet,
@@ -66,13 +68,6 @@ function SpecValue({ value, threat }: { value: unknown; threat: boolean }) {
     );
   }
   return <span className={typeof value === 'number' ? 'tabular-nums' : undefined}>{String(value)}</span>;
-}
-
-/** title은 nullable이다 — null이면 유형 표시명 + ARN 축약으로 대체한다(§4.4 계약). */
-function incidentTitle(incident: IncidentListItem): string {
-  if (incident.title !== null) return incident.title;
-  const label = CATEGORY_LABELS[incident.category]?.label ?? incident.category;
-  return `${label} · ${incident.subject_arn.split(/[:/]/).pop() ?? incident.subject_arn}`;
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
@@ -170,18 +165,19 @@ export function AssetDetail({
                 ) : incidents.length === 0 ? (
                   <p className="text-muted-foreground text-sm">연결된 인시던트가 없습니다.</p>
                 ) : (
-                  // ⏳ 행 클릭 → INC-002는 상세 화면이 생긴 뒤 연결한다(§4.3 액션). 지금 링크를 걸면 404다.
+                  // 행 클릭 → INC-002(§4.3 액션).
                   incidents.map((incident) => (
-                    <div
+                    <Link
                       key={incident.incident_id}
-                      className="flex flex-col gap-1.5 rounded-md border p-3"
+                      href={`/incidents/${encodeURIComponent(incident.incident_id)}`}
+                      className="hover:border-ring focus-visible:ring-ring/50 flex flex-col gap-1.5 rounded-md border p-3 transition-colors focus-visible:ring-2 focus-visible:outline-none"
                     >
                       <div className="flex flex-wrap items-center gap-1">
                         <StatusBadge field="category" value={incident.category} />
                         <StatusBadge field="incident_status" value={incident.status} />
                       </div>
                       <p className="text-sm">{incidentTitle(incident)}</p>
-                    </div>
+                    </Link>
                   ))
                 )}
               </Section>

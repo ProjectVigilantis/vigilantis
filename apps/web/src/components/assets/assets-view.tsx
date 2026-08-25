@@ -51,6 +51,7 @@ function Select({
 export function AssetsView({
   data,
   incidentsByArn,
+  openArn,
 }: {
   data: AssetsResponse;
   /**
@@ -58,12 +59,16 @@ export function AssetsView({
    * `null`은 **조회 실패**다. 0건과 구분해서 화면에 그대로 전달한다.
    */
   incidentsByArn: Record<string, IncidentListItem[]> | null;
+  /** INC-002에서 넘어온 딥링크 대상 ARN(§4.5 액션). 목록에 없으면 무시한다. */
+  openArn?: string;
 }) {
   const [assetType, setAssetType] = useState<string>(ALL);
   // AST-002는 이 목록이 이미 받은 단건을 그대로 넘겨 연다 — 신규 페치 없음(§4.3).
   // 닫아도 selected를 비우지 않는다 — 닫는 애니메이션 도중 본문이 사라지면 빈 패널이 미끄러져 나간다.
-  const [selected, setSelected] = useState<AssetItem | null>(null);
-  const [detailOpen, setDetailOpen] = useState(false);
+  // 딥링크는 첫 렌더에만 반영한다 — 이후 열고 닫는 것은 사용자 조작이 정한다.
+  const linked = openArn ? (data.items.find((a) => a.arn === openArn) ?? null) : null;
+  const [selected, setSelected] = useState<AssetItem | null>(linked);
+  const [detailOpen, setDetailOpen] = useState(linked !== null);
   const [region, setRegion] = useState<string>(ALL);
   const [wasteOnly, setWasteOnly] = useState(false);
   const [primaryOnly, setPrimaryOnly] = useState(false);
