@@ -53,8 +53,11 @@ export function AssetsView({
   incidentsByArn,
 }: {
   data: AssetsResponse;
-  /** 인시던트는 자산 계약에 없다 — 목록 API의 `subject_arn` 역조인 결과다(§4.2·§4.3). */
-  incidentsByArn: Record<string, IncidentListItem[]>;
+  /**
+   * 인시던트는 자산 계약에 없다 — 목록 API의 `subject_arn` 역조인 결과다(§4.2·§4.3).
+   * `null`은 **조회 실패**다. 0건과 구분해서 화면에 그대로 전달한다.
+   */
+  incidentsByArn: Record<string, IncidentListItem[]> | null;
 }) {
   const [assetType, setAssetType] = useState<string>(ALL);
   // AST-002는 이 목록이 이미 받은 단건을 그대로 넘겨 연다 — 신규 페치 없음(§4.3).
@@ -137,7 +140,7 @@ export function AssetsView({
               <AssetCard
                 key={asset.arn}
                 asset={asset}
-                incidentCount={(incidentsByArn[asset.arn] ?? []).length}
+                incidentCount={incidentsByArn === null ? null : (incidentsByArn[asset.arn] ?? []).length}
                 onSelect={(a) => {
                   setSelected(a);
                   setDetailOpen(true);
@@ -157,7 +160,9 @@ export function AssetsView({
 
       <AssetDetail
         asset={selected}
-        incidents={selected ? (incidentsByArn[selected.arn] ?? []) : []}
+        incidents={
+          incidentsByArn === null ? null : selected ? (incidentsByArn[selected.arn] ?? []) : []
+        }
         open={detailOpen}
         onOpenChange={setDetailOpen}
       />

@@ -27,19 +27,22 @@ export function VerdictArea({ asset }: { asset: AssetItem }) {
   );
 }
 
+/** 값을 못 받은 자리 — `—` + `확인 불가`. 값이 0인 것과 다르다는 표시다(§3.3). */
+export function UnknownValue() {
+  return (
+    <span className="flex items-center gap-1.5">
+      <span className="text-muted-foreground tabular-nums">{NO_VALUE}</span>
+      <EnumBadge entry={{ label: '확인 불가', tone: 'gray' }} />
+    </span>
+  );
+}
+
 /**
  * 헬스는 EC2 전용 0~100 정수다(계약). 그 외 6종은 항상 null이므로 게이지를 0으로
  * 그리지 않고 `—` + `확인 불가`로 둔다(§3.3).
  */
 export function HealthArea({ score }: { score: number | null }) {
-  if (score === null) {
-    return (
-      <span className="flex items-center gap-1.5">
-        <span className="text-muted-foreground tabular-nums">{NO_VALUE}</span>
-        <EnumBadge entry={{ label: '확인 불가', tone: 'gray' }} />
-      </span>
-    );
-  }
+  if (score === null) return <UnknownValue />;
   return <span className="text-foreground tabular-nums">{score}</span>;
 }
 
@@ -58,7 +61,8 @@ export function AssetCard({
   onSelect,
 }: {
   asset: AssetItem;
-  incidentCount: number;
+  /** `null`은 조회 실패다 — 0건과 같은 자리에 그리지 않는다(PR #137 리뷰). */
+  incidentCount: number | null;
   onSelect?: (asset: AssetItem) => void;
 }) {
   const state = assetStateEntry(asset);
@@ -111,7 +115,9 @@ export function AssetCard({
           <HealthArea score={asset.health_score} />
         </Row>
         <Row label="인시던트">
-          {incidentCount > 0 ? (
+          {incidentCount === null ? (
+            <UnknownValue />
+          ) : incidentCount > 0 ? (
             <span className="text-foreground">{incidentCount}건</span>
           ) : (
             <span className="text-muted-foreground">{NO_VALUE}</span>

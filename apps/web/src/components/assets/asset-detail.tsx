@@ -96,8 +96,8 @@ export function AssetDetail({
    * 빈 채로 미끄러져 나가므로, 호출부는 다음 선택 전까지 마지막 자산을 그대로 둔다.
    */
   asset: AssetItem | null;
-  /** 목록 API의 `subject_arn` 역조인 결과(§3.3). */
-  incidents: IncidentListItem[];
+  /** 목록 API의 `subject_arn` 역조인 결과(§3.3). `null`은 조회 실패 — 0건과 구분한다. */
+  incidents: IncidentListItem[] | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
@@ -162,7 +162,12 @@ export function AssetDetail({
             <Separator />
             <div className="p-4">
               <Section title="연결된 인시던트">
-                {incidents.length === 0 ? (
+                {incidents === null ? (
+                  // 조회 실패를 "없습니다"로 적으면 관제자가 0건으로 읽는다 — 확인 못 한 상태로 남긴다.
+                  <p className="text-muted-foreground text-sm">
+                    인시던트를 불러오지 못했습니다. 새로고침하면 다시 조회합니다.
+                  </p>
+                ) : incidents.length === 0 ? (
                   <p className="text-muted-foreground text-sm">연결된 인시던트가 없습니다.</p>
                 ) : (
                   // ⏳ 행 클릭 → INC-002는 상세 화면이 생긴 뒤 연결한다(§4.3 액션). 지금 링크를 걸면 404다.
