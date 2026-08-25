@@ -159,7 +159,7 @@ def test_detail_assembles_execution_summaries(client_pg, db):
             "execution_id": execution.execution_id,
             "runbook_id": "RUNBOOK_EC2_ISOLATE",
             "status": "SUCCESS",
-            # 복구 가능 목록 구성은 조치 실행 작업으로 유예 — 조회 단계는 빈 목록
+            # 복구 가능 목록 구성은 Issue #126으로 유예 — 조회 단계는 빈 목록
             "available_recovery_runbook_ids": [],
             "updated_at": "2026-08-19T03:02:00Z",
         }

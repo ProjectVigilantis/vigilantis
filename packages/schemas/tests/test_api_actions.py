@@ -91,6 +91,14 @@ def test_request_rejects_empty_identifiers(over):
         ExecuteActionRequest.model_validate(make_request(**over))
 
 
+def test_request_bounds_idempotency_key_to_column_width():
+    # 상한 128 = action_executions.idempotency_key 컬럼 폭. 계약이 막지 않으면
+    # 검증을 통과한 값이 저장 시점에 깨져 500이 된다 (Issue #116)
+    ExecuteActionRequest.model_validate(make_request(idempotency_key="k" * 128))
+    with pytest.raises(ValidationError):
+        ExecuteActionRequest.model_validate(make_request(idempotency_key="k" * 129))
+
+
 @pytest.mark.parametrize("status", sorted(CONTRACT_EXECUTION_STATUSES))
 def test_response_roundtrip_all_statuses(status):
     resp = ExecuteActionResponse.model_validate({

@@ -68,12 +68,12 @@ export function ErrorState({
     <div
       role="alert"
       className={cn(
-        'flex flex-col gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm',
+        'flex flex-col gap-2 rounded-lg border border-danger/30 bg-danger/5 p-4 text-sm',
         layout === 'page' && 'items-center py-12 text-center',
         className,
       )}
     >
-      <AlertTriangle aria-hidden className="size-4 text-destructive" />
+      <AlertTriangle aria-hidden className="size-4 text-danger" />
       {/* error.message를 그대로 표시한다 — 화면이 문구를 다시 쓰지 않는다(4.9) */}
       <p className="font-medium text-foreground">{message}</p>
       {preset.note ? <p className="text-muted-foreground">{preset.note}</p> : null}
