@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from config import get_collector_settings
 from schemas.assets import (
     AssetInventory,
+    EbsAsset,
     Ec2Asset,
     MetricName,
     MetricSeries,
@@ -173,6 +174,7 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
     sgs_raw = ec2.describe_security_groups()["SecurityGroups"]
     enis_raw = ec2.describe_network_interfaces()["NetworkInterfaces"]
     nacls_raw = ec2.describe_network_acls()["NetworkAcls"]
+    volumes_raw = ec2.describe_volumes()["Volumes"]
     used = _used_sg_ids(instances_raw, enis_raw)
 
     end = datetime.now(timezone.utc)
@@ -232,6 +234,23 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
         for n in nacls_raw
     ]
 
+    ebs_assets = [
+        EbsAsset(
+            arn=_arn("volume", v["VolumeId"], region, account_id),
+            volume_id=v["VolumeId"],
+            region=region,
+            volume_type=v.get("VolumeType"),
+            size_gib=v.get("Size"),
+            availability_zone=v.get("AvailabilityZone"),
+            encrypted=v.get("Encrypted"),
+            state=v.get("State"),
+            attached_instance_ids=[
+                att["InstanceId"] for att in v.get("Attachments", []) if att.get("InstanceId")
+            ],
+        )
+        for v in volumes_raw
+    ]
+
     return AssetInventory(
         account_id=account_id,
         region=region,
@@ -241,6 +260,7 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
         ec2_instances=ec2_assets,
         security_groups=sg_assets,
         nacls=nacl_assets,
+        ebs_volumes=ebs_assets,
     )
 
 
@@ -277,7 +297,8 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
     ec2_count = len(inv.ec2_instances)
     sg_count = len(inv.security_groups)
     nacl_count = len(inv.nacls)
-    total = ec2_count + sg_count + nacl_count
+    ebs_count = len(inv.ebs_volumes)
+    total = ec2_count + sg_count + nacl_count + ebs_count
 
     # subnet → NACL ARN (EC2→NACL PROTECTED_BY 파생용)
     subnet_to_nacl = {
@@ -285,6 +306,12 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
         for n in inv.nacls
         for subnet_id in n.associated_subnet_ids
     }
+
+    # instance_id → [Volume ARN] (EC2→EBS ATTACHED_TO 파생용)
+    instance_to_volumes: dict[str, list[str]] = {}
+    for v in inv.ebs_volumes:
+        for iid in v.attached_instance_ids:
+            instance_to_volumes.setdefault(iid, []).append(v.arn)
 
     window_end = inv.collected_at
     window_start = window_end - timedelta(days=inv.lookback_days)
@@ -321,7 +348,7 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
             window_end=window_end,
             collected_at=inv.collected_at,
         )
-        # SG(SECURED_BY) + NACL(PROTECTED_BY) 를 한 번에 교체(replace 는 덮어쓰기)
+        # SG(SECURED_BY) + NACL(PROTECTED_BY) + EBS(ATTACHED_TO) 를 한 번에 교체(replace 는 덮어쓰기)
         rel_items = [
             (RelationType.SECURED_BY, f"arn:aws:ec2:{inv.region}:{inv.account_id}:security-group/{sg_id}")
             for sg_id in a.security_group_ids
@@ -329,6 +356,8 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
         nacl_arn = subnet_to_nacl.get(a.subnet_id)
         if nacl_arn:
             rel_items.append((RelationType.PROTECTED_BY, nacl_arn))
+        for vol_arn in instance_to_volumes.get(a.instance_id, []):
+            rel_items.append((RelationType.ATTACHED_TO, vol_arn))
         if rel_items:
             assets_repo.replace_relationships(
                 db,
@@ -380,6 +409,29 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
             state=None,
         )
 
+    # 4. EBS 적재 (판정 대상 — verdict/status 는 rule_engine 이 매긴다)
+    for v in inv.ebs_volumes:
+        ebs_spec = {
+            "volume_type": v.volume_type,
+            "size_gib": v.size_gib,
+            "availability_zone": v.availability_zone,
+            "encrypted": v.encrypted,
+            "attached_instance_ids": v.attached_instance_ids,
+        }
+        assets_repo.upsert_asset(
+            db,
+            arn=v.arn,
+            asset_type=AssetType.EBS,
+            resource_id=v.volume_id,
+            account_id=inv.account_id,
+            region=inv.region,
+            spec=ebs_spec,
+            collection_run_id=collection_run_id,
+            collected_at=inv.collected_at,
+            name=None,
+            state=v.state,
+        )
+
     if started_own_run:
         assets_repo.finish_collection_run(
             db,
@@ -394,6 +446,7 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
         "ec2_count": ec2_count,
         "sg_count": sg_count,
         "nacl_count": nacl_count,
+        "ebs_count": ebs_count,
         "total": total,
     }
 

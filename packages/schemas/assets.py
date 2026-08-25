@@ -106,6 +106,26 @@ class NaclAsset(BaseModel):
     )
 
 
+class EbsAsset(BaseModel):
+    """EBS Volume. 토폴로지 EC2→EBS(ATTACHED_TO) 산출용이자 미부착 볼륨 정리 판정 대상.
+
+    NACL 등과 달리 EBS 는 Rule 판정 대상(`_RULE_TARGET_TYPES`)이라, 미부착(=attached_instance_ids
+    비어있음)이면 rule_engine 이 UNUSED, 부착이면 SKIP_ACTIVE 로 판정한다.
+    """
+    asset_type: AssetType = Field(default=AssetType.EBS, frozen=True)
+    arn: str = Field(..., description="Volume ARN (안정 키)")
+    volume_id: str = Field(..., description="vol-xxxx")
+    region: str = Field(..., description="리전")
+    volume_type: Optional[str] = Field(None, description="gp3/gp2/io1 등")
+    size_gib: Optional[int] = Field(None, description="크기(GiB)")
+    availability_zone: Optional[str] = None
+    encrypted: Optional[bool] = None
+    state: Optional[str] = Field(None, description="available(미부착)/in-use 등")
+    attached_instance_ids: list[str] = Field(
+        default_factory=list, description="부착된 인스턴스 목록. 비어있으면 미사용(UNUSED) 후보"
+    )
+
+
 class AssetInventory(BaseModel):
     """한 리전 1회 수집 결과. rule_engine 파이프라인의 입력 단위."""
     account_id: str = Field(..., description="AWS 계정 ID")
@@ -117,6 +137,7 @@ class AssetInventory(BaseModel):
     ec2_instances: list[Ec2Asset] = Field(default_factory=list)
     security_groups: list[SecurityGroupAsset] = Field(default_factory=list)
     nacls: list[NaclAsset] = Field(default_factory=list)
+    ebs_volumes: list[EbsAsset] = Field(default_factory=list)
 
     @computed_field  # type: ignore[prop-decorator]
     @property

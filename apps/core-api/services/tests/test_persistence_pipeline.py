@@ -26,6 +26,7 @@ from db import models  # noqa: E402
 from schemas.api.assets import AssetItem, AssetType  # noqa: E402
 from schemas.assets import (  # noqa: E402
     AssetInventory,
+    EbsAsset,
     Ec2Asset,
     MetricSummary,
     NaclAsset,
@@ -378,3 +379,99 @@ def test_skip_to_non_skip_clears_reason_code(db, skip_case_inventory):
     # 4) 전이: 비SKIP + 이전 사유 코드 초기화(None) — 초기화 줄(else None)이 유일 방어
     assert ev2.verdict == "COST_CANDIDATE"
     assert ev2.skip_reason_code is None
+
+
+def test_ebs_topology_and_verdict(db):
+    """EBS 자산 적재 + EC2→EBS(ATTACHED_TO) 관계 + 판정(#149).
+
+    - 부착 볼륨: rule_engine 이 SKIP/SKIP_ACTIVE, EC2 에 ATTACHED_TO 관계 산출
+    - 미부착 볼륨: UNUSED(정리 후보) — EBS 는 NACL 과 달리 판정 대상(_RULE_TARGET_TYPES)
+    """
+    now = datetime.now(timezone.utc)
+    vol_attached = "arn:aws:ec2:ap-northeast-2:123456789012:volume/vol-att1"
+    vol_free = "arn:aws:ec2:ap-northeast-2:123456789012:volume/vol-free1"
+    inv = AssetInventory(
+        account_id="123456789012", region="ap-northeast-2", mode="localstack",
+        collected_at=now, lookback_days=14, period_seconds=3600,
+        ec2_instances=[
+            Ec2Asset(
+                arn="arn:aws:ec2:ap-northeast-2:123456789012:instance/i-ebs1",
+                instance_id="i-ebs1", name="ebs-ec2", instance_type="t3.large",
+                state="running", region="ap-northeast-2", tags={"Environment": "dev"},
+                metric_summary=MetricSummary(cpu_datapoints=336, cpu_avg=1.5, cpu_max=3.0),
+            )
+        ],
+        ebs_volumes=[
+            EbsAsset(
+                arn=vol_attached, volume_id="vol-att1", region="ap-northeast-2",
+                volume_type="gp3", size_gib=20, availability_zone="ap-northeast-2a",
+                encrypted=True, state="in-use", attached_instance_ids=["i-ebs1"],
+            ),
+            EbsAsset(
+                arn=vol_free, volume_id="vol-free1", region="ap-northeast-2",
+                volume_type="gp2", size_gib=8, availability_zone="ap-northeast-2a",
+                encrypted=False, state="available", attached_instance_ids=[],
+            ),
+        ],
+    )
+    res = persist_inventory(inv, db)
+    assert res["ebs_count"] == 2
+    assert res["total"] == 3  # EC2 1 + EBS 2
+
+    run_id = res["collection_run_id"]
+
+    # EBS 자산 적재 + spec
+    att = db.execute(
+        select(models.Asset).where(models.Asset.resource_id == "vol-att1")
+    ).scalar_one()
+    assert att.asset_type == AssetType.EBS
+    assert att.spec["volume_type"] == "gp3"
+    assert att.spec["size_gib"] == 20
+    assert att.spec["attached_instance_ids"] == ["i-ebs1"]
+
+    # EC2→EBS ATTACHED_TO 관계 (부착 볼륨만)
+    ec2 = db.execute(
+        select(models.Asset).where(models.Asset.asset_type == AssetType.EC2)
+    ).scalar_one()
+    rels = db.execute(
+        select(models.AssetRelationship).where(
+            models.AssetRelationship.source_asset_id == ec2.asset_id
+        )
+    ).scalars().all()
+    pairs = {(_rt(r), r.target_arn) for r in rels}
+    assert ("ATTACHED_TO", vol_attached) in pairs
+    assert ("ATTACHED_TO", vol_free) not in pairs
+
+    # 판정: 미부착 → UNUSED, 부착 → SKIP/SKIP_ACTIVE
+    run_rule_engine(db, collection_run_id=run_id)
+    db.flush()
+
+    free = db.execute(
+        select(models.Asset).where(models.Asset.resource_id == "vol-free1")
+    ).scalar_one()
+    ev_free = db.execute(
+        select(models.RuleEvaluation).where(models.RuleEvaluation.asset_id == free.asset_id)
+    ).scalar_one()
+    assert ev_free.evaluation_status == "COMPLETED"
+    assert ev_free.verdict == "UNUSED"
+    assert ev_free.skip_reason_code is None
+    assert ev_free.health_score is None  # EBS 는 health_score 없음
+
+    ev_att = db.execute(
+        select(models.RuleEvaluation).where(models.RuleEvaluation.asset_id == att.asset_id)
+    ).scalar_one()
+    assert ev_att.verdict == "SKIP"
+    assert ev_att.skip_reason_code == "SKIP_ACTIVE"
+
+    # AssetItem(EBS) 계약 라운드트립 — EbsSpec + RUNBOOK_SUPPORT + COMPLETED/UNUSED
+    item = AssetItem.model_validate(
+        {
+            "arn": free.arn, "resource_id": free.resource_id, "asset_type": free.asset_type,
+            "resource_role": "RUNBOOK_SUPPORT", "account_id": free.account_id,
+            "region": free.region, "state": free.state, "spec": free.spec, "relationships": [],
+            "evaluation_status": ev_free.evaluation_status, "verdict": ev_free.verdict,
+            "skip_reason_code": ev_free.skip_reason_code, "collected_at": free.collected_at,
+        }
+    )
+    assert item.asset_type == AssetType.EBS
+    assert item.verdict.value == "UNUSED"
