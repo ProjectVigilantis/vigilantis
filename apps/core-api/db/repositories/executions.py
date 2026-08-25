@@ -84,6 +84,30 @@ def list_by_incident(db: Session, incident_id: str) -> list[models.ActionExecuti
     )
 
 
+def lock_execution(db: Session, execution_id: str) -> Optional[models.ActionExecution]:
+    """행 잠금 후 최신 값으로 다시 읽는다 — 잠그기 전에 읽은 값은 이미 낡았을 수 있다.
+    관제자 복구 접수가 원본 실행을 선점하는 관문이다 (Issue #126)."""
+    return db.execute(
+        select(models.ActionExecution)
+        .where(models.ActionExecution.execution_id == execution_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+
+
+def list_rollback_children(
+    db: Session, parent_execution_id: str
+) -> list[models.ActionExecution]:
+    """원본을 되돌리려 만든 자식 실행. 1건이라도 있으면 복구는 이미 접수된 것이다."""
+    return list(
+        db.execute(
+            select(models.ActionExecution).where(
+                models.ActionExecution.parent_execution_id == parent_execution_id
+            )
+        ).scalars()
+    )
+
+
 def list_non_terminal(db: Session) -> list[models.ActionExecution]:
     """Dispatcher 회수 스캔 — 부분 인덱스(ix_action_executions_non_terminal) 대상."""
     return list(
