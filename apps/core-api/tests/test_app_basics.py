@@ -42,10 +42,13 @@ def test_invalid_query_enum_returns_422_envelope(client):
     assert "NOPE" not in body["error"]["message"]
 
 
-def test_malformed_incident_id_returns_422_envelope(client):
+def test_malformed_incident_id_returns_404_envelope(client):
+    # 계약이 UUID를 요구하지 않으므로 형식 오류는 계약 위반이 아니라 없는 인시던트다.
+    # POST /actions/execute와 같은 코드로 답한다 (PR #119 리뷰).
+    # 정규화 실패는 조회 전에 걸러져 DB 접속이 없다 — DB 비의존 픽스처로 검증한다
     response = client.get("/api/v1/incidents/not-a-uuid")
-    assert response.status_code == 422
-    assert response.json()["error"]["code"] == "REQUEST_VALIDATION_FAILED"
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "INCIDENT_NOT_FOUND"
 
 
 def test_unhandled_exception_returns_500_envelope(client, capsys):

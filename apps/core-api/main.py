@@ -5,8 +5,7 @@
 #   - 오류는 exceptions의 공통 봉투로, 접근 로그는 request_context 미들웨어가
 #     구조화 로그(logging_config)로 남긴다.
 #   - 실시간 전송(realtime.RealtimeManager)은 앱 수명주기에 묶어 기동·종료한다.
-#   - actions(조치 실행) 라우터는 후속 작업에서, Scheduler(주기 수집) 기동은
-#     수집·판정 연결 작업(#67)에서 배선한다.
+#   - Scheduler(주기 수집) 기동은 수집·판정 연결 작업(#67)에서 연결한다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -36,6 +35,7 @@ from config import get_settings  # noqa: E402
 from exceptions import register_error_handlers, unexpected_error_response  # noqa: E402
 from logging_config import request_id_var, setup_logging  # noqa: E402
 from realtime import RealtimeManager  # noqa: E402
+from routers import actions as actions_router  # noqa: E402
 from routers import assets as assets_router  # noqa: E402
 from routers import incidents as incidents_router  # noqa: E402
 from routers import ws as ws_router  # noqa: E402
@@ -105,6 +105,7 @@ def create_app() -> FastAPI:
     )
 
     register_error_handlers(app)
+    app.include_router(actions_router.router)
     app.include_router(assets_router.router)
     app.include_router(incidents_router.router)
     app.include_router(ws_router.router)
