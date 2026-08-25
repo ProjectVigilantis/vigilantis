@@ -4,7 +4,7 @@
 > 다른 문서(README, 기획서, MVP 범위 명세 등)와 충돌하면 **이 문서가 이긴다.**
 > 범위·API 계약·역할이 바뀌는 PR은 이 문서 갱신을 포함할 것.
 >
-> **최종 갱신**: 2026-08-25 (김세혁)
+> **최종 갱신**: 2026-08-25 (박지현)
 
 ---
 
@@ -26,9 +26,9 @@
   - **김세혁**: ~~Dry-Run 호출 시그니처를 안성일과 문서로 합의(8/26 목표)~~ ✅ 확정(2026-08-24, ADR-0007 / #113 — 기한 내). Boto3 클라이언트 팩토리·AWS 예외 공통 래퍼 → 스펙 JSON 백업 모듈 → executor 런북 디스패치 테이블·`precheck()` 구현. CI `apps/web` lint·build 잡 추가(#91), compose 정리(#94·#111).
   - **안성일**: `AIModelClient` 경계(ADR-0005 — 외부 전송 페이로드 마스킹 포함, #115), 가드레일 ①Schema Check ②Action Whitelist(#114), `POST /api/v1/actions/execute` 라우터 골격·Idempotency Key 멱등 처리(#116, 김세혁 공동).
   - **김승철**: ~~`_is_prod` 인식 태그 키·값 집합 확정(#95)~~ ✅ 확정(2026-08-24, PR #97 — 기한 8/27 내 본인 결정, PM 대행 불발동). `evaluate_ec2` `name` 인자 정리(#96 — `PROD_HINTS`는 #97에서 제거돼 잔여 범위 축소), rule_engine update 경로 SKIP→비SKIP 전이 회귀 테스트(#109 — #99 잔여 재발행). ~~자산 연결관계(토폴로지) 산출(#101)~~ ✅ NACL 축 완료(2026-08-25, PR #101 — subnet 연관 기반 EC2→NACL `PROTECTED_BY`); TG(`REGISTERED_IN`) 축은 `elbv2`가 LocalStack Community 미포함이라 로컬 검증 경로가 없어(ADR-0006 §4) 실 AWS 스모크(6–7주차)로 이월 — 별도 카드 발행 예정.
-  - **박지현**: E2E 시연 시나리오 설계서 1차(FinOps·SecOps 2트랙), 실행 계열 테스트 하네스·픽스처 선구축, 회귀 21건 CI 상시 실행 검증. **`_is_prod` 확정 기준 반영 Golden 경계 케이스 추가**(#95 확정 후속 — 접미 변형 `prod-us-east`류 미탐은 "부분일치 금지" 의도된 결과임을 케이스로 고정). SecOps 정답은 Risk Evaluator 대기(미해결 6번).
+  - **박지현**: ~~`_is_prod` 확정 기준 반영 Golden 경계 케이스 추가~~ ✅ 완료(2026-08-25, #124 — 미해결 4번 완전 종결). ~~회귀 CI 상시 실행 검증~~ ✅ 확인(dev CI `419 passed, 5 skipped` — 골든 회귀 21→26건 상시 실행, DB 통합 28건 skip 0건으로 판정 기준 ⓒ 충족. 남은 skip 5건은 전부 미구현 대기 중인 placeholder다). E2E 시연 시나리오 설계서 1차(FinOps·SecOps 2트랙), 실행 계열 테스트 하네스·픽스처 선구축. **가드레일 회귀 테스트 skip 2건 해제**(#114 / PR #123 머지로 선행 조건 해소). SecOps 정답은 Risk Evaluator 대기(미해결 6번).
   - **유건희**: ~~다크 고정 마감(#89)·`--font-sans` 순환 참조 수정(#90)~~ ✅ 완료(2026-08-24, PR #103·#102). 자산 목록·상세 화면 mock 연동 마감(#106 — 판정 기준 ⓔ), global-error 셸 다크 고정(#112 — #103 잔여 재발행).
-- **주차 종료 판정 기준**: ⓐ ~~executor ↔ 가드레일 ④ Dry-Run 인터페이스 문서 합의~~ ✅ 충족(2026-08-24, ADR-0007 / #113) ⓑ ~~`_is_prod` 정책 결정 종결(또는 PM 대행)~~ ✅ 충족(2026-08-24, #95) ⓒ CI에서 DB 통합 테스트 28건 실행(skip 0건) ⓓ `POST /actions/execute` 멱등 처리 동작(실행 스텁 허용) ⓔ FE 자산 화면 mock 100% 렌더 ⓕ LLM 외부 전송 페이로드 마스킹 적용.
+- **주차 종료 판정 기준**: ⓐ ~~executor ↔ 가드레일 ④ Dry-Run 인터페이스 문서 합의~~ ✅ 충족(2026-08-24, ADR-0007 / #113) ⓑ ~~`_is_prod` 정책 결정 종결(또는 PM 대행)~~ ✅ 충족(2026-08-24, #95) ⓒ ~~CI에서 DB 통합 테스트 28건 실행(skip 0건)~~ ✅ 충족(2026-08-25, #92 — dev CI `419 passed, 5 skipped`. 남은 skip 5건은 `test_e2e_scenario` 2 + `test_guardrails` 2 + `test_rollback` 1 로 전부 미구현 대기 QA placeholder이므로 DB 통합 28건은 skip 0건으로 실행 중) ⓓ `POST /actions/execute` 멱등 처리 동작(실행 스텁 허용) ⓔ FE 자산 화면 mock 100% 렌더 ⓕ LLM 외부 전송 페이로드 마스킹 적용.
 
 ## MVP 확정 범위
 
@@ -106,7 +106,7 @@
 1. ~~LocalStack 팀 표준 환경~~ ✅ 해소(#62) — [ADR-0006](adr/0006-localstack-team-standard-env.md) 전략 + compose `localstack` 서비스 + `scripts/seed_localstack.py` + `.env.example` 스위치 활성화. 잔여 후속 중 **CI LocalStack service container는 완료**(#65). 남은 것은 6–7주차 실 AWS 스모크 테스트(ADR-0006 §4). **범위 확대(2026-08-24, ADR-0007 실측)**: `elbv2`·`autoscaling`이 LocalStack Community에 없어(Pro 전용) `EC2_ISOLATE`·`UNISOLATE`·`ENABLE_AUTOSCALING` **P2 3종은 실행뿐 아니라 Dry-Run 대체 조회조차 로컬에서 돌지 않는다.** 이 3종의 유일한 검증 경로가 실 AWS 스모크이므로, §일정 리스크의 "P2 인프라 조기 준비"가 선택이 아니라 전제 조건이 됐다.
 2. ~~PR #29 후속 보완~~ ✅ 종결(2026-08-19, PM 대행 판단 — 김승철 부재, 기록: 이슈 #67 댓글) — 당초 우려("자체 boto3 로직·시드 없으면 빈 결과 통과")는 현행 `test_collector_raw.py`에서 해소 확인(`collect_region()` 직접 호출, 시드 없으면 assert 실패). dev 머지본(#64) 기준 작성자 외 로컬에서 표준 절차(compose→시드→pytest) 통합 테스트 3건 통과 재현. 잔여였던 **CI LocalStack service container**는 #65로 완료. 김승철 복귀 후 이견 시 재오픈.
 3. ~~README 최신화~~ ✅ 해소(팀명·역할 표·런북 10종·LangGraph 반영). 기획서 docx는 동결 방침이라 갱신 대상 아님.
-4. **`_is_prod` 판정 규칙 — 핵심 해소** (박지현 제기 #81 → 규칙 소유자 김승철 확정, 2026-08-24; **#95로 종결**) — 인식 태그 키·값 집합을 확정·구현했다. **키**(대소문자 무시): `Environment`·`env`·`Stage`·`Tier`. **값**(소문자 정확일치, 부분일치 금지): `prod`·`production`·`prd`. `product-service`류 오탐 없음·다중 키/값 변형 탐지를 단위 테스트로 커버했다. `PROD_HINTS` 미사용 상수는 `PROD_TAG_KEYS`/`PROD_TAG_VALUES`로 정리 완료. **잔여**: ① `evaluate_ec2`의 `name` 인자 미세정리(**#96**) ② 확정 기준 반영한 Golden Dataset 경계 케이스 추가(박지현). `RUNBOOK_EC2_RIGHTSIZING`은 관제자 승인이라 자동 실행 위험은 없다.
+4. ~~**`_is_prod` 판정 규칙**~~ ✅ **완전 종결**(2026-08-25) — 박지현 제기 #81 → 규칙 소유자 김승철 확정(#95 / PR #97). 인식 태그 키·값 집합을 확정·구현했다. **키**(대소문자 무시 정확일치): `environment`·`env`·`stage`·`tier`. **값**(`strip` 후 소문자 정확일치, 부분일치 영구 금지): `prod`·`production`·`prd`. 잔여 2건도 닫혔다 — ① `evaluate_ec2`의 `name` 인자 정리 = #96 / PR #110(인자 자체 제거) ② 확정 기준 반영 Golden 경계 케이스 = #124 / 본 PR(`asset_inventory_003.json` A11–A16, 뮤테이션 4종 방어 확인). 접미 변형(`prod-us-east`)·부정 접두(`non-prod`)·부분 포함(`product-service`) 미탐이 **의도된 결과임이 정답지로 고정**됐으므로, 앞으로 이를 버그로 보고 부분일치를 되살리는 변경은 골든 회귀에서 막힌다.
 5. ~~CI에 PostgreSQL service container 없음~~ ✅ 해소(#92, 박지현 제기 2026-08-20) — `ci.yml` `test` 잡에 `postgres:16-alpine` service container를 추가했다(이미지·계정·DB명은 compose `db` 서비스와 동일 — 로컬 = CI 동형). 그동안 CI에서 항상 skip되던 **DB 통합 테스트 28건**(`apps/core-api/db/tests` 21 + `apps/core-api/tests` 7)이 실행되며, `health_score` 0–100 정수 변환 등 DB 경유 계약과 Alembic `upgrade head`가 매 PR에서 검증된다. 서비스 장애로 다시 조용히 skip되는 것을 막기 위해 pytest 앞에 접속 확인 스텝을 둔다. **원 제기 문구 정정**: `test_persistence_pipeline`은 저장소에 존재하지 않는 테스트 이름이며(실제 대상은 위 28건), "`ci.yml` 주석에도 명시"는 #65(PR #84)에서 헤더 주석이 교체되며 사라진 서술이다.
 6. **Golden Dataset SecOps 정답 보류** (박지현) — 위협 입력 10건은 작성 완료했으나 `initial_risk_level`·`response_mode`·`reason_codes` 판정 규칙이 미확정이라 정답을 채우면 추측이 된다. Risk Evaluator 구현과 `RiskReasonCode` 값 목록 확정 시 별도 PR. 각 케이스가 강제하는 판정 논점은 `datasets/golden/secops/expected/README.md`에 기록.
 
