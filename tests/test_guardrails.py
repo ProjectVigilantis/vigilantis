@@ -146,6 +146,25 @@ def _golden_asset_pairs() -> list[tuple[str, str]]:
     return pairs
 
 
+def _golden_asset_kinds() -> set[str]:
+    """골든 파일에 실제로 들어 있는 자산 종류. 매핑이 이걸 전부 덮어야 한다.
+
+    arn 을 가진 dict 의 리스트를 자산 목록으로 본다 — account_id·region 같은
+    스칼라 키와 갈린다.
+    """
+    kinds: set[str] = set()
+    for path in sorted(GOLDEN_FINOPS_INPUT.glob("*.json")):
+        with path.open(encoding="utf-8") as fp:
+            data = json.load(fp)
+        kinds.update(
+            key
+            for key, value in data.items()
+            if isinstance(value, list)
+            and any(isinstance(item, dict) and "arn" in item for item in value)
+        )
+    return kinds
+
+
 def test_golden_asset_arns_pass_the_implemented_steps() -> None:
     """Golden Dataset 의 실제 자산 ARN 이 구현된 단계를 통과한다.
 
@@ -160,6 +179,10 @@ def test_golden_asset_arns_pass_the_implemented_steps() -> None:
     """
     pairs = _golden_asset_pairs()
     assert pairs, "Golden Dataset 에 자산이 없다 — 경로나 파일 구조가 바뀌었다"
+    # 한 종류가 빠져도 나머지가 남아 assert pairs 는 통과한다 — SG 누락이 그렇게
+    # 지나갔다(#134). 건수는 골든이 늘 때마다 바뀌므로(#127) 종류만 고정한다.
+    missing = _golden_asset_kinds() - set(_GOLDEN_ASSET_RUNBOOKS)
+    assert not missing, f"골든에 있는데 매핑에 없는 자산 종류: {sorted(missing)}"
 
     for arn, runbook_id in pairs:
         _, whitelist = _run_first_two_steps(
