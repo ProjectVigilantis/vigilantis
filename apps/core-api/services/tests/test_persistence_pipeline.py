@@ -15,7 +15,6 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.orm.attributes import flag_modified
 
 CORE_API = Path(__file__).resolve().parents[2]
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -359,15 +358,19 @@ def test_skip_to_non_skip_clears_reason_code(db, skip_case_inventory):
     assert ev.skip_reason_code == "SKIP_PROD_PROTECTED"
 
     # 2) 운영 태그만 dev로 변경(같은 run_id 유지 → RuleEvaluation update 경로). 메트릭은 그대로.
+    #    spec 을 새 dict 로 재바인딩하므로 SQLAlchemy 속성 계측이 dirty 로 잡는다
+    #    (in-place 변경이 아니라 flag_modified 불필요).
     new_tags = {**prod.spec.get("tags", {}), "Environment": "dev"}
     prod.spec = {**prod.spec, "tags": new_tags}
-    flag_modified(prod, "spec")
     db.flush()
 
-    # 3) 재판정(update 경로) → flush 로 갱신 반영 후 재조회
-    #    (run_rule_engine 의 update 분기는 dirty 만 만들고 flush 하지 않으므로 여기서 flush)
+    # 3) 재판정(update 경로) 후 재조회. flush 로 update 분기의 대입을 DB 에 반영하고,
+    #    expire_all 로 identity map 을 비워 ev2 를 DB 행에서 다시 읽는다(왕복 검증).
+    #    (db 픽스처가 expire_on_commit=False + commit 없음이라, expire 없이는
+    #     ev2 is ev 가 되어 메모리 속성만 읽게 된다 — #109 3단계 지시)
     run_rule_engine(db, collection_run_id=run_id)
     db.flush()
+    db.expire_all()
     ev2 = db.execute(
         select(models.RuleEvaluation).where(models.RuleEvaluation.asset_id == prod.asset_id)
     ).scalar_one()
