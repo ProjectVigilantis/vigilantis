@@ -3,6 +3,7 @@
 import Link from 'next/link';
 
 import { CopyButton } from '@/components/copy-button';
+import { Row } from '@/components/detail-row';
 import { EmptyState } from '@/components/empty-state';
 import { StatusBadge } from '@/components/status-badge';
 import { Button } from '@/components/ui/button';
@@ -42,6 +43,41 @@ function SummaryLines({ incident }: { incident: IncidentResponse }) {
   );
 }
 
+/**
+ * 위험도 영역 — SECOPS(B 변형) 전용이다(§4.5).
+ * FINOPS는 계약이 세 필드를 전부 null로 강제하므로 **영역 자체를 렌더하지 않는다**(§3.3).
+ * 빈 배지를 남기면 "판정을 못 받은 위협"으로 읽힌다.
+ */
+function RiskArea({ incident }: { incident: IncidentResponse }) {
+  if (incident.initial_risk_level === null) return null;
+
+  return (
+    <Section title="위험도">
+      <div className="flex flex-col gap-1.5">
+        {/* ⏳ 판정 사유·정책 버전·판정 시각은 계약에 필드가 없다(9장 #30) — 등급만 표시한다. */}
+        <Row label="초기 판정">
+          <StatusBadge field="risk_level" value={incident.initial_risk_level} />
+        </Row>
+        <Row label="정밀 평가">
+          {incident.reviewed_risk_level !== null ? (
+            <StatusBadge field="risk_level" value={incident.reviewed_risk_level} />
+          ) : (
+            // null은 "위험도 없음"이 아니라 아직 안 나온 것이다 — status로 갈라 적는다(§3.3).
+            <span className="text-muted-foreground">
+              {incident.status === 'ANALYZING' ? '정밀평가 진행 중' : '정밀평가 없음'}
+            </span>
+          )}
+        </Row>
+        {incident.response_mode !== null ? (
+          <Row label="대응">
+            <StatusBadge field="response_mode" value={incident.response_mode} />
+          </Row>
+        ) : null}
+      </div>
+    </Section>
+  );
+}
+
 export function IncidentDetail({
   incident,
   subject,
@@ -65,8 +101,7 @@ export function IncidentDetail({
         </p>
       </header>
 
-      {/* FINOPS는 위험도 2필드·response_mode가 전부 null이라 위험도 영역을 렌더하지 않는다(§3.3).
-          SECOPS 위험도 블록과 B-Medium 카운트다운은 #139에서 붙인다. */}
+      <RiskArea incident={incident} />
 
       <Separator />
 
