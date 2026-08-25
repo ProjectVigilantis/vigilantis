@@ -1,8 +1,8 @@
 # Golden Dataset (담당: 박지현)
 
-MVP 공통 테스트 정답지. 위협/자산 더미 데이터 20여 건을 `*.json`으로 적재.
+MVP 공통 테스트 정답지. 위협/자산 더미 데이터 26건을 `*.json`으로 적재.
 
-- 낭비 자원 시나리오 10건 (예: CPU 2% 미만 Idle EC2, Unattached SG)
+- 낭비 자원 시나리오 16건 (예: CPU 2% 미만 Idle EC2, Unattached SG, `_is_prod` 경계)
 - 보안 위협 시나리오 10건 (예: 22번 포트 전체 개방 0.0.0.0/0, SSH 브루트포스)
 
 전체 팀(UI/AI/백엔드)이 공유하며 pytest 회귀 테스트(`tests/`)의 입력으로 사용한다.
@@ -105,7 +105,7 @@ A6은 이름을 `golden-ec2-billing-worker`로 잡았다. `_is_prod`는 인식 �
 본다(#95). 이름에 `prod`를 넣으면 이름 부분 매칭으로 되돌아가는 회귀가 생겨도 정답이 그대로
 나와 태그 경로 검증이 무의미해지므로, 이름에서 `prod`를 뺀다.
 
-**판정 커버리지**: 1차 5건 + 2차 5건으로 `Verdict` 4종·`SkipReasonCode` 5종 전부 커버(미커버 0).
+**판정 커버리지**: 1차 5건 + 2차 5건으로 `Verdict` 4종·`SkipReasonCode` 5종 전부 커버(미커버 0). 3차는 판정 종류가 아니라 `_is_prod` 입력 경로를 넓힌다.
 
 **위협 6건** — `secops/input/` (정답은 Risk 규칙 확정 후 별도 PR)
 
@@ -120,16 +120,49 @@ A6은 이름을 `golden-ec2-billing-worker`로 잡았다. `_is_prod`는 인식 �
 
 각 케이스가 강제하는 판정 논점은 `secops/expected/README.md` 표에 기록했다.
 
-## 3차 이후로 미룬 분기
+## 3차 작성 케이스 (자산 6건 — 누적 26건)
+
+**`_is_prod` 경계 전용** — `finops/input/asset_inventory_003.json`
+
+`docs/PROJECT_STATUS.md` §미해결 4번의 잔여②(확정 기준 반영 Golden 경계 케이스 추가)에 대응한다.
+인식 기준은 #95 / PR #97 확정: **키**(`PROD_TAG_KEYS`, 대소문자 무시 **정확일치**) = `environment`·`env`·
+`stage`·`tier` / **값**(`PROD_TAG_VALUES`, `strip` 후 소문자 **정확일치**) = `prod`·`production`·`prd`.
+부분 문자열 매칭은 영구 금지(#81).
+
+6건 전부 `cpu_datapoints 336` · `cpu_avg 1.5` · `cpu_max 10.0`으로 **입력이 동일하다.** 관측치 부족도
+스파이크도 아니고 저활성은 확실하므로 **prod 판정만이 결과를 가르는 유일한 변수**다. 판정이 틀리면
+원인은 반드시 `_is_prod`이며 다른 분기를 의심할 필요가 없다.
+
+| ID | 태그 | 판정 | 막는 회귀 |
+| --- | --- | --- | --- |
+| A11 | `Environment: prod-us-east` | `COST_CANDIDATE` | 값 접두 부분일치 — SSOT 결정 로그가 지목한 "접미 변형 미탐은 의도된 결과" 그 케이스 |
+| A12 | `Environment: non-prod` | `COST_CANDIDATE` | 값 접미 부분일치 (`"prod" in "non-prod"`) |
+| A13 | `TIER: "  PRD  "` | `SKIP_PROD_PROTECTED` | 키 `lower()` · 값 `strip().lower()` 누락 — **정탐 방향** 경계 |
+| A14 | `environment_name: production` | `COST_CANDIDATE` | 키 부분일치(`any(k in key.lower())`) — 값 쪽 방어의 대칭 |
+| A15 | `Environment: staging` + `Stage: prd` | `SKIP_PROD_PROTECTED` | 첫 인식 키에서 조기 `return False` — 태그 순회 완주 검증 |
+| A16 | `Environment: product-service` | `COST_CANDIDATE` | 이슈 #81이 제기한 **원 오탐 사례**를 회귀 기준으로 고정 |
+
+**A13·A15가 정탐(prod로 잡아야 하는) 방향이라는 점이 중요하다.** 미탐 케이스만 있으면 "아무것도
+prod로 안 잡는" 구현이 전부 통과하기 때문이다.
+
+**뮤테이션 검증**: `_is_prod`를 4가지로 일부러 망가뜨려 각 케이스가 잡는지 확인했다.
+① 값 부분일치 → A11·A12·A16 / ② 정규화 제거 → A13 / ③ 키 부분일치 → A14 / ④ 조기 종료 → A15.
+**②③④는 각각 단 한 케이스만 잡는다** — 그 케이스를 지우면 해당 회귀가 통과한다.
+
+**판정 커버리지**: 3차는 새 `Verdict`·`SkipReasonCode`를 늘리지 않는다(2차에서 이미 전량 커버).
+늘리는 것은 **같은 판정에 도달하는 입력 경로의 커버리지**다.
+
+## 4차 이후로 미룬 분기
 
 | 항목 | 사유 |
 | --- | --- |
 | EBS | 입력 스키마(`AssetInventory`)에 `ebs_volumes`가 없고 `rule_engine`에도 판정 분기가 없다 — 지금 채우면 규칙을 지어내는 셈. 3~5주차에 collector(`describe_volumes`)·schema·rule을 함께 도입 예정(김승철, P1 `RUNBOOK_EBS_DELETE_UNATTACHED` 전 완료). 확정 규칙은 아래 참고 |
 | 화이트리스트 태그(`finops:ignore` 등) | `feat/DATA-27-rule-engine-handoff`가 stale(dev가 47커밋 앞섬). 담당자가 현재 dev로 rebase·재작업 예정이며 **2차는 이를 기다리지 않는다** |
-| 이름 기반 prod 탐지 / 미부착+개방 → `THREAT` 우선순위 / `dp` 부족 + prod 우선순위 | 슬롯 부족 |
-| `non-prod` 부분 문자열 오탐 | `"prod" in "non-prod"`가 참이라 `SKIP_PROD_PROTECTED`가 된다. 버그 가능성이 있어 정답지로 굳히지 않음 — 별도 이슈로 제기 |
+| 미부착+개방 → `THREAT` 우선순위 / `dp` 부족 + prod 우선순위 | 3차 파일은 `_is_prod` 단일 변수 설계(다른 입력 전부 동일)라 우선순위 케이스를 섞으면 그 성질이 깨진다. 4차에서 별도 파일로 작성 |
+| ~~`non-prod` 부분 문자열 오탐~~ ✅ 3차 A12로 편입 | 당시 "버그 가능성"이라 정답으로 굳히지 못했으나, #95 / PR #97이 **부분일치 영구 금지**를 확정해 정답이 정해졌다 |
+| ~~이름 기반 prod 탐지~~ ❌ 성립 불가 | `evaluate_ec2`의 `name` 인자가 #96 / PR #110으로 제거됐다. 이름 경로 자체가 없어 케이스로 만들 수 없다 |
 
-### EBS 판정 규칙 (도입 확정 — 3차 골든셋 작성 근거)
+### EBS 판정 규칙 (도입 확정 — 4차 골든셋 작성 근거)
 
 | 입력 | 판정 |
 | --- | --- |
