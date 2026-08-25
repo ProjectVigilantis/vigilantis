@@ -1,0 +1,40 @@
+# Docker 빌드 컨텍스트 제외 목록
+#
+# docker-compose.yml의 migrate/api 서비스는 context를 저장소 루트(`.`)로 잡지만
+# apps/core-api/Dockerfile이 실제로 COPY하는 대상은 pyproject.toml·uv.lock·
+# packages·apps/core-api 뿐이다. Docker는 .gitignore를 읽지 않으므로 이 파일이
+# 없으면 node_modules·.venv 등 700MB 가까이가 매 빌드마다 데몬으로 전송된다.
+
+# --- 의존성 디렉터리 (이미지 안에서 재설치) ---
+**/.venv/
+**/node_modules/
+**/.next/
+
+# --- VCS · 로컬 전용 문서 ---
+.git/
+.github/
+.gitignore
+vigilantis-docs/
+
+# --- 캐시 · 빌드 산출물 ---
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/*.egg-info/
+
+# --- 시크릿 (런타임에 compose env_file로 주입) ---
+.env
+.env.*
+!.env.example
+
+# --- 개발 도구 · 에디터 ---
+.claude/
+.vscode/
+.idea/
+**/.DS_Store
+
+# --- 이미지에 불필요한 루트 파일 ---
+docker-compose.yml
+.dockerignore
