@@ -33,6 +33,7 @@ from .agents import (
     RunbookCapability,
     SecOpsGraphInput,
 )
+from .backups import BackupType, InstanceSpecBackup
 from .candidates import CandidateStatus, RunbookCandidateData
 from .collections import CollectionRunStatus
 from .events import (
@@ -113,6 +114,7 @@ __all__ = [
     "AssetInventory",
     "AssetType",
     "AutoScalingGroupAsset",
+    "BackupType",
     "build_verification_summary",
     "CandidateStatus",
     "CollectionRunStatus",
@@ -142,6 +144,7 @@ __all__ = [
     "GuardrailValidationRequest",
     "GuardrailValidationResult",
     "InitialRiskEvaluationResult",
+    "InstanceSpecBackup",
     "is_ai_recommendable",
     "is_allowed_runbook",
     "MetricEvidence",
