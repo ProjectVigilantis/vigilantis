@@ -16,3 +16,6 @@ export function formatKst(iso: string | null): string {
   if (iso === null) return NO_VALUE
   return new Date(iso).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' }) + ' KST'
 }
+
+// [임시] #91 CI 실패 검증용 타입 오류 — 바로 다음 커밋에서 revert 한다.
+export const __ciTypeErrorProbe: number = '문자열';
