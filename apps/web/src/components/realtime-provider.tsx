@@ -23,12 +23,15 @@ interface RealtimeContextValue {
   reconnect: () => void;
   /** `EXECUTION_UPDATED` 구독. ACT-002가 자기 실행만 골라 쓴다. 해지 함수를 돌려준다. */
   subscribeExecution: (listener: (action: Extract<RealtimeAction, { kind: 'execution' }>) => void) => () => void;
+  /** `INCIDENT_CREATED`·`INCIDENT_UPDATED` 구독. Toast가 `toast` flag를 보고 판단한다. */
+  subscribeIncident: (listener: (action: Extract<RealtimeAction, { kind: 'refresh' }>) => void) => () => void;
 }
 
 const RealtimeContext = createContext<RealtimeContextValue>({
   connection: 'disabled',
   reconnect: () => {},
   subscribeExecution: () => () => {},
+  subscribeIncident: () => () => {},
 });
 
 export function useRealtime(): RealtimeContextValue {
@@ -51,6 +54,7 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const seenRef = useRef(new SeenEvents());
   const listenersRef = useRef(new Set<(a: Extract<RealtimeAction, { kind: 'execution' }>) => void>());
+  const incidentListenersRef = useRef(new Set<(a: Extract<RealtimeAction, { kind: 'refresh' }>) => void>());
   /** 언마운트 후 재연결이 붙지 않게 하는 표식. */
   const aliveRef = useRef(true);
   /** `connect`가 자기 자신을 예약해야 해서 참조로 끊는다(useCallback 자기 참조 금지). */
@@ -66,20 +70,49 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
     [],
   );
 
+  const subscribeIncident = useCallback(
+    (listener: (a: Extract<RealtimeAction, { kind: 'refresh' }>) => void) => {
+      incidentListenersRef.current.add(listener);
+      return () => {
+        incidentListenersRef.current.delete(listener);
+      };
+    },
+    [],
+  );
+
+  /** 백오프만큼 기다렸다 다시 붙는다. 30s까지 늘어나면 수동 버튼을 노출한다(§4.8 4). */
+  const scheduleRetry = useCallback(() => {
+    const wait = backoffMs(attemptRef.current);
+    attemptRef.current += 1;
+    setConnection(wait >= 30_000 ? 'closed' : 'reconnecting');
+    timerRef.current = setTimeout(() => connectRef.current(), wait);
+  }, []);
+
   const connect = useCallback(() => {
     const url = websocketUrl(process.env.NEXT_PUBLIC_API_BASE_URL);
     // mock 단계에는 WS가 없다 — 초기값이 이미 `disabled`이므로 상태를 건드리지 않는다.
     if (url === null || !aliveRef.current) return;
 
-    const socket = new WebSocket(url);
+    let socket: WebSocket;
+    try {
+      // 생성자가 던지는 경로가 있다 — HTTPS 페이지에서 `ws://`(mixed content)면 SecurityError다.
+      // mount effect에서 터지면 인디케이터가 아니라 **화면 전체가 에러 바운더리로** 가고,
+      // 재시도 타이머 안에서 터지면 예외가 잡히지 않아 재시도 체인이 조용히 끊긴다(PR #181 리뷰).
+      socket = new WebSocket(url);
+    } catch {
+      scheduleRetry();
+      return;
+    }
     socketRef.current = socket;
 
     socket.onopen = () => {
+      // 재조회는 **재연결일 때만** 한다 — 첫 진입에서 부르면 방금 그린 페이지를 RSC로 한 번 더 받는다.
+      const reconnected = attemptRef.current > 0;
       attemptRef.current = 0;
       setConnection('open');
       // 재연결 성공 시 목록 API를 재조회해 상태를 교체한다 — snapshot·replay 없음이 계약이다
       // (§4.8 3 · ws.py "과거 이벤트 재생은 보장하지 않는다"). 끊긴 동안의 변화가 여기서 복구된다.
-      router.refresh();
+      if (reconnected) router.refresh();
     };
 
     socket.onmessage = (message) => {
@@ -99,23 +132,23 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
         if (action.toast) router.refresh();
         return;
       }
-      // 인시던트 계열은 값을 들고 오지 않는다 — 해당 화면을 재조회한다.
+      // 인시던트 계열은 값을 들고 오지 않는다 — 해당 화면을 재조회하고, Toast에도 배달한다.
       router.refresh();
+      for (const listener of incidentListenersRef.current) listener(action);
     };
 
     // 연결·구독 오류 이벤트는 계약에 없다 — 상태는 수명주기(onclose·onerror)로만 표시한다(§4.8).
     socket.onerror = () => socket.close();
 
     socket.onclose = () => {
+      // 옛 소켓의 지연 close가 새 소켓 참조를 지우고 재시도를 한 번 더 예약하는 것을 막는다.
+      // `reconnect()`가 close 직후 동기로 connect()를 부르므로 이 창이 실제로 열린다(PR #181 리뷰).
+      if (socketRef.current !== socket) return;
       socketRef.current = null;
       if (!aliveRef.current) return;
-      const wait = backoffMs(attemptRef.current);
-      attemptRef.current += 1;
-      // 30s까지 늘어났으면 자동 재시도는 계속하되 수동 버튼을 노출한다(§4.8 4).
-      setConnection(wait >= 30_000 ? 'closed' : 'reconnecting');
-      timerRef.current = setTimeout(() => connectRef.current(), wait);
+      scheduleRetry();
     };
-  }, [router]);
+  }, [router, scheduleRetry]);
 
   useEffect(() => {
     connectRef.current = connect;
@@ -124,7 +157,11 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
   const reconnect = useCallback(() => {
     if (timerRef.current !== null) clearTimeout(timerRef.current);
     attemptRef.current = 0;
-    socketRef.current?.close();
+    const previous = socketRef.current;
+    socketRef.current = null; // 옛 소켓의 지연 close가 새 연결을 건드리지 못하게 먼저 끊는다
+    previous?.close();
+    // 시도가 진행 중임을 즉시 보여준다 — 아니면 in-flight 동안에도 `연결 끊김`이 떠 있다.
+    setConnection('connecting');
     connect();
   }, [connect]);
 
@@ -141,7 +178,9 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
   }, [connect]);
 
   return (
-    <RealtimeContext.Provider value={{ connection, reconnect, subscribeExecution }}>
+    <RealtimeContext.Provider
+      value={{ connection, reconnect, subscribeExecution, subscribeIncident }}
+    >
       {children}
     </RealtimeContext.Provider>
   );

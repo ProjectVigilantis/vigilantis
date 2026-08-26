@@ -29,17 +29,12 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { useRealtime } from '@/components/realtime-provider';
+import { appendTransition } from '@/lib/realtime-events';
 import { newIdempotencyKey } from '@/lib/api/client';
 import { isTerminalStatus } from '@/lib/execution-status';
 import { RUNBOOK_LABELS, incidentTitle } from '@/lib/enum-labels';
 import { formatKst } from '@/lib/utils';
-import type {
-  AssetItem,
-  ExecutionStatus,
-  IncidentResponse,
-  IsoDateTime,
-  RunbookId,
-} from '@/types/api';
+import type { AssetItem, IncidentResponse, IsoDateTime, RunbookId } from '@/types/api';
 
 /**
  * 계약 합의(2026-08-14): `AGENT_WAIT` 전환 이벤트의 `occurred_at` + 60초.
@@ -332,12 +327,7 @@ export function IncidentDetail({
     if (watchedId === null) return;
     return subscribeExecution((action) => {
       if (action.executionId !== watchedId) return;
-      setTransitions((prev) => {
-        const from = prev.at(-1)?.to ?? null;
-        // 같은 status 재수신은 줄을 늘리지 않는다 — event_id 멱등과 별개로 값이 안 바뀐 경우다.
-        if (from === action.status) return prev;
-        return [...prev, { at: action.updatedAt as IsoDateTime, from, to: action.status as ExecutionStatus }];
-      });
+      setTransitions((prev) => appendTransition(prev, { at: action.updatedAt, status: action.status }));
       setOutcome((prev) =>
         prev === null
           ? prev
@@ -345,7 +335,7 @@ export function IncidentDetail({
               ...prev,
               execution: {
                 ...prev.execution,
-                status: action.status as ExecutionStatus,
+                status: action.status,
                 updated_at: action.updatedAt as IsoDateTime,
               },
             },
@@ -478,11 +468,9 @@ export function IncidentDetail({
           replayed={outcome.replayed}
           subjectHref={subjectHref}
           live={connection === 'open'}
-          transitions={[
-            // 접수 1건 + WS로 들어온 전이 누적.
-            { at: outcome.execution.updated_at, from: null, to: outcome.execution.status },
-            ...transitions,
-          ]}
+          // 접수 행 + WS 전이가 모두 이 state에 들어 있다. outcome에서 파생하면 같은 리스너가
+          // outcome을 덮어쓰면서 접수 시각·상태까지 최신값으로 뭉갠다(PR #181 리뷰).
+          transitions={transitions}
         />
       ) : null}
 
@@ -492,6 +480,11 @@ export function IncidentDetail({
         onClose={() => setRequest(null)}
         onExecuted={(next) => {
           setOutcome(next);
+          // 진행 기록을 새 실행의 접수 행으로 초기화한다 — 안 지우면 FAILED 후 재실행에서
+          // 옛 실행의 줄이 새 패널에 그대로 쌓인다(§4.7이 허용하는 경로다).
+          setTransitions([
+            { at: next.execution.updated_at, from: null, to: next.execution.status },
+          ]);
           // 서버 상태(ACTION_IN_PROGRESS)를 따라오게 한다. 위 locked가 그 사이를 덮는다.
           router.refresh();
         }}

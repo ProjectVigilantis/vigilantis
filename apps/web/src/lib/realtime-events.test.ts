@@ -3,7 +3,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { SeenEvents, actionFor, backoffMs, websocketUrl } from './realtime-events.ts';
+import {
+  SeenEvents,
+  actionFor,
+  appendTransition,
+  backoffMs,
+  websocketUrl,
+} from './realtime-events.ts';
 import type { WsEvent } from '../types/api.ts';
 
 const incidentEvent = (type: 'INCIDENT_CREATED' | 'INCIDENT_UPDATED'): WsEvent =>
@@ -89,4 +95,34 @@ test('mock 단계(base URL 미설정)에서는 연결하지 않는다', () => {
 test('http·https를 ws·wss로 바꾸고 계약 경로를 붙인다', () => {
   assert.equal(websocketUrl('http://localhost:8000'), 'ws://localhost:8000/api/v1/ws');
   assert.equal(websocketUrl('https://api.example.com/'), 'wss://api.example.com/api/v1/ws');
+});
+
+// ── 진행 기록 누적 — PR #181 리뷰가 "배달 쪽이 빠졌다"고 짚은 경계다 ──────────────
+
+const 접수 = { at: '2026-08-26T00:00:00Z', from: null, to: 'IN_PROGRESS' } as const;
+
+test('접수 행 다음에 다른 status가 오면 from이 접수 상태로 이어진다', () => {
+  const out = appendTransition([접수], { at: '2026-08-26T00:00:05Z', status: 'SUCCESS' });
+  assert.equal(out.length, 2);
+  assert.deepEqual(out[1], { at: '2026-08-26T00:00:05Z', from: 'IN_PROGRESS', to: 'SUCCESS' });
+});
+
+test('첫 이벤트가 접수와 같은 status면 줄을 늘리지 않는다', () => {
+  // 접수 행이 prev에 없으면 from이 null이라 이 차단이 무력해진다 — 그게 원래 버그였다.
+  const out = appendTransition([접수], { at: '2026-08-26T00:00:05Z', status: 'IN_PROGRESS' });
+  assert.deepEqual(out, [접수]);
+});
+
+test('접수 행은 덮이지 않고 남는다', () => {
+  let rows = appendTransition([접수], { at: '2026-08-26T00:00:05Z', status: 'ROLLBACK_INITIATED' });
+  rows = appendTransition(rows, { at: '2026-08-26T00:00:09Z', status: 'ROLLED_BACK' });
+  assert.deepEqual(rows[0], 접수);
+  assert.deepEqual(
+    rows.map((r) => r.to),
+    ['IN_PROGRESS', 'ROLLBACK_INITIATED', 'ROLLED_BACK'],
+  );
+});
+
+test('websocketUrl은 스킴 없는 값을 거른다', () => {
+  assert.equal(websocketUrl('localhost:8000'), null);
 });
