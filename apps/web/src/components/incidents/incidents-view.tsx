@@ -10,11 +10,14 @@ import { FilterSelect } from '@/components/filter-select';
 import { IncidentCard } from '@/components/incidents/incident-card';
 import { Badge } from '@/components/ui/badge';
 import { CATEGORY_LABELS, INCIDENT_STATUS_LABELS } from '@/lib/enum-labels';
-import { sortByRisk } from '@/lib/incident-sort';
+import {
+  ALL,
+  clampStatus,
+  statusOptionsOf,
+  visibleIncidents,
+} from '@/lib/incident-filter';
 import { cn } from '@/lib/utils';
-import type { IncidentCategory, IncidentListItem, IncidentStatus } from '@/types/api';
-
-const ALL = '전체';
+import type { IncidentCategory, IncidentListItem } from '@/types/api';
 
 /**
  * 프리셋은 **필터만 다르고 정렬은 같다**(§4.4). `승인 대기`는 서버 필터(`?status=`)로 부르므로
@@ -60,20 +63,14 @@ export function IncidentsView({
   const [category, setCategory] = useState<string>(ALL);
   const [status, setStatus] = useState<string>(ALL);
 
-  const visible = useMemo(() => {
-    const filtered = items.filter(
-      (i) =>
-        (category === ALL || i.category === (category as IncidentCategory)) &&
-        (status === ALL || i.status === (status as IncidentStatus)),
-    );
-    // 정렬은 전역 셀렉터 한 곳이다 — DSH-001 AI 조치 카드가 같은 함수를 쓴다(§4.4).
-    return sortByRisk(filtered);
-  }, [items, category, status]);
-
   // 셀렉트 옵션은 응답에 실제로 있는 값만 — 계약 전체 enum을 늘어놓으면 0건 옵션이 섞인다.
-  const statusOptions = useMemo(
-    () => [...new Set(items.map((i) => i.status))],
-    [items],
+  const statusOptions = useMemo(() => statusOptionsOf(items), [items]);
+  // 프리셋 전환에서 살아남은 필터가 지금 목록에 없는 값이면 `전체`로 접는다(§lib/incident-filter).
+  // 셀렉트 표시값도 이 값을 써야 화면과 실제 필터가 어긋나지 않는다.
+  const effectiveStatus = clampStatus(status, statusOptions);
+  const visible = useMemo(
+    () => visibleIncidents(items, category, status),
+    [items, category, status],
   );
 
   return (
@@ -107,7 +104,7 @@ export function IncidentsView({
           />
           <FilterSelect
             label="상태"
-            value={status}
+            value={effectiveStatus}
             options={[
               { value: ALL, label: ALL },
               ...statusOptions.map((s) => ({

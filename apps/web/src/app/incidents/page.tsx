@@ -25,7 +25,10 @@ export default async function IncidentsPage({ searchParams }: PageProps<'/incide
       typeof status === 'string' ? { status: status as IncidentStatus } : undefined,
     );
   } catch (error) {
-    return <ErrorState error={error} variant="page" />;
+    // variant를 넘기지 않는다 — 이 화면의 주 오류인 REQUEST_VALIDATION_FAILED(422)는
+    // error-state의 code별 프리셋이 `inline`으로 정해 뒀다(§4.9). 강제 인라인이 필요한
+    // 모달·패널이 아니면 그 규칙을 덮어쓰지 않는다(PR #171 리뷰).
+    return <ErrorState error={error} />;
   }
 
   /**
@@ -34,7 +37,10 @@ export default async function IncidentsPage({ searchParams }: PageProps<'/incide
    * 두 프리셋 밖 필터에서는 응답에 승인 대기 건이 아예 없어 0이 **거짓말**이 된다(PR #171 리뷰).
    * 그때는 null로 넘겨 배지를 감춘다.
    */
-  const countable = status === undefined || pendingOnly;
+  // "서버에 필터를 실제로 넘겼는가"로 판정한다. `?status=A&status=B`처럼 배열로 오면
+  // 아래 조회가 필터 없이 전량을 받으므로 셀 수 있다 — `status !== undefined`로 보면 뒤집힌다.
+  const serverFiltered = typeof status === 'string';
+  const countable = !serverFiltered || pendingOnly;
   const pendingCount = countable
     ? incidents.items.filter((i) => i.status === 'AWAITING_APPROVAL').length
     : null;

@@ -92,11 +92,20 @@ export function IncidentCard({
 
       <RiskTransition incident={incident} />
 
-      <p className="text-muted-foreground truncate text-xs" title={incident.subject_arn}>
+      {/* 카드는 ARN을 마지막 세그먼트로 자르므로 전체 ARN을 볼 방법이 이 `title` 하나다.
+          링크 오버레이(`::after`)가 위치 지정 자손이라 이 문단을 통째로 덮어 툴팁이 뜨지 않았다
+          (PR #171 리뷰). `z-10`으로 올리되 `w-fit`으로 텍스트 폭만 덮어, 남는 여백에서는
+          카드 클릭이 그대로 살아 있게 한다. */}
+      <p
+        className="text-muted-foreground relative z-10 w-fit max-w-full truncate text-xs"
+        title={incident.subject_arn}
+      >
         대상 {incident.subject_arn.split(/[:/]/).pop() ?? incident.subject_arn}
       </p>
 
-      <div className="border-border/60 flex items-center justify-between gap-2 border-t pt-3">
+      {/* `mt-auto` — FINOPS는 위험도 행이 없어 내용이 한 줄 짧다. 그리드가 카드 높이만 맞추고
+          푸터가 따라오지 않으면 같은 행의 [조치 실행] 버튼 줄이 들쭉날쭉해진다(PR #171 리뷰). */}
+      <div className="border-border/60 mt-auto flex items-center justify-between gap-2 border-t pt-3">
         <span className="text-muted-foreground text-xs">{formatKst(incident.updated_at)}</span>
         {showExecute ? (
           // 실행은 ACT-001 모달(#166)이 열어야 한다 — 요청 3필드·멱등 키·파괴적 조치 경고가
