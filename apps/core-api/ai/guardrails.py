@@ -182,9 +182,9 @@ def _whitelist_fail(
         "guardrail_action_whitelist_rejected",
         extra={
             "runbook_id": runbook_id[:_MAX_LOGGED_LOC_CHARS],
-            # .value로 남긴다 — str,Enum 멤버를 그대로 넘기면 포매터가 str()을 써서
-            # "ActionWhitelistReasonCode.WHITELIST_UNKNOWN_RUNBOOK"이 찍히고 DB에
-            # 저장되는 문자열과 로그가 어긋난다.
+            # 값 문자열로 명시 고정 — services/aws/executor.py의 _fail과 같은 표기다.
+            # 포매터(JsonLineFormatter)가 str,Enum을 값으로 직렬화하므로 멤버를 그대로
+            # 넘겨도 결과는 같지만, DB에 저장되는 값과 동일함을 호출부에서 드러낸다.
             "reason_code": reason_code.value,
         },
     )

@@ -135,12 +135,17 @@ def test_step_reason_only_on_fail():
 # 코드는 계약이 거절한다. (#125)
 
 
-def test_reason_codes_cover_four_steps_with_step_prefix():
-    """단계별 목록이 4단계 전부를 덮고, 접두가 단계를 표시한다.
+def test_reason_codes_cover_every_step_with_step_prefix():
+    """단계별 목록이 GuardrailStep 전부를 덮고, 접두가 단계를 표시한다.
 
     접두가 흔들리면 거절 기록만 보고 어느 단계가 막았는지 역산할 수 없다.
+
+    기준은 GUARDRAIL_STEP_ORDER가 아니라 GuardrailStep이다 — 둘 다 손으로 유지하는
+    상수라 서로 비교하면 단계가 늘어날 때 양쪽이 함께 낡아도 통과한다. Enum을 기준으로
+    삼아야 새 단계에 사유 코드 목록이 없는 상태가 여기서 걸리고, 그래야
+    GuardrailStepResult의 STEP_REASON_CODES 조회가 KeyError로 새지 않는다.
     """
-    assert set(STEP_REASON_CODES) == set(GUARDRAIL_STEP_ORDER)
+    assert set(STEP_REASON_CODES) == set(GuardrailStep)
 
     prefixes = {
         GuardrailStep.SCHEMA_CHECK: "SCHEMA_",
