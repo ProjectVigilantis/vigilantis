@@ -226,10 +226,6 @@ export const SPEC_KEY_LABELS: Record<string, string> = {
 };
 
 /**
- * 4.4·4.5 확정 — `title`은 nullable이고 빈 문자열은 오지 않는다.
- * null이면 유형 표시명 + `subject_arn` 축약으로 대체한다. 화면마다 다른 문구를 쓰지 않도록 여기 둔다.
- */
-/**
  * ARN의 마지막 세그먼트. 카드의 `대상` 줄과 `incidentTitle` fallback이 같은 축약을 쓴다 —
  * 정의가 두 곳에 있으면 두 화면이 같은 자산을 다르게 부르게 된다(PR #171 리뷰).
  */
@@ -238,6 +234,10 @@ export function arnShort(arn: string): string {
   return arn.split(/[:/]/).pop() || arn;
 }
 
+/**
+ * 4.4·4.5 확정 — `title`은 nullable이고 빈 문자열은 오지 않는다.
+ * null이면 유형 표시명 + `subject_arn` 축약으로 대체한다. 화면마다 다른 문구를 쓰지 않도록 여기 둔다.
+ */
 export function incidentTitle(incident: IncidentListItem): string {
   if (incident.title !== null) return incident.title;
   const label = CATEGORY_LABELS[incident.category]?.label ?? incident.category;

@@ -199,8 +199,11 @@ export function IncidentsView({
         </span>
       </div>
 
-      {/* 상세 조회 실패 — variant를 넘기지 않아 code별 §4.9 규칙이 적용된다. */}
-      {openError !== null ? <ErrorState error={openError} /> : null}
+      {/* 카드 1건의 조회 실패다 — **인라인으로 강제한다.** 이 자리가 받을 수 있는 두 코드가
+          `INCIDENT_NOT_FOUND`·`INTERNAL_ERROR`로 **둘 다 `page`** 라(error-state.tsx:24·38),
+          code별 기본에 맡기면 목록 위에 전체 오류 화면이 뜨고 `목록으로` 버튼이 목록에 붙는다.
+          `page` 매핑은 화면 전체가 그 인시던트인 `/incidents/[id]`를 위한 것이다(PR #180 리뷰). */}
+      {openError !== null ? <ErrorState error={openError} variant="inline" /> : null}
 
       {visible.length === 0 ? (
         <EmptyState
