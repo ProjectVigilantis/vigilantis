@@ -3,6 +3,7 @@
 // 같은 디렉터리 상대 경로를 쓴다 — `node --test`는 `@/` 별칭을 해석하지 못한다(타입 전용
 // import는 스트리핑돼 사라지므로 `@/types/api`는 그대로 둔다).
 import { sortByRisk } from './incident-sort.ts';
+import { INCIDENT_CATEGORIES, INCIDENT_STATUSES } from '../types/api.ts';
 import type { IncidentCategory, IncidentListItem, IncidentStatus } from '@/types/api';
 
 export const ALL = '전체';
@@ -19,9 +20,20 @@ export function clampStatus(status: string, options: readonly IncidentStatus[]):
   return status === ALL || options.includes(status as IncidentStatus) ? status : ALL;
 }
 
-/** 응답에 실제로 있는 상태만 셀렉트에 올린다 — 계약 전체 enum을 늘어놓으면 0건 옵션이 섞인다. */
+/**
+ * 셀렉트 옵션은 **응답에 실제로 있는 값만** 올린다 — 계약 전체 enum을 늘어놓으면 0건 옵션이 섞인다.
+ * 다만 순서는 **계약 상수 순서**로 세운다. 응답 순서를 그대로 쓰면 데이터가 바뀔 때마다
+ * 셀렉트 순서가 흔들린다(PR #171 리뷰).
+ */
 export function statusOptionsOf(items: readonly IncidentListItem[]): IncidentStatus[] {
-  return [...new Set(items.map((i) => i.status))];
+  const present = new Set(items.map((i) => i.status));
+  return INCIDENT_STATUSES.filter((s) => present.has(s));
+}
+
+/** 유형 셀렉트도 상태와 같은 규칙을 쓴다 — 한 화면에서 규칙이 갈리지 않게(PR #171 리뷰). */
+export function categoryOptionsOf(items: readonly IncidentListItem[]): IncidentCategory[] {
+  const present = new Set(items.map((i) => i.category));
+  return INCIDENT_CATEGORIES.filter((c) => present.has(c));
 }
 
 /** 필터를 걸고 위험도순으로 세운다. 정렬은 DSH-001과 공유하는 셀렉터 하나뿐이다(§4.4). */
