@@ -1,7 +1,9 @@
 # ==============================================================================
 # Vigilantis CI — push/PR(dev·main) 시 자동 실행
-# 현재 범위: LocalStack·PostgreSQL service container + 시드 + uv 의존성 설치 + pytest
-# TODO: 린터(ruff 등) 도입 확정 시 lint job 추가
+# 잡 2개가 병렬로 돈다.
+#   test — LocalStack·PostgreSQL service container + 시드 + uv 의존성 설치 + pytest
+#   web  — apps/web ESLint + next build(tsc 타입 체크 포함) + 유닛 테스트 (Issue #91)
+# TODO: 린터(ruff 등) 도입 확정 시 백엔드 lint job 추가
 # ==============================================================================
 name: CI
 
@@ -61,3 +63,48 @@ jobs:
 
       - name: Run pytest
         run: uv run pytest tests apps/core-api/services/tests apps/core-api/ai/tests packages/schemas/tests apps/core-api/db/tests apps/core-api/tests -q
+
+  # apps/web 검증 게이트 (Issue #91). test 잡과 독립이라 병렬로 돈다.
+  #
+  # path 필터를 걸지 않는다 — `apps/web/**` 변경에만 도는 잡으로 만들면, 나중에 이 체크를
+  # branch protection의 required로 지정했을 때 FE를 건드리지 않은 PR에서 영원히 pending으로
+  # 남아 머지를 막는다. 공개 저장소라 러너 시간이 무료이고 test 잡과 병렬이라 실제 대기 시간도
+  # 늘지 않으므로, 조건부로 만들어 얻는 이득이 없다.
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    env:
+      # 빌드 로그에 텔레메트리 안내가 섞이는 것만 막는다(수집 자체는 CI에서 비활성).
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Node 24 = 현행 Active LTS. 이슈 본문의 "Node 22"는 발행 시점(8/13) 기준이라 올린다.
+      # 22를 쓰면 `node --test`의 TypeScript 타입 스트리핑(22.18+/23.6+)이 버전에 따라 갈린다.
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      # `npm install`이 아니라 `ci` — 락파일과 어긋나면 설치 단계에서 실패해야 한다.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: ESLint
+        run: npm run lint
+
+      # Next 16 빌드가 tsc 타입 체크까지 수행한다 — 타입 오류는 여기서 잡힌다.
+      # `NEXT_PUBLIC_API_BASE_URL` 미설정이 정상 경로다(자체 origin mock Route Handler 사용).
+      - name: Next build (tsc 타입 체크 포함)
+        run: npm run build
+
+      # `--if-present`로 둔다 — 유닛 테스트 스크립트는 PR #171에서 들어오므로 그전까지는 no-op다.
+      # 머지되는 즉시 이 단계가 살아나고, 그때 러너 셸에서 0건 침묵 통과가 재발하지 않는지
+      # 실행 건수로 확인할 수 있다(PR #171 리뷰).
+      - name: Unit tests
+        run: npm run test --if-present
