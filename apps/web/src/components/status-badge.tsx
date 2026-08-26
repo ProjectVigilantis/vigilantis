@@ -52,6 +52,21 @@ const TONE_CLASS: Record<LabelTone, string> = {
 };
 
 /**
+ * INC-001 카드 좌측 세로 띠(6px)의 배경색 — `initial_risk_level` 전용이다(§4.4).
+ * 색을 카드 쪽에 복제하지 않으려고 TONE_CLASS와 같은 팔레트에서 여기 함께 둔다.
+ *
+ * FINOPS(위험도 null)는 띠를 그리지 않지만 **자리는 남긴다**(`RISK_BAND_EMPTY`) —
+ * 폭이 달라지면 그리드에서 SECOPS 카드와 어긋난다.
+ */
+export const RISK_BAND_CLASS: Record<RiskLevel, string> = {
+  HIGH: 'bg-danger',
+  MEDIUM: 'bg-orange-500',
+  LOW: 'bg-amber-400',
+};
+
+export const RISK_BAND_EMPTY = 'bg-muted/40';
+
+/**
  * 사전 항목 하나를 그리는 최소 단위. `null`이면 아무것도 그리지 않는다(3.2의 "—").
  * assetStateLabel처럼 Record로 못 만드는 값도 이걸로 그린다.
  */

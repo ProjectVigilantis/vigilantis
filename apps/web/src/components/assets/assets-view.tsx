@@ -7,6 +7,7 @@ import { useMemo, useState } from 'react';
 import { AssetCard } from '@/components/assets/asset-card';
 import { AssetDetail } from '@/components/assets/asset-detail';
 import { EmptyState } from '@/components/empty-state';
+import { FilterSelect } from '@/components/filter-select';
 import { StatusBadge } from '@/components/status-badge';
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -18,35 +19,6 @@ import type { AssetItem, AssetType, AssetsResponse, IncidentListItem } from '@/t
 const WASTE_VERDICTS = ['COST_CANDIDATE', 'UNUSED'] as const;
 
 const ALL = '전체';
-
-function Select({
-  label,
-  value,
-  options,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  options: { value: string; label: string }[];
-  onChange: (v: string) => void;
-}) {
-  return (
-    <label className="flex items-center gap-1.5 text-sm">
-      <span className="text-muted-foreground">{label}</span>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="border-input bg-background focus-visible:ring-ring/50 rounded-md border px-2 py-1 focus-visible:ring-2 focus-visible:outline-none"
-      >
-        {options.map((o) => (
-          <option key={o.value} value={o.value}>
-            {o.label}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-}
 
 export function AssetsView({
   data,
@@ -108,8 +80,8 @@ export function AssetsView({
         </TabsList>
 
         <div className="flex flex-wrap items-center gap-3">
-          <Select label="유형" value={assetType} options={typeOptions} onChange={setAssetType} />
-          <Select
+          <FilterSelect label="유형" value={assetType} options={typeOptions} onChange={setAssetType} />
+          <FilterSelect
             label="리전"
             value={region}
             options={[{ value: ALL, label: ALL }, ...regions.map((r) => ({ value: r, label: r }))]}
