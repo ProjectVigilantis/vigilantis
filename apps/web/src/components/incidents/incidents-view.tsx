@@ -4,7 +4,7 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 
 import {
   ActionExecuteDialog,
@@ -20,7 +20,7 @@ import { CATEGORY_LABELS, INCIDENT_STATUS_LABELS } from '@/lib/enum-labels';
 import {
   ALL,
   categoryOptionsOf,
-  clampStatus,
+  clampOption,
   statusOptionsOf,
   visibleIncidents,
 } from '@/lib/incident-filter';
@@ -82,16 +82,24 @@ export function IncidentsView({
   /** 상세를 조회 중인 카드. 누른 카드만 잠근다. */
   const [openingId, setOpeningId] = useState<string | null>(null);
   const [openError, setOpenError] = useState<unknown>(null);
+  /**
+   * 마지막으로 누른 요청의 표식. A 조회가 끝나기 전에 B를 누르면 **늦게 도착한 A의 응답이
+   * B를 덮어써 A의 실행 창이 열릴 수 있다** — 잘못된 대상의 조치를 승인하게 되는 경로다
+   * (PR #180 리뷰). 표식이 어긋난 응답은 버린다.
+   */
+  const latestOpen = useRef(0);
 
   /**
    * 목록 계약에 `recommendations`가 없어(`api.ts:286`) 버튼을 누른 시점에 상세를 부른다.
    * §4.4도 "추천·복구 버튼 유무 배지는 건별 상세 조회로 보강"으로 이 경로를 전제한다.
    */
   async function openExecute(incidentId: string) {
+    const token = ++latestOpen.current;
     setOpeningId(incidentId);
     setOpenError(null);
     try {
       const incident = await getIncident(incidentId);
+      if (latestOpen.current !== token) return; // 이전 선택의 응답 — 버린다
       // 조회 사이에 상태가 바뀌었으면 모달을 열지 않는다 — 실행 잠금은 §4.5가 정한 규칙이고,
       // 후보가 비어 있으면 고를 것이 없는 모달이 뜬다.
       if (incident.status === 'ACTION_IN_PROGRESS' || incident.recommendations.length === 0) {
@@ -113,9 +121,10 @@ export function IncidentsView({
       });
     } catch (error) {
       // 실패한 채로 열면 후보 없는 모달이 된다 — 열지 않고 §4.9 규칙대로 오류만 그린다.
-      setOpenError(error);
+      if (latestOpen.current === token) setOpenError(error);
     } finally {
-      setOpeningId(null);
+      // 이전 선택의 finally가 새 선택의 진행 표시를 끄지 않게 한다.
+      if (latestOpen.current === token) setOpeningId(null);
     }
   }
 
@@ -124,7 +133,8 @@ export function IncidentsView({
   const categoryOptions = useMemo(() => categoryOptionsOf(items), [items]);
   // 프리셋 전환에서 살아남은 필터가 지금 목록에 없는 값이면 `전체`로 접는다(§lib/incident-filter).
   // 셀렉트 표시값도 이 값을 써야 화면과 실제 필터가 어긋나지 않는다.
-  const effectiveStatus = clampStatus(status, statusOptions);
+  const effectiveStatus = clampOption(status, statusOptions);
+  const effectiveCategory = clampOption(category, categoryOptions);
   const visible = useMemo(
     () => visibleIncidents(items, category, status),
     [items, category, status],
@@ -149,7 +159,7 @@ export function IncidentsView({
         <div className="flex flex-wrap items-center gap-3">
           <FilterSelect
             label="유형"
-            value={category}
+            value={effectiveCategory}
             options={[
               { value: ALL, label: ALL },
               ...categoryOptions.map((c) => ({ value: c, label: CATEGORY_LABELS[c]?.label ?? c })),

@@ -9,15 +9,15 @@ import type { IncidentCategory, IncidentListItem, IncidentStatus } from '@/types
 export const ALL = '전체';
 
 /**
- * 프리셋 전환은 **목록을 통째로 갈아끼운다.** `IncidentsView`는 같은 라우트·같은 위치라
+ * **상태·유형 두 셀렉트 모두에 쓴다.** 프리셋 전환은 **목록을 통째로 갈아끼운다.** `IncidentsView`는 같은 라우트·같은 위치라
  * searchParams만 바뀌는 soft navigation에서 `useState`가 살아남는다 — 이전 목록에서 고른 상태
  * 필터가 새 목록에 없는 값이면 0건이 되는데 **셀렉트는 `전체`라고 말한다**(PR #171 리뷰).
  *
  * 그래서 지금 목록에 없는 값은 `전체`로 접는다. 셀렉트 표시값도 이 결과를 쓰므로 화면과 필터가
  * 어긋나지 않고, 되돌아가면 원래 고른 값이 다시 유효해져 사용자 의도가 유지된다.
  */
-export function clampStatus(status: string, options: readonly IncidentStatus[]): string {
-  return status === ALL || options.includes(status as IncidentStatus) ? status : ALL;
+export function clampOption(value: string, options: readonly string[]): string {
+  return value === ALL || options.includes(value) ? value : ALL;
 }
 
 /**
@@ -42,10 +42,12 @@ export function visibleIncidents(
   category: string,
   status: string,
 ): IncidentListItem[] {
-  const effectiveStatus = clampStatus(status, statusOptionsOf(items));
+  // 두 필터 모두 접는다 — 상태만 접으면 유형 쪽으로 같은 버그가 남는다(PR #180 리뷰).
+  const effectiveStatus = clampOption(status, statusOptionsOf(items));
+  const effectiveCategory = clampOption(category, categoryOptionsOf(items));
   const filtered = items.filter(
     (i) =>
-      (category === ALL || i.category === (category as IncidentCategory)) &&
+      (effectiveCategory === ALL || i.category === (effectiveCategory as IncidentCategory)) &&
       (effectiveStatus === ALL || i.status === (effectiveStatus as IncidentStatus)),
   );
   return sortByRisk(filtered);
