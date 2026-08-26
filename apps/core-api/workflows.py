@@ -10,6 +10,9 @@
 #   - AWS 실행은 아직 스텁이다 — 예약 레코드를 IN_PROGRESS로 남기는 데까지다.
 #     실행 직전 대상 자산 재확인과 후보 INVALIDATED 전이는 실제 실행이 붙을 때
 #     함께 들어온다.
+#   - 조치 직전 스펙 JSON 백업은 여기서 커밋한다(store_instance_spec_backup).
+#     캡처는 services/aws/backup.py가, 저장·결속·커밋 순서는 이 계층이 소유한다 —
+#     "AWS 변경보다 먼저 커밋"이 트랜잭션 경계의 문제이기 때문이다.
 #   - 접수 경로는 둘이다. 본편 7종은 Guardrail PASS 후보(EXECUTABLE)에서, 롤백
 #     3종은 복구를 열어 준 원본 실행에서 접수한다 — 롤백은 후보가 될 수 없다
 #     (ADR-0004 정책 ②, packages/schemas/candidates.py). (Issue #126)
@@ -18,6 +21,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -27,9 +31,11 @@ from schemas.api.errors import ErrorCode
 from schemas.api.incidents import IncidentStatus
 from schemas.candidates import CandidateStatus
 from schemas.executions import EXECUTION_RECOVERABLE_STATUSES
+from schemas.precheck import PrecheckReasonCode
 from schemas.runbooks import (
     ROLLBACK_RUNBOOK_BY_MAIN_ID,
     ROLLBACK_RUNBOOK_IDS,
+    RunbookId,
     TriggerSource,
 )
 
@@ -38,6 +44,8 @@ from db.repositories import executions as executions_repo
 from db.repositories import incidents as incidents_repo
 from exceptions import ApiError
 from identifiers import canonical_id
+from services.aws import backup
+from services.aws.executor import parse_arn
 
 
 @dataclass(frozen=True)
@@ -216,3 +224,90 @@ def reserve_execution(
     reserved = _to_response(execution)
     db.commit()
     return ExecutionReservation(response=reserved, created=True)
+
+
+# --- 스펙 JSON 백업 -------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BackupOutcome:
+    """record가 있으면 백업이 확보된 것 — AWS 변경 호출은 그 이후에만 시작한다."""
+
+    record: Optional[models.BackupRecord] = None
+    created: bool = False           # False = 이미 결속돼 있던 백업을 그대로 쓴 것
+    reason_code: Optional[PrecheckReasonCode] = None
+    detail: Optional[str] = None
+
+    @property
+    def stored(self) -> bool:
+        return self.record is not None
+
+
+def _backup_failed(code: PrecheckReasonCode, detail: str) -> BackupOutcome:
+    return BackupOutcome(reason_code=code, detail=detail)
+
+
+def store_instance_spec_backup(db: Session, execution_id: str) -> BackupOutcome:
+    """RIGHTSIZING 조치 직전 스펙 JSON 백업 — 캡처 → 저장 → 실행 결속 → commit.
+
+    **AWS 변경 호출 이전에 commit까지 끝나야 한다.** 변경과 백업 기록 사이에서
+    프로세스가 죽으면 인스턴스는 바뀐 채로 남고 되돌릴 값은 어디에도 없다 —
+    REVERT_SIZE는 원복 타입을 백업 레코드에서만 로드하기 때문이다(ADR-0004
+    롤백 공통 정책 ③). 그래서 이 함수는 호출부의 트랜잭션에 얹히지 않고
+    스스로 커밋한다.
+
+    실패를 ApiError로 던지지 않는다. 예약 이후의 실패는 HTTP 오류가 아니라
+    Execution 상태로 전달하는 것이 공개 계약이다(schemas/api/errors.py) —
+    호출부가 reason_code를 error_summary에 실어 실행을 FAILED로 끝낸다.
+
+    같은 실행에 두 번 불러도 백업은 하나다. 재시도가 새 레코드를 만들면 "조치
+    직전"이 아니라 "이미 바뀐 뒤"의 스펙이 원복 값이 되어, 원복이 아무것도
+    되돌리지 못한다.
+    """
+    execution = executions_repo.lock_execution(db, execution_id)
+    if execution is None:
+        return _backup_failed(
+            PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND, "실행 레코드를 찾을 수 없습니다"
+        )
+    if execution.runbook_id is not RunbookId.RUNBOOK_EC2_RIGHTSIZING:
+        # 배선 오류다 — 스펙 JSON 백업을 쓰는 런북은 RIGHTSIZING 하나뿐이다
+        # (런북 명세서 safety_and_rollback.backup_action). 판정으로 삼키면
+        # 다른 런북이 엉뚱한 백업 종류를 달고 조용히 진행된다.
+        raise ValueError(
+            f"스펙 JSON 백업 대상 런북이 아닙니다: {execution.runbook_id.value}"
+        )
+    if execution.backup_record_id is not None:
+        return BackupOutcome(
+            record=executions_repo.get_backup_record(db, execution.backup_record_id)
+        )
+
+    target = parse_arn(execution.target_arn)
+    if target is None or target.resource_type != "instance":
+        return _backup_failed(
+            PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+            f"인스턴스 ARN이 아닙니다: {execution.target_arn}",
+        )
+
+    capture = backup.capture_instance_spec(target.resource_id, target.region)
+    if not capture.captured:
+        return _backup_failed(capture.reason_code, capture.detail or "")
+
+    record = executions_repo.create_backup_record(
+        db,
+        execution_id=execution.execution_id,
+        target_arn=execution.target_arn,
+        backup_type=capture.backup_type,
+        payload=capture.payload,
+    )
+    if not executions_repo.bind_backup_record(
+        db, execution.execution_id, record.backup_record_id
+    ):
+        # 행을 잠그고 들어왔으므로 여기까지 오면 결속이 실패할 이유가 없다.
+        # 그래도 통과시키지 않는다 — 결속되지 않은 백업은 원복이 찾지 못한다.
+        db.rollback()
+        return _backup_failed(
+            PrecheckReasonCode.PRECHECK_INVALID_STATE, "백업 레코드 결속 실패"
+        )
+
+    db.commit()
+    return BackupOutcome(record=record, created=True)

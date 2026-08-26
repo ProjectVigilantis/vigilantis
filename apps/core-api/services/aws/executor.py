@@ -35,6 +35,7 @@ from typing import Any, Callable, Mapping, Optional, Protocol
 
 from botocore.exceptions import BotoCoreError, ClientError
 
+from schemas.backups import BackupType
 from schemas.precheck import (
     PrecheckOutcome,
     PrecheckReasonCode,
@@ -64,7 +65,8 @@ _DESCRIBE_MISSES = "IAM 권한(조회 대체 경로)"
 # ------------------------------------------------------------------ 백업 레코드
 # 원복 값의 유일한 원천은 DB 백업 레코드다(ADR-0004 롤백 공통 정책 ③). executor는
 # 읽기만 하고 트랜잭션을 소유하지 않으므로 조회를 주입받는다 — precheck()가 DB 없이
-# 단위 테스트되는 것도 같은 이유다. 기록(스펙 JSON 백업 모듈)은 별도 카드다.
+# 단위 테스트되는 것도 같은 이유다. 기록하는 쪽은 services/aws/backup.py(캡처)와
+# workflows.store_instance_spec_backup(저장·결속·커밋)이다.
 
 
 @dataclass(frozen=True)
@@ -99,11 +101,13 @@ class BackupRecordLoader(Protocol):
         """
 
 
-# 백업 종류 — 런북 명세서 safety_and_rollback.backup_action과 같은 어휘를 쓴다
-BACKUP_INSTANCE_SPEC = "SAVE_INSTANCE_SPEC_JSON"
-BACKUP_SG_FULL_RULES = "SAVE_SG_FULL_RULES_JSON"
-BACKUP_SG_AND_TG_MAPPING = "SAVE_CURRENT_SG_AND_TG_MAPPING"
-BACKUP_NACL_RULE_INDEX = "RECORD_NACL_RULE_INDEX"
+# 백업 종류 — 어휘의 원천은 schemas.backups.BackupType이다(런북 명세서
+# safety_and_rollback.backup_action). 읽는 쪽(여기)과 만드는 쪽(services/aws/backup.py)이
+# 문자열을 각자 적으면 오타 하나로 백업이 조회되지 않는다.
+BACKUP_INSTANCE_SPEC = BackupType.SAVE_INSTANCE_SPEC_JSON.value
+BACKUP_SG_FULL_RULES = BackupType.SAVE_SG_FULL_RULES_JSON.value
+BACKUP_SG_AND_TG_MAPPING = BackupType.SAVE_CURRENT_SG_AND_TG_MAPPING.value
+BACKUP_NACL_RULE_INDEX = BackupType.RECORD_NACL_RULE_INDEX.value
 
 
 # ------------------------------------------------------------------ 파라미터 검증
@@ -160,11 +164,15 @@ class ParsedArn:
     resource_id: str
 
 
-def _parse_arn(arn: str) -> Optional[ParsedArn]:
+def parse_arn(arn: str) -> Optional[ParsedArn]:
     """arn:aws:ec2:<region>:<account>:<type>/<id> 형태만 받는다.
 
     수집기가 만드는 포맷과 같다(services/collector.py의 _arn) — 가드레일 ③이
     대조하는 문자열도 이것이다.
+
+    공개 함수다. 실행 흐름이 target_arn에서 리전·자원 ID를 꺼낼 때 같은 해석을
+    써야 하기 때문이다(workflows의 스펙 JSON 백업) — 파서가 둘이면 precheck가
+    본 자원과 조치·백업이 향하는 자원이 갈릴 수 있다.
     """
     if not isinstance(arn, str):
         return None
@@ -439,7 +447,7 @@ def _validate_scope(spec: _Spec, target: ParsedArn, params: Mapping[str, Any]) -
         return f"{primary}가 target_arn과 다른 자원을 가리킴"
 
     for key in spec.arn_params:
-        parsed = _parse_arn(params[key])
+        parsed = parse_arn(params[key])
         if parsed is None:
             return f"{key} ARN 형식 위반"
         if (parsed.partition, parsed.account_id) != (target.partition, target.account_id):
@@ -1003,7 +1011,7 @@ def precheck(
     if problem is not None:
         return _reject(spec, R.PRECHECK_PARAM_INVALID, problem)
 
-    target = _parse_arn(target_arn)
+    target = parse_arn(target_arn)
     if target is None:
         return _reject(spec, R.PRECHECK_PARAM_INVALID, "target_arn 형식 위반")
 
