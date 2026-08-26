@@ -34,5 +34,5 @@
 
 Refs #<이슈번호>
 <!-- Closes·Fixes·Resolves 등 자동 CLOSE 키워드 금지 (기본 브랜치가 dev라 머지 즉시 닫힌다).
-     이슈는 머지 후 작성자 외 1명의 교차검증 결과를 코멘트로 남기고 수동으로 CLOSE한다.
-     전체 규칙은 CLAUDE.md §Git 작업 흐름. -->
+     이슈는 머지 후 머지 책임자가 직접 판단해 수동으로 CLOSE한다 — 머지 승인 코멘트 끝의 Claude CLOSE 추천이 판단 근거다.
+     전체 규칙은 CLAUDE.md §Git 작업 흐름·§Pull Request(PR) 규칙. -->
