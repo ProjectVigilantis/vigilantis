@@ -89,6 +89,8 @@
 | `INFRA` | Docker·IaC·CI/CD·배포 | `packages/iac`, `docker-compose.yml`, `.github` |
 | `DOCS` | 문서·ADR | `docs` |
 
+> **테스트·데이터셋·QA 산출물의 DOMAIN**(2026-08-26 확정 · 이슈 #144)은 파일이 놓인 디렉터리가 아니라 **그 작업이 검증·대상으로 삼는 영역**을 따른다. 예: `tests/test_guardrails.py` → `AI`, `datasets/golden/`의 판정 정답지 → `DATA`, `tests/`의 실행 계열 하네스 → `BE`. 문서 자체가 산출물이면 `DOCS`. **`QA`는 DOMAIN 값이 아니다** — DOMAIN 축의 실질적 쓸모가 **리뷰어 지정**(§리뷰 요청 대상 표)인데, `QA`로 묶으면 가드레일 테스트(안성일)와 Golden Dataset(김승철) 중 누가 봐야 하는지가 표기에서 사라진다.
+
 ---
 
 ## 브랜치명 규칙
