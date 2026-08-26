@@ -46,12 +46,16 @@ function Preset({
 export function IncidentsView({
   items,
   pendingOnly,
+  otherStatusFilter,
   pendingCount,
 }: {
   items: IncidentListItem[];
   /** `승인 대기` 프리셋 여부. 서버가 `?status=AWAITING_APPROVAL`로 걸러 준 결과다. */
   pendingOnly: boolean;
-  pendingCount: number;
+  /** 두 프리셋 밖의 유효한 `?status=` 값. 있으면 어느 프리셋도 활성이 아니다. */
+  otherStatusFilter: string | null;
+  /** 셀 수 없는 응답이면 null — 배지를 감춘다. */
+  pendingCount: number | null;
 }) {
   const [category, setCategory] = useState<string>(ALL);
   const [status, setStatus] = useState<string>(ALL);
@@ -76,14 +80,15 @@ export function IncidentsView({
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <nav className="flex items-center gap-1">
-          <Preset href="/incidents" active={!pendingOnly}>
+          <Preset href="/incidents" active={!pendingOnly && otherStatusFilter === null}>
             {ALL}
           </Preset>
           <Preset href="/incidents?status=AWAITING_APPROVAL" active={pendingOnly}>
             승인 대기
             {/* 대기 건수 배지 — 이 프리셋에 뜨는 건 전부 지금 누를 수 있는 건이다.
-                계약이 AWAITING_APPROVAL을 "실행 가능한 제안 ≥ 1 · 진행 중 실행 없음"으로 강제한다. */}
-            <Badge variant="secondary">{pendingCount}</Badge>
+                계약이 AWAITING_APPROVAL을 "실행 가능한 제안 ≥ 1 · 진행 중 실행 없음"으로 강제한다.
+                셀 수 없는 응답(두 프리셋 밖 필터)에서는 배지를 감춘다 — 0은 거짓말이 된다. */}
+            {pendingCount !== null ? <Badge variant="secondary">{pendingCount}</Badge> : null}
           </Preset>
         </nav>
 
@@ -115,8 +120,22 @@ export function IncidentsView({
         </div>
       </div>
 
-      <div className="text-muted-foreground text-xs" aria-live="polite">
-        {visible.length === items.length ? `${items.length}건` : `${visible.length} / ${items.length}건`}
+      <div className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs">
+        {/* 두 프리셋 어느 쪽도 아닌 필터가 걸려 있으면 그 사실을 말한다 — 프리셋 표시만으로는
+            지금 무엇이 걸러진 목록인지 알 수 없다(PR #171 리뷰). */}
+        {otherStatusFilter !== null ? (
+          <span>
+            서버 필터 <code className="font-mono">status={otherStatusFilter}</code> 적용됨 ·{' '}
+            <Link href="/incidents" className="underline underline-offset-4">
+              전체 보기
+            </Link>
+          </span>
+        ) : null}
+        <span aria-live="polite">
+          {visible.length === items.length
+            ? `${items.length}건`
+            : `${visible.length} / ${items.length}건`}
+        </span>
       </div>
 
       {visible.length === 0 ? (

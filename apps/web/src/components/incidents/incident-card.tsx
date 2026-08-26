@@ -79,11 +79,13 @@ export function IncidentCard({
         ) : null}
       </div>
 
-      {/* 카드 전체가 아니라 제목만 링크다 — 카드 안에 [조치 실행] 버튼이 들어가므로
-          카드를 통째로 클릭 영역으로 만들면 버튼 클릭이 상세 이동으로 새어 나간다. */}
+      {/* 카드 전체가 INC-002 진입점이다(§4.4 액션). 링크를 `::after`로 카드 전면에 펼쳐
+          어디를 눌러도 상세로 가되, 접근성 트리에는 **링크 하나**만 남긴다 —
+          카드를 role="button"으로 감싸면 안에 든 [조치 실행]이 중첩 대화형 요소가 된다.
+          버튼은 아래에서 `z-10`으로 이 오버레이 위에 올린다(PR #171 리뷰). */}
       <Link
         href={`/incidents/${encodeURIComponent(incident.incident_id)}`}
-        className="hover:text-primary min-w-0 font-medium underline-offset-4 hover:underline"
+        className="hover:text-primary min-w-0 font-medium underline-offset-4 after:absolute after:inset-0 hover:underline"
       >
         <span className="line-clamp-2">{incidentTitle(incident)}</span>
       </Link>
@@ -99,7 +101,8 @@ export function IncidentCard({
         {showExecute ? (
           // 실행은 ACT-001 모달(#166)이 열어야 한다 — 요청 3필드·멱등 키·파괴적 조치 경고가
           // 그 카드 소관이고, 그것 없이 실행을 열면 계약을 어긴 요청이 나간다.
-          <Button type="button" size="sm" disabled>
+          // `z-10`으로 카드 전면 링크 오버레이 위에 둔다.
+          <Button type="button" size="sm" disabled className="relative z-10">
             조치 실행
           </Button>
         ) : null}

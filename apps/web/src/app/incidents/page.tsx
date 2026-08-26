@@ -28,9 +28,16 @@ export default async function IncidentsPage({ searchParams }: PageProps<'/incide
     return <ErrorState error={error} variant="page" />;
   }
 
-  // 응답이 무엇으로 걸러졌든 배지는 같은 식으로 센다 — `승인 대기` 프리셋에서는 전량이,
-  // `전체`에서는 해당 status만 잡힌다. 요청을 한 번 더 부르지 않는다.
-  const pendingCount = incidents.items.filter((i) => i.status === 'AWAITING_APPROVAL').length;
+  /**
+   * 대기 건수는 **셀 수 있을 때만** 넘긴다 — 요청을 한 번 더 부르지 않기 때문이다.
+   * `전체`(무필터)와 `승인 대기`에서는 받아 온 목록으로 정확히 세지만, `?status=FAILED` 같은
+   * 두 프리셋 밖 필터에서는 응답에 승인 대기 건이 아예 없어 0이 **거짓말**이 된다(PR #171 리뷰).
+   * 그때는 null로 넘겨 배지를 감춘다.
+   */
+  const countable = status === undefined || pendingOnly;
+  const pendingCount = countable
+    ? incidents.items.filter((i) => i.status === 'AWAITING_APPROVAL').length
+    : null;
 
   return (
     <>
@@ -38,6 +45,8 @@ export default async function IncidentsPage({ searchParams }: PageProps<'/incide
       <IncidentsView
         items={incidents.items}
         pendingOnly={pendingOnly}
+        // 두 프리셋 밖 필터가 걸린 상태 — 어느 프리셋도 활성이 아니다.
+        otherStatusFilter={!countable && typeof status === 'string' ? status : null}
         pendingCount={pendingCount}
       />
     </>

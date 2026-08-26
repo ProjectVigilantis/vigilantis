@@ -64,7 +64,11 @@ export const RISK_BAND_CLASS: Record<RiskLevel, string> = {
   LOW: 'bg-amber-400',
 };
 
-export const RISK_BAND_EMPTY = 'bg-muted/40';
+/**
+ * FINOPS 자리표시 — **보이지 않아야 한다.** 회색 띠를 그리면 "위험도가 낮은 것"으로 읽히는데,
+ * 계약은 FinOps의 위험도를 판정 안 함(null)으로 강제한다. 폭만 차지한다(PR #171 리뷰).
+ */
+export const RISK_BAND_EMPTY = 'bg-transparent';
 
 /**
  * 사전 항목 하나를 그리는 최소 단위. `null`이면 아무것도 그리지 않는다(3.2의 "—").
