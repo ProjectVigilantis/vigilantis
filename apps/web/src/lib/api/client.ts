@@ -104,5 +104,16 @@ export async function executeAction(
  * 버튼 클릭 시점에 만들면 중복 클릭이 서로 다른 키가 되어 멱등성이 무력화된다.
  */
 export function newIdempotencyKey(): string {
-  return crypto.randomUUID();
+  // `randomUUID`는 **secure context 전용**이다 — https·localhost·127.0.0.1에서만 노출된다.
+  // 시연을 `http://<퍼블릭 IP>:3000`으로 띄우면 `undefined`가 되고, React 19는 이벤트 핸들러에서
+  // 던진 예외를 error boundary로 잡지 않아 **실행 버튼이 아무 반응 없이 죽는다**(PR #169 리뷰).
+  // `apps/web`은 아직 Dockerfile·compose 서비스가 없어 HTTPS를 전제할 수 없다.
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+
+  // getRandomValues는 secure context가 아니어도 항상 있다. RFC 4122 v4 비트만 맞춰 준다.
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((n) => n.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }

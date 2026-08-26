@@ -15,8 +15,37 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { ApiError, executeAction } from '@/lib/api/client';
-import { RUNBOOK_LABELS, isDestructiveRunbook } from '@/lib/enum-labels';
+import { DESTRUCTIVE_RUNBOOK_IDS, RUNBOOK_LABELS, isDestructiveRunbook } from '@/lib/enum-labels';
 import type { ExecuteActionResponse, IncidentResponse, RunbookId } from '@/types/api';
+
+/**
+ * 파괴적 조치 경고는 **런북별로 다르다.** 2종에 한 문장을 공통으로 붙일 수 없다(PR #169 리뷰).
+ *
+ * - `RUNBOOK_EBS_DELETE_UNATTACHED` — 최종 스냅샷을 강제하지만 **등록된 롤백 런북이 없다**
+ * - `RUNBOOK_SG_DELETE_ISOLATED` — 스냅샷이 아니라 **규칙 JSON 백업**(`SAVE_SG_FULL_RULES_JSON`)이고
+ *   `RUNBOOK_SG_RECREATE`로 되돌릴 수 있다(`packages/schemas/runbooks.py` `ROLLBACK_RUNBOOK_BY_MAIN_ID`).
+ *   대신 **신규 sg-id가 발급**돼 원본 sg-id를 참조하던 다른 규칙은 자동 복원되지 않는다.
+ *
+ * 이 모달은 관제자가 마지막으로 사실을 확인하는 자리다 — 없는 안전장치를 약속하지 않는다.
+ */
+const DESTRUCTIVE_WARNINGS: Record<(typeof DESTRUCTIVE_RUNBOOK_IDS)[number], string> = {
+  RUNBOOK_EBS_DELETE_UNATTACHED:
+    '볼륨을 삭제합니다. 삭제 직전 최종 스냅샷을 강제로 남기지만, 원클릭 롤백 런북은 없습니다.',
+  RUNBOOK_SG_DELETE_ISOLATED:
+    '보안 그룹을 삭제합니다. 삭제 직전 규칙 전체를 JSON으로 백업하고 「SG 재생성」으로 되돌릴 수 있습니다. 단 신규 sg-id가 발급되어, 원본 sg-id를 참조하던 다른 규칙은 자동 복원되지 않습니다.',
+};
+
+/** 실행 후보 1건. 주 조치는 `recommendations[]`의 값을 그대로 싣는다. */
+export interface ActionCandidate {
+  runbookId: RunbookId;
+  /**
+   * **실제로 바뀌는 자원**이다. `subject_arn`과 다를 수 있다 — 예를 들어 SG 인시던트의
+   * `RUNBOOK_NACL_ADD_DENY`는 NACL을 고친다(PR #169 리뷰). 복구 런북은 계약에 이 값이 없어 null이다.
+   */
+  targetArn: string | null;
+  /** 표시 전용. FE가 key 표시명을 지어내지 않고 원문을 쓴다. */
+  displayParameters: Record<string, string> | null;
+}
 
 /**
  * 모달 한 인스턴스가 다루는 요청. **`idempotencyKey`는 모달을 열 때 만들어 여기 고정한다**(§4.6) —
@@ -25,8 +54,8 @@ import type { ExecuteActionResponse, IncidentResponse, RunbookId } from '@/types
  */
 export interface ActionRequest {
   idempotencyKey: string;
-  /** 실행 후보. 주 조치는 `recommendations`의 런북, 복구는 해제할 롤백 런북 1종. */
-  candidates: RunbookId[];
+  /** 실행 후보. 주 조치는 `recommendations`, 복구는 해제할 롤백 런북 1종. */
+  candidates: ActionCandidate[];
   variant: 'ACTION' | 'RECOVERY';
   /** B 변형 표시용 — 어느 실행을 해제하는지. 전송하지 않는다(계약에서 폐기된 필드다). */
   originExecutionId?: string;
@@ -38,7 +67,7 @@ export interface ExecuteOutcome {
   replayed: boolean;
 }
 
-/** §4.7 최종 상태 4종. 여기서는 `PROPOSAL_NOT_EXECUTABLE` 후 재조회 판단에만 쓴다. */
+/** §4.6 응답 처리 표의 오류 4종 — 모달을 유지할지, 닫고 상세를 재조회할지 가른다. */
 function messageFor(error: ApiError): { text: string; keepOpen: boolean } {
   switch (error.code) {
     case 'IDEMPOTENCY_KEY_CONFLICT':
@@ -81,7 +110,8 @@ export function ActionExecuteDialog({
 
   const open = request !== null;
   const candidates = request?.candidates ?? [];
-  const runbookId = selected ?? candidates[0] ?? null;
+  const runbookId = selected ?? candidates[0]?.runbookId ?? null;
+  const chosen = candidates.find((c) => c.runbookId === runbookId) ?? null;
   const isRecovery = request?.variant === 'RECOVERY';
   const destructive = runbookId !== null && isDestructiveRunbook(runbookId);
 
@@ -135,8 +165,12 @@ export function ActionExecuteDialog({
 
         <dl className="flex flex-col gap-2 text-sm">
           <div className="flex items-start justify-between gap-3">
+            {/* 선택한 런북이 실제로 바꾸는 자원을 보여준다 — `subject_arn`과 다를 수 있다.
+                복구 런북은 계약에 target이 없어 인시던트 대상으로 되돌린다. */}
             <dt className="text-muted-foreground">대상</dt>
-            <dd className="text-right font-mono text-xs break-all">{incident.subject_arn}</dd>
+            <dd className="text-right font-mono text-xs break-all">
+              {chosen?.targetArn ?? incident.subject_arn}
+            </dd>
           </div>
           {request?.originExecutionId ? (
             <div className="flex items-start justify-between gap-3">
@@ -150,20 +184,42 @@ export function ActionExecuteDialog({
           <legend className="text-muted-foreground mb-1.5 text-xs font-medium">
             {isRecovery ? '해제 대상' : `실행할 런북 (${candidates.length}건 중 선택)`}
           </legend>
-          {candidates.map((id) => (
-            <label key={id} className="flex items-center gap-2 text-sm">
+          {candidates.map((candidate) => (
+            <label
+              key={candidate.runbookId}
+              className="border-border flex items-start gap-2 rounded-md border p-2 text-sm"
+            >
               <input
                 type="radio"
                 name="runbook"
-                value={id}
-                checked={runbookId === id}
-                onChange={() => setSelected(id)}
+                value={candidate.runbookId}
+                checked={runbookId === candidate.runbookId}
+                onChange={() => setSelected(candidate.runbookId)}
                 disabled={pending}
+                className="mt-1"
               />
-              <span>{RUNBOOK_LABELS[id]}</span>
-              {isDestructiveRunbook(id) ? (
-                <span className="text-destructive text-xs font-medium">[파괴적]</span>
-              ) : null}
+              <span className="flex min-w-0 flex-col gap-0.5">
+                <span className="flex flex-wrap items-center gap-1.5">
+                  <span className="font-medium">{RUNBOOK_LABELS[candidate.runbookId]}</span>
+                  {isDestructiveRunbook(candidate.runbookId) ? (
+                    <span className="text-destructive text-xs font-medium">[파괴적]</span>
+                  ) : null}
+                </span>
+                {/* display_parameters는 자유 형식 Record다 — key 표시명을 지어내지 않고 원문을 쓴다. */}
+                {candidate.displayParameters
+                  ? Object.entries(candidate.displayParameters).map(([key, value]) => (
+                      <span key={key} className="text-muted-foreground flex gap-2 text-xs">
+                        <span className="font-mono">{key}</span>
+                        <span className="text-foreground">{value}</span>
+                      </span>
+                    ))
+                  : null}
+                {candidate.targetArn !== null ? (
+                  <span className="text-muted-foreground font-mono text-xs break-all">
+                    {candidate.targetArn}
+                  </span>
+                ) : null}
+              </span>
             </label>
           ))}
         </fieldset>
@@ -172,8 +228,8 @@ export function ActionExecuteDialog({
         {destructive && runbookId !== null ? (
           <p className="border-destructive text-destructive rounded-md border p-3 text-sm">
             {/* 런북 표시명이 조사에 따라 갈리므로 "은/는"을 붙이지 않고 콜론으로 끊는다. */}
-            ⚠ 파괴적 조치입니다 — <b>{RUNBOOK_LABELS[runbookId]}</b>: 자원을 삭제하며{' '}
-            <b>되돌릴 수 없습니다.</b> 삭제 직전 최종 스냅샷을 강제 생성합니다.
+            ⚠ 파괴적 조치입니다 — <b>{RUNBOOK_LABELS[runbookId]}</b>:{' '}
+            {DESTRUCTIVE_WARNINGS[runbookId as (typeof DESTRUCTIVE_RUNBOOK_IDS)[number]]}
           </p>
         ) : null}
 

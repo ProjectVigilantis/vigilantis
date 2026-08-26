@@ -14,6 +14,7 @@ import { CopyButton } from '@/components/copy-button';
 import { Row } from '@/components/detail-row';
 import {
   ActionExecuteDialog,
+  type ActionCandidate,
   type ActionRequest,
   type ExecuteOutcome,
 } from '@/components/incidents/action-execute-dialog';
@@ -25,6 +26,7 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { newIdempotencyKey } from '@/lib/api/client';
+import { isTerminalStatus } from '@/lib/execution-status';
 import { RUNBOOK_LABELS, incidentTitle } from '@/lib/enum-labels';
 import { formatKst } from '@/lib/utils';
 import type { AssetItem, IncidentResponse, IsoDateTime, RunbookId } from '@/types/api';
@@ -236,7 +238,7 @@ function ProposalActions({
 }: {
   incident: IncidentResponse;
   locked: boolean;
-  onExecute: (candidates: RunbookId[]) => void;
+  onExecute: (candidates: ActionCandidate[]) => void;
 }) {
   if (incident.recommendations.length === 0) return null;
 
@@ -250,7 +252,15 @@ function ProposalActions({
       <Button
         type="button"
         disabled={locked}
-        onClick={() => onExecute(incident.recommendations.map((r) => r.runbook_id))}
+        onClick={() =>
+          onExecute(
+            incident.recommendations.map((r) => ({
+              runbookId: r.runbook_id,
+              targetArn: r.target_arn,
+              displayParameters: r.display_parameters,
+            })),
+          )
+        }
       >
         {approveLabel}
       </Button>
@@ -288,17 +298,28 @@ export function IncidentDetail({
   const [request, setRequest] = useState<ActionRequest | null>(null);
   const [outcome, setOutcome] = useState<ExecuteOutcome | null>(null);
 
-  const locked = incident.status === 'ACTION_IN_PROGRESS';
+  /**
+   * §4.5 실행 잠금. `incident.status`는 서버 컴포넌트 prop이라 202 직후에는 아직 갱신되지 않는데,
+   * 그 공백에 다른 런북을 누르면 **새 모달 = 새 멱등 키**라 계약의 Idempotency가 걸러 주지 못하고
+   * 같은 대상에 두 번째 실제 실행이 나간다(PR #169 리뷰). 그래서 응답을 받은 즉시 로컬로도 잠근다.
+   *
+   * 잠금은 **비최종 상태 동안만**이다 — `FAILED`는 AWS 변경이 없어 재시도·다른 제안이 가능하고(§4.7),
+   * 그때는 재조회된 서버 상태가 판단한다.
+   */
+  const locked =
+    incident.status === 'ACTION_IN_PROGRESS' ||
+    (outcome !== null && !isTerminalStatus(outcome.execution.status));
   const subjectHref = subject ? `/assets?asset=${encodeURIComponent(subject.arn)}` : null;
 
-  function openAction(candidates: RunbookId[]) {
+  function openAction(candidates: ActionCandidate[]) {
     setRequest({ idempotencyKey: newIdempotencyKey(), candidates, variant: 'ACTION' });
   }
 
   function openRecovery(runbookId: RunbookId, originExecutionId: string) {
     setRequest({
       idempotencyKey: newIdempotencyKey(),
-      candidates: [runbookId],
+      // 복구 런북은 `available_recovery_runbook_ids`의 ID뿐이다 — 계약에 target·파라미터가 없다.
+      candidates: [{ runbookId, targetArn: null, displayParameters: null }],
       variant: 'RECOVERY',
       originExecutionId,
     });
@@ -419,7 +440,11 @@ export function IncidentDetail({
         incident={incident}
         request={request}
         onClose={() => setRequest(null)}
-        onExecuted={setOutcome}
+        onExecuted={(next) => {
+          setOutcome(next);
+          // 서버 상태(ACTION_IN_PROGRESS)를 따라오게 한다. 위 locked가 그 사이를 덮는다.
+          router.refresh();
+        }}
         // 409 PROPOSAL_NOT_EXECUTABLE — 제안이 이미 실행됐거나 무효해졌다. 상세를 다시 읽는다(§4.6).
         onProposalStale={() => router.refresh()}
       />

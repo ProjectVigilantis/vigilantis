@@ -9,6 +9,7 @@ import { useEffect, useRef } from 'react';
 import { CopyButton } from '@/components/copy-button';
 import { ExecutionStatusBadge } from '@/components/status-badge';
 import { Card } from '@/components/ui/card';
+import { isTerminalStatus } from '@/lib/execution-status';
 import { formatKst } from '@/lib/utils';
 import type { ExecuteActionResponse, ExecutionStatus, IsoDateTime } from '@/types/api';
 
@@ -19,17 +20,6 @@ export interface ExecutionTransition {
   from: ExecutionStatus | null;
   to: ExecutionStatus;
 }
-
-/**
- * 최종 상태 4종. 여기에 닿으면 스피너를 끄고 `GET /incidents/{id}`를 재조회한다(§4.7).
- * `ROLLED_BACK`·`ROLLBACK_FAILED`는 **원본 Execution에만** 기록되고 롤백 자식은 SUCCESS·FAILED만 쓴다.
- */
-const TERMINAL_STATUSES: readonly ExecutionStatus[] = [
-  'SUCCESS',
-  'FAILED',
-  'ROLLED_BACK',
-  'ROLLBACK_FAILED',
-];
 
 /**
  * §4.7 최종 상태 표시 표. `FAILED`(AWS 변경 없음)와 `ROLLBACK_FAILED`(변경된 채 복구 실패)는
@@ -43,10 +33,6 @@ const STATUS_MESSAGES: Record<ExecutionStatus, string> = {
   ROLLED_BACK: '이전 상태로 복구했습니다.',
   ROLLBACK_FAILED: '복구에 실패했습니다. 수동 확인이 필요합니다.',
 };
-
-function isTerminal(status: ExecutionStatus): boolean {
-  return TERMINAL_STATUSES.includes(status);
-}
 
 export function ExecutionStatusPanel({
   execution,
@@ -67,7 +53,7 @@ export function ExecutionStatusPanel({
   // 최종 상태를 받으면 상세를 재조회해 화면 값을 확정한다 — WS는 알림이고 상태의 기준이 아니다(§4.8).
   // router.refresh()는 useState를 보존하므로 이 패널은 유지된다(Next 16 useRouter 레퍼런스).
   useEffect(() => {
-    if (!isTerminal(execution.status)) return;
+    if (!isTerminalStatus(execution.status)) return;
     const key = `${execution.execution_id}:${execution.status}`;
     if (refreshedFor.current === key) return;
     refreshedFor.current = key;
