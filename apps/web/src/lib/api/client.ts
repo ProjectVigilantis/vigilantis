@@ -39,7 +39,10 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function requestWithStatus<T>(
+  path: string,
+  init?: RequestInit,
+): Promise<{ httpStatus: number; body: T }> {
   const response = await fetch(`${baseUrl()}/api/v1${path}`, { cache: 'no-store', ...init });
   const body: unknown = await response.json().catch(() => null);
 
@@ -52,7 +55,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       detail?.request_id ?? '',
     );
   }
-  return body as T;
+  return { httpStatus: response.status, body: body as T };
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  return (await requestWithStatus<T>(path, init)).body;
 }
 
 export function getAssets(): Promise<AssetsResponse> {
@@ -74,16 +81,28 @@ export function getIncident(incidentId: string): Promise<IncidentResponse> {
   return request<IncidentResponse>(`/incidents/${encodeURIComponent(incidentId)}`);
 }
 
-/** 202(신규 예약)·200(같은 Key 재요청) 모두 같은 본문이라 응답만 돌려준다. */
-export function executeAction(body: ExecuteActionRequest): Promise<ExecuteActionResponse> {
-  return request<ExecuteActionResponse>('/actions/execute', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+/**
+ * 202(신규 예약)·200(같은 Key 재요청)은 본문이 같고 **상태 코드로만** 갈린다 — 200이면 ACT-002에
+ * `이미 접수된 요청입니다`를 함께 띄워야 하므로(§4.6 응답 처리) `replayed`로 구분해 돌려준다.
+ */
+export async function executeAction(
+  body: ExecuteActionRequest,
+): Promise<{ replayed: boolean; execution: ExecuteActionResponse }> {
+  const { httpStatus, body: execution } = await requestWithStatus<ExecuteActionResponse>(
+    '/actions/execute',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  );
+  return { replayed: httpStatus === 200, execution };
 }
 
-/** idempotency_key는 클릭 시점에 FE가 생성한다(재사용은 같은 요청의 중복 클릭·재시도 한정). */
+/**
+ * `idempotency_key`는 **ACT-001 모달이 열릴 때 1회** 만들어 모달 인스턴스 수명 동안 고정한다(§4.6).
+ * 버튼 클릭 시점에 만들면 중복 클릭이 서로 다른 키가 되어 멱등성이 무력화된다.
+ */
 export function newIdempotencyKey(): string {
   return crypto.randomUUID();
 }
