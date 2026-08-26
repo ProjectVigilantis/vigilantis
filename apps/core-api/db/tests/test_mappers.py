@@ -81,7 +81,8 @@ def test_candidate_round_trip():
         incident_id="in-1",
         runbook_id="RUNBOOK_EC2_RIGHTSIZING",
         target_arn="arn:x",
-        display_parameters={"instance_type": "t3.large -> t3.medium"},
+        # display_parameters는 넘기지 않는다 — 계약이 parameters에서 만든다(#154)
+        parameters={"target_instance_type": "t3.medium"},
         evidence_ids=["ev-1", "ev-2"],
         status=CandidateStatus.PENDING_VALIDATION,
     )

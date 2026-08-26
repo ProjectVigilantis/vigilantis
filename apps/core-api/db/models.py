@@ -363,6 +363,11 @@ class RunbookCandidate(Base):
     incident_id: Mapped[str] = mapped_column(_ID, ForeignKey("incidents.incident_id"))
     runbook_id: Mapped[RunbookId] = mapped_column(_enum(RunbookId, "runbook_id"))
     target_arn: Mapped[str] = mapped_column(String(512))
+    # Runbook별 typed 파라미터의 저장본 — AI가 정한 값만 들어온다(#154).
+    # display_parameters는 그것에서 서버가 만든 화면 표시본이다.
+    # ORM 기본값을 두지 않는다 — 기본값이 있으면 계약(RunbookCandidateData)을
+    # 우회한 삽입이 빈 파라미터로 조용히 저장된다. 쓰는 쪽이 반드시 값을 낸다.
+    parameters: Mapped[dict] = mapped_column(JSONB)
     display_parameters: Mapped[dict] = mapped_column(JSONB, default=dict)
     evidence_ids: Mapped[list] = mapped_column(JSONB, default=list)
     status: Mapped[CandidateStatus] = mapped_column(

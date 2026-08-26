@@ -36,6 +36,15 @@ KEY = "6dbfe076-1da1-4d35-88f8-b869dce44e61"
 SUBJECT_EC2 = "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0aaa"
 DEFAULT_RUNBOOK = RunbookId.RUNBOOK_NACL_ADD_DENY
 
+# Runbook별 typed 파라미터(#154) — 접수가 저장 후보를 계약으로 재검증하므로
+# 픽스처도 계약에 맞는 값을 싣는다
+_PARAMS_BY_RUNBOOK = {
+    RunbookId.RUNBOOK_NACL_ADD_DENY: {
+        "rule_number": 100, "cidr_block": "203.0.113.5/32", "protocol": "-1",
+    },
+    RunbookId.RUNBOOK_SG_DELETE_ISOLATED: {},
+}
+
 
 def _seed_incident(db) -> models.Incident:
     incident = models.Incident(
@@ -57,11 +66,14 @@ def _add_candidate(
     incident: models.Incident,
     runbook_id: RunbookId = DEFAULT_RUNBOOK,
     status: CandidateStatus = CandidateStatus.EXECUTABLE,
+    parameters: dict | None = None,
 ) -> models.RunbookCandidate:
     candidate = models.RunbookCandidate(
         incident_id=incident.incident_id,
         runbook_id=runbook_id,
         target_arn=SUBJECT_EC2,
+        parameters=_PARAMS_BY_RUNBOOK[runbook_id] if parameters is None else parameters,
+        evidence_ids=["ev-1"],
         status=status,
     )
     db.add(candidate)
@@ -154,6 +166,31 @@ def test_other_runbook_executable_returns_409(client_pg, db):
     )
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "PROPOSAL_NOT_EXECUTABLE"
+
+
+def test_contract_invalid_candidate_returns_409(client_pg, db):
+    """typed 계약(#154)을 거치지 않은 저장 후보는 EXECUTABLE이어도 실행되지 않는다.
+
+    계약 이전에 저장된 행·마이그레이션 backfill(빈 parameters)이 이 부류다.
+    접수만 막고 상세 노출은 그대로 둔다 — 응답 계약이 AWAITING_APPROVAL에 제안
+    1개 이상을 요구해, 노출을 거르면 이 인시던트의 상세가 500이 된다
+    (workflows._candidate_meets_contract 참조).
+    """
+    incident = _seed_incident(db)
+    _add_candidate(db, incident, parameters={})  # NACL_ADD_DENY 필수 키 누락
+
+    response = client_pg.post(URL, json=_body(incident, DEFAULT_RUNBOOK))
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "PROPOSAL_NOT_EXECUTABLE"
+    # 실행 예약이 남지 않는다
+    assert executions_repo.get_by_idempotency_key(db, KEY) is None
+
+    # 상세는 계속 응답한다 — 후보는 보이되 실행만 막힌 상태다
+    detail = client_pg.get(f"/api/v1/incidents/{incident.incident_id}")
+    assert detail.status_code == 200
+    assert [r["runbook_id"] for r in detail.json()["recommendations"]] == [
+        DEFAULT_RUNBOOK.value
+    ]
 
 
 # --- 예약 · 멱등 ---------------------------------------------------------------
