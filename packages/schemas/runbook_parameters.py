@@ -68,18 +68,21 @@ def _reject_blank(value: str) -> str:
     return value
 
 
-def _reject_bare_ip(value: str) -> str:
-    """접두 길이를 반드시 적게 한다.
+def _require_network_cidr(value: str) -> str:
+    """접두 길이가 있고 호스트 비트가 서지 않은 네트워크 주소만 받는다.
 
-    ipaddress는 맨 IP도 /32로 받아 주지만, 차단 대역을 다루는 필드에서
-    "203.0.113.5"와 "203.0.113.5/32"를 같게 보면 의도가 흐려진다.
+    ipaddress는 맨 IP를 /32로, "203.0.113.5/24"를 203.0.113.0/24로 해석해 주지만,
+    차단 대역을 다루는 필드에서 그 자동 해석은 AI가 의도한 범위와 실제 차단 범위를
+    조용히 가른다 — 호스트 하나를 노린 값이 256개 주소 차단이 된다(PR #178 리뷰).
+    보정하지 않고 거절해, 값이 호스트(/32)인지 대역(canonical CIDR)인지를 AI가
+    값으로 밝히게 한다.
     """
     if "/" not in value:
         raise ValueError("접두 길이가 있는 IPv4 CIDR이어야 합니다")
     try:
-        ipaddress.IPv4Network(value, strict=False)
+        ipaddress.IPv4Network(value, strict=True)
     except ValueError as exc:
-        raise ValueError("IPv4 CIDR이어야 합니다") from exc
+        raise ValueError("호스트 비트가 없는 네트워크 주소 IPv4 CIDR이어야 합니다") from exc
     return value
 
 
@@ -100,7 +103,7 @@ TargetGroupArn = Annotated[
 ]
 RuleNumber = Annotated[StrictInt, Field(ge=1, le=32766)]
 AutoScalingSize = Annotated[StrictInt, Field(ge=1, le=4)]
-Ipv4Cidr = Annotated[str, AfterValidator(_reject_bare_ip)]
+Ipv4Cidr = Annotated[str, AfterValidator(_require_network_cidr)]
 # "-1"은 AWS의 전체 프로토콜 표기다
 NaclProtocol = Literal["tcp", "udp", "icmp", "-1"]
 

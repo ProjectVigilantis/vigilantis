@@ -163,6 +163,10 @@ def test_every_precheck_key_has_exactly_one_source(runbook_id):
     {"rule_number": "100"},
     {"cidr_block": "203.0.113.5"},  # 접두 길이 필수
     {"cidr_block": "not-an-ip/32"},
+    # 호스트 비트 거절(strict) — 자동 해석하면 호스트 하나를 노린 값이 대역
+    # 차단이 된다(203.0.113.5/24 → 203.0.113.0/24, PR #178 리뷰)
+    {"cidr_block": "203.0.113.5/24"},
+    {"cidr_block": "10.1.2.3/16"},
     {"protocol": "sctp"},
 ])
 def test_nacl_add_deny_value_violations(over):
@@ -170,6 +174,17 @@ def test_nacl_add_deny_value_violations(over):
         NaclAddDenyCandidateParameters.model_validate(
             {**CANDIDATE_VALUES["RUNBOOK_NACL_ADD_DENY"], **over}
         )
+
+
+@pytest.mark.parametrize(
+    "cidr", ["0.0.0.0/0", "10.0.0.0/8", "203.0.113.128/25", "203.0.113.5/32"]
+)
+def test_canonical_cidr_blocks_pass_unchanged(cidr):
+    """호스트 비트가 없는 canonical CIDR은 전 대역 폭에서 통과하고, 값이 보정되지 않는다."""
+    model = NaclAddDenyCandidateParameters.model_validate(
+        {**CANDIDATE_VALUES["RUNBOOK_NACL_ADD_DENY"], "cidr_block": cidr}
+    )
+    assert model.cidr_block == cidr
 
 
 @pytest.mark.parametrize("value", ["", "   ", "v" * 257])
