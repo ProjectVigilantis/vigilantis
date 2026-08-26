@@ -2,6 +2,8 @@ import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 
 import { Gnb } from "@/components/gnb";
+import { RealtimeProvider } from "@/components/realtime-provider";
+import { ToastStack } from "@/components/toast-stack";
 
 import "./globals.css";
 
@@ -34,17 +36,13 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       className={`dark ${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">
-        <Gnb />
-        <main className="flex flex-1 flex-col p-6">{children}</main>
-        {/*
-          CMN-001 Toast 스택 자리 — 우하단 고정, 최대 3개(4.8).
-          WebSocket 연동 단계에서 이 컨테이너에 Toast를 붙인다.
-        */}
-        <div
-          id="toast-stack"
-          aria-live="polite"
-          className="pointer-events-none fixed right-4 bottom-4 z-50 flex w-80 flex-col gap-2"
-        />
+        {/* CMN-001이 소켓 수명주기를 소유한다 — layout에 두어야 라우트가 바뀌어도 연결이 유지된다(4.8 1). */}
+        <RealtimeProvider>
+          <Gnb />
+          <main className="flex flex-1 flex-col p-6">{children}</main>
+          {/* CMN-001 Toast 스택 — 우하단 고정·8초·최대 3개(4.8). */}
+          <ToastStack />
+        </RealtimeProvider>
       </body>
     </html>
   );

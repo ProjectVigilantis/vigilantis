@@ -8,7 +8,7 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { CopyButton } from '@/components/copy-button';
 import { Row } from '@/components/detail-row';
@@ -18,18 +18,28 @@ import {
   type ActionRequest,
   type ExecuteOutcome,
 } from '@/components/incidents/action-execute-dialog';
-import { ExecutionStatusPanel } from '@/components/incidents/execution-status-panel';
+import {
+  ExecutionStatusPanel,
+  type ExecutionTransition,
+} from '@/components/incidents/execution-status-panel';
 import { TimeoutCountdown } from '@/components/incidents/timeout-countdown';
 import { EmptyState } from '@/components/empty-state';
 import { ExecutionStatusBadge, StatusBadge } from '@/components/status-badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
+import { useRealtime } from '@/components/realtime-provider';
 import { newIdempotencyKey } from '@/lib/api/client';
 import { isTerminalStatus } from '@/lib/execution-status';
 import { RUNBOOK_LABELS, incidentTitle } from '@/lib/enum-labels';
 import { formatKst } from '@/lib/utils';
-import type { AssetItem, IncidentResponse, IsoDateTime, RunbookId } from '@/types/api';
+import type {
+  AssetItem,
+  ExecutionStatus,
+  IncidentResponse,
+  IsoDateTime,
+  RunbookId,
+} from '@/types/api';
 
 /**
  * 계약 합의(2026-08-14): `AGENT_WAIT` 전환 이벤트의 `occurred_at` + 60초.
@@ -301,6 +311,12 @@ export function IncidentDetail({
   // 모달 인스턴스 = 이 객체 하나. 열 때마다 새로 만들어 **멱등 키를 인스턴스에 고정**한다(§4.6).
   const [request, setRequest] = useState<ActionRequest | null>(null);
   const [outcome, setOutcome] = useState<ExecuteOutcome | null>(null);
+  const { connection, subscribeExecution } = useRealtime();
+  /**
+   * ACT-002 진행 기록 — `EXECUTION_UPDATED` 수신마다 한 줄 쌓는다(§4.7). WS에 사용자용 메시지
+   * 필드가 없으므로(추가하지 않는다) **수신 시각과 status 전이만** 담는다.
+   */
+  const [transitions, setTransitions] = useState<ExecutionTransition[]>([]);
 
   /**
    * §4.5 실행 잠금. `incident.status`는 서버 컴포넌트 prop이라 202 직후에는 아직 갱신되지 않는데,
@@ -310,6 +326,33 @@ export function IncidentDetail({
    * 잠금은 **비최종 상태 동안만**이다 — `FAILED`는 AWS 변경이 없어 재시도·다른 제안이 가능하고(§4.7),
    * 그때는 재조회된 서버 상태가 판단한다.
    */
+  // 이 화면이 연 실행의 전이만 받는다 — 다른 인시던트·다른 실행의 이벤트는 무시한다.
+  const watchedId = outcome?.execution.execution_id ?? null;
+  useEffect(() => {
+    if (watchedId === null) return;
+    return subscribeExecution((action) => {
+      if (action.executionId !== watchedId) return;
+      setTransitions((prev) => {
+        const from = prev.at(-1)?.to ?? null;
+        // 같은 status 재수신은 줄을 늘리지 않는다 — event_id 멱등과 별개로 값이 안 바뀐 경우다.
+        if (from === action.status) return prev;
+        return [...prev, { at: action.updatedAt as IsoDateTime, from, to: action.status as ExecutionStatus }];
+      });
+      setOutcome((prev) =>
+        prev === null
+          ? prev
+          : {
+              ...prev,
+              execution: {
+                ...prev.execution,
+                status: action.status as ExecutionStatus,
+                updated_at: action.updatedAt as IsoDateTime,
+              },
+            },
+      );
+    });
+  }, [subscribeExecution, watchedId]);
+
   const locked =
     incident.status === 'ACTION_IN_PROGRESS' ||
     (outcome !== null && !isTerminalStatus(outcome.execution.status));
@@ -434,8 +477,11 @@ export function IncidentDetail({
           execution={outcome.execution}
           replayed={outcome.replayed}
           subjectHref={subjectHref}
+          live={connection === 'open'}
           transitions={[
+            // 접수 1건 + WS로 들어온 전이 누적.
             { at: outcome.execution.updated_at, from: null, to: outcome.execution.status },
+            ...transitions,
           ]}
         />
       ) : null}

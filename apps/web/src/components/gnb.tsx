@@ -3,6 +3,8 @@
 'use client';
 
 import Link from 'next/link';
+
+import { ConnectionIndicator } from '@/components/connection-indicator';
 import { usePathname } from 'next/navigation';
 
 import { cn } from '@/lib/utils';
@@ -45,14 +47,8 @@ export function Gnb() {
         })}
       </nav>
 
-      {/*
-        연결 인디케이터는 CMN-001(4.8) 소유다. WebSocket 연동 전이라 실제 상태는 "연결 끊김"이고,
-        수동 [재연결] 버튼도 CMN-001과 함께 붙는다. 여기서는 자리와 문구만 잡아 둔다.
-      */}
-      <span className="ml-auto flex shrink-0 items-center gap-1.5 text-xs whitespace-nowrap text-muted-foreground">
-        <span aria-hidden>○</span>
-        연결 끊김
-      </span>
+      {/* 연결 인디케이터는 CMN-001(4.8) 소유다 — 소켓 상태를 RealtimeProvider에서 받아 그린다. */}
+      <ConnectionIndicator />
     </header>
   );
 }
