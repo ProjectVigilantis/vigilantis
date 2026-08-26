@@ -155,6 +155,23 @@ export const RUNBOOK_LABELS: Record<RunbookId, string> = {
 };
 
 /**
+ * 자원을 삭제해 되돌릴 수 없는 런북 2종 — ACT-001 경고 블록의 **유일한 판별 근거**다(§4.6).
+ *
+ * 런북별 `destructive` 플래그는 만들지 않기로 확정됐고(BE 2026-08-20), Whitelist가 10종 고정이라
+ * 화면이 ID로 판별해도 위험하지 않다. `available_recovery_runbook_ids`는 "백업 기반 롤백이 붙어
+ * 있느냐"만 나타내고(`RUNBOOK_NACL_ADD_DENY`는 목록이 비어도 복원 가능), 계약의 `risk_level`은
+ * **위협 위험도이지 조치 위험도가 아니다** — 둘 다 판별에 쓸 수 없다.
+ */
+export const DESTRUCTIVE_RUNBOOK_IDS = [
+  'RUNBOOK_EBS_DELETE_UNATTACHED',
+  'RUNBOOK_SG_DELETE_ISOLATED',
+] as const satisfies readonly RunbookId[];
+
+export function isDestructiveRunbook(id: RunbookId): boolean {
+  return (DESTRUCTIVE_RUNBOOK_IDS as readonly string[]).includes(id);
+}
+
+/**
  * `state`는 AWS 원문 문자열(nullable)이라 Record로 못 만든다 — 3.2 표의 규칙만 옮긴다.
  * `running`만 번역하고 나머지는 원문 그대로 노출한다(임의 번역 금지).
  */
