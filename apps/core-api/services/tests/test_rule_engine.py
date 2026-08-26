@@ -14,9 +14,18 @@ if str(CORE_API) not in sys.path:
 from services.rule_engine import (  # noqa: E402
     SkipReason,
     Verdict,
+    evaluate_ebs,
     evaluate_ec2,
     evaluate_sg,
 )
+
+# (state, attached_instance_ids) -> (verdict, skip_reason)
+EBS_CASES = [
+    ("available", [], Verdict.UNUSED, None),                 # 미부착·available → 정리 후보
+    ("in-use", ["i-abc"], Verdict.SKIP, SkipReason.SKIP_ACTIVE),  # 부착 → 정상 사용
+    ("creating", [], Verdict.SKIP, SkipReason.SKIP_ACTIVE),  # 전이 상태 → UNUSED 아님(오삭제 방지)
+    ("error", [], Verdict.SKIP, SkipReason.SKIP_ACTIVE),     # 비정상 상태 → UNUSED 아님
+]
 
 # (name, cpu_avg, cpu_max, datapoints, tags) -> (verdict, skip_reason)
 EC2_CASES = [
@@ -48,6 +57,13 @@ def test_ec2_verdicts(name, avg, mx, dp, tags, exp_v, exp_s):
 @pytest.mark.parametrize("name,attached,openw,exp_v,exp_s", SG_CASES)
 def test_sg_verdicts(name, attached, openw, exp_v, exp_s):
     verdict, skip = evaluate_sg(name, attached, openw)
+    assert verdict == exp_v
+    assert skip == exp_s
+
+
+@pytest.mark.parametrize("state,attached_ids,exp_v,exp_s", EBS_CASES)
+def test_ebs_verdicts(state, attached_ids, exp_v, exp_s):
+    verdict, skip = evaluate_ebs(state, attached_ids)
     assert verdict == exp_v
     assert skip == exp_s
 

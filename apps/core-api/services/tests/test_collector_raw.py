@@ -102,3 +102,14 @@ def test_asg_degrades_on_pro_only_service(inventory):
     )
     # degrade 사실이 라벨로 기록되어 persist 가 PARTIAL 로 마감할 수 있어야 한다(#161 리뷰 ①).
     assert "auto_scaling_groups" in inventory.degraded_collectors
+
+
+def test_alb_target_group_degrades_on_pro_only_service(inventory):
+    # elbv2 도 LocalStack Community 미포함(Pro 전용, ADR-0006 §4) → InternalFailure.
+    # _safe_describe 가 흡수해 빈 목록으로 degrade 하고, 나머지 수집은 정상 완료되어야 한다.
+    # 실 AWS 에서의 TG 수집·REGISTERED_IN 검증은 6~7주차 스모크로 이월(§4).
+    assert inventory.alb_target_groups == [], (
+        "로컬에서 ALB TG 가 수집됨 — LocalStack 이 elbv2(Pro)를 지원하게 되었거나 "
+        "_safe_describe degrade 가 동작하지 않음"
+    )
+    assert "alb_target_groups" in inventory.degraded_collectors

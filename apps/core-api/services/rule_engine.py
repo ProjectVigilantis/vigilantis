@@ -69,13 +69,15 @@ def evaluate_ec2(cpu_avg: Optional[float], cpu_max: Optional[float], cpu_datapoi
     return Verdict.SKIP, SkipReason.SKIP_ACTIVE, health             # 정상 가동
 
 
-def evaluate_ebs(attached_instance_ids: Optional[list[str]]) -> tuple[Verdict, Optional[SkipReason]]:
+def evaluate_ebs(state: Optional[str],
+                 attached_instance_ids: Optional[list[str]]) -> tuple[Verdict, Optional[SkipReason]]:
     """EBS 볼륨 1개 판정 → (verdict, skip_reason).
 
-    미부착(어떤 인스턴스에도 안 붙음) → UNUSED(정리 후보), 부착 → SKIP_ACTIVE(정상 사용).
-    SG 의 미부착 판정(evaluate_sg 의 UNUSED)과 같은 결을 따른다.
+    정리 후보(UNUSED)는 **state == "available"(미부착·정상 유휴)** 이면서 부착 인스턴스가 없는
+    경우로 한정한다. in-use 는 SKIP_ACTIVE, creating/deleting/error 등 전이·비정상 상태는
+    삭제 후보가 아니므로 UNUSED 로 보지 않는다(오삭제 방지). SG 미부착 판정과 같은 결.
     """
-    if not attached_instance_ids:
+    if not attached_instance_ids and (state or "").lower() == "available":
         return Verdict.UNUSED, None
     return Verdict.SKIP, SkipReason.SKIP_ACTIVE
 
@@ -144,9 +146,9 @@ def run_rule_engine(db, collection_run_id: str | None = None) -> dict:
             health_int = None
         elif a.asset_type == AssetType.EBS:
             # EBS 는 판정 대상(_RULE_TARGET_TYPES). 분기를 두지 않으면 판정행이 없어
-            # 조회단이 영구 PENDING 을 부여한다.
+            # 조회단이 영구 PENDING 을 부여한다. state 는 Asset 행 컬럼(available/in-use 등).
             attached_ids = (a.spec or {}).get("attached_instance_ids") or []
-            verdict, skip = evaluate_ebs(attached_ids)
+            verdict, skip = evaluate_ebs(a.state, attached_ids)
             health_int = None
         else:
             continue
