@@ -18,7 +18,12 @@ for p in (str(CORE_API), str(REPO_ROOT / "packages")):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from services.collector import _paginate, _safe_describe  # noqa: E402
+from services.collector import (  # noqa: E402
+    _is_alb_target_group,
+    _paginate,
+    _registered_instance_ids,
+    _safe_describe,
+)
 
 
 class _FakePaginator:
@@ -102,3 +107,24 @@ def test_safe_describe_does_not_swallow_unexpected_error():
     with pytest.raises(KeyError):
         _safe_describe(_boom, "auto_scaling_groups", degraded)
     assert degraded == []
+
+
+def test_registered_instance_ids_dedups_multiport():
+    # 같은 인스턴스가 한 TG 에 여러 포트로 등록되면 target health 가 중복 반환한다.
+    # REGISTERED_IN 은 (source, relation, target) unique 라 중복 제거가 필수(#165 리뷰 ①).
+    health = [
+        {"Target": {"Id": "i-aaa", "Port": 80}},
+        {"Target": {"Id": "i-aaa", "Port": 8080}},  # 같은 인스턴스, 다른 포트
+        {"Target": {"Id": "i-bbb", "Port": 80}},
+        {"Target": {"Id": "192.0.2.10", "Port": 80}},  # ip 대상 — 제외
+    ]
+    assert _registered_instance_ids(health) == ["i-aaa", "i-bbb"]
+
+
+def test_is_alb_target_group_filters_by_protocol():
+    # ALB(HTTP/HTTPS)만 통과. NLB(TCP/UDP/TLS)·GWLB(GENEVE)·lambda(프로토콜 없음) 제외(#165 리뷰 ②).
+    assert _is_alb_target_group({"Protocol": "HTTP"}) is True
+    assert _is_alb_target_group({"Protocol": "HTTPS"}) is True
+    assert _is_alb_target_group({"Protocol": "TCP"}) is False
+    assert _is_alb_target_group({"Protocol": "GENEVE"}) is False
+    assert _is_alb_target_group({}) is False

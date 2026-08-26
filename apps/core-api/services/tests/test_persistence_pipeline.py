@@ -674,3 +674,46 @@ def test_alb_target_group_topology(db):
         }
     )
     assert item.evaluation_status.value == "NOT_APPLICABLE"
+
+
+def test_registered_in_deduped_no_unique_violation(db):
+    """같은 EC2가 한 TG 에 중복 등록돼도 REGISTERED_IN 은 1건만 적재된다 (#165 리뷰 ①).
+
+    중복이 걸러지지 않으면 (source, relation, target) unique constraint 로 수집 전체가
+    롤백된다. persist 의 rel_items 중복 제거가 방어선.
+    """
+    now = datetime.now(timezone.utc)
+    tg_arn = "arn:aws:elasticloadbalancing:ap-northeast-2:123456789012:targetgroup/dup-tg/x1"
+    inv = AssetInventory(
+        account_id="123456789012", region="ap-northeast-2", mode="aws",
+        collected_at=now, lookback_days=14, period_seconds=3600,
+        ec2_instances=[
+            Ec2Asset(
+                arn="arn:aws:ec2:ap-northeast-2:123456789012:instance/i-dup",
+                instance_id="i-dup", name="dup", instance_type="t3.large",
+                state="running", region="ap-northeast-2", tags={"Environment": "dev"},
+                metric_summary=MetricSummary(cpu_datapoints=336, cpu_avg=1.5, cpu_max=3.0),
+            )
+        ],
+        alb_target_groups=[
+            AlbTargetGroupAsset(
+                arn=tg_arn, name="dup-tg", region="ap-northeast-2",
+                protocol="HTTP", port=80, target_type="instance",
+                target_instance_ids=["i-dup", "i-dup"],  # 멀티포트 중복 모사
+            )
+        ],
+    )
+    res = persist_inventory(inv, db)  # unique 위반 없이 통과해야 한다
+    assert res["tg_count"] == 1
+
+    ec2 = db.execute(
+        select(models.Asset).where(models.Asset.resource_id == "i-dup")
+    ).scalar_one()
+    reg = db.execute(
+        select(models.AssetRelationship).where(
+            models.AssetRelationship.source_asset_id == ec2.asset_id,
+            models.AssetRelationship.relation_type == "REGISTERED_IN",
+        )
+    ).scalars().all()
+    assert len(reg) == 1
+    assert reg[0].target_arn == tg_arn

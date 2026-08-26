@@ -31,6 +31,7 @@ from services.rule_engine import (  # noqa: E402
     IDLE_CPU_AVG,
     MIN_DATAPOINTS,
     SPIKE_CPU_MAX,
+    evaluate_ebs,
     evaluate_ec2,
     evaluate_sg,
 )
@@ -145,6 +146,11 @@ def _evaluate_inventory(inventory: AssetInventory) -> dict[str, tuple[str, str |
         # collector.py 가 open_to_world(list) → bool 로 넘기는 규약과 동일하게 맞춘다.
         verdict, skip = evaluate_sg(sg.name, sg.attached, bool(sg.open_to_world))
         results[sg.arn] = (verdict.value, skip.value if skip else None)
+
+    # EBS 도 판정 대상(_RULE_TARGET_TYPES). 미부착·available → UNUSED.
+    for ebs in inventory.ebs_volumes:
+        verdict, skip = evaluate_ebs(ebs.state, ebs.attached_instance_ids)
+        results[ebs.arn] = (verdict.value, skip.value if skip else None)
 
     return results
 

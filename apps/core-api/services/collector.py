@@ -215,6 +215,27 @@ def _asg_launch_template(g: dict) -> tuple[str | None, str | None]:
     return lt.get("LaunchTemplateId"), lt.get("LaunchTemplateName")
 
 
+def _is_alb_target_group(tg: dict) -> bool:
+    """ALB Target Group 만 선별. describe_target_groups 는 NLB(TCP/UDP/TLS)·GWLB(GENEVE)
+    TG 도 반환하는데, 공개 계약의 자산 유형은 ALB_TARGET_GROUP 이다. TG 프로토콜로 가른다
+    (ALB=HTTP/HTTPS). lambda 대상 TG 등 프로토콜 없는 TG 도 여기서 제외된다."""
+    return tg.get("Protocol") in ("HTTP", "HTTPS")
+
+
+def _registered_instance_ids(target_health: list) -> list[str]:
+    """target health 에서 등록된 EC2 instance id 목록(순서 유지·중복 제거).
+
+    같은 인스턴스가 한 TG 에 여러 포트로 등록되면 describe_target_health 가 중복 반환한다.
+    REGISTERED_IN 은 (source, relation, target_arn) 단위 unique 라 중복을 지우지 않으면
+    동일 관계가 두 번 INSERT 되어 수집 전체가 롤백된다. instance 대상만(i-xxxx) 취한다."""
+    ids = [
+        d["Target"]["Id"]
+        for d in target_health
+        if str(d.get("Target", {}).get("Id", "")).startswith("i-")
+    ]
+    return list(dict.fromkeys(ids))
+
+
 # ------------------------------------------------------------------ 공개 API
 def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
     """한 리전의 EC2/SG 인벤토리 + 메트릭을 수집해 AssetInventory 로 정형화한다."""
@@ -233,7 +254,7 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
     sgs_raw = ec2.describe_security_groups()["SecurityGroups"]
     enis_raw = ec2.describe_network_interfaces()["NetworkInterfaces"]
     nacls_raw = ec2.describe_network_acls()["NetworkAcls"]
-    volumes_raw = ec2.describe_volumes()["Volumes"]
+    volumes_raw = _paginate(ec2, "describe_volumes", "Volumes")
     # Launch Template 은 ec2(Community 지원). ASG 는 autoscaling(Pro 전용)이라 로컬에선
     # _safe_describe 가 빈 목록으로 degrade 하고 degraded 에 라벨을 남긴다(ADR-0006 §4).
     degraded: list[str] = []
@@ -360,19 +381,17 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
 
     tg_assets = []
     for tg in tgs_raw:
+        if not _is_alb_target_group(tg):
+            continue  # NLB/GWLB/lambda TG 는 ALB_TARGET_GROUP 이 아니다
         tg_arn = tg["TargetGroupArn"]
         # 등록 인스턴스는 describe_target_health(elbv2, Pro 전용)로만 얻는다. TG describe 가
         # 성공한 실 AWS 에서만 호출되며(로컬은 tgs_raw 가 비어 루프 자체가 안 돈다),
-        # target_type=instance 의 Target.Id(i-xxxx)만 REGISTERED_IN 대상이다.
+        # target_type=instance 의 Target.Id(i-xxxx)만 REGISTERED_IN 대상, 중복 제거.
         health = _safe_describe(
             lambda arn=tg_arn: elbv2.describe_target_health(TargetGroupArn=arn)["TargetHealthDescriptions"],
             "alb_target_health", degraded,
         )
-        target_instance_ids = [
-            d["Target"]["Id"]
-            for d in health
-            if str(d.get("Target", {}).get("Id", "")).startswith("i-")
-        ]
+        target_instance_ids = _registered_instance_ids(health)
         tg_assets.append(
             AlbTargetGroupAsset(
                 arn=tg_arn,
@@ -516,6 +535,8 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
             rel_items.append((RelationType.MEMBER_OF, asg_arn))
         for tg_arn in instance_to_tgs.get(a.instance_id, []):
             rel_items.append((RelationType.REGISTERED_IN, tg_arn))
+        # (relation, target_arn) 중복 제거 — 동일 관계 두 번 INSERT 시 unique constraint 위반 방어
+        rel_items = list(dict.fromkeys(rel_items))
         if rel_items:
             assets_repo.replace_relationships(
                 db,
