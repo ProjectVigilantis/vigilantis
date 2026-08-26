@@ -2,7 +2,7 @@
 
 - **Status**: Accepted (2026-08-24 — 안성일(AI/Guardrail) 확인 완료, PR #117 승인)
 - **Date**: 2026-08-24
-- **Amended**: 2026-08-25 — precheck 구현(#129)에서 드러난 실측 반영. 하단 "개정 이력" 참조, 핵심 결정 불변
+- **Amended**: 2026-08-25(1차 — precheck 구현 실측 반영) · 2026-08-26(2차 — ④ 사유 코드 정의 위치 현행화). 하단 "개정 이력" 참조, **핵심 결정 불변**
 - **Deciders**: 김세혁(PM/Infra, executor 소유자) 결정, 안성일(AI/Guardrail) 합의 완료
 - **Refs**: #113
 
@@ -56,15 +56,19 @@ autoscaling -> InternalFailure: the autoscaling service is not included within y
 ### 1. 호출 규약
 
 ```python
-# packages/schemas/precheck.py (신규)
+# packages/schemas/guardrails.py — 가드레일 네 단계 거절 사유 코드의 단일 원천
 @unique
-class PrecheckReasonCode(str, Enum):
+class PrecheckReasonCode(str, Enum):        # ④ AWS Dry-Run 단계의 어휘
     PRECHECK_UNAUTHORIZED = "PRECHECK_UNAUTHORIZED"
     PRECHECK_TARGET_NOT_FOUND = "PRECHECK_TARGET_NOT_FOUND"
     PRECHECK_INVALID_STATE = "PRECHECK_INVALID_STATE"
     PRECHECK_NOT_IMPLEMENTED = "PRECHECK_NOT_IMPLEMENTED"
     PRECHECK_PARAM_INVALID = "PRECHECK_PARAM_INVALID"
     PRECHECK_AWS_ERROR = "PRECHECK_AWS_ERROR"
+
+
+# packages/schemas/precheck.py — executor 호출 계약. 위 Enum을 재노출한다
+from .guardrails import PrecheckReasonCode
 
 
 class PrecheckOutcome(BaseModel):
@@ -103,7 +107,9 @@ def precheck(
 | 백업 레코드 조회 | 키워드 전용 `backup_loader` **주입** | 롤백 계열 4종(`NACL_RESTORE`·`UNISOLATE`·`SG_RECREATE`·`REVERT_SIZE`)의 통과 조건이 백업 레코드의 **내용**을 필요로 한다. executor는 DB 트랜잭션을 소유하지 않으므로 조회를 주입받고, 그래야 `precheck()`가 DB 없이 단위 테스트된다 |
 | 미구현 런북 | executor가 `PRECHECK_NOT_IMPLEMENTED` 반환 | 디스패치 테이블이 executor에 있으므로 판정 소유권도 같은 쪽에 둔다. 호출 전 필터가 필요하면 `IMPLEMENTED_RUNBOOK_IDS: frozenset[str]`를 함께 export한다 |
 
-`GuardrailStepResult` 매핑은 1:1이다 — `passed` → `result`, `reason_code` → `reason_code`, `verification_summary` → `verification_summary`.
+**④의 사유 코드는 `packages/schemas/guardrails.py`가 정의하고 `precheck.py`가 재노출한다.** 본 ADR 채택 시점에는 `precheck.py`가 유일한 정의처였으나, 그 뒤 ①②③의 어휘가 생기면서 네 단계 목록이 한 파일로 통합됐다(#125). 값 문자열 6종·`PRECHECK_` 접두·`from schemas.precheck import PrecheckReasonCode` import 경로는 그대로이므로 **executor 계약에 바뀐 것은 없다.**
+
+`GuardrailStepResult` 매핑은 1:1이다 — `passed` → `result`, `reason_code` → `reason_code`, `verification_summary` → `verification_summary`. 다만 `reason_code`의 타입이 네 단계 Enum의 union으로 좁혀져 **단계와 맞지 않는 코드는 계약이 거절한다** — ④ 결과에 다른 단계의 코드를 담으면 `ValidationError`다(#125).
 
 **"예외를 던지지 않는다"의 유일한 예외는 `backup_loader` 미배선이다.** 이 규칙은 `precheck()`가 **받은 페이로드에 대해** 내리는 판정의 규칙이다. 백업 조회가 필요한 런북인데 loader가 배선되지 않은 것은 페이로드 문제가 아니라 **호출부의 배선 오류**이고, `RuntimeError`로 즉시 드러내야 한다. FAIL로 남기면 멀쩡한 원복 요청에 거절 기록이 붙어 관제 화면에 남는다. `ai/guardrails.py`가 미배선 검증 문맥을 `NotImplementedError`로 막는 것과 같은 구분이다.
 
@@ -245,7 +251,7 @@ authorize_security_group_ingress(GroupId='sg-000...0')  # 부재 -> DryRunOperat
 - 확정 규격: `vigilantis-docs/런북 명세서.md` — `parameters_schema` · `dry_run_supported`
 - 현황 기준: `docs/PROJECT_STATUS.md` — 3주차 종료 판정 기준 ⓐ, 구현 우선순위 P0/P1/P2
 - 후속: #154(런북별 typed 파라미터 계약 — 후보 `display_parameters`·`evidence_ids` → `precheck(parameters)` 변환 포함) · `AUTO_ISOLATION`·`ROLLBACK_EXECUTION` 문맥의 precheck 호출 시점 · 승인·실행 시점 재검증 정책 · 거절 이후 알림·에스컬레이션
-- 영향 범위: `packages/schemas/precheck.py`(신규), `apps/core-api/services/aws/executor.py`, `apps/core-api/ai/guardrails.py`, `scripts/probe_dryrun.py`(신규), `docs/adr/0006-localstack-team-standard-env.md`
+- 영향 범위: `packages/schemas/precheck.py`(신규 — 호출 계약), `packages/schemas/guardrails.py`(④ 사유 코드 정의처 — #125 이후), `apps/core-api/services/aws/executor.py`, `apps/core-api/ai/guardrails.py`, `scripts/probe_dryrun.py`(신규), `docs/adr/0006-localstack-team-standard-env.md`
 
 ## 개정 이력
 
@@ -265,3 +271,12 @@ authorize_security_group_ingress(GroupId='sg-000...0')  # 부재 -> DryRunOperat
   함께 정리한 것: 후속 이슈 참조를 **#49 → #154**로 교체한다. #49(`[SCHEMA/FEAT] 내부 공통
   계약 — Incident·위협·AI 계열`)는 2026-08-18 종료됐고, `packages/schemas/agents.py:16-17`이
   런북별 typed parameters를 **그 이슈의 범위 밖으로 명시**하고 있어 후속 근거가 될 수 없다.
+
+- **2026-08-26 (2차 개정)** — ④ 사유 코드의 **정의 위치**를 현행화한다. 판정 구조·코드
+  6종·값 문자열·호출 규약은 **바뀌지 않는다.** 근거는 #125(PR #164)이며, 문서가 코드
+  이동을 따라가지 못하고 있던 것을 맞추는 개정이다.
+
+  | # | 절 | 개정 내용 | 근거 |
+  | --- | --- | --- | --- |
+  | ① | §1 | `PrecheckReasonCode`의 정의처를 `packages/schemas/precheck.py` → **`packages/schemas/guardrails.py`**(네 단계 공용 목록)로 정정. `precheck.py`는 재노출이며 `from schemas.precheck import PrecheckReasonCode` 경로는 불변 | 본 ADR 채택 시점에는 ④만 Enum이었고 ①②는 앱 안 문자열, ③은 어휘 자체가 없었다. #125가 넷을 한 파일로 모으면서 정의가 옮겨 갔다 |
+  | ② | §1 | `GuardrailStepResult.reason_code`가 네 단계 Enum union으로 좁혀져 **단계↔코드 정합을 계약이 강제**한다는 사실을 매핑 서술에 명시 | 같은 PR. ④ 결과에 다른 단계 코드를 담으면 `ValidationError`이므로, 1:1 매핑만 읽고 임의 문자열을 넣을 수 없다 |
