@@ -5,9 +5,8 @@
 문구를 그대로 보존하기 위해서다.
 
 기존 행에는 빈 객체를 채운다 — NOT NULL을 위한 backfill일 뿐 typed 값으로의 이관이
-아니다. 그 상태의 행은 현행 후보 계약(RunbookCandidateData)에 어긋나므로, 실행 접수와
-상세 recommendations 노출이 접수 시점 재검증(workflows.candidate_meets_contract)으로
-거른다 — 잘못된 값이 실행으로 새지 않는다.
+아니다. 그 상태의 행은 현행 후보 계약(RunbookCandidateData)에 어긋나므로 실행 접수가
+거절한다(workflows._candidate_meets_contract) — 잘못된 값이 실행으로 새지 않는다.
 
 Revision ID: b71c3f0a92d4
 Revises: e4947bbcd48a
