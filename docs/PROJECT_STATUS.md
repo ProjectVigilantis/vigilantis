@@ -4,7 +4,7 @@
 > 다른 문서(README, 기획서, MVP 범위 명세 등)와 충돌하면 **이 문서가 이긴다.**
 > 범위·API 계약·역할이 바뀌는 PR은 이 문서 갱신을 포함할 것.
 >
-> **최종 갱신**: 2026-08-25 (김세혁)
+> **최종 갱신**: 2026-08-26 (김세혁)
 
 ---
 
@@ -12,7 +12,7 @@
 
 24/7 AWS 자산·보안 상시 관제 + 4단계 AI 가드레일 기반 원클릭 자율 조치 + 양방향 회복(자동 원복/원클릭 해제)을 제공하는 FinSecOps 플랫폼. **1차 발표(10/15) MVP 시연**이 목표다.
 
-## 현재 위치 (2026-08-25 기준)
+## 현재 위치 (2026-08-26 기준)
 
 > 이 섹션은 ⓐ 주차 전환 ⓑ 범위·API 계약·역할·확정 결정 변경 ⓒ 미해결 이슈 상태 변경 시에만 갱신한다.
 > **개별 머지 이력은 이 문서에 복제하지 않는다** — 상세 원천은 [dev 머지 PR 목록](https://github.com/ProjectVigilantis/vigilantis/pulls?q=is%3Apr+is%3Amerged+base%3Adev), 결정 배경은 아래 §확정 결정 변경 로그와 `docs/adr/`다. 일반 기능 PR은 이 문서를 갱신하지 않는다.
@@ -23,7 +23,7 @@
   - **2주차(8/18–8/23) · 실행 기반 구축** — DB 저장 계층(ORM 13종·Alembic baseline·Repository)과 collector·rule_engine 재연결, Core API 앱 골격·조회 API 3종·로깅, WebSocket 실시간 상태 전송(`/api/v1/ws`), Golden Dataset 20건(`Verdict` 4종·`SkipReasonCode` 5종 전량 커버, 회귀 21건), CI LocalStack service container, FE shadcn 프리미티브·다크 모드 고정.
   - **3주차(8/24–8/30, 진행 중) · 실행 기반 착수** — 현재까지: CI PostgreSQL service container(#92)로 DB 통합 테스트 28건 상시 skip 해소(미해결 5번 종결), PR 본문 템플릿·리뷰 요청 규칙 코드화(`.github/PULL_REQUEST_TEMPLATE.md`), `_is_prod` 인식 태그 키·값 집합 확정(#95 → PR #97, 미해결 4번 핵심 해소), **executor ↔ 가드레일 ④ Dry-Run 호출 규약 확정([ADR-0007](adr/0007-guardrail-dryrun-executor-precheck-contract.md) — #113 종결, 판정 기준 ⓐ 충족)**.
 - **다음 단계 (담당별 1줄)**
-  - **김세혁**: ~~Dry-Run 호출 시그니처를 안성일과 문서로 합의(8/26 목표)~~ ✅ 확정(2026-08-24, ADR-0007 / #113 — 기한 내). ~~Boto3 클라이언트 팩토리·AWS 예외 공통 래퍼~~ ✅ 완료(2026-08-25, #128 / PR #131). executor 런북 디스패치 테이블·`precheck()` 확정 10종(#129 / PR #147 — 리뷰 반영 완료, [ADR-0007](adr/0007-guardrail-dryrun-executor-precheck-contract.md) 1차 개정(#133) 선행 머지 후 승인 예정). 다음: 스펙 JSON 백업 모듈 → `execute` 본체. 후속으로 런북별 typed 파라미터 계약(#154 — 안성일), `scripts/probe_dryrun.py` 편입(#130). CI `apps/web` lint·build 잡 추가(#91), compose 정리(#94·#111).
+  - **김세혁**: ~~Dry-Run 호출 시그니처를 안성일과 문서로 합의(8/26 목표)~~ ✅ 확정(2026-08-24, ADR-0007 / #113 — 기한 내). ~~Boto3 클라이언트 팩토리·AWS 예외 공통 래퍼~~ ✅ 완료(2026-08-25, #128 / PR #131). ~~executor 런북 디스패치 테이블·`precheck()` 확정 10종(#129)~~ ✅ 완료(2026-08-25, PR #147 — [ADR-0007](adr/0007-guardrail-dryrun-executor-precheck-contract.md) 1차 개정(#133 / PR #157) 선행 머지 후 승인). ~~`scripts/probe_dryrun.py` 편입(#130)~~ ✅ 완료(2026-08-26, #130 — ADR-0007 §6이 머지 조건으로 못 박은 실측 절차. 확정 10종 `target_api` 14개 전수가 §Context 표를 재현하고, 표↔코드 정합은 회귀 테스트가 CI에서 상시 확인). 다음: 스펙 JSON 백업 모듈 → `execute` 본체. 후속으로 런북별 typed 파라미터 계약(#154 — 안성일). CI `apps/web` lint·build 잡 추가(#91), compose 정리(#94·#111).
   - **안성일**: `AIModelClient` 경계(ADR-0005 — 외부 전송 페이로드 마스킹 포함, #115), 가드레일 ①Schema Check ②Action Whitelist(#114), `POST /api/v1/actions/execute` 라우터 골격·Idempotency Key 멱등 처리(#116, 김세혁 공동).
   - **김승철**: ~~`_is_prod` 인식 태그 키·값 집합 확정(#95)~~ ✅ 확정(2026-08-24, PR #97 — 기한 8/27 내 본인 결정, PM 대행 불발동). `evaluate_ec2` `name` 인자 정리(#96 — `PROD_HINTS`는 #97에서 제거돼 잔여 범위 축소), rule_engine update 경로 SKIP→비SKIP 전이 회귀 테스트(#109 — #99 잔여 재발행). ~~자산 연결관계(토폴로지) 산출(#101)~~ ✅ NACL 축 완료(2026-08-25, PR #101 — subnet 연관 기반 EC2→NACL `PROTECTED_BY`); TG(`REGISTERED_IN`) 축은 `elbv2`가 LocalStack Community 미포함이라 로컬 검증 경로가 없어(ADR-0006 §4) 실 AWS 스모크(6–7주차)로 이월 — 별도 카드 발행 예정.
   - **박지현**: ~~`_is_prod` 확정 기준 반영 Golden 경계 케이스 추가~~ ✅ 완료(2026-08-25, #124 — 미해결 4번 완전 종결). ~~회귀 CI 상시 실행 검증~~ ✅ 확인(dev CI `419 passed, 5 skipped` — 골든 회귀 21→26건 상시 실행, DB 통합 28건 skip 0건으로 판정 기준 ⓒ 충족. 남은 skip 5건은 전부 미구현 대기 중인 placeholder다). ~~E2E 시연 시나리오 설계서 1차(FinOps·SecOps 2트랙)~~ ✅ 완료(2026-08-25, #132 — `docs/E2E_DEMO_SCENARIOS.md`). 실행 계열 테스트 하네스·픽스처 선구축(#136). **가드레일 회귀 테스트 skip 2건 해제**(#114 / PR #123 머지로 선행 조건 해소). SecOps 정답은 Risk Evaluator 대기(미해결 6번).
