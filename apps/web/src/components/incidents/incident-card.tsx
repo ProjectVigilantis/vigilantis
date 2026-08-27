@@ -1,4 +1,5 @@
-// INC-001 명함 카드 — 인시던트 1건. 화면설계서 v1.5 §4.4 데이터 바인딩 표를 따릅니다.
+// 인시던트 명함 카드 1건 — 화면설계서 v1.6 §4.4 데이터 바인딩 표를 따릅니다.
+// INC-001 보안과 INC-004 자산이 같은 카드를 쓴다 — 값이 없는 자리(위험도·선제차단)만 비운다.
 
 import Link from 'next/link';
 
@@ -6,6 +7,7 @@ import { RISK_BAND_CLASS, RISK_BAND_EMPTY, StatusBadge } from '@/components/stat
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { arnShort, incidentTitle } from '@/lib/enum-labels';
+import { isPreemptive } from '@/lib/incident-filter';
 import { cn, formatKst } from '@/lib/utils';
 import type { IncidentListItem } from '@/types/api';
 
@@ -72,15 +74,16 @@ export function IncidentCard({
       <div className="flex flex-wrap items-center gap-1">
         <StatusBadge field="category" value={incident.category} />
         <StatusBadge field="incident_status" value={incident.status} />
-        {/* B-Medium 승인 대기 행 식별 — 계약 필드 그대로다(§4.4 바인딩).
+        {/* v1.6 §4.4 — `response_mode` 배지는 **선제차단 계열에만** 붙인다.
             `AGENT_WAIT`의 표시명이 `AWAITING_APPROVAL`과 똑같은 `승인 대기`라(3.2 사전)
-            배지 두 개가 나란히 붙으면 중복으로 읽힌다. INC-002는 `대응` 행 안에 있어 문제가
-            없으므로, 사전을 고치지 않고 카드에서만 `대응` 접두를 붙여 갈라 읽게 한다. */}
-        {incident.response_mode !== null ? (
-          <span className="flex items-center gap-1">
-            <span className="text-muted-foreground text-xs">대응</span>
-            <StatusBadge field="response_mode" value={incident.response_mode} />
-          </span>
+            같은 카드에 "승인 대기"가 두 번 뜬다. v1.5는 `대응` 접두를 붙여 갈랐지만, 실제 화면에서
+            `보안 · 승인 대기 · 대응 승인 대기`로 읽혀 접두가 중복을 없애지 못했다.
+            그 정보는 상태 배지가 이미 말한다.
+
+            선제차단 계열은 반대다 — 상태 배지만으로는 "승인 없이 이미 격리됐다"를 알 수 없고,
+            같은 이름의 프리셋이 있어 어느 카드가 거기 담기는지 카드에 보여야 한다. */}
+        {incident.response_mode !== null && isPreemptive(incident) ? (
+          <StatusBadge field="response_mode" value={incident.response_mode} />
         ) : null}
       </div>
 
@@ -111,7 +114,14 @@ export function IncidentCard({
       {/* `mt-auto` — FINOPS는 위험도 행이 없어 내용이 한 줄 짧다. 그리드가 카드 높이만 맞추고
           푸터가 따라오지 않으면 같은 행의 [조치 실행] 버튼 줄이 들쭉날쭉해진다(PR #171 리뷰). */}
       <div className="border-border/60 mt-auto flex items-center justify-between gap-2 border-t pt-3">
-        <span className="text-muted-foreground text-xs">{formatKst(incident.updated_at)}</span>
+        {/* v1.6 §4.4 — 카드 날짜는 **`created_at`**(이슈가 올라온 시각)이다. `updated_at`을 쓰면
+            상태가 바뀔 때마다 날짜가 움직여 "언제 들어온 건인가"를 못 읽는다. 정렬 동점 기준도
+            `created_at`이라 화면과 순서가 같은 값을 가리킨다.
+
+            **상대 표기("오늘이면 hh:mm")를 쓰지 않는다.** "지금"이 필요해 SSR과 하이드레이션이
+            다른 문자열을 그린다(설계서 v1.6 §4.4 — 이 이유로 규칙을 절대 표기로 바꿨다).
+            `formatKst`는 KST 고정이라 그 함정이 없다. */}
+        <span className="text-muted-foreground text-xs">{formatKst(incident.created_at)}</span>
         {showExecute ? (
           // 누르면 ACT-001 모달을 연다(§4.6). 목록 계약에 `recommendations`가 없어
           // 호출부가 `GET /incidents/{id}`로 후보를 채운 뒤 연다.

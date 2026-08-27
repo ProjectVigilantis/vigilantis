@@ -10,6 +10,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 
+import { CloseIncidentDialog } from '@/components/incidents/close-incident-dialog';
 import { CopyButton } from '@/components/copy-button';
 import { Row } from '@/components/detail-row';
 import {
@@ -190,11 +191,14 @@ function ExecutionsArea({
   incident,
   locked,
   onRecover,
+  onCloseJudgement,
 }: {
   incident: IncidentResponse;
   /** `ACTION_IN_PROGRESS`면 같은 Incident의 실행 버튼을 전부 비활성화한다(§4.5). */
   locked: boolean;
   onRecover: (runbookId: RunbookId, originExecutionId: string) => void;
+  /** v1.6 — 선제 차단의 정당성을 판단하는 ACT-001 C 모달을 연다(§4.5·§4.6). */
+  onCloseJudgement: () => void;
 }) {
   if (incident.executions.length === 0) return null;
 
@@ -212,12 +216,9 @@ function ExecutionsArea({
                 갱신 {formatKst(execution.updated_at)}
               </p>
               <div className="flex flex-wrap items-center gap-2">
-                {/* 차단을 그대로 두는 선택도 조치다 — SECOPS 격리 실행에만 둔다(§4.5 버튼 표). */}
-                {incident.category === 'SECOPS' ? (
-                  <Button type="button" variant="outline" size="sm" disabled>
-                    차단 유지
-                  </Button>
-                ) : null}
+                {/* v1.6 — 구 `차단 유지`는 여기 있었지만 **실행 단위가 아니라 인시던트 단위**의
+                    판단이라(종료는 인시던트 상태다) 아래 영역 푸터의 `종료 판단`으로 올렸다.
+                    비활성 버튼이 실행마다 반복되면 누를 수 없는 버튼만 늘어난다(§4.5). */}
                 {execution.available_recovery_runbook_ids.map((runbookId) => (
                   <Button
                     key={runbookId}
@@ -235,6 +236,17 @@ function ExecutionsArea({
           </li>
         ))}
       </ul>
+
+      {/* v1.6 종료 판단 — 선제 차단은 이미 일어난 일이고(§7.1) 관제자가 할 일은 "정당했나"다.
+          구 `차단 유지`는 목록으로 돌아갈 뿐 아무 판단도 남기지 않았다(§4.5).
+          SECOPS이고 아직 종료되지 않은 건에만 둔다 — FINOPS는 선제 차단 개념이 없다. */}
+      {incident.category === 'SECOPS' && incident.status !== 'RESOLVED' ? (
+        <div className="flex justify-end pt-1">
+          <Button type="button" variant="outline" size="sm" onClick={onCloseJudgement}>
+            종료 판단
+          </Button>
+        </div>
+      ) : null}
     </Section>
   );
 }
@@ -322,6 +334,8 @@ export function IncidentDetail({
   const router = useRouter();
   // 모달 인스턴스 = 이 객체 하나. 열 때마다 새로 만들어 **멱등 키를 인스턴스에 고정**한다(§4.6).
   const [request, setRequest] = useState<ActionRequest | null>(null);
+  /** ACT-001 C 종료 확인 모달(v1.6). 실행 모달과 동시에 뜨지 않게 별도 상태로 둔다. */
+  const [closing, setClosing] = useState(false);
   // 딥링크로 들어온 실행(#179). props에서만 파생하므로 서버·클라이언트가 같은 값을 만든다(하이드레이션 안전).
   const deepLinked =
     openExecutionId === null
@@ -524,7 +538,30 @@ export function IncidentDetail({
         )}
       </Section>
 
-      <ExecutionsArea incident={incident} locked={locked} onRecover={openRecovery} />
+      <ExecutionsArea
+        incident={incident}
+        locked={locked}
+        onRecover={openRecovery}
+        onCloseJudgement={() => setClosing(true)}
+      />
+
+      {closing ? (
+        <CloseIncidentDialog
+          incident={incident}
+          onClose={() => setClosing(false)}
+          // `과잉이었다` → 종료하지 않고 해제 흐름으로. 되돌릴 실행이 여럿이면 첫 번째를 연다
+          // — 계약이 복구를 **실행 항목별**로 매다는 구조라 인시던트 단위 해제가 없다(§4.5).
+          onChooseRecovery={() => {
+            const target = incident.executions.find(
+              (e) => e.available_recovery_runbook_ids.length > 0,
+            );
+            setClosing(false);
+            if (target !== undefined) {
+              openRecovery(target.available_recovery_runbook_ids[0], target.execution_id);
+            }
+          }}
+        />
+      ) : null}
 
       <Section title="제안 조치">
         {incident.recommendations.length === 0 ? (

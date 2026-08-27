@@ -44,47 +44,69 @@ export function AssetsView({
   const [detailOpen, setDetailOpen] = useState(linked !== null);
   const [region, setRegion] = useState<string>(ALL);
   const [wasteOnly, setWasteOnly] = useState(false);
-  const [primaryOnly, setPrimaryOnly] = useState(false);
 
-  const regions = useMemo(
-    () => [...new Set(data.items.map((a) => a.region))].sort(),
+  /**
+   * v1.6 팀 회의 결정 — **목록 뷰는 `resource_role = PRIMARY`만 다룬다**(§4.2).
+   * 지원 자산(NACL·ASG·시작 템플릿·ALB 대상 그룹)은 비용이 붙지 않고 `evaluation_status =
+   * NOT_APPLICABLE`이라 카드의 판정·헬스·인시던트 세 열이 전부 `—`다 — 자리를 쓰면서 아무것도
+   * 답하지 않는다. 구 `주요 관제만` 토글은 이 규칙이 상시가 되면서 **제거**했다(켤 대상이 없다).
+   *
+   * **토폴로지 뷰가 서면(#146) 그쪽은 `data.items` 전량을 써야 한다** — 관계 6종 중 4종이 이
+   * 노드 위에 그려지고 `RUNBOOK_NACL_ADD_DENY`의 대상도 NACL이다(§4.2).
+   */
+  const primaryItems = useMemo(
+    () => data.items.filter((a) => a.resource_role === 'PRIMARY'),
     [data.items],
   );
+  const supportCount = data.items.length - primaryItems.length;
 
-  // 토폴로지의 초점 집합 — 유형 필터만 뺀 나머지 3종이다. 위 TabsContent 주석 참조.
+  /**
+   * 토폴로지의 초점 집합 — **유형 필터만 뺀 나머지**다(#146). 위 TabsContent 주석 참조.
+   *
+   * v1.6에서 `주요 관제만` 토글이 사라져(위 judgedItems 주석) 초점 축은 리전·낭비 후보 2종이다.
+   * 초점은 `data.items` **전량**에서 고른다 — 목록에서 뺀 지원 자산도 그래프에는 노드로 있고,
+   * 리전만 걸었을 때 그 노드가 흐려지면 같은 리전인데 빠진 것처럼 읽힌다.
+   */
   const focusedArns = useMemo(() => {
-    if (region === ALL && !primaryOnly && !wasteOnly) return null;
+    if (region === ALL && !wasteOnly) return null;
     return new Set(
       data.items
         .filter((a) => {
           if (region !== ALL && a.region !== region) return false;
-          if (primaryOnly && a.resource_role !== 'PRIMARY') return false;
           if (wasteOnly && !WASTE_VERDICTS.some((v) => v === a.verdict)) return false;
           return true;
         })
         .map((a) => a.arn),
     );
-  }, [data.items, region, wasteOnly, primaryOnly]);
+  }, [data.items, region, wasteOnly]);
 
-  // 필터 4종 전부 클라이언트 필터다 — 계약에 Query Parameter가 없어 전량 응답에서 거른다(§4.2).
+  const regions = useMemo(
+    () => [...new Set(primaryItems.map((a) => a.region))].sort(),
+    [primaryItems],
+  );
+
+  // 필터 3종 전부 클라이언트 필터다 — 계약에 Query Parameter가 없어 전량 응답에서 거른다(§4.2).
   const visible = useMemo(
     () =>
-      data.items.filter((a) => {
+      primaryItems.filter((a) => {
         if (assetType !== ALL && a.asset_type !== assetType) return false;
         if (region !== ALL && a.region !== region) return false;
-        if (primaryOnly && a.resource_role !== 'PRIMARY') return false;
         if (wasteOnly && !WASTE_VERDICTS.some((v) => v === a.verdict)) return false;
         return true;
       }),
-    [data.items, assetType, region, wasteOnly, primaryOnly],
+    [primaryItems, assetType, region, wasteOnly],
   );
 
+  // 유형 옵션도 PRIMARY 기준으로 세운다 — 목록에 없는 유형을 고를 수 있으면 0건만 나온다.
   const typeOptions = [
-    { value: ALL, label: `${ALL} (${data.items.length})` },
-    ...(Object.keys(ASSET_TYPE_LABELS) as AssetType[]).map((t) => ({
-      value: t,
-      label: `${ASSET_TYPE_LABELS[t]?.label ?? t} (${data.items.filter((a) => a.asset_type === t).length})`,
-    })),
+    { value: ALL, label: `${ALL} (${primaryItems.length})` },
+    ...(Object.keys(ASSET_TYPE_LABELS) as AssetType[])
+      .map((t) => ({ type: t, count: primaryItems.filter((a) => a.asset_type === t).length }))
+      .filter(({ count }) => count > 0)
+      .map(({ type, count }) => ({
+        value: type,
+        label: `${ASSET_TYPE_LABELS[type]?.label ?? type} (${count})`,
+      })),
   ];
 
   return (
@@ -104,7 +126,6 @@ export function AssetsView({
             onChange={setRegion}
           />
           <Toggle checked={wasteOnly} onChange={setWasteOnly} label="낭비 후보만" />
-          <Toggle checked={primaryOnly} onChange={setPrimaryOnly} label="주요 관제만" />
         </div>
       </div>
 
@@ -114,10 +135,15 @@ export function AssetsView({
         <StatusBadge field="collection_status" value={data.collection_status} />
         <span>갱신 {formatKst(data.last_collected_at)}</span>
         <span aria-live="polite">
-          {visible.length === data.items.length
-            ? `${data.items.length}건`
-            : `${visible.length} / ${data.items.length}건`}
+          {visible.length === primaryItems.length
+            ? `${primaryItems.length}건`
+            : `${visible.length} / ${primaryItems.length}건`}
         </span>
+        {/* 응답에 있었는데 화면에 없는 것이 있으면 그 사실을 말한다 — 숨긴 줄 모르면
+            "수집이 안 된 것"으로 읽힌다(§4.2). */}
+        {supportCount > 0 ? (
+          <span>지원 자산 {supportCount}건 제외 (판정·비용 대상 아님 · 토폴로지에는 남는다)</span>
+        ) : null}
       </div>
 
       <TabsContent value="list">

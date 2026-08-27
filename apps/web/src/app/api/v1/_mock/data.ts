@@ -491,7 +491,10 @@ export const incidents: IncidentResponse[] = [
     // 차단(NACL_ADD_DENY)은 SUCCESS로 끝났고, 해제(NACL_RESTORE)는 롤백 3종이 아니라
     // AI 추천 가능한 본편 조치라 available_recovery가 아닌 recommendations로 온다.
     incident_id: 'inc-20260814-0004',
-    title: 'NACL 인바운드 차단 적용 완료 — 해제 대기 (vigilantis-web-01)',
+    // v1.6 §4.4 규칙 2 — 제목은 **위협 이름**이다. 구 제목('NACL 인바운드 차단 적용 완료 —
+    // 해제 대기')은 조치명이라 상태 배지가 이미 말하는 것을 한 번 더 말했다.
+    // 위협 자체는 summary_lines[1]이 말하는 "vigilantis-web-01에 대한 비정상 접근 시도"다.
+    title: '비정상 접근 시도 — vigilantis-web-01',
     subject_arn: arn.ec2Normal,
     category: 'SECOPS',
     status: 'AWAITING_APPROVAL',
