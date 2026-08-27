@@ -27,6 +27,7 @@
 
 - [ ] `pytest` 통과
 - [ ] `docker-compose up`으로 로컬 기동 확인
+- [x] (`apps/web` 변경 시) `npm run lint` · `npm run build` · `npm test` 통과 — (해당 없음) <사유>
 - [x] (API 변경 시) FE↔BE 계약/Mock 영향 확인 — (해당 없음) <사유>
 - [x] (범위·계약·역할 변경 시) `docs/PROJECT_STATUS.md` 갱신 — (해당 없음) <사유>
 

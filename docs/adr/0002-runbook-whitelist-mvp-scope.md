@@ -1,6 +1,6 @@
 # ADR-0002: Action Whitelist는 런북 명세서 7종으로 확정하고 전부 MVP 범위로 한다
 
-- **Status**: Accepted
+- **Status**: Accepted (2026-08-13 [ADR-0004](0004-rollback-runbook-whitelist-registration.md)로 **범위 확대** — 롤백 3종 정식 등록으로 Whitelist는 **7종 → 10종**. 본 ADR의 판단은 유효하며 대상 목록만 확장됐다)
 - **Date**: 2026-08-12
 - **Deciders**: 김세혁(PM/Infra), 안성일(AI/Guardrail) 공동 확정 사안
 
@@ -35,7 +35,7 @@
 
 **비용/유의**
 - 구현량이 2종 → 7종(+롤백 런북)으로 증가. 9주 일정 대비 위험 → 컷라인(P0/P1/P2) 운용 필요(`docs/PROJECT_STATUS.md` 참고)
-- **미해결**: `rollback_runbook_id`가 참조하는 `RUNBOOK_EC2_UNISOLATE`·`RUNBOOK_SG_RECREATE`·`RUNBOOK_EC2_REVERT_SIZE`가 Whitelist에 미등록 — 명세 추가 또는 롤백 실행의 Whitelist 검증 우회 정책 결정 필요(후속 ADR 후보)
+- ~~**미해결**: `rollback_runbook_id`가 참조하는 `RUNBOOK_EC2_UNISOLATE`·`RUNBOOK_SG_RECREATE`·`RUNBOOK_EC2_REVERT_SIZE`가 Whitelist에 미등록~~ ✅ **해소**(2026-08-13, [ADR-0004](0004-rollback-runbook-whitelist-registration.md)) — 우회 정책은 기각되고 **3종 정식 등록**으로 결정됐다(`ai_recommendable: false`·백업 레코드 기반 복원·가드레일 실패 시 수동 개입)
 - 구 MVP 범위 명세·README·코드 스텁 주석의 "EC2·SG 한정 / 런북 2종" 서술은 구버전이 됨 → 순차 갱신
 
 ## Related
