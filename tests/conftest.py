@@ -33,10 +33,20 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from typing import Mapping
 
 import pytest
-from execution_harness import (
+
+# execution_harness 는 이 디렉터리의 형제 모듈이다. pytest 기본 임포트 모드(prepend)는
+# 이 경로를 알아서 넣어 주지만, 그 기본값에 기대지 않는다 — `--import-mode=importlib` 로
+# 돌리면 넣어 주지 않아 수집이 통째로 멈춘다. 임포트 모드는 테스트가 고를 문제가 아니다.
+_TESTS_DIR = str(Path(__file__).resolve().parent)
+if _TESTS_DIR not in sys.path:
+    sys.path.insert(0, _TESTS_DIR)
+
+from execution_harness import (  # noqa: E402
     P2_LOCAL_FAIL_CASES,
     SEED_HINT,
     SEED_TAG_KEY,
