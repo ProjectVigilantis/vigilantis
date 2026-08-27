@@ -18,22 +18,21 @@
 # 1. 확정 10종 실행 함수(execute) — 조치 전 스펙 JSON 백업 후 상태 변경
 # 2. 롤백 3종 실행도 executor 경유 — 트리거 판단·감시는 rollback.py 담당
 #
-# 파라미터 형식 검증은 #154(런북별 typed 파라미터 계약)까지의 과도기 코드다. #154가
-# 확정되면 이 표를 원천으로 packages/schemas에 typed 모델이 생기고, 형식 위반은
-# ④가 아니라 ① Schema Check에서 걸린다. 후보(RunbookCandidateDraft)의
-# display_parameters·evidence_ids를 여기 parameters로 바꾸는 변환도 #154 범위다
-# — 그 계약이 서기 전에는 후보를 그대로 이 함수에 넣을 수 없다.
+# 파라미터 계약의 원천은 packages/schemas/runbook_parameters.py의 typed 모델이다(#154).
+# 형식 위반은 AI 후보라면 ① Schema Check에서 먼저 걸리고, 여기 _validate_params는 같은
+# 모델로 한 번 더 본다 — ④를 타는 경로가 그것만이 아니기 때문이다(롤백 3종·시스템
+# 트리거는 ①을 거치지 않는다). 후보(RunbookCandidateDraft)를 여기 parameters로 바꾸는
+# 변환은 runbook_parameters.py의 build_precheck_parameters()다.
 # ==============================================================================
 
 from __future__ import annotations
 
-import ipaddress
 import logging
-import re
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional, Protocol
 
 from botocore.exceptions import BotoCoreError, ClientError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from schemas.backups import BackupType
 from schemas.precheck import (
@@ -41,6 +40,20 @@ from schemas.precheck import (
     PrecheckReasonCode,
     VerificationMethod,
     build_verification_summary,
+)
+from schemas.runbook_parameters import (
+    EbsDeleteUnattachedParameters,
+    Ec2EnableAutoscalingParameters,
+    Ec2IsolateParameters,
+    Ec2RevertSizeParameters,
+    Ec2RightsizingParameters,
+    Ec2UnisolateParameters,
+    NaclAddDenyParameters,
+    NaclRestoreParameters,
+    SecurityGroupId,
+    SgDeleteIsolatedParameters,
+    SgRecreateParameters,
+    TargetGroupArn,
 )
 from schemas.runbooks import RunbookId
 
@@ -110,47 +123,24 @@ BACKUP_SG_AND_TG_MAPPING = BackupType.SAVE_CURRENT_SG_AND_TG_MAPPING.value
 BACKUP_NACL_RULE_INDEX = BackupType.RECORD_NACL_RULE_INDEX.value
 
 
-# ------------------------------------------------------------------ 파라미터 검증
-def _matches(pattern: str) -> Callable[[Any], bool]:
-    compiled = re.compile(pattern)
-    return lambda value: isinstance(value, str) and bool(compiled.fullmatch(value))
+# ------------------------------------------------------------------ 백업 payload 확인
+# 파라미터가 아니라 우리가 저장한 백업 JSON을 보는 자리다(구조의 원천은
+# services/aws/backup.py). 식별자 형식은 파라미터 계약과 같아야 하므로 같은 타입을
+# 재사용한다 — 패턴을 두 번 적으면 한쪽만 고쳐진 채로 남는다.
+_SG_ID = TypeAdapter(SecurityGroupId)
+_TG_ARN = TypeAdapter(TargetGroupArn)
 
 
 def _non_empty_str(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-def _int_between(low: int, high: int) -> Callable[[Any], bool]:
-    # bool은 int의 하위 타입이라 명시적으로 배제한다
-    return lambda v: isinstance(v, int) and not isinstance(v, bool) and low <= v <= high
-
-
-def _is_bool(value: Any) -> bool:
-    return isinstance(value, bool)
-
-
-def _is_ipv4_cidr(value: Any) -> bool:
-    # 접두 길이를 반드시 적게 한다. ipaddress는 맨 IP도 /32로 받아 주지만, 차단 대역을
-    # 다루는 필드에서 "203.0.113.5"와 "203.0.113.5/32"를 같게 보면 의도가 흐려진다.
-    if not isinstance(value, str) or "/" not in value:
-        return False
+def _conforms(adapter: TypeAdapter, value: Any) -> bool:
     try:
-        ipaddress.IPv4Network(value, strict=False)
-    except ValueError:
+        adapter.validate_python(value)
+    except ValidationError:
         return False
     return True
-
-
-def _one_of(*allowed: str) -> Callable[[Any], bool]:
-    return lambda value: value in allowed
-
-
-# 런북 명세서 parameters_schema의 pattern을 그대로 옮긴다
-_INSTANCE_ID = _matches(r"i-[a-f0-9]{8,17}")
-_GROUP_ID = _matches(r"sg-[a-f0-9]{8,17}")
-_ACL_ID = _matches(r"acl-[a-f0-9]{8,17}")
-_VOLUME_ID = _matches(r"vol-[a-f0-9]{8,17}")
-_TARGET_GROUP_ARN = _matches(r"arn:aws:elasticloadbalancing:.*:targetgroup/.*")
 
 
 # ------------------------------------------------------------------ ARN
@@ -190,7 +180,7 @@ def parse_arn(arn: str) -> Optional[ParsedArn]:
 class _Spec:
     """런북 1종의 precheck 명세. 파라미터 계약과 확인 방식을 한 자리에 모은다."""
 
-    params: Mapping[str, Callable[[Any], bool]]
+    params_model: type[BaseModel]           # 파라미터 계약(packages/schemas, #154)
     resource_type: str                      # target_arn이 가리켜야 하는 자원 유형
     primary_param: Optional[str]            # target_arn의 자원 ID와 같아야 하는 키
     method: VerificationMethod
@@ -202,16 +192,9 @@ class _Spec:
     backup_match_params: tuple[str, ...] = ()
 
 
-_EVIDENCE = {"evidence_id": _non_empty_str}
-
 RUNBOOK_SPECS: Mapping[str, _Spec] = {
     RunbookId.RUNBOOK_EC2_ISOLATE.value: _Spec(
-        params={
-            "instance_id": _INSTANCE_ID,
-            "target_group_arn": _TARGET_GROUP_ARN,
-            "isolation_group_id": _GROUP_ID,
-            **_EVIDENCE,
-        },
+        params_model=Ec2IsolateParameters,
         resource_type="instance",
         primary_param="instance_id",
         arn_params=("target_group_arn",),
@@ -224,13 +207,7 @@ RUNBOOK_SPECS: Mapping[str, _Spec] = {
         handler="_precheck_isolate",
     ),
     RunbookId.RUNBOOK_NACL_ADD_DENY.value: _Spec(
-        params={
-            "network_acl_id": _ACL_ID,
-            "rule_number": _int_between(1, 32766),
-            "cidr_block": _is_ipv4_cidr,
-            "protocol": _one_of("tcp", "udp", "icmp", "-1"),
-            **_EVIDENCE,
-        },
+        params_model=NaclAddDenyParameters,
         resource_type="network-acl",
         primary_param="network_acl_id",
         method=M.DESCRIBE,
@@ -238,12 +215,7 @@ RUNBOOK_SPECS: Mapping[str, _Spec] = {
         handler="_precheck_nacl_add_deny",
     ),
     RunbookId.RUNBOOK_NACL_RESTORE.value: _Spec(
-        params={
-            "network_acl_id": _ACL_ID,
-            "rule_number": _int_between(1, 32766),
-            "egress": _is_bool,
-            **_EVIDENCE,
-        },
+        params_model=NaclRestoreParameters,
         resource_type="network-acl",
         primary_param="network_acl_id",
         method=M.DESCRIBE,
@@ -254,7 +226,7 @@ RUNBOOK_SPECS: Mapping[str, _Spec] = {
         backup_match_params=("rule_number", "egress"),
     ),
     RunbookId.RUNBOOK_SG_DELETE_ISOLATED.value: _Spec(
-        params={"group_id": _GROUP_ID, **_EVIDENCE},
+        params_model=SgDeleteIsolatedParameters,
         resource_type="security-group",
         primary_param="group_id",
         method=M.DRY_RUN,
@@ -262,12 +234,7 @@ RUNBOOK_SPECS: Mapping[str, _Spec] = {
         handler="_precheck_sg_delete",
     ),
     RunbookId.RUNBOOK_EC2_RIGHTSIZING.value: _Spec(
-        params={
-            "instance_id": _INSTANCE_ID,
-            "current_instance_type": _non_empty_str,
-            "target_instance_type": _non_empty_str,
-            **_EVIDENCE,
-        },
+        params_model=Ec2RightsizingParameters,
         resource_type="instance",
         primary_param="instance_id",
         method=M.DRY_RUN,
@@ -275,12 +242,7 @@ RUNBOOK_SPECS: Mapping[str, _Spec] = {
         handler="_precheck_rightsizing",
     ),
     RunbookId.RUNBOOK_EC2_ENABLE_AUTOSCALING.value: _Spec(
-        params={
-            "instance_id": _INSTANCE_ID,
-            "min_size": _int_between(1, 4),
-            "max_size": _int_between(1, 4),
-            **_EVIDENCE,
-        },
+        params_model=Ec2EnableAutoscalingParameters,
         resource_type="instance",
         primary_param="instance_id",
         method=M.MIXED,
@@ -292,7 +254,7 @@ RUNBOOK_SPECS: Mapping[str, _Spec] = {
         handler="_precheck_enable_autoscaling",
     ),
     RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED.value: _Spec(
-        params={"volume_id": _VOLUME_ID, **_EVIDENCE},
+        params_model=EbsDeleteUnattachedParameters,
         resource_type="volume",
         primary_param="volume_id",
         method=M.DRY_RUN,
@@ -300,11 +262,7 @@ RUNBOOK_SPECS: Mapping[str, _Spec] = {
         handler="_precheck_ebs_delete",
     ),
     RunbookId.RUNBOOK_EC2_UNISOLATE.value: _Spec(
-        params={
-            "instance_id": _INSTANCE_ID,
-            "backup_record_id": _non_empty_str,
-            **_EVIDENCE,
-        },
+        params_model=Ec2UnisolateParameters,
         resource_type="instance",
         primary_param="instance_id",
         method=M.MIXED,
@@ -319,7 +277,7 @@ RUNBOOK_SPECS: Mapping[str, _Spec] = {
         backup_type=BACKUP_SG_AND_TG_MAPPING,
     ),
     RunbookId.RUNBOOK_SG_RECREATE.value: _Spec(
-        params={"backup_record_id": _non_empty_str, **_EVIDENCE},
+        params_model=SgRecreateParameters,
         resource_type="security-group",
         primary_param=None,     # 복원 대상은 백업 레코드가 가리킨다
         method=M.DRY_RUN,
@@ -332,11 +290,7 @@ RUNBOOK_SPECS: Mapping[str, _Spec] = {
         backup_type=BACKUP_SG_FULL_RULES,
     ),
     RunbookId.RUNBOOK_EC2_REVERT_SIZE.value: _Spec(
-        params={
-            "instance_id": _INSTANCE_ID,
-            "backup_record_id": _non_empty_str,
-            **_EVIDENCE,
-        },
+        params_model=Ec2RevertSizeParameters,
         resource_type="instance",
         primary_param="instance_id",
         method=M.DRY_RUN,
@@ -410,26 +364,46 @@ def _call(operation: Callable[..., Any], **kwargs: Any):
 def _validate_params(spec: _Spec, params: Mapping[str, Any]) -> Optional[str]:
     """계약 위반 사유 문자열. 문제가 없으면 None.
 
-    키 집합이 정확히 일치해야 한다. 이 규칙이 ADR-0007 §5 ①("롤백 3종은 원복 값을
-    파라미터로 받지 않는다")을 그대로 강제한다 — 원본 SG 규칙·인스턴스 타입이 실려
-    오면 알 수 없는 키가 되어 여기서 거절된다.
+    판정은 packages/schemas의 typed 모델이 한다(#154). 키 집합이 정확히 일치해야
+    한다는 규칙(extra="forbid" + 전 키 required)이 ADR-0007 §5 ①("롤백 3종은 원복
+    값을 파라미터로 받지 않는다")을 그대로 강제한다 — 원본 SG 규칙·인스턴스 타입이
+    실려 오면 알 수 없는 키가 되어 여기서 거절된다.
+
+    AI 후보는 ① Schema Check가 같은 계약을 먼저 본다. 여기서 한 번 더 보는 이유는
+    ④를 타는 경로가 그것만이 아니기 때문이다 — 롤백 3종과 시스템 트리거는 ①을
+    거치지 않는다(ADR-0004 정책 ②).
     """
-    missing = sorted(key for key in spec.params if key not in params)
-    if missing:
-        return f"필수 키 누락: {', '.join(missing)}"
-
-    # 알 수 없는 키의 이름은 payload가 지은 문자열이라 요약에 싣지 않는다 — 개수만 남긴다
-    unknown = [key for key in params if key not in spec.params]
-    if unknown:
-        return f"허용되지 않은 키 {len(unknown)}개"
-
-    invalid = sorted(key for key, check in spec.params.items() if not check(params[key]))
-    if invalid:
-        return f"값 형식 위반: {', '.join(invalid)}"
-
-    if "min_size" in spec.params and params["min_size"] > params["max_size"]:
-        return "값 형식 위반: min_size, max_size"
+    try:
+        spec.params_model.model_validate(params)
+    except ValidationError as exc:
+        return _describe_violation(exc)
     return None
+
+
+def _describe_violation(exc: ValidationError) -> str:
+    """검증 오류를 요약 한 줄로. 이전 술어 표가 내던 문구와 우선순위를 유지한다."""
+    missing: list[str] = []
+    unknown = 0
+    invalid: list[str] = []
+    for err in exc.errors():
+        location = ".".join(str(part) for part in err["loc"])
+        if err["type"] == "missing":
+            missing.append(location)
+        elif err["type"] == "extra_forbidden":
+            unknown += 1
+        elif location:
+            invalid.append(location)
+        else:
+            # 필드에 매이지 않는 규칙(min_size ≤ max_size 등). 문구는 계약이 지은
+            # 것이라 그대로 실어도 payload 문자열이 새지 않는다.
+            invalid.append(err["msg"].removeprefix("Value error, "))
+
+    if missing:
+        return f"필수 키 누락: {', '.join(sorted(missing))}"
+    # 알 수 없는 키의 이름은 payload가 지은 문자열이라 요약에 싣지 않는다 — 개수만 남긴다
+    if unknown:
+        return f"허용되지 않은 키 {unknown}개"
+    return f"값 형식 위반: {', '.join(sorted(set(invalid)))}"
 
 
 def _validate_scope(spec: _Spec, target: ParsedArn, params: Mapping[str, Any]) -> Optional[str]:
@@ -795,8 +769,8 @@ def _precheck_unisolate(ctx: _Ctx) -> PrecheckOutcome:
     if not (
         isinstance(restore_groups, list)
         and restore_groups
-        and all(_GROUP_ID(group) for group in restore_groups)
-        and _TARGET_GROUP_ARN(target_group_arn)
+        and all(_conforms(_SG_ID, group) for group in restore_groups)
+        and _conforms(_TG_ARN, target_group_arn)
     ):
         return _fail(
             ctx,
@@ -975,7 +949,7 @@ def _load_backup(
 def precheck(
     runbook_id: "RunbookId | str",
     target_arn: str,
-    parameters: Mapping[str, Any],
+    parameters: "Mapping[str, Any] | BaseModel",
     *,
     backup_loader: Optional[BackupRecordLoader] = None,
 ) -> PrecheckOutcome:
@@ -990,6 +964,12 @@ def precheck(
 
     반환값은 GuardrailStepResult와 1:1로 매핑된다.
     """
+    if isinstance(parameters, BaseModel):
+        # 변환 경로(schemas.runbook_parameters.build_precheck_parameters)의 반환
+        # 모델을 그대로 받는다. 판정·핸들러는 §1대로 Mapping을 전제하므로 경계에서
+        # 한 번에 떨어뜨린다 — 호출부마다 model_dump를 요구하면 잊은 곳에서
+        # TypeError가 난다.
+        parameters = parameters.model_dump()
     runbook_value = (
         runbook_id.value if isinstance(runbook_id, RunbookId) else str(runbook_id)
     )

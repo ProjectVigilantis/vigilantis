@@ -6,7 +6,9 @@
 #   - commit은 여기서만 한다. Repository는 commit하지 않는다.
 #   - 4단계 가드레일을 실행 시점에 다시 부르지 않는다. 가드레일은 AI 제안 생성
 #     직후 1회 수행되고 통과한 제안이 EXECUTABLE이 되므로, 여기서는 그 상태를
-#     확인만 한다 (Issue #113 §2, packages/schemas/candidates.py).
+#     확인만 한다 (Issue #113 §2, packages/schemas/candidates.py). 단 저장된 행이
+#     현행 후보 계약(typed parameters, #154)대로인지는 접수 시점에 재확인한다 —
+#     가드레일 재실행이 아니라 저장소 무결성 확인이다.
 #   - AWS 실행은 아직 스텁이다 — 예약 레코드를 IN_PROGRESS로 남기는 데까지다.
 #     실행 직전 대상 자산 재확인과 후보 INVALIDATED 전이는 실제 실행이 붙을 때
 #     함께 들어온다.
@@ -20,9 +22,11 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Optional
 
+from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -39,13 +43,42 @@ from schemas.runbooks import (
     TriggerSource,
 )
 
-from db import models
+from db import mappers, models
 from db.repositories import executions as executions_repo
 from db.repositories import incidents as incidents_repo
 from exceptions import ApiError
 from identifiers import canonical_id
 from services.aws import backup
 from services.aws.executor import parse_arn
+
+logger = logging.getLogger("vigilantis.workflow")
+
+
+def _candidate_meets_contract(candidate: models.RunbookCandidate) -> bool:
+    """저장된 후보가 현행 후보 계약(#154 typed parameters)에 맞는가.
+
+    후보의 정상 경로는 계약(RunbookCandidateData) 검증을 거쳐 저장되지만, DB에는
+    그 경로를 우회한 행이 있을 수 있다 — typed 계약 이전에 저장된 행과 마이그레이션
+    backfill(빈 parameters)이 그렇다. EXECUTABLE 상태만 믿으면 ① Schema Check가
+    세운 계약이 실행 접수에서 무너진다.
+
+    접수만 막고 상세의 recommendations 노출은 거르지 않는다 — 응답 계약이
+    AWAITING_APPROVAL에 제안 1개 이상을 요구해(api/incidents.py) 노출 필터는 그
+    자리를 500으로 만든다. 이런 행의 실행 시도는 여기서 409로 떨어지는데, 그것은
+    후보 선점 경합과 같은 코드라 FE가 이미 처리하는 경로다.
+    """
+    try:
+        mappers.to_candidate_data(candidate)
+    except ValidationError:
+        logger.warning(
+            "candidate_contract_invalid",
+            extra={
+                "candidate_id": candidate.candidate_id,
+                "runbook_id": candidate.runbook_id.value,
+            },
+        )
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -91,6 +124,10 @@ def _executable_candidate(
     )
     for candidate in sorted(executable, key=lambda row: row.created_at):
         if candidate.runbook_id == request.runbook_id:
+            # 계약 위반 저장분은 실행할 수 없는 제안이다 — 상태가 EXECUTABLE이어도
+            # 접수하지 않는다(_candidate_meets_contract 참조)
+            if not _candidate_meets_contract(candidate):
+                break
             return candidate
     raise ApiError(ErrorCode.PROPOSAL_NOT_EXECUTABLE)
 

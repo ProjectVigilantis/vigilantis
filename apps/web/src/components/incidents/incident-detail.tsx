@@ -296,21 +296,51 @@ function ProposalActions({
 export function IncidentDetail({
   incident,
   subject,
+  openExecutionId = null,
 }: {
   incident: IncidentResponse;
   /** `subject_arn` → `GET /assets`의 `arn` 조인 결과(§4.5). 조회 실패·미수집이면 null이다. */
   subject: AssetItem | null;
+  /**
+   * `?execution=<id>` 딥링크(§4.4 목록에서 실행한 경우). 자체 URL이 없는 ACT-002를
+   * 부모 화면이 열어 준다 — `?asset=`(AST-002, #138)과 같은 방식이다.
+   * 값은 이미 받아 온 `executions[]`에서 찾으므로 재조회하지 않는다.
+   */
+  openExecutionId?: string | null;
 }) {
   const router = useRouter();
   // 모달 인스턴스 = 이 객체 하나. 열 때마다 새로 만들어 **멱등 키를 인스턴스에 고정**한다(§4.6).
   const [request, setRequest] = useState<ActionRequest | null>(null);
-  const [outcome, setOutcome] = useState<ExecuteOutcome | null>(null);
+  // 딥링크로 들어온 실행(#179). props에서만 파생하므로 서버·클라이언트가 같은 값을 만든다(하이드레이션 안전).
+  const deepLinked =
+    openExecutionId === null
+      ? undefined
+      : incident.executions.find((e) => e.execution_id === openExecutionId);
+  const [outcome, setOutcome] = useState<ExecuteOutcome | null>(() =>
+    deepLinked === undefined
+      ? null
+      : {
+          // 딥링크로 들어온 것은 재요청 응답이 아니다 — `이미 접수된 요청입니다`를 띄우지 않는다.
+          replayed: false,
+          execution: {
+            execution_id: deepLinked.execution_id,
+            status: deepLinked.status,
+            updated_at: deepLinked.updated_at,
+          },
+        },
+  );
   const { connection, subscribeExecution, subscribeIncident } = useRealtime();
   /**
    * ACT-002 진행 기록 — `EXECUTION_UPDATED` 수신마다 한 줄 쌓는다(§4.7). WS에 사용자용 메시지
    * 필드가 없으므로(추가하지 않는다) **수신 시각과 status 전이만** 담는다.
+   *
+   * 딥링크 진입도 접수 행 하나로 시작한다 — 비우면 패널이 진행 기록을 빈 목록으로 그린다.
    */
-  const [transitions, setTransitions] = useState<ExecutionTransition[]>([]);
+  const [transitions, setTransitions] = useState<ExecutionTransition[]>(() =>
+    deepLinked === undefined
+      ? []
+      : [{ at: deepLinked.updated_at, from: null, to: deepLinked.status }],
+  );
   /**
    * B-Medium 카운트다운의 기준 시각 — `AGENT_WAIT` 전환을 알린 `INCIDENT_UPDATED`의
    * `occurred_at`이다(계약 합의 2026-08-14 · #155). **수신 시각을 쓰지 않는다.**

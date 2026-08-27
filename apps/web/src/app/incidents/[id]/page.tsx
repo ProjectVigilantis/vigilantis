@@ -10,8 +10,13 @@ import { getAssets, getIncident } from '@/lib/api/client';
  *
  * 자산은 `subject_arn` 조인에만 쓴다. 실패해도 인시던트 화면은 떠야 하므로 조인 결과만 비운다.
  */
-export default async function IncidentDetailPage({ params }: PageProps<'/incidents/[id]'>) {
+export default async function IncidentDetailPage({
+  params,
+  searchParams,
+}: PageProps<'/incidents/[id]'>) {
   const { id } = await params;
+  // `?execution=`은 INC-001 목록에서 실행하고 넘어온 경우다(§4.4 → §4.7). ACT-002를 연 채로 연다.
+  const { execution } = await searchParams;
 
   let incident;
   try {
@@ -23,5 +28,11 @@ export default async function IncidentDetailPage({ params }: PageProps<'/inciden
   const assets = await getAssets().catch(() => null);
   const subject = assets?.items.find((a) => a.arn === incident.subject_arn) ?? null;
 
-  return <IncidentDetail incident={incident} subject={subject} />;
+  return (
+    <IncidentDetail
+      incident={incident}
+      subject={subject}
+      openExecutionId={typeof execution === 'string' ? execution : null}
+    />
+  );
 }

@@ -106,16 +106,22 @@ def test_detail_assembles_evidence_recommendations_executions(client_pg, db):
     )
     executable = models.RunbookCandidate(
         incident_id=secops.incident_id,
-        runbook_id=RunbookId.RUNBOOK_EC2_ISOLATE,
+        runbook_id=RunbookId.RUNBOOK_NACL_ADD_DENY,
         target_arn=SUBJECT_EC2,
-        display_parameters={"port": "22"},
-        evidence_ids=[],
+        # 서버가 parameters에서 만든 화면 표시본이다(#154) — 라우터는 그대로 실어 보낸다
+        parameters={"rule_number": 100, "cidr_block": "203.0.113.5/32", "protocol": "-1"},
+        display_parameters={
+            "rule_number": "100", "cidr_block": "203.0.113.5/32", "protocol": "-1",
+        },
+        evidence_ids=["ev-1"],
         status=CandidateStatus.EXECUTABLE,
     )
     rejected = models.RunbookCandidate(
         incident_id=secops.incident_id,
         runbook_id=RunbookId.RUNBOOK_SG_DELETE_ISOLATED,
         target_arn=SUBJECT_EC2,
+        parameters={},  # SG 삭제는 AI가 정할 값이 없다(#154)
+        evidence_ids=["ev-1"],
         status=CandidateStatus.REJECTED,
     )
     db.add_all([older, newer, executable, rejected])
@@ -130,9 +136,11 @@ def test_detail_assembles_evidence_recommendations_executions(client_pg, db):
     assert body["evidence_ids"] == [older.evidence_id, newer.evidence_id]
     # EXECUTABLE 후보만 recommendations에 온다(REJECTED 제외)
     assert [rec["runbook_id"] for rec in body["recommendations"]] == [
-        "RUNBOOK_EC2_ISOLATE"
+        "RUNBOOK_NACL_ADD_DENY"
     ]
-    assert body["recommendations"][0]["display_parameters"] == {"port": "22"}
+    assert body["recommendations"][0]["display_parameters"] == {
+        "rule_number": "100", "cidr_block": "203.0.113.5/32", "protocol": "-1",
+    }
     assert body["executions"] == []
     assert body["created_at"] == "2026-08-19T03:00:00Z"
 
@@ -143,6 +151,8 @@ def test_detail_assembles_execution_summaries(client_pg, db):
         incident_id=secops.incident_id,
         runbook_id=RunbookId.RUNBOOK_NACL_ADD_DENY,
         target_arn=SUBJECT_EC2,
+        parameters={"rule_number": 100, "cidr_block": "203.0.113.5/32", "protocol": "-1"},
+        evidence_ids=["ev-1"],
         status=CandidateStatus.EXECUTABLE,
     )
     execution = models.ActionExecution(

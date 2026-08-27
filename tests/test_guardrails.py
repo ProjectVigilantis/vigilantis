@@ -50,11 +50,33 @@ GOLDEN_FINOPS_INPUT = ROOT / "datasets" / "golden" / "finops" / "input"
 _SAFE_ARN = "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0123456789abcdef0"
 
 
+# Runbook 별로 AI 가 정하는 값 (#154). ① Schema Check 가 이 계약과 대조하므로,
+# 런북과 무관한 파라미터를 실으면 목록 대조(②) 전에 형식 위반으로 걸린다.
+# 목록에 없는 ID 는 typed 계약이 없어 빈 dict 로 둔다 — 판정은 ② 의 몫이다.
+_PARAMS_BY_RUNBOOK = {
+    RunbookId.RUNBOOK_EC2_ISOLATE.value: {},
+    RunbookId.RUNBOOK_NACL_ADD_DENY.value: {
+        "rule_number": 100, "cidr_block": "203.0.113.5/32", "protocol": "-1",
+    },
+    RunbookId.RUNBOOK_NACL_RESTORE.value: {"rule_number": 100, "egress": False},
+    RunbookId.RUNBOOK_SG_DELETE_ISOLATED.value: {},
+    RunbookId.RUNBOOK_EC2_RIGHTSIZING.value: {"target_instance_type": "t3.small"},
+    RunbookId.RUNBOOK_EC2_ENABLE_AUTOSCALING.value: {"min_size": 1, "max_size": 2},
+    RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED.value: {},
+}
+
+
 def _payload(**overrides) -> dict:
+    """Runbook 에 맞는 파라미터를 실어 준다.
+
+    이 헬퍼가 런북을 무시하고 한 벌만 싣던 때는 SG 삭제 후보에 rightsizing
+    파라미터가 붙어도 통과했다 (#154). 이제 그 조합은 ① 에서 걸린다.
+    """
+    runbook_id = overrides.get("runbook_id", RunbookId.RUNBOOK_EC2_RIGHTSIZING.value)
     base = {
-        "runbook_id": RunbookId.RUNBOOK_EC2_RIGHTSIZING.value,
+        "runbook_id": runbook_id,
         "target_arn": _SAFE_ARN,
-        "display_parameters": {"target_instance_type": "t3.small"},
+        "parameters": _PARAMS_BY_RUNBOOK.get(runbook_id, {}),
         "evidence_ids": ["ev-1"],
     }
     base.update(overrides)
@@ -127,8 +149,8 @@ def test_rollback_runbooks_are_listed_but_not_ai_recommendable(runbook_id: str) 
 
 
 # 자산 종류마다 그 자산을 대상으로 하는 Runbook 을 짝지어 둔다 — ARN 만 바꾸면
-# SG ARN 이 EC2 Rightsizing 에 붙는 조합이 생기고, Runbook 별 파라미터 계약(#49)이
-# 들어올 때 그 조합부터 깨진다. (PR #141 리뷰 반영)
+# SG ARN 이 EC2 Rightsizing 에 붙는 조합이 생긴다. Runbook 별 파라미터 계약(#154)이
+# 선 지금은 파라미터도 함께 갈리므로 그 조합은 ① 에서 걸린다. (PR #141 리뷰 반영)
 _GOLDEN_ASSET_RUNBOOKS = {
     "ec2_instances": RunbookId.RUNBOOK_EC2_RIGHTSIZING.value,
     "security_groups": RunbookId.RUNBOOK_SG_DELETE_ISOLATED.value,

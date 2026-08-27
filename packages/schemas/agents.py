@@ -13,8 +13,12 @@
 #     NO_PROPOSAL=요약 3줄+후보 0개, FAILED=빈 요약+후보 0개+reviewed null.
 #   - FINOPS 출력의 reviewed_risk_level=null 규칙과 "후보 evidence_ids⊆입력 Evidence"
 #     규칙은 입력·출력을 함께 아는 Workflow가 검증한다(출력 모델 단독으로는 불가).
-#   - Runbook별 typed parameters·Capability의 파라미터 계약 메타데이터는 세부 계약
-#     확정 후 추가한다(#49 확정 — 이번 범위에서 제외).
+#   - 후보 parameters는 Runbook별 typed 모델이다(#154, runbook_parameters.py).
+#     AI가 정하는 값만 싣는다 — 자원 ID는 target_arn에서, 조회값과 evidence_id는
+#     실행 접수 시점에 채운다. 화면 표시본(display_parameters)은 Draft에 없다.
+#     서버가 parameters에서 생성하므로 LLM이 지을 자리를 두지 않는다.
+#   - Capability의 파라미터 계약 메타데이터는 세부 계약 확정 후 추가한다(#49 확정 —
+#     이번 범위에서 제외).
 # ==============================================================================
 
 from __future__ import annotations
@@ -30,6 +34,11 @@ from .evidence import EVIDENCE_CONTENT_MODELS, EvidenceContent, EvidenceType, bi
 from .events import InitialRiskEvaluationResult
 from .incidents import AGENT_TERMINAL_STATUSES, AgentInvocationStatus
 from .rules import RuleEvaluationResult
+from .runbook_parameters import (
+    CANDIDATE_PARAMETER_MODELS,
+    CandidateParameters,
+    bind_candidate_parameters,
+)
 from .runbooks import AI_RECOMMENDABLE_RUNBOOK_IDS, RunbookId
 
 # 자산 문맥은 공개 AssetItem을 그대로 재사용한다 — 대상 ARN·유형·상태·Spec·관계를
@@ -145,13 +154,24 @@ class RunbookCandidateDraft(BaseModel):
 
     runbook_id: RunbookId
     target_arn: str = Field(min_length=1)
-    display_parameters: dict[str, str] = Field(default_factory=dict)
-    evidence_ids: list[Annotated[str, Field(min_length=1)]] = Field(default_factory=list)
+    parameters: CandidateParameters
+    # evidence_id(단수)를 여기 첫 항목에서 뽑으므로 비어 있을 수 없다(#154)
+    evidence_ids: list[Annotated[str, Field(min_length=1)]] = Field(min_length=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _bind_parameters(cls, data):
+        return bind_candidate_parameters(data)
 
     @model_validator(mode="after")
-    def _ai_recommendable_only(self):
+    def _enforce_contract(self):
         if self.runbook_id.value not in AI_RECOMMENDABLE_RUNBOOK_IDS:
             raise ValueError("Draft에는 AI 추천 가능 Runbook(본편 7종)만 올 수 있습니다")
+        expected = CANDIDATE_PARAMETER_MODELS[self.runbook_id]
+        if not isinstance(self.parameters, expected):
+            raise ValueError(
+                f"{self.runbook_id.value}의 parameters는 {expected.__name__}이어야 합니다"
+            )
         return self
 
 

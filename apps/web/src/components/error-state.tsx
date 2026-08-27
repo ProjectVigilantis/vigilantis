@@ -88,7 +88,10 @@ export function ErrorState({
         </details>
       ) : null}
 
-      {preset.backToList ? (
+      {/* `목록으로`는 **전체 오류 화면의 탈출구**다 — 화면이 통째로 죽어 갈 곳이 없을 때만 의미가 있다.
+          인라인 오류는 주변 화면이 살아 있으므로 붙이지 않는다. 목록 안에서 카드 1건이 실패했는데
+          이 버튼이 뜨면 이미 있는 목록으로 보내면서 필터만 푼다(PR #180 리뷰). */}
+      {preset.backToList && layout === 'page' ? (
         <Button asChild variant="outline" size="sm">
           <Link href="/incidents">목록으로</Link>
         </Button>
