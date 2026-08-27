@@ -87,8 +87,16 @@ def _execution(db, incident, **overrides):
 
 
 def test_alembic_head_applied_with_13_tables(db):
+    # 리비전 문자열을 적어 두면 마이그레이션마다 이 줄을 고쳐야 하고, 그 수정은
+    # 검증이 아니라 손질이다. 확인할 것은 "DB가 head까지 올라와 있는가"다.
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    head = ScriptDirectory.from_config(
+        Config(str(CORE_API / "alembic.ini"))
+    ).get_current_head()
     version = db.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-    assert version == "e4947bbcd48a"
+    assert version == head
     count = db.execute(
         text(
             "SELECT count(*) FROM information_schema.tables"
@@ -389,11 +397,15 @@ def test_set_agent_wait_once_and_deadline_constraint(db):
 
 
 def _candidate(incident, runbook=RunbookId.RUNBOOK_EC2_RIGHTSIZING, cid=None):
+    # parameters는 Runbook별 typed 계약이다(#154) — 기본 Runbook의 값을 싣는다.
+    # display_parameters는 계약이 여기서 만들어 준다.
     return RunbookCandidateData(
         candidate_id=cid or str(uuid.uuid4()),
         incident_id=incident.incident_id,
         runbook_id=runbook,
         target_arn=incident.subject_arn,
+        parameters={"target_instance_type": "t3.medium"},
+        evidence_ids=["ev-1"],
         status=CandidateStatus.PENDING_VALIDATION,
     )
 

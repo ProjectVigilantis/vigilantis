@@ -138,7 +138,7 @@ SUMMARY3 = ["저활성 EC2입니다.", "현재 부하 대비 과대 스펙입니
 DRAFT = {
     "runbook_id": "RUNBOOK_EC2_RIGHTSIZING",
     "target_arn": EC2_ARN,
-    "display_parameters": {"target_instance_type": "t3.small"},
+    "parameters": {"target_instance_type": "t3.small"},
     "evidence_ids": ["ev-001"],
 }
 
