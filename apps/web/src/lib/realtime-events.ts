@@ -46,7 +46,7 @@ export function actionFor(event: WsEvent): RealtimeAction {
   return {
     kind: 'refresh',
     incidentId: event.data.incident_id,
-    // 봉투의 `occurred_at`이다 — B-Medium 카운트다운의 기준 시각이라 여기서 버리면 상세가
+    // 봉투의 `occurred_at`이다 — B-Medium 대기 기준 시각이라 여기서 버리면 상세가
     // 항상 fallback 안내문으로 떨어진다(계약 합의 2026-08-14 · #155 · PR #181 리뷰).
     occurredAt: event.occurred_at,
     toast: event.event_type === 'INCIDENT_CREATED',
@@ -77,7 +77,7 @@ export function appendTransition(
 }
 
 /**
- * B-Medium 카운트다운 기준 시각의 래치 규칙(§4.5 · 계약 합의 2026-08-14).
+ * B-Medium 대기 기준 시각의 래치 규칙(§4.5 · 계약 합의 2026-08-14).
  *
  * `AGENT_WAIT` 창에 **들어갈 때 한 번만** 잡고, 창 안에서는 바꾸지 않는다 — 창 안에서 오는
  * 후속 `INCIDENT_UPDATED`(정밀 평가 도착 등)마다 다시 물리면 60초가 리셋돼 서버 자동 격리보다
@@ -92,6 +92,32 @@ export function latchAgentWaitAt(
 ): IsoDateTime | null {
   if (!inWindow) return null;
   return prev ?? lastEventAt;
+}
+
+/**
+ * 응답 기한 = 대기 기준 시각 + 60초. 계약 `AgentWaitSchedule`의 검증기와
+ * `apps/core-api/db/models.py`의 CHECK 제약이 같은 값을 강제한다.
+ */
+const AGENT_WAIT_TIMEOUT_MS = 60_000;
+
+/**
+ * B-Medium 대기 화면이 그리는 두 시각. **파싱 불가한 입력은 null로 떨어뜨린다.**
+ *
+ * `new Date(NaN).toISOString()`은 `RangeError`를 던지는데, `apps/web/src/app`에 route-level
+ * `error.tsx`가 없어 가장 가까운 경계가 `global-error.tsx`뿐이라 **한 섹션이 아니라 앱 셸
+ * 전체가 대체된다.** WS 프레임은 `JSON.parse(...) as WsEvent` 캐스트라 런타임 검증이 없어
+ * `occurred_at` 누락이 그대로 흘러들 수 있다 — `undefined`는 `!== null`을 통과한다(PR #187 리뷰).
+ */
+export function agentWaitTimes(
+  startedAt: string | null | undefined,
+): { startedAt: IsoDateTime; deadlineAt: IsoDateTime } | null {
+  if (startedAt === null || startedAt === undefined) return null;
+  const startedMs = Date.parse(startedAt);
+  if (!Number.isFinite(startedMs)) return null;
+  return {
+    startedAt: startedAt as IsoDateTime,
+    deadlineAt: new Date(startedMs + AGENT_WAIT_TIMEOUT_MS).toISOString() as IsoDateTime,
+  };
 }
 
 /**

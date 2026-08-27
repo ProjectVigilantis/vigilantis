@@ -28,19 +28,12 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { useRealtime } from '@/components/realtime-provider';
-import { appendTransition, latchAgentWaitAt } from '@/lib/realtime-events';
+import { agentWaitTimes, appendTransition, latchAgentWaitAt } from '@/lib/realtime-events';
 import { newIdempotencyKey } from '@/lib/api/client';
 import { isTerminalStatus } from '@/lib/execution-status';
 import { RUNBOOK_LABELS, incidentTitle } from '@/lib/enum-labels';
 import { formatKst } from '@/lib/utils';
 import type { AssetItem, IncidentResponse, IsoDateTime, RunbookId } from '@/types/api';
-
-/**
- * 응답 기한 = `AGENT_WAIT` 전환 시각 + 60초. 계약(`AgentWaitSchedule`)과 DB CHECK 제약이
- * `response_deadline_at = started_at + 60초`를 강제하므로 화면도 같은 값을 만든다.
- * `'use client'` 모듈에 두면 서버 컴포넌트가 값 대신 클라이언트 참조를 받아 계산이 NaN이 된다.
- */
-const AGENT_WAIT_TIMEOUT_MS = 60_000;
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -156,23 +149,26 @@ function AgentWaitNotice({
 }) {
   if (!inAgentWaitWindow(incident)) return null;
 
+  // 기준은 `AGENT_WAIT` 전환을 알린 INCIDENT_UPDATED의 occurred_at이다 — **수신 시각을 쓰지
+  // 않는다**(합의 2026-08-14). 수신 기준이면 재접속마다 시간이 늘어난다. 파싱 불가한 값은
+  // null로 떨어져 아래 고정 안내문이 받는다(PR #187 리뷰).
+  const times = agentWaitTimes(agentWaitAt);
+
   return (
     <div className="border-danger/30 bg-danger/5 flex flex-col gap-1.5 rounded-md border p-3 text-sm">
       <p>승인 전까지 조치는 수행되지 않습니다.</p>
-      {agentWaitAt !== null ? (
-        // 기준은 `AGENT_WAIT` 전환을 알린 INCIDENT_UPDATED의 occurred_at이다 —
-        // **수신 시각을 쓰지 않는다**(합의 2026-08-14). 수신 기준이면 재접속마다 시간이 늘어난다.
+      {times !== null ? (
         // formatKst는 timeZone을 고정하므로 서버·클라이언트가 같은 문자열을 만든다.
         <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
           <dt className="text-muted-foreground text-xs">제안 생성</dt>
-          <dd className="font-mono text-xs tabular-nums">{formatKst(agentWaitAt)}</dd>
+          <dd className="font-mono text-xs tabular-nums">{formatKst(times.startedAt)}</dd>
           <dt className="text-muted-foreground text-xs">실행 예정</dt>
           <dd className="text-danger font-mono text-xs font-medium tabular-nums">
-            {formatKst(new Date(Date.parse(agentWaitAt) + AGENT_WAIT_TIMEOUT_MS).toISOString())}
+            {formatKst(times.deadlineAt)}
           </dd>
         </dl>
       ) : (
-        // 전환 이벤트를 받지 못한 인시던트(재접속 등)는 시각 없이 고정 안내문을 쓴다(§4.5).
+        // 전환 이벤트를 못 받았거나 값이 계약 밖이면 시각 없이 고정 안내문을 쓴다(§4.5).
         <p className="text-danger font-medium">1분 안에 응답하지 않으면 서버가 자동으로 격리합니다.</p>
       )}
     </div>
@@ -357,7 +353,7 @@ export function IncidentDetail({
       : [{ at: deepLinked.updated_at, from: null, to: deepLinked.status }],
   );
   /**
-   * B-Medium 카운트다운의 기준 시각 — `AGENT_WAIT` 전환을 알린 `INCIDENT_UPDATED`의
+   * B-Medium 대기 기준 시각 — `AGENT_WAIT` 전환을 알린 `INCIDENT_UPDATED`의
    * `occurred_at`이다(계약 합의 2026-08-14 · #155). **수신 시각을 쓰지 않는다.**
    *
    * 창에 **들어가는 순간 한 번만** 래치한다. 창 안에서 오는 후속 `INCIDENT_UPDATED`(정밀 평가
