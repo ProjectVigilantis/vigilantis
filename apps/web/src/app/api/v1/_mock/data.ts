@@ -354,12 +354,13 @@ export const incidents: IncidentResponse[] = [
       {
         runbook_id: 'RUNBOOK_NACL_ADD_DENY',
         target_arn: arn.nacl,
-        display_parameters: { source_cidr: '0.0.0.0/0', rule_number: '100' },
+        display_parameters: { rule_number: '100', cidr_block: '0.0.0.0/0', protocol: 'tcp' },
       },
       {
         runbook_id: 'RUNBOOK_SG_DELETE_ISOLATED',
         target_arn: arn.sgOpenIp,
-        display_parameters: { security_group_id: 'sg-0a1b2c3d4e5f60001' },
+        // 삭제 대상 SG는 target_arn이 가리킨다 — 후보 파라미터가 비어 서버 파생본도 {}다.
+        display_parameters: {},
       },
     ],
     executions: [],
@@ -386,10 +387,8 @@ export const incidents: IncidentResponse[] = [
       {
         runbook_id: 'RUNBOOK_EC2_RIGHTSIZING',
         target_arn: arn.ec2Idle,
-        display_parameters: {
-          current_instance_type: 't3.large',
-          target_instance_type: 't3.small',
-        },
+        // current_instance_type은 실행 파라미터에만 있고 후보에는 없다 — 서버가 내지 않는다(#183).
+        display_parameters: { target_instance_type: 't3.small' },
       },
     ],
     executions: [],
@@ -419,7 +418,8 @@ export const incidents: IncidentResponse[] = [
       {
         runbook_id: 'RUNBOOK_NACL_RESTORE',
         target_arn: arn.nacl,
-        display_parameters: { source_cidr: '0.0.0.0/0', rule_number: '100' },
+        // egress는 StrictBool이고 서버가 'true'/'false' 문자열로 내린다(_display_value).
+        display_parameters: { rule_number: '100', egress: 'false' },
       },
     ],
     executions: [
@@ -454,7 +454,9 @@ export const incidents: IncidentResponse[] = [
       {
         runbook_id: 'RUNBOOK_EBS_DELETE_UNATTACHED',
         target_arn: arn.ebsUnattached,
-        display_parameters: { volume_id: 'vol-0a1b2c3d4e5f60002', size_gib: '100' },
+        // 삭제 대상 볼륨은 target_arn이 가리킨다 — 후보 파라미터가 비어 서버 파생본도 {}다.
+        // 삭제 규모(size_gib)는 이 경로로 오지 않는다 — 승인 화면 복원은 #183 후속.
+        display_parameters: {},
       },
     ],
     executions: [],
