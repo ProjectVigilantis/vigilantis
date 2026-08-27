@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { RISK_BAND_CLASS, RISK_BAND_EMPTY, StatusBadge } from '@/components/status-badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
-import { incidentTitle } from '@/lib/enum-labels';
+import { arnShort, incidentTitle } from '@/lib/enum-labels';
 import { cn, formatKst } from '@/lib/utils';
 import type { IncidentListItem } from '@/types/api';
 
@@ -50,9 +50,14 @@ export function IncidentCard({
   incident,
   /** `승인 대기` 프리셋에서만 붙는다 — 전체 목록에서는 직접 실행하지 않는다(§4.4 액션). */
   showExecute = false,
+  /** 이 카드의 상세를 조회하는 중. **누른 카드만** 잠근다(다른 카드는 계속 눌린다). */
+  executePending = false,
+  onExecute,
 }: {
   incident: IncidentListItem;
   showExecute?: boolean;
+  executePending?: boolean;
+  onExecute?: (incidentId: string) => void;
 }) {
   const band =
     incident.initial_risk_level === null
@@ -100,7 +105,7 @@ export function IncidentCard({
         className="text-muted-foreground relative z-10 w-fit max-w-full truncate text-xs"
         title={incident.subject_arn}
       >
-        대상 {incident.subject_arn.split(/[:/]/).pop() ?? incident.subject_arn}
+        대상 {arnShort(incident.subject_arn)}
       </p>
 
       {/* `mt-auto` — FINOPS는 위험도 행이 없어 내용이 한 줄 짧다. 그리드가 카드 높이만 맞추고
@@ -108,11 +113,17 @@ export function IncidentCard({
       <div className="border-border/60 mt-auto flex items-center justify-between gap-2 border-t pt-3">
         <span className="text-muted-foreground text-xs">{formatKst(incident.updated_at)}</span>
         {showExecute ? (
-          // 실행은 ACT-001 모달(#166)이 열어야 한다 — 요청 3필드·멱등 키·파괴적 조치 경고가
-          // 그 카드 소관이고, 그것 없이 실행을 열면 계약을 어긴 요청이 나간다.
+          // 누르면 ACT-001 모달을 연다(§4.6). 목록 계약에 `recommendations`가 없어
+          // 호출부가 `GET /incidents/{id}`로 후보를 채운 뒤 연다.
           // `z-10`으로 카드 전면 링크 오버레이 위에 둔다.
-          <Button type="button" size="sm" disabled className="relative z-10">
-            조치 실행
+          <Button
+            type="button"
+            size="sm"
+            className="relative z-10"
+            disabled={executePending || onExecute === undefined}
+            onClick={() => onExecute?.(incident.incident_id)}
+          >
+            {executePending ? '여는 중…' : '조치 실행'}
           </Button>
         ) : null}
       </div>

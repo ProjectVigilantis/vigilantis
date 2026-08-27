@@ -287,6 +287,7 @@ export function IncidentDetail({
   incident,
   subject,
   agentWaitAt = null,
+  openExecutionId = null,
 }: {
   incident: IncidentResponse;
   /** `subject_arn` → `GET /assets`의 `arn` 조인 결과(§4.5). 조회 실패·미수집이면 null이다. */
@@ -296,11 +297,31 @@ export function IncidentDetail({
    * WS 미연동 구간이라 지금은 항상 null이며, 그때는 고정 안내문으로 대체한다(§4.5).
    */
   agentWaitAt?: IsoDateTime | null;
+  /**
+   * `?execution=<id>` 딥링크(§4.4 목록에서 실행한 경우). 자체 URL이 없는 ACT-002를
+   * 부모 화면이 열어 준다 — `?asset=`(AST-002, #138)과 같은 방식이다.
+   * 값은 이미 받아 온 `executions[]`에서 찾으므로 재조회하지 않는다.
+   */
+  openExecutionId?: string | null;
 }) {
   const router = useRouter();
   // 모달 인스턴스 = 이 객체 하나. 열 때마다 새로 만들어 **멱등 키를 인스턴스에 고정**한다(§4.6).
   const [request, setRequest] = useState<ActionRequest | null>(null);
-  const [outcome, setOutcome] = useState<ExecuteOutcome | null>(null);
+  const [outcome, setOutcome] = useState<ExecuteOutcome | null>(() => {
+    // props에서만 파생하므로 서버·클라이언트가 같은 값을 만든다(하이드레이션 안전).
+    if (openExecutionId === null) return null;
+    const found = incident.executions.find((e) => e.execution_id === openExecutionId);
+    if (found === undefined) return null;
+    return {
+      // 딥링크로 들어온 것은 재요청 응답이 아니다 — `이미 접수된 요청입니다`를 띄우지 않는다.
+      replayed: false,
+      execution: {
+        execution_id: found.execution_id,
+        status: found.status,
+        updated_at: found.updated_at,
+      },
+    };
+  });
 
   /**
    * §4.5 실행 잠금. `incident.status`는 서버 컴포넌트 prop이라 202 직후에는 아직 갱신되지 않는데,
