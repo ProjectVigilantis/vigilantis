@@ -28,13 +28,37 @@ for p in (str(CORE_API), str(REPO_ROOT / "packages")):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-# 실행마다 고유 이름 — 이미 존재하는 어떤 DB와도 충돌·삭제가 일어나지 않는다
-TEST_DB_NAME = f"vigilantis_test_{uuid.uuid4().hex[:8]}"
-# compose db 서비스(localhost:5432) 기본값 — 환경변수로 재지정 가능
+
+def _host_db_port() -> str:
+    """호스트에서 compose `db` 서비스에 붙을 포트.
+
+    실제 환경변수 > 루트 `.env`의 `POSTGRES_PORT` > 5432 순으로 고른다. compose가
+    호스트 포트를 `${POSTGRES_PORT:-5432}`로 열기 때문에, `.env`만 고친 팀원의 pytest가
+    5432를 보고 **조용히 skip되고 초록불이 나는** 것을 막는다 — #92가 CI에서 막은
+    사각지대의 로컬판이다. CI에는 `.env`가 없어 기본값 5432로 떨어진다. (Issue #111)
+
+    `.env` 파싱은 pydantic-settings(`env_file=`)가 내부에서 쓰는 python-dotenv다.
+    """
+    from dotenv import dotenv_values
+
+    return (
+        os.getenv("POSTGRES_PORT")
+        or dotenv_values(REPO_ROOT / ".env").get("POSTGRES_PORT")
+        or "5432"
+    )
+
+
+# 접속 대상 — 전체 재지정은 TEST_DATABASE_ADMIN_URL 하나로 계속 가능하다
+DB_HOSTPORT = f"localhost:{_host_db_port()}"
 ADMIN_URL = os.getenv(
     "TEST_DATABASE_ADMIN_URL",
-    "postgresql+psycopg://vigilantis:vigilantis@localhost:5432/postgres",
+    f"postgresql+psycopg://vigilantis:vigilantis@{DB_HOSTPORT}/postgres",
 )
+# skip 메시지가 실제 접속 대상을 적게 한다(자격증명 제외) — 포트를 바꿔도 거짓말하지 않게
+PG_TARGET = ADMIN_URL.rsplit("@", 1)[-1].split("/")[0]
+
+# 실행마다 고유 이름 — 이미 존재하는 어떤 DB와도 충돌·삭제가 일어나지 않는다
+TEST_DB_NAME = f"vigilantis_test_{uuid.uuid4().hex[:8]}"
 TEST_URL = ADMIN_URL.rsplit("/", 1)[0] + "/" + TEST_DB_NAME
 
 
@@ -55,7 +79,7 @@ def _postgres_available() -> bool:
 def pg_engine():
     """일회용 테스트 DB 생성 → Alembic head 적용 → 세션 종료 시 DB 삭제."""
     if not _postgres_available():
-        pytest.skip("PostgreSQL(localhost:5432) 미기동 — 통합 테스트 skip")
+        pytest.skip(f"PostgreSQL({PG_TARGET}) 미기동 — 통합 테스트 skip")
 
     from sqlalchemy import create_engine, text
 
