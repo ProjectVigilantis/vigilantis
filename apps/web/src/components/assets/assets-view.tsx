@@ -9,6 +9,7 @@ import { AssetGraph } from '@/components/assets/asset-graph';
 import { AssetDetail } from '@/components/assets/asset-detail';
 import { EmptyState } from '@/components/empty-state';
 import { FilterSelect } from '@/components/filter-select';
+import { isJudgedAsset } from '@/lib/asset-filter';
 import { StatusBadge } from '@/components/status-badge';
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -46,19 +47,31 @@ export function AssetsView({
   const [wasteOnly, setWasteOnly] = useState(false);
 
   /**
-   * v1.6 팀 회의 결정 — **목록 뷰는 `resource_role = PRIMARY`만 다룬다**(§4.2).
-   * 지원 자산(NACL·ASG·시작 템플릿·ALB 대상 그룹)은 비용이 붙지 않고 `evaluation_status =
-   * NOT_APPLICABLE`이라 카드의 판정·헬스·인시던트 세 열이 전부 `—`다 — 자리를 쓰면서 아무것도
-   * 답하지 않는다. 구 `주요 관제만` 토글은 이 규칙이 상시가 되면서 **제거**했다(켤 대상이 없다).
+   * v1.6 팀 회의 결정 — 목록 뷰에서 **판정 대상이 아닌 자산을 뺀다**(§4.2).
+   *
+   * **판정 기준은 `evaluation_status`이지 `resource_role`이 아니다.** 계약에서 두 값은 다른 축이다
+   * (`packages/schemas/api/assets.py`):
+   *
+   * - `_PRIMARY_TYPES = {EC2, SG}` — **EBS는 `PRIMARY`가 아니다.** validator가 EBS의
+   *   `resource_role`을 `RUNBOOK_SUPPORT`로 강제한다
+   * - `_RULE_TARGET_TYPES = {EC2, SG, EBS}` — **그런데 EBS는 Rule 판정 대상이다.** `verdict`가
+   *   나오고 `NOT_APPLICABLE`일 수 없다
+   *
+   * `resource_role`로 거르면 **미연결 EBS가 목록에서 사라진다** — 비용이 계속 청구되는 대표
+   * 낭비 후보이자 `RUNBOOK_EBS_DELETE_UNATTACHED`의 실행 대상이라, 회의 결정("빌링이 없는 것을
+   * 뺀다")과 정반대가 된다. `NOT_APPLICABLE`은 정확히 NACL·ASG·시작 템플릿·ALB 대상 그룹
+   * 4종만 걸러 그 결정과 일치한다.
+   *
+   * 구 `주요 관제만` 토글은 이 규칙이 상시가 되면서 **제거**했다(켤 대상이 없다).
    *
    * **토폴로지 뷰가 서면(#146) 그쪽은 `data.items` 전량을 써야 한다** — 관계 6종 중 4종이 이
    * 노드 위에 그려지고 `RUNBOOK_NACL_ADD_DENY`의 대상도 NACL이다(§4.2).
    */
-  const primaryItems = useMemo(
-    () => data.items.filter((a) => a.resource_role === 'PRIMARY'),
+  const judgedItems = useMemo(
+    () => data.items.filter(isJudgedAsset),
     [data.items],
   );
-  const supportCount = data.items.length - primaryItems.length;
+  const supportCount = data.items.length - judgedItems.length;
 
   /**
    * 토폴로지의 초점 집합 — **유형 필터만 뺀 나머지**다(#146). 위 TabsContent 주석 참조.
@@ -81,27 +94,27 @@ export function AssetsView({
   }, [data.items, region, wasteOnly]);
 
   const regions = useMemo(
-    () => [...new Set(primaryItems.map((a) => a.region))].sort(),
-    [primaryItems],
+    () => [...new Set(judgedItems.map((a) => a.region))].sort(),
+    [judgedItems],
   );
 
   // 필터 3종 전부 클라이언트 필터다 — 계약에 Query Parameter가 없어 전량 응답에서 거른다(§4.2).
   const visible = useMemo(
     () =>
-      primaryItems.filter((a) => {
+      judgedItems.filter((a) => {
         if (assetType !== ALL && a.asset_type !== assetType) return false;
         if (region !== ALL && a.region !== region) return false;
         if (wasteOnly && !WASTE_VERDICTS.some((v) => v === a.verdict)) return false;
         return true;
       }),
-    [primaryItems, assetType, region, wasteOnly],
+    [judgedItems, assetType, region, wasteOnly],
   );
 
   // 유형 옵션도 PRIMARY 기준으로 세운다 — 목록에 없는 유형을 고를 수 있으면 0건만 나온다.
   const typeOptions = [
-    { value: ALL, label: `${ALL} (${primaryItems.length})` },
+    { value: ALL, label: `${ALL} (${judgedItems.length})` },
     ...(Object.keys(ASSET_TYPE_LABELS) as AssetType[])
-      .map((t) => ({ type: t, count: primaryItems.filter((a) => a.asset_type === t).length }))
+      .map((t) => ({ type: t, count: judgedItems.filter((a) => a.asset_type === t).length }))
       .filter(({ count }) => count > 0)
       .map(({ type, count }) => ({
         value: type,
@@ -135,14 +148,14 @@ export function AssetsView({
         <StatusBadge field="collection_status" value={data.collection_status} />
         <span>갱신 {formatKst(data.last_collected_at)}</span>
         <span aria-live="polite">
-          {visible.length === primaryItems.length
-            ? `${primaryItems.length}건`
-            : `${visible.length} / ${primaryItems.length}건`}
+          {visible.length === judgedItems.length
+            ? `${judgedItems.length}건`
+            : `${visible.length} / ${judgedItems.length}건`}
         </span>
         {/* 응답에 있었는데 화면에 없는 것이 있으면 그 사실을 말한다 — 숨긴 줄 모르면
             "수집이 안 된 것"으로 읽힌다(§4.2). */}
         {supportCount > 0 ? (
-          <span>지원 자산 {supportCount}건 제외 (판정·비용 대상 아님 · 토폴로지에는 남는다)</span>
+          <span>판정 비대상 {supportCount}건 제외 (NACL·ASG·시작 템플릿·대상 그룹 · 토폴로지에는 남는다)</span>
         ) : null}
       </div>
 
