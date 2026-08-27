@@ -39,8 +39,11 @@ const COLLECTED_AT = minutesAgo(5);
 const arn = {
   ec2Normal: `arn:aws:ec2:${REGION}:${ACCOUNT_ID}:instance/i-0a1b2c3d4e5f60001`,
   ec2Idle: `arn:aws:ec2:${REGION}:${ACCOUNT_ID}:instance/i-0a1b2c3d4e5f60002`,
+  ec2Canary: `arn:aws:ec2:${REGION}:${ACCOUNT_ID}:instance/i-0a1b2c3d4e5f60003`,
   sgOpenIp: `arn:aws:ec2:${REGION}:${ACCOUNT_ID}:security-group/sg-0a1b2c3d4e5f60001`,
   sgUnused: `arn:aws:ec2:${REGION}:${ACCOUNT_ID}:security-group/sg-0a1b2c3d4e5f60002`,
+  sgQuarantine: `arn:aws:ec2:${REGION}:${ACCOUNT_ID}:security-group/sg-0a1b2c3d4e5f60003`,
+  sgIsolation: `arn:aws:ec2:${REGION}:${ACCOUNT_ID}:security-group/sg-0a1b2c3d4e5f60004`,
   nacl: `arn:aws:ec2:${REGION}:${ACCOUNT_ID}:network-acl/acl-0a1b2c3d4e5f60001`,
   ebsAttached: `arn:aws:ec2:${REGION}:${ACCOUNT_ID}:volume/vol-0a1b2c3d4e5f60001`,
   ebsUnattached: `arn:aws:ec2:${REGION}:${ACCOUNT_ID}:volume/vol-0a1b2c3d4e5f60002`,
@@ -53,7 +56,11 @@ const arn = {
 
 const assetItems: AssetItem[] = [
   {
-    // 정상 EC2 — 관계 6종 중 5종(SECURED_BY·ATTACHED_TO·MEMBER_OF·REGISTERED_IN·PROTECTED_BY)의 출발점
+    // inc-20260814-0001의 RUNBOOK_EC2_ISOLATE가 SUCCESS로 끝나 격리 유지 중인 EC2.
+    // 격리 = ALB 타겟 그룹 이탈 + 격리 SG 교체(PROJECT_STATUS.md 확정 결정 2026-08-25)이므로
+    // REGISTERED_IN이 없고 SECURED_BY가 격리 SG를 가리킨다. 수집 시각(now-5분)이 격리(48분 전)보다
+    // 뒤라 반영돼 있어야 한다. 웹 SG로 되돌리면 "격리했다"는 인시던트와 자산 화면이 어긋난다.
+    // REGISTERED_IN 표본은 격리되지 않은 vigilantis-api-canary가 맡는다.
     arn: arn.ec2Normal,
     resource_id: 'i-0a1b2c3d4e5f60001',
     asset_type: 'EC2',
@@ -70,10 +77,9 @@ const assetItems: AssetItem[] = [
       private_ip: '10.0.1.21',
     },
     relationships: [
-      { relation_type: 'SECURED_BY', target_arn: arn.sgOpenIp },
+      { relation_type: 'SECURED_BY', target_arn: arn.sgIsolation },
       { relation_type: 'ATTACHED_TO', target_arn: arn.ebsAttached },
       { relation_type: 'MEMBER_OF', target_arn: arn.asg },
-      { relation_type: 'REGISTERED_IN', target_arn: arn.targetGroup },
       { relation_type: 'PROTECTED_BY', target_arn: arn.nacl },
     ],
     evaluation_status: 'COMPLETED',
@@ -83,7 +89,8 @@ const assetItems: AssetItem[] = [
     collected_at: COLLECTED_AT,
   },
   {
-    // Idle EC2 — FinOps 최적화 후보(health_score 낮음)
+    // Idle EC2 — FinOps 최적화 후보. health_score는 서버에서 round(cpu_avg)라
+    // COST_CANDIDATE(= cpu_avg < IDLE_CPU_AVG 5.0)면 5 미만이어야 한다.
     arn: arn.ec2Idle,
     resource_id: 'i-0a1b2c3d4e5f60002',
     asset_type: 'EC2',
@@ -100,13 +107,42 @@ const assetItems: AssetItem[] = [
       private_ip: '10.0.2.34',
     },
     relationships: [
-      { relation_type: 'SECURED_BY', target_arn: arn.sgUnused },
+      { relation_type: 'SECURED_BY', target_arn: arn.sgOpenIp },
       { relation_type: 'PROTECTED_BY', target_arn: arn.nacl },
     ],
     evaluation_status: 'COMPLETED',
-    health_score: 8,
+    health_score: 1,
     verdict: 'COST_CANDIDATE',
     skip_reason_code: null,
+    collected_at: COLLECTED_AT,
+  },
+  {
+    // 관측치 부족 + prod 태그 동시 — evaluate_ec2의 첫 분기가 이겨 SKIP_INSUFFICIENT_DATA다.
+    // SKIP_PROD_PROTECTED로 보이면 서버 판정 순서가 뒤집힌 것.
+    arn: arn.ec2Canary,
+    resource_id: 'i-0a1b2c3d4e5f60003',
+    asset_type: 'EC2',
+    resource_role: 'PRIMARY',
+    name: 'vigilantis-api-canary',
+    account_id: ACCOUNT_ID,
+    region: REGION,
+    state: 'running',
+    spec: {
+      instance_type: 't3.small',
+      availability_zone: `${REGION}a`,
+      vpc_id: 'vpc-0a1b2c3d4e5f60001',
+      subnet_id: 'subnet-0a1b2c3d4e5f60001',
+      private_ip: '10.0.1.55',
+    },
+    relationships: [
+      { relation_type: 'SECURED_BY', target_arn: arn.sgOpenIp },
+      { relation_type: 'REGISTERED_IN', target_arn: arn.targetGroup },
+      { relation_type: 'PROTECTED_BY', target_arn: arn.nacl },
+    ],
+    evaluation_status: 'COMPLETED',
+    health_score: 1,
+    verdict: 'SKIP',
+    skip_reason_code: 'SKIP_INSUFFICIENT_DATA',
     collected_at: COLLECTED_AT,
   },
   {
@@ -153,6 +189,59 @@ const assetItems: AssetItem[] = [
     health_score: null,
     verdict: 'UNUSED',
     skip_reason_code: null,
+    collected_at: COLLECTED_AT,
+  },
+  {
+    // 미부착(UNUSED 조건) + 전체개방(THREAT 조건) 동시 — THREAT가 이긴다.
+    // 이름이 default가 아니라 화이트리스트로도 빠지지 않는다. UNUSED로 보이면 판정 순서 회귀.
+    arn: arn.sgQuarantine,
+    resource_id: 'sg-0a1b2c3d4e5f60003',
+    asset_type: 'SG',
+    resource_role: 'PRIMARY',
+    name: 'vigilantis-quarantine-sg',
+    account_id: ACCOUNT_ID,
+    region: REGION,
+    state: null,
+    spec: {
+      description: 'detached quarantine tier',
+      vpc_id: 'vpc-0a1b2c3d4e5f60001',
+      attached: false,
+      open_to_world: [
+        { protocol: 'tcp', from_port: 3389, to_port: 3389, ipv6: false },
+        { protocol: 'tcp', from_port: 22, to_port: 22, ipv6: true },
+      ],
+    },
+    relationships: [],
+    evaluation_status: 'COMPLETED',
+    health_score: null,
+    verdict: 'THREAT',
+    skip_reason_code: null,
+    collected_at: COLLECTED_AT,
+  },
+  {
+    // RUNBOOK_EC2_ISOLATE가 교체해 넣은 격리 SG. 인그레스 없음 + web-01에 부착 → SKIP_ACTIVE.
+    // 주의: RUNBOOK_SG_DELETE_ISOLATED의 대상이 '격리용 SG'인지(enum-labels.ts 라벨 "격리 SG 삭제")
+    // '고립(미부착) SG'인지(datasets/golden/README.md의 UNUSED 후보 서술) 문서로 확정된 바 없다.
+    // 전자라면 inc-20260814-0001이 47분 전 지운 것이 이 SG라 목록에 남아 있으면 안 된다.
+    arn: arn.sgIsolation,
+    resource_id: 'sg-0a1b2c3d4e5f60004',
+    asset_type: 'SG',
+    resource_role: 'PRIMARY',
+    name: 'vigilantis-isolation-sg',
+    account_id: ACCOUNT_ID,
+    region: REGION,
+    state: null,
+    spec: {
+      description: 'quarantine SG applied by RUNBOOK_EC2_ISOLATE — no ingress',
+      vpc_id: 'vpc-0a1b2c3d4e5f60001',
+      attached: true,
+      open_to_world: [],
+    },
+    relationships: [],
+    evaluation_status: 'COMPLETED',
+    health_score: null,
+    verdict: 'SKIP',
+    skip_reason_code: 'SKIP_ACTIVE',
     collected_at: COLLECTED_AT,
   },
   {
@@ -354,7 +443,9 @@ export const incidents: IncidentResponse[] = [
       {
         runbook_id: 'RUNBOOK_NACL_ADD_DENY',
         target_arn: arn.nacl,
-        display_parameters: { rule_number: '100', cidr_block: '0.0.0.0/0', protocol: 'tcp' },
+        // rule 100은 inc-20260814-0004가 같은 NACL에 이미 적용해 SUCCESS다. 번호가 겹치면
+        // 이 추천을 승인하는 순간 기존 규칙과 충돌한다 — 다음 번호로 띄운다.
+        display_parameters: { rule_number: '110', cidr_block: '0.0.0.0/0', protocol: 'tcp' },
       },
       {
         runbook_id: 'RUNBOOK_SG_DELETE_ISOLATED',
