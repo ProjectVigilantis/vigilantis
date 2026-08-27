@@ -24,8 +24,9 @@ jobs:
         env:
           SERVICES: ec2,cloudwatch,sts
       # DB 통합 테스트용 — 이미지·계정·DB명을 docker-compose.yml의 db 서비스와 맞춘다(로컬 = CI 동형).
-      # conftest의 기본 접속 문자열(vigilantis:vigilantis@localhost:5432)이 그대로 붙으므로
-      # 테스트 코드 변경이 필요 없다. 테스트는 실행마다 일회용 DB를 만들고 지운다. (Issue #92)
+      # 포트는 5432 고정이다 — CI에는 포트 충돌도 .env도 없어 conftest의 POSTGRES_PORT 해석이
+      # 기본값 5432로 떨어지고(Issue #111), 그 기본 접속 문자열(vigilantis:vigilantis@localhost:5432)이
+      # 그대로 붙는다. 테스트는 실행마다 일회용 DB를 만들고 지운다. (Issue #92)
       postgres:
         image: postgres:16-alpine
         env:

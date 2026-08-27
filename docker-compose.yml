@@ -16,7 +16,11 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vigilantis}
       POSTGRES_DB: ${POSTGRES_DB:-vigilantis}
     ports:
-      - "5432:5432"
+      # 호스트 노출 포트만 변수화한다 — 컨테이너 내부는 5432 고정이므로 api·migrate의
+      # DATABASE_URL(db:5432)은 영향받지 않는다. 값을 바꾸면 호스트에서 도는 pytest도
+      # 같은 포트를 봐야 하는데, conftest가 루트 .env의 POSTGRES_PORT를 함께 읽으므로
+      # .env 한 곳만 고치면 된다. (Issue #111)
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:

@@ -79,7 +79,7 @@ vigilantis/
 
 ```bash
 cp .env.example .env                 # 값 채우기 (OPENAI_API_KEY, AWS_* 등)
-docker compose up                    # api(:8000) + db(:5432) + localstack(:4566) [+ migrate 1회]
+docker compose up                    # api(:8000) + db(:${POSTGRES_PORT:-5432}) + localstack(:4566) [+ migrate 1회]
 docker compose --profile tools up    # ↑ + adminer(:${ADMINER_PORT:-8080}) — 선택 DB 웹 UI
 uv sync                              # (호스트 개발 시) 워크스페이스 의존성 동기화
 ```
