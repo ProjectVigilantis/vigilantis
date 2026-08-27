@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import {
   SeenEvents,
   actionFor,
+  agentWaitTimes,
   appendTransition,
   backoffMs,
   latchAgentWaitAt,
@@ -68,7 +69,7 @@ test('EXECUTION_UPDATED는 status를 data에서 그대로 옮긴다', () => {
   });
 });
 
-test('인시던트 계열은 봉투의 occurred_at을 싣는다 — B-Medium 카운트다운의 기준이다', () => {
+test('인시던트 계열은 봉투의 occurred_at을 싣는다 — B-Medium 대기 기준 시각이다', () => {
   // 여기서 버리면 상세가 기준 시각을 못 받아 항상 fallback 안내문으로 떨어진다(PR #181 리뷰).
   assert.deepEqual(actionFor(incidentEvent('INCIDENT_UPDATED')), {
     kind: 'refresh',
@@ -78,7 +79,7 @@ test('인시던트 계열은 봉투의 occurred_at을 싣는다 — B-Medium 카
   });
 });
 
-// ── 카운트다운 기준 시각 래치 — 리셋되면 서버 자동 격리보다 시간을 더 남았다고 말한다 ──────
+// ── 대기 기준 시각 래치 — 리셋되면 서버 자동 격리보다 시간을 더 남았다고 말한다 ──────
 
 test('AGENT_WAIT 창에 들어가면 마지막 이벤트 시각을 기준으로 잡는다', () => {
   assert.equal(latchAgentWaitAt(null, true, '2026-08-26T00:00:00Z'), '2026-08-26T00:00:00Z');
@@ -98,6 +99,24 @@ test('창을 벗어나면 비워 다음 진입이 새로 잡게 한다', () => {
 
 test('이벤트를 못 본 진입은 null로 남는다 — 고정 안내문 fallback', () => {
   assert.equal(latchAgentWaitAt(null, true, null), null);
+});
+
+// ── 대기 화면의 두 시각 — 파싱 불가 입력이 화면을 죽이던 회귀를 여기서 막는다(PR #187 리뷰) ──
+
+test('응답 기한은 대기 기준 시각 + 정확히 60초다', () => {
+  const times = agentWaitTimes('2026-08-26T00:00:00.000Z');
+  assert.deepEqual(times, {
+    startedAt: '2026-08-26T00:00:00.000Z',
+    deadlineAt: '2026-08-26T00:01:00.000Z',
+  });
+});
+
+test('파싱 불가한 기준 시각은 null이다 — 화면은 고정 안내문으로 떨어진다', () => {
+  // `new Date(NaN).toISOString()`은 RangeError를 던지고, route-level error.tsx가 없어
+  // 앱 셸 전체가 대체된다. WS 프레임은 런타임 검증이 없어 이 값들이 실제로 흘러들 수 있다.
+  for (const bad of [null, undefined, '', 'not-a-date']) {
+    assert.equal(agentWaitTimes(bad), null, `${JSON.stringify(bad)}는 null이어야 한다`);
+  }
 });
 
 test('같은 event_id 재수신은 한 번만 반영한다', () => {
