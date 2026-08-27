@@ -39,6 +39,7 @@ export function ExecutionStatusPanel({
   transitions,
   replayed,
   subjectHref,
+  live = false,
 }: {
   execution: ExecuteActionResponse;
   transitions: ExecutionTransition[];
@@ -46,6 +47,8 @@ export function ExecutionStatusPanel({
   replayed: boolean;
   /** AST-001 링크. 스펙 조정 진행은 EC2 `state` 전이로만 관측되므로 단계를 지어내지 않고 넘긴다(§4.7). */
   subjectHref: string | null;
+  /** 실시간 연결이 살아 있는지 — 안내 문구를 가른다. */
+  live?: boolean;
 }) {
   const router = useRouter();
   const refreshedFor = useRef<string | null>(null);
@@ -106,10 +109,10 @@ export function ExecutionStatusPanel({
               </li>
             ))}
           </ol>
-          {transitions.length === 1 ? (
-            // WS 미연동 구간이라 접수 이후 전이가 들어오지 않는다 — 빈 목록으로 오해되지 않게 밝힌다.
+          {transitions.length === 1 && !live ? (
+            // 실시간 연결이 없으면 접수 이후 전이가 들어오지 않는다 — 빈 목록으로 오해되지 않게 밝힌다.
             <p className="text-muted-foreground text-xs">
-              이후 상태 전이는 실시간 연결(WS) 연동 후 이 목록에 쌓입니다.
+              실시간 연결이 없어 이후 상태 전이가 들어오지 않습니다.
             </p>
           ) : null}
         </div>

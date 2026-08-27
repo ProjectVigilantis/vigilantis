@@ -312,7 +312,7 @@ export interface IncidentsResponse {
 }
 
 /* ─────────────────────────────── ws.py ─────────────────────────────── */
-/* WS는 타입만 정의한다 — mock·연동 없음(확정 방침). */
+/* WS 이벤트 봉투. mock에는 엔드포인트가 없고(2026-08-14 확정) 실 BE에만 연결한다(#168). */
 
 export type WsEventType =
   | 'INCIDENT_CREATED'

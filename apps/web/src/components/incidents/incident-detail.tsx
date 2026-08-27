@@ -8,7 +8,7 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { CopyButton } from '@/components/copy-button';
 import { Row } from '@/components/detail-row';
@@ -18,13 +18,18 @@ import {
   type ActionRequest,
   type ExecuteOutcome,
 } from '@/components/incidents/action-execute-dialog';
-import { ExecutionStatusPanel } from '@/components/incidents/execution-status-panel';
+import {
+  ExecutionStatusPanel,
+  type ExecutionTransition,
+} from '@/components/incidents/execution-status-panel';
 import { TimeoutCountdown } from '@/components/incidents/timeout-countdown';
 import { EmptyState } from '@/components/empty-state';
 import { ExecutionStatusBadge, StatusBadge } from '@/components/status-badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
+import { useRealtime } from '@/components/realtime-provider';
+import { appendTransition, latchAgentWaitAt } from '@/lib/realtime-events';
 import { newIdempotencyKey } from '@/lib/api/client';
 import { isTerminalStatus } from '@/lib/execution-status';
 import { RUNBOOK_LABELS, incidentTitle } from '@/lib/enum-labels';
@@ -110,6 +115,18 @@ function RiskArea({
 }
 
 /**
+ * B-Medium 타임아웃 창 — **고지를 그리는 조건이자 카운트다운 기준 시각을 래치하는 조건**이다.
+ * 두 곳이 따로 판정하면 화면에는 카운트다운이 떠 있는데 기준은 안 잡히는 식으로 어긋난다.
+ */
+function inAgentWaitWindow(incident: IncidentResponse): boolean {
+  return (
+    incident.response_mode === 'AGENT_WAIT' &&
+    incident.initial_risk_level !== 'LOW' &&
+    incident.status === 'AWAITING_APPROVAL'
+  );
+}
+
+/**
  * B-Medium 타임아웃 고지(§4.5) — 승인 전까지 조치는 수행되지 않지만, 1분 미응답이면 서버가
  * `TIMEOUT_ISOLATION_1M`으로 자동 격리한다는 사실을 **대기 중에 미리** 알린다.
  *
@@ -128,14 +145,7 @@ function TimeoutNotice({
   incident: IncidentResponse;
   agentWaitAt: IsoDateTime | null;
 }) {
-  const level = incident.initial_risk_level;
-  if (
-    incident.response_mode !== 'AGENT_WAIT' ||
-    level === 'LOW' ||
-    incident.status !== 'AWAITING_APPROVAL'
-  ) {
-    return null;
-  }
+  if (!inAgentWaitWindow(incident)) return null;
 
   return (
     <p className="border-danger/30 bg-danger/5 flex flex-wrap items-center gap-1 rounded-md border p-3 text-sm">
@@ -286,17 +296,11 @@ function ProposalActions({
 export function IncidentDetail({
   incident,
   subject,
-  agentWaitAt = null,
   openExecutionId = null,
 }: {
   incident: IncidentResponse;
   /** `subject_arn` → `GET /assets`의 `arn` 조인 결과(§4.5). 조회 실패·미수집이면 null이다. */
   subject: AssetItem | null;
-  /**
-   * `AGENT_WAIT` 전환을 알린 `INCIDENT_UPDATED`의 `occurred_at`. 카운트다운의 유일한 기준이다.
-   * WS 미연동 구간이라 지금은 항상 null이며, 그때는 고정 안내문으로 대체한다(§4.5).
-   */
-  agentWaitAt?: IsoDateTime | null;
   /**
    * `?execution=<id>` 딥링크(§4.4 목록에서 실행한 경우). 자체 URL이 없는 ACT-002를
    * 부모 화면이 열어 준다 — `?asset=`(AST-002, #138)과 같은 방식이다.
@@ -307,21 +311,62 @@ export function IncidentDetail({
   const router = useRouter();
   // 모달 인스턴스 = 이 객체 하나. 열 때마다 새로 만들어 **멱등 키를 인스턴스에 고정**한다(§4.6).
   const [request, setRequest] = useState<ActionRequest | null>(null);
-  const [outcome, setOutcome] = useState<ExecuteOutcome | null>(() => {
-    // props에서만 파생하므로 서버·클라이언트가 같은 값을 만든다(하이드레이션 안전).
-    if (openExecutionId === null) return null;
-    const found = incident.executions.find((e) => e.execution_id === openExecutionId);
-    if (found === undefined) return null;
-    return {
-      // 딥링크로 들어온 것은 재요청 응답이 아니다 — `이미 접수된 요청입니다`를 띄우지 않는다.
-      replayed: false,
-      execution: {
-        execution_id: found.execution_id,
-        status: found.status,
-        updated_at: found.updated_at,
-      },
-    };
-  });
+  // 딥링크로 들어온 실행(#179). props에서만 파생하므로 서버·클라이언트가 같은 값을 만든다(하이드레이션 안전).
+  const deepLinked =
+    openExecutionId === null
+      ? undefined
+      : incident.executions.find((e) => e.execution_id === openExecutionId);
+  const [outcome, setOutcome] = useState<ExecuteOutcome | null>(() =>
+    deepLinked === undefined
+      ? null
+      : {
+          // 딥링크로 들어온 것은 재요청 응답이 아니다 — `이미 접수된 요청입니다`를 띄우지 않는다.
+          replayed: false,
+          execution: {
+            execution_id: deepLinked.execution_id,
+            status: deepLinked.status,
+            updated_at: deepLinked.updated_at,
+          },
+        },
+  );
+  const { connection, subscribeExecution, subscribeIncident } = useRealtime();
+  /**
+   * ACT-002 진행 기록 — `EXECUTION_UPDATED` 수신마다 한 줄 쌓는다(§4.7). WS에 사용자용 메시지
+   * 필드가 없으므로(추가하지 않는다) **수신 시각과 status 전이만** 담는다.
+   *
+   * 딥링크 진입도 접수 행 하나로 시작한다 — 비우면 패널이 진행 기록을 빈 목록으로 그린다.
+   */
+  const [transitions, setTransitions] = useState<ExecutionTransition[]>(() =>
+    deepLinked === undefined
+      ? []
+      : [{ at: deepLinked.updated_at, from: null, to: deepLinked.status }],
+  );
+  /**
+   * B-Medium 카운트다운의 기준 시각 — `AGENT_WAIT` 전환을 알린 `INCIDENT_UPDATED`의
+   * `occurred_at`이다(계약 합의 2026-08-14 · #155). **수신 시각을 쓰지 않는다.**
+   *
+   * 창에 **들어가는 순간 한 번만** 래치한다. 창 안에서 오는 후속 `INCIDENT_UPDATED`(정밀 평가
+   * 도착 등)마다 다시 물리면 60초가 리셋돼 **서버 자동 격리보다 화면이 시간을 더 남았다고
+   * 말한다**(PR #181 리뷰). 이벤트를 못 본 진입(재접속·목록에서 나중에 열기)은 null로 남고
+   * 고정 안내문 fallback이 대신한다 — replay가 없는 계약의 결과다(§4.5 · ws.py).
+   */
+  const [waitBase, setWaitBase] = useState<IsoDateTime | null>(null);
+  const lastIncidentEventRef = useRef<IsoDateTime | null>(null);
+
+  useEffect(
+    () =>
+      subscribeIncident((action) => {
+        if (action.incidentId !== incident.incident_id) return;
+        lastIncidentEventRef.current = action.occurredAt;
+      }),
+    [subscribeIncident, incident.incident_id],
+  );
+
+  // Provider가 이벤트마다 재조회하므로 `incident`가 뒤이어 바뀐다 — 창 진입은 그때 판정된다.
+  const inWindow = inAgentWaitWindow(incident);
+  useEffect(() => {
+    setWaitBase((prev) => latchAgentWaitAt(prev, inWindow, lastIncidentEventRef.current));
+  }, [inWindow]);
 
   /**
    * §4.5 실행 잠금. `incident.status`는 서버 컴포넌트 prop이라 202 직후에는 아직 갱신되지 않는데,
@@ -331,9 +376,62 @@ export function IncidentDetail({
    * 잠금은 **비최종 상태 동안만**이다 — `FAILED`는 AWS 변경이 없어 재시도·다른 제안이 가능하고(§4.7),
    * 그때는 재조회된 서버 상태가 판단한다.
    */
+  // 이 화면이 연 실행의 전이만 받는다 — 다른 인시던트·다른 실행의 이벤트는 무시한다.
+  const watchedId = outcome?.execution.execution_id ?? null;
+  useEffect(() => {
+    if (watchedId === null) return;
+    return subscribeExecution((action) => {
+      if (action.executionId !== watchedId) return;
+      setTransitions((prev) => appendTransition(prev, { at: action.updatedAt, status: action.status }));
+      setOutcome((prev) =>
+        prev === null
+          ? prev
+          : {
+              ...prev,
+              execution: {
+                ...prev.execution,
+                status: action.status,
+                updated_at: action.updatedAt,
+              },
+            },
+      );
+    });
+  }, [subscribeExecution, watchedId]);
+
+  /**
+   * 끊긴 동안 놓친 `EXECUTION_UPDATED` 복구. 재연결 재조회(§4.8 3)로 들어온 서버 실행 상태를
+   * **렌더에서 파생한다** — 없으면 실행이 끝났는데도 패널이 비최종에 멈추고 아래 `locked`가
+   * 안 풀려 **다음 조치를 아예 못 누른다**(PR #181 리뷰).
+   *
+   * state를 고치지 않고 파생하는 이유는 effect 안 setState가 연쇄 렌더이기 때문이다.
+   * **최종 상태만** 받아서 재조회가 WS보다 늦게 도착해도 화면이 뒤로 돌지 않는다.
+   */
+  const served = watchedId === null
+    ? undefined
+    : incident.executions.find((e) => e.execution_id === watchedId);
+  const missed =
+    outcome !== null &&
+    !isTerminalStatus(outcome.execution.status) &&
+    served !== undefined &&
+    isTerminalStatus(served.status)
+      ? served
+      : null;
+  const shownOutcome =
+    outcome === null || missed === null
+      ? outcome
+      : {
+          ...outcome,
+          execution: { ...outcome.execution, status: missed.status, updated_at: missed.updated_at },
+        };
+  // 같은 status면 appendTransition이 줄을 늘리지 않는다 — WS로 이미 받은 전이는 중복되지 않는다.
+  const shownTransitions =
+    missed === null
+      ? transitions
+      : appendTransition(transitions, { at: missed.updated_at, status: missed.status });
+
   const locked =
     incident.status === 'ACTION_IN_PROGRESS' ||
-    (outcome !== null && !isTerminalStatus(outcome.execution.status));
+    (shownOutcome !== null && !isTerminalStatus(shownOutcome.execution.status));
   const subjectHref = subject ? `/assets?asset=${encodeURIComponent(subject.arn)}` : null;
 
   function openAction(candidates: ActionCandidate[]) {
@@ -365,7 +463,7 @@ export function IncidentDetail({
         </p>
       </header>
 
-      <RiskArea incident={incident} agentWaitAt={agentWaitAt} />
+      <RiskArea incident={incident} agentWaitAt={waitBase} />
 
       <Separator />
 
@@ -450,14 +548,15 @@ export function IncidentDetail({
       <ProposalActions incident={incident} locked={locked} onExecute={openAction} />
 
       {/* ACT-002 — 실행 흐름은 여기서 끝난다. 위쪽 판단 근거·근거 데이터·제안 조치는 그대로 남는다(§4.7). */}
-      {outcome ? (
+      {shownOutcome ? (
         <ExecutionStatusPanel
-          execution={outcome.execution}
-          replayed={outcome.replayed}
+          execution={shownOutcome.execution}
+          replayed={shownOutcome.replayed}
           subjectHref={subjectHref}
-          transitions={[
-            { at: outcome.execution.updated_at, from: null, to: outcome.execution.status },
-          ]}
+          live={connection === 'open'}
+          // 접수 행 + WS 전이가 모두 이 state에 들어 있다. outcome에서 파생하면 같은 리스너가
+          // outcome을 덮어쓰면서 접수 시각·상태까지 최신값으로 뭉갠다(PR #181 리뷰).
+          transitions={shownTransitions}
         />
       ) : null}
 
@@ -467,6 +566,11 @@ export function IncidentDetail({
         onClose={() => setRequest(null)}
         onExecuted={(next) => {
           setOutcome(next);
+          // 진행 기록을 새 실행의 접수 행으로 초기화한다 — 안 지우면 FAILED 후 재실행에서
+          // 옛 실행의 줄이 새 패널에 그대로 쌓인다(§4.7이 허용하는 경로다).
+          setTransitions([
+            { at: next.execution.updated_at, from: null, to: next.execution.status },
+          ]);
           // 서버 상태(ACTION_IN_PROGRESS)를 따라오게 한다. 위 locked가 그 사이를 덮는다.
           router.refresh();
         }}
