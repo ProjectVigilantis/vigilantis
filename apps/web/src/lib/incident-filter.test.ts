@@ -138,3 +138,25 @@ test('목록에 없는 위험도 필터도 전체로 접힌다 — 상태 쪽과
   const items = [item('a', 'ANALYZING', null, 'HIGH'), item('b', 'ANALYZING', null, 'HIGH')];
   assert.equal(visibleIncidents(items, 'ACTIVE', ALL, 'LOW').length, items.length);
 });
+
+test('선제차단된 건은 승인 대기 프리셋에 담기지 않는다 — 두 큐는 배타다', () => {
+  const items = [
+    item('plain', 'AWAITING_APPROVAL'),
+    item('preempted', 'AWAITING_APPROVAL', 'PRE_MITIGATION_0_5S'),
+  ];
+  assert.deepEqual(
+    byPreset(items, 'PENDING').map((i) => i.incident_id),
+    ['plain'],
+  );
+  // 사라지지는 않는다 — 선제차단 큐와 기본 목록이 받는다.
+  assert.deepEqual(
+    byPreset(items, 'PREEMPTIVE').map((i) => i.incident_id),
+    ['preempted'],
+  );
+  assert.equal(byPreset(items, 'ACTIVE').length, 2);
+});
+
+test('AGENT_WAIT 승인 대기는 그대로 승인 대기에 남는다 — 선제차단이 아니다', () => {
+  const items = [item('agent', 'AWAITING_APPROVAL', 'AGENT_WAIT')];
+  assert.deepEqual(byPreset(items, 'PENDING').map((i) => i.incident_id), ['agent']);
+});

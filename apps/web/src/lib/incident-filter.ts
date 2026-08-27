@@ -97,7 +97,16 @@ export function byPreset(
     case 'HISTORY':
       return items.filter((i) => i.status === 'RESOLVED');
     case 'PENDING':
-      return active.filter((i) => i.status === 'AWAITING_APPROVAL');
+      // **선제차단된 건은 여기 담지 않는다** — 두 프리셋을 배타로 둔다.
+      //
+      // 계약상 겹치는 것은 합법이다(`AWAITING_APPROVAL`은 "제안 1개 이상 + 진행 중 실행 없음"만
+      // 요구하므로, 격리가 끝난 뒤 추가 조치가 승인을 기다릴 수 있다). 그러나 §4.4가 두 프리셋을
+      // 세운 근거는 **"성격이 반대"** — 승인 대기는 *지금 누를 일*, 선제차단은 *이미 끝난 일의
+      // 정당성 판단*이다. 한 카드가 양쪽에 뜨면 어느 큐가 그 건을 책임지는지 알 수 없다.
+      //
+      // 일이 사라지지는 않는다 — 선제차단 큐에서 열면 격리 사실과 남은 제안을 함께 보고,
+      // 기본(프리셋 없음) 목록에도 그대로 있다. 카드의 상태 배지도 `승인 대기`로 남는다.
+      return active.filter((i) => i.status === 'AWAITING_APPROVAL' && !isPreemptive(i));
     case 'PREEMPTIVE':
       return active.filter(isPreemptive);
     case 'ACTIVE':
