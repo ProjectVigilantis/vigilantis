@@ -51,6 +51,11 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
 
   const socketRef = useRef<WebSocket | null>(null);
   const attemptRef = useRef(0);
+  /**
+   * 다음 `onopen`이 **재연결**인지. 백오프 카운터(`attemptRef`)에 겸직시키면 수동 [재연결]이
+   * 카운터를 0으로 되돌린 뒤 붙으므로 판정이 항상 `false`가 되어 REST 복구가 빠진다(PR #181 리뷰).
+   */
+  const resumedRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const seenRef = useRef(new SeenEvents());
   const listenersRef = useRef(new Set<(a: Extract<RealtimeAction, { kind: 'execution' }>) => void>());
@@ -84,6 +89,7 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
   const scheduleRetry = useCallback(() => {
     const wait = backoffMs(attemptRef.current);
     attemptRef.current += 1;
+    resumedRef.current = true;
     setConnection(wait >= 30_000 ? 'closed' : 'reconnecting');
     timerRef.current = setTimeout(() => connectRef.current(), wait);
   }, []);
@@ -107,7 +113,8 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
 
     socket.onopen = () => {
       // 재조회는 **재연결일 때만** 한다 — 첫 진입에서 부르면 방금 그린 페이지를 RSC로 한 번 더 받는다.
-      const reconnected = attemptRef.current > 0;
+      const reconnected = resumedRef.current;
+      resumedRef.current = false;
       attemptRef.current = 0;
       setConnection('open');
       // 재연결 성공 시 목록 API를 재조회해 상태를 교체한다 — snapshot·replay 없음이 계약이다
@@ -157,6 +164,9 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
   const reconnect = useCallback(() => {
     if (timerRef.current !== null) clearTimeout(timerRef.current);
     attemptRef.current = 0;
+    // 백오프는 처음부터 다시 세지만 "끊겼다 붙는 중"이라는 사실은 남긴다 — 이 줄이 없으면
+    // 수동 재연결로 복구한 세션만 끊긴 동안의 변화를 못 받는다(PR #181 리뷰).
+    resumedRef.current = true;
     const previous = socketRef.current;
     socketRef.current = null; // 옛 소켓의 지연 close가 새 연결을 건드리지 못하게 먼저 끊는다
     previous?.close();
