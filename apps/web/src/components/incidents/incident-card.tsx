@@ -12,38 +12,35 @@ import { cn, formatKst } from '@/lib/utils';
 import type { IncidentListItem } from '@/types/api';
 
 /**
- * 전이 배지 2개 — `[초기] → [정밀]`(§7.3 축약). 두 위험도를 합치지 않으므로(§7.2)
- * 색 하나로 표현할 수 없어 좌측 띠(훑어보기)와 이 배지(정확히 읽기)로 나눠 담는다.
+ * 목록 카드의 위험도 — **값 하나**만 그린다 (v1.6, 2026-08-27 PM 결정).
  *
- * `reviewed_risk_level = null`은 **색 없는 테두리**로 그린다 — 색이 없다는 것 자체가
- * "아직 판정 안 됨"이다(§4.4). 문구는 status로 가른다: 분석 중이면 `평가 중`, 분석이
- * 깨졌으면 `평가 실패`, 그 외는 아직 안 나온 것이므로 `평가 없음`이다.
- * (§4.4는 앞의 둘만 적었는데, 승인 대기 중 reviewed가 비어 있는 건은 실패가 아니다.)
+ * 초기 판정으로 시작해 **AI 정밀 평가가 나오면 그 값으로 바뀐다**(`reviewed ?? initial`).
+ * v1.5까지는 `[초기] → [정밀]` 전이 배지 2개였는데(구 §7.3), 두 값이 같을 때
+ * `중간 → 중간`처럼 같은 말이 두 번 나왔다.
+ *
+ * **정보가 사라지지는 않는다** — 두 판정을 나란히 대조하는 자리는 INC-002 상세의
+ * `위험도 판정` 2칸이며 거기는 그대로다(§4.5). 목록은 훑어보는 자리고 상세는 정확히 읽는
+ * 자리라는 §4.4의 분업을 따른다.
+ *
+ * 정밀 평가가 아직 없으면 초기 판정을 그대로 쓴다 — 구 버전의 `평가 중`·`평가 실패` 문구는
+ * 값이 하나가 되면서 자리를 잃었고, 그 정보는 **상태 배지**가 이미 말한다(`분석 중`·`진행 불가`).
  */
-function RiskTransition({ incident }: { incident: IncidentListItem }) {
-  if (incident.initial_risk_level === null) return null;
-
-  const pendingLabel =
-    incident.status === 'ANALYZING'
-      ? '평가 중'
-      : incident.status === 'FAILED'
-        ? '평가 실패'
-        : '평가 없음';
+function RiskLevelLine({ incident }: { incident: IncidentListItem }) {
+  const shown = incident.reviewed_risk_level ?? incident.initial_risk_level;
+  if (shown === null) return null; // FINOPS — 계약이 두 위험도를 null로 강제한다
 
   return (
     <span className="flex flex-wrap items-center gap-1 text-xs">
       <span className="text-muted-foreground">위험도</span>
-      <StatusBadge field="risk_level" value={incident.initial_risk_level} />
-      <span className="text-muted-foreground" aria-hidden>
-        →
-      </span>
-      {incident.reviewed_risk_level !== null ? (
-        <StatusBadge field="risk_level" value={incident.reviewed_risk_level} />
-      ) : (
-        <span className="border-border text-muted-foreground rounded-md border px-1.5 py-0.5">
-          {pendingLabel}
+      <StatusBadge field="risk_level" value={shown} />
+      {/* 정밀 평가로 바뀐 건임을 한 글자로만 밝힌다 — 어느 판정을 보고 있는지 모르면
+          상세의 2칸과 대조할 때 혼란이 된다. 초기 판정 그대로면 표식이 없다. */}
+      {incident.reviewed_risk_level !== null &&
+      incident.reviewed_risk_level !== incident.initial_risk_level ? (
+        <span className="text-muted-foreground" title="AI 정밀 평가로 갱신된 값입니다">
+          (정밀)
         </span>
-      )}
+      ) : null}
     </span>
   );
 }
@@ -61,10 +58,13 @@ export function IncidentCard({
   executePending?: boolean;
   onExecute?: (incidentId: string) => void;
 }) {
-  const band =
-    incident.initial_risk_level === null
-      ? RISK_BAND_EMPTY
-      : RISK_BAND_CLASS[incident.initial_risk_level];
+  // 띠도 표시값을 따른다 — 배지와 띠가 서로 다른 판정을 가리키면 카드가 자기모순이 된다.
+  //
+  // ⚠️ 정렬 축은 `initial_risk_level`(불변 키) 그대로다(§4.4). 정밀 평가로 값이 바뀐 카드는
+  // 색과 자리가 어긋날 수 있다. 정렬을 reviewed로 옮기면 AI 평가가 갱신될 때마다 목록이
+  // 눈앞에서 재배치돼 누르려던 항목이 움직인다 — 설계서가 명시적으로 피한 쪽이다.
+  const bandLevel = incident.reviewed_risk_level ?? incident.initial_risk_level;
+  const band = bandLevel === null ? RISK_BAND_EMPTY : RISK_BAND_CLASS[bandLevel];
 
   return (
     <Card className="relative gap-3 overflow-hidden p-4 pl-5 transition-colors hover:border-ring">
@@ -98,7 +98,7 @@ export function IncidentCard({
         <span className="line-clamp-2">{incidentTitle(incident)}</span>
       </Link>
 
-      <RiskTransition incident={incident} />
+      <RiskLevelLine incident={incident} />
 
       {/* 카드는 ARN을 마지막 세그먼트로 자르므로 전체 ARN을 볼 방법이 이 `title` 하나다.
           링크 오버레이(`::after`)가 위치 지정 자손이라 이 문단을 통째로 덮어 툴팁이 뜨지 않았다
