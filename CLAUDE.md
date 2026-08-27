@@ -99,7 +99,7 @@
   - `type`: TYPE 소문자.
   - `DOMAIN`: 도메인 코드 대문자.
   - `이슈번호`: GitHub 이슈 번호(숫자만, `#` 제외).
-  - `english-kebab-summary`: 작업을 요약하는 **영문 소문자 kebab-case**. 2~5단어 권장, 축약보다 의미 명확성 우선.
+  - `english-kebab-summary`: 작업을 요약하는 **영문 소문자 kebab-case**. 2–5단어 권장, 축약보다 의미 명확성 우선.
 - 연결된 이슈가 없으면 번호를 임의로 만들지 않고 이슈 번호를 생략한다: `<type>/<DOMAIN>-<english-kebab-summary>`.
 - 하나의 브랜치는 하나의 이슈/작업 단위에 대응시킨다.
 
@@ -160,7 +160,7 @@ Refs #7
 - **대상 브랜치**: 항상 `dev`. (`main` 직접 PR 금지)
 - **제목**: 커밋과 동일한 `<gitmoji> [TYPE] #이슈번호 - 한 줄 설명` 형식.
 - **본문**: PR을 열면 [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md)가 **자동으로 채워진다.** 본문 양식의 원천은 그 파일이며 이 문서에 복제하지 않는다. 섹션은 `## 개요` · `## 변경 사항` · `## 테스트` · `## 관련 이슈` 4개다.
-- **리뷰/머지**: 최소 1명 이상(특히 백엔드↔AI↔프론트 API 접점 담당자)의 승인과 CI(GitHub Actions: pytest + LocalStack·PostgreSQL service container) 통과 후 머지한다. `apps/web` lint·build 잡은 추가 예정(#91).
+- **리뷰/머지**: 최소 1명 이상(특히 백엔드↔AI↔프론트 API 접점 담당자)의 승인과 CI 통과 후 머지한다. CI는 두 잡이다 — `test`(pytest + LocalStack·PostgreSQL service container)와 `web`(ESLint · `next build` 타입 체크 · `node --test`, #91 / PR #176).
 - **머지 승인 코멘트의 CLOSE 추천(2026-08-26 신설)**: 최종 승인이라 판단해 머지 승인 코멘트를 남길 때, **끝에 `Refs`로 연결된 이슈의 CLOSE 추천 한 줄을 붙인다.** Claude가 PR 변경 범위와 이슈의 수용 기준을 대조해 `CLOSE 추천 — #N: <충족 근거>` 또는 `CLOSE 보류 — #N: <남은 항목>` 중 하나를 제시하며, 판단이 갈리면 보류로 적는다. **이 줄은 머지 책임자가 CLOSE 판단을 놓치지 않게 하는 권고이며, 실제 CLOSE 판단과 수행은 머지 책임자가 직접 한다**(§Git 작업 흐름). **별도 교차검증자는 세우지 않는다** — 리뷰에서 이미 이슈 범위와 승인 기준을 확인하므로 중복 절차다.
 
 ### 본문 작성 규칙 2가지 (반드시 지킬 것)
