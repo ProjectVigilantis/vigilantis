@@ -8,7 +8,7 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { CopyButton } from '@/components/copy-button';
 import { Row } from '@/components/detail-row';
@@ -22,25 +22,18 @@ import {
   ExecutionStatusPanel,
   type ExecutionTransition,
 } from '@/components/incidents/execution-status-panel';
-import { TimeoutCountdown } from '@/components/incidents/timeout-countdown';
 import { EmptyState } from '@/components/empty-state';
 import { ExecutionStatusBadge, StatusBadge } from '@/components/status-badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { useRealtime } from '@/components/realtime-provider';
-import { appendTransition, latchAgentWaitAt } from '@/lib/realtime-events';
+import { appendTransition } from '@/lib/realtime-events';
 import { newIdempotencyKey } from '@/lib/api/client';
 import { isTerminalStatus } from '@/lib/execution-status';
 import { RUNBOOK_LABELS, incidentTitle } from '@/lib/enum-labels';
 import { formatKst } from '@/lib/utils';
-import type { AssetItem, IncidentResponse, IsoDateTime, RunbookId } from '@/types/api';
-
-/**
- * 계약 합의(2026-08-14): `AGENT_WAIT` 전환 이벤트의 `occurred_at` + 60초.
- * `'use client'` 모듈에 두면 서버 컴포넌트가 값 대신 클라이언트 참조를 받아 계산이 NaN이 된다.
- */
-const AGENT_WAIT_TIMEOUT_MS = 60_000;
+import type { AssetItem, IncidentResponse, RunbookId } from '@/types/api';
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -77,13 +70,7 @@ function SummaryLines({ incident }: { incident: IncidentResponse }) {
  * FINOPS는 계약이 세 필드를 전부 null로 강제하므로 **영역 자체를 렌더하지 않는다**(§3.3).
  * 빈 배지를 남기면 "판정을 못 받은 위협"으로 읽힌다.
  */
-function RiskArea({
-  incident,
-  agentWaitAt,
-}: {
-  incident: IncidentResponse;
-  agentWaitAt: IsoDateTime | null;
-}) {
+function RiskArea({ incident }: { incident: IncidentResponse }) {
   if (incident.initial_risk_level === null) return null;
 
   return (
@@ -109,14 +96,13 @@ function RiskArea({
           </Row>
         ) : null}
       </div>
-      <TimeoutNotice incident={incident} agentWaitAt={agentWaitAt} />
+      <TimeoutNotice incident={incident} />
     </Section>
   );
 }
 
 /**
- * B-Medium 타임아웃 창 — **고지를 그리는 조건이자 카운트다운 기준 시각을 래치하는 조건**이다.
- * 두 곳이 따로 판정하면 화면에는 카운트다운이 떠 있는데 기준은 안 잡히는 식으로 어긋난다.
+ * B-Medium 타임아웃 대상 창 — 이 고지를 그릴 조건이다. Low는 자동 격리가 없어 제외한다.
  */
 function inAgentWaitWindow(incident: IncidentResponse): boolean {
   return (
@@ -130,6 +116,10 @@ function inAgentWaitWindow(incident: IncidentResponse): boolean {
  * B-Medium 타임아웃 고지(§4.5) — 승인 전까지 조치는 수행되지 않지만, 1분 미응답이면 서버가
  * `TIMEOUT_ISOLATION_1M`으로 자동 격리한다는 사실을 **대기 중에 미리** 알린다.
  *
+ * **남은 시간 카운트다운은 표시하지 않는다(2026-08-27 팀 결정).** 자동 격리 정책은 그대로이므로
+ * 고지는 남기고, 초 단위로 흐르는 표시만 뺀다 — 1분을 실시간으로 지켜보게 만드는 화면이고
+ * (`docs/E2E_DEMO_SCENARIOS.md` 1차 시연 범위 밖), 몇 초 오차가 그대로 드러나는 자리다.
+ *
  * Low는 같은 `AGENT_WAIT`이지만 타임아웃 자동 격리가 없어 이 블록을 뺀다(§4.5 · SSOT §3단계 위험 대응).
  *
  * 기준 등급은 **`initial_risk_level`만** 본다(2026-08-25 확정, SSOT §확정 결정 로그).
@@ -138,28 +128,15 @@ function inAgentWaitWindow(incident: IncidentResponse): boolean {
  * `_EXPECTED_MODE_BY_RISK`). 정밀 평가가 자동 행동을 바꾸려면 상태 전이 계약이 먼저 필요하다
  * (Risk Evaluator, SSOT §미해결 6번).
  */
-function TimeoutNotice({
-  incident,
-  agentWaitAt,
-}: {
-  incident: IncidentResponse;
-  agentWaitAt: IsoDateTime | null;
-}) {
+function TimeoutNotice({ incident }: { incident: IncidentResponse }) {
   if (!inAgentWaitWindow(incident)) return null;
 
   return (
     <p className="border-danger/30 bg-danger/5 flex flex-wrap items-center gap-1 rounded-md border p-3 text-sm">
       <span>승인 전까지 조치는 수행되지 않습니다.</span>
-      {agentWaitAt !== null ? (
-        // 기준은 `AGENT_WAIT` 전환을 알린 INCIDENT_UPDATED의 occurred_at이다 —
-        // **수신 시각을 쓰지 않는다**(합의 2026-08-14). 수신 기준이면 재접속마다 시간이 늘어난다.
-        <TimeoutCountdown deadline={Date.parse(agentWaitAt) + AGENT_WAIT_TIMEOUT_MS} />
-      ) : (
-        // 전환 이벤트를 받지 못한 인시던트(재접속 등)는 카운트다운 없이 고정 안내문을 쓴다(§4.5).
-        <span className="text-danger font-medium">
-          1분 안에 응답하지 않으면 서버가 자동으로 격리합니다.
-        </span>
-      )}
+      <span className="text-danger font-medium">
+        1분 안에 응답하지 않으면 서버가 자동으로 격리합니다.
+      </span>
     </p>
   );
 }
@@ -329,7 +306,7 @@ export function IncidentDetail({
           },
         },
   );
-  const { connection, subscribeExecution, subscribeIncident } = useRealtime();
+  const { connection, subscribeExecution } = useRealtime();
   /**
    * ACT-002 진행 기록 — `EXECUTION_UPDATED` 수신마다 한 줄 쌓는다(§4.7). WS에 사용자용 메시지
    * 필드가 없으므로(추가하지 않는다) **수신 시각과 status 전이만** 담는다.
@@ -341,33 +318,6 @@ export function IncidentDetail({
       ? []
       : [{ at: deepLinked.updated_at, from: null, to: deepLinked.status }],
   );
-  /**
-   * B-Medium 카운트다운의 기준 시각 — `AGENT_WAIT` 전환을 알린 `INCIDENT_UPDATED`의
-   * `occurred_at`이다(계약 합의 2026-08-14 · #155). **수신 시각을 쓰지 않는다.**
-   *
-   * 창에 **들어가는 순간 한 번만** 래치한다. 창 안에서 오는 후속 `INCIDENT_UPDATED`(정밀 평가
-   * 도착 등)마다 다시 물리면 60초가 리셋돼 **서버 자동 격리보다 화면이 시간을 더 남았다고
-   * 말한다**(PR #181 리뷰). 이벤트를 못 본 진입(재접속·목록에서 나중에 열기)은 null로 남고
-   * 고정 안내문 fallback이 대신한다 — replay가 없는 계약의 결과다(§4.5 · ws.py).
-   */
-  const [waitBase, setWaitBase] = useState<IsoDateTime | null>(null);
-  const lastIncidentEventRef = useRef<IsoDateTime | null>(null);
-
-  useEffect(
-    () =>
-      subscribeIncident((action) => {
-        if (action.incidentId !== incident.incident_id) return;
-        lastIncidentEventRef.current = action.occurredAt;
-      }),
-    [subscribeIncident, incident.incident_id],
-  );
-
-  // Provider가 이벤트마다 재조회하므로 `incident`가 뒤이어 바뀐다 — 창 진입은 그때 판정된다.
-  const inWindow = inAgentWaitWindow(incident);
-  useEffect(() => {
-    setWaitBase((prev) => latchAgentWaitAt(prev, inWindow, lastIncidentEventRef.current));
-  }, [inWindow]);
-
   /**
    * §4.5 실행 잠금. `incident.status`는 서버 컴포넌트 prop이라 202 직후에는 아직 갱신되지 않는데,
    * 그 공백에 다른 런북을 누르면 **새 모달 = 새 멱등 키**라 계약의 Idempotency가 걸러 주지 못하고
@@ -463,7 +413,7 @@ export function IncidentDetail({
         </p>
       </header>
 
-      <RiskArea incident={incident} agentWaitAt={waitBase} />
+      <RiskArea incident={incident} />
 
       <Separator />
 

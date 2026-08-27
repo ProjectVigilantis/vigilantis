@@ -8,7 +8,6 @@ import {
   actionFor,
   appendTransition,
   backoffMs,
-  latchAgentWaitAt,
   websocketUrl,
 } from './realtime-events.ts';
 import type { WsEvent } from '../types/api.ts';
@@ -38,7 +37,6 @@ test('INCIDENT_CREATED는 Toast를 띄우고 재조회시킨다', () => {
   assert.deepEqual(actionFor(incidentEvent('INCIDENT_CREATED')), {
     kind: 'refresh',
     incidentId: 'inc-1',
-    occurredAt: '2026-08-26T00:00:00Z',
     toast: true,
   });
 });
@@ -66,38 +64,6 @@ test('EXECUTION_UPDATED는 status를 data에서 그대로 옮긴다', () => {
     updatedAt: '2026-08-26T00:00:01Z',
     toast: false,
   });
-});
-
-test('인시던트 계열은 봉투의 occurred_at을 싣는다 — B-Medium 카운트다운의 기준이다', () => {
-  // 여기서 버리면 상세가 기준 시각을 못 받아 항상 fallback 안내문으로 떨어진다(PR #181 리뷰).
-  assert.deepEqual(actionFor(incidentEvent('INCIDENT_UPDATED')), {
-    kind: 'refresh',
-    incidentId: 'inc-1',
-    occurredAt: '2026-08-26T00:00:00Z',
-    toast: false,
-  });
-});
-
-// ── 카운트다운 기준 시각 래치 — 리셋되면 서버 자동 격리보다 시간을 더 남았다고 말한다 ──────
-
-test('AGENT_WAIT 창에 들어가면 마지막 이벤트 시각을 기준으로 잡는다', () => {
-  assert.equal(latchAgentWaitAt(null, true, '2026-08-26T00:00:00Z'), '2026-08-26T00:00:00Z');
-});
-
-test('창 안에서 후속 이벤트가 와도 기준 시각은 바뀌지 않는다', () => {
-  // 정밀 평가 도착 등으로 INCIDENT_UPDATED가 한 번 더 오는 경로다 — 여기서 갈아치우면 60초가 리셋된다.
-  assert.equal(
-    latchAgentWaitAt('2026-08-26T00:00:00Z', true, '2026-08-26T00:00:40Z'),
-    '2026-08-26T00:00:00Z',
-  );
-});
-
-test('창을 벗어나면 비워 다음 진입이 새로 잡게 한다', () => {
-  assert.equal(latchAgentWaitAt('2026-08-26T00:00:00Z', false, '2026-08-26T00:00:40Z'), null);
-});
-
-test('이벤트를 못 본 진입은 null로 남는다 — 고정 안내문 fallback', () => {
-  assert.equal(latchAgentWaitAt(null, true, null), null);
 });
 
 test('같은 event_id 재수신은 한 번만 반영한다', () => {

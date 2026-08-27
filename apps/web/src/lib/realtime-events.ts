@@ -12,7 +12,7 @@ import type { ExecutionStatus, IsoDateTime, WsEvent } from '@/types/api';
  * 직접 오므로(§4.8 표) ACT-002가 그 값을 바로 그린다.
  */
 export type RealtimeAction =
-  | { kind: 'refresh'; incidentId: string; occurredAt: IsoDateTime; toast: boolean }
+  | { kind: 'refresh'; incidentId: string; toast: boolean }
   | {
       kind: 'execution';
       incidentId: string;
@@ -46,9 +46,6 @@ export function actionFor(event: WsEvent): RealtimeAction {
   return {
     kind: 'refresh',
     incidentId: event.data.incident_id,
-    // 봉투의 `occurred_at`이다 — B-Medium 카운트다운의 기준 시각이라 여기서 버리면 상세가
-    // 항상 fallback 안내문으로 떨어진다(계약 합의 2026-08-14 · #155 · PR #181 리뷰).
-    occurredAt: event.occurred_at,
     toast: event.event_type === 'INCIDENT_CREATED',
   };
 }
@@ -74,24 +71,6 @@ export function appendTransition(
   // 같은 status 재수신은 줄을 늘리지 않는다 — event_id 멱등과 별개로 값이 안 바뀐 경우다.
   if (from === next.status) return prev as Transition[];
   return [...prev, { at: next.at, from, to: next.status }];
-}
-
-/**
- * B-Medium 카운트다운 기준 시각의 래치 규칙(§4.5 · 계약 합의 2026-08-14).
- *
- * `AGENT_WAIT` 창에 **들어갈 때 한 번만** 잡고, 창 안에서는 바꾸지 않는다 — 창 안에서 오는
- * 후속 `INCIDENT_UPDATED`(정밀 평가 도착 등)마다 다시 물리면 60초가 리셋돼 서버 자동 격리보다
- * 화면이 시간을 더 남았다고 말한다(PR #181 리뷰). 창을 벗어나면 비워 다음 진입이 새로 잡는다.
- *
- * `lastEventAt`이 null이면(이벤트를 못 본 진입) null을 유지해 고정 안내문 fallback으로 간다.
- */
-export function latchAgentWaitAt(
-  prev: IsoDateTime | null,
-  inWindow: boolean,
-  lastEventAt: IsoDateTime | null,
-): IsoDateTime | null {
-  if (!inWindow) return null;
-  return prev ?? lastEventAt;
 }
 
 /**
