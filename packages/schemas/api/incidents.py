@@ -4,8 +4,10 @@
 # Dashboard(FE)와의 공개 계약입니다. (확정 설계 4.3 + PROJECT_STATUS API 계약)
 #
 # 계약 원칙
-#   - title은 nullable — 분석 전 null이며, 그 경우 FE가 category+대상 ARN 축약으로
-#     표시한다(2026-08-14 합의, Issue #45 코멘트).
+#   - title은 SECOPS 필수·FINOPS nullable — 카드 제목이 곧 위협 이름이라 SECOPS는
+#     비면 제목이 자원 ID가 된다(Issue #200). 위협 이름은 만드는 시점에 이미 정해져
+#     있어 AI를 기다리지 않는다. FINOPS는 진단명이라 분석 전 null이며, 그 경우 FE가
+#     category+대상 ARN 축약으로 표시한다(Issue #45 코멘트).
 #   - 목록(IncidentListItem)은 상세의 부분집합 10필드다. 정렬 created_at 내림차순·
 #     전체 반환(페이지네이션 Post-MVP)·필터 검증은 라우터 계약이다.
 #   - 초기 판정과 AI 사후 평가 분리: initial_risk_level(불변)과 reviewed_risk_level을
@@ -128,6 +130,10 @@ class IncidentResponse(BaseModel):
                 "FINOPS는 initial_risk_level·reviewed_risk_level·response_mode가 null이어야 합니다"
             )
 
+        # SECOPS 카드 제목은 위협 이름이다 — null이면 FE fallback이 자원 ID를 제목으로 쓴다
+        if self.category == IncidentCategory.SECOPS and self.title is None:
+            raise ValueError("SECOPS는 title이 필수입니다(위협 이름)")
+
         # 분석 완료 = 정확히 3줄, 그 외 = 빈 배열
         if len(self.summary_lines) not in (0, 3):
             raise ValueError("summary_lines는 빈 배열 또는 정확히 3개여야 합니다")
@@ -189,6 +195,10 @@ class IncidentListItem(BaseModel):
             raise ValueError(
                 "FINOPS는 initial_risk_level·reviewed_risk_level·response_mode가 null이어야 합니다"
             )
+
+        # 상세와 같은 불변식: SECOPS 카드 제목은 위협 이름이다
+        if self.category == IncidentCategory.SECOPS and self.title is None:
+            raise ValueError("SECOPS는 title이 필수입니다(위협 이름)")
         return self
 
 

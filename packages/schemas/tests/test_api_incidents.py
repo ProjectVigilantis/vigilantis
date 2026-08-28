@@ -24,6 +24,7 @@ def make_secops_incident(**over):
     """설계 4.3 예시 JSON 기반의 유효 SECOPS Incident."""
     base = {
         "incident_id": "inc-20260812-001",
+        "title": "SSH 브루트포스 — i-0123",
         "subject_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0123",
         "category": "SECOPS",
         "status": "AWAITING_APPROVAL",
@@ -62,6 +63,7 @@ def make_secops_incident(**over):
 def make_finops_incident(**over):
     base = make_secops_incident(
         incident_id="inc-20260812-002",
+        title=None,
         category="FINOPS",
         status="AWAITING_APPROVAL",
         initial_risk_level=None,
@@ -191,20 +193,30 @@ def test_recovery_ids_reject_main_runbooks():
         }]))
 
 
-# --- title (Issue #45 코멘트 확정: nullable, null이면 FE가 category+ARN 축약 fallback) ---
+# --- title (Issue #200: SECOPS 필수 · FINOPS nullable) ---
 
-def test_title_nullable_default_and_roundtrip():
-    without = IncidentResponse.model_validate(make_secops_incident())
+def test_secops_title_required():
+    # 카드 제목 = 위협 이름 — null이면 FE fallback이 자원 ID를 제목으로 쓴다
+    with pytest.raises(ValidationError):
+        IncidentResponse.model_validate(make_secops_incident(title=None))
+
+
+def test_finops_title_nullable_and_roundtrip():
+    # FINOPS는 진단명이라 분석 전 null이 정상이고, fallback(category+ARN)이 자연스럽다
+    without = IncidentResponse.model_validate(make_finops_incident())
     assert without.title is None
     with_title = IncidentResponse.model_validate(
-        make_secops_incident(title="SSH 브루트포스 — i-0123")
+        make_finops_incident(title="t3.large 과대 스펙")
     )
-    assert with_title.title == "SSH 브루트포스 — i-0123"
+    assert with_title.title == "t3.large 과대 스펙"
     assert IncidentResponse.model_validate_json(with_title.model_dump_json()) == with_title
 
 
 def test_title_rejects_empty_string():
-    # 빈 문자열 대신 null을 쓴다 — fallback 규칙이 null 기준이라 빈 문자열은 계약 위반
+    # 빈 문자열은 어느 category에서도 계약 위반 — FINOPS fallback 규칙이 null 기준이고,
+    # SECOPS는 애초에 위협 이름이 있어야 한다
+    with pytest.raises(ValidationError):
+        IncidentResponse.model_validate(make_finops_incident(title=""))
     with pytest.raises(ValidationError):
         IncidentResponse.model_validate(make_secops_incident(title=""))
 
@@ -263,7 +275,8 @@ def test_list_envelope_empty_items_valid():
 @pytest.mark.parametrize("over", [
     {"category": "FINOPS", "initial_risk_level": "HIGH",
      "reviewed_risk_level": None, "response_mode": None},  # FINOPS인데 위험도 잔존
-    {"title": ""},                                          # 빈 제목 — null을 써야 함
+    {"title": None},                                        # SECOPS인데 제목 없음 (#200)
+    {"title": ""},                                          # 빈 제목 — 계약 위반
     {"unknown_field": 1},                                   # extra 거부
 ])
 def test_list_item_contract_violations(over):

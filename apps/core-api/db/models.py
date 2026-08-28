@@ -299,13 +299,14 @@ class Incident(Base):
             "jsonb_typeof(initial_risk_reason_codes) = 'array'",
             name="reason_codes_is_array",
         ),
-        # SECOPS: 초기 위험도 필수 + 사유 코드 1개 이상 /
+        # SECOPS: 위협 이름(title)·초기 위험도 필수 + 사유 코드 1개 이상 /
         # FINOPS: 위험 대응 축 전부 null + 사유 코드 빈 배열 (api/incidents.py 불변식)
         # CASE로 배열 확인을 먼저 강제한다 — AND 단락 평가는 SQL이 보장하지 않아
         # 비배열 값에서 jsonb_array_length가 제약 위반 대신 런타임 오류를 낸다
         CheckConstraint(
             "CASE jsonb_typeof(initial_risk_reason_codes) WHEN 'array' THEN"
-            " (category = 'SECOPS' AND initial_risk_level IS NOT NULL"
+            " (category = 'SECOPS' AND title IS NOT NULL"
+            " AND initial_risk_level IS NOT NULL"
             " AND jsonb_array_length(initial_risk_reason_codes) >= 1)"
             " OR "
             "(category = 'FINOPS' AND initial_risk_level IS NULL"

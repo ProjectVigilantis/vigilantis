@@ -56,6 +56,7 @@ def _secops_incident(db, **overrides):
     kwargs = dict(
         subject_arn="arn:aws:ec2:ap-northeast-2:123456789012:instance/i-1",
         category=IncidentCategory.SECOPS,
+        title="SSH 브루트포스 — i-1",
         initial_risk_level=RiskLevel.MEDIUM,
         response_mode=ResponseMode.AGENT_WAIT,
         initial_risk_reason_codes=["SSH_FAILED_ATTEMPTS_OVER_THRESHOLD"],
@@ -333,15 +334,31 @@ def test_category_risk_shape_rejected_by_db(db):
                 db, subject_arn="arn:x", category=IncidentCategory.FINOPS,
                 initial_risk_level=RiskLevel.HIGH,
             )
-    # SECOPS인데 사유 코드 0개
+    # SECOPS인데 사유 코드 0개 (title은 채워 위반 조건을 하나로 좁힌다)
     with pytest.raises(IntegrityError, match="ck_incidents_category_risk_shape"):
         with db.begin_nested():
             incidents_repo.create_incident(
                 db, subject_arn="arn:x", category=IncidentCategory.SECOPS,
-                initial_risk_level=RiskLevel.HIGH,
+                title="SSH 브루트포스", initial_risk_level=RiskLevel.HIGH,
                 response_mode=ResponseMode.PRE_MITIGATION_0_5S,
                 initial_risk_reason_codes=[],
             )
+
+
+def test_secops_title_required_by_db(db):
+    """SECOPS는 title 필수, FINOPS는 nullable (Issue #200)."""
+    with pytest.raises(IntegrityError, match="ck_incidents_category_risk_shape"):
+        with db.begin_nested():
+            incidents_repo.create_incident(
+                db, subject_arn="arn:x", category=IncidentCategory.SECOPS,
+                title=None, initial_risk_level=RiskLevel.HIGH,
+                response_mode=ResponseMode.PRE_MITIGATION_0_5S,
+                initial_risk_reason_codes=["SSH_BRUTE_FORCE"],
+            )
+    # FINOPS는 그대로 nullable — 진단명이라 분석 전 null이 정상이다
+    assert incidents_repo.create_incident(
+        db, subject_arn="arn:y", category=IncidentCategory.FINOPS,
+    ).title is None
 
 
 # --- AI 호출 원자 Claim ---------------------------------------------------------
