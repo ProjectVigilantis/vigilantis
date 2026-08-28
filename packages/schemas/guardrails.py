@@ -96,12 +96,7 @@ class ActionWhitelistReasonCode(str, Enum):
 
 @unique
 class ArnMatchReasonCode(str, Enum):
-    """③ ARN Match 거절 사유 — 대상이 DB에 수집된 자산이 아니다(Scope Escalation).
-
-    판정 로직은 아직 없다(apps/core-api/ai/guardrails.py [남은 작업] 3번). 어휘를
-    먼저 세워 두는 이유는 ③이 구현될 때 사유 코드가 다시 앱 안 문자열로 생기는 것을
-    막기 위해서다.
-    """
+    """③ ARN Match 거절 사유 — 대상이 DB에 수집된 자산이 아니다(Scope Escalation)."""
 
     ARN_TARGET_NOT_MANAGED = "ARN_TARGET_NOT_MANAGED"
 

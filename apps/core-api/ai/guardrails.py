@@ -2,7 +2,8 @@
 # [파일 설명]  담당: 안성일 (AI / Guardrail)
 # 4단계 Execution Guardrail입니다. LLM 출력을 순서대로 검증해 프롬프트 인젝션/RCE를
 # 차단합니다: Schema → Action Whitelist → ARN Match → AWS Dry-Run.
-# 이 파일은 그중 ① Schema Check와 ② Action Whitelist를 담습니다. (Issue #114)
+# 이 파일은 그중 ① Schema Check · ② Action Whitelist · ③ ARN Match를 담습니다.
+# (Issue #114 · #177)
 #
 # 계약 원칙
 #   - 단계 결과는 GuardrailStepResult(packages/schemas/guardrails.py)로만 나간다.
@@ -13,25 +14,30 @@
 #   - ①은 parameters를 Runbook별 typed 계약(#154)에도 대조한다. 모델을 가진 ID만
 #     대조하고 모르는 ID는 봉투 검사로 끝낸다 — 그래야 위 규칙과 어긋나지 않는다.
 #   - ②를 통과한 명령만 RunbookCandidateDraft로 승격한다.
+#   - ③은 수집된 자산인지만 대조하고 자산 종류↔Runbook 짝은 보지 않는다. 이 단계가
+#     쓸 수 있는 사유 코드가 ARN_TARGET_NOT_MANAGED 하나뿐이라, 짝 불일치를 여기서
+#     거절하면 거절 기록이 사실과 달라진다.
+#   - ③은 DB를 직접 부르지 않고 조회를 인자로 받는다(ManagedAssetLookup). 외부 자원의
+#     타입이 이 계층으로 넘어오지 않게 하는 것은 model_client.AIModelClient와 같다.
 #   - 거절 사유는 공용 계약이 정의한 단계별 Enum이다(packages/schemas/guardrails.py).
-#     이 파일은 값을 정의하지 않고 ①②가 쓰는 멤버만 짧은 이름으로 다시 노출한다.
+#     이 파일은 값을 정의하지 않고 ①②③이 쓰는 멤버만 짧은 이름으로 다시 노출한다.
 #   - 검증 문맥은 AI_CANDIDATE만 구현한다. 다른 문맥은 payload 모양이 달라 여기서
 #     판정하면 거절 기록이 틀리므로, FAIL이 아니라 예외로 막는다.
 #
 # [남은 작업]
-# 3. ARN Match: DB 수집 ARN과 대조(Scope Escalation 차단)
 # 4. AWS Dry-Run: executor precheck 호출(#113 규약)
-# 4단계 종합 판정 GuardrailValidationResult는 ③④를 붙일 때 만든다 — steps가 고정
-# 4개인 계약이라 두 단계만으로는 조립되지 않는다.
+# 4단계 종합 판정 GuardrailValidationResult는 ④를 붙일 때 만든다 — steps가 고정
+# 4개인 계약이라 세 단계만으로는 조립되지 않는다.
 # ==============================================================================
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Annotated, Final, Union
+from typing import Annotated, Final, Protocol, Union
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
     ConfigDict,
     Field,
@@ -43,6 +49,7 @@ from pydantic import (
 from schemas.agents import RunbookCandidateDraft
 from schemas.guardrails import (
     ActionWhitelistReasonCode,
+    ArnMatchReasonCode,
     GuardrailReasonCode,
     GuardrailStep,
     GuardrailStepResult,
@@ -59,7 +66,7 @@ from .whitelist import is_ai_recommendable, is_allowed_runbook
 logger = logging.getLogger("vigilantis.ai")
 
 # ------------------------------------------------------------------------------
-# 거절 사유 코드 — 값의 정의는 packages/schemas/guardrails.py에 있고 여기는 ①②가
+# 거절 사유 코드 — 값의 정의는 packages/schemas/guardrails.py에 있고 여기는 ①②③이
 # 쓰는 멤버의 짧은 이름이다. 호출부·테스트가 이 이름으로 참조한다.
 # ------------------------------------------------------------------------------
 
@@ -68,12 +75,28 @@ WHITELIST_UNKNOWN_RUNBOOK: Final = ActionWhitelistReasonCode.WHITELIST_UNKNOWN_R
 WHITELIST_NOT_AI_RECOMMENDABLE: Final = (
     ActionWhitelistReasonCode.WHITELIST_NOT_AI_RECOMMENDABLE
 )
+ARN_TARGET_NOT_MANAGED: Final = ArnMatchReasonCode.ARN_TARGET_NOT_MANAGED
 
 # 위반 항목 수·위치 문자열은 payload가 키우는 값이다 — 로그 한 줄이 무한정
 # 길어지지 않게 자른다. loc에는 payload가 지은 키 이름(추가 필드명·dict 키)이
 # 들어오므로 길이 제한이 곧 LLM 저작 텍스트의 로그 유입 상한이다.
 _MAX_LOGGED_VIOLATIONS: Final[int] = 10
 _MAX_LOGGED_LOC_CHARS: Final[int] = 80
+
+
+def _reject_nul(value: str) -> str:
+    """PostgreSQL의 text·jsonb 는 NUL(0x00)을 담지 못한다 — 조회·저장에서 DataError다.
+
+    ③이 target_arn 으로 DB를 조회하고 evidence_ids·parameters 는 후보 저장 시
+    JSONB 컬럼에 담기므로, 여기서 막지 않으면 거절이 기록되는 대신 조회·저장이
+    예외로 끝난다. 값이 아니라 담길 수 있는 문자인지의 문제라 크기 상한(DB 컬럼
+    폭)과 같은 부류이며, 형식 판정이 아니다. runbook_id 는 여기서도 보지 않는다 —
+    ID 판정은 ②의 몫이고(#114), ②의 거절은 저장 없이 기록된다.
+    """
+    if "\x00" in value:
+        raise ValueError("NUL(0x00) 문자는 담을 수 없습니다")
+    return value
+
 
 # 필드별 값 제약 — "빈 문자열은 거절"(#114)에 크기 상한을 더한 것이다.
 #
@@ -84,17 +107,26 @@ _MAX_LOGGED_LOC_CHARS: Final[int] = 80
 #
 # runbook_id에만 상한이 없다 — 목록에 있는지는 ②가 판정하는 것이고, 여기서 길이로
 # 미리 거절하면 미등록 ID의 거절 기록이 ②가 아니라 ①에 남는다(#114 설계).
+_MAX_ARN_CHARS: Final[int] = 512  # DB 컬럼 폭과 동일
 _NonEmptyStr = Annotated[str, Field(min_length=1)]
-_TargetArn = Annotated[str, Field(min_length=1, max_length=512)]  # DB 컬럼 폭과 동일
-_EvidenceId = Annotated[str, Field(min_length=1, max_length=36)]  # DB의 UUID 길이
-_ParamKey = Annotated[str, Field(min_length=1, max_length=64)]
+_TargetArn = Annotated[
+    str, Field(min_length=1, max_length=_MAX_ARN_CHARS), AfterValidator(_reject_nul)
+]
+_EvidenceId = Annotated[
+    str, Field(min_length=1, max_length=36), AfterValidator(_reject_nul)
+]  # DB의 UUID 길이
+_ParamKey = Annotated[
+    str, Field(min_length=1, max_length=64), AfterValidator(_reject_nul)
+]
 # 봉투 단계의 값 제약이다. Runbook별 typed 계약(#154)이 알려진 ID의 값을 판정하지만,
 # 미등록 ID는 그 모델이 없어 이 상한이 마지막 방어다. 중첩 구조는 받지 않는다 —
 # 스칼라만 허용하면 LLM이 파라미터 안에 다른 모양을 밀어 넣을 수 없다.
 # Strict 계열을 쓰는 이유는 "100"이 100으로, 1이 True로 바뀐 채 typed 계약에 닿지
 # 않게 하기 위해서다(bool은 int의 하위 타입이다).
 _ParamScalar = Union[
-    Annotated[str, Field(min_length=1, max_length=256)], StrictInt, StrictBool
+    Annotated[str, Field(min_length=1, max_length=256), AfterValidator(_reject_nul)],
+    StrictInt,
+    StrictBool,
 ]
 _MAX_EVIDENCE_IDS: Final[int] = 50
 _MAX_PARAMS: Final[int] = 20
@@ -132,6 +164,14 @@ class SchemaCheckOutcome:
 @dataclass(frozen=True)
 class ActionWhitelistOutcome:
     """② 결과. draft는 PASS일 때만 있다."""
+
+    step_result: GuardrailStepResult
+    draft: RunbookCandidateDraft | None
+
+
+@dataclass(frozen=True)
+class ArnMatchOutcome:
+    """③ 결과. draft는 PASS일 때만 있고, ②가 넘긴 것을 그대로 통과시킨다."""
 
     step_result: GuardrailStepResult
     draft: RunbookCandidateDraft | None
@@ -245,8 +285,8 @@ def run_action_whitelist(command: SchemaCheckedCommand) -> ActionWhitelistOutcom
     후보 초안"이고, AI 추천 불가 판정(WHITELIST_NOT_AI_RECOMMENDABLE)도 AI가 제안한
     경우에만 옳다 — 롤백 3종은 ROLLBACK_EXECUTION에서는 정당한 실행 대상이다(ADR-0004
     정책 ②의 "트리거는 시스템·관제자"). 지금은 ①이 다른 문맥을 앞에서 막지만 이 함수
-    자체는 문맥을 받지 않으므로, 나머지 문맥은 ③④와 함께 붙일 때 문맥 인자를 받는
-    형태로 바꾼다. (PR #123 리뷰)
+    자체는 문맥을 받지 않으므로, 나머지 문맥은 ④와 종합 판정을 붙일 때 문맥 인자를
+    받는 형태로 바꾼다. (PR #123 리뷰)
 
     통과한 명령만 RunbookCandidateDraft로 승격한다. 두 판정을 이미 거쳤으므로 Draft의
     AI 추천 검증(packages/schemas/agents.py)이 여기서 실패할 수는 없다. parameters도
@@ -265,4 +305,52 @@ def run_action_whitelist(command: SchemaCheckedCommand) -> ActionWhitelistOutcom
     )
     return ActionWhitelistOutcome(
         step_result=_step_pass(GuardrailStep.ACTION_WHITELIST), draft=draft
+    )
+
+
+class ManagedAssetLookup(Protocol):
+    """수집된 자산인지 답하는 조회 경계 — 구현은 이 계층 밖에 둔다.
+
+    호출부가 DB 조회(apps/core-api/db/repositories/assets.py::get_asset_by_arn)를
+    감아 넘긴다. ai/가 db/를 직접 부르지 않는 이유는 model_client.AIModelClient와
+    같다 — 외부 자원의 타입(여기서는 ORM 객체)이 AI 계층으로 넘어오지 않는다.
+    """
+
+    def __call__(self, target_arn: str, /) -> bool: ...
+
+
+def run_arn_match(
+    draft: RunbookCandidateDraft, is_managed_arn: ManagedAssetLookup
+) -> ArnMatchOutcome:
+    """③ ARN Match — 대상이 우리가 수집한 자산인지 대조한다(Scope Escalation 차단).
+
+    판정 기준은 수집 여부 하나이며, 계정·리전 접두어로 거르지 않는다.
+    arn:aws:ec2:<리전>:<계정>:instance/* 는 정당한 대상과 같은 문자열로 시작해
+    접두어 검사를 그대로 통과하기 때문이다 — 이 단계가 막아야 하는 것이 바로
+    그 부류다.
+
+    자산 종류가 Runbook과 맞는지(SG ARN에 EC2 Rightsizing 등)는 보지 않는다.
+    이 단계가 쓸 수 있는 사유 코드가 ARN_TARGET_NOT_MANAGED 하나뿐이라, 짝
+    불일치를 여기서 거절하면 수집된 자산이 "미수집"으로 기록돼 거절 사유가
+    사실과 달라진다.
+    """
+    if is_managed_arn(draft.target_arn):
+        return ArnMatchOutcome(
+            step_result=_step_pass(GuardrailStep.ARN_MATCH), draft=draft
+        )
+
+    # 범위를 벗어난 대상을 지목했다는 것 자체가 조사 대상이라 ARN을 남긴다.
+    # 길이는 자른다 — Draft의 target_arn에는 상한이 없어(packages/schemas/agents.py)
+    # ①을 거치지 않고 만들어진 Draft가 오면 LLM이 지은 문자열이 그대로 들어온다.
+    logger.warning(
+        "guardrail_arn_match_rejected",
+        extra={
+            "runbook_id": draft.runbook_id.value,
+            "target_arn": draft.target_arn[:_MAX_ARN_CHARS],
+            "reason_code": ARN_TARGET_NOT_MANAGED.value,
+        },
+    )
+    return ArnMatchOutcome(
+        step_result=_step_fail(GuardrailStep.ARN_MATCH, ARN_TARGET_NOT_MANAGED),
+        draft=None,
     )
