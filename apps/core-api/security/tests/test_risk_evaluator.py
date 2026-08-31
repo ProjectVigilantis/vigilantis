@@ -66,21 +66,22 @@ def _load(name: str) -> NormalizedThreatEvent:
         return _normalized_from_input(json.load(fp))
 
 
-# (파일, 케이스, 기대 risk_level, 기대 response_mode, 기대 reason_codes 집합) — 잠정안
+# (파일, 케이스, 기대 risk_level, 기대 response_mode, 기대 reason_codes 집합)
+# — 판정 규칙 확정: 2026-08-31 안성일(PR #206). 임계 변경 시 이 표와 risk_evaluator 상수를 함께 갱신.
 CASES = [
     ("evt_open_ip_001.json", "S1", "MEDIUM", "AGENT_WAIT",
      {"RISK_OPEN_INGRESS_WORLD", "RISK_SENSITIVE_PORT_EXPOSED"}),
     ("evt_open_ip_002.json", "S2", "MEDIUM", "AGENT_WAIT",
-     {"RISK_OPEN_INGRESS_WORLD", "RISK_ALL_PROTOCOL_OPEN", "RISK_SENSITIVE_PORT_EXPOSED"}),
+     {"RISK_OPEN_INGRESS_WORLD", "RISK_ALL_PROTOCOL_OPEN"}),
     ("evt_open_ip_003.json", "S5", "MEDIUM", "AGENT_WAIT",
-     {"RISK_OPEN_INGRESS_WORLD", "RISK_SENSITIVE_PORT_EXPOSED"}),
+     {"RISK_OPEN_INGRESS_WORLD", "RISK_ALL_PORTS_EXPOSED"}),
     ("evt_open_ip_004.json", "S6", "MEDIUM", "AGENT_WAIT",
      {"RISK_OPEN_INGRESS_WORLD", "RISK_SENSITIVE_PORT_EXPOSED"}),
     ("evt_open_ip_005.json", "S7", "MEDIUM", "AGENT_WAIT",
      {"RISK_OPEN_INGRESS_WORLD", "RISK_SENSITIVE_PORT_EXPOSED"}),
     ("evt_ssh_bruteforce_001.json", "S3", "HIGH", "PRE_MITIGATION_0_5S", {"RISK_SSH_BRUTEFORCE"}),
-    ("evt_ssh_bruteforce_002.json", "S4", "LOW", "AGENT_WAIT", {"RISK_LOW_SIGNAL"}),
-    ("evt_ssh_bruteforce_003.json", "S8", "LOW", "AGENT_WAIT", {"RISK_LOW_SIGNAL"}),
+    ("evt_ssh_bruteforce_002.json", "S4", "LOW", "AGENT_WAIT", {"RISK_SSH_LOW_SIGNAL"}),
+    ("evt_ssh_bruteforce_003.json", "S8", "LOW", "AGENT_WAIT", {"RISK_SSH_LOW_SIGNAL"}),
     ("evt_ssh_bruteforce_004.json", "S9", "HIGH", "PRE_MITIGATION_0_5S", {"RISK_SSH_BRUTEFORCE"}),
     ("evt_ssh_bruteforce_005.json", "S10", "HIGH", "PRE_MITIGATION_0_5S", {"RISK_SSH_BRUTEFORCE"}),
 ]
@@ -115,28 +116,39 @@ def test_rdp_same_tier_as_ssh_port():
     assert "RISK_SENSITIVE_PORT_EXPOSED" in rdp.reason_codes
 
 
-def test_ssh_medium_band_provisional():
-    # 중간대(시도 10~99 & 분당 20 미만) — Golden 10건엔 없는 밴드. 구현 3분기(LOW/MEDIUM/HIGH)를 고정.
-    ev = NormalizedThreatEvent(
-        threat_event_id="te-mid", source_event_id="mid",
+def _ssh_event(count: int, window: int) -> NormalizedThreatEvent:
+    return NormalizedThreatEvent(
+        threat_event_id=f"te-{count}-{window}", source_event_id=f"{count}-{window}",
         event_type=ThreatEventType.SSH_BRUTE_FORCE,
-        target_arn="arn:aws:ec2:ap-northeast-2:123456789012:instance/i-mid",
+        target_arn="arn:aws:ec2:ap-northeast-2:123456789012:instance/i-syn",
         occurred_at=datetime.now(timezone.utc),
         payload=SshBruteForceThreatPayload(
-            source_ip="203.0.113.9", failed_attempt_count=60, window_seconds=600,  # 6/min
+            source_ip="203.0.113.9", failed_attempt_count=count, window_seconds=window,
         ),
-        deduplication_key="mid", collected_at=datetime.now(timezone.utc),
+        deduplication_key=f"{count}-{window}", collected_at=datetime.now(timezone.utc),
     )
-    r = evaluate_threat(ev)
+
+
+def test_ssh_medium_band_sustained_below_rate():
+    # 지속적이나 발동선 미만(시도 60 & 분당 6) → MEDIUM. Golden 10건엔 없는 밴드.
+    r = evaluate_threat(_ssh_event(60, 600))
     assert r.initial_risk_level.value == "MEDIUM"
-    assert r.response_mode.value == "AGENT_WAIT"
     assert set(r.reason_codes) == {"RISK_SSH_BRUTEFORCE"}
 
 
-def test_asset_context_arg_is_optional_and_ignored_for_now():
-    # 결정 ②(자산 문맥 의존) 확정 전 — asset_context 를 받되 결과가 바뀌지 않아야 한다
-    ev = _load("evt_ssh_bruteforce_005.json")  # S10 (prod EC2)
-    base = evaluate_threat(ev)
-    with_ctx = evaluate_threat(ev, asset_context={"is_prod": True, "actionable": False})
-    assert base.initial_risk_level == with_ctx.initial_risk_level
-    assert set(base.reason_codes) == set(with_ctx.reason_codes)
+def test_ssh_short_burst_is_medium_not_low():
+    # 🔵 해소: 9회/1초=540/min 짧은 버스트 — 단발(1회)이 아니고 속도가 높아 LOW 로 떨어지지 않는다.
+    r = evaluate_threat(_ssh_event(9, 1))
+    assert r.initial_risk_level.value == "MEDIUM"
+
+
+def test_non_world_open_ip_rejected():
+    # ③: 전체 공개가 아닌 OPEN_IP 는 접수 단계에서 거부 — 평가기 도달 시 방어적으로 거절
+    raw = {
+        "event_id": "evt-narrow", "event_type": "OPEN_IP",
+        "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-x",
+        "occurred_at": "2026-08-20T06:10:00Z",
+        "protocol": "tcp", "from_port": 22, "to_port": 22, "source_cidr": "10.0.0.0/8",
+    }
+    with pytest.raises(ValueError):
+        evaluate_threat(_normalized_from_input(raw))

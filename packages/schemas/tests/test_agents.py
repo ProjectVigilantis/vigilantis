@@ -77,6 +77,7 @@ def make_secops_input(**over):
             "threat_event_id": "thr-20260814-001",
             "initial_risk_level": "HIGH",
             "response_mode": "PRE_MITIGATION_0_5S",
+            "reason_codes": ["RISK_SSH_BRUTEFORCE"],
         },
         "evidences": [],
         "isolation_execution": {

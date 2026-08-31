@@ -1,19 +1,18 @@
 # ==============================================================================
-# [파일 설명]  담당: 김승철 (Data & Rule Engine)
+# [파일 설명]  담당: 김승철 (Data & Rule Engine) · 디렉터리 오너 SEC(김세혁)
 # 결정적 초기 위험 판정(Risk Evaluator). 정규화된 위협 이벤트(NormalizedThreatEvent)를
 # 받아 initial_risk_level·response_mode·reason_codes(InitialRiskEvaluationResult)를 낸다.
 # rule_engine(FinOps 자산 판정)과 짝이 되는 SecOps 판정 축이다.
 #
-# ⚠️ 임계값·위험도 매핑은 **잠정(2026-08-31)** — 안성일 승인 대기(스코핑 결정 ②③④,
-#    #회의 Canvas). 확정 전까지 SecOps Golden expected 정답은 채우지 않는다(추측 금지).
-#    - 결정 ②(자산 문맥 의존): evaluate_threat 은 asset_context 를 선택 인자로 받되
-#      현재는 사용하지 않는다. "판정이 DB 자산을 조인하나"가 확정되면 여기서 소비한다
-#      (S5=default SG 조치불가, S10=prod EC2 위험↑ 논점).
-#    - 임계값 상수는 이 파일 상단 한 곳에 모아 두어 확정 시 교체가 국소적이다.
-#
-# 접지 근거(잠정): 위험도를 대응 런북의 위험도에 맞춘다 — OpenIP(SG 전체개방)의 조치는
-#   NACL_ADD_DENY·SG_DELETE(Medium/관제자 승인)라 MEDIUM, SSH 브루트포스의 조치는
-#   EC2_ISOLATE(High/0.5초 선차단)라 강도 임계 이상이면 HIGH.
+# 판정 규칙 확정: 2026-08-31 안성일(아키텍트) 결정, PR #206 리뷰.
+#   ② 자산 문맥 미의존 — 들어온 위협 정보(NormalizedThreatEvent)만 본다. 조치 가능성
+#      (S5 default SG)·운영 자산 여부(S10 prod)는 초기 위험도에 반영하지 않고 가드레일·
+#      실행 단계가 판단한다.
+#   ③ reason_codes 는 RiskReasonCode 로 제한(최소 1개). 전 포트 개방(RISK_ALL_PORTS_EXPOSED)과
+#      전 프로토콜 개방(RISK_ALL_PROTOCOL_OPEN)을 구분한다. 전체 공개가 아닌 OPEN_IP 는
+#      위협 접수 단계에서 거부되므로 이 판정기에 도달하지 않는다(도달 시 방어적으로 거절).
+#   ④ OpenIP 전체 공개 → MEDIUM(관제자 확인). SSH → 실패 횟수와 발생 속도를 함께 본다.
+#      횟수 단독(예: 100회)으로 HIGH 가 되지는 않는다(관측 창이 일정하지 않음).
 # ==============================================================================
 
 from __future__ import annotations
@@ -33,13 +32,14 @@ from schemas.events import (
     expected_mode_for,
 )
 
-# ----- 잠정 임계값 (안성일 승인 대기 — 확정 시 이 블록만 교체) -----
-WORLD_CIDRS = ("0.0.0.0/0", "::/0")          # IPv4·IPv6 전체개방 (S7 IPv6 누락 방지)
-ALL_PROTOCOL = "-1"                          # 전 프로토콜 개방 표기
-SENSITIVE_PORTS = (22, 3389)                 # SSH·RDP — 노출 시 민감(S1·S6)
-SSH_MEDIUM_ATTEMPT_MIN = 10                  # 이 값 미만이면 LOW(오탐·오타) — S4(5)·S8(1)
-SSH_HIGH_ATTEMPT_MIN = 100                   # 이상이면 HIGH — S3(120)·S9(1000)·S10(120)
-SSH_HIGH_RATE_PER_MIN = 20.0                 # 분당 시도 이 값 이상이면 HIGH
+# ----- 판정 임계값 (2026-08-31 안성일 결정) -----
+WORLD_CIDRS = ("0.0.0.0/0", "::/0")     # IPv4·IPv6 전체개방 (S7 IPv6 누락 방지)
+ALL_PROTOCOL = "-1"                     # 전 프로토콜 개방 표기
+ALL_PORTS = (0, 65535)                  # 단일 프로토콜 전 포트 개방 (S5)
+SENSITIVE_PORTS = (22, 3389)           # SSH·RDP — 노출 시 민감 (S1·S6)
+SSH_SINGLE_ATTEMPT = 1                 # 단발 시도는 발생 속도와 무관하게 LOW (S8)
+SSH_HIGH_ATTEMPT_MIN = 10              # HIGH 하한(횟수) — 발생 속도 조건과 AND
+SSH_HIGH_RATE_PER_MIN = 20.0           # HIGH 하한(분당 시도)
 
 
 def _hits_sensitive_port(from_port: Optional[int], to_port: Optional[int]) -> bool:
@@ -50,21 +50,27 @@ def _hits_sensitive_port(from_port: Optional[int], to_port: Optional[int]) -> bo
     return any(lo <= p <= hi for p in SENSITIVE_PORTS)
 
 
-def _evaluate_open_ip(payload: OpenIpThreatPayload) -> tuple[RiskLevel, list[RiskReasonCode]]:
-    world_open = payload.source_cidr in WORLD_CIDRS
-    all_proto = payload.protocol == ALL_PROTOCOL
-    sensitive = all_proto or _hits_sensitive_port(payload.from_port, payload.to_port)
+def _is_all_ports(from_port: Optional[int], to_port: Optional[int]) -> bool:
+    """단일 프로토콜의 전 포트(0–65535) 개방 여부."""
+    return (from_port, to_port) == ALL_PORTS
 
-    if not world_open:
-        # 전체개방이 아니면 잠정 하한 — 특정 CIDR 대상 개방 규칙은 미확정
-        return RiskLevel.LOW, [RiskReasonCode.RISK_LOW_SIGNAL]
+
+def _evaluate_open_ip(payload: OpenIpThreatPayload) -> tuple[RiskLevel, list[RiskReasonCode]]:
+    if payload.source_cidr not in WORLD_CIDRS:
+        # ③: 전체 공개가 아닌 OPEN_IP 는 접수 단계에서 거부된다 — 여기 도달하면 계약 위반.
+        raise ValueError(
+            f"전체 공개(0.0.0.0/0·::/0)가 아닌 OPEN_IP 는 접수 단계에서 거부되어야 한다: "
+            f"{payload.source_cidr}"
+        )
 
     codes = [RiskReasonCode.RISK_OPEN_INGRESS_WORLD]
-    if all_proto:
-        codes.append(RiskReasonCode.RISK_ALL_PROTOCOL_OPEN)
-    if sensitive:
-        codes.append(RiskReasonCode.RISK_SENSITIVE_PORT_EXPOSED)
-    # 잠정: SG 전체개방의 대응 런북이 Medium(관제자 승인)이라 MEDIUM 으로 접지.
+    if payload.protocol == ALL_PROTOCOL:
+        codes.append(RiskReasonCode.RISK_ALL_PROTOCOL_OPEN)          # 전 프로토콜 (S2)
+    elif _is_all_ports(payload.from_port, payload.to_port):
+        codes.append(RiskReasonCode.RISK_ALL_PORTS_EXPOSED)         # 단일 프로토콜 전 포트 (S5)
+    elif _hits_sensitive_port(payload.from_port, payload.to_port):
+        codes.append(RiskReasonCode.RISK_SENSITIVE_PORT_EXPOSED)    # 22·3389 (S1·S6·S7)
+    # SG 전체개방의 대응 런북이 Medium(관제자 승인)이라 MEDIUM 으로 접지.
     return RiskLevel.MEDIUM, codes
 
 
@@ -74,23 +80,25 @@ def _evaluate_ssh_bruteforce(
     count = payload.failed_attempt_count
     rate_per_min = count * 60.0 / payload.window_seconds
 
-    if count < SSH_MEDIUM_ATTEMPT_MIN:
-        return RiskLevel.LOW, [RiskReasonCode.RISK_LOW_SIGNAL]      # 시도 수 하한 — 오탐·오타
-    if count >= SSH_HIGH_ATTEMPT_MIN or rate_per_min >= SSH_HIGH_RATE_PER_MIN:
+    if count <= SSH_SINGLE_ATTEMPT:
+        # 단발 — 발생 속도 무관 LOW (S8: 1회/1초)
+        return RiskLevel.LOW, [RiskReasonCode.RISK_SSH_LOW_SIGNAL]
+    if count >= SSH_HIGH_ATTEMPT_MIN and rate_per_min >= SSH_HIGH_RATE_PER_MIN:
+        # 횟수·속도 동시 충족 (S3·S9·S10)
         return RiskLevel.HIGH, [RiskReasonCode.RISK_SSH_BRUTEFORCE]
-    # 중간대(시도 수 10~99 & 분당 20 미만) — 지속적이나 발동선 미만 → MEDIUM(승인 대기)
+    if count < SSH_HIGH_ATTEMPT_MIN and rate_per_min < SSH_HIGH_RATE_PER_MIN:
+        # 저강도·저속 — 오탐·오타 (S4: 5회/3600초)
+        return RiskLevel.LOW, [RiskReasonCode.RISK_SSH_LOW_SIGNAL]
+    # 한쪽만 충족(지속적이나 발동선 미만, 또는 짧은 버스트) → MEDIUM(관제자 확인)
     return RiskLevel.MEDIUM, [RiskReasonCode.RISK_SSH_BRUTEFORCE]
 
 
-def evaluate_threat(
-    event: NormalizedThreatEvent,
-    asset_context: Optional[dict] = None,
-) -> InitialRiskEvaluationResult:
+def evaluate_threat(event: NormalizedThreatEvent) -> InitialRiskEvaluationResult:
     """정규화 위협 이벤트 → 결정적 초기 위험 판정.
 
-    asset_context 는 결정 ②(자산 문맥 의존) 확정 전까지 받되 사용하지 않는다.
-    response_mode 는 initial_risk_level 에서 파생한다(_EXPECTED_MODE_BY_RISK — validator 가
-    동일 매핑을 재검증). reason_codes 는 항상 ≥1개(DB CHECK: SECOPS 배열 길이 ≥1).
+    입력은 NormalizedThreatEvent 하나뿐이다(② 자산 문맥 미의존). response_mode 는
+    initial_risk_level 에서 파생하고(expected_mode_for — validator 가 재검증), reason_codes 는
+    항상 ≥1개다(DB CHECK: SECOPS 배열 길이 ≥1).
     """
     if event.event_type == ThreatEventType.OPEN_IP:
         level, codes = _evaluate_open_ip(event.payload)  # type: ignore[arg-type]
@@ -103,5 +111,5 @@ def evaluate_threat(
         threat_event_id=event.threat_event_id,
         initial_risk_level=level,
         response_mode=expected_mode_for(level),
-        reason_codes=[c.value for c in codes],
+        reason_codes=codes,
     )
