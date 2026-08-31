@@ -138,7 +138,7 @@ export function CloseIncidentDialog({
             </Button>
           ) : (
             // 막히는 이유가 둘이라 문구를 가른다 — 하나는 **지금 관제자가 풀 수 있는 것**(남은
-            // 제안 정리)이고 하나는 **BE 대기**(9장 #33)다. 합치면 관제자가 자기가 할 수 있는
+            // 제안 정리)이고 하나는 **BE 대기**(9장 #33 · 이슈 #199)다. 합치면 관제자가 자기가 할 수 있는
             // 일을 백엔드 탓으로 읽는다.
             <Button
               type="button"
@@ -146,7 +146,7 @@ export function CloseIncidentDialog({
               title={
                 remaining > 0
                   ? '남은 제안을 먼저 정리해야 종료할 수 있습니다'
-                  : '종료 처리 API 대기 중 (9장 #33)'
+                  : '종료 처리 API 대기 중 (9장 #33 · 이슈 #199)'
               }
             >
               종료 처리
@@ -155,7 +155,7 @@ export function CloseIncidentDialog({
         </DialogFooter>
         {verdict === 'JUSTIFIED' && remaining === 0 ? (
           <p className="text-muted-foreground text-right text-xs">
-            ⏳ 종료 처리 API 대기 — 상태를 `RESOLVED`로 바꾸는 엔드포인트가 아직 없습니다 (9장 #33).
+            ⏳ 종료 처리 API 대기 — 상태를 `RESOLVED`로 바꾸는 엔드포인트가 아직 없습니다 (9장 #33 · 이슈 #199).
           </p>
         ) : null}
       </DialogContent>
