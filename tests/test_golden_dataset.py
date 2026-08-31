@@ -3,8 +3,10 @@
 # datasets/golden/ 의 Golden Dataset 회귀 테스트.
 #
 #   1) 입력 JSON 이 packages/schemas 의 Pydantic 모델로 검증되는가
-#   2) 자산 입력이 rule_engine 판정을 거쳤을 때 expected 와 일치하는가
-#   3) expected 에 기록된 임계값이 현재 rule_engine 상수와 같은가 (드리프트 감지)
+#   2) 입력이 판정을 거쳤을 때 expected 와 일치하는가
+#        FinOps 자산 → rule_engine (evaluate_ec2·evaluate_sg·evaluate_ebs)
+#        SecOps 위협 → security/risk_evaluator (evaluate_threat, 2026-08-31 규칙 확정)
+#   3) expected 에 기록된 임계값이 현재 판정기 상수와 같은가 (드리프트 감지)
 #
 # 3번이 ADR-0006 의 "임계값을 바꾸는 PR은 데이터 갱신을 포함해야 한다" 를
 # 코드로 강제하는 장치다. JSON 은 상수를 import 할 수 없으므로 테스트가 대조한다.
@@ -26,7 +28,23 @@ for _path in (ROOT / "apps" / "core-api", ROOT / "packages"):
         sys.path.insert(0, str(_path))
 
 from schemas.assets import AssetInventory  # noqa: E402
-from schemas.events import MockThreatEventInput  # noqa: E402
+from schemas.events import (  # noqa: E402
+    MockThreatEventInput,
+    NormalizedThreatEvent,
+    OpenIpThreatPayload,
+    SshBruteForceThreatPayload,
+    ThreatEventType,
+)
+from security.risk_evaluator import (  # noqa: E402
+    ALL_PORTS,
+    ALL_PROTOCOL,
+    SENSITIVE_PORTS,
+    SSH_HIGH_ATTEMPT_MIN,
+    SSH_HIGH_RATE_PER_MIN,
+    SSH_SINGLE_ATTEMPT,
+    WORLD_CIDRS,
+    evaluate_threat,
+)
 from services.rule_engine import (  # noqa: E402
     IDLE_CPU_AVG,
     MIN_DATAPOINTS,
@@ -41,6 +59,7 @@ GOLDEN = ROOT / "datasets" / "golden"
 FINOPS_INPUT = GOLDEN / "finops" / "input"
 FINOPS_EXPECTED = GOLDEN / "finops" / "expected"
 SECOPS_INPUT = GOLDEN / "secops" / "input"
+SECOPS_EXPECTED = GOLDEN / "secops" / "expected"
 
 _THREAT_ADAPTER = TypeAdapter(MockThreatEventInput)
 
@@ -60,6 +79,49 @@ def _finops_pairs() -> list[tuple[Path, Path]]:
         assert expected.exists(), f"정답 파일 누락: {expected}"
         pairs.append((src, expected))
     return pairs
+
+
+def _secops_pairs() -> list[tuple[Path, Path]]:
+    """위협 입력 1건 = 정답 1건. 누락되면 여기서 즉시 걸린다."""
+    pairs = []
+    for src in sorted(SECOPS_INPUT.glob("*.json")):
+        expected = SECOPS_EXPECTED / src.name
+        assert expected.exists(), f"정답 파일 누락: {expected}"
+        pairs.append((src, expected))
+    return pairs
+
+
+def _normalized(raw: dict) -> NormalizedThreatEvent:
+    """Mock 위협 입력 → NormalizedThreatEvent.
+
+    수집·정규화 단계가 아직 없어 테스트가 그 자리를 대신한다. 실제 정규화가 구현되면
+    이 헬퍼를 그쪽으로 옮기고 여기서는 호출만 한다 —
+    `apps/core-api/security/tests/test_risk_evaluator.py` 에도 같은 형태가 있다.
+    """
+    etype = ThreatEventType(raw["event_type"])
+    if etype == ThreatEventType.OPEN_IP:
+        payload = OpenIpThreatPayload(
+            protocol=raw["protocol"],
+            from_port=raw.get("from_port"),
+            to_port=raw.get("to_port"),
+            source_cidr=raw["source_cidr"],
+        )
+    else:
+        payload = SshBruteForceThreatPayload(
+            source_ip=raw["source_ip"],
+            failed_attempt_count=raw["failed_attempt_count"],
+            window_seconds=raw["window_seconds"],
+        )
+    return NormalizedThreatEvent(
+        threat_event_id=f"te-{raw['event_id']}",
+        source_event_id=raw["event_id"],
+        event_type=etype,
+        target_arn=raw["target_arn"],
+        occurred_at=raw["occurred_at"],
+        payload=payload,
+        deduplication_key=raw["event_id"],
+        collected_at=raw["occurred_at"],
+    )
 
 
 # ---------------------------------------------------------------- 입력 계약 검증
@@ -230,4 +292,106 @@ def test_finops_expected_covers_every_input_asset(input_path: Path, expected_pat
     assert asset_count == case_count, (
         f"{input_path.name}: 입력 자산 {asset_count}건 / 정답 {case_count}건.\n"
         f"  자산 유형이 추가됐다면 _evaluate_inventory 의 순회와 정답을 함께 갱신하세요."
+    )
+
+# ==============================================================================
+# SecOps — 위험 판정 정답 대조 (판정 규칙 확정: 2026-08-31, PR #206 / 이슈 #210 J3)
+# ==============================================================================
+#
+# FinOps 와 같은 3층 구조다.
+#   1) 입력 계약 검증        — test_secops_input_validates (위 §입력 계약 검증)
+#   2) 판정 대조             — test_secops_verdicts_match_expected
+#   3) 임계값 드리프트 감지  — test_secops_thresholds_not_drifted
+#
+# 정답은 evaluate_threat 의 산출을 베낀 것이 아니라 **확정 규칙에서 도출**해 적었다.
+# 베끼면 구현이 틀려도 정답지가 함께 틀려 회귀를 못 잡는다. 2)가 그 도출과 실제
+# 산출을 대조하므로, 불일치는 "규칙 해석 오류" 아니면 "구현 버그" 둘 중 하나다.
+
+
+@pytest.mark.parametrize("_, expected_path", _secops_pairs(), ids=lambda p: getattr(p, "name", ""))
+def test_secops_thresholds_not_drifted(_: Path, expected_path: Path) -> None:
+    """정답에 기록된 임계값이 현재 risk_evaluator 상수와 같다.
+
+    실패하면 판정 임계가 바뀐 것이다. Golden 의 경계 케이스(S3·S4·S8·S9)가 어느
+    분기에 떨어지는지가 함께 달라지므로 정답을 갱신해야 한다
+    (ADR-0006 임계값 결합 원칙 — FinOps test_thresholds_not_drifted 와 같은 장치).
+    """
+    recorded = _load(expected_path)["thresholds_at_authoring"]
+    current = {
+        "WORLD_CIDRS": list(WORLD_CIDRS),
+        "ALL_PROTOCOL": ALL_PROTOCOL,
+        "ALL_PORTS": list(ALL_PORTS),
+        "SENSITIVE_PORTS": list(SENSITIVE_PORTS),
+        "SSH_SINGLE_ATTEMPT": SSH_SINGLE_ATTEMPT,
+        "SSH_HIGH_ATTEMPT_MIN": SSH_HIGH_ATTEMPT_MIN,
+        "SSH_HIGH_RATE_PER_MIN": SSH_HIGH_RATE_PER_MIN,
+    }
+    # 케이스가 실제로 의존하는 상수만 기록한다 — 기록된 것만 대조한다.
+    checked = [name for name in current if name in recorded]
+    assert checked, f"{expected_path.name}: thresholds_at_authoring 에 대조할 상수가 없습니다."
+    for name in checked:
+        assert recorded[name] == current[name], (
+            f"{name} 이 {recorded[name]} → {current[name]} 로 변경됐습니다. "
+            f"{expected_path.name} 의 정답을 갱신하세요."
+        )
+
+
+@pytest.mark.parametrize(
+    "input_path, expected_path", _secops_pairs(), ids=lambda p: getattr(p, "name", "")
+)
+def test_secops_verdicts_match_expected(input_path: Path, expected_path: Path) -> None:
+    """evaluate_threat 판정이 정답과 일치한다 (3값 전부)."""
+    expected = _load(expected_path)
+    result = evaluate_threat(_normalized(_load(input_path)))
+
+    case = expected["case_id"]
+    assert result.initial_risk_level.value == expected["initial_risk_level"], (
+        f"{case} initial_risk_level 불일치: "
+        f"기대 {expected['initial_risk_level']} / 실제 {result.initial_risk_level.value}\n"
+        f"  목적: {expected['purpose']}\n"
+        f"  도출: {expected['derivation']}"
+    )
+    assert result.response_mode.value == expected["response_mode"], (
+        f"{case} response_mode 불일치: "
+        f"기대 {expected['response_mode']} / 실제 {result.response_mode.value}"
+    )
+    assert sorted(c.value for c in result.reason_codes) == sorted(expected["reason_codes"]), (
+        f"{case} reason_codes 불일치:\n"
+        f"  기대 {sorted(expected['reason_codes'])}\n"
+        f"  실제 {sorted(c.value for c in result.reason_codes)}\n"
+        f"  도출: {expected['derivation']}"
+    )
+
+
+def test_secops_expected_source_points_at_its_input() -> None:
+    """정답의 source 가 짝이 되는 입력을 가리킨다.
+
+    파일명으로 짝을 짓기 때문에, source 를 잘못 적어도 대조는 통과한다. 사람이 정답을
+    읽을 때 근거로 삼는 줄이라 여기서 못 박는다.
+    """
+    for input_path, expected_path in _secops_pairs():
+        source = _load(expected_path)["source"]
+        assert source == f"secops/input/{input_path.name}", (
+            f"{expected_path.name}: source 가 {source} 로 적혀 있습니다."
+        )
+
+
+def test_secops_case_ids_are_unique() -> None:
+    """case_id 가 10건 전부 다르다 — 복사로 만든 정답의 흔한 사고."""
+    ids = [_load(p)["case_id"] for _, p in _secops_pairs()]
+    duplicated = sorted({i for i in ids if ids.count(i) > 1})
+    assert not duplicated, f"중복된 case_id: {duplicated}"
+
+
+def test_secops_expected_covers_every_risk_level() -> None:
+    """정답 10건이 HIGH·MEDIUM·LOW 를 전부 담는다.
+
+    Golden Dataset 은 '판정 분기 전량 커버'가 기준이다(FinOps 는 Verdict 4종·
+    SkipReasonCode 5종 전량). 한 등급이 비면 그 경로는 회귀에서 빠진다.
+    """
+    levels = {_load(p)["initial_risk_level"] for _, p in _secops_pairs()}
+    missing = {"HIGH", "MEDIUM", "LOW"} - levels
+    assert not missing, (
+        f"정답에 없는 위험도 등급: {sorted(missing)}. "
+        f"해당 등급을 내는 입력 케이스를 secops/input 에 추가해야 합니다."
     )
