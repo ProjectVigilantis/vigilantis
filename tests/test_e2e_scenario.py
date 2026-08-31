@@ -40,6 +40,7 @@ from pydantic import ValidationError  # noqa: E402
 from schemas.api.incidents import (  # noqa: E402
     ExecutionSummaryItem,
     IncidentCategory,
+    IncidentResponse,
     ResponseMode,
 )
 from schemas.runbooks import (  # noqa: E402
@@ -50,6 +51,7 @@ from schemas.runbooks import (  # noqa: E402
     TriggerSource,
     domain_of,
 )
+from services.rule_engine import _is_prod  # noqa: E402
 
 GOLDEN = ROOT / "datasets" / "golden"
 
@@ -98,9 +100,15 @@ def test_t1_target_is_not_production_so_the_verdict_is_not_absorbed():
 
     보호 규칙이 idle 검사보다 우선하기 때문이다(#95 확정 기준). 태그 하나로 시나리오
     전체가 무너지는 자리라 여기서 못 박는다.
+
+    **판정기를 그대로 부른다.** 인식 키는 environment·env·stage·tier 넷이라
+    (`services/rule_engine.py`의 PROD_TAG_KEYS), 그중 하나만 옮겨 적으면 나머지 셋으로
+    들어온 prod 태그를 놓친다 — 규칙의 부분 복사본이 되는 자리다(PR #220 리뷰).
     """
-    environment = _a1()["tags"].get("Environment", "")
-    assert environment.strip().lower() not in {"prod", "production", "prd"}
+    assert not _is_prod(_a1()["tags"]), (
+        "A1에 prod 계열 태그가 붙으면 T1 전제가 무너진다 — "
+        "SKIP_PROD_PROTECTED로 흡수돼 COST_CANDIDATE가 나오지 않는다"
+    )
 
 
 def test_t1_rightsizing_is_a_finops_runbook_paired_with_revert_size():
@@ -194,7 +202,17 @@ def test_t2_response_mode_and_trigger_source_are_different_axes():
     `RUNBOOK_EC2_ISOLATE` 하나뿐인데 그 런북은 1차 시연에서 제외된 P2다.
     """
     assert ResponseMode.PRE_MITIGATION_0_5S.value == TriggerSource.PRE_MITIGATION_0_5S.value
-    assert ResponseMode.PRE_MITIGATION_0_5S is not TriggerSource.PRE_MITIGATION_0_5S
+
+    # 두 번째 단언(`is not`)은 걷어냈다 — 서로 다른 Enum 클래스의 멤버는 `is` 로 같아질
+    # 수 없어 **항상 참**이었다(PR #220 리뷰). 이빨이 없는 줄을 이빨로 세면 안 된다.
+    #
+    # 이 축 혼동을 실제로 잡는 곳은 두 자리인데 아직 없다.
+    #   ① 런북별 trigger_source 레지스트리 — packages/schemas/runbooks.py 에 없다.
+    #      "PRE_MITIGATION_0_5S 를 갖는 런북은 EC2_ISOLATE 하나뿐"의 원천은 코드가
+    #      아니라 SSOT §Action Whitelist 표다.
+    #   ② 가드레일 ② 의 trigger_source 대조 — packages/schemas/guardrails.py:12 가
+    #      "승인 후 RunbookCommand 계약과 함께 추가한다"로 남겨 뒀다.
+    # 둘 중 하나가 서면 그때 여기에 진짜 단언을 붙인다.
 
 
 # ==============================================================================
@@ -226,16 +244,26 @@ def test_finops_incident_carries_no_risk_fields():
     위험 대응 축(`initial_risk_level`·`reviewed_risk_level`·`response_mode`)은
     SECOPS에만 있다. 설계서 §카테고리별 필드 차이가 이 사실에 기대고 있다.
     """
-    assert IncidentCategory.FINOPS.value == "FINOPS"
-    assert {mode.value for mode in ResponseMode} == {
-        "PRE_MITIGATION_0_5S",
-        "AGENT_WAIT",
-        "TIMEOUT_ISOLATION_1M",
-    }
+    with pytest.raises(ValidationError):
+        IncidentResponse.model_validate(
+            {
+                "incident_id": "inc-qa-finops",
+                "subject_arn": TARGET_INSTANCE_ARN,
+                "category": IncidentCategory.FINOPS.value,
+                "status": "ANALYZING",
+                # SECOPS 전용 축이 FINOPS에 남은 상태. 계약이 여기서 거절해야
+                # 화면에 T1 위험도 배지가 뜨지 않는다.
+                "initial_risk_level": "HIGH",
+                "created_at": "2026-08-27T06:30:00Z",
+                "updated_at": "2026-08-27T06:30:00Z",
+            }
+        )
 
 
 # ==============================================================================
-# ② 전 구간 흐름 — `execute` 본체 구현 후 skip 해제
+# ② 전 구간 흐름 — 자동 원복까지 서면 skip 해제
+# Boto3 실행 경로는 dev 에 들어갔다(#211 / PR #216 — run_rightsizing_execution).
+# 남은 것은 Status Check 실패 주입과 자동 원복 둘이다(설계서 §대조 3번).
 # ==============================================================================
 #
 # 아래 2건은 김세혁의 `execute` 본체(Boto3 실행 → `get_waiter` Status Check → 자동
@@ -243,7 +271,7 @@ def test_finops_incident_carries_no_risk_fields():
 # 보증하고 있으므로, 흐름 테스트는 **상태 전이만** 보면 된다.
 
 
-@pytest.mark.skip(reason="execute 본체(Boto3 실행·get_waiter·자동 원복) 미구현 — 김세혁")
+@pytest.mark.skip(reason="Status Check 실패 주입·자동 원복 미구현 — 설계서 §대조 3번(김세혁)")
 def test_t1_idle_ec2_downsize_and_auto_rollback_flow():
     """T1 전 구간 — 설계서 §T1 단계표 1~9번.
 
@@ -260,7 +288,7 @@ def test_t1_idle_ec2_downsize_and_auto_rollback_flow():
     """
 
 
-@pytest.mark.skip(reason="execute 본체(Boto3 실행·get_waiter·자동 원복) 미구현 — 김세혁")
+@pytest.mark.skip(reason="Status Check 실패 주입·자동 원복 미구현 — 설계서 §대조 3번(김세혁)")
 def test_t2_ssh_bruteforce_block_and_one_click_release_flow():
     """T2 전 구간 — 설계서 §T2 단계표 1~8번.
 

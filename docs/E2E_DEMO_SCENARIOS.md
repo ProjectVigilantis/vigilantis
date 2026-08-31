@@ -223,15 +223,24 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 
 ## `tests/test_e2e_scenario.py` 대응
 
-현재 skip 2건이 본 설계서의 어느 범위를 검증할지 고정한다.
+이 파일은 **두 층**이다(#219).
+
+| 층 | 무엇 | 상태 |
+| --- | --- | --- |
+| ① **시연 전제 대조 11건** | 이 설계서가 인용한 값(입력 수치·런북 짝·계약 제약)을 원천과 결속한다. 파이프라인 없이 지금 돈다 | ✅ 실행 중 |
+| ② **전 구간 흐름 2건** | 아래 표. 파이프라인이 서야 열린다 | ⏸ skip |
+
+①이 있는 이유는 이 문서가 인용한 값들이 **지금은 참이지만 아무도 지켜보지 않는 주장**이기 때문이다. 골든 숫자 하나, 런북 분류 하나가 바뀌면 대본이 조용히 틀어지고 리허설에서야 드러난다.
+
+②의 skip 2건이 본 설계서의 어느 범위를 검증할지 고정한다.
 
 | 테스트 | 대응 트랙 | 검증 범위 | 여는 조건 |
 | --- | --- | --- | --- |
-| `test_idle_ec2_downsize_flow` | **T1** | Golden A1 → `COST_CANDIDATE` → 가드레일 → 실행 접수 → Status Check 실패 → `ROLLED_BACK` | 대조 3번(원복 엔진) |
-| `test_open_ssh_ip_block_flow` | **T2** | Golden **S3** → Incident → `response_mode` 진입 → 승인 → `NACL_ADD_DENY`(`USER_APPROVAL`) → 원클릭 해제 → `NACL_RESTORE` | 대조 1번(Risk Evaluator) |
+| `test_t1_idle_ec2_downsize_and_auto_rollback_flow` | **T1** | Golden A1 → `COST_CANDIDATE` → 가드레일 → 실행 접수 → Status Check 실패 → `ROLLED_BACK` | 대조 3번(Status Check 실패 주입·자동 원복) |
+| `test_t2_ssh_bruteforce_block_and_one_click_release_flow` | **T2** | Golden **S3** → Incident → `response_mode` 진입 → 승인 → `NACL_ADD_DENY`(`USER_APPROVAL`) → 원클릭 해제 → `NACL_RESTORE` | 대조 1번(판정기 워크플로 배선) |
 
 **두 테스트 모두 Golden Dataset을 입력으로 쓴다.** 시연에 쓰는 데이터와 테스트에 쓰는 데이터가 같아야 "시연이 되면 테스트도 된다"가 성립한다.
 
-**테스트 이름과 입력이 어긋난다** — `test_open_ssh_ip_block_flow`는 `OPEN_IP`를 가리키는데 입력은 `SSH_BRUTE_FORCE`(S3)다. 1주차에 지은 이름이고 T2 입력이 PR #148 리뷰로 바뀐 결과다. skip을 해제하는 시점(대조 1번 해소)에 `test_ssh_bruteforce_nacl_block_flow` 등으로 함께 고친다.
+~~**테스트 이름과 입력이 어긋난다**~~ ✅ 해소(2026-08-31, #219) — 옛 이름 `test_open_ssh_ip_block_flow`가 `OPEN_IP`를 가리키는데 입력은 `SSH_BRUTE_FORCE`(S3)였다. 1주차에 지은 이름이고 T2 입력이 PR #148 리뷰로 바뀐 결과다. skip 해제를 기다리지 않고 위 표의 이름으로 함께 고쳤다 — **이 표가 명세인 이상 이름이 어긋난 채로 두면 문서가 없는 테스트를 가리킨다.**
 
 실행 계열 공통 fixture는 **#136**에서 선구축한다. 그 픽스처가 P2 3종의 로컬 FAIL을 `GuardrailValidationContext` 문맥별로 표현해야 한다는 전제도 같은 이슈에 적었다.
