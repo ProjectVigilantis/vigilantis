@@ -2,12 +2,12 @@
 # [파일 설명]  담당: 안성일 (AI / Guardrail)
 # 4단계 Execution Guardrail입니다. LLM 출력을 순서대로 검증해 프롬프트 인젝션/RCE를
 # 차단합니다: Schema → Action Whitelist → ARN Match → AWS Dry-Run.
-# 이 파일은 그중 ① Schema Check · ② Action Whitelist · ③ ARN Match를 담습니다.
-# (Issue #114 · #177)
+# 네 단계 함수와 그 종합 판정(GuardrailValidationResult 조립)을 담습니다.
+# (Issue #114 · #177 · #208)
 #
 # 계약 원칙
 #   - 단계 결과는 GuardrailStepResult(packages/schemas/guardrails.py)로만 나간다.
-#     거절일 때만 reason_code를 채우고, verification_summary는 ④ 전용이라 비운다.
+#     거절일 때만 reason_code를 채우고, verification_summary는 ④만 채운다.
 #   - ①은 payload를 runbook_id가 문자열인 SchemaCheckedCommand로 변환한다. 여기서
 #     RunbookCandidateDraft로 바로 가면 그 모델이 AI 추천 7종만 받으므로 미등록
 #     ID·롤백 ID가 ①에서 터지고 ②가 걸러낼 것이 남지 않는다. 목록 대조는 ②다.
@@ -19,21 +19,26 @@
 #     거절하면 거절 기록이 사실과 달라진다.
 #   - ③은 DB를 직접 부르지 않고 조회를 인자로 받는다(ManagedAssetLookup). 외부 자원의
 #     타입이 이 계층으로 넘어오지 않게 하는 것은 model_client.AIModelClient와 같다.
+#   - ④도 같은 이유로 AWS 판정을 인자로 받는다(CandidatePrecheck). ai/는
+#     services/aws/를 직접 부르지 않고, 오가는 타입은 packages/schemas의 것뿐이다.
+#   - ④는 판정을 다시 분류하지 않는다. executor precheck의 PrecheckOutcome을
+#     GuardrailStepResult로 1:1로 옮기기만 한다(ADR-0007 §1 호출 규약) — 사유 코드
+#     분류가 두 곳으로 갈라지면 거절 기록과 실제 판정이 어긋난다.
 #   - 거절 사유는 공용 계약이 정의한 단계별 Enum이다(packages/schemas/guardrails.py).
 #     이 파일은 값을 정의하지 않고 ①②③이 쓰는 멤버만 짧은 이름으로 다시 노출한다.
+#     ④의 코드는 executor가 골라 넘기므로 여기서 고를 일이 없다.
+#   - 종합 판정은 첫 FAIL에서 멈추고 이후 단계를 NOT_RUN으로 남긴다. 이 단락이 곧
+#     "거절된 대상으로 AWS를 부르지 않는다"는 보장이다 — ③이 막은 ARN이 ④까지 가면
+#     범위를 벗어난 자원에 실제로 요청이 나간다.
 #   - 검증 문맥은 AI_CANDIDATE만 구현한다. 다른 문맥은 payload 모양이 달라 여기서
 #     판정하면 거절 기록이 틀리므로, FAIL이 아니라 예외로 막는다.
-#
-# [남은 작업]
-# 4. AWS Dry-Run: executor precheck 호출(#113 규약)
-# 4단계 종합 판정 GuardrailValidationResult는 ④를 붙일 때 만든다 — steps가 고정
-# 4개인 계약이라 세 단계만으로는 조립되지 않는다.
 # ==============================================================================
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Annotated, Final, Protocol, Union
 
 from pydantic import (
@@ -48,16 +53,20 @@ from pydantic import (
 
 from schemas.agents import RunbookCandidateDraft
 from schemas.guardrails import (
+    GUARDRAIL_STEP_ORDER,
     ActionWhitelistReasonCode,
     ArnMatchReasonCode,
+    GuardrailDecision,
     GuardrailReasonCode,
     GuardrailStep,
     GuardrailStepResult,
     GuardrailStepStatus,
     GuardrailValidationContext,
     GuardrailValidationRequest,
+    GuardrailValidationResult,
     SchemaCheckReasonCode,
 )
+from schemas.precheck import PrecheckOutcome
 from schemas.runbook_parameters import CANDIDATE_PARAMETER_MODELS
 from schemas.runbooks import RunbookId
 
@@ -177,15 +186,43 @@ class ArnMatchOutcome:
     draft: RunbookCandidateDraft | None
 
 
-def _step_pass(step: GuardrailStep) -> GuardrailStepResult:
-    return GuardrailStepResult(step=step, result=GuardrailStepStatus.PASS)
+@dataclass(frozen=True)
+class AwsDryRunOutcome:
+    """④ 결과. draft는 PASS일 때만 있고, ③이 넘긴 것을 그대로 통과시킨다."""
+
+    step_result: GuardrailStepResult
+    draft: RunbookCandidateDraft | None
+
+
+@dataclass(frozen=True)
+class GuardrailOutcome:
+    """네 단계 종합 결과. draft는 네 단계를 모두 통과했을 때만 있다 — 후보를
+    EXECUTABLE로 저장하는 근거이며, 거절이면 남는 것은 result의 거절 기록뿐이다."""
+
+    result: GuardrailValidationResult
+    draft: RunbookCandidateDraft | None
+
+
+def _step_pass(
+    step: GuardrailStep, verification_summary: str | None = None
+) -> GuardrailStepResult:
+    return GuardrailStepResult(
+        step=step,
+        result=GuardrailStepStatus.PASS,
+        verification_summary=verification_summary,
+    )
 
 
 def _step_fail(
-    step: GuardrailStep, reason_code: GuardrailReasonCode
+    step: GuardrailStep,
+    reason_code: GuardrailReasonCode,
+    verification_summary: str | None = None,
 ) -> GuardrailStepResult:
     return GuardrailStepResult(
-        step=step, result=GuardrailStepStatus.FAIL, reason_code=reason_code
+        step=step,
+        result=GuardrailStepStatus.FAIL,
+        reason_code=reason_code,
+        verification_summary=verification_summary,
     )
 
 
@@ -285,8 +322,9 @@ def run_action_whitelist(command: SchemaCheckedCommand) -> ActionWhitelistOutcom
     후보 초안"이고, AI 추천 불가 판정(WHITELIST_NOT_AI_RECOMMENDABLE)도 AI가 제안한
     경우에만 옳다 — 롤백 3종은 ROLLBACK_EXECUTION에서는 정당한 실행 대상이다(ADR-0004
     정책 ②의 "트리거는 시스템·관제자"). 지금은 ①이 다른 문맥을 앞에서 막지만 이 함수
-    자체는 문맥을 받지 않으므로, 나머지 문맥은 ④와 종합 판정을 붙일 때 문맥 인자를
-    받는 형태로 바꾼다. (PR #123 리뷰)
+    자체는 문맥을 받지 않으므로, 나머지 문맥을 구현할 때 문맥 인자를 받는 형태로
+    바꾼다 — 그 문맥들은 호출 시점 자체가 아직 결정되지 않았다(ADR-0007 §Consequences).
+    (PR #123 리뷰)
 
     통과한 명령만 RunbookCandidateDraft로 승격한다. 두 판정을 이미 거쳤으므로 Draft의
     AI 추천 검증(packages/schemas/agents.py)이 여기서 실패할 수는 없다. parameters도
@@ -354,3 +392,129 @@ def run_arn_match(
         step_result=_step_fail(GuardrailStep.ARN_MATCH, ARN_TARGET_NOT_MANAGED),
         draft=None,
     )
+
+
+class CandidatePrecheck(Protocol):
+    """④가 부르는 AWS 판정 경계 — 구현은 이 계층 밖에 둔다.
+
+    호출부가 services/aws/executor.py::precheck()를 감아 넘긴다. 후보를 실행
+    파라미터로 바꾸는 변환(schemas.runbook_parameters.build_precheck_parameters)이
+    그 감싸는 자리의 몫인 이유는, 변환에 필요한 값이 이 계층에 없기 때문이다 —
+    target_arn이 가리키는 자원 ID는 executor.parse_arn이 해석하고, 나머지는 DB·AWS
+    조회로 채운다. ai/가 services/aws/를 직접 부르지 않는 이유는 ManagedAssetLookup과
+    같다.
+
+    감싸는 쪽이 지켜야 하는 것 둘.
+      - **RUNBOOK_NACL_RESTORE 후보에는 backup_loader를 배선한다.** 백업 레코드가
+        필요한 4종 중 이 하나만 롤백 3종이 아니라 AI 추천 7종이라(schemas/runbooks.py)
+        ②를 통과해 여기까지 온다. 미배선이면 precheck는 FAIL이 아니라 RuntimeError다
+        (ADR-0007 §1 — 배선 오류를 거절로 기록하면 멀쩡한 명령에 거절 사유가 붙는다).
+      - **동기 함수다**(ADR-0007 §1). async 문맥에서 threadpool로 감싸는 것도 호출부다.
+    """
+
+    def __call__(self, draft: RunbookCandidateDraft, /) -> PrecheckOutcome: ...
+
+
+def run_aws_dry_run(
+    draft: RunbookCandidateDraft, precheck: CandidatePrecheck
+) -> AwsDryRunOutcome:
+    """④ AWS Dry-Run — 실제 AWS에 물어 판정한다(ADR-0007).
+
+    판정을 여기서 다시 분류하지 않는다. PrecheckOutcome을 GuardrailStepResult로
+    1:1로 옮기기만 한다(ADR-0007 §1 호출 규약) — 사유 코드 분류가 두 곳에 생기면
+    거절 기록과 executor가 실제로 내린 판정이 어긋난다. 단계↔코드 정합은 공용 계약이
+    강제하므로(GuardrailStepResult), 다른 단계의 코드가 섞이면 여기서 ValidationError다.
+
+    verification_summary는 PASS·FAIL 모두 옮긴다. 무엇을 확인하지 못했는지는 통과한
+    경우에도 관제자에게 나가야 하는 정보다(ADR-0007 §3).
+
+    미구현 런북을 호출 전에 거르지 않는다 — 그 판정의 소유권은 디스패치 테이블을
+    가진 executor다(PRECHECK_NOT_IMPLEMENTED).
+    """
+    outcome = precheck(draft)
+
+    if outcome.passed:
+        return AwsDryRunOutcome(
+            step_result=_step_pass(
+                GuardrailStep.AWS_DRY_RUN, outcome.verification_summary
+            ),
+            draft=draft,
+        )
+
+    # executor도 자체 로그를 남기지만(vigilantis.aws) AWS에 닿기 전에 끝난 거절은
+    # 남기지 않는다. 거절 기록을 단계별로 훑을 수 있어야 하므로 ②③과 같은 자리에
+    # 한 줄을 남긴다. 요약 문자열은 단계 결과에 이미 담겨 있어 여기서 다시 쓰지 않는다.
+    logger.warning(
+        "guardrail_aws_dry_run_rejected",
+        extra={
+            "runbook_id": draft.runbook_id.value,
+            "target_arn": draft.target_arn[:_MAX_ARN_CHARS],
+            "reason_code": outcome.reason_code.value if outcome.reason_code else None,
+        },
+    )
+    return AwsDryRunOutcome(
+        step_result=_step_fail(
+            GuardrailStep.AWS_DRY_RUN,
+            outcome.reason_code,
+            outcome.verification_summary,
+        ),
+        draft=None,
+    )
+
+
+def _validation_result(steps: list[GuardrailStepResult]) -> GuardrailValidationResult:
+    """실행된 단계 결과에 NOT_RUN을 채워 고정 4단계 계약으로 만든다.
+
+    남은 단계는 GUARDRAIL_STEP_ORDER에서 잘라 온다 — 단계 개수·순서를 이 파일이
+    다시 세면 계약과 갈릴 수 있고, 그러면 조립이 통째로 거절된다.
+    """
+    failed = next((s for s in steps if s.result == GuardrailStepStatus.FAIL), None)
+    return GuardrailValidationResult(
+        result=GuardrailDecision.FAIL if failed else GuardrailDecision.PASS,
+        failed_step=failed.step if failed else None,
+        steps=[
+            *steps,
+            *(
+                GuardrailStepResult(step=step, result=GuardrailStepStatus.NOT_RUN)
+                for step in GUARDRAIL_STEP_ORDER[len(steps):]
+            ),
+        ],
+        validated_at=datetime.now(timezone.utc),
+    )
+
+
+def run_guardrail_validation(
+    request: GuardrailValidationRequest,
+    *,
+    is_managed_arn: ManagedAssetLookup,
+    precheck: CandidatePrecheck,
+) -> GuardrailOutcome:
+    """네 단계를 순서대로 돌려 GuardrailValidationResult를 조립한다.
+
+    첫 FAIL에서 멈춘다 — 뒤 단계는 실행하지 않고 NOT_RUN으로 남긴다. 이것이 곧
+    "거절된 명령으로 AWS를 부르지 않는다"는 보장이다: ③이 막은 ARN이 ④까지 가면
+    범위를 벗어난 자원에 조회·DryRun 요청이 실제로 나간다.
+
+    조회 경계 둘(is_managed_arn·precheck)은 키워드로만 받는다 — 호출부가 순서를
+    바꿔 넘기면 두 경계가 조용히 뒤바뀐다.
+
+    AI_CANDIDATE 문맥 전용이다(①이 다른 문맥을 NotImplementedError로 막는다).
+    """
+    schema_check = run_schema_check(request)
+    steps = [schema_check.step_result]
+    if schema_check.command is None:
+        return GuardrailOutcome(result=_validation_result(steps), draft=None)
+
+    whitelist = run_action_whitelist(schema_check.command)
+    steps.append(whitelist.step_result)
+    if whitelist.draft is None:
+        return GuardrailOutcome(result=_validation_result(steps), draft=None)
+
+    arn_match = run_arn_match(whitelist.draft, is_managed_arn)
+    steps.append(arn_match.step_result)
+    if arn_match.draft is None:
+        return GuardrailOutcome(result=_validation_result(steps), draft=None)
+
+    dry_run = run_aws_dry_run(arn_match.draft, precheck)
+    steps.append(dry_run.step_result)
+    return GuardrailOutcome(result=_validation_result(steps), draft=dry_run.draft)
