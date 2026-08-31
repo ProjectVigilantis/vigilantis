@@ -1,6 +1,6 @@
 # E2E 시연 시나리오 설계서 (1차)
 
-> **담당**: 박지현 (QA & Scenario) · **이슈**: #132 · **작성**: 2026-08-25 · **현황 갱신**: 2026-08-31 (김세혁 — §대조 필요 목록 2번 해소·원천 재지정 / 박지현 — 본문 🔶 잔여 정리·번호 표기)
+> **담당**: 박지현 (QA & Scenario) · **이슈**: #132 · **작성**: 2026-08-25 · **현황 갱신**: 2026-08-31 (김세혁 — §대조 필요 목록 1·2번 상태·원천 재지정 / 박지현 — 본문 🔶 잔여 정리·번호 표기)
 > **목적**: 1차 발표(10/15) 시연 대본의 원천이자 `tests/test_e2e_scenario.py`의 명세.
 > **범위 기준**: `docs/PROJECT_STATUS.md`(SSOT)를 따른다. 충돌하면 SSOT가 이긴다.
 
@@ -134,7 +134,7 @@ IN_PROGRESS → SUCCESS
 | # | 단계 | 화면(FE) | API | WS 이벤트 | 실패 시 대체 컷 |
 | --- | --- | --- | --- | --- | --- |
 | 1 | 위협 주입 | 토폴로지에 **붉은 노드** | (mock 주입) | `INCIDENT_CREATED` | 토폴로지 정적 이미지 |
-| 2 | 위험도 판정 | 위험도 배지 | `GET /api/v1/incidents/{id}` | `INCIDENT_UPDATED` | 🔶 **판정 규칙 미확정** — §대조 필요 1번 |
+| 2 | 위험도 판정 | 위험도 배지 | `GET /api/v1/incidents/{id}` | `INCIDENT_UPDATED` | 🔶 **판정기 워크플로 배선 미완** — §대조 필요 1번 |
 | 3 | 대응 경로 진입 | "선제 차단" 경로 표시 | `response_mode: PRE_MITIGATION_0_5S`<br>*(Incident 축 — 실행 축 아님)* | `INCIDENT_UPDATED` | 경로 표시 없이 4번으로 |
 | 4 | 가드레일 4단계 | — (화면 표시 없음) | (내부) | — | 슬라이드 컷으로 분리 |
 | 5 | **관제자 승인 → 차단** | **[조치 실행]** 클릭 | `RUNBOOK_NACL_ADD_DENY`<br>`trigger_source: USER_APPROVAL`<br>`approval_mode: HUMAN_ONLY`<br>`ec2.create_network_acl_entry` | `EXECUTION_UPDATED` `SUCCESS` | — |
@@ -200,7 +200,7 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 
 | # | 항목 | 막힌 이유 | 풀리는 시점 |
 | --- | --- | --- | --- |
-| 1 | T2 2번 위험도 판정값(`initial_risk_level`) | Risk Evaluator 미구현 · `RiskReasonCode` 목록 미확정 | SSOT 미해결 6번 해소 |
+| 1 | T2 2번 위험도 판정값(`initial_risk_level`) | **판정 규칙과 `RiskReasonCode` 6종은 확정**(#210 / PR #206 — `packages/schemas/events.py`, `apps/core-api/security/risk_evaluator.py::evaluate_threat`). 남은 것 둘 — ① `evaluate_threat()`가 **Security Workflow에 배선되지 않아** 위협 접수 → 배지 경로가 아직 없다(현재 호출처는 테스트뿐) ② Golden SecOps 정답 10건 미작성(`datasets/golden/secops/expected/`가 비어 있다 — 규칙 확정으로 보류 사유는 풀렸다) | ① SecOps 워크플로 배선 ② 정답 채우기(박지현) |
 | 2 | ~~런북별 세부 실행 단계·`parameters_schema`~~ ✅ 해소(2026-08-31) | 확정본이 SSOT §Action Whitelist로 이관되고, `parameters_schema`는 `packages/schemas/runbook_parameters.py`(#154 / PR #178), 세부 실행 단계·`target_api`는 [ADR-0007](adr/0007-guardrail-dryrun-executor-precheck-contract.md) §Context·§5가 갖는다 | — |
 | 3 | Status Check 실패 **주입 방법** | 자동 원복 엔진 미구현 | 김세혁 원복 엔진 |
 | 4 | ~~가드레일 ③ 실제 통과~~ ✅ 해소(2026-08-31) | **4단계가 전부 섰다.** ③ ARN Match 구현(#177 / PR #202 — DB 수집 ARN 대조로 Scope Escalation 차단, ① NUL 문자 차단 포함)으로 `tests/test_guardrails.py`의 placeholder skip 1건이 해제됐다. ④ Dry-Run은 `precheck()` 확정 10종 구현 완료(#129 / PR #147 · 실측 #130 / PR #170) | — |
