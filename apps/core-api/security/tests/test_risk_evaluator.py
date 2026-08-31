@@ -115,6 +115,24 @@ def test_rdp_same_tier_as_ssh_port():
     assert "RISK_SENSITIVE_PORT_EXPOSED" in rdp.reason_codes
 
 
+def test_ssh_medium_band_provisional():
+    # 중간대(시도 10~99 & 분당 20 미만) — Golden 10건엔 없는 밴드. 구현 3분기(LOW/MEDIUM/HIGH)를 고정.
+    ev = NormalizedThreatEvent(
+        threat_event_id="te-mid", source_event_id="mid",
+        event_type=ThreatEventType.SSH_BRUTE_FORCE,
+        target_arn="arn:aws:ec2:ap-northeast-2:123456789012:instance/i-mid",
+        occurred_at=datetime.now(timezone.utc),
+        payload=SshBruteForceThreatPayload(
+            source_ip="203.0.113.9", failed_attempt_count=60, window_seconds=600,  # 6/min
+        ),
+        deduplication_key="mid", collected_at=datetime.now(timezone.utc),
+    )
+    r = evaluate_threat(ev)
+    assert r.initial_risk_level.value == "MEDIUM"
+    assert r.response_mode.value == "AGENT_WAIT"
+    assert set(r.reason_codes) == {"RISK_SSH_BRUTEFORCE"}
+
+
 def test_asset_context_arg_is_optional_and_ignored_for_now():
     # 결정 ②(자산 문맥 의존) 확정 전 — asset_context 를 받되 결과가 바뀌지 않아야 한다
     ev = _load("evt_ssh_bruteforce_005.json")  # S10 (prod EC2)

@@ -137,6 +137,15 @@ _EXPECTED_MODE_BY_RISK: dict[RiskLevel, ResponseMode] = {
 }
 
 
+def expected_mode_for(risk_level: RiskLevel) -> ResponseMode:
+    """초기 판정 위험도 → 대응 경로(response_mode) 매핑의 공개 접점.
+
+    Risk Evaluator 등 외부 소비자가 비공개 `_EXPECTED_MODE_BY_RISK` 를 넘어 import 하지
+    않도록 공개 헬퍼로 노출한다. InitialRiskEvaluationResult validator 가 이 매핑을 재검증한다.
+    """
+    return _EXPECTED_MODE_BY_RISK[risk_level]
+
+
 @unique
 class RiskReasonCode(str, Enum):
     """Risk Evaluator 판정 근거 코드.

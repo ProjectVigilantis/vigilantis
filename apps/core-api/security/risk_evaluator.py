@@ -18,31 +18,26 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import Optional
 
-# import 경로: packages(schemas) — services/collector.py 등과 동일 관례
-_PACKAGES = Path(__file__).resolve().parents[3] / "packages"
-if str(_PACKAGES) not in sys.path:
-    sys.path.insert(0, str(_PACKAGES))
-
-from schemas.api.incidents import RiskLevel  # noqa: E402
-from schemas.events import (  # noqa: E402
+# schemas 는 진입점(main.py·conftest)이 sys.path 에 올린다 — collector.py·rule_engine.py 와
+# 동일하게 여기서는 부트스트랩하지 않는다. RiskLevel 은 events 가 재노출하므로 원천을 하나로 모은다.
+from schemas.events import (
+    InitialRiskEvaluationResult,
     NormalizedThreatEvent,
     OpenIpThreatPayload,
+    RiskLevel,
     RiskReasonCode,
     SshBruteForceThreatPayload,
     ThreatEventType,
-    _EXPECTED_MODE_BY_RISK,
+    expected_mode_for,
 )
-from schemas.events import InitialRiskEvaluationResult  # noqa: E402
 
 # ----- 잠정 임계값 (안성일 승인 대기 — 확정 시 이 블록만 교체) -----
 WORLD_CIDRS = ("0.0.0.0/0", "::/0")          # IPv4·IPv6 전체개방 (S7 IPv6 누락 방지)
 ALL_PROTOCOL = "-1"                          # 전 프로토콜 개방 표기
 SENSITIVE_PORTS = (22, 3389)                 # SSH·RDP — 노출 시 민감(S1·S6)
-SSH_LOW_ATTEMPT_MAX = 10                     # 미만이면 LOW(오탐·오타) — S4(5)·S8(1)
+SSH_MEDIUM_ATTEMPT_MIN = 10                  # 이 값 미만이면 LOW(오탐·오타) — S4(5)·S8(1)
 SSH_HIGH_ATTEMPT_MIN = 100                   # 이상이면 HIGH — S3(120)·S9(1000)·S10(120)
 SSH_HIGH_RATE_PER_MIN = 20.0                 # 분당 시도 이 값 이상이면 HIGH
 
@@ -79,10 +74,11 @@ def _evaluate_ssh_bruteforce(
     count = payload.failed_attempt_count
     rate_per_min = count * 60.0 / payload.window_seconds
 
-    if count < SSH_LOW_ATTEMPT_MAX:
-        return RiskLevel.LOW, [RiskReasonCode.RISK_LOW_SIGNAL]
+    if count < SSH_MEDIUM_ATTEMPT_MIN:
+        return RiskLevel.LOW, [RiskReasonCode.RISK_LOW_SIGNAL]      # 시도 수 하한 — 오탐·오타
     if count >= SSH_HIGH_ATTEMPT_MIN or rate_per_min >= SSH_HIGH_RATE_PER_MIN:
         return RiskLevel.HIGH, [RiskReasonCode.RISK_SSH_BRUTEFORCE]
+    # 중간대(시도 수 10~99 & 분당 20 미만) — 지속적이나 발동선 미만 → MEDIUM(승인 대기)
     return RiskLevel.MEDIUM, [RiskReasonCode.RISK_SSH_BRUTEFORCE]
 
 
@@ -106,6 +102,6 @@ def evaluate_threat(
     return InitialRiskEvaluationResult(
         threat_event_id=event.threat_event_id,
         initial_risk_level=level,
-        response_mode=_EXPECTED_MODE_BY_RISK[level],
+        response_mode=expected_mode_for(level),
         reason_codes=[c.value for c in codes],
     )

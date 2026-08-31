@@ -63,7 +63,7 @@ jobs:
         run: uv run python -c "import psycopg; psycopg.connect('postgresql://vigilantis:vigilantis@localhost:5432/postgres').close()"
 
       - name: Run pytest
-        run: uv run pytest tests apps/core-api/services/tests apps/core-api/ai/tests packages/schemas/tests apps/core-api/db/tests apps/core-api/tests -q
+        run: uv run pytest tests apps/core-api/services/tests apps/core-api/ai/tests packages/schemas/tests apps/core-api/db/tests apps/core-api/tests apps/core-api/security/tests -q
 
   # apps/web 검증 게이트 (Issue #91). test 잡과 독립이라 병렬로 돈다.
   #
