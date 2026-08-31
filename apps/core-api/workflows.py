@@ -32,9 +32,10 @@ from sqlalchemy.orm import Session
 
 from schemas.api.actions import ExecuteActionRequest, ExecuteActionResponse
 from schemas.api.errors import ErrorCode
-from schemas.api.incidents import IncidentStatus
+from schemas.api.incidents import IncidentStatus, ResolutionJudgement
 from schemas.candidates import CandidateStatus
 from schemas.executions import EXECUTION_RECOVERABLE_STATUSES
+from schemas.incidents import INCIDENT_RESOLVABLE_STATUSES
 from schemas.precheck import PrecheckReasonCode
 from schemas.runbooks import (
     ROLLBACK_RUNBOOK_BY_MAIN_ID,
@@ -170,6 +171,12 @@ def _move_incident_to_in_progress(db: Session, incident_id: str) -> None:
     전제하지 않고 실제 상태를 잠근 뒤 옮긴다 — 종료 상태(RESOLVED·FAILED)에서
     오는 관제자 복구 접수도 정규 경로이기 때문이다. RESOLVED는 "더 진행할
     제안·실행 없음"이지 자산이 원복됐다는 뜻이 아니다 (ADR-0004, Issue #126).
+
+    RESOLVED에서 나올 때는 종료 판단(resolution·resolved_at)을 함께 지운다. 그
+    값은 "지금 이 인시던트가 종료된 이유"를 말하므로 재개되면 거짓이 되고, 남겨
+    두면 DB 제약이 전이 자체를 거절한다. 지워진 판단은 복원되지 않는다 — 남는
+    것은 복구 실행 레코드가 가리키는 "재개됐다"는 사실뿐이므로, 판단 이력 자체가
+    필요해지면 별도 이력 모델이 맞다 (Issue #199).
     """
     incident = incidents_repo.lock_incident(db, incident_id)
     if incident is None:
@@ -183,6 +190,7 @@ def _move_incident_to_in_progress(db: Session, incident_id: str) -> None:
         incident_id,
         expected=incident.status,
         next_status=IncidentStatus.ACTION_IN_PROGRESS,
+        clear_resolution=incident.status is IncidentStatus.RESOLVED,
     )
 
 
@@ -261,6 +269,52 @@ def reserve_execution(
     reserved = _to_response(execution)
     db.commit()
     return ExecutionReservation(response=reserved, created=True)
+
+
+def resolve_incident(
+    db: Session, incident_id: str, resolution: ResolutionJudgement
+) -> bool:
+    """관제자 종료 처리 — 상태 확인 → 잔여 제안 무효화 → RESOLVED 전이.
+
+    True면 이번 요청이 종료를 확정한 것, False면 이미 종료돼 있던 건이다. 후자는
+    처음 저장된 판단을 유지한다 — Idempotency Key 없이 재요청이 안전한 이유이고,
+    나중 요청이 판단을 덮어쓰지 않는 것은 먼저 내린 판단이 기록이기 때문이다.
+
+    출발 상태를 AWAITING_APPROVAL로 전제하지 않고 잠근 뒤 실제 상태를 본다 —
+    허용 집합은 INCIDENT_RESOLVABLE_STATUSES(schemas/incidents.py)다.
+    """
+    incident = incidents_repo.lock_incident(db, incident_id)
+    if incident is None:
+        raise ApiError(ErrorCode.INCIDENT_NOT_FOUND)
+    if incident.status is IncidentStatus.RESOLVED:
+        return False
+    if incident.status not in INCIDENT_RESOLVABLE_STATUSES:
+        raise ApiError(ErrorCode.INCIDENT_NOT_RESOLVABLE)
+
+    # 남은 제안을 함께 정리한다 — 상세 응답 계약이 RESOLVED에 빈 제안 목록을
+    # 요구하므로(api/incidents.py), 두고 가면 종료 직후 조회가 500이 된다
+    for candidate in incidents_repo.list_candidates(
+        db, incident_id, status=CandidateStatus.EXECUTABLE
+    ):
+        incidents_repo.update_candidate_status(
+            db,
+            candidate.candidate_id,
+            expected=CandidateStatus.EXECUTABLE,
+            next_status=CandidateStatus.INVALIDATED,
+        )
+
+    moved = incidents_repo.resolve_incident(
+        db, incident_id, expected=incident.status, resolution=resolution
+    )
+    if not moved:
+        # 행을 잠그고 들어왔으므로 여기까지 와서 전이가 실패할 이유가 없다. 그래도
+        # 통과시키지 않는다 — 제안만 무효화된 채 상태가 남는다. commit 없이 예외를
+        # 던지므로 세션 정리에서 되돌아간다(여기서 rollback하지 않는 이유다)
+        raise ApiError(ErrorCode.INCIDENT_NOT_RESOLVABLE)
+
+    db.commit()
+    db.refresh(incident)  # UPDATE가 바꾼 상태·판단을 응답 조립 전에 되읽는다
+    return True
 
 
 # --- 스펙 JSON 백업 -------------------------------------------------------------

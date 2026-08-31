@@ -39,6 +39,7 @@ from schemas.api.assets import AssetType, RelationType
 from schemas.api.incidents import (
     IncidentCategory,
     IncidentStatus,
+    ResolutionJudgement,
     ResponseMode,
     RiskLevel,
 )
@@ -288,6 +289,14 @@ class Incident(Base):
     response_deadline_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # --- 관제자 종료 판단(Issue #199) — updated_at은 자식 상태 변경으로도 올라가므로
+    #     종료 시각은 따로 남긴다 ---
+    resolution: Mapped[Optional[ResolutionJudgement]] = mapped_column(
+        _enum(ResolutionJudgement, "resolution_judgement"), nullable=True
+    )
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
@@ -329,6 +338,15 @@ class Incident(Base):
             " OR (agent_wait_started_at IS NOT NULL AND response_deadline_at IS NOT NULL"
             " AND response_deadline_at = agent_wait_started_at + INTERVAL '60 seconds')",
             name="wait_deadline_60s",
+        ),
+        # 종료 판단은 판단·시각이 함께 있고, RESOLVED에서만 채워진다
+        # (api/incidents.py 불변식과 같은 것). RESOLVED인데 판단이 없는 것은
+        # 허용한다 — 관제자 판단 없이 종료되는 경로가 뒤에 생길 수 있다.
+        # RESOLVED에서 나가는 전이는 판단을 함께 지운다(workflows의 복구 재개)
+        CheckConstraint(
+            "((resolution IS NULL) = (resolved_at IS NULL))"
+            " AND (resolution IS NULL OR status = 'RESOLVED')",
+            name="resolution_with_resolved_status",
         ),
         Index("ix_incidents_status", "status"),
         Index("ix_incidents_category", "category"),

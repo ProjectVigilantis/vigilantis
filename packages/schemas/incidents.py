@@ -7,6 +7,8 @@
 #     response_deadline_at은 항상 started_at + 60초이며, 같은 started_at을
 #     INCIDENT_UPDATED.occurred_at으로 사용해 Dashboard 카운트다운 기준과 맞춘다.
 #     타임아웃 판정 기준은 브라우저가 아니라 서버(PostgreSQL)의 이 값이다.
+#   - INCIDENT_RESOLVABLE_STATUSES: 관제자 종료 처리가 출발할 수 있는 상태.
+#     허용 여부의 근거는 공개 응답 계약이 RESOLVED에 요구하는 모양이다.
 # 공개 Incident DTO(api/incidents.py)와는 별개 계약이다.
 # ==============================================================================
 
@@ -18,6 +20,7 @@ from enum import Enum, unique
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .api.assets import UtcDateTime
+from .api.incidents import IncidentStatus
 
 
 @unique
@@ -37,6 +40,17 @@ AGENT_TERMINAL_STATUSES: frozenset[AgentInvocationStatus] = frozenset(
         AgentInvocationStatus.NO_PROPOSAL,
         AgentInvocationStatus.FAILED,
     }
+)
+
+
+# 관제자가 종료 처리할 수 있는 출발 상태 (Issue #199).
+#   - ACTION_IN_PROGRESS는 제외한다 — 공개 응답 계약(api/incidents.py)이 RESOLVED에
+#     진행 중인 실행이 없을 것을 요구하므로, 허용하면 종료 직후 조회가 깨진다.
+#   - ANALYZING도 제외한다 — AI 분석이 끝나며 제안이 붙고 AWAITING_APPROVAL로
+#     되살아나므로 종료가 뒤집힌다.
+#   - RESOLVED 재요청은 거절이 아니라 멱등 응답이라 이 집합에 넣지 않는다.
+INCIDENT_RESOLVABLE_STATUSES: frozenset[IncidentStatus] = frozenset(
+    {IncidentStatus.AWAITING_APPROVAL, IncidentStatus.FAILED}
 )
 
 

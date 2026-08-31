@@ -20,6 +20,12 @@
 #   - executions의 available_recovery_runbook_ids는 롤백 3종만 — 관제자 복구 조치.
 #     (RUNBOOK_NACL_RESTORE는 AI 추천 가능한 주 조치라 recommendations 경로)
 #     이 필드는 PR #44에서 팀 계약으로 확정됐다.
+#   - resolution·resolved_at은 관제자가 종료 처리하며 남긴 판단이다. status가
+#     RESOLVED인 것과 동시에 채워지고, 그 전에는 둘 다 null이다 — 상태만 옮기고
+#     판단을 빠뜨리면 왜 종료됐는지 남지 않는다. 관제자 복구 접수로 재개되면
+#     (ADR-0004) 다시 null이 된다 — "지금 이 인시던트가 종료된 이유"를 말하는
+#     값이라 재개된 뒤에는 거짓이 되기 때문이다. 목록에는 넣지 않는다(부분집합
+#     10필드 유지). (Issue #199)
 # ==============================================================================
 
 from __future__ import annotations
@@ -63,6 +69,27 @@ class ResponseMode(str, Enum):
     PRE_MITIGATION_0_5S = "PRE_MITIGATION_0_5S"
     AGENT_WAIT = "AGENT_WAIT"
     TIMEOUT_ISOLATION_1M = "TIMEOUT_ISOLATION_1M"
+
+
+@unique
+class ResolutionJudgement(str, Enum):
+    """종료 처리 시 관제자가 남기는 대응 정당성 판단 (2026-08-27 회의 결정 ④)."""
+
+    JUSTIFIED = "JUSTIFIED"    # 수행된 대응이 정당했다
+    EXCESSIVE = "EXCESSIVE"    # 과잉 대응이었다
+
+
+class ResolveIncidentRequest(BaseModel):
+    """POST /api/v1/incidents/{incident_id}/resolve 요청 본문.
+
+    Idempotency Key를 받지 않는다 — 종료는 AWS를 바꾸지 않고 Incident 상태 하나만
+    옮기므로 조건부 갱신 자체가 멱등이다. 이미 종료된 건의 재요청은 처음 저장된
+    판단을 그대로 돌려준다(schemas/api/actions.py의 실행 접수와 다른 점).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    resolution: ResolutionJudgement
 
 
 class RecommendationItem(BaseModel):
@@ -115,6 +142,8 @@ class IncidentResponse(BaseModel):
     evidence_ids: list[str] = Field(default_factory=list)
     recommendations: list[RecommendationItem] = Field(default_factory=list)
     executions: list[ExecutionSummaryItem] = Field(default_factory=list)
+    resolution: Optional[ResolutionJudgement] = None
+    resolved_at: Optional[UtcDateTime] = None
     created_at: UtcDateTime
     updated_at: UtcDateTime
 
@@ -164,6 +193,13 @@ class IncidentResponse(BaseModel):
             raise ValueError("ANALYZING이면 summary_lines는 빈 배열이어야 합니다")
         if self.status == IncidentStatus.RESOLVED and in_progress:
             raise ValueError("RESOLVED이면 진행 중인 실행이 없어야 합니다")
+
+        # 종료 판단은 RESOLVED와 함께 채워진다. 한쪽만 있으면 화면이 판단 없는
+        # 종료나 종료되지 않은 판단을 그리게 된다 (Issue #199)
+        if (self.resolution is None) != (self.resolved_at is None):
+            raise ValueError("resolution과 resolved_at은 함께 채워지거나 함께 null이어야 합니다")
+        if self.status != IncidentStatus.RESOLVED and self.resolution is not None:
+            raise ValueError("RESOLVED가 아니면 resolution·resolved_at은 null이어야 합니다")
 
         return self
 
