@@ -1,0 +1,21 @@
+{
+  "source": "secops/input/evt_ssh_bruteforce_003.json",
+  "contract": "packages/schemas/events.py :: InitialRiskEvaluationResult (부분집합)",
+  "excluded_fields": {
+    "threat_event_id": "정규화 단계에서 부여되는 런타임 값 — 정답 대조 대상 아님"
+  },
+  "thresholds_at_authoring": {
+    "SSH_SINGLE_ATTEMPT": 1,
+    "SSH_HIGH_ATTEMPT_MIN": 10,
+    "SSH_HIGH_RATE_PER_MIN": 20.0,
+    "note": "작성 시점의 apps/core-api/security/risk_evaluator.py 상수. 값이 바뀌면 tests/test_golden_dataset.py 가 실패하므로 본 정답을 함께 갱신할 것 (ADR-0006 임계값 결합 원칙)"
+  },
+  "case_id": "S8",
+  "purpose": "1회 / 1초 — 계약 최소값. 단발은 속도가 아무리 높아도 LOW",
+  "derivation": "count 1 ≤ SSH_SINGLE_ATTEMPT 라 속도(60/min)를 보기 전에 LOW 로 확정된다. 이 분기가 없으면 rate 60 ≥ 20 으로 MEDIUM 이 됐을 것이다",
+  "initial_risk_level": "LOW",
+  "response_mode": "AGENT_WAIT",
+  "reason_codes": [
+    "RISK_SSH_LOW_SIGNAL"
+  ]
+}

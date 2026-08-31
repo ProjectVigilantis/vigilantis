@@ -1,0 +1,32 @@
+{
+  "source": "secops/input/evt_open_ip_003.json",
+  "contract": "packages/schemas/events.py :: InitialRiskEvaluationResult (부분집합)",
+  "excluded_fields": {
+    "threat_event_id": "정규화 단계에서 부여되는 런타임 값 — 정답 대조 대상 아님"
+  },
+  "thresholds_at_authoring": {
+    "WORLD_CIDRS": [
+      "0.0.0.0/0",
+      "::/0"
+    ],
+    "ALL_PROTOCOL": "-1",
+    "ALL_PORTS": [
+      0,
+      65535
+    ],
+    "SENSITIVE_PORTS": [
+      22,
+      3389
+    ],
+    "note": "작성 시점의 apps/core-api/security/risk_evaluator.py 상수. 값이 바뀌면 tests/test_golden_dataset.py 가 실패하므로 본 정답을 함께 갱신할 것 (ADR-0006 임계값 결합 원칙)"
+  },
+  "case_id": "S5",
+  "purpose": "tcp 0–65535 전 포트 개방. 대상이 조치 불가한 default SG(A8)지만 초기 판정은 자산 문맥을 보지 않는다(확정 규칙 ②)",
+  "derivation": "(0,65535) == ALL_PORTS 가 먼저 잡혀 RISK_ALL_PORTS_EXPOSED 하나만 붙는다 — 범위가 22·3389 를 포함하지만 elif 라 민감 포트 코드는 붙지 않는다",
+  "initial_risk_level": "MEDIUM",
+  "response_mode": "AGENT_WAIT",
+  "reason_codes": [
+    "RISK_OPEN_INGRESS_WORLD",
+    "RISK_ALL_PORTS_EXPOSED"
+  ]
+}

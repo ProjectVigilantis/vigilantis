@@ -1,0 +1,21 @@
+{
+  "source": "secops/input/evt_ssh_bruteforce_001.json",
+  "contract": "packages/schemas/events.py :: InitialRiskEvaluationResult (부분집합)",
+  "excluded_fields": {
+    "threat_event_id": "정규화 단계에서 부여되는 런타임 값 — 정답 대조 대상 아님"
+  },
+  "thresholds_at_authoring": {
+    "SSH_SINGLE_ATTEMPT": 1,
+    "SSH_HIGH_ATTEMPT_MIN": 10,
+    "SSH_HIGH_RATE_PER_MIN": 20.0,
+    "note": "작성 시점의 apps/core-api/security/risk_evaluator.py 상수. 값이 바뀌면 tests/test_golden_dataset.py 가 실패하므로 본 정답을 함께 갱신할 것 (ADR-0006 임계값 결합 원칙)"
+  },
+  "case_id": "S3",
+  "purpose": "120회 / 300초 — 명백한 고강도 공격. 선제 차단 경로가 열리는 기준선",
+  "derivation": "rate = 120 × 60 / 300 = 24.0/min. count 120 ≥ 10 AND rate 24.0 ≥ 20.0 → HIGH",
+  "initial_risk_level": "HIGH",
+  "response_mode": "PRE_MITIGATION_0_5S",
+  "reason_codes": [
+    "RISK_SSH_BRUTEFORCE"
+  ]
+}
