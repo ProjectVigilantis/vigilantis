@@ -73,10 +73,16 @@ class ResponseMode(str, Enum):
 
 @unique
 class ResolutionJudgement(str, Enum):
-    """종료 처리 시 관제자가 남기는 대응 정당성 판단 (2026-08-27 회의 결정 ④)."""
+    """종료 처리 시 관제자가 남기는 판단 (2026-08-27 회의 결정 ④).
+
+    JUSTIFIED 1종이다. 모달의 다른 선택지 `과잉이었다`는 종료 값이 아니라 해제
+    실행으로 넘어가는 트리거라(#196 §D — 해제는 실행이라 결과를 보고 종료를
+    판단한다) 이 API에 도달하지 않으며, 과잉 판단의 기록은 해제 실행 레코드가
+    남긴다. 해제를 마친 뒤의 종료도 JUSTIFIED다 — 그 시점의 대응 상태(해제 완료)를
+    정당하다고 보고 닫는 것이기 때문이다.
+    """
 
     JUSTIFIED = "JUSTIFIED"    # 수행된 대응이 정당했다
-    EXCESSIVE = "EXCESSIVE"    # 과잉 대응이었다
 
 
 class ResolveIncidentRequest(BaseModel):

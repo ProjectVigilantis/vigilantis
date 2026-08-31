@@ -75,7 +75,7 @@ def test_judgement_outside_resolved_status_is_rejected():
         IncidentResponse.model_validate(
             _detail(
                 status=IncidentStatus.FAILED,
-                resolution=ResolutionJudgement.EXCESSIVE,
+                resolution=ResolutionJudgement.JUSTIFIED,
                 resolved_at=T0,
             )
         )
@@ -89,3 +89,10 @@ def test_request_rejects_unknown_field_and_value():
         ResolveIncidentRequest(resolution="MAYBE")
     with pytest.raises(ValidationError):
         ResolveIncidentRequest(resolution="JUSTIFIED", note="x")
+
+
+def test_request_rejects_excessive():
+    """`과잉이었다`는 종료 값이 아니라 해제 실행으로 넘어가는 트리거다(#196 §D).
+    화면이 실수로 보내면 422로 거절돼야 격리 유지된 채 종료되는 흐름이 막힌다."""
+    with pytest.raises(ValidationError):
+        ResolveIncidentRequest(resolution="EXCESSIVE")

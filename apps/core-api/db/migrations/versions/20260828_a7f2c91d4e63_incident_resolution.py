@@ -26,8 +26,9 @@ down_revision = 'c3d5a81f47e2'
 branch_labels = None
 depends_on = None
 
-# 값 원천은 packages/schemas/api/incidents.py ResolutionJudgement
-_RESOLUTION_JUDGEMENT = ('JUSTIFIED', 'EXCESSIVE')
+# 값 원천은 packages/schemas/api/incidents.py ResolutionJudgement — JUSTIFIED 1종.
+# `과잉이었다`는 종료 값이 아니라 해제 실행으로 넘어가는 트리거다(#196 §D)
+_RESOLUTION_JUDGEMENT = ('JUSTIFIED',)
 
 
 def upgrade() -> None:

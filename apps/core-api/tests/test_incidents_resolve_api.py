@@ -96,11 +96,11 @@ def test_detail_and_list_after_resolve_still_serve_200(client_pg, db):
     """종료가 만든 상태를 읽는 쪽 계약 회귀 — 잔여 제안이 남으면 여기서 500이 된다."""
     incident = _seed_incident(db)
     _add_candidate(db, incident)
-    client_pg.post(_url(incident), json={"resolution": "EXCESSIVE"})
+    client_pg.post(_url(incident), json={"resolution": "JUSTIFIED"})
 
     detail = client_pg.get(f"/api/v1/incidents/{incident.incident_id}")
     assert detail.status_code == 200
-    assert detail.json()["resolution"] == "EXCESSIVE"
+    assert detail.json()["resolution"] == "JUSTIFIED"
 
     listing = client_pg.get("/api/v1/incidents", params={"status": "RESOLVED"})
     assert listing.status_code == 200
@@ -110,13 +110,14 @@ def test_detail_and_list_after_resolve_still_serve_200(client_pg, db):
     assert "resolution" not in items[0]
 
 
-def test_resolve_twice_keeps_first_judgement(client_pg, db):
-    """Idempotency Key 없이 재요청이 안전한 지점 — 나중 판단이 덮어쓰지 않는다."""
+def test_resolve_twice_keeps_the_first_resolved_at(client_pg, db):
+    """Idempotency Key 없이 재요청이 안전한 지점 — 조건부 UPDATE라 두 번째 요청은
+    아무것도 바꾸지 않고, 종료 시각도 처음 찍힌 값이 남는다."""
     incident = _seed_incident(db)
     first = client_pg.post(_url(incident), json={"resolution": "JUSTIFIED"})
     resolved_at = first.json()["resolved_at"]
 
-    again = client_pg.post(_url(incident), json={"resolution": "EXCESSIVE"})
+    again = client_pg.post(_url(incident), json={"resolution": "JUSTIFIED"})
 
     assert again.status_code == 200
     assert again.json()["resolution"] == "JUSTIFIED"
@@ -127,7 +128,7 @@ def test_resolve_allows_failed_incident(client_pg, db):
     """흐름이 멈춘 건에도 정당성 판단은 남겨야 한다."""
     incident = _seed_incident(db, IncidentStatus.FAILED)
 
-    response = client_pg.post(_url(incident), json={"resolution": "EXCESSIVE"})
+    response = client_pg.post(_url(incident), json={"resolution": "JUSTIFIED"})
 
     assert response.status_code == 200
     assert response.json()["status"] == "RESOLVED"
@@ -208,7 +209,7 @@ def test_resolve_rejected_status_publishes_nothing(client_pg, db, monkeypatch):
 
 
 def test_resolution_judgement_values_match_db_enum(client_pg, db):
-    """계약 Enum 2종이 DB 타입에 그대로 저장된다 — migration의 값 목록 회귀."""
+    """계약 Enum 값 전수가 DB 타입에 그대로 저장된다 — migration의 값 목록 회귀."""
     for judgement in ResolutionJudgement:
         incident = _seed_incident(db)
         response = client_pg.post(_url(incident), json={"resolution": judgement.value})
@@ -243,8 +244,8 @@ def test_recovery_after_resolve_resumes_and_clears_the_judgement(client_pg, db):
     origin = _add_execution(db, incident, RunbookId.RUNBOOK_EC2_ISOLATE)
     detail_url = f"/api/v1/incidents/{incident.incident_id}"
 
-    resolved = client_pg.post(_url(incident), json={"resolution": "EXCESSIVE"})
-    assert (resolved.status_code, resolved.json()["resolution"]) == (200, "EXCESSIVE")
+    resolved = client_pg.post(_url(incident), json={"resolution": "JUSTIFIED"})
+    assert (resolved.status_code, resolved.json()["resolution"]) == (200, "JUSTIFIED")
 
     recovery = client_pg.post(
         "/api/v1/actions/execute",
