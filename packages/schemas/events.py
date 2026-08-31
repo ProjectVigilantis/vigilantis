@@ -12,8 +12,8 @@
 #     중복 판정은 source_event_id·deduplication_key로 한다.
 #   - 초기 판정 High→PRE_MITIGATION_0_5S, Medium·Low→AGENT_WAIT.
 #     TIMEOUT_ISOLATION_1M은 초기 판정 결과가 아니다(응답 기한 만료 시 전환).
-#   - reason_codes 값 Enum은 Risk 판정 규칙 확정 시 교체한다(#49 확정 — 값을
-#     지어내지 않기 위해 우선 문자열로 둔다).
+#   - reason_codes 값 원천은 RiskReasonCode Enum(값 목록·임계 2026-08-31 잠정, 안성일 승인 대기).
+#     필드 타입은 아직 list[str] — 좁히는 것은 안성일 승인·test_events.py 동반 수정과 함께.
 # ==============================================================================
 
 from __future__ import annotations
@@ -137,6 +137,27 @@ _EXPECTED_MODE_BY_RISK: dict[RiskLevel, ResponseMode] = {
 }
 
 
+@unique
+class RiskReasonCode(str, Enum):
+    """Risk Evaluator 판정 근거 코드.
+
+    가드레일 reason code 관례를 계승한다(`packages/schemas/guardrails.py`):
+    접두어(`RISK_`)로 축을 표시하고, DB(`initial_risk_reason_codes` JSONB)에 값이
+    남으므로 **이름은 늘리되 기존 값은 바꾸지 않는다**. 판정당 최소 1개(DB CHECK
+    `category_risk_shape`: SECOPS면 reason_codes 배열 길이 ≥1).
+
+    ⚠️ 값 목록·판정 임계는 **잠정(2026-08-31)** — 안성일 승인 대기(스코핑 결정 ②③④).
+    자산 문맥 의존 코드(RISK_PROD_ASSET·RISK_UNACTIONABLE_ASSET)는 결정 ②(자산 조인
+    여부) 확정 후 추가한다.
+    """
+
+    RISK_OPEN_INGRESS_WORLD = "RISK_OPEN_INGRESS_WORLD"       # 0.0.0.0/0·::/0 전체개방 인그레스
+    RISK_SENSITIVE_PORT_EXPOSED = "RISK_SENSITIVE_PORT_EXPOSED"  # 22(SSH)·3389(RDP) 노출
+    RISK_ALL_PROTOCOL_OPEN = "RISK_ALL_PROTOCOL_OPEN"        # protocol -1 전 프로토콜 개방
+    RISK_SSH_BRUTEFORCE = "RISK_SSH_BRUTEFORCE"              # SSH 브루트포스(공격 강도 임계 이상)
+    RISK_LOW_SIGNAL = "RISK_LOW_SIGNAL"                      # 임계 미만(오탐·오타 가능) — 하한
+
+
 class InitialRiskEvaluationResult(BaseModel):
     """결정적 초기 위험 판정 — Risk Evaluator → PostgreSQL·Security Workflow.
 
@@ -149,6 +170,8 @@ class InitialRiskEvaluationResult(BaseModel):
     threat_event_id: str = Field(min_length=1)
     initial_risk_level: RiskLevel
     response_mode: ResponseMode
+    # 값 원천은 RiskReasonCode Enum(아래). 필드 타입을 list[RiskReasonCode]로 좁히는 것은
+    # 안성일 소유 계약 + test_events.py 동반 수정이라 그의 승인과 함께 별도로 진행한다.
     reason_codes: list[Annotated[str, Field(min_length=1)]] = Field(default_factory=list)
 
     @model_validator(mode="after")
