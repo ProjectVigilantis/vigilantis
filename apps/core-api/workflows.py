@@ -9,9 +9,10 @@
 #     확인만 한다 (Issue #113 §2, packages/schemas/candidates.py). 단 저장된 행이
 #     현행 후보 계약(typed parameters, #154)대로인지는 접수 시점에 재확인한다 —
 #     가드레일 재실행이 아니라 저장소 무결성 확인이다.
-#   - AWS 실행은 아직 스텁이다 — 예약 레코드를 IN_PROGRESS로 남기는 데까지다.
-#     실행 직전 대상 자산 재확인과 후보 INVALIDATED 전이는 실제 실행이 붙을 때
-#     함께 들어온다.
+#   - 접수(reserve_execution)와 실행(run_rightsizing_execution)은 갈라져 있다. 예약은
+#     IN_PROGRESS 레코드를 남기는 데까지고, 그 예약을 실행으로 넘기는 디스패치는
+#     dispatcher.py 몫이다. 실행 직전 대상 자산 재확인과 후보 INVALIDATED 전이는
+#     아직 붙지 않았다.
 #   - 조치 직전 스펙 JSON 백업은 여기서 커밋한다(store_instance_spec_backup).
 #     캡처는 services/aws/backup.py가, 저장·결속·커밋 순서는 이 계층이 소유한다 —
 #     "AWS 변경보다 먼저 커밋"이 트랜잭션 경계의 문제이기 때문이다.
@@ -24,17 +25,26 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Optional
 
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from schemas.api.actions import ExecuteActionRequest, ExecuteActionResponse
+from schemas.api.actions import (
+    ExecuteActionRequest,
+    ExecuteActionResponse,
+    ExecutionStatus,
+)
 from schemas.api.errors import ErrorCode
 from schemas.api.incidents import IncidentStatus
 from schemas.candidates import CandidateStatus
-from schemas.executions import EXECUTION_RECOVERABLE_STATUSES
+from schemas.executions import (
+    EXECUTION_RECOVERABLE_STATUSES,
+    ExecutionStepResult,
+    ExecutionStepStatus,
+)
 from schemas.precheck import PrecheckReasonCode
 from schemas.runbooks import (
     ROLLBACK_RUNBOOK_BY_MAIN_ID,
@@ -48,7 +58,7 @@ from db.repositories import executions as executions_repo
 from db.repositories import incidents as incidents_repo
 from exceptions import ApiError
 from identifiers import canonical_id
-from services.aws import backup
+from services.aws import backup, executor
 from services.aws.executor import parse_arn
 
 logger = logging.getLogger("vigilantis.workflow")
@@ -348,3 +358,168 @@ def store_instance_spec_backup(db: Session, execution_id: str) -> BackupOutcome:
 
     db.commit()
     return BackupOutcome(record=record, created=True)
+
+
+# --- 실행 (Issue #211) ---------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ExecutionRunOutcome:
+    """실행 1건의 종료 결과. status는 이미 DB에 기록된 값이다."""
+
+    status: ExecutionStatus
+    reason_code: Optional[PrecheckReasonCode] = None
+    error_summary: Optional[str] = None
+
+    @property
+    def succeeded(self) -> bool:
+        return self.status is ExecutionStatus.SUCCESS
+
+
+def _step_recorder(db: Session, execution_id: str):
+    """executor가 넘기는 단계를 그 자리에서 저장하고 commit한다.
+
+    단계마다 commit하는 이유는 프로세스가 중간에 사라져도 "어디까지 갔는가"가
+    남아야 하기 때문이다 — 남지 않으면 회수(dispatcher.py)가 이미 바뀐 자산을
+    바뀌지 않은 것으로 본다.
+    """
+
+    def record(step: ExecutionStepResult) -> None:
+        if step.status is ExecutionStepStatus.IN_PROGRESS:
+            executions_repo.add_step(db, step, execution_id=execution_id)
+        elif not executions_repo.update_step_result(db, step, execution_id=execution_id):
+            # AWS 호출 직전에 같은 sequence의 IN_PROGRESS 행이 반드시 먼저 저장된다.
+            # 없다면 기록 순서가 깨진 것이므로 조용히 넘기지 않는다.
+            logger.warning(
+                "execution_step_missing",
+                extra={"execution_id": execution_id, "sequence": step.sequence},
+            )
+        db.commit()
+
+    return record
+
+
+def _rightsizing_target_type(
+    db: Session, execution: models.ActionExecution
+) -> Optional[str]:
+    """조치가 적용할 인스턴스 타입.
+
+    Guardrail PASS의 불변 실행 명령(validated_command)이 채워지면 그것이 원천이다.
+    아직 배선되지 않은 동안에는 후보의 typed 파라미터에서 읽는다 — 계약 검증을
+    거쳐 읽으므로(#154) 옛 계약으로 저장된 행이 실행으로 새지 않는다.
+    """
+    command = execution.validated_command or {}
+    from_command = command.get("target_instance_type")
+    if isinstance(from_command, str) and from_command.strip():
+        return from_command
+
+    if execution.candidate_id is None:
+        return None
+    candidate = incidents_repo.get_candidate(db, execution.candidate_id)
+    if candidate is None:
+        return None
+    try:
+        data = mappers.to_candidate_data(candidate)
+    except ValidationError:
+        logger.warning(
+            "candidate_contract_invalid",
+            extra={"candidate_id": candidate.candidate_id, "runbook_id": candidate.runbook_id.value},
+        )
+        return None
+    return getattr(data.parameters, "target_instance_type", None)
+
+
+def _finish_execution(
+    db: Session,
+    execution_id: str,
+    status: ExecutionStatus,
+    *,
+    reason_code: Optional[PrecheckReasonCode] = None,
+    error_summary: Optional[str] = None,
+) -> ExecutionRunOutcome:
+    """종료 상태를 기록하고 commit한다. 출발 상태는 항상 IN_PROGRESS다."""
+    summary = error_summary[:1024] if error_summary else None
+    moved = executions_repo.update_execution_status(
+        db,
+        execution_id,
+        expected=ExecutionStatus.IN_PROGRESS,
+        next_status=status,
+        error_summary=summary,
+        finished_at=datetime.now(timezone.utc),
+    )
+    if not moved:
+        # 다른 주체가 먼저 상태를 옮겼다 — 실행 결과는 단계 기록으로 남아 있다
+        logger.warning(
+            "execution_status_not_moved",
+            extra={"execution_id": execution_id, "next_status": status.value},
+        )
+    db.commit()
+    return ExecutionRunOutcome(
+        status=status, reason_code=reason_code, error_summary=summary
+    )
+
+
+def run_rightsizing_execution(db: Session, execution_id: str) -> ExecutionRunOutcome:
+    """`RUNBOOK_EC2_RIGHTSIZING` 실행 — 백업 확보 → 정지·타입 변경·기동 → 종료 기록.
+
+    순서가 계약이다. **스펙 JSON 백업이 commit된 뒤에만 AWS 변경이 시작된다**
+    (store_instance_spec_backup) — 변경과 백업 사이에서 프로세스가 죽으면 되돌릴
+    값이 어디에도 남지 않는다(ADR-0004 롤백 공통 정책 ③). 백업 실패는 조치를
+    시작하지 않고 실행을 FAILED로 끝낸다.
+
+    실행 실패는 ApiError로 던지지 않는다. 예약 이후의 실패는 HTTP 오류가 아니라
+    Execution 상태로 전달하는 것이 공개 계약이다(schemas/api/errors.py) —
+    store_instance_spec_backup이 실패를 판정으로 돌려주는 것과 같은 이유다.
+
+    **Incident 전이는 하지 않는다.** 실행 결과별 목적 상태는 관제자 종료 경로(#199)와
+    함께 정해질 미결 항목이라 dispatcher.py가 소유한다(그 파일 [수행해야 할 작업] 5번) —
+    여기서 임의로 정하면 두 자리가 서로 다른 매핑을 갖게 된다.
+    """
+    execution = executions_repo.get_execution(db, execution_id)
+    if execution is None:
+        raise ValueError(f"실행 레코드를 찾을 수 없습니다: {execution_id}")
+    if execution.runbook_id is not RunbookId.RUNBOOK_EC2_RIGHTSIZING:
+        # 배선 오류다 — 런북마다 단계와 백업 종류가 다르다
+        raise ValueError(f"RIGHTSIZING 실행이 아닙니다: {execution.runbook_id.value}")
+    if execution.status is not ExecutionStatus.IN_PROGRESS:
+        # 끝난 실행을 다시 돌리면 백업 없는 두 번째 변경이 된다. 동시 접수를 막는
+        # 선점(lock_execution)은 호출부(dispatcher.py) 몫이라 여기서는 상태만 본다.
+        raise ValueError(f"진행 중인 실행이 아닙니다: {execution.status.value}")
+
+    target_arn = execution.target_arn
+    target_instance_type = _rightsizing_target_type(db, execution)
+    if target_instance_type is None:
+        return _finish_execution(
+            db,
+            execution_id,
+            ExecutionStatus.FAILED,
+            reason_code=PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+            error_summary="실행 파라미터에서 target_instance_type을 찾지 못했습니다",
+        )
+
+    stored = store_instance_spec_backup(db, execution_id)
+    if not stored.stored:
+        return _finish_execution(
+            db,
+            execution_id,
+            ExecutionStatus.FAILED,
+            reason_code=stored.reason_code,
+            error_summary=f"스펙 JSON 백업 실패: {stored.detail or ''}".strip(),
+        )
+
+    outcome = executor.execute_rightsizing(
+        target_arn,
+        target_instance_type=target_instance_type,
+        record_step=_step_recorder(db, execution_id),
+    )
+    if not outcome.succeeded:
+        return _finish_execution(
+            db,
+            execution_id,
+            ExecutionStatus.FAILED,
+            reason_code=outcome.reason_code,
+            error_summary=outcome.error_summary,
+        )
+    # 성공 판정 경계는 기동 요청 접수까지다. 2/2 Status Check 감시가 붙으면
+    # (services/aws/rollback.py) 그 결과가 SUCCESS와 ROLLBACK_INITIATED를 가른다.
+    return _finish_execution(db, execution_id, ExecutionStatus.SUCCESS)

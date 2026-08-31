@@ -14,8 +14,12 @@
 #   - DryRun을 쓸 수 없는 작업은 환경과 무관하게 조회로 대체한다(§4). LocalStack일
 #     때만 조회하도록 나누는 것은 ADR-0006 §3이 금지한다.
 #
+# 실행 범위: RUNBOOK_EC2_RIGHTSIZING = execute_rightsizing(). (Issue #211, §실행)
+#   - precheck과 같은 규약으로 예외를 던지지 않는다. 단계별 결과는 ExecutionStepResult로
+#     돌려주고, 저장·커밋 순서는 workflows.py가 소유한다.
+#
 # [남은 작업]
-# 1. 확정 10종 실행 함수(execute) — 조치 전 스펙 JSON 백업 후 상태 변경
+# 1. 나머지 9종 실행 함수 — 백업이 필요한 런북은 백업 commit 이후에만 진입한다
 # 2. 롤백 3종 실행도 executor 경유 — 트리거 판단·감시는 rollback.py 담당
 #
 # 파라미터 계약의 원천은 packages/schemas/runbook_parameters.py의 typed 모델이다(#154).
@@ -29,12 +33,18 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Optional, Protocol
 
-from botocore.exceptions import BotoCoreError, ClientError
+from botocore.exceptions import BotoCoreError, ClientError, ParamValidationError
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from schemas.backups import BackupType
+from schemas.executions import (
+    ExecutionEffect,
+    ExecutionStepResult,
+    ExecutionStepStatus,
+)
 from schemas.precheck import (
     PrecheckOutcome,
     PrecheckReasonCode,
@@ -58,7 +68,7 @@ from schemas.runbook_parameters import (
 from schemas.runbooks import RunbookId
 
 from .client import aws_client
-from .errors import reason_code_for, run_dry_run
+from .errors import aws_error_code, reason_code_for, run_dry_run
 
 logger = logging.getLogger("vigilantis.aws")
 
@@ -1007,3 +1017,269 @@ def precheck(
 
     ctx = _Ctx(runbook_value, spec, target_arn, target, parameters, backup)
     return _HANDLERS[spec.handler](ctx)
+
+
+# ==============================================================================
+# 실행 (Issue #211)
+# ==============================================================================
+# precheck과 같은 규약이다 — **예외를 던지지 않는다.** AWS 오류는
+# errors.reason_code_for()의 공용 표로 분류해 ExecutionOutcome에 싣는다. 실행 도중
+# 예외가 밖으로 나가면 호출부의 트랜잭션이 열린 채 끊겨 "어디까지 바뀌었는가"가
+# 남지 않는다 — 자동 원복이 판단할 근거가 사라진다는 뜻이다.
+#
+# DB를 모른다. AWS 호출 직전에 IN_PROGRESS 단계를, 직후에 종료 단계를 record_step으로
+# 넘길 뿐이고 저장·커밋 순서는 workflows.py가 소유한다 — services/aws/backup.py가
+# 캡처만 하고 저장을 넘긴 것과 같은 경계다. 다만 **record_step이 던지는 예외는 막지
+# 않는다** — 기록이 되지 않는 채로 자산을 계속 바꾸면 어디까지 갔는지 아무 데도 남지
+# 않는다. 그 경우 실행은 IN_PROGRESS로 남고 회수(dispatcher.py)가 집는다.
+#
+# effect는 "자산이 실제로 바뀌었는가"이며 자동 원복 판단의 입력이다. 낙관적으로 적지
+# 않는다 — AWS가 거절한 호출만 NOT_APPLIED이고, 요청이 닿았는지 모르는 실패는 UNKNOWN이다.
+
+
+# 단계 유형 — schemas.executions가 어휘를 Enum으로 확정할 때까지 문자열이다(#55 헤더).
+STEP_STOP_INSTANCE = "STOP_INSTANCE"
+STEP_MODIFY_INSTANCE_TYPE = "MODIFY_INSTANCE_TYPE"
+STEP_START_INSTANCE = "START_INSTANCE"
+
+_OP_STOP = "ec2.stop_instances"
+_OP_MODIFY = "ec2.modify_instance_attribute"
+_OP_START = "ec2.start_instances"
+
+# 정지 확인 대기 — 5초 간격 40회(최대 200초). 초과는 "실패"가 아니라 "상태 불명"이라
+# 단계 effect가 UNKNOWN이 되고, 타입 변경으로 넘어가지 않는다.
+STOP_WAIT_DELAY_SECONDS = 5
+STOP_WAIT_MAX_ATTEMPTS = 40
+
+# 요약 문자열 저장 한도는 1024자(db.models)다. 그보다 넉넉히 줄여 원인 앞부분을 남긴다.
+_SUMMARY_LIMIT = 400
+
+
+@dataclass(frozen=True)
+class ExecutionOutcome:
+    """실행 1건의 결과. steps는 시도한 순서 그대로다."""
+
+    steps: tuple[ExecutionStepResult, ...] = ()
+    reason_code: Optional[PrecheckReasonCode] = None
+    error_summary: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if (self.reason_code is None) != (self.error_summary is None):
+            raise ValueError("실패에는 reason_code와 error_summary가 함께 필요합니다")
+
+    @property
+    def succeeded(self) -> bool:
+        return self.reason_code is None
+
+
+# 단계 1건을 받는 호출부 콜백. IN_PROGRESS로 한 번, 종료 상태로 한 번 불린다.
+StepRecorder = Callable[[ExecutionStepResult], None]
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _summarize(exc: BaseException) -> str:
+    """실패 요약 한 줄. AWS 오류 코드를 앞에 세워 원인을 먼저 읽게 한다."""
+    if isinstance(exc, ClientError):
+        message = str(exc.response.get("Error", {}).get("Message", "")).strip()
+        code = aws_error_code(exc)
+        text = f"{code}: {message}" if message else code
+    else:
+        text = f"{type(exc).__name__}: {exc}".strip()
+    return text[:_SUMMARY_LIMIT] or type(exc).__name__
+
+
+def _effect_for(exc: BaseException) -> ExecutionEffect:
+    """AWS가 거절한 호출은 자산을 바꾸지 않는다. 요청이 닿았는지 모르면 UNKNOWN이다.
+
+    ParamValidationError는 botocore가 네트워크 호출 이전에 내므로 거절과 같이 본다
+    (errors.reason_code_for가 같은 이유로 PARAM_INVALID로 분류한다).
+    """
+    if isinstance(exc, (ClientError, ParamValidationError)):
+        return ExecutionEffect.NOT_APPLIED
+    return ExecutionEffect.UNKNOWN
+
+
+def _request_id(payload: Any) -> Optional[str]:
+    """AWS 요청 ID. 정상 응답과 ClientError.response 어느 쪽에서도 같은 자리다."""
+    if not isinstance(payload, Mapping):
+        return None
+    request_id = (payload.get("ResponseMetadata") or {}).get("RequestId")
+    return request_id if _non_empty_str(request_id) else None
+
+
+class _StepLog:
+    """단계 기록기 — 호출 직전 IN_PROGRESS, 직후 종료 결과. 순서와 누적을 한자리에 둔다."""
+
+    def __init__(self, affected_arn: str, record: Optional[StepRecorder]) -> None:
+        self._arn = affected_arn
+        self._record: StepRecorder = record if record is not None else _ignore_step
+        self._current: tuple[int, str, str] = (0, "", "")
+        self.steps: list[ExecutionStepResult] = []
+
+    def begin(self, sequence: int, step_type: str, aws_operation: str) -> None:
+        self._current = (sequence, step_type, aws_operation)
+        self._emit(status=ExecutionStepStatus.IN_PROGRESS)
+
+    def succeed(
+        self, effect: ExecutionEffect, summary: str, *, response: Any = None
+    ) -> None:
+        self._emit(
+            status=ExecutionStepStatus.SUCCESS,
+            effect=effect,
+            result_summary=summary,
+            aws_request_id=_request_id(response),
+        )
+
+    def fail(self, exc: BaseException, *, detail: str) -> None:
+        self._emit(
+            status=ExecutionStepStatus.FAILED,
+            effect=_effect_for(exc),
+            error_summary=f"{detail}: {_summarize(exc)}"[:_SUMMARY_LIMIT],
+            aws_request_id=_request_id(
+                exc.response if isinstance(exc, ClientError) else None
+            ),
+        )
+
+    def _emit(self, **fields: Any) -> None:
+        sequence, step_type, aws_operation = self._current
+        step = ExecutionStepResult(
+            sequence=sequence,
+            affected_arn=self._arn,
+            step_type=step_type,
+            aws_operation=aws_operation,
+            occurred_at=_utcnow(),
+            **fields,
+        )
+        if step.status is not ExecutionStepStatus.IN_PROGRESS:
+            self.steps.append(step)
+        self._record(step)
+
+
+def _ignore_step(step: ExecutionStepResult) -> None:
+    """기록하지 않는 호출부(단위 테스트·스모크)의 기본 콜백."""
+
+
+def _abort(log: _StepLog, exc: BaseException, *, detail: str) -> ExecutionOutcome:
+    """실패 단계를 남기고 실행을 끝낸다. 뒤 단계는 시도하지 않는다."""
+    log.fail(exc, detail=detail)
+    logger.warning(
+        "execution_step_failed",
+        extra={"aws_operation": log.steps[-1].aws_operation, "detail": detail},
+    )
+    return ExecutionOutcome(
+        steps=tuple(log.steps),
+        reason_code=reason_code_for(exc),
+        error_summary=f"{detail}: {_summarize(exc)}"[:_SUMMARY_LIMIT],
+    )
+
+
+def _rejected(detail: str) -> ExecutionOutcome:
+    """AWS에 닿기 전에 끝난 거절 — 단계가 하나도 없다."""
+    return ExecutionOutcome(reason_code=R.PRECHECK_PARAM_INVALID, error_summary=detail)
+
+
+def _previous_state(response: Any) -> str:
+    """stop_instances 응답이 알려 주는 조치 직전 상태. 알 수 없으면 빈 문자열."""
+    if not isinstance(response, Mapping):
+        return ""
+    for changed in response.get("StoppingInstances") or []:
+        name = (changed.get("PreviousState") or {}).get("Name")
+        if _non_empty_str(name):
+            return str(name)
+    return ""
+
+
+def execute_rightsizing(
+    target_arn: str,
+    *,
+    target_instance_type: str,
+    record_step: Optional[StepRecorder] = None,
+) -> ExecutionOutcome:
+    """`RUNBOOK_EC2_RIGHTSIZING` 실행 — 정지 → 타입 변경 → 기동. (Issue #211)
+
+    **스펙 JSON 백업이 commit된 뒤에만 부른다**(workflows.store_instance_spec_backup).
+    타입을 바꾸고 나면 바꾸기 전 값을 어디서도 얻을 수 없어, 백업이 없으면 되돌릴
+    근거가 사라진다(ADR-0004 롤백 공통 정책 ③).
+
+    타입 변경은 **stopped 상태에서만** 받는다. 그래서 정지가 조치의 일부이고, 조치
+    직전에 running이던 인스턴스만 마지막에 다시 기동한다 — 원래 멈춰 있던 인스턴스를
+    켜는 것은 이 런북이 요청받은 변경이 아니다.
+
+    타입 변경이 실패하면 인스턴스는 **정지된 채로 남는다.** 여기서 되돌리지 않는
+    이유는 원복 경로를 하나로 두기 위해서다 — `RUNBOOK_EC2_REVERT_SIZE`
+    (`trigger_source=AUTO_ON_FAILURE`)가 백업 레코드를 근거로 되돌린다. 실행부가
+    자체 보상까지 하면 어느 쪽이 자산을 만졌는지 기록이 갈린다.
+
+    기동은 요청 접수까지다. 2/2 Status Check 확인·타임아웃 판정은
+    services/aws/rollback.py 몫이라 여기서 기다리지 않는다(파일 헤더 경계).
+    """
+    target = parse_arn(target_arn)
+    if target is None or target.resource_type != "instance":
+        return _rejected(f"인스턴스 ARN이 아닙니다: {target_arn}")
+    if not _non_empty_str(target_instance_type):
+        return _rejected("target_instance_type이 비어 있습니다")
+
+    instance_id = target.resource_id
+    ec2 = aws_client("ec2", target.region)
+    log = _StepLog(target_arn, record_step)
+
+    # ① 정지 — 타입 변경의 전제 조건이다
+    log.begin(1, STEP_STOP_INSTANCE, _OP_STOP)
+    try:
+        response = ec2.stop_instances(InstanceIds=[instance_id])
+    except (ClientError, BotoCoreError) as exc:
+        return _abort(log, exc, detail="인스턴스 정지 요청 실패")
+    previous_state = _previous_state(response)
+    # 상태를 읽지 못했으면 기동하는 쪽으로 둔다 — 조치 대상은 running 인스턴스이고,
+    # 켜야 할 것을 끈 채로 두는 편이 더 나쁜 결과다
+    was_running = previous_state != "stopped"
+    try:
+        ec2.get_waiter("instance_stopped").wait(
+            InstanceIds=[instance_id],
+            WaiterConfig={
+                "Delay": STOP_WAIT_DELAY_SECONDS,
+                "MaxAttempts": STOP_WAIT_MAX_ATTEMPTS,
+            },
+        )
+    except (ClientError, BotoCoreError) as exc:
+        # 정지 요청은 접수됐고 최종 상태만 확인하지 못했다 — WaiterError는
+        # BotoCoreError라 _effect_for가 UNKNOWN을 준다. 이 상태로 타입 변경을 걸면
+        # IncorrectInstanceState로 거절되므로 여기서 끝낸다.
+        return _abort(log, exc, detail="정지 확인 실패")
+    log.succeed(
+        ExecutionEffect.APPLIED,
+        f"정지 확인(조치 직전 상태: {previous_state or '알 수 없음'})",
+        response=response,
+    )
+
+    # ② 타입 변경
+    log.begin(2, STEP_MODIFY_INSTANCE_TYPE, _OP_MODIFY)
+    try:
+        response = ec2.modify_instance_attribute(
+            InstanceId=instance_id, InstanceType={"Value": target_instance_type}
+        )
+    except (ClientError, BotoCoreError) as exc:
+        return _abort(log, exc, detail="인스턴스 타입 변경 실패")
+    log.succeed(
+        ExecutionEffect.APPLIED, f"타입 변경: {target_instance_type}", response=response
+    )
+
+    # ③ 기동 — 조치 직전에 running이었을 때만
+    log.begin(3, STEP_START_INSTANCE, _OP_START)
+    if not was_running:
+        log.succeed(ExecutionEffect.NOT_APPLIED, "조치 직전 stopped 상태라 기동하지 않음")
+        return ExecutionOutcome(steps=tuple(log.steps))
+    try:
+        response = ec2.start_instances(InstanceIds=[instance_id])
+    except (ClientError, BotoCoreError) as exc:
+        # 타입은 이미 바뀐 채 멈춰 있다 — 원복 판단은 호출부·rollback.py 몫이다
+        return _abort(log, exc, detail="인스턴스 기동 요청 실패")
+    log.succeed(
+        ExecutionEffect.APPLIED,
+        "기동 요청 접수(2/2 Status Check 확인은 별도 축)",
+        response=response,
+    )
+    return ExecutionOutcome(steps=tuple(log.steps))
