@@ -102,6 +102,8 @@ def test_asg_degrades_on_pro_only_service(inventory):
     )
     # degrade 사실이 라벨로 기록되어 persist 가 PARTIAL 로 마감할 수 있어야 한다(#161 리뷰 ①).
     assert "auto_scaling_groups" in inventory.degraded_collectors
+    # 자산 단위 실패 사유도 기록된다(C4) — LocalStack Pro 미포함은 InternalFailure.
+    assert inventory.collector_failures.get("auto_scaling_groups")
 
 
 def test_alb_target_group_degrades_on_pro_only_service(inventory):

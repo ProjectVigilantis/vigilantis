@@ -200,6 +200,13 @@ class AssetInventory(BaseModel):
             "비어있지 않으면 부분 수집 — persist 가 CollectionRun 을 PARTIAL 로 마감한다."
         ),
     )
+    collector_failures: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "자산 단위 실패 사유 — {서비스 라벨: 사유 코드}(예: {'auto_scaling_groups': 'InternalFailure'}). "
+            "degraded_collectors 와 키가 같고 사유를 더한다. persist 가 error_summary(JSON)에 싣는다. (C4)"
+        ),
+    )
 
     @computed_field  # type: ignore[prop-decorator]
     @property
