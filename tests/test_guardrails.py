@@ -35,6 +35,7 @@ for _path in (ROOT / "apps" / "core-api", ROOT / "packages"):
 
 from ai.guardrails import (  # noqa: E402
     ARN_TARGET_NOT_MANAGED,
+    SCHEMA_INVALID_PAYLOAD,
     WHITELIST_NOT_AI_RECOMMENDABLE,
     WHITELIST_UNKNOWN_RUNBOOK,
     run_action_whitelist,
@@ -295,3 +296,58 @@ def test_failed_step_reports_the_first_failing_step() -> None:
         GuardrailStep.SCHEMA_CHECK,
         GuardrailStep.ACTION_WHITELIST,
     ], "③ 이 실행됐다 — 앞 단계가 FAIL 하면 뒤 단계는 돌지 않는다"
+
+
+@pytest.mark.parametrize(
+    "payload, why",
+    [
+        (
+            _payload(runbook_id="RUNBOOK_EC2_DOWNSIZE", target_arn="", severity="HIGH"),
+            "폐기 Runbook(②) · 빈 ARN(①) · 추가 필드(①) 동시",
+        ),
+        (
+            _payload(
+                runbook_id=RunbookId.RUNBOOK_NACL_ADD_DENY.value,
+                target_arn="arn:aws:ec2:ap-northeast-2:123456789012:instance/i-uncollected",
+                parameters={"target_instance_type": "t3.small"},
+            ),
+            "미수집 ARN(③) · 런북과 안 맞는 파라미터(①) 동시",
+        ),
+    ],
+    ids=["retired_id_with_empty_arn", "unmanaged_arn_with_wrong_params"],
+)
+def test_schema_failure_stops_before_the_later_steps(payload: dict, why: str) -> None:
+    """① 이 거절한 입력은 ②·③ 을 아예 태우지 않는다.
+
+    ① 자체의 거절 판정은 apps/core-api/ai/tests/test_guardrail_steps.py 가 20종으로
+    덮는다. 여기서 보는 것은 **파이프라인 순서**다 — 두 테스트가 보는 대상이 다르다.
+
+    뒤 단계도 거절할 입력을 일부러 준다. 단계 순서가 무너지면 거절 기록이
+    ACTION_WHITELIST·ARN_MATCH 로 남아, 관제자에게 나가는 사유가 "형식이 깨진 요청"
+    대신 "목록에 없는 조치"·"관리 대상 아님" 이 된다. 원인을 엉뚱한 곳에서 찾게 된다.
+
+    test_failed_step_reports_the_first_failing_step 는 ②↔③ 경계만 본다.
+    이 테스트가 그 앞 경계(①↔②)를 막는다.
+    """
+    run = _run_implemented_steps(payload, [_SAFE_ARN])
+
+    assert run.failed_step is GuardrailStep.SCHEMA_CHECK, why
+    assert run.draft is None
+    assert run.steps[-1].reason_code == SCHEMA_INVALID_PAYLOAD
+    assert [step.step for step in run.steps] == [GuardrailStep.SCHEMA_CHECK], (
+        f"① 이 FAIL 했는데 뒤 단계가 실행됐다 ({why}) — "
+        f"실행된 단계: {[s.step.value for s in run.steps]}"
+    )
+
+
+def test_schema_check_failure_carries_no_verification_summary() -> None:
+    """① 거절에는 verification_summary 가 붙지 않는다.
+
+    그 필드는 ④ AWS Dry-Run 이 "무엇을 어디까지 확인했는가" 를 담는 자리다
+    (ADR-0007 §3). ① 은 payload 형식만 보므로 확인 범위라는 개념이 없고, 값이
+    채워지면 관제자가 AWS 를 조회해 본 것으로 읽는다.
+    """
+    run = _run_implemented_steps(_payload(target_arn=""))
+
+    assert run.failed_step is GuardrailStep.SCHEMA_CHECK
+    assert run.steps[-1].verification_summary is None
