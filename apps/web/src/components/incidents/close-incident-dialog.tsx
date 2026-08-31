@@ -10,6 +10,7 @@
 
 import { useState } from 'react';
 
+import { StatusBadge } from '@/components/status-badge';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -46,6 +47,7 @@ export function CloseIncidentDialog({
   onChooseRecovery: () => void;
 }) {
   const [verdict, setVerdict] = useState<Verdict>('JUSTIFIED');
+  const shownRisk = incident.reviewed_risk_level ?? incident.initial_risk_level;
   const remaining = incident.recommendations.length;
 
   return (
@@ -65,6 +67,23 @@ export function CloseIncidentDialog({
           <dd className="truncate" title={incident.subject_arn}>
             {arnShort(incident.subject_arn)}
           </dd>
+          {/* 위험도는 "그 차단이 정당했나"를 가르는 값이라 판단 화면에 반드시 있어야 한다(§4.6).
+              표기는 목록 카드와 같은 단일 값이다(§7.3) — 두 판정을 대조하는 자리는 INC-002 상세다. */}
+          {shownRisk !== null ? (
+            <>
+              <dt className="text-muted-foreground">위험도</dt>
+              <dd className="flex flex-wrap items-center gap-1">
+                <StatusBadge field="risk_level" value={shownRisk} />
+                {/* 표식 규칙은 목록 카드의 RiskLevelLine과 같다 — 초기 판정 그대로면 없다. */}
+                {incident.reviewed_risk_level !== null &&
+                incident.reviewed_risk_level !== incident.initial_risk_level ? (
+                  <span className="text-muted-foreground text-xs" title="AI 정밀 평가로 갱신된 값입니다">
+                    (정밀)
+                  </span>
+                ) : null}
+              </dd>
+            </>
+          ) : null}
         </dl>
 
         <fieldset className="flex flex-col gap-2">
