@@ -1,9 +1,10 @@
-"""가드레일 ① Schema Check · ② Action Whitelist · ③ ARN Match 테스트 —
-통과 경로와 거절 사유 4종.
+"""가드레일 네 단계 함수와 그 종합 판정 테스트 — 통과 경로와 단계별 거절.
 
 이슈 #114 설계 의도의 회귀 테스트를 겸한다: ①은 runbook_id를 문자열로만 보고 목록
 대조는 ②가 한다. 미등록 ID가 ①에서 터지면 거절 기록에 실제로 막힌 단계가 남지 않는다.
 """
+
+from datetime import timezone
 
 import pytest
 from ai.guardrails import (
@@ -15,18 +16,28 @@ from ai.guardrails import (
     SchemaCheckedCommand,
     run_action_whitelist,
     run_arn_match,
+    run_aws_dry_run,
+    run_guardrail_validation,
     run_schema_check,
 )
 from ai.whitelist import AI_RECOMMENDABLE_RUNBOOK_IDS, ROLLBACK_RUNBOOK_IDS, RunbookId
 from schemas.agents import RunbookCandidateDraft
 from schemas.guardrails import (
+    GUARDRAIL_STEP_ORDER,
     ActionWhitelistReasonCode,
     ArnMatchReasonCode,
+    GuardrailDecision,
     GuardrailStep,
     GuardrailStepStatus,
     GuardrailValidationContext,
     GuardrailValidationRequest,
     SchemaCheckReasonCode,
+)
+from schemas.precheck import (
+    PrecheckOutcome,
+    PrecheckReasonCode,
+    VerificationMethod,
+    build_verification_summary,
 )
 
 TARGET_ARN = "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0123456789abcdef0"
@@ -487,3 +498,195 @@ def test_arn_match_does_not_match_by_prefix(target_arn: str):
     assert outcome.step_result.result is GuardrailStepStatus.FAIL
     assert outcome.step_result.reason_code is ARN_TARGET_NOT_MANAGED
     assert outcome.draft is None
+
+
+# ------------------------------------------------------------------------------
+# ④ AWS Dry-Run
+# ------------------------------------------------------------------------------
+
+# 요약 문자열은 손으로 짓지 않고 계약의 조립 함수로 만든다 — 형식이 바뀌면 여기서도
+# 깨져야 한다(ADR-0007 §3 형식, packages/schemas/precheck.py).
+PASS_SUMMARY = build_verification_summary(
+    VerificationMethod.DRY_RUN,
+    verified=["호출 권한과 파라미터 형식(DryRun)"],
+    unverified=["대상 자원 존재와 현재 상태(DryRun 비검증)"],
+    operations=["ec2.modify_instance_attribute"],
+)
+FAIL_SUMMARY = build_verification_summary(
+    VerificationMethod.DESCRIBE,
+    verified=["없음(대상 인스턴스 부재)"],
+    unverified=["AWS 대상 상태", "IAM 권한"],
+)
+
+
+class _Precheck:
+    """AWS 판정의 Test Double — 받은 Draft를 기록한다.
+
+    실제 executor.precheck()를 부르지 않는 이유는 ④가 판정을 만들지 않기 때문이다.
+    이 단계의 책임은 PrecheckOutcome을 GuardrailStepResult로 옮기는 것뿐이라,
+    검증할 것은 AWS 응답 해석이 아니라 옮기기와 호출 여부다.
+    """
+
+    def __init__(self, outcome: PrecheckOutcome):
+        self._outcome = outcome
+        self.asked: list[RunbookCandidateDraft] = []
+
+    def __call__(self, draft: RunbookCandidateDraft) -> PrecheckOutcome:
+        self.asked.append(draft)
+        return self._outcome
+
+
+def _passing_precheck() -> _Precheck:
+    return _Precheck(PrecheckOutcome(passed=True, verification_summary=PASS_SUMMARY))
+
+
+def _failing_precheck(
+    reason_code: PrecheckReasonCode = PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND,
+) -> _Precheck:
+    return _Precheck(
+        PrecheckOutcome(
+            passed=False, reason_code=reason_code, verification_summary=FAIL_SUMMARY
+        )
+    )
+
+
+def test_aws_dry_run_passes_and_keeps_the_verification_summary():
+    """통과해도 요약은 남는다 — 무엇을 확인하지 못했는지가 PASS에도 필요하다."""
+    outcome = run_aws_dry_run(_draft(), _passing_precheck())
+
+    assert outcome.step_result.step is GuardrailStep.AWS_DRY_RUN
+    assert outcome.step_result.result is GuardrailStepStatus.PASS
+    assert outcome.step_result.reason_code is None
+    assert outcome.step_result.verification_summary == PASS_SUMMARY
+    assert outcome.draft is not None and outcome.draft.target_arn == TARGET_ARN
+
+
+@pytest.mark.parametrize("reason_code", list(PrecheckReasonCode))
+def test_aws_dry_run_copies_the_rejection_without_reclassifying(reason_code):
+    """사유 코드를 다시 분류하지 않는다 — executor가 고른 값이 그대로 기록된다.
+
+    여기서 코드를 다시 매기면 거절 기록과 executor가 실제로 내린 판정이 갈린다
+    (ADR-0007 §1 호출 규약의 1:1 매핑).
+    """
+    outcome = run_aws_dry_run(_draft(), _failing_precheck(reason_code))
+
+    assert outcome.step_result.result is GuardrailStepStatus.FAIL
+    assert outcome.step_result.reason_code is reason_code
+    assert outcome.step_result.verification_summary == FAIL_SUMMARY
+    assert outcome.draft is None
+
+
+def test_aws_dry_run_asks_about_the_candidates_own_draft():
+    """판정 대상이 ③을 통과한 그 후보여야 한다 — 다른 값을 물으면 판정이 무의미하다."""
+    draft = _draft()
+    precheck = _passing_precheck()
+
+    run_aws_dry_run(draft, precheck)
+
+    assert precheck.asked == [draft]
+
+
+# ------------------------------------------------------------------------------
+# 4단계 종합 판정
+# ------------------------------------------------------------------------------
+
+
+def _validate(payload: dict | None = None, *, collected=(TARGET_ARN,), precheck=None):
+    return run_guardrail_validation(
+        _request(VALID_PAYLOAD if payload is None else payload),
+        is_managed_arn=_collected(*collected),
+        precheck=_passing_precheck() if precheck is None else precheck,
+    )
+
+
+# 단계별로 막히는 입력 — 하나의 단계만 실패하도록 나머지는 통과 조건으로 둔다
+BLOCKED_AT = [
+    pytest.param(
+        {"payload": {**VALID_PAYLOAD, "unexpected_field": "x"}},
+        GuardrailStep.SCHEMA_CHECK,
+        SCHEMA_INVALID_PAYLOAD,
+        id="schema_check",
+    ),
+    pytest.param(
+        {"payload": UNTYPED_PAYLOAD},
+        GuardrailStep.ACTION_WHITELIST,
+        WHITELIST_UNKNOWN_RUNBOOK,
+        id="action_whitelist",
+    ),
+    pytest.param(
+        {"collected": ()},
+        GuardrailStep.ARN_MATCH,
+        ARN_TARGET_NOT_MANAGED,
+        id="arn_match",
+    ),
+    pytest.param(
+        {"precheck": _failing_precheck(PrecheckReasonCode.PRECHECK_UNAUTHORIZED)},
+        GuardrailStep.AWS_DRY_RUN,
+        PrecheckReasonCode.PRECHECK_UNAUTHORIZED,
+        id="aws_dry_run",
+    ),
+]
+
+
+def test_validation_passes_all_four_steps():
+    outcome = _validate()
+    result = outcome.result
+
+    assert result.result is GuardrailDecision.PASS
+    assert result.failed_step is None
+    assert [step.step for step in result.steps] == list(GUARDRAIL_STEP_ORDER)
+    assert all(step.result is GuardrailStepStatus.PASS for step in result.steps)
+    assert outcome.draft is not None and outcome.draft.target_arn == TARGET_ARN
+
+
+def test_validation_records_the_summary_only_on_the_aws_step():
+    """확인 방식·한계 요약은 ④의 것이다 — 앞 세 단계는 AWS에 묻지 않는다."""
+    steps = _validate().result.steps
+
+    assert [step.verification_summary for step in steps] == [
+        None,
+        None,
+        None,
+        PASS_SUMMARY,
+    ]
+
+
+def test_validated_at_is_recorded_in_utc():
+    """거절·통과 기록이 남는 시각은 저장·조회 계약과 같은 UTC여야 한다."""
+    assert _validate().result.validated_at.tzinfo is timezone.utc
+
+
+@pytest.mark.parametrize(("blocked", "step", "reason_code"), BLOCKED_AT)
+def test_validation_records_the_step_that_blocked(blocked, step, reason_code):
+    """막힌 단계가 기록되고, 그 뒤 단계는 돌지 않은 것으로 남는다."""
+    outcome = _validate(**blocked)
+    result = outcome.result
+    failed_index = GUARDRAIL_STEP_ORDER.index(step)
+
+    assert result.result is GuardrailDecision.FAIL
+    assert result.failed_step is step
+    assert outcome.draft is None
+    assert [s.step for s in result.steps] == list(GUARDRAIL_STEP_ORDER)
+    assert [s.result for s in result.steps] == [
+        *[GuardrailStepStatus.PASS] * failed_index,
+        GuardrailStepStatus.FAIL,
+        *[GuardrailStepStatus.NOT_RUN] * (len(GUARDRAIL_STEP_ORDER) - failed_index - 1),
+    ]
+    assert result.steps[failed_index].reason_code is reason_code
+
+
+@pytest.mark.parametrize(
+    ("blocked", "step", "reason_code"),
+    [case for case in BLOCKED_AT if case.id != "aws_dry_run"],
+)
+def test_aws_is_not_asked_when_an_earlier_step_blocks(blocked, step, reason_code):
+    """앞 단계가 막으면 AWS를 부르지 않는다.
+
+    ③이 거절한 ARN을 ④가 물으면 범위를 벗어난 자원에 조회·DryRun 요청이 실제로
+    나간다 — 단락이 곧 그 방어다.
+    """
+    precheck = _passing_precheck()
+
+    _validate(**blocked, precheck=precheck)
+
+    assert precheck.asked == []

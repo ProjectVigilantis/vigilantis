@@ -1,15 +1,16 @@
-"""REST 공통 오류 봉투 계약 테스트 (확정 설계 4.6) — 코드 5종, 봉투 형태 고정."""
+"""REST 공통 오류 봉투 계약 테스트 (확정 설계 4.6) — 코드 6종, 봉투 형태 고정."""
 
 import pytest
 from pydantic import ValidationError
 
 from schemas.api.errors import ErrorCode, ErrorResponse
 
-# 계약 원문 5종. 코드가 아니라 이 리터럴 집합이 기대값이다.
+# 계약 원문 6종. 코드가 아니라 이 리터럴 집합이 기대값이다.
 CONTRACT_ERROR_CODES = {
     "INCIDENT_NOT_FOUND",         # 404
     "IDEMPOTENCY_KEY_CONFLICT",   # 409
     "PROPOSAL_NOT_EXECUTABLE",    # 409
+    "INCIDENT_NOT_RESOLVABLE",    # 409 — 종료 처리 거절 (Issue #199)
     "REQUEST_VALIDATION_FAILED",  # 422
     "INTERNAL_ERROR",             # 500
 }

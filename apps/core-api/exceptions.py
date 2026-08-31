@@ -27,6 +27,7 @@ _STATUS_BY_CODE: dict[ErrorCode, int] = {
     ErrorCode.INCIDENT_NOT_FOUND: 404,
     ErrorCode.IDEMPOTENCY_KEY_CONFLICT: 409,
     ErrorCode.PROPOSAL_NOT_EXECUTABLE: 409,
+    ErrorCode.INCIDENT_NOT_RESOLVABLE: 409,
     ErrorCode.REQUEST_VALIDATION_FAILED: 422,
     ErrorCode.INTERNAL_ERROR: 500,
 }
@@ -34,6 +35,7 @@ _MESSAGE_BY_CODE: dict[ErrorCode, str] = {
     ErrorCode.INCIDENT_NOT_FOUND: "인시던트를 찾을 수 없습니다.",
     ErrorCode.IDEMPOTENCY_KEY_CONFLICT: "같은 멱등성 키의 실행이 이미 있습니다.",
     ErrorCode.PROPOSAL_NOT_EXECUTABLE: "실행 가능한 상태의 제안이 아닙니다.",
+    ErrorCode.INCIDENT_NOT_RESOLVABLE: "종료 처리할 수 있는 상태의 인시던트가 아닙니다.",
     ErrorCode.REQUEST_VALIDATION_FAILED: "요청 값이 계약과 다릅니다.",
     ErrorCode.INTERNAL_ERROR: "서버 내부 오류입니다.",
 }

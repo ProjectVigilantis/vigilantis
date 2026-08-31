@@ -3,7 +3,7 @@
 // ACT-001 원클릭 실행 확인 모달 — 화면설계서 v1.5 §4.6.
 // 되돌리기 어려운 AWS 변경 직전에 대상과 결과를 확정하고, 중복 클릭을 여기서 차단합니다.
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
 import {
@@ -107,6 +107,15 @@ export function ActionExecuteDialog({
   const [selected, setSelected] = useState<RunbookId | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string>('');
+  /**
+   * 중복 클릭의 **동기 잠금**. `pending`은 state라 `setPending(true)` 뒤 리렌더가 오기 전까지
+   * 버튼이 그대로 열려 있어, 같은 tick에 연달아 눌리면 요청이 그 횟수만큼 나간다(#217 실측:
+   * 같은 tick 3클릭 → 3건 / 150ms 간격 3클릭 → 1건). ref는 즉시 닫혀 첫 클릭만 통과시킨다.
+   *
+   * 세 요청이 **같은 키**로 나가 서버가 202 → 200 replay로 접으므로(계약 4.7) 실행이 여러 번
+   * 되지는 않았다 — 여기서 막는 것은 불필요한 왕복이다.
+   */
+  const inFlight = useRef(false);
 
   const open = request !== null;
   const candidates = request?.candidates ?? [];
@@ -116,6 +125,7 @@ export function ActionExecuteDialog({
   const destructive = runbookId !== null && isDestructiveRunbook(runbookId);
 
   function close() {
+    inFlight.current = false;
     setSelected(null);
     setPending(false);
     setError('');
@@ -124,6 +134,8 @@ export function ActionExecuteDialog({
 
   async function submit() {
     if (request === null || runbookId === null) return;
+    if (inFlight.current) return;
+    inFlight.current = true;
     setPending(true);
     setError('');
     try {
@@ -146,8 +158,10 @@ export function ActionExecuteDialog({
         onProposalStale();
         return;
       }
+      // 모달을 열어 둔 채 다시 누를 수 있는 오류다 — 잠금도 같이 푼다.
       setError(text);
       setPending(false);
+      inFlight.current = false;
     }
   }
 
