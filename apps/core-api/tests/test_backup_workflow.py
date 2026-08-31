@@ -188,7 +188,7 @@ def test_missing_execution_is_reported_not_raised(db, aws):
 
 
 def test_wrong_runbook_is_a_wiring_error(db, aws):
-    """스펙 JSON 백업을 쓰는 런북은 RIGHTSIZING 하나뿐이다(런북 명세서). 판정으로
+    """스펙 JSON 백업을 쓰는 런북은 RIGHTSIZING 하나뿐이다(ADR-0007 §5). 판정으로
     삼키면 다른 런북이 엉뚱한 백업 종류를 달고 조용히 진행된다."""
     execution = _execution(db, runbook=RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED)
 

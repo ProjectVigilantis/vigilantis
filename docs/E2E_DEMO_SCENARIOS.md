@@ -17,7 +17,7 @@
 
 같은 4단계 가드레일을 지나지만 **되돌리는 주체가 다르다** — 이 대비가 시연의 핵심이다.
 
-**왜 보안만 사람을 거치는가**가 발표에서 나올 질문이다. 답은 설계 의도다 — NACL 차단은 오탐 시 **서브넷 전체**에 영향이 가므로 `RUNBOOK_NACL_ADD_DENY`의 `approval_mode`가 `HUMAN_ONLY`로 확정돼 있다(런북 명세서 `[SecOps-02]`). 자산 원복은 대상이 인스턴스 1대라 자동화해도 폭발 반경이 좁다. **자동화 범위를 폭발 반경으로 나눈 것**이 두 트랙의 대비다.
+**왜 보안만 사람을 거치는가**가 발표에서 나올 질문이다. 답은 설계 의도다 — NACL 차단은 오탐 시 **서브넷 전체**에 영향이 가므로 `RUNBOOK_NACL_ADD_DENY`의 `approval_mode`가 `HUMAN_ONLY`로 확정돼 있다([`docs/PROJECT_STATUS.md`](PROJECT_STATUS.md) §Action Whitelist). 자산 원복은 대상이 인스턴스 1대라 자동화해도 폭발 반경이 좁다. **자동화 범위를 폭발 반경으로 나눈 것**이 두 트랙의 대비다.
 
 각 단계는 아래 5개 축으로 적는다(#132 완료 조건).
 
@@ -33,9 +33,9 @@
 
 ---
 
-## 원천 문서에 대한 주의
+## 원천 문서
 
-`vigilantis-docs/런북 명세서.md`(문서 지도 2위)와 `시스템 흐름도.md`(3위)는 **저장소에 없고 팀장 로컬에만 있다**. 본 1차 설계서는 저장소 안의 확정 원천으로만 작성했다.
+본 설계서는 저장소 안의 확정 원천으로만 작성했다. 확정본은 [`docs/PROJECT_STATUS.md`](PROJECT_STATUS.md)(문서 지도 1위)이며, 이 설계서는 그것을 원천으로 삼는 파생 문서다(문서 지도 4위).
 
 | 사용한 원천 | 신뢰도 |
 | --- | --- |
@@ -201,7 +201,7 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 | # | 항목 | 막힌 이유 | 풀리는 시점 |
 | --- | --- | --- | --- |
 | 1 | T2 2번 위험도 판정값(`initial_risk_level`) | Risk Evaluator 미구현 · `RiskReasonCode` 목록 미확정 | SSOT 미해결 6번 해소 |
-| 2 | 런북별 세부 실행 단계·`parameters_schema` | `런북 명세서.md`가 저장소 밖 | 확정본 확보 또는 #49 |
+| 2 | ~~런북별 세부 실행 단계·`parameters_schema`~~ ✅ 해소(2026-08-31) | 확정본이 SSOT §Action Whitelist로 이관되고, `parameters_schema`는 `packages/schemas/runbook_parameters.py`(#154 / PR #178), 세부 실행 단계·`target_api`는 [ADR-0007](adr/0007-guardrail-dryrun-executor-precheck-contract.md) §Context·§5가 갖는다 | — |
 | 3 | Status Check 실패 **주입 방법** | 자동 원복 엔진 미구현 | 김세혁 원복 엔진 |
 | 4 | 가드레일 ③ 실제 통과 | ④ Dry-Run은 `precheck()` 확정 10종 구현 완료(#129 / PR #147 · 실측 #130 / PR #170). 남은 것은 **③ ARN Match뿐**(#177 — `tests/test_guardrails.py` placeholder skip 1건이 여기 묶임) | #177 구현 |
 | 5 | 화면 구현 상태 | 아래 표 | 카드별 |

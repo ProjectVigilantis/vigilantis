@@ -308,7 +308,7 @@ def store_instance_spec_backup(db: Session, execution_id: str) -> BackupOutcome:
         )
     if execution.runbook_id is not RunbookId.RUNBOOK_EC2_RIGHTSIZING:
         # 배선 오류다 — 스펙 JSON 백업을 쓰는 런북은 RIGHTSIZING 하나뿐이다
-        # (런북 명세서 safety_and_rollback.backup_action). 판정으로 삼키면
+        # (schemas.backups.BackupType — ADR-0004 롤백 공통 정책 ③). 판정으로 삼키면
         # 다른 런북이 엉뚱한 백업 종류를 달고 조용히 진행된다.
         raise ValueError(
             f"스펙 JSON 백업 대상 런북이 아닙니다: {execution.runbook_id.value}"

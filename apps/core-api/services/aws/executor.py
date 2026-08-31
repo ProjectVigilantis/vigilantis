@@ -105,7 +105,7 @@ class BackupRecordLoader(Protocol):
         """대상 자원의 최신 백업 1건. 없으면 None.
 
         NACL_RESTORE처럼 backup_record_id를 파라미터로 받지 않는 런북이 쓴다
-        (런북 명세서 parameters_schema 기준).
+        (ADR-0007 §5 파라미터 표 기준 — 코드 소재는 schemas.runbook_parameters).
 
         payload_match가 있으면 payload의 해당 키가 전부 같은 레코드만 후보다.
         한 자원에 조치가 누적되면 대상의 최신 하나만으로는 복원 대상을 고를 수
@@ -114,7 +114,7 @@ class BackupRecordLoader(Protocol):
         """
 
 
-# 백업 종류 — 어휘의 원천은 schemas.backups.BackupType이다(런북 명세서
+# 백업 종류 — 어휘의 원천은 schemas.backups.BackupType이다(ADR-0004
 # safety_and_rollback.backup_action). 읽는 쪽(여기)과 만드는 쪽(services/aws/backup.py)이
 # 문자열을 각자 적으면 오타 하나로 백업이 조회되지 않는다.
 BACKUP_INSTANCE_SPEC = BackupType.SAVE_INSTANCE_SPEC_JSON.value
@@ -543,7 +543,7 @@ def _precheck_ebs_delete(ctx: _Ctx) -> PrecheckOutcome:
             (ec2.create_snapshot, {"VolumeId": volume_id}),
             (ec2.delete_volume, {"VolumeId": volume_id}),
         ],
-        # 런북 명세서의 "available 상태 2차 검증"은 실행 직전 단계의 몫이다
+        # "available 상태 2차 검증"은 실행 직전 단계의 몫이다
         unverified=["볼륨 available 상태"],
     )
 
@@ -637,7 +637,7 @@ def _precheck_nacl_add_deny(ctx: _Ctx) -> PrecheckOutcome:
         return _fail(
             ctx, code, verified=["없음(NACL 조회 실패)"], unverified=[_DESCRIBE_MISSES]
         )
-    # ADD_DENY는 인바운드 차단 규칙이다 — 런북 명세서 parameters_schema에 egress가 없다
+    # ADD_DENY는 인바운드 차단 규칙이다 — ADR-0007 §5 파라미터 표에 egress가 없다
     if _find_entry(acl, ctx.params["rule_number"], egress=False) is not None:
         return _fail(
             ctx,

@@ -405,7 +405,7 @@ def test_absent_backup_record_is_target_not_found(runbook_id, aws):
 
 
 # backup_record_id를 파라미터로 받는 런북(ID 조회)과 받지 않는 런북(대상으로 조회)은
-# 잘못된 백업이 걸러지는 자리가 다르다. NACL_RESTORE만 후자다(런북 명세서 기준).
+# 잘못된 백업이 걸러지는 자리가 다르다. NACL_RESTORE만 후자다(ADR-0007 §5 기준).
 _BY_ID = sorted(set(BACKUP_PAYLOADS) - {"RUNBOOK_NACL_RESTORE"})
 
 

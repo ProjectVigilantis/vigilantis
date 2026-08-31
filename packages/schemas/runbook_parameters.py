@@ -2,8 +2,7 @@
 # [파일 설명]  담당: 안성일 (AI/Guardrail · Architect)
 # Runbook별 파라미터의 typed 계약입니다. (Issue #154)
 # ID 수준 판정은 runbooks.py가 담당하고, 이 파일은 그 아래 층 — "각 Runbook이
-# 어떤 값을 받는가"를 정의한다. 원천은 ADR-0007 §5 파라미터 표(런북 명세서
-# parameters_schema 기준)이며, 전 키가 required다.
+# 어떤 값을 받는가"를 정의한다. 원천은 ADR-0007 §5 파라미터 표이며, 전 키가 required다.
 #
 # 두 계열로 나뉜다. 같은 Runbook이라도 AI가 채우는 값과 실행이 받는 값이 다르다.
 #   ① 후보 파라미터(본편 7종) — AI가 정하는 값만. 나머지는 지어낼 수 없다.
@@ -93,7 +92,7 @@ _EvidenceId = Annotated[
     str, Field(min_length=1, max_length=36), AfterValidator(_reject_blank)
 ]  # DB의 UUID 길이
 
-# 런북 명세서 parameters_schema의 pattern을 그대로 옮긴다
+# ADR-0007 §5 파라미터 표의 pattern을 그대로 옮긴다
 InstanceId = Annotated[str, _fullmatch(r"i-[a-f0-9]{8,17}")]
 SecurityGroupId = Annotated[str, _fullmatch(r"sg-[a-f0-9]{8,17}")]
 NetworkAclId = Annotated[str, _fullmatch(r"acl-[a-f0-9]{8,17}")]
