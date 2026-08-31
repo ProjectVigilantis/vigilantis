@@ -1,4 +1,5 @@
-"""가드레일 ① Schema Check · ② Action Whitelist 테스트 — 통과 경로와 거절 사유 3종.
+"""가드레일 ① Schema Check · ② Action Whitelist · ③ ARN Match 테스트 —
+통과 경로와 거절 사유 4종.
 
 이슈 #114 설계 의도의 회귀 테스트를 겸한다: ①은 runbook_id를 문자열로만 보고 목록
 대조는 ②가 한다. 미등록 ID가 ①에서 터지면 거절 기록에 실제로 막힌 단계가 남지 않는다.
@@ -6,17 +7,21 @@
 
 import pytest
 from ai.guardrails import (
+    ARN_TARGET_NOT_MANAGED,
     SCHEMA_INVALID_PAYLOAD,
     WHITELIST_NOT_AI_RECOMMENDABLE,
     WHITELIST_UNKNOWN_RUNBOOK,
+    ManagedAssetLookup,
     SchemaCheckedCommand,
     run_action_whitelist,
+    run_arn_match,
     run_schema_check,
 )
 from ai.whitelist import AI_RECOMMENDABLE_RUNBOOK_IDS, ROLLBACK_RUNBOOK_IDS, RunbookId
 from schemas.agents import RunbookCandidateDraft
 from schemas.guardrails import (
     ActionWhitelistReasonCode,
+    ArnMatchReasonCode,
     GuardrailStep,
     GuardrailStepStatus,
     GuardrailValidationContext,
@@ -352,6 +357,7 @@ def test_exposed_reason_codes_are_the_shared_contract_members():
     assert WHITELIST_NOT_AI_RECOMMENDABLE is (
         ActionWhitelistReasonCode.WHITELIST_NOT_AI_RECOMMENDABLE
     )
+    assert ARN_TARGET_NOT_MANAGED is ArnMatchReasonCode.ARN_TARGET_NOT_MANAGED
 
 
 def test_step_result_carries_reason_code_of_its_own_step():
@@ -364,3 +370,120 @@ def test_step_result_carries_reason_code_of_its_own_step():
     assert isinstance(result.reason_code, ActionWhitelistReasonCode)
     # DB에는 이 문자열이 남는다(apps/core-api/db/repositories/guardrails.py)
     assert result.model_dump(mode="json")["reason_code"] == "WHITELIST_UNKNOWN_RUNBOOK"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"target_arn": "\x00"}, id="arn_only_nul"),
+        pytest.param(
+            {"target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0\x00"},
+            id="arn_trailing_nul",
+        ),
+        pytest.param(
+            {"target_arn": "arn:aws:ec2:\x00ap-northeast-2:123456789012:instance/i-0"},
+            id="arn_embedded_nul",
+        ),
+        pytest.param({"evidence_ids": ["ev-1", "ev\x002"]}, id="evidence_id_nul"),
+        pytest.param(
+            {"parameters": {"target_instance_type": "t3\x00small"}}, id="param_value_nul"
+        ),
+        pytest.param(
+            {"parameters": {"target_instance\x00_type": "t3.small"}}, id="param_key_nul"
+        ),
+    ],
+)
+def test_schema_check_rejects_nul(overrides):
+    """NUL(0x00)이 든 문자열 필드는 ①에서 걸린다 — runbook_id만 예외(②의 몫).
+
+    PostgreSQL text·jsonb가 담지 못하는 문자라, ③ ARN Match의 DB 조회와 후보
+    저장(JSONB)에서 psycopg DataError가 난다 — 거절이 기록되는 대신 검증·저장이
+    예외로 끝난다. ①이 이미 보는 크기 상한(DB 컬럼 폭)과 같은 부류의 제약이다.
+    """
+    outcome = run_schema_check(_request({**VALID_PAYLOAD, **overrides}))
+
+    assert outcome.step_result.result is GuardrailStepStatus.FAIL
+    assert outcome.step_result.reason_code is SCHEMA_INVALID_PAYLOAD
+    assert outcome.command is None
+
+
+# ------------------------------------------------------------------------------
+# ③ ARN Match
+# ------------------------------------------------------------------------------
+
+
+def _collected(*arns: str) -> ManagedAssetLookup:
+    """수집 자산 조회의 Test Double — get_asset_by_arn과 같은 완전 일치 조회다."""
+    managed = frozenset(arns)
+    return lambda target_arn: target_arn in managed
+
+
+def _draft(**overrides) -> RunbookCandidateDraft:
+    """③을 보는 테스트의 입력 — ①②를 실제로 통과시켜 얻는다."""
+    outcome = run_action_whitelist(_checked(**overrides))
+    assert outcome.draft is not None
+    return outcome.draft
+
+
+def test_arn_match_passes_collected_asset():
+    outcome = run_arn_match(_draft(), _collected(TARGET_ARN))
+
+    assert outcome.step_result.step is GuardrailStep.ARN_MATCH
+    assert outcome.step_result.result is GuardrailStepStatus.PASS
+    assert outcome.step_result.reason_code is None
+    assert outcome.step_result.verification_summary is None
+    assert outcome.draft is not None and outcome.draft.target_arn == TARGET_ARN
+
+
+def test_arn_match_rejects_uncollected_target():
+    outcome = run_arn_match(_draft(), _collected())
+
+    assert outcome.step_result.result is GuardrailStepStatus.FAIL
+    assert outcome.step_result.reason_code is ARN_TARGET_NOT_MANAGED
+    assert outcome.draft is None
+
+
+def test_arn_match_queries_the_exact_target_arn():
+    """조회에 넘기는 값이 Draft의 target_arn 그대로여야 한다.
+
+    정규화·절단을 끼우면 대조 대상이 실제 실행 대상과 갈린다 — 조회는 맞다고
+    답했는데 executor는 다른 자원을 건드리는 상태가 만들어진다.
+    """
+    asked: list[str] = []
+
+    def lookup(target_arn: str) -> bool:
+        asked.append(target_arn)
+        return True
+
+    run_arn_match(_draft(), lookup)
+
+    assert asked == [TARGET_ARN]
+
+
+@pytest.mark.parametrize(
+    "target_arn",
+    [
+        pytest.param(
+            "arn:aws:ec2:ap-northeast-2:123456789012:instance/*", id="wildcard_resource"
+        ),
+        pytest.param(
+            "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-9999999999999999",
+            id="same_prefix_other_instance",
+        ),
+        pytest.param("*", id="wildcard"),
+        pytest.param("arn:aws:iam::999999999999:role/Admin", id="other_account_role"),
+        pytest.param("'; DROP TABLE assets; --", id="not_an_arn"),
+    ],
+)
+def test_arn_match_does_not_match_by_prefix(target_arn: str):
+    """수집 목록에 없으면 거절한다 — 계정·리전 접두어가 같아도 마찬가지다.
+
+    앞의 두 케이스는 TARGET_ARN과 계정·리전까지 같은 문자열로 시작하므로,
+    접두어 검사를 판정으로 쓰면 그대로 통과한다. Scope Escalation 차단의
+    정의가 접두어가 아니라 수집 자산과의 대조인 이유다(#177).
+    """
+    outcome = run_arn_match(_draft(target_arn=target_arn), _collected(TARGET_ARN))
+
+    assert outcome.step_result.result is GuardrailStepStatus.FAIL
+    assert outcome.step_result.reason_code is ARN_TARGET_NOT_MANAGED
+    assert outcome.draft is None
