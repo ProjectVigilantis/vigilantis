@@ -19,11 +19,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 @unique
 class ErrorCode(str, Enum):
-    """REST 공통 오류 코드 5종. 괄호는 계약상 HTTP 상태."""
+    """REST 공통 오류 코드 6종. 괄호는 계약상 HTTP 상태."""
 
     INCIDENT_NOT_FOUND = "INCIDENT_NOT_FOUND"                # 404
     IDEMPOTENCY_KEY_CONFLICT = "IDEMPOTENCY_KEY_CONFLICT"    # 409
     PROPOSAL_NOT_EXECUTABLE = "PROPOSAL_NOT_EXECUTABLE"      # 409
+    INCIDENT_NOT_RESOLVABLE = "INCIDENT_NOT_RESOLVABLE"      # 409
     REQUEST_VALIDATION_FAILED = "REQUEST_VALIDATION_FAILED"  # 422
     INTERNAL_ERROR = "INTERNAL_ERROR"                        # 500
 
