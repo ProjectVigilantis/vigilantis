@@ -59,9 +59,32 @@ def _failure_reason(exc: BaseException) -> str:
 
 
 def _failures_summary(failures: dict[str, str]) -> str:
-    """collector_failures 를 error_summary(String(1024))에 실을 compact JSON 으로. 초과 시 잘라낸다."""
+    """collector_failures 를 error_summary(String(1024))에 실을 compact JSON 으로.
+    상한 초과 시 문자열을 자르면 JSON 이 깨지므로, 항목을 버리고 표식만 남겨 유효 JSON 을
+    유지한다(라벨은 4종뿐이라 실제 도달은 불가하나 계약(json.loads)을 안전하게 지킨다)."""
     text = json.dumps(failures, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return text if len(text) <= 1024 else text[:1021] + "..."
+    if len(text) <= 1024:
+        return text
+    return json.dumps({"_truncated": str(len(failures))}, ensure_ascii=False, separators=(",", ":"))
+
+
+# 리전 단위 재시도 대상 — 일시성 오류만. AccessDenied·InternalFailure 등 비재시도성은 즉시 실패로.
+_RETRYABLE_CLIENT_CODES = (
+    "Throttling", "ThrottlingException", "RequestLimitExceeded",
+    "ServiceUnavailable", "RequestTimeout", "InternalError",
+)
+_RETRYABLE_BOTOCORE = (
+    "EndpointConnectionError", "ConnectTimeoutError", "ReadTimeoutError",
+    "ConnectionError", "ConnectionClosedError",
+)
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """리전 단위 재시도 대상인지. botocore adaptive(max 5)가 이미 도는 계층 위이므로
+    대상을 일시성(스로틀·서비스 불가·연결 계열)으로 좁힌다 — 나머지는 재시도해도 결과가 같다."""
+    if isinstance(exc, ClientError):
+        return _failure_reason(exc) in _RETRYABLE_CLIENT_CODES
+    return type(exc).__name__ in _RETRYABLE_BOTOCORE
 
 
 def _safe_describe(fn, label: str, failures: dict[str, str]) -> list:
@@ -434,8 +457,7 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
         launch_templates=lt_assets,
         auto_scaling_groups=asg_assets,
         alb_target_groups=tg_assets,
-        degraded_collectors=list(failures),
-        collector_failures=failures,
+        collector_failures=failures,  # degraded_collectors 는 여기서 파생(computed_field)
     )
 
 
@@ -762,14 +784,17 @@ def _collect_store_region(region: str, cfg: dict, session_factory) -> dict:
         try:
             inv = collect_region(region, cfg)
         except (ClientError, BotoCoreError) as exc:
-            _log.warning("리전 %s 수집 실패 — 1회 재시도(%s)", region, _failure_reason(exc))
-            inv = collect_region(region, cfg)  # 부분 리트라이(일시 오류 대비)
+            if not _is_retryable(exc):
+                raise  # 비재시도성(AccessDenied·InternalFailure 등)은 즉시 실패로
+            _log.warning("리전 %s 수집 일시 실패 — 1회 재시도(%s)", region, _failure_reason(exc))
+            inv = collect_region(region, cfg)
         summary = persist_inventory(inv, db)
         db.commit()
         return summary
     except Exception as exc:  # 리전 격리 — 이 리전만 실패로 마감하고 다른 리전은 계속
         db.rollback()
-        _log.error("리전 %s 수집 최종 실패 — FAILED 로 기록하고 계속(%s)", region, _failure_reason(exc))
+        # 코드 버그(KeyError 등)도 여기서 삼키므로 스택트레이스를 남긴다(_log.exception).
+        _log.exception("리전 %s 수집 최종 실패 — FAILED 로 기록하고 계속(%s)", region, _failure_reason(exc))
         _record_failed_region(region, cfg, exc, session_factory)
         return {"region": region, "status": "FAILED", "error": _failure_reason(exc)}
     finally:
@@ -784,13 +809,11 @@ def _record_failed_region(region: str, cfg: dict, exc: BaseException, session_fa
 
     db = session_factory()
     try:
-        try:
-            account = _account_id(region)
-        except Exception:
-            account = "unknown"
+        # 실패 경로를 짧게 — STS(GetCallerIdentity) 재호출 안 하고 account 는 unknown 으로 둔다
+        # (계정은 CollectionRun.region 과 함께 이미 성공 리전 run 에서 확인 가능).
         run = assets_repo.start_collection_run(
             db,
-            account_id=account,
+            account_id="unknown",
             region=region,
             mode=deployment_mode(),
             lookback_days=cfg["lookback_days"],
@@ -801,11 +824,13 @@ def _record_failed_region(region: str, cfg: dict, exc: BaseException, session_fa
             collection_run_id=run.collection_run_id,
             status=CollectionRunStatus.FAILED,
             finished_at=datetime.now(timezone.utc),
-            error_summary=_failures_summary({region: _failure_reason(exc)}),
+            # error_summary 키 축을 PARTIAL(서비스 라벨)과 통일 — 실패 단계 라벨. 리전은 run.region 이 담는다.
+            error_summary=_failures_summary({"collect_region": _failure_reason(exc)}),
         )
         db.commit()
     except Exception:
         db.rollback()
+        _log.exception("리전 %s FAILED 기록 실패 — 흔적 없이 유실 방지 로그", region)
     finally:
         db.close()
 

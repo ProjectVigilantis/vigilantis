@@ -146,7 +146,7 @@ def test_collect_store_region_retries_once_then_succeeds(monkeypatch):
     def flaky(region, cfg=None):
         calls["n"] += 1
         if calls["n"] == 1:
-            raise ClientError({"Error": {"Code": "Throttling"}}, "DescribeInstances")
+            raise EndpointConnectionError(endpoint_url="http://localhost:4566")  # 일시 연결 블립
         return "INV"
 
     monkeypatch.setattr(C, "collect_region", flaky)
@@ -159,7 +159,10 @@ def test_collect_store_region_retries_once_then_succeeds(monkeypatch):
 def test_collect_store_region_isolates_failure_and_records(monkeypatch):
     from services import collector as C
 
+    calls = {"n": 0}
+
     def boom(region, cfg=None):
+        calls["n"] += 1
         raise ClientError({"Error": {"Code": "InternalFailure"}}, "DescribeInstances")
 
     recorded = {}
@@ -172,3 +175,4 @@ def test_collect_store_region_isolates_failure_and_records(monkeypatch):
     assert res["status"] == "FAILED"      # 이 리전만 실패로 마감(예외 삼킴 → 다른 리전 계속)
     assert res["error"] == "InternalFailure"
     assert recorded == {"region": "bad", "reason": "InternalFailure"}
+    assert calls["n"] == 1  # 비재시도성(InternalFailure)은 재시도하지 않고 즉시 실패
