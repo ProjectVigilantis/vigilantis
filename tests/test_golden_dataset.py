@@ -35,6 +35,7 @@ from schemas.events import (  # noqa: E402
     SshBruteForceThreatPayload,
     ThreatEventType,
 )
+from schemas.events import RiskReasonCode  # noqa: E402
 from security.risk_evaluator import (  # noqa: E402
     ALL_PORTS,
     ALL_PROTOCOL,
@@ -82,13 +83,19 @@ def _finops_pairs() -> list[tuple[Path, Path]]:
 
 
 def _secops_pairs() -> list[tuple[Path, Path]]:
-    """위협 입력 1건 = 정답 1건. 누락되면 여기서 즉시 걸린다."""
-    pairs = []
-    for src in sorted(SECOPS_INPUT.glob("*.json")):
-        expected = SECOPS_EXPECTED / src.name
-        assert expected.exists(), f"정답 파일 누락: {expected}"
-        pairs.append((src, expected))
-    return pairs
+    """위협 입력 1건 = 정답 1건. **양방향으로 본다.**
+
+    정답 누락만 잡으면, 입력이 삭제·개명될 때 그 시나리오가 회귀에서 조용히 빠진다
+    (PR #223 리뷰). 남은 정답 파일은 짝이 없어 아무도 태우지 않는다.
+    """
+    inputs = {p.name for p in SECOPS_INPUT.glob("*.json")}
+    answers = {p.name for p in SECOPS_EXPECTED.glob("*.json")}
+    assert inputs == answers, (
+        f"입력↔정답 짝이 어긋납니다 — "
+        f"정답 없는 입력: {sorted(inputs - answers)} / "
+        f"입력 없는 정답: {sorted(answers - inputs)}"
+    )
+    return [(SECOPS_INPUT / name, SECOPS_EXPECTED / name) for name in sorted(inputs)]
 
 
 def _normalized(raw: dict) -> NormalizedThreatEvent:
@@ -327,6 +334,13 @@ def test_secops_thresholds_not_drifted(_: Path, expected_path: Path) -> None:
         "SSH_HIGH_RATE_PER_MIN": SSH_HIGH_RATE_PER_MIN,
     }
     # 케이스가 실제로 의존하는 상수만 기록한다 — 기록된 것만 대조한다.
+    # 다만 **기록된 키가 전부 실재하는 상수명이어야 한다.** 오타나 개명된 키를 그냥
+    # 건너뛰면(유효 키 1개만 있어도 통과) 결합 원칙이 조용히 풀린다 (PR #223 리뷰).
+    unknown = set(recorded) - set(current) - {"note"}
+    assert not unknown, (
+        f"{expected_path.name}: risk_evaluator 에 없는 임계 키가 기록돼 있습니다 "
+        f"{sorted(unknown)} — 오타이거나 상수가 개명됐습니다."
+    )
     checked = [name for name in current if name in recorded]
     assert checked, f"{expected_path.name}: thresholds_at_authoring 에 대조할 상수가 없습니다."
     for name in checked:
@@ -381,6 +395,20 @@ def test_secops_case_ids_are_unique() -> None:
     ids = [_load(p)["case_id"] for _, p in _secops_pairs()]
     duplicated = sorted({i for i in ids if ids.count(i) > 1})
     assert not duplicated, f"중복된 case_id: {duplicated}"
+
+
+def test_secops_expected_covers_every_reason_code() -> None:
+    """정답 10건이 RiskReasonCode 6종을 전부 담는다.
+
+    FinOps 쪽 기준(Verdict 4종·SkipReasonCode 5종 전량 커버)의 SecOps 대응물이다
+    (PR #223 리뷰). 한 코드가 어느 정답에도 안 나오면 그 판정 분기는 골든이 못 잡는다.
+    """
+    used = {code for _, path in _secops_pairs() for code in _load(path)["reason_codes"]}
+    missing = {code.value for code in RiskReasonCode} - used
+    assert not missing, (
+        f"정답에 한 번도 안 나오는 RiskReasonCode: {sorted(missing)}. "
+        f"그 분기를 내는 입력 케이스를 secops/input 에 추가해야 합니다."
+    )
 
 
 def test_secops_expected_covers_every_risk_level() -> None:

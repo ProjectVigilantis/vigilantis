@@ -1,9 +1,11 @@
 # Golden Dataset (담당: 박지현)
 
-MVP 공통 테스트 정답지. 위협/자산 더미 데이터 26건을 `*.json`으로 적재.
+MVP 공통 테스트 정답지. 위협/자산 더미 데이터 **26건**을 `*.json`으로 적재하며, **정답은 26건 전부 채워져 있다**(2026-08-31).
 
-- 낭비 자원 시나리오 16건 (예: CPU 2% 미만 Idle EC2, Unattached SG, `_is_prod` 경계)
-- 보안 위협 시나리오 10건 (예: 22번 포트 전체 개방 0.0.0.0/0, SSH 브루트포스)
+- 낭비 자원 시나리오 16건 (예: CPU 2% 미만 Idle EC2, Unattached SG, `_is_prod` 경계) — 정답 `finops/expected/`
+- 보안 위협 시나리오 10건 (예: 22번 포트 전체 개방 0.0.0.0/0, SSH 브루트포스) — 정답 `secops/expected/`
+
+> **4주차 판정 기준 ⓔ의 "20건"** 은 1·2차 작성분(자산 10 + 위협 10)을 가리킨다. 3차 자산 6건(#124 — `_is_prod` 경계)이 뒤에 더해져 실제 전체는 26건이다.
 
 전체 팀(UI/AI/백엔드)이 공유하며 pytest 회귀 테스트(`tests/`)의 입력으로 사용한다.
 
@@ -37,7 +39,7 @@ datasets/golden/
 │   └── expected/               # rule_engine 판정 정답
 └── secops/
     ├── input/                  # MockThreatEventInput — 위협 1건 = 1파일
-    └── expected/               # (작성 보류 — 사유는 해당 폴더 README 참고)
+    └── expected/               # 위협 1건 = 1파일 (input 과 파일명 1:1)
 ```
 
 자산은 `AssetInventory`가 "한 리전 1회 수집 결과" 단위이므로 여러 자산을 한 파일에 담는다.
@@ -76,7 +78,7 @@ import할 수 없으므로 `tests/test_golden_dataset.py`가 현재 상수와 �
 | A4 | EC2 | `cpu_avg 1.0 / dp 47` | `SKIP_INSUFFICIENT_DATA` | 관측치 부족이 최우선인지 |
 | A5 | SG | `attached true / tcp 22 전체개방` | `THREAT` | 전체개방 탐지 |
 
-**위협 4건** — `secops/input/` (정답은 Risk 규칙 확정 후 별도 PR)
+**위협 4건** — `secops/input/` (정답 ✅ 2026-08-31 — 판정 규칙 확정 #210 / PR #206 후 작성)
 
 | ID | 파일 | 입력 |
 | --- | --- | --- |
@@ -107,7 +109,7 @@ A6은 이름을 `golden-ec2-billing-worker`로 잡았다. `_is_prod`는 인식 �
 
 **판정 커버리지**: 1차 5건 + 2차 5건으로 `Verdict` 4종·`SkipReasonCode` 5종 전부 커버(미커버 0). 3차는 판정 종류가 아니라 `_is_prod` 입력 경로를 넓힌다.
 
-**위협 6건** — `secops/input/` (정답은 Risk 규칙 확정 후 별도 PR)
+**위협 6건** — `secops/input/` (정답 ✅ 2026-08-31 — 판정 규칙 확정 #210 / PR #206 후 작성)
 
 | ID | 파일 | 입력 |
 | --- | --- | --- |
