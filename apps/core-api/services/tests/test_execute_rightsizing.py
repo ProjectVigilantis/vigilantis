@@ -48,9 +48,15 @@ STOP_RESPONSE = {
 }
 
 
-def client_error(code: str, operation: str = "Op", message: str = "") -> ClientError:
+def client_error(
+    code: str, operation: str = "Op", message: str = "", status: int | None = 400
+) -> ClientError:
+    """AWS 오류 응답 1건. status가 None이면 응답에 상태 코드가 없는 경우다."""
+    metadata: dict = {"RequestId": "req-err"}
+    if status is not None:
+        metadata["HTTPStatusCode"] = status
     return ClientError(
-        {"Error": {"Code": code, "Message": message}, "ResponseMetadata": {"RequestId": "req-err"}},
+        {"Error": {"Code": code, "Message": message}, "ResponseMetadata": metadata},
         operation,
     )
 
@@ -284,6 +290,35 @@ def test_start_failure_keeps_the_applied_type_change_visible(aws):
     assert not outcome.succeeded
     assert outcome.steps[1].effect is E.APPLIED
     assert (outcome.steps[2].status, outcome.steps[2].effect) == (S.FAILED, E.NOT_APPLIED)
+
+
+def test_server_error_leaves_the_effect_unknown(aws):
+    """5xx는 AWS가 작업을 시작했는지 알려 주지 않는다 — 변경 없음으로 단정하면
+    이미 바뀐 자산이 기록에서 사라진다."""
+    aws(modify_instance_attribute=client_error("InternalError", status=500))
+
+    outcome = run(aws)
+
+    assert not outcome.succeeded
+    assert outcome.steps[-1].effect is E.UNKNOWN
+
+
+def test_throttling_is_a_rejection_even_though_it_is_5xx(aws):
+    """스로틀링은 작업 이전에 반려된 것이라 자산이 그대로다(EC2는 503으로 보낸다)."""
+    aws(modify_instance_attribute=client_error("RequestLimitExceeded", status=503))
+
+    outcome = run(aws)
+
+    assert outcome.steps[-1].effect is E.NOT_APPLIED
+
+
+def test_response_without_a_status_code_is_unknown(aws):
+    """읽지 못한 것을 '변경 없음'으로 적지 않는다."""
+    aws(modify_instance_attribute=client_error("SomethingOdd", status=None))
+
+    outcome = run(aws)
+
+    assert outcome.steps[-1].effect is E.UNKNOWN
 
 
 def test_unreachable_endpoint_is_unknown_not_rejected(aws):

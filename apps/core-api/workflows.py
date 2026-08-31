@@ -13,6 +13,10 @@
 #     IN_PROGRESS 레코드를 남기는 데까지고, 그 예약을 실행으로 넘기는 디스패치는
 #     dispatcher.py 몫이다. 실행 직전 대상 자산 재확인과 후보 INVALIDATED 전이는
 #     아직 붙지 않았다.
+#   - 실행은 단계 기록까지만 커밋하고 **종료 상태는 확정하지 않는다.** 실행 종료와
+#     Incident 전이는 한 트랜잭션이어야 하며(dispatcher.py [수행해야 할 작업] 5번),
+#     실행만 먼저 옮기면 ACTION_IN_PROGRESS인데 진행 중 실행이 없는 조합이 생겨
+#     상세 조회가 500이 된다(api/incidents.py 응답 계약).
 #   - 조치 직전 스펙 JSON 백업은 여기서 커밋한다(store_instance_spec_backup).
 #     캡처는 services/aws/backup.py가, 저장·결속·커밋 순서는 이 계층이 소유한다 —
 #     "AWS 변경보다 먼저 커밋"이 트랜잭션 경계의 문제이기 때문이다.
@@ -25,7 +29,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Optional
 
 from pydantic import ValidationError
@@ -419,15 +422,22 @@ def store_instance_spec_backup(db: Session, execution_id: str) -> BackupOutcome:
 
 @dataclass(frozen=True)
 class ExecutionRunOutcome:
-    """실행 1건의 종료 결과. status는 이미 DB에 기록된 값이다."""
+    """실행 1건의 결과. **종료 상태는 아직 DB에 없다.**
 
-    status: ExecutionStatus
+    실행 행은 IN_PROGRESS로 남아 있고 SUCCESS·FAILED 확정은 dispatcher.py가
+    Incident 전이와 한 트랜잭션에서 한다(run_rightsizing_execution 참조). 여기 담긴
+    것은 그 확정에 필요한 재료다 — 성공 여부, 실패 분류(reason_code), 사람이 읽을
+    사유(error_summary), 그리고 자산이 어디까지 바뀌었는지 말하는 단계 결과(steps).
+    """
+
+    succeeded: bool
     reason_code: Optional[PrecheckReasonCode] = None
     error_summary: Optional[str] = None
+    steps: tuple[ExecutionStepResult, ...] = ()
 
-    @property
-    def succeeded(self) -> bool:
-        return self.status is ExecutionStatus.SUCCESS
+    def __post_init__(self) -> None:
+        if self.succeeded == (self.reason_code is not None):
+            raise ValueError("실패에만 reason_code를 채웁니다")
 
 
 def _step_recorder(db: Session, execution_id: str):
@@ -483,51 +493,41 @@ def _rightsizing_target_type(
     return getattr(data.parameters, "target_instance_type", None)
 
 
-def _finish_execution(
-    db: Session,
-    execution_id: str,
-    status: ExecutionStatus,
-    *,
-    reason_code: Optional[PrecheckReasonCode] = None,
-    error_summary: Optional[str] = None,
+def _run_failed(
+    reason_code: PrecheckReasonCode,
+    error_summary: str,
+    steps: tuple[ExecutionStepResult, ...] = (),
 ) -> ExecutionRunOutcome:
-    """종료 상태를 기록하고 commit한다. 출발 상태는 항상 IN_PROGRESS다."""
-    summary = error_summary[:1024] if error_summary else None
-    moved = executions_repo.update_execution_status(
-        db,
-        execution_id,
-        expected=ExecutionStatus.IN_PROGRESS,
-        next_status=status,
-        error_summary=summary,
-        finished_at=datetime.now(timezone.utc),
-    )
-    if not moved:
-        # 다른 주체가 먼저 상태를 옮겼다 — 실행 결과는 단계 기록으로 남아 있다
-        logger.warning(
-            "execution_status_not_moved",
-            extra={"execution_id": execution_id, "next_status": status.value},
-        )
-    db.commit()
+    """실패 결과 1건. 상태는 기록하지 않는다 — 확정은 dispatcher.py 몫이다."""
     return ExecutionRunOutcome(
-        status=status, reason_code=reason_code, error_summary=summary
+        succeeded=False,
+        reason_code=reason_code,
+        error_summary=error_summary[:1024],
+        steps=steps,
     )
 
 
 def run_rightsizing_execution(db: Session, execution_id: str) -> ExecutionRunOutcome:
-    """`RUNBOOK_EC2_RIGHTSIZING` 실행 — 백업 확보 → 정지·타입 변경·기동 → 종료 기록.
+    """`RUNBOOK_EC2_RIGHTSIZING` 실행 — 백업 확보 → 정지·타입 변경·기동 → 결과 반환.
 
     순서가 계약이다. **스펙 JSON 백업이 commit된 뒤에만 AWS 변경이 시작된다**
     (store_instance_spec_backup) — 변경과 백업 사이에서 프로세스가 죽으면 되돌릴
-    값이 어디에도 남지 않는다(ADR-0004 롤백 공통 정책 ③). 백업 실패는 조치를
-    시작하지 않고 실행을 FAILED로 끝낸다.
+    값이 어디에도 남지 않는다(ADR-0004 롤백 공통 정책 ③). 백업에 실패하면 조치를
+    시작하지 않고 실패 결과로 돌아간다.
 
     실행 실패는 ApiError로 던지지 않는다. 예약 이후의 실패는 HTTP 오류가 아니라
     Execution 상태로 전달하는 것이 공개 계약이다(schemas/api/errors.py) —
     store_instance_spec_backup이 실패를 판정으로 돌려주는 것과 같은 이유다.
 
-    **Incident 전이는 하지 않는다.** 실행 결과별 목적 상태는 관제자 종료 경로(#199)와
-    함께 정해질 미결 항목이라 dispatcher.py가 소유한다(그 파일 [수행해야 할 작업] 5번) —
-    여기서 임의로 정하면 두 자리가 서로 다른 매핑을 갖게 된다.
+    **종료 상태도 Incident 전이도 여기서 하지 않는다.** 실행 행은 IN_PROGRESS로
+    남기고 확정은 dispatcher.py가 둘을 **한 트랜잭션에서** 처리한다(그 파일
+    [수행해야 할 작업] 5번). 실행만 먼저 종료 상태로 옮기면 "Incident는
+    ACTION_IN_PROGRESS인데 진행 중인 실행이 없는" 조합이 생기는데, 상세 응답 계약
+    (api/incidents.py)이 그 조합을 거절하므로 상세 조회가 500이 된다.
+
+    최종 상태를 아는 자리가 여기가 아니기도 하다 — 기동 요청 접수는 성공의 경계가
+    아니고, 2/2 Status Check 결과가 SUCCESS와 ROLLBACK_INITIATED를 가른다
+    (services/aws/rollback.py).
     """
     execution = executions_repo.get_execution(db, execution_id)
     if execution is None:
@@ -543,22 +543,15 @@ def run_rightsizing_execution(db: Session, execution_id: str) -> ExecutionRunOut
     target_arn = execution.target_arn
     target_instance_type = _rightsizing_target_type(db, execution)
     if target_instance_type is None:
-        return _finish_execution(
-            db,
-            execution_id,
-            ExecutionStatus.FAILED,
-            reason_code=PrecheckReasonCode.PRECHECK_PARAM_INVALID,
-            error_summary="실행 파라미터에서 target_instance_type을 찾지 못했습니다",
+        return _run_failed(
+            PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+            "실행 파라미터에서 target_instance_type을 찾지 못했습니다",
         )
 
     stored = store_instance_spec_backup(db, execution_id)
     if not stored.stored:
-        return _finish_execution(
-            db,
-            execution_id,
-            ExecutionStatus.FAILED,
-            reason_code=stored.reason_code,
-            error_summary=f"스펙 JSON 백업 실패: {stored.detail or ''}".strip(),
+        return _run_failed(
+            stored.reason_code, f"스펙 JSON 백업 실패: {stored.detail or ''}".strip()
         )
 
     outcome = executor.execute_rightsizing(
@@ -567,13 +560,5 @@ def run_rightsizing_execution(db: Session, execution_id: str) -> ExecutionRunOut
         record_step=_step_recorder(db, execution_id),
     )
     if not outcome.succeeded:
-        return _finish_execution(
-            db,
-            execution_id,
-            ExecutionStatus.FAILED,
-            reason_code=outcome.reason_code,
-            error_summary=outcome.error_summary,
-        )
-    # 성공 판정 경계는 기동 요청 접수까지다. 2/2 Status Check 감시가 붙으면
-    # (services/aws/rollback.py) 그 결과가 SUCCESS와 ROLLBACK_INITIATED를 가른다.
-    return _finish_execution(db, execution_id, ExecutionStatus.SUCCESS)
+        return _run_failed(outcome.reason_code, outcome.error_summary, outcome.steps)
+    return ExecutionRunOutcome(succeeded=True, steps=outcome.steps)

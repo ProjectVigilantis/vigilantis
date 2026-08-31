@@ -58,8 +58,14 @@ STOP_RESPONSE = {
 }
 
 
-def client_error(code: str) -> ClientError:
-    return ClientError({"Error": {"Code": code, "Message": code}}, "Op")
+def client_error(code: str, status: int = 400) -> ClientError:
+    return ClientError(
+        {
+            "Error": {"Code": code, "Message": code},
+            "ResponseMetadata": {"HTTPStatusCode": status},
+        },
+        "Op",
+    )
 
 
 class FakeWaiter:
@@ -175,15 +181,21 @@ def test_steps_are_stored_in_order(db, aws):
     ]
 
 
-def test_execution_ends_as_success(db, aws):
+def test_execution_stays_in_progress_until_the_dispatcher_closes_it(db, aws):
+    """종료 상태는 여기서 확정하지 않는다.
+
+    실행만 먼저 종료로 옮기면 Incident는 ACTION_IN_PROGRESS인데 진행 중 실행이
+    없는 조합이 되고, 상세 응답 계약(api/incidents.py)이 그것을 거절해 조회가
+    500이 된다. 실행 종료와 Incident 전이는 dispatcher.py가 한 트랜잭션에서 한다.
+    """
     execution = _execution(db)
 
     outcome = workflows.run_rightsizing_execution(db, execution.execution_id)
 
-    assert outcome.status is ExecutionStatus.SUCCESS
+    assert outcome.succeeded and outcome.reason_code is None
     row = exec_repo.get_execution(db, execution.execution_id)
-    assert row.status is ExecutionStatus.SUCCESS
-    assert row.finished_at is not None and row.error_summary is None
+    assert row.status is ExecutionStatus.IN_PROGRESS
+    assert row.finished_at is None and row.error_summary is None
 
 
 def test_target_type_comes_from_the_candidate(db, aws):
@@ -215,10 +227,12 @@ def test_backup_failure_stops_before_the_change(db, aws):
 
     outcome = workflows.run_rightsizing_execution(db, execution.execution_id)
 
-    assert outcome.status is ExecutionStatus.FAILED
+    assert not outcome.succeeded
     assert outcome.reason_code is R.PRECHECK_TARGET_NOT_FOUND
+    assert outcome.error_summary and outcome.steps == ()
     assert "stop_instances" not in operations(aws)
-    assert exec_repo.get_execution(db, execution.execution_id).error_summary
+    # 실패도 종료 상태로 옮기지 않는다 — Incident 전이와 함께 dispatcher가 확정한다
+    assert exec_repo.get_execution(db, execution.execution_id).status is ExecutionStatus.IN_PROGRESS
 
 
 def test_missing_target_type_fails_without_touching_aws(db, aws):
@@ -226,7 +240,7 @@ def test_missing_target_type_fails_without_touching_aws(db, aws):
 
     outcome = workflows.run_rightsizing_execution(db, execution.execution_id)
 
-    assert outcome.status is ExecutionStatus.FAILED
+    assert not outcome.succeeded
     assert outcome.reason_code is R.PRECHECK_PARAM_INVALID
     assert aws.calls == []
 
@@ -238,14 +252,18 @@ def test_failed_change_keeps_the_step_trace(db, aws):
 
     outcome = workflows.run_rightsizing_execution(db, execution.execution_id)
 
-    assert outcome.status is ExecutionStatus.FAILED
+    assert not outcome.succeeded
     steps = exec_repo.list_steps(db, execution.execution_id)
     assert [(s.sequence, s.status, s.effect) for s in steps] == [
         (1, S.SUCCESS, E.APPLIED),
         (2, S.FAILED, E.NOT_APPLIED),
     ]
-    row = exec_repo.get_execution(db, execution.execution_id)
-    assert row.status is ExecutionStatus.FAILED and "InvalidParameterValue" in row.error_summary
+    # 종료 상태를 확정할 dispatcher가 읽을 재료 — 어디까지 바뀌었는지가 반환값에 실린다
+    assert [(s.sequence, s.effect) for s in outcome.steps] == [
+        (1, E.APPLIED),
+        (2, E.NOT_APPLIED),
+    ]
+    assert "InvalidParameterValue" in outcome.error_summary
 
 
 # ------------------------------------------------------------------ 배선 오류

@@ -1034,7 +1034,9 @@ def precheck(
 # 않는다. 그 경우 실행은 IN_PROGRESS로 남고 회수(dispatcher.py)가 집는다.
 #
 # effect는 "자산이 실제로 바뀌었는가"이며 자동 원복 판단의 입력이다. 낙관적으로 적지
-# 않는다 — AWS가 거절한 호출만 NOT_APPLIED이고, 요청이 닿았는지 모르는 실패는 UNKNOWN이다.
+# 않는다 — 4xx 거절과 스로틀링처럼 **작업 이전에 반려된 것이 확실한** 실패만
+# NOT_APPLIED이고, 5xx 서버 오류·연결 실패처럼 적용 여부를 알 수 없는 실패는
+# UNKNOWN이다(_effect_for).
 
 
 # 단계 유형 — schemas.executions가 어휘를 Enum으로 확정할 때까지 문자열이다(#55 헤더).
@@ -1091,13 +1093,35 @@ def _summarize(exc: BaseException) -> str:
     return text[:_SUMMARY_LIMIT] or type(exc).__name__
 
 
-def _effect_for(exc: BaseException) -> ExecutionEffect:
-    """AWS가 거절한 호출은 자산을 바꾸지 않는다. 요청이 닿았는지 모르면 UNKNOWN이다.
+# 5xx로 오지만 "작업 이전에 거절됐다"가 확실한 오류 — 스로틀링이 그렇다(EC2의
+# RequestLimitExceeded는 503으로 온다). 자산은 손대지 않은 채 요청만 반려된 것이다.
+_THROTTLED_CODES: frozenset[str] = frozenset(
+    {"RequestLimitExceeded", "Throttling", "ThrottlingException", "SlowDown"}
+)
 
-    ParamValidationError는 botocore가 네트워크 호출 이전에 내므로 거절과 같이 본다
-    (errors.reason_code_for가 같은 이유로 PARAM_INVALID로 분류한다).
+
+def _effect_for(exc: BaseException) -> ExecutionEffect:
+    """이 실패가 자산을 바꿨는가. 확실할 때만 NOT_APPLIED로 적는다.
+
+    자동 원복은 "되돌릴 것이 있는가"를 effect로만 판단한다. 그래서 오류 응답이
+    왔다는 사실만으로 변경 없음이라 단정하지 않는다 — 오류를 전부 NOT_APPLIED로
+    적으면 서버 오류로 끊긴 변경이 기록상 사라진다.
+
+    - 4xx 거절(IncorrectInstanceState 등): 요청이 받아들여지지 않았다 → NOT_APPLIED
+    - 5xx 서버 오류: AWS가 작업을 시작했는지 알 수 없다 → UNKNOWN
+    - 스로틀링: 5xx여도 작업 이전 반려라 변경이 없다 → NOT_APPLIED
+    - 상태 코드를 읽지 못한 응답·AWS에 닿지 못한 실패 → UNKNOWN
+    - ParamValidationError는 botocore가 네트워크 호출 이전에 낸다 → NOT_APPLIED
+      (errors.reason_code_for가 같은 이유로 PARAM_INVALID로 분류한다)
     """
-    if isinstance(exc, (ClientError, ParamValidationError)):
+    if isinstance(exc, ParamValidationError):
+        return ExecutionEffect.NOT_APPLIED
+    if not isinstance(exc, ClientError):
+        return ExecutionEffect.UNKNOWN
+    if aws_error_code(exc) in _THROTTLED_CODES:
+        return ExecutionEffect.NOT_APPLIED
+    status = (exc.response.get("ResponseMetadata") or {}).get("HTTPStatusCode")
+    if isinstance(status, int) and 400 <= status < 500:
         return ExecutionEffect.NOT_APPLIED
     return ExecutionEffect.UNKNOWN
 
