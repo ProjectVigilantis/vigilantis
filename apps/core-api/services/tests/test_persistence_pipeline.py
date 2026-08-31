@@ -23,7 +23,7 @@ for p in (str(CORE_API), str(REPO_ROOT / "packages")):
         sys.path.insert(0, p)
 
 from db import models  # noqa: E402
-from schemas.api.assets import AssetItem, AssetType  # noqa: E402
+from schemas.api.assets import AssetItem, AssetType, SkipReasonCode  # noqa: E402
 from schemas.assets import (  # noqa: E402
     AlbTargetGroupAsset,
     AssetInventory,
@@ -771,10 +771,12 @@ def five_skip_inventory() -> AssetInventory:
 
 def test_all_five_skip_reason_codes_persisted(db, five_skip_inventory):
     """SkipReasonCode 5종이 full 파이프라인(persist → run_rule_engine)으로 RuleEvaluation 에
-    실제 적재되는지 (C2). 기존 테스트는 PROD_PROTECTED·ACTIVE 2종만 DB 검증했다."""
+    실제 적재되는지 (C2). rule_engine 판정 → DB 적재 경로로 검증된 건 기존엔 PROD_PROTECTED·
+    ACTIVE 2종뿐이었다(나머지는 evaluate_* 직접 호출 golden 테스트로만 대조)."""
     res = persist_inventory(five_skip_inventory, db)
     run_rule_engine(db, collection_run_id=res["collection_run_id"])
     db.flush()
+    db.expire_all()  # identity map 비우고 DB 행에서 다시 읽는다 — 왕복 검증(#109 선례)
 
     expected = {
         "i-insufficient": "SKIP_INSUFFICIENT_DATA",
@@ -795,6 +797,5 @@ def test_all_five_skip_reason_codes_persisted(db, five_skip_inventory):
         assert ev.skip_reason_code == exp_code, resource_id
         persisted[resource_id] = ev.skip_reason_code
 
-    # 5종 전량이 서로 다른 값으로 실제 적재됐는지(누락·중복 방어)
-    assert set(persisted.values()) == set(expected.values())
-    assert len(set(persisted.values())) == 5
+    # 5종 전량 = SkipReasonCode enum 전량. 6번째 코드가 추가되면 깨져서 "5종" 전제가 낡았음을 알린다.
+    assert set(persisted.values()) == {c.value for c in SkipReasonCode}
