@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -49,8 +50,46 @@ _METRIC_NAMES = (MetricName.CPU_UTILIZATION, MetricName.NETWORK_IN, MetricName.N
 _QUERY_BATCH = 100
 
 
-def _safe_describe(fn, label: str, degraded: list[str]) -> list:
-    """describe 호출 1건을 시도하고, AWS 오류면 빈 목록으로 degrade 하며 label 을 degraded 에 남긴다.
+def _failure_reason(exc: BaseException) -> str:
+    """degrade 사유를 사람이 읽을 짧은 코드로. ClientError 는 AWS 오류 코드
+    (InternalFailure·AccessDenied·Throttling 등), 그 외는 예외 클래스명."""
+    if isinstance(exc, ClientError):
+        return exc.response.get("Error", {}).get("Code") or "ClientError"
+    return type(exc).__name__
+
+
+def _failures_summary(failures: dict[str, str]) -> str:
+    """collector_failures 를 error_summary(String(1024))에 실을 compact JSON 으로.
+    상한 초과 시 문자열을 자르면 JSON 이 깨지므로, 항목을 버리고 표식만 남겨 유효 JSON 을
+    유지한다(라벨은 4종뿐이라 실제 도달은 불가하나 계약(json.loads)을 안전하게 지킨다)."""
+    text = json.dumps(failures, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if len(text) <= 1024:
+        return text
+    return json.dumps({"_truncated": str(len(failures))}, ensure_ascii=False, separators=(",", ":"))
+
+
+# 리전 단위 재시도 대상 — 일시성 오류만. AccessDenied·InternalFailure 등 비재시도성은 즉시 실패로.
+_RETRYABLE_CLIENT_CODES = (
+    "Throttling", "ThrottlingException", "RequestLimitExceeded",
+    "ServiceUnavailable", "RequestTimeout", "InternalError",
+)
+_RETRYABLE_BOTOCORE = (
+    "EndpointConnectionError", "ConnectTimeoutError", "ReadTimeoutError",
+    "ConnectionError", "ConnectionClosedError",
+)
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """리전 단위 재시도 대상인지. botocore adaptive(max 5)가 이미 도는 계층 위이므로
+    대상을 일시성(스로틀·서비스 불가·연결 계열)으로 좁힌다 — 나머지는 재시도해도 결과가 같다."""
+    if isinstance(exc, ClientError):
+        return _failure_reason(exc) in _RETRYABLE_CLIENT_CODES
+    return type(exc).__name__ in _RETRYABLE_BOTOCORE
+
+
+def _safe_describe(fn, label: str, failures: dict[str, str]) -> list:
+    """describe 호출 1건을 시도하고, AWS 오류면 빈 목록으로 degrade 하며 `failures[label]`에
+    사유 코드를 남긴다(자산 단위 실패 사유, C4).
 
     목적은 부분 실패 시 나머지 수집을 살리는 것이다. autoscaling·elbv2 는 LocalStack
     Community 미포함(ADR-0006 §4)이라 로컬에서 `InternalFailure`(ClientError)가 나는데,
@@ -58,16 +97,16 @@ def _safe_describe(fn, label: str, degraded: list[str]) -> list:
     환경(LocalStack 여부)을 보고 분기하지 않고 '호출은 시도하되 실패를 잡아 강등'하는
     방식이라 ADR-0006 §3(코드 분기 금지)에 저촉되지 않는다.
 
-    다만 실 AWS 의 AccessDenied·Throttling 도 같은 ClientError 라 함께 흡수된다 — 이를
-    '정상 0건'과 구별하려고 실패 라벨을 degraded 에 모아, persist 단계가 수집을 PARTIAL
-    로 마감하게 한다(라우터가 PARTIAL → collection_status=PARTIAL 로 표면화). 로그만으로는
-    발표 중 degrade 가 화면에 드러나지 않는다. 실 AWS 검증은 6~7주차 스모크로 이월(§4).
+    실 AWS 의 AccessDenied·Throttling 도 같은 ClientError 라 함께 흡수되므로, '정상 0건'과
+    구별하려고 실패 라벨·사유를 모은다 — persist 가 이를 error_summary(JSON)에 싣고 PARTIAL
+    로 마감한다(라우터가 PARTIAL → collection_status=PARTIAL 로 표면화). 실 검증은 스모크(§4).
     """
     try:
         return fn()
     except (ClientError, BotoCoreError) as exc:
-        _log.warning("자산 수집 degrade — %s 조회 실패(환경 미지원/권한/스로틀): %s", label, exc)
-        degraded.append(label)
+        reason = _failure_reason(exc)
+        _log.warning("자산 수집 degrade — %s 조회 실패(%s): %s", label, reason, exc)
+        failures[label] = reason
         return []
 
 
@@ -256,22 +295,22 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
     nacls_raw = ec2.describe_network_acls()["NetworkAcls"]
     volumes_raw = _paginate(ec2, "describe_volumes", "Volumes")
     # Launch Template 은 ec2(Community 지원). ASG 는 autoscaling(Pro 전용)이라 로컬에선
-    # _safe_describe 가 빈 목록으로 degrade 하고 degraded 에 라벨을 남긴다(ADR-0006 §4).
-    degraded: list[str] = []
+    # _safe_describe 가 빈 목록으로 degrade 하고 failures 에 (서비스→사유)를 남긴다(ADR-0006 §4, C4).
+    failures: dict[str, str] = {}
     lts_raw = _safe_describe(
         lambda: _paginate(ec2, "describe_launch_templates", "LaunchTemplates"),
-        "launch_templates", degraded,
+        "launch_templates", failures,
     )
     asg = aws_client("autoscaling", region)
     asgs_raw = _safe_describe(
         lambda: _paginate(asg, "describe_auto_scaling_groups", "AutoScalingGroups"),
-        "auto_scaling_groups", degraded,
+        "auto_scaling_groups", failures,
     )
     # ALB Target Group 도 elbv2(Pro 전용)라 로컬에선 degrade 된다(ADR-0006 §4).
     elbv2 = aws_client("elbv2", region)
     tgs_raw = _safe_describe(
         lambda: _paginate(elbv2, "describe_target_groups", "TargetGroups"),
-        "alb_target_groups", degraded,
+        "alb_target_groups", failures,
     )
     used = _used_sg_ids(instances_raw, enis_raw)
 
@@ -389,7 +428,7 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
         # target_type=instance 의 Target.Id(i-xxxx)만 REGISTERED_IN 대상, 중복 제거.
         health = _safe_describe(
             lambda arn=tg_arn: elbv2.describe_target_health(TargetGroupArn=arn)["TargetHealthDescriptions"],
-            "alb_target_health", degraded,
+            "alb_target_health", failures,
         )
         target_instance_ids = _registered_instance_ids(health)
         tg_assets.append(
@@ -418,7 +457,7 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
         launch_templates=lt_assets,
         auto_scaling_groups=asg_assets,
         alb_target_groups=tg_assets,
-        degraded_collectors=degraded,
+        collector_failures=failures,  # degraded_collectors 는 여기서 파생(computed_field)
     )
 
 
@@ -690,16 +729,21 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
         )
 
     if started_own_run:
-        # degrade(빈 목록으로 흡수된 수집 실패)가 한 번이라도 있으면 PARTIAL 로 마감한다.
-        # 실 AWS 의 권한 누락·스로틀링이 '정상 0건'으로 오인되지 않게 화면에 표면화된다.
+        # degrade(빈 목록으로 흡수된 수집 실패)가 한 번이라도 있으면 PARTIAL 로 마감하고,
+        # 자산 단위 실패 사유를 error_summary(JSON)에 싣는다(C4). run 단위 1문장이 아니라
+        # {서비스: 사유} 지도라 화면·조회에서 무엇이 왜 빠졌는지 판별된다.
         run_status = (
-            CollectionRunStatus.PARTIAL if inv.degraded_collectors else CollectionRunStatus.SUCCESS
+            CollectionRunStatus.PARTIAL if inv.collector_failures else CollectionRunStatus.SUCCESS
+        )
+        error_summary = (
+            _failures_summary(inv.collector_failures) if inv.collector_failures else None
         )
         assets_repo.finish_collection_run(
             db,
             collection_run_id=collection_run_id,
             status=run_status,
             finished_at=inv.collected_at,
+            error_summary=error_summary,
         )
 
     return {
@@ -714,28 +758,79 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
         "tg_count": tg_count,
         "total": total,
         "degraded_collectors": list(inv.degraded_collectors),
+        "collector_failures": dict(inv.collector_failures),
     }
 
 
 def collect_and_store() -> list[dict]:
     """수집 → 정형화 → DB 적재까지. scheduler 가 이 함수를 주기 호출한다.
-    (판정은 이후 rule_engine 이 assets 테이블 및 metric_summaries 를 읽어 수행)"""
+    (판정은 이후 rule_engine 이 assets 테이블 및 metric_summaries 를 읽어 수행)
+
+    C4: 리전을 독립 트랜잭션으로 처리한다 — 한 리전이 실패해도 다른 리전은 커밋된다
+    (기존엔 한 리전 예외 = 전체 롤백). 실패 리전은 1회 재시도 후 FAILED 로 기록한다.
+    """
     from db.session import get_session_factory
 
     cfg = _runtime_config()
-    summaries = []
     session_factory = get_session_factory()
+    return [_collect_store_region(region, cfg, session_factory) for region in cfg["regions"]]
+
+
+def _collect_store_region(region: str, cfg: dict, session_factory) -> dict:
+    """한 리전을 독립 트랜잭션으로 수집·적재. core describe 가 일시 오류로 실패하면 1회
+    재시도하고, 그래도 실패하면 그 리전만 FAILED 로 기록한 뒤 예외를 삼켜 다음 리전이 계속되게 한다."""
     db = session_factory()
     try:
-        for region in cfg["regions"]:
+        try:
             inv = collect_region(region, cfg)
-            summary = persist_inventory(inv, db)
-            summaries.append(summary)
+        except (ClientError, BotoCoreError) as exc:
+            if not _is_retryable(exc):
+                raise  # 비재시도성(AccessDenied·InternalFailure 등)은 즉시 실패로
+            _log.warning("리전 %s 수집 일시 실패 — 1회 재시도(%s)", region, _failure_reason(exc))
+            inv = collect_region(region, cfg)
+        summary = persist_inventory(inv, db)
+        db.commit()
+        return summary
+    except Exception as exc:  # 리전 격리 — 이 리전만 실패로 마감하고 다른 리전은 계속
+        db.rollback()
+        # 코드 버그(KeyError 등)도 여기서 삼키므로 스택트레이스를 남긴다(_log.exception).
+        _log.exception("리전 %s 수집 최종 실패 — FAILED 로 기록하고 계속(%s)", region, _failure_reason(exc))
+        _record_failed_region(region, cfg, exc, session_factory)
+        return {"region": region, "status": "FAILED", "error": _failure_reason(exc)}
+    finally:
+        db.close()
+
+
+def _record_failed_region(region: str, cfg: dict, exc: BaseException, session_factory) -> None:
+    """실패한 리전을 FAILED CollectionRun 으로 남긴다(다른 리전과 격리된 별도 트랜잭션).
+    기록 자체가 실패해도 파이프라인을 막지 않는다."""
+    from db.repositories import assets as assets_repo
+    from schemas.collections import CollectionRunStatus
+
+    db = session_factory()
+    try:
+        # 실패 경로를 짧게 — STS(GetCallerIdentity) 재호출 안 하고 account 는 unknown 으로 둔다
+        # (계정은 CollectionRun.region 과 함께 이미 성공 리전 run 에서 확인 가능).
+        run = assets_repo.start_collection_run(
+            db,
+            account_id="unknown",
+            region=region,
+            mode=deployment_mode(),
+            lookback_days=cfg["lookback_days"],
+            period_seconds=cfg["period_seconds"],
+        )
+        assets_repo.finish_collection_run(
+            db,
+            collection_run_id=run.collection_run_id,
+            status=CollectionRunStatus.FAILED,
+            finished_at=datetime.now(timezone.utc),
+            # error_summary 키 축을 PARTIAL(서비스 라벨)과 통일 — 실패 단계 라벨. 리전은 run.region 이 담는다.
+            error_summary=_failures_summary({"collect_region": _failure_reason(exc)}),
+        )
         db.commit()
     except Exception:
         db.rollback()
-        raise
+        _log.exception("리전 %s FAILED 기록 실패 — 흔적 없이 유실 방지 로그", region)
     finally:
         db.close()
-    return summaries
 

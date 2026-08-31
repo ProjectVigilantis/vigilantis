@@ -586,17 +586,20 @@ def test_degraded_collectors_finish_run_partial(db):
                 instance_ids=[], launch_template_id=None,  # LT 없음 → USES 없음
             )
         ],
-        degraded_collectors=["auto_scaling_groups"],  # 예: 실 AWS AccessDenied 흡수 상황
+        # 자산 단위 실패 사유(C4) — 예: 실 AWS AccessDenied 흡수 상황
+        collector_failures={"auto_scaling_groups": "AccessDenied"},
     )
     res = persist_inventory(inv, db)
     run_id = res["collection_run_id"]
-    assert res["degraded_collectors"] == ["auto_scaling_groups"]
+    assert res["collector_failures"] == {"auto_scaling_groups": "AccessDenied"}
 
-    # 1) degrade 있으면 PARTIAL 로 마감
+    # 1) degrade(실패 사유)가 있으면 PARTIAL 로 마감 + error_summary(JSON)에 사유 적재 (C4)
     run = db.execute(
         select(models.CollectionRun).where(models.CollectionRun.collection_run_id == run_id)
     ).scalar_one()
     assert run.status.value == "PARTIAL"
+    import json as _json
+    assert _json.loads(run.error_summary) == {"auto_scaling_groups": "AccessDenied"}
 
     # 2) LT 없는 ASG 는 USES(및 어떤) 관계도 없다
     asg = db.execute(

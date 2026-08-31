@@ -193,13 +193,20 @@ class AssetInventory(BaseModel):
     launch_templates: list[LaunchTemplateAsset] = Field(default_factory=list)
     auto_scaling_groups: list[AutoScalingGroupAsset] = Field(default_factory=list)
     alb_target_groups: list[AlbTargetGroupAsset] = Field(default_factory=list)
-    degraded_collectors: list[str] = Field(
-        default_factory=list,
+    collector_failures: dict[str, str] = Field(
+        default_factory=dict,
         description=(
-            "수집 실패로 빈 목록 degrade 된 서비스 라벨(예: auto_scaling_groups). "
-            "비어있지 않으면 부분 수집 — persist 가 CollectionRun 을 PARTIAL 로 마감한다."
+            "자산 단위 실패 사유 — {서비스 라벨: 사유 코드}(예: {'auto_scaling_groups': 'InternalFailure'}). "
+            "비어있지 않으면 부분 수집 — **PARTIAL 판정의 단일 원천**이다(persist 가 error_summary(JSON)에 싣고 "
+            "CollectionRun 을 PARTIAL 로 마감). (C4)"
         ),
     )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def degraded_collectors(self) -> list[str]:
+        """degrade 된 서비스 라벨 목록 — collector_failures 에서 파생(원천 하나)."""
+        return sorted(self.collector_failures)
 
     @computed_field  # type: ignore[prop-decorator]
     @property

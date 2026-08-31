@@ -63,50 +63,50 @@ def test_paginate_empty_pages():
     assert _paginate(client, "describe_auto_scaling_groups", "AutoScalingGroups") == []
 
 
-def test_safe_describe_passes_through_and_no_label():
-    degraded: list[str] = []
-    out = _safe_describe(lambda: [1, 2, 3], "launch_templates", degraded)
+def test_safe_describe_passes_through_and_no_failure():
+    failures: dict[str, str] = {}
+    out = _safe_describe(lambda: [1, 2, 3], "launch_templates", failures)
     assert out == [1, 2, 3]
-    assert degraded == []
+    assert failures == {}
 
 
-def test_safe_describe_absorbs_client_error_and_records_label():
-    # LocalStack 의 Pro 전용 InternalFailure(=ClientError) 를 모사.
+def test_safe_describe_absorbs_client_error_and_records_reason():
+    # LocalStack 의 Pro 전용 InternalFailure(=ClientError) 를 모사. 사유=AWS 오류 코드 (C4).
     err = ClientError(
         {"Error": {"Code": "InternalFailure", "Message": "not included within your LocalStack license"}},
         "DescribeAutoScalingGroups",
     )
-    degraded: list[str] = []
+    failures: dict[str, str] = {}
 
     def _boom():
         raise err
 
-    out = _safe_describe(_boom, "auto_scaling_groups", degraded)
+    out = _safe_describe(_boom, "auto_scaling_groups", failures)
     assert out == []
-    assert degraded == ["auto_scaling_groups"]
+    assert failures == {"auto_scaling_groups": "InternalFailure"}
 
 
-def test_safe_describe_absorbs_botocore_error():
-    # 엔드포인트 접속 실패(BotoCoreError 계열)도 흡수한다.
-    degraded: list[str] = []
+def test_safe_describe_absorbs_botocore_error_with_class_name():
+    # 엔드포인트 접속 실패(BotoCoreError 계열)도 흡수 — 사유=예외 클래스명.
+    failures: dict[str, str] = {}
 
     def _boom():
         raise EndpointConnectionError(endpoint_url="http://localhost:4566")
 
-    assert _safe_describe(_boom, "auto_scaling_groups", degraded) == []
-    assert degraded == ["auto_scaling_groups"]
+    assert _safe_describe(_boom, "auto_scaling_groups", failures) == []
+    assert failures == {"auto_scaling_groups": "EndpointConnectionError"}
 
 
 def test_safe_describe_does_not_swallow_unexpected_error():
     # AWS 예외가 아닌 버그성 예외까지 삼키면 안 된다.
-    degraded: list[str] = []
+    failures: dict[str, str] = {}
 
     def _boom():
         raise KeyError("AutoScalingGroupARN")
 
     with pytest.raises(KeyError):
-        _safe_describe(_boom, "auto_scaling_groups", degraded)
-    assert degraded == []
+        _safe_describe(_boom, "auto_scaling_groups", failures)
+    assert failures == {}
 
 
 def test_registered_instance_ids_dedups_multiport():
@@ -128,3 +128,51 @@ def test_is_alb_target_group_filters_by_protocol():
     assert _is_alb_target_group({"Protocol": "TCP"}) is False
     assert _is_alb_target_group({"Protocol": "GENEVE"}) is False
     assert _is_alb_target_group({}) is False
+
+
+# ---- C4: 리전 격리·부분 리트라이 제어 흐름 (no-DB) ----
+
+class _FakeSession:
+    def commit(self): pass
+    def rollback(self): pass
+    def close(self): pass
+
+
+def test_collect_store_region_retries_once_then_succeeds(monkeypatch):
+    from services import collector as C
+
+    calls = {"n": 0}
+
+    def flaky(region, cfg=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise EndpointConnectionError(endpoint_url="http://localhost:4566")  # 일시 연결 블립
+        return "INV"
+
+    monkeypatch.setattr(C, "collect_region", flaky)
+    monkeypatch.setattr(C, "persist_inventory", lambda inv, db: {"region": "r", "total": 1})
+    res = C._collect_store_region("r", {"lookback_days": 14, "period_seconds": 3600}, lambda: _FakeSession())
+    assert res["total"] == 1
+    assert calls["n"] == 2  # 일시 오류 → 1회 재시도 후 성공
+
+
+def test_collect_store_region_isolates_failure_and_records(monkeypatch):
+    from services import collector as C
+
+    calls = {"n": 0}
+
+    def boom(region, cfg=None):
+        calls["n"] += 1
+        raise ClientError({"Error": {"Code": "InternalFailure"}}, "DescribeInstances")
+
+    recorded = {}
+    monkeypatch.setattr(C, "collect_region", boom)
+    monkeypatch.setattr(
+        C, "_record_failed_region",
+        lambda region, cfg, exc, sf: recorded.update(region=region, reason=C._failure_reason(exc)),
+    )
+    res = C._collect_store_region("bad", {"lookback_days": 14, "period_seconds": 3600}, lambda: _FakeSession())
+    assert res["status"] == "FAILED"      # 이 리전만 실패로 마감(예외 삼킴 → 다른 리전 계속)
+    assert res["error"] == "InternalFailure"
+    assert recorded == {"region": "bad", "reason": "InternalFailure"}
+    assert calls["n"] == 1  # 비재시도성(InternalFailure)은 재시도하지 않고 즉시 실패
