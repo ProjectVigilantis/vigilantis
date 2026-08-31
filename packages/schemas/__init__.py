@@ -42,9 +42,11 @@ from .events import (
     NormalizedThreatEvent,
     OpenIpThreatInput,
     OpenIpThreatPayload,
+    RiskReasonCode,
     SshBruteForceThreatInput,
     SshBruteForceThreatPayload,
     ThreatEventType,
+    expected_mode_for,
 )
 from .evidence import (
     EVIDENCE_CONTENT_MODELS,
@@ -220,6 +222,8 @@ __all__ = [
     "PrecheckReasonCode",
     "ROLLBACK_RUNBOOK_BY_MAIN_ID",
     "ROLLBACK_RUNBOOK_IDS",
+    "expected_mode_for",
+    "RiskReasonCode",
     "RuleEvaluationResult",
     "RuleEvidence",
     "RUNBOOK_DOMAIN_BY_ID",

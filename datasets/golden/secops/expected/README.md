@@ -1,9 +1,10 @@
-# SecOps 정답(expected) — 작성 보류
+# SecOps 정답(expected) — 작성 대기(규칙 확정됨)
 
-이 폴더는 의도적으로 비어 있다. 위협 4건의 입력(`secops/input/`)은 작성 완료했으나,
-**예상 판단/대응 결과를 정의할 규칙이 아직 확정되지 않았다.**
+이 폴더는 아직 비어 있다. 위협 입력(`secops/input/`)은 작성 완료했고,
+**판정 규칙은 2026-08-31 확정됐다(PR #206 — Risk Evaluator: `RiskReasonCode` 값 목록·위험도 임계).**
+남은 것은 그 규칙대로 정답을 채우는 작업(J3, 박지현)이며, 이 문서의 보류 사유(규칙 미확정)는 해소됐다.
 
-## 보류 사유
+## 정답 3값 · 계약 위치
 
 위협 이벤트의 "판단/대응 결과"는 다음 세 값을 뜻한다.
 
@@ -13,21 +14,15 @@
 | `response_mode` (`PRE_MITIGATION_0_5S` / `AGENT_WAIT`) | 〃 |
 | `reason_codes` (`RiskReasonCode`) | 〃 |
 
-셋 다 판정 규칙이 미확정이며, 저장소는 **값을 추정하지 말 것**을 명시하고 있다.
+셋 다 확정됐다(2026-08-31, PR #206):
 
-- `packages/schemas/events.py` — `reason_codes` Enum은 Risk 판정 규칙 확정 시 교체한다.
-  값을 지어내지 않기 위해 우선 문자열로 둔다.
-- [ADR-0005](../../../docs/adr/0005-langgraph-stateless-domain-graphs.md) —
-  `RiskReasonCode` 값 목록은 Risk 규칙 확정 전까지 미정. 저장 위치만 정한 것이다.
-- `apps/core-api/security/` — Risk Evaluator 구현 자체가 아직 없다.
+- `packages/schemas/events.py` — `RiskReasonCode` Enum 6종 확정, `reason_codes` = list[RiskReasonCode](최소 1개).
+- `apps/core-api/security/risk_evaluator.py` — `evaluate_threat()` 구현. 판정 규칙은 이 파일 상단·PR #206 참고.
 
-여기서 정답을 채우면 임계값을 추측해 적는 것이 되고, 나중에 실제 규칙이 정해졌을 때
-**틀린 정답지가 회귀 테스트를 통과시키는** 더 나쁜 상태가 된다.
+## 남은 작업 (J3, 박지현)
 
-## 해소 조건
-
-Risk 판정 규칙(`RiskReasonCode` 값 목록 + 위험도 임계값)이 확정되면 별도 PR로 채운다.
-형식은 `finops/expected/`와 동일하게 맞춘다.
+확정된 규칙대로 10건의 정답을 채운다(형식은 `finops/expected/`와 동일). **여전히 값을 추정해 적지 말 것** —
+정답은 `evaluate_threat`의 실제 산출과 대조해 고정하며, 규칙이 바뀌면 정답지와 `risk_evaluator` 상수를 함께 갱신한다.
 
 ```json
 {

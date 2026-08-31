@@ -12,8 +12,7 @@
 #     중복 판정은 source_event_id·deduplication_key로 한다.
 #   - 초기 판정 High→PRE_MITIGATION_0_5S, Medium·Low→AGENT_WAIT.
 #     TIMEOUT_ISOLATION_1M은 초기 판정 결과가 아니다(응답 기한 만료 시 전환).
-#   - reason_codes 값 Enum은 Risk 판정 규칙 확정 시 교체한다(#49 확정 — 값을
-#     지어내지 않기 위해 우선 문자열로 둔다).
+#   - reason_codes 는 RiskReasonCode(2026-08-31 안성일 결정, PR #206) 제한·최소 1개.
 # ==============================================================================
 
 from __future__ import annotations
@@ -137,6 +136,35 @@ _EXPECTED_MODE_BY_RISK: dict[RiskLevel, ResponseMode] = {
 }
 
 
+def expected_mode_for(risk_level: RiskLevel) -> ResponseMode:
+    """초기 판정 위험도 → 대응 경로(response_mode) 매핑의 공개 접점.
+
+    Risk Evaluator 등 외부 소비자가 비공개 `_EXPECTED_MODE_BY_RISK` 를 넘어 import 하지
+    않도록 공개 헬퍼로 노출한다. InitialRiskEvaluationResult validator 가 이 매핑을 재검증한다.
+    """
+    return _EXPECTED_MODE_BY_RISK[risk_level]
+
+
+@unique
+class RiskReasonCode(str, Enum):
+    """Risk Evaluator 판정 근거 코드 (2026-08-31 안성일 결정, PR #206).
+
+    가드레일 reason code 관례를 계승한다(`packages/schemas/guardrails.py`):
+    접두어(`RISK_`)로 축을 표시하고, DB(`initial_risk_reason_codes` JSONB)에 값이
+    남으므로 **이름은 늘리되 기존 값은 바꾸지 않는다**. 판정당 최소 1개(DB CHECK
+    `category_risk_shape`: SECOPS면 reason_codes 배열 길이 ≥1).
+
+    ② 자산 문맥 미의존 판정이라 자산 기반 코드(prod·조치불가)는 두지 않는다.
+    """
+
+    RISK_OPEN_INGRESS_WORLD = "RISK_OPEN_INGRESS_WORLD"          # 0.0.0.0/0·::/0 전체개방 인그레스
+    RISK_SENSITIVE_PORT_EXPOSED = "RISK_SENSITIVE_PORT_EXPOSED"  # 22(SSH)·3389(RDP) 노출
+    RISK_ALL_PROTOCOL_OPEN = "RISK_ALL_PROTOCOL_OPEN"            # protocol -1 전 프로토콜 개방
+    RISK_ALL_PORTS_EXPOSED = "RISK_ALL_PORTS_EXPOSED"            # 단일 프로토콜 전 포트(0–65535) 개방
+    RISK_SSH_BRUTEFORCE = "RISK_SSH_BRUTEFORCE"                  # SSH 브루트포스(횟수·속도 임계)
+    RISK_SSH_LOW_SIGNAL = "RISK_SSH_LOW_SIGNAL"                  # SSH 임계 미만(오탐·오타 가능)
+
+
 class InitialRiskEvaluationResult(BaseModel):
     """결정적 초기 위험 판정 — Risk Evaluator → PostgreSQL·Security Workflow.
 
@@ -149,7 +177,9 @@ class InitialRiskEvaluationResult(BaseModel):
     threat_event_id: str = Field(min_length=1)
     initial_risk_level: RiskLevel
     response_mode: ResponseMode
-    reason_codes: list[Annotated[str, Field(min_length=1)]] = Field(default_factory=list)
+    # ③(2026-08-31 안성일): RiskReasonCode 로 제한하고 최소 1개를 강제한다
+    # (DB CHECK category_risk_shape: SECOPS reason_codes 배열 길이 ≥1과 정렬).
+    reason_codes: list[RiskReasonCode] = Field(min_length=1)
 
     @model_validator(mode="after")
     def _mode_matches_risk(self):
