@@ -3,19 +3,20 @@
 # 4단계 Execution Guardrail 통과/차단 회귀 테스트입니다.
 #
 # 계층 구분 — 단위 테스트와 겹치지 않게 나눈다.
-#   apps/core-api/ai/tests/test_guardrail_steps.py (안성일) = 각 단계 함수의 동작.
-#     구조적 오류(추가 필드·타입 불일치·빈 문자열)와 목록 대조를 전수로 본다.
-#   이 파일 = 팀 공용 회귀. ① 문서에서 확정한 결정이 코드로 지켜지는가
-#     ② Golden Dataset 자산이 실제로 가드레일을 통과하는가
-#     ③ 단계 순서와 거절 사유가 관제자에게 나가는 기록대로인가.
+#   apps/core-api/ai/tests/test_guardrail_steps.py (안성일) = 단계 함수와 4단계 조립의
+#     동작. 구조적 오류 전수·목록 대조·단계 순서(막힌 단계 기록, 뒤 단계 NOT_RUN,
+#     앞이 막으면 AWS 미호출)를 parametrize 로 덮는다. **순서 규약은 그쪽이 원본이다.**
+#   이 파일 = 팀 공용 회귀. 유닛이 보지 않는 것만 본다.
+#     ① 문서에서 확정한 결정이 코드로 지켜지는가 (폐기 Runbook ID·롤백 3종 정책)
+#     ② Golden Dataset 의 실제 자산이 4단계를 통과하는가
+#     ③ 범위를 벗어난 ARN 이 ③ 에서 차단되는가 (Scope Escalation)
 #
-# 구현 현황 (#114 / PR #123 · #177)
-#   ① Schema Check      구현됨
-#   ② Action Whitelist  구현됨
-#   ③ ARN Match         구현됨 — 수집 자산 조회를 인자로 받는다
-#   ④ AWS Dry-Run       미구현 — executor precheck 대기(ADR-0007)
-# 4단계 종합 판정(GuardrailValidationResult)은 ④가 붙어야 조립되므로, 지금은
-# 단계 함수를 직접 불러 _Run.failed_step 으로 순서를 본다.
+# 구현 현황 (#114 / PR #123 · #177 / PR #202 · #208 / PR #213)
+#   ①②③④ 전부 구현됨. 4단계 종합 판정 진입점은 run_guardrail_validation 이다.
+#
+# **진입점을 직접 부른다.** 단계 함수를 손으로 이어 붙이면 그 조립이 프로덕션의
+# 복사본이 되어, 실제 순서가 깨져도 이 파일은 초록불이 된다. ④ 가 서기 전에는
+# 진입점이 없어 손으로 이었는데(#224), 이제 갈아탄다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -35,22 +36,23 @@ for _path in (ROOT / "apps" / "core-api", ROOT / "packages"):
 
 from ai.guardrails import (  # noqa: E402
     ARN_TARGET_NOT_MANAGED,
-    SCHEMA_INVALID_PAYLOAD,
     WHITELIST_NOT_AI_RECOMMENDABLE,
     WHITELIST_UNKNOWN_RUNBOOK,
-    run_action_whitelist,
-    run_arn_match,
-    run_schema_check,
+    GuardrailOutcome,
+    run_guardrail_validation,
 )
 from ai.whitelist import ROLLBACK_RUNBOOK_IDS, RunbookId  # noqa: E402
 from schemas.agents import RunbookCandidateDraft  # noqa: E402
 from schemas.guardrails import (  # noqa: E402
+    GUARDRAIL_STEP_ORDER,
+    GuardrailDecision,
     GuardrailStep,
     GuardrailStepResult,
     GuardrailStepStatus,
     GuardrailValidationContext,
     GuardrailValidationRequest,
 )
+from schemas.precheck import PrecheckOutcome  # noqa: E402
 
 GOLDEN_FINOPS_INPUT = ROOT / "datasets" / "golden" / "finops" / "input"
 
@@ -90,52 +92,51 @@ def _payload(**overrides) -> dict:
     return base
 
 
-@dataclass(frozen=True)
-class _Run:
-    """구현된 단계를 순서대로 태운 결과.
+# ④ 가 부르는 AWS 판정 경계를 대신한다. **실제 AWS 판정은 이 계층 몫이 아니다** —
+# 확정 10종의 실물 precheck 는 services/tests/test_precheck_localstack.py 가 덮는다.
+# 여기서는 "골든 자산이 ④ 까지 도달하는가"와 조립 결과만 본다.
+_STUB_SUMMARY = "DRY_RUN | 확인: 형식·권한 | 미확인: 실행 시점 자원 상태"
 
-    failed_step 은 4단계 종합 판정(GuardrailValidationResult)의 같은 이름 필드와
-    같은 뜻이다 — 처음 FAIL 한 단계이고 그 뒤 단계는 실행되지 않는다. 종합 판정
-    자체는 ④ AWS Dry-Run 이 붙어야 조립되므로(steps 고정 4개), 그 전까지 단계
-    순서만 이 필드로 먼저 고정한다.
+
+@dataclass
+class _StubPrecheck:
+    """통과만 하는 precheck. 물어본 draft 를 쌓아 둔다 — 호출 여부가 곧 도달 증거다."""
+
+    asked: list = field(default_factory=list)
+
+    def __call__(self, draft: RunbookCandidateDraft, /) -> PrecheckOutcome:
+        self.asked.append(draft)
+        return PrecheckOutcome(passed=True, verification_summary=_STUB_SUMMARY)
+
+
+def _validate(
+    payload: dict,
+    collected: Iterable[str] = (),
+    *,
+    precheck: _StubPrecheck | None = None,
+) -> GuardrailOutcome:
+    """4단계 진입점을 그대로 부른다(ai/guardrails.py::run_guardrail_validation).
+
+    collected 는 DB 에 수집된 자산 ARN 목록이다 — ③ 이 받는 조회를 완전 일치 집합으로
+    대신한다(apps/core-api/db/repositories/assets.py::get_asset_by_arn 과 같은 판정).
     """
-
-    steps: list[GuardrailStepResult]
-    failed_step: GuardrailStep | None
-    draft: RunbookCandidateDraft | None
-
-
-def _run_implemented_steps(payload: dict, collected: Iterable[str] = ()) -> _Run:
-    """① Schema Check → ② Action Whitelist → ③ ARN Match 를 순서대로 태운다.
-
-    collected 는 DB 에 수집된 자산 ARN 목록이다 — ③ 이 받는 조회를 완전 일치
-    집합으로 대신한다(apps/core-api/db/repositories/assets.py::get_asset_by_arn
-    과 같은 판정이다). 기본값이 빈 목록이라, ②에서 멈추는 입력은 그대로 두면 된다.
-    """
-    request = GuardrailValidationRequest(
-        validation_context=GuardrailValidationContext.AI_CANDIDATE,
-        candidate_id="cand-qa",
-        command_payload=payload,
-    )
-    steps: list[GuardrailStepResult] = []
-
-    schema = run_schema_check(request)
-    steps.append(schema.step_result)
-    if schema.command is None:
-        return _Run(steps, GuardrailStep.SCHEMA_CHECK, None)
-
-    whitelist = run_action_whitelist(schema.command)
-    steps.append(whitelist.step_result)
-    if whitelist.draft is None:
-        return _Run(steps, GuardrailStep.ACTION_WHITELIST, None)
-
     managed = frozenset(collected)
-    arn_match = run_arn_match(whitelist.draft, lambda target_arn: target_arn in managed)
-    steps.append(arn_match.step_result)
-    if arn_match.draft is None:
-        return _Run(steps, GuardrailStep.ARN_MATCH, None)
+    return run_guardrail_validation(
+        GuardrailValidationRequest(
+            validation_context=GuardrailValidationContext.AI_CANDIDATE,
+            candidate_id="cand-qa",
+            command_payload=payload,
+        ),
+        is_managed_arn=lambda target_arn: target_arn in managed,
+        precheck=precheck or _StubPrecheck(),
+    )
 
-    return _Run(steps, None, arn_match.draft)
+
+def _failed_step_result(outcome: GuardrailOutcome) -> GuardrailStepResult:
+    """FAIL 로 기록된 단계 결과. steps 는 항상 4개(뒤는 NOT_RUN)라 [-1] 로 잡으면 틀린다."""
+    failed = [s for s in outcome.result.steps if s.result is GuardrailStepStatus.FAIL]
+    assert len(failed) == 1, f"FAIL 단계가 {len(failed)}개다 — 첫 FAIL 에서 멈춰야 한다"
+    return failed[0]
 
 
 # ---------------------------------------------------------------- ② 목록 대조
@@ -155,14 +156,14 @@ def test_guardrail_blocks_unlisted_runbook(runbook_id: str) -> None:
     거절이 ②에 기록되는지까지 본다. ①에서 터지면 "무엇이 막았는가"가 사라지고
     관제자에게 나가는 사유가 틀린다(#114 설계 의도).
     """
-    run = _run_implemented_steps(_payload(runbook_id=runbook_id))
+    outcome = _validate(_payload(runbook_id=runbook_id))
 
-    assert run.steps[0].result is GuardrailStepStatus.PASS, (
+    assert outcome.result.steps[0].result is GuardrailStepStatus.PASS, (
         f"{runbook_id} 가 ①에서 걸렸다 — 목록 대조는 ②의 몫이다"
     )
-    assert run.failed_step is GuardrailStep.ACTION_WHITELIST
-    assert run.draft is None
-    assert run.steps[-1].reason_code == WHITELIST_UNKNOWN_RUNBOOK
+    assert outcome.result.failed_step is GuardrailStep.ACTION_WHITELIST
+    assert outcome.draft is None
+    assert _failed_step_result(outcome).reason_code == WHITELIST_UNKNOWN_RUNBOOK
 
 
 @pytest.mark.parametrize("runbook_id", sorted(ROLLBACK_RUNBOOK_IDS))
@@ -174,11 +175,11 @@ def test_rollback_runbooks_are_listed_but_not_ai_recommendable(runbook_id: str) 
     WHITELIST_UNKNOWN_RUNBOOK 으로 바뀌면 등록이 풀린 것이고(우회 경로 발생),
     통과해버리면 AI 가 롤백을 제안할 수 있게 된 것이다 — 양쪽 다 회귀다.
     """
-    run = _run_implemented_steps(_payload(runbook_id=runbook_id))
+    outcome = _validate(_payload(runbook_id=runbook_id))
 
-    assert run.failed_step is GuardrailStep.ACTION_WHITELIST
-    assert run.draft is None
-    assert run.steps[-1].reason_code == WHITELIST_NOT_AI_RECOMMENDABLE
+    assert outcome.result.failed_step is GuardrailStep.ACTION_WHITELIST
+    assert outcome.draft is None
+    assert _failed_step_result(outcome).reason_code == WHITELIST_NOT_AI_RECOMMENDABLE
 
 
 # ---------------------------------------------------------------- Golden 연동
@@ -223,8 +224,8 @@ def _golden_asset_kinds() -> set[str]:
     return kinds
 
 
-def test_golden_asset_arns_pass_the_implemented_steps() -> None:
-    """Golden Dataset 의 실제 자산 ARN 이 구현된 단계를 통과한다.
+def test_golden_asset_arns_pass_all_four_steps() -> None:
+    """Golden Dataset 의 실제 자산 ARN 이 4단계를 전부 통과한다.
 
     EC2 와 SG 를 모두 본다. SG ARN 은 형식이 security-group/sg-… 로 EC2 의
     instance/i-… 와 달라, ③ ARN Match 가 형식을 보는 판정으로 바뀌면 가장 먼저
@@ -242,13 +243,26 @@ def test_golden_asset_arns_pass_the_implemented_steps() -> None:
 
     collected = [arn for arn, _ in pairs]
     for arn, runbook_id in pairs:
-        run = _run_implemented_steps(
-            _payload(target_arn=arn, runbook_id=runbook_id), collected
+        precheck = _StubPrecheck()
+        outcome = _validate(
+            _payload(target_arn=arn, runbook_id=runbook_id), collected, precheck=precheck
         )
-        blocked = run.failed_step.value if run.failed_step else None
+        blocked = (
+            outcome.result.failed_step.value if outcome.result.failed_step else None
+        )
         assert blocked is None, (
             f"골든 자산 {arn} ({runbook_id}) 이 {blocked} 에서 거절됐다"
         )
+        assert outcome.result.result is GuardrailDecision.PASS
+        assert outcome.draft is not None, "통과했는데 승격된 후보가 없다"
+        # ④ 까지 실제로 도달했는가. 앞 단계가 조용히 막으면 failed_step 만 보고는
+        # "통과"로 읽히지 않지만, 조립이 바뀌어 ④ 를 건너뛰면 여기서 걸린다.
+        assert len(precheck.asked) == 1, (
+            f"골든 자산 {arn} 이 ④ 에 도달하지 않았다 — precheck 호출 {len(precheck.asked)}회"
+        )
+        assert [step.step for step in outcome.result.steps] == list(
+            GUARDRAIL_STEP_ORDER
+        ), "4단계 고정 계약이 깨졌다"
 
 
 # ------------------------------------------------------------- ③ 범위 초과 차단
@@ -273,11 +287,15 @@ def test_guardrail_blocks_arn_scope_escalation(target_arn: str) -> None:
     같은 문자열로 시작하므로, 판정을 접두어 검사로 바꾸면 이 케이스부터 통과한다 —
     Scope Escalation 차단이 접두어가 아니라 수집 자산 대조인 이유다.
     """
-    run = _run_implemented_steps(_payload(target_arn=target_arn), [_SAFE_ARN])
+    precheck = _StubPrecheck()
+    outcome = _validate(_payload(target_arn=target_arn), [_SAFE_ARN], precheck=precheck)
 
-    assert run.failed_step is GuardrailStep.ARN_MATCH
-    assert run.draft is None
-    assert run.steps[-1].reason_code == ARN_TARGET_NOT_MANAGED
+    assert outcome.result.failed_step is GuardrailStep.ARN_MATCH
+    assert outcome.draft is None
+    assert _failed_step_result(outcome).reason_code == ARN_TARGET_NOT_MANAGED
+    assert precheck.asked == [], (
+        "③ 이 막은 ARN 을 ④ 가 물었다 — 범위 밖 자원에 실제 조회가 나간다"
+    )
 
 
 def test_failed_step_reports_the_first_failing_step() -> None:
@@ -286,68 +304,12 @@ def test_failed_step_reports_the_first_failing_step() -> None:
     ③ 도 거절할 입력이라, 단계 순서가 무너지면 거절 기록이 ARN_MATCH 로 남는다 —
     관제자에게 나가는 사유가 "목록에 없는 조치" 대신 "관리 대상 아님" 이 된다.
     """
-    run = _run_implemented_steps(
-        _payload(runbook_id="RUNBOOK_EC2_DOWNSIZE", target_arn="*")
-    )
+    outcome = _validate(_payload(runbook_id="RUNBOOK_EC2_DOWNSIZE", target_arn="*"))
 
-    assert run.failed_step is GuardrailStep.ACTION_WHITELIST
-    assert run.steps[-1].reason_code == WHITELIST_UNKNOWN_RUNBOOK
-    assert [step.step for step in run.steps] == [
+    assert outcome.result.failed_step is GuardrailStep.ACTION_WHITELIST
+    assert _failed_step_result(outcome).reason_code == WHITELIST_UNKNOWN_RUNBOOK
+    ran = [s.step for s in outcome.result.steps if s.result is not GuardrailStepStatus.NOT_RUN]
+    assert ran == [
         GuardrailStep.SCHEMA_CHECK,
         GuardrailStep.ACTION_WHITELIST,
     ], "③ 이 실행됐다 — 앞 단계가 FAIL 하면 뒤 단계는 돌지 않는다"
-
-
-@pytest.mark.parametrize(
-    "payload, why",
-    [
-        (
-            _payload(runbook_id="RUNBOOK_EC2_DOWNSIZE", target_arn="", severity="HIGH"),
-            "폐기 Runbook(②) · 빈 ARN(①) · 추가 필드(①) 동시",
-        ),
-        (
-            _payload(
-                runbook_id=RunbookId.RUNBOOK_NACL_ADD_DENY.value,
-                target_arn="arn:aws:ec2:ap-northeast-2:123456789012:instance/i-uncollected",
-                parameters={"target_instance_type": "t3.small"},
-            ),
-            "미수집 ARN(③) · 런북과 안 맞는 파라미터(①) 동시",
-        ),
-    ],
-    ids=["retired_id_with_empty_arn", "unmanaged_arn_with_wrong_params"],
-)
-def test_schema_failure_stops_before_the_later_steps(payload: dict, why: str) -> None:
-    """① 이 거절한 입력은 ②·③ 을 아예 태우지 않는다.
-
-    ① 자체의 거절 판정은 apps/core-api/ai/tests/test_guardrail_steps.py 가 20종으로
-    덮는다. 여기서 보는 것은 **파이프라인 순서**다 — 두 테스트가 보는 대상이 다르다.
-
-    뒤 단계도 거절할 입력을 일부러 준다. 단계 순서가 무너지면 거절 기록이
-    ACTION_WHITELIST·ARN_MATCH 로 남아, 관제자에게 나가는 사유가 "형식이 깨진 요청"
-    대신 "목록에 없는 조치"·"관리 대상 아님" 이 된다. 원인을 엉뚱한 곳에서 찾게 된다.
-
-    test_failed_step_reports_the_first_failing_step 는 ②↔③ 경계만 본다.
-    이 테스트가 그 앞 경계(①↔②)를 막는다.
-    """
-    run = _run_implemented_steps(payload, [_SAFE_ARN])
-
-    assert run.failed_step is GuardrailStep.SCHEMA_CHECK, why
-    assert run.draft is None
-    assert run.steps[-1].reason_code == SCHEMA_INVALID_PAYLOAD
-    assert [step.step for step in run.steps] == [GuardrailStep.SCHEMA_CHECK], (
-        f"① 이 FAIL 했는데 뒤 단계가 실행됐다 ({why}) — "
-        f"실행된 단계: {[s.step.value for s in run.steps]}"
-    )
-
-
-def test_schema_check_failure_carries_no_verification_summary() -> None:
-    """① 거절에는 verification_summary 가 붙지 않는다.
-
-    그 필드는 ④ AWS Dry-Run 이 "무엇을 어디까지 확인했는가" 를 담는 자리다
-    (ADR-0007 §3). ① 은 payload 형식만 보므로 확인 범위라는 개념이 없고, 값이
-    채워지면 관제자가 AWS 를 조회해 본 것으로 읽는다.
-    """
-    run = _run_implemented_steps(_payload(target_arn=""))
-
-    assert run.failed_step is GuardrailStep.SCHEMA_CHECK
-    assert run.steps[-1].verification_summary is None
