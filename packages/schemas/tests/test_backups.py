@@ -13,7 +13,7 @@ MINIMAL = {"instance_id": "i-0abc", "instance_type": "t3.xlarge", "state": "runn
 
 
 def test_backup_types_match_the_runbook_spec_vocabulary():
-    """런북 명세서 safety_and_rollback.backup_action과 같은 어휘여야 한다 —
+    """ADR-0004 롤백 공통 정책 ③의 backup_action과 같은 어휘여야 한다 —
     executor의 백업 조회가 이 문자열로 레코드를 찾는다."""
     assert {t.value for t in BackupType} == {
         "SAVE_INSTANCE_SPEC_JSON",

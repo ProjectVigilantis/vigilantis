@@ -140,7 +140,7 @@ export const EXECUTION_STATUS_LABELS: LabelMap<ExecutionStatus> = {
   ROLLBACK_FAILED: { label: '복구 실패', tone: 'red', glyph: '⚠' },
 };
 
-/** 3.2.1 Runbook 사전의 "표시" 열. 파라미터·실행 상세는 런북 명세서 소관이라 옮기지 않는다. */
+/** 3.2.1 Runbook 사전의 "표시" 열. 파라미터·실행 상세는 서버 계약(schemas) 소관이라 옮기지 않는다. */
 export const RUNBOOK_LABELS: Record<RunbookId, string> = {
   RUNBOOK_EC2_ISOLATE: 'EC2 격리',
   RUNBOOK_NACL_ADD_DENY: 'NACL DENY 추가',

@@ -61,7 +61,7 @@ _SUMMARY_RE = re.compile(
 
 _SUMMARY_FORMAT_HINT = "<방식>[(작업)] | 확인: <...> | 미확인: <...> (방식 ∈ DRY_RUN·DESCRIBE·MIXED)"
 
-# 항목 나열 구분자 — 런북 명세서·ADR 서술과 같은 기호를 쓴다
+# 항목 나열 구분자 — SSOT·ADR 서술과 같은 기호를 쓴다
 _ITEM_SEP = "·"
 
 

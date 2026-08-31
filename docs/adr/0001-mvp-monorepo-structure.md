@@ -42,5 +42,5 @@ MVP 기간 동안 **단일 FastAPI 백엔드 `apps/core-api`** 로 통합한다.
 
 ## Related
 
-- 근거 문서: `1차 발표까지의 마일스톤 및 MVP 범위 명세.md`
+- 현황 기준: [`docs/PROJECT_STATUS.md`](../PROJECT_STATUS.md) — 범위·마일스톤
 - 후속 결정 후보: LangGraph 도입 여부, OCSF 스키마·Cedar Policy 채택 → 별도 ADR

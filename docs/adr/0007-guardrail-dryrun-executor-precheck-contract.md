@@ -177,11 +177,11 @@ authorize_security_group_ingress(GroupId='sg-000...0')  # 부재 -> DryRunOperat
 
 **항상 거절되는 런북은 없다** — 5종 모두 통과 경로가 존재한다. 다만 §Context의 Community 제약 때문에 `ISOLATE`·`UNISOLATE`·`ENABLE_AUTOSCALING`의 elbv2·asg 조회는 로컬에서 실행되지 않으며, **이 3행의 통과 조건은 6–7주차 실 AWS 스모크에서 확정한다**(현재는 잠정안).
 
-`ISOLATE`·`UNISOLATE`가 부분 대체라는 사실 자체는 새로운 결정이 아니다 — 런북 명세서가 이미 `dry_run_supported: partial` + "`describe_target_health` 사전 조회로 대체 검증"으로 규정하고 있고, 본 ADR은 그것을 실측으로 확인해 executor 규약에 편입한 것이다.
+`ISOLATE`·`UNISOLATE`가 부분 대체라는 사실 자체는 새로운 결정이 아니다 — 선행 규격이 이미 `dry_run_supported: partial` + "`describe_target_health` 사전 조회로 대체 검증"으로 규정하고 있었고, 본 ADR은 그것을 실측으로 확인해 executor 규약에 편입한 것이다.
 
 ### 5. 파라미터 계약
 
-`precheck()`의 `parameters`는 런북 명세서의 `parameters_schema`를 따른다. 전부 required이며, typed 계약은 #154 확정 시 이 표를 원천으로 생성한다.
+`precheck()`의 `parameters`는 아래 §5 표를 따른다. 전부 required이며, typed 계약(`packages/schemas/runbook_parameters.py`, #154)이 이 표를 원천으로 생성됐다.
 
 | runbook_id | 키 |
 | --- | --- |
@@ -248,7 +248,7 @@ authorize_security_group_ingress(GroupId='sg-000...0')  # 부재 -> DryRunOperat
 - 배경 이슈: #113 — `[BE/DOCS] 가드레일 4단계 AWS Dry-Run — executor 호출 규약 확정`
 - 계약 원천: `packages/schemas/guardrails.py` · `packages/schemas/runbooks.py` · `packages/schemas/candidates.py`
 - 선행 결정: [ADR-0002](0002-runbook-whitelist-mvp-scope.md)(본편 7종) · [ADR-0004](0004-rollback-runbook-whitelist-registration.md)(롤백 3종·공통 정책) · [ADR-0006](0006-localstack-team-standard-env.md) §3(전환 스위치 규약)·§4(검증 한계)
-- 확정 규격: `vigilantis-docs/런북 명세서.md` — `parameters_schema` · `dry_run_supported`
+- 확정 규격: [`docs/PROJECT_STATUS.md`](../PROJECT_STATUS.md) §Action Whitelist — `parameters_schema`는 `packages/schemas/runbook_parameters.py`, `dry_run_supported`는 본 ADR §Context 실측표가 소재다
 - 현황 기준: `docs/PROJECT_STATUS.md` — 3주차 종료 판정 기준 ⓐ, 구현 우선순위 P0/P1/P2
 - 후속: #154(런북별 typed 파라미터 계약 — 후보 `display_parameters`·`evidence_ids` → `precheck(parameters)` 변환 포함) · `AUTO_ISOLATION`·`ROLLBACK_EXECUTION` 문맥의 precheck 호출 시점 · 승인·실행 시점 재검증 정책 · 거절 이후 알림·에스컬레이션
 - 영향 범위: `packages/schemas/precheck.py`(신규 — 호출 계약), `packages/schemas/guardrails.py`(④ 사유 코드 정의처 — #125 이후), `apps/core-api/services/aws/executor.py`, `apps/core-api/ai/guardrails.py`, `scripts/probe_dryrun.py`(신규), `docs/adr/0006-localstack-team-standard-env.md`

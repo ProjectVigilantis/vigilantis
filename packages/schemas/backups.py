@@ -11,7 +11,7 @@
 #   저장: db.models.BackupRecord.payload (JSONB, 생성 후 불변)
 #   소비: apps/core-api/services/aws/executor.py precheck 롤백 4종
 #
-# BackupType은 런북 명세서 safety_and_rollback.backup_action과 같은 어휘다.
+# BackupType은 ADR-0004 롤백 공통 정책 ③의 backup_action과 같은 어휘다.
 # backup_action이 NONE인 런북(롤백 4종·NACL_RESTORE 등)은 여기 값을 갖지 않는다.
 # ==============================================================================
 
@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 @unique
 class BackupType(str, Enum):
-    """백업 종류 4종 — 런북 명세서 safety_and_rollback.backup_action 어휘."""
+    """백업 종류 4종 — ADR-0004 롤백 공통 정책 ③의 backup_action 어휘."""
 
     SAVE_INSTANCE_SPEC_JSON = "SAVE_INSTANCE_SPEC_JSON"        # RIGHTSIZING
     SAVE_SG_FULL_RULES_JSON = "SAVE_SG_FULL_RULES_JSON"        # SG_DELETE_ISOLATED
@@ -36,7 +36,7 @@ class BackupType(str, Enum):
 class InstanceSpecBackup(BaseModel):
     """`SAVE_INSTANCE_SPEC_JSON` payload — RIGHTSIZING 변경 직전 인스턴스 스펙.
 
-    `RUNBOOK_EC2_REVERT_SIZE`가 읽는 값이다(런북 명세서 FinOps-04). 원복이
+    `RUNBOOK_EC2_REVERT_SIZE`가 읽는 값이다(ADR-0004 §Decision). 원복이
     필요한 순간은 인스턴스가 부팅에 실패한 뒤이므로, **원복에 필요한 값은 전부
     여기 있어야 한다** — 그 시점에 AWS를 다시 조회해서 얻을 수 있는 것은 이미
     바뀐 값뿐이다.

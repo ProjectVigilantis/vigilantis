@@ -6,7 +6,7 @@
 
 ## Context (배경)
 
-MVP 범위 명세와 SSOT(`docs/PROJECT_STATUS.md`)는 FE 스택을 **Next.js 14(App Router)** 로 표기해 왔다. `apps/web` 실제 스캐폴딩(PR #30) 시점에 아래 제약을 확인했다(npm 레지스트리 검증: 2026-08-13):
+SSOT(`docs/PROJECT_STATUS.md`)는 FE 스택을 **Next.js 14(App Router)** 로 표기해 왔다. `apps/web` 실제 스캐폴딩(PR #30) 시점에 아래 제약을 확인했다(npm 레지스트리 검증: 2026-08-13):
 
 - **next 14 라인은 `14.2.35`에서 동결**(dist-tag `next-14`). 현재 latest는 `16.3.0`.
 - **shadcn CLI 4.x**(latest `4.17.0`)는 **Tailwind v4 / Next 15+ 기준** — 14 유지 시 컴포넌트 추가마다 수동 구성 부담 발생.

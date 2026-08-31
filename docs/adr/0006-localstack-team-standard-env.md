@@ -101,7 +101,7 @@ LocalStack 통과를 "검증 완료"로 간주하지 않는 경로를 고정 목
 
 - 현황 기준: `docs/PROJECT_STATUS.md` — 결정 로그 2026-08-13(개발 = LocalStack), 미해결 #1(팀 표준 환경)·#2(PR #29 후속)
 - 선행 결정: [ADR-0001](0001-mvp-monorepo-structure.md) — 단일 `apps/core-api`·docker-compose 개발 환경
-- 마일스톤: `vigilantis-docs/1차 발표까지의 마일스톤 및 MVP 범위 명세.md` — 3–5주차 집중 개발, 6–7주차 통합, P0/P1/P2 착수 순서
+- 마일스톤·구현 우선순위: [`docs/PROJECT_STATUS.md`](../PROJECT_STATUS.md) §현재 위치·§일정 리스크 & 구현 우선순위 — P0/P1/P2 착수 순서
 - 기존 구현: `apps/core-api/services/collector.py`(`_runtime_config`/`_client` — 스위치 규약 원형), `apps/core-api/services/tests/test_collector_raw.py`(skip 규약), `.env.example`
 - 영향 범위: `docker-compose.yml`, `scripts/seed_localstack.py`(신규), `.env.example`, `.github/workflows/ci.yml`(3주차), 이후 `services/aws`·`security/`의 클라이언트 생성 규약
 

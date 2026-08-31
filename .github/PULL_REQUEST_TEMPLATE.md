@@ -14,9 +14,9 @@
 <이 PR이 무엇을, 왜 바꾸는지 2–3줄>
 
 **리뷰 요청**: @<핸들> — <담당 접점, 이 PR에서 봐줘야 할 지점>
-<!-- 접점이 둘 이상이면 줄을 추가한다. 선정 기준은 CLAUDE.md §리뷰 요청 대상 표.
-     BE·INFRA → 김세혁 / AI·아키텍처·DB → 안성일 / DATA·Rule → 김승철
-     SEC → 안성일+김세혁 / FE → 유건희 / SCHEMA·API 계약 → 양쪽 담당자 모두 / DOCS·QA → 박지현 -->
+<!-- 접점이 둘 이상이면 줄을 추가한다.
+     담당 매핑의 원천은 docs/PROJECT_STATUS.md §팀 & 역할의 `담당 DOMAIN` 열과 `복수 담당 접점` 표다.
+     고르는 절차는 CLAUDE.md §리뷰 요청 대상. -->
 
 ## 변경 사항
 
@@ -29,7 +29,10 @@
 - [ ] `docker-compose up`으로 로컬 기동 확인
 - [x] (`apps/web` 변경 시) `npm run lint` · `npm run build` · `npm test` 통과 — (해당 없음) <사유>
 - [x] (API 변경 시) FE↔BE 계약/Mock 영향 확인 — (해당 없음) <사유>
-- [x] (범위·계약·역할 변경 시) `docs/PROJECT_STATUS.md` 갱신 — (해당 없음) <사유>
+
+<!-- docs/PROJECT_STATUS.md(SSOT)는 이 PR에서 갱신하지 않는다.
+     SSOT는 매주 월요일 아침 PM이 갱신하며, 주중 갱신은 범위·API 계약·역할·확정 결정이 걸린
+     큰 변경에 한한 예외로 별도 PR로 올린다. 규칙은 CLAUDE.md §갱신 주체와 시점. -->
 
 ## 관련 이슈
 
