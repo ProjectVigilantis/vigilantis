@@ -5,6 +5,7 @@
 import { useMemo, useState } from 'react';
 
 import { AssetCard } from '@/components/assets/asset-card';
+import { AssetGraph } from '@/components/assets/asset-graph';
 import { AssetDetail } from '@/components/assets/asset-detail';
 import { EmptyState } from '@/components/empty-state';
 import { FilterSelect } from '@/components/filter-select';
@@ -49,6 +50,21 @@ export function AssetsView({
     () => [...new Set(data.items.map((a) => a.region))].sort(),
     [data.items],
   );
+
+  // 토폴로지의 초점 집합 — 유형 필터만 뺀 나머지 3종이다. 위 TabsContent 주석 참조.
+  const focusedArns = useMemo(() => {
+    if (region === ALL && !primaryOnly && !wasteOnly) return null;
+    return new Set(
+      data.items
+        .filter((a) => {
+          if (region !== ALL && a.region !== region) return false;
+          if (primaryOnly && a.resource_role !== 'PRIMARY') return false;
+          if (wasteOnly && !WASTE_VERDICTS.some((v) => v === a.verdict)) return false;
+          return true;
+        })
+        .map((a) => a.arn),
+    );
+  }, [data.items, region, wasteOnly, primaryOnly]);
 
   // 필터 4종 전부 클라이언트 필터다 — 계약에 Query Parameter가 없어 전량 응답에서 거른다(§4.2).
   const visible = useMemo(
@@ -129,9 +145,15 @@ export function AssetsView({
       </TabsContent>
 
       <TabsContent value="topology">
-        <EmptyState
-          message="토폴로지는 준비 중입니다."
-          description="자산 연결관계(relationships) 산출이 선행 조건입니다."
+        {/* 유형 필터는 걸지 않는다 — 노드를 빼면 엣지의 도착 노드가 사라져 그래프가 끊어진
+            것처럼 보인다. 나머지 필터는 초점(흐리게)으로만 반영한다(§9.3 FE 판단). */}
+        <AssetGraph
+          items={data.items}
+          focusedArns={focusedArns}
+          onSelect={(a) => {
+            setSelected(a);
+            setDetailOpen(true);
+          }}
         />
       </TabsContent>
 
