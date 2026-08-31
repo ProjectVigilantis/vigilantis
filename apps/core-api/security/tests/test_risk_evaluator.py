@@ -1,8 +1,8 @@
 """Risk Evaluator 단위 테스트 — SecOps Golden 10케이스(S1~S10) 기준. DB·LocalStack 불필요.
 
-⚠️ 아래 기대값은 **잠정 판정안(2026-08-31)** 을 인코딩한다 — 안성일 승인 시 임계·매핑이
+아래 기대값은 확정 판정 규칙(2026-08-31 안성일 결정, PR #206)을 인코딩한다 — 임계·매핑이
 바뀌면 이 표와 `security/risk_evaluator.py` 상수를 함께 갱신한다. SecOps Golden expected
-정답지(datasets/golden/secops/expected)는 규칙 확정 전까지 채우지 않는다(추측 금지 원칙).
+정답지(datasets/golden/secops/expected)는 J3(박지현)에서 이 규칙대로 채운다.
 """
 
 from __future__ import annotations
