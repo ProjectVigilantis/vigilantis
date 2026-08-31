@@ -717,3 +717,81 @@ def test_registered_in_deduped_no_unique_violation(db):
     ).scalars().all()
     assert len(reg) == 1
     assert reg[0].target_arn == tg_arn
+
+
+@pytest.fixture
+def five_skip_inventory() -> AssetInventory:
+    """SkipReasonCode 5종을 한 배치로 유발 — DB 실적재 검증용 (C2).
+
+    EC2 4종(INSUFFICIENT_DATA·PROD_PROTECTED·LOW_UTIL·ACTIVE) + SG 1종(WHITELISTED=default).
+    evaluate_ec2 우선순위: 데이터부족 → prod → (idle&spike)LOW_UTIL / idle→후보 → ACTIVE.
+    """
+    now = datetime.now(timezone.utc)
+    return AssetInventory(
+        account_id="123456789012", region="ap-northeast-2", mode="localstack",
+        collected_at=now, lookback_days=14, period_seconds=3600,
+        ec2_instances=[
+            Ec2Asset(  # 관측치 부족(< MIN_DATAPOINTS 48) → SKIP_INSUFFICIENT_DATA
+                arn="arn:aws:ec2:ap-northeast-2:123456789012:instance/i-insufficient",
+                instance_id="i-insufficient", name="new-inst", instance_type="t3.large",
+                state="running", region="ap-northeast-2", tags={"Environment": "dev"},
+                metric_summary=MetricSummary(cpu_datapoints=10, cpu_avg=1.0, cpu_max=2.0),
+            ),
+            Ec2Asset(  # 운영 태그 → SKIP_PROD_PROTECTED
+                arn="arn:aws:ec2:ap-northeast-2:123456789012:instance/i-prod",
+                instance_id="i-prod", name="prod-api", instance_type="t3.large",
+                state="running", region="ap-northeast-2", tags={"Environment": "production"},
+                metric_summary=MetricSummary(cpu_datapoints=336, cpu_avg=1.5, cpu_max=3.0),
+            ),
+            Ec2Asset(  # 저활성 평균 + 스파이크 최대(≥ SPIKE_CPU_MAX 40) → SKIP_LOW_UTIL
+                arn="arn:aws:ec2:ap-northeast-2:123456789012:instance/i-spike",
+                instance_id="i-spike", name="spiky", instance_type="t3.large",
+                state="running", region="ap-northeast-2", tags={"Environment": "dev"},
+                metric_summary=MetricSummary(cpu_datapoints=336, cpu_avg=1.5, cpu_max=91.0),
+            ),
+            Ec2Asset(  # 정상 가동(평균 ≥ IDLE_CPU_AVG 5) → SKIP_ACTIVE
+                arn="arn:aws:ec2:ap-northeast-2:123456789012:instance/i-active",
+                instance_id="i-active", name="busy", instance_type="t3.large",
+                state="running", region="ap-northeast-2", tags={"Environment": "dev"},
+                metric_summary=MetricSummary(cpu_datapoints=336, cpu_avg=50.0, cpu_max=60.0),
+            ),
+        ],
+        security_groups=[
+            SecurityGroupAsset(  # default SG → SKIP_WHITELISTED
+                arn="arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-default",
+                group_id="sg-default", name="default", description="default VPC SG",
+                region="ap-northeast-2", attached=True, open_to_world=[],
+            ),
+        ],
+    )
+
+
+def test_all_five_skip_reason_codes_persisted(db, five_skip_inventory):
+    """SkipReasonCode 5종이 full 파이프라인(persist → run_rule_engine)으로 RuleEvaluation 에
+    실제 적재되는지 (C2). 기존 테스트는 PROD_PROTECTED·ACTIVE 2종만 DB 검증했다."""
+    res = persist_inventory(five_skip_inventory, db)
+    run_rule_engine(db, collection_run_id=res["collection_run_id"])
+    db.flush()
+
+    expected = {
+        "i-insufficient": "SKIP_INSUFFICIENT_DATA",
+        "i-prod": "SKIP_PROD_PROTECTED",
+        "i-spike": "SKIP_LOW_UTIL",
+        "i-active": "SKIP_ACTIVE",
+        "sg-default": "SKIP_WHITELISTED",
+    }
+    persisted = {}
+    for resource_id, exp_code in expected.items():
+        asset = db.execute(
+            select(models.Asset).where(models.Asset.resource_id == resource_id)
+        ).scalar_one()
+        ev = db.execute(
+            select(models.RuleEvaluation).where(models.RuleEvaluation.asset_id == asset.asset_id)
+        ).scalar_one()
+        assert ev.verdict == "SKIP", resource_id
+        assert ev.skip_reason_code == exp_code, resource_id
+        persisted[resource_id] = ev.skip_reason_code
+
+    # 5종 전량이 서로 다른 값으로 실제 적재됐는지(누락·중복 방어)
+    assert set(persisted.values()) == set(expected.values())
+    assert len(set(persisted.values())) == 5
