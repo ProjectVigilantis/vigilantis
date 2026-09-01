@@ -113,7 +113,15 @@ def db(pg_engine):
 
     conn = pg_engine.connect()
     trans = conn.begin()
-    session = Session(bind=conn, autoflush=False, expire_on_commit=False)
+    # create_savepoint 명시 — 기본값(conditional_savepoint)은 세션 commit 이후의
+    # rollback이 외부 트랜잭션까지 되돌려, 그 전에 commit된 시드가 통째로 사라진다.
+    # 프로덕션 rollback 경로(dispatcher 예외 처리 등)를 지나는 테스트가 걸린다 (Issue #232)
+    session = Session(
+        bind=conn,
+        autoflush=False,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
     try:
         yield session
     finally:
