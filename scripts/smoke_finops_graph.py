@@ -20,6 +20,9 @@
 #
 # Prompt 전문과 모델 원문 응답은 출력하지 않는다(ADR-0005 미보존 대상). 남기는 것은
 # 최종 요약 3줄·후보·토큰 사용량이며, 그 셋은 저장·노출 대상이다.
+#
+# 종료 코드: 마스킹이 뚫렸거나 invocation_status가 FAILED면 1이다. NO_PROPOSAL은
+# 업무 판단이라 0으로 끝난다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -37,6 +40,7 @@ from ai.model_client import AIModelRequest, AIModelResponse, build_outbound_payl
 from ai.openai_client import build_openai_model_client  # noqa: E402
 from config import Settings  # noqa: E402
 from schemas.agents import FinOpsGraphInput  # noqa: E402
+from schemas.incidents import AgentInvocationStatus  # noqa: E402
 
 # ------------------------------------------------------------------------------
 # 합성 입력 — 저평가된 EC2 1건 + 거기 붙은 EBS 볼륨
@@ -170,9 +174,19 @@ def main() -> int:
         )
     print("=" * 68)
 
-    # 마스킹이 뚫렸으면 결과와 무관하게 실패로 끝낸다 — 전송이 이미 일어난 뒤라 경고가
-    # 조용히 스크롤 밖으로 밀려나면 안 된다
-    return 1 if leaked else 0
+    # 실패로 끝낼 사유는 둘이다. 마스킹이 뚫린 것은 전송이 이미 일어난 뒤라 경고가
+    # 조용히 스크롤 밖으로 밀려나면 안 되고, FAILED는 왕복이 결과를 못 냈다는 뜻이라
+    # 이 스크립트가 확인하려던 것 자체가 확인되지 않은 것이다. **NO_PROPOSAL은 실패가
+    # 아니다** — "조치할 것이 없다"는 업무 판단이고 계약상 정상 종료다.
+    failures = []
+    if leaked:
+        failures.append(f"자격증명 유출 {len(leaked)}건")
+    if output.invocation_status is AgentInvocationStatus.FAILED:
+        failures.append("invocation_status=FAILED")
+    if failures:
+        print("실패: " + " · ".join(failures), file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

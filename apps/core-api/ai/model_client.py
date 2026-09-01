@@ -75,6 +75,11 @@ class TokenUsage:
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+    # prompt_tokens 중 제공자 캐시에서 온 몫. 청구 단가가 달라 이 값을 빼고는 실제
+    # 비용을 계산할 수 없다. 같은 프롬프트를 반복하는 계측에서는 크게 걸리고, 인시던트
+    # 마다 입력이 다른 실경로에서는 대개 0이다 — 그 차이를 구분해 말하려면 기록해야
+    # 한다(#237). 제공자가 이 정보를 주지 않으면 0이다.
+    cached_prompt_tokens: int = 0
 
 
 @dataclass(frozen=True)
