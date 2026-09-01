@@ -8,8 +8,11 @@
 #     lazy라 접속이 일어나지 않는다 — /health·오류 봉투·로깅 검증용.
 #   - PostgreSQL 통합(client_pg): db/tests/conftest.py와 같은 일회용 DB +
 #     Alembic upgrade head 방식. DB 미기동 시 통합 테스트만 skip한다.
-#     라우터에는 get_db 의존성 재정의로 테스트 세션을 주입한다(테스트 종료 시
-#     외부 트랜잭션 rollback — Repository는 commit하지 않으므로 성립).
+#     라우터에는 get_db 의존성 재정의로 테스트 세션을 주입한다. 테스트 종료 시
+#     외부 트랜잭션을 rollback해 전부 되돌린다 — 세션이 create_savepoint 모드라
+#     테스트 중의 commit·rollback이 외부 트랜잭션을 건드리지 않는다 (Issue #232).
+#   - 앱 기동 시 실행 스캔 잡은 끈다(DISPATCH_ENABLED=false) — 테스트마다 스캔이
+#     돌면 lru_cache된 세션 팩토리가 개발 DB로 굳은 채 그쪽을 스캔할 수 있다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -60,6 +63,8 @@ PG_TARGET = ADMIN_URL.rsplit("@", 1)[-1].split("/")[0]
 os.environ.setdefault(
     "DATABASE_URL", f"postgresql+psycopg://vigilantis:vigilantis@{DB_HOSTPORT}/vigilantis"
 )
+# 테스트 앱 기동마다 스캔 잡이 도는 것을 막는다 (PR #236 리뷰)
+os.environ.setdefault("DISPATCH_ENABLED", "false")
 
 TEST_DB_NAME = f"vigilantis_test_{uuid.uuid4().hex[:8]}"
 TEST_URL = ADMIN_URL.rsplit("/", 1)[0] + "/" + TEST_DB_NAME
@@ -135,7 +140,15 @@ def db(pg_engine):
 
     conn = pg_engine.connect()
     trans = conn.begin()
-    session = Session(bind=conn, autoflush=False, expire_on_commit=False)
+    # create_savepoint 명시 — 기본값(conditional_savepoint)은 세션 commit 이후의
+    # rollback이 외부 트랜잭션까지 되돌려, 그 전에 commit된 시드가 통째로 사라진다.
+    # 프로덕션 rollback 경로(dispatcher 예외 처리 등)를 지나는 테스트가 걸린다 (Issue #232)
+    session = Session(
+        bind=conn,
+        autoflush=False,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
     try:
         yield session
     finally:

@@ -50,6 +50,13 @@ class Settings(BaseSettings):
     # 제거·종료 시 연결 close() 정리도 같은 값을 상한으로 쓴다.
     # 0 이하면 모든 연결이 즉시 제거되므로 양수만 허용한다 (Issue #75)
     WS_SEND_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0)
+    # 접수된 조치 실행 디스패치·회수 스캔 주기(초) — dispatcher.py 잡 1개가 쓴다.
+    # 승인부터 AWS 호출까지의 지연 상한이자 부분 인덱스
+    # (ix_action_executions_non_terminal) 조회 빈도다 (Issue #232)
+    DISPATCH_INTERVAL_SECONDS: int = Field(default=10, gt=0)
+    # 스캔 잡 기동 스위치 — 테스트가 앱을 띄울 때 스캔이 따라 돌지 않게 끈다
+    # (apps/core-api/tests/conftest.py, PR #236 리뷰)
+    DISPATCH_ENABLED: bool = True
 
     # --- AI 모델 호출 (Issue #115) ---
     # 키는 Optional이다 — AI 호출 경로가 앱에 배선되기 전이라 키 없이도 기동해야 하고,
