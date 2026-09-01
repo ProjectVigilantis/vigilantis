@@ -367,6 +367,48 @@ def test_cached_tokens_cannot_exceed_prompt_tokens():
     assert client.complete(_request(), Answer).usage.cached_prompt_tokens == 100
 
 
+# --- 실패 위상·usage 보존 (#237) --------------------------------------------------
+# 예외 클래스만으로는 실패가 왕복의 어느 자리에서 났는지 갈리지 않는다(계약 위반은
+# 요청·응답 양쪽에 쓰인다). 응답을 받은 실패는 토큰이 이미 발생했으므로 usage를
+# 예외에 실어 보존한다 — 버리면 계측 비용이 실제 청구보다 적게 잡힌다.
+
+
+def test_response_side_failures_carry_phase_and_usage():
+    client, _ = _client([_completion(None, refusal="거절", usage=(1200, 0, 1200), cached=1024)])
+
+    with pytest.raises(AIModelRejectedError) as excinfo:
+        client.complete(_request(), Answer)
+
+    assert excinfo.value.phase == "response"
+    assert excinfo.value.usage.prompt_tokens == 1200
+    assert excinfo.value.usage.cached_prompt_tokens == 1024
+
+
+def test_contract_failure_after_response_preserves_usage():
+    empty = SimpleNamespace(
+        choices=[],
+        usage=SimpleNamespace(prompt_tokens=900, completion_tokens=0, total_tokens=900),
+        model="gpt-4o",
+    )
+    client, _ = _client([empty])
+
+    with pytest.raises(AIModelContractError) as excinfo:
+        client.complete(_request(), Answer)
+
+    assert excinfo.value.phase == "response"
+    assert excinfo.value.usage.prompt_tokens == 900
+
+
+def test_transport_failures_carry_transport_phase():
+    client, _ = _client([APITimeoutError(_REQUEST)], max_attempts=1)
+
+    with pytest.raises(AIModelTimeoutError) as excinfo:
+        client.complete(_request(), Answer)
+
+    assert excinfo.value.phase == "transport"
+    assert excinfo.value.usage is None
+
+
 # --- 모델 동작 노브 (#237) --------------------------------------------------------
 # 켠 노브만 요청에 실려야 한다. 모델 계열마다 받는 파라미터가 달라(gpt-4o는
 # temperature, gpt-5 계열 추론 모델은 reasoning_effort) 안 쓰는 노브가 요청 본문에

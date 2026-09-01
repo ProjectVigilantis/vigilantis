@@ -127,8 +127,11 @@ class OpenAIModelClient:
                 )
                 retry_after = _retry_after_seconds(exc)
             except ValidationError:
-                # SDK가 응답을 구조화 출력으로 검증하다 실패 — 재호출해도 같다
-                rejected = AIModelContractError("응답을 요구한 구조로 파싱하지 못했습니다")
+                # SDK가 응답을 구조화 출력으로 검증하다 실패 — 재호출해도 같다.
+                # 응답은 받은 실패라 phase=response다(usage는 SDK가 예외를 던져 없다)
+                rejected = AIModelContractError(
+                    "응답을 요구한 구조로 파싱하지 못했습니다", phase="response"
+                )
             except APIStatusError as exc:
                 # SDK 재시도 정책(_base_client._should_retry)은 408·409·429·5xx를
                 # 일시 오류로 본다. SDK 재시도를 꺼 놨으므로(max_retries=0) 전용
@@ -202,18 +205,22 @@ class OpenAIModelClient:
             },
         )
 
+        # 여기서부터의 실패는 전부 phase=response다 — 왕복은 섰고 토큰도 이미
+        # 발생했다. usage를 예외에 실어, 계측이 실패한 호출의 비용을 잃지 않게 한다
         choices = getattr(completion, "choices", None) or []
         if not choices:
-            raise AIModelContractError("응답에 선택지가 없습니다")
+            raise AIModelContractError("응답에 선택지가 없습니다", usage=usage, phase="response")
 
         message = choices[0].message
         if getattr(message, "refusal", None):
-            raise AIModelRejectedError("모델이 응답을 거절했습니다")
+            raise AIModelRejectedError("모델이 응답을 거절했습니다", usage=usage, phase="response")
 
         parsed = getattr(message, "parsed", None)
         if not isinstance(parsed, response_model):
             raise AIModelContractError(
-                f"응답을 {response_model.__name__}으로 파싱하지 못했습니다"
+                f"응답을 {response_model.__name__}으로 파싱하지 못했습니다",
+                usage=usage,
+                phase="response",
             )
 
         return AIModelResponse(output=parsed, usage=usage, model=model)
