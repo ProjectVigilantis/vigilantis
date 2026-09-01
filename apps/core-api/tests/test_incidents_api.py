@@ -15,7 +15,6 @@ from schemas.api.actions import ExecutionStatus
 from schemas.api.incidents import (
     IncidentCategory,
     IncidentStatus,
-    ResponseMode,
     RiskLevel,
 )
 from schemas.candidates import CandidateStatus
@@ -30,33 +29,39 @@ SUBJECT_EC2 = "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0aaa"
 SUBJECT_EBS = "arn:aws:ec2:ap-northeast-2:123456789012:volume/vol-0bbb"
 
 
-def _seed_two_incidents(db) -> tuple[models.Incident, models.Incident]:
-    secops = models.Incident(
-        subject_arn=SUBJECT_EC2,
-        category=IncidentCategory.SECOPS,
-        status=IncidentStatus.AWAITING_APPROVAL,
-        title="SSH 브루트포스 탐지",
-        initial_risk_level=RiskLevel.HIGH,
-        response_mode=ResponseMode.AGENT_WAIT,
-        initial_risk_reason_codes=["SSH_BRUTE_FORCE"],
-        summary_lines=["요약 1", "요약 2", "요약 3"],
-        created_at=T0,
-        updated_at=T0,
-    )
-    finops = models.Incident(
-        subject_arn=SUBJECT_EBS,
-        category=IncidentCategory.FINOPS,
-        status=IncidentStatus.ANALYZING,
-        created_at=T0 + timedelta(minutes=10),
-        updated_at=T0 + timedelta(minutes=10),
-    )
-    db.add_all([secops, finops])
-    db.flush()
-    return secops, finops
+@pytest.fixture()
+def two_incidents(db, make_incident, seed_summary_lines):
+    """목록 정렬·필터 검증용 SECOPS+FINOPS 쌍.
+
+    사본이 아니라 조합이라 이 파일에 남긴다. 위험 축 모양(SECOPS는 필수 필드,
+    FINOPS는 전부 NULL)은 팩토리가 category에서 파생시키므로 여기서 적지 않는다
+    — 예전 이 함수는 두 모양을 나란히 손으로 박고 있었다 (Issue #233).
+    """
+
+    def _make() -> tuple[models.Incident, models.Incident]:
+        secops = make_incident(
+            db,
+            subject_arn=SUBJECT_EC2,
+            initial_risk_level=RiskLevel.HIGH,
+            summary_lines=seed_summary_lines,
+            created_at=T0,
+            updated_at=T0,
+        )
+        finops = make_incident(
+            db,
+            category=IncidentCategory.FINOPS,
+            subject_arn=SUBJECT_EBS,
+            status=IncidentStatus.ANALYZING,
+            created_at=T0 + timedelta(minutes=10),
+            updated_at=T0 + timedelta(minutes=10),
+        )
+        return secops, finops
+
+    return _make
 
 
-def test_list_orders_by_created_at_desc_and_filters(client_pg, db):
-    secops, finops = _seed_two_incidents(db)
+def test_list_orders_by_created_at_desc_and_filters(client_pg, db, two_incidents):
+    secops, finops = two_incidents()
 
     body = client_pg.get("/api/v1/incidents").json()
     assert [item["incident_id"] for item in body["items"]] == [
@@ -84,8 +89,8 @@ def test_detail_unknown_id_returns_404_envelope(client_pg):
     assert body["error"]["request_id"] == response.headers["X-Request-ID"]
 
 
-def test_detail_assembles_evidence_recommendations_executions(client_pg, db):
-    secops, _ = _seed_two_incidents(db)
+def test_detail_assembles_evidence_recommendations_executions(client_pg, db, two_incidents):
+    secops, _ = two_incidents()
     older = models.Evidence(
         incident_id=secops.incident_id,
         evidence_type=EvidenceType.THREAT,
@@ -145,8 +150,8 @@ def test_detail_assembles_evidence_recommendations_executions(client_pg, db):
     assert body["created_at"] == "2026-08-19T03:00:00Z"
 
 
-def test_detail_assembles_execution_summaries(client_pg, db):
-    secops, _ = _seed_two_incidents(db)
+def test_detail_assembles_execution_summaries(client_pg, db, two_incidents):
+    secops, _ = two_incidents()
     candidate = models.RunbookCandidate(
         incident_id=secops.incident_id,
         runbook_id=RunbookId.RUNBOOK_NACL_ADD_DENY,
@@ -222,9 +227,9 @@ def _add_execution(
         (RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED, ExecutionStatus.SUCCESS, []),
     ],
 )
-def test_detail_derives_available_recovery(client_pg, db, runbook_id, status, expected):
+def test_detail_derives_available_recovery(client_pg, db, two_incidents, runbook_id, status, expected):
     """FE mock(route.ts RECOVERY_BY_RUNBOOK·RECOVERABLE_ORIGIN_STATUSES)과 같은 규칙."""
-    secops, _ = _seed_two_incidents(db)
+    secops, _ = two_incidents()
     secops.status = (
         IncidentStatus.ACTION_IN_PROGRESS
         if status in EXECUTION_NON_TERMINAL_STATUSES
@@ -237,9 +242,9 @@ def test_detail_derives_available_recovery(client_pg, db, runbook_id, status, ex
     assert body["executions"][0]["available_recovery_runbook_ids"] == expected
 
 
-def test_detail_hides_recovery_once_child_execution_exists(client_pg, db):
+def test_detail_hides_recovery_once_child_execution_exists(client_pg, db, two_incidents):
     """복구가 접수된 원본은 목록에서 빠진다 — 이중 롤백을 화면에서부터 막는다."""
-    secops, _ = _seed_two_incidents(db)
+    secops, _ = two_incidents()
     secops.status = IncidentStatus.ACTION_IN_PROGRESS
     origin = _add_execution(db, secops, RunbookId.RUNBOOK_EC2_ISOLATE, ExecutionStatus.SUCCESS)
     _add_execution(
