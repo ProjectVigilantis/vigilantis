@@ -34,6 +34,8 @@ members = [
 # CI는 7개 디렉터리를 한 세션으로 돌리므로 그 즉시 잡 실패가 된다.
 # 개별 디렉터리만 돌리면 초록불이라 CI에서야 처음 터진다는 게 이 사고의 핵심이다.
 # importlib 모드는 sys.path를 건드리지 않아 이름 충돌 자체가 성립하지 않는다.
-# 대신 테스트 파일끼리 `from <형제 모듈> import`는 불가하다 — 공유 픽스처는 conftest.py로.
+# 대신 테스트 파일끼리 `from <형제 모듈> import`는 conftest가 자기 디렉터리를
+# sys.path에 넣은 곳에서만 된다 — 지금은 tests/ 하나다(tests/conftest.py).
+# 그 처리가 없는 나머지 6곳은 공유 픽스처를 conftest.py로 옮긴다.
 [tool.pytest.ini_options]
 addopts = "--import-mode=importlib"
