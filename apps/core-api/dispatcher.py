@@ -49,6 +49,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from schemas.api.actions import ExecutionStatus
 from schemas.api.ws import WsEvent, WsEventType
+from schemas.executions import ExecutionEffect
 from schemas.runbooks import RunbookId
 
 import workflows
@@ -71,6 +72,17 @@ _RUNNERS: dict[RunbookId, Callable[[Session, str], workflows.ExecutionRunOutcome
 }
 
 
+# 자산이 만져졌을 수 있다고 보는 effect. NOT_APPLIED만 "확실히 안 바뀜"이다
+# (services/aws/executor.py _effect_for — 4xx 거절·스로틀링만 NOT_APPLIED).
+_ASSET_MAY_HAVE_CHANGED = frozenset(
+    {ExecutionEffect.APPLIED, ExecutionEffect.PARTIAL, ExecutionEffect.UNKNOWN}
+)
+
+
+def _changed_the_asset(outcome: workflows.ExecutionRunOutcome) -> bool:
+    return any(step.effect in _ASSET_MAY_HAVE_CHANGED for step in outcome.steps)
+
+
 @dataclass
 class DispatchReport:
     """스캔 1회 요약 — 로그와 테스트가 읽는 값이다."""
@@ -79,6 +91,7 @@ class DispatchReport:
     started: int = 0                # executor로 넘긴 실행
     closed: int = 0                 # 종료 상태로 확정한 실행
     awaiting_status_check: int = 0  # 요청은 접수됐고 2/2 판정을 기다리는 실행
+    left_for_rollback: int = 0      # 자산이 바뀐 채 실패 — 판정·원복은 rollback.py 몫
     skipped: int = 0                # 선점 실패·이미 AWS 변경이 시작된 실행
     unsupported: int = 0            # 실행 함수가 아직 없는 런북
     errored: int = 0
@@ -92,7 +105,9 @@ def _claim(db: Session, execution_id: str) -> Optional[models.ActionExecution]:
     (run_rightsizing_execution이 상태만 보고 거절하는 것과 짝을 이루는 관문이다).
 
     단계 기록이 1건이라도 있으면 넘기지 않는다 — 자산이 이미 만져졌을 수 있고,
-    그 판정은 rollback.py 몫이다(파일 헤더 계층 경계).
+    그 판정은 rollback.py 몫이다(파일 헤더 계층 경계). "단계 0건 = 자산 미변경"은
+    executor 계약에 의존한다 — AWS 호출 직전에 IN_PROGRESS 단계가 먼저 커밋된다
+    (workflows._step_recorder). 그 순서를 바꾸면 이 판정도 함께 무너진다.
     """
     row = executions_repo.lock_execution(db, execution_id)
     if row is None or row.status is not ExecutionStatus.IN_PROGRESS:
@@ -152,7 +167,9 @@ def _dispatch_one(
 
     runner = _RUNNERS.get(claimed.runbook_id)
     if runner is None:
-        logger.warning(
+        # 미지원 예약은 비종료로 남아 매 주기 다시 걸린다 — 주기 요약(unsupported
+        # 카운터)이 신호를 이미 나르므로 행 단위 반복 로그는 debug로 낮춘다
+        logger.debug(
             "dispatch_runner_missing",
             extra={
                 "execution_id": execution_id,
@@ -175,6 +192,22 @@ def _dispatch_one(
             logger.info(
                 "dispatch_awaiting_status_check", extra={"execution_id": execution_id}
             )
+            db.commit()  # runner는 반환 전에 commit을 끝낸다 — 그 계약을 코드로 남긴다
+            return
+        if _changed_the_asset(outcome):
+            # 자산이 바뀐 채 끝난 실행이다. FAILED로 확정하면 계약상 "변경 없이
+            # 실패"가 되어(packages/schemas/executions.py 복구 가능 상태 주석)
+            # 관제자 복구 목록이 닫히고, 종료 상태라 rollback.py도 다시 집지
+            # 못한다. 성공 경로와 같은 대기로 남긴다 — 2/2 판정·원복이 그쪽 몫이다
+            report.left_for_rollback += 1
+            logger.warning(
+                "dispatch_partial_change_left_open",
+                extra={
+                    "execution_id": execution_id,
+                    "reason_code": outcome.reason_code.value,
+                },
+            )
+            db.commit()
             return
         closure = workflows.close_execution(
             db,
@@ -225,13 +258,21 @@ def run_dispatch_cycle(
         db.close()
 
 
-def start_dispatcher(publish: Optional[Publish] = None) -> AsyncIOScheduler:
+def start_dispatcher(publish: Optional[Publish] = None) -> Optional[AsyncIOScheduler]:
     """main의 lifespan에서 기동한다 — 스캔 잡 1개를 등록·기동해 반환한다.
 
     잡을 겹쳐 돌리지 않는다(max_instances=1). 스캔이 둘이면 같은 실행 행을 두
     주체가 만지고, 그것이 이 모듈이 스캔을 독점하는 이유다(파일 헤더).
+
+    DISPATCH_ENABLED=false면 기동하지 않고 None을 돌려준다 — 테스트가 앱을 띄울
+    때마다 스캔이 돌면 lru_cache된 세션 팩토리가 개발 DB로 굳은 채 그쪽을 스캔할
+    수 있다(PR #236 리뷰).
     """
-    interval = get_settings().DISPATCH_INTERVAL_SECONDS
+    settings = get_settings()
+    if not settings.DISPATCH_ENABLED:
+        logger.info("dispatcher disabled: DISPATCH_ENABLED=false")
+        return None
+    interval = settings.DISPATCH_INTERVAL_SECONDS
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
         lambda: run_dispatch_cycle(get_session_factory(), publish),

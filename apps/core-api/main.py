@@ -59,7 +59,9 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         # 실시간 전송을 먼저 열고 스캔을 붙인다 — 반대면 첫 스캔이 발행할 곳을
-        # 찾지 못한다. 종료는 역순이라 스캔이 멈춘 뒤 전송이 닫힌다
+        # 찾지 못한다. 종료 시 진행 중인 스캔은 끝까지 돈다 — shutdown(wait=False)는
+        # 스레드풀에 이미 넘어간 잡을 취소하지 못한다. 그 스캔의 발행이 전송 종료
+        # 뒤에 오면 publish_dropped_at_shutdown 경고로 버려진다(realtime.py 규약)
         await realtime.start()
         scheduler = None
         try:

@@ -264,9 +264,9 @@ def test_execution_with_steps_is_not_touched(db, aws):
 
 
 def test_failed_execution_closes_the_incident_too(db, aws):
-    """남은 제안도 실행도 없으면 흐름이 더 진행되지 않는다 — FAILED."""
+    """변경 없이 실패한 실행(1단계 4xx 거절)만 FAILED로 확정된다."""
     incident_id, execution_id = _reserved(db)
-    aws(modify_instance_attribute=client_error("InvalidParameterValue"))
+    aws(stop_instances=client_error("IncorrectInstanceState"))
 
     report = cycle(db)
 
@@ -277,7 +277,7 @@ def test_failed_execution_closes_the_incident_too(db, aws):
     )
     row = exec_repo.get_execution(db, execution_id)
     assert row.finished_at is not None
-    assert "InvalidParameterValue" in row.error_summary
+    assert "IncorrectInstanceState" in row.error_summary
 
 
 def test_incident_returns_to_awaiting_approval_when_a_proposal_remains(db, aws):
@@ -292,7 +292,7 @@ def test_incident_returns_to_awaiting_approval_when_a_proposal_remains(db, aws):
         status=CandidateStatus.EXECUTABLE,
     )
     db.commit()
-    aws(modify_instance_attribute=client_error("InvalidParameterValue"))
+    aws(stop_instances=client_error("IncorrectInstanceState"))
 
     cycle(db)
 
@@ -313,7 +313,7 @@ def test_incident_stays_in_progress_while_another_execution_runs(db, aws):
         trigger_source=TriggerSource.USER_APPROVAL,
     ).execution_id
     db.commit()
-    aws(modify_instance_attribute=client_error("InvalidParameterValue"))
+    aws(stop_instances=client_error("IncorrectInstanceState"))
 
     cycle(db)
 
@@ -329,7 +329,7 @@ def test_incident_stays_in_progress_while_another_execution_runs(db, aws):
 def test_second_close_is_a_no_op(db, aws):
     """이미 확정된 실행에 두 번째 확정이 들어와도 상태와 사유를 덮어쓰지 않는다."""
     _incident_id, execution_id = _reserved(db)
-    aws(modify_instance_attribute=client_error("InvalidParameterValue"))
+    aws(stop_instances=client_error("IncorrectInstanceState"))
     cycle(db)
 
     again = workflows.close_execution(
@@ -383,7 +383,7 @@ def test_close_failure_is_also_contained(db, aws, monkeypatch):
     """확정(close_execution) 단계의 예외도 같은 우산 안이다 — 그 1건만 errored."""
     _p_incident, poisoned_id = _reserved(db)
     _h_incident, healthy_id = _reserved(db)
-    aws(modify_instance_attribute=client_error("InvalidParameterValue"))
+    aws(stop_instances=client_error("IncorrectInstanceState"))
 
     real_close = workflows.close_execution
 
@@ -407,13 +407,37 @@ def test_close_failure_is_also_contained(db, aws, monkeypatch):
     )
 
 
+def test_partially_applied_failure_stays_open_for_rollback(db, aws):
+    """자산이 바뀐 채 실패한 실행은 확정하지 않는다.
+
+    1단계 정지가 APPLIED로 끝난 뒤 2단계 타입 변경이 실패하면 인스턴스는 정지된
+    채 남는다. FAILED는 계약상 "변경 없이 실패"라(schemas/executions.py 복구 가능
+    상태 주석) 여기서 확정하면 관제자 복구 목록이 닫히고 rollback.py도 다시 집지
+    못한다 — 판정은 그쪽 몫으로 남긴다.
+    """
+    incident_id, execution_id = _reserved(db)
+    aws(modify_instance_attribute=client_error("InvalidParameterValue"))
+    events = []
+
+    report = cycle(db, events.append)
+
+    assert report.left_for_rollback == 1 and report.closed == 0
+    assert events == []
+    assert status_of(db, incident_id, execution_id) == (
+        IncidentStatus.ACTION_IN_PROGRESS,
+        ExecutionStatus.IN_PROGRESS,
+    )
+    # 다음 주기는 단계 기록 때문에 이 행을 건드리지 않는다(_claim)
+    assert cycle(db).skipped == 1
+
+
 # ------------------------------------------------------------------ 실시간 발행
 
 
 def test_events_are_published_only_after_commit(db, aws, monkeypatch):
     """commit 전에 보내면 받는 쪽이 아직 없는 상태를 조회한다(realtime.py 규약)."""
     incident_id, _execution_id = _reserved(db)
-    aws(modify_instance_attribute=client_error("InvalidParameterValue"))
+    aws(stop_instances=client_error("IncorrectInstanceState"))
 
     log = []
     real_commit = db.commit
@@ -457,7 +481,7 @@ def test_nothing_is_published_when_no_execution_closes(db, aws):
 def test_detail_survives_the_transition_with_nothing_left(client_pg, db, aws):
     """전이 뒤 상세 조회가 200이어야 한다 — 나눠 커밋하면 여기가 500이 된다."""
     incident_id, _execution_id = _reserved(db)
-    aws(modify_instance_attribute=client_error("InvalidParameterValue"))
+    aws(stop_instances=client_error("IncorrectInstanceState"))
     cycle(db)
 
     response = client_pg.get(f"/api/v1/incidents/{incident_id}")
@@ -481,7 +505,7 @@ def test_detail_survives_the_transition_with_a_proposal_left(client_pg, db, aws)
         status=CandidateStatus.EXECUTABLE,
     )
     db.commit()
-    aws(modify_instance_attribute=client_error("InvalidParameterValue"))
+    aws(stop_instances=client_error("IncorrectInstanceState"))
     cycle(db)
 
     response = client_pg.get(f"/api/v1/incidents/{incident_id}")

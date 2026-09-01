@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     # 승인부터 AWS 호출까지의 지연 상한이자 부분 인덱스
     # (ix_action_executions_non_terminal) 조회 빈도다 (Issue #232)
     DISPATCH_INTERVAL_SECONDS: int = Field(default=10, gt=0)
+    # 스캔 잡 기동 스위치 — 테스트가 앱을 띄울 때 스캔이 따라 돌지 않게 끈다
+    # (apps/core-api/tests/conftest.py, PR #236 리뷰)
+    DISPATCH_ENABLED: bool = True
 
     # --- AI 모델 호출 (Issue #115) ---
     # 키는 Optional이다 — AI 호출 경로가 앱에 배선되기 전이라 키 없이도 기동해야 하고,

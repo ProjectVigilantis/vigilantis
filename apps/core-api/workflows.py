@@ -529,8 +529,8 @@ def run_rightsizing_execution(db: Session, execution_id: str) -> ExecutionRunOut
     store_instance_spec_backup이 실패를 판정으로 돌려주는 것과 같은 이유다.
 
     **종료 상태도 Incident 전이도 여기서 하지 않는다.** 실행 행은 IN_PROGRESS로
-    남기고 확정은 dispatcher.py가 둘을 **한 트랜잭션에서** 처리한다(그 파일
-    [수행해야 할 작업] 5번). 실행만 먼저 종료 상태로 옮기면 "Incident는
+    남기고 확정은 dispatcher.py가 close_execution으로 둘을 **한 트랜잭션에서**
+    처리한다. 실행만 먼저 종료 상태로 옮기면 "Incident는
     ACTION_IN_PROGRESS인데 진행 중인 실행이 없는" 조합이 생기는데, 상세 응답 계약
     (api/incidents.py)이 그 조합을 거절하므로 상세 조회가 500이 된다.
 
@@ -607,6 +607,11 @@ def _incident_status_after(
     ACTION_IN_PROGRESS는 진행 중 실행 1개 이상을, AWAITING_APPROVAL은 제안 1개
     이상과 진행 중 실행 없음을, FAILED는 빈 제안 목록을 요구한다. 성패로 정하면
     "실패했는데 다른 제안이 남은" 건이 그 계약을 깬다.
+
+    SUCCESS 확정에 그대로 쓰면 성공한 실행의 인시던트도 (남은 실행·제안이 없으면)
+    FAILED로 간다 — 그 분기의 목적 상태는 미정이며 rollback.py 카드에서 정한다
+    (PR #236 리뷰 §2-②). 지금 어휘 5종에는 "조치는 끝났고 관제자 종료 판단만
+    남은" 자리가 없다.
 
     남는 자리가 셋뿐인 것도 계약에서 나온다. ANALYZING은 AI 분석 미완을 뜻해 실행이
     끝난 뒤 갈 자리가 아니고, RESOLVED로는 옮기지 않는다 — DB 제약은 판단 없는
