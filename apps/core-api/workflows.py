@@ -13,10 +13,11 @@
 #     IN_PROGRESS 레코드를 남기는 데까지고, 그 예약을 실행으로 넘기는 디스패치는
 #     dispatcher.py 몫이다. 실행 직전 대상 자산 재확인과 후보 INVALIDATED 전이는
 #     아직 붙지 않았다.
-#   - 실행은 단계 기록까지만 커밋하고 **종료 상태는 확정하지 않는다.** 실행 종료와
-#     Incident 전이는 한 트랜잭션이어야 하며(dispatcher.py [수행해야 할 작업] 5번),
-#     실행만 먼저 옮기면 ACTION_IN_PROGRESS인데 진행 중 실행이 없는 조합이 생겨
-#     상세 조회가 500이 된다(api/incidents.py 응답 계약).
+#   - 실행(run_rightsizing_execution)은 단계 기록까지만 커밋하고 **종료 상태는
+#     확정하지 않는다.** 확정은 close_execution 하나가 하며, 실행 종료와 Incident
+#     전이를 한 트랜잭션에 넣는다 — 실행만 먼저 옮기면 ACTION_IN_PROGRESS인데
+#     진행 중 실행이 없는 조합이 생겨 상세 조회가 500이 된다(api/incidents.py
+#     응답 계약). 그 둘을 언제 부를지 고르는 것은 dispatcher.py다. (Issue #232)
 #   - 조치 직전 스펙 JSON 백업은 여기서 커밋한다(store_instance_spec_backup).
 #     캡처는 services/aws/backup.py가, 저장·결속·커밋 순서는 이 계층이 소유한다 —
 #     "AWS 변경보다 먼저 커밋"이 트랜잭션 경계의 문제이기 때문이다.
@@ -29,6 +30,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Optional
 
 from pydantic import ValidationError
@@ -44,6 +46,8 @@ from schemas.api.errors import ErrorCode
 from schemas.api.incidents import IncidentStatus, ResolutionJudgement
 from schemas.candidates import CandidateStatus
 from schemas.executions import (
+    EXECUTION_NON_TERMINAL_STATUSES,
+    EXECUTION_TERMINAL_STATUSES,
     EXECUTION_RECOVERABLE_STATUSES,
     ExecutionStepResult,
     ExecutionStepStatus,
@@ -424,10 +428,15 @@ def store_instance_spec_backup(db: Session, execution_id: str) -> BackupOutcome:
 class ExecutionRunOutcome:
     """실행 1건의 결과. **종료 상태는 아직 DB에 없다.**
 
-    실행 행은 IN_PROGRESS로 남아 있고 SUCCESS·FAILED 확정은 dispatcher.py가
-    Incident 전이와 한 트랜잭션에서 한다(run_rightsizing_execution 참조). 여기 담긴
-    것은 그 확정에 필요한 재료다 — 성공 여부, 실패 분류(reason_code), 사람이 읽을
-    사유(error_summary), 그리고 자산이 어디까지 바뀌었는지 말하는 단계 결과(steps).
+    실행 행은 IN_PROGRESS로 남아 있고, 여기 담긴 것은 종료 확정에 필요한 재료다 —
+    성공 여부, 실패 분류(reason_code), 사람이 읽을 사유(error_summary), 그리고
+    자산이 어디까지 바뀌었는지 말하는 단계 결과(steps).
+
+    확정 주체는 succeeded가 가른다. **실패는 dispatcher.py가 여기서 바로 FAILED로
+    확정**하고(close_execution), **성공은 아직 확정하지 않는다** — 기동 요청 접수는
+    성공의 경계가 아니고 2/2 Status Check 결과가 SUCCESS와 ROLLBACK_INITIATED를
+    가르기 때문이다(services/aws/rollback.py, run_rightsizing_execution 참조).
+    그때까지 실행은 IN_PROGRESS로 남는다. (Issue #232)
     """
 
     succeeded: bool
@@ -562,3 +571,139 @@ def run_rightsizing_execution(db: Session, execution_id: str) -> ExecutionRunOut
     if not outcome.succeeded:
         return _run_failed(outcome.reason_code, outcome.error_summary, outcome.steps)
     return ExecutionRunOutcome(succeeded=True, steps=outcome.steps)
+
+
+# --- 실행 종료 확정 (Issue #232) -------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ExecutionClosure:
+    """종료 확정 1건의 결과 — commit 이후 발행에 쓸 재료다.
+
+    발행은 여기서 하지 않는다. 이 계층이 앱 상태(RealtimeManager)를 알게 되면
+    업무 흐름이 전송 채널에 묶이므로, 라우터와 같은 경계를 쓴다 — commit 이후
+    발행은 호출부 몫이다(routers/incidents.py 헤더).
+    """
+
+    incident_id: str
+    execution_id: str
+    execution_status: ExecutionStatus
+    execution_updated_at: datetime
+    incident_status: IncidentStatus
+    incident_updated_at: datetime
+
+
+def _incident_status_after(
+    db: Session,
+    incident_id: str,
+    *,
+    closed_execution_id: str,
+    closed_status: ExecutionStatus,
+) -> IncidentStatus:
+    """실행 하나가 확정된 뒤 Incident가 있어야 할 상태.
+
+    목적 상태는 실행의 성패가 아니라 **그 인시던트에 남은 것**이 정한다. 상세 응답
+    계약(api/incidents.py)이 상태와 자식 목록의 정합을 강제하기 때문이다 —
+    ACTION_IN_PROGRESS는 진행 중 실행 1개 이상을, AWAITING_APPROVAL은 제안 1개
+    이상과 진행 중 실행 없음을, FAILED는 빈 제안 목록을 요구한다. 성패로 정하면
+    "실패했는데 다른 제안이 남은" 건이 그 계약을 깬다.
+
+    남는 자리가 셋뿐인 것도 계약에서 나온다. ANALYZING은 AI 분석 미완을 뜻해 실행이
+    끝난 뒤 갈 자리가 아니고, RESOLVED로는 옮기지 않는다 — DB 제약은 판단 없는
+    RESOLVED를 허용하지만(db/models.py resolution_with_resolved_status), 시스템이
+    먼저 옮기면 관제자 종료 API가 멱등 경로로 떨어져(resolve_incident) 종료 판단이
+    영구히 비어 있는 채로 남는다 (Issue #199).
+    """
+    still_running = closed_status in EXECUTION_NON_TERMINAL_STATUSES or any(
+        row.status in EXECUTION_NON_TERMINAL_STATUSES
+        # 방금 옮긴 행은 세션이 옛 상태를 들고 있을 수 있어 인자로 받은 값을 쓴다
+        for row in executions_repo.list_by_incident(db, incident_id)
+        if row.execution_id != closed_execution_id
+    )
+    if still_running:
+        return IncidentStatus.ACTION_IN_PROGRESS
+    if incidents_repo.list_candidates(
+        db, incident_id, status=CandidateStatus.EXECUTABLE
+    ):
+        return IncidentStatus.AWAITING_APPROVAL
+    return IncidentStatus.FAILED
+
+
+def close_execution(
+    db: Session,
+    execution_id: str,
+    *,
+    next_status: ExecutionStatus,
+    error_summary: Optional[str] = None,
+) -> Optional[ExecutionClosure]:
+    """실행 상태 확정과 Incident 전이를 **한 트랜잭션**으로 커밋한다. (Issue #232)
+
+    나눠 커밋하면 그 사이의 조회가 "ACTION_IN_PROGRESS인데 진행 중인 실행이 없는"
+    인시던트를 보게 되고, 상세 응답 계약(api/incidents.py)이 그 조합을 거절해 상세
+    조회가 500이 된다.
+
+    None은 실패가 아니라 **이미 다른 주체가 확정한 실행**이라는 뜻이다 — 잠근 뒤
+    상태를 다시 보므로 여기까지 두 번 들어와도 확정은 한 번이다.
+
+    잠금 순서는 실행 → Incident로 고정한다(reserve_execution과 같은 순서). 엇갈리면
+    두 경로가 서로를 기다린다.
+    """
+    execution = executions_repo.lock_execution(db, execution_id)
+    if execution is None:
+        raise ValueError(f"실행 레코드를 찾을 수 없습니다: {execution_id}")
+    if execution.status not in EXECUTION_NON_TERMINAL_STATUSES:
+        return None
+
+    incident_id = execution.incident_id
+    incident = incidents_repo.lock_incident(db, incident_id)
+    if incident is None:
+        raise ValueError(f"실행이 가리키는 인시던트가 없습니다: {incident_id}")
+
+    moved = executions_repo.update_execution_status(
+        db,
+        execution_id,
+        expected=execution.status,
+        next_status=next_status,
+        error_summary=error_summary,
+        finished_at=(
+            datetime.now(timezone.utc)
+            if next_status in EXECUTION_TERMINAL_STATUSES
+            else None
+        ),
+    )
+    if not moved:
+        # 행을 잠그고 들어왔으므로 여기까지 와서 실패할 이유가 없다. 그래도
+        # 통과시키지 않는다 — 실행은 그대로인데 Incident만 옮겨 가면 상세 응답이
+        # 깨진다. commit 없이 예외를 던지므로 세션 정리에서 되돌아간다
+        raise ValueError(f"실행 상태 전이 실패: {execution_id}")
+
+    target = _incident_status_after(
+        db, incident_id, closed_execution_id=execution_id, closed_status=next_status
+    )
+    status_changed = incident.status is not target
+    if status_changed:
+        if not incidents_repo.update_incident_status(
+            db,
+            incident_id,
+            expected=incident.status,
+            next_status=target,
+            clear_resolution=incident.status is IncidentStatus.RESOLVED,
+        ):
+            raise ValueError(f"Incident 상태 전이 실패: {incident_id}")
+    else:
+        # 상태는 그대로여도 상세 응답의 자식 목록이 바뀌었으므로 updated_at은 올린다
+        incidents_repo.touch_incident(db, incident_id)
+
+    db.commit()
+    # Core UPDATE는 세션이 든 객체를 갱신하지 않는다 — 발행에 실을 상태·시각을
+    # 되읽는다(resolve_incident와 같은 자리)
+    db.refresh(execution)
+    db.refresh(incident)
+    return ExecutionClosure(
+        incident_id=incident_id,
+        execution_id=execution_id,
+        execution_status=execution.status,
+        execution_updated_at=execution.updated_at,
+        incident_status=incident.status,
+        incident_updated_at=incident.updated_at,
+    )

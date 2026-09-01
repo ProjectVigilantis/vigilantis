@@ -5,6 +5,8 @@
 #   - 오류는 exceptions의 공통 봉투로, 접근 로그는 request_context 미들웨어가
 #     구조화 로그(logging_config)로 남긴다.
 #   - 실시간 전송(realtime.RealtimeManager)은 앱 수명주기에 묶어 기동·종료한다.
+#   - 접수된 조치 실행 디스패치·회수 스캔(dispatcher)도 같은 수명주기에 묶는다.
+#     실시간 전송보다 늦게 열고 먼저 닫는다 (Issue #232).
 #   - Scheduler(주기 수집) 기동은 수집·판정 연결 작업(#67)에서 연결한다.
 # ==============================================================================
 
@@ -31,6 +33,7 @@ from contextlib import asynccontextmanager  # noqa: E402
 from fastapi import FastAPI, Request  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
+import dispatcher  # noqa: E402
 from config import get_settings  # noqa: E402
 from exceptions import register_error_handlers, unexpected_error_response  # noqa: E402
 from logging_config import request_id_var, setup_logging  # noqa: E402
@@ -55,10 +58,16 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        # 실시간 전송을 먼저 열고 스캔을 붙인다 — 반대면 첫 스캔이 발행할 곳을
+        # 찾지 못한다. 종료는 역순이라 스캔이 멈춘 뒤 전송이 닫힌다
         await realtime.start()
+        scheduler = None
         try:
+            scheduler = dispatcher.start_dispatcher(realtime.publish)
             yield
         finally:
+            if scheduler is not None:
+                scheduler.shutdown(wait=False)
             await realtime.stop()
 
     app = FastAPI(title="Vigilantis Core API", lifespan=lifespan)
