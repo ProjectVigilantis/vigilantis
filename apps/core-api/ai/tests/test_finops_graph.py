@@ -312,6 +312,30 @@ def test_proposal_payload_carries_required_parameters_per_runbook():
     assert by_id["RUNBOOK_EBS_DELETE_UNATTACHED"]["parameter_schema"] == {}
 
 
+def test_rule_evaluation_is_not_sent_twice():
+    # RuleEvidence는 RuleEvaluationResult를 그대로 감싼 모델이라, RULE 근거가 있으면
+    # 최상위 rule_evaluation은 그 복사본이다. 후보 호출이 이 페이로드를 다시 보내므로
+    # 그대로 두면 같은 판정이 한 실행에서 네 번 나간다
+    _, client = run(SUMMARY, proposals(rightsizing_proposal()))
+
+    for sent in client.sent:
+        payload = sent["user_payload"]
+        assert "rule_evaluation" not in payload
+        # 판정은 사라지지 않는다 — 근거 쪽에 그대로 있다
+        assert payload["evidences"][0]["content"]["evaluation"]["verdict"] == (
+            RULE_RESULT["verdict"]
+        )
+
+
+def test_rule_evaluation_is_sent_when_no_evidence_carries_it():
+    # 근거가 없거나 값이 다르면 빼지 않는다 — 빼면 판정이 페이로드에서 사라진다
+    _, client = run(SUMMARY, proposals(), graph_input=make_input(evidences=[]))
+
+    assert client.sent[0]["user_payload"]["rule_evaluation"]["verdict"] == (
+        RULE_RESULT["verdict"]
+    )
+
+
 def test_summary_payload_does_not_carry_the_menu():
     # 요약 노드는 조치를 고르지 않는다 — capabilities를 보낼 이유가 없다
     _, client = run(SUMMARY, proposals())

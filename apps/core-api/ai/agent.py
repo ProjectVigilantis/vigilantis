@@ -33,6 +33,7 @@ from schemas.agents import (
     RunbookCandidateDraft,
     RunbookCapability,
 )
+from schemas.evidence import EvidenceType
 from schemas.incidents import AgentInvocationStatus
 from schemas.runbook_parameters import CANDIDATE_PARAMETER_MODELS
 from schemas.runbooks import RunbookId
@@ -210,12 +211,33 @@ def _to_draft(proposal: ProposedCandidate, graph_input: FinOpsGraphInput) -> Run
 
 
 def _incident_payload(graph_input: FinOpsGraphInput) -> dict[str, Any]:
-    return {
+    """모델에게 나갈 값. 같은 값을 두 번 싣지 않는다.
+
+    RuleEvidence는 RuleEvaluationResult를 그대로 감싼 모델이라(packages/schemas/evidence.py),
+    RULE 근거가 있는 인시던트에서는 최상위 rule_evaluation이 그 근거의 복사본이다. 둘 다
+    실으면 같은 판정이 한 실행에서 네 번 나간다 — 후보 호출이 이 페이로드를 다시 보내기
+    때문이다(_proposal_payload). 골든 6건 기준 입력의 14.6%가 그 중복이었다.
+
+    **근거 쪽을 남기고 최상위를 뺀다.** 후보가 evidence_ids로 인용할 ID가 근거에만 있어
+    반대로는 뺄 수 없다. 값이 다르거나 RULE 근거가 없는 인시던트에서는 그대로 실어,
+    판정이 페이로드에서 사라지지 않게 한다.
+    """
+    rule_evaluation = graph_input.rule_evaluation.model_dump(mode="json")
+    evidences = [evidence.model_dump(mode="json") for evidence in graph_input.evidences]
+    carried_by_evidence = any(
+        evidence["evidence_type"] == EvidenceType.RULE.value
+        and evidence["content"].get("evaluation") == rule_evaluation
+        for evidence in evidences
+    )
+
+    payload: dict[str, Any] = {
         "incident_id": graph_input.incident_id,
         "asset": graph_input.asset_context.model_dump(mode="json"),
-        "rule_evaluation": graph_input.rule_evaluation.model_dump(mode="json"),
-        "evidences": [evidence.model_dump(mode="json") for evidence in graph_input.evidences],
     }
+    if not carried_by_evidence:
+        payload["rule_evaluation"] = rule_evaluation
+    payload["evidences"] = evidences
+    return payload
 
 
 def _proposal_payload(graph_input: FinOpsGraphInput, summary_lines: list[str]) -> dict[str, Any]:
