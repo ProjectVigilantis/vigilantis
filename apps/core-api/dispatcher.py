@@ -15,19 +15,28 @@
 # workflows.store_instance_spec_backup()과 services/aws/backup.py가 나눈 것과 같은
 # 경계입니다 — AWS 호출은 services/aws/**, 커밋 순서는 workflows.py.
 #
-# 회수 대상은 **단계 기록이 없는 비종료 실행**입니다. 백업이 모든 AWS 변경보다
-# 먼저 커밋되고 단계는 호출 직전에 저장되므로, 단계가 없다는 것은 자산이 아직
-# 만져지지 않았다는 뜻이고 그래서 다시 넘겨도 안전합니다. 단계가 남은 실행은
-# 자산이 이미 바뀌었을 수 있어 여기서 만지지 않습니다 — 재실행도, 실패 확정도
-# 하지 않고 rollback.py의 2/2 Status Check 판정에 맡깁니다.
+# 비종료 실행 1건이 가는 길은 **단계 기록의 유무**가 가릅니다. 백업이 모든 AWS
+# 변경보다 먼저 커밋되고 단계는 호출 직전에 저장되므로, 단계가 없다는 것은 자산이
+# 아직 만져지지 않았다는 뜻이라 실행으로 넘겨도 안전합니다(_RUNNERS). 단계가 남은
+# 실행은 자산이 이미 바뀌었을 수 있어 재실행하지 않고 2/2 Status Check 판정으로
+# 보냅니다(_JUDGES) — 기동 요청 접수는 성공의 경계가 아니고 그 판정이 SUCCESS와
+# ROLLBACK_INITIATED를 가르기 때문입니다. (Issue #240)
+#
+# ROLLBACK_INITIATED로 확정된 실행은 스캔에 계속 걸리지만 여기서 다시 만지지
+# 않습니다 — 자동 원복 실행을 낳는 것은 rollback.py·#241 몫입니다.
+#
+# 판정이 늘 확정으로 끝나지는 않습니다. AWS에 물어보지 못한 경우는 자산이 실패했다는
+# 근거가 아니므로 확정하지 않고 IN_PROGRESS로 남겨 다음 주기가 다시 묻습니다 —
+# 검증기의 실패를 ROLLBACK_INITIATED로 저장하면 #241의 자동 원복이 멀쩡한 인스턴스를
+# 되돌립니다. 재시도 상한과 판정 불가의 저장 계약은 Issue #249입니다.
 #
 # [남은 작업]
-# 1. 성공 경로의 종료 상태 확정 — 기동 요청 접수는 성공의 경계가 아니라
-#    2/2 Status Check가 SUCCESS와 ROLLBACK_INITIATED를 가릅니다
-#    (services/aws/rollback.py). 그 파일이 설 때까지 성공한 실행은 IN_PROGRESS로,
-#    그 Incident는 ACTION_IN_PROGRESS로 남습니다.
-# 2. RIGHTSIZING 외 9종 실행 — 실행 함수가 생기는 대로 _RUNNERS에 등록합니다
-#    (services/aws/executor.py [남은 작업] 1번).
+# 1. RIGHTSIZING 외 9종 실행 — 실행 함수가 생기는 대로 _RUNNERS에, 종료 판정이
+#    필요한 런북은 _JUDGES에 등록합니다(services/aws/executor.py [남은 작업] 1번).
+# 2. ROLLBACK_INITIATED 원본의 자동 원복 발동 — trigger_source=AUTO_ON_FAILURE로
+#    원복 실행을 만들고 원본을 ROLLED_BACK·ROLLBACK_FAILED로 확정합니다 (Issue #241).
+# 3. 판정 보류의 재시도 정책 — 조회 실패를 몇 번까지 다시 묻고, 소진하면 어떤 typed
+#    상태로 남겨 관제자에게 보일지 확정합니다. 지금은 상한 없이 다시 묻습니다 (Issue #249).
 #
 # 기동 worker 개수는 미정입니다 — ADR-0005가 다중 worker·replica 실행 토폴로지를
 # 별도 결정 대상으로 남겼고, 이 모듈은 worker 1개를 전제합니다. 선점(_claim)의
@@ -49,7 +58,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from schemas.api.actions import ExecutionStatus
 from schemas.api.ws import WsEvent, WsEventType
-from schemas.executions import ExecutionEffect
+from schemas.executions import ASSET_MAY_HAVE_CHANGED_EFFECTS
 from schemas.runbooks import RunbookId
 
 import workflows
@@ -71,16 +80,18 @@ _RUNNERS: dict[RunbookId, Callable[[Session, str], workflows.ExecutionRunOutcome
     RunbookId.RUNBOOK_EC2_RIGHTSIZING: workflows.run_rightsizing_execution,
 }
 
-
-# 자산이 만져졌을 수 있다고 보는 effect. NOT_APPLIED만 "확실히 안 바뀜"이다
-# (services/aws/executor.py _effect_for — 4xx 거절·스로틀링만 NOT_APPLIED).
-_ASSET_MAY_HAVE_CHANGED = frozenset(
-    {ExecutionEffect.APPLIED, ExecutionEffect.PARTIAL, ExecutionEffect.UNKNOWN}
-)
+# 런북별 종료 판정 진입점 — AWS 변경이 이미 시작된 실행을 어느 종료 상태로 확정할지
+# 정한다. _RUNNERS와 짝이며, 여기 없는 런북의 진행 중 실행은 판정 주체가 없다는
+# 뜻이라 건드리지 않고 남긴다(미구현을 실패 확정으로 바꾸지 않는 것과 같은 이유).
+_JUDGES: dict[RunbookId, Callable[[Session, str], workflows.BootJudgement]] = {
+    RunbookId.RUNBOOK_EC2_RIGHTSIZING: workflows.judge_rightsizing_boot,
+}
 
 
 def _changed_the_asset(outcome: workflows.ExecutionRunOutcome) -> bool:
-    return any(step.effect in _ASSET_MAY_HAVE_CHANGED for step in outcome.steps)
+    return any(
+        step.effect in ASSET_MAY_HAVE_CHANGED_EFFECTS for step in outcome.steps
+    )
 
 
 @dataclass
@@ -89,11 +100,13 @@ class DispatchReport:
 
     scanned: int = 0
     started: int = 0                # executor로 넘긴 실행
+    judged: int = 0                 # 2/2 Status Check 판정을 수행한 실행(deferred 포함)
     closed: int = 0                 # 종료 상태로 확정한 실행
-    awaiting_status_check: int = 0  # 요청은 접수됐고 2/2 판정을 기다리는 실행
-    left_for_rollback: int = 0      # 자산이 바뀐 채 실패 — 판정·원복은 rollback.py 몫
-    skipped: int = 0                # 선점 실패·이미 AWS 변경이 시작된 실행
-    unsupported: int = 0            # 실행 함수가 아직 없는 런북
+    awaiting_status_check: int = 0  # 요청은 접수됐고 다음 주기의 판정을 기다리는 실행
+    rollback_initiated: int = 0     # 원복이 필요해 ROLLBACK_INITIATED로 남긴 실행
+    deferred: int = 0               # AWS 조회 실패로 확정하지 않고 다음 주기로 미룬 실행
+    skipped: int = 0                # 선점 실패·이미 확정된 실행
+    unsupported: int = 0            # 실행 함수·판정 함수가 아직 없는 런북
     errored: int = 0
 
 
@@ -104,15 +117,11 @@ def _claim(db: Session, execution_id: str) -> Optional[models.ActionExecution]:
     넘기면 이미 끝난 실행을 한 번 더 돌려 **백업 없는 두 번째 AWS 변경**이 된다
     (run_rightsizing_execution이 상태만 보고 거절하는 것과 짝을 이루는 관문이다).
 
-    단계 기록이 1건이라도 있으면 넘기지 않는다 — 자산이 이미 만져졌을 수 있고,
-    그 판정은 rollback.py 몫이다(파일 헤더 계층 경계). "단계 0건 = 자산 미변경"은
-    executor 계약에 의존한다 — AWS 호출 직전에 IN_PROGRESS 단계가 먼저 커밋된다
-    (workflows._step_recorder). 그 순서를 바꾸면 이 판정도 함께 무너진다.
+    IN_PROGRESS만 집는다. 비종료 상태에는 ROLLBACK_INITIATED도 있지만 그쪽은 이미
+    판정이 끝나 자동 원복을 기다리는 실행이라 여기서 만지지 않는다 (Issue #241).
     """
     row = executions_repo.lock_execution(db, execution_id)
     if row is None or row.status is not ExecutionStatus.IN_PROGRESS:
-        return None
-    if executions_repo.list_steps(db, execution_id):
         return None
     return row
 
@@ -151,6 +160,105 @@ def _publish_closure(publish: Publish, closure: workflows.ExecutionClosure) -> N
     )
 
 
+def _close_and_publish(
+    db: Session,
+    execution_id: str,
+    publish: Optional[Publish],
+    report: DispatchReport,
+    *,
+    next_status: ExecutionStatus,
+    error_summary: Optional[str] = None,
+) -> None:
+    """확정 → 카운트 → 발행. 확정이 None이면 다른 주체가 먼저 옮긴 것이다."""
+    closure = workflows.close_execution(
+        db, execution_id, next_status=next_status, error_summary=error_summary
+    )
+    if closure is None:
+        # 실행 도중 다른 주체가 먼저 확정했다 — 발행도 그쪽이 한다
+        report.skipped += 1
+        return
+    if next_status is ExecutionStatus.ROLLBACK_INITIATED:
+        report.rollback_initiated += 1
+    else:
+        report.closed += 1
+    if publish is not None:
+        _publish_closure(publish, closure)
+
+
+def _judge_one(
+    db: Session,
+    claimed: models.ActionExecution,
+    publish: Optional[Publish],
+    report: DispatchReport,
+) -> None:
+    """AWS 변경이 시작된 실행 1건을 종료 판정으로 보낸다. (Issue #240)
+
+    재실행하지 않는다 — 자산이 이미 만져졌을 수 있으므로 남은 질문은 "다시 돌릴까"가
+    아니라 "이 조치가 성공으로 끝났는가"다. 판정 자체는 rollback.py가, 상태 확정은
+    workflows.close_execution이 소유한다.
+    """
+    execution_id = claimed.execution_id
+    judge = _JUDGES.get(claimed.runbook_id)
+    if judge is None:
+        # 판정 주체가 없는 런북이다. 실패로 확정하면 미구현이 "조치가 실패했다"로
+        # 둔갑하므로 남긴다 — _RUNNERS 미등록을 다루는 것과 같은 규약이다
+        logger.debug(
+            "dispatch_judge_missing",
+            extra={
+                "execution_id": execution_id,
+                "runbook_id": claimed.runbook_id.value,
+            },
+        )
+        report.unsupported += 1
+        db.commit()
+        return
+
+    report.judged += 1
+    # 선점 잠금을 먼저 놓는다. 판정은 최대 STATUS_CHECK_WAIT_DELAY × MAX_ATTEMPTS만큼
+    # AWS를 기다리는데, 그동안 행을 잠근 트랜잭션이 열려 있으면 커넥션과 잠금을 분
+    # 단위로 붙잡는다. 놓아도 안전한 것은 확정이 close_execution 몫이고 그쪽이 다시
+    # 잠근 뒤 상태를 재확인하기 때문이다 — 그 사이 누가 먼저 확정했으면 None이 온다.
+    db.commit()
+    try:
+        judgement = judge(db, execution_id)
+        if judgement.deferred:
+            # AWS에 물어보지 못해 결론이 없다 — 확정하지 않고 다음 주기가 다시 묻는다.
+            # 여기서 ROLLBACK_INITIATED로 닫으면 검증기의 실패가 자산의 실패로
+            # 저장되어 #241의 자동 원복 입력과 구분되지 않는다. 사유는 로그로만
+            # 남긴다 — 판정 불가의 저장 계약은 Issue #249다
+            report.deferred += 1
+            logger.warning(
+                "dispatch_judgement_deferred",
+                extra={
+                    "execution_id": execution_id,
+                    "reason": judgement.defer_reason,
+                },
+            )
+            db.commit()
+            return
+        _close_and_publish(
+            db,
+            execution_id,
+            publish,
+            report,
+            next_status=judgement.next_status,
+            error_summary=judgement.error_summary,
+        )
+    except Exception:  # noqa: BLE001 — 판정 1건의 오류가 스캔 전체를 멈추면 안 된다
+        logger.exception("dispatch_judge_failed", extra={"execution_id": execution_id})
+        db.rollback()
+        report.errored += 1
+        return
+    logger.info(
+        "dispatch_judged",
+        extra={
+            "execution_id": execution_id,
+            "next_status": judgement.next_status.value,
+            "verdict": judgement.verdict.value if judgement.verdict else None,
+        },
+    )
+
+
 def _dispatch_one(
     db: Session,
     execution_id: str,
@@ -163,6 +271,14 @@ def _dispatch_one(
         # 선점 조회가 연 트랜잭션을 닫아 행 잠금을 놓는다. 쓴 것이 없으므로
         # commit이고, rollback을 쓰면 호출부가 같은 세션에 얹어 둔 작업까지 잃는다
         db.commit()
+        return
+
+    # 단계 기록이 1건이라도 있으면 자산이 이미 만져졌을 수 있다 — 재실행이 아니라
+    # 종료 판정으로 간다. "단계 0건 = 자산 미변경"은 executor 계약에 의존한다:
+    # AWS 호출 직전에 IN_PROGRESS 단계가 먼저 커밋된다(workflows._step_recorder).
+    # 그 순서를 바꾸면 이 분기도 함께 무너진다.
+    if executions_repo.list_steps(db, execution_id):
+        _judge_one(db, claimed, publish, report)
         return
 
     runner = _RUNNERS.get(claimed.runbook_id)
@@ -188,6 +304,8 @@ def _dispatch_one(
             # ROLLBACK_INITIATED를 가른다(services/aws/rollback.py). 여기서 SUCCESS를
             # 앞질러 쓰면 관제자 복구 경로가 판정 전에 열리고(EXECUTION_RECOVERABLE_
             # STATUSES), 뒤이은 자동 원복 개시가 종료 상태를 되살리는 전이가 된다.
+            # 판정은 **다음 주기**가 한다 — 방금 기동을 요청한 인스턴스에 곧바로
+            # 2/2를 물으면 부팅 시간만큼 이 스캔이 붙잡힌다(max_instances=1).
             report.awaiting_status_check += 1
             logger.info(
                 "dispatch_awaiting_status_check", extra={"execution_id": execution_id}
@@ -197,21 +315,29 @@ def _dispatch_one(
         if _changed_the_asset(outcome):
             # 자산이 바뀐 채 끝난 실행이다. FAILED로 확정하면 계약상 "변경 없이
             # 실패"가 되어(packages/schemas/executions.py 복구 가능 상태 주석)
-            # 관제자 복구 목록이 닫히고, 종료 상태라 rollback.py도 다시 집지
-            # 못한다. 성공 경로와 같은 대기로 남긴다 — 2/2 판정·원복이 그쪽 몫이다
-            report.left_for_rollback += 1
+            # 관제자 복구 목록이 닫히므로, 되돌릴 것이 남았다고 적는다. 2/2를
+            # 물을 이유는 없다 — 조치가 제 갈 데까지 가지 못한 것이 이미 확정이다.
             logger.warning(
-                "dispatch_partial_change_left_open",
+                "dispatch_rollback_initiated",
                 extra={
                     "execution_id": execution_id,
                     "reason_code": outcome.reason_code.value,
                 },
             )
-            db.commit()
+            _close_and_publish(
+                db,
+                execution_id,
+                publish,
+                report,
+                next_status=ExecutionStatus.ROLLBACK_INITIATED,
+                error_summary=_failure_summary(outcome),
+            )
             return
-        closure = workflows.close_execution(
+        _close_and_publish(
             db,
             execution_id,
+            publish,
+            report,
             next_status=ExecutionStatus.FAILED,
             error_summary=_failure_summary(outcome),
         )
@@ -222,14 +348,6 @@ def _dispatch_one(
         db.rollback()
         report.errored += 1
         return
-
-    if closure is None:
-        # 실행 도중 다른 주체가 먼저 확정했다 — 발행도 그쪽이 한다
-        report.skipped += 1
-        return
-    report.closed += 1
-    if publish is not None:
-        _publish_closure(publish, closure)
 
 
 def dispatch_pending(db: Session, publish: Optional[Publish] = None) -> DispatchReport:

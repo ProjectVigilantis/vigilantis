@@ -49,8 +49,15 @@ AGENT_TERMINAL_STATUSES: frozenset[AgentInvocationStatus] = frozenset(
 #   - ANALYZING도 제외한다 — AI 분석이 끝나며 제안이 붙고 AWAITING_APPROVAL로
 #     되살아나므로 종료가 뒤집힌다.
 #   - RESOLVED 재요청은 거절이 아니라 멱등 응답이라 이 집합에 넣지 않는다.
+#   - AWAITING_CLOSURE는 이 집합의 주 출발점이다 — 조치가 끝나고 종료 판단만 남은
+#     자리라, 관제자 [종료 판단]이 여기서 열리지 않으면 그 상태가 무의미해진다
+#     (Issue #240).
 INCIDENT_RESOLVABLE_STATUSES: frozenset[IncidentStatus] = frozenset(
-    {IncidentStatus.AWAITING_APPROVAL, IncidentStatus.FAILED}
+    {
+        IncidentStatus.AWAITING_APPROVAL,
+        IncidentStatus.AWAITING_CLOSURE,
+        IncidentStatus.FAILED,
+    }
 )
 
 

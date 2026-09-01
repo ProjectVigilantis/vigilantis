@@ -718,7 +718,12 @@ function seedIncident(seed: IncidentSeed): IncidentResponse {
         : 'AGENT_WAIT';
 
   const analyzing = seed.status === 'ANALYZING';
-  const terminal = seed.status === 'RESOLVED' || seed.status === 'FAILED';
+  // 제안 목록이 비어야 하는 상태 — `AWAITING_CLOSURE`는 종료 판단만 남은 자리라
+  // 남은 제안이 있으면 성립하지 않는다(v1.6 ⑤, packages/schemas/api/incidents.py).
+  const terminal =
+    seed.status === 'RESOLVED' ||
+    seed.status === 'FAILED' ||
+    seed.status === 'AWAITING_CLOSURE';
   const summary = analyzing ? [] : (seed.summary ?? []);
   const recommend = analyzing || terminal ? [] : (seed.recommend ?? []);
   const executions = seed.executions ?? [];
@@ -743,6 +748,9 @@ function seedIncident(seed: IncidentSeed): IncidentResponse {
   }
   if (seed.status === 'RESOLVED' && inProgress) {
     throw new Error(`${where}: RESOLVED면 진행 중인 실행이 없어야 한다`);
+  }
+  if (seed.status === 'AWAITING_CLOSURE' && (executions.length === 0 || inProgress)) {
+    throw new Error(`${where}: AWAITING_CLOSURE는 수행된 실행 1개 이상 + 진행 중 실행 없음이다`);
   }
   if (new Set(recommend.map((r) => r.runbook)).size !== recommend.length) {
     throw new Error(`${where}: recommendations에 같은 runbook_id가 중복될 수 없다`);

@@ -57,6 +57,11 @@ class Settings(BaseSettings):
     # 스캔 잡 기동 스위치 — 테스트가 앱을 띄울 때 스캔이 따라 돌지 않게 끈다
     # (apps/core-api/tests/conftest.py, PR #236 리뷰)
     DISPATCH_ENABLED: bool = True
+    # 2/2 Status Check 대기 — services/aws/rollback.py의 waiter 설정 (Issue #240).
+    # 기본 15초×12회=3분으로 boto3 기본값(15초×40회=10분)보다 짧다. 판정 1건이
+    # 그만큼 다음 스캔을 미루므로(max_instances=1) 시연에서 조일 수 있어야 한다.
+    STATUS_CHECK_WAIT_DELAY_SECONDS: int = Field(default=15, gt=0)
+    STATUS_CHECK_WAIT_MAX_ATTEMPTS: int = Field(default=12, ge=1)
 
     # --- AI 모델 호출 (Issue #115) ---
     # 키는 Optional이다 — AI 호출 경로가 앱에 배선되기 전이라 키 없이도 기동해야 하고,

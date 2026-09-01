@@ -46,9 +46,12 @@ from schemas.api.errors import ErrorCode
 from schemas.api.incidents import IncidentStatus, ResolutionJudgement
 from schemas.candidates import CandidateStatus
 from schemas.executions import (
+    ASSET_MAY_HAVE_CHANGED_EFFECTS,
     EXECUTION_NON_TERMINAL_STATUSES,
+    EXECUTION_SETTLED_STATUSES,
     EXECUTION_TERMINAL_STATUSES,
     EXECUTION_RECOVERABLE_STATUSES,
+    ExecutionEffect,
     ExecutionStepResult,
     ExecutionStepStatus,
 )
@@ -66,7 +69,7 @@ from db.repositories import executions as executions_repo
 from db.repositories import incidents as incidents_repo
 from exceptions import ApiError
 from identifiers import canonical_id
-from services.aws import backup, executor
+from services.aws import backup, executor, rollback
 from services.aws.executor import parse_arn
 
 logger = logging.getLogger("vigilantis.workflow")
@@ -573,6 +576,163 @@ def run_rightsizing_execution(db: Session, execution_id: str) -> ExecutionRunOut
     return ExecutionRunOutcome(succeeded=True, steps=outcome.steps)
 
 
+# --- 2/2 Status Check 판정 (Issue #240) -----------------------------------------
+
+
+@dataclass(frozen=True)
+class BootJudgement:
+    """기동 판정 1건 — 확정할 목적 상태와 사유. **상태는 아직 DB에 없다.**
+
+    run_rightsizing_execution이 ExecutionRunOutcome를 돌려주는 것과 같은 자리다.
+    확정은 close_execution 하나가 하고, 언제 부를지는 dispatcher.py가 고른다.
+
+    next_status가 None이면 **판정 보류**다 — 확정하지 않고 IN_PROGRESS로 남겨 다음
+    주기가 다시 묻는다. AWS에 물어보지 못해 자산 상태를 본 적이 없는 경우이며, 그때
+    ROLLBACK_INITIATED로 닫으면 검증기의 실패가 자산의 실패로 저장되어 자동 원복
+    (#241)의 입력과 구분되지 않는다 (PR #244 리뷰).
+
+    **보류 사유는 저장하지 않는다**(defer_reason은 로그 몫이다). 판정 불가를 어떤
+    typed 상태로 남기고 재시도를 몇 번까지 허용할지가 Issue #249의 계약이며, 그
+    계약이 서기 전에 error_summary 문자열이 판정 근거로 읽히면 안 된다.
+    """
+
+    next_status: Optional[ExecutionStatus] = None
+    error_summary: Optional[str] = None
+    verdict: Optional[rollback.StatusCheckVerdict] = None
+    defer_reason: Optional[str] = None
+
+    @property
+    def deferred(self) -> bool:
+        return self.next_status is None
+
+    def __post_init__(self) -> None:
+        if self.deferred:
+            if self.error_summary is not None:
+                raise ValueError("보류 판정은 error_summary를 저장하지 않습니다")
+            if self.defer_reason is None:
+                raise ValueError("보류 판정에는 사유가 필요합니다")
+            return
+        if self.defer_reason is not None:
+            raise ValueError("확정 판정에는 defer_reason을 두지 않습니다")
+        if (self.next_status is ExecutionStatus.SUCCESS) != (self.error_summary is None):
+            raise ValueError("성공이 아닌 판정에만 error_summary를 채웁니다")
+
+
+def _steps_changed_the_asset(steps: list[models.ExecutionStep]) -> bool:
+    """단계 기록이 "자산이 만져졌을 수 있다"고 말하는가.
+
+    IN_PROGRESS로 남은 단계는 AWS 호출 결과를 받지 못한 것이라 effect가 없다 —
+    그 호출이 적용됐는지 알 수 없으므로 바뀌었을 수 있다는 쪽으로 센다.
+    """
+    return any(
+        step.status is ExecutionStepStatus.IN_PROGRESS
+        or step.effect in ASSET_MAY_HAVE_CHANGED_EFFECTS
+        for step in steps
+    )
+
+
+def _boot_failure_summary(outcome: rollback.StatusCheckOutcome) -> str:
+    """판정 사유 한 줄 — 분류를 앞에 둬 로그·DB에서 사유별로 모인다(보류 사유도 같은 꼴)."""
+    code = (
+        outcome.reason_code.value
+        if outcome.reason_code is not None
+        else outcome.verdict.value
+    )
+    return f"{code}: {outcome.summary}"[:1024]
+
+
+def judge_rightsizing_boot(db: Session, execution_id: str) -> BootJudgement:
+    """AWS 변경이 시작된 RIGHTSIZING 실행 1건의 종료 판정. (Issue #240)
+
+    **기동 요청 접수는 성공의 경계가 아니다.** 2/2 Status Check가 SUCCESS와
+    ROLLBACK_INITIATED를 가르므로, 단계가 남은 채 IN_PROGRESS인 실행은 재실행이
+    아니라 이 판정으로 온다(dispatcher.py 회수 규약).
+
+    판정 순서가 계약이다.
+      ① 끝나지 않은·실패한 단계가 있으면 부팅을 물을 필요가 없다 — 조치 자체가
+         제 갈 데까지 가지 못했다. 자산이 바뀌었을 수 있으면 원복이 남고
+         (ROLLBACK_INITIATED), 확실히 안 바뀌었으면 그냥 실패다(FAILED).
+      ② 조치 직전 stopped였던 인스턴스는 기동하지 않는다(executor.execute_rightsizing
+         ③단계 NOT_APPLIED). 켜지 않은 인스턴스에 2/2를 물으면 영원히 오지 않으므로
+         타임아웃 뒤 멀쩡한 자산을 되돌리게 된다 — 그 전에 성공으로 확정한다.
+      ③ 그 밖에는 waiter에 묻는다 — 2/2면 성공이고, 관측된 실패·타임아웃이면 원복이
+         남는다. **AWS에 물어보지 못했으면 어느 쪽도 아니라 보류다**(next_status가
+         없는 판정) — 검증기의 실패를 자산의 실패로 저장하면 자동 원복이 멀쩡한
+         인스턴스를 되돌린다 (Issue #249).
+
+    **종료 상태도 Incident 전이도 여기서 하지 않는다** — run_rightsizing_execution과
+    같은 이유다(확정은 close_execution 한 트랜잭션).
+    """
+    execution = executions_repo.get_execution(db, execution_id)
+    if execution is None:
+        raise ValueError(f"실행 레코드를 찾을 수 없습니다: {execution_id}")
+    if execution.runbook_id is not RunbookId.RUNBOOK_EC2_RIGHTSIZING:
+        # 배선 오류다 — 런북마다 성공의 경계가 다르다
+        raise ValueError(f"RIGHTSIZING 실행이 아닙니다: {execution.runbook_id.value}")
+    if execution.status is not ExecutionStatus.IN_PROGRESS:
+        raise ValueError(f"진행 중인 실행이 아닙니다: {execution.status.value}")
+
+    steps = executions_repo.list_steps(db, execution_id)
+    if not steps:
+        # 단계가 없으면 자산이 아직 안 만져진 것이라 재실행 대상이다(dispatcher._claim).
+        # 여기로 왔다면 회수 분기가 어긋난 것이므로 판정으로 삼키지 않는다
+        raise ValueError(f"단계 기록이 없는 실행입니다: {execution_id}")
+
+    unsettled = [
+        step
+        for step in steps
+        if step.status is not ExecutionStepStatus.SUCCESS
+    ]
+    if unsettled:
+        detail = (unsettled[-1].error_summary or "").strip() or (
+            f"단계 {unsettled[-1].sequence}({unsettled[-1].step_type})가 끝나지 않았습니다"
+        )
+        if _steps_changed_the_asset(steps):
+            return BootJudgement(
+                next_status=ExecutionStatus.ROLLBACK_INITIATED,
+                error_summary=f"조치 미완(자산 변경됨): {detail}"[:1024],
+            )
+        return BootJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary=f"조치 미완(자산 변경 없음): {detail}"[:1024],
+        )
+
+    started = next(
+        (
+            step
+            for step in reversed(steps)
+            if step.step_type == executor.STEP_START_INSTANCE
+        ),
+        None,
+    )
+    if started is None:
+        # 타입 변경까지 갔는데 기동 단계가 없다 — 자산은 바뀐 채 멈춰 있다
+        return BootJudgement(
+            next_status=ExecutionStatus.ROLLBACK_INITIATED,
+            error_summary="조치 미완: 기동 단계가 기록되지 않았습니다",
+        )
+    if started.effect is ExecutionEffect.NOT_APPLIED:
+        return BootJudgement(next_status=ExecutionStatus.SUCCESS)
+
+    outcome = rollback.wait_for_status_check(execution.target_arn)
+    if outcome.booted:
+        return BootJudgement(
+            next_status=ExecutionStatus.SUCCESS, verdict=outcome.verdict
+        )
+    if outcome.probe_failed:
+        # AWS에 물어보지 못해 결론이 없다 — 자산이 실패했다는 근거가 아니다.
+        # 여기서 ROLLBACK_INITIATED로 닫으면 검증기의 실패가 자산의 실패로 저장되고,
+        # 자동 원복(#241)이 멀쩡한 인스턴스를 되돌린다 (PR #244 리뷰 / Issue #249)
+        return BootJudgement(
+            defer_reason=_boot_failure_summary(outcome), verdict=outcome.verdict
+        )
+    return BootJudgement(
+        next_status=ExecutionStatus.ROLLBACK_INITIATED,
+        error_summary=_boot_failure_summary(outcome),
+        verdict=outcome.verdict,
+    )
+
+
 # --- 실행 종료 확정 (Issue #232) -------------------------------------------------
 
 
@@ -608,16 +768,17 @@ def _incident_status_after(
     이상과 진행 중 실행 없음을, FAILED는 빈 제안 목록을 요구한다. 성패로 정하면
     "실패했는데 다른 제안이 남은" 건이 그 계약을 깬다.
 
-    SUCCESS 확정에 그대로 쓰면 성공한 실행의 인시던트도 (남은 실행·제안이 없으면)
-    FAILED로 간다 — 그 분기의 목적 상태는 미정이며 rollback.py 카드에서 정한다
-    (PR #236 리뷰 §2-②). 지금 어휘 5종에는 "조치는 끝났고 관제자 종료 판단만
-    남은" 자리가 없다.
+    남은 것이 없을 때만 **방금 확정된 실행의 결과**가 목적 상태를 가른다. 조치가 제
+    갈 데까지 갔으면(EXECUTION_SETTLED_STATUSES) 관제자 종료 판단만 남은 것이므로
+    AWAITING_CLOSURE, 그렇지 않으면 흐름을 더 진행할 수 없으므로 FAILED다. 성공을
+    FAILED로 접으면 계약은 통과하지만 화면이 성공한 조치를 '진행 불가'로 그린다
+    (PR #236 리뷰 §2-②가 남긴 미정 분기 — Issue #240에서 확정).
 
-    남는 자리가 셋뿐인 것도 계약에서 나온다. ANALYZING은 AI 분석 미완을 뜻해 실행이
-    끝난 뒤 갈 자리가 아니고, RESOLVED로는 옮기지 않는다 — DB 제약은 판단 없는
-    RESOLVED를 허용하지만(db/models.py resolution_with_resolved_status), 시스템이
-    먼저 옮기면 관제자 종료 API가 멱등 경로로 떨어져(resolve_incident) 종료 판단이
-    영구히 비어 있는 채로 남는다 (Issue #199).
+    RESOLVED로는 옮기지 않는다. DB 제약은 판단 없는 RESOLVED를 허용하지만
+    (db/models.py resolution_with_resolved_status), 시스템이 먼저 옮기면 관제자 종료
+    API가 멱등 경로로 떨어져(resolve_incident) 종료 판단이 영구히 비어 있는 채로
+    남는다 (Issue #199). ANALYZING도 AI 분석 미완을 뜻해 실행이 끝난 뒤 갈 자리가
+    아니다.
     """
     still_running = closed_status in EXECUTION_NON_TERMINAL_STATUSES or any(
         row.status in EXECUTION_NON_TERMINAL_STATUSES
@@ -631,6 +792,8 @@ def _incident_status_after(
         db, incident_id, status=CandidateStatus.EXECUTABLE
     ):
         return IncidentStatus.AWAITING_APPROVAL
+    if closed_status in EXECUTION_SETTLED_STATUSES:
+        return IncidentStatus.AWAITING_CLOSURE
     return IncidentStatus.FAILED
 
 

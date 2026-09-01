@@ -5,7 +5,10 @@
 import pytest
 
 
-@pytest.mark.skip(reason="TODO: services.aws.rollback 구현 후 작성")
+# 2/2 Status Check 판정 자체(#240)는 services/tests/test_status_check.py가 3분기
+# 전수로, 판정 → 상태 확정 라우팅은 apps/core-api/tests/test_dispatcher.py가 본다.
+# 여기 남은 것은 그 뒤 — 실제로 되돌리는 실행이다.
+@pytest.mark.skip(reason="TODO: RUNBOOK_EC2_REVERT_SIZE 자동 발동(#241) 구현 후 작성")
 def test_rollback_on_status_check_fail():
-    # 다운사이징 후 Status Check 실패 시 이전 스펙 스냅샷으로 원복되어야 함
+    # ROLLBACK_INITIATED 원본이 이전 스펙 스냅샷으로 원복되어야 함
     ...

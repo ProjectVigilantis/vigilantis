@@ -110,6 +110,9 @@ export const INCIDENT_STATUS_LABELS: LabelMap<IncidentStatus> = {
   ANALYZING: { label: '분석 중', tone: 'gray', spinner: true },
   AWAITING_APPROVAL: { label: '승인 대기', tone: 'yellow' },
   ACTION_IN_PROGRESS: { label: '조치 진행 중', tone: 'blue' },
+  // 조치는 끝났고 관제자 종료 판단만 남은 자리 — 실패가 아니므로 '진행 불가'(빨강)와
+  // 색이 갈려야 한다. v1.6 ④ [종료 판단] 모달이 열리는 상태다 (#240).
+  AWAITING_CLOSURE: { label: '종료 판단 대기', tone: 'green' },
   RESOLVED: { label: '종료', tone: 'gray' },
   FAILED: { label: '진행 불가', tone: 'red' },
 };

@@ -249,6 +249,8 @@ export const INCIDENT_STATUSES = [
   'ANALYZING',
   'AWAITING_APPROVAL',
   'ACTION_IN_PROGRESS',
+  /** 조치가 끝났고 관제자 종료 판단만 남음 — 남은 제안·진행 중 실행 없음 (#240). */
+  'AWAITING_CLOSURE',
   'RESOLVED',
   'FAILED',
 ] as const;
