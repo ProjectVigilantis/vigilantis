@@ -3,10 +3,11 @@
 # 계측 실행 결과를 비교표 한 줄로 접습니다. (Issue #237)
 #
 # 한 줄 = 모델·파라미터 조합 하나. 담는 것은 넷이다.
-#   ① 계약 실패(FAILED) 건수 — 호출이 결과를 못 낸 횟수. **원인 둘을 갈라 센다** —
-#      모델이 답했지만 계약을 어긴 것과, 경계에서 왕복 자체가 못 선 것(타임아웃·
-#      5xx·한도)은 다른 사실이다. 섞으면 API가 흔들린 시간대에 측정한 조합이 모델
-#      품질 때문에 나쁜 것처럼 보인다(실측: gpt-4o 24회 중 3회가 후자였다).
+#   ① 계약 실패(FAILED) 건수 — 호출이 결과를 못 낸 횟수. **실패 위상으로 갈라 센다**
+#      — 모델이 답했는데 쓸 수 없던 것(response·그래프 계약 위반), 왕복 자체가 못 선
+#      것(transport — 타임아웃·5xx·한도), 호출 준비·수락 단계의 거절(request — 인증·
+#      파라미터 오류)은 다른 사실이다. 섞으면 API가 흔들린 시간대에 측정한 조합이
+#      모델 품질 때문에 나쁜 것처럼 보인다(실측: gpt-4o 24회 중 3회가 transport였다).
 #   ② NO_PROPOSAL 건수 — 요약은 냈지만 후보가 빈 횟수. **고정 세트가 전부 낭비 후보라
 #      기준선은 0이어야 한다.** 제약을 더할수록 빈 배열이 가장 안전한 답이 되어 모델이
 #      아무것도 제안하지 않는 쪽으로 기우는데, 그 위축을 잡을 수단이 이것 말고 없다.
@@ -48,6 +49,9 @@ class CaseRun:
     # 그때의 FAILED는 모델이 계약을 어긴 것이다. 메시지는 담지 않는다 —
     # 원문 응답이 섞여 들어올 수 있어서다(ADR-0005 미보존 대상).
     error: Optional[str] = None
+    # 예외의 실패 위상(model_client.AIModelError.phase). 클래스 이름만으로는 계약
+    # 위반이 요청 쪽인지 응답 쪽인지 갈리지 않아 따로 든다 — response만 모델 품질이다
+    error_phase: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -60,8 +64,11 @@ class ColumnReport:
     succeeded: int
     no_proposal: int
     failed: int
-    # FAILED 중 경계 예외가 있었던 회차. 모델 품질이 아니라 왕복이 못 선 것이다
+    # FAILED 중 왕복 자체가 못 선 회차(phase=transport — 타임아웃·일시 오류)
     failed_transport: int
+    # FAILED 중 호출 준비·수락 단계에서 거절된 회차(phase=request — 인증·파라미터
+    # 오류·요청 직렬화 실패). 계측 설정의 문제지 모델 품질이 아니다
+    failed_request: int
     # 사실 정합성은 요약이 나온 회차에서만 판정한다 — FAILED는 요약이 비어 있어
     # 위반이 0건인데, 그것을 통과로 세면 실패가 많을수록 지표가 좋아진다
     fact_checked: int
@@ -80,8 +87,12 @@ class ColumnReport:
 
     @property
     def failed_contract(self) -> int:
-        """모델이 답했는데 계약을 어긴 회차. 조합 비교에서 실제로 볼 수는 이쪽이다."""
-        return self.failed - self.failed_transport
+        """모델이 답했는데 쓸 수 없었던 회차. 조합 비교에서 실제로 볼 수는 이쪽이다.
+
+        두 갈래의 합이다 — 응답이 계약을 어겨 경계가 세운 것(phase=response)과,
+        경계는 통과했지만 그래프 계약 검증이 거절한 것(예외 없음).
+        """
+        return self.failed - self.failed_transport - self.failed_request
 
     @property
     def no_proposal_rate(self) -> float:
@@ -117,7 +128,17 @@ def build_column_report(label: str, runs: Sequence[CaseRun]) -> ColumnReport:
     stable_slots = 0
     field_slots = 0
     for case_id, case_runs in by_case.items():
-        outputs: list[AgentGraphOutput] = [run.output for run in case_runs]
+        # FAILED의 출력은 _failed_output()의 빈 자리표시자라 필드 값이 모델의 것이
+        # 아니다 — 일치율 분모에 넣으면 호출 실패·계약 위반이 FAILED 칸과 재현성
+        # 흔들림 양쪽에 이중 계산되어, API가 흔들린 시간대의 계측이 모델 변동으로
+        # 기록된다. FAILED는 위의 전용 칸으로만 세고, 일치율은 유효 출력끼리 본다
+        outputs: list[AgentGraphOutput] = [
+            run.output
+            for run in case_runs
+            if run.output.invocation_status is not AgentInvocationStatus.FAILED
+        ]
+        if not outputs:
+            continue
         shaky = unstable_fields(outputs)
         # 필드 자리 수는 그 케이스에서 한 번이라도 나타난 필드 이름의 개수다
         names = {name for output in outputs for name in output_fields(output)}
@@ -136,7 +157,14 @@ def build_column_report(label: str, runs: Sequence[CaseRun]) -> ColumnReport:
         failed_transport=sum(
             1
             for run in runs
-            if run.output.invocation_status is AgentInvocationStatus.FAILED and run.error
+            if run.output.invocation_status is AgentInvocationStatus.FAILED
+            and run.error_phase == "transport"
+        ),
+        failed_request=sum(
+            1
+            for run in runs
+            if run.output.invocation_status is AgentInvocationStatus.FAILED
+            and run.error_phase == "request"
         ),
         fact_checked=sum(1 for run in runs if run.output.summary_lines),
         fact_failed=sum(1 for run in runs if run.output.summary_lines and not run.fact.passed),

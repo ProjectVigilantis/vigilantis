@@ -7,14 +7,19 @@
 # 여기서 보는 것이 그것이며, 정답 문장이 없어도 돌아간다 — 대조 상대가 "좋은 요약"이
 # 아니라 **모델에게 실제로 나간 페이로드의 값 집합**이기 때문이다.
 #
-# 토큰을 네 갈래로 나누고, 그중 둘만 실패로 센다.
+# 토큰을 다섯 갈래로 나누고, 그중 셋만 실패로 센다.
 #   ① 식별자(FAIL) — 자원 ID·ARN·IP. 입력에 없으면 지어낸 것이다. 파생될 수 없다.
-#   ② 숫자(FAIL) — 입력 값 집합에도, 아래 ④의 파생 집합에도 없는 수치. 걸린 토큰을
+#   ② 날짜·시각(FAIL) — **통째로 대조하고 숫자로 쪼개지 않는다.** 타임스탬프 파편
+#      (월 08·일 19·시 06)을 숫자 허용 집합에 넣으면 1~31 범위의 흔한 수라 지어낸
+#      측정값("평균 CPU 8%")을 정당화하게 된다(PR #248 리뷰 재현). 요약 날짜의
+#      숫자열이 입력 날짜의 숫자열에 부분 문자열이면 인용이다("08-19" ⊂
+#      "2026-08-19T06:00:00Z"). 걸린 날짜는 숫자 위반으로 보고한다.
+#   ③ 숫자(FAIL) — 입력 값 집합에도, 아래 ⑤의 파생 집합에도 없는 수치. 걸린 토큰을
 #      그대로 돌려주므로 사람이 환각인지 산문인지 가른다.
-#   ③ 인스턴스 타입(보고만) — **실패로 세지 않는다.** 다운사이징 권고의 대상 타입은
+#   ④ 인스턴스 타입(보고만) — **실패로 세지 않는다.** 다운사이징 권고의 대상 타입은
 #      정의상 입력에 없는 값이라(그것이 이 런북이 하는 일이다) 실패로 세면 정상 응답이
 #      전부 FAIL이 된다. 대신 목록으로 남겨, 현재 타입을 잘못 말한 경우를 사람이 본다.
-#   ④ 파생 수치(보고만) — 입력의 두 시각 차이처럼 **입력에서 문서화된 연산으로 나오는
+#   ⑤ 파생 수치(보고만) — 입력의 두 시각 차이처럼 **입력에서 문서화된 연산으로 나오는
 #      값.** 처음에는 이것도 FAIL로 셌는데, 그러면 지표가 정확성이 아니라 "덜 말하는
 #      쪽"을 상위로 올린다. 실측(#237)에서 gpt-5.6-luna의 위반 12건이 전부 `14`
 #      하나였고 그것은 window_start·window_end의 차이를 정확히 계산한 관측 기간이었다.
@@ -59,10 +64,24 @@ _NUMBER = r"(?<![0-9A-Za-z_.])[0-9]+(?:\.[0-9]+)?" + r"(?![0-9A-Za-z_])"
 
 _IDENTIFIER_PATTERNS = (_ARN, _RESOURCE_ID, _IPV4)
 
-# ISO 타임스탬프의 T·Z는 낱말 문자라 숫자 경계가 성립하지 않는다. 입력의
-# `2026-08-19T06:00:00Z`에서 일(19)과 시(06)가 추출되지 않아, 요약이 같은 날짜를
-# `2026-08-19`로 쓰면 입력에 없는 값으로 잡혔다(실측: gpt-5.6-luna·terra·5.4-nano).
-_ISO_SEPARATOR = re.compile(r"(?<=[0-9])[tz](?![0-9a-z])|(?<=[0-9])t(?=[0-9])")
+# 날짜·시각 토큰. 식별자 다음, 숫자보다 먼저 통째로 먹는다(헤더 ② 날짜·시각).
+# 범위 표기("10-20%")가 부분 날짜 형태와 겹치면 위반으로 잡힌다 — 흡수보다 지목이
+# 안전한 방향의 오차라 그대로 둔다(위반은 사람이 읽고 가른다).
+_FULL_DATE = (
+    r"(?<![0-9])\d{4}-\d{2}-\d{2}"
+    r"(?:[t ]\d{2}:\d{2}(?::\d{2})?(?:z|[+\-]\d{2}:?\d{2})?)?(?![0-9])"
+)
+_PARTIAL_DATE = r"(?<![0-9\-])\d{2}-\d{2}(?![0-9\-])"
+_TIME_OF_DAY = r"(?<![0-9:])\d{2}:\d{2}(?::\d{2})?(?![0-9:])"
+# 기간 축약 표기 "2026-08-11~25"·"2026-08-05~08-19". 끝점이 일(日) 하나여도 날짜다 —
+# 이 형태를 안 덮으면 실측 요약의 3분의 1이 위반으로 찍힌다(300회 중 ~100회가 이 표기)
+_DATE_RANGE = (
+    r"(?<![0-9])\d{4}-\d{2}-\d{2}\s*~\s*"
+    # 일(日) 대안은 콜론 앞에서 물러선다 — "2026-08-05~06:00"의 06은 범위 끝점이
+    # 아니라 시각의 시작이라, 여기서 물면 시각 토큰이 반토막 난다
+    r"(?:\d{4}-\d{2}-\d{2}|\d{2}-\d{2}|\d{1,2}(?![0-9:]))(?![0-9])"
+)
+_DATE_PATTERNS = (_DATE_RANGE, _FULL_DATE, _PARTIAL_DATE, _TIME_OF_DAY)
 
 # 천 단위 쉼표. 요약은 `1,024`로 쓰고 입력은 정수 1024라, 쪼개진 `1`과 `024`가 그대로
 # 위반이 됐다. 세 자리 묶음일 때만 지운다 — `4.9, 10.0` 같은 나열 쉼표는 건드리지 않는다.
@@ -107,11 +126,34 @@ def _normalize_number(text: str) -> str:
 def _canonicalize(text: str) -> str:
     """입력과 요약에 **똑같이** 적용하는 표기 정규화. 값을 바꾸지 않고 경계만 맞춘다."""
     lowered = _ENUM_MARKER.sub(" ", text.lower())
-    return _THOUSANDS_COMMA.sub("", _ISO_SEPARATOR.sub(" ", lowered))
+    return _THOUSANDS_COMMA.sub("", lowered)
 
 
-def _tokens(text: str) -> tuple[set[str], set[str], set[str]]:
-    """(식별자, 인스턴스 타입, 숫자). 앞 갈래가 먹은 자리는 공백으로 지우고 넘긴다."""
+def _digits(token: str) -> str:
+    """날짜 토큰의 숫자열. 구분자 표기(T·공백·콜론)가 달라도 같은 시각으로 본다."""
+    return re.sub(r"[^0-9]", "", token)
+
+
+def _date_cited(token: str, allowed_digits: list[str], allowed_days: set[str]) -> bool:
+    """요약 날짜 토큰이 입력 날짜의 인용인가.
+
+    단일 토큰은 숫자열 포함으로 본다("08-19" ⊂ "2026-08-19T06:00:00Z"). 범위 토큰은
+    양끝을 따로 본다 — 끝점이 일(日) 하나면("~25") 포함 검사가 성립하지 않으므로,
+    입력 날짜들의 일 집합과 대조한다. "~20"처럼 연도 접두("20xx")에 우연히 포함되는
+    값을 통과시키지 않기 위해서이기도 하다.
+    """
+    if "~" in token:
+        left, right = (part.strip() for part in token.split("~", 1))
+        if not any(_digits(left) in pool for pool in allowed_digits):
+            return False
+        if re.fullmatch(r"\d{1,2}", right):
+            return right.zfill(2) in allowed_days
+        return any(_digits(right) in pool for pool in allowed_digits)
+    return any(_digits(token) in pool for pool in allowed_digits)
+
+
+def _tokens(text: str) -> tuple[set[str], set[str], set[str], set[str]]:
+    """(식별자, 날짜, 인스턴스 타입, 숫자). 앞 갈래가 먹은 자리는 공백으로 지우고 넘긴다."""
     remaining = _canonicalize(text)
     identifiers: set[str] = set()
     for pattern in _IDENTIFIER_PATTERNS:
@@ -124,11 +166,16 @@ def _tokens(text: str) -> tuple[set[str], set[str], set[str]]:
             identifiers.update(inner.group(0) for inner in re.finditer(_RESOURCE_ID, token))
         remaining = re.sub(pattern, " ", remaining)
 
+    dates: set[str] = set()
+    for pattern in _DATE_PATTERNS:
+        dates.update(match.group(0) for match in re.finditer(pattern, remaining))
+        remaining = re.sub(pattern, " ", remaining)
+
     instance_types = {match.group(0) for match in re.finditer(_INSTANCE_TYPE, remaining)}
     remaining = re.sub(_INSTANCE_TYPE, " ", remaining)
 
     numbers = {_normalize_number(match.group(0)) for match in re.finditer(_NUMBER, remaining)}
-    return identifiers, instance_types, numbers
+    return identifiers, dates, instance_types, numbers
 
 
 def _walk(value: Any, sink: list[str]) -> None:
@@ -146,10 +193,13 @@ def _walk(value: Any, sink: list[str]) -> None:
 
 
 def derivable_numbers(payload: Mapping[str, Any]) -> set[str]:
-    """입력의 시각들에서 나오는 기간(일). 요약이 관측 창을 사람 말로 옮길 때 쓰는 값이다.
+    """입력의 시각들에서 나오는 기간. 요약이 관측 창을 사람 말로 옮길 때 쓰는 값이다.
 
-    허용하는 연산을 **두 시각의 차이(일 단위 정수) 하나로 한정한다.** 넓힐수록 검사기가
-    잡을 수 있는 환각이 줄기 때문이다. 시각 쌍을 전부 도는 것은 어느 필드에서 왔는지에
+    허용하는 연산을 **두 시각의 차이(일 단위 정수)와, 그 일수가 7의 배수일 때의 주
+    환산으로 한정한다.** "14일"을 파생으로 인정하면 같은 기간의 "2주"도 같은 부류다 —
+    일만 인정하면 주로 쓰는 요약이 문체 때문에 위반이 된다. 그 이상(월 환산·시간 환산)
+    은 넓히지 않는다 — 월은 일수가 고정되지 않아 파생이 아니라 해석이고, 넓힐수록
+    검사기가 잡을 수 있는 환각이 준다. 시각 쌍을 전부 도는 것은 어느 필드에서 왔는지에
     검사기를 묶지 않기 위해서다 — 페이로드 구성이 바뀌어도 규칙이 그대로 선다.
     """
     scalars: list[str] = []
@@ -170,22 +220,26 @@ def derivable_numbers(payload: Mapping[str, Any]) -> set[str]:
         days, remainder = divmod(seconds, 86_400)
         if remainder == 0 and days:
             derived.add(str(int(days)))
+            if days % 7 == 0:
+                derived.add(str(int(days // 7)))
     return derived
 
 
-def allowed_tokens(payload: Mapping[str, Any]) -> tuple[set[str], set[str], set[str]]:
+def allowed_tokens(payload: Mapping[str, Any]) -> tuple[set[str], set[str], set[str], set[str]]:
     """모델에게 나간 페이로드에서 인용 가능한 값 집합을 뽑는다."""
     scalars: list[str] = []
     _walk(payload, scalars)
     identifiers: set[str] = set()
+    dates: set[str] = set()
     instance_types: set[str] = set()
     numbers: set[str] = set()
     for scalar in scalars:
-        found_ids, found_types, found_numbers = _tokens(scalar)
+        found_ids, found_dates, found_types, found_numbers = _tokens(scalar)
         identifiers |= found_ids
+        dates |= found_dates
         instance_types |= found_types
         numbers |= found_numbers
-    return identifiers, instance_types, numbers
+    return identifiers, dates, instance_types, numbers
 
 
 def check_summary_facts(
@@ -196,22 +250,46 @@ def check_summary_facts(
     payload는 **요약 노드에 실제로 나간 값**(ai/agent.py의 _incident_payload)을 그대로
     넘긴다. 다른 것을 넘기면 모델이 보지 못한 값을 근거로 통과시키게 된다.
     """
-    allowed_ids, allowed_types, allowed_numbers = allowed_tokens(payload)
+    allowed_ids, allowed_dates, allowed_types, allowed_numbers = allowed_tokens(payload)
 
     identifiers: set[str] = set()
+    dates: set[str] = set()
     instance_types: set[str] = set()
     numbers: set[str] = set()
     for line in summary_lines:
-        found_ids, found_types, found_numbers = _tokens(line)
+        found_ids, found_dates, found_types, found_numbers = _tokens(line)
         identifiers |= found_ids
+        dates |= found_dates
         instance_types |= found_types
         numbers |= found_numbers
+
+    # 요약 날짜는 입력 날짜의 부분이면 인용이다 — "08-19"는 "2026-08-19T06:00:00Z"의
+    # 일부다. 어긋난 날짜는 수치 주장이므로 숫자 위반으로 합쳐 보고한다.
+    # 한국어 날짜 관용("8월 19일")은 다루지 않는다 — 파편이 숫자로 잡혀 위반으로 뜨고,
+    # 사람이 위반 토큰을 읽고 가른다(흡수보다 지목이 안전한 방향).
+    allowed_date_digits = [_digits(token) for token in allowed_dates]
+    allowed_days = {
+        match.group(1)
+        for token in allowed_dates
+        for match in [re.match(r"\d{4}-\d{2}-(\d{2})", token)]
+        if match
+    }
+    date_violations = {
+        token
+        for token in dates
+        if not _date_cited(token, allowed_date_digits, allowed_days)
+    }
+    # 연도만 인용("2026년")하는 문장은 허용한다 — 4자리 연도는 1~31 파편과 달리
+    # 지어낸 측정값을 흡수할 위험이 없다
+    allowed_numbers = allowed_numbers | {
+        token[:4] for token in allowed_dates if re.match(r"\d{4}-", token)
+    }
 
     unquoted = numbers - allowed_numbers
     derivable = derivable_numbers(payload)
     return FactCheckResult(
         identifier_violations=tuple(sorted(identifiers - allowed_ids)),
-        number_violations=tuple(sorted(unquoted - derivable)),
+        number_violations=tuple(sorted((unquoted - derivable) | date_violations)),
         instance_types_outside_input=tuple(sorted(instance_types - allowed_types)),
         derived_numbers=tuple(sorted(unquoted & derivable)),
     )

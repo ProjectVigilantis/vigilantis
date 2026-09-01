@@ -1,10 +1,11 @@
 # ==============================================================================
-# [파일 설명]  담당: 안성일 (AI/Guardrail · Architect)
+# [파일 설명]
 # FinOps 그래프 응답 품질 계측 실행기입니다. (Issue #237)
 #
 # 고정 입력 세트(Golden Dataset FinOps의 낭비 후보)를 같은 값으로 N회 넣어, 한 조합
 # (모델 + 파라미터)의 지표를 표 한 줄로 낸다.
-#   FAILED · NO_PROPOSAL · 사실 정합성 실패 · 필드별 일치율 · 토큰 · 추정 비용
+#   FAILED(계약 위반 · 호출 실패) · NO_PROPOSAL · 사실 정합성 실패 · 필드별 일치율 ·
+#   토큰(캐시분 포함) · 추정 비용 · 응답이 밝힌 모델 스냅샷
 #
 # 조합은 **환경변수로 바꾼다** — OPENAI_MODEL·OPENAI_TEMPERATURE·OPENAI_REASONING_EFFORT.
 # 코드를 고치지 않고 같은 경로로 여러 조합을 재기 위한 것이며, 모델 계열마다 받는
@@ -15,7 +16,7 @@
 #   조합 수용 프로브    : uv run python scripts/finops_eval.py --case A1 --repeats 1
 #   현재 상태(gpt-4o)   : uv run python scripts/finops_eval.py --repeats 4
 #   temperature 0       : OPENAI_TEMPERATURE=0 uv run python scripts/finops_eval.py --repeats 4
-#   추론 모델           : OPENAI_MODEL=gpt-5-nano OPENAI_REASONING_EFFORT=low uv run python ...
+#   추론 모델           : OPENAI_MODEL=gpt-5.6-luna OPENAI_REASONING_EFFORT=low uv run python ...
 #   (PowerShell은 `$env:OPENAI_TEMPERATURE='0'; uv run python ...`)
 #
 # **실제 모델을 부르므로 과금이 발생한다**(케이스 1건 = 모델 호출 2회). CI 인자에 넣지
@@ -83,6 +84,7 @@ class _UsageRecordingClient:
         # FAILED로 접기 때문에, 여기서 잡아 두지 않으면 "모델이 계약을 어겼다"와
         # "왕복이 못 섰다"가 결과에서 같은 값이 된다
         self.last_error: Optional[str] = None
+        self.last_error_phase: Optional[str] = None
         # 응답이 밝힌 스냅샷 ID(예: gpt-4o-2024-08-06). 별칭으로 부른 모델이 실제로
         # 무엇이었는지 없이는 나중에 같은 표를 재현할 수 없다
         self.model_snapshots: set[str] = set()
@@ -93,6 +95,7 @@ class _UsageRecordingClient:
         self.cached_prompt_tokens = 0
         self.calls = 0
         self.last_error: Optional[str] = None
+        self.last_error_phase: Optional[str] = None
 
     def complete(self, request: AIModelRequest, response_model) -> AIModelResponse:
         self.calls += 1
@@ -101,6 +104,13 @@ class _UsageRecordingClient:
         except AIModelError as exc:
             self.errors.append(type(exc).__name__)
             self.last_error = type(exc).__name__
+            self.last_error_phase = exc.phase
+            # 응답을 받은 실패(refusal·응답 계약 위반)는 토큰이 이미 발생했다 —
+            # 예외에 실려 온 usage를 집계에 보존한다. 버리면 비용이 적게 잡힌다
+            if exc.usage is not None:
+                self.prompt_tokens += exc.usage.prompt_tokens
+                self.completion_tokens += exc.usage.completion_tokens
+                self.cached_prompt_tokens += exc.usage.cached_prompt_tokens
             raise
         self.prompt_tokens += response.usage.prompt_tokens
         self.completion_tokens += response.usage.completion_tokens
@@ -177,6 +187,7 @@ def run(
                     fact=check_summary_facts(payload, output.summary_lines),
                     cached_prompt_tokens=client.cached_prompt_tokens,
                     error=client.last_error,
+                    error_phase=client.last_error_phase,
                 )
             )
             print(
@@ -249,7 +260,8 @@ def main() -> int:
     print(f"실행 {report.runs}회 = 케이스 {report.case_count} × 반복 {report.repeats}")
     print(
         f"FAILED        {report.failed}"
-        f"  (계약 위반 {report.failed_contract} · 호출 실패 {report.failed_transport})"
+        f"  (계약 위반 {report.failed_contract} · 호출 실패 {report.failed_transport}"
+        f" · 요청 거절 {report.failed_request})"
     )
     print(f"NO_PROPOSAL   {report.no_proposal}  ({report.no_proposal_rate:.1%})")
     print(f"사실 정합성    실패 {report.fact_failed} / 판정 {report.fact_checked}")
@@ -286,6 +298,15 @@ def main() -> int:
                 parts.append(f"숫자 {', '.join(run_.fact.number_violations)}")
             print(f"  {run_.case_id}: {' / '.join(parts)}")
 
+    # 파생 수치는 실패가 아니라 "입력에서 계산해 냈다"는 표시다. 세어 두는 것은 이것이
+    # 조합을 가르는 실질 차이이기 때문이다 — 관측 기간을 사람 말로 옮기는 조합과
+    # 아예 말하지 않는 조합이 여기서 갈린다
+    derived = sorted({value for run_ in runs for value in run_.fact.derived_numbers})
+    if derived:
+        cited = sum(1 for run_ in runs if run_.fact.derived_numbers)
+        print("-" * 72)
+        print(f"입력에서 계산해 낸 수치 (실패 아님)  {', '.join(derived)}  — {cited}회차")
+
     print("-" * 72)
     print("PR 본문 표 한 줄:")
     print(
@@ -317,11 +338,13 @@ def main() -> int:
                             "completion_tokens": run_.completion_tokens,
                             "cached_prompt_tokens": run_.cached_prompt_tokens,
                             "error": run_.error,
+                            "error_phase": run_.error_phase,
                             "identifier_violations": list(run_.fact.identifier_violations),
                             "number_violations": list(run_.fact.number_violations),
                             "instance_types_outside_input": list(
                                 run_.fact.instance_types_outside_input
                             ),
+                            "derived_numbers": list(run_.fact.derived_numbers),
                         }
                         for run_ in runs
                     ],

@@ -128,13 +128,53 @@ def test_number_forms_are_normalized(payload):
 
 
 def test_iso_timestamp_components_are_quotable(payload):
-    # 입력 window_end는 2026-08-19T06:00:00Z다. T가 낱말 문자라 일·시가 추출되지 않으면
-    # 날짜를 인용한 요약이 전부 위반이 된다(실측: luna·terra·5.4-nano가 여기 걸렸다)
+    # 입력 window는 2026-08-05~19다. 날짜는 숫자로 쪼개지 않고 날짜 갈래끼리 대조한다 —
+    # 부분 표기("08-19")도 입력 날짜의 일부면 인용이다(실측: luna·terra·5.4-nano가 씀)
     result = check_summary_facts(
         payload, ["2026-08-05~08-19 측정이다.", "평균 CPU 4.9%다.", "권고"]
     )
 
     assert result.number_violations == ()
+
+
+def test_date_fragments_do_not_justify_invented_measurements(payload):
+    # A1의 cpu_avg는 4.9다 — "8"은 입력의 2026-08-…에서만 나온다. 타임스탬프를 숫자로
+    # 쪼개 허용 집합에 넣으면 이런 지어낸 측정값이 통과한다(PR #248 리뷰 재현)
+    result = check_summary_facts(payload, ["평균 CPU는 8%다.", "분석", "권고"])
+
+    assert result.number_violations == ("8",)
+    assert not result.passed
+
+
+def test_full_timestamp_and_year_citations_pass(payload):
+    result = check_summary_facts(
+        payload, ["수집 2026-08-19T06:00:00Z 기준이다.", "2026년 관측이다.", "권고"]
+    )
+
+    assert result.number_violations == ()
+
+
+def test_invented_date_fails(payload):
+    # 입력 창(08-05~08-19) 밖의 날짜는 수치 주장이다 — 숫자 위반으로 보고한다
+    result = check_summary_facts(payload, ["수집 2026-07-19 기준이다.", "분석", "권고"])
+
+    assert result.number_violations == ("2026-07-19",)
+
+
+def test_week_conversion_of_the_window_is_derived_not_invented():
+    # 두 시각이 14일 차이면 "2주"도 계산해 낸 값이다 — 일 표기만 인정하면 같은 기간을
+    # 주로 쓰는 요약이 문체 때문에 위반이 된다. 합성 페이로드를 쓰는 것은 골든 A1에는
+    # 리전 문자열(ap-northeast-2)에서 나온 낱개 '2'가 이미 허용돼 있어 이 경로가
+    # 구분되지 않기 때문이다
+    window = {"window_start": "2026-08-05T06:00:00Z", "window_end": "2026-08-19T06:00:00Z"}
+
+    ok = check_summary_facts(window, ["약 2주 관측이다.", "분석", "권고"])
+    bad = check_summary_facts(window, ["약 3주 관측이다.", "분석", "권고"])
+
+    assert ok.derived_numbers == ("2",)
+    assert ok.passed
+    assert bad.number_violations == ("3",)
+    assert not bad.passed
 
 
 def test_thousands_separator_is_not_split(payload):
@@ -220,7 +260,7 @@ def test_stable_fields_are_still_listed_by_field_agreement():
 # --- 집계 ------------------------------------------------------------------------
 
 
-def _run(case_id, output, fact_ok=True, prompt=100, completion=20, error=None):
+def _run(case_id, output, fact_ok=True, prompt=100, completion=20, error=None, error_phase=None):
     result = check_summary_facts({}, [] if fact_ok else ["i-0fff888877776666e"])
     return CaseRun(
         case_id=case_id,
@@ -229,6 +269,7 @@ def _run(case_id, output, fact_ok=True, prompt=100, completion=20, error=None):
         completion_tokens=completion,
         fact=result,
         error=error,
+        error_phase=error_phase,
     )
 
 
@@ -265,18 +306,62 @@ def test_column_report_counts_fact_failures():
     assert (report.fact_failed, report.fact_checked) == (1, 2)
 
 
-def test_failed_runs_are_split_by_cause():
-    # 왕복이 못 선 회차(경계 예외)를 모델의 계약 위반과 같이 세면, API가 흔들린
-    # 시간대에 잰 조합이 모델 품질 때문에 나쁜 것처럼 보인다
+def test_failed_runs_are_split_by_phase():
+    # 예외 클래스가 아니라 실패 위상으로 가른다 — 계약 위반 예외는 요청·응답 양쪽에
+    # 쓰여서, 클래스로 갈랐다면 응답 계약 위반(모델 품질)이 호출 실패(인프라)로
+    # 집계된다(PR #248 리뷰). 그래프 계약 검증 거절(예외 없음)은 응답 쪽과 같이 센다
     runs = [
         _run("A1", _output()),
-        _run("A1", _output(AgentInvocationStatus.FAILED), error="AIModelUnavailableError"),
-        _run("A7", _output(AgentInvocationStatus.FAILED)),
+        _run(
+            "A1",
+            _output(AgentInvocationStatus.FAILED),
+            error="AIModelUnavailableError",
+            error_phase="transport",
+        ),
+        _run(
+            "A7",
+            _output(AgentInvocationStatus.FAILED),
+            error="AIModelRejectedError",
+            error_phase="request",
+        ),
+        _run(
+            "A7",
+            _output(AgentInvocationStatus.FAILED),
+            error="AIModelContractError",
+            error_phase="response",
+        ),
+        _run("A11", _output(AgentInvocationStatus.FAILED)),
     ]
 
     report = build_column_report("gpt-4o", runs)
 
-    assert (report.failed, report.failed_transport, report.failed_contract) == (2, 1, 1)
+    assert (
+        report.failed,
+        report.failed_transport,
+        report.failed_request,
+        report.failed_contract,
+    ) == (4, 1, 1, 2)
+
+
+def test_failed_runs_do_not_pollute_field_agreement():
+    # FAILED의 출력은 _failed_output()의 빈 자리표시자다 — 일치율 분모에 넣으면
+    # API 장애가 모델 출력 변동으로 기록된다(PR #248 리뷰)
+    runs = [
+        _run("A1", _output()),
+        _run("A1", _output()),
+        _run(
+            "A1",
+            _output(AgentInvocationStatus.FAILED),
+            error="AIModelUnavailableError",
+            error_phase="transport",
+        ),
+    ]
+
+    report = build_column_report("gpt-4o", runs)
+
+    assert report.unstable_field_names == []
+    assert report.field_stability == 1.0
+    assert (report.failed, report.failed_transport) == (1, 1)
 
 
 def test_failed_runs_are_not_counted_as_fact_passes():
