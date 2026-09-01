@@ -171,6 +171,7 @@ def test_still_initializing_is_a_timeout(ec2):
 
     assert outcome.verdict is V.TIMED_OUT
     assert outcome.reason_code is None  # 상태는 확인했다 — AWS 오류가 아니다
+    assert outcome.probe_failed is False  # 관측된 타임아웃 — 원복 대상이다
 
 
 def test_empty_status_response_is_a_failure(ec2):
@@ -198,6 +199,7 @@ def test_probe_error_defers_instead_of_failing(ec2):
 
     assert outcome.verdict is V.TIMED_OUT
     assert outcome.reason_code is R.PRECHECK_UNAUTHORIZED
+    assert outcome.probe_failed is True  # 판정 불가 — 자동 원복 입력이 아니다
 
 
 def test_missing_instance_probe_is_a_failure(ec2):
@@ -218,6 +220,7 @@ def test_waiter_call_error_defers(ec2):
 
     assert outcome.verdict is V.TIMED_OUT
     assert outcome.reason_code is R.PRECHECK_AWS_ERROR
+    assert outcome.probe_failed is True  # 판정 불가 — 자동 원복 입력이 아니다
 
 
 @pytest.mark.parametrize(

@@ -79,17 +79,29 @@ class StatusCheckVerdict(str, Enum):
 class StatusCheckOutcome:
     """판정 1건. 상태 기록·원복 발동은 호출부 몫이다(dispatcher.py).
 
-    reason_code가 TIMED_OUT과 함께 채워지면 "2/2가 되지 않았다"가 아니라 **AWS에
-    물어보지 못해 결론을 내지 못했다**는 뜻이다. 두 경우 모두 성공으로 확정할 근거가
-    없어 같은 분기로 가지만, 자동 원복을 걸 때는 구분이 필요하다 — 일시적인 조회
-    실패로 멀쩡한 인스턴스를 되돌리지 않도록 이 값을 남긴다 (Issue #241).
+    probe_failed는 **AWS에 물어보지 못해 결론을 내지 못했다**는 뜻이다. 제한 시간
+    안에 2/2가 오지 않은 TIMED_OUT(자산 상태를 실제로 관측했다)과 "성공으로 확정할
+    근거가 없다"는 점은 같지만 **자동 원복의 입력이 되는지가 다르다.** 검증기의
+    실패를 자산의 실패로 저장하면 일시적인 권한·네트워크·스로틀링 오류가 멀쩡한
+    인스턴스를 되돌린다 — 그래서 호출부는 이 값이 참이면 확정하지 않고 보류한다
+    (workflows.judge_rightsizing_boot). 보류 이후의 재시도 정책과 판정 불가 상태의
+    저장 계약은 Issue #249다.
+
+    reason_code는 보류·실패 양쪽에 실린다(인스턴스 없음도 코드를 단다). 판정 불가를
+    가르는 것은 코드의 유무가 아니라 이 값이다.
     """
 
     verdict: StatusCheckVerdict
     summary: str
     reason_code: Optional[PrecheckReasonCode] = None
     instance_state: Optional[str] = None
+    probe_failed: bool = False
     checked_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def __post_init__(self) -> None:
+        if self.probe_failed and self.verdict is not StatusCheckVerdict.TIMED_OUT:
+            # 자산 상태를 본 적이 없는데 실패·성공으로 확정된 결과는 만들 수 없다
+            raise ValueError("조회 실패 판정은 TIMED_OUT과 함께여야 합니다")
 
     @property
     def booted(self) -> bool:
@@ -167,6 +179,7 @@ def _classify_failure(ec2: Any, instance_id: str) -> StatusCheckOutcome:
             verdict=StatusCheckVerdict.TIMED_OUT,
             summary=f"상태 조회 실패로 판정 보류: {type(exc).__name__}",
             reason_code=code,
+            probe_failed=True,
         )
 
     status = _first_status(response)
@@ -244,6 +257,7 @@ def wait_for_status_check(
             verdict=StatusCheckVerdict.TIMED_OUT,
             summary=f"Status Check 확인 실패로 판정 보류: {type(exc).__name__}",
             reason_code=reason_code_for(exc),
+            probe_failed=True,
         )
 
     return StatusCheckOutcome(

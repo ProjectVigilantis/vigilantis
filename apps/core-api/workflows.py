@@ -585,13 +585,35 @@ class BootJudgement:
 
     run_rightsizing_execution이 ExecutionRunOutcome를 돌려주는 것과 같은 자리다.
     확정은 close_execution 하나가 하고, 언제 부를지는 dispatcher.py가 고른다.
+
+    next_status가 None이면 **판정 보류**다 — 확정하지 않고 IN_PROGRESS로 남겨 다음
+    주기가 다시 묻는다. AWS에 물어보지 못해 자산 상태를 본 적이 없는 경우이며, 그때
+    ROLLBACK_INITIATED로 닫으면 검증기의 실패가 자산의 실패로 저장되어 자동 원복
+    (#241)의 입력과 구분되지 않는다 (PR #244 리뷰).
+
+    **보류 사유는 저장하지 않는다**(defer_reason은 로그 몫이다). 판정 불가를 어떤
+    typed 상태로 남기고 재시도를 몇 번까지 허용할지가 Issue #249의 계약이며, 그
+    계약이 서기 전에 error_summary 문자열이 판정 근거로 읽히면 안 된다.
     """
 
-    next_status: ExecutionStatus
+    next_status: Optional[ExecutionStatus] = None
     error_summary: Optional[str] = None
     verdict: Optional[rollback.StatusCheckVerdict] = None
+    defer_reason: Optional[str] = None
+
+    @property
+    def deferred(self) -> bool:
+        return self.next_status is None
 
     def __post_init__(self) -> None:
+        if self.deferred:
+            if self.error_summary is not None:
+                raise ValueError("보류 판정은 error_summary를 저장하지 않습니다")
+            if self.defer_reason is None:
+                raise ValueError("보류 판정에는 사유가 필요합니다")
+            return
+        if self.defer_reason is not None:
+            raise ValueError("확정 판정에는 defer_reason을 두지 않습니다")
         if (self.next_status is ExecutionStatus.SUCCESS) != (self.error_summary is None):
             raise ValueError("성공이 아닌 판정에만 error_summary를 채웁니다")
 
@@ -610,7 +632,7 @@ def _steps_changed_the_asset(steps: list[models.ExecutionStep]) -> bool:
 
 
 def _boot_failure_summary(outcome: rollback.StatusCheckOutcome) -> str:
-    """판정 실패 한 줄 — 분류를 앞에 둬 로그·DB에서 사유별로 모인다."""
+    """판정 사유 한 줄 — 분류를 앞에 둬 로그·DB에서 사유별로 모인다(보류 사유도 같은 꼴)."""
     code = (
         outcome.reason_code.value
         if outcome.reason_code is not None
@@ -633,7 +655,10 @@ def judge_rightsizing_boot(db: Session, execution_id: str) -> BootJudgement:
       ② 조치 직전 stopped였던 인스턴스는 기동하지 않는다(executor.execute_rightsizing
          ③단계 NOT_APPLIED). 켜지 않은 인스턴스에 2/2를 물으면 영원히 오지 않으므로
          타임아웃 뒤 멀쩡한 자산을 되돌리게 된다 — 그 전에 성공으로 확정한다.
-      ③ 그 밖에는 waiter에 묻는다.
+      ③ 그 밖에는 waiter에 묻는다 — 2/2면 성공이고, 관측된 실패·타임아웃이면 원복이
+         남는다. **AWS에 물어보지 못했으면 어느 쪽도 아니라 보류다**(next_status가
+         없는 판정) — 검증기의 실패를 자산의 실패로 저장하면 자동 원복이 멀쩡한
+         인스턴스를 되돌린다 (Issue #249).
 
     **종료 상태도 Incident 전이도 여기서 하지 않는다** — run_rightsizing_execution과
     같은 이유다(확정은 close_execution 한 트랜잭션).
@@ -693,6 +718,13 @@ def judge_rightsizing_boot(db: Session, execution_id: str) -> BootJudgement:
     if outcome.booted:
         return BootJudgement(
             next_status=ExecutionStatus.SUCCESS, verdict=outcome.verdict
+        )
+    if outcome.probe_failed:
+        # AWS에 물어보지 못해 결론이 없다 — 자산이 실패했다는 근거가 아니다.
+        # 여기서 ROLLBACK_INITIATED로 닫으면 검증기의 실패가 자산의 실패로 저장되고,
+        # 자동 원복(#241)이 멀쩡한 인스턴스를 되돌린다 (PR #244 리뷰 / Issue #249)
+        return BootJudgement(
+            defer_reason=_boot_failure_summary(outcome), verdict=outcome.verdict
         )
     return BootJudgement(
         next_status=ExecutionStatus.ROLLBACK_INITIATED,

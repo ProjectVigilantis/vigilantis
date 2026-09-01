@@ -548,6 +548,53 @@ def test_status_check_timeout_initiates_rollback(db, aws):
     assert rb.StatusCheckVerdict.TIMED_OUT.value in row.error_summary
 
 
+def test_probe_failure_defers_instead_of_initiating_rollback(db, aws):
+    """AWS 조회 실패는 자산의 실패가 아니다 — 확정하지 않고 IN_PROGRESS로 남긴다.
+
+    여기서 ROLLBACK_INITIATED로 닫으면 검증기의 실패가 자산의 실패로 저장되어
+    #241의 자동 원복 입력과 구분되지 않고, 일시적인 스로틀링·권한 오류가 멀쩡한
+    인스턴스를 되돌린다 (PR #244 리뷰 / Issue #249).
+    """
+    incident_id, execution_id = _ran_and_awaiting(db, aws)
+    aws(
+        **{f"waiter:{rb.WAITER_NAME}": waiter_timeout()},
+        describe_instance_status=client_error("RequestLimitExceeded", 503),
+    )
+
+    report = cycle(db)
+
+    assert report.judged == 1 and report.deferred == 1
+    assert report.closed == 0 and report.rollback_initiated == 0
+    assert status_of(db, incident_id, execution_id) == (
+        IncidentStatus.ACTION_IN_PROGRESS,
+        ExecutionStatus.IN_PROGRESS,
+    )
+    row = exec_repo.get_execution(db, execution_id)
+    # 보류 사유는 저장하지 않는다 — 판정 불가의 저장 계약은 #249다
+    assert row.error_summary is None
+    assert row.finished_at is None
+
+
+def test_deferred_judgement_is_asked_again_next_cycle(db, aws):
+    """보류는 막다른 길이 아니다 — 조회가 회복되면 다음 주기가 확정한다."""
+    incident_id, execution_id = _ran_and_awaiting(db, aws)
+    aws(
+        **{f"waiter:{rb.WAITER_NAME}": waiter_timeout()},
+        describe_instance_status=client_error("RequestLimitExceeded", 503),
+    )
+    assert cycle(db).deferred == 1
+
+    aws(**{f"waiter:{rb.WAITER_NAME}": None})  # 조회 회복 — 2/2가 통과한다
+
+    report = cycle(db)
+
+    assert report.deferred == 0 and report.closed == 1
+    assert status_of(db, incident_id, execution_id) == (
+        IncidentStatus.AWAITING_CLOSURE,
+        ExecutionStatus.SUCCESS,
+    )
+
+
 def test_instance_that_was_never_started_skips_the_status_check(db, aws):
     """조치 직전 stopped였던 인스턴스는 기동하지 않는다(executor ③단계 NOT_APPLIED).
 

@@ -25,11 +25,18 @@
 # ROLLBACK_INITIATED로 확정된 실행은 스캔에 계속 걸리지만 여기서 다시 만지지
 # 않습니다 — 자동 원복 실행을 낳는 것은 rollback.py·#241 몫입니다.
 #
+# 판정이 늘 확정으로 끝나지는 않습니다. AWS에 물어보지 못한 경우는 자산이 실패했다는
+# 근거가 아니므로 확정하지 않고 IN_PROGRESS로 남겨 다음 주기가 다시 묻습니다 —
+# 검증기의 실패를 ROLLBACK_INITIATED로 저장하면 #241의 자동 원복이 멀쩡한 인스턴스를
+# 되돌립니다. 재시도 상한과 판정 불가의 저장 계약은 Issue #249입니다.
+#
 # [남은 작업]
 # 1. RIGHTSIZING 외 9종 실행 — 실행 함수가 생기는 대로 _RUNNERS에, 종료 판정이
 #    필요한 런북은 _JUDGES에 등록합니다(services/aws/executor.py [남은 작업] 1번).
 # 2. ROLLBACK_INITIATED 원본의 자동 원복 발동 — trigger_source=AUTO_ON_FAILURE로
 #    원복 실행을 만들고 원본을 ROLLED_BACK·ROLLBACK_FAILED로 확정합니다 (Issue #241).
+# 3. 판정 보류의 재시도 정책 — 조회 실패를 몇 번까지 다시 묻고, 소진하면 어떤 typed
+#    상태로 남겨 관제자에게 보일지 확정합니다. 지금은 상한 없이 다시 묻습니다 (Issue #249).
 #
 # 기동 worker 개수는 미정입니다 — ADR-0005가 다중 worker·replica 실행 토폴로지를
 # 별도 결정 대상으로 남겼고, 이 모듈은 worker 1개를 전제합니다. 선점(_claim)의
@@ -93,10 +100,11 @@ class DispatchReport:
 
     scanned: int = 0
     started: int = 0                # executor로 넘긴 실행
-    judged: int = 0                 # 2/2 Status Check 판정을 수행한 실행
+    judged: int = 0                 # 2/2 Status Check 판정을 수행한 실행(deferred 포함)
     closed: int = 0                 # 종료 상태로 확정한 실행
     awaiting_status_check: int = 0  # 요청은 접수됐고 다음 주기의 판정을 기다리는 실행
     rollback_initiated: int = 0     # 원복이 필요해 ROLLBACK_INITIATED로 남긴 실행
+    deferred: int = 0               # AWS 조회 실패로 확정하지 않고 다음 주기로 미룬 실행
     skipped: int = 0                # 선점 실패·이미 확정된 실행
     unsupported: int = 0            # 실행 함수·판정 함수가 아직 없는 런북
     errored: int = 0
@@ -213,6 +221,21 @@ def _judge_one(
     db.commit()
     try:
         judgement = judge(db, execution_id)
+        if judgement.deferred:
+            # AWS에 물어보지 못해 결론이 없다 — 확정하지 않고 다음 주기가 다시 묻는다.
+            # 여기서 ROLLBACK_INITIATED로 닫으면 검증기의 실패가 자산의 실패로
+            # 저장되어 #241의 자동 원복 입력과 구분되지 않는다. 사유는 로그로만
+            # 남긴다 — 판정 불가의 저장 계약은 Issue #249다
+            report.deferred += 1
+            logger.warning(
+                "dispatch_judgement_deferred",
+                extra={
+                    "execution_id": execution_id,
+                    "reason": judgement.defer_reason,
+                },
+            )
+            db.commit()
+            return
         _close_and_publish(
             db,
             execution_id,
