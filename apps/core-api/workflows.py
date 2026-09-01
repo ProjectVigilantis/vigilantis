@@ -435,11 +435,17 @@ class ExecutionRunOutcome:
     성공 여부, 실패 분류(reason_code), 사람이 읽을 사유(error_summary), 그리고
     자산이 어디까지 바뀌었는지 말하는 단계 결과(steps).
 
-    확정 주체는 succeeded가 가른다. **실패는 dispatcher.py가 여기서 바로 FAILED로
-    확정**하고(close_execution), **성공은 아직 확정하지 않는다** — 기동 요청 접수는
-    성공의 경계가 아니고 2/2 Status Check 결과가 SUCCESS와 ROLLBACK_INITIATED를
-    가르기 때문이다(services/aws/rollback.py, run_rightsizing_execution 참조).
-    그때까지 실행은 IN_PROGRESS로 남는다. (Issue #232)
+    확정 여부는 succeeded 하나가 아니라 **succeeded와 단계 effect 둘**이 가른다.
+    dispatcher.py가 여기서 바로 FAILED로 확정하는 것은 **변경 없이 실패한 경우뿐**
+    이다(모든 단계가 NOT_APPLIED이거나 단계가 없음, close_execution). 단계 effect에
+    APPLIED·PARTIAL·UNKNOWN이 하나라도 있으면 자산이 바뀐 채 끝난 실행이라 확정하지
+    않는다 — FAILED는 계약상 "변경 없이 실패"라(schemas/executions.py 복구 가능 상태
+    주석) 확정하면 관제자 복구 목록이 닫힌다.
+
+    **성공도 확정하지 않는다** — 기동 요청 접수는 성공의 경계가 아니고 2/2 Status
+    Check 결과가 SUCCESS와 ROLLBACK_INITIATED를 가르기 때문이다
+    (services/aws/rollback.py, run_rightsizing_execution 참조). 확정하지 않은 두 갈래
+    모두 실행은 IN_PROGRESS로 남고 그 판정은 rollback.py 몫이다. (Issue #232)
     """
 
     succeeded: bool

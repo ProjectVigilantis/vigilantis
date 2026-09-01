@@ -32,15 +32,42 @@ StructuredOutputT = TypeVar("StructuredOutputT", bound=BaseModel)
 
 
 class AIModelError(Exception):
-    """모델 호출 실패의 최상위 타입."""
+    """모델 호출 실패의 최상위 타입.
+
+    phase는 실패가 왕복의 어느 자리에서 났는지다 — "transport"(왕복 자체가 못 섬),
+    "request"(호출 준비·수락 단계의 거절), "response"(응답은 받았지만 쓸 수 없음).
+    예외 클래스만으로는 이 축이 갈리지 않아서(예: 계약 위반은 요청 직렬화 실패와
+    응답 파싱 실패 양쪽에 쓰인다) 따로 든다 — 계측이 response만 모델 품질로 센다(#237).
+
+    usage는 응답을 받은 실패에서 이미 발생한 토큰이다. 예외에 실어 보내지 않으면
+    그 호출의 토큰이 어느 집계에도 남지 않아 비용이 실제 청구보다 적게 잡힌다.
+    """
+
+    phase: str = "request"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        usage: Optional["TokenUsage"] = None,
+        phase: Optional[str] = None,
+    ) -> None:
+        super().__init__(message)
+        self.usage = usage
+        if phase is not None:
+            self.phase = phase
 
 
 class AIModelTimeoutError(AIModelError):
     """제한시간 초과. 재시도 상한을 소진한 뒤에 나온다."""
 
+    phase = "transport"
+
 
 class AIModelUnavailableError(AIModelError):
     """일시적 실패(연결 오류·408·409·429·5xx). 재시도 상한을 소진한 뒤에 나온다."""
+
+    phase = "transport"
 
 
 class AIModelRejectedError(AIModelError):
@@ -75,6 +102,11 @@ class TokenUsage:
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+    # prompt_tokens 중 제공자 캐시에서 온 몫. 청구 단가가 달라 이 값을 빼고는 실제
+    # 비용을 계산할 수 없다. 같은 프롬프트를 반복하는 계측에서는 크게 걸리고, 인시던트
+    # 마다 입력이 다른 실경로에서는 대개 0이다 — 그 차이를 구분해 말하려면 기록해야
+    # 한다(#237). 제공자가 이 정보를 주지 않으면 0이다.
+    cached_prompt_tokens: int = 0
 
 
 @dataclass(frozen=True)
