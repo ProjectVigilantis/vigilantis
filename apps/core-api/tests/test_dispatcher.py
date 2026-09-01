@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, WaiterError
 
 CORE_API = Path(__file__).resolve().parents[1]
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -28,10 +28,16 @@ from schemas.api.actions import ExecutionStatus  # noqa: E402
 from schemas.api.incidents import IncidentCategory, IncidentStatus  # noqa: E402
 from schemas.api.ws import WsEventType  # noqa: E402
 from schemas.candidates import CandidateStatus, RunbookCandidateData  # noqa: E402
-from schemas.executions import ExecutionStepResult, ExecutionStepStatus  # noqa: E402
+from schemas.executions import (  # noqa: E402
+    EXECUTION_RECOVERABLE_STATUSES,
+    ExecutionEffect,
+    ExecutionStepResult,
+    ExecutionStepStatus,
+)
 from schemas.runbooks import RunbookId, TriggerSource  # noqa: E402
 from services.aws import backup as bk  # noqa: E402
 from services.aws import executor as ex  # noqa: E402
+from services.aws import rollback as rb  # noqa: E402
 
 ACCOUNT = "123456789012"
 REGION = "ap-northeast-2"
@@ -69,11 +75,15 @@ def client_error(code: str, status: int = 400) -> ClientError:
 
 
 class FakeWaiter:
-    def __init__(self, state):
+    def __init__(self, state, name):
         self._state = state
+        self._name = name
 
     def wait(self, **kwargs):
-        self._state["calls"].append(("wait", kwargs))
+        self._state["calls"].append((f"wait:{self._name}", kwargs))
+        outcome = self._state["overrides"].get(f"waiter:{self._name}")
+        if isinstance(outcome, BaseException):
+            raise outcome
 
 
 class FakeEc2:
@@ -81,7 +91,7 @@ class FakeEc2:
         self._state = state
 
     def get_waiter(self, name):
-        return FakeWaiter(self._state)
+        return FakeWaiter(self._state, name)
 
     def __getattr__(self, operation):
         def call(**kwargs):
@@ -102,7 +112,7 @@ class FakeEc2:
 
 @pytest.fixture
 def aws(monkeypatch):
-    """캡처(backup)와 실행(executor)이 같은 가짜 EC2를 본다."""
+    """캡처(backup)·실행(executor)·판정(rollback)이 같은 가짜 EC2를 본다."""
     state = {"overrides": {}, "calls": []}
 
     def factory(service, region=None, **_):
@@ -110,6 +120,17 @@ def aws(monkeypatch):
 
     monkeypatch.setattr(bk, "aws_client", factory)
     monkeypatch.setattr(ex, "aws_client", factory)
+    monkeypatch.setattr(rb, "aws_client", factory)
+    # 판정 대기는 실제로 자지 않는다 — 이 테스트가 보는 것은 대기가 아니라 라우팅이다
+    monkeypatch.setattr(
+        rb,
+        "get_settings",
+        lambda: type(
+            "S",
+            (),
+            {"STATUS_CHECK_WAIT_DELAY_SECONDS": 1, "STATUS_CHECK_WAIT_MAX_ATTEMPTS": 1},
+        )(),
+    )
 
     def configure(**overrides):
         state["overrides"].update(overrides)
@@ -233,8 +254,12 @@ def test_unsupported_runbook_is_not_dispatched(db, aws):
     )
 
 
-def test_execution_with_steps_is_not_touched(db, aws):
-    """단계가 남았다는 것은 자산이 이미 만져졌을 수 있다는 뜻이다 — rollback.py 몫."""
+def test_execution_with_steps_is_judged_not_rerun(db, aws):
+    """단계가 남았다는 것은 자산이 이미 만져졌을 수 있다는 뜻이다 — 재실행이 아니라 판정.
+
+    호출이 끝나지 않은 채(IN_PROGRESS) 남은 단계는 적용 여부를 알 수 없으므로
+    되돌릴 것이 있다고 본다. 다시 돌리면 백업 없는 두 번째 AWS 변경이 된다.
+    """
     incident_id, execution_id = _reserved(db)
     exec_repo.add_step(
         db,
@@ -252,11 +277,12 @@ def test_execution_with_steps_is_not_touched(db, aws):
 
     report = cycle(db)
 
-    assert report.skipped == 1 and report.started == 0
-    assert aws.calls == []
+    assert report.judged == 1 and report.started == 0
+    assert report.rollback_initiated == 1
+    assert aws.calls == []  # 조치가 미완인 것이 이미 확정이라 2/2를 물을 이유가 없다
     assert status_of(db, incident_id, execution_id) == (
         IncidentStatus.ACTION_IN_PROGRESS,
-        ExecutionStatus.IN_PROGRESS,
+        ExecutionStatus.ROLLBACK_INITIATED,
     )
 
 
@@ -407,13 +433,13 @@ def test_close_failure_is_also_contained(db, aws, monkeypatch):
     )
 
 
-def test_partially_applied_failure_stays_open_for_rollback(db, aws):
-    """자산이 바뀐 채 실패한 실행은 확정하지 않는다.
+def test_partially_applied_failure_initiates_rollback(db, aws):
+    """자산이 바뀐 채 실패한 실행은 FAILED가 아니라 ROLLBACK_INITIATED다.
 
     1단계 정지가 APPLIED로 끝난 뒤 2단계 타입 변경이 실패하면 인스턴스는 정지된
     채 남는다. FAILED는 계약상 "변경 없이 실패"라(schemas/executions.py 복구 가능
-    상태 주석) 여기서 확정하면 관제자 복구 목록이 닫히고 rollback.py도 다시 집지
-    못한다 — 판정은 그쪽 몫으로 남긴다.
+    상태 주석) 그것으로 확정하면 관제자 복구 목록이 닫힌다. 2/2를 물을 이유도
+    없다 — 조치가 제 갈 데까지 가지 못한 것이 이미 확정이다.
     """
     incident_id, execution_id = _reserved(db)
     aws(modify_instance_attribute=client_error("InvalidParameterValue"))
@@ -421,14 +447,201 @@ def test_partially_applied_failure_stays_open_for_rollback(db, aws):
 
     report = cycle(db, events.append)
 
-    assert report.left_for_rollback == 1 and report.closed == 0
-    assert events == []
+    assert report.rollback_initiated == 1 and report.closed == 0
+    assert [event.event_type for event in events] == [
+        WsEventType.EXECUTION_UPDATED,
+        WsEventType.INCIDENT_UPDATED,
+    ]
+    assert status_of(db, incident_id, execution_id) == (
+        IncidentStatus.ACTION_IN_PROGRESS,
+        ExecutionStatus.ROLLBACK_INITIATED,
+    )
+    row = exec_repo.get_execution(db, execution_id)
+    assert row.finished_at is None  # 비종료 상태다 — 자동 원복이 아직 남았다
+    # 관제자 복구 목록이 열려 있다(EXECUTION_RECOVERABLE_STATUSES)
+    assert row.status in EXECUTION_RECOVERABLE_STATUSES
+    # 다음 주기는 이 행을 다시 집지 않는다 — 자동 원복은 #241 몫이다
+    assert cycle(db).skipped == 1
+
+
+# ------------------------------------------------- 2/2 Status Check 판정 (#240)
+
+
+def waiter_timeout() -> WaiterError:
+    return WaiterError(
+        name=rb.WAITER_NAME, reason="Max attempts exceeded", last_response={}
+    )
+
+
+def _ran_and_awaiting(db, aws):
+    """1주기 = 실행. 단계가 남고 IN_PROGRESS인 채로 판정을 기다린다."""
+    incident_id, execution_id = _reserved(db)
+    assert cycle(db).awaiting_status_check == 1
+    aws.calls.clear()
+    return incident_id, execution_id
+
+
+def test_status_check_ok_closes_the_execution_as_success(db, aws):
+    """성공한 실행이 IN_PROGRESS로 남지 않는다 — 2/2가 SUCCESS 확정의 경계다."""
+    incident_id, execution_id = _ran_and_awaiting(db, aws)
+
+    report = cycle(db)
+
+    assert report.judged == 1 and report.closed == 1
+    assert f"wait:{rb.WAITER_NAME}" in operations(aws)
+    assert status_of(db, incident_id, execution_id) == (
+        IncidentStatus.AWAITING_CLOSURE,
+        ExecutionStatus.SUCCESS,
+    )
+    assert exec_repo.get_execution(db, execution_id).finished_at is not None
+
+
+def test_status_check_failure_initiates_rollback(db, aws):
+    """부팅 실패는 원복 개시다 — 원본이 비종료로 남아 복구 경로가 열린다."""
+    incident_id, execution_id = _ran_and_awaiting(db, aws)
+    aws(
+        **{f"waiter:{rb.WAITER_NAME}": waiter_timeout()},
+        describe_instance_status={
+            "InstanceStatuses": [
+                {
+                    "InstanceId": INSTANCE,
+                    "InstanceState": {"Name": "stopped"},
+                    "SystemStatus": {"Status": "not-applicable"},
+                    "InstanceStatus": {"Status": "not-applicable"},
+                }
+            ]
+        },
+    )
+
+    report = cycle(db)
+
+    assert report.judged == 1 and report.rollback_initiated == 1
+    assert status_of(db, incident_id, execution_id) == (
+        IncidentStatus.ACTION_IN_PROGRESS,
+        ExecutionStatus.ROLLBACK_INITIATED,
+    )
+    row = exec_repo.get_execution(db, execution_id)
+    assert row.status in EXECUTION_RECOVERABLE_STATUSES
+    assert "stopped" in row.error_summary
+
+
+def test_status_check_timeout_initiates_rollback(db, aws):
+    """제한 시간 안에 2/2가 오지 않아도 성공으로 확정할 근거는 없다."""
+    _incident_id, execution_id = _ran_and_awaiting(db, aws)
+    aws(
+        **{f"waiter:{rb.WAITER_NAME}": waiter_timeout()},
+        describe_instance_status={
+            "InstanceStatuses": [
+                {
+                    "InstanceId": INSTANCE,
+                    "InstanceState": {"Name": "pending"},
+                    "SystemStatus": {"Status": "initializing"},
+                    "InstanceStatus": {"Status": "initializing"},
+                }
+            ]
+        },
+    )
+
+    assert cycle(db).rollback_initiated == 1
+    row = exec_repo.get_execution(db, execution_id)
+    assert row.status is ExecutionStatus.ROLLBACK_INITIATED
+    assert rb.StatusCheckVerdict.TIMED_OUT.value in row.error_summary
+
+
+def test_instance_that_was_never_started_skips_the_status_check(db, aws):
+    """조치 직전 stopped였던 인스턴스는 기동하지 않는다(executor ③단계 NOT_APPLIED).
+
+    켜지 않은 인스턴스에 2/2를 물으면 영원히 오지 않아 타임아웃 뒤 멀쩡한 자산을
+    되돌리게 된다 — 묻기 전에 성공으로 확정해야 한다.
+    """
+    incident_id, execution_id = _reserved(db)
+    aws(
+        stop_instances={
+            "StoppingInstances": [
+                {"InstanceId": INSTANCE, "PreviousState": {"Name": "stopped"}}
+            ]
+        }
+    )
+    assert cycle(db).awaiting_status_check == 1
+    started = [
+        s
+        for s in exec_repo.list_steps(db, execution_id)
+        if s.step_type == ex.STEP_START_INSTANCE
+    ]
+    assert started and started[-1].effect is ExecutionEffect.NOT_APPLIED
+    aws.calls.clear()
+
+    report = cycle(db)
+
+    assert report.closed == 1
+    assert f"wait:{rb.WAITER_NAME}" not in operations(aws)
+    assert status_of(db, incident_id, execution_id) == (
+        IncidentStatus.AWAITING_CLOSURE,
+        ExecutionStatus.SUCCESS,
+    )
+
+
+def test_judge_without_a_judge_leaves_the_execution_open(db, aws, monkeypatch):
+    """판정 주체가 없는 런북을 실패로 확정하면 미구현이 조치 실패로 둔갑한다."""
+    incident_id, execution_id = _ran_and_awaiting(db, aws)
+    monkeypatch.delitem(dispatcher._JUDGES, RunbookId.RUNBOOK_EC2_RIGHTSIZING)
+
+    report = cycle(db)
+
+    assert report.unsupported == 1 and report.judged == 0
     assert status_of(db, incident_id, execution_id) == (
         IncidentStatus.ACTION_IN_PROGRESS,
         ExecutionStatus.IN_PROGRESS,
     )
-    # 다음 주기는 단계 기록 때문에 이 행을 건드리지 않는다(_claim)
-    assert cycle(db).skipped == 1
+
+
+def test_one_poisoned_judgement_does_not_starve_the_scan(db, aws, monkeypatch):
+    """판정 1건의 예외도 그 행에서 멈춘다 — 실행 경로와 같은 우산이다."""
+    _p_incident, poisoned_id = _reserved(db)
+    _h_incident, healthy_id = _reserved(db)
+    # 두 건을 한 주기에 실행시켜 둘 다 판정 대기로 만든다 — 따로 돌리면 앞 건이
+    # 뒤 건의 실행 주기에 판정까지 끝나 버린다
+    assert cycle(db).awaiting_status_check == 2
+    aws.calls.clear()
+
+    real_judge = workflows.judge_rightsizing_boot
+
+    def judge(session, execution_id):
+        if execution_id == poisoned_id:
+            raise RuntimeError("판정 배선 오류 재현")
+        return real_judge(session, execution_id)
+
+    monkeypatch.setitem(dispatcher._JUDGES, RunbookId.RUNBOOK_EC2_RIGHTSIZING, judge)
+
+    report = cycle(db)
+
+    assert report.scanned == 2
+    assert report.errored == 1 and report.closed == 1
+    assert exec_repo.get_execution(db, poisoned_id).status is (
+        ExecutionStatus.IN_PROGRESS
+    )
+    assert exec_repo.get_execution(db, healthy_id).status is ExecutionStatus.SUCCESS
+
+
+def test_incident_waits_for_approval_when_a_proposal_survives_success(db, aws):
+    """성공했어도 남은 제안이 있으면 종료 판단이 아니라 승인 대기다(v1.6 ⑤)."""
+    incident_id, execution_id = _ran_and_awaiting(db, aws)
+    _candidate(
+        db,
+        incident_id,
+        runbook=RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED,
+        target_arn=VOLUME_ARN,
+        parameters={},
+        status=CandidateStatus.EXECUTABLE,
+    )
+    db.commit()
+
+    cycle(db)
+
+    assert status_of(db, incident_id, execution_id) == (
+        IncidentStatus.AWAITING_APPROVAL,
+        ExecutionStatus.SUCCESS,
+    )
 
 
 # ------------------------------------------------------------------ 실시간 발행
@@ -516,3 +729,38 @@ def test_detail_survives_the_transition_with_a_proposal_left(client_pg, db, aws)
     assert [r["runbook_id"] for r in body["recommendations"]] == [
         RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED.value
     ]
+
+
+def test_detail_survives_the_success_transition(client_pg, db, aws):
+    """성공 확정 뒤 상세 조회가 200이어야 한다.
+
+    AWAITING_CLOSURE는 "수행된 실행 1건 이상 + 진행 중 실행 없음 + 제안 없음"을
+    요구한다(api/incidents.py). 그 조합을 만들지 못하면 성공 직후 조회가 500이다.
+    """
+    incident_id, _execution_id = _ran_and_awaiting(db, aws)
+    cycle(db)
+
+    response = client_pg.get(f"/api/v1/incidents/{incident_id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == IncidentStatus.AWAITING_CLOSURE.value
+    assert body["recommendations"] == []
+    assert body["executions"][0]["status"] == ExecutionStatus.SUCCESS.value
+    # 성공한 원본은 관제자 복구(REVERT_SIZE)를 연다
+    assert body["executions"][0]["available_recovery_runbook_ids"] == [
+        RunbookId.RUNBOOK_EC2_REVERT_SIZE.value
+    ]
+
+
+def test_resolved_from_awaiting_closure(client_pg, db, aws):
+    """종료 판단이 AWAITING_CLOSURE에서 열린다 — 안 열리면 그 상태가 막다른 길이다."""
+    incident_id, _execution_id = _ran_and_awaiting(db, aws)
+    cycle(db)
+
+    response = client_pg.post(
+        f"/api/v1/incidents/{incident_id}/resolve", json={"resolution": "JUSTIFIED"}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == IncidentStatus.RESOLVED.value

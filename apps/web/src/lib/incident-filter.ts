@@ -16,11 +16,16 @@ export const ALL = '전체';
 export const INCIDENT_PRESETS = ['ACTIVE', 'PENDING', 'PREEMPTIVE', 'HISTORY'] as const;
 export type IncidentPreset = (typeof INCIDENT_PRESETS)[number];
 
-/** 진행 중 = 종료(`RESOLVED`)가 아닌 4종. `FAILED`는 사람 개입이 남아 여기 잔류한다(§4.4). */
+/**
+ * 진행 중 = 종료(`RESOLVED`)가 아닌 5종. `FAILED`는 사람 개입이 남아 여기 잔류하고(§4.4),
+ * `AWAITING_CLOSURE`도 같은 이유로 남는다 — 관제자 종료 판단이 아직 끝나지 않았으므로
+ * 기본 목록에서 빠지면 조치에 성공한 건이 화면에서 통째로 사라진다 (#240).
+ */
 export const ACTIVE_STATUSES = [
   'ANALYZING',
   'AWAITING_APPROVAL',
   'ACTION_IN_PROGRESS',
+  'AWAITING_CLOSURE',
   'FAILED',
 ] as const satisfies readonly IncidentStatus[];
 

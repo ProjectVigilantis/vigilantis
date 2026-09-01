@@ -88,7 +88,8 @@ def make_finops_incident(**over):
 
 def test_enums_match_contract_exactly():
     assert {s.value for s in IncidentStatus} == {
-        "ANALYZING", "AWAITING_APPROVAL", "ACTION_IN_PROGRESS", "RESOLVED", "FAILED",
+        "ANALYZING", "AWAITING_APPROVAL", "ACTION_IN_PROGRESS",
+        "AWAITING_CLOSURE", "RESOLVED", "FAILED",
     }
     assert {c.value for c in IncidentCategory} == {"FINOPS", "SECOPS"}
     assert {r.value for r in RiskLevel} == {"HIGH", "MEDIUM", "LOW"}
@@ -169,6 +170,42 @@ def test_recommendations_reject_rollback_runbooks(runbook_id):
     {"unknown_field": 1},
 ])
 def test_incident_contract_violations(over):
+    with pytest.raises(ValidationError):
+        IncidentResponse.model_validate(make_secops_incident(**over))
+
+
+def test_awaiting_closure_valid_after_a_settled_execution():
+    """조치가 끝나고 종료 판단만 남은 자리 — 제안 없음 + 진행 중 실행 없음 + 실행 1건."""
+    inc = IncidentResponse.model_validate(
+        make_secops_incident(status="AWAITING_CLOSURE", recommendations=[])
+    )
+    assert inc.status == IncidentStatus.AWAITING_CLOSURE
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        # 제안이 남았으면 아직 승인 대기다 (v1.6 ⑤ — 남은 제안이 있으면 종료 불가)
+        {"status": "AWAITING_CLOSURE"},
+        # 수행된 조치가 없으면 판단할 것이 없다
+        {"status": "AWAITING_CLOSURE", "recommendations": [], "executions": []},
+        # 진행 중 실행이 있으면 조치가 끝나지 않았다
+        {
+            "status": "AWAITING_CLOSURE",
+            "recommendations": [],
+            "executions": [
+                {
+                    "execution_id": "exec-1",
+                    "runbook_id": "RUNBOOK_EC2_RIGHTSIZING",
+                    "status": "IN_PROGRESS",
+                    "available_recovery_runbook_ids": [],
+                    "updated_at": "2026-08-12T09:01:01Z",
+                }
+            ],
+        },
+    ],
+)
+def test_awaiting_closure_contract_violations(over):
     with pytest.raises(ValidationError):
         IncidentResponse.model_validate(make_secops_incident(**over))
 

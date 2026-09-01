@@ -45,6 +45,14 @@ EXECUTION_RECOVERABLE_STATUSES: frozenset[ExecutionStatus] = frozenset(
     {ExecutionStatus.SUCCESS, ExecutionStatus.ROLLBACK_INITIATED}
 )
 
+# 확정 결과가 "조치가 제 갈 데까지 갔다"인 상태. 남은 제안·실행이 없을 때 Incident를
+# 종료 판단 대기(AWAITING_CLOSURE)로 보낼지 진행 불가(FAILED)로 보낼지 가르는 기준이다.
+# ROLLBACK_FAILED는 넣지 않는다 — 되돌리지도 못한 채 끝났으므로 관제자 종료 판단이
+# 아니라 수동 개입이 남는다(ADR-0004 롤백 공통 정책 ④). (Issue #240)
+EXECUTION_SETTLED_STATUSES: frozenset[ExecutionStatus] = frozenset(
+    {ExecutionStatus.SUCCESS, ExecutionStatus.ROLLED_BACK}
+)
+
 
 @unique
 class ExecutionStepStatus(str, Enum):
@@ -61,6 +69,14 @@ class ExecutionEffect(str, Enum):
     APPLIED = "APPLIED"
     PARTIAL = "PARTIAL"
     UNKNOWN = "UNKNOWN"
+
+
+# 자산이 만져졌을 수 있다고 보는 effect. NOT_APPLIED만 "확실히 안 바뀜"이다
+# (services/aws/executor.py _effect_for — 4xx 거절·스로틀링만 NOT_APPLIED). 자동 원복이
+# "되돌릴 것이 있는가"를 판단하는 입력이라 회수·판정 양쪽이 같은 집합을 본다.
+ASSET_MAY_HAVE_CHANGED_EFFECTS: frozenset[ExecutionEffect] = frozenset(
+    {ExecutionEffect.APPLIED, ExecutionEffect.PARTIAL, ExecutionEffect.UNKNOWN}
+)
 
 
 _ALLOWED_EFFECTS_BY_STATUS: dict[ExecutionStepStatus, frozenset[ExecutionEffect]] = {

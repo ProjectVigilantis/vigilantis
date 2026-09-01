@@ -51,6 +51,12 @@ class IncidentStatus(str, Enum):
     ANALYZING = "ANALYZING"                  # AI 분석 또는 Guardrail 검증 미완
     AWAITING_APPROVAL = "AWAITING_APPROVAL"  # 실행 가능한 제안 ≥1, 진행 중 실행 없음
     ACTION_IN_PROGRESS = "ACTION_IN_PROGRESS"
+    # 조치가 끝났고 관제자 종료 판단만 남음 — 남은 제안·진행 중 실행이 없고, 마지막
+    # 으로 확정된 실행이 SUCCESS·ROLLED_BACK인 자리다. RESOLVED로 시스템이 먼저
+    # 옮기지 않는 이유는 그러면 관제자 종료 API가 멱등 경로로 떨어져 종료 판단이
+    # 영구히 비어 남기 때문이고(Issue #199), FAILED로 두지 않는 이유는 성공한 조치가
+    # 화면에서 '진행 불가'로 읽히기 때문이다. (Issue #240)
+    AWAITING_CLOSURE = "AWAITING_CLOSURE"
     RESOLVED = "RESOLVED"                    # 더 진행할 제안·실행 없음(자산 원복 의미 아님)
     FAILED = "FAILED"                        # 흐름 진행 불가(수행된 조치 결과는 executions)
 
@@ -190,8 +196,23 @@ class IncidentResponse(BaseModel):
                 raise ValueError("AWAITING_APPROVAL이면 진행 중인 실행이 없어야 합니다")
         if self.status == IncidentStatus.ACTION_IN_PROGRESS and not in_progress:
             raise ValueError("ACTION_IN_PROGRESS이면 진행 중인 실행이 1개 이상이어야 합니다")
+        if self.status == IncidentStatus.AWAITING_CLOSURE:
+            # "조치가 끝났고 종료 판단만 남았다"는 세 조건이 함께여야 성립한다.
+            # 수행된 조치가 없으면 판단할 것이 없고(그건 ANALYZING·FAILED 자리다),
+            # 남은 제안이 있으면 아직 승인 대기이며(v1.6 결정 ⑤ — 남은 제안이 있으면
+            # 종료 불가), 진행 중 실행이 있으면 조치가 끝나지 않았다
+            if not self.executions:
+                raise ValueError("AWAITING_CLOSURE이면 수행된 실행이 1개 이상이어야 합니다")
+            if in_progress:
+                raise ValueError("AWAITING_CLOSURE이면 진행 중인 실행이 없어야 합니다")
         if (
-            self.status in (IncidentStatus.ANALYZING, IncidentStatus.RESOLVED, IncidentStatus.FAILED)
+            self.status
+            in (
+                IncidentStatus.ANALYZING,
+                IncidentStatus.AWAITING_CLOSURE,
+                IncidentStatus.RESOLVED,
+                IncidentStatus.FAILED,
+            )
             and self.recommendations
         ):
             raise ValueError(f"{self.status.value}이면 recommendations는 빈 배열이어야 합니다")
