@@ -31,7 +31,7 @@ SecOps : summarize_evidence → reassess_risk → propose_candidates → validat
 1. **도메인별 분리** — 단일 그래프에 조건 Edge를 두면 합집합 State가 필요해 한쪽 전용 필드가 nullable로 혼입된다. 두 그래프로 나눠 출력 불변식을 그래프 단위로 강제한다. (`domain`은 Workflow가 설정하며 그래프 노드가 이를 바꿀 수 없다 — #49 불변식 2) SecOps 전용 `reassess_risk`가 `reviewed_risk_level`을 산출하며 초기 위험도는 덮어쓰지 않는다.
 2. **상태 비보관** — Checkpointer를 두지 않고 업무 상태는 PostgreSQL 단일 원천으로 둔다. 승인 중단점도 없다 — 그래프는 한 번 호출되면 Terminal 결과 반환 후 종료한다. 중복 호출은 Incident의 AI 호출 상태를 PostgreSQL 트랜잭션 안에서 원자적으로 선점(Claim)해 막는다 — 프로세스 수와 무관하게 성립한다. (상태 이원화와 서버 타이머·그래프 수명의 결합 회피)
 3. **책임 한정** — 그래프는 분석·후보 생성까지만 담당하고 Guardrail·DB 저장·AWS 실행·승인은 밖에 둔다. 모델 호출은 이 ADR에서 도입하는 `AIModelClient` 경계를 통해서만 수행해 SDK 타입·자격증명·예외가 `AIModelClient` 구현 밖의 그래프·도메인 코드로 새지 않게 한다. (테스트 주입용 경계이며 Provider 교체·배포 방식의 확정이 아님)
-4. **근거는 구조화 필드로** — 판단 근거는 `Incident`의 요약 3줄·`initial_risk_reason_codes`·`reviewed_risk_level`, `RunbookCandidate.evidence_ids`, `GuardrailEvaluation` 4단계 결과에 남긴다. 호출 메타는 구조화 로그로 출력하되 업무·감사 데이터의 기준은 PostgreSQL이며 운영 로그는 감사 근거가 아니다. `evidence_ids`가 가리키는 Evidence는 생성 후 변경하지 않는다 — 근거가 바뀌면 판단 설명이 성립하지 않는다. (`RiskReasonCode` 값 목록은 Risk 규칙 확정 전까지 미정 — 저장 위치만 정한 것이다)
+4. **근거는 구조화 필드로** — 판단 근거는 `Incident`의 요약 3줄·`initial_risk_reason_codes`·`reviewed_risk_level`, `RunbookCandidate.evidence_ids`, `GuardrailEvaluation` 4단계 결과에 남긴다. 호출 메타는 구조화 로그로 출력하되 업무·감사 데이터의 기준은 PostgreSQL이며 운영 로그는 감사 근거가 아니다. `evidence_ids`가 가리키는 Evidence는 생성 후 변경하지 않는다 — 근거가 바뀌면 판단 설명이 성립하지 않는다. (`RiskReasonCode` 값 목록은 2026-08-31 확정 — PR #206, `packages/schemas/events.py`)
 
 미보존 대상:
 

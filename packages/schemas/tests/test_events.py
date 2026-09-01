@@ -116,7 +116,7 @@ def test_initial_risk_mode_pairing(risk, mode, ok):
         "threat_event_id": "thr-20260814-001",
         "initial_risk_level": risk,
         "response_mode": mode,
-        "reason_codes": ["SSH_FAILED_ATTEMPTS_OVER_THRESHOLD"],
+        "reason_codes": ["RISK_SSH_BRUTEFORCE"],
     }
     if ok:
         assert InitialRiskEvaluationResult.model_validate(data).response_mode.value == mode

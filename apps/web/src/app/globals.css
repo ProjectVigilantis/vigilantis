@@ -7,7 +7,7 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-sans);
+  --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
   --font-heading: var(--font-sans);
   --color-sidebar-ring: var(--sidebar-ring);
@@ -27,6 +27,7 @@
   --color-input: var(--input);
   --color-border: var(--border);
   --color-destructive: var(--destructive);
+  --color-danger: var(--danger);
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
   --color-muted-foreground: var(--muted-foreground);
@@ -64,6 +65,8 @@
   --accent: oklch(0.97 0 0);
   --accent-foreground: oklch(0.205 0 0);
   --destructive: oklch(0.577 0.245 27.325);
+  /* 위협·실패 의미색 전용(설계서 §0.3). UI 크롬(버튼·탭·링크·포커스 링)에는 쓰지 않는다. */
+  --danger: oklch(0.55 0.22 25);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
@@ -98,7 +101,10 @@
   --muted-foreground: oklch(0.708 0 0);
   --accent: oklch(0.269 0 0);
   --accent-foreground: oklch(0.985 0 0);
+  /* shadcn 기본 크롬 빨강. 앱 코드는 쓰지 않는다 — 의미색은 --danger 하나뿐(§0.3).
+     ui/button·ui/badge의 destructive variant가 참조하므로 지우지는 않는다. */
   --destructive: oklch(0.704 0.191 22.216);
+  --danger: oklch(0.7 0.2 25);
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
   --ring: oklch(0.556 0 0);

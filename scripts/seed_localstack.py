@@ -18,7 +18,9 @@
 #   재실행만으로 자가 복구된다.
 #
 # 시드 데이터셋 (ADR-0006 §2 표 — rule_engine 임계값을 import해 결합을 코드로 강제):
-#   idle EC2(t3.xlarge, CPU<IDLE_CPU_AVG)  → RIGHTSIZING 후보
+#   idle EC2(t3.xlarge, prod 태그, CPU<IDLE_CPU_AVG)     → SKIP_PROD_PROTECTED 경로
+#     (저활성 대형 인스턴스라도 운영 자산이면 조치하지 않는다 — 보호 규칙 확인용)
+#   idle-dev EC2(m5.2xlarge, non-prod, CPU<IDLE_CPU_AVG) → RIGHTSIZING 후보(COST_CANDIDATE)
 #   normal EC2(t3.micro, CPU≥IDLE_CPU_AVG) → 오탐 방지(후보 미선정)
 #   spike EC2(t3.small, 평균<IDLE, 최대≥SPIKE) → SKIP_LOW_UTIL 경로
 #   OpenIP SG(0.0.0.0/0 22/tcp)            → 위협 탐지·토폴로지 붉은 노드
@@ -29,7 +31,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -44,14 +45,10 @@ for _p in (str(_REPO_ROOT / "apps" / "core-api"), str(_REPO_ROOT / "packages")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-import boto3  # noqa: E402
-from botocore.config import Config  # noqa: E402
-
 from schemas.assets import MetricName  # noqa: E402
 
-# 리전·엔드포인트·자격증명 해석과 클라이언트 생성은 collector와 단일 원천(ADR-0006 §3).
-# config.get_settings() 확정 시 collector와 함께 그쪽으로 이관한다.
-from services.collector import _client, _runtime_config  # noqa: E402
+# 리전·엔드포인트·자격증명 해석과 클라이언트 생성의 단일 원천(ADR-0006 §3, Issue #128).
+from services.aws.client import aws_client, endpoint_url, regions  # noqa: E402
 from services.rule_engine import IDLE_CPU_AVG, MIN_DATAPOINTS, SPIKE_CPU_MAX  # noqa: E402
 
 SEED_TAG_KEY = "vigilantis:seed"
@@ -79,20 +76,30 @@ SG_OPEN = "vigilantis-seed-open-ssh"
 SG_USED = "vigilantis-seed-used"
 SG_UNUSED = "vigilantis-seed-unused"
 
-# (Name 태그, 인스턴스 타입, SG 이름, CPU 프로필) — idle은 OpenIP SG를 달아 붉은 노드도 겸한다
+# (Name 태그, 인스턴스 타입, SG 이름, CPU 프로필, Environment 태그) — idle은 OpenIP SG를 달아 붉은 노드도 겸한다
+# idle 은 Environment=production 이라 판정이 SKIP_PROD_PROTECTED 로 흡수된다(보호 규칙이 idle 검사보다
+# 우선). 그래서 절감 후보는 idle-dev 를 non-prod 대형 타입으로 따로 둔다 — 이 한 대가 빠지면 시드
+# 전체에서 COST_CANDIDATE 가 0대가 되어 FinOps 경로(RIGHTSIZING)가 통째로 시연 불가가 된다.
 INSTANCES = (
-    ("vigilantis-seed-idle", "t3.xlarge", SG_OPEN, "idle"),
-    ("vigilantis-seed-normal", "t3.micro", SG_USED, "normal"),
-    ("vigilantis-seed-spike", "t3.small", SG_USED, "spike"),
+    ("vigilantis-seed-idle", "t3.xlarge", SG_OPEN, "idle", "production"),
+    ("vigilantis-seed-normal", "t3.micro", SG_USED, "normal", "staging"),
+    ("vigilantis-seed-spike", "t3.small", SG_USED, "spike", "development"),
+    ("vigilantis-seed-idle-dev", "m5.2xlarge", SG_USED, "idle", "development"),
 )
 VOLUME_NAME = "vigilantis-seed-unattached"
+# Launch Template — ec2 네임스페이스라 Community 지원(ASG/elbv2 와 달리 로컬 수집 검증 가능).
+# ASG(autoscaling)는 Pro 전용이라 시드 불가 → USES 관계는 실 AWS 스모크에서만 확인된다(ADR-0006 §4).
+LAUNCH_TEMPLATE_NAME = "vigilantis-seed-lt"
 FALLBACK_AMI = "ami-00000000000000000"  # LocalStack 기본 AMI 조회 실패 시 폴백
 
 
 # ------------------------------------------------------------------ 안전 가드
-def _require_localstack() -> None:
-    """실 AWS 실행 거부(ADR-0006 §2). 엔드포인트 필수 + LocalStack 헬스체크 확인."""
-    endpoint = os.getenv("AWS_ENDPOINT_URL")
+def _require_localstack() -> str:
+    """실 AWS 실행 거부(ADR-0006 §2). 엔드포인트 필수 + LocalStack 헬스체크 확인.
+
+    엔드포인트 해석은 클라이언트 팩토리가 단일 원천이다 — 여기서 환경변수를 다시
+    읽으면 시드가 붙는 대상과 검사 대상이 갈릴 수 있다."""
+    endpoint = endpoint_url()
     if not endpoint:
         sys.exit(
             "AWS_ENDPOINT_URL 미설정 — 이 스크립트는 LocalStack 전용이다.\n"
@@ -109,11 +116,15 @@ def _require_localstack() -> None:
             f"LocalStack 헬스체크 실패({endpoint}): {e}\n"
             "  docker compose up 으로 localstack 서비스가 기동됐는지 확인할 것."
         )
+    return endpoint
 
 
 # ------------------------------------------------------------------ 리소스 ensure
-def _seed_tags(name: str) -> list[dict]:
-    return [{"Key": "Name", "Value": name}, {"Key": SEED_TAG_KEY, "Value": SEED_TAG_VALUE}]
+def _seed_tags(name: str, environment: str | None = None) -> list[dict]:
+    tags = [{"Key": "Name", "Value": name}, {"Key": SEED_TAG_KEY, "Value": SEED_TAG_VALUE}]
+    if environment:
+        tags.insert(1, {"Key": "Environment", "Value": environment})
+    return tags
 
 
 def _ensure_sg(ec2, name: str, open_ssh: bool) -> tuple[str, bool]:
@@ -123,7 +134,7 @@ def _ensure_sg(ec2, name: str, open_ssh: bool) -> tuple[str, bool]:
     sg_id = ec2.create_security_group(
         GroupName=name,
         Description=f"vigilantis seed: {name}",
-        TagSpecifications=[{"ResourceType": "security-group", "Tags": _seed_tags(name)}],
+        TagSpecifications=[{"ResourceType": "security-group", "Tags": _seed_tags(name, None)}],
     )["GroupId"]
     if open_ssh:  # OpenIP 위협 시나리오 — 22/tcp 전세계 개방
         ec2.authorize_security_group_ingress(
@@ -150,14 +161,14 @@ def _find_instance(ec2, name: str) -> str | None:
     return found[0]["Instances"][0]["InstanceId"] if found else None
 
 
-def _ensure_instance(ec2, ami: str, name: str, itype: str, sg_id: str) -> tuple[str, bool]:
+def _ensure_instance(ec2, ami: str, name: str, itype: str, sg_id: str, environment: str | None = None) -> tuple[str, bool]:
     iid = _find_instance(ec2, name)
     if iid:
         return iid, False
     iid = ec2.run_instances(
         ImageId=ami, InstanceType=itype, MinCount=1, MaxCount=1,
         SecurityGroupIds=[sg_id],
-        TagSpecifications=[{"ResourceType": "instance", "Tags": _seed_tags(name)}],
+        TagSpecifications=[{"ResourceType": "instance", "Tags": _seed_tags(name, environment)}],
     )["Instances"][0]["InstanceId"]
     return iid, True
 
@@ -174,6 +185,20 @@ def _ensure_volume(ec2, region: str) -> tuple[str, bool]:
         TagSpecifications=[{"ResourceType": "volume", "Tags": _seed_tags(VOLUME_NAME)}],
     )
     return vol["VolumeId"], True
+
+
+def _ensure_launch_template(ec2, ami: str) -> tuple[str, bool]:
+    for lt in ec2.describe_launch_templates()["LaunchTemplates"]:
+        if lt.get("LaunchTemplateName") == LAUNCH_TEMPLATE_NAME:
+            return lt["LaunchTemplateId"], False
+    created = ec2.create_launch_template(
+        LaunchTemplateName=LAUNCH_TEMPLATE_NAME,
+        LaunchTemplateData={"ImageId": ami, "InstanceType": "t3.micro"},
+        TagSpecifications=[
+            {"ResourceType": "launch-template", "Tags": _seed_tags(LAUNCH_TEMPLATE_NAME)}
+        ],
+    )["LaunchTemplate"]
+    return created["LaunchTemplateId"], True
 
 
 # ------------------------------------------------------------------ 메트릭 주입
@@ -231,8 +256,8 @@ def seed_all(ec2, cw, region: str) -> None:
         print(f"[seed] SG {sg_name}: {sg_id} ({'생성' if created else '존재 — skip'})")
 
     ami = _default_ami(ec2)
-    for name, itype, sg_name, profile in INSTANCES:
-        iid, created = _ensure_instance(ec2, ami, name, itype, sg_ids[sg_name])
+    for name, itype, sg_name, profile, environment in INSTANCES:
+        iid, created = _ensure_instance(ec2, ami, name, itype, sg_ids[sg_name], environment)
         print(f"[seed] EC2 {name}({itype}): {iid} ({'생성' if created else '존재 — skip'})")
         # 신규 생성 또는 메트릭 부재 시 주입 — 이전 실행이 중간에 죽었어도 재실행으로 복구된다
         if created or not _has_metrics(cw, iid):
@@ -242,9 +267,12 @@ def seed_all(ec2, cw, region: str) -> None:
     vol_id, created = _ensure_volume(ec2, region)
     print(f"[seed] EBS {VOLUME_NAME}: {vol_id} ({'생성' if created else '존재 — skip'})")
 
+    lt_id, created = _ensure_launch_template(ec2, ami)
+    print(f"[seed] LaunchTemplate {LAUNCH_TEMPLATE_NAME}: {lt_id} ({'생성' if created else '존재 — skip'})")
+
 
 def reinject_metrics(ec2, cw) -> None:
-    for name, _itype, _sg_name, profile in INSTANCES:
+    for name, _itype, _sg_name, profile, _environment in INSTANCES:
         iid = _find_instance(ec2, name)
         if not iid:
             sys.exit(f"[seed] {name} 없음(pending·running 기준) — 전체 시드를 먼저 실행할 것")
@@ -258,20 +286,16 @@ def main() -> None:
     parser.add_argument("--metrics-only", action="store_true", help="자산 생성 없이 메트릭만 재주입")
     args = parser.parse_args()
 
-    _require_localstack()
-    cfg = _runtime_config()  # 리전·엔드포인트·자격증명 해석 = collector와 동일 규약
-    if not cfg["regions"]:
+    endpoint = _require_localstack()
+    resolved = regions()
+    if not resolved:
         sys.exit("[seed] 리전 해석 실패 — AWS_REGION / AWS_REGIONS 값을 확인할 것")
-    region, endpoint = cfg["regions"][0], cfg["endpoint_url"]
+    region = resolved[0]
 
-    ec2 = _client("ec2", region, endpoint)
-    # cloudwatch 만 직접 생성: botocore가 10KB 초과 PutMetricData 본문을 gzip 압축하는데
-    # LocalStack 구버전이 압축 본문을 못 읽는 사례가 있어("Missing Action") 방어적으로 끈다.
-    # _client() 는 config 주입을 지원하지 않음 — 공용 헬퍼 이관(get_settings) 시 함께 정리.
-    cw = boto3.client(
-        "cloudwatch", region_name=region, endpoint_url=endpoint,
-        config=Config(disable_request_compression=True),
-    )
+    ec2 = aws_client("ec2", region)
+    # cloudwatch 만 압축을 끈다: botocore가 10KB 초과 PutMetricData 본문을 gzip 압축하는데
+    # LocalStack 구버전이 압축 본문을 못 읽는 사례가 있다("Missing Action").
+    cw = aws_client("cloudwatch", region, disable_request_compression=True)
     print(f"[seed] endpoint={endpoint} region={region}")
 
     if args.metrics_only:

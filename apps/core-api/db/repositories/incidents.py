@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from schemas.api.incidents import (
     IncidentCategory,
     IncidentStatus,
+    ResolutionJudgement,
     ResponseMode,
     RiskLevel,
 )
@@ -92,6 +93,17 @@ def get_incident(db: Session, incident_id: str) -> Optional[models.Incident]:
     ).scalar_one_or_none()
 
 
+def lock_incident(db: Session, incident_id: str) -> Optional[models.Incident]:
+    """행 잠금 후 최신 상태로 다시 읽는다. 접수 시 상태 전이가 현재 상태를 전제로
+    하므로, 잠그지 않으면 동시 접수가 서로의 전이를 덮어쓴다 (Issue #126)."""
+    return db.execute(
+        select(models.Incident)
+        .where(models.Incident.incident_id == incident_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+
+
 def list_incidents(
     db: Session,
     *,
@@ -113,14 +125,51 @@ def update_incident_status(
     *,
     expected: IncidentStatus,
     next_status: IncidentStatus,
+    clear_resolution: bool = False,
 ) -> bool:
+    """clear_resolution은 RESOLVED에서 나오는 전이에 쓴다 — 종료 판단은 그 종료를
+    설명하는 값이라 재개되면 남겨 둘 수 없고, DB 제약(resolution_with_resolved_status)이
+    RESOLVED 밖의 판단을 거절한다. 전이와 한 UPDATE로 묶어 중간 상태를 만들지 않는다."""
+    values: dict = {"status": next_status}
+    if clear_resolution:
+        values |= {"resolution": None, "resolved_at": None}
     result = db.execute(
         update(models.Incident)
         .where(
             models.Incident.incident_id == incident_id,
             models.Incident.status == expected,
         )
-        .values(status=next_status)
+        .values(**values)
+    )
+    return result.rowcount == 1
+
+
+def resolve_incident(
+    db: Session,
+    incident_id: str,
+    *,
+    expected: IncidentStatus,
+    resolution: ResolutionJudgement,
+) -> bool:
+    """expected 상태에서만 RESOLVED로 옮기고 관제자 판단을 함께 남긴다.
+
+    상태와 판단을 한 UPDATE로 쓴다 — 나눠 쓰면 그 사이에 조회가 들어와 판단 없는
+    RESOLVED를 보게 되고, DB 제약(resolution_with_resolved_status)도 거절한다.
+    종료 시각은 여기서 찍는다(touch_incident와 같은 자리) — updated_at은 자식 상태
+    변경으로도 올라가 종료 시점을 가리키지 못한다. 허용 출발 상태 판단은 Workflow
+    몫이다(3층 분리).
+    """
+    result = db.execute(
+        update(models.Incident)
+        .where(
+            models.Incident.incident_id == incident_id,
+            models.Incident.status == expected,
+        )
+        .values(
+            status=IncidentStatus.RESOLVED,
+            resolution=resolution,
+            resolved_at=models._utcnow(),
+        )
     )
     return result.rowcount == 1
 

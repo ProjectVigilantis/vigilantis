@@ -1,0 +1,10 @@
+{
+  "$schema": "../../schema/mock_threat_event_input.schema.json",
+  "event_id": "evt-ssh-bruteforce-001",
+  "event_type": "SSH_BRUTE_FORCE",
+  "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00001",
+  "source_ip": "203.0.113.10",
+  "occurred_at": "2026-08-19T06:30:00Z",
+  "failed_attempt_count": 120,
+  "window_seconds": 300
+}

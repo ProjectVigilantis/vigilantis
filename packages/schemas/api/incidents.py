@@ -4,8 +4,10 @@
 # Dashboard(FE)와의 공개 계약입니다. (확정 설계 4.3 + PROJECT_STATUS API 계약)
 #
 # 계약 원칙
-#   - title은 nullable — 분석 전 null이며, 그 경우 FE가 category+대상 ARN 축약으로
-#     표시한다(2026-08-14 합의, Issue #45 코멘트).
+#   - title은 SECOPS 필수·FINOPS nullable — 카드 제목이 곧 위협 이름이라 SECOPS는
+#     비면 제목이 자원 ID가 된다(Issue #200). 위협 이름은 만드는 시점에 이미 정해져
+#     있어 AI를 기다리지 않는다. FINOPS는 진단명이라 분석 전 null이며, 그 경우 FE가
+#     category+대상 ARN 축약으로 표시한다(Issue #45 코멘트).
 #   - 목록(IncidentListItem)은 상세의 부분집합 10필드다. 정렬 created_at 내림차순·
 #     전체 반환(페이지네이션 Post-MVP)·필터 검증은 라우터 계약이다.
 #   - 초기 판정과 AI 사후 평가 분리: initial_risk_level(불변)과 reviewed_risk_level을
@@ -18,6 +20,12 @@
 #   - executions의 available_recovery_runbook_ids는 롤백 3종만 — 관제자 복구 조치.
 #     (RUNBOOK_NACL_RESTORE는 AI 추천 가능한 주 조치라 recommendations 경로)
 #     이 필드는 PR #44에서 팀 계약으로 확정됐다.
+#   - resolution·resolved_at은 관제자가 종료 처리하며 남긴 판단이다. status가
+#     RESOLVED인 것과 동시에 채워지고, 그 전에는 둘 다 null이다 — 상태만 옮기고
+#     판단을 빠뜨리면 왜 종료됐는지 남지 않는다. 관제자 복구 접수로 재개되면
+#     (ADR-0004) 다시 null이 된다 — "지금 이 인시던트가 종료된 이유"를 말하는
+#     값이라 재개된 뒤에는 거짓이 되기 때문이다. 목록에는 넣지 않는다(부분집합
+#     10필드 유지). (Issue #199)
 # ==============================================================================
 
 from __future__ import annotations
@@ -61,6 +69,33 @@ class ResponseMode(str, Enum):
     PRE_MITIGATION_0_5S = "PRE_MITIGATION_0_5S"
     AGENT_WAIT = "AGENT_WAIT"
     TIMEOUT_ISOLATION_1M = "TIMEOUT_ISOLATION_1M"
+
+
+@unique
+class ResolutionJudgement(str, Enum):
+    """종료 처리 시 관제자가 남기는 판단 (2026-08-27 회의 결정 ④).
+
+    JUSTIFIED 1종이다. 모달의 다른 선택지 `과잉이었다`는 종료 값이 아니라 해제
+    실행으로 넘어가는 트리거라(#196 §D — 해제는 실행이라 결과를 보고 종료를
+    판단한다) 이 API에 도달하지 않으며, 과잉 판단의 기록은 해제 실행 레코드가
+    남긴다. 해제를 마친 뒤의 종료도 JUSTIFIED다 — 그 시점의 대응 상태(해제 완료)를
+    정당하다고 보고 닫는 것이기 때문이다.
+    """
+
+    JUSTIFIED = "JUSTIFIED"    # 수행된 대응이 정당했다
+
+
+class ResolveIncidentRequest(BaseModel):
+    """POST /api/v1/incidents/{incident_id}/resolve 요청 본문.
+
+    Idempotency Key를 받지 않는다 — 종료는 AWS를 바꾸지 않고 Incident 상태 하나만
+    옮기므로 조건부 갱신 자체가 멱등이다. 이미 종료된 건의 재요청은 처음 저장된
+    판단을 그대로 돌려준다(schemas/api/actions.py의 실행 접수와 다른 점).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    resolution: ResolutionJudgement
 
 
 class RecommendationItem(BaseModel):
@@ -113,6 +148,8 @@ class IncidentResponse(BaseModel):
     evidence_ids: list[str] = Field(default_factory=list)
     recommendations: list[RecommendationItem] = Field(default_factory=list)
     executions: list[ExecutionSummaryItem] = Field(default_factory=list)
+    resolution: Optional[ResolutionJudgement] = None
+    resolved_at: Optional[UtcDateTime] = None
     created_at: UtcDateTime
     updated_at: UtcDateTime
 
@@ -127,6 +164,10 @@ class IncidentResponse(BaseModel):
             raise ValueError(
                 "FINOPS는 initial_risk_level·reviewed_risk_level·response_mode가 null이어야 합니다"
             )
+
+        # SECOPS 카드 제목은 위협 이름이다 — null이면 FE fallback이 자원 ID를 제목으로 쓴다
+        if self.category == IncidentCategory.SECOPS and self.title is None:
+            raise ValueError("SECOPS는 title이 필수입니다(위협 이름)")
 
         # 분석 완료 = 정확히 3줄, 그 외 = 빈 배열
         if len(self.summary_lines) not in (0, 3):
@@ -159,6 +200,13 @@ class IncidentResponse(BaseModel):
         if self.status == IncidentStatus.RESOLVED and in_progress:
             raise ValueError("RESOLVED이면 진행 중인 실행이 없어야 합니다")
 
+        # 종료 판단은 RESOLVED와 함께 채워진다. 한쪽만 있으면 화면이 판단 없는
+        # 종료나 종료되지 않은 판단을 그리게 된다 (Issue #199)
+        if (self.resolution is None) != (self.resolved_at is None):
+            raise ValueError("resolution과 resolved_at은 함께 채워지거나 함께 null이어야 합니다")
+        if self.status != IncidentStatus.RESOLVED and self.resolution is not None:
+            raise ValueError("RESOLVED가 아니면 resolution·resolved_at은 null이어야 합니다")
+
         return self
 
 
@@ -189,6 +237,10 @@ class IncidentListItem(BaseModel):
             raise ValueError(
                 "FINOPS는 initial_risk_level·reviewed_risk_level·response_mode가 null이어야 합니다"
             )
+
+        # 상세와 같은 불변식: SECOPS 카드 제목은 위협 이름이다
+        if self.category == IncidentCategory.SECOPS and self.title is None:
+            raise ValueError("SECOPS는 title이 필수입니다(위협 이름)")
         return self
 
 

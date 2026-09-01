@@ -105,6 +105,7 @@ class Ec2Spec(BaseModel):
     vpc_id: Optional[str] = None
     subnet_id: Optional[str] = None
     private_ip: Optional[str] = None
+    tags: dict[str, str] = Field(default_factory=dict)
 
 
 class SgSpec(BaseModel):

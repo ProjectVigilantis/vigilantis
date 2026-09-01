@@ -1,0 +1,67 @@
+{
+  "source": "finops/input/asset_inventory_003.json",
+  "contract": "packages/schemas/rules.py :: RuleEvaluationResult (부분집합)",
+  "excluded_fields": {
+    "collection_run_id": "실행 시점에 생성되는 런타임 값 — 정답 대조 대상 아님",
+    "evaluated_at": "실행 시점에 생성되는 런타임 값 — 정답 대조 대상 아님",
+    "health_score": "정수 변환은 run_rule_engine 소관 — 골든셋은 evaluate_* 직접 호출이라 검증 범위 밖",
+    "reason": "사람이 읽는 자유 서술 — 문자열 대조 대상 아님"
+  },
+  "thresholds_at_authoring": {
+    "IDLE_CPU_AVG": 5.0,
+    "SPIKE_CPU_MAX": 40.0,
+    "MIN_DATAPOINTS": 48,
+    "note": "작성 시점의 apps/core-api/services/rule_engine.py 상수. 값이 바뀌면 tests/test_golden_dataset.py가 실패하므로 본 정답을 함께 갱신할 것 (ADR-0006 임계값 결합 원칙)"
+  },
+  "design_note": "6건 전부 cpu_datapoints 336 · cpu_avg 1.5 · cpu_max 10.0 으로 동일하다. 관측치 부족(<48)도 아니고 스파이크(>=40.0)도 아니며 저활성(<5.0)은 확실하므로, prod 판정만이 결과를 가르는 유일한 변수다. 따라서 verdict 가 틀리면 원인은 반드시 _is_prod 이며 다른 분기를 의심할 필요가 없다. 인식 기준은 #95/PR #97 확정 — 키(PROD_TAG_KEYS, 대소문자 무시 정확일치) = environment·env·stage·tier, 값(PROD_TAG_VALUES, strip 후 소문자 정확일치) = prod·production·prd. 부분 문자열 매칭은 영구 금지(#81).",
+  "evaluations": [
+    {
+      "case_id": "A11",
+      "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00021",
+      "purpose": "Environment=prod-us-east — 접미 변형은 prod 로 보지 않는다. docs/PROJECT_STATUS.md §확정 결정 로그(2026-08-24)가 '접미 변형 미탐은 의도된 결과이며 Golden 경계 케이스로 고정'이라고 명시한 바로 그 케이스다. 값 비교를 startswith 나 in 으로 되돌리면 SKIP_PROD_PROTECTED 가 되어 실패한다. 이 케이스가 실패하면 그것은 버그 리포트가 아니라 확정 정책 위반이다",
+      "evaluation_status": "COMPLETED",
+      "verdict": "COST_CANDIDATE",
+      "skip_reason_code": null
+    },
+    {
+      "case_id": "A12",
+      "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00022",
+      "purpose": "Environment=non-prod — prod 가 값의 접미로 들어 있다. 부분일치 시절에는 'prod' in 'non-prod' 가 참이라 운영 자산으로 오탐돼 다운사이징 후보에서 빠졌다(1·2차 골든셋 작성 시점에는 버그 가능성 때문에 정답으로 굳히지 못하고 3차로 미뤄뒀던 항목). #95 확정으로 판정이 정해졌으므로 정답지에 편입한다. 값 비교를 in 으로 되돌리면 실패한다",
+      "evaluation_status": "COMPLETED",
+      "verdict": "COST_CANDIDATE",
+      "skip_reason_code": null
+    },
+    {
+      "case_id": "A13",
+      "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00023",
+      "purpose": "TIER='  PRD  ' — 정탐 방향의 경계다. 키는 대문자 TIER 이고 값은 대문자에 앞뒤 공백까지 있다. 구현이 key.lower() · value.strip().lower() 를 모두 적용해야만 prod 로 잡힌다. 셋 중 하나라도 빠지면 COST_CANDIDATE 가 되어 실패한다. 미탐 케이스(A11·A12·A14·A16)만 있으면 '아무것도 prod 로 안 잡는' 구현이 전부 통과하므로, 이 케이스가 그 구멍을 막는다",
+      "evaluation_status": "COMPLETED",
+      "verdict": "SKIP",
+      "skip_reason_code": "SKIP_PROD_PROTECTED"
+    },
+    {
+      "case_id": "A14",
+      "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00024",
+      "purpose": "environment_name=production — 값은 확정 목록에 있는 production 이지만 키가 인식 대상이 아니다. 키 비교는 값과 달리 '대소문자 무시 정확일치'이므로 environment_name 은 걸리지 않는다. 키 비교를 부분일치(any(k in key.lower()))로 바꾸는 회귀를 잡는다. A11·A12·A16 이 값 쪽 부분일치를 막는 것과 대칭되는 키 쪽 방어다",
+      "evaluation_status": "COMPLETED",
+      "verdict": "COST_CANDIDATE",
+      "skip_reason_code": null
+    },
+    {
+      "case_id": "A15",
+      "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00025",
+      "purpose": "Environment=staging(비prod) + Stage=prd(prod) — 인식 키 두 개가 서로 다른 답을 낸다. _is_prod 는 '하나라도 맞으면 True' 이므로 prod 다. 첫 인식 키를 만난 순간 return False 하도록 잘못 구현하면 Environment=staging 에서 멈춰 COST_CANDIDATE 가 되어 실패한다. 태그 순회 전체를 끝까지 도는지 검증한다",
+      "evaluation_status": "COMPLETED",
+      "verdict": "SKIP",
+      "skip_reason_code": "SKIP_PROD_PROTECTED"
+    },
+    {
+      "case_id": "A16",
+      "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00026",
+      "purpose": "Environment=product-service — 이슈 #81 이 제기한 원 오탐 사례를 정답지로 고정한다. A11 과 같은 접두 방향이지만 A11 은 확정 결정 로그가 지목한 문구('접미 변형')를 지키는 케이스이고, 이쪽은 최초 제기된 실제 사례를 회귀 기준으로 남기는 것이다. 둘 다 남겨 다음 사람이 이슈 번호에서 케이스를 역추적할 수 있게 한다",
+      "evaluation_status": "COMPLETED",
+      "verdict": "COST_CANDIDATE",
+      "skip_reason_code": null
+    }
+  ]
+}

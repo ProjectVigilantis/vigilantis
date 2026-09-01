@@ -20,7 +20,12 @@ from typing import Optional
 IDLE_CPU_AVG = 5.0        # 평균 CPU 이 값 미만이면 저활성 후보
 SPIKE_CPU_MAX = 40.0      # 평균은 낮아도 최대가 이 값 이상이면 스파이크 → 다운사이징 부적합
 MIN_DATAPOINTS = 48       # 최소 관측치(약 2일). 미만이면 데이터부족
-PROD_HINTS = ("prod", "production")
+
+# 운영(prod) 자산 인식 기준 (미해결 #4, 규칙 소유자 확정 2026-08-24)
+#   - 키: 대소문자 무시 비교(소문자로 저장)
+#   - 값: 소문자 정확일치 — 부분 문자열 매칭 금지(product-service류 오탐 방지, #81)
+PROD_TAG_KEYS = ("environment", "env", "stage", "tier")
+PROD_TAG_VALUES = ("prod", "production", "prd")
 
 
 class Verdict(str, Enum):
@@ -38,29 +43,43 @@ class SkipReason(str, Enum):
     SKIP_ACTIVE = "SKIP_ACTIVE"                        # 정상 가동(낭비 아님)
 
 
-def _is_prod(name: Optional[str], tags: dict) -> bool:
-    hay = (name or "").lower()
-    if any(h in hay for h in PROD_HINTS):
-        return True
-    env = str(tags.get("Environment", tags.get("env", ""))).lower()
-    return any(h in env for h in PROD_HINTS)
+def _is_prod(tags: dict) -> bool:
+    """운영 자산 여부. 인식 태그 키(PROD_TAG_KEYS)의 값이 PROD_TAG_VALUES 에
+    정확히 들어맞으면 True. 키·값 모두 대소문자 무시, 값은 부분일치 아님."""
+    for key, value in (tags or {}).items():
+        if key.lower() in PROD_TAG_KEYS and str(value).strip().lower() in PROD_TAG_VALUES:
+            return True
+    return False
 
 
 def evaluate_ec2(cpu_avg: Optional[float], cpu_max: Optional[float], cpu_datapoints: Optional[int],
-                 name: Optional[str], tags: dict | None = None) -> tuple[Verdict, Optional[SkipReason], Optional[float]]:
+                 tags: dict | None = None) -> tuple[Verdict, Optional[SkipReason], Optional[float]]:
     """EC2 1대 판정 → (verdict, skip_reason, health_score). 판정 우선순위대로 검사."""
     tags = tags or {}
     health = round(cpu_avg, 2) if cpu_avg is not None else None
 
     if cpu_datapoints is None or cpu_datapoints < MIN_DATAPOINTS:
         return Verdict.SKIP, SkipReason.SKIP_INSUFFICIENT_DATA, health
-    if _is_prod(name, tags):
+    if _is_prod(tags):
         return Verdict.SKIP, SkipReason.SKIP_PROD_PROTECTED, health
     if cpu_avg is not None and cpu_avg < IDLE_CPU_AVG:
         if cpu_max is not None and cpu_max >= SPIKE_CPU_MAX:
             return Verdict.SKIP, SkipReason.SKIP_LOW_UTIL, health   # 스파이크: 최대 CPU 높음
         return Verdict.COST_CANDIDATE, None, health                 # 저활성 → 다운사이징 후보
     return Verdict.SKIP, SkipReason.SKIP_ACTIVE, health             # 정상 가동
+
+
+def evaluate_ebs(state: Optional[str],
+                 attached_instance_ids: Optional[list[str]]) -> tuple[Verdict, Optional[SkipReason]]:
+    """EBS 볼륨 1개 판정 → (verdict, skip_reason).
+
+    정리 후보(UNUSED)는 **state == "available"(미부착·정상 유휴)** 이면서 부착 인스턴스가 없는
+    경우로 한정한다. in-use 는 SKIP_ACTIVE, creating/deleting/error 등 전이·비정상 상태는
+    삭제 후보가 아니므로 UNUSED 로 보지 않는다(오삭제 방지). SG 미부착 판정과 같은 결.
+    """
+    if not attached_instance_ids and (state or "").lower() == "available":
+        return Verdict.UNUSED, None
+    return Verdict.SKIP, SkipReason.SKIP_ACTIVE
 
 
 def evaluate_sg(name: Optional[str], attached: Optional[bool],
@@ -75,27 +94,107 @@ def evaluate_sg(name: Optional[str], attached: Optional[bool],
     return Verdict.SKIP, SkipReason.SKIP_ACTIVE
 
 
-def run_rule_engine(db) -> dict:
-    """assets 테이블 전체를 읽어 판정 결과(verdict/skip_reason/health_score)를 기록한다.
-    반환: verdict 별 집계 + 각 자산 판정 목록."""
+def run_rule_engine(db, collection_run_id: str | None = None) -> dict:
+    """assets 및 metric_summaries 테이블을 읽어 RuleEvaluation 결과(RuleEvaluationResult 계약)를 기록한다.
+    반환: verdict 별 집계 + 각 자산 판정 목록.
+    """
+    from datetime import datetime, timezone
+
     from sqlalchemy import select
 
-    from db.models import Asset
+    from db import models
+    from db.repositories import assets as assets_repo
+    from schemas.api.assets import (
+        AssetType,
+        EvaluationStatus,
+        SkipReasonCode,
+    )
+    from schemas.api.assets import (
+        Verdict as ApiVerdict,
+    )
+    from schemas.rules import RuleEvaluationResult
 
-    assets = db.execute(select(Asset)).scalars().all()
+    assets = assets_repo.list_assets(db)
     results = []
     counts: dict[str, int] = {}
+    now = datetime.now(timezone.utc)
+
     for a in assets:
-        if a.asset_type == "EC2":
-            tags = (a.attributes or {}).get("tags", {})
-            verdict, skip, health = evaluate_ec2(a.cpu_avg, a.cpu_max, a.cpu_datapoints, a.name, tags)
-            a.health_score = health
-        else:  # SG
-            verdict, skip = evaluate_sg(a.name, a.attached, a.open_to_world)
-        a.verdict = verdict.value
-        a.skip_reason = skip.value if skip else None
-        counts[verdict.value] = counts.get(verdict.value, 0) + 1
-        results.append({"name": a.name, "type": a.asset_type,
-                        "verdict": a.verdict, "skip_reason": a.skip_reason})
-    db.commit()
+        run_id = collection_run_id or a.last_collection_run_id
+        if not run_id:
+            continue
+
+        if a.asset_type == AssetType.EC2:
+            metric_row = db.execute(
+                select(models.MetricSummary).where(
+                    models.MetricSummary.asset_id == a.asset_id,
+                    models.MetricSummary.collection_run_id == run_id,
+                )
+            ).scalar_one_or_none()
+
+            cpu_avg = metric_row.cpu_avg if metric_row else None
+            cpu_max = metric_row.cpu_max if metric_row else None
+            cpu_dp = metric_row.cpu_datapoints if metric_row else None
+
+            tags = (a.spec or {}).get("tags", {})
+            verdict, skip, health = evaluate_ec2(cpu_avg, cpu_max, cpu_dp, tags)
+            health_int = int(round(health)) if health is not None else None
+        elif a.asset_type == AssetType.SG:
+            attached = (a.spec or {}).get("attached")
+            open_to_world = bool((a.spec or {}).get("open_to_world"))
+            verdict, skip = evaluate_sg(a.name, attached, open_to_world)
+            health_int = None
+        elif a.asset_type == AssetType.EBS:
+            # EBS 는 판정 대상(_RULE_TARGET_TYPES). 분기를 두지 않으면 판정행이 없어
+            # 조회단이 영구 PENDING 을 부여한다. state 는 Asset 행 컬럼(available/in-use 등).
+            attached_ids = (a.spec or {}).get("attached_instance_ids") or []
+            verdict, skip = evaluate_ebs(a.state, attached_ids)
+            health_int = None
+        else:
+            continue
+
+        api_verdict = ApiVerdict(verdict.value)
+        api_skip = SkipReasonCode(skip.value) if skip else None
+
+        contract = RuleEvaluationResult(
+            asset_arn=a.arn,
+            collection_run_id=run_id,
+            evaluation_status=EvaluationStatus.COMPLETED,
+            verdict=api_verdict,
+            health_score=health_int,
+            skip_reason_code=api_skip,
+            reason=f"{a.asset_type.value} rule evaluation: verdict={api_verdict.value}",
+            evaluated_at=now,
+        )
+
+        existing_eval = db.execute(
+            select(models.RuleEvaluation).where(
+                models.RuleEvaluation.asset_id == a.asset_id,
+                models.RuleEvaluation.collection_run_id == run_id,
+            )
+        ).scalar_one_or_none()
+
+        if existing_eval is None:
+            assets_repo.add_rule_evaluation(db, contract)
+        else:
+            existing_eval.evaluation_status = contract.evaluation_status.value
+            existing_eval.verdict = contract.verdict.value if contract.verdict else None
+            existing_eval.health_score = contract.health_score
+            existing_eval.skip_reason_code = (
+                contract.skip_reason_code.value if contract.skip_reason_code else None
+            )
+            existing_eval.reason = contract.reason
+            existing_eval.evaluated_at = contract.evaluated_at
+
+        counts[api_verdict.value] = counts.get(api_verdict.value, 0) + 1
+        results.append(
+            {
+                "name": a.name,
+                "type": a.asset_type.value if hasattr(a.asset_type, "value") else str(a.asset_type),
+                "verdict": api_verdict.value,
+                "skip_reason": api_skip.value if api_skip else None,
+            }
+        )
+
     return {"counts": counts, "results": results}
+

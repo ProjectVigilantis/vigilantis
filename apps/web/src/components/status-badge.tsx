@@ -1,4 +1,4 @@
-// enum 표시 배지 — enum-labels 사전만 참조합니다(화면설계서 v1.4 §8: 매핑을 화면마다 복제하지 않는다).
+// enum 표시 배지 — enum-labels 사전만 참조합니다(화면설계서 v1.5 §8: 매핑을 화면마다 복제하지 않는다).
 
 import { Loader2 } from 'lucide-react';
 
@@ -33,16 +33,42 @@ import type {
   Verdict,
 } from '@/types/api';
 
-/** 사전의 tone(의미) → 실제 색. 색 정의는 여기 한 곳뿐이다. */
+/**
+ * 사전의 tone(의미) → 실제 색. 색 정의는 여기 한 곳뿐이다.
+ *
+ * red만 `--danger` 토큰을 쓴다 — 설계서 §0.3이 "빨강 토큰은 하나"로 못박았고, 토폴로지
+ * THREAT 노드·공격 경로 엣지가 같은 값을 참조해야 하기 때문이다. 나머지 tone은 그런
+ * 제약이 없어 팔레트 클래스를 그대로 둔다(토큰을 늘리면 정의처만 흩어진다).
+ */
 const TONE_CLASS: Record<LabelTone, string> = {
   neutral: 'bg-muted text-foreground',
   gray: 'bg-muted text-muted-foreground',
   yellow: 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300',
   orange: 'bg-orange-100 text-orange-800 dark:bg-orange-950 dark:text-orange-300',
-  red: 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300',
+  red: 'bg-danger/15 text-danger',
   blue: 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300',
   green: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300',
+  purple: 'bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300',
 };
+
+/**
+ * INC-001 카드 좌측 세로 띠(6px)의 배경색 — `initial_risk_level` 전용이다(§4.4).
+ * 색을 카드 쪽에 복제하지 않으려고 TONE_CLASS와 같은 팔레트에서 여기 함께 둔다.
+ *
+ * FINOPS(위험도 null)는 띠를 그리지 않지만 **자리는 남긴다**(`RISK_BAND_EMPTY`) —
+ * 폭이 달라지면 그리드에서 SECOPS 카드와 어긋난다.
+ */
+export const RISK_BAND_CLASS: Record<RiskLevel, string> = {
+  HIGH: 'bg-danger',
+  MEDIUM: 'bg-orange-500',
+  LOW: 'bg-amber-400',
+};
+
+/**
+ * FINOPS 자리표시 — **보이지 않아야 한다.** 회색 띠를 그리면 "위험도가 낮은 것"으로 읽히는데,
+ * 계약은 FinOps의 위험도를 판정 안 함(null)으로 강제한다. 폭만 차지한다(PR #171 리뷰).
+ */
+export const RISK_BAND_EMPTY = 'bg-transparent';
 
 /**
  * 사전 항목 하나를 그리는 최소 단위. `null`이면 아무것도 그리지 않는다(3.2의 "—").

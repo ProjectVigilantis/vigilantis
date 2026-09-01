@@ -1,0 +1,58 @@
+{
+  "source": "finops/input/asset_inventory_001.json",
+  "contract": "packages/schemas/rules.py :: RuleEvaluationResult (부분집합)",
+  "excluded_fields": {
+    "collection_run_id": "실행 시점에 생성되는 런타임 값 — 정답 대조 대상 아님",
+    "evaluated_at": "실행 시점에 생성되는 런타임 값 — 정답 대조 대상 아님",
+    "health_score": "정수 변환은 run_rule_engine(rule_engine.py:122) 소관 — 골든셋은 evaluate_* 직접 호출이라 검증 범위 밖. 변환 자체는 test_persistence_pipeline과 스키마 계약(0~100 정수)이 커버",
+    "reason": "사람이 읽는 자유 서술 — 문자열 대조 대상 아님"
+  },
+  "thresholds_at_authoring": {
+    "IDLE_CPU_AVG": 5.0,
+    "SPIKE_CPU_MAX": 40.0,
+    "MIN_DATAPOINTS": 48,
+    "note": "작성 시점의 apps/core-api/services/rule_engine.py 상수. 값이 바뀌면 tests/test_golden_dataset.py가 실패하므로 본 정답을 함께 갱신할 것 (ADR-0006 임계값 결합 원칙)"
+  },
+  "evaluations": [
+    {
+      "case_id": "A1",
+      "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00001",
+      "purpose": "IDLE_CPU_AVG 바로 아래(4.9) — 다운사이징 후보 선정 성공 경로",
+      "evaluation_status": "COMPLETED",
+      "verdict": "COST_CANDIDATE",
+      "skip_reason_code": null
+    },
+    {
+      "case_id": "A2",
+      "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00002",
+      "purpose": "IDLE_CPU_AVG 정확히 일치(5.0) — 조건이 '미만(<)'이므로 후보가 아님. '<='로 잘못 구현하면 실패",
+      "evaluation_status": "COMPLETED",
+      "verdict": "SKIP",
+      "skip_reason_code": "SKIP_ACTIVE"
+    },
+    {
+      "case_id": "A3",
+      "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00003",
+      "purpose": "SPIKE_CPU_MAX 정확히 일치(40.0) — 조건이 '이상(>=)'이므로 스파이크로 제외. '>'로 잘못 구현하면 실패",
+      "evaluation_status": "COMPLETED",
+      "verdict": "SKIP",
+      "skip_reason_code": "SKIP_LOW_UTIL"
+    },
+    {
+      "case_id": "A4",
+      "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00004",
+      "purpose": "MIN_DATAPOINTS 바로 아래(47) — cpu_avg 1.0으로 명백히 저활성이지만 데이터 부족 판정이 최우선. 우선순위가 뒤바뀌면 COST_CANDIDATE가 되어 실패",
+      "evaluation_status": "COMPLETED",
+      "verdict": "SKIP",
+      "skip_reason_code": "SKIP_INSUFFICIENT_DATA"
+    },
+    {
+      "case_id": "A5",
+      "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00005",
+      "purpose": "전체개방(0.0.0.0/0, tcp 22) SG — 위협 판정. secops/input/evt_open_ip_001.json이 같은 ARN을 가리켜 자산-위협 연계를 검증",
+      "evaluation_status": "COMPLETED",
+      "verdict": "THREAT",
+      "skip_reason_code": null
+    }
+  ]
+}

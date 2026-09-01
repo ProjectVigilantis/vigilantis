@@ -1,16 +1,16 @@
-// INC-001 인시던트 목록 — 라우트 스텁입니다(실제 화면은 다음 단계, 화면설계서 v1.4 §4.4).
+// INC-001 보안 인시던트 목록 — 화면설계서 v1.6 §4.4 (`category = SECOPS`).
+// 경로를 `/incidents`로 유지하는 이유는 gnb.tsx 주석 참조(상세·ACT-002 딥링크가 이 아래에 있다).
 
-import { EmptyState } from '@/components/empty-state';
+import { IncidentListPage } from '@/components/incidents/incident-list-page';
 
-export default function IncidentsPage() {
+export default async function SecurityIncidentsPage({ searchParams }: PageProps<'/incidents'>) {
+  const { preset } = await searchParams;
   return (
-    <>
-      <h1 className="mb-4 text-lg font-semibold">인시던트 목록</h1>
-      {/* 임시 스캐폴딩 문구 — 4.9의 빈 상태 문구가 아니다. 실제 화면 구현 시 교체한다. */}
-      <EmptyState
-        message="화면 준비 중입니다."
-        description="INC-001 인시던트 목록은 다음 단계에서 구현합니다."
-      />
-    </>
+    <IncidentListPage
+      category="SECOPS"
+      heading="보안 인시던트"
+      basePath="/incidents"
+      presetParam={preset}
+    />
   );
 }

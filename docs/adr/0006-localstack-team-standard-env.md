@@ -2,6 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-08-19
+- **Amended**: 2026-08-24 — §4 검증 한계 목록 갱신(하단 "개정 이력" 참조, 핵심 결정 불변)
 - **Deciders**: 김세혁(PM/Infra) 수립 — 2026-08-13 확정 결정(개발 = LocalStack, 발표 직전 실 AWS 전환)의 구체화
 
 ## Context (배경)
@@ -12,11 +13,11 @@
 - 시드 스크립트 없음 — `test_collector_raw.py` docstring이 `scripts/seed_localstack`을 전제하지만 `scripts/` 디렉터리 자체가 없음
 - 통합 테스트는 LocalStack 미기동 시 전체 skip → CI에서 항상 skip, 로컬에서도 개인 환경(김세혁·김승철 PC)에서만 통과
 
-이 때문에 수집 통합 테스트를 타 팀원이 재현 불가하고(미해결 #1), PR #29 후속 보완(미해결 #2 — collector 실경로 검증 재작성)이 차단돼 있다. 3~5주차 집중 개발에서 팀원 전원이 같은 가짜 AWS를 보게 하려면 1~2주차(~8/23) 안에 표준 환경이 저장소에 들어가야 한다.
+이 때문에 수집 통합 테스트를 타 팀원이 재현 불가하고(미해결 #1), PR #29 후속 보완(미해결 #2 — collector 실경로 검증 재작성)이 차단돼 있다. 3–5주차 집중 개발에서 팀원 전원이 같은 가짜 AWS를 보게 하려면 1–2주차(8/23까지) 안에 표준 환경이 저장소에 들어가야 한다.
 
 ## Decision (결정)
 
-**LocalStack Community를 docker-compose에 포함해 `docker compose up` 한 줄로 팀 전원이 동일한 시드 상태의 가짜 AWS를 얻게 하고, LocalStack이 검증하지 못하는 경로는 명시적 목록으로 관리해 6~7주차 실 AWS 스모크 테스트로 이월한다.**
+**LocalStack Community를 docker-compose에 포함해 `docker compose up` 한 줄로 팀 전원이 동일한 시드 상태의 가짜 AWS를 얻게 하고, LocalStack이 검증하지 못하는 경로는 명시적 목록으로 관리해 6–7주차 실 AWS 스모크 테스트로 이월한다.**
 
 ### 1. 단일 compose — `localstack` 서비스 추가
 
@@ -33,13 +34,15 @@
 
 | 시드 리소스 | 목적 (검증 대상) |
 | --- | --- |
-| Idle EC2 (CPU 평균 < 5.0 메트릭 주입) | `RUNBOOK_EC2_RIGHTSIZING` 후보 판별 |
+| Idle EC2 · non-prod (CPU 평균 < 5.0 메트릭 주입, 대형 타입) | `RUNBOOK_EC2_RIGHTSIZING` 후보 판별 |
+| Idle EC2 · `Environment=production` (CPU 평균 < 5.0, 대형 타입) | `SKIP_PROD_PROTECTED` — 저활성 대형이라도 운영 자산은 미조치 |
 | 정상 EC2 (CPU 평균 ≥ 5.0) | 오탐 방지 — 후보 미선정 확인 |
 | 스파이크 EC2 (평균 < 5.0, 최대 ≥ 40.0) | `SKIP_LOW_UTIL` Skip 경로 |
 | OpenIP SG (0.0.0.0/0, 22/tcp) | 위협 탐지(OpenIP)·토폴로지 붉은 노드 |
 | 사용 중 SG / 미사용 SG 각 1개 | 미사용 SG 판별 |
 | 미연결(available) EBS 볼륨 | `RUNBOOK_EBS_DELETE_UNATTACHED` (P1) |
 
+- **Idle EC2는 prod / non-prod 두 대가 모두 필요하다.** `_is_prod` 검사가 idle 검사보다 앞서므로 idle 인스턴스가 prod 하나뿐이면 시드 전체의 `COST_CANDIDATE`가 0대가 되고 FinOps 경로가 시연 불가가 된다. 판정 분포는 `apps/core-api/services/tests/test_seed_dataset_verdicts.py`가 고정한다(AWS 불필요).
 - 임계값(5.0 / 40.0)은 `rule_engine.py`의 `IDLE_CPU_AVG`·`SPIKE_CPU_MAX`와 결합돼 있다 — **임계값을 바꾸는 PR은 시드 스크립트 갱신을 포함해야 한다** (시드 스크립트가 상수를 rule_engine에서 import해 결합을 코드로 강제하는 것을 우선안으로 한다).
 - CloudWatch 메트릭은 `put_metric_data`로 `AWS/EC2` 네임스페이스에 직접 주입한다. **이는 LocalStack에서만 가능한 경로다**(실 AWS는 `AWS/` 네임스페이스 커스텀 주입 불가) — 스크립트 주석에 명시하고, 실 AWS 대상 실행을 스크립트 스스로 거부하게 한다(`AWS_ENDPOINT_URL` 미설정 시 즉시 종료).
 
@@ -58,9 +61,10 @@ LocalStack 통과를 "검증 완료"로 간주하지 않는 경로를 고정 목
 | 1 | 가드레일 4단계 `DryRun=True` | LocalStack은 실제 IAM 권한을 검증하지 않음 |
 | 2 | `get_waiter` Status Check(2/2) 감시·자동 원복 | 실제 부팅·헬스체크가 없어 대기·실패 시나리오가 재현되지 않음 |
 | 3 | CloudWatch 메트릭 수집 | 실 AWS는 EC2가 자동 발행, LocalStack은 시드 주입 — 지연·해상도 특성이 다름 |
-| 4 | ALB Target Group·ASG(Launch Template) 경로 (P2 런북) | Community 에뮬레이션 커버리지 제한 가능 — 구현 시점에 확인, 미동작 시 이 목록에 확정 편입 |
+| 4 | ALB Target Group·ASG 경로 (P2 런북 3종) | **확정 편입(2026-08-24 실측)** — `elbv2`·`autoscaling`은 Community 미포함(Pro 전용, `InternalFailure: not included within your LocalStack license`). `ISOLATE`·`UNISOLATE`·`ENABLE_AUTOSCALING`은 실행뿐 아니라 Dry-Run 대체용 describe 조회도 로컬 불가 |
+| 5 | `ec2.create_network_acl_entry` · `ec2.delete_network_acl_entry`의 `DryRun=True` | **LocalStack이 플래그를 무시하고 실제로 규칙을 생성·삭제한다**(예외 미발생). 실 AWS는 정상 지원하므로 `DryRun` 경로는 실 AWS에서 처음 검증된다 — 그때까지 두 런북은 조회 대체 검증으로 동작한다([ADR-0007](0007-guardrail-dryrun-executor-precheck-contract.md) §4) |
 
-이 목록은 **6~7주차 실 AWS 스모크 테스트**에서 해소한다: P0 런북 4종(`RIGHTSIZING`+`REVERT_SIZE`, `NACL_ADD_DENY`+`NACL_RESTORE`) 실동작 + Dry-Run·Status Check 경로 각 1회 검증. 비용 통제 — 단일 계정, 최소 스펙(t3.micro급), 검증 직후 리소스 정리. P2 시연 인프라(ALB·다중 EC2)는 마일스톤대로 조기 준비하되 실 AWS에 구성한다.
+이 목록은 **6–7주차 실 AWS 스모크 테스트**에서 해소한다: P0 런북 4종(`RIGHTSIZING`+`REVERT_SIZE`, `NACL_ADD_DENY`+`NACL_RESTORE`) 실동작 + Dry-Run·Status Check 경로 각 1회 검증. 비용 통제 — 단일 계정, 최소 스펙(t3.micro급), 검증 직후 리소스 정리. P2 시연 인프라(ALB·다중 EC2)는 마일스톤대로 조기 준비하되 실 AWS에 구성한다.
 
 **실 AWS 전환 절차(스모크·발표 직전 공통)** — `.env` 편집 두 가지를 반드시 **함께** 한다: ① 더미 자격증명(`test`)을 실제 키로 교체, ② `AWS_ENDPOINT_URL` 줄 삭제. 하나라도 빠지면 — ② 누락 시 모든 호출이 **조용히 LocalStack으로 가서 스모크가 가짜 AWS를 검증**하고(무증상 — 가장 위험), ① 누락 시 실 AWS가 `AuthFailure`로 시끄럽게 실패한다(인지 용이). 전환 여부는 편집 직후 `aws sts get-caller-identity`(또는 boto3 동일 호출)로 확인한다 — **계정 ID가 `000000000000`이면 아직 LocalStack이다.**
 
@@ -68,11 +72,11 @@ LocalStack 통과를 "검증 완료"로 간주하지 않는 경로를 고정 목
 
 | 시점 | 작업 | 산출물 |
 | --- | --- | --- |
-| 1~2주차 말(이번 주) | 본 ADR + compose `localstack` + 시드 스크립트 + `.env.example` 스위치 기본 활성화 | 팀 표준 환경 PR (김세혁) |
+| 1–2주차 말(이번 주) | 본 ADR + compose `localstack` + 시드 스크립트 + `.env.example` 스위치 기본 활성화 | 팀 표준 환경 PR (김세혁) |
 | 3주차 | CI에 LocalStack service container + 시드 단계 추가(별도 CHORE), PR #29 후속 재작성 착수 가능(김승철 — 미해결 #2 차단 해제) | CI 통합 테스트 가동 |
-| 3~5주차 | 전원 LocalStack 기반 개발·pytest. 실행 엔진·가드레일도 동일 규약(§3)으로 작성 | — |
-| 6~7주차 | 실 AWS 스모크 테스트(§4 목록 해소) — 마일스톤 "백엔드-프론트엔드 연동 & 회복 엔진 통합" 기간 내 | 스모크 결과 기록 |
-| 8~9주차(발표 직전) | `AWS_ENDPOINT_URL` 제거 전환 리허설 + 시연 인프라 최종 점검 | 시연 환경 |
+| 3–5주차 | 전원 LocalStack 기반 개발·pytest. 실행 엔진·가드레일도 동일 규약(§3)으로 작성 | — |
+| 6–7주차 | 실 AWS 스모크 테스트(§4 목록 해소) — 마일스톤 "백엔드-프론트엔드 연동 & 회복 엔진 통합" 기간 내 | 스모크 결과 기록 |
+| 8–9주차(발표 직전) | `AWS_ENDPOINT_URL` 제거 전환 리허설 + 시연 인프라 최종 점검 | 시연 환경 |
 
 통합 테스트의 현행 skip 규약(LocalStack 미기동 시 전체 skip)은 유지한다 — CI service container 도입 전까지 CI 안전성을 보장하는 장치다.
 
@@ -87,8 +91,8 @@ LocalStack 통과를 "검증 완료"로 간주하지 않는 경로를 고정 목
 
 **비용/유의**
 
-- LocalStack ≠ 실 AWS 격차(§4)는 구조적으로 남는다 — **6~7주차 스모크가 유일한 방어선**이므로 해당 주차 일정에서 빠지면 시연 직전 리스크로 직결
-- Community 커버리지가 P2 런북 리소스(ALB TG·ASG)에서 부족할 수 있음 — 구현 착수 시점(3~5주차)에 확인해 §4 목록을 갱신해야 함
+- LocalStack ≠ 실 AWS 격차(§4)는 구조적으로 남는다 — **6–7주차 스모크가 유일한 방어선**이므로 해당 주차 일정에서 빠지면 시연 직전 리스크로 직결
+- ~~Community 커버리지가 P2 런북 리소스(ALB TG·ASG)에서 부족할 수 있음 — 구현 착수 시점(3–5주차)에 확인해 §4 목록을 갱신해야 함~~ → **확인 완료(2026-08-24)**: `elbv2`·`autoscaling`은 Community 미포함으로 확정, §4 4행 편입(1차 개정)
 - 시드 데이터와 rule_engine 임계값의 결합 — 임계값 변경 PR에 시드 갱신 누락 시 통합 테스트가 조용히 무의미해짐
 - 이미지 버전 고정 관리 부담(업그레이드는 PR로만)
 - 시연 데이터(Golden Dataset·mock GuardDuty 위협 주입)는 본 ADR 범위 밖 — 시드는 자산·메트릭까지만 책임지며, 위협 이벤트 주입 방식은 별도 결정 대상
@@ -97,6 +101,20 @@ LocalStack 통과를 "검증 완료"로 간주하지 않는 경로를 고정 목
 
 - 현황 기준: `docs/PROJECT_STATUS.md` — 결정 로그 2026-08-13(개발 = LocalStack), 미해결 #1(팀 표준 환경)·#2(PR #29 후속)
 - 선행 결정: [ADR-0001](0001-mvp-monorepo-structure.md) — 단일 `apps/core-api`·docker-compose 개발 환경
-- 마일스톤: `vigilantis-docs/1차 발표까지의 마일스톤 및 MVP 범위 명세.md` — 3~5주차 집중 개발, 6~7주차 통합, P0/P1/P2 착수 순서
+- 마일스톤·구현 우선순위: [`docs/PROJECT_STATUS.md`](../PROJECT_STATUS.md) §현재 위치·§일정 리스크 & 구현 우선순위 — P0/P1/P2 착수 순서
 - 기존 구현: `apps/core-api/services/collector.py`(`_runtime_config`/`_client` — 스위치 규약 원형), `apps/core-api/services/tests/test_collector_raw.py`(skip 규약), `.env.example`
 - 영향 범위: `docker-compose.yml`, `scripts/seed_localstack.py`(신규), `.env.example`, `.github/workflows/ci.yml`(3주차), 이후 `services/aws`·`security/`의 클라이언트 생성 규약
+
+## 개정 이력
+
+- **2026-08-24 (1차 개정)** — §4 검증 한계 목록 갱신. 확정 10종 Runbook이 사용하는 AWS 작업
+  전수를 LocalStack 4.14.0에서 실측한 결과 두 가지가 확인됐다(#113, [ADR-0007](0007-guardrail-dryrun-executor-precheck-contract.md) §Context).
+
+  | 대상 | 변경 |
+  | --- | --- |
+  | 4행 (ALB TG·ASG 경로) | "커버리지 제한 **가능** — 구현 시점에 확인" → **확정 편입**. `elbv2`·`autoscaling`은 Community 미포함(Pro 전용)이라 §1의 Community 전용 방침 아래에서는 해소 불가 |
+  | 5행 (신규) | `create_network_acl_entry`·`delete_network_acl_entry`가 `DryRun=True`를 무시하고 실제 수행 — 실 AWS는 정상 지원 |
+
+  §3(전환 스위치 규약 — 코드 분기 금지)은 그대로 유지한다. 두 NACL 작업을 "LocalStack일 때만
+  조회"로 나누지 않고 환경 무관 조회 대체 검증으로 처리하는 근거가 그 조항이다. 핵심 결정
+  (단일 compose·Boto3 시드 단일 원천·전환 스위치·이월 목록 운용)은 불변.

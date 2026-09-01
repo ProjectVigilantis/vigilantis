@@ -12,62 +12,126 @@
 #   - DB 적재: 안성일의 db.models.Asset/SpecSnapshot 확정 후 연결 (TODO: persist)
 #   - 판정: Idle/미사용/Skip 사유는 rule_engine 의 몫 (여기선 정형화까지만)
 #
-# 설정 주입: 아직 config.get_settings() 가 미구현이라 임시로 환경변수를 직접 읽는다.
-#   config 가 준비되면 _runtime_config() 를 get_settings() 호출로 교체할 것. (TODO: config)
+# 설정 주입: 리전·엔드포인트·자격증명 해석과 클라이언트 생성은 services/aws/client.py
+#   가 단일 원천이다(ADR-0006 §3, Issue #128). 여기서는 수집 창 설정만 합친다.
 # ==============================================================================
 
 from __future__ import annotations
 
-import os
+import json
+import logging
 from datetime import datetime, timedelta, timezone
 
-import boto3
-from botocore.config import Config
+from botocore.exceptions import BotoCoreError, ClientError
 
+from config import get_collector_settings
 from schemas.assets import (
+    AlbTargetGroupAsset,
     AssetInventory,
+    AutoScalingGroupAsset,
+    EbsAsset,
     Ec2Asset,
+    LaunchTemplateAsset,
     MetricName,
     MetricSeries,
     MetricSummary,
+    NaclAsset,
     OpenPort,
     SecurityGroupAsset,
 )
 
-# 스로틀링(RequestLimitExceeded) 대비. adaptive 모드가 자동으로 속도를 낮춘다.
-_BOTO_CONFIG = Config(
-    retries={"max_attempts": 5, "mode": "adaptive"},
-    user_agent_extra="vigilantis-collector/0.1",
-)
+from .aws.client import account_id as _account_id
+from .aws.client import aws_client, deployment_mode, regions
+
+_log = logging.getLogger(__name__)
 
 _METRIC_NAMES = (MetricName.CPU_UTILIZATION, MetricName.NETWORK_IN, MetricName.NETWORK_OUT)
 # get_metric_data 는 호출당 최대 500 쿼리를 받지만 응답 안정성을 위해 보수적으로 끊는다.
 _QUERY_BATCH = 100
 
 
-# ------------------------------------------------------------------ 설정(임시)
+def _failure_reason(exc: BaseException) -> str:
+    """degrade 사유를 사람이 읽을 짧은 코드로. ClientError 는 AWS 오류 코드
+    (InternalFailure·AccessDenied·Throttling 등), 그 외는 예외 클래스명."""
+    if isinstance(exc, ClientError):
+        return exc.response.get("Error", {}).get("Code") or "ClientError"
+    return type(exc).__name__
+
+
+def _failures_summary(failures: dict[str, str]) -> str:
+    """collector_failures 를 error_summary(String(1024))에 실을 compact JSON 으로.
+    상한 초과 시 문자열을 자르면 JSON 이 깨지므로, 항목을 버리고 표식만 남겨 유효 JSON 을
+    유지한다(라벨은 4종뿐이라 실제 도달은 불가하나 계약(json.loads)을 안전하게 지킨다)."""
+    text = json.dumps(failures, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if len(text) <= 1024:
+        return text
+    return json.dumps({"_truncated": str(len(failures))}, ensure_ascii=False, separators=(",", ":"))
+
+
+# 리전 단위 재시도 대상 — 일시성 오류만. AccessDenied·InternalFailure 등 비재시도성은 즉시 실패로.
+_RETRYABLE_CLIENT_CODES = (
+    "Throttling", "ThrottlingException", "RequestLimitExceeded",
+    "ServiceUnavailable", "RequestTimeout", "InternalError",
+)
+_RETRYABLE_BOTOCORE = (
+    "EndpointConnectionError", "ConnectTimeoutError", "ReadTimeoutError",
+    "ConnectionError", "ConnectionClosedError",
+)
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """리전 단위 재시도 대상인지. botocore adaptive(max 5)가 이미 도는 계층 위이므로
+    대상을 일시성(스로틀·서비스 불가·연결 계열)으로 좁힌다 — 나머지는 재시도해도 결과가 같다."""
+    if isinstance(exc, ClientError):
+        return _failure_reason(exc) in _RETRYABLE_CLIENT_CODES
+    return type(exc).__name__ in _RETRYABLE_BOTOCORE
+
+
+def _safe_describe(fn, label: str, failures: dict[str, str]) -> list:
+    """describe 호출 1건을 시도하고, AWS 오류면 빈 목록으로 degrade 하며 `failures[label]`에
+    사유 코드를 남긴다(자산 단위 실패 사유, C4).
+
+    목적은 부분 실패 시 나머지 수집을 살리는 것이다. autoscaling·elbv2 는 LocalStack
+    Community 미포함(ADR-0006 §4)이라 로컬에서 `InternalFailure`(ClientError)가 나는데,
+    그 실패가 EC2/SG/EBS/NACL 등 나머지 수집까지 무너뜨리면 안 되므로 여기서 흡수한다.
+    환경(LocalStack 여부)을 보고 분기하지 않고 '호출은 시도하되 실패를 잡아 강등'하는
+    방식이라 ADR-0006 §3(코드 분기 금지)에 저촉되지 않는다.
+
+    실 AWS 의 AccessDenied·Throttling 도 같은 ClientError 라 함께 흡수되므로, '정상 0건'과
+    구별하려고 실패 라벨·사유를 모은다 — persist 가 이를 error_summary(JSON)에 싣고 PARTIAL
+    로 마감한다(라우터가 PARTIAL → collection_status=PARTIAL 로 표면화). 실 검증은 스모크(§4).
+    """
+    try:
+        return fn()
+    except (ClientError, BotoCoreError) as exc:
+        reason = _failure_reason(exc)
+        _log.warning("자산 수집 degrade — %s 조회 실패(%s): %s", label, reason, exc)
+        failures[label] = reason
+        return []
+
+
+def _paginate(client, operation_name: str, key: str) -> list:
+    """페이지네이션 describe 를 전 페이지 순회해 key 리스트를 평탄화한다.
+
+    단일 호출은 첫 페이지만 받아 계정에 자산이 많으면 뒤 페이지가 조용히 누락된다.
+    describe_instances(collect_region)와 동일하게 paginator 로 전량 수집한다.
+    """
+    return [
+        item
+        for page in client.get_paginator(operation_name).paginate()
+        for item in page[key]
+    ]
+
+
+# ------------------------------------------------------------------ 설정
 def _runtime_config() -> dict:
-    """TODO(config): apps/core-api/config.py 의 get_settings() 확정 시 이 함수를 대체.
-    LocalStack ↔ 실 AWS 전환은 AWS_ENDPOINT_URL 유무로 갈린다(있으면 LocalStack)."""
-    regions = [r.strip() for r in os.getenv("AWS_REGIONS", os.getenv("AWS_REGION", "ap-northeast-2")).split(",") if r.strip()]
-    endpoint = os.getenv("AWS_ENDPOINT_URL") or None
-    # LocalStack 은 자격증명을 검사하지 않지만 boto3 는 키가 아예 없으면 예외를 낸다.
-    if endpoint and not os.getenv("AWS_ACCESS_KEY_ID"):
-        os.environ.setdefault("AWS_ACCESS_KEY_ID", "test")
-        os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "test")
+    """수집 1회에 필요한 설정. 리전은 클라이언트 팩토리가 해석한 목록을 그대로 쓴다."""
+    settings = get_collector_settings()
     return {
-        "regions": regions,
-        "endpoint_url": endpoint,
-        "lookback_days": int(os.getenv("METRIC_LOOKBACK_DAYS", "14")),
-        "period_seconds": int(os.getenv("METRIC_PERIOD_SECONDS", "3600")),
+        "regions": regions(),
+        "lookback_days": settings.METRIC_LOOKBACK_DAYS,
+        "period_seconds": settings.METRIC_PERIOD_SECONDS,
     }
-
-
-def _client(service: str, region: str, endpoint: str | None):
-    kwargs = {"region_name": region, "config": _BOTO_CONFIG}
-    if endpoint:
-        kwargs["endpoint_url"] = endpoint
-    return boto3.client(service, **kwargs)
 
 
 def _arn(resource_type: str, resource_id: str, region: str, account_id: str) -> str:
@@ -174,15 +238,51 @@ def _summarize(series_by_metric: dict[MetricName, MetricSeries]) -> MetricSummar
     )
 
 
+def _asg_launch_template(g: dict) -> tuple[str | None, str | None]:
+    """ASG describe 응답에서 (launch_template_id, name) 을 뽑는다(ASG→LT USES 파생용).
+    LaunchTemplate 직접 지정과 MixedInstancesPolicy 두 형태를 모두 본다.
+    LaunchConfiguration 만 쓰는 구형 ASG 는 LT 가 없으므로 (None, None)."""
+    lt = g.get("LaunchTemplate")
+    if not lt:
+        lt = (
+            g.get("MixedInstancesPolicy", {})
+            .get("LaunchTemplate", {})
+            .get("LaunchTemplateSpecification")
+        )
+    if not lt:
+        return None, None
+    return lt.get("LaunchTemplateId"), lt.get("LaunchTemplateName")
+
+
+def _is_alb_target_group(tg: dict) -> bool:
+    """ALB Target Group 만 선별. describe_target_groups 는 NLB(TCP/UDP/TLS)·GWLB(GENEVE)
+    TG 도 반환하는데, 공개 계약의 자산 유형은 ALB_TARGET_GROUP 이다. TG 프로토콜로 가른다
+    (ALB=HTTP/HTTPS). lambda 대상 TG 등 프로토콜 없는 TG 도 여기서 제외된다."""
+    return tg.get("Protocol") in ("HTTP", "HTTPS")
+
+
+def _registered_instance_ids(target_health: list) -> list[str]:
+    """target health 에서 등록된 EC2 instance id 목록(순서 유지·중복 제거).
+
+    같은 인스턴스가 한 TG 에 여러 포트로 등록되면 describe_target_health 가 중복 반환한다.
+    REGISTERED_IN 은 (source, relation, target_arn) 단위 unique 라 중복을 지우지 않으면
+    동일 관계가 두 번 INSERT 되어 수집 전체가 롤백된다. instance 대상만(i-xxxx) 취한다."""
+    ids = [
+        d["Target"]["Id"]
+        for d in target_health
+        if str(d.get("Target", {}).get("Id", "")).startswith("i-")
+    ]
+    return list(dict.fromkeys(ids))
+
+
 # ------------------------------------------------------------------ 공개 API
 def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
     """한 리전의 EC2/SG 인벤토리 + 메트릭을 수집해 AssetInventory 로 정형화한다."""
     cfg = cfg or _runtime_config()
-    endpoint = cfg["endpoint_url"]
 
-    ec2 = _client("ec2", region, endpoint)
-    cw = _client("cloudwatch", region, endpoint)
-    account_id = _client("sts", region, endpoint).get_caller_identity()["Account"]
+    ec2 = aws_client("ec2", region)
+    cw = aws_client("cloudwatch", region)
+    account_id = _account_id(region)
 
     instances_raw = [
         i
@@ -192,6 +292,26 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
     ]
     sgs_raw = ec2.describe_security_groups()["SecurityGroups"]
     enis_raw = ec2.describe_network_interfaces()["NetworkInterfaces"]
+    nacls_raw = ec2.describe_network_acls()["NetworkAcls"]
+    volumes_raw = _paginate(ec2, "describe_volumes", "Volumes")
+    # Launch Template 은 ec2(Community 지원). ASG 는 autoscaling(Pro 전용)이라 로컬에선
+    # _safe_describe 가 빈 목록으로 degrade 하고 failures 에 (서비스→사유)를 남긴다(ADR-0006 §4, C4).
+    failures: dict[str, str] = {}
+    lts_raw = _safe_describe(
+        lambda: _paginate(ec2, "describe_launch_templates", "LaunchTemplates"),
+        "launch_templates", failures,
+    )
+    asg = aws_client("autoscaling", region)
+    asgs_raw = _safe_describe(
+        lambda: _paginate(asg, "describe_auto_scaling_groups", "AutoScalingGroups"),
+        "auto_scaling_groups", failures,
+    )
+    # ALB Target Group 도 elbv2(Pro 전용)라 로컬에선 degrade 된다(ADR-0006 §4).
+    elbv2 = aws_client("elbv2", region)
+    tgs_raw = _safe_describe(
+        lambda: _paginate(elbv2, "describe_target_groups", "TargetGroups"),
+        "alb_target_groups", failures,
+    )
     used = _used_sg_ids(instances_raw, enis_raw)
 
     end = datetime.now(timezone.utc)
@@ -237,14 +357,107 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
         for sg in sgs_raw
     ]
 
+    nacl_assets = [
+        NaclAsset(
+            arn=_arn("network-acl", n["NetworkAclId"], region, account_id),
+            nacl_id=n["NetworkAclId"],
+            region=region,
+            vpc_id=n.get("VpcId"),
+            is_default=bool(n.get("IsDefault", False)),
+            associated_subnet_ids=[
+                a["SubnetId"] for a in n.get("Associations", []) if a.get("SubnetId")
+            ],
+        )
+        for n in nacls_raw
+    ]
+
+    ebs_assets = [
+        EbsAsset(
+            arn=_arn("volume", v["VolumeId"], region, account_id),
+            volume_id=v["VolumeId"],
+            region=region,
+            volume_type=v.get("VolumeType"),
+            size_gib=v.get("Size"),
+            availability_zone=v.get("AvailabilityZone"),
+            encrypted=v.get("Encrypted"),
+            state=v.get("State"),
+            attached_instance_ids=[
+                att["InstanceId"] for att in v.get("Attachments", []) if att.get("InstanceId")
+            ],
+        )
+        for v in volumes_raw
+    ]
+
+    lt_assets = [
+        LaunchTemplateAsset(
+            arn=_arn("launch-template", lt["LaunchTemplateId"], region, account_id),
+            launch_template_id=lt["LaunchTemplateId"],
+            name=lt.get("LaunchTemplateName"),
+            region=region,
+            latest_version=lt.get("LatestVersionNumber"),
+            default_version=lt.get("DefaultVersionNumber"),
+        )
+        for lt in lts_raw
+    ]
+
+    asg_assets = []
+    for g in asgs_raw:
+        lt_id, lt_name = _asg_launch_template(g)
+        asg_assets.append(
+            AutoScalingGroupAsset(
+                arn=g["AutoScalingGroupARN"],
+                name=g["AutoScalingGroupName"],
+                region=region,
+                min_size=g["MinSize"],
+                max_size=g["MaxSize"],
+                desired_capacity=g["DesiredCapacity"],
+                health_check_type=g.get("HealthCheckType"),
+                instance_ids=[i["InstanceId"] for i in g.get("Instances", [])],
+                launch_template_id=lt_id,
+                launch_template_name=lt_name,
+            )
+        )
+
+    tg_assets = []
+    for tg in tgs_raw:
+        if not _is_alb_target_group(tg):
+            continue  # NLB/GWLB/lambda TG 는 ALB_TARGET_GROUP 이 아니다
+        tg_arn = tg["TargetGroupArn"]
+        # 등록 인스턴스는 describe_target_health(elbv2, Pro 전용)로만 얻는다. TG describe 가
+        # 성공한 실 AWS 에서만 호출되며(로컬은 tgs_raw 가 비어 루프 자체가 안 돈다),
+        # target_type=instance 의 Target.Id(i-xxxx)만 REGISTERED_IN 대상, 중복 제거.
+        health = _safe_describe(
+            lambda arn=tg_arn: elbv2.describe_target_health(TargetGroupArn=arn)["TargetHealthDescriptions"],
+            "alb_target_health", failures,
+        )
+        target_instance_ids = _registered_instance_ids(health)
+        tg_assets.append(
+            AlbTargetGroupAsset(
+                arn=tg_arn,
+                name=tg["TargetGroupName"],
+                region=region,
+                protocol=tg.get("Protocol"),
+                port=tg.get("Port"),
+                target_type=tg.get("TargetType"),
+                health_check_path=tg.get("HealthCheckPath"),
+                target_instance_ids=target_instance_ids,
+            )
+        )
+
     return AssetInventory(
         account_id=account_id,
         region=region,
-        mode="localstack" if endpoint else "aws",
+        mode=deployment_mode(),
         lookback_days=cfg["lookback_days"],
         period_seconds=cfg["period_seconds"],
         ec2_instances=ec2_assets,
         security_groups=sg_assets,
+        nacls=nacl_assets,
+        ebs_volumes=ebs_assets,
+        launch_templates=lt_assets,
+        auto_scaling_groups=asg_assets,
+        alb_target_groups=tg_assets,
+        collector_failures=failures,  # degraded_collectors 는 여기서 파생(computed_field)
     )
 
 
@@ -255,81 +468,369 @@ def collect() -> list[AssetInventory]:
 
 
 # ------------------------------------------------------------------ DB 적재
-def _ec2_row(a: Ec2Asset) -> dict:
-    s = a.metric_summary
-    return {
-        "arn": a.arn,
-        "asset_type": a.asset_type.value,
-        "resource_id": a.instance_id,
-        "name": a.name,
-        "account_id": None,  # persist_inventory 에서 채움
-        "region": a.region,
-        "state": a.state,
-        "vpc_id": a.vpc_id,
-        "cpu_datapoints": s.cpu_datapoints,
-        "cpu_avg": s.cpu_avg,
-        "cpu_max": s.cpu_max,
-        "net_in_avg": s.net_in_avg,
-        "net_out_avg": s.net_out_avg,
-        "attached": None,
-        "open_to_world": None,
-        "attributes": a.model_dump(mode="json"),  # 메트릭 시계열·태그 등 원본 보존
+def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = None) -> dict:
+    """AssetInventory 를 DB(CollectionRun, Asset, MetricSummary, AssetRelationship)에 적재한다.
+    Repository는 commit하지 않으므로 호출부에서 트랜잭션을 관리한다.
+    """
+    from datetime import timedelta
+
+    from db.repositories import assets as assets_repo
+    from schemas.api.assets import AssetType, RelationType
+    from schemas.collections import CollectionRunStatus
+
+    started_own_run = False
+    if collection_run_id is None:
+        run = assets_repo.start_collection_run(
+            db,
+            account_id=inv.account_id,
+            region=inv.region,
+            mode=inv.mode,
+            lookback_days=inv.lookback_days,
+            period_seconds=inv.period_seconds,
+        )
+        collection_run_id = run.collection_run_id
+        started_own_run = True
+
+    ec2_count = len(inv.ec2_instances)
+    sg_count = len(inv.security_groups)
+    nacl_count = len(inv.nacls)
+    ebs_count = len(inv.ebs_volumes)
+    lt_count = len(inv.launch_templates)
+    asg_count = len(inv.auto_scaling_groups)
+    tg_count = len(inv.alb_target_groups)
+    total = ec2_count + sg_count + nacl_count + ebs_count + lt_count + asg_count + tg_count
+
+    # subnet → NACL ARN (EC2→NACL PROTECTED_BY 파생용)
+    subnet_to_nacl = {
+        subnet_id: n.arn
+        for n in inv.nacls
+        for subnet_id in n.associated_subnet_ids
     }
 
+    # instance_id → [Volume ARN] (EC2→EBS ATTACHED_TO 파생용)
+    instance_to_volumes: dict[str, list[str]] = {}
+    for v in inv.ebs_volumes:
+        for iid in v.attached_instance_ids:
+            instance_to_volumes.setdefault(iid, []).append(v.arn)
 
-def _sg_row(g: SecurityGroupAsset) -> dict:
-    return {
-        "arn": g.arn,
-        "asset_type": g.asset_type.value,
-        "resource_id": g.group_id,
-        "name": g.name,
-        "account_id": None,
-        "region": g.region,
-        "state": None,
-        "vpc_id": g.vpc_id,
-        "attached": g.attached,
-        "open_to_world": bool(g.open_to_world),
-        "attributes": g.model_dump(mode="json"),  # 개방포트·description 등 보존
+    # instance_id → ASG ARN (EC2→ASG MEMBER_OF 파생용). 인스턴스는 최대 1개 ASG 소속.
+    instance_to_asg = {
+        iid: g.arn for g in inv.auto_scaling_groups for iid in g.instance_ids
     }
 
+    # instance_id → [TG ARN] (EC2→ALB TG REGISTERED_IN 파생용). 한 인스턴스가 여러 TG 등록 가능.
+    instance_to_tgs: dict[str, list[str]] = {}
+    for tg in inv.alb_target_groups:
+        for iid in tg.target_instance_ids:
+            instance_to_tgs.setdefault(iid, []).append(tg.arn)
 
-def persist_inventory(inv: AssetInventory, db) -> dict:
-    """AssetInventory 를 assets 테이블에 arn 기준 upsert 한다.
-    health_score/skip_reason 은 건드리지 않는다(rule_engine 의 몫)."""
-    from sqlalchemy import select
+    window_end = inv.collected_at
+    window_start = window_end - timedelta(days=inv.lookback_days)
 
-    from db.models import Asset
+    # 1. EC2 적재
+    for a in inv.ec2_instances:
+        ec2_spec = {
+            "instance_type": a.instance_type,
+            "availability_zone": a.availability_zone,
+            "vpc_id": a.vpc_id,
+            "subnet_id": a.subnet_id,
+            "private_ip": a.private_ip,
+            "tags": a.tags or {},
+        }
+        asset = assets_repo.upsert_asset(
+            db,
+            arn=a.arn,
+            asset_type=AssetType.EC2,
+            resource_id=a.instance_id,
+            account_id=inv.account_id,
+            region=inv.region,
+            spec=ec2_spec,
+            collection_run_id=collection_run_id,
+            collected_at=inv.collected_at,
+            name=a.name,
+            state=a.state,
+        )
+        assets_repo.add_metric_summary(
+            db,
+            asset_id=asset.asset_id,
+            collection_run_id=collection_run_id,
+            summary=a.metric_summary,
+            window_start=window_start,
+            window_end=window_end,
+            collected_at=inv.collected_at,
+        )
+        # SG(SECURED_BY) + NACL(PROTECTED_BY) + EBS(ATTACHED_TO) 를 한 번에 교체(replace 는 덮어쓰기)
+        rel_items = [
+            (RelationType.SECURED_BY, f"arn:aws:ec2:{inv.region}:{inv.account_id}:security-group/{sg_id}")
+            for sg_id in a.security_group_ids
+        ]
+        nacl_arn = subnet_to_nacl.get(a.subnet_id)
+        if nacl_arn:
+            rel_items.append((RelationType.PROTECTED_BY, nacl_arn))
+        for vol_arn in instance_to_volumes.get(a.instance_id, []):
+            rel_items.append((RelationType.ATTACHED_TO, vol_arn))
+        asg_arn = instance_to_asg.get(a.instance_id)
+        if asg_arn:
+            rel_items.append((RelationType.MEMBER_OF, asg_arn))
+        for tg_arn in instance_to_tgs.get(a.instance_id, []):
+            rel_items.append((RelationType.REGISTERED_IN, tg_arn))
+        # (relation, target_arn) 중복 제거 — 동일 관계 두 번 INSERT 시 unique constraint 위반 방어
+        rel_items = list(dict.fromkeys(rel_items))
+        if rel_items:
+            assets_repo.replace_relationships(
+                db,
+                source_asset_id=asset.asset_id,
+                items=rel_items,
+                collection_run_id=collection_run_id,
+            )
 
-    rows = [_ec2_row(a) for a in inv.ec2_instances] + [_sg_row(g) for g in inv.security_groups]
-    inserted = updated = 0
-    for row in rows:
-        row["account_id"] = inv.account_id
-        existing = db.execute(select(Asset).where(Asset.arn == row["arn"])).scalar_one_or_none()
-        if existing is None:
-            db.add(Asset(collected_at=inv.collected_at, **row))
-            inserted += 1
-        else:
-            for k, v in row.items():
-                setattr(existing, k, v)
-            existing.collected_at = inv.collected_at
-            updated += 1
-    db.commit()
-    return {"region": inv.region, "inserted": inserted, "updated": updated, "total": len(rows)}
+    # 2. SG 적재
+    for g in inv.security_groups:
+        sg_spec = {
+            "description": g.description,
+            "vpc_id": g.vpc_id,
+            "attached": g.attached,
+            "open_to_world": [p.model_dump(mode="json") for p in g.open_to_world],
+        }
+        assets_repo.upsert_asset(
+            db,
+            arn=g.arn,
+            asset_type=AssetType.SG,
+            resource_id=g.group_id,
+            account_id=inv.account_id,
+            region=inv.region,
+            spec=sg_spec,
+            collection_run_id=collection_run_id,
+            collected_at=inv.collected_at,
+            name=g.name,
+            state=None,
+        )
+
+    # 3. NACL 적재 (판정 비대상 — role/status 파생은 조회단이 처리)
+    for n in inv.nacls:
+        nacl_spec = {
+            "vpc_id": n.vpc_id,
+            "is_default": n.is_default,
+            "associated_subnet_ids": n.associated_subnet_ids,
+        }
+        assets_repo.upsert_asset(
+            db,
+            arn=n.arn,
+            asset_type=AssetType.NACL,
+            resource_id=n.nacl_id,
+            account_id=inv.account_id,
+            region=inv.region,
+            spec=nacl_spec,
+            collection_run_id=collection_run_id,
+            collected_at=inv.collected_at,
+            name=None,
+            state=None,
+        )
+
+    # 4. EBS 적재 (판정 대상 — verdict/status 는 rule_engine 이 매긴다)
+    for v in inv.ebs_volumes:
+        ebs_spec = {
+            "volume_type": v.volume_type,
+            "size_gib": v.size_gib,
+            "availability_zone": v.availability_zone,
+            "encrypted": v.encrypted,
+            "attached_instance_ids": v.attached_instance_ids,
+        }
+        assets_repo.upsert_asset(
+            db,
+            arn=v.arn,
+            asset_type=AssetType.EBS,
+            resource_id=v.volume_id,
+            account_id=inv.account_id,
+            region=inv.region,
+            spec=ebs_spec,
+            collection_run_id=collection_run_id,
+            collected_at=inv.collected_at,
+            name=None,
+            state=v.state,
+        )
+
+    # 5. Launch Template 적재 (판정 비대상)
+    for lt in inv.launch_templates:
+        lt_spec = {
+            "latest_version": lt.latest_version,
+            "default_version": lt.default_version,
+        }
+        assets_repo.upsert_asset(
+            db,
+            arn=lt.arn,
+            asset_type=AssetType.LAUNCH_TEMPLATE,
+            resource_id=lt.launch_template_id,
+            account_id=inv.account_id,
+            region=inv.region,
+            spec=lt_spec,
+            collection_run_id=collection_run_id,
+            collected_at=inv.collected_at,
+            name=lt.name,
+            state=None,
+        )
+
+    # 6. ASG 적재 (판정 비대상) + ASG→LT(USES) 관계. USES 는 source 가 ASG 라
+    #    EC2 관계 루프가 아니라 여기서 산출한다.
+    for g in inv.auto_scaling_groups:
+        asg_spec = {
+            "min_size": g.min_size,
+            "max_size": g.max_size,
+            "desired_capacity": g.desired_capacity,
+            "health_check_type": g.health_check_type,
+        }
+        asset = assets_repo.upsert_asset(
+            db,
+            arn=g.arn,
+            asset_type=AssetType.AUTO_SCALING_GROUP,
+            resource_id=g.name,
+            account_id=inv.account_id,
+            region=inv.region,
+            spec=asg_spec,
+            collection_run_id=collection_run_id,
+            collected_at=inv.collected_at,
+            name=g.name,
+            state=None,
+        )
+        # USES 는 스냅샷 의미론(source 관계 전량 교체)이라 조건 밖에서 호출한다.
+        # LT 를 떼어낸 ASG 는 items=[] 로 이전 수집의 stale USES 엣지가 지워진다.
+        lt_items = (
+            [(RelationType.USES, _arn("launch-template", g.launch_template_id, inv.region, inv.account_id))]
+            if g.launch_template_id
+            else []
+        )
+        assets_repo.replace_relationships(
+            db,
+            source_asset_id=asset.asset_id,
+            items=lt_items,
+            collection_run_id=collection_run_id,
+        )
+
+    # 7. ALB Target Group 적재 (판정 비대상)
+    for tg in inv.alb_target_groups:
+        tg_spec = {
+            "protocol": tg.protocol,
+            "port": tg.port,
+            "target_type": tg.target_type,
+            "health_check_path": tg.health_check_path,
+        }
+        assets_repo.upsert_asset(
+            db,
+            arn=tg.arn,
+            asset_type=AssetType.ALB_TARGET_GROUP,
+            resource_id=tg.name,
+            account_id=inv.account_id,
+            region=inv.region,
+            spec=tg_spec,
+            collection_run_id=collection_run_id,
+            collected_at=inv.collected_at,
+            name=tg.name,
+            state=None,
+        )
+
+    if started_own_run:
+        # degrade(빈 목록으로 흡수된 수집 실패)가 한 번이라도 있으면 PARTIAL 로 마감하고,
+        # 자산 단위 실패 사유를 error_summary(JSON)에 싣는다(C4). run 단위 1문장이 아니라
+        # {서비스: 사유} 지도라 화면·조회에서 무엇이 왜 빠졌는지 판별된다.
+        run_status = (
+            CollectionRunStatus.PARTIAL if inv.collector_failures else CollectionRunStatus.SUCCESS
+        )
+        error_summary = (
+            _failures_summary(inv.collector_failures) if inv.collector_failures else None
+        )
+        assets_repo.finish_collection_run(
+            db,
+            collection_run_id=collection_run_id,
+            status=run_status,
+            finished_at=inv.collected_at,
+            error_summary=error_summary,
+        )
+
+    return {
+        "region": inv.region,
+        "collection_run_id": collection_run_id,
+        "ec2_count": ec2_count,
+        "sg_count": sg_count,
+        "nacl_count": nacl_count,
+        "ebs_count": ebs_count,
+        "lt_count": lt_count,
+        "asg_count": asg_count,
+        "tg_count": tg_count,
+        "total": total,
+        "degraded_collectors": list(inv.degraded_collectors),
+        "collector_failures": dict(inv.collector_failures),
+    }
 
 
 def collect_and_store() -> list[dict]:
     """수집 → 정형화 → DB 적재까지. scheduler 가 이 함수를 주기 호출한다.
-    (판정은 이후 rule_engine 이 assets 테이블을 읽어 수행)"""
-    from db.session import SessionLocal, init_db
+    (판정은 이후 rule_engine 이 assets 테이블 및 metric_summaries 를 읽어 수행)
 
-    init_db()  # 개발/테스트 편의. 운영은 Alembic.
+    C4: 리전을 독립 트랜잭션으로 처리한다 — 한 리전이 실패해도 다른 리전은 커밋된다
+    (기존엔 한 리전 예외 = 전체 롤백). 실패 리전은 1회 재시도 후 FAILED 로 기록한다.
+    """
+    from db.session import get_session_factory
+
     cfg = _runtime_config()
-    summaries = []
-    db = SessionLocal()
+    session_factory = get_session_factory()
+    return [_collect_store_region(region, cfg, session_factory) for region in cfg["regions"]]
+
+
+def _collect_store_region(region: str, cfg: dict, session_factory) -> dict:
+    """한 리전을 독립 트랜잭션으로 수집·적재. core describe 가 일시 오류로 실패하면 1회
+    재시도하고, 그래도 실패하면 그 리전만 FAILED 로 기록한 뒤 예외를 삼켜 다음 리전이 계속되게 한다."""
+    db = session_factory()
     try:
-        for region in cfg["regions"]:
+        try:
             inv = collect_region(region, cfg)
-            summaries.append(persist_inventory(inv, db))
+        except (ClientError, BotoCoreError) as exc:
+            if not _is_retryable(exc):
+                raise  # 비재시도성(AccessDenied·InternalFailure 등)은 즉시 실패로
+            _log.warning("리전 %s 수집 일시 실패 — 1회 재시도(%s)", region, _failure_reason(exc))
+            inv = collect_region(region, cfg)
+        summary = persist_inventory(inv, db)
+        db.commit()
+        return summary
+    except Exception as exc:  # 리전 격리 — 이 리전만 실패로 마감하고 다른 리전은 계속
+        db.rollback()
+        # 코드 버그(KeyError 등)도 여기서 삼키므로 스택트레이스를 남긴다(_log.exception).
+        _log.exception("리전 %s 수집 최종 실패 — FAILED 로 기록하고 계속(%s)", region, _failure_reason(exc))
+        _record_failed_region(region, cfg, exc, session_factory)
+        return {"region": region, "status": "FAILED", "error": _failure_reason(exc)}
     finally:
         db.close()
-    return summaries
+
+
+def _record_failed_region(region: str, cfg: dict, exc: BaseException, session_factory) -> None:
+    """실패한 리전을 FAILED CollectionRun 으로 남긴다(다른 리전과 격리된 별도 트랜잭션).
+    기록 자체가 실패해도 파이프라인을 막지 않는다."""
+    from db.repositories import assets as assets_repo
+    from schemas.collections import CollectionRunStatus
+
+    db = session_factory()
+    try:
+        # 실패 경로를 짧게 — STS(GetCallerIdentity) 재호출 안 하고 account 는 unknown 으로 둔다
+        # (계정은 CollectionRun.region 과 함께 이미 성공 리전 run 에서 확인 가능).
+        run = assets_repo.start_collection_run(
+            db,
+            account_id="unknown",
+            region=region,
+            mode=deployment_mode(),
+            lookback_days=cfg["lookback_days"],
+            period_seconds=cfg["period_seconds"],
+        )
+        assets_repo.finish_collection_run(
+            db,
+            collection_run_id=run.collection_run_id,
+            status=CollectionRunStatus.FAILED,
+            finished_at=datetime.now(timezone.utc),
+            # error_summary 키 축을 PARTIAL(서비스 라벨)과 통일 — 실패 단계 라벨. 리전은 run.region 이 담는다.
+            error_summary=_failures_summary({"collect_region": _failure_reason(exc)}),
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        _log.exception("리전 %s FAILED 기록 실패 — 흔적 없이 유실 방지 로그", region)
+    finally:
+        db.close()
+

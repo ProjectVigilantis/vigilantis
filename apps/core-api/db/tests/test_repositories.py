@@ -56,6 +56,7 @@ def _secops_incident(db, **overrides):
     kwargs = dict(
         subject_arn="arn:aws:ec2:ap-northeast-2:123456789012:instance/i-1",
         category=IncidentCategory.SECOPS,
+        title="SSH 브루트포스 — i-1",
         initial_risk_level=RiskLevel.MEDIUM,
         response_mode=ResponseMode.AGENT_WAIT,
         initial_risk_reason_codes=["SSH_FAILED_ATTEMPTS_OVER_THRESHOLD"],
@@ -87,8 +88,16 @@ def _execution(db, incident, **overrides):
 
 
 def test_alembic_head_applied_with_13_tables(db):
+    # 리비전 문자열을 적어 두면 마이그레이션마다 이 줄을 고쳐야 하고, 그 수정은
+    # 검증이 아니라 손질이다. 확인할 것은 "DB가 head까지 올라와 있는가"다.
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    head = ScriptDirectory.from_config(
+        Config(str(CORE_API / "alembic.ini"))
+    ).get_current_head()
     version = db.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-    assert version == "e4947bbcd48a"
+    assert version == head
     count = db.execute(
         text(
             "SELECT count(*) FROM information_schema.tables"
@@ -325,15 +334,31 @@ def test_category_risk_shape_rejected_by_db(db):
                 db, subject_arn="arn:x", category=IncidentCategory.FINOPS,
                 initial_risk_level=RiskLevel.HIGH,
             )
-    # SECOPS인데 사유 코드 0개
+    # SECOPS인데 사유 코드 0개 (title은 채워 위반 조건을 하나로 좁힌다)
     with pytest.raises(IntegrityError, match="ck_incidents_category_risk_shape"):
         with db.begin_nested():
             incidents_repo.create_incident(
                 db, subject_arn="arn:x", category=IncidentCategory.SECOPS,
-                initial_risk_level=RiskLevel.HIGH,
+                title="SSH 브루트포스", initial_risk_level=RiskLevel.HIGH,
                 response_mode=ResponseMode.PRE_MITIGATION_0_5S,
                 initial_risk_reason_codes=[],
             )
+
+
+def test_secops_title_required_by_db(db):
+    """SECOPS는 title 필수, FINOPS는 nullable (Issue #200)."""
+    with pytest.raises(IntegrityError, match="ck_incidents_category_risk_shape"):
+        with db.begin_nested():
+            incidents_repo.create_incident(
+                db, subject_arn="arn:x", category=IncidentCategory.SECOPS,
+                title=None, initial_risk_level=RiskLevel.HIGH,
+                response_mode=ResponseMode.PRE_MITIGATION_0_5S,
+                initial_risk_reason_codes=["SSH_BRUTE_FORCE"],
+            )
+    # FINOPS는 그대로 nullable — 진단명이라 분석 전 null이 정상이다
+    assert incidents_repo.create_incident(
+        db, subject_arn="arn:y", category=IncidentCategory.FINOPS,
+    ).title is None
 
 
 # --- AI 호출 원자 Claim ---------------------------------------------------------
@@ -389,11 +414,15 @@ def test_set_agent_wait_once_and_deadline_constraint(db):
 
 
 def _candidate(incident, runbook=RunbookId.RUNBOOK_EC2_RIGHTSIZING, cid=None):
+    # parameters는 Runbook별 typed 계약이다(#154) — 기본 Runbook의 값을 싣는다.
+    # display_parameters는 계약이 여기서 만들어 준다.
     return RunbookCandidateData(
         candidate_id=cid or str(uuid.uuid4()),
         incident_id=incident.incident_id,
         runbook_id=runbook,
         target_arn=incident.subject_arn,
+        parameters={"target_instance_type": "t3.medium"},
+        evidence_ids=["ev-1"],
         status=CandidateStatus.PENDING_VALIDATION,
     )
 

@@ -9,6 +9,8 @@
 #     Target ARN·AWS 실행 파라미터는 받지 않는다 — 서버가 저장된 Guardrail PASS
 #     제안(관제자 Rollback은 원본 Execution + DB backup_record_id)으로 명령을 재구성.
 #   - 추가 필드는 거부한다(extra=forbid → 422 REQUEST_VALIDATION_FAILED).
+#   - idempotency_key 상한 128자 = 저장 컬럼 폭(action_executions.idempotency_key).
+#     계약에 상한이 없으면 검증을 통과한 값이 저장 시점에 깨져 500으로 샌다 (Issue #116).
 #   - runbook_id는 schemas/runbooks.py 확정 10종 원천(RunbookId)으로만 검증한다.
 #     목록 복사 금지. 등록 ID여도 현재 실행 가능한 제안·복구 조치가 아니면
 #     실행부가 409 PROPOSAL_NOT_EXECUTABLE로 거절한다.
@@ -44,7 +46,7 @@ class ExecuteActionRequest(BaseModel):
 
     incident_id: str = Field(min_length=1)
     runbook_id: RunbookId
-    idempotency_key: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1, max_length=128)
 
 
 class ExecuteActionResponse(BaseModel):

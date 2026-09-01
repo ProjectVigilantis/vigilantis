@@ -39,6 +39,7 @@ from schemas.api.assets import AssetType, RelationType
 from schemas.api.incidents import (
     IncidentCategory,
     IncidentStatus,
+    ResolutionJudgement,
     ResponseMode,
     RiskLevel,
 )
@@ -288,6 +289,14 @@ class Incident(Base):
     response_deadline_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # --- 관제자 종료 판단(Issue #199) — updated_at은 자식 상태 변경으로도 올라가므로
+    #     종료 시각은 따로 남긴다 ---
+    resolution: Mapped[Optional[ResolutionJudgement]] = mapped_column(
+        _enum(ResolutionJudgement, "resolution_judgement"), nullable=True
+    )
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
@@ -299,13 +308,14 @@ class Incident(Base):
             "jsonb_typeof(initial_risk_reason_codes) = 'array'",
             name="reason_codes_is_array",
         ),
-        # SECOPS: 초기 위험도 필수 + 사유 코드 1개 이상 /
+        # SECOPS: 위협 이름(title)·초기 위험도 필수 + 사유 코드 1개 이상 /
         # FINOPS: 위험 대응 축 전부 null + 사유 코드 빈 배열 (api/incidents.py 불변식)
         # CASE로 배열 확인을 먼저 강제한다 — AND 단락 평가는 SQL이 보장하지 않아
         # 비배열 값에서 jsonb_array_length가 제약 위반 대신 런타임 오류를 낸다
         CheckConstraint(
             "CASE jsonb_typeof(initial_risk_reason_codes) WHEN 'array' THEN"
-            " (category = 'SECOPS' AND initial_risk_level IS NOT NULL"
+            " (category = 'SECOPS' AND title IS NOT NULL"
+            " AND initial_risk_level IS NOT NULL"
             " AND jsonb_array_length(initial_risk_reason_codes) >= 1)"
             " OR "
             "(category = 'FINOPS' AND initial_risk_level IS NULL"
@@ -328,6 +338,15 @@ class Incident(Base):
             " OR (agent_wait_started_at IS NOT NULL AND response_deadline_at IS NOT NULL"
             " AND response_deadline_at = agent_wait_started_at + INTERVAL '60 seconds')",
             name="wait_deadline_60s",
+        ),
+        # 종료 판단은 판단·시각이 함께 있고, RESOLVED에서만 채워진다
+        # (api/incidents.py 불변식과 같은 것). RESOLVED인데 판단이 없는 것은
+        # 허용한다 — 관제자 판단 없이 종료되는 경로가 뒤에 생길 수 있다.
+        # RESOLVED에서 나가는 전이는 판단을 함께 지운다(workflows의 복구 재개)
+        CheckConstraint(
+            "((resolution IS NULL) = (resolved_at IS NULL))"
+            " AND (resolution IS NULL OR status = 'RESOLVED')",
+            name="resolution_with_resolved_status",
         ),
         Index("ix_incidents_status", "status"),
         Index("ix_incidents_category", "category"),
@@ -363,6 +382,11 @@ class RunbookCandidate(Base):
     incident_id: Mapped[str] = mapped_column(_ID, ForeignKey("incidents.incident_id"))
     runbook_id: Mapped[RunbookId] = mapped_column(_enum(RunbookId, "runbook_id"))
     target_arn: Mapped[str] = mapped_column(String(512))
+    # Runbook별 typed 파라미터의 저장본 — AI가 정한 값만 들어온다(#154).
+    # display_parameters는 그것에서 서버가 만든 화면 표시본이다.
+    # ORM 기본값을 두지 않는다 — 기본값이 있으면 계약(RunbookCandidateData)을
+    # 우회한 삽입이 빈 파라미터로 조용히 저장된다. 쓰는 쪽이 반드시 값을 낸다.
+    parameters: Mapped[dict] = mapped_column(JSONB)
     display_parameters: Mapped[dict] = mapped_column(JSONB, default=dict)
     evidence_ids: Mapped[list] = mapped_column(JSONB, default=list)
     status: Mapped[CandidateStatus] = mapped_column(

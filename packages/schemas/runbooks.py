@@ -10,9 +10,10 @@
 # 롤백 3종은 실행은 허용하되 AI 추천 대상이 아닙니다(ai_recommendable: false,
 # ADR-0004 롤백 공통 정책 ②) — 트리거는 시스템·관제자만 가능합니다.
 #
-# Runbook별 필수 파라미터·허용 AWS 작업·호출 순서는 런북 명세서
-# (vigilantis-docs/런북 명세서.md — 로컬 전용 확정본, ADR-0002 참조) 대조 후
-# 별도 계약으로 추가합니다. 이 파일은 ID 수준 판정만 담당합니다.
+# 이 파일은 ID 수준 판정만 담당합니다. Runbook별 필수 파라미터는 runbook_parameters.py가
+# 정의하고(#154, ADR-0007 §5), 허용 AWS 작업·호출 순서는 ADR-0007 §Context의 target_api
+# 실측표가 갖습니다. Whitelist 확정본은 docs/PROJECT_STATUS.md §Action Whitelist 표이며,
+# 이 파일은 그 표의 코드 소재입니다 — 표와 어긋나면 표를 기준으로 이 파일을 고칩니다.
 # ==============================================================================
 
 from __future__ import annotations

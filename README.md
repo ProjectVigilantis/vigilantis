@@ -8,7 +8,7 @@
 
 * **팀명**: 딸깍 인프라
 * **개발 배경**: Multi-Account/Region 환경 확산에 따른 인프라 파편화와 초단위 보안 위협에 대응하고, AI 자동화 도입 시 발생하는 환각(Hallucination) 및 과도한 권한 실행(Excessive Agency) 위험을 해결하기 위해 구축되었습니다.
-* **MVP 범위**: **AWS 단일 계정 / 1~2개 리전 / EC2·Security Group 중심**(런북 조치 대상: NACL·EBS·ASG·ALB Target Group 포함). CloudWatch(CPU/Network) 기반 Idle EC2 판별, OpenIP·SSH 브루트포스 **모의 위협** 대응, GPT-4o 4단계 가드레일 + **런북 10종(본편 7 + 롤백 3) Action Whitelist**, 양방향 회복 엔진, Next.js 대시보드까지를 1차 발표 대상으로 한다.
+* **MVP 범위**: **AWS 단일 계정 / 1–2개 리전 / EC2·Security Group 중심**(런북 조치 대상: NACL·EBS·ASG·ALB Target Group 포함). CloudWatch(CPU/Network) 기반 Idle EC2 판별, OpenIP·SSH 브루트포스 **모의 위협** 대응, GPT-4o 4단계 가드레일 + **런북 10종(본편 7 + 롤백 3) Action Whitelist**, 양방향 회복 엔진, Next.js 대시보드까지를 1차 발표 대상으로 한다.
 * **현황·결정 기준(SSOT)**: [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) — 확정 범위·결정 로그·미해결 이슈의 단일 기준. 본 README와 충돌 시 PROJECT_STATUS.md가 우선한다.
 * **Post-MVP (로드맵)**: RDS·S3 확장, Multi-Account/Region, OpenTelemetry 전 구간 트레이싱, Step Functions/ECS Fargate/Lambda, Terraform Drift 감지·GitOps PR, 모바일 푸시(FCM), GCP·Azure. (아래 Tech Stack 참고)
 
@@ -22,7 +22,7 @@
 | **안성일** | **AI/Guardrail · Architect** | 전체 아키텍처·DB 스키마(`db`), FastAPI 메인·라우터(`main.py`,`routers`), GPT-4o + 4단계 가드레일(`ai`) |
 | **김승철** | **Data & Rule Engine** | CloudWatch 수집·정형화(`services/collector`), Idle EC2·미사용 SG 판별 및 Skip 사유 코드(`services/rule_engine`) |
 | **박지현** | **QA & Scenario / Technical Writer** | Golden Dataset(`datasets/golden`), pytest 회귀·E2E 시나리오(`tests`), 문서·ADR(`docs`) |
-| **유건희** | **Frontend Engineer** | Next.js 16 + Shadcn 대시보드, REST/WebSocket 연동, Recharts/Tremor 시각화(`apps/web`) |
+| **유건희** | **Frontend Engineer** | Next.js 16 + Shadcn 대시보드, REST/WebSocket 연동, 자산 토폴로지·차트 시각화(`apps/web`) |
 
 ---
 
@@ -30,10 +30,10 @@
 
 **MVP (실사용)**
 
-* **Frontend**: Next.js 16 (App Router), TypeScript, Shadcn UI, Tailwind CSS, Recharts/Tremor, WebSocket/SSE
+* **Frontend**: Next.js 16 (App Router), React 19, TypeScript, Shadcn UI(radix-ui), Tailwind CSS v4, WebSocket (차트 라이브러리는 미선정 — Recharts/Tremor 후보)
 * **Backend**: FastAPI (Python 3.11+), Boto3, PostgreSQL, SQLAlchemy · Alembic, APScheduler, pydantic-settings
 * **AI & Safety**: OpenAI GPT-4o, LangGraph (오케스트레이션), Pydantic v2 (Structured Output), pytest (Golden Dataset Evals)
-* **Infra/Dev**: Docker Compose (FastAPI + PostgreSQL), GitHub Actions (pytest CI · Lint/Schema Validation 확장 예정)
+* **Infra/Dev**: Docker Compose (FastAPI + PostgreSQL + LocalStack), GitHub Actions CI — `test` 잡(pytest + PostgreSQL·LocalStack service container) · `web` 잡(ESLint · `next build` 타입 체크 · `node --test`)
 
 **Post-MVP (로드맵)**: OpenTelemetry(W3C Trace Context) · AWS Step Functions/ECS Fargate/Lambda/EventBridge/GuardDuty · Terraform(Drift·GitOps) · Redis(ElastiCache) · LangGraph **Multi-Agent 확장**(MVP는 단일 그래프 오케스트레이션) · OIDC SSO·MFA·RBAC · 모바일 푸시(FCM) · GCP/Azure
 
@@ -41,9 +41,9 @@
 
 ## ✨ Key Features (MVP)
 
-1. **자산 관제 & Idle 판별**: EC2·SG 인벤토리와 CloudWatch(CPU/Network)를 주기 수집(APScheduler)하고, Rule Engine이 Idle EC2·미사용 SG를 판별. 정상 자산은 Skip 사유 코드(`SKIP_LOW_UTIL` 등)로 적재해 LLM 호출 절감.
+1. **자산 관제 & Idle 판별**: EC2·SG·EBS·ASG/Launch Template·ALB Target Group 인벤토리와 CloudWatch(CPU/Network)를 주기 수집(APScheduler)하고 자산 간 연결관계 6종을 산출하며, Rule Engine이 Idle EC2·미사용 SG를 판별. 정상 자산은 Skip 사유 코드(`SKIP_LOW_UTIL` 등)로 적재해 LLM 호출 절감.
 2. **보안 위협 대응 (모의)**: OpenIP(0.0.0.0/0)·SSH 브루트포스 모의 위협을 수집·시각화(붉은색 토폴로지 노드)하고, 선제 차단 → 관제자 **[원클릭 해제]** 롤백.
-3. **Capability-Restricted AI & 4단계 Guardrail**: LLM 권한을 사전 등록된 **런북 7종**(Action Whitelist, [ADR-0002](docs/adr/0002-runbook-whitelist-mvp-scope.md)) 추천으로 제한하고, `Schema ➔ Action Whitelist ➔ ARN Match ➔ AWS Dry-Run` 4단계 출력 검증으로 RCE 차단.
+3. **Capability-Restricted AI & 4단계 Guardrail**: LLM 권한을 사전 등록된 **Action Whitelist 런북 10종**([ADR-0002](docs/adr/0002-runbook-whitelist-mvp-scope.md)·[ADR-0004](docs/adr/0004-rollback-runbook-whitelist-registration.md)) 중 **AI 추천 가능한 본편 7종** 추천으로 제한하고(롤백 3종은 `ai_recommendable: false` — 시스템/관제자만 트리거), `Schema ➔ Action Whitelist ➔ ARN Match ➔ AWS Dry-Run` 4단계 출력 검증으로 RCE 차단.
 4. **One-Click & 양방향 회복 엔진**: Idempotency Key로 중복 실행 방지. 다운사이징 전 스펙 JSON 백업 → `get_waiter` Status Check 감시 → 기동 실패 시 이전 스펙 **자동 원복(Auto-Rollback)**.
 5. **실시간 대시보드**: Next.js + Shadcn 기반 자산/위협 실시간 뷰, AI CoT 3줄 요약 카드, 원클릭 조치 UX.
 
@@ -55,77 +55,33 @@ uv workspace 모노레포. **MVP는 단일 FastAPI 백엔드(`apps/core-api`)** 
 
 ```text
 vigilantis/
-├── docker-compose.yml         # 로컬 개발 환경: FastAPI(api) + PostgreSQL(db) + adminer
-├── .env.example               # 환경변수 템플릿 (복사 → .env)
-├── pyproject.toml             # uv workspace 루트(virtual, aggregator)
+├── docker-compose.yml         # 로컬 개발: api + db + migrate + localstack (+ adminer: --profile tools)
 ├── apps/
-│   ├── web/                   # [유건희·FE] Next.js 16 + Shadcn + Recharts 대시보드
+│   ├── web/                   # [유건희·FE] Next.js 16 + React 19 + Shadcn 대시보드
 │   └── core-api/              # [안성일·BE/AI · 김세혁·Infra] 단일 FastAPI 백엔드
-│       ├── Dockerfile         #   개발용 이미지 (uv 기반)
-│       ├── main.py            #   앱 생성 · 라우터 등록 · APScheduler 기동
-│       ├── config.py          #   pydantic-settings 환경설정 로더
-│       ├── db/                #   [안성일] PostgreSQL 계층
-│       │   ├── session.py     #     SQLAlchemy 엔진/세션
-│       │   ├── models.py      #     ORM 모델 (Asset/Incident/ActionLog/SpecSnapshot)
-│       │   └── migrations/    #     Alembic 마이그레이션
-│       ├── routers/           #   [안성일] API 계약 구현
-│       │   ├── assets.py      #     GET  /api/v1/assets
-│       │   ├── incidents.py   #     GET  /api/v1/incidents/{id}
-│       │   └── actions.py     #     POST /api/v1/actions/execute (idempotency)
-│       ├── services/
-│       │   ├── aws/
-│       │   │   ├── executor.py#     [김세혁] Boto3 런북 실행 엔진 (RIGHTSIZING 등 10종)
-│       │   │   └── rollback.py#     [김세혁] get_waiter 감시 + 스냅샷 자동 원복
-│       │   ├── collector.py   #     [김승철] EC2/SG + CloudWatch 수집
-│       │   ├── rule_engine.py #     [김승철] Idle/미사용 판별 + Skip 코드 적재
-│       │   └── scheduler.py   #     [김세혁/김승철] APScheduler 주기 스캔
-│       ├── ai/
-│       │   ├── agent.py       #     [안성일] GPT-4o CoT 3줄 + Runbook 추천
-│       │   ├── guardrails.py  #     [안성일] 4단계 Execution Guardrail
-│       │   └── whitelist.py   #     [안성일/김세혁] 허용 Runbook 10종 (실행 10 · AI 추천 7)
-│       └── security/
-│           └── soar.py        #     [김세혁] (모의) 위협 선제 차단 / 원클릭 해제
+│       ├── db/                #   [안성일] PostgreSQL ORM 모델·세션·migrations
+│       ├── routers/           #   [안성일] 3대 API 계약 구현 (assets/incidents/actions)
+│       ├── services/          #   [김세혁/김승철] Boto3 AWS 실행·원복(aws) · 수집·Rule Engine·스케줄러
+│       ├── ai/                #   [안성일/김세혁] GPT-4o Agent + 4단계 Guardrail + Whitelist 10종
+│       └── security/          #   [김세혁] 위협 선제 차단 / 원클릭 해제 (SOAR)
 ├── packages/
-│   ├── schemas/               # [공통] Pydantic DTO (assets/events/guardrails/runbooks) + tests
-│   ├── telemetry/             # (Post-MVP) OpenTelemetry 셋업 자리표시자
-│   └── iac/                   # (Post-MVP) Terraform Core (mock 위주)
-├── datasets/
-│   └── golden/                # [박지현] Golden Dataset 20여 건 (*.json)
-├── tests/                     # [박지현] pytest 회귀·E2E (guardrails/rollback/e2e)
-└── docs/
-    ├── PROJECT_STATUS.md      # [공통] 프로젝트 현황·확정 결정 단일 기준(SSOT)
-    └── adr/                   # [박지현] 아키텍처 의사결정 기록 (결정 1건 = 파일 1개)
-        ├── 0001-mvp-monorepo-structure.md       # MVP 단일 백엔드 구조 재정비 결정
-        ├── 0002-runbook-whitelist-mvp-scope.md  # 런북 7종 Whitelist MVP 확정
-        ├── 0003-fe-stack-nextjs-16.md           # FE 스택 Next.js 16 상향
-        └── 0004-rollback-runbook-whitelist-registration.md  # 롤백 3종 등록(총 10종)
+│   ├── schemas/               # [공통] Pydantic DTO — api/(FE↔BE 공개 계약) + 내부 계약
+│   │                          #   (assets·events·guardrails·runbooks·runbook_parameters·precheck 등)
+│   ├── telemetry/             # (Post-MVP 자리표시자) OpenTelemetry 셋업
+│   └── iac/                   # (Post-MVP 자리표시자) Terraform Core
+├── scripts/                   # [김세혁] seed_localstack.py(시드 단일 원천) · probe_dryrun.py(DryRun 지원 실측)
+├── datasets/golden/           # [박지현] Golden Dataset 테스트 정답지 (*.json)
+├── tests/                     # [박지현] pytest 회귀·E2E 시나리오 테스트
+└── docs/                      # PROJECT_STATUS.md (SSOT) · E2E_DEMO_SCENARIOS.md · adr/ (의사결정 기록)
 ```
-
-### 디렉토리 설명
-
-| 경로 | 설명 | 담당 |
-| :--- | :--- | :--- |
-| `apps/web` | Next.js 16 대시보드(SSR/CSR), 자산·위협 시각화, 원클릭 조치 UI | 유건희 |
-| `apps/core-api` | MVP 단일 FastAPI 백엔드. 아래 하위 모듈로 전 파이프라인을 담는다 | 안성일/김세혁/김승철 |
-| `apps/core-api/main.py` · `config.py` | 앱 엔트리포인트(라우터 등록·스케줄러 기동)와 환경설정 로더 | 안성일 |
-| `apps/core-api/db` | PostgreSQL ORM 모델·세션·Alembic 마이그레이션 | 안성일 |
-| `apps/core-api/routers` | 3대 API 계약(`assets`/`incidents`/`actions`) 구현 | 안성일 |
-| `apps/core-api/services/aws` | Boto3 EC2/SG 제어(`executor`)와 자동 원복(`rollback`) | 김세혁 |
-| `apps/core-api/services/collector·rule_engine·scheduler` | 수집·사전 필터링·APScheduler 주기 스캔 (구 scan-worker 흡수) | 김승철/김세혁 |
-| `apps/core-api/ai` | GPT-4o 추론(`agent`), 4단계 가드레일(`guardrails`), 허용 Runbook(`whitelist`) | 안성일 |
-| `apps/core-api/security` | (모의) 위협 선제 차단·원클릭 해제 (구 security-soar 흡수) | 김세혁 |
-| `packages/schemas` | 앱 간 공유 Pydantic DTO 및 스키마 단위 테스트 | 공통 |
-| `packages/telemetry` · `packages/iac` | Post-MVP 자리표시자(관측/Terraform) | — |
-| `datasets/golden` | 팀 공통 테스트 정답지(위협/자산 더미 20여 건) | 박지현 |
-| `tests` | pytest 회귀·E2E 시나리오 테스트 | 박지현 |
-| `docs/adr` | 아키텍처 의사결정 기록(ADR). 되돌리기 어려운 기술 결정(무엇을/왜/대안/결과)을 번호순 `.md` 1건씩 기록·추적. 예: `0001-mvp-monorepo-structure.md`(4앱→단일 core-api 통합 결정) | 박지현 (Technical Writer) |
 
 ### 로컬 실행
 
 ```bash
-cp .env.example .env      # 값 채우기 (OPENAI_API_KEY, AWS_* 등)
-docker compose up         # api(:8000) + db(:5432) + adminer(:8080)
-uv sync                   # (호스트 개발 시) 워크스페이스 의존성 동기화
+cp .env.example .env                 # 값 채우기 (OPENAI_API_KEY, AWS_* 등)
+docker compose up                    # api(:8000) + db(:${POSTGRES_PORT:-5432}) + localstack(:4566) [+ migrate 1회]
+docker compose --profile tools up    # ↑ + adminer(:${ADMINER_PORT:-8080}) — 선택 DB 웹 UI
+uv sync                              # (호스트 개발 시) 워크스페이스 의존성 동기화
 ```
 
 ---
@@ -162,4 +118,5 @@ dev (Integration)
 
 1. `feat/*` 등 작업 브랜치에서 **`dev`로 PR** 제출 (`main` 직접 PR 금지).
 2. 최소 1명 이상(특히 백엔드↔AI↔프론트 API 접점 담당자)의 Approve 후 Merge.
-3. GitHub Actions CI(pytest) 통과 필수. (Lint·Pydantic Schema Validation은 도입 예정)
+3. GitHub Actions CI 통과 필수 — `test` 잡(pytest + PostgreSQL·LocalStack service container)과 `web` 잡(ESLint · `next build` · `node --test`) 양쪽.
+4. **이슈 자동 CLOSE 금지**: 커밋 푸터·PR 본문에 `Closes`·`Fixes`·`Resolves`를 쓰지 않고 **`Refs #N`으로만** 연결한다. 기본 브랜치가 `dev`라 그 키워드는 머지 즉시 이슈를 닫아 잔여 작업을 가린다 — **CLOSE는 머지 책임자가 머지 후 직접 판단해 수동으로** 한다.

@@ -7,7 +7,7 @@
 
 ## Context (배경)
 
-런북 명세서 7종([ADR-0002](0002-runbook-whitelist-mvp-scope.md))의 각 상세 명세는 `safety_and_rollback.rollback_runbook_id`로 롤백 런북을 참조하지만, 참조 대상 3종(`RUNBOOK_EC2_UNISOLATE`, `RUNBOOK_SG_RECREATE`, `RUNBOOK_EC2_REVERT_SIZE`)은 레지스트리·상세 명세·Whitelist 어디에도 정의되어 있지 않았다(ADR-0002 미해결 항목).
+본편 7종([ADR-0002](0002-runbook-whitelist-mvp-scope.md))의 각 상세 명세는 `safety_and_rollback.rollback_runbook_id`로 롤백 런북을 참조하지만, 참조 대상 3종(`RUNBOOK_EC2_UNISOLATE`, `RUNBOOK_SG_RECREATE`, `RUNBOOK_EC2_REVERT_SIZE`)은 레지스트리·상세 명세·Whitelist 어디에도 정의되어 있지 않았다(ADR-0002 미해결 항목).
 
 가드레일 Step 2는 "Whitelist에 없는 런북은 실행 차단"이 원칙이고 **롤백 실행도 런북 실행**이므로, 이대로 구현하면:
 
@@ -41,7 +41,7 @@
 3. **백업 레코드 기반 복원** — 원복 파라미터(원본 SG 규칙·인스턴스 스펙 등)는 요청 페이로드가 아니라 실행 시점에 DB 백업 레코드(`backup_record_id`)에서만 로드한다.
 4. **가드레일 거절 시** — 자동 재시도 없이 CRITICAL 알림 후 수동 개입으로 전환한다. (긴급 원복이 차단된 채 방치되는 것을 방지)
 
-상세 명세(파라미터 스키마·target_api·`trigger_source: AUTO_ON_FAILURE` 신설 포함)는 `vigilantis-docs/런북 명세서.md` [SecOps-05]·[SecOps-06]·[FinOps-04]에 작성 완료.
+상세 명세(파라미터 스키마·target_api·`trigger_source: AUTO_ON_FAILURE` 신설 포함)의 소재는 `packages/schemas/runbook_parameters.py`(파라미터 계약)와 [ADR-0007](0007-guardrail-dryrun-executor-precheck-contract.md) §Context·§5(`target_api` 전수 실측표)다.
 
 ## Consequences (결과·트레이드오프)
 
@@ -58,14 +58,14 @@
 
 ## Related
 
-- 확정 규격: `vigilantis-docs/런북 명세서.md` (10종)
+- 확정 규격: [`docs/PROJECT_STATUS.md`](../PROJECT_STATUS.md) §Action Whitelist (10종)
 - 현황 기준: `docs/PROJECT_STATUS.md`
 - 선행 결정: [ADR-0002](0002-runbook-whitelist-mvp-scope.md) — 미해결로 남겼던 항목의 해소
 - 영향 범위: `apps/core-api/ai/whitelist.py`(PR #35 재작업), `packages/schemas/runbooks.py`, API 계약(`action_type=ROLLBACK_EXECUTION` 논의)
 
 ## 개정 이력
 
-- **2026-08-18 (1차 개정)** — 실행 축 어휘 교체. 확정본 런북 명세서가 두 축의 이름을
+- **2026-08-18 (1차 개정)** — 실행 축 어휘 교체. 당시 확정본이 두 축의 이름을
   서로 바꿔 쓰고 있었고, 구 어휘에 세 결함이 있었다. ① `approval_mode`가 ResponseMode
   값(`PRE_MITIGATION_0_5S`·`AGENT_WAIT`)을 재사용해 한 어휘가 두 개념에 걸침
   ② `RUNBOOK_EC2_REVERT_SIZE`의 "엔진 자동 시작 vs 관제자 수동 요청"을 실행 기록에

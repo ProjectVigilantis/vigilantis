@@ -22,21 +22,26 @@ JOB_ID = "finops_secops_scan"
 
 
 def run_pipeline() -> dict:
-    """collector → rule_engine 1회 실행. 스케줄러 잡이자 수동 호출 진입점.
-    수집·적재는 collector 가 자체 세션으로, 판정은 여기서 세션을 열어 수행한다."""
-    from db.session import SessionLocal
+    """collector → rule_engine 1회 실행. 스케줄러 잡이자 수동 호출 진입점."""
+    from db.session import get_session_factory
     from services.collector import collect_and_store
     from services.rule_engine import run_rule_engine
 
-    store = collect_and_store()  # 수집→정형화→assets upsert
-    db = SessionLocal()
+    store = collect_and_store()  # 수집→정형화→assets/metric_summaries upsert
+    session_factory = get_session_factory()
+    db = session_factory()
     try:
-        judged = run_rule_engine(db)  # assets 판정(verdict/skip_reason)
+        judged = run_rule_engine(db)  # RuleEvaluation 적재
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
     summary = {"stored": store, "verdicts": judged["counts"]}
     logger.info("scan pipeline done: %s", summary)
     return summary
+
 
 
 def _interval_seconds() -> int:
@@ -60,8 +65,7 @@ def build_scheduler() -> AsyncIOScheduler:
 
 
 def start_scheduler() -> AsyncIOScheduler:
-    """FastAPI startup 훅에서 호출. 스케줄러를 구성·기동해 반환한다.
-    예) @app.on_event("startup") 에서 app.state.scheduler = start_scheduler()"""
+    """main의 lifespan에서 기동(#67에서 배선). 스케줄러를 구성·기동해 반환한다."""
     scheduler = build_scheduler()
     scheduler.start()
     logger.info("scheduler started: job=%s interval=%ss", JOB_ID, _interval_seconds())

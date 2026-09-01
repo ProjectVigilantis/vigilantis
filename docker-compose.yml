@@ -1,8 +1,9 @@
 # ==============================================================================
 # Vigilantis MVP 로컬 개발 환경
 #   db         : PostgreSQL 16
+#   migrate    : DB 스키마 적용(alembic upgrade head) — 성공 종료 후 api 기동
 #   api        : Core API (단일 FastAPI 백엔드)
-#   adminer    : DB 웹 관리 UI (http://localhost:8080)
+#   adminer    : DB 웹 관리 UI (선택 도구, --profile tools; 기본 ${ADMINER_PORT:-8080})
 #   localstack : 가짜 AWS (팀 표준 개발 환경 — ADR-0006, http://localhost:4566)
 # 사용: cp .env.example .env  →  docker compose up
 #       → 시드 주입: scripts/seed_localstack.py (파일 docstring 참고)
@@ -15,7 +16,11 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vigilantis}
       POSTGRES_DB: ${POSTGRES_DB:-vigilantis}
     ports:
-      - "5432:5432"
+      # 호스트 노출 포트만 변수화한다 — 컨테이너 내부는 5432 고정이므로 api·migrate의
+      # DATABASE_URL(db:5432)은 영향받지 않는다. 값을 바꾸면 호스트에서 도는 pytest도
+      # 같은 포트를 봐야 하는데, conftest가 루트 .env의 POSTGRES_PORT를 함께 읽으므로
+      # .env 한 곳만 고치면 된다. (Issue #111)
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -42,6 +47,21 @@ services:
       retries: 10
       start_period: 30s
 
+  # DB 스키마 적용 — Alembic 마이그레이션을 api 기동 전에 1회 실행하고 종료한다.
+  # 스키마 변경은 Alembic 전용(create_all 없음)이므로 이 서비스가 성공해야 api가 뜬다. (Issue #68)
+  migrate:
+    build:
+      context: .
+      dockerfile: apps/core-api/Dockerfile
+    env_file: .env
+    command: ["uv", "run", "alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./apps/core-api:/app/apps/core-api
+      - ./packages:/app/packages
+
   api:
     build:
       context: .
@@ -52,6 +72,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     ports:
       - "${APP_PORT:-8000}:8000"
     volumes:
@@ -59,9 +81,11 @@ services:
       - ./packages:/app/packages
 
   adminer:
-    image: adminer:latest
+    # 선택 도구(DB 웹 UI) — 기본 up 제외. 필요 시: docker compose --profile tools up
+    image: adminer:6.0.1          # 버전 고정(다른 이미지와 동일 정책, latest 금지)
+    profiles: ["tools"]
     ports:
-      - "8080:8080"
+      - "${ADMINER_PORT:-8080}:8080"
     depends_on:
       - db
 

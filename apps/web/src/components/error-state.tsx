@@ -68,12 +68,12 @@ export function ErrorState({
     <div
       role="alert"
       className={cn(
-        'flex flex-col gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm',
+        'flex flex-col gap-2 rounded-lg border border-danger/30 bg-danger/5 p-4 text-sm',
         layout === 'page' && 'items-center py-12 text-center',
         className,
       )}
     >
-      <AlertTriangle aria-hidden className="size-4 text-destructive" />
+      <AlertTriangle aria-hidden className="size-4 text-danger" />
       {/* error.message를 그대로 표시한다 — 화면이 문구를 다시 쓰지 않는다(4.9) */}
       <p className="font-medium text-foreground">{message}</p>
       {preset.note ? <p className="text-muted-foreground">{preset.note}</p> : null}
@@ -88,7 +88,10 @@ export function ErrorState({
         </details>
       ) : null}
 
-      {preset.backToList ? (
+      {/* `목록으로`는 **전체 오류 화면의 탈출구**다 — 화면이 통째로 죽어 갈 곳이 없을 때만 의미가 있다.
+          인라인 오류는 주변 화면이 살아 있으므로 붙이지 않는다. 목록 안에서 카드 1건이 실패했는데
+          이 버튼이 뜨면 이미 있는 목록으로 보내면서 필터만 푼다(PR #180 리뷰). */}
+      {preset.backToList && layout === 'page' ? (
         <Button asChild variant="outline" size="sm">
           <Link href="/incidents">목록으로</Link>
         </Button>
