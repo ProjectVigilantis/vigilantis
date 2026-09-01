@@ -1,0 +1,21 @@
+{
+  "source": "secops/input/evt_ssh_bruteforce_007.json",
+  "contract": "packages/schemas/events.py :: InitialRiskEvaluationResult (부분집합)",
+  "excluded_fields": {
+    "threat_event_id": "정규화 단계에서 부여되는 런타임 값 — 정답 대조 대상 아님"
+  },
+  "thresholds_at_authoring": {
+    "SSH_SINGLE_ATTEMPT": 1,
+    "SSH_HIGH_ATTEMPT_MIN": 10,
+    "SSH_HIGH_RATE_PER_MIN": 20.0,
+    "note": "작성 시점의 apps/core-api/security/risk_evaluator.py 상수. 값이 바뀌면 tests/test_golden_dataset.py 가 실패하므로 본 정답을 함께 갱신할 것 (ADR-0006 임계값 결합 원칙)"
+  },
+  "case_id": "S12",
+  "purpose": "5회 / 10초 — 속도는 충족하나 횟수가 적은 짧은 버스트. S4(5회/3600초)와 횟수가 같고 창만 달라, 속도 조건 하나로 LOW 와 MEDIUM 이 갈리는 것을 보인다",
+  "derivation": "rate = 5 × 60 / 10 = 30.0/min. count 5 > 1 이라 단발 아님. count 5 < 10 이라 HIGH 미충족. rate 30.0 < 20.0 이 거짓이라 저강도 LOW 도 아님 → 한쪽만 충족이므로 MEDIUM",
+  "initial_risk_level": "MEDIUM",
+  "response_mode": "AGENT_WAIT",
+  "reason_codes": [
+    "RISK_SSH_BRUTEFORCE"
+  ]
+}
