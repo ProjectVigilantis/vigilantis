@@ -31,9 +31,6 @@ from schemas.assets import AssetInventory  # noqa: E402
 from schemas.events import (  # noqa: E402
     MockThreatEventInput,
     NormalizedThreatEvent,
-    OpenIpThreatPayload,
-    SshBruteForceThreatPayload,
-    ThreatEventType,
 )
 from security.risk_evaluator import (  # noqa: E402
     ALL_PORTS,
@@ -45,6 +42,7 @@ from security.risk_evaluator import (  # noqa: E402
     WORLD_CIDRS,
     evaluate_threat,
 )
+from security.threat_normalizer import normalize_mock_input  # noqa: E402
 from services.rule_engine import (  # noqa: E402
     IDLE_CPU_AVG,
     MIN_DATAPOINTS,
@@ -94,34 +92,12 @@ def _secops_pairs() -> list[tuple[Path, Path]]:
 def _normalized(raw: dict) -> NormalizedThreatEvent:
     """Mock 위협 입력 → NormalizedThreatEvent.
 
-    수집·정규화 단계가 아직 없어 테스트가 그 자리를 대신한다. 실제 정규화가 구현되면
-    이 헬퍼를 그쪽으로 옮기고 여기서는 호출만 한다 —
-    `apps/core-api/security/tests/test_risk_evaluator.py` 에도 같은 형태가 있다.
+    정형화는 프로덕션 코드(security/threat_normalizer.py)가 한다 — 여기서는 호출만
+    한다. 종전에는 이 함수가 변환을 직접 들고 있어, 골든 정답 12건이 **프로덕션이
+    공유하지 않는 변환**을 검증했다(#268). collected_at 을 occurred_at 으로 고정해
+    시각이 실행마다 흔들리지 않게 한다.
     """
-    etype = ThreatEventType(raw["event_type"])
-    if etype == ThreatEventType.OPEN_IP:
-        payload = OpenIpThreatPayload(
-            protocol=raw["protocol"],
-            from_port=raw.get("from_port"),
-            to_port=raw.get("to_port"),
-            source_cidr=raw["source_cidr"],
-        )
-    else:
-        payload = SshBruteForceThreatPayload(
-            source_ip=raw["source_ip"],
-            failed_attempt_count=raw["failed_attempt_count"],
-            window_seconds=raw["window_seconds"],
-        )
-    return NormalizedThreatEvent(
-        threat_event_id=f"te-{raw['event_id']}",
-        source_event_id=raw["event_id"],
-        event_type=etype,
-        target_arn=raw["target_arn"],
-        occurred_at=raw["occurred_at"],
-        payload=payload,
-        deduplication_key=raw["event_id"],
-        collected_at=raw["occurred_at"],
-    )
+    return normalize_mock_input(raw, collected_at=raw["occurred_at"])
 
 
 # ---------------------------------------------------------------- 입력 계약 검증
