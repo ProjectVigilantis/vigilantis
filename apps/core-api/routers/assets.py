@@ -29,7 +29,6 @@ from schemas.api.assets import (
 )
 from schemas.collections import CollectionRunStatus
 
-from config import get_aws_settings
 from db import models
 from db.repositories import assets as assets_repo
 from db.session import get_db
@@ -116,9 +115,7 @@ def _to_item(
 def get_assets(db: Session = Depends(get_db)) -> AssetsResponse:
     # 전역 최신 1행이 아니라 리전별 최신 run 을 모아 최악 상태로 접는다 — 리전 격리(C4)
     # 이후 FAILED → SUCCESS 순서면 실패가 가려졌다. (Issue #231)
-    runs = assets_repo.latest_collection_run_per_region(
-        db, regions=get_aws_settings().regions_list()
-    )
+    runs = assets_repo.latest_collection_run_per_region(db)
     if not runs:
         # 수집 이력이 전혀 없음 — 계약상 목록·last_collected_at도 비어 있어야 한다
         return AssetsResponse(collection_status=CollectionStatus.NOT_COLLECTED)
