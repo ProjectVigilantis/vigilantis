@@ -15,6 +15,10 @@
 # workflows.store_instance_spec_backup()과 services/aws/backup.py가 나눈 것과 같은
 # 경계입니다 — AWS 호출은 services/aws/**, 커밋 순서는 workflows.py.
 #
+# AI 호출 대상 스캔은 이 모듈이 아니라 agent_dispatcher.py가 소유합니다 — 이쪽은
+# 접수된 조치를 AWS 실행으로, 그쪽은 만들어진 Incident를 AI 호출로 넘깁니다
+# (Issue #254).
+#
 # 비종료 실행 1건이 가는 길은 **단계 기록의 유무**가 가릅니다. 백업이 모든 AWS
 # 변경보다 먼저 커밋되고 단계는 호출 직전에 저장되므로, 단계가 없다는 것은 자산이
 # 아직 만져지지 않았다는 뜻이라 실행으로 넘겨도 안전합니다(_RUNNERS). 단계가 남은
