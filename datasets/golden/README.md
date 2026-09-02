@@ -1,8 +1,8 @@
 # Golden Dataset (담당: 박지현)
 
-MVP 공통 테스트 정답지. 위협/자산 더미 데이터 28건을 `*.json`으로 적재.
+MVP 공통 테스트 정답지. 위협/자산 더미 데이터 36건을 `*.json`으로 적재.
 
-- 낭비 자원 시나리오 16건 (예: CPU 2% 미만 Idle EC2, Unattached SG, `_is_prod` 경계)
+- 낭비 자원 시나리오 24건 (예: CPU 2% 미만 Idle EC2, Unattached SG, `_is_prod` 경계, EBS 미연결 볼륨)
 - 보안 위협 시나리오 12건 (예: 22번 포트 전체 개방 0.0.0.0/0, SSH 브루트포스)
 
 전체 팀(UI/AI/백엔드)이 공유하며 pytest 회귀 테스트(`tests/`)의 입력으로 사용한다.

@@ -1,0 +1,83 @@
+{
+  "source": "finops/input/asset_inventory_004.json",
+  "contract": "packages/schemas/rules.py :: RuleEvaluationResult (부분집합)",
+  "excluded_fields": {
+    "collection_run_id": "실행 시점에 생성되는 런타임 값 — 정답 대조 대상 아님",
+    "evaluated_at": "실행 시점에 생성되는 런타임 값 — 정답 대조 대상 아님",
+    "health_score": "EBS 판정은 health_score 를 내지 않는다(evaluate_ebs 반환값 2튜플)",
+    "reason": "사람이 읽는 자유 서술 — 문자열 대조 대상 아님"
+  },
+  "thresholds_at_authoring": {
+    "IDLE_CPU_AVG": 5.0,
+    "SPIKE_CPU_MAX": 40.0,
+    "MIN_DATAPOINTS": 48,
+    "note": "EBS 판정(evaluate_ebs)은 이 임계값을 쓰지 않는다 — 부착 여부와 state 만 본다. tests/test_golden_dataset.py 의 test_thresholds_not_drifted 가 finops 정답 전 파일에 이 블록을 요구하므로 형식을 맞춰 기록한다. 값이 바뀌면 이 파일도 함께 갱신할 것(ADR-0006 임계값 결합 원칙)."
+  },
+  "design_note": "EBS 만 담은 파일이다. EC2·SG 를 섞지 않은 이유는 asset_inventory_003 과 같다 — 결과를 가르는 변수를 하나로 두어, 정답이 틀렸을 때 원인이 반드시 evaluate_ebs 이도록 만든다. 판정 규칙은 `not attached_instance_ids and (state or '').lower() == 'available'` → UNUSED, 그 외 SKIP_ACTIVE 이며(#156), 정답은 이 확정 규칙에서 도출해 적었다. 구현 산출을 베끼지 않았다 — 베끼면 구현이 틀려도 정답지가 함께 틀려 회귀를 못 잡는다(SecOps 정답 10건이 #223 에서 취한 방식과 같다). 방향 균형: 오삭제 방향(E3·E4·E5·E6·E8)과 미탐 방향(E1·E7)을 모두 둔다. 미탐 방향이 없으면 '아무것도 UNUSED 로 만들지 않는' 구현이 전부 통과하고, 오삭제 방향이 없으면 'state 만 보는' 구현이 전부 통과한다.",
+  "evaluations": [
+    {
+      "case_id": "E1",
+      "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:volume/vol-0a1b2c3d4e5f00001",
+      "purpose": "available + 부착 없음 = 정탐의 기준선. 미연결 볼륨 정리(6주차 RUNBOOK_EBS_DELETE_UNATTACHED)의 유일한 진입 조건이다. 이 케이스가 없으면 '아무것도 UNUSED 로 만들지 않는' 구현이 나머지 정답을 전부 통과한다.",
+      "evaluation_status": "COMPLETED",
+      "verdict": "UNUSED",
+      "skip_reason_code": null
+    },
+    {
+      "case_id": "E2",
+      "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:volume/vol-0a1b2c3d4e5f00002",
+      "purpose": "in-use + 부착 있음 = 사용 중. 삭제 후보가 아니다. 두 조건이 함께 참이라 어느 한쪽만 보는 구현도 통과하므로, 분리 검증은 E3(상태만 available)과 E8(부착만 없음)이 맡는다.",
+      "evaluation_status": "COMPLETED",
+      "verdict": "SKIP",
+      "skip_reason_code": "SKIP_ACTIVE"
+    },
+    {
+      "case_id": "E3",
+      "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:volume/vol-0a1b2c3d4e5f00003",
+      "purpose": "available 인데 부착 인스턴스가 있는 모순 상태. AWS 가 전이 중이거나 조회 시점이 어긋나면 나온다. 구현이 state 문자열만 보고 판단하면 UNUSED 가 되어 **사용 중인 볼륨을 삭제 후보로 올린다.** evaluate_ebs 의 조건이 `not attached_instance_ids and state == available` 인 이유가 이 케이스다. and 를 or 로 바꾸거나 부착 검사를 빼면 실패한다.",
+      "evaluation_status": "COMPLETED",
+      "verdict": "SKIP",
+      "skip_reason_code": "SKIP_ACTIVE"
+    },
+    {
+      "case_id": "E4",
+      "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:volume/vol-0a1b2c3d4e5f00004",
+      "purpose": "creating — 생성 전이 중. 부착이 아직 없지만 곧 붙을 볼륨이다. 상태를 available 로만 좁히지 않고 '부착 없음'만 보면 UNUSED 가 되어 오삭제한다.",
+      "evaluation_status": "COMPLETED",
+      "verdict": "SKIP",
+      "skip_reason_code": "SKIP_ACTIVE"
+    },
+    {
+      "case_id": "E5",
+      "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:volume/vol-0a1b2c3d4e5f00005",
+      "purpose": "deleting — 이미 삭제 중. 정리 대상으로 다시 올리면 중복 조치가 된다.",
+      "evaluation_status": "COMPLETED",
+      "verdict": "SKIP",
+      "skip_reason_code": "SKIP_ACTIVE"
+    },
+    {
+      "case_id": "E6",
+      "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:volume/vol-0a1b2c3d4e5f00006",
+      "purpose": "error — 비정상 상태. 정상 유휴가 아니므로 삭제 후보로 보지 않는다. E4·E5·E6 은 'available 이 아닌 상태는 전부 SKIP_ACTIVE' 라는 한 규칙의 세 표본이며, 전이·비정상 상태를 열거로 특별 취급하는 구현을 막는다.",
+      "evaluation_status": "COMPLETED",
+      "verdict": "SKIP",
+      "skip_reason_code": "SKIP_ACTIVE"
+    },
+    {
+      "case_id": "E7",
+      "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:volume/vol-0a1b2c3d4e5f00007",
+      "purpose": "AVAILABLE — 대문자. AWS 응답 표기가 흔들려도 같은 판정이어야 한다. 구현이 (state or '').lower() 를 적용해야만 통과하며, 이 정규화를 빼면 미연결 볼륨을 놓친다(미탐 방향).",
+      "evaluation_status": "COMPLETED",
+      "verdict": "UNUSED",
+      "skip_reason_code": null
+    },
+    {
+      "case_id": "E8",
+      "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:volume/vol-0a1b2c3d4e5f00008",
+      "purpose": "state 없음(null) + 부착 없음. 수집이 상태를 못 받은 경우다. 상태를 모르는데 삭제 후보로 올리면 안 된다. (state or '') 가 빈 문자열로 떨어져 available 과 다르므로 SKIP_ACTIVE 다. 부착 없음만 보고 판단하는 구현은 여기서 UNUSED 를 내어 실패한다.",
+      "evaluation_status": "COMPLETED",
+      "verdict": "SKIP",
+      "skip_reason_code": "SKIP_ACTIVE"
+    }
+  ]
+}
