@@ -148,7 +148,7 @@ FE는 `NEXT_PUBLIC_API_BASE_URL`을 이 백엔드로 걸면 mock 대신 실 API�
 경계가 깨지지 않는지는 `apps/core-api/tests/test_golden_assets_api.py` 3건이 CI에서 지킨다.
 
 **🔶 아직 mock이 필요한 것**
-- **2단계 이후**(Incident 카드·AI 3줄·추천)는 그대로 mock이다 — **§대조 필요 9번**. 판정에서 Incident를 만드는 계층이 아직 없다.
+- **2단계 이후**(Incident 카드·AI 3줄·추천)는 그대로 mock이다 — **§대조 필요 9번**. Intake 계층의 **자리는 섰으나 본문이 비어 있다**(#254 / PR #258, `NotImplementedError`).
 - **토폴로지 뷰**는 골든으로 못 채운다 — **§대조 필요 8번**. 골든 FinOps 입력의 자산 유형이 **EC2·SG 2종뿐**이고 계약은 7종이다.
 
 ---
@@ -245,7 +245,7 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 | 6 | **WS 이벤트로 화면이 실시간 갱신되는 것** | FE 연동 구현됨 — 소켓 수명주기·이벤트 3종·Toast·재연결(#168 / PR #181). 로컬 `core-api`로 **연결·중단·자동 복구 확인**. 다만 **이벤트 실배달은 미확인**. 막던 이유였던 "코어 DB가 비었다"는 **자산에 대해서는 풀렸다**(2026-09-02 — `scripts/load_golden_assets.py`로 골든 16건 적재). 남은 것은 **Incident를 만드는 계층**(아래 9번)이다 | 9번 해소 후 |
 | 7 | ~~T1 5번 `POST /actions/execute` HTTP 상태 코드~~ ✅ 해소(2026-08-27) | 라우터·멱등 처리 구현 완료(#116 / PR #119), 롤백 3종 실행 접수는 #126 / PR #158. **신규 접수 `202 Accepted` · 같은 `idempotency_key` 재요청 `200 OK`** 로 확정돼 SSOT §API 계약에 등재됐다. 남은 것은 `execute` 본체(Boto3 실행·자동 원복 — 김세혁) | — |
 | 8 | **토폴로지 뷰를 골든으로 못 채운다** (2026-09-02 신설) | 골든 FinOps 입력의 자산 유형이 **EC2·SG 2종뿐**인데 계약은 7종이다 — NACL·EBS·Launch Template·ASG·ALB Target Group이 **0건**이다. 자산 목록의 판정 배지는 골든으로 전부 서지만(위 T1 §자산 화면), 관계 그래프가 요구하는 노드 5종은 여전히 mock(`_mock/data.ts`)에서 온다 | 골든 FinOps 입력에 자산 5종 추가 (박지현) |
-| 9 | **T1 2단계 이후가 mock인 이유** (2026-09-02 신설) | 판정 행에서 **Incident를 만드는 계층이 없다** — `create_incident`·`claim_agent_invocation`·`evaluate_threat`의 서비스 호출부가 0곳이고 `INCIDENT_CREATED` 발행 경로도 없다(#254). 자산 화면까지는 골든이 실데이터로 가지만 카드 그리드부터는 그 앞이 끊겨 있다 | #254 Intake 계층 + #243 AI 요약 프롬프트 |
+| 9 | **T1 2단계 이후가 mock인 이유** (2026-09-02 신설) | 판정 행에서 **Incident를 만드는 계층의 자리는 섰지만 본문이 비어 있다.** `apps/core-api/incident_intake.py`·`agent_dispatcher.py`와 진입 계약 `schemas/intake.py`가 2026-09-02에 머지됐고(#254 / PR #258), `create_incident_from_intake()`는 아직 `NotImplementedError`다. 판정 계층에서 이 진입점을 부르는 자리도 없어 `create_incident`·`evaluate_threat`의 서비스 호출부는 여전히 0곳이다. 자산 화면까지는 골든이 실데이터로 가지만 카드 그리드부터는 그 앞이 끊겨 있다 | #254 본문 구현 + 판정→Intake 배선 + #243 AI 요약 프롬프트 |
 
 **문서의 WS 이벤트 열은 "서버가 그 시점에 보내는 이벤트"로는 정확하다.** 다만 그 이벤트로 화면이 실시간으로 바뀌는 것을 시연하려면 6번이 필요하다.
 
