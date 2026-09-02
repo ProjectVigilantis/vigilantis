@@ -228,6 +228,47 @@ def add_metric_summary(
     return row
 
 
+def fresh_ec2_metric_summaries(
+    db: Session, *, region: str, not_older_than: datetime
+) -> tuple[Optional[datetime], dict[str, MetricSummaryContract]]:
+    """리전의 EC2 자산별 최신 메트릭 요약 중 not_older_than 이후에 수집된 것만 돌려준다.
+
+    collector 가 CloudWatch 재조회를 건너뛸지 판단하는 근거다(#255) — 스캔 주기가 메트릭
+    입자(METRIC_PERIOD_SECONDS)보다 짧으면 같은 값을 반복해서 받아오게 되기 때문이다.
+    반환 = (재사용 대상 창의 끝, {resource_id: 요약}). 해당 행이 없으면 (None, {}).
+    창의 끝을 함께 주는 이유는 persist 가 이 요약을 **원본 창** 으로 적재해야 해서다.
+    """
+    rows = db.execute(
+        select(models.Asset.resource_id, models.MetricSummary)
+        .join(
+            models.MetricSummary,
+            models.MetricSummary.asset_id == models.Asset.asset_id,
+        )
+        .where(
+            models.Asset.region == region,
+            models.Asset.asset_type == AssetType.EC2,
+            models.MetricSummary.collected_at >= not_older_than,
+        )
+        .order_by(models.MetricSummary.collected_at.desc())
+    ).all()
+
+    out: dict[str, MetricSummaryContract] = {}
+    window_end: Optional[datetime] = None
+    for resource_id, row in rows:
+        if resource_id in out:
+            continue  # collected_at 내림차순이라 첫 행이 최신이다
+        out[resource_id] = MetricSummaryContract(
+            cpu_datapoints=row.cpu_datapoints,
+            cpu_avg=row.cpu_avg,
+            cpu_max=row.cpu_max,
+            net_in_avg=row.net_in_avg,
+            net_out_avg=row.net_out_avg,
+        )
+        if window_end is None or row.window_end > window_end:
+            window_end = row.window_end
+    return window_end, out
+
+
 # --- RuleEvaluation ------------------------------------------------------------
 
 

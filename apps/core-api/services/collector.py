@@ -238,6 +238,23 @@ def _summarize(series_by_metric: dict[MetricName, MetricSeries]) -> MetricSummar
     )
 
 
+def _reusable_summaries(
+    instance_ids: list[str],
+    fresh: dict[str, MetricSummary] | None,
+) -> dict[str, MetricSummary] | None:
+    """이번 회차의 CloudWatch 조회를 건너뛸 수 있으면 재사용할 요약을, 아니면 None 을 준다(#255).
+
+    **전부 아니면 전무다.** get_metric_data 는 인스턴스 전량을 한 번에 배치 조회하므로
+    한 대라도 새로 받아야 하면 나머지를 아껴도 호출 수가 줄지 않는다. 부분 재사용은
+    같은 회차 안에 창이 다른 요약을 섞어 metric_summaries 의 window 를 못 믿게 만들기만 한다.
+    """
+    if not instance_ids or not fresh:
+        return None
+    if any(iid not in fresh for iid in instance_ids):
+        return None  # 신규 인스턴스가 있으면 전량 재조회
+    return fresh
+
+
 def _asg_launch_template(g: dict) -> tuple[str | None, str | None]:
     """ASG describe 응답에서 (launch_template_id, name) 을 뽑는다(ASG→LT USES 파생용).
     LaunchTemplate 직접 지정과 MixedInstancesPolicy 두 형태를 모두 본다.
@@ -276,8 +293,18 @@ def _registered_instance_ids(target_health: list) -> list[str]:
 
 
 # ------------------------------------------------------------------ 공개 API
-def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
-    """한 리전의 EC2/SG 인벤토리 + 메트릭을 수집해 AssetInventory 로 정형화한다."""
+def collect_region(
+    region: str,
+    cfg: dict | None = None,
+    fresh_metrics: dict[str, MetricSummary] | None = None,
+    fresh_window_end: datetime | None = None,
+) -> AssetInventory:
+    """한 리전의 EC2/SG 인벤토리 + 메트릭을 수집해 AssetInventory 로 정형화한다.
+
+    fresh_metrics 는 아직 유효한(= 메트릭 입자 안에서 수집된) 요약이다. 인스턴스 전량이
+    덮이면 CloudWatch 를 건너뛰고 그 값을 그대로 쓴다(#255). DB 는 여기서 읽지 않는다 —
+    조회는 호출자(_collect_store_region)가 하고 이 함수는 결과만 받는다.
+    """
     cfg = cfg or _runtime_config()
 
     ec2 = aws_client("ec2", region)
@@ -317,7 +344,17 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=cfg["lookback_days"])
     ids = [i["InstanceId"] for i in instances_raw]
-    metrics = _fetch_metrics(cw, ids, start, end, cfg["period_seconds"]) if ids else {}
+    reuse = _reusable_summaries(ids, fresh_metrics)
+    # 재사용 시 시계열은 받지 않는다 — 원자료를 쓰는 곳은 _summarize 뿐이고 그 결과를
+    # 그대로 물려받기 때문이다(Ec2Asset.metrics 를 읽는 소비자는 없다).
+    metrics: dict[str, dict[MetricName, MetricSeries]] = {}
+    if reuse is not None:
+        _log.info(
+            "리전 %s 메트릭 재사용 — CloudWatch 조회 생략(인스턴스 %d대, 창 끝 %s)",
+            region, len(ids), fresh_window_end,
+        )
+    elif ids:
+        metrics = _fetch_metrics(cw, ids, start, end, cfg["period_seconds"])
 
     ec2_assets: list[Ec2Asset] = []
     for i in instances_raw:
@@ -339,7 +376,7 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
                 security_group_ids=[g["GroupId"] for g in i.get("SecurityGroups", [])],
                 tags={t["Key"]: t["Value"] for t in i.get("Tags", [])},
                 metrics=series,
-                metric_summary=_summarize(series),
+                metric_summary=reuse[iid] if reuse else _summarize(series),
             )
         )
 
@@ -450,6 +487,7 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
         mode=deployment_mode(),
         lookback_days=cfg["lookback_days"],
         period_seconds=cfg["period_seconds"],
+        metrics_window_end=fresh_window_end if reuse else None,
         ec2_instances=ec2_assets,
         security_groups=sg_assets,
         nacls=nacl_assets,
@@ -524,7 +562,9 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
         for iid in tg.target_instance_ids:
             instance_to_tgs.setdefault(iid, []).append(tg.arn)
 
-    window_end = inv.collected_at
+    # 재사용 요약은 이번 회차가 아니라 원본 창을 적는다 — 안 받은 구간을 관측한 것처럼
+    # 남기지 않으려는 것이다(#255). 직접 조회했으면 metrics_window_end 가 None 이다.
+    window_end = inv.metrics_window_end or inv.collected_at
     window_start = window_end - timedelta(days=inv.lookback_days)
 
     # 1. EC2 적재
@@ -779,15 +819,23 @@ def collect_and_store() -> list[dict]:
 def _collect_store_region(region: str, cfg: dict, session_factory) -> dict:
     """한 리전을 독립 트랜잭션으로 수집·적재. core describe 가 일시 오류로 실패하면 1회
     재시도하고, 그래도 실패하면 그 리전만 FAILED 로 기록한 뒤 예외를 삼켜 다음 리전이 계속되게 한다."""
+    from db.repositories import assets as assets_repo
+
     db = session_factory()
     try:
+        # 스캔 주기가 메트릭 입자보다 짧으면 같은 입자를 반복 조회하게 된다(#255).
+        # 입자 안에서 이미 받아 둔 요약이 있으면 그것으로 대신한다.
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=cfg["period_seconds"])
+        fresh_window_end, fresh_metrics = assets_repo.fresh_ec2_metric_summaries(
+            db, region=region, not_older_than=cutoff
+        )
         try:
-            inv = collect_region(region, cfg)
+            inv = collect_region(region, cfg, fresh_metrics, fresh_window_end)
         except (ClientError, BotoCoreError) as exc:
             if not _is_retryable(exc):
                 raise  # 비재시도성(AccessDenied·InternalFailure 등)은 즉시 실패로
             _log.warning("리전 %s 수집 일시 실패 — 1회 재시도(%s)", region, _failure_reason(exc))
-            inv = collect_region(region, cfg)
+            inv = collect_region(region, cfg, fresh_metrics, fresh_window_end)
         summary = persist_inventory(inv, db)
         db.commit()
         return summary

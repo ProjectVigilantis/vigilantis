@@ -18,10 +18,12 @@ for p in (str(CORE_API), str(REPO_ROOT / "packages")):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+from schemas.assets import MetricSummary  # noqa: E402
 from services.collector import (  # noqa: E402
     _is_alb_target_group,
     _paginate,
     _registered_instance_ids,
+    _reusable_summaries,
     _safe_describe,
 )
 
@@ -132,10 +134,17 @@ def test_is_alb_target_group_filters_by_protocol():
 
 # ---- C4: 리전 격리·부분 리트라이 제어 흐름 (no-DB) ----
 
+class _FakeResult:
+    def all(self):
+        return []
+
+
 class _FakeSession:
     def commit(self): pass
     def rollback(self): pass
     def close(self): pass
+    # 재사용 가능한 메트릭 요약 조회(#255) — 이 흐름 테스트는 적재분이 없는 상태를 본다
+    def execute(self, *_a, **_kw): return _FakeResult()
 
 
 def test_collect_store_region_retries_once_then_succeeds(monkeypatch):
@@ -143,7 +152,7 @@ def test_collect_store_region_retries_once_then_succeeds(monkeypatch):
 
     calls = {"n": 0}
 
-    def flaky(region, cfg=None):
+    def flaky(region, cfg=None, fresh_metrics=None, fresh_window_end=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise EndpointConnectionError(endpoint_url="http://localhost:4566")  # 일시 연결 블립
@@ -161,7 +170,7 @@ def test_collect_store_region_isolates_failure_and_records(monkeypatch):
 
     calls = {"n": 0}
 
-    def boom(region, cfg=None):
+    def boom(region, cfg=None, fresh_metrics=None, fresh_window_end=None):
         calls["n"] += 1
         raise ClientError({"Error": {"Code": "InternalFailure"}}, "DescribeInstances")
 
@@ -176,3 +185,33 @@ def test_collect_store_region_isolates_failure_and_records(monkeypatch):
     assert res["error"] == "InternalFailure"
     assert recorded == {"region": "bad", "reason": "InternalFailure"}
     assert calls["n"] == 1  # 비재시도성(InternalFailure)은 재시도하지 않고 즉시 실패
+
+
+# ---- #255: 메트릭 재사용 판정 (no-DB) ----
+
+
+def _summary(avg: float) -> MetricSummary:
+    return MetricSummary(cpu_datapoints=336, cpu_avg=avg, cpu_max=avg + 1)
+
+
+def test_reusable_returns_map_when_every_instance_covered():
+    # 전량이 덮이면 CloudWatch 를 건너뛴다 — 5분 스캔이 1시간 입자를 12번 받는 것을 막는 지점.
+    fresh = {"i-1": _summary(1.0), "i-2": _summary(2.0)}
+    assert _reusable_summaries(["i-1", "i-2"], fresh) is fresh
+
+
+def test_reusable_is_none_when_one_instance_missing():
+    # 신규 인스턴스 1대라도 있으면 전량 재조회한다. get_metric_data 가 배치라 부분 재사용은
+    # 호출 수를 줄이지 못하고 창만 어긋나게 한다.
+    fresh = {"i-1": _summary(1.0)}
+    assert _reusable_summaries(["i-1", "i-2"], fresh) is None
+
+
+def test_reusable_is_none_without_fresh_rows():
+    assert _reusable_summaries(["i-1"], None) is None
+    assert _reusable_summaries(["i-1"], {}) is None
+
+
+def test_reusable_is_none_when_no_instances():
+    # 인스턴스가 없으면 애초에 조회하지 않으므로 재사용 판정도 성립하지 않는다.
+    assert _reusable_summaries([], {"i-1": _summary(1.0)}) is None

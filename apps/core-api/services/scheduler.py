@@ -5,16 +5,17 @@
 #
 # 구현: run_pipeline(수집→정형화→적재→판정) 잡을 IntervalTrigger 로 등록한다.
 #   FastAPI 시작 시 start_scheduler() 를 호출하면 된다(main.py 배선은 별도).
-#   실행 간격은 SCAN_INTERVAL_SECONDS(기본 300초). config 확정 시 주입부 교체. (TODO: config)
+#   실행 간격은 CollectorSettings.SCAN_INTERVAL_SECONDS(기본 300초, gt=0 검증).
 # ==============================================================================
 
 from __future__ import annotations
 
 import logging
-import os
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+
+from config import get_collector_settings
 
 logger = logging.getLogger("vigilantis.scheduler")
 
@@ -45,8 +46,9 @@ def run_pipeline() -> dict:
 
 
 def _interval_seconds() -> int:
-    # TODO(config): get_settings().scan_interval_seconds 로 교체
-    return int(os.getenv("SCAN_INTERVAL_SECONDS", "300"))
+    """스캔 주기(초). 검증된 설정에서만 읽는다 — 생짜 os.getenv 는 0·음수·비정수를
+    잡지 못해 잘못된 값이 잡 등록 시점까지 흘러갔다(#255)."""
+    return get_collector_settings().SCAN_INTERVAL_SECONDS
 
 
 def build_scheduler() -> AsyncIOScheduler:

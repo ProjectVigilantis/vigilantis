@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -799,3 +799,62 @@ def test_all_five_skip_reason_codes_persisted(db, five_skip_inventory):
 
     # 5종 전량 = SkipReasonCode enum 전량. 6번째 코드가 추가되면 깨져서 "5종" 전제가 낡았음을 알린다.
     assert set(persisted.values()) == {c.value for c in SkipReasonCode}
+
+
+# --- #255: 메트릭 재사용 창·조회 -------------------------------------------------
+
+
+def test_reused_summary_is_persisted_with_original_window(db, mock_inventory):
+    """재사용한 요약은 이번 회차 시각이 아니라 **원본 창**으로 적재돼야 한다.
+
+    collected_at 을 창의 끝으로 적으면 받아오지도 않은 최근 구간을 관측한 것처럼 남는다.
+    """
+    original_end = mock_inventory.collected_at - timedelta(minutes=45)
+    inv = mock_inventory.model_copy(update={"metrics_window_end": original_end})
+
+    persist_inventory(inv, db)
+
+    asset = db.execute(
+        select(models.Asset).where(models.Asset.resource_id == "i-idle001")
+    ).scalar_one()
+    row = db.execute(
+        select(models.MetricSummary).where(models.MetricSummary.asset_id == asset.asset_id)
+    ).scalar_one()
+    assert row.window_end == original_end
+    assert row.window_start == original_end - timedelta(days=inv.lookback_days)
+    # 자산 자체의 수집 시각은 이번 회차 그대로 — 인벤토리는 방금 받았다
+    assert asset.collected_at == inv.collected_at
+
+
+def test_fresh_lookup_returns_recent_rows_and_skips_stale(db, mock_inventory):
+    """조회는 입자 안(cutoff 이후)에 수집된 요약만 돌려준다 — 재사용 판단의 근거."""
+    from db.repositories import assets as assets_repo
+
+    persist_inventory(mock_inventory, db)
+
+    cutoff = mock_inventory.collected_at - timedelta(seconds=mock_inventory.period_seconds)
+    window_end, fresh = assets_repo.fresh_ec2_metric_summaries(
+        db, region="ap-northeast-2", not_older_than=cutoff
+    )
+    assert set(fresh) == {"i-idle001"}
+    assert fresh["i-idle001"].cpu_avg == 1.5
+    assert fresh["i-idle001"].cpu_datapoints == 336
+    assert window_end == mock_inventory.collected_at
+
+    # 입자를 지난 시점을 기준으로 잡으면 같은 행이 더는 재사용 대상이 아니다
+    stale_cutoff = mock_inventory.collected_at + timedelta(seconds=1)
+    assert assets_repo.fresh_ec2_metric_summaries(
+        db, region="ap-northeast-2", not_older_than=stale_cutoff
+    ) == (None, {})
+
+
+def test_fresh_lookup_is_scoped_to_region(db, mock_inventory):
+    """다른 리전의 요약을 끌어다 쓰면 안 된다 — 리전별로 독립 수집한다(C4)."""
+    from db.repositories import assets as assets_repo
+
+    persist_inventory(mock_inventory, db)
+
+    cutoff = mock_inventory.collected_at - timedelta(seconds=mock_inventory.period_seconds)
+    assert assets_repo.fresh_ec2_metric_summaries(
+        db, region="us-east-1", not_older_than=cutoff
+    ) == (None, {})

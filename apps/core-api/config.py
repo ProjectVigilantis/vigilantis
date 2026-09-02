@@ -145,12 +145,18 @@ class AwsSettings(BaseSettings):
 
 
 class CollectorSettings(BaseSettings):
-    """CloudWatch 조회 창 설정 — 수집 비용·판정 신뢰도에 직접 영향을 준다."""
+    """CloudWatch 조회 창·스캔 주기 설정 — 수집 비용·판정 신뢰도에 직접 영향을 준다.
+
+    SCAN_INTERVAL_SECONDS 는 인벤토리 describe 주기다. METRIC_PERIOD_SECONDS(메트릭 입자)
+    보다 짧아도 된다 — SG 전체개방 같은 위협은 빨리 봐야 하기 때문이다. 그 경우 collector 가
+    같은 입자를 다시 받아오지 않도록 적재된 요약을 재사용한다(#255).
+    """
 
     model_config = _ENV_ONLY
 
     METRIC_LOOKBACK_DAYS: int = Field(default=14, gt=0)
     METRIC_PERIOD_SECONDS: int = Field(default=3600, gt=0)
+    SCAN_INTERVAL_SECONDS: int = Field(default=300, gt=0)
 
 
 @lru_cache
