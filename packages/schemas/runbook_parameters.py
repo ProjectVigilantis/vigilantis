@@ -330,6 +330,28 @@ def bind_candidate_parameters(data: Any) -> Any:
     return {**data, "parameters": model.model_validate(raw)}
 
 
+def bind_precheck_parameters(data: Any) -> Any:
+    """dict 입력의 parameters를 runbook_id가 지정한 **실행 파라미터** 모델로 검증한다.
+
+    bind_candidate_parameters와 같은 규약이고 표만 다르다 — 이쪽은 확정 10종 전부를
+    가진 PRECHECK_PARAMETER_MODELS다. 후보가 될 수 없는 롤백 3종(ADR-0004 정책 ②)도
+    실행 파라미터 계약은 가지므로, 원복 경로의 가드레일 ①이 이 표로 대조한다.
+    """
+    if not isinstance(data, dict):
+        return data
+    try:
+        runbook_id = RunbookId(data.get("runbook_id"))
+    except (ValueError, TypeError):
+        return data  # runbook_id 오류는 필드 검증이 보고한다
+    model = PRECHECK_PARAMETER_MODELS.get(runbook_id)
+    if model is None:
+        return data  # 확정 10종 밖 — 목록 대조는 가드레일 ②가 한다
+    raw = data.get("parameters", {})
+    if not isinstance(raw, dict):
+        return data
+    return {**data, "parameters": model.model_validate(raw)}
+
+
 def build_precheck_parameters(
     runbook_id: RunbookId,
     parameters: CandidateParameters,

@@ -1,7 +1,7 @@
 # ==============================================================================
 # [파일 설명]  담당: 김세혁 (Infra & DevSecOps)
-# 자산 자동 원복(Auto-Rollback) 동작입니다. get_waiter로 개별 실행의 Status Check
-# 결과를 보고, 기동 실패·타임아웃이면 BackupRecord의 이전 스펙으로 되돌립니다.
+# 자산 자동 원복(Auto-Rollback)의 판정 축입니다. get_waiter로 개별 실행의 2/2 Status
+# Check 결과를 보고 "되돌려야 하는가"를 가릅니다 — 되돌리는 동작 자체는 여기 없습니다.
 # 비종료 실행 회수 스캔은 dispatcher.py가, ActionExecution 상태 전이·커밋은
 # workflows.py가 소유합니다 — services/aws/backup.py와
 # workflows.store_instance_spec_backup()이 나눈 것과 같은 경계입니다.
@@ -19,10 +19,14 @@
 #   - 대기 시간은 설정값이다(STATUS_CHECK_WAIT_*). 시연에서 조여야 할 값이라
 #     코드 상수로 굳히지 않는다.
 #
+# 자동 원복 자체는 이 모듈에 있지 않습니다 (Issue #241). 여기는 "되돌려야 하는가"를
+# 가르는 판정까지이고, 되돌리는 동작은 executor.execute_revert_size(), 발동·상태
+# 확정은 workflows·dispatcher가 나눠 갖습니다 — AWS 호출은 services/aws/**, 커밋
+# 순서는 workflows.py라는 같은 경계입니다.
+#
 # [남은 작업]
-# 1. 실패 시 BackupRecord 이전 스펙으로 자동 원복 — RUNBOOK_EC2_REVERT_SIZE 실행과
-#    trigger_source=AUTO_ON_FAILURE 발동 경로 (Issue #241)
-# 2. 원복 결과를 반환 — ActionExecution 상태 기록·알림은 호출부 소유
+# 1. 롤백 나머지 2종(UNISOLATE·SG_RECREATE)의 트리거 판단 — 둘 다 관제자 발동이라
+#    여기 감시가 필요한지부터 정해야 합니다
 #
 # 대기는 호출 스레드를 붙잡습니다. 스캔 잡이 겹쳐 돌지 않으므로(dispatcher.py
 # max_instances=1) 판정 1건이 최대 Delay×MaxAttempts만큼 다음 스캔을 미룹니다 —

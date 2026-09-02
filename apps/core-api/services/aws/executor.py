@@ -15,18 +15,25 @@
 #     때만 조회하도록 나누는 것은 ADR-0006 §3이 금지한다.
 #
 # 실행 범위: RUNBOOK_EC2_RIGHTSIZING = execute_rightsizing(). (Issue #211, §실행)
+#            RUNBOOK_EC2_REVERT_SIZE  = execute_revert_size(). (Issue #241, §원복)
 #   - precheck과 같은 규약으로 예외를 던지지 않는다. 단계별 결과는 ExecutionStepResult로
 #     돌려주고, 저장·커밋 순서는 workflows.py가 소유한다.
+#   - 원복은 되돌릴 값을 인자로만 받는다 — 백업 레코드 조회는 호출부(workflows) 몫이다.
+#     원천이 하나라는 정책(ADR-0004 정책 ③)은 값을 뽑는 자리가 하나일 때만 성립한다.
 #
 # [남은 작업]
-# 1. 나머지 9종 실행 함수 — 백업이 필요한 런북은 백업 commit 이후에만 진입한다
-# 2. 롤백 3종 실행도 executor 경유 — 트리거 판단·감시는 rollback.py 담당
+# 1. 나머지 8종 실행 함수 — 백업이 필요한 런북은 백업 commit 이후에만 진입한다
+# 2. 롤백 나머지 2종(RUNBOOK_EC2_UNISOLATE·RUNBOOK_SG_RECREATE) 실행도 executor 경유 —
+#    트리거 판단·감시는 rollback.py 담당
 #
 # 파라미터 계약의 원천은 packages/schemas/runbook_parameters.py의 typed 모델이다(#154).
-# 형식 위반은 AI 후보라면 ① Schema Check에서 먼저 걸리고, 여기 _validate_params는 같은
-# 모델로 한 번 더 본다 — ④를 타는 경로가 그것만이 아니기 때문이다(롤백 3종·시스템
-# 트리거는 ①을 거치지 않는다). 후보(RunbookCandidateDraft)를 여기 parameters로 바꾸는
-# 변환은 runbook_parameters.py의 build_precheck_parameters()다.
+# 형식 위반은 ① Schema Check에서 먼저 걸리고, 여기 _validate_params는 같은 모델로 한 번
+# 더 본다 — ④를 타는 경로가 그것만이 아니기 때문이다. **롤백 3종도 ①을 거친다**
+# (ADR-0004 정책 ①, Issue #241): ①이 문맥별 파라미터 계약을 골라 대조하므로
+# (ai/guardrails.py `_PARAMETER_MODELS_BY_CONTEXT`) 후보가 없는 원복 명령도 통과한다.
+# 후보(RunbookCandidateDraft)를 여기 parameters로 바꾸는 변환은
+# runbook_parameters.py의 build_precheck_parameters()이며, 원복 명령의 parameters는
+# 이미 실행 파라미터 계약의 값이라 변환이 없다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -1043,10 +1050,16 @@ def precheck(
 STEP_STOP_INSTANCE = "STOP_INSTANCE"
 STEP_MODIFY_INSTANCE_TYPE = "MODIFY_INSTANCE_TYPE"
 STEP_START_INSTANCE = "START_INSTANCE"
+# 원복 전 상태 대조(ADR-0008 §3-2). 자산을 바꾸지 않는 단계라, 원복을 **진행하는**
+# 경우에는 기록하지 않는다 — 기록하면 "단계 1건 이상 = 자산이 바뀌었을 수 있다"는
+# 회수 규약(ADR-0008 §7)이 거짓이 되어, 아무것도 안 바꾼 실행이 재실행 대신 종료
+# 판정으로 가서 실패로 확정된다. 남기는 것은 대조 자체가 결론인 두 경우뿐이다.
+STEP_COMPARE_INSTANCE_TYPE = "COMPARE_INSTANCE_TYPE"
 
 _OP_STOP = "ec2.stop_instances"
 _OP_MODIFY = "ec2.modify_instance_attribute"
 _OP_START = "ec2.start_instances"
+_OP_DESCRIBE = "ec2.describe_instances"
 
 # 정지 확인 대기 — 5초 간격 40회(최대 200초). 초과는 "실패"가 아니라 "상태 불명"이라
 # 단계 effect가 UNKNOWN이 되고, 타입 변경으로 넘어가지 않는다.
@@ -1059,15 +1072,29 @@ _SUMMARY_LIMIT = 400
 
 @dataclass(frozen=True)
 class ExecutionOutcome:
-    """실행 1건의 결과. steps는 시도한 순서 그대로다."""
+    """실행 1건의 결과. steps는 시도한 순서 그대로다.
+
+    deferred는 **판정을 못 해 자산을 만지지 않았다**는 뜻이다(원복 경로 전용).
+    실패와 나누는 이유는 rollback.StatusCheckOutcome.probe_failed와 같다 — AWS에
+    물어보지 못한 것은 조치가 실패했다는 근거가 아니고, 확정하면 되돌릴 것이 없는
+    자산에 "원복 실패" 기록이 붙는다. 보류는 단계를 남기지 않으므로 다음 주기가
+    처음부터 다시 시도한다(ADR-0008 §7). 재시도 상한은 Issue #249다.
+    """
 
     steps: tuple[ExecutionStepResult, ...] = ()
     reason_code: Optional[PrecheckReasonCode] = None
     error_summary: Optional[str] = None
+    deferred: bool = False
 
     def __post_init__(self) -> None:
         if (self.reason_code is None) != (self.error_summary is None):
             raise ValueError("실패에는 reason_code와 error_summary가 함께 필요합니다")
+        if self.deferred:
+            if self.reason_code is None:
+                raise ValueError("보류에도 분류 코드가 필요합니다")
+            if self.steps:
+                # 자산을 만졌으면 보류가 아니다 — 되돌릴 것이 남은 실패다
+                raise ValueError("보류 결과에는 단계 기록이 없어야 합니다")
 
     @property
     def succeeded(self) -> bool:
@@ -1304,6 +1331,177 @@ def execute_rightsizing(
     log.succeed(
         ExecutionEffect.APPLIED,
         "기동 요청 접수(2/2 Status Check 확인은 별도 축)",
+        response=response,
+    )
+    return ExecutionOutcome(steps=tuple(log.steps))
+
+
+# ------------------------------------------------------------------ 원복 (Issue #241)
+def current_instance_type(instance_id: str, region: str):
+    """(현재 인스턴스 타입, 사유 코드) 짝. 타입을 읽지 못하면 코드가 채워진다.
+
+    실행과 종료 판정이 같은 축을 같은 방법으로 읽어야 해서 공개한다(ADR-0008 §3-2의
+    대조와 workflows.judge_revert_size의 실자산 대조가 그 둘이다). 읽는 방법이 갈리면
+    "되돌아왔는가"의 답이 자리마다 달라진다.
+    """
+    instance, code = _instance(instance_id, region)
+    if code is not None:
+        return None, code
+    found = instance.get("InstanceType")
+    if not _non_empty_str(found):
+        # 조회는 됐는데 타입이 없다 — 대조할 축이 없으므로 대상 상태 문제다
+        return None, R.PRECHECK_INVALID_STATE
+    return str(found), None
+
+
+def _deferred(code: PrecheckReasonCode, detail: str) -> ExecutionOutcome:
+    """대조하지 못해 원복을 시작하지 않았다 — 실패가 아니라 보류다."""
+    logger.warning(
+        "revert_size_deferred",
+        extra={"reason_code": code.value, "aws_operation": _OP_DESCRIBE},
+    )
+    return ExecutionOutcome(reason_code=code, error_summary=detail, deferred=True)
+
+
+def execute_revert_size(
+    target_arn: str,
+    *,
+    restore_instance_type: str,
+    applied_instance_type: str,
+    restore_state: str,
+    record_step: Optional[StepRecorder] = None,
+) -> ExecutionOutcome:
+    """`RUNBOOK_EC2_REVERT_SIZE` 실행 — 상태 대조 → 정지 → 타입 원복 → 기동. (Issue #241)
+
+    execute_rightsizing과 같은 규약이다 — **예외를 던지지 않고** 단계별 결과를
+    돌려준다. 다른 것은 앞에 붙는 대조 하나다.
+
+    **되돌릴 값은 전부 인자로 받는다.** 이 함수는 백업 레코드도 DB도 읽지 않는다 —
+    원복 값의 유일한 원천이 백업 레코드라는 정책(ADR-0004 정책 ③)은 호출부가 그
+    레코드에서만 값을 뽑아 넘길 때 성립하며, 여기서 다시 조회하면 원천이 둘이 된다.
+    `restore_state`도 같은 이유로 백업 payload의 `state`다 — 원본 실행이 정지 응답에서
+    읽은 PreviousState는 그 실행 안에서만 쓴다(ADR-0008 §4).
+
+    **`applied_instance_type`은 원본 조치가 적용한 타입이다.** 되돌릴 값이 아니라
+    대조 축이며, 이것이 없으면 아래 3분기 중 ②와 ③을 가를 수 없다.
+
+    상태 대조 3분기(ADR-0008 §3-2) — 위에서 아래로, 처음 일치하는 곳에서 멈춘다.
+      ① 현재 타입 == 백업 값: 변경이 적용되지 않았거나 누군가 이미 되돌렸다 →
+         **AWS 변경 호출을 하지 않는다.** 되돌릴 것이 없음을 NOT_APPLIED 단계로 남긴다.
+         원본 조치가 타입을 실제로 바꾸지 않은 경우 ①과 ②가 동시에 참인데 ①이 이긴다 —
+         할 일이 없는 실행을 거절로 올려 사람을 부르지 않기 위해서다.
+      ② 현재 타입 == 원본이 적용한 값: 우리가 바꾼 그대로다 → 원복을 진행한다.
+      ③ 둘 다 아님: 제3자가 그사이 타입을 바꿨다 → **중단하고 CRITICAL.** 자동
+         재시도는 없다(ADR-0008 §6). 백업을 무조건 진실로 삼으면 원복이 남의 변경을
+         조용히 덮어쓴다 — 조회 1회로 막을 수 있으면 막는다.
+
+    대조 자체를 하지 못하면(AWS 조회 실패) 원복을 진행하지 않고 **보류**한다.
+    검증기의 실패는 자산이 제3자에게 바뀌었다는 근거가 아니다.
+    """
+    target = parse_arn(target_arn)
+    if target is None or target.resource_type != "instance":
+        return _rejected(f"인스턴스 ARN이 아닙니다: {target_arn}")
+    if not _non_empty_str(restore_instance_type):
+        return _rejected("백업 레코드의 instance_type이 비어 있습니다")
+    if not _non_empty_str(applied_instance_type):
+        return _rejected("원본 조치가 적용한 instance_type을 알 수 없습니다")
+
+    instance_id = target.resource_id
+    current, code = current_instance_type(instance_id, target.region)
+    if code is not None:
+        if code is R.PRECHECK_TARGET_NOT_FOUND:
+            # 인스턴스가 없으면 되돌릴 대상이 없다 — 다시 물어도 답은 같으므로 확정한다
+            return ExecutionOutcome(
+                reason_code=code,
+                error_summary=f"원복 대상 인스턴스를 찾을 수 없습니다: {instance_id}",
+            )
+        return _deferred(code, f"상태 대조 실패로 원복 보류: {code.value}")
+
+    log = _StepLog(target_arn, record_step)
+
+    if current == restore_instance_type:
+        log.begin(1, STEP_COMPARE_INSTANCE_TYPE, _OP_DESCRIBE)
+        log.succeed(
+            ExecutionEffect.NOT_APPLIED,
+            f"이미 백업 스펙 상태입니다({current}) — 되돌릴 것이 없어 변경하지 않음",
+        )
+        return ExecutionOutcome(steps=tuple(log.steps))
+
+    if current != applied_instance_type:
+        log.begin(1, STEP_COMPARE_INSTANCE_TYPE, _OP_DESCRIBE)
+        detail = (
+            f"제3자 변경 감지 — 현재 {current}, 백업 {restore_instance_type},"
+            f" 조치 적용 {applied_instance_type}"
+        )
+        log.succeed(ExecutionEffect.NOT_APPLIED, f"{detail}. 원복을 중단합니다")
+        logger.critical(
+            "revert_size_third_party_drift",
+            extra={
+                "instance_id": instance_id,
+                "current_instance_type": current,
+                "restore_instance_type": restore_instance_type,
+                "applied_instance_type": applied_instance_type,
+            },
+        )
+        return ExecutionOutcome(
+            steps=tuple(log.steps),
+            reason_code=R.PRECHECK_INVALID_STATE,
+            error_summary=detail[:_SUMMARY_LIMIT],
+        )
+
+    # ② 우리가 바꾼 그대로다 — 대조는 기록하지 않는다(STEP_COMPARE_INSTANCE_TYPE 주석)
+    ec2 = aws_client("ec2", target.region)
+    log.begin(1, STEP_STOP_INSTANCE, _OP_STOP)
+    try:
+        response = ec2.stop_instances(InstanceIds=[instance_id])
+    except (ClientError, BotoCoreError) as exc:
+        return _abort(log, exc, detail="인스턴스 정지 요청 실패")
+    try:
+        ec2.get_waiter("instance_stopped").wait(
+            InstanceIds=[instance_id],
+            WaiterConfig={
+                "Delay": STOP_WAIT_DELAY_SECONDS,
+                "MaxAttempts": STOP_WAIT_MAX_ATTEMPTS,
+            },
+        )
+    except (ClientError, BotoCoreError) as exc:
+        return _abort(log, exc, detail="정지 확인 실패")
+    log.succeed(
+        ExecutionEffect.APPLIED,
+        f"정지 확인(조치 직전 상태: {_previous_state(response) or '알 수 없음'})",
+        response=response,
+    )
+
+    log.begin(2, STEP_MODIFY_INSTANCE_TYPE, _OP_MODIFY)
+    try:
+        response = ec2.modify_instance_attribute(
+            InstanceId=instance_id, InstanceType={"Value": restore_instance_type}
+        )
+    except (ClientError, BotoCoreError) as exc:
+        return _abort(log, exc, detail="인스턴스 타입 원복 실패")
+    log.succeed(
+        ExecutionEffect.APPLIED,
+        f"타입 원복: {restore_instance_type}",
+        response=response,
+    )
+
+    # 다시 켤지는 백업 레코드의 state가 정한다(ADR-0008 §4) — 조치 이전에 멈춰 있던
+    # 인스턴스를 원복하면서 켜는 것은 되돌리기가 아니라 새 변경이다
+    log.begin(3, STEP_START_INSTANCE, _OP_START)
+    if restore_state != "running":
+        log.succeed(
+            ExecutionEffect.NOT_APPLIED,
+            f"조치 이전 상태가 {restore_state}라 기동하지 않음",
+        )
+        return ExecutionOutcome(steps=tuple(log.steps))
+    try:
+        response = ec2.start_instances(InstanceIds=[instance_id])
+    except (ClientError, BotoCoreError) as exc:
+        # 타입은 되돌아갔고 멈춰 있다 — 원복의 원복은 없으므로 수동 개입이 남는다
+        return _abort(log, exc, detail="원복 후 기동 요청 실패")
+    log.succeed(
+        ExecutionEffect.APPLIED,
+        "기동 요청 접수(2/2 Status Check는 원복 성공 판정의 축이 아니다)",
         response=response,
     )
     return ExecutionOutcome(steps=tuple(log.steps))

@@ -51,6 +51,12 @@ class InstanceSpecBackup(BaseModel):
     AWS가 돌려주지 않을 수 있는 값이라 없다고 조치를 막지는 않는다 — 백업이
     없어서 못 되돌리는 것과, 부가 정보가 비어 있는 것은 다른 사건이다.
 
+    그중 `public_ip_address`·`elastic_ip_association_id`는 **원복 값이 아니라 한계
+    고지의 근거다**(ADR-0008 §5). 타입 변경은 정지를 거치므로 EIP가 붙어 있지 않으면
+    퍼블릭 IPv4가 바뀌고, 원복해도 원래 주소로 돌아오지 않는다. 조치 이전 주소를
+    여기 남겨 두지 않으면 조치 후에는 영영 알 수 없어, "무엇이 안 돌아왔는지"를
+    관제자에게 사실대로 말할 수 없다.
+
     SG 목록은 일부러 담지 않는다. ENI SG 복원의 원천은
     `SAVE_CURRENT_SG_AND_TG_MAPPING`이며(EC2_ISOLATE), 스펙 백업에 SG를 함께
     두면 격리 해제가 잘못된 레코드에서 SG를 복원할 여지가 생긴다.
@@ -71,3 +77,7 @@ class InstanceSpecBackup(BaseModel):
     availability_zone: Optional[str] = None
     vpc_id: Optional[str] = None
     subnet_id: Optional[str] = None
+    # 조치 이전 퍼블릭 IPv4. 원복해도 돌아오지 않으므로 복원 값이 아니라 고지 근거다.
+    public_ip_address: Optional[str] = None
+    # 값이 있으면 EIP가 붙어 있었다는 뜻이라 주소가 유지된다 — 위 고지의 반대 근거다.
+    elastic_ip_association_id: Optional[str] = None
