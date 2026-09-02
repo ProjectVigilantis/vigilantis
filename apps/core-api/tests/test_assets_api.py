@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from schemas.api.assets import AssetType, RelationType
 from schemas.collections import CollectionRunStatus
 from schemas.rules import RuleEvaluationResult
@@ -164,3 +166,133 @@ def test_assets_use_latest_evaluation_when_multiple_runs(client_pg, db):
     assert ec2["verdict"] == "SKIP"
     assert ec2["skip_reason_code"] == "SKIP_LOW_UTIL"
     assert ec2["health_score"] is None
+
+
+# --- #231: collection_status 를 리전별 최신 run 의 최악 상태로 산출 ---------------
+
+US_EAST = "us-east-1"
+
+
+def _run(db, region: str, status: CollectionRunStatus | None, started_at=None):
+    """리전에 수집 실행을 1건 남긴다. status 를 주면 그 상태로 마감한다."""
+    run = assets_repo.start_collection_run(
+        db,
+        account_id=ACCOUNT,
+        region=region,
+        mode="localstack",
+        lookback_days=3,
+        period_seconds=3600,
+    )
+    if started_at is not None:
+        run.started_at = started_at
+    if status is not None:
+        assets_repo.finish_collection_run(
+            db,
+            collection_run_id=run.collection_run_id,
+            status=status,
+            finished_at=NOW,
+        )
+    db.flush()
+    return run
+
+
+@pytest.fixture
+def two_regions(monkeypatch):
+    """수집 대상 리전을 2개로 — 라우터가 설정된 리전만 보므로 함께 지정해야 한다."""
+    from config import get_aws_settings
+
+    monkeypatch.setenv("AWS_REGIONS", f"ap-northeast-2,{US_EAST}")
+    get_aws_settings.cache_clear()
+    yield
+    get_aws_settings.cache_clear()
+
+
+def test_failed_region_is_not_hidden_by_later_success(client_pg, db, two_regions):
+    """리전1 FAILED → 리전2 SUCCESS 순서. 전역 최신 1행만 보면 READY 로 실패가 사라졌다."""
+    _run(db, "ap-northeast-2", CollectionRunStatus.FAILED, started_at=NOW)
+    _run(db, US_EAST, CollectionRunStatus.SUCCESS, started_at=NOW + timedelta(minutes=1))
+
+    body = client_pg.get("/api/v1/assets").json()
+    assert body["collection_status"] == "FAILED"
+
+
+def test_failed_region_surfaces_regardless_of_order(client_pg, db, two_regions):
+    """반대 순서(SUCCESS 가 먼저)에서도 같은 답이어야 한다 — 순서에 의존하지 않는다."""
+    _run(db, "ap-northeast-2", CollectionRunStatus.SUCCESS, started_at=NOW)
+    _run(db, US_EAST, CollectionRunStatus.FAILED, started_at=NOW + timedelta(minutes=1))
+
+    body = client_pg.get("/api/v1/assets").json()
+    assert body["collection_status"] == "FAILED"
+
+
+def test_partial_region_outranks_success(client_pg, db, two_regions):
+    _run(db, "ap-northeast-2", CollectionRunStatus.PARTIAL, started_at=NOW)
+    _run(db, US_EAST, CollectionRunStatus.SUCCESS, started_at=NOW + timedelta(minutes=1))
+
+    body = client_pg.get("/api/v1/assets").json()
+    assert body["collection_status"] == "PARTIAL"
+
+
+def test_all_regions_success_is_ready(client_pg, db, two_regions):
+    _run(db, "ap-northeast-2", CollectionRunStatus.SUCCESS, started_at=NOW)
+    _run(db, US_EAST, CollectionRunStatus.SUCCESS, started_at=NOW + timedelta(minutes=1))
+
+    body = client_pg.get("/api/v1/assets").json()
+    assert body["collection_status"] == "READY"
+
+
+def test_only_latest_run_per_region_counts(client_pg, db, two_regions):
+    """같은 리전의 옛 FAILED 는 그 리전이 이후 성공하면 더는 화면을 잡지 않는다."""
+    _run(db, "ap-northeast-2", CollectionRunStatus.FAILED, started_at=NOW)
+    _run(db, "ap-northeast-2", CollectionRunStatus.SUCCESS, started_at=NOW + timedelta(minutes=5))
+    _run(db, US_EAST, CollectionRunStatus.SUCCESS, started_at=NOW + timedelta(minutes=6))
+
+    body = client_pg.get("/api/v1/assets").json()
+    assert body["collection_status"] == "READY"
+
+
+def test_unconfigured_region_is_ignored(client_pg, db):
+    """수집 대상에서 빠진 리전의 옛 FAILED 가 화면을 영구히 붙잡지 않아야 한다.
+
+    이 테스트는 AWS_REGIONS 를 건드리지 않는다 — 기본값(ap-northeast-2)만 대상이므로
+    us-east-1 행은 조회 범위 밖이다.
+    """
+    _run(db, US_EAST, CollectionRunStatus.FAILED, started_at=NOW)
+    _run(db, "ap-northeast-2", CollectionRunStatus.SUCCESS, started_at=NOW + timedelta(minutes=1))
+
+    body = client_pg.get("/api/v1/assets").json()
+    assert body["collection_status"] == "READY"
+
+
+def test_no_run_in_configured_regions_is_not_collected(client_pg, db):
+    _run(db, US_EAST, CollectionRunStatus.SUCCESS, started_at=NOW)
+
+    body = client_pg.get("/api/v1/assets").json()
+    assert body["collection_status"] == "NOT_COLLECTED"
+
+
+# --- 순수 함수: 심각도 순서 (DB 불필요) ---
+
+
+class _Run:
+    def __init__(self, status):
+        self.status = status
+
+
+@pytest.mark.parametrize(
+    "statuses, expected",
+    [
+        ([CollectionRunStatus.SUCCESS, CollectionRunStatus.FAILED], CollectionRunStatus.FAILED),
+        ([CollectionRunStatus.SUCCESS, CollectionRunStatus.PARTIAL], CollectionRunStatus.PARTIAL),
+        ([CollectionRunStatus.PARTIAL, CollectionRunStatus.FAILED], CollectionRunStatus.FAILED),
+        # 아직 안 끝난 리전이 있으면 READY 로 확정하지 않는다
+        ([CollectionRunStatus.SUCCESS, CollectionRunStatus.IN_PROGRESS], CollectionRunStatus.IN_PROGRESS),
+        # 실패는 진행 중보다 위 — 늦게 보여줄 이유가 없다
+        ([CollectionRunStatus.IN_PROGRESS, CollectionRunStatus.FAILED], CollectionRunStatus.FAILED),
+        ([CollectionRunStatus.SUCCESS], CollectionRunStatus.SUCCESS),
+    ],
+)
+def test_worst_status_picks_the_worst(statuses, expected):
+    from routers.assets import _worst_status
+
+    assert _worst_status([_Run(s) for s in statuses]) == expected

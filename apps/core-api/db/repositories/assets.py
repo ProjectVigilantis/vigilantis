@@ -63,13 +63,26 @@ def finish_collection_run(
     return result.rowcount == 1
 
 
-def latest_collection_run(db: Session) -> Optional[models.CollectionRun]:
-    """가장 최근에 시작된 수집 실행 — 목록 응답의 collection_status 원천. (Issue #68)"""
-    return db.execute(
+def latest_collection_run_per_region(
+    db: Session, *, regions: Optional[Sequence[str]] = None
+) -> list[models.CollectionRun]:
+    """리전별로 가장 최근에 시작된 수집 실행을 1건씩. (Issue #231)
+
+    C4(#222)로 수집이 리전 단위 독립 트랜잭션이 되면서 한 사이클에 CollectionRun 이
+    리전 수만큼 생긴다. 전역 최신 1행만 보면 리전1 FAILED → 리전2 SUCCESS 순서일 때
+    실패가 성공에 가려진다 — 화면이 READY 로 뜬다.
+
+    regions 를 주면 그 리전만 본다. 수집 대상에서 빠진 리전의 옛 FAILED 가 화면을
+    영구히 붙잡지 않게 하려는 것이다.
+    """
+    stmt = (
         select(models.CollectionRun)
-        .order_by(models.CollectionRun.started_at.desc())
-        .limit(1)
-    ).scalar_one_or_none()
+        .distinct(models.CollectionRun.region)  # DISTINCT ON — 리전별 첫 행
+        .order_by(models.CollectionRun.region, models.CollectionRun.started_at.desc())
+    )
+    if regions is not None:
+        stmt = stmt.where(models.CollectionRun.region.in_(list(regions)))
+    return list(db.execute(stmt).scalars().all())
 
 
 def last_finished_collection_at(db: Session) -> Optional[datetime]:

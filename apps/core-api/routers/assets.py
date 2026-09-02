@@ -29,6 +29,7 @@ from schemas.api.assets import (
 )
 from schemas.collections import CollectionRunStatus
 
+from config import get_aws_settings
 from db import models
 from db.repositories import assets as assets_repo
 from db.session import get_db
@@ -41,6 +42,21 @@ _COLLECTION_STATUS = {
     CollectionRunStatus.PARTIAL: CollectionStatus.PARTIAL,
     CollectionRunStatus.FAILED: CollectionStatus.FAILED,
 }
+
+# 리전별 최신 run 을 하나로 접을 때의 우선순위 — 나쁜 쪽이 이긴다. (Issue #231)
+# IN_PROGRESS 가 SUCCESS 보다 위인 이유: 아직 안 끝난 리전이 있는데 READY 로 확정하면
+# 다음 순간 FAILED 로 뒤집힌다. 실패는 진행 중보다 위다 — 실패를 늦게 보여줄 이유가 없다.
+_STATUS_SEVERITY = {
+    CollectionRunStatus.SUCCESS: 0,
+    CollectionRunStatus.IN_PROGRESS: 1,
+    CollectionRunStatus.PARTIAL: 2,
+    CollectionRunStatus.FAILED: 3,
+}
+
+
+def _worst_status(runs: list[models.CollectionRun]) -> CollectionRunStatus:
+    """리전별 최신 run 들 중 가장 나쁜 상태. 빈 목록은 호출 전에 걸러야 한다."""
+    return max((run.status for run in runs), key=_STATUS_SEVERITY.__getitem__)
 
 
 def _to_item(
@@ -98,8 +114,12 @@ def _to_item(
 
 @router.get("/assets", response_model=AssetsResponse)
 def get_assets(db: Session = Depends(get_db)) -> AssetsResponse:
-    latest_run = assets_repo.latest_collection_run(db)
-    if latest_run is None:
+    # 전역 최신 1행이 아니라 리전별 최신 run 을 모아 최악 상태로 접는다 — 리전 격리(C4)
+    # 이후 FAILED → SUCCESS 순서면 실패가 가려졌다. (Issue #231)
+    runs = assets_repo.latest_collection_run_per_region(
+        db, regions=get_aws_settings().regions_list()
+    )
+    if not runs:
         # 수집 이력이 전혀 없음 — 계약상 목록·last_collected_at도 비어 있어야 한다
         return AssetsResponse(collection_status=CollectionStatus.NOT_COLLECTED)
 
@@ -113,7 +133,7 @@ def get_assets(db: Session = Depends(get_db)) -> AssetsResponse:
         for asset in assets_repo.list_assets(db)
     ]
     return AssetsResponse(
-        collection_status=_COLLECTION_STATUS[latest_run.status],
+        collection_status=_COLLECTION_STATUS[_worst_status(runs)],
         last_collected_at=assets_repo.last_finished_collection_at(db),
         items=items,
     )
