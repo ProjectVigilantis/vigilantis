@@ -13,6 +13,11 @@
 #     나중에 자산을 다시 읽는 쪽이 **예전 판정 + 최신 자산**을 한 시점인 양 조립하게
 #     된다 — t3.xlarge에서 COST_CANDIDATE가 난 뒤 다음 회차에 t3.medium으로 바뀌면
 #     이미 줄어든 인스턴스에 그 판정이 붙는다.
+#     이 대조는 판정을 만든 쪽이 자산 행과 같은 회차를 쓸 때만 성립한다. 지금은
+#     run_rule_engine이 회차 인자 없이 불려 자산 행의 last_collection_run_id를 그대로
+#     쓰지만(services/rule_engine.py), 나중에 회차를 명시로 넘기면 그 회차에 관측되지
+#     않은 자산에도 그 회차 ID가 찍혀 정상 판정이 여기서 거절된다 — 호출부를 붙이는
+#     쪽이 확인할 것.
 #   - 보장 둘을 분리한다. 이 계약이 담는 것은 **Incident 생성 근거**(Detection 당시
 #     자산 + 같은 회차 판정)이고, **현재 조치 가능성**은 AI 제안이 나온 직후 가드레일
 #     ④ AWS Dry-Run이 한 번 본다(precheck — ADR-0007). 최신 상태가 필요해도 Detection
@@ -22,9 +27,10 @@
 #     아끼려 판정 단계가 이미 거른 자산이라 여기 오지 않는다(services/rule_engine.py).
 #   - THREAT 판정은 Incident를 만들지 않는다. SECOPS Incident는 DB CHECK
 #     category_risk_shape가 title·initial_risk_level·사유 코드 1개 이상을 요구하는데
-#     (db/models.py Incident) 자산 판정에는 그 셋을 채울 값이 없다. 전체개방 SG의
-#     위험도는 Risk Evaluator가 위협 이벤트에서 내며, SECOPS Incident는 그 경로에서만
-#     생긴다.
+#     (db/models.py Incident) 자산 판정에는 그 셋을 채울 값이 없다. **차단이지 탐지
+#     제거가 아니다** — 전체개방 SG는 OPEN_IP 위협 이벤트로 들어와 Risk Evaluator가
+#     위험도를 내고(events.py ThreatEventType.OPEN_IP · security/risk_evaluator.py),
+#     SECOPS Incident는 그 경로 하나로 모인다.
 #   - Incident 분류 축과 Runbook Registry 도메인 축은 별개다(SSOT §Action Whitelist
 #     "분류 축 주의"). UNUSED SG가 부르는 RUNBOOK_SG_DELETE_ISOLATED는 Registry에서
 #     SECOPS지만 그 Incident는 FINOPS다 — 위협 이벤트가 없어 SECOPS 형태를 채울 수

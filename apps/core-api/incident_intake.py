@@ -5,6 +5,10 @@
 # 진입 타입은 packages/schemas/intake.py의 IncidentIntake 하나입니다.
 #
 # 계층 경계 — workflows.py와 같은 3층 분리를 따릅니다(Router → Workflow → Repository).
+# 같은 계층이지만 파일을 나눈 것은, 그쪽이 **이미 만들어진 인시던트의 조치**를
+# 접수·실행·확정하는 자리이고 이쪽은 **그 인시던트를 만드는** 자리이기 때문입니다.
+# 실패 처리가 그래서 다릅니다 — 접수는 요청 1건에 대한 오류를 호출자에게 돌려주면
+# 끝이고, 수집 주기가 부르는 이 흐름은 실패해도 다음 주기가 다시 만듭니다.
 #   - commit은 여기서만 합니다. Repository는 commit하지 않습니다.
 #   - 판정 자체를 하지 않습니다. 어떤 자산·위협이 Incident가 되는지는 판정 계층이
 #     이미 정했고(services/rule_engine.py · security/risk_evaluator.py), 그 결과가
@@ -47,7 +51,9 @@
 #    않습니다. 이 결정 전까지 그래프 입력이 Detection 시점 자산을 얻을 수 없습니다.
 # 3. 판정 계층에서 이 진입점을 부르는 자리 — services/scheduler.py의 수집 파이프라인
 #    (담당: 김세혁·김승철)과 위협 주입 경로. 위협 주입 방식은 ADR-0006이 별도 결정
-#    대상으로 남겼습니다.
+#    대상으로 남겼습니다. 이때 DB 행에서 AssetItem을 만드는 자리도 함께 정합니다 —
+#    지금 그 변환은 routers/assets.py의 private 함수 하나뿐인데, 이 계층이 Router
+#    내부를 import하면 위 3층 분리가 깨집니다.
 # 4. FINOPS 미종료 판정의 기준 상태 집합 — RESOLVED 외에 무엇을 종료로 볼지는
 #    Incident 상태 6종(api/incidents.py)과 함께 확정합니다.
 # ==============================================================================

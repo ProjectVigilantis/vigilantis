@@ -14,12 +14,21 @@
 #   1. 스캔      status=ANALYZING · agent_invocation_status=PENDING
 #   2. 선점      claim_agent_invocation — PENDING→IN_PROGRESS 조건부 UPDATE 1건.
 #                성공한 호출자만 그래프를 부릅니다(ADR-0005 결정 2). 실패는 다른
-#                주체가 이미 가져간 것이라 건너뜁니다.
+#                주체가 이미 가져간 것이라 건너뜁니다. **선점에 성공하면 곧바로
+#                commit해 행 잠금을 놓습니다** — Repository는 commit하지 않으므로
+#                (db/repositories/incidents.py) 여기서 끊지 않으면 선점한 행이 잠긴
+#                채 4번의 모델 호출 시간을 통과합니다. 4번이 트랜잭션 밖에서 도는
+#                전제가 이 commit입니다.
 #   3. 입력 빌드 DB에서 읽어 typed snapshot을 만듭니다. Graph Node는 DB를 직접
 #                조회하지 않습니다(schemas/agents.py 계약 원칙). **자산 문맥은 최신
 #                자산 행이 아니라 Detection 당시 스냅샷입니다** — 아래 별도 항.
-#   4. 그래프 호출 **여기서 DB 트랜잭션을 열어 두지 않습니다.** 모델 호출은 초 단위라
-#                트랜잭션을 걸치면 그 시간만큼 행 잠금이 살아 있습니다.
+#                **조립을 마치면 읽기 트랜잭션도 닫습니다.** 2번에서 commit했더라도
+#                여기서 조회를 하면 같은 Session이 트랜잭션을 다시 엽니다(SQLAlchemy
+#                autobegin). 끊는 방법은 둘 중 하나입니다 — 같은 Session이면 조립 후
+#                rollback으로 닫고, 아니면 짧은 별도 Session에서 조립하고 닫습니다.
+#   4. 그래프 호출 **트랜잭션이 닫힌 상태에서만 부릅니다.** 모델 호출은 초 단위라,
+#                걸친 채로 부르면 커넥션 1개가 그 시간만큼 트랜잭션에 묶인 채
+#                남습니다(선점 행 잠금 자체는 2번의 commit이 이미 놓았습니다).
 #   5. 검증      출력 모델 단독으로 볼 수 없어 계약이 Workflow 몫으로 못 박은 둘을
 #                여기서 봅니다(schemas/agents.py 계약 원칙) —
 #                ⓐ 후보 evidence_ids ⊆ 입력 Evidence  ⓑ FINOPS의 reviewed_risk_level=null

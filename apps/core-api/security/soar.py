@@ -18,6 +18,8 @@
 #
 # [Post-MVP]
 # 0.5초 실환경 선제 차단이 필요해지면 이 자리가 Lambda/EventBridge로 나갑니다
-# (ADR-0001 Post-MVP 전환 경로). MVP 범위에서는 PRE_MITIGATION_0_5S를 갖는 런북이
-# RUNBOOK_EC2_ISOLATE 하나뿐이고 그 런북은 P2입니다.
+# (ADR-0001 Post-MVP 전환 경로). MVP 범위에서 PRE_MITIGATION_0_5S로 발동하는 런북은
+# RUNBOOK_EC2_ISOLATE 하나뿐이고 그 런북은 P2입니다 — 출처는 SSOT의 Action Whitelist
+# 표이며, 런북별 trigger_source 매핑은 코드에 없습니다(TriggerSource는 실행 레코드에
+# 붙는 값입니다).
 # ==============================================================================
