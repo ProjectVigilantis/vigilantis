@@ -191,10 +191,6 @@ def test_rollback_runbooks_are_listed_but_not_ai_recommendable(runbook_id: str) 
 _GOLDEN_ASSET_RUNBOOKS = {
     "ec2_instances": RunbookId.RUNBOOK_EC2_RIGHTSIZING.value,
     "security_groups": RunbookId.RUNBOOK_SG_DELETE_ISOLATED.value,
-    # EBS 는 골든에 asset_inventory_004(미연결 볼륨 판정 정답)가 들어오면서 생겼다.
-    # 이 매핑을 비워 두면 test_golden_asset_arns_pass_all_four_steps 가 "매핑에 없는
-    # 자산 종류"로 막는다 — #134(SG 누락)가 조용히 지나간 뒤 세운 가드다. (#264)
-    "ebs_volumes": RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED.value,
 }
 
 
