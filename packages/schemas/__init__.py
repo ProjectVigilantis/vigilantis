@@ -82,6 +82,14 @@ from .guardrails import (
     SchemaCheckReasonCode,
 )
 from .incidents import AGENT_TERMINAL_STATUSES, AgentInvocationStatus, AgentWaitSchedule
+from .intake import (
+    INCIDENT_INTAKE_ADAPTER,
+    INCIDENT_TRIGGERING_VERDICTS,
+    DetectionAssetSnapshot,
+    FinOpsIncidentIntake,
+    IncidentIntake,
+    SecOpsIncidentIntake,
+)
 from .precheck import (
     PrecheckOutcome,
     PrecheckReasonCode,
@@ -179,6 +187,7 @@ __all__ = [
     "build_verification_summary",
     "CandidateStatus",
     "CollectionRunStatus",
+    "DetectionAssetSnapshot",
     "domain_of",
     "EbsAsset",
     "Ec2Asset",
@@ -196,6 +205,7 @@ __all__ = [
     "ExecutionStepResult",
     "ExecutionStepStatus",
     "FinOpsGraphInput",
+    "FinOpsIncidentIntake",
     "GUARDRAIL_STEP_ORDER",
     "GuardrailDecision",
     "GuardrailReasonCode",
@@ -205,6 +215,9 @@ __all__ = [
     "GuardrailValidationContext",
     "GuardrailValidationRequest",
     "GuardrailValidationResult",
+    "INCIDENT_INTAKE_ADAPTER",
+    "INCIDENT_TRIGGERING_VERDICTS",
+    "IncidentIntake",
     "InitialRiskEvaluationResult",
     "InstanceSpecBackup",
     "is_ai_recommendable",
@@ -234,6 +247,7 @@ __all__ = [
     "RunbookId",
     "SchemaCheckReasonCode",
     "SecOpsGraphInput",
+    "SecOpsIncidentIntake",
     "SecurityGroupAsset",
     "SshBruteForceThreatInput",
     "SshBruteForceThreatPayload",
