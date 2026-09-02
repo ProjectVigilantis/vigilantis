@@ -186,6 +186,14 @@ class AssetInventory(BaseModel):
     collected_at: datetime = Field(default_factory=_utcnow, description="수집 시각(UTC)")
     lookback_days: int = Field(..., description="메트릭 조회 기간(일)")
     period_seconds: int = Field(..., description="메트릭 집계 주기(초)")
+    metrics_window_end: Optional[datetime] = Field(
+        None,
+        description=(
+            "메트릭 요약을 재사용했을 때 그 **원본 창의 끝**(UTC). None 이면 이번 회차에 직접 "
+            "조회했다는 뜻이고 창의 끝은 collected_at 이다. 재사용 시 창을 collected_at 으로 "
+            "적으면 받지도 않은 구간을 관측한 것처럼 남는다(#255)."
+        ),
+    )
     ec2_instances: list[Ec2Asset] = Field(default_factory=list)
     security_groups: list[SecurityGroupAsset] = Field(default_factory=list)
     nacls: list[NaclAsset] = Field(default_factory=list)

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -799,3 +799,105 @@ def test_all_five_skip_reason_codes_persisted(db, five_skip_inventory):
 
     # 5종 전량 = SkipReasonCode enum 전량. 6번째 코드가 추가되면 깨져서 "5종" 전제가 낡았음을 알린다.
     assert set(persisted.values()) == {c.value for c in SkipReasonCode}
+
+
+# --- #255: 메트릭 재사용 창·조회 -------------------------------------------------
+
+
+def test_reused_summary_is_persisted_with_original_window(db, mock_inventory):
+    """재사용한 요약은 이번 회차 시각이 아니라 **원본 창**으로 적재돼야 한다.
+
+    collected_at 을 창의 끝으로 적으면 받아오지도 않은 최근 구간을 관측한 것처럼 남는다.
+    """
+    original_end = mock_inventory.collected_at - timedelta(minutes=45)
+    inv = mock_inventory.model_copy(update={"metrics_window_end": original_end})
+
+    persist_inventory(inv, db)
+
+    asset = db.execute(
+        select(models.Asset).where(models.Asset.resource_id == "i-idle001")
+    ).scalar_one()
+    row = db.execute(
+        select(models.MetricSummary).where(models.MetricSummary.asset_id == asset.asset_id)
+    ).scalar_one()
+    assert row.window_end == original_end
+    assert row.window_start == original_end - timedelta(days=inv.lookback_days)
+    # 자산 자체의 수집 시각은 이번 회차 그대로 — 인벤토리는 방금 받았다
+    assert asset.collected_at == inv.collected_at
+
+
+def test_fresh_lookup_returns_recent_rows_and_skips_stale(db, mock_inventory):
+    """조회는 입자 안(cutoff 이후)에 수집된 요약만 돌려준다 — 재사용 판단의 근거."""
+    from db.repositories import assets as assets_repo
+
+    persist_inventory(mock_inventory, db)
+
+    cutoff = mock_inventory.collected_at - timedelta(seconds=mock_inventory.period_seconds)
+    window_end, fresh = assets_repo.fresh_ec2_metric_summaries(
+        db, region="ap-northeast-2", not_older_than=cutoff
+    )
+    assert set(fresh) == {"i-idle001"}
+    assert fresh["i-idle001"].cpu_avg == 1.5
+    assert fresh["i-idle001"].cpu_datapoints == 336
+    assert window_end == mock_inventory.collected_at
+
+    # 입자를 지난 시점을 기준으로 잡으면 같은 행이 더는 재사용 대상이 아니다
+    stale_cutoff = mock_inventory.collected_at + timedelta(seconds=1)
+    assert assets_repo.fresh_ec2_metric_summaries(
+        db, region="ap-northeast-2", not_older_than=stale_cutoff
+    ) == (None, {})
+
+
+def test_fresh_lookup_is_scoped_to_region(db, mock_inventory):
+    """다른 리전의 요약을 끌어다 쓰면 안 된다 — 리전별로 독립 수집한다(C4)."""
+    from db.repositories import assets as assets_repo
+
+    persist_inventory(mock_inventory, db)
+
+    cutoff = mock_inventory.collected_at - timedelta(seconds=mock_inventory.period_seconds)
+    assert assets_repo.fresh_ec2_metric_summaries(
+        db, region="us-east-1", not_older_than=cutoff
+    ) == (None, {})
+
+
+def test_reuse_does_not_extend_freshness_across_cycles(db, mock_inventory):
+    """직접 조회 → 재사용 → 최초 조회로부터 period 경과 → 재조회. (PR #257 리뷰)
+
+    재사용한 요약도 회차마다 새 행으로 복사되고 collected_at 에는 그 회차 시각이 찍힌다.
+    신선도를 collected_at 으로 재면 복사본이 매번 "방금 수집됨"이 되어 기준이 무한히
+    연장되고, 최초 조회 이후 CloudWatch 를 영영 다시 부르지 않는다 — 메트릭이 그 시점에
+    얼어붙는다. 기준은 재사용해도 보존되는 window_end 여야 한다.
+    """
+    from db.repositories import assets as assets_repo
+
+    period = mock_inventory.period_seconds
+    t0 = mock_inventory.collected_at
+
+    def reusable_at(now):
+        _, fresh = assets_repo.fresh_ec2_metric_summaries(
+            db,
+            region="ap-northeast-2",
+            not_older_than=now - timedelta(seconds=period),
+        )
+        return set(fresh)
+
+    # 1회차(t0) — 직접 조회. metrics_window_end 가 None 이므로 창의 끝은 t0
+    persist_inventory(mock_inventory, db)
+    assert reusable_at(t0 + timedelta(minutes=5)) == {"i-idle001"}
+
+    # 2회차(t0+5분) — 재사용분 적재. 원본 창은 t0 그대로다
+    persist_inventory(
+        mock_inventory.model_copy(
+            update={"collected_at": t0 + timedelta(minutes=5), "metrics_window_end": t0}
+        ),
+        db,
+    )
+    assert reusable_at(t0 + timedelta(minutes=10)) == {"i-idle001"}  # 입자 안 — 계속 재사용
+
+    # 최초 조회로부터 period 경과 — 복사본이 몇 개든 재사용 대상이 사라져야 한다
+    assert reusable_at(t0 + timedelta(seconds=period + 1)) == set()
+
+    # 3회차 — 실제 재조회분(창의 끝 = 그 시각)을 적재하면 다시 재사용 가능해진다
+    t3 = t0 + timedelta(seconds=period + 60)
+    persist_inventory(mock_inventory.model_copy(update={"collected_at": t3}), db)
+    assert reusable_at(t3 + timedelta(minutes=5)) == {"i-idle001"}
