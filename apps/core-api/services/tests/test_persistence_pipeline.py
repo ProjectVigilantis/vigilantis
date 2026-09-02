@@ -858,3 +858,46 @@ def test_fresh_lookup_is_scoped_to_region(db, mock_inventory):
     assert assets_repo.fresh_ec2_metric_summaries(
         db, region="us-east-1", not_older_than=cutoff
     ) == (None, {})
+
+
+def test_reuse_does_not_extend_freshness_across_cycles(db, mock_inventory):
+    """직접 조회 → 재사용 → 최초 조회로부터 period 경과 → 재조회. (PR #257 리뷰)
+
+    재사용한 요약도 회차마다 새 행으로 복사되고 collected_at 에는 그 회차 시각이 찍힌다.
+    신선도를 collected_at 으로 재면 복사본이 매번 "방금 수집됨"이 되어 기준이 무한히
+    연장되고, 최초 조회 이후 CloudWatch 를 영영 다시 부르지 않는다 — 메트릭이 그 시점에
+    얼어붙는다. 기준은 재사용해도 보존되는 window_end 여야 한다.
+    """
+    from db.repositories import assets as assets_repo
+
+    period = mock_inventory.period_seconds
+    t0 = mock_inventory.collected_at
+
+    def reusable_at(now):
+        _, fresh = assets_repo.fresh_ec2_metric_summaries(
+            db,
+            region="ap-northeast-2",
+            not_older_than=now - timedelta(seconds=period),
+        )
+        return set(fresh)
+
+    # 1회차(t0) — 직접 조회. metrics_window_end 가 None 이므로 창의 끝은 t0
+    persist_inventory(mock_inventory, db)
+    assert reusable_at(t0 + timedelta(minutes=5)) == {"i-idle001"}
+
+    # 2회차(t0+5분) — 재사용분 적재. 원본 창은 t0 그대로다
+    persist_inventory(
+        mock_inventory.model_copy(
+            update={"collected_at": t0 + timedelta(minutes=5), "metrics_window_end": t0}
+        ),
+        db,
+    )
+    assert reusable_at(t0 + timedelta(minutes=10)) == {"i-idle001"}  # 입자 안 — 계속 재사용
+
+    # 최초 조회로부터 period 경과 — 복사본이 몇 개든 재사용 대상이 사라져야 한다
+    assert reusable_at(t0 + timedelta(seconds=period + 1)) == set()
+
+    # 3회차 — 실제 재조회분(창의 끝 = 그 시각)을 적재하면 다시 재사용 가능해진다
+    t3 = t0 + timedelta(seconds=period + 60)
+    persist_inventory(mock_inventory.model_copy(update={"collected_at": t3}), db)
+    assert reusable_at(t3 + timedelta(minutes=5)) == {"i-idle001"}

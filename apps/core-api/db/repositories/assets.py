@@ -231,12 +231,19 @@ def add_metric_summary(
 def fresh_ec2_metric_summaries(
     db: Session, *, region: str, not_older_than: datetime
 ) -> tuple[Optional[datetime], dict[str, MetricSummaryContract]]:
-    """리전의 EC2 자산별 최신 메트릭 요약 중 not_older_than 이후에 수집된 것만 돌려준다.
+    """리전의 EC2 자산별 최신 메트릭 요약 중 not_older_than 이후 **창** 의 것만 돌려준다.
 
     collector 가 CloudWatch 재조회를 건너뛸지 판단하는 근거다(#255) — 스캔 주기가 메트릭
     입자(METRIC_PERIOD_SECONDS)보다 짧으면 같은 값을 반복해서 받아오게 되기 때문이다.
     반환 = (재사용 대상 창의 끝, {resource_id: 요약}). 해당 행이 없으면 (None, {}).
     창의 끝을 함께 주는 이유는 persist 가 이 요약을 **원본 창** 으로 적재해야 해서다.
+
+    **신선도 기준은 window_end 이지 collected_at 이 아니다.** 재사용한 요약도 회차마다
+    새 행으로 복사되면서 collected_at 에는 그 회차 시각이 찍힌다. collected_at 으로 재면
+    복사본이 매번 "방금 수집됨"이 되어 기준이 무한히 연장되고, 최초 조회 이후 CloudWatch 를
+    영영 다시 부르지 않는다 — 메트릭이 그 시점에 얼어붙는다. window_end 는 재사용해도
+    원본 값이 보존되므로 **실제로 CloudWatch 를 부른 시각** 을 가리킨다.
+    (PR #257 리뷰에서 안성일 지적)
     """
     rows = db.execute(
         select(models.Asset.resource_id, models.MetricSummary)
@@ -247,16 +254,19 @@ def fresh_ec2_metric_summaries(
         .where(
             models.Asset.region == region,
             models.Asset.asset_type == AssetType.EC2,
-            models.MetricSummary.collected_at >= not_older_than,
+            models.MetricSummary.window_end >= not_older_than,
         )
-        .order_by(models.MetricSummary.collected_at.desc())
+        .order_by(
+            models.MetricSummary.window_end.desc(),
+            models.MetricSummary.collected_at.desc(),
+        )
     ).all()
 
     out: dict[str, MetricSummaryContract] = {}
     window_end: Optional[datetime] = None
     for resource_id, row in rows:
         if resource_id in out:
-            continue  # collected_at 내림차순이라 첫 행이 최신이다
+            continue  # window_end 내림차순이라 첫 행이 가장 최근 조회분이다
         out[resource_id] = MetricSummaryContract(
             cpu_datapoints=row.cpu_datapoints,
             cpu_avg=row.cpu_avg,
