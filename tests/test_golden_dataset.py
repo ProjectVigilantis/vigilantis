@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import get_args
 
 import pytest
 from pydantic import TypeAdapter
@@ -27,6 +28,7 @@ for _path in (ROOT / "apps" / "core-api", ROOT / "packages"):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
+from schemas.api.assets import _RULE_TARGET_TYPES, AssetType  # noqa: E402
 from schemas.assets import AssetInventory  # noqa: E402
 from schemas.events import (  # noqa: E402
     MockThreatEventInput,
@@ -256,9 +258,45 @@ def test_finops_expected_has_no_runtime_fields() -> None:
 # ---------------------------------------------------------------- 자산 누락 감지
 
 
+def _asset_list_fields() -> dict[str, AssetType]:
+    """AssetInventory 의 '자산 리스트' 필드 → 그 리스트가 담는 자산 유형.
+
+    필드 이름을 손으로 적지 않는다. 리스트 항목 모델의 asset_type 기본값에서 읽으므로
+    (Ec2Asset.asset_type = AssetType.EC2, frozen), 자산 유형이 늘면 여기도 함께 는다.
+    """
+    fields: dict[str, AssetType] = {}
+    for name, field in AssetInventory.model_fields.items():
+        args = get_args(field.annotation)  # list[Ec2Asset] → (Ec2Asset,)
+        if not args:
+            continue
+        declared = getattr(args[0], "model_fields", {}).get("asset_type")
+        if declared is not None:
+            fields[name] = declared.default
+    return fields
+
+
+# 판정이 붙지 않는 자산 리스트. 계약(_RULE_TARGET_TYPES)에서 **파생**시킨다 —
+# 키 이름을 하드코딩하면 판정 대상이 늘어날 때 면제가 함께 좁아지지 않아, 가드가
+# 조용히 헐거워진다. 지금은 NACL·Launch Template·ASG·ALB Target Group 4종이고,
+# 어떤 유형이 _RULE_TARGET_TYPES 에 들어가는 순간 이 집합에서 자동으로 빠진다.
+_JUDGEMENT_FREE_LIST_FIELDS = frozenset(
+    name for name, asset_type in _asset_list_fields().items()
+    if asset_type not in _RULE_TARGET_TYPES
+)
+
+
 def _count_asset_arns(raw: dict) -> int:
-    """입력 JSON 원문에서 자산 ARN 개수를 센다(중첩 포함)."""
+    """입력 JSON 원문에서 **판정 대상** 자산 ARN 개수를 센다(중첩 포함).
+
+    판정 비대상 리스트는 세지 않는다. 그 자산들은 계약상 항상 NOT_APPLICABLE 이라
+    (api/assets.py AssetItem._enforce_contract) 정답으로 적을 판정 자체가 없다.
+    토폴로지가 그릴 노드를 골든에 넣으려면 이 면제가 필요하다.
+
+    **모델이 모르는 키는 계속 센다.** 면제는 "판정 비대상임을 계약으로 증명한" 리스트에만
+    준다 — 오타로 생긴 키나 모델보다 앞서 추가된 자산 리스트는 여기서 걸려야 한다.
+    """
     count = 0
+    counted = {key: value for key, value in raw.items() if key not in _JUDGEMENT_FREE_LIST_FIELDS}
 
     def walk(node) -> None:
         nonlocal count
@@ -271,8 +309,28 @@ def _count_asset_arns(raw: dict) -> int:
             for item in node:
                 walk(item)
 
-    walk(raw)
+    walk(counted)
     return count
+
+
+def test_judgement_free_exemption_is_derived_from_the_contract() -> None:
+    """면제 집합이 계약에서 파생됐는지 — 하드코딩으로 되돌아가면 여기서 걸린다.
+
+    두 방향을 함께 본다. 면제된 것에 판정 대상이 섞이면 정답 누락을 못 잡고,
+    판정 대상인데 리스트 필드가 없으면 그 유형은 골든에 담길 자리가 없다.
+    """
+    fields = _asset_list_fields()
+
+    for name in _JUDGEMENT_FREE_LIST_FIELDS:
+        assert fields[name] not in _RULE_TARGET_TYPES, (
+            f"{name}({fields[name].value})은 판정 대상인데 면제됐다 — 정답 누락을 못 잡는다"
+        )
+
+    judged_fields = {t for n, t in fields.items() if n not in _JUDGEMENT_FREE_LIST_FIELDS}
+    assert judged_fields == set(_RULE_TARGET_TYPES), (
+        f"판정 대상 유형과 자산 리스트가 어긋난다: 계약 {sorted(t.value for t in _RULE_TARGET_TYPES)} / "
+        f"리스트 {sorted(t.value for t in judged_fields)}"
+    )
 
 
 @pytest.mark.parametrize("input_path, expected_path", _finops_pairs(), ids=lambda p: getattr(p, "name", ""))
