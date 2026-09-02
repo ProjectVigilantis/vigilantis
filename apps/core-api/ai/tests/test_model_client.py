@@ -492,6 +492,24 @@ def test_shipped_defaults_pair_the_reasoning_model_with_its_knob(monkeypatch):
     assert client._model_params == {"reasoning_effort": "low"}
 
 
+def test_unset_reasoning_effort_carries_no_knob():
+    from config import Settings
+
+    # "unset"은 값이 아니라 "이 노브를 싣지 말라"는 표기다 — 기본값이 low라 끌 표기가
+    # 필요한데 빈 값은 Literal에 걸리고 "none"은 모델에게 실제로 보내는 값이다.
+    # Settings에서 None으로 접으므로 이 필드를 읽는 다른 곳(계측 도구의 열 이름)도
+    # 미설정과 똑같이 읽는다
+    settings = Settings(
+        _env_file=None,
+        DATABASE_URL="postgresql+psycopg://t:t@localhost:5432/t",
+        OPENAI_API_KEY="sk-test",
+        OPENAI_REASONING_EFFORT="unset",
+    )
+
+    assert settings.OPENAI_REASONING_EFFORT is None
+    assert build_openai_model_client(settings)._model_params == {}
+
+
 def test_unknown_reasoning_effort_is_rejected_at_startup():
     from config import Settings
 

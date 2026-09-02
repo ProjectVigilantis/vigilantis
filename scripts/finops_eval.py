@@ -17,10 +17,8 @@
 #   기본 조합(luna low) : uv run python scripts/finops_eval.py --repeats 4
 #   추론량 바꾸기       : OPENAI_REASONING_EFFORT=high uv run python scripts/finops_eval.py --repeats 4
 #   다른 추론 모델      : OPENAI_MODEL=gpt-5.6-terra uv run python scripts/finops_eval.py --repeats 4
+#   temperature 계열    : OPENAI_MODEL=gpt-4o OPENAI_TEMPERATURE=0 OPENAI_REASONING_EFFORT=unset uv run python ...
 #   (PowerShell은 `$env:OPENAI_REASONING_EFFORT='high'; uv run python ...`)
-#
-# temperature 계열(gpt-4o 등)은 환경변수만으로 재지 못한다 — reasoning_effort 기본값을
-# 끄는 환경변수 표기가 없어서, apps/core-api/config.py의 기본값 두 줄을 함께 고쳐야 한다.
 #
 # **실제 모델을 부르므로 과금이 발생한다**(케이스 1건 = 모델 호출 2회). CI 인자에 넣지
 # 않으며, 키가 없으면 대체 경로로 떨어지지 않고 거절한다 — Fake로 돌아 초록불이 뜨면

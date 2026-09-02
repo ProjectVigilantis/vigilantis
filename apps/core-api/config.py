@@ -21,7 +21,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal, Optional
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # .env에는 POSTGRES_USER 등 다른 서비스용 변수도 있으므로 extra는 무시한다.
@@ -75,14 +75,18 @@ class Settings(BaseSettings):
     # — 조용히 무시되지 않으므로 오설정이 드러난다.
     #
     # **두 노브의 기본값은 위 OPENAI_MODEL과 한 쌍이다**(#237 비교표). 기본 모델이
-    # 추론 모델이라 temperature는 미설정이고 reasoning_effort만 켜져 있다. OPENAI_MODEL만
-    # gpt-4o 계열로 되돌리면 첫 호출이 400으로 거절되며, 이때 reasoning_effort는
-    # 환경변수로 끄지 못한다 — 빈 값은 아래 Literal 검증에 걸린다. 모델 계열을 바꾸려면
-    # 이 파일의 기본값 두 줄을 함께 고친다.
+    # 추론 모델이라 temperature는 미설정이고 reasoning_effort만 켜져 있다. 벤더 기본값에
+    # 맡기지 않고 low로 박는 것은 그 기본값이 우리 것이 아니라 우리 코드 변경 없이 바뀔
+    # 수 있기 때문이다 — 비교표가 보증하는 것은 low라고 명시한 열이지 그때의 벤더
+    # 기본값이 아니다. 모델 계열은 두 노브를 뒤집어 환경변수만으로 바꾼다(gpt-4o 계열이면
+    # OPENAI_TEMPERATURE=0 · OPENAI_REASONING_EFFORT=unset).
     OPENAI_TEMPERATURE: Optional[float] = Field(default=None, ge=0, le=2)
-    # 값 집합은 SDK의 openai.types.shared.ReasoningEffort와 같다. 그 타입을 여기서
-    # import하지 않는 것은 SDK를 부르는 지점을 ai/openai_client.py 하나로 유지하기
-    # 위해서다(ADR-0005 설계 원칙 3).
+    # 값 집합은 SDK의 openai.types.shared.ReasoningEffort에 "unset" 하나를 더한 것이다.
+    # 기본값이 low라 노브를 끌 표기가 필요한데, 빈 값은 아래 Literal 검증에 걸리고
+    # "none"은 모델에게 실제로 보내는 값이라 끄기로 못 쓴다. "unset"은 아래 검증기가
+    # None으로 접으므로, 이 필드를 읽는 쪽(호출 경계·계측 도구)은 미설정과 구별하지
+    # 않는다. SDK 타입을 여기서 import하지 않는 것은 SDK를 부르는 지점을
+    # ai/openai_client.py 하나로 유지하기 위해서다(ADR-0005 설계 원칙 3).
     #
     # 이 Literal은 **오타 방지용이며 모델별 지원 목록이 아니다.** 어느 값을 실제로
     # 받는지는 모델마다 다르다 — 계측 대상 3종(gpt-5.6-luna·terra·gpt-5.4-nano)은
@@ -90,7 +94,7 @@ class Settings(BaseSettings):
     # 좁히지 않는 것은 모델이 늘 때마다 이 목록을 고쳐야 하기 때문이고, 지원하지 않는
     # 값은 기동이 아니라 첫 호출에서 드러난다.
     OPENAI_REASONING_EFFORT: Optional[
-        Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+        Literal["unset", "none", "minimal", "low", "medium", "high", "xhigh", "max"]
     ] = "low"
     OPENAI_TIMEOUT_SECONDS: float = Field(default=30.0, gt=0)
     # 재시도 대상은 일시 오류뿐이다(ai/openai_client.py). 1이면 재시도 없음
@@ -99,6 +103,14 @@ class Settings(BaseSettings):
     # 서버가 Retry-After로 지시한 대기의 상한. 이보다 길게 지시하면 따르지 않고
     # backoff로 간다 — 요청 경로에서 부르는 호출이라 무한정 붙잡지 않는다
     OPENAI_MAX_RETRY_AFTER_SECONDS: float = Field(default=60.0, ge=0)
+
+    @field_validator("OPENAI_REASONING_EFFORT", mode="after")
+    @classmethod
+    def _fold_unset_reasoning_effort(cls, value: Optional[str]) -> Optional[str]:
+        # 접는 자리를 호출 경계가 아니라 여기로 둔다 — 이 필드를 읽는 곳이 호출 경계
+        # 말고도 있어(scripts/finops_eval.py의 열 이름) 경계에서 접으면 "unset"이 값인
+        # 것처럼 표에 찍힌다.
+        return None if value == "unset" else value
 
     def cors_allow_origins_list(self) -> list[str]:
         return [
