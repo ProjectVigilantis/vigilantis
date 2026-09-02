@@ -20,13 +20,12 @@
     ],
     "note": "작성 시점의 apps/core-api/security/risk_evaluator.py 상수. 값이 바뀌면 tests/test_golden_dataset.py 가 실패하므로 본 정답을 함께 갱신할 것 (ADR-0006 임계값 결합 원칙)"
   },
-  "case_id": "S16",
-  "purpose": "udp 전 포트 개방 — 전 포트 판정이 protocol과 무관함을 못박는다. tcp에만 걸어 둔 구현이 여기서 걸린다",
-  "derivation": "WORLD. protocol udp ≠ -1 이므로 전 프로토콜 분기가 아니다. (0,65535)==ALL_PORTS → 전 포트 코드",
+  "case_id": "S17",
+  "purpose": "tcp 23(telnet) — 민감 포트 22 바로 옆. SENSITIVE_PORTS 집합이 범위나 근사로 새면 여기서 걸린다",
+  "derivation": "WORLD. (23,23)≠ALL_PORTS. 범위 23..23에 22·3389 없음 → 추가 코드 없음",
   "initial_risk_level": "MEDIUM",
   "response_mode": "AGENT_WAIT",
   "reason_codes": [
-    "RISK_OPEN_INGRESS_WORLD",
-    "RISK_ALL_PORTS_EXPOSED"
+    "RISK_OPEN_INGRESS_WORLD"
   ]
 }

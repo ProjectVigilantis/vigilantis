@@ -20,13 +20,13 @@
     ],
     "note": "작성 시점의 apps/core-api/security/risk_evaluator.py 상수. 값이 바뀌면 tests/test_golden_dataset.py 가 실패하므로 본 정답을 함께 갱신할 것 (ADR-0006 임계값 결합 원칙)"
   },
-  "case_id": "S15",
-  "purpose": "from>to 역순 범위 — 계약(OpenIpThreatInput)이 각각 0..65535로만 제한해 통과한다. 판정이 min/max로 정규화하지 않으면 22를 놓친다",
-  "derivation": "WORLD. (25,20)≠ALL_PORTS. 범위를 20..25로 정규화하면 ∋ 22 → 민감 포트 코드",
+  "case_id": "S16",
+  "purpose": "udp 전 포트 개방 — 전 포트 판정이 protocol과 무관함을 못박는다. tcp에만 걸어 둔 구현이 여기서 걸린다",
+  "derivation": "WORLD. protocol udp ≠ -1 이므로 전 프로토콜 분기가 아니다. (0,65535)==ALL_PORTS → 전 포트 코드",
   "initial_risk_level": "MEDIUM",
   "response_mode": "AGENT_WAIT",
   "reason_codes": [
     "RISK_OPEN_INGRESS_WORLD",
-    "RISK_SENSITIVE_PORT_EXPOSED"
+    "RISK_ALL_PORTS_EXPOSED"
   ]
 }
