@@ -77,7 +77,7 @@ class _FakeCompletions:
         return outcome
 
 
-def _completion(parsed, refusal=None, usage=(11, 7, 18), model="gpt-4o", cached=None):
+def _completion(parsed, refusal=None, usage=(11, 7, 18), model="gpt-5.6-luna", cached=None):
     message = SimpleNamespace(parsed=parsed, refusal=refusal)
     usage_obj = SimpleNamespace(
         prompt_tokens=usage[0], completion_tokens=usage[1], total_tokens=usage[2]
@@ -100,7 +100,7 @@ def _client(
     sdk = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     client = OpenAIModelClient(
         client=sdk,
-        model="gpt-4o",
+        model="gpt-5.6-luna",
         timeout_seconds=1.0,
         max_attempts=max_attempts,
         retry_backoff_seconds=0.0,  # 테스트에서 실제로 대기하지 않는다
@@ -388,7 +388,7 @@ def test_contract_failure_after_response_preserves_usage():
     empty = SimpleNamespace(
         choices=[],
         usage=SimpleNamespace(prompt_tokens=900, completion_tokens=0, total_tokens=900),
-        model="gpt-4o",
+        model="gpt-5.6-luna",
     )
     client, _ = _client([empty])
 
@@ -472,6 +472,26 @@ def test_builder_carries_model_params_only_when_set():
     assert tuned._model_params == {"temperature": 0.0, "reasoning_effort": "low"}
 
 
+def test_shipped_defaults_pair_the_reasoning_model_with_its_knob(monkeypatch):
+    from config import Settings
+
+    # 기본 모델과 노브는 한 쌍이다(#237 비교표) — 위 테스트는 None을 명시 주입해
+    # "미설정"을 재현하므로 기본값이 바뀌어도 통과한다. 출하되는 조합은 여기서 고정한다.
+    # 코드 기본값만 봐야 하므로 .env와 환경변수를 둘 다 끊는다(Settings는 env_file=".env")
+    for name in ("OPENAI_MODEL", "OPENAI_TEMPERATURE", "OPENAI_REASONING_EFFORT"):
+        monkeypatch.delenv(name, raising=False)
+    client = build_openai_model_client(
+        Settings(
+            _env_file=None,
+            DATABASE_URL="postgresql+psycopg://t:t@localhost:5432/t",
+            OPENAI_API_KEY="sk-test",
+        )
+    )
+
+    assert client._model == "gpt-5.6-luna"
+    assert client._model_params == {"reasoning_effort": "low"}
+
+
 def test_unknown_reasoning_effort_is_rejected_at_startup():
     from config import Settings
 
@@ -492,7 +512,7 @@ def test_successful_call_returns_parsed_output_and_usage():
     response = client.complete(_request({"arn": INSTANCE_ARN}), Answer)
 
     assert response.output.verdict == "isolate"
-    assert response.model == "gpt-4o"
+    assert response.model == "gpt-5.6-luna"
     assert (response.usage.prompt_tokens, response.usage.total_tokens) == (11, 18)
     assert completions.calls[0]["response_format"] is Answer
     assert completions.calls[0]["timeout"] == 1.0
@@ -698,7 +718,7 @@ def test_refusal_is_rejected_not_parsed():
 
 
 def test_empty_choices_is_a_contract_error():
-    client, _ = _client([SimpleNamespace(choices=[], usage=None, model="gpt-4o")])
+    client, _ = _client([SimpleNamespace(choices=[], usage=None, model="gpt-5.6-luna")])
 
     with pytest.raises(AIModelContractError):
         client.complete(_request(), Answer)

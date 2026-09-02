@@ -14,10 +14,13 @@
 # 실행 (repo 루트, .env에 실제 OPENAI_API_KEY 필요):
 #   예상 호출 수만 보기 : uv run python scripts/finops_eval.py --estimate
 #   조합 수용 프로브    : uv run python scripts/finops_eval.py --case A1 --repeats 1
-#   현재 상태(gpt-4o)   : uv run python scripts/finops_eval.py --repeats 4
-#   temperature 0       : OPENAI_TEMPERATURE=0 uv run python scripts/finops_eval.py --repeats 4
-#   추론 모델           : OPENAI_MODEL=gpt-5.6-luna OPENAI_REASONING_EFFORT=low uv run python ...
-#   (PowerShell은 `$env:OPENAI_TEMPERATURE='0'; uv run python ...`)
+#   기본 조합(luna low) : uv run python scripts/finops_eval.py --repeats 4
+#   추론량 바꾸기       : OPENAI_REASONING_EFFORT=high uv run python scripts/finops_eval.py --repeats 4
+#   다른 추론 모델      : OPENAI_MODEL=gpt-5.6-terra uv run python scripts/finops_eval.py --repeats 4
+#   (PowerShell은 `$env:OPENAI_REASONING_EFFORT='high'; uv run python ...`)
+#
+# temperature 계열(gpt-4o 등)은 환경변수만으로 재지 못한다 — reasoning_effort 기본값을
+# 끄는 환경변수 표기가 없어서, apps/core-api/config.py의 기본값 두 줄을 함께 고쳐야 한다.
 #
 # **실제 모델을 부르므로 과금이 발생한다**(케이스 1건 = 모델 호출 2회). CI 인자에 넣지
 # 않으며, 키가 없으면 대체 경로로 떨어지지 않고 거절한다 — Fake로 돌아 초록불이 뜨면
@@ -85,8 +88,8 @@ class _UsageRecordingClient:
         # "왕복이 못 섰다"가 결과에서 같은 값이 된다
         self.last_error: Optional[str] = None
         self.last_error_phase: Optional[str] = None
-        # 응답이 밝힌 스냅샷 ID(예: gpt-4o-2024-08-06). 별칭으로 부른 모델이 실제로
-        # 무엇이었는지 없이는 나중에 같은 표를 재현할 수 없다
+        # 응답이 밝힌 스냅샷 ID(별칭이 아니라 날짜가 붙은 실제 버전). 별칭으로 부른
+        # 모델이 실제로 무엇이었는지 없이는 나중에 같은 표를 재현할 수 없다
         self.model_snapshots: set[str] = set()
 
     def reset(self) -> None:

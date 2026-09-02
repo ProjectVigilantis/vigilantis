@@ -67,12 +67,18 @@ class Settings(BaseSettings):
     # 키는 Optional이다 — AI 호출 경로가 앱에 배선되기 전이라 키 없이도 기동해야 하고,
     # 누락은 실제 클라이언트를 만드는 build_openai_model_client()가 거절한다.
     OPENAI_API_KEY: Optional[str] = None
-    OPENAI_MODEL: str = "gpt-4o"
-    # 모델 동작 노브 2종. **기본값이 없고, 값이 있을 때만 호출에 실린다**(#237) —
-    # 모델 계열마다 받는 파라미터가 다르기 때문이다. gpt-4o는 temperature를 받고
-    # reasoning_effort가 없으며, gpt-5 계열 추론 모델은 그 반대다. 받지 않는 쪽을
-    # 켜면 호출이 400으로 거절된다(ai/openai_client.py가 AIModelRejectedError로
-    # 옮기며 재시도하지 않는다) — 조용히 무시되지 않으므로 오설정이 드러난다.
+    OPENAI_MODEL: str = "gpt-5.6-luna"
+    # 모델 동작 노브 2종. **값이 있는 것만 호출에 실린다**(#237) — 모델 계열마다
+    # 받는 파라미터가 다르기 때문이다. gpt-4o는 temperature를 받고 reasoning_effort가
+    # 없으며, gpt-5 계열 추론 모델은 그 반대다. 받지 않는 쪽을 켜면 호출이 400으로
+    # 거절된다(ai/openai_client.py가 AIModelRejectedError로 옮기며 재시도하지 않는다)
+    # — 조용히 무시되지 않으므로 오설정이 드러난다.
+    #
+    # **두 노브의 기본값은 위 OPENAI_MODEL과 한 쌍이다**(#237 비교표). 기본 모델이
+    # 추론 모델이라 temperature는 미설정이고 reasoning_effort만 켜져 있다. OPENAI_MODEL만
+    # gpt-4o 계열로 되돌리면 첫 호출이 400으로 거절되며, 이때 reasoning_effort는
+    # 환경변수로 끄지 못한다 — 빈 값은 아래 Literal 검증에 걸린다. 모델 계열을 바꾸려면
+    # 이 파일의 기본값 두 줄을 함께 고친다.
     OPENAI_TEMPERATURE: Optional[float] = Field(default=None, ge=0, le=2)
     # 값 집합은 SDK의 openai.types.shared.ReasoningEffort와 같다. 그 타입을 여기서
     # import하지 않는 것은 SDK를 부르는 지점을 ai/openai_client.py 하나로 유지하기
@@ -85,7 +91,7 @@ class Settings(BaseSettings):
     # 값은 기동이 아니라 첫 호출에서 드러난다.
     OPENAI_REASONING_EFFORT: Optional[
         Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
-    ] = None
+    ] = "low"
     OPENAI_TIMEOUT_SECONDS: float = Field(default=30.0, gt=0)
     # 재시도 대상은 일시 오류뿐이다(ai/openai_client.py). 1이면 재시도 없음
     OPENAI_MAX_ATTEMPTS: int = Field(default=3, ge=1)
