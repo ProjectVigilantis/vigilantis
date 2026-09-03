@@ -263,15 +263,16 @@ def test_finops_incident_carries_no_risk_fields():
 # ==============================================================================
 # ② 전 구간 흐름 — 자동 원복까지 서면 skip 해제
 # Boto3 실행 경로는 dev 에 들어갔다(#211 / PR #216 — run_rightsizing_execution).
-# 남은 것은 Status Check 실패 주입과 자동 원복 둘이다(설계서 §대조 3번).
+# 자동 원복도 dev 에 들어갔다(#241 / PR #256 — AUTO_ON_FAILURE 자식 실행 접수).
+# 남은 것은 **LocalStack 에서 2/2 실패를 만드는 주입 방법** 하나다(설계서 §대조 3번).
 # ==============================================================================
 #
-# 아래 2건은 김세혁의 `execute` 본체(Boto3 실행 → `get_waiter` Status Check → 자동
-# 원복)가 서면 열린다. 그때 이 파일 위쪽의 전제 테스트가 이미 입력·런북 짝을
-# 보증하고 있으므로, 흐름 테스트는 **상태 전이만** 보면 된다.
+# 아래 2건은 **2/2 실패를 만드는 방법**이 생기면 열린다. 실행 본체·판정·자동 원복은
+# 전부 dev 에 있다(#211 / #240 / #241). 그때 이 파일 위쪽의 전제 테스트가 이미
+# 입력·런북 짝을 보증하고 있으므로, 흐름 테스트는 **상태 전이만** 보면 된다.
 
 
-@pytest.mark.skip(reason="Status Check 실패 주입·자동 원복 미구현 — 설계서 §대조 3번(김세혁)")
+@pytest.mark.skip(reason="Status Check 2/2 실패 주입 방법 없음 — 설계서 §대조 3번(6–7주차 실 AWS 스모크)")
 def test_t1_idle_ec2_downsize_and_auto_rollback_flow():
     """T1 전 구간 — 설계서 §T1 단계표 1~9번.
 
@@ -279,16 +280,17 @@ def test_t1_idle_ec2_downsize_and_auto_rollback_flow():
       A1 수집 → `COST_CANDIDATE` 판정
       → Incident `ANALYZING` → 추천 `RUNBOOK_EC2_RIGHTSIZING` → `AWAITING_APPROVAL`
       → `POST /actions/execute` **202** → Execution `IN_PROGRESS`
-      → Status Check 2/2 실패 → `FAILED`
-      → `RUNBOOK_EC2_REVERT_SIZE` (`trigger_source: AUTO_ON_FAILURE`)
-        → 원본 Execution `ROLLBACK_INITIATED` → `ROLLED_BACK`
+      → Status Check 2/2 실패 → 원본 Execution `ROLLBACK_INITIATED`
+        (Incident 는 원본이 비종료라 `ACTION_IN_PROGRESS` 로 남는다)
+      → `RUNBOOK_EC2_REVERT_SIZE` 자식 접수 (`trigger_source: AUTO_ON_FAILURE`)
+        → 자식 `SUCCESS` → 원본 `ROLLED_BACK` → Incident `AWAITING_CLOSURE`
 
     핵심: **5번 [조치 실행] 이후 사람 입력이 없다.** 8~9번은 전부 시스템이 한다.
     원복 파라미터는 AI도 화면도 아닌 **DB 백업 레코드(`backup_record_id`)** 에서만 온다.
     """
 
 
-@pytest.mark.skip(reason="Status Check 실패 주입·자동 원복 미구현 — 설계서 §대조 3번(김세혁)")
+@pytest.mark.skip(reason="Status Check 2/2 실패 주입 방법 없음 — 설계서 §대조 3번(6–7주차 실 AWS 스모크)")
 def test_t2_ssh_bruteforce_block_and_one_click_release_flow():
     """T2 전 구간 — 설계서 §T2 단계표 1~8번.
 

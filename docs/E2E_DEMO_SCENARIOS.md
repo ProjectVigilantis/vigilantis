@@ -44,7 +44,7 @@
 | `packages/schemas/runbooks.py`·`api/` — 실행 축 어휘·API 계약 | 확정(코드) |
 | `datasets/golden/` — 입력 케이스 | 확정 |
 
-**확정본 대조가 필요한 항목은 §대조 필요 목록에 모아뒀다.** 본문의 🔶 에는 **그 목록의 번호를 함께 적는다** — 번호가 없으면 무엇을 기다리는 표시인지 읽는 사람이 알 수 없다. 런북별 세부 실행 단계와 `parameters_schema`는 §대조 2번으로 해소됐고(2026-08-31, PR #205), **1번은 절반이 해소돼**(2026-09-01 — Golden SecOps 정답 12건, PR #223 · #242) `evaluate_threat()` 워크플로 배선 하나만 남았다. 남은 🔶 는 그 배선(1번)과 Status Check 실패 주입(3번) 둘이다.
+**확정본 대조가 필요한 항목은 §대조 필요 목록에 모아뒀다.** 본문의 🔶 에는 **그 목록의 번호를 함께 적는다** — 번호가 없으면 무엇을 기다리는 표시인지 읽는 사람이 알 수 없다. 런북별 세부 실행 단계와 `parameters_schema`는 §대조 2번으로 해소됐고(2026-08-31, PR #205), **1번은 절반이 해소돼**(2026-09-01 — Golden SecOps 정답 12건, PR #223 · #242) `evaluate_threat()` 워크플로 배선 하나만 남았다. 남은 🔶 는 그 배선(1번)과 Status Check **실패 주입 방법**(3번) 둘이다 — 3번의 자동 원복 엔진 쪽은 해소됐다(2026-09-03, #241 / PR #256).
 
 ---
 
@@ -100,9 +100,9 @@ IN_PROGRESS → SUCCESS
 | 4 | 가드레일 4단계 | — (화면 표시 없음) · 통과 신호는 `status: AWAITING_APPROVAL`로 실행 버튼이 열리는 것 | (내부) | `INCIDENT_UPDATED` | 슬라이드 컷으로 분리 |
 | 5 | 관제자 승인 | **[조치 실행]** 클릭 | `POST /api/v1/actions/execute`<br>**`202 Accepted`** → `IN_PROGRESS`<br>*(같은 `idempotency_key` 재요청은 `200 OK` 멱등 재생)* | `EXECUTION_UPDATED` | — |
 | 6 | 실행 | 진행 표시 | `ec2.modify_instance_attribute` | `EXECUTION_UPDATED` | LocalStack 재기동 후 재시도 |
-| 7 | **Status Check 실패** | 실패 표시 | 🔶 `get_waiter` 2/2 실패 — §대조 필요 3번 | `EXECUTION_UPDATED` `FAILED` | **핵심 컷** — 실패 주입이 안 되면 T1 성립 안 함 |
-| 8 | **자동 원복 발동** | **복구 중** | `RUNBOOK_EC2_REVERT_SIZE`<br>`trigger_source: AUTO_ON_FAILURE` | `EXECUTION_UPDATED` `ROLLBACK_INITIATED` | 상태 전이만 화면으로 설명 |
-| 9 | 원복 완료 | **AST-001로 이동해** 인스턴스 유형 복귀 확인 | 원본 Execution `ROLLED_BACK` | `EXECUTION_UPDATED` | — |
+| 7 | **Status Check 실패** | 실패 표시 | 🔶 `get_waiter` 2/2 실패 — §대조 필요 3번 | `EXECUTION_UPDATED` **Execution `ROLLBACK_INITIATED`**<br>`INCIDENT_UPDATED` **Incident `ACTION_IN_PROGRESS`** | **핵심 컷** — 실패 주입이 안 되면 T1 성립 안 함 |
+| 8 | **자동 원복 발동** | **복구 중** | `RUNBOOK_EC2_REVERT_SIZE` **자식 실행 접수**<br>`trigger_source: AUTO_ON_FAILURE` · `parent_execution_id` = 원본<br>*(상태 전이가 아니라 새 실행 레코드다)* | `EXECUTION_UPDATED` **자식 `IN_PROGRESS`** | 접수만 화면으로 설명 |
+| 9 | 원복 완료 | **AST-001로 이동해** 인스턴스 유형 복귀 확인 | 자식 `SUCCESS` → 원본 Execution `ROLLED_BACK`(함께 확정) | `EXECUTION_UPDATED`<br>`INCIDENT_UPDATED` **Incident `AWAITING_CLOSURE`** | 관제자 [종료 판단]이 남는다 |
 
 ### 이 트랙이 증명하는 것
 
@@ -202,7 +202,8 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 | --- | --- | --- | --- |
 | 1 | T2 2번 위험도 판정값(`initial_risk_level`) | **판정 규칙과 `RiskReasonCode` 6종은 확정**(#210 / PR #206 — `packages/schemas/events.py`, `apps/core-api/security/risk_evaluator.py::evaluate_threat`). **② 정답지는 해소됐다**(2026-09-01) — `datasets/golden/secops/expected/`에 입력 12건과 1:1로 대응하는 정답 12건이 있다(PR #223 10건 · PR #242 SSH MEDIUM 밴드 2건). **남은 것은 ① 하나다** — `evaluate_threat()`가 **Security Workflow에 배선되지 않아** 위협 접수 → 배지 경로가 아직 없다(현재 호출처는 테스트뿐) | ① SecOps 워크플로 배선 |
 | 2 | ~~런북별 세부 실행 단계·`parameters_schema`~~ ✅ 해소(2026-08-31) | 확정본이 SSOT §Action Whitelist로 이관되고, `parameters_schema`는 `packages/schemas/runbook_parameters.py`(#154 / PR #178), 세부 실행 단계·`target_api`는 [ADR-0007](adr/0007-guardrail-dryrun-executor-precheck-contract.md) §Context·§5가 갖는다 | — |
-| 3 | Status Check 실패 **주입 방법** | 자동 원복 엔진 미구현 | 김세혁 원복 엔진 |
+| 3 | Status Check 실패 **주입 방법** | **LocalStack에서 2/2 실패를 만드는 방법이 없다.** 판정기(`wait_for_status_check()` 3분기)와 자동 원복 엔진은 둘 다 섰다 — 아래 3-B 참조 | 6–7주차 실 AWS 스모크([ADR-0006](adr/0006-localstack-team-standard-env.md) §4, PR #244 본문) |
+| 3-B | ~~자동 원복 엔진~~ ✅ 해소(2026-09-03) | `RUNBOOK_EC2_REVERT_SIZE` 실행과 `AUTO_ON_FAILURE` 자동 발동이 dev에 들어갔다(#241 / PR #256). 2/2 판정 자체는 #240 / PR #244로 먼저 섰다. **3번을 한 줄로 두면 이 머지가 3번 전체를 해소한 것처럼 읽히므로 갈라 둔다** — 주입 방법은 그대로 남는다 | — |
 | 4 | ~~가드레일 ③ 실제 통과~~ ✅ 해소(2026-08-31) | **4단계가 전부 섰다.** ③ ARN Match 구현(#177 / PR #202 — DB 수집 ARN 대조로 Scope Escalation 차단, ① NUL 문자 차단 포함)으로 `tests/test_guardrails.py`의 placeholder skip 1건이 해제됐다. ④ Dry-Run은 `precheck()` 확정 10종 구현 완료(#129 / PR #147 · 실측 #130 / PR #170) | — |
 | 5 | 화면 구현 상태 | 아래 표 | 카드별 |
 | 6 | **WS 이벤트로 화면이 실시간 갱신되는 것** | FE 연동 구현됨 — 소켓 수명주기·이벤트 3종·Toast·재연결(#168 / PR #181). 로컬 `core-api`로 **연결·중단·자동 복구 확인**. 다만 **이벤트 실배달은 미확인**(코어 DB가 비어 발생시킬 인시던트가 없다) | #168 / PR #181. 실배달은 시드 확보 후 |
@@ -236,7 +237,7 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 
 | 테스트 | 대응 트랙 | 검증 범위 | 여는 조건 |
 | --- | --- | --- | --- |
-| `test_t1_idle_ec2_downsize_and_auto_rollback_flow` | **T1** | Golden A1 → `COST_CANDIDATE` → 가드레일 → 실행 접수 → Status Check 실패 → `ROLLED_BACK` | 대조 3번(Status Check 실패 주입·자동 원복) |
+| `test_t1_idle_ec2_downsize_and_auto_rollback_flow` | **T1** | Golden A1 → `COST_CANDIDATE` → 가드레일 → 실행 접수 → Status Check 실패 → `ROLLED_BACK` | 대조 3번 — **실패 주입 방법**(자동 원복은 2026-09-03 해소) |
 | `test_t2_ssh_bruteforce_block_and_one_click_release_flow` | **T2** | Golden **S3** → Incident → `response_mode` 진입 → 승인 → `NACL_ADD_DENY`(`USER_APPROVAL`) → 원클릭 해제 → `NACL_RESTORE` | 대조 1번(판정기 워크플로 배선) |
 
 **두 테스트 모두 Golden Dataset을 입력으로 쓴다.** 시연에 쓰는 데이터와 테스트에 쓰는 데이터가 같아야 "시연이 되면 테스트도 된다"가 성립한다.
