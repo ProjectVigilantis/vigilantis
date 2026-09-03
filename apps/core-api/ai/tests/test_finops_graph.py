@@ -272,8 +272,13 @@ def test_parameters_of_other_runbooks_are_dropped():
 
 
 def test_outbound_payload_is_masked():
+    # RULE 근거와 최상위는 같은 객체여야 하므로(FinOpsGraphInput 계약, #265) 둘 다 바꾼다.
+    # 페이로드에 실리는 쪽은 근거이고, 마스킹이 그 content까지 닿는지가 이 테스트다.
     rule = dict(RULE_RESULT, reason="수집 계정 키 AKIAIOSFODNN7EXAMPLE 로 조회함")
-    graph_input = make_input(rule_evaluation=rule)
+    graph_input = make_input(
+        rule_evaluation=rule,
+        evidences=[dict(EVIDENCE, content={"evaluation": rule})],
+    )
     _, client = run(SUMMARY, proposals(), graph_input=graph_input)
 
     for sent in client.sent:

@@ -219,15 +219,17 @@ def _incident_payload(graph_input: FinOpsGraphInput) -> dict[str, Any]:
     때문이다(_proposal_payload). 골든 6건 기준 입력의 14.6%가 그 중복이었다.
 
     **근거 쪽을 남기고 최상위를 뺀다.** 후보가 evidence_ids로 인용할 ID가 근거에만 있어
-    반대로는 뺄 수 없다. 값이 다르거나 RULE 근거가 없는 인시던트에서는 그대로 실어,
-    판정이 페이로드에서 사라지지 않게 한다.
+    반대로는 뺄 수 없다. RULE 근거가 없는 인시던트에서는 최상위를 그대로 실어, 판정이
+    페이로드에서 사라지지 않게 한다.
+
+    값이 다를 때를 여기서 가리지 않는다 — RULE 근거가 있으면 그 evaluation이 최상위와
+    같다는 것을 입력 계약이 이미 강제한다(FinOpsGraphInput, Issue #265). 여기서 다시
+    비교하면 계약이 거절한 조합을 위한 분기가 되어 도달하지 않는다.
     """
     rule_evaluation = graph_input.rule_evaluation.model_dump(mode="json")
     evidences = [evidence.model_dump(mode="json") for evidence in graph_input.evidences]
     carried_by_evidence = any(
-        evidence["evidence_type"] == EvidenceType.RULE.value
-        and evidence["content"].get("evaluation") == rule_evaluation
-        for evidence in evidences
+        evidence["evidence_type"] == EvidenceType.RULE.value for evidence in evidences
     )
 
     payload: dict[str, Any] = {
