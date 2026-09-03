@@ -26,7 +26,7 @@ from schemas.events import (  # noqa: E402
     SshBruteForceThreatPayload,
     ThreatEventType,
 )
-from security.risk_evaluator import evaluate_threat  # noqa: E402
+from security.risk_evaluator import _hits_sensitive_port, evaluate_threat  # noqa: E402
 
 GOLDEN_INPUT = REPO_ROOT / "datasets" / "golden" / "secops" / "input"
 
@@ -152,3 +152,52 @@ def test_non_world_open_ip_rejected():
     }
     with pytest.raises(ValueError):
         evaluate_threat(_normalized_from_input(raw))
+
+
+# --- _hits_sensitive_port 가드 방어 테스트 (#282) --------------------------------
+# S15(역순 범위)·S18(to=null)이 골든에서 빠지면 아래 두 가드가 골든 회귀 보호를 잃는다.
+# min/max 정규화·None 가드를 순수 함수 단위로 직접 고정한다(#272/#273 연계).
+
+
+@pytest.mark.parametrize(
+    "from_port,to_port,expected",
+    [
+        (22, 22, True),          # 단일 포트 22
+        (3389, 3389, True),      # 단일 포트 3389(RDP)
+        (20, 25, True),          # 범위가 22 포함
+        (22, 3389, True),        # 범위가 둘 다 포함
+        (23, 23, False),         # 경계 바로 옆 — 미포함
+        (0, 65535, True),        # 전 포트는 22 포함(단, 분기 순서상 실제 판정은 ALL_PORTS 우선)
+        (80, 443, False),        # 민감 포트 없는 범위
+    ],
+)
+def test_hits_sensitive_port_ranges(from_port, to_port, expected):
+    assert _hits_sensitive_port(from_port, to_port) is expected
+
+
+@pytest.mark.parametrize("from_port,to_port", [(25, 20), (3389, 22)])
+def test_hits_sensitive_port_normalizes_reversed_range(from_port, to_port):
+    # S15 가드: AWS 는 from>to 를 거부하므로 실입력엔 없지만, 역순이 들어와도 min/max 로
+    # 정규화해 잡는다(수집단 버그 방어층). 이 테스트가 없으면 정규화 제거 회귀를 못 잡는다.
+    assert _hits_sensitive_port(from_port, to_port) is True
+
+
+@pytest.mark.parametrize("from_port,to_port", [(22, None), (None, 22), (None, None)])
+def test_hits_sensitive_port_none_guard_returns_false(from_port, to_port):
+    # S18 가드: 반쪽만 적힌 포트쌍(from 또는 to 가 null)은 민감으로 보지 않는다 — 수집 경로에서
+    # 나올 수 없는 malformed 입력이라 의도된 미탐(#282). 이 가드가 없으면 min/max 가 TypeError 를
+    # 낸다. 정책이 바뀌면 이 테스트와 #282 를 함께 갱신한다.
+    assert _hits_sensitive_port(from_port, to_port) is False
+
+
+def test_half_specified_port_pair_not_flagged_sensitive_end_to_end():
+    # #282 미탐을 계약 레벨에서 고정 — from=22·to=null 세계개방은 WORLD 만 붙고 SENSITIVE 는 안 붙는다.
+    raw = {
+        "event_id": "evt-half", "event_type": "OPEN_IP",
+        "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-half",
+        "occurred_at": "2026-08-20T06:10:00Z",
+        "protocol": "tcp", "from_port": 22, "source_cidr": "0.0.0.0/0",  # to_port 없음(null)
+    }
+    result = evaluate_threat(_normalized_from_input(raw))
+    assert set(result.reason_codes) == {"RISK_OPEN_INGRESS_WORLD"}
+    assert result.initial_risk_level.value == "MEDIUM"
