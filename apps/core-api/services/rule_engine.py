@@ -41,6 +41,7 @@ class SkipReason(str, Enum):
     SKIP_LOW_UTIL = "SKIP_LOW_UTIL"                    # 스파이크 등으로 다운사이징 부적합
     SKIP_WHITELISTED = "SKIP_WHITELISTED"              # 화이트리스트(예: default SG)
     SKIP_ACTIVE = "SKIP_ACTIVE"                        # 정상 가동(낭비 아님)
+    SKIP_UNSUPPORTED_STATE = "SKIP_UNSUPPORTED_STATE"  # EBS: available/in-use 외 상태 — 판정 보류(오삭제 방지, #276)
 
 
 def _is_prod(tags: dict) -> bool:
@@ -71,15 +72,20 @@ def evaluate_ec2(cpu_avg: Optional[float], cpu_max: Optional[float], cpu_datapoi
 
 def evaluate_ebs(state: Optional[str],
                  attached_instance_ids: Optional[list[str]]) -> tuple[Verdict, Optional[SkipReason]]:
-    """EBS 볼륨 1개 판정 → (verdict, skip_reason).
+    """EBS 볼륨 1개 판정 → (verdict, skip_reason). (#276 정책 확정)
 
-    정리 후보(UNUSED)는 **state == "available"(미부착·정상 유휴)** 이면서 부착 인스턴스가 없는
-    경우로 한정한다. in-use 는 SKIP_ACTIVE, creating/deleting/error 등 전이·비정상 상태는
-    삭제 후보가 아니므로 UNUSED 로 보지 않는다(오삭제 방지). SG 미부착 판정과 같은 결.
+    - 정리 후보(UNUSED): **state == "available" 이면서 부착 인스턴스가 없음** — 유일한 삭제 후보.
+    - SKIP_ACTIVE: in-use 이거나 부착된 볼륨(정상 가동). available + 부착 같은 모순 조합은 부착을 우선.
+    - SKIP_UNSUPPORTED_STATE: creating·deleting·error·deleted·미상(null·기타) — available/in-use 가
+      아닌 상태. 삭제 후보가 아니므로 UNUSED 로 보지 않고, "정상 가동" 오해를 주는 SKIP_ACTIVE 대신
+      판정 보류 코드로 처리한다(오삭제 방지 + 관제 화면·AI 요약 정확성).
     """
-    if not attached_instance_ids and (state or "").lower() == "available":
+    s = (state or "").lower()
+    if not attached_instance_ids and s == "available":
         return Verdict.UNUSED, None
-    return Verdict.SKIP, SkipReason.SKIP_ACTIVE
+    if attached_instance_ids or s == "in-use":
+        return Verdict.SKIP, SkipReason.SKIP_ACTIVE
+    return Verdict.SKIP, SkipReason.SKIP_UNSUPPORTED_STATE
 
 
 def evaluate_sg(name: Optional[str], attached: Optional[bool],
