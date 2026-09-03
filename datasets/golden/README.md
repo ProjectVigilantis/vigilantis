@@ -1,8 +1,8 @@
 # Golden Dataset (담당: 박지현)
 
-MVP 공통 테스트 정답지. 위협/자산 더미 데이터 28건을 `*.json`으로 적재.
+MVP 공통 테스트 정답지. 위협/자산 더미 데이터 30건을 `*.json`으로 적재.
 
-- 낭비 자원 시나리오 16건 (예: CPU 2% 미만 Idle EC2, Unattached SG, `_is_prod` 경계)
+- 낭비 자원 시나리오 18건 (예: CPU 2% 미만 Idle EC2, Unattached SG, `_is_prod` 경계, 미부착 EBS)
 - 보안 위협 시나리오 12건 (예: 22번 포트 전체 개방 0.0.0.0/0, SSH 브루트포스)
 
 전체 팀(UI/AI/백엔드)이 공유하며 pytest 회귀 테스트(`tests/`)의 입력으로 사용한다.
@@ -156,7 +156,7 @@ prod로 안 잡는" 구현이 전부 통과하기 때문이다.
 
 | 항목 | 사유 |
 | --- | --- |
-| EBS | 입력 스키마(`AssetInventory`)에 `ebs_volumes`가 없고 `rule_engine`에도 판정 분기가 없다 — 지금 채우면 규칙을 지어내는 셈. 3~5주차에 collector(`describe_volumes`)·schema·rule을 함께 도입 예정(김승철, P1 `RUNBOOK_EBS_DELETE_UNATTACHED` 전 완료). 확정 규칙은 아래 참고 |
+| ~~EBS~~ ✅ 4차 E1·E2로 편입 | 작성 시점에는 `ebs_volumes`도 판정 분기도 없어 미뤘다. #156으로 collector·schema·rule이 모두 들어와 아래 §EBS 판정 규칙 2행을 정답으로 굳혔다. **남은 분기(전이·비정상 상태 `creating`·`deleting`·`error`·`deleted`, `state` 미상)는 확정 규칙에 답이 없어 여전히 보류** — 정책 확정 후 편입한다(이슈 #264) |
 | 화이트리스트 태그(`finops:ignore` 등) | `feat/DATA-27-rule-engine-handoff`가 stale(dev가 47커밋 앞섬). 담당자가 현재 dev로 rebase·재작업 예정이며 **2차는 이를 기다리지 않는다** |
 | 미부착+개방 → `THREAT` 우선순위 / `dp` 부족 + prod 우선순위 | 3차 파일은 `_is_prod` 단일 변수 설계(다른 입력 전부 동일)라 우선순위 케이스를 섞으면 그 성질이 깨진다. 4차에서 별도 파일로 작성 |
 | ~~`non-prod` 부분 문자열 오탐~~ ✅ 3차 A12로 편입 | 당시 "버그 가능성"이라 정답으로 굳히지 못했으나, #95 / PR #97이 **부분일치 영구 금지**를 확정해 정답이 정해졌다 |
@@ -177,3 +177,33 @@ EBS가 없음). 세 항목 모두 `AssetItem` 계약이 위반 시 거부하는 
 `tests/test_golden_dataset.py`의 `_evaluate_inventory`에 순회를 함께 추가해야 한다.
 빠뜨리면 EBS 자산이 판정도 대조도 없이 무시되는데,
 `test_finops_expected_covers_every_input_asset`이 이를 감지한다.
+→ #156에서 둘 다 들어왔고, 4차 작성 시 `tests/test_guardrails.py`의 `_GOLDEN_ASSET_RUNBOOKS`에
+`ebs_volumes` 매핑을 추가하는 것이 **세 번째 선행 조건**이었다. 그 dict가 골든의 자산 종류를
+전부 덮는지 검사하므로, 매핑 없이 EBS를 넣으면 가드레일 회귀가 즉시 실패한다.
+
+## 4차 작성 케이스 (자산 2건 — 누적 30건)
+
+**자산 2건** — `finops/input/asset_inventory_004.json` (EBS 전용)
+
+| case | 입력 | 정답 | 막는 것 |
+| --- | --- | --- | --- |
+| E1 | `state: available` · 부착 없음 | `UNUSED` | 아무것도 `UNUSED`로 만들지 않는 구현 (미탐) |
+| E2 | `state: in-use` · 부착 있음 | `SKIP` / `SKIP_ACTIVE` | 사용 중인 볼륨을 삭제 후보로 넘기는 구현 (오탐) |
+
+**두 행은 위 §EBS 판정 규칙 표에서 그대로 도출했다.** 그 표에 없는 입력은 넣지 않았다 —
+정답지는 정답을 적는 곳이지 현재 구현을 기록하는 곳이 아니다.
+
+**정답으로 굳히지 않은 입력과 그 사유** (이슈 #264에서 정책 확인 중)
+
+| 입력 | 수집 경로에서 나오나 | 확정 규칙에 답이 있나 | 처리 |
+| --- | --- | --- | --- |
+| `creating` · `deleting` · `error` · `deleted` + 미부착 | ✅ AWS `VolumeState` 유효값 | ❌ | **정책 질문** — 답이 오면 편입 |
+| `state` 없음(null) | ❌ `describe_volumes`가 `State`를 돌려주므로 수집 경로에선 안 나온다. `EbsAsset.state`가 `Optional`이라 형식만 허용 | ❌ | **정책 질문** — fail-safe 판정 승인 필요 |
+| `available` + 부착 있음 | ❌ 볼륨 상태와 부착 상태는 별개 필드이며(`VolumeState` vs `VolumeAttachment.status`), 부착이 있는 볼륨은 `in-use`다 | ❌ | **제외** |
+| `AVAILABLE`(대문자) | ❌ AWS `VolumeState` 유효값은 전부 소문자 | ❌ | **제외** |
+
+제외 2행은 수집 경로에서 나올 수 없는 입력이라, 정답을 못박아도 막는 것이 **실제 판정 결과를
+바꾸지 않는 구현 차이**뿐이다. 실측으로 확인했다 — 부착 조건을 통째로 지우는 변형(`evaluate_ebs`에서
+`not attached_instance_ids` 제거)은 골든·단위 테스트 **어느 쪽도 실패시키지 않는다.** AWS가
+`state`와 부착을 함께 옮기기 때문이며, 그 조건은 수집단 버그에 대한 방어층이다.
+**커버리지가 늘어난다는 것은 정답성의 근거가 아니다.**

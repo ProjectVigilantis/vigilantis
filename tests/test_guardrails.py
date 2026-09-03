@@ -191,6 +191,7 @@ def test_rollback_runbooks_are_listed_but_not_ai_recommendable(runbook_id: str) 
 _GOLDEN_ASSET_RUNBOOKS = {
     "ec2_instances": RunbookId.RUNBOOK_EC2_RIGHTSIZING.value,
     "security_groups": RunbookId.RUNBOOK_SG_DELETE_ISOLATED.value,
+    "ebs_volumes": RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED.value,
 }
 
 
