@@ -188,7 +188,7 @@ def test_assets_use_latest_evaluation_when_multiple_runs(client_pg, db, set_regi
 US_EAST = "us-east-1"
 
 
-def _run(db, region: str, status: CollectionRunStatus | None, started_at=None):
+def _run(db, region: str, status: CollectionRunStatus | None, started_at=None, finished_at=NOW):
     """리전에 수집 실행을 1건 남긴다. status 를 주면 그 상태로 마감한다."""
     run = assets_repo.start_collection_run(
         db,
@@ -205,7 +205,7 @@ def _run(db, region: str, status: CollectionRunStatus | None, started_at=None):
             db,
             collection_run_id=run.collection_run_id,
             status=status,
-            finished_at=NOW,
+            finished_at=finished_at,
         )
     db.flush()
     return run
@@ -308,8 +308,8 @@ def test_all_configured_regions_missing_is_not_collected(client_pg, db, set_regi
     assert body["items"] == []
 
 
-def _seed_ec2(db, region: str, suffix: str) -> str:
-    run = _run(db, region, CollectionRunStatus.SUCCESS, started_at=NOW)
+def _seed_ec2(db, region: str, suffix: str, finished_at=NOW) -> str:
+    run = _run(db, region, CollectionRunStatus.SUCCESS, started_at=NOW, finished_at=finished_at)
     arn = f"arn:aws:ec2:{region}:{ACCOUNT}:instance/i-{suffix}"
     assets_repo.upsert_asset(
         db,
@@ -336,6 +336,27 @@ def test_items_scoped_to_configured_regions(client_pg, db, set_regions):
     arns = {item["arn"] for item in body["items"]}
     assert seoul_arn in arns
     assert east_arn not in arns  # 관제 밖 리전 자산 제외
+
+
+def test_three_fields_share_configured_region_scope(client_pg, db, set_regions):
+    """세 필드(collection_status·items·last_collected_at)가 한 응답에서 모두 설정 리전
+    기준으로 산출된다 — 이 PR 의 핵심 계약. 제외 리전(US_EAST)의 종료 시각을 설정
+    리전보다 **늦게** 둬도 last_collected_at 이 그 늦은 시각을 집지 않아야 한다
+    (#278 안성일 요청 — #259 revert 를 부른 '응답 내 범위 불일치'의 정상 계약 사례)."""
+    set_regions(SEOUL)
+    seoul_finished = NOW + timedelta(minutes=1)   # 2026-08-19T06:01:00Z
+    east_finished = NOW + timedelta(hours=2)       # 2026-08-19T08:00:00Z — 더 늦음(제외 대상)
+    seoul_arn = _seed_ec2(db, SEOUL, "0seoul", finished_at=seoul_finished)
+    east_arn = _seed_ec2(db, US_EAST, "0east", finished_at=east_finished)
+
+    body = client_pg.get("/api/v1/assets").json()
+    # ① collection_status — 제외 리전 무시, SEOUL SUCCESS 만
+    assert body["collection_status"] == "READY"
+    # ② last_collected_at — SEOUL 종료 시각. US_EAST 의 더 늦은 08:00 을 집으면 실패
+    assert body["last_collected_at"] == "2026-08-19T06:01:00Z"
+    # ③ items — SEOUL 자산만, US_EAST 제외
+    arns = {item["arn"] for item in body["items"]}
+    assert arns == {seoul_arn} and east_arn not in arns
 
 
 # --- 순수 함수: 심각도 순서 (DB 불필요) ---
