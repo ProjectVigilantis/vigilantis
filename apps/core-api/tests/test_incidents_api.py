@@ -89,7 +89,9 @@ def test_detail_unknown_id_returns_404_envelope(client_pg):
     assert body["error"]["request_id"] == response.headers["X-Request-ID"]
 
 
-def test_detail_assembles_evidence_recommendations_executions(client_pg, db, two_incidents):
+def test_detail_assembles_evidence_recommendations_executions(
+    client_pg, db, two_incidents, make_candidate
+):
     secops, _ = two_incidents()
     older = models.Evidence(
         incident_id=secops.incident_id,
@@ -109,27 +111,16 @@ def test_detail_assembles_evidence_recommendations_executions(client_pg, db, two
         occurred_at=T0 - timedelta(minutes=1),
         collected_at=T0,
     )
-    executable = models.RunbookCandidate(
-        incident_id=secops.incident_id,
-        runbook_id=RunbookId.RUNBOOK_NACL_ADD_DENY,
-        target_arn=SUBJECT_EC2,
-        # 서버가 parameters에서 만든 화면 표시본이다(#154) — 라우터는 그대로 실어 보낸다
-        parameters={"rule_number": 100, "cidr_block": "203.0.113.5/32", "protocol": "-1"},
-        display_parameters={
-            "rule_number": "100", "cidr_block": "203.0.113.5/32", "protocol": "-1",
-        },
-        evidence_ids=["ev-1"],
-        status=CandidateStatus.EXECUTABLE,
-    )
-    rejected = models.RunbookCandidate(
-        incident_id=secops.incident_id,
+    # display_parameters는 팩토리가 계약(#154)으로 파생시킨다 — 시드가 그 값을 손으로
+    # 적으면 아래 단언이 자기가 심은 값을 되읽어, 파생 규칙의 회귀를 못 잡는다.
+    make_candidate(db, secops)
+    make_candidate(
+        db,
+        secops,
         runbook_id=RunbookId.RUNBOOK_SG_DELETE_ISOLATED,
-        target_arn=SUBJECT_EC2,
-        parameters={},  # SG 삭제는 AI가 정할 값이 없다(#154)
-        evidence_ids=["ev-1"],
         status=CandidateStatus.REJECTED,
     )
-    db.add_all([older, newer, executable, rejected])
+    db.add_all([older, newer])
     db.flush()
 
     response = client_pg.get(f"/api/v1/incidents/{secops.incident_id}")
@@ -150,16 +141,9 @@ def test_detail_assembles_evidence_recommendations_executions(client_pg, db, two
     assert body["created_at"] == "2026-08-19T03:00:00Z"
 
 
-def test_detail_assembles_execution_summaries(client_pg, db, two_incidents):
+def test_detail_assembles_execution_summaries(client_pg, db, two_incidents, make_candidate):
     secops, _ = two_incidents()
-    candidate = models.RunbookCandidate(
-        incident_id=secops.incident_id,
-        runbook_id=RunbookId.RUNBOOK_NACL_ADD_DENY,
-        target_arn=SUBJECT_EC2,
-        parameters={"rule_number": 100, "cidr_block": "203.0.113.5/32", "protocol": "-1"},
-        evidence_ids=["ev-1"],
-        status=CandidateStatus.EXECUTABLE,
-    )
+    make_candidate(db, secops)
     execution = models.ActionExecution(
         incident_id=secops.incident_id,
         runbook_id=RunbookId.RUNBOOK_EC2_ISOLATE,
@@ -168,7 +152,7 @@ def test_detail_assembles_execution_summaries(client_pg, db, two_incidents):
         trigger_source=TriggerSource.PRE_MITIGATION_0_5S,
         updated_at=T0 + timedelta(minutes=2),
     )
-    db.add_all([candidate, execution])
+    db.add(execution)
     db.flush()
 
     body = client_pg.get(f"/api/v1/incidents/{secops.incident_id}").json()
