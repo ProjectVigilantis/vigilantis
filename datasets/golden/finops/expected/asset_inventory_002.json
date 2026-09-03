@@ -25,7 +25,7 @@
     {
       "case_id": "A7",
       "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00012",
-      "purpose": "MIN_DATAPOINTS 정확히 일치(48) — 조건이 '미만(<)'이므로 데이터부족이 아니다. '<='로 잘못 구현하면 SKIP_INSUFFICIENT_DATA가 되어 실패. 더불어 cpu_max가 null이면 스파이크 검사를 건너뛰어 COST_CANDIDATE가 되는 동작을 고정한다(null 가드가 빠지면 TypeError)",
+      "purpose": "MIN_DATAPOINTS 정확히 일치(48) — 조건이 '미만(<)'이므로 데이터부족이 아니다. '<='로 잘못 구현하면 SKIP_INSUFFICIENT_DATA가 되어 실패. cpu_max는 A1과 같은 10.0 — 수집기(collector._summarize)는 cpu_avg와 cpu_max를 같은 데이터포인트 목록에서 뽑으므로 'avg 있고 max 없음'을 만들지 않는다. cpu_max null 가드는 도달 불가 입력에 대한 방어 동작이라 골든이 아니라 단위 테스트 몫이다(apps/core-api/services/tests/test_rule_engine.py)",
       "evaluation_status": "COMPLETED",
       "verdict": "COST_CANDIDATE",
       "skip_reason_code": null
