@@ -460,8 +460,10 @@ def test_partially_applied_failure_initiates_rollback(db, aws):
     assert row.finished_at is None  # 비종료 상태다 — 자동 원복이 아직 남았다
     # 관제자 복구 목록이 열려 있다(EXECUTION_RECOVERABLE_STATUSES)
     assert row.status in EXECUTION_RECOVERABLE_STATUSES
-    # 다음 주기는 이 행을 다시 집지 않는다 — 자동 원복은 #241 몫이다
-    assert cycle(db).skipped == 1
+    # 다음 주기는 이 행을 재실행·재판정하지 않고 자동 원복 자식을 낳는다 (Issue #241).
+    # 발동 이후의 확정은 test_auto_rollback_workflow.py가 본다.
+    assert cycle(db).rollback_started == 1
+    assert len(exec_repo.list_rollback_children(db, execution_id)) == 1
 
 
 # ------------------------------------------------- 2/2 Status Check 판정 (#240)

@@ -121,6 +121,7 @@ from .runbook_parameters import (
     SgDeleteIsolatedParameters,
     SgRecreateParameters,
     bind_candidate_parameters,
+    bind_precheck_parameters,
     build_display_parameters,
     build_precheck_parameters,
 )
@@ -182,6 +183,7 @@ __all__ = [
     "SgDeleteIsolatedParameters",
     "SgRecreateParameters",
     "bind_candidate_parameters",
+    "bind_precheck_parameters",
     "build_display_parameters",
     "build_precheck_parameters",
     "build_verification_summary",
