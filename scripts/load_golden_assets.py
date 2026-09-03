@@ -28,6 +28,14 @@
 #   CollectionRun 3건과 판정 16건이 **누적**된다 — 화면은 리전별 최신 run과 자산별
 #   최신 판정만 보므로 응답은 같다. 실측: 2회 실행 후 assets 16 · runs 6 · 판정 32.
 #
+# 이 스크립트의 run 모양을 수집 계약으로 읽지 말 것 (PR #263 리뷰 반영):
+#   `persist_inventory`가 **인벤토리 1건마다 CollectionRun 1건**을 연다. 골든 3파일이
+#   전부 같은 리전(ap-northeast-2)이라 **한 리전에 run 3건**이 생긴다 — 프로덕션 수집은
+#   `collector.collect_region`이 **리전당 1회 1건**을 연다. 응답이 같아 보이는 것은
+#   조회단이 리전별 **최신 run**만 접기 때문이고(`routers/assets.py`의
+#   `latest_collection_run_per_region`, #231 / #259), run 테이블의 모양은 다르다.
+#   여기서 본 run 개수를 수집 계약으로 오해하면 안 된다.
+#
 # 적재되는 것 (2026-09-02 실측):
 #   자산 16건 (EC2 12 · SG 4) · 판정 16건
 #   verdict 4종 전부(COST_CANDIDATE 6 · SKIP 8 · THREAT 1 · UNUSED 1)
