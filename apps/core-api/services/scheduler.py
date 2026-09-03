@@ -21,27 +21,60 @@ logger = logging.getLogger("vigilantis.scheduler")
 
 JOB_ID = "finops_secops_scan"
 
+# 파이프라인 잡 전용 PostgreSQL advisory lock 키(고정 64bit 정수).
+# 다중 워커/레플리카에서 같은 tick 이 파이프라인을 겹쳐 돌리지 않게 한다 — 프로세스 내
+# 겹침은 build_scheduler 의 max_instances=1 이, 프로세스 간 겹침은 이 락이 막는다. (#277)
+# 값은 이 잡 전용으로 고정한 임의 상수다("vig_scan" ASCII, 다른 advisory lock 과 비충돌).
+_ADVISORY_LOCK_KEY = 0x7669675F7363616E
+
 
 def run_pipeline() -> dict:
-    """collector → rule_engine 1회 실행. 스케줄러 잡이자 수동 호출 진입점."""
-    from db.session import get_session_factory
+    """collector → rule_engine 1회 실행. 스케줄러 잡이자 수동 호출 진입점.
+
+    다중 워커/레플리카에서 같은 tick 이 파이프라인을 겹쳐 돌리지 않도록 PostgreSQL
+    세션 레벨 advisory lock 을 전용 커넥션에 잡고 실행한다. 락을 못 잡으면(다른 프로세스가
+    이미 실행 중) 이 tick 을 건너뛴다({"skipped": True}). 끝나면 락을 해제하고 커넥션을
+    반납한다. 프로세스 내 겹침은 max_instances=1, 프로세스 간 겹침은 이 락이 막는다. (#277)
+    """
+    from sqlalchemy import text
+
+    from db.session import get_engine, get_session_factory
     from services.collector import collect_and_store
     from services.rule_engine import run_rule_engine
 
-    store = collect_and_store()  # 수집→정형화→assets/metric_summaries upsert
-    session_factory = get_session_factory()
-    db = session_factory()
+    # AUTOCOMMIT — 세션 레벨 advisory lock 은 트랜잭션이 아니라 커넥션에 매이므로,
+    # 장시간 열린 트랜잭션을 남기지 않고 커넥션이 살아있는 동안 락을 유지한다.
+    lock_conn = get_engine().connect().execution_options(isolation_level="AUTOCOMMIT")
     try:
-        judged = run_rule_engine(db)  # RuleEvaluation 적재
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
+        acquired = lock_conn.execute(
+            text("SELECT pg_try_advisory_lock(:k)"), {"k": _ADVISORY_LOCK_KEY}
+        ).scalar()
+        if not acquired:
+            logger.info("scan pipeline skipped: 다른 프로세스가 이미 실행 중(advisory lock 미획득)")
+            return {"skipped": True}
+
+        store = collect_and_store()  # 수집→정형화→assets/metric_summaries upsert
+        session_factory = get_session_factory()
+        db = session_factory()
+        try:
+            judged = run_rule_engine(db)  # RuleEvaluation 적재
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+        summary = {"stored": store, "verdicts": judged["counts"]}
+        logger.info("scan pipeline done: %s", summary)
+        return summary
     finally:
-        db.close()
-    summary = {"stored": store, "verdicts": judged["counts"]}
-    logger.info("scan pipeline done: %s", summary)
-    return summary
+        try:
+            lock_conn.execute(
+                text("SELECT pg_advisory_unlock(:k)"), {"k": _ADVISORY_LOCK_KEY}
+            )
+        except Exception:
+            logger.exception("advisory unlock 실패 — 커넥션 반납으로 세션 종료 시 해제됨")
+        lock_conn.close()
 
 
 
