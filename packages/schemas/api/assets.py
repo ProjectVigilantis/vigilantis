@@ -77,6 +77,7 @@ class SkipReasonCode(str, Enum):
     SKIP_LOW_UTIL = "SKIP_LOW_UTIL"
     SKIP_WHITELISTED = "SKIP_WHITELISTED"
     SKIP_ACTIVE = "SKIP_ACTIVE"
+    SKIP_UNSUPPORTED_STATE = "SKIP_UNSUPPORTED_STATE"  # EBS: available/in-use 외 상태(생성·삭제 중·오류·삭제됨·미상) — 판정 보류 (#276)
 
 
 class RelationType(str, Enum):

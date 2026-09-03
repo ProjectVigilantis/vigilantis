@@ -93,7 +93,8 @@ export type SkipReasonCode =
   | 'SKIP_PROD_PROTECTED'
   | 'SKIP_LOW_UTIL'
   | 'SKIP_WHITELISTED'
-  | 'SKIP_ACTIVE';
+  | 'SKIP_ACTIVE'
+  | 'SKIP_UNSUPPORTED_STATE';
 
 export type RelationType =
   | 'SECURED_BY' // EC2 → SG
