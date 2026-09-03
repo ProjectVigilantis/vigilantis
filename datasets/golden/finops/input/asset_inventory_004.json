@@ -1,0 +1,35 @@
+{
+  "$schema": "../../schema/asset_inventory.schema.json",
+  "account_id": "123456789012",
+  "region": "ap-northeast-2",
+  "mode": "localstack",
+  "collected_at": "2026-09-03T06:00:00Z",
+  "lookback_days": 14,
+  "period_seconds": 3600,
+  "ebs_volumes": [
+    {
+      "asset_type": "EBS",
+      "arn": "arn:aws:ec2:ap-northeast-2:123456789012:volume/vol-0a1b2c3d4e5f00041",
+      "volume_id": "vol-0a1b2c3d4e5f00041",
+      "region": "ap-northeast-2",
+      "volume_type": "gp3",
+      "size_gib": 100,
+      "availability_zone": "ap-northeast-2a",
+      "encrypted": false,
+      "state": "available",
+      "attached_instance_ids": []
+    },
+    {
+      "asset_type": "EBS",
+      "arn": "arn:aws:ec2:ap-northeast-2:123456789012:volume/vol-0a1b2c3d4e5f00042",
+      "volume_id": "vol-0a1b2c3d4e5f00042",
+      "region": "ap-northeast-2",
+      "volume_type": "gp3",
+      "size_gib": 100,
+      "availability_zone": "ap-northeast-2a",
+      "encrypted": false,
+      "state": "in-use",
+      "attached_instance_ids": ["i-0a1b2c3d4e5f00041"]
+    }
+  ]
+}
