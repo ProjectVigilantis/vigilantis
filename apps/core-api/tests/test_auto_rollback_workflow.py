@@ -10,6 +10,7 @@ Incident를 어디로 옮기는가, 거절이 자동 재시도로 이어지지 �
 재시도로 이어지면 ADR-0004 정책 ④가 코드에서 사라진다.
 """
 
+import logging
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -30,7 +31,7 @@ from db.repositories import assets as assets_repo  # noqa: E402
 from db.repositories import executions as exec_repo  # noqa: E402
 from db.repositories import guardrails as guardrails_repo  # noqa: E402
 from db.repositories import incidents as incidents_repo  # noqa: E402
-from schemas.api.actions import ExecutionStatus  # noqa: E402
+from schemas.api.actions import ExecuteActionRequest, ExecutionStatus  # noqa: E402
 from schemas.api.assets import AssetType  # noqa: E402
 from schemas.api.incidents import IncidentCategory, IncidentStatus  # noqa: E402
 from schemas.backups import BackupType  # noqa: E402
@@ -98,7 +99,7 @@ class FakeEc2:
                                 {
                                     "InstanceId": INSTANCE,
                                     "InstanceType": self._state["current_type"],
-                                    "State": {"Name": "running"},
+                                    "State": {"Name": self._state["current_state"]},
                                 }
                             ]
                         }
@@ -114,7 +115,12 @@ class FakeEc2:
 @pytest.fixture
 def aws(monkeypatch):
     """캡처·실행·판정이 같은 가짜 EC2를 본다. 기본은 §3-2 ② 경로다."""
-    state = {"overrides": {}, "calls": [], "current_type": APPLIED_TYPE}
+    state = {
+        "overrides": {},
+        "calls": [],
+        "current_type": APPLIED_TYPE,
+        "current_state": "running",
+    }
 
     def factory(service, region=None, **_):
         return FakeEc2(state)
@@ -122,9 +128,11 @@ def aws(monkeypatch):
     for module in (bk, ex, rb):
         monkeypatch.setattr(module, "aws_client", factory)
 
-    def configure(current_type=None, **overrides):
+    def configure(current_type=None, current_state=None, **overrides):
         if current_type is not None:
             state["current_type"] = current_type
+        if current_state is not None:
+            state["current_state"] = current_state
         state["overrides"].update(overrides)
 
     configure.calls = state["calls"]
@@ -154,7 +162,9 @@ def _collected_asset(db):
     )
 
 
-def _rolled_back_origin(db, *, with_backup=True, with_candidate=True, collected=True):
+def _rolled_back_origin(
+    db, *, with_backup=True, with_candidate=True, collected=True, backup_state="running"
+):
     """2/2 Status Check가 실패로 갈린 직후 상태 — 되돌려야 하는 원본 1건.
 
     식별자만 돌려준다. 스캔이 커밋을 하므로 들고 간 ORM 객체는 곧 낡는다.
@@ -202,7 +212,7 @@ def _rolled_back_origin(db, *, with_backup=True, with_candidate=True, collected=
             payload={
                 "instance_id": INSTANCE,
                 "instance_type": BACKUP_TYPE,
-                "state": "running",
+                "state": backup_state,
             },
         )
         exec_repo.bind_backup_record(db, origin.execution_id, record.backup_record_id)
@@ -215,6 +225,20 @@ def _rolled_back_origin(db, *, with_backup=True, with_candidate=True, collected=
     )
     db.commit()
     return incident.incident_id, origin.execution_id
+
+
+def reserve_manual_revert(db, incident_id):
+    """관제자 [원클릭 원복] 접수 — 자동 발동과 갈라진 진입점(HTTP가 쓰는 것과 같다)."""
+    reservation = workflows.reserve_execution(
+        db,
+        ExecuteActionRequest(
+            incident_id=incident_id,
+            runbook_id=RunbookId.RUNBOOK_EC2_REVERT_SIZE,
+            idempotency_key=str(uuid.uuid4()),
+        ),
+    )
+    db.commit()
+    return reservation.response.execution_id
 
 
 def cycle(db, publish=None):
@@ -466,5 +490,159 @@ def test_interrupted_revert_is_judged_not_rerun(db, aws):
     report = cycle(db)
 
     assert report.judged == 1 and report.started == 0
+    assert only_child(db, origin_id).status is ExecutionStatus.SUCCESS
+    assert statuses(db, incident_id, origin_id)[1] is ExecutionStatus.ROLLED_BACK
+
+
+# ---------------------------------------------------- 관제자 접수 원복 (PR #256 리뷰 ②)
+
+
+def test_manual_revert_child_is_bound_to_the_origin_backup(db, aws):
+    """관제자 접수 자식도 되돌릴 값의 출처를 자기 행에 결속한다.
+
+    실행(run_revert_size_execution)은 요청도 후보도 보지 않고 **자기 행의
+    backup_record_id 하나**만 읽는다(ADR-0004 정책 ③). 접수가 그것을 박아 주지 않으면
+    정상 접수된 원복이 실행 단계에서 "원복 근거 없음"으로 실패한다 — 자동 발동에는
+    있고 관제자 경로에만 없던 구멍이다.
+    """
+    incident_id, origin_id = _rolled_back_origin(db)
+
+    child_id = reserve_manual_revert(db, incident_id)
+
+    child = exec_repo.get_execution(db, child_id)
+    origin = exec_repo.get_execution(db, origin_id)
+    assert child.trigger_source is TriggerSource.USER_APPROVAL
+    assert child.parent_execution_id == origin_id
+    assert origin.backup_record_id is not None
+    assert child.backup_record_id == origin.backup_record_id
+
+
+def test_manual_revert_runs_and_settles_both(db, aws):
+    """접수 → 실행 → 확정. 확정의 근거는 발동 주체가 아니라 자식의 결과다."""
+    incident_id, origin_id = _rolled_back_origin(db)
+    reserve_manual_revert(db, incident_id)
+
+    cycle(db)
+
+    child = only_child(db, origin_id)
+    assert child.trigger_source is TriggerSource.USER_APPROVAL
+    assert child.status is ExecutionStatus.SUCCESS
+    assert statuses(db, incident_id, origin_id) == (
+        IncidentStatus.AWAITING_CLOSURE,
+        ExecutionStatus.ROLLED_BACK,
+    )
+
+
+def test_manual_revert_restores_the_backup_type(db, aws):
+    """관제자 경로도 백업 값으로 되돌린다 — 원본이 적용한 값이 아니다."""
+    incident_id, _ = _rolled_back_origin(db)
+    reserve_manual_revert(db, incident_id)
+
+    cycle(db)
+
+    modify = [
+        kwargs
+        for name, kwargs in aws.calls
+        if name == "modify_instance_attribute" and not kwargs.get("DryRun")
+    ]
+    assert modify == [{"InstanceId": INSTANCE, "InstanceType": {"Value": BACKUP_TYPE}}]
+
+
+def test_manual_revert_does_not_double_with_auto(db, aws):
+    """접수된 원복이 있으면 자동 발동은 걸리지 않는다 — 관문이 자식의 존재라서다."""
+    incident_id, origin_id = _rolled_back_origin(db)
+    reserve_manual_revert(db, incident_id)
+
+    cycle(db)
+    cycle(db)
+
+    assert len(children(db, origin_id)) == 1
+
+
+# --------------------------------------------- 중단된 원복의 성공 경계 (PR #256 리뷰 ①)
+
+
+def _interrupted_after_type_restore(db, origin_id):
+    """정지 → 타입 원복까지 갔다가 **기동 전에** 끊긴 모양을 만든다."""
+    child = only_child(db, origin_id)
+    workflows._step_recorder(db, child.execution_id)(
+        ExecutionStepResult(
+            sequence=1,
+            affected_arn=INSTANCE_ARN,
+            step_type=ex.STEP_STOP_INSTANCE,
+            aws_operation="ec2.stop_instances",
+            status=ExecutionStepStatus.IN_PROGRESS,
+            occurred_at=datetime.now(timezone.utc),
+        )
+    )
+    return child
+
+
+def test_interrupted_revert_stopped_before_start_is_not_success(db, aws):
+    """타입만 되돌아왔고 인스턴스가 멈춰 있으면 성공이 아니다.
+
+    실행 절차의 마지막 칸은 기동이다(executor.STEP_START_INSTANCE). 그 앞에서 끊기면
+    타입은 이미 백업 값이라, 타입만 보는 판정은 자식을 SUCCESS로 닫고 원본까지
+    ROLLED_BACK으로 확정한다 — 멈춘 자산을 아무도 다시 보지 않게 된다.
+    """
+    incident_id, origin_id = _rolled_back_origin(db)
+    cycle(db)
+    _interrupted_after_type_restore(db, origin_id)
+    aws(current_type=BACKUP_TYPE, current_state="stopped")
+
+    report = cycle(db)
+
+    assert report.judged == 1 and report.started == 0
+    assert only_child(db, origin_id).status is ExecutionStatus.FAILED
+    assert statuses(db, incident_id, origin_id) == (
+        IncidentStatus.FAILED,
+        ExecutionStatus.ROLLBACK_FAILED,
+    )
+
+
+def test_interrupted_revert_not_restarted_is_critical(db, aws, caplog):
+    """멈춘 채 끝난 원복은 수동 개입이 남는다 — 조용히 닫지 않는다."""
+    _, origin_id = _rolled_back_origin(db)
+    cycle(db)
+    _interrupted_after_type_restore(db, origin_id)
+    aws(current_type=BACKUP_TYPE, current_state="stopped")
+
+    with caplog.at_level(logging.CRITICAL):
+        cycle(db)
+
+    assert [r.message for r in caplog.records if r.levelno == logging.CRITICAL] == [
+        "revert_size_not_restarted"
+    ]
+
+
+def test_interrupted_revert_pending_counts_as_started(db, aws):
+    """기동 **요청**이 원복 성공의 경계다 — 2/2 Status Check는 묻지 않는다(ADR-0008 §6).
+
+    pending을 성공에서 빼면 방금 켠 인스턴스가 다음 주기에 미완으로 확정된다.
+    """
+    incident_id, origin_id = _rolled_back_origin(db)
+    cycle(db)
+    _interrupted_after_type_restore(db, origin_id)
+    aws(current_type=BACKUP_TYPE, current_state="pending")
+
+    cycle(db)
+
+    assert only_child(db, origin_id).status is ExecutionStatus.SUCCESS
+    assert statuses(db, incident_id, origin_id)[1] is ExecutionStatus.ROLLED_BACK
+
+
+def test_interrupted_revert_of_a_stopped_instance_succeeds(db, aws):
+    """조치 이전에 멈춰 있었으면 멈춰 있는 것이 원복의 완료다.
+
+    되돌려야 할 상태의 원천은 백업 레코드의 state다(ADR-0008 §4). 여기서 실자산 상태만
+    보고 running을 요구하면, 원복이 조치 이전에 없던 기동을 만들어 낸 셈이 된다.
+    """
+    incident_id, origin_id = _rolled_back_origin(db, backup_state="stopped")
+    cycle(db)
+    _interrupted_after_type_restore(db, origin_id)
+    aws(current_type=BACKUP_TYPE, current_state="stopped")
+
+    cycle(db)
+
     assert only_child(db, origin_id).status is ExecutionStatus.SUCCESS
     assert statuses(db, incident_id, origin_id)[1] is ExecutionStatus.ROLLED_BACK

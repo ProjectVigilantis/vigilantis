@@ -1337,21 +1337,35 @@ def execute_rightsizing(
 
 
 # ------------------------------------------------------------------ 원복 (Issue #241)
-def current_instance_type(instance_id: str, region: str):
-    """(현재 인스턴스 타입, 사유 코드) 짝. 타입을 읽지 못하면 코드가 채워진다.
+def current_instance_type_and_state(instance_id: str, region: str):
+    """(현재 인스턴스 타입, 현재 state, 사유 코드) 3짝. 타입을 못 읽으면 코드가 채워진다.
 
     실행과 종료 판정이 같은 축을 같은 방법으로 읽어야 해서 공개한다(ADR-0008 §3-2의
     대조와 workflows.judge_revert_size의 실자산 대조가 그 둘이다). 읽는 방법이 갈리면
     "되돌아왔는가"의 답이 자리마다 달라진다.
+
+    **타입과 state를 describe 한 번으로 함께 읽는다.** 나눠 부르면 두 호출 사이에
+    상태가 바뀌어 "타입은 되돌아왔는데 state는 그 이전 것"인 조합을 판정이 보게 되고,
+    그 조합은 실재한 적 없는 자산이다.
+
+    state는 부가 축이라 없다고 판정을 막지 않는다(None으로 돌려준다) — 대조의 축은
+    타입이고, state는 "기동까지 끝났는가"를 덧붙여 묻는 자리이기 때문이다.
     """
     instance, code = _instance(instance_id, region)
     if code is not None:
-        return None, code
+        return None, None, code
     found = instance.get("InstanceType")
     if not _non_empty_str(found):
         # 조회는 됐는데 타입이 없다 — 대조할 축이 없으므로 대상 상태 문제다
-        return None, R.PRECHECK_INVALID_STATE
-    return str(found), None
+        return None, None, R.PRECHECK_INVALID_STATE
+    state = instance.get("State", {}).get("Name")
+    return str(found), (str(state) if _non_empty_str(state) else None), None
+
+
+def current_instance_type(instance_id: str, region: str):
+    """(현재 인스턴스 타입, 사유 코드) 짝 — state가 필요 없는 자리의 축약형."""
+    found, _state, code = current_instance_type_and_state(instance_id, region)
+    return found, code
 
 
 def _deferred(code: PrecheckReasonCode, detail: str) -> ExecutionOutcome:
