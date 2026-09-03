@@ -13,6 +13,8 @@
 #      아무것도 제안하지 않는 쪽으로 기우는데, 그 위축을 잡을 수단이 이것 말고 없다.
 #   ③ 사실 정합성 실패 건수 — factcheck.py 판정
 #   ④ 필드 안정도와 흔들린 필드 목록 — reproducibility.py 판정
+#   ⑤ 되읽기 줄 수 · 첫 줄의 근거 인용 회차 — readback.py 판정(#243). 합격 조건이
+#      아니라 판을 바꿨을 때 방향을 보는 진단값이다
 #
 # 단가·비용은 여기 담지 않는다. ADR-0005 §Consequences가 LLM 운영비 지표를 제품 기능에서
 # 빼고 "토큰 사용량을 집계해 오프라인으로 추정"으로 못 박았고, 단가는 계속 낡는 값이라
@@ -29,6 +31,7 @@ from schemas.agents import AgentGraphOutput
 from schemas.incidents import AgentInvocationStatus
 
 from .factcheck import FactCheckResult
+from .readback import ReadbackResult
 from .reproducibility import FieldAgreement, output_fields, unstable_fields
 
 
@@ -52,6 +55,9 @@ class CaseRun:
     # 예외의 실패 위상(model_client.AIModelError.phase). 클래스 이름만으로는 계약
     # 위반이 요청 쪽인지 응답 쪽인지 갈리지 않아 따로 든다 — response만 모델 품질이다
     error_phase: Optional[str] = None
+    # 되읽기·근거 인용 진단(#243). 요약이 없는 회차(FAILED)는 None이다
+    readback: Optional[ReadbackResult] = None
+    observation_cites_input: Optional[bool] = None
 
 
 @dataclass(frozen=True)
@@ -80,6 +86,12 @@ class ColumnReport:
     unstable: dict[str, list[FieldAgreement]] = field(default_factory=dict)
     stable_slots: int = 0
     field_slots: int = 0
+    # 일치율 분모에 든 케이스 수 — 유효 출력이 2회 이상인 케이스만(#243 §선행 계측의 한계)
+    stability_cases: int = 0
+    # 되읽기(결함 5 근사)·근거 인용(결함 1 근사). 분모는 fact_checked(요약이 있는 회차)다
+    readback_lines: int = 0
+    readback_runs: int = 0
+    observation_cited: int = 0
 
     @property
     def runs(self) -> int:
@@ -127,6 +139,7 @@ def build_column_report(label: str, runs: Sequence[CaseRun]) -> ColumnReport:
     unstable: dict[str, list[FieldAgreement]] = {}
     stable_slots = 0
     field_slots = 0
+    stability_cases = 0
     for case_id, case_runs in by_case.items():
         # FAILED의 출력은 _failed_output()의 빈 자리표시자라 필드 값이 모델의 것이
         # 아니다 — 일치율 분모에 넣으면 호출 실패·계약 위반이 FAILED 칸과 재현성
@@ -137,8 +150,12 @@ def build_column_report(label: str, runs: Sequence[CaseRun]) -> ColumnReport:
             for run in case_runs
             if run.output.invocation_status is not AgentInvocationStatus.FAILED
         ]
-        if not outputs:
+        # 유효 출력이 1건이면 흔들릴 자리가 없어 자동으로 "전회 일치"가 된다 — FAILED가
+        # 많은 열일수록 일치율이 낙관적으로 뜨는 원인이다(#243 §선행 계측의 한계). 분모에서
+        # 뺀다. 그 케이스의 FAILED는 위 전용 칸에 이미 세어져 있다
+        if len(outputs) < 2:
             continue
+        stability_cases += 1
         shaky = unstable_fields(outputs)
         # 필드 자리 수는 그 케이스에서 한 번이라도 나타난 필드 이름의 개수다
         names = {name for output in outputs for name in output_fields(output)}
@@ -174,4 +191,8 @@ def build_column_report(label: str, runs: Sequence[CaseRun]) -> ColumnReport:
         unstable=unstable,
         stable_slots=stable_slots,
         field_slots=field_slots,
+        stability_cases=stability_cases,
+        readback_lines=sum(run.readback.lines_with_readback for run in runs if run.readback),
+        readback_runs=sum(1 for run in runs if run.readback and run.readback.any),
+        observation_cited=sum(1 for run in runs if run.observation_cites_input),
     )

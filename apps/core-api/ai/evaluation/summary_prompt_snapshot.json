@@ -5,6 +5,11 @@
   "reasoning_effort": "low",
   "temperature": null,
   "payload_dedup_active": null,
+  "fixed_set": {
+    "inventory_ids": ["001", "002", "003"],
+    "case_ids": ["A1", "A7", "A11", "A12", "A14", "A16"],
+    "input_sha256": "8fffd381a2e89d0d1c0c1b5530e7e4934e244b10978585715ba87c31731d9454"
+  },
   "approved_at": "2026-09-03",
   "approved_by": "안성일",
   "judge": {
