@@ -18,10 +18,7 @@ import pytest
 
 from schemas.api.actions import ExecuteActionRequest, ExecutionStatus
 from schemas.api.incidents import (
-    IncidentCategory,
     IncidentStatus,
-    ResponseMode,
-    RiskLevel,
 )
 from schemas.candidates import CandidateStatus
 from schemas.runbooks import RunbookId, TriggerSource
@@ -37,55 +34,6 @@ SUBJECT_EC2 = "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0aaa"
 DEFAULT_RUNBOOK = RunbookId.RUNBOOK_NACL_ADD_DENY
 
 # Runbook별 typed 파라미터(#154) — 접수가 저장 후보를 계약으로 재검증하므로
-# 픽스처도 계약에 맞는 값을 싣는다
-_PARAMS_BY_RUNBOOK = {
-    RunbookId.RUNBOOK_NACL_ADD_DENY: {
-        "rule_number": 100, "cidr_block": "203.0.113.5/32", "protocol": "-1",
-    },
-    RunbookId.RUNBOOK_SG_DELETE_ISOLATED: {},
-}
-
-
-def _seed_incident(db) -> models.Incident:
-    incident = models.Incident(
-        subject_arn=SUBJECT_EC2,
-        category=IncidentCategory.SECOPS,
-        status=IncidentStatus.AWAITING_APPROVAL,
-        title="SSH 브루트포스 탐지",
-        initial_risk_level=RiskLevel.MEDIUM,
-        response_mode=ResponseMode.AGENT_WAIT,
-        initial_risk_reason_codes=["SSH_BRUTE_FORCE"],
-    )
-    db.add(incident)
-    db.flush()
-    return incident
-
-
-def _add_candidate(
-    db,
-    incident: models.Incident,
-    runbook_id: RunbookId = DEFAULT_RUNBOOK,
-    status: CandidateStatus = CandidateStatus.EXECUTABLE,
-    parameters: dict | None = None,
-) -> models.RunbookCandidate:
-    candidate = models.RunbookCandidate(
-        incident_id=incident.incident_id,
-        runbook_id=runbook_id,
-        target_arn=SUBJECT_EC2,
-        parameters=_PARAMS_BY_RUNBOOK[runbook_id] if parameters is None else parameters,
-        evidence_ids=["ev-1"],
-        status=status,
-    )
-    db.add(candidate)
-    db.flush()
-    return candidate
-
-
-def _seed_executable(db) -> tuple[models.Incident, models.RunbookCandidate]:
-    incident = _seed_incident(db)
-    return incident, _add_candidate(db, incident)
-
-
 def _body(incident: models.Incident, runbook_id: RunbookId, key: str = KEY) -> dict:
     return {
         "incident_id": incident.incident_id,
@@ -148,18 +96,18 @@ def test_unknown_incident_returns_404_envelope(client_pg, incident_id):
     CandidateStatus.CLAIMED,              # 이미 실행에 선점됨
     CandidateStatus.INVALIDATED,          # 실행 전 재확인에서 무효화됨
 ])
-def test_candidate_not_executable_returns_409(client_pg, db, status):
-    incident = _seed_incident(db)
-    _add_candidate(db, incident, status=status)
+def test_candidate_not_executable_returns_409(client_pg, db, make_incident, make_candidate, status):
+    incident = make_incident(db)
+    make_candidate(db, incident, status=status)
 
     response = client_pg.post(URL, json=_body(incident, DEFAULT_RUNBOOK))
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "PROPOSAL_NOT_EXECUTABLE"
 
 
-def test_other_runbook_executable_returns_409(client_pg, db):
+def test_other_runbook_executable_returns_409(client_pg, db, make_executable):
     """EXECUTABLE 후보가 있어도 요청한 Runbook과 다르면 실행 대상이 아니다."""
-    incident, _ = _seed_executable(db)
+    incident, _ = make_executable(db)
 
     response = client_pg.post(
         URL, json=_body(incident, RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED)
@@ -168,7 +116,7 @@ def test_other_runbook_executable_returns_409(client_pg, db):
     assert response.json()["error"]["code"] == "PROPOSAL_NOT_EXECUTABLE"
 
 
-def test_contract_invalid_candidate_returns_409(client_pg, db):
+def test_contract_invalid_candidate_returns_409(client_pg, db, make_incident, make_precontract_candidate):
     """typed 계약(#154)을 거치지 않은 저장 후보는 EXECUTABLE이어도 실행되지 않는다.
 
     계약 이전에 저장된 행·마이그레이션 backfill(빈 parameters)이 이 부류다.
@@ -176,8 +124,8 @@ def test_contract_invalid_candidate_returns_409(client_pg, db):
     1개 이상을 요구해, 노출을 거르면 이 인시던트의 상세가 500이 된다
     (workflows._candidate_meets_contract 참조).
     """
-    incident = _seed_incident(db)
-    _add_candidate(db, incident, parameters={})  # NACL_ADD_DENY 필수 키 누락
+    incident = make_incident(db)
+    make_precontract_candidate(db, incident)  # NACL_ADD_DENY 필수 키 누락
 
     response = client_pg.post(URL, json=_body(incident, DEFAULT_RUNBOOK))
     assert response.status_code == 409
@@ -196,8 +144,8 @@ def test_contract_invalid_candidate_returns_409(client_pg, db):
 # --- 예약 · 멱등 ---------------------------------------------------------------
 
 
-def test_new_key_reserves_execution_and_claims_candidate(client_pg, db):
-    incident, candidate = _seed_executable(db)
+def test_new_key_reserves_execution_and_claims_candidate(client_pg, db, make_executable):
+    incident, candidate = make_executable(db)
     seeded_updated_at = incident.updated_at
 
     response = client_pg.post(URL, json=_body(incident, candidate.runbook_id))
@@ -225,10 +173,10 @@ def test_new_key_reserves_execution_and_claims_candidate(client_pg, db):
     assert refreshed.updated_at > seeded_updated_at
 
 
-def test_detail_stays_readable_after_reservation(client_pg, db):
+def test_detail_stays_readable_after_reservation(client_pg, db, make_executable):
     """접수와 함께 Incident가 ACTION_IN_PROGRESS로 옮겨가지 않으면, 유일한 후보가
     CLAIMED로 빠지고 IN_PROGRESS 실행이 생겨 상세 응답 계약이 깨진다(500)."""
-    incident, candidate = _seed_executable(db)
+    incident, candidate = make_executable(db)
     detail = f"/api/v1/incidents/{incident.incident_id}"
 
     assert client_pg.get(detail).status_code == 200
@@ -242,11 +190,11 @@ def test_detail_stays_readable_after_reservation(client_pg, db):
     assert [item["status"] for item in body["executions"]] == ["IN_PROGRESS"]
 
 
-def test_second_reservation_keeps_action_in_progress(client_pg, db):
+def test_second_reservation_keeps_action_in_progress(client_pg, db, make_candidate, make_executable):
     """이미 ACTION_IN_PROGRESS인 Incident의 두 번째 접수 — 상태 전이 rowcount 0은
     정상 경로이며, 상세는 계속 200이어야 한다."""
-    incident, first = _seed_executable(db)
-    second = _add_candidate(db, incident, RunbookId.RUNBOOK_SG_DELETE_ISOLATED)
+    incident, first = make_executable(db)
+    second = make_candidate(db, incident, runbook_id=RunbookId.RUNBOOK_SG_DELETE_ISOLATED)
     detail = f"/api/v1/incidents/{incident.incident_id}"
 
     assert client_pg.post(URL, json=_body(incident, first.runbook_id)).status_code == 202
@@ -266,9 +214,9 @@ def test_second_reservation_keeps_action_in_progress(client_pg, db):
     assert incidents_repo.get_incident(db, incident.incident_id).updated_at > after_first
 
 
-def test_same_key_replay_returns_200_with_same_execution(client_pg, db):
+def test_same_key_replay_returns_200_with_same_execution(client_pg, db, make_executable):
     """재요청 시점의 후보는 이미 CLAIMED다 — 멱등 조회가 앞서야 200이 나온다."""
-    incident, candidate = _seed_executable(db)
+    incident, candidate = make_executable(db)
     payload = _body(incident, candidate.runbook_id)
 
     first = client_pg.post(URL, json=payload)
@@ -282,10 +230,10 @@ def test_same_key_replay_returns_200_with_same_execution(client_pg, db):
     assert len(executions_repo.list_by_incident(db, incident.incident_id)) == 1
 
 
-def test_same_key_pointing_elsewhere_returns_409_conflict(client_pg, db):
-    incident, candidate = _seed_executable(db)
-    _add_candidate(db, incident, RunbookId.RUNBOOK_SG_DELETE_ISOLATED)
-    other_incident, other_candidate = _seed_executable(db)
+def test_same_key_pointing_elsewhere_returns_409_conflict(client_pg, db, make_candidate, make_executable):
+    incident, candidate = make_executable(db)
+    make_candidate(db, incident, runbook_id=RunbookId.RUNBOOK_SG_DELETE_ISOLATED)
+    other_incident, other_candidate = make_executable(db)
 
     first = client_pg.post(URL, json=_body(incident, candidate.runbook_id))
     assert first.status_code == 202
@@ -303,10 +251,10 @@ def test_same_key_pointing_elsewhere_returns_409_conflict(client_pg, db):
     assert conflict.json()["error"]["code"] == "IDEMPOTENCY_KEY_CONFLICT"
 
 
-def test_replay_accepts_equivalent_uuid_text_forms(client_pg, db):
+def test_replay_accepts_equivalent_uuid_text_forms(client_pg, db, make_executable):
     """저장 값은 정규형(소문자·하이픈)이다 — 대문자·하이픈 없는 표기의 동일
     재요청이 IDEMPOTENCY_KEY_CONFLICT로 오판되면 안 된다."""
-    incident, candidate = _seed_executable(db)
+    incident, candidate = make_executable(db)
 
     first = client_pg.post(URL, json=_body(incident, candidate.runbook_id))
     assert first.status_code == 202
@@ -339,12 +287,12 @@ def test_replay_accepts_equivalent_uuid_text_forms(client_pg, db):
     assert mismatch.json()["error"]["code"] == "IDEMPOTENCY_KEY_CONFLICT"
 
 
-def test_claimed_race_window_replays_existing_execution(client_pg, db, monkeypatch):
+def test_claimed_race_window_replays_existing_execution(client_pg, db, make_incident, make_candidate, monkeypatch):
     """최초 멱등 조회가 앞선 요청의 commit 전에 실행되고 후보 확인이 commit 후에
     실행된 경합 창 — 후보는 이미 CLAIMED지만 같은 Key 재요청이므로 409
     PROPOSAL_NOT_EXECUTABLE이 아니라 200 재생이어야 한다."""
-    incident = _seed_incident(db)
-    candidate = _add_candidate(db, incident, status=CandidateStatus.CLAIMED)
+    incident = make_incident(db)
+    candidate = make_candidate(db, incident, status=CandidateStatus.CLAIMED)
     winner = models.ActionExecution(
         incident_id=incident.incident_id,
         runbook_id=candidate.runbook_id,
@@ -377,13 +325,13 @@ def test_claimed_race_window_replays_existing_execution(client_pg, db, monkeypat
     assert len(executions_repo.list_by_incident(db, incident.incident_id)) == 1
 
 
-def test_duplicate_key_race_recovers_to_existing_execution(client_pg, db, monkeypatch):
+def test_duplicate_key_race_recovers_to_existing_execution(client_pg, db, make_executable, monkeypatch):
     """앞선 요청이 이미 예약한 상태에서 뒤엣 요청이 INSERT까지 간 경우.
 
     유니크 제약이 거절하고, 그 오류를 재조회로 받아 200으로 돌린다 —
     db/repositories/executions.py 헤더가 규정한 해석이다.
     """
-    incident, candidate = _seed_executable(db)
+    incident, candidate = make_executable(db)
     winner = models.ActionExecution(
         incident_id=incident.incident_id,
         runbook_id=candidate.runbook_id,
@@ -423,7 +371,7 @@ def test_duplicate_key_race_recovers_to_existing_execution(client_pg, db, monkey
 # --- 실제 동시 경합(독립 세션) --------------------------------------------------
 
 
-def test_concurrent_same_key_requests_reserve_exactly_once(pg_engine, monkeypatch):
+def test_concurrent_same_key_requests_reserve_exactly_once(pg_engine, make_incident, make_candidate, monkeypatch):
     """독립 트랜잭션 2개가 같은 Key로 실제 경합한다 — 트랜잭션 간 유니크 충돌,
     선행 commit 대기, 충돌 후 재조회 가시성은 같은 세션 재현으로는 검증되지
     않는다. INSERT 직전 게이트로 두 트랜잭션이 모두 멱등 조회·후보 확인을
@@ -437,8 +385,8 @@ def test_concurrent_same_key_requests_reserve_exactly_once(pg_engine, monkeypatc
 
     setup = Session(bind=pg_engine)
     try:
-        incident = _seed_incident(setup)
-        candidate = _add_candidate(setup, incident)
+        incident = make_incident(setup)
+        candidate = make_candidate(setup, incident)
         incident_id, candidate_id = incident.incident_id, candidate.candidate_id
         setup.commit()
     finally:
@@ -555,10 +503,10 @@ def _add_execution(
 
 @pytest.mark.parametrize("origin_runbook, rollback_runbook", ROLLBACK_PAIRS)
 def test_rollback_reserves_child_bound_to_origin(
-    client_pg, db, origin_runbook, rollback_runbook
+    client_pg, db, make_incident, origin_runbook, rollback_runbook
 ):
     """롤백은 후보가 아니라 원본 실행에서 접수된다 — 결속은 parent_execution_id."""
-    incident = _seed_incident(db)
+    incident = make_incident(db)
     origin = _add_execution(db, incident, origin_runbook)
 
     response = client_pg.post(URL, json=_body(incident, rollback_runbook))
@@ -576,9 +524,9 @@ def test_rollback_reserves_child_bound_to_origin(
     "origin_status",
     [ExecutionStatus.IN_PROGRESS, ExecutionStatus.FAILED, ExecutionStatus.ROLLED_BACK],
 )
-def test_rollback_without_recoverable_origin_returns_409(client_pg, db, origin_status):
+def test_rollback_without_recoverable_origin_returns_409(client_pg, db, make_incident, origin_status):
     """복구를 열어 주지 않는 상태의 원본은 접수 근거가 되지 않는다."""
-    incident = _seed_incident(db)
+    incident = make_incident(db)
     _add_execution(db, incident, RunbookId.RUNBOOK_EC2_ISOLATE, status=origin_status)
 
     response = client_pg.post(
@@ -589,9 +537,9 @@ def test_rollback_without_recoverable_origin_returns_409(client_pg, db, origin_s
     assert response.json()["error"]["code"] == "PROPOSAL_NOT_EXECUTABLE"
 
 
-def test_rollback_without_matching_pair_returns_409(client_pg, db):
+def test_rollback_without_matching_pair_returns_409(client_pg, db, make_incident):
     """짝이 아닌 원본은 복구를 열지 않는다 — NACL_ADD_DENY의 해제는 본편 경로다."""
-    incident = _seed_incident(db)
+    incident = make_incident(db)
     _add_execution(db, incident, RunbookId.RUNBOOK_NACL_ADD_DENY)
 
     response = client_pg.post(
@@ -602,9 +550,9 @@ def test_rollback_without_matching_pair_returns_409(client_pg, db):
     assert response.json()["error"]["code"] == "PROPOSAL_NOT_EXECUTABLE"
 
 
-def test_second_rollback_on_same_origin_returns_409(client_pg, db):
+def test_second_rollback_on_same_origin_returns_409(client_pg, db, make_incident):
     """이중 롤백 방지 — 한 원본이 여는 복구는 1회뿐이다."""
-    incident = _seed_incident(db)
+    incident = make_incident(db)
     _add_execution(db, incident, RunbookId.RUNBOOK_EC2_ISOLATE)
     body = _body(incident, RunbookId.RUNBOOK_EC2_UNISOLATE)
 
@@ -616,9 +564,9 @@ def test_second_rollback_on_same_origin_returns_409(client_pg, db):
     assert second.json()["error"]["code"] == "PROPOSAL_NOT_EXECUTABLE"
 
 
-def test_rollback_same_key_replay_returns_200(client_pg, db):
+def test_rollback_same_key_replay_returns_200(client_pg, db, make_incident):
     """멱등 처리는 #116 경로를 그대로 쓴다 — 롤백도 같은 Key면 200 + 같은 실행."""
-    incident = _seed_incident(db)
+    incident = make_incident(db)
     _add_execution(db, incident, RunbookId.RUNBOOK_EC2_ISOLATE)
     body = _body(incident, RunbookId.RUNBOOK_EC2_UNISOLATE)
 
@@ -629,13 +577,13 @@ def test_rollback_same_key_replay_returns_200(client_pg, db):
     assert replay.json()["execution_id"] == first.json()["execution_id"]
 
 
-def test_rollback_on_resolved_incident_resumes_action_in_progress(client_pg, db):
+def test_rollback_on_resolved_incident_resumes_action_in_progress(client_pg, db, make_incident):
     """종료 상태에서도 관제자 복구는 접수되고, 그 뒤 상세 조회가 200으로 남는다.
 
     RESOLVED는 "더 진행할 제안·실행 없음"이지 자산이 원복됐다는 뜻이 아니다 —
     격리된 채 RESOLVED인 인시던트의 [원클릭 해제]가 ADR-0004의 정규 경로다.
     """
-    incident = _seed_incident(db)
+    incident = make_incident(db)
     incident.status = IncidentStatus.RESOLVED
     origin = _add_execution(db, incident, RunbookId.RUNBOOK_EC2_ISOLATE)
     detail_url = f"/api/v1/incidents/{incident.incident_id}"
