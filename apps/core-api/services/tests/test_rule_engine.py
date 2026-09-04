@@ -23,8 +23,13 @@ from services.rule_engine import (  # noqa: E402
 EBS_CASES = [
     ("available", [], Verdict.UNUSED, None),                 # 미부착·available → 정리 후보
     ("in-use", ["i-abc"], Verdict.SKIP, SkipReason.SKIP_ACTIVE),  # 부착 → 정상 사용
-    ("creating", [], Verdict.SKIP, SkipReason.SKIP_ACTIVE),  # 전이 상태 → UNUSED 아님(오삭제 방지)
-    ("error", [], Verdict.SKIP, SkipReason.SKIP_ACTIVE),     # 비정상 상태 → UNUSED 아님
+    ("available", ["i-abc"], Verdict.SKIP, SkipReason.SKIP_ACTIVE),  # 모순(available+부착) → 부착 우선
+    # 전이·비정상·미상 상태 → UNUSED 아님, "정상 가동"도 아님 → 판정 보류(#276)
+    ("creating", [], Verdict.SKIP, SkipReason.SKIP_UNSUPPORTED_STATE),
+    ("deleting", [], Verdict.SKIP, SkipReason.SKIP_UNSUPPORTED_STATE),
+    ("error", [], Verdict.SKIP, SkipReason.SKIP_UNSUPPORTED_STATE),
+    ("deleted", [], Verdict.SKIP, SkipReason.SKIP_UNSUPPORTED_STATE),
+    (None, [], Verdict.SKIP, SkipReason.SKIP_UNSUPPORTED_STATE),  # state 미상(null) fail-safe
 ]
 
 # (name, cpu_avg, cpu_max, datapoints, tags) -> (verdict, skip_reason)

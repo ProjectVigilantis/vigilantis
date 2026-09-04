@@ -98,6 +98,7 @@ export const SKIP_REASON_LABELS: LabelMap<SkipReasonCode> = {
   SKIP_LOW_UTIL: { label: '저사용 임계 미달', tone: 'orange' }, // 기준만 못 넘음 — 재검토 여지
   SKIP_WHITELISTED: { label: '예외 등록됨', tone: 'purple' }, // 사람이 등록한 예외
   SKIP_ACTIVE: { label: '활성 자산', tone: 'green' }, // 정상 사용 중
+  SKIP_UNSUPPORTED_STATE: { label: '판정 보류 상태', tone: 'yellow' }, // EBS 전이·비정상·미상(available/in-use 외) — 삭제 후보 아님
 };
 
 export const CATEGORY_LABELS: LabelMap<IncidentCategory> = {

@@ -723,10 +723,11 @@ def test_registered_in_deduped_no_unique_violation(db):
 
 
 @pytest.fixture
-def five_skip_inventory() -> AssetInventory:
-    """SkipReasonCode 5종을 한 배치로 유발 — DB 실적재 검증용 (C2).
+def six_skip_inventory() -> AssetInventory:
+    """SkipReasonCode 6종을 한 배치로 유발 — DB 실적재 검증용 (C2 + #276).
 
-    EC2 4종(INSUFFICIENT_DATA·PROD_PROTECTED·LOW_UTIL·ACTIVE) + SG 1종(WHITELISTED=default).
+    EC2 4종(INSUFFICIENT_DATA·PROD_PROTECTED·LOW_UTIL·ACTIVE) + SG 1종(WHITELISTED=default)
+    + EBS 1종(UNSUPPORTED_STATE=creating·미부착).
     evaluate_ec2 우선순위: 데이터부족 → prod → (idle&spike)LOW_UTIL / idle→후보 → ACTIVE.
     """
     now = datetime.now(timezone.utc)
@@ -766,14 +767,21 @@ def five_skip_inventory() -> AssetInventory:
                 region="ap-northeast-2", attached=True, open_to_world=[],
             ),
         ],
+        ebs_volumes=[
+            EbsAsset(  # available/in-use 아닌 전이 상태(creating·미부착) → SKIP_UNSUPPORTED_STATE (#276)
+                arn="arn:aws:ec2:ap-northeast-2:123456789012:volume/vol-creating",
+                volume_id="vol-creating", region="ap-northeast-2", volume_type="gp3",
+                size_gib=100, state="creating", attached_instance_ids=[],
+            ),
+        ],
     )
 
 
-def test_all_five_skip_reason_codes_persisted(db, five_skip_inventory):
-    """SkipReasonCode 5종이 full 파이프라인(persist → run_rule_engine)으로 RuleEvaluation 에
-    실제 적재되는지 (C2). rule_engine 판정 → DB 적재 경로로 검증된 건 기존엔 PROD_PROTECTED·
+def test_all_six_skip_reason_codes_persisted(db, six_skip_inventory):
+    """SkipReasonCode 6종이 full 파이프라인(persist → run_rule_engine)으로 RuleEvaluation 에
+    실제 적재되는지 (C2 + #276). rule_engine 판정 → DB 적재 경로로 검증된 건 기존엔 PROD_PROTECTED·
     ACTIVE 2종뿐이었다(나머지는 evaluate_* 직접 호출 golden 테스트로만 대조)."""
-    res = persist_inventory(five_skip_inventory, db)
+    res = persist_inventory(six_skip_inventory, db)
     run_rule_engine(db, collection_run_id=res["collection_run_id"])
     db.flush()
     db.expire_all()  # identity map 비우고 DB 행에서 다시 읽는다 — 왕복 검증(#109 선례)
@@ -784,6 +792,7 @@ def test_all_five_skip_reason_codes_persisted(db, five_skip_inventory):
         "i-spike": "SKIP_LOW_UTIL",
         "i-active": "SKIP_ACTIVE",
         "sg-default": "SKIP_WHITELISTED",
+        "vol-creating": "SKIP_UNSUPPORTED_STATE",
     }
     persisted = {}
     for resource_id, exp_code in expected.items():
@@ -797,7 +806,7 @@ def test_all_five_skip_reason_codes_persisted(db, five_skip_inventory):
         assert ev.skip_reason_code == exp_code, resource_id
         persisted[resource_id] = ev.skip_reason_code
 
-    # 5종 전량 = SkipReasonCode enum 전량. 6번째 코드가 추가되면 깨져서 "5종" 전제가 낡았음을 알린다.
+    # 6종 전량 = SkipReasonCode enum 전량. 7번째 코드가 추가되면 깨져서 "6종" 전제가 낡았음을 알린다.
     assert set(persisted.values()) == {c.value for c in SkipReasonCode}
 
 
