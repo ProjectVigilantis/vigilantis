@@ -166,7 +166,7 @@ Refs #7
 - **제목**: 커밋과 동일한 `<gitmoji> [TYPE] #이슈번호 - 한 줄 설명` 형식.
 - **본문**: PR을 열면 [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md)가 **자동으로 채워진다.** 본문 양식의 원천은 그 파일이며 이 문서에 복제하지 않는다. 섹션은 `## 개요` · `## 변경 사항` · `## 테스트` · `## 관련 이슈` 4개다.
 - **리뷰/머지**: 최소 1명 이상(특히 백엔드↔AI↔프론트 API 접점 담당자)의 승인과 CI 통과 후 머지한다. CI는 두 잡이다 — `test`(pytest + LocalStack·PostgreSQL service container)와 `web`(ESLint · `next build` 타입 체크 · `node --test`, #91 / PR #176).
-- **리뷰 코멘트의 리뷰 상태 변경 필수(2026-09-03 팀 규칙)**: PR에 리뷰 코멘트를 달 때는 GitHub 리뷰 상태를 반드시 함께 바꾼다 — 수정이 필요하면 `Request changes`, 머지해도 되면 `Approve`. 상태 없는 `Comment`만 남기지 않는다. 코멘트가 머지를 막는지 저자와 머지 책임자가 알 수 없기 때문이다. CLI로는 `gh pr review <번호> --approve|--request-changes --body-file <파일>`이며, `gh pr comment`로 리뷰 본문을 올리지 않는다.
+- **리뷰 코멘트의 리뷰 상태 변경 필수(2026-09-03 팀 규칙)**: **리뷰어가** PR에 리뷰 코멘트를 달 때는 GitHub 리뷰 상태를 반드시 함께 바꾼다 — 수정이 필요하면 `Request changes`, 머지해도 되면 `Approve`. 상태 없는 `Comment`만 남기지 않는다. 코멘트가 머지를 막는지 저자와 머지 책임자가 알 수 없기 때문이다. CLI로는 `gh pr review <번호> --approve|--request-changes --body-file <파일>`이며, `gh pr comment`로 리뷰 본문을 올리지 않는다. **저자가 자기 PR에 남기는 코멘트(리뷰 반영 보고·질문·변경 고지)는 이 규칙의 대상이 아니다** — GitHub이 저자 본인의 `Approve`·`Request changes` 제출을 막으므로 지킬 방법이 없고, 그런 코멘트는 애초에 머지를 막는 축이 아니다. 저자는 기존대로 `gh pr comment`를 쓴다.
 - **머지 승인 코멘트의 CLOSE 추천(2026-08-26 신설)**: 최종 승인이라 판단해 머지 승인 코멘트를 남길 때, **끝에 `Refs`로 연결된 이슈의 CLOSE 추천 한 줄을 붙인다.** Claude가 PR 변경 범위와 이슈의 수용 기준을 대조해 `CLOSE 추천 — #N: <충족 근거>` 또는 `CLOSE 보류 — #N: <남은 항목>` 중 하나를 제시하며, 판단이 갈리면 보류로 적는다. **이 줄은 머지 책임자가 CLOSE 판단을 놓치지 않게 하는 권고이며, 실제 CLOSE 판단과 수행은 머지 책임자가 직접 한다**(§Git 작업 흐름). **별도 교차검증자는 세우지 않는다** — 리뷰에서 이미 이슈 범위와 승인 기준을 확인하므로 중복 절차다.
 
 ### 본문 작성 규칙 2가지 (반드시 지킬 것)
