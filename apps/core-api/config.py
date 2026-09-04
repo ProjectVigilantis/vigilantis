@@ -157,6 +157,9 @@ class CollectorSettings(BaseSettings):
     METRIC_LOOKBACK_DAYS: int = Field(default=14, gt=0)
     METRIC_PERIOD_SECONDS: int = Field(default=3600, gt=0)
     SCAN_INTERVAL_SECONDS: int = Field(default=300, gt=0)
+    # 스캔 파이프라인 잡 기동 여부. false 면 start_scheduler 가 None 을 돌려준다 —
+    # 테스트가 앱을 띄울 때 실제 수집·판정이 도는 것을 막는다(DISPATCH_ENABLED 와 같은 결).
+    SCAN_ENABLED: bool = True
 
 
 @lru_cache

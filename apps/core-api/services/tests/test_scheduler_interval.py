@@ -19,7 +19,7 @@ for p in (str(CORE_API), str(REPO_ROOT / "packages")):
         sys.path.insert(0, p)
 
 from config import CollectorSettings, get_collector_settings  # noqa: E402
-from services.scheduler import _interval_seconds  # noqa: E402
+from services.scheduler import _interval_seconds, start_scheduler  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -44,3 +44,10 @@ def test_invalid_interval_is_rejected_at_settings(monkeypatch, bad):
     monkeypatch.setenv("SCAN_INTERVAL_SECONDS", bad)
     with pytest.raises(ValidationError):
         _interval_seconds()
+
+
+def test_scan_disabled_returns_none(monkeypatch):
+    # SCAN_ENABLED=false 면 스캔 스케줄러를 기동하지 않는다 — 테스트/특정 배포에서
+    # 실제 수집·판정이 도는 것을 막는 안전장치(dispatcher.start_dispatcher 와 같은 결).
+    monkeypatch.setenv("SCAN_ENABLED", "false")
+    assert start_scheduler() is None
