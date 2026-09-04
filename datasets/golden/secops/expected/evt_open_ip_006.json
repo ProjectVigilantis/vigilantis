@@ -21,7 +21,7 @@
     "note": "작성 시점의 apps/core-api/security/risk_evaluator.py 상수. 값이 바뀌면 tests/test_golden_dataset.py 가 실패하므로 본 정답을 함께 갱신할 것 (ADR-0006 임계값 결합 원칙)"
   },
   "case_id": "S13",
-  "purpose": "tcp 8080 전체개방 — 전 프로토콜·전 포트·민감 포트 어디에도 걸리지 않는 네 번째 분기. RISK_OPEN_INGRESS_WORLD 단독이 나오는 유일한 케이스다",
+  "purpose": "tcp 8080 전체개방 — 전 프로토콜·전 포트·민감 포트 어디에도 걸리지 않는 네 번째 분기. RISK_OPEN_INGRESS_WORLD 단독이 나오는 첫 케이스다(같은 4차의 S17과 함께 이 분기를 덮는다)",
   "derivation": "source_cidr 0.0.0.0/0 ∈ WORLD_CIDRS → MEDIUM + WORLD. protocol tcp(≠-1), (8080,8080)≠ALL_PORTS, 범위 8080..8080에 22·3389 없음 → 추가 코드 없음",
   "initial_risk_level": "MEDIUM",
   "response_mode": "AGENT_WAIT",
