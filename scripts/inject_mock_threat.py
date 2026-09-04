@@ -84,11 +84,21 @@ def inject(path: Path) -> dict:
 
     expected = _expected_for(path.name)
     if expected is not None:
-        want = (expected["initial_risk_level"], expected["response_mode"])
-        got = (row["initial_risk_level"], row["response_mode"])
+        # 정답 3축 전부 대조 — reason_codes 를 빼면 사유 코드만 어긋난 오구현을 놓친다
+        # (박지현 지적, #269 리뷰). row·expected 양쪽을 sorted 로 맞춰 순서 무관 비교.
+        want = (
+            expected["initial_risk_level"],
+            expected["response_mode"],
+            sorted(expected["reason_codes"]),
+        )
+        got = (row["initial_risk_level"], row["response_mode"], row["reason_codes"])
         row["expected_match"] = want == got
         if not row["expected_match"]:
-            row["expected"] = {"initial_risk_level": want[0], "response_mode": want[1]}
+            row["expected"] = {
+                "initial_risk_level": want[0],
+                "response_mode": want[1],
+                "reason_codes": want[2],
+            }
     return row
 
 
@@ -131,7 +141,9 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    print(f"\n{len(rows)}건 처리 — 정답 대조 통과(대조 대상만).")
+    # 성공 요약은 stderr 로 — --json 의 stdout 은 순수 JSON 이어야 기계가 파싱한다
+    # (안성일 지적, #269 리뷰: `--json | json.load` 가 이 줄에 Extra data 로 깨졌다).
+    print(f"\n{len(rows)}건 처리 — 정답 대조 통과(대조 대상만).", file=sys.stderr)
     return 0
 
 

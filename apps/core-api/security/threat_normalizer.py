@@ -85,7 +85,15 @@ def _identity_parts(event) -> tuple[str, ...]:
 
     규칙을 바꾸려면 이 함수만 고친다(파일 헤더 §중복 억제 키).
     """
-    occurred = event.occurred_at.astimezone(timezone.utc).isoformat()
+    # 시간대 없는 시각은 UTC 로 본다 — astimezone() 은 naive 를 호스트 지역시각으로 읽어
+    # KST 머신에서 다른 위협이 같은 키가 되거나(→ UNIQUE 로 진짜 위협이 조용히 사라짐)
+    # 같은 관측이 호스트마다 다른 키를 받는다(#269 리뷰: 김세혁). schemas 의 _as_utc 와 같은 결.
+    occurred_at = event.occurred_at
+    occurred = (
+        occurred_at.replace(tzinfo=timezone.utc)
+        if occurred_at.tzinfo is None
+        else occurred_at.astimezone(timezone.utc)
+    ).isoformat()
     if isinstance(event, OpenIpThreatInput):
         return (
             ThreatEventType.OPEN_IP.value,

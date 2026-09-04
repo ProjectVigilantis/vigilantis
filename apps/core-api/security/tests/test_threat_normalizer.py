@@ -136,6 +136,18 @@ def test_same_instant_in_another_offset_is_the_same_key():
     assert utc.deduplication_key == kst.deduplication_key
 
 
+def test_naive_occurred_at_is_read_as_utc_not_host_local():
+    """시간대 없는 시각은 호스트 지역시각이 아니라 UTC 로 읽어야 한다.
+
+    astimezone() 은 naive 를 실행 호스트 지역시각으로 해석하므로, KST 머신에서
+    `06:30:00`(naive) 이 실제로 다른 위협인 `2026-08-18T21:30:00Z` 와 같은 키가 되어
+    UNIQUE 제약에 진짜 위협이 조용히 사라진다(#269 리뷰: 김세혁). naive 는 UTC 와 동일 키.
+    """
+    naive = normalize_mock_input({**SSH_RAW, "occurred_at": "2026-08-31T00:00:00"})
+    utc = normalize_mock_input({**SSH_RAW, "occurred_at": "2026-08-31T00:00:00Z"})
+    assert naive.deduplication_key == utc.deduplication_key
+
+
 @pytest.mark.parametrize("field, value", [
     ("target_arn", "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-other"),
     ("source_ip", "198.51.100.7"),
