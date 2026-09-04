@@ -14,6 +14,8 @@ from schemas.api.assets import AssetType, RelationType
 from schemas.collections import CollectionRunStatus
 from schemas.rules import RuleEvaluationResult
 
+import routers.assets as assets_router
+from config import AwsSettings
 from db.repositories import assets as assets_repo
 
 NOW = datetime(2026, 8, 19, 6, 0, 0, tzinfo=timezone.utc)
@@ -33,6 +35,30 @@ def set_regions(monkeypatch):
         monkeypatch.setattr("routers.assets._configured_regions", lambda: list(regions))
 
     return _apply
+
+
+def test_configured_regions_reads_aws_settings(monkeypatch):
+    """설정 → 라우터 배선을 여기서만 고정한다 — 다른 테스트는 _configured_regions 를
+    통째로 monkeypatch 하므로 이 한 줄(get_aws_settings().regions_list())을 안 지나간다.
+    regions_list 를 리네임하면 이 테스트만 잡는다(김세혁 #278 리뷰)."""
+    monkeypatch.setattr(
+        assets_router,
+        "get_aws_settings",
+        lambda: AwsSettings(_env_file=None, AWS_REGIONS="ap-northeast-2, us-east-1"),
+    )
+    assert assets_router._configured_regions() == ["ap-northeast-2", "us-east-1"]
+
+
+def test_no_configured_region_fails_loudly(monkeypatch):
+    """관제 범위가 비면 소리내어 실패한다 — 빈 목록으로 NOT_COLLECTED 를 주면 설정 오류가
+    '아직 수집 안 함'과 같아진다(services/aws/client.default_region() 과 같은 규약, 김세혁 #278)."""
+    monkeypatch.setattr(
+        assets_router,
+        "get_aws_settings",
+        lambda: AwsSettings(_env_file=None, AWS_REGION="", AWS_REGIONS=""),
+    )
+    with pytest.raises(RuntimeError, match="리전 해석 실패"):
+        assets_router._configured_regions()
 
 
 def test_no_collection_history_returns_not_collected(client_pg, set_regions):

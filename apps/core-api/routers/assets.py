@@ -65,7 +65,13 @@ def _configured_regions() -> list[str]:
     collection_status·items·last_collected_at 을 이 범위로 함께 좁혀 응답 안에서
     리전 범위가 갈리지 않게 한다. (테스트는 이 함수를 monkeypatch 로 대체한다)
     """
-    return get_aws_settings().regions_list()
+    regions = get_aws_settings().regions_list()
+    if not regions:
+        # 관제 범위가 비면 세 필드가 빈 스코프가 되어 조용히 NOT_COLLECTED 가 된다 —
+        # "아직 수집 안 함"과 "설정 오류"가 화면에서 구분되지 않는다. 같은 오설정에서
+        # services/aws/client.default_region() 은 소리내어 죽으므로 여기서도 같은 결로 실패한다.
+        raise RuntimeError("리전 해석 실패 — AWS_REGION / AWS_REGIONS 값을 확인할 것")
+    return regions
 
 
 def _collection_status(
