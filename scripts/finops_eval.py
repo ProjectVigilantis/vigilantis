@@ -77,6 +77,9 @@ from schemas.assets import AssetInventory  # noqa: E402
 
 GOLDEN = REPO_ROOT / "datasets" / "golden" / "finops"
 SNAPSHOT = REPO_ROOT / "apps" / "core-api" / "ai" / "evaluation" / "summary_prompt_snapshot.json"
+# 골든 파일을 손으로 고른다 — 고정 세트는 스냅샷 fixed_set에 파일 목록으로 박혀 있어, 파일이 늘 때
+# 조용히 넓어지지 않고 사람이 여기와 스냅샷에 추가한 뒤 기준선을 다시 잰다(docs/AI_SUMMARY_BASELINE.md).
+# 004는 EBS 전용이라 finops_cases가 케이스 0건을 내므로 제외.
 INVENTORY_IDS = ("001", "002", "003")
 
 

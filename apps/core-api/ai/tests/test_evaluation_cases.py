@@ -16,6 +16,7 @@ from schemas.runbooks import RunbookId
 from services.rule_engine import evaluate_ec2
 
 GOLDEN = Path(__file__).resolve().parents[4] / "datasets" / "golden" / "finops"
+# scripts/finops_eval.py와 같은 목록 — 004는 EBS 전용이라 케이스 0건, EC2가 든 파일이 늘면 양쪽에 추가한다
 INVENTORY_IDS = ("001", "002", "003")
 
 # 정답지 verdict가 COST_CANDIDATE인 자산 — 인벤토리 순서 그대로다
