@@ -93,6 +93,19 @@ def get_incident(db: Session, incident_id: str) -> Optional[models.Incident]:
     ).scalar_one_or_none()
 
 
+def get_incident_by_threat_event_id(
+    db: Session, threat_event_id: str
+) -> Optional[models.Incident]:
+    """위협 이벤트에 묶인 Incident. SECOPS 중복(같은 deduplication_key) 접수 시 기존
+    Incident 를 돌려주는 데 쓴다 — 위협 이벤트와 Incident 는 한 트랜잭션에서 1:1 로 생긴다
+    (incident_intake.create_incident_from_intake)."""
+    return db.execute(
+        select(models.Incident).where(
+            models.Incident.threat_event_id == threat_event_id
+        )
+    ).scalar_one_or_none()
+
+
 def lock_incident(db: Session, incident_id: str) -> Optional[models.Incident]:
     """행 잠금 후 최신 상태로 다시 읽는다. 접수 시 상태 전이가 현재 상태를 전제로
     하므로, 잠그지 않으면 동시 접수가 서로의 전이를 덮어쓴다 (Issue #126)."""
