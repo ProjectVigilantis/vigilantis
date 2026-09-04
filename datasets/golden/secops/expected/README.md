@@ -1,6 +1,7 @@
-# SecOps 정답(expected) — 12건 작성 완료
+# SecOps 정답(expected) — 16건 작성 완료
 
-위협 입력 12건(`secops/input/`)에 **1:1로 대응하는 정답 파일 12개**가 이 폴더에 있다.
+위협 입력 16건(`secops/input/`)에 **1:1로 대응하는 정답 파일 16개**가 이 폴더에 있다.
+**건수는 `tests/test_golden_dataset.py`가 양방향으로 지킨다** — 짝이 없는 입력도, 짝이 없는 정답도 실패한다.
 판정 규칙은 2026-08-31 확정됐고(PR #206 — Risk Evaluator: `RiskReasonCode` 값 목록·위험도 임계),
 그 규칙대로 정답을 채웠다(J3, 박지현). 보류 사유(규칙 미확정)는 해소됐다.
 
@@ -54,6 +55,10 @@ SSH는 횟수·속도 계열). `test_secops_thresholds_not_drifted`가 이 값�
 | S5 | `evt_open_ip_003.json` | MEDIUM | `AGENT_WAIT` | `OPEN_INGRESS_WORLD` · `ALL_PORTS_EXPOSED` |
 | S6 | `evt_open_ip_004.json` | MEDIUM | `AGENT_WAIT` | `OPEN_INGRESS_WORLD` · `SENSITIVE_PORT_EXPOSED` |
 | S7 | `evt_open_ip_005.json` | MEDIUM | `AGENT_WAIT` | `OPEN_INGRESS_WORLD` · `SENSITIVE_PORT_EXPOSED` |
+| S13 | `evt_open_ip_006.json` | MEDIUM | `AGENT_WAIT` | `OPEN_INGRESS_WORLD` |
+| S14 | `evt_open_ip_007.json` | MEDIUM | `AGENT_WAIT` | `OPEN_INGRESS_WORLD` · `SENSITIVE_PORT_EXPOSED` |
+| S16 | `evt_open_ip_008.json` | MEDIUM | `AGENT_WAIT` | `OPEN_INGRESS_WORLD` · `ALL_PORTS_EXPOSED` |
+| S17 | `evt_open_ip_009.json` | MEDIUM | `AGENT_WAIT` | `OPEN_INGRESS_WORLD` |
 | S3 | `evt_ssh_bruteforce_001.json` | **HIGH** | `PRE_MITIGATION_0_5S` | `SSH_BRUTEFORCE` |
 | S4 | `evt_ssh_bruteforce_002.json` | LOW | `AGENT_WAIT` | `SSH_LOW_SIGNAL` |
 | S8 | `evt_ssh_bruteforce_003.json` | LOW | `AGENT_WAIT` | `SSH_LOW_SIGNAL` |
