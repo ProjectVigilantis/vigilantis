@@ -11,21 +11,61 @@
 # 골든 JSON을 읽는 것은 호출부 몫이다.
 # ==============================================================================
 
-from .cases import EvalCase, finops_cases
+from .cases import EvalCase, finops_cases, input_fingerprint
 from .factcheck import FactCheckResult, check_summary_facts
+from .judge import (
+    JUDGE_VERSION,
+    DefectJudgement,
+    RestorationOutput,
+    RestorationScore,
+    defect_request,
+    expected_deciding_values,
+    fact_sheet,
+    judge_fingerprint,
+    proposal_cards,
+    restoration_request,
+    score_restoration,
+)
+from .readback import (
+    ReadbackResult,
+    check_readback,
+    cites_input,
+    observation_cites_input,
+)
 from .report import CaseRun, ColumnReport, build_column_report
-from .reproducibility import FieldAgreement, field_agreement, output_fields, unstable_fields
+from .reproducibility import (
+    FieldAgreement,
+    field_agreement,
+    output_fields,
+    unstable_fields,
+)
 
 __all__ = [
+    "JUDGE_VERSION",
     "CaseRun",
     "ColumnReport",
+    "DefectJudgement",
     "EvalCase",
     "FactCheckResult",
     "FieldAgreement",
+    "ReadbackResult",
+    "RestorationOutput",
+    "RestorationScore",
     "build_column_report",
+    "check_readback",
     "check_summary_facts",
+    "cites_input",
+    "defect_request",
+    "expected_deciding_values",
+    "fact_sheet",
     "field_agreement",
     "finops_cases",
+    "input_fingerprint",
+    "judge_fingerprint",
+    "observation_cites_input",
     "output_fields",
+    "proposal_cards",
+    "restoration_request",
+    "score_restoration",
     "unstable_fields",
 ]

@@ -95,7 +95,7 @@ import할 수 없으므로 `tests/test_golden_dataset.py`가 현재 상수와 �
 | ID | 자산 | 입력 | 판정 | 목적 |
 | --- | --- | --- | --- | --- |
 | A6 | EC2 | 이름에 `prod` 없음 / `Environment: production` 태그 / `cpu_avg 1.0` · `dp 336` | `SKIP_PROD_PROTECTED` | 태그 경로 검증 + prod 보호가 idle보다 우선 |
-| A7 | EC2 | `dp 48` (경계 정확히) / `cpu_avg 4.9` / `cpu_max` **null** | `COST_CANDIDATE` | `<`를 `<=`로 쓰면 실패 + `cpu_max` null 가드 |
+| A7 | EC2 | `dp 48` (경계 정확히) / `cpu_avg 4.9` / `cpu_max 10.0` | `COST_CANDIDATE` | `<`를 `<=`로 쓰면 실패 (`cpu_max` null 가드는 `apps/core-api/services/tests/test_rule_engine.py`로 — 수집기는 avg·max를 같은 목록에서 뽑아 null max를 만들지 않는다, #243) |
 | A8 | SG | 이름 `default` / `attached false` / `tcp 22` 전체개방 | `SKIP_WHITELISTED` | 화이트리스트가 `THREAT`·`UNUSED`를 모두 이김 |
 | A9 | SG | `attached false` / 개방 없음 | `UNUSED` | 미사용 SG 정리 후보 |
 | A10 | SG | `attached true` / 개방 없음 | `SKIP_ACTIVE` | 정상 SG — 오탐 방지 음성 대조군 |

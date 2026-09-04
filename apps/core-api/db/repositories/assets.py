@@ -63,32 +63,43 @@ def finish_collection_run(
     return result.rowcount == 1
 
 
-def latest_collection_run_per_region(db: Session) -> list[models.CollectionRun]:
+def latest_collection_run_per_region(
+    db: Session, regions: Optional[Sequence[str]] = None
+) -> list[models.CollectionRun]:
     """리전별로 가장 최근에 시작된 수집 실행을 1건씩. (Issue #231)
 
     C4(#222)로 수집이 리전 단위 독립 트랜잭션이 되면서 한 사이클에 CollectionRun 이
     리전 수만큼 생긴다. 전역 최신 1행만 보면 리전1 FAILED → 리전2 SUCCESS 순서일 때
     실패가 성공에 가려진다 — 화면이 READY 로 뜬다.
 
-    **설정된 리전으로 범위를 좁히지 않는다.** 좁히면 collection_status 만 설정 리전을
-    보고 items·last_collected_at 은 전 리전을 보게 되어 한 응답 안에서 범위가 갈린다
-    (PR #259 리뷰, 안성일). 대신 수집 대상에서 빠진 리전의 옛 FAILED 가 계속 잡히는
-    문제가 남는데, 그 범위 정리는 #261 로 뗐다.
+    ``regions`` 를 주면 그 리전들로 범위를 좁힌다(관제 대상 = 설정된 리전). 수집 대상에서
+    빠진 리전의 옛 run 이 영구히 그 리전의 최신으로 남아 collection_status 를 붙잡던
+    문제(#261)를 막는다. 세 필드(collection_status·items·last_collected_at)를 **같은
+    리전 스코프로 함께 좁혀야** 응답 안에서 범위가 갈리지 않는다(PR #259 리뷰, 안성일).
+    ``regions=None`` 이면 전 리전(수집기 등 내부 호출용).
     """
-    return list(
-        db.execute(
-            select(models.CollectionRun)
-            .distinct(models.CollectionRun.region)  # DISTINCT ON — 리전별 첫 행
-            .order_by(models.CollectionRun.region, models.CollectionRun.started_at.desc())
-        ).scalars().all()
+    stmt = (
+        select(models.CollectionRun)
+        .distinct(models.CollectionRun.region)  # DISTINCT ON — 리전별 첫 행
+        .order_by(models.CollectionRun.region, models.CollectionRun.started_at.desc())
     )
+    if regions is not None:
+        stmt = stmt.where(models.CollectionRun.region.in_(regions))
+    return list(db.execute(stmt).scalars().all())
 
 
-def last_finished_collection_at(db: Session) -> Optional[datetime]:
-    """마지막으로 종료된 수집 시각 — 목록 응답의 last_collected_at 원천. (Issue #68)"""
-    return db.execute(
-        select(func.max(models.CollectionRun.finished_at))
-    ).scalar_one()
+def last_finished_collection_at(
+    db: Session, regions: Optional[Sequence[str]] = None
+) -> Optional[datetime]:
+    """마지막으로 종료된 수집 시각 — 목록 응답의 last_collected_at 원천. (Issue #68)
+
+    ``regions`` 를 주면 그 리전들로 좁힌다 — collection_status·items 와 같은 스코프를
+    유지하기 위함이다(#261). ``None`` 이면 전 리전.
+    """
+    stmt = select(func.max(models.CollectionRun.finished_at))
+    if regions is not None:
+        stmt = stmt.where(models.CollectionRun.region.in_(regions))
+    return db.execute(stmt).scalar_one()
 
 
 # --- Asset ---------------------------------------------------------------------
@@ -101,11 +112,19 @@ def get_asset_by_arn(db: Session, arn: str) -> Optional[models.Asset]:
 
 
 def list_assets(
-    db: Session, *, asset_type: Optional[AssetType] = None
+    db: Session,
+    *,
+    asset_type: Optional[AssetType] = None,
+    regions: Optional[Sequence[str]] = None,
 ) -> list[models.Asset]:
+    """자산 목록. ``regions`` 를 주면 그 리전들로 좁힌다 — collection_status·
+    last_collected_at 과 같은 스코프를 유지하기 위함이다(#261, ix_assets_region 활용).
+    ``None`` 이면 전 리전."""
     stmt = select(models.Asset).order_by(models.Asset.arn)
     if asset_type is not None:
         stmt = stmt.where(models.Asset.asset_type == asset_type)
+    if regions is not None:
+        stmt = stmt.where(models.Asset.region.in_(regions))
     return list(db.execute(stmt).scalars())
 
 
