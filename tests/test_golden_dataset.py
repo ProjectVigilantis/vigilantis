@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import get_args
 
 import pytest
 from pydantic import TypeAdapter
@@ -27,6 +28,10 @@ for _path in (ROOT / "apps" / "core-api", ROOT / "packages"):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
+# _RULE_TARGET_TYPES는 계약 모듈의 판정 대상 정의를 단일 원천으로 재사용한다 —
+# 여기서 재정의하면 계약 개정 시 어긋난다(`routers/assets.py`가 같은 취지로 쓴다).
+# `_` 접두라 사적 이름이지만, 이 파일이 그 계약에서 면제를 파생시키므로 필요하다.
+from schemas.api.assets import _RULE_TARGET_TYPES, AssetType  # noqa: E402
 from schemas.assets import AssetInventory  # noqa: E402
 from schemas.events import (  # noqa: E402
     MockThreatEventInput,
@@ -256,9 +261,53 @@ def test_finops_expected_has_no_runtime_fields() -> None:
 # ---------------------------------------------------------------- 자산 누락 감지
 
 
+def _asset_list_fields() -> dict[str, AssetType]:
+    """AssetInventory 의 '자산 리스트' 필드 → 그 리스트가 담는 자산 유형.
+
+    필드 이름을 손으로 적지 않는다. 리스트 항목 모델의 asset_type 기본값에서 읽으므로
+    (Ec2Asset.asset_type = AssetType.EC2, frozen), 자산 유형이 늘면 여기도 함께 는다.
+
+    **유형이 실제 AssetType 일 때만 담는다.** `asset_type` 필드가 있기만 하면 담으면,
+    기본값 없는 모델(`asset_type: AssetType` 만 선언)의 default 는 None 이 아니라
+    PydanticUndefined 라 _RULE_TARGET_TYPES 에 당연히 없고, 그 리스트가 **면제로**
+    분류된다 — 세지도 대조하지도 않은 채 골든을 통과한다. PydanticUndefined 는
+    "판정 비대상임의 증명"이 아니라 **증명 실패**이므로, 증명에 실패한 리스트는
+    fields 에 넣지 않아 _count_asset_arns 가 계속 세게 둔다(닫히는 쪽으로 틀린다).
+    SG 누락이 그렇게 지나간 적이 있다 — `tests/test_guardrails.py` 참조(#134).
+    """
+    fields: dict[str, AssetType] = {}
+    for name, field in AssetInventory.model_fields.items():
+        args = get_args(field.annotation)  # list[Ec2Asset] → (Ec2Asset,)
+        if not args:
+            continue
+        declared = getattr(args[0], "model_fields", {}).get("asset_type")
+        if isinstance(getattr(declared, "default", None), AssetType):
+            fields[name] = declared.default
+    return fields
+
+
+# 판정이 붙지 않는 자산 리스트. 계약(_RULE_TARGET_TYPES)에서 **파생**시킨다 —
+# 키 이름을 하드코딩하면 판정 대상이 늘어날 때 면제가 함께 좁아지지 않아, 가드가
+# 조용히 헐거워진다. 지금은 NACL·Launch Template·ASG·ALB Target Group 4종이고,
+# 어떤 유형이 _RULE_TARGET_TYPES 에 들어가는 순간 이 집합에서 자동으로 빠진다.
+_JUDGEMENT_FREE_LIST_FIELDS = frozenset(
+    name for name, asset_type in _asset_list_fields().items()
+    if asset_type not in _RULE_TARGET_TYPES
+)
+
+
 def _count_asset_arns(raw: dict) -> int:
-    """입력 JSON 원문에서 자산 ARN 개수를 센다(중첩 포함)."""
+    """입력 JSON 원문에서 **판정 대상** 자산 ARN 개수를 센다(중첩 포함).
+
+    판정 비대상 리스트는 세지 않는다. 그 자산들은 계약상 항상 NOT_APPLICABLE 이라
+    (api/assets.py AssetItem._enforce_contract) 정답으로 적을 판정 자체가 없다.
+    토폴로지가 그릴 노드를 골든에 넣으려면 이 면제가 필요하다.
+
+    **모델이 모르는 키는 계속 센다.** 면제는 "판정 비대상임을 계약으로 증명한" 리스트에만
+    준다 — 오타로 생긴 키나 모델보다 앞서 추가된 자산 리스트는 여기서 걸려야 한다.
+    """
     count = 0
+    counted = {key: value for key, value in raw.items() if key not in _JUDGEMENT_FREE_LIST_FIELDS}
 
     def walk(node) -> None:
         nonlocal count
@@ -271,8 +320,36 @@ def _count_asset_arns(raw: dict) -> int:
             for item in node:
                 walk(item)
 
-    walk(raw)
+    walk(counted)
     return count
+
+
+def test_judgement_free_exemption_is_derived_from_the_contract() -> None:
+    """면제 집합이 계약에서 파생됐는지 — 하드코딩으로 되돌아가면 여기서 걸린다.
+
+    두 방향을 함께 본다. 면제된 것에 판정 대상이 섞이면 정답 누락을 못 잡고,
+    판정 대상인데 리스트 필드가 없으면 그 유형은 골든에 담길 자리가 없다.
+    """
+    fields = _asset_list_fields()
+
+    for name in _JUDGEMENT_FREE_LIST_FIELDS:
+        declared = fields.get(name)
+        # 파생식이 담은 이름만 면제될 수 있다. 하드코딩으로 되돌아가거나 오타 키가
+        # 섞이면 여기서 먼저 걸린다 — fields[name] 로 받으면 KeyError 가 나서 아래
+        # 메시지가 보이지 않는다.
+        assert declared is not None, (
+            f"{name}은 유형을 증명한 자산 리스트가 아닌데 면제됐다 — "
+            "면제 집합이 계약 파생이 아니라 손으로 적힌 것은 아닌가"
+        )
+        assert declared not in _RULE_TARGET_TYPES, (
+            f"{name}({declared.value})은 판정 대상인데 면제됐다 — 정답 누락을 못 잡는다"
+        )
+
+    judged_fields = {t for n, t in fields.items() if n not in _JUDGEMENT_FREE_LIST_FIELDS}
+    assert judged_fields == set(_RULE_TARGET_TYPES), (
+        f"판정 대상 유형과 자산 리스트가 어긋난다: 계약 {sorted(t.value for t in _RULE_TARGET_TYPES)} / "
+        f"리스트 {sorted(t.value for t in judged_fields)}"
+    )
 
 
 @pytest.mark.parametrize("input_path, expected_path", _finops_pairs(), ids=lambda p: getattr(p, "name", ""))
