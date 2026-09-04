@@ -244,7 +244,9 @@ def test_created_incident_passes_public_response_contract(client_pg, db, make_in
     assert body["status"] == "ANALYZING"
     assert body["summary_lines"] == []
     assert body["recommendations"] == []
-    assert body["evidence_ids"]
+    # ASSET 근거는 그래프 입력에서만 빠지고 공개 evidence_ids에는 실린다 —
+    # FINOPS는 RULE·ASSET 2건, SECOPS는 THREAT 1건이 화면의 근거 목록이 된다
+    assert len(body["evidence_ids"]) == (2 if make_intake is finops_intake else 1)
 
     listed = client_pg.get("/api/v1/incidents").json()["items"]
     assert [item["incident_id"] for item in listed] == [outcome.incident_id]
@@ -292,3 +294,63 @@ def test_secops_duplicate_key_returns_existing(db):
     assert second.created is False
     assert second.incident_id == first.incident_id
     assert len(incidents_repo.list_incidents(db, category=IncidentCategory.SECOPS)) == 1
+
+
+def test_secops_insert_race_returns_existing_without_discarding_caller_work(db, monkeypatch):
+    """dedup SELECT가 놓친 뒤 INSERT가 유니크 제약에 걸리는 경쟁 — 이 계층의 되감기가
+    호출부의 아직 commit되지 않은 일감까지 지우면 안 된다(세션은 호출부 소유).
+
+    되감기를 SAVEPOINT가 아니라 db.rollback()으로 하면 아래 CollectionRun 개수 대조가
+    잡는다(호출부가 같은 세션에 쌓아 둔 회차 1건이 사라진다).
+    """
+    from sqlalchemy import func, select
+
+    from db import models
+
+    first = incident_intake.create_incident_from_intake(db, secops_intake())
+
+    # 호출부가 같은 세션에 쌓아 둔 일감 — 이 계층이 실패해도 살아 있어야 한다
+    assets_repo.start_collection_run(
+        db, account_id=ACCOUNT, region=REGION,
+        mode="localstack", lookback_days=14, period_seconds=3600,
+    )
+    runs_before = db.execute(select(func.count()).select_from(models.CollectionRun)).scalar_one()
+
+    real = incidents_repo.get_threat_event_by_dedup_key
+    calls = {"n": 0}
+
+    def racing(session, key):
+        # 첫 조회는 못 본 척한다 — SELECT와 INSERT 사이에 다른 주체가 넣은 경쟁
+        calls["n"] += 1
+        return None if calls["n"] == 1 else real(session, key)
+
+    monkeypatch.setattr(incidents_repo, "get_threat_event_by_dedup_key", racing)
+
+    fresh_id = "3c4d5e6f-7081-4923-a456-6789abcdef01"
+    again = secops_intake(
+        threat_event=dict(
+            secops_intake().threat_event.model_dump(mode="json"), threat_event_id=fresh_id
+        ),
+        initial_risk=dict(
+            secops_intake().initial_risk.model_dump(mode="json"), threat_event_id=fresh_id
+        ),
+    )
+    second = incident_intake.create_incident_from_intake(db, again)
+
+    assert calls["n"] == 2  # 경쟁 분기를 실제로 지났다
+    assert second.created is False
+    assert second.incident_id == first.incident_id
+    assert (
+        db.execute(select(func.count()).select_from(models.CollectionRun)).scalar_one()
+        == runs_before
+    )
+
+
+def test_finops_is_not_blocked_by_open_secops_incident_on_same_asset(db):
+    """같은 인스턴스에 위협 카드가 열려 있어도 비용 카드는 따로 만들어진다 —
+    중복 판정은 분류 안에서만 본다(find_open_by_subject_arn의 category 필터)."""
+    sec = incident_intake.create_incident_from_intake(db, secops_intake())
+    fin = incident_intake.create_incident_from_intake(db, finops_intake())
+
+    assert fin.created is True
+    assert fin.incident_id != sec.incident_id

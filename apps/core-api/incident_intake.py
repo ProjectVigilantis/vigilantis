@@ -168,10 +168,15 @@ def _create_secops(db: Session, intake: SecOpsIncidentIntake) -> IntakeOutcome:
         event = mappers.to_threat_event(seen)
     else:
         try:
-            incidents_repo.insert_threat_event(db, event)
+            # SAVEPOINT — 충돌 시 이 INSERT만 되감는다. 세션은 호출부 소유라
+            # db.rollback()으로 세션 전체를 되감으면 호출부가 아직 commit하지 않은
+            # 일감까지 사라진다(수집 파이프라인이 한 세션을 물고 돈다 —
+            # services/scheduler.py run_pipeline). dispatcher.py의 rollback은 세션을
+            # 소유한 최상위 루프가 작업 1건을 되감는 것이라 이 자리와 다르다.
+            with db.begin_nested():
+                incidents_repo.insert_threat_event(db, event)
         except IntegrityError:
             # 같은 키가 동시에 들어온 경우 — 먼저 넣은 쪽의 Incident를 돌려준다
-            db.rollback()
             seen = incidents_repo.get_threat_event_by_dedup_key(db, event.deduplication_key)
             existing = (
                 incidents_repo.get_incident_by_threat_event_id(db, seen.threat_event_id)
