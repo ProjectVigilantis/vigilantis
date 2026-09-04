@@ -111,6 +111,24 @@ def capture_instance_spec(instance_id: str, region: str) -> BackupCapture:
     return BackupCapture(backup_type=backup_type, payload=spec.model_dump(mode="json"))
 
 
+def _eip_association_id(instance: Mapping[str, Any]) -> Optional[str]:
+    """EIP 연결 ID. 자동 할당 퍼블릭 IPv4에는 없다 — 그 부재가 곧 "정지하면 주소가
+    바뀐다"는 뜻이라(ADR-0008 §5) None을 그대로 남긴다.
+
+    AWS는 EIP일 때만 Association에 AssociationId(eipassoc-…)를 채운다. 자동 할당
+    주소도 Association 블록 자체는 오지만 소유자가 amazon이고 이 키가 없다.
+    """
+    for eni in instance.get("NetworkInterfaces") or []:
+        if not isinstance(eni, Mapping):
+            continue
+        association = eni.get("Association")
+        if isinstance(association, Mapping):
+            found = _optional(association.get("AssociationId"))
+            if found is not None:
+                return found
+    return None
+
+
 def _to_instance_spec(instance: Mapping[str, Any]) -> InstanceSpecBackup:
     return InstanceSpecBackup(
         instance_id=_optional(instance.get("InstanceId")),
@@ -125,4 +143,6 @@ def _to_instance_spec(instance: Mapping[str, Any]) -> InstanceSpecBackup:
         availability_zone=_optional((instance.get("Placement") or {}).get("AvailabilityZone")),
         vpc_id=_optional(instance.get("VpcId")),
         subnet_id=_optional(instance.get("SubnetId")),
+        public_ip_address=_optional(instance.get("PublicIpAddress")),
+        elastic_ip_association_id=_eip_association_id(instance),
     )

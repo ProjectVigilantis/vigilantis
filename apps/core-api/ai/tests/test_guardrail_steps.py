@@ -7,12 +7,15 @@
 from datetime import timezone
 
 import pytest
+from pydantic import ValidationError
 from ai.guardrails import (
     ARN_TARGET_NOT_MANAGED,
     SCHEMA_INVALID_PAYLOAD,
     WHITELIST_NOT_AI_RECOMMENDABLE,
+    WHITELIST_NOT_ROLLBACK_RUNBOOK,
     WHITELIST_UNKNOWN_RUNBOOK,
     ManagedAssetLookup,
+    RollbackExecutionCommand,
     SchemaCheckedCommand,
     run_action_whitelist,
     run_arn_match,
@@ -39,6 +42,7 @@ from schemas.precheck import (
     VerificationMethod,
     build_verification_summary,
 )
+from schemas.runbook_parameters import Ec2RevertSizeParameters
 
 TARGET_ARN = "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0123456789abcdef0"
 
@@ -276,14 +280,14 @@ def test_schema_check_leaves_id_judgement_to_whitelist(runbook_id):
     assert outcome.command.runbook_id == runbook_id
 
 
-@pytest.mark.parametrize(
-    "validation_context",
-    [GuardrailValidationContext.AUTO_ISOLATION, GuardrailValidationContext.ROLLBACK_EXECUTION],
-)
-def test_schema_check_implements_ai_candidate_only(validation_context):
-    # 다른 문맥은 payload 모양이 달라 FAIL로 기록하면 거절 사유가 틀린다
+def test_schema_check_rejects_unimplemented_contexts():
+    """아직 구현하지 않은 문맥은 payload 모양이 달라 FAIL로 기록하면 거절 사유가 틀린다.
+
+    ROLLBACK_EXECUTION은 #241에서 구현했으므로 여기 없다 — 남은 것은 AUTO_ISOLATION
+    하나이고, 그쪽은 호출 시점 자체가 아직 정해지지 않았다(ADR-0007 §Consequences).
+    """
     request = GuardrailValidationRequest(
-        validation_context=validation_context,
+        validation_context=GuardrailValidationContext.AUTO_ISOLATION,
         execution_id="exec-1",
         command_payload=VALID_PAYLOAD,
     )
@@ -305,7 +309,7 @@ def test_action_whitelist_promotes_ai_recommendable(runbook_id):
     assert outcome.step_result.result is GuardrailStepStatus.PASS
     assert outcome.step_result.reason_code is None
     assert outcome.step_result.verification_summary is None
-    assert outcome.draft == RunbookCandidateDraft.model_validate({
+    assert outcome.command == RunbookCandidateDraft.model_validate({
         "runbook_id": runbook_id,
         "target_arn": TARGET_ARN,
         "parameters": PARAMS_BY_RUNBOOK[runbook_id],
@@ -317,7 +321,7 @@ def test_action_whitelist_promotes_ai_recommendable(runbook_id):
 def test_action_whitelist_rejects_unknown_runbook(runbook_id):
     outcome = run_action_whitelist(_checked(runbook_id=runbook_id))
 
-    assert outcome.draft is None
+    assert outcome.command is None
     assert outcome.step_result.step is GuardrailStep.ACTION_WHITELIST
     assert outcome.step_result.result is GuardrailStepStatus.FAIL
     assert outcome.step_result.reason_code == WHITELIST_UNKNOWN_RUNBOOK
@@ -329,7 +333,7 @@ def test_action_whitelist_rejects_rollback_runbooks(runbook_id):
     # ADR-0004 정책 ②: 등록된 조치지만 AI는 제안할 수 없다
     outcome = run_action_whitelist(_checked(runbook_id=runbook_id))
 
-    assert outcome.draft is None
+    assert outcome.command is None
     assert outcome.step_result.result is GuardrailStepStatus.FAIL
     assert outcome.step_result.reason_code == WHITELIST_NOT_AI_RECOMMENDABLE
     assert outcome.step_result.verification_summary is None
@@ -432,8 +436,8 @@ def _collected(*arns: str) -> ManagedAssetLookup:
 def _draft(**overrides) -> RunbookCandidateDraft:
     """③을 보는 테스트의 입력 — ①②를 실제로 통과시켜 얻는다."""
     outcome = run_action_whitelist(_checked(**overrides))
-    assert outcome.draft is not None
-    return outcome.draft
+    assert outcome.command is not None
+    return outcome.command
 
 
 def test_arn_match_passes_collected_asset():
@@ -443,7 +447,7 @@ def test_arn_match_passes_collected_asset():
     assert outcome.step_result.result is GuardrailStepStatus.PASS
     assert outcome.step_result.reason_code is None
     assert outcome.step_result.verification_summary is None
-    assert outcome.draft is not None and outcome.draft.target_arn == TARGET_ARN
+    assert outcome.command is not None and outcome.command.target_arn == TARGET_ARN
 
 
 def test_arn_match_rejects_uncollected_target():
@@ -451,7 +455,7 @@ def test_arn_match_rejects_uncollected_target():
 
     assert outcome.step_result.result is GuardrailStepStatus.FAIL
     assert outcome.step_result.reason_code is ARN_TARGET_NOT_MANAGED
-    assert outcome.draft is None
+    assert outcome.command is None
 
 
 def test_arn_match_queries_the_exact_target_arn():
@@ -497,7 +501,7 @@ def test_arn_match_does_not_match_by_prefix(target_arn: str):
 
     assert outcome.step_result.result is GuardrailStepStatus.FAIL
     assert outcome.step_result.reason_code is ARN_TARGET_NOT_MANAGED
-    assert outcome.draft is None
+    assert outcome.command is None
 
 
 # ------------------------------------------------------------------------------
@@ -558,7 +562,7 @@ def test_aws_dry_run_passes_and_keeps_the_verification_summary():
     assert outcome.step_result.result is GuardrailStepStatus.PASS
     assert outcome.step_result.reason_code is None
     assert outcome.step_result.verification_summary == PASS_SUMMARY
-    assert outcome.draft is not None and outcome.draft.target_arn == TARGET_ARN
+    assert outcome.command is not None and outcome.command.target_arn == TARGET_ARN
 
 
 @pytest.mark.parametrize("reason_code", list(PrecheckReasonCode))
@@ -573,7 +577,7 @@ def test_aws_dry_run_copies_the_rejection_without_reclassifying(reason_code):
     assert outcome.step_result.result is GuardrailStepStatus.FAIL
     assert outcome.step_result.reason_code is reason_code
     assert outcome.step_result.verification_summary == FAIL_SUMMARY
-    assert outcome.draft is None
+    assert outcome.command is None
 
 
 def test_aws_dry_run_asks_about_the_candidates_own_draft():
@@ -636,7 +640,7 @@ def test_validation_passes_all_four_steps():
     assert result.failed_step is None
     assert [step.step for step in result.steps] == list(GUARDRAIL_STEP_ORDER)
     assert all(step.result is GuardrailStepStatus.PASS for step in result.steps)
-    assert outcome.draft is not None and outcome.draft.target_arn == TARGET_ARN
+    assert outcome.command is not None and outcome.command.target_arn == TARGET_ARN
 
 
 def test_validation_records_the_summary_only_on_the_aws_step():
@@ -665,7 +669,7 @@ def test_validation_records_the_step_that_blocked(blocked, step, reason_code):
 
     assert result.result is GuardrailDecision.FAIL
     assert result.failed_step is step
-    assert outcome.draft is None
+    assert outcome.command is None
     assert [s.step for s in result.steps] == list(GUARDRAIL_STEP_ORDER)
     assert [s.result for s in result.steps] == [
         *[GuardrailStepStatus.PASS] * failed_index,
@@ -690,3 +694,159 @@ def test_aws_is_not_asked_when_an_earlier_step_blocks(blocked, step, reason_code
     _validate(**blocked, precheck=precheck)
 
     assert precheck.asked == []
+
+
+# ------------------------------------------------------------------------------
+# ROLLBACK_EXECUTION 문맥 (Issue #241, ADR-0004 정책 ①②)
+#
+# 롤백도 네 단계를 전부 지난다. 다른 것은 ①의 파라미터 계약과 ②의 허용 목록뿐이고,
+# 그 둘이 문맥별로 갈리지 않으면 원복은 ①에서 계약이 없어 터지거나 ②에서 "AI 추천
+# 불가"로 거절돼 자동 원복이 아예 서지 못한다.
+# ------------------------------------------------------------------------------
+
+REVERT_PAYLOAD = {
+    "runbook_id": RunbookId.RUNBOOK_EC2_REVERT_SIZE.value,
+    "target_arn": TARGET_ARN,
+    # 되돌릴 값(instance_type)은 실리지 않는다 — 원천은 백업 레코드다(ADR-0008 §4)
+    "parameters": {
+        "instance_id": "i-0123456789abcdef0",
+        "backup_record_id": "bk-1",
+        "evidence_id": "ev-1",
+    },
+    "evidence_ids": ["ev-1"],
+}
+
+
+def _rollback_request(payload: dict) -> GuardrailValidationRequest:
+    return GuardrailValidationRequest(
+        validation_context=GuardrailValidationContext.ROLLBACK_EXECUTION,
+        execution_id="exec-1",
+        command_payload=payload,
+    )
+
+
+def _validate_rollback(payload: dict | None = None, *, collected=(TARGET_ARN,), precheck=None):
+    return run_guardrail_validation(
+        _rollback_request(REVERT_PAYLOAD if payload is None else payload),
+        is_managed_arn=_collected(*collected),
+        precheck=_passing_precheck() if precheck is None else precheck,
+    )
+
+
+def test_rollback_passes_all_four_steps():
+    """자동 원복이 4단계를 전부 통과한다 — 우회 경로를 두지 않는다(ADR-0004 정책 ①)."""
+    outcome = _validate_rollback()
+
+    assert outcome.result.result is GuardrailDecision.PASS
+    assert [step.step for step in outcome.result.steps] == list(GUARDRAIL_STEP_ORDER)
+    assert all(s.result is GuardrailStepStatus.PASS for s in outcome.result.steps)
+
+
+def test_rollback_promotes_a_rollback_command_not_a_draft():
+    """롤백 3종은 Draft가 될 수 없다 — 그 모델이 AI 추천 7종만 받는다."""
+    outcome = _validate_rollback()
+
+    assert isinstance(outcome.command, RollbackExecutionCommand)
+    assert outcome.command.runbook_id is RunbookId.RUNBOOK_EC2_REVERT_SIZE
+    # ④가 그대로 executor.precheck에 넘길 수 있는 실행 파라미터 계약의 값이다
+    assert isinstance(outcome.command.parameters, Ec2RevertSizeParameters)
+
+
+def test_rollback_schema_check_uses_the_execution_parameter_contract():
+    """①이 후보 계약을 쓰면 원복은 계약이 없어 봉투 검사로 끝난다 — 형식 위반이 ④까지 간다."""
+    broken = {
+        **REVERT_PAYLOAD,
+        "parameters": {**REVERT_PAYLOAD["parameters"], "instance_id": "not-an-instance-id"},
+    }
+
+    outcome = run_schema_check(_rollback_request(broken))
+
+    assert outcome.step_result.result is GuardrailStepStatus.FAIL
+    assert outcome.step_result.reason_code == SCHEMA_INVALID_PAYLOAD
+
+
+# 롤백 3종의 실행 파라미터. SG_RECREATE만 자원 ID를 받지 않는다 — 복원 대상을 백업
+# 레코드가 가리키기 때문이다(packages/schemas/runbook_parameters.py).
+ROLLBACK_PARAMS = {
+    "RUNBOOK_EC2_REVERT_SIZE": REVERT_PAYLOAD["parameters"],
+    "RUNBOOK_EC2_UNISOLATE": REVERT_PAYLOAD["parameters"],
+    "RUNBOOK_SG_RECREATE": {"backup_record_id": "bk-1", "evidence_id": "ev-1"},
+}
+
+
+@pytest.mark.parametrize("runbook_id", sorted(ROLLBACK_RUNBOOK_IDS))
+def test_rollback_whitelist_admits_all_three_rollback_runbooks(runbook_id):
+    """AI_CANDIDATE에서 거절되는 3종이 여기서는 정당한 실행 대상이다(ADR-0004 정책 ②).
+
+    ①을 실제로 통과시켜 얻는다 — ②가 승격할 때 파라미터가 이미 실행 계약의 값이라는
+    전제가 그 순서에서만 성립한다.
+    """
+    payload = {
+        **REVERT_PAYLOAD,
+        "runbook_id": runbook_id,
+        "parameters": ROLLBACK_PARAMS[runbook_id],
+    }
+    checked = run_schema_check(_rollback_request(payload)).command
+    assert checked is not None
+
+    outcome = run_action_whitelist(
+        checked, GuardrailValidationContext.ROLLBACK_EXECUTION
+    )
+
+    assert outcome.step_result.result is GuardrailStepStatus.PASS
+    assert outcome.command.runbook_id.value == runbook_id
+
+
+def test_rollback_whitelist_rejects_a_main_runbook():
+    """원복 경로에 본편 런북이 실리면 거절한다 — AI 추천 불가와는 반대 방향의 신호다."""
+    outcome = run_action_whitelist(
+        _checked(), GuardrailValidationContext.ROLLBACK_EXECUTION
+    )
+
+    assert outcome.step_result.result is GuardrailStepStatus.FAIL
+    assert outcome.step_result.reason_code == WHITELIST_NOT_ROLLBACK_RUNBOOK
+    assert outcome.command is None
+
+
+def test_rollback_whitelist_still_rejects_unknown_runbooks():
+    outcome = run_action_whitelist(
+        SchemaCheckedCommand.model_validate(UNTYPED_PAYLOAD),
+        GuardrailValidationContext.ROLLBACK_EXECUTION,
+    )
+
+    assert outcome.step_result.reason_code == WHITELIST_UNKNOWN_RUNBOOK
+
+
+def test_rollback_is_blocked_when_the_target_is_no_longer_collected():
+    """③은 문맥을 보지 않는다 — 조치 뒤 자산이 수집 목록에서 사라지면 원복도 막힌다."""
+    outcome = _validate_rollback(collected=())
+
+    assert outcome.result.failed_step is GuardrailStep.ARN_MATCH
+    assert outcome.command is None
+
+
+def test_rollback_dry_run_rejection_stops_the_command():
+    """④ 거절이면 명령이 나오지 않는다 — 호출부가 CRITICAL로 넘길 신호다(정책 ④)."""
+    outcome = _validate_rollback(
+        precheck=_failing_precheck(PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND)
+    )
+
+    assert outcome.result.result is GuardrailDecision.FAIL
+    assert outcome.result.failed_step is GuardrailStep.AWS_DRY_RUN
+    assert outcome.command is None
+
+
+def test_rollback_command_rejects_a_non_rollback_runbook():
+    """운반 타입 자체가 롤백 3종만 받는다 — ②를 우회해 만들어진 명령도 막힌다."""
+    with pytest.raises(ValidationError):
+        RollbackExecutionCommand(
+            runbook_id=RunbookId.RUNBOOK_EC2_RIGHTSIZING,
+            target_arn=TARGET_ARN,
+            parameters={
+                "instance_id": "i-0123456789abcdef0",
+                "current_instance_type": "t3.xlarge",
+                "target_instance_type": "t3.medium",
+                "evidence_id": "ev-1",
+            },
+            evidence_ids=["ev-1"],
+        )
