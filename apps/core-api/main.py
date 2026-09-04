@@ -35,10 +35,10 @@ from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
 import dispatcher  # noqa: E402
 from config import get_settings  # noqa: E402
-from services.scheduler import start_scheduler as start_scan_scheduler  # noqa: E402
 from exceptions import register_error_handlers, unexpected_error_response  # noqa: E402
 from logging_config import request_id_var, setup_logging  # noqa: E402
 from realtime import RealtimeManager  # noqa: E402
+from services.scheduler import start_scheduler as start_scan_scheduler  # noqa: E402
 from routers import actions as actions_router  # noqa: E402
 from routers import assets as assets_router  # noqa: E402
 from routers import incidents as incidents_router  # noqa: E402

@@ -76,3 +76,39 @@ def test_cors_preflight_allows_fe_dev_origin(client):
     )
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+
+
+def test_lifespan_starts_and_stops_both_schedulers(monkeypatch):
+    """lifespan 배선 자체를 여기서만 고정한다 — conftest가 두 게이트(SCAN/DISPATCH_ENABLED)를
+    끄므로 다른 테스트는 이 두 줄을 지나가도 아무것도 확인하지 못한다(이 PR이 고친 결함이 그
+    종류다: 배선이 빠진 줄 아무도 몰랐다). fake 스케줄러로 기동·종료를 직접 고정한다(#287 리뷰: 김세혁).
+    """
+    from fastapi.testclient import TestClient
+
+    import main as main_module
+
+    started: list[str] = []
+    stopped: list[str] = []
+
+    class FakeScheduler:
+        def __init__(self, name: str):
+            self.name = name
+
+        def shutdown(self, wait=False):
+            stopped.append(self.name)
+
+    def fake_scan():
+        started.append("scan")
+        return FakeScheduler("scan")
+
+    def fake_dispatch(_publish):
+        started.append("dispatch")
+        return FakeScheduler("dispatch")
+
+    monkeypatch.setattr(main_module, "start_scan_scheduler", fake_scan)
+    monkeypatch.setattr(main_module.dispatcher, "start_dispatcher", fake_dispatch)
+
+    with TestClient(main_module.create_app()) as test_client:
+        assert set(started) == {"scan", "dispatch"}  # 배선이 둘 다 기동
+        assert test_client.get("/health").status_code == 200
+    assert set(stopped) == {"scan", "dispatch"}  # 종료 시 둘 다 정리
