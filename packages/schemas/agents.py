@@ -13,6 +13,8 @@
 #     NO_PROPOSAL=요약 3줄+후보 0개, FAILED=빈 요약+후보 0개+reviewed null.
 #   - FINOPS 출력의 reviewed_risk_level=null 규칙과 "후보 evidence_ids⊆입력 Evidence"
 #     규칙은 입력·출력을 함께 아는 Workflow가 검증한다(출력 모델 단독으로는 불가).
+#   - RULE 근거와 최상위 rule_evaluation이 같은 객체에서 나왔는지는 입력 계약이 본다
+#     (Issue #265). 입력 안에서 닫히는 대조라 Workflow로 미루지 않는다.
 #   - 후보 parameters는 Runbook별 typed 모델이다(#154, runbook_parameters.py).
 #     AI가 정하는 값만 싣는다 — 자원 ID는 target_arn에서, 조회값과 evidence_id는
 #     실행 접수 시점에 채운다. 화면 표시본(display_parameters)은 Draft에 없다.
@@ -47,7 +49,13 @@ AgentAssetContext = AssetItem
 
 
 class AgentEvidenceInput(BaseModel):
-    """Graph에 전달하는 근거 1건 — EvidenceItem의 축약(식별자·유형·내용만)."""
+    """Graph에 전달하는 근거 1건 — EvidenceItem의 축약(식별자·유형·내용만).
+
+    ASSET 근거는 여기 오지 않는다 — 자산은 asset_context로 이미 들어가므로 근거로도
+    실으면 같은 값이 모델 입력에 두 번 간다(Issue #265, evidence.py 헤더). 후보의
+    evidence_ids가 ASSET 근거를 가리키지 못하는 것은 이 거절 위에 "후보 evidence_ids ⊆
+    입력 Evidence" 검증(Workflow 몫, 파일 헤더 계약 원칙)이 설 때 따라 나온다.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -62,6 +70,11 @@ class AgentEvidenceInput(BaseModel):
 
     @model_validator(mode="after")
     def _enforce_content_shape(self):
+        if self.evidence_type == EvidenceType.ASSET:
+            raise ValueError(
+                "ASSET 근거는 그래프 입력의 evidences에 실을 수 없습니다 "
+                "(자산은 asset_context로 전달합니다)"
+            )
         expected = EVIDENCE_CONTENT_MODELS[self.evidence_type]
         if not isinstance(self.content, expected):
             raise ValueError(
@@ -104,6 +117,30 @@ def _validate_capabilities(capabilities: list[RunbookCapability]) -> None:
         raise ValueError("capabilities에 같은 runbook_id가 중복될 수 없습니다")
 
 
+def _validate_rule_evidence(
+    evidences: list[AgentEvidenceInput], rule_evaluation: RuleEvaluationResult
+) -> None:
+    """RULE 근거와 최상위 rule_evaluation이 같은 객체에서 나왔는지 본다. (Issue #265)
+
+    어긋나면 ai/agent.py의 _incident_payload가 중복 제거 조건(완전 일치)을 빗나가 같은
+    판정이 모델 입력에 두 번 실린다. 그쪽은 로그도 예외도 남기지 않으므로 여기서 막는다.
+
+    RULE 근거가 2건 이상이면 거절한다 — 최상위가 어느 쪽을 비추는지 정할 근거가 없다.
+    인시던트 1건은 판정 1건에서 나오므로(apps/core-api/incident_intake.py 저장 순서)
+    지금 그 조합이 생길 경로는 없고, 생긴다면 어느 것이 기준인지 먼저 정해야 한다.
+    """
+    rule_evidences = [e for e in evidences if e.evidence_type == EvidenceType.RULE]
+    if not rule_evidences:
+        return
+    if len(rule_evidences) > 1:
+        raise ValueError("RULE 근거는 최대 1건입니다 (최상위 rule_evaluation의 기준이 갈립니다)")
+    if rule_evidences[0].content.evaluation != rule_evaluation:
+        raise ValueError(
+            "RULE 근거의 evaluation은 최상위 rule_evaluation과 같아야 합니다 "
+            "(같은 객체에서 나오지 않았습니다)"
+        )
+
+
 class FinOpsGraphInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -117,6 +154,7 @@ class FinOpsGraphInput(BaseModel):
     @model_validator(mode="after")
     def _enforce_contract(self):
         _validate_capabilities(self.capabilities)
+        _validate_rule_evidence(self.evidences, self.rule_evaluation)
         return self
 
 
