@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import pytest
 from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker
 
@@ -107,3 +108,27 @@ def test_two_ticks_do_not_overlap(pg_engine, monkeypatch):
     assert result["verdicts"] == {}
     assert called["collect"] == 1  # 재진입분은 락에 막혀 collect 재실행 안 됨
     assert called["judge"] == 1
+
+
+def test_lock_released_when_pipeline_raises(pg_engine, monkeypatch):
+    """파이프라인이 예외로 끝나도 락은 finally 에서 풀린다 — 다음 tick 이 잡을 수 있어야
+    한 프로세스의 실패가 스캔을 영구히 막지 않는다(#277 완료조건 4, #281 리뷰: 김세혁)."""
+    from services import scheduler
+
+    _bind_scheduler_to_test_db(monkeypatch, pg_engine)
+
+    def _boom():
+        raise RuntimeError("collect boom")
+
+    monkeypatch.setattr("services.collector.collect_and_store", _boom)
+
+    with pytest.raises(RuntimeError, match="collect boom"):
+        scheduler.run_pipeline()
+
+    # 예외에도 락이 해제됐어야 한다 — 같은 키를 다시 잡을 수 있다
+    conn, got = _try_lock(pg_engine, scheduler._ADVISORY_LOCK_KEY)
+    try:
+        assert got is True
+    finally:
+        conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": scheduler._ADVISORY_LOCK_KEY})
+        conn.close()

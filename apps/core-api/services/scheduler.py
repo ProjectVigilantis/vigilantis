@@ -24,7 +24,8 @@ JOB_ID = "finops_secops_scan"
 # 파이프라인 잡 전용 PostgreSQL advisory lock 키(고정 64bit 정수).
 # 다중 워커/레플리카에서 같은 tick 이 파이프라인을 겹쳐 돌리지 않게 한다 — 프로세스 내
 # 겹침은 build_scheduler 의 max_instances=1 이, 프로세스 간 겹침은 이 락이 막는다. (#277)
-# 값은 이 잡 전용으로 고정한 임의 상수다("vig_scan" ASCII, 다른 advisory lock 과 비충돌).
+# 값은 이 잡 전용으로 고정한 임의 상수다("vig_scan" ASCII). 현재 저장소에 다른 advisory
+# lock 은 없다 — **새 advisory lock 을 추가하면 이 키와 겹치지 않는지 확인할 것**(#281 리뷰).
 _ADVISORY_LOCK_KEY = 0x7669675F7363616E
 
 
@@ -45,10 +46,13 @@ def run_pipeline() -> dict:
     # AUTOCOMMIT — 세션 레벨 advisory lock 은 트랜잭션이 아니라 커넥션에 매이므로,
     # 장시간 열린 트랜잭션을 남기지 않고 커넥션이 살아있는 동안 락을 유지한다.
     lock_conn = get_engine().connect().execution_options(isolation_level="AUTOCOMMIT")
+    acquired = False
     try:
-        acquired = lock_conn.execute(
-            text("SELECT pg_try_advisory_lock(:k)"), {"k": _ADVISORY_LOCK_KEY}
-        ).scalar()
+        acquired = bool(
+            lock_conn.execute(
+                text("SELECT pg_try_advisory_lock(:k)"), {"k": _ADVISORY_LOCK_KEY}
+            ).scalar()
+        )
         if not acquired:
             logger.info("scan pipeline skipped: 다른 프로세스가 이미 실행 중(advisory lock 미획득)")
             return {"skipped": True}
@@ -68,12 +72,19 @@ def run_pipeline() -> dict:
         logger.info("scan pipeline done: %s", summary)
         return summary
     finally:
-        try:
-            lock_conn.execute(
-                text("SELECT pg_advisory_unlock(:k)"), {"k": _ADVISORY_LOCK_KEY}
-            )
-        except Exception:
-            logger.exception("advisory unlock 실패 — 커넥션 반납으로 세션 종료 시 해제됨")
+        # 락을 잡은 tick 만 unlock 한다 — 미획득(skip) tick 에서 부르면 Postgres 가
+        # "you don't own a lock" WARNING 을 서버 로그에 남긴다(다중 워커에서 매 tick 누적, #281 리뷰: 김세혁).
+        if acquired:
+            try:
+                lock_conn.execute(
+                    text("SELECT pg_advisory_unlock(:k)"), {"k": _ADVISORY_LOCK_KEY}
+                )
+            except Exception:
+                # close()는 커넥션을 풀에 반납할 뿐 백엔드 세션을 끝내지 않아 락이 남는다
+                # (그러면 이 프로세스가 이후 모든 tick 을 조용히 skip). invalidate()로 실제
+                # DBAPI 커넥션을 끊어 세션 레벨 락을 확실히 해제한다(#281 리뷰: 김세혁).
+                logger.exception("advisory unlock 실패 — 커넥션 무효화로 백엔드 세션 종료해 락 해제")
+                lock_conn.invalidate()
         lock_conn.close()
 
 
