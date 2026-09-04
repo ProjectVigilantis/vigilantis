@@ -4,7 +4,7 @@
 # collector→rule_engine 파이프라인을 주기적으로 실행합니다.
 #
 # 구현: run_pipeline(수집→정형화→적재→판정) 잡을 IntervalTrigger 로 등록한다.
-#   FastAPI 시작 시 start_scheduler() 를 호출하면 된다(main.py 배선은 별도).
+#   main.py lifespan 이 start_scheduler() 를 호출해 기동한다(SCAN_ENABLED=false 면 미기동).
 #   실행 간격은 CollectorSettings.SCAN_INTERVAL_SECONDS(기본 300초, gt=0 검증).
 # ==============================================================================
 
@@ -66,8 +66,14 @@ def build_scheduler() -> AsyncIOScheduler:
     return scheduler
 
 
-def start_scheduler() -> AsyncIOScheduler:
-    """main의 lifespan에서 기동(#67에서 배선). 스케줄러를 구성·기동해 반환한다."""
+def start_scheduler() -> AsyncIOScheduler | None:
+    """main의 lifespan에서 기동. 스케줄러를 구성·기동해 반환한다.
+
+    SCAN_ENABLED=false 면 기동하지 않고 None 을 돌려준다 — 테스트가 앱을 띄울 때 실제
+    수집·판정 스캔이 도는 것을 막는다(dispatcher.start_dispatcher 와 같은 결)."""
+    if not get_collector_settings().SCAN_ENABLED:
+        logger.info("scan scheduler disabled: SCAN_ENABLED=false")
+        return None
     scheduler = build_scheduler()
     scheduler.start()
     logger.info("scheduler started: job=%s interval=%ss", JOB_ID, _interval_seconds())

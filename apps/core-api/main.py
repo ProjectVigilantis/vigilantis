@@ -38,6 +38,7 @@ from config import get_settings  # noqa: E402
 from exceptions import register_error_handlers, unexpected_error_response  # noqa: E402
 from logging_config import request_id_var, setup_logging  # noqa: E402
 from realtime import RealtimeManager  # noqa: E402
+from services.scheduler import start_scheduler as start_scan_scheduler  # noqa: E402
 from routers import actions as actions_router  # noqa: E402
 from routers import assets as assets_router  # noqa: E402
 from routers import incidents as incidents_router  # noqa: E402
@@ -63,13 +64,18 @@ def create_app() -> FastAPI:
         # 스레드풀에 이미 넘어간 잡을 취소하지 못한다. 그 스캔의 발행이 전송 종료
         # 뒤에 오면 publish_dropped_at_shutdown 경고로 버려진다(realtime.py 규약)
         await realtime.start()
-        scheduler = None
+        scan_scheduler = None
+        dispatch_scheduler = None
         try:
-            scheduler = dispatcher.start_dispatcher(realtime.publish)
+            # 수집→판정 스캔 파이프라인(collector→rule_engine). 실데이터 시연의 최상류.
+            scan_scheduler = start_scan_scheduler()
+            # 접수된 조치 실행 디스패치·회수 스캔.
+            dispatch_scheduler = dispatcher.start_dispatcher(realtime.publish)
             yield
         finally:
-            if scheduler is not None:
-                scheduler.shutdown(wait=False)
+            for sched in (dispatch_scheduler, scan_scheduler):
+                if sched is not None:
+                    sched.shutdown(wait=False)
             await realtime.stop()
 
     app = FastAPI(title="Vigilantis Core API", lifespan=lifespan)
