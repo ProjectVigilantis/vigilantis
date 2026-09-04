@@ -61,6 +61,26 @@ INCIDENT_RESOLVABLE_STATUSES: frozenset[IncidentStatus] = frozenset(
 )
 
 
+# 아직 끝나지 않은 Incident — 같은 대상에 새 Incident를 만들지 않는 기준 (Issue #265).
+#   - RESOLVED만 뺀다. 관제자가 닫은 건이라, 이후 같은 자산이 다시 판정되면 새 카드가
+#     맞다 — 그때의 낭비는 그때의 사건이다.
+#   - FAILED는 넣는다. 흐름은 멈췄지만 관제자가 종료 처리로 닫을 수 있는 상태라
+#     (INCIDENT_RESOLVABLE_STATUSES) 실패는 사람이 보고 닫아야 풀린다는 것이 그 설계다.
+#     빼면 실패 원인이 그대로인 자산에 수집 주기마다 새 카드가 쌓인다 — 기본 주기
+#     300초면 시간당 12장이다. (2026-09-03 안성일 결정)
+#   - 나머지 넷은 아직 사람이 볼 것이 남아 있어, 같은 대상에 카드를 더 만들면 관제자가
+#     같은 자산을 두 번 판단하게 된다.
+INCIDENT_OPEN_STATUSES: frozenset[IncidentStatus] = frozenset(
+    {
+        IncidentStatus.ANALYZING,
+        IncidentStatus.AWAITING_APPROVAL,
+        IncidentStatus.ACTION_IN_PROGRESS,
+        IncidentStatus.AWAITING_CLOSURE,
+        IncidentStatus.FAILED,
+    }
+)
+
+
 def _as_utc(v: datetime) -> datetime:
     return v.replace(tzinfo=timezone.utc) if v.tzinfo is None else v
 

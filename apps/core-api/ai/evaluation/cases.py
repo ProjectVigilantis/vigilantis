@@ -32,9 +32,8 @@ from typing import Any, Mapping, Optional, Sequence
 from schemas.agents import FinOpsGraphInput
 from schemas.api.assets import AssetType, RelationType, SkipReasonCode, Verdict
 from schemas.assets import AssetInventory, Ec2Asset, MetricName
-from schemas.runbook_parameters import RESOURCE_ID_PARAM
-from schemas.runbooks import RUNBOOK_DOMAIN_BY_ID, RunbookDomain, RunbookId
 
+from ai.capabilities import build_capabilities
 from services.rule_engine import evaluate_ec2
 
 # ------------------------------------------------------------------------------
@@ -47,31 +46,6 @@ from services.rule_engine import evaluate_ec2
 #     RUNBOOK_DOMAIN_BY_ID에서 SECOPS이고, FinOpsGraphInput.domain은 FINOPS 고정이다.
 #   - SKIP은 LLM 호출을 아끼려고 판정 단계가 이미 거른 자산이라 인시던트가 되지 않는다.
 _INCIDENT_VERDICTS = frozenset({Verdict.COST_CANDIDATE})
-
-# RESOURCE_ID_PARAM(runbook_parameters.py)이 런북마다 "target_arn이 가리켜야 하는
-# 자원 ID"를 정하고 있어, 그 파라미터 이름이 곧 대상 자산 유형이다.
-_ASSET_TYPE_BY_RESOURCE_ID_PARAM: Mapping[str, AssetType] = {
-    "instance_id": AssetType.EC2,
-    "group_id": AssetType.SG,
-    "network_acl_id": AssetType.NACL,
-    "volume_id": AssetType.EBS,
-}
-
-# 관계 유형이 곧 상대 자산의 유형이다(api/assets.py RelationType 주석). 아래 둘만 두는
-# 것은 골든 인벤토리가 SG와 EBS 볼륨만 담고 있어서다 — NACL·ASG·Launch Template·
-# ALB Target Group이 골든에 추가되면 services/collector.py의 파생 규칙을 함께 옮긴다.
-_RELATION_TARGET_TYPE: Mapping[RelationType, AssetType] = {
-    RelationType.SECURED_BY: AssetType.SG,
-    RelationType.ATTACHED_TO: AssetType.EBS,
-}
-
-# Capability에 싣는 한 줄 설명. ADR-0002는 런북 ID 목록만 담고 설명 문구를 두지 않아
-# 여기서 정한다(scripts/smoke_finops_graph.py가 쓰던 문구와 같은 결).
-_CAPABILITY_PURPOSE: Mapping[RunbookId, str] = {
-    RunbookId.RUNBOOK_EC2_RIGHTSIZING: "과대 스펙 EC2 다운사이징",
-    RunbookId.RUNBOOK_EC2_ENABLE_AUTOSCALING: "고정 대수 EC2를 Auto Scaling 그룹으로 전환",
-    RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED: "미연결 EBS 볼륨 삭제",
-}
 
 
 @dataclass(frozen=True)
@@ -111,30 +85,6 @@ def _relationships(ec2: Ec2Asset, inventory: AssetInventory) -> list[dict[str, s
     return items
 
 
-def _capabilities(reachable: set[AssetType]) -> list[dict[str, Any]]:
-    """대상 자산이 실제로 있는 FinOps 런북만 싣는다.
-
-    AI 추천 7종을 전부 싣지 않는 것은, 대상이 없는 런북을 메뉴에 올리면 모델이 고를 수
-    있는 값의 범위가 프로덕션과 달라지기 때문이다. RunbookId 선언 순서를 따라 목록이
-    호출마다 흔들리지 않게 한다.
-    """
-    capabilities: list[dict[str, Any]] = []
-    for runbook_id in RunbookId:
-        if RUNBOOK_DOMAIN_BY_ID.get(runbook_id.value) is not RunbookDomain.FINOPS:
-            continue
-        target_type = _ASSET_TYPE_BY_RESOURCE_ID_PARAM.get(RESOURCE_ID_PARAM.get(runbook_id, ""))
-        if target_type is None or target_type not in reachable:
-            continue
-        capabilities.append(
-            {
-                "runbook_id": runbook_id.value,
-                "purpose": _CAPABILITY_PURPOSE[runbook_id],
-                "allowed_target_asset_types": [target_type.value],
-            }
-        )
-    return capabilities
-
-
 def finops_cases(inventory: AssetInventory, expected: Mapping[str, Any]) -> list[EvalCase]:
     """인벤토리 1개 + 그 정답지 1개 → 계측 케이스 목록.
 
@@ -171,9 +121,6 @@ def finops_cases(inventory: AssetInventory, expected: Mapping[str, Any]) -> list
 
         case_id = evaluation["case_id"]
         relationships = _relationships(ec2, inventory)
-        reachable = {AssetType.EC2} | {
-            _RELATION_TARGET_TYPE[RelationType(item["relation_type"])] for item in relationships
-        }
         rule_evaluation = {
             "asset_arn": ec2.arn,
             "collection_run_id": collection_run_id,
@@ -235,7 +182,11 @@ def finops_cases(inventory: AssetInventory, expected: Mapping[str, Any]) -> list
                         },
                     },
                 ],
-                "capabilities": _capabilities(reachable),
+                # 프로덕션과 같은 빌더를 쓴다 — 두 벌이면 계측이 재는 입력과 실경로가
+                # 만드는 입력이 갈린다(ai/capabilities.py)
+                "capabilities": build_capabilities(
+                    asset_type=AssetType.EC2, verdict=verdict
+                ),
             }
         )
 
