@@ -64,9 +64,9 @@ COLLECTED_AT = "2026-09-02T09:00:00Z"
 EVALUATED_AT = "2026-09-02T09:00:05Z"
 
 SUMMARY = EvidenceSummaryOutput(
-    situation="t3.xlarge 인스턴스의 3일 평균 CPU가 4.9%다.",
-    analysis="규칙 판정은 COST_CANDIDATE이고 health_score는 4다.",
-    recommendation="t3.medium으로 다운사이징한다.",
+    observation="3일 평균 CPU가 4.9%이고 규칙 판정은 COST_CANDIDATE다.",
+    diagnosis="이 인스턴스는 할당된 스펙을 쓰지 못하고 있다.",
+    rationale="관측 구간 내내 저활성이라 한 단계 낮은 유형으로 줄여도 된다.",
 )
 
 
@@ -388,7 +388,7 @@ def test_reviewed_risk_level_on_a_finops_output_is_rejected(db):
 
     violating = AgentGraphOutput(
         invocation_status=AgentInvocationStatus.NO_PROPOSAL,
-        summary_lines=[SUMMARY.situation, SUMMARY.analysis, SUMMARY.recommendation],
+        summary_lines=[SUMMARY.observation, SUMMARY.diagnosis, SUMMARY.rationale],
         reviewed_risk_level=RiskLevel.HIGH,
     )
 
@@ -410,7 +410,7 @@ def test_evidence_subset_check_reads_the_input_not_the_incident(db):
 
     citing_asset = AgentGraphOutput(
         invocation_status=AgentInvocationStatus.SUCCEEDED,
-        summary_lines=[SUMMARY.situation, SUMMARY.analysis, SUMMARY.recommendation],
+        summary_lines=[SUMMARY.observation, SUMMARY.diagnosis, SUMMARY.rationale],
         candidates=[
             RunbookCandidateDraft.model_validate(
                 {
@@ -486,9 +486,9 @@ def test_dropped_summary_is_logged_for_no_proposal(db, caplog):
     assert len(dropped) == 1
     assert dropped[0].incident_id == incident_id
     assert dropped[0].summary_lines == [
-        SUMMARY.situation,
-        SUMMARY.analysis,
-        SUMMARY.recommendation,
+        SUMMARY.observation,
+        SUMMARY.diagnosis,
+        SUMMARY.rationale,
     ]
     # 로그로 남겼다고 인시던트에 쓰지는 않는다(조회 계약)
     incident = incidents_repo.get_incident(db, incident_id)
@@ -559,7 +559,7 @@ def test_incident_updated_is_published_after_commit(db, precheck_pass):
         (SUMMARY, {"target_instance_type": "t3.med\x00ium"}, "후보 parameters"),
         (
             EvidenceSummaryOutput(
-                situation="상황\x00", analysis="분석", recommendation="권고"
+                observation="관측\x00", diagnosis="진단", rationale="근거"
             ),
             {},
             "요약",
