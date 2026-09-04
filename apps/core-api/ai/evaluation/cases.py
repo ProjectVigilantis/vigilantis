@@ -23,9 +23,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Sequence
 
 from schemas.agents import FinOpsGraphInput
 from schemas.api.assets import AssetType, RelationType, SkipReasonCode, Verdict
@@ -251,3 +253,20 @@ def finops_cases(inventory: AssetInventory, expected: Mapping[str, Any]) -> list
             )
         )
     return cases
+
+
+def input_fingerprint(cases: Sequence[EvalCase]) -> str:
+    """고정 입력 세트의 지문 — 그래프 입력(자산·판정·근거·capabilities) 전체의 sha256.
+
+    스냅샷에 적어 두고 계측 도구가 대조한다 — CI가 아니다. 골든이 바뀌는 것은 골든 담당의
+    일이라 막지 않고, 세트가 달라진 원자료로 이전 판과 짝 비교를 하려 할 때 도구가 알리고
+    거절한다(docs/AI_SUMMARY_BASELINE.md §기준선).
+    """
+    digest = hashlib.sha256()
+    for case in cases:
+        digest.update(
+            json.dumps(
+                case.graph_input.model_dump(mode="json"), sort_keys=True, ensure_ascii=False
+            ).encode("utf-8")
+        )
+    return digest.hexdigest()

@@ -39,6 +39,10 @@ EC2_CASES = [
     ("prod-web-01", 54.5, 71.9, 332, {"Environment": "production"}, Verdict.SKIP, SkipReason.SKIP_PROD_PROTECTED),
     ("dev-spiky-worker-03", 4.9, 91.82, 332, {}, Verdict.SKIP, SkipReason.SKIP_LOW_UTIL),
     ("dev-new-04", 3.23, 4.98, 24, {}, Verdict.SKIP, SkipReason.SKIP_INSUFFICIENT_DATA),
+    # cpu_max 없음 — 수집기는 avg·max를 같은 목록에서 뽑아 이 조합을 만들지 않는다(도달 불가 입력).
+    # 계약이 아니라 수집기 구현의 성질이다 — 스키마·DB는 두 값이 독립 nullable이라 막지 않는다.
+    # 그래도 null 가드가 빠지면 TypeError라 방어 동작을 여기서 고정한다. 골든 A7에서 옮겨 왔다(#243).
+    ("null-max-guard", 4.9, None, 48, {}, Verdict.COST_CANDIDATE, None),
 ]
 
 # (name, attached, open_to_world) -> (verdict, skip_reason)
