@@ -14,7 +14,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional, Sequence
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
 from schemas.api.incidents import (
@@ -215,6 +215,55 @@ def touch_incident(db: Session, incident_id: str) -> bool:
 
 
 # --- AI 호출 상태 --------------------------------------------------------------
+
+
+def list_pending_agent_analysis(
+    db: Session,
+) -> list[tuple[str, IncidentCategory]]:
+    """AI 분석을 기다리는 Incident의 (식별자, 분류). 스캔 1회의 대상이다 (Issue #285).
+
+    행이 아니라 식별자만 돌려준다 — 스캔은 건마다 커밋하며 도는데, 들고 있던 행 상태는
+    그 사이에 낡아 선점 재확인이 무의미해진다(agent_dispatcher.py · dispatcher.py와 같다).
+
+    분류를 함께 싣는 것은 **선점하기 전에** 그래프가 있는 분류인지 갈라야 하기 때문이다.
+    분류로 걸러 버리면 스캔이 넘기지 못한 건수를 셀 수 없고, 선점한 뒤에 갈라내면 그래프가
+    없는 Incident가 주기마다 선점·해제를 반복한다.
+    """
+    return [
+        (row.incident_id, row.category)
+        for row in db.execute(
+            select(models.Incident.incident_id, models.Incident.category)
+            .where(
+                models.Incident.status == IncidentStatus.ANALYZING,
+                models.Incident.agent_invocation_status == AgentInvocationStatus.PENDING,
+            )
+            .order_by(models.Incident.created_at)
+        )
+    ]
+
+
+def list_stale_agent_claims(db: Session, *, started_before: datetime) -> list[str]:
+    """상한을 넘긴 IN_PROGRESS Claim의 Incident 식별자. 회수 대상 판단은 Workflow 몫이다.
+
+    started_at이 NULL인 IN_PROGRESS도 함께 돌려준다. claim_agent_invocation은 상태와
+    시각을 한 UPDATE로 쓰고 reset은 둘을 함께 되돌리므로 그 조합은 정상 경로에서 생기지
+    않지만, 생겼다면 시각 비교가 NULL을 걸러내 **영원히 회수되지 않는다** — 회수만이
+    그 행을 푸는 유일한 길이라 여기서 받는다.
+    """
+    return list(
+        db.execute(
+            select(models.Incident.incident_id)
+            .where(
+                models.Incident.agent_invocation_status
+                == AgentInvocationStatus.IN_PROGRESS,
+                or_(
+                    models.Incident.agent_invocation_started_at < started_before,
+                    models.Incident.agent_invocation_started_at.is_(None),
+                ),
+            )
+            .order_by(models.Incident.created_at)
+        ).scalars()
+    )
 
 
 def claim_agent_invocation(

@@ -132,8 +132,9 @@ def test_capabilities_hold_only_finops_runbooks_with_a_real_target():
     for case in _all_cases():
         offered = [capability.runbook_id for capability in case.graph_input.capabilities]
 
-        # EBS 볼륨이 골든에 없어 EBS_DELETE_UNATTACHED는 대상이 없다.
-        # SecOps 런북과 롤백 3종은 도메인에서 걸러진다
+        # 골든 케이스의 subject는 전부 COST_CANDIDATE EC2다. EBS_DELETE_UNATTACHED는
+        # 대상 유형이 EBS라 빠지고, SECOPS 도메인 런북(격리·NACL)은 판정이 UNUSED가
+        # 아니라 빠지며, 롤백 3종은 AI 추천 대상이 아니다 (ai/capabilities.py 축 ①②)
         assert offered == [
             RunbookId.RUNBOOK_EC2_RIGHTSIZING,
             RunbookId.RUNBOOK_EC2_ENABLE_AUTOSCALING,
