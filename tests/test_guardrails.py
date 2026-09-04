@@ -162,7 +162,7 @@ def test_guardrail_blocks_unlisted_runbook(runbook_id: str) -> None:
         f"{runbook_id} 가 ①에서 걸렸다 — 목록 대조는 ②의 몫이다"
     )
     assert outcome.result.failed_step is GuardrailStep.ACTION_WHITELIST
-    assert outcome.draft is None
+    assert outcome.command is None
     assert _failed_step_result(outcome).reason_code == WHITELIST_UNKNOWN_RUNBOOK
 
 
@@ -178,7 +178,7 @@ def test_rollback_runbooks_are_listed_but_not_ai_recommendable(runbook_id: str) 
     outcome = _validate(_payload(runbook_id=runbook_id))
 
     assert outcome.result.failed_step is GuardrailStep.ACTION_WHITELIST
-    assert outcome.draft is None
+    assert outcome.command is None
     assert _failed_step_result(outcome).reason_code == WHITELIST_NOT_AI_RECOMMENDABLE
 
 
@@ -191,6 +191,7 @@ def test_rollback_runbooks_are_listed_but_not_ai_recommendable(runbook_id: str) 
 _GOLDEN_ASSET_RUNBOOKS = {
     "ec2_instances": RunbookId.RUNBOOK_EC2_RIGHTSIZING.value,
     "security_groups": RunbookId.RUNBOOK_SG_DELETE_ISOLATED.value,
+    "ebs_volumes": RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED.value,
 }
 
 
@@ -254,7 +255,7 @@ def test_golden_asset_arns_pass_all_four_steps() -> None:
             f"골든 자산 {arn} ({runbook_id}) 이 {blocked} 에서 거절됐다"
         )
         assert outcome.result.result is GuardrailDecision.PASS
-        assert outcome.draft is not None, "통과했는데 승격된 후보가 없다"
+        assert outcome.command is not None, "통과했는데 승격된 후보가 없다"
         # ④ 까지 실제로 도달했는가. 앞 단계가 조용히 막으면 failed_step 만 보고는
         # "통과"로 읽히지 않지만, 조립이 바뀌어 ④ 를 건너뛰면 여기서 걸린다.
         assert len(precheck.asked) == 1, (
@@ -291,7 +292,7 @@ def test_guardrail_blocks_arn_scope_escalation(target_arn: str) -> None:
     outcome = _validate(_payload(target_arn=target_arn), [_SAFE_ARN], precheck=precheck)
 
     assert outcome.result.failed_step is GuardrailStep.ARN_MATCH
-    assert outcome.draft is None
+    assert outcome.command is None
     assert _failed_step_result(outcome).reason_code == ARN_TARGET_NOT_MANAGED
     assert precheck.asked == [], (
         "③ 이 막은 ARN 을 ④ 가 물었다 — 범위 밖 자원에 실제 조회가 나간다"

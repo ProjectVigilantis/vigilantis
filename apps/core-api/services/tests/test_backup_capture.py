@@ -114,7 +114,83 @@ def test_capture_keeps_only_the_declared_fields(aws):
         "availability_zone",
         "vpc_id",
         "subnet_id",
+        # 원복 값이 아니라 한계 고지의 근거다 — 되돌려도 퍼블릭 IPv4는 돌아오지
+        # 않으므로, 조치 이전 주소를 여기 남기지 않으면 영영 알 수 없다 (ADR-0008 §5)
+        "public_ip_address",
+        "elastic_ip_association_id",
     }
+
+
+# ------------------------------------------------- 한계 고지 근거 (ADR-0008 §5)
+
+
+def test_capture_records_the_public_ip_before_the_change(aws):
+    """되돌려도 퍼블릭 IPv4는 돌아오지 않는다 — 조치 이전 주소를 남기지 않으면
+    조치 후에는 영영 알 수 없어 관제자에게 사실대로 말할 수 없다."""
+    aws({"Reservations": [{"Instances": [{**FULL_INSTANCE, "PublicIpAddress": "3.35.1.1"}]}]})
+
+    payload = bk.capture_instance_spec(INSTANCE, REGION).payload
+
+    assert payload["public_ip_address"] == "3.35.1.1"
+
+
+def test_capture_records_the_eip_association_when_present(aws):
+    """EIP가 붙어 있었으면 주소가 유지된다 — 위 고지의 반대 근거다."""
+    aws(
+        {
+            "Reservations": [
+                {
+                    "Instances": [
+                        {
+                            **FULL_INSTANCE,
+                            "PublicIpAddress": "3.35.1.1",
+                            "NetworkInterfaces": [
+                                {"Association": {"AssociationId": "eipassoc-1"}}
+                            ],
+                        }
+                    ]
+                }
+            ]
+        }
+    )
+
+    payload = bk.capture_instance_spec(INSTANCE, REGION).payload
+
+    assert payload["elastic_ip_association_id"] == "eipassoc-1"
+
+
+def test_auto_assigned_public_ip_leaves_the_eip_association_empty(aws):
+    """자동 할당 주소에는 AssociationId가 없다 — 그 부재가 곧 "정지하면 바뀐다"다."""
+    aws(
+        {
+            "Reservations": [
+                {
+                    "Instances": [
+                        {
+                            **FULL_INSTANCE,
+                            "PublicIpAddress": "3.35.1.1",
+                            "NetworkInterfaces": [
+                                {"Association": {"IpOwnerId": "amazon", "PublicIp": "3.35.1.1"}}
+                            ],
+                        }
+                    ]
+                }
+            ]
+        }
+    )
+
+    payload = bk.capture_instance_spec(INSTANCE, REGION).payload
+
+    assert payload["public_ip_address"] == "3.35.1.1"
+    assert payload["elastic_ip_association_id"] is None
+
+
+def test_missing_public_ip_does_not_block_the_capture(aws):
+    """부가 항목의 부재는 조치를 막지 않는다 — 되돌리지 못하는 것과 다른 사건이다."""
+    capture = bk.capture_instance_spec(INSTANCE, REGION)
+
+    assert capture.captured
+    assert capture.payload["public_ip_address"] is None
 
 
 def test_capture_uses_the_region_it_was_given(aws):

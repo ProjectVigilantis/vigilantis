@@ -4,11 +4,16 @@
 # 경계를 소유한다(3층 분리: Router → Workflow → Repository). (Issue #116)
 #
 #   - commit은 여기서만 한다. Repository는 commit하지 않는다.
-#   - 4단계 가드레일을 실행 시점에 다시 부르지 않는다. 가드레일은 AI 제안 생성
-#     직후 1회 수행되고 통과한 제안이 EXECUTABLE이 되므로, 여기서는 그 상태를
-#     확인만 한다 (Issue #113 §2, packages/schemas/candidates.py). 단 저장된 행이
-#     현행 후보 계약(typed parameters, #154)대로인지는 접수 시점에 재확인한다 —
+#   - **AI 후보 경로는** 4단계 가드레일을 실행 시점에 다시 부르지 않는다. 가드레일은
+#     AI 제안 생성 직후 1회 수행되고 통과한 제안이 EXECUTABLE이 되므로, 여기서는 그
+#     상태를 확인만 한다 (Issue #113 §2, packages/schemas/candidates.py). 단 저장된
+#     행이 현행 후보 계약(typed parameters, #154)대로인지는 접수 시점에 재확인한다 —
 #     가드레일 재실행이 아니라 저장소 무결성 확인이다.
+#   - **원복 경로에는 그 1회가 없다.** 롤백 3종은 후보가 될 수 없어(ADR-0004 정책 ②)
+#     제안 생성 시점 자체가 없으므로, 4단계를 실행 직전에 부르는 것이 유일한 자리다
+#     (run_revert_size_execution → _run_rollback_guardrails). 두 경로가 다른 것은
+#     **부르는 시점**이지 통과해야 하는 단계 수가 아니다 — 정책 ①은 롤백도 네 단계를
+#     본편과 동일하게 전부 지날 것을 요구한다. (Issue #241)
 #   - 접수(reserve_execution)와 실행(run_rightsizing_execution)은 갈라져 있다. 예약은
 #     IN_PROGRESS 레코드를 남기는 데까지고, 그 예약을 실행으로 넘기는 디스패치는
 #     dispatcher.py 몫이다. 실행 직전 대상 자산 재확인과 후보 INVALIDATED 전이는
@@ -44,6 +49,7 @@ from schemas.api.actions import (
 )
 from schemas.api.errors import ErrorCode
 from schemas.api.incidents import IncidentStatus, ResolutionJudgement
+from schemas.backups import InstanceSpecBackup
 from schemas.candidates import CandidateStatus
 from schemas.executions import (
     ASSET_MAY_HAVE_CHANGED_EFFECTS,
@@ -55,6 +61,11 @@ from schemas.executions import (
     ExecutionStepResult,
     ExecutionStepStatus,
 )
+from schemas.guardrails import (
+    GuardrailValidationContext,
+    GuardrailValidationRequest,
+    GuardrailValidationResult,
+)
 from schemas.incidents import INCIDENT_RESOLVABLE_STATUSES
 from schemas.precheck import PrecheckReasonCode
 from schemas.runbooks import (
@@ -64,8 +75,11 @@ from schemas.runbooks import (
     TriggerSource,
 )
 
+from ai import guardrails
 from db import mappers, models
+from db.repositories import assets as assets_repo
 from db.repositories import executions as executions_repo
+from db.repositories import guardrails as guardrails_repo
 from db.repositories import incidents as incidents_repo
 from exceptions import ApiError
 from identifiers import canonical_id
@@ -183,6 +197,39 @@ def _recoverable_origin(
     raise ApiError(ErrorCode.PROPOSAL_NOT_EXECUTABLE)
 
 
+def _recovery_backup_record_id(
+    db: Session, origin: models.ActionExecution
+) -> Optional[str]:
+    """관제자 복구 접수가 자식에 결속할 백업 레코드 id — 원본 실행에서만 조회한다. (Issue #241)
+
+    **요청은 원복 값의 출처를 나르지 않는다.** ExecuteActionRequest에 backup_record_id가
+    없는 것이 계약이며(정책 ③, packages/schemas/api/actions.py), 서버가 원본 행에 결속된
+    레코드를 찾아 자식에 박는다. 자동 발동(initiate_auto_rollback)이 하는 것과 같은 일을
+    같은 근거로 한다 — 두 경로가 다른 출처를 쓰면 "원천이 하나"라는 정책이 접수 주체에
+    따라 달라진다. 결속을 접수 시점에 하지 않으면 실행은 자기 행에서 출처를 찾지 못하고
+    (run_revert_size_execution은 요청도 후보도 보지 않는다) 정상 접수된 원복이 실행
+    단계에서 실패한다.
+
+    **없다고 접수를 거절하지는 않는다.** 거절하려면 화면의 복구 목록도 같은 조건이어야
+    하는데(routers/incidents._recovery_ids), 그 목록은 GET /api/v1/incidents/{id}의 공개
+    계약이라 여기서 함께 바꿀 자리가 아니다. 실제로 롤백 3종의 원본은 모두 backup_action이
+    있는 런북이므로, 결속이 비어 있는 원본은 운영 경로에서 나오지 않는다 — 그때의 실행
+    실패("원복 근거 없음")는 오히려 사실대로다.
+
+    남의 실행이 만든 레코드는 받지 않는다. 결속(bind_backup_record)이 실행 자신이 만든
+    레코드만 걸도록 돼 있어도, 그 불변식을 읽는 쪽에서 한 번 더 확인해야 잘못된 결속이
+    조용히 원복 값으로 쓰이지 않는다.
+    """
+    record = (
+        executions_repo.get_backup_record(db, origin.backup_record_id)
+        if origin.backup_record_id is not None
+        else None
+    )
+    if record is None or record.execution_id != origin.execution_id:
+        return None
+    return record.backup_record_id
+
+
 def _move_incident_to_in_progress(db: Session, incident_id: str) -> None:
     """접수한 실행이 진행 중인 동안 Incident는 반드시 ACTION_IN_PROGRESS다.
 
@@ -236,6 +283,11 @@ def reserve_execution(
             if is_rollback
             else _executable_candidate(db, request)
         )
+        # 되돌릴 값의 출처는 **접수 시점에** 정한다. 실행은 자기 행에 결속된 것만 읽으므로
+        # (run_revert_size_execution) 여기서 박아 두지 않으면 원복이 근거를 찾지 못한다.
+        backup_record_id = (
+            _recovery_backup_record_id(db, source) if is_rollback else None
+        )
     except ApiError as exc:
         if exc.code is ErrorCode.PROPOSAL_NOT_EXECUTABLE:
             # 최초 멱등 조회와 접수 근거 확인 사이에 같은 Key의 앞선 요청이
@@ -263,6 +315,9 @@ def reserve_execution(
                 trigger_source=TriggerSource.USER_APPROVAL,
                 candidate_id=None if is_rollback else source.candidate_id,
                 parent_execution_id=source.execution_id if is_rollback else None,
+                # 자동 발동과 같은 자리에 같은 값을 박는다(ADR-0008 §4 보강) — 원천이
+                # 하나라는 정책은 어느 레코드에서 왔는지가 자식 행에 남을 때만 검증된다
+                backup_record_id=backup_record_id,
                 idempotency_key=request.idempotency_key,
             )
     except IntegrityError:
@@ -446,16 +501,28 @@ class ExecutionRunOutcome:
     Check 결과가 SUCCESS와 ROLLBACK_INITIATED를 가르기 때문이다
     (services/aws/rollback.py, run_rightsizing_execution 참조). 확정하지 않은 두 갈래
     모두 실행은 IN_PROGRESS로 남고 그 판정은 rollback.py 몫이다. (Issue #232)
+
+    deferred는 세 번째 갈래다 — **판정·대조를 못 해 자산을 만지지 않았다.** 원복
+    실행이 상태 대조(ADR-0008 §3-2)에 필요한 조회에 실패한 경우이며, 실패로 확정하면
+    되돌릴 것이 그대로 남은 자산에 "원복 실패"가 기록된다. 단계가 없으므로 다음
+    주기가 처음부터 다시 시도한다. 재시도 상한은 Issue #249다. (Issue #241)
     """
 
     succeeded: bool
     reason_code: Optional[PrecheckReasonCode] = None
     error_summary: Optional[str] = None
     steps: tuple[ExecutionStepResult, ...] = ()
+    deferred: bool = False
 
     def __post_init__(self) -> None:
         if self.succeeded == (self.reason_code is not None):
             raise ValueError("실패에만 reason_code를 채웁니다")
+        if self.deferred:
+            if self.succeeded:
+                raise ValueError("성공한 실행은 보류가 아닙니다")
+            if self.steps:
+                # 자산을 만졌으면 보류가 아니다 — 되돌릴 것이 남은 실패다
+                raise ValueError("보류 결과에는 단계 기록이 없어야 합니다")
 
 
 def _step_recorder(db: Session, execution_id: str):
@@ -586,8 +653,13 @@ def run_rightsizing_execution(db: Session, execution_id: str) -> ExecutionRunOut
 
 
 @dataclass(frozen=True)
-class BootJudgement:
-    """기동 판정 1건 — 확정할 목적 상태와 사유. **상태는 아직 DB에 없다.**
+class ExecutionJudgement:
+    """종료 판정 1건 — 확정할 목적 상태와 사유. **상태는 아직 DB에 없다.**
+
+    "성공의 경계"는 런북마다 다르다. RIGHTSIZING은 2/2 Status Check가 가르고
+    (judge_rightsizing_boot), REVERT_SIZE는 실자산 타입이 백업 값으로 돌아왔는지가
+    가른다(judge_revert_size) — 그래서 이 타입은 판정의 종류가 아니라 **판정 결과의
+    모양**만 정한다.
 
     run_rightsizing_execution이 ExecutionRunOutcome를 돌려주는 것과 같은 자리다.
     확정은 close_execution 하나가 하고, 언제 부를지는 dispatcher.py가 고른다.
@@ -647,7 +719,7 @@ def _boot_failure_summary(outcome: rollback.StatusCheckOutcome) -> str:
     return f"{code}: {outcome.summary}"[:1024]
 
 
-def judge_rightsizing_boot(db: Session, execution_id: str) -> BootJudgement:
+def judge_rightsizing_boot(db: Session, execution_id: str) -> ExecutionJudgement:
     """AWS 변경이 시작된 RIGHTSIZING 실행 1건의 종료 판정. (Issue #240)
 
     **기동 요청 접수는 성공의 경계가 아니다.** 2/2 Status Check가 SUCCESS와
@@ -694,11 +766,11 @@ def judge_rightsizing_boot(db: Session, execution_id: str) -> BootJudgement:
             f"단계 {unsettled[-1].sequence}({unsettled[-1].step_type})가 끝나지 않았습니다"
         )
         if _steps_changed_the_asset(steps):
-            return BootJudgement(
+            return ExecutionJudgement(
                 next_status=ExecutionStatus.ROLLBACK_INITIATED,
                 error_summary=f"조치 미완(자산 변경됨): {detail}"[:1024],
             )
-        return BootJudgement(
+        return ExecutionJudgement(
             next_status=ExecutionStatus.FAILED,
             error_summary=f"조치 미완(자산 변경 없음): {detail}"[:1024],
         )
@@ -713,26 +785,26 @@ def judge_rightsizing_boot(db: Session, execution_id: str) -> BootJudgement:
     )
     if started is None:
         # 타입 변경까지 갔는데 기동 단계가 없다 — 자산은 바뀐 채 멈춰 있다
-        return BootJudgement(
+        return ExecutionJudgement(
             next_status=ExecutionStatus.ROLLBACK_INITIATED,
             error_summary="조치 미완: 기동 단계가 기록되지 않았습니다",
         )
     if started.effect is ExecutionEffect.NOT_APPLIED:
-        return BootJudgement(next_status=ExecutionStatus.SUCCESS)
+        return ExecutionJudgement(next_status=ExecutionStatus.SUCCESS)
 
     outcome = rollback.wait_for_status_check(execution.target_arn)
     if outcome.booted:
-        return BootJudgement(
+        return ExecutionJudgement(
             next_status=ExecutionStatus.SUCCESS, verdict=outcome.verdict
         )
     if outcome.probe_failed:
         # AWS에 물어보지 못해 결론이 없다 — 자산이 실패했다는 근거가 아니다.
         # 여기서 ROLLBACK_INITIATED로 닫으면 검증기의 실패가 자산의 실패로 저장되고,
         # 자동 원복(#241)이 멀쩡한 인스턴스를 되돌린다 (PR #244 리뷰 / Issue #249)
-        return BootJudgement(
+        return ExecutionJudgement(
             defer_reason=_boot_failure_summary(outcome), verdict=outcome.verdict
         )
-    return BootJudgement(
+    return ExecutionJudgement(
         next_status=ExecutionStatus.ROLLBACK_INITIATED,
         error_summary=_boot_failure_summary(outcome),
         verdict=outcome.verdict,
@@ -765,6 +837,7 @@ def _incident_status_after(
     *,
     closed_execution_id: str,
     closed_status: ExecutionStatus,
+    also_closed: tuple[str, ...] = (),
 ) -> IncidentStatus:
     """실행 하나가 확정된 뒤 Incident가 있어야 할 상태.
 
@@ -780,17 +853,22 @@ def _incident_status_after(
     FAILED로 접으면 계약은 통과하지만 화면이 성공한 조치를 '진행 불가'로 그린다
     (PR #236 리뷰 §2-②가 남긴 미정 분기 — Issue #240에서 확정).
 
+    also_closed는 **같은 트랜잭션에서 함께 종료 상태로 옮긴 다른 실행**이다 — 원복
+    자식이 끝나면 원본도 같이 확정되므로(close_execution), 그 원본을 세션이 든 옛
+    상태(ROLLBACK_INITIATED)로 다시 세면 영원히 "진행 중 실행이 있다"가 된다.
+
     RESOLVED로는 옮기지 않는다. DB 제약은 판단 없는 RESOLVED를 허용하지만
     (db/models.py resolution_with_resolved_status), 시스템이 먼저 옮기면 관제자 종료
     API가 멱등 경로로 떨어져(resolve_incident) 종료 판단이 영구히 비어 있는 채로
     남는다 (Issue #199). ANALYZING도 AI 분석 미완을 뜻해 실행이 끝난 뒤 갈 자리가
     아니다.
     """
+    settled_now = {closed_execution_id, *(also_closed or ())}
     still_running = closed_status in EXECUTION_NON_TERMINAL_STATUSES or any(
         row.status in EXECUTION_NON_TERMINAL_STATUSES
         # 방금 옮긴 행은 세션이 옛 상태를 들고 있을 수 있어 인자로 받은 값을 쓴다
         for row in executions_repo.list_by_incident(db, incident_id)
-        if row.execution_id != closed_execution_id
+        if row.execution_id not in settled_now
     )
     if still_running:
         return IncidentStatus.ACTION_IN_PROGRESS
@@ -801,6 +879,79 @@ def _incident_status_after(
     if closed_status in EXECUTION_SETTLED_STATUSES:
         return IncidentStatus.AWAITING_CLOSURE
     return IncidentStatus.FAILED
+
+
+# 자식 실행의 결과가 원본에 남기는 확정 상태. 자식이 갖는 종료 상태는 DB CheckConstraint
+# (rollback_child_status)가 SUCCESS·FAILED로 묶으므로 표도 두 줄이다.
+_ORIGIN_STATUS_AFTER_ROLLBACK: dict[ExecutionStatus, ExecutionStatus] = {
+    ExecutionStatus.SUCCESS: ExecutionStatus.ROLLED_BACK,
+    ExecutionStatus.FAILED: ExecutionStatus.ROLLBACK_FAILED,
+}
+
+
+def _lock_rollback_origin(
+    db: Session, execution: models.ActionExecution
+) -> Optional[models.ActionExecution]:
+    """이 실행이 되돌리려는 원본. 롤백 자식이 아니면 None.
+
+    자식을 잠근 뒤에 잠근다 — 잠금 방향을 자식 → 원본으로 고정하지 않으면 관제자
+    복구 접수(_recoverable_origin은 원본만 잠근다)와 엇갈릴 수 있다.
+    """
+    if execution.parent_execution_id is None:
+        return None
+    origin = executions_repo.lock_execution(db, execution.parent_execution_id)
+    if origin is None:
+        raise ValueError(
+            f"롤백 자식이 가리키는 원본이 없습니다: {execution.parent_execution_id}"
+        )
+    return origin
+
+
+def _settle_rollback_origin(
+    db: Session,
+    origin: Optional[models.ActionExecution],
+    *,
+    child_status: ExecutionStatus,
+) -> tuple[str, ...]:
+    """원복 결과를 원본에 확정한다. 함께 옮긴 실행 ID를 돌려준다.
+
+    원본이 이미 종료 상태면 옮기지 않는다 — 관제자가 두 번째 복구를 접수할 수 없는
+    구조라(_recoverable_origin) 정상 경로에서는 오지 않지만, 확정이 두 번 오면
+    나중 것이 먼저 내린 판단을 덮어쓴다.
+
+    자식이 아직 비종료면 원본도 그대로 둔다. "되돌리는 중"인 원본의 상태가
+    ROLLBACK_INITIATED이며, 그것이 곧 자동 원복이 개시됐다는 기록이다.
+    """
+    if origin is None:
+        return ()
+    next_status = _ORIGIN_STATUS_AFTER_ROLLBACK.get(child_status)
+    if next_status is None:
+        return ()
+    if origin.status not in EXECUTION_RECOVERABLE_STATUSES:
+        # 복구가 열려 있던 상태(SUCCESS·ROLLBACK_INITIATED)에서만 옮긴다. 이미
+        # ROLLED_BACK·ROLLBACK_FAILED로 확정된 원본의 판단을 덮어쓰지 않는다.
+        return ()
+    if not executions_repo.update_execution_status(
+        db,
+        origin.execution_id,
+        expected=origin.status,
+        next_status=next_status,
+        # 성공으로 끝났던 원본의 종료 시각은 그대로 둔다 — 그 조치가 끝난 시각이고,
+        # 되돌린 시각은 자식 실행 행이 갖는다
+        finished_at=(
+            None if origin.finished_at is not None else datetime.now(timezone.utc)
+        ),
+    ):
+        raise ValueError(f"원본 실행 상태 전이 실패: {origin.execution_id}")
+    logger.info(
+        "rollback_origin_settled",
+        extra={
+            "execution_id": origin.execution_id,
+            "next_status": next_status.value,
+            "child_status": child_status.value,
+        },
+    )
+    return (origin.execution_id,)
 
 
 def close_execution(
@@ -819,8 +970,14 @@ def close_execution(
     None은 실패가 아니라 **이미 다른 주체가 확정한 실행**이라는 뜻이다 — 잠근 뒤
     상태를 다시 보므로 여기까지 두 번 들어와도 확정은 한 번이다.
 
-    잠금 순서는 실행 → Incident로 고정한다(reserve_execution과 같은 순서). 엇갈리면
-    두 경로가 서로를 기다린다.
+    **롤백 자식이 끝나면 원본도 같은 트랜잭션에서 확정한다** — 자식 SUCCESS면 원본은
+    ROLLED_BACK, 자식 FAILED면 ROLLBACK_FAILED다(Issue #241). 나눠 커밋하면 그 사이의
+    조회가 "되돌리기는 끝났는데 원본은 아직 원복 중"인 인시던트를 보고, 상세 응답의
+    자식 목록과 상태가 어긋난다. 자동 발동이든 관제자 요청이든 같다 — 확정의 근거는
+    발동 주체가 아니라 자식의 결과다.
+
+    잠금 순서는 실행(자식 → 원본) → Incident로 고정한다(reserve_execution과 같은
+    방향). 엇갈리면 두 경로가 서로를 기다린다.
     """
     execution = executions_repo.lock_execution(db, execution_id)
     if execution is None:
@@ -828,6 +985,7 @@ def close_execution(
     if execution.status not in EXECUTION_NON_TERMINAL_STATUSES:
         return None
 
+    origin = _lock_rollback_origin(db, execution)
     incident_id = execution.incident_id
     incident = incidents_repo.lock_incident(db, incident_id)
     if incident is None:
@@ -851,8 +1009,13 @@ def close_execution(
         # 깨진다. commit 없이 예외를 던지므로 세션 정리에서 되돌아간다
         raise ValueError(f"실행 상태 전이 실패: {execution_id}")
 
+    settled_origin = _settle_rollback_origin(db, origin, child_status=next_status)
     target = _incident_status_after(
-        db, incident_id, closed_execution_id=execution_id, closed_status=next_status
+        db,
+        incident_id,
+        closed_execution_id=execution_id,
+        closed_status=next_status,
+        also_closed=settled_origin,
     )
     status_changed = incident.status is not target
     if status_changed:
@@ -880,4 +1043,466 @@ def close_execution(
         execution_updated_at=execution.updated_at,
         incident_status=incident.status,
         incident_updated_at=incident.updated_at,
+    )
+
+
+# --- 자동 원복 (Issue #241) -------------------------------------------------------
+#
+# 자산 트랙의 마지막 칸이다. 2/2 Status Check가 실패·타임아웃으로 갈린 실행은
+# ROLLBACK_INITIATED로 남는데(judge_rightsizing_boot), 그 상태는 "되돌려야 한다"는
+# 표시일 뿐 되돌리는 주체가 아니었다. 여기가 그 주체다.
+#
+# 경로를 접수와 실행으로 가르는 것은 본편과 같다(reserve_execution ↔
+# run_rightsizing_execution). 접수(initiate_auto_rollback)는 자식 실행 행을 남기는
+# 데까지고, 가드레일 4단계와 AWS 변경은 실행(run_revert_size_execution)이 한다.
+# 그렇게 나누는 이유가 **멱등**이다 — 자식 행의 존재 자체가 "이 원본의 자동 원복은
+# 이미 시작됐다"는 관문이라(list_rollback_children), 가드레일이 거절해 자식이
+# FAILED로 끝나도 다음 주기가 다시 발동하지 않는다(ADR-0004 정책 ④ 무재시도).
+
+
+class _DbBackupRecordLoader:
+    """executor.BackupRecordLoader의 DB 구현 — 세션 1개를 감싼 읽기 전용 조회.
+
+    executor가 백업 조회를 주입받는 이유는 그쪽이 DB를 모르기 때문이고(ADR-0007 §1),
+    그래서 배선은 이 계층 몫이다. 미배선은 FAIL이 아니라 RuntimeError라, 백업이
+    필요한 런북의 precheck를 부르는 자리는 반드시 이것을 넘겨야 한다.
+    """
+
+    def __init__(self, db: Session) -> None:
+        self._db = db
+
+    def get(self, backup_record_id: str) -> Optional[executor.BackupRecordView]:
+        record = executions_repo.get_backup_record(self._db, backup_record_id)
+        if record is None:
+            return None
+        return executor.BackupRecordView(
+            backup_record_id=record.backup_record_id,
+            target_arn=record.target_arn,
+            backup_type=record.backup_type,
+            payload=record.payload or {},
+        )
+
+    def latest_for_target(
+        self,
+        target_arn: str,
+        backup_type: str,
+        payload_match: Optional[dict] = None,
+    ) -> Optional[executor.BackupRecordView]:
+        # backup_record_id를 파라미터로 받지 않는 런북은 NACL_RESTORE 하나이고
+        # (executor.RUNBOOK_SPECS), 그 실행 경로는 아직 없다. 지금 조용히 None을
+        # 돌려주면 "백업 레코드 없음" 거절이 되어 미구현이 판정으로 둔갑한다.
+        raise NotImplementedError(
+            "대상 기준 백업 조회는 NACL 실행 경로와 함께 붙인다 (ADR-0008 §Consequences)"
+        )
+
+
+@dataclass(frozen=True)
+class RollbackInitiation:
+    """자동 원복 접수 1건의 결과.
+
+    execution_id가 있으면 이번 호출이 자식을 만들었다는 뜻이다. skipped_reason은
+    만들지 않은 이유이며, closure가 함께 있으면 그 자리에서 원본을 ROLLBACK_FAILED로
+    확정했다는 뜻이다 — 되돌릴 근거가 없어 자동 원복을 시작조차 못 한 경우다.
+    호출부는 그 closure로 발행한다(commit 이후 발행은 호출부 몫, realtime.py 규약).
+    """
+
+    execution_id: Optional[str] = None
+    skipped_reason: Optional[str] = None
+    closure: Optional["ExecutionClosure"] = None
+
+
+def _rollback_evidence_ids(
+    db: Session, origin: models.ActionExecution
+) -> list[str]:
+    """원복 명령이 실을 근거 ID. 원본 조치가 선 근거를 그대로 잇는다.
+
+    원복은 후보가 아니라 근거를 새로 만들지 않는다(ADR-0004 정책 ②). 그래서 "왜
+    되돌리는가"의 좌표는 원본 조치가 딛고 선 근거이며, 없으면 인시던트에 고정된
+    근거에서 가장 먼저 수집된 것을 쓴다.
+    """
+    if origin.candidate_id is not None:
+        candidate = incidents_repo.get_candidate(db, origin.candidate_id)
+        if candidate is not None:
+            try:
+                return list(mappers.to_candidate_data(candidate).evidence_ids)
+            except ValidationError:
+                logger.warning(
+                    "candidate_contract_invalid",
+                    extra={"candidate_id": origin.candidate_id},
+                )
+    fixed = incidents_repo.list_evidence(db, origin.incident_id)
+    return [row.evidence_id for row in fixed[:1]]
+
+
+def initiate_auto_rollback(db: Session, origin_execution_id: str) -> RollbackInitiation:
+    """ROLLBACK_INITIATED 원본에 자동 원복 자식을 접수한다. (Issue #241)
+
+    **원본당 1회다.** 관문은 자식의 존재이며(list_rollback_children), 관제자 복구
+    접수가 쓰는 것과 같은 관문이다(_recoverable_origin) — 두 경로가 같은 원본에
+    두 개의 원복을 만들지 않는다.
+
+    되돌릴 근거가 없으면 자식을 만들지 않고 원본을 ROLLBACK_FAILED로 확정한다.
+    백업 레코드가 없다는 것은 원복 값이 어디에도 없다는 뜻이라(ADR-0008 §1 ④
+    "백업이 없으면 원복을 시작하지 않는다" — 현물 조회로 값을 추정하지 않는다),
+    다시 시도해도 답이 같다. ROLLBACK_INITIATED로 남겨 두면 매 주기 같은 자리에서
+    실패하면서 인시던트가 영원히 진행 중으로 남는다.
+
+    **가드레일은 여기서 부르지 않는다.** 접수는 실행 행을 남기는 데까지이고, 4단계
+    통과는 AWS 변경 직전인 run_revert_size_execution이 한다 — 그 순서라야 자식 행이
+    멱등 관문 노릇을 해서 거절된 원복이 다음 주기에 다시 발동하지 않는다.
+    """
+    origin = executions_repo.lock_execution(db, origin_execution_id)
+    if origin is None:
+        raise ValueError(f"실행 레코드를 찾을 수 없습니다: {origin_execution_id}")
+    if origin.status is not ExecutionStatus.ROLLBACK_INITIATED:
+        return RollbackInitiation(skipped_reason="자동 원복 대상 상태가 아닙니다")
+    if executions_repo.list_rollback_children(db, origin.execution_id):
+        return RollbackInitiation(skipped_reason="복구가 이미 접수돼 있습니다")
+
+    rollback_id = ROLLBACK_RUNBOOK_BY_MAIN_ID.get(origin.runbook_id.value)
+    if rollback_id is None:
+        # 등록 롤백이 없는 런북이다 — 미구현을 실패로 바꾸지 않는 규약대로 남긴다
+        return RollbackInitiation(skipped_reason="등록된 롤백 런북이 없습니다")
+
+    record = (
+        executions_repo.get_backup_record(db, origin.backup_record_id)
+        if origin.backup_record_id is not None
+        else None
+    )
+    if record is None:
+        return _abandon_auto_rollback(
+            db, origin, detail="자동 원복 불가: 백업 레코드가 없어 되돌릴 값이 없습니다"
+        )
+    evidence_ids = _rollback_evidence_ids(db, origin)
+    if not evidence_ids:
+        return _abandon_auto_rollback(
+            db, origin, detail="자동 원복 불가: 원복 명령에 실을 근거 ID가 없습니다"
+        )
+
+    child = executions_repo.create_execution(
+        db,
+        incident_id=origin.incident_id,
+        runbook_id=RunbookId(rollback_id),
+        target_arn=origin.target_arn,
+        trigger_source=TriggerSource.AUTO_ON_FAILURE,
+        parent_execution_id=origin.execution_id,
+        # 실제로 로드한 백업을 자기 행에 결속한다(ADR-0008 §4 보강) — 원천이 하나라는
+        # 정책은 어느 레코드에서 왔는지가 기록에 남을 때만 사후에 검증된다
+        backup_record_id=record.backup_record_id,
+    )
+    db.commit()
+    logger.info(
+        "auto_rollback_initiated",
+        extra={
+            "execution_id": child.execution_id,
+            "parent_execution_id": origin.execution_id,
+            "runbook_id": rollback_id,
+        },
+    )
+    return RollbackInitiation(execution_id=child.execution_id)
+
+
+def _abandon_auto_rollback(
+    db: Session, origin: models.ActionExecution, *, detail: str
+) -> RollbackInitiation:
+    """자동 원복을 시작조차 못 한다 — 원본을 ROLLBACK_FAILED로 확정하고 CRITICAL.
+
+    Incident 전이까지 close_execution에 맡긴다. 실행만 옮기면 "ACTION_IN_PROGRESS인데
+    진행 중 실행이 없는" 조합이 생겨 상세 조회가 500이 된다.
+    """
+    logger.critical(
+        "auto_rollback_abandoned",
+        extra={"execution_id": origin.execution_id, "detail": detail},
+    )
+    closure = close_execution(
+        db,
+        origin.execution_id,
+        next_status=ExecutionStatus.ROLLBACK_FAILED,
+        error_summary=detail[:1024],
+    )
+    return RollbackInitiation(skipped_reason=detail, closure=closure)
+
+
+def _revert_command_payload(
+    execution: models.ActionExecution,
+    record: models.BackupRecord,
+    evidence_ids: list[str],
+    instance_id: str,
+) -> dict:
+    """가드레일 ①에 넘길 원복 실행 명령.
+
+    **원복 값은 여기 실리지 않는다.** 되돌릴 타입은 백업 레코드가 갖고 있고 명령이
+    나르는 것은 그 레코드를 가리키는 backup_record_id뿐이다 — 파라미터에 원복 값이
+    실려 오면 요청 페이로드가 제2의 원천이 된다(ADR-0008 §4). ④ precheck가
+    backup_record_id로 레코드를 다시 읽어 종류·대상까지 대조한다.
+    """
+    return {
+        "runbook_id": execution.runbook_id.value,
+        "target_arn": execution.target_arn,
+        "parameters": {
+            "instance_id": instance_id,
+            "backup_record_id": record.backup_record_id,
+            "evidence_id": evidence_ids[0],
+        },
+        "evidence_ids": evidence_ids,
+    }
+
+
+def _run_rollback_guardrails(
+    db: Session, execution: models.ActionExecution, command_payload: dict
+) -> guardrails.GuardrailOutcome:
+    """원복 실행 명령을 4단계 가드레일에 통과시키고 그 판정을 저장한다.
+
+    롤백도 본편과 동일하게 네 단계를 전부 지난다(ADR-0004 정책 ①). 시스템이 시작한
+    실행이라 payload에 LLM 저작 문자열이 없더라도 우회하지 않는다 — "AWS를 건드리는
+    모든 실행은 가드레일을 통과한다"가 예외를 갖는 순간 그 문장을 근거로 쓸 수 없다.
+
+    판정 결과는 저장한다. 거절이 로그로만 남으면 관제 화면에서 "왜 원복이 멈췄는가"를
+    답할 자리가 없다.
+    """
+    request = GuardrailValidationRequest(
+        validation_context=GuardrailValidationContext.ROLLBACK_EXECUTION,
+        execution_id=execution.execution_id,
+        command_payload=command_payload,
+    )
+    loader = _DbBackupRecordLoader(db)
+    outcome = guardrails.run_guardrail_validation(
+        request,
+        is_managed_arn=lambda arn: assets_repo.get_asset_by_arn(db, arn) is not None,
+        # 롤백 3종은 전부 백업 레코드를 읽는다 — 미배선이면 FAIL이 아니라 RuntimeError다
+        precheck=lambda command: executor.precheck(
+            command.runbook_id,
+            command.target_arn,
+            command.parameters,
+            backup_loader=loader,
+        ),
+    )
+    guardrails_repo.add_evaluation(
+        db,
+        validation_context=GuardrailValidationContext.ROLLBACK_EXECUTION,
+        result=outcome.result,
+        execution_id=execution.execution_id,
+        validated_command=command_payload if outcome.command is not None else None,
+    )
+    db.commit()
+    return outcome
+
+
+def _guardrail_rejection_summary(result: GuardrailValidationResult) -> str:
+    """거절 한 줄 — 어느 단계에서 어떤 사유로 막혔는지를 앞에 세운다."""
+    failed = next((s for s in result.steps if s.step == result.failed_step), None)
+    code = (
+        failed.reason_code.value
+        if failed is not None and failed.reason_code is not None
+        else "UNKNOWN"
+    )
+    step = result.failed_step.value if result.failed_step is not None else "UNKNOWN"
+    return f"가드레일 거절({step}/{code})"
+
+
+def run_revert_size_execution(db: Session, execution_id: str) -> ExecutionRunOutcome:
+    """`RUNBOOK_EC2_REVERT_SIZE` 실행 — 백업 로드 → 가드레일 4단계 → 원복. (Issue #241)
+
+    순서가 계약이다. **가드레일 4단계가 AWS 변경보다 먼저 끝난다**(ADR-0004 정책 ①).
+    거절이면 자산을 만지지 않고 실패로 돌아가며 **자동 재시도는 없다**(정책 ④) —
+    자식 실행 행이 이미 있어 다음 주기의 발동이 멱등 관문에 걸리기 때문이다
+    (initiate_auto_rollback). 남는 처분은 CRITICAL 알림과 수동 개입이다.
+
+    **원복 값은 백업 레코드에서만 온다**(ADR-0004 정책 ③). 이 함수가 읽는 것은 자기
+    행에 결속된 backup_record_id 하나이고 요청 페이로드도 후보도 보지 않는다. 원본
+    실행에서 읽는 값은 하나뿐인데, 그것은 되돌릴 값이 아니라 제3자 변경을 가리기 위한
+    대조 축이다(ADR-0008 §3-2).
+
+    종료 상태도 Incident 전이도 여기서 하지 않는다 — run_rightsizing_execution과 같은
+    이유다(확정은 close_execution 한 트랜잭션).
+    """
+    execution = executions_repo.get_execution(db, execution_id)
+    if execution is None:
+        raise ValueError(f"실행 레코드를 찾을 수 없습니다: {execution_id}")
+    if execution.runbook_id is not RunbookId.RUNBOOK_EC2_REVERT_SIZE:
+        # 배선 오류다 — 런북마다 단계와 되돌릴 축이 다르다
+        raise ValueError(f"REVERT_SIZE 실행이 아닙니다: {execution.runbook_id.value}")
+    if execution.status is not ExecutionStatus.IN_PROGRESS:
+        raise ValueError(f"진행 중인 실행이 아닙니다: {execution.status.value}")
+    if execution.parent_execution_id is None:
+        # 원복은 언제나 되돌릴 원본을 가리킨다 — 원본 없이는 대조 축을 알 수 없다
+        raise ValueError(f"원본을 가리키지 않는 원복 실행입니다: {execution_id}")
+
+    target = parse_arn(execution.target_arn)
+    if target is None or target.resource_type != "instance":
+        return _run_failed(
+            PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+            f"인스턴스 ARN이 아닙니다: {execution.target_arn}",
+        )
+
+    record = (
+        executions_repo.get_backup_record(db, execution.backup_record_id)
+        if execution.backup_record_id is not None
+        else None
+    )
+    if record is None:
+        return _run_failed(
+            PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND,
+            "원복 근거 없음: 결속된 백업 레코드를 찾을 수 없습니다",
+        )
+
+    origin = executions_repo.get_execution(db, execution.parent_execution_id)
+    if origin is None:
+        raise ValueError(f"원본 실행이 없습니다: {execution.parent_execution_id}")
+    applied_type = _rightsizing_target_type(db, origin)
+    if applied_type is None:
+        # 원본이 무엇으로 바꿨는지 모르면 §3-2의 ②와 ③을 가를 수 없다. 모르는 채로
+        # 되돌리면 제3자 변경을 덮어쓸 수 있으므로 시작하지 않는다.
+        return _run_failed(
+            PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+            "상태 대조 불가: 원본 조치가 적용한 instance_type을 알 수 없습니다",
+        )
+
+    evidence_ids = _rollback_evidence_ids(db, origin)
+    if not evidence_ids:
+        return _run_failed(
+            PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+            "원복 명령에 실을 근거 ID가 없습니다",
+        )
+
+    payload = _revert_command_payload(
+        execution, record, evidence_ids, target.resource_id
+    )
+    guardrail = _run_rollback_guardrails(db, execution, payload)
+    if guardrail.command is None:
+        detail = _guardrail_rejection_summary(guardrail.result)
+        logger.critical(
+            "auto_rollback_guardrail_rejected",
+            extra={
+                "execution_id": execution_id,
+                "parent_execution_id": origin.execution_id,
+                "failed_step": (
+                    guardrail.result.failed_step.value
+                    if guardrail.result.failed_step is not None
+                    else None
+                ),
+            },
+        )
+        return _run_failed(PrecheckReasonCode.PRECHECK_INVALID_STATE, detail)
+
+    spec = InstanceSpecBackup.model_validate(record.payload or {})
+    outcome = executor.execute_revert_size(
+        execution.target_arn,
+        restore_instance_type=spec.instance_type,
+        applied_instance_type=applied_type,
+        restore_state=spec.state,
+        record_step=_step_recorder(db, execution_id),
+    )
+    if outcome.deferred:
+        return ExecutionRunOutcome(
+            succeeded=False,
+            reason_code=outcome.reason_code,
+            error_summary=outcome.error_summary,
+            deferred=True,
+        )
+    if not outcome.succeeded:
+        return _run_failed(outcome.reason_code, outcome.error_summary, outcome.steps)
+    return ExecutionRunOutcome(succeeded=True, steps=outcome.steps)
+
+
+# 기동 요청이 접수된 뒤의 EC2 state. **원복 성공의 경계는 기동 "요청"이지 2/2 Status
+# Check가 아니다**(ADR-0008 §6) — 되돌린 인스턴스가 또 부팅에 실패해도 원복의 원복은
+# 없어 판정이 바뀌지 않는다. 그래서 pending도 성공에 넣는다: 빼면 방금 켠 인스턴스가
+# 다음 주기에 "미완"으로 확정된다.
+_REVERT_STARTED_STATES: frozenset[str] = frozenset({"running", "pending"})
+
+
+def judge_revert_size(db: Session, execution_id: str) -> ExecutionJudgement:
+    """단계를 남긴 채 IN_PROGRESS인 원복 실행 1건의 종료 판정. (Issue #241, ADR-0008 §6)
+
+    여기로 오는 것은 **실행 도중 프로세스가 끊긴 원복**뿐이다. 정상 경로는 실행이
+    끝난 그 주기에 dispatcher가 확정한다. 자동 재시도를 하지 않는다는 것이 종료
+    판정을 하지 않는다는 뜻은 아니므로(ADR-0008 §6) 판정 주체를 runner와 짝으로 둔다 —
+    짝이 어긋나면 중단된 자식이 재실행도 종료도 되지 않고 IN_PROGRESS에 남는다.
+
+    **성공의 경계는 실자산이다.** 원복이 끝났는지는 단계 기록이 아니라 지금 인스턴스
+    타입이 백업 값인지가 답한다 — 끊긴 지점이 어디든 그 답은 같다. 2/2 Status Check는
+    여기서 묻지 않는다: 부팅이 또 실패해도 원복의 원복은 없어 판정을 바꾸지 못한다.
+
+    조회하지 못하면 확정하지 않고 보류한다 — judge_rightsizing_boot이 probe_failed를
+    다루는 것과 같은 이유이며, 재시도 상한은 Issue #249다.
+    """
+    execution = executions_repo.get_execution(db, execution_id)
+    if execution is None:
+        raise ValueError(f"실행 레코드를 찾을 수 없습니다: {execution_id}")
+    if execution.runbook_id is not RunbookId.RUNBOOK_EC2_REVERT_SIZE:
+        raise ValueError(f"REVERT_SIZE 실행이 아닙니다: {execution.runbook_id.value}")
+    if execution.status is not ExecutionStatus.IN_PROGRESS:
+        raise ValueError(f"진행 중인 실행이 아닙니다: {execution.status.value}")
+
+    record = (
+        executions_repo.get_backup_record(db, execution.backup_record_id)
+        if execution.backup_record_id is not None
+        else None
+    )
+    if record is None:
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary="원복 판정 불가: 결속된 백업 레코드를 찾을 수 없습니다",
+        )
+    target = parse_arn(execution.target_arn)
+    if target is None or target.resource_type != "instance":
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary=f"인스턴스 ARN이 아닙니다: {execution.target_arn}",
+        )
+
+    spec = InstanceSpecBackup.model_validate(record.payload or {})
+    restored = spec.instance_type
+    current, state, code = executor.current_instance_type_and_state(
+        target.resource_id, target.region
+    )
+    if code is not None and code is not PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND:
+        # 자산 상태를 본 적이 없다 — 확정하면 검증기의 실패가 원복의 실패로 저장된다
+        return ExecutionJudgement(
+            defer_reason=f"{code.value}: 원복 대상 상태 조회 실패로 판정 보류"
+        )
+    if current == restored:
+        # 타입은 되돌아왔다. 그것만으로 성공이라 하면 **정지 → 타입 원복 → [중단]**
+        # 으로 끊긴 원복이 성공으로 확정된다 — 실행 절차의 마지막 칸이 기동이므로
+        # (executor.execute_revert_size의 STEP_START_INSTANCE) 그 앞에서 끊기면
+        # 인스턴스는 멈춘 채 남는다. 자식이 SUCCESS면 원본까지 ROLLED_BACK으로 닫혀
+        # 인시던트가 내려가고, 멈춘 자산을 다시 볼 자리가 사라진다.
+        #
+        # 되돌려야 할 상태는 백업 레코드의 state다(ADR-0008 §4) — 조치 이전에 멈춰
+        # 있던 인스턴스는 멈춰 있는 것이 원복의 완료다.
+        if spec.state != "running" or state in _REVERT_STARTED_STATES:
+            return ExecutionJudgement(next_status=ExecutionStatus.SUCCESS)
+        detail = (
+            f"원복 미완 — 타입은 {restored}로 되돌렸으나 조치 이전 running이던"
+            f" 인스턴스가 {state or '알 수 없음'} 상태입니다."
+            " 자동 재시도 없이 수동 개입으로 전환합니다"
+        )
+        logger.critical(
+            "revert_size_not_restarted",
+            extra={
+                "execution_id": execution_id,
+                "instance_state": state,
+                "restore_state": spec.state,
+                "restore_instance_type": restored,
+            },
+        )
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED, error_summary=detail[:1024]
+        )
+
+    detail = (
+        f"원복 미완 — 현재 {current or '알 수 없음'}, 백업 {restored}."
+        " 자동 재시도 없이 수동 개입으로 전환합니다"
+    )
+    logger.critical(
+        "revert_size_incomplete",
+        extra={
+            "execution_id": execution_id,
+            "current_instance_type": current,
+            "restore_instance_type": restored,
+        },
+    )
+    return ExecutionJudgement(
+        next_status=ExecutionStatus.FAILED, error_summary=detail[:1024]
     )
