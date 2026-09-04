@@ -99,6 +99,13 @@ def test_api_verdicts_match_the_golden_answers(client_pg, loaded, golden):
     assert not mismatched, "\n".join(mismatched)
 
 
+# 골든이 아직 못 만드는 Skip 사유 — 그 코드를 만드는 판정 케이스가 열린 카드에 있다.
+# **비우는 것이 목표다.** #276(EBS 전이·비정상 상태 = SKIP_UNSUPPORTED_STATE)은 규칙과
+# enum만 dev에 들어왔고(PR #284), 정답지 편입은 그 이슈의 완료 기준 3번으로 남아 있다.
+# 그 케이스가 골든에 들어오면 아래 단언이 "예외 목록이 낡았다"고 먼저 실패한다.
+UNCOVERED_SKIP_REASONS = {"SKIP_UNSUPPORTED_STATE"}  # Refs #276
+
+
 def test_golden_fills_every_verdict_and_skip_reason(client_pg, loaded):
     """화면의 배지·사유 분기를 골든만으로 전부 눌러 볼 수 있다.
 
@@ -106,7 +113,9 @@ def test_golden_fills_every_verdict_and_skip_reason(client_pg, loaded):
     분기를 전부 덮는 한 자산 화면은 mock이 필요 없다.
 
     계약에 값이 추가되면 이 테스트가 먼저 실패한다 — 그때 고칠 것은 이 파일이 아니라
-    `datasets/golden/finops/`다(사유 코드를 만드는 판정 케이스를 추가한다).
+    `datasets/golden/finops/`다(사유 코드를 만드는 판정 케이스를 추가한다). 아직 그
+    케이스를 만들 수 없는 값만 `UNCOVERED_SKIP_REASONS`에 이름으로 남긴다. 부분집합
+    비교(`skips <= enum`)로 완화하지 않는다 — 항상 참이라 이 단언이 하는 일이 없어진다.
     """
     from schemas.rules import SkipReasonCode, Verdict
 
@@ -114,11 +123,24 @@ def test_golden_fills_every_verdict_and_skip_reason(client_pg, loaded):
     verdicts = {item["verdict"] for item in items if item["verdict"]}
     skips = {item["skip_reason_code"] for item in items if item["skip_reason_code"]}
 
+    known = {s.value for s in SkipReasonCode}
+    assert UNCOVERED_SKIP_REASONS <= known, (
+        "예외 목록이 계약에 없는 사유를 가리킨다: "
+        f"{sorted(UNCOVERED_SKIP_REASONS - known)}"
+    )
+
     assert verdicts == {v.value for v in Verdict}, (
         f"골든이 못 만드는 verdict가 있다: {sorted({v.value for v in Verdict} - verdicts)}"
     )
-    assert skips == {s.value for s in SkipReasonCode}, (
-        f"골든이 못 만드는 Skip 사유가 있다: {sorted({s.value for s in SkipReasonCode} - skips)}"
+    # 예외가 해소되면 여기서 먼저 걸린다. 순서가 반대면 아래 등식이 "골든이 못 만든다"는
+    # 엉뚱한 문구로 먼저 터져 낡은 예외라는 사실이 가려진다.
+    assert not (skips & UNCOVERED_SKIP_REASONS), (
+        "골든이 이제 만드는 사유가 예외 목록에 남아 있다 — "
+        f"UNCOVERED_SKIP_REASONS에서 지울 것: {sorted(skips & UNCOVERED_SKIP_REASONS)}"
+    )
+    assert skips == known - UNCOVERED_SKIP_REASONS, (
+        "골든이 못 만드는 Skip 사유가 있다: "
+        f"{sorted(known - UNCOVERED_SKIP_REASONS - skips)}"
     )
 
     # 한 분기에 표본이 몰려 화면이 단조로워지지 않는지 — 분포도 함께 남긴다

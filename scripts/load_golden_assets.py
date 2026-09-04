@@ -22,31 +22,37 @@
 #   (`apps/web/src/lib/api/client.ts`).
 #
 # 안전 가드: 기본적으로 **로컬 DB에만** 적재한다. `DATABASE_URL`의 호스트가
-#   localhost/127.0.0.1이 아니면 즉시 종료하며, `--force`로만 넘길 수 있다.
+#   `localhost`·`127.0.0.1`·`db`(compose 서비스명)가 아니면 즉시 종료하며, `--force`
+#   로만 넘길 수 있다. `_is_local`의 집합에는 `::1`도 있지만 호스트 파싱이 `:`로 먼저
+#   자르므로 IPv6 대괄호 표기(`[::1]`)는 실제로는 걸러진다 — **틀릴 때 닫히는 쪽으로
+#   틀리는** 가드다(자격증명 없는 원격 URL도 같은 이유로 거부된다).
 #
-# 멱등성: 자산은 ARN 기준 upsert라 다시 돌려도 16건 그대로다. 다만 실행마다
-#   CollectionRun 3건과 판정 16건이 **누적**된다 — 화면은 리전별 최신 run과 자산별
-#   최신 판정만 보므로 응답은 같다. 실측: 2회 실행 후 assets 16 · runs 6 · 판정 32.
+# 멱등성: 자산은 ARN 기준 upsert라 다시 돌려도 자산 수가 늘지 않는다. 다만 실행마다
+#   CollectionRun과 판정이 **누적**된다 — 화면은 리전별 최신 run과 자산별 최신 판정만
+#   보므로 응답은 같다.
 #
 # 이 스크립트의 run 모양을 수집 계약으로 읽지 말 것 (PR #263 리뷰 반영):
-#   `persist_inventory`가 **인벤토리 1건마다 CollectionRun 1건**을 연다. 골든 3파일이
-#   전부 같은 리전(ap-northeast-2)이라 **한 리전에 run 3건**이 생긴다 — 프로덕션 수집은
-#   `collector.collect_region`이 **리전당 1회 1건**을 연다. 응답이 같아 보이는 것은
-#   조회단이 리전별 **최신 run**만 접기 때문이고(`routers/assets.py`의
+#   `persist_inventory`가 **인벤토리 1건마다 CollectionRun 1건**을 연다. 골든 입력이
+#   전부 같은 리전(ap-northeast-2)이라 **한 리전에 파일 수만큼 run**이 생긴다 —
+#   프로덕션 수집은 `collector.collect_region`이 **리전당 1회 1건**을 연다. 응답이
+#   같아 보이는 것은 조회단이 리전별 **최신 run**만 접기 때문이고(`routers/assets.py`의
 #   `latest_collection_run_per_region`, #231 / #259), run 테이블의 모양은 다르다.
 #   여기서 본 run 개수를 수집 계약으로 오해하면 안 된다.
 #
-# 적재되는 것 (2026-09-02 실측):
-#   자산 16건 (EC2 12 · SG 4) · 판정 16건
-#   verdict 4종 전부(COST_CANDIDATE 6 · SKIP 8 · THREAT 1 · UNUSED 1)
-#   Skip 사유 5종 전부(ACTIVE 2 · LOW_UTIL 1 · INSUFFICIENT_DATA 1 ·
-#                      PROD_PROTECTED 3 · WHITELISTED 1)
-#   → 자산 화면의 배지·사유 분기를 전부 눌러 볼 수 있다. mock 22건과 달리
-#     이 값들은 `tests/test_golden_dataset.py`가 지키는 정답지에서 나온다.
+# 적재 건수·판정 분포는 여기 적지 않는다:
+#   골든이 한 건만 늘어도 낡고, 이 헤더의 어떤 설명도 그 숫자에 기대지 않는다. 실제
+#   값은 `--verify` 출력이 원천이다(같은 표가 PR #266 → #275 원복 → #280 재착륙으로
+#   세 번 낡았다). 남기는 것은 분포가 아니라 **커버리지**다.
 #
-# 담지 못하는 것: 골든 FinOps 입력에는 NACL·EBS·Launch Template·ASG·ALB Target
-#   Group이 없다(자산 유형 2/7종). 토폴로지 뷰가 요구하는 자산 5종은 여전히
-#   mock이 필요하다.
+#   골든이 채우는 분기 — `verdict` 4종 전부 · `skip_reason_code` 6종 중 5종
+#   (`SKIP_UNSUPPORTED_STATE`만 비어 있다 — EBS 전이·비정상·미상, #276의 정답지
+#   편입 대기). 이 문장은 `apps/core-api/tests/test_golden_assets_api.py`가 CI에서
+#   강제하므로 손으로 맞출 필요가 없다. mock과 달리 값의 출처가
+#   `tests/test_golden_dataset.py`가 지키는 정답지다.
+#
+# 담지 못하는 것: 골든 FinOps 입력에는 NACL·Launch Template·ASG·ALB Target Group이
+#   없다(자산 유형 EC2·SG·EBS 3종 / 계약 7종). 토폴로지 뷰가 요구하는 나머지 자산
+#   4종은 여전히 mock이 필요하다.
 # ==============================================================================
 
 from __future__ import annotations
