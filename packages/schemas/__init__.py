@@ -50,6 +50,7 @@ from .events import (
 )
 from .evidence import (
     EVIDENCE_CONTENT_MODELS,
+    DetectionAssetSnapshot,
     EvidenceContent,
     EvidenceItem,
     EvidenceType,
@@ -85,7 +86,6 @@ from .incidents import AGENT_TERMINAL_STATUSES, AgentInvocationStatus, AgentWait
 from .intake import (
     INCIDENT_INTAKE_ADAPTER,
     INCIDENT_TRIGGERING_VERDICTS,
-    DetectionAssetSnapshot,
     FinOpsIncidentIntake,
     IncidentIntake,
     SecOpsIncidentIntake,

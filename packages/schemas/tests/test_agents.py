@@ -128,6 +128,52 @@ def test_capability_and_draft_reject_rollback(runbook_id):
         })
 
 
+RULE_EVIDENCE = {
+    "evidence_id": "ev-rule-001",
+    "evidence_type": "RULE",
+    "content": {"evaluation": RULE_RESULT},
+}
+
+
+def test_rule_evidence_matching_top_level_valid():
+    graph_input = FinOpsGraphInput.model_validate(
+        make_finops_input(evidences=[RULE_EVIDENCE])
+    )
+    assert graph_input.evidences[0].content.evaluation == graph_input.rule_evaluation
+
+
+def test_rule_evidence_mismatch_rejected():
+    """어긋나면 ai/agent.py의 중복 제거가 빗나가 같은 판정이 두 번 실린다 — 조용히."""
+    with pytest.raises(ValidationError):
+        FinOpsGraphInput.model_validate(make_finops_input(evidences=[
+            dict(RULE_EVIDENCE, content={"evaluation": dict(RULE_RESULT, health_score=4)}),
+        ]))
+
+
+def test_two_rule_evidences_rejected():
+    """최상위가 어느 쪽을 비추는지 정할 근거가 없다."""
+    with pytest.raises(ValidationError):
+        FinOpsGraphInput.model_validate(make_finops_input(evidences=[
+            RULE_EVIDENCE,
+            dict(RULE_EVIDENCE, evidence_id="ev-rule-002"),
+        ]))
+
+
+def test_no_rule_evidence_valid():
+    # 근거가 없으면 대조할 것이 없다 — 최상위만 실린다
+    assert FinOpsGraphInput.model_validate(make_finops_input(evidences=[])).evidences == []
+
+
+def test_asset_evidence_rejected_in_graph_input():
+    """자산은 asset_context로 들어간다 — 근거로도 실으면 같은 값이 두 번 간다."""
+    with pytest.raises(ValidationError):
+        FinOpsGraphInput.model_validate(make_finops_input(evidences=[{
+            "evidence_id": "ev-asset-001",
+            "evidence_type": "ASSET",
+            "content": {"collection_run_id": "run-20260814-001", "asset": ASSET_CONTEXT},
+        }]))
+
+
 def test_capabilities_reject_duplicates():
     with pytest.raises(ValidationError):
         FinOpsGraphInput.model_validate(
