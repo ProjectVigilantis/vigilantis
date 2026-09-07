@@ -5,7 +5,10 @@
 # 고정 입력 세트(Golden Dataset FinOps의 낭비 후보)를 같은 값으로 N회 넣어, 한 조합
 # (모델 + 파라미터)의 지표를 표 한 줄로 낸다.
 #   FAILED(계약 위반 · 호출 실패) · NO_PROPOSAL · 사실 정합성 실패 · 필드별 일치율 ·
-#   토큰(캐시분 포함) · 추정 비용 · 응답이 밝힌 모델 스냅샷
+#   되읽기 줄 수 · 첫 줄 근거 인용(#243) · 토큰(캐시분 포함) · 추정 비용 · 모델 스냅샷
+#
+# 요약 문장의 복원 대조와 결함 판정(LLM 판정자)은 여기가 아니라 scripts/finops_judge.py가
+# 한다 — 이 스크립트의 --json 원자료를 입력으로 받는다.
 #
 # 조합은 **환경변수로 바꾼다** — OPENAI_MODEL·OPENAI_TEMPERATURE·OPENAI_REASONING_EFFORT.
 # 코드를 고치지 않고 같은 경로로 여러 조합을 재기 위한 것이며, 모델 계열마다 받는
@@ -50,13 +53,22 @@ for path in (REPO_ROOT / "apps" / "core-api", REPO_ROOT / "packages"):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from ai.agent import _incident_payload, run_finops_graph  # noqa: E402
+from ai.agent import (  # noqa: E402
+    PROMPT_VERSION,
+    _incident_payload,
+    _summary_payload,
+    prompt_fingerprint,
+    run_finops_graph,
+)
 from ai.evaluation import (  # noqa: E402
     CaseRun,
     EvalCase,
     build_column_report,
+    check_readback,
     check_summary_facts,
     finops_cases,
+    input_fingerprint,
+    observation_cites_input,
 )
 from ai.model_client import AIModelError, AIModelRequest, AIModelResponse  # noqa: E402
 from ai.openai_client import build_openai_model_client  # noqa: E402
@@ -64,6 +76,10 @@ from config import Settings  # noqa: E402
 from schemas.assets import AssetInventory  # noqa: E402
 
 GOLDEN = REPO_ROOT / "datasets" / "golden" / "finops"
+SNAPSHOT = REPO_ROOT / "apps" / "core-api" / "ai" / "evaluation" / "summary_prompt_snapshot.json"
+# 골든 파일을 손으로 고른다 — 고정 세트는 스냅샷 fixed_set에 파일 목록으로 박혀 있어, 파일이 늘 때
+# 조용히 넓어지지 않고 사람이 여기와 스냅샷에 추가한 뒤 기준선을 다시 잰다(docs/AI_SUMMARY_BASELINE.md).
+# 004는 EBS 전용이라 finops_cases가 케이스 0건을 내므로 제외.
 INVENTORY_IDS = ("001", "002", "003")
 
 
@@ -135,6 +151,39 @@ def load_cases() -> list[EvalCase]:
     return cases
 
 
+def _fixed_set(cases: list[EvalCase]) -> dict[str, object]:
+    """스냅샷에 옮겨 적을 고정 입력 세트 — 파일 목록·케이스 ID·입력 지문. --case 필터 전의
+    전체 세트로 만든다(스냅샷은 세트 전체와 대조한다)."""
+    return {
+        "inventory_ids": list(INVENTORY_IDS),
+        "case_ids": [case.case_id for case in cases],
+        "input_sha256": input_fingerprint(cases),
+    }
+
+
+def _fixed_set_drift(fixed_set: dict[str, object]) -> list[str]:
+    """스냅샷의 고정 세트와 다르면 알린다 — 막지는 않는다.
+
+    골든이 바뀌는 것은 골든 담당의 일이라 CI로 막지 않는다. 대신 여기서 알려, 다음 재통과 때
+    이전 판을 새 세트에서 다시 만들어 짝을 맞추게 한다(docs/AI_SUMMARY_BASELINE.md §기준선).
+    """
+    snapshot = json.loads(SNAPSHOT.read_text("utf-8"))
+    approved = snapshot.get("fixed_set")
+    if not approved:
+        return []
+    lines: list[str] = []
+    if approved["case_ids"] != fixed_set["case_ids"]:
+        lines.append(
+            f"고정 세트     스냅샷({snapshot['version']})과 케이스가 다름 — "
+            f"스냅샷 {', '.join(approved['case_ids'])} / 지금 {', '.join(fixed_set['case_ids'])}"
+        )
+    elif approved["input_sha256"] != fixed_set["input_sha256"]:
+        lines.append(f"고정 세트     스냅샷({snapshot['version']})과 입력 지문이 다름 — 케이스는 같고 입력 값이 바뀜")
+    if lines:
+        lines.append("              이 원자료는 스냅샷의 이전 판과 짝이 안 된다 — 이전 판을 이 세트에서 다시 만든 뒤 판정한다")
+    return lines
+
+
 def _label(settings: Settings) -> str:
     knobs = []
     if settings.OPENAI_TEMPERATURE is not None:
@@ -152,7 +201,7 @@ def _estimate(cases: list[EvalCase], repeats: int) -> None:
     """
     total_chars = 0
     for case in cases:
-        payload = _incident_payload(case.graph_input)
+        payload = _summary_payload(case.graph_input)
         total_chars += len(json.dumps(payload, ensure_ascii=False, sort_keys=True))
     print(f"케이스 {len(cases)}건 × 반복 {repeats}회 = 실행 {len(cases) * repeats}회")
     print(f"모델 호출 {len(cases) * repeats * 2}회 (요약 1 + 후보 1)")
@@ -189,6 +238,12 @@ def run(
                     cached_prompt_tokens=client.cached_prompt_tokens,
                     error=client.last_error,
                     error_phase=client.last_error_phase,
+                    readback=check_readback(payload, output) if output.summary_lines else None,
+                    observation_cites_input=(
+                        observation_cites_input(payload, output.summary_lines)
+                        if output.summary_lines
+                        else None
+                    ),
                 )
             )
             print(
@@ -221,6 +276,9 @@ def main() -> int:
         return 1
 
     cases = load_cases()
+    fixed_set = _fixed_set(cases)
+    for line in _fixed_set_drift(fixed_set):
+        print(line)
     if args.cases:
         known = {case.case_id for case in cases}
         unknown = set(args.cases) - known
@@ -232,8 +290,14 @@ def main() -> int:
             )
             return 1
         cases = [case for case in cases if case.case_id in set(args.cases)]
+    # 모델 입력의 rule_evaluation 중복 제거는 완전 일치 조건이라 조용히 꺼질 수 있다(#243
+    # §선행 계측의 한계). 프롬프트를 변수로 두는 동안 페이로드가 같았다는 것을 여기서 남긴다
+    dedup_active = {
+        case.case_id: "rule_evaluation" not in _incident_payload(case.graph_input) for case in cases
+    }
     if args.estimate:
         _estimate(cases, args.repeats)
+        print(f"중복 제거 활성 {sum(dedup_active.values())}/{len(dedup_active)} 케이스")
         return 0
 
     # DB를 쓰지 않지만 Settings가 DATABASE_URL을 필수로 받는다. 자리값을 넘겨
@@ -267,8 +331,19 @@ def main() -> int:
     print(f"NO_PROPOSAL   {report.no_proposal}  ({report.no_proposal_rate:.1%})")
     print(f"사실 정합성    실패 {report.fact_failed} / 판정 {report.fact_checked}")
     print(
+        f"되읽기        줄 {report.readback_lines} / {report.fact_checked * 3}"
+        f" · 회차 {report.readback_runs} / {report.fact_checked}"
+    )
+    print(f"근거 인용     첫 줄에 입력값 {report.observation_cited} / {report.fact_checked}")
+    print(f"중복 제거     활성 {sum(dedup_active.values())}/{len(dedup_active)} 케이스")
+    print(
         f"필드 안정도    {report.stable_slots}/{report.field_slots}"
-        f"  ({report.field_stability:.1%})"
+        + (
+            f"  ({report.field_stability:.1%} · 유효 2회 이상 {report.stability_cases}"
+            f"/{report.case_count}케이스)"
+            if report.field_slots
+            else "  (유효 출력 2회 이상인 케이스 없음 — 일치율 없음)"
+        )
     )
     print(f"흔들린 필드   {', '.join(report.unstable_field_names) or '없음'}")
     print(
@@ -314,6 +389,7 @@ def main() -> int:
         f"| {label} | {report.failed_contract} | {report.failed_transport} | {report.no_proposal} |"
         f" {report.fact_checked - report.fact_failed}/{report.fact_checked} |"
         f" {report.field_stability:.0%} |"
+        f" {report.readback_lines}/{report.fact_checked * 3} |"
         f" {report.prompt_tokens + report.completion_tokens:,} |"
         f" {f'${cost:.3f}' if cost is not None else '—'} |"
     )
@@ -324,8 +400,12 @@ def main() -> int:
             json.dumps(
                 {
                     "label": label,
+                    "prompt_version": PROMPT_VERSION,
+                    "prompt_sha256": prompt_fingerprint(),
                     "model_snapshots": sorted(client.model_snapshots),
                     "repeats": report.repeats,
+                    "payload_dedup_active": dedup_active,
+                    "fixed_set": fixed_set,
                     "runs": [
                         {
                             "case_id": run_.case_id,
@@ -346,6 +426,12 @@ def main() -> int:
                                 run_.fact.instance_types_outside_input
                             ),
                             "derived_numbers": list(run_.fact.derived_numbers),
+                            "readback_hits": (
+                                [list(line) for line in run_.readback.hits]
+                                if run_.readback
+                                else None
+                            ),
+                            "observation_cites_input": run_.observation_cites_input,
                         }
                         for run_ in runs
                     ],

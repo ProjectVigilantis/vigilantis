@@ -29,6 +29,7 @@ from schemas.api.assets import (
 )
 from schemas.collections import CollectionRunStatus
 
+from config import get_aws_settings
 from db import models
 from db.repositories import assets as assets_repo
 from db.session import get_db
@@ -56,6 +57,40 @@ _STATUS_SEVERITY = {
 def _worst_status(runs: list[models.CollectionRun]) -> CollectionRunStatus:
     """리전별 최신 run 들 중 가장 나쁜 상태. 빈 목록은 호출 전에 걸러야 한다."""
     return max((run.status for run in runs), key=_STATUS_SEVERITY.__getitem__)
+
+
+def _configured_regions() -> list[str]:
+    """관제 대상 리전 = 설정된 리전(AWS_REGIONS, 없으면 AWS_REGION). (#261)
+
+    collection_status·items·last_collected_at 을 이 범위로 함께 좁혀 응답 안에서
+    리전 범위가 갈리지 않게 한다. (테스트는 이 함수를 monkeypatch 로 대체한다)
+    """
+    regions = get_aws_settings().regions_list()
+    if not regions:
+        # 관제 범위가 비면 세 필드가 빈 스코프가 되어 조용히 NOT_COLLECTED 가 된다 —
+        # "아직 수집 안 함"과 "설정 오류"가 화면에서 구분되지 않는다. 같은 오설정에서
+        # services/aws/client.default_region() 은 소리내어 죽으므로 여기서도 같은 결로 실패한다.
+        raise RuntimeError("리전 해석 실패 — AWS_REGION / AWS_REGIONS 값을 확인할 것")
+    return regions
+
+
+def _collection_status(
+    runs: list[models.CollectionRun], regions: list[str]
+) -> CollectionStatus:
+    """설정 리전 스코프 안에서 collection_status 산출. (#261)
+
+    설정 리전 중 아직 run 이 없는 리전이 있으면(최초 수집 대기·수집 중 모두 해당)
+    '전체 관제 범위 수집 미완료'로 보아 COLLECTING 을 하한으로 깐다 — 기존 리전의
+    SUCCESS 만으로 READY 를 주지 않는다. 단 IN_PROGRESS 는 심각도상 PARTIAL·FAILED
+    아래라, 다른 리전의 실제 실패는 그대로 드러난다(안성일 확정).
+    """
+    worst = _worst_status(runs)
+    covered = {run.region for run in runs}
+    if not set(regions) <= covered:  # 아직 run 이 없는 설정 리전이 있음
+        worst = max(
+            worst, CollectionRunStatus.IN_PROGRESS, key=_STATUS_SEVERITY.__getitem__
+        )
+    return _COLLECTION_STATUS[worst]
 
 
 def _to_item(
@@ -113,11 +148,14 @@ def _to_item(
 
 @router.get("/assets", response_model=AssetsResponse)
 def get_assets(db: Session = Depends(get_db)) -> AssetsResponse:
-    # 전역 최신 1행이 아니라 리전별 최신 run 을 모아 최악 상태로 접는다 — 리전 격리(C4)
-    # 이후 FAILED → SUCCESS 순서면 실패가 가려졌다. (Issue #231)
-    runs = assets_repo.latest_collection_run_per_region(db)
+    # 관제 대상 = 설정된 리전(AWS_REGIONS). 세 필드를 모두 이 범위로 좁혀 응답 안에서
+    # 리전 범위가 갈리지 않게 한다 — 수집 대상서 빠진 리전의 옛 run 이 화면을 붙잡던
+    # 문제를 막는다. (Issue #261, 안성일 확정) 리전별 최신 run 을 최악 상태로 접는
+    # 것은 #231 그대로 — 리전 격리(C4) 이후 실패가 실행 순서에 가려지지 않게 한다.
+    regions = _configured_regions()
+    runs = assets_repo.latest_collection_run_per_region(db, regions=regions)
     if not runs:
-        # 수집 이력이 전혀 없음 — 계약상 목록·last_collected_at도 비어 있어야 한다
+        # 설정 리전 전체에 수집 이력이 없음 — 계약상 목록·last_collected_at도 비어야 한다
         return AssetsResponse(collection_status=CollectionStatus.NOT_COLLECTED)
 
     relationships: dict[str, list[models.AssetRelationship]] = defaultdict(list)
@@ -127,10 +165,10 @@ def get_assets(db: Session = Depends(get_db)) -> AssetsResponse:
 
     items = [
         _to_item(asset, relationships.get(asset.asset_id, []), evaluations.get(asset.asset_id))
-        for asset in assets_repo.list_assets(db)
+        for asset in assets_repo.list_assets(db, regions=regions)
     ]
     return AssetsResponse(
-        collection_status=_COLLECTION_STATUS[_worst_status(runs)],
-        last_collected_at=assets_repo.last_finished_collection_at(db),
+        collection_status=_collection_status(runs, regions),
+        last_collected_at=assets_repo.last_finished_collection_at(db, regions=regions),
         items=items,
     )

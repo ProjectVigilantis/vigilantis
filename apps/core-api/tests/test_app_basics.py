@@ -78,10 +78,12 @@ def test_cors_preflight_allows_fe_dev_origin(client):
     assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
 
 
-def test_lifespan_starts_and_stops_both_schedulers(monkeypatch):
+def test_lifespan_starts_and_stops_all_schedulers(monkeypatch):
     """lifespan 배선 자체를 여기서만 고정한다 — conftest가 두 게이트(SCAN/DISPATCH_ENABLED)를
-    끄므로 다른 테스트는 이 두 줄을 지나가도 아무것도 확인하지 못한다(이 PR이 고친 결함이 그
+    끄므로 다른 테스트는 이 세 줄을 지나가도 아무것도 확인하지 못한다(이 PR이 고친 결함이 그
     종류다: 배선이 빠진 줄 아무도 몰랐다). fake 스케줄러로 기동·종료를 직접 고정한다(#287 리뷰: 김세혁).
+    스케줄러 셋(스캔·실행 디스패치·AI 디스패치)을 모두 고정한다 — 하나만 지워도 같은 종류의
+    공백이 남으므로.
     """
     from fastapi.testclient import TestClient
 
@@ -105,10 +107,15 @@ def test_lifespan_starts_and_stops_both_schedulers(monkeypatch):
         started.append("dispatch")
         return FakeScheduler("dispatch")
 
+    def fake_agent(_publish):
+        started.append("agent")
+        return FakeScheduler("agent")
+
     monkeypatch.setattr(main_module, "start_scan_scheduler", fake_scan)
     monkeypatch.setattr(main_module.dispatcher, "start_dispatcher", fake_dispatch)
+    monkeypatch.setattr(main_module.agent_dispatcher, "start_agent_dispatcher", fake_agent)
 
     with TestClient(main_module.create_app()) as test_client:
-        assert set(started) == {"scan", "dispatch"}  # 배선이 둘 다 기동
+        assert set(started) == {"scan", "dispatch", "agent"}  # 배선이 셋 다 기동
         assert test_client.get("/health").status_code == 200
-    assert set(stopped) == {"scan", "dispatch"}  # 종료 시 둘 다 정리
+    assert set(stopped) == {"scan", "dispatch", "agent"}  # 종료 시 셋 다 정리

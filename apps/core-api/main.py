@@ -5,9 +5,10 @@
 #   - 오류는 exceptions의 공통 봉투로, 접근 로그는 request_context 미들웨어가
 #     구조화 로그(logging_config)로 남긴다.
 #   - 실시간 전송(realtime.RealtimeManager)은 앱 수명주기에 묶어 기동·종료한다.
-#   - 접수된 조치 실행 디스패치·회수 스캔(dispatcher)도 같은 수명주기에 묶는다.
-#     실시간 전송보다 늦게 열고 먼저 닫는다 (Issue #232).
-#   - Scheduler(주기 수집) 기동은 수집·판정 연결 작업(#67)에서 연결한다.
+#   - 스케줄러 셋을 같은 수명주기에 묶는다. 실시간 전송보다 늦게 열고 먼저 닫는다.
+#     수집→판정 스캔(services.scheduler)은 SCAN_ENABLED로, 접수된 조치 실행 디스패치·
+#     회수 스캔(dispatcher)과 AI 분석 대기 스캔(agent_dispatcher)은 DISPATCH_ENABLED를
+#     공유해 켜고 끈다 (Issue #232·#277·#285).
 # ==============================================================================
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import re
 import sys
 import time
 import uuid
+from functools import partial
 from pathlib import Path
 
 # import 경로 부트스트랩 — 다른 진입점(db/migrations/env.py·tests·시드 스크립트)과
@@ -33,16 +35,17 @@ from contextlib import asynccontextmanager  # noqa: E402
 from fastapi import FastAPI, Request  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
+import agent_dispatcher  # noqa: E402
 import dispatcher  # noqa: E402
 from config import get_settings  # noqa: E402
 from exceptions import register_error_handlers, unexpected_error_response  # noqa: E402
 from logging_config import request_id_var, setup_logging  # noqa: E402
 from realtime import RealtimeManager  # noqa: E402
-from services.scheduler import start_scheduler as start_scan_scheduler  # noqa: E402
 from routers import actions as actions_router  # noqa: E402
 from routers import assets as assets_router  # noqa: E402
 from routers import incidents as incidents_router  # noqa: E402
 from routers import ws as ws_router  # noqa: E402
+from services.scheduler import start_scheduler as start_scan_scheduler  # noqa: E402
 
 _http_logger = logging.getLogger("vigilantis.http")
 
@@ -64,18 +67,27 @@ def create_app() -> FastAPI:
         # 스레드풀에 이미 넘어간 잡을 취소하지 못한다. 그 스캔의 발행이 전송 종료
         # 뒤에 오면 publish_dropped_at_shutdown 경고로 버려진다(realtime.py 규약)
         await realtime.start()
-        scan_scheduler = None
-        dispatch_scheduler = None
-        try:
+        # 기동에 성공한 것만 그때그때 모은다 — 뒤쪽 기동이 던져도 앞서 뜬 스케줄러가
+        # finally 에서 내려간다. 리스트 컴프리헨션은 도중에 던지면 결과가 통째로
+        # 유실돼 이미 기동한 스케줄러를 아무도 못 내린다.
+        schedulers = []
+        starts = (
             # 수집→판정 스캔 파이프라인(collector→rule_engine). 실데이터 시연의 최상류.
-            scan_scheduler = start_scan_scheduler()
+            start_scan_scheduler,
             # 접수된 조치 실행 디스패치·회수 스캔.
-            dispatch_scheduler = dispatcher.start_dispatcher(realtime.publish)
+            partial(dispatcher.start_dispatcher, realtime.publish),
+            # AI 분석 대기 Incident 스캔·회수.
+            partial(agent_dispatcher.start_agent_dispatcher, realtime.publish),
+        )
+        try:
+            for start in starts:
+                started = start()
+                if started is not None:
+                    schedulers.append(started)
             yield
         finally:
-            for sched in (dispatch_scheduler, scan_scheduler):
-                if sched is not None:
-                    sched.shutdown(wait=False)
+            for scheduler in reversed(schedulers):
+                scheduler.shutdown(wait=False)
             await realtime.stop()
 
     app = FastAPI(title="Vigilantis Core API", lifespan=lifespan)

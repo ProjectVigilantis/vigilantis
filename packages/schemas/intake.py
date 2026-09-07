@@ -6,8 +6,10 @@
 #
 # 계약 원칙
 #   - **한 시점에서 나온 값만 묶는다.** FinOps Intake는 판정(RuleEvaluationResult)과
-#     그 판정이 내려진 회차의 자산 스냅샷을 함께 받고, 둘이 같은 collection_run_id에서
-#     나왔는지 계약이 확인한다. 자산 행은 수집 회차마다 최신 관측으로 덮어쓰지만
+#     그 판정이 내려진 회차의 자산 스냅샷(DetectionAssetSnapshot)을 함께 받고, 둘이 같은
+#     collection_run_id에서 나왔는지 계약이 확인한다. 스냅샷 정의가 evidence.py에 있는
+#     것은 생성 Workflow가 그 값을 ASSET 근거로 그대로 보존하기 때문이다.
+#     자산 행은 수집 회차마다 최신 관측으로 덮어쓰지만
 #     (db/repositories/assets.py upsert_asset) 판정은 회차 단위로 보존되므로
 #     (db/models.py RuleEvaluation의 asset_id·collection_run_id 유니크), 스냅샷을 빼면
 #     나중에 자산을 다시 읽는 쪽이 **예전 판정 + 최신 자산**을 한 시점인 양 조립하게
@@ -48,9 +50,10 @@ from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
-from .api.assets import AssetItem, Verdict
+from .api.assets import Verdict
 from .api.incidents import IncidentCategory
 from .events import InitialRiskEvaluationResult, NormalizedThreatEvent
+from .evidence import DetectionAssetSnapshot
 from .rules import RuleEvaluationResult
 
 # 자산 판정 4종 중 Incident가 되는 2종. THREAT·SKIP이 빠진 이유는 파일 헤더에 있다.
@@ -64,24 +67,6 @@ INCIDENT_TRIGGERING_VERDICTS: frozenset[Verdict] = frozenset(
 
 def _as_utc(v: datetime) -> datetime:
     return v.replace(tzinfo=timezone.utc) if v.tzinfo is None else v
-
-
-class DetectionAssetSnapshot(BaseModel):
-    """판정이 내려진 그 회차의 자산 상태.
-
-    자산 표현은 공개 AssetItem을 그대로 쓴다 — 대상 ARN·유형·상태·Spec·관계를 이미
-    담고 있고 spec↔asset_type 정합도 그쪽 계약이 강제한다(그래프 입력의 자산 문맥과
-    같은 타입 — schemas/agents.py AgentAssetContext, #49 확정).
-
-    collection_run_id를 따로 받는 것은 공개 AssetItem이 그 값을 담지 않기 때문이다
-    (FE 계약이라 여기 필요한 필드를 늘리지 않는다). 자산 행의 last_collection_run_id에서
-    채우며, 판정의 collection_run_id와 대조하는 것이 이 필드의 유일한 쓸모다.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    collection_run_id: str = Field(min_length=1)
-    asset: AssetItem
 
 
 class FinOpsIncidentIntake(BaseModel):

@@ -16,11 +16,8 @@ import uuid
 import pytest
 
 from schemas.api.incidents import (
-    IncidentCategory,
     IncidentStatus,
     ResolutionJudgement,
-    ResponseMode,
-    RiskLevel,
 )
 from schemas.api.actions import ExecutionStatus
 from schemas.candidates import CandidateStatus
@@ -31,52 +28,28 @@ from db import models
 SUBJECT_EC2 = "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0aaa"
 
 
-def _seed_incident(
-    db, status: IncidentStatus = IncidentStatus.AWAITING_APPROVAL
-) -> models.Incident:
-    incident = models.Incident(
-        subject_arn=SUBJECT_EC2,
-        category=IncidentCategory.SECOPS,
-        status=status,
-        title="SSH 브루트포스 탐지",
-        initial_risk_level=RiskLevel.MEDIUM,
-        response_mode=ResponseMode.AGENT_WAIT,
-        initial_risk_reason_codes=["SSH_BRUTE_FORCE"],
-        summary_lines=["요약 1", "요약 2", "요약 3"],
-    )
-    db.add(incident)
-    db.flush()
-    return incident
+@pytest.fixture()
+def seeded_incident(db, make_incident, seed_summary_lines):
+    """이 파일의 인시던트는 요약 3줄을 갖는다.
 
+    종료 판단 응답이 인시던트 상세를 돌려주고, 상세 계약이 `summary_lines`를
+    **상태별로** 따지기 때문이다(`packages/schemas/api/incidents.py` — ANALYZING이면
+    빈 배열이어야 한다). 모양이 아니라 이 파일의 선택이라 인자 하나만 얹는다.
+    """
 
-def _add_candidate(
-    db, incident: models.Incident, status: CandidateStatus = CandidateStatus.EXECUTABLE
-) -> models.RunbookCandidate:
-    candidate = models.RunbookCandidate(
-        incident_id=incident.incident_id,
-        runbook_id=RunbookId.RUNBOOK_NACL_ADD_DENY,
-        target_arn=SUBJECT_EC2,
-        parameters={
-            "rule_number": 100, "cidr_block": "203.0.113.5/32", "protocol": "-1",
-        },
-        display_parameters={
-            "rule_number": "100", "cidr_block": "203.0.113.5/32", "protocol": "-1",
-        },
-        evidence_ids=["ev-1"],
-        status=status,
-    )
-    db.add(candidate)
-    db.flush()
-    return candidate
+    def _make(status: IncidentStatus = IncidentStatus.AWAITING_APPROVAL):
+        return make_incident(db, status=status, summary_lines=seed_summary_lines)
+
+    return _make
 
 
 def _url(incident: models.Incident) -> str:
     return f"/api/v1/incidents/{incident.incident_id}/resolve"
 
 
-def test_resolve_stores_judgement_and_invalidates_remaining_proposals(client_pg, db):
-    incident = _seed_incident(db)
-    candidate = _add_candidate(db, incident)
+def test_resolve_stores_judgement_and_invalidates_remaining_proposals(client_pg, db, seeded_incident, make_candidate):
+    incident = seeded_incident()
+    candidate = make_candidate(db, incident)
 
     response = client_pg.post(_url(incident), json={"resolution": "JUSTIFIED"})
 
@@ -92,10 +65,10 @@ def test_resolve_stores_judgement_and_invalidates_remaining_proposals(client_pg,
     assert candidate.status is CandidateStatus.INVALIDATED
 
 
-def test_detail_and_list_after_resolve_still_serve_200(client_pg, db):
+def test_detail_and_list_after_resolve_still_serve_200(client_pg, db, seeded_incident, make_candidate):
     """종료가 만든 상태를 읽는 쪽 계약 회귀 — 잔여 제안이 남으면 여기서 500이 된다."""
-    incident = _seed_incident(db)
-    _add_candidate(db, incident)
+    incident = seeded_incident()
+    make_candidate(db, incident)
     client_pg.post(_url(incident), json={"resolution": "JUSTIFIED"})
 
     detail = client_pg.get(f"/api/v1/incidents/{incident.incident_id}")
@@ -110,10 +83,10 @@ def test_detail_and_list_after_resolve_still_serve_200(client_pg, db):
     assert "resolution" not in items[0]
 
 
-def test_resolve_twice_keeps_the_first_resolved_at(client_pg, db):
+def test_resolve_twice_keeps_the_first_resolved_at(client_pg, db, seeded_incident, make_candidate):
     """Idempotency Key 없이 재요청이 안전한 지점 — 조건부 UPDATE라 두 번째 요청은
     아무것도 바꾸지 않고, 종료 시각도 처음 찍힌 값이 남는다."""
-    incident = _seed_incident(db)
+    incident = seeded_incident()
     first = client_pg.post(_url(incident), json={"resolution": "JUSTIFIED"})
     resolved_at = first.json()["resolved_at"]
 
@@ -124,9 +97,9 @@ def test_resolve_twice_keeps_the_first_resolved_at(client_pg, db):
     assert again.json()["resolved_at"] == resolved_at
 
 
-def test_resolve_allows_failed_incident(client_pg, db):
+def test_resolve_allows_failed_incident(client_pg, db, seeded_incident, make_candidate):
     """흐름이 멈춘 건에도 정당성 판단은 남겨야 한다."""
-    incident = _seed_incident(db, IncidentStatus.FAILED)
+    incident = seeded_incident(IncidentStatus.FAILED)
 
     response = client_pg.post(_url(incident), json={"resolution": "JUSTIFIED"})
 
@@ -138,11 +111,11 @@ def test_resolve_allows_failed_incident(client_pg, db):
     "status", [IncidentStatus.ACTION_IN_PROGRESS, IncidentStatus.ANALYZING]
 )
 def test_resolve_rejects_statuses_that_would_break_the_contract(
-    client_pg, db, status
+    client_pg, db, seeded_incident, status
 ):
     """ACTION_IN_PROGRESS는 RESOLVED에 진행 중 실행이 없어야 한다는 계약 때문에,
     ANALYZING은 분석이 끝나며 제안이 붙어 종료가 뒤집히기 때문에 거절한다."""
-    incident = _seed_incident(db, status)
+    incident = seeded_incident(status)
 
     response = client_pg.post(_url(incident), json={"resolution": "JUSTIFIED"})
 
@@ -168,8 +141,8 @@ def test_resolve_unknown_or_malformed_id_returns_404(client_pg, path_id):
 @pytest.mark.parametrize(
     "payload", [{"resolution": "MAYBE"}, {}, {"resolution": "JUSTIFIED", "note": "x"}]
 )
-def test_resolve_rejects_payloads_outside_the_contract(client_pg, db, payload):
-    incident = _seed_incident(db)
+def test_resolve_rejects_payloads_outside_the_contract(client_pg, db, seeded_incident, payload):
+    incident = seeded_incident()
 
     response = client_pg.post(_url(incident), json=payload)
 
@@ -177,10 +150,10 @@ def test_resolve_rejects_payloads_outside_the_contract(client_pg, db, payload):
     assert response.json()["error"]["code"] == "REQUEST_VALIDATION_FAILED"
 
 
-def test_resolve_publishes_incident_updated_once(client_pg, db, monkeypatch):
+def test_resolve_publishes_incident_updated_once(client_pg, db, seeded_incident, monkeypatch):
     """서버가 INCIDENT_UPDATED를 실제로 내보내는 첫 지점이다(#73 발행 장치 이후).
     재요청은 상태가 그대로라 발행하지 않는다."""
-    incident = _seed_incident(db)
+    incident = seeded_incident()
     published: list = []
     monkeypatch.setattr(
         client_pg.app.state.realtime, "publish", published.append
@@ -196,8 +169,8 @@ def test_resolve_publishes_incident_updated_once(client_pg, db, monkeypatch):
     assert len(published) == 1
 
 
-def test_resolve_rejected_status_publishes_nothing(client_pg, db, monkeypatch):
-    incident = _seed_incident(db, IncidentStatus.ACTION_IN_PROGRESS)
+def test_resolve_rejected_status_publishes_nothing(client_pg, db, seeded_incident, monkeypatch):
+    incident = seeded_incident(IncidentStatus.ACTION_IN_PROGRESS)
     published: list = []
     monkeypatch.setattr(
         client_pg.app.state.realtime, "publish", published.append
@@ -208,10 +181,10 @@ def test_resolve_rejected_status_publishes_nothing(client_pg, db, monkeypatch):
     assert published == []
 
 
-def test_resolution_judgement_values_match_db_enum(client_pg, db):
+def test_resolution_judgement_values_match_db_enum(client_pg, db, seeded_incident, make_candidate):
     """계약 Enum 값 전수가 DB 타입에 그대로 저장된다 — migration의 값 목록 회귀."""
     for judgement in ResolutionJudgement:
-        incident = _seed_incident(db)
+        incident = seeded_incident()
         response = client_pg.post(_url(incident), json={"resolution": judgement.value})
         assert response.status_code == 200
         db.refresh(incident)
@@ -233,14 +206,14 @@ def _add_execution(
     return execution
 
 
-def test_recovery_after_resolve_resumes_and_clears_the_judgement(client_pg, db):
+def test_recovery_after_resolve_resumes_and_clears_the_judgement(client_pg, db, seeded_incident, make_candidate):
     """종료한 뒤 관제자 복구를 접수하는 정규 경로(ADR-0004) — 판단은 초기화된다.
 
     resolution은 "지금 이 인시던트가 종료된 이유"라 재개되면 거짓이 되고, 남겨
     두면 DB 제약(resolution_with_resolved_status)이 전이 자체를 막는다. 종료했다
     재개한 이력은 복구 실행 레코드가 남긴다.
     """
-    incident = _seed_incident(db)
+    incident = seeded_incident()
     origin = _add_execution(db, incident, RunbookId.RUNBOOK_EC2_ISOLATE)
     detail_url = f"/api/v1/incidents/{incident.incident_id}"
 
