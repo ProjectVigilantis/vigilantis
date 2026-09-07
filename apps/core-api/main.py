@@ -5,8 +5,9 @@
 #   - 오류는 exceptions의 공통 봉투로, 접근 로그는 request_context 미들웨어가
 #     구조화 로그(logging_config)로 남긴다.
 #   - 실시간 전송(realtime.RealtimeManager)은 앱 수명주기에 묶어 기동·종료한다.
-#   - 접수된 조치 실행 디스패치·회수 스캔(dispatcher)도 같은 수명주기에 묶는다.
-#     실시간 전송보다 늦게 열고 먼저 닫는다 (Issue #232).
+#   - 접수된 조치 실행 디스패치·회수 스캔(dispatcher)과 AI 분석 대기 스캔
+#     (agent_dispatcher)도 같은 수명주기에 묶는다. 실시간 전송보다 늦게 열고 먼저
+#     닫는다 (Issue #232·#285). 둘은 스위치(DISPATCH_ENABLED)를 공유하고 주기만 다르다.
 #   - Scheduler(주기 수집) 기동은 수집·판정 연결 작업(#67)에서 연결한다.
 # ==============================================================================
 
@@ -33,6 +34,7 @@ from contextlib import asynccontextmanager  # noqa: E402
 from fastapi import FastAPI, Request  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
+import agent_dispatcher  # noqa: E402
 import dispatcher  # noqa: E402
 from config import get_settings  # noqa: E402
 from exceptions import register_error_handlers, unexpected_error_response  # noqa: E402
@@ -63,12 +65,19 @@ def create_app() -> FastAPI:
         # 스레드풀에 이미 넘어간 잡을 취소하지 못한다. 그 스캔의 발행이 전송 종료
         # 뒤에 오면 publish_dropped_at_shutdown 경고로 버려진다(realtime.py 규약)
         await realtime.start()
-        scheduler = None
+        schedulers = []
         try:
-            scheduler = dispatcher.start_dispatcher(realtime.publish)
+            schedulers = [
+                started
+                for started in (
+                    dispatcher.start_dispatcher(realtime.publish),
+                    agent_dispatcher.start_agent_dispatcher(realtime.publish),
+                )
+                if started is not None
+            ]
             yield
         finally:
-            if scheduler is not None:
+            for scheduler in schedulers:
                 scheduler.shutdown(wait=False)
             await realtime.stop()
 
