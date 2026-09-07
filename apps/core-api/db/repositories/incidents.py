@@ -29,6 +29,7 @@ from schemas.events import NormalizedThreatEvent
 from schemas.evidence import EvidenceItem
 from schemas.incidents import (
     AGENT_TERMINAL_STATUSES,
+    INCIDENT_OPEN_STATUSES,
     AgentInvocationStatus,
     AgentWaitSchedule,
 )
@@ -101,6 +102,35 @@ def lock_incident(db: Session, incident_id: str) -> Optional[models.Incident]:
         .where(models.Incident.incident_id == incident_id)
         .with_for_update()
         .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+
+
+def find_open_by_subject_arn(
+    db: Session, *, subject_arn: str, category: IncidentCategory
+) -> Optional[models.Incident]:
+    """같은 대상의 미종료 Incident 1건. 중복 생성 판정에 쓴다 (Issue #265).
+
+    '미종료'의 기준은 INCIDENT_OPEN_STATUSES다(schemas/incidents.py). 여러 건이면
+    가장 최근 것을 돌려준다 — 이 계층은 집합을 판정하지 않고 존재만 알린다.
+    """
+    return db.execute(
+        select(models.Incident)
+        .where(
+            models.Incident.subject_arn == subject_arn,
+            models.Incident.category == category,
+            models.Incident.status.in_(INCIDENT_OPEN_STATUSES),
+        )
+        .order_by(models.Incident.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+
+def get_incident_by_threat_event_id(
+    db: Session, threat_event_id: str
+) -> Optional[models.Incident]:
+    """위협 이벤트에서 생긴 Incident. 중복 위협 재수신 시 기존 건을 찾는 데 쓴다."""
+    return db.execute(
+        select(models.Incident).where(models.Incident.threat_event_id == threat_event_id)
     ).scalar_one_or_none()
 
 
