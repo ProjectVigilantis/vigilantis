@@ -1,0 +1,32 @@
+{
+  "source": "secops/input/evt_open_ip_007.json",
+  "contract": "packages/schemas/events.py :: InitialRiskEvaluationResult (부분집합)",
+  "excluded_fields": {
+    "threat_event_id": "정규화 단계에서 부여되는 런타임 값 — 정답 대조 대상 아님"
+  },
+  "thresholds_at_authoring": {
+    "WORLD_CIDRS": [
+      "0.0.0.0/0",
+      "::/0"
+    ],
+    "ALL_PROTOCOL": "-1",
+    "ALL_PORTS": [
+      0,
+      65535
+    ],
+    "SENSITIVE_PORTS": [
+      22,
+      3389
+    ],
+    "note": "작성 시점의 apps/core-api/security/risk_evaluator.py 상수. 값이 바뀌면 tests/test_golden_dataset.py 가 실패하므로 본 정답을 함께 갱신할 것 (ADR-0006 임계값 결합 원칙)"
+  },
+  "case_id": "S14",
+  "purpose": "tcp 20–25 범위 개방 — 22를 '포함'한다. 민감 포트를 동등 비교로 구현하면 이 케이스만 놓친다",
+  "derivation": "WORLD. protocol tcp(≠-1), (20,25)≠ALL_PORTS. 범위 20..25 ∋ 22 → 민감 포트 코드",
+  "initial_risk_level": "MEDIUM",
+  "response_mode": "AGENT_WAIT",
+  "reason_codes": [
+    "RISK_OPEN_INGRESS_WORLD",
+    "RISK_SENSITIVE_PORT_EXPOSED"
+  ]
+}

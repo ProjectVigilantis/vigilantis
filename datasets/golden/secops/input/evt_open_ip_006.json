@@ -1,0 +1,11 @@
+{
+  "$schema": "../../schema/mock_threat_event_input.schema.json",
+  "event_id": "evt-open-ip-006",
+  "event_type": "OPEN_IP",
+  "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00018",
+  "occurred_at": "2026-08-20T06:40:00Z",
+  "protocol": "tcp",
+  "from_port": 8080,
+  "to_port": 8080,
+  "source_cidr": "0.0.0.0/0"
+}
