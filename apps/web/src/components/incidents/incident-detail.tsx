@@ -270,10 +270,13 @@ function ExecutionsArea({
  */
 function ProposalActions({
   incident,
+  assets,
   locked,
   onExecute,
 }: {
   incident: IncidentResponse;
+  /** 제안의 `target_arn`을 조인해 승인 모달에 자산 사실값을 넘긴다(#183). */
+  assets: AssetItem[];
   locked: boolean;
   onExecute: (candidates: ActionCandidate[]) => void;
 }) {
@@ -295,6 +298,7 @@ function ProposalActions({
               runbookId: r.runbook_id,
               targetArn: r.target_arn,
               displayParameters: r.display_parameters,
+              targetAsset: assets.find((a) => a.arn === r.target_arn) ?? null,
             })),
           )
         }
@@ -318,12 +322,16 @@ function ProposalActions({
 
 export function IncidentDetail({
   incident,
-  subject,
+  assets,
   openExecutionId = null,
 }: {
   incident: IncidentResponse;
-  /** `subject_arn` → `GET /assets`의 `arn` 조인 결과(§4.5). 조회 실패·미수집이면 null이다. */
-  subject: AssetItem | null;
+  /**
+   * `GET /assets`의 수집 목록. 조회가 실패하면 빈 배열이다 — 인시던트 화면은 그래도 떠야 한다.
+   * 두 곳이 조인해 쓴다: `subject_arn`(§4.5 대상 자산 블록)과 각 제안의 `target_arn`
+   * (§4.6 승인 모달 조치 대상, #183 A안).
+   */
+  assets: AssetItem[];
   /**
    * `?execution=<id>` 딥링크(§4.4 목록에서 실행한 경우). 자체 URL이 없는 ACT-002를
    * 부모 화면이 열어 준다 — `?asset=`(AST-002, #138)과 같은 방식이다.
@@ -332,6 +340,9 @@ export function IncidentDetail({
   openExecutionId?: string | null;
 }) {
   const router = useRouter();
+  // 조인은 목록에서 찾는 것뿐이라 props에서만 파생한다(하이드레이션 안전). 시연 규모(자산 약 22건)에서
+  // Map을 세울 이유가 없다 — 후보는 많아야 몇 건이다.
+  const subject = assets.find((a) => a.arn === incident.subject_arn) ?? null;
   // 모달 인스턴스 = 이 객체 하나. 열 때마다 새로 만들어 **멱등 키를 인스턴스에 고정**한다(§4.6).
   const [request, setRequest] = useState<ActionRequest | null>(null);
   /** ACT-001 C 종료 확인 모달(v1.6). 실행 모달과 동시에 뜨지 않게 별도 상태로 둔다. */
@@ -467,7 +478,8 @@ export function IncidentDetail({
     setRequest({
       idempotencyKey: newIdempotencyKey(),
       // 복구 런북은 `available_recovery_runbook_ids`의 ID뿐이다 — 계약에 target·파라미터가 없다.
-      candidates: [{ runbookId, targetArn: null, displayParameters: null }],
+      // 복구 런북은 계약에 target이 없다 — 되돌리는 대상은 인시던트 자산이므로 그 자산을 넘긴다.
+      candidates: [{ runbookId, targetArn: null, displayParameters: null, targetAsset: subject }],
       variant: 'RECOVERY',
       originExecutionId,
     });
@@ -593,7 +605,7 @@ export function IncidentDetail({
         )}
       </Section>
 
-      <ProposalActions incident={incident} locked={locked} onExecute={openAction} />
+      <ProposalActions incident={incident} assets={assets} locked={locked} onExecute={openAction} />
 
       {/* ACT-002 — 실행 흐름은 여기서 끝난다. 위쪽 판단 근거·근거 데이터·제안 조치는 그대로 남는다(§4.7). */}
       {shownOutcome ? (

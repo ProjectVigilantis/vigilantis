@@ -5,6 +5,7 @@ import {
   RESPONSE_MODES,
   RISK_LEVELS,
   type AssetItem,
+  type AssetType,
   type AssetsResponse,
   type ErrorCode,
   type ErrorResponse,
@@ -696,6 +697,44 @@ interface IncidentSeed {
   updatedAgo?: number;
 }
 
+/**
+ * `display_parameters`가 가질 수 있는 **정확한 키 집합** — 원천은 서버의 후보 파라미터 모델
+ * (`packages/schemas/runbook_parameters.py` `CANDIDATE_PARAMETER_MODELS`)이다. 모델 필드가
+ * 전부 필수라 서버 응답은 늘 이 집합과 **정확히 일치**한다(부분집합이 아니다).
+ *
+ * 표를 두는 이유는 #183이 잡은 드리프트가 **v1.6 시드 확장에서 4건 되살아났기** 때문이다
+ * (PR #189가 손으로 쓴 5건을 고쳤지만, 뒤이어 들어온 시드는 같은 검사를 받지 않았다).
+ * `display_parameters`는 관제자가 보고 승인하는 값이라, mock으로 개발·시연하면 **prod에서
+ * 안 보이는 값을 근거로 승인 흐름을 확인하게 된다.**
+ *
+ * 롤백 3종은 후보가 될 수 없어(ADR-0004 정책 ②) 여기 없다 — 제안에 오면 그 자체가 오류다.
+ */
+const CANDIDATE_PARAM_KEYS: Partial<Record<RunbookId, readonly string[]>> = {
+  RUNBOOK_EC2_ISOLATE: [],
+  RUNBOOK_NACL_ADD_DENY: ['rule_number', 'cidr_block', 'protocol'],
+  RUNBOOK_NACL_RESTORE: ['rule_number', 'egress'],
+  RUNBOOK_SG_DELETE_ISOLATED: [],
+  RUNBOOK_EC2_RIGHTSIZING: ['target_instance_type'],
+  RUNBOOK_EC2_ENABLE_AUTOSCALING: ['min_size', 'max_size'],
+  RUNBOOK_EBS_DELETE_UNATTACHED: [],
+};
+
+/**
+ * 각 런북이 **바꿀 수 있는 자원 유형**. 확정 10종은 대상이 하나씩으로 정해져 있다
+ * (`packages/schemas/runbook_parameters.py`의 precheck 파라미터가 받는 식별자 종류).
+ * 유형이 어긋난 제안은 실행 단계에서 파라미터 검증에 걸리므로 화면에 떠서는 안 된다 —
+ * `RUNBOOK_EC2_RIGHTSIZING`이 EBS 볼륨을 대상으로 잡고 있던 시드가 실제로 있었다(#183 실측).
+ */
+const CANDIDATE_TARGET_TYPE: Partial<Record<RunbookId, AssetType>> = {
+  RUNBOOK_EC2_ISOLATE: 'EC2',
+  RUNBOOK_NACL_ADD_DENY: 'NACL',
+  RUNBOOK_NACL_RESTORE: 'NACL',
+  RUNBOOK_SG_DELETE_ISOLATED: 'SG',
+  RUNBOOK_EC2_RIGHTSIZING: 'EC2',
+  RUNBOOK_EC2_ENABLE_AUTOSCALING: 'EC2',
+  RUNBOOK_EBS_DELETE_UNATTACHED: 'EBS',
+};
+
 function seedIncident(seed: IncidentSeed): IncidentResponse {
   const where = `seed ${seed.id}`;
   const isSec = seed.category === 'SECOPS';
@@ -754,6 +793,30 @@ function seedIncident(seed: IncidentSeed): IncidentResponse {
   }
   if (new Set(recommend.map((r) => r.runbook)).size !== recommend.length) {
     throw new Error(`${where}: recommendations에 같은 runbook_id가 중복될 수 없다`);
+  }
+  for (const r of recommend) {
+    const expected = CANDIDATE_PARAM_KEYS[r.runbook];
+    if (expected === undefined) {
+      throw new Error(`${where}: ${r.runbook}은 AI 추천 후보가 될 수 없다(롤백 런북)`);
+    }
+    // 대상 자원 유형 대조. **수집 목록에 없는 자산은 통과시킨다** — 계약상 정상이며
+    // (미수집 자산의 인시던트) 그 경우 조인 결과가 null인 것을 화면이 이미 다룬다.
+    const targetAsset = assetsResponse.items.find((a) => a.arn === (r.target ?? seed.arn));
+    const wantType = CANDIDATE_TARGET_TYPE[r.runbook];
+    if (targetAsset && wantType && targetAsset.asset_type !== wantType) {
+      throw new Error(
+        `${where}: ${r.runbook}의 대상은 ${wantType}여야 하는데 ${targetAsset.asset_type}다 ` +
+          `(${targetAsset.arn})`,
+      );
+    }
+    const actual = Object.keys(r.params ?? {}).sort();
+    const want = [...expected].sort();
+    if (actual.join(',') !== want.join(',')) {
+      throw new Error(
+        `${where}: ${r.runbook}의 display_parameters 키가 서버 파생본과 다르다 — ` +
+          `기대 [${want.join(', ')}] / 실제 [${actual.join(', ')}]`,
+      );
+    }
   }
 
   return {
@@ -815,7 +878,7 @@ const seededIncidents: IncidentResponse[] = [
       '초기 위험등급 HIGH 정책에 따라 0.5초 선제 격리를 수행했습니다.',
       '정밀 평가는 MEDIUM으로 낮췄으나 차단은 자동 해제되지 않습니다.',
     ],
-    recommend: [{ runbook: 'RUNBOOK_NACL_ADD_DENY', target: arn.nacl, params: { rule_number: '110', egress: 'false' } }],
+    recommend: [{ runbook: 'RUNBOOK_NACL_ADD_DENY', target: arn.nacl, params: { rule_number: '110', cidr_block: '203.0.113.42/32', protocol: 'tcp' } }],
     executions: [{ runbook: 'RUNBOOK_EC2_ISOLATE', status: 'SUCCESS', recovery: ['RUNBOOK_EC2_UNISOLATE'] }],
   }),
   seedIncident({
@@ -827,7 +890,7 @@ const seededIncidents: IncidentResponse[] = [
       '위험등급 MEDIUM이라 승인 전까지 조치가 수행되지 않았습니다.',
       '미응답 시 시간 초과 자동 격리가 발동합니다.',
     ],
-    recommend: [{ runbook: 'RUNBOOK_NACL_ADD_DENY', target: arn.nacl, params: { rule_number: '120', egress: 'true' } }],
+    recommend: [{ runbook: 'RUNBOOK_NACL_ADD_DENY', target: arn.nacl, params: { rule_number: '120', cidr_block: '198.51.100.77/32', protocol: 'tcp' } }],
   }),
   seedIncident({
     id: 'inc-20260827-s104', category: 'SECOPS', risk: 'MEDIUM', timedOut: true,
@@ -849,7 +912,7 @@ const seededIncidents: IncidentResponse[] = [
       '위험등급 LOW라 승인 전까지 조치가 수행되지 않습니다.',
       'LOW는 시간 초과 자동 격리 대상이 아닙니다.',
     ],
-    recommend: [{ runbook: 'RUNBOOK_SG_DELETE_ISOLATED', params: { group_id: 'sg-0a1b2c3d4e5f60003' } }],
+    recommend: [{ runbook: 'RUNBOOK_SG_DELETE_ISOLATED' }],
   }),
   seedIncident({
     id: 'inc-20260827-s106', category: 'SECOPS', risk: 'LOW',
@@ -912,7 +975,7 @@ const seededIncidents: IncidentResponse[] = [
   /* ── FINOPS 진행 중 ── */
   seedIncident({
     id: 'inc-20260827-f101', category: 'FINOPS',
-    title: '저사용 EC2 — vigilantis-worker-01', arn: arn.ec2Canary,
+    title: '저사용 EC2 — vigilantis-worker-01', arn: arn.ec2Worker,
     status: 'AWAITING_APPROVAL', createdAgo: 44, updatedAgo: 44,
     summary: [
       '최근 관측 구간의 CPU 평균이 Idle 기준 이하입니다.',
@@ -930,7 +993,7 @@ const seededIncidents: IncidentResponse[] = [
       '삭제 직전 최종 스냅샷을 강제로 남깁니다.',
       '등록된 롤백 런북이 없는 파괴적 조치입니다.',
     ],
-    recommend: [{ runbook: 'RUNBOOK_EBS_DELETE_UNATTACHED', params: { volume_id: 'vol-0a1b2c3d4e5f60002' } }],
+    recommend: [{ runbook: 'RUNBOOK_EBS_DELETE_UNATTACHED', target: arn.ebsUnattached }],
   }),
   seedIncident({
     id: 'inc-20260827-f103', category: 'FINOPS',
@@ -971,11 +1034,11 @@ const seededIncidents: IncidentResponse[] = [
   }),
   seedIncident({
     id: 'inc-20260827-f107', category: 'FINOPS',
-    title: null, arn: arn.ebsAttached,
+    title: null, arn: arn.ec2LegacyApi,
     status: 'AWAITING_APPROVAL', createdAgo: 15, updatedAgo: 15,
     summary: [
-      '연결돼 있으나 입출력이 거의 없는 볼륨입니다.',
-      '스토리지 타입 조정 여지가 있습니다.',
+      '구형 인스턴스 유형으로 남아 있으며 CPU 평균이 Idle 기준 이하입니다.',
+      '현재 스펙에서 두 단계 축소할 수 있습니다.',
       '표시할 제목이 아직 산출되지 않아 대상 자원으로 표기됩니다.',
     ],
     recommend: [{ runbook: 'RUNBOOK_EC2_RIGHTSIZING', params: { target_instance_type: 't3.micro' } }],
