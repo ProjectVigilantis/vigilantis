@@ -1,8 +1,8 @@
 # ADR-0008: 백업 레코드는 조치 직전 1회 캡처·불변 보존하고, 원복 재개는 시간이 아니라 상태 대조로 판단한다
 
-- **Status**: Proposed
+- **Status**: Accepted (2026-09-02 — 안성일(AI·Architect) 검토 완료, PR #253 승인)
 - **Date**: 2026-09-02
-- **Deciders**: 김세혁(PM/Infra — `backup.py`·`rollback.py`·실행 경로 소유자) 결정, 안성일(AI·Architect — `ExecutionStep` 계약 소유자) 검토 대상
+- **Deciders**: 김세혁(PM/Infra — `backup.py`·`rollback.py`·실행 경로 소유자) 결정, 안성일(AI·Architect — `ExecutionStep` 계약 소유자) 검토 완료
 - **Refs**: 4주차 P0 카드 `[DOCS] ADR-0008 백업 레코드 수명주기·드리프트·복구 무결성`
 
 ## Context (배경)
