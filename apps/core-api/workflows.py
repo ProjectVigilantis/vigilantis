@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
@@ -42,6 +43,7 @@ from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from schemas.agents import AgentGraphOutput
 from schemas.api.actions import (
     ExecuteActionRequest,
     ExecuteActionResponse,
@@ -50,7 +52,7 @@ from schemas.api.actions import (
 from schemas.api.errors import ErrorCode
 from schemas.api.incidents import IncidentStatus, ResolutionJudgement
 from schemas.backups import InstanceSpecBackup
-from schemas.candidates import CandidateStatus
+from schemas.candidates import CandidateStatus, RunbookCandidateData
 from schemas.executions import (
     ASSET_MAY_HAVE_CHANGED_EFFECTS,
     EXECUTION_NON_TERMINAL_STATUSES,
@@ -62,12 +64,19 @@ from schemas.executions import (
     ExecutionStepStatus,
 )
 from schemas.guardrails import (
+    GuardrailDecision,
     GuardrailValidationContext,
     GuardrailValidationRequest,
     GuardrailValidationResult,
 )
 from schemas.incidents import INCIDENT_RESOLVABLE_STATUSES
-from schemas.precheck import PrecheckReasonCode
+from schemas.precheck import (
+    PrecheckOutcome,
+    PrecheckReasonCode,
+    VerificationMethod,
+    build_verification_summary,
+)
+from schemas.runbook_parameters import build_precheck_parameters
 from schemas.runbooks import (
     ROLLBACK_RUNBOOK_BY_MAIN_ID,
     ROLLBACK_RUNBOOK_IDS,
@@ -1505,4 +1514,291 @@ def judge_revert_size(db: Session, execution_id: str) -> ExecutionJudgement:
     )
     return ExecutionJudgement(
         next_status=ExecutionStatus.FAILED, error_summary=detail[:1024]
+    )
+
+
+# --- AI 분석 결과 저장·전이 (Issue #285) ------------------------------------------
+#
+# agent_dispatcher가 그래프를 부르고 계약 검증까지 마친 출력 1건을 여기서 저장한다.
+# 그쪽에 두지 않은 것은, 이 계층이 상태 전이·트랜잭션 경계를 소유하고(파일 헤더)
+# **가드레일을 부르고 그 판정을 저장하는 자리가 이미 여기이기 때문이다**
+# (_run_rollback_guardrails). 배선이 두 곳으로 갈리면 같은 4단계가 두 규약을 갖는다.
+# dispatcher.py가 실행 전이를 이 계층에 내리는 것과 같은 경계다.
+#
+# **순서가 계약이다. 가드레일이 저장보다 먼저다.**
+#   1. 관리 자산 조회(읽기) → 읽기 트랜잭션 종료
+#   2. 후보마다 가드레일 4단계 1회 — **트랜잭션 밖**
+#   3. 한 트랜잭션에 저장 — 후보(최종 상태)·판정·Terminal 기록·Incident 전이 → commit
+#
+# 2번이 저장보다 앞서는 이유 둘. 어느 쪽도 순서를 바꾸면 성립하지 않는다.
+#   - **저장할 수 없는 값을 저장하지 않는다.** ① Schema Check가 거절하는 값에는 NUL처럼
+#     PostgreSQL이 담지 못하는 문자가 있다(ai/guardrails.py _reject_nul). 저장을 먼저 하면
+#     그 값이 INSERT에서 DataError로 터져 거절이 기록되는 대신 예외가 나고, 그 Incident는
+#     ANALYZING·IN_PROGRESS에 남아 회수를 거쳐 같은 출력을 다시 받는다. 출력 단위의
+#     같은 제약은 그래프 호출 직후에도 한 번 본다(agent_dispatcher.py 5번 ⓒ).
+#   - **AWS 호출 중 트랜잭션을 열어 두지 않는다.** ④ AWS Dry-Run은 실제 AWS 호출이라
+#     응답·재시도 시간만큼 커넥션이 트랜잭션에 묶인다. 모델 호출을 트랜잭션 밖으로 뺀
+#     것과 같은 이유다(agent_dispatcher.py 4번).
+# ③ ARN Match가 쓰는 자산 조회도 그래서 미리 해석해 집합으로 넘긴다 — 경계가
+# ManagedAssetLookup Protocol이라 구현을 바꿔 끼우는 것이고, 판정 기준(수집된 자산인가)은
+# 그대로다.
+#
+# **요약 3줄은 AWAITING_APPROVAL로 갈 때만 쓴다.** 조회 계약(api/incidents.py
+# _enforce_contract)이 ANALYZING·FAILED에 빈 summary_lines를 요구하므로, 실패로 닫는
+# 건에 요약을 남기면 그 Incident의 상세 조회가 500이 된다. 쓰지 않는 요약은 로그로만
+# 남긴다(Issue #285) — 후보가 왜 0개였는지 진단할 근거가 그것뿐이다.
+#
+# **Incident 행을 잠그지 않는다.** 배타 보장은 AI 호출 선점(IN_PROGRESS)이 이미 갖고
+# 있고(agent_dispatcher.py 2번), 잠그면 저장 트랜잭션이 여는 시간만큼 행이 잠긴다.
+# 전이는 expected 조건부 UPDATE라 잠금 없이도 덮어쓰기가 생기지 않는다.
+
+
+@dataclass
+class AgentAnalysisOutcome:
+    """그래프 출력 1건의 저장 결과 — 발행과 스캔 집계를 정하는 호출부가 읽는 값이다."""
+
+    incident_id: str
+    next_status: IncidentStatus  # AWAITING_APPROVAL | FAILED
+    executable: int
+    rejected: int
+    occurred_at: datetime  # 저장된 Incident.updated_at — WS 봉투의 occurred_at
+
+
+def _candidate_command_payload(candidate: RunbookCandidateData) -> dict:
+    """저장 전 후보 → 가드레일 ① Schema Check가 받는 경계 JSON.
+
+    display_parameters는 싣지 않는다 — 서버가 parameters에서 파생하는 화면 표시본이라
+    검증 대상이 아니고, SchemaCheckedCommand가 추가 필드를 거절한다.
+    """
+    return {
+        "runbook_id": candidate.runbook_id.value,
+        "target_arn": candidate.target_arn,
+        "parameters": candidate.parameters.model_dump(mode="json"),
+        "evidence_ids": list(candidate.evidence_ids),
+    }
+
+
+def _precheck_param_invalid(detail: str) -> PrecheckOutcome:
+    """④에 넘길 실행 파라미터를 조립하지 못했다 — AWS를 부르지 않은 거절이다."""
+    logger.warning("candidate_precheck_params_failed", extra={"detail": detail[:256]})
+    return PrecheckOutcome(
+        passed=False,
+        reason_code=PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+        verification_summary=build_verification_summary(
+            VerificationMethod.DESCRIBE,
+            verified=["없음(실행 파라미터 조립 실패)"],
+            unverified=["AWS 대상 상태", "IAM 권한"],
+        ),
+    )
+
+
+def _candidate_precheck(command) -> PrecheckOutcome:
+    """④ AWS Dry-Run 경계 — 후보 파라미터를 실행 파라미터로 옮겨 executor에 넘긴다.
+
+    조회로 채우는 값은 여기서 AWS에 물어 온다. **Detection 스냅샷의 값을 쓰지 않는다** —
+    ④는 "지금 이 조치가 나가는가"를 보는 단계이고 스냅샷은 Incident 생성 근거라 보장의
+    종류가 다르다(agent_dispatcher.py 불변식 ⓑ · schemas/intake.py 계약 원칙).
+
+    지금 배선하는 조회는 RIGHTSIZING의 current_instance_type 하나다. 나머지 FinOps
+    후보(ENABLE_AUTOSCALING·EBS_DELETE_UNATTACHED·SG_DELETE_ISOLATED)는 실행 파라미터가
+    후보 값과 대상 자원 ID만으로 서고, 격리·NACL 계열은 메뉴에 오르지 않는다
+    (ai/capabilities.py 축 ②). 조회 실패는 배선 오류가 아니라 AWS 판정이라 예외가 아니라
+    FAIL로 돌려준다(ADR-0007 §1 — 예외로 막는 것은 배선 오류뿐이다).
+    """
+    target = parse_arn(command.target_arn)
+    if target is None:
+        # ③ ARN Match가 수집된 자산만 통과시키므로 방어적 경로다
+        return _precheck_param_invalid(f"target_arn 해석 실패: {command.target_arn}")
+
+    lookups: dict = {}
+    if command.runbook_id is RunbookId.RUNBOOK_EC2_RIGHTSIZING:
+        current, code = executor.current_instance_type(target.resource_id, target.region)
+        if code is not None:
+            return PrecheckOutcome(
+                passed=False,
+                reason_code=code,
+                verification_summary=build_verification_summary(
+                    VerificationMethod.DESCRIBE,
+                    operations=["describe_instances"],
+                    verified=["없음(현재 인스턴스 타입 조회 실패)"],
+                    unverified=["AWS 대상 상태", "IAM 권한"],
+                ),
+            )
+        lookups["current_instance_type"] = current
+
+    try:
+        parameters = build_precheck_parameters(
+            command.runbook_id,
+            command.parameters,
+            resource_id=target.resource_id,
+            evidence_ids=command.evidence_ids,
+            **lookups,
+        )
+    except (ValidationError, ValueError) as exc:
+        return _precheck_param_invalid(f"{type(exc).__name__}: {exc}")
+
+    return executor.precheck(command.runbook_id, command.target_arn, parameters)
+
+
+def _draft_candidates(
+    incident_id: str, output: AgentGraphOutput
+) -> list[RunbookCandidateData]:
+    """그래프 출력의 후보 초안에 서버 식별자와 초기 상태를 붙인다. 저장은 아직 하지 않는다."""
+    return [
+        RunbookCandidateData(
+            candidate_id=str(uuid.uuid4()),
+            incident_id=incident_id,
+            runbook_id=draft.runbook_id,
+            target_arn=draft.target_arn,
+            parameters=draft.parameters,
+            evidence_ids=list(draft.evidence_ids),
+            status=CandidateStatus.PENDING_VALIDATION,
+        )
+        for draft in output.candidates
+    ]
+
+
+def _managed_arns(db: Session, candidates: list[RunbookCandidateData]) -> set[str]:
+    """③ ARN Match가 볼 대상 중 수집된 자산인 것. 가드레일 전에 미리 해석한다."""
+    return {
+        arn
+        for arn in {candidate.target_arn for candidate in candidates}
+        if assets_repo.get_asset_by_arn(db, arn) is not None
+    }
+
+
+def _guard_candidate(
+    candidate: RunbookCandidateData, managed: set[str]
+) -> guardrails.GuardrailOutcome:
+    """후보 1건에 가드레일 4단계를 1회 수행한다. **DB를 만지지 않는다.**"""
+    return guardrails.run_guardrail_validation(
+        GuardrailValidationRequest(
+            validation_context=GuardrailValidationContext.AI_CANDIDATE,
+            candidate_id=candidate.candidate_id,
+            command_payload=_candidate_command_payload(candidate),
+        ),
+        is_managed_arn=lambda arn: arn in managed,
+        precheck=_candidate_precheck,
+    )
+
+
+def _store_candidate(
+    db: Session,
+    candidate: RunbookCandidateData,
+    outcome: guardrails.GuardrailOutcome,
+) -> bool:
+    """가드레일을 마친 후보 1건과 그 판정을 저장한다. PASS면 True.
+
+    판정 결과를 저장한다 — 거절이 로그로만 남으면 관제 화면에서 "왜 이 제안이 사라졌는가"를
+    답할 자리가 없다(_run_rollback_guardrails와 같은 이유). 실행 시점에는 다시 부르지
+    않는다(파일 헤더 · Issue #113 §2).
+
+    후보를 PENDING_VALIDATION으로 넣었다가 옮기지 않고 **최종 상태로 한 번에 넣는다** —
+    같은 트랜잭션 안에서 두 번 쓰는 것이고, 중간 상태를 볼 수 있는 조회자가 없다.
+    """
+    passed = outcome.result.result is GuardrailDecision.PASS
+    payload = _candidate_command_payload(candidate)
+    stored = candidate.model_copy(
+        update={
+            "status": (
+                CandidateStatus.EXECUTABLE if passed else CandidateStatus.REJECTED
+            )
+        }
+    )
+    incidents_repo.add_candidate(db, stored)
+    guardrails_repo.add_evaluation(
+        db,
+        validation_context=GuardrailValidationContext.AI_CANDIDATE,
+        result=outcome.result,
+        candidate_id=candidate.candidate_id,
+        validated_command=payload if outcome.command is not None else None,
+    )
+    return passed
+
+
+def _log_dropped_summary(incident_id: str, output: AgentGraphOutput) -> None:
+    """저장하지 않는 요약을 로그로 남긴다 — 후보가 0개인 이유를 볼 자리가 여기뿐이다.
+
+    줄마다 자른다. 모델이 길이를 스스로 정하는 문자열이라 상한이 없으면 로그 한 줄이
+    무한정 길어진다(ai/guardrails.py의 위반 항목 절단과 같은 이유).
+    """
+    if not output.summary_lines:
+        return
+    logger.info(
+        "agent_summary_dropped",
+        extra={
+            "incident_id": incident_id,
+            "invocation_status": output.invocation_status.value,
+            "summary_lines": [line[:256] for line in output.summary_lines],
+        },
+    )
+
+
+def record_agent_analysis(
+    db: Session, incident_id: str, output: AgentGraphOutput
+) -> AgentAnalysisOutcome:
+    """그래프 출력 1건 → 가드레일 1회 + 후보 저장 + ANALYZING 이탈. 순서는 파일 절 참조.
+
+    **NO_PROPOSAL과 "후보 전부 REJECTED"는 분석 실패다.** 둘 다 관제자에게 보여줄 조치가
+    0개인데 AWAITING_APPROVAL은 실행 가능한 제안 1개 이상을 요구한다(api/incidents.py
+    _enforce_contract). 새 상태를 만들지 않고 FAILED로 닫되 agent_invocation_status는
+    그래프가 낸 Terminal 값을 그대로 남겨 그래프 오류(FAILED)와 구분한다 — 결함 계측과
+    감사가 그 둘을 갈라 봐야 한다(Issue #237 도피 비율).
+
+    출력이 FAILED면 후보도 요약도 없으므로(계약 불변식) 곧바로 Incident를 FAILED로 옮긴다.
+    """
+    candidates = _draft_candidates(incident_id, output)
+    managed = _managed_arns(db, candidates) if candidates else set()
+    # 가드레일 ④가 AWS를 부르는 동안 트랜잭션을 열어 두지 않는다
+    db.rollback()
+
+    guarded = [(candidate, _guard_candidate(candidate, managed)) for candidate in candidates]
+
+    executable = sum(
+        _store_candidate(db, candidate, outcome) for candidate, outcome in guarded
+    )
+    rejected = len(guarded) - executable
+
+    target = IncidentStatus.AWAITING_APPROVAL if executable else IncidentStatus.FAILED
+    if target is not IncidentStatus.AWAITING_APPROVAL:
+        _log_dropped_summary(incident_id, output)
+    if not incidents_repo.finish_agent_invocation(
+        db,
+        incident_id,
+        output.invocation_status,
+        # FAILED로 닫는 건은 빈 요약을 유지한다(조회 계약)
+        summary_lines=(
+            list(output.summary_lines)
+            if target is IncidentStatus.AWAITING_APPROVAL
+            else None
+        ),
+    ):
+        raise ValueError(f"AI 호출 종료 전이 실패: {incident_id}")
+    if not incidents_repo.update_incident_status(
+        db, incident_id, expected=IncidentStatus.ANALYZING, next_status=target
+    ):
+        # ANALYZING은 관제자 종료 처리의 출발 상태가 아니라(INCIDENT_RESOLVABLE_STATUSES)
+        # 분석 중에 상태가 옮겨 갈 경로가 없다. commit 없이 던져 세션 정리에서 되돌린다
+        raise ValueError(f"Incident 상태 전이 실패: {incident_id}")
+
+    db.commit()
+    incident = incidents_repo.get_incident(db, incident_id)
+    # Core UPDATE는 세션이 든 객체를 갱신하지 않는다 — 발행에 실을 시각을 되읽는다
+    db.refresh(incident)
+    logger.info(
+        "agent_analysis_recorded",
+        extra={
+            "incident_id": incident_id,
+            "invocation_status": output.invocation_status.value,
+            "incident_status": target.value,
+            "executable": executable,
+            "rejected": rejected,
+        },
+    )
+    return AgentAnalysisOutcome(
+        incident_id=incident_id,
+        next_status=target,
+        executable=executable,
+        rejected=rejected,
+        occurred_at=incident.updated_at,
     )
