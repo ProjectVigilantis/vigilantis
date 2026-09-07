@@ -142,10 +142,10 @@ uv run python scripts/load_golden_assets.py --verify
 | 축 | 골든이 채우는 것 |
 | --- | --- |
 | `verdict` | **4종 전부** |
-| `skip_reason_code` | **6종 중 5종** — `SKIP_UNSUPPORTED_STATE`만 비어 있다(EBS 전이·비정상·미상 상태 — **#276**) |
+| `skip_reason_code` | **6종 전부** — 마지막 값이던 `SKIP_UNSUPPORTED_STATE`는 EBS 전이·비정상·미상 상태 5건(골든 E4~E8)이 채웠다(**#276**) |
 | 자산 유형 | **`EC2`·`SG`·`EBS` 3종** / 계약 7종 — §대조 8번의 근거다 |
 
-**화면의 배지·사유 분기는 사유 코드 1종을 빼고 골든만으로 눌러 볼 수 있다.** 그 1종은 판정 규칙이 확정됐고(#276 / PR #284) **정답지 편입만 남았다** — 편입되는 순간 위 테스트의 `UNCOVERED_SKIP_REASONS`가 먼저 실패해 **이 표를 고치라고 알린다.** 게다가 이 값들은 임의로 적은 것이 아니라 `tests/test_golden_dataset.py`가 임계값 드리프트까지 지키는 정답지에서 나온다 — 판정 규칙이 바뀌면 화면에 앞서 테스트가 먼저 깨진다.
+**화면의 배지·사유 분기는 골든만으로 전부 눌러 볼 수 있다.** 마지막까지 비어 있던 `SKIP_UNSUPPORTED_STATE`는 판정 규칙 확정(#276 / PR #284) 뒤 정답지에 편입돼 예외 목록(`UNCOVERED_SKIP_REASONS`)이 비워졌다 — 그 목록이 실제로 "낡았다"고 먼저 실패해 **이 표를 고치라고 알렸다.** 게다가 이 값들은 임의로 적은 것이 아니라 `tests/test_golden_dataset.py`가 임계값 드리프트까지 지키는 정답지에서 나온다 — 판정 규칙이 바뀌면 화면에 앞서 테스트가 먼저 깨진다.
 
 FE는 `NEXT_PUBLIC_API_BASE_URL`을 이 백엔드로 걸면 mock 대신 실 API를 본다(`apps/web/src/lib/api/client.ts` — 미설정 시 자체 origin의 mock Route Handler).
 

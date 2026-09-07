@@ -44,9 +44,9 @@
 #   값은 `--verify` 출력이 원천이다(같은 표가 PR #266 → #275 원복 → #280 재착륙으로
 #   세 번 낡았다). 남기는 것은 분포가 아니라 **커버리지**다.
 #
-#   골든이 채우는 분기 — `verdict` 4종 전부 · `skip_reason_code` 6종 중 5종
-#   (`SKIP_UNSUPPORTED_STATE`만 비어 있다 — EBS 전이·비정상·미상, #276의 정답지
-#   편입 대기). 이 문장은 `apps/core-api/tests/test_golden_assets_api.py`가 CI에서
+#   골든이 채우는 분기 — `verdict` 4종 전부 · `skip_reason_code` 6종 전부
+#   (마지막 값이던 `SKIP_UNSUPPORTED_STATE`를 EBS 전이·비정상·미상 케이스 E4~E8이
+#   채웠다, #276). 이 문장은 `apps/core-api/tests/test_golden_assets_api.py`가 CI에서
 #   강제하므로 손으로 맞출 필요가 없다. mock과 달리 값의 출처가
 #   `tests/test_golden_dataset.py`가 지키는 정답지다.
 #
