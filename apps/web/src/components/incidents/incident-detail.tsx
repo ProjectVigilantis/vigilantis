@@ -32,6 +32,7 @@ import { useRealtime } from '@/components/realtime-provider';
 import { agentWaitTimes, appendTransition, latchAgentWaitAt } from '@/lib/realtime-events';
 import { newIdempotencyKey } from '@/lib/api/client';
 import { isTerminalStatus } from '@/lib/execution-status';
+import { isResolvable } from '@/lib/incident-filter';
 import { RUNBOOK_LABELS, incidentTitle } from '@/lib/enum-labels';
 import { formatKst } from '@/lib/utils';
 import type { AssetItem, IncidentResponse, IsoDateTime, RunbookId } from '@/types/api';
@@ -237,10 +238,12 @@ function ExecutionsArea({
         ))}
       </ul>
 
-      {/* v1.6 종료 판단 — 선제 차단은 이미 일어난 일이고(§7.1) 관제자가 할 일은 "정당했나"다.
+      {/* v1.6 종료 판단 — 수행된 대응은 이미 일어난 일이고(§7.1) 관제자가 할 일은 "정당했나"다.
           구 `차단 유지`는 목록으로 돌아갈 뿐 아무 판단도 남기지 않았다(§4.5).
-          SECOPS이고 아직 종료되지 않은 건에만 둔다 — FINOPS는 선제 차단 개념이 없다. */}
-      {incident.category === 'SECOPS' && incident.status !== 'RESOLVED' ? (
+          노출 조건은 **서버가 종료를 받아 주는 상태**와 같다(RESOLVABLE_STATUSES) — 여기서 넓히면
+          409가 나고, 좁히면 그 상태가 막다른 길이 된다. FINOPS도 RIGHTSIZING 종료 판정으로
+          `AWAITING_CLOSURE`에 들어오므로 카테고리로 가르지 않는다(#240). */}
+      {isResolvable(incident.status) ? (
         <div className="flex justify-end pt-1">
           <Button type="button" variant="outline" size="sm" onClick={onCloseJudgement}>
             종료 판단
@@ -549,6 +552,16 @@ export function IncidentDetail({
         <CloseIncidentDialog
           incident={incident}
           onClose={() => setClosing(false)}
+          // 종료 처리 성공 — 서버가 상태를 RESOLVED로 옮기고 남은 제안을 정리했다. 다시 읽는다.
+          onResolved={() => {
+            setClosing(false);
+            router.refresh();
+          }}
+          // 409 INCIDENT_NOT_RESOLVABLE·404 — 화면이 낡았다(§4.6 응답 처리).
+          onStale={() => {
+            setClosing(false);
+            router.refresh();
+          }}
           // `과잉이었다` → 종료하지 않고 해제 흐름으로. 되돌릴 실행이 여럿이면 첫 번째를 연다
           // — 계약이 복구를 **실행 항목별**로 매다는 구조라 인시던트 단위 해제가 없다(§4.5).
           onChooseRecovery={() => {

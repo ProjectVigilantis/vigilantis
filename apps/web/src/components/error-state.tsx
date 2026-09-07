@@ -1,4 +1,4 @@
-// CMN-002 오류 상태 — 오류 봉투의 code 5종으로 분기하고 message를 그대로 보여줍니다(화면설계서 v1.4 §4.9).
+// CMN-002 오류 상태 — 오류 봉투의 code 6종으로 분기하고 message를 그대로 보여줍니다(화면설계서 v1.4 §4.9).
 // 주의: 이 파일에 "use client"를 붙이지 말 것 — RSC 직렬화가 ApiError의 code·requestId·httpStatus를
 // 오류 없이 조용히 버려서(prod에선 message까지) 5종 분기가 전부 무너진다. 클라이언트 로직은 copy-button처럼 분리한다.
 
@@ -30,6 +30,9 @@ const PRESENTATION: Record<ErrorCode, Presentation> = {
   // 4.9: Toast + 재조회가 원칙 — Toast는 CMN-001 소관, "해당 Incident 재조회"는 이 컴포넌트가 아니라
   // 호출 화면 책임이다. 이 오류를 받는 화면은 반드시 재조회를 붙일 것 (화면설계서 4.6·5장 원칙 2).
   PROPOSAL_NOT_EXECUTABLE: { variant: 'inline' },
+  // 종료 처리(#199)가 받는 409 — 그 사이 상태가 옮겨졌다는 뜻이라 PROPOSAL_NOT_EXECUTABLE과
+  // 같은 처리다: 모달을 닫고 상세를 재조회한다(재조회는 호출 화면 책임).
+  INCIDENT_NOT_RESOLVABLE: { variant: 'inline' },
   // 4.9: "계약 불일치이므로 사용자 재시도로 해결되지 않음을 명시"
   REQUEST_VALIDATION_FAILED: {
     variant: 'inline',

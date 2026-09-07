@@ -14,6 +14,7 @@ import {
   type RecommendationItem,
   type IncidentStatus,
   type IsoDateTime,
+  type ResolutionJudgement,
   type ResponseMode,
   type RollbackRunbookId,
   type RiskLevel,
@@ -527,6 +528,8 @@ export const incidents: IncidentResponse[] = [
         updated_at: minutesAgo(47),
       },
     ],
+    resolution: null,
+    resolved_at: null,
     created_at: minutesAgo(50),
     updated_at: minutesAgo(47),
   },
@@ -562,6 +565,8 @@ export const incidents: IncidentResponse[] = [
       },
     ],
     executions: [],
+    resolution: null,
+    resolved_at: null,
     created_at: minutesAgo(40),
     updated_at: minutesAgo(39),
   },
@@ -590,6 +595,8 @@ export const incidents: IncidentResponse[] = [
       },
     ],
     executions: [],
+    resolution: null,
+    resolved_at: null,
     created_at: minutesAgo(30),
     updated_at: minutesAgo(29),
   },
@@ -632,6 +639,8 @@ export const incidents: IncidentResponse[] = [
         updated_at: minutesAgo(17),
       },
     ],
+    resolution: null,
+    resolved_at: null,
     created_at: minutesAgo(20),
     updated_at: minutesAgo(17),
   },
@@ -661,6 +670,8 @@ export const incidents: IncidentResponse[] = [
       },
     ],
     executions: [],
+    resolution: null,
+    resolved_at: null,
     created_at: minutesAgo(10),
     updated_at: minutesAgo(9),
   },
@@ -779,13 +790,15 @@ function seedIncident(seed: IncidentSeed): IncidentResponse {
       available_recovery_runbook_ids: e.recovery ?? [],
       updated_at: minutesAgo(seed.updatedAgo ?? seed.createdAgo),
     })),
+    resolution: null,
+    resolved_at: null,
     created_at: minutesAgo(seed.createdAgo),
     updated_at: minutesAgo(seed.updatedAgo ?? seed.createdAgo),
   };
 }
 
 /**
- * 표본 22건 — 두 목록이 각각 진행 중 10건 이상을 갖도록 채운다. 프리셋·정렬·빈 상태를
+ * 표본 24건 — 두 목록이 각각 진행 중 10건 이상을 갖도록 채운다. 프리셋·정렬·빈 상태를
  * 실제로 눌러 볼 수 있는 최소 규모다. 위 5건(시연 스토리 본선)은 손으로 쓴 것이고,
  * 아래는 팩토리가 계약 불변식을 지켜 찍는다.
  *
@@ -986,6 +999,32 @@ const seededIncidents: IncidentResponse[] = [
     status: 'ANALYZING', createdAgo: 8, updatedAgo: 8,
   }),
 
+  /* ── FINOPS 종료 판단 대기 ── 조치는 끝났고 관제자 판단만 남은 자리(#240).
+     이 상태에서 [종료 판단]이 열리지 않으면 FinOps 트랙이 막다른 길이 된다. */
+  seedIncident({
+    id: 'inc-20260827-f109', category: 'FINOPS',
+    title: '저사용 EC2 스펙 조정 완료 — vigilantis-cache-01', arn: arn.ec2Cache,
+    status: 'AWAITING_CLOSURE', createdAgo: 120, updatedAgo: 6,
+    summary: [
+      '최근 관측 구간의 CPU 평균이 Idle 기준 이하로 유지됐습니다.',
+      '스펙 조정과 2/2 Status Check가 모두 통과했습니다.',
+      '되돌릴 필요가 없다면 종료 판단만 남았습니다.',
+    ],
+    executions: [{ runbook: 'RUNBOOK_EC2_RIGHTSIZING', status: 'SUCCESS', recovery: ['RUNBOOK_EC2_REVERT_SIZE'] }],
+  }),
+  seedIncident({
+    id: 'inc-20260827-f110', category: 'FINOPS',
+    title: '미연결 EBS 볼륨 삭제 완료 — vigilantis-snapshot-vol', arn: arn.ebsSnapshot,
+    status: 'AWAITING_CLOSURE', createdAgo: 95, updatedAgo: 11,
+    summary: [
+      '어떤 인스턴스에도 연결되지 않은 볼륨이 계속 과금되고 있었습니다.',
+      '최종 스냅샷을 남기고 볼륨을 삭제했습니다.',
+      '등록된 롤백 런북이 없어 되돌릴 수 없습니다.',
+    ],
+    // 롤백 런북이 없는 유일한 파괴적 조치라 `과잉이었다`가 갈 곳이 없다 — 모달이 그 선택지를 잠근다.
+    executions: [{ runbook: 'RUNBOOK_EBS_DELETE_UNATTACHED', status: 'SUCCESS' }],
+  }),
+
   /* ── FINOPS 종료 ── */
   seedIncident({
     id: 'inc-20260826-f201', category: 'FINOPS',
@@ -1035,6 +1074,12 @@ export interface StoredExecution {
 
 // ponytail: 프로세스 메모리 Map — dev 서버 재시작·핫리로드 시 리셋된다(mock 한정, 영속화 불필요).
 export const executionsByIdempotencyKey = new Map<string, StoredExecution>();
+
+/** 관제자 종료 처리(#199)로 남은 판단. 같은 건의 재요청은 여기 저장된 값을 그대로 돌려준다. */
+export const resolutionsByIncidentId = new Map<
+  string,
+  { resolution: ResolutionJudgement; resolved_at: IsoDateTime }
+>();
 
 /* ─────────────────── mock 전용 오버라이드 쿼리 (계약 밖) ─────────────────── */
 
@@ -1155,6 +1200,16 @@ export function incidentView(
           : incident.status,
     updated_at: updatedAt,
   };
+  // 종료 처리된 건은 상태·제안·판단이 함께 확정된다 — 서버도 종료 시 남은 제안을
+  // INVALIDATED로 정리하므로(workflows.resolve_incident) 여기서 제안을 비우지 않으면
+  // `RESOLVED`에 제안이 남아 상세 응답 불변식을 깬다.
+  const resolved = resolutionsByIncidentId.get(incident.incident_id);
+  if (resolved !== undefined) {
+    return applyOverrides(
+      { ...view, status: 'RESOLVED', recommendations: [], ...resolved },
+      overrides,
+    );
+  }
   return applyOverrides(view, overrides);
 }
 
