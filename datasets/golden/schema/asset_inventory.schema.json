@@ -201,7 +201,7 @@
       "type": "object"
     },
     "EbsAsset": {
-      "description": "EBS Volume. 토폴로지 EC2→EBS(ATTACHED_TO) 산출용이자 미부착 볼륨 정리 판정 대상.\n\nNACL 등과 달리 EBS 는 Rule 판정 대상(`_RULE_TARGET_TYPES`)이라, 미부착(=attached_instance_ids\n비어있음)이면 rule_engine 이 UNUSED, 부착이면 SKIP_ACTIVE 로 판정한다.",
+      "description": "EBS Volume. 토폴로지 EC2→EBS(ATTACHED_TO) 산출용이자 미부착 볼륨 정리 판정 대상.\n\nNACL 등과 달리 EBS 는 Rule 판정 대상(`_RULE_TARGET_TYPES`)이라 rule_engine 이 판정한다.\n판정 계약은 `services/rule_engine.evaluate_ebs` 이며(#276 결정 ④), 세 갈래다.\n\n- `state == \"available\"` 이면서 미부착 → `UNUSED` (삭제 후보)\n- `in-use` 이거나 부착됨 → `SKIP` / `SKIP_ACTIVE`\n- 그 밖의 상태(`creating`·`deleting`·`error`·`deleted`·미상 `None`)\n  → `SKIP` / `SKIP_UNSUPPORTED_STATE` (판정 보류 — 오삭제 방지)\n\n**미부착이라는 것만으로 UNUSED 가 되지 않는다** — `state` 를 함께 본다. 이 문장이\n이전에는 \"미부착이면 UNUSED\"였고, 그 서술이 `evaluate_ebs` 와 다른 답을 내 #276 이\n열렸다. 정답지 고정은 `datasets/golden/finops/expected/asset_inventory_004.json`.",
       "properties": {
         "asset_type": {
           "$ref": "#/$defs/AssetType",
@@ -286,7 +286,7 @@
           "title": "State"
         },
         "attached_instance_ids": {
-          "description": "부착된 인스턴스 목록. 비어있으면 미사용(UNUSED) 후보",
+          "description": "부착된 인스턴스 목록. 비어있고 state 가 available 일 때만 UNUSED 후보 (#276)",
           "items": {
             "type": "string"
           },
@@ -850,6 +850,20 @@
       "description": "메트릭 집계 주기(초)",
       "title": "Period Seconds",
       "type": "integer"
+    },
+    "metrics_window_end": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "메트릭 요약을 재사용했을 때 그 **원본 창의 끝**(UTC). None 이면 이번 회차에 직접 조회했다는 뜻이고 창의 끝은 collected_at 이다. 재사용 시 창을 collected_at 으로 적으면 받지도 않은 구간을 관측한 것처럼 남는다(#255).",
+      "title": "Metrics Window End"
     },
     "ec2_instances": {
       "items": {
