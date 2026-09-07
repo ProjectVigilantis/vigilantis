@@ -19,7 +19,7 @@ for p in (str(CORE_API), str(REPO_ROOT / "packages")):
         sys.path.insert(0, p)
 
 from config import CollectorSettings, get_collector_settings  # noqa: E402
-from services.scheduler import _interval_seconds  # noqa: E402
+from services.scheduler import _interval_seconds, start_scheduler  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -44,3 +44,30 @@ def test_invalid_interval_is_rejected_at_settings(monkeypatch, bad):
     monkeypatch.setenv("SCAN_INTERVAL_SECONDS", bad)
     with pytest.raises(ValidationError):
         _interval_seconds()
+
+
+def test_scan_disabled_returns_none(monkeypatch):
+    # SCAN_ENABLED=false 면 스캔 스케줄러를 기동하지 않는다 — 테스트/특정 배포에서
+    # 실제 수집·판정이 도는 것을 막는 안전장치(dispatcher.start_dispatcher 와 같은 결).
+    monkeypatch.setenv("SCAN_ENABLED", "false")
+    assert start_scheduler() is None
+
+
+def test_scan_enabled_starts_and_returns_scheduler(monkeypatch):
+    # 게이트의 켜진 쪽. 이것이 없으면 start_scheduler 가 늘 None 을 돌려줘도 스위트가 초록이다
+    # (#287 리뷰: 김세혁). AsyncIOScheduler.start() 는 이벤트 루프를 요구하므로 build_scheduler 를
+    # 가짜로 바꿔, 고정하려는 것을 "게이트가 켜졌을 때 기동해서 돌려준다" 한 가지로 좁힌다.
+    import services.scheduler as scheduler_module
+
+    started = []
+
+    class FakeScheduler:
+        def start(self):
+            started.append("start")
+
+    monkeypatch.setenv("SCAN_ENABLED", "true")
+    monkeypatch.setattr(scheduler_module, "build_scheduler", FakeScheduler)
+    scheduler = start_scheduler()
+
+    assert isinstance(scheduler, FakeScheduler)
+    assert started == ["start"]
