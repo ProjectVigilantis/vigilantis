@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -20,45 +19,22 @@ for _p in (str(CORE_API), str(REPO_ROOT / "packages")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from schemas.events import (  # noqa: E402
-    NormalizedThreatEvent,
-    OpenIpThreatPayload,
-    SshBruteForceThreatPayload,
-    ThreatEventType,
-)
+from schemas.events import NormalizedThreatEvent  # noqa: E402
 from security.risk_evaluator import evaluate_threat  # noqa: E402
+from security.threat_normalizer import normalize_mock_input  # noqa: E402
 
 GOLDEN_INPUT = REPO_ROOT / "datasets" / "golden" / "secops" / "input"
 
 
 def _normalized_from_input(raw: dict) -> NormalizedThreatEvent:
-    """Golden Mock 입력 → NormalizedThreatEvent (정규화 단계 대체)."""
-    raw = {k: v for k, v in raw.items() if k != "$schema"}
-    etype = ThreatEventType(raw["event_type"])
-    now = datetime.now(timezone.utc)
-    if etype == ThreatEventType.OPEN_IP:
-        payload = OpenIpThreatPayload(
-            protocol=raw["protocol"],
-            from_port=raw.get("from_port"),
-            to_port=raw.get("to_port"),
-            source_cidr=raw["source_cidr"],
-        )
-    else:
-        payload = SshBruteForceThreatPayload(
-            source_ip=raw["source_ip"],
-            failed_attempt_count=raw["failed_attempt_count"],
-            window_seconds=raw["window_seconds"],
-        )
-    return NormalizedThreatEvent(
-        threat_event_id=f"te-{raw['event_id']}",
-        source_event_id=raw["event_id"],
-        event_type=etype,
-        target_arn=raw["target_arn"],
-        occurred_at=raw["occurred_at"],
-        payload=payload,
-        deduplication_key=raw["event_id"],
-        collected_at=now,
-    )
+    """Golden Mock 입력 → NormalizedThreatEvent.
+
+    정형화는 프로덕션 코드(security/threat_normalizer.py)가 한다 — 여기서는 호출만
+    한다. 종전에는 이 함수가 변환을 직접 들고 있어 tests/test_golden_dataset.py 의
+    같은 헬퍼와 collected_at 이 갈렸고(now vs occurred_at), 둘 다 threat_event_id 를
+    DB 에 넣을 수 없는 형식으로 만들고 있었다(#268).
+    """
+    return normalize_mock_input(raw)
 
 
 def _load(name: str) -> NormalizedThreatEvent:
@@ -117,15 +93,19 @@ def test_rdp_same_tier_as_ssh_port():
 
 
 def _ssh_event(count: int, window: int) -> NormalizedThreatEvent:
-    return NormalizedThreatEvent(
-        threat_event_id=f"te-{count}-{window}", source_event_id=f"{count}-{window}",
-        event_type=ThreatEventType.SSH_BRUTE_FORCE,
-        target_arn="arn:aws:ec2:ap-northeast-2:123456789012:instance/i-syn",
-        occurred_at=datetime.now(timezone.utc),
-        payload=SshBruteForceThreatPayload(
-            source_ip="203.0.113.9", failed_attempt_count=count, window_seconds=window,
-        ),
-        deduplication_key=f"{count}-{window}", collected_at=datetime.now(timezone.utc),
+    """골든에 없는 밴드를 합성한다. 골든 케이스와 같은 정형화 경로를 지난다 — 합성만
+    다른 변환을 쓰면 이 테스트가 지키는 것이 프로덕션 동작이 아니게 된다(#268).
+    occurred_at 은 판정에 쓰이지 않아 고정값으로 둔다."""
+    return normalize_mock_input(
+        {
+            "event_id": f"syn-ssh-{count}-{window}",
+            "event_type": "SSH_BRUTE_FORCE",
+            "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-syn",
+            "source_ip": "203.0.113.9",
+            "occurred_at": "2026-08-31T00:00:00Z",
+            "failed_attempt_count": count,
+            "window_seconds": window,
+        }
     )
 
 

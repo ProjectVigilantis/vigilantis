@@ -5,7 +5,7 @@
 # 이 파일에는 구현이 없습니다.
 #
 # [현재 소재]
-# 1. 위협 이벤트 수신·정형화 — packages/schemas/events.py
+# 1. 위협 이벤트 수신·정형화 — security/threat_normalizer.py
 #    (MockThreatEventInput → NormalizedThreatEvent. 입력은 severity·response_mode를
 #     받지 않습니다 — 위험도는 판정기가 냅니다.)
 # 2. 초기 위험 판정 — security/risk_evaluator.py
