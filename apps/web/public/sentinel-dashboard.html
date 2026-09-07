@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sentinel — 클라우드 자산 관제</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+
+  :root{
+    --bg: #0D1013;
+    --panel: #15191D;
+    --panel-2: #1B2126;
+    --line: #262C31;
+    --line-soft: #1E2429;
+    --text: #E7E9EA;
+    --text-dim: #8E969D;
+    --text-faint: #5C646B;
+    --teal: #3ECF9A;
+    --amber: #E8A94B;
+    --red: #E5605A;
+    --blue: #5B9FE8;
+    --mono: 'JetBrains Mono', monospace;
+    --sans: 'Inter', sans-serif;
+  }
+
+  *{box-sizing:border-box; margin:0; padding:0;}
+  html,body{background:var(--bg); color:var(--text); font-family:var(--sans); -webkit-font-smoothing:antialiased;}
+  body{font-size:14px; line-height:1.5;}
+
+  a{color:inherit; text-decoration:none;}
+
+  /* header */
+  header{
+    display:flex; align-items:center; justify-content:space-between;
+    padding:16px 28px; border-bottom:1px solid var(--line);
+    position:sticky; top:0; background:rgba(13,16,19,0.92); backdrop-filter:blur(6px); z-index:10;
+  }
+  .brand{display:flex; align-items:center; gap:10px;}
+  .brand-mark{width:22px; height:22px; border-radius:5px; background:linear-gradient(135deg, var(--teal), var(--blue)); flex-shrink:0;}
+  .brand-name{font-weight:600; font-size:15px; letter-spacing:0.2px;}
+  .brand-sub{color:var(--text-faint); font-size:12px; margin-left:8px; padding-left:8px; border-left:1px solid var(--line);}
+
+  nav{display:flex; gap:4px;}
+  nav a{padding:7px 14px; border-radius:6px; font-size:13px; color:var(--text-dim); transition:background .15s, color .15s;}
+  nav a:hover{background:var(--panel-2); color:var(--text);}
+  nav a.active{color:var(--text); background:var(--panel-2);}
+
+  .header-right{display:flex; align-items:center; gap:14px;}
+  .env-pill{display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-dim); border:1px solid var(--line); padding:5px 10px; border-radius:6px;}
+  .dot{width:6px; height:6px; border-radius:50%; background:var(--teal);}
+  /* 실시간 연동 — 자산(회사)별 수집 연결 상태 3종 */
+  .link-bar{display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:22px;}
+  .link-lbl{color:var(--text-faint); font-size:11.5px; margin-right:2px;}
+  .pill-name{color:var(--text);}
+  .pill-sub{font-size:11.5px; margin-left:2px; padding-left:8px; border-left:1px solid var(--line);}
+  .env-pill.ok .dot{background:var(--teal);}
+  .env-pill.ok .pill-sub{color:var(--teal);}
+  .env-pill.warn .dot{background:var(--amber);}
+  .env-pill.warn .pill-sub{color:var(--amber);}
+  /* 무색 — 아직 수집 대상으로 잡히지 않은 자산. 테두리만 남겨 "꺼짐"과 구분한다. */
+  .env-pill.none .dot{background:transparent; box-shadow:inset 0 0 0 1px var(--text-faint);}
+  .env-pill.none .pill-sub{color:var(--text-faint);}
+
+  .avatar{width:28px; height:28px; border-radius:50%; background:var(--panel-2); border:1px solid var(--line); display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:500; color:var(--text-dim);}
+
+  main{max-width:1320px; margin:0 auto; padding:28px;}
+
+  .page-head{display:flex; align-items:baseline; justify-content:space-between; margin-bottom:22px; flex-wrap:wrap; gap:10px;}
+  .page-head h1{font-size:19px; font-weight:500;}
+  .page-head p{color:var(--text-faint); font-size:12px; margin-top:4px;}
+  .scope{display:flex; gap:8px; font-size:12px; color:var(--text-dim);}
+  .scope span{border:1px solid var(--line); padding:5px 10px; border-radius:6px;}
+
+  /* metric row */
+  .metrics{display:grid; grid-template-columns:repeat(5,1fr); gap:1px; background:var(--line); border:1px solid var(--line); border-radius:10px; overflow:hidden; margin-bottom:24px;}
+  .metric{background:var(--panel); padding:18px 20px;}
+  .metric-label{color:var(--text-faint); font-size:11.5px; text-transform:none; margin-bottom:10px;}
+  .metric-value{font-family:var(--mono); font-size:26px; font-weight:500; letter-spacing:-0.5px;}
+  .metric-value.warn{color:var(--amber);}
+  .metric-value.crit{color:var(--red);}
+  .metric-value.ok{color:var(--teal);}
+  .metric-delta{font-size:11.5px; color:var(--text-faint); margin-top:6px;}
+
+  /* grid layout */
+  .grid{display:grid; grid-template-columns:1.15fr 1.55fr; gap:18px; margin-bottom:18px;}
+  .grid-3{display:grid; grid-template-columns:repeat(3,1fr); gap:18px;}
+
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow:hidden;}
+  .card-head{display:flex; align-items:center; justify-content:space-between; padding:14px 18px; border-bottom:1px solid var(--line-soft);}
+  .card-head h2{font-size:13px; font-weight:500;}
+  .card-head .tag{font-size:11px; color:var(--text-faint); font-family:var(--mono);}
+  .card-body{padding:16px 18px;}
+
+  /* inventory list */
+  .inv-row{display:flex; align-items:center; justify-content:space-between; padding:9px 0; border-bottom:1px solid var(--line-soft);}
+  .inv-row:last-child{border-bottom:none;}
+  .inv-left{display:flex; align-items:center; gap:10px; color:var(--text-dim); font-size:13px;}
+  .inv-icon{width:26px; height:26px; border-radius:6px; background:var(--panel-2); display:flex; align-items:center; justify-content:center; font-size:12px; color:var(--text-dim); flex-shrink:0;}
+  .inv-count{font-family:var(--mono); font-size:13px; color:var(--text);}
+  .inv-bar-track{width:100%; height:3px; background:var(--line-soft); border-radius:2px; margin-top:8px; overflow:hidden;}
+  .inv-bar-fill{height:100%; background:var(--blue);}
+
+  /* topology svg wrapper */
+  .topo{padding:10px 8px 6px;}
+
+  /* exposure table */
+  table{width:100%; border-collapse:collapse; font-size:12.5px;}
+  thead th{text-align:left; color:var(--text-faint); font-weight:500; font-size:11px; padding:0 0 10px; border-bottom:1px solid var(--line-soft);}
+  tbody td{padding:9px 0; border-bottom:1px solid var(--line-soft); color:var(--text-dim);}
+  tbody tr:last-child td{border-bottom:none;}
+  tbody td:first-child{color:var(--text); font-family:var(--mono); font-size:12px;}
+  .sev{display:inline-flex; align-items:center; gap:6px; font-size:12px;}
+  .sev-dot{width:7px; height:7px; border-radius:50%;}
+  .sev-dot.crit{background:var(--red);}
+  .sev-dot.high{background:var(--amber);}
+  .sev-dot.med{background:var(--blue);}
+
+  /* compliance bars */
+  .comp-row{margin-bottom:14px;}
+  .comp-row:last-child{margin-bottom:0;}
+  .comp-top{display:flex; justify-content:space-between; font-size:12.5px; margin-bottom:6px; color:var(--text-dim);}
+  .comp-top b{color:var(--text); font-weight:500; font-family:var(--mono); font-size:12px;}
+  .comp-track{width:100%; height:6px; background:var(--line-soft); border-radius:3px; overflow:hidden;}
+  .comp-fill{height:100%; border-radius:3px;}
+
+  /* small stat pairs */
+  .stat-pair{display:flex; justify-content:space-between; align-items:center; padding:10px 0; border-bottom:1px solid var(--line-soft); font-size:13px;}
+  .stat-pair:last-child{border-bottom:none;}
+  .stat-pair .l{color:var(--text-dim);}
+  .stat-pair .r{font-family:var(--mono); font-size:13px;}
+
+  footer{color:var(--text-faint); font-size:11.5px; text-align:center; padding:30px 0 40px;}
+
+  @media (max-width:900px){
+    .grid, .grid-3{grid-template-columns:1fr;}
+    .metrics{grid-template-columns:repeat(2,1fr);}
+    nav{display:none;}
+  }
+
+  /* 실데이터 배선 */
+  .state-bar{margin-bottom:18px; padding:10px 14px; border:1px solid var(--line); border-radius:8px; color:var(--text-dim); font-size:12.5px;}
+  .state-bar.err{border-color:#5A332E; color:#E5A79A;}
+  .hs-top{display:flex; justify-content:space-between; gap:8px; font-size:12.5px; margin-bottom:6px; color:var(--text-dim);}
+  .hs-top b{color:var(--text); font-weight:500; font-family:var(--mono); font-size:12px;}
+  .hs-sub{color:var(--text-faint); font-size:11px; margin-left:6px;}
+  .topo-note{color:var(--text-faint); font-size:11px; padding:0 10px 10px;}
+  .empty{color:var(--text-faint); font-size:12.5px; padding:18px 0; text-align:center;}
+  .sev{white-space:nowrap;}
+</style>
+</head>
+<body>
+
+<main>
+
+  <div id="state" class="state-bar">불러오는 중…</div>
+
+  <div class="metrics" id="metrics"></div>
+
+  <div class="grid">
+    <div class="card">
+      <div class="card-head">
+        <h2>자산 인벤토리</h2>
+        <span class="tag">asset_type 7종</span>
+      </div>
+      <div class="card-body" id="inv"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>자산 토폴로지</h2>
+        <span class="tag" id="topo-tag">relationships</span>
+      </div>
+      <div class="topo" id="topo"></div>
+      <div class="topo-note">보호 계층(SG·NACL) ─ 컴퓨트(EC2) ─ 부착·소속(EBS·ASG·LT·TG). 관계가 없는 자산은 그리지 않는다.</div>
+    </div>
+  </div>
+
+  <div class="grid-3">
+    <div class="card">
+      <div class="card-head">
+        <h2>인터넷 개방 자산</h2>
+        <span class="tag">open_to_world</span>
+      </div>
+      <div class="card-body" id="exposure"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>헬스 스코어</h2>
+        <span class="tag">EC2 전용</span>
+      </div>
+      <div class="card-body" id="health"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>판정 현황</h2>
+        <span class="tag">verdict</span>
+      </div>
+      <div class="card-body" id="verdicts"></div>
+    </div>
+  </div>
+
+  <footer id="footer">자산 현황 스냅샷 · GET /assets + GET /incidents 집계</footer>
+
+</main>
+
+<script src="./sentinel-dashboard.js"></script>
+
+</body>
+</html>

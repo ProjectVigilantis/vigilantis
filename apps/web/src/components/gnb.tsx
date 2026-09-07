@@ -4,7 +4,7 @@
 
 import Link from 'next/link';
 
-import { ConnectionIndicator } from '@/components/connection-indicator';
+import { CollectionIndicator } from '@/components/collection-indicator';
 import { usePathname } from 'next/navigation';
 
 import { cn } from '@/lib/utils';
@@ -66,8 +66,11 @@ export function Gnb() {
         })}
       </nav>
 
-      {/* 연결 인디케이터는 CMN-001(4.8) 소유다 — 소켓 상태를 RealtimeProvider에서 받아 그린다. */}
-      <ConnectionIndicator />
+      {/* 서버↔클라우드 수집 상태. WS 인디케이터(CMN-001 §4.8)는 2026-09-07 지시로 뺐다 —
+          소켓 자체는 RealtimeProvider가 계속 소유하고 Toast도 그대로 뜬다. */}
+      <div className="ml-auto flex shrink-0 items-center">
+        <CollectionIndicator />
+      </div>
     </header>
   );
 }
