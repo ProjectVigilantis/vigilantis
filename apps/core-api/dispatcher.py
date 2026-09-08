@@ -37,8 +37,8 @@
 # 되돌립니다. 재시도 상한과 판정 불가의 저장 계약은 Issue #249입니다.
 #
 # [남은 작업]
-# 1. RIGHTSIZING·REVERT_SIZE 외 8종 실행 — 실행 함수가 생기는 대로 _RUNNERS에
-#    등록하고, _JUDGES에 **짝으로** 함께 등록합니다(ADR-0008 §6, 아래 짝 검사).
+# 1. RIGHTSIZING·REVERT_SIZE·NACL_ADD_DENY 외 7종 실행 — 실행 함수가 생기는 대로
+#    _RUNNERS에 등록하고, _JUDGES에 **짝으로** 함께 등록합니다(ADR-0008 §6, 아래 짝 검사).
 # 2. 보류의 재시도 정책 — 조회 실패를 몇 번까지 다시 묻고, 소진하면 어떤 typed
 #    상태로 남겨 관제자에게 보일지 확정합니다. 지금은 상한 없이 다시 묻습니다.
 #    판정 보류(_judge_one)와 실행 보류(원복 상태 대조 실패)가 같은 자리입니다 (Issue #249).
@@ -87,6 +87,7 @@ Publish = Callable[[WsEvent], None]
 _RUNNERS: dict[RunbookId, Callable[[Session, str], workflows.ExecutionRunOutcome]] = {
     RunbookId.RUNBOOK_EC2_RIGHTSIZING: workflows.run_rightsizing_execution,
     RunbookId.RUNBOOK_EC2_REVERT_SIZE: workflows.run_revert_size_execution,
+    RunbookId.RUNBOOK_NACL_ADD_DENY: workflows.run_nacl_add_deny_execution,
 }
 
 # 런북별 종료 판정 진입점 — AWS 변경이 이미 시작된 실행을 어느 종료 상태로 확정할지
@@ -95,15 +96,19 @@ _RUNNERS: dict[RunbookId, Callable[[Session, str], workflows.ExecutionRunOutcome
 _JUDGES: dict[RunbookId, Callable[[Session, str], workflows.ExecutionJudgement]] = {
     RunbookId.RUNBOOK_EC2_RIGHTSIZING: workflows.judge_rightsizing_boot,
     RunbookId.RUNBOOK_EC2_REVERT_SIZE: workflows.judge_revert_size,
+    RunbookId.RUNBOOK_NACL_ADD_DENY: workflows.judge_nacl_add_deny,
 }
 
 # 실행이 성공을 반환해도 확정하지 않는 런북 — **성공의 경계가 실행 밖에 있다.**
 # RIGHTSIZING은 기동 요청 접수까지만 하고, 2/2 Status Check가 SUCCESS와
-# ROLLBACK_INITIATED를 가른다(services/aws/rollback.py). REVERT_SIZE는 여기 없다 —
-# 원복은 되돌린 것이 성공이고, 되돌린 인스턴스가 또 부팅에 실패해도 되돌릴 곳이
-# 없어(원복의 원복은 없다, ADR-0008 §6) 판정이 바뀌지 않는다. 여기 잘못 넣으면
-# 성공한 원복이 확정되지 않은 채 다음 주기의 판정으로 넘어가고, 그 판정은 재실행이
-# 아니라 실자산 대조라 원복이 끝난 뒤에도 "미완"으로 읽힐 수 있다.
+# ROLLBACK_INITIATED를 가른다(services/aws/rollback.py).
+#
+# 나머지 둘은 여기 없다. REVERT_SIZE는 되돌린 것이 성공이고, 되돌린 인스턴스가 또
+# 부팅에 실패해도 되돌릴 곳이 없어(원복의 원복은 없다, ADR-0008 §6) 판정이 바뀌지
+# 않는다. NACL_ADD_DENY는 규칙 삽입이 원자적이고 뒤따르는 판정 축이 없어 성공의
+# 경계가 실행 반환 그 자체다. 여기 잘못 넣으면 끝난 실행이 확정되지 않은 채 다음
+# 주기의 판정으로 넘어가고, 그 판정은 재실행이 아니라 실자산 대조라 조치가 끝난
+# 뒤에도 "미완"으로 읽힐 수 있다.
 _AWAIT_JUDGEMENT_ON_SUCCESS: frozenset[RunbookId] = frozenset(
     {RunbookId.RUNBOOK_EC2_RIGHTSIZING}
 )
