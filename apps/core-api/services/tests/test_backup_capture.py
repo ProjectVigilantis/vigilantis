@@ -259,3 +259,150 @@ def test_capture_result_cannot_be_both_success_and_failure():
         bk.BackupCapture(backup_type="X", payload={"a": 1}, reason_code=R.PRECHECK_AWS_ERROR)
     with pytest.raises(ValueError):
         bk.BackupCapture(backup_type="X")
+
+
+# ------------------------------------------------- NACL 규칙 index (Issue #297)
+
+ACL = "acl-0abc123456789def0"
+RULE_NUMBER = 100
+CIDR = "198.51.100.0/24"
+
+EMPTY_ACL = {"NetworkAcls": [{"NetworkAclId": ACL, "Entries": []}]}
+
+
+class FakeNaclEc2:
+    def __init__(self, outcome, calls):
+        self._outcome = outcome
+        self.calls = calls
+
+    def describe_network_acls(self, **kwargs):
+        self.calls.append(kwargs)
+        if isinstance(self._outcome, BaseException):
+            raise self._outcome
+        return self._outcome
+
+
+@pytest.fixture
+def nacl(monkeypatch):
+    """NACL 조회를 가짜로 갈아 끼운다. 기본은 슬롯이 비어 있는 NACL 1건."""
+    state = {"outcome": EMPTY_ACL, "calls": [], "clients": []}
+
+    def factory(service, region=None, **_):
+        state["clients"].append((service, region))
+        return FakeNaclEc2(state["outcome"], state["calls"])
+
+    monkeypatch.setattr(bk, "aws_client", factory)
+
+    def configure(outcome):
+        state["outcome"] = outcome
+
+    configure.calls = state["calls"]
+    configure.clients = state["clients"]
+    return configure
+
+
+def capture_nacl(**overrides):
+    values = {"rule_number": RULE_NUMBER, "cidr_block": CIDR, "protocol": "tcp"}
+    values.update(overrides)
+    return bk.capture_nacl_rule_index(ACL, REGION, **values)
+
+
+def entry(**overrides) -> dict:
+    values = {
+        "RuleNumber": RULE_NUMBER,
+        "Egress": False,
+        "CidrBlock": "203.0.113.0/24",
+        "Protocol": "-1",
+        "RuleAction": "deny",
+    }
+    values.update(overrides)
+    return values
+
+
+def test_nacl_capture_carries_the_declared_backup_type(nacl):
+    capture = capture_nacl()
+    assert capture.captured
+    assert capture.backup_type == BackupType.RECORD_NACL_RULE_INDEX.value
+
+
+def test_nacl_capture_records_the_slot_and_the_fingerprint(nacl):
+    payload = capture_nacl().payload
+    assert set(payload) == {
+        "rule_number",
+        "egress",
+        "cidr_block",
+        "protocol",
+        "rule_action",
+    }
+    assert payload["rule_number"] == RULE_NUMBER
+    # ADD_DENY는 인바운드 차단 규칙이다(ADR-0007 §5 파라미터 표에 egress가 없다)
+    assert payload["egress"] is False
+    assert payload["rule_action"] == "deny"
+
+
+def test_nacl_capture_stores_the_protocol_as_an_aws_number(nacl):
+    """이름으로 받아 번호로 저장한다 — 대조 상대가 describe의 Protocol이라 축을 맞춘다."""
+    assert capture_nacl(protocol="tcp").payload["protocol"] == "6"
+    assert capture_nacl(protocol="-1").payload["protocol"] == "-1"
+
+
+def test_nacl_capture_refuses_a_slot_that_is_already_used(nacl):
+    """가드레일 ④가 같은 것을 이미 봤더라도 승인 대기 동안 제3자가 그 번호를 쓸 수
+    있다. 확인 없이 레코드를 남기면 남의 규칙을 가리키는 백업이 생기고,
+    NACL_RESTORE가 그것을 근거로 삭제한다 — 삭제는 되돌릴 수 없다."""
+    nacl({"NetworkAcls": [{"NetworkAclId": ACL, "Entries": [entry()]}]})
+
+    capture = capture_nacl()
+
+    assert not capture.captured
+    assert capture.reason_code is R.PRECHECK_INVALID_STATE
+    assert str(RULE_NUMBER) in capture.detail
+
+
+def test_nacl_capture_ignores_an_outbound_rule_in_the_same_slot(nacl):
+    """아웃바운드는 다른 축이다 — 인바운드 슬롯이 비어 있으면 삽입할 수 있다."""
+    nacl({"NetworkAcls": [{"NetworkAclId": ACL, "Entries": [entry(Egress=True)]}]})
+
+    assert capture_nacl().captured
+
+
+def test_nacl_capture_ignores_other_rule_numbers(nacl):
+    nacl({"NetworkAcls": [{"NetworkAclId": ACL, "Entries": [entry(RuleNumber=101)]}]})
+
+    assert capture_nacl().captured
+
+
+@pytest.mark.parametrize(
+    "error,expected",
+    [
+        (client_error("InvalidNetworkAclID.NotFound"), R.PRECHECK_TARGET_NOT_FOUND),
+        (client_error("UnauthorizedOperation"), R.PRECHECK_UNAUTHORIZED),
+        (EndpointConnectionError(endpoint_url="http://x"), R.PRECHECK_AWS_ERROR),
+    ],
+)
+def test_nacl_capture_turns_aws_errors_into_reason_codes(nacl, error, expected):
+    nacl(error)
+    capture = capture_nacl()
+    assert not capture.captured
+    assert capture.reason_code is expected
+
+
+def test_missing_nacl_is_target_not_found(nacl):
+    nacl({"NetworkAcls": []})
+    assert capture_nacl().reason_code is R.PRECHECK_TARGET_NOT_FOUND
+
+
+def test_nacl_capture_rejects_an_unknown_protocol_spelling(nacl):
+    """계약(NaclProtocol)이 이미 거르는 값이다 — 여기 오면 배선 문제라 AWS를 부르지 않는다."""
+    capture = capture_nacl(protocol="TCP")
+    assert not capture.captured
+    assert capture.reason_code is R.PRECHECK_PARAM_INVALID
+    assert nacl.calls == []
+
+
+def test_nacl_capture_rejects_a_host_cidr(nacl):
+    """호스트 비트가 남은 CIDR은 계약을 벗어난다 — 그대로 넣으면 되돌릴 근거가
+    실제로 들어간 규칙과 어긋난다."""
+    capture = capture_nacl(cidr_block="198.51.100.7/24")
+    assert not capture.captured
+    assert capture.reason_code is R.PRECHECK_PARAM_INVALID

@@ -106,6 +106,32 @@ Ipv4Cidr = Annotated[str, AfterValidator(_require_network_cidr)]
 # "-1"은 AWS의 전체 프로토콜 표기다
 NaclProtocol = Literal["tcp", "udp", "icmp", "-1"]
 
+# NACL 규칙을 AWS에 넣고 다시 읽을 때 쓰는 표기. describe_network_acls가 돌려주는
+# Protocol 값이 이쪽이라, 백업 fingerprint 대조(ADR-0008 §5)가 보는 축도 이쪽이다.
+NaclProtocolNumber = Literal["6", "17", "1", "-1"]
+
+# 이름 → 번호. **보내는 값도 번호로 맞춘다.**
+# 실측(2026-09-08 LocalStack Community): Protocol="tcp"로 넣으면 그 문자열이 그대로
+# 저장돼 describe도 "tcp"를 돌려준다. 실 AWS는 같은 요청을 번호로 정규화하므로 같은
+# 코드가 환경마다 다른 값을 저장하게 된다 — 그러면 NACL_RESTORE의 fingerprint 대조가
+# LocalStack에서는 맞고 실 AWS에서는 어긋난다(백업 "tcp" vs 엔트리 "6"). 삽입 시점에
+# 번호로 바꿔 두 환경이 같은 값을 저장하게 한다.
+NACL_PROTOCOL_NUMBERS: Mapping[NaclProtocol, NaclProtocolNumber] = {
+    "tcp": "6",
+    "udp": "17",
+    "icmp": "1",
+    "-1": "-1",
+}
+
+# ADD_DENY는 인바운드 차단 규칙이다 — ADR-0007 §5 파라미터 표에 egress가 없다.
+# precheck·백업 캡처·실행이 같은 축을 봐야 하므로 값을 한자리에 둔다. 세 자리가
+# 각자 False를 적으면 한쪽만 바뀌었을 때 백업이 가리키는 슬롯과 실제로 넣은 슬롯이
+# 갈리고, 그 어긋남은 NACL_RESTORE가 규칙을 못 찾는 형태로 뒤늦게 드러난다.
+NACL_ADD_DENY_EGRESS = False
+
+# ADD_DENY가 넣는 RuleAction. 백업 fingerprint의 rule_action 항목과 같은 값이다.
+NACL_DENY_ACTION = "deny"
+
 
 class _Parameters(BaseModel):
     """파라미터 모델 공통 — 알 수 없는 키를 받지 않는다.

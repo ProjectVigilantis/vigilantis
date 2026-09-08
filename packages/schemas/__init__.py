@@ -33,7 +33,7 @@ from .agents import (
     RunbookCapability,
     SecOpsGraphInput,
 )
-from .backups import BackupType, InstanceSpecBackup
+from .backups import BackupType, InstanceSpecBackup, NaclRuleIndexBackup
 from .candidates import CandidateStatus, RunbookCandidateData
 from .collections import CollectionRunStatus
 from .events import (
@@ -229,6 +229,7 @@ __all__ = [
     "MetricSeries",
     "MetricSummary",
     "MockThreatEventInput",
+    "NaclRuleIndexBackup",
     "NormalizedThreatEvent",
     "OpenIpThreatInput",
     "OpenIpThreatPayload",
