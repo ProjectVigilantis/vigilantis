@@ -1,0 +1,138 @@
+{
+  "source": "finops/input/asset_inventory_003.json",
+  "contract": "packages/schemas/agents.py :: AgentGraphOutput (부분집합 — 아래 excluded_fields)",
+  "converter": "apps/core-api/ai/evaluation/cases.py :: finops_cases — #237 의 것을 그대로 쓴다(이 카드에서 사본을 만들지 않는다)",
+  "excluded_fields": {
+    "summary_lines": "LLM 이 짓는 문장이라 내용을 고정할 수 없다. 개수만 담는다 — 문장 품질 판정은 #237 의 결함 체크리스트·사실 정합성 검사 몫이다(#234 §결정)",
+    "candidates[].parameters": "target_instance_type 은 #251 이 미결이고, 골든 6건이 전부 t3.small 로 수렴해 변별력이 없다(#234 §결정)",
+    "candidates 순서": "계약이 순서를 정하지 않는다",
+    "토큰 사용량·응답 시간": "산출의 정확성 축이 아니다"
+  },
+  "design_note": "**정답을 값이 아니라 명세로 적는다.** 산출이 LLM 이라 정확한 값으로 못박을 수 있는 축과 관계로만 못박을 수 있는 축이 갈리기 때문이다. 각 축을 어느 쪽으로 뒀는지와 그 근거는 아래와 같다.\n\n**invocation_status = SUCCEEDED · summary_line_count = 3 · reviewed_risk_level = null** — 계약이 정한다. AgentGraphOutput._enforce_contract(packages/schemas/agents.py)가 상태별 모양을 강제하고, FINOPS 는 reviewed_risk_level 이 계약상 항상 null 이다. summary_line_count 는 독립 축이 아니라 invocation_status 에 딸린 값이다(SUCCEEDED·NO_PROPOSAL 이 3, FAILED 가 0 — 2026-09-01 안성일 지적 반영).\n\n**target_arn = 정확한 값(EC2)** — 그래프가 target_arn 을 allowed_target_arns 안으로 강제하는데(ai/agent.py:294), 그 목록에는 인시던트 EC2 와 관계 SG 가 함께 있다. 그런데도 EC2 로 못박는 근거는 capabilities 다 — build_capabilities(ai/capabilities.py:104)가 대상 자산 유형이 subject 와 같은 런북만 메뉴에 올리고, 각 RunbookCapability 가 allowed_target_asset_types=[EC2] 를 싣는다. 메뉴에 오른 두 런북의 파라미터 계약도 instance_id: InstanceId(패턴 i-...)를 요구해 SG 로는 만들 수 없다. **즉 EC2 라는 답은 규칙에서 도출되며 산출 관찰이 아니다.** 그리고 이 축이 케이스 6건을 서로 구분한다.\n\n**runbook_id = 멤버십(⊆ capabilities)** — 정확한 값으로 못박지 않는다. 메뉴에 RUNBOOK_EC2_RIGHTSIZING 과 RUNBOOK_EC2_ENABLE_AUTOSCALING 둘이 오르고 그래프는 둘 다 받는다. 실측상 산출이 RIGHTSIZING 으로 모이더라도 그것은 **관찰**이지 규칙이 정한 답이 아니라서, 값으로 못박으면 정답지가 현재 구현을 기록하게 된다(#223 원칙). 어느 런북이 더 나은 추천인가는 이 카드가 재는 축이 아니다 — 판정 기준 ⓒ의 문장은 '추천을 산출한다'이지 '가장 좋은 추천을 고른다'가 아니고, 품질 판정은 #237 몫이다.\n\n**evidence_ids = 부분집합(⊆ 입력 evidences, 후보당 1개 이상)** — 정확한 값으로 못박지 않는다. 입력 Evidence 집합은 변환기가 결정적으로 만들지만, 그중 **몇 개를 인용할지는 모델이 고른다.** 그리고 그 부분집합 관계를 **그래프는 검사하지 않는다** — ai/agent.py 헤더가 '계약이 Workflow 몫으로 못 박았다'고 적고 있다. 정답지가 이 관계를 담는 이유가 그것이다: 아무도 안 보는 축이었다.",
+  "expectations": [
+    {
+      "case_id": "A11",
+      "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00021",
+      "derivation": "asset_inventory_003의 첫 COST_CANDIDATE. 003은 _is_prod 단일 변수 설계라 자산 대부분이 태그만 다르고 나머지 입력이 같다 — 그래서 target_arn 축이 특히 값을 한다. 같은 모양의 자산 넷(A11·A12·A14·A16)에 대해 그래프가 각각 자기 ARN을 붙이는지가 여기서 갈린다.",
+      "expected": {
+        "invocation_status": "SUCCEEDED",
+        "summary_line_count": 3,
+        "reviewed_risk_level": null,
+        "candidates": {
+          "min_count": 1,
+          "runbook_ids_subset_of": [
+            "RUNBOOK_EC2_ENABLE_AUTOSCALING",
+            "RUNBOOK_EC2_RIGHTSIZING"
+          ],
+          "runbook_ids_unique": true,
+          "target_arn_exactly": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00021",
+          "evidence_ids_subset_of": [
+            "ev-a11-rule",
+            "ev-a11-metric"
+          ],
+          "evidence_ids_min_per_candidate": 1
+        }
+      },
+      "input_facts": {
+        "allowed_target_arns": [
+          "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00021",
+          "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00015"
+        ],
+        "note": "그래프가 target_arn 을 이 목록 안으로 강제한다(ai/agent.py:294). 목록에 SG 가 함께 있는데도 정답을 EC2 로 못박는 근거는 design_note §target_arn 이다."
+      }
+    },
+    {
+      "case_id": "A12",
+      "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00022",
+      "derivation": "A11과 입력 모양이 거의 같고 자산 식별자만 다르다. 두 건을 함께 두는 이유는 '자산을 바꿔 끼워도 같은 답을 내는' 배선 오류를 잡기 위해서다 — 한 건만 있으면 그 상태가 정답을 통과한다.",
+      "expected": {
+        "invocation_status": "SUCCEEDED",
+        "summary_line_count": 3,
+        "reviewed_risk_level": null,
+        "candidates": {
+          "min_count": 1,
+          "runbook_ids_subset_of": [
+            "RUNBOOK_EC2_ENABLE_AUTOSCALING",
+            "RUNBOOK_EC2_RIGHTSIZING"
+          ],
+          "runbook_ids_unique": true,
+          "target_arn_exactly": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00022",
+          "evidence_ids_subset_of": [
+            "ev-a12-rule",
+            "ev-a12-metric"
+          ],
+          "evidence_ids_min_per_candidate": 1
+        }
+      },
+      "input_facts": {
+        "allowed_target_arns": [
+          "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00022",
+          "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00015"
+        ],
+        "note": "그래프가 target_arn 을 이 목록 안으로 강제한다(ai/agent.py:294). 목록에 SG 가 함께 있는데도 정답을 EC2 로 못박는 근거는 design_note §target_arn 이다."
+      }
+    },
+    {
+      "case_id": "A14",
+      "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00024",
+      "derivation": "위와 같은 축. 넷을 모두 담는 이유는 allowed_target_arns가 케이스마다 2개(자산 EC2 + 관계 SG)라 그래프가 SG를 고르는 경로도 계약상 열려 있기 때문이다 — 표본이 하나면 그 경로가 우연히 안 밟힌 것과 구분되지 않는다.",
+      "expected": {
+        "invocation_status": "SUCCEEDED",
+        "summary_line_count": 3,
+        "reviewed_risk_level": null,
+        "candidates": {
+          "min_count": 1,
+          "runbook_ids_subset_of": [
+            "RUNBOOK_EC2_ENABLE_AUTOSCALING",
+            "RUNBOOK_EC2_RIGHTSIZING"
+          ],
+          "runbook_ids_unique": true,
+          "target_arn_exactly": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00024",
+          "evidence_ids_subset_of": [
+            "ev-a14-rule",
+            "ev-a14-metric"
+          ],
+          "evidence_ids_min_per_candidate": 1
+        }
+      },
+      "input_facts": {
+        "allowed_target_arns": [
+          "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00024",
+          "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00015"
+        ],
+        "note": "그래프가 target_arn 을 이 목록 안으로 강제한다(ai/agent.py:294). 목록에 SG 가 함께 있는데도 정답을 EC2 로 못박는 근거는 design_note §target_arn 이다."
+      }
+    },
+    {
+      "case_id": "A16",
+      "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00026",
+      "derivation": "위와 같은 축. 003의 마지막 COST_CANDIDATE로, 고정 세트 6건을 빠짐없이 덮는다(test_expected_ai_covers_the_whole_fixed_set가 이 완전성을 지킨다).",
+      "expected": {
+        "invocation_status": "SUCCEEDED",
+        "summary_line_count": 3,
+        "reviewed_risk_level": null,
+        "candidates": {
+          "min_count": 1,
+          "runbook_ids_subset_of": [
+            "RUNBOOK_EC2_ENABLE_AUTOSCALING",
+            "RUNBOOK_EC2_RIGHTSIZING"
+          ],
+          "runbook_ids_unique": true,
+          "target_arn_exactly": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00026",
+          "evidence_ids_subset_of": [
+            "ev-a16-rule",
+            "ev-a16-metric"
+          ],
+          "evidence_ids_min_per_candidate": 1
+        }
+      },
+      "input_facts": {
+        "allowed_target_arns": [
+          "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00026",
+          "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00015"
+        ],
+        "note": "그래프가 target_arn 을 이 목록 안으로 강제한다(ai/agent.py:294). 목록에 SG 가 함께 있는데도 정답을 EC2 로 못박는 근거는 design_note §target_arn 이다."
+      }
+    }
+  ]
+}

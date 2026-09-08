@@ -34,14 +34,24 @@ datasets/golden/
 ├── schema/                     # 입력 양식 (Pydantic 추출본)
 ├── finops/
 │   ├── input/                  # AssetInventory — 한 리전 1회 수집 결과
-│   └── expected/               # rule_engine 판정 정답
+│   ├── expected/               # rule_engine 판정 정답 (Rule Engine 축)
+│   └── expected_ai/            # AI 그래프 산출 정답 (LangGraph 축 — #234, 아래 §정답 축이 둘인 이유)
 └── secops/
     ├── input/                  # MockThreatEventInput — 위협 1건 = 1파일
-    └── expected/               # (작성 보류 — 사유는 해당 폴더 README 참고)
+    └── expected/               # 초기 위험 판정 정답 (Risk Evaluator 축)
 ```
+
+**같은 입력에 정답 폴더가 둘인 것은 검증 대상이 둘이기 때문이다.** `finops/input/`의 자산 하나가
+`expected/`에서는 **규칙 엔진**의 판정 대상이고, `expected_ai/`에서는 **AI 그래프**의 입력이다.
+입력을 복제하지 않는 이유가 그것이다 — 복제하면 두 축이 다른 자산을 보게 되고, 그 어긋남은
+아무 테스트도 잡지 못한다. 자세한 것은 [`finops/expected_ai/README.md`](finops/expected_ai/README.md).
 
 자산은 `AssetInventory`가 "한 리전 1회 수집 결과" 단위이므로 여러 자산을 한 파일에 담는다.
 위협은 이벤트 1건이 곧 1단위이므로 파일을 나눈다.
+
+> **총계 39건에 `expected_ai/`는 더하지 않는다.** 39는 **입력** 건수(자산 23 + 위협 이벤트 16)이고,
+> `expected_ai/`는 그 입력 중 6건에 **두 번째 정답 축**을 얹은 것이지 새 입력이 아니다.
+> 더해 세면 같은 자산을 두 번 세게 된다.
 
 ## 정답(expected) 형식
 
