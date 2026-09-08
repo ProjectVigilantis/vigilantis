@@ -261,17 +261,26 @@ def test_finops_incident_carries_no_risk_fields():
 
 
 # ==============================================================================
-# ② 전 구간 흐름 — 자동 원복까지 서면 skip 해제
-# Boto3 실행 경로는 dev 에 들어갔다(#211 / PR #216 — run_rightsizing_execution).
-# 남은 것은 Status Check 실패 주입과 자동 원복 둘이다(설계서 §대조 3번).
+# ② 전 구간 흐름 — 남은 선행이 닫히면 skip 해제 (SSOT 5주차 판정 기준 ⓑ)
+# Boto3 실행 경로는 dev 에 들어갔고(#211 / PR #216 — run_rightsizing_execution),
+# **자동 원복도 #241 로 구현됐다.** 종전 skip 사유가 "자동 원복 미구현"이라고 적고
+# 있었으나 그건 낡은 문장이라 아래에서 고쳤다 — 남은 것이 무엇인지 흐려지기 때문이다.
 # ==============================================================================
 #
-# 아래 2건은 김세혁의 `execute` 본체(Boto3 실행 → `get_waiter` Status Check → 자동
-# 원복)가 서면 열린다. 그때 이 파일 위쪽의 전제 테스트가 이미 입력·런북 짝을
-# 보증하고 있으므로, 흐름 테스트는 **상태 전이만** 보면 된다.
+# 두 흐름에 공통으로 걸린 선행이 하나 있다. **판정 → Intake 배선**이다:
+# incident_intake.create_incident_from_intake() 의 본문은 dev 에 있으나
+# (#265 / PR #286) 프로덕션 호출부가 없어 판정 결과가 Incident 가 되지 않는다
+# (services/scheduler.py:run_pipeline 은 판정까지만 한다). 그 위에 트랙별 선행이
+# 하나씩 더 있다 — T1 은 Status Check 실패 주입, T2 는 NACL 실행 함수다.
+#
+# 열리면 이 파일 위쪽의 전제 테스트가 이미 입력·런북 짝을 보증하고 있으므로,
+# 흐름 테스트는 **상태 전이만** 보면 된다. 경계 실사는 docs/E2E_REHEARSAL_1ST.md.
 
 
-@pytest.mark.skip(reason="Status Check 실패 주입·자동 원복 미구현 — 설계서 §대조 3번(김세혁)")
+@pytest.mark.skip(
+    reason="Status Check 실패 주입 방법 없음 + 판정→Intake 배선 없음 "
+    "(자동 원복은 #241 로 구현됨) — 설계서 §대조 3번(김세혁) · 이슈 #301"
+)
 def test_t1_idle_ec2_downsize_and_auto_rollback_flow():
     """T1 전 구간 — 설계서 §T1 단계표 1~9번.
 
@@ -288,7 +297,10 @@ def test_t1_idle_ec2_downsize_and_auto_rollback_flow():
     """
 
 
-@pytest.mark.skip(reason="Status Check 실패 주입·자동 원복 미구현 — 설계서 §대조 3번(김세혁)")
+@pytest.mark.skip(
+    reason="NACL 2종 실행 함수 없음(services/aws/executor.py) + 판정→Intake 배선 없음 "
+    "— SSOT 5주차 판정 기준 ⓐ · 이슈 #301"
+)
 def test_t2_ssh_bruteforce_block_and_one_click_release_flow():
     """T2 전 구간 — 설계서 §T2 단계표 1~8번.
 
