@@ -1,8 +1,8 @@
 # Golden Dataset (담당: 박지현)
 
-MVP 공통 테스트 정답지. 위협/자산 더미 데이터 39건을 `*.json`으로 적재.
+MVP 공통 테스트 정답지. 위협/자산 더미 데이터 48건을 `*.json`으로 적재.
 
-- 낭비 자원 시나리오 23건 (예: CPU 2% 미만 Idle EC2, Unattached SG, `_is_prod` 경계, 미부착 EBS, EBS 전이·비정상·미상 상태)
+- 낭비 자원 시나리오 32건 (예: CPU 2% 미만 Idle EC2, Unattached SG, `_is_prod` 경계, 미부착 EBS, EBS 전이·비정상·미상 상태, 토폴로지 노드 4종)
 - 보안 위협 시나리오 16건 (예: 22번 포트 전체 개방 0.0.0.0/0, SSH 브루트포스, `OPEN_IP` 네 번째 분기)
 
 전체 팀(UI/AI/백엔드)이 공유하며 pytest 회귀 테스트(`tests/`)의 입력으로 사용한다.
@@ -49,7 +49,7 @@ datasets/golden/
 자산은 `AssetInventory`가 "한 리전 1회 수집 결과" 단위이므로 여러 자산을 한 파일에 담는다.
 위협은 이벤트 1건이 곧 1단위이므로 파일을 나눈다.
 
-> **총계 39건에 `expected_ai/`는 더하지 않는다.** 39는 **입력** 건수(자산 23 + 위협 이벤트 16)이고,
+> **총계 48건에 `expected_ai/`는 더하지 않는다.** 48은 **입력** 건수(자산 32 + 위협 이벤트 16)이고,
 > `expected_ai/`는 그 입력 중 6건에 **두 번째 정답 축**을 얹은 것이지 새 입력이 아니다.
 > 더해 세면 같은 자산을 두 번 세게 된다.
 
@@ -261,3 +261,52 @@ E3을 비우고 E4부터 시작했고, #264의 E4는 3종을 한 행으로 묶�
 **판정 커버리지**: 5차로 `skip_reason_code` 6종이 골든에서 전부 채워진다 —
 `SKIP_UNSUPPORTED_STATE`가 마지막 미충족 값이었다. `apps/core-api/tests/test_golden_assets_api.py`의
 예외 목록(`UNCOVERED_SKIP_REASONS`)이 같은 PR에서 비워졌다.
+
+## 6차 작성 케이스 (자산 9건 — 누적 48건)
+
+**목적이 다른 회차다.** 1~5차는 **판정**을 굳혔다. 6차는 **관계 그래프**를 세운다 — 토폴로지 뷰(#146)가
+그릴 노드와 엣지가 골든에 하나도 없어 화면이 계속 `apps/web/src/app/api/v1/_mock/data.ts`에서 왔다.
+(이슈 #271 ③ · 설계서 `docs/E2E_DEMO_SCENARIOS.md` §대조 필요 8번)
+
+**자산 8건** — `finops/input/asset_inventory_005.json` (신규 · 자족 파일)
+
+| case | 입력 | 정답 | 이 파일에서 맡는 것 |
+| --- | --- | --- | --- |
+| A17 | EC2 `t3.large` · `cpu_avg 18.5` · subnet **A** | `SKIP` / `SKIP_ACTIVE` | 관계 앵커 A — `SECURED_BY`·`PROTECTED_BY`·`MEMBER_OF`·`ATTACHED_TO` |
+| A18 | EC2 `t3.medium` · `cpu_avg 40.0` · subnet **B** | `SKIP` / `SKIP_ACTIVE` | 관계 앵커 B — `SECURED_BY`·`MEMBER_OF`·`REGISTERED_IN` |
+| A19 | SG 부착됨 · 개방 없음 | `SKIP` / `SKIP_ACTIVE` | 두 앵커가 함께 참조하는 `SECURED_BY` 대상 |
+| E9 | EBS `in-use` · A17 에 부착 | `SKIP` / `SKIP_ACTIVE` | `ATTACHED_TO` 의 유일한 파생 자리 |
+| — | NACL(subnet **A** 에만 연관) | 정답 없음 (`NOT_APPLICABLE`) | `PROTECTED_BY` 의 대상 |
+| — | Launch Template | 〃 | ASG `USES` 의 대상 |
+| — | Auto Scaling Group(`instance_ids: [A17, A18]`) | 〃 | `MEMBER_OF` 의 대상 · `USES` 의 출발점 |
+| — | ALB Target Group(`target_instance_ids: [A18]`) | 〃 | `REGISTERED_IN` 의 대상 |
+
+**정답이 4건뿐인 것은 누락이 아니라 계약이다.** 아래 4종은 판정 대상이 아니라
+(`packages/schemas/api/assets.py` `_RULE_TARGET_TYPES`) 항상 `NOT_APPLICABLE` 이고,
+`tests/golden_contract.py::judgement_free_list_fields()` 가 그 면제를 **계약에서 파생**시켜
+1:1 대조에서 뺀다(#271 ① / PR #270).
+
+**NACL 을 subnet A 에만, TG 를 A18 에만 붙인 것이 설계의 요점이다.** 관계가 "전부 다 붙는" 상태면
+파생 조건이 틀려도 드러나지 않는다. 두 앵커의 관계 집합이 실제로 다르게 나오는지를 회귀가 본다.
+
+**앵커 EC2 두 대는 일부러 `COST_CANDIDATE` 가 아니다.** 하나라도 후보가 되면 AI 정답지의 고정 세트가
+6건에서 7건이 되어 `tests/test_golden_ai_dataset.py` 의 가드 2종이 깨진다(#234 / PR #303).
+이 파일의 목적은 판정이 아니라 관계이고, 판정 축은 A1~A16·E1~E8 이 이미 덮는다.
+
+**자산 1건** — `finops/input/asset_inventory_001.json` (기존 파일 보정)
+
+| case | 입력 | 정답 | 막는 것 |
+| --- | --- | --- | --- |
+| A20 | SG `sg-…00006` 부착됨 · 개방 없음 | `SKIP` / `SKIP_ACTIVE` | **끊긴 엣지** — A2·A3·A4 가 `security_group_ids` 로 이 SG 를 가리키는데 자산으로는 없어, 세 EC2 의 `SECURED_BY` 가 응답에 없는 노드를 향하고 있었다 |
+
+**관계는 같은 인벤토리 파일 안에서만 파생된다.** `collector.persist_inventory` 가 `subnet_id`→NACL,
+`instance_id`→ASG/TG, `attached_instance_ids`→EBS, ASG→LT 를 잇는데, 짝이 다른 파일에 있으면
+조용히 0건이 된다. `ATTACHED_TO` 가 실제로 그랬다 — 4차 EBS(#264 · #276)가 부착 대상으로 적은
+`i-0a1b2c3d4e5f00041` 이 골든 어디에도 EC2 로 없어, EBS 가 들어온 뒤에도 이 관계는 **한 번도 파생된
+적이 없다.** 아무도 세지 않아 아무도 몰랐다.
+
+**커버리지**: 6차로 **자산 유형 7종 전량**과 **`RelationType` 6종 전량**이 골든에서 파생된다.
+`apps/core-api/tests/test_golden_assets_api.py` 의 가드 3종이 그 등식을 지킨다 —
+노드(`test_golden_covers_every_asset_type`) · 엣지(`test_golden_derives_every_relation_type`) ·
+끊긴 엣지 없음(`test_golden_relations_point_at_served_assets`). 계약에 유형이나 관계가 추가되면
+그 등식이 먼저 실패하고, 고칠 곳은 테스트가 아니라 이 디렉터리다.
