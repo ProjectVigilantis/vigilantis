@@ -46,7 +46,7 @@
 
 **확정본 대조가 필요한 항목은 §대조 필요 목록에 모아뒀다.** 본문의 🔶 에는 **그 목록의 번호를 함께 적는다** — 번호가 없으면 무엇을 기다리는 표시인지 읽는 사람이 알 수 없다. 런북별 세부 실행 단계와 `parameters_schema`는 §대조 2번으로 해소됐고(2026-08-31, PR #205), **1번은 절반이 해소돼**(2026-09-01 — Golden SecOps 정답 12건, PR #223 · #242) `evaluate_threat()` 워크플로 배선 하나만 남았다.
 
-남은 🔶 는 **넷**이다 — 그 배선(1번) · Status Check **실패 주입 방법**(3-A번 — 판정 자체는 #240 / PR #244로 섰고, 자동 원복 엔진 3-B번도 #241 / PR #256으로 해소됐다) · **골든 자산 유형 3/7종으로 토폴로지 뷰가 mock인 것(8번)** · **판정→Intake 배선이 없어 T1 2단계 이후가 mock인 것(9번)**. 8·9번은 2026-09-02에 신설했다. **막혀 있던 것이 늘어난 게 아니라, mock으로 덮여 안 보이던 것을 목록에 올린 것이다** — 같은 날 자산 화면(T1 1단계)은 골든 실데이터로 서는 것을 실측해 mock을 벗겼다.
+남은 🔶 는 **넷**이다 — 그 배선(1번) · Status Check 실패 주입(3번) · **골든 자산 유형 3/7종으로 토폴로지 뷰가 mock인 것(8번)** · **Incident 생성 계층 부재로 T1 2단계 이후가 mock인 것(9번)**. 8·9번은 2026-09-02에 신설했다. **막혀 있던 것이 늘어난 게 아니라, mock으로 덮여 안 보이던 것을 목록에 올린 것이다** — 같은 날 자산 화면(T1 1단계)은 골든 실데이터로 서는 것을 실측해 mock을 벗겼다.
 
 ---
 
@@ -102,13 +102,13 @@ IN_PROGRESS → SUCCESS
 | 4 | 가드레일 4단계 | — (화면 표시 없음) · 통과 신호는 `status: AWAITING_APPROVAL`로 실행 버튼이 열리는 것 | (내부) | `INCIDENT_UPDATED` | 슬라이드 컷으로 분리 |
 | 5 | 관제자 승인 | **[조치 실행]** 클릭 | `POST /api/v1/actions/execute`<br>**`202 Accepted`** → `IN_PROGRESS`<br>*(같은 `idempotency_key` 재요청은 `200 OK` 멱등 재생)* | `EXECUTION_UPDATED` | — |
 | 6 | 실행 | 진행 표시 | `ec2.modify_instance_attribute` | `EXECUTION_UPDATED` | LocalStack 재기동 후 재시도 |
-| 7 | **Status Check 실패** | 실패 표시 | `get_waiter` 2/2 판정 3분기(`OK`·`FAILED`·`TIMED_OUT`) — **구현됨**(#240 / PR #244). 🔶 남은 것은 **실패 주입 방법**(§대조 3-A) | `EXECUTION_UPDATED`<br>Execution **`ROLLBACK_INITIATED`**<br>Incident **`ACTION_IN_PROGRESS`** | **핵심 컷** — 실패 주입이 안 되면 T1 성립 안 함 |
-| 8 | **자동 원복 발동** | **복구 중** | `RUNBOOK_EC2_REVERT_SIZE`<br>`trigger_source: AUTO_ON_FAILURE`<br>**원본을 옮기지 않고 `parent_execution_id`로 묶인 자식 실행을 새로 만든다**(`workflows.py:1146 initiate_auto_rollback()`) | `EXECUTION_UPDATED`<br>**자식** `IN_PROGRESS`<br>(원본은 `ROLLBACK_INITIATED` 그대로) | 상태 전이만 화면으로 설명 |
-| 9 | 원복 완료 | **AST-001로 이동해** 인스턴스 유형 복귀 확인 | **자식 `SUCCESS` → 원본 `ROLLED_BACK`** 으로 함께 확정(`workflows.py:895 _ORIGIN_STATUS_AFTER_ROLLBACK`) | `EXECUTION_UPDATED`<br>원본 **`ROLLED_BACK`**<br>Incident **`AWAITING_CLOSURE`** | — |
+| 7 | **Status Check 실패** | 실패 표시 | 🔶 `get_waiter` 2/2 실패 — §대조 필요 3번 | `EXECUTION_UPDATED` `FAILED` | **핵심 컷** — 실패 주입이 안 되면 T1 성립 안 함 |
+| 8 | **자동 원복 발동** | **복구 중** | `RUNBOOK_EC2_REVERT_SIZE`<br>`trigger_source: AUTO_ON_FAILURE` | `EXECUTION_UPDATED` `ROLLBACK_INITIATED` | 상태 전이만 화면으로 설명 |
+| 9 | 원복 완료 | **AST-001로 이동해** 인스턴스 유형 복귀 확인 | 원본 Execution `ROLLED_BACK` | `EXECUTION_UPDATED` | — |
 
-### 7·8·9번의 상태값은 어느 축인가 — 이벤트 이름에 속지 않기
+### 7·8·9번의 상태값 — 세 시점을 겹쳐 본다
 
-세 행의 WS 이벤트가 전부 `EXECUTION_UPDATED`라, **그 옆에 적힌 값이 Execution 상태로 읽힌다.** 실제로는 두 축이 함께 움직이고 값이 서로 다르다.
+표는 행마다 축을 갈라 적는다. 세 시점을 한자리에 겹쳐 놓으면 **두 축이 어떻게 어긋난 채로 함께 움직이는지**가 보인다.
 
 | 시점 | Execution(원본) | Execution(자식) | Incident |
 | --- | --- | --- | --- |
@@ -118,7 +118,9 @@ IN_PROGRESS → SUCCESS
 
 **7번 Incident가 `FAILED`가 아닌 이유**: `_incident_status_after()`는 실행의 성패가 아니라 **그 인시던트에 남은 것**으로 목적 상태를 가른다(`workflows.py:843`). `ROLLBACK_INITIATED`가 비종료 상태라(`packages/schemas/executions.py:28 EXECUTION_NON_TERMINAL_STATUSES`) *"진행 중 실행이 있다"* 가 되어 `ACTION_IN_PROGRESS`다. **되돌릴 것이 남았는데 `FAILED`로 적으면 화면이 복구 중인 조치를 '진행 불가'로 그린다.**
 
-**8번이 상태 전이가 아닌 이유**: #241은 원본을 옮기지 않고 **`parent_execution_id`로 묶인 자식 행을 새로 만든다**(`workflows.py:1146`). 원본과 자식을 한 축으로 적으면 7번과 8번이 같은 값(`ROLLBACK_INITIATED`)을 두 번 말하게 되어 **무엇이 새로 일어났는지가 사라진다.**
+**8번이 상태 전이가 아닌 이유**: #241은 원본을 옮기지 않고 **`parent_execution_id`로 묶인 자식 행을 새로 만든다**(`workflows.py:1146 initiate_auto_rollback()`). 원본과 자식을 한 축으로 적으면 7번과 8번이 같은 값(`ROLLBACK_INITIATED`)을 두 번 말하게 되어 **무엇이 새로 일어났는지가 사라진다.**
+
+**9번이 두 실행을 함께 확정하는 이유**: `_ORIGIN_STATUS_AFTER_ROLLBACK`(`workflows.py:895`)이 자식 `SUCCESS` → 원본 `ROLLED_BACK`으로 잇는다. 원본이 `ROLLBACK_INITIATED`에 남으면 비종료라 인시던트가 영원히 진행 중이 된다.
 
 ### 이 트랙이 증명하는 것
 
@@ -166,7 +168,7 @@ FE는 `NEXT_PUBLIC_API_BASE_URL`을 이 백엔드로 걸면 mock 대신 실 API�
 경계가 깨지지 않는지는 `apps/core-api/tests/test_golden_assets_api.py` 3건이 CI에서 지킨다.
 
 **🔶 아직 mock이 필요한 것**
-- **2단계 이후**(Incident 카드·AI 3줄·추천)는 그대로 mock이다 — **§대조 필요 9번**. Intake 계층은 **본문까지 들어왔으나 부르는 코드가 없다**(#265 / PR #286 — `incident_intake.py:215`, 프로덕션 호출부 0건).
+- **2단계 이후**(Incident 카드·AI 3줄·추천)는 그대로 mock이다 — **§대조 필요 9번**. Intake 계층의 **자리는 섰으나 본문이 비어 있다**(#254 / PR #258, `NotImplementedError`).
 - **토폴로지 뷰**는 골든으로 못 채운다 — **§대조 필요 8번**. 골든 FinOps 입력의 자산 유형이 **EC2·SG·EBS 3종**이고 계약은 7종이다.
 
 ---
@@ -257,16 +259,13 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 | --- | --- | --- | --- |
 | 1 | T2 2번 위험도 판정값(`initial_risk_level`) | **판정 규칙과 `RiskReasonCode` 6종은 확정**(#210 / PR #206 — `packages/schemas/events.py`, `apps/core-api/security/risk_evaluator.py::evaluate_threat`). **② 정답지는 해소됐다**(2026-09-01) — `datasets/golden/secops/expected/`에 입력 12건과 1:1로 대응하는 정답 12건이 있다(PR #223 10건 · PR #242 SSH MEDIUM 밴드 2건). **남은 것은 ① 하나다** — `evaluate_threat()`가 **Security Workflow에 배선되지 않아** 위협 접수 → 배지 경로가 아직 없다(현재 호출처는 테스트뿐) | ① SecOps 워크플로 배선 |
 | 2 | ~~런북별 세부 실행 단계·`parameters_schema`~~ ✅ 해소(2026-08-31) | 확정본이 SSOT §Action Whitelist로 이관되고, `parameters_schema`는 `packages/schemas/runbook_parameters.py`(#154 / PR #178), 세부 실행 단계·`target_api`는 [ADR-0007](adr/0007-guardrail-dryrun-executor-precheck-contract.md) §Context·§5가 갖는다 | — |
-| 3-A | Status Check 실패 **주입 방법** | **판정은 섰다** — `wait_for_status_check()` 3분기(`OK`·`FAILED`·`TIMED_OUT`)가 구현됐다(#240 / PR #244, 2026-09-01). 남은 것은 **LocalStack에서 2/2 실패를 만들 방법**이고, PR #244 본문이 이를 실 AWS 스모크(ADR-0006 §4 · 6–7주차)로 넘겼다 | 실 AWS 스모크 또는 별도 주입 수단 |
-| 3-B | ~~자동 원복 엔진~~ ✅ 해소(2026-09-03) | #241 / PR #256으로 `initiate_auto_rollback()`이 섰다(`workflows.py:1146`) — `ROLLBACK_INITIATED` 원본에 `AUTO_ON_FAILURE` 자식을 **원본당 1회** 접수한다(`dispatcher.py:301`). 발동 억제는 자식 행의 존재가 하므로 자식이 거절로 끝나도 재발동하지 않는다(ADR-0004 정책 ④) | — |
+| 3 | Status Check 실패 **주입 방법** | 자동 원복 엔진 미구현 | 김세혁 원복 엔진 |
 | 4 | ~~가드레일 ③ 실제 통과~~ ✅ 해소(2026-08-31) | **4단계가 전부 섰다.** ③ ARN Match 구현(#177 / PR #202 — DB 수집 ARN 대조로 Scope Escalation 차단, ① NUL 문자 차단 포함)으로 `tests/test_guardrails.py`의 placeholder skip 1건이 해제됐다. ④ Dry-Run은 `precheck()` 확정 10종 구현 완료(#129 / PR #147 · 실측 #130 / PR #170) | — |
 | 5 | 화면 구현 상태 | 아래 표 | 카드별 |
 | 6 | **WS 이벤트로 화면이 실시간 갱신되는 것** | FE 연동 구현됨 — 소켓 수명주기·이벤트 3종·Toast·재연결(#168 / PR #181). 로컬 `core-api`로 **연결·중단·자동 복구 확인**. 다만 **이벤트 실배달은 미확인**. 막던 이유였던 "코어 DB가 비었다"는 **자산에 대해서는 풀렸다**(2026-09-02 — `scripts/load_golden_assets.py`로 골든 FinOps 전량 적재). 남은 것은 **Incident를 만드는 계층**(아래 9번)이다 | 9번 해소 후 |
 | 7 | ~~T1 5번 `POST /actions/execute` HTTP 상태 코드~~ ✅ 해소(2026-08-27) | 라우터·멱등 처리 구현 완료(#116 / PR #119), 롤백 3종 실행 접수는 #126 / PR #158. **신규 접수 `202 Accepted` · 같은 `idempotency_key` 재요청 `200 OK`** 로 확정돼 SSOT §API 계약에 등재됐다. 남은 것은 `execute` 본체(Boto3 실행·자동 원복 — 김세혁) | — |
 | 8 | **토폴로지 뷰를 골든으로 못 채운다** (2026-09-02 신설 · 2026-09-04 EBS 편입 반영) | 골든 FinOps 입력의 자산 유형이 **EC2·SG·EBS 3종**인데 계약은 7종이다 — NACL·Launch Template·ASG·ALB Target Group이 **0건**이다. EBS는 2026-09-03에 편입됐다(#264 / PR #280). 자산 목록의 판정 배지는 골든으로 서지만(위 T1 §자산 화면), 관계 그래프가 요구하는 나머지 노드 4종은 여전히 mock(`_mock/data.ts`)에서 온다 | 골든 FinOps 입력에 자산 4종 추가 (박지현) |
-| 9 | **T1 2단계 이후가 mock인 이유** (2026-09-02 신설 · **2026-09-08 갱신**) | **본문은 들어왔고, 부르는 코드가 없다.** `create_incident_from_intake()`는 구현돼 dev에 있으나(#265 / PR #286 — `apps/core-api/incident_intake.py:215`) **프로덕션 호출부가 0건**이다: `services/scheduler.py:32 run_pipeline()`이 수집→정형화→적재→**판정까지만** 하고, 라우터·`workflows.py`·`main.py` 어디에도 부르는 자리가 없다. 그 아래는 이미 이어져 있어 — `agent_dispatcher.py:407 dispatch_pending_analysis()`가 lifespan에 배선돼 있다(`main.py`의 `start_agent_dispatcher`) — **Incident만 생기면 그 뒤는 자동으로 흐른다.** 자산 화면까지는 골든이 실데이터로 가지만 카드 그리드부터는 그 앞이 끊겨 있다 | **판정→Intake 배선 하나만 남았다.** #254 본문은 PR #286으로, #243 AI 요약 프롬프트는 PR #288로 해소 |
-
-**3번을 3-A·3-B로 가른 이유**: 한 줄로 두면 **#241 머지 시 3번 전체가 해소된 것으로 읽힌다.** 실제로 자동 원복은 2026-09-03에 섰지만 **실패 주입 방법은 그때도 안 풀렸고**, 그 둘은 담당도 해소 시점도 다르다. 3-A가 `tests/test_e2e_scenario.py`의 T1 skip을 붙잡고 있는 쪽이다.
+| 9 | **T1 2단계 이후가 mock인 이유** (2026-09-02 신설) | 판정 행에서 **Incident를 만드는 계층의 자리는 섰지만 본문이 비어 있다.** `apps/core-api/incident_intake.py`·`agent_dispatcher.py`와 진입 계약 `schemas/intake.py`가 2026-09-02에 머지됐고(#254 / PR #258), `create_incident_from_intake()`는 아직 `NotImplementedError`다. 판정 계층에서 이 진입점을 부르는 자리도 없어 `create_incident`·`evaluate_threat`의 서비스 호출부는 여전히 0곳이다. 자산 화면까지는 골든이 실데이터로 가지만 카드 그리드부터는 그 앞이 끊겨 있다 | #254 본문 구현 + 판정→Intake 배선 + #243 AI 요약 프롬프트 |
 
 **문서의 WS 이벤트 열은 "서버가 그 시점에 보내는 이벤트"로는 정확하다.** 다만 그 이벤트로 화면이 실시간으로 바뀌는 것을 시연하려면 6번이 필요하다.
 
@@ -296,8 +295,8 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 
 | 테스트 | 대응 트랙 | 검증 범위 | 여는 조건 |
 | --- | --- | --- | --- |
-| `test_t1_idle_ec2_downsize_and_auto_rollback_flow` | **T1** | Golden A1 → `COST_CANDIDATE` → 가드레일 → 실행 접수 → Status Check 실패 → `ROLLED_BACK` | 대조 **3-A**(실패 주입 방법) + **9번**(판정→Intake 배선). **자동 원복은 조건이 아니다** — 3-B로 해소됐다 |
-| `test_t2_ssh_bruteforce_block_and_one_click_release_flow` | **T2** | Golden **S3** → Incident → `response_mode` 진입 → 승인 → `NACL_ADD_DENY`(`USER_APPROVAL`) → 원클릭 해제 → `NACL_RESTORE` | 대조 1번(판정기 워크플로 배선) + **9번** + **NACL 2종 실행 함수**(#297·#298 — `services/aws/executor.py`의 실행 함수는 `execute_rightsizing`·`execute_revert_size` 2개뿐이다) |
+| `test_t1_idle_ec2_downsize_and_auto_rollback_flow` | **T1** | Golden A1 → `COST_CANDIDATE` → 가드레일 → 실행 접수 → Status Check 실패 → `ROLLED_BACK` | 대조 3번(Status Check 실패 주입·자동 원복) |
+| `test_t2_ssh_bruteforce_block_and_one_click_release_flow` | **T2** | Golden **S3** → Incident → `response_mode` 진입 → 승인 → `NACL_ADD_DENY`(`USER_APPROVAL`) → 원클릭 해제 → `NACL_RESTORE` | 대조 1번(판정기 워크플로 배선) |
 
 **두 테스트 모두 Golden Dataset을 입력으로 쓴다.** 시연에 쓰는 데이터와 테스트에 쓰는 데이터가 같아야 "시연이 되면 테스트도 된다"가 성립한다.
 

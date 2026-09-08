@@ -279,7 +279,7 @@ def test_finops_incident_carries_no_risk_fields():
 
 @pytest.mark.skip(
     reason="Status Check 실패 주입 방법 없음 + 판정→Intake 배선 없음 "
-    "— 설계서 §대조 3-A(주입 방법) · 9번(배선). 자동 원복은 3-B 로 해소됨 "
+    "— 설계서 §대조 3번(주입 방법) · 9번(배선). 자동 원복은 3-B 로 해소됨 "
     "(#241 / PR #256) · 이슈 #301 · #246"
 )
 def test_t1_idle_ec2_downsize_and_auto_rollback_flow():
