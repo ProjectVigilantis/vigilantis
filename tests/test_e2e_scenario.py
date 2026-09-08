@@ -274,7 +274,7 @@ def test_finops_incident_carries_no_risk_fields():
 # 하나씩 더 있다 — T1 은 Status Check 실패 주입, T2 는 NACL 실행 함수다.
 #
 # 열리면 이 파일 위쪽의 전제 테스트가 이미 입력·런북 짝을 보증하고 있으므로,
-# 흐름 테스트는 **상태 전이만** 보면 된다. 경계 실사는 docs/E2E_REHEARSAL_1ST.md.
+# 흐름 테스트는 **상태 전이만** 보면 된다. 경계 실사는 docs/E2E_GATE_0911.md.
 
 
 @pytest.mark.skip(

@@ -8,7 +8,7 @@
 
 * **팀명**: 딸깍 인프라
 * **개발 배경**: Multi-Account/Region 환경 확산에 따른 인프라 파편화와 초단위 보안 위협에 대응하고, AI 자동화 도입 시 발생하는 환각(Hallucination) 및 과도한 권한 실행(Excessive Agency) 위험을 해결하기 위해 구축되었습니다.
-* **MVP 범위**: **AWS 단일 계정 / 1–2개 리전 / EC2·Security Group 중심**(런북 조치 대상: NACL·EBS·ASG·ALB Target Group 포함). CloudWatch(CPU/Network) 기반 Idle EC2 판별, OpenIP·SSH 브루트포스 **모의 위협** 대응, gpt-5.6-luna 4단계 가드레일 + **런북 10종(본편 7 + 롤백 3) Action Whitelist**, 양방향 회복 엔진, Next.js 대시보드까지를 1차 발표 대상으로 한다.
+* **MVP 범위**: **AWS 단일 계정 / 1–2개 리전 / EC2·Security Group 중심**(런북 조치 대상: NACL·EBS·ASG·ALB Target Group 포함). CloudWatch(CPU/Network) 기반 Idle EC2 판별, OpenIP·SSH 브루트포스 **모의 위협** 대응, gpt-5.6-luna 4단계 가드레일 + **런북 10종(본편 7 + 롤백 3) Action Whitelist**, 양방향 회복 엔진, Next.js 대시보드까지를 **중간 발표(10/1) MVP 시연** 대상으로 한다. **최종 발표(12/11)** 에는 Post-MVP 범위까지 배포·시연한다.
 * **현황·결정 기준(SSOT)**: [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) — 확정 범위·결정 로그·미해결 이슈의 단일 기준. 본 README와 충돌 시 PROJECT_STATUS.md가 우선한다.
 * **Post-MVP (로드맵)**: RDS·S3 확장, Multi-Account/Region, OpenTelemetry 전 구간 트레이싱, Step Functions/ECS Fargate/Lambda, Terraform Drift 감지·GitOps PR, 모바일 푸시(FCM), GCP·Azure. (아래 Tech Stack 참고)
 
