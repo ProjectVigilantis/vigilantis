@@ -401,6 +401,7 @@ def make_execution():
         parent=None,
         candidate=None,
         idempotency_key: str | None = None,
+        validated_command: dict | None = None,
         updated_at=None,
     ):
         if target_arn is None:
@@ -418,6 +419,7 @@ def make_execution():
             if candidate is None
             else getattr(candidate, "candidate_id", candidate),
             idempotency_key=idempotency_key,
+            validated_command=validated_command,
         )
         # status·updated_at 은 서버/모델 기본값이 있어 **덮을 때만** 싣는다.
         # 넘기지 않은 것과 기본값을 다시 적은 것은 뜻이 다르다.
