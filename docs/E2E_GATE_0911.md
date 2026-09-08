@@ -2,7 +2,9 @@
 
 > ⚠️ **2026-09-08 일정 변경**: 종전의 "9/11 리허설 1차 → 9/13 게이트" 2단이 **9/11 하루의 게이트 판정 1단으로 합쳐졌다**(PM 확정 — 9/13이 일요일이라 주말·공휴일 제외 규칙에 걸린다). **리허설은 없다.** 이 문서가 곧 게이트 당일 대본이자 판정서이며, 종전 문서명 `E2E_REHEARSAL_1ST.md`에서 옮겨왔다. 본문에서 "리허설"로 읽히던 자리는 전부 **게이트 당일(9/11)** 을 가리킨다 — *리허설에서 걸러 게이트 전에 고친다*는 여유 구간은 없어졌다.
 >
-> **기준일**: 2026-09-07 · **실측 기준 커밋**: `79d6001` (이 브랜치의 부모 — 2026-09-08 재실측)
+> **기준일**: 2026-09-08 · **실측 기준 커밋**: `8752ddc` (2026-09-08 14:5x 전량 재측정 — 이전 기준 `79d6001` 이후 dev 6커밋)
+> **재측정 결과**: 인용한 `파일:줄` **12건 이상 없음**. 핵심 주장 3건도 그대로다 — `create_incident_from_intake` 프로덕션 호출부 **0건** · `executor.py` 실행 함수 **2개뿐** · FE PR 3건 전부 `CHANGES_REQUESTED`(09-07 이후 무변동).
+> **§2 사전 준비는 이 날 처음으로 실제로 돌려 봤고, 8단계 중 3개가 문서대로는 실패했다** — 아래 §2 ⓪ 로 고쳤다.
 > **작성**: 박지현 (QA & Scenario) · **카드**: 이슈 #301 · **입력 결정**: 이슈 #267 안건 1·2번
 > **원천**: [`E2E_DEMO_SCENARIOS.md`](E2E_DEMO_SCENARIOS.md)(T1·T2 단계표) · [`PROJECT_STATUS.md`](PROJECT_STATUS.md) §현재 위치(5주차 판정 기준 ⓕ)
 
@@ -47,7 +49,7 @@
 | --- | --- | --- | --- |
 | 1 | 실경로 / 대체 컷 경계 | 김세혁 | ✅ **답 나옴** — 2026-09-07 PM 확정(PR #302 리뷰). T1-7 실패 주입은 **9/11에 붙이지 않는다** |
 | 2 | 게이트 당일 화면 데이터 출처 | 김세혁 | ✅ **답 나옴** — 2026-09-07 PM 확정(PR #302 리뷰). §1-2 |
-| 3 | 판정 → Intake 배선이 9/11 전에 서는가 | 안성일 | 🔶 **현재 상태로는 「아니오」** — §3-2 |
+| 3 | 판정 → Intake 배선이 9/11 전에 서는가 | ~~안성일~~ → **김승철** | 🔶 **현재 상태로는 「아니오」** — §3-2. **담당이 옮겨졌다**(2026-09-08 확인): 안성일은 본문 축(#265 · #285)을 닫았고, 남은 **배선**은 카드 **#306**(김승철 · 6주차)이 든다 |
 | 4 | 계약에 금액 축을 둘 것인가 | 안성일 · 유건희 | ✅ **답 나옴** — 2026-09-07 PM 확정, 조치별 절감 예상을 **넣는다**(SSOT §MVP 확정 범위) |
 
 **1·2번은 이 문서의 리뷰에서 답이 왔다**(PR #302 · 2026-09-07). 아래 §1-2는 「기본 가정」이 아니라 **확정**이며, 답이 없어 잠정으로 둔 항목은 남아 있지 않다.
@@ -69,6 +71,19 @@
 
 각 단계에 **"이렇게 나오면 정상"** 을 붙였다. 하나라도 어긋나면 그 자리에서 멈추고 대체 컷으로 전환할지 판단한다.
 
+> ⚠️ **2026-09-08 — 이 8단계를 처음 끝까지 돌려 봤고, ②③④가 문서대로는 실패했다.** 리허설이 폐지돼 이 절차가 **당일에 처음 도는 것**이 되므로 실측으로 고쳤다. 아래는 전부 rc=0 을 확인한 형태다.
+
+**⓪ 환경변수 — ②③④가 여기에 걸린다. 새 셸이면 반드시 먼저**
+
+```bash
+export DATABASE_URL="postgresql+psycopg://vigilantis:vigilantis@localhost:5432/vigilantis"
+export AWS_ENDPOINT_URL="http://localhost:4566"
+```
+
+**`.env` 로는 안 된다.** `apps/core-api/config.py:32-35` 가 못 박고 있다 — *"AWS·수집 설정은 `.env` 를 읽지 않는다. `.env` 의 `AWS_ENDPOINT_URL`·`DATABASE_URL` 은 compose 네트워크 안에서만 유효한 호스트명(`localstack`·`db`)"* 이라, 호스트에서 직접 도는 시드·적재 스크립트가 그 값을 집으면 **붙지도 않는 대상에 조용히 붙으려 한다.** 그래서 호스트 실행은 실제 환경변수로 넘겨야 한다.
+
+> AWS 자격증명은 넣지 않는다 — `services/aws/client.py:72 _ensure_dummy_credentials()` 가 **엔드포인트가 있을 때만** 더미 키를 주입한다(실 AWS 에서는 절대 넣지 않는다).
+
 **① 인프라 기동**
 
 ```bash
@@ -80,10 +95,14 @@ docker compose up -d db localstack
 **② DB 스키마**
 
 ```bash
-uv run alembic upgrade head
+uv run alembic -c apps/core-api/alembic.ini upgrade head
 ```
 
 → 마지막 리비전까지 올라가고 오류 없음.
+
+⚠️ **`-c` 를 빼면 저장소 루트에서 실패한다** — `alembic.ini` 가 루트가 아니라 `apps/core-api/` 에 있다(`rc=127` · *"No 'script_location' key found in configuration"*). compose 의 `migrate` 서비스가 `uv run alembic upgrade head` 로 도는 것은 Dockerfile 이 `WORKDIR /app/apps/core-api` 를 잡기 때문이고(`apps/core-api/Dockerfile:18`), **호스트에는 그 cwd 가 없다.** `script_location` 이 `%(here)s/db/migrations` 라 ini 만 찾으면 나머지는 따라온다.
+
+⚠️ **이 단계를 건너뛰지 않는다.** 2026-09-08 실측에서 로컬 DB 가 head 보다 **한 리비전 뒤**였다(`d9b3e5c71a08 → f4a1c8e29b57`). 그대로 갔으면 **옛 스키마로 시연**하게 된다 — 오류 없이 조용히.
 
 **③ LocalStack 시드**
 
@@ -91,7 +110,8 @@ uv run alembic upgrade head
 uv run python scripts/seed_localstack.py
 ```
 
-→ EC2·SG 리소스 생성 로그. 이게 없으면 T1-6 실행이 대상 인스턴스를 못 찾는다.
+→ `[seed] EC2 …`·`[seed] SG …` 생성(또는 `존재 — skip`) 로그. 이게 없으면 T1-6 실행이 대상 인스턴스를 못 찾는다.
+⚠️ **⓪의 `AWS_ENDPOINT_URL` 이 없으면 즉시 종료한다** — *"AWS_ENDPOINT_URL 미설정 — 이 스크립트는 LocalStack 전용이다"*(rc=1).
 
 **④ 골든 자산 적재 — T1-1의 실경로 근거**
 
@@ -101,6 +121,7 @@ uv run python scripts/load_golden_assets.py --verify
 
 → `GET /api/v1/assets` `200` · `collection_status: READY` · **골든 정답 대조 어긋남 0**.
 적재 건수·판정 분포는 여기 적지 않는다 — 골든이 한 건만 늘어도 낡고, 이 명령의 출력이 원천이다.
+⚠️ **⓪의 `DATABASE_URL` 이 없으면 pydantic `Field required` 로 죽는다**(rc=1). 화면에 뜨는 것은 스택 트레이스뿐이라 원인이 바로 안 보인다.
 
 **⑤ 위협 판정 확인 — T2-2·3의 실경로 근거**
 
@@ -108,7 +129,8 @@ uv run python scripts/load_golden_assets.py --verify
 uv run python scripts/inject_mock_threat.py evt_ssh_bruteforce_001
 ```
 
-→ S3가 `HIGH` · `PRE_MITIGATION_0_5S` · `SSH_BRUTEFORCE`로 판정.
+→ `1건 처리 — 정답 대조 통과` 뒤에 `위험도=HIGH 대응=PRE_MITIGATION_0_5S 사유=RISK_SSH_BRUTEFORCE`.
+사유 코드는 접두 `RISK_` 가 붙는다 — 슬라이드에 옮길 때 그대로 쓴다.
 ⚠️ **이 스크립트는 DB에 쓰지 않는다**(`scripts/inject_mock_threat.py` 헤더). 판정을 눈으로 보여 주는 데까지가 이 명령의 몫이다.
 
 **⑥ 스캔 스케줄러 실기동 확인 — 판정 기준 ⓓ의 컷 (여기서 한 번 띄우고, 끈다)**
@@ -117,7 +139,13 @@ uv run python scripts/inject_mock_threat.py evt_ssh_bruteforce_001
 uv run uvicorn main:app --app-dir apps/core-api
 ```
 
-→ 기동 로그에 스캔 스케줄러 등록(`main.py`의 `start_scan_scheduler`). **1 tick(기본 300초)을 기다리지 않는다 — 등록 로그를 보이고 즉시 종료(`Ctrl+C`)한다.**
+→ 기동 로그에서 **이 한 줄**을 찾는다(2026-09-08 실측):
+
+```
+"event": "scheduler started: job=finops_secops_scan interval=300s"
+```
+
+**1 tick(기본 300초)을 기다리지 않는다 — 이 줄을 보이고 즉시 종료(`Ctrl+C`)한다.** 같은 기동에서 `dispatcher started: job=execution_dispatch interval=10s` 와 `agent dispatcher started: job=agent_dispatch interval=30s` 도 함께 뜬다.
 
 ⚠️ **이 기동을 그대로 두고 대본을 시작하면 R2가 발표 도중 깨진다.** `SCAN_ENABLED` 기본값이 `True`이고(`apps/core-api/config.py:169`) 주기가 300초라(`:166`), 첫 tick에서 **LocalStack 시드 자산이 골든만 있던 자산 화면에 섞인다.** 골든과 시드가 **같은 리전**이고, 자산 목록 조회에 **run 필터가 없기 때문이다**(`routers/assets.py`의 `get_assets` — 리전으로만 좁힌다). 골든 자산이 지워지지는 않지만 시드가 **섞이고** `collection_status`·`last_collected_at`이 스캔 run 기준으로 바뀐다. **오류 없이 조용히 일어난다.**
 
@@ -129,7 +157,15 @@ uv run uvicorn main:app --app-dir apps/core-api
 SCAN_ENABLED=false uv run uvicorn main:app --app-dir apps/core-api
 ```
 
-→ 기동 로그에 `scan scheduler disabled: SCAN_ENABLED=false` · dispatcher·agent_dispatcher 2종 등록(`main.py`의 `start_dispatcher`·`start_agent_dispatcher`).
+→ 기동 로그에 세 줄(2026-09-08 실측):
+
+```
+"event": "scan scheduler disabled: SCAN_ENABLED=false"
+"event": "dispatcher started: job=execution_dispatch interval=10s"
+"event": "agent dispatcher started: job=agent_dispatch interval=30s"
+```
+
+**끄였다는 것을 확인하는 방법**: 로그에서 `finops_secops_scan` 이 **0건**이어야 한다. ⑥ 에서는 이 문자열이 뜨고 ⑦ 에서는 안 뜬다 — 그 차이가 곧 R2 의 전제다.
 
 > **⑥과 ⑦을 한 기동으로 합치지 않는다.** ⓓ(스캔 실기동)와 T1-1(골든과 대조되는 자산 화면)은 **서로를 무너뜨린다** — 섞으면 둘 다 잃는다.
 > 여기서 줄 번호 대신 심볼로 가리키는 것도 같은 사고를 막기 위해서다 — `main.py`의 lifespan은 #287로 스케줄러가 3종이 되며 73·74 → **76·78·80**으로 밀렸다.
@@ -236,6 +272,8 @@ PR #286(#265)으로 함수 본문은 dev에 들어왔다. **그러나 판정 결
 
 > **줄 번호가 아니라 테스트 함수명으로 가리킨다.** 이 skip은 같은 파일 위쪽 주석이 늘면서 `:274` → `:280`으로 밀렸다. 함수명은 그때 흔들리지 않는다.
 
+> ⚠️ **위 인용은 2026-09-08 현재 dev 와 정확히 일치하지만, [PR #304](https://github.com/ProjectVigilantis/vigilantis/pull/304)가 머지되면 낡는다.** 그 PR 이 사유를 더 좁힌다 — `3번` 통째가 아니라 **`3번(주입 방법)` · `9번(배선)`** 을 가리키고, 자동 원복은 `3-B` 로 해소됐다고 적는다. **머지되면 이 블록을 다시 붙여넣을 것.**
+
 이 skip 2건 해제가 **5주차 판정 기준 ⓑ**다.
 
 ### 5-2. ② 판정 → Intake 배선 — #267 2번의 답이 여기서 나왔다
@@ -270,7 +308,7 @@ SSOT 5주차 리스크 3번의 실측:
 
 | # | 확인 항목 | 기대 | 결과 | 판정 | 비고 |
 | --- | --- | --- | --- | --- | --- |
-| R1 | 사전 준비 ①~⑧이 오류 없이 끝난다 | 8/8 | | ☐합격 ☐불합격 ☐미실시 | ⑥(스캔 실기동)과 ⑦(스캔 끄고 본 기동)은 **별개 기동**이다 |
+| R1 | 사전 준비 **⓪~⑧**이 오류 없이 끝난다 | 9/9 | | ☐합격 ☐불합격 ☐미실시 | **⓪(환경변수)를 먼저** — 2026-09-08 실측에서 ②③④가 여기에 걸려 전부 실패했다. ⑥(스캔 실기동)과 ⑦(스캔 끄고 본 기동)은 **별개 기동**이다 |
 | R2 | T1-1 자산 화면이 **골든 실데이터**로 뜬다 | 대조 어긋남 0 | | ☐합격 ☐불합격 ☐미실시 | **먼저 `SCAN_ENABLED=false`인지 확인**한다 — 켜져 있으면 첫 tick에서 시드가 섞여 조용히 불합격이 된다(§2-⑥·⑦) |
 | R3 | T1-2 Incident 1건이 생기고 `ANALYZING`이 된다 | 수동 우회 · 대상 ARN = **골든 A1** | | ☐합격 ☐불합격 ☐미실시 | 배선 여부를 함께 적는다. ARN이 A1이 아니면 인시던트 화면이 자산 화면과 갈린다(§1-2) |
 | R4 | T1-3 AI 근거 3줄 + 런북 추천이 **자동으로** 붙는다 | 사람 조작 0 | | ☐합격 ☐불합격 ☐미실시 | |
@@ -309,10 +347,14 @@ SSOT 5주차 리스크 3번의 실측:
 
 | # | 대조할 것 | 재는 방법 | 담당 |
 | --- | --- | --- | --- |
-| 1 | §0·§3·§4의 경계 판정 전부 | 각 행의 `파일:줄`·심볼을 다시 연다 — **dev가 하루만 움직여도 낡는다** | 박지현 |
+| 1 | §0·§3·§4의 경계 판정 전부 | 각 행의 `파일:줄`·심볼을 다시 연다 — **dev가 하루만 움직여도 낡는다**. **2026-09-08 `8752ddc` 기준 재측정: 12건 이상 없음**(이전 기준 `79d6001` 이후 dev 6커밋). 게이트 전 마지막으로 9/10 에 한 번 더 잰다 | 박지현 |
 | 2 | T2-1의 토폴로지 붉은 노드 | `MEMBER_OF`·`USES`·`REGISTERED_IN` 엣지는 `elbv2`·`autoscaling` 미포함으로 로컬에서 안 채워진다(ADR-0007) → **mock 유지** | 유건희 |
 | 3 | 설계서 §대조 필요 1번(판정기 워크플로 배선) | T2-2·3을 화면으로 올릴 수 있는지가 여기 걸린다 | 김승철 |
 | 4 | `scripts/inject_mock_threat.py:15`의 헤더가 낡았다 | 헤더가 *"`create_incident_from_intake` 가 할 일인데 아직 `NotImplementedError` 다"* 라 적고 있으나 **#286(#265)으로 구현됐다.** 남은 것은 호출부다 — §3-2와 같은 사실인데 그 파일만 옛 문장을 들고 있다 | 김승철 |
-| 5 | #183(PR #293) 상태 | `CHANGES_REQUESTED`가 9/11까지 풀리는가 — **R5 비고가 여기 걸린다** | 유건희 |
+| 5 | #183(PR #293) 상태 | `CHANGES_REQUESTED`가 9/11까지 풀리는가 — **R5 비고가 여기 걸린다**. 2026-09-08 재확인: FE PR 3건(#299·#293·#292) 전부 `CHANGES_REQUESTED` 이고 **09-07 이후 갱신이 없다** | 유건희 |
+| 6 | **R10 의 `T1+T2 ≤ 8분` 을 아직 한 번도 재지 않았다** | 리허설이 그 측정 자리였는데 폐지됐다. **9/10 에 대본 전체를 통으로 한 번 돌려 잰다** — 당일에 처음 재면 초과해도 줄일 구간을 못 고른다 | 박지현 |
+| 7 | ⓪ 환경변수 전제가 게이트 당일 셸에도 서는가 | 위 §2-⓪ 두 줄을 새 셸에서 다시 확인한다. **`.env` 로는 안 된다**(`config.py:32-35`) | 박지현 |
 
 > **R10의 목표 시간**과 **#267 안건 1·2번**은 이 목록에서 뺐다 — 2026-09-07 PM 확정으로 답이 왔다(R10 = `T1+T2 ≤ 8분` · §1-2). 답이 온 항목을 「대조 필요」에 남겨 두면 **무엇이 아직 열려 있는지**가 흐려진다.
+>
+> **6번이 R10을 다시 들고 온 것은 모순이 아니다** — 빠진 것은 *목표 시간이 얼마인가*이고, 6번은 *그 시간 안에 드는가를 한 번도 재지 않았다*이다. **값이 정해진 것과 재 본 것은 다르다.**
