@@ -193,10 +193,17 @@ def test_rollback_runbooks_are_listed_but_not_ai_recommendable(runbook_id: str) 
 # 자산 종류마다 그 자산을 대상으로 하는 Runbook 을 짝지어 둔다 — ARN 만 바꾸면
 # SG ARN 이 EC2 Rightsizing 에 붙는 조합이 생긴다. Runbook 별 파라미터 계약(#154)이
 # 선 지금은 파라미터도 함께 갈리므로 그 조합은 ① 에서 걸린다. (PR #141 리뷰 반영)
+#
+# **NACL 은 판정 대상이 아닌데도 여기 있다.** 두 면제 축이 다르기 때문이다 —
+# 판정 대상(_RULE_TARGET_TYPES)에는 없어서 정답 1:1 대조에서는 빠지지만
+# (golden_contract.judgement_free_list_fields), RUNBOOK_NACL_ADD_DENY 의 대상이라
+# 런북 짝 면제(runbook_free_list_fields)에는 들지 않는다. 짝을 안 적으면 아래
+# 테스트가 "매핑에 없는 자산 종류"로 걸린다. (#271 ② · PR #308 docstring 이 예고한 자리)
 _GOLDEN_ASSET_RUNBOOKS = {
     "ec2_instances": RunbookId.RUNBOOK_EC2_RIGHTSIZING.value,
     "security_groups": RunbookId.RUNBOOK_SG_DELETE_ISOLATED.value,
     "ebs_volumes": RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED.value,
+    "nacls": RunbookId.RUNBOOK_NACL_ADD_DENY.value,
 }
 
 

@@ -101,6 +101,17 @@
       "open_to_world": [
         { "protocol": "tcp", "from_port": 22, "to_port": 22, "ipv6": false }
       ]
+    },
+    {
+      "asset_type": "SG",
+      "arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00006",
+      "group_id": "sg-0a1b2c3d4e5f00006",
+      "name": "golden-sg-app-tier",
+      "description": "Golden Dataset: app tier SG (attached, no world-open ingress)",
+      "region": "ap-northeast-2",
+      "vpc_id": "vpc-0a1b2c3d4e5f0f001",
+      "attached": true,
+      "open_to_world": []
     }
   ]
 }
