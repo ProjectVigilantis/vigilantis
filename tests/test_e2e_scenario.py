@@ -295,10 +295,10 @@ def test_t1_idle_ec2_downsize_and_auto_rollback_flow():
         — 원본을 옮기지 않고 parent_execution_id 로 묶인 새 행이다 (§T1 8번)
       → 자식 `SUCCESS` → 원본 `ROLLED_BACK` · Incident `AWAITING_CLOSURE` (§T1 9번)
 
-    상태값을 어느 축으로 읽는지가 이 흐름의 함정이다. WS 이벤트가 세 번 다
-    EXECUTION_UPDATED 라 옆의 값이 Execution 상태로 읽히는데, 7번에서 Incident 는
-    FAILED 가 아니라 ACTION_IN_PROGRESS 다 — 되돌릴 것이 남아 있기 때문이다
-    (workflows.py:843 _incident_status_after · 설계서 §7·8·9번의 상태값은 어느 축인가).
+    상태값을 어느 축으로 읽는지가 이 흐름의 함정이다. 7번의 Execution 은
+    ROLLBACK_INITIATED 인데 Incident 는 FAILED 가 아니라 ACTION_IN_PROGRESS 다 —
+    되돌릴 것이 남아 있기 때문이다 (workflows.py:843 _incident_status_after ·
+    설계서 §7·8·9번의 상태값은 어느 축인가).
 
     핵심: **5번 [조치 실행] 이후 사람 입력이 없다.** 8~9번은 전부 시스템이 한다.
     원복 파라미터는 AI도 화면도 아닌 **DB 백업 레코드(`backup_record_id`)** 에서만 온다.

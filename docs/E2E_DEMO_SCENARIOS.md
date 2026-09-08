@@ -106,19 +106,13 @@ IN_PROGRESS → SUCCESS
 | 8 | **자동 원복 발동** | **복구 중** | `RUNBOOK_EC2_REVERT_SIZE`<br>`trigger_source: AUTO_ON_FAILURE` | `EXECUTION_UPDATED` `ROLLBACK_INITIATED` | 상태 전이만 화면으로 설명 |
 | 9 | 원복 완료 | **AST-001로 이동해** 인스턴스 유형 복귀 확인 | 원본 Execution `ROLLED_BACK` | `EXECUTION_UPDATED` | — |
 
-### 7·8·9번의 상태값 — 세 시점을 겹쳐 본다
+### 7·8·9번의 상태값은 어느 축인가
 
-표는 행마다 축을 갈라 적는다. 세 시점을 한자리에 겹쳐 놓으면 **두 축이 어떻게 어긋난 채로 함께 움직이는지**가 보인다.
-
-| 시점 | Execution(원본) | Execution(자식) | Incident |
-| --- | --- | --- | --- |
-| 7번 · 2/2 실패 | **`ROLLBACK_INITIATED`** | — | **`ACTION_IN_PROGRESS`** |
-| 8번 · 원복 접수 | `ROLLBACK_INITIATED` 유지 | **`IN_PROGRESS`** | `ACTION_IN_PROGRESS` |
-| 9번 · 원복 완료 | **`ROLLED_BACK`** | `SUCCESS` | **`AWAITING_CLOSURE`** |
+**어느 값이 무엇인지는 위 단계표가 이미 적는다.** 여기서는 그 값이 **왜 그래야 하는지**만 코드 좌표와 함께 남긴다 — 축을 다시 뭉개는 서술이 들어오는 것을 막는 것은 표가 아니라 아래 세 문단이다.
 
 **7번 Incident가 `FAILED`가 아닌 이유**: `_incident_status_after()`는 실행의 성패가 아니라 **그 인시던트에 남은 것**으로 목적 상태를 가른다(`workflows.py:843`). `ROLLBACK_INITIATED`가 비종료 상태라(`packages/schemas/executions.py:28 EXECUTION_NON_TERMINAL_STATUSES`) *"진행 중 실행이 있다"* 가 되어 `ACTION_IN_PROGRESS`다. **되돌릴 것이 남았는데 `FAILED`로 적으면 화면이 복구 중인 조치를 '진행 불가'로 그린다.**
 
-**8번이 상태 전이가 아닌 이유**: #241은 원본을 옮기지 않고 **`parent_execution_id`로 묶인 자식 행을 새로 만든다**(`workflows.py:1146 initiate_auto_rollback()`). 원본과 자식을 한 축으로 적으면 7번과 8번이 같은 값(`ROLLBACK_INITIATED`)을 두 번 말하게 되어 **무엇이 새로 일어났는지가 사라진다.**
+**8번이 상태 전이가 아닌 이유**: #241은 원본을 옮기지 않고 **`parent_execution_id`로 묶인 자식 행을 새로 만든다**(`workflows.py:1146 initiate_auto_rollback()`). 원본과 자식을 한 축으로 적으면 7번과 8번이 같은 값(`ROLLBACK_INITIATED`)을 두 번 말하게 되어 **무엇이 새로 일어났는지가 사라진다.** **이 시점에 원본과 Incident는 그대로다** — 원본은 `ROLLBACK_INITIATED`, Incident는 `ACTION_IN_PROGRESS`에 머문다(단계표 8번 행은 새로 생기는 자식만 적는다).
 
 **9번이 두 실행을 함께 확정하는 이유**: `_ORIGIN_STATUS_AFTER_ROLLBACK`(`workflows.py:895`)이 자식 `SUCCESS` → 원본 `ROLLED_BACK`으로 잇는다. 원본이 `ROLLBACK_INITIATED`에 남으면 비종료라 인시던트가 영원히 진행 중이 된다.
 
