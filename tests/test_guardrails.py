@@ -52,6 +52,11 @@ from schemas.guardrails import (  # noqa: E402
     GuardrailValidationContext,
     GuardrailValidationRequest,
 )
+from golden_contract import (  # noqa: E402
+    asset_list_fields,
+    runbook_free_list_fields,
+    runbook_target_asset_types,
+)
 from schemas.precheck import PrecheckOutcome  # noqa: E402
 
 GOLDEN_FINOPS_INPUT = ROOT / "datasets" / "golden" / "finops" / "input"
@@ -225,6 +230,39 @@ def _golden_asset_kinds() -> set[str]:
     return kinds
 
 
+def test_runbook_free_exemption_is_derived_from_the_contract() -> None:
+    """면제 집합이 계약에서 파생됐는지 — 하드코딩으로 되돌아가면 여기서 걸린다.
+
+    두 방향을 함께 본다. 면제된 것에 **런북 대상**이 섞이면 짝 누락을 못 잡고,
+    런북 대상인데 자산 리스트가 없으면 그 유형은 골든에 담길 자리가 없다.
+
+    바로 아래 테스트가 여는 면제를 지키는 자리다 — 면제가 넓어지면 그 테스트는
+    조용히 통과하고, 이 테스트만 깨진다. (Issue #271 ② · PR #270 과 같은 결)
+    """
+    fields = asset_list_fields()
+    targeted = runbook_target_asset_types()
+    exempt = runbook_free_list_fields()
+
+    for name in exempt:
+        declared = fields.get(name)
+        # 파생식이 담은 이름만 면제될 수 있다. 하드코딩으로 되돌아가거나 오타 키가
+        # 섞이면 여기서 먼저 걸린다 — fields[name] 로 받으면 KeyError 가 나서 아래
+        # 메시지가 보이지 않는다.
+        assert declared is not None, (
+            f"{name}은 유형을 증명한 자산 리스트가 아닌데 면제됐다 — "
+            "면제 집합이 계약 파생이 아니라 손으로 적힌 것은 아닌가"
+        )
+        assert declared not in targeted, (
+            f"{name}({declared.value})은 런북 대상인데 면제됐다 — 짝 누락을 못 잡는다"
+        )
+
+    paired = {asset_type for name, asset_type in fields.items() if name not in exempt}
+    assert paired == targeted, (
+        f"런북 대상 유형과 자산 리스트가 어긋난다: 계약 {sorted(t.value for t in targeted)} / "
+        f"리스트 {sorted(t.value for t in paired)}"
+    )
+
+
 def test_golden_asset_arns_pass_all_four_steps() -> None:
     """Golden Dataset 의 실제 자산 ARN 이 4단계를 전부 통과한다.
 
@@ -239,8 +277,18 @@ def test_golden_asset_arns_pass_all_four_steps() -> None:
     assert pairs, "Golden Dataset 에 자산이 없다 — 경로나 파일 구조가 바뀌었다"
     # 한 종류가 빠져도 나머지가 남아 assert pairs 는 통과한다 — SG 누락이 그렇게
     # 지나갔다(#134). 건수는 골든이 늘 때마다 바뀌므로(#127) 종류만 고정한다.
-    missing = _golden_asset_kinds() - set(_GOLDEN_ASSET_RUNBOOKS)
-    assert not missing, f"골든에 있는데 매핑에 없는 자산 종류: {sorted(missing)}"
+    #
+    # **어떤 런북도 대상으로 삼지 않는 자산 종류는 뺀다.** 토폴로지가 그릴 노드
+    # (Launch Template·ASG·ALB Target Group)는 짝지을 런북이 계약상 없으므로, 넣는
+    # 순간 이 가드가 깨진다 — 없는 짝을 요구하는 것이라 데이터가 틀린 게 아니다.
+    # 면제는 **계약에서 파생**시킨다(golden_contract.runbook_free_list_fields) —
+    # 키를 손으로 적으면 런북이 늘어도 면제가 좁아지지 않아 가드가 헐거워진다. (#271 ②)
+    exempt = runbook_free_list_fields()
+    missing = _golden_asset_kinds() - set(_GOLDEN_ASSET_RUNBOOKS) - exempt
+    assert not missing, (
+        f"골든에 있는데 매핑에 없는 자산 종류: {sorted(missing)} — "
+        f"이 종류를 대상으로 삼는 런북이 있으므로 _GOLDEN_ASSET_RUNBOOKS 에 짝을 적을 것"
+    )
 
     collected = [arn for arn, _ in pairs]
     for arn, runbook_id in pairs:
