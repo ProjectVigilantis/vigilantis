@@ -141,19 +141,20 @@ def test_detail_assembles_evidence_recommendations_executions(
     assert body["created_at"] == "2026-08-19T03:00:00Z"
 
 
-def test_detail_assembles_execution_summaries(client_pg, db, two_incidents, make_candidate):
+def test_detail_assembles_execution_summaries(
+    client_pg, db, two_incidents, make_candidate, make_execution
+):
     secops, _ = two_incidents()
     make_candidate(db, secops)
-    execution = models.ActionExecution(
-        incident_id=secops.incident_id,
+    execution = make_execution(
+        db,
+        secops,
         runbook_id=RunbookId.RUNBOOK_EC2_ISOLATE,
         target_arn=SUBJECT_EC2,
         status=ExecutionStatus.SUCCESS,
         trigger_source=TriggerSource.PRE_MITIGATION_0_5S,
         updated_at=T0 + timedelta(minutes=2),
     )
-    db.add(execution)
-    db.flush()
 
     body = client_pg.get(f"/api/v1/incidents/{secops.incident_id}").json()
     assert body["executions"] == [
@@ -168,26 +169,6 @@ def test_detail_assembles_execution_summaries(client_pg, db, two_incidents, make
 
 
 # --- 복구 가능 목록 파생 (Issue #126) --------------------------------------------
-
-
-def _add_execution(
-    db,
-    incident: models.Incident,
-    runbook_id: RunbookId,
-    status: ExecutionStatus,
-    parent: models.ActionExecution | None = None,
-) -> models.ActionExecution:
-    execution = models.ActionExecution(
-        incident_id=incident.incident_id,
-        runbook_id=runbook_id,
-        target_arn=SUBJECT_EC2,
-        status=status,
-        trigger_source=TriggerSource.USER_APPROVAL,
-        parent_execution_id=None if parent is None else parent.execution_id,
-    )
-    db.add(execution)
-    db.flush()
-    return execution
 
 
 @pytest.mark.parametrize(
@@ -211,7 +192,9 @@ def _add_execution(
         (RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED, ExecutionStatus.SUCCESS, []),
     ],
 )
-def test_detail_derives_available_recovery(client_pg, db, two_incidents, runbook_id, status, expected):
+def test_detail_derives_available_recovery(
+    client_pg, db, two_incidents, make_execution, runbook_id, status, expected
+):
     """FE mock(route.ts RECOVERY_BY_RUNBOOK·RECOVERABLE_ORIGIN_STATUSES)과 같은 규칙."""
     secops, _ = two_incidents()
     secops.status = (
@@ -219,23 +202,32 @@ def test_detail_derives_available_recovery(client_pg, db, two_incidents, runbook
         if status in EXECUTION_NON_TERMINAL_STATUSES
         else IncidentStatus.RESOLVED
     )
-    _add_execution(db, secops, runbook_id, status)
+    make_execution(db, secops, runbook_id=runbook_id, status=status, target_arn=SUBJECT_EC2)
 
     body = client_pg.get(f"/api/v1/incidents/{secops.incident_id}").json()
 
     assert body["executions"][0]["available_recovery_runbook_ids"] == expected
 
 
-def test_detail_hides_recovery_once_child_execution_exists(client_pg, db, two_incidents):
+def test_detail_hides_recovery_once_child_execution_exists(
+    client_pg, db, two_incidents, make_execution
+):
     """복구가 접수된 원본은 목록에서 빠진다 — 이중 롤백을 화면에서부터 막는다."""
     secops, _ = two_incidents()
     secops.status = IncidentStatus.ACTION_IN_PROGRESS
-    origin = _add_execution(db, secops, RunbookId.RUNBOOK_EC2_ISOLATE, ExecutionStatus.SUCCESS)
-    _add_execution(
+    origin = make_execution(
         db,
         secops,
-        RunbookId.RUNBOOK_EC2_UNISOLATE,
-        ExecutionStatus.IN_PROGRESS,
+        runbook_id=RunbookId.RUNBOOK_EC2_ISOLATE,
+        status=ExecutionStatus.SUCCESS,
+        target_arn=SUBJECT_EC2,
+    )
+    make_execution(
+        db,
+        secops,
+        runbook_id=RunbookId.RUNBOOK_EC2_UNISOLATE,
+        status=ExecutionStatus.IN_PROGRESS,
+        target_arn=SUBJECT_EC2,
         parent=origin,
     )
 

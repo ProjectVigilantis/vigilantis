@@ -20,13 +20,12 @@ for p in (str(CORE_API), str(REPO_ROOT / "packages")):
 
 import workflows  # noqa: E402
 from db.repositories import executions as exec_repo  # noqa: E402
-from db.repositories import incidents as incidents_repo  # noqa: E402
 from schemas.api.actions import ExecutionStatus  # noqa: E402
-from schemas.api.incidents import IncidentCategory  # noqa: E402
-from schemas.candidates import CandidateStatus, RunbookCandidateData  # noqa: E402
+from schemas.api.incidents import IncidentCategory, IncidentStatus  # noqa: E402
+from schemas.candidates import CandidateStatus  # noqa: E402
 from schemas.executions import ExecutionEffect, ExecutionStepStatus  # noqa: E402
 from schemas.precheck import PrecheckReasonCode  # noqa: E402
-from schemas.runbooks import RunbookId, TriggerSource  # noqa: E402
+from schemas.runbooks import RunbookId  # noqa: E402
 from services.aws import backup as bk  # noqa: E402
 from services.aws import executor as ex  # noqa: E402
 
@@ -118,34 +117,47 @@ def aws(monkeypatch):
     return configure
 
 
-def _execution(db, *, runbook=RunbookId.RUNBOOK_EC2_RIGHTSIZING, with_candidate=True, **kwargs):
-    incident = incidents_repo.create_incident(
-        db, subject_arn=INSTANCE_ARN, category=IncidentCategory.FINOPS
-    )
-    candidate_id = None
-    if with_candidate:
-        candidate = incidents_repo.add_candidate(
+@pytest.fixture()
+def reserved_execution(db, make_incident, make_candidate, make_execution):
+    """실행 1건 — FINOPS Incident + (선택) CLAIMED 후보 위에 선다.
+
+    사본이 아니라 **조합**이라 이 파일에 남기되 conftest 팩토리 위에 세운다(#233 과
+    같은 결). `RunbookCandidateData` 손조립이 여기 있었고, 그것이 저장소에 남아 있던
+    조립 사본 중 하나였다 — 계약 경유는 `make_candidate` 가 맡는다.
+
+    Incident 상태를 ANALYZING 으로 명시하는 것은 종전 경로였던
+    `incidents_repo.create_incident` 가 상태를 싣지 않아 모델 기본값이 그대로 섰기
+    때문이다. `make_incident` 의 기본은 AWAITING_APPROVAL 이라 넘기지 않으면 조용히
+    다른 상태를 시드한다.
+    """
+
+    def _make(*, runbook=RunbookId.RUNBOOK_EC2_RIGHTSIZING, with_candidate=True, **kwargs):
+        incident = make_incident(
             db,
-            RunbookCandidateData(
-                candidate_id=str(uuid.uuid4()),
-                incident_id=incident.incident_id,
+            category=IncidentCategory.FINOPS,
+            subject_arn=INSTANCE_ARN,
+            status=IncidentStatus.ANALYZING,
+        )
+        candidate = None
+        if with_candidate:
+            candidate = make_candidate(
+                db,
+                incident,
                 runbook_id=runbook,
                 target_arn=INSTANCE_ARN,
                 parameters={"target_instance_type": CANDIDATE_TYPE},
-                evidence_ids=["ev-1"],
                 status=CandidateStatus.CLAIMED,
-            ),
+            )
+        return make_execution(
+            db,
+            incident,
+            runbook_id=runbook,
+            target_arn=INSTANCE_ARN,
+            candidate=candidate,
+            **kwargs,
         )
-        candidate_id = candidate.candidate_id
-    return exec_repo.create_execution(
-        db,
-        incident_id=incident.incident_id,
-        runbook_id=runbook,
-        target_arn=INSTANCE_ARN,
-        trigger_source=TriggerSource.USER_APPROVAL,
-        candidate_id=candidate_id,
-        **kwargs,
-    )
+
+    return _make
 
 
 def operations(aws):
@@ -155,9 +167,9 @@ def operations(aws):
 # ------------------------------------------------------------------ 성공 경로
 
 
-def test_backup_is_committed_before_any_change(db, aws):
+def test_backup_is_committed_before_any_change(db, reserved_execution, aws):
     """변경과 백업 사이에서 죽으면 되돌릴 값이 남지 않는다(ADR-0004 정책 ③)."""
-    execution = _execution(db)
+    execution = reserved_execution()
 
     outcome = workflows.run_rightsizing_execution(db, execution.execution_id)
 
@@ -168,8 +180,8 @@ def test_backup_is_committed_before_any_change(db, aws):
     assert record.payload["instance_type"] == "t3.xlarge"
 
 
-def test_steps_are_stored_in_order(db, aws):
-    execution = _execution(db)
+def test_steps_are_stored_in_order(db, reserved_execution, aws):
+    execution = reserved_execution()
 
     workflows.run_rightsizing_execution(db, execution.execution_id)
 
@@ -181,14 +193,14 @@ def test_steps_are_stored_in_order(db, aws):
     ]
 
 
-def test_execution_stays_in_progress_until_the_dispatcher_closes_it(db, aws):
+def test_execution_stays_in_progress_until_the_dispatcher_closes_it(db, reserved_execution, aws):
     """종료 상태는 여기서 확정하지 않는다.
 
     실행만 먼저 종료로 옮기면 Incident는 ACTION_IN_PROGRESS인데 진행 중 실행이
     없는 조합이 되고, 상세 응답 계약(api/incidents.py)이 그것을 거절해 조회가
     500이 된다. 실행 종료와 Incident 전이는 dispatcher.py가 한 트랜잭션에서 한다.
     """
-    execution = _execution(db)
+    execution = reserved_execution()
 
     outcome = workflows.run_rightsizing_execution(db, execution.execution_id)
 
@@ -198,8 +210,8 @@ def test_execution_stays_in_progress_until_the_dispatcher_closes_it(db, aws):
     assert row.finished_at is None and row.error_summary is None
 
 
-def test_target_type_comes_from_the_candidate(db, aws):
-    execution = _execution(db)
+def test_target_type_comes_from_the_candidate(db, reserved_execution, aws):
+    execution = reserved_execution()
 
     workflows.run_rightsizing_execution(db, execution.execution_id)
 
@@ -207,9 +219,9 @@ def test_target_type_comes_from_the_candidate(db, aws):
     assert modify["InstanceType"] == {"Value": CANDIDATE_TYPE}
 
 
-def test_validated_command_wins_over_the_candidate(db, aws):
+def test_validated_command_wins_over_the_candidate(db, reserved_execution, aws):
     """Guardrail PASS의 불변 실행 명령이 있으면 그것이 원천이다."""
-    execution = _execution(db, validated_command={"target_instance_type": "t3.nano"})
+    execution = reserved_execution(validated_command={"target_instance_type": "t3.nano"})
 
     workflows.run_rightsizing_execution(db, execution.execution_id)
 
@@ -220,9 +232,9 @@ def test_validated_command_wins_over_the_candidate(db, aws):
 # ------------------------------------------------------------------ 실패 경로
 
 
-def test_backup_failure_stops_before_the_change(db, aws):
+def test_backup_failure_stops_before_the_change(db, reserved_execution, aws):
     """백업이 없으면 조치를 시작하지 않는다 — 원복 근거 없는 변경은 만들지 않는다."""
-    execution = _execution(db)
+    execution = reserved_execution()
     aws(describe_instances=client_error("InvalidInstanceID.NotFound"))
 
     outcome = workflows.run_rightsizing_execution(db, execution.execution_id)
@@ -235,8 +247,8 @@ def test_backup_failure_stops_before_the_change(db, aws):
     assert exec_repo.get_execution(db, execution.execution_id).status is ExecutionStatus.IN_PROGRESS
 
 
-def test_missing_target_type_fails_without_touching_aws(db, aws):
-    execution = _execution(db, with_candidate=False)
+def test_missing_target_type_fails_without_touching_aws(db, reserved_execution, aws):
+    execution = reserved_execution(with_candidate=False)
 
     outcome = workflows.run_rightsizing_execution(db, execution.execution_id)
 
@@ -245,9 +257,9 @@ def test_missing_target_type_fails_without_touching_aws(db, aws):
     assert aws.calls == []
 
 
-def test_failed_change_keeps_the_step_trace(db, aws):
+def test_failed_change_keeps_the_step_trace(db, reserved_execution, aws):
     """실행이 어디서 멈췄고 자산이 바뀌었는지가 남아야 원복이 판단할 수 있다."""
-    execution = _execution(db)
+    execution = reserved_execution()
     aws(modify_instance_attribute=client_error("InvalidParameterValue"))
 
     outcome = workflows.run_rightsizing_execution(db, execution.execution_id)
@@ -269,19 +281,19 @@ def test_failed_change_keeps_the_step_trace(db, aws):
 # ------------------------------------------------------------------ 배선 오류
 
 
-def test_other_runbooks_are_rejected(db, aws):
+def test_other_runbooks_are_rejected(db, reserved_execution, aws):
     """런북마다 단계와 백업 종류가 다르다 — 조용히 진행시키지 않는다."""
-    execution = _execution(
-        db, runbook=RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED, with_candidate=False
+    execution = reserved_execution(
+        runbook=RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED, with_candidate=False
     )
 
     with pytest.raises(ValueError):
         workflows.run_rightsizing_execution(db, execution.execution_id)
 
 
-def test_finished_execution_is_not_run_again(db, aws):
+def test_finished_execution_is_not_run_again(db, reserved_execution, aws):
     """다시 돌리면 백업 없는 두 번째 변경이 된다."""
-    execution = _execution(db)
+    execution = reserved_execution()
     exec_repo.update_execution_status(
         db,
         execution.execution_id,

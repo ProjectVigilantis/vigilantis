@@ -287,22 +287,22 @@ def test_replay_accepts_equivalent_uuid_text_forms(client_pg, db, make_executabl
     assert mismatch.json()["error"]["code"] == "IDEMPOTENCY_KEY_CONFLICT"
 
 
-def test_claimed_race_window_replays_existing_execution(client_pg, db, make_incident, make_candidate, monkeypatch):
+def test_claimed_race_window_replays_existing_execution(
+    client_pg, db, make_incident, make_candidate, make_execution, monkeypatch
+):
     """최초 멱등 조회가 앞선 요청의 commit 전에 실행되고 후보 확인이 commit 후에
     실행된 경합 창 — 후보는 이미 CLAIMED지만 같은 Key 재요청이므로 409
     PROPOSAL_NOT_EXECUTABLE이 아니라 200 재생이어야 한다."""
     incident = make_incident(db)
     candidate = make_candidate(db, incident, status=CandidateStatus.CLAIMED)
-    winner = models.ActionExecution(
-        incident_id=incident.incident_id,
+    winner = make_execution(
+        db,
+        incident,
         runbook_id=candidate.runbook_id,
         target_arn=candidate.target_arn,
-        trigger_source=TriggerSource.USER_APPROVAL,
-        candidate_id=candidate.candidate_id,
+        candidate=candidate,
         idempotency_key=KEY,
     )
-    db.add(winner)
-    db.flush()
 
     real_lookup = executions_repo.get_by_idempotency_key
     seen = {"calls": 0}
@@ -325,22 +325,22 @@ def test_claimed_race_window_replays_existing_execution(client_pg, db, make_inci
     assert len(executions_repo.list_by_incident(db, incident.incident_id)) == 1
 
 
-def test_duplicate_key_race_recovers_to_existing_execution(client_pg, db, make_executable, monkeypatch):
+def test_duplicate_key_race_recovers_to_existing_execution(
+    client_pg, db, make_executable, make_execution, monkeypatch
+):
     """앞선 요청이 이미 예약한 상태에서 뒤엣 요청이 INSERT까지 간 경우.
 
     유니크 제약이 거절하고, 그 오류를 재조회로 받아 200으로 돌린다 —
     db/repositories/executions.py 헤더가 규정한 해석이다.
     """
     incident, candidate = make_executable(db)
-    winner = models.ActionExecution(
-        incident_id=incident.incident_id,
+    winner = make_execution(
+        db,
+        incident,
         runbook_id=candidate.runbook_id,
         target_arn=candidate.target_arn,
-        trigger_source=TriggerSource.USER_APPROVAL,
         idempotency_key=KEY,
     )
-    db.add(winner)
-    db.flush()
 
     real_lookup = executions_repo.get_by_idempotency_key
     seen = {"calls": 0}
@@ -483,31 +483,15 @@ ROLLBACK_PAIRS = [
 ]
 
 
-def _add_execution(
-    db,
-    incident: models.Incident,
-    runbook_id: RunbookId,
-    status: ExecutionStatus = ExecutionStatus.SUCCESS,
-) -> models.ActionExecution:
-    execution = models.ActionExecution(
-        incident_id=incident.incident_id,
-        runbook_id=runbook_id,
-        target_arn=SUBJECT_EC2,
-        status=status,
-        trigger_source=TriggerSource.USER_APPROVAL,
-    )
-    db.add(execution)
-    db.flush()
-    return execution
-
-
 @pytest.mark.parametrize("origin_runbook, rollback_runbook", ROLLBACK_PAIRS)
 def test_rollback_reserves_child_bound_to_origin(
-    client_pg, db, make_incident, origin_runbook, rollback_runbook
+    client_pg, db, make_incident, make_execution, origin_runbook, rollback_runbook
 ):
     """롤백은 후보가 아니라 원본 실행에서 접수된다 — 결속은 parent_execution_id."""
     incident = make_incident(db)
-    origin = _add_execution(db, incident, origin_runbook)
+    origin = make_execution(
+        db, incident, runbook_id=origin_runbook, status=ExecutionStatus.SUCCESS
+    )
 
     response = client_pg.post(URL, json=_body(incident, rollback_runbook))
 
@@ -524,10 +508,14 @@ def test_rollback_reserves_child_bound_to_origin(
     "origin_status",
     [ExecutionStatus.IN_PROGRESS, ExecutionStatus.FAILED, ExecutionStatus.ROLLED_BACK],
 )
-def test_rollback_without_recoverable_origin_returns_409(client_pg, db, make_incident, origin_status):
+def test_rollback_without_recoverable_origin_returns_409(
+    client_pg, db, make_incident, make_execution, origin_status
+):
     """복구를 열어 주지 않는 상태의 원본은 접수 근거가 되지 않는다."""
     incident = make_incident(db)
-    _add_execution(db, incident, RunbookId.RUNBOOK_EC2_ISOLATE, status=origin_status)
+    make_execution(
+        db, incident, runbook_id=RunbookId.RUNBOOK_EC2_ISOLATE, status=origin_status
+    )
 
     response = client_pg.post(
         URL, json=_body(incident, RunbookId.RUNBOOK_EC2_UNISOLATE)
@@ -537,10 +525,15 @@ def test_rollback_without_recoverable_origin_returns_409(client_pg, db, make_inc
     assert response.json()["error"]["code"] == "PROPOSAL_NOT_EXECUTABLE"
 
 
-def test_rollback_without_matching_pair_returns_409(client_pg, db, make_incident):
+def test_rollback_without_matching_pair_returns_409(client_pg, db, make_incident, make_execution):
     """짝이 아닌 원본은 복구를 열지 않는다 — NACL_ADD_DENY의 해제는 본편 경로다."""
     incident = make_incident(db)
-    _add_execution(db, incident, RunbookId.RUNBOOK_NACL_ADD_DENY)
+    make_execution(
+        db,
+        incident,
+        runbook_id=RunbookId.RUNBOOK_NACL_ADD_DENY,
+        status=ExecutionStatus.SUCCESS,
+    )
 
     response = client_pg.post(
         URL, json=_body(incident, RunbookId.RUNBOOK_EC2_UNISOLATE)
@@ -550,10 +543,15 @@ def test_rollback_without_matching_pair_returns_409(client_pg, db, make_incident
     assert response.json()["error"]["code"] == "PROPOSAL_NOT_EXECUTABLE"
 
 
-def test_second_rollback_on_same_origin_returns_409(client_pg, db, make_incident):
+def test_second_rollback_on_same_origin_returns_409(client_pg, db, make_incident, make_execution):
     """이중 롤백 방지 — 한 원본이 여는 복구는 1회뿐이다."""
     incident = make_incident(db)
-    _add_execution(db, incident, RunbookId.RUNBOOK_EC2_ISOLATE)
+    make_execution(
+        db,
+        incident,
+        runbook_id=RunbookId.RUNBOOK_EC2_ISOLATE,
+        status=ExecutionStatus.SUCCESS,
+    )
     body = _body(incident, RunbookId.RUNBOOK_EC2_UNISOLATE)
 
     first = client_pg.post(URL, json=body)
@@ -564,10 +562,15 @@ def test_second_rollback_on_same_origin_returns_409(client_pg, db, make_incident
     assert second.json()["error"]["code"] == "PROPOSAL_NOT_EXECUTABLE"
 
 
-def test_rollback_same_key_replay_returns_200(client_pg, db, make_incident):
+def test_rollback_same_key_replay_returns_200(client_pg, db, make_incident, make_execution):
     """멱등 처리는 #116 경로를 그대로 쓴다 — 롤백도 같은 Key면 200 + 같은 실행."""
     incident = make_incident(db)
-    _add_execution(db, incident, RunbookId.RUNBOOK_EC2_ISOLATE)
+    make_execution(
+        db,
+        incident,
+        runbook_id=RunbookId.RUNBOOK_EC2_ISOLATE,
+        status=ExecutionStatus.SUCCESS,
+    )
     body = _body(incident, RunbookId.RUNBOOK_EC2_UNISOLATE)
 
     first = client_pg.post(URL, json=body)
@@ -577,7 +580,7 @@ def test_rollback_same_key_replay_returns_200(client_pg, db, make_incident):
     assert replay.json()["execution_id"] == first.json()["execution_id"]
 
 
-def test_rollback_on_resolved_incident_resumes_action_in_progress(client_pg, db, make_incident):
+def test_rollback_on_resolved_incident_resumes_action_in_progress(client_pg, db, make_incident, make_execution):
     """종료 상태에서도 관제자 복구는 접수되고, 그 뒤 상세 조회가 200으로 남는다.
 
     RESOLVED는 "더 진행할 제안·실행 없음"이지 자산이 원복됐다는 뜻이 아니다 —
@@ -585,7 +588,12 @@ def test_rollback_on_resolved_incident_resumes_action_in_progress(client_pg, db,
     """
     incident = make_incident(db)
     incident.status = IncidentStatus.RESOLVED
-    origin = _add_execution(db, incident, RunbookId.RUNBOOK_EC2_ISOLATE)
+    origin = make_execution(
+        db,
+        incident,
+        runbook_id=RunbookId.RUNBOOK_EC2_ISOLATE,
+        status=ExecutionStatus.SUCCESS,
+    )
     detail_url = f"/api/v1/incidents/{incident.incident_id}"
 
     before = client_pg.get(detail_url)
