@@ -370,6 +370,69 @@ def make_executable(make_incident, make_candidate):
 
 
 @pytest.fixture()
+def make_execution():
+    """ActionExecution 시드 — **ORM 직접**.
+
+    `exec_repo.create_execution`은 값을 그대로 넘기는 래퍼이고(파생·기본값 없음)
+    결정적으로 **`status`를 인자로 받지 않는다**(db/repositories/executions.py:28).
+    호출부는 `SUCCESS`·`FAILED`·파라미터라이즈 값을 명시로 싣고 있어, 계약을 태우면
+    그 자리를 못 덮는다. #233에서 Incident가 같은 이유로 ORM 직접이 됐다 —
+    **대칭이 목적이 아니라 각 축을 따로 잰 결과가 같았을 뿐이다.**
+
+    `status`를 넘기지 않으면 모델 기본값 `IN_PROGRESS`가 그대로 선다
+    (db/models.py ActionExecution.status). "접수 직후"를 시드하는 호출부가 그 기본에
+    기대고 있어, 여기서 `SUCCESS` 같은 값을 기본으로 잡으면 그 뜻이 뒤집힌다.
+
+    `incident`·`parent`·`candidate`는 ORM 객체와 식별자 문자열을 모두 받는다 —
+    스캔 너머로 식별자만 들고 다니는 dispatcher 계열 호출부가 있다.
+    """
+    from db import models
+    from schemas.api.actions import ExecutionStatus
+    from schemas.runbooks import RunbookId, TriggerSource
+
+    def _make(
+        session,
+        incident,
+        *,
+        runbook_id: "RunbookId" = RunbookId.RUNBOOK_EC2_RIGHTSIZING,
+        target_arn: str | None = None,
+        status: "ExecutionStatus | None" = None,
+        trigger_source: "TriggerSource" = TriggerSource.USER_APPROVAL,
+        parent=None,
+        candidate=None,
+        idempotency_key: str | None = None,
+        updated_at=None,
+    ):
+        if target_arn is None:
+            target_arn = getattr(incident, "subject_arn", SEED_SUBJECT_EC2)
+
+        execution = models.ActionExecution(
+            incident_id=getattr(incident, "incident_id", incident),
+            runbook_id=runbook_id,
+            target_arn=target_arn,
+            trigger_source=trigger_source,
+            parent_execution_id=None
+            if parent is None
+            else getattr(parent, "execution_id", parent),
+            candidate_id=None
+            if candidate is None
+            else getattr(candidate, "candidate_id", candidate),
+            idempotency_key=idempotency_key,
+        )
+        # status·updated_at 은 서버/모델 기본값이 있어 **덮을 때만** 싣는다.
+        # 넘기지 않은 것과 기본값을 다시 적은 것은 뜻이 다르다.
+        if status is not None:
+            execution.status = status
+        if updated_at is not None:
+            execution.updated_at = updated_at
+        session.add(execution)
+        session.flush()
+        return execution
+
+    return _make
+
+
+@pytest.fixture()
 def make_precontract_candidate():
     """typed 계약(#154) **이전에** 저장된 후보 행을 재현한다 — ORM 직접, 검증 우회.
 
