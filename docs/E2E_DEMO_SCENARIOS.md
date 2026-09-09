@@ -290,8 +290,8 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 
 | 테스트 | 대응 트랙 | 검증 범위 | 여는 조건 |
 | --- | --- | --- | --- |
-| `test_t1_idle_ec2_downsize_and_auto_rollback_flow` | **T1** | Golden A1 → `COST_CANDIDATE` → 가드레일 → 실행 접수 → Status Check 실패 → `ROLLED_BACK` | 대조 3번 — **실패 주입 방법**(자동 원복은 2026-09-03 해소) |
-| `test_t2_ssh_bruteforce_block_and_one_click_release_flow` | **T2** | Golden **S3** → Incident → `response_mode` 진입 → 승인 → `NACL_ADD_DENY`(`USER_APPROVAL`) → 원클릭 해제 → `NACL_RESTORE` | 대조 1번(판정기 워크플로 배선) |
+| `test_t1_idle_ec2_downsize_and_auto_rollback_flow` | **T1** | Golden A1 → `COST_CANDIDATE` → 가드레일 → 실행 접수 → Status Check 실패 → `ROLLED_BACK` | 대조 3번 — **실패 주입 방법**(자동 원복은 2026-09-03 해소) · 9번(판정→Intake 배선) |
+| `test_t2_ssh_bruteforce_block_and_one_click_release_flow` | **T2** | Golden **S3** → Incident → `response_mode` 진입 → 승인 → `NACL_ADD_DENY`(`USER_APPROVAL`) → 원클릭 해제 → `NACL_RESTORE` | 대조 1번(판정기 워크플로 배선) · 9번(판정→Intake 배선) |
 
 **두 테스트 모두 Golden Dataset을 입력으로 쓴다.** 시연에 쓰는 데이터와 테스트에 쓰는 데이터가 같아야 "시연이 되면 테스트도 된다"가 성립한다.
 
