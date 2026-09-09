@@ -53,6 +53,14 @@
       "evaluation_status": "COMPLETED",
       "verdict": "THREAT",
       "skip_reason_code": null
+    },
+    {
+      "case_id": "A20",
+      "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00006",
+      "purpose": "A2·A3·A4가 security_group_ids로 가리키던 SG. 자산으로는 없어서 그 세 EC2의 SECURED_BY가 응답에 없는 노드를 향하고 있었다 — 토폴로지가 그릴 수 없는 엣지 3건이다. 부착됨·전체개방 없음이라 A5(전체개방 THREAT)와 대비되는 정상 SG이기도 하다. case_id가 A6~A19를 건너뛴 것은 그 번호가 002·003·005에 있기 때문이다(번호는 파일 순서가 아니라 전역 유일)",
+      "evaluation_status": "COMPLETED",
+      "verdict": "SKIP",
+      "skip_reason_code": "SKIP_ACTIVE"
     }
   ]
 }
