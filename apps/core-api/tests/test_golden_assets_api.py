@@ -133,3 +133,76 @@ def test_golden_fills_every_verdict_and_skip_reason(client_pg, loaded):
     # 한 분기에 표본이 몰려 화면이 단조로워지지 않는지 — 분포도 함께 남긴다
     distribution = Counter(str(item["verdict"]) for item in items)
     assert distribution["COST_CANDIDATE"] >= 1 and distribution["SKIP"] >= 1
+
+
+# ------------------------------------------------------------------------------
+# 토폴로지 뷰(#146)가 그릴 수 있는가 — 노드와 엣지 (#271 ③)
+# ------------------------------------------------------------------------------
+#
+# 위 세 테스트는 **판정**이 화면까지 가는지를 본다. 관계 그래프는 다른 축이다 —
+# 자산이 전부 있어도 엣지가 없으면 토폴로지는 그릴 것이 없다.
+#
+# 이 가드가 없어서 실제로 하나가 조용히 비어 있었다: `ATTACHED_TO` 는 골든에
+# EBS 가 들어온 뒤(#264 · #276)에도 **한 번도 파생되지 않았다.** 004 의 볼륨이
+# 부착 대상으로 `i-0a1b2c3d4e5f00041` 을 적는데 그 EC2 가 골든 어디에도 없었고,
+# 관계는 `persist_inventory` 가 **같은 인벤토리 안에서만** 잇기 때문이다. 아무도
+# 세지 않으니 아무도 몰랐다.
+
+
+def test_golden_covers_every_asset_type(client_pg, loaded):
+    """골든만으로 계약의 자산 유형이 전부 뜬다 — 토폴로지가 그릴 **노드**.
+
+    `Verdict`·`SkipReasonCode` 를 등식으로 잠근 위 테스트와 같은 이유다. 부분집합
+    비교로 완화하지 않는다 — 계약에 유형이 추가되면 여기서 먼저 실패해야 하고,
+    고칠 곳은 이 파일이 아니라 `datasets/golden/finops/input/` 이다.
+    """
+    from schemas.api.assets import AssetType
+
+    served = {item["asset_type"] for item in _items(client_pg)["items"]}
+    known = {a.value for a in AssetType}
+    assert served == known, (
+        f"골든이 못 만드는 자산 유형이 있다: {sorted(known - served)} / "
+        f"계약에 없는 유형이 응답에 있다: {sorted(served - known)}"
+    )
+
+
+def test_golden_derives_every_relation_type(client_pg, loaded):
+    """골든만으로 계약의 관계 6종이 전부 **파생**된다 — 토폴로지가 그릴 **엣지**.
+
+    자산을 넣는 것과 관계가 서는 것은 다르다. 관계는 입력에 적는 값이 아니라
+    `collector.persist_inventory` 가 같은 인벤토리 안의 참조에서 파생시키는 것이라
+    (subnet_id→NACL · instance_id→ASG/TG · attached_instance_ids→EBS · ASG→LT),
+    **한 파일에 짝이 다 들어 있어야** 선다. 파일을 갈라 담으면 조용히 0건이 된다.
+    """
+    from schemas.api.assets import RelationType
+
+    derived = {
+        relationship["relation_type"]
+        for item in _items(client_pg)["items"]
+        for relationship in item["relationships"]
+    }
+    known = {r.value for r in RelationType}
+    assert derived == known, (
+        f"골든이 못 만드는 관계가 있다: {sorted(known - derived)} — "
+        "관계는 같은 인벤토리 파일 안에서만 파생된다(양쪽 자산이 한 파일에 있어야 한다) / "
+        f"계약에 없는 관계가 응답에 있다: {sorted(derived - known)}"
+    )
+
+
+def test_golden_relations_point_at_served_assets(client_pg, loaded):
+    """엣지의 반대쪽 끝이 응답 안에 있다 — 그래프가 끊기지 않는다.
+
+    `target_arn` 이 응답에 없는 자산을 가리키면 화면은 **그릴 수 없는 엣지**를 받는다.
+    관계 개수가 맞아도 이 방향은 드러나지 않으므로 따로 센다.
+    """
+    items = _items(client_pg)["items"]
+    served = {item["arn"] for item in items}
+    dangling = sorted(
+        {
+            f"{item['arn']} -{relationship['relation_type']}-> {relationship['target_arn']}"
+            for item in items
+            for relationship in item["relationships"]
+            if relationship["target_arn"] not in served
+        }
+    )
+    assert not dangling, f"응답에 없는 자산을 가리키는 관계가 있다: {dangling}"
