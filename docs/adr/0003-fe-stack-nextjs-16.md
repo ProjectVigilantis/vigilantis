@@ -24,7 +24,7 @@ SSOT(`docs/PROJECT_STATUS.md`)는 FE 스택을 **Next.js 14(App Router)** 로 �
 
 **장점**
 
-- 시작 시점 최신 안정판 채택으로 MVP 기간(10/15까지) 내 프레임워크 EOL·보안 패치 공백 리스크 제거
+- 시작 시점 최신 안정판 채택으로 MVP 기간(중간 발표 10/1까지) 내 프레임워크 EOL·보안 패치 공백 리스크 제거
 - shadcn CLI 표준 경로를 그대로 사용 — 컴포넌트 추가 비용 최소화
 - Turbopack 기본화로 dev/build 속도 이점
 

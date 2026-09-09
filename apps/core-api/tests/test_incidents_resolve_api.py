@@ -21,7 +21,7 @@ from schemas.api.incidents import (
 )
 from schemas.api.actions import ExecutionStatus
 from schemas.candidates import CandidateStatus
-from schemas.runbooks import RunbookId, TriggerSource
+from schemas.runbooks import RunbookId
 
 from db import models
 
@@ -191,22 +191,9 @@ def test_resolution_judgement_values_match_db_enum(client_pg, db, seeded_inciden
         assert incident.resolution is judgement
 
 
-def _add_execution(
-    db, incident: models.Incident, runbook_id: RunbookId
-) -> models.ActionExecution:
-    execution = models.ActionExecution(
-        incident_id=incident.incident_id,
-        runbook_id=runbook_id,
-        target_arn=SUBJECT_EC2,
-        status=ExecutionStatus.SUCCESS,
-        trigger_source=TriggerSource.USER_APPROVAL,
-    )
-    db.add(execution)
-    db.flush()
-    return execution
-
-
-def test_recovery_after_resolve_resumes_and_clears_the_judgement(client_pg, db, seeded_incident, make_candidate):
+def test_recovery_after_resolve_resumes_and_clears_the_judgement(
+    client_pg, db, seeded_incident, make_candidate, make_execution
+):
     """종료한 뒤 관제자 복구를 접수하는 정규 경로(ADR-0004) — 판단은 초기화된다.
 
     resolution은 "지금 이 인시던트가 종료된 이유"라 재개되면 거짓이 되고, 남겨
@@ -214,7 +201,13 @@ def test_recovery_after_resolve_resumes_and_clears_the_judgement(client_pg, db, 
     재개한 이력은 복구 실행 레코드가 남긴다.
     """
     incident = seeded_incident()
-    origin = _add_execution(db, incident, RunbookId.RUNBOOK_EC2_ISOLATE)
+    origin = make_execution(
+        db,
+        incident,
+        runbook_id=RunbookId.RUNBOOK_EC2_ISOLATE,
+        status=ExecutionStatus.SUCCESS,
+        target_arn=SUBJECT_EC2,
+    )
     detail_url = f"/api/v1/incidents/{incident.incident_id}"
 
     resolved = client_pg.post(_url(incident), json={"resolution": "JUSTIFIED"})

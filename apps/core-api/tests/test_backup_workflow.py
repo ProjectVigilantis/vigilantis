@@ -18,12 +18,10 @@ for p in (str(CORE_API), str(REPO_ROOT / "packages")):
         sys.path.insert(0, p)
 
 import workflows  # noqa: E402
-from db.repositories import executions as exec_repo  # noqa: E402
-from db.repositories import incidents as incidents_repo  # noqa: E402
-from schemas.api.incidents import IncidentCategory  # noqa: E402
+from schemas.api.incidents import IncidentCategory, IncidentStatus  # noqa: E402
 from schemas.backups import BackupType  # noqa: E402
 from schemas.precheck import PrecheckReasonCode  # noqa: E402
-from schemas.runbooks import RunbookId, TriggerSource  # noqa: E402
+from schemas.runbooks import RunbookId  # noqa: E402
 from services.aws import backup as bk  # noqa: E402
 
 R = PrecheckReasonCode
@@ -79,24 +77,34 @@ def aws(monkeypatch):
     return configure
 
 
-def _execution(db, *, runbook=RunbookId.RUNBOOK_EC2_RIGHTSIZING, target_arn=INSTANCE_ARN):
-    incident = incidents_repo.create_incident(
-        db, subject_arn=INSTANCE_ARN, category=IncidentCategory.FINOPS
-    )
-    return exec_repo.create_execution(
-        db,
-        incident_id=incident.incident_id,
-        runbook_id=runbook,
-        target_arn=target_arn,
-        trigger_source=TriggerSource.USER_APPROVAL,
-    )
+@pytest.fixture()
+def reserved_execution(db, make_incident, make_execution):
+    """백업이 결속될 최소 상태 — FINOPS Incident 1건 + 실행 1건.
+
+    사본이 아니라 **조합**이라 이 파일에 남기되 conftest 팩토리 위에 세운다(#233 과
+    같은 결). Incident 상태를 ANALYZING 으로 명시하는 것은 종전 경로였던
+    `incidents_repo.create_incident` 가 상태를 싣지 않아 모델 기본값이 그대로 섰기
+    때문이다 — `make_incident` 의 기본은 AWAITING_APPROVAL 이라, 넘기지 않으면 조용히
+    다른 상태를 시드한다.
+    """
+
+    def _make(*, runbook=RunbookId.RUNBOOK_EC2_RIGHTSIZING, target_arn=INSTANCE_ARN):
+        incident = make_incident(
+            db,
+            category=IncidentCategory.FINOPS,
+            subject_arn=INSTANCE_ARN,
+            status=IncidentStatus.ANALYZING,
+        )
+        return make_execution(db, incident, runbook_id=runbook, target_arn=target_arn)
+
+    return _make
 
 
 # ------------------------------------------------------------------ 저장·결속
 
 
-def test_backup_is_stored_and_bound_to_the_execution(db, aws):
-    execution = _execution(db)
+def test_backup_is_stored_and_bound_to_the_execution(db, reserved_execution, aws):
+    execution = reserved_execution()
 
     outcome = workflows.store_instance_spec_backup(db, execution.execution_id)
 
@@ -107,8 +115,8 @@ def test_backup_is_stored_and_bound_to_the_execution(db, aws):
     assert execution.backup_record_id == outcome.record.backup_record_id
 
 
-def test_stored_payload_carries_the_revert_input(db, aws):
-    execution = _execution(db)
+def test_stored_payload_carries_the_revert_input(db, reserved_execution, aws):
+    execution = reserved_execution()
 
     outcome = workflows.store_instance_spec_backup(db, execution.execution_id)
 
@@ -117,11 +125,11 @@ def test_stored_payload_carries_the_revert_input(db, aws):
     assert outcome.record.payload["state"] == "running"
 
 
-def test_capture_targets_the_arn_region_and_resource(db, aws):
+def test_capture_targets_the_arn_region_and_resource(db, reserved_execution, aws):
     """실행의 target_arn이 가리키는 자원·리전으로만 조회한다 — 다른 리전으로
     나가면 같은 ID의 다른 자원을 스펙으로 기록하게 된다."""
-    execution = _execution(
-        db, target_arn=f"arn:aws:ec2:us-east-1:{ACCOUNT}:instance/{INSTANCE}"
+    execution = reserved_execution(
+        target_arn=f"arn:aws:ec2:us-east-1:{ACCOUNT}:instance/{INSTANCE}"
     )
 
     workflows.store_instance_spec_backup(db, execution.execution_id)
@@ -133,10 +141,10 @@ def test_capture_targets_the_arn_region_and_resource(db, aws):
 # ------------------------------------------------------------------ 재시도
 
 
-def test_second_call_reuses_the_first_backup(db, aws):
+def test_second_call_reuses_the_first_backup(db, reserved_execution, aws):
     """재시도가 새 레코드를 만들면 '조치 직전'이 아니라 '이미 바뀐 뒤'의 스펙이
     원복 값이 된다 — 그 원복은 아무것도 되돌리지 못한다."""
-    execution = _execution(db)
+    execution = reserved_execution()
     first = workflows.store_instance_spec_backup(db, execution.execution_id)
 
     # 두 번째 시도 시점의 AWS 상태는 이미 바뀌어 있다
@@ -158,9 +166,9 @@ def test_second_call_reuses_the_first_backup(db, aws):
 # ------------------------------------------------------------------ 실패 경로
 
 
-def test_capture_failure_leaves_no_record_and_reports_the_reason(db, aws):
+def test_capture_failure_leaves_no_record_and_reports_the_reason(db, reserved_execution, aws):
     """백업이 없으면 조치를 시작하면 안 된다 — 호출부가 이 사유로 실행을 끝낸다."""
-    execution = _execution(db)
+    execution = reserved_execution()
     aws(ClientError({"Error": {"Code": "UnauthorizedOperation"}}, "DescribeInstances"))
 
     outcome = workflows.store_instance_spec_backup(db, execution.execution_id)
@@ -170,9 +178,9 @@ def test_capture_failure_leaves_no_record_and_reports_the_reason(db, aws):
     assert execution.backup_record_id is None
 
 
-def test_non_instance_target_is_rejected_before_calling_aws(db, aws):
-    execution = _execution(
-        db, target_arn=f"arn:aws:ec2:{REGION}:{ACCOUNT}:volume/vol-0abc123456789def0"
+def test_non_instance_target_is_rejected_before_calling_aws(db, reserved_execution, aws):
+    execution = reserved_execution(
+        target_arn=f"arn:aws:ec2:{REGION}:{ACCOUNT}:volume/vol-0abc123456789def0"
     )
 
     outcome = workflows.store_instance_spec_backup(db, execution.execution_id)
@@ -187,10 +195,10 @@ def test_missing_execution_is_reported_not_raised(db, aws):
     assert outcome.reason_code is R.PRECHECK_TARGET_NOT_FOUND
 
 
-def test_wrong_runbook_is_a_wiring_error(db, aws):
+def test_wrong_runbook_is_a_wiring_error(db, reserved_execution, aws):
     """스펙 JSON 백업을 쓰는 런북은 RIGHTSIZING 하나뿐이다(ADR-0007 §5). 판정으로
     삼키면 다른 런북이 엉뚱한 백업 종류를 달고 조용히 진행된다."""
-    execution = _execution(db, runbook=RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED)
+    execution = reserved_execution(runbook=RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED)
 
     with pytest.raises(ValueError, match="스펙 JSON 백업 대상 런북이 아닙니다"):
         workflows.store_instance_spec_backup(db, execution.execution_id)
