@@ -137,6 +137,27 @@ def test_sends_the_protocol_as_an_aws_number(aws, protocol, expected):
     assert aws.calls[0][1]["Protocol"] == expected
 
 
+@pytest.mark.parametrize("protocol", ["tcp", "udp"])
+def test_sends_the_whole_port_range_for_tcp_and_udp(aws, protocol):
+    """TCP·UDP에는 PortRange가 필수다 — 빠뜨리면 실 AWS가 요청을 거절한다.
+
+    LocalStack은 없는 요청도 받아 주므로 로컬 테스트만으로는 드러나지 않는다.
+    범위가 전체인 것은 이 조치가 막는 축이 포트가 아니라 **출발지 주소**이기
+    때문이다 — 일부 포트만 막으면 같은 출발지가 다른 포트로 그대로 들어온다.
+    """
+    run(protocol=protocol)
+
+    assert aws.calls[0][1]["PortRange"] == {"From": 0, "To": 65535}
+
+
+@pytest.mark.parametrize("protocol", ["icmp", "-1"])
+def test_does_not_send_a_port_range_for_protocols_without_ports(aws, protocol):
+    """ICMP와 전체 프로토콜에는 포트 축이 없다 — 보내면 의미 없는 제약이 붙는다."""
+    run(protocol=protocol)
+
+    assert "PortRange" not in aws.calls[0][1]
+
+
 def test_success_step_says_the_asset_changed(aws, recorded):
     """effect가 자동 원복의 유일한 입력이다 — 규칙이 들어갔으면 APPLIED다."""
     outcome = run(recorded)

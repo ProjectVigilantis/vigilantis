@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-08-19
-- **Amended**: 2026-08-24, 2026-09-08 — §4 검증 한계 목록 갱신(하단 "개정 이력" 참조, 핵심 결정 불변)
+- **Amended**: 2026-08-24, 2026-09-08, 2026-09-10 — §4 검증 한계 목록 갱신(하단 "개정 이력" 참조, 핵심 결정 불변)
 - **Deciders**: 김세혁(PM/Infra) 수립 — 2026-08-13 확정 결정(개발 = LocalStack, 발표 직전 실 AWS 전환)의 구체화
 
 ## Context (배경)
@@ -64,6 +64,7 @@ LocalStack 통과를 "검증 완료"로 간주하지 않는 경로를 고정 목
 | 4 | ALB Target Group·ASG 경로 (P2 런북 3종) | **확정 편입(2026-08-24 실측)** — `elbv2`·`autoscaling`은 Community 미포함(Pro 전용, `InternalFailure: not included within your LocalStack license`). `ISOLATE`·`UNISOLATE`·`ENABLE_AUTOSCALING`은 실행뿐 아니라 Dry-Run 대체용 describe 조회도 로컬 불가 |
 | 5 | `ec2.create_network_acl_entry` · `ec2.delete_network_acl_entry`의 `DryRun=True` | **LocalStack이 플래그를 무시하고 실제로 규칙을 생성·삭제한다**(예외 미발생). 실 AWS는 정상 지원하므로 `DryRun` 경로는 실 AWS에서 처음 검증된다 — 그때까지 두 런북은 조회 대체 검증으로 동작한다([ADR-0007](0007-guardrail-dryrun-executor-precheck-contract.md) §4) |
 | 6 | `ec2.create_network_acl_entry`의 `Protocol` 표기 | **LocalStack은 보낸 문자열을 그대로 저장한다**(2026-09-08 실측 — `Protocol="tcp"`로 넣으면 `describe_network_acls`도 `"tcp"`를 돌려준다). 실 AWS는 같은 요청을 프로토콜 번호로 정규화한다. 저장 값이 곧 `NACL_RESTORE`의 백업 fingerprint 대조 상대라(ADR-0008 §5) 이름을 그대로 보내면 대조가 LocalStack에서만 맞는다. **행동 규칙: 삽입 시점에 번호로 바꿔 보낸다**(`schemas.runbook_parameters.NACL_PROTOCOL_NUMBERS`) — 그러면 두 환경이 같은 값을 저장하므로 이 격차는 이월이 아니라 코드로 닫힌다 |
+| 7 | `ec2.create_network_acl_entry`의 `PortRange` | **LocalStack은 TCP·UDP 규칙에서 `PortRange`가 빠진 요청도 받아 준다**(2026-09-10 실측 — TCP 규칙이 그대로 생성되며 `describe_network_acls`의 `PortRange`는 `None`으로 남는다). 실 AWS는 같은 요청을 `InvalidParameterValue`로 거절한다([CreateNetworkAclEntry](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_CreateNetworkAclEntry.html)). **행동 규칙: TCP·UDP에는 전체 범위 `0-65535`를 실어 보낸다**(`services/aws/executor._NACL_ALL_PORTS`) — 막는 축이 포트가 아니라 출발지 주소라 범위를 좁힐 이유가 없고, 6행과 같이 이월이 아니라 코드로 닫힌다 |
 
 이 목록은 **6–7주차 실 AWS 스모크 테스트**에서 해소한다: P0 런북 4종(`RIGHTSIZING`+`REVERT_SIZE`, `NACL_ADD_DENY`+`NACL_RESTORE`) 실동작 + Dry-Run·Status Check 경로 각 1회 검증. 비용 통제 — 단일 계정, 최소 스펙(t3.micro급), 검증 직후 리소스 정리. P2 시연 인프라(ALB·다중 EC2)는 마일스톤대로 조기 준비하되 실 AWS에 구성한다.
 
@@ -134,3 +135,16 @@ LocalStack 통과를 "검증 완료"로 간주하지 않는 경로를 고정 목
   §3(전환 스위치 규약 — 코드 분기 금지)은 그대로 유지한다. 두 NACL 작업을 "LocalStack일 때만
   조회"로 나누지 않고 환경 무관 조회 대체 검증으로 처리하는 근거가 그 조항이다. 핵심 결정
   (단일 compose·Boto3 시드 단일 원천·전환 스위치·이월 목록 운용)은 불변.
+
+- **2026-09-10 (3차 개정)** — §4에 7행 추가. PR #313 리뷰에서 **TCP·UDP 규칙의 `PortRange`
+  누락**이 지적됐다. LocalStack이 그 요청을 받아 주기 때문에 로컬 테스트로는 드러나지 않고,
+  실 AWS 전환에서 처음 거절로 나타난다.
+
+  | 대상 | 변경 |
+  | --- | --- |
+  | 7행 (신규) | LocalStack은 `PortRange` 없는 TCP·UDP 규칙 생성을 허용하고 실 AWS는 거절한다. 삽입 시점에 전체 범위 `0-65535`를 실어 보내 두 환경에서 같은 요청이 서게 했다 |
+
+  처분은 6행과 같다 — **실 AWS 스모크로 이월하지 않고 코드로 닫는다.** 범위 값은
+  `services/aws/executor.py`의 `_NACL_ALL_PORTS` 하나에 두고, 회귀는
+  `test_execute_nacl_add_deny.py`가 지킨다(TCP·UDP는 전체 범위, ICMP·`-1`은 미전송).
+  핵심 결정은 불변이다.
