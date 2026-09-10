@@ -75,7 +75,7 @@ def test_run_pipeline_runs_and_releases_when_lock_free(pg_engine, monkeypatch):
     assert called["collect"] == 1 and called["judge"] == 1
     assert result == {
         "stored": {"stored": 1}, "verdicts": {"SKIP": 1},
-        "incidents": {"created": 0, "existing": 0},
+        "incidents": {"created": 0, "existing": 0, "failed": 0},
     }
 
     # 락이 해제됐어야 한다 — 같은 키를 다시 잡을 수 있어야 한다

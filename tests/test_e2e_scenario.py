@@ -8,8 +8,8 @@
 #    계속 맞는가. 입력 케이스 ID·런북 짝·계약 제약이 여기 해당한다. 파이프라인이
 #    없어도 전부 확인 가능하며, 어긋나면 **대본이 틀린 채로 발표까지 간다.**
 # ② **전 구간 흐름 (skip 유지)** — 감지 → Rule Engine → AI CoT → 가드레일 4단계 →
-#    원클릭 실행 → 자동 원복. `execute` 본체(Boto3 실행·`get_waiter`·자동 원복)가
-#    미구현이라 아직 못 돈다. 무엇을 검증할지는 docstring에 적어 둔다.
+#    원클릭 실행 → 자동 원복/해제. 트랙별 남은 선행은 아래 skip 사유에,
+#    검증할 상태 전이는 각 docstring에 적어 둔다.
 #
 # ①이 필요한 이유: 설계서는 200줄인데 대응 코드가 주석 한 줄이었다. 그동안 문서의
 # 주장(어느 골든 케이스를 쓰는지, 어느 런북이 짝인지)은 **아무것도 검증되지 않았다.**
@@ -267,20 +267,18 @@ def test_finops_incident_carries_no_risk_fields():
 # 있었으나 그건 낡은 문장이라 아래에서 고쳤다 — 남은 것이 무엇인지 흐려지기 때문이다.
 # ==============================================================================
 #
-# 두 흐름에 공통으로 걸린 선행이 하나 있다. **판정 → Intake 배선**이다:
-# incident_intake.create_incident_from_intake() 의 본문은 dev 에 있으나
-# (#265 / PR #286) 프로덕션 호출부가 없어 판정 결과가 Incident 가 되지 않는다
-# (services/scheduler.py:run_pipeline 은 판정까지만 한다). 그 위에 트랙별 선행이
-# 하나씩 더 있다 — T1 은 Status Check 실패 주입, T2 는 NACL_RESTORE 실행 함수다
-# (NACL_ADD_DENY 는 #297 로 구현됐다).
+# T1의 FinOps 판정 → Intake 배선은 #306으로 연결됐다. 남은 선행은
+# Status Check 실패 주입이다. T2는 SecOps 위협 판정 → Intake 배선과
+# NACL_RESTORE 실행 함수가 남아 있다(NACL_ADD_DENY는 #297로 구현됨).
+# #306은 COST_CANDIDATE·UNUSED만 연결하므로 T2의 선행까지 해소하지 않는다.
 #
 # 열리면 이 파일 위쪽의 전제 테스트가 이미 입력·런북 짝을 보증하고 있으므로,
 # 흐름 테스트는 **상태 전이만** 보면 된다. 경계 실사는 docs/E2E_GATE_0911.md.
 
 
 @pytest.mark.skip(
-    reason="Status Check 실패 주입 방법 없음 + 판정→Intake 배선 없음 "
-    "— 설계서 §대조 3번(주입 방법) · 9번(배선). 자동 원복은 3-B 로 해소됨 "
+    reason="Status Check 실패 주입 방법 없음 "
+    "— 설계서 §대조 3번(주입 방법). FinOps 배선은 #306, 자동 원복은 3-B 로 해소됨 "
     "(#241 / PR #256) · 이슈 #301 · #246"
 )
 def test_t1_idle_ec2_downsize_and_auto_rollback_flow():
@@ -307,8 +305,8 @@ def test_t1_idle_ec2_downsize_and_auto_rollback_flow():
 
 
 @pytest.mark.skip(
-    reason="NACL_RESTORE 실행 함수 없음(services/aws/executor.py) + 판정→Intake 배선 없음 "
-    "(NACL_ADD_DENY 는 #297 로 구현됨) — 설계서 §대조 1번(배선)·9번. "
+    reason="NACL_RESTORE 실행 함수 없음(services/aws/executor.py) + SecOps 위협 판정→Intake 미연결 "
+    "(NACL_ADD_DENY는 #297로 구현됨, #306은 FinOps 배선) — 설계서 §대조 1번·9번. "
     "SSOT 5주차 판정 기준 ⓐ · 이슈 #298 · #301 · #246"
 )
 def test_t2_ssh_bruteforce_block_and_one_click_release_flow():

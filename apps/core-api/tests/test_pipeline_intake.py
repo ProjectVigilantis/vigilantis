@@ -7,6 +7,7 @@ AWS 수집만 골든 인벤토리로 대체한다. 판정 규칙의 경계값은
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -73,7 +74,7 @@ def test_pipeline_creates_only_finops_and_preserves_first_detection_on_rescan(
     incidents = list(db.scalars(select(models.Incident)))
     assert expected
     assert {item.subject_arn for item in incidents} == expected
-    assert first["incidents"] == {"created": len(expected), "existing": 0}
+    assert first["incidents"] == {"created": len(expected), "existing": 0, "failed": 0}
     assert len(events) == len(expected)
     assert all(e.event_type is WsEventType.INCIDENT_CREATED for e in events)
     assert {e.data.incident_id for e in events} == {item.incident_id for item in incidents}
@@ -99,7 +100,7 @@ def test_pipeline_creates_only_finops_and_preserves_first_detection_on_rescan(
         first_inputs[item.incident_id] = graph_input
 
     second = scheduler.run_pipeline(events.append)
-    assert second["incidents"] == {"created": 0, "existing": len(expected)}
+    assert second["incidents"] == {"created": 0, "existing": len(expected), "failed": 0}
     assert len(list(db.scalars(select(models.Incident)))) == len(expected)
     assert len(events) == len(expected)
     db.expire_all()
@@ -110,34 +111,68 @@ def test_pipeline_creates_only_finops_and_preserves_first_detection_on_rescan(
         assert agent_dispatcher.build_graph_input(db, incident_id) == original
 
 
-def test_intake_failure_rolls_back_one_incident_and_next_tick_retries(
-    pipeline, db, monkeypatch,
+def test_persistent_intake_failure_does_not_starve_later_assets_and_recovers(
+    pipeline, db, monkeypatch, caplog,
 ):
     events = []
     add_evidence = incident_intake._add_evidence
-    attempts = 0
+    expected = _expected_incident_arns()
+    failing_arn = sorted(expected)[1]  # 앞뒤에 정상 대상이 있는 같은 자산을 매번 실패시킨다.
+    failed_ids = []
 
-    def fail_second_incident(session, **kwargs):
-        nonlocal attempts
-        if kwargs["evidence_type"] is EvidenceType.RULE:
-            attempts += 1
-        if attempts == 2:
+    def fail_same_asset(session, **kwargs):
+        result = add_evidence(session, **kwargs)
+        if kwargs["evidence_type"] is EvidenceType.ASSET and kwargs["source_id"] == failing_arn:
+            # Incident·RULE·ASSET을 쓴 뒤 실패시켜 부분 저장의 rollback도 확인한다.
+            failed_ids.append(kwargs["incident_id"])
             raise RuntimeError("intake evidence failure")
-        return add_evidence(session, **kwargs)
+        return result
 
-    monkeypatch.setattr(incident_intake, "_add_evidence", fail_second_incident)
-    with pytest.raises(RuntimeError, match="intake evidence failure"):
-        scheduler.run_pipeline(events.append)
+    monkeypatch.setattr(incident_intake, "_add_evidence", fail_same_asset)
+    with caplog.at_level(logging.ERROR, logger="vigilantis.scheduler"):
+        for tick in range(2):
+            result = scheduler.run_pipeline(events.append)
+            assert result["incidents"] == {
+                "created": len(expected) - 1 if tick == 0 else 0,
+                "existing": 0 if tick == 0 else len(expected) - 1,
+                "failed": 1,
+            }
+            db.expire_all()
+            incidents = list(db.scalars(select(models.Incident)))
+            assert {item.subject_arn for item in incidents} == expected - {failing_arn}
+            assert {event.data.incident_id for event in events} == {
+                item.incident_id for item in incidents
+            }
+            assert len(events) == len(expected) - 1
+            assert not list(db.scalars(select(models.Evidence).where(
+                models.Evidence.incident_id.in_(failed_ids),
+            )))
 
-    assert len(list(db.scalars(select(models.Incident)))) == 1
-    assert len(events) == 1  # 부분 저장된 실패 건은 알리지 않는다.
+    failures = [record for record in caplog.records if record.getMessage() == "scan_intake_failed"]
+    assert len(failed_ids) == len(failures) == 2
+    assert all(record.subject_arn == failing_arn for record in failures)
+    assert all(record.exc_info and isinstance(record.exc_info[1], RuntimeError) for record in failures)
     assert list(db.scalars(select(models.RuleEvaluation)))  # 판정은 이미 저장됨.
     monkeypatch.setattr(incident_intake, "_add_evidence", add_evidence)
     retried = scheduler.run_pipeline(events.append)  # 실패 후 advisory lock도 해제되어야 한다.
-    expected = _expected_incident_arns()
-    assert retried["incidents"] == {"created": len(expected) - 1, "existing": 1}
+    assert retried["incidents"] == {"created": 1, "existing": len(expected) - 1, "failed": 0}
     assert len(events) == len(expected)
     assert {item.subject_arn for item in db.scalars(select(models.Incident))} == expected
+
+
+def test_publish_failure_does_not_rollback_or_count_as_intake_failure(pipeline, db, caplog):
+    def fail_publish(event):
+        raise RuntimeError("publish failure")
+
+    with caplog.at_level(logging.ERROR, logger="vigilantis.scheduler"):
+        with pytest.raises(RuntimeError, match="publish failure"):
+            scheduler.run_pipeline(fail_publish)
+
+    assert len(list(db.scalars(select(models.Incident)))) == 1  # 발행 전에 저장됨.
+    assert not any(record.getMessage() == "scan_intake_failed" for record in caplog.records)
+    expected = _expected_incident_arns()
+    retried = scheduler.run_pipeline()
+    assert retried["incidents"] == {"created": len(expected) - 1, "existing": 1, "failed": 0}
 
 
 def test_pipeline_does_not_disguise_another_collection_as_the_detection(
@@ -150,7 +185,7 @@ def test_pipeline_does_not_disguise_another_collection_as_the_detection(
         result = real_rule_engine(session)
         for evaluation in result["evaluations"]:
             judged_arns.add(evaluation.asset_arn)
-            evaluation.collection_run_id = "different-collection"
+            evaluation.collection_run_id = "00000000-0000-0000-0000-000000000001"
         return result
 
     monkeypatch.setattr(rule_engine, "run_rule_engine", judge_with_wrong_run)
