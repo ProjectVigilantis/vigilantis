@@ -259,6 +259,29 @@ def add_metric_summary(
     return row
 
 
+def get_metric_summary_for_run(
+    db: Session, *, asset_arn: str, collection_run_id: str
+) -> Optional[models.MetricSummary]:
+    """자산 1건의 **그 회차** 메트릭 요약. 없으면 None.
+
+    회차를 인자로 받는 것이 이 함수의 요점이다 — Intake가 나르는 판정·자산 스냅샷과
+    같은 회차의 관측만 Incident 근거가 되어야 한다(schemas/intake.py 계약 원칙).
+    자산별 최신 요약을 돌려주는 fresh_ec2_metric_summaries와 다른 자리다: 그쪽은
+    CloudWatch 재조회를 건너뛸지 판단하는 신선도 기준이라 회차를 묻지 않는다.
+
+    (asset_id, collection_run_id)에 유니크 제약이 있어(db/models.py MetricSummary)
+    결과는 0건 또는 1건이다.
+    """
+    return db.execute(
+        select(models.MetricSummary)
+        .join(models.Asset, models.Asset.asset_id == models.MetricSummary.asset_id)
+        .where(
+            models.Asset.arn == asset_arn,
+            models.MetricSummary.collection_run_id == collection_run_id,
+        )
+    ).scalar_one_or_none()
+
+
 def fresh_ec2_metric_summaries(
     db: Session, *, region: str, not_older_than: datetime
 ) -> tuple[Optional[datetime], dict[str, MetricSummaryContract]]:
