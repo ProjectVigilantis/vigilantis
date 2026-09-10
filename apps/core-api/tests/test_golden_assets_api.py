@@ -206,3 +206,74 @@ def test_golden_relations_point_at_served_assets(client_pg, loaded):
         }
     )
     assert not dangling, f"응답에 없는 자산을 가리키는 관계가 있다: {dangling}"
+
+
+# ------------------------------------------------------------- 게이트 바인딩 (#301)
+# `--bind-a1-to-seed`는 골든 A1의 **식별자만** LocalStack 실물 인스턴스의 것으로 바꾼다.
+# LocalStack 없이도 지킬 수 있는 축이 둘이라 여기서 잰다 — ① 바뀌는 것이 식별자뿐인가
+# ② 입력과 정답이 **함께** 바뀌는가. ②가 깨지면 `--verify`가 바인딩 자체를 어긋남으로
+# 세어, 게이트 사전 준비 ④의 "어긋남 0"이 아무것도 보증하지 못하게 된다.
+_FAKE_BOUND_ARN = "arn:aws:ec2:ap-northeast-2:000000000000:instance/i-0feedfacecafe0001"
+
+
+@pytest.fixture()
+def binding(golden):
+    return golden.SeedBinding(
+        old_arn=golden.GOLDEN_A1_ARN,
+        new_arn=_FAKE_BOUND_ARN,
+        new_instance_id=_FAKE_BOUND_ARN.rsplit("/", 1)[1],
+    )
+
+
+def test_binding_changes_only_identifiers(golden, binding):
+    """바뀌는 것은 `arn`·`instance_id` 둘뿐이다 — 판정 입력은 골든 그대로다."""
+    plain = {
+        instance["instance_id"]: instance
+        for inventory in golden.load_inventories()
+        for instance in [i.model_dump() for i in inventory.ec2_instances]
+    }
+    bound = {
+        instance["arn"]: instance
+        for inventory in golden.load_inventories(binding)
+        for instance in [i.model_dump() for i in inventory.ec2_instances]
+    }
+
+    a1_before = plain[golden.GOLDEN_A1_ARN.rsplit("/", 1)[1]]
+    a1_after = bound[binding.new_arn]
+    assert a1_after["instance_id"] == binding.new_instance_id
+    differing = {
+        key for key in a1_before if a1_before[key] != a1_after.get(key)
+    }
+    assert differing == {"arn", "instance_id"}, (
+        f"식별자 밖의 필드가 함께 바뀌었다: {sorted(differing - {'arn', 'instance_id'})} — "
+        "판정·화면 서사(경계값 cpu_avg)가 바인딩으로 흔들리면 안 된다"
+    )
+
+
+def test_binding_rewrites_expected_key_too(db, golden, binding):
+    """입력과 정답이 함께 바뀌어 대조가 어긋남 0으로 남는다."""
+    from db.repositories import assets as assets_repo
+
+    golden.load_into_db(db, golden.load_inventories(binding))
+
+    assert assets_repo.get_asset_by_arn(db, binding.new_arn) is not None
+    assert assets_repo.get_asset_by_arn(db, binding.old_arn) is None
+    assert golden._verify(db, binding) == 0
+
+
+def test_stale_binding_from_a_previous_boot_is_caught(db, golden, binding):
+    """이전 기동의 바인딩이 DB에 남아 있으면 적재 전에 걸린다.
+
+    시드 인스턴스 ID는 LocalStack 재기동마다 바뀌므로, 골든 ARN만 보는 검사는 "A1이 두 장
+    뜨는" 상태를 그냥 지나친다 — 그중 실물이 없는 쪽을 고르면 승인 직후 실행이 깨진다.
+    """
+    golden.load_into_db(db, golden.load_inventories(binding))
+
+    next_boot = golden.SeedBinding(
+        old_arn=golden.GOLDEN_A1_ARN,
+        new_arn=_FAKE_BOUND_ARN[:-1] + "2",
+        new_instance_id=_FAKE_BOUND_ARN.rsplit("/", 1)[1][:-1] + "2",
+    )
+    assert golden._stale_a1_assets(db, next_boot) == [binding.new_arn]
+    # 같은 바인딩으로 다시 적재하는 것은 막지 않는다 — 그 행은 upsert로 덮인다.
+    assert golden._stale_a1_assets(db, binding) == []
