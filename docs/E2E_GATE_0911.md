@@ -64,7 +64,7 @@
 
 > **A1 고정이 대본에 박혀 있어야 하는 이유**: 당일 아무 ARN으로 Incident를 만들면 자산 화면(골든)과 인시던트 화면이 서로 다른 ARN 집합을 쓰게 되어, SSOT 5주차 리스크 3번의 **「교집합 0건」이 되살아난다**(§5-2). 고정하면 두 화면이 같은 집합을 쓴다.
 
-> 🔴 **그런데 골든 A1은 LocalStack에 없다 — 그대로 두면 T1-6이 승인 직후에 깨진다.** 골든의 `i-0a1b2c3d4e5f00001`은 정답지가 지어낸 ID라 실행 1단계 `stop_instances`가 `InvalidInstanceID.NotFound`로 즉사한다. **가드레일은 이것을 못 막는다**(2026-09-10 실측) — ③ ARN Match는 DB 조회라 통과하고, ④ Dry-Run은 LocalStack이 DryRun 플래그를 **대상 존재 검사보다 먼저** 처리해 `DryRunOperation`으로 통과한다. 4단계 전부 통과 → 실행 버튼이 열리고 → **관제자가 누른 뒤에야 붉은 오류가 뜬다.**
+> 🔴 **그런데 골든 A1은 LocalStack에 없다 — 그대로 두면 T1-6이 승인 직후에 깨진다.** 골든의 `i-0a1b2c3d4e5f00001`은 정답지가 지어낸 ID라 실행 1단계 `stop_instances`가 `InvalidInstanceID.NotFound`로 즉사한다. **가드레일은 이것을 못 막는다**(2026-09-10 실측 · [ADR-0006](adr/0006-localstack-team-standard-env.md) §4 8행으로 이월) — ③ ARN Match는 DB 조회라 통과하고, ④ Dry-Run은 LocalStack이 DryRun 플래그를 **대상 존재 검사보다 먼저** 처리해 `DryRunOperation`으로 통과한다. 4단계 전부 통과 → 실행 버튼이 열리고 → **관제자가 누른 뒤에야 붉은 오류가 뜬다.**
 >
 > **처분(2026-09-10 PM 확정)**: 적재 시 골든 A1의 **식별자만**(`arn`·`instance_id`) 살아있는 시드 인스턴스 `vigilantis-seed-idle`의 것으로 바꾼다(`scripts/load_golden_assets.py --bind-a1-to-seed`). 이름·타입·메트릭·태그는 골든 그대로라 **화면·판정·경계값 서사(`cpu_avg 4.9`)는 하나도 바뀌지 않고**, 시드가 자산 화면에 섞이지도 않는다(스캔을 켤 필요가 없다). 시드 `vigilantis-seed-idle`은 타입이 **t3.xlarge로 골든 A1과 같아** R6의 `t3.xlarge → t3.small`이 문구 그대로 성립한다.
 > **실측**(2026-09-10 · LocalStack 4.14.0): 바인딩 전 = 1단계 `STOP_INSTANCE` **FAILED** / `PRECHECK_TARGET_NOT_FOUND`. 바인딩 후 = 3단계 전부 `SUCCESS`·`APPLIED`, 실제 타입이 `t3.xlarge → t3.small`로 바뀜.
