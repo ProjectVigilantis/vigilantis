@@ -418,7 +418,11 @@ def main() -> int:
             print(f"중단: 이번 바인딩과 다른 A1 자산이 DB에 남아 있다({', '.join(stale)})")
             print("  DB를 비우고 다시 적재할 것 —")
             print("  docker compose down -v && docker compose up -d db localstack")
-            print("  uv run alembic upgrade head && uv run python scripts/seed_localstack.py")
+            # 마이그레이션은 compose의 migrate 서비스로 돌린다 — `alembic.ini`가
+            # apps/core-api/에 있어 저장소 루트의 `uv run alembic upgrade head`는
+            # `No 'script_location' key found`로 죽는다(대본 §2-②와 같은 형태).
+            print("  docker compose run --rm migrate")
+            print("  uv run python scripts/seed_localstack.py")
             return 2
         result = load_into_db(db, inventories)
         print(f"자산 {result['assets']}건 적재 · CollectionRun {result['runs']}건")

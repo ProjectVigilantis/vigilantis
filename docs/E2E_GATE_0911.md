@@ -66,7 +66,7 @@
 
 > 🔴 **그런데 골든 A1은 LocalStack에 없다 — 그대로 두면 T1-6이 승인 직후에 깨진다.** 골든의 `i-0a1b2c3d4e5f00001`은 정답지가 지어낸 ID라 실행 1단계 `stop_instances`가 `InvalidInstanceID.NotFound`로 즉사한다. **가드레일은 이것을 못 막는다**(2026-09-10 실측 · [ADR-0006](adr/0006-localstack-team-standard-env.md) §4 8행으로 이월) — ③ ARN Match는 DB 조회라 통과하고, ④ Dry-Run은 LocalStack이 DryRun 플래그를 **대상 존재 검사보다 먼저** 처리해 `DryRunOperation`으로 통과한다. 4단계 전부 통과 → 실행 버튼이 열리고 → **관제자가 누른 뒤에야 붉은 오류가 뜬다.**
 >
-> **처분(2026-09-10 PM 확정)**: 적재 시 골든 A1의 **식별자만**(`arn`·`instance_id`) 살아있는 시드 인스턴스 `vigilantis-seed-idle`의 것으로 바꾼다(`scripts/load_golden_assets.py --bind-a1-to-seed`). 이름·타입·메트릭·태그는 골든 그대로라 **화면·판정·경계값 서사(`cpu_avg 4.9`)는 하나도 바뀌지 않고**, 시드가 자산 화면에 섞이지도 않는다(스캔을 켤 필요가 없다). 시드 `vigilantis-seed-idle`은 타입이 **t3.xlarge로 골든 A1과 같아** R6의 `t3.xlarge → t3.small`이 문구 그대로 성립한다.
+> **처분(2026-09-10 PM 확정)**: 적재 시 골든 A1의 **식별자만**(`arn`·`instance_id`) 살아있는 시드 인스턴스 `vigilantis-seed-idle`의 것으로 바꾼다(`scripts/load_golden_assets.py --bind-a1-to-seed`). 이름·타입·메트릭·태그는 골든 그대로라 **화면·판정·경계값 서사(`cpu_avg 4.9`)는 하나도 바뀌지 않고**, 시드가 자산 화면에 섞이지도 않는다(스캔을 켤 필요가 없다). 시드 `vigilantis-seed-idle`은 타입이 **t3.xlarge로 골든 A1과 같아** 출발 타입이 골든 서사와 어긋나지 않고 **다운사이징 실행이 그대로 성립한다.** 도착 타입은 여기에 적지 않는다 — **그 값을 고르는 것은 AI**이고 같은 입력에서도 흔들리는 것이 실측돼 있다(`apps/core-api/ai/evaluation/reproducibility.py` · #237). 바인딩이 여는 것은 *"타입이 실제로 바뀐다"* 이지 *"특정 타입이 된다"* 가 아니다(R6 기대값은 #315에서 그 뜻으로 고쳐진다).
 > **실측**(2026-09-10 · LocalStack 4.14.0): 바인딩 전 = 1단계 `STOP_INSTANCE` **FAILED** / `PRECHECK_TARGET_NOT_FOUND`. 바인딩 후 = 3단계 전부 `SUCCESS`·`APPLIED`, 실제 타입이 `t3.xlarge → t3.small`로 바뀜.
 > ⚠️ **바인딩된 ARN은 LocalStack이 재기동될 때마다 바뀐다.** 그래서 이 문서에 ARN을 적지 않는다 — 사전 준비 ④의 출력이 그날의 원천이다.
 
