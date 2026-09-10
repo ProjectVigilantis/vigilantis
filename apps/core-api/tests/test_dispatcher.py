@@ -44,6 +44,16 @@ INSTANCE = "i-0abc123456789def0"
 INSTANCE_ARN = f"arn:aws:ec2:{REGION}:{ACCOUNT}:instance/{INSTANCE}"
 VOLUME_ARN = f"arn:aws:ec2:{REGION}:{ACCOUNT}:volume/vol-0abc123456789def0"
 CANDIDATE_TYPE = "t3.medium"
+ACL = "acl-0abc123456789def0"
+ACL_ARN = f"arn:aws:ec2:{REGION}:{ACCOUNT}:network-acl/{ACL}"
+NACL_RULE_NUMBER = 100
+NACL_CIDR = "203.0.113.10/32"
+NACL_PARAMS = {
+    "rule_number": NACL_RULE_NUMBER,
+    "cidr_block": NACL_CIDR,
+    "protocol": "tcp",
+}
+EMPTY_ACL = {"NetworkAcls": [{"NetworkAclId": ACL, "Entries": []}]}
 
 INSTANCE_RESPONSE = {
     "Reservations": [
@@ -104,6 +114,8 @@ class FakeEc2:
                 return INSTANCE_RESPONSE
             if operation == "stop_instances":
                 return STOP_RESPONSE
+            if operation == "describe_network_acls":
+                return EMPTY_ACL
             return {}
 
         return call
@@ -465,6 +477,158 @@ def test_partially_applied_failure_initiates_rollback(db, reserved, aws):
     # 발동 이후의 확정은 test_auto_rollback_workflow.py가 본다.
     assert cycle(db).rollback_started == 1
     assert len(exec_repo.list_rollback_children(db, execution_id)) == 1
+
+
+# --------------------------------------- 차단 실행의 실패 처분 (#297 · PR #313 리뷰)
+
+
+def acl_with(*entries: dict) -> dict:
+    return {"NetworkAcls": [{"NetworkAclId": ACL, "Entries": list(entries)}]}
+
+
+def our_entry(**overrides) -> dict:
+    """조치가 넣은 그 규칙 — 백업 fingerprint와 일치하는 모양이다."""
+    values = {
+        "RuleNumber": NACL_RULE_NUMBER,
+        "Egress": False,
+        "CidrBlock": NACL_CIDR,
+        "Protocol": "6",
+        "RuleAction": "deny",
+    }
+    values.update(overrides)
+    return values
+
+
+@pytest.fixture()
+def nacl_reserved(db, make_incident, make_candidate):
+    """차단 조치가 접수된 상태 — SECOPS Incident + IN_PROGRESS 실행 1건.
+
+    `reserved`와 같은 조합이되 대상이 NACL이다. 자동 원복 짝이 없는 런북이라
+    실패 처분이 RIGHTSIZING과 갈리는 자리를 이 픽스처가 세운다.
+    """
+
+    def _make():
+        incident = make_incident(
+            db,
+            category=IncidentCategory.SECOPS,
+            subject_arn=ACL_ARN,
+            status=IncidentStatus.ANALYZING,
+        )
+        candidate = make_candidate(
+            db,
+            incident,
+            runbook_id=RunbookId.RUNBOOK_NACL_ADD_DENY,
+            target_arn=ACL_ARN,
+            parameters=NACL_PARAMS,
+            status=CandidateStatus.CLAIMED,
+        )
+        incidents_repo.update_incident_status(
+            db,
+            incident.incident_id,
+            expected=incident.status,
+            next_status=IncidentStatus.ACTION_IN_PROGRESS,
+        )
+        execution = exec_repo.create_execution(
+            db,
+            incident_id=incident.incident_id,
+            runbook_id=RunbookId.RUNBOOK_NACL_ADD_DENY,
+            target_arn=ACL_ARN,
+            trigger_source=TriggerSource.USER_APPROVAL,
+            candidate_id=candidate.candidate_id,
+        )
+        db.commit()
+        return incident.incident_id, execution.execution_id
+
+    return _make
+
+
+@pytest.fixture()
+def block_lost_the_response(db, nacl_reserved, aws):
+    """1주기 = 통신 오류로 끊긴 차단. 규칙이 들어갔는지 **알 수 없는** 상태다.
+
+    5xx는 effect UNKNOWN으로 적힌다(executor._effect_for) — 자산이 바뀌었을 수
+    있다는 쪽이다. 그래도 ROLLBACK_INITIATED로 가면 안 된다: 차단 해제는 관제자가
+    승인하는 주 조치(NACL_RESTORE)라 발동할 자동 원복 자식이 없어, 그 상태로 닫으면
+    실행이 갇히고 judge_nacl_add_deny에 닿지 못한다.
+    """
+
+    def _make():
+        incident_id, execution_id = nacl_reserved()
+        aws(create_network_acl_entry=client_error("InternalError", status=500))
+
+        report = cycle(db)
+
+        assert report.awaiting_judgement == 1
+        # 갇히는 두 갈래가 모두 아니다 — 자동 원복 발동도, 판정 주체 없음도 아니다
+        assert (report.rollback_initiated, report.unsupported, report.closed) == (0, 0, 0)
+        assert status_of(db, incident_id, execution_id) == (
+            IncidentStatus.ACTION_IN_PROGRESS,
+            ExecutionStatus.IN_PROGRESS,
+        )
+        steps = exec_repo.list_steps(db, execution_id)
+        assert [s.effect for s in steps] == [ExecutionEffect.UNKNOWN]
+        aws.calls.clear()
+        return incident_id, execution_id
+
+    return _make
+
+
+def test_the_block_that_landed_is_judged_success_next_cycle(
+    db, block_lost_the_response, aws
+):
+    """규칙은 들어갔고 응답만 못 받았다 — 답하는 것은 단계 기록이 아니라 실자산이다."""
+    incident_id, execution_id = block_lost_the_response()
+    aws(describe_network_acls=acl_with(our_entry()))
+
+    report = cycle(db)
+
+    assert report.judged == 1 and report.unsupported == 0
+    assert "describe_network_acls" in operations(aws)
+    assert status_of(db, incident_id, execution_id) == (
+        IncidentStatus.AWAITING_CLOSURE,
+        ExecutionStatus.SUCCESS,
+    )
+
+
+def test_the_block_that_never_landed_is_judged_failed_next_cycle(
+    db, block_lost_the_response, aws
+):
+    """슬롯이 비어 있으면 삽입되지 않은 것이다 — 자산에 남은 변경이 없으므로 FAILED다."""
+    incident_id, execution_id = block_lost_the_response()
+
+    report = cycle(db)
+
+    assert report.judged == 1 and report.closed == 1
+    assert exec_repo.get_execution(db, execution_id).status is ExecutionStatus.FAILED
+
+
+def test_the_judge_defers_and_is_asked_again_when_aws_cannot_be_asked(
+    db, block_lost_the_response, aws
+):
+    """조회에 실패하면 확정하지 않는다 — 검증기의 실패를 조치의 실패로 저장하지 않는다."""
+    incident_id, execution_id = block_lost_the_response()
+    aws(describe_network_acls=client_error("RequestLimitExceeded", status=503))
+
+    deferred = cycle(db)
+
+    assert deferred.judged == 1 and deferred.deferred == 1 and deferred.closed == 0
+    assert exec_repo.get_execution(db, execution_id).status is ExecutionStatus.IN_PROGRESS
+    # 다음 주기가 같은 질문을 다시 한다 — 판정 경로에서 벗어나지 않았다는 뜻이다
+    aws(describe_network_acls=acl_with(our_entry()))
+
+    assert cycle(db).judged == 1
+    assert exec_repo.get_execution(db, execution_id).status is ExecutionStatus.SUCCESS
+
+
+def test_a_rejected_block_is_a_plain_failure(db, nacl_reserved, aws):
+    """4xx 거절은 자산을 만지지 않았다(NOT_APPLIED) — 판정을 기다릴 것 없이 FAILED다."""
+    incident_id, execution_id = nacl_reserved()
+    aws(create_network_acl_entry=client_error("NetworkAclEntryAlreadyExists"))
+
+    report = cycle(db)
+
+    assert report.closed == 1 and report.awaiting_judgement == 0
+    assert exec_repo.get_execution(db, execution_id).status is ExecutionStatus.FAILED
 
 
 # ------------------------------------------------- 2/2 Status Check 판정 (#240)

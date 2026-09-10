@@ -31,6 +31,13 @@
 # 발동을 막는 것은 이 모듈이 아니라 자식 실행 행의 존재입니다 — 그래서 가드레일이
 # 거절해 자식이 FAILED로 끝난 뒤에도 다시 발동하지 않습니다(ADR-0004 정책 ④).
 #
+# **자산이 바뀐 채 실패했다고 모두 그리로 가지는 않습니다.** ROLLBACK_INITIATED는
+# "되돌릴 것이 남았다"는 표시가 아니라 **자동 원복을 발동하라는 신호**라, 자동 원복
+# 짝이 있는 런북에만 씁니다(_AUTO_ROLLBACK_ON_ASSET_CHANGE). 짝이 없는 차단
+# (NACL_ADD_DENY — 해제가 관제자 승인 런북 NACL_RESTORE입니다)의 "적용 여부 불명확"은
+# 되돌릴 대상이 아니라 **실자산에 물을 질문**이므로, 확정하지 않고 다음 주기의 현물
+# 판정으로 보냅니다(Issue #297).
+#
 # 판정이 늘 확정으로 끝나지는 않습니다. AWS에 물어보지 못한 경우는 자산이 실패했다는
 # 근거가 아니므로 확정하지 않고 IN_PROGRESS로 남겨 다음 주기가 다시 묻습니다 —
 # 검증기의 실패를 ROLLBACK_INITIATED로 저장하면 #241의 자동 원복이 멀쩡한 인스턴스를
@@ -113,6 +120,19 @@ _AWAIT_JUDGEMENT_ON_SUCCESS: frozenset[RunbookId] = frozenset(
     {RunbookId.RUNBOOK_EC2_RIGHTSIZING}
 )
 
+# 자산이 바뀐 채 실패했을 때 **ROLLBACK_INITIATED로 보낼** 런북 — 등록 롤백 런북이 있는
+# 주 조치만이다. 이 표를 따로 적지 않고 ROLLBACK_RUNBOOK_BY_MAIN_ID에서 파생하는 이유는
+# 그 맵이 "자동 원복 짝이 있는가"의 원천이기 때문이다(ADR-0004로 등록된 3종).
+#
+# NACL_ADD_DENY는 여기 없다. **차단 해제는 자동 원복이 아니라 관제자가 승인하는 주 조치
+# (NACL_RESTORE)** 라 짝이 없고, 그래서 실패를 ROLLBACK_INITIATED로 닫으면 낳을 자식이
+# 없어 매 주기 unsupported로 되돌아온다 — 실행은 그 상태에 갇히고 judge_nacl_add_deny에는
+# 영원히 닿지 못한다(PR #313 리뷰). 짝이 없는 런북의 "적용 여부 불명확"이 가는 곳은
+# _dispatch_one의 현물 판정이다.
+_AUTO_ROLLBACK_ON_ASSET_CHANGE: frozenset[RunbookId] = frozenset(
+    RunbookId(main_id) for main_id in ROLLBACK_RUNBOOK_BY_MAIN_ID
+)
+
 # 두 표는 **짝으로** 등록한다(ADR-0008 §6). runner만 등록하면 실행 도중 끊긴 실행이
 # 재실행도 종료도 되지 않고 IN_PROGRESS에 남는다 — 단계가 1건이라도 있으면 재실행
 # 대상에서 빠지고, 판정 주체가 없으면 unsupported로 남기 때문이다. assert로 두지
@@ -139,6 +159,7 @@ class DispatchReport:
     judged: int = 0                 # 2/2 Status Check 판정을 수행한 실행(deferred 포함)
     closed: int = 0                 # 종료 상태로 확정한 실행
     awaiting_status_check: int = 0  # 요청은 접수됐고 다음 주기의 판정을 기다리는 실행
+    awaiting_judgement: int = 0     # 적용 여부가 불명확해 다음 주기의 현물 판정을 기다리는 실행
     rollback_initiated: int = 0     # 원복이 필요해 ROLLBACK_INITIATED로 남긴 실행
     rollback_started: int = 0       # 자동 원복 자식을 접수한 원본 (Issue #241)
     deferred: int = 0               # AWS 조회 실패로 확정하지 않고 다음 주기로 미룬 실행
@@ -434,6 +455,29 @@ def _dispatch_one(
             db.commit()
             return
         if _changed_the_asset(outcome) and claimed.parent_execution_id is None:
+            if claimed.runbook_id not in _AUTO_ROLLBACK_ON_ASSET_CHANGE:
+                # 자동 원복 짝이 없는 런북이다 — ROLLBACK_INITIATED로 닫으면 발동할
+                # 자식이 없어(_initiate_rollback_one의 unsupported) 그 상태에 갇히고,
+                # 판정 경로에서도 벗어난다. 확정하지 않고 IN_PROGRESS로 남겨 **다음
+                # 주기의 현물 판정**으로 보낸다 — 단계가 남아 있으므로 그 주기의
+                # _dispatch_one이 재실행이 아니라 _judge_one으로 보낸다.
+                #
+                # 판정 주체가 있다는 보장은 짝 검사(_RUNNERS ↔ _JUDGES)가 이미 한다.
+                # 이 주기에 곧바로 판정하지 않는 것은 실행이 방금 만진 자산을 같은
+                # 주기에 되묻지 않기 위해서다(_AWAIT_JUDGEMENT_ON_SUCCESS와 같은 이유).
+                # 실패 사유는 로그로만 남긴다 — 확정 상태와 error_summary는 실자산을
+                # 본 판정이 쓴다.
+                report.awaiting_judgement += 1
+                logger.warning(
+                    "dispatch_awaiting_judgement",
+                    extra={
+                        "execution_id": execution_id,
+                        "runbook_id": claimed.runbook_id.value,
+                        "reason": _failure_summary(outcome),
+                    },
+                )
+                db.commit()  # runner는 반환 전에 commit을 끝낸다 — 그 계약을 코드로 남긴다
+                return
             # 자산이 바뀐 채 끝난 실행이다. FAILED로 확정하면 계약상 "변경 없이
             # 실패"가 되어(packages/schemas/executions.py 복구 가능 상태 주석)
             # 관제자 복구 목록이 닫히므로, 되돌릴 것이 남았다고 적는다. 2/2를
