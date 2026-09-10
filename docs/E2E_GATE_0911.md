@@ -84,13 +84,24 @@ docker compose up -d db localstack
 
 → `db`·`localstack` 두 서비스가 `running`.
 
+> ⚠️ **③ 이후 호스트에서 도는 명령(③④⑥⑦)은 접속 주소를 따로 준다.** `.env`의 `localstack:4566`·`db:5432`는 **compose 네트워크 안의 이름**이라 호스트에서는 풀리지 않는다 — 그대로 두면 ③이 `AWS_ENDPOINT_URL 미설정`으로 멈추고(`scripts/seed_localstack.py` `_require_localstack`), ④와 호스트 uvicorn은 DB를 못 찾는다. **셸 하나를 열어 두고 그 셸에서 나머지를 전부 잇는다.**
+>
+> ```powershell
+> $env:AWS_ENDPOINT_URL = 'http://localhost:4566'
+> $env:DATABASE_URL = 'postgresql+psycopg://vigilantis:<.env의 POSTGRES_PASSWORD>@localhost:5432/vigilantis'
+> ```
+>
+> 포트를 바꿔 쓰는 사람은 `.env`의 `POSTGRES_PORT`를 그대로 옮겨 적는다(compose가 호스트 포트를 그 값으로 연다).
+
 **② DB 스키마**
 
 ```bash
-uv run alembic upgrade head
+docker compose run --rm migrate
 ```
 
 → 마지막 리비전까지 올라가고 오류 없음.
+
+`alembic.ini`는 `apps/core-api/`에 있어 저장소 루트에서 `uv run alembic upgrade head`를 부르면 `No 'script_location' key found`로 죽는다. compose의 `migrate` 서비스가 같은 명령을 **컨테이너 안에서** 돌리므로 접속 주소도 `.env` 그대로 맞는다(2026-09-10 실측).
 
 **③ LocalStack 시드**
 
@@ -153,6 +164,8 @@ uv run uvicorn main:app --app-dir apps/core-api
 ```bash
 SCAN_ENABLED=false uv run uvicorn main:app --app-dir apps/core-api
 ```
+
+PowerShell에는 이 앞자리 대입 문법이 없다 — 같은 셸에서 `$env:SCAN_ENABLED = 'false'`를 먼저 주고 `uv run uvicorn ...`을 부른다. **⑦이 끝나면 그 셸을 닫는다**(값이 남아 다음 기동까지 스캔을 끈다).
 
 → 기동 로그에 `scan scheduler disabled: SCAN_ENABLED=false` · dispatcher·agent_dispatcher 2종 등록(`main.py`의 `start_dispatcher`·`start_agent_dispatcher`).
 
