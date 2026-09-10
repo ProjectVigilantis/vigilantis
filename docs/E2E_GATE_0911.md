@@ -59,9 +59,16 @@
 | T1 실경로 범위 | 1–6번 (**7·8·9는 대체 컷** — 실패 주입을 9/11까지 붙이지 않는다) | #267 안건 1번 · PR #302 리뷰 |
 | T2 실경로 범위 | 전 구간 대체 컷 → **§4에서 1–3번으로 넓혔다**(실측 근거 있음) | #267 안건 1번 + 이 문서 실측 |
 | 자산 화면 데이터 | **골든** | #267 안건 2번 |
-| 인시던트 화면 데이터 | **골든 유래 실데이터** — 수동 우회 Incident의 대상 ARN을 **골든 A1(`i-0a1b2c3d4e5f00001`)로 고정**한다 | #267 안건 2번 · PR #302 리뷰 |
+| 인시던트 화면 데이터 | **골든 유래 실데이터** — 수동 우회 Incident의 대상 ARN을 **골든 A1로 고정**한다 | #267 안건 2번 · PR #302 리뷰 |
+| A1의 **조치 대상 ARN** | 골든 A1의 식별자를 **LocalStack 시드 실물 인스턴스에 바인딩**한다 — 적재 시 `--bind-a1-to-seed` | 2026-09-10 PM 확정 · 아래 |
 
 > **A1 고정이 대본에 박혀 있어야 하는 이유**: 당일 아무 ARN으로 Incident를 만들면 자산 화면(골든)과 인시던트 화면이 서로 다른 ARN 집합을 쓰게 되어, SSOT 5주차 리스크 3번의 **「교집합 0건」이 되살아난다**(§5-2). 고정하면 두 화면이 같은 집합을 쓴다.
+
+> 🔴 **그런데 골든 A1은 LocalStack에 없다 — 그대로 두면 T1-6이 승인 직후에 깨진다.** 골든의 `i-0a1b2c3d4e5f00001`은 정답지가 지어낸 ID라 실행 1단계 `stop_instances`가 `InvalidInstanceID.NotFound`로 즉사한다. **가드레일은 이것을 못 막는다**(2026-09-10 실측 · [ADR-0006](adr/0006-localstack-team-standard-env.md) §4 8행으로 이월) — ③ ARN Match는 DB 조회라 통과하고, ④ Dry-Run은 LocalStack이 DryRun 플래그를 **대상 존재 검사보다 먼저** 처리해 `DryRunOperation`으로 통과한다. 4단계 전부 통과 → 실행 버튼이 열리고 → **관제자가 누른 뒤에야 붉은 오류가 뜬다.**
+>
+> **처분(2026-09-10 PM 확정)**: 적재 시 골든 A1의 **식별자만**(`arn`·`instance_id`) 살아있는 시드 인스턴스 `vigilantis-seed-idle`의 것으로 바꾼다(`scripts/load_golden_assets.py --bind-a1-to-seed`). 이름·타입·메트릭·태그는 골든 그대로라 **화면·판정·경계값 서사(`cpu_avg 4.9`)는 하나도 바뀌지 않고**, 시드가 자산 화면에 섞이지도 않는다(스캔을 켤 필요가 없다). 시드 `vigilantis-seed-idle`은 타입이 **t3.xlarge로 골든 A1과 같아** 출발 타입이 골든 서사와 어긋나지 않고 **다운사이징 실행이 그대로 성립한다.** 도착 타입은 여기에 적지 않는다 — **그 값을 고르는 것은 AI**이고 같은 입력에서도 흔들리는 것이 실측돼 있다(`apps/core-api/ai/evaluation/reproducibility.py` · #237). 바인딩이 여는 것은 *"타입이 실제로 바뀐다"* 이지 *"특정 타입이 된다"* 가 아니다(R6 기대값은 #315에서 그 뜻으로 고쳐진다).
+> **실측**(2026-09-10 · LocalStack 4.14.0): 바인딩 전 = 1단계 `STOP_INSTANCE` **FAILED** / `PRECHECK_TARGET_NOT_FOUND`. 바인딩 후 = 3단계 전부 `SUCCESS`·`APPLIED`, 실제 타입이 `t3.xlarge → t3.small`로 바뀜.
+> ⚠️ **바인딩된 ARN은 LocalStack이 재기동될 때마다 바뀐다.** 그래서 이 문서에 ARN을 적지 않는다 — 사전 준비 ④의 출력이 그날의 원천이다.
 
 ---
 
@@ -77,13 +84,26 @@ docker compose up -d db localstack
 
 → `db`·`localstack` 두 서비스가 `running`.
 
+> ⚠️ **② 이후 호스트에서 도는 명령(②③④⑥⑦)은 접속 주소를 따로 준다.** `.env`의 `localstack:4566`·`db:5432`는 **compose 네트워크 안의 이름**이라 호스트에서는 풀리지 않는다 — 그대로 두면 ③이 `AWS_ENDPOINT_URL 미설정`으로 멈추고(`scripts/seed_localstack.py` `_require_localstack`), ②④와 호스트 uvicorn은 DB를 못 찾는다. **셸 하나를 열어 두고 그 셸에서 나머지를 전부 잇는다.**
+>
+> ```powershell
+> $env:AWS_ENDPOINT_URL = 'http://localhost:4566'
+> $env:DATABASE_URL = 'postgresql+psycopg://vigilantis:<.env의 POSTGRES_PASSWORD>@localhost:5432/vigilantis'
+> ```
+>
+> 포트를 바꿔 쓰는 사람은 `.env`의 `POSTGRES_PORT`를 그대로 옮겨 적는다(compose가 호스트 포트를 그 값으로 연다).
+
 **② DB 스키마**
 
 ```bash
-uv run alembic upgrade head
+uv run alembic -c apps/core-api/alembic.ini upgrade head
 ```
 
 → 마지막 리비전까지 올라가고 오류 없음.
+
+`alembic.ini`는 `apps/core-api/`에 있어 `-c`를 빼면 저장소 루트에서 `No 'script_location' key found`로 죽는다(`rc=127`). `-c`로 ini만 짚으면 `script_location`이 `%(here)s` 기준이라 나머지는 따라온다(2026-09-10 실측).
+
+> **compose로 돌리지 않는 이유**: `docker compose run --rm migrate`도 같은 마이그레이션을 올리지만, **첫째** 그 서비스는 **컨테이너 안 `db:5432`**를 보고 ②③④는 호스트 `localhost:5432`를 보아 **한 대본에서 DB 주소가 둘로 갈리고**, **둘째** `docker-compose.yml:52`의 `migrate`에 `build:`(`:53`)가 붙어 있어 **이미지가 없으면 이 자리에서 빌드가 돌아** T-30분 예산을 읽을 수 없게 된다. **호스트에 `uv`가 없는 머신에서만** 대안으로 쓴다.
 
 **③ LocalStack 시드**
 
@@ -93,14 +113,30 @@ uv run python scripts/seed_localstack.py
 
 → EC2·SG 리소스 생성 로그. 이게 없으면 T1-6 실행이 대상 인스턴스를 못 찾는다.
 
-**④ 골든 자산 적재 — T1-1의 실경로 근거**
+**④ 골든 자산 적재 — T1-1의 실경로 근거이자 T1-6의 조치 대상 확정**
 
 ```bash
-uv run python scripts/load_golden_assets.py --verify
+uv run python scripts/load_golden_assets.py --bind-a1-to-seed --verify
 ```
 
 → `GET /api/v1/assets` `200` · `collection_status: READY` · **골든 정답 대조 어긋남 0**.
 적재 건수·판정 분포는 여기 적지 않는다 — 골든이 한 건만 늘어도 낡고, 이 명령의 출력이 원천이다.
+
+**반드시 ③ 뒤에 돌린다** — 바인딩이 살아있는 시드 인스턴스를 이름으로 조회하기 때문이다. 출력 셋째 줄의
+
+```text
+  조치 대상 ARN: arn:aws:ec2:ap-northeast-2:000000000000:instance/i-...
+```
+
+이 **그날의 T1 조치 대상**이다. 받아 적어 T1-2의 수동 우회 Incident에 그대로 쓴다(§1-2 · R3).
+
+이렇게 나오면 멈춘다 — 스크립트가 적재 전에 막고 복구 절차를 함께 찍는다.
+
+| 출력 | 뜻 | 처분 |
+| --- | --- | --- |
+| `살아있는 시드 인스턴스가 없다` | ③을 건너뛰었다 | ③을 먼저 돌린다 |
+| `시드 인스턴스 타입이 골든 A1과 다르다` | 이전 시연으로 이미 다운사이징됐다. 시드 스크립트는 이름으로 기존 인스턴스를 재사용하므로 **재실행만으로는 안 돌아온다** | `docker compose restart localstack` 후 ③ 재실행 |
+| `이번 바인딩과 다른 A1 자산이 DB에 남아 있다` | 예전에 `--bind-a1-to-seed` 없이 적재했거나, **이전 LocalStack 기동의 바인딩**이 남아 있다(시드 인스턴스 ID는 재기동마다 바뀐다). 그대로 두면 **자산 화면에 A1이 두 장** 뜨고 실물 없는 쪽을 고르면 실행이 깨진다 | `docker compose down -v` → ①②③④ 재실행 |
 
 **⑤ 위협 판정 확인 — T2-2·3의 실경로 근거**
 
@@ -119,6 +155,8 @@ uv run uvicorn main:app --app-dir apps/core-api
 
 → 기동 로그에 스캔 스케줄러 등록(`main.py`의 `start_scan_scheduler`). **1 tick(기본 300초)을 기다리지 않는다 — 등록 로그를 보이고 즉시 종료(`Ctrl+C`)한다.**
 
+⚠️ **바인딩(④) 뒤에는 손실이 하나 더 있다.** 스캔이 돌면 바인딩된 ARN이 **시드 spec으로 덮여** — 시드 `vigilantis-seed-idle`은 `Environment=production`이라 — A1의 판정이 `COST_CANDIDATE`에서 `SKIP_PROD_PROTECTED`로 **뒤집히고 이름도 `vigilantis-seed-idle`로 바뀐다.** T1-1의 최적화 후보 배지가 그 자리에서 사라진다.
+
 ⚠️ **이 기동을 그대로 두고 대본을 시작하면 R2가 발표 도중 깨진다.** `SCAN_ENABLED` 기본값이 `True`이고(`apps/core-api/config.py:169`) 주기가 300초라(`:166`), 첫 tick에서 **LocalStack 시드 자산이 골든만 있던 자산 화면에 섞인다.** 골든과 시드가 **같은 리전**이고, 자산 목록 조회에 **run 필터가 없기 때문이다**(`routers/assets.py`의 `get_assets` — 리전으로만 좁힌다). 골든 자산이 지워지지는 않지만 시드가 **섞이고** `collection_status`·`last_collected_at`이 스캔 run 기준으로 바뀐다. **오류 없이 조용히 일어난다.**
 
 > **"같은 리전"은 우연이 아니다.** 시드 스크립트도 수집기와 **같은 설정을 읽는다** — `scripts/seed_localstack.py:290`이 `services/aws/client.py:59 regions()`를 부르고, 그것이 `config.py`의 `AWS_REGIONS`(비면 `AWS_REGION`, 기본 `ap-northeast-2` — `config.py:140`)로 풀린다. **리전을 바꿔도 둘이 함께 움직인다** — 리전을 갈라 피하는 우회는 없다는 뜻이다.
@@ -128,6 +166,8 @@ uv run uvicorn main:app --app-dir apps/core-api
 ```bash
 SCAN_ENABLED=false uv run uvicorn main:app --app-dir apps/core-api
 ```
+
+PowerShell에는 이 앞자리 대입 문법이 없다 — 같은 셸에서 `$env:SCAN_ENABLED = 'false'`를 먼저 주고 `uv run uvicorn ...`을 부른다. **⑦이 끝나면 그 셸을 닫는다**(값이 남아 다음 기동까지 스캔을 끈다).
 
 → 기동 로그에 `scan scheduler disabled: SCAN_ENABLED=false` · dispatcher·agent_dispatcher 2종 등록(`main.py`의 `start_dispatcher`·`start_agent_dispatcher`).
 
@@ -143,8 +183,10 @@ SCAN_ENABLED=false uv run uvicorn main:app --app-dir apps/core-api
 ## 3. T1 · FinOps — Idle EC2 다운사이징과 자동 원복
 
 **입력**: 골든 `finops/input/asset_inventory_001.json` **A1**
-`i-0a1b2c3d4e5f00001` · `t3.xlarge` · `cpu_avg 4.9` · `dp 336` → 임계값(`IDLE_CPU_AVG 5.0`) **바로 아래**라 `COST_CANDIDATE`.
+`t3.xlarge` · `cpu_avg 4.9` · `dp 336` → 임계값(`IDLE_CPU_AVG 5.0`) **바로 아래**라 `COST_CANDIDATE`.
 경계값을 쓰는 이유는 *"왜 이게 낭비냐"* 는 질문에 숫자로 답하기 위해서다.
+
+> **인스턴스 ID는 골든의 `i-0a1b2c3d4e5f00001`이 아니다.** 사전 준비 ④의 바인딩으로 **살아있는 시드 인스턴스의 ID**가 그 자리에 들어간다(§1-2). 판정을 만드는 값(타입·메트릭·태그)은 전부 골든 그대로이므로 위 서사는 바뀌지 않는다 — 바뀌는 것은 *"이 자산이 AWS에서 누구인가"* 하나이고, 그것이 6번을 실경로로 만든다.
 
 ### 3-1. 컷 시트
 
@@ -155,7 +197,7 @@ SCAN_ENABLED=false uv run uvicorn main:app --app-dir apps/core-api
 | 3 | AI 판단 근거 3줄 + 추천 | ✅ **실경로** | 상세에 근거 3줄 + `RUNBOOK_EC2_RIGHTSIZING` 추천 | `agent_dispatcher.py:407` 스캔 + `main.py`의 `start_agent_dispatcher` lifespan 배선 확인. **2번이 채워지면 사람 손 없이 돈다** |
 | 4 | 가드레일 4단계 | ✅ **실경로** | 화면 표시는 없다 — 통과 신호는 `AWAITING_APPROVAL`로 **실행 버튼이 열리는 것** | #229 · #224 회귀 green |
 | 5 | 관제자 승인 | ✅ **실경로** | **[조치 실행]** 클릭 → `202 Accepted` | `POST /api/v1/actions/execute` |
-| 6 | 실행 | ✅ **실경로** | 진행 표시. `t3.xlarge → t3.small` | `services/aws/executor.py:1246 execute_rightsizing()` · LocalStack 실측 `apps/core-api/services/tests/test_execute_localstack.py`(SSOT 4주차 판정 ⓐ가 근거로 드는 파일 — `t3.small` 전환을 실제로 확인한다) |
+| 6 | 실행 | ✅ **실경로** | 진행 표시. `t3.xlarge → t3.small` | `services/aws/executor.py:1246 execute_rightsizing()` · LocalStack 실측 `apps/core-api/services/tests/test_execute_localstack.py`(SSOT 4주차 판정 ⓐ가 근거로 드는 파일 — `t3.small` 전환을 실제로 확인한다). **사전 준비 ④의 바인딩이 전제다** — 없으면 1단계에서 `InvalidInstanceID.NotFound`(§1-2) |
 | 7 | **Status Check 실패** | ❌ **대체 컷 확정** | — | 실패 주입 방법이 없고, **9/11까지 붙이지 않는다**(2026-09-07 PM 확정). §5-1 |
 | 8 | 자동 원복 발동 | ❌ **대체 컷** | — | 코드는 있다(`executor.py:1380 execute_revert_size()`, #241). **7번이 안 돌면 발동할 이유가 없다** |
 | 9 | 원복 완료 | ❌ **대체 컷** | — | 〃 |
@@ -196,6 +238,8 @@ PR #286(#265)으로 함수 본문은 dev에 들어왔다. **그러나 판정 결
 **입력**: 골든 `secops/input/evt_ssh_bruteforce_001.json` **S3**
 `SSH_BRUTE_FORCE` · `source_ip 203.0.113.10` · `120회 / 300초` · 대상 `i-0a1b2c3d4e5f00001`
 → **T1이 쓰는 A1과 같은 인스턴스**다. *"이 서버가 아까 그 서버"* 라고 짚을 수 있다.
+
+> 사전 준비 ④의 바인딩은 **T1 쪽 ARN만** 바꾼다. 이 이벤트의 `target_arn`은 골든의 `i-0a1b…0001` 그대로다 — T2-1~3은 DB에 쓰지 않고 터미널 판정까지만 가므로(아래 ⚠️) 실물과 대조할 자리가 없기 때문이다. 화면에서 짚는 자산은 같은 이름(`golden-ec2-idle-boundary`)이라 서사는 그대로 성립한다.
 
 | # | 단계 | 판정 | 무엇을 보여 주나 | 실측 근거 |
 | --- | --- | --- | --- | --- |
@@ -272,10 +316,10 @@ SSOT 5주차 리스크 3번의 실측:
 | --- | --- | --- | --- | --- | --- |
 | R1 | 사전 준비 ①~⑧이 오류 없이 끝난다 | 8/8 | | ☐합격 ☐불합격 ☐미실시 | ⑥(스캔 실기동)과 ⑦(스캔 끄고 본 기동)은 **별개 기동**이다 |
 | R2 | T1-1 자산 화면이 **골든 실데이터**로 뜬다 | 대조 어긋남 0 | | ☐합격 ☐불합격 ☐미실시 | **먼저 `SCAN_ENABLED=false`인지 확인**한다 — 켜져 있으면 첫 tick에서 시드가 섞여 조용히 불합격이 된다(§2-⑥·⑦) |
-| R3 | T1-2 Incident 1건이 생기고 `ANALYZING`이 된다 | 수동 우회 · 대상 ARN = **골든 A1** | | ☐합격 ☐불합격 ☐미실시 | 배선 여부를 함께 적는다. ARN이 A1이 아니면 인시던트 화면이 자산 화면과 갈린다(§1-2) |
+| R3 | T1-2 Incident 1건이 생기고 `ANALYZING`이 된다 | 수동 우회 · 대상 ARN = **사전 준비 ④가 찍은 조치 대상 ARN** | | ☐합격 ☐불합격 ☐미실시 | 배선 여부를 함께 적는다. 그 ARN이 아니면 인시던트 화면이 자산 화면과 갈리고, 골든의 `i-0a1b…0001`을 그대로 쓰면 **R6이 실행 단계에서 깨진다**(§1-2) |
 | R4 | T1-3 AI 근거 3줄 + 런북 추천이 **자동으로** 붙는다 | 사람 조작 0 | | ☐합격 ☐불합격 ☐미실시 | |
 | R5 | T1-4 가드레일 통과로 `AWAITING_APPROVAL`이 되어 **실행 버튼이 열린다** | 열림 | | ☐합격 ☐불합격 ☐미실시 | 🔶 **승인 모달의 「대상 자산」 블록은 9/11에도 비어 있을 수 있다** — #183(PR #293)이 `CHANGES_REQUESTED`다. **버튼이 열리는 것**과 **문맥이 채워지는 것**을 갈라 적는다 |
-| R6 | T1-5·6 [조치 실행] → `202` → 인스턴스 유형이 실제로 바뀐다 | `t3.xlarge → t3.small` | | ☐합격 ☐불합격 ☐미실시 | |
+| R6 | T1-5·6 [조치 실행] → `202` → 인스턴스 유형이 실제로 바뀐다 | `t3.xlarge → t3.small` | | ☐합격 ☐불합격 ☐미실시 | **먼저 사전 준비 ④가 `--bind-a1-to-seed`로 돌았는지 확인**한다. 안 돌았으면 가드레일 4단계와 승인은 그대로 통과하고 **실행에서만** 깨진다(§1-2) |
 | R7 | T1-7·8·9 대체 컷이 **미구현이 아니라 미시연으로** 전달된다 | 설명 성립 | | ☐합격 ☐불합격 ☐미실시 | §3-3의 한 문장 |
 | R8 | T2-1·2·3 위협 판정이 골든 정답과 일치한다 | S3 `HIGH` 일치 | | ☐합격 ☐불합격 ☐미실시 | 터미널 출력 |
 | R9 | T2-4~8 대체 컷이 성립한다 | 설명 성립 | | ☐합격 ☐불합격 ☐미실시 | |
