@@ -20,6 +20,7 @@ import incident_intake  # noqa: E402
 from db.repositories import assets as assets_repo  # noqa: E402
 from db.repositories import incidents as incidents_repo  # noqa: E402
 from schemas.api.assets import AssetType  # noqa: E402
+from schemas.assets import MetricSummary as MetricSummaryContract  # noqa: E402
 from schemas.api.incidents import IncidentCategory, IncidentStatus  # noqa: E402
 from schemas.evidence import EvidenceType  # noqa: E402
 from schemas.intake import FinOpsIncidentIntake, SecOpsIncidentIntake  # noqa: E402
@@ -154,6 +155,92 @@ def test_finops_asset_evidence_survives_asset_row_change(db):
     )
     assert asset_evidence.content["asset"]["spec"]["instance_type"] == "t3.xlarge"
     assert asset_evidence.content["asset"]["collected_at"] == COLLECTED_AT
+
+
+def _seed_run(db, *, with_metrics: bool, cpu_avg: float = 4.9, cpu_max: float = 7.2) -> str:
+    """회차 1개를 열고 자산 행을 넣는다. with_metrics면 그 회차 관측 요약도 넣는다.
+
+    회차 ID를 돌려주는 것이 요점이다 — Intake가 그 ID를 들고 와야 METRIC 조회가
+    같은 회차를 가리킨다.
+    """
+    run = assets_repo.start_collection_run(
+        db, account_id=ACCOUNT, region=REGION,
+        mode="localstack", lookback_days=14, period_seconds=3600,
+    )
+    asset = assets_repo.upsert_asset(
+        db, arn=EC2_ARN, asset_type=AssetType.EC2, resource_id="i-0abc123456789def0",
+        account_id=ACCOUNT, region=REGION, spec={"instance_type": "t3.xlarge"},
+        collection_run_id=run.collection_run_id, collected_at=datetime.now(timezone.utc),
+    )
+    if with_metrics:
+        assets_repo.add_metric_summary(
+            db,
+            asset_id=asset.asset_id,
+            collection_run_id=run.collection_run_id,
+            summary=MetricSummaryContract(
+                cpu_datapoints=336, cpu_avg=cpu_avg, cpu_max=cpu_max,
+                net_in_avg=1024.0, net_out_avg=512.0,
+            ),
+            window_start=datetime(2026, 8, 31, 9, 0, tzinfo=timezone.utc),
+            window_end=datetime(2026, 9, 2, 9, 0, tzinfo=timezone.utc),
+            collected_at=datetime.now(timezone.utc),
+        )
+    return run.collection_run_id
+
+
+def _intake_for_run(run_id: str) -> FinOpsIncidentIntake:
+    """finops_intake를 회차 ID만 바꿔 만든다 — 두 축이 같은 회차를 가리켜야 계약을 통과한다."""
+    return finops_intake(
+        asset_snapshot={"collection_run_id": run_id, "asset": asset_payload()},
+        rule_evaluation={
+            "asset_arn": EC2_ARN,
+            "collection_run_id": run_id,
+            "evaluation_status": "COMPLETED",
+            "verdict": "COST_CANDIDATE",
+            "health_score": 4,
+            "skip_reason_code": None,
+            "reason": "2일 평균 CPU 4.9% — 다운사이징 후보",
+            "evaluated_at": EVALUATED_AT,
+        },
+    )
+
+
+def test_finops_attaches_metric_evidence_from_the_judged_run(db):
+    """판정 회차의 관측 요약이 METRIC 근거로 남는다.
+
+    이 근거가 없으면 그래프 입력에 CPU 수치가 **한 군데도** 들어가지 않는다 —
+    rule_evaluation.reason은 판정 결과 한 줄이고 AssetItem은 판정 표기만 담는다.
+    2026-09-10 게이트 예비 실행에서 같은 입력이 NO_PROPOSAL과 SUCCEEDED로 갈린 원인이다.
+    """
+    run_id = _seed_run(db, with_metrics=True)
+
+    outcome = incident_intake.create_incident_from_intake(db, _intake_for_run(run_id))
+
+    by_type = {e.evidence_type: e for e in incidents_repo.list_evidence(db, outcome.incident_id)}
+    assert set(by_type) == {EvidenceType.RULE, EvidenceType.ASSET, EvidenceType.METRIC}
+    metric = by_type[EvidenceType.METRIC].content
+    # 요약은 CPU·Network를 함께 담으므로 대표 이름을 판정 축(CPU)으로 둔다
+    assert metric["metric_name"] == "CPUUtilization"
+    assert metric["summary"]["cpu_avg"] == 4.9
+    assert metric["summary"]["cpu_max"] == 7.2
+    assert metric["summary"]["cpu_datapoints"] == 336
+
+
+def test_finops_ignores_metric_summary_from_another_run(db):
+    """판정 회차가 아닌 관측은 근거가 되지 않는다.
+
+    회차를 묻지 않고 '자산의 최신 관측'을 붙이면 **예전 판정 + 최신 관측**이 한 시점인
+    양 묶인다(schemas/intake.py 계약 원칙). 관측이 없는 회차로 판정된 건은 METRIC
+    근거 없이 남는 것이 맞다.
+    """
+    _seed_run(db, with_metrics=True, cpu_avg=4.9)      # 이전 회차 — 관측 있음
+    judged_run = _seed_run(db, with_metrics=False)     # 판정 회차 — 관측 없음
+
+    outcome = incident_intake.create_incident_from_intake(db, _intake_for_run(judged_run))
+
+    by_type = {e.evidence_type: e for e in incidents_repo.list_evidence(db, outcome.incident_id)}
+    assert EvidenceType.METRIC not in by_type
+    assert set(by_type) == {EvidenceType.RULE, EvidenceType.ASSET}
 
 
 def test_finops_duplicate_returns_existing_without_creating(db):
