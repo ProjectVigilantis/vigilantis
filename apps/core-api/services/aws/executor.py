@@ -1070,6 +1070,16 @@ _OP_START = "ec2.start_instances"
 _OP_DESCRIBE = "ec2.describe_instances"
 _OP_CREATE_NACL_ENTRY = "ec2.create_network_acl_entry"
 
+# TCP·UDP 규칙에는 PortRange가 필수다(CreateNetworkAclEntry API 계약). LocalStack은
+# 빠뜨린 요청도 받아 주지만 실 AWS는 InvalidParameterValue로 거절한다 — 로컬에서만
+# 통과하는 차단이 되지 않도록 여기서 채운다(PR #313 리뷰).
+#
+# 범위는 **전체**다. 이 조치가 막는 것은 포트가 아니라 **출발지 주소**이며
+# (ADR-0007 §5 파라미터 표에 포트가 없다), 일부 포트만 막으면 같은 출발지가 다른
+# 포트로 그대로 들어온다. 포트를 고르는 입력은 그래서 두지 않는다.
+_NACL_ALL_PORTS = {"From": 0, "To": 65535}
+_NACL_PORT_RANGE_PROTOCOLS: frozenset[str] = frozenset({"6", "17"})  # tcp · udp
+
 # 정지 확인 대기 — 5초 간격 40회(최대 200초). 초과는 "실패"가 아니라 "상태 불명"이라
 # 단계 effect가 UNKNOWN이 되고, 타입 변경으로 넘어가지 않는다.
 STOP_WAIT_DELAY_SECONDS = 5
@@ -1587,6 +1597,10 @@ def execute_nacl_add_deny(
     단계는 하나다. 삽입은 원자적이라 부분 적용이 없고, 성공의 경계도 실행 안에 있다 —
     RIGHTSIZING처럼 뒤따르는 판정 축(2/2 Status Check)이 없다.
 
+    TCP·UDP는 PortRange가 필수 필드라 **전체 범위(0-65535)** 를 함께 보낸다. 막는
+    축이 포트가 아니라 출발지 주소이기 때문이며, LocalStack이 빠진 요청도 받아 줘
+    실 AWS에서만 드러나는 차이라 여기 적어 둔다(_NACL_ALL_PORTS).
+
     protocol은 이름 표기(`NaclProtocol`)로 받아 **AWS 번호 표기로 바꿔 보낸다.**
     LocalStack은 보낸 문자열을 그대로 저장하고 실 AWS는 번호로 정규화하므로, 이름을
     그대로 보내면 저장 값이 환경마다 갈려 백업 fingerprint 대조가 한쪽에서만 맞는다
@@ -1602,16 +1616,22 @@ def execute_nacl_add_deny(
     ec2 = aws_client("ec2", target.region)
     log = _StepLog(target_arn, record_step)
 
+    request: dict[str, Any] = {
+        "NetworkAclId": target.resource_id,
+        "RuleNumber": rule_number,
+        "Protocol": protocol_number,
+        "RuleAction": NACL_DENY_ACTION,
+        "Egress": NACL_ADD_DENY_EGRESS,
+        "CidrBlock": cidr_block,
+    }
+    if protocol_number in _NACL_PORT_RANGE_PROTOCOLS:
+        # 백업 fingerprint는 이 값을 보지 않는다(rule_action·cidr_block·protocol 3항목,
+        # ADR-0008 §5) — 대조 축이 아니라 요청 유효성의 문제라 요청에만 싣는다
+        request["PortRange"] = dict(_NACL_ALL_PORTS)
+
     log.begin(1, STEP_CREATE_NACL_ENTRY, _OP_CREATE_NACL_ENTRY)
     try:
-        response = ec2.create_network_acl_entry(
-            NetworkAclId=target.resource_id,
-            RuleNumber=rule_number,
-            Protocol=protocol_number,
-            RuleAction=NACL_DENY_ACTION,
-            Egress=NACL_ADD_DENY_EGRESS,
-            CidrBlock=cidr_block,
-        )
+        response = ec2.create_network_acl_entry(**request)
     except (ClientError, BotoCoreError) as exc:
         # 규칙 번호가 그사이 점유됐으면 NetworkAclEntryAlreadyExists(4xx)로 온다 —
         # _effect_for가 NOT_APPLIED로 분류하므로 되돌릴 것 없는 실패로 확정된다
