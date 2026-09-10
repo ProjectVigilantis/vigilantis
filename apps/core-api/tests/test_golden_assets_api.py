@@ -259,3 +259,21 @@ def test_binding_rewrites_expected_key_too(db, golden, binding):
     assert assets_repo.get_asset_by_arn(db, binding.new_arn) is not None
     assert assets_repo.get_asset_by_arn(db, binding.old_arn) is None
     assert golden._verify(db, binding) == 0
+
+
+def test_stale_binding_from_a_previous_boot_is_caught(db, golden, binding):
+    """이전 기동의 바인딩이 DB에 남아 있으면 적재 전에 걸린다.
+
+    시드 인스턴스 ID는 LocalStack 재기동마다 바뀌므로, 골든 ARN만 보는 검사는 "A1이 두 장
+    뜨는" 상태를 그냥 지나친다 — 그중 실물이 없는 쪽을 고르면 승인 직후 실행이 깨진다.
+    """
+    golden.load_into_db(db, golden.load_inventories(binding))
+
+    next_boot = golden.SeedBinding(
+        old_arn=golden.GOLDEN_A1_ARN,
+        new_arn=_FAKE_BOUND_ARN[:-1] + "2",
+        new_instance_id=_FAKE_BOUND_ARN.rsplit("/", 1)[1][:-1] + "2",
+    )
+    assert golden._stale_a1_assets(db, next_boot) == [binding.new_arn]
+    # 같은 바인딩으로 다시 적재하는 것은 막지 않는다 — 그 행은 upsert로 덮인다.
+    assert golden._stale_a1_assets(db, binding) == []

@@ -212,17 +212,38 @@ def load_expected(binding: Optional[SeedBinding] = None) -> dict[str, dict]:
     return by_arn
 
 
-def _golden_instance_type(arn: str) -> Optional[str]:
-    """골든 입력에서 그 ARN의 인스턴스 타입. 없으면 None.
+def _golden_instance(arn: str) -> Optional[dict]:
+    """골든 입력에서 그 ARN의 EC2 레코드 원문. 없으면 None.
 
-    타입을 상수로 적지 않는 이유 — 골든이 바뀌면 함께 움직여야 한다.
+    타입·이름을 상수로 적지 않는 이유 — 골든이 바뀌면 함께 움직여야 한다.
     """
     for path in sorted(GOLDEN_INPUT_DIR.glob("*.json")):
         doc = json.loads(path.read_text(encoding="utf-8"))
         for instance in doc.get("ec2_instances", []):
             if instance.get("arn") == arn:
-                return instance.get("instance_type")
+                return instance
     return None
+
+
+def _stale_a1_assets(db, binding: SeedBinding) -> list[str]:
+    """이번 바인딩과 다른 ARN으로 이미 적재돼 있는 A1 자산들의 ARN.
+
+    ARN이 아니라 **이름으로** 세는 이유: 바인딩 없이 적재한 이력(골든 ARN)만이 아니라
+    **이전 LocalStack 기동의 바인딩**도 잡아야 하기 때문이다. 시드 인스턴스 ID는 재기동마다
+    바뀌는데 DB는 그대로 남으므로, 골든 ARN만 보면 "A1이 두 장 뜨는" 같은 상태를 그냥
+    지나친다 — 그중 실물이 없는 쪽을 고르면 승인 직후 실행이 깨진다.
+
+    같은 바인딩으로 다시 적재하는 것은 막지 않는다(그 행은 upsert로 덮인다).
+    """
+    from db.repositories import assets as assets_repo
+
+    golden_name = (_golden_instance(binding.old_arn) or {}).get("name")
+    return [
+        asset.arn
+        for asset in assets_repo.list_assets(db)
+        if asset.arn != binding.new_arn
+        and (asset.arn == binding.old_arn or (golden_name and asset.name == golden_name))
+    ]
 
 
 def _resolve_seed_binding() -> SeedBinding:
@@ -275,7 +296,7 @@ def _resolve_seed_binding() -> SeedBinding:
         )
 
     instance = found[0]
-    want = _golden_instance_type(GOLDEN_A1_ARN)
+    want = (_golden_instance(GOLDEN_A1_ARN) or {}).get("instance_type")
     got = instance.get("InstanceType")
     if want is not None and got != want:
         sys.exit(
@@ -372,7 +393,6 @@ def main() -> int:
     args = parser.parse_args()
 
     from config import get_settings
-    from db.repositories import assets as assets_repo
     from db.session import get_session_factory
 
     database_url = get_settings().DATABASE_URL
@@ -390,11 +410,12 @@ def main() -> int:
         print("  ↑ 인시던트 수동 생성의 대상 ARN에 이 값을 쓴다(대본 §1-2 · R3)")
 
     with get_session_factory()() as db:
-        if binding is not None and assets_repo.get_asset_by_arn(db, binding.old_arn):
-            # 바인딩 없이 적재한 이력이 남아 있다. 그대로 두면 화면에 A1이 두 장 뜨고
-            # 그중 실물이 없는 쪽을 고르면 실행이 승인 직후 깨진다 — 조용히 지나가는 대신
-            # 여기서 멈춘다.
-            print(f"중단: 바인딩 전 골든 A1 자산이 DB에 남아 있다({binding.old_arn})")
+        stale = _stale_a1_assets(db, binding) if binding is not None else []
+        if stale:
+            # 바인딩 없이 적재한 이력이거나, 이전 LocalStack 기동의 바인딩이 남아 있다.
+            # 그대로 두면 화면에 A1이 두 장 뜨고 그중 실물이 없는 쪽을 고르면 실행이
+            # 승인 직후 깨진다 — 조용히 지나가는 대신 여기서 멈춘다.
+            print(f"중단: 이번 바인딩과 다른 A1 자산이 DB에 남아 있다({', '.join(stale)})")
             print("  DB를 비우고 다시 적재할 것 —")
             print("  docker compose down -v && docker compose up -d db localstack")
             print("  uv run alembic upgrade head && uv run python scripts/seed_localstack.py")
