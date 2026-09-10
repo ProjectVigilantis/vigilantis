@@ -65,6 +65,7 @@ LocalStack 통과를 "검증 완료"로 간주하지 않는 경로를 고정 목
 | 5 | `ec2.create_network_acl_entry` · `ec2.delete_network_acl_entry`의 `DryRun=True` | **LocalStack이 플래그를 무시하고 실제로 규칙을 생성·삭제한다**(예외 미발생). 실 AWS는 정상 지원하므로 `DryRun` 경로는 실 AWS에서 처음 검증된다 — 그때까지 두 런북은 조회 대체 검증으로 동작한다([ADR-0007](0007-guardrail-dryrun-executor-precheck-contract.md) §4) |
 | 6 | `ec2.create_network_acl_entry`의 `Protocol` 표기 | **LocalStack은 보낸 문자열을 그대로 저장한다**(2026-09-08 실측 — `Protocol="tcp"`로 넣으면 `describe_network_acls`도 `"tcp"`를 돌려준다). 실 AWS는 같은 요청을 프로토콜 번호로 정규화한다. 저장 값이 곧 `NACL_RESTORE`의 백업 fingerprint 대조 상대라(ADR-0008 §5) 이름을 그대로 보내면 대조가 LocalStack에서만 맞는다. **행동 규칙: 삽입 시점에 번호로 바꿔 보낸다**(`schemas.runbook_parameters.NACL_PROTOCOL_NUMBERS`) — 그러면 두 환경이 같은 값을 저장하므로 이 격차는 이월이 아니라 코드로 닫힌다 |
 | 7 | `ec2.create_network_acl_entry`의 `PortRange` | **LocalStack은 TCP·UDP 규칙에서 `PortRange`가 빠진 요청도 받아 준다**(2026-09-10 실측 — TCP 규칙이 그대로 생성되며 `describe_network_acls`의 `PortRange`는 `None`으로 남는다). 실 AWS는 같은 요청을 `InvalidParameterValue`로 거절한다([CreateNetworkAclEntry](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_CreateNetworkAclEntry.html)). **행동 규칙: TCP·UDP에는 전체 범위 `0-65535`를 실어 보낸다**(`services/aws/executor._NACL_ALL_PORTS`) — 막는 축이 포트가 아니라 출발지 주소라 범위를 좁힐 이유가 없고, 6행과 같이 이월이 아니라 코드로 닫힌다 |
+| 8 | 가드레일 4단계 `DryRun=True`의 **대상 존재 검사** | **LocalStack은 실재하지 않는 인스턴스에도 `DryRunOperation`을 돌려준다**(2026-09-10 실측 — 골든 A1 `i-0a1b2c3d4e5f00001`은 LocalStack에 없는데 `modify_instance_attribute(DryRun=True)`가 통과했고, 같은 ID로 부른 `stop_instances`는 `InvalidInstanceID.NotFound`로 실패했다). DryRun 플래그를 **대상 존재 검사보다 먼저** 처리하기 때문이다. 그래서 4단계가 전부 통과해 승인 버튼이 열리고, **관제자가 누른 뒤 실행 1단계에서 처음 깨진다**(`PRECHECK_TARGET_NOT_FOUND`). 1행과 같은 이월이다 — 실 AWS는 여기서 걸러 줄 것으로 보이나 **미측정**이며, 로컬에서 ④는 "대상이 실재하는가"를 보증하지 않는다. 9/11 게이트는 조치 대상을 실물에 바인딩해 회피한다(`scripts/load_golden_assets.py --bind-a1-to-seed`, #301) |
 
 이 목록은 **6–7주차 실 AWS 스모크 테스트**에서 해소한다: P0 런북 4종(`RIGHTSIZING`+`REVERT_SIZE`, `NACL_ADD_DENY`+`NACL_RESTORE`) 실동작 + Dry-Run·Status Check 경로 각 1회 검증. 비용 통제 — 단일 계정, 최소 스펙(t3.micro급), 검증 직후 리소스 정리. P2 시연 인프라(ALB·다중 EC2)는 마일스톤대로 조기 준비하되 실 AWS에 구성한다.
 
@@ -148,3 +149,24 @@ LocalStack 통과를 "검증 완료"로 간주하지 않는 경로를 고정 목
   `services/aws/executor.py`의 `_NACL_ALL_PORTS` 하나에 두고, 회귀는
   `test_execute_nacl_add_deny.py`가 지킨다(TCP·UDP는 전체 범위, ICMP·`-1`은 미전송).
   핵심 결정은 불변이다.
+
+- **2026-09-10 (4차 개정)** — §4에 8행 추가. 9/11 게이트 대본(#301)이 T1의 조치 대상을
+  **골든 A1로 고정**하면서, 그 골든 A1이 LocalStack에 실재하지 않는데도 **가드레일 4단계가
+  전부 통과하는 것**이 드러났다(PR #321 실측).
+
+  | 대상 | 변경 |
+  | --- | --- |
+  | 8행 (신규) | LocalStack은 존재하지 않는 인스턴스에도 `DryRunOperation`을 돌려준다(DryRun 플래그를 대상 존재 검사보다 먼저 처리). 승인 버튼이 열린 뒤 실행 1단계에서 처음 깨진다 — 실 AWS 동작은 미측정 |
+
+  **처분은 6·7행과 다르다 — 이것은 이월이다.** 코드로 닫을 수 있는 격차가 아니기 때문이다.
+  4단계는 "AWS에 물어본 답"을 그대로 판정으로 쓰는 자리이고([ADR-0007](0007-guardrail-dryrun-executor-precheck-contract.md) §2),
+  그 답이 에뮬레이터에서 다르다고 해서 우리 쪽에 존재 검사를 덧대면 §3(환경 감지 분기 금지)을
+  어기게 된다. 대상 존재는 실행 시점의 `precheck`가 이미 `PRECHECK_TARGET_NOT_FOUND`로 잡는다 —
+  로컬에서 잃는 것은 **그 판정이 승인 전으로 당겨지지 않는다**는 것 하나다.
+
+  **스모크에서 잴 것**: 존재하지 않는 인스턴스 ID로 `modify_instance_attribute(DryRun=True)`를
+  1회 불러 실 AWS가 `InvalidInstanceID.NotFound`로 거절하는지 확인한다. 거절하면 8행은 닫히고,
+  통과하면 **실 AWS에서도 같은 공백이라는 뜻이므로** 그때 가드레일 쪽 처분을 다시 연다.
+
+  9/11 게이트 당일은 조치 대상을 실물에 바인딩해 회피한다(`--bind-a1-to-seed`). 핵심 결정
+  (단일 compose·Boto3 시드 단일 원천·전환 스위치·이월 목록 운용)은 불변이다.
