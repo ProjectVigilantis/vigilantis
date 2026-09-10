@@ -18,9 +18,11 @@
 from __future__ import annotations
 
 from enum import Enum, unique
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from .runbook_parameters import Ipv4Cidr, NaclProtocolNumber, RuleNumber
 
 
 @unique
@@ -81,3 +83,43 @@ class InstanceSpecBackup(BaseModel):
     public_ip_address: Optional[str] = None
     # 값이 있으면 EIP가 붙어 있었다는 뜻이라 주소가 유지된다 — 위 고지의 반대 근거다.
     elastic_ip_association_id: Optional[str] = None
+
+
+class NaclRuleIndexBackup(BaseModel):
+    """`RECORD_NACL_RULE_INDEX` payload — `NACL_ADD_DENY`가 넣은 deny 규칙 1건의 좌표.
+
+    `RUNBOOK_NACL_RESTORE`가 읽는 값이다. 다른 백업 3종과 성격이 다르다 — 조치
+    **이전** 상태가 아니라 조치가 **만들어 낼** 규칙을 적는다. NACL 규칙 삽입은
+    기존 값을 덮지 않고 빈 슬롯에 넣는 조치라, 되돌리는 일이 "옛 값 복원"이 아니라
+    "우리가 넣은 그 규칙만 삭제"이기 때문이다.
+
+    5항목 전부가 필수다(ADR-0008 §5). 앞의 둘은 규칙 슬롯을 특정하고, 뒤의 셋은
+    **규칙 fingerprint**로 `NACL_RESTORE`의 통과 조건이 된다.
+
+      - `rule_number`·`egress` — 삭제할 슬롯
+      - `cidr_block`·`protocol`·`rule_action` — 그 슬롯에 있는 규칙이 우리 것인지
+
+    fingerprint가 부가 정보가 아니라 필수인 이유가 이 백업의 존재 이유이기도 하다.
+    `rule_number`는 **재사용되는 슬롯 번호**다. 우리 규칙이 삭제된 뒤 같은 번호에
+    제3자의 다른 deny 규칙이 들어오면, 슬롯만 보는 대조는 그 규칙을 우리 것으로
+    오인해 삭제한다 — 그리고 삭제는 되돌릴 수 없다.
+
+    `protocol`은 AWS 표기(번호 문자열)다. `NaclAddDenyParameters.protocol`의 이름
+    표기가 아니다 — 이 값이 대조할 상대가 `describe_network_acls`의 `Protocol`이라,
+    같은 축의 값을 저장해야 대조가 성립한다(schemas.runbook_parameters
+    `NACL_PROTOCOL_NUMBERS`의 실측 주석).
+
+    `rule_action`을 "deny"로 못 박는다. 이 백업 종류를 만드는 런북은 `NACL_ADD_DENY`
+    하나뿐이고(ADR-0004 롤백 공통 정책 ③의 backup_action 표), 그 조치가 넣는 규칙은
+    항상 deny다. "allow"가 실린 payload는 이 경로가 만든 레코드가 아니라는 뜻이므로
+    모델 검증에서 걸리는 편이 옳다 — 그때 `NACL_RESTORE`는 삭제하지 않고 판정 불가로
+    남긴다(ADR-0008 §5의 "백업 payload에 항목이 없다" 칸과 같은 처분).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    rule_number: RuleNumber
+    egress: bool
+    cidr_block: Ipv4Cidr
+    protocol: NaclProtocolNumber
+    rule_action: Literal["deny"]

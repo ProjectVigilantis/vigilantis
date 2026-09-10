@@ -51,7 +51,7 @@ from schemas.api.actions import (
 )
 from schemas.api.errors import ErrorCode
 from schemas.api.incidents import IncidentStatus, ResolutionJudgement
-from schemas.backups import InstanceSpecBackup
+from schemas.backups import InstanceSpecBackup, NaclRuleIndexBackup
 from schemas.candidates import CandidateStatus, RunbookCandidateData
 from schemas.executions import (
     ASSET_MAY_HAVE_CHANGED_EFFECTS,
@@ -76,7 +76,10 @@ from schemas.precheck import (
     VerificationMethod,
     build_verification_summary,
 )
-from schemas.runbook_parameters import build_precheck_parameters
+from schemas.runbook_parameters import (
+    NaclAddDenyParameters,
+    build_precheck_parameters,
+)
 from schemas.runbooks import (
     ROLLBACK_RUNBOOK_BY_MAIN_ID,
     ROLLBACK_RUNBOOK_IDS,
@@ -488,6 +491,77 @@ def store_instance_spec_backup(db: Session, execution_id: str) -> BackupOutcome:
     return BackupOutcome(record=record, created=True)
 
 
+def store_nacl_rule_index_backup(
+    db: Session, execution_id: str, params: NaclAddDenyParameters
+) -> BackupOutcome:
+    """NACL_ADD_DENY 삽입 직전 규칙 index 백업 — 캡처 → 저장 → 실행 결속 → commit.
+
+    **AWS 변경 호출 이전에 commit까지 끝나야 한다.** 규칙을 넣고 나면 그것이 우리가
+    넣은 것인지 말해 줄 근거가 어디에도 없다 — NACL_RESTORE는 삭제 대상을 백업
+    fingerprint로만 특정하므로(ADR-0004 롤백 공통 정책 ③, ADR-0008 §5), 백업 없이
+    넣은 규칙은 되돌릴 수 없는 변경이 된다. store_instance_spec_backup과 같은 이유로
+    호출부 트랜잭션에 얹히지 않고 스스로 커밋한다.
+
+    **파라미터를 인자로 받는다.** 여기서 다시 해석하지 않는 이유는 백업이 가리키는
+    규칙과 실제로 넣는 규칙이 같아야 하기 때문이다 — 같은 값을 두 번 해석하면 그
+    사이에 후보나 명령이 바뀌었을 때 백업이 엉뚱한 슬롯을 가리키고, 그 어긋남은
+    NACL_RESTORE가 규칙을 못 찾는 형태로 뒤늦게 드러난다.
+
+    같은 실행에 두 번 불러도 백업은 하나다(ADR-0008 §1 ③).
+    """
+    execution = executions_repo.lock_execution(db, execution_id)
+    if execution is None:
+        return _backup_failed(
+            PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND, "실행 레코드를 찾을 수 없습니다"
+        )
+    if execution.runbook_id is not RunbookId.RUNBOOK_NACL_ADD_DENY:
+        # 배선 오류다 — 규칙 index 백업을 쓰는 런북은 NACL_ADD_DENY 하나뿐이다
+        # (schemas.backups.BackupType). 판정으로 삼키면 다른 런북이 엉뚱한 백업
+        # 종류를 달고 조용히 진행된다.
+        raise ValueError(
+            f"NACL 규칙 index 백업 대상 런북이 아닙니다: {execution.runbook_id.value}"
+        )
+    if execution.backup_record_id is not None:
+        return BackupOutcome(
+            record=executions_repo.get_backup_record(db, execution.backup_record_id)
+        )
+
+    target = parse_arn(execution.target_arn)
+    if target is None or target.resource_type != "network-acl":
+        return _backup_failed(
+            PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+            f"NACL ARN이 아닙니다: {execution.target_arn}",
+        )
+
+    capture = backup.capture_nacl_rule_index(
+        target.resource_id,
+        target.region,
+        rule_number=params.rule_number,
+        cidr_block=params.cidr_block,
+        protocol=params.protocol,
+    )
+    if not capture.captured:
+        return _backup_failed(capture.reason_code, capture.detail or "")
+
+    record = executions_repo.create_backup_record(
+        db,
+        execution_id=execution.execution_id,
+        target_arn=execution.target_arn,
+        backup_type=capture.backup_type,
+        payload=capture.payload,
+    )
+    if not executions_repo.bind_backup_record(
+        db, execution.execution_id, record.backup_record_id
+    ):
+        db.rollback()
+        return _backup_failed(
+            PrecheckReasonCode.PRECHECK_INVALID_STATE, "백업 레코드 결속 실패"
+        )
+
+    db.commit()
+    return BackupOutcome(record=record, created=True)
+
+
 # --- 실행 (Issue #211) ---------------------------------------------------------
 
 
@@ -658,6 +732,112 @@ def run_rightsizing_execution(db: Session, execution_id: str) -> ExecutionRunOut
     return ExecutionRunOutcome(succeeded=True, steps=outcome.steps)
 
 
+def _nacl_add_deny_params(
+    db: Session, execution: models.ActionExecution
+) -> Optional[NaclAddDenyParameters]:
+    """조치가 넣을 deny 규칙의 실행 파라미터. 계약 모델을 거쳐서만 돌려준다.
+
+    Guardrail PASS의 불변 실행 명령(validated_command)이 채워지면 그것이 원천이다.
+    아직 배선되지 않은 동안에는 후보의 typed 파라미터를 **④가 쓴 것과 같은 변환**
+    (build_precheck_parameters)으로 실행 파라미터로 옮긴다 — 변환이 갈리면 판정한
+    규칙과 삽입하는 규칙이 달라진다. _rightsizing_target_type과 같은 자리다.
+    """
+    target = parse_arn(execution.target_arn)
+    if target is None or target.resource_type != "network-acl":
+        return None
+
+    stored = (execution.validated_command or {}).get("parameters")
+    if isinstance(stored, dict):
+        try:
+            return NaclAddDenyParameters.model_validate(stored)
+        except ValidationError:
+            # 옛 계약으로 저장된 명령이 실행으로 새지 않게 한다
+            logger.warning(
+                "execution_command_contract_invalid",
+                extra={
+                    "execution_id": execution.execution_id,
+                    "runbook_id": execution.runbook_id.value,
+                },
+            )
+            return None
+
+    if execution.candidate_id is None:
+        return None
+    candidate = incidents_repo.get_candidate(db, execution.candidate_id)
+    if candidate is None:
+        return None
+    try:
+        data = mappers.to_candidate_data(candidate)
+        return build_precheck_parameters(
+            data.runbook_id,
+            data.parameters,
+            resource_id=target.resource_id,
+            evidence_ids=data.evidence_ids,
+        )
+    except (ValidationError, ValueError):
+        logger.warning(
+            "candidate_contract_invalid",
+            extra={
+                "candidate_id": candidate.candidate_id,
+                "runbook_id": candidate.runbook_id.value,
+            },
+        )
+        return None
+
+
+def run_nacl_add_deny_execution(db: Session, execution_id: str) -> ExecutionRunOutcome:
+    """`RUNBOOK_NACL_ADD_DENY` 실행 — 백업 확보 → deny 규칙 삽입 → 결과 반환. (Issue #297)
+
+    순서가 계약이다. **규칙 index 백업이 commit된 뒤에만 AWS 변경이 시작된다**
+    (store_nacl_rule_index_backup) — 규칙을 넣고 프로세스가 죽으면 그것이 우리가 넣은
+    것인지 말해 줄 근거가 남지 않아 되돌릴 수 없다(ADR-0004 롤백 공통 정책 ③).
+
+    RIGHTSIZING과 다른 점은 **성공의 경계가 실행 안에 있다**는 것이다. 규칙 삽입은
+    원자적이고 뒤따르는 판정 축(2/2 Status Check 같은 것)이 없으므로, dispatcher가
+    반환값을 받아 그 자리에서 SUCCESS로 확정한다(_AWAIT_JUDGEMENT_ON_SUCCESS에 넣지
+    않는 이유다). 여기로 판정이 돌아오는 것은 실행 도중 끊긴 경우뿐이며 그때는
+    judge_nacl_add_deny가 실자산을 본다.
+
+    종료 상태도 Incident 전이도 여기서 하지 않는다 — run_rightsizing_execution과 같은
+    이유이며, 확정은 dispatcher.py의 close_execution 하나가 한다.
+    """
+    execution = executions_repo.get_execution(db, execution_id)
+    if execution is None:
+        raise ValueError(f"실행 레코드를 찾을 수 없습니다: {execution_id}")
+    if execution.runbook_id is not RunbookId.RUNBOOK_NACL_ADD_DENY:
+        # 배선 오류다 — 런북마다 단계와 백업 종류가 다르다
+        raise ValueError(f"NACL_ADD_DENY 실행이 아닙니다: {execution.runbook_id.value}")
+    if execution.status is not ExecutionStatus.IN_PROGRESS:
+        # 끝난 실행을 다시 돌리면 백업 없는 두 번째 변경이 된다. 선점(lock_execution)은
+        # 호출부(dispatcher.py) 몫이라 여기서는 상태만 본다.
+        raise ValueError(f"진행 중인 실행이 아닙니다: {execution.status.value}")
+
+    params = _nacl_add_deny_params(db, execution)
+    if params is None:
+        return _run_failed(
+            PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+            "실행 파라미터에서 NACL deny 규칙 값을 찾지 못했습니다",
+        )
+
+    stored = store_nacl_rule_index_backup(db, execution_id, params)
+    if not stored.stored:
+        return _run_failed(
+            stored.reason_code,
+            f"NACL 규칙 index 백업 실패: {stored.detail or ''}".strip(),
+        )
+
+    outcome = executor.execute_nacl_add_deny(
+        execution.target_arn,
+        rule_number=params.rule_number,
+        cidr_block=params.cidr_block,
+        protocol=params.protocol,
+        record_step=_step_recorder(db, execution_id),
+    )
+    if not outcome.succeeded:
+        return _run_failed(outcome.reason_code, outcome.error_summary, outcome.steps)
+    return ExecutionRunOutcome(succeeded=True, steps=outcome.steps)
+
+
 # --- 2/2 Status Check 판정 (Issue #240) -----------------------------------------
 
 
@@ -818,6 +998,111 @@ def judge_rightsizing_boot(db: Session, execution_id: str) -> ExecutionJudgement
         error_summary=_boot_failure_summary(outcome),
         verdict=outcome.verdict,
     )
+
+
+def judge_nacl_add_deny(db: Session, execution_id: str) -> ExecutionJudgement:
+    """단계를 남긴 채 IN_PROGRESS인 NACL_ADD_DENY 실행 1건의 종료 판정. (Issue #297)
+
+    여기로 오는 것은 **실행 도중 프로세스가 끊긴 차단**뿐이다. 정상 경로는 실행이
+    끝난 그 주기에 dispatcher가 SUCCESS로 확정한다 — 규칙 삽입은 원자적이고 뒤따르는
+    판정 축이 없기 때문이다. 그래도 판정 주체를 runner와 **짝으로** 둔다(ADR-0008 §6):
+    짝이 어긋나면 중단된 실행이 재실행도 종료도 되지 않고 IN_PROGRESS에 남는다.
+
+    **성공의 경계는 실자산이다.** 규칙이 들어갔는지는 단계 기록이 아니라 지금 NACL의
+    그 슬롯에 백업 fingerprint와 같은 규칙이 있는지가 답한다 — 끊긴 지점이 어디든 그
+    답은 같다.
+
+    슬롯이 비어 있으면 삽입되지 않은 것이라 FAILED다. 자산이 바뀌지 않았으므로
+    관제자 복구 목록을 닫아도 되돌릴 것이 남지 않는다.
+
+    슬롯이 차 있는데 fingerprint가 다르면 **그 규칙은 우리 것이 아니다.** 성공으로
+    확정하면 남의 규칙을 우리 차단으로 기록하게 되고, 그 기록을 근거로 NACL_RESTORE가
+    그것을 삭제한다 — 삭제는 되돌릴 수 없다(ADR-0008 §5). 그래서 FAILED로 남긴다.
+
+    조회하지 못하면 확정하지 않고 보류한다 — judge_revert_size와 같은 이유이며,
+    재시도 상한은 Issue #249다.
+    """
+    execution = executions_repo.get_execution(db, execution_id)
+    if execution is None:
+        raise ValueError(f"실행 레코드를 찾을 수 없습니다: {execution_id}")
+    if execution.runbook_id is not RunbookId.RUNBOOK_NACL_ADD_DENY:
+        raise ValueError(f"NACL_ADD_DENY 실행이 아닙니다: {execution.runbook_id.value}")
+    if execution.status is not ExecutionStatus.IN_PROGRESS:
+        raise ValueError(f"진행 중인 실행이 아닙니다: {execution.status.value}")
+
+    record = (
+        executions_repo.get_backup_record(db, execution.backup_record_id)
+        if execution.backup_record_id is not None
+        else None
+    )
+    if record is None:
+        # 백업은 AWS 호출 이전에 commit된다 — 단계가 남았는데 레코드가 없다면 이 경로가
+        # 만든 실행이 아니다. 되돌릴 근거가 없으므로 확정하고 수동 개입으로 넘긴다
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary="차단 판정 불가: 결속된 백업 레코드를 찾을 수 없습니다",
+        )
+    target = parse_arn(execution.target_arn)
+    if target is None or target.resource_type != "network-acl":
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary=f"NACL ARN이 아닙니다: {execution.target_arn}",
+        )
+
+    try:
+        expected = NaclRuleIndexBackup.model_validate(record.payload or {})
+    except ValidationError as exc:
+        # 우리가 쓴 것과 같은 모델로 읽는다 — 여기서 걸리면 이 경로가 만든 레코드가
+        # 아니다. 대조할 fingerprint가 없으므로 성공이라 말할 수 없다
+        logger.critical(
+            "nacl_backup_payload_invalid",
+            extra={
+                "execution_id": execution_id,
+                "backup_record_id": record.backup_record_id,
+            },
+        )
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary=f"차단 판정 불가: 백업 payload가 계약을 벗어났습니다 ({exc.error_count()}건)",
+        )
+
+    entry, code = executor.current_nacl_entry(
+        target.resource_id,
+        target.region,
+        rule_number=expected.rule_number,
+        egress=expected.egress,
+    )
+    if code is not None and code is not PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND:
+        # 자산 상태를 본 적이 없다 — 확정하면 검증기의 실패가 조치의 실패로 저장된다
+        return ExecutionJudgement(
+            defer_reason=f"{code.value}: 차단 대상 NACL 조회 실패로 판정 보류"
+        )
+    if entry is None:
+        # NACL 자체가 없는 경우(TARGET_NOT_FOUND)도 여기로 온다 — 어느 쪽이든 그
+        # 차단은 지금 효력이 없고, 자산에 남은 변경도 없다
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary=(
+                f"차단 미완 — 규칙 {expected.rule_number}(인바운드)가 삽입되지 않았습니다"
+            ),
+        )
+    if not executor.nacl_entry_fingerprint_matches(entry, expected):
+        logger.critical(
+            "nacl_slot_taken_by_other_rule",
+            extra={
+                "execution_id": execution_id,
+                "rule_number": expected.rule_number,
+                "network_acl_id": target.resource_id,
+            },
+        )
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary=(
+                f"차단 미완 — 규칙 번호 {expected.rule_number}에 다른 규칙이 있습니다."
+                " 우리가 넣은 규칙이 아니므로 자동 삭제하지 않고 수동 개입으로 전환합니다"
+            ),
+        )
+    return ExecutionJudgement(next_status=ExecutionStatus.SUCCESS)
 
 
 # --- 실행 종료 확정 (Issue #232) -------------------------------------------------
