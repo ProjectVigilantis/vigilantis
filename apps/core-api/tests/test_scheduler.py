@@ -37,7 +37,7 @@ def _stub_pipeline(monkeypatch, called):
     )
     monkeypatch.setattr(
         "services.rule_engine.run_rule_engine",
-        lambda db: (called.__setitem__("judge", called["judge"] + 1), {"counts": {"SKIP": 1}})[1],
+        lambda db: (called.__setitem__("judge", called["judge"] + 1), {"counts": {"SKIP": 1}, "evaluations": []})[1],
     )
 
 
@@ -73,7 +73,10 @@ def test_run_pipeline_runs_and_releases_when_lock_free(pg_engine, monkeypatch):
     result = scheduler.run_pipeline()
 
     assert called["collect"] == 1 and called["judge"] == 1
-    assert result == {"stored": {"stored": 1}, "verdicts": {"SKIP": 1}}
+    assert result == {
+        "stored": {"stored": 1}, "verdicts": {"SKIP": 1},
+        "incidents": {"created": 0, "existing": 0},
+    }
 
     # 락이 해제됐어야 한다 — 같은 키를 다시 잡을 수 있어야 한다
     conn, got = _try_lock(pg_engine, scheduler._ADVISORY_LOCK_KEY)
@@ -101,7 +104,7 @@ def test_two_ticks_do_not_overlap(pg_engine, monkeypatch):
     monkeypatch.setattr("services.collector.collect_and_store", _collect_then_reenter)
     monkeypatch.setattr(
         "services.rule_engine.run_rule_engine",
-        lambda db: (called.__setitem__("judge", called["judge"] + 1), {"counts": {}})[1],
+        lambda db: (called.__setitem__("judge", called["judge"] + 1), {"counts": {}, "evaluations": []})[1],
     )
 
     result = scheduler.run_pipeline()

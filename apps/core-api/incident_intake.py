@@ -41,7 +41,7 @@
 #
 # **이 근거가 없으면 AI는 사용률을 못 봅니다.** rule_evaluation.reason은
 # "EC2 rule evaluation: verdict=COST_CANDIDATE" 한 줄이라 수치가 없고, ASSET 근거의
-# AssetItem도 판정 표기만 담습니다(routers/assets.py _to_item). 그래서 METRIC이 비면
+# AssetItem도 판정 표기만 담습니다(asset_mapping.py to_asset_item). 그래서 METRIC이 비면
 # 그래프 입력에 CPU 평균·최대·데이터포인트 수가 **한 군데도** 들어가지 않습니다 —
 # 2026-09-10 게이트 예비 실행에서 같은 자산·같은 입력이 NO_PROPOSAL과 SUCCEEDED로
 # 갈린 원인이 이것입니다(모델이 요약 3줄에 "입력에 없다"를 직접 적었습니다).
@@ -60,14 +60,11 @@
 #     deduplication_key 유니크 제약이 DB에서 한 번 더 막지만 FINOPS에는 그런 제약이
 #     없으므로, 다중 worker로 갈 때 이 자리를 함께 봐야 합니다.
 #
-# [남은 작업]
-# 1. 판정 계층에서 이 진입점을 부르는 자리 — services/scheduler.py의 수집 파이프라인
-#    (담당: 김세혁·김승철)과 위협 주입 경로. 위협 주입 방식은 ADR-0006이 별도 결정
-#    대상으로 남겼습니다. 이때 DB 행에서 AssetItem을 만드는 자리도 함께 정합니다 —
-#    지금 그 변환은 routers/assets.py의 private 함수 하나뿐인데, 이 계층이 Router
-#    내부를 import하면 위 3층 분리가 깨집니다.
-# 2. Incident를 만든 뒤 AI 호출로 넘기는 자리 — agent_dispatcher.py 본문.
-#    이 계층은 Incident와 근거를 남기는 데까지고, 그 뒤를 그쪽이 잇습니다.
+# [호출 경로]
+# FINOPS는 services/scheduler.py가 판정과 같은 회차의 자산 스냅샷을 조립해 부릅니다
+# (#306). AssetItem 변환은 asset_mapping.py를 목록 API와 공유합니다.
+# 생성 뒤 AI 호출은 agent_dispatcher.py가 맡습니다(#285).
+# 남은 것은 SECOPS 위협 주입 경로입니다 — #306 범위 밖이며 ADR-0006의 별도 결정 대상입니다.
 # ==============================================================================
 
 from __future__ import annotations
