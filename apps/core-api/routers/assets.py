@@ -11,24 +11,17 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Optional
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-# _PRIMARY_TYPES·_RULE_TARGET_TYPES는 계약 모듈의 판정 대상 정의를 단일 원천으로
-# 재사용한다 — 여기서 재정의하면 계약 개정 시 어긋난다
 from schemas.api.assets import (
-    _PRIMARY_TYPES,
-    _RULE_TARGET_TYPES,
-    AssetItem,
     AssetsResponse,
     CollectionStatus,
-    EvaluationStatus,
-    ResourceRole,
 )
 from schemas.collections import CollectionRunStatus
 
+from asset_mapping import to_asset_item
 from config import get_aws_settings
 from db import models
 from db.repositories import assets as assets_repo
@@ -93,59 +86,6 @@ def _collection_status(
     return _COLLECTION_STATUS[worst]
 
 
-def _to_item(
-    asset: models.Asset,
-    relationships: list[models.AssetRelationship],
-    evaluation: Optional[models.RuleEvaluation],
-) -> AssetItem:
-    if asset.asset_type in _RULE_TARGET_TYPES:
-        if evaluation is not None:
-            evaluation_fields = {
-                "evaluation_status": evaluation.evaluation_status,
-                "verdict": evaluation.verdict,
-                "health_score": evaluation.health_score,
-                "skip_reason_code": evaluation.skip_reason_code,
-            }
-        else:
-            # 판정 대상인데 판정 행이 아직 없음 — 계약상 PENDING
-            evaluation_fields = {
-                "evaluation_status": EvaluationStatus.PENDING,
-                "verdict": None,
-                "health_score": None,
-                "skip_reason_code": None,
-            }
-    else:
-        evaluation_fields = {
-            "evaluation_status": EvaluationStatus.NOT_APPLICABLE,
-            "verdict": None,
-            "health_score": None,
-            "skip_reason_code": None,
-        }
-    return AssetItem.model_validate(
-        {
-            "arn": asset.arn,
-            "resource_id": asset.resource_id,
-            "asset_type": asset.asset_type,
-            "resource_role": (
-                ResourceRole.PRIMARY
-                if asset.asset_type in _PRIMARY_TYPES
-                else ResourceRole.RUNBOOK_SUPPORT
-            ),
-            "name": asset.name,
-            "account_id": asset.account_id,
-            "region": asset.region,
-            "state": asset.state,
-            "spec": asset.spec,
-            "relationships": [
-                {"relation_type": rel.relation_type, "target_arn": rel.target_arn}
-                for rel in relationships
-            ],
-            **evaluation_fields,
-            "collected_at": asset.collected_at,
-        }
-    )
-
-
 @router.get("/assets", response_model=AssetsResponse)
 def get_assets(db: Session = Depends(get_db)) -> AssetsResponse:
     # 관제 대상 = 설정된 리전(AWS_REGIONS). 세 필드를 모두 이 범위로 좁혀 응답 안에서
@@ -164,7 +104,7 @@ def get_assets(db: Session = Depends(get_db)) -> AssetsResponse:
     evaluations = assets_repo.latest_rule_evaluation_by_asset(db)
 
     items = [
-        _to_item(asset, relationships.get(asset.asset_id, []), evaluations.get(asset.asset_id))
+        to_asset_item(asset, relationships.get(asset.asset_id, []), evaluations.get(asset.asset_id))
         for asset in assets_repo.list_assets(db, regions=regions)
     ]
     return AssetsResponse(

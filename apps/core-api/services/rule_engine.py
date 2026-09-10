@@ -102,7 +102,7 @@ def evaluate_sg(name: Optional[str], attached: Optional[bool],
 
 def run_rule_engine(db, collection_run_id: str | None = None) -> dict:
     """assets 및 metric_summaries 테이블을 읽어 RuleEvaluation 결과(RuleEvaluationResult 계약)를 기록한다.
-    반환: verdict 별 집계 + 각 자산 판정 목록.
+    반환: verdict 별 집계 + 표시 요약 + 이번 호출의 typed 판정 목록(Intake 조립용).
     """
     from datetime import datetime, timezone
 
@@ -122,6 +122,7 @@ def run_rule_engine(db, collection_run_id: str | None = None) -> dict:
 
     assets = assets_repo.list_assets(db)
     results = []
+    evaluations: list[RuleEvaluationResult] = []
     counts: dict[str, int] = {}
     now = datetime.now(timezone.utc)
 
@@ -192,6 +193,7 @@ def run_rule_engine(db, collection_run_id: str | None = None) -> dict:
             existing_eval.reason = contract.reason
             existing_eval.evaluated_at = contract.evaluated_at
 
+        evaluations.append(contract)
         counts[api_verdict.value] = counts.get(api_verdict.value, 0) + 1
         results.append(
             {
@@ -202,5 +204,5 @@ def run_rule_engine(db, collection_run_id: str | None = None) -> dict:
             }
         )
 
-    return {"counts": counts, "results": results}
+    return {"counts": counts, "results": results, "evaluations": evaluations}
 

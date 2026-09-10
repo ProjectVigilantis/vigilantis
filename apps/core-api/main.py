@@ -72,8 +72,8 @@ def create_app() -> FastAPI:
         # 유실돼 이미 기동한 스케줄러를 아무도 못 내린다.
         schedulers = []
         starts = (
-            # 수집→판정 스캔 파이프라인(collector→rule_engine). 실데이터 시연의 최상류.
-            start_scan_scheduler,
+            # 수집→판정→FinOps Incident 생성. 실데이터 시연의 최상류.
+            partial(start_scan_scheduler, realtime.publish),
             # 접수된 조치 실행 디스패치·회수 스캔.
             partial(dispatcher.start_dispatcher, realtime.publish),
             # AI 분석 대기 Incident 스캔·회수.

@@ -62,12 +62,20 @@ def test_scan_enabled_starts_and_returns_scheduler(monkeypatch):
     started = []
 
     class FakeScheduler:
+        def __init__(self, publish):
+            self.publish = publish
+
         def start(self):
             started.append("start")
 
     monkeypatch.setenv("SCAN_ENABLED", "true")
     monkeypatch.setattr(scheduler_module, "build_scheduler", FakeScheduler)
-    scheduler = start_scheduler()
+
+    def publish(event):
+        pass
+
+    scheduler = start_scheduler(publish)
+    assert scheduler.publish is publish
 
     assert isinstance(scheduler, FakeScheduler)
     assert started == ["start"]
