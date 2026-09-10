@@ -1,9 +1,9 @@
 # ==============================================================================
 # [파일 설명]  담당: 김세혁 / 김승철
 # APScheduler 기반 주기 스캔 스케줄러입니다. (MVP에서 Step Functions/Fargate 대체)
-# collector→rule_engine 파이프라인을 주기적으로 실행합니다.
+# collector→rule_engine→FinOps Intake 파이프라인을 주기적으로 실행합니다.
 #
-# 구현: run_pipeline(수집→정형화→적재→판정) 잡을 IntervalTrigger 로 등록한다.
+# 구현: run_pipeline(수집→정형화→적재→판정→Incident 생성) 잡을 등록한다.
 #   main.py lifespan 이 start_scheduler() 를 호출해 기동한다(SCAN_ENABLED=false 면 미기동).
 #   실행 간격은 CollectorSettings.SCAN_INTERVAL_SECONDS(기본 300초, gt=0 검증).
 # ==============================================================================
@@ -11,11 +11,23 @@
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
+from collections.abc import Callable
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from sqlalchemy.orm import Session
 
+from schemas.api.ws import WsEvent, WsEventType
+from schemas.evidence import DetectionAssetSnapshot
+from schemas.intake import INCIDENT_TRIGGERING_VERDICTS, FinOpsIncidentIntake
+from schemas.rules import RuleEvaluationResult
+
+from asset_mapping import to_asset_item
 from config import get_collector_settings
+from db.repositories import assets as assets_repo
+from incident_intake import create_incident_from_intake
+from realtime import incident_event
 
 logger = logging.getLogger("vigilantis.scheduler")
 
@@ -29,8 +41,40 @@ JOB_ID = "finops_secops_scan"
 _ADVISORY_LOCK_KEY = 0x7669675F7363616E
 
 
-def run_pipeline() -> dict:
-    """collector → rule_engine 1회 실행. 스케줄러 잡이자 수동 호출 진입점.
+def _build_finops_intakes(
+    db: Session, evaluations: list[RuleEvaluationResult],
+) -> list[FinOpsIncidentIntake]:
+    # COST_CANDIDATE·UNUSED만 FINOPS로 올린다(schemas.intake 계약).
+    # SKIP은 제외 판정, THREAT은 별도 위협 이벤트·위험 판정이 필요한 SECOPS다.
+    selected = [e for e in evaluations if e.verdict in INCIDENT_TRIGGERING_VERDICTS]
+    if not selected:
+        return []
+
+    assets = {asset.arn: asset for asset in assets_repo.list_assets(db)}
+    relationships = defaultdict(list)
+    for rel in assets_repo.list_all_relationships(db):
+        relationships[rel.source_asset_id].append(rel)
+
+    return [
+        FinOpsIncidentIntake(
+            rule_evaluation=evaluation,
+            asset_snapshot=DetectionAssetSnapshot(
+                # 판정의 ID를 복사하면 다른 회차의 자산을 정상처럼 포장한다.
+                # 관측 행의 실제 ID를 넘겨 Intake의 회차 일치 검증을 통과시킨다.
+                collection_run_id=assets[evaluation.asset_arn].last_collection_run_id,
+                asset=to_asset_item(
+                    assets[evaluation.asset_arn],
+                    relationships[assets[evaluation.asset_arn].asset_id],
+                    evaluation,
+                ),
+            ),
+        )
+        for evaluation in selected
+    ]
+
+
+def run_pipeline(publish: Callable[[WsEvent], None] | None = None) -> dict:
+    """collector → rule_engine → FINOPS Intake 1회 실행.
 
     다중 워커/레플리카에서 같은 tick 이 파이프라인을 겹쳐 돌리지 않도록 PostgreSQL
     세션 레벨 advisory lock 을 전용 커넥션에 잡고 실행한다. 락을 못 잡으면(다른 프로세스가
@@ -63,12 +107,44 @@ def run_pipeline() -> dict:
         try:
             judged = run_rule_engine(db)  # RuleEvaluation 적재
             db.commit()
+            # 판정은 독립 결과다. 뒤의 Intake 조립이 실패해도 판정 기록은 남긴다.
+            # 전부 조립한 뒤 저장을 시작하므로 조립 한 건이 실패하면 이 tick의
+            # 신규 Incident는 0건이다. 아래 건별 실패 격리는 저장 단계에 적용한다.
+            intakes = _build_finops_intakes(db, judged["evaluations"])
         except Exception:
             db.rollback()
             raise
         finally:
             db.close()
-        summary = {"stored": store, "verdicts": judged["counts"]}
+
+        incidents = {"created": 0, "existing": 0, "failed": 0}
+        for intake in intakes:
+            # 판정 저장과 Incident 저장은 별도 트랜잭션이다. Intake의 commit이
+            # 다른 자산의 작업을 확정하지 않도록 건별 세션을 만들고 닫는다.
+            db = session_factory()
+            try:
+                outcome = create_incident_from_intake(db, intake)
+            except Exception:
+                db.rollback()
+                # 같은 ARN이 매번 실패해도 뒤의 자산은 처리한다. 실패는 로그와
+                # 집계로 남기고, 저장되지 않은 건은 다음 스캔에서 다시 시도한다.
+                incidents["failed"] += 1
+                logger.exception(
+                    "scan_intake_failed", extra={"subject_arn": intake.subject_arn},
+                )
+                continue
+            finally:
+                db.close()
+            incidents["created" if outcome.created else "existing"] += 1
+            # 이미 commit된 결과다. 발행 오류를 저장 실패로 집계하거나 되감지 않는다.
+            if outcome.created and publish is not None:
+                publish(incident_event(
+                    WsEventType.INCIDENT_CREATED,
+                    incident_id=outcome.incident_id,
+                    occurred_at=outcome.occurred_at,
+                ))
+
+        summary = {"stored": store, "verdicts": judged["counts"], "incidents": incidents}
         logger.info("scan pipeline done: %s", summary)
         return summary
     finally:
@@ -95,11 +171,12 @@ def _interval_seconds() -> int:
     return get_collector_settings().SCAN_INTERVAL_SECONDS
 
 
-def build_scheduler() -> AsyncIOScheduler:
+def build_scheduler(publish: Callable[[WsEvent], None] | None = None) -> AsyncIOScheduler:
     """스케줄러를 구성하고 파이프라인 잡을 등록한다(기동은 하지 않음)."""
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
         run_pipeline,
+        kwargs={"publish": publish},
         trigger=IntervalTrigger(seconds=_interval_seconds()),
         id=JOB_ID,
         name="FinOps/SecOps 자산 스캔 파이프라인",
@@ -110,7 +187,7 @@ def build_scheduler() -> AsyncIOScheduler:
     return scheduler
 
 
-def start_scheduler() -> AsyncIOScheduler | None:
+def start_scheduler(publish: Callable[[WsEvent], None] | None = None) -> AsyncIOScheduler | None:
     """main의 lifespan에서 기동. 스케줄러를 구성·기동해 반환한다.
 
     SCAN_ENABLED=false 면 기동하지 않고 None 을 돌려준다 — 테스트가 앱을 띄울 때 실제
@@ -118,7 +195,7 @@ def start_scheduler() -> AsyncIOScheduler | None:
     if not get_collector_settings().SCAN_ENABLED:
         logger.info("scan scheduler disabled: SCAN_ENABLED=false")
         return None
-    scheduler = build_scheduler()
+    scheduler = build_scheduler(publish)
     scheduler.start()
     logger.info("scheduler started: job=%s interval=%ss", JOB_ID, _interval_seconds())
     return scheduler

@@ -16,13 +16,14 @@
 #
 # 실행 범위: RUNBOOK_EC2_RIGHTSIZING = execute_rightsizing(). (Issue #211, §실행)
 #            RUNBOOK_EC2_REVERT_SIZE  = execute_revert_size(). (Issue #241, §원복)
+#            RUNBOOK_NACL_ADD_DENY    = execute_nacl_add_deny(). (Issue #297, §차단)
 #   - precheck과 같은 규약으로 예외를 던지지 않는다. 단계별 결과는 ExecutionStepResult로
 #     돌려주고, 저장·커밋 순서는 workflows.py가 소유한다.
 #   - 원복은 되돌릴 값을 인자로만 받는다 — 백업 레코드 조회는 호출부(workflows) 몫이다.
 #     원천이 하나라는 정책(ADR-0004 정책 ③)은 값을 뽑는 자리가 하나일 때만 성립한다.
 #
 # [남은 작업]
-# 1. 나머지 8종 실행 함수 — 백업이 필요한 런북은 백업 commit 이후에만 진입한다
+# 1. 나머지 7종 실행 함수 — 백업이 필요한 런북은 백업 commit 이후에만 진입한다
 # 2. 롤백 나머지 2종(RUNBOOK_EC2_UNISOLATE·RUNBOOK_SG_RECREATE) 실행도 executor 경유 —
 #    트리거 판단·감시는 rollback.py 담당
 #
@@ -46,7 +47,7 @@ from typing import Any, Callable, Mapping, Optional, Protocol
 from botocore.exceptions import BotoCoreError, ClientError, ParamValidationError
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
-from schemas.backups import BackupType
+from schemas.backups import BackupType, NaclRuleIndexBackup
 from schemas.executions import (
     ExecutionEffect,
     ExecutionStepResult,
@@ -59,6 +60,9 @@ from schemas.precheck import (
     build_verification_summary,
 )
 from schemas.runbook_parameters import (
+    NACL_ADD_DENY_EGRESS,
+    NACL_DENY_ACTION,
+    NACL_PROTOCOL_NUMBERS,
     EbsDeleteUnattachedParameters,
     Ec2EnableAutoscalingParameters,
     Ec2IsolateParameters,
@@ -654,8 +658,10 @@ def _precheck_nacl_add_deny(ctx: _Ctx) -> PrecheckOutcome:
         return _fail(
             ctx, code, verified=["없음(NACL 조회 실패)"], unverified=[_DESCRIBE_MISSES]
         )
-    # ADD_DENY는 인바운드 차단 규칙이다 — ADR-0007 §5 파라미터 표에 egress가 없다
-    if _find_entry(acl, ctx.params["rule_number"], egress=False) is not None:
+    # ADD_DENY는 인바운드 차단 규칙이다 — ADR-0007 §5 파라미터 표에 egress가 없다.
+    # 값은 상수 하나로 둔다: 여기와 백업 캡처와 실행이 서로 다른 슬롯을 보면, 백업이
+    # 가리키는 규칙과 실제로 넣은 규칙이 갈린다
+    if _find_entry(acl, ctx.params["rule_number"], NACL_ADD_DENY_EGRESS) is not None:
         return _fail(
             ctx,
             R.PRECHECK_INVALID_STATE,
@@ -1056,10 +1062,23 @@ STEP_START_INSTANCE = "START_INSTANCE"
 # 판정으로 가서 실패로 확정된다. 남기는 것은 대조 자체가 결론인 두 경우뿐이다.
 STEP_COMPARE_INSTANCE_TYPE = "COMPARE_INSTANCE_TYPE"
 
+STEP_CREATE_NACL_ENTRY = "CREATE_NACL_ENTRY"
+
 _OP_STOP = "ec2.stop_instances"
 _OP_MODIFY = "ec2.modify_instance_attribute"
 _OP_START = "ec2.start_instances"
 _OP_DESCRIBE = "ec2.describe_instances"
+_OP_CREATE_NACL_ENTRY = "ec2.create_network_acl_entry"
+
+# TCP·UDP 규칙에는 PortRange가 필수다(CreateNetworkAclEntry API 계약). LocalStack은
+# 빠뜨린 요청도 받아 주지만 실 AWS는 InvalidParameterValue로 거절한다 — 로컬에서만
+# 통과하는 차단이 되지 않도록 여기서 채운다(PR #313 리뷰).
+#
+# 범위는 **전체**다. 이 조치가 막는 것은 포트가 아니라 **출발지 주소**이며
+# (ADR-0007 §5 파라미터 표에 포트가 없다), 일부 포트만 막으면 같은 출발지가 다른
+# 포트로 그대로 들어온다. 포트를 고르는 입력은 그래서 두지 않는다.
+_NACL_ALL_PORTS = {"From": 0, "To": 65535}
+_NACL_PORT_RANGE_PROTOCOLS: frozenset[str] = frozenset({"6", "17"})  # tcp · udp
 
 # 정지 확인 대기 — 5초 간격 40회(최대 200초). 초과는 "실패"가 아니라 "상태 불명"이라
 # 단계 effect가 UNKNOWN이 되고, 타입 변경으로 넘어가지 않는다.
@@ -1516,6 +1535,110 @@ def execute_revert_size(
     log.succeed(
         ExecutionEffect.APPLIED,
         "기동 요청 접수(2/2 Status Check는 원복 성공 판정의 축이 아니다)",
+        response=response,
+    )
+    return ExecutionOutcome(steps=tuple(log.steps))
+
+
+# ------------------------------------------------------------------ 차단 (Issue #297)
+def current_nacl_entry(
+    network_acl_id: str, region: str, *, rule_number: int, egress: bool
+):
+    """(그 슬롯의 엔트리, 사유 코드) 짝. 슬롯이 비어 있으면 둘 다 None이다.
+
+    공개 함수다. 실행과 종료 판정이 같은 축을 같은 방법으로 읽어야 하기 때문이며
+    (workflows.judge_nacl_add_deny), current_instance_type_and_state를 공개한 이유와
+    같다 — 읽는 방법이 갈리면 "규칙이 들어갔는가"의 답이 자리마다 달라진다.
+
+    **NACL이 없는 것과 슬롯이 빈 것은 다른 사건이다.** 앞은 사유 코드
+    (PRECHECK_TARGET_NOT_FOUND)로, 뒤는 엔트리 None으로 나온다 — 판정이 "삽입이 안
+    됐다"와 "대상을 못 찾았다"를 섞으면 안 되기 때문이다.
+    """
+    acl, code = _network_acl(network_acl_id, region)
+    if code is not None:
+        return None, code
+    return _find_entry(acl, rule_number, egress), None
+
+
+def nacl_entry_fingerprint_matches(
+    entry: Mapping[str, Any], backup: NaclRuleIndexBackup
+) -> bool:
+    """그 슬롯의 엔트리가 백업이 가리키는 **우리 규칙**인가 — fingerprint 3항목 대조.
+
+    `rule_number`는 재사용되는 슬롯 번호라 슬롯만 맞아서는 우리 것이라 말할 수 없다
+    (ADR-0008 §5). 그래서 판정도 삭제도 이 대조를 통과한 뒤에만 한다.
+
+    Protocol은 양쪽 모두 AWS 번호 표기여야 맞는다 — 백업이 그 표기로 저장되는 이유가
+    이 비교다(schemas.runbook_parameters.NACL_PROTOCOL_NUMBERS).
+    """
+    return (
+        entry.get("RuleAction") == backup.rule_action
+        and entry.get("CidrBlock") == backup.cidr_block
+        and entry.get("Protocol") == backup.protocol
+    )
+
+
+def execute_nacl_add_deny(
+    target_arn: str,
+    *,
+    rule_number: int,
+    cidr_block: str,
+    protocol: str,
+    record_step: Optional[StepRecorder] = None,
+) -> ExecutionOutcome:
+    """`RUNBOOK_NACL_ADD_DENY` 실행 — 서브넷 NACL에 인바운드 deny 규칙 1건 삽입.
+
+    **규칙 index 백업이 commit된 뒤에만 부른다**(workflows.store_nacl_rule_index_backup).
+    규칙을 넣고 나면 그것이 우리가 넣은 것인지 말해 줄 근거가 어디에도 없다 —
+    `RUNBOOK_NACL_RESTORE`는 삭제 대상을 백업 레코드의 fingerprint로만 특정하므로
+    (ADR-0004 롤백 공통 정책 ③, ADR-0008 §5), 백업 없이 넣은 규칙은 되돌릴 수 없는
+    변경이 된다.
+
+    단계는 하나다. 삽입은 원자적이라 부분 적용이 없고, 성공의 경계도 실행 안에 있다 —
+    RIGHTSIZING처럼 뒤따르는 판정 축(2/2 Status Check)이 없다.
+
+    TCP·UDP는 PortRange가 필수 필드라 **전체 범위(0-65535)** 를 함께 보낸다. 막는
+    축이 포트가 아니라 출발지 주소이기 때문이며, LocalStack이 빠진 요청도 받아 줘
+    실 AWS에서만 드러나는 차이라 여기 적어 둔다(_NACL_ALL_PORTS).
+
+    protocol은 이름 표기(`NaclProtocol`)로 받아 **AWS 번호 표기로 바꿔 보낸다.**
+    LocalStack은 보낸 문자열을 그대로 저장하고 실 AWS는 번호로 정규화하므로, 이름을
+    그대로 보내면 저장 값이 환경마다 갈려 백업 fingerprint 대조가 한쪽에서만 맞는다
+    (schemas.runbook_parameters.NACL_PROTOCOL_NUMBERS의 실측 주석).
+    """
+    target = parse_arn(target_arn)
+    if target is None or target.resource_type != "network-acl":
+        return _rejected(f"NACL ARN이 아닙니다: {target_arn}")
+    protocol_number = NACL_PROTOCOL_NUMBERS.get(protocol)
+    if protocol_number is None:
+        return _rejected(f"알 수 없는 프로토콜 표기: {protocol}")
+
+    ec2 = aws_client("ec2", target.region)
+    log = _StepLog(target_arn, record_step)
+
+    request: dict[str, Any] = {
+        "NetworkAclId": target.resource_id,
+        "RuleNumber": rule_number,
+        "Protocol": protocol_number,
+        "RuleAction": NACL_DENY_ACTION,
+        "Egress": NACL_ADD_DENY_EGRESS,
+        "CidrBlock": cidr_block,
+    }
+    if protocol_number in _NACL_PORT_RANGE_PROTOCOLS:
+        # 백업 fingerprint는 이 값을 보지 않는다(rule_action·cidr_block·protocol 3항목,
+        # ADR-0008 §5) — 대조 축이 아니라 요청 유효성의 문제라 요청에만 싣는다
+        request["PortRange"] = dict(_NACL_ALL_PORTS)
+
+    log.begin(1, STEP_CREATE_NACL_ENTRY, _OP_CREATE_NACL_ENTRY)
+    try:
+        response = ec2.create_network_acl_entry(**request)
+    except (ClientError, BotoCoreError) as exc:
+        # 규칙 번호가 그사이 점유됐으면 NetworkAclEntryAlreadyExists(4xx)로 온다 —
+        # _effect_for가 NOT_APPLIED로 분류하므로 되돌릴 것 없는 실패로 확정된다
+        return _abort(log, exc, detail="NACL deny 규칙 삽입 실패")
+    log.succeed(
+        ExecutionEffect.APPLIED,
+        f"deny 규칙 삽입: rule {rule_number} · {cidr_block} · protocol {protocol_number}",
         response=response,
     )
     return ExecutionOutcome(steps=tuple(log.steps))

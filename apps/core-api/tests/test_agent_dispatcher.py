@@ -36,6 +36,7 @@ from db.repositories import guardrails as guardrails_repo  # noqa: E402
 from db.repositories import incidents as incidents_repo  # noqa: E402
 from schemas.agents import AgentGraphOutput, RunbookCandidateDraft  # noqa: E402
 from schemas.api.assets import AssetType  # noqa: E402
+from schemas.assets import MetricSummary as MetricSummaryContract  # noqa: E402
 from schemas.api.incidents import IncidentStatus, RiskLevel  # noqa: E402
 from schemas.candidates import CandidateStatus  # noqa: E402
 from schemas.evidence import EvidenceType  # noqa: E402
@@ -346,6 +347,65 @@ def test_graph_input_reads_the_rule_and_asset_evidence_rows(db):
     assert all(
         item.evidence_type is not EvidenceType.ASSET for item in graph_input.evidences
     )
+
+
+def test_graph_input_carries_the_cpu_numbers_when_the_run_has_metrics(db):
+    """METRIC 근거가 있으면 CPU 수치가 그래프 입력에 실린다 — 추천의 유일한 수치 근거다.
+
+    이 경로가 비면 모델이 받는 입력에 사용률이 **한 군데도** 없다. rule_evaluation은
+    판정 결과 한 줄이고(reason) 자산 문맥은 판정 표기만 담기 때문이다. 2026-09-10
+    게이트 예비 실행에서 같은 자산·같은 입력이 NO_PROPOSAL과 SUCCEEDED로 갈렸고,
+    모델이 요약 3줄에 "평균·최대 사용률은 입력에 없다"를 직접 적었다.
+    """
+    run = assets_repo.start_collection_run(
+        db, account_id=ACCOUNT, region=REGION,
+        mode="localstack", lookback_days=3, period_seconds=3600,
+    )
+    asset = assets_repo.upsert_asset(
+        db, arn=EC2_ARN, asset_type=AssetType.EC2, resource_id=INSTANCE_ID,
+        account_id=ACCOUNT, region=REGION, spec={"instance_type": "t3.xlarge"},
+        collection_run_id=run.collection_run_id,
+        collected_at=datetime.now(timezone.utc), state="running",
+    )
+    assets_repo.add_metric_summary(
+        db, asset_id=asset.asset_id, collection_run_id=run.collection_run_id,
+        summary=MetricSummaryContract(
+            cpu_datapoints=336, cpu_avg=4.9, cpu_max=7.2,
+            net_in_avg=1024.0, net_out_avg=512.0,
+        ),
+        window_start=datetime(2026, 8, 31, 9, 0, tzinfo=timezone.utc),
+        window_end=datetime(2026, 9, 2, 9, 0, tzinfo=timezone.utc),
+        collected_at=datetime.now(timezone.utc),
+    )
+    db.commit()
+    intake = FinOpsIncidentIntake.model_validate(
+        {
+            "asset_snapshot": {
+                "collection_run_id": run.collection_run_id, "asset": _ec2_asset()
+            },
+            "rule_evaluation": {
+                "asset_arn": EC2_ARN,
+                "collection_run_id": run.collection_run_id,
+                "evaluation_status": "COMPLETED",
+                "verdict": "COST_CANDIDATE",
+                "health_score": 4,
+                "skip_reason_code": None,
+                "reason": "3일 평균 CPU 4.9% — 다운사이징 후보",
+                "evaluated_at": EVALUATED_AT,
+            },
+        }
+    )
+    incident_id = incident_intake.create_incident_from_intake(db, intake).incident_id
+
+    graph_input = agent_dispatcher.build_graph_input(db, incident_id)
+
+    metric = next(
+        item for item in graph_input.evidences
+        if item.evidence_type is EvidenceType.METRIC
+    )
+    assert metric.content.summary.cpu_avg == 4.9
+    assert metric.content.summary.cpu_max == 7.2
+    assert metric.content.summary.cpu_datapoints == 336
 
 
 # ------------------------------------------------------------------------------
