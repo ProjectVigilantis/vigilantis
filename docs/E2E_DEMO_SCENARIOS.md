@@ -106,6 +106,16 @@ IN_PROGRESS → SUCCESS
 | 8 | **자동 원복 발동** | **복구 중** | `RUNBOOK_EC2_REVERT_SIZE` **자식 실행 접수**<br>`trigger_source: AUTO_ON_FAILURE` · `parent_execution_id` = 원본<br>*(상태 전이가 아니라 새 실행 레코드다)* | **없다** — 접수는 발행하지 않는다(`dispatcher.py:335-337`). 화면의 "복구 중"은 **7번 이벤트로 이미 그려져 있다** | 접수만 화면으로 설명 |
 | 9 | 원복 완료 | **AST-001로 이동해** 인스턴스 유형 복귀 확인 | 자식 `SUCCESS` → 원본 Execution `ROLLED_BACK`(함께 확정) | `EXECUTION_UPDATED`<br>`INCIDENT_UPDATED` **Incident `AWAITING_CLOSURE`** | 관제자 [종료 판단]이 남는다 |
 
+### 7·8·9번의 상태값은 어느 축인가
+
+**어느 값이 무엇인지는 위 단계표가 이미 적는다.** 여기서는 그 값이 **왜 그래야 하는지**만 코드 좌표와 함께 남긴다 — 축을 다시 뭉개는 서술이 들어오는 것을 막는 것은 표가 아니라 아래 세 문단이다.
+
+**7번 Incident가 `FAILED`가 아닌 이유**: `_incident_status_after()`는 실행의 성패가 아니라 **그 인시던트에 남은 것**으로 목적 상태를 가른다(`workflows.py:843`). `ROLLBACK_INITIATED`가 비종료 상태라(`packages/schemas/executions.py:28 EXECUTION_NON_TERMINAL_STATUSES`) *"진행 중 실행이 있다"* 가 되어 `ACTION_IN_PROGRESS`다. **되돌릴 것이 남았는데 `FAILED`로 적으면 화면이 복구 중인 조치를 '진행 불가'로 그린다.**
+
+**8번이 상태 전이가 아닌 이유**: #241은 원본을 옮기지 않고 **`parent_execution_id`로 묶인 자식 행을 새로 만든다**(`workflows.py:1146 initiate_auto_rollback()`). 원본과 자식을 한 축으로 적으면 7번과 8번이 같은 값(`ROLLBACK_INITIATED`)을 두 번 말하게 되어 **무엇이 새로 일어났는지가 사라진다.** **이 시점에 원본과 Incident는 그대로다** — 원본은 `ROLLBACK_INITIATED`, Incident는 `ACTION_IN_PROGRESS`에 머문다(단계표 8번 행은 새로 생기는 자식만 적는다).
+
+**9번이 두 실행을 함께 확정하는 이유**: `_ORIGIN_STATUS_AFTER_ROLLBACK`(`workflows.py:895`)이 자식 `SUCCESS` → 원본 `ROLLED_BACK`으로 잇는다. 원본이 `ROLLBACK_INITIATED`에 남으면 비종료라 인시던트가 영원히 진행 중이 된다.
+
 ### 이 트랙이 증명하는 것
 
 - **버튼은 하나뿐이다.** 5번의 [조치 실행] 이후 사람은 아무것도 누르지 않는다. 8–9번은 전부 시스템이 한다.
@@ -280,8 +290,8 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 
 | 테스트 | 대응 트랙 | 검증 범위 | 여는 조건 |
 | --- | --- | --- | --- |
-| `test_t1_idle_ec2_downsize_and_auto_rollback_flow` | **T1** | Golden A1 → `COST_CANDIDATE` → 가드레일 → 실행 접수 → Status Check 실패 → `ROLLED_BACK` | 대조 3번 — **실패 주입 방법**(자동 원복은 2026-09-03 해소) |
-| `test_t2_ssh_bruteforce_block_and_one_click_release_flow` | **T2** | Golden **S3** → Incident → `response_mode` 진입 → 승인 → `NACL_ADD_DENY`(`USER_APPROVAL`) → 원클릭 해제 → `NACL_RESTORE` | 대조 1번(판정기 워크플로 배선) |
+| `test_t1_idle_ec2_downsize_and_auto_rollback_flow` | **T1** | Golden A1 → `COST_CANDIDATE` → 가드레일 → 실행 접수 → Status Check 실패 → `ROLLED_BACK` | 대조 3번 — **실패 주입 방법**(자동 원복은 2026-09-03 해소) · 9번(판정→Intake 배선) |
+| `test_t2_ssh_bruteforce_block_and_one_click_release_flow` | **T2** | Golden **S3** → Incident → `response_mode` 진입 → 승인 → `NACL_ADD_DENY`(`USER_APPROVAL`) → 원클릭 해제 → `NACL_RESTORE` | 대조 1번(판정기 워크플로 배선) · 9번(판정→Intake 배선) |
 
 **두 테스트 모두 Golden Dataset을 입력으로 쓴다.** 시연에 쓰는 데이터와 테스트에 쓰는 데이터가 같아야 "시연이 되면 테스트도 된다"가 성립한다.
 
