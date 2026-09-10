@@ -84,7 +84,7 @@ docker compose up -d db localstack
 
 → `db`·`localstack` 두 서비스가 `running`.
 
-> ⚠️ **③ 이후 호스트에서 도는 명령(③④⑥⑦)은 접속 주소를 따로 준다.** `.env`의 `localstack:4566`·`db:5432`는 **compose 네트워크 안의 이름**이라 호스트에서는 풀리지 않는다 — 그대로 두면 ③이 `AWS_ENDPOINT_URL 미설정`으로 멈추고(`scripts/seed_localstack.py` `_require_localstack`), ④와 호스트 uvicorn은 DB를 못 찾는다. **셸 하나를 열어 두고 그 셸에서 나머지를 전부 잇는다.**
+> ⚠️ **② 이후 호스트에서 도는 명령(②③④⑥⑦)은 접속 주소를 따로 준다.** `.env`의 `localstack:4566`·`db:5432`는 **compose 네트워크 안의 이름**이라 호스트에서는 풀리지 않는다 — 그대로 두면 ③이 `AWS_ENDPOINT_URL 미설정`으로 멈추고(`scripts/seed_localstack.py` `_require_localstack`), ②④와 호스트 uvicorn은 DB를 못 찾는다. **셸 하나를 열어 두고 그 셸에서 나머지를 전부 잇는다.**
 >
 > ```powershell
 > $env:AWS_ENDPOINT_URL = 'http://localhost:4566'
@@ -96,12 +96,14 @@ docker compose up -d db localstack
 **② DB 스키마**
 
 ```bash
-docker compose run --rm migrate
+uv run alembic -c apps/core-api/alembic.ini upgrade head
 ```
 
 → 마지막 리비전까지 올라가고 오류 없음.
 
-`alembic.ini`는 `apps/core-api/`에 있어 저장소 루트에서 `uv run alembic upgrade head`를 부르면 `No 'script_location' key found`로 죽는다. compose의 `migrate` 서비스가 같은 명령을 **컨테이너 안에서** 돌리므로 접속 주소도 `.env` 그대로 맞는다(2026-09-10 실측).
+`alembic.ini`는 `apps/core-api/`에 있어 `-c`를 빼면 저장소 루트에서 `No 'script_location' key found`로 죽는다(`rc=127`). `-c`로 ini만 짚으면 `script_location`이 `%(here)s` 기준이라 나머지는 따라온다(2026-09-10 실측).
+
+> **compose로 돌리지 않는 이유**: `docker compose run --rm migrate`도 같은 마이그레이션을 올리지만, **첫째** 그 서비스는 **컨테이너 안 `db:5432`**를 보고 ②③④는 호스트 `localhost:5432`를 보아 **한 대본에서 DB 주소가 둘로 갈리고**, **둘째** `docker-compose.yml:52`의 `migrate`에 `build:`(`:53`)가 붙어 있어 **이미지가 없으면 이 자리에서 빌드가 돌아** T-30분 예산을 읽을 수 없게 된다. **호스트에 `uv`가 없는 머신에서만** 대안으로 쓴다.
 
 **③ LocalStack 시드**
 
