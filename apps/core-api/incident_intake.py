@@ -22,8 +22,9 @@
 #   SECOPS: ThreatEvent 저장 → Incident 생성(title·initial_risk_level·response_mode·
 #           사유 코드) → THREAT 근거 1건
 #   FINOPS: Incident 생성(위험 대응 축 전부 null) → RULE 근거 1건 → ASSET 근거 1건
+#           → METRIC 근거 0–1건(그 회차 관측이 있을 때만)
 #
-# **두 근거의 content로 저장하는 값은 intake가 들고 온 객체 그 자체입니다.**
+# **RULE·ASSET 근거의 content로 저장하는 값은 intake가 들고 온 객체 그 자체입니다.**
 #   - RULE ← intake.rule_evaluation. 그래프 입력 빌더가 최상위 rule_evaluation을 이
 #     근거 행에서 읽어야 두 값이 같은 객체에서 나온다는 불변식이 성립합니다
 #     (agent_dispatcher.py 헤더 · Issue #243). 어긋난 조합은 FinOpsGraphInput 계약이
@@ -31,6 +32,19 @@
 #   - ASSET ← intake.asset_snapshot. 자산 행은 회차마다 덮어써지므로
 #     (db/repositories/assets.py upsert_asset) 이 근거가 그 회차 자산의 유일한
 #     사본이고, 빌더의 자산 문맥이 여기서 나옵니다 (Issue #265).
+#
+# **METRIC 근거만 intake가 아니라 DB에서 읽습니다.** 계약으로 나르지 않는 이유는
+# 대조할 수가 없기 때문입니다 — MetricEvidence에는 collection_run_id가 없어
+# (schemas/evidence.py), 계약에 실으면 "같은 회차인가"를 아무도 못 봅니다. 반면
+# (asset_arn, collection_run_id)로 읽으면 같은 회차임이 조회 자체로 보장됩니다
+# (db/models.py MetricSummary의 (asset_id, collection_run_id) 유니크).
+#
+# **이 근거가 없으면 AI는 사용률을 못 봅니다.** rule_evaluation.reason은
+# "EC2 rule evaluation: verdict=COST_CANDIDATE" 한 줄이라 수치가 없고, ASSET 근거의
+# AssetItem도 판정 표기만 담습니다(asset_mapping.py to_asset_item). 그래서 METRIC이 비면
+# 그래프 입력에 CPU 평균·최대·데이터포인트 수가 **한 군데도** 들어가지 않습니다 —
+# 2026-09-10 게이트 예비 실행에서 같은 자산·같은 입력이 NO_PROPOSAL과 SUCCEEDED로
+# 갈린 원인이 이것입니다(모델이 요약 3줄에 "입력에 없다"를 직접 적었습니다).
 #
 # 중복은 계약이 막지 못해 여기서 막습니다.
 #   - FINOPS: 같은 subject_arn의 미종료 Incident가 있으면 만들지 않습니다. 수집
@@ -46,14 +60,11 @@
 #     deduplication_key 유니크 제약이 DB에서 한 번 더 막지만 FINOPS에는 그런 제약이
 #     없으므로, 다중 worker로 갈 때 이 자리를 함께 봐야 합니다.
 #
-# [남은 작업]
-# 1. 판정 계층에서 이 진입점을 부르는 자리 — services/scheduler.py의 수집 파이프라인
-#    (담당: 김세혁·김승철)과 위협 주입 경로. 위협 주입 방식은 ADR-0006이 별도 결정
-#    대상으로 남겼습니다. 이때 DB 행에서 AssetItem을 만드는 자리도 함께 정합니다 —
-#    지금 그 변환은 routers/assets.py의 private 함수 하나뿐인데, 이 계층이 Router
-#    내부를 import하면 위 3층 분리가 깨집니다.
-# 2. Incident를 만든 뒤 AI 호출로 넘기는 자리 — agent_dispatcher.py 본문.
-#    이 계층은 Incident와 근거를 남기는 데까지고, 그 뒤를 그쪽이 잇습니다.
+# [호출 경로]
+# FINOPS는 services/scheduler.py가 판정과 같은 회차의 자산 스냅샷을 조립해 부릅니다
+# (#306). AssetItem 변환은 asset_mapping.py를 목록 API와 공유합니다.
+# 생성 뒤 AI 호출은 agent_dispatcher.py가 맡습니다(#285).
+# 남은 것은 SECOPS 위협 주입 경로입니다 — #306 범위 밖이며 ADR-0006의 별도 결정 대상입니다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -62,15 +73,25 @@ import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Optional
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from schemas.api.incidents import IncidentCategory
-from schemas.evidence import EvidenceItem, EvidenceType, RuleEvidence, ThreatEvidence
+from schemas.assets import MetricName
+from schemas.assets import MetricSummary as MetricSummaryContract
+from schemas.evidence import (
+    EvidenceItem,
+    EvidenceType,
+    MetricEvidence,
+    RuleEvidence,
+    ThreatEvidence,
+)
 from schemas.intake import FinOpsIncidentIntake, IncidentIntake, SecOpsIncidentIntake
 
 from db import mappers, models
+from db.repositories import assets as assets_repo
 from db.repositories import incidents as incidents_repo
 
 logger = logging.getLogger("vigilantis.incident_intake")
@@ -117,6 +138,35 @@ def _add_evidence(
     )
 
 
+def _metric_evidence(
+    db: Session, *, asset_arn: str, collection_run_id: str
+) -> Optional[MetricEvidence]:
+    """그 회차 관측 요약 1건 → METRIC 근거. 행이 없으면 None.
+
+    metric_name을 CPU_UTILIZATION으로 고정하는 것은 MetricEvidence가 이름 1개를
+    받는데 요약 자체는 CPU·Network를 함께 담기 때문이다(schemas/evidence.py ·
+    schemas/assets.py MetricSummary). 판정 축이 CPU라(services/rule_engine.py
+    IDLE_CPU_AVG) 대표 이름을 그쪽으로 두고, 값은 요약째로 보존한다.
+    """
+    row = assets_repo.get_metric_summary_for_run(
+        db, asset_arn=asset_arn, collection_run_id=collection_run_id
+    )
+    if row is None:
+        return None
+    return MetricEvidence(
+        metric_name=MetricName.CPU_UTILIZATION,
+        window_start=row.window_start,
+        window_end=row.window_end,
+        summary=MetricSummaryContract(
+            cpu_datapoints=row.cpu_datapoints,
+            cpu_avg=row.cpu_avg,
+            cpu_max=row.cpu_max,
+            net_in_avg=row.net_in_avg,
+            net_out_avg=row.net_out_avg,
+        ),
+    )
+
+
 def _create_finops(db: Session, intake: FinOpsIncidentIntake) -> IntakeOutcome:
     open_incident = incidents_repo.find_open_by_subject_arn(
         db, subject_arn=intake.subject_arn, category=IncidentCategory.FINOPS
@@ -145,6 +195,32 @@ def _create_finops(db: Session, intake: FinOpsIncidentIntake) -> IntakeOutcome:
         content=intake.asset_snapshot,
         occurred_at=intake.asset_snapshot.asset.collected_at,
     )
+    metric = _metric_evidence(
+        db,
+        asset_arn=intake.asset_snapshot.asset.arn,
+        collection_run_id=intake.asset_snapshot.collection_run_id,
+    )
+    if metric is not None:
+        _add_evidence(
+            db,
+            incident_id=incident.incident_id,
+            evidence_type=EvidenceType.METRIC,
+            source_type="metric_summary",
+            source_id=intake.asset_snapshot.collection_run_id,
+            content=metric,
+            occurred_at=metric.window_end,
+        )
+    else:
+        # 없어도 Incident는 만든다 — 관측이 없는 판정(UNUSED SG·미부착 EBS)이 정상이기
+        # 때문이다. 다만 CPU로 판정된 건에서 비면 AI가 사용률을 못 보므로 남긴다.
+        logger.warning(
+            "intake_metric_summary_missing",
+            extra={
+                "subject_arn": intake.subject_arn,
+                "collection_run_id": intake.asset_snapshot.collection_run_id,
+                "verdict": intake.rule_evaluation.verdict.value,
+            },
+        )
     db.commit()
     return IntakeOutcome(
         incident_id=incident.incident_id, created=True, occurred_at=incident.updated_at

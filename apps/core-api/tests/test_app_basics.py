@@ -93,6 +93,7 @@ def test_lifespan_starts_and_stops_all_schedulers(monkeypatch):
 
     started: list[str] = []
     stopped: list[str] = []
+    publishers = []
 
     class FakeScheduler:
         def __init__(self, name: str):
@@ -101,15 +102,18 @@ def test_lifespan_starts_and_stops_all_schedulers(monkeypatch):
         def shutdown(self, wait=False):
             stopped.append(self.name)
 
-    def fake_scan():
+    def fake_scan(_publish):
+        publishers.append(_publish)
         started.append("scan")
         return FakeScheduler("scan")
 
     def fake_dispatch(_publish):
+        publishers.append(_publish)
         started.append("dispatch")
         return FakeScheduler("dispatch")
 
     def fake_agent(_publish):
+        publishers.append(_publish)
         started.append("agent")
         return FakeScheduler("agent")
 
@@ -118,6 +122,8 @@ def test_lifespan_starts_and_stops_all_schedulers(monkeypatch):
     monkeypatch.setattr(main_module.agent_dispatcher, "start_agent_dispatcher", fake_agent)
 
     with TestClient(main_module.create_app()) as test_client:
+        assert publishers[0] == publishers[1] == publishers[2]
+        assert callable(publishers[0])
         assert set(started) == {"scan", "dispatch", "agent"}  # 배선이 셋 다 기동
         assert test_client.get("/health").status_code == 200
     assert set(stopped) == {"scan", "dispatch", "agent"}  # 종료 시 셋 다 정리
@@ -145,7 +151,7 @@ def test_lifespan_shuts_down_already_started_when_a_scheduler_raises(monkeypatch
         def shutdown(self, wait=False):
             stopped.append(self.name)
 
-    def fake_scan():
+    def fake_scan(_publish):
         started.append("scan")
         return FakeScheduler("scan")
 
