@@ -271,7 +271,8 @@ def test_finops_incident_carries_no_risk_fields():
 # incident_intake.create_incident_from_intake() 의 본문은 dev 에 있으나
 # (#265 / PR #286) 프로덕션 호출부가 없어 판정 결과가 Incident 가 되지 않는다
 # (services/scheduler.py:run_pipeline 은 판정까지만 한다). 그 위에 트랙별 선행이
-# 하나씩 더 있다 — T1 은 Status Check 실패 주입, T2 는 NACL 실행 함수다.
+# 하나씩 더 있다 — T1 은 Status Check 실패 주입, T2 는 NACL_RESTORE 실행 함수다
+# (NACL_ADD_DENY 는 #297 로 구현됐다).
 #
 # 열리면 이 파일 위쪽의 전제 테스트가 이미 입력·런북 짝을 보증하고 있으므로,
 # 흐름 테스트는 **상태 전이만** 보면 된다. 경계 실사는 docs/E2E_GATE_0911.md.
@@ -306,8 +307,9 @@ def test_t1_idle_ec2_downsize_and_auto_rollback_flow():
 
 
 @pytest.mark.skip(
-    reason="NACL 2종 실행 함수 없음(services/aws/executor.py) + 판정→Intake 배선 없음 "
-    "— 설계서 §대조 1번(배선)·9번. SSOT 5주차 판정 기준 ⓐ · 이슈 #301 · #246"
+    reason="NACL_RESTORE 실행 함수 없음(services/aws/executor.py) + 판정→Intake 배선 없음 "
+    "(NACL_ADD_DENY 는 #297 로 구현됨) — 설계서 §대조 1번(배선)·9번. "
+    "SSOT 5주차 판정 기준 ⓐ · 이슈 #298 · #301 · #246"
 )
 def test_t2_ssh_bruteforce_block_and_one_click_release_flow():
     """T2 전 구간 — 설계서 §T2 단계표 1~8번.
