@@ -108,6 +108,8 @@ def run_pipeline(publish: Callable[[WsEvent], None] | None = None) -> dict:
             judged = run_rule_engine(db)  # RuleEvaluation 적재
             db.commit()
             # 판정은 독립 결과다. 뒤의 Intake 조립이 실패해도 판정 기록은 남긴다.
+            # 전부 조립한 뒤 저장을 시작하므로 조립 한 건이 실패하면 이 tick의
+            # 신규 Incident는 0건이다. 아래 건별 실패 격리는 저장 단계에 적용한다.
             intakes = _build_finops_intakes(db, judged["evaluations"])
         except Exception:
             db.rollback()
@@ -115,7 +117,7 @@ def run_pipeline(publish: Callable[[WsEvent], None] | None = None) -> dict:
         finally:
             db.close()
 
-        incidents = {"created": 0, "existing": 0}
+        incidents = {"created": 0, "existing": 0, "failed": 0}
         for intake in intakes:
             # 판정 저장과 Incident 저장은 별도 트랜잭션이다. Intake의 commit이
             # 다른 자산의 작업을 확정하지 않도록 건별 세션을 만들고 닫는다.
@@ -124,12 +126,17 @@ def run_pipeline(publish: Callable[[WsEvent], None] | None = None) -> dict:
                 outcome = create_incident_from_intake(db, intake)
             except Exception:
                 db.rollback()
-                # 저장 실패를 성공 요약으로 숨기지 않도록 건별 계속 처리 대신 tick을
-                # 중단한다. 앞서 commit한 건은 유지하고 다음 스캔에서 멱등 재시도한다.
-                raise
+                # 같은 ARN이 매번 실패해도 뒤의 자산은 처리한다. 실패는 로그와
+                # 집계로 남기고, 저장되지 않은 건은 다음 스캔에서 다시 시도한다.
+                incidents["failed"] += 1
+                logger.exception(
+                    "scan_intake_failed", extra={"subject_arn": intake.subject_arn},
+                )
+                continue
             finally:
                 db.close()
             incidents["created" if outcome.created else "existing"] += 1
+            # 이미 commit된 결과다. 발행 오류를 저장 실패로 집계하거나 되감지 않는다.
             if outcome.created and publish is not None:
                 publish(incident_event(
                     WsEventType.INCIDENT_CREATED,
