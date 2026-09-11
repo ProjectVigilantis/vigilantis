@@ -227,7 +227,9 @@ def _rule_evidence_id(db, incident_id: str) -> str:
 # ------------------------------------------------------------------------------
 
 
-def _passing_precheck(_command) -> PrecheckOutcome:
+# 대역도 실제 _candidate_precheck와 같은 호출 모양을 받는다 — 가드레일이 NACL_RESTORE
+# 후보용 backup_loader를 함께 넘기기 때문이다(#298)
+def _passing_precheck(_command, backup_loader=None) -> PrecheckOutcome:
     return PrecheckOutcome(
         passed=True,
         verification_summary=build_verification_summary(
@@ -238,7 +240,7 @@ def _passing_precheck(_command) -> PrecheckOutcome:
     )
 
 
-def _failing_precheck(_command) -> PrecheckOutcome:
+def _failing_precheck(_command, backup_loader=None) -> PrecheckOutcome:
     return PrecheckOutcome(
         passed=False,
         reason_code=PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND,
@@ -560,7 +562,7 @@ def test_guardrails_run_outside_a_transaction(db, monkeypatch):
     """④ AWS Dry-Run이 트랜잭션에 걸치면 AWS 응답·재시도 동안 커넥션이 묶인다."""
     seen = []
 
-    def _spy(command):
+    def _spy(command, backup_loader=None):
         seen.append(db.in_transaction())
         return _passing_precheck(command)
 

@@ -17,13 +17,14 @@
 # 실행 범위: RUNBOOK_EC2_RIGHTSIZING = execute_rightsizing(). (Issue #211, §실행)
 #            RUNBOOK_EC2_REVERT_SIZE  = execute_revert_size(). (Issue #241, §원복)
 #            RUNBOOK_NACL_ADD_DENY    = execute_nacl_add_deny(). (Issue #297, §차단)
+#            RUNBOOK_NACL_RESTORE     = execute_nacl_restore().  (Issue #298, §해제)
 #   - precheck과 같은 규약으로 예외를 던지지 않는다. 단계별 결과는 ExecutionStepResult로
 #     돌려주고, 저장·커밋 순서는 workflows.py가 소유한다.
 #   - 원복은 되돌릴 값을 인자로만 받는다 — 백업 레코드 조회는 호출부(workflows) 몫이다.
 #     원천이 하나라는 정책(ADR-0004 정책 ③)은 값을 뽑는 자리가 하나일 때만 성립한다.
 #
 # [남은 작업]
-# 1. 나머지 7종 실행 함수 — 백업이 필요한 런북은 백업 commit 이후에만 진입한다
+# 1. 나머지 6종 실행 함수 — 백업이 필요한 런북은 백업 commit 이후에만 진입한다
 # 2. 롤백 나머지 2종(RUNBOOK_EC2_UNISOLATE·RUNBOOK_SG_RECREATE) 실행도 executor 경유 —
 #    트리거 판단·감시는 rollback.py 담당
 #
@@ -675,7 +676,30 @@ def _precheck_nacl_add_deny(ctx: _Ctx) -> PrecheckOutcome:
     )
 
 
+def nacl_rule_backup(payload: Mapping[str, Any]) -> Optional[NaclRuleIndexBackup]:
+    """백업 payload를 규칙 fingerprint 계약으로 읽는다. 계약을 벗어나면 None.
+
+    precheck·실행·종료 판정이 같은 모델로 읽는다 — `dict.get` 문자열로 읽으면 만든 쪽과
+    읽는 쪽이 다른 시점에 사는 계약이 원복 시점에야 어긋난다(ADR-0008 §5).
+    """
+    try:
+        return NaclRuleIndexBackup.model_validate(dict(payload or {}))
+    except ValidationError:
+        return None
+
+
 def _precheck_nacl_restore(ctx: _Ctx) -> PrecheckOutcome:
+    # fingerprint 항목이 없으면 슬롯에 있는 규칙이 우리 것인지 가릴 수 없다 — AWS를
+    # 부르기 전에 판정 불가로 끝낸다(ADR-0008 §5 "백업 payload에 항목이 없다" 칸)
+    backup = nacl_rule_backup(ctx.backup.payload)
+    if backup is None:
+        return _fail(
+            ctx,
+            R.PRECHECK_PARAM_INVALID,
+            verified=["없음(백업 레코드에 규칙 fingerprint 없음)"],
+            unverified=[_DESCRIBE_MISSES],
+        )
+
     acl, code = _network_acl(ctx.params["network_acl_id"], ctx.target.region)
     if code is not None:
         return _fail(
@@ -699,17 +723,30 @@ def _precheck_nacl_restore(ctx: _Ctx) -> PrecheckOutcome:
             unverified=[_DESCRIBE_MISSES],
         )
     # 삭제 대상이 우리가 넣은 그 규칙인지 — 백업 레코드의 rule index와 대조한다
-    payload = ctx.backup.payload
-    if payload.get("rule_number") != rule_number or bool(payload.get("egress")) != egress:
+    if (backup.rule_number, backup.egress) != (rule_number, egress):
         return _fail(
             ctx,
             R.PRECHECK_PARAM_INVALID,
             verified=["NACL 존재", "대상 규칙이 deny 상태"],
             unverified=[_DESCRIBE_MISSES],
         )
+    # rule_number는 재사용되는 슬롯 번호다 — 같은 슬롯의 제3자 deny 규칙을 우리 것으로
+    # 오인해 지우지 않도록 fingerprint 3항목을 통과 조건으로 본다(ADR-0008 §5)
+    if not nacl_entry_fingerprint_matches(entry, backup):
+        return _fail(
+            ctx,
+            R.PRECHECK_INVALID_STATE,
+            verified=["NACL 존재", "대상 규칙이 deny 상태", "백업 레코드 rule index 일치"],
+            unverified=[_DESCRIBE_MISSES],
+        )
     return _ok(
         ctx,
-        verified=["NACL 존재", "대상 규칙이 deny 상태", "백업 레코드 rule index 일치"],
+        verified=[
+            "NACL 존재",
+            "대상 규칙이 deny 상태",
+            "백업 레코드 rule index 일치",
+            "규칙 fingerprint 일치",
+        ],
         unverified=[_DESCRIBE_MISSES, "삭제 자체의 AWS 검증(DryRun 미지원 작업)"],
     )
 
@@ -1063,12 +1100,19 @@ STEP_START_INSTANCE = "START_INSTANCE"
 STEP_COMPARE_INSTANCE_TYPE = "COMPARE_INSTANCE_TYPE"
 
 STEP_CREATE_NACL_ENTRY = "CREATE_NACL_ENTRY"
+STEP_DELETE_NACL_ENTRY = "DELETE_NACL_ENTRY"
+# 해제 전 슬롯 대조(ADR-0008 §5). STEP_COMPARE_INSTANCE_TYPE과 같은 규칙이다 — 삭제로
+# **진행하는** 경우에는 기록하지 않고, 대조 자체가 결론인 두 경우(이미 해제됨·제3자
+# 규칙)만 남긴다.
+STEP_COMPARE_NACL_ENTRY = "COMPARE_NACL_ENTRY"
 
 _OP_STOP = "ec2.stop_instances"
 _OP_MODIFY = "ec2.modify_instance_attribute"
 _OP_START = "ec2.start_instances"
 _OP_DESCRIBE = "ec2.describe_instances"
 _OP_CREATE_NACL_ENTRY = "ec2.create_network_acl_entry"
+_OP_DELETE_NACL_ENTRY = "ec2.delete_network_acl_entry"
+_OP_DESCRIBE_NACL = "ec2.describe_network_acls"
 
 # TCP·UDP 규칙에는 PortRange가 필수다(CreateNetworkAclEntry API 계약). LocalStack은
 # 빠뜨린 요청도 받아 주지만 실 AWS는 InvalidParameterValue로 거절한다 — 로컬에서만
@@ -1387,11 +1431,16 @@ def current_instance_type(instance_id: str, region: str):
     return found, code
 
 
-def _deferred(code: PrecheckReasonCode, detail: str) -> ExecutionOutcome:
+def _deferred(
+    code: PrecheckReasonCode,
+    detail: str,
+    *,
+    event: str = "revert_size_deferred",
+    aws_operation: str = _OP_DESCRIBE,
+) -> ExecutionOutcome:
     """대조하지 못해 원복을 시작하지 않았다 — 실패가 아니라 보류다."""
     logger.warning(
-        "revert_size_deferred",
-        extra={"reason_code": code.value, "aws_operation": _OP_DESCRIBE},
+        event, extra={"reason_code": code.value, "aws_operation": aws_operation}
     )
     return ExecutionOutcome(reason_code=code, error_summary=detail, deferred=True)
 
@@ -1639,6 +1688,105 @@ def execute_nacl_add_deny(
     log.succeed(
         ExecutionEffect.APPLIED,
         f"deny 규칙 삽입: rule {rule_number} · {cidr_block} · protocol {protocol_number}",
+        response=response,
+    )
+    return ExecutionOutcome(steps=tuple(log.steps))
+
+
+# ------------------------------------------------------------------ 해제 (Issue #298)
+def execute_nacl_restore(
+    target_arn: str,
+    *,
+    backup: NaclRuleIndexBackup,
+    record_step: Optional[StepRecorder] = None,
+) -> ExecutionOutcome:
+    """`RUNBOOK_NACL_RESTORE` 실행 — 슬롯 대조 → 우리가 넣은 deny 규칙 1건 삭제.
+
+    **삭제할 규칙은 백업 레코드로만 특정한다.** 이 함수는 DB를 읽지 않고, 호출부가 백업
+    payload에서 뽑은 fingerprint를 받는다 — execute_revert_size가 되돌릴 값을 인자로만
+    받는 것과 같은 이유다(ADR-0004 정책 ③).
+
+    가드레일 ④가 같은 대조를 이미 했다(_precheck_nacl_restore). 그래도 삭제 직전에 다시
+    본다 — ④는 후보 생성 시점에 1회 돌고, 관제자가 [해제]를 누르기까지 시간이 있다. 그
+    사이 슬롯이 바뀌었는지는 지금 조회해야 알 수 있고, **삭제는 되돌릴 수 없다.**
+
+    슬롯 대조 3분기 — 위에서 아래로, 처음 일치하는 곳에서 멈춘다.
+      ① 슬롯이 비어 있다: 이미 해제됐다 → **AWS 변경 호출을 하지 않는다.** 되돌릴 것이
+         없음을 NOT_APPLIED 단계로 남기고 성공이다 — 관제자가 원한 상태가 이미 서 있다.
+      ② fingerprint가 일치한다: 우리가 넣은 그 규칙이다 → 삭제한다.
+      ③ 슬롯에 다른 규칙이 있다: 제3자 규칙이다 → **삭제하지 않고 중단, CRITICAL.**
+
+    NACL 자체가 없으면 지울 대상이 없다 — 다시 물어도 답이 같으므로 실패로 확정한다.
+    조회를 못 하면 판정 근거가 없으므로 자산을 만지지 않고 **보류**한다.
+    """
+    target = parse_arn(target_arn)
+    if target is None or target.resource_type != "network-acl":
+        return _rejected(f"NACL ARN이 아닙니다: {target_arn}")
+
+    entry, code = current_nacl_entry(
+        target.resource_id,
+        target.region,
+        rule_number=backup.rule_number,
+        egress=backup.egress,
+    )
+    if code is not None:
+        if code is R.PRECHECK_TARGET_NOT_FOUND:
+            return ExecutionOutcome(
+                reason_code=code,
+                error_summary=f"해제 대상 NACL을 찾을 수 없습니다: {target.resource_id}",
+            )
+        return _deferred(
+            code,
+            f"슬롯 대조 실패로 해제 보류: {code.value}",
+            event="nacl_restore_deferred",
+            aws_operation=_OP_DESCRIBE_NACL,
+        )
+
+    log = _StepLog(target_arn, record_step)
+    slot = f"rule {backup.rule_number}({'아웃바운드' if backup.egress else '인바운드'})"
+
+    if entry is None:
+        log.begin(1, STEP_COMPARE_NACL_ENTRY, _OP_DESCRIBE_NACL)
+        log.succeed(
+            ExecutionEffect.NOT_APPLIED,
+            f"{slot}이 이미 비어 있습니다 — 해제할 규칙이 없어 삭제하지 않음",
+        )
+        return ExecutionOutcome(steps=tuple(log.steps))
+
+    if not nacl_entry_fingerprint_matches(entry, backup):
+        log.begin(1, STEP_COMPARE_NACL_ENTRY, _OP_DESCRIBE_NACL)
+        detail = f"{slot}에 우리가 넣지 않은 규칙이 있습니다 — 제3자 규칙이라 삭제하지 않음"
+        log.succeed(ExecutionEffect.NOT_APPLIED, f"{detail}. 해제를 중단합니다")
+        logger.critical(
+            "nacl_restore_slot_taken_by_other_rule",
+            extra={
+                "network_acl_id": target.resource_id,
+                "rule_number": backup.rule_number,
+                "egress": backup.egress,
+            },
+        )
+        return ExecutionOutcome(
+            steps=tuple(log.steps),
+            reason_code=R.PRECHECK_INVALID_STATE,
+            error_summary=detail[:_SUMMARY_LIMIT],
+        )
+
+    # ② 우리 규칙이다 — 대조는 기록하지 않는다(STEP_COMPARE_NACL_ENTRY 주석)
+    ec2 = aws_client("ec2", target.region)
+    log.begin(1, STEP_DELETE_NACL_ENTRY, _OP_DELETE_NACL_ENTRY)
+    try:
+        response = ec2.delete_network_acl_entry(
+            NetworkAclId=target.resource_id,
+            RuleNumber=backup.rule_number,
+            Egress=backup.egress,
+        )
+    except (ClientError, BotoCoreError) as exc:
+        # 대조와 삭제 사이에 규칙이 사라졌으면 InvalidNetworkAclEntry.NotFound(4xx)로
+        # 온다 — _effect_for가 NOT_APPLIED로 분류해 되돌릴 것 없는 실패로 확정된다
+        return _abort(log, exc, detail="NACL deny 규칙 삭제 실패")
+    log.succeed(
+        ExecutionEffect.APPLIED,
+        f"deny 규칙 삭제: {slot} · {backup.cidr_block} · protocol {backup.protocol}",
         response=response,
     )
     return ExecutionOutcome(steps=tuple(log.steps))
