@@ -64,7 +64,7 @@
 # FINOPS는 services/scheduler.py가 판정과 같은 회차의 자산 스냅샷을 조립해 부릅니다
 # (#306). AssetItem 변환은 asset_mapping.py를 목록 API와 공유합니다.
 # 생성 뒤 AI 호출은 agent_dispatcher.py가 맡습니다(#285).
-# 남은 것은 SECOPS 위협 주입 경로입니다 — #306 범위 밖이며 ADR-0006의 별도 결정 대상입니다.
+# SECOPS는 threat_ingress.py가 모의 위협을 정형화·판정해 부릅니다(#322).
 # ==============================================================================
 
 from __future__ import annotations
