@@ -34,7 +34,7 @@
 | 트랙 | 실경로 | 수동 우회 | 대체 컷 |
 | --- | --- | --- | --- |
 | **T1 · FinOps** | 1 · 3 · 4 · 5 · **6**(대상 ARN 실물 정합 전제 — §1-2) | **2** (Incident 생성 — 배선은 섰으나 대본이 스캔을 끈다) | **7 · 8 · 9** (Status Check 실패 → 자동 원복) |
-| **T2 · SecOps** | 1 · 2 · 3 (판정까지, 터미널) | **4 · 5 · 6** (수집 1회 + Incident 생성 + AI 출력 주입 — 2026-09-11 실측으로 **가드레일 4단계까지 실경로** 확인) | **7 · 8** (원클릭 해제) |
+| **T2 · SecOps** | 1 · 2 · 3 (판정까지, 터미널) | **4 · 5 · 6** — **실경로(입력 수동)**. 수집 1회 + Incident 생성 + AI 출력 주입이 전제이고, **가드레일 4단계부터 실물 규칙까지 실경로**다(2026-09-11 실측 · §4) | **7 · 8** (원클릭 해제) |
 
 **차단 요인은 넷이고 성격이 다르다.** 2026-09-10 하루에 **②는 해소, ③은 절반 해소, ④는 성격이 바뀌었다.**
 
@@ -43,7 +43,7 @@
 | ① | **Status Check 실패 주입 방법이 없다** | ❌ **대체 컷 확정** — 9/11까지 붙이지 않는다(2026-09-07 PM 확정 · §5-1) | `test_t1_idle_ec2_downsize_and_auto_rollback_flow` skip 사유 · SSOT 5주차 리스크 2번 |
 | ② | ~~판정 → Intake 배선이 없다~~ → **FinOps는 섰다** (2026-09-10 해소) | ✅ **코드는 해소.** 다만 호출부가 **스캔 안**이고 대본 ⑦이 스캔을 끄므로, **당일에는 여전히 Incident를 손으로 만든다** | `services/scheduler.py:126`이 `create_incident_from_intake`를 부른다(#306 / PR #320). 조립기는 `_build_finops_intakes` — **FinOps 전용**이라 T2에는 안 온다(§3-2) |
 | ③ | **NACL 해제 실행 함수가 없다** — ⚠️ **차단은 섰다**(2026-09-10 갱신) | 🔶 **절반 해소** — 차단(`ADD_DENY`)은 **dev 머지 완료**이고 **2026-09-11에 4·5·6을 실제로 관통시켰다**(아래 ⚠️). **우회 불가는 7·8(해제)뿐**이다 | `executor.py:1581 execute_nacl_add_deny()` + `workflows.py:788`·`:1003` + `dispatcher.py:97·106` 짝 등록(#297 / PR #313). 해제는 **#298 미착수** + `workflows.py:1379 latest_for_target()`이 `NotImplementedError`(`:1388`) — §5-3 |
-| ④ | ~~`OPENAI_API_KEY` 가 없다~~ → **게이트 운영 머신을 어디로 하는가** (2026-09-10 재정의 · **#316**) | ✅ **해소 — 운영 머신을 PM 로컬로 확정**(2026-09-10 PM). 그 머신 `.env`에 키가 있고, **T1-3~6을 실제로 관통시킨 실측이 있다** | 팀 공용 키가 없어 각자 발급이며, 이 문서 작성자 머신에는 키가 없다. **키가 없는 머신에서 돌면 화면에 오류가 안 뜬다** — `agent_dispatcher.py:436-442`가 예외를 삼켜 Incident가 `ANALYZING`에 남는다(§2 ⓪) |
+| ④ | ~~`OPENAI_API_KEY` 가 없다~~ → **게이트 운영 머신을 어디로 하는가** (2026-09-10 재정의 · **#316**) | ✅ **해소 — 운영 머신을 PM 로컬로 확정**(2026-09-10 PM). 그 머신 `.env`에 키가 있고, **T1-3–6을 실제로 관통시킨 실측이 있다** | 팀 공용 키가 없어 각자 발급이며, 이 문서 작성자 머신에는 키가 없다. **키가 없는 머신에서 돌면 화면에 오류가 안 뜬다** — `agent_dispatcher.py:436-442`가 예외를 삼켜 Incident가 `ANALYZING`에 남는다(§2 ⓪) |
 
 > ✅ **T2-4·5·6은 실경로로 선다 — 2026-09-11에 끝까지 관통시켰다.** 전제는 **셋이고 전부 대본 안에 있다**: ① 수집 1회 ② Incident 수동 생성 ③ AI 출력 주입. 상세는 §4 · 재현 절차는 §6-1.
 > **열쇠는 「수집 1회」였다.** SECOPS Incident에는 후보 행이 자동으로 생기지 않고(`agent_dispatcher.py:426-429`가 `IncidentCategory.FINOPS`만 골라 낸다), 후보 없이 `POST /actions/execute`를 부르면 `workflows.py:161 _executable_candidate()`가 **`409 PROPOSAL_NOT_EXECUTABLE`**(raise `:179`) 로 거절한다. 그런데 **`workflows.record_agent_analysis()`를 직접 부르면** 후보 생성과 **가드레일 4단계가 함께 돈다**(`_guard_candidate` `:2040`) — 그 가드레일의 ③ ARN Match가 **DB 자산만 통과시키므로** 시드 NACL을 자산으로 만드는 **수집 1회가 선행이다**(§1-2 B안).
@@ -153,7 +153,7 @@ export DISPATCH_INTERVAL_SECONDS=2
 > ```
 > → 키가 없으면 Fake 로 떨어지지 않고 **거절한다.** 이 명령이 통과해야 T1-3 이 열린 것이다.
 >
-> **2026-09-10 PM 확정: 게이트 운영 머신은 PM 로컬이다.** 그 머신 `.env` 에 키가 있고 T1-3~6 관통 실측이 있다(#316). **이 문서 작성자 머신에는 키가 없다** — 팀 공용 키가 없어 각자 발급이라, `cp .env.example .env`(README `:81`)만으로는 채워지지 않는다.
+> **2026-09-10 PM 확정: 게이트 운영 머신은 PM 로컬이다.** 그 머신 `.env` 에 키가 있고 T1-3–6 관통 실측이 있다(#316). **이 문서 작성자 머신에는 키가 없다** — 팀 공용 키가 없어 각자 발급이라, `cp .env.example .env`(README `:81`)만으로는 채워지지 않는다.
 
 > AWS 자격증명은 넣지 않는다 — `services/aws/client.py:72 _ensure_dummy_credentials()` 가 **엔드포인트가 있을 때만** 더미 키를 주입한다(실 AWS 에서는 절대 넣지 않는다).
 
@@ -248,7 +248,8 @@ uv run python scripts/inject_mock_threat.py evt_ssh_bruteforce_001
 → 두 줄이 나온다 — `위험도=HIGH 대응=PRE_MITIGATION_0_5S 사유=RISK_SSH_BRUTEFORCE` 와 `1건 처리 — 정답 대조 통과(대조 대상만).`
 사유 코드는 접두 `RISK_` 가 붙는다 — 슬라이드에 옮길 때 그대로 쓴다.
 ⚠️ **순서로 판정하지 않는다**(2026-09-11 실측 정정). 종전 판은 *"`1건 처리` 뒤에 `위험도=`"* 라고 적었는데 **터미널에서는 반대 순서**다 — 요약 줄이 `sys.stderr`라(`inject_mock_threat.py:146`) 버퍼링이 갈린다. **PowerShell `>` 로 받으면 그 줄이 파일에 아예 없다**(`*>` 또는 `2>&1` 을 쓴다). **두 줄이 다 있는지**로 본다 — §6-1 R8.
-⚠️ **이 스크립트는 DB에 쓰지 않는다**(`scripts/inject_mock_threat.py` 헤더). 판정을 눈으로 보여 주는 데까지가 이 명령의 몫이다.
+⚠️ **이 명령(기본 모드)은 DB에 쓰지 않는다.** 판정을 눈으로 보여 주는 데까지가 몫이다.
+> **2026-09-11 정정** — 종전 판은 이 사실의 근거로 *"스크립트 헤더"* 를 들었는데, **PR #325 머지로 그 헤더 문장이 없어졌다**(`be779ce`). 지금 헤더는 *"기본 모드는 판정 확인이다. `--prepare-inbox` 모드는 모의 관측 파일만 준비한다"* 이다. **대본이 쓰는 것은 기본 모드뿐이고 그 모드는 여전히 DB에 쓰지 않는다** — 근거를 헤더가 아니라 **모드**로 바꿔 적는다. `--prepare-inbox` 는 앱이 소비해 저장까지 가므로 **게이트에서 쓰지 않는다.**
 
 **⑥ 스캔 스케줄러 실기동 확인 — 판정 기준 ⓓ의 컷 (여기서 한 번 띄우고, 끈다)**
 
@@ -399,9 +400,9 @@ agent_dispatcher.py:407 dispatch_pending_analysis()   main.py 의 start_agent_di
 | 1 | 위협 주입 | ✅ **실경로(터미널)** | 주입 명령의 출력으로 정형화 결과 | 사전 준비 ⑤. #268 / PR #269(`e4f2511` dev 머지). 화면이 아니라 **터미널**인 이유는 표 아래 ⚠️ |
 | 2 | 위험도 판정 | ✅ **실경로(터미널)** | `HIGH` · `SSH_BRUTEFORCE` | `security/risk_evaluator.evaluate_threat` · 골든 정답 S3와 대조 |
 | 3 | 대응 경로 표시 | ✅ **실경로(터미널)** | `response_mode: PRE_MITIGATION_0_5S` | 〃 |
-| 4 | 가드레일 4단계 | ✅ **실경로**(수집 1회 + Incident 수동 + AI 출력 주입 전제 · 2026-09-11 실측) | 화면 표시는 없다 — 통과 신호는 `AWAITING_APPROVAL`로 **실행 버튼이 열리는 것** | `executor.py:655 _precheck_nacl_add_deny` — NACL은 AWS Dry-Run 미지원이라 describe 대체 검증(ADR-0007 §4). ⚠️ 가드레일은 후보 생성과 같은 함수에서 돈다(`_guard_candidate` `workflows.py:2040`) — 표 아래 ⚠️ |
-| 5 | **승인 → 차단** | ✅ **실경로**(4번과 같은 전제 · 2026-09-11 실측) | **[조치 실행]** → `202 Accepted` → `203.0.113.10/32` deny 규칙 삽입 | `executor.py:1581 execute_nacl_add_deny()` · `workflows.py:788 run_nacl_add_deny_execution()` · `dispatcher.py:97·106` 짝 등록 · LocalStack 실측 `apps/core-api/services/tests/test_execute_nacl_localstack.py`(#297 / PR #313 · `b674262`) |
-| 6 | 관제자 확인 | ✅ **실경로 — 5번에 종속** | Execution `SUCCESS` · `describe_network_acls`로 규칙 실재 확인 | `workflows.py:1003 judge_nacl_add_deny()` |
+| 4 | 가드레일 4단계 | ✅ **실경로(입력 수동)** — 수집 1회 + Incident 수동 + AI 출력 주입 전제 · 2026-09-11 실측 | 화면 표시는 없다 — 통과 신호는 `AWAITING_APPROVAL`로 **실행 버튼이 열리는 것** | `executor.py:655 _precheck_nacl_add_deny` — NACL은 AWS Dry-Run 미지원이라 describe 대체 검증(ADR-0007 §4). ⚠️ 가드레일은 후보 생성과 같은 함수에서 돈다(`_guard_candidate` `workflows.py:2040`) — 표 아래 ⚠️ |
+| 5 | **승인 → 차단** | ✅ **실경로(입력 수동)** — 4번과 같은 전제 · 2026-09-11 실측 | **[조치 실행]** → `202 Accepted` → `203.0.113.10/32` deny 규칙 삽입 | `executor.py:1581 execute_nacl_add_deny()` · `workflows.py:788 run_nacl_add_deny_execution()` · `dispatcher.py:97·106` 짝 등록 · LocalStack 실측 `apps/core-api/services/tests/test_execute_nacl_localstack.py`(#297 / PR #313 · `b674262`) |
+| 6 | 관제자 확인 | ✅ **실경로(입력 수동)** — 5번에 종속 | Execution `SUCCESS` · `describe_network_acls`로 규칙 실재 확인 | `workflows.py:1003 judge_nacl_add_deny()` |
 | 7–8 | **원클릭 해제** | ❌ **대체 컷 — 확정** | — | **#313이 머지돼도 안 열린다.** #313은 백업을 **쓰는** 쪽(`capture_nacl_rule_index`)만 더하고 **읽는** 쪽은 안 건드린다 — `workflows.py:1379 latest_for_target()`이 여전히 `NotImplementedError`를 던진다(`:1388`). `RESTORE` 실행 함수도, 그 카드(#298)의 PR도 없다 |
 
 > ✅ **4·5·6의 전제 셋 — 전부 대본 안에서 선다**(2026-09-11 실측 · `712200a` 기준 스택).
@@ -508,7 +509,7 @@ SSOT 5주차 리스크 3번의 실측:
 | T1-5 접수 | **`202` 즉시** | 〃 |
 | T1-6 LocalStack 실행 완료 | **15초** | 〃 — dispatcher 10초 주기 포함 |
 | Status Check 판정 | **실행 후 +34초 감시 진입 → +43초 판정** | 〃 (T1-7 은 대체 컷이라 대본 밖) |
-| **T1-3~6 합계** | **약 60~90초** | 〃 |
+| **T1-3–6 합계** | **약 60–90초** | 〃 |
 | T2-1·2·3 위협 주입·판정 | **0.7초** | `inject_mock_threat.py` |
 
 **붙박이 대기 40초가 480초 예산의 8%다.** 그리고 그 40초는 화면이 아무것도 안 하는 시간이라 체감이 더 크다. **두 주기는 노브라 조일 수 있고, 조여지는 것을 확인했다** — `AGENT_DISPATCH_INTERVAL_SECONDS=3` · `DISPATCH_INTERVAL_SECONDS=2` 로 기동하면 로그가 `interval=3s` · `interval=2s` 로 뜬다. **40초 → 5초.** §2 ⓪ 에 넣어 뒀다.
@@ -537,9 +538,9 @@ SSOT 5주차 리스크 3번의 실측:
 | R6 | T1-5·6 [조치 실행] → `202` → 인스턴스 유형이 실제로 바뀐다 | **더 작은 유형으로 실제로 바뀐다**(도착 타입은 당일 결과 칸에 적는다) | | ☐합격 ☐불합격 ☐미실시 | **먼저 사전 준비 ④가 `--bind-a1-to-seed`로 돌았는지 확인**한다. 안 돌았으면 가드레일 4단계와 승인은 그대로 통과하고 **실행에서만** 깨진다(§1-2) |
 | R7 | T1-7·8·9 대체 컷이 **미구현이 아니라 미시연으로** 전달된다 | 설명 성립 | | ☐합격 ☐불합격 ☐미실시 | §3-3의 한 문장 |
 | R8 | T2-1·2·3 위협 판정이 골든 정답과 일치한다 | S3 `HIGH` 일치 | | ☐합격 ☐불합격 ☐미실시 | 터미널 출력 |
-| R9 | **T2-4·5·6이 실경로로 돈다** | `203.0.113.10/32` deny 규칙이 `describe_network_acls`에 **실재** | | ☐합격 ☐불합격 ☐미실시 | ✅ **전제 셋이 전부 대본 안에 있다**(수집 1회 + Incident 수동 + AI 출력 주입 · §4). **2026-09-11에 관통 실측했다** — 재현 절차는 §6-1. ⚠️ **`add_candidate` 로 후보를 직접 넣으면 4번이 사라진다** — `guardrail_evaluations` 행이 생겼는지 **함께 확인해 적는다.** 그래도 안 서면 대체 컷으로 전환했다고 적고 R9-2로 옮긴다 |
+| R9 | **T2-4·5·6이 실경로로 돈다** | `203.0.113.10/32` deny 규칙이 `describe_network_acls`에 **실재** | | ☐합격 ☐불합격 ☐미실시 | ✅ **전제 셋이 전부 대본 안에 있다**(수집 1회 + Incident 수동 + AI 출력 주입 · §4). **결과 칸에는 「실경로(입력 수동)」 하나로 적는다** — §0 표는 「수동 우회」 열에, §4 단계표는 「✅ 실경로」로 적어 두 말이 같은 것을 가리키는데, 심사자 앞에서 둘을 섞어 말하면 흔들린다. **2026-09-11에 관통 실측했다** — 재현 절차는 §6-1. ⚠️ **`add_candidate` 로 후보를 직접 넣으면 4번이 사라진다** — `guardrail_evaluations` 행이 생겼는지 **함께 확인해 적는다.** 그래도 안 서면 대체 컷으로 전환했다고 적고 R9-2로 옮긴다 |
 | R9-2 | T2-7·8 대체 컷이 **미구현이 아니라 미시연으로** 전달된다 | 설명 성립 | | ☐합격 ☐불합격 ☐미실시 | `RESTORE`(#298) 미착수 · `latest_for_target` `NotImplementedError`(§5-3) |
-| R10 | **전체 소요 시간**이 발표 지속 시간 안에 든다 | **T1+T2 ≤ 8분** | | ☐합격 ☐불합격 ☐미실시 | 2026-09-07 PM 잠정 확정 — 기획 발표 규격(10분 발표 + 5분 QA)에서 역산. **§5-4 실측(2026-09-10 완료)**: T1-3~6 합계 **60~90초**로 시간 여유는 크다. ⚠️ **T2 후반이 슬라이드에서 실행으로 바뀌면 그만큼 늘고, 그 구간은 아직 미측정이다.** **실제 위협은 속도가 아니라 T1-3 재현율**이다(R4 비고) |
+| R10 | **전체 소요 시간**이 발표 지속 시간 안에 든다 | **T1+T2 ≤ 8분** | | ☐합격 ☐불합격 ☐미실시 | 2026-09-07 PM 잠정 확정 — 기획 발표 규격(10분 발표 + 5분 QA)에서 역산. **§5-4 실측(2026-09-10 완료)**: T1-3–6 합계 **60–90초**로 시간 여유는 크다. ⚠️ **T2 후반이 슬라이드에서 실행으로 바뀌면 그만큼 늘고, 그 구간은 아직 미측정이다.** **실제 위협은 속도가 아니라 T1-3 재현율**이다(R4 비고) |
 | R11 | 실경로/대체 컷 경계가 **9/11 게이트용으로 확정**된다 | 확정 | | ☐합격 ☐불합격 ☐미실시 | 판정 기준 ⓕ의 본문. **T1 대상 ARN 정합**(PR #321 · §1-2)과 **T2 후반 경계**(2026-09-11 관통 실측 · §4) 둘 다 확정됐다. 남은 것은 **수집 전환 컷의 위치**이고(§대조 10번), **당일 어디에 넣었는지와 그 결과를 적는 것**이 R11의 실질이다 |
 
 > ⚠️ **게이트 당일 LocalStack을 재기동하지 않는다**(2026-09-10 PM 실측).
@@ -675,7 +676,7 @@ uv run python -c "import sys; sys.path[:0]=['apps/core-api','packages']; from se
 2. `incidents_repo.claim_agent_invocation(db, incident_id, started_at=<now>)` → `True`
 3. `workflows.record_agent_analysis(db, incident_id, output)` — `output` 은 `AgentGraphOutput(invocation_status=SUCCEEDED, summary_lines=[3줄], reviewed_risk_level=HIGH, candidates=[RunbookCandidateDraft(RUNBOOK_NACL_ADD_DENY, target_arn=<시드 NACL ARN>, parameters={rule_number, cidr_block, protocol}, evidence_ids=[...])])`
 
-→ `AgentAnalysisOutcome(next_status=AWAITING_APPROVAL, executable=1, rejected=0)` · **`guardrail_evaluations` 1행 생성**(`AI_CANDIDATE` · `PASS`).
+→ `AgentAnalysisOutcome(next_status=AWAITING_APPROVAL, executable=1, rejected=0)` · **이 Incident 앞으로 `guardrail_evaluations` 1행 생성**(`AI_CANDIDATE` · `PASS`). ⚠️ **표 전체가 1행이라는 뜻이 아니다** — 키가 있으면 A가 만든 FINOPS 분석 행이 함께 쌓인다(아래 SQL).
 ⚠️ **`summary_lines` 는 정확히 3줄**이어야 하고 `candidates` 가 비면 계약이 거절한다(`AgentGraphOutput._enforce_contract`).
 
 **C. 실행** — 화면 [조치 실행] 또는 API. **T2-5·6 그 자체다.**
@@ -685,10 +686,17 @@ uv run python -c "import sys; sys.path[:0]=['apps/core-api','packages']; from se
 **게이트에서 눈으로 짚을 것** — 가드레일 4단계 기록이 남는다. **T2-4의 판정 근거가 이 한 행이다.**
 
 ```sql
-select validation_context, result, steps from guardrail_evaluations;
+select g.validation_context, g.result, g.steps
+  from guardrail_evaluations g
+  join runbook_candidates c on c.candidate_id = g.candidate_id
+ where c.incident_id = '<B가 찍은 INCIDENT_ID>';
 ```
 
-→ `AI_CANDIDATE` · `PASS` · `SCHEMA_CHECK`·`ACTION_WHITELIST`·`ARN_MATCH`·`AWS_DRY_RUN` 네 단계가 전부 `PASS`.
+→ **그 Incident의 1행**이 `AI_CANDIDATE` · `PASS` 이고 `SCHEMA_CHECK`·`ACTION_WHITELIST`·`ARN_MATCH`·`AWS_DRY_RUN` 네 단계가 전부 `PASS`.
+
+> 🔴 **Incident 로 거르지 않으면 이 확인이 제 역할을 못 한다**(2026-09-11 PM 실측 · PR #315 리뷰 ③-3).
+> 필터 없이 `select … from guardrail_evaluations;` 만 치면 **키가 있는 머신에서 8행**이 나온다 — 그중 **6행이 A(수집)가 만든 FINOPS Incident를 agent dispatcher 가 분석하며 남긴 것**이다(`PASS` 3 · `FAIL` 3). **작성 머신에는 키가 없어 1행이었을 뿐이다.**
+> 그러면 **SECOPS 후보를 `add_candidate` 로 질러가 0행이어도 표에 FINOPS 행이 있으니 「생겼다」로 보인다** — 이 확인은 원래 **그 우회를 잡으려고** 둔 것이다.
 `AWS_DRY_RUN` 의 `verification_summary` 가 **ADR-0007 §4의 describe 대체 검증을 문장으로 남긴다** — *"DESCRIBE(ec2.describe_network_acls) | 확인: NACL 존재·규칙 번호 미사용(인바운드)·CIDR/프로토콜 형식 | 미확인: IAM 권한(조회 대체 경로)·삽입 자체의 AWS 검증(DryRun 미지원 작업)"*. 심사자에게 읽어 줄 문장이다.
 
 > 🔴 **`incidents_repo.add_candidate`(`incidents.py:369`)로 질러가지 않는다.** `202`도 나오고 실행도 `SUCCESS`가 되지만 **`guardrail_evaluations` 가 0행**이라 **T2-4가 사라진다.** 실측에서 실제로 그렇게 나왔다.
@@ -718,13 +726,13 @@ select validation_context, result, steps from guardrail_evaluations;
 | 1 | §0·§3·§4의 경계 판정 전부 | 각 행의 `파일:줄`·심볼을 다시 연다 — **dev가 하루만 움직여도 낡는다**. **2026-09-10 `a8ba0ba` 기준 전량 재측정**(이전 기준 `8752ddc` 이후 dev 12커밋). 이번엔 **프로덕션 소스가 크게 움직였다** — #313·#318·#319·#320이 `apps/`·`packages/`·`scripts/`를 바꿔 **인용 좌표 7건이 밀렸다**: `incident_intake.py:215→291` · `workflows.py:1094→1379`(`:1103→:1388`) · `executor.py:651→655`·`:672→678`·`:1246→1265`·`:1380→1399` · `seed_localstack.py:290→387`. 그대로인 것은 `agent_dispatcher.py:407`·`:436-442` · `client.py:59`·`:72` · `config.py:140`·`:169` · `inject_mock_threat.py:15`. **2026-09-11 아침 재측정 완료 — `977d013`(dev 최신 · 당일 00:00 이후 dev 0커밋) 기준 인용 좌표 42건 전수, 어긋남 0.** 재는 법은 `파일:줄`의 그 줄에 기대 심볼이 실제로 있는지 한 건씩 여는 것이다. 정밀도 1건만 고쳤다 — `workflows.py:161`은 `_executable_candidate` **정의** 줄이고 409 `raise`는 `:179`라, `:1379 latest_for_target()`/`:1388` 표기와 같은 형태로 맞췄다(§0·§4). `agent_dispatcher.py:426-429`는 범위 표기가 정확하다(`:426 dispatchable = [` ~ `:429 if category is IncidentCategory.FINOPS`) | 박지현 |
 | 2 | T2-1의 토폴로지 붉은 노드 | ⚠️ **경로를 갈라야 한다**(2026-09-09 정정). `elbv2`·`autoscaling` 미포함(ADR-0007)은 **AWS 수집 경로**(`collector.collect_region`)에만 해당한다 — **골든 적재 경로**(`scripts/load_golden_assets.py` → `persist_inventory`)는 **AWS를 부르지 않아** `RelationType` **6종이 전부 파생된다**([PR #314](https://github.com/ProjectVigilantis/vigilantis/pull/314) · CI 등식 가드 `test_golden_derives_every_relation_type`). 즉 **그래프 자체는 골든으로 실경로다.** mock으로 남는 것은 **노드를 붉게 만드는 Incident** 쪽이고 그건 §3-2에 걸린다 | 유건희 · 박지현 |
 | 3 | 설계서 §대조 필요 1번(판정기 워크플로 배선) | T2-2·3을 화면으로 올릴 수 있는지가 여기 걸린다 | 김승철 |
-| 4 | ~~`scripts/inject_mock_threat.py:15`의 헤더가 낡았다~~ | ⚠️ **2026-09-10에 한 번 더 낡았다.** 헤더는 여전히 *"`create_incident_from_intake` 가 할 일인데 아직 `NotImplementedError` 다"* 인데, 본문은 #286(#265)으로 구현됐고 **호출부까지 #306 / PR #320으로 섰다**(`services/scheduler.py:126`). 그 파일만 **두 세대 전 문장**을 들고 있다 — 다만 그 호출부는 FinOps 전용이라 **이 스크립트(SecOps)에는 여전히 안 온다.** 고칠 때 그 구분을 함께 적는다 | 김승철 |
+| 4 | ~~`scripts/inject_mock_threat.py:15`의 헤더가 낡았다~~ → ✅ **해소(2026-09-11 · PR #325 머지 `be779ce`)** | 헤더가 `--prepare-inbox` 모드 설명으로 교체돼 **두 세대 전 문장이 사라졌다.** 대본 §2-⑤는 근거를 헤더가 아니라 **기본 모드**로 바꿔 적었다. 종전 기록: ⚠️ **2026-09-10에 한 번 더 낡았다.** 헤더는 여전히 *"`create_incident_from_intake` 가 할 일인데 아직 `NotImplementedError` 다"* 인데, 본문은 #286(#265)으로 구현됐고 **호출부까지 #306 / PR #320으로 섰다**(`services/scheduler.py:126`). 그 파일만 **두 세대 전 문장**을 들고 있다 — 다만 그 호출부는 FinOps 전용이라 **이 스크립트(SecOps)에는 여전히 안 온다.** 고칠 때 그 구분을 함께 적는다 | 김승철 |
 | 5 | #183(PR #293) 상태 | `CHANGES_REQUESTED`가 9/11까지 풀리는가 — **R5 비고가 여기 걸린다**. 2026-09-10 재확인: FE PR 3건(#299·#293·#292) 전부 `CHANGES_REQUESTED` 이고 **09-07 이후 갱신이 없다** | 유건희 |
-| 6 | ~~**R10 의 `T1+T2 ≤ 8분` — 절반만 쟀다**~~ → **T2 후반 구간이 새로 미측정이 됐다** | 2026-09-10 PM이 나머지 절반(AI 호출 6.6초 · T1-6 실행 15초 · T1-3~6 합계 60~90초)을 **재서 닫았다**(§5-4). **대신 새 미측정이 생겼다** — T2-4·5·6이 슬라이드에서 실행으로 바뀌면 **차단 실행·확인 시간**이 새로 든다. 종전 8분 전제는 T2 후반이 전부 슬라이드라는 가정 위에 있었다 | 김세혁 · 박지현 |
+| 6 | ~~**R10 의 `T1+T2 ≤ 8분` — 절반만 쟀다**~~ → **T2 후반 구간이 새로 미측정이 됐다** | 2026-09-10 PM이 나머지 절반(AI 호출 6.6초 · T1-6 실행 15초 · T1-3–6 합계 60–90초)을 **재서 닫았다**(§5-4). **대신 새 미측정이 생겼다** — T2-4·5·6이 슬라이드에서 실행으로 바뀌면 **차단 실행·확인 시간**이 새로 든다. 종전 8분 전제는 T2 후반이 전부 슬라이드라는 가정 위에 있었다 | 김세혁 · 박지현 |
 | 7 | ⓪ 환경변수 전제가 게이트 당일 셸에도 서는가 | 위 §2-⓪ 두 줄을 새 셸에서 다시 확인한다. **`.env` 로는 안 된다**(`config.py:32-35`). ⚠️ **`.env` 가 있는 머신과 없는 머신의 증상이 다르다** — §2-⓪ 표. 게이트 운영 머신은 **PM 로컬**이다 | 박지현 · 김세혁 |
 | **8** | ~~PR #321 머지 뒤 이 문서에 얹을 것 3건~~ → ✅ **해소(2026-09-10)** | #321이 `977d013`로 머지된 뒤 셋 다 반영했다 — ① §3-1 6번 행 `executor.py:1246 → :1265` ② R6 기대값을 **「더 작은 유형으로 실제로 바뀐다」**로(도착 타입은 결과 칸에 적는다 · §3-1 표 아래 ⚠️) ③ R3–R4 병합 — **R3은 #321 것**(대상 ARN = 사전 준비 ④가 찍은 값), **R4는 이 PR의 재현율 비고**. §2-② 통일도 #321에서 처리돼 이 PR에서 뺐다 | 박지현 |
 | **9** | ~~🔴 T2 후보 행 우회를 당일에 준비할 수 있는가~~ → ✅ **해소(2026-09-11 · 관통 실측)** | **준비할 것이 없었다.** 후보 행을 직접 넣는 대신 `workflows.record_agent_analysis()`를 부르면 **가드레일 4단계까지 함께 돈다.** 선행은 **수집 1회** 하나이고 그것은 §1-2의 B안으로 이미 정해져 있었다 — 이 문서가 그 결정을 T1으로만 좁게 읽고 있었다. 재현 절차 §6-1 · 이슈 #301 | 박지현 |
-| **10** | 🔶 **수집 전환 컷을 대본의 어디에 넣는가** | **2026-09-11에 새로 생겼다.** 9번이 풀리자 그 아래에서 드러났다. B안은 *"T1-1과 T1-2 사이"* 였는데, 실측해 보니 수집 뒤 **A1이 `COST_CANDIDATE` → `SKIP_PROD_PROTECTED`로 뒤집히고 이름도 `vigilantis-seed-idle`로 바뀐다**(§2-⑥ · 자산 32 → 47). **T1-6 뒤로 미루면** T1 화면이 온전하고 T2도 그대로 선다. 실행 가능 여부가 아니라 **화면 서사** 판단이라 이 문서가 정하지 않는다 — #301에 질의(2026-09-11) | 김세혁 · 유건희 |
+| **10** | 🔶 **수집 전환 컷을 대본의 어디에 넣는가** | **2026-09-11에 새로 생겼다.** 9번이 풀리자 그 아래에서 드러났다. B안은 *"T1-1과 T1-2 사이"* 였는데, 실측해 보니 수집 뒤 **A1이 `COST_CANDIDATE` → `SKIP_PROD_PROTECTED`로 뒤집히고 이름도 `vigilantis-seed-idle`로 바뀐다**(§2-⑥ · 자산 32 → 47). **2026-09-11 PM 추가 실측**: 키가 있으면 그 수집이 만든 **FINOPS Incident 10건이 첫 agent 주기(3초) 안에 전부 분석**된다 — `AWAITING_APPROVAL` **5** / `FAILED` **5**(전부 골든 EC2 · 실물이 없어 Dry-Run 대체 조회에서 거절). **인시던트 목록에 10건이 한꺼번에 더해지고 `FAILED` 5건이 섞이며, T1-6 뒤로 미뤄도 T2 구간 화면에 그대로 뜬다.** 승인 버튼이 열리는 골든 2건(`golden-sg-orphan`·골든 EBS)은 **실물이 없어 누르지 않는 카드**다. 뒤집어 말하면 **그 장면이 곧 판정 기준 ⓒ**라, §7 ⓒ의 *"대본이 그 경로를 끈다"* 가 컷 위치에 따라 *"한 번 보인다"* 로 바뀔 수 있다. **T1-6 뒤로 미루면** T1 화면이 온전하고 T2도 그대로 선다. 실행 가능 여부가 아니라 **화면 서사** 판단이라 이 문서가 정하지 않는다 — #301에 질의(2026-09-11) | 김세혁 · 유건희 |
 
 > **R10의 목표 시간**과 **#267 안건 1·2번**은 이 목록에서 뺐다 — 2026-09-07 PM 확정으로 답이 왔다(R10 = `T1+T2 ≤ 8분` · §1-2). 답이 온 항목을 「대조 필요」에 남겨 두면 **무엇이 아직 열려 있는지**가 흐려진다.
 >
