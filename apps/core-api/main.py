@@ -9,6 +9,7 @@
 #     수집→판정 스캔(services.scheduler)은 SCAN_ENABLED로, 접수된 조치 실행 디스패치·
 #     회수 스캔(dispatcher)과 AI 분석 대기 스캔(agent_dispatcher)은 DISPATCH_ENABLED를
 #     공유해 켜고 끈다 (Issue #232·#277·#285).
+#   - 모의 위협 파일 소비자는 MOCK_THREAT_INBOX_DIR 지정 시 독립 기동한다(#322).
 # ==============================================================================
 
 from __future__ import annotations
@@ -38,8 +39,10 @@ from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 import agent_dispatcher  # noqa: E402
 import dispatcher  # noqa: E402
 from config import get_settings  # noqa: E402
+from db.session import get_session_factory  # noqa: E402
 from exceptions import register_error_handlers, unexpected_error_response  # noqa: E402
 from logging_config import request_id_var, setup_logging  # noqa: E402
+from mock_threat_source import MockThreatConsumer  # noqa: E402
 from realtime import RealtimeManager  # noqa: E402
 from routers import actions as actions_router  # noqa: E402
 from routers import assets as assets_router  # noqa: E402
@@ -71,6 +74,7 @@ def create_app() -> FastAPI:
         # finally 에서 내려간다. 리스트 컴프리헨션은 도중에 던지면 결과가 통째로
         # 유실돼 이미 기동한 스케줄러를 아무도 못 내린다.
         schedulers = []
+        threat_consumer = None
         starts = (
             # 수집→판정→FinOps Incident 생성. 실데이터 시연의 최상류.
             partial(start_scan_scheduler, realtime.publish),
@@ -84,11 +88,24 @@ def create_app() -> FastAPI:
                 started = start()
                 if started is not None:
                     schedulers.append(started)
+            if settings.MOCK_THREAT_INBOX_DIR.strip():
+                threat_consumer = MockThreatConsumer(
+                    Path(settings.MOCK_THREAT_INBOX_DIR),
+                    get_session_factory(),
+                    realtime.publish,
+                    interval_seconds=settings.MOCK_THREAT_POLL_SECONDS,
+                )
+                threat_consumer.start()
             yield
         finally:
-            for scheduler in reversed(schedulers):
-                scheduler.shutdown(wait=False)
-            await realtime.stop()
+            try:
+                if threat_consumer is not None:
+                    # 처리 중인 접수의 commit·발행을 마친 뒤 실시간 전송을 닫는다.
+                    await threat_consumer.stop()
+            finally:
+                for scheduler in reversed(schedulers):
+                    scheduler.shutdown(wait=False)
+                await realtime.stop()
 
     app = FastAPI(title="Vigilantis Core API", lifespan=lifespan)
     app.state.realtime = realtime

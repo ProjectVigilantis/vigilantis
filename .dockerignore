@@ -38,3 +38,6 @@ vigilantis-docs/
 # --- 이미지에 불필요한 루트 파일 ---
 docker-compose.yml
 .dockerignore
+
+# 모의 관측 배달·처리 원문은 이미지에 포함하지 않는다(#322).
+**/.mock-threat-inbox/

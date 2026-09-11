@@ -11,11 +11,12 @@
 # 지나는 경로: 골든 입력 → 입력 계약 검증 → security/threat_normalizer.normalize_mock_input
 #              → security/risk_evaluator.evaluate_threat
 #
-# **DB 에 쓰지 않는다.** Incident 생성(ThreatEvent 저장 → Incident → THREAT 근거)은
-# incident_intake.create_incident_from_intake 가 할 일인데 아직 NotImplementedError 다
-# (#254). 그 구현이 서면 이 스크립트의 다음 줄이 저장이고, 그때가 E2E 설계서
-# §대조 필요 1번이 완전히 풀리는 지점이다 — 이 스크립트는 그 앞까지를 실행 가능하게
-# 만들어, 판정 결과를 눈으로 확인할 수 있게 한다.
+# 기본 모드는 판정 확인이다. --prepare-inbox 모드는 모의 관측 파일만 준비한다.
+# 앱의 MOCK_THREAT_INBOX_DIR에 같은 폴더를 지정하면 앱이 정형화·판정·Intake를
+# 호출해 저장한다(#322). 준비 출력은 저장 확인이 아니며 결과는 조회 API에서 확인한다.
+# --target-arn으로 실행 환경의 EC2/SG를 지정한다. 관계 자산은 수집기가 적재한 것을
+# 후속 그래프가 조회한다. 골든 원본은 바꾸지 않는다.
+# 같은 관측 재전달은 멱등이다. 새로운 관측은 --occurred-at에 새 발생 시각을 지정한다.
 #
 # AWS 를 부르지 않으므로 LocalStack·자격증명이 필요 없다. 골든 정답(expected)이 있으면
 # 함께 대조해 어긋나면 종료 코드 1 로 알린다 — 정답지와 구현이 갈린 것을 주입 시점에
@@ -34,6 +35,7 @@ for _p in (str(REPO_ROOT / "apps" / "core-api"), str(REPO_ROOT / "packages")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from mock_threat_source import parse_observation, prepare_observation  # noqa: E402
 from security.risk_evaluator import evaluate_threat  # noqa: E402
 from security.threat_normalizer import normalize_mock_input  # noqa: E402
 
@@ -117,7 +119,31 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="골든 SecOps 위협을 정형화·판정한다")
     parser.add_argument("names", nargs="*", help="입력 파일명(생략 시 전량)")
     parser.add_argument("--json", action="store_true", help="결과를 JSON 배열로 출력")
+    parser.add_argument("--prepare-inbox", type=Path, help="앱이 소비할 모의 관측 폴더")
+    parser.add_argument("--target-arn", help="준비할 관측의 대상 EC2/SG ARN")
+    parser.add_argument("--occurred-at", help="새 관측의 발생 시각(ISO 8601); 생략 시 원본 시각")
     args = parser.parse_args()
+
+    if args.prepare_inbox is not None:
+        if len(args.names) != 1 or not args.target_arn:
+            parser.error("--prepare-inbox는 입력 1개와 --target-arn이 필요합니다")
+        source = _targets(args.names)[0]
+        raw = _load(source)
+        raw["target_arn"] = args.target_arn
+        if args.occurred_at is not None:
+            raw["occurred_at"] = args.occurred_at
+        observation = parse_observation(raw)
+        path = prepare_observation(args.prepare_inbox, observation)
+        print(json.dumps({
+            "status": "PREPARED",
+            "path": str(path.resolve()),
+            "source_event_id": observation.event_id,
+            "target_arn": observation.target_arn,
+            "occurred_at": observation.occurred_at.isoformat(),
+        }, ensure_ascii=False, indent=2))
+        return 0
+    if args.target_arn is not None or args.occurred_at is not None:
+        parser.error("대상·발생 시각 변경은 --prepare-inbox 모드에서만 가능합니다")
 
     rows = [inject(path) for path in _targets(args.names)]
 
