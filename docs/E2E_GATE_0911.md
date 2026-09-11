@@ -45,7 +45,7 @@
 | ③ | **NACL 해제 실행 함수가 없다** — ⚠️ **차단은 섰다**(2026-09-10 갱신) | 🔶 **절반 해소** — 차단(`ADD_DENY`)은 **dev 머지 완료**. **우회 불가는 7·8(해제)뿐**이다. 단 4~6도 **후보 행 수동 생성**이 전제다(아래 ⚠️) | `executor.py:1581 execute_nacl_add_deny()` + `workflows.py:788`·`:1003` + `dispatcher.py:97·106` 짝 등록(#297 / PR #313). 해제는 **#298 미착수** + `workflows.py:1379 latest_for_target()`이 `NotImplementedError`(`:1388`) — §5-3 |
 | ④ | ~~`OPENAI_API_KEY` 가 없다~~ → **게이트 운영 머신을 어디로 하는가** (2026-09-10 재정의 · **#316**) | ✅ **해소 — 운영 머신을 PM 로컬로 확정**(2026-09-10 PM). 그 머신 `.env`에 키가 있고, **T1-3~6을 실제로 관통시킨 실측이 있다** | 팀 공용 키가 없어 각자 발급이며, 이 문서 작성자 머신에는 키가 없다. **키가 없는 머신에서 돌면 화면에 오류가 안 뜬다** — `agent_dispatcher.py:436-442`가 예외를 삼켜 Incident가 `ANALYZING`에 남는다(§2 ⓪) |
 
-> ⚠️ **T2-4·5·6이 「실경로」인 전제는 두 겹이다.** SECOPS Incident에는 **조치 후보 행이 생기지 않는다** — `agent_dispatcher.py:426-429`가 `IncidentCategory.FINOPS`만 골라 내고, 후보를 만드는 자리는 그 경로 하나뿐이다(`_store_candidate` `workflows.py:1970` ← `record_agent_analysis` `:2022` ← `agent_dispatcher.py:387`). 후보 행 없이 `POST /actions/execute`를 부르면 `workflows.py:161`이 **`409 PROPOSAL_NOT_EXECUTABLE`** 로 거절한다. 가드레일 4단계도 같은 함수 안이라(`_guard_candidate` `:2040`) T2-4가 함께 걸린다.
+> ⚠️ **T2-4·5·6이 「실경로」인 전제는 두 겹이다.** SECOPS Incident에는 **조치 후보 행이 생기지 않는다** — `agent_dispatcher.py:426-429`가 `IncidentCategory.FINOPS`만 골라 내고, 후보를 만드는 자리는 그 경로 하나뿐이다(`_store_candidate` `workflows.py:1970` ← `record_agent_analysis` `:2022` ← `agent_dispatcher.py:387`). 후보 행 없이 `POST /actions/execute`를 부르면 `workflows.py:161 _executable_candidate()`가 **`409 PROPOSAL_NOT_EXECUTABLE`**(raise `:179`) 로 거절한다. 가드레일 4단계도 같은 함수 안이라(`_guard_candidate` `:2040`) T2-4가 함께 걸린다.
 > **그래서 T1-2의 *"Incident만 만들면 뒤는 자동"* 보다 한 겹 더 깊다** — Incident와 **후보 행**을 둘 다 손으로 넣어야 한다. 그 우회를 당일에 준비하지 못하면 **T2-4·5·6은 대체 컷**이다(이슈 #301 · 2026-09-10 질의).
 
 > **넷이 서로 다른 이유로 막혀 있었다.** ①만 **코드가 없어서** 막힌 것이라 9/11까지 못 푼다(2026-09-07 PM 확정). ②③④는 **9/10 하루에 전부 움직였다** — ②는 PR #320으로 배선이 섰고, ③은 PR #313으로 차단 축이 섰으며, ④는 운영 머신을 바꾸는 것으로 성격이 바뀌었다.
@@ -93,22 +93,39 @@
 
 > ⚠️ **2026-09-08 — 이 8단계를 처음 끝까지 돌려 봤고, ②③④가 문서대로는 실패했다.** 리허설이 폐지돼 이 절차가 **당일에 처음 도는 것**이 되므로 실측으로 고쳤다. 아래는 전부 rc=0 을 확인한 형태다.
 
-**⓪ 환경변수 — ②③④와 T1-3 이 여기에 걸린다. 새 셸이면 반드시 먼저**
+**⓪ 환경변수 — ②③④⑥⑦과 T1-3 이 여기에 걸린다. 셸 하나를 열어 두고 그 셸에서 나머지를 전부 잇는다**
+
+> 🔴 **`.env` 만으로는 안 된다.** `.env` 의 `localstack:4566`·`db:5432` 는 **compose 네트워크 안의 이름**이라 호스트에서는 풀리지 않는다 — 그대로 두면 ②④와 호스트 uvicorn 이 DB 를 못 찾고(`getaddrinfo failed` · 아래 ②), ③ 은 `AWS_ENDPOINT_URL 미설정` 으로 멈춘다(`scripts/seed_localstack.py` `_require_localstack`).
+> **이 블록을 ① 앞에 두는 이유**: 호스트에서 도는 단계는 ②부터라 값 자체는 ① 뒤에 줘도 되지만, R1 이 재는 것은 **`⓪~⑧` 을 순서대로 오류 없이 끝내는가**다. 번호와 실행 순서를 갈라 두면 당일에 한 칸을 건너뛴다. ①(`docker compose up`) 만은 이 값 없이도 돈다 — 컨테이너 안에서 도는 유일한 단계다.
 
 > ⚠️ **이 블록의 전제는 머신마다 갈린다**(2026-09-10 PM 리뷰 실측). 갈리는 것이 셋이고, **셋 다 「어느 머신에서 게이트를 도는가」로 수렴한다.** 2026-09-10 PM 확정 — **게이트 운영 머신은 PM 로컬**이다.
 > 1. **`.env` 가 있는 머신에서는 ④의 실패 증상이 다르다** — 아래 ④ 참조.
-> 2. **`localhost:5432` 가 고정값이 아니다** — `docker-compose.yml:23`이 `"${POSTGRES_PORT:-5432}:5432"`라 호스트 노출 포트가 변수다(#111). `.env` 에 `POSTGRES_PORT` 를 쓰는 머신이면 아래 URL의 포트를 그 값으로 바꾼다.
-> 3. **`export` 는 `.env` 를 이긴다** — `.env` 가 있는 머신에서도 아래 두 줄이 그대로 먹는다(PM 실측).
+> 2. **`localhost:5432` 가 고정값이 아니다** — `docker-compose.yml:23`이 `"${POSTGRES_PORT:-5432}:5432"`라 호스트 노출 포트가 변수다(#111). `.env` 에 `POSTGRES_PORT` 를 쓰는 머신이면 아래 URL의 포트를 그 값으로 바꾼다(compose 가 호스트 포트를 그 값으로 연다).
+> 3. **셸에서 준 값이 `.env` 를 이긴다** — `.env` 가 있는 머신에서도 아래 값이 그대로 먹는다(PM 실측).
 
-```bash
-export DATABASE_URL="postgresql+psycopg://vigilantis:vigilantis@localhost:5432/vigilantis"
-export AWS_ENDPOINT_URL="http://localhost:4566"
-export OPENAI_API_KEY="…"                      # 🔴 없거나 틀리면 T1 이 3번에서 멈춘다 (아래)
+**주 표기는 PowerShell 이다** — 게이트 운영 머신이 Windows(PM 로컬)로 확정됐다(#316).
+
+```powershell
+$env:DATABASE_URL = 'postgresql+psycopg://vigilantis:<.env의 POSTGRES_PASSWORD>@localhost:5432/vigilantis'
+$env:AWS_ENDPOINT_URL = 'http://localhost:4566'
+$env:OPENAI_API_KEY = '…'                  # 🔴 없거나 틀리면 T1 이 3번에서 멈춘다 (아래)
 
 # 게이트 권장 — 대본의 붙박이 대기를 40초에서 5초로 줄인다 (아래 §R10 실측)
-export AGENT_DISPATCH_INTERVAL_SECONDS=3       # 기본 30 — T1-2 → T1-3 대기
-export DISPATCH_INTERVAL_SECONDS=2             # 기본 10 — T1-5 → T1-6 대기
+$env:AGENT_DISPATCH_INTERVAL_SECONDS = '3' # 기본 30 — T1-2 → T1-3 대기
+$env:DISPATCH_INTERVAL_SECONDS = '2'       # 기본 10 — T1-5 → T1-6 대기
 ```
+
+bash(WSL·macOS)에서 도는 사람은 같은 값을 이렇게 준다.
+
+```bash
+export DATABASE_URL="postgresql+psycopg://vigilantis:<.env의 POSTGRES_PASSWORD>@localhost:5432/vigilantis"
+export AWS_ENDPOINT_URL="http://localhost:4566"
+export OPENAI_API_KEY="…"
+export AGENT_DISPATCH_INTERVAL_SECONDS=3
+export DISPATCH_INTERVAL_SECONDS=2
+```
+
+> ⚠️ **`SCAN_ENABLED` 는 이 블록에 넣지 않는다.** ⑥은 스캔이 **켜진 채로** 떠야 하고 ⑦만 꺼야 한다 — 이 셸에 미리 넣으면 ⑥이 판정 기준 ⓓ(스캔 스케줄러 실기동)를 못 보인다. ⑦ 자리에서 준다.
 
 **`.env` 로 되는 것과 안 되는 것이 갈린다.** 클래스마다 읽는 원천이 다르다(`apps/core-api/config.py`).
 
@@ -141,14 +158,7 @@ docker compose up -d db localstack
 
 → `db`·`localstack` 두 서비스가 `running`.
 
-> ⚠️ **② 이후 호스트에서 도는 명령(②③④⑥⑦)은 접속 주소를 따로 준다.** `.env`의 `localstack:4566`·`db:5432`는 **compose 네트워크 안의 이름**이라 호스트에서는 풀리지 않는다 — 그대로 두면 ③이 `AWS_ENDPOINT_URL 미설정`으로 멈추고(`scripts/seed_localstack.py` `_require_localstack`), ②④와 호스트 uvicorn은 DB를 못 찾는다. **셸 하나를 열어 두고 그 셸에서 나머지를 전부 잇는다.**
->
-> ```powershell
-> $env:AWS_ENDPOINT_URL = 'http://localhost:4566'
-> $env:DATABASE_URL = 'postgresql+psycopg://vigilantis:<.env의 POSTGRES_PASSWORD>@localhost:5432/vigilantis'
-> ```
->
-> 포트를 바꿔 쓰는 사람은 `.env`의 `POSTGRES_PORT`를 그대로 옮겨 적는다(compose가 호스트 포트를 그 값으로 연다).
+> **접속 주소는 ⓪에서 이미 줬다 — 여기서 다시 주지 않는다.** ②부터는 ⓪을 친 그 셸에서 이어 친다. **새 셸을 열었으면 ⓪을 먼저 다시 준다**(값이 그 셸에만 살아 있다).
 
 **② DB 스키마**
 
@@ -168,7 +178,7 @@ uv run alembic -c apps/core-api/alembic.ini upgrade head
 sqlalchemy.exc.OperationalError: failed to resolve host 'db': [Errno 11001] getaddrinfo failed
 ```
 
-즉 **`cp .env.example .env`(README `:81`) 직후 바로 이 단계에서 멈춘다.** ⓪의 `export` 두 줄이 `.env` 를 이기므로 ⓪만 먼저 하면 풀린다.
+즉 **`cp .env.example .env`(README `:81`) 직후 바로 이 단계에서 멈춘다.** ⓪의 접속 주소 두 줄이 `.env` 를 이기므로 ⓪만 먼저 하면 풀린다.
 
 > **compose로 돌리지 않는 이유**: `docker compose run --rm migrate`도 같은 마이그레이션을 올리지만, **첫째** 그 서비스는 **컨테이너 안 `db:5432`**를 보고 ②③④는 호스트 `localhost:5432`를 보아 **한 대본에서 DB 주소가 둘로 갈리고**, **둘째** `docker-compose.yml:52`의 `migrate`에 `build:`(`:53`)가 붙어 있어 **이미지가 없으면 이 자리에서 빌드가 돌아** T-30분 예산을 읽을 수 없게 된다. **호스트에 `uv`가 없는 머신에서만** 대안으로 쓴다.
 
@@ -379,10 +389,11 @@ agent_dispatcher.py:407 dispatch_pending_analysis()   main.py 의 start_agent_di
 | 7–8 | **원클릭 해제** | ❌ **대체 컷 — 확정** | — | **#313이 머지돼도 안 열린다.** #313은 백업을 **쓰는** 쪽(`capture_nacl_rule_index`)만 더하고 **읽는** 쪽은 안 건드린다 — `workflows.py:1379 latest_for_target()`이 여전히 `NotImplementedError`를 던진다(`:1388`). `RESTORE` 실행 함수도, 그 카드(#298)의 PR도 없다 |
 
 > 🔴 **4·5·6이 「실경로」인 전제 — 후보 행까지 손으로 넣어야 한다**(2026-09-10 실측 · `a8ba0ba`).
-> `RUNBOOK_NACL_ADD_DENY`는 `ROLLBACK_RUNBOOK_IDS`(`packages/schemas/runbooks.py:44-48`)에 없어 `workflows.py:296`이 `_executable_candidate`로 간다. **EXECUTABLE 후보 행이 없으면 `workflows.py:161`이 `409 PROPOSAL_NOT_EXECUTABLE`로 거절한다.**
+> `RUNBOOK_NACL_ADD_DENY`는 `ROLLBACK_RUNBOOK_IDS`(`packages/schemas/runbooks.py:44-48`)에 없어 `workflows.py:296`이 `_executable_candidate`로 간다. **EXECUTABLE 후보 행이 없으면 `workflows.py:161 _executable_candidate()`가 `409 PROPOSAL_NOT_EXECUTABLE`(raise `:179`)로 거절한다.**
 > 후보 행을 만드는 자리는 저장소에 하나뿐이다 — `_store_candidate`(`workflows.py:1970`) ← `record_agent_analysis`(`:2022`) ← `agent_dispatcher.py:387`. 그런데 **`agent_dispatcher.py:426-429`가 `IncidentCategory.FINOPS`만 골라 낸다.** PR #313은 이 파일을 건드리지 않았다.
 > **가드레일 4단계도 같은 함수 안이라**(`_guard_candidate` `:2040`) **4번이 함께 걸린다.** 실행 시점 가드레일(`:1545 _run_rollback_guardrails`)은 롤백 계열 전용이라 이 경로엔 오지 않는다.
-> **즉 T1-2의 「Incident만 만들면 뒤는 자동」보다 한 겹 더 깊다.** 그 우회를 당일에 준비하지 못하면 **4·5·6은 대체 컷**이다 — 이슈 #301에 질의해 두었다(2026-09-10).
+> **즉 T1-2의 「Incident만 만들면 뒤는 자동」보다 한 겹 더 깊다.** 그 우회를 당일에 준비하지 못하면 **4·5·6은 대체 컷**이다 — 이슈 #301에 질의해 두었다(2026-09-10 · 2026-09-11 재질의).
+> **되돌림 판정 시점은 「사전 준비 ④가 끝나는 지점」이다.** 그때까지 후보 행 우회가 서지 않으면 4·5·6을 대체 컷으로 전환하고 R9를 R9-2로 옮긴다 — **전환했다는 사실과 그 시점을 판정서에 적는다.** 그 전까지 이 표를 미리 되돌리지 않는 이유는, `ADD_DENY` 차단이 **실물로 확인되는 유일한 자리**(판정 기준 ⓐ의 살아 있는 절반)라 시도해 보지 않고 버릴 자리가 아니기 때문이다.
 
 > ⚠️ **어느 시점부터 화면이 mock이 아닌지 갈라서 말한다**(2026-09-10 정리).
 > **1~3번은 화면으로 보여 줄 수 없다** — 주입 스크립트가 DB에 쓰지 않아 Incident가 생기지 않으므로 토폴로지의 붉은 노드·위험도 배지는 mock이다. **터미널 출력으로 판정이 실제로 도는 것을 보인다.**
@@ -505,7 +516,7 @@ SSOT 5주차 리스크 3번의 실측:
 | R6 | T1-5·6 [조치 실행] → `202` → 인스턴스 유형이 실제로 바뀐다 | **더 작은 유형으로 실제로 바뀐다**(도착 타입은 당일 결과 칸에 적는다) | | ☐합격 ☐불합격 ☐미실시 | **먼저 사전 준비 ④가 `--bind-a1-to-seed`로 돌았는지 확인**한다. 안 돌았으면 가드레일 4단계와 승인은 그대로 통과하고 **실행에서만** 깨진다(§1-2) |
 | R7 | T1-7·8·9 대체 컷이 **미구현이 아니라 미시연으로** 전달된다 | 설명 성립 | | ☐합격 ☐불합격 ☐미실시 | §3-3의 한 문장 |
 | R8 | T2-1·2·3 위협 판정이 골든 정답과 일치한다 | S3 `HIGH` 일치 | | ☐합격 ☐불합격 ☐미실시 | 터미널 출력 |
-| R9 | **T2-4·5·6이 실경로로 돈다** | `203.0.113.10/32` deny 규칙이 `describe_network_acls`에 **실재** | | ☐합격 ☐불합격 ☐미실시 | 🔶 **후보 행 수동 생성 + 대상 ARN 실물 정합이 전제다**(§4). 전제가 안 서면 **`미실시`가 아니라 `불합격`이 아니다** — 대체 컷으로 전환했다고 적고 R9-2로 옮긴다 |
+| R9 | **T2-4·5·6이 실경로로 돈다** | `203.0.113.10/32` deny 규칙이 `describe_network_acls`에 **실재** | | ☐합격 ☐불합격 ☐미실시 | 🔶 **후보 행 수동 생성 + 대상 ARN 실물 정합이 전제다**(§4). 전제가 안 서면 **`미실시`가 아니라 `불합격`이 아니다** — 대체 컷으로 전환했다고 적고 R9-2로 옮긴다. **판정 시점은 사전 준비 ④가 끝나는 지점**이고, 전환했으면 **그 시점을 이 칸에 함께 적는다** |
 | R9-2 | T2-7·8 대체 컷이 **미구현이 아니라 미시연으로** 전달된다 | 설명 성립 | | ☐합격 ☐불합격 ☐미실시 | `RESTORE`(#298) 미착수 · `latest_for_target` `NotImplementedError`(§5-3) |
 | R10 | **전체 소요 시간**이 발표 지속 시간 안에 든다 | **T1+T2 ≤ 8분** | | ☐합격 ☐불합격 ☐미실시 | 2026-09-07 PM 잠정 확정 — 기획 발표 규격(10분 발표 + 5분 QA)에서 역산. **§5-4 실측(2026-09-10 완료)**: T1-3~6 합계 **60~90초**로 시간 여유는 크다. ⚠️ **T2 후반이 슬라이드에서 실행으로 바뀌면 그만큼 늘고, 그 구간은 아직 미측정이다.** **실제 위협은 속도가 아니라 T1-3 재현율**이다(R4 비고) |
 | R11 | 실경로/대체 컷 경계가 **9/11 게이트용으로 확정**된다 | 확정 | | ☐합격 ☐불합격 ☐미실시 | 판정 기준 ⓕ의 본문. **T1 대상 ARN 정합은 확정됐고**(PR #321 · §1-2), 남은 것은 **§4의 후보 행 우회**다 — 그 확정이 R11의 실질이다 |
@@ -541,7 +552,7 @@ SSOT 5주차 리스크 3번의 실측:
 
 | # | 대조할 것 | 재는 방법 | 담당 |
 | --- | --- | --- | --- |
-| 1 | §0·§3·§4의 경계 판정 전부 | 각 행의 `파일:줄`·심볼을 다시 연다 — **dev가 하루만 움직여도 낡는다**. **2026-09-10 `a8ba0ba` 기준 전량 재측정**(이전 기준 `8752ddc` 이후 dev 12커밋). 이번엔 **프로덕션 소스가 크게 움직였다** — #313·#318·#319·#320이 `apps/`·`packages/`·`scripts/`를 바꿔 **인용 좌표 7건이 밀렸다**: `incident_intake.py:215→291` · `workflows.py:1094→1379`(`:1103→:1388`) · `executor.py:651→655`·`:672→678`·`:1246→1265`·`:1380→1399` · `seed_localstack.py:290→387`. 그대로인 것은 `agent_dispatcher.py:407`·`:436-442` · `client.py:59`·`:72` · `config.py:140`·`:169` · `inject_mock_threat.py:15`. **게이트 당일 아침에 한 번 더 잰다** | 박지현 |
+| 1 | §0·§3·§4의 경계 판정 전부 | 각 행의 `파일:줄`·심볼을 다시 연다 — **dev가 하루만 움직여도 낡는다**. **2026-09-10 `a8ba0ba` 기준 전량 재측정**(이전 기준 `8752ddc` 이후 dev 12커밋). 이번엔 **프로덕션 소스가 크게 움직였다** — #313·#318·#319·#320이 `apps/`·`packages/`·`scripts/`를 바꿔 **인용 좌표 7건이 밀렸다**: `incident_intake.py:215→291` · `workflows.py:1094→1379`(`:1103→:1388`) · `executor.py:651→655`·`:672→678`·`:1246→1265`·`:1380→1399` · `seed_localstack.py:290→387`. 그대로인 것은 `agent_dispatcher.py:407`·`:436-442` · `client.py:59`·`:72` · `config.py:140`·`:169` · `inject_mock_threat.py:15`. **2026-09-11 아침 재측정 완료 — `977d013`(dev 최신 · 당일 00:00 이후 dev 0커밋) 기준 인용 좌표 42건 전수, 어긋남 0.** 재는 법은 `파일:줄`의 그 줄에 기대 심볼이 실제로 있는지 한 건씩 여는 것이다. 정밀도 1건만 고쳤다 — `workflows.py:161`은 `_executable_candidate` **정의** 줄이고 409 `raise`는 `:179`라, `:1379 latest_for_target()`/`:1388` 표기와 같은 형태로 맞췄다(§0·§4). `agent_dispatcher.py:426-429`는 범위 표기가 정확하다(`:426 dispatchable = [` ~ `:429 if category is IncidentCategory.FINOPS`) | 박지현 |
 | 2 | T2-1의 토폴로지 붉은 노드 | ⚠️ **경로를 갈라야 한다**(2026-09-09 정정). `elbv2`·`autoscaling` 미포함(ADR-0007)은 **AWS 수집 경로**(`collector.collect_region`)에만 해당한다 — **골든 적재 경로**(`scripts/load_golden_assets.py` → `persist_inventory`)는 **AWS를 부르지 않아** `RelationType` **6종이 전부 파생된다**([PR #314](https://github.com/ProjectVigilantis/vigilantis/pull/314) · CI 등식 가드 `test_golden_derives_every_relation_type`). 즉 **그래프 자체는 골든으로 실경로다.** mock으로 남는 것은 **노드를 붉게 만드는 Incident** 쪽이고 그건 §3-2에 걸린다 | 유건희 · 박지현 |
 | 3 | 설계서 §대조 필요 1번(판정기 워크플로 배선) | T2-2·3을 화면으로 올릴 수 있는지가 여기 걸린다 | 김승철 |
 | 4 | ~~`scripts/inject_mock_threat.py:15`의 헤더가 낡았다~~ | ⚠️ **2026-09-10에 한 번 더 낡았다.** 헤더는 여전히 *"`create_incident_from_intake` 가 할 일인데 아직 `NotImplementedError` 다"* 인데, 본문은 #286(#265)으로 구현됐고 **호출부까지 #306 / PR #320으로 섰다**(`services/scheduler.py:126`). 그 파일만 **두 세대 전 문장**을 들고 있다 — 다만 그 호출부는 FinOps 전용이라 **이 스크립트(SecOps)에는 여전히 안 온다.** 고칠 때 그 구분을 함께 적는다 | 김승철 |
@@ -549,7 +560,7 @@ SSOT 5주차 리스크 3번의 실측:
 | 6 | ~~**R10 의 `T1+T2 ≤ 8분` — 절반만 쟀다**~~ → **T2 후반 구간이 새로 미측정이 됐다** | 2026-09-10 PM이 나머지 절반(AI 호출 6.6초 · T1-6 실행 15초 · T1-3~6 합계 60~90초)을 **재서 닫았다**(§5-4). **대신 새 미측정이 생겼다** — T2-4·5·6이 슬라이드에서 실행으로 바뀌면 **차단 실행·확인 시간**이 새로 든다. 종전 8분 전제는 T2 후반이 전부 슬라이드라는 가정 위에 있었다 | 김세혁 · 박지현 |
 | 7 | ⓪ 환경변수 전제가 게이트 당일 셸에도 서는가 | 위 §2-⓪ 두 줄을 새 셸에서 다시 확인한다. **`.env` 로는 안 된다**(`config.py:32-35`). ⚠️ **`.env` 가 있는 머신과 없는 머신의 증상이 다르다** — §2-⓪ 표. 게이트 운영 머신은 **PM 로컬**이다 | 박지현 · 김세혁 |
 | **8** | ~~PR #321 머지 뒤 이 문서에 얹을 것 3건~~ → ✅ **해소(2026-09-10)** | #321이 `977d013`로 머지된 뒤 셋 다 반영했다 — ① §3-1 6번 행 `executor.py:1246 → :1265` ② R6 기대값을 **「더 작은 유형으로 실제로 바뀐다」**로(도착 타입은 결과 칸에 적는다 · §3-1 표 아래 ⚠️) ③ R3–R4 병합 — **R3은 #321 것**(대상 ARN = 사전 준비 ④가 찍은 값), **R4는 이 PR의 재현율 비고**. §2-② 통일도 #321에서 처리돼 이 PR에서 뺐다 | 박지현 |
-| **9** | 🔴 **T2 후보 행 우회를 당일에 준비할 수 있는가** | SECOPS Incident에는 후보 행이 생기지 않아(`agent_dispatcher.py:426-429`) `POST /actions/execute`가 **409**로 떨어진다(§4). 넣는 자리는 `incidents_repo.add_candidate`(`incidents.py:369`) 하나. **못 하면 T2-4·5·6은 대체 컷**이고 §0·§4·§5-3·§7 ⓐ를 그에 맞게 되돌린다 — 이슈 #301에 질의(2026-09-10) | 김세혁 |
+| **9** | 🔴 **T2 후보 행 우회를 당일에 준비할 수 있는가** | SECOPS Incident에는 후보 행이 생기지 않아(`agent_dispatcher.py:426-429`) `POST /actions/execute`가 **409**로 떨어진다(§4). 넣는 자리는 `incidents_repo.add_candidate`(`incidents.py:369`) 하나. **못 하면 T2-4·5·6은 대체 컷**이고 §0·§4·§5-3·§7 ⓐ를 그에 맞게 되돌린다 — 이슈 #301에 질의(2026-09-10 · **2026-09-11 재질의**). **되돌림 판정 시점은 사전 준비 ④가 끝나는 지점**(§4) | 김세혁 |
 
 > **R10의 목표 시간**과 **#267 안건 1·2번**은 이 목록에서 뺐다 — 2026-09-07 PM 확정으로 답이 왔다(R10 = `T1+T2 ≤ 8분` · §1-2). 답이 온 항목을 「대조 필요」에 남겨 두면 **무엇이 아직 열려 있는지**가 흐려진다.
 >
