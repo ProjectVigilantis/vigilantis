@@ -45,3 +45,6 @@ CLAUDE.local.md
 # ---- 로컬 전용 문서 (Obsidian vault) ----
 # 기획·명세 원본 보관용. GitHub에는 올리지 않음 (공식 기준은 docs/ 참조)
 /vigilantis-docs/
+
+# 모의 위협 배달·처리 원문 (로컬 시연 전용)
+.mock-threat-inbox/

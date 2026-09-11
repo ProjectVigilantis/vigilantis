@@ -67,6 +67,9 @@ os.environ.setdefault(
 os.environ.setdefault("DISPATCH_ENABLED", "false")
 # 수집→판정 스캔 파이프라인도 테스트에서 끈다 — 앱 기동 시 실제 스캔이 돌지 않게 한다
 os.environ.setdefault("SCAN_ENABLED", "false")
+# 외부 환경·.env의 실제 inbox를 테스트 앱이 소비하지 않게 강제로 끈다.
+# 소비자 검증은 해당 테스트가 임시 경로와 테스트 세션을 명시해 켠다.
+os.environ["MOCK_THREAT_INBOX_DIR"] = ""
 
 TEST_DB_NAME = f"vigilantis_test_{uuid.uuid4().hex[:8]}"
 TEST_URL = ADMIN_URL.rsplit("/", 1)[0] + "/" + TEST_DB_NAME

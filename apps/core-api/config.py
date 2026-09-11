@@ -64,6 +64,10 @@ class Settings(BaseSettings):
     # (apps/core-api/tests/conftest.py, PR #236 리뷰). 실행 디스패치와 AI 디스패치가
     # 이 하나를 공유한다 — 끄는 목적이 같다
     DISPATCH_ENABLED: bool = True
+    # 모의 관측 공급자는 경로를 지정했을 때만 기동한다(#322). 수집·AI 실행 스위치와
+    # 독립이다. 폴더 안 JSON을 소비하며 DB 결과는 앱의 조회 API에서 확인한다.
+    MOCK_THREAT_INBOX_DIR: str = ""
+    MOCK_THREAT_POLL_SECONDS: float = Field(default=1.0, gt=0)
     # 2/2 Status Check 대기 — services/aws/rollback.py의 waiter 설정 (Issue #240).
     # 기본 15초×12회=3분으로 boto3 기본값(15초×40회=10분)보다 짧다. 판정 1건이
     # 그만큼 다음 스캔을 미루므로(max_instances=1) 시연에서 조일 수 있어야 한다.
