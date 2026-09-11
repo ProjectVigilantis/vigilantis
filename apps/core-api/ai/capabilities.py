@@ -85,7 +85,7 @@ def target_asset_type(runbook_id: RunbookId) -> Optional[AssetType]:
     return ASSET_TYPE_BY_RESOURCE_ID_PARAM.get(RESOURCE_ID_PARAM.get(runbook_id, ""))
 
 
-def build_capabilities(
+def build_finops_capabilities(
     *, asset_type: AssetType, verdict: Verdict
 ) -> list[RunbookCapability]:
     """Incident subject 자산 1건 → 그 Incident의 조치 메뉴. 축 둘은 파일 헤더 참조.

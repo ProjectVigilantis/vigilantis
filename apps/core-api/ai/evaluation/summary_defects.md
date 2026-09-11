@@ -35,7 +35,7 @@
 
 ## 지시문 대응 (v1)
 
-| # | `ai/agent.py` `_SUMMARY_SYSTEM_PROMPT`의 줄 |
+| # | `ai/agent.py` `_FINOPS_SUMMARY_SYSTEM_PROMPT`의 줄 |
 | --- | --- |
 | 1 | `observation:` — 근거가 된 입력 사실을 쓰고 판정의 문턱이 된 값을 포함한다 |
 | 2 | `diagnosis:` — 입력이 확정한 것은 단정으로, 추론한 것은 추정으로 구분한다 |
@@ -49,7 +49,7 @@
 
 | 실측 | 규칙 | 자리 |
 | --- | --- | --- |
-| A7(관측 48개)에서 요약이 판정을 유보하고 후보를 비움(NO_PROPOSAL 4/60) | "verdict는 규칙 엔진이 이미 내린 판정이다 … 판정을 다시 내리는 자리는 승인 단계의 관제자다" | `_SUMMARY_SYSTEM_PROMPT` 둘째 문단 |
+| A7(관측 48개)에서 요약이 판정을 유보하고 후보를 비움(NO_PROPOSAL 4/60) | "verdict는 규칙 엔진이 이미 내린 판정이다 … 판정을 다시 내리는 자리는 승인 단계의 관제자다" | `_FINOPS_SUMMARY_SYSTEM_PROMPT` 둘째 문단 |
 | 3줄이 메뉴에 없는 조치(중지·종료·삭제)를 권함(31/60) | 요약 호출에 가능한 조치의 **목적 문구만**(`available_actions`) 싣는다 — 이름을 주면 되읽고 열거한다 | `agent._summary_payload` |
 | 3줄이 메뉴를 열거하자 후보 노드가 언급된 런북을 다 담음(후보 2건 35/60, `min_size=max_size=1`) | rationale은 뒷받침하는 조치 하나만 · 후보는 "rationale이 뒷받침한 조치를, 한 대상에 하나" | 요약·후보 프롬프트 |
 
