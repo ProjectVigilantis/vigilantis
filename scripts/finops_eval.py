@@ -54,10 +54,10 @@ for path in (REPO_ROOT / "apps" / "core-api", REPO_ROOT / "packages"):
         sys.path.insert(0, str(path))
 
 from ai.agent import (  # noqa: E402
-    PROMPT_VERSION,
+    FINOPS_PROMPT_VERSION,
     _incident_payload,
     _summary_payload,
-    prompt_fingerprint,
+    finops_prompt_fingerprint,
     run_finops_graph,
 )
 from ai.evaluation import (  # noqa: E402
@@ -400,8 +400,8 @@ def main() -> int:
             json.dumps(
                 {
                     "label": label,
-                    "prompt_version": PROMPT_VERSION,
-                    "prompt_sha256": prompt_fingerprint(),
+                    "prompt_version": FINOPS_PROMPT_VERSION,
+                    "prompt_sha256": finops_prompt_fingerprint(),
                     "model_snapshots": sorted(client.model_snapshots),
                     "repeats": report.repeats,
                     "payload_dedup_active": dedup_active,

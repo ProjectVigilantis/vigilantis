@@ -70,18 +70,18 @@ from schemas.runbooks import RunbookId
 #     _PARAMETER_CONSTRAINTS로 싣는다. 프롬프트에 런북 이름을 박으면 그 런북이 메뉴에
 #     없는 인시던트에도 지시가 나가고, 런북 목록이 프롬프트와 계약 두 곳에 생긴다.
 #
-# 문구를 바꾸면 prompt_fingerprint()가 움직여 승인 스냅샷(ai/evaluation/
+# 문구를 바꾸면 finops_prompt_fingerprint()가 움직여 승인 스냅샷(ai/evaluation/
 # summary_prompt_snapshot.json) 대조 테스트가 실패한다 — 재통과 절차는
-# docs/AI_SUMMARY_BASELINE.md. 판 이름(PROMPT_VERSION)은 사람이 부르기 위한 것이고
+# docs/AI_SUMMARY_BASELINE.md. 판 이름(FINOPS_PROMPT_VERSION)은 사람이 부르기 위한 것이고
 # 판정은 해시가 한다. 프롬프트 전문은 스냅샷에 남기지 않는다(ADR-0005 미보존 대상).
 #
 # 비밀값 라벨 표기(`token:`·`password:` 같은 형태)를 프롬프트에 쓰지 않는다 —
 # build_outbound_payload()가 system_prompt에도 마스킹을 적용해 지침이 조용히 잘린다
 # (ai/model_client.py 계약 원칙).
 
-PROMPT_VERSION = "v1"
+FINOPS_PROMPT_VERSION = "v1"
 
-_SUMMARY_SYSTEM_PROMPT = (
+_FINOPS_SUMMARY_SYSTEM_PROMPT = (
     "너는 AWS 비용 최적화 인시던트를 관제자에게 설명한다. 관제자는 이 세 줄과 조치 카드만 "
     "보고 승인할지 차단할지 정한다. 아래 세 줄을 각각 한국어 한 문장으로 쓴다.\n"
     "verdict는 규칙 엔진이 이미 내린 판정이다. 요약은 그 판정이 어떤 값에서 나왔는지를 "
@@ -100,7 +100,7 @@ _SUMMARY_SYSTEM_PROMPT = (
     "화면에 나간다. 그 값은 근거로 인용할 때만 쓴다."
 )
 
-_PROPOSAL_SYSTEM_PROMPT = (
+_FINOPS_PROPOSAL_SYSTEM_PROMPT = (
     "너는 분석 결과를 조치 후보로 옮긴다. capabilities에 실린 Runbook만 고르고, "
     "target_arn은 allowed_target_arns에 있는 값만 쓴다. evidence_ids에는 입력 evidences의 "
     "evidence_id만 인용한다. 고른 Runbook의 required_parameters에 적힌 키는 "
@@ -124,6 +124,8 @@ _PARAMETER_CONSTRAINTS: dict[RunbookId, tuple[str, ...]] = {
 # ------------------------------------------------------------------------------
 
 
+# 아래 docstring도 모델에 전달되는 JSON Schema description이다. 승인된 FinOps
+# 모델 입력을 보존하므로 설명 안의 구 함수명은 유지한다(#323).
 class EvidenceSummaryOutput(BaseModel):
     """summarize_evidence 노드가 모델에서 받는 출력 — CoT 3줄.
 
@@ -186,15 +188,15 @@ class CandidateProposalOutput(BaseModel):
 # RunbookId enum이 바뀌어도 움직이는데, 그것은 모델의 메뉴가 바뀐 것이라 재통과가 맞다.
 
 
-def prompt_material() -> str:
+def finops_prompt_material() -> str:
     """해시 대상 전문. 테스트가 무엇이 해시에 들어가는지 확인하는 데도 쓴다."""
     constraints = {
         runbook_id.value: list(texts)
         for runbook_id, texts in sorted(_PARAMETER_CONSTRAINTS.items(), key=lambda kv: kv[0].value)
     }
     sections = (
-        ("summary_system_prompt", _SUMMARY_SYSTEM_PROMPT),
-        ("proposal_system_prompt", _PROPOSAL_SYSTEM_PROMPT),
+        ("summary_system_prompt", _FINOPS_SUMMARY_SYSTEM_PROMPT),
+        ("proposal_system_prompt", _FINOPS_PROPOSAL_SYSTEM_PROMPT),
         ("parameter_constraints", json.dumps(constraints, ensure_ascii=False, sort_keys=True)),
         (
             "summary_output_schema",
@@ -208,9 +210,9 @@ def prompt_material() -> str:
     return "\n".join(f"[{name}]\n{body}" for name, body in sections)
 
 
-def prompt_fingerprint() -> str:
+def finops_prompt_fingerprint() -> str:
     """승인 스냅샷과 대조하는 값. 사람이 부르는 이름은 PROMPT_VERSION이고 판정은 이것이 한다."""
-    return hashlib.sha256(prompt_material().encode("utf-8")).hexdigest()
+    return hashlib.sha256(finops_prompt_material().encode("utf-8")).hexdigest()
 
 
 # ------------------------------------------------------------------------------
@@ -378,7 +380,7 @@ def _proposal_payload(graph_input: FinOpsGraphInput, summary_lines: list[str]) -
 def _summarize_evidence(state: _FinOpsState) -> dict[str, Any]:
     graph_input = state["graph_input"]
     request = AIModelRequest(
-        system_prompt=_SUMMARY_SYSTEM_PROMPT,
+        system_prompt=_FINOPS_SUMMARY_SYSTEM_PROMPT,
         user_payload=_summary_payload(graph_input),
     )
     try:
@@ -392,7 +394,7 @@ def _summarize_evidence(state: _FinOpsState) -> dict[str, Any]:
 def _propose_candidates(state: _FinOpsState) -> dict[str, Any]:
     graph_input = state["graph_input"]
     request = AIModelRequest(
-        system_prompt=_PROPOSAL_SYSTEM_PROMPT,
+        system_prompt=_FINOPS_PROPOSAL_SYSTEM_PROMPT,
         user_payload=_proposal_payload(graph_input, state["summary_lines"]),
     )
     try:

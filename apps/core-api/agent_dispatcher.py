@@ -111,7 +111,7 @@ from schemas.incidents import AgentInvocationStatus
 
 import workflows
 from ai.agent import run_finops_graph
-from ai.capabilities import build_capabilities
+from ai.capabilities import build_finops_capabilities
 from ai.model_client import AIModelClient
 from ai.openai_client import build_openai_model_client
 from config import Settings, get_settings
@@ -235,7 +235,7 @@ def build_graph_input(db: Session, incident_id: str) -> AgentGraphInput:
 
     if rule_evaluation.verdict is None:
         raise _GraphInputUnavailable("RULE 근거에 판정이 없습니다")
-    capabilities = build_capabilities(
+    capabilities = build_finops_capabilities(
         asset_type=asset.asset_type, verdict=rule_evaluation.verdict
     )
     if not capabilities:

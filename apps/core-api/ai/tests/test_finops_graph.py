@@ -17,14 +17,14 @@ from pydantic import ValidationError
 
 from ai.agent import (
     _PARAMETER_CONSTRAINTS,
-    _PROPOSAL_SYSTEM_PROMPT,
-    _SUMMARY_SYSTEM_PROMPT,
-    PROMPT_VERSION,
+    _FINOPS_PROPOSAL_SYSTEM_PROMPT,
+    _FINOPS_SUMMARY_SYSTEM_PROMPT,
+    FINOPS_PROMPT_VERSION,
     CandidateProposalOutput,
     EvidenceSummaryOutput,
     ProposedCandidate,
-    prompt_fingerprint,
-    prompt_material,
+    finops_prompt_fingerprint,
+    finops_prompt_material,
     run_finops_graph,
 )
 from ai.model_client import FakeAIModelClient
@@ -400,17 +400,17 @@ def test_prompt_fingerprint_matches_approved_snapshot():
     # 있어야 "판 올리기를 잊어도 드러난다"가 말이 아니라 동작이다
     snapshot = json.loads(SNAPSHOT.read_text("utf-8"))
 
-    assert snapshot["version"] == PROMPT_VERSION
-    assert snapshot["prompt_sha256"] == prompt_fingerprint(), (
+    assert snapshot["version"] == FINOPS_PROMPT_VERSION
+    assert snapshot["prompt_sha256"] == finops_prompt_fingerprint(), (
         "프롬프트가 승인 스냅샷과 다릅니다 — docs/AI_SUMMARY_BASELINE.md 절차로 재통과 후 갱신"
     )
 
 
 def test_prompt_material_covers_every_instruction_surface():
-    material = prompt_material()
+    material = finops_prompt_material()
 
-    assert _SUMMARY_SYSTEM_PROMPT in material
-    assert _PROPOSAL_SYSTEM_PROMPT in material
+    assert _FINOPS_SUMMARY_SYSTEM_PROMPT in material
+    assert _FINOPS_PROPOSAL_SYSTEM_PROMPT in material
     for texts in _PARAMETER_CONSTRAINTS.values():
         for text in texts:
             assert text in material
@@ -423,7 +423,7 @@ def test_summary_output_fields_are_the_three_roles():
     assert list(EvidenceSummaryOutput.model_fields) == ["observation", "diagnosis", "rationale"]
 
 
-@pytest.mark.parametrize("prompt", [_SUMMARY_SYSTEM_PROMPT, _PROPOSAL_SYSTEM_PROMPT])
+@pytest.mark.parametrize("prompt", [_FINOPS_SUMMARY_SYSTEM_PROMPT, _FINOPS_PROPOSAL_SYSTEM_PROMPT])
 def test_prompts_are_directive_not_prohibitive(prompt):
     # 금지가 쌓일수록 빈 후보가 가장 안전한 답이 된다(#243) — 금지형 표지를 잡는다
     for marker in ("않는다", "마라", "금지"):
