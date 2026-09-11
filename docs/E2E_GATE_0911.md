@@ -235,8 +235,9 @@ uv run python scripts/load_golden_assets.py --bind-a1-to-seed --verify
 uv run python scripts/inject_mock_threat.py evt_ssh_bruteforce_001
 ```
 
-→ `1건 처리 — 정답 대조 통과` 뒤에 `위험도=HIGH 대응=PRE_MITIGATION_0_5S 사유=RISK_SSH_BRUTEFORCE`.
+→ 두 줄이 나온다 — `위험도=HIGH 대응=PRE_MITIGATION_0_5S 사유=RISK_SSH_BRUTEFORCE` 와 `1건 처리 — 정답 대조 통과(대조 대상만).`
 사유 코드는 접두 `RISK_` 가 붙는다 — 슬라이드에 옮길 때 그대로 쓴다.
+⚠️ **순서로 판정하지 않는다**(2026-09-11 실측 정정). 종전 판은 *"`1건 처리` 뒤에 `위험도=`"* 라고 적었는데 **터미널에서는 반대 순서**다 — 요약 줄이 `sys.stderr`라(`inject_mock_threat.py:146`) 버퍼링이 갈린다. **PowerShell `>` 로 받으면 그 줄이 파일에 아예 없다**(`*>` 또는 `2>&1` 을 쓴다). **두 줄이 다 있는지**로 본다 — §6-1 R8.
 ⚠️ **이 스크립트는 DB에 쓰지 않는다**(`scripts/inject_mock_threat.py` 헤더). 판정을 눈으로 보여 주는 데까지가 이 명령의 몫이다.
 
 **⑥ 스캔 스케줄러 실기동 확인 — 판정 기준 ⓓ의 컷 (여기서 한 번 띄우고, 끈다)**
@@ -530,6 +531,52 @@ SSOT 5주차 리스크 3번의 실측:
 **게이트 뒤로 남는 것 (6주차 9/14–9/18 이월 — 10/1 중간 발표까지 만회 구간은 이 한 주뿐이다)**:
 
 **게이트에서 새로 드러난 것**:
+
+### 6-1. 각 칸을 무엇으로 재나 (2026-09-11 추가)
+
+위 표가 *무엇을 확인하나*라면 이 절은 *그것을 무슨 명령으로 재나*다. **게이트 도중에 재는 법을 짜지 않으려고** 미리 적는다 — 2026-09-08에 사전 준비 8단계 중 3개가 그 자리에서 막혔고, 그 시간이 T-30분 예산을 넘겼다.
+
+> ⚠️ **아래 명령 중 라이브로 돌려 본 것은 R8 하나다.** 작성 머신에 Docker가 없어(`docker ps` → 데몬 없음) 나머지는 **경로·응답 필드·플래그·출력 문자열을 소스에서 확인**하는 데까지만 갔다. 다만 **가장 깨지기 쉬운 두 가지는 실제로 쳤다** — boto3 스니펫의 import 부트스트랩과 `aws` CLI의 인자·JMESPath 파싱(아래 표 밖). *"읽으면 맞는데 치면 안 되는 것"* 이 이 문서에서 이미 세 번 나왔으므로 나머지는 같은 등급으로 의심한다.
+
+> 🔴 **④는 판정하려고 다시 치면 안 된다.** `--verify`가 `load_into_db` **뒤**에 붙어 있어(`scripts/load_golden_assets.py:428 load_into_db` → `:431-434` `--verify`) 대조만 하는 것이 아니라 **재적재**한다. R2는 ④가 **사전 준비에서 찍은 출력**으로 판정하고, 화면은 읽기 전용 조회로 본다.
+
+**🔁 열**: ✅ 몇 번이든 다시 쳐도 된다(읽기 전용) · ⚠️ 조건이 붙는다 · ❌ 재실행 금지.
+
+| # | 재는 법 | 합격 신호 | 🔁 |
+| --- | --- | --- | --- |
+| R1 | §2 ⓪~⑧을 순서대로 치고 **각 단계 뒤 `$LASTEXITCODE`** 를 본다. **파이프를 걸지 않는다** — 파이프 뒤의 코드는 마지막 명령의 것이다 | 8단계 전부 `0` + 각 단계의 *"이렇게 나오면 정상"* 과 문자열 일치 | ⚠️ 단계마다 다름 |
+| R2 | **④가 찍은 출력**을 옮긴다 — `  대조 N건 중 어긋남 0건`(`load_golden_assets.py:378`). 화면은 읽기 전용으로 `Invoke-RestMethod http://localhost:8000/api/v1/assets` | `어긋남 0건` · `collection_status: READY` · ⑦ 로그에 `scan scheduler disabled: SCAN_ENABLED=false` | ❌ ④ 재실행 금지 / 조회는 ✅ |
+| R3 | `(Invoke-RestMethod http://localhost:8000/api/v1/incidents).items` — `incident_id`·`category`·`status`·`subject_arn` 4필드를 본다(`api/incidents.py:239`·`:241-243`) | 1건 · `status: ANALYZING` · `subject_arn` = **④가 찍은 조치 대상 ARN**. ⚠️ **만드는 법은 아직 없다**(§4 · #301) — 이 줄은 *재는* 법이다 | ✅ |
+| R4 | 상세 `(Invoke-RestMethod http://localhost:8000/api/v1/incidents/<id>)`의 `summary_lines`·`recommendations`(`api/incidents.py:153`·`:155`). **재현율**은 ⑦ 터미널의 `agent_dispatch_cycle_done` 줄을 센다 — `succeeded=1`이 나오기까지 몇 주기인가(`agent_dispatcher.py:433`·`:446` · 필드 `:143-154`) | `summary_lines` 3줄 · `recommendations` 1건 이상 · 같은 줄의 `failed`·`errored`가 `0`이면 **1회 성공** | ✅ |
+| R5 | 같은 상세의 `status` | `AWAITING_APPROVAL`. **화면 버튼이 열리는 것과 갈라 적는다**(위 표 비고) | ✅ |
+| R6 | 정상 경로는 **화면 [조치 실행] 버튼**이다. FE가 막히면 `POST http://localhost:8000/api/v1/actions/execute` — 본문 3필드 `incident_id`·`runbook_id`·`idempotency_key`(`api/actions.py:47-49`). 실물은 `aws --endpoint-url http://localhost:4566 ec2 describe-instances --instance-ids <시드 인스턴스 ID> --query "Reservations[].Instances[].InstanceType"` | `202` + `execution_id` · 상세 `executions[].status`가 `SUCCESS` · **도착 타입이 출발보다 작다**(값은 결과 칸에) | ⚠️ **실행은 1회** — 같은 `idempotency_key` 재요청은 `200`이고 새 실행이 아니다(`routers/actions.py:39-40`) |
+| R7 | 명령 없음 — §3-3의 한 문장을 **실제로 말했는가** | 심사자가 *미구현*이 아니라 *미시연*으로 되물으면 성립 | ✅ |
+| R8 | ⑤ 재실행: `uv run python scripts/inject_mock_threat.py evt_ssh_bruteforce_001` | 두 줄이 **함께** 나온다 — `위험도=HIGH 대응=PRE_MITIGATION_0_5S 사유=RISK_SSH_BRUTEFORCE` 와 `1건 처리 — 정답 대조 통과(대조 대상만).` ⚠️ 뒷줄은 **stderr**다(아래 ⚠️) | ✅ **DB·AWS를 안 써서 몇 번이든** |
+| R9 | `aws --endpoint-url http://localhost:4566 ec2 describe-network-acls --network-acl-ids <③이 찍은 acl-id> --query "NetworkAcls[0].Entries[?CidrBlock=='203.0.113.10/32']"` | `RuleAction: deny` · `Egress: false` 항목 **1건**. `test_execute_nacl_localstack.py:80-84`가 재는 모양과 같다 | ✅ |
+| R9-2 | 명령 없음 — R7과 같다 | 〃 | ✅ |
+| R10 | T1-1 시작 ~ T2 마지막 컷까지 **벽시계**. T1 구간과 T2 구간을 갈라 적는다 | 합 **≤ 8분**. T2 후반이 실경로로 서면 **그 구간을 따로 적는다** — §대조 6번이 미측정이라 적어 둔 자리다 | ✅ |
+| R11 | 명령 없음 — §4의 후보 행 우회가 **사전 준비 ④가 끝나는 지점**에 섰는가로 갈린다 | 섰으면 그대로, 안 섰으면 대체 컷 전환을 §0·§4·§5-3·§7 ⓐ에 반영한 뒤 `합격` | — |
+
+**`aws` CLI는 자격증명을 스스로 넣지 않는다.** boto3 경로는 `services/aws/client.py:72 _ensure_dummy_credentials()`가 **엔드포인트가 있을 때만** `test`/`test`를 넣지만, CLI는 그 코드를 타지 않는다. R6·R9를 치기 전에 같은 셸에 준다.
+
+```powershell
+$env:AWS_ACCESS_KEY_ID = 'test'
+$env:AWS_SECRET_ACCESS_KEY = 'test'
+$env:AWS_DEFAULT_REGION = 'ap-northeast-2'
+```
+
+> **⓪에는 넣지 않았다** — 사전 준비 ⓪~⑧에 `aws` CLI를 쓰는 단계가 없다. **판정할 때만** 필요하다.
+> **`aws` 가 없는 머신에서는 boto3 한 줄로 대신한다**(2026-09-11 실측 — import 부트스트랩과 엔드포인트·리전 해석까지 확인했다. 남은 것은 실호출뿐이다).
+> ```powershell
+> uv run python -c "import sys; sys.path[:0]=['apps/core-api','packages']; from services.aws.client import aws_client; print(aws_client('ec2').describe_network_acls(NetworkAclIds=['<acl-id>'])['NetworkAcls'][0]['Entries'])"
+> ```
+> **두 경로를 `sys.path` 앞에 함께 넣어야 한다** — `services`(core-api)와 `schemas`(packages)가 다른 자리에 있다(`scripts/seed_localstack.py:45-48`과 같은 부트스트랩).
+
+> ⚠️ **R8의 합격 신호 한 줄은 `stderr`다 — 출력을 파일로 받으면 사라진다**(2026-09-11 실측).
+> `1건 처리 — 정답 대조 통과(대조 대상만).` 은 `inject_mock_threat.py:146`이 **stderr로** 찍는다. `--json`의 stdout을 순수 JSON으로 지키기 위한 의도다(#269 리뷰). 그래서
+> - **터미널에 그냥 치면** 대본이 적은 순서대로 나온다 — 위험도 줄 먼저, 요약 줄 나중.
+> - **PowerShell `>` 로 받으면 그 줄이 파일에 없다.** 남기려면 `*>` 또는 `2>&1` 을 쓴다.
+> - **파이프를 걸면 순서가 뒤집힌다** — stdout은 블록 버퍼링되고 stderr는 아니다. 실측에서 요약 줄이 **먼저** 나왔다. 순서로 판정하지 말고 **두 줄이 다 있는지**로 판정한다.
 
 ---
 
