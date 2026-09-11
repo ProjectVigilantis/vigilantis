@@ -2,8 +2,8 @@
 
 지정 폴더의 *.json 한 파일이 관측 한 건이다. 공급자는 임시 파일을 완성한 뒤
 원자적으로 공개한다. 소비 완료는 done/, 계약 거부는 rejected/에 원문을 보관한다.
-저장소·파일 I/O 실패는 원본을 남겨 다음 회차에 재시도한다. commit 직후 종료되어
-재전달돼도 기존 Intake의 중복 키가 저장을 멱등하게 만든다.
+DB 데이터 오류는 거부로 보관하고, 그 밖의 저장소·파일 I/O 실패는 원본을 남겨
+재시도한다. commit 직후 종료되어 재전달돼도 기존 Intake의 중복 키가 저장을 멱등하게 만든다.
 
 worker 1개가 순차 소비한다. 종료 요청 뒤 새 파일은 받지 않고 처리 중인 한 건을
 마친 뒤 돌아온다. lifespan은 이 종료를 기다린 뒤 RealtimeManager를 닫는다.
@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Callable
 
 from pydantic import TypeAdapter
+from sqlalchemy.exc import DataError
 from sqlalchemy.orm import Session, sessionmaker
 
 from schemas.api.ws import WsEvent
@@ -76,9 +77,14 @@ class MockThreatConsumer:
         self._task: asyncio.Task | None = None
 
     def start(self) -> None:
-        # 잘못 설정한 경로·권한은 기동 실패로 드러낸다.
-        self.inbox.mkdir(parents=True, exist_ok=True)
+        # cwd에 따라 달라지는 상대 경로와 없는 부모 경로는 기동 실패로 드러낸다.
+        if not self.inbox.is_absolute():
+            raise ValueError(f"MOCK_THREAT_INBOX_DIR는 절대 경로여야 합니다: {self.inbox}")
+        self.inbox.mkdir(exist_ok=True)
         self._task = asyncio.create_task(asyncio.to_thread(self._run))
+        logger.info("mock_threat_consumer_started", extra={
+            "inbox": str(self.inbox), "interval_seconds": self._interval,
+        })
 
     async def stop(self) -> None:
         self._stopping.set()
@@ -111,9 +117,17 @@ class MockThreatConsumer:
                     outcome = receive_threat(db, observation, self._publish)
                 report["created" if outcome.created else "existing"] += 1
                 self._archive(path, "done")
-            except ThreatInputRejected:
+            except (ThreatInputRejected, DataError) as exc:
                 report["rejected"] += 1
-                logger.warning("mock_threat_input_rejected", extra={"file": path.name})
+                is_data_error = isinstance(exc, DataError)
+                cause = exc.orig if is_data_error else (exc.__cause__ or exc)
+                # 예외 문자열에는 입력값·SQL이 섞일 수 있어 분류와 SQLSTATE만 기록한다.
+                logger.warning("mock_threat_input_rejected", extra={
+                    "file": path.name,
+                    "reason": "database_data_error" if is_data_error else "input_contract_rejected",
+                    "error_type": type(cause).__name__,
+                    "sqlstate": getattr(cause, "sqlstate", None) if is_data_error else None,
+                })
                 try:
                     self._archive(path, "rejected")
                 except OSError:

@@ -173,7 +173,7 @@ def test_inbox_retries_failed_delivery_and_continues_other_files(tmp_path, monke
     second = prepare_observation(tmp_path, parse_observation(_raw()))
     (tmp_path / "invalid.json").write_text('{"initial_risk_level":"HIGH"}', encoding="utf-8")
     (tmp_path / ".incomplete.tmp").write_text("{", encoding="utf-8")
-    failing = json.loads(first.read_text())["event_id"]
+    failing = json.loads(first.read_text(encoding="utf-8"))["event_id"]
     calls = []
 
     def receive(db, observation, publish):
@@ -249,7 +249,7 @@ def test_prepare_cli_preserves_golden_and_only_prepares_observation(tmp_path):
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
     assert result["status"] == "PREPARED"
-    event = parse_observation(json.loads(Path(result["path"]).read_text()))
+    event = parse_observation(json.loads(Path(result["path"]).read_text(encoding="utf-8")))
     assert event.target_arn == target
     assert event.failed_attempt_count == 120 and event.window_seconds == 300
     assert event.occurred_at == datetime(2026, 9, 11, tzinfo=timezone.utc)
@@ -327,3 +327,95 @@ def test_app_consumes_s3_and_publishes_websocket_after_commit(
                 assert observed[0].data.incident_id == dto.incident_id
     finally:
         get_settings.cache_clear()
+
+
+@pytest.mark.parametrize("invalid_path", ["relative", "missing_parent"])
+def test_consumer_rejects_invalid_inbox_without_creating_directories(tmp_path, monkeypatch, invalid_path):
+    monkeypatch.chdir(tmp_path)
+    inbox = Path("relative-inbox") if invalid_path == "relative" else tmp_path / "missing" / "inbox"
+    consumer = MockThreatConsumer(inbox, MagicMock(), MagicMock(), interval_seconds=1)
+    expected = ValueError if invalid_path == "relative" else FileNotFoundError
+
+    async def scenario():
+        try:
+            with pytest.raises(expected):
+                consumer.start()
+        finally:
+            await consumer.stop()
+
+    asyncio.run(scenario())
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_consumer_creates_inbox_under_existing_parent_and_logs_path(tmp_path, caplog):
+    inbox = tmp_path / "inbox"
+    consumer = MockThreatConsumer(inbox, MagicMock(), MagicMock(), interval_seconds=2)
+
+    async def scenario():
+        consumer.start()
+        try:
+            assert inbox.is_dir()
+        finally:
+            await consumer.stop()
+
+    with caplog.at_level(logging.INFO, logger="vigilantis.mock_threat_source"):
+        asyncio.run(scenario())
+    started = [r for r in caplog.records if r.message == "mock_threat_consumer_started"]
+    assert len(started) == 1
+    assert started[0].inbox == str(inbox)
+    assert started[0].interval_seconds == 2
+
+
+@pytest.mark.parametrize(("field", "length"), [("event_id", 300), ("target_arn", 600)])
+def test_db_data_error_is_archived_without_retry_and_next_input_is_saved(
+    committed_sessions, tmp_path, monkeypatch, caplog, field, length,
+):
+    raw = _raw()
+    private_value = "test322-private-input-" + "x" * length
+    raw[field] = private_value
+    rejected_path = prepare_observation(tmp_path, parse_observation(raw)).rename(tmp_path / "00-rejected.json")
+    normal = _raw()
+    normal_path = prepare_observation(tmp_path, parse_observation(normal)).rename(tmp_path / "01-normal.json")
+    calls = []
+    events = []
+    receive = mock_threat_source.receive_threat
+
+    def observe_receive(db, observation, publish):
+        if calls:
+            # 앞선 DataError가 rollback된 뒤 정상 입력까지 같은 회차에서 도달한다.
+            with committed_sessions() as check:
+                assert not list(check.scalars(select(models.ThreatEvent)))
+                assert not list(check.scalars(select(models.Incident)))
+                assert not list(check.scalars(select(models.Evidence)))
+            assert events == []
+        calls.append(observation.event_id)
+        return receive(db, observation, publish)
+
+    monkeypatch.setattr(mock_threat_source, "receive_threat", observe_receive)
+    consumer = MockThreatConsumer(tmp_path, committed_sessions, events.append, interval_seconds=1)
+    with caplog.at_level(logging.WARNING, logger="vigilantis.mock_threat_source"):
+        assert consumer.consume_once() == {"created": 1, "existing": 0, "rejected": 1, "failed": 0}
+        assert consumer.consume_once() == {"created": 0, "existing": 0, "rejected": 0, "failed": 0}
+    assert calls == [raw["event_id"], normal["event_id"]]
+    assert not rejected_path.exists() and not normal_path.exists()
+    archived = list((tmp_path / "rejected").glob("*.json"))
+    assert len(archived) == 1
+    assert json.loads(archived[0].read_text(encoding="utf-8"))[field] == private_value
+    assert len(list((tmp_path / "done").glob("*.json"))) == 1
+    assert len(events) == 1
+    with committed_sessions() as check:
+        threats = list(check.scalars(select(models.ThreatEvent)))
+        assert len(threats) == 1 and threats[0].source_event_id == normal["event_id"]
+        assert len(list(check.scalars(select(models.Incident)))) == 1
+        assert len(list(check.scalars(select(models.Evidence)))) == 1
+    rejected = [r for r in caplog.records if r.message == "mock_threat_input_rejected"]
+    assert len(rejected) == 1
+    assert rejected[0].reason == "database_data_error"
+    assert rejected[0].error_type == "StringDataRightTruncation"
+    assert rejected[0].sqlstate == "22001"
+    assert rejected[0].exc_info is None
+    from logging_config import JsonLineFormatter
+
+    rendered = JsonLineFormatter().format(rejected[0])
+    assert private_value not in rendered
+    assert "INSERT INTO" not in rendered
