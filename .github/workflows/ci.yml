@@ -16,6 +16,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      AWS_ENDPOINT_URL: http://localhost:4566
     services:
       localstack:
         image: localstack/localstack:4.14.0
@@ -54,8 +56,6 @@ jobs:
 
       - name: Seed LocalStack
         run: uv run python scripts/seed_localstack.py
-        env:
-          AWS_ENDPOINT_URL: http://localhost:4566
 
       # DB 미기동 시 통합 테스트는 조용히 skip되고 CI는 초록불이 된다 —
       # 여기서 먼저 접속을 확인해 그 사각지대를 막는다. (Issue #92)

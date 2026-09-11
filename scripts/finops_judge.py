@@ -40,7 +40,7 @@ for path in (REPO_ROOT / "apps" / "core-api", REPO_ROOT / "packages"):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from ai.agent import _incident_payload, prompt_fingerprint  # noqa: E402
+from ai.agent import _incident_payload, finops_prompt_fingerprint  # noqa: E402
 from ai.evaluation import (  # noqa: E402
     JUDGE_VERSION,
     DefectJudgement,
@@ -338,7 +338,7 @@ def main() -> int:
             return 1
     # 승인 스냅샷의 해시와 지표는 같은 문구의 실측을 가리켜야 한다 — 현재 문구로 만든 원자료가
     # 하나도 없으면 문구를 고친 뒤 생성을 건너뛴 것이다(이전 판 원자료만 재판정하는 경우는 예외)
-    current_prompt = prompt_fingerprint()
+    current_prompt = finops_prompt_fingerprint()
     if not any(raw.get("prompt_sha256") == current_prompt for raw in sources):
         print(
             "현재 프롬프트로 만든 원자료가 없다 — 승인할 문구는 그 문구로 생성·판정한 결과여야 한다. "

@@ -33,18 +33,15 @@ from schemas.agents import FinOpsGraphInput
 from schemas.api.assets import AssetType, RelationType, SkipReasonCode, Verdict
 from schemas.assets import AssetInventory, Ec2Asset, MetricName
 
-from ai.capabilities import build_capabilities
+from ai.capabilities import build_finops_capabilities
 from services.rule_engine import evaluate_ec2
 
 # ------------------------------------------------------------------------------
 # 인시던트로 삼을 판정
 # ------------------------------------------------------------------------------
-# rule_engine은 COST_CANDIDATE·THREAT·UNUSED를 AI로 넘긴다고 적고 있다
-# (services/rule_engine.py 헤더). 그중 FinOps 그래프가 받을 수 있는 것은
-# COST_CANDIDATE뿐이다.
-#   - THREAT·UNUSED의 대상 런북(EC2_ISOLATE·NACL_*·SG_DELETE_ISOLATED)은 전부
-#     RUNBOOK_DOMAIN_BY_ID에서 SECOPS이고, FinOpsGraphInput.domain은 FINOPS 고정이다.
-#   - SKIP은 LLM 호출을 아끼려고 판정 단계가 이미 거른 자산이라 인시던트가 되지 않는다.
+# 이 고정 계측 세트는 COST_CANDIDATE EC2만 대상으로 한다.
+# 프로덕션 FinOps는 UNUSED SG·EBS도 처리한다. Incident 분류와 Registry 도메인은
+# 별개이며, 이 필터는 그래프의 지원 범위가 아니라 승인된 계측 범위다.
 _INCIDENT_VERDICTS = frozenset({Verdict.COST_CANDIDATE})
 
 
@@ -184,7 +181,7 @@ def finops_cases(inventory: AssetInventory, expected: Mapping[str, Any]) -> list
                 ],
                 # 프로덕션과 같은 빌더를 쓴다 — 두 벌이면 계측이 재는 입력과 실경로가
                 # 만드는 입력이 갈린다(ai/capabilities.py)
-                "capabilities": build_capabilities(
+                "capabilities": build_finops_capabilities(
                     asset_type=AssetType.EC2, verdict=verdict
                 ),
             }

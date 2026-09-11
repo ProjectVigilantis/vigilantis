@@ -42,7 +42,9 @@ import logging
 from typing import Mapping, Optional
 
 from schemas.agents import RunbookCapability
-from schemas.api.assets import AssetType, Verdict
+from schemas.api.assets import AssetItem, AssetType, RelationType, Verdict
+from schemas.events import ThreatEventType
+from services.aws.executor import parse_arn
 from schemas.runbook_parameters import RESOURCE_ID_PARAM
 from schemas.runbooks import (
     AI_RECOMMENDABLE_RUNBOOK_IDS,
@@ -85,7 +87,7 @@ def target_asset_type(runbook_id: RunbookId) -> Optional[AssetType]:
     return ASSET_TYPE_BY_RESOURCE_ID_PARAM.get(RESOURCE_ID_PARAM.get(runbook_id, ""))
 
 
-def build_capabilities(
+def build_finops_capabilities(
     *, asset_type: AssetType, verdict: Verdict
 ) -> list[RunbookCapability]:
     """Incident subject 자산 1건 → 그 Incident의 조치 메뉴. 축 둘은 파일 헤더 참조.
@@ -120,3 +122,39 @@ def build_capabilities(
             extra={"asset_type": asset_type.value, "verdict": verdict.value},
         )
     return capabilities
+
+
+def secops_action_targets(asset: AssetItem) -> dict[str, list[str]]:
+    """현재 지원하는 차단 대상은 EC2의 직접 PROTECTED_BY NACL이다.
+
+    같은 VPC라는 이유로 모든 NACL을 허용하지 않는다. 수집된 관계만 사용하며,
+    실제 자산 행 존재 여부는 Dispatcher가 입력 조립 때 확인한다.
+    """
+    targets = []
+    if asset.asset_type is AssetType.EC2:
+        for relation in asset.relationships:
+            arn = parse_arn(relation.target_arn)
+            if (relation.relation_type is RelationType.PROTECTED_BY and arn is not None
+                    and arn.resource_type == "network-acl"
+                    and arn.account_id == asset.account_id and arn.region == asset.region):
+                targets.append(relation.target_arn)
+    return {RunbookId.RUNBOOK_NACL_ADD_DENY.value: sorted(set(targets))}
+
+
+def build_secops_capabilities(
+    *, asset: AssetItem, event_type: ThreatEventType
+) -> list[RunbookCapability]:
+    """조회·실행 의존성이 연결된 SSH 차단만 제공한다.
+
+    EC2_ISOLATE의 isolation_group_id·target_group_arn 공급은 아직 없다.
+    OPEN_IP의 SG를 NACL 또는 미부착 삭제 대상으로 추측하지 않는다.
+    빈 메뉴의 처분은 Dispatcher가 소유한다.
+    """
+    runbook = RunbookId.RUNBOOK_NACL_ADD_DENY
+    if event_type is not ThreatEventType.SSH_BRUTE_FORCE or not secops_action_targets(asset)[runbook.value]:
+        return []
+    return [RunbookCapability(
+        runbook_id=runbook,
+        purpose=CAPABILITY_PURPOSE[runbook],
+        allowed_target_asset_types=[AssetType.NACL],
+    )]
