@@ -127,6 +127,12 @@ export DISPATCH_INTERVAL_SECONDS=2
 
 > ⚠️ **`SCAN_ENABLED` 는 이 블록에 넣지 않는다.** ⑥은 스캔이 **켜진 채로** 떠야 하고 ⑦만 꺼야 한다 — 이 셸에 미리 넣으면 ⑥이 판정 기준 ⓓ(스캔 스케줄러 실기동)를 못 보인다. ⑦ 자리에서 준다.
 
+> 🔴 **이 블록을 `.ps1` 파일로 저장하려면 BOM을 넣는다**(2026-09-11 실측 — 여기서 한 번 당했다).
+> **Windows PowerShell 5.1은 BOM 없는 UTF-8 `.ps1` 을 cp949로 읽는다.** 한글 주석이 깨지면서 **줄바꿈까지 먹혀 바로 다음 줄이 주석 안으로 빨려 들어간다** — 그 줄은 **오류 없이 조용히 실행되지 않는다.** 실제로 `$env:SCAN_ENABLED = 'false'` 한 줄이 그렇게 사라져 ⑦이 스캔을 켠 채 떴고, 로그를 보기 전까지 몰랐다.
+> - **콘솔에 직접 붙여 넣으면 안 난다** — 권장 경로다.
+> - 파일로 남기려면 `Set-Content -Encoding UTF8` 로 저장하거나 **스크립트에 한글을 쓰지 않는다.**
+> - 증상 구분법: **환경변수 일부만 먹었다면** 코드가 아니라 **이 문제**다. 전부 안 먹었으면 다른 원인이다.
+
 **`.env` 로 되는 것과 안 되는 것이 갈린다.** 클래스마다 읽는 원천이 다르다(`apps/core-api/config.py`).
 
 | | 클래스 | `.env` | 값 |
@@ -213,6 +219,9 @@ uv run python scripts/load_golden_assets.py --bind-a1-to-seed --verify
 
 둘 다 스택 트레이스만 뜨므로 원인이 바로 안 보인다. **⓪을 먼저 하면 양쪽 다 안 난다.**
 
+> 🔴 **이 가드가 찍는 복구 절차 1행은 PowerShell에서 파서 오류다**(2026-09-11 실측). 스크립트가 `docker compose down -v && docker compose up -d db localstack` 을 찍는데, **Windows PowerShell 5.1에는 `&&` 가 없다** — `The token '&&' is not a valid statement separator in this version.` 로 죽는다. 운영 머신이 Windows로 확정된 이상(#316) **위 표의 두 줄 형태로 친다.** 스크립트 쪽 수정은 `scripts/load_golden_assets.py` 담당에게 넘겼다(#301).
+> **이 가드가 뜨는 순간이 곧 그 절차가 필요한 순간이다** — T-30분 예산 안에서 두 번 막히지 않게 여기 적어 둔다.
+
 **반드시 ③ 뒤에 돌린다** — 바인딩이 살아있는 시드 인스턴스를 이름으로 조회하기 때문이다. 출력 셋째 줄의
 
 ```text
@@ -227,7 +236,7 @@ uv run python scripts/load_golden_assets.py --bind-a1-to-seed --verify
 | --- | --- | --- |
 | `살아있는 시드 인스턴스가 없다` | ③을 건너뛰었다 | ③을 먼저 돌린다 |
 | `시드 인스턴스 타입이 골든 A1과 다르다` | 이전 시연으로 이미 다운사이징됐다. 시드 스크립트는 이름으로 기존 인스턴스를 재사용하므로 **재실행만으로는 안 돌아온다** | `docker compose restart localstack` 후 ③ 재실행 |
-| `이번 바인딩과 다른 A1 자산이 DB에 남아 있다` | 예전에 `--bind-a1-to-seed` 없이 적재했거나, **이전 LocalStack 기동의 바인딩**이 남아 있다(시드 인스턴스 ID는 재기동마다 바뀐다). 그대로 두면 **자산 화면에 A1이 두 장** 뜨고 실물 없는 쪽을 고르면 실행이 깨진다 | `docker compose down -v` → ①②③④ 재실행 |
+| `이번 바인딩과 다른 A1 자산이 DB에 남아 있다` | 예전에 `--bind-a1-to-seed` 없이 적재했거나, **이전 LocalStack 기동의 바인딩**이 남아 있다(시드 인스턴스 ID는 재기동마다 바뀐다). 그대로 두면 **자산 화면에 A1이 두 장** 뜨고 실물 없는 쪽을 고르면 실행이 깨진다 | `docker compose down -v` → ①②③④ 재실행. ⚠️ **스크립트가 찍는 줄을 그대로 복사하지 않는다** — 아래 🔴 |
 
 **⑤ 위협 판정 확인 — T2-2·3의 실경로 근거**
 
@@ -274,13 +283,15 @@ SCAN_ENABLED=false uv run uvicorn main:app --app-dir apps/core-api
 
 PowerShell에는 이 앞자리 대입 문법이 없다 — 같은 셸에서 `$env:SCAN_ENABLED = 'false'`를 먼저 주고 `uv run uvicorn ...`을 부른다. **⑦이 끝나면 그 셸을 닫는다**(값이 남아 다음 기동까지 스캔을 끈다).
 
-→ 기동 로그에 세 줄(2026-09-08 실측):
+→ 기동 로그에 세 줄(2026-09-11 재실측):
 
 ```
 "event": "scan scheduler disabled: SCAN_ENABLED=false"
-"event": "dispatcher started: job=execution_dispatch interval=10s"
-"event": "agent dispatcher started: job=agent_dispatch interval=30s"
+"event": "dispatcher started: job=execution_dispatch interval=2s"
+"event": "agent dispatcher started: job=agent_dispatch interval=3s"
 ```
+
+⚠️ **`interval` 두 값은 ⓪을 따랐을 때의 값이다**(2026-09-11 정정). 종전 판은 `10s`·`30s`로 적었는데 그것은 **기본값**이고, ⓪의 주기 노브 두 줄(`DISPATCH_INTERVAL_SECONDS=2` · `AGENT_DISPATCH_INTERVAL_SECONDS=3`)을 주면 **`2s`·`3s`로 뜬다.** ⓪ 노브는 그 뒤에 추가돼 이 블록이 함께 갱신되지 않았다. **숫자가 다르다고 멈추지 않는다 — 오히려 `2s`·`3s`가 ⓪이 먹었다는 증거다.**
 
 **끄였다는 것을 확인하는 방법**: 로그에서 `finops_secops_scan` 이 **0건**이어야 한다. ⑥ 에서는 이 문자열이 뜨고 ⑦ 에서는 안 뜬다 — 그 차이가 곧 R2 의 전제다.
 
@@ -536,7 +547,9 @@ SSOT 5주차 리스크 3번의 실측:
 
 위 표가 *무엇을 확인하나*라면 이 절은 *그것을 무슨 명령으로 재나*다. **게이트 도중에 재는 법을 짜지 않으려고** 미리 적는다 — 2026-09-08에 사전 준비 8단계 중 3개가 그 자리에서 막혔고, 그 시간이 T-30분 예산을 넘겼다.
 
-> ⚠️ **아래 명령 중 라이브로 돌려 본 것은 R8 하나다.** 작성 머신에 Docker가 없어(`docker ps` → 데몬 없음) 나머지는 **경로·응답 필드·플래그·출력 문자열을 소스에서 확인**하는 데까지만 갔다. 다만 **가장 깨지기 쉬운 두 가지는 실제로 쳤다** — boto3 스니펫의 import 부트스트랩과 `aws` CLI의 인자·JMESPath 파싱(아래 표 밖). *"읽으면 맞는데 치면 안 되는 것"* 이 이 문서에서 이미 세 번 나왔으므로 나머지는 같은 등급으로 의심한다.
+> ✅ **2026-09-11에 스택을 세워 대부분을 실제로 쳤다.** `docker compose down -v` 부터 시작해 **①②③④⑥⑦을 대본대로 한 셸에서** 돌렸고 **전부 rc=0**이었다. ④의 stale A1 가드도 실제로 걸려 봤다(rc=2 · 아래 §2-④). 표의 **합격 신호는 그때 실제로 나온 문자열**이다.
+> ⚠️ **못 친 것은 셋이다 — 표에 `🔬미실측`으로 적었다.** **R4·R5와 R6의 실행 단계**는 Incident 1건과 `OPENAI_API_KEY`가 있어야 하는데 작성 머신에 둘 다 없다(§2-⓪). **R1의 ⑧(FE 연결)** 도 같다. 그 칸들은 **경로·응답 필드·플래그를 소스에서 확인한 데까지**다.
+> **이 절을 만들면서 대본 자체의 어긋남 셋이 나왔다** — ⑦ 기대 출력의 `interval`(§2-⑦), 가드가 찍는 복구 1행의 `&&`(§2-④), §2-⑤ 출력의 문자열·순서. **전부 쳐 봐서 나왔고 읽어서는 안 나왔다.**
 
 > 🔴 **④는 판정하려고 다시 치면 안 된다.** `--verify`가 `load_into_db` **뒤**에 붙어 있어(`scripts/load_golden_assets.py:428 load_into_db` → `:431-434` `--verify`) 대조만 하는 것이 아니라 **재적재**한다. R2는 ④가 **사전 준비에서 찍은 출력**으로 판정하고, 화면은 읽기 전용 조회로 본다.
 
@@ -544,15 +557,15 @@ SSOT 5주차 리스크 3번의 실측:
 
 | # | 재는 법 | 합격 신호 | 🔁 |
 | --- | --- | --- | --- |
-| R1 | §2 ⓪~⑧을 순서대로 치고 **각 단계 뒤 `$LASTEXITCODE`** 를 본다. **파이프를 걸지 않는다** — 파이프 뒤의 코드는 마지막 명령의 것이다 | 8단계 전부 `0` + 각 단계의 *"이렇게 나오면 정상"* 과 문자열 일치 | ⚠️ 단계마다 다름 |
-| R2 | **④가 찍은 출력**을 옮긴다 — `  대조 N건 중 어긋남 0건`(`load_golden_assets.py:378`). 화면은 읽기 전용으로 `Invoke-RestMethod http://localhost:8000/api/v1/assets` | `어긋남 0건` · `collection_status: READY` · ⑦ 로그에 `scan scheduler disabled: SCAN_ENABLED=false` | ❌ ④ 재실행 금지 / 조회는 ✅ |
-| R3 | `(Invoke-RestMethod http://localhost:8000/api/v1/incidents).items` — `incident_id`·`category`·`status`·`subject_arn` 4필드를 본다(`api/incidents.py:239`·`:241-243`) | 1건 · `status: ANALYZING` · `subject_arn` = **④가 찍은 조치 대상 ARN**. ⚠️ **만드는 법은 아직 없다**(§4 · #301) — 이 줄은 *재는* 법이다 | ✅ |
-| R4 | 상세 `(Invoke-RestMethod http://localhost:8000/api/v1/incidents/<id>)`의 `summary_lines`·`recommendations`(`api/incidents.py:153`·`:155`). **재현율**은 ⑦ 터미널의 `agent_dispatch_cycle_done` 줄을 센다 — `succeeded=1`이 나오기까지 몇 주기인가(`agent_dispatcher.py:433`·`:446` · 필드 `:143-154`) | `summary_lines` 3줄 · `recommendations` 1건 이상 · 같은 줄의 `failed`·`errored`가 `0`이면 **1회 성공** | ✅ |
-| R5 | 같은 상세의 `status` | `AWAITING_APPROVAL`. **화면 버튼이 열리는 것과 갈라 적는다**(위 표 비고) | ✅ |
-| R6 | 정상 경로는 **화면 [조치 실행] 버튼**이다. FE가 막히면 `POST http://localhost:8000/api/v1/actions/execute` — 본문 3필드 `incident_id`·`runbook_id`·`idempotency_key`(`api/actions.py:47-49`). 실물은 `aws --endpoint-url http://localhost:4566 ec2 describe-instances --instance-ids <시드 인스턴스 ID> --query "Reservations[].Instances[].InstanceType"` | `202` + `execution_id` · 상세 `executions[].status`가 `SUCCESS` · **도착 타입이 출발보다 작다**(값은 결과 칸에) | ⚠️ **실행은 1회** — 같은 `idempotency_key` 재요청은 `200`이고 새 실행이 아니다(`routers/actions.py:39-40`) |
+| R1 | §2 ⓪~⑧을 순서대로 치고 **각 단계 뒤 `$LASTEXITCODE`** 를 본다. **파이프를 걸지 않는다** — 파이프 뒤의 코드는 마지막 명령의 것이다 | 8단계 전부 `0` + 각 단계의 *"이렇게 나오면 정상"* 과 문자열 일치. **2026-09-11 실측: ①②③④ rc=0** (빈 DB에서 ②가 리비전 6개를 올린다 · ⑥⑦도 기대 로그 일치). **⑧만 🔬미실측** | ⚠️ 단계마다 다름 |
+| R2 | **④가 찍은 출력**을 옮긴다 — `  대조 N건 중 어긋남 0건`(`load_golden_assets.py:378`). 화면은 읽기 전용으로 `Invoke-RestMethod http://localhost:8000/api/v1/assets` | **2026-09-11 실측**: ④가 `대조 28건 중 어긋남 0건` · `자산 32건 적재 · CollectionRun 5건` · `판정 분포: {'COST_CANDIDATE': 6, 'SKIP': 19, 'THREAT': 1, 'UNUSED': 2}`. 화면은 `collection_status: READY` · `items 32` 로 **④ 출력과 일치**. ⑦ 로그에 `scan scheduler disabled: SCAN_ENABLED=false` · `finops_secops_scan` **0건**. ⚠️ **`last_collected_at` 은 `2026-09-08T06:00:00Z`로 뜬다** — 골든 고정값이라 당일 화면에 **3일 전 날짜**가 보인다. 물으면 *"정답지의 수집 시각"* 이라고 답한다 | ❌ ④ 재실행 금지 / 조회는 ✅ |
+| R3 | `(Invoke-RestMethod http://localhost:8000/api/v1/incidents).items` — `incident_id`·`category`·`status`·`subject_arn` 4필드를 본다(`api/incidents.py:239`·`:241-243`) | 1건 · `status: ANALYZING` · `subject_arn` = **④가 찍은 조치 대상 ARN**. **2026-09-11 실측**: 봉투가 `items` 한 필드뿐인 것과 0건 응답까지 확인했다(Incident가 없어 내용은 못 봤다). 바인딩 쪽은 확인됐다 — 자산 화면의 그 ARN이 `name=golden-ec2-idle-boundary` · `verdict=COST_CANDIDATE` 로 선다. ⚠️ **만드는 법은 아직 없다**(§4 · #301) — 이 줄은 *재는* 법이다 | ✅ |
+| R4 | 상세 `(Invoke-RestMethod http://localhost:8000/api/v1/incidents/<id>)`의 `summary_lines`·`recommendations`(`api/incidents.py:153`·`:155`). **재현율**은 ⑦ 터미널의 `agent_dispatch_cycle_done` 줄을 센다 — `succeeded=1`이 나오기까지 몇 주기인가(`agent_dispatcher.py:433`·`:446` · 필드 `:143-154`) | `summary_lines` 3줄 · `recommendations` 1건 이상 · 같은 줄의 `failed`·`errored`가 `0`이면 **1회 성공**. 🔬**미실측** — Incident와 `OPENAI_API_KEY`가 필요하다. 다만 `agent_dispatch_cycle_done` 줄이 9필드를 다 싣고 3초마다 찍히는 것은 봤다 | ✅ |
+| R5 | 같은 상세의 `status` | `AWAITING_APPROVAL`. **화면 버튼이 열리는 것과 갈라 적는다**(위 표 비고). 🔬**미실측** — R4와 같은 이유 | ✅ |
+| R6 | 정상 경로는 **화면 [조치 실행] 버튼**이다. FE가 막히면 `POST http://localhost:8000/api/v1/actions/execute` — 본문 3필드 `incident_id`·`runbook_id`·`idempotency_key`(`api/actions.py:47-49`). 실물은 `aws --endpoint-url http://localhost:4566 ec2 describe-instances --instance-ids <시드 인스턴스 ID> --query "Reservations[].Instances[].InstanceType"` | `202` + `execution_id` · 상세 `executions[].status`가 `SUCCESS` · **도착 타입이 출발보다 작다**(값은 결과 칸에). **2026-09-11 실측**: `describe-instances` 쪽은 확인했다 — 바인딩된 A1에 대해 `["t3.xlarge"]`(조치 전)를 돌려준다. 🔬**실행(`POST`)은 미실측** | ⚠️ **실행은 1회** — 같은 `idempotency_key` 재요청은 `200`이고 새 실행이 아니다(`routers/actions.py:39-40`) |
 | R7 | 명령 없음 — §3-3의 한 문장을 **실제로 말했는가** | 심사자가 *미구현*이 아니라 *미시연*으로 되물으면 성립 | ✅ |
 | R8 | ⑤ 재실행: `uv run python scripts/inject_mock_threat.py evt_ssh_bruteforce_001` | 두 줄이 **함께** 나온다 — `위험도=HIGH 대응=PRE_MITIGATION_0_5S 사유=RISK_SSH_BRUTEFORCE` 와 `1건 처리 — 정답 대조 통과(대조 대상만).` ⚠️ 뒷줄은 **stderr**다(아래 ⚠️) | ✅ **DB·AWS를 안 써서 몇 번이든** |
-| R9 | `aws --endpoint-url http://localhost:4566 ec2 describe-network-acls --network-acl-ids <③이 찍은 acl-id> --query "NetworkAcls[0].Entries[?CidrBlock=='203.0.113.10/32']"` | `RuleAction: deny` · `Egress: false` 항목 **1건**. `test_execute_nacl_localstack.py:80-84`가 재는 모양과 같다 | ✅ |
+| R9 | `aws --endpoint-url http://localhost:4566 ec2 describe-network-acls --network-acl-ids <③이 찍은 acl-id> --query "NetworkAcls[0].Entries[?CidrBlock=='203.0.113.10/32']"` | `RuleAction: deny` · `Egress: false` 항목 **1건**. `test_execute_nacl_localstack.py:80-84`가 재는 모양과 같다. **2026-09-11 실측 — 전/후를 다 잡았다**(아래 ⚠️) | ✅ |
 | R9-2 | 명령 없음 — R7과 같다 | 〃 | ✅ |
 | R10 | T1-1 시작 ~ T2 마지막 컷까지 **벽시계**. T1 구간과 T2 구간을 갈라 적는다 | 합 **≤ 8분**. T2 후반이 실경로로 서면 **그 구간을 따로 적는다** — §대조 6번이 미측정이라 적어 둔 자리다 | ✅ |
 | R11 | 명령 없음 — §4의 후보 행 우회가 **사전 준비 ④가 끝나는 지점**에 섰는가로 갈린다 | 섰으면 그대로, 안 섰으면 대체 컷 전환을 §0·§4·§5-3·§7 ⓐ에 반영한 뒤 `합격` | — |
@@ -577,6 +590,30 @@ $env:AWS_DEFAULT_REGION = 'ap-northeast-2'
 > - **터미널에 그냥 치면** 대본이 적은 순서대로 나온다 — 위험도 줄 먼저, 요약 줄 나중.
 > - **PowerShell `>` 로 받으면 그 줄이 파일에 없다.** 남기려면 `*>` 또는 `2>&1` 을 쓴다.
 > - **파이프를 걸면 순서가 뒤집힌다** — stdout은 블록 버퍼링되고 stderr는 아니다. 실측에서 요약 줄이 **먼저** 나왔다. 순서로 판정하지 말고 **두 줄이 다 있는지**로 판정한다.
+
+**R9의 전/후는 이렇게 갈린다**(2026-09-11 실측 · 시드 NACL에 규칙을 실제로 넣어 보고 확인했다).
+
+**전** — `[]`. 시드가 만든 NACL은 **`Entries` 가 비어 있다**: LocalStack은 커스텀 NACL에 실 AWS의 기본 deny 2건(rule 32767)을 만들지 않는다. **그래서 판정 신호가 깨끗하다 — 0건이면 안 들어간 것이고 1건이면 들어간 것이다.**
+
+**후** — 이 한 건이 그대로 나오면 합격이다.
+
+```json
+[
+    {
+        "CidrBlock": "203.0.113.10/32",
+        "Egress": false,
+        "PortRange": {
+            "From": 0,
+            "To": 65535
+        },
+        "Protocol": "6",
+        "RuleAction": "deny",
+        "RuleNumber": 100
+    }
+]
+```
+
+> **두 값은 눈으로 확인할 것**: `PortRange 0-65535` 는 TCP·UDP에 PortRange가 필수라 전체 범위를 싣는 것이고(#297 · PR #313 `928a519`), `Protocol: "6"` 은 executor가 이름 `tcp` 를 **AWS 번호 표기로 바꿔 보내기 때문**이다(`executor.py:1581` docstring). **`"tcp"` 가 그대로 보이면 그건 우리 실행 경로를 안 탄 규칙이다.**
 
 ---
 
