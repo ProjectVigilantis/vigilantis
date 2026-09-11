@@ -78,6 +78,7 @@ from schemas.precheck import (
 )
 from schemas.runbook_parameters import (
     NaclAddDenyParameters,
+    NaclRestoreParameters,
     build_precheck_parameters,
 )
 from schemas.runbooks import (
@@ -735,12 +736,28 @@ def run_rightsizing_execution(db: Session, execution_id: str) -> ExecutionRunOut
 def _nacl_add_deny_params(
     db: Session, execution: models.ActionExecution
 ) -> Optional[NaclAddDenyParameters]:
-    """조치가 넣을 deny 규칙의 실행 파라미터. 계약 모델을 거쳐서만 돌려준다.
+    """조치가 넣을 deny 규칙의 실행 파라미터."""
+    return _nacl_execution_params(db, execution, NaclAddDenyParameters)
+
+
+def _nacl_restore_params(
+    db: Session, execution: models.ActionExecution
+) -> Optional[NaclRestoreParameters]:
+    """해제할 규칙 슬롯의 실행 파라미터 — 지울 값이 아니라 **백업을 찾는 좌표**다.
+
+    지울 규칙의 fingerprint는 여기 없다. 그것은 백업 레코드에서만 온다(ADR-0008 §5 —
+    NaclRestoreParameters에 싣지 않는 이유).
+    """
+    return _nacl_execution_params(db, execution, NaclRestoreParameters)
+
+
+def _nacl_execution_params(db: Session, execution: models.ActionExecution, model):
+    """NACL 2종의 실행 파라미터. 계약 모델을 거쳐서만 돌려준다.
 
     Guardrail PASS의 불변 실행 명령(validated_command)이 채워지면 그것이 원천이다.
     아직 배선되지 않은 동안에는 후보의 typed 파라미터를 **④가 쓴 것과 같은 변환**
     (build_precheck_parameters)으로 실행 파라미터로 옮긴다 — 변환이 갈리면 판정한
-    규칙과 삽입하는 규칙이 달라진다. _rightsizing_target_type과 같은 자리다.
+    규칙과 실행하는 규칙이 달라진다. _rightsizing_target_type과 같은 자리다.
     """
     target = parse_arn(execution.target_arn)
     if target is None or target.resource_type != "network-acl":
@@ -749,7 +766,7 @@ def _nacl_add_deny_params(
     stored = (execution.validated_command or {}).get("parameters")
     if isinstance(stored, dict):
         try:
-            return NaclAddDenyParameters.model_validate(stored)
+            return model.model_validate(stored)
         except ValidationError:
             # 옛 계약으로 저장된 명령이 실행으로 새지 않게 한다
             logger.warning(
@@ -768,7 +785,7 @@ def _nacl_add_deny_params(
         return None
     try:
         data = mappers.to_candidate_data(candidate)
-        return build_precheck_parameters(
+        built = build_precheck_parameters(
             data.runbook_id,
             data.parameters,
             resource_id=target.resource_id,
@@ -783,6 +800,9 @@ def _nacl_add_deny_params(
             },
         )
         return None
+    # 후보의 런북이 실행의 런북과 다르면 다른 조치의 값이다 — 접수가 막는 조합이지만
+    # 여기까지 오면 엉뚱한 규칙을 건드리므로 값을 돌려주지 않는다
+    return built if isinstance(built, model) else None
 
 
 def run_nacl_add_deny_execution(db: Session, execution_id: str) -> ExecutionRunOutcome:
@@ -833,6 +853,150 @@ def run_nacl_add_deny_execution(db: Session, execution_id: str) -> ExecutionRunO
         protocol=params.protocol,
         record_step=_step_recorder(db, execution_id),
     )
+    if not outcome.succeeded:
+        return _run_failed(outcome.reason_code, outcome.error_summary, outcome.steps)
+    return ExecutionRunOutcome(succeeded=True, steps=outcome.steps)
+
+
+def _usable_nacl_backup(
+    record: Optional[models.BackupRecord],
+    execution: models.ActionExecution,
+    params: NaclRestoreParameters,
+) -> Optional[str]:
+    """이 레코드로 이 슬롯을 해제해도 되는가. 안 되면 사유, 되면 None.
+
+    새로 찾은 레코드는 조회 조건이 이미 걸렀지만, 이전 시도가 결속해 둔 레코드는 조회를
+    거치지 않는다 — 두 경로가 같은 관문을 지나게 여기서 한 번에 본다.
+    """
+    if record is None:
+        return "결속된 백업 레코드를 찾을 수 없습니다"
+    if record.backup_type != executor.BACKUP_NACL_RULE_INDEX:
+        return "백업 레코드 종류 불일치"
+    if record.target_arn != execution.target_arn:
+        return "백업 레코드가 다른 자원을 가리킴"
+    backup = executor.nacl_rule_backup(record.payload)
+    if backup is None:
+        return "백업 payload에 규칙 fingerprint가 없습니다"
+    if (backup.rule_number, backup.egress) != (params.rule_number, params.egress):
+        return "백업 레코드가 다른 규칙 슬롯을 가리킴"
+    return None
+
+
+def load_nacl_restore_backup(
+    db: Session, execution_id: str, params: NaclRestoreParameters
+) -> BackupOutcome:
+    """NACL_RESTORE가 지울 규칙의 근거 — 백업 조회 → 실행 결속 → commit. (Issue #298)
+
+    backup_record_id를 파라미터로 받지 않는 유일한 원복 경로라, 대상·종류·rule index로
+    레코드를 찾는다(_latest_backup_record — 가드레일 ④와 같은 규칙).
+
+    **찾은 레코드를 첫 AWS 변경 이전에 자기 행에 결속하고 커밋한다**(ADR-0008 §4 보강).
+    그래야 어느 레코드를 근거로 지웠는지가 기록에 남고, 그 결속이 다음 조회에서 "이미 쓰인
+    레코드"를 가리는 표시가 된다(executions_repo.latest_backup_for_target의 consumed_by).
+    이미 결속돼 있으면 그것을 쓴다 — 재실행은 처음부터이되 근거는 재사용한다(ADR-0008 §7).
+
+    **백업이 없으면 해제를 시작하지 않는다**(ADR-0008 §1 ④). 현물 조회로 "아마 이 규칙"을
+    추정해 지우지 않는다 — 우리가 넣었다는 근거가 없는 규칙은 지울 권한도 없다.
+    """
+    execution = executions_repo.lock_execution(db, execution_id)
+    if execution is None:
+        return _backup_failed(
+            PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND, "실행 레코드를 찾을 수 없습니다"
+        )
+    if execution.runbook_id is not RunbookId.RUNBOOK_NACL_RESTORE:
+        # 배선 오류다 — 대상 기준으로 백업을 찾아 결속하는 런북은 NACL_RESTORE 하나뿐이다
+        raise ValueError(
+            f"NACL 해제 백업 대상 런북이 아닙니다: {execution.runbook_id.value}"
+        )
+
+    if execution.backup_record_id is not None:
+        record = executions_repo.get_backup_record(db, execution.backup_record_id)
+        problem = _usable_nacl_backup(record, execution, params)
+        if problem is not None:
+            return _backup_failed(PrecheckReasonCode.PRECHECK_PARAM_INVALID, problem)
+        # 쓴 것은 없지만 선점 잠금을 놓는다 — 뒤이은 슬롯 대조가 AWS를 부른다
+        db.commit()
+        return BackupOutcome(record=record)
+
+    record = _latest_backup_record(
+        db,
+        execution.target_arn,
+        executor.BACKUP_NACL_RULE_INDEX,
+        {"rule_number": params.rule_number, "egress": params.egress},
+    )
+    if record is None:
+        return _backup_failed(
+            PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND,
+            f"해제할 차단의 백업 레코드가 없습니다(rule {params.rule_number})",
+        )
+    problem = _usable_nacl_backup(record, execution, params)
+    if problem is not None:
+        # 결속하지 않는다 — 쓸 수 없는 레코드를 근거로 박으면 다음 시도도 그것을 재사용한다
+        return _backup_failed(PrecheckReasonCode.PRECHECK_PARAM_INVALID, problem)
+    if not executions_repo.bind_backup_record(
+        db, execution.execution_id, record.backup_record_id
+    ):
+        db.rollback()
+        return _backup_failed(
+            PrecheckReasonCode.PRECHECK_INVALID_STATE, "백업 레코드 결속 실패"
+        )
+
+    db.commit()
+    return BackupOutcome(record=record)
+
+
+def run_nacl_restore_execution(db: Session, execution_id: str) -> ExecutionRunOutcome:
+    """`RUNBOOK_NACL_RESTORE` 실행 — 백업 조회·결속 → 슬롯 대조 → 규칙 삭제. (Issue #298)
+
+    순서가 계약이다. **근거 백업이 자기 행에 결속·커밋된 뒤에만 AWS 변경이 시작된다**
+    (load_nacl_restore_backup, ADR-0008 §4). 지울 규칙은 그 백업의 fingerprint로만
+    특정하고, 삭제 직전 현물과 다시 대조한다(executor.execute_nacl_restore) — 가드레일 ④는
+    후보 생성 시점에 1회 돌았고 관제자 승인까지 시간이 있다.
+
+    **성공의 경계가 실행 안에 있다** — NACL_ADD_DENY와 같다. 삭제는 원자적이고 뒤따르는
+    판정 축이 없으므로 dispatcher가 반환값으로 그 자리에서 확정한다. 판정
+    (judge_nacl_restore)으로 오는 것은 실행 도중 끊긴 경우뿐이다.
+
+    롤백 3종이 아니라 주 조치다(ADR-0004 · SSOT §Action Whitelist) — 원본 실행을 가리키지
+    않고, 접수 근거는 EXECUTABLE 후보다. 그래서 가드레일도 실행 직전이 아니라 후보 생성
+    시점에 1회 돌았다(파일 헤더).
+
+    종료 상태도 Incident 전이도 여기서 하지 않는다 — 확정은 close_execution 하나가 한다.
+    """
+    execution = executions_repo.get_execution(db, execution_id)
+    if execution is None:
+        raise ValueError(f"실행 레코드를 찾을 수 없습니다: {execution_id}")
+    if execution.runbook_id is not RunbookId.RUNBOOK_NACL_RESTORE:
+        raise ValueError(f"NACL_RESTORE 실행이 아닙니다: {execution.runbook_id.value}")
+    if execution.status is not ExecutionStatus.IN_PROGRESS:
+        raise ValueError(f"진행 중인 실행이 아닙니다: {execution.status.value}")
+
+    params = _nacl_restore_params(db, execution)
+    if params is None:
+        return _run_failed(
+            PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+            "실행 파라미터에서 해제할 NACL 규칙 슬롯을 찾지 못했습니다",
+        )
+
+    loaded = load_nacl_restore_backup(db, execution_id, params)
+    if not loaded.stored:
+        return _run_failed(
+            loaded.reason_code, f"해제 근거 없음: {loaded.detail or ''}".strip()
+        )
+
+    outcome = executor.execute_nacl_restore(
+        execution.target_arn,
+        # _usable_nacl_backup이 같은 모델로 이미 확인한 payload다
+        backup=executor.nacl_rule_backup(loaded.record.payload),
+        record_step=_step_recorder(db, execution_id),
+    )
+    if outcome.deferred:
+        return ExecutionRunOutcome(
+            succeeded=False,
+            reason_code=outcome.reason_code,
+            error_summary=outcome.error_summary,
+            deferred=True,
+        )
     if not outcome.succeeded:
         return _run_failed(outcome.reason_code, outcome.error_summary, outcome.steps)
     return ExecutionRunOutcome(succeeded=True, steps=outcome.steps)
@@ -1105,6 +1269,113 @@ def judge_nacl_add_deny(db: Session, execution_id: str) -> ExecutionJudgement:
     return ExecutionJudgement(next_status=ExecutionStatus.SUCCESS)
 
 
+def judge_nacl_restore(db: Session, execution_id: str) -> ExecutionJudgement:
+    """단계를 남긴 채 IN_PROGRESS인 NACL_RESTORE 실행 1건의 종료 판정. (Issue #298)
+
+    여기로 오는 것은 **실행 도중 끊긴 해제**뿐이다 — 삭제 호출이 5xx·연결 실패로 적용
+    여부를 알 수 없게 끝났거나 프로세스가 죽은 경우다. 정상 경로는 dispatcher가 실행
+    반환으로 확정한다. 판정 주체를 runner와 짝으로 두는 이유는 judge_nacl_add_deny와 같다
+    (ADR-0008 §6).
+
+    **성공의 경계는 실자산이다** — 지금 그 슬롯에 **우리 규칙**(백업 fingerprint와 같은
+    규칙)이 없으면 해제는 이뤄진 것이다. 슬롯이 비었든 제3자 규칙이 새로 들어왔든 우리
+    차단은 효력이 없다.
+
+    우리 규칙이 그대로 있으면 삭제가 적용되지 않은 것이라 FAILED다(자산 변경 없음).
+    **자동으로 다시 지우지 않는다** — 재개 단위는 실행이고(ADR-0008 §7), 끊긴 삭제를
+    판정이 대신 이어 하면 판정이 실행이 된다.
+
+    NACL 자체가 없으면 판정할 대상이 없다 — 성공이라 적으면 사라진 NACL이 "해제 완료"로
+    기록되므로 FAILED로 두고 사람에게 넘긴다. 조회를 못 하면 보류한다(Issue #249).
+    """
+    execution = executions_repo.get_execution(db, execution_id)
+    if execution is None:
+        raise ValueError(f"실행 레코드를 찾을 수 없습니다: {execution_id}")
+    if execution.runbook_id is not RunbookId.RUNBOOK_NACL_RESTORE:
+        raise ValueError(f"NACL_RESTORE 실행이 아닙니다: {execution.runbook_id.value}")
+    if execution.status is not ExecutionStatus.IN_PROGRESS:
+        raise ValueError(f"진행 중인 실행이 아닙니다: {execution.status.value}")
+
+    record = (
+        executions_repo.get_backup_record(db, execution.backup_record_id)
+        if execution.backup_record_id is not None
+        else None
+    )
+    if record is None:
+        # 결속은 첫 AWS 변경 이전에 커밋된다 — 단계가 남았는데 레코드가 없다면 이 경로가
+        # 만든 실행이 아니다. 무엇을 지우려 했는지 모르므로 사람에게 넘긴다
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary="해제 판정 불가: 결속된 백업 레코드를 찾을 수 없습니다",
+        )
+    target = parse_arn(execution.target_arn)
+    if target is None or target.resource_type != "network-acl":
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary=f"NACL ARN이 아닙니다: {execution.target_arn}",
+        )
+    expected = executor.nacl_rule_backup(record.payload)
+    if expected is None:
+        logger.critical(
+            "nacl_backup_payload_invalid",
+            extra={
+                "execution_id": execution_id,
+                "backup_record_id": record.backup_record_id,
+            },
+        )
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary="해제 판정 불가: 백업 payload가 규칙 fingerprint 계약을 벗어났습니다",
+        )
+
+    entry, code = executor.current_nacl_entry(
+        target.resource_id,
+        target.region,
+        rule_number=expected.rule_number,
+        egress=expected.egress,
+    )
+    if code is PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND:
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary=(
+                f"해제 판정 불가 — NACL {target.resource_id}를 찾을 수 없습니다."
+                " 자동 재시도 없이 수동 확인으로 전환합니다"
+            ),
+        )
+    if code is not None:
+        return ExecutionJudgement(
+            defer_reason=f"{code.value}: 해제 대상 NACL 조회 실패로 판정 보류"
+        )
+    if entry is not None and executor.nacl_entry_fingerprint_matches(entry, expected):
+        logger.critical(
+            "nacl_restore_incomplete",
+            extra={
+                "execution_id": execution_id,
+                "rule_number": expected.rule_number,
+                "network_acl_id": target.resource_id,
+            },
+        )
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary=(
+                f"해제 미완 — 규칙 {expected.rule_number}(차단)이 그대로 남아 있습니다."
+                " 자동 재시도 없이 수동 개입으로 전환합니다"
+            ),
+        )
+    if entry is not None:
+        # 우리 규칙은 없고 그 슬롯을 다른 규칙이 쓴다 — 해제는 이뤄졌다. 새 규칙은 우리가
+        # 넣은 것이 아니라 건드리지 않았다는 사실만 남긴다
+        logger.warning(
+            "nacl_restore_slot_reused",
+            extra={
+                "execution_id": execution_id,
+                "rule_number": expected.rule_number,
+                "network_acl_id": target.resource_id,
+            },
+        )
+    return ExecutionJudgement(next_status=ExecutionStatus.SUCCESS)
+
+
 # --- 실행 종료 확정 (Issue #232) -------------------------------------------------
 
 
@@ -1354,6 +1625,39 @@ def close_execution(
 # FAILED로 끝나도 다음 주기가 다시 발동하지 않는다(ADR-0004 정책 ④ 무재시도).
 
 
+# 대상 기준으로 찾는 백업 종류 → 그 백업으로 되돌리는 런북. 되돌리는 실행은 쓴 레코드를
+# 자기 행에 결속하므로(ADR-0008 §4), 그 런북의 SUCCESS가 결속한 레코드는 이미 쓰인
+# 것이다(executions_repo.latest_backup_for_target의 consumed_by).
+_BACKUP_CONSUMERS: dict[str, RunbookId] = {
+    executor.BACKUP_NACL_RULE_INDEX: RunbookId.RUNBOOK_NACL_RESTORE,
+}
+
+
+def _latest_backup_record(
+    db: Session, target_arn: str, backup_type: str, payload_match: Optional[dict]
+) -> Optional[models.BackupRecord]:
+    """대상 기준 백업 조회의 유일한 규칙 — 가드레일 ④와 실행이 같은 레코드를 고르게 한다.
+
+    둘이 조회 조건을 따로 적으면 ④가 통과시킨 레코드와 실행이 지우는 근거가 갈린다.
+    """
+    return executions_repo.latest_backup_for_target(
+        db,
+        target_arn=target_arn,
+        backup_type=backup_type,
+        payload_match=dict(payload_match) if payload_match else None,
+        consumed_by=_BACKUP_CONSUMERS.get(backup_type),
+    )
+
+
+def _backup_view(record: models.BackupRecord) -> executor.BackupRecordView:
+    return executor.BackupRecordView(
+        backup_record_id=record.backup_record_id,
+        target_arn=record.target_arn,
+        backup_type=record.backup_type,
+        payload=record.payload or {},
+    )
+
+
 class _DbBackupRecordLoader:
     """executor.BackupRecordLoader의 DB 구현 — 세션 1개를 감싼 읽기 전용 조회.
 
@@ -1367,14 +1671,7 @@ class _DbBackupRecordLoader:
 
     def get(self, backup_record_id: str) -> Optional[executor.BackupRecordView]:
         record = executions_repo.get_backup_record(self._db, backup_record_id)
-        if record is None:
-            return None
-        return executor.BackupRecordView(
-            backup_record_id=record.backup_record_id,
-            target_arn=record.target_arn,
-            backup_type=record.backup_type,
-            payload=record.payload or {},
-        )
+        return None if record is None else _backup_view(record)
 
     def latest_for_target(
         self,
@@ -1382,12 +1679,49 @@ class _DbBackupRecordLoader:
         backup_type: str,
         payload_match: Optional[dict] = None,
     ) -> Optional[executor.BackupRecordView]:
-        # backup_record_id를 파라미터로 받지 않는 런북은 NACL_RESTORE 하나이고
-        # (executor.RUNBOOK_SPECS), 그 실행 경로는 아직 없다. 지금 조용히 None을
-        # 돌려주면 "백업 레코드 없음" 거절이 되어 미구현이 판정으로 둔갑한다.
-        raise NotImplementedError(
-            "대상 기준 백업 조회는 NACL 실행 경로와 함께 붙인다 (ADR-0008 §Consequences)"
-        )
+        # backup_record_id를 파라미터로 받지 않는 런북은 NACL_RESTORE 하나다
+        # (executor.RUNBOOK_SPECS). 0건이면 None — precheck가 "백업 레코드 없음"으로
+        # 거절하며, 이것은 로더 미배선(RuntimeError)과 다른 결과다(ADR-0007 §1).
+        record = _latest_backup_record(self._db, target_arn, backup_type, payload_match)
+        return None if record is None else _backup_view(record)
+
+
+def _backup_lookup_key(
+    target_arn: str, backup_type: str, payload_match: Optional[dict]
+) -> tuple:
+    return (target_arn, backup_type, frozenset((payload_match or {}).items()))
+
+
+class _PrefetchedBackupLoader:
+    """가드레일 ④가 **트랜잭션 밖에서** 읽는 백업 조회 — 미리 뽑아 둔 것만 돌려준다.
+
+    후보 가드레일은 AWS 호출 동안 트랜잭션을 열지 않으려고 DB 없이 돈다
+    (record_agent_analysis 절). ③이 쓰는 관리 자산을 미리 해석하는 것과 같은 이유로,
+    ④가 읽을 백업도 가드레일 전에 조회해 둔다(_prefetch_candidate_backups).
+
+    **미리 뽑지 않은 조회가 오면 None이 아니라 예외다.** None은 "백업 레코드 없음"
+    거절이 되어 배선 누락이 판정으로 둔갑한다(ADR-0007 §1).
+    """
+
+    def __init__(self, records: dict[tuple, Optional[executor.BackupRecordView]]) -> None:
+        self._records = records
+
+    def get(self, backup_record_id: str) -> Optional[executor.BackupRecordView]:
+        # backup_record_id를 받는 런북은 롤백 3종뿐이고 후보가 될 수 없다(ADR-0004 정책 ②)
+        raise RuntimeError("후보 가드레일은 backup_record_id로 백업을 조회하지 않습니다")
+
+    def latest_for_target(
+        self,
+        target_arn: str,
+        backup_type: str,
+        payload_match: Optional[dict] = None,
+    ) -> Optional[executor.BackupRecordView]:
+        key = _backup_lookup_key(target_arn, backup_type, payload_match)
+        if key not in self._records:
+            raise RuntimeError(
+                f"가드레일 전에 조회하지 않은 백업입니다: {backup_type} · {target_arn}"
+            )
+        return self._records[key]
 
 
 @dataclass(frozen=True)
@@ -1877,7 +2211,9 @@ def _precheck_param_invalid(detail: str) -> PrecheckOutcome:
     )
 
 
-def _candidate_precheck(command) -> PrecheckOutcome:
+def _candidate_precheck(
+    command, backup_loader: Optional[executor.BackupRecordLoader] = None
+) -> PrecheckOutcome:
     """④ AWS Dry-Run 경계 — 후보 파라미터를 실행 파라미터로 옮겨 executor에 넘긴다.
 
     조회로 채우는 값은 여기서 AWS에 물어 온다. **Detection 스냅샷의 값을 쓰지 않는다** —
@@ -1889,6 +2225,11 @@ def _candidate_precheck(command) -> PrecheckOutcome:
     후보 값과 대상 자원 ID만으로 서고, 격리·NACL 계열은 메뉴에 오르지 않는다
     (ai/capabilities.py 축 ②). 조회 실패는 배선 오류가 아니라 AWS 판정이라 예외가 아니라
     FAIL로 돌려준다(ADR-0007 §1 — 예외로 막는 것은 배선 오류뿐이다).
+
+    **backup_loader는 NACL_RESTORE 후보가 읽는다**(ai/guardrails.CandidatePrecheck가 요구하는
+    배선). 백업이 필요한 4종 중 이것만 AI 추천 7종이라 ④까지 온다 — 넘기지 않으면
+    precheck가 거절이 아니라 RuntimeError를 낸다. 호출부는 트랜잭션 밖이라 DB 로더가 아니라
+    미리 뽑아 둔 조회를 넘긴다(_PrefetchedBackupLoader).
     """
     target = parse_arn(command.target_arn)
     if target is None:
@@ -1922,7 +2263,9 @@ def _candidate_precheck(command) -> PrecheckOutcome:
     except (ValidationError, ValueError) as exc:
         return _precheck_param_invalid(f"{type(exc).__name__}: {exc}")
 
-    return executor.precheck(command.runbook_id, command.target_arn, parameters)
+    return executor.precheck(
+        command.runbook_id, command.target_arn, parameters, backup_loader=backup_loader
+    )
 
 
 def _draft_candidates(
@@ -1952,8 +2295,34 @@ def _managed_arns(db: Session, candidates: list[RunbookCandidateData]) -> set[st
     }
 
 
+def _prefetch_candidate_backups(
+    db: Session, candidates: list[RunbookCandidateData]
+) -> _PrefetchedBackupLoader:
+    """④가 읽을 백업을 가드레일 전에 조회한다 — _managed_arns와 같은 이유(④는 트랜잭션 밖).
+
+    조회 키는 executor가 부를 그대로다 — 런북 명세의 backup_match_params를 후보 값에서
+    뽑는다. 후보 → 실행 파라미터 변환이 그 값을 바꾸지 않으므로(build_precheck_parameters)
+    ④가 부르는 키와 같다. 키가 갈리면 로더가 예외로 알린다.
+    """
+    records: dict[tuple, Optional[executor.BackupRecordView]] = {}
+    for candidate in candidates:
+        spec = executor.RUNBOOK_SPECS.get(candidate.runbook_id.value)
+        if spec is None or spec.backup_type is None or not spec.backup_match_params:
+            continue
+        values = candidate.parameters.model_dump()
+        match = {key: values.get(key) for key in spec.backup_match_params}
+        key = _backup_lookup_key(candidate.target_arn, spec.backup_type, match)
+        if key in records:
+            continue
+        record = _latest_backup_record(db, candidate.target_arn, spec.backup_type, match)
+        records[key] = None if record is None else _backup_view(record)
+    return _PrefetchedBackupLoader(records)
+
+
 def _guard_candidate(
-    candidate: RunbookCandidateData, managed: set[str]
+    candidate: RunbookCandidateData,
+    managed: set[str],
+    backup_loader: Optional[executor.BackupRecordLoader] = None,
 ) -> guardrails.GuardrailOutcome:
     """후보 1건에 가드레일 4단계를 1회 수행한다. **DB를 만지지 않는다.**"""
     return guardrails.run_guardrail_validation(
@@ -1963,7 +2332,9 @@ def _guard_candidate(
             command_payload=_candidate_command_payload(candidate),
         ),
         is_managed_arn=lambda arn: arn in managed,
-        precheck=_candidate_precheck,
+        precheck=lambda command: _candidate_precheck(
+            command, backup_loader=backup_loader
+        ),
     )
 
 
@@ -2034,10 +2405,14 @@ def record_agent_analysis(
     """
     candidates = _draft_candidates(incident_id, output)
     managed = _managed_arns(db, candidates) if candidates else set()
+    backups = _prefetch_candidate_backups(db, candidates)
     # 가드레일 ④가 AWS를 부르는 동안 트랜잭션을 열어 두지 않는다
     db.rollback()
 
-    guarded = [(candidate, _guard_candidate(candidate, managed)) for candidate in candidates]
+    guarded = [
+        (candidate, _guard_candidate(candidate, managed, backups))
+        for candidate in candidates
+    ]
 
     executable = sum(
         _store_candidate(db, candidate, outcome) for candidate, outcome in guarded
