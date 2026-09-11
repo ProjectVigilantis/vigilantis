@@ -158,6 +158,32 @@ def test_replace_relationships_snapshot_and_reverse_lookup(db):
     assert assets_repo.list_relationships_by_target(db, "arn:sg/sg-1") == []
 
 
+def test_relationships_by_source_excludes_other_assets(db):
+    run = assets_repo.start_collection_run(
+        db, account_id="1", region="r", mode="localstack",
+        lookback_days=14, period_seconds=3600,
+    )
+    sources = []
+    for suffix in ("a", "b"):
+        asset = assets_repo.upsert_asset(
+            db, arn=f"arn:ec2/i-{suffix}", asset_type=AssetType.EC2,
+            resource_id=f"i-{suffix}", account_id="1", region="r", spec={},
+            collection_run_id=run.collection_run_id, collected_at=NOW,
+        )
+        assets_repo.replace_relationships(
+            db, asset.asset_id,
+            [(RelationType.PROTECTED_BY, f"arn:nacl/acl-{suffix}")],
+            collection_run_id=run.collection_run_id,
+        )
+        sources.append(asset.asset_id)
+
+    relations = assets_repo.list_relationships_by_source(db, sources[0])
+    assert [(row.source_asset_id, row.target_arn) for row in relations] == [
+        (sources[0], "arn:nacl/acl-a")
+    ]
+    assert assets_repo.list_relationships_by_source(db, str(uuid.uuid4())) == []
+
+
 def test_finish_collection_run_only_from_in_progress(db):
     run = assets_repo.start_collection_run(
         db, account_id="1", region="r", mode="localstack",
