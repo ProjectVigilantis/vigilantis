@@ -16,7 +16,7 @@ import { ErrorState } from '@/components/error-state';
 import { FilterSelect } from '@/components/filter-select';
 import { IncidentCard } from '@/components/incidents/incident-card';
 import { Badge } from '@/components/ui/badge';
-import { getIncident, newIdempotencyKey } from '@/lib/api/client';
+import { getAssets, getIncident, newIdempotencyKey } from '@/lib/api/client';
 import { INCIDENT_STATUS_LABELS, RISK_LEVEL_LABELS } from '@/lib/enum-labels';
 import {
   ALL,
@@ -109,7 +109,13 @@ export function IncidentsView({
     setOpeningId(incidentId);
     setOpenError(null);
     try {
-      const incident = await getIncident(incidentId);
+      // 자산은 승인 모달의 `조치 대상` 블록 조인에만 쓴다(#183 A안) — **병렬로** 부른다.
+      // 순차로 부르면 지연이 합이 되지만 병렬이면 max라 모달 진입 체감이 사실상 그대로다.
+      // 자산 조회 실패가 실행을 막아서는 안 되므로 여기서 접고 조인 결과만 비운다.
+      const [incident, assets] = await Promise.all([
+        getIncident(incidentId),
+        getAssets().catch(() => null),
+      ]);
       if (latestOpen.current !== token) return; // 이전 선택의 응답 — 버린다
       // 조회 사이에 상태가 바뀌었으면 모달을 열지 않는다 — 실행 잠금은 §4.5가 정한 규칙이고,
       // 후보가 비어 있으면 고를 것이 없는 모달이 뜬다.
@@ -127,6 +133,7 @@ export function IncidentsView({
             runbookId: r.runbook_id,
             targetArn: r.target_arn,
             displayParameters: r.display_parameters,
+            targetAsset: assets?.items.find((a) => a.arn === r.target_arn) ?? null,
           })),
         },
       });

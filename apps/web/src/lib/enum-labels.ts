@@ -230,6 +230,44 @@ export const SPEC_KEY_LABELS: Record<string, string> = {
 };
 
 /**
+ * **승인 판단에 필요한 자산 사실값** — ACT-001 `조치 대상` 블록이 쓴다 (#183).
+ *
+ * `display_parameters`(서버 파생본)에 섞지 않고 별도로 그린다. 두 값의 출처가 다르기 때문이다:
+ * 저쪽은 서버가 typed `parameters`에서 파생한 값이고, 이쪽은 FE가 `target_arn`으로
+ * `GET /assets`를 조인한 자산 사실값이다(2026-09-01 A안 확정, 안성일).
+ *
+ * 유형별로 고르는 근거는 **그 값이 없으면 승인을 판단할 수 없는가**다.
+ *   - `EC2` `instance_type` — `RUNBOOK_EC2_RIGHTSIZING`의 **변경 폭**. 목표값만 보이면
+ *     `t3.xlarge → t3.small`인지 `t3.small → t3.small`인지 가를 근거가 없다
+ *   - `EBS` `size_gib`·`volume_type` — `RUNBOOK_EBS_DELETE_UNATTACHED`의 **삭제 규모**.
+ *     등록된 롤백 런북이 없는 유일한 파괴적 조치라, 규모를 모르고 되돌릴 수 없는 조치를 승인하게 된다
+ *
+ * 나머지 유형이 빈 배열인 것은 누락이 아니다 — 그 유형을 건드리는 런북들은 잃은 문맥이
+ * `target_arn`에 이미 들어 있어 실손실이 아니라고 판정했다(#183 §2). 필요해지면 한 줄 추가한다.
+ */
+export function approvalAssetFacts(asset: AssetItem): { key: string; label: string; value: string }[] {
+  const picked: [string, string | number | null | undefined][] =
+    asset.asset_type === 'EC2'
+      ? [['instance_type', asset.spec.instance_type]]
+      : asset.asset_type === 'EBS'
+        ? [
+            ['size_gib', asset.spec.size_gib],
+            ['volume_type', asset.spec.volume_type],
+          ]
+        : [];
+
+  // 계약이 전부 Optional이라 값이 없을 수 있다. 빈 줄을 그리면 "0 GiB"·"—"가 근거로 읽히므로
+  // 아예 내지 않는다 — 없는 값은 없다고 두는 편이 잘못된 확신을 주지 않는다.
+  return picked
+    .filter((entry): entry is [string, string | number] => entry[1] !== null && entry[1] !== undefined)
+    .map(([key, value]) => ({
+      key,
+      label: SPEC_KEY_LABELS[key] ?? key,
+      value: String(value),
+    }));
+}
+
+/**
  * ARN의 마지막 세그먼트. 카드의 `대상` 줄과 `incidentTitle` fallback이 같은 축약을 쓴다 —
  * 정의가 두 곳에 있으면 두 화면이 같은 자산을 다르게 부르게 된다(PR #171 리뷰).
  */
