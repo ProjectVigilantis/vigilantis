@@ -10,6 +10,7 @@ export type ErrorCode =
   | 'INCIDENT_NOT_FOUND' // 404
   | 'IDEMPOTENCY_KEY_CONFLICT' // 409
   | 'PROPOSAL_NOT_EXECUTABLE' // 409
+  | 'INCIDENT_NOT_RESOLVABLE' // 409
   | 'REQUEST_VALIDATION_FAILED' // 422
   | 'INTERNAL_ERROR'; // 500
 
@@ -301,12 +302,27 @@ export interface IncidentListItem {
   updated_at: IsoDateTime;
 }
 
+/**
+ * 종료 처리 시 관제자가 남기는 판단 — **`JUSTIFIED` 1종이다.**
+ * 모달의 다른 선택지 `과잉이었다`는 종료 값이 아니라 복구 실행으로 넘어가는 트리거라
+ * 이 API에 도달하지 않는다(§4.6 · packages/schemas/api/incidents.py `ResolutionJudgement`).
+ */
+export const RESOLUTION_JUDGEMENTS = ['JUSTIFIED'] as const;
+export type ResolutionJudgement = (typeof RESOLUTION_JUDGEMENTS)[number];
+
 export interface IncidentResponse extends IncidentListItem {
   /** 분석 완료 시 정확히 3개, 분석 중·실패 시 빈 배열. */
   summary_lines: string[];
   evidence_ids: string[];
   recommendations: RecommendationItem[];
   executions: ExecutionSummaryItem[];
+  /**
+   * 종료 판단과 그 시각. **상세 전용**이라 목록 10필드에는 없다.
+   * `status`가 `RESOLVED`인 것과 동시에 채워지고 그 전에는 둘 다 null이며,
+   * 관제자 복구 접수로 재개되면 다시 null이 된다(ADR-0004).
+   */
+  resolution: ResolutionJudgement | null;
+  resolved_at: IsoDateTime | null;
 }
 
 /** 목록 봉투 — 페이지네이션 필드는 Post-MVP. */

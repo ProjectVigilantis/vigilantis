@@ -30,6 +30,25 @@ export const ACTIVE_STATUSES = [
 ] as const satisfies readonly IncidentStatus[];
 
 /**
+ * 관제자 종료 처리가 **출발할 수 있는** 상태 3종. 원천은 서버 계약
+ * `INCIDENT_RESOLVABLE_STATUSES`(packages/schemas/incidents.py)이며 그대로 옮긴 것이다 —
+ * 여기 없는 상태에서 `[종료 처리]`를 누르면 409 `INCIDENT_NOT_RESOLVABLE`이 온다.
+ *
+ * `ANALYZING`은 분석이 끝나며 제안이 붙어 종료가 뒤집히고, `ACTION_IN_PROGRESS`는
+ * 진행 중 실행이 있어 `RESOLVED` 응답 불변식을 깬다. `RESOLVED` 재요청은 거절이 아니라
+ * 멱등 200이라 이 집합에 없다 — 이미 종료된 건에는 버튼 자체를 내지 않는다.
+ */
+export const RESOLVABLE_STATUSES = [
+  'AWAITING_APPROVAL',
+  'AWAITING_CLOSURE',
+  'FAILED',
+] as const satisfies readonly IncidentStatus[];
+
+export function isResolvable(status: IncidentStatus): boolean {
+  return (RESOLVABLE_STATUSES as readonly IncidentStatus[]).includes(status);
+}
+
+/**
  * 선제차단 계열 — **승인 없이 이미 격리가 수행된** 두 `response_mode`다.
  * 묶는 근거는 §3.2.3의 `action.mode = PREEMPTIVE_EXECUTED` 유도 규칙과 같다.
  * `AGENT_WAIT`은 아직 실행 전이라 들어가지 않는다.
