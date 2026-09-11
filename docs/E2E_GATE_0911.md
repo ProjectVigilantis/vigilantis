@@ -34,7 +34,7 @@
 | 트랙 | 실경로 | 수동 우회 | 대체 컷 |
 | --- | --- | --- | --- |
 | **T1 · FinOps** | 1 · 3 · 4 · 5 · **6**(대상 ARN 실물 정합 전제 — §1-2) | **2** (Incident 생성 — 배선은 섰으나 대본이 스캔을 끈다) | **7 · 8 · 9** (Status Check 실패 → 자동 원복) |
-| **T2 · SecOps** | 1 · 2 · 3 (판정까지, 터미널) | **4 · 5 · 6** — **실경로(입력 수동)**. 수집 1회 + Incident 생성 + AI 출력 주입이 전제이고, **가드레일 4단계부터 실물 규칙까지 실경로**다(2026-09-11 실측 · §4) | **7 · 8** (원클릭 해제) |
+| **T2 · SecOps** | 1 · 2 · 3 — **관측·판정·Incident 저장까지 실경로**(#322 / PR #325 · 2026-09-11 실측). 화면 표시 여부는 FE 축(§4 🟢) | **4 · 5 · 6** — **실경로(입력 수동)**. 수집 1회 + Incident 생성 + AI 출력 주입이 전제이고, **가드레일 4단계부터 실물 규칙까지 실경로**다(2026-09-11 실측 · §4) | **7 · 8** (원클릭 해제) |
 
 **차단 요인은 넷이고 성격이 다르다.** 2026-09-10 하루에 **②는 해소, ③은 절반 해소, ④는 성격이 바뀌었다.**
 
@@ -125,6 +125,15 @@ export OPENAI_API_KEY="…"
 export AGENT_DISPATCH_INTERVAL_SECONDS=3
 export DISPATCH_INTERVAL_SECONDS=2
 ```
+
+> 🟢 **T2 를 실경로로 세우려면 두 줄이 더 필요하다**(2026-09-11 · #322 / PR #325). ⑦ 기동 때 이 값이 있어야 앱이 모의 관측 소비자(`MockThreatConsumer`)를 띄운다 — **비어 있으면 안 뜨고, T2-1·2·3 의 Incident 가 생기지 않는다.** 수집·AI 스위치와 **독립**이라 `SCAN_ENABLED=false` 와 충돌하지 않는다.
+>
+> ```powershell
+> $env:MOCK_THREAT_INBOX_DIR = '<관측을 넣을 빈 폴더>'
+> $env:MOCK_THREAT_POLL_SECONDS = '1'   # 기본 1.0 — 그대로 둬도 된다
+> ```
+>
+> 기동 로그에서 **이 줄**을 확인한다(2026-09-11 실측): `"event": "mock_threat_consumer_started"` · `"inbox": "<지정한 폴더>"`. 폴더는 앱이 만들고, 소비한 파일은 `done/`, 계약 거부는 `rejected/` 로 옮겨진다.
 
 > ⚠️ **`SCAN_ENABLED` 는 이 블록에 넣지 않는다.** ⑥은 스캔이 **켜진 채로** 떠야 하고 ⑦만 꺼야 한다 — 이 셸에 미리 넣으면 ⑥이 판정 기준 ⓓ(스캔 스케줄러 실기동)를 못 보인다. ⑦ 자리에서 준다.
 
@@ -249,7 +258,7 @@ uv run python scripts/inject_mock_threat.py evt_ssh_bruteforce_001
 사유 코드는 접두 `RISK_` 가 붙는다 — 슬라이드에 옮길 때 그대로 쓴다.
 ⚠️ **순서로 판정하지 않는다**(2026-09-11 실측 정정). 종전 판은 *"`1건 처리` 뒤에 `위험도=`"* 라고 적었는데 **터미널에서는 반대 순서**다 — 요약 줄이 `sys.stderr`라(`inject_mock_threat.py:146`) 버퍼링이 갈린다. **PowerShell `>` 로 받으면 그 줄이 파일에 아예 없다**(`*>` 또는 `2>&1` 을 쓴다). **두 줄이 다 있는지**로 본다 — §6-1 R8.
 ⚠️ **이 명령(기본 모드)은 DB에 쓰지 않는다.** 판정을 눈으로 보여 주는 데까지가 몫이다.
-> **2026-09-11 정정** — 종전 판은 이 사실의 근거로 *"스크립트 헤더"* 를 들었는데, **PR #325 머지로 그 헤더 문장이 없어졌다**(`be779ce`). 지금 헤더는 *"기본 모드는 판정 확인이다. `--prepare-inbox` 모드는 모의 관측 파일만 준비한다"* 이다. **대본이 쓰는 것은 기본 모드뿐이고 그 모드는 여전히 DB에 쓰지 않는다** — 근거를 헤더가 아니라 **모드**로 바꿔 적는다. `--prepare-inbox` 는 앱이 소비해 저장까지 가므로 **게이트에서 쓰지 않는다.**
+> **2026-09-11 정정** — 종전 판은 이 사실의 근거로 *"스크립트 헤더"* 를 들었는데, **PR #325 머지로 그 헤더 문장이 없어졌다**(`be779ce`). 지금 헤더는 *"기본 모드는 판정 확인이다. `--prepare-inbox` 모드는 모의 관측 파일만 준비한다"* 이다. **대본이 쓰는 것은 기본 모드뿐이고 그 모드는 여전히 DB에 쓰지 않는다** — 근거를 헤더가 아니라 **모드**로 바꿔 적는다. 🔴 **`--prepare-inbox` 는 게이트가 쓴다**(2026-09-11 PM 재정정 — 같은 날 *"게이트에서 쓰지 않는다"* 고 적었던 것이 틀렸다). **T2 의 SECOPS Incident 를 만드는 실경로가 그 모드다**(§4 🟢 · §6-1 B). ⑤(기본 모드)는 **판정을 눈으로 보이는 컷**이고, `--prepare-inbox` 는 **T2 본편에서 Incident 를 만드는 컷**이다 — 같은 스크립트의 다른 일이다.
 
 **⑥ 스캔 스케줄러 실기동 확인 — 판정 기준 ⓓ의 컷 (여기서 한 번 띄우고, 끈다)**
 
@@ -297,6 +306,8 @@ PowerShell에는 이 앞자리 대입 문법이 없다 — 같은 셸에서 `$en
 ```
 
 ⚠️ **`interval` 두 값은 ⓪을 따랐을 때의 값이다**(2026-09-11 정정). 종전 판은 `10s`·`30s`로 적었는데 그것은 **기본값**이고, ⓪의 주기 노브 두 줄(`DISPATCH_INTERVAL_SECONDS=2` · `AGENT_DISPATCH_INTERVAL_SECONDS=3`)을 주면 **`2s`·`3s`로 뜬다.** ⓪ 노브는 그 뒤에 추가돼 이 블록이 함께 갱신되지 않았다. **숫자가 다르다고 멈추지 않는다 — 오히려 `2s`·`3s`가 ⓪이 먹었다는 증거다.**
+
+**T2 를 세울 것이면 네 번째 줄이 함께 뜬다**(⓪에 `MOCK_THREAT_INBOX_DIR` 을 줬을 때) — `"event": "mock_threat_consumer_started"`. **이 줄이 없으면 T2-1·2·3 의 Incident 가 생기지 않는다.**
 
 **끄였다는 것을 확인하는 방법**: 로그에서 `finops_secops_scan` 이 **0건**이어야 한다. ⑥ 에서는 이 문자열이 뜨고 ⑦ 에서는 안 뜬다 — 그 차이가 곧 R2 의 전제다.
 
@@ -422,7 +433,7 @@ uv run python -c "import sys; sys.path[:0]=['apps/core-api','packages']; from se
 
 | # | 단계 | 판정 | 무엇을 보여 주나 | 실측 근거 |
 | --- | --- | --- | --- | --- |
-| 1 | 위협 주입 | ✅ **실경로(터미널)** | 주입 명령의 출력으로 정형화 결과 | 사전 준비 ⑤. #268 / PR #269(`e4f2511` dev 머지). 화면이 아니라 **터미널**인 이유는 표 아래 ⚠️ |
+| 1 | 위협 주입 | ✅ **실경로(터미널)** | 주입 명령의 출력으로 정형화 결과 | 사전 준비 ⑤. #268 / PR #269(`e4f2511` dev 머지). **2026-09-11에 실경로가 서서 DB 저장까지 간다**(#322 / PR #325) — 화면으로 짚을지는 표 아래 🟢 |
 | 2 | 위험도 판정 | ✅ **실경로(터미널)** | `HIGH` · `SSH_BRUTEFORCE` | `security/risk_evaluator.evaluate_threat` · 골든 정답 S3와 대조 |
 | 3 | 대응 경로 표시 | ✅ **실경로(터미널)** | `response_mode: PRE_MITIGATION_0_5S` | 〃 |
 | 4 | 가드레일 4단계 | ✅ **실경로(입력 수동)** — 수집 1회 + Incident 수동 + AI 출력 주입 전제 · 2026-09-11 실측 | 화면 표시는 없다 — 통과 신호는 `AWAITING_APPROVAL`로 **실행 버튼이 열리는 것** | `executor.py:655 _precheck_nacl_add_deny` — NACL은 AWS Dry-Run 미지원이라 describe 대체 검증(ADR-0007 §4). ⚠️ 가드레일은 후보 생성과 같은 함수에서 돈다(`_guard_candidate` `workflows.py:2040`) — 표 아래 ⚠️ |
@@ -441,9 +452,13 @@ uv run python -c "import sys; sys.path[:0]=['apps/core-api','packages']; from se
 >
 > ⚠️ **AI 출력은 사람이 만든다.** SecOps 그래프는 없고 dispatcher도 FINOPS만 고른다. 다만 **T2의 컷 4·5·6에 「AI 근거」 컷이 없고**(그것은 T1-3이다) **가드레일은 그 입력 위에서 실제로 돈다** — 대본이 이미 부르는 「수동 우회」의 범위다. **심사자에게는 그렇게 말한다.**
 
-> ⚠️ **어느 시점부터 화면이 mock이 아닌지 갈라서 말한다**(2026-09-10 정리).
-> **1~3번은 화면으로 보여 줄 수 없다** — 주입 스크립트가 DB에 쓰지 않아 Incident가 생기지 않으므로 토폴로지의 붉은 노드·위험도 배지는 mock이다. **터미널 출력으로 판정이 실제로 도는 것을 보인다.**
-> **4번부터는 다르다** — 4·5·6을 위해 Incident를 수동으로 만드는 순간부터 **화면에도 실물이 뜬다.** 심사자에게 *"여기서부터는 화면이 실데이터입니다"* 를 명시적으로 짚는다. 이 구분을 흐리면 T2 전체의 신뢰가 함께 떨어진다.
+> 🟢 **1·2·3번이 터미널이던 이유가 없어졌다**(2026-09-11 PM 실측 · PR #325 머지 `be779ce`).
+> 종전 판은 *"주입 스크립트가 DB에 쓰지 않아 Incident가 생기지 않으므로 토폴로지의 붉은 노드·위험도 배지는 mock이다"* 라고 적었다. **#322의 실경로가 서면서 그 전제가 깨졌다** — `scripts/inject_mock_threat.py --prepare-inbox <폴더>` 로 관측을 넣으면 앱의 `MockThreatConsumer` 가 소비해 **정형화 → 위험 판정 → Intake → SECOPS Incident 저장**까지 간다.
+> **실측**: Incident 1건(`SECOPS` · `ANALYZING` · `HIGH` · `PRE_MITIGATION_0_5S`) · `threat_events` 1행 · `evidence_items` 1행이 저장됐고, 대상 ARN 은 사전 준비 ④가 찍은 바인딩 A1 이었다.
+>
+> ⚠️ **그래도 「화면이 뜬다」고 적지 않는다 — 여기까지가 DB다.** 붉은 노드·위험도 배지가 실제로 그려지는지는 **FE 축**이고, PR #299·#293·#292 가 `CHANGES_REQUESTED` 다(판정 기준 ⓔ). **「뜰 근거가 생겼다」까지가 이 문서가 말할 수 있는 것**이고, 당일 화면을 보고 판정서 R8 에 적는다.
+> **당일 처분**: 화면이 그려지면 1·2·3 을 화면으로 짚고, 안 그려지면 **종전대로 터미널 출력으로 짚는다** — 어느 쪽이든 판정이 실제로 도는 것은 같다.
+> **4번부터는 AI 축이 갈린다** — 근거 요약과 조치 후보를 **사람이 넣는다**(#323 미착수 · §4 ⚠️). 심사자에게 *"관측·판정·저장은 실경로이고, AI 제안만 오늘은 사람이 씁니다"* 로 갈라 말한다.
 
 **대체 컷 7·8번**: 명세서 `[SecOps-02]`의 `HUMAN_ONLY` 승인 정책 중 **해제 쪽**을 슬라이드로 설명한다.
 (`/32` 단일 주소 핀셋 차단은 **5번에서 실물로 보인다** — 슬라이드로 대신할 필요가 없다.)
@@ -695,11 +710,14 @@ uv run python -c "import sys; sys.path[:0]=['apps/core-api','packages']; from se
 ⚠️ **여기서 자산 화면이 바뀐다** — §2-⑥의 실측 블록. **대본에서는 T1-6 뒤의 「골든 → 실수집 전환」 컷이 이 자리다**(§3-4).
 ⚠️ 이 수집이 **FINOPS Incident를 여러 건 자동 생성한다**(`create_incident_from_intake` · #306). 부작용이자 **판정 기준 ⓒ의 앞부분이 도는 증거**다. **SECOPS는 0건**이다.
 
-**B. SECOPS Incident 1건 + `record_agent_analysis()`** — 후보와 가드레일이 여기서 함께 난다.
+**B. SECOPS Incident 는 실경로가 만든다. AI 출력만 사람이 넣는다.**
 
-1. `incidents_repo.create_incident(db, subject_arn=<시드 NACL ARN>, category=SECOPS, title="SSH_BRUTE_FORCE", initial_risk_level=HIGH, response_mode=PRE_MITIGATION_0_5S, initial_risk_reason_codes=["RISK_SSH_BRUTEFORCE"])`
-2. `incidents_repo.claim_agent_invocation(db, incident_id, started_at=<now>)` → `True`
-3. `workflows.record_agent_analysis(db, incident_id, output)` — `output` 은 `AgentGraphOutput(invocation_status=SUCCEEDED, summary_lines=[3줄], reviewed_risk_level=HIGH, candidates=[RunbookCandidateDraft(RUNBOOK_NACL_ADD_DENY, target_arn=<시드 NACL ARN>, parameters={rule_number, cidr_block, protocol}, evidence_ids=[...])])`
+1. **Incident 생성** — `scripts/inject_mock_threat.py evt_ssh_bruteforce_001 --prepare-inbox <폴더> --target-arn <④가 찍은 A1 ARN>`. 앱이 소비해 **정형화 → 판정 → Intake → SECOPS Incident 저장**까지 간다(#322 / PR #325). `GET /api/v1/incidents` 로 그 `incident_id` 를 받아 둔다. **더 이상 손으로 만들지 않는다.**
+2. **AI 출력 주입** — `uv run python scripts/gate_t2_setup.py --incident-id <위 id> --target-arn <③이 찍은 NACL ARN>`. Claim 과 `record_agent_analysis()` 를 한 번에 한다
+3. → `[2] 분석 기록: next_status=AWAITING_APPROVAL executable=1 rejected=0` · 후보 `EXECUTABLE`
+
+> 🔴 **A(수집 컷)를 빼먹고 B를 돌리면 그 Incident 는 탄다**(2026-09-11 실측). 가드레일 ③에서 `guardrail_arn_match_rejected` 로 거절돼 **Incident 가 `FAILED`, 후보가 `REJECTED`** 가 되고 **AI 호출 Claim 이 소비된다.** 같은 Incident 로 다시 시도할 수 없다 — **새 관측을 넣어야 한다**: `--prepare-inbox … --occurred-at '<새 시각>'`(같은 관측 재전달은 멱등이라 새 Incident 가 안 생긴다).
+> 스크립트가 그 상황에서 *"ARN Match 거절이면 대본 §3-4 「골든 → 실수집 전환」 컷을 먼저 돌린다"* 를 찍는다 — **실제로 그 안내를 보고 복구했다.**
 
 → `AgentAnalysisOutcome(next_status=AWAITING_APPROVAL, executable=1, rejected=0)` · **이 Incident 앞으로 `guardrail_evaluations` 1행 생성**(`AI_CANDIDATE` · `PASS`). ⚠️ **표 전체가 1행이라는 뜻이 아니다** — 키가 있으면 A가 만든 FINOPS 분석 행이 함께 쌓인다(아래 SQL).
 ⚠️ **`summary_lines` 는 정확히 3줄**이어야 하고 `candidates` 가 비면 계약이 거절한다(`AgentGraphOutput._enforce_contract`).
@@ -734,7 +752,7 @@ select g.validation_context, g.result, g.steps
 | 5주차 판정 기준 | 이 게이트에서 확인되나 |
 | --- | --- |
 | ⓐ NACL 2종 실행 경로 구현 | 🔶 **절반**(2026-09-11 갱신) — `ADD_DENY`는 **구현·머지 완료**(#297 / PR #313 · `b674262`)이고 **2026-09-11에 가드레일 4단계부터 실물 규칙까지 관통 실측했다**(전제 셋은 §4 · 재현 §6-1). **게이트에서 실물로 확인된다.** `RESTORE`(#298)는 **미착수**이고 선행 `latest_for_target()`이 `NotImplementedError`(`workflows.py:1388`)다. **2종 중 1종**이라 ⓐ 전체로는 미달이며, 게이트는 이를 **드러낼 뿐** 해소하지 못한다 |
-| ⓑ E2E skip 2건 해제 | 🔶 **부분** — T1 skip은 이제 **실패 주입 하나**에만 걸린다(배선 #306·자동 원복 #241 해소 · §5-1). T2 skip은 **둘**에 걸린다 — `NACL_RESTORE` 실행 함수와 **SecOps 판정→Intake 배선**(#306은 FinOps 전용) |
+| ⓑ E2E skip 2건 해제 | 🔶 **부분** — T1 skip은 이제 **실패 주입 하나**에만 걸린다(배선 #306·자동 원복 #241 해소 · §5-1). T2 skip은 **2026-09-11에 하나로 줄었다** — **SecOps 판정→Intake 배선이 PR #325로 해소**됐고(#322 · 실측으로 Incident 저장 확인), 남은 것은 **`NACL_RESTORE` 실행 함수**(#298 미착수)뿐이다. ⚠️ **skip 해제 자체는 별개다** — 테스트의 skip 사유를 실제로 걷어 내는 것은 이 문서의 범위가 아니고 #246에 걸려 있다 |
 | ⓒ 판정 → Intake → AI → 승인 대기 **mock 없이 1건 관통** | 🔶 **대본이 상시 스캔은 끄지만 한 번은 돌린다**(2026-09-11 갱신) — `services/scheduler.py:126`(#306 / PR #320)이 호출부이나 **`run_pipeline`(스캔) 안**이고 §2-⑦이 `SCAN_ENABLED=false`로 띄운다(§3-2). **그런데 2026-09-11 PM 확정으로 §3-4「골든 → 실수집 전환」 컷이 T1-6 뒤에 서서, 그 자리에서 `run_pipeline()`이 한 번 돈다.** 즉 종전 서술(*"대본이 그 경로를 끈다"*)은 **이제 절반만 맞다** — 상시로는 꺼져 있고, **당일 한 번은 관통한다.** **그 경로가 실제로 관통한 실측이 있다** — 2026-09-10에 스캔이 생성한 Incident 3건이 같은 DB의 자동 dispatcher를 거쳐 **전부 `AWAITING_APPROVAL`에 도달**했다(안성일 · #306 종결 코멘트 · 2026-09-11 확인). 2026-09-11에 이 문서 작성자도 수집 1회로 **FINOPS Incident 10건 자동 생성**까지는 확인했다(AI 단계는 키가 없어 미확인). 충족 여부는 PM 판단이다 — **기준 문장이 「1건 관통」이고 그 컷에서 5건이 관통한다는 사실**, 그리고 **상시 경로는 여전히 대본이 끄고 있다는 사실**을 판정서에 함께 적는다. ⚠️ 차단 요인 ④는 **운영 머신을 PM 로컬로 확정해 해소**됐다(#316) |
 | ⓓ 스캔 스케줄러 lifespan 기동 + 중복 실행 방지 | ✅ **코드 기준 충족** — advisory lock #281(`a820a4b`) · lifespan 배선 #287(`79d6001`) **둘 다 dev**다. 게이트에서는 **사전 준비 ⑥ 실기동**으로 확인한다 |
 | ⓔ FE가 실 API로 자산 → 인시던트 → 종료 처리 | 🔴 **「부분 확인」도 위태롭다**(2026-09-10 재확인) — FE PR 3건(#299·#293·#292)이 전부 `CHANGES_REQUESTED`이고 **09-07 이후 갱신이 없다**. **게이트 전 작업일이 오늘로 끝난다.** 확인 가능한 것이 **자산 화면 하나**로 줄어들 수 있다 |
