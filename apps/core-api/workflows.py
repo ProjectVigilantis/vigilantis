@@ -36,7 +36,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from pydantic import ValidationError
@@ -50,7 +50,8 @@ from schemas.api.actions import (
     ExecutionStatus,
 )
 from schemas.api.errors import ErrorCode
-from schemas.api.incidents import IncidentStatus, ResolutionJudgement
+from schemas.api.incidents import IncidentStatus, ResolutionJudgement, IncidentCategory, ResponseMode
+from schemas.incidents import AgentWaitSchedule
 from schemas.backups import InstanceSpecBackup, NaclRuleIndexBackup
 from schemas.candidates import CandidateStatus, RunbookCandidateData
 from schemas.executions import (
@@ -2162,14 +2163,10 @@ def judge_revert_size(db: Session, execution_id: str) -> ExecutionJudgement:
 # ManagedAssetLookup Protocol이라 구현을 바꿔 끼우는 것이고, 판정 기준(수집된 자산인가)은
 # 그대로다.
 #
-# **요약 3줄은 AWAITING_APPROVAL로 갈 때만 쓴다.** 조회 계약(api/incidents.py
-# _enforce_contract)이 ANALYZING·FAILED에 빈 summary_lines를 요구하므로, 실패로 닫는
-# 건에 요약을 남기면 그 Incident의 상세 조회가 500이 된다. 쓰지 않는 요약은 로그로만
-# 남긴다(Issue #285) — 후보가 왜 0개였는지 진단할 근거가 그것뿐이다.
-#
-# **Incident 행을 잠그지 않는다.** 배타 보장은 AI 호출 선점(IN_PROGRESS)이 이미 갖고
-# 있고(agent_dispatcher.py 2번), 잠그면 저장 트랜잭션이 여는 시간만큼 행이 잠긴다.
-# 전이는 expected 조건부 UPDATE라 잠금 없이도 덮어쓰기가 생기지 않는다.
+# FAILED로 닫는 분석의 요약·재평가는 저장하지 않는다. 요약은 로그로만 남긴다(#285).
+# SecOps의 선행 실행이 진행 중이거나 성공·원복 완료라면 해당 실행 상태를 유지한다.
+# 저장 직전 Incident 행을 잠그고 선행 실행 상태를 읽어 최종 상태를 정한다.
+# 모델·AWS 호출 동안에는 이 잠금과 DB 트랜잭션을 열어 두지 않는다.
 
 
 @dataclass
@@ -2177,10 +2174,10 @@ class AgentAnalysisOutcome:
     """그래프 출력 1건의 저장 결과 — 발행과 스캔 집계를 정하는 호출부가 읽는 값이다."""
 
     incident_id: str
-    next_status: IncidentStatus  # AWAITING_APPROVAL | FAILED
+    next_status: IncidentStatus
     executable: int
     rejected: int
-    occurred_at: datetime  # 저장된 Incident.updated_at — WS 봉투의 occurred_at
+    occurred_at: datetime  # 승인 대기 시작 시각 또는 Incident.updated_at
 
 
 def _candidate_command_payload(candidate: RunbookCandidateData) -> dict:
@@ -2222,8 +2219,9 @@ def _candidate_precheck(
 
     지금 배선하는 조회는 RIGHTSIZING의 current_instance_type 하나다. 나머지 FinOps
     후보(ENABLE_AUTOSCALING·EBS_DELETE_UNATTACHED·SG_DELETE_ISOLATED)는 실행 파라미터가
-    후보 값과 대상 자원 ID만으로 서고, 격리·NACL 계열은 메뉴에 오르지 않는다
-    (ai/capabilities.py 축 ②). 조회 실패는 배선 오류가 아니라 AWS 판정이라 예외가 아니라
+    후보 값과 대상 자원 ID만으로 선다. SecOps NACL_ADD_DENY도 같은 변환을 사용한다.
+    현재 SecOps 그래프 메뉴는 NACL_ADD_DENY만 제공한다.
+    조회 실패는 배선 오류가 아니라 AWS 판정이라 예외가 아니라
     FAIL로 돌려준다(ADR-0007 §1 — 예외로 막는 것은 배선 오류뿐이다).
 
     **backup_loader는 NACL_RESTORE 후보가 읽는다**(ai/guardrails.CandidatePrecheck가 요구하는
@@ -2395,13 +2393,15 @@ def record_agent_analysis(
 ) -> AgentAnalysisOutcome:
     """그래프 출력 1건 → 가드레일 1회 + 후보 저장 + ANALYZING 이탈. 순서는 파일 절 참조.
 
-    **NO_PROPOSAL과 "후보 전부 REJECTED"는 분석 실패다.** 둘 다 관제자에게 보여줄 조치가
+    **NO_PROPOSAL과 "후보 전부 REJECTED"는 실행 가능한 제안이 없다.** 관제자에게 보여줄 조치가
     0개인데 AWAITING_APPROVAL은 실행 가능한 제안 1개 이상을 요구한다(api/incidents.py
     _enforce_contract). 새 상태를 만들지 않고 FAILED로 닫되 agent_invocation_status는
     그래프가 낸 Terminal 값을 그대로 남겨 그래프 오류(FAILED)와 구분한다 — 결함 계측과
     감사가 그 둘을 갈라 봐야 한다(Issue #237 도피 비율).
 
-    출력이 FAILED면 후보도 요약도 없으므로(계약 불변식) 곧바로 Incident를 FAILED로 옮긴다.
+    SecOps는 실행 중이면 ACTION_IN_PROGRESS, 성공·원복 완료 실행이 있고 제안이
+    없으면 AWAITING_CLOSURE로 둔다. FAILED에서는 요약·재평가를 비운다.
+    AGENT_WAIT의 승인 대기 시각만 기록하며 자동 격리 엔진은 기동하지 않는다.
     """
     candidates = _draft_candidates(incident_id, output)
     managed = _managed_arns(db, candidates) if candidates else set()
@@ -2414,32 +2414,64 @@ def record_agent_analysis(
         for candidate in candidates
     ]
 
+    incident = incidents_repo.lock_incident(db, incident_id)
+    if incident is None:
+        raise ValueError(f"Incident를 찾을 수 없습니다: {incident_id}")
+    previous_status = incident.status
+    is_secops = incident.category is IncidentCategory.SECOPS
+    permitted = {IncidentStatus.ANALYZING}
+    if is_secops:
+        permitted.update({IncidentStatus.ACTION_IN_PROGRESS, IncidentStatus.AWAITING_CLOSURE})
+    if previous_status not in permitted:
+        raise ValueError(f"분석 결과를 저장할 수 없는 Incident 상태: {previous_status.value}")
+
     executable = sum(
         _store_candidate(db, candidate, outcome) for candidate, outcome in guarded
     )
     rejected = len(guarded) - executable
 
     target = IncidentStatus.AWAITING_APPROVAL if executable else IncidentStatus.FAILED
-    if target is not IncidentStatus.AWAITING_APPROVAL:
+    if is_secops:
+        executions = executions_repo.list_by_incident(db, incident_id)
+        if any(item.status in EXECUTION_NON_TERMINAL_STATUSES for item in executions):
+            target = IncidentStatus.ACTION_IN_PROGRESS
+        elif not executable and any(
+            item.status in EXECUTION_SETTLED_STATUSES for item in executions
+        ):
+            target = IncidentStatus.AWAITING_CLOSURE
+    keep_summary = target is not IncidentStatus.FAILED
+    if not keep_summary:
         _log_dropped_summary(incident_id, output)
     if not incidents_repo.finish_agent_invocation(
         db,
         incident_id,
         output.invocation_status,
-        # FAILED로 닫는 건은 빈 요약을 유지한다(조회 계약)
         summary_lines=(
             list(output.summary_lines)
-            if target is IncidentStatus.AWAITING_APPROVAL
+            if keep_summary
             else None
+        ),
+        reviewed_risk_level=(
+            output.reviewed_risk_level if is_secops and keep_summary else None
         ),
     ):
         raise ValueError(f"AI 호출 종료 전이 실패: {incident_id}")
     if not incidents_repo.update_incident_status(
-        db, incident_id, expected=IncidentStatus.ANALYZING, next_status=target
+        db, incident_id, expected=previous_status, next_status=target
     ):
         # ANALYZING은 관제자 종료 처리의 출발 상태가 아니라(INCIDENT_RESOLVABLE_STATUSES)
         # 분석 중에 상태가 옮겨 갈 경로가 없다. commit 없이 던져 세션 정리에서 되돌린다
         raise ValueError(f"Incident 상태 전이 실패: {incident_id}")
+
+    wait_started = None
+    if (is_secops and target is IncidentStatus.AWAITING_APPROVAL
+            and incident.response_mode is ResponseMode.AGENT_WAIT
+            and incident.agent_wait_started_at is None):
+        wait_started = datetime.now(timezone.utc)
+        incidents_repo.set_agent_wait(db, AgentWaitSchedule(
+            incident_id=incident_id, started_at=wait_started,
+            response_deadline_at=wait_started + timedelta(seconds=60),
+        ))
 
     db.commit()
     incident = incidents_repo.get_incident(db, incident_id)
@@ -2460,5 +2492,5 @@ def record_agent_analysis(
         next_status=target,
         executable=executable,
         rejected=rejected,
-        occurred_at=incident.updated_at,
+        occurred_at=wait_started or incident.updated_at,
     )

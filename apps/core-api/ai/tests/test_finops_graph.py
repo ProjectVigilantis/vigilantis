@@ -19,6 +19,9 @@ from ai.agent import (
     _PARAMETER_CONSTRAINTS,
     _FINOPS_PROPOSAL_SYSTEM_PROMPT,
     _FINOPS_SUMMARY_SYSTEM_PROMPT,
+    _SECOPS_SUMMARY_PROMPT,
+    _SECOPS_RISK_PROMPT,
+    _SECOPS_PROPOSAL_PROMPT,
     FINOPS_PROMPT_VERSION,
     CandidateProposalOutput,
     EvidenceSummaryOutput,
@@ -423,7 +426,13 @@ def test_summary_output_fields_are_the_three_roles():
     assert list(EvidenceSummaryOutput.model_fields) == ["observation", "diagnosis", "rationale"]
 
 
-@pytest.mark.parametrize("prompt", [_FINOPS_SUMMARY_SYSTEM_PROMPT, _FINOPS_PROPOSAL_SYSTEM_PROMPT])
+@pytest.mark.parametrize("prompt", [
+    _FINOPS_SUMMARY_SYSTEM_PROMPT,
+    _FINOPS_PROPOSAL_SYSTEM_PROMPT,
+    _SECOPS_SUMMARY_PROMPT,
+    _SECOPS_RISK_PROMPT,
+    _SECOPS_PROPOSAL_PROMPT,
+])
 def test_prompts_are_directive_not_prohibitive(prompt):
     # 금지가 쌓일수록 빈 후보가 가장 안전한 답이 된다(#243) — 금지형 표지를 잡는다
     for marker in ("않는다", "마라", "금지"):
