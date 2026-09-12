@@ -101,9 +101,20 @@ VALID = {
     ),
 }
 
+# NACL_RESTORE 백업 — 슬롯 2항목 + 규칙 fingerprint 3항목(ADR-0008 §5). 아래
+# describe_network_acls 기본 응답의 100번 엔트리와 fingerprint가 맞는다.
+NACL_CIDR = "203.0.113.5/32"
+NACL_BACKUP = {
+    "rule_number": 100,
+    "egress": False,
+    "cidr_block": NACL_CIDR,
+    "protocol": "6",
+    "rule_action": "deny",
+}
+
 # 런북별 백업 레코드 payload — 스펙 JSON 백업 모듈이 만들어야 할 모양이다
 BACKUP_PAYLOADS = {
-    "RUNBOOK_NACL_RESTORE": (ex.BACKUP_NACL_RULE_INDEX, {"rule_number": 100, "egress": False}),
+    "RUNBOOK_NACL_RESTORE": (ex.BACKUP_NACL_RULE_INDEX, NACL_BACKUP),
     "RUNBOOK_EC2_UNISOLATE": (
         ex.BACKUP_SG_AND_TG_MAPPING,
         {"security_group_ids": [GROUP], "target_group_arn": TG_ARN},
@@ -152,7 +163,13 @@ DEFAULT_RESPONSES = {
             {
                 "NetworkAclId": ACL,
                 "Entries": [
-                    {"RuleNumber": 100, "Egress": False, "RuleAction": "deny"},
+                    {
+                        "RuleNumber": 100,
+                        "Egress": False,
+                        "RuleAction": "deny",
+                        "CidrBlock": NACL_CIDR,
+                        "Protocol": "6",
+                    },
                     {"RuleNumber": 32767, "Egress": False, "RuleAction": "allow"},
                 ],
             }
@@ -538,11 +555,48 @@ def test_nacl_restore_refuses_to_delete_an_allow_rule(aws):
 def test_nacl_restore_requires_the_backup_rule_index_to_match(aws):
     """다른 규칙의 백업으로는 복원하지 않는다 — 조회 자체가 rule index로 좁혀진다."""
     loader = loader_for(
-        "RUNBOOK_NACL_RESTORE", payload={"rule_number": 900, "egress": False}
+        "RUNBOOK_NACL_RESTORE", payload={**NACL_BACKUP, "rule_number": 900}
     )
     outcome = run("RUNBOOK_NACL_RESTORE", loader=loader)
     assert (outcome.passed, outcome.reason_code) == (False, R.PRECHECK_TARGET_NOT_FOUND)
     assert loader.match_calls == [{"rule_number": 100, "egress": False}]
+
+
+@pytest.mark.parametrize(
+    "differs",
+    [{"CidrBlock": "10.0.0.0/8"}, {"Protocol": "17"}],
+)
+def test_nacl_restore_refuses_a_third_party_rule_in_the_same_slot(differs, aws):
+    """rule_number는 재사용되는 슬롯 번호다 — 우리 규칙이 지워진 뒤 같은 번호에 들어온
+    남의 deny 규칙을 우리 것으로 오인해 지우지 않는다(ADR-0008 §5). 삭제는 되돌릴 수 없다."""
+    third_party = {
+        "RuleNumber": 100,
+        "Egress": False,
+        "RuleAction": "deny",
+        "CidrBlock": NACL_CIDR,
+        "Protocol": "6",
+        **differs,
+    }
+    aws(describe_network_acls={"NetworkAcls": [{"Entries": [third_party]}]})
+    outcome = run("RUNBOOK_NACL_RESTORE")
+    assert (outcome.passed, outcome.reason_code) == (False, R.PRECHECK_INVALID_STATE)
+    assert "규칙 fingerprint 일치" not in outcome.verification_summary
+
+
+@pytest.mark.parametrize("missing", ["cidr_block", "protocol", "rule_action"])
+def test_nacl_restore_without_a_fingerprint_cannot_judge(missing, aws):
+    """백업에 fingerprint 항목이 없으면 슬롯의 규칙이 우리 것인지 가릴 수 없다 — 판정
+    불가로 끝내고 AWS에 닿지 않는다(ADR-0008 §5 "백업 payload에 항목이 없다" 칸)."""
+    payload = {k: v for k, v in NACL_BACKUP.items() if k != missing}
+    outcome = run("RUNBOOK_NACL_RESTORE", payload=payload)
+    assert (outcome.passed, outcome.reason_code) == (False, R.PRECHECK_PARAM_INVALID)
+    assert not aws.calls
+
+
+def test_nacl_restore_names_the_fingerprint_in_what_it_verified(aws):
+    outcome = run("RUNBOOK_NACL_RESTORE")
+    assert outcome.passed
+    assert "규칙 fingerprint 일치" in outcome.verification_summary
 
 
 def test_isolate_requires_the_target_to_be_registered(aws):
@@ -686,9 +740,9 @@ def test_nacl_restore_can_reach_an_older_rule_backup(aws):
             target_arn = VALID["RUNBOOK_NACL_RESTORE"][0]
             self.records = [
                 ex.BackupRecordView("bk-900", target_arn, ex.BACKUP_NACL_RULE_INDEX,
-                                    {"rule_number": 900, "egress": False}),
+                                    {**NACL_BACKUP, "rule_number": 900}),
                 ex.BackupRecordView("bk-100", target_arn, ex.BACKUP_NACL_RULE_INDEX,
-                                    {"rule_number": 100, "egress": False}),
+                                    NACL_BACKUP),
             ]
 
         def get(self, backup_record_id):

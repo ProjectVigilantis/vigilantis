@@ -13,8 +13,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import select, update
-from sqlalchemy.orm import Session
+from sqlalchemy import exists, select, update
+from sqlalchemy.orm import Session, aliased
 
 from schemas.api.actions import ExecutionStatus
 from schemas.executions import EXECUTION_NON_TERMINAL_STATUSES, ExecutionStepResult
@@ -233,4 +233,53 @@ def get_backup_record(
         select(models.BackupRecord).where(
             models.BackupRecord.backup_record_id == backup_record_id
         )
+    ).scalar_one_or_none()
+
+
+def latest_backup_for_target(
+    db: Session,
+    *,
+    target_arn: str,
+    backup_type: str,
+    payload_match: Optional[dict] = None,
+    consumed_by: Optional[RunbookId] = None,
+) -> Optional[models.BackupRecord]:
+    """대상 기준 최신 백업 1건 — backup_record_id를 모르는 원복이 레코드를 찾는 자리.
+
+    종류·target_arn·payload_match 3중 대조(ADR-0008 §1 ④)에 두 조건을 더 건다.
+
+      - **백업을 만든 실행이 SUCCESS인 것만.** 실패한 조치도 백업은 남긴다(백업이 AWS
+        변경보다 먼저 커밋되므로). 그 레코드는 들어가지 않은 변경을 가리키므로, 최신이라는
+        이유로 고르면 실제로 적용된 변경의 레코드를 가린다.
+      - **consumed_by 런북의 SUCCESS 실행이 이미 결속한 레코드는 뺀다.** 원복은 쓴 레코드를
+        자기 행에 결속하므로(ADR-0008 §4) 그 결속이 곧 "이 레코드로 이미 되돌렸다"는
+        기록이다. 빼지 않으면 같은 값으로 다시 생긴 제3자 자원을 우리 것으로 읽는다.
+
+    그래도 여러 건이 남으면 가장 최근 것이다. payload_match는 JSONB 포함(@>)으로 본다.
+    """
+    query = (
+        select(models.BackupRecord)
+        .join(
+            models.ActionExecution,
+            models.ActionExecution.execution_id == models.BackupRecord.execution_id,
+        )
+        .where(
+            models.BackupRecord.target_arn == target_arn,
+            models.BackupRecord.backup_type == backup_type,
+            models.ActionExecution.status == ExecutionStatus.SUCCESS,
+        )
+    )
+    if payload_match:
+        query = query.where(models.BackupRecord.payload.contains(payload_match))
+    if consumed_by is not None:
+        consumer = aliased(models.ActionExecution)
+        query = query.where(
+            ~exists().where(
+                consumer.backup_record_id == models.BackupRecord.backup_record_id,
+                consumer.runbook_id == consumed_by,
+                consumer.status == ExecutionStatus.SUCCESS,
+            )
+        )
+    return db.execute(
+        query.order_by(models.BackupRecord.created_at.desc()).limit(1)
     ).scalar_one_or_none()

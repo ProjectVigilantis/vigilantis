@@ -269,7 +269,10 @@ def test_finops_incident_carries_no_risk_fields():
 #
 # T1의 FinOps 판정 → Intake 배선은 #306으로 연결됐다. 남은 선행은
 # Status Check 실패 주입이다. T2는 SecOps 위협 판정 → Intake 배선과
-# NACL_RESTORE 실행 함수가 남아 있다(NACL_ADD_DENY는 #297로 구현됨).
+# **차단 성공 뒤 해제 후보를 만드는 경로**가 남아 있다. 실행 경로는 NACL 2종 모두
+# 섰다(ADD_DENY #297 · RESTORE #298) — 해제는 AI 추천 7종이라 [해제] 버튼이
+# EXECUTABLE 후보(recommendations)에서 렌더되는데, 차단이 SUCCESS로 닫힌 뒤 그 후보를
+# 만드는 주체가 아직 없다(#323은 범위 밖으로 둠).
 # #306은 COST_CANDIDATE·UNUSED만 연결하므로 T2의 선행까지 해소하지 않는다.
 #
 # 열리면 이 파일 위쪽의 전제 테스트가 이미 입력·런북 짝을 보증하고 있으므로,
@@ -305,9 +308,9 @@ def test_t1_idle_ec2_downsize_and_auto_rollback_flow():
 
 
 @pytest.mark.skip(
-    reason="NACL_RESTORE 실행 함수 없음(services/aws/executor.py) + SecOps 위협 판정→Intake 미연결 "
-    "(NACL_ADD_DENY는 #297로 구현됨, #306은 FinOps 배선) — 설계서 §대조 1번·9번. "
-    "SSOT 5주차 판정 기준 ⓐ · 이슈 #298 · #301 · #246"
+    reason="차단 성공 뒤 해제 후보(NACL_RESTORE)를 만드는 경로 없음 + SecOps 위협 판정→Intake 미연결 "
+    "(NACL 2종 실행 경로는 #297·#298로 구현됨, #306은 FinOps 배선) — 설계서 §대조 1번·9번. "
+    "SSOT 5주차 판정 기준 ⓑ · 이슈 #298 · #301 · #246"
 )
 def test_t2_ssh_bruteforce_block_and_one_click_release_flow():
     """T2 전 구간 — 설계서 §T2 단계표 1~8번.
