@@ -1,7 +1,8 @@
-"""NACL_ADD_DENY LocalStack 통합 테스트 (Issue #297, ADR-0006).
+"""NACL 2종 LocalStack 통합 테스트 (Issue #297 · #298, ADR-0006).
 
-단계 분기 전수는 test_execute_nacl_add_deny.py가 맡고, 여기서는 **실물에서 실제로
-규칙이 들어가고, 저장된 백업 fingerprint가 그 규칙과 맞는가**만 본다.
+단계 분기 전수는 test_execute_nacl_add_deny.py·test_execute_nacl_restore.py가 맡고,
+여기서는 **실물에서 실제로 규칙이 들어가고, 저장된 백업 fingerprint가 그 규칙과 맞으며,
+해제가 그 규칙만 지우는가**를 본다.
 
 이 파일이 필요한 이유가 NACL에는 특히 크다. 이 자원의 두 쓰기 API는 LocalStack이
 `DryRun=True`를 무시하고 실제로 수행해 버리는 바로 그 경로이고(ADR-0006 §4 5행),
@@ -201,6 +202,46 @@ def test_the_judge_read_sees_the_same_slot(nacl):
     )
     assert code is None
     assert after["CidrBlock"] == CIDR
+
+
+def test_block_then_release_round_trip(nacl):
+    """차단 → 해제 왕복(Issue #298 DoD). 넣은 규칙이 해제로 사라지고 describe가 그것을 확인한다.
+
+    백업은 차단 직전 캡처가 만든 그대로를 쓴다 — 해제가 지울 규칙을 특정하는 근거가
+    실물에서도 맞는지가 이 왕복의 요점이다.
+    """
+    acl_id, arn = nacl
+    capture = bk.capture_nacl_rule_index(
+        acl_id, default_region(), rule_number=RULE_NUMBER, cidr_block=CIDR, protocol="tcp"
+    )
+    ex.execute_nacl_add_deny(arn, rule_number=RULE_NUMBER, cidr_block=CIDR, protocol="tcp")
+    assert _inbound_entry(acl_id, RULE_NUMBER) is not None
+
+    outcome = ex.execute_nacl_restore(
+        arn, backup=NaclRuleIndexBackup.model_validate(capture.payload)
+    )
+
+    assert outcome.succeeded, outcome.error_summary
+    assert [(s.step_type, s.effect) for s in outcome.steps] == [
+        (ex.STEP_DELETE_NACL_ENTRY, E.APPLIED)
+    ]
+    assert _inbound_entry(acl_id, RULE_NUMBER) is None
+
+
+def test_release_leaves_a_third_party_rule_in_the_slot(nacl):
+    """우리 백업과 fingerprint가 다른 규칙은 실물에서도 지우지 않는다(ADR-0008 §5)."""
+    acl_id, arn = nacl
+    ex.execute_nacl_add_deny(
+        arn, rule_number=RULE_NUMBER, cidr_block="203.0.113.0/24", protocol="udp"
+    )
+    ours = NaclRuleIndexBackup(
+        rule_number=RULE_NUMBER, egress=False, cidr_block=CIDR, protocol="6", rule_action="deny"
+    )
+
+    outcome = ex.execute_nacl_restore(arn, backup=ours)
+
+    assert outcome.reason_code is R.PRECHECK_INVALID_STATE
+    assert _inbound_entry(acl_id, RULE_NUMBER)["CidrBlock"] == "203.0.113.0/24"
 
 
 def test_a_missing_nacl_reads_as_target_not_found():
