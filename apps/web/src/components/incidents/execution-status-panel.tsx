@@ -32,6 +32,8 @@ const STATUS_MESSAGES: Record<ExecutionStatus, string> = {
   ROLLBACK_INITIATED: '복구를 시작했습니다.',
   ROLLED_BACK: '이전 상태로 복구했습니다.',
   ROLLBACK_FAILED: '복구에 실패했습니다. 수동 확인이 필요합니다.',
+  UNVERIFIED:
+    '결과를 확인하지 못해 자동 판정을 멈췄습니다. 자동 복구는 하지 않았으며 자산 상태를 수동으로 확인해야 합니다.',
 };
 
 export function ExecutionStatusPanel({

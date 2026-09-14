@@ -131,8 +131,9 @@ export const RESPONSE_MODE_LABELS: LabelMap<ResponseMode> = {
 };
 
 /**
- * 실행 status 6종 — 라벨은 4.7 "진행 표시기 매핑", 기호·색은 5장과 4.7 "최종 상태 표시".
+ * 실행 status 7종 — 라벨은 4.7 "진행 표시기 매핑", 기호·색은 5장과 4.7 "최종 상태 표시".
  * FAILED(AWS 변경 없음)와 ROLLBACK_FAILED(변경된 채 복구 실패·CRITICAL)를 합치지 않는다.
+ * UNVERIFIED(결과 확인 불가, #249)는 실패가 아니라 "모른다"라서 빨강과 색을 가른다.
  */
 export const EXECUTION_STATUS_LABELS: LabelMap<ExecutionStatus> = {
   // IN_PROGRESS 색은 문서에 없다 — 3.2의 진행 중 표기(회색 + 스피너) 관례를 따른다
@@ -142,6 +143,7 @@ export const EXECUTION_STATUS_LABELS: LabelMap<ExecutionStatus> = {
   ROLLBACK_INITIATED: { label: '복구 중', tone: 'orange', glyph: '⟲' },
   ROLLED_BACK: { label: '복구 완료', tone: 'blue', glyph: '⟲' },
   ROLLBACK_FAILED: { label: '복구 실패', tone: 'red', glyph: '⚠' },
+  UNVERIFIED: { label: '결과 확인 불가', tone: 'yellow', glyph: '?' },
 };
 
 /** 3.2.1 Runbook 사전의 "표시" 열. 파라미터·실행 상세는 서버 계약(schemas) 소관이라 옮기지 않는다. */
