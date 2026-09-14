@@ -117,11 +117,15 @@ class CollectionRun(Base):
     __table_args__ = (
         Index("ix_collection_runs_started_at", "started_at"),
         # 리전별 최신 run 조회(latest_collection_run_per_region)가 5분 스캔으로 쌓이는
-        # 행을 전부 정렬하지 않게 — (region, started_at DESC) 순서로 LIMIT 1 을 찍는다.
+        # 행을 전부 정렬하지 않게 — (region, started_at DESC, id DESC) 순서로 LIMIT 1 을
+        # 찍는다. 두 번째 키 id 는 동시각 tie-break 이자, ix_collection_runs_started_at
+        # (started_at 단독)이 이 정렬을 대신하지 못하게 해 플래너가 그 인덱스를 최신순으로
+        # 훑다가 리전 필터로 버리는 경로(PR #344 리뷰)를 고르지 않게 한다.
         Index(
             "ix_collection_runs_region_started_at",
             "region",
             text("started_at DESC"),
+            text("collection_run_id DESC"),
         ),
     )
 

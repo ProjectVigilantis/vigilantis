@@ -8,6 +8,8 @@
 #      바뀐 뒤에도 답이 같다 — 리전·자산별 최신 1건, 없는 쪽은 빠짐, 동시각은 id 큰 쪽.
 #   3. 두 조회가 정렬(Sort) 없이 인덱스 첫 항목으로 끝난다 — 회차가 쌓여도 비용이
 #      리전·자산 수에만 비례하는 이유가 이것이라, 정렬이 돌아오면 그 보장이 사라진다.
+#      "만진 행" 에는 필터로 버린 행도 센다 — 이력이 없거나 묵은 리전에서 다른 리전 행을
+#      읽고 버리는 경로(PR #344 리뷰)가 여기 걸린다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -145,18 +147,41 @@ def test_latest_evaluation_by_asset_newest_then_larger_id(db):
 # --- 3. 비용이 회차 수가 아니라 리전·자산 수에 비례한다 ------------------------------
 
 
-def _rows_touched(db, stmt, table: str) -> int:
-    """EXPLAIN ANALYZE 에서 ``table`` 을 읽는 노드들의 실제 행 수(rows × loops) 최댓값."""
-    import re
-
+def _plan(db, stmt) -> list[str]:
     from sqlalchemy.dialects import postgresql
 
     sql = str(stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
-    plan = [r[0] for r in db.execute(text("EXPLAIN (ANALYZE, COSTS OFF) " + sql))]
+    return [r[0] for r in db.execute(text("EXPLAIN (ANALYZE, COSTS OFF) " + sql))]
+
+
+def _rows_touched(plan: list[str], table: str) -> int:
+    """``table`` 을 읽는 노드가 실제로 만진 행 수 — 내보낸 행(rows × loops)에 **필터로 버린
+    행(Rows Removed by Filter × loops)** 을 더한다. 버린 행을 빼고 세면 인덱스를 최신순으로
+    훑다가 리전 조건으로 수천 행을 폐기하는 경로가 통과한다(PR #344 리뷰)."""
+    import re
+
     node = re.compile(rf"\bon {table}\b.*rows=(\d+) loops=(\d+)")
-    touched = [int(m.group(1)) * int(m.group(2)) for m in map(node.search, plan) if m]
+    removed = re.compile(r"Rows Removed by Filter: (\d+)")
+    touched: list[int] = []
+    loops = 0
+    for line in plan:
+        m = node.search(line)
+        if m:
+            loops = int(m.group(2))
+            touched.append(int(m.group(1)) * loops)
+            continue
+        r = removed.search(line)
+        if r and touched:
+            touched[-1] += int(r.group(1)) * loops
     assert touched, "\n".join(plan)
     return max(touched)
+
+
+def _prepare_planner(db):
+    """통계가 없으면 플래너가 표를 비었다고 보고 아무 경로나 고른다 — 실제 크기를 알린 뒤,
+    작은 표에서 순차 탐색을 고르지 않게 한다."""
+    db.execute(text("ANALYZE assets, collection_runs, rule_evaluations"))
+    db.execute(text("SET LOCAL enable_seqscan = off"))
 
 
 def test_latest_queries_touch_one_row_per_region_and_asset(db):
@@ -174,10 +199,32 @@ def test_latest_queries_touch_one_row_per_region_and_asset(db):
         for asset in assets:
             _evaluate(db, run, asset, run.started_at)
 
-    # 통계가 없으면 플래너가 표를 비었다고 보고 아무 경로나 고른다 — 실제 크기를 알린 뒤,
-    # 작은 표에서 순차 탐색을 고르지 않게 한다.
-    db.execute(text("ANALYZE assets, collection_runs, rule_evaluations"))
-    db.execute(text("SET LOCAL enable_seqscan = off"))
+    _prepare_planner(db)
 
-    assert _rows_touched(db, assets_repo.latest_run_per_region_stmt(regions), "collection_runs") == 2
-    assert _rows_touched(db, assets_repo.latest_rule_evaluation_by_asset_stmt(), "rule_evaluations") == 2
+    assert _rows_touched(_plan(db, assets_repo.latest_run_per_region_stmt(regions)), "collection_runs") == 2
+    assert _rows_touched(_plan(db, assets_repo.latest_rule_evaluation_by_asset_stmt()), "rule_evaluations") == 2
+
+
+def test_stale_or_empty_region_does_not_scan_other_regions(db):
+    """이력이 없는 리전·31일 묵은 리전을 조회해도 다른 리전의 행을 읽고 버리지 않는다.
+
+    PR #344 리뷰가 잡은 경로: 플래너가 started_at 단독 인덱스를 최신순으로 훑으며 리전
+    필터로 8,640행을 폐기했다. 정렬 키에 id 를 더해 그 인덱스가 정렬을 대신하지 못하게
+    했으므로, 어떤 리전 조합에서도 만진 행은 이력이 있는 리전 수를 넘지 않는다.
+    """
+    for i in range(40):
+        _run(db, "fresh", NOW + timedelta(minutes=5 * i))
+        _run(db, "stale", NOW - timedelta(days=31) + timedelta(minutes=5 * i))
+
+    _prepare_planner(db)
+
+    stmt = assets_repo.latest_run_per_region_stmt(["fresh", "stale", "never-collected"])
+    plan = _plan(db, stmt)
+    assert "ix_collection_runs_started_at" not in "\n".join(plan), "\n".join(plan)
+    assert "Rows Removed by Filter" not in "\n".join(plan), "\n".join(plan)
+    # EXPLAIN 의 rows 는 loop 평균(반올림)이라 3 리전 × 1 = 3 까지가 상한 — 80 이 아니다
+    assert _rows_touched(plan, "collection_runs") <= 3, "\n".join(plan)
+
+    got = {r.region: r for r in db.execute(stmt).scalars()}
+    assert set(got) == {"fresh", "stale"}
+    assert got["stale"].started_at == NOW - timedelta(days=31) + timedelta(minutes=5 * 39)
