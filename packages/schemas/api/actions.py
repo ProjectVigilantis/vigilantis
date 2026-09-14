@@ -14,9 +14,12 @@
 #   - runbook_id는 schemas/runbooks.py 확정 10종 원천(RunbookId)으로만 검증한다.
 #     목록 복사 금지. 등록 ID여도 현재 실행 가능한 제안·복구 조치가 아니면
 #     실행부가 409 PROPOSAL_NOT_EXECUTABLE로 거절한다.
-#   - 실행 상태 6종 = SSOT 4종 + 복구 최종 결과 2종(ROLLED_BACK·ROLLBACK_FAILED).
-#     +2종은 원본 Execution에만 기록하며(Rollback 자식은 IN_PROGRESS→SUCCESS|FAILED),
+#   - 실행 상태 7종 = SSOT 4종 + 복구 최종 결과 2종(ROLLED_BACK·ROLLBACK_FAILED)
+#     + 결과 확인 불가 1종(UNVERIFIED, Issue #249).
+#     복구 최종 결과 2종은 원본 Execution에만 기록하며(Rollback 자식은 IN_PROGRESS→SUCCESS|FAILED),
 #     FE 합의 대상 확장으로 이 PR에서 SSOT 표와 함께 확정한다.
+#   - UNVERIFIED도 원본 전용이다. AWS에 물어보지 못해 결과를 확정하지 못한 채 재시도를
+#     소진한 실행이며 자동 원복의 입력이 아니다 — 판정은 관제자에게 넘어간다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -31,7 +34,7 @@ from .assets import UtcDateTime
 
 @unique
 class ExecutionStatus(str, Enum):
-    """실행 상태 6종 = SSOT 4종 + 복구 최종 결과 2종(FE 합의 확장)."""
+    """실행 상태 7종 = SSOT 4종 + 복구 최종 결과 2종 + 결과 확인 불가 1종(FE 합의 확장)."""
 
     IN_PROGRESS = "IN_PROGRESS"
     SUCCESS = "SUCCESS"
@@ -39,6 +42,10 @@ class ExecutionStatus(str, Enum):
     ROLLBACK_INITIATED = "ROLLBACK_INITIATED"
     ROLLED_BACK = "ROLLED_BACK"
     ROLLBACK_FAILED = "ROLLBACK_FAILED"
+    # 결과 확인 불가 — AWS 조회 실패로 종료 판정을 내리지 못한 채 재시도를 소진했다.
+    # 자산이 바뀌었을 수 있지만 성공으로도 실패로도 확정하지 않고, 자동 원복하지 않고
+    # 관제자 확인으로 넘긴다(종료 상태 · 관제자 복구 가능). 원본 실행 전용이다. (Issue #249)
+    UNVERIFIED = "UNVERIFIED"
 
 
 class ExecuteActionRequest(BaseModel):

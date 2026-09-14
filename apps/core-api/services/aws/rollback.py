@@ -87,12 +87,13 @@ class StatusCheckOutcome:
     안에 2/2가 오지 않은 TIMED_OUT(자산 상태를 실제로 관측했다)과 "성공으로 확정할
     근거가 없다"는 점은 같지만 **자동 원복의 입력이 되는지가 다르다.** 검증기의
     실패를 자산의 실패로 저장하면 일시적인 권한·네트워크·스로틀링 오류가 멀쩡한
-    인스턴스를 되돌린다 — 그래서 호출부는 이 값이 참이면 확정하지 않고 보류한다
-    (workflows.judge_rightsizing_boot). 보류 이후의 재시도 정책과 판정 불가 상태의
-    저장 계약은 Issue #249다.
+    인스턴스를 되돌린다 — 그래서 호출부는 이 값이 참이면 확정하지 않고 판정 불가로
+    기록한다(workflows.judge_rightsizing_boot → record_verification_failure).
 
     reason_code는 보류·실패 양쪽에 실린다(인스턴스 없음도 코드를 단다). 판정 불가를
-    가르는 것은 코드의 유무가 아니라 이 값이다.
+    가르는 것은 코드의 유무가 아니라 이 값이다. 다만 **판정 불가에는 코드가 반드시
+    있다** — 다시 물을지(errors.RETRYABLE_REASON_CODES)와 관제자가 볼 사유가 그 코드로
+    갈리기 때문이다 (Issue #249).
     """
 
     verdict: StatusCheckVerdict
@@ -106,6 +107,9 @@ class StatusCheckOutcome:
         if self.probe_failed and self.verdict is not StatusCheckVerdict.TIMED_OUT:
             # 자산 상태를 본 적이 없는데 실패·성공으로 확정된 결과는 만들 수 없다
             raise ValueError("조회 실패 판정은 TIMED_OUT과 함께여야 합니다")
+        if self.probe_failed and self.reason_code is None:
+            # 재시도 여부를 가르는 축이 없으면 보류가 영원한 보류가 된다 (Issue #249)
+            raise ValueError("조회 실패 판정에는 사유 코드가 필요합니다")
 
     @property
     def booted(self) -> bool:

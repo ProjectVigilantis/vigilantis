@@ -223,6 +223,12 @@ def test_waiter_call_error_defers(ec2):
     assert outcome.probe_failed is True  # 판정 불가 — 자동 원복 입력이 아니다
 
 
+def test_probe_failure_must_carry_its_reason_code():
+    """판정 불가에 사유가 없으면 다시 물을지 가를 수 없다 — 영원한 보류가 된다 (Issue #249)."""
+    with pytest.raises(ValueError, match="사유 코드"):
+        rb.StatusCheckOutcome(verdict=V.TIMED_OUT, summary="조회 실패", probe_failed=True)
+
+
 @pytest.mark.parametrize(
     "error",
     [

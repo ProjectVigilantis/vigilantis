@@ -17,6 +17,7 @@ from .actions import (
 from .errors import ErrorCode, ErrorDetail, ErrorResponse
 from .incidents import (
     ExecutionSummaryItem,
+    ExecutionVerificationHold,
     IncidentCategory,
     IncidentListItem,
     IncidentResponse,
@@ -59,6 +60,7 @@ __all__ = [
     "ExecutionEventData",
     "ExecutionStatus",
     "ExecutionSummaryItem",
+    "ExecutionVerificationHold",
     "IncidentCategory",
     "IncidentEventData",
     "IncidentListItem",

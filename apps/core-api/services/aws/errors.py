@@ -30,6 +30,22 @@ _INVALID_STATE_CODES: Final[frozenset[str]] = frozenset(
 )
 _TARGET_NOT_FOUND_CODES: Final[frozenset[str]] = frozenset({"InvalidTarget"})
 
+# 다시 물으면 답이 바뀔 수 있는 사유 — 판정 불가 재시도(Issue #249)가 읽는다.
+# PRECHECK_AWS_ERROR 하나다. 스로틀링·5xx·엔드포인트 접속 실패처럼 AWS에 닿지 못했거나
+# AWS가 일시적으로 답하지 못한 경우가 이 코드로 모인다(아래 표의 나머지 칸 · BotoCoreError).
+# 자격 증명 부재도 여기로 오지만 재시도 상한이 사람에게 넘긴다.
+# 권한 거부(UNAUTHORIZED)·파라미터 오류(PARAM_INVALID)는 사람이 고치기 전에는 몇 번을
+# 물어도 같고, 대상 없음·상태 이상은 AWS가 이미 답한 것이다 — 재시도로 붙잡아 두면
+# 관제자에게 넘어가는 시각만 늦어진다.
+RETRYABLE_REASON_CODES: Final[frozenset[PrecheckReasonCode]] = frozenset(
+    {PrecheckReasonCode.PRECHECK_AWS_ERROR}
+)
+
+
+def is_retryable(code: PrecheckReasonCode) -> bool:
+    """이 사유의 조회 실패를 다시 물을 가치가 있는가."""
+    return code in RETRYABLE_REASON_CODES
+
 
 def aws_error_code(exc: ClientError) -> str:
     """ClientError의 AWS 오류 코드. 응답에 없으면 빈 문자열."""

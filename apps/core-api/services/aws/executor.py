@@ -1140,8 +1140,10 @@ class ExecutionOutcome:
     deferred는 **판정을 못 해 자산을 만지지 않았다**는 뜻이다(원복 경로 전용).
     실패와 나누는 이유는 rollback.StatusCheckOutcome.probe_failed와 같다 — AWS에
     물어보지 못한 것은 조치가 실패했다는 근거가 아니고, 확정하면 되돌릴 것이 없는
-    자산에 "원복 실패" 기록이 붙는다. 보류는 단계를 남기지 않으므로 다음 주기가
-    처음부터 다시 시도한다(ADR-0008 §7). 재시도 상한은 Issue #249다.
+    자산에 "원복 실패" 기록이 붙는다. 보류는 단계를 남기지 않으므로 다음 재시도가
+    처음부터 다시 시도한다(ADR-0008 §7). 재시도 상한과 소진 뒤의 처분은
+    workflows.record_verification_failure가 정하며, 다시 물을지를 reason_code가 가르므로
+    보류에도 코드가 필요하다 (Issue #249).
     """
 
     steps: tuple[ExecutionStepResult, ...] = ()

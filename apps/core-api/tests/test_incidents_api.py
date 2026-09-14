@@ -163,6 +163,7 @@ def test_detail_assembles_execution_summaries(
             "runbook_id": "RUNBOOK_EC2_ISOLATE",
             "status": "SUCCESS",
             "available_recovery_runbook_ids": ["RUNBOOK_EC2_UNISOLATE"],
+            "verification_hold": None,  # 판정 불가 보류 없음 (Issue #249)
             "updated_at": "2026-08-19T03:02:00Z",
         }
     ]

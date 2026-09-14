@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from schemas.api.incidents import (
+    ExecutionSummaryItem,
     IncidentCategory,
     IncidentListItem,
     IncidentResponse,
@@ -130,6 +131,89 @@ def test_action_in_progress_valid():
         }],
     ))
     assert inc.status == IncidentStatus.ACTION_IN_PROGRESS
+
+
+# ---------------------------------------------------- 판정 불가 보류 (Issue #249)
+
+HOLD = {
+    "reason_code": "PRECHECK_AWS_ERROR",
+    "attempts": 5,
+    "first_failed_at": "2026-09-14T09:00:00Z",
+    "last_failed_at": "2026-09-14T09:04:00Z",
+}
+
+
+def make_execution_item(status, **over):
+    base = {
+        "execution_id": "exec-1",
+        "runbook_id": "RUNBOOK_EC2_RIGHTSIZING",
+        "status": status,
+        "available_recovery_runbook_ids": [],
+        "updated_at": "2026-09-14T09:04:00Z",
+    }
+    base.update(over)
+    return base
+
+
+def test_unverified_execution_requires_its_hold():
+    """무엇을 확인하지 못했는지가 관제자 판단의 근거다 — 기록 없는 UNVERIFIED는 오지 않는다."""
+    with pytest.raises(ValidationError):
+        ExecutionSummaryItem.model_validate(make_execution_item("UNVERIFIED"))
+
+    item = ExecutionSummaryItem.model_validate(
+        make_execution_item("UNVERIFIED", verification_hold=HOLD)
+    )
+
+    assert item.verification_hold.reason_code == "PRECHECK_AWS_ERROR"
+    assert '"2026-09-14T09:04:00Z"' in item.model_dump_json()
+
+
+@pytest.mark.parametrize("status", ["SUCCESS", "ROLLBACK_INITIATED"])
+def test_judged_execution_carries_no_hold(status):
+    """판정이 내려진 상태에 보류가 붙어 있으면 성공한 실행에 경고가 그려진다."""
+    with pytest.raises(ValidationError):
+        ExecutionSummaryItem.model_validate(
+            make_execution_item(status, verification_hold=HOLD)
+        )
+
+
+@pytest.mark.parametrize(
+    "status", ["IN_PROGRESS", "FAILED", "ROLLED_BACK", "ROLLBACK_FAILED"]
+)
+def test_hold_rides_on_retrying_or_handed_over_executions(status):
+    """재시도 중(IN_PROGRESS)·대조 전 멈춤(FAILED)·관제자 복구가 이어받은 원본은 기록을 싣는다."""
+    item = ExecutionSummaryItem.model_validate(
+        make_execution_item(status, verification_hold=HOLD)
+    )
+    assert item.verification_hold.attempts == 5
+
+
+@pytest.mark.parametrize("over", [
+    {"reason_code": "ARN_TARGET_NOT_MANAGED"},   # 다른 단계의 사유 코드
+    {"reason_code": "THROTTLED"},                # 등록되지 않은 코드
+    {"attempts": 0},
+    {"last_failed_at": "2026-09-14T08:59:59Z"},  # 처음보다 앞선 마지막 실패
+    {"detail": "조회 실패"},                      # extra 거부
+])
+def test_hold_contract_violations(over):
+    with pytest.raises(ValidationError):
+        ExecutionSummaryItem.model_validate(
+            make_execution_item("UNVERIFIED", verification_hold={**HOLD, **over})
+        )
+
+
+def test_unverified_execution_leaves_the_incident_failed_and_recoverable():
+    """UNVERIFIED는 종료 상태라 인시던트는 FAILED(흐름 진행 불가)로 서고 관제자 원복이 열린다."""
+    inc = IncidentResponse.model_validate(make_finops_incident(
+        status="FAILED",
+        recommendations=[],
+        executions=[make_execution_item(
+            "UNVERIFIED",
+            verification_hold=HOLD,
+            available_recovery_runbook_ids=["RUNBOOK_EC2_REVERT_SIZE"],
+        )],
+    ))
+    assert inc.executions[0].status.value == "UNVERIFIED"
 
 
 @pytest.mark.parametrize("runbook_id", sorted(AI_RECOMMENDABLE_RUNBOOK_IDS))
