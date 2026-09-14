@@ -1,0 +1,37 @@
+# ==============================================================================
+# AI 서명 검사 — 커밋 메시지·PR 본문에 AI 서명이 있으면 실패한다.
+# 규칙 원천: CLAUDE.md §커밋 메시지 규칙. 검사 로직: scripts/check_ai_signature.py
+#
+# ci.yml과 파일을 가르는 이유: PR 본문을 고칠 때(`edited`)도 다시 돌아야 하는데,
+# ci.yml에 `edited`를 걸면 본문을 고칠 때마다 pytest·next build까지 다시 돈다.
+# ==============================================================================
+name: AI Signature
+
+on:
+  pull_request:
+    branches: [main, dev]
+    types: [opened, edited, synchronize, reopened]
+  push:
+    branches: [main, dev]
+
+jobs:
+  ai-signature:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # base..head 범위의 커밋 메시지를 읽어야 한다
+
+      # 표준 라이브러리만 쓴다 — 러너 기본 python3로 충분해 uv 설치를 건너뛴다.
+      - name: 커밋 메시지 검사
+        env:
+          RANGE: ${{ github.event_name == 'pull_request' && format('{0}..{1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha) || format('{0}..{1}', github.event.before, github.sha) }}
+        run: python3 scripts/check_ai_signature.py --commits "$RANGE"
+
+      # 본문을 셸에 직접 끼워 넣지 않고 env로 넘긴다 — 본문의 따옴표·백틱이 명령으로 풀리지 않게.
+      - name: PR 본문 검사
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: python3 scripts/check_ai_signature.py --text-env PR_BODY
