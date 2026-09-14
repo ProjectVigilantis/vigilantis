@@ -215,6 +215,22 @@ def list_relationships_by_target(
     )
 
 
+def list_relationships_by_source(
+    db: Session, source_asset_id: str
+) -> list[models.AssetRelationship]:
+    """지정 자산의 정방향 관계만 조회한다."""
+    return list(
+        db.execute(
+            select(models.AssetRelationship)
+            .where(models.AssetRelationship.source_asset_id == source_asset_id)
+            .order_by(
+                models.AssetRelationship.relation_type,
+                models.AssetRelationship.target_arn,
+            )
+        ).scalars()
+    )
+
+
 def list_all_relationships(db: Session) -> list[models.AssetRelationship]:
     """전 자산의 정방향 연결 일괄 조회 — 목록 응답 조립용. 자산별 반복 질의를
     피하고 호출부가 source_asset_id로 묶는다. (Issue #68)"""

@@ -29,6 +29,7 @@ from ai.agent import (  # noqa: E402
     CandidateProposalOutput,
     EvidenceSummaryOutput,
     ProposedCandidate,
+    RiskReassessmentOutput,
 )
 from ai.model_client import FakeAIModelClient  # noqa: E402
 from db.repositories import assets as assets_repo  # noqa: E402
@@ -734,20 +735,216 @@ def test_a_claim_within_the_ceiling_is_left_alone(db):
     assert incident.agent_invocation_status is AgentInvocationStatus.IN_PROGRESS
 
 
-def test_secops_incident_is_counted_but_never_claimed(db):
-    """SecOps 그래프가 아직 없다 — 선점하면 주기마다 선점·해제를 반복한다."""
+def test_secops_without_collected_asset_finishes_as_input_failure(db):
+    """입력 불가는 모델 호출 없이 끝내며 위협의 초기 판정은 보존한다."""
     incident_id = incident_intake.create_incident_from_intake(
         db, _secops_intake()
     ).incident_id
 
     report = agent_dispatcher.dispatch_pending_analysis(db, client=_client())
 
-    assert (report.scanned, report.unsupported, report.claimed) == (1, 1, 0)
+    assert (report.scanned, report.unsupported, report.claimed, report.failed) == (1, 0, 1, 1)
     incident = incidents_repo.get_incident(db, incident_id)
     db.refresh(incident)
-    # 그래프가 생기면 그대로 집어 갈 수 있어야 한다
-    assert incident.agent_invocation_status is AgentInvocationStatus.PENDING
-    assert incident.status is IncidentStatus.ANALYZING
+    assert incident.agent_invocation_status is AgentInvocationStatus.FAILED
+    assert incident.status is IncidentStatus.FAILED
+    assert incident.initial_risk_level is RiskLevel.HIGH
+
+
+NACL_ID = "acl-0abc123456789def0"
+NACL_ARN = f"arn:aws:ec2:{REGION}:{ACCOUNT}:network-acl/{NACL_ID}"
+
+
+def _pending_secops(db, *, medium=False):
+    from schemas.api.assets import RelationType
+
+    _seed_asset_row(db, arn=EC2_ARN, asset_type=AssetType.EC2,
+                    resource_id=INSTANCE_ID, spec={"instance_type": "t3.small"}, state="running")
+    _seed_asset_row(db, arn=NACL_ARN, asset_type=AssetType.NACL,
+                    resource_id=NACL_ID, spec={"is_default": False}, state=None)
+    asset = assets_repo.get_asset_by_arn(db, EC2_ARN)
+    assets_repo.replace_relationships(db, asset.asset_id,
+                                     [(RelationType.PROTECTED_BY, NACL_ARN)],
+                                     collection_run_id=asset.last_collection_run_id)
+    db.commit()
+    intake = _secops_intake()
+    if medium:
+        from schemas.api.incidents import ResponseMode
+        intake.initial_risk = intake.initial_risk.model_copy(update={
+            "initial_risk_level": RiskLevel.MEDIUM, "response_mode": ResponseMode.AGENT_WAIT,
+        })
+    return incident_intake.create_incident_from_intake(db, intake).incident_id
+
+
+def _secops_client(db, incident_id, *, candidates=True, **over):
+    evidence_id = incidents_repo.list_evidence(db, incident_id)[0].evidence_id
+    values = dict(runbook_id=RunbookId.RUNBOOK_NACL_ADD_DENY, target_arn=NACL_ARN,
+                  evidence_ids=[evidence_id], rule_number=100,
+                  cidr_block="203.0.113.10/32", protocol="tcp")
+    values.update(over)
+    return _client(
+        EvidenceSummaryOutput(observation="300초 동안 SSH 실패 120회", diagnosis="SSH 공격 추정",
+                              rationale="출발지 차단 필요"),
+        RiskReassessmentOutput(reviewed_risk_level=RiskLevel.HIGH),
+        CandidateProposalOutput(candidates=[ProposedCandidate(**values)] if candidates else []),
+    )
+
+
+def test_secops_dispatch_stores_risk_candidates_wait_and_commit_event(db, client_pg, monkeypatch):
+    from schemas.api.incidents import ResponseMode
+
+    incident_id = _pending_secops(db, medium=True)
+    client = _secops_client(db, incident_id)
+    original_complete = client.complete
+    def complete(*args):
+        assert not db.in_transaction()
+        return original_complete(*args)
+    client.complete = complete
+    def precheck(command, backup_loader=None):
+        assert not db.in_transaction()
+        assert command.target_arn == NACL_ARN
+        return _passing_precheck(command)
+    monkeypatch.setattr(workflows, "_candidate_precheck", precheck)
+    commits = []
+    from sqlalchemy import event
+    event.listen(db, "after_commit", lambda session: commits.append(True))
+    published = []
+    def publish(envelope):
+        assert len(commits) == 3  # 회수 주기·선점·분석 결과 commit 뒤
+        published.append(envelope)
+    report = _cycle(db, client, publish)
+    assert (report.succeeded, report.failed, report.errored) == (1, 0, 0)
+    data = client_pg.get(f"/api/v1/incidents/{incident_id}").json()
+    assert data["status"] == "AWAITING_APPROVAL"
+    assert data["initial_risk_level"] == "MEDIUM"
+    assert data["reviewed_risk_level"] == "HIGH"
+    assert data["response_mode"] == ResponseMode.AGENT_WAIT.value
+    assert data["recommendations"][0]["target_arn"] == NACL_ARN
+    row = incidents_repo.get_incident(db, incident_id)
+    db.refresh(row)
+    assert row.initial_risk_reason_codes == ["RISK_SSH_BRUTEFORCE"]
+    assert (row.response_deadline_at - row.agent_wait_started_at).total_seconds() == 60
+    assert len(published) == 1
+    candidate = incidents_repo.list_candidates(db, incident_id)[0]
+    evaluation = guardrails_repo.latest_for_candidate(db, candidate.candidate_id)
+    assert len(evaluation.steps) == 4
+    assert _cycle(db, client).claimed == 0
+
+
+@pytest.mark.parametrize("kind", ["no_proposal", "rejected", "unknown_evidence", "broad_cidr", "nul"])
+def test_secops_non_executable_results_remain_readable(db, client_pg, monkeypatch, caplog, kind):
+    caplog.set_level("INFO", logger="workflows")
+    incident_id = _pending_secops(db)
+    monkeypatch.setattr(workflows, "_candidate_precheck", _failing_precheck)
+    over = {}
+    if kind == "unknown_evidence":
+        over["evidence_ids"] = ["unknown"]
+    if kind == "broad_cidr":
+        over["cidr_block"] = "203.0.113.0/24"
+    client = _secops_client(db, incident_id, candidates=kind != "no_proposal", **over)
+    if kind == "nul":
+        client._outputs[0] = EvidenceSummaryOutput(observation="bad\x00text",
+                                                   diagnosis="추정", rationale="차단")
+    report = _cycle(db, client)
+    assert report.errored == 0
+    data = client_pg.get(f"/api/v1/incidents/{incident_id}").json()
+    assert data["status"] == "FAILED" and data["recommendations"] == []
+    assert data["initial_risk_level"] == "HIGH"
+    assert data["summary_lines"] == [] and data["reviewed_risk_level"] is None
+    if kind in ("no_proposal", "rejected"):
+        dropped = [record for record in caplog.records if record.message == "agent_summary_dropped"]
+        assert len(dropped) == 1
+        assert dropped[0].incident_id == incident_id
+        assert len(dropped[0].summary_lines) == 3
+
+
+@pytest.mark.parametrize("status, expected", [
+    ("IN_PROGRESS", "ACTION_IN_PROGRESS"),
+    ("SUCCESS", "AWAITING_CLOSURE"),
+    ("ROLLED_BACK", "AWAITING_CLOSURE"),
+    ("FAILED", "FAILED"),
+])
+def test_secops_prior_execution_controls_state_and_input(db, client_pg, status, expected):
+    from db.repositories import executions as executions_repo
+    from schemas.api.actions import ExecutionStatus
+    from schemas.runbooks import TriggerSource
+
+    incident_id = _pending_secops(db)
+    execution = executions_repo.create_execution(
+        db, incident_id=incident_id, runbook_id=RunbookId.RUNBOOK_NACL_ADD_DENY,
+        target_arn=NACL_ARN, trigger_source=TriggerSource.PRE_MITIGATION_0_5S,
+    )
+    execution.status = ExecutionStatus(status)
+    row = incidents_repo.get_incident(db, incident_id)
+    # FAILED 실행만 남은 종료 대기는 현재 서비스가 만들지 않는 손상 상태다.
+    # 이 경우에도 실행 존재만으로 종료 대기를 유지하지 않는지 함께 확인한다.
+    row.status = (IncidentStatus.ACTION_IN_PROGRESS if status == "IN_PROGRESS"
+                  else IncidentStatus.AWAITING_CLOSURE)
+    db.commit()
+    graph_input = agent_dispatcher.build_graph_input(db, incident_id)
+    assert graph_input.isolation_execution.execution_id == execution.execution_id
+    assert graph_input.isolation_execution.status.value == status
+    client = _secops_client(db, incident_id, candidates=False)
+    report = _cycle(db, client)
+    assert report.errored == 0
+    data = client_pg.get(f"/api/v1/incidents/{incident_id}").json()
+    assert data["status"] == expected
+    assert len(data["executions"]) == 1
+    if expected == "FAILED":
+        assert data["summary_lines"] == [] and data["reviewed_risk_level"] is None
+    else:
+        assert len(data["summary_lines"]) == 3 and data["reviewed_risk_level"] == "HIGH"
+
+
+def test_secops_claim_ceiling_covers_three_model_calls():
+    from config import Settings
+
+    settings = Settings(OPENAI_TIMEOUT_SECONDS=30, OPENAI_MAX_ATTEMPTS=3,
+                        OPENAI_MAX_RETRY_AFTER_SECONDS=60)
+    assert agent_dispatcher.stale_claim_ceiling_seconds(settings) == 630
+
+
+def test_secops_ssh_reaches_approval_through_localstack_guardrail(db, client_pg, monkeypatch):
+    """모델만 대역. 관계 NACL 후보가 실제 4단계 가드레일·DB·조회 API를 통과한다."""
+    import urllib.request
+    from services.aws.client import aws_client, endpoint_url, account_id
+
+    endpoint = endpoint_url()
+    if not endpoint:
+        pytest.skip("LocalStack 엔드포인트 미설정")
+    try:
+        with urllib.request.urlopen(f"{endpoint}/_localstack/health", timeout=2) as response:
+            assert response.status == 200
+    except OSError:
+        pytest.skip("LocalStack 미기동")
+
+    ec2 = aws_client("ec2", REGION)
+    account = account_id(REGION)
+    vpc_id = ec2.create_vpc(CidrBlock="10.233.0.0/16")["Vpc"]["VpcId"]
+    nacl_id = None
+    try:
+        nacl_id = ec2.create_network_acl(VpcId=vpc_id)["NetworkAcl"]["NetworkAclId"]
+        module = sys.modules[__name__]
+        monkeypatch.setattr(module, "ACCOUNT", account)
+        monkeypatch.setattr(module, "EC2_ARN", f"arn:aws:ec2:{REGION}:{account}:instance/{INSTANCE_ID}")
+        monkeypatch.setattr(module, "NACL_ID", nacl_id)
+        monkeypatch.setattr(module, "NACL_ARN", f"arn:aws:ec2:{REGION}:{account}:network-acl/{nacl_id}")
+        incident_id = _pending_secops(db, medium=True)
+        report = _cycle(db, _secops_client(db, incident_id))
+        assert (report.succeeded, report.errored) == (1, 0)
+        data = client_pg.get(f"/api/v1/incidents/{incident_id}").json()
+        assert data["status"] == "AWAITING_APPROVAL"
+        assert data["recommendations"][0]["target_arn"] == NACL_ARN
+        candidate = incidents_repo.list_candidates(db, incident_id)[0]
+        evaluation = guardrails_repo.latest_for_candidate(db, candidate.candidate_id)
+        assert [step["result"] for step in evaluation.steps] == ["PASS"] * 4
+        # 분석·가드레일은 조치를 실행하지 않는다.
+        entries = ec2.describe_network_acls(NetworkAclIds=[nacl_id])["NetworkAcls"][0]["Entries"]
+        assert all(entry["RuleNumber"] != 100 for entry in entries)
+    finally:
+        if nacl_id:
+            ec2.delete_network_acl(NetworkAclId=nacl_id)
+        ec2.delete_vpc(VpcId=vpc_id)
 
 
 def test_incident_claimed_by_another_scanner_is_skipped(db, monkeypatch):
