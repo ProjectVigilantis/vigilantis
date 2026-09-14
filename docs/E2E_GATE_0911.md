@@ -2,7 +2,8 @@
 
 > ⚠️ **2026-09-08 일정 변경**: 종전의 "9/11 리허설 1차 → 9/13 게이트" 2단이 **9/11 하루의 게이트 판정 1단으로 합쳐졌다**(PM 확정 — 9/13이 일요일이라 주말·공휴일 제외 규칙에 걸린다). **리허설은 없다.** 이 문서가 곧 게이트 당일 대본이자 판정서이며, 종전 문서명 `E2E_REHEARSAL_1ST.md`에서 옮겨왔다. 본문에서 "리허설"로 읽히던 자리는 전부 **게이트 당일(9/11)** 을 가리킨다 — *리허설에서 걸러 게이트 전에 고친다*는 여유 구간은 없어졌다.
 >
-> **기준일**: 2026-09-10 · **실측 기준 커밋**: `a8ba0ba` (2026-09-10 15:3x 전량 재측정 — 이전 기준 `8752ddc` 이후 dev 12커밋)
+> **기준일**: 2026-09-12 · **실측 기준 dev**: `28fed36`(#327 머지 — 이 뒤 첫 dev 머지인 #331 직전. 9/12 재측정 당시 해시 `9d9fa37`이 2026-09-14 AI 서명 이력 재작성으로 바뀐 것이고 트리는 같다. 재측정 이력은 §대조 필요 1번)
+> **이 기준 뒤에 머지된 #323 SecOps 그래프(PR #331 · 2026-09-14)와 #329 해제 후보 생성(PR #337 · 2026-09-14)은 반영하지 않았다.** 본문의 *"dispatcher는 FINOPS만 고른다"* · *"#323 미착수"* · *"해제 후보를 만드는 주체가 없다(#329)"* 는 **이 기준 커밋의 사실**이다. 지금의 T2 경계는 SSOT 6주차(9/14–9/18) 판정 기준 ⓔ에서 본다.
 > **🔴 2026-09-10 하루에 dev가 네 번 움직였고, 이 문서의 핵심 주장 3건 중 둘이 뒤집혔다.**
 > · `create_incident_from_intake` 프로덕션 호출부 **0건 → `services/scheduler.py:126`에 생겼다**(#306 / [PR #320](https://github.com/ProjectVigilantis/vigilantis/pull/320) · 14:28). **차단 요인 ②가 해소됐다.**
 > · `executor.py` 실행 함수 **2개 → 3개** (`execute_nacl_add_deny` 신설 · #297 / [PR #313](https://github.com/ProjectVigilantis/vigilantis/pull/313) · 10:48). **차단 요인 ③이 절반 해소됐다.**
@@ -46,7 +47,7 @@
 | ④ | ~~`OPENAI_API_KEY` 가 없다~~ → **게이트 운영 머신을 어디로 하는가** (2026-09-10 재정의 · **#316**) | ✅ **해소 — 운영 머신을 PM 로컬로 확정**(2026-09-10 PM). 그 머신 `.env`에 키가 있고, **T1-3–6을 실제로 관통시킨 실측이 있다** | 팀 공용 키가 없어 각자 발급이며, 이 문서 작성자 머신에는 키가 없다. **키가 없는 머신에서 돌면 화면에 오류가 안 뜬다** — `agent_dispatcher.py:436-442`가 예외를 삼켜 Incident가 `ANALYZING`에 남는다(§2 ⓪) |
 
 > ✅ **T2-4·5·6은 실경로로 선다 — 2026-09-11에 끝까지 관통시켰다.** 전제는 **셋이고 전부 대본 안에 있다**: ① 수집 1회 ② Incident 수동 생성 ③ AI 출력 주입. 상세는 §4 · 재현 절차는 §6-1.
-> **열쇠는 「수집 1회」였다.** SECOPS Incident에는 후보 행이 자동으로 생기지 않고(`agent_dispatcher.py:426-429`가 `IncidentCategory.FINOPS`만 골라 낸다), 후보 없이 `POST /actions/execute`를 부르면 `workflows.py:162 _executable_candidate()`가 **`409 PROPOSAL_NOT_EXECUTABLE`**(raise `:180`) 로 거절한다. 그런데 **`workflows.record_agent_analysis()`를 직접 부르면** 후보 생성과 **가드레일 4단계가 함께 돈다**(`_guard_candidate` `:2040`) — 그 가드레일의 ③ ARN Match가 **DB 자산만 통과시키므로** 시드 NACL을 자산으로 만드는 **수집 1회가 선행이다**(§1-2 B안).
+> **열쇠는 「수집 1회」였다.** SECOPS Incident에는 후보 행이 자동으로 생기지 않고(`agent_dispatcher.py:426-429`가 `IncidentCategory.FINOPS`만 골라 낸다), 후보 없이 `POST /actions/execute`를 부르면 `workflows.py:162 _executable_candidate()`가 **`409 PROPOSAL_NOT_EXECUTABLE`**(raise `:180`) 로 거절한다. 그런데 **`workflows.record_agent_analysis()`를 직접 부르면** 후보 생성과 **가드레일 4단계가 함께 돈다**(`_guard_candidate` `:2413`) — 그 가드레일의 ③ ARN Match가 **DB 자산만 통과시키므로** 시드 NACL을 자산으로 만드는 **수집 1회가 선행이다**(§1-2 B안).
 > 🔴 **`incidents_repo.add_candidate` 로 후보를 직접 넣지 않는다.** 그래도 `202`가 나오고 실행도 성공하지만 **`guardrail_evaluations` 가 0행이다** — **T2-4가 통째로 사라진 채 5·6만 선다.** 넣는 값은 같은데 **들어가는 문이 다르다.**
 
 > **넷이 서로 다른 이유로 막혀 있었다.** ①만 **코드가 없어서** 막힌 것이라 9/11까지 못 푼다(2026-09-07 PM 확정). ②③④는 **9/10 하루에 전부 움직였다** — ②는 PR #320으로 배선이 섰고, ③은 PR #313으로 차단 축이 섰으며, ④는 운영 머신을 바꾸는 것으로 성격이 바뀌었다.
@@ -444,7 +445,7 @@ uv run python -c "import sys; sys.path[:0]=['apps/core-api','packages']; from se
 > ✅ **4·5·6의 전제 셋 — 전부 대본 안에서 선다**(2026-09-11 실측 · `712200a` 기준 스택).
 > **① 수집 1회** → **② SECOPS Incident 1건 수동 생성 + Claim** → **③ `workflows.record_agent_analysis()` 에 AI 출력을 주입.** 이 셋이면 가드레일 4단계가 `PASS` 하고 후보가 `EXECUTABLE`, Incident가 `AWAITING_APPROVAL`이 된다. **재현 절차와 실측 출력은 §6-1에 있다.**
 >
-> **왜 수집 1회가 선행인가.** SECOPS Incident에는 후보 행이 자동으로 생기지 않는다 — `_store_candidate`(`workflows.py:2341`) ← `record_agent_analysis`(`:2022`) ← `agent_dispatcher.py:387` 경로 하나뿐인데 **`:426-429`가 `IncidentCategory.FINOPS`만 골라 낸다.** 그래서 `record_agent_analysis`를 직접 부르는데, 그러면 **같은 함수 안의 가드레일 4단계**(`_guard_candidate` `:2040`)가 함께 돌고 **그 ③ ARN Match가 DB 자산만 통과시킨다**(`_managed_arns` `:1946`). **시드 NACL은 수집을 한 번 돌려야 DB 자산이 된다** — §1-2의 B안이 T1의 ARN 정합만이 아니라 **여기까지 연다.**
+> **왜 수집 1회가 선행인가.** SECOPS Incident에는 후보 행이 자동으로 생기지 않는다 — `_store_candidate`(`workflows.py:2341`) ← `record_agent_analysis`(`:2393`) ← `agent_dispatcher.py:387` 경로 하나뿐인데 **`:426-429`가 `IncidentCategory.FINOPS`만 골라 낸다.** 그래서 `record_agent_analysis`를 직접 부르는데, 그러면 **같은 함수 안의 가드레일 4단계**(`_guard_candidate` `:2413`)가 함께 돌고 **그 ③ ARN Match가 DB 자산만 통과시킨다**(`_managed_arns` `:2289`). **시드 NACL은 수집을 한 번 돌려야 DB 자산이 된다** — §1-2의 B안이 T1의 ARN 정합만이 아니라 **여기까지 연다.**
 >
 > 🔴 **`incidents_repo.add_candidate`(`incidents.py:369`)로 후보를 직접 넣지 않는다.** 그래도 `POST /actions/execute`는 **`202`를 내고 실행도 `SUCCESS`가 된다** — 그런데 **`guardrail_evaluations`가 0행이다.** `_guard_candidate`를 안 타기 때문이고, 결과적으로 **4번이 통째로 사라진 채 5·6만 선다.** 넣는 값은 같은데 **들어가는 문이 다르다.** 판정서에 「실경로」라고 쓸 수 있느냐가 이 문 하나에 걸린다.
 >
@@ -723,7 +724,7 @@ uv run python -c "import sys; sys.path[:0]=['apps/core-api','packages']; from se
 **B. SECOPS Incident 는 실경로가 만든다. AI 출력만 사람이 넣는다.**
 
 1. **Incident 생성** — `scripts/inject_mock_threat.py evt_ssh_bruteforce_001 --prepare-inbox <폴더> --target-arn <④가 찍은 A1 ARN>`. 🔴 **`<폴더>` 는 ⓪에서 `MOCK_THREAT_INBOX_DIR` 에 넣은 그 폴더다** — 다른 폴더를 주면 **오류 없이 아무 일도 일어나지 않는다.** 앱이 소비해 **정형화 → 판정 → Intake → SECOPS Incident 저장**까지 간다(#322 / PR #325). `GET /api/v1/incidents` 로 그 `incident_id` 를 받아 둔다. **더 이상 손으로 만들지 않는다.**
-2. **AI 출력 주입** — `uv run python scripts/gate_t2_setup.py --incident-id <위 id> --target-arn <③이 찍은 NACL ARN>`. Claim 과 `record_agent_analysis()` 를 한 번에 한다. **후보가 인용하는 근거는 실경로가 저장한 `evidence_items` 에서 읽는다** — 지어내지 않는다(프로덕션이라면 `agent_dispatcher._contract_violation` ⓐ 가 *"입력 밖 evidence_id를 인용했습니다"* 로 출력 전체를 `FAILED` 로 떨어뜨릴 입력이다)
+2. **AI 출력 주입** — [`gate_t2_setup.py`](https://github.com/ProjectVigilantis/vigilantis/blob/063616f/scripts/gate_t2_setup.py) `--incident-id <위 id> --target-arn <③이 찍은 NACL ARN>`. ⚠️ **이 스크립트는 dev에 없다** — 스크립트 스스로 헤더에 적은 삭제 조건(*#323 머지*)이 PR #331(2026-09-14)로 성립해 PR #330에서 뺐다. 링크는 PR #330 리뷰를 거친 판이다. #323 뒤 dev에서는 dispatcher가 SECOPS Incident도 분석 대상으로 고른다(`agent_dispatcher.dispatch_pending_analysis`의 `dispatchable`) — 그 경로의 관통은 6주차(9/14–9/18) 판정 기준 ⓔ에서 잰다. Claim 과 `record_agent_analysis()` 를 한 번에 한다. **후보가 인용하는 근거는 실경로가 저장한 `evidence_items` 에서 읽는다** — 지어내지 않는다(프로덕션이라면 `agent_dispatcher._contract_violation` ⓐ 가 *"입력 밖 evidence_id를 인용했습니다"* 로 출력 전체를 `FAILED` 로 떨어뜨릴 입력이다)
 3. → `[1] Claim: … / 근거 N건(ev-…) · 대상 자산 확인됨` → `[2] 분석 기록: next_status=AWAITING_APPROVAL executable=1 rejected=0` · 후보 `EXECUTABLE`
 
 > 🟢 **A(수집 컷)를 빼먹으면 스크립트가 Claim 전에 멈춘다 — Incident 는 그대로다**(2026-09-12 · PR #330 리뷰 반영). `gate_t2_setup.py` 가 Claim 앞에서 **ⓐ 대상 ARN 이 DB 자산인가**(가드레일 ③이 쓰는 `assets_repo.get_asset_by_arn` 과 같은 조건) · **ⓑ 이 Incident 에 근거가 저장돼 있는가** · **ⓒ 파라미터가 계약을 통과하는가**(출력 조립) 셋을 다 보고, 하나라도 어긋나면 **Incident 를 건드리지 않고 중단한다.** 멈추면 A 를 돌린 뒤 **같은 명령을 그대로 다시 치면 된다.**
