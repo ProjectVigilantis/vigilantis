@@ -7,7 +7,7 @@
 # 반대로 비어 있으면 FinOpsGraphInput(capabilities min_length=1)을 만들 수 없어 그
 # Incident는 AI를 부르지 못합니다. 넓혀도 좁혀도 값이 나가는 자리라 축을 명시합니다.
 #
-# 거르는 축은 둘입니다. 순서는 RunbookId 선언 순서를 따릅니다 — 목록이 호출마다
+# 거르는 축은 셋입니다. 순서는 RunbookId 선언 순서를 따릅니다 — 목록이 호출마다
 # 흔들리면 같은 Incident에 대한 입력이 회차마다 달라져 재현성 계측이 성립하지 않습니다.
 #
 # ① 런북의 대상 자산 유형 == Incident subject 자산 유형
@@ -32,6 +32,13 @@
 #    UNUSED를 예외로 두는 근거: SECOPS 조치가 FinOps Incident에서 정당한 경우는 대상이
 #    더는 쓰이지 않는 자산일 때뿐이고, 그때 제거는 위협 대응이 아니라 미사용 자원 정리입니다.
 #
+# ③ 서버가 계산해야 하는 파라미터를 계산할 수 있는가 (#251)
+#    다운사이징 목표 타입은 AI가 아니라 서버 규칙이 정합니다(schemas/rightsizing_policy.py).
+#    규칙이 답을 내지 못하는 자산 — 하한·비율에 막혀 더 내릴 크기가 없거나 사양 표 밖
+#    패밀리 — 에
+#    다운사이징을 올리면, 모델이 고르는 순간 그래프가 값을 채우지 못해 호출 전체가
+#    FAILED가 됩니다. 실행할 수 없는 조치는 메뉴에 싣지 않습니다.
+#
 # 계측 하네스(ai/evaluation/cases.py)도 이 빌더를 씁니다 — 빌더가 두 벌이면 계측이
 # 재는 입력과 프로덕션이 만드는 입력이 갈립니다.
 # ==============================================================================
@@ -45,6 +52,7 @@ from schemas.agents import RunbookCapability
 from schemas.api.assets import AssetItem, AssetType, RelationType, Verdict
 from schemas.events import ThreatEventType
 from services.aws.executor import parse_arn
+from schemas.rightsizing_policy import rightsizing_target_type
 from schemas.runbook_parameters import RESOURCE_ID_PARAM
 from schemas.runbooks import (
     AI_RECOMMENDABLE_RUNBOOK_IDS,
@@ -88,9 +96,12 @@ def target_asset_type(runbook_id: RunbookId) -> Optional[AssetType]:
 
 
 def build_finops_capabilities(
-    *, asset_type: AssetType, verdict: Verdict
+    *, asset_type: AssetType, verdict: Verdict, instance_type: Optional[str]
 ) -> list[RunbookCapability]:
-    """Incident subject 자산 1건 → 그 Incident의 조치 메뉴. 축 둘은 파일 헤더 참조.
+    """Incident subject 자산 1건 → 그 Incident의 조치 메뉴. 축 셋은 파일 헤더 참조.
+
+    instance_type은 기본값을 두지 않는다 — 빠뜨린 호출부가 다운사이징을 조용히 잃지 않게
+    호출부마다 값을 정하게 한다. EC2가 아닌 자산은 None을 넘긴다.
 
     빈 목록을 돌려줄 수 있다 — 판정이 조치 가능하다고 본 자산에 걸 조치가 메뉴에 하나도
     없는 경우다(조치 공간의 공백). 그 처분은 호출부가 정한다: FinOpsGraphInput은 빈
@@ -108,6 +119,12 @@ def build_finops_capabilities(
         # ② FinOps 조치이거나, 미사용 자산 정리인가
         is_finops = RUNBOOK_DOMAIN_BY_ID.get(runbook_id.value) is RunbookDomain.FINOPS
         if not is_finops and verdict is not Verdict.UNUSED:
+            continue
+        # ③ 서버가 목표 값을 계산할 수 있는가
+        if (
+            runbook_id is RunbookId.RUNBOOK_EC2_RIGHTSIZING
+            and rightsizing_target_type(instance_type) is None
+        ):
             continue
         capabilities.append(
             RunbookCapability(

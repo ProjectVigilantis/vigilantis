@@ -182,7 +182,7 @@ def finops_cases(inventory: AssetInventory, expected: Mapping[str, Any]) -> list
                 # 프로덕션과 같은 빌더를 쓴다 — 두 벌이면 계측이 재는 입력과 실경로가
                 # 만드는 입력이 갈린다(ai/capabilities.py)
                 "capabilities": build_finops_capabilities(
-                    asset_type=AssetType.EC2, verdict=verdict
+                    asset_type=AssetType.EC2, verdict=verdict, instance_type=ec2.instance_type
                 ),
             }
         )

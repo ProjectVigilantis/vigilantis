@@ -268,7 +268,6 @@ def _proposal(evidence_id: str, **over) -> ProposedCandidate:
         "runbook_id": "RUNBOOK_EC2_RIGHTSIZING",
         "target_arn": EC2_ARN,
         "evidence_ids": [evidence_id],
-        "target_instance_type": "t3.medium",
     }
     base.update(over)
     return ProposedCandidate.model_validate(base)
@@ -616,27 +615,18 @@ def test_incident_updated_is_published_after_commit(db, precheck_pass):
     assert published[0].occurred_at == incident.updated_at
 
 
-@pytest.mark.parametrize(
-    "summary,proposal_over,자리",
-    [
-        (SUMMARY, {"target_instance_type": "t3.med\x00ium"}, "후보 parameters"),
-        (
-            EvidenceSummaryOutput(
-                observation="관측\x00", diagnosis="진단", rationale="근거"
-            ),
-            {},
-            "요약",
-        ),
-    ],
-    ids=["candidate-parameter", "summary-line"],
-)
-def test_output_with_unstorable_characters_closes_as_failed(
-    db, precheck_pass, summary, proposal_over, 자리
-):
+UNSTORABLE_SUMMARY = EvidenceSummaryOutput(observation="관측\x00", diagnosis="진단", rationale="근거")
+
+
+def test_output_with_unstorable_characters_closes_as_failed(db, precheck_pass):
     """PostgreSQL이 담지 못하는 NUL은 거절이지 예외가 아니다.
 
     막지 않으면 저장이 DataError로 터져 그 건이 ANALYZING·IN_PROGRESS에 남고, 회수를 거쳐
     **같은 출력을 다시 받는다** — 모델 호출만 되풀이된다.
+
+    FinOps 후보 parameters에는 모델이 쓰는 문자열이 없어 이 경로로 NUL을 싣지 못한다 —
+    다운사이징 목표 타입은 그래프가 규칙으로 계산하고(#251), 나머지 FinOps 파라미터는
+    정수다. 모델이 쓰는 문자열 자리인 요약 줄로 확인한다.
     """
     incident_id = _pending_incident(db)
     evidence_id = _rule_evidence_id(db, incident_id)
@@ -644,10 +634,8 @@ def test_output_with_unstorable_characters_closes_as_failed(
     report = _cycle(
         db,
         _client(
-            summary,
-            CandidateProposalOutput(
-                candidates=[_proposal(evidence_id, **proposal_over)]
-            ),
+            UNSTORABLE_SUMMARY,
+            CandidateProposalOutput(candidates=[_proposal(evidence_id)]),
         ),
     )
 
@@ -673,10 +661,8 @@ def test_unstorable_output_is_closed_beyond_the_reclaimer_s_reach(
     _cycle(
         db,
         _client(
-            SUMMARY,
-            CandidateProposalOutput(
-                candidates=[_proposal(evidence_id, target_instance_type="t3.\x00")]
-            ),
+            UNSTORABLE_SUMMARY,
+            CandidateProposalOutput(candidates=[_proposal(evidence_id)]),
         ),
     )
     incident = incidents_repo.get_incident(db, incident_id)
