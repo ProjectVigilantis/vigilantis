@@ -219,7 +219,7 @@ FE는 `NEXT_PUBLIC_API_BASE_URL`을 이 백엔드로 걸면 mock 대신 실 API�
 
 NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검증**으로 판정한다(ADR-0007). 가드레일 ④는 통과하지만 `DryRun` 경로 자체는 **실 AWS에서 처음 실행된다.**
 
-> 두 런북은 9/11 내부 P0 게이트의 P0 4종에 포함된다. 여기서 어긋나면 **T2 시연 경로가 통째로 막힌다.** 실 AWS 스모크(6–7주차) 최우선 확인 대상이다.
+> 두 런북은 9/11 내부 P0 게이트의 P0 4종에 포함된다. 여기서 어긋나면 **T2 시연 경로가 통째로 막힌다.** 실 AWS 스모크(9주차 10/02–10/08) 최우선 확인 대상이다.
 
 ## 1차 시연에서 빼는 것과 그 이유
 
@@ -231,7 +231,7 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 | `RUNBOOK_SG_DELETE_ISOLATED` / `SG_RECREATE` (P1) | 두 트랙이 이미 양방향 회복을 각각 보여준다. 세 번째는 중복 |
 | `RUNBOOK_EBS_DELETE_UNATTACHED` (P1) | 입력 스키마에 `ebs_volumes`가 아직 없다 |
 
-**2차 설계서 대상**: 실 AWS 전환(6–7주차) 후 P2 트랙 추가 여부를 다시 판단한다.
+**2차 설계서 대상**: 실 AWS 전환(9주차 10/02–10/08) 후 P2 트랙 추가 여부를 다시 판단한다 — P2 3종의 실 AWS 첫 검증은 10주차(10/12–10/15)다.
 
 ---
 
@@ -251,7 +251,7 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 | 경로 | `MEMBER_OF`·`USES`·`REGISTERED_IN` |
 | --- | --- |
 | **골든 적재** — `scripts/load_golden_assets.py` → `collector.persist_inventory` | ✅ **로컬에서 선다.** 이 경로는 AWS를 **부르지 않고** 골든 JSON을 그대로 파싱하므로 LocalStack의 한계를 타지 않는다. `RelationType` **6종 전부** 파생(#271 / PR #314 · CI 등식 가드) |
-| **AWS 수집** — `collector.collect_region` | 🔶 **실 AWS 스모크(6–7주차) 전까지 안 채워진다.** `autoscaling`·`elbv2`가 LocalStack Community에 없어 collector가 호출 실패를 흡수해 degrade 한다(`PARTIAL` 표면화) |
+| **AWS 수집** — `collector.collect_region` | 🔶 **실 AWS 스모크(9주차 10/02–10/08) 전까지 안 채워진다.** `autoscaling`·`elbv2`가 LocalStack Community에 없어 collector가 호출 실패를 흡수해 degrade 한다(`PARTIAL` 표면화) |
 
 두 경로 공통으로, #149 완료 뒤 자산 4종(EBS·ASG·Launch Template·ALB TG)과 `RelationType` 6종이 **코드상** 전부 산출된다(PR #156·#161·#165). **종전 서술은 이 둘을 가르지 않아 골든 경로까지 막힌 것처럼 읽혔다.**
 
@@ -263,7 +263,7 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 | --- | --- | --- | --- |
 | 1 | T2 2번 위험도 판정값(`initial_risk_level`) | **판정 규칙과 `RiskReasonCode` 6종은 확정**(#210 / PR #206 — `packages/schemas/events.py`, `apps/core-api/security/risk_evaluator.py::evaluate_threat`). **② 정답지는 해소됐다**(2026-09-01) — `datasets/golden/secops/expected/`에 입력 12건과 1:1로 대응하는 정답 12건이 있다(PR #223 10건 · PR #242 SSH MEDIUM 밴드 2건). **남은 것은 ① 하나다** — `evaluate_threat()`가 **Security Workflow에 배선되지 않아** 위협 접수 → 배지 경로가 아직 없다(현재 호출처는 테스트뿐) | ① SecOps 워크플로 배선 |
 | 2 | ~~런북별 세부 실행 단계·`parameters_schema`~~ ✅ 해소(2026-08-31) | 확정본이 SSOT §Action Whitelist로 이관되고, `parameters_schema`는 `packages/schemas/runbook_parameters.py`(#154 / PR #178), 세부 실행 단계·`target_api`는 [ADR-0007](adr/0007-guardrail-dryrun-executor-precheck-contract.md) §Context·§5가 갖는다 | — |
-| 3 | Status Check 실패 **주입 방법** | **LocalStack에서 2/2 실패를 만드는 방법이 없다.** 판정기(`wait_for_status_check()` 3분기)와 자동 원복 엔진은 둘 다 섰다 — 아래 3-B 참조 | 6–7주차 실 AWS 스모크([ADR-0006](adr/0006-localstack-team-standard-env.md) §4, PR #244 본문) |
+| 3 | Status Check 실패 **주입 방법** | **판정기(`wait_for_status_check()` 3분기)와 자동 원복 엔진은 둘 다 섰다**(아래 3-B). 막힌 것은 주입이며, **분기가 둘이고 처지가 다르다.** ⓐ `impaired` 분기 — LocalStack에 실제 부팅·헬스체크가 없어 **만들 수 없다**([ADR-0006](adr/0006-localstack-team-standard-env.md) §4 2행) ⓑ `_NOT_BOOTING_STATES`(`stopping`·`stopped`·`shutting-down`·`terminated`) 분기 — **`stop_instances`로 도달할 수 있다.** LocalStack Community가 지원하는 호출이고, 가짜 AWS의 상태만 조작하므로 프로덕션 코드에 데모 분기를 넣지 않는다. **미측정 전제 하나** — `describe_instance_status(IncludeAllInstances=True)`가 stopped 인스턴스를 돌려주는가. 안 돌려주면 사유가 `PRECHECK_TARGET_NOT_FOUND`가 되어 서사가 "기동 실패"가 아니라 "대상 없음"이 된다 | **ⓑ 측정 = 6주차(9/14–9/18)** — 판정 기준 ⓑ, 김세혁. 가능하면 T1 7·8·9번이 10/1(목) 시연에서 실경로가 된다.<br>**ⓐ 해소 = 9주차(10/02–10/08) 실 AWS 스모크**(ADR-0006 §4, PR #244 본문 — 2026-09-14 일정 재편으로 7주차에서 옮겼다) |
 | 3-B | ~~자동 원복 엔진~~ ✅ 해소(2026-09-03) | `RUNBOOK_EC2_REVERT_SIZE` 실행과 `AUTO_ON_FAILURE` 자동 발동이 dev에 들어갔다(#241 / PR #256). 2/2 판정 자체는 #240 / PR #244로 먼저 섰다. **3번을 한 줄로 두면 이 머지가 3번 전체를 해소한 것처럼 읽히므로 갈라 둔다** — 주입 방법은 그대로 남는다 | — |
 | 4 | ~~가드레일 ③ 실제 통과~~ ✅ 해소(2026-08-31) | **4단계가 전부 섰다.** ③ ARN Match 구현(#177 / PR #202 — DB 수집 ARN 대조로 Scope Escalation 차단, ① NUL 문자 차단 포함)으로 `tests/test_guardrails.py`의 placeholder skip 1건이 해제됐다. ④ Dry-Run은 `precheck()` 확정 10종 구현 완료(#129 / PR #147 · 실측 #130 / PR #170) | — |
 | 5 | 화면 구현 상태 | 아래 표 | 카드별 |
