@@ -417,13 +417,18 @@ def main() -> int:
             # 승인 직후 깨진다 — 조용히 지나가는 대신 여기서 멈춘다.
             print(f"중단: 이번 바인딩과 다른 A1 자산이 DB에 남아 있다({', '.join(stale)})")
             print("  DB를 비우고 다시 적재할 것 —")
-            print("  docker compose down -v && docker compose up -d db localstack")
+            # 운영 머신이 Windows PowerShell 5.1이라(#316) `&&`로 잇지 않는다 —
+            # 5.1에는 그 연산자가 없어 파서 오류로 죽는다. 한 줄에 명령 하나씩 찍는다.
+            print("  docker compose down -v")
+            print("  docker compose up -d db localstack")
             # `alembic.ini`가 apps/core-api/에 있어 저장소 루트의
             # `uv run alembic upgrade head`는 `No 'script_location' key found`로
             # 죽는다. `-c`로 ini를 짚는다(대본 §2-②와 같은 명령) — 이 자리는
             # 접속 주소 블록 뒤라 셸에 DATABASE_URL이 이미 잡혀 있다.
             print("  uv run alembic -c apps/core-api/alembic.ini upgrade head")
             print("  uv run python scripts/seed_localstack.py")
+            # 대본의 복구는 ①②③④ 재실행이다 — 시드에서 멈추면 DB가 빈 채로 남는다.
+            print("  uv run python scripts/load_golden_assets.py --bind-a1-to-seed --verify")
             return 2
         result = load_into_db(db, inventories)
         print(f"자산 {result['assets']}건 적재 · CollectionRun {result['runs']}건")

@@ -14,7 +14,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional, Sequence
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import Session
 
 from schemas.api.incidents import (
@@ -33,6 +33,7 @@ from schemas.incidents import (
     AgentInvocationStatus,
     AgentWaitSchedule,
 )
+from schemas.runbooks import TriggerSource
 
 from .. import mappers, models
 
@@ -234,7 +235,20 @@ def list_pending_agent_analysis(
         for row in db.execute(
             select(models.Incident.incident_id, models.Incident.category)
             .where(
-                models.Incident.status == IncidentStatus.ANALYZING,
+                or_(
+                    models.Incident.status == IncidentStatus.ANALYZING,
+                    and_(
+                        models.Incident.category == IncidentCategory.SECOPS,
+                        models.Incident.status.in_([
+                            IncidentStatus.ACTION_IN_PROGRESS,
+                            IncidentStatus.AWAITING_CLOSURE,
+                        ]),
+                        select(models.ActionExecution.execution_id).where(
+                            models.ActionExecution.incident_id == models.Incident.incident_id,
+                            models.ActionExecution.trigger_source == TriggerSource.PRE_MITIGATION_0_5S,
+                        ).exists(),
+                    ),
+                ),
                 models.Incident.agent_invocation_status == AgentInvocationStatus.PENDING,
             )
             .order_by(models.Incident.created_at)

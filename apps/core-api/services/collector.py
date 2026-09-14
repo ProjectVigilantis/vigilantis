@@ -50,6 +50,21 @@ _METRIC_NAMES = (MetricName.CPU_UTILIZATION, MetricName.NETWORK_IN, MetricName.N
 _QUERY_BATCH = 100
 
 
+# collector_failures 라벨(_safe_describe 가 흡수한 조회) → 그 조회로만 채워지는 자산 유형.
+# EC2·SG·NACL·EBS 조회는 흡수하지 않아 실패하면 리전이 FAILED 로 끝나므로 여기 없다 —
+# 소멸 표시 블록에 도달했다면 그 넷은 전량 관측된 것이다.
+# alb_target_health 는 TG 목록이 아니라 등록 대상 조회라 TG 자산을 못 본 것이 아니다.
+# **이 지도에 없는 라벨이 섞이면 아무것도 판단하지 않는다**(fail-closed) — 누가 흡수
+# 조회를 새로 더하고 이 지도를 안 고치면, 조용히 잘못 지우는 대신 조용히 안 지우는
+# 쪽으로 넘어지게 한다. (Issue #332 · PR #339 리뷰: 김세혁)
+_UNOBSERVED_TYPES_BY_FAILURE: dict[str, tuple[str, ...]] = {
+    "launch_templates": ("LAUNCH_TEMPLATE",),
+    "auto_scaling_groups": ("AUTO_SCALING_GROUP",),
+    "alb_target_groups": ("ALB_TARGET_GROUP",),
+    "alb_target_health": (),
+}
+
+
 def _failure_reason(exc: BaseException) -> str:
     """degrade 사유를 사람이 읽을 짧은 코드로. ClientError 는 AWS 오류 코드
     (InternalFailure·AccessDenied·Throttling 등), 그 외는 예외 클래스명."""
@@ -506,9 +521,25 @@ def collect() -> list[AssetInventory]:
 
 
 # ------------------------------------------------------------------ DB 적재
-def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = None) -> dict:
+def persist_inventory(
+    inv: AssetInventory,
+    db,
+    collection_run_id: str | None = None,
+    *,
+    prune_absent: bool = False,
+) -> dict:
     """AssetInventory 를 DB(CollectionRun, Asset, MetricSummary, AssetRelationship)에 적재한다.
     Repository는 commit하지 않으므로 호출부에서 트랜잭션을 관리한다.
+
+    ``prune_absent`` 는 실수집 경로에서 켠다(#332). 켜면 이번 회차가 관측에 성공한 유형 중
+    관측되지 않은 그 리전의 자산에 소멸 표시를 찍는다 — 어느 유형을 판단할지는
+    ``_UNOBSERVED_TYPES_BY_FAILURE`` 가 정한다. 기본이 꺼짐인
+    이유는 이 함수가 실수집 말고도 불리기 때문이다 — `scripts/load_golden_assets.py` 는
+    **골든 파일 1건마다** 이 함수를 부르고 그 파일들이 전부 같은 리전이라, 켜져 있으면
+    두 번째 파일이 첫 번째 파일의 자산을 통째로 소멸 처리한다.
+
+    ``collection_run_id`` 를 받은 호출(회차를 남이 연 경우)에서는 ``prune_absent`` 를
+    켜도 아무것도 하지 않는다 — 회차를 마감하는 쪽이 관측 범위를 안다.
     """
     from datetime import timedelta
 
@@ -786,6 +817,56 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
             error_summary=error_summary,
         )
 
+    # 소멸 자산 표시 — **이번 회차가 실제로 관측한 유형에 대해서만** 한다(#332).
+    # 회차 상태(PARTIAL)로 가르지 않는 이유는 그 단위가 너무 거칠기 때문이다 —
+    # LocalStack Community 는 autoscaling·elbv2 가 라이선스 밖이라 실수집 회차가
+    # **매번** PARTIAL 이고, 회차 단위로 막으면 팀 표준 환경에서 소멸 표시가 한 번도
+    # 발동하지 않는다(PR #339 리뷰: 김세혁). collector_failures 는 이미 *어느 조회를
+    # 못 봤는지* 를 라벨로 담고 있으므로, 그 라벨이 채우는 유형만 판단에서 뺀다.
+    absent_marked: list[str] = []
+    if prune_absent and started_own_run:
+        observed_arns = {
+            a.arn
+            for a in (
+                *inv.ec2_instances,
+                *inv.security_groups,
+                *inv.nacls,
+                *inv.ebs_volumes,
+                *inv.launch_templates,
+                *inv.auto_scaling_groups,
+                *inv.alb_target_groups,
+            )
+        }
+        unknown = set(inv.collector_failures) - _UNOBSERVED_TYPES_BY_FAILURE.keys()
+        if unknown:
+            # 무엇을 못 봤는지 모르면 판단하지 않는다. 라벨을 늘린 쪽이 지도를 고치게
+            # 하려고 조용히 넘기지 않고 경고로 남긴다.
+            _log.warning(
+                "리전 %s: 모르는 수집 실패 라벨 %s — 소멸 표시를 건너뛴다",
+                inv.region,
+                sorted(unknown),
+            )
+            absent_marked = []
+        else:
+            blind = {
+                AssetType(t)
+                for label in inv.collector_failures
+                for t in _UNOBSERVED_TYPES_BY_FAILURE[label]
+            }
+            absent_marked = assets_repo.mark_absent_assets(
+                db,
+                region=inv.region,
+                observed_arns=observed_arns,
+                absent_at=inv.collected_at,
+                asset_types=[t for t in AssetType if t not in blind],
+            )
+        if absent_marked:
+            _log.info(
+                "리전 %s: 이번 회차에 관측되지 않은 자산 %d건을 소멸로 표시",
+                inv.region,
+                len(absent_marked),
+            )
+
     return {
         "region": inv.region,
         "collection_run_id": collection_run_id,
@@ -799,6 +880,7 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
         "total": total,
         "degraded_collectors": list(inv.degraded_collectors),
         "collector_failures": dict(inv.collector_failures),
+        "absent_marked": len(absent_marked),
     }
 
 
@@ -836,7 +918,7 @@ def _collect_store_region(region: str, cfg: dict, session_factory) -> dict:
                 raise  # 비재시도성(AccessDenied·InternalFailure 등)은 즉시 실패로
             _log.warning("리전 %s 수집 일시 실패 — 1회 재시도(%s)", region, _failure_reason(exc))
             inv = collect_region(region, cfg, fresh_metrics, fresh_window_end)
-        summary = persist_inventory(inv, db)
+        summary = persist_inventory(inv, db, prune_absent=True)
         db.commit()
         return summary
     except Exception as exc:  # 리전 격리 — 이 리전만 실패로 마감하고 다른 리전은 계속

@@ -45,41 +45,31 @@
 #                IN_PROGRESS로 남은 채 프로세스가 죽으면 reset_agent_invocation으로
 #                회수하며, 회수 대상 판단은 이 계층 몫입니다(Repository docstring).
 #
-# **입력 빌드의 불변식 둘. 어느 쪽도 "최신 값을 다시 읽는" 것으로 대신할 수 없습니다.**
+# **FinOps 입력 빌드의 불변식 둘. 최신 값을 다시 읽는 것으로 대신할 수 없다.**
+# ⓐ 최상위 rule_evaluation은 RULE 근거 행에서 읽는다(#243). 근거와 다른 원천이면
+#    _incident_payload의 완전 일치 중복 제거를 빗나가 같은 판정이 모델에 두 번 실린다.
+# ⓑ 자산 문맥은 ASSET 근거 행의 Detection 스냅샷에서 읽는다(#265). 자산 테이블은
+#    수집마다 덮어쓰므로 최신 행을 쓰면 예전 판정과 최신 자산이 한 시점처럼 조립된다.
+#    예를 들어 t3.xlarge의 저활성 판정이 이미 t3.medium인 자산에 붙을 수 있다.
+#    현재 AWS 상태를 보는 곳은 제안 직후 가드레일 ④ precheck다(ADR-0007).
+#    실행 직전 재확인 여부는 workflows.py의 실행 계약을 따른다.
+#    ASSET은 asset_context로 전달하며 evidences에 중복해서 싣지 않는다. 후보가 ASSET
+#    근거를 인용하지 않는 보장은 그래프 이후 5번 ⓐ의 evidence_ids 대조에서 성립한다.
+# 조치 메뉴는 ai/capabilities.py의 빌더를 서비스와 계측이 함께 써 입력 차이를 막는다.
 #
-# ⓐ 최상위 rule_evaluation은 RULE 근거 행에서 읽습니다. (Issue #243)
-#    다른 원천에서 읽으면 두 값이 한 글자만 달라도 ai/agent.py의 _incident_payload가
-#    중복 제거 조건(완전 일치)을 빗나가, 같은 판정이 모델 입력에 두 번 실립니다.
-#    로그도 예외도 없어 드러나지 않습니다 — 근거와 최상위는 같은 객체에서 나옵니다.
-# ⓑ 자산 문맥은 ASSET 근거 행에서 읽습니다. 자산 행은 수집 회차마다 최신 관측으로
-#    덮어써지므로(db/repositories/assets.py upsert_asset) 여기서 최신 행을 읽으면
-#    **예전 판정 + 최신 자산**이 한 시점인 양 조립됩니다 — t3.xlarge에서 난 저활성
-#    판정이 이미 t3.medium으로 줄어든 인스턴스에 붙습니다. 그 회차 자산의 사본은
-#    ASSET 근거뿐이라(Issue #265) 자산 테이블이 아니라 근거를 읽습니다. 최신 상태를
-#    보는 자리는 여기가 아니라 제안이 나온 직후의 가드레일 ④ AWS Dry-Run입니다
-#    (precheck — ADR-0007). 그 판정은 실행 시점에 다시 돌지 않고, 실행 직전 대상 자산
-#    재확인은 아직 붙지 않았습니다(workflows.py 헤더).
-#    **ASSET 근거는 evidences 목록에는 싣지 않습니다** — 자산은 asset_context로 이미
-#    들어가므로 근거로도 실으면 같은 값이 두 번 갑니다. AgentEvidenceInput이 이 유형을
-#    거절합니다(schemas/agents.py). 후보 evidence_ids가 그 근거를 가리키지 못하는 것은
-#    5번 검증 ⓐ가 서야 성립합니다 — 그래프는 모델이 돌려준 evidence_ids를 입력과
-#    대조하지 않으므로(ai/agent.py 헤더), 그 검증 전까지는 보장이 아닙니다.
+# FinOps는 그래프 오류·출력 검증 위반·NO_PROPOSAL·가드레일 전부 거절을 FAILED로 닫는다.
+# 뒤 둘은 관제자에게 보여 줄 실행 가능한 조치가 없어 요약을 로그로만 남긴다(#285).
+# 입력 불가도 같은 처분이다. 근거 누락·빈 메뉴를 PENDING으로 남기면 다음 스캔에서도
+# 같은 입력으로 실패를 반복하기 때문이다(_GraphInputUnavailable).
 #
-# 조치 메뉴(capabilities)를 거르는 축은 ai/capabilities.py가 소유합니다. 계측 하네스도
-# 같은 빌더를 씁니다 — 빌더가 두 벌이면 계측이 재는 입력과 실경로의 입력이 갈립니다.
+# SecOps는 고정 THREAT 근거·초기 판정과 분석 시점 수집 자산을 조립한다.
+# 후보는 입력 근거·조치 대상·저장 가능성을 검증한 뒤 Workflow에 넘긴다.
+# SecOps의 위험도 재평가는 초기 위험도·사유·대응 모드를 덮어쓰지 않는다.
 #
-# **분석 실패로 닫는 경우는 넷입니다.** 어느 쪽도 관제자에게 보여줄 상태를 새로 만들지
-# 않습니다 — 그래프 오류(FAILED), 5번 검증 위반, 요약만 있고 후보가 없는 NO_PROPOSAL,
-# 후보가 전부 가드레일에서 거절된 경우입니다. 뒤 둘의 처분 근거는
-# workflows.record_agent_analysis에 있습니다. 입력을 아예 만들 수 없는 건도 같은
-# 처분입니다(_GraphInputUnavailable) — 근거 행이 빠졌거나 조치 메뉴가 비어 다음 주기에
-# 다시 시도해도 결과가 같으므로, PENDING으로 두면 스캔마다 같은 실패를 반복합니다.
-#
-# [남은 작업]
-# 1. SecOps 경로 — SecOpsGraphInput을 만들려면 reassess_risk 노드가 필요한데 아직
-#    없습니다(ai/agent.py 헤더). 그때까지 SECOPS Incident는 넘기지 않고 남깁니다.
-# 2. Medium·Low의 승인 대기 시작(set_agent_wait)과 TIMEOUT_ISOLATION_1M — SecOps
-#    경로와 같은 묶음입니다.
+# SecOps도 FAILED에서는 요약·재평가를 비운다. 선행 실행이 진행 중이면 ACTION_IN_PROGRESS,
+# 성공·원복 완료 실행이 있고 제안이 없으면 AWAITING_CLOSURE다. 그 밖에 실행 가능한
+# 제안이 없으면 FAILED다(workflows.record_agent_analysis).
+# 승인 대기 시각·60초 기한을 기록하되 자동 격리 발동 엔진은 이 모듈 범위 밖이다.
 #
 # 기동 worker 개수는 dispatcher.py와 같은 전제입니다 — worker 1개. 선점의 잠금 수명이
 # 2번의 commit에서 끝나므로, "그래프 진입은 한 주체뿐"이라는 보장은 그 전제 + 스캔
@@ -90,6 +80,7 @@
 from __future__ import annotations
 
 import logging
+import ipaddress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
@@ -97,26 +88,39 @@ from typing import Callable, Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy.orm import Session, sessionmaker
+from pydantic import ValidationError
 
 from schemas.agents import (
     AgentEvidenceInput,
     AgentGraphInput,
     AgentGraphOutput,
     FinOpsGraphInput,
+    SecOpsGraphInput,
+    AgentExecutionContext,
 )
+from schemas.api.assets import AssetType, RelationType
+from schemas.api.actions import ExecutionStatus
 from schemas.api.incidents import IncidentCategory
+from schemas.events import InitialRiskEvaluationResult, expected_mode_for
+from schemas.runbooks import RunbookId, TriggerSource
 from schemas.api.ws import WsEvent, WsEventType
 from schemas.evidence import EvidenceItem, EvidenceType
 from schemas.incidents import AgentInvocationStatus
 
 import workflows
-from ai.agent import run_finops_graph
-from ai.capabilities import build_capabilities
+from ai.agent import run_finops_graph, run_secops_graph, FINOPS_MODEL_CALLS, SECOPS_MODEL_CALLS
+from ai.capabilities import (
+    build_finops_capabilities,
+    build_secops_capabilities,
+    secops_action_targets,
+)
+from asset_mapping import to_asset_item
 from ai.model_client import AIModelClient
 from ai.openai_client import build_openai_model_client
 from config import Settings, get_settings
 from db import mappers
 from db.repositories import incidents as incidents_repo
+from db.repositories import assets as assets_repo, executions as executions_repo
 from db.session import get_session_factory
 from realtime import incident_event
 
@@ -126,9 +130,8 @@ Publish = Callable[[WsEvent], None]
 
 JOB_ID = "agent_dispatch"
 
-# 그래프 1회가 부르는 모델 호출 수 — 요약(_summarize_evidence)과 후보 제안
-# (_propose_candidates) 둘이다(ai/agent.py). 회수 상한이 이 수에 비례한다.
-_MODEL_CALLS_PER_GRAPH = 2
+# FinOps 2회·SecOps 3회 중 최대값으로 회수 상한을 계산한다.
+_MODEL_CALLS_PER_GRAPH = max(FINOPS_MODEL_CALLS, SECOPS_MODEL_CALLS)
 
 
 class _UnsupportedIncident(Exception):
@@ -149,7 +152,7 @@ class AgentDispatchReport:
     no_proposal: int = 0   # NO_PROPOSAL — 요약 3줄 + 후보 0개
     failed: int = 0        # FAILED — 그래프 오류이거나 Workflow 검증에서 걸린 출력
     skipped: int = 0       # 선점 실패(다른 주체가 이미 가져감)
-    unsupported: int = 0   # 그래프가 아직 없는 분류(SECOPS)
+    unsupported: int = 0   # 지원하지 않는 분류
     reclaimed: int = 0     # 상한을 넘겨 PENDING으로 되돌린 IN_PROGRESS Claim
     errored: int = 0
 
@@ -166,7 +169,7 @@ def stale_claim_ceiling_seconds(settings: Optional[Settings] = None) -> float:
     제한시간을 다 쓰고(OPENAI_TIMEOUT_SECONDS × OPENAI_MAX_ATTEMPTS) 시도 사이마다
     서버가 지시한 최대 대기를 따르는 경우다(OPENAI_MAX_RETRY_AFTER_SECONDS ×
     (시도 수 − 1) — ai/openai_client.py _retry_delay는 상한 이내의 Retry-After를
-    backoff보다 우선한다). 기본값으로 (30×3 + 60×2) × 2 = 420초다.
+    backoff보다 우선한다). 기본값으로 (30×3 + 60×2) × 3 = 630초다.
 
     **짧게 잡으면 안 된다.** 상한이 실제 최악값보다 짧으면 아직 살아 있는 호출이
     PENDING으로 되돌아가 같은 Incident에 과금되는 그래프 호출이 한 번 더 나가고,
@@ -223,6 +226,8 @@ def build_graph_input(db: Session, incident_id: str) -> AgentGraphInput:
     incident = incidents_repo.get_incident(db, incident_id)
     if incident is None:
         raise _GraphInputUnavailable(f"Incident를 찾을 수 없습니다: {incident_id}")
+    if incident.category is IncidentCategory.SECOPS:
+        return _build_secops_input(db, incident)
     if incident.category is not IncidentCategory.FINOPS:
         raise _UnsupportedIncident(incident.category.value)
 
@@ -235,7 +240,7 @@ def build_graph_input(db: Session, incident_id: str) -> AgentGraphInput:
 
     if rule_evaluation.verdict is None:
         raise _GraphInputUnavailable("RULE 근거에 판정이 없습니다")
-    capabilities = build_capabilities(
+    capabilities = build_finops_capabilities(
         asset_type=asset.asset_type, verdict=rule_evaluation.verdict
     )
     if not capabilities:
@@ -261,6 +266,70 @@ def build_graph_input(db: Session, incident_id: str) -> AgentGraphInput:
         ],
         capabilities=capabilities,
     )
+
+
+def _build_secops_input(db: Session, incident) -> SecOpsGraphInput:
+    """관측은 고정 THREAT 근거, 자산은 분석 시점의 최신 수집 행에서 읽는다.
+
+    SecOps Intake에는 Detection 자산 스냅샷이 없다. 자산 collected_at을 모델에
+    함께 보내 시점을 구분한다. 직접 PROTECTED_BY 관계 중 같은 계정·리전의
+    수집된 NACL만 남긴다. SG 역방향·VPC 전체로 대상 범위를 추측하지 않는다.
+    """
+    try:
+        evidences = [mappers.to_evidence_item(row)
+                     for row in incidents_repo.list_evidence(db, incident.incident_id)]
+        threat = _sole_evidence(evidences, EvidenceType.THREAT)
+        event = threat.content.event
+        if (event.target_arn != incident.subject_arn
+                or event.threat_event_id != incident.threat_event_id):
+            raise _GraphInputUnavailable("위협 근거와 Incident 대상이 다릅니다")
+        row = assets_repo.get_asset_by_arn(db, incident.subject_arn)
+        if row is None:
+            raise _GraphInputUnavailable("위협 대상 자산이 수집되지 않았습니다")
+        relations = []
+        for relation in assets_repo.list_relationships_by_source(db, row.asset_id):
+            if relation.relation_type is not RelationType.PROTECTED_BY:
+                continue
+            target = assets_repo.get_asset_by_arn(db, relation.target_arn)
+            if (target is not None and target.asset_type is AssetType.NACL
+                    and target.account_id == row.account_id and target.region == row.region):
+                relations.append(relation)
+        asset = to_asset_item(row, relations, None)
+        capabilities = build_secops_capabilities(asset=asset, event_type=event.event_type)
+        if not capabilities:
+            raise _GraphInputUnavailable("이 위협에 제공할 조치·조회 의존성이 없습니다")
+        # response_mode는 이후 타이머가 바꿀 수 있다. 초기 입력에는 초기 위험도에
+        # 대응하는 원래 모드를 복원하고 현재 Incident 대응 모드는 수정하지 않는다.
+        initial = InitialRiskEvaluationResult(
+            threat_event_id=event.threat_event_id,
+            initial_risk_level=incident.initial_risk_level,
+            response_mode=expected_mode_for(incident.initial_risk_level),
+            reason_codes=incident.initial_risk_reason_codes,
+        )
+        prior = [execution for execution in executions_repo.list_by_incident(db, incident.incident_id)
+                 if execution.trigger_source is TriggerSource.PRE_MITIGATION_0_5S
+                 and execution.runbook_id in (RunbookId.RUNBOOK_EC2_ISOLATE,
+                                              RunbookId.RUNBOOK_NACL_ADD_DENY)]
+        isolation = None
+        if prior:
+            execution = prior[-1]
+            isolation = AgentExecutionContext(
+                execution_id=execution.execution_id, runbook_id=execution.runbook_id,
+                status=execution.status,
+                # 실패·부분 적용은 대상과 영향을 동일시하지 않는다. 성공만 확정한다.
+                affected_arns=([execution.target_arn]
+                               if execution.status is ExecutionStatus.SUCCESS else []),
+                result_summary=execution.error_summary or None,
+            )
+        return SecOpsGraphInput(
+            incident_id=incident.incident_id, asset_context=asset, initial_risk=initial,
+            evidences=[AgentEvidenceInput(evidence_id=threat.evidence_id,
+                                         evidence_type=threat.evidence_type,
+                                         content=threat.content)],
+            isolation_execution=isolation, capabilities=capabilities,
+        )
+    except ValidationError as exc:
+        raise _GraphInputUnavailable("저장된 SecOps 입력이 계약과 다릅니다") from exc
 
 
 # ------------------------------------------------------------------------------
@@ -305,6 +374,11 @@ def _contract_violation(
     ):
         return "FINOPS 출력에 reviewed_risk_level이 실렸습니다"
 
+    if (graph_input.domain is IncidentCategory.SECOPS
+            and output.invocation_status is not AgentInvocationStatus.FAILED
+            and output.reviewed_risk_level is None):
+        return "SECOPS 분석 결과에 재평가 위험도가 없습니다"
+
     offered = {item.evidence_id for item in graph_input.evidences}
     for candidate in output.candidates:
         unknown = sorted(set(candidate.evidence_ids) - offered)
@@ -313,6 +387,27 @@ def _contract_violation(
                 f"{candidate.runbook_id.value} 후보가 입력 밖 evidence_id를 인용했습니다: "
                 f"{unknown}"
             )
+
+    if isinstance(graph_input, SecOpsGraphInput):
+        targets = secops_action_targets(graph_input.asset_context)
+        menu = {item.runbook_id for item in graph_input.capabilities}
+        for candidate in output.candidates:
+            if (candidate.runbook_id not in menu or candidate.target_arn not in
+                    targets.get(candidate.runbook_id.value, [])):
+                return "SECOPS 후보의 조치·대상이 입력 메뉴 밖입니다"
+            if candidate.runbook_id is RunbookId.RUNBOOK_NACL_ADD_DENY:
+                threats = [item.content.event for item in graph_input.evidences
+                           if item.evidence_type is EvidenceType.THREAT
+                           and item.evidence_id in candidate.evidence_ids]
+                try:
+                    source = ipaddress.ip_address(threats[0].payload.source_ip)
+                    network = ipaddress.ip_network(candidate.parameters.cidr_block)
+                    if (len(threats) != 1 or network.num_addresses != 1
+                            or network.network_address != source
+                            or candidate.parameters.protocol != "tcp"):
+                        return "SSH 차단 파라미터가 인용한 위협 근거와 다릅니다"
+                except (ValueError, AttributeError, IndexError):
+                    return "SSH 차단의 출발지 근거를 확인할 수 없습니다"
 
     unstorable = _unstorable_field(output)
     if unstorable is not None:
@@ -381,7 +476,11 @@ def _dispatch_one(
             # 그래프 호출이 트랜잭션 밖에서 돈다
             db.rollback()
             output = _verified_output(
-                graph_input, run_finops_graph(graph_input, client=client), incident_id
+                graph_input,
+                (run_secops_graph(graph_input, client=client)
+                 if isinstance(graph_input, SecOpsGraphInput)
+                 else run_finops_graph(graph_input, client=client)),
+                incident_id,
             )
 
         outcome = workflows.record_agent_analysis(db, incident_id, output)
@@ -421,12 +520,11 @@ def dispatch_pending_analysis(
 
     scanned = incidents_repo.list_pending_agent_analysis(db)
     report.scanned = len(scanned)
-    # 그래프가 없는 분류는 선점하지 않고 남긴다(파일 헤더 [남은 작업] 1번). 선점한 뒤에
-    # 갈라내면 SECOPS Incident가 주기마다 선점·해제를 반복한다
+    # 지원하는 도메인은 공통 선점·회수 경로를 사용한다.
     dispatchable = [
         incident_id
         for incident_id, category in scanned
-        if category is IncidentCategory.FINOPS
+        if category in (IncidentCategory.FINOPS, IncidentCategory.SECOPS)
     ]
     report.unsupported = len(scanned) - len(dispatchable)
     if not dispatchable:
