@@ -3,8 +3,9 @@
 # 소멸 자산 표시·해제와 그 경계를 회귀로 고정한다. (Issue #332)
 #
 # 지키려는 것은 넷이다.
-#   1. SUCCESS 로 마감된 회차가 못 본 그 리전의 자산에 소멸 표시가 찍힌다.
-#   2. PARTIAL 회차에서는 아무것도 표시되지 않는다 — 못 본 것과 사라진 것은 다르다(#221).
+#   1. 그 유형을 실제로 관측한 회차가 못 본 그 리전의 자산에 소멸 표시가 찍힌다.
+#   2. 조회가 실패한 유형, 모르는 실패 라벨이 섞인 회차는 표시하지 않는다 — 못 본 것과
+#      사라진 것은 다르다(#221).
 #   3. 소멸 자산은 판정 대상에서 빠진다 — 낡은 메트릭으로 후보가 서지 않는다.
 #   4. 이력(MetricSummary·RuleEvaluation)은 남는다 — 표시이지 삭제가 아니다.
 #
@@ -323,3 +324,25 @@ def test_absent_asset_keeps_its_history(db, t0):
             select(models.RuleEvaluation).where(models.RuleEvaluation.asset_id == asset_id)
         ).scalars().all()
     ) == len(evals_before)
+
+# ------------------------------------------------------------------------------
+# 실패 라벨 → 못 본 유형 지도의 드리프트 가드 (리뷰 nit, #339)
+# 값에 오타가 나면 fail-closed 가 아니라 AssetType(t) 에서 ValueError 가 나
+# 리전 전체가 FAILED 로 롤백된다. 키는 _safe_describe 라벨과, 값은 AssetType 멤버와
+# 여기서 대조해 잠근다.
+# ------------------------------------------------------------------------------
+
+
+def test_unobserved_types_map_matches_labels_and_asset_types():
+    import re
+
+    from schemas.api.assets import AssetType
+    from services import collector
+
+    source = Path(collector.__file__).read_text(encoding="utf-8")
+    labels = set(re.findall(r'"([a-z_]+)", failures,', source))
+    assert labels, "_safe_describe 호출 라벨을 하나도 찾지 못했다 — 정규식을 다시 봐라"
+    assert set(collector._UNOBSERVED_TYPES_BY_FAILURE) == labels
+    valid = {t.value for t in AssetType}
+    for label, types in collector._UNOBSERVED_TYPES_BY_FAILURE.items():
+        assert set(types) <= valid, (label, types)

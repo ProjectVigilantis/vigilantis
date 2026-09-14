@@ -531,8 +531,9 @@ def persist_inventory(
     """AssetInventory 를 DB(CollectionRun, Asset, MetricSummary, AssetRelationship)에 적재한다.
     Repository는 commit하지 않으므로 호출부에서 트랜잭션을 관리한다.
 
-    ``prune_absent`` 는 **이번 회차가 그 리전의 전량을 관측했다고 말할 수 있을 때만**
-    켠다(#332). 켜면 관측되지 않은 그 리전의 자산에 소멸 표시를 찍는다. 기본이 꺼짐인
+    ``prune_absent`` 는 실수집 경로에서 켠다(#332). 켜면 이번 회차가 관측에 성공한 유형 중
+    관측되지 않은 그 리전의 자산에 소멸 표시를 찍는다 — 어느 유형을 판단할지는
+    ``_UNOBSERVED_TYPES_BY_FAILURE`` 가 정한다. 기본이 꺼짐인
     이유는 이 함수가 실수집 말고도 불리기 때문이다 — `scripts/load_golden_assets.py` 는
     **골든 파일 1건마다** 이 함수를 부르고 그 파일들이 전부 같은 리전이라, 켜져 있으면
     두 번째 파일이 첫 번째 파일의 자산을 통째로 소멸 처리한다.
