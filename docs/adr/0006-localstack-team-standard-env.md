@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-08-19
-- **Amended**: 2026-08-24, 2026-09-08, 2026-09-10 — §4 검증 한계 목록 갱신(하단 "개정 이력" 참조, 핵심 결정 불변)
+- **Amended**: 2026-08-24, 2026-09-08, 2026-09-10, **2026-09-14** — §4 검증 한계 목록 갱신과 **스모크 시점·중간 발표 전환 방침 변경**(하단 "개정 이력" 참조, 핵심 결정 불변)
 - **Deciders**: 김세혁(PM/Infra) 수립 — 2026-08-13 확정 결정(개발 = LocalStack, 발표 직전 실 AWS 전환)의 구체화
 
 ## Context (배경)
@@ -17,7 +17,7 @@
 
 ## Decision (결정)
 
-**LocalStack Community를 docker-compose에 포함해 `docker compose up` 한 줄로 팀 전원이 동일한 시드 상태의 가짜 AWS를 얻게 하고, LocalStack이 검증하지 못하는 경로는 명시적 목록으로 관리해 6–7주차 실 AWS 스모크 테스트로 이월한다.**
+**LocalStack Community를 docker-compose에 포함해 `docker compose up` 한 줄로 팀 전원이 동일한 시드 상태의 가짜 AWS를 얻게 하고, LocalStack이 검증하지 못하는 경로는 명시적 목록으로 관리해 9주차(10/02–10/08) 실 AWS 스모크 테스트로 이월한다.**(스모크 시점은 2026-09-14에 7주차에서 옮겼다 — 아래 5차 개정)
 
 ### 1. 단일 compose — `localstack` 서비스 추가
 
@@ -59,7 +59,7 @@ LocalStack 통과를 "검증 완료"로 간주하지 않는 경로를 고정 목
 | # | 경로 | 실 AWS와의 격차 |
 | --- | --- | --- |
 | 1 | 가드레일 4단계 `DryRun=True` | LocalStack은 실제 IAM 권한을 검증하지 않음 |
-| 2 | `get_waiter` Status Check(2/2) 감시·자동 원복 | 실제 부팅·헬스체크가 없어 대기·실패 시나리오가 재현되지 않음 |
+| 2 | `get_waiter` Status Check(2/2) 감시·자동 원복 | 실제 부팅·헬스체크가 없어 대기·실패 시나리오가 재현되지 않음. **다만 실패 판정 분기는 둘이고 처지가 갈린다**(2026-09-14 재검토): ⓐ `impaired` 검사 결과 — LocalStack이 헬스체크를 돌리지 않으므로 **만들 수 없고 이 이월 목록에 남는다** ⓑ `_NOT_BOOTING_STATES`(`stopping`·`stopped`·`shutting-down`·`terminated`) — **`stop_instances`로 도달할 수 있다.** Community가 지원하는 호출이고, 가짜 AWS의 **상태만** 조작하므로 §3(코드 분기 금지)에 걸리지 않는다. ⓑ의 미측정 전제는 `describe_instance_status(IncludeAllInstances=True)`가 stopped 인스턴스를 돌려주는가이며, 안 돌려주면 사유가 `PRECHECK_TARGET_NOT_FOUND`로 갈려 실패 서사가 "기동 실패"가 아니라 "대상 없음"이 된다. **ⓑ 측정은 6주차(9/14–9/18)** — 결과에 따라 이 행의 범위가 ⓐ로 좁아진다 |
 | 3 | CloudWatch 메트릭 수집 | 실 AWS는 EC2가 자동 발행, LocalStack은 시드 주입 — 지연·해상도 특성이 다름 |
 | 4 | ALB Target Group·ASG 경로 (P2 런북 3종) | **확정 편입(2026-08-24 실측)** — `elbv2`·`autoscaling`은 Community 미포함(Pro 전용, `InternalFailure: not included within your LocalStack license`). `ISOLATE`·`UNISOLATE`·`ENABLE_AUTOSCALING`은 실행뿐 아니라 Dry-Run 대체용 describe 조회도 로컬 불가 |
 | 5 | `ec2.create_network_acl_entry` · `ec2.delete_network_acl_entry`의 `DryRun=True` | **LocalStack이 플래그를 무시하고 실제로 규칙을 생성·삭제한다**(예외 미발생). 실 AWS는 정상 지원하므로 `DryRun` 경로는 실 AWS에서 처음 검증된다 — 그때까지 두 런북은 조회 대체 검증으로 동작한다([ADR-0007](0007-guardrail-dryrun-executor-precheck-contract.md) §4) |
@@ -67,9 +67,11 @@ LocalStack 통과를 "검증 완료"로 간주하지 않는 경로를 고정 목
 | 7 | `ec2.create_network_acl_entry`의 `PortRange` | **LocalStack은 TCP·UDP 규칙에서 `PortRange`가 빠진 요청도 받아 준다**(2026-09-10 실측 — TCP 규칙이 그대로 생성되며 `describe_network_acls`의 `PortRange`는 `None`으로 남는다). 실 AWS는 같은 요청을 `InvalidParameterValue`로 거절한다([CreateNetworkAclEntry](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_CreateNetworkAclEntry.html)). **행동 규칙: TCP·UDP에는 전체 범위 `0-65535`를 실어 보낸다**(`services/aws/executor._NACL_ALL_PORTS`) — 막는 축이 포트가 아니라 출발지 주소라 범위를 좁힐 이유가 없고, 6행과 같이 이월이 아니라 코드로 닫힌다 |
 | 8 | 가드레일 4단계 `DryRun=True`의 **대상 존재 검사** | **LocalStack은 실재하지 않는 인스턴스에도 `DryRunOperation`을 돌려준다**(2026-09-10 실측 — 골든 A1 `i-0a1b2c3d4e5f00001`은 LocalStack에 없는데 `modify_instance_attribute(DryRun=True)`가 통과했고, 같은 ID로 부른 `stop_instances`는 `InvalidInstanceID.NotFound`로 실패했다). DryRun 플래그를 **대상 존재 검사보다 먼저** 처리하기 때문이다. 그래서 4단계가 전부 통과해 승인 버튼이 열리고, **관제자가 누른 뒤 실행 1단계에서 처음 깨진다**(`PRECHECK_TARGET_NOT_FOUND`). 1행과 같은 이월이다 — 실 AWS는 여기서 걸러 줄 것으로 보이나 **미측정**이며, 로컬에서 ④는 "대상이 실재하는가"를 보증하지 않는다. 9/11 게이트는 조치 대상을 실물에 바인딩해 회피한다(`scripts/load_golden_assets.py --bind-a1-to-seed`, #301) |
 
-이 목록은 **6–7주차 실 AWS 스모크 테스트**에서 해소한다: P0 런북 4종(`RIGHTSIZING`+`REVERT_SIZE`, `NACL_ADD_DENY`+`NACL_RESTORE`) 실동작 + Dry-Run·Status Check 경로 각 1회 검증. 비용 통제 — 단일 계정, 최소 스펙(t3.micro급), 검증 직후 리소스 정리. P2 시연 인프라(ALB·다중 EC2)는 마일스톤대로 조기 준비하되 실 AWS에 구성한다.
+이 목록은 **9주차(10/02–10/08) 실 AWS 스모크 테스트**에서 해소한다: P0 런북 4종(`RIGHTSIZING`+`REVERT_SIZE`, `NACL_ADD_DENY`+`NACL_RESTORE`) 실동작 + Dry-Run·Status Check 경로 각 1회 검증. 비용 통제 — 단일 계정, 최소 스펙(t3.micro급), 검증 직후 리소스 정리. P2 시연 인프라(ALB·다중 EC2)는 마일스톤대로 조기 준비하되 실 AWS에 구성하며, **P2 3종의 실 AWS 첫 검증은 10주차(10/12–10/15)다**.
 
-**실 AWS 전환 절차(스모크·발표 직전 공통)** — `.env` 편집 두 가지를 반드시 **함께** 한다: ① 더미 자격증명(`test`)을 실제 키로 교체, ② `AWS_ENDPOINT_URL` 줄 삭제. 하나라도 빠지면 — ② 누락 시 모든 호출이 **조용히 LocalStack으로 가서 스모크가 가짜 AWS를 검증**하고(무증상 — 가장 위험), ① 누락 시 실 AWS가 `AuthFailure`로 시끄럽게 실패한다(인지 용이). 전환 여부는 편집 직후 `aws sts get-caller-identity`(또는 boto3 동일 호출)로 확인한다 — **계정 ID가 `000000000000`이면 아직 LocalStack이다.**
+> ⚠️ **10/1(목) 중간 발표 시연은 이 스모크보다 앞선다 — 그래서 발표는 LocalStack으로 한다**(2026-09-14 PM 결정, `docs/PROJECT_STATUS.md` §확정 결정 로그). **의도된 선택이며 미비가 아니다.** 이 ADR이 2026-08-19에 전제한 "발표 직전 실 AWS 전환"(§Context의 2026-08-13 확정)은 **중간 발표에 대해서는 적용하지 않는다.** 아래 전환 절차가 처음 실행되는 자리는 9주차(10/02–10/08) 스모크다.
+
+**실 AWS 전환 절차(스모크·최종 발표 직전 공통)** — `.env` 편집 두 가지를 반드시 **함께** 한다: ① 더미 자격증명(`test`)을 실제 키로 교체, ② `AWS_ENDPOINT_URL` 줄 삭제. 하나라도 빠지면 — ② 누락 시 모든 호출이 **조용히 LocalStack으로 가서 스모크가 가짜 AWS를 검증**하고(무증상 — 가장 위험), ① 누락 시 실 AWS가 `AuthFailure`로 시끄럽게 실패한다(인지 용이). 전환 여부는 편집 직후 `aws sts get-caller-identity`(또는 boto3 동일 호출)로 확인한다 — **계정 ID가 `000000000000`이면 아직 LocalStack이다.**
 
 ### 5. 단계 편성 (마일스톤 정합)
 
@@ -78,8 +80,9 @@ LocalStack 통과를 "검증 완료"로 간주하지 않는 경로를 고정 목
 | 1–2주차 말(이번 주) | 본 ADR + compose `localstack` + 시드 스크립트 + `.env.example` 스위치 기본 활성화 | 팀 표준 환경 PR (김세혁) |
 | 3주차 | CI에 LocalStack service container + 시드 단계 추가(별도 CHORE), PR #29 후속 재작성 착수 가능(김승철 — 미해결 #2 차단 해제) | CI 통합 테스트 가동 |
 | 3–5주차 | 전원 LocalStack 기반 개발·pytest. 실행 엔진·가드레일도 동일 규약(§3)으로 작성 | — |
-| 6–7주차 | 실 AWS 스모크 테스트(§4 목록 해소) — 마일스톤 "백엔드-프론트엔드 연동 & 회복 엔진 통합" 기간 내 | 스모크 결과 기록 |
-| 8주차(중간 발표 직전) | `AWS_ENDPOINT_URL` 제거 전환 리허설 + 시연 인프라 최종 점검 | 시연 환경 |
+| 8주차(9/28–10/01) | **10/1(목) 중간 발표 시연 — LocalStack 유지.** 전환하지 않는다(2026-09-14 결정). 시연 인프라 최종 점검과 리허설(9/29–9/30)은 LocalStack 위에서 한다 | 시연 환경 |
+| **9주차(10/02–10/08)** | **실 AWS 스모크 테스트(§4 목록 해소)** — `AWS_ENDPOINT_URL` 제거 전환이 **처음 실행되는 자리**다. 2026-09-14 일정 재편으로 7주차에서 옮겼다 | 스모크 결과 기록 |
+| **10주차(10/12–10/15)** | P2 3종(`EC2_ISOLATE`·`UNISOLATE`·`ENABLE_AUTOSCALING`) 실 AWS 첫 검증 — §4 4행 해소 · **10/15(목) MVP 마감 판정** | P2 검증 기록 |
 
 통합 테스트의 현행 skip 규약(LocalStack 미기동 시 전체 skip)은 유지한다 — CI service container 도입 전까지 CI 안전성을 보장하는 장치다.
 
@@ -94,7 +97,7 @@ LocalStack 통과를 "검증 완료"로 간주하지 않는 경로를 고정 목
 
 **비용/유의**
 
-- LocalStack ≠ 실 AWS 격차(§4)는 구조적으로 남는다 — **6–7주차 스모크가 유일한 방어선**이므로 해당 주차 일정에서 빠지면 시연 직전 리스크로 직결
+- LocalStack ≠ 실 AWS 격차(§4)는 구조적으로 남는다 — **9주차(10/02–10/08) 스모크가 유일한 방어선**이므로 그 주차 일정에서 빠지면 10/15(목) MVP 마감 판정이 격차를 안은 채 내려진다. **10/1(목) 중간 발표는 이 방어선보다 앞서므로, 그 시연에서 보이는 것은 LocalStack이 보증하는 범위까지다**(2026-09-14 결정으로 감수)
 - ~~Community 커버리지가 P2 런북 리소스(ALB TG·ASG)에서 부족할 수 있음 — 구현 착수 시점(3–5주차)에 확인해 §4 목록을 갱신해야 함~~ → **확인 완료(2026-08-24)**: `elbv2`·`autoscaling`은 Community 미포함으로 확정, §4 4행 편입(1차 개정)
 - 시드 데이터와 rule_engine 임계값의 결합 — 임계값 변경 PR에 시드 갱신 누락 시 통합 테스트가 조용히 무의미해짐
 - 이미지 버전 고정 관리 부담(업그레이드는 PR로만)
@@ -170,3 +173,28 @@ LocalStack 통과를 "검증 완료"로 간주하지 않는 경로를 고정 목
 
   9/11 게이트 당일은 조치 대상을 실물에 바인딩해 회피한다(`--bind-a1-to-seed`). 핵심 결정
   (단일 compose·Boto3 시드 단일 원천·전환 스위치·이월 목록 운용)은 불변이다.
+
+- **2026-09-14 (5차 개정)** — **앞선 넷과 성격이 다르다.** 1–4차는 §4 목록에 행을 더하는
+  실측 반영이었고, 이번은 **이월분을 해소하는 시점과 중간 발표의 전환 방침**을 바꾼다.
+  근거는 2026-09-14 PM 일정 재편이다(`docs/PROJECT_STATUS.md` §확정 결정 로그 · 이슈 #333).
+
+  | 대상 | 변경 |
+  | --- | --- |
+  | §Decision · §4 말미 · §Consequences | 실 AWS 스모크 **6–7주차 → 9주차(10/02–10/08)** |
+  | §5 단계 편성 표 | **8주차(9/28–10/01) 행을 "전환 리허설"에서 "LocalStack 유지"로 바꾸고**, 9주차(10/02–10/08) 스모크 행과 10주차(10/12–10/15) P2 검증 행을 신설 |
+  | §4 2행 (Status Check) | 실패 판정 분기를 **ⓐ `impaired`(이월 유지) / ⓑ `_NOT_BOOTING_STATES`(`stop_instances`로 도달 가능, 6주차 측정)** 로 갈랐다 |
+
+  **바뀐 전제를 분명히 적어 둔다.** 이 ADR §Context는 2026-08-13 확정 *"개발 = LocalStack,
+  발표 직전 실 AWS 전환"* 위에 서 있었다. **중간 발표 10/1(목)에 대해서는 그 전제가
+  적용되지 않는다** — 시연은 LocalStack으로 하고, `AWS_ENDPOINT_URL` 제거 전환은 9주차
+  (10/02–10/08) 스모크가 처음이다. **이는 준비 부족이 아니라 감수한 선택이다**(2026-09-14
+  PM 결정). 그렇게 적어 두지 않으면 다음에 이 문서를 읽는 사람이 "발표 직전 전환을
+  못 한 것"으로 읽는다.
+
+  §4 2행의 갈래도 성격을 적어 둔다 — ⓑ는 **프로덕션 코드에 데모 분기를 넣는 것이 아니라**
+  가짜 AWS의 상태를 바꾸는 것이므로 §3(환경 감지 분기 금지)과 충돌하지 않는다. 측정 결과가
+  "가능"이면 2행의 이월 범위는 ⓐ로 좁아지고, "불가"면 2행은 지금 범위 그대로 9주차
+  스모크로 간다. **어느 쪽이든 6주차(9/14–9/18)에 판정해 이 행을 갱신한다.**
+
+  §1(Community 전용)·§2(Boto3 시드 단일 원천)·§3(전환 스위치 규약)은 그대로 유지하며,
+  핵심 결정(단일 compose·Boto3 시드 단일 원천·전환 스위치·이월 목록 운용)은 불변이다.
