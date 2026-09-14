@@ -137,8 +137,8 @@ class Asset(Base):
     )
     collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     # AWS 에서 사라진 자산의 표시. 하드 삭제하지 않는 이유는 MetricSummary·RuleEvaluation·
-    # AssetRelationship 이 asset_id 를 참조해 이력이 함께 끊기기 때문이다. 값은 SUCCESS 로
-    # 마감된 수집 회차가 그 리전에서 이 자산을 관측하지 못한 시각이고, 다시 관측되면
+    # AssetRelationship 이 asset_id 를 참조해 이력이 함께 끊기기 때문이다. 값은 그 유형을
+    # 실제로 관측한 수집 회차가 그 리전에서 이 자산을 보지 못한 시각이고, 다시 관측되면
     # upsert_asset 이 None 으로 되돌린다. (Issue #332)
     absent_since: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True

@@ -191,13 +191,20 @@ def mark_absent_assets(
     region: str,
     observed_arns: Collection[str],
     absent_at: datetime,
+    asset_types: Optional[Collection[AssetType]] = None,
 ) -> list[str]:
     """이번 회차가 관측하지 못한 ``region`` 의 자산에 소멸 표시를 찍고 그 ARN 을 돌려준다.
 
-    **호출 조건은 부르는 쪽이 지킨다** — 이 함수는 회차 상태를 보지 않는다. 수집이
-    일부만 성공한 회차(PARTIAL)에서 부르면 못 본 것과 사라진 것을 구분하지 못해 멀쩡한
-    자산이 화면에서 사라진다. collector 는 **SUCCESS 로 마감되는 회차에서만** 부른다
-    (#221 이 세운 경계를 그대로 쓴다).
+    **못 본 것과 사라진 것을 가르는 책임은 부르는 쪽에 있다** — 이 함수는 회차 상태를
+    보지 않는다. ``asset_types`` 로 **이번 회차가 실제로 관측한 유형만** 넘기면,
+    조회가 실패한 유형의 자산은 판단에서 빠진다(#221 의 경계를 유형 단위로 지킨다).
+    ``None`` 이면 전 유형이 대상이다.
+
+    유형 단위인 이유는 회차 단위가 너무 거칠기 때문이다 — LocalStack Community 는
+    ``autoscaling``·``elbv2`` 가 라이선스 밖이라 실수집 회차가 **매번** PARTIAL 로
+    끝난다. 회차 상태로 가르면 팀 표준 환경에서 소멸 표시가 한 번도 발동하지 않는다.
+    실 AWS 에서도 ``autoscaling`` 에 AccessDenied 하나 났다고 EC2 소멸 판단까지
+    멈출 이유가 없다. (PR #339 리뷰: 김세혁)
 
     스코프가 리전인 이유는 수집 단위가 리전이기 때문이다 — 다른 리전의 자산은 이번
     회차의 관측 범위 밖이라 판단 근거가 없다.
@@ -205,8 +212,8 @@ def mark_absent_assets(
     이미 표시된 자산은 건드리지 않는다. 처음 사라진 시각을 보존해야 "언제부터 없었나"
     가 남고, 매 회차 값이 갱신되면 그 정보가 사라진다.
 
-    ``observed_arns`` 가 비어 있으면 그 리전의 자산이 전부 표시된다. 그것이 맞는
-    동작이다 — SUCCESS 로 마감된 회차가 아무것도 못 봤다면 AWS 쪽이 실제로 비어 있다.
+    ``observed_arns`` 가 비어 있으면 대상 유형의 자산이 전부 표시된다. 그것이 맞는
+    동작이다 — 관측에 성공한 조회가 아무것도 못 봤다면 AWS 쪽이 실제로 비어 있다.
     """
     stmt = select(models.Asset).where(
         models.Asset.region == region,
@@ -214,6 +221,8 @@ def mark_absent_assets(
     )
     if observed_arns:
         stmt = stmt.where(models.Asset.arn.notin_(list(observed_arns)))
+    if asset_types is not None:
+        stmt = stmt.where(models.Asset.asset_type.in_(list(asset_types)))
 
     # UPDATE 문 대신 ORM 객체에 값을 넣는다 — 같은 세션이 들고 있는 자산 객체가 바로
     # 최신이 되어, 호출부가 expire_all 왕복 없이 이어서 읽어도 어긋나지 않는다

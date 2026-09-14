@@ -29,7 +29,12 @@ for _p in (str(CORE_API), str(REPO_ROOT / "packages")):
         sys.path.insert(0, _p)
 
 from db import models  # noqa: E402
-from schemas.assets import AssetInventory, Ec2Asset, MetricSummary  # noqa: E402
+from schemas.assets import (  # noqa: E402
+    AssetInventory,
+    AutoScalingGroupAsset,
+    Ec2Asset,
+    MetricSummary,
+)
 from services.collector import persist_inventory  # noqa: E402
 from services.rule_engine import run_rule_engine  # noqa: E402
 
@@ -64,12 +69,25 @@ def _ec2(instance_id: str, region: str = REGION) -> Ec2Asset:
     )
 
 
+def _asg(name: str, region: str = REGION) -> AutoScalingGroupAsset:
+    """ASG 1개 — autoscaling 은 LocalStack Community 밖이라 실패 흡수 대상이다."""
+    return AutoScalingGroupAsset(
+        arn=f"arn:aws:autoscaling:{region}:{ACCOUNT}:autoScalingGroup:g1:autoScalingGroupName/{name}",
+        name=name,
+        region=region,
+        min_size=1,
+        max_size=3,
+        desired_capacity=2,
+    )
+
+
 def _inventory(
     instance_ids: list[str],
     *,
     collected_at: datetime,
     region: str = REGION,
     failures: dict[str, str] | None = None,
+    asg_names: list[str] | None = None,
 ) -> AssetInventory:
     return AssetInventory(
         account_id=ACCOUNT,
@@ -79,6 +97,7 @@ def _inventory(
         lookback_days=14,
         period_seconds=3600,
         ec2_instances=[_ec2(iid, region) for iid in instance_ids],
+        auto_scaling_groups=[_asg(n, region) for n in (asg_names or [])],
         collector_failures=failures or {},
     )
 
@@ -152,8 +171,49 @@ def test_absent_since_keeps_the_first_time(db, t0):
 # ------------------------------------------------------------------ 경계
 
 
-def test_partial_run_marks_nothing(db, t0):
-    """PARTIAL 회차는 판단하지 않는다 — 못 본 것을 사라진 것으로 읽으면 멀쩡한 자산이 사라진다."""
+def test_localstack_shaped_failure_marks_ec2_but_not_asg(db, t0):
+    """관측에 성공한 유형은 판단하고, 실패한 조회가 채우는 유형은 건드리지 않는다.
+
+    LocalStack Community 는 autoscaling·elbv2 가 라이선스 밖이라 실수집 회차가 **매번**
+    이 형태(ASG·TG InternalFailure)로 끝난다. 회차 상태(PARTIAL)로 가르면 팀 표준
+    환경에서 소멸 표시가 한 번도 발동하지 않는다. (PR #339 리뷰: 김세혁)
+    """
+    persist_inventory(
+        _inventory(["i-aaa", "i-bbb"], collected_at=t0, asg_names=["asg-1"]),
+        db,
+        prune_absent=True,
+    )
+    db.commit()
+
+    res = persist_inventory(
+        _inventory(
+            ["i-aaa"],
+            collected_at=t0 + timedelta(minutes=30),
+            failures={
+                "auto_scaling_groups": "InternalFailure",
+                "alb_target_groups": "InternalFailure",
+            },
+        ),
+        db,
+        prune_absent=True,
+    )
+    db.commit()
+
+    assert res["absent_marked"] == 1
+    assert _asset(db, "i-bbb").absent_since is not None   # EC2 는 관측했으므로 판단한다
+    assert _asset(db, "i-aaa").absent_since is None
+    asg = db.execute(
+        select(models.Asset).where(models.Asset.asset_type == "AUTO_SCALING_GROUP")
+    ).scalar_one()
+    assert asg.absent_since is None, "못 본 유형을 사라진 것으로 읽으면 안 된다"
+
+
+def test_unknown_failure_label_marks_nothing(db, t0):
+    """모르는 실패 라벨이 섞이면 아무것도 판단하지 않는다(fail-closed).
+
+    흡수 조회를 새로 더하고 라벨→유형 지도를 안 고치면, 조용히 잘못 지우는 대신
+    조용히 안 지우는 쪽으로 넘어져야 한다.
+    """
     persist_inventory(_inventory(["i-aaa", "i-bbb"], collected_at=t0), db, prune_absent=True)
     db.commit()
 
@@ -161,7 +221,7 @@ def test_partial_run_marks_nothing(db, t0):
         _inventory(
             ["i-aaa"],
             collected_at=t0 + timedelta(minutes=30),
-            failures={"auto_scaling_groups": "InternalFailure"},
+            failures={"some_new_collector": "InternalFailure"},
         ),
         db,
         prune_absent=True,
