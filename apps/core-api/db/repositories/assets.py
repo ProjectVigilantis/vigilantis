@@ -87,7 +87,11 @@ def latest_collection_run_per_region(
         stmt = (
             select(models.CollectionRun)
             .distinct(models.CollectionRun.region)  # DISTINCT ON — 리전별 첫 행
-            .order_by(models.CollectionRun.region, models.CollectionRun.started_at.desc())
+            .order_by(
+                models.CollectionRun.region,
+                models.CollectionRun.started_at.desc(),
+                models.CollectionRun.collection_run_id.desc(),
+            )
         )
         return list(db.execute(stmt).scalars().all())
     if not regions:
@@ -100,10 +104,17 @@ def latest_run_per_region_stmt(regions: Sequence[str]):
     wanted = values(column("region", String), name="wanted").data(
         [(r,) for r in dict.fromkeys(regions)]  # 중복 제거, 순서 유지
     )
+    # 정렬 키 (started_at DESC, id DESC) 는 ix_collection_runs_region_started_at 의 순서
+    # 그대로다. id 를 빼면 started_at 단독 인덱스도 이 정렬을 줄 수 있어, 플래너가 그쪽을
+    # 최신순으로 훑다가 리전 필터로 수천 행을 버리는 경로를 고를 수 있다(PR #344 리뷰 —
+    # 이력이 없거나 31일 묵은 리전에서 8,640행 폐기).
     latest = (
         select(models.CollectionRun)
         .where(models.CollectionRun.region == wanted.c.region)
-        .order_by(models.CollectionRun.started_at.desc())
+        .order_by(
+            models.CollectionRun.started_at.desc(),
+            models.CollectionRun.collection_run_id.desc(),
+        )
         .limit(1)
         .lateral("latest")
     )

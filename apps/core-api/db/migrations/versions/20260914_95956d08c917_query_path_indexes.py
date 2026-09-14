@@ -6,6 +6,10 @@
 
 - latest_collection_run_per_region — DISTINCT ON (region) ORDER BY started_at DESC.
   ix_collection_runs_started_at 은 region 이 앞에 없어 정렬을 대신하지 못했다.
+  새 인덱스의 세 번째 키 collection_run_id 는 tie-break 이면서, 정렬 키를
+  (started_at, id) 로 두어 started_at 단독 인덱스가 그 정렬을 대신하지 못하게 한다 —
+  이력이 없거나 오래된 리전에서 플래너가 started_at 인덱스를 최신순으로 훑으며 리전
+  필터로 수천 행을 버리던 경로(PR #344 리뷰)를 막는다.
 - latest_rule_evaluation_by_asset — DISTINCT ON (asset_id) ORDER BY evaluated_at DESC.
   (asset_id, collection_run_id) 유니크 인덱스는 evaluated_at 순서를 모른다.
 
@@ -41,7 +45,7 @@ def upgrade() -> None:
     op.create_index(
         'ix_collection_runs_region_started_at',
         'collection_runs',
-        ['region', sa.text('started_at DESC')],
+        ['region', sa.text('started_at DESC'), sa.text('collection_run_id DESC')],
     )
     op.create_index(
         'ix_rule_evaluations_asset_evaluated_at',
