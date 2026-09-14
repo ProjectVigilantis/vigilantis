@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional, Sequence
+from typing import Collection, Optional, Sequence
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
@@ -116,15 +116,23 @@ def list_assets(
     *,
     asset_type: Optional[AssetType] = None,
     regions: Optional[Sequence[str]] = None,
+    include_absent: bool = False,
 ) -> list[models.Asset]:
     """자산 목록. ``regions`` 를 주면 그 리전들로 좁힌다 — collection_status·
     last_collected_at 과 같은 스코프를 유지하기 위함이다(#261, ix_assets_region 활용).
-    ``None`` 이면 전 리전."""
+    ``None`` 이면 전 리전.
+
+    **소멸 자산(``absent_since`` 가 찍힌 행)은 기본으로 제외한다**(#332). 실물이 없는
+    자산을 돌려주면 화면에 유령이 섞이는 데서 끝나지 않고, 판정이 낡은 메트릭으로 다시
+    돌아 조치 후보까지 올라간다(rule_engine 은 이 함수의 결과를 판정 대상으로 읽는다).
+    이력·감사 목적으로 소멸분까지 봐야 하면 ``include_absent=True`` 로 부른다."""
     stmt = select(models.Asset).order_by(models.Asset.arn)
     if asset_type is not None:
         stmt = stmt.where(models.Asset.asset_type == asset_type)
     if regions is not None:
         stmt = stmt.where(models.Asset.region.in_(regions))
+    if not include_absent:
+        stmt = stmt.where(models.Asset.absent_since.is_(None))
     return list(db.execute(stmt).scalars())
 
 
@@ -143,7 +151,10 @@ def upsert_asset(
     state: Optional[str] = None,
 ) -> models.Asset:
     """arn 기준 upsert. 수집 회차마다 최신 관측으로 덮어쓴다(이력은 MetricSummary·
-    RuleEvaluation이 회차 단위로 보존)."""
+    RuleEvaluation이 회차 단위로 보존).
+
+    이 함수가 불렸다는 것은 곧 **이번 회차에 관측됐다**는 뜻이므로 소멸 표시를 해제한다
+    (#332) — 자산이 지워졌다 같은 ARN 으로 되살아나는 경우도 이 경로로 돌아온다."""
     asset = get_asset_by_arn(db, arn)
     if asset is None:
         asset = models.Asset(
@@ -169,8 +180,49 @@ def upsert_asset(
         asset.collected_at = collected_at
         asset.name = name
         asset.state = state
+        asset.absent_since = None
     db.flush()
     return asset
+
+
+def mark_absent_assets(
+    db: Session,
+    *,
+    region: str,
+    observed_arns: Collection[str],
+    absent_at: datetime,
+) -> list[str]:
+    """이번 회차가 관측하지 못한 ``region`` 의 자산에 소멸 표시를 찍고 그 ARN 을 돌려준다.
+
+    **호출 조건은 부르는 쪽이 지킨다** — 이 함수는 회차 상태를 보지 않는다. 수집이
+    일부만 성공한 회차(PARTIAL)에서 부르면 못 본 것과 사라진 것을 구분하지 못해 멀쩡한
+    자산이 화면에서 사라진다. collector 는 **SUCCESS 로 마감되는 회차에서만** 부른다
+    (#221 이 세운 경계를 그대로 쓴다).
+
+    스코프가 리전인 이유는 수집 단위가 리전이기 때문이다 — 다른 리전의 자산은 이번
+    회차의 관측 범위 밖이라 판단 근거가 없다.
+
+    이미 표시된 자산은 건드리지 않는다. 처음 사라진 시각을 보존해야 "언제부터 없었나"
+    가 남고, 매 회차 값이 갱신되면 그 정보가 사라진다.
+
+    ``observed_arns`` 가 비어 있으면 그 리전의 자산이 전부 표시된다. 그것이 맞는
+    동작이다 — SUCCESS 로 마감된 회차가 아무것도 못 봤다면 AWS 쪽이 실제로 비어 있다.
+    """
+    stmt = select(models.Asset).where(
+        models.Asset.region == region,
+        models.Asset.absent_since.is_(None),
+    )
+    if observed_arns:
+        stmt = stmt.where(models.Asset.arn.notin_(list(observed_arns)))
+
+    # UPDATE 문 대신 ORM 객체에 값을 넣는다 — 같은 세션이 들고 있는 자산 객체가 바로
+    # 최신이 되어, 호출부가 expire_all 왕복 없이 이어서 읽어도 어긋나지 않는다
+    # (upsert_asset 과 같은 방식). 대상은 한 리전의 자산이라 건수가 작다.
+    vanished = list(db.execute(stmt).scalars())
+    for asset in vanished:
+        asset.absent_since = absent_at
+    db.flush()
+    return [asset.arn for asset in vanished]
 
 
 # --- AssetRelationship ---------------------------------------------------------

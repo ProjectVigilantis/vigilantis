@@ -506,9 +506,21 @@ def collect() -> list[AssetInventory]:
 
 
 # ------------------------------------------------------------------ DB 적재
-def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = None) -> dict:
+def persist_inventory(
+    inv: AssetInventory,
+    db,
+    collection_run_id: str | None = None,
+    *,
+    prune_absent: bool = False,
+) -> dict:
     """AssetInventory 를 DB(CollectionRun, Asset, MetricSummary, AssetRelationship)에 적재한다.
     Repository는 commit하지 않으므로 호출부에서 트랜잭션을 관리한다.
+
+    ``prune_absent`` 는 **이번 회차가 그 리전의 전량을 관측했다고 말할 수 있을 때만**
+    켠다(#332). 켜면 관측되지 않은 그 리전의 자산에 소멸 표시를 찍는다. 기본이 꺼짐인
+    이유는 이 함수가 실수집 말고도 불리기 때문이다 — `scripts/load_golden_assets.py` 는
+    **골든 파일 1건마다** 이 함수를 부르고 그 파일들이 전부 같은 리전이라, 켜져 있으면
+    두 번째 파일이 첫 번째 파일의 자산을 통째로 소멸 처리한다.
     """
     from datetime import timedelta
 
@@ -786,6 +798,37 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
             error_summary=error_summary,
         )
 
+    # 소멸 자산 표시 — 이번 회차가 **전량을 봤다고 말할 수 있을 때만** 한다(#332).
+    # PARTIAL 은 일부 서비스가 빈 목록으로 흡수된 회차라(C4/#221), 여기서 미관측을
+    # 소멸로 읽으면 멀쩡한 자산이 목록에서 사라진다. 못 본 것과 사라진 것의 경계는
+    # 이미 run 상태가 담고 있으므로 그 경계를 그대로 쓴다.
+    absent_marked: list[str] = []
+    if prune_absent and started_own_run and run_status is CollectionRunStatus.SUCCESS:
+        observed_arns = {
+            a.arn
+            for a in (
+                *inv.ec2_instances,
+                *inv.security_groups,
+                *inv.nacls,
+                *inv.ebs_volumes,
+                *inv.launch_templates,
+                *inv.auto_scaling_groups,
+                *inv.alb_target_groups,
+            )
+        }
+        absent_marked = assets_repo.mark_absent_assets(
+            db,
+            region=inv.region,
+            observed_arns=observed_arns,
+            absent_at=inv.collected_at,
+        )
+        if absent_marked:
+            _log.info(
+                "리전 %s: 이번 회차에 관측되지 않은 자산 %d건을 소멸로 표시",
+                inv.region,
+                len(absent_marked),
+            )
+
     return {
         "region": inv.region,
         "collection_run_id": collection_run_id,
@@ -799,6 +842,7 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
         "total": total,
         "degraded_collectors": list(inv.degraded_collectors),
         "collector_failures": dict(inv.collector_failures),
+        "absent_marked": len(absent_marked),
     }
 
 
@@ -836,7 +880,7 @@ def _collect_store_region(region: str, cfg: dict, session_factory) -> dict:
                 raise  # 비재시도성(AccessDenied·InternalFailure 등)은 즉시 실패로
             _log.warning("리전 %s 수집 일시 실패 — 1회 재시도(%s)", region, _failure_reason(exc))
             inv = collect_region(region, cfg, fresh_metrics, fresh_window_end)
-        summary = persist_inventory(inv, db)
+        summary = persist_inventory(inv, db, prune_absent=True)
         db.commit()
         return summary
     except Exception as exc:  # 리전 격리 — 이 리전만 실패로 마감하고 다른 리전은 계속

@@ -39,8 +39,7 @@ from schemas.assets import (  # noqa: E402
 from services.collector import persist_inventory  # noqa: E402
 from services.rule_engine import run_rule_engine  # noqa: E402
 
-# db/tests/conftest.py 의 픽스처 재사용
-from db.tests.conftest import db, pg_engine  # noqa: F401, E402
+# db·pg_engine 픽스처는 services/tests/conftest.py 가 등록한다
 
 
 @pytest.fixture

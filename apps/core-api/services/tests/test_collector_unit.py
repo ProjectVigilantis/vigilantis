@@ -159,7 +159,9 @@ def test_collect_store_region_retries_once_then_succeeds(monkeypatch):
         return "INV"
 
     monkeypatch.setattr(C, "collect_region", flaky)
-    monkeypatch.setattr(C, "persist_inventory", lambda inv, db: {"region": "r", "total": 1})
+    monkeypatch.setattr(
+        C, "persist_inventory", lambda inv, db, **kw: {"region": "r", "total": 1}
+    )
     res = C._collect_store_region("r", {"lookback_days": 14, "period_seconds": 3600}, lambda: _FakeSession())
     assert res["total"] == 1
     assert calls["n"] == 2  # 일시 오류 → 1회 재시도 후 성공
