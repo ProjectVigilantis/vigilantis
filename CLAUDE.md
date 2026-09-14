@@ -169,6 +169,21 @@ Refs #7
 - **리뷰 코멘트의 리뷰 상태 변경 필수(2026-09-03 팀 규칙)**: **리뷰어가** PR에 리뷰 코멘트를 달 때는 GitHub 리뷰 상태를 반드시 함께 바꾼다 — 수정이 필요하면 `Request changes`, 머지해도 되면 `Approve`. 상태 없는 `Comment`만 남기지 않는다. 코멘트가 머지를 막는지 저자와 머지 책임자가 알 수 없기 때문이다. CLI로는 `gh pr review <번호> --approve|--request-changes --body-file <파일>`이며, `gh pr comment`로 리뷰 본문을 올리지 않는다. **저자가 자기 PR에 남기는 코멘트(리뷰 반영 보고·질문·변경 고지)는 이 규칙의 대상이 아니다** — GitHub이 저자 본인의 `Approve`·`Request changes` 제출을 막으므로 지킬 방법이 없고, 그런 코멘트는 애초에 머지를 막는 축이 아니다. 저자는 기존대로 `gh pr comment`를 쓴다.
 - **머지 승인 코멘트의 CLOSE 추천(2026-08-26 신설)**: 최종 승인이라 판단해 머지 승인 코멘트를 남길 때, **끝에 `Refs`로 연결된 이슈의 CLOSE 추천 한 줄을 붙인다.** Claude가 PR 변경 범위와 이슈의 수용 기준을 대조해 `CLOSE 추천 — #N: <충족 근거>` 또는 `CLOSE 보류 — #N: <남은 항목>` 중 하나를 제시하며, 판단이 갈리면 보류로 적는다. **이 줄은 머지 책임자가 CLOSE 판단을 놓치지 않게 하는 권고이며, 실제 CLOSE 판단과 수행은 머지 책임자가 직접 한다**(§Git 작업 흐름). **별도 교차검증자는 세우지 않는다** — 리뷰에서 이미 이슈 범위와 승인 기준을 확인하므로 중복 절차다.
 
+### 푸시 전 로컬 통합 테스트 — Docker를 켜는 기준 (2026-09-14 확정)
+
+CI의 `test`·`web`은 머지 필수 체크이고, 로컬 실행은 그 앞의 사전 점검이다. 판단 기준은 하나다 — **이 PR이 추가·수정한 테스트가 Docker 없이 skip되는가.**
+
+1. 푸시 전에 Docker 없이 `pytest -rs`를 CI와 같은 경로로 한 번 돌린다. 경로의 원천은 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)의 `Run pytest` 단계다.
+2. **이 PR이 추가·수정한 테스트 파일에 `미기동`(PostgreSQL·LocalStack)이나 `시드 인스턴스 없음` 사유의 skip이 하나라도 있으면** Docker로 다시 돌린다 — `docker compose up -d db localstack` → `scripts/seed_localstack.py` → `pytest -rs`. 호스트에서 돌리므로 `AWS_ENDPOINT_URL=http://localhost:4566`을 셸에 준다(`.env`의 `localstack:4566`은 compose 네트워크 안의 이름이다).
+3. 재실행에서 **그 파일들의 skip이 0건**이어야 PR 본문 `pytest` 칸을 `[x]`로 체크한다. 못 돌렸으면 `[ ]`로 두고 이유를 적는다 — CI가 그 테스트의 첫 실행이 된다는 뜻이다.
+4. 그 밖의 변경은 로컬 Docker 없이 CI에 맡긴다. CI는 DB 접속을 먼저 확인하고(#92) LocalStack을 시드한 뒤 돌기 때문에 조용한 skip이 생기지 않는다(2026-09-14 dev: 1845 passed / 2 skipped — 2건은 T2 E2E의 무조건 skip).
+
+이 기준으로 막지 못하는 것:
+
+- **로컬에서만 실패하면** 먼저 LocalStack에 남은 상태를 의심하고 시드를 다시 돌린다. DB는 실행마다 일회용 DB를 만들고 지우므로 남는 상태가 없다.
+- **`elbv2`·`autoscaling`**(P2 런북 3종)은 LocalStack Community에 없어 로컬·CI 모두 검증하지 못한다 — 실 AWS 스모크 몫이다(ADR-0006).
+- **새 테스트 디렉터리를 만들면** `ci.yml`의 pytest 경로에 함께 추가한다. 빠지면 CI가 그 디렉터리를 돌지 않는다.
+
 ### 본문 작성 규칙 2가지 (반드시 지킬 것)
 
 1. **개요에 리뷰 요청 줄을 남긴다.**

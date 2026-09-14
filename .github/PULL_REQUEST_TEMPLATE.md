@@ -25,7 +25,7 @@
 
 ## 테스트
 
-- [ ] `pytest` 통과
+- [ ] `pytest` 통과 — 추가·수정한 테스트가 Docker 없이 skip되면 Docker로 다시 돌려 skip 0건 확인(CLAUDE.md §푸시 전 로컬 통합 테스트)
 - [ ] `docker-compose up`으로 로컬 기동 확인
 - [x] (`apps/web` 변경 시) `npm run lint` · `npm run build` · `npm test` 통과 — (해당 없음) <사유>
 - [x] (API 변경 시) FE↔BE 계약/Mock 영향 확인 — (해당 없음) <사유>
