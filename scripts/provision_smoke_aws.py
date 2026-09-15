@@ -28,6 +28,10 @@
 # up은 **없는 것을 만들 뿐 바뀐 것을 되돌리지 않는다.** 스모크 도중 다시 돌려도 격리
 # (EC2_ISOLATE가 뺀 Target Group 등록)나 차단 규칙을 조용히 되돌리지 않게 하기 위해서다.
 # 런북이 지운 자원(미사용 SG·미연결 EBS)은 없는 것이므로 다시 만든다 — 재실행 준비가 그것이다.
+# 예외는 **만든 직후의 설정이 끝나지 않은 자원**이다. SG 규칙·NACL 허용 규칙·TG 대상 등록은
+# 생성과 별개 호출이라 그 사이에 끊길 수 있다. 그래서 생성 때 초기화 표지(INIT_TAG_KEY=pending)를
+# 함께 달고 설정이 끝나야 done으로 바꾼다. 다음 up은 pending인 자원만 설정을 이어서 끝낸다 —
+# done이거나 표지가 없는 자원(앱이 런북으로 만든 것)은 여전히 손대지 않는다.
 #
 # 격리 설계(ADR-0009 §1): 인터넷 게이트웨이를 두지 않는다. ALB는 internal, 인스턴스는 공인
 # IP가 없다 — 22/tcp 0.0.0.0/0 위협 미끼 SG가 실제로 열리는 일이 없고 공인 IPv4 과금도 없다.
@@ -61,6 +65,11 @@ from services.rule_engine import MIN_DATAPOINTS  # noqa: E402
 SMOKE_TAG_KEY = "vigilantis:smoke"
 SMOKE_TAG_VALUE = "true"
 PREFIX = "vigilantis-smoke"
+# 초기화 표지 — 맨 위 "up은 되돌리지 않는다"의 예외를 가르는 기준. pending은 이 스크립트의
+# 생성 호출만 단다(생성과 한 호출이라 표지 없는 미완성 자원은 생기지 않는다).
+INIT_TAG_KEY = "vigilantis:smoke-init"
+INIT_PENDING = "pending"
+INIT_DONE = "done"
 
 VPC_NAME = f"{PREFIX}-vpc"
 VPC_CIDR = "10.42.0.0/16"  # 기본 VPC(172.31.0.0/16)와 겹치지 않게
@@ -166,7 +175,8 @@ def build_app_policy(account: str, region: str, vpc_id: str) -> dict:
 
     울타리는 셋이다. ① 리전(ARN에 박히거나 aws:RequestedRegion) ② 인스턴스·NACL·볼륨은
     스모크 태그 자원만 ③ SG·ENI는 스모크 VPC 안만 — 앱이 재생성한 SG에는 우리 태그가 없어
-    태그 대신 VPC로 가둔다. 조건 키가 실제로 채워지는지는 적용 직후 DryRun으로 잰다.
+    태그 대신 VPC로 가둔다. 새 SG 생성은 새 SG가 아니라 생성 장소(VPC ARN)로 가둔다.
+    조건 키가 실제로 채워지는지는 적용 직후 DryRun으로 잰다.
     """
     arn = f"arn:aws:ec2:{region}:{account}"
     vpc_arn = f"{arn}:vpc/{vpc_id}"
@@ -210,13 +220,12 @@ def build_app_policy(account: str, region: str, vpc_id: str) -> dict:
                 "Resource": f"arn:aws:ec2:{region}::snapshot/*",
             },
             {
-                # SG_DELETE_ISOLATED·SG_RECREATE·EC2_ISOLATE·EC2_UNISOLATE(ENI의 SG 교체)
+                # SG_DELETE_ISOLATED·SG_RECREATE(규칙 복원)·EC2_ISOLATE·EC2_UNISOLATE(ENI의 SG 교체)
                 "Sid": "SecurityGroupsAndEnisInSmokeVpc",
                 "Effect": "Allow",
                 "Action": [
                     "ec2:AuthorizeSecurityGroupEgress",
                     "ec2:AuthorizeSecurityGroupIngress",
-                    "ec2:CreateSecurityGroup",
                     "ec2:DeleteSecurityGroup",
                     "ec2:ModifyNetworkInterfaceAttribute",
                 ],
@@ -224,7 +233,16 @@ def build_app_policy(account: str, region: str, vpc_id: str) -> dict:
                 "Condition": {"ArnEquals": {"ec2:Vpc": vpc_arn}},
             },
             {
-                "Sid": "CreateSecurityGroupInSmokeVpc",  # CreateSecurityGroup은 VPC 자원도 요구한다
+                # SG_RECREATE의 생성. CreateSecurityGroup은 새 SG와 생성 장소 VPC를 **각각** 검사하는데,
+                # 새 SG 쪽 조건 키는 요청 태그·ec2:SecurityGroupID뿐이다(ec2:Vpc 없음 — 붙이면 이
+                # 문장은 영영 성립하지 않는다). 그래서 새 SG 쪽은 열어 두고 울타리는 아래 VPC 문장이 친다.
+                "Sid": "NewSecurityGroups",
+                "Effect": "Allow",
+                "Action": ["ec2:CreateSecurityGroup"],
+                "Resource": f"{arn}:security-group/*",
+            },
+            {
+                "Sid": "CreateSecurityGroupInSmokeVpc",  # 생성 장소 — 스모크 VPC 밖에는 만들지 못한다
                 "Effect": "Allow",
                 "Action": ["ec2:CreateSecurityGroup"],
                 "Resource": vpc_arn,
@@ -261,23 +279,40 @@ def _code(exc: ClientError) -> str:
     return exc.response.get("Error", {}).get("Code", "")
 
 
-def _tags(name: str, environment: Optional[str] = None) -> list[dict]:
+def _tags(name: str, environment: Optional[str] = None, *, pending: bool = False) -> list[dict]:
     tags = [{"Key": "Name", "Value": name}, {"Key": SMOKE_TAG_KEY, "Value": SMOKE_TAG_VALUE}]
     if environment:
         tags.append({"Key": "Environment", "Value": environment})
+    if pending:
+        tags.append({"Key": INIT_TAG_KEY, "Value": INIT_PENDING})
     return tags
 
 
-def _tag_spec(resource_type: str, name: str, environment: Optional[str] = None) -> list[dict]:
-    return [{"ResourceType": resource_type, "Tags": _tags(name, environment)}]
+def _tag_spec(
+    resource_type: str, name: str, environment: Optional[str] = None, *, pending: bool = False
+) -> list[dict]:
+    return [{"ResourceType": resource_type, "Tags": _tags(name, environment, pending=pending)}]
 
 
 def _vpc_filter(vpc_id: str) -> dict:
     return {"Name": "vpc-id", "Values": [vpc_id]}
 
 
+def _tag_of(resource: dict, key: str) -> Optional[str]:
+    return next((t["Value"] for t in resource.get("Tags") or [] if t["Key"] == key), None)
+
+
 def _name_of(resource: dict) -> Optional[str]:
-    return next((t["Value"] for t in resource.get("Tags") or [] if t["Key"] == "Name"), None)
+    return _tag_of(resource, "Name")
+
+
+def _init_pending(resource: dict) -> bool:
+    """이 스크립트가 만들고 설정을 끝내지 못한 자원인가(맨 위 "up은 되돌리지 않는다"의 예외)."""
+    return _tag_of(resource, INIT_TAG_KEY) == INIT_PENDING
+
+
+def _mark_init_done(ec2, resource_id: str) -> None:
+    ec2.create_tags(Resources=[resource_id], Tags=[{"Key": INIT_TAG_KEY, "Value": INIT_DONE}])
 
 
 def _retry(fn: Callable[[], Any], what: str, codes: tuple[str, ...], timeout: int = 600) -> Any:
@@ -308,9 +343,10 @@ def _find_subnets(ec2, vpc_id: str) -> dict[str, str]:
     return {az: by_name[f"{PREFIX}-{az}"] for az in SUBNETS if f"{PREFIX}-{az}" in by_name}
 
 
-def _find_security_groups(ec2, vpc_id: str) -> dict[str, str]:
+def _find_security_groups(ec2, vpc_id: str) -> dict[str, dict]:
+    """GroupName → 응답(GroupId·Tags·규칙)."""
     found = ec2.describe_security_groups(Filters=[_vpc_filter(vpc_id)])["SecurityGroups"]
-    return {g["GroupName"]: g["GroupId"] for g in found}
+    return {g["GroupName"]: g for g in found}
 
 
 def _find_instances(ec2, vpc_id: str) -> dict[str, dict]:
@@ -326,11 +362,11 @@ def _find_instances(ec2, vpc_id: str) -> dict[str, dict]:
     }
 
 
-def _find_nacl(ec2, vpc_id: str) -> Optional[str]:
+def _find_nacl(ec2, vpc_id: str) -> Optional[dict]:
     found = ec2.describe_network_acls(
         Filters=[_vpc_filter(vpc_id), {"Name": "tag:Name", "Values": [NACL_NAME]}]
     )["NetworkAcls"]
-    return found[0]["NetworkAclId"] if found else None
+    return found[0] if found else None
 
 
 def _find_volume(ec2) -> Optional[str]:
@@ -409,8 +445,9 @@ def inventory(clients: dict, account: str) -> list[tuple[str, str, Optional[str]
     sgs = _find_security_groups(ec2, vpc_id) if vpc_id else {}
     instances = _find_instances(ec2, vpc_id) if vpc_id else {}
     rows += [("Subnet", f"{PREFIX}-{az}", subnets.get(az)) for az in SUBNETS]
-    rows += [("SecurityGroup", name, sgs.get(name)) for name in SECURITY_GROUPS]
-    rows.append(("NetworkAcl", NACL_NAME, _find_nacl(ec2, vpc_id) if vpc_id else None))
+    rows += [("SecurityGroup", name, sgs[name]["GroupId"] if name in sgs else None) for name in SECURITY_GROUPS]
+    acl = _find_nacl(ec2, vpc_id) if vpc_id else None
+    rows.append(("NetworkAcl", NACL_NAME, acl["NetworkAclId"] if acl else None))
     rows += [
         ("Instance", spec.name, instances[spec.name]["InstanceId"] if spec.name in instances else None)
         for spec in INSTANCES
@@ -495,19 +532,46 @@ def _ensure_subnets(ec2, vpc_id: str, region: str) -> dict[str, str]:
     return subnets
 
 
+# AWS가 새 VPC SG에 넣는 기본 egress(전체 허용). 격리 SG는 이것까지 걷는다.
+_DEFAULT_EGRESS = {"IpProtocol": "-1", "IpRanges": [{"CidrIp": "0.0.0.0/0"}]}
+
+
+def _revoke_all_rules(ec2, group: dict) -> None:
+    if group["IpPermissions"]:
+        ec2.revoke_security_group_ingress(GroupId=group["GroupId"], IpPermissions=group["IpPermissions"])
+    if group["IpPermissionsEgress"]:
+        ec2.revoke_security_group_egress(GroupId=group["GroupId"], IpPermissions=group["IpPermissionsEgress"])
+
+
+def _authorize_ingress(ec2, group_id: str, permissions: list[dict]) -> None:
+    try:
+        ec2.authorize_security_group_ingress(GroupId=group_id, IpPermissions=permissions)
+    except ClientError as exc:
+        # 지난 up이 규칙은 넣고 표지를 바꾸기 전에 끊겼다 — 규칙이 이미 있으면 된 것이다
+        if _code(exc) != "InvalidPermission.Duplicate":
+            raise
+
+
 def _ensure_security_groups(ec2, vpc_id: str) -> dict[str, str]:
-    ids = _find_security_groups(ec2, vpc_id)
-    created = []
+    groups = _find_security_groups(ec2, vpc_id)
     for name in SECURITY_GROUPS:
-        if name in ids:
+        if name in groups:
             continue
-        ids[name] = ec2.create_security_group(
+        group_id = ec2.create_security_group(
             GroupName=name,
             Description=f"vigilantis smoke: {name}",
             VpcId=vpc_id,
-            TagSpecifications=_tag_spec("security-group", name),
+            TagSpecifications=_tag_spec("security-group", name, pending=True),
         )["GroupId"]
-        created.append(name)
+        # 갓 만든 그룹의 상태는 AWS 기본값(기본 egress 1개)이다 — 다시 조회하지 않는다
+        groups[name] = {
+            "GroupId": group_id,
+            "Tags": _tags(name, pending=True),
+            "IpPermissions": [],
+            "IpPermissionsEgress": [_DEFAULT_EGRESS],
+        }
+        print(f"[smoke] SG {name} {group_id} 생성")
+    ids = {name: g["GroupId"] for name, g in groups.items()}
 
     ingress = {
         SG_ALB: [{"IpProtocol": "tcp", "FromPort": 80, "ToPort": 80, "IpRanges": [{"CidrIp": VPC_CIDR}]}],
@@ -517,17 +581,20 @@ def _ensure_security_groups(ec2, vpc_id: str) -> dict[str, str]:
             "IpRanges": [{"CidrIp": "0.0.0.0/0", "Description": "vigilantis smoke: OpenIP bait, no public IP"}],
         }],
     }
-    # 규칙은 새로 만든 그룹에만 넣는다 — 있는 그룹은 손대지 않는다(맨 위 "up은 되돌리지 않는다")
-    for name in created:
+    # 규칙은 초기화가 끝나지 않은(pending) 그룹에만 넣는다. done인 그룹은 스모크가 바꿨어도 손대지
+    # 않는다(맨 위 "up은 되돌리지 않는다"). 설정이 실패하면 표지가 pending으로 남은 채 up이 여기서
+    # 멈추고 — 미완성 SG의 ID는 출력되지 않는다 — 다음 up이 같은 설정을 이어서 끝낸다.
+    for name in SECURITY_GROUPS:
+        group = groups[name]
+        if not _init_pending(group):
+            continue
         if name in ingress:
-            ec2.authorize_security_group_ingress(GroupId=ids[name], IpPermissions=ingress[name])
+            _authorize_ingress(ec2, group["GroupId"], ingress[name])
         if name == SG_ISOLATION:
             # 기본 egress(전체 허용)까지 걷어 규칙 0개로 만든다 — 격리는 나가는 길도 막는다
-            ec2.revoke_security_group_egress(
-                GroupId=ids[name],
-                IpPermissions=[{"IpProtocol": "-1", "IpRanges": [{"CidrIp": "0.0.0.0/0"}]}],
-            )
-        print(f"[smoke] SG {name} {ids[name]} 생성")
+            _revoke_all_rules(ec2, group)
+        _mark_init_done(ec2, group["GroupId"])
+        print(f"[smoke] SG {name} {group['GroupId']} 규칙 설정")
     return ids
 
 
@@ -542,23 +609,44 @@ def _associate_nacl(ec2, vpc_id: str, acl_id: str, subnet_id: str) -> None:
             print(f"[smoke] NACL {acl_id} → 서브넷 {subnet_id} 연결")
 
 
+def _is_allow_all(entry: dict) -> bool:
+    return entry["RuleAction"] == "allow" and entry["Protocol"] == "-1" and entry.get("CidrBlock") == "0.0.0.0/0"
+
+
 def _ensure_nacl(ec2, vpc_id: str, subnet_id: str) -> str:
-    acl_id = _find_nacl(ec2, vpc_id)
-    if acl_id is None:
-        acl_id = ec2.create_network_acl(
-            VpcId=vpc_id, TagSpecifications=_tag_spec("network-acl", NACL_NAME)
-        )["NetworkAcl"]["NetworkAclId"]
-        # 연결보다 허용이 먼저다 — 반대 순서면 그 사이 서브넷 통신이 끊긴다
+    acl = _find_nacl(ec2, vpc_id)
+    fresh = acl is None
+    if fresh:
+        acl = ec2.create_network_acl(
+            VpcId=vpc_id, TagSpecifications=_tag_spec("network-acl", NACL_NAME, pending=True)
+        )["NetworkAcl"]
+        print(f"[smoke] NACL {acl['NetworkAclId']} 생성")
+    acl_id = acl["NetworkAclId"]
+    if fresh or _init_pending(acl):
+        # 연결보다 허용이 먼저다 — 반대 순서면 그 사이 서브넷 통신이 끊긴다. 끊긴 초기화를 이을 때는
+        # 빠진 방향만 채운다. 허용이 양방향 다 서기(done) 전에는 서브넷에 붙이지 않는다.
         for egress in (False, True):
-            ec2.create_network_acl_entry(
-                NetworkAclId=acl_id,
-                RuleNumber=NACL_ALLOW_ALL_RULE,
-                Protocol="-1",
-                RuleAction="allow",
-                Egress=egress,
-                CidrBlock="0.0.0.0/0",
+            entry = next(
+                (e for e in acl.get("Entries", [])
+                 if e["RuleNumber"] == NACL_ALLOW_ALL_RULE and e["Egress"] == egress),
+                None,
             )
-        print(f"[smoke] NACL {acl_id} 생성 — 허용 규칙 {NACL_ALLOW_ALL_RULE}(인·아웃바운드)")
+            if entry is None:
+                ec2.create_network_acl_entry(
+                    NetworkAclId=acl_id,
+                    RuleNumber=NACL_ALLOW_ALL_RULE,
+                    Protocol="-1",
+                    RuleAction="allow",
+                    Egress=egress,
+                    CidrBlock="0.0.0.0/0",
+                )
+            elif not _is_allow_all(entry):
+                sys.exit(
+                    f"[smoke] NACL {acl_id}의 규칙 {NACL_ALLOW_ALL_RULE}({'아웃' if egress else '인'}바운드)이 "
+                    "전체 허용이 아니다 — 서브넷에 붙이지 않고 멈춘다. 콘솔에서 확인할 것."
+                )
+        _mark_init_done(ec2, acl_id)
+        print(f"[smoke] NACL {acl_id} 허용 규칙 {NACL_ALLOW_ALL_RULE}(인·아웃바운드) 설정")
     # 연결은 매번 확인한다 — 풀린 채 남으면 화면의 PROTECTED_BY 엣지와 조치 대상이 갈린다
     _associate_nacl(ec2, vpc_id, acl_id, subnet_id)
     return acl_id
@@ -600,17 +688,28 @@ def _ensure_instances(ec2, ssm, vpc_id: str, subnets: dict[str, str], sgs: dict[
 
 def _ensure_load_balancer(elbv2, vpc_id: str, subnets: dict[str, str], sgs: dict[str, str], instances: dict[str, str]) -> str:
     tg = _find_target_group(elbv2)
-    if tg is None:
+    fresh = tg is None
+    if fresh:
         tg = elbv2.create_target_group(
             Name=TG_NAME, Protocol="HTTP", Port=80, VpcId=vpc_id,
-            TargetType="instance", HealthCheckPath="/", Tags=_tags(TG_NAME),
+            TargetType="instance", HealthCheckPath="/", Tags=_tags(TG_NAME, pending=True),
         )["TargetGroups"][0]
-        # 등록은 TG를 만들 때 한 번만 한다 — 다시 돌린 up이 격리(등록 해제)를 되돌리면 안 된다
-        elbv2.register_targets(
-            TargetGroupArn=tg["TargetGroupArn"],
-            Targets=[{"Id": instances[s.name]} for s in INSTANCES if s.in_target_group],
-        )
-        print(f"[smoke] TG {TG_NAME} 생성 · 대상 등록")
+        print(f"[smoke] TG {TG_NAME} 생성")
+    tg_arn = tg["TargetGroupArn"]
+    if fresh or _init_pending({"Tags": elbv2.describe_tags(ResourceArns=[tg_arn])["TagDescriptions"][0]["Tags"]}):
+        # 등록은 초기화 때 한 번만 한다 — 다시 돌린 up이 격리(등록 해제)를 되돌리면 안 된다.
+        # 끊긴 초기화를 이을 때는 아직 등록되지 않은 대상만 넣는다.
+        health = elbv2.describe_target_health(TargetGroupArn=tg_arn)["TargetHealthDescriptions"]
+        registered = {d["Target"]["Id"] for d in health}
+        targets = [
+            {"Id": instances[s.name]}
+            for s in INSTANCES
+            if s.in_target_group and instances[s.name] not in registered
+        ]
+        if targets:
+            elbv2.register_targets(TargetGroupArn=tg_arn, Targets=targets)
+        elbv2.add_tags(ResourceArns=[tg_arn], Tags=[{"Key": INIT_TAG_KEY, "Value": INIT_DONE}])
+        print(f"[smoke] TG {TG_NAME} 대상 등록")
     lb = _find_load_balancer(elbv2)
     if lb is None:
         lb = elbv2.create_load_balancer(
@@ -621,9 +720,9 @@ def _ensure_load_balancer(elbv2, vpc_id: str, subnets: dict[str, str], sgs: dict
     if not elbv2.describe_listeners(LoadBalancerArn=lb["LoadBalancerArn"])["Listeners"]:
         elbv2.create_listener(
             LoadBalancerArn=lb["LoadBalancerArn"], Protocol="HTTP", Port=80,
-            DefaultActions=[{"Type": "forward", "TargetGroupArn": tg["TargetGroupArn"]}],
+            DefaultActions=[{"Type": "forward", "TargetGroupArn": tg_arn}],
         )
-    return tg["TargetGroupArn"]
+    return tg_arn
 
 
 def _ensure_volume(ec2, region: str) -> str:
@@ -739,10 +838,7 @@ def _delete_security_groups(ec2, vpc_id: str) -> None:
     ]
     # 서로를 참조하는 규칙(web ← alb)이 있으면 어느 쪽도 먼저 지워지지 않는다 — 규칙부터 걷는다
     for g in groups:
-        if g["IpPermissions"]:
-            ec2.revoke_security_group_ingress(GroupId=g["GroupId"], IpPermissions=g["IpPermissions"])
-        if g["IpPermissionsEgress"]:
-            ec2.revoke_security_group_egress(GroupId=g["GroupId"], IpPermissions=g["IpPermissionsEgress"])
+        _revoke_all_rules(ec2, g)
     for g in groups:
         _retry(lambda gid=g["GroupId"]: ec2.delete_security_group(GroupId=gid),
                f"SG {g['GroupName']}", ("DependencyViolation",))

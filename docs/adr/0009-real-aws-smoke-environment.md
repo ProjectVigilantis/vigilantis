@@ -35,7 +35,7 @@
 | 앱 키(`vigilantis-smoke-app`) | PM | 로컬 `.env` 한 곳 — core-api가 쓴다 | 아래 정책 |
 
 - **관리자 키는 `.env`에 넣지 않는다.** 가드레일은 앱 안의 방어선이고, 앱이 관리자 권한으로 돌면 가드레일이 뚫렸을 때 AWS 쪽에서 막을 것이 없다. **앱 정책은 Action Whitelist의 AWS 쪽 거울**이다 — 코드가 부르지 않는 조치는 가드레일을 우회해도 AWS가 거절한다.
-- **정책 울타리는 셋이다.** ① 리전 — 조치 문장은 리전이 박힌 ARN, 조회 문장은 `aws:RequestedRegion` ② 인스턴스·NACL·볼륨 조치는 **`vigilantis:smoke=true` 태그 자원만** ③ SG·ENI 조치는 **스모크 VPC 안만**(`ec2:Vpc`) — `SG_RECREATE`가 만드는 SG에는 우리 태그가 없어 태그가 아니라 VPC로 가둔다.
+- **정책 울타리는 셋이다.** ① 리전 — 조치 문장은 리전이 박힌 ARN, 조회 문장은 `aws:RequestedRegion` ② 인스턴스·NACL·볼륨 조치는 **`vigilantis:smoke=true` 태그 자원만** ③ SG·ENI 조치는 **스모크 VPC 안만**(`ec2:Vpc`) — `SG_RECREATE`가 만드는 SG에는 우리 태그가 없어 태그가 아니라 VPC로 가둔다. 단 **새 SG 생성**은 가두는 자리가 다르다. `CreateSecurityGroup`은 새 SG와 생성 장소 VPC를 각각 검사하는데 새 SG 쪽 조건 키에는 `ec2:Vpc`가 없으므로(AWS 서비스 권한 참조), 새 SG 쪽은 조건 없이 허용하고 **생성 장소인 스모크 VPC ARN 문장**이 울타리가 된다.
 - **정책은 코드가 부르는 작업에서 도출하고, 테스트가 두 방향을 지킨다**(`tests/test_provision_smoke_aws.py`). 실행 경로를 더한 PR이 정책을 빠뜨리면 깨지고, 코드가 부르지 않는 조치 권한이 끼어도 깨진다. DryRun도 같은 권한을 요구하므로 precheck만 있는 런북의 작업도 들어간다. P2 실행 작업(`elbv2.deregister_targets`·`register_targets`·`autoscaling.create_auto_scaling_group`)은 아직 코드에 없어 정책에도 없다 — **그 실행 경로를 붙이는 PR이 정책을 함께 고친다.**
 - **조건 키가 실제로 채워지는지는 적용 직후 잰다.** 앱 키로 DryRun을 1회씩 불러 `UnauthorizedOperation`이 나면 정책을 고친다. ADR-0006 §4 1행(DryRun이 IAM을 검증하지 않음)을 해소하는 첫걸음이 이것이다.
 - **앱 키는 1개이고 PM만 쥔다.** 팀원에게 배포하지 않는다 — 팀원의 개발·테스트 표준은 그대로 LocalStack이다. Slack·이슈·PR에 붙이지 않는다.
@@ -77,6 +77,7 @@
 - **NACL 허용 규칙을 32766에 두는 이유**: AI는 `rule_number`를 1–32766에서 고른다(`ai/agent.py`, `RuleNumber`). 허용을 그 맨 끝에 둬야 AI가 넣는 어떤 차단 규칙도 허용보다 먼저 평가된다. 같은 번호를 고르면 precheck ②가 점유로 거절하므로 조용히 무력화되는 차단은 없다. 허용 규칙은 NACL을 서브넷에 붙이기 **전에** 넣는다.
 - **ASG는 세우지 않는다** — `ENABLE_AUTOSCALING`이 만드는 것이다. 다만 계정의 첫 ASG에는 서비스 연결 역할이 필요하고 앱 키에는 `iam:CreateServiceLinkedRole`을 주지 않으므로, 역할은 스크립트가 관리자 권한으로 미리 만든다(무료, `down` 뒤에도 둔다).
 - **`up`은 없는 것을 만들 뿐 바뀐 것을 되돌리지 않는다.** 스모크 도중 다시 돌려도 격리(Target Group 등록 해제)나 차단 규칙을 조용히 되돌리지 않게 하기 위해서다. 런북이 지운 자원(미사용 SG·미연결 EBS)은 다시 만든다 — 재실행 준비가 그것이다. `RIGHTSIZING`이 바꾼 타입은 `up`이 되돌리지 않으며 `REVERT_SIZE`(관제자 수동 요청)로 되돌린다.
+- **예외는 만든 직후의 설정이 끝나지 않은 자원이다.** SG 규칙·NACL 허용 규칙·Target Group 대상 등록은 생성과 별개 호출이라 도중에 끊길 수 있다. 그래서 생성 때 초기화 표지 태그(`vigilantis:smoke-init=pending`)를 함께 달고 설정이 끝나야 `done`으로 바꾼다. 다음 `up`은 `pending`인 자원만 설정을 이어서 끝내며, 허용 규칙이 다 서기 전의 NACL은 서브넷에 붙이지 않는다. 설정이 끝난 자원과 표지 없는 자원(앱이 만든 것)은 위 원칙대로 손대지 않는다.
 
 ### 5. 구성 도구 — Terraform이 아니라 Boto3 스크립트
 
@@ -107,7 +108,7 @@
 **비용/유의**
 
 - **실 AWS 접근이 PM 1명에게 몰린다.** PM 부재 시 스모크가 멈춘다. 키 유출면을 최소로 두는 대가로 감수한다.
-- **정책의 조건 키(`ec2:Vpc`·태그 조건)는 아직 실측 전이다.** 시험 적용의 DryRun이 첫 실측이다.
+- **정책의 조건 키(`ec2:Vpc`·태그 조건)는 아직 실측 전이다.** 작업·자원별로 그 조건 키를 지원하는지는 AWS 서비스 권한 참조와 대조했다. 남은 것은 런타임에 실제로 채워지는지이며, 시험 적용의 DryRun이 첫 실측이다.
 - **격리 SG가 평소에는 `UNUSED`로 판정된다.** `evaluate_sg`는 미부착 SG를 미사용 후보로 보므로(`services/rule_engine.py`), 격리 때까지 붙지 않는 isolation SG가 `SG_DELETE_ISOLATED` 후보로 올라올 수 있다. 지워지면 `EC2_ISOLATE`는 precheck에서 `PRECHECK_TARGET_NOT_FOUND`로 멈추므로 잘못된 격리는 없지만 시연 경로가 막힌다. 스모크에서 실제로 후보가 올라오는지 보고, 올라오면 판정 규칙 쪽 처분을 규칙 소유자(김승철)와 연다.
 - **수집은 계정의 서울 리전 전체를 본다** — 기본 VPC의 자원도 함께 들어온다. 기본 SG는 `SKIP_WHITELISTED`로 빠진다.
 - **48시간 리드 타임은 `MIN_DATAPOINTS`에 묶여 있다.** 그 값이 바뀌면 §6의 기동일도 바뀐다.
