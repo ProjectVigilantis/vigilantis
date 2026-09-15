@@ -171,12 +171,12 @@ Refs #7
 
 ### 푸시 전 로컬 통합 테스트 — Docker를 켜는 기준 (2026-09-14 확정)
 
-CI의 `test`·`web`은 머지 필수 체크이고, 로컬 실행은 그 앞의 사전 점검이다. 판단 기준은 하나다 — **이 PR이 추가·수정한 테스트가 Docker 없이 skip되는가.**
+CI의 `test`·`web`은 머지 필수 체크이고, 로컬 실행은 그 앞의 사전 점검이다. 판단 기준은 하나다 — **이 PR이 추가·수정한 테스트가 Docker 없이 skip되는가.** 조건 없는 `@pytest.mark.skip`(선행이 닫힐 때까지 일부러 보류한 테스트 — 이하 "무조건 보류")은 Docker와 무관하므로 이 기준의 skip으로 세지 않는다.
 
 1. 푸시 전에 Docker 없이 `pytest -rs`를 CI와 같은 경로로 한 번 돌린다. 경로의 원천은 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)의 `Run pytest` 단계다.
-2. **이 PR이 추가·수정한 테스트 파일에 `미기동`(PostgreSQL·LocalStack)이나 `시드 인스턴스 없음` 사유의 skip이 하나라도 있으면** Docker로 다시 돌린다 — `docker compose up -d db localstack` → `scripts/seed_localstack.py` → `pytest -rs`. 호스트에서 돌리므로 `AWS_ENDPOINT_URL=http://localhost:4566`을 셸에 준다(`.env`의 `localstack:4566`은 compose 네트워크 안의 이름이다).
-3. 재실행에서 **그 파일들의 skip이 0건**이어야 PR 본문 `pytest` 칸을 `[x]`로 체크한다. 못 돌렸으면 `[ ]`로 두고 이유를 적는다 — CI가 그 테스트의 첫 실행이 된다는 뜻이다.
-4. 그 밖의 변경은 로컬 Docker 없이 CI에 맡긴다. CI는 DB 접속을 먼저 확인하고(#92) LocalStack을 시드한 뒤 돌기 때문에 조용한 skip이 생기지 않는다(2026-09-14 dev: 1845 passed / 2 skipped — 2건은 T2 E2E의 무조건 skip).
+2. **이 PR이 추가·수정한 테스트 파일에 무조건 보류가 아닌 skip이 하나라도 있으면** Docker로 다시 돌린다. 사유 문구(`미기동`·`미설정`·`시드 인스턴스 없음`·`running EC2 없음` 등)는 파일마다 달라 문구로 가르지 않는다. 순서는 `docker compose up --wait db localstack` → `scripts/seed_localstack.py` → `pytest -rs`다 — `--wait`는 healthcheck 통과까지 기다려 시드가 준비 전의 LocalStack에 붙지 않게 한다. 호스트에서 돌리므로 `AWS_ENDPOINT_URL=http://localhost:4566`을 셸에 준다. AWS 설정(`apps/core-api/config.py`의 `AwsSettings`)은 `.env`를 읽지 않으므로 이 값이 없으면 LocalStack 테스트가 `미설정`(실 AWS 모드) 사유로 계속 skip된다(`.env`의 `localstack:4566`은 compose 네트워크 안의 이름이다).
+3. 재실행에서 **그 파일들의 skip이 무조건 보류 말고는 0건**이어야 PR 본문 `pytest` 칸을 `[x]`로 체크한다. 못 돌렸으면 `[ ]`로 두고 이유를 적는다 — CI가 그 테스트의 첫 실행이 된다는 뜻이다.
+4. 그 밖의 변경은 로컬 Docker 없이 CI에 맡긴다. CI는 DB 접속을 먼저 확인하고(#92) LocalStack을 시드한 뒤 돌기 때문에 **DB·LocalStack 미기동이나 시드 누락으로 인한** 조용한 skip이 생기지 않는다(2026-09-14 dev: 1845 passed / 2 skipped — 2건은 `tests/test_e2e_scenario.py`의 T1·T2 전 구간 흐름 무조건 보류 각 1건).
 
 이 기준으로 막지 못하는 것:
 
