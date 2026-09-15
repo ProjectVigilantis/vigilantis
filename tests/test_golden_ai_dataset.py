@@ -101,9 +101,13 @@ def _stub_client(case) -> FakeAIModelClient:
 
 
 def _parameters_for(runbook_id: str) -> dict:
-    """스텁이 채울 AI 몫 파라미터. 조회값은 넣지 않는다(계약 원칙 ①)."""
+    """스텁이 채울 AI 몫 파라미터. 조회값은 넣지 않는다(계약 원칙 ①).
+
+    다운사이징 목표 타입은 AI 몫이 아니다 — 그래프가 규칙으로 계산한다(#251). 모델 출력
+    스키마에 자리가 없어 스텁도 싣지 않는다.
+    """
     if runbook_id == "RUNBOOK_EC2_RIGHTSIZING":
-        return {"target_instance_type": "t3.small"}
+        return {}
     if runbook_id == "RUNBOOK_EC2_ENABLE_AUTOSCALING":
         return {"min_size": 1, "max_size": 2}
     raise AssertionError(

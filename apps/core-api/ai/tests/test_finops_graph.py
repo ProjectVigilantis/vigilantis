@@ -115,7 +115,6 @@ def rightsizing_proposal(**over) -> ProposedCandidate:
         "runbook_id": "RUNBOOK_EC2_RIGHTSIZING",
         "target_arn": EC2_ARN,
         "evidence_ids": ["ev-0001"],
-        "target_instance_type": "t3.medium",
     }
     base.update(over)
     return ProposedCandidate.model_validate(base)
@@ -209,7 +208,6 @@ def test_failed_when_runbook_is_outside_offered_capabilities():
         rule_number=100,
         cidr_block="203.0.113.0/24",
         protocol="-1",
-        target_instance_type=None,
     )
     output, _ = run(SUMMARY, proposals(proposal))
 
@@ -246,9 +244,44 @@ def test_relationship_arn_is_an_allowed_target():
 
 
 def test_failed_when_required_parameter_is_missing():
-    # 다운사이징 목표 타입은 AI가 정해야 하는 값이다 — 서버가 대신 채우지 않는다
-    proposal = rightsizing_proposal(target_instance_type=None)
-    output, _ = run(SUMMARY, proposals(proposal))
+    # AI가 정해야 하는 값이 빠지면 서버가 대신 채우지 않는다
+    autoscaling = {
+        "runbook_id": "RUNBOOK_EC2_ENABLE_AUTOSCALING",
+        "purpose": "고정 대수 EC2를 Auto Scaling 그룹으로 전환",
+        "allowed_target_asset_types": ["EC2"],
+    }
+    proposal = rightsizing_proposal(runbook_id="RUNBOOK_EC2_ENABLE_AUTOSCALING", min_size=1)
+    output, _ = run(
+        SUMMARY, proposals(proposal), graph_input=make_input(capabilities=[autoscaling])
+    )
+
+    assert output.invocation_status == AgentInvocationStatus.FAILED
+
+
+def test_model_has_no_slot_for_the_rightsizing_target():
+    # 목표 타입은 서버 규칙이 정한다(#251) — 모델 출력에 자리가 없어 실어 보내면 거절된다
+    with pytest.raises(ValidationError):
+        rightsizing_proposal(target_instance_type="t3.nano")
+
+
+@pytest.mark.parametrize(
+    "current,expected",
+    [("t3.xlarge", "t3.medium"), ("t3.large", "t3.small"), ("t3a.medium", "t3a.small")],
+)
+def test_rightsizing_target_is_computed_from_the_asset_snapshot(current, expected):
+    graph_input = make_input(asset_context={**ASSET_CONTEXT, "spec": {"instance_type": current}})
+    output, _ = run(SUMMARY, proposals(rightsizing_proposal()), graph_input=graph_input)
+
+    assert output.invocation_status == AgentInvocationStatus.SUCCEEDED
+    assert output.candidates[0].parameters.target_instance_type == expected
+
+
+@pytest.mark.parametrize("current", ["t3.small", "m5.large", "c5.large", None])
+def test_failed_when_the_server_cannot_compute_the_target(current):
+    # 메뉴 빌더가 이런 자산에는 다운사이징을 올리지 않는다(ai/capabilities.py 축 ③).
+    # 메뉴를 거치지 않은 입력이 와도 규칙이 내지 않은 값을 지어 채우지 않는다
+    graph_input = make_input(asset_context={**ASSET_CONTEXT, "spec": {"instance_type": current}})
+    output, _ = run(SUMMARY, proposals(rightsizing_proposal()), graph_input=graph_input)
 
     assert output.invocation_status == AgentInvocationStatus.FAILED
 
@@ -274,6 +307,37 @@ def test_failed_when_evidence_ids_are_empty():
     output, _ = run(SUMMARY, proposals(proposal))
 
     assert output.invocation_status == AgentInvocationStatus.FAILED
+
+
+def test_evidence_ids_follow_the_input_order_not_the_model_order():
+    # 첫 항목이 실행 파라미터 evidence_id가 된다 — 순서는 모델이 아니라 입력이 정한다
+    # (#251 v2 재계측에서 같은 두 근거의 순서만 뒤집힌 회차가 나왔다)
+    from schemas.assets import MetricName
+
+    metric = {
+        "evidence_id": "ev-0002",
+        "evidence_type": "METRIC",
+        "content": {
+            "metric_name": MetricName.CPU_UTILIZATION.value,
+            "window_start": "2026-08-28T09:00:00Z",
+            "window_end": "2026-08-31T09:00:00Z",
+            "summary": {"cpu_datapoints": 72, "cpu_avg": 3.0, "cpu_max": 9.0},
+        },
+    }
+    graph_input = make_input(evidences=[EVIDENCE, metric])
+    proposal = rightsizing_proposal(evidence_ids=["ev-0002", "ev-0001"])
+    output, _ = run(SUMMARY, proposals(proposal), graph_input=graph_input)
+
+    assert output.invocation_status == AgentInvocationStatus.SUCCEEDED
+    assert output.candidates[0].evidence_ids == ["ev-0001", "ev-0002"]
+
+
+def test_evidence_ids_outside_the_input_are_kept_for_the_workflow_to_reject():
+    # 그래프는 거르지 않는다 — 입력 밖 인용의 거절은 Workflow ⓐ가 한다(agent_dispatcher.py)
+    proposal = rightsizing_proposal(evidence_ids=["ev-unknown", "ev-0001"])
+    output, _ = run(SUMMARY, proposals(proposal))
+
+    assert output.candidates[0].evidence_ids == ["ev-0001", "ev-unknown"]
 
 
 def test_parameters_of_other_runbooks_are_dropped():
@@ -324,12 +388,21 @@ def test_proposal_payload_carries_the_menu_and_summary():
 def test_proposal_payload_carries_required_parameters_per_runbook():
     # 이걸 빼면 모델은 어느 키를 채워야 하는지 알 수 없고, 빈 값으로 온 후보가
     # 계약 검증에서 거절되어 호출 전체가 FAILED가 된다(#209 실제 호출에서 확인)
-    _, client = run(SUMMARY, proposals(rightsizing_proposal()))
+    autoscaling = {
+        "runbook_id": "RUNBOOK_EC2_ENABLE_AUTOSCALING",
+        "purpose": "고정 대수 EC2를 Auto Scaling 그룹으로 전환",
+        "allowed_target_asset_types": ["EC2"],
+    }
+    graph_input = make_input(capabilities=[RIGHTSIZING_CAPABILITY, autoscaling, EBS_CAPABILITY])
+    _, client = run(SUMMARY, proposals(rightsizing_proposal()), graph_input=graph_input)
     by_id = {c["runbook_id"]: c for c in client.sent[1]["user_payload"]["capabilities"]}
 
-    rightsizing = by_id["RUNBOOK_EC2_RIGHTSIZING"]
-    assert rightsizing["required_parameters"] == ["target_instance_type"]
-    assert rightsizing["parameter_schema"]["target_instance_type"]["type"] == "string"
+    assert by_id["RUNBOOK_EC2_ENABLE_AUTOSCALING"]["required_parameters"] == ["max_size", "min_size"]
+    assert set(by_id["RUNBOOK_EC2_ENABLE_AUTOSCALING"]["parameter_schema"]) == {"max_size", "min_size"}
+
+    # 목표 타입은 그래프가 규칙으로 계산한다(#251) — 명세에 실으면 모델에게 채우라는 지시가 된다
+    assert by_id["RUNBOOK_EC2_RIGHTSIZING"]["required_parameters"] == []
+    assert by_id["RUNBOOK_EC2_RIGHTSIZING"]["parameter_schema"] == {}
 
     # AI가 정할 값이 0개인 Runbook은 빈 목록이다 — 채울 자리가 없다는 것도 정보다
     assert by_id["RUNBOOK_EBS_DELETE_UNATTACHED"]["required_parameters"] == []
@@ -418,8 +491,10 @@ def test_prompt_material_covers_every_instruction_surface():
         for text in texts:
             assert text in material
     # 출력 스키마 — 필드 이름이 모델에 나가므로 이름을 바꾸면 해시가 움직여야 한다
-    for field in ("observation", "diagnosis", "rationale", "target_instance_type"):
+    for field in ("observation", "diagnosis", "rationale", "min_size"):
         assert f'"{field}"' in material
+    # 목표 타입은 그래프가 계산한다(#251) — 모델에게 나가는 지시 어디에도 없어야 한다
+    assert '"target_instance_type"' not in material
 
 
 def test_summary_output_fields_are_the_three_roles():

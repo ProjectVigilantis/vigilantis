@@ -4,8 +4,10 @@
 # ID 수준 판정은 runbooks.py가 담당하고, 이 파일은 그 아래 층 — "각 Runbook이
 # 어떤 값을 받는가"를 정의한다. 원천은 ADR-0007 §5 파라미터 표이며, 전 키가 required다.
 #
-# 두 계열로 나뉜다. 같은 Runbook이라도 AI가 채우는 값과 실행이 받는 값이 다르다.
-#   ① 후보 파라미터(본편 7종) — AI가 정하는 값만. 나머지는 지어낼 수 없다.
+# 두 계열로 나뉜다. 같은 Runbook이라도 후보가 싣는 값과 실행이 받는 값이 다르다.
+#   ① 후보 파라미터(본편 7종) — 후보 시점에 정해지는 값만. 대부분 AI가 정하고, 답이 규칙
+#      하나로 정해지는 값은 서버가 계산한다(SERVER_COMPUTED_CANDIDATE_PARAMS — #251의
+#      RIGHTSIZING 목표 타입). 나머지는 지어낼 수 없다.
 #      RUNBOOK_EC2_ISOLATE·SG_DELETE_ISOLATED·EBS_DELETE_UNATTACHED는 AI가 정할
 #      값이 0개라 빈 모델이다. 빈 모델은 낭비가 아니라 방어다 — extra=forbid가
 #      "이 Runbook에는 AI가 값을 실을 자리가 없다"를 강제한다.
@@ -42,6 +44,7 @@ from pydantic import (
     model_validator,
 )
 
+from .rightsizing_policy import KNOWN_INSTANCE_TYPES
 from .runbooks import ROLLBACK_RUNBOOK_IDS, RunbookId
 
 # ------------------------------------------------------------------------------
@@ -106,6 +109,17 @@ Ipv4Cidr = Annotated[str, AfterValidator(_require_network_cidr)]
 # "-1"은 AWS의 전체 프로토콜 표기다
 NaclProtocol = Literal["tcp", "udp", "icmp", "-1"]
 
+
+def _require_known_instance_type(value: str) -> str:
+    if value not in KNOWN_INSTANCE_TYPES:
+        raise ValueError("사양 표(schemas/rightsizing_policy.py)에 있는 인스턴스 타입이어야 합니다")
+    return value
+
+
+# 다운사이징 목표 타입(#251). 서버 규칙이 사양 표 안에서만 계산하므로, 표 밖 값은 규칙이
+# 낼 수 없는 값이다 — ④ AWS Dry-Run까지 보내지 않고 ① Schema Check에서 끝낸다.
+RightsizingTargetType = Annotated[str, AfterValidator(_require_known_instance_type)]
+
 # NACL 규칙을 AWS에 넣고 다시 읽을 때 쓰는 표기. describe_network_acls가 돌려주는
 # Protocol 값이 이쪽이라, 백업 fingerprint 대조(ADR-0008 §5)가 보는 축도 이쪽이다.
 NaclProtocolNumber = Literal["6", "17", "1", "-1"]
@@ -169,7 +183,9 @@ class SgDeleteIsolatedCandidateParameters(_Parameters):
 
 
 class Ec2RightsizingCandidateParameters(_Parameters):
-    target_instance_type: _FreeText
+    """목표 타입은 AI가 아니라 그래프가 규칙으로 계산해 싣는다(#251, SERVER_COMPUTED_CANDIDATE_PARAMS)."""
+
+    target_instance_type: RightsizingTargetType
 
 
 class Ec2EnableAutoscalingCandidateParameters(_Parameters):
@@ -301,6 +317,23 @@ CANDIDATE_PARAMETER_MODELS: Mapping[RunbookId, type[BaseModel]] = {
     RunbookId.RUNBOOK_EC2_ENABLE_AUTOSCALING: Ec2EnableAutoscalingCandidateParameters,
     RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED: EbsDeleteUnattachedCandidateParameters,
 }
+
+# 후보 파라미터 중 그래프가 규칙으로 계산해 채우는 키(#251). AI 출력 스키마와 capability
+# 명세에서 빠진다 — 모델에게 채우라고 하지 않은 값은 모델이 채울 자리도 두지 않는다.
+# 계산하는 곳은 ai/agent.py _server_parameter_values다.
+SERVER_COMPUTED_CANDIDATE_PARAMS: Mapping[RunbookId, frozenset[str]] = {
+    RunbookId.RUNBOOK_EC2_RIGHTSIZING: frozenset({"target_instance_type"}),
+}
+
+
+def ai_decided_parameter_names(runbook_id: RunbookId) -> list[str]:
+    """그 Runbook의 후보 파라미터 중 AI가 정하는 키(정렬). 롤백 3종은 빈 목록이다."""
+    model = CANDIDATE_PARAMETER_MODELS.get(runbook_id)
+    if model is None:
+        return []
+    computed = SERVER_COMPUTED_CANDIDATE_PARAMS.get(runbook_id, frozenset())
+    return sorted(name for name in model.model_fields if name not in computed)
+
 
 PRECHECK_PARAMETER_MODELS: Mapping[RunbookId, type[BaseModel]] = {
     RunbookId.RUNBOOK_EC2_ISOLATE: Ec2IsolateParameters,

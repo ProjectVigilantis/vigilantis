@@ -29,6 +29,9 @@
 #   - 접수 경로는 둘이다. 본편 7종은 Guardrail PASS 후보(EXECUTABLE)에서, 롤백
 #     3종은 복구를 열어 준 원본 실행에서 접수한다 — 롤백은 후보가 될 수 없다
 #     (ADR-0004 정책 ②, packages/schemas/candidates.py). (Issue #126)
+#   - 후보가 생기는 문도 둘이다. AI 분석 결과(record_agent_analysis)와, 차단이 SUCCESS로
+#     끝난 뒤의 해제 제안(offer_nacl_release)이다. 뒤의 것은 값을 모델이 아니라 차단의
+#     백업에서 가져오되 가드레일 4단계는 똑같이 1회 지난다. (Issue #329)
 # ==============================================================================
 
 from __future__ import annotations
@@ -2677,3 +2680,232 @@ def record_agent_analysis(
         rejected=rejected,
         occurred_at=wait_started or incident.updated_at,
     )
+
+
+# --- 차단 뒤 해제 제안 (Issue #329) ------------------------------------------------
+#
+# NACL_RESTORE는 롤백 3종이 아니라 AI 추천 7종이라, [해제] 버튼은 복구 목록
+# (available_recovery_runbook_ids — 계약상 롤백 3종만)이 아니라 EXECUTABLE 후보
+# (recommendations)에서 렌더된다. 그런데 후보가 생기는 문(record_agent_analysis)은
+# ANALYZING에서만 열리고, 차단이 SUCCESS로 닫히면 인시던트는 AWAITING_CLOSURE로 간다 —
+# 해제 후보를 만들 주체가 없었다. 여기가 그 주체다.
+#
+# **값은 AI가 아니라 차단의 백업 레코드에서만 온다.** 슬롯(rule_number·egress)과 대상은
+# 차단이 자기 행에 결속한 백업에서, 근거(evidence_ids)는 차단 후보에서 가져온다 — 되돌리는
+# 값을 백업에서만 읽는 ADR-0004 정책 ③과 같은 방향이다. 모델을 다시 부르지 않으므로 원클릭
+# 해제가 모델 출력에 흔들리지 않는다.
+#
+# **가드레일 4단계는 AI 후보와 똑같이 1회 지난다** — 사전 조회 → 트랜잭션 밖 가드레일 →
+# 저장, record_agent_analysis와 같은 순서다. 검증 문맥은 AI_CANDIDATE다. 저장된 행이 AI
+# 후보와 같은 문(_executable_candidate)으로 접수되므로, 문맥을 가르면 같은 접수 경로 뒤에
+# 두 종류의 판정 기록이 섞인다(문맥을 새로 둘지는 #329 결정 1 — 계약 소유자 판단).
+#
+# 부르는 쪽은 dispatcher의 주기 스캔이다(executions_repo.list_release_offer_pending).
+# 차단 확정 직후에 곧바로 부르지 않고 스캔으로 두는 이유는 **확정과 제안 사이에서
+# 프로세스가 죽어도 다음 주기가 이어받게** 하기 위해서다 — 제안이 유실되면 우리가 넣은
+# 차단을 화면에서 풀 방법이 사라진다. 멱등의 관문은 "이 인시던트에 NACL_RESTORE 후보가
+# 이미 있는가"(상태 불문) 하나다. 거절된 제안도 다시 만들지 않는다 — ADR-0004 정책 ④의
+# 무재시도와 같은 이유이며, 그때 인시던트는 AWAITING_CLOSURE에 머문다.
+#
+# 인시던트당 해제 제안은 하나다. 활성 후보가 (incident, runbook)당 1개라는 부분 유니크
+# 인덱스(db/models.py uq_runbook_candidates_active)가 이미 그렇게 묶고 있다.
+
+# 해제 제안을 받는 인시던트 상태. **AWAITING_CLOSURE만이 아니다** — 차단이 닫힐 때 다른
+# 제안이 남아 있으면 AWAITING_APPROVAL이고, 다른 실행이 진행 중이면 ACTION_IN_PROGRESS다.
+# 셋 모두 EXECUTABLE 후보가 있어도 상세 응답 계약(api/incidents.py)을 깨지 않는다
+# (AWAITING_CLOSURE는 이 자리에서 AWAITING_APPROVAL로 옮긴다). RESOLVED는 관제자가 해제
+# 없이 닫기로 판단한 것이고, FAILED·ANALYZING은 성공한 차단 뒤에 오는 자리가 아니다.
+RELEASE_OFFERABLE_STATUSES: frozenset[IncidentStatus] = frozenset(
+    {
+        IncidentStatus.AWAITING_CLOSURE,
+        IncidentStatus.AWAITING_APPROVAL,
+        IncidentStatus.ACTION_IN_PROGRESS,
+    }
+)
+
+
+@dataclass(frozen=True)
+class ReleaseOffer:
+    """해제 제안 1건의 결과 — 발행과 스캔 집계를 정하는 호출부가 읽는 값이다.
+
+    candidate_status가 None이면 저장하지 않은 것이고 skipped_reason이 이유다.
+    """
+
+    incident_id: str
+    candidate_status: Optional[CandidateStatus] = None  # EXECUTABLE | REJECTED
+    skipped_reason: Optional[str] = None
+    incident_status: Optional[IncidentStatus] = None
+    incident_updated_at: Optional[datetime] = None  # WS 봉투의 occurred_at
+
+
+def _release_skipped(incident_id: str, execution_id: str, reason: str) -> ReleaseOffer:
+    # 근거가 없는 차단은 후보 행이 생기지 않아 매 주기(DISPATCH_INTERVAL_SECONDS) 다시
+    # 걸린다 — 신호는 주기 요약의 release_skipped 카운터가 나르므로 행 단위 로그는 debug다
+    # (dispatcher.py dispatch_runner_missing과 같은 규약)
+    logger.debug(
+        "release_offer_skipped",
+        extra={
+            "incident_id": incident_id,
+            "execution_id": execution_id,
+            "reason": reason,
+        },
+    )
+    return ReleaseOffer(incident_id=incident_id, skipped_reason=reason)
+
+
+def _release_candidate(
+    db: Session, block: models.ActionExecution
+) -> tuple[Optional[RunbookCandidateData], Optional[str]]:
+    """차단 실행 1건 → 해제 후보 초안. 만들 수 없으면 (None, 사유).
+
+    백업은 **차단 자기 행에 결속된 것**만 쓴다. 대상 기준 조회(_latest_backup_record)로
+    찾지 않는 이유는 이 제안이 "그 차단"을 푸는 것이기 때문이다 — 조회는 가드레일 ④와
+    해제 실행이 따로 한 번씩 하고, 셋이 같은 레코드를 가리키는지는 ④의 지문 대조가 본다.
+    남의 실행이 만든 레코드는 받지 않는다(_recovery_backup_record_id와 같은 이유).
+    """
+    record = (
+        executions_repo.get_backup_record(db, block.backup_record_id)
+        if block.backup_record_id is not None
+        else None
+    )
+    if record is None or record.execution_id != block.execution_id:
+        return None, "차단 실행에 결속된 백업 레코드가 없습니다"
+    if record.backup_type != executor.BACKUP_NACL_RULE_INDEX:
+        return None, "차단 실행의 백업 종류가 NACL 규칙 index가 아닙니다"
+    if record.target_arn != block.target_arn:
+        return None, "백업 레코드가 차단 대상과 다른 자원을 가리킵니다"
+    backup = executor.nacl_rule_backup(record.payload)
+    if backup is None:
+        return None, "백업 payload에 규칙 슬롯이 없습니다"
+
+    source = (
+        incidents_repo.get_candidate(db, block.candidate_id)
+        if block.candidate_id is not None
+        else None
+    )
+    if source is None or not source.evidence_ids:
+        # 사람 승인 없이 시작한 차단(선차단 계열)은 후보가 없다 — 그 경로가 배선될 때
+        # 근거를 어디서 가져올지 함께 정한다. 지금 차단은 전부 USER_APPROVAL이다.
+        return None, "차단 후보의 근거(evidence_ids)가 없습니다"
+
+    try:
+        return (
+            RunbookCandidateData(
+                candidate_id=str(uuid.uuid4()),
+                incident_id=block.incident_id,
+                runbook_id=RunbookId.RUNBOOK_NACL_RESTORE,
+                target_arn=record.target_arn,
+                parameters={"rule_number": backup.rule_number, "egress": backup.egress},
+                evidence_ids=list(source.evidence_ids),
+                status=CandidateStatus.PENDING_VALIDATION,
+            ),
+            None,
+        )
+    except ValidationError as exc:
+        return None, f"해제 후보 계약 위반: {exc.error_count()}건"
+
+
+def _release_already_offered(db: Session, incident_id: str) -> bool:
+    return any(
+        row.runbook_id is RunbookId.RUNBOOK_NACL_RESTORE
+        for row in incidents_repo.list_candidates(db, incident_id)
+    )
+
+
+def _store_release_offer(
+    db: Session,
+    candidate: RunbookCandidateData,
+    outcome: guardrails.GuardrailOutcome,
+    *,
+    execution_id: str,
+) -> ReleaseOffer:
+    """가드레일을 마친 해제 후보를 저장하고, 통과했으면 인시던트를 승인 대기로 올린다.
+
+    **후보 저장과 상태 전이는 한 트랜잭션이다.** AWAITING_CLOSURE에 EXECUTABLE 후보가 붙은
+    채 커밋되면 상세 응답 계약이 거절해 조회가 500이 된다(api/incidents.py).
+
+    가드레일이 AWS를 부르는 동안 관제자가 인시던트를 닫았을 수 있어 잠근 뒤 다시 본다.
+    그때는 저장하지 않는다 — 판정 기록도 남기지 않는 것은, 받을 인시던트가 없는 제안의
+    판정은 "왜 이 제안이 사라졌는가"에 답할 대상이 없기 때문이다.
+    """
+    incident_id = candidate.incident_id
+    incident = incidents_repo.lock_incident(db, incident_id)
+    if incident is None:
+        raise ValueError(f"해제 제안의 인시던트가 없습니다: {incident_id}")
+    if incident.status not in RELEASE_OFFERABLE_STATUSES:
+        db.commit()  # 쓴 것 없이 잠금만 놓는다
+        return _release_skipped(
+            incident_id, execution_id, f"인시던트가 {incident.status.value}로 옮겨 갔습니다"
+        )
+    if _release_already_offered(db, incident_id):
+        db.commit()
+        return _release_skipped(incident_id, execution_id, "해제 후보가 이미 있습니다")
+
+    passed = _store_candidate(db, candidate, outcome)
+    if passed and incident.status is IncidentStatus.AWAITING_CLOSURE:
+        if not incidents_repo.update_incident_status(
+            db,
+            incident_id,
+            expected=IncidentStatus.AWAITING_CLOSURE,
+            next_status=IncidentStatus.AWAITING_APPROVAL,
+        ):
+            # 잠그고 들어왔으므로 실패할 이유가 없다. 통과시키면 AWAITING_CLOSURE에 제안이
+            # 붙는다 — commit 없이 던져 세션 정리에서 되돌린다
+            raise ValueError(f"Incident 상태 전이 실패: {incident_id}")
+    elif passed:
+        # 상태는 그대로여도 상세 응답의 제안 목록이 바뀌었으므로 updated_at은 올린다
+        incidents_repo.touch_incident(db, incident_id)
+
+    db.commit()
+    db.refresh(incident)
+    status = CandidateStatus.EXECUTABLE if passed else CandidateStatus.REJECTED
+    logger.info(
+        "release_offer_recorded",
+        extra={
+            "incident_id": incident_id,
+            "execution_id": execution_id,
+            "candidate_id": candidate.candidate_id,
+            "candidate_status": status.value,
+            "incident_status": incident.status.value,
+        },
+    )
+    return ReleaseOffer(
+        incident_id=incident_id,
+        candidate_status=status,
+        incident_status=incident.status,
+        incident_updated_at=incident.updated_at,
+    )
+
+
+def offer_nacl_release(db: Session, execution_id: str) -> ReleaseOffer:
+    """SUCCESS로 끝난 차단 1건에 해제 후보를 만든다 — 초안 → 가드레일 1회 → 저장. (Issue #329)
+
+    순서는 record_agent_analysis와 같다. ③이 볼 관리 자산과 ④가 읽을 백업을 미리 조회하고,
+    **가드레일 ④가 AWS를 부르는 동안 트랜잭션을 열어 두지 않는다.**
+    """
+    block = executions_repo.get_execution(db, execution_id)
+    if block is None:
+        raise ValueError(f"실행 레코드를 찾을 수 없습니다: {execution_id}")
+    if block.runbook_id is not RunbookId.RUNBOOK_NACL_ADD_DENY:
+        # 배선 오류다 — 해제 제안을 낳는 조치는 차단 하나뿐이다
+        raise ValueError(f"NACL_ADD_DENY 실행이 아닙니다: {block.runbook_id.value}")
+    incident_id = block.incident_id
+    if block.status is not ExecutionStatus.SUCCESS:
+        db.commit()
+        return _release_skipped(
+            incident_id, execution_id, f"차단이 {block.status.value}로 끝났습니다"
+        )
+
+    candidate, problem = _release_candidate(db, block)
+    if candidate is None:
+        db.commit()
+        return _release_skipped(incident_id, execution_id, problem or "")
+
+    managed = _managed_arns(db, [candidate])
+    backups = _prefetch_candidate_backups(db, [candidate])
+    # 읽기만 했다 — rollback이 아니라 commit으로 닫는 것은 dispatcher 규약이다(호출부가 같은
+    # 세션에 얹어 둔 작업을 잃지 않게)
+    db.commit()
+
+    outcome = _guard_candidate(candidate, managed, backups)
+    return _store_release_offer(db, candidate, outcome, execution_id=execution_id)

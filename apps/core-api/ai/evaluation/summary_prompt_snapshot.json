@@ -1,6 +1,6 @@
 {
-  "version": "v1",
-  "prompt_sha256": "9a3f661330d7356dd4871220bc1a8841c0e45bc87f0398233e1be738493dba67",
+  "version": "v2",
+  "prompt_sha256": "1e2e5c45cd1b1d250ebf371ba65699827bf3c42f88f6d77080515a07c22e1cc7",
   "model": "gpt-5.6-luna",
   "reasoning_effort": "low",
   "temperature": null,
@@ -10,8 +10,8 @@
     "case_ids": ["A1", "A7", "A11", "A12", "A14", "A16"],
     "input_sha256": "8fffd381a2e89d0d1c0c1b5530e7e4934e244b10978585715ba87c31731d9454"
   },
-  "approved_at": "2026-09-03",
-  "approved_by": "안성일",
+  "approved_at": "2026-09-14",
+  "approved_by": "김세혁",
   "judge": {
     "model": "gpt-5.6-luna",
     "reasoning_effort": "low",
@@ -27,9 +27,9 @@
     }
   },
   "previous": {
-    "version": "v0",
+    "version": "v1",
     "label": "gpt-5.6-luna (reasoning_effort=low)",
-    "source": "PR #248 확정 라운드 원자료 60회 — A7은 골든 cpu_max 보정 후 v0 프롬프트로 10회 재생성",
+    "source": "2026-09-14 dev(d160484)에서 v1 프롬프트로 재생성한 60회 — v2와 같은 판정 호출에서 짝 비교했다(#251)",
     "runs": 60,
     "failed_contract": 0,
     "failed_transport": 0,
@@ -37,13 +37,11 @@
     "fact_failed": 0,
     "fact_checked": 60,
     "field_stability": 0.833,
-    "unstable_fields": [
-      "RUNBOOK_EC2_RIGHTSIZING.target_instance_type"
-    ],
+    "unstable_fields": ["RUNBOOK_EC2_RIGHTSIZING.target_instance_type"],
     "readback": {
-      "lines_with_readback": 67,
+      "lines_with_readback": 4,
       "of_lines": 180,
-      "runs_with_readback": 56,
+      "runs_with_readback": 4,
       "observation_cites_input": 60,
       "of_runs": 60
     },
@@ -54,7 +52,7 @@
       "restored": {
         "cpu_avg": 60,
         "cpu_max": 60,
-        "cpu_datapoints": 10
+        "cpu_datapoints": 60
       },
       "expected": {
         "cpu_avg": 60,
@@ -64,13 +62,11 @@
     },
     "defects": {
       "flagged": {
-        "defect_2": 18,
-        "defect_3": 60,
-        "defect_4": 3
+        "defect_2": 13,
+        "defect_3": 3,
+        "defect_4": 2
       },
-      "judged": 60,
-      "judge_self_agreement_defect_2": "42/60 (같은 v0 출력 2회 판정)",
-      "judge_self_agreement_restoration_and_defect_3": "60/60"
+      "judged": 60
     },
     "payload_dedup_active": true,
     "judge_prompt_sha256": "e582efcac19b88a544da17d90cccc320e152f74ac9164cf37b657d08422b76e9"
@@ -82,14 +78,12 @@
     "no_proposal": 0,
     "fact_failed": 0,
     "fact_checked": 60,
-    "field_stability": 0.833,
-    "unstable_fields": [
-      "RUNBOOK_EC2_RIGHTSIZING.target_instance_type"
-    ],
+    "field_stability": 1.0,
+    "unstable_fields": [],
     "readback": {
-      "lines_with_readback": 15,
+      "lines_with_readback": 11,
       "of_lines": 180,
-      "runs_with_readback": 15,
+      "runs_with_readback": 11,
       "observation_cites_input": 60,
       "of_runs": 60
     },
@@ -104,17 +98,12 @@
     "generation_rounds": [
       {
         "round": 1,
-        "outcome": "NO_PROPOSAL 4/60 (A7) — 요약이 판정을 유보하고 후보를 비움",
-        "fix": "verdict 앵커 줄"
+        "outcome": "실행값 흔들림 1/60 — A14 evidence_ids의 순서만 뒤집힘(집합 동일). 첫 항목이 실행 파라미터 evidence_id가 된다",
+        "fix": "그래프가 후보 evidence_ids를 입력 근거 순서로 정렬(ai/agent.py _canonical_evidence_ids) — 프롬프트·스키마 무변경이라 해시 동일"
       },
       {
         "round": 2,
-        "outcome": "후보 2건 35/60 (ENABLE_AUTOSCALING min=max=1) — 요약이 메뉴를 열거",
-        "fix": "available_actions 목적 문구만 · rationale 하나 · 후보 '뒷받침한 것만'"
-      },
-      {
-        "round": 3,
-        "outcome": "합격선 전부 통과",
+        "outcome": "합격선 전부 통과 · 필드 안정도 36/36",
         "fix": null
       }
     ],
@@ -135,18 +124,16 @@
     },
     "defects": {
       "flagged": {
-        "defect_2": 14,
-        "defect_3": 2,
+        "defect_2": 22,
+        "defect_3": 1,
         "defect_4": 0
       },
       "judged": 60
     },
     "judge_pass": {
-      "paired_with": "previous(v0, A7 재생성)",
+      "paired_with": "previous(v1, 2026-09-14 재생성)",
       "judge_prompt_sha256": "e582efcac19b88a544da17d90cccc320e152f74ac9164cf37b657d08422b76e9",
-      "model_snapshots": [
-        "gpt-5.6-luna"
-      ]
+      "model_snapshots": ["gpt-5.6-luna"]
     }
   },
   "outputs": {
@@ -156,9 +143,9 @@
         "run_index": 0,
         "invocation_status": "SUCCEEDED",
         "summary_lines": [
-          "2026-08-05T06:00:00Z부터 2026-08-19T06:00:00Z까지 336개 데이터포인트에서 CPU 평균 사용률은 4.9%, 최대 사용률은 10.0%였고 네트워크 입출력 평균은 각각 1024.0과 768.0이었다.",
-          "이 EC2는 해당 관측 기간에 CPU와 네트워크 사용량이 낮아 현재 t3.xlarge 사양이 과대할 가능성이 있다.",
-          "낮은 평균·최대 사용률이 과대 스펙 EC2 다운사이징 조치를 뒷받침하므로 이 자산의 비용 후보 판정에 맞는 조치다."
+          "2026-08-05T06:00:00Z부터 2026-08-19T06:00:00Z까지 336개 데이터포인트에서 CPU 평균 사용률은 4.9%, 최대 사용률은 10.0%였고, 네트워크 평균 수신·송신량은 각각 1024.0·768.0이었다.",
+          "이 EC2는 관측 기간 동안 CPU 사용률이 낮아 과대 스펙일 가능성이 있으며, 입력에는 메모리 사용률이 없다.",
+          "낮은 CPU 사용률과 최대 사용률 10.0%가 과대 스펙 EC2 다운사이징을 뒷받침하므로 이 자산에 해당 조치를 적용할 근거가 있다."
         ],
         "proposal_cards": [
           {
@@ -174,16 +161,16 @@
         "run_index": 10,
         "invocation_status": "SUCCEEDED",
         "summary_lines": [
-          "EC2 인스턴스 i-0a1b2c3d4e5f00012는 2026-08-06T06:00:00Z부터 2026-08-20T06:00:00Z까지 48개 데이터포인트에서 CPU 평균 4.9%, 최대 10.0%, 네트워크 수신 평균 1024.0, 송신 평균 512.0을 기록했다.",
-          "이 기간의 낮은 CPU 평균·최대 사용률과 네트워크 평균값은 golden-ec2-dp-boundary가 현재 t3.xlarge 용량을 충분히 사용하지 않는 상태임을 시사한다.",
-          "관측된 낮은 자원 사용률은 과대 스펙 EC2 다운사이징이 이 자산의 용량을 줄여 비용을 최적화하는 데 부합함을 뒷받침한다."
+          "2026-08-06T06:00:00Z부터 2026-08-20T06:00:00Z까지 48개 데이터포인트에서 CPU 평균 사용률은 4.9, 최대 사용률은 10.0이며 네트워크 인바운드 평균은 1024.0, 아웃바운드 평균은 512.0이다.",
+          "이 EC2는 현재 running 상태인 t3.xlarge 인스턴스이며, 관측 기간 동안 CPU 사용률이 낮아 과대 스펙일 가능성이 추정된다.",
+          "낮은 CPU 평균·최대 사용률이 확인되어 과대 스펙 EC2 다운사이징이 이 자산의 비용 절감 후보로 뒷받침된다."
         ],
         "proposal_cards": [
           {
             "runbook_id": "RUNBOOK_EC2_RIGHTSIZING",
             "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00012",
             "display_parameters": {
-              "target_instance_type": "t3.large"
+              "target_instance_type": "t3.medium"
             }
           }
         ]
@@ -192,16 +179,16 @@
         "run_index": 20,
         "invocation_status": "SUCCEEDED",
         "summary_lines": [
-          "EC2 인스턴스 i-0a1b2c3d4e5f00021의 CPU 사용률은 2026-08-11T06:00:00Z부터 2026-08-25T06:00:00Z까지 336개 데이터포인트에서 평균 1.5%, 최대 10.0%였고 평균 네트워크 입력·출력은 각각 1024.0·768.0이었다.",
-          "이 기간의 낮은 CPU 평균·최대 사용률은 t3.large가 관측 부하에 비해 과대 스펙일 가능성을 시사하지만, 메모리 사용량과 장기 피크 부하는 입력에 없다.",
-          "관측된 낮은 CPU 사용률이 과대 스펙 가능성을 뒷받침하므로 과대 스펙 EC2 다운사이징이 이 자산에 맞는 조치다."
+          "EC2 인스턴스 i-0a1b2c3d4e5f00021의 CPUUtilization은 2026-08-11T06:00:00Z부터 2026-08-25T06:00:00Z까지 336개 데이터포인트에서 평균 1.5%, 최대 10.0%였고 네트워크 입출력 평균은 각각 1024.0과 768.0이었다.",
+          "이 인스턴스는 현재 실행 중인 t3.large이며, 관측 기간의 낮은 CPU 사용률로 보아 컴퓨팅 용량이 과대할 가능성이 추정된다.",
+          "낮은 평균·최대 CPU 사용률이 과대 프로비저닝 가능성을 뒷받침하므로 이 자산에는 「과대 스펙 EC2 다운사이징」이 적합하다."
         ],
         "proposal_cards": [
           {
             "runbook_id": "RUNBOOK_EC2_RIGHTSIZING",
             "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00021",
             "display_parameters": {
-              "target_instance_type": "t3.medium"
+              "target_instance_type": "t3.small"
             }
           }
         ]
@@ -210,16 +197,16 @@
         "run_index": 30,
         "invocation_status": "SUCCEEDED",
         "summary_lines": [
-          "EC2 인스턴스 i-0a1b2c3d4e5f00022는 2026-08-11T06:00:00Z부터 2026-08-25T06:00:00Z까지 336개 데이터포인트에서 CPU 평균 사용률 1.5%, 최대 사용률 10.0%를 기록했으며 네트워크 평균 입출력은 각각 1024.0, 768.0이다.",
-          "t3.large 실행 인스턴스의 관측 기간 동안 CPU 사용률이 평균과 최대 모두 낮아 현재 용량이 실제 부하보다 큰 상태로 추정된다.",
-          "낮은 CPU 사용률이 지속된 이 자산에는 과대 스펙 EC2 다운사이징이 관측 사실과 진단에 부합한다."
+          "EC2 인스턴스 i-0a1b2c3d4e5f00022는 2026-08-11T06:00:00Z부터 2026-08-25T06:00:00Z까지 336개 데이터포인트에서 CPU 평균 1.5, 최대 10.0을 기록했고 네트워크 입출력 평균은 각각 1024.0과 768.0이었다.",
+          "해당 기간의 낮은 CPU 평균과 최대 사용률로 보아 인스턴스가 과대 스펙일 가능성이 추정된다.",
+          "관측된 낮은 CPU 사용률은 과대 스펙 EC2 다운사이징이 이 자산의 용량을 줄이는 조치로 뒷받침한다."
         ],
         "proposal_cards": [
           {
             "runbook_id": "RUNBOOK_EC2_RIGHTSIZING",
             "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00022",
             "display_parameters": {
-              "target_instance_type": "t3.medium"
+              "target_instance_type": "t3.small"
             }
           }
         ]
@@ -228,16 +215,16 @@
         "run_index": 40,
         "invocation_status": "SUCCEEDED",
         "summary_lines": [
-          "EC2 인스턴스 i-0a1b2c3d4e5f00024는 2026-08-11T06:00:00Z부터 2026-08-25T06:00:00Z까지 336개 데이터포인트에서 CPU 평균 사용률 1.5%, 최대 사용률 10.0%, 네트워크 인바운드 평균 1024.0, 아웃바운드 평균 768.0을 기록했다.",
-          "이 인스턴스는 t3.large로 실행 중이며 관측 기간의 CPU 사용률이 평균 1.5%, 최대 10.0%로 낮아 과대 스펙일 가능성이 추정된다.",
-          "낮은 CPU 사용률이 장기간 확인되어 이 자산에는 과대 스펙 EC2 다운사이징이 뒷받침된다."
+          "2026-08-11T06:00:00Z부터 2026-08-25T06:00:00Z까지 336개 데이터포인트에서 CPU 평균 사용률은 1.5%, 최대 사용률은 10.0%였고 평균 네트워크 수신·송신량은 각각 1024.0·768.0이었다.",
+          "이 EC2는 해당 관측 기간에 CPU 사용률이 낮았으므로 과대 스펙일 가능성이 추정되지만, 고정 대수 운영 여부는 입력에서 확인되지 않는다.",
+          "낮은 CPU 평균·최대 사용률이 확인되어 과대 스펙 EC2 다운사이징이 이 자산의 비용 절감 후보에 부합한다."
         ],
         "proposal_cards": [
           {
             "runbook_id": "RUNBOOK_EC2_RIGHTSIZING",
             "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00024",
             "display_parameters": {
-              "target_instance_type": "t3.medium"
+              "target_instance_type": "t3.small"
             }
           }
         ]
@@ -246,9 +233,9 @@
         "run_index": 50,
         "invocation_status": "SUCCEEDED",
         "summary_lines": [
-          "EC2 인스턴스 i-0a1b2c3d4e5f00026은 2026-08-11T06:00:00Z부터 2026-08-25T06:00:00Z까지 CPU 평균 사용률 1.5%, 최대 사용률 10.0%, 데이터포인트 336개의 관측으로 평가되었다.",
-          "이 기간의 낮은 CPU 평균 및 최대 사용률은 t3.large 인스턴스의 컴퓨팅 용량이 사용량보다 클 가능성을 시사한다.",
-          "관측된 낮은 CPU 사용률이 과대 프로비저닝 가능성을 뒷받침하므로 과대 스펙 EC2 다운사이징이 이 자산에 맞는 조치다."
+          "EC2 인스턴스 i-0a1b2c3d4e5f00026은 2026-08-11T06:00:00Z부터 2026-08-25T06:00:00Z까지 CPU 평균 1.5, CPU 최대 10.0, 데이터포인트 336개와 네트워크 평균 유입 1024.0, 유출 768.0을 기록했다.",
+          "관측 기간 동안 CPU 사용률이 낮아 이 인스턴스가 과대 스펙일 가능성이 추정되며, 고정 대수 운영 여부와 무관하게 입력에는 최대 사용률 판정 기준 외의 추가 사용 패턴 정보가 없다.",
+          "낮은 CPU 평균과 최대값이 과대 스펙 가능성을 뒷받침하므로 과대 스펙 EC2 다운사이징이 이 자산에 맞는 조치다."
         ],
         "proposal_cards": [
           {

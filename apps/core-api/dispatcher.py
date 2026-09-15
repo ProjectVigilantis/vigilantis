@@ -38,6 +38,12 @@
 # 되돌릴 대상이 아니라 **실자산에 물을 질문**이므로, 확정하지 않고 다음 주기의 현물
 # 판정으로 보냅니다(Issue #297).
 #
+# **SUCCESS로 끝난 차단은 해제 제안을 낳는 자리로 한 번 더 지나갑니다**(_offer_release_one,
+# Issue #329). 해제(NACL_RESTORE)는 관제자가 승인하는 주 조치라 [해제] 버튼이 EXECUTABLE
+# 후보에서 서는데, 그 후보를 만들 AI 분석은 이미 끝난 뒤이기 때문입니다. 비종료 스캔과
+# 같은 주기에 돌며, 두 번째 제안을 막는 것은 이 모듈이 아니라 해제 후보 행의 존재입니다 —
+# 자동 원복이 자식 실행 행으로 1회를 지키는 것과 같은 구조입니다.
+#
 # 판정이 늘 확정으로 끝나지는 않습니다. AWS에 물어보지 못한 경우는 자산이 실패했다는
 # 근거가 아니므로 곧바로 확정하지 않고, 사유를 typed로 기록한 채 IN_PROGRESS로 남겨
 # 간격이 지난 뒤의 주기가 다시 묻습니다. 재시도를 소진하면 **자동 원복하지 않고**
@@ -71,6 +77,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from schemas.api.actions import ExecutionStatus
 from schemas.api.ws import WsEvent, WsEventType
+from schemas.candidates import CandidateStatus
 from schemas.executions import (
     ASSET_MAY_HAVE_CHANGED_EFFECTS,
     EXECUTION_NON_TERMINAL_STATUSES,
@@ -169,6 +176,9 @@ class DispatchReport:
     deferred: int = 0               # AWS 조회 실패를 기록하고 재시도로 미룬 실행 (Issue #249)
     retry_waiting: int = 0          # 판정 불가 보류 중 재시도 간격이 아직 안 된 실행
     held: int = 0                   # 재시도를 소진해 자동 판정을 멈추고 확정한 실행(closed와 따로 센다)
+    release_offered: int = 0        # 차단 뒤 해제 후보가 가드레일을 통과해 [해제]가 선 건 (Issue #329)
+    release_rejected: int = 0       # 해제 후보가 가드레일에서 거절된 건 — 다시 제안하지 않는다
+    release_skipped: int = 0        # 해제 후보를 저장하지 않은 건(근거 없음·경합) — 사유는 debug 로그
     skipped: int = 0                # 선점 실패·이미 확정된 실행
     unsupported: int = 0            # 실행 함수·판정 함수가 아직 없는 런북
     errored: int = 0
@@ -577,6 +587,42 @@ def _dispatch_one(
         return
 
 
+def _offer_release_one(
+    db: Session,
+    execution_id: str,
+    publish: Optional[Publish],
+    report: DispatchReport,
+) -> None:
+    """SUCCESS로 끝난 차단 1건에 해제 후보를 낸다. (Issue #329)
+
+    발행은 [해제]가 선 경우에만 한다 — 거절된 제안은 상세 응답의 제안 목록에 오르지
+    않아(routers/incidents.py) 받는 쪽이 다시 조회할 것이 없다.
+    """
+    try:
+        offer = workflows.offer_nacl_release(db, execution_id)
+    except Exception:  # noqa: BLE001 — 1건의 제안 오류가 스캔 전체를 멈추면 안 된다
+        logger.exception(
+            "dispatch_release_offer_failed", extra={"execution_id": execution_id}
+        )
+        db.rollback()
+        report.errored += 1
+        return
+    if offer.candidate_status is CandidateStatus.EXECUTABLE:
+        report.release_offered += 1
+        if publish is not None:
+            publish(
+                incident_event(
+                    WsEventType.INCIDENT_UPDATED,
+                    incident_id=offer.incident_id,
+                    occurred_at=offer.incident_updated_at,
+                )
+            )
+    elif offer.candidate_status is CandidateStatus.REJECTED:
+        report.release_rejected += 1
+    else:
+        report.release_skipped += 1
+
+
 def dispatch_pending(
     db: Session,
     publish: Optional[Publish] = None,
@@ -586,6 +632,10 @@ def dispatch_pending(
 
     목록을 행이 아니라 식별자로만 받아 둔다. 처리 중에 커밋이 일어나므로 들고 있던
     행 상태는 곧 낡고, 그 값을 믿으면 선점 재확인이 무의미해진다.
+
+    **해제 제안은 비종료 스캔 뒤에 돈다** — 이번 주기에 SUCCESS로 닫힌 차단도 같은
+    주기에 제안을 받는다. 확정 직후가 아니라 따로 스캔하는 이유는 workflows.py
+    §차단 뒤 해제 제안(확정과 제안 사이에서 죽어도 다음 주기가 이어받는다).
 
     policy는 판정 불가 재시도 정책이다 — 없으면 설정값(VERIFICATION_RETRY_*)을 쓴다.
     테스트가 설정 캐시를 건드리지 않고 상한·간격을 조일 수 있도록 인자를 연다.
@@ -597,6 +647,10 @@ def dispatch_pending(
     report.scanned = len(pending)
     for execution_id in pending:
         _dispatch_one(db, execution_id, publish, report, policy)
+    for execution_id in executions_repo.list_release_offer_pending(
+        db, incident_statuses=workflows.RELEASE_OFFERABLE_STATUSES
+    ):
+        _offer_release_one(db, execution_id, publish, report)
     logger.info("dispatch_cycle_done", extra=vars(report))
     return report
 

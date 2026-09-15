@@ -120,6 +120,9 @@ def run_rule_engine(db, collection_run_id: str | None = None) -> dict:
     )
     from schemas.rules import RuleEvaluationResult
 
+    # 소멸 자산은 list_assets 가 기본으로 제외한다(#332) — 실물이 없는 자산을 여기서
+    # 판정하면 마지막 관측 회차의 낡은 메트릭으로 후보가 서고, 그 후보가 승인 화면까지
+    # 올라간 뒤 실행에서야 깨진다.
     assets = assets_repo.list_assets(db)
     results = []
     evaluations: list[RuleEvaluationResult] = []

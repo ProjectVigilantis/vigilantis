@@ -11,12 +11,13 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Iterable, Optional
 
 from sqlalchemy import exists, select, update
 from sqlalchemy.orm import Session, aliased
 
 from schemas.api.actions import ExecutionStatus
+from schemas.api.incidents import IncidentStatus
 from schemas.executions import EXECUTION_NON_TERMINAL_STATUSES, ExecutionStepResult
 from schemas.guardrails import PrecheckReasonCode
 from schemas.runbooks import RunbookId, TriggerSource
@@ -116,6 +117,40 @@ def list_non_terminal(db: Session) -> list[models.ActionExecution]:
             select(models.ActionExecution).where(
                 models.ActionExecution.status.in_(EXECUTION_NON_TERMINAL_STATUSES)
             )
+        ).scalars()
+    )
+
+
+def list_release_offer_pending(
+    db: Session, *, incident_statuses: Iterable[IncidentStatus]
+) -> list[str]:
+    """해제 제안을 기다리는 차단 실행 — SUCCESS로 끝났는데 그 인시던트에 해제 후보가 없다.
+    (Issue #329)
+
+    해제 후보는 **상태를 가리지 않고** 센다. 거절(REJECTED)·무효(INVALIDATED)된 제안도
+    "이미 한 번 냈다"는 기록이라, 빼면 매 주기 같은 제안을 다시 만든다.
+
+    식별자만 돌려준다 — 처리 중 커밋이 일어나 들고 있던 행 상태는 곧 낡는다
+    (list_non_terminal을 받는 dispatch_pending과 같은 이유).
+    """
+    release = aliased(models.RunbookCandidate)
+    return list(
+        db.execute(
+            select(models.ActionExecution.execution_id)
+            .join(
+                models.Incident,
+                models.Incident.incident_id == models.ActionExecution.incident_id,
+            )
+            .where(
+                models.ActionExecution.runbook_id == RunbookId.RUNBOOK_NACL_ADD_DENY,
+                models.ActionExecution.status == ExecutionStatus.SUCCESS,
+                models.Incident.status.in_(list(incident_statuses)),
+                ~exists().where(
+                    release.incident_id == models.ActionExecution.incident_id,
+                    release.runbook_id == RunbookId.RUNBOOK_NACL_RESTORE,
+                ),
+            )
+            .order_by(models.ActionExecution.finished_at)
         ).scalars()
     )
 
