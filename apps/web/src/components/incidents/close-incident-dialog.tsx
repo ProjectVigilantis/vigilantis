@@ -109,6 +109,10 @@ export function CloseIncidentDialog({
    * 되돌릴 수 있는 실행이 하나도 없으면 `과잉이었다`는 갈 곳이 없다 — 계약이 복구를
    * **실행 항목별**로 매달기 때문이다(§4.5). 막지 않으면 버튼이 아무 반응 없이 닫힌다.
    * 롤백 런북이 없는 `RUNBOOK_EBS_DELETE_UNATTACHED`와 실행 전 `FAILED`가 이 경우다.
+   *
+   * `RUNBOOK_NACL_ADD_DENY`도 여기 걸리지만 되돌릴 수 없는 게 아니다 — 해제는 롤백 짝이 아니라
+   * 주 조치 `RUNBOOK_NACL_RESTORE`(제안 조치)라 복구 목록이 계약상 늘 비어 있다
+   * (`ROLLBACK_RUNBOOK_BY_MAIN_ID`). 그래서 잠금 사유를 "없다"로 단정하지 않고 갈 곳을 알린다.
    */
   const recoverable = incident.executions.some(
     (e) => e.available_recovery_runbook_ids.length > 0,
@@ -120,7 +124,9 @@ export function CloseIncidentDialog({
     {
       value: 'EXCESSIVE',
       label: '과잉이었다',
-      hint: recoverable ? copy.excessiveHint : '되돌릴 수 있는 실행이 없어 고를 수 없습니다.',
+      hint: recoverable
+        ? copy.excessiveHint
+        : '이 모달에서 넘어갈 복구 실행이 없습니다 — 되돌릴 조치가 있으면 [제안 조치]에서 실행하세요.',
       disabled: !recoverable,
     },
   ];

@@ -1203,10 +1203,18 @@ export function incidentView(
   // 종료 처리된 건은 상태·제안·판단이 함께 확정된다 — 서버도 종료 시 남은 제안을
   // INVALIDATED로 정리하므로(workflows.resolve_incident) 여기서 제안을 비우지 않으면
   // `RESOLVED`에 제안이 남아 상세 응답 불변식을 깬다.
+  // updated_at도 종료 시각으로 올린다 — 실 BE는 종료 갱신에 onupdate가 걸려(db/models.py)
+  // resolved_at > updated_at이 나올 수 없고, INC-002 헤더가 `갱신` 시각을 그린다.
   const resolved = resolutionsByIncidentId.get(incident.incident_id);
   if (resolved !== undefined) {
     return applyOverrides(
-      { ...view, status: 'RESOLVED', recommendations: [], ...resolved },
+      {
+        ...view,
+        status: 'RESOLVED',
+        recommendations: [],
+        ...resolved,
+        updated_at: resolved.resolved_at,
+      },
       overrides,
     );
   }
