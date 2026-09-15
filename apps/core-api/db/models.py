@@ -114,7 +114,20 @@ class CollectionRun(Base):
         DateTime(timezone=True), nullable=True
     )
 
-    __table_args__ = (Index("ix_collection_runs_started_at", "started_at"),)
+    __table_args__ = (
+        Index("ix_collection_runs_started_at", "started_at"),
+        # 리전별 최신 run 조회(latest_collection_run_per_region)가 5분 스캔으로 쌓이는
+        # 행을 전부 정렬하지 않게 — (region, started_at DESC, id DESC) 순서로 LIMIT 1 을
+        # 찍는다. 두 번째 키 id 는 동시각 tie-break 이자, ix_collection_runs_started_at
+        # (started_at 단독)이 이 정렬을 대신하지 못하게 해 플래너가 그 인덱스를 최신순으로
+        # 훑다가 리전 필터로 버리는 경로(PR #344 리뷰)를 고르지 않게 한다.
+        Index(
+            "ix_collection_runs_region_started_at",
+            "region",
+            text("started_at DESC"),
+            text("collection_run_id DESC"),
+        ),
+    )
 
 
 class Asset(Base):
@@ -198,6 +211,9 @@ class MetricSummary(Base):
     __table_args__ = (
         UniqueConstraint("asset_id", "collection_run_id"),
         CheckConstraint("window_end >= window_start", name="window_ordered"),
+        # 신선한 메트릭 재사용(fresh_ec2_metric_summaries)의 window_end >= 기준 시각 —
+        # 회차마다 쌓이는 요약을 전부 훑지 않고 최근 구간만 읽는다.
+        Index("ix_metric_summaries_window_end", text("window_end DESC")),
     )
 
 
@@ -227,6 +243,14 @@ class RuleEvaluation(Base):
             name="health_score_range",
         ),
         Index("ix_rule_evaluations_verdict", "verdict"),
+        # 자산별 최신 판정(latest_rule_evaluation / latest_rule_evaluation_by_asset) —
+        # 정렬 키와 같은 순서라 자산마다 인덱스 첫 항목 1건으로 끝난다.
+        Index(
+            "ix_rule_evaluations_asset_evaluated_at",
+            "asset_id",
+            text("evaluated_at DESC"),
+            text("rule_evaluation_id DESC"),
+        ),
     )
 
 
