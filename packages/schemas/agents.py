@@ -16,8 +16,9 @@
 #   - RULE 근거와 최상위 rule_evaluation이 같은 객체에서 나왔는지는 입력 계약이 본다
 #     (Issue #265). 입력 안에서 닫히는 대조라 Workflow로 미루지 않는다.
 #   - 후보 parameters는 Runbook별 typed 모델이다(#154, runbook_parameters.py).
-#     AI가 정하는 값만 싣는다 — 자원 ID는 target_arn에서, 조회값과 evidence_id는
-#     실행 접수 시점에 채운다. 화면 표시본(display_parameters)은 Draft에 없다.
+#     후보 시점에 정해지는 값만 싣는다 — AI가 정하는 값과, 규칙 하나로 답이 정해져
+#     그래프가 계산하는 값(#251 RIGHTSIZING 목표 타입). 자원 ID는 target_arn에서,
+#     조회값과 evidence_id는 실행 접수 시점에 채운다. 화면 표시본(display_parameters)은 Draft에 없다.
 #     서버가 parameters에서 생성하므로 LLM이 지을 자리를 두지 않는다.
 #   - Capability의 파라미터 계약 메타데이터는 세부 계약 확정 후 추가한다(#49 확정 —
 #     이번 범위에서 제외).

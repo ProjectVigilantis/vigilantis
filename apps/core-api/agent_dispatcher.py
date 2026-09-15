@@ -241,7 +241,9 @@ def build_graph_input(db: Session, incident_id: str) -> AgentGraphInput:
     if rule_evaluation.verdict is None:
         raise _GraphInputUnavailable("RULE 근거에 판정이 없습니다")
     capabilities = build_finops_capabilities(
-        asset_type=asset.asset_type, verdict=rule_evaluation.verdict
+        asset_type=asset.asset_type,
+        verdict=rule_evaluation.verdict,
+        instance_type=getattr(asset.spec, "instance_type", None),
     )
     if not capabilities:
         # 조치 공간의 공백 — 판정이 조치 가능하다고 본 자산에 걸 조치가 메뉴에 없다.

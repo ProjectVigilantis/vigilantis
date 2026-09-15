@@ -4,7 +4,7 @@
   "converter": "apps/core-api/ai/evaluation/cases.py :: finops_cases — #237 의 것을 그대로 쓴다(이 카드에서 사본을 만들지 않는다)",
   "excluded_fields": {
     "summary_lines": "LLM 이 짓는 문장이라 내용을 고정할 수 없다. 개수만 담는다 — 문장 품질 판정은 #237 의 결함 체크리스트·사실 정합성 검사 몫이다(#234 §결정)",
-    "candidates[].parameters": "target_instance_type 은 #251 이 미결이고, 골든 6건이 전부 t3.small 로 수렴해 변별력이 없다(#234 §결정)",
+    "candidates[].parameters": "target_instance_type 은 AI 산출이 아니라 서버 규칙이 계산한다(#251 — packages/schemas/rightsizing_policy.py). AI 정답지가 채점할 값이 아니다(#234 §결정)",
     "candidates 순서": "계약이 순서를 정하지 않는다",
     "토큰 사용량·응답 시간": "산출의 정확성 축이 아니다"
   },

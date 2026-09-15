@@ -15,6 +15,9 @@
 #   - Guardrail·DB 저장·AWS 실행·승인은 그래프 밖이다(ADR-0005 설계 원칙 3).
 #   - 모델이 지어낼 수 없는 값은 그래프가 고정한다 — 후보 Runbook은 입력 capabilities
 #     안에서만, target_arn은 입력 자산과 그 관계 자산 안에서만 받는다. 벗어나면 FAILED다.
+#   - 답이 규칙 하나로 정해지는 파라미터는 모델에 묻지 않고 그래프가 계산해 채운다 —
+#     다운사이징 목표 타입(#251, schemas/rightsizing_policy.py). 출력 스키마·capability
+#     명세에서 그 키를 빼 모델이 채울 자리 자체를 두지 않는다.
 #   - 후보 evidence_ids가 입력 Evidence 안에 있는지와 FINOPS의 reviewed_risk_level=null은
 #     여기서 보지 않는다 — 계약이 Workflow 몫으로 못 박았다(schemas/agents.py 계약 원칙).
 # ==============================================================================
@@ -31,6 +34,7 @@ from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, ValidationErr
 from ai.capabilities import secops_action_targets
 from ai.model_client import AIModelClient, AIModelError, AIModelRequest
 from schemas.agents import (
+    AgentAssetContext,
     AgentGraphOutput,
     FinOpsGraphInput,
     RunbookCandidateDraft,
@@ -40,7 +44,8 @@ from schemas.agents import (
 from schemas.api.incidents import RiskLevel
 from schemas.evidence import EvidenceType
 from schemas.incidents import AgentInvocationStatus
-from schemas.runbook_parameters import CANDIDATE_PARAMETER_MODELS
+from schemas.rightsizing_policy import rightsizing_target_type
+from schemas.runbook_parameters import CANDIDATE_PARAMETER_MODELS, ai_decided_parameter_names
 from schemas.runbooks import RunbookId
 
 # ------------------------------------------------------------------------------
@@ -81,7 +86,9 @@ from schemas.runbooks import RunbookId
 # build_outbound_payload()가 system_prompt에도 마스킹을 적용해 지침이 조용히 잘린다
 # (ai/model_client.py 계약 원칙).
 
-FINOPS_PROMPT_VERSION = "v1"
+# v2(#251) — 문구는 v1 그대로이고, 후보 출력 스키마와 RIGHTSIZING capability 명세에서
+# target_instance_type이 빠졌다(그래프가 규칙으로 계산한다).
+FINOPS_PROMPT_VERSION = "v2"
 
 _FINOPS_SUMMARY_SYSTEM_PROMPT = (
     "너는 AWS 비용 최적화 인시던트를 관제자에게 설명한다. 관제자는 이 세 줄과 조치 카드만 "
@@ -153,7 +160,9 @@ class ProposedCandidate(BaseModel):
     어느 키가 실제로 쓰이는지는 runbook_id가 정하며, 조립은 _parameter_values()가 한다.
 
     자원 ID·현재 스펙 같은 조회값은 여기에 없다 — AI가 정하는 값만 싣는다
-    (packages/schemas/runbook_parameters.py 계약 원칙 ①).
+    (packages/schemas/runbook_parameters.py 계약 원칙 ①). 서버가 규칙으로 계산하는
+    값(다운사이징 목표 타입, #251)도 없다 — 자리가 있으면 모델이 채우고, 채운 값은
+    흔들린다(#237 계측에서 유일하게 흔들린 필드였다).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -168,7 +177,6 @@ class ProposedCandidate(BaseModel):
     cidr_block: Optional[str] = None
     protocol: Optional[str] = None
     egress: Optional[StrictBool] = None
-    target_instance_type: Optional[str] = None
     min_size: Optional[StrictInt] = None
     max_size: Optional[StrictInt] = None
 
@@ -266,28 +274,76 @@ def _capability_payload(capability: RunbookCapability) -> dict[str, Any]:
 
     parameter_constraints는 JSON Schema에 나타나지 않는 model_validator 제약의 문구다
     (#243). 제약이 없는 런북은 빈 목록이다 — 채울 것이 없다는 것도 정보다.
+
+    명세는 AI 몫 키만 담는다. 그래프가 규칙으로 계산하는 키(#251 — 다운사이징 목표
+    타입)를 실으면 모델에게 채우라는 지시가 되어, 흔들리던 값이 다시 모델 몫이 된다.
     """
     payload = capability.model_dump(mode="json")
     model = CANDIDATE_PARAMETER_MODELS.get(capability.runbook_id)
-    schema = model.model_json_schema() if model is not None else {}
-    payload["required_parameters"] = sorted(model.model_fields) if model else []
-    payload["parameter_schema"] = schema.get("properties", {})
+    properties = model.model_json_schema().get("properties", {}) if model is not None else {}
+    names = ai_decided_parameter_names(capability.runbook_id)
+    payload["required_parameters"] = names
+    # 키 순서는 계약 모델의 필드 순서 그대로 둔다 — 순서가 바뀌면 같은 메뉴라도 모델 입력이
+    # 달라져 이전 판과의 계측 비교가 흐려진다
+    payload["parameter_schema"] = {
+        name: schema for name, schema in properties.items() if name in names
+    }
     payload["parameter_constraints"] = list(_PARAMETER_CONSTRAINTS.get(capability.runbook_id, ()))
     return payload
 
 
-def _parameter_values(runbook_id: RunbookId, proposal: ProposedCandidate) -> dict[str, Any]:
-    """평평한 후보 필드에서 그 Runbook의 파라미터 키만 추린다.
+def _parameter_values(
+    runbook_id: RunbookId, proposal: ProposedCandidate, asset: AgentAssetContext
+) -> dict[str, Any]:
+    """평평한 후보 필드에서 그 Runbook의 AI 몫 키만 추리고, 서버 몫 키를 계산해 붙인다.
 
     고른 Runbook이 받지 않는 키는 버린다 — 실행으로 나가지 않는 값이라 무해하다.
     반대로 필요한 키가 null이면 여기서 걸러내지 않는다. RunbookCandidateDraft 검증이
     거절해 FAILED가 되어야 하며, 조용히 채우면 모델이 정하지 않은 값이 실행으로 간다.
+    서버 몫 키(#251)는 예외다 — 모델에게 묻지 않은 값이라 여기서 규칙으로 채운다.
     """
-    model = CANDIDATE_PARAMETER_MODELS.get(runbook_id)
-    if model is None:
+    if runbook_id not in CANDIDATE_PARAMETER_MODELS:
         return {}  # 롤백 3종 — 후보가 될 수 없다는 판정은 계약 검증기가 한다
     values = proposal.model_dump()
-    return {name: values[name] for name in model.model_fields if name in values}
+    chosen = {
+        name: values[name] for name in ai_decided_parameter_names(runbook_id) if name in values
+    }
+    chosen.update(_server_parameter_values(runbook_id, asset))
+    return chosen
+
+
+def _server_parameter_values(runbook_id: RunbookId, asset: AgentAssetContext) -> dict[str, Any]:
+    """규칙으로 계산하는 후보 파라미터 — SERVER_COMPUTED_CANDIDATE_PARAMS의 값. (Issue #251)
+
+    자산 문맥의 instance_type은 Detection 당시 스냅샷이다(agent_dispatcher.py 불변식 ⓑ)
+    — 판정이 본 스펙과 목표 타입이 같은 시점을 가리킨다. 계산할 수 없으면 예외를 올려
+    FAILED로 간다. 메뉴 빌더가 그런 자산에는 다운사이징을 올리지 않으므로(ai/capabilities.py
+    축 ③) 정상 경로에서는 오지 않는다.
+    """
+    if runbook_id is not RunbookId.RUNBOOK_EC2_RIGHTSIZING:
+        return {}
+    target = rightsizing_target_type(getattr(asset.spec, "instance_type", None))
+    if target is None:
+        raise ValueError("다운사이징 목표 타입을 계산할 수 없는 자산입니다")
+    return {"target_instance_type": target}
+
+
+def _canonical_evidence_ids(
+    cited: list[str], graph_input: FinOpsGraphInput | SecOpsGraphInput
+) -> list[str]:
+    """후보가 인용한 근거를 입력 근거 순서로 정렬한다. (Issue #251 v2 재계측)
+
+    인용할 근거의 **집합**은 모델이 정하지만, 순서는 모델이 정할 이유가 없는 값이다. 그런데
+    첫 항목이 실행 파라미터의 evidence_id가 되므로(schemas/runbook_parameters.py
+    build_precheck_parameters) 순서가 흔들리면 실행으로 나가는 값이 흔들린다 — v2 재계측
+    60회에서 같은 두 근거의 순서만 뒤집힌 회차가 1회 나왔다. target_instance_type과 같은
+    처리로 닫는다.
+
+    입력에 없는 ID는 버리지 않고 뒤에 원래 순서대로 둔다(정렬이 안정적이다). 그 거절은
+    입력·출력을 함께 아는 Workflow가 한다(agent_dispatcher.py 검증 ⓐ).
+    """
+    position = {item.evidence_id: index for index, item in enumerate(graph_input.evidences)}
+    return sorted(cited, key=lambda evidence_id: position.get(evidence_id, len(position)))
 
 
 def _to_draft(proposal: ProposedCandidate, graph_input: FinOpsGraphInput) -> RunbookCandidateDraft:
@@ -301,8 +357,10 @@ def _to_draft(proposal: ProposedCandidate, graph_input: FinOpsGraphInput) -> Run
         {
             "runbook_id": proposal.runbook_id.value,
             "target_arn": proposal.target_arn,
-            "parameters": _parameter_values(proposal.runbook_id, proposal),
-            "evidence_ids": proposal.evidence_ids,
+            "parameters": _parameter_values(
+                proposal.runbook_id, proposal, graph_input.asset_context
+            ),
+            "evidence_ids": _canonical_evidence_ids(proposal.evidence_ids, graph_input),
         }
     )
 
@@ -606,8 +664,10 @@ def _secops_validate(state: _SecOpsState) -> dict[str, Any]:
             drafts.append(RunbookCandidateDraft(
                 runbook_id=proposal.runbook_id,
                 target_arn=proposal.target_arn,
-                parameters=_parameter_values(proposal.runbook_id, proposal),
-                evidence_ids=proposal.evidence_ids,
+                parameters=_parameter_values(
+                    proposal.runbook_id, proposal, graph_input.asset_context
+                ),
+                evidence_ids=_canonical_evidence_ids(proposal.evidence_ids, graph_input),
             ))
         return {"output": AgentGraphOutput(
             invocation_status=(AgentInvocationStatus.SUCCEEDED if drafts
