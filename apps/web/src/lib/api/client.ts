@@ -1,4 +1,4 @@
-// API 호출 계층 — 오류 봉투를 ApiError로 변환하고 계약 엔드포인트 4종의 타입드 함수를 제공합니다.
+// API 호출 계층 — 오류 봉투를 ApiError로 변환하고 계약 엔드포인트 5종의 타입드 함수를 제공합니다.
 
 import type {
   AssetsResponse,
@@ -10,6 +10,7 @@ import type {
   IncidentResponse,
   IncidentStatus,
   IncidentsResponse,
+  ResolutionJudgement,
 } from '@/types/api';
 
 /**
@@ -79,6 +80,22 @@ export function getIncidents(filter?: {
 
 export function getIncident(incidentId: string): Promise<IncidentResponse> {
   return request<IncidentResponse>(`/incidents/${encodeURIComponent(incidentId)}`);
+}
+
+/**
+ * 관제자 종료 처리(#199). **Idempotency Key를 받지 않는다** — 종료는 AWS를 바꾸지 않고
+ * Incident 상태 하나만 옮기므로 조건부 갱신 자체가 멱등이다. 이미 종료된 건의 재요청도
+ * 200이며 처음 저장된 판단을 그대로 돌려준다(schemas/api/incidents.py `ResolveIncidentRequest`).
+ */
+export function resolveIncident(
+  incidentId: string,
+  resolution: ResolutionJudgement,
+): Promise<IncidentResponse> {
+  return request<IncidentResponse>(`/incidents/${encodeURIComponent(incidentId)}/resolve`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ resolution }),
+  });
 }
 
 /**

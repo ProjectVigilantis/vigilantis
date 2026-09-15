@@ -8,6 +8,8 @@ import {
   byPreset,
   clampOption,
   isPreemptive,
+  isResolvable,
+  RESOLVABLE_STATUSES,
   riskOptionsOf,
   statusOptionsOf,
   visibleIncidents,
@@ -159,4 +161,19 @@ test('선제차단된 건은 승인 대기 프리셋에 담기지 않는다 — 
 test('AGENT_WAIT 승인 대기는 그대로 승인 대기에 남는다 — 선제차단이 아니다', () => {
   const items = [item('agent', 'AWAITING_APPROVAL', 'AGENT_WAIT')];
   assert.deepEqual(byPreset(items, 'PENDING').map((i) => i.incident_id), ['agent']);
+});
+
+// ── 종료 처리 출발 상태 (#291)
+
+test('종료 처리 출발 상태는 서버 계약 3종뿐이다 — INCIDENT_RESOLVABLE_STATUSES 사본', () => {
+  // 손으로 베낀 서버 상수라 원본이 바뀌면 조용히 갈린다 — 넓어지면 화면이 409를 만들고,
+  // 좁아지면 AWAITING_CLOSURE가 다시 막다른 길이 된다.
+  assert.deepEqual([...RESOLVABLE_STATUSES].sort(), [
+    'AWAITING_APPROVAL',
+    'AWAITING_CLOSURE',
+    'FAILED',
+  ]);
+  assert.equal(isResolvable('ANALYZING'), false);
+  assert.equal(isResolvable('ACTION_IN_PROGRESS'), false);
+  assert.equal(isResolvable('RESOLVED'), false);
 });
