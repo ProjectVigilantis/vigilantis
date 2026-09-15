@@ -1,6 +1,6 @@
 # E2E 시연 시나리오 설계서 (1차)
 
-> **담당**: 박지현 (QA & Scenario) · **이슈**: #132 · **작성**: 2026-08-25 · **현황 갱신**: 2026-08-31 (김세혁 — §대조 필요 목록 1·2번 상태·원천 재지정 / 박지현 — 본문 🔶 잔여 정리·번호 표기) · 2026-09-01 (박지현 — §대조 1번 ② 해소 반영) · 2026-09-02 (박지현 — T1 1단계 골든 실경로 실측·기재, §대조 8·9번 신설) · 2026-09-04 (박지현 — 골든 EBS 편입 반영, §자산 화면의 분포 숫자를 재현 명령으로 대체) · 2026-09-08 (김세혁 — §T1 7·8·9번 상태 축 정정, §대조 3번 분리·9번 재서술) · 2026-09-09 (박지현 — §대조 8번 해소 반영, 골든 커버리지 표에 관계 축 추가)
+> **담당**: 박지현 (QA & Scenario) · **이슈**: #132 · **작성**: 2026-08-25 · **현황 갱신**: 2026-08-31 (김세혁 — §대조 필요 목록 1·2번 상태·원천 재지정 / 박지현 — 본문 🔶 잔여 정리·번호 표기) · 2026-09-01 (박지현 — §대조 1번 ② 해소 반영) · 2026-09-02 (박지현 — T1 1단계 골든 실경로 실측·기재, §대조 8·9번 신설) · 2026-09-04 (박지현 — 골든 EBS 편입 반영, §자산 화면의 분포 숫자를 재현 명령으로 대체) · 2026-09-08 (김세혁 — §T1 7·8·9번 상태 축 정정, §대조 3번 분리·9번 재서술) · 2026-09-09 (박지현 — §대조 8번 해소 반영, 골든 커버리지 표에 관계 축 추가) · 2026-09-15 (김세혁 — §대조 3번 ⓑ 실측 해소, §T1 7번 행·§T2 관통 실측 반영)
 > **목적**: 중간 발표(10/1) MVP 시연 대본의 원천이자 `tests/test_e2e_scenario.py`의 명세.
 > **범위 기준**: `docs/PROJECT_STATUS.md`(SSOT)를 따른다. 충돌하면 SSOT가 이긴다.
 
@@ -46,7 +46,7 @@
 
 **확정본 대조가 필요한 항목은 §대조 필요 목록에 모아뒀다.** 본문의 🔶 에는 **그 목록의 번호를 함께 적는다** — 번호가 없으면 무엇을 기다리는 표시인지 읽는 사람이 알 수 없다. 런북별 세부 실행 단계와 `parameters_schema`는 §대조 2번으로 해소됐고(2026-08-31, PR #205), **1번은 절반이 해소돼**(2026-09-01 — Golden SecOps 정답 12건, PR #223 · #242) `evaluate_threat()` 워크플로 배선 하나만 남았다.
 
-남은 🔶 는 **셋**이다 — 그 배선(1번) · Status Check **실패 주입 방법**(3번 — 3번의 자동 원복 엔진 쪽은 2026-09-03에 해소됐다, #241 / PR #256) · **판정→Intake 배선 부재로 T1 2단계 이후와 T2의 Incident 생성이 막힌 것(9번)**. **8번(토폴로지 뷰를 골든으로 못 채우는 것)은 2026-09-08에 해소됐다** — 자산 유형 **7/7종** · `RelationType` **6/6종**이 골든에서 선다(#271 / PR #314). 8·9번은 2026-09-02에 신설했다. **막혀 있던 것이 늘어난 게 아니라, mock으로 덮여 안 보이던 것을 목록에 올린 것이다** — 같은 날 자산 화면(T1 1단계)은 골든 실데이터로 서는 것을 실측해 mock을 벗겼고, 8번은 그 뒤 골든이 노드·엣지까지 채우며 닫혔다.
+남은 🔶 는 **셋**이다 — 그 배선(1번) · Status Check **실패 주입 방법**(3번 — 자동 원복 엔진은 2026-09-03에(#241 / PR #256), **`stop_instances` 주입 경로(ⓑ)는 2026-09-15 실측으로 해소됐고 `impaired`(ⓐ)만 실 AWS로 남는다**) · **판정→Intake 배선 부재로 T1 2단계 이후와 T2의 Incident 생성이 막힌 것(9번)**. **8번(토폴로지 뷰를 골든으로 못 채우는 것)은 2026-09-08에 해소됐다** — 자산 유형 **7/7종** · `RelationType` **6/6종**이 골든에서 선다(#271 / PR #314). 8·9번은 2026-09-02에 신설했다. **막혀 있던 것이 늘어난 게 아니라, mock으로 덮여 안 보이던 것을 목록에 올린 것이다** — 같은 날 자산 화면(T1 1단계)은 골든 실데이터로 서는 것을 실측해 mock을 벗겼고, 8번은 그 뒤 골든이 노드·엣지까지 채우며 닫혔다.
 
 ---
 
@@ -102,7 +102,7 @@ IN_PROGRESS → SUCCESS
 | 4 | 가드레일 4단계 | — (화면 표시 없음) · 통과 신호는 `status: AWAITING_APPROVAL`로 실행 버튼이 열리는 것 | (내부) | `INCIDENT_UPDATED` | 슬라이드 컷으로 분리 |
 | 5 | 관제자 승인 | **[조치 실행]** 클릭 | `POST /api/v1/actions/execute`<br>**`202 Accepted`** → `IN_PROGRESS`<br>*(같은 `idempotency_key` 재요청은 `200 OK` 멱등 재생)* | `EXECUTION_UPDATED` | — |
 | 6 | 실행 | 진행 표시 | `ec2.modify_instance_attribute` | `EXECUTION_UPDATED` | LocalStack 재기동 후 재시도 |
-| 7 | **Status Check 실패** | 실패 표시 | 🔶 `get_waiter` 2/2 실패 — §대조 필요 3번 | `EXECUTION_UPDATED` **Execution `ROLLBACK_INITIATED`**<br>`INCIDENT_UPDATED` **Incident `ACTION_IN_PROGRESS`** | **핵심 컷** — 실패 주입이 안 되면 T1 성립 안 함 |
+| 7 | **Status Check 실패** | 실패 표시 | `get_waiter` 2/2 실패 — 6번 실행 주기가 끝난 뒤 대상 인스턴스를 **`stop_instances`로 멈춰** 만든다(§대조 필요 3번 ⓑ) | `EXECUTION_UPDATED` **Execution `ROLLBACK_INITIATED`**<br>`INCIDENT_UPDATED` **Incident `ACTION_IN_PROGRESS`** | **핵심 컷** — 주입 창(실행 주기 뒤·판정 주기 전)을 놓치면 판정이 `OK`로 끝나 원복이 일어나지 않는다 |
 | 8 | **자동 원복 발동** | **복구 중** | `RUNBOOK_EC2_REVERT_SIZE` **자식 실행 접수**<br>`trigger_source: AUTO_ON_FAILURE` · `parent_execution_id` = 원본<br>*(상태 전이가 아니라 새 실행 레코드다)* | **없다** — 접수는 발행하지 않는다(`dispatcher.py:335-337`). 화면의 "복구 중"은 **7번 이벤트로 이미 그려져 있다** | 접수만 화면으로 설명 |
 | 9 | 원복 완료 | **AST-001로 이동해** 인스턴스 유형 복귀 확인 | 자식 `SUCCESS` → 원본 Execution `ROLLED_BACK`(함께 확정) | `EXECUTION_UPDATED`<br>`INCIDENT_UPDATED` **Incident `AWAITING_CLOSURE`** | 관제자 [종료 판단]이 남는다 |
 
@@ -221,6 +221,20 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 
 > 두 런북은 9/11 내부 P0 게이트의 P0 4종에 포함된다. 여기서 어긋나면 **T2 시연 경로가 통째로 막힌다.** 실 AWS 스모크(9주차 10/02–10/08) 최우선 확인 대상이다.
 
+### 관통 실측 — 2026-09-15 (SSOT 6주차 판정 기준 ⓔ)
+
+**위협 관측부터 해제까지 LocalStack에서 끝까지 갔고, 사람 조작은 [조치 실행] 2회뿐이었다.** 입력은 S3이고, 대상만 시드 인스턴스 `vigilantis-seed-idle`로 바꿨다(`--target-arn`) — 그 서브넷에 시드 NACL이 연결돼 있어 `PROTECTED_BY` 관계가 선다.
+
+| # | 단계 | 누가 부르나 | 결과 |
+| --- | --- | --- | --- |
+| 1 | 관측 → 접수 | `scripts/inject_mock_threat.py --prepare-inbox` → `MockThreatConsumer`(#322) | SECOPS Incident `ANALYZING` · 초기 `HIGH` · `PRE_MITIGATION_0_5S` · `INCIDENT_CREATED` |
+| 2–4 | AI 분석 → 계약 검증 → 가드레일 | agent dispatcher의 SecOps 그래프(#323 · 실 모델 호출 3회) | 재평가 `HIGH` · 후보 `RUNBOOK_NACL_ADD_DENY`(`203.0.113.10/32` · tcp · 규칙 100) `EXECUTABLE` · 가드레일 `PASS` → `AWAITING_APPROVAL` |
+| 5 | **[조치 실행] ①** | 관제자 | `202` → dispatcher 1주기 안에 차단 `SUCCESS` · NACL에 `100 · 203.0.113.10/32 · 6 · deny` |
+| 6 | 해제 후보 | 같은 주기의 해제 제안(#329) | `RUNBOOK_NACL_RESTORE`(규칙 100 · 인바운드) `EXECUTABLE` · 가드레일 `PASS` → `AWAITING_APPROVAL` |
+| 7–8 | **[조치 실행] ②** | 관제자 | `202` → 해제 `SUCCESS` · NACL 커스텀 규칙 0건 · Incident `AWAITING_CLOSURE` |
+
+**재는 방식의 한계** — 앱을 띄워 타이머에 맡긴 것이 아니라, 타이머가 부르는 함수(`MockThreatConsumer.consume_once` · agent dispatcher의 건별 처리 · `dispatcher.run_dispatch_cycle`)를 **같은 순서로 직접** 불렀고, HTTP는 같은 라우터를 `TestClient`로 탔다. 확인한 것은 **경로가 끝까지 이어진다**는 것이며, 타이머 기동은 게이트 판정서 [`E2E_GATE_0911.md`](E2E_GATE_0911.md) §2-⑥·⑦의 기동 로그가 보인다. AI 분석은 대상 Incident 1건만 골라 불렀다(수집이 함께 만든 FINOPS Incident는 분석하지 않았다 — 모델 호출 비용). 모델 호출 없이 분석 결과를 주입해 dev `77d5cae`에서 한 번 더 돌렸고 같은 전이가 나왔다.
+
 ## 1차 시연에서 빼는 것과 그 이유
 
 | 항목 | 빼는 이유 |
@@ -263,7 +277,7 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 | --- | --- | --- | --- |
 | 1 | T2 2번 위험도 판정값(`initial_risk_level`) | **판정 규칙과 `RiskReasonCode` 6종은 확정**(#210 / PR #206 — `packages/schemas/events.py`, `apps/core-api/security/risk_evaluator.py::evaluate_threat`). **② 정답지는 해소됐다**(2026-09-01) — `datasets/golden/secops/expected/`에 입력 12건과 1:1로 대응하는 정답 12건이 있다(PR #223 10건 · PR #242 SSH MEDIUM 밴드 2건). **남은 것은 ① 하나다** — `evaluate_threat()`가 **Security Workflow에 배선되지 않아** 위협 접수 → 배지 경로가 아직 없다(현재 호출처는 테스트뿐) | ① SecOps 워크플로 배선 |
 | 2 | ~~런북별 세부 실행 단계·`parameters_schema`~~ ✅ 해소(2026-08-31) | 확정본이 SSOT §Action Whitelist로 이관되고, `parameters_schema`는 `packages/schemas/runbook_parameters.py`(#154 / PR #178), 세부 실행 단계·`target_api`는 [ADR-0007](adr/0007-guardrail-dryrun-executor-precheck-contract.md) §Context·§5가 갖는다 | — |
-| 3 | Status Check 실패 **주입 방법** | **판정기(`wait_for_status_check()` 3분기)와 자동 원복 엔진은 둘 다 섰다**(아래 3-B). 막힌 것은 주입이며, **분기가 둘이고 처지가 다르다.** ⓐ `impaired` 분기 — LocalStack에 실제 부팅·헬스체크가 없어 **만들 수 없다**([ADR-0006](adr/0006-localstack-team-standard-env.md) §4 2행) ⓑ `_NOT_BOOTING_STATES`(`stopping`·`stopped`·`shutting-down`·`terminated`) 분기 — **`stop_instances`로 도달할 수 있다.** LocalStack Community가 지원하는 호출이고, 가짜 AWS의 상태만 조작하므로 프로덕션 코드에 데모 분기를 넣지 않는다. **미측정 전제 하나** — `describe_instance_status(IncludeAllInstances=True)`가 stopped 인스턴스를 돌려주는가. 안 돌려주면 사유가 `PRECHECK_TARGET_NOT_FOUND`가 되어 서사가 "기동 실패"가 아니라 "대상 없음"이 된다 | **ⓑ 측정 = 6주차(9/14–9/18)** — 판정 기준 ⓑ, 김세혁. 가능하면 T1 7·8·9번이 10/1(목) 시연에서 실경로가 된다.<br>**ⓐ 해소 = 9주차(10/02–10/08) 실 AWS 스모크**(ADR-0006 §4, PR #244 본문 — 2026-09-14 일정 재편으로 7주차에서 옮겼다) |
+| 3 | Status Check 실패 **주입 방법** — **ⓑ 해소(2026-09-15)** · ⓐ만 남음 | **판정기(`wait_for_status_check()` 3분기)와 자동 원복 엔진은 둘 다 섰다**(아래 3-B). 막힌 것은 주입이었고 분기가 둘이다. **ⓑ `_NOT_BOOTING_STATES` 분기는 LocalStack에서 선다**(2026-09-15 실측 · [ADR-0006](adr/0006-localstack-team-standard-env.md) §4 2행 6차 개정). 6번 실행 주기가 끝난 뒤 대상 인스턴스를 `stop_instances`로 멈추면 `describe_instance_status(IncludeAllInstances=True)`가 `stopped`를 돌려줘 판정이 `FAILED`("기동 실패 — 인스턴스 상태가 stopped입니다")로 떨어진다 — 사유가 `PRECHECK_TARGET_NOT_FOUND`로 갈리지 않는다. 그 뒤 7·8·9번이 단계표의 상태값 그대로 흐른다(원본 `ROLLBACK_INITIATED` → `REVERT_SIZE` 자식 `AUTO_ON_FAILURE` → 원본 `ROLLED_BACK` · Incident `AWAITING_CLOSURE`). 가짜 AWS의 상태만 바꾸므로 프로덕션 코드에 데모 분기가 없고, 에뮬레이터 동작은 `apps/core-api/services/tests/test_status_check_localstack.py`가 지킨다. **대본이 지킬 조건 둘** — ① 창: 실행 주기 뒤·판정 주기 전(`DISPATCH_INTERVAL_SECONDS`, 기본 10초). 대기 도중에는 틈이 없다 ② 대기: 멈춘 인스턴스는 waiter가 `STATUS_CHECK_WAIT_*` 전량(기본 3분)을 쓴 뒤 `FAILED`가 나므로 시연에서는 조인다. **ⓐ `impaired` 분기만 남는다** — LocalStack에 헬스체크가 없어 만들 수 없다 | **ⓑ 해소 → T1 7·8·9번을 10/1(목) 시연에서 실경로로 세울 수 있다**(판정 기준 ⓑ).<br>**ⓐ 해소 = 9주차(10/02–10/08) 실 AWS 스모크**(ADR-0006 §4, PR #244 본문 — 2026-09-14 일정 재편으로 7주차에서 옮겼다) |
 | 3-B | ~~자동 원복 엔진~~ ✅ 해소(2026-09-03) | `RUNBOOK_EC2_REVERT_SIZE` 실행과 `AUTO_ON_FAILURE` 자동 발동이 dev에 들어갔다(#241 / PR #256). 2/2 판정 자체는 #240 / PR #244로 먼저 섰다. **3번을 한 줄로 두면 이 머지가 3번 전체를 해소한 것처럼 읽히므로 갈라 둔다** — 주입 방법은 그대로 남는다 | — |
 | 4 | ~~가드레일 ③ 실제 통과~~ ✅ 해소(2026-08-31) | **4단계가 전부 섰다.** ③ ARN Match 구현(#177 / PR #202 — DB 수집 ARN 대조로 Scope Escalation 차단, ① NUL 문자 차단 포함)으로 `tests/test_guardrails.py`의 placeholder skip 1건이 해제됐다. ④ Dry-Run은 `precheck()` 확정 10종 구현 완료(#129 / PR #147 · 실측 #130 / PR #170) | — |
 | 5 | 화면 구현 상태 | 아래 표 | 카드별 |
@@ -300,7 +314,7 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 
 | 테스트 | 대응 트랙 | 검증 범위 | 여는 조건 |
 | --- | --- | --- | --- |
-| `test_t1_idle_ec2_downsize_and_auto_rollback_flow` | **T1** | Golden A1 → `COST_CANDIDATE` → 가드레일 → 실행 접수 → Status Check 실패 → `ROLLED_BACK` | 대조 3번 — **실패 주입 방법**(자동 원복은 2026-09-03 해소) · 9번(판정→Intake 배선) |
+| `test_t1_idle_ec2_downsize_and_auto_rollback_flow` | **T1** | Golden A1 → `COST_CANDIDATE` → 가드레일 → 실행 접수 → Status Check 실패 → `ROLLED_BACK` | 대조 3번 — 실패 주입 방법 ✅ **2026-09-15 해소**(`stop_instances` 주입 · 자동 원복은 2026-09-03 해소) · 9번(판정→Intake 배선) |
 | `test_t2_ssh_bruteforce_block_and_one_click_release_flow` | **T2** | Golden **S3** → Incident → `response_mode` 진입 → 승인 → `NACL_ADD_DENY`(`USER_APPROVAL`) → 원클릭 해제 → `NACL_RESTORE` | 대조 1번(판정기 워크플로 배선) · 9번(판정→Intake 배선) |
 
 **두 테스트 모두 Golden Dataset을 입력으로 쓴다.** 시연에 쓰는 데이터와 테스트에 쓰는 데이터가 같아야 "시연이 되면 테스트도 된다"가 성립한다.
