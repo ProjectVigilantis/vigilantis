@@ -267,23 +267,20 @@ def test_finops_incident_carries_no_risk_fields():
 # 있었으나 그건 낡은 문장이라 아래에서 고쳤다 — 남은 것이 무엇인지 흐려지기 때문이다.
 # ==============================================================================
 #
-# T1의 FinOps 판정 → Intake 배선은 #306으로 연결됐다. 남은 선행은
-# Status Check 실패 주입이다. T2는 **SECOPS Incident의 AI 분석(SecOps 그래프 · #323)**
-# 하나가 남았다 — agent_dispatcher가 아직 FINOPS만 넘겨, 차단 후보(NACL_ADD_DENY)를
-# 내는 주체가 없다. 나머지는 섰다: 모의 위협 → SECOPS Incident 접수(#322), 실행 경로
-# NACL 2종(ADD_DENY #297 · RESTORE #298), 차단 SUCCESS 뒤 해제 후보 생성(#329 —
-# 해제는 AI 추천 7종이라 [해제] 버튼이 EXECUTABLE 후보에서 렌더되는데, 그 후보를
-# dispatcher가 차단의 백업에서 만들어 가드레일 4단계를 통과시킨다).
-# #306은 COST_CANDIDATE·UNUSED만 연결하므로 T2의 선행까지 해소하지 않는다.
+# **두 트랙 모두 선행이 전부 닫혔다 — 남은 것은 테스트 본문이다**(SSOT 6주차 판정 기준 ⓐ).
+# T1은 FinOps 판정 → Intake 배선(#306)에 이어 Status Check 실패 주입이 2026-09-15에
+# 실측으로 섰다 — 실행 주기 뒤 대상 인스턴스를 stop_instances로 멈추면 판정이 FAILED로
+# 떨어져 자동 원복까지 흐른다(ADR-0006 §4 2행 6차 개정 · 설계서 §대조 3번).
+# T2는 SecOps 그래프(#323)가 차단 후보를 내면서 위협 접수(#322) → 차단(#297) → 해제 후보
+# 생성(#329) → 해제(#298)가 2026-09-15에 LocalStack에서 관통했다(설계서 §T2 관통 실측).
 #
 # 열리면 이 파일 위쪽의 전제 테스트가 이미 입력·런북 짝을 보증하고 있으므로,
 # 흐름 테스트는 **상태 전이만** 보면 된다. 경계 실사는 docs/E2E_GATE_0911.md.
 
 
 @pytest.mark.skip(
-    reason="Status Check 실패 주입 방법 없음 "
-    "— 설계서 §대조 3번(주입 방법). FinOps 배선은 #306, 자동 원복은 3-B 로 해소됨 "
-    "(#241 / PR #256) · 이슈 #301 · #246"
+    reason="본문 미작성 — 선행은 전부 해소됨(FinOps 배선 #306 · 자동 원복 #241 · "
+    "실패 주입은 stop_instances, ADR-0006 §4 2행 6차 개정) · SSOT 6주차 판정 기준 ⓐ"
 )
 def test_t1_idle_ec2_downsize_and_auto_rollback_flow():
     """T1 전 구간 — 설계서 §T1 단계표 1~9번.
@@ -309,9 +306,8 @@ def test_t1_idle_ec2_downsize_and_auto_rollback_flow():
 
 
 @pytest.mark.skip(
-    reason="SECOPS Incident의 AI 분석(SecOps 그래프 #323) 미연결 — 차단 후보를 내는 주체 없음 "
-    "(위협 접수 #322 · NACL 2종 실행 #297·#298 · 해제 후보 생성 #329로 해소, #306은 FinOps 배선) "
-    "— 설계서 §대조 1번·9번. SSOT 5주차 판정 기준 ⓑ · 이슈 #301 · #246"
+    reason="본문 미작성 — 선행은 전부 해소됨(위협 접수 #322 · SecOps 그래프 #323 · "
+    "NACL 2종 #297·#298 · 해제 후보 #329, 설계서 §T2 관통 실측) · SSOT 6주차 판정 기준 ⓐ"
 )
 def test_t2_ssh_bruteforce_block_and_one_click_release_flow():
     """T2 전 구간 — 설계서 §T2 단계표 1~8번.
