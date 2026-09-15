@@ -794,30 +794,7 @@ function seedIncident(seed: IncidentSeed): IncidentResponse {
   if (new Set(recommend.map((r) => r.runbook)).size !== recommend.length) {
     throw new Error(`${where}: recommendations에 같은 runbook_id가 중복될 수 없다`);
   }
-  for (const r of recommend) {
-    const expected = CANDIDATE_PARAM_KEYS[r.runbook];
-    if (expected === undefined) {
-      throw new Error(`${where}: ${r.runbook}은 AI 추천 후보가 될 수 없다(롤백 런북)`);
-    }
-    // 대상 자원 유형 대조. **수집 목록에 없는 자산은 통과시킨다** — 계약상 정상이며
-    // (미수집 자산의 인시던트) 그 경우 조인 결과가 null인 것을 화면이 이미 다룬다.
-    const targetAsset = assetsResponse.items.find((a) => a.arn === (r.target ?? seed.arn));
-    const wantType = CANDIDATE_TARGET_TYPE[r.runbook];
-    if (targetAsset && wantType && targetAsset.asset_type !== wantType) {
-      throw new Error(
-        `${where}: ${r.runbook}의 대상은 ${wantType}여야 하는데 ${targetAsset.asset_type}다 ` +
-          `(${targetAsset.arn})`,
-      );
-    }
-    const actual = Object.keys(r.params ?? {}).sort();
-    const want = [...expected].sort();
-    if (actual.join(',') !== want.join(',')) {
-      throw new Error(
-        `${where}: ${r.runbook}의 display_parameters 키가 서버 파생본과 다르다 — ` +
-          `기대 [${want.join(', ')}] / 실제 [${actual.join(', ')}]`,
-      );
-    }
-  }
+  // 후보 키·대상 유형·제목 대조는 손으로 쓴 5건도 받아야 해서 `assertIncidentContract`(아래)가 한다.
 
   return {
     incident_id: seed.id,
@@ -905,7 +882,9 @@ const seededIncidents: IncidentResponse[] = [
   }),
   seedIncident({
     id: 'inc-20260827-s105', category: 'SECOPS', risk: 'LOW', reviewed: 'LOW',
-    title: '미사용 보안 그룹 잔존 — vigilantis-stale-sg', arn: arn.sgQuarantine,
+    // 대상은 UNUSED SG다. `vigilantis-stale-sg`는 SKIP_WHITELISTED(사람이 등록한 예외)라
+    // 거기에 삭제 제안을 걸면 자산 화면의 「예외」와 승인 모달이 서로 다른 말을 한다(#183).
+    title: '미사용 보안 그룹 잔존 — vigilantis-legacy-sg', arn: arn.sgUnused,
     status: 'AWAITING_APPROVAL', createdAgo: 26, updatedAgo: 26,
     summary: [
       '어떤 자원에도 연결되지 않은 보안 그룹이 남아 있습니다.',
@@ -924,10 +903,13 @@ const seededIncidents: IncidentResponse[] = [
     title: '루트 계정 콘솔 로그인 — 계정 123456789012', arn: arn.ec2Normal,
     status: 'FAILED', createdAgo: 18, updatedAgo: 16,
     summary: [
-      '루트 계정으로 콘솔 로그인이 발생했습니다.',
-      '대상 자원을 특정하지 못해 조치 후보를 만들지 못했습니다.',
-      '수집 범위를 확인한 뒤 재분석이 필요합니다.',
+      '루트 계정 콘솔 로그인 직후 이 호스트에서 비정상 API 호출이 이어졌습니다.',
+      '선제 격리가 AWS 변경 없이 실패했습니다.',
+      '원인을 확인한 뒤 재조치 여부를 판단해야 합니다.',
     ],
+    // FAILED는 실행 결과로만 도달한다(workflows._incident_status_after_execution) — 실행 0건
+    // FAILED는 실 BE에서 나올 수 없고, 실행 영역이 통째로 빠져 화면에서 닫을 길도 없다(PR #292 리뷰).
+    executions: [{ runbook: 'RUNBOOK_EC2_ISOLATE', status: 'FAILED' }],
   }),
   seedIncident({
     id: 'inc-20260827-s108', category: 'SECOPS', risk: 'MEDIUM',
@@ -986,14 +968,14 @@ const seededIncidents: IncidentResponse[] = [
   }),
   seedIncident({
     id: 'inc-20260827-f102', category: 'FINOPS',
-    title: '미연결 EBS 볼륨 — vigilantis-snapshot-vol', arn: arn.ebsUnattached,
+    title: '미연결 EBS 볼륨 — vigilantis-snapshot-vol', arn: arn.ebsSnapshot,
     status: 'AWAITING_APPROVAL', createdAgo: 40, updatedAgo: 40,
     summary: [
       '어떤 인스턴스에도 연결되지 않은 볼륨이 과금되고 있습니다.',
       '삭제 직전 최종 스냅샷을 강제로 남깁니다.',
       '등록된 롤백 런북이 없는 파괴적 조치입니다.',
     ],
-    recommend: [{ runbook: 'RUNBOOK_EBS_DELETE_UNATTACHED', target: arn.ebsUnattached }],
+    recommend: [{ runbook: 'RUNBOOK_EBS_DELETE_UNATTACHED' }],
   }),
   seedIncident({
     id: 'inc-20260827-f103', category: 'FINOPS',
@@ -1019,18 +1001,22 @@ const seededIncidents: IncidentResponse[] = [
   }),
   seedIncident({
     id: 'inc-20260827-f105', category: 'FINOPS',
-    title: '사용량 재수집 대기 — vigilantis-cache-01', arn: arn.ec2Canary,
+    // 제목을 대상(SKIP_INSUFFICIENT_DATA)에 맞췄다. `vigilantis-cache-01`은 SKIP_PROD_PROTECTED라
+    // 거기에 FinOps 인시던트를 걸면 자산 화면의 「운영 보호」와 어긋난다(#183).
+    title: '사용량 재수집 대기 — vigilantis-api-canary', arn: arn.ec2Canary,
     status: 'ANALYZING', createdAgo: 24, updatedAgo: 24,
   }),
   seedIncident({
     id: 'inc-20260827-f106', category: 'FINOPS',
-    title: 'Idle 판정 데이터 부족 — vigilantis-legacy-api', arn: arn.ec2Normal,
+    title: '저사용 EC2 — vigilantis-legacy-api', arn: arn.ec2LegacyApi,
     status: 'FAILED', createdAgo: 20, updatedAgo: 19,
     summary: [
-      '판정에 필요한 관측 구간이 충분히 쌓이지 않았습니다.',
-      '수집이 더 진행된 뒤 재판정이 필요합니다.',
-      '현재로서는 조치 후보를 만들 수 없습니다.',
+      '최근 관측 구간의 CPU 평균이 Idle 기준 이하였습니다.',
+      '승인된 스펙 조정이 AWS 변경 없이 실패했습니다.',
+      '원인을 확인한 뒤 재조치 여부를 판단해야 합니다.',
     ],
+    // 실행 0건 FAILED는 실 BE에서 나올 수 없다 — inc-20260827-s107 주석 참조.
+    executions: [{ runbook: 'RUNBOOK_EC2_RIGHTSIZING', status: 'FAILED' }],
   }),
   seedIncident({
     id: 'inc-20260827-f107', category: 'FINOPS',
@@ -1045,7 +1031,7 @@ const seededIncidents: IncidentResponse[] = [
   }),
   seedIncident({
     id: 'inc-20260827-f108', category: 'FINOPS',
-    title: '저사용 인스턴스 재평가 — vigilantis-worker-01', arn: arn.ec2Canary,
+    title: '저사용 인스턴스 재평가 — vigilantis-worker-01', arn: arn.ec2Worker,
     status: 'ANALYZING', createdAgo: 8, updatedAgo: 8,
   }),
 
@@ -1086,6 +1072,56 @@ const seededIncidents: IncidentResponse[] = [
 ];
 
 incidents.push(...seededIncidents);
+
+/**
+ * 인시던트 **전량** 계약 가드 — 모듈 로드 시 한 번 돌며, `next build`의 page data 수집에서
+ * 깨지므로 CI `web` 잡이 잡는다. `seedIncident` 안에 두면 팩토리를 타지 않는 손으로 쓴
+ * 시연 본선 5건(`inc-20260814-0001`–`0005`)이 무검사로 남는데, #183이 처음 잡은 드리프트가
+ * 바로 그 5건에서 났다(PR #293 리뷰).
+ */
+function assertIncidentContract(inc: IncidentResponse): void {
+  const where = `incident ${inc.incident_id}`;
+
+  // FAILED는 실행 결과로만 도달한다(workflows._incident_status_after_execution).
+  if (inc.status === 'FAILED' && inc.executions.length === 0) {
+    throw new Error(`${where}: FAILED는 실행 결과로만 도달한다 — 실행이 1개 이상이어야 한다`);
+  }
+
+  for (const r of inc.recommendations) {
+    const expected = CANDIDATE_PARAM_KEYS[r.runbook_id];
+    if (expected === undefined) {
+      throw new Error(`${where}: ${r.runbook_id}은 AI 추천 후보가 될 수 없다(롤백 런북)`);
+    }
+    // 대상 자원 유형 대조. **수집 목록에 없는 자산은 통과시킨다** — 계약상 정상이며
+    // (미수집 자산의 인시던트) 그 경우 조인 결과가 null인 것을 화면이 이미 다룬다.
+    const targetAsset = assetsResponse.items.find((a) => a.arn === r.target_arn);
+    const wantType = CANDIDATE_TARGET_TYPE[r.runbook_id];
+    if (targetAsset && wantType && targetAsset.asset_type !== wantType) {
+      throw new Error(
+        `${where}: ${r.runbook_id}의 대상은 ${wantType}여야 하는데 ${targetAsset.asset_type}다 ` +
+          `(${targetAsset.arn})`,
+      );
+    }
+    const actual = Object.keys(r.display_parameters).sort();
+    const want = [...expected].sort();
+    if (actual.join(',') !== want.join(',')) {
+      throw new Error(
+        `${where}: ${r.runbook_id}의 display_parameters 키가 서버 파생본과 다르다 — ` +
+          `기대 [${want.join(', ')}] / 실제 [${actual.join(', ')}]`,
+      );
+    }
+  }
+
+  // 제목이 자산 이름을 부르면 그 자산이 실제 대상이어야 한다. v1.6 확장에서 제목만 새 자산으로
+  // 바뀌고 arn은 구 자산에 남은 시드가 5건 있었다(#183). 화면은 제목과 조치 대상을 나란히 그린다.
+  const named = inc.title?.match(/vigilantis-[a-z0-9-]+/);
+  const subject = assetsResponse.items.find((a) => a.arn === inc.subject_arn);
+  if (named && subject && subject.name !== named[0]) {
+    throw new Error(`${where}: 제목은 ${named[0]}인데 subject_arn은 ${subject.name}이다`);
+  }
+}
+
+incidents.forEach(assertIncidentContract);
 
 
 /* ───────────────────── 실행 mock 상태 (dev 서버 수명 기준) ───────────────────── */

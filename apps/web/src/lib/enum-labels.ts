@@ -236,7 +236,9 @@ export const SPEC_KEY_LABELS: Record<string, string> = {
  * 저쪽은 서버가 typed `parameters`에서 파생한 값이고, 이쪽은 FE가 `target_arn`으로
  * `GET /assets`를 조인한 자산 사실값이다(2026-09-01 A안 확정, 안성일).
  *
- * 유형별로 고르는 근거는 **그 값이 없으면 승인을 판단할 수 없는가**다.
+ * 고르는 축은 런북이 아니라 **자산 유형**이다 — 그래서 같은 EC2를 겨누는 `RUNBOOK_EC2_ISOLATE`
+ * 모달에도 `instance_type`이 뜨며, 해롭지 않은 문맥이다. 유형별로 고르는 근거는 **그 값이 없으면
+ * 승인을 판단할 수 없는가**이고, 그 값이 승인 근거가 되는 런북은 다음과 같다.
  *   - `EC2` `instance_type` — `RUNBOOK_EC2_RIGHTSIZING`의 **변경 폭**. 목표값만 보이면
  *     `t3.xlarge → t3.small`인지 `t3.small → t3.small`인지 가를 근거가 없다
  *   - `EBS` `size_gib`·`volume_type` — `RUNBOOK_EBS_DELETE_UNATTACHED`의 **삭제 규모**.

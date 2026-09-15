@@ -475,11 +475,19 @@ export function IncidentDetail({
   }
 
   function openRecovery(runbookId: RunbookId, originExecutionId: string) {
+    // 복구 런북은 `available_recovery_runbook_ids`의 ID뿐이다 — 계약에 target·파라미터가 없다.
+    // EC2 계열 둘은 되돌릴 대상이 인시던트 자산과 같지만, `RUNBOOK_SG_RECREATE`는 삭제된 SG를
+    // 백업 레코드로만 가리켜(`SgRecreateParameters`) FE가 알 수 없다. 인시던트 자산이 EC2가 아닌
+    // 격리 해제(SG 개방 뒤 인스턴스를 격리한 건)도 같다. 모르는 것을 인시던트 자산으로 메우면
+    // 승인 화면이 틀린 사실을 근거로 내밀므로, 알 수 없으면 넘기지 않는다(자산 줄이 빠진다).
+    const recoveryAsset =
+      (runbookId === 'RUNBOOK_EC2_UNISOLATE' || runbookId === 'RUNBOOK_EC2_REVERT_SIZE') &&
+      subject?.asset_type === 'EC2'
+        ? subject
+        : null;
     setRequest({
       idempotencyKey: newIdempotencyKey(),
-      // 복구 런북은 `available_recovery_runbook_ids`의 ID뿐이다 — 계약에 target·파라미터가 없다.
-      // 복구 런북은 계약에 target이 없다 — 되돌리는 대상은 인시던트 자산이므로 그 자산을 넘긴다.
-      candidates: [{ runbookId, targetArn: null, displayParameters: null, targetAsset: subject }],
+      candidates: [{ runbookId, targetArn: null, displayParameters: null, targetAsset: recoveryAsset }],
       variant: 'RECOVERY',
       originExecutionId,
     });
