@@ -62,14 +62,19 @@ def reason_code_for(exc: BaseException) -> PrecheckReasonCode:
     if isinstance(exc, ParamValidationError):
         return PrecheckReasonCode.PRECHECK_PARAM_INVALID
     if isinstance(exc, ClientError):
-        return _reason_code_for_error_code(aws_error_code(exc))
+        return reason_code_for_error_code(aws_error_code(exc))
     if isinstance(exc, BotoCoreError):
         # 엔드포인트 접속 실패·자격증명 부재 등 — AWS에 닿지 못한 경우
         return PrecheckReasonCode.PRECHECK_AWS_ERROR
     raise TypeError(f"AWS 예외가 아닙니다: {type(exc).__name__}")
 
 
-def _reason_code_for_error_code(code: str) -> PrecheckReasonCode:
+def reason_code_for_error_code(code: str) -> PrecheckReasonCode:
+    """AWS 오류 코드 문자열을 같은 표로 분류한다.
+
+    예외가 아니라 응답 dict로만 오류를 받는 자리(끊긴 waiter의 last_response —
+    rollback._interruption_code)가 쓴다.
+    """
     if code in _UNAUTHORIZED_CODES or code.startswith("AccessDenied"):
         return PrecheckReasonCode.PRECHECK_UNAUTHORIZED
     if code in _TARGET_NOT_FOUND_CODES or code.endswith("NotFound"):
@@ -96,7 +101,7 @@ def run_dry_run(operation: Callable[..., Any], **params: Any) -> Optional[Preche
         code = aws_error_code(exc)
         if code == DRY_RUN_SUCCESS_ERROR_CODE:
             return None
-        return _reason_code_for_error_code(code)
+        return reason_code_for_error_code(code)
     except (ParamValidationError, BotoCoreError) as exc:
         return reason_code_for(exc)
 

@@ -49,13 +49,14 @@ from schemas.precheck import PrecheckReasonCode
 from config import get_settings
 
 from .client import aws_client
-from .errors import reason_code_for
+from .errors import reason_code_for, reason_code_for_error_code
 from .executor import parse_arn
 
 logger = logging.getLogger("vigilantis.aws")
 
-# 2/2 = 시스템 상태 검사 + 인스턴스 상태 검사. boto3의 이 waiter는 둘 다 ok일 때만
-# 통과한다(DescribeInstanceStatus의 SystemStatus·InstanceStatus).
+# 2/2 = 시스템 상태 검사 + 인스턴스 상태 검사(DescribeInstanceStatus의 SystemStatus·
+# InstanceStatus). boto3의 이 waiter는 success acceptor가 InstanceStatus 하나만 본다 —
+# 재조회 판정(_classify_failure)은 두 검사를 모두 본다.
 WAITER_NAME = "instance_status_ok"
 _OP_DESCRIBE_STATUS = "ec2.describe_instance_status"
 
@@ -68,6 +69,15 @@ _NOT_BOOTING_STATES: frozenset[str] = frozenset(
 # 검사 결과가 impaired면 AWS가 이미 이상으로 판정한 것이라 더 기다릴 이유가 없다.
 # initializing·insufficient-data는 아직 판정 전이라 타임아웃 쪽이다.
 _IMPAIRED = "impaired"
+
+# 재조회가 2/2 통과로 읽는 검사 결과 — SystemStatus·InstanceStatus 순서(_check_values)
+_TWO_OF_TWO_OK = ["ok", "ok"]
+
+# waiter가 오류 응답에 멈추지 않고 "아직"으로 읽는 코드 — instance_status_ok의 retry
+# acceptor다. 이 코드가 last_response에 남았다면 대기를 끝까지 쓴 것이지 끊긴 것이 아니다.
+_WAITER_RETRY_ERROR_CODES: frozenset[str] = frozenset({"InvalidInstanceID.NotFound"})
+
+_OK_SUMMARY = "2/2 Status Check 통과(인프라 부팅까지 — 앱 Health Check는 별개 축)"
 
 
 @unique
@@ -161,14 +171,42 @@ def _describe_summary(state: str, checks: list[str]) -> str:
     return f"{'/'.join(checks) or '검사 결과 없음'} (상태 {state or '알 수 없음'})"
 
 
-def _classify_failure(ec2: Any, instance_id: str) -> StatusCheckOutcome:
-    """waiter가 통과하지 못했다 — 실패인지 타임아웃인지 한 번 더 물어 가른다.
+def _interruption_code(exc: WaiterError) -> Optional[PrecheckReasonCode]:
+    """waiter가 AWS 오류 응답에 끊겼으면 그 사유 코드, 대기 시간을 다 썼으면 None.
+
+    boto3 waiter는 acceptor에 없는 오류 응답(스로틀링·5xx·권한 거부)을 받으면
+    MaxAttempts와 무관하게 그 자리에서 WaiterError를 던지고 그 응답을 last_response에
+    싣는다(botocore.waiter.Waiter.wait). 끊긴 waiter는 **제한 시간을 다 기다린 것이
+    아니다** — 기다린 시간이 0초일 수도 있다 (PR #341 리뷰).
+    """
+    response = getattr(exc, "last_response", None)
+    error = response.get("Error") if isinstance(response, Mapping) else None
+    if not isinstance(error, Mapping):
+        return None
+    code = str(error.get("Code") or "")
+    if code in _WAITER_RETRY_ERROR_CODES:
+        return None
+    return reason_code_for_error_code(code)
+
+
+def _classify_failure(
+    ec2: Any,
+    instance_id: str,
+    interrupted_by: Optional[PrecheckReasonCode] = None,
+) -> StatusCheckOutcome:
+    """waiter가 통과하지 못했다 — 한 번 더 물어 성공·실패·타임아웃·판정 불가를 가른다.
 
     waiter만으로는 갈리지 않는다. instance_status_ok에는 실패 acceptor가 없어
     impaired든 initializing이든 똑같이 MaxAttempts를 소진하고, 게다가
     DescribeInstanceStatus는 기본적으로 running 인스턴스만 돌려주므로 기동에
     실패해 stopped로 떨어진 인스턴스는 **빈 응답**으로만 나타난다. 그래서
     IncludeAllInstances로 한 번 더 조회해 상태를 직접 읽는다.
+
+    재조회가 2/2 정상을 보이면 성공이다 — 마지막 시도 뒤에 통과했거나, 조회 오류가
+    waiter를 끊었을 뿐 부팅은 끝난 경우다. 확정적인 실패(정지·impaired)는 끊겼든
+    아니든 관측한 그대로 실패다. 남는 "아직 2/2 전"은 waiter가 끊겼으면(interrupted_by)
+    제한 시간을 다 기다린 관측이 아니므로 타임아웃으로 확정하지 않고 판정 불가로
+    돌린다 — 끊은 오류의 사유 코드가 재시도·보류 정책(Issue #249)의 입력이다.
     """
     try:
         response = ec2.describe_instance_status(
@@ -212,6 +250,23 @@ def _classify_failure(ec2: Any, instance_id: str) -> StatusCheckOutcome:
             summary=f"Status Check 실패 — {_describe_summary(state, checks)}",
             instance_state=state or None,
         )
+    if state == "running" and checks == _TWO_OF_TWO_OK:
+        return StatusCheckOutcome(
+            verdict=StatusCheckVerdict.OK,
+            summary=f"{_OK_SUMMARY} — 재조회로 확인",
+            instance_state=state,
+        )
+    if interrupted_by is not None:
+        return StatusCheckOutcome(
+            verdict=StatusCheckVerdict.TIMED_OUT,
+            summary=(
+                "Status Check 대기가 AWS 오류로 끊겨 판정 보류 — "
+                f"{_describe_summary(state, checks)}"
+            ),
+            reason_code=interrupted_by,
+            instance_state=state or None,
+            probe_failed=True,
+        )
     return StatusCheckOutcome(
         verdict=StatusCheckVerdict.TIMED_OUT,
         summary=f"제한 시간 안에 2/2에 도달하지 못했습니다 — {_describe_summary(state, checks)}",
@@ -247,13 +302,15 @@ def wait_for_status_check(
 
     try:
         ec2.get_waiter(WAITER_NAME).wait(InstanceIds=[instance_id], WaiterConfig=config)
-    except WaiterError:
-        outcome = _classify_failure(ec2, instance_id)
+    except WaiterError as exc:
+        interrupted_by = _interruption_code(exc)
+        outcome = _classify_failure(ec2, instance_id, interrupted_by)
         logger.warning(
             "status_check_not_ok",
             extra={
                 "instance_id": instance_id,
                 "verdict": outcome.verdict.value,
+                "interrupted_by": interrupted_by.value if interrupted_by else None,
                 "aws_operation": _OP_DESCRIBE_STATUS,
             },
         )
@@ -270,6 +327,6 @@ def wait_for_status_check(
 
     return StatusCheckOutcome(
         verdict=StatusCheckVerdict.OK,
-        summary="2/2 Status Check 통과(인프라 부팅까지 — 앱 Health Check는 별개 축)",
+        summary=_OK_SUMMARY,
         instance_state="running",
     )

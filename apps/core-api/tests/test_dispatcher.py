@@ -647,6 +647,31 @@ def waiter_timeout() -> WaiterError:
     )
 
 
+def waiter_interrupted(code: str = "RequestLimitExceeded", status: int = 503) -> WaiterError:
+    """AWS 오류 응답이 waiter를 끊었다 — 대기 시간을 다 쓴 것이 아니다(PR #341 리뷰)."""
+    return WaiterError(
+        name=rb.WAITER_NAME,
+        reason=f"An error occurred ({code}): {code}",
+        last_response={
+            "Error": {"Code": code, "Message": code},
+            "ResponseMetadata": {"HTTPStatusCode": status},
+        },
+    )
+
+
+def instance_status(state: str, system: str, instance: str) -> dict:
+    return {
+        "InstanceStatuses": [
+            {
+                "InstanceId": INSTANCE,
+                "InstanceState": {"Name": state},
+                "SystemStatus": {"Status": system},
+                "InstanceStatus": {"Status": instance},
+            }
+        ]
+    }
+
+
 @pytest.fixture()
 def ran_and_awaiting(db, reserved, aws):
     """1주기 = 실행. 단계가 남고 IN_PROGRESS인 채로 판정을 기다린다.
@@ -781,6 +806,51 @@ def test_deferred_judgement_is_asked_again_next_cycle(db, ran_and_awaiting, aws)
     # 판정이 내려졌으므로 보류 기록은 지워진다 — 성공한 실행에 경고가 남지 않는다 (Issue #249)
     row = exec_repo.get_execution(db, execution_id)
     assert row.verification_attempts == 0 and row.verification_reason_code is None
+
+
+def test_throttled_wait_with_a_healthy_instance_is_success(db, ran_and_awaiting, aws):
+    """스로틀링이 waiter를 끊어도 재조회가 2/2 정상이면 성공이다 — 자동 원복에 들어가지 않는다.
+
+    PR #341 리뷰 1번 회귀. 전에는 끊긴 waiter가 '제한 시간 소진'으로 읽혀 첫 조회 오류에서
+    ROLLBACK_INITIATED로 확정됐다 — 재시도·보류 정책(Issue #249)을 거치지 않은 채 멀쩡한
+    인스턴스의 자동 원복이 시작됐다.
+    """
+    incident_id, execution_id = ran_and_awaiting()
+    aws(
+        **{f"waiter:{rb.WAITER_NAME}": waiter_interrupted()},
+        describe_instance_status=instance_status("running", "ok", "ok"),
+    )
+
+    report = cycle(db)
+    follow_up = cycle(db)
+
+    assert report.closed == 1 and report.rollback_initiated == 0
+    assert follow_up.rollback_started == 0
+    assert status_of(db, incident_id, execution_id) == (
+        IncidentStatus.AWAITING_CLOSURE,
+        ExecutionStatus.SUCCESS,
+    )
+    assert exec_repo.list_rollback_children(db, execution_id) == []
+
+
+def test_throttled_wait_with_a_booting_instance_is_retried(db, ran_and_awaiting, aws):
+    """끊긴 waiter의 '아직'은 관측된 타임아웃이 아니다 — 원복하지 않고 재시도 정책으로 보낸다."""
+    incident_id, execution_id = ran_and_awaiting()
+    aws(
+        **{f"waiter:{rb.WAITER_NAME}": waiter_interrupted()},
+        describe_instance_status=instance_status("pending", "initializing", "initializing"),
+    )
+
+    report = cycle(db)
+
+    assert report.deferred == 1 and report.rollback_initiated == 0
+    assert status_of(db, incident_id, execution_id) == (
+        IncidentStatus.ACTION_IN_PROGRESS,
+        ExecutionStatus.IN_PROGRESS,
+    )
+    row = exec_repo.get_execution(db, execution_id)
+    assert row.verification_reason_code is PrecheckReasonCode.PRECHECK_AWS_ERROR
+    assert row.verification_attempts == 1
 
 
 def test_instance_that_was_never_started_skips_the_status_check(db, reserved, aws):

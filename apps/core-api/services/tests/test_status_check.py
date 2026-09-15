@@ -11,12 +11,15 @@ LocalStack 실물 검증은 test_execute_localstack.py 계열이 맡는다.
 import sys
 from pathlib import Path
 
+import boto3
 import pytest
+from botocore.config import Config
 from botocore.exceptions import (
     ClientError,
     EndpointConnectionError,
     WaiterError,
 )
+from botocore.stub import Stubber
 
 CORE_API = Path(__file__).resolve().parents[2]
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -51,6 +54,22 @@ def waiter_error() -> WaiterError:
     """boto3가 MaxAttempts를 소진했을 때 내는 예외."""
     return WaiterError(
         name=rb.WAITER_NAME, reason="Max attempts exceeded", last_response={}
+    )
+
+
+def waiter_interrupted(code: str = "RequestLimitExceeded", status: int = 503) -> WaiterError:
+    """AWS 오류 응답이 waiter를 끊었을 때 boto3가 내는 예외 — 대기 시간을 다 쓴 것이 아니다.
+
+    boto3 waiter는 acceptor에 없는 오류 응답을 받으면 MaxAttempts와 무관하게 그 자리에서
+    멈추고, 그 응답을 last_response에 싣는다(botocore.waiter.Waiter.wait).
+    """
+    return WaiterError(
+        name=rb.WAITER_NAME,
+        reason=f"An error occurred ({code}): {code}",
+        last_response={
+            "Error": {"Code": code, "Message": code},
+            "ResponseMetadata": {"HTTPStatusCode": status},
+        },
     )
 
 
@@ -182,6 +201,132 @@ def test_empty_status_response_is_a_failure(ec2):
 
     assert outcome.verdict is V.FAILED
     assert outcome.reason_code is R.PRECHECK_TARGET_NOT_FOUND
+
+
+def test_healthy_probe_after_the_last_attempt_is_ok(ec2):
+    """마지막 시도 뒤에 2/2가 왔다 — 재조회가 정상을 보면 되돌릴 근거가 없다."""
+    ec2(waiter=waiter_error(), describe=status_response("running", "ok", "ok"))
+
+    outcome = judge()
+
+    assert outcome.verdict is V.OK and outcome.booted
+    assert outcome.probe_failed is False
+
+
+def test_half_passed_checks_are_not_two_of_two(ec2):
+    """인스턴스 검사만 ok면 2/2가 아니다 — 성공으로 올리지 않는다."""
+    ec2(waiter=waiter_error(), describe=status_response("running", "initializing", "ok"))
+
+    outcome = judge()
+
+    assert outcome.verdict is V.TIMED_OUT and not outcome.booted
+
+
+# ------------------------------------------- 끊긴 waiter ≠ 소진된 waiter (PR #341 리뷰)
+
+
+def test_real_waiter_cut_by_throttling_reads_a_healthy_instance_as_ok(monkeypatch):
+    """스로틀링이 waiter를 첫 시도에서 끊어도 재조회가 running·ok/ok면 부팅은 성공이다.
+
+    실제 botocore waiter로 재현한다 — 끊긴 waiter가 어떤 예외를 내는지가 이 판정의 입력이라
+    가짜 waiter로는 그 모양을 보증할 수 없다. 전에는 이 경로가 '제한 시간 소진'으로 읽혀
+    ROLLBACK_INITIATED — 자동 원복의 입력 — 이 됐고, 재시도·보류 정책(Issue #249)을 거치지
+    않은 채 첫 조회 오류에서 원복이 시작됐다.
+    """
+    client = boto3.client(
+        "ec2",
+        region_name=REGION,
+        aws_access_key_id="testing",
+        aws_secret_access_key="testing",
+        # SDK 재시도를 끈다 — 스로틀링 응답이 곧바로 waiter에 닿아야 끊김이 재현된다
+        config=Config(retries={"mode": "standard", "total_max_attempts": 1}),
+    )
+    stubber = Stubber(client)
+    stubber.add_client_error(
+        "describe_instance_status",
+        service_error_code="RequestLimitExceeded",
+        service_message="Request limit exceeded.",
+        http_status_code=503,
+        expected_params={"InstanceIds": [INSTANCE]},
+    )
+    stubber.add_response(
+        "describe_instance_status",
+        status_response("running", "ok", "ok"),
+        expected_params={"InstanceIds": [INSTANCE], "IncludeAllInstances": True},
+    )
+    monkeypatch.setattr(rb, "aws_client", lambda service, region=None, **_: client)
+
+    with stubber:
+        outcome = judge()
+        stubber.assert_no_pending_responses()
+
+    assert outcome.verdict is V.OK and outcome.booted
+    assert outcome.probe_failed is False
+
+
+def test_interrupted_waiter_with_a_booting_instance_defers(ec2):
+    """끊긴 waiter의 '아직'은 제한 시간을 다 기다린 관측이 아니다 — 판정 불가로 보류한다.
+
+    기다린 시간이 0초일 수도 있다. 여기서 타임아웃으로 확정하면 부팅 중인 자산을
+    되돌린다. 사유 코드는 waiter를 끊은 오류의 것이다 — 재시도 여부가 그 코드로 갈린다.
+    """
+    ec2(
+        waiter=waiter_interrupted(),
+        describe=status_response("pending", "initializing", "initializing"),
+    )
+
+    outcome = judge()
+
+    assert outcome.verdict is V.TIMED_OUT
+    assert outcome.probe_failed is True  # 판정 불가 — 자동 원복 입력이 아니다
+    assert outcome.reason_code is R.PRECHECK_AWS_ERROR  # 다시 물을 가치가 있다
+    assert outcome.instance_state == "pending"
+
+
+def test_interrupted_waiter_carries_the_code_that_cut_it(ec2):
+    """권한 거부로 끊겼으면 그 사유다 — 재시도로 붙잡지 않고 첫 실패에서 사람에게 넘긴다."""
+    ec2(
+        waiter=waiter_interrupted("UnauthorizedOperation", 403),
+        describe=status_response("running", "initializing", "initializing"),
+    )
+
+    outcome = judge()
+
+    assert outcome.probe_failed is True
+    assert outcome.reason_code is R.PRECHECK_UNAUTHORIZED
+
+
+@pytest.mark.parametrize(
+    "state, system, instance",
+    [("stopped", "not-applicable", "not-applicable"), ("running", "ok", "impaired")],
+)
+def test_interrupted_waiter_still_reads_a_real_failure(ec2, state, system, instance):
+    """끊겼어도 재조회가 확정적인 실패를 보면 실패다 — 관측한 그대로 자동 원복의 입력이다."""
+    ec2(waiter=waiter_interrupted(), describe=status_response(state, system, instance))
+
+    outcome = judge()
+
+    assert outcome.verdict is V.FAILED
+    assert outcome.probe_failed is False
+
+
+def test_not_found_left_by_the_waiter_is_an_exhausted_wait(ec2):
+    """InvalidInstanceID.NotFound는 waiter가 '아직'으로 읽고 계속 기다리는 오류다.
+
+    그 응답이 last_response에 남았다면 대기 시간을 다 쓴 것이지 끊긴 것이 아니다 —
+    기존대로 관측된 타임아웃이다.
+    """
+    exhausted = WaiterError(
+        name=rb.WAITER_NAME,
+        reason="Max attempts exceeded",
+        last_response={"Error": {"Code": "InvalidInstanceID.NotFound", "Message": "x"}},
+    )
+    ec2(waiter=exhausted, describe=status_response("pending", "initializing", "initializing"))
+
+    outcome = judge()
+
+    assert outcome.verdict is V.TIMED_OUT
+    assert outcome.probe_failed is False
 
 
 # ------------------------------------------------------------- AWS 오류 분류
