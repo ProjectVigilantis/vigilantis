@@ -23,7 +23,7 @@ PostgreSQL은 enum 값 삭제를 지원하지 않으므로 execution_status는 �
 바꿔 끼운다.
 
 Revision ID: b5e2d7a4c19f
-Revises: f4a1c8e29b57
+Revises: b2f9d4c81e07
 Create Date: 2026-09-14 16:00:00.000000
 """
 from __future__ import annotations
@@ -33,7 +33,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision = 'b5e2d7a4c19f'
-down_revision = 'f4a1c8e29b57'
+down_revision = 'b2f9d4c81e07'
 branch_labels = None
 depends_on = None
 
