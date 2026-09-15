@@ -38,6 +38,7 @@ from schemas.backups import BackupType  # noqa: E402
 from schemas.candidates import CandidateStatus  # noqa: E402
 from schemas.executions import ExecutionStepResult, ExecutionStepStatus  # noqa: E402
 from schemas.guardrails import GuardrailDecision, GuardrailStep  # noqa: E402
+from schemas.precheck import PrecheckReasonCode  # noqa: E402
 from schemas.runbooks import RunbookId, TriggerSource  # noqa: E402
 from services.aws import backup as bk  # noqa: E402
 from services.aws import executor as ex  # noqa: E402
@@ -181,7 +182,8 @@ def rolled_back_origin(db, make_incident, make_candidate, make_execution):
     """
 
     def _make(*, with_backup=True, with_candidate=True, collected=True,
-              backup_state="running"):
+              backup_state="running",
+              origin_status=ExecutionStatus.ROLLBACK_INITIATED):
         if collected:
             _collected_asset(db)
         incident = make_incident(
@@ -226,13 +228,31 @@ def rolled_back_origin(db, make_incident, make_candidate, make_execution):
                 },
             )
             exec_repo.bind_backup_record(db, origin.execution_id, record.backup_record_id)
+        summary = "FAILED: 기동 실패 — 인스턴스 상태가 stopped입니다"
+        if origin_status is ExecutionStatus.UNVERIFIED:
+            # 결과 확인 불가로 확정된 원본 — 보류 기록 없이는 DB가 받지 않는다 (Issue #249)
+            exec_repo.record_verification_failure(
+                db,
+                origin,
+                reason_code=PrecheckReasonCode.PRECHECK_AWS_ERROR,
+                failed_at=datetime.now(timezone.utc),
+            )
+            summary = "PRECHECK_AWS_ERROR: 결과 확인 불가"
         exec_repo.update_execution_status(
             db,
             origin.execution_id,
             expected=ExecutionStatus.IN_PROGRESS,
-            next_status=ExecutionStatus.ROLLBACK_INITIATED,
-            error_summary="FAILED: 기동 실패 — 인스턴스 상태가 stopped입니다",
+            next_status=origin_status,
+            error_summary=summary,
         )
+        if origin_status is ExecutionStatus.UNVERIFIED:
+            # 종료 상태라 인시던트는 흐름 진행 불가로 선다(_incident_status_after)
+            incidents_repo.update_incident_status(
+                db,
+                incident.incident_id,
+                expected=IncidentStatus.ACTION_IN_PROGRESS,
+                next_status=IncidentStatus.FAILED,
+            )
         db.commit()
         return incident.incident_id, origin.execution_id
 
@@ -253,8 +273,12 @@ def reserve_manual_revert(db, incident_id):
     return reservation.response.execution_id
 
 
+# 판정 불가 재시도 — 상한 3회·간격 없음. 운영값(설정)과 무관하게 주기 수로 센다 (Issue #249)
+RETRY_NOW = workflows.VerificationRetryPolicy(max_attempts=3, interval_seconds=0)
+
+
 def cycle(db, publish=None):
-    return dispatcher.dispatch_pending(db, publish)
+    return dispatcher.dispatch_pending(db, publish, RETRY_NOW)
 
 
 def children(db, origin_id):
@@ -411,8 +435,69 @@ def test_probe_failure_defers_without_settling(db, rolled_back_origin, aws):
     report = cycle(db)
 
     assert report.deferred == 1
-    assert only_child(db, origin_id).status is ExecutionStatus.IN_PROGRESS
+    child = only_child(db, origin_id)
+    assert child.status is ExecutionStatus.IN_PROGRESS
+    # 사유는 typed 칸에 남는다 — 재시도 판단이 읽는 자리다 (Issue #249)
+    assert child.verification_reason_code is PrecheckReasonCode.PRECHECK_AWS_ERROR
+    assert child.verification_attempts == 1
     assert statuses(db, incident_id, origin_id)[1] is ExecutionStatus.ROLLBACK_INITIATED
+
+
+def test_revert_that_cannot_compare_is_handed_to_a_person(db, rolled_back_origin, aws):
+    """원복 전 상태 대조를 끝내 못 하면 자식은 FAILED, 원본은 ROLLBACK_FAILED다 (Issue #249).
+
+    자식은 SUCCESS|FAILED만 가질 수 있다(DB CheckConstraint rollback_child_status). 대조
+    전에 멈췄으므로 자산은 만져지지 않았고, 무엇을 확인하지 못했는지는 자식의 보류 기록이
+    말한다. 남는 처분은 수동 개입이다(ADR-0004 정책 ④).
+    """
+    incident_id, origin_id = rolled_back_origin()
+    aws(describe_instances=EndpointConnectionError(endpoint_url="https://ec2"))
+    cycle(db)  # 접수
+
+    reports = [cycle(db) for _ in range(RETRY_NOW.max_attempts)]
+
+    assert [r.deferred for r in reports] == [1] * (RETRY_NOW.max_attempts - 1) + [0]
+    assert reports[-1].held == 1
+    child = only_child(db, origin_id)
+    assert child.status is ExecutionStatus.FAILED
+    assert child.verification_reason_code is PrecheckReasonCode.PRECHECK_AWS_ERROR
+    assert child.verification_attempts == RETRY_NOW.max_attempts
+    assert statuses(db, incident_id, origin_id) == (
+        IncidentStatus.FAILED,
+        ExecutionStatus.ROLLBACK_FAILED,
+    )
+    assert "stop_instances" not in operations(aws)
+    # 자동 재시도 없음 — 자식 행이 멱등 관문이다
+    cycle(db)
+    assert len(children(db, origin_id)) == 1
+
+
+def test_unverified_origin_is_not_rolled_back_automatically(db, rolled_back_origin, aws):
+    """결과를 모르는 원본은 자동 원복의 입력이 아니다 — 스캔이 집지 않는다 (Issue #249)."""
+    _, origin_id = rolled_back_origin(origin_status=ExecutionStatus.UNVERIFIED)
+
+    report = cycle(db)
+
+    assert report.scanned == 0
+    assert children(db, origin_id) == []
+
+
+def test_operator_can_revert_an_unverified_origin(db, rolled_back_origin, aws):
+    """자동 원복을 하지 않은 대신 관제자 원복은 열려 있다 (Issue #249).
+
+    닫으면 결과를 모르는 변경이 되돌릴 수 없는 변경이 된다. 확정의 근거는 자식의 결과라
+    원본은 ROLLED_BACK으로 옮겨 가고 인시던트는 종료 판단 대기로 간다.
+    """
+    incident_id, origin_id = rolled_back_origin(origin_status=ExecutionStatus.UNVERIFIED)
+    reserve_manual_revert(db, incident_id)
+
+    cycle(db)
+
+    assert only_child(db, origin_id).status is ExecutionStatus.SUCCESS
+    assert statuses(db, incident_id, origin_id) == (
+        IncidentStatus.AWAITING_CLOSURE,
+        ExecutionStatus.ROLLED_BACK,
+    )
 
 
 # ------------------------------------------------------------------ 가드레일

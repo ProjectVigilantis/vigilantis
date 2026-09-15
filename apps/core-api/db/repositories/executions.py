@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session, aliased
 from schemas.api.actions import ExecutionStatus
 from schemas.api.incidents import IncidentStatus
 from schemas.executions import EXECUTION_NON_TERMINAL_STATUSES, ExecutionStepResult
+from schemas.guardrails import PrecheckReasonCode
 from schemas.runbooks import RunbookId, TriggerSource
 
 from .. import mappers, models
@@ -162,13 +163,25 @@ def update_execution_status(
     next_status: ExecutionStatus,
     error_summary: Optional[str] = None,
     finished_at: Optional[datetime] = None,
+    clear_verification_hold: bool = False,
 ) -> bool:
-    """롤백 자식의 상태 제한(SUCCESS|FAILED)은 DB CheckConstraint가 함께 강제한다."""
+    """롤백 자식의 상태 제한(SUCCESS|FAILED)은 DB CheckConstraint가 함께 강제한다.
+
+    clear_verification_hold는 판정 불가 보류 기록을 같은 UPDATE에서 지운다 — 판정이
+    내려진 확정이면 보류는 더 이상 사실이 아니다 (Issue #249).
+    """
     values: dict = {"status": next_status}
     if error_summary is not None:
         values["error_summary"] = error_summary
     if finished_at is not None:
         values["finished_at"] = finished_at
+    if clear_verification_hold:
+        values.update(
+            verification_reason_code=None,
+            verification_attempts=0,
+            verification_first_failed_at=None,
+            verification_last_failed_at=None,
+        )
     result = db.execute(
         update(models.ActionExecution)
         .where(
@@ -178,6 +191,31 @@ def update_execution_status(
         .values(**values)
     )
     return result.rowcount == 1
+
+
+def record_verification_failure(
+    db: Session,
+    row: models.ActionExecution,
+    *,
+    reason_code: PrecheckReasonCode,
+    failed_at: datetime,
+) -> int:
+    """판정 불가 1회를 누적한다. 누적 횟수를 돌려준다. (Issue #249)
+
+    **호출부가 잠근 행을 받는다**(lock_execution). 조건부 UPDATE로 가지 않는 것은 같은
+    트랜잭션의 뒤이은 판단(소진했는가)이 이 행을 다시 읽기 때문이다 — Core UPDATE는
+    세션이 든 행을 갱신하지 않아 그 판단이 옛 횟수를 본다.
+
+    사유는 **마지막 실패의 코드**다. 처음 시각은 첫 실패에서 한 번만 적는다 — 관제자가
+    "언제부터 확인하지 못했는가"를 읽는 자리다.
+    """
+    row.verification_reason_code = reason_code
+    row.verification_attempts = (row.verification_attempts or 0) + 1
+    if row.verification_first_failed_at is None:
+        row.verification_first_failed_at = failed_at
+    row.verification_last_failed_at = failed_at
+    db.flush()
+    return row.verification_attempts
 
 
 def bind_backup_record(db: Session, execution_id: str, backup_record_id: str) -> bool:

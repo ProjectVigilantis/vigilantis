@@ -73,6 +73,15 @@ class Settings(BaseSettings):
     # 그만큼 다음 스캔을 미루므로(max_instances=1) 시연에서 조일 수 있어야 한다.
     STATUS_CHECK_WAIT_DELAY_SECONDS: int = Field(default=15, gt=0)
     STATUS_CHECK_WAIT_MAX_ATTEMPTS: int = Field(default=12, ge=1)
+    # 판정 불가 재시도 — AWS에 물어보지 못해 실행 결과를 확정하지 못했을 때 (Issue #249).
+    # MAX_ATTEMPTS는 받아 주는 실패 횟수(첫 실패 포함)이고, 소진하면 자동 원복하지 않고
+    # 결과 확인 불가(UNVERIFIED)로 확정해 관제자에게 넘긴다. INTERVAL은 마지막 실패로부터
+    # 다음 질문까지의 최소 간격이다 — 스캔 주기(DISPATCH_INTERVAL_SECONDS)마다 되물으면
+    # 스로틀링 같은 일시 오류를 우리가 키운다. 기본 5회·60초면 첫 실패부터 최소 4분을
+    # 기다린 뒤 사람에게 넘긴다. 권한 거부처럼 다시 물어도 같은 사유는 이 값과 무관하게
+    # 첫 실패에서 넘긴다(services/aws/errors.py RETRYABLE_REASON_CODES).
+    VERIFICATION_RETRY_MAX_ATTEMPTS: int = Field(default=5, ge=1)
+    VERIFICATION_RETRY_INTERVAL_SECONDS: int = Field(default=60, ge=0)
 
     # --- AI 모델 호출 (Issue #115) ---
     # 키는 Optional이다 — AI 호출 경로가 앱에 배선되기 전이라 키 없이도 기동해야 하고,

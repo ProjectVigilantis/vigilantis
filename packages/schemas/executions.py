@@ -8,7 +8,7 @@
 #   - status↔effect 짝 고정: IN_PROGRESS→effect 없음, SUCCESS→APPLIED|NOT_APPLIED,
 #     FAILED→NOT_APPLIED|PARTIAL|UNKNOWN. 그 외 조합은 계약 위반.
 #   - step_type 값 어휘·Runbook별 결과 모델은 세부 계약 확정 후 추가한다.
-#   - Execution 자체의 상태 6종은 공개 계약(api/actions.py ExecutionStatus)이 원천.
+#   - Execution 자체의 상태 7종은 공개 계약(api/actions.py ExecutionStatus)이 원천.
 # ==============================================================================
 
 from __future__ import annotations
@@ -29,20 +29,29 @@ EXECUTION_NON_TERMINAL_STATUSES: frozenset[ExecutionStatus] = frozenset(
     {ExecutionStatus.IN_PROGRESS, ExecutionStatus.ROLLBACK_INITIATED}
 )
 
+# UNVERIFIED는 종료 쪽이다 — 재시도를 소진해 자동 판정을 멈춘 자리라 회수 스캔이 다시
+# 집으면 안 된다. 남은 판단은 관제자 몫이다. (Issue #249)
 EXECUTION_TERMINAL_STATUSES: frozenset[ExecutionStatus] = frozenset(
     {
         ExecutionStatus.SUCCESS,
         ExecutionStatus.FAILED,
         ExecutionStatus.ROLLED_BACK,
         ExecutionStatus.ROLLBACK_FAILED,
+        ExecutionStatus.UNVERIFIED,
     }
 )
 
 # 관제자 복구(롤백 3종)를 열어 주는 원본 실행 상태. AWS가 실제로 바뀐 뒤여야 되돌릴
 # 것이 있으므로 FAILED(변경 없이 실패)·IN_PROGRESS(아직 안 끝남)는 열지 않는다.
 # ROLLBACK_INITIATED는 자동 원복이 개시된 상태라 관제자 경로가 열려 있어야 한다.
+# UNVERIFIED도 연다 — 자산이 바뀌었을 수 있는데 자동 원복은 하지 않았으므로, 되돌릴
+# 길이 관제자 경로 하나뿐이다. 닫으면 결과를 모르는 변경이 되돌릴 수 없는 변경이 된다.
 EXECUTION_RECOVERABLE_STATUSES: frozenset[ExecutionStatus] = frozenset(
-    {ExecutionStatus.SUCCESS, ExecutionStatus.ROLLBACK_INITIATED}
+    {
+        ExecutionStatus.SUCCESS,
+        ExecutionStatus.ROLLBACK_INITIATED,
+        ExecutionStatus.UNVERIFIED,
+    }
 )
 
 # 확정 결과가 "조치가 제 갈 데까지 갔다"인 상태. 남은 제안·실행이 없을 때 Incident를

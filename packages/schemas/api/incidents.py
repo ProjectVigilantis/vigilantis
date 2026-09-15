@@ -26,14 +26,18 @@
 #     (ADR-0004) 다시 null이 된다 — "지금 이 인시던트가 종료된 이유"를 말하는
 #     값이라 재개된 뒤에는 거짓이 되기 때문이다. 목록에는 넣지 않는다(부분집합
 #     10필드 유지). (Issue #199)
+#   - executions의 verification_hold는 판정 불가 보류 기록이다 — AWS에 물어보지 못해
+#     실행 결과를 확정하지 못했을 때의 사유 코드·횟수·시각. status가 UNVERIFIED면
+#     반드시 있고, 판정이 내려진 SUCCESS·ROLLBACK_INITIATED에는 오지 않는다. (Issue #249)
 # ==============================================================================
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from enum import Enum, unique
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..runbooks import AI_RECOMMENDABLE_RUNBOOK_IDS, ROLLBACK_RUNBOOK_IDS, RunbookId
 from .actions import ExecutionStatus
@@ -119,6 +123,59 @@ class RecommendationItem(BaseModel):
         return self
 
 
+def _as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+
+
+class ExecutionVerificationHold(BaseModel):
+    """판정 불가 보류 기록 — AWS에 물어보지 못해 실행 결과를 확정하지 못한 이력. (Issue #249)
+
+    읽는 법은 실행 status가 정한다.
+      - IN_PROGRESS: **재시도 중**이다. 서버가 간격을 두고 다시 묻는다.
+      - UNVERIFIED: 재시도를 소진해 자동 판정을 멈췄다. 자동 원복은 하지 않았고,
+        자산 상태를 관제자가 확인해야 한다(관제자 복구 경로는 열려 있다).
+      - FAILED: 실행 전 상태 대조에서 멈춰 자산을 만지지 않았거나, 롤백 자식이 원복
+        결과를 확인하지 못한 것이다.
+      - ROLLED_BACK·ROLLBACK_FAILED: 확인 불가였던 원본을 관제자 복구가 이어받은 뒤다.
+    판정이 내려지면 서버가 지운다 — 그래서 SUCCESS·ROLLBACK_INITIATED에는 오지 않는다.
+
+    reason_code의 어휘는 가드레일 ④와 같은 사유 코드 표(PRECHECK_*)다. 실행·판정이 AWS
+    오류를 분류하는 표가 하나이기 때문이다(services/aws/errors.py).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason_code: str = Field(min_length=1)
+    attempts: int = Field(ge=1)
+    first_failed_at: UtcDateTime
+    last_failed_at: UtcDateTime
+
+    @field_validator("reason_code")
+    @classmethod
+    def _known_reason_code(cls, value: str) -> str:
+        # 어휘의 원천은 schemas.guardrails.PrecheckReasonCode다. 모듈 상단에서 가져오지
+        # 않는 것은 guardrails가 이 패키지(api.assets)를 import해 순환 import가 되기
+        # 때문이다 — 목록을 여기 다시 적는 대신 검증 시점에 원천을 부른다.
+        from ..guardrails import PrecheckReasonCode
+
+        try:
+            return PrecheckReasonCode(value).value
+        except ValueError:
+            raise ValueError(f"알 수 없는 판정 불가 사유 코드입니다: {value}") from None
+
+    @model_validator(mode="after")
+    def _failures_in_order(self):
+        if _as_utc(self.last_failed_at) < _as_utc(self.first_failed_at):
+            raise ValueError("last_failed_at은 first_failed_at보다 앞설 수 없습니다")
+        return self
+
+
+# 판정이 내려져 보류 기록이 지워진 뒤에만 오는 상태 (Issue #249)
+_HOLD_CLEARED_STATUSES: frozenset[ExecutionStatus] = frozenset(
+    {ExecutionStatus.SUCCESS, ExecutionStatus.ROLLBACK_INITIATED}
+)
+
+
 class ExecutionSummaryItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -126,6 +183,8 @@ class ExecutionSummaryItem(BaseModel):
     runbook_id: RunbookId
     status: ExecutionStatus
     available_recovery_runbook_ids: list[RunbookId] = Field(default_factory=list)
+    # 판정 불가 보류 기록 — 없으면 null (Issue #249)
+    verification_hold: Optional[ExecutionVerificationHold] = None
     updated_at: UtcDateTime
 
     @model_validator(mode="after")
@@ -136,6 +195,16 @@ class ExecutionSummaryItem(BaseModel):
                     "available_recovery_runbook_ids에는 롤백 3종만 올 수 있습니다"
                     " (주 조치 계열 복구는 recommendations 경로)"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _hold_matches_status(self):
+        # UNVERIFIED는 "무엇을 확인하지 못했는가"가 관제자 판단의 근거라 기록 없이 오지 않는다
+        if self.status is ExecutionStatus.UNVERIFIED and self.verification_hold is None:
+            raise ValueError("UNVERIFIED이면 verification_hold가 있어야 합니다")
+        # 판정이 내려진 상태에 보류가 붙어 있으면 성공한 실행에 경고가 그려진다
+        if self.status in _HOLD_CLEARED_STATUSES and self.verification_hold is not None:
+            raise ValueError(f"{self.status.value}이면 verification_hold는 null이어야 합니다")
         return self
 
 

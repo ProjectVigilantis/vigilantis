@@ -11,6 +11,8 @@
 #   - available_recovery_runbook_ids는 실행 이력에서 파생한다 — 짝(ADR-0004)이
 #     있고, 원본이 복구 가능 상태이며, 아직 복구가 접수되지 않은 실행만 노출한다.
 #     (Issue #126)
+#   - verification_hold는 실행 행의 판정 불가 보류 기록을 그대로 싣는다 — 사유는 저장된
+#     typed 코드이며 error_summary 문자열에서 뽑지 않는다. (Issue #249)
 #   - 종료의 상태 전이·트랜잭션은 workflows.resolve_incident가 소유한다. 라우터는
 #     commit 이후 INCIDENT_UPDATED를 발행하는 데까지만 한다 — 발행을 Workflow에
 #     두면 그 계층이 앱 상태(app.state.realtime)를 알아야 한다.
@@ -63,6 +65,18 @@ def _recovery_ids(
         return []
     rollback_id = ROLLBACK_RUNBOOK_BY_MAIN_ID.get(execution.runbook_id.value)
     return [rollback_id] if rollback_id is not None else []
+
+
+def _verification_hold(execution: models.ActionExecution) -> Optional[dict]:
+    """판정 불가 보류 기록. 없으면 None — 보류가 없던 실행과 판정이 내려진 실행이다."""
+    if not execution.verification_attempts:
+        return None
+    return {
+        "reason_code": execution.verification_reason_code.value,
+        "attempts": execution.verification_attempts,
+        "first_failed_at": execution.verification_first_failed_at,
+        "last_failed_at": execution.verification_last_failed_at,
+    }
 
 
 def _to_list_item(row: models.Incident) -> IncidentListItem:
@@ -133,6 +147,7 @@ def _to_detail(db: Session, row: models.Incident) -> IncidentResponse:
             "available_recovery_runbook_ids": _recovery_ids(
                 execution, recovered_parent_ids
             ),
+            "verification_hold": _verification_hold(execution),
             "updated_at": execution.updated_at,
         }
         for execution in execution_rows

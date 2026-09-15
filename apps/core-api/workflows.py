@@ -93,6 +93,7 @@ from schemas.runbooks import (
 )
 
 from ai import guardrails
+from config import get_settings
 from db import mappers, models
 from db.repositories import assets as assets_repo
 from db.repositories import executions as executions_repo
@@ -101,6 +102,7 @@ from db.repositories import incidents as incidents_repo
 from exceptions import ApiError
 from identifiers import canonical_id
 from services.aws import backup, executor, rollback
+from services.aws.errors import is_retryable
 from services.aws.executor import parse_arn
 
 logger = logging.getLogger("vigilantis.workflow")
@@ -592,8 +594,9 @@ class ExecutionRunOutcome:
 
     deferred는 세 번째 갈래다 — **판정·대조를 못 해 자산을 만지지 않았다.** 원복
     실행이 상태 대조(ADR-0008 §3-2)에 필요한 조회에 실패한 경우이며, 실패로 확정하면
-    되돌릴 것이 그대로 남은 자산에 "원복 실패"가 기록된다. 단계가 없으므로 다음
-    주기가 처음부터 다시 시도한다. 재시도 상한은 Issue #249다. (Issue #241)
+    되돌릴 것이 그대로 남은 자산에 "원복 실패"가 기록된다. 단계가 없으므로 재시도는
+    처음부터 다시 한다. 재시도 상한과 소진 뒤의 처분은 record_verification_failure가
+    정한다(Issue #249). (Issue #241)
     """
 
     succeeded: bool
@@ -1021,19 +1024,21 @@ class ExecutionJudgement:
     run_rightsizing_execution이 ExecutionRunOutcome를 돌려주는 것과 같은 자리다.
     확정은 close_execution 하나가 하고, 언제 부를지는 dispatcher.py가 고른다.
 
-    next_status가 None이면 **판정 보류**다 — 확정하지 않고 IN_PROGRESS로 남겨 다음
-    주기가 다시 묻는다. AWS에 물어보지 못해 자산 상태를 본 적이 없는 경우이며, 그때
+    next_status가 None이면 **판정 보류**다 — 확정하지 않고 IN_PROGRESS로 남겨 재시도가
+    다시 묻는다. AWS에 물어보지 못해 자산 상태를 본 적이 없는 경우이며, 그때
     ROLLBACK_INITIATED로 닫으면 검증기의 실패가 자산의 실패로 저장되어 자동 원복
     (#241)의 입력과 구분되지 않는다 (PR #244 리뷰).
 
-    **보류 사유는 저장하지 않는다**(defer_reason은 로그 몫이다). 판정 불가를 어떤
-    typed 상태로 남기고 재시도를 몇 번까지 허용할지가 Issue #249의 계약이며, 그
-    계약이 서기 전에 error_summary 문자열이 판정 근거로 읽히면 안 된다.
+    **보류 사유는 typed 코드(defer_code)로 저장된다**(record_verification_failure) —
+    다시 물을지가 그 코드로 갈리고, 재시도를 소진한 뒤 관제자가 보는 사유도 그것이다.
+    defer_reason은 사람이 읽는 한 줄이라 로그 몫이며 판정 근거로 읽지 않는다. 보류
+    판정이 error_summary를 싣지 않는 것도 같은 이유다 (Issue #249).
     """
 
     next_status: Optional[ExecutionStatus] = None
     error_summary: Optional[str] = None
     verdict: Optional[rollback.StatusCheckVerdict] = None
+    defer_code: Optional[PrecheckReasonCode] = None
     defer_reason: Optional[str] = None
 
     @property
@@ -1044,11 +1049,11 @@ class ExecutionJudgement:
         if self.deferred:
             if self.error_summary is not None:
                 raise ValueError("보류 판정은 error_summary를 저장하지 않습니다")
-            if self.defer_reason is None:
-                raise ValueError("보류 판정에는 사유가 필요합니다")
+            if self.defer_code is None or self.defer_reason is None:
+                raise ValueError("보류 판정에는 사유 코드와 사유가 필요합니다")
             return
-        if self.defer_reason is not None:
-            raise ValueError("확정 판정에는 defer_reason을 두지 않습니다")
+        if self.defer_code is not None or self.defer_reason is not None:
+            raise ValueError("확정 판정에는 보류 사유를 두지 않습니다")
         if (self.next_status is ExecutionStatus.SUCCESS) != (self.error_summary is None):
             raise ValueError("성공이 아닌 판정에만 error_summary를 채웁니다")
 
@@ -1159,7 +1164,9 @@ def judge_rightsizing_boot(db: Session, execution_id: str) -> ExecutionJudgement
         # 여기서 ROLLBACK_INITIATED로 닫으면 검증기의 실패가 자산의 실패로 저장되고,
         # 자동 원복(#241)이 멀쩡한 인스턴스를 되돌린다 (PR #244 리뷰 / Issue #249)
         return ExecutionJudgement(
-            defer_reason=_boot_failure_summary(outcome), verdict=outcome.verdict
+            defer_code=outcome.reason_code,
+            defer_reason=_boot_failure_summary(outcome),
+            verdict=outcome.verdict,
         )
     return ExecutionJudgement(
         next_status=ExecutionStatus.ROLLBACK_INITIATED,
@@ -1187,8 +1194,8 @@ def judge_nacl_add_deny(db: Session, execution_id: str) -> ExecutionJudgement:
     확정하면 남의 규칙을 우리 차단으로 기록하게 되고, 그 기록을 근거로 NACL_RESTORE가
     그것을 삭제한다 — 삭제는 되돌릴 수 없다(ADR-0008 §5). 그래서 FAILED로 남긴다.
 
-    조회하지 못하면 확정하지 않고 보류한다 — judge_revert_size와 같은 이유이며,
-    재시도 상한은 Issue #249다.
+    조회하지 못하면 확정하지 않고 보류한다 — judge_revert_size와 같은 이유이며, 보류의
+    재시도·소진은 record_verification_failure가 처분한다(Issue #249).
     """
     execution = executions_repo.get_execution(db, execution_id)
     if execution is None:
@@ -1243,7 +1250,8 @@ def judge_nacl_add_deny(db: Session, execution_id: str) -> ExecutionJudgement:
     if code is not None and code is not PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND:
         # 자산 상태를 본 적이 없다 — 확정하면 검증기의 실패가 조치의 실패로 저장된다
         return ExecutionJudgement(
-            defer_reason=f"{code.value}: 차단 대상 NACL 조회 실패로 판정 보류"
+            defer_code=code,
+            defer_reason=f"{code.value}: 차단 대상 NACL 조회 실패로 판정 보류",
         )
     if entry is None:
         # NACL 자체가 없는 경우(TARGET_NOT_FOUND)도 여기로 온다 — 어느 쪽이든 그
@@ -1348,7 +1356,8 @@ def judge_nacl_restore(db: Session, execution_id: str) -> ExecutionJudgement:
         )
     if code is not None:
         return ExecutionJudgement(
-            defer_reason=f"{code.value}: 해제 대상 NACL 조회 실패로 판정 보류"
+            defer_code=code,
+            defer_reason=f"{code.value}: 해제 대상 NACL 조회 실패로 판정 보류",
         )
     if entry is not None and executor.nacl_entry_fingerprint_matches(entry, expected):
         logger.critical(
@@ -1529,6 +1538,7 @@ def close_execution(
     *,
     next_status: ExecutionStatus,
     error_summary: Optional[str] = None,
+    keep_verification_hold: bool = False,
 ) -> Optional[ExecutionClosure]:
     """실행 상태 확정과 Incident 전이를 **한 트랜잭션**으로 커밋한다. (Issue #232)
 
@@ -1544,6 +1554,11 @@ def close_execution(
     조회가 "되돌리기는 끝났는데 원본은 아직 원복 중"인 인시던트를 보고, 상세 응답의
     자식 목록과 상태가 어긋난다. 자동 발동이든 관제자 요청이든 같다 — 확정의 근거는
     발동 주체가 아니라 자식의 결과다.
+
+    **판정 불가 보류 기록은 지운다**(Issue #249). 확정은 판정이 내려졌다는 뜻이라 "지금
+    확인하지 못했다"는 기록이 더는 사실이 아니다 — 남겨 두면 성공한 실행에 경고가
+    그려진다. keep_verification_hold는 재시도를 소진해 보류 자체로 확정하는 호출
+    (record_verification_failure) 하나만 쓴다.
 
     잠금 순서는 실행(자식 → 원본) → Incident로 고정한다(reserve_execution과 같은
     방향). 엇갈리면 두 경로가 서로를 기다린다.
@@ -1571,6 +1586,7 @@ def close_execution(
             if next_status in EXECUTION_TERMINAL_STATUSES
             else None
         ),
+        clear_verification_hold=not keep_verification_hold,
     )
     if not moved:
         # 행을 잠그고 들어왔으므로 여기까지 와서 실패할 이유가 없다. 그래도
@@ -1612,6 +1628,171 @@ def close_execution(
         execution_updated_at=execution.updated_at,
         incident_status=incident.status,
         incident_updated_at=incident.updated_at,
+    )
+
+
+# --- 판정 불가 보류 (Issue #249) --------------------------------------------------
+#
+# AWS에 물어보지 못해 결론을 내지 못한 실행의 처분이다. 종료 판정의 보류
+# (ExecutionJudgement)와 원복·해제 전 상태 대조의 보류(ExecutionRunOutcome)가 같은 자리로
+# 온다 — 둘 다 "자산이 실패했다는 근거가 아니라 검증기가 실패했다"는 같은 사건이다.
+#
+#   ① 실패 1회를 **typed로 저장한다** — 사유 코드·횟수·처음/마지막 실패 시각
+#      (action_executions.verification_*). 사람이 읽는 error_summary는 판정 근거가
+#      아니며, 그 문자열을 해석하는 코드를 두지 않는다.
+#   ② **다시 물으면 답이 바뀔 수 있는 사유만** 재시도한다(errors.RETRYABLE_REASON_CODES).
+#      권한 거부·파라미터 오류는 몇 번을 물어도 같으므로 첫 실패에서 바로 보류한다.
+#      재시도 횟수·간격은 설정값이다(VerificationRetryPolicy).
+#   ③ 소진하면 **자동 원복하지 않고** 확정해 사람에게 넘긴다. ROLLBACK_INITIATED로
+#      보내면 검증기의 실패가 자동 원복의 입력이 된다(PR #244 리뷰). 어느 상태로
+#      확정할지는 _held_outcome이 가른다.
+#   ④ 판정이 내려지면 기록을 지운다(close_execution). 보류는 "지금 확인하지 못했다"는
+#      뜻이라 확인된 뒤에도 남으면 성공한 실행에 경고가 붙는다. 소진으로 확정한 기록만
+#      남는다 — 관제자가 무엇을 확인해야 하는지가 거기 있다.
+
+
+@dataclass(frozen=True)
+class VerificationRetryPolicy:
+    """판정 불가 재시도의 상한과 간격. 운영값의 원천은 설정이다(config.VERIFICATION_RETRY_*).
+
+    max_attempts는 **실패를 몇 번까지 받아 주는가**다 — 첫 실패도 센다. 3이면 세 번째
+    실패에서 보류로 확정한다. interval_seconds는 마지막 실패로부터 다음 질문까지의 최소
+    간격이다 — 스캔 주기마다 되물으면 스로틀링 같은 일시 오류를 우리가 키운다.
+    """
+
+    max_attempts: int
+    interval_seconds: int
+
+    def __post_init__(self) -> None:
+        if self.max_attempts < 1:
+            raise ValueError("max_attempts는 1 이상이어야 합니다")
+        if self.interval_seconds < 0:
+            raise ValueError("interval_seconds는 0 이상이어야 합니다")
+
+    @classmethod
+    def from_settings(cls) -> "VerificationRetryPolicy":
+        settings = get_settings()
+        return cls(
+            max_attempts=settings.VERIFICATION_RETRY_MAX_ATTEMPTS,
+            interval_seconds=settings.VERIFICATION_RETRY_INTERVAL_SECONDS,
+        )
+
+    def retry_due(self, execution: models.ActionExecution, now: datetime) -> bool:
+        """지금 다시 물어도 되는가. 보류 기록이 없으면 늘 된다."""
+        last = execution.verification_last_failed_at
+        if execution.verification_attempts == 0 or last is None:
+            return True
+        return now >= last + timedelta(seconds=self.interval_seconds)
+
+
+@dataclass(frozen=True)
+class VerificationHold:
+    """판정 불가 1회를 기록한 결과.
+
+    held면 재시도를 멈추고 확정했다는 뜻이며 closure가 그 확정의 발행 재료다(commit 이후
+    발행은 호출부 몫, realtime.py 규약). held가 아니면 실행은 IN_PROGRESS로 남고 간격이
+    지난 뒤의 주기가 다시 묻는다.
+    """
+
+    reason_code: PrecheckReasonCode
+    attempts: int
+    held: bool
+    closure: Optional[ExecutionClosure] = None
+
+
+def _held_outcome(
+    db: Session,
+    execution: models.ActionExecution,
+    reason_code: PrecheckReasonCode,
+    attempts: int,
+) -> tuple[ExecutionStatus, str]:
+    """재시도를 소진한 실행을 어느 종료 상태로, 어떤 사유로 확정할지.
+
+    - **단계가 있는 원본은 UNVERIFIED다.** 자산이 이미 만져졌을 수 있는데(dispatcher
+      회수 규약 "단계 1건 이상") 결과를 모른다. FAILED("변경 없이 실패")로 닫으면 관제자
+      복구 목록이 닫혀 되돌릴 길이 사라지고, ROLLBACK_INITIATED로 닫으면 자동 원복이 돈다.
+    - **롤백 자식은 FAILED다.** 자식은 SUCCESS|FAILED만 가질 수 있고(DB CheckConstraint
+      rollback_child_status · SSOT §API 계약), 원본은 close_execution이 ROLLBACK_FAILED로
+      함께 옮겨 수동 개입으로 넘긴다(ADR-0004 정책 ④). 원복의 원복은 없으므로(ADR-0008
+      §6) 확인 불가를 따로 표시해 열어 줄 경로도 없다 — 무엇을 확인하지 못했는지는 자식의
+      보류 기록이 말한다.
+    - **단계가 없으면 FAILED다.** 원복·해제 전 상태 대조에서 멈춘 것이라 자산은 만져지지
+      않았다 — 보류 결과에는 단계가 없다는 계약(ExecutionRunOutcome)이 그것을 보장한다.
+    """
+    code = reason_code.value
+    has_steps = bool(executions_repo.list_steps(db, execution.execution_id))
+    if not has_steps:
+        return ExecutionStatus.FAILED, (
+            f"{code}: 실행 전 상태 대조 불가 — AWS 조회 {attempts}회 실패로 시작하지"
+            " 않았습니다(자산 변경 없음). 관제자 확인이 필요합니다"
+        )
+    if execution.parent_execution_id is not None:
+        return ExecutionStatus.FAILED, (
+            f"{code}: 원복 결과 확인 불가 — AWS 조회 {attempts}회 실패로 자동 판정을"
+            " 멈췄습니다. 관제자 확인이 필요합니다"
+        )
+    return ExecutionStatus.UNVERIFIED, (
+        f"{code}: 결과 확인 불가 — AWS 조회 {attempts}회 실패로 자동 판정을 멈췄습니다."
+        " 자동 원복하지 않았으며 관제자 확인이 필요합니다"
+    )
+
+
+def record_verification_failure(
+    db: Session,
+    execution_id: str,
+    *,
+    reason_code: PrecheckReasonCode,
+    policy: VerificationRetryPolicy,
+    detail: Optional[str] = None,
+    now: Optional[datetime] = None,
+) -> Optional[VerificationHold]:
+    """AWS 조회 실패 1회를 typed로 기록하고, 재시도할지 보류로 확정할지 정한다. (Issue #249)
+
+    None은 **다른 주체가 먼저 확정한 실행**이다. 판정은 잠금을 놓고 AWS를 기다리므로
+    (dispatcher._judge_one) 그 사이 확정이 끼어들 수 있고, 그 판단을 덮어쓰지 않는다.
+
+    보류로 확정하는 것도 close_execution이다 — 실행 종료와 Incident 전이를 한
+    트랜잭션에 넣는 규약을 여기서도 따른다. 기록과 확정이 같은 트랜잭션이라, 소진한
+    실행이 "횟수는 찼는데 확정되지 않은" 채로 남지 않는다.
+
+    detail은 사람이 읽는 마지막 사유 한 줄이라 로그에만 싣는다.
+    """
+    failed_at = now or datetime.now(timezone.utc)
+    execution = executions_repo.lock_execution(db, execution_id)
+    if execution is None:
+        raise ValueError(f"실행 레코드를 찾을 수 없습니다: {execution_id}")
+    if execution.status is not ExecutionStatus.IN_PROGRESS:
+        db.commit()  # 쓴 것은 없다 — 선점 잠금만 놓는다
+        return None
+
+    attempts = executions_repo.record_verification_failure(
+        db, execution, reason_code=reason_code, failed_at=failed_at
+    )
+    if is_retryable(reason_code) and attempts < policy.max_attempts:
+        db.commit()
+        return VerificationHold(reason_code=reason_code, attempts=attempts, held=False)
+
+    next_status, summary = _held_outcome(db, execution, reason_code, attempts)
+    logger.critical(
+        "verification_held",
+        extra={
+            "execution_id": execution_id,
+            "runbook_id": execution.runbook_id.value,
+            "reason_code": reason_code.value,
+            "attempts": attempts,
+            "next_status": next_status.value,
+            "detail": (detail or "")[:256],
+        },
+    )
+    closure = close_execution(
+        db,
+        execution_id,
+        next_status=next_status,
+        error_summary=summary[:1024],
+        keep_verification_hold=True,
+    )
+    return VerificationHold(
+        reason_code=reason_code, attempts=attempts, held=True, closure=closure
     )
 
 
@@ -2057,7 +2238,8 @@ def judge_revert_size(db: Session, execution_id: str) -> ExecutionJudgement:
     여기서 묻지 않는다: 부팅이 또 실패해도 원복의 원복은 없어 판정을 바꾸지 못한다.
 
     조회하지 못하면 확정하지 않고 보류한다 — judge_rightsizing_boot이 probe_failed를
-    다루는 것과 같은 이유이며, 재시도 상한은 Issue #249다.
+    다루는 것과 같은 이유이며, 보류의 재시도·소진은 record_verification_failure가
+    처분한다(Issue #249).
     """
     execution = executions_repo.get_execution(db, execution_id)
     if execution is None:
@@ -2092,7 +2274,8 @@ def judge_revert_size(db: Session, execution_id: str) -> ExecutionJudgement:
     if code is not None and code is not PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND:
         # 자산 상태를 본 적이 없다 — 확정하면 검증기의 실패가 원복의 실패로 저장된다
         return ExecutionJudgement(
-            defer_reason=f"{code.value}: 원복 대상 상태 조회 실패로 판정 보류"
+            defer_code=code,
+            defer_reason=f"{code.value}: 원복 대상 상태 조회 실패로 판정 보류",
         )
     if current == restored:
         # 타입은 되돌아왔다. 그것만으로 성공이라 하면 **정지 → 타입 원복 → [중단]**

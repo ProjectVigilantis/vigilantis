@@ -52,6 +52,7 @@ from schemas.guardrails import (
     GuardrailDecision,
     GuardrailStep,
     GuardrailValidationContext,
+    PrecheckReasonCode,
 )
 from schemas.incidents import AgentInvocationStatus
 from schemas.runbooks import RunbookId, TriggerSource
@@ -467,7 +468,7 @@ class GuardrailEvaluation(Base):
 
 
 class ActionExecution(Base):
-    """런북 실행 1건. 상태 6종은 공개 계약(api/actions.py)이 원천."""
+    """런북 실행 1건. 상태 7종은 공개 계약(api/actions.py)이 원천."""
 
     __tablename__ = "action_executions"
 
@@ -510,14 +511,48 @@ class ActionExecution(Base):
     finished_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # 판정 불가 보류 기록 (Issue #249) — AWS에 물어보지 못해 결과를 확정하지 못한 이력.
+    # 재시도 여부와 소진 판단의 입력이라 사유는 typed 코드로만 두고, 사람이 읽는
+    # error_summary를 근거로 쓰지 않는다. 판정이 내려지면 지워지고(workflows.close_execution)
+    # 소진으로 확정한 기록만 남는다.
+    verification_reason_code: Mapped[Optional[PrecheckReasonCode]] = mapped_column(
+        _enum(PrecheckReasonCode, "precheck_reason_code"), nullable=True
+    )
+    verification_attempts: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0")
+    )
+    verification_first_failed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    verification_last_failed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     __table_args__ = (
-        # ROLLBACK_INITIATED·ROLLED_BACK·ROLLBACK_FAILED는 원본 Execution 전용 —
+        # ROLLBACK_INITIATED·ROLLED_BACK·ROLLBACK_FAILED·UNVERIFIED는 원본 Execution 전용 —
         # 롤백 자식은 진행·성공·실패만 갖는다 (SSOT §API 계약)
         CheckConstraint(
             "parent_execution_id IS NULL"
             " OR status IN ('IN_PROGRESS', 'SUCCESS', 'FAILED')",
             name="rollback_child_status",
+        ),
+        # 보류 기록 네 칸은 함께 채워지거나 함께 비어 있다 (Issue #249). 마지막 실패
+        # 시각의 IS NOT NULL을 명시한다 — 없으면 NULL 비교가 NULL이 되어 CHECK를 통과한다
+        CheckConstraint(
+            "(verification_attempts = 0 AND verification_reason_code IS NULL"
+            " AND verification_first_failed_at IS NULL"
+            " AND verification_last_failed_at IS NULL)"
+            " OR (verification_attempts >= 1 AND verification_reason_code IS NOT NULL"
+            " AND verification_first_failed_at IS NOT NULL"
+            " AND verification_last_failed_at IS NOT NULL"
+            " AND verification_last_failed_at >= verification_first_failed_at)",
+            name="verification_hold_shape",
+        ),
+        # UNVERIFIED는 무엇을 확인하지 못했는지가 남아야 한다. text로 비교하는 것은 새
+        # enum 값을 추가한 트랜잭션에서 그 값을 쓰지 않기 위해서다(20260914 마이그레이션)
+        CheckConstraint(
+            "status::text <> 'UNVERIFIED' OR verification_attempts >= 1",
+            name="unverified_has_hold",
         ),
         Index("ix_action_executions_incident_id", "incident_id"),
         # Dispatcher 회수 스캔용 — 진행 중 상태만 부분 인덱스로 좁힌다

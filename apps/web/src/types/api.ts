@@ -214,8 +214,8 @@ export interface AssetsResponse {
 /* ───────────────────────────── actions.py ───────────────────────────── */
 
 /**
- * 실행 상태 6종 = SSOT 4종 + 복구 최종 결과 2종.
- * ROLLED_BACK·ROLLBACK_FAILED는 원본 Execution에만 기록되고,
+ * 실행 상태 7종 = SSOT 4종 + 복구 최종 결과 2종 + 결과 확인 불가 1종(#249).
+ * ROLLED_BACK·ROLLBACK_FAILED·UNVERIFIED는 원본 Execution에만 기록되고,
  * 롤백 자식 Execution은 IN_PROGRESS → SUCCESS | FAILED만 쓴다.
  * FAILED(AWS 변경 없음)와 ROLLBACK_FAILED(AWS 변경된 채 복구 실패·CRITICAL)를 UI에서 합치지 말 것.
  */
@@ -225,7 +225,12 @@ export type ExecutionStatus =
   | 'FAILED'
   | 'ROLLBACK_INITIATED'
   | 'ROLLED_BACK'
-  | 'ROLLBACK_FAILED';
+  | 'ROLLBACK_FAILED'
+  /**
+   * 결과 확인 불가 — AWS 조회 실패로 종료 판정을 내리지 못한 채 재시도를 소진했다(#249).
+   * 자동 원복하지 않았고 관제자 확인이 남았다. 종료 상태이며 관제자 복구가 열린다.
+   */
+  | 'UNVERIFIED';
 
 /** 요청은 3필드만 — Target ARN·AWS 파라미터는 보내지 않는다(extra=forbid). */
 export interface ExecuteActionRequest {
@@ -276,12 +281,27 @@ export interface RecommendationItem {
   display_parameters: Record<string, string>;
 }
 
+/**
+ * 판정 불가 보류 기록(#249) — AWS에 물어보지 못해 실행 결과를 확정하지 못한 이력.
+ * 실행 `status`가 IN_PROGRESS면 재시도 중, UNVERIFIED·FAILED면 재시도를 소진한 것이다.
+ * `reason_code`는 가드레일 ④와 같은 사유 코드 표(`PRECHECK_*`)다.
+ */
+export interface ExecutionVerificationHold {
+  reason_code: string;
+  /** 누적 조회 실패 횟수(첫 실패 포함). */
+  attempts: number;
+  first_failed_at: IsoDateTime;
+  last_failed_at: IsoDateTime;
+}
+
 export interface ExecutionSummaryItem {
   execution_id: string;
   runbook_id: RunbookId;
   status: ExecutionStatus;
   /** 관제자 복구 조치 — 롤백 3종만 온다. */
   available_recovery_runbook_ids: RollbackRunbookId[];
+  /** 보류가 없으면 null. UNVERIFIED면 반드시 있고 SUCCESS·ROLLBACK_INITIATED에는 오지 않는다(#249). */
+  verification_hold?: ExecutionVerificationHold | null;
   updated_at: IsoDateTime;
 }
 

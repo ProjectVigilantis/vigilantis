@@ -45,16 +45,16 @@
 # 자동 원복이 자식 실행 행으로 1회를 지키는 것과 같은 구조입니다.
 #
 # 판정이 늘 확정으로 끝나지는 않습니다. AWS에 물어보지 못한 경우는 자산이 실패했다는
-# 근거가 아니므로 확정하지 않고 IN_PROGRESS로 남겨 다음 주기가 다시 묻습니다 —
-# 검증기의 실패를 ROLLBACK_INITIATED로 저장하면 #241의 자동 원복이 멀쩡한 인스턴스를
-# 되돌립니다. 재시도 상한과 판정 불가의 저장 계약은 Issue #249입니다.
+# 근거가 아니므로 곧바로 확정하지 않고, 사유를 typed로 기록한 채 IN_PROGRESS로 남겨
+# 간격이 지난 뒤의 주기가 다시 묻습니다. 재시도를 소진하면 **자동 원복하지 않고**
+# 보류로 확정해 관제자에게 넘깁니다 — 검증기의 실패를 ROLLBACK_INITIATED로 저장하면
+# #241의 자동 원복이 멀쩡한 인스턴스를 되돌립니다. 판정 보류(_judge_one)와 실행 보류
+# (원복·해제 전 상태 대조 실패)가 같은 자리(_defer_or_hold)로 오고, 기록·재시도·소진의
+# 규칙은 workflows.record_verification_failure가 소유합니다 (Issue #249).
 #
 # [남은 작업]
 # 1. RIGHTSIZING·REVERT_SIZE·NACL 2종 외 6종 실행 — 실행 함수가 생기는 대로
 #    _RUNNERS에 등록하고, _JUDGES에 **짝으로** 함께 등록합니다(ADR-0008 §6, 아래 짝 검사).
-# 2. 보류의 재시도 정책 — 조회 실패를 몇 번까지 다시 묻고, 소진하면 어떤 typed
-#    상태로 남겨 관제자에게 보일지 확정합니다. 지금은 상한 없이 다시 묻습니다.
-#    판정 보류(_judge_one)와 실행 보류(원복 상태 대조 실패)가 같은 자리입니다 (Issue #249).
 #
 # 기동 worker 개수는 미정입니다 — ADR-0005가 다중 worker·replica 실행 토폴로지를
 # 별도 결정 대상으로 남겼고, 이 모듈은 worker 1개를 전제합니다. 선점(_claim)의
@@ -68,6 +68,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Callable, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -81,6 +82,7 @@ from schemas.executions import (
     ASSET_MAY_HAVE_CHANGED_EFFECTS,
     EXECUTION_NON_TERMINAL_STATUSES,
 )
+from schemas.precheck import PrecheckReasonCode
 from schemas.runbooks import ROLLBACK_RUNBOOK_BY_MAIN_ID, RunbookId
 
 import workflows
@@ -171,7 +173,9 @@ class DispatchReport:
     awaiting_judgement: int = 0     # 적용 여부가 불명확해 다음 주기의 현물 판정을 기다리는 실행
     rollback_initiated: int = 0     # 원복이 필요해 ROLLBACK_INITIATED로 남긴 실행
     rollback_started: int = 0       # 자동 원복 자식을 접수한 원본 (Issue #241)
-    deferred: int = 0               # AWS 조회 실패로 확정하지 않고 다음 주기로 미룬 실행
+    deferred: int = 0               # AWS 조회 실패를 기록하고 재시도로 미룬 실행 (Issue #249)
+    retry_waiting: int = 0          # 판정 불가 보류 중 재시도 간격이 아직 안 된 실행
+    held: int = 0                   # 재시도를 소진해 자동 판정을 멈추고 확정한 실행(closed와 따로 센다)
     release_offered: int = 0        # 차단 뒤 해제 후보가 가드레일을 통과해 [해제]가 선 건 (Issue #329)
     release_rejected: int = 0       # 해제 후보가 가드레일에서 거절된 건 — 다시 제안하지 않는다
     release_skipped: int = 0        # 해제 후보를 저장하지 않은 건(근거 없음·경합) — 사유는 debug 로그
@@ -256,11 +260,52 @@ def _close_and_publish(
         _publish_closure(publish, closure)
 
 
+def _defer_or_hold(
+    db: Session,
+    execution_id: str,
+    *,
+    reason_code: PrecheckReasonCode,
+    detail: Optional[str],
+    publish: Optional[Publish],
+    report: DispatchReport,
+    policy: workflows.VerificationRetryPolicy,
+    event: str,
+) -> None:
+    """AWS에 물어보지 못한 실행 1건 — 재시도로 미루거나, 소진했으면 보류로 확정한다. (Issue #249)
+
+    기록·판단·확정은 workflows.record_verification_failure가 한다. 여기는 결과를 세고,
+    확정됐으면 commit 이후에 알린다 — _close_and_publish와 같은 경계다.
+    """
+    hold = workflows.record_verification_failure(
+        db, execution_id, reason_code=reason_code, policy=policy, detail=detail
+    )
+    if hold is None:
+        # 판정하는 사이 다른 주체가 먼저 확정했다 — 발행도 그쪽이 한다
+        report.skipped += 1
+        return
+    if not hold.held:
+        report.deferred += 1
+        logger.warning(
+            event,
+            extra={
+                "execution_id": execution_id,
+                "reason_code": reason_code.value,
+                "attempts": hold.attempts,
+                "reason": detail,
+            },
+        )
+        return
+    report.held += 1
+    if publish is not None and hold.closure is not None:
+        _publish_closure(publish, hold.closure)
+
+
 def _judge_one(
     db: Session,
     claimed: models.ActionExecution,
     publish: Optional[Publish],
     report: DispatchReport,
+    policy: workflows.VerificationRetryPolicy,
 ) -> None:
     """AWS 변경이 시작된 실행 1건을 종료 판정으로 보낸다. (Issue #240)
 
@@ -293,19 +338,19 @@ def _judge_one(
     try:
         judgement = judge(db, execution_id)
         if judgement.deferred:
-            # AWS에 물어보지 못해 결론이 없다 — 확정하지 않고 다음 주기가 다시 묻는다.
-            # 여기서 ROLLBACK_INITIATED로 닫으면 검증기의 실패가 자산의 실패로
-            # 저장되어 #241의 자동 원복 입력과 구분되지 않는다. 사유는 로그로만
-            # 남긴다 — 판정 불가의 저장 계약은 Issue #249다
-            report.deferred += 1
-            logger.warning(
-                "dispatch_judgement_deferred",
-                extra={
-                    "execution_id": execution_id,
-                    "reason": judgement.defer_reason,
-                },
+            # AWS에 물어보지 못해 결론이 없다 — ROLLBACK_INITIATED로 닫으면 검증기의
+            # 실패가 자산의 실패로 저장되어 #241의 자동 원복 입력과 구분되지 않는다.
+            # 사유를 typed로 기록해 재시도하거나, 소진했으면 보류로 확정한다 (Issue #249)
+            _defer_or_hold(
+                db,
+                execution_id,
+                reason_code=judgement.defer_code,
+                detail=judgement.defer_reason,
+                publish=publish,
+                report=report,
+                policy=policy,
+                event="dispatch_judgement_deferred",
             )
-            db.commit()
             return
         _close_and_publish(
             db,
@@ -390,6 +435,7 @@ def _dispatch_one(
     execution_id: str,
     publish: Optional[Publish],
     report: DispatchReport,
+    policy: workflows.VerificationRetryPolicy,
 ) -> None:
     claimed = _claim(db, execution_id)
     if claimed is None:
@@ -405,12 +451,19 @@ def _dispatch_one(
         _initiate_rollback_one(db, claimed, publish, report)
         return
 
+    if not policy.retry_due(claimed, datetime.now(timezone.utc)):
+        # 판정 불가로 보류 중인 실행 — 재시도 간격이 아직 안 됐다. 스캔 주기마다 되물으면
+        # 스로틀링 같은 일시 오류를 우리가 키운다. 선점 잠금만 놓는다 (Issue #249)
+        report.retry_waiting += 1
+        db.commit()
+        return
+
     # 단계 기록이 1건이라도 있으면 자산이 이미 만져졌을 수 있다 — 재실행이 아니라
     # 종료 판정으로 간다. "단계 0건 = 자산 미변경"은 executor 계약에 의존한다:
     # AWS 호출 직전에 IN_PROGRESS 단계가 먼저 커밋된다(workflows._step_recorder).
     # 그 순서를 바꾸면 이 분기도 함께 무너진다.
     if executions_repo.list_steps(db, execution_id):
-        _judge_one(db, claimed, publish, report)
+        _judge_one(db, claimed, publish, report, policy)
         return
 
     runner = _RUNNERS.get(claimed.runbook_id)
@@ -453,18 +506,19 @@ def _dispatch_one(
             )
             return
         if outcome.deferred:
-            # 대조를 못 해 자산을 만지지 않았다 — 확정하면 검증기의 실패가 원복의
-            # 실패로 저장된다. 단계가 없으므로 다음 주기가 처음부터 다시 시도한다.
-            # 재시도 상한은 Issue #249다 (판정 보류와 같은 자리).
-            report.deferred += 1
-            logger.warning(
-                "dispatch_run_deferred",
-                extra={
-                    "execution_id": execution_id,
-                    "reason": outcome.error_summary,
-                },
+            # 대조를 못 해 자산을 만지지 않았다 — 곧바로 확정하면 검증기의 실패가 원복의
+            # 실패로 저장된다. 단계가 없으므로 재시도는 처음부터 다시 한다. 기록·재시도·
+            # 소진은 판정 보류와 같은 자리다 (Issue #249)
+            _defer_or_hold(
+                db,
+                execution_id,
+                reason_code=outcome.reason_code,
+                detail=outcome.error_summary,
+                publish=publish,
+                report=report,
+                policy=policy,
+                event="dispatch_run_deferred",
             )
-            db.commit()
             return
         if _changed_the_asset(outcome) and claimed.parent_execution_id is None:
             if claimed.runbook_id not in _AUTO_ROLLBACK_ON_ASSET_CHANGE:
@@ -569,7 +623,11 @@ def _offer_release_one(
         report.release_skipped += 1
 
 
-def dispatch_pending(db: Session, publish: Optional[Publish] = None) -> DispatchReport:
+def dispatch_pending(
+    db: Session,
+    publish: Optional[Publish] = None,
+    policy: Optional[workflows.VerificationRetryPolicy] = None,
+) -> DispatchReport:
     """비종료 실행 스캔 1회. **세션 수명은 호출부가 소유한다.**
 
     목록을 행이 아니라 식별자로만 받아 둔다. 처리 중에 커밋이 일어나므로 들고 있던
@@ -578,12 +636,17 @@ def dispatch_pending(db: Session, publish: Optional[Publish] = None) -> Dispatch
     **해제 제안은 비종료 스캔 뒤에 돈다** — 이번 주기에 SUCCESS로 닫힌 차단도 같은
     주기에 제안을 받는다. 확정 직후가 아니라 따로 스캔하는 이유는 workflows.py
     §차단 뒤 해제 제안(확정과 제안 사이에서 죽어도 다음 주기가 이어받는다).
+
+    policy는 판정 불가 재시도 정책이다 — 없으면 설정값(VERIFICATION_RETRY_*)을 쓴다.
+    테스트가 설정 캐시를 건드리지 않고 상한·간격을 조일 수 있도록 인자를 연다.
     """
+    if policy is None:
+        policy = workflows.VerificationRetryPolicy.from_settings()
     report = DispatchReport()
     pending = [row.execution_id for row in executions_repo.list_non_terminal(db)]
     report.scanned = len(pending)
     for execution_id in pending:
-        _dispatch_one(db, execution_id, publish, report)
+        _dispatch_one(db, execution_id, publish, report, policy)
     for execution_id in executions_repo.list_release_offer_pending(
         db, incident_statuses=workflows.RELEASE_OFFERABLE_STATUSES
     ):
