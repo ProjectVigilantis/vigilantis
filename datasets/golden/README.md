@@ -23,6 +23,8 @@ MVP 공통 테스트 정답지. 위협/자산 더미 데이터 48건을 `*.json`
   조용히 무시되므로 Pydantic 검증만으로는 잡히지 않는다. `tests/test_golden_dataset.py`의
   `test_finops_input_has_no_verdict_fields`가 원문 JSON을 직접 검사해 막는다.
 - 스키마는 추출본이다. `packages/schemas` 모델이 바뀌면 재추출 필요(원천은 항상 Pydantic 모델).
+  재추출은 `uv run python scripts/extract_golden_schema.py` 한 줄이고, 빠뜨리면
+  `tests/test_golden_schema_drift.py` 가 CI 에서 잡는다(#309).
 
 ## 폴더 구조
 
