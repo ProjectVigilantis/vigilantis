@@ -5,6 +5,7 @@ import {
   RESPONSE_MODES,
   RISK_LEVELS,
   type AssetItem,
+  type AssetType,
   type AssetsResponse,
   type ErrorCode,
   type ErrorResponse,
@@ -696,6 +697,44 @@ interface IncidentSeed {
   updatedAgo?: number;
 }
 
+/**
+ * `display_parameters`가 가질 수 있는 **정확한 키 집합** — 원천은 서버의 후보 파라미터 모델
+ * (`packages/schemas/runbook_parameters.py` `CANDIDATE_PARAMETER_MODELS`)이다. 모델 필드가
+ * 전부 필수라 서버 응답은 늘 이 집합과 **정확히 일치**한다(부분집합이 아니다).
+ *
+ * 표를 두는 이유는 #183이 잡은 드리프트가 **v1.6 시드 확장에서 4건 되살아났기** 때문이다
+ * (PR #189가 손으로 쓴 5건을 고쳤지만, 뒤이어 들어온 시드는 같은 검사를 받지 않았다).
+ * `display_parameters`는 관제자가 보고 승인하는 값이라, mock으로 개발·시연하면 **prod에서
+ * 안 보이는 값을 근거로 승인 흐름을 확인하게 된다.**
+ *
+ * 롤백 3종은 후보가 될 수 없어(ADR-0004 정책 ②) 여기 없다 — 제안에 오면 그 자체가 오류다.
+ */
+const CANDIDATE_PARAM_KEYS: Partial<Record<RunbookId, readonly string[]>> = {
+  RUNBOOK_EC2_ISOLATE: [],
+  RUNBOOK_NACL_ADD_DENY: ['rule_number', 'cidr_block', 'protocol'],
+  RUNBOOK_NACL_RESTORE: ['rule_number', 'egress'],
+  RUNBOOK_SG_DELETE_ISOLATED: [],
+  RUNBOOK_EC2_RIGHTSIZING: ['target_instance_type'],
+  RUNBOOK_EC2_ENABLE_AUTOSCALING: ['min_size', 'max_size'],
+  RUNBOOK_EBS_DELETE_UNATTACHED: [],
+};
+
+/**
+ * 각 런북이 **바꿀 수 있는 자원 유형**. 확정 10종은 대상이 하나씩으로 정해져 있다
+ * (`packages/schemas/runbook_parameters.py`의 precheck 파라미터가 받는 식별자 종류).
+ * 유형이 어긋난 제안은 실행 단계에서 파라미터 검증에 걸리므로 화면에 떠서는 안 된다 —
+ * `RUNBOOK_EC2_RIGHTSIZING`이 EBS 볼륨을 대상으로 잡고 있던 시드가 실제로 있었다(#183 실측).
+ */
+const CANDIDATE_TARGET_TYPE: Partial<Record<RunbookId, AssetType>> = {
+  RUNBOOK_EC2_ISOLATE: 'EC2',
+  RUNBOOK_NACL_ADD_DENY: 'NACL',
+  RUNBOOK_NACL_RESTORE: 'NACL',
+  RUNBOOK_SG_DELETE_ISOLATED: 'SG',
+  RUNBOOK_EC2_RIGHTSIZING: 'EC2',
+  RUNBOOK_EC2_ENABLE_AUTOSCALING: 'EC2',
+  RUNBOOK_EBS_DELETE_UNATTACHED: 'EBS',
+};
+
 function seedIncident(seed: IncidentSeed): IncidentResponse {
   const where = `seed ${seed.id}`;
   const isSec = seed.category === 'SECOPS';
@@ -755,6 +794,7 @@ function seedIncident(seed: IncidentSeed): IncidentResponse {
   if (new Set(recommend.map((r) => r.runbook)).size !== recommend.length) {
     throw new Error(`${where}: recommendations에 같은 runbook_id가 중복될 수 없다`);
   }
+  // 후보 키·대상 유형·제목 대조는 손으로 쓴 5건도 받아야 해서 `assertIncidentContract`(아래)가 한다.
 
   return {
     incident_id: seed.id,
@@ -815,7 +855,7 @@ const seededIncidents: IncidentResponse[] = [
       '초기 위험등급 HIGH 정책에 따라 0.5초 선제 격리를 수행했습니다.',
       '정밀 평가는 MEDIUM으로 낮췄으나 차단은 자동 해제되지 않습니다.',
     ],
-    recommend: [{ runbook: 'RUNBOOK_NACL_ADD_DENY', target: arn.nacl, params: { rule_number: '110', egress: 'false' } }],
+    recommend: [{ runbook: 'RUNBOOK_NACL_ADD_DENY', target: arn.nacl, params: { rule_number: '110', cidr_block: '203.0.113.42/32', protocol: 'tcp' } }],
     executions: [{ runbook: 'RUNBOOK_EC2_ISOLATE', status: 'SUCCESS', recovery: ['RUNBOOK_EC2_UNISOLATE'] }],
   }),
   seedIncident({
@@ -827,7 +867,7 @@ const seededIncidents: IncidentResponse[] = [
       '위험등급 MEDIUM이라 승인 전까지 조치가 수행되지 않았습니다.',
       '미응답 시 시간 초과 자동 격리가 발동합니다.',
     ],
-    recommend: [{ runbook: 'RUNBOOK_NACL_ADD_DENY', target: arn.nacl, params: { rule_number: '120', egress: 'true' } }],
+    recommend: [{ runbook: 'RUNBOOK_NACL_ADD_DENY', target: arn.nacl, params: { rule_number: '120', cidr_block: '198.51.100.77/32', protocol: 'tcp' } }],
   }),
   seedIncident({
     id: 'inc-20260827-s104', category: 'SECOPS', risk: 'MEDIUM', timedOut: true,
@@ -842,14 +882,16 @@ const seededIncidents: IncidentResponse[] = [
   }),
   seedIncident({
     id: 'inc-20260827-s105', category: 'SECOPS', risk: 'LOW', reviewed: 'LOW',
-    title: '미사용 보안 그룹 잔존 — vigilantis-stale-sg', arn: arn.sgQuarantine,
+    // 대상은 UNUSED SG다. `vigilantis-stale-sg`는 SKIP_WHITELISTED(사람이 등록한 예외)라
+    // 거기에 삭제 제안을 걸면 자산 화면의 「예외」와 승인 모달이 서로 다른 말을 한다(#183).
+    title: '미사용 보안 그룹 잔존 — vigilantis-legacy-sg', arn: arn.sgUnused,
     status: 'AWAITING_APPROVAL', createdAgo: 26, updatedAgo: 26,
     summary: [
       '어떤 자원에도 연결되지 않은 보안 그룹이 남아 있습니다.',
       '위험등급 LOW라 승인 전까지 조치가 수행되지 않습니다.',
       'LOW는 시간 초과 자동 격리 대상이 아닙니다.',
     ],
-    recommend: [{ runbook: 'RUNBOOK_SG_DELETE_ISOLATED', params: { group_id: 'sg-0a1b2c3d4e5f60003' } }],
+    recommend: [{ runbook: 'RUNBOOK_SG_DELETE_ISOLATED' }],
   }),
   seedIncident({
     id: 'inc-20260827-s106', category: 'SECOPS', risk: 'LOW',
@@ -861,10 +903,13 @@ const seededIncidents: IncidentResponse[] = [
     title: '루트 계정 콘솔 로그인 — 계정 123456789012', arn: arn.ec2Normal,
     status: 'FAILED', createdAgo: 18, updatedAgo: 16,
     summary: [
-      '루트 계정으로 콘솔 로그인이 발생했습니다.',
-      '대상 자원을 특정하지 못해 조치 후보를 만들지 못했습니다.',
-      '수집 범위를 확인한 뒤 재분석이 필요합니다.',
+      '루트 계정 콘솔 로그인 직후 이 호스트에서 비정상 API 호출이 이어졌습니다.',
+      '선제 격리가 AWS 변경 없이 실패했습니다.',
+      '원인을 확인한 뒤 재조치 여부를 판단해야 합니다.',
     ],
+    // FAILED는 실행 결과로만 도달한다(workflows._incident_status_after_execution) — 실행 0건
+    // FAILED는 실 BE에서 나올 수 없고, 실행 영역이 통째로 빠져 화면에서 닫을 길도 없다(PR #292 리뷰).
+    executions: [{ runbook: 'RUNBOOK_EC2_ISOLATE', status: 'FAILED' }],
   }),
   seedIncident({
     id: 'inc-20260827-s108', category: 'SECOPS', risk: 'MEDIUM',
@@ -912,7 +957,7 @@ const seededIncidents: IncidentResponse[] = [
   /* ── FINOPS 진행 중 ── */
   seedIncident({
     id: 'inc-20260827-f101', category: 'FINOPS',
-    title: '저사용 EC2 — vigilantis-worker-01', arn: arn.ec2Canary,
+    title: '저사용 EC2 — vigilantis-worker-01', arn: arn.ec2Worker,
     status: 'AWAITING_APPROVAL', createdAgo: 44, updatedAgo: 44,
     summary: [
       '최근 관측 구간의 CPU 평균이 Idle 기준 이하입니다.',
@@ -923,14 +968,14 @@ const seededIncidents: IncidentResponse[] = [
   }),
   seedIncident({
     id: 'inc-20260827-f102', category: 'FINOPS',
-    title: '미연결 EBS 볼륨 — vigilantis-snapshot-vol', arn: arn.ebsUnattached,
+    title: '미연결 EBS 볼륨 — vigilantis-snapshot-vol', arn: arn.ebsSnapshot,
     status: 'AWAITING_APPROVAL', createdAgo: 40, updatedAgo: 40,
     summary: [
       '어떤 인스턴스에도 연결되지 않은 볼륨이 과금되고 있습니다.',
       '삭제 직전 최종 스냅샷을 강제로 남깁니다.',
       '등록된 롤백 런북이 없는 파괴적 조치입니다.',
     ],
-    recommend: [{ runbook: 'RUNBOOK_EBS_DELETE_UNATTACHED', params: { volume_id: 'vol-0a1b2c3d4e5f60002' } }],
+    recommend: [{ runbook: 'RUNBOOK_EBS_DELETE_UNATTACHED' }],
   }),
   seedIncident({
     id: 'inc-20260827-f103', category: 'FINOPS',
@@ -956,33 +1001,37 @@ const seededIncidents: IncidentResponse[] = [
   }),
   seedIncident({
     id: 'inc-20260827-f105', category: 'FINOPS',
-    title: '사용량 재수집 대기 — vigilantis-cache-01', arn: arn.ec2Canary,
+    // 제목을 대상(SKIP_INSUFFICIENT_DATA)에 맞췄다. `vigilantis-cache-01`은 SKIP_PROD_PROTECTED라
+    // 거기에 FinOps 인시던트를 걸면 자산 화면의 「운영 보호」와 어긋난다(#183).
+    title: '사용량 재수집 대기 — vigilantis-api-canary', arn: arn.ec2Canary,
     status: 'ANALYZING', createdAgo: 24, updatedAgo: 24,
   }),
   seedIncident({
     id: 'inc-20260827-f106', category: 'FINOPS',
-    title: 'Idle 판정 데이터 부족 — vigilantis-legacy-api', arn: arn.ec2Normal,
+    title: '저사용 EC2 — vigilantis-legacy-api', arn: arn.ec2LegacyApi,
     status: 'FAILED', createdAgo: 20, updatedAgo: 19,
     summary: [
-      '판정에 필요한 관측 구간이 충분히 쌓이지 않았습니다.',
-      '수집이 더 진행된 뒤 재판정이 필요합니다.',
-      '현재로서는 조치 후보를 만들 수 없습니다.',
+      '최근 관측 구간의 CPU 평균이 Idle 기준 이하였습니다.',
+      '승인된 스펙 조정이 AWS 변경 없이 실패했습니다.',
+      '원인을 확인한 뒤 재조치 여부를 판단해야 합니다.',
     ],
+    // 실행 0건 FAILED는 실 BE에서 나올 수 없다 — inc-20260827-s107 주석 참조.
+    executions: [{ runbook: 'RUNBOOK_EC2_RIGHTSIZING', status: 'FAILED' }],
   }),
   seedIncident({
     id: 'inc-20260827-f107', category: 'FINOPS',
-    title: null, arn: arn.ebsAttached,
+    title: null, arn: arn.ec2LegacyApi,
     status: 'AWAITING_APPROVAL', createdAgo: 15, updatedAgo: 15,
     summary: [
-      '연결돼 있으나 입출력이 거의 없는 볼륨입니다.',
-      '스토리지 타입 조정 여지가 있습니다.',
+      '구형 인스턴스 유형으로 남아 있으며 CPU 평균이 Idle 기준 이하입니다.',
+      '현재 스펙에서 두 단계 축소할 수 있습니다.',
       '표시할 제목이 아직 산출되지 않아 대상 자원으로 표기됩니다.',
     ],
     recommend: [{ runbook: 'RUNBOOK_EC2_RIGHTSIZING', params: { target_instance_type: 't3.micro' } }],
   }),
   seedIncident({
     id: 'inc-20260827-f108', category: 'FINOPS',
-    title: '저사용 인스턴스 재평가 — vigilantis-worker-01', arn: arn.ec2Canary,
+    title: '저사용 인스턴스 재평가 — vigilantis-worker-01', arn: arn.ec2Worker,
     status: 'ANALYZING', createdAgo: 8, updatedAgo: 8,
   }),
 
@@ -1023,6 +1072,56 @@ const seededIncidents: IncidentResponse[] = [
 ];
 
 incidents.push(...seededIncidents);
+
+/**
+ * 인시던트 **전량** 계약 가드 — 모듈 로드 시 한 번 돌며, `next build`의 page data 수집에서
+ * 깨지므로 CI `web` 잡이 잡는다. `seedIncident` 안에 두면 팩토리를 타지 않는 손으로 쓴
+ * 시연 본선 5건(`inc-20260814-0001`–`0005`)이 무검사로 남는데, #183이 처음 잡은 드리프트가
+ * 바로 그 5건에서 났다(PR #293 리뷰).
+ */
+function assertIncidentContract(inc: IncidentResponse): void {
+  const where = `incident ${inc.incident_id}`;
+
+  // FAILED는 실행 결과로만 도달한다(workflows._incident_status_after_execution).
+  if (inc.status === 'FAILED' && inc.executions.length === 0) {
+    throw new Error(`${where}: FAILED는 실행 결과로만 도달한다 — 실행이 1개 이상이어야 한다`);
+  }
+
+  for (const r of inc.recommendations) {
+    const expected = CANDIDATE_PARAM_KEYS[r.runbook_id];
+    if (expected === undefined) {
+      throw new Error(`${where}: ${r.runbook_id}은 AI 추천 후보가 될 수 없다(롤백 런북)`);
+    }
+    // 대상 자원 유형 대조. **수집 목록에 없는 자산은 통과시킨다** — 계약상 정상이며
+    // (미수집 자산의 인시던트) 그 경우 조인 결과가 null인 것을 화면이 이미 다룬다.
+    const targetAsset = assetsResponse.items.find((a) => a.arn === r.target_arn);
+    const wantType = CANDIDATE_TARGET_TYPE[r.runbook_id];
+    if (targetAsset && wantType && targetAsset.asset_type !== wantType) {
+      throw new Error(
+        `${where}: ${r.runbook_id}의 대상은 ${wantType}여야 하는데 ${targetAsset.asset_type}다 ` +
+          `(${targetAsset.arn})`,
+      );
+    }
+    const actual = Object.keys(r.display_parameters).sort();
+    const want = [...expected].sort();
+    if (actual.join(',') !== want.join(',')) {
+      throw new Error(
+        `${where}: ${r.runbook_id}의 display_parameters 키가 서버 파생본과 다르다 — ` +
+          `기대 [${want.join(', ')}] / 실제 [${actual.join(', ')}]`,
+      );
+    }
+  }
+
+  // 제목이 자산 이름을 부르면 그 자산이 실제 대상이어야 한다. v1.6 확장에서 제목만 새 자산으로
+  // 바뀌고 arn은 구 자산에 남은 시드가 5건 있었다(#183). 화면은 제목과 조치 대상을 나란히 그린다.
+  const named = inc.title?.match(/vigilantis-[a-z0-9-]+/);
+  const subject = assetsResponse.items.find((a) => a.arn === inc.subject_arn);
+  if (named && subject && subject.name !== named[0]) {
+    throw new Error(`${where}: 제목은 ${named[0]}인데 subject_arn은 ${subject.name}이다`);
+  }
+}
+
+incidents.forEach(assertIncidentContract);
 
 
 /* ───────────────────── 실행 mock 상태 (dev 서버 수명 기준) ───────────────────── */

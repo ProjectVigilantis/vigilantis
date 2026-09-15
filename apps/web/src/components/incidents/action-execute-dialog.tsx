@@ -15,8 +15,13 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { ApiError, executeAction } from '@/lib/api/client';
-import { DESTRUCTIVE_RUNBOOK_IDS, RUNBOOK_LABELS, isDestructiveRunbook } from '@/lib/enum-labels';
-import type { ExecuteActionResponse, IncidentResponse, RunbookId } from '@/types/api';
+import {
+  DESTRUCTIVE_RUNBOOK_IDS,
+  RUNBOOK_LABELS,
+  approvalAssetFacts,
+  isDestructiveRunbook,
+} from '@/lib/enum-labels';
+import type { AssetItem, ExecuteActionResponse, IncidentResponse, RunbookId } from '@/types/api';
 
 /**
  * 파괴적 조치 경고는 **런북별로 다르다.** 2종에 한 문장을 공통으로 붙일 수 없다(PR #169 리뷰).
@@ -45,6 +50,12 @@ export interface ActionCandidate {
   targetArn: string | null;
   /** 표시 전용. FE가 key 표시명을 지어내지 않고 원문을 쓴다. */
   displayParameters: Record<string, string> | null;
+  /**
+   * `targetArn`을 `GET /assets`에 조인한 자산(#183 A안). 수집 목록에 없거나 조회가 실패하면 null이다.
+   * **조인은 호출부가 한다** — 두 진입 경로(INC-002 상세 · INC-001 목록)가 자산을 부르는 방식이
+   * 달라서(상세는 이미 부른 결과 재사용, 목록은 병렬 조회) 모달이 그 차이를 알 필요가 없다.
+   */
+  targetAsset: AssetItem | null;
 }
 
 /**
@@ -186,6 +197,24 @@ export function ActionExecuteDialog({
               {chosen?.targetArn ?? incident.subject_arn}
             </dd>
           </div>
+          {/* 조치 대상의 **자산 사실값**(#183). 서버 파생본인 display_parameters와 출처가 달라
+              런북 목록 안에 섞지 않고 여기 둔다 — 이름은 ARN만으로 무엇인지 모를 때의 문맥이고,
+              유형별 값은 승인 판단에 직접 쓰인다(변경 폭 · 삭제 규모). */}
+          {chosen?.targetAsset
+            ? [
+                {
+                  key: '__name__',
+                  label: '자산',
+                  value: chosen.targetAsset.name ?? chosen.targetAsset.resource_id,
+                },
+                ...approvalAssetFacts(chosen.targetAsset),
+              ].map(({ key, label, value }) => (
+                <div key={key} className="flex items-start justify-between gap-3">
+                  <dt className="text-muted-foreground">{label}</dt>
+                  <dd className="text-right font-medium break-all">{value}</dd>
+                </div>
+              ))
+            : null}
           {request?.originExecutionId ? (
             <div className="flex items-start justify-between gap-3">
               <dt className="text-muted-foreground">원본 실행</dt>
