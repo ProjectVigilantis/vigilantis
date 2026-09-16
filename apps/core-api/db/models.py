@@ -116,12 +116,12 @@ class CollectionRun(Base):
     )
 
     __table_args__ = (
-        Index("ix_collection_runs_started_at", "started_at"),
         # 리전별 최신 run 조회(latest_collection_run_per_region)가 5분 스캔으로 쌓이는
         # 행을 전부 정렬하지 않게 — (region, started_at DESC, id DESC) 순서로 LIMIT 1 을
-        # 찍는다. 두 번째 키 id 는 동시각 tie-break 이자, ix_collection_runs_started_at
-        # (started_at 단독)이 이 정렬을 대신하지 못하게 해 플래너가 그 인덱스를 최신순으로
-        # 훑다가 리전 필터로 버리는 경로(PR #344 리뷰)를 고르지 않게 한다.
+        # 찍는다. 세 번째 키 id 는 동시각 tie-break 다.
+        # 종전의 started_at 단독 인덱스(ix_collection_runs_started_at)는 #343 에서 지웠다 —
+        # 플래너가 그쪽을 최신순으로 훑다가 리전 필터로 수천 행을 버리는 경쟁 경로였고
+        # (PR #344 리뷰), 시작 시각 단독으로 정렬·범위 조회하는 문장이 운영 코드에 없다.
         Index(
             "ix_collection_runs_region_started_at",
             "region",

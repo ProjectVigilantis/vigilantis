@@ -44,6 +44,18 @@ NEW_INDEXES = {
 # --- 1. 마이그레이션 ↔ models ----------------------------------------------------
 
 
+def test_started_at_only_index_is_gone(db):
+    """옛 started_at 단독 인덱스는 지워져 있어야 한다 — 남아 있으면 플래너가 리전 조건을
+    필터로 거르는 경쟁 경로가 된다(PR #344 리뷰). 모델 선언과 DB 양쪽에서 확인한다."""
+    assert all(
+        idx.name != "ix_collection_runs_started_at"
+        for idx in models.Base.metadata.tables["collection_runs"].indexes
+    )
+    assert db.execute(
+        text("SELECT count(*) FROM pg_indexes WHERE indexname = 'ix_collection_runs_started_at'")
+    ).scalar_one() == 0
+
+
 def test_new_indexes_exist_and_match_models(db):
     """세 인덱스가 DB 에 있고, 컬럼·정렬 방향이 models.Index 선언과 같다."""
     for table, name in NEW_INDEXES.items():
@@ -128,7 +140,8 @@ def test_latest_evaluation_by_asset_newest_then_larger_id(db):
 
     _evaluate(db, run1, a, NOW, verdict="COST_CANDIDATE")
     a_new = _evaluate(db, run2, a, NOW + timedelta(minutes=5))
-    # 같은 시각 두 건 — 회차만 다르다. id 가 큰 쪽이 최신이다(종전 DISTINCT ON 과 같은 규칙).
+    # 같은 시각 두 건 — 회차만 다르다. 동시각이면 id 역순을 고른다 — id 는 UUID v4 라
+    # "최신" 이라는 뜻은 없고, 목록·단건이 같은 한 건을 고르게 하는 결정적 규칙일 뿐이다.
     b1 = _evaluate(db, run2, b, NOW + timedelta(minutes=5))
     b2 = _evaluate(db, run3, b, NOW + timedelta(minutes=5))
     b_win = max(b1, b2, key=lambda e: e.rule_evaluation_id)
@@ -205,26 +218,51 @@ def test_latest_queries_touch_one_row_per_region_and_asset(db):
     assert _rows_touched(_plan(db, assets_repo.latest_rule_evaluation_by_asset_stmt()), "rule_evaluations") == 2
 
 
-def test_stale_or_empty_region_does_not_scan_other_regions(db):
-    """이력이 없는 리전·31일 묵은 리전을 조회해도 다른 리전의 행을 읽고 버리지 않는다.
+def _seven_days_of_runs(db, regions: dict[str, str]):
+    """7일치(리전당 2,016행)를 generate_series 로 넣는다. ``regions`` 는 리전 → 과거로 미는 간격."""
+    values = ", ".join(f"('{r}', INTERVAL '{back}')" for r, back in regions.items())
+    db.execute(
+        text(
+            f"""
+            INSERT INTO collection_runs (collection_run_id, status, account_id, region, mode,
+                                         lookback_days, period_seconds, started_at)
+            SELECT gen_random_uuid(), CAST(:st AS collection_run_status), '1', v.r, 'aws', 14, 3600,
+                   CAST(:now AS timestamptz) - v.back - i * INTERVAL '5 min'
+            FROM generate_series(0, 2015) i, (VALUES {values}) v(r, back)
+            """
+        ),
+        {"st": CollectionRunStatus.SUCCESS.value, "now": NOW},
+    )
+    db.execute(text("ANALYZE collection_runs"))
 
-    PR #344 리뷰가 잡은 경로: 플래너가 started_at 단독 인덱스를 최신순으로 훑으며 리전
-    필터로 8,640행을 폐기했다. 정렬 키에 id 를 더해 그 인덱스가 정렬을 대신하지 못하게
-    했으므로, 어떤 리전 조합에서도 만진 행은 이력이 있는 리전 수를 넘지 않는다.
-    """
-    for i in range(40):
-        _run(db, "fresh", NOW + timedelta(minutes=5 * i))
-        _run(db, "stale", NOW - timedelta(days=31) + timedelta(minutes=5 * i))
 
-    _prepare_planner(db)
+def _assert_region_is_an_index_condition(db, regions):
+    plan = _plan(db, assets_repo.latest_run_per_region_stmt(regions))
+    joined = "\n".join(plan)
+    assert "ix_collection_runs_region_started_at" in joined, joined
+    assert "Rows Removed by Filter" not in joined, joined  # 0 이면 EXPLAIN 이 이 줄을 아예 안 찍는다
+    # EXPLAIN 의 rows 는 loop 평균(반올림)이라 리전 수 × 1 이 상한 — 수천이 아니다
+    assert _rows_touched(plan, "collection_runs") <= len(regions), joined
 
-    stmt = assets_repo.latest_run_per_region_stmt(["fresh", "stale", "never-collected"])
-    plan = _plan(db, stmt)
-    assert "ix_collection_runs_started_at" not in "\n".join(plan), "\n".join(plan)
-    assert "Rows Removed by Filter" not in "\n".join(plan), "\n".join(plan)
-    # EXPLAIN 의 rows 는 loop 평균(반올림)이라 3 리전 × 1 = 3 까지가 상한 — 80 이 아니다
-    assert _rows_touched(plan, "collection_runs") <= 3, "\n".join(plan)
 
-    got = {r.region: r for r in db.execute(stmt).scalars()}
-    assert set(got) == {"fresh", "stale"}
-    assert got["stale"].started_at == NOW - timedelta(days=31) + timedelta(minutes=5 * 39)
+def test_unseen_region_filters_by_index_at_seven_day_scale(db):
+    """신선한 리전 둘에 이력 없는 리전을 함께 물어도 리전 조건이 **인덱스 조건**으로 걸린다
+    (필터로 버리는 행 0). 80행 규모에서는 플래너가 어차피 복합 인덱스를 골라 구분이 안 되고
+    7일치부터 갈린다 — PR #344 리뷰(김세혁)의 재현 조건 그대로(리전 둘 다 신선, 플래너
+    설정 기본값). started_at 단독 인덱스가 남아 있던 상태에서는 loop 당 1,344행을 버리며
+    실패한다 — 묵은 리전 행을 섞어 넣으면 통계가 달라져 그 상태에서도 통과해 버리므로
+    데이터는 이 둘뿐이어야 한다."""
+    _seven_days_of_runs(db, {"fresh-a": "0", "fresh-b": "0"})
+    _assert_region_is_an_index_condition(db, ["fresh-a", "fresh-b", "never-collected"])
+
+
+def test_stale_region_filters_by_index_and_returns_its_own_latest(db):
+    """31일 묵은 리전을 물어도 다른 리전 행을 읽고 버리지 않고, 그 리전의 최신값을 돌려준다."""
+    _seven_days_of_runs(db, {"fresh-a": "0", "stale": "31 days"})
+    regions = ["fresh-a", "stale", "never-collected"]
+    _assert_region_is_an_index_condition(db, regions)
+
+    got = {r.region: r for r in db.execute(assets_repo.latest_run_per_region_stmt(regions)).scalars()}
+    assert set(got) == {"fresh-a", "stale"}
+    assert got["fresh-a"].started_at == NOW
+    assert got["stale"].started_at == NOW - timedelta(days=31)

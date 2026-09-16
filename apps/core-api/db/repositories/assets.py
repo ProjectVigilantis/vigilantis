@@ -76,7 +76,8 @@ def latest_collection_run_per_region(
     빠진 리전의 옛 run 이 영구히 그 리전의 최신으로 남아 collection_status 를 붙잡던
     문제(#261)를 막는다. 세 필드(collection_status·items·last_collected_at)를 **같은
     리전 스코프로 함께 좁혀야** 응답 안에서 범위가 갈리지 않는다(PR #259 리뷰, 안성일).
-    ``regions=None`` 이면 전 리전(수집기 등 내부 호출용).
+    ``regions=None`` 이면 전 리전 — 현재는 테스트에서만 쓴다(운영 호출자는 routers/assets.py
+    하나이고 항상 ``regions=`` 를 넘긴다).
 
     리전을 받으면 리전마다 ``ORDER BY started_at DESC LIMIT 1`` 을 LATERAL 로 찍는다 —
     ``ix_collection_runs_region_started_at`` 의 첫 항목이 답이라 run 이 5분마다 쌓여도
@@ -105,9 +106,8 @@ def latest_run_per_region_stmt(regions: Sequence[str]):
         [(r,) for r in dict.fromkeys(regions)]  # 중복 제거, 순서 유지
     )
     # 정렬 키 (started_at DESC, id DESC) 는 ix_collection_runs_region_started_at 의 순서
-    # 그대로다. id 를 빼면 started_at 단독 인덱스도 이 정렬을 줄 수 있어, 플래너가 그쪽을
-    # 최신순으로 훑다가 리전 필터로 수천 행을 버리는 경로를 고를 수 있다(PR #344 리뷰 —
-    # 이력이 없거나 31일 묵은 리전에서 8,640행 폐기).
+    # 그대로다. started_at 단독 인덱스는 #343 에서 지웠다 — 남아 있으면 플래너가 그쪽을
+    # 최신순으로 훑다가 리전 필터로 수천 행을 버리는 경로를 고를 수 있었다(PR #344 리뷰).
     latest = (
         select(models.CollectionRun)
         .where(models.CollectionRun.region == wanted.c.region)
