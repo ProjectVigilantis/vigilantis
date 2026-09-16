@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-08-19
-- **Amended**: 2026-08-24, 2026-09-08, 2026-09-10, **2026-09-14** — §4 검증 한계 목록 갱신과 **스모크 시점·중간 발표 전환 방침 변경**(하단 "개정 이력" 참조, 핵심 결정 불변)
+- **Amended**: 2026-08-24, 2026-09-08, 2026-09-10, 2026-09-14, **2026-09-15** — §4 검증 한계 목록 갱신, 스모크 시점·중간 발표 전환 방침 변경, **§4 2행 Status Check 실패 주입 실측 반영**(하단 "개정 이력" 참조, 핵심 결정 불변)
 - **Deciders**: 김세혁(PM/Infra) 수립 — 2026-08-13 확정 결정(개발 = LocalStack, 발표 직전 실 AWS 전환)의 구체화
 
 ## Context (배경)
@@ -59,7 +59,7 @@ LocalStack 통과를 "검증 완료"로 간주하지 않는 경로를 고정 목
 | # | 경로 | 실 AWS와의 격차 |
 | --- | --- | --- |
 | 1 | 가드레일 4단계 `DryRun=True` | LocalStack은 실제 IAM 권한을 검증하지 않음 |
-| 2 | `get_waiter` Status Check(2/2) 감시·자동 원복 | 실제 부팅·헬스체크가 없어 대기·실패 시나리오가 재현되지 않음. **다만 실패 판정 분기는 둘이고 처지가 갈린다**(2026-09-14 재검토): ⓐ `impaired` 검사 결과 — LocalStack이 헬스체크를 돌리지 않으므로 **만들 수 없고 이 이월 목록에 남는다** ⓑ `_NOT_BOOTING_STATES`(`stopping`·`stopped`·`shutting-down`·`terminated`) — **`stop_instances`로 도달할 수 있다.** Community가 지원하는 호출이고, 가짜 AWS의 **상태만** 조작하므로 §3(코드 분기 금지)에 걸리지 않는다. ⓑ의 미측정 전제는 `describe_instance_status(IncludeAllInstances=True)`가 stopped 인스턴스를 돌려주는가이며, 안 돌려주면 사유가 `PRECHECK_TARGET_NOT_FOUND`로 갈려 실패 서사가 "기동 실패"가 아니라 "대상 없음"이 된다. **ⓑ 측정은 6주차(9/14–9/18)** — 결과에 따라 이 행의 범위가 ⓐ로 좁아진다 |
+| 2 | `get_waiter` Status Check(2/2) — **`impaired` 검사 결과 경로만** | **2026-09-15 실측으로 이 행을 ⓐ로 좁혔다**(아래 6차 개정). ⓐ `impaired`(AWS가 이미 이상으로 판정한 검사 결과) — LocalStack이 헬스체크를 돌리지 않으므로 **만들 수 없고 이 이월 목록에 남는다.** 실제 부팅 시간만큼 기다리는 대기도 재현되지 않는다 — LocalStack은 running 인스턴스를 첫 조회에 2/2 `ok`로 돌려준다. ⓑ `_NOT_BOOTING_STATES`(`stopping`·`stopped`·`shutting-down`·`terminated`) 분기는 **이 목록에서 뺐다** — 실행 뒤 대상을 `stop_instances`로 멈추면 `IncludeAllInstances=True` 재조회가 `stopped`를 돌려줘 판정이 `FAILED`("기동 실패")로 떨어지고, 자동 원복(`REVERT_SIZE` · `AUTO_ON_FAILURE`)까지 LocalStack에서 실경로로 흐른다. 사유는 `PRECHECK_TARGET_NOT_FOUND`로 갈리지 않는다. 에뮬레이터 동작은 `apps/core-api/services/tests/test_status_check_localstack.py`가 지킨다 |
 | 3 | CloudWatch 메트릭 수집 | 실 AWS는 EC2가 자동 발행, LocalStack은 시드 주입 — 지연·해상도 특성이 다름 |
 | 4 | ALB Target Group·ASG 경로 (P2 런북 3종) | **확정 편입(2026-08-24 실측)** — `elbv2`·`autoscaling`은 Community 미포함(Pro 전용, `InternalFailure: not included within your LocalStack license`). `ISOLATE`·`UNISOLATE`·`ENABLE_AUTOSCALING`은 실행뿐 아니라 Dry-Run 대체용 describe 조회도 로컬 불가 |
 | 5 | `ec2.create_network_acl_entry` · `ec2.delete_network_acl_entry`의 `DryRun=True` | **LocalStack이 플래그를 무시하고 실제로 규칙을 생성·삭제한다**(예외 미발생). 실 AWS는 정상 지원하므로 `DryRun` 경로는 실 AWS에서 처음 검증된다 — 그때까지 두 런북은 조회 대체 검증으로 동작한다([ADR-0007](0007-guardrail-dryrun-executor-precheck-contract.md) §4) |
@@ -198,3 +198,39 @@ LocalStack 통과를 "검증 완료"로 간주하지 않는 경로를 고정 목
 
   §1(Community 전용)·§2(Boto3 시드 단일 원천)·§3(전환 스위치 규약)은 그대로 유지하며,
   핵심 결정(단일 compose·Boto3 시드 단일 원천·전환 스위치·이월 목록 운용)은 불변이다.
+
+- **2026-09-15 (6차 개정)** — §4 2행을 ⓑ 실측으로 좁혔다. 5차 개정이 *"6주차(9/14–9/18)에
+  판정해 이 행을 갱신한다"* 고 남긴 자리의 이행이다(`docs/PROJECT_STATUS.md` 6주차 판정 기준 ⓑ).
+
+  | 대상 | 변경 |
+  | --- | --- |
+  | §4 2행 (Status Check) | 이월 범위를 **ⓐ `impaired` 경로만**으로 좁혔다. ⓑ `_NOT_BOOTING_STATES`는 `stop_instances` 주입으로 LocalStack에서 선다 |
+
+  **실측**(LocalStack 4.14.0 · dev `77d5cae`) — 5차 개정이 미측정으로 남긴 전제는 **참**이었다.
+
+  | | running | `stop_instances` 직후 |
+  | --- | --- | --- |
+  | `DescribeInstanceStatus` 기본 호출 | `running` · 검사 `ok/ok` | **빈 목록** |
+  | `IncludeAllInstances=True` 재조회 | `running` · 검사 `ok/ok` | **`stopped`** · 검사 `not-applicable/not-applicable` |
+  | `rollback.wait_for_status_check()` | `OK`(첫 시도) | **`FAILED`** · `instance_state=stopped` · 사유 코드 없음 |
+
+  `terminated`도 같은 분기(`FAILED`)로 떨어진다. 전 구간도 돌렸다 — 수집 → 판정 → Intake →
+  분석 기록(가드레일 4단계) → `POST /actions/execute` 1회 → dispatcher 실행 주기(stop → modify →
+  start) → **`stop_instances` 주입** → 판정 주기 `FAILED` → 원본 `ROLLBACK_INITIATED`·Incident
+  `ACTION_IN_PROGRESS` → 다음 주기 `REVERT_SIZE` 자식(`AUTO_ON_FAILURE`) → 자식 `SUCCESS`·원본
+  `ROLLED_BACK`·Incident `AWAITING_CLOSURE`, 인스턴스 타입이 원래 값으로 돌아왔다. **사람 조작은
+  승인 1회뿐이다.** 실 모델 분석을 넣은 1회와 모델 호출 없이 분석을 주입한 1회가 같은 전이를 보였다.
+
+  **주입이 서려면 대본이 지킬 조건이 둘이다** — 코드가 아니라 시연 운영의 몫이다.
+  1. **시점** — 실행 주기가 끝난 뒤(인스턴스가 목표 타입으로 running)·다음 판정 주기 전. RIGHTSIZING은
+     기동 요청까지만 하고 판정을 **다음 주기**로 미루므로(`dispatcher._AWAIT_JUDGEMENT_ON_SUCCESS`)
+     창의 길이는 `DISPATCH_INTERVAL_SECONDS`(기본 10초)다. **대기 도중에는 끼어들 틈이 없다** —
+     running이면 첫 조회에 `OK`로 끝나므로, 창을 놓치면 T1은 `SUCCESS`로 닫힌다.
+  2. **대기 길이** — 멈춘 인스턴스는 기본 조회에서 빈 목록이라, waiter가
+     `STATUS_CHECK_WAIT_DELAY_SECONDS × STATUS_CHECK_WAIT_MAX_ATTEMPTS`(기본 15초 × 12회 = 3분)를
+     다 쓴 뒤에야 `FAILED`가 난다. 실측은 2초 × 3회로 조여 판정 4.2초였다 — `rollback.py` 헤더가
+     *"시연에서 조여야 할 값"* 이라 설정값으로 둔 이유가 여기다.
+
+  **프로덕션 코드는 한 줄도 바꾸지 않았다** — 가짜 AWS의 상태를 바꾼 것이므로 §3(환경 감지 분기
+  금지)에 걸리지 않는다. 9주차(10/02–10/08) 스모크의 Status Check 검증 1회는 그대로 남는다 —
+  ⓐ `impaired`와 실제 부팅 대기는 실 AWS에서만 보인다. 핵심 결정은 불변이다.
