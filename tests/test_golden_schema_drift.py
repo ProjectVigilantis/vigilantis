@@ -13,11 +13,12 @@
 # scripts/extract_golden_schema.py 가 저장본을 바이트 단위로 재생성하므로
 # 등식으로 잠글 수 있고, 깨졌을 때 처방이 **"이 명령을 돌려라"** 하나로 끝난다.
 #
-# ── 가드 둘이 서로 다른 것을 잠근다 ───────────────────────────────────────
-# 1) 바이트 등식 — 모델을 고쳐도(추출 결과가 달라진다) 저장본만 고쳐도 깨진다.
-# 2) 머리 3키의 **값** — `render()` 가 머리 키를 저장본에서 **그대로 복사**하므로
-#    1)은 머리 값에 대해 **항상 참**이다. 값을 무엇으로 바꿔도 통과한다.
-#    그 값을 잠그는 것은 2) 하나뿐이다. (2026-09-11 PM 리뷰에서 확인된 사실)
+# ── 가드 셋이 서로 다른 것을 잠근다 ───────────────────────────────────────
+# 1) 바이트 등식 — 모델에서 파생되는 내용이 저장본과 일치하는지 확인한다.
+# 2) 머리 메타데이터 — 3키의 존재와 x-source-model·$schema 의 값을 확인한다.
+#    `render()` 가 머리 값을 저장본에서 복사하므로 1)만으로는 값을 검증하지 못한다.
+#    x-note 는 사람이 쓴 설명을 보존하며 특정 문구로 고정하지 않는다.
+# 3) 파일 등록 — 실제 스키마 파일과 TARGETS 를 대조해 검사 대상 누락을 막는다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ from extract_golden_schema import (  # noqa: E402
     HAND_WRITTEN_KEYS,
     JSON_SCHEMA_DRAFT,
     REEXTRACT_COMMAND,
+    SCHEMA_DIR,
     TARGETS,
     render,
 )
@@ -49,8 +51,8 @@ def test_golden_schema_is_a_current_extraction_of_the_contract(target):
     """저장본 == 현행 모델에서 다시 뽑은 것. 어긋나면 재추출 명령을 알려 준다.
 
     머리 3키가 없으면 여기서 `render` 가 ValueError 로 멈춘다 — 그 메시지는
-    없어진 키 이름과 할 일을 둘 다 말해 준다. 이 테스트가 **못 잡는 것**은
-    머리 키의 *값* 이고, 그것은 아래 테스트가 맡는다.
+    없어진 키 이름과 할 일을 둘 다 말해 준다. 머리 값은 저장본에서 복사하므로
+    x-source-model·$schema 의 값 검사는 아래 테스트가 맡는다.
     """
     current = target.path.read_text(encoding="utf-8")
     expected = render(json.loads(current), target)
@@ -64,7 +66,7 @@ def test_golden_schema_is_a_current_extraction_of_the_contract(target):
 
 @pytest.mark.parametrize("target", TARGETS, ids=_IDS)
 def test_hand_written_header_keeps_its_values(target):
-    """머리 3키가 남아 있고 **값이 그대로인가.**
+    """머리 3키의 존재와 원천 모델·스키마 draft 의 값을 확인한다.
 
     위 테스트는 이 값들을 못 잡는다 — `render()` 가 저장본에서 복사하므로
     무엇으로 바꿔도 재생성 결과가 같아진다(2026-09-11 PM 실측: x-source-model 을
@@ -72,7 +74,7 @@ def test_hand_written_header_keeps_its_values(target):
 
     x-source-model 은 이 JSON 이 어느 모델의 추출본인지 말하는 유일한 자리다.
     $schema 는 pydantic v2 가 정하는 사실이고, 값이 바뀌면 편집기 검증이 다른
-    규칙으로 돈다.
+    규칙으로 돈다. x-note 는 존재만 확인하고 사람이 쓴 설명을 보존한다.
     """
     stored = json.loads(target.path.read_text(encoding="utf-8"))
 
@@ -90,4 +92,18 @@ def test_hand_written_header_keeps_its_values(target):
         f"$schema draft 가 pydantic v2 출력과 다르다 — {target.rel}\n"
         f"  저장본: {stored['$schema']}\n"
         f"  실제  : {JSON_SCHEMA_DRAFT}"
+    )
+
+
+def test_every_schema_file_is_registered():
+    """실제 파일과 TARGETS 가 일치해야 모든 스키마 사본이 검사 대상이 된다."""
+    on_disk = {path.name for path in SCHEMA_DIR.glob("*.schema.json") if path.is_file()}
+    registered = {target.filename for target in TARGETS}
+
+    assert on_disk == registered, (
+        "골든 입력 스키마 파일과 TARGETS 등록이 다르다.\n"
+        f"  미등록 파일: {sorted(on_disk - registered)}\n"
+        "    scripts/extract_golden_schema.py 의 TARGETS 에 추가할 것.\n"
+        f"  등록됐지만 없는 파일: {sorted(registered - on_disk)}\n"
+        "    datasets/golden/schema/ 의 파일을 복원하거나 불필요한 TARGETS 항목을 정리할 것."
     )
