@@ -10,17 +10,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
+from config import Settings
 from pydantic import ValidationError
-
+from realtime import RealtimeManager, incident_event
 from schemas.api.ws import WsEventType
 
-from config import Settings
-from realtime import RealtimeManager, incident_event
-
-T0 = datetime(2026, 8, 19, 10, 0, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 8, 19, 10, 0, 0, tzinfo=UTC)
 
 
 def _ev(incident_id: str, event_type: WsEventType = WsEventType.INCIDENT_CREATED):
@@ -47,6 +45,7 @@ class FakeWebSocket:
         self.close_seconds = close_seconds
         self.sent: list[str] = []
         self.closed = False
+        self.close_completed = asyncio.Event()
 
     async def accept(self) -> None:
         pass
@@ -62,6 +61,7 @@ class FakeWebSocket:
         if self.close_seconds:
             await asyncio.sleep(self.close_seconds)
         self.closed = True
+        self.close_completed.set()
 
 
 async def _publish_and_wait(manager: RealtimeManager, good: FakeWebSocket) -> None:
@@ -80,13 +80,17 @@ def test_failing_connection_is_removed_and_others_still_receive():
     async def scenario():
         manager = RealtimeManager(send_timeout_seconds=1.0)
         await manager.start()
-        good, bad = FakeWebSocket(), FakeWebSocket(fail=True)
-        await manager.register(good)
-        await manager.register(bad)
-        await _publish_and_wait(manager, good)
-        assert manager.connection_count == 1
-        assert bad.closed
-        await manager.stop()
+        try:
+            good, bad = FakeWebSocket(), FakeWebSocket(fail=True)
+            await manager.register(good)
+            await manager.register(bad)
+            await _publish_and_wait(manager, good)
+            # 연결 제거와 close 완료는 별도 단계이므로 완료 신호까지 기다린다.
+            await asyncio.wait_for(bad.close_completed.wait(), timeout=2.0)
+            assert manager.connection_count == 1
+            assert bad.closed
+        finally:
+            await manager.stop()
 
     asyncio.run(scenario())
 
