@@ -51,6 +51,7 @@ from schemas.api.assets import AssetType  # noqa: E402
 from schemas.api.incidents import IncidentCategory, IncidentStatus, RiskLevel  # noqa: E402
 from schemas.assets import MetricSummary as MetricSummaryContract  # noqa: E402
 from schemas.events import MockThreatEventInput  # noqa: E402
+from schemas.executions import ExecutionEffect  # noqa: E402
 from schemas.incidents import AgentInvocationStatus  # noqa: E402
 from schemas.runbooks import RunbookId, TriggerSource  # noqa: E402
 from services.aws import backup as bk  # noqa: E402
@@ -66,6 +67,7 @@ INSTANCE = "i-0a1b2c3d4e5f0e2e1"
 INSTANCE_ARN = f"arn:aws:ec2:{REGION}:{ACCOUNT}:instance/{INSTANCE}"
 
 STARTING_TYPE = "t3.xlarge"   # 조치 이전 = 백업에 남고 원복이 되돌릴 값
+TARGET_TYPE = "t3.large"      # AI 가 제안한 축소 대상 = 원복이 대조할 "조치 적용" 값
 NOW = datetime(2026, 9, 16, 6, 0, tzinfo=timezone.utc)
 
 # T2 — 골든 SecOps S3(`evt_ssh_bruteforce_001`)의 값 그대로다. 시나리오를 바꾸면
@@ -148,10 +150,26 @@ class FakeEc2:
                         }
                     ]
                 }
+            # 인스턴스도 규칙과 같은 이유로 상태를 들고 있어야 한다 — 원복은 현재 타입을
+            # 백업 값·조치 적용 값과 대조해 3분기로 갈린다(ADR-0008 §3-2). 고정 응답을
+            # 주면 "이미 백업 스펙 상태" 분기로 빠져 **되돌리는 호출 없이** SUCCESS 가
+            # 되고, 축소→실패→원복 경로가 통째로 빠진다. (PR #358 리뷰: 안성일)
+            if operation == "modify_instance_attribute":
+                self._state["current_type"] = kwargs["InstanceType"]["Value"]
+                return {}
             if operation == "stop_instances":
+                previous = self._state["current_state"]
+                self._state["current_state"] = "stopped"
                 return {
                     "StoppingInstances": [
-                        {"InstanceId": INSTANCE, "PreviousState": {"Name": "running"}}
+                        {"InstanceId": INSTANCE, "PreviousState": {"Name": previous}}
+                    ]
+                }
+            if operation == "start_instances":
+                self._state["current_state"] = "running"
+                return {
+                    "StartingInstances": [
+                        {"InstanceId": INSTANCE, "PreviousState": {"Name": "stopped"}}
                     ]
                 }
             # NACL 은 상태를 들고 있어야 한다 — 차단이 넣은 규칙을 판정이 다시 읽고,
@@ -289,7 +307,7 @@ def _ai_proposes_rightsizing(db, incident_id, evidence_id):
             RunbookCandidateDraft(
                 runbook_id=RunbookId.RUNBOOK_EC2_RIGHTSIZING,
                 target_arn=INSTANCE_ARN,
-                parameters={"target_instance_type": "t3.large"},
+                parameters={"target_instance_type": TARGET_TYPE},
                 evidence_ids=[evidence_id],
             )
         ],
@@ -390,9 +408,14 @@ def test_t1_idle_ec2_downsize_and_auto_rollback_flow(db, client_pg, aws):
     assert child.trigger_source is TriggerSource.AUTO_ON_FAILURE
     assert child.parent_execution_id == origin_id
 
+    # 축소가 실물에 닿았다 — 원복이 되돌릴 것이 실제로 남아 있다.
+    assert aws.state["current_type"] == TARGET_TYPE
+
     # 9번 — 자식이 실행·확정되면 원본이 되돌려진 것으로 닫히고 Incident가 종료 대기로 간다.
+    # 타입을 손으로 되돌리지 않는다. 되돌려 두면 원복이 "이미 백업 스펙 상태" 분기로
+    # 끝나 되돌리는 호출 없이 SUCCESS 가 된다(PR #358 리뷰: 안성일). 여기서 지우는 것은
+    # Status Check 를 넘어뜨린 일시 장애뿐이다.
     aws.state["overrides"].clear()
-    aws(current_type=STARTING_TYPE)
     for _ in range(3):  # 실행 → 판정 → 확정. 주기 수는 고정하지 않는다.
         if exec_repo.get_execution(db, origin_id).status is ExecutionStatus.ROLLED_BACK:
             break
@@ -402,6 +425,25 @@ def test_t1_idle_ec2_downsize_and_auto_rollback_flow(db, client_pg, aws):
     assert origin_status is ExecutionStatus.ROLLED_BACK
     assert incident_status is IncidentStatus.AWAITING_CLOSURE
     assert exec_repo.get_execution(db, child.execution_id).status is ExecutionStatus.SUCCESS
+
+    # 원복이 **실물을 되돌렸다.** 상태 전이만 보면 아무것도 하지 않은 원복과 갈리지 않는다.
+    assert aws.state["current_type"] == STARTING_TYPE
+    reverts = [
+        kwargs for op, kwargs in aws.calls
+        if op == "modify_instance_attribute"
+        and kwargs["InstanceType"]["Value"] == STARTING_TYPE
+        and not kwargs.get("DryRun")   # 가드레일 ④ 탐침은 실물을 바꾸지 않는다
+    ]
+    assert len(reverts) == 1
+    # ADR-0008 §3-2 의 ② 분기 — "우리가 바꾼 그대로"라 정지·변경·기동을 실제로 적용한다.
+    # ① 분기("이미 백업 스펙")로 빠지면 여기가 COMPARE_INSTANCE_TYPE/NOT_APPLIED 하나가 된다.
+    steps = exec_repo.list_steps(db, child.execution_id)
+    applied = [s.step_type for s in steps if s.effect is ExecutionEffect.APPLIED]
+    assert applied == [
+        ex.STEP_STOP_INSTANCE,
+        ex.STEP_MODIFY_INSTANCE_TYPE,
+        ex.STEP_START_INSTANCE,
+    ]
 
 
 # ============================================================== T2 · SecOps
