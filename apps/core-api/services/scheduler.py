@@ -148,11 +148,21 @@ def run_pipeline(publish: Callable[[WsEvent], None] | None = None) -> dict:
         # ARN 조인 무결성 점검 — 자산을 가리키는 키가 assets.arn 과 어긋나거나 자산 리전이
         # 자기 ARN 과 다르면 건수를 회차 요약에 싣고 경고로 남긴다. FK 가 없어 DB 가 막지
         # 못하는 어긋남의 조기 신호다 — 정합 실패로 스캔을 세우지는 않는다(경고만). (#342)
-        db = session_factory()
+        #
+        # 점검은 회차의 **산출물이 아니라 진단**이다. 여기 닿았을 때 수집·판정·Incident 는
+        # 이미 commit 됐고 WebSocket 이벤트도 나갔다 — 진단이 던져서 그 회차 요약을 지우면
+        # 안 된다. 그래서 쿼리 자체의 예외도 받아 넘긴다(#353 리뷰: 김세혁).
+        # 요약에는 **"못 쟀음"(None)과 "0건"(0)을 구분해** 싣는다. 둘이 같은 값이면 요약을
+        # 읽는 쪽이 "정합했다" 와 "점검이 깨졌다" 를 가를 수 없다.
+        dangling: list[assets_repo.DanglingArn] | None
+        check_db = session_factory()  # 위 Intake 반복문의 db 와 다른 세션이다(#353 nit)
         try:
-            dangling = assets_repo.find_dangling_arns(db)
+            dangling = assets_repo.find_dangling_arns(check_db)
+        except Exception:
+            dangling = None
+            logger.exception("scan_dangling_check_failed")
         finally:
-            db.close()
+            check_db.close()
         if dangling:
             logger.warning(
                 "scan_dangling_arns",
@@ -163,7 +173,7 @@ def run_pipeline(publish: Callable[[WsEvent], None] | None = None) -> dict:
             "stored": store,
             "verdicts": judged["counts"],
             "incidents": incidents,
-            "dangling_arns": len(dangling),
+            "dangling_arns": None if dangling is None else len(dangling),
         }
         logger.info("scan pipeline done: %s", summary)
         return summary

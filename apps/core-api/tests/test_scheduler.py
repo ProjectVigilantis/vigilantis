@@ -76,13 +76,50 @@ def test_run_pipeline_runs_and_releases_when_lock_free(pg_engine, monkeypatch):
     assert result == {
         "stored": {"stored": 1}, "verdicts": {"SKIP": 1},
         "incidents": {"created": 0, "existing": 0, "failed": 0},
-        "dangling_arns": 0,  # ARN 조인 무결성 점검 건수(#342)
+        "dangling_arns": 0,  # 점검했고 0건(#342). 못 쟀으면 None 이다 — 아래 실패 테스트
     }
 
     # 락이 해제됐어야 한다 — 같은 키를 다시 잡을 수 있어야 한다
     conn, got = _try_lock(pg_engine, scheduler._ADVISORY_LOCK_KEY)
     try:
         assert got is True  # 실행 후 해제 확인
+    finally:
+        conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": scheduler._ADVISORY_LOCK_KEY})
+        conn.close()
+
+
+def test_dangling_check_failure_does_not_swallow_the_run_summary(pg_engine, monkeypatch):
+    """ARN 점검이 던져도 회차 요약은 남는다 — 진단이 산출물을 지우지 않는다(#353 리뷰: 김세혁).
+
+    점검에 닿는 시점에는 수집·판정·Incident 저장이 **이미 commit 됐다.** 점검은 그 회차의
+    산출물이 아니라 진단이므로, 쿼리가 깨졌다고 해서 회차 결과가 사라지면 안 된다.
+    요약의 `dangling_arns` 는 그때 **`None`(못 쟀음)** 이어서 `0`(점검했고 0건)과 갈린다.
+    """
+    from services import scheduler
+
+    _bind_scheduler_to_test_db(monkeypatch, pg_engine)
+    called = {"collect": 0, "judge": 0}
+    _stub_pipeline(monkeypatch, called)
+
+    def _boom(db):
+        raise RuntimeError("점검 쿼리가 깨졌다")
+
+    monkeypatch.setattr("db.repositories.assets.find_dangling_arns", _boom)
+
+    result = scheduler.run_pipeline()
+
+    # 요약이 남았고, 수집·판정은 그대로 1회씩 돌았다
+    assert called["collect"] == 1 and called["judge"] == 1
+    assert result == {
+        "stored": {"stored": 1}, "verdicts": {"SKIP": 1},
+        "incidents": {"created": 0, "existing": 0, "failed": 0},
+        "dangling_arns": None,  # 0(점검 0건)이 아니라 None(못 쟀음)
+    }
+
+    # 락도 정상 해제됐다 — 점검 실패가 다음 tick 을 막지 않는다
+    conn, got = _try_lock(pg_engine, scheduler._ADVISORY_LOCK_KEY)
+    try:
+        assert got is True
     finally:
         conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": scheduler._ADVISORY_LOCK_KEY})
         conn.close()
