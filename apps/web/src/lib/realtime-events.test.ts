@@ -140,7 +140,7 @@ test('백오프는 1s에서 시작해 30s에서 멈춘다', () => {
   assert.equal(backoffMs(10), 30_000);
 });
 
-test('mock 단계(base URL 미설정)에서는 연결하지 않는다', () => {
+test('소켓 주소로 성립하지 않는 오리진이면 연결하지 않는다', () => {
   assert.equal(websocketUrl(undefined), null);
   assert.equal(websocketUrl(''), null);
 });

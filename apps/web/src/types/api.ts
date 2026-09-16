@@ -351,7 +351,7 @@ export interface IncidentsResponse {
 }
 
 /* ─────────────────────────────── ws.py ─────────────────────────────── */
-/* WS 이벤트 봉투. mock에는 엔드포인트가 없고(2026-08-14 확정) 실 BE에만 연결한다(#168). */
+/* WS 이벤트 봉투. 계약 경로는 `/api/v1/ws`이고 REST와 같은 오리진에 붙는다(#168 · `routers/ws.py`). */
 
 export type WsEventType =
   | 'INCIDENT_CREATED'

@@ -14,15 +14,21 @@ import type {
 } from '@/types/api';
 
 /**
- * NEXT_PUBLIC_API_BASE_URL 미설정이면 자체 origin(= mock Route Handler).
- * 서버 실행 구간은 상대 경로 fetch가 불가능해 로컬 dev 서버 origin으로 대체한다.
+ * 계약 엔드포인트의 오리진 — **언제나 실 백엔드(core-api)를 가리킨다.**
+ *
+ * 자체 origin으로 떨어지는 경로를 남기지 않는다. mock Route Handler(`src/app/api/v1/**`)를 걷어낸
+ * 뒤에도 그 fallback이 남아 있으면 미설정 환경에서 Next 서버가 **자기 자신에게 계약 요청을 보내고**,
+ * 돌아온 404를 화면이 계약 오류로 그린다 — 원인이 설정 누락인데 화면은 백엔드 장애라고 말한다.
+ * 그래서 미설정이면 compose의 core-api 기본 주소(루트 `.env`의 `APP_PORT=8000`)로 간다.
  */
-function baseUrl(): string {
-  const configured = process.env.NEXT_PUBLIC_API_BASE_URL;
-  if (configured) return configured.replace(/\/$/, '');
-  // ponytail: 서버 측 자체 origin은 localhost 가정 — 실 BE 전환은 환경변수로만 한다.
-  if (typeof window === 'undefined') return `http://127.0.0.1:${process.env.PORT ?? 3000}`;
-  return '';
+export const DEFAULT_API_BASE_URL = 'http://localhost:8000';
+
+/**
+ * REST와 WebSocket이 **같은 오리진**을 쓴다(§4.8). 소켓 쪽이 raw env를 따로 읽으면 기본값이
+ * 한쪽에만 걸려 REST는 붙는데 인디케이터만 `실시간 미연동`으로 남는다 — 그래서 여기 하나로 모은다.
+ */
+export function apiBaseUrl(): string {
+  return (process.env.NEXT_PUBLIC_API_BASE_URL || DEFAULT_API_BASE_URL).replace(/\/$/, '');
 }
 
 /** REST 오류 봉투({"error":{code,message,request_id}})를 담은 typed error. */
@@ -44,7 +50,7 @@ async function requestWithStatus<T>(
   path: string,
   init?: RequestInit,
 ): Promise<{ httpStatus: number; body: T }> {
-  const response = await fetch(`${baseUrl()}/api/v1${path}`, { cache: 'no-store', ...init });
+  const response = await fetch(`${apiBaseUrl()}/api/v1${path}`, { cache: 'no-store', ...init });
   const body: unknown = await response.json().catch(() => null);
 
   if (!response.ok) {
