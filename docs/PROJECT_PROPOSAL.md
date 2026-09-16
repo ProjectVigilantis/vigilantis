@@ -4,7 +4,7 @@
 > 본문의 사실값은 [`docs/PROJECT_STATUS.md`](PROJECT_STATUS.md)(SSOT)를 원천으로 옮겨 적는다. 충돌하면 SSOT가 이긴다.
 >
 > **출처 표기 규칙** — 각 절 머리에 `> **출처** — …` 한 줄로 그 절의 값이 어디서 왔는지 밝힌다.
-> **프로젝트 사실값**(범위·결정·역할·현황·계약)의 원천은 셋뿐이다: **SSOT**(`docs/PROJECT_STATUS.md`) · **`docs/adr/`** · **`packages/schemas/`**. 저장소 밖 문서를 프로젝트 사실의 기준으로 삼지 않는다 — 대조할 수 없는 기준은 기준이 아니다.
+> **프로젝트 사실값**(범위·결정·역할·현황·계약)의 원천은 셋뿐이다: **SSOT**(`docs/PROJECT_STATUS.md`) · `docs/adr/` · `packages/schemas/`. 저장소 밖 문서를 프로젝트 사실의 기준으로 삼지 않는다 — 대조할 수 없는 기준은 기준이 아니다.
 > **외부 시장·통계**는 다른 축이다. 저장소가 답을 갖고 있지 않으므로 인용하되, **기관명·조사명·연도를 표 아래에 명시**한다.
 
 | 항목 | 값 |
@@ -185,11 +185,11 @@
 | 지표 | 목표 | 현재(2026-09-16) | 재는 법 |
 | --- | --- | --- | --- |
 | 시연 소요 시간 | **T1 + T2 ≤ 8분** | 🔶 T1-3–6 구간 **60–90초** 실측 · T2 후반 미측정 | 게이트 실측 |
-| 사람 조작 횟수 | T1 **[조치 실행] 1회** · T2 **승인 2회** | ✅ T2 관통 실측(2026-09-15) | E2E 시나리오 |
+| 사람 조작 횟수 | T1 **「조치 실행」 1회** · T2 **승인 2회** | ✅ T2 관통 실측(2026-09-15) | E2E 시나리오 |
 | CI 필수 체크 | **3잡 전부 통과** | ✅ `dev` **1845 passed / 2 skipped** (2026-09-14 기준) | GitHub Actions |
 | 전 구간 흐름 회귀 | **T1 · T2 2건 통과** | ⬜ **미해제** — 선행은 전부 닫혔고 본문 작성만 남았다 | `pytest` |
 
-> **기준선은 낡는다.** 위 CI 수치는 **2026-09-14 `dev` 기준**이고 매 머지마다 움직인다. 비교할 때는 **같은 자리에서 다시 잰다.**
+> **기준선은 낡는다.** 위 CI 수치는 **2026-09-14 기준**(`dev`)이고 매 머지마다 움직인다. 비교할 때는 **같은 자리에서 다시 잰다.**
 
 ---
 
@@ -213,7 +213,7 @@
 | --- | --- |
 | 계정 · 리전 | AWS **단일 계정 / 1–2개 리전** |
 | 관제 대상 | **EC2 · SG 중심** + 런북 조치 대상 리소스(NACL, EBS, ASG · Launch Template, ALB Target Group) |
-| 위협 유형 | **OpenIP(`0.0.0.0/0`) · SSH 브루트포스** 2종 — Golden Dataset 기반 **모의(Mock) 주입** |
+| 위협 유형 | **OpenIP** (`0.0.0.0/0`) · **SSH 브루트포스** 2종 — Golden Dataset 기반 **모의(Mock) 주입** |
 | 수집 주기 | APScheduler 기반 주기 스캔 |
 
 **3단계 위험 대응** — 위험도에 따라 사람이 개입하는 지점이 달라진다.
@@ -221,7 +221,7 @@
 | 위험도 | 처분 | 사람의 개입 |
 | --- | --- | --- |
 | High | `PRE_MITIGATION_0_5S` — 0.5초 선차단 시뮬레이션 | 차단 **후** 확인 |
-| Medium | `AGENT_WAIT` — 승인 대기 · **1분 미응답 시 `TIMEOUT_ISOLATION_1M`(자동 격리)** | 승인 |
+| Medium | `AGENT_WAIT` — 승인 대기 · **1분 미응답 시 자동 격리** (`TIMEOUT_ISOLATION_1M`) | 승인 |
 | Low | `AGENT_WAIT` — 승인 대기 (**자동 격리 없음**) | 승인 |
 
 > **화면 표기**: Medium 대기 화면에는 **초 단위 카운트다운을 두지 않는다.** `제안 생성 시간` · `실행 예정 시간` **절대 시각 2종**만 보여준다(2026-08-27 확정).
@@ -244,9 +244,9 @@
 | 축 | 경로 | 발동 주체 |
 | --- | --- | --- |
 | 자산 (FinOps) | 스펙 JSON 백업 ➔ `get_waiter` **Status Check 2/2** ➔ 실패 시 **자동 원복** | **시스템** |
-| 보안 (SecOps) | 선제 차단 ➔ 관제자 **[원클릭 해제]** | **관제자** |
+| 보안 (SecOps) | 선제 차단 ➔ 관제자 **「원클릭 해제」** | **관제자** |
 
-**원복 파라미터는 AI도 화면도 아닌 DB 백업 레코드(`backup_record_id`)에서만 온다.** 조치 *전에* 남긴 값이므로, 조치 후 상태가 무엇이든 되돌릴 근거가 보존된다.
+**원복 파라미터는 AI도 화면도 아닌 DB 백업 레코드에서만 온다** (`backup_record_id`). 조치 *전에* 남긴 값이므로, 조치 후 상태가 무엇이든 되돌릴 근거가 보존된다.
 
 > **레콘(Reckon)** — 가드레일이 *실행해도 되는가*를 묻는다면, 그 다음 두 물음 *실제로 무엇이 일어났는가* → *그 결과를 어떻게 수습·종료하는가* 를 다루는 **Incident 상태와 그 상태를 관리하는 일련의 과정**을 부르는 고유명사다. '가드레일'과 같은 층위로 쓴다(2026-09-03 확정).
 
@@ -277,12 +277,12 @@
 | 롤백 | `RUNBOOK_SG_RECREATE` | Low / 관제자 승인 | ❌ | — |
 | 롤백 | `RUNBOOK_EC2_REVERT_SIZE` | High / **시스템 자동 발동**(Status Check 실패 시) 또는 관제자 수동 요청 | ❌ | — |
 
-> **분류 축 주의**: 위 `분류`는 Runbook Registry 축(`FINOPS` · `SECOPS` · `ROLLBACK`)이며 **Incident 분류(`FINOPS` · `SECOPS`)와 별개**다. 롤백 3종은 Registry에서 `ROLLBACK` 단일 도메인으로 묶인다.
+> **분류 축 주의**: 위 `분류`는 Runbook Registry 축(`FINOPS` · `SECOPS` · `ROLLBACK`)이며 **Incident 분류와 별개**다 (`FINOPS` · `SECOPS`). 롤백 3종은 Registry에서 `ROLLBACK` 단일 도메인으로 묶인다.
 
 **롤백 런북 공통 정책** (2026-08-13 확정 · [ADR-0004](adr/0004-rollback-runbook-whitelist-registration.md))
 
 1. **Whitelist 정식 등록** — 롤백이라고 가드레일을 우회하지 않는다. 우회 경로 자체가 없다.
-2. **`ai_recommendable: false`** — AI 추천 목록에서 제외. 트리거는 **시스템 또는 관제자**만이다.
+2. `ai_recommendable: false` — **AI 추천 제외** — AI 추천 목록에서 제외. 트리거는 **시스템 또는 관제자**만이다.
 3. **원복 파라미터는 DB 백업 레코드에서만 로드** — AI 출력도 화면 입력도 원복 값의 출처가 될 수 없다.
 4. **롤백이 가드레일에서 거절되면 자동 재시도 없이 CRITICAL 알림 + 수동 개입** — 되돌리기 실패를 조용히 삼키지 않는다.
 
@@ -436,7 +436,7 @@ flowchart TB
 | [0004](adr/0004-rollback-runbook-whitelist-registration.md) | 2026-08-13 | **롤백 3종도 Whitelist에 정식 등록한다(7→10종)** — 우회 경로를 만들지 않는다 | **가드레일이 우리 자신의 자동 원복을 차단**하는 것. 우회로를 뚫었다면 *되돌리기* 만 검증 없이 도는 구멍이 생긴다 |
 | [0005](adr/0005-langgraph-stateless-domain-graphs.md) | 2026-08-18 | **LangGraph를 상태 없는 도메인별 두 그래프로** — 상태 원천은 그래프가 아니라 **DB** | 그래프 Checkpointer가 **제2의 상태 원천**이 되어, AWS를 실제로 바꾼 뒤 *무엇이 근거였나* 를 사후에 설명할 수 없게 되는 것 |
 | [0006](adr/0006-localstack-team-standard-env.md) | 2026-08-19 | **LocalStack을 팀 표준 환경으로** — 단일 compose · 시드 단일 원천 · `AWS_ENDPOINT_URL` 스위치 | 통합 테스트가 **개인 PC에서만 통과**하고 CI에서는 조용히 전부 skip되는 것 |
-| [0007](adr/0007-guardrail-dryrun-executor-precheck-contract.md) | 2026-08-24 | **가드레일 ④는 executor의 단일 `precheck()` 호출로 판정한다** — Dry-Run 미지원 작업은 **조회로 대체 검증** | 가드레일(AI 소유)과 executor(Infra 소유)의 **경계에 규약이 없어 양쪽이 서로를 기다리는 것** |
+| [0007](adr/0007-guardrail-dryrun-executor-precheck-contract.md) | 2026-08-24 | **가드레일 ④는 executor의 단일 호출로 판정한다** (`precheck()`) — Dry-Run 미지원 작업은 **조회로 대체 검증** | 가드레일(AI 소유)과 executor(Infra 소유)의 **경계에 규약이 없어 양쪽이 서로를 기다리는 것** |
 | [0008](adr/0008-backup-record-lifecycle-recovery-integrity.md) | 2026-09-02 | **백업은 조치 직전 1회 캡처·불변 보존**하고, **원복 재개는 시간이 아니라 상태 대조로** 판단한다 | 원복의 유일한 근거가 *어디서 읽는가* 만 정해지고 **언제 만들고 무엇과 대조하는가가 빈 채로** 자동 원복이 붙는 것 |
 
 **세 ADR이 §1.2의 「신뢰」 3가지에 그대로 대응한다.**
@@ -462,15 +462,15 @@ flowchart TB
 | `GET /api/v1/assets` | EC2/SG 상태·스펙·연결관계 · 헬스 스코어(**0–100 정수**) · Skip 사유 코드 **6종** |
 | `GET /api/v1/incidents` | 목록 — 상세의 부분집합 10필드. `status`·`category` 필터, `created_at` 내림차순 |
 | `GET /api/v1/incidents/{id}` | **AI CoT 3줄 요약** · Evidence ID · 추천 런북(**본편 7종만**) · 실행 요약(복구 조치는 **롤백 3종만**) |
-| `POST /api/v1/actions/execute` | Request는 **`{incident_id, runbook_id, idempotency_key}` 셋뿐** — 신규 `202`, 같은 키 재요청 `200`(멱등 재생) |
+| `POST /api/v1/actions/execute` | Request는 **셋뿐**이다 — `{incident_id, runbook_id, idempotency_key}` — 신규 `202`, 같은 키 재요청 `200`(멱등 재생) |
 | `WebSocket /api/v1/ws` | `INCIDENT_CREATED` · `INCIDENT_UPDATED` · `EXECUTION_UPDATED` — **DB commit 이후 전송, 상태 원본이 아니다** |
 
 **계약이 지키는 두 가지가 §1.2의 전제와 이어진다.**
 
 1. **실행 요청은 Target ARN도 AWS 파라미터도 받지 않는다.** 무엇을 어디에 할지는 서버가 Incident와 백업 레코드에서 정한다 — 화면이 조작돼도 조치 대상이 바뀌지 않는다.
-2. **화면 표시용 값(`display_parameters`)은 서버가 typed `parameters`에서 파생한다.** LLM이 짓지 않고, 실행 요청으로 되돌려 받지도 않는다.
+2. **화면 표시용 값은 서버가 typed 파라미터에서 파생한다** (`display_parameters` ← `parameters`). LLM이 짓지 않고, 실행 요청으로 되돌려 받지도 않는다.
 
-실행 상태는 **7종**이다 — `IN_PROGRESS` · `SUCCESS` · `FAILED` · `ROLLBACK_INITIATED` · `ROLLED_BACK` · `ROLLBACK_FAILED` · **`UNVERIFIED`**(AWS 조회 실패로 결과를 판정하지 못한 종료 상태 — 자동 원복하지 않고 관제자 복구를 연다).
+실행 상태는 **7종**이다 — `IN_PROGRESS` · `SUCCESS` · `FAILED` · `ROLLBACK_INITIATED` · `ROLLED_BACK` · `ROLLBACK_FAILED` · `UNVERIFIED`(AWS 조회 실패로 결과를 판정하지 못한 종료 상태 — 자동 원복하지 않고 관제자 복구를 연다).
 
 <!-- UNVERIFIED는 #249 / PR #341로 2026-09-14 머지됐다. SSOT §API 계약의 6종 표기는 PR #354가 7종으로 갱신 중이다 -->
 
@@ -518,7 +518,7 @@ flowchart TB
 
 | 트랙 | 시나리오 | 단계 | 증명하는 것 |
 | --- | --- | --- | --- |
-| **T1 · FinOps** | Idle EC2 다운사이징 → **자동 원복** | 9단계 | **[조치 실행] 이후 사람 입력이 없다.** 실패 판정·원복 발동·자식 실행 접수까지 전부 시스템이 한다 |
+| **T1 · FinOps** | Idle EC2 다운사이징 → **자동 원복** | 9단계 | **「조치 실행」 이후 사람 입력이 없다.** 실패 판정·원복 발동·자식 실행 접수까지 전부 시스템이 한다 |
 | **T2 · SecOps** | SSH 브루트포스 → 차단 → **원클릭 해제** | 8단계 | 사람 조작이 **승인 2회뿐**이다. 해제 근거는 차단 시점의 백업 레코드에서 온다 |
 
 **T1의 함정 하나** — 7번 시점에 Execution은 `ROLLBACK_INITIATED`인데 Incident는 `FAILED`가 아니라 `ACTION_IN_PROGRESS`다. **되돌릴 것이 남아 있기 때문**이며, 두 상태가 다른 축이라는 것이 이 트랙의 설계 요점이다.
@@ -536,13 +536,13 @@ flowchart TB
 
 > **출처** — CLAUDE.md §PR 규칙 · .github/workflows/
 
-**`dev`·`main`의 필수 체크는 3잡이다.**
+`dev`·`main`의 **필수 체크는 3잡이다.**
 
 | 잡 | 무엇을 도나 |
 | --- | --- |
-| **`test`** | pytest — **PostgreSQL · LocalStack service container** 위에서. DB 접속을 먼저 확인하고 LocalStack을 시드한 뒤 돈다 |
-| **`web`** | ESLint · `next build`(타입 체크 포함) · `node --test` |
-| **`ai-signature`** | 커밋 메시지·PR 본문의 AI 서명 검사 |
+| `test` | pytest — **PostgreSQL · LocalStack service container** 위에서. DB 접속을 먼저 확인하고 LocalStack을 시드한 뒤 돈다 |
+| `web` | ESLint · `next build`(타입 체크 포함) · `node --test` |
+| `ai-signature` | 커밋 메시지·PR 본문의 AI 서명 검사 |
 
 **service container가 왜 필수 체크인가.** PostgreSQL이 없으면 DB 의존 테스트가 **조용히 skip**되고, 호출부를 수십 곳 고쳐도 초록불이 난다. **로컬 skip 수는 단독으로 아무것도 증명하지 않는다** — 그래서 CI를 로컬과 같은 구성으로 세우고, 그 앞에 **푸시 전 로컬 통합 테스트 기준**(PR이 추가·수정한 테스트가 Docker 없이 skip되면 Docker로 다시 돌려 skip 0건을 본다)을 팀 규약으로 둔다.
 
@@ -563,7 +563,7 @@ flowchart TB
 
 **전환은 코드 변경이 아니라 스위치 하나다.** `AWS_ENDPOINT_URL`의 유무로 갈리며(ADR-0006), 환경 감지 분기를 코드에 두지 않는 것이 그 ADR의 결정 사항이다. **같은 코드가 두 환경을 탄다.**
 
-**대신 LocalStack이 검증하지 못하는 자리를 목록으로 갖고 있다.** ADR-0006 §4가 그 이월 목록이며, 가장 큰 것은 **`elbv2`·`autoscaling`이 LocalStack Community에 없다**는 점이다 — 그래서 P2 런북 3종은 **Dry-Run 대체 조회조차 로컬에서 돌지 않는다.**
+**대신 LocalStack이 검증하지 못하는 자리를 목록으로 갖고 있다.** ADR-0006 §4가 그 이월 목록이며, 가장 큰 것은 `elbv2`·`autoscaling`이 **LocalStack Community에 없다**는 점이다 — 그래서 P2 런북 3종은 **Dry-Run 대체 조회조차 로컬에서 돌지 않는다.**
 
 **그 자리를 닫는 것이 실 AWS 스모크이며, 9주차(10/02–10/08)로 배치돼 있다.** 중간 발표 시점에 **무엇이 검증됐고 무엇이 이월됐는지가 문서로 구분돼 있다** — 이것이 "LocalStack이라 검증이 덜 됐다"와 다른 점이다.
 
@@ -707,7 +707,7 @@ flowchart TB
 | 항목 | 위치 |
 | --- | --- |
 | 저장소 | [ProjectVigilantis/vigilantis](https://github.com/ProjectVigilantis/vigilantis) |
-| 설계 결정 8건 | [`docs/adr/`](adr/) — ADR-0001 ~ 0008 |
+| 설계 결정 8건 | [`docs/adr/`](adr/) — ADR-0001 – 0008 |
 | 시연 대본 | [`docs/E2E_DEMO_SCENARIOS.md`](E2E_DEMO_SCENARIOS.md) |
 | 팀 협업 규약 | [`CLAUDE.md`](../CLAUDE.md) — 브랜치·커밋·PR·리뷰·SSOT 운영 |
 | 정답지 | `datasets/golden/` |
