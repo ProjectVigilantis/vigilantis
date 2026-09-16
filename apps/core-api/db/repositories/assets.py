@@ -9,8 +9,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Collection, Optional, Sequence
 
-from sqlalchemy import delete, func, select, update
-from sqlalchemy.orm import Session
+from sqlalchemy import String, column, delete, func, select, true, update, values
+from sqlalchemy.orm import Session, aliased
 
 from schemas.api.assets import AssetType, RelationType
 from schemas.assets import MetricSummary as MetricSummaryContract
@@ -76,16 +76,53 @@ def latest_collection_run_per_region(
     빠진 리전의 옛 run 이 영구히 그 리전의 최신으로 남아 collection_status 를 붙잡던
     문제(#261)를 막는다. 세 필드(collection_status·items·last_collected_at)를 **같은
     리전 스코프로 함께 좁혀야** 응답 안에서 범위가 갈리지 않는다(PR #259 리뷰, 안성일).
-    ``regions=None`` 이면 전 리전(수집기 등 내부 호출용).
+    ``regions=None`` 이면 전 리전 — 현재는 테스트에서만 쓴다(운영 호출자는 routers/assets.py
+    하나이고 항상 ``regions=`` 를 넘긴다).
+
+    리전을 받으면 리전마다 ``ORDER BY started_at DESC LIMIT 1`` 을 LATERAL 로 찍는다 —
+    ``ix_collection_runs_region_started_at`` 의 첫 항목이 답이라 run 이 5분마다 쌓여도
+    비용이 리전 수에만 비례한다. DISTINCT ON 은 인덱스가 있어도 전 행을 걸어야 했다
+    (30일치 17,280행에서 24ms → 0.05ms, Issue #343).
     """
-    stmt = (
-        select(models.CollectionRun)
-        .distinct(models.CollectionRun.region)  # DISTINCT ON — 리전별 첫 행
-        .order_by(models.CollectionRun.region, models.CollectionRun.started_at.desc())
+    if regions is None:
+        stmt = (
+            select(models.CollectionRun)
+            .distinct(models.CollectionRun.region)  # DISTINCT ON — 리전별 첫 행
+            .order_by(
+                models.CollectionRun.region,
+                models.CollectionRun.started_at.desc(),
+                models.CollectionRun.collection_run_id.desc(),
+            )
+        )
+        return list(db.execute(stmt).scalars().all())
+    if not regions:
+        return []
+    return list(db.execute(latest_run_per_region_stmt(regions)).scalars().all())
+
+
+def latest_run_per_region_stmt(regions: Sequence[str]):
+    """리전 목록 → 리전별 최신 run 1건. 실행 계획 회귀(db/tests)가 이 문장을 그대로 본다."""
+    wanted = values(column("region", String), name="wanted").data(
+        [(r,) for r in dict.fromkeys(regions)]  # 중복 제거, 순서 유지
     )
-    if regions is not None:
-        stmt = stmt.where(models.CollectionRun.region.in_(regions))
-    return list(db.execute(stmt).scalars().all())
+    # 정렬 키 (started_at DESC, id DESC) 는 ix_collection_runs_region_started_at 의 순서
+    # 그대로다. started_at 단독 인덱스는 #343 에서 지웠다 — 남아 있으면 플래너가 그쪽을
+    # 최신순으로 훑다가 리전 필터로 수천 행을 버리는 경로를 고를 수 있었다(PR #344 리뷰).
+    latest = (
+        select(models.CollectionRun)
+        .where(models.CollectionRun.region == wanted.c.region)
+        .order_by(
+            models.CollectionRun.started_at.desc(),
+            models.CollectionRun.collection_run_id.desc(),
+        )
+        .limit(1)
+        .lateral("latest")
+    )
+    return (
+        select(aliased(models.CollectionRun, latest))
+        .select_from(wanted.join(latest, true()))
+        .order_by(wanted.c.region)
+    )
 
 
 def last_finished_collection_at(
@@ -429,24 +466,45 @@ def add_rule_evaluation(
 def latest_rule_evaluation(
     db: Session, asset_id: str
 ) -> Optional[models.RuleEvaluation]:
+    """자산 1건의 최신 판정. 동시각 두 건이면 id 가 큰 쪽 — latest_rule_evaluation_by_asset
+    과 같은 규칙이어야 목록과 단건이 다른 판정을 보이지 않는다(종전엔 두 번째 키가 없어
+    인덱스 순서에 따라 답이 갈렸다)."""
     return db.execute(
         select(models.RuleEvaluation)
         .where(models.RuleEvaluation.asset_id == asset_id)
-        .order_by(models.RuleEvaluation.evaluated_at.desc())
+        .order_by(
+            models.RuleEvaluation.evaluated_at.desc(),
+            models.RuleEvaluation.rule_evaluation_id.desc(),
+        )
         .limit(1)
     ).scalar_one_or_none()
 
 
 def latest_rule_evaluation_by_asset(db: Session) -> dict[str, models.RuleEvaluation]:
-    """자산별 최신 판정 1건 일괄 조회(PostgreSQL DISTINCT ON) — 자산마다
-    latest_rule_evaluation()을 반복 호출하는 N+1을 피한다. (Issue #68)"""
-    rows = db.execute(
+    """자산별 최신 판정 1건 일괄 조회 — 자산마다 latest_rule_evaluation()을 반복
+    호출하는 N+1을 피한다. (Issue #68)
+
+    assets 를 축으로 LATERAL ``ORDER BY evaluated_at DESC, id DESC LIMIT 1`` 을 찍는다.
+    ``ix_rule_evaluations_asset_evaluated_at`` 와 정렬 키가 같아 자산 1건당 인덱스 탐색
+    1회로 끝난다. 종전 DISTINCT ON 은 판정 행 전체(30일치 138,240행)를 정렬해야 해서
+    150ms 가 걸렸다 → 0.08ms (Issue #343). 판정이 한 번도 없는 자산은 빠진다.
+    """
+    rows = db.execute(latest_rule_evaluation_by_asset_stmt()).scalars()
+    return {row.asset_id: row for row in rows}
+
+
+def latest_rule_evaluation_by_asset_stmt():
+    """자산별 최신 판정 1건 문장. 실행 계획 회귀(db/tests)가 이 문장을 그대로 본다."""
+    latest = (
         select(models.RuleEvaluation)
-        .distinct(models.RuleEvaluation.asset_id)
+        .where(models.RuleEvaluation.asset_id == models.Asset.asset_id)
         .order_by(
-            models.RuleEvaluation.asset_id,
             models.RuleEvaluation.evaluated_at.desc(),
             models.RuleEvaluation.rule_evaluation_id.desc(),
         )
-    ).scalars()
-    return {row.asset_id: row for row in rows}
+        .limit(1)
+        .lateral("latest")
+    )
+    return select(aliased(models.RuleEvaluation, latest)).select_from(
+        models.Asset.__table__.join(latest, true())
+    )
