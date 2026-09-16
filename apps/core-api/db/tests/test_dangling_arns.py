@@ -2,6 +2,11 @@
 # [파일 설명]  담당: 김승철 (Data & Rule Engine)
 # assets_repo.find_dangling_arns 회귀 — 조인 키가 assets.arn 과 어긋나거나 자산 리전이
 # 자기 ARN 과 다르면 잡는다. (Issue #342)
+#
+# 이 파일이 지키는 핵심은 **매달렸다는 사실과 이상하다는 판단을 가르는 것**이다(#353 리뷰).
+# 위협 접수는 미등록 대상도 받고 가드레일 ③ 은 거절한 후보를 기록으로 남긴다 — 그 자리는
+# 매달린 것이 정상이라, 같은 통에 담으면 정상 보존분이 매 회차 같은 경고로 반복되며 새
+# 어긋남을 덮는다. 집계 단위가 행이 아니라 **ARN** 이라는 것도 함께 잠근다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -19,26 +24,85 @@ for _p in (str(CORE_API), str(REPO_ROOT / "packages")):
 from db import models  # noqa: E402
 from db.repositories import assets as assets_repo  # noqa: E402
 from schemas.api.assets import AssetType, RelationType  # noqa: E402
+from schemas.api.incidents import IncidentCategory, RiskLevel  # noqa: E402
+from schemas.collections import CollectionRunStatus  # noqa: E402
+from schemas.events import ThreatEventType  # noqa: E402
+from schemas.guardrails import (  # noqa: E402
+    GuardrailDecision,
+    GuardrailStep,
+    GuardrailValidationContext,
+)
+from schemas.runbooks import RunbookId, TriggerSource  # noqa: E402
 
 NOW = datetime(2026, 9, 16, 6, 0, tzinfo=timezone.utc)
 
+UNMANAGED = "arn:aws:ec2:ap-northeast-2:1:instance/i-not-ours"
 
-def _asset(db, arn, region):
-    run = assets_repo.start_collection_run(
+
+def _run(db, region="ap-northeast-2"):
+    return assets_repo.start_collection_run(
         db, account_id="1", region=region, mode="localstack",
         lookback_days=14, period_seconds=3600,
     )
+
+
+def _asset(db, arn, region, asset_type=AssetType.EC2):
     return assets_repo.upsert_asset(
-        db, arn=arn, asset_type=AssetType.EC2, resource_id=arn.rsplit("/", 1)[-1],
-        account_id="1", region=region, spec={}, collection_run_id=run.collection_run_id,
+        db, arn=arn, asset_type=asset_type, resource_id=arn.rsplit("/", 1)[-1],
+        account_id="1", region=region, spec={}, collection_run_id=_run(db, region).collection_run_id,
         collected_at=NOW,
     )
+
+
+def _incident(db, arn, category):
+    # SECOPS 는 위협 이름·초기 위험도·사유 코드 1개 이상이 필수이고 FINOPS 는 그 축이 전부
+    # null 이어야 한다(models.py ck_incidents_category_risk_shape).
+    secops = category is IncidentCategory.SECOPS
+    inc = models.Incident(
+        subject_arn=arn,
+        category=category,
+        title="SSH 무차별 대입" if secops else None,
+        initial_risk_level=RiskLevel.HIGH if secops else None,
+        initial_risk_reason_codes=["SSH_BRUTE_FORCE"] if secops else [],
+    )
+    db.add(inc)
+    db.flush()
+    return inc
+
+
+def _candidate(db, incident, arn, runbook_id=RunbookId.RUNBOOK_NACL_ADD_DENY):
+    # 한 Incident 에 같은 런북 후보를 둘 둘 수 없다(uq_runbook_candidates_active).
+    cand = models.RunbookCandidate(
+        incident_id=incident.incident_id, runbook_id=runbook_id,
+        target_arn=arn, parameters={},
+    )
+    db.add(cand)
+    db.flush()
+    return cand
+
+
+def _guardrail(db, candidate, failed_step):
+    db.add(models.GuardrailEvaluation(
+        validation_context=GuardrailValidationContext.AI_CANDIDATE,
+        candidate_id=candidate.candidate_id, result=GuardrailDecision.FAIL,
+        failed_step=failed_step, steps=[], validated_at=NOW,
+    ))
+    db.flush()
+
+
+def _kinds(found):
+    return {f.kind for f in found}
+
+
+def _of_kind(found, kind):
+    return [f for f in found if f.kind == kind]
 
 
 def test_consistent_assets_and_relationships_have_no_findings(db):
     """리전 정합 자산 + 그 자산을 정확히 가리키는 관계 → 0건."""
     a = _asset(db, "arn:aws:ec2:ap-northeast-2:1:instance/i-ok", "ap-northeast-2")
-    sg = _asset(db, "arn:aws:ec2:ap-northeast-2:1:security-group/sg-ok", "ap-northeast-2")
+    sg = _asset(db, "arn:aws:ec2:ap-northeast-2:1:security-group/sg-ok", "ap-northeast-2",
+                AssetType.SG)
     db.add(models.AssetRelationship(
         source_asset_id=a.asset_id, relation_type=RelationType.SECURED_BY.value,
         target_arn=sg.arn,
@@ -47,24 +111,184 @@ def test_consistent_assets_and_relationships_have_no_findings(db):
     assert assets_repo.find_dangling_arns(db) == []
 
 
-def test_dangling_target_arn_is_flagged(db):
-    """관계 target_arn 이 assets.arn 에 없으면 (dangling) 으로 잡힌다 — 한 곳에서 ARN 을
-    다르게 조립했을 때의 증상."""
+def test_preserved_observations_do_not_count_as_investigation(db):
+    """미등록 대상 관측을 **정상 보존**한 것은 조사 대상에서 빠진다(#353 리뷰: 안성일).
+
+    안성일 님이 실측한 사례 그대로다 — 미등록 대상의 위협 1건을 정상 접수하면
+    `ThreatEvent` 와 `Incident` 가 각각 남고, 종전 구현은 그 둘을 매 회차 같은 경고로
+    올렸다. 위협 접수는 미등록 대상도 받는 자리이므로 이것은 어긋남이 아니다.
+    """
+    db.add(models.ThreatEvent(
+        source_event_id="evt-1", event_type=ThreatEventType.SSH_BRUTE_FORCE,
+        target_arn=UNMANAGED, payload={}, deduplication_key="dedup-1", occurred_at=NOW,
+    ))
+    _incident(db, UNMANAGED, IncidentCategory.SECOPS)
+    db.flush()
+
+    found = assets_repo.find_dangling_arns(db)
+
+    # 대상이 하나이므로 ARN 1건으로 묶이고, 보인 자리 둘은 상세에 남는다
+    assert _kinds(found) == {assets_repo.KIND_UNMANAGED_OBSERVATION}
+    assert len(found) == 1
+    assert set(found[0].sources) == {"threat_events.target_arn", "incidents.subject_arn"}
+
+    summary = assets_repo.summarize_dangling(found)
+    assert summary["total"] == 1
+    assert summary["investigate"] == 0  # 경고로 올리지 않는다
+
+
+def test_a_real_missing_reference_is_separated_from_preserved_observations(db):
+    """정상 보존분과 **실제 참조 누락**이 같은 점검에서 갈린다 — 집계가 구분된다.
+
+    관계는 수집이 만든 자산끼리의 연결이라 대상이 없으면 조립이 어긋난 것이고, FINOPS
+    Incident 는 등록 자산의 판정에서만 생기므로 매달릴 수 없다.
+    """
+    db.add(models.ThreatEvent(
+        source_event_id="evt-1", event_type=ThreatEventType.SSH_BRUTE_FORCE,
+        target_arn=UNMANAGED, payload={}, deduplication_key="dedup-1", occurred_at=NOW,
+    ))
     a = _asset(db, "arn:aws:ec2:ap-northeast-2:1:instance/i-ok", "ap-northeast-2")
     db.add(models.AssetRelationship(
         source_asset_id=a.asset_id, relation_type=RelationType.SECURED_BY.value,
         target_arn="arn:aws:ec2:ap-northeast-2:1:security-group/sg-missing",
     ))
+    _incident(db, "arn:aws:ec2:ap-northeast-2:1:instance/i-gone", IncidentCategory.FINOPS)
     db.flush()
+
     found = assets_repo.find_dangling_arns(db)
-    assert [f for f in found if f.kind == "dangling" and "sg-missing" in f.value]
-    assert all(f.table == "asset_relationships" for f in found if f.kind == "dangling")
+    broken = _of_kind(found, assets_repo.KIND_BROKEN_REFERENCE)
+
+    assert {f.value for f in broken} == {
+        "arn:aws:ec2:ap-northeast-2:1:security-group/sg-missing",
+        "arn:aws:ec2:ap-northeast-2:1:instance/i-gone",
+    }
+    assert len(_of_kind(found, assets_repo.KIND_UNMANAGED_OBSERVATION)) == 1
+
+    summary = assets_repo.summarize_dangling(found)
+    assert summary["total"] == 3
+    assert summary["investigate"] == 2  # 보존한 관측 1건은 빠진다
 
 
-def test_region_mismatch_is_flagged(db):
-    """자산 region 컬럼이 자기 ARN 의 리전과 다르면 (region_mismatch) 으로 잡힌다 —
+def test_candidate_rejected_at_arn_match_is_expected_but_a_later_rejection_is_not(db):
+    """후보는 **상태가 아니라 어느 단계에서 넘어졌는지**로 가른다(#353 리뷰: 안성일).
+
+    `REJECTED` 전체를 정상으로 치면 가드레일 ③ 을 통과한 뒤 ④(DryRun)에서 거절된 후보까지
+    함께 빠진다 — 그쪽은 ③ 이 대상을 관리 자산으로 인정했는데도 매달린 것이라 어긋남이다.
+    """
+    inc = _incident(db, UNMANAGED, IncidentCategory.SECOPS)
+    at_three = _candidate(db, inc, UNMANAGED)
+    _guardrail(db, at_three, GuardrailStep.ARN_MATCH)
+
+    later = _candidate(
+        db, inc, "arn:aws:ec2:ap-northeast-2:1:instance/i-passed-three",
+        runbook_id=RunbookId.RUNBOOK_NACL_RESTORE,
+    )
+    _guardrail(db, later, GuardrailStep.AWS_DRY_RUN)
+    db.flush()
+
+    found = assets_repo.find_dangling_arns(db)
+
+    rejected = _of_kind(found, assets_repo.KIND_GUARDRAIL_REJECTED)
+    assert [f.value for f in rejected] == [UNMANAGED]
+
+    broken = _of_kind(found, assets_repo.KIND_BROKEN_REFERENCE)
+    assert [f.value for f in broken] == ["arn:aws:ec2:ap-northeast-2:1:instance/i-passed-three"]
+
+
+def test_execution_axis_counts_one_arn_once_and_always_investigates(db):
+    """실행·단계·백업 3컬럼은 **한 값의 사본 3개**다 — 1건으로 센다(#353 리뷰: 김세혁).
+
+    행으로 세면 어긋남 1건이 3건으로 부풀어 요약의 숫자가 "어긋난 대상 수"도 "어긋난
+    행 수"도 아니게 된다. 그리고 이 축은 가드레일 ③ 을 통과한 후보나 앞선 원본 실행에서만
+    나오므로, 나오면 예외 없이 버그다 — 관측·제안 축과 다른 통에 담는다.
+    """
+    inc = _incident(db, UNMANAGED, IncidentCategory.SECOPS)
+    execution = models.ActionExecution(
+        incident_id=inc.incident_id, runbook_id=RunbookId.RUNBOOK_NACL_ADD_DENY,
+        target_arn=UNMANAGED, trigger_source=TriggerSource.USER_APPROVAL,
+    )
+    db.add(execution)
+    db.flush()
+    db.add(models.ExecutionStep(
+        execution_id=execution.execution_id, sequence=1, affected_arn=UNMANAGED,
+        step_type="APPLY", aws_operation="CreateNetworkAclEntry",
+    ))
+    db.add(models.BackupRecord(
+        execution_id=execution.execution_id, target_arn=UNMANAGED,
+        backup_type="SAVE_NACL_RULE_INDEX", payload={},
+    ))
+    db.flush()
+
+    found = assets_repo.find_dangling_arns(db)
+    axis = _of_kind(found, assets_repo.KIND_EXECUTION_INTEGRITY)
+
+    assert len(axis) == 1  # 3행이 아니라 대상 1건
+    assert set(axis[0].sources) == {
+        "action_executions.target_arn",
+        "execution_steps.affected_arn",
+        "backup_records.target_arn",
+    }
+    assert assets_repo.KIND_EXECUTION_INTEGRITY in assets_repo.INVESTIGATE_KINDS
+
+
+def test_relation_to_an_unobserved_type_is_explained_by_a_degraded_run(db):
+    """그 회차가 대상 유형을 관측하지 못했으면 누락이 아니라 **미관측**이다.
+
+    LocalStack Community 는 `autoscaling`·`elbv2` 가 라이선스 밖이라 회차가 매번 PARTIAL 로
+    끝난다(ADR-0006). 그 조건에서 만들어진 ASG 관계를 누락으로 세면 팀 표준 환경에서
+    조사 대상이 매 회차 올라온다. 반대로 SUCCESS 로 끝난 회차의 같은 관계는 누락이다.
+    """
+    a = _asset(db, "arn:aws:ec2:ap-northeast-2:1:instance/i-ok", "ap-northeast-2")
+    degraded = _run(db)
+    degraded.status = CollectionRunStatus.PARTIAL
+    clean = _run(db)
+    clean.status = CollectionRunStatus.SUCCESS
+    db.flush()
+
+    db.add(models.AssetRelationship(
+        source_asset_id=a.asset_id, relation_type=RelationType.MEMBER_OF.value,
+        target_arn="arn:aws:autoscaling:ap-northeast-2:1:autoScalingGroup/asg-unseen",
+        collection_run_id=degraded.collection_run_id,
+    ))
+    db.add(models.AssetRelationship(
+        source_asset_id=a.asset_id, relation_type=RelationType.SECURED_BY.value,
+        target_arn="arn:aws:ec2:ap-northeast-2:1:security-group/sg-missing",
+        collection_run_id=clean.collection_run_id,
+    ))
+    db.flush()
+
+    found = assets_repo.find_dangling_arns(db)
+
+    unobserved = _of_kind(found, assets_repo.KIND_UNOBSERVED_RELATION)
+    assert [f.value for f in unobserved] == [
+        "arn:aws:autoscaling:ap-northeast-2:1:autoScalingGroup/asg-unseen"
+    ]
+    assert assets_repo.KIND_UNOBSERVED_RELATION not in assets_repo.INVESTIGATE_KINDS
+
+    broken = _of_kind(found, assets_repo.KIND_BROKEN_REFERENCE)
+    assert [f.value for f in broken] == [
+        "arn:aws:ec2:ap-northeast-2:1:security-group/sg-missing"
+    ]
+
+
+def test_region_mismatch_is_its_own_kind(db):
+    """자산 region 컬럼이 자기 ARN 의 리전과 다르면 매달림과 **별개 종류**로 잡힌다 —
     #261 리전 스코프가 둘을 따로 읽어 어긋나면 필터에서 새거나 빠진다."""
     _asset(db, "arn:aws:ec2:us-east-1:1:instance/i-bad", "ap-northeast-2")  # region≠arn
     found = assets_repo.find_dangling_arns(db)
-    mism = [f for f in found if f.kind == "region_mismatch"]
-    assert mism and "i-bad" in mism[0].value
+    mism = _of_kind(found, assets_repo.KIND_REGION_MISMATCH)
+    assert [f.value for f in mism] == ["arn:aws:ec2:us-east-1:1:instance/i-bad"]
+    assert mism[0].detail == "region=ap-northeast-2"
+    assert assets_repo.KIND_REGION_MISMATCH in assets_repo.INVESTIGATE_KINDS
+
+
+def test_optional_types_match_the_collector_map():
+    """미관측 판정에 쓰는 유형 집합이 수집기의 지도와 어긋나지 않는다.
+
+    원천은 collector 의 `_UNOBSERVED_TYPES_BY_FAILURE` 다(#332 의 fail-closed 지도).
+    누가 흡수 조회를 새로 더하고 한쪽만 고치면 미관측이 누락으로, 또는 그 반대로 뒤집힌다.
+    """
+    from services.collector import _UNOBSERVED_TYPES_BY_FAILURE
+
+    from_collector = {t for types in _UNOBSERVED_TYPES_BY_FAILURE.values() for t in types}
+    assert from_collector == {t.value for t in assets_repo._COLLECTION_OPTIONAL_TYPES}

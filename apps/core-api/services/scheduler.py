@@ -163,17 +163,27 @@ def run_pipeline(publish: Callable[[WsEvent], None] | None = None) -> dict:
             logger.exception("scan_dangling_check_failed")
         finally:
             check_db.close()
+        # 경고는 **조사 대상 축만** 올린다. 미등록 대상 관측·가드레일 ③ 거절·대상을 못 본
+        # 관계는 그 자리에 그렇게 남는 것이 정상이라, 같은 통에 담으면 매 회차 같은 경고가
+        # 반복되며 새 어긋남을 덮는다(#353 리뷰: 안성일). 정상 보존분은 요약에만 남는다.
         if dangling:
-            logger.warning(
-                "scan_dangling_arns",
-                extra={"count": len(dangling), "findings": [d._asdict() for d in dangling[:20]]},
-            )
+            investigate = [d for d in dangling if d.kind in assets_repo.INVESTIGATE_KINDS]
+            if investigate:
+                logger.warning(
+                    "scan_dangling_arns",
+                    extra={
+                        "count": len(investigate),
+                        "findings": [d._asdict() for d in investigate[:20]],
+                    },
+                )
 
         summary = {
             "stored": store,
             "verdicts": judged["counts"],
             "incidents": incidents,
-            "dangling_arns": None if dangling is None else len(dangling),
+            "dangling_arns": (
+                None if dangling is None else assets_repo.summarize_dangling(dangling)
+            ),
         }
         logger.info("scan pipeline done: %s", summary)
         return summary

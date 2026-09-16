@@ -13,7 +13,9 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from schemas.api.assets import AssetType, RelationType
+from schemas.api.incidents import IncidentCategory
 from schemas.arns import arn_region
+from schemas.guardrails import GuardrailStep
 from schemas.assets import MetricSummary as MetricSummaryContract
 from schemas.collections import CollectionRunStatus
 from schemas.rules import RuleEvaluationResult
@@ -456,49 +458,199 @@ def latest_rule_evaluation_by_asset(db: Session) -> dict[str, models.RuleEvaluat
 # --- ARN 조인 무결성 점검 (#342) ----------------------------------------------
 
 
+# 점검 결과의 종류. 앞 셋은 **그 기록이 원래 그렇게 남는 자리**(정상 보존)이고, 뒤 셋은
+# 건수가 0 이 아닌 것만으로 조사 대상이다. 둘을 한 통에 담으면 정상 보존분이 같은 경고에
+# 영원히 섞여 새 어긋남을 덮는다(#353 리뷰: 안성일).
+KIND_UNMANAGED_OBSERVATION = "unmanaged_observation"  # 미등록 대상 관측을 보존한 것
+KIND_GUARDRAIL_REJECTED = "guardrail_rejected"        # 가드레일 ③ 이 거절해 남은 후보
+KIND_UNOBSERVED_RELATION = "unobserved_relation"      # 그 회차가 대상 유형을 못 본 관계
+KIND_BROKEN_REFERENCE = "broken_reference"            # 위 어디에도 해당 없는 참조 누락
+KIND_EXECUTION_INTEGRITY = "execution_integrity"      # 실행·단계·백업 — 나오면 버그
+KIND_REGION_MISMATCH = "region_mismatch"              # 자산 region 이 자기 ARN 과 다름
+
+# 경고로 올릴 축. 정상 보존 셋은 요약에만 싣는다.
+INVESTIGATE_KINDS: frozenset[str] = frozenset(
+    {KIND_BROKEN_REFERENCE, KIND_EXECUTION_INTEGRITY, KIND_REGION_MISMATCH}
+)
+
+
 class DanglingArn(NamedTuple):
-    kind: str      # "dangling"(assets.arn 에 없음) | "region_mismatch"(자기 리전과 어긋남)
-    table: str
-    column: str
-    value: str
+    """어긋난 ARN **1개**. 집계 단위는 `value`(대상)이지 행이 아니다(#353 리뷰: 김세혁).
+
+    `sources` 는 그 ARN 이 보인 자리(`table.column`) 목록이며 **상세 전용**이다 — 실행·
+    단계·백업 3컬럼은 한 값을 세 번 복사한 것이라, 행으로 세면 어긋남 1건이 3건으로
+    부풀어 오른다.
+    """
+
+    kind: str
+    value: str                  # 어긋난 ARN — 집계 단위
+    sources: tuple[str, ...]    # "table.column" 목록(상세 전용)
+    detail: str = ""
 
 
-# 자산을 가리키는 조인 키 7개 — 전부 FK 없는 ARN 문자열이라 어긋나도 DB 가 막지 않는다.
-# (모델, ARN 컬럼명). Incident·BackupRecord 는 자산이 사라져도 남는 기록이라 FK 를 붙이지
-# 않지만(#332 는 하드 삭제 대신 표시라 자산 행이 남는다), 어긋남 자체는 여기서 잡는다.
-_ARN_JOIN_KEYS: tuple[tuple[type, str], ...] = (
-    (models.AssetRelationship, "target_arn"),
-    (models.ThreatEvent, "target_arn"),
-    (models.Incident, "subject_arn"),
-    (models.RunbookCandidate, "target_arn"),
+# 실행 축 3컬럼 — `ActionExecution.target_arn` 은 가드레일 ③ 을 통과한 후보
+# (`_executable_candidate` 는 EXECUTABLE 만 받는다) 또는 앞선 원본 실행에서만 나오고,
+# `ExecutionStep.affected_arn`·`BackupRecord.target_arn` 은 그 값을 그대로 복사한다.
+# 자산 행은 지워지지 않으므로(#332 는 하드 삭제 대신 표시) **여기서 나오면 예외 없이
+# 버그다** — 관측·제안 축과 같은 통에 담지 않는다. (#353 리뷰: 김세혁)
+_EXECUTION_ARN_KEYS: tuple[tuple[type, str], ...] = (
     (models.ActionExecution, "target_arn"),
     (models.ExecutionStep, "affected_arn"),
     (models.BackupRecord, "target_arn"),
+)
+
+# 관계의 대상 자산 유형 — relation_type 이 곧 대상 유형이다(api/assets.py 주석과 1:1).
+_RELATION_TARGET_TYPE: dict[RelationType, AssetType] = {
+    RelationType.SECURED_BY: AssetType.SG,
+    RelationType.ATTACHED_TO: AssetType.EBS,
+    RelationType.MEMBER_OF: AssetType.AUTO_SCALING_GROUP,
+    RelationType.USES: AssetType.LAUNCH_TEMPLATE,
+    RelationType.REGISTERED_IN: AssetType.ALB_TARGET_GROUP,
+    RelationType.PROTECTED_BY: AssetType.NACL,
+}
+
+# 수집이 **흡수할 수 있는** 조회로만 채워지는 유형 — 그 조회가 degrade 하면 회차가
+# SUCCESS 로 끝나지 않고 대상을 확인하지 못한 관계가 남는다. EC2·SG·NACL·EBS 조회는
+# 흡수하지 않아 실패하면 리전이 FAILED 로 끝나므로 여기 없다.
+# 원천은 collector 의 `_UNOBSERVED_TYPES_BY_FAILURE` 이고, 둘이 어긋나지 않는지는
+# `db/tests/test_dangling_arns.py::test_optional_types_match_the_collector_map` 이 잠근다.
+_COLLECTION_OPTIONAL_TYPES: frozenset[AssetType] = frozenset(
+    {AssetType.LAUNCH_TEMPLATE, AssetType.AUTO_SCALING_GROUP, AssetType.ALB_TARGET_GROUP}
 )
 
 
 def find_dangling_arns(db: Session) -> list[DanglingArn]:
     """자산 조인 무결성을 점검한다(#342). 두 가지를 함께 본다:
 
-    - **매달린 ARN**: 조인 키 7개 컬럼의 값 중 `assets.arn` 에 없는 것 — 한 곳에서 ARN 을
-      다르게 조립하면(가드레일 ③ 완전일치) 조치 대상이 조용히 거절된다.
+    - **매달린 ARN**: 자산을 가리키는 조인 키 7개 컬럼의 값 중 `assets.arn` 에 없는 것 —
+      한 곳에서 ARN 을 다르게 조립하면(가드레일 ③ 완전일치) 조치 대상이 조용히 거절된다.
     - **리전 불일치**: 자산의 `region` 컬럼과 자기 ARN 의 리전 칸이 다른 것 — #261 리전
       스코프가 이 둘을 따로 읽으므로 어긋나면 리전 필터에서 새거나 빠진다.
 
-    FK 가 없어 DB 가 막지 못하는 어긋남을 `(kind, table, column, value)` 로 돌려준다.
-    빈 리스트면 정합. 골든 적재·실수집 뒤 0 건이 기준선(2026-09-14 실측 0건)이다.
+    **매달렸다는 사실만으로는 이상이 아니다.** 위협 접수는 미등록 대상도 받고(SECOPS),
+    가드레일 ③ 은 거절한 후보를 기록으로 남긴다 — 그 자리는 매달린 것이 정상이다. 그래서
+    종류(`kind`)를 함께 돌려주고, 조사 대상은 `INVESTIGATE_KINDS` 로 좁힌다.
+    `absent_since` 는 거르지 않는다 — 소멸 표시된 자산을 가리키는 참조는 자산 행이 남아
+    매달리지 않으며, 그 동작이 맞다(#353 리뷰에서 양쪽이 각각 실측).
+
+    집계 단위는 **ARN(대상)** 이다. 같은 ARN 이 여러 테이블에서 보이면 한 건으로 묶고
+    `sources` 에 자리를 적는다. 빈 리스트면 정합이며, 골든 적재·실수집 뒤 0 건이
+    기준선이다(2026-09-14 실측 0건 · 2026-09-16 김세혁 재현 0건).
     """
-    findings: list[DanglingArn] = []
+    found: dict[tuple[str, str], list[str]] = {}
+    details: dict[tuple[str, str], str] = {}
+
+    def _add(kind: str, arn: str, source: str, detail: str = "") -> None:
+        key = (kind, arn)
+        found.setdefault(key, [])
+        if source not in found[key]:
+            found[key].append(source)
+        if detail:
+            details[key] = detail
 
     known_arns = select(models.Asset.arn)
-    for model, column in _ARN_JOIN_KEYS:
-        col = getattr(model, column)
-        for value in db.execute(select(col).where(col.notin_(known_arns)).distinct()).scalars():
-            findings.append(DanglingArn("dangling", model.__tablename__, column, value))
 
+    # ① 위협 관측 — 미등록 대상도 접수한다. 매달린 것이 정상이다.
+    threats = select(models.ThreatEvent.target_arn).where(
+        models.ThreatEvent.target_arn.notin_(known_arns)
+    ).distinct()
+    for arn in db.execute(threats).scalars():
+        _add(KIND_UNMANAGED_OBSERVATION, arn, "threat_events.target_arn")
+
+    # ② Incident — SECOPS 는 미등록 관측에서도 생기지만, FINOPS 는 등록 자산의 판정에서만
+    #    생긴다. 그래서 FINOPS 가 매달리면 참조가 실제로 끊긴 것이다.
+    incidents = select(models.Incident.subject_arn, models.Incident.category).where(
+        models.Incident.subject_arn.notin_(known_arns)
+    ).distinct()
+    for arn, category in db.execute(incidents):
+        kind = (
+            KIND_UNMANAGED_OBSERVATION
+            if category is IncidentCategory.SECOPS
+            else KIND_BROKEN_REFERENCE
+        )
+        _add(kind, arn, "incidents.subject_arn", detail=f"category={category.value}")
+
+    # ③ 런북 후보 — 상태로 가르지 않는다. REJECTED 전체를 정상으로 치면 ③ 을 통과한 뒤
+    #    ④(DryRun)에서 거절된 후보까지 함께 빠진다(#353 리뷰: 안성일). 그래서 가드레일
+    #    판정 기록에서 **ARN Match 에서 넘어진 후보**만 골라 정상 보존으로 본다.
+    rejected_at_arn_match = set(
+        db.execute(
+            select(models.GuardrailEvaluation.candidate_id).where(
+                models.GuardrailEvaluation.failed_step == GuardrailStep.ARN_MATCH,
+                models.GuardrailEvaluation.candidate_id.is_not(None),
+            )
+        ).scalars()
+    )
+    candidates = select(
+        models.RunbookCandidate.target_arn, models.RunbookCandidate.candidate_id
+    ).where(models.RunbookCandidate.target_arn.notin_(known_arns))
+    for arn, candidate_id in db.execute(candidates):
+        at_arn_match = candidate_id in rejected_at_arn_match
+        _add(
+            KIND_GUARDRAIL_REJECTED if at_arn_match else KIND_BROKEN_REFERENCE,
+            arn,
+            "runbook_candidates.target_arn",
+            detail="" if at_arn_match else "가드레일 ③ 에서 거절된 기록이 없다",
+        )
+
+    # ④ 관계 — 그 회차가 대상 유형을 관측하지 못했으면(SUCCESS 로 끝나지 않은 회차 +
+    #    흡수 가능한 조회로만 채워지는 유형) 대상을 확인하지 못한 것이고, 그 밖은 누락이다.
+    relations = (
+        select(
+            models.AssetRelationship.target_arn,
+            models.AssetRelationship.relation_type,
+            models.CollectionRun.status,
+        )
+        .join(
+            models.CollectionRun,
+            models.AssetRelationship.collection_run_id
+            == models.CollectionRun.collection_run_id,
+            isouter=True,
+        )
+        .where(models.AssetRelationship.target_arn.notin_(known_arns))
+        .distinct()
+    )
+    for arn, relation_type, run_status in db.execute(relations):
+        target_type = _RELATION_TARGET_TYPE.get(RelationType(relation_type))
+        unobserved = (
+            run_status is not CollectionRunStatus.SUCCESS
+            and target_type in _COLLECTION_OPTIONAL_TYPES
+        )
+        _add(
+            KIND_UNOBSERVED_RELATION if unobserved else KIND_BROKEN_REFERENCE,
+            arn,
+            "asset_relationships.target_arn",
+            detail=f"relation_type={relation_type}",
+        )
+
+    # ⑤ 실행 축 — 한 값의 사본 3개다. ARN 으로 묶어 1건으로 센다.
+    for model, column in _EXECUTION_ARN_KEYS:
+        col = getattr(model, column)
+        for arn in db.execute(select(col).where(col.notin_(known_arns)).distinct()).scalars():
+            _add(KIND_EXECUTION_INTEGRITY, arn, f"{model.__tablename__}.{column}")
+
+    # ⑥ 리전 불일치 — 매달림과 별개 종류다(#353 리뷰: 안성일).
     for arn, region in db.execute(select(models.Asset.arn, models.Asset.region)):
         if arn_region(arn) != region:
-            findings.append(
-                DanglingArn("region_mismatch", "assets", "region", f"{arn} (region={region})")
-            )
-    return findings
+            _add(KIND_REGION_MISMATCH, arn, "assets.region", detail=f"region={region}")
+
+    return [
+        DanglingArn(kind, arn, tuple(sources), details.get((kind, arn), ""))
+        for (kind, arn), sources in found.items()
+    ]
+
+
+def summarize_dangling(findings: Sequence[DanglingArn]) -> dict:
+    """점검 결과를 회차 요약에 실을 모양으로 접는다 — 집계 단위는 ARN 이다.
+
+    `investigate` 가 0 이 아닌 것만으로 조사 대상이다. 정상 보존분(관측·거절·미관측 관계)은
+    `by_kind` 에만 남아, 같은 기록이 새 어긋남을 덮는 경고로 매 회차 반복되지 않는다.
+    """
+    by_kind: dict[str, int] = {}
+    for f in findings:
+        by_kind[f.kind] = by_kind.get(f.kind, 0) + 1
+    return {
+        "total": len(findings),
+        "investigate": sum(1 for f in findings if f.kind in INVESTIGATE_KINDS),
+        "by_kind": by_kind,
+    }

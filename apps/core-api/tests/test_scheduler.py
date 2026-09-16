@@ -76,7 +76,8 @@ def test_run_pipeline_runs_and_releases_when_lock_free(pg_engine, monkeypatch):
     assert result == {
         "stored": {"stored": 1}, "verdicts": {"SKIP": 1},
         "incidents": {"created": 0, "existing": 0, "failed": 0},
-        "dangling_arns": 0,  # 점검했고 0건(#342). 못 쟀으면 None 이다 — 아래 실패 테스트
+        # 점검했고 0건(#342). 집계 단위는 ARN 이고, 못 쟀으면 None 이다 — 아래 실패 테스트
+        "dangling_arns": {"total": 0, "investigate": 0, "by_kind": {}},
     }
 
     # 락이 해제됐어야 한다 — 같은 키를 다시 잡을 수 있어야 한다
