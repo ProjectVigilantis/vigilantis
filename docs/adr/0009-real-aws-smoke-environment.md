@@ -37,6 +37,7 @@
 - **관리자 키는 `.env`에 넣지 않는다.** 가드레일은 앱 안의 방어선이고, 앱이 관리자 권한으로 돌면 가드레일이 뚫렸을 때 AWS 쪽에서 막을 것이 없다. **앱 정책은 Action Whitelist의 AWS 쪽 거울**이다 — 코드가 부르지 않는 조치는 가드레일을 우회해도 AWS가 거절한다.
 - **정책 울타리는 셋이다.** ① 리전 — 조치 문장은 리전이 박힌 ARN, 조회 문장은 `aws:RequestedRegion` ② 인스턴스·NACL·볼륨 조치는 **`vigilantis:smoke=true` 태그 자원만** ③ SG·ENI 조치는 **스모크 VPC 안만**(`ec2:Vpc`) — `SG_RECREATE`가 만드는 SG에는 우리 태그가 없어 태그가 아니라 VPC로 가둔다. 단 **새 SG 생성**은 가두는 자리가 다르다. `CreateSecurityGroup`은 새 SG와 생성 장소 VPC를 각각 검사하는데 새 SG 쪽 조건 키에는 `ec2:Vpc`가 없으므로(AWS 서비스 권한 참조), 새 SG 쪽은 조건 없이 허용하고 **생성 장소인 스모크 VPC ARN 문장**이 울타리가 된다.
 - **정책은 코드가 부르는 작업에서 도출하고, 테스트가 두 방향을 지킨다**(`tests/test_provision_smoke_aws.py`). 실행 경로를 더한 PR이 정책을 빠뜨리면 깨지고, 코드가 부르지 않는 조치 권한이 끼어도 깨진다. DryRun도 같은 권한을 요구하므로 precheck만 있는 런북의 작업도 들어간다. P2 실행 작업(`elbv2.deregister_targets`·`register_targets`·`autoscaling.create_auto_scaling_group`)은 아직 코드에 없어 정책에도 없다 — **그 실행 경로를 붙이는 PR이 정책을 함께 고친다.**
+- **정책은 사용자 인라인이 아니라 고객 관리형 정책으로 붙인다.** 사용자 인라인 정책은 합계 2,048자(공백 제외)가 한도인데, 코드가 지금 부르는 작업만 담은 정책이 이미 2,084자다. 관리형 정책 한도는 6,144자이고, 위 P2 실행 경로가 붙으며 늘어날 문장도 여기에 담긴다. 한도는 테스트가 지킨다 — 넘기는 PR은 `up`이 아니라 CI에서 깨진다. `up`은 문서가 바뀐 때(VPC를 다시 세운 때)만 새 버전을 기본으로 올리고(정책당 버전 5개 한도 — 가장 오래된 비기본 버전부터 지운다), `down`은 사용자와 함께 정책도 지운다. **앱 사용자의 권한은 이 정책 하나뿐이다** — `up`은 전환 전에 붙었을 인라인 정책을 걷어 권한이 두 문서의 합집합이 되지 않게 한다.
 - **조건 키가 실제로 채워지는지는 적용 직후 잰다.** 앱 키로 DryRun을 1회씩 불러 `UnauthorizedOperation`이 나면 정책을 고친다. ADR-0006 §4 1행(DryRun이 IAM을 검증하지 않음)을 해소하는 첫걸음이 이것이다.
 - **앱 키는 1개이고 PM만 쥔다.** 팀원에게 배포하지 않는다 — 팀원의 개발·테스트 표준은 그대로 LocalStack이다. Slack·이슈·PR에 붙이지 않는다.
 - **스크립트는 키를 만들지 않는다.** 비밀이 스크립트 출력·로그에 남지 않게 PM이 `aws iam create-access-key`로 발급해 `.env`에만 넣는다.
@@ -72,7 +73,7 @@
 | 전용 NACL(서브넷 a) · 허용 규칙 **32766** | `NACL_ADD_DENY`·`NACL_RESTORE`와 그 `DryRun`(ADR-0006 §4 5행) |
 | SG 5개 — alb · web · open-ssh(미끼) · unused · isolation(규칙 0개) | `SG_DELETE_ISOLATED` 대상(unused) · `EC2_ISOLATE`의 `isolation_group_id`(isolation) |
 | 미연결 EBS 1 GiB gp3 | `EBS_DELETE_UNATTACHED` |
-| 앱 IAM 사용자·정책 · Budget · `AWSServiceRoleForAutoScaling` | §2 · §3 · 아래 |
+| 앱 IAM 사용자·관리형 정책 · Budget · `AWSServiceRoleForAutoScaling` | §2 · §3 · 아래 |
 
 - **NACL 허용 규칙을 32766에 두는 이유**: AI는 `rule_number`를 1–32766에서 고른다(`ai/agent.py`, `RuleNumber`). 허용을 그 맨 끝에 둬야 AI가 넣는 어떤 차단 규칙도 허용보다 먼저 평가된다. 같은 번호를 고르면 precheck ②가 점유로 거절하므로 조용히 무력화되는 차단은 없다. 허용 규칙은 NACL을 서브넷에 붙이기 **전에** 넣는다.
 - **ASG는 세우지 않는다** — `ENABLE_AUTOSCALING`이 만드는 것이다. 다만 계정의 첫 ASG에는 서비스 연결 역할이 필요하고 앱 키에는 `iam:CreateServiceLinkedRole`을 주지 않으므로, 역할은 스크립트가 관리자 권한으로 미리 만든다(무료, `down` 뒤에도 둔다).

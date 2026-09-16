@@ -8,15 +8,20 @@
 #   ③ 실 AWS에서만 드러나는 배치 조건 두 개(NACL 허용 번호·RIGHTSIZING 대상 타입).
 #   ④ 끊긴 초기화 — 만든 직후의 설정(SG 규칙·NACL 허용·TG 대상 등록)이 도중에 실패하면
 #      다음 up이 이어서 끝내고, 설정이 끝난 자원은 스모크가 바꾼 그대로 둔다.
+#   ⑤ 앱 정책 저장 — 사용자 인라인 한도(합계 2,048자)로는 들어가지 않아 관리형으로 붙는다.
+#      크기가 관리형 한도(6,144자)를 넘기는 PR은 up이 아니라 여기서 깨진다. 전환 전에 붙은
+#      인라인이 남으면 앱 권한이 두 문서의 합집합이 되므로 up이 걷는다.
 #
-# scripts/ 는 CI pytest 경로에 없어 여기(루트 tests/)에 둔다. AWS를 부르지 않는다(④는 대역).
+# scripts/ 는 CI pytest 경로에 없어 여기(루트 tests/)에 둔다. AWS를 부르지 않는다(④⑤는 대역).
 
 from __future__ import annotations
 
 import copy
 import fnmatch
 import importlib.util
+import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -44,9 +49,10 @@ from schemas.rightsizing_policy import rightsizing_target_type  # noqa: E402
 from schemas.runbook_parameters import RuleNumber  # noqa: E402
 from services.aws import executor, rollback  # noqa: E402
 
+ACCOUNT = "123456789012"
 REGION = "ap-northeast-2"
-VPC_ID = "vpc-0123456789abcdef0"
-POLICY = smoke.build_app_policy("123456789012", REGION, VPC_ID)
+VPC_ID = "vpc-0123456789abcdef0"  # 실 VPC ID와 같은 길이(17자리 16진) — ⑤의 크기 계측이 이 길이에 기댄다
+POLICY = smoke.build_app_policy(ACCOUNT, REGION, VPC_ID)
 
 # boto3 클라이언트 이름 → IAM 서비스 접두
 _IAM_SERVICE = {"ec2": "ec2", "elbv2": "elasticloadbalancing", "autoscaling": "autoscaling"}
@@ -416,3 +422,162 @@ def test_rerun_leaves_initialized_resources_as_the_smoke_left_them():
     _ensure_tg(elbv2)
     assert ec2.writes == []
     assert elbv2.writes == []
+
+
+# ------------------------------------------------------------------ ⑤ 앱 정책 저장
+def _policy_chars(policy: dict) -> int:
+    """IAM이 정책 한도에 세는 길이 — 공백은 세지 않는다."""
+    return len(re.sub(r"\s", "", json.dumps(policy)))
+
+
+def test_app_policy_fits_the_managed_policy_limit():
+    """P2 실행 경로가 붙으면 ①의 대조 테스트가 정책을 키우게 한다 — 한도는 여기서 막는다."""
+    assert _policy_chars(POLICY) <= smoke.MANAGED_POLICY_MAX_CHARS
+
+
+class FakeIam(_Fake):
+    """앱 사용자와 관리형 정책. put_user_policy는 두지 않는다 — 인라인으로 붙이려 하면 AttributeError."""
+
+    def __init__(self):
+        super().__init__()
+        self.users: dict[str, set[str]] = {}          # 사용자 → 연결된 정책 ARN
+        self.inline: dict[str, set[str]] = {}         # 사용자 → 인라인 정책 이름(전환 전 잔재)
+        self.versions: dict[str, list[dict]] = {}     # 정책 ARN → 버전(오래된 순)
+
+    def get_user(self, UserName):
+        if UserName not in self.users:
+            raise _client_error("NoSuchEntity", "GetUser")
+        return {"User": {"UserName": UserName}}
+
+    def create_user(self, UserName, Tags):
+        self._write("create_user")
+        self.users[UserName] = set()
+        self.inline[UserName] = set()
+
+    def _add_version(self, arn: str, document: str, default: bool) -> None:
+        self._seq += 1
+        if default:
+            for version in self.versions[arn]:
+                version["IsDefaultVersion"] = False
+        self.versions[arn].append({
+            "VersionId": f"v{self._seq}", "IsDefaultVersion": default, "CreateDate": self._seq,
+            "Document": json.loads(document),  # botocore가 URL 인코딩된 문서를 dict로 풀어 준다
+        })
+
+    def create_policy(self, PolicyName, PolicyDocument, Tags):
+        self._write("create_policy")
+        arn = f"arn:aws:iam::{ACCOUNT}:policy/{PolicyName}"
+        self.versions[arn] = []
+        self._add_version(arn, PolicyDocument, default=True)
+        return {"Policy": {"Arn": arn}}
+
+    def get_policy(self, PolicyArn):
+        if PolicyArn not in self.versions:
+            raise _client_error("NoSuchEntity", "GetPolicy")
+        default = next(v for v in self.versions[PolicyArn] if v["IsDefaultVersion"])
+        return {"Policy": {"Arn": PolicyArn, "DefaultVersionId": default["VersionId"]}}
+
+    def get_policy_version(self, PolicyArn, VersionId):
+        version = next(v for v in self.versions[PolicyArn] if v["VersionId"] == VersionId)
+        return {"PolicyVersion": copy.deepcopy(version)}
+
+    def list_policy_versions(self, PolicyArn):
+        return {"Versions": [
+            {k: v[k] for k in ("VersionId", "IsDefaultVersion", "CreateDate")} for v in self.versions[PolicyArn]
+        ]}
+
+    def create_policy_version(self, PolicyArn, PolicyDocument, SetAsDefault):
+        self._write("create_policy_version")
+        if len(self.versions[PolicyArn]) >= smoke._POLICY_VERSION_LIMIT:
+            raise _client_error("LimitExceeded", "CreatePolicyVersion")
+        self._add_version(PolicyArn, PolicyDocument, default=SetAsDefault)
+
+    def delete_policy_version(self, PolicyArn, VersionId):
+        self._write("delete_policy_version")
+        version = next(v for v in self.versions[PolicyArn] if v["VersionId"] == VersionId)
+        if version["IsDefaultVersion"]:
+            raise _client_error("DeleteConflict", "DeletePolicyVersion")
+        self.versions[PolicyArn].remove(version)
+
+    def delete_policy(self, PolicyArn):
+        self._write("delete_policy")
+        if len(self.versions[PolicyArn]) > 1 or any(PolicyArn in arns for arns in self.users.values()):
+            raise _client_error("DeleteConflict", "DeletePolicy")
+        del self.versions[PolicyArn]
+
+    def list_attached_user_policies(self, UserName):
+        return {"AttachedPolicies": [{"PolicyArn": arn} for arn in sorted(self.users[UserName])]}
+
+    def attach_user_policy(self, UserName, PolicyArn):
+        self._write("attach_user_policy")
+        self.users[UserName].add(PolicyArn)
+
+    def detach_user_policy(self, UserName, PolicyArn):
+        self._write("detach_user_policy")
+        self.users[UserName].discard(PolicyArn)
+
+    def list_access_keys(self, UserName):
+        return {"AccessKeyMetadata": []}
+
+    def list_user_policies(self, UserName):
+        return {"PolicyNames": sorted(self.inline.get(UserName, ()))}
+
+    def delete_user_policy(self, UserName, PolicyName):
+        self._write("delete_user_policy")
+        self.inline[UserName].remove(PolicyName)
+
+    def delete_user(self, UserName):
+        self._write("delete_user")
+        if self.users[UserName] or self.inline[UserName]:
+            raise _client_error("DeleteConflict", "DeleteUser")
+        del self.users[UserName]
+        del self.inline[UserName]
+
+    def default_document(self, arn: str) -> dict:
+        return next(v["Document"] for v in self.versions[arn] if v["IsDefaultVersion"])
+
+
+def test_app_policy_is_attached_as_a_managed_policy():
+    """사용자 인라인 정책(합계 2,048자)으로는 저장되지 않는다(#348 리뷰 — 2,084자)."""
+    iam = FakeIam()
+    smoke._ensure_app_user(iam, ACCOUNT, REGION, VPC_ID)
+    arn = smoke._app_policy_arn(ACCOUNT)
+    assert iam.users[smoke.APP_USER] == {arn}
+    assert iam.default_document(arn) == POLICY
+
+    iam.writes.clear()
+    smoke._ensure_app_user(iam, ACCOUNT, REGION, VPC_ID)  # 같은 VPC로 다시 — 버전을 쌓지 않는다
+    assert iam.writes == []
+
+
+def test_recreated_vpc_moves_the_policy_to_a_new_version_within_the_limit():
+    """VPC를 다시 세우면 정책의 VPC ARN이 따라간다 — 버전 한도(5)를 넘겨도 up이 멈추지 않는다."""
+    iam = FakeIam()
+    vpcs = [f"vpc-{n:017x}" for n in range(smoke._POLICY_VERSION_LIMIT + 3)]
+    for vpc_id in vpcs:
+        smoke._ensure_app_user(iam, ACCOUNT, REGION, vpc_id)
+    arn = smoke._app_policy_arn(ACCOUNT)
+    assert len(iam.versions[arn]) == smoke._POLICY_VERSION_LIMIT
+    assert iam.default_document(arn) == smoke.build_app_policy(ACCOUNT, REGION, vpcs[-1])
+
+
+def test_down_removes_the_app_user_and_its_managed_policy():
+    """사용자를 지워도 관리형 정책은 남는다 — status 잔여 0건이 되려면 따로 걷혀야 한다."""
+    iam = FakeIam()
+    smoke._ensure_app_user(iam, ACCOUNT, REGION, VPC_ID)
+    smoke._ensure_app_user(iam, ACCOUNT, REGION, "vpc-0fedcba9876543210")  # 비기본 버전을 하나 남긴다
+    smoke._delete_app_user(iam)
+    smoke._delete_app_policy(iam, ACCOUNT)
+    assert iam.users == {}
+    assert iam.versions == {}
+
+
+def test_up_clears_an_inline_policy_left_from_before_the_managed_switch():
+    """앱 권한은 관리형 정책 하나여야 한다 — 전환 전에 붙은 인라인이 남으면 권한이 합집합이 된다."""
+    iam = FakeIam()
+    smoke._ensure_app_user(iam, ACCOUNT, REGION, VPC_ID)
+    iam.inline[smoke.APP_USER].add(smoke.APP_USER)  # 전환 전 up이 남긴 인라인 정책
+
+    smoke._ensure_app_user(iam, ACCOUNT, REGION, VPC_ID)
+    assert iam.inline[smoke.APP_USER] == set()
+    assert iam.users[smoke.APP_USER] == {smoke._app_policy_arn(ACCOUNT)}

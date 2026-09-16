@@ -125,6 +125,12 @@ ALB_NAME = f"{PREFIX}-alb"
 TG_NAME = f"{PREFIX}-tg"
 
 APP_USER = f"{PREFIX}-app"
+# 앱 정책은 사용자 인라인이 아니라 고객 관리형으로 붙인다. 사용자 인라인 정책은 합계 2,048자(공백
+# 제외)가 한도라 코드가 부르는 조치 권한만 담은 지금 정책(2,084자)도 들어가지 않는다(#348 리뷰).
+# 관리형 한도는 6,144자이고 P2 실행 경로가 붙으며 늘어날 문장도 담는다 — 한도는 테스트가 지킨다.
+APP_POLICY = APP_USER
+MANAGED_POLICY_MAX_CHARS = 6144
+_POLICY_VERSION_LIMIT = 5  # 관리형 정책 하나가 가질 수 있는 버전 수
 BUDGET_NAME = f"{PREFIX}-monthly"
 BUDGET_USD = "50"  # 알림선이지 상한이 아니다(ADR-0009 §3)
 BUDGET_ALERTS = (("ACTUAL", 50), ("ACTUAL", 80), ("ACTUAL", 100), ("FORECASTED", 100))
@@ -177,6 +183,8 @@ def build_app_policy(account: str, region: str, vpc_id: str) -> dict:
     스모크 태그 자원만 ③ SG·ENI는 스모크 VPC 안만 — 앱이 재생성한 SG에는 우리 태그가 없어
     태그 대신 VPC로 가둔다. 새 SG 생성은 새 SG가 아니라 생성 장소(VPC ARN)로 가둔다.
     조건 키가 실제로 채워지는지는 적용 직후 DryRun으로 잰다.
+
+    크기는 관리형 정책 한도(MANAGED_POLICY_MAX_CHARS, 공백 제외) 안이어야 한다 — 테스트가 잰다.
     """
     arn = f"arn:aws:ec2:{region}:{account}"
     vpc_arn = f"{arn}:vpc/{vpc_id}"
@@ -408,6 +416,20 @@ def _user_exists(iam) -> bool:
         raise
 
 
+def _app_policy_arn(account: str) -> str:
+    return f"arn:aws:iam::{account}:policy/{APP_POLICY}"
+
+
+def _managed_policy_exists(iam, arn: str) -> bool:
+    try:
+        iam.get_policy(PolicyArn=arn)
+        return True
+    except ClientError as exc:
+        if _code(exc) == "NoSuchEntity":
+            return False
+        raise
+
+
 def _budget_exists(budgets, account: str) -> bool:
     try:
         budgets.describe_budget(AccountId=account, BudgetName=BUDGET_NAME)
@@ -457,6 +479,8 @@ def inventory(clients: dict, account: str) -> list[tuple[str, str, Optional[str]
     rows.append(("LoadBalancer", ALB_NAME, lb["LoadBalancerArn"] if lb else None))
     rows.append(("Volume", VOLUME_NAME, _find_volume(ec2)))
     rows.append(("IamUser", APP_USER, APP_USER if _user_exists(iam) else None))
+    policy_arn = _app_policy_arn(account)
+    rows.append(("IamPolicy", APP_POLICY, policy_arn if _managed_policy_exists(iam, policy_arn) else None))
     rows.append(("Budget", BUDGET_NAME, BUDGET_NAME if _budget_exists(budgets, account) else None))
     return rows
 
@@ -741,12 +765,44 @@ def _ensure_app_user(iam, account: str, region: str, vpc_id: str) -> None:
     if not _user_exists(iam):
         iam.create_user(UserName=APP_USER, Tags=_tags(APP_USER))
         print(f"[smoke] IAM 사용자 {APP_USER} 생성 — 키는 만들지 않는다(ADR-0009 §2)")
-    # 덮어쓰기라 매번 둔다 — VPC를 다시 세웠으면 정책의 VPC ARN도 따라가야 한다
-    iam.put_user_policy(
-        UserName=APP_USER,
-        PolicyName=APP_USER,
-        PolicyDocument=json.dumps(build_app_policy(account, region, vpc_id)),
-    )
+    # 이 사용자의 권한은 아래 관리형 정책 하나뿐이다(ADR-0009 §2 — 정책은 Action Whitelist의
+    # 거울). 인라인은 더 만들지 않으므로 남아 있다면 관리형 전환 전에 붙은 것이다 — 걷어야
+    # 권한이 두 문서의 합집합이 되지 않는다.
+    for stale in iam.list_user_policies(UserName=APP_USER)["PolicyNames"]:
+        iam.delete_user_policy(UserName=APP_USER, PolicyName=stale)
+        print(f"[smoke] 남아 있던 인라인 정책 {stale} 삭제 — 앱 권한은 관리형 정책 하나로 모은다")
+    document = build_app_policy(account, region, vpc_id)
+    arn = _app_policy_arn(account)
+    try:
+        policy = iam.get_policy(PolicyArn=arn)["Policy"]
+    except ClientError as exc:
+        if _code(exc) != "NoSuchEntity":
+            raise
+        iam.create_policy(PolicyName=APP_POLICY, PolicyDocument=json.dumps(document), Tags=_tags(APP_POLICY))
+        print(f"[smoke] IAM 관리형 정책 {APP_POLICY} 생성")
+    else:
+        # VPC를 다시 세웠으면 정책의 VPC ARN도 따라가야 한다 — 문서가 바뀐 때만 새 버전을 올린다.
+        # botocore가 IAM 응답의 정책 문서를 dict로 풀어 주므로 그대로 비교한다.
+        current = iam.get_policy_version(
+            PolicyArn=arn, VersionId=policy["DefaultVersionId"]
+        )["PolicyVersion"]["Document"]
+        if current != document:
+            _make_room_for_policy_version(iam, arn)
+            iam.create_policy_version(PolicyArn=arn, PolicyDocument=json.dumps(document), SetAsDefault=True)
+            print(f"[smoke] IAM 관리형 정책 {APP_POLICY} 새 버전을 기본으로")
+    # 이미 붙은 정책의 재연결 멱등성에 기대지 않고 확인한 뒤 붙인다
+    attached = iam.list_attached_user_policies(UserName=APP_USER)["AttachedPolicies"]
+    if all(p["PolicyArn"] != arn for p in attached):
+        iam.attach_user_policy(UserName=APP_USER, PolicyArn=arn)
+        print(f"[smoke] 정책 {APP_POLICY} → 사용자 {APP_USER} 연결")
+
+
+def _make_room_for_policy_version(iam, arn: str) -> None:
+    """관리형 정책은 버전을 5개까지만 가진다 — 새 버전 자리를 가장 오래된 비기본 버전에서 낸다."""
+    versions = iam.list_policy_versions(PolicyArn=arn)["Versions"]
+    stale = sorted((v for v in versions if not v["IsDefaultVersion"]), key=lambda v: v["CreateDate"])
+    for version in stale[: max(0, len(versions) - _POLICY_VERSION_LIMIT + 1)]:
+        iam.delete_policy_version(PolicyArn=arn, VersionId=version["VersionId"])
 
 
 def _ensure_asg_service_role(iam) -> None:
@@ -873,7 +929,20 @@ def _delete_app_user(iam) -> None:
     print(f"[smoke] IAM 사용자 {APP_USER} 삭제")
 
 
-def down(clients: dict) -> None:
+def _delete_app_policy(iam, account: str) -> None:
+    """사용자를 지워도 관리형 정책은 남는다 — 따로 걷는다. 사용자 쪽 연결은 _delete_app_user가 푼다."""
+    arn = _app_policy_arn(account)
+    if not _managed_policy_exists(iam, arn):
+        return
+    # 비기본 버전을 먼저 지워야 정책이 지워진다(기본 버전은 정책과 함께 사라진다)
+    for version in iam.list_policy_versions(PolicyArn=arn)["Versions"]:
+        if not version["IsDefaultVersion"]:
+            iam.delete_policy_version(PolicyArn=arn, VersionId=version["VersionId"])
+    iam.delete_policy(PolicyArn=arn)
+    print(f"[smoke] IAM 관리형 정책 {APP_POLICY} 삭제")
+
+
+def down(clients: dict, account: str) -> None:
     ec2, elbv2, asg = clients["ec2"], clients["elbv2"], clients["asg"]
     vpc_id = _find_vpc(ec2)
     if vpc_id:
@@ -914,6 +983,7 @@ def down(clients: dict) -> None:
         ec2.delete_volume(VolumeId=vol_id)
         print(f"[smoke] EBS {vol_id} 삭제")
     _delete_app_user(clients["iam"])
+    _delete_app_policy(clients["iam"], account)
     # Budget은 남긴다 — 정리 뒤 남은 과금을 월말까지 잡는 그물이다. 서비스 연결 역할도 무료라 둔다.
     print(f"[smoke] Budget {BUDGET_NAME}은 남겼다 — 월말 청구 확인 뒤 콘솔에서 지운다")
     print("[smoke] 정리 끝 — status로 잔여 0건을 확인할 것")
@@ -966,7 +1036,7 @@ def main() -> None:
             print("[smoke] 삭제 대상(스모크 태그 자원 + 스모크 VPC 안 전부) — 실제로 지우려면 --yes")
             _print_rows([row for row in inventory(clients, args.account) if row[2]])
             return
-        down(clients)
+        down(clients, args.account)
 
 
 if __name__ == "__main__":
