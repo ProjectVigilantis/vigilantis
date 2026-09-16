@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 580" width="920" height="580" font-family="Malgun Gothic, Apple SD Gothic Neo, sans-serif">
+  <rect width="920" height="580" fill="#FFFFFF"/>
+
+  <!-- 관제자 -->
+  <rect x="360" y="20" width="200" height="48" rx="6" fill="#1B3A5C"/>
+  <text x="460" y="50" text-anchor="middle" font-size="16" font-weight="bold" fill="#FFFFFF">관제자 (브라우저)</text>
+
+  <!-- apps/web -->
+  <rect x="280" y="108" width="360" height="72" rx="6" fill="#EEF3F8" stroke="#4A6FA5" stroke-width="2"/>
+  <text x="460" y="132" text-anchor="middle" font-size="13" font-weight="bold" fill="#4A6FA5">apps/web — Next.js 16</text>
+  <text x="460" y="158" text-anchor="middle" font-size="14" fill="#1A2733">대시보드 · 인시던트 · 토폴로지</text>
+
+  <!-- core-api -->
+  <rect x="120" y="230" width="680" height="200" rx="8" fill="#F7FAFD" stroke="#1B3A5C" stroke-width="2.5"/>
+  <text x="460" y="258" text-anchor="middle" font-size="14" font-weight="bold" fill="#1B3A5C">apps/core-api — 단일 FastAPI 백엔드</text>
+
+  <rect x="145" y="278" width="150" height="128" rx="5" fill="#FFFFFF" stroke="#8FA8C4" stroke-width="1.5"/>
+  <text x="220" y="304" text-anchor="middle" font-size="14" font-weight="bold" fill="#1B3A5C">routers</text>
+  <text x="220" y="330" text-anchor="middle" font-size="12" fill="#43566B">REST · WebSocket</text>
+
+  <rect x="311" y="278" width="150" height="128" rx="5" fill="#FFFFFF" stroke="#8FA8C4" stroke-width="1.5"/>
+  <text x="386" y="304" text-anchor="middle" font-size="14" font-weight="bold" fill="#1B3A5C">services</text>
+  <text x="386" y="328" text-anchor="middle" font-size="12" fill="#43566B">collector</text>
+  <text x="386" y="348" text-anchor="middle" font-size="12" fill="#43566B">rule_engine</text>
+  <text x="386" y="368" text-anchor="middle" font-size="12" fill="#43566B">scheduler</text>
+
+  <rect x="477" y="278" width="150" height="128" rx="5" fill="#FFFFFF" stroke="#C48A2E" stroke-width="2"/>
+  <text x="552" y="304" text-anchor="middle" font-size="14" font-weight="bold" fill="#8A5E12">ai</text>
+  <text x="552" y="328" text-anchor="middle" font-size="12" fill="#43566B">LangGraph 2그래프</text>
+  <text x="552" y="350" text-anchor="middle" font-size="12" font-weight="bold" fill="#8A5E12">가드레일 4단계</text>
+
+  <rect x="643" y="278" width="132" height="128" rx="5" fill="#FFFFFF" stroke="#8FA8C4" stroke-width="1.5"/>
+  <text x="709" y="304" text-anchor="middle" font-size="13" font-weight="bold" fill="#1B3A5C">services/aws</text>
+  <text x="709" y="328" text-anchor="middle" font-size="12" fill="#43566B">executor</text>
+  <text x="709" y="348" text-anchor="middle" font-size="12" fill="#43566B">backup</text>
+  <text x="709" y="368" text-anchor="middle" font-size="12" fill="#43566B">rollback</text>
+
+  <!-- DB / AWS -->
+  <rect x="180" y="500" width="220" height="60" rx="6" fill="#EEF3F8" stroke="#4A6FA5" stroke-width="2"/>
+  <text x="290" y="536" text-anchor="middle" font-size="15" font-weight="bold" fill="#1B3A5C">PostgreSQL</text>
+
+  <rect x="520" y="500" width="240" height="60" rx="6" fill="#EEF3F8" stroke="#4A6FA5" stroke-width="2"/>
+  <text x="640" y="528" text-anchor="middle" font-size="15" font-weight="bold" fill="#1B3A5C">AWS</text>
+  <text x="640" y="548" text-anchor="middle" font-size="12" fill="#43566B">LocalStack / 실 AWS</text>
+
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#4A6FA5"/>
+    </marker>
+  </defs>
+  <g stroke="#4A6FA5" stroke-width="2" fill="none" marker-end="url(#a)">
+    <path d="M460,68 L460,104"/>
+    <path d="M460,180 L460,226" />
+    <path d="M220,406 L220,496"/>
+    <path d="M386,406 L290,496"/>
+    <path d="M552,406 L620,496"/>
+    <path d="M709,406 L680,496"/>
+    <path d="M386,342 L473,342"/>
+    <path d="M295,342 L307,342"/>
+    <path d="M627,342 L639,342"/>
+  </g>
+  <text x="470" y="200" text-anchor="middle" font-size="12" fill="#43566B">REST · WebSocket</text>
+  <text x="430" y="336" text-anchor="middle" font-size="11" fill="#43566B">판정 → Incident</text>
+  <text x="633" y="336" text-anchor="middle" font-size="11" fill="#43566B">가드레일 PASS</text>
+</svg>

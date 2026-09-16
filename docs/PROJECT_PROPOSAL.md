@@ -363,9 +363,13 @@
 ### 3.1 구성도
 
 > **출처** — ADR-0001(단일 FastAPI 백엔드·모노레포) · SSOT §MVP 확정 범위 아키텍처 절
+
+![Vigilantis 시스템 구성도](img/architecture.svg)
+
 <!--
-TODO: 제출용 변환본(Word)에서는 mermaid가 렌더되지 않는다 — 이미지로 바꿔 넣는다
--->
+구성도 원본(mermaid). 위 SVG는 이 그래프를 손으로 옮긴 것이다 —
+Confluence·Word 어디서도 mermaid가 렌더되지 않아 이미지를 본문에 둔다.
+구조가 바뀌면 아래를 고치고 docs/img/architecture.svg 를 함께 고친다.
 
 ```mermaid
 flowchart TB
@@ -395,6 +399,7 @@ flowchart TB
     A <--> DB
     X <--> DB
 ```
+-->
 
 **조치 한 건이 지나는 경로는 하나다.**
 
