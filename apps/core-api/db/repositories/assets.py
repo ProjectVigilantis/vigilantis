@@ -630,7 +630,15 @@ def find_dangling_arns(db: Session) -> list[DanglingArn]:
             _add(KIND_EXECUTION_INTEGRITY, arn, f"{model.__tablename__}.{column}")
 
     # ⑥ 리전 불일치 — 매달림과 별개 종류다(#353 리뷰: 안성일).
-    for arn, region in db.execute(select(models.Asset.arn, models.Asset.region)):
+    #    소멸 표시된 자산은 보지 않는다(#353 nit 3: 김세혁). #261 이 말하는 해(리전 필터에서
+    #    새거나 빠진다)는 살아 있는 자산에서만 생기고 — `list_assets` 가 소멸분을 기본
+    #    제외하며 판정이 그 목록을 쓴다 — 다시 관측되면 `upsert_asset` 이 region 과
+    #    absent_since 를 함께 다시 쓴다. 남겨 두면 고칠 수도, 사라지지도 않는 경고가
+    #    매 회차 반복되며 새 어긋남을 덮는다.
+    live_assets = select(models.Asset.arn, models.Asset.region).where(
+        models.Asset.absent_since.is_(None)
+    )
+    for arn, region in db.execute(live_assets):
         if arn_region(arn) != region:
             _add(KIND_REGION_MISMATCH, arn, "assets.region", detail=f"region={region}")
 

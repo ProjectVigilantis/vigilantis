@@ -282,6 +282,21 @@ def test_region_mismatch_is_its_own_kind(db):
     assert assets_repo.KIND_REGION_MISMATCH in assets_repo.INVESTIGATE_KINDS
 
 
+def test_region_mismatch_skips_assets_marked_absent(db):
+    """소멸 표시된 자산의 리전 불일치는 올리지 않는다(#353 nit 3: 김세혁).
+
+    #261 이 말하는 해는 살아 있는 자산에서만 생기고(`list_assets` 가 소멸분을 기본
+    제외하며 판정이 그 목록을 쓴다), 다시 관측되면 `upsert_asset` 이 region 과
+    absent_since 를 함께 다시 쓴다. 남겨 두면 고칠 수도 사라지지도 않는 경고가 된다.
+    """
+    asset = _asset(db, "arn:aws:ec2:us-east-1:1:instance/i-gone-bad", "ap-northeast-2")
+    assert _of_kind(assets_repo.find_dangling_arns(db), assets_repo.KIND_REGION_MISMATCH)
+
+    asset.absent_since = NOW
+    db.flush()
+    assert _of_kind(assets_repo.find_dangling_arns(db), assets_repo.KIND_REGION_MISMATCH) == []
+
+
 def test_optional_types_match_the_collector_map():
     """미관측 판정에 쓰는 유형 집합이 수집기의 지도와 어긋나지 않는다.
 
