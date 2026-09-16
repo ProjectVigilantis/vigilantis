@@ -5,10 +5,12 @@
 두 조회는 이 표를 **전부 정렬** 하고 첫 행만 썼다.
 
 - latest_collection_run_per_region — DISTINCT ON (region) ORDER BY started_at DESC.
-  ix_collection_runs_started_at 은 region 이 앞에 없어 정렬을 대신하지 못했다.
-  그 옛 인덱스는 **여기서 지운다** — 남겨 두면 플래너가 그쪽을 최신순으로 훑다가 리전
-  필터로 수천 행을 버리는 경쟁 경로가 된다(PR #344 리뷰: 이력 없는 리전 17,280행 ·
-  31일 묵은 리전 8,640행 폐기). 운영 코드에 started_at 단독으로 정렬·범위 조회하는
+  ix_collection_runs_started_at 은 region 이 앞에 없지만, PostgreSQL 16 은 Incremental
+  Sort 로 (started_at, id) 정렬을 만들어 낸다 — 정렬을 못 대신하는 게 아니라, 플래너가
+  그쪽을 최신순으로 훑다가 리전 조건을 뒤늦게 필터로 거르는 경쟁 경로가 되는 것이다.
+  그 옛 인덱스는 **여기서 지운다** — 남겨 두면 복합 인덱스가 한 층 깊어지는 60–180일치에서
+  이력 없는·묵은 리전을 함께 물을 때 다른 리전 행을 전부 읽고 버린다(PR #344 리뷰:
+  180일치 이력 없는 리전 103,683행 폐기). 운영 코드에 started_at 단독으로 정렬·범위 조회하는
   문장은 없다. 새 인덱스의 세 번째 키 collection_run_id 는 동시각 tie-break 다.
 - latest_rule_evaluation_by_asset — DISTINCT ON (asset_id) ORDER BY evaluated_at DESC.
   (asset_id, collection_run_id) 유니크 인덱스는 evaluated_at 순서를 모른다.

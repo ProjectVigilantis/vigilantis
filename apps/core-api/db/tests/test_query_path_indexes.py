@@ -218,8 +218,9 @@ def test_latest_queries_touch_one_row_per_region_and_asset(db):
     assert _rows_touched(_plan(db, assets_repo.latest_rule_evaluation_by_asset_stmt()), "rule_evaluations") == 2
 
 
-def _seven_days_of_runs(db, regions: dict[str, str]):
-    """7일치(리전당 2,016행)를 generate_series 로 넣는다. ``regions`` 는 리전 → 과거로 미는 간격."""
+def _days_of_runs(db, regions: dict[str, str], days: int):
+    """``days`` 일치(리전당 days×288행, 5분 간격)를 generate_series 로 넣는다.
+    ``regions`` 는 리전 → 과거로 미는 간격."""
     values = ", ".join(f"('{r}', INTERVAL '{back}')" for r, back in regions.items())
     db.execute(
         text(
@@ -228,10 +229,11 @@ def _seven_days_of_runs(db, regions: dict[str, str]):
                                          lookback_days, period_seconds, started_at)
             SELECT gen_random_uuid(), CAST(:st AS collection_run_status), '1', v.r, 'aws', 14, 3600,
                    CAST(:now AS timestamptz) - v.back - i * INTERVAL '5 min'
-            FROM generate_series(0, 2015) i, (VALUES {values}) v(r, back)
+            FROM generate_series(0, :cap) i, (VALUES {values}) v(r, back)
+            ORDER BY i DESC
             """
         ),
-        {"st": CollectionRunStatus.SUCCESS.value, "now": NOW},
+        {"st": CollectionRunStatus.SUCCESS.value, "now": NOW, "cap": days * 288 - 1},
     )
     db.execute(text("ANALYZE collection_runs"))
 
@@ -252,13 +254,13 @@ def test_unseen_region_filters_by_index_at_seven_day_scale(db):
     설정 기본값). started_at 단독 인덱스가 남아 있던 상태에서는 loop 당 1,344행을 버리며
     실패한다 — 묵은 리전 행을 섞어 넣으면 통계가 달라져 그 상태에서도 통과해 버리므로
     데이터는 이 둘뿐이어야 한다."""
-    _seven_days_of_runs(db, {"fresh-a": "0", "fresh-b": "0"})
+    _days_of_runs(db, {"fresh-a": "0", "fresh-b": "0"}, 7)
     _assert_region_is_an_index_condition(db, ["fresh-a", "fresh-b", "never-collected"])
 
 
 def test_stale_region_filters_by_index_and_returns_its_own_latest(db):
     """31일 묵은 리전을 물어도 다른 리전 행을 읽고 버리지 않고, 그 리전의 최신값을 돌려준다."""
-    _seven_days_of_runs(db, {"fresh-a": "0", "stale": "31 days"})
+    _days_of_runs(db, {"fresh-a": "0", "stale": "31 days"}, 7)
     regions = ["fresh-a", "stale", "never-collected"]
     _assert_region_is_an_index_condition(db, regions)
 
@@ -266,3 +268,19 @@ def test_stale_region_filters_by_index_and_returns_its_own_latest(db):
     assert set(got) == {"fresh-a", "stale"}
     assert got["fresh-a"].started_at == NOW
     assert got["stale"].started_at == NOW - timedelta(days=31)
+
+
+def test_unseen_region_filters_by_index_at_180_day_scale(db):
+    """옛 인덱스를 지운 상태에서, 규모가 커져도 리전 조건이 **인덱스 조건**으로 걸린다
+    (버리는 행 0). 복합 인덱스가 한 층 깊어지는 60일치부터 옛 started_at 단독 인덱스가
+    경쟁에서 이기고 365일치에서 다시 뒤집히는 창(60–180일)의 상단인 180일치(리전당 51,840행)
+    로 본다 — 옛 인덱스를 재도입하면 이 규모에서 플래너가 그쪽을 골라 이력 없는 리전당
+    수만 행(180일치 103,683행)을 버린다(단독 실행 실측 · PR #344 리뷰: 김세혁이 제안한 회귀).
+
+    ⚠️ 이 plan-choice 검증은 **실행 순서에 의존한다** — savepoint 픽스처에서 앞선 테스트의
+    ANALYZE 가 pg_class 통계를 in-place 로 남겨(롤백돼도 persist) 플래너 추정이 흔들린다.
+    그래서 옛 인덱스 재도입을 **확정적으로** 막는 것은 이 테스트가 아니라 구조 가드
+    test_started_at_only_index_is_gone 다. 이 테스트는 제거 상태에서 규모가 커져도 정렬 없이
+    인덱스로 끝난다는 positive 보장을 맡는다(제거 상태에선 경쟁 후보가 없어 순서와 무관)."""
+    _days_of_runs(db, {"fresh-a": "0", "fresh-b": "0"}, 180)
+    _assert_region_is_an_index_condition(db, ["fresh-a", "fresh-b", "never-collected"])
