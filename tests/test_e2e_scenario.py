@@ -281,5 +281,5 @@ def test_finops_incident_carries_no_risk_fields():
 #
 # **이 파일이 그 흐름에 대해 계속 갖는 몫**은 ① 층이다 — 어느 골든 케이스를 쓰는지,
 # 어느 런북이 짝인지, 쓰지 않기로 한 케이스는 무엇인지(`test_t2_must_not_use_the_open_ip_case`).
-# 흐름 테스트는 그 전제를 다시 확인하지 않고 **상태 전이만** 본다. 경계 실사는
-# `docs/E2E_GATE_0911.md`.
+# 흐름 테스트는 그 전제를 다시 확인하지 않고 **상태 전이만** 본다. 실경로/대체 컷
+# 경계는 `docs/E2E_DEMO_SCENARIOS.md`.
