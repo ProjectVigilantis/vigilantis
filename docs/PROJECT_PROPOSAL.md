@@ -536,7 +536,6 @@ flowchart TB
 | 저장소 | [ProjectVigilantis/vigilantis](https://github.com/ProjectVigilantis/vigilantis) |
 | 설계 결정 8건 | [`docs/adr/`](adr/) — ADR-0001 ~ 0008 |
 | 시연 대본 | [`docs/E2E_DEMO_SCENARIOS.md`](E2E_DEMO_SCENARIOS.md) |
-| 게이트 판정서 | [`docs/E2E_GATE_0911.md`](E2E_GATE_0911.md) |
 | 팀 협업 규약 | [`CLAUDE.md`](../CLAUDE.md) — 브랜치·커밋·PR·리뷰·SSOT 운영 |
 | 정답지 | `datasets/golden/` |
 | 공통 스키마 | `packages/schemas/` |
