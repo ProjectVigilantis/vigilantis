@@ -233,7 +233,7 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 | 6 | 해제 후보 | 같은 주기의 해제 제안(#329) | `RUNBOOK_NACL_RESTORE`(규칙 100 · 인바운드) `EXECUTABLE` · 가드레일 `PASS` → `AWAITING_APPROVAL` |
 | 7–8 | **[조치 실행] ②** | 관제자 | `202` → 해제 `SUCCESS` · NACL 커스텀 규칙 0건 · Incident `AWAITING_CLOSURE` |
 
-**재는 방식의 한계** — 앱을 띄워 타이머에 맡긴 것이 아니라, 타이머가 부르는 함수(`MockThreatConsumer.consume_once` · agent dispatcher의 건별 처리 · `dispatcher.run_dispatch_cycle`)를 **같은 순서로 직접** 불렀고, HTTP는 같은 라우터를 `TestClient`로 탔다. 확인한 것은 **경로가 끝까지 이어진다**는 것이며, 타이머 기동은 게이트 판정서 [`E2E_GATE_0911.md`](E2E_GATE_0911.md) §2-⑥·⑦의 기동 로그가 보인다. AI 분석은 대상 Incident 1건만 골라 불렀다(수집이 함께 만든 FINOPS Incident는 분석하지 않았다 — 모델 호출 비용). 모델 호출 없이 분석 결과를 주입해 dev `77d5cae`에서 한 번 더 돌렸고 같은 전이가 나왔다.
+**재는 방식의 한계** — 앱을 띄워 타이머에 맡긴 것이 아니라, 타이머가 부르는 함수(`MockThreatConsumer.consume_once` · agent dispatcher의 건별 처리 · `dispatcher.run_dispatch_cycle`)를 **같은 순서로 직접** 불렀고, HTTP는 같은 라우터를 `TestClient`로 탔다. 확인한 것은 **경로가 끝까지 이어진다**는 것이며, 타이머 기동은 9/11 게이트에서 **앱을 실제로 띄워** 확인했다 — 그 기록이던 게이트 판정서는 **2026-09-16 저장소에서 삭제됐고**(PR #355) 내용은 git 이력에만 있다(`git show 60f329f:docs/E2E_GATE_0911.md` §2-⑥·⑦의 기동 로그). AI 분석은 대상 Incident 1건만 골라 불렀다(수집이 함께 만든 FINOPS Incident는 분석하지 않았다 — 모델 호출 비용). 모델 호출 없이 분석 결과를 주입해 dev `77d5cae`에서 한 번 더 돌렸고 같은 전이가 나왔다.
 
 ## 1차 시연에서 빼는 것과 그 이유
 

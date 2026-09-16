@@ -61,8 +61,8 @@
 # (`vigilantis-seed-idle`)의 것으로 바꿔 적재한다. 이름·타입·메트릭·태그는 골든 그대로라
 # 화면도 판정도 골든이다 — 바뀌는 것은 "이 자산이 AWS에서 누구인가" 하나다.
 #
-# 왜 필요한가: 9/11 게이트 T1은 자산 화면과 인시던트를 **골든 A1로 고정**하면서
-#   (`docs/E2E_GATE_0911.md` §1-2) 6번에서 **실제 인스턴스 타입 변경**을 요구한다(§3-1).
+# 왜 필요한가: 시연 T1은 자산 화면과 인시던트를 **골든 A1로 고정**한 채
+#   **실제 인스턴스 타입 변경**까지 요구한다(설계서 `docs/E2E_DEMO_SCENARIOS.md` §T1 단계표).
 #   그런데 골든 A1은 LocalStack에 없다 — 실행 1단계 `stop_instances`가
 #   `InvalidInstanceID.NotFound`로 즉사한다(`services/aws/executor.py`의
 #   `execute_rightsizing` ①).
@@ -75,8 +75,8 @@
 #   실재하는가"를 보증하지 않는다. 이 격차는 `docs/adr/0006` §4 **8행**으로 이월했고,
 #   실 AWS 스모크에서 존재하지 않는 ID로 1회 재는 것이 해소 조건이다.
 #
-# 대상이 `vigilantis-seed-idle`인 이유: 타입이 **t3.xlarge로 골든 A1과 같다.** 판정서 R6의
-#   `t3.xlarge → t3.small`이 문구 그대로 성립한다. 시드 쪽 `Environment=production` 태그는
+# 대상이 `vigilantis-seed-idle`인 이유: 타입이 **t3.xlarge로 골든 A1과 같다.** T1의
+#   `t3.xlarge → t3.small` 컷이 문구 그대로 성립한다. 시드 쪽 `Environment=production` 태그는
 #   적재되지 않으므로(태그도 골든 것을 쓴다) `SKIP_PROD_PROTECTED`로 흡수되지 않는다.
 #
 # ⚠️ 적재 뒤 스캔이 돌면 같은 ARN이 **시드 spec으로 덮여** 판정이 뒤집힌다. 대본이
