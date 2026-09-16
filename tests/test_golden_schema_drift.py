@@ -73,8 +73,8 @@ def test_hand_written_header_keeps_its_values(target):
     바꿔도 위 테스트는 PASS 했다). **값을 잠그는 것은 이 테스트 하나뿐이다.**
 
     x-source-model 은 이 JSON 이 어느 모델의 추출본인지 말하는 유일한 자리다.
-    $schema 는 pydantic v2 가 정하는 사실이고, 값이 바뀌면 편집기 검증이 다른
-    규칙으로 돈다. x-note 는 존재만 확인하고 사람이 쓴 설명을 보존한다.
+    저장본의 $schema 는 Pydantic 생성기가 선언한 dialect 와 대조한다. 값이
+    바뀌면 편집기 검증이 다른 규칙으로 돈다. x-note 는 존재만 확인하고 보존한다.
     """
     stored = json.loads(target.path.read_text(encoding="utf-8"))
 
@@ -89,7 +89,7 @@ def test_hand_written_header_keeps_its_values(target):
         f"  실제  : {target.source_model}"
     )
     assert stored["$schema"] == JSON_SCHEMA_DRAFT, (
-        f"$schema draft 가 pydantic v2 출력과 다르다 — {target.rel}\n"
+        f"$schema draft 가 Pydantic 생성기의 dialect 와 다르다 — {target.rel}\n"
         f"  저장본: {stored['$schema']}\n"
         f"  실제  : {JSON_SCHEMA_DRAFT}"
     )

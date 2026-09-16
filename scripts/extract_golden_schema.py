@@ -35,9 +35,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 for _path in (ROOT / "packages",):
@@ -45,7 +45,7 @@ for _path in (ROOT / "packages",):
         sys.path.insert(0, str(_path))
 
 from pydantic import TypeAdapter  # noqa: E402
-
+from pydantic.json_schema import GenerateJsonSchema  # noqa: E402
 from schemas.assets import AssetInventory  # noqa: E402
 from schemas.events import MockThreatEventInput  # noqa: E402
 
@@ -54,8 +54,8 @@ SCHEMA_DIR = ROOT / "datasets" / "golden" / "schema"
 # 모델에서 파생되지 않는 키 — 순서도 저장본 그대로 유지한다(diff 를 순수 추가로 둔다)
 HAND_WRITTEN_KEYS = ("$schema", "x-source-model", "x-note")
 
-# pydantic v2 가 뽑는 스키마의 draft. 사람의 의견이 아니라 추출기가 정하는 사실이다
-JSON_SCHEMA_DRAFT = "https://json-schema.org/draft/2020-12/schema"
+# 생성 결과에는 $schema 키가 없으므로 생성기가 선언한 dialect 를 기대값으로 쓴다.
+JSON_SCHEMA_DRAFT = GenerateJsonSchema.schema_dialect
 
 REEXTRACT_COMMAND = "uv run python scripts/extract_golden_schema.py"
 
