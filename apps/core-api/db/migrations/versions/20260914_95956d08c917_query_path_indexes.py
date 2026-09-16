@@ -29,7 +29,7 @@ incidents 의 (status, created_at)·(category, created_at) 복합 인덱스는 �
 이득이 없어(3,000건 · 정렬 0.3ms) 넣지 않았다 — 목록 API 는 페이지네이션 없이 전 행을
 돌려주는 것이 비용의 전부라 인덱스 문제가 아니다.
 
-인덱스만 더한다. 데이터·제약은 바뀌지 않는다.
+인덱스 3개를 더하고 옛 ix_collection_runs_started_at 하나를 지운다. 데이터·제약은 바뀌지 않는다.
 
 Revision ID: 95956d08c917
 Revises: b5e2d7a4c19f

@@ -249,11 +249,16 @@ def _assert_region_is_an_index_condition(db, regions):
 
 def test_unseen_region_filters_by_index_at_seven_day_scale(db):
     """신선한 리전 둘에 이력 없는 리전을 함께 물어도 리전 조건이 **인덱스 조건**으로 걸린다
-    (필터로 버리는 행 0). 80행 규모에서는 플래너가 어차피 복합 인덱스를 골라 구분이 안 되고
-    7일치부터 갈린다 — PR #344 리뷰(김세혁)의 재현 조건 그대로(리전 둘 다 신선, 플래너
-    설정 기본값). started_at 단독 인덱스가 남아 있던 상태에서는 loop 당 1,344행을 버리며
-    실패한다 — 묵은 리전 행을 섞어 넣으면 통계가 달라져 그 상태에서도 통과해 버리므로
-    데이터는 이 둘뿐이어야 한다."""
+    (필터로 버리는 행 0). 작은 규모의 positive 보장이다 — 80행에서도 7일치(리전당 2,016행)
+    에서도 플래너는 복합 인덱스를 고른다. 재현 조건은 PR #344 리뷰 그대로다(리전 둘 다 신선,
+    플래너 설정 기본값). 묵은 리전은 바로 아래
+    test_stale_region_filters_by_index_and_returns_its_own_latest 가 따로 본다.
+
+    ⚠️ 이 테스트는 옛 started_at 단독 인덱스를 되살려도 통과한다 — tie-break 키가 들어온
+    뒤로는 이 규모에서 플래너가 복합 인덱스를 고르기 때문이다(저자 실측 049a7be PASSED ·
+    PR #344 리뷰 재현 7·30일치 복합 / 60일치부터 옛 인덱스 — 갈리는 규모는 환경·통계에
+    따라 다르다). 재도입을 막는 확정적 방어는 구조 가드 test_started_at_only_index_is_gone
+    이며, 180일치 회귀는 실행 순서에 의존한다(그 테스트 설명 참조)."""
     _days_of_runs(db, {"fresh-a": "0", "fresh-b": "0"}, 7)
     _assert_region_is_an_index_condition(db, ["fresh-a", "fresh-b", "never-collected"])
 
