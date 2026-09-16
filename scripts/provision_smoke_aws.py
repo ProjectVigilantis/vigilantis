@@ -70,6 +70,11 @@ PREFIX = "vigilantis-smoke"
 INIT_TAG_KEY = "vigilantis:smoke-init"
 INIT_PENDING = "pending"
 INIT_DONE = "done"
+# 자원이 맡은 자리를 판정 규칙에 알리는 표지. 격리용 SG는 격리 전까지 어디에도 붙지 않아
+# evaluate_sg가 UNUSED(삭제 후보)로 보는데, 이름·규칙 수로 가리는 것은 추정이라 태그로 가둔다.
+# 값의 뜻(어느 role을 판정에서 빼는가)은 규칙 쪽이 정한다 — 여기는 자리만 선언한다(#348 리뷰).
+ROLE_TAG_KEY = "vigilantis:role"
+ROLE_ISOLATION = "isolation"
 
 VPC_NAME = f"{PREFIX}-vpc"
 VPC_CIDR = "10.42.0.0/16"  # 기본 VPC(172.31.0.0/16)와 겹치지 않게
@@ -105,7 +110,8 @@ class InstanceSpec:
 
 INSTANCES = (
     # EC2_ISOLATE 대상 · NACL_ADD_DENY가 겨누는 서브넷 · OpenIP 위협 SG.
-    # production이라 비용 판정은 SKIP_PROD_PROTECTED — 보호 규칙도 실 AWS에서 함께 본다.
+    # production이라 비용 판정은 관측치가 찬 뒤 SKIP_PROD_PROTECTED — evaluate_ec2는 관측치
+    # 검사가 prod 검사보다 앞이라 기동 후 MIN_DATAPOINTS시간은 SKIP_INSUFFICIENT_DATA다.
     InstanceSpec(f"{PREFIX}-web-1", WEB_TYPE, "a", (SG_WEB, SG_OPEN_SSH), "production", True),
     # 격리 뒤에도 Target Group을 잇는 두 번째 대상 — "다중 EC2"의 자리
     InstanceSpec(f"{PREFIX}-web-2", WEB_TYPE, "c", (SG_WEB,), "production", True),
@@ -287,19 +293,35 @@ def _code(exc: ClientError) -> str:
     return exc.response.get("Error", {}).get("Code", "")
 
 
-def _tags(name: str, environment: Optional[str] = None, *, pending: bool = False) -> list[dict]:
+def _tags(
+    name: str,
+    environment: Optional[str] = None,
+    *,
+    pending: bool = False,
+    role: Optional[str] = None,
+) -> list[dict]:
     tags = [{"Key": "Name", "Value": name}, {"Key": SMOKE_TAG_KEY, "Value": SMOKE_TAG_VALUE}]
     if environment:
         tags.append({"Key": "Environment", "Value": environment})
     if pending:
         tags.append({"Key": INIT_TAG_KEY, "Value": INIT_PENDING})
+    if role:
+        tags.append({"Key": ROLE_TAG_KEY, "Value": role})
     return tags
 
 
 def _tag_spec(
-    resource_type: str, name: str, environment: Optional[str] = None, *, pending: bool = False
+    resource_type: str,
+    name: str,
+    environment: Optional[str] = None,
+    *,
+    pending: bool = False,
+    role: Optional[str] = None,
 ) -> list[dict]:
-    return [{"ResourceType": resource_type, "Tags": _tags(name, environment, pending=pending)}]
+    return [{
+        "ResourceType": resource_type,
+        "Tags": _tags(name, environment, pending=pending, role=role),
+    }]
 
 
 def _vpc_filter(vpc_id: str) -> dict:
@@ -498,14 +520,16 @@ def status(clients: dict, account: str) -> None:
     vpc_id = _find_vpc(ec2)
     if vpc_id:
         print("[smoke] 인스턴스 상태")
+        # 첫 판정 가능 시각은 세 대 공통이다 — evaluate_ec2는 관측치 검사가 prod 검사보다
+        # 앞이라, 그 전에는 idle-dev의 RIGHTSIZING도 web-1·web-2의 SKIP_PROD_PROTECTED도
+        # 보이지 않고 셋 다 SKIP_INSUFFICIENT_DATA다.
         for name, inst in sorted(_find_instances(ec2, vpc_id).items()):
             print(f"  {name:<28} {inst['InstanceType']:<10} {inst['State']['Name']:<9} 기동 {inst['LaunchTime']:%m/%d %H:%M}")
-            if name == f"{PREFIX}-idle-dev":
-                ready = inst["LaunchTime"] + timedelta(hours=MIN_DATAPOINTS)
-                print(
-                    f"  └ 첫 판정 가능 ≈ {ready:%m/%d %H:%M} (최초 기동 + MIN_DATAPOINTS {MIN_DATAPOINTS}시간 — "
-                    "재시작하면 기동 시각은 바뀌어도 관측치는 이어진다)"
-                )
+            ready = inst["LaunchTime"] + timedelta(hours=MIN_DATAPOINTS)
+            print(
+                f"  └ 첫 판정 가능 ≈ {ready:%m/%d %H:%M} (최초 기동 + MIN_DATAPOINTS {MIN_DATAPOINTS}시간 — "
+                "그 전에는 SKIP_INSUFFICIENT_DATA. 재시작하면 기동 시각은 바뀌어도 관측치는 이어진다)"
+            )
         tg = _find_target_group(elbv2)
         if tg:
             health = elbv2.describe_target_health(TargetGroupArn=tg["TargetGroupArn"])
@@ -581,16 +605,17 @@ def _ensure_security_groups(ec2, vpc_id: str) -> dict[str, str]:
     for name in SECURITY_GROUPS:
         if name in groups:
             continue
+        role = ROLE_ISOLATION if name == SG_ISOLATION else None
         group_id = ec2.create_security_group(
             GroupName=name,
             Description=f"vigilantis smoke: {name}",
             VpcId=vpc_id,
-            TagSpecifications=_tag_spec("security-group", name, pending=True),
+            TagSpecifications=_tag_spec("security-group", name, pending=True, role=role),
         )["GroupId"]
         # 갓 만든 그룹의 상태는 AWS 기본값(기본 egress 1개)이다 — 다시 조회하지 않는다
         groups[name] = {
             "GroupId": group_id,
-            "Tags": _tags(name, pending=True),
+            "Tags": _tags(name, pending=True, role=role),
             "IpPermissions": [],
             "IpPermissionsEgress": [_DEFAULT_EGRESS],
         }

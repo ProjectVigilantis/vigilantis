@@ -55,7 +55,12 @@ VPC_ID = "vpc-0123456789abcdef0"  # 실 VPC ID와 같은 길이(17자리 16진) 
 POLICY = smoke.build_app_policy(ACCOUNT, REGION, VPC_ID)
 
 # boto3 클라이언트 이름 → IAM 서비스 접두
-_IAM_SERVICE = {"ec2": "ec2", "elbv2": "elasticloadbalancing", "autoscaling": "autoscaling"}
+_IAM_SERVICE = {
+    "ec2": "ec2",
+    "elbv2": "elasticloadbalancing",
+    "autoscaling": "autoscaling",
+    "cloudwatch": "cloudwatch",
+}
 
 
 def _iam_action(operation: str) -> str:
@@ -97,6 +102,44 @@ def test_policy_grants_no_change_the_code_does_not_make():
     needed = {_iam_action(op) for op in _code_operations()}
     extra = sorted(a for a in _granted() if a not in smoke.READ_ACTIONS and a not in needed)
     assert not extra, f"코드가 부르지 않는 조치 권한: {extra}"
+
+
+# 조회 쪽 거울. READ_ACTIONS는 손으로 적은 목록이고 바로 위 ②방향 테스트가 그것을 통째로 제외하므로,
+# 수집기가 Describe* 밖의 조회를 더하면 정책이 그대로여도 초록불이다. 조치 쪽보다 더 조용히 새는데,
+# 수집기는 autoscaling·elbv2·launch template 조회를 _safe_describe로 감싸 AccessDenied까지 빈 목록
+# + collector_failures로 강등하고 회차를 PARTIAL로 마감하기 때문이다(ADR-0006 §4, C4) — LocalStack
+# 에서 늘 보던 PARTIAL과 겉모습이 같다(#348 리뷰). 실행·원복·백업의 조회는 RUNBOOK_SPECS와 _OP_*
+# 상수가 이미 위 두 방향으로 비춘다.
+_COLLECTOR = REPO_ROOT / "apps" / "core-api" / "services" / "collector.py"
+
+
+def _collector_clients(source: str) -> dict[str, str]:
+    """수집기가 만드는 클라이언트 변수 → boto3 서비스. 변수 이름을 여기 박지 않고 소스에서 읽는다
+    — 박아 두면 수집기가 이름을 바꿨을 때 찾는 호출이 조용히 줄어든다."""
+    clients = dict(re.findall(r'(\w+) = aws_client\("([a-z0-9]+)"', source))
+    unknown = sorted({service for service in clients.values() if service not in _IAM_SERVICE})
+    assert not unknown, f"_IAM_SERVICE에 IAM 접두가 없는 수집기 클라이언트: {unknown}"
+    return clients
+
+
+def test_policy_grants_every_read_the_collector_makes():
+    source = _COLLECTOR.read_text(encoding="utf-8")
+    clients = _collector_clients(source)
+    assert clients, "수집기의 aws_client 대입을 하나도 못 찾았다 — 패턴이 코드와 어긋났다"
+    names = "|".join(sorted(clients))
+    patterns = (
+        rf"\b({names})\.(?!get_paginator\b)([a-z0-9_]+)\(",   # 직접 호출
+        rf'\b({names})\.get_paginator\("([a-z0-9_]+)"\)',     # 페이지네이터
+        rf'_paginate\(({names}), "([a-z0-9_]+)"',             # 공통 헬퍼
+    )
+    calls = {
+        _iam_action(f"{clients[variable]}.{operation}")
+        for pattern in patterns
+        for variable, operation in re.findall(pattern, source)
+    }
+    assert calls, "수집기 호출을 하나도 못 찾았다 — 패턴이 코드와 어긋났다"
+    missing = sorted(action for action in calls if not _is_granted(action))
+    assert not missing, f"앱 정책의 조회 권한에 없는 수집기 호출: {missing}"
 
 
 def test_every_change_statement_is_fenced():
@@ -361,6 +404,20 @@ def test_isolation_sg_whose_egress_revoke_failed_is_finished_on_rerun():
     assert isolation["IpPermissions"] == []
     assert isolation["IpPermissionsEgress"] == []
     assert all(_done(g) for g in ec2.groups.values())
+
+
+def test_isolation_sg_declares_its_role_for_the_rule_engine():
+    """격리용 SG는 격리 전까지 어디에도 붙지 않아 evaluate_sg가 곧장 UNUSED(삭제 후보)로 본다 —
+    EC2와 달리 관측치 게이트가 없어 첫 회차부터 unused SG와 나란히 올라온다. 이름이나 규칙 수로
+    가리는 것은 추정이라, 판정 규칙이 기댈 표지를 태그로 남긴다(#348 리뷰 · 규칙 쪽은 DATA 카드)."""
+    ec2 = FakeEc2()
+    ids = smoke._ensure_security_groups(ec2, VPC)
+    roles = {
+        name: smoke._tag_of(ec2.groups[group_id], smoke.ROLE_TAG_KEY)
+        for name, group_id in ids.items()
+    }
+    assert roles.pop(smoke.SG_ISOLATION) == smoke.ROLE_ISOLATION
+    assert set(roles.values()) == {None}, f"격리 SG 말고도 role이 붙었다: {roles}"
 
 
 def test_sg_left_pending_after_its_rule_landed_gets_no_duplicate_rule():
