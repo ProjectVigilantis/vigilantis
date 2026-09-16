@@ -83,6 +83,7 @@ def run_pipeline(publish: Callable[[WsEvent], None] | None = None) -> dict:
     """
     from sqlalchemy import text
 
+    from db.repositories import assets as assets_repo
     from db.session import get_engine, get_session_factory
     from services.collector import collect_and_store
     from services.rule_engine import run_rule_engine
@@ -144,7 +145,26 @@ def run_pipeline(publish: Callable[[WsEvent], None] | None = None) -> dict:
                     occurred_at=outcome.occurred_at,
                 ))
 
-        summary = {"stored": store, "verdicts": judged["counts"], "incidents": incidents}
+        # ARN 조인 무결성 점검 — 자산을 가리키는 키가 assets.arn 과 어긋나거나 자산 리전이
+        # 자기 ARN 과 다르면 건수를 회차 요약에 싣고 경고로 남긴다. FK 가 없어 DB 가 막지
+        # 못하는 어긋남의 조기 신호다 — 정합 실패로 스캔을 세우지는 않는다(경고만). (#342)
+        db = session_factory()
+        try:
+            dangling = assets_repo.find_dangling_arns(db)
+        finally:
+            db.close()
+        if dangling:
+            logger.warning(
+                "scan_dangling_arns",
+                extra={"count": len(dangling), "findings": [d._asdict() for d in dangling[:20]]},
+            )
+
+        summary = {
+            "stored": store,
+            "verdicts": judged["counts"],
+            "incidents": incidents,
+            "dangling_arns": len(dangling),
+        }
         logger.info("scan pipeline done: %s", summary)
         return summary
     finally:

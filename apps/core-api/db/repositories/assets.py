@@ -7,12 +7,13 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Collection, Optional, Sequence
+from typing import Collection, NamedTuple, Optional, Sequence
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from schemas.api.assets import AssetType, RelationType
+from schemas.arns import arn_region
 from schemas.assets import MetricSummary as MetricSummaryContract
 from schemas.collections import CollectionRunStatus
 from schemas.rules import RuleEvaluationResult
@@ -450,3 +451,54 @@ def latest_rule_evaluation_by_asset(db: Session) -> dict[str, models.RuleEvaluat
         )
     ).scalars()
     return {row.asset_id: row for row in rows}
+
+
+# --- ARN 조인 무결성 점검 (#342) ----------------------------------------------
+
+
+class DanglingArn(NamedTuple):
+    kind: str      # "dangling"(assets.arn 에 없음) | "region_mismatch"(자기 리전과 어긋남)
+    table: str
+    column: str
+    value: str
+
+
+# 자산을 가리키는 조인 키 7개 — 전부 FK 없는 ARN 문자열이라 어긋나도 DB 가 막지 않는다.
+# (모델, ARN 컬럼명). Incident·BackupRecord 는 자산이 사라져도 남는 기록이라 FK 를 붙이지
+# 않지만(#332 는 하드 삭제 대신 표시라 자산 행이 남는다), 어긋남 자체는 여기서 잡는다.
+_ARN_JOIN_KEYS: tuple[tuple[type, str], ...] = (
+    (models.AssetRelationship, "target_arn"),
+    (models.ThreatEvent, "target_arn"),
+    (models.Incident, "subject_arn"),
+    (models.RunbookCandidate, "target_arn"),
+    (models.ActionExecution, "target_arn"),
+    (models.ExecutionStep, "affected_arn"),
+    (models.BackupRecord, "target_arn"),
+)
+
+
+def find_dangling_arns(db: Session) -> list[DanglingArn]:
+    """자산 조인 무결성을 점검한다(#342). 두 가지를 함께 본다:
+
+    - **매달린 ARN**: 조인 키 7개 컬럼의 값 중 `assets.arn` 에 없는 것 — 한 곳에서 ARN 을
+      다르게 조립하면(가드레일 ③ 완전일치) 조치 대상이 조용히 거절된다.
+    - **리전 불일치**: 자산의 `region` 컬럼과 자기 ARN 의 리전 칸이 다른 것 — #261 리전
+      스코프가 이 둘을 따로 읽으므로 어긋나면 리전 필터에서 새거나 빠진다.
+
+    FK 가 없어 DB 가 막지 못하는 어긋남을 `(kind, table, column, value)` 로 돌려준다.
+    빈 리스트면 정합. 골든 적재·실수집 뒤 0 건이 기준선(2026-09-14 실측 0건)이다.
+    """
+    findings: list[DanglingArn] = []
+
+    known_arns = select(models.Asset.arn)
+    for model, column in _ARN_JOIN_KEYS:
+        col = getattr(model, column)
+        for value in db.execute(select(col).where(col.notin_(known_arns)).distinct()).scalars():
+            findings.append(DanglingArn("dangling", model.__tablename__, column, value))
+
+    for arn, region in db.execute(select(models.Asset.arn, models.Asset.region)):
+        if arn_region(arn) != region:
+            findings.append(
+                DanglingArn("region_mismatch", "assets", "region", f"{arn} (region={region})")
+            )
+    return findings

@@ -76,6 +76,7 @@ def test_run_pipeline_runs_and_releases_when_lock_free(pg_engine, monkeypatch):
     assert result == {
         "stored": {"stored": 1}, "verdicts": {"SKIP": 1},
         "incidents": {"created": 0, "existing": 0, "failed": 0},
+        "dangling_arns": 0,  # ARN 조인 무결성 점검 건수(#342)
     }
 
     # 락이 해제됐어야 한다 — 같은 키를 다시 잡을 수 있어야 한다

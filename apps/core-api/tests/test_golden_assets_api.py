@@ -58,6 +58,19 @@ def _items(client_pg):
     return response.json()
 
 
+def test_golden_load_has_no_dangling_or_mismatched_arns(loaded, db):
+    """골든 적재 뒤 자산 조인 무결성이 성립한다 — 매달린 ARN 0, 리전 불일치 0. (#342)
+
+    ARN 조립이 schemas.arns.build_arn 하나로 모였으므로 관계 target_arn 이 assets.arn 과
+    완전일치하고(가드레일 ③ 대조 대상), 각 자산의 region 이 자기 ARN 의 리전과 같다.
+    2026-09-14 LocalStack 실측(매달린 target_arn 0건)의 골든판 기준선이다.
+    """
+    from db.repositories import assets as assets_repo
+
+    dangling = assets_repo.find_dangling_arns(db)
+    assert dangling == [], "\n".join(str(d) for d in dangling)
+
+
 def test_golden_inventory_reaches_the_assets_api(client_pg, loaded, golden):
     """골든이 적재되면 자산 목록이 mock 없이 채워진다 — 화면 1단계의 전제.
 
