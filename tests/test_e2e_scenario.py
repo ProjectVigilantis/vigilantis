@@ -275,7 +275,7 @@ def test_finops_incident_carries_no_risk_fields():
 # 생성(#329) → 해제(#298)가 2026-09-15에 LocalStack에서 관통했다(설계서 §T2 관통 실측).
 #
 # 열리면 이 파일 위쪽의 전제 테스트가 이미 입력·런북 짝을 보증하고 있으므로,
-# 흐름 테스트는 **상태 전이만** 보면 된다. 경계 실사는 docs/E2E_GATE_0911.md.
+# 흐름 테스트는 **상태 전이만** 보면 된다. 실경로/대체 컷 경계는 docs/E2E_DEMO_SCENARIOS.md.
 
 
 @pytest.mark.skip(
