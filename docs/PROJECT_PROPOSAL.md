@@ -201,37 +201,112 @@
 
 ### 3.1 구성도
 
-<!-- 원천: ADR-0001(단일 FastAPI 백엔드 · 모노레포 구조) -->
-*(TODO)*
+<!--
+원천: ADR-0001(단일 FastAPI 백엔드·모노레포) · SSOT §MVP 확정 범위 아키텍처 절
+TODO: 제출용 변환본(Word)에서는 mermaid가 렌더되지 않는다 — 이미지로 바꿔 넣는다
+-->
+
+```mermaid
+flowchart TB
+    U["관제자 (브라우저)"]
+    subgraph WEB["apps/web — Next.js 16"]
+        DASH["대시보드 · 인시던트 · 토폴로지"]
+    end
+    subgraph API["apps/core-api — 단일 FastAPI 백엔드"]
+        R["routers — REST · WebSocket"]
+        S["services — collector · rule_engine · scheduler"]
+        A["ai — LangGraph 2그래프 · 가드레일 4단계"]
+        X["services/aws — executor · backup · rollback"]
+    end
+    DB[("PostgreSQL")]
+    AWS["AWS — LocalStack / 실 AWS"]
+
+    U --> DASH
+    DASH -- "REST · WS" --> R
+    R --> S
+    S -- "판정 → Incident" --> A
+    A -- "가드레일 PASS" --> R
+    R -- "원클릭 실행" --> X
+    X --> AWS
+    S -- "주기 수집" --> AWS
+    R <--> DB
+    S <--> DB
+    A <--> DB
+    X <--> DB
+```
+
+**조치 한 건이 지나는 경로는 하나다.**
+
+`주기 수집` → `규칙 판정` → `Incident 생성` → `AI 요약·런북 추천` → `가드레일 4단계` → `관제자 승인` → `실행` → `회복(자동 원복 / 원클릭 해제)`
 
 ### 3.2 기술 스택
 
-<!-- 원천: SSOT §MVP 확정 범위 기술 스택 절 -->
-*(TODO)*
+<!-- 원천: SSOT §MVP 확정 범위 · ADR-0001 · ADR-0003 · ADR-0005 · ADR-0006 -->
+
+| 층 | 채택 | 근거 |
+| --- | --- | --- |
+| **백엔드** | **단일 FastAPI** (`apps/core-api`) | ADR-0001 |
+| DB | PostgreSQL + Alembic | ADR-0001 |
+| 스케줄러 | APScheduler (앱 `lifespan` 배선 · advisory lock으로 중복 실행 방지) | SSOT |
+| **프론트엔드** | **Next.js 16**(App Router · Turbopack) + React 19 + TypeScript + **Tailwind CSS v4** + shadcn UI | ADR-0003 |
+| **AI 모델** | OpenAI `gpt-5.6-luna` (`reasoning_effort=low`) | SSOT |
+| AI 출력 계약 | **Pydantic v2 Structured Output** | SSOT |
+| AI 오케스트레이션 | **LangGraph** — 도메인별 2그래프 | ADR-0005 |
+| AWS 제어 | boto3 (`AWS_ENDPOINT_URL` 스위치 하나로 LocalStack ↔ 실 AWS) | ADR-0006 |
+| **개발·시연 환경** | **LocalStack**(단일 compose · 버전 고정 · Boto3 시드 단일 원천) | ADR-0006 |
+| 공통 스키마 | `packages/schemas` — FE↔BE 계약의 코드 원천 | ADR-0001 |
+| 테스트 | pytest(BE) · `node --test`(FE) | — |
+| CI | GitHub Actions **3잡** — `test` · `web` · `ai-signature` | SSOT |
 
 ### 3.3 주요 설계 결정 (ADR)
 
-<!--
-원천: docs/adr/ — 0001~0008 (ADR-0009는 PR #348 머지 시 추가)
-배점 ③ 실현 가능성(기술·일정) 15점이 직접 걸리는 절이다. "왜 이렇게 만들었는가"가
-문서로 남아 있다는 것이 9/4 제출본에 없던 자산이므로 두껍게 쓴다.
--->
+**이 프로젝트는 설계 결정을 문서로 남긴다.** 8건이 저장소 [`docs/adr/`](adr/)에 있고, 각 ADR은 *무엇을 정했나* 와 *무엇을 버렸나* 를 함께 적는다. 아래는 그 요약이며, 배경·대안 비교·개정 이력은 원문에 있다.
 
-| ADR | 결정 | 왜 |
-| --- | --- | --- |
-| 0001 | 모노레포 · 단일 FastAPI 백엔드 | *(TODO)* |
-| 0002 | 런북 화이트리스트 MVP 범위 | *(TODO)* |
-| 0003 | FE 스택 Next.js 16 | *(TODO)* |
-| 0004 | 롤백 런북 화이트리스트 등재 | *(TODO)* |
-| 0005 | LangGraph 무상태 도메인 그래프 | *(TODO)* |
-| 0006 | LocalStack 팀 표준 환경 | *(TODO)* |
-| 0007 | 가드레일 · Dry-Run · Executor precheck 계약 | *(TODO)* |
-| 0008 | 백업 레코드 수명주기와 회복 무결성 | *(TODO)* |
+| ADR | 날짜 | 결정 | 이 결정이 막는 것 |
+| --- | --- | --- | --- |
+| [0001](adr/0001-mvp-monorepo-structure.md) | 2026-08-11 | **MVP는 단일 FastAPI 백엔드로 통합한다** — 앱 4개(마이크로서비스) 구조를 `apps/core-api` 하나로 | 단일 계정·1–2개 리전 범위에 Step Functions·Lambda를 얹어 **서비스 간 배포·통신 비용이 개발 속도를 먹는 것** |
+| [0002](adr/0002-runbook-whitelist-mvp-scope.md) | 2026-08-12 | **Action Whitelist를 레지스트리 7종으로 확정**하고 전부 MVP 범위로 (→ 0004로 10종) | 조치 범위가 *예시* 로만 남아 **AI 엔진과 Boto3 제어가 서로 다른 목록을 보고 개발되는 것** |
+| [0003](adr/0003-fe-stack-nextjs-16.md) | 2026-08-13 | **FE 스택을 Next.js 16 + React 19 + Tailwind v4 + shadcn 4로** | 동결된 Next 14 라인 위에서 **컴포넌트를 추가할 때마다 수동 구성 부담**을 지는 것 |
+| [0004](adr/0004-rollback-runbook-whitelist-registration.md) | 2026-08-13 | **롤백 3종도 Whitelist에 정식 등록한다(7→10종)** — 우회 경로를 만들지 않는다 | **가드레일이 우리 자신의 자동 원복을 차단**하는 것. 우회로를 뚫었다면 *되돌리기* 만 검증 없이 도는 구멍이 생긴다 |
+| [0005](adr/0005-langgraph-stateless-domain-graphs.md) | 2026-08-18 | **LangGraph를 상태 없는 도메인별 두 그래프로** — 상태 원천은 그래프가 아니라 **DB** | 그래프 Checkpointer가 **제2의 상태 원천**이 되어, AWS를 실제로 바꾼 뒤 *무엇이 근거였나* 를 사후에 설명할 수 없게 되는 것 |
+| [0006](adr/0006-localstack-team-standard-env.md) | 2026-08-19 | **LocalStack을 팀 표준 환경으로** — 단일 compose · 시드 단일 원천 · `AWS_ENDPOINT_URL` 스위치 | 통합 테스트가 **개인 PC에서만 통과**하고 CI에서는 조용히 전부 skip되는 것 |
+| [0007](adr/0007-guardrail-dryrun-executor-precheck-contract.md) | 2026-08-24 | **가드레일 ④는 executor의 단일 `precheck()` 호출로 판정한다** — Dry-Run 미지원 작업은 **조회로 대체 검증** | 가드레일(AI 소유)과 executor(Infra 소유)의 **경계에 규약이 없어 양쪽이 서로를 기다리는 것** |
+| [0008](adr/0008-backup-record-lifecycle-recovery-integrity.md) | 2026-09-02 | **백업은 조치 직전 1회 캡처·불변 보존**하고, **원복 재개는 시간이 아니라 상태 대조로** 판단한다 | 원복의 유일한 근거가 *어디서 읽는가* 만 정해지고 **언제 만들고 무엇과 대조하는가가 빈 채로** 자동 원복이 붙는 것 |
+
+**세 ADR이 §1.2의 「신뢰」 3가지에 그대로 대응한다.**
+
+| §1.2의 위험 | 답 |
+| --- | --- |
+| 되돌릴 수 없는 조치를 기계가 한다 | **ADR-0008** — 조치 *전에* 백업을 남기고 불변으로 보존 |
+| LLM이 무엇을 할지 자유롭게 정한다 | **ADR-0002 · 0004** — 등재된 10종 밖으로 나갈 경로가 없다 |
+| 실패했을 때 되돌릴 근거가 없다 | **ADR-0004 ③ · 0008** — 원복 파라미터는 **DB 백업 레코드에서만** 온다 |
+
+> **ADR은 살아 있는 문서다.** 0002·0004·0006·0007은 실측이 쌓이며 개정됐고(0006은 5차까지), **개정 이력이 본문 하단에 남는다.** 핵심 결정은 불변이고 바뀐 것은 대상 목록·검증 한계·좌표다.
+
+<!-- TODO: ADR-0009(실 AWS 계정·키·비용 통제)는 PR #348 머지 시 9번째 행 추가 -->
 
 ### 3.4 API 계약 개요
 
 <!-- 원천: SSOT §API 계약 (코드 원천: packages/schemas/api/) -->
-*(TODO)*
+
+**FE↔BE 공개 계약은 코드가 원천**(`packages/schemas/api/`)이고 문서는 그 요약이다.
+
+| 엔드포인트 | 담는 것 |
+| --- | --- |
+| `GET /api/v1/assets` | EC2/SG 상태·스펙·연결관계 · 헬스 스코어(**0–100 정수**) · Skip 사유 코드 **6종** |
+| `GET /api/v1/incidents` | 목록 — 상세의 부분집합 10필드. `status`·`category` 필터, `created_at` 내림차순 |
+| `GET /api/v1/incidents/{id}` | **AI CoT 3줄 요약** · Evidence ID · 추천 런북(**본편 7종만**) · 실행 요약(복구 조치는 **롤백 3종만**) |
+| `POST /api/v1/actions/execute` | Request는 **`{incident_id, runbook_id, idempotency_key}` 셋뿐** — 신규 `202`, 같은 키 재요청 `200`(멱등 재생) |
+| `WebSocket /api/v1/ws` | `INCIDENT_CREATED` · `INCIDENT_UPDATED` · `EXECUTION_UPDATED` — **DB commit 이후 전송, 상태 원본이 아니다** |
+
+**계약이 지키는 두 가지가 §1.2의 전제와 이어진다.**
+
+1. **실행 요청은 Target ARN도 AWS 파라미터도 받지 않는다.** 무엇을 어디에 할지는 서버가 Incident와 백업 레코드에서 정한다 — 화면이 조작돼도 조치 대상이 바뀌지 않는다.
+2. **화면 표시용 값(`display_parameters`)은 서버가 typed `parameters`에서 파생한다.** LLM이 짓지 않고, 실행 요청으로 되돌려 받지도 않는다.
+
+실행 상태는 **7종**이다 — `IN_PROGRESS` · `SUCCESS` · `FAILED` · `ROLLBACK_INITIATED` · `ROLLED_BACK` · `ROLLBACK_FAILED` · **`UNVERIFIED`**(AWS 조회 실패로 결과를 판정하지 못한 종료 상태 — 자동 원복하지 않고 관제자 복구를 연다).
+
+<!-- UNVERIFIED는 #249 / PR #341로 2026-09-14 머지됐다. SSOT §API 계약의 6종 표기는 PR #354가 7종으로 갱신 중이다 -->
 
 ---
 
