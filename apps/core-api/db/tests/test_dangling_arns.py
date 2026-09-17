@@ -84,9 +84,11 @@ def _candidate(db, incident, arn, runbook_id=RunbookId.RUNBOOK_NACL_ADD_DENY):
 
 
 def _guardrail(db, candidate, failed_step):
+    """가드레일 평가 1건. `failed_step=None` 이면 네 단계 전체 PASS 다."""
     db.add(models.GuardrailEvaluation(
         validation_context=GuardrailValidationContext.AI_CANDIDATE,
-        candidate_id=candidate.candidate_id, result=GuardrailDecision.FAIL,
+        candidate_id=candidate.candidate_id,
+        result=GuardrailDecision.PASS if failed_step is None else GuardrailDecision.FAIL,
         failed_step=failed_step, steps=[], validated_at=NOW,
     ))
     db.flush()
@@ -183,6 +185,7 @@ def test_candidate_not_past_arn_match_is_expected_but_others_investigate(db, fai
       종전 구현은 ③ 실패만 이렇게 보고 ①·②에서 거절된 후보를 조사 대상으로 올렸다.
     - ③ 을 통과한 뒤 ④(DryRun)에서 거절된 후보가 매달렸다면 **어긋남**이다. `REJECTED`
       전체를 정상으로 치면 이것까지 빠진다.
+    - 네 단계를 전부 통과한 후보가 매달렸다면 ③ 이 인정한 참조가 끊긴 것이니 **조사 대상**이다.
     - 평가 기록이 없는 후보는 판단할 근거가 없으니 **조사 대상**으로 남긴다.
     """
     inc = _incident(db, UNMANAGED, IncidentCategory.SECOPS)
@@ -192,6 +195,10 @@ def test_candidate_not_past_arn_match_is_expected_but_others_investigate(db, fai
     passed_three = "arn:aws:ec2:ap-northeast-2:1:instance/i-passed-three"
     later = _candidate(db, inc, passed_three, runbook_id=RunbookId.RUNBOOK_NACL_RESTORE)
     _guardrail(db, later, GuardrailStep.AWS_DRY_RUN)
+
+    all_passed = "arn:aws:ec2:ap-northeast-2:1:instance/i-all-passed"
+    passed_all = _candidate(db, inc, all_passed, runbook_id=RunbookId.RUNBOOK_EC2_ISOLATE)
+    _guardrail(db, passed_all, None)
 
     unevaluated = "arn:aws:ec2:ap-northeast-2:1:instance/i-no-evaluation"
     _candidate(db, inc, unevaluated, runbook_id=RunbookId.RUNBOOK_SG_DELETE_ISOLATED)
@@ -203,7 +210,7 @@ def test_candidate_not_past_arn_match_is_expected_but_others_investigate(db, fai
     assert [f.value for f in rejected] == [UNMANAGED]
 
     broken = _of_kind(found, assets_repo.KIND_BROKEN_REFERENCE)
-    assert {f.value for f in broken} == {passed_three, unevaluated}
+    assert {f.value for f in broken} == {passed_three, all_passed, unevaluated}
 
 
 def test_execution_axis_counts_one_arn_once_and_always_investigates(db):
