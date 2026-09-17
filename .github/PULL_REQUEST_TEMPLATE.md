@@ -28,7 +28,7 @@
 - [ ] `pytest` 통과 — 추가·수정한 테스트에 무조건 보류(`@pytest.mark.skip`) 외의 skip이 있으면 Docker로 다시 돌려 그 skip 0건 확인(CLAUDE.md §푸시 전 로컬 통합 테스트)
 - [ ] `docker-compose up`으로 로컬 기동 확인
 - [x] (`apps/web` 변경 시) `npm run lint` · `npm run build` · `npm test` 통과 — (해당 없음) <사유>
-- [x] (API 변경 시) FE↔BE 계약/Mock 영향 확인 — (해당 없음) <사유>
+- [x] (API 변경 시) FE↔BE 계약 동기화 확인(`packages/schemas/api/` ↔ `apps/web/src/types/api.ts`) — (해당 없음) <사유>
 
 <!-- docs/PROJECT_STATUS.md(SSOT)는 이 PR에서 갱신하지 않는다.
      SSOT는 주 2회(월요일 아침·목요일 회의 뒤) PM이 갱신하며, 그 밖의 주중 갱신은 범위·API 계약·역할·확정 결정이 걸린
