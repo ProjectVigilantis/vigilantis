@@ -99,7 +99,7 @@ IN_PROGRESS → SUCCESS
 | # | 단계 | 화면(FE) | API | WS 이벤트 | 실패 시 대체 컷 |
 | --- | --- | --- | --- | --- | --- |
 | 1 | 수집·판정 | 자산 목록에 **최적화 후보** 배지 | `GET /api/v1/assets` — **골든 실데이터로 응답한다**(아래 §자산 화면) | — | 시드 스크립트 재실행 후 목록만 |
-| 2 | Incident 생성 | INC-001 **카드 그리드**에 신규 카드, `status: ANALYZING` | `GET /api/v1/incidents` | `INCIDENT_CREATED` | **대체 컷 없음**(FE mock 계층 제거, 2026-09-17 · PR #351) |
+| 2 | Incident 생성 | **INC-004 자산 인시던트** 카드 그리드에 신규 카드, `status: ANALYZING` | `GET /api/v1/incidents` | `INCIDENT_CREATED` | **대체 컷 없음**(FE mock 계층 제거, 2026-09-17 · PR #351) |
 | 3 | AI 판단 근거 + 추천 | 상세에 **판단 근거** 3줄 + 추천 `RUNBOOK_EC2_RIGHTSIZING` | `GET /api/v1/incidents/{id}` | `INCIDENT_UPDATED` | 미리 저장한 근거 텍스트 표시 |
 | 4 | 가드레일 4단계 | — (화면 표시 없음) · 통과 신호는 `status: AWAITING_APPROVAL`로 실행 버튼이 열리는 것 | (내부) | `INCIDENT_UPDATED` | 슬라이드 컷으로 분리 |
 | 5 | 관제자 승인 | **[조치 실행]** 클릭 | `POST /api/v1/actions/execute`<br>**`202 Accepted`** → `IN_PROGRESS`<br>*(같은 `idempotency_key` 재요청은 `200 OK` 멱등 재생)* | `EXECUTION_UPDATED` | — |
@@ -256,7 +256,19 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 
 **T1 1–3번은 무대에서 하지 않는다**(결정 ①). 스캔 잡은 `IntervalTrigger`로만 등록돼 **기동 뒤 한 주기(300초)가 지나야 첫 스캔**이 돌고, 그 뒤 AI 분석(모델 호출)이 이어진다. 무대 밖에서 끝내 두면 실패가 무대 전에 드러나 고칠 시간이 있다. 잃는 것은 "스캔이 카드를 만드는 순간"의 실시간 장면이며, 그 장면은 T2 1번 주입이 보여준다.
 
-`docker compose up -d --wait db localstack` → 시드(`scripts/seed_localstack.py`) → `docker compose up -d api` → **첫 스캔과 AI 분석 완료 확인** — `GET /api/v1/incidents`에서 idle-dev 카드가 **승인 대기**(`AWAITING_APPROVAL`)인지 본다.
+**시연 스택은 별도 compose 프로젝트 `vigilantis-demo`로 띄우고, "사전 준비를 처음부터"는 그 프로젝트를 볼륨째 내리고 다시 올리는 것이다**(결정 2026-09-17 · PR #371 재리뷰). LocalStack은 재기동하면 비지만 DB는 볼륨에 남는다 — DB를 그대로 두고 LocalStack만 새로 시드하면 새 인스턴스 ID로 카드가 새로 생기고 이전 카드도 열린 채 남는다(재현: 3장 → 6장 · FinOps 중복 방지는 `subject_arn` 기준). 평소 개발 DB 볼륨(`vigilantis_pgdata`)과는 `vigilantis-demo_pgdata`로 갈린다. 포트(5432 · 4566 · 8000)를 함께 쓰므로 **평소 스택은 내려 둔다.** 이 프로젝트 이름으로는 처음 한 번 `api` 이미지 빌드가 돈다(리허설 9/29(화)에 미리 치른다).
+
+```powershell
+$env:COMPOSE_PROJECT_NAME = 'vigilantis-demo'   # 시연 터미널 전용 — 평소 스택은 내려 둔다
+docker compose down -v                            # 시연 DB·LocalStack만 비운다
+docker compose up -d --wait db localstack
+$env:AWS_ENDPOINT_URL = 'http://localhost:4566'; uv run python scripts/seed_localstack.py
+docker compose up -d api                          # migrate(스키마 적용)가 먼저 돈다
+```
+
+> ⚠️ **`COMPOSE_PROJECT_NAME` 없이 `docker compose down -v`를 실행하면 평소 개발 DB가 지워진다.**
+
+그 뒤 **첫 스캔(기동 뒤 300초)과 AI 분석 완료를 확인**한다 — `GET /api/v1/incidents`에서 idle-dev 카드가 **승인 대기**(`AWAITING_APPROVAL`)인지 본다.
 
 같은 스캔이 **카드 3건**을 만든다(idle-dev · 미사용 SG `vigilantis-seed-unused` · 미연결 EBS). 나머지 둘은 시드에서 빼지 않는다 — LocalStack 사전 검증 테스트(`apps/core-api/services/tests/test_precheck_localstack.py`)가 그 자원을 쓴다. **대본에서 한 줄로 설명한다**: "스캔이 서버 1대 말고도 미사용 자원 2건을 함께 찾았다." EBS 카드는 이름 없이 리소스 ID(`vol-` 접두)로 보인다(수집이 EBS 이름을 비워 둔다). 모델 호출은 사전 준비 1회에 3건으로 고정된다.
 
@@ -267,7 +279,7 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 | `SCAN_INTERVAL_SECONDS` | **300**(기본) | 첫 스캔이 무대 밖으로 나갔다. 짧게 두면 무대 도중 스캔이 자산 정보를 중간값으로 바꿀 수 있다 |
 | `DISPATCH_INTERVAL_SECONDS` | **5** | T1-7 실패 주입 창의 길이다. 5초 실측: 창 약 4.6초 · 헬퍼 반응 0.05초 · 승인 → 원복 완료 16초 · 3/3(#349 실측 코멘트). 리허설에서 헬퍼가 3회 연속 창 안에 들면 확정, 한 번이라도 놓치면 10 |
 | `AGENT_DISPATCH_INTERVAL_SECONDS` | **3** | T2 주입 뒤 분석 시작까지의 지연 |
-| `STATUS_CHECK_WAIT_DELAY_SECONDS` · `STATUS_CHECK_WAIT_MAX_ATTEMPTS` | **2 · 3** | PR #346에서 이 값으로 판정이 4.2초에 났다. **LocalStack 전용** — 실 AWS 스모크(9주차) 전에 기본값으로 되돌린다 |
+| `STATUS_CHECK_WAIT_DELAY_SECONDS` · `STATUS_CHECK_WAIT_MAX_ATTEMPTS` | **2 · 3** | PR #346에서 이 값으로 판정이 4.2초에 났다. **LocalStack 전용** — 9주차(10/02–10/08) 실 AWS 스모크 전에 기본값으로 되돌린다 |
 | `MOCK_THREAT_INBOX_DIR` | `/app/apps/core-api/.mock-threat-inbox` | `.env.example` 값 · compose 마운트 안 경로(호스트는 `apps/core-api/.mock-threat-inbox`) |
 | `OPENAI_API_KEY` | 운영 머신 키 | 값은 적지 않는다 |
 
@@ -279,9 +291,9 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 | 2 | Incident 생성 | ✅ 실경로 · **사전 준비(무대 전)** — 스캔 1회로 생성 실측 | 카드 3건 — §사전 준비 | **무대 전에 드러난다** → 사전 준비를 처음부터(대체 컷은 만들지 않는다 — 결정 ①) |
 | 3 | AI 판단 근거 + 추천 | 🔶 실경로 · **사전 준비(무대 전)** · idle-dev 모델 호출 미측정(§결정 기록 ④) | `OPENAI_API_KEY` · `AGENT_DISPATCH_INTERVAL_SECONDS` | 사전 준비를 처음부터 |
 | 4 | 가드레일 4단계 | ✅ 실경로 | — | 슬라이드 컷 |
-| 5 | 관제자 승인 | ✅ 실경로 · **무대 시작** | 승인 대기 카드 → **[조치 실행]** 1회. **시작 전에 `docker compose logs api`의 스캔 잡 `next run at`을 보고, 다음 스캔이 약 20초 안이면 기다렸다 시작한다** — 원복(약 16초) 도중 스캔이 돌면 AST-001이 중간값(`m5.large · stopped`)으로 다음 스캔까지 최대 300초 남는다(#349 실측) | — |
+| 5 | 관제자 승인 | ✅ 실경로 · **무대 시작** | 순서대로 셋. **① 스캔 시점 확인** — `docker compose logs api \| Select-String -SimpleMatch 'interval[0:05:00]' \| Select-Object -Last 1`의 `next run at:` 시각(**UTC** — 한국 시각 +9시간)이 지금부터 20초 안이면 기다렸다 시작한다. 필터가 필요한 이유: 실행·AI 분석 주기도 `next run at`을 1초에 1줄꼴로 찍어, 필터 없이 마지막 줄을 보면 거의 항상 몇 초 뒤가 보인다. 원복(약 16초) 도중 스캔이 돌면 AST-001이 중간값(`m5.large · stopped`)으로 다음 스캔까지 최대 300초 남는다(#349 실측). **② 헬퍼 띄우기** — 호스트 셸에서 `$env:AWS_ENDPOINT_URL='http://localhost:4566'; uv run python scripts/inject_status_check_failure.py`(PR #373)를 실행하고 `대기 중` 출력을 확인한다. **헬퍼가 `중단`을 출력하면 누르지 않고 출력의 안내를 따른다.** **③ [조치 실행]** — **자산 인시던트(INC-004)** 화면의 승인 대기 카드에서 1회 누른다(FinOps 카드는 보안 인시던트 INC-001이 아니라 이 화면에 뜬다) | — |
 | 6 | 실행 | ✅ 실경로(PR #346) | `DISPATCH_INTERVAL_SECONDS` | **사전 준비를 처음부터** — LocalStack 재기동은 자원 ID가 새로 생겨 이 Incident의 대상이 사라진다 |
-| 7 | Status Check 실패 | 🔶 **실경로 · 헬퍼 머지 전까지** | **실패 주입 헬퍼 실행**(#356 ① · 김세혁 · 리허설 9/29(화) 전) — 대상 인스턴스를 조회하다가 유형이 바뀌고 `running`이 된 순간 `stop_instances`를 부른다. 사람이 창을 맞출 수 없다: 판정 대기 동안 실행 상태는 `IN_PROGRESS`이고 이벤트도 나가지 않는다 | 창을 놓치면 실행이 `SUCCESS`로 닫힌다 → 상세 화면 실행 항목의 **[이전 스펙 복원]**(`RUNBOOK_EC2_REVERT_SIZE` · 관제자 승인)으로 되돌린다. 자동 발동 장면은 빠지지만 같은 확인 화면(9번)까지 간다. **시드 재실행은 줄어든 유형을 되돌리지 않는다**(이름으로 찾아 건너뛴다) |
+| 7 | Status Check 실패 | ✅ 실경로 · 헬퍼(PR #373) | **사람 조작 없음** — 5번에서 띄운 헬퍼가 축소된 유형으로 기동되는 순간 멈춘다(`주입: stop_instances` 출력). 헬퍼가 필요한 이유: 판정 대기 동안 실행 상태는 `IN_PROGRESS`이고 이벤트도 나가지 않아 사람이 창을 맞출 수 없다. **7번에서 띄우면 늦다** — 이미 유형이 바뀌었거나 정지 구간이라 헬퍼가 주입 없이 끝나고 실행이 `SUCCESS`로 닫힌다 | 창을 놓치면 실행이 `SUCCESS`로 닫힌다 → 상세 화면 실행 항목의 **[이전 스펙 복원]**(`RUNBOOK_EC2_REVERT_SIZE` · 관제자 승인)으로 되돌린다. 자동 발동 장면은 빠지지만 같은 확인 화면(9번)까지 간다. **시드 재실행은 줄어든 유형을 되돌리지 않는다**(이름으로 찾아 건너뛴다) |
 | 8 | 자동 원복 발동 | ✅ 실경로(PR #346) | 사람 조작 없음 | 7번 "막히면"과 같다 |
 | 9 | 원복 완료 | ✅ 실경로 · **무대 끝** · 확인 화면을 바꾼다 | **AST-001의 인스턴스 유형은 수집만 갱신한다**(실행 경로는 자산 정보를 바꾸지 않는다) — 축소 전과 원복 뒤가 같은 값으로 보여 복귀를 증명하지 못한다. **실행 상태 패널의 "이전 상태로 복구했습니다."(원본 `ROLLED_BACK` — `apps/web/src/components/incidents/execution-status-panel.tsx`)로 확인**한다. 화면은 실행 단계(정지 → 유형 변경 → 기동)를 표시하지 않는다(API 계약에 단계 목록이 없다) | Incident는 **종료 판단 대기**로 남긴다 — **[종료 판단]은 무대에서 누르지 않는다**(§반복). 누르면 다음 스캔이 같은 서버에 새 카드를 만들고 모델까지 불러 T2 도중에 카드가 뜰 수 있다 |
 
@@ -312,7 +324,7 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 | 무엇 | 왜 · 어떻게 |
 | --- | --- |
 | **T1 Incident [종료 판단]** | 열린 Incident(종료 판단 대기 포함)가 있으면 스캔이 같은 서버에 새 카드를 만들지 않는다(`apps/core-api/incident_intake.py` `_create_finops`). 닫은 뒤 다음 스캔(최대 300초) → AI 분석 → 승인 대기 확인 = §사전 준비를 다시 하는 셈이다 |
-| **T2 재주입 시각** | 같은 관측 재전달은 멱등이라 새 Incident가 생기지 않는다. 주입 명령에 **`--occurred-at <새 ISO 시각>`**을 붙인다(`scripts/inject_mock_threat.py`) |
+| **T2 재주입 시각 · 이전 카드 닫기** | 같은 관측 재전달은 멱등이라 새 Incident가 생기지 않는다. 주입 명령에 **`--occurred-at <새 ISO 시각>`**을 붙인다(`scripts/inject_mock_threat.py`). 새 시각이면 이전 카드와 별개로 새 카드가 생기므로, **앞 세션의 T2 카드(종료 판단 대기)도 [종료 판단]으로 닫아** 보안 인시던트 화면에 한 장만 보이게 한다 |
 | **시드 NACL 규칙** | 시드 재실행이 커스텀 규칙을 비운다 — 차단 슬롯을 다시 쓸 수 있다 |
 
 ### 결정 기록과 남은 것
@@ -323,8 +335,8 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 | ② | 시연 환경변수 · T1 실패 주입 방식 | **결정 2026-09-17 · PR #371 리뷰** — §시연 환경변수 · 주입은 헬퍼(#356 ①) |
 | ③ | 스캔이 함께 만드는 Incident 2건 | **결정 2026-09-17** — 시드에서 빼지 않고 대본에서 한 줄 설명(§사전 준비) |
 | ④ | **T1-3 idle-dev 모델 호출 실측** — 절감 추정 호출(#347)이 함께 붙는다 | **남음** · 김승철 |
-| ⑤ | **T1-7 헬퍼** — 머지 후 T1-7 🔶 해소, 리허설에서 디스패치 5초 확정 | **남음** · 김세혁(#356 ①) |
-| ⑥ | **공격 경로 표시(#362)** — 완성되면 T2-1·T2-8 대본을 되돌릴지 | **남음** · 9/28(월) 릴리스 컷(#349). 9/23(수) 확정은 지금 화면(공격 경로 없음) 기준 |
+| ⑤ | T1-7 헬퍼 | **헬퍼 머지(PR #373 · 9/17(목))**. 남은 것은 리허설 9/29(화)에서 실행 디스패치 5초를 3회 연속 확인하는 것 · 김세혁 |
+| ⑥ | **공격 경로 표시(#362)** — 완성되면 T2-1·T2-8 대본을 되돌릴지 | **남음** — 계약(DoD ①·②)은 PR #374로 9/17(목) 머지됐고, 남은 것은 화면(DSH-001 토폴로지의 공격 경로 · DoD ③)이다. 판단은 9/28(월) 릴리스 컷(#349). 9/23(수) 확정은 지금 화면(공격 경로 없음) 기준 |
 
 **재현**: `docker compose up -d --wait db localstack` → `AWS_ENDPOINT_URL=http://localhost:4566 uv run python scripts/seed_localstack.py` → 일회용 DB에 `alembic upgrade head` → `run_pipeline()` 1회. 판정 분포는 적지 않는다(시드가 바뀌면 낡는다) — 이 시트가 기대는 것은 두 대상의 판정과 SG 연결뿐이다.
 
@@ -348,7 +360,7 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 
 | 컷 | 필요한 화면 | 현재 상태 |
 | --- | --- | --- |
-| T1-2 Incident 카드 | **INC-001** 카드 그리드 | ✅ **확보**(2026-08-26, #167 / PR #171 — 카드 그리드·위험도 정렬·승인 대기 프리셋). 목록에서 조치 실행·ACT-002 딥링크까지 연결됨(#179 / PR #180) |
+| T1-2 Incident 카드 | **INC-004** 자산 인시던트 카드 그리드(v1.6 · PR #197에서 INC-001과 분리 — FinOps 카드가 뜨는 화면) | ✅ **확보**(2026-08-26, #167 / PR #171 — 카드 그리드·위험도 정렬·승인 대기 프리셋). 목록에서 조치 실행·ACT-002 딥링크까지 연결됨(#179 / PR #180) |
 | T2-1 · T2-8 붉은 노드 | **AST-001 토폴로지 뷰**(#146) 또는 **DSH-001** 통합 위협 토폴로지 | ✅ **화면은 확보**(2026-08-31 · #146 CLOSED) — `AssetGraph`가 `GET /api/v1/assets` 응답을 그대로 그린다(`apps/web/src/components/assets/assets-view.tsx:189`). 노드 테두리 색은 **Incident가 아니라 자산 판정(`verdict`)** 에서 온다 — `THREAT`만 빨강이고(`apps/web/src/components/assets/asset-graph.tsx` `VERDICT_BORDER`), `THREAT`는 SG 전체개방에서만 나온다(`services/rule_engine.py`). DSH-001 토폴로지도 같은 `AssetGraph`를 쓴다(#294 / PR #351) |
 
 **붉은 노드 컷에 mock 기준은 없다**(PR #351). **다만 골든 적재 기준으로 T2-1·T2-8의 "붉은 노드"는 S3 대상 인스턴스에 서지 않는다.** S3 대상 `i-0a1b2c3d4e5f00001`은 골든 A1이라 판정이 `COST_CANDIDATE` — 테두리는 **주황**이다. 빨강은 그 인스턴스와 `SECURED_BY`로 이어진 SG `sg-0a1b2c3d4e5f00005`(`golden-sg-open-ssh` · A5 · 22번 전체개방 `THREAT`)다. 두 색 모두 **적재할 때 정해지고** 위협 주입이나 NACL 해제로 바뀌지 않는다 — 위협 접수가 쓰는 것은 `ThreatEvent`·`Incident`뿐이다. 그래서 T2-1("주입 → 붉은 노드")은 **주입 전부터 옆 SG가 빨강**이고, T2-8("해제 → 정상 복귀")은 **해제 뒤에도 SG가 빨강**이다. LocalStack 시드 경로(`vigilantis-seed-idle`)의 색은 재지 않았다. 대본을 어떻게 바꿀지는 10/1(목) 컷 시트 확정(9/23(수))에서 판단한다.
