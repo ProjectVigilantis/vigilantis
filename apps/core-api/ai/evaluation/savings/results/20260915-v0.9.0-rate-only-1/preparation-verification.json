@@ -1,0 +1,33 @@
+{
+  "tests": {
+    "command": ".venv/Scripts/python.exe -m pytest <CI roots> -q -rs -p no:cacheprovider -k \"savings or test_agent_dispatcher or test_mappers or test_secops_graph\"",
+    "passed": 183,
+    "failed": 0,
+    "skipped": 0,
+    "deselected": 1970,
+    "elapsed_seconds": 6.79,
+    "includes_live_db": true,
+    "model": "test doubles and SDK mock transport",
+    "first_run": "132 passed / 1 failed: SDK test constructor omitted timeout/backoff, fixed before final 183-pass run"
+  },
+  "historical_files_unchanged": 78,
+  "real_model_calls": 0,
+  "runtime_adoption": false,
+  "offline_runner_checks": {
+    "preflight": "PASS",
+    "stage_and_total_call_caps": "PASS",
+    "pilot_gates": "PASS",
+    "duplicate_before_credentials": "PASS",
+    "live_calls": 0,
+    "environment_note": "Two temporary-directory probes hit Windows sandbox ACL errors; gate predicates were subsequently verified in memory, without temporary directories."
+  },
+  "ruff": {
+    "changed_candidate_and_runner": "PASS",
+    "dispatcher_incremental": {
+      "before_count": 30,
+      "after_count": 30,
+      "new_findings": [],
+      "comparison": "In-memory reversal of this scoped edit, normalized line endings; compares Ruff code/message multisets, not original source bytes."
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "scope": "offline runner verification with synthetic responses; no model execution",
+  "live_model_calls": 0,
+  "checks_run": 6,
+  "failures": 0,
+  "errors": 0,
+  "passed": true,
+  "runner_sha256": "106d1a62ed7b93c283e03db38927796ed80d4388f827209b048aade4eec57b95",
+  "verification_source_sha256": "b7c2b9db02ae421997ea4c84b16df765085b3132abd5e0ae45f998829eb40873",
+  "preflight_sha256": "d83b92f21e1b6ac08bb7bbf494ed3530507ca2fa37dbf4d881834be1f0d9f635"
+}

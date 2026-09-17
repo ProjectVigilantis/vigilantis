@@ -1,0 +1,134 @@
+{
+  "scorer_version": "v0.2.0",
+  "spec_version": "v0.2.0",
+  "prompt_version": "v0.4.0",
+  "prompt_sha256": "68eb744564bf2b7ec7906a01e3a9cc45333e88e55b4d1f6bcfe81478ed1a1840",
+  "model_snapshots": [
+    "gpt-5.6-luna"
+  ],
+  "label": "gpt-5.6-luna (reasoning_effort=low), v0.4.0, frozen summary",
+  "price_reference_url": "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonEC2/20260910195514/ap-northeast-2/index.csv",
+  "fixed_set": {
+    "inventory_ids": [
+      "001",
+      "002",
+      "003"
+    ],
+    "case_ids": [
+      "A1",
+      "A7",
+      "A11",
+      "A12",
+      "A14",
+      "A16"
+    ],
+    "input_sha256": "8fffd381a2e89d0d1c0c1b5530e7e4934e244b10978585715ba87c31731d9454"
+  },
+  "criteria": {
+    "repeats": 10,
+    "amount_policy": "ASYMMETRIC_SAVINGS",
+    "rate_relative_tolerance": "0.10",
+    "amount_overestimate_relative_tolerance": "0.10",
+    "amount_underestimate_relative_tolerance": "0.20",
+    "amount_absolute_tolerance_usd": "1.00",
+    "minimum_estimated_fraction": "0.95"
+  },
+  "complete": false,
+  "passed": false,
+  "runs": 2,
+  "estimated": 2,
+  "not_estimated": 0,
+  "not_estimated_fraction": "0",
+  "status_counts": {
+    "PASS": 1,
+    "PRICE_DEVIATION": 1
+  },
+  "stability": {
+    "A1": {
+      "estimated_runs": 1,
+      "distinct_amounts": [
+        "90.96"
+      ],
+      "all_amounts_equal": null
+    },
+    "A7": {
+      "estimated_runs": 0,
+      "distinct_amounts": [],
+      "all_amounts_equal": null
+    },
+    "A11": {
+      "estimated_runs": 1,
+      "distinct_amounts": [
+        "58.69"
+      ],
+      "all_amounts_equal": null
+    },
+    "A12": {
+      "estimated_runs": 0,
+      "distinct_amounts": [],
+      "all_amounts_equal": null
+    },
+    "A14": {
+      "estimated_runs": 0,
+      "distinct_amounts": [],
+      "all_amounts_equal": null
+    },
+    "A16": {
+      "estimated_runs": 0,
+      "distinct_amounts": [],
+      "all_amounts_equal": null
+    }
+  },
+  "results": [
+    {
+      "case_id": "A1",
+      "status": "PRICE_DEVIATION",
+      "amount": "90.96",
+      "expected_amount": "113.88",
+      "absolute_error_usd": "22.92",
+      "relative_error": "0.2012644889357218124341412013",
+      "current_rate_relative_error": "0.2",
+      "target_rate_relative_error": "0.1961538461538461538461538462",
+      "arithmetic_context_and_assumptions_valid": true,
+      "savings_direction": "UNDERSTATED",
+      "signed_relative_error": "-0.2012644889357218124341412013",
+      "amount_lower_bound_usd": "91.10",
+      "amount_upper_bound_usd": "125.27",
+      "rate_accuracy": {
+        "within_symmetric_tolerance": false,
+        "affects_savings_pass": false,
+        "current_signed_relative_error": "-0.2",
+        "target_signed_relative_error": "-0.1961538461538461538461538462"
+      }
+    },
+    {
+      "case_id": "A11",
+      "status": "PASS",
+      "amount": "58.69",
+      "expected_amount": "56.94",
+      "absolute_error_usd": "1.75",
+      "relative_error": "0.03073410607657182999648753073",
+      "current_rate_relative_error": "0.03076923076923076923076923077",
+      "target_rate_relative_error": "0.03076923076923076923076923077",
+      "arithmetic_context_and_assumptions_valid": true,
+      "savings_direction": "OVERSTATED",
+      "signed_relative_error": "0.03073410607657182999648753073",
+      "amount_lower_bound_usd": "45.55",
+      "amount_upper_bound_usd": "62.63",
+      "rate_accuracy": {
+        "within_symmetric_tolerance": true,
+        "affects_savings_pass": false,
+        "current_signed_relative_error": "0.03076923076923076923076923077",
+        "target_signed_relative_error": "0.03076923076923076923076923077"
+      }
+    }
+  ],
+  "source_file": "../../../20260915-v0.5.0-order-comparison-1/v0.4.0.raw.json",
+  "source_sha256": "f3a1823f55a7b7f4037033dfcee3edc406d59d4279705d235929baf4e2296ad2",
+  "spec_file": "../../../../spec.json",
+  "spec_sha256": "a9ed0222a39de8e6a56f7478acb3a0d0caf9df8a001ef3b8d4b6abffa8312b57",
+  "previous_scored_file": "../../../20260915-v0.5.0-order-comparison-1/v0.4.0.scored.json",
+  "previous_scored_sha256": "7a0c19605e417ad122412c03f00d9c5baf6b9a924cb007191d4eff368c2d5918",
+  "rescoring_only": true,
+  "new_model_calls": 0
+}

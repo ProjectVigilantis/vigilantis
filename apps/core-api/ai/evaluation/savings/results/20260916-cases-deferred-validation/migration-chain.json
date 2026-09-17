@@ -1,0 +1,62 @@
+{
+  "heads": [
+    "c7a9e1d83f24"
+  ],
+  "parent_revision": "95956d08c917",
+  "fresh_upgrade": {
+    "revision": "c7a9e1d83f24",
+    "has_savings_column": true,
+    "indexes": {
+      "collection_runs": [
+        "ix_collection_runs_region_started_at"
+      ],
+      "metric_summaries": [
+        "ix_metric_summaries_window_end",
+        "uq_metric_summaries_asset_id_collection_run_id"
+      ],
+      "rule_evaluations": [
+        "ix_rule_evaluations_asset_evaluated_at",
+        "ix_rule_evaluations_verdict",
+        "uq_rule_evaluations_asset_id_collection_run_id"
+      ]
+    }
+  },
+  "downgrade_to_344": {
+    "revision": "95956d08c917",
+    "has_savings_column": false,
+    "indexes": {
+      "collection_runs": [
+        "ix_collection_runs_region_started_at"
+      ],
+      "metric_summaries": [
+        "ix_metric_summaries_window_end",
+        "uq_metric_summaries_asset_id_collection_run_id"
+      ],
+      "rule_evaluations": [
+        "ix_rule_evaluations_asset_evaluated_at",
+        "ix_rule_evaluations_verdict",
+        "uq_rule_evaluations_asset_id_collection_run_id"
+      ]
+    }
+  },
+  "reupgrade": {
+    "revision": "c7a9e1d83f24",
+    "has_savings_column": true,
+    "indexes": {
+      "collection_runs": [
+        "ix_collection_runs_region_started_at"
+      ],
+      "metric_summaries": [
+        "ix_metric_summaries_window_end",
+        "uq_metric_summaries_asset_id_collection_run_id"
+      ],
+      "rule_evaluations": [
+        "ix_rule_evaluations_asset_evaluated_at",
+        "ix_rule_evaluations_verdict",
+        "uq_rule_evaluations_asset_id_collection_run_id"
+      ]
+    }
+  },
+  "temporary_database_removed": true,
+  "live_model_calls": 0
+}

@@ -1,0 +1,10 @@
+{
+  "scored_reproduced": true,
+  "input_spec_implementation_runner_hashes_match": true,
+  "calls": 1,
+  "successful_model_responses": 0,
+  "missing_usage_calls": 1,
+  "price_calls": 0,
+  "generation_calls_during_verification": 0,
+  "local_document_links_resolve": true
+}

@@ -1,0 +1,106 @@
+{
+  "scorer_version": "v1",
+  "spec_version": "v1",
+  "prompt_version": "v3",
+  "prompt_sha256": "9574d258465a02dad5790684e47042625aa652dfe5017598a5ffd9ba7a6f0d3e",
+  "model_snapshots": [
+    "gpt-5.6-luna"
+  ],
+  "label": "gpt-5.6-luna (reasoning_effort=low)",
+  "price_reference_url": "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonEC2/20260910195514/ap-northeast-2/index.csv",
+  "fixed_set": {
+    "inventory_ids": [
+      "001",
+      "002",
+      "003"
+    ],
+    "case_ids": [
+      "A1",
+      "A7",
+      "A11",
+      "A12",
+      "A14",
+      "A16"
+    ],
+    "input_sha256": "8fffd381a2e89d0d1c0c1b5530e7e4934e244b10978585715ba87c31731d9454"
+  },
+  "criteria": {
+    "repeats": 10,
+    "rate_relative_tolerance": "0.10",
+    "amount_relative_tolerance": "0.10",
+    "amount_absolute_tolerance_usd": "1.00",
+    "minimum_estimated_fraction": "0.95"
+  },
+  "complete": false,
+  "passed": false,
+  "runs": 2,
+  "estimated": 2,
+  "not_estimated": 0,
+  "not_estimated_fraction": "0",
+  "status_counts": {
+    "PASS": 1,
+    "PRICE_DEVIATION": 1
+  },
+  "stability": {
+    "A1": {
+      "estimated_runs": 1,
+      "distinct_amounts": [
+        "103.37"
+      ],
+      "all_amounts_equal": null
+    },
+    "A7": {
+      "estimated_runs": 0,
+      "distinct_amounts": [],
+      "all_amounts_equal": null
+    },
+    "A11": {
+      "estimated_runs": 1,
+      "distinct_amounts": [
+        "45.55"
+      ],
+      "all_amounts_equal": null
+    },
+    "A12": {
+      "estimated_runs": 0,
+      "distinct_amounts": [],
+      "all_amounts_equal": null
+    },
+    "A14": {
+      "estimated_runs": 0,
+      "distinct_amounts": [],
+      "all_amounts_equal": null
+    },
+    "A16": {
+      "estimated_runs": 0,
+      "distinct_amounts": [],
+      "all_amounts_equal": null
+    }
+  },
+  "results": [
+    {
+      "case_id": "A1",
+      "status": "PASS",
+      "amount": "103.37",
+      "expected_amount": "113.88",
+      "absolute_error_usd": "10.51",
+      "relative_error": "0.09229012996136283807516684229",
+      "current_rate_relative_error": "0.09230769230769230769230769231",
+      "target_rate_relative_error": "0.09230769230769230769230769231",
+      "arithmetic_context_and_assumptions_valid": true
+    },
+    {
+      "case_id": "A11",
+      "status": "PRICE_DEVIATION",
+      "amount": "45.55",
+      "expected_amount": "56.94",
+      "absolute_error_usd": "11.39",
+      "relative_error": "0.2000351246926589392342817000",
+      "current_rate_relative_error": "0.2",
+      "target_rate_relative_error": "0.2",
+      "arithmetic_context_and_assumptions_valid": true
+    }
+  ],
+  "source_sha256": "d61f6808701848f275e338479788916e852f59a796f610b90419c5bbcc2b89bb",
+  "spec_sha256": "acf507e478b61d724971f9a0237086a96a10f290d9ca3b963dc4427e0d810bb9"
+}

@@ -1,0 +1,255 @@
+{
+  "label": "gpt-5.6-luna/low v0.8.0 comparison pair",
+  "execution_mode": "price_only_diagnostic",
+  "condition": "pair",
+  "prompt_version": "v0.6.0",
+  "prompt_sha256": "6bbd22aeeaf3326acbc7c84102507c90db290c8d2b3da1e785266de7488fb1bb",
+  "model_snapshots": [
+    "gpt-5.6-luna"
+  ],
+  "repeats": 3,
+  "case_ids": [
+    "A1",
+    "A11"
+  ],
+  "fixed_set": {
+    "inventory_ids": [
+      "001",
+      "002",
+      "003"
+    ],
+    "case_ids": [
+      "A1",
+      "A7",
+      "A11",
+      "A12",
+      "A14",
+      "A16"
+    ],
+    "input_sha256": "8fffd381a2e89d0d1c0c1b5530e7e4934e244b10978585715ba87c31731d9454"
+  },
+  "runs": [
+    {
+      "case_id": "A1",
+      "repeat": 1,
+      "response_status": "RETURNED",
+      "ai_savings_estimate": {
+        "status": "ESTIMATED",
+        "currency": "USD",
+        "period": "MONTH",
+        "amount": "119.14",
+        "basis": {
+          "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00001",
+          "region": "ap-northeast-2",
+          "current_instance_type": "t3.xlarge",
+          "target_instance_type": "t3.medium",
+          "current_hourly_rate": "0.217600",
+          "target_hourly_rate": "0.054400",
+          "assumptions": {
+            "hours": 730,
+            "operating_system": "LINUX",
+            "tenancy": "SHARED",
+            "purchase_option": "ON_DEMAND",
+            "included_cost": "INSTANCE_COMPUTE_ONLY",
+            "pricing_source": "MODEL_KNOWLEDGE"
+          },
+          "explanation": "아시아 태평양(서울)(ap-northeast-2) 리전의 Linux, 공유 테넌시, 온디맨드 요금을 적용한 모델 지식 기반 추정입니다. 시간당 단가는 t3.xlarge USD 0.217600, t3.medium USD 0.054400으로 가정했습니다. 월 절감액은 (0.217600 - 0.054400) × 730시간 = USD 119.14입니다. 인스턴스 컴퓨팅 요금만 포함하며 스토리지·네트워크·세금·할인·크레딧은 제외했습니다. 실제 요금은 AWS 요금표 및 청구 조건에 따라 달라질 수 있습니다. 출처는 요금 API나 청구서 조회가 아닌 모델 지식입니다."
+        },
+        "reason": null
+      },
+      "savings_diagnostics": [],
+      "call_number": 1,
+      "elapsed_seconds": 5.959,
+      "usage": {
+        "prompt_tokens": 1157,
+        "completion_tokens": 463,
+        "cached_prompt_tokens": 0
+      }
+    },
+    {
+      "case_id": "A11",
+      "repeat": 1,
+      "response_status": "RETURNED",
+      "ai_savings_estimate": {
+        "status": "ESTIMATED",
+        "currency": "USD",
+        "period": "MONTH",
+        "amount": "45.55",
+        "basis": {
+          "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00021",
+          "region": "ap-northeast-2",
+          "current_instance_type": "t3.large",
+          "target_instance_type": "t3.small",
+          "current_hourly_rate": "0.083200",
+          "target_hourly_rate": "0.020800",
+          "assumptions": {
+            "hours": 730,
+            "operating_system": "LINUX",
+            "tenancy": "SHARED",
+            "purchase_option": "ON_DEMAND",
+            "included_cost": "INSTANCE_COMPUTE_ONLY",
+            "pricing_source": "MODEL_KNOWLEDGE"
+          },
+          "explanation": "AWS 리전 ap-northeast-2(서울)의 Linux 공유형 온디맨드 인스턴스 컴퓨팅 요금을 적용했습니다. 현재 t3.large는 시간당 USD 0.083200, 목표 t3.small은 시간당 USD 0.020800으로 추정했습니다. 월 절감액은 (0.083200 - 0.020800) × 730시간 = USD 45.55입니다. 스토리지·네트워크·세금·할인·크레딧은 제외했으며, 요금 API나 청구서 조회가 아닌 모델 지식 기반 추정입니다."
+        },
+        "reason": null
+      },
+      "savings_diagnostics": [],
+      "call_number": 4,
+      "elapsed_seconds": 3.86,
+      "usage": {
+        "prompt_tokens": 1156,
+        "completion_tokens": 304,
+        "cached_prompt_tokens": 0
+      }
+    },
+    {
+      "case_id": "A11",
+      "repeat": 2,
+      "response_status": "RETURNED",
+      "ai_savings_estimate": {
+        "status": "ESTIMATED",
+        "currency": "USD",
+        "period": "MONTH",
+        "amount": "59.57",
+        "basis": {
+          "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00021",
+          "region": "ap-northeast-2",
+          "current_instance_type": "t3.large",
+          "target_instance_type": "t3.small",
+          "current_hourly_rate": "0.108800",
+          "target_hourly_rate": "0.027200",
+          "assumptions": {
+            "hours": 730,
+            "operating_system": "LINUX",
+            "tenancy": "SHARED",
+            "purchase_option": "ON_DEMAND",
+            "included_cost": "INSTANCE_COMPUTE_ONLY",
+            "pricing_source": "MODEL_KNOWLEDGE"
+          },
+          "explanation": "ap-northeast-2(AWS 아시아 태평양(서울)) 리전의 Linux, 공유 테넌시, 온디맨드 요금을 적용했습니다. 월 730시간 기준으로 (현재 t3.large $0.108800/시간 - 목표 t3.small $0.027200/시간) × 730시간 = $59.57입니다. 인스턴스 컴퓨팅 요금만 포함했으며 스토리지·네트워크·세금·할인·크레딧은 제외했습니다. 요금 API나 청구서 조회가 아닌 모델 지식 기반 추정이므로 실제 계약 및 청구 금액과 다를 수 있습니다."
+        },
+        "reason": null
+      },
+      "savings_diagnostics": [],
+      "call_number": 5,
+      "elapsed_seconds": 6.71,
+      "usage": {
+        "prompt_tokens": 1156,
+        "completion_tokens": 636,
+        "cached_prompt_tokens": 1153
+      }
+    },
+    {
+      "case_id": "A1",
+      "repeat": 2,
+      "response_status": "RETURNED",
+      "ai_savings_estimate": {
+        "status": "ESTIMATED",
+        "currency": "USD",
+        "period": "MONTH",
+        "amount": "113.88",
+        "basis": {
+          "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00001",
+          "region": "ap-northeast-2",
+          "current_instance_type": "t3.xlarge",
+          "target_instance_type": "t3.medium",
+          "current_hourly_rate": "0.208000",
+          "target_hourly_rate": "0.052000",
+          "assumptions": {
+            "hours": 730,
+            "operating_system": "LINUX",
+            "tenancy": "SHARED",
+            "purchase_option": "ON_DEMAND",
+            "included_cost": "INSTANCE_COMPUTE_ONLY",
+            "pricing_source": "MODEL_KNOWLEDGE"
+          },
+          "explanation": "AWS 리전 ap-northeast-2(서울)의 Linux 공유형 On-Demand 인스턴스 컴퓨팅 요금을 적용했습니다. 모델 지식 기반 추정 단가는 t3.xlarge 시간당 $0.208000, t3.medium 시간당 $0.052000입니다. 월 절감액은 ($0.208000 - $0.052000) × 730시간 = $113.88입니다. 스토리지·네트워크·세금·할인·크레딧은 제외했으며, 요금 API나 청구서 조회가 아닌 모델 지식에 기반한 추정입니다."
+        },
+        "reason": null
+      },
+      "savings_diagnostics": [],
+      "call_number": 8,
+      "elapsed_seconds": 4.248,
+      "usage": {
+        "prompt_tokens": 1157,
+        "completion_tokens": 361,
+        "cached_prompt_tokens": 1154
+      }
+    },
+    {
+      "case_id": "A1",
+      "repeat": 3,
+      "response_status": "RETURNED",
+      "ai_savings_estimate": {
+        "status": "ESTIMATED",
+        "currency": "USD",
+        "period": "MONTH",
+        "amount": "120.30",
+        "basis": {
+          "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00001",
+          "region": "ap-northeast-2",
+          "current_instance_type": "t3.xlarge",
+          "target_instance_type": "t3.medium",
+          "current_hourly_rate": "0.217600",
+          "target_hourly_rate": "0.052800",
+          "assumptions": {
+            "hours": 730,
+            "operating_system": "LINUX",
+            "tenancy": "SHARED",
+            "purchase_option": "ON_DEMAND",
+            "included_cost": "INSTANCE_COMPUTE_ONLY",
+            "pricing_source": "MODEL_KNOWLEDGE"
+          },
+          "explanation": "AWS 아시아 태평양(서울) 리전(ap-northeast-2)의 Linux 공유형 온디맨드 인스턴스 컴퓨팅 요금을 적용한 모델 지식 기반 추정입니다. 시간당 단가는 현재 t3.xlarge USD 0.217600, 목표 t3.medium USD 0.052800이며, 월 절감액은 (0.217600 - 0.052800) × 730시간 = USD 120.30입니다. 스토리지·네트워크·세금·할인·크레딧은 제외했습니다. 실제 요금은 요금 API 또는 청구서 조회로 확인해야 합니다."
+        },
+        "reason": null
+      },
+      "savings_diagnostics": [],
+      "call_number": 9,
+      "elapsed_seconds": 4.008,
+      "usage": {
+        "prompt_tokens": 1157,
+        "completion_tokens": 329,
+        "cached_prompt_tokens": 1154
+      }
+    },
+    {
+      "case_id": "A11",
+      "repeat": 3,
+      "response_status": "RETURNED",
+      "ai_savings_estimate": {
+        "status": "ESTIMATED",
+        "currency": "USD",
+        "period": "MONTH",
+        "amount": "59.57",
+        "basis": {
+          "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00021",
+          "region": "ap-northeast-2",
+          "current_instance_type": "t3.large",
+          "target_instance_type": "t3.small",
+          "current_hourly_rate": "0.108800",
+          "target_hourly_rate": "0.027200",
+          "assumptions": {
+            "hours": 730,
+            "operating_system": "LINUX",
+            "tenancy": "SHARED",
+            "purchase_option": "ON_DEMAND",
+            "included_cost": "INSTANCE_COMPUTE_ONLY",
+            "pricing_source": "MODEL_KNOWLEDGE"
+          },
+          "explanation": "대상 리전은 AWS 아시아 태평양(서울) 리전(ap-northeast-2)이며, Linux 공유형 온디맨드 인스턴스 컴퓨팅 요금을 적용했습니다. 모델 지식 기반 추정 단가는 t3.large 시간당 USD 0.108800, t3.small 시간당 USD 0.027200입니다. 월 절감액은 (0.108800 - 0.027200) × 730시간 = USD 59.568이며, 소수 둘째 자리로 반올림해 USD 59.57입니다. 스토리지·네트워크·세금·할인·크레딧은 제외했으며, 요금 API나 청구서 조회가 아닌 모델 지식에 기반한 추정입니다."
+        },
+        "reason": null
+      },
+      "savings_diagnostics": [],
+      "call_number": 12,
+      "elapsed_seconds": 4.289,
+      "usage": {
+        "prompt_tokens": 1156,
+        "completion_tokens": 331,
+        "cached_prompt_tokens": 1153
+      }
+    }
+  ]
+}

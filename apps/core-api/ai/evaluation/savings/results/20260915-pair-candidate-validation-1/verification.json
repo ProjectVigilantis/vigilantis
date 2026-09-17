@@ -1,0 +1,65 @@
+{
+  "verified_at": "2026-09-15T08:58:57.088780+00:00",
+  "status": "PREPARATION_VERIFIED_AWAITING_PAID_ROUND_APPROVAL",
+  "new_model_calls": 0,
+  "overestimate_resolved": false,
+  "chain_of_thought_collected": false,
+  "service_baseline_evaluated": false,
+  "new_summary_quality_evaluated": false,
+  "runtime_graph_adopted": false,
+  "historical_artifacts_unchanged": 50,
+  "five_prompt_fingerprints_unchanged": true,
+  "local_markdown_links_verified": 20,
+  "pytest": [
+    {
+      "scope": "savings",
+      "collection_paths": "tests apps/core-api/services/tests apps/core-api/ai/tests packages/schemas/tests apps/core-api/db/tests apps/core-api/tests apps/core-api/security/tests",
+      "passed": 98,
+      "failed": 0,
+      "skipped": 4,
+      "deselected": 2020,
+      "elapsed_seconds": 47.87,
+      "skip_reason": "PostgreSQL unavailable before compose startup"
+    },
+    {
+      "scope": "test_agent_dispatcher or test_mappers or test_secops_graph",
+      "collection_paths": "tests apps/core-api/services/tests apps/core-api/ai/tests packages/schemas/tests apps/core-api/db/tests apps/core-api/tests apps/core-api/security/tests",
+      "passed": 55,
+      "failed": 0,
+      "skipped": 0,
+      "deselected": 2067,
+      "elapsed_seconds": 6.29,
+      "setup": "docker compose up --wait db localstack; localhost LocalStack seed",
+      "includes_previous_four_skipped_cases": true,
+      "model": "FakeAIModelClient",
+      "database": "actual local PostgreSQL temporary DB",
+      "three_call_mode": "test-injected candidate; current service remains two-call"
+    }
+  ],
+  "runner_offline_checks": [
+    "frozen inputs and implementation preflight",
+    "empty result not passed",
+    "historical six runs reproduce five PASS and one PRICE_DEVIATION",
+    "partial run and automatic checks never imply summary or service baseline approval",
+    "181st call rejected before inner client",
+    "existing round blocks before credential loading"
+  ],
+  "ruff": {
+    "runner": "PASS",
+    "dispatcher_test_prior_findings": 30,
+    "dispatcher_test_current_findings": 30,
+    "new_findings_in_this_turn": 0
+  },
+  "git_diff_check": {
+    "exit_code": 0,
+    "existing_line_ending_warnings": 13
+  },
+  "source_sha256": {
+    "apps/core-api/ai/evaluation/savings/results/20260915-pair-candidate-validation-1/run_round.py": "3e1ed7def4e1cf519e3fe3096acf9fd09d23bb1ef614ca8f109249579a3d0093",
+    "apps/core-api/ai/evaluation/savings/results/20260915-pair-candidate-validation-1/preflight.json": "bfa8c85250e31a2ec1dffa0334c24d59de705bb7152966779ed4d1922e7e7d9c",
+    "apps/core-api/ai/evaluation/savings/results/20260915-pair-candidate-validation-1/diagnosis.json": "5f35fc454ab33ed655f8936c4004ed9ef18d04e72a1757d0c724456e321e1f69",
+    "apps/core-api/ai/evaluation/savings/results/20260915-pair-candidate-validation-1/plan.md": "f4b67e57e4ebe44cd09712601dd1af7881a49f3470e872f09bfe0fce100e7b35",
+    "apps/core-api/ai/evaluation/savings/README.md": "2190fff0a03de2ea30e0629eb5fc0e039cf48133a7e9cfb8b92099cadce800ac",
+    "apps/core-api/tests/test_agent_dispatcher.py": "dc165758f46b952a080233f3987cf0215ef253ad855a62759f9f6096dd380595"
+  }
+}

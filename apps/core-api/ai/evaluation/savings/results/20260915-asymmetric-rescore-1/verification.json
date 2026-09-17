@@ -1,0 +1,43 @@
+{
+  "verified_at": "2026-09-15T08:32:25.587941+00:00",
+  "status": "PASS",
+  "new_model_calls": 0,
+  "historical_artifacts_unchanged": 50,
+  "legacy_scores_reproduced": 10,
+  "new_scores_reproduced": 10,
+  "reference_inputs_and_prices_unchanged": true,
+  "model_prompt_fingerprints_unchanged": {
+    "runtime_prompt_sha256": "b2564546a4e2984973aae75a73543266e75bae883a2740f6e85aeb7ad31612da",
+    "price_only_prompt_sha256": "6bbd22aeeaf3326acbc7c84102507c90db290c8d2b3da1e785266de7488fb1bb",
+    "price_table_prompt_sha256": "ac343004defd53a1a6735d55992e656cdc4e3f171bfd8f81bb212f94e158ad56",
+    "three_call_pair_prompt_sha256": "a10d1654b458c35b2afc856a1d979bdc1dde2a97f16c0bcd03e66b9884b7952f",
+    "three_call_table_prompt_sha256": "5f596c6c3c741fa5b02db35bb768cbc5d22eac74f439f34c2eedb783cca980f0"
+  },
+  "scorer_and_spec_revision": "v0.2.0",
+  "source_hashes": {
+    "apps/core-api/ai/evaluation/savings/scoring.py": "e9cfe8fc49f2640bdc1c1537e2a81aed6881038713c67fdbe4818d970e362aee",
+    "apps/core-api/ai/evaluation/savings/isolation.py": "b5392dbfaf8685e2eee3725e0ca355fc16b14adc5ed365eded91726313568f70",
+    "apps/core-api/ai/evaluation/savings/spec.json": "a9ed0222a39de8e6a56f7478acb3a0d0caf9df8a001ef3b8d4b6abffa8312b57",
+    "apps/core-api/ai/evaluation/savings/spec-v1.json": "acf507e478b61d724971f9a0237086a96a10f290d9ca3b963dc4427e0d810bb9",
+    "apps/core-api/ai/tests/test_savings_evaluation.py": "c9a091c2b331a4c5a25966fecea7c5650040db60cb86f66b5cd386b7283b3db5",
+    "apps/core-api/ai/evaluation/savings/README.md": "bb16cad0ba1f2ae4f3ab02e6cc41301f86d7f2d0b90461a0542ad0acff39be95"
+  },
+  "rescorer_sha256": "3012d992ca611488f042351a40fc6f8cf31447805a946c22ba6085ee93744198",
+  "summary_sha256": "16f92896358162103f97830863ec590d4170f8e3cc90f750b3c511b2d5f64225",
+  "report_sha256": "4fdd1301129f2e83c6adfa52ef7010135fcca10fc3013688cf3f5c0d7e02c8c3",
+  "pytest": {
+    "passed": 57,
+    "failed": 0,
+    "skipped": 0,
+    "errors": 0,
+    "deselected": 2063,
+    "elapsed_seconds": 43.47,
+    "scope": "savings_evaluation or savings_price_table or savings_three_call; CI collection paths"
+  },
+  "ruff": {
+    "files": 4,
+    "status": "PASS"
+  },
+  "local_markdown_links_verified": 19,
+  "service_baseline_evaluated": false
+}

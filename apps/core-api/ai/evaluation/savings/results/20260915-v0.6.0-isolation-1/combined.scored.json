@@ -1,0 +1,140 @@
+{
+  "scorer_version": "v1",
+  "spec_version": "v1",
+  "prompt_version": "v0.5.0",
+  "prompt_sha256": "b2564546a4e2984973aae75a73543266e75bae883a2740f6e85aeb7ad31612da",
+  "model_snapshots": [
+    "gpt-5.6-luna"
+  ],
+  "label": "gpt-5.6-luna (reasoning_effort=low), combined",
+  "price_reference_url": "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonEC2/20260910195514/ap-northeast-2/index.csv",
+  "fixed_set": {
+    "inventory_ids": [
+      "001",
+      "002",
+      "003"
+    ],
+    "case_ids": [
+      "A1",
+      "A7",
+      "A11",
+      "A12",
+      "A14",
+      "A16"
+    ],
+    "input_sha256": "8fffd381a2e89d0d1c0c1b5530e7e4934e244b10978585715ba87c31731d9454"
+  },
+  "criteria": {
+    "repeats": 10,
+    "rate_relative_tolerance": "0.10",
+    "amount_relative_tolerance": "0.10",
+    "amount_absolute_tolerance_usd": "1.00",
+    "minimum_estimated_fraction": "0.95"
+  },
+  "complete": false,
+  "passed": false,
+  "runs": 5,
+  "estimated": 5,
+  "not_estimated": 0,
+  "not_estimated_fraction": "0",
+  "status_counts": {
+    "PASS": 3,
+    "PRICE_DEVIATION": 2
+  },
+  "stability": {
+    "A1": {
+      "estimated_runs": 3,
+      "distinct_amounts": [
+        "115.63",
+        "91.54"
+      ],
+      "all_amounts_equal": false
+    },
+    "A7": {
+      "estimated_runs": 0,
+      "distinct_amounts": [],
+      "all_amounts_equal": null
+    },
+    "A11": {
+      "estimated_runs": 2,
+      "distinct_amounts": [
+        "57.82"
+      ],
+      "all_amounts_equal": true
+    },
+    "A12": {
+      "estimated_runs": 0,
+      "distinct_amounts": [],
+      "all_amounts_equal": null
+    },
+    "A14": {
+      "estimated_runs": 0,
+      "distinct_amounts": [],
+      "all_amounts_equal": null
+    },
+    "A16": {
+      "estimated_runs": 0,
+      "distinct_amounts": [],
+      "all_amounts_equal": null
+    }
+  },
+  "results": [
+    {
+      "case_id": "A1",
+      "status": "PRICE_DEVIATION",
+      "amount": "91.54",
+      "expected_amount": "113.88",
+      "absolute_error_usd": "22.34",
+      "relative_error": "0.1961714085001756234632946962",
+      "current_rate_relative_error": "0.1961538461538461538461538462",
+      "target_rate_relative_error": "0.1961538461538461538461538462",
+      "arithmetic_context_and_assumptions_valid": true
+    },
+    {
+      "case_id": "A11",
+      "status": "PASS",
+      "amount": "57.82",
+      "expected_amount": "56.94",
+      "absolute_error_usd": "0.88",
+      "relative_error": "0.01545486476993326308394801545",
+      "current_rate_relative_error": "0.01538461538461538461538461538",
+      "target_rate_relative_error": "0.01538461538461538461538461538",
+      "arithmetic_context_and_assumptions_valid": true
+    },
+    {
+      "case_id": "A1",
+      "status": "PRICE_DEVIATION",
+      "amount": "91.54",
+      "expected_amount": "113.88",
+      "absolute_error_usd": "22.34",
+      "relative_error": "0.1961714085001756234632946962",
+      "current_rate_relative_error": "0.1961538461538461538461538462",
+      "target_rate_relative_error": "0.1961538461538461538461538462",
+      "arithmetic_context_and_assumptions_valid": true
+    },
+    {
+      "case_id": "A11",
+      "status": "PASS",
+      "amount": "57.82",
+      "expected_amount": "56.94",
+      "absolute_error_usd": "0.88",
+      "relative_error": "0.01545486476993326308394801545",
+      "current_rate_relative_error": "0.01538461538461538461538461538",
+      "target_rate_relative_error": "0.01538461538461538461538461538",
+      "arithmetic_context_and_assumptions_valid": true
+    },
+    {
+      "case_id": "A1",
+      "status": "PASS",
+      "amount": "115.63",
+      "expected_amount": "113.88",
+      "absolute_error_usd": "1.75",
+      "relative_error": "0.01536705303828591499824376537",
+      "current_rate_relative_error": "0.01538461538461538461538461538",
+      "target_rate_relative_error": "0.01538461538461538461538461538",
+      "arithmetic_context_and_assumptions_valid": true
+    }
+  ],
+  "source_sha256": "934633f63e2b4700a8cf2853a34d27d9749d393798f6b17ac7f30140aaef9e06",
+  "spec_sha256": "acf507e478b61d724971f9a0237086a96a10f290d9ca3b963dc4427e0d810bb9"
+}

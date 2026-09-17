@@ -1,0 +1,102 @@
+{
+  "passed": false,
+  "gates": {
+    "price": false,
+    "contract_and_generation": true,
+    "no_proposal": true,
+    "input_facts": true,
+    "execution_fields": true,
+    "judge_completed": false,
+    "restoration": null
+  },
+  "calls": 300,
+  "approved_maximum_calls": 540,
+  "judge_status": "SKIPPED_PRICE_GATE",
+  "usage": {
+    "prompt_tokens": 563288,
+    "completion_tokens": 66307,
+    "cached_prompt_tokens": 346468
+  },
+  "cost_with_reported_cache_usd": "0.12986176",
+  "cost_without_cache_discount_usd": "0.192226",
+  "elapsed_stage_seconds": 925.112,
+  "price_counts": {
+    "PASS": 58,
+    "PRICE_DEVIATION": 2
+  },
+  "savings_direction_counts": {
+    "MATCH": 4,
+    "OVERSTATED": 26,
+    "UNDERSTATED": 30
+  },
+  "minimum_savings_signed_relative_error": "-0.2000351246926589392342817000",
+  "maximum_savings_signed_relative_error": "0.1384791008078679311556023885",
+  "rate_diagnostic_outside_10_percent": 30,
+  "rate_diagnostic_affects_savings_pass": false,
+  "rate_diagnostic_over_10_percent": 2,
+  "amount_on_lower_bound": 22,
+  "flows": {
+    "baseline": {
+      "label": "gpt-5.6-luna/low v2 baseline",
+      "case_count": 6,
+      "repeats": 10,
+      "succeeded": 60,
+      "no_proposal": 0,
+      "failed": 0,
+      "failed_transport": 0,
+      "failed_request": 0,
+      "fact_checked": 60,
+      "fact_failed": 0,
+      "prompt_tokens": 249904,
+      "completion_tokens": 21322,
+      "cached_prompt_tokens": 171263,
+      "unstable": {},
+      "stable_slots": 36,
+      "field_slots": 36,
+      "stability_cases": 6,
+      "readback_lines": 21,
+      "readback_runs": 20,
+      "observation_cited": 60
+    },
+    "candidate": {
+      "label": "gpt-5.6-luna/low v0.9.1 candidate",
+      "case_count": 6,
+      "repeats": 10,
+      "succeeded": 60,
+      "no_proposal": 0,
+      "failed": 0,
+      "failed_transport": 0,
+      "failed_request": 0,
+      "fact_checked": 60,
+      "fact_failed": 0,
+      "prompt_tokens": 313384,
+      "completion_tokens": 44985,
+      "cached_prompt_tokens": 175205,
+      "unstable": {},
+      "stable_slots": 36,
+      "field_slots": 36,
+      "stability_cases": 6,
+      "readback_lines": 44,
+      "readback_runs": 44,
+      "observation_cited": 60
+    }
+  },
+  "summary_comparison": {},
+  "sources_changed_after_measurement": {
+    "scripts/finops_eval.py": {
+      "measured": "be63e365d3333c58e88f763afa1629bc6ae40b61552709f7f0a70a23ad711a51",
+      "current": "e3b16a54353c747057c23742c167be4fe6d171caa5a30b840d8fb74f1d45cfad"
+    }
+  },
+  "artifacts_sha256": {
+    "preflight.json": "7d079adcc146f31f0536630639ae5e3d595c6e1b02d37fb94c20615ec453729f",
+    "approval.json": "6adf6a9b8f8f5db079dcab57df1c712ae94dae1fac89289562f42249831ebbf8",
+    "metadata.json": "303af18e82b51df34ac832962364d2fbd75403762f1350f3af2c5f69600dca88",
+    "baseline-raw.json": "c40046573b72992b81ec9387700c346163b01e90c9e13ba5aa6165bc94a28cf7",
+    "candidate-raw.json": "ec56cc7447726d27d4f43a4fe60366fe330929fefadeab0f3786c8724ab74974",
+    "baseline-flow.json": "c08c257867f6262e86e74c224d68af9043414cbc407afa03532da6613ee40b46",
+    "candidate-flow.json": "b3077b7e594cad0589dafeef4304be0e1bc2798f11ed7193f246827185c7b001",
+    "candidate-scored.json": "aa1b017f9a5d7ba4a7c664438701113cfdc8dac4efdbacd37cbb652c7cd3df7f"
+  },
+  "analysis_source_sha256": "6db0c6164f59c0aacbfb000d06211b098c1e7ab864e6fa2ce90a694d8665c7d7"
+}

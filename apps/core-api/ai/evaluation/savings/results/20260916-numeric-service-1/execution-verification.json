@@ -1,0 +1,84 @@
+{
+  "verified_at": "2026-09-16T02:17:26.390953+00:00",
+  "passed": true,
+  "method": "Independent saved-record checks and Decimal calculations; no external calls",
+  "current_sources_unchanged": 51,
+  "historical_artifacts_unchanged": 175,
+  "before_archive_sources_verified": 46,
+  "online_service_paths": 6,
+  "fresh_api_reads": 24,
+  "read_model_calls": 0,
+  "free_service_paths": 6,
+  "pytest_passed": 2222,
+  "pytest_skipped": 2,
+  "new_paid_calls": 18,
+  "cumulative_paid_calls": 80,
+  "remaining_calls": 0,
+  "cost_usage_estimate_usd": "0.0089048",
+  "cumulative_cost_usage_estimate_usd": "0.0351480",
+  "cases": [
+    {
+      "case_id": "A1",
+      "amount": "115.63",
+      "reference": "113.88",
+      "lower": "91.10",
+      "upper": "125.27",
+      "at_lower_bound": false,
+      "signed_error_percent": "1.536705303828591499824376500",
+      "rates_within_10_percent": true
+    },
+    {
+      "case_id": "A7",
+      "amount": "115.63",
+      "reference": "113.88",
+      "lower": "91.10",
+      "upper": "125.27",
+      "at_lower_bound": false,
+      "signed_error_percent": "1.536705303828591499824376500",
+      "rates_within_10_percent": true
+    },
+    {
+      "case_id": "A11",
+      "amount": "57.82",
+      "reference": "56.94",
+      "lower": "45.55",
+      "upper": "62.63",
+      "at_lower_bound": false,
+      "signed_error_percent": "1.545486476993326308394801500",
+      "rates_within_10_percent": true
+    },
+    {
+      "case_id": "A12",
+      "amount": "50.81",
+      "reference": "56.94",
+      "lower": "45.55",
+      "upper": "62.63",
+      "at_lower_bound": false,
+      "signed_error_percent": "-10.76571829996487530734106077",
+      "rates_within_10_percent": false
+    },
+    {
+      "case_id": "A14",
+      "amount": "55.19",
+      "reference": "56.94",
+      "lower": "45.55",
+      "upper": "62.63",
+      "at_lower_bound": false,
+      "signed_error_percent": "-3.073410607657182999648753070",
+      "rates_within_10_percent": true
+    },
+    {
+      "case_id": "A16",
+      "amount": "45.55",
+      "reference": "56.94",
+      "lower": "45.55",
+      "upper": "62.63",
+      "at_lower_bound": true,
+      "signed_error_percent": "-20.00351246926589392342817000",
+      "rates_within_10_percent": false
+    }
+  ],
+  "metadata_sha256": "73ca9600b9b62f1761a57f3e3114f81b4fcb15546b7cd72dc08a163f5b4f979e",
+  "analysis_sha256": "3efe02a978eb72e3364eef9d231c019cc48d75abf2f96f84eef03c739e346c82",
+  "verifier_sha256": "8544ac7f8c8611c020281569dd29d64bb1f959df79f966c9ec5f5ba8d74c0f66"
+}

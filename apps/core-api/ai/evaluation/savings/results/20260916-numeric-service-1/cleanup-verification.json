@@ -1,0 +1,14 @@
+{
+  "metadata.json": {
+    "owned_instances": 6,
+    "terminated": 6
+  },
+  "free-service.json": {
+    "owned_instances": 6,
+    "terminated": 6
+  },
+  "verified_at": "2026-09-16T02:17:27.362199+00:00",
+  "localstack_endpoint": "http://localhost:4566",
+  "temporary_service_databases_remaining": 0,
+  "verification_mutated_resources": false
+}

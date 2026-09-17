@@ -1,0 +1,27 @@
+{
+  "verified_at": "2026-09-16T01:07:21.194107+00:00",
+  "paid_model_calls": 0,
+  "pytest": {
+    "name": "pytest",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "2",
+    "tests": "2181",
+    "time": "82.358",
+    "timestamp": "2026-09-16T10:04:42.124905+09:00",
+    "hostname": "AICA_HRD"
+  },
+  "passed": 2179,
+  "new_candidate_checks": 27,
+  "ruff_changed_files": "passed",
+  "protected_previous_code_count": 37,
+  "changed_previous_code": [],
+  "protected_historical_files": 140,
+  "changed_historical_files": [],
+  "source_sha256": {
+    "apps/core-api/ai/evaluation/savings/compact.py": "a9fb8c22de45dea3313c4e83478a23db6c249e8d6f7908871502e13aa40848c0",
+    "apps/core-api/ai/evaluation/savings/compact_validation.py": "de9fceac9407a29599680bef560214390c4ede284b8e7bdb71ce8a3f657b2820",
+    "apps/core-api/ai/tests/test_savings_compact.py": "74716d2ba2e9d70e2ceabe7c84dd5823a7efa0e792f90947a31c13b49a33ca67"
+  },
+  "preflight_sha256": "d181e7a572f578b1e2fa1b1b2cc7037c07f138b82f5d3718fb4d278f581962d4"
+}

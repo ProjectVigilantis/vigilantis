@@ -1,0 +1,14 @@
+{
+  "full_pytest": {
+    "passed": 2140,
+    "failed": 1,
+    "skipped": 2,
+    "elapsed_seconds": 47.06,
+    "remaining_failure": "approved snapshot v2 != candidate v0.9.1; requires approved final model validation",
+    "skip_kind": "existing unconditional E2E holds"
+  },
+  "offline_guards": "approval, stage/total caps, sequence, duplicate start all passed",
+  "real_calls_before_execution": 0,
+  "candidate_prompt_sha256": "f1c3e037a8eb9ed2993b78a083c4e488b94c033bebd345bc09542a8b9796fbfa",
+  "frozen_sources": 18
+}

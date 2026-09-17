@@ -1,0 +1,157 @@
+{
+ "label": "gpt-5.6-luna (reasoning_effort=low)",
+ "prompt_version": "v3",
+ "prompt_sha256": "9574d258465a02dad5790684e47042625aa652dfe5017598a5ffd9ba7a6f0d3e",
+ "model_snapshots": [
+  "gpt-5.6-luna"
+ ],
+ "repeats": 1,
+ "payload_dedup_active": {
+  "A1": true,
+  "A11": true
+ },
+ "fixed_set": {
+  "inventory_ids": [
+   "001",
+   "002",
+   "003"
+  ],
+  "case_ids": [
+   "A1",
+   "A7",
+   "A11",
+   "A12",
+   "A14",
+   "A16"
+  ],
+  "input_sha256": "8fffd381a2e89d0d1c0c1b5530e7e4934e244b10978585715ba87c31731d9454"
+ },
+ "runs": [
+  {
+   "case_id": "A1",
+   "invocation_status": "SUCCEEDED",
+   "summary_lines": [
+    "EC2 인스턴스 i-0a1b2c3d4e5f00001은 2026-08-05T06:00:00Z부터 2026-08-19T06:00:00Z까지 CPU 평균 사용률 4.9%, 최대 사용률 10.0%, 데이터포인트 336개와 네트워크 입력 평균 1024.0, 출력 평균 768.0으로 관측되었다.",
+    "이 자산은 실행 중인 t3.xlarge 스테이징 EC2이며 14일간 CPU 사용률이 낮아 과대 스펙 상태로 확정되고, 현재 입력에는 고정 대수 운영 여부가 없어 Auto Scaling 전환 필요성은 판단할 수 없다.",
+    "낮은 CPU 평균·최대 사용률이 과대 스펙을 뒷받침하므로 과대 스펙 EC2 다운사이징이 이 자산에 맞는 조치이다."
+   ],
+   "candidates": [
+    {
+     "runbook_id": "RUNBOOK_EC2_RIGHTSIZING",
+     "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00001",
+     "parameters": {
+      "target_instance_type": "t3.medium"
+     },
+     "ai_savings_estimate": {
+      "status": "ESTIMATED",
+      "currency": "USD",
+      "period": "MONTH",
+      "amount": "103.37",
+      "basis": {
+       "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00001",
+       "region": "ap-northeast-2",
+       "current_instance_type": "t3.xlarge",
+       "target_instance_type": "t3.medium",
+       "current_hourly_rate": "0.188800",
+       "target_hourly_rate": "0.047200",
+       "assumptions": {
+        "hours": 730,
+        "operating_system": "LINUX",
+        "tenancy": "SHARED",
+        "purchase_option": "ON_DEMAND",
+        "included_cost": "INSTANCE_COMPUTE_ONLY",
+        "pricing_source": "MODEL_KNOWLEDGE"
+       },
+       "explanation": "모델 지식 기반으로 서울 리전 Linux 공유형 온디맨드 인스턴스 요금을 추정했다. 시간당 차액은 USD 0.188800-USD 0.047200=USD 0.141600이며, 730시간 기준 월 절감액은 USD 0.141600×730=USD 103.37이다. 스토리지·네트워크·세금·할인·크레딧은 제외했으며 실제 요금과 다를 수 있다."
+      },
+      "reason": null
+     },
+     "evidence_ids": [
+      "ev-a1-rule",
+      "ev-a1-metric"
+     ]
+    }
+   ],
+   "prompt_tokens": 4603,
+   "completion_tokens": 781,
+   "cached_prompt_tokens": 0,
+   "error": null,
+   "error_phase": null,
+   "identifier_violations": [],
+   "number_violations": [],
+   "instance_types_outside_input": [],
+   "derived_numbers": [
+    "14"
+   ],
+   "readback_hits": [
+    [],
+    [],
+    []
+   ],
+   "observation_cites_input": true
+  },
+  {
+   "case_id": "A11",
+   "invocation_status": "SUCCEEDED",
+   "summary_lines": [
+    "EC2 인스턴스 i-0a1b2c3d4e5f00021은 2026-08-11T06:00:00Z부터 2026-08-25T06:00:00Z까지 CPU 평균 사용률 1.5%, 최대 사용률 10.0%, 데이터포인트 336개를 기록했고 판정은 COST_CANDIDATE이다.",
+    "t3.large 인스턴스의 해당 관측 기간 CPU 사용률이 낮아 과대 스펙일 가능성이 추정되며, 입력에는 메모리 사용률이나 애플리케이션 성능 영향 정보가 없다.",
+    "CPU 사용률이 낮다는 근거가 과대 스펙 EC2 다운사이징 조치를 뒷받침하므로 이 인스턴스에 해당 조치를 검토할 수 있다."
+   ],
+   "candidates": [
+    {
+     "runbook_id": "RUNBOOK_EC2_RIGHTSIZING",
+     "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00021",
+     "parameters": {
+      "target_instance_type": "t3.small"
+     },
+     "ai_savings_estimate": {
+      "status": "ESTIMATED",
+      "currency": "USD",
+      "period": "MONTH",
+      "amount": "45.55",
+      "basis": {
+       "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00021",
+       "region": "ap-northeast-2",
+       "current_instance_type": "t3.large",
+       "target_instance_type": "t3.small",
+       "current_hourly_rate": "0.083200",
+       "target_hourly_rate": "0.020800",
+       "assumptions": {
+        "hours": 730,
+        "operating_system": "LINUX",
+        "tenancy": "SHARED",
+        "purchase_option": "ON_DEMAND",
+        "included_cost": "INSTANCE_COMPUTE_ONLY",
+        "pricing_source": "MODEL_KNOWLEDGE"
+       },
+       "explanation": "서울 리전 Linux 공유형 온디맨드 인스턴스 요금을 모델 지식으로 추정했다. 시간당 절감액은 $0.083200-$0.020800=$0.062400이며, 월 절감액은 $0.062400×730=$45.55이다. 스토리지·네트워크·세금·할인·크레딧은 제외했으며 실제 요금과 사용량에 따라 달라질 수 있다."
+      },
+      "reason": null
+     },
+     "evidence_ids": [
+      "ev-a11-rule",
+      "ev-a11-metric"
+     ]
+    }
+   ],
+   "prompt_tokens": 4578,
+   "completion_tokens": 616,
+   "cached_prompt_tokens": 1682,
+   "error": null,
+   "error_phase": null,
+   "identifier_violations": [],
+   "number_violations": [],
+   "instance_types_outside_input": [],
+   "derived_numbers": [],
+   "readback_hits": [
+    [
+     "COST_CANDIDATE"
+    ],
+    [],
+    []
+   ],
+   "observation_cites_input": true
+  }
+ ]
+}

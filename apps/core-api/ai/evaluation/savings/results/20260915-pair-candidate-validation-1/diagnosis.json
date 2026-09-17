@@ -1,0 +1,41 @@
+{
+  "source": "../20260915-v0.7.0-three-call-2/raw.json",
+  "source_sha256": "784ba3e05454a864a2bf26a6162af4f3dad617ee31dbbabadfaac5022253d764",
+  "case_id": "A1",
+  "repeat": 1,
+  "live_calls": 0,
+  "current_contract_replay": "ESTIMATED; exact output preserved",
+  "independent_price_score": {
+    "status": "PRICE_DEVIATION",
+    "amount": "129.65",
+    "expected_amount": "113.88",
+    "absolute_error_usd": "15.77",
+    "relative_error": "0.1384791008078679311556023885",
+    "current_rate_relative_error": "0.1076923076923076923076923077",
+    "target_rate_relative_error": "0.01538461538461538461538461538",
+    "arithmetic_context_and_assumptions_valid": true,
+    "savings_direction": "OVERSTATED",
+    "signed_relative_error": "0.1384791008078679311556023885",
+    "amount_lower_bound_usd": "91.10",
+    "amount_upper_bound_usd": "125.27",
+    "rate_accuracy": {
+      "within_symmetric_tolerance": false,
+      "affects_savings_pass": false,
+      "current_signed_relative_error": "0.1076923076923076923076923077",
+      "target_signed_relative_error": "0.01538461538461538461538461538"
+    }
+  },
+  "current_rate_contribution_usd": "16.352000",
+  "target_rate_contribution_usd": "-0.584000",
+  "generated_formula_unrounded_usd": "129.648000",
+  "amount_rounding_residual_usd": "0.002000",
+  "observed_error_boundary": "GENERATED_CURRENT_HOURLY_RATE",
+  "internal_model_cause": "UNKNOWN",
+  "chain_of_thought_collected": false,
+  "public_explanation_is_internal_reasoning": false,
+  "hypotheses_not_established": [
+    "rate recall error",
+    "billing-context confusion"
+  ],
+  "overestimate_resolved": false
+}

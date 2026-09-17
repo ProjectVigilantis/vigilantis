@@ -1,0 +1,287 @@
+{
+  "scope": "user-approved maximum 12 calls; combined versus price-only; Luna/low; no retries; stop on price-only criterion failure",
+  "trial_version": "v0.6.0",
+  "execution_mode": "recommendation_vs_price_only",
+  "started_at": "2026-09-15T05:45:33.588463+00:00",
+  "status": "EARLY_STOP_PRICE_ONLY_FAILED",
+  "model": "gpt-5.6-luna",
+  "reasoning_effort": "low",
+  "temperature": null,
+  "timeout_seconds": 30.0,
+  "max_attempts": 1,
+  "sdk_max_retries": 0,
+  "call_budget": 12,
+  "planned_repeats_per_case_and_condition": 3,
+  "schedule": [
+    {
+      "repeat": 1,
+      "case_id": "A1",
+      "condition": "combined"
+    },
+    {
+      "repeat": 1,
+      "case_id": "A1",
+      "condition": "price_only"
+    },
+    {
+      "repeat": 1,
+      "case_id": "A11",
+      "condition": "price_only"
+    },
+    {
+      "repeat": 1,
+      "case_id": "A11",
+      "condition": "combined"
+    },
+    {
+      "repeat": 2,
+      "case_id": "A1",
+      "condition": "price_only"
+    },
+    {
+      "repeat": 2,
+      "case_id": "A1",
+      "condition": "combined"
+    },
+    {
+      "repeat": 2,
+      "case_id": "A11",
+      "condition": "combined"
+    },
+    {
+      "repeat": 2,
+      "case_id": "A11",
+      "condition": "price_only"
+    },
+    {
+      "repeat": 3,
+      "case_id": "A1",
+      "condition": "combined"
+    },
+    {
+      "repeat": 3,
+      "case_id": "A1",
+      "condition": "price_only"
+    },
+    {
+      "repeat": 3,
+      "case_id": "A11",
+      "condition": "price_only"
+    },
+    {
+      "repeat": 3,
+      "case_id": "A11",
+      "condition": "combined"
+    }
+  ],
+  "calls": [
+    {
+      "number": 1,
+      "repeat": 1,
+      "case_id": "A1",
+      "condition": "combined",
+      "status": "RETURNED",
+      "elapsed_seconds": 6.249,
+      "model": "gpt-5.6-luna",
+      "grade": "PRICE_DEVIATION"
+    },
+    {
+      "number": 2,
+      "repeat": 1,
+      "case_id": "A1",
+      "condition": "price_only",
+      "status": "RETURNED",
+      "elapsed_seconds": 3.654,
+      "model": "gpt-5.6-luna",
+      "grade": "PASS"
+    },
+    {
+      "number": 3,
+      "repeat": 1,
+      "case_id": "A11",
+      "condition": "price_only",
+      "status": "RETURNED",
+      "elapsed_seconds": 3.937,
+      "model": "gpt-5.6-luna",
+      "grade": "PASS"
+    },
+    {
+      "number": 4,
+      "repeat": 1,
+      "case_id": "A11",
+      "condition": "combined",
+      "status": "RETURNED",
+      "elapsed_seconds": 5.674,
+      "model": "gpt-5.6-luna",
+      "grade": "PASS"
+    },
+    {
+      "number": 5,
+      "repeat": 2,
+      "case_id": "A1",
+      "condition": "price_only",
+      "status": "RETURNED",
+      "elapsed_seconds": 4.019,
+      "model": "gpt-5.6-luna",
+      "grade": "PASS"
+    },
+    {
+      "number": 6,
+      "repeat": 2,
+      "case_id": "A1",
+      "condition": "combined",
+      "status": "RETURNED",
+      "elapsed_seconds": 5.238,
+      "model": "gpt-5.6-luna",
+      "grade": "PRICE_DEVIATION"
+    },
+    {
+      "number": 7,
+      "repeat": 2,
+      "case_id": "A11",
+      "condition": "combined",
+      "status": "RETURNED",
+      "elapsed_seconds": 5.423,
+      "model": "gpt-5.6-luna",
+      "grade": "PASS"
+    },
+    {
+      "number": 8,
+      "repeat": 2,
+      "case_id": "A11",
+      "condition": "price_only",
+      "status": "RETURNED",
+      "elapsed_seconds": 3.46,
+      "model": "gpt-5.6-luna",
+      "grade": "PASS"
+    },
+    {
+      "number": 9,
+      "repeat": 3,
+      "case_id": "A1",
+      "condition": "combined",
+      "status": "RETURNED",
+      "elapsed_seconds": 4.743,
+      "model": "gpt-5.6-luna",
+      "grade": "PASS"
+    },
+    {
+      "number": 10,
+      "repeat": 3,
+      "case_id": "A1",
+      "condition": "price_only",
+      "status": "RETURNED",
+      "elapsed_seconds": 3.282,
+      "model": "gpt-5.6-luna",
+      "grade": "INVALID"
+    }
+  ],
+  "stopping_rule": "First price_only grade other than PASS stops the round; transport/request errors abort the round; no retries.",
+  "frozen_summary_source": "../20260915-v0.4.0-probe-1/raw.json",
+  "frozen_summary_source_sha256": "02d0dce89246a3f6f9ffa30b2eb6609877536d61532284f842be960e7d31daef",
+  "frozen_summaries_sha256": "40c0818e47462198fa38dcace793224a54f806558329bf60868fd3fa18bcc5fc",
+  "fixed_set": {
+    "inventory_ids": [
+      "001",
+      "002",
+      "003"
+    ],
+    "case_ids": [
+      "A1",
+      "A7",
+      "A11",
+      "A12",
+      "A14",
+      "A16"
+    ],
+    "input_sha256": "8fffd381a2e89d0d1c0c1b5530e7e4934e244b10978585715ba87c31731d9454"
+  },
+  "spec_sha256": "acf507e478b61d724971f9a0237086a96a10f290d9ca3b963dc4427e0d810bb9",
+  "user_json_sha256": {
+    "A1": {
+      "combined": "e690472e4ac78ebabc553c9ad75c383099dbe7966178f293aacac7c08835f22a",
+      "price_only": "dc537e033e5c414aeabca50b6fc9a5a85982e431d483401c799007b3085166cb"
+    },
+    "A11": {
+      "combined": "5021cc88544ee0aed79bf13b93a75a40cb99a3883016181a305bb2576976fc64",
+      "price_only": "447d129c5bb029c5625fa7113b259b093a9063fc00bed133f2657dce8e7b0f9e"
+    }
+  },
+  "conditions": {
+    "combined": {
+      "prompt_version": "v0.5.0",
+      "prompt_sha256": "b2564546a4e2984973aae75a73543266e75bae883a2740f6e85aeb7ad31612da",
+      "system_prompt_sha256": "40d092ad772774c63fb8f5a9e5632bfdb19953fedf1cfb370b6202eeec3f453f",
+      "output_schema_sha256": "845a560f91dbc0be8c3174eac556ee09df33311f86a23357d2aa295fb2cff45b"
+    },
+    "price_only": {
+      "prompt_version": "v0.6.0",
+      "prompt_sha256": "6bbd22aeeaf3326acbc7c84102507c90db290c8d2b3da1e785266de7488fb1bb",
+      "system_prompt_sha256": "c65286707391d010886a94f0ce1b6d47b51e0ef1ddcc2ea2a0e07d005511e20d",
+      "output_schema_sha256": "491767c493f33cf91dd61dc859ef545a95e2dfd1f53478a7b55a72a742d854ad"
+    }
+  },
+  "price_per_million_usd": {
+    "input": 0.2,
+    "cached_input": 0.02,
+    "output": 1.2
+  },
+  "pricing_source": "https://developers.openai.com/api/docs/models/gpt-5.6-luna",
+  "git_base_head": "3e482a4aed9bdae3308d1eabc58676963e1265c2",
+  "observed_remote_heads": {
+    "dev": "4c9c90fcc25b4f7f0df9c3f30b972068c1f98b1a",
+    "main": "62a4b4ecaa8a9323ace0f4ca4bb13703e9c813b9"
+  },
+  "implementation_sha256": {
+    "apps/core-api/ai/agent.py": "a54f78343cc39b852297816b70d80dc618e0c0c478c960f6d12664819a71ba89",
+    "apps/core-api/ai/savings.py": "24481b5a691c310c5a3ecef4d60edd41abecdd6debabdc957da18b076c2cc5cb",
+    "packages/schemas/savings.py": "baec5cae65044edf41fa77d9209a538fed25bf418fff28e18adb7a3b2da1d139",
+    "apps/core-api/ai/evaluation/savings/scoring.py": "b4e1708880d3dbec2593e28410608942c1cddd76438c6f2121369de2358ef18f",
+    "apps/core-api/ai/evaluation/savings/isolation.py": "120e37b4a1d1054309351c561823e1c040f13b11ffa1e536adf0a89dd9fa8f5c",
+    "apps/core-api/ai/evaluation/savings/replay.py": "590e5f99d412634b4efe11ab273b6ca3adb22d786807a96fd4e31a858187a381",
+    "scripts/finops_eval.py": "be63e365d3333c58e88f763afa1629bc6ae40b61552709f7f0a70a23ad711a51"
+  },
+  "package_versions": {
+    "openai": "3.0.0",
+    "pydantic": "2.13.4",
+    "langgraph": "1.2.11"
+  },
+  "preflight": {
+    "mock_sdk_requests": 2,
+    "live_calls": 0,
+    "same_price_context": true,
+    "same_estimate_schema": true,
+    "historical_scored_files_unchanged": 4,
+    "ruff_new_diagnostics": 0,
+    "focused_tests": {
+      "passed": 91,
+      "failed": 1,
+      "errors": 0,
+      "skipped": 0,
+      "deselected": 1991,
+      "elapsed_seconds": 43.68,
+      "failure": "approved prompt snapshot v2 differs from runtime v0.5.0"
+    },
+    "sandbox_test_environment_error": "Initial tmp_path setup was denied; identical suite rerun on host resolved the environment error."
+  },
+  "attempted_calls": 10,
+  "unused_call_budget": 2,
+  "usage": {
+    "prompt_tokens": 21312,
+    "completion_tokens": 4017,
+    "cached_prompt_tokens": 14609
+  },
+  "cost_estimate_without_cache_discount_usd": "0.0090828",
+  "cost_note": "Available response usage multiplied by public rates, without cache discount; not an invoice amount.",
+  "price_only_probe_passed": false,
+  "early_stop": {
+    "repeat": 3,
+    "case_id": "A1",
+    "condition": "price_only",
+    "grade": "INVALID"
+  },
+  "elapsed_seconds": 45.755,
+  "ended_at": "2026-09-15T05:46:19.787863+00:00",
+  "actual_client_calls": 10,
+  "exit_code": 0
+}

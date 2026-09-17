@@ -1,0 +1,56 @@
+{
+  "candidate_version": "v0.9.1",
+  "candidate_prompt_sha256": "f1c3e037a8eb9ed2993b78a083c4e488b94c033bebd345bc09542a8b9796fbfa",
+  "baseline_ref": "3e482a4aed9bdae3308d1eabc58676963e1265c2",
+  "baseline_source_sha256": "822c8347be854594f99dcbf0dc091ee30c6b0e6561d9312a315aa0b44659be20",
+  "baseline_prompt_sha256": "1e2e5c45cd1b1d250ebf371ba65699827bf3c42f88f6d77080515a07c22e1cc7",
+  "judge_prompt_sha256": "e582efcac19b88a544da17d90cccc320e152f74ac9164cf37b657d08422b76e9",
+  "fixed_set": {
+    "inventory_ids": [
+      "001",
+      "002",
+      "003"
+    ],
+    "case_ids": [
+      "A1",
+      "A7",
+      "A11",
+      "A12",
+      "A14",
+      "A16"
+    ],
+    "input_sha256": "8fffd381a2e89d0d1c0c1b5530e7e4934e244b10978585715ba87c31731d9454"
+  },
+  "spec_sha256": "a9ed0222a39de8e6a56f7478acb3a0d0caf9df8a001ef3b8d4b6abffa8312b57",
+  "source_sha256": {
+    "apps/core-api/ai/agent.py": "2edfa225588e8a6deb031f49233c831c77810db084d4314ede5878f289af107c",
+    "apps/core-api/ai/savings.py": "ff918a00a0203dbf10f302e3707d1b150dd49f62a054499f7c2d786ce44933e6",
+    "apps/core-api/ai/model_client.py": "90b97df832fe8ff1597322cbb0587073c5f2185ce5f1e15dffb2386a6c403623",
+    "apps/core-api/ai/openai_client.py": "00eddda7b43a5ea78afd12f2848e8f7864c8042d6611905964f5bc7bc6bc4a11",
+    "apps/core-api/ai/evaluation/judge.py": "890291099ec8d7132bad397c21e1cda3266a819bc314f759608dd9be7b8fb71b",
+    "apps/core-api/ai/evaluation/factcheck.py": "0a4fc961382d4cc5cf2b9d4265c4e9fdab78a12bd14b4d12ab2ed5fdea1a0233",
+    "apps/core-api/ai/evaluation/cases.py": "9fb97f8272db199e12b62c40b1f5e622e1e355db217d98b54cb5bb5acbe8cad2",
+    "apps/core-api/ai/evaluation/readback.py": "26eee167a0630575b5df72d73e4bfcd060d77bb9b7ddd3b4fc73366bf20eedd5",
+    "apps/core-api/ai/evaluation/report.py": "7388ae9a7e7d26af2a9dd1e445611e34b9ae14116398812e9322637a63728445",
+    "apps/core-api/ai/evaluation/reproducibility.py": "b3e227cc04b9190fcc3d84d3f23dd1a15f19dafbd3edd84d313e5c12251af8cd",
+    "apps/core-api/ai/evaluation/savings/scoring.py": "e9cfe8fc49f2640bdc1c1537e2a81aed6881038713c67fdbe4818d970e362aee",
+    "apps/core-api/ai/evaluation/summary_prompt_snapshot.json": "63f1e5a8605fa12a093648ab9529c88a5cb2388756674cbc68a7f0a5fa37d211",
+    "packages/schemas/agents.py": "7e820e4df89b5f9dc0b61724541f8e988a284026a2e979f9fdc36669659dc5c7",
+    "packages/schemas/savings.py": "cdad492dcd50c567e518fd2c2f746f887417f7ac31c76652b03682c3ee780d26",
+    "packages/schemas/rightsizing_policy.py": "2114226a4981c29a5ef888e0de7f1704a47b74ac2d38d91bece8575d86b8b74b",
+    "scripts/finops_eval.py": "be63e365d3333c58e88f763afa1629bc6ae40b61552709f7f0a70a23ad711a51",
+    "scripts/finops_judge.py": "4772a6f9b0245d6d920371053e3ffc5cb62a310e712be4bd7d5dcf5a3e7102cb",
+    "apps/core-api/ai/evaluation/savings/results/20260915-service-adoption-1/run_validation.py": "ee7f59da9d0ab69b4636fadd4d3696d057b43622b0e7b4dbb86b3a3925a1101a"
+  },
+  "model": "gpt-5.6-luna",
+  "reasoning_effort": "low",
+  "temperature": null,
+  "stage_call_limits": {
+    "baseline": 120,
+    "candidate": 180,
+    "judge": 240
+  },
+  "maximum_calls": 540,
+  "sdk_max_retries": 0,
+  "max_attempts": 1
+}

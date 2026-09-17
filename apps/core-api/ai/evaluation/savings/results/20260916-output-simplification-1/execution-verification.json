@@ -1,0 +1,34 @@
+{
+  "execution_integrity_verified": true,
+  "candidate_quality_passed": false,
+  "full_sweep_completed": false,
+  "first_price_failure_stopped_execution": true,
+  "live_model_calls": 2,
+  "extra_calls_in_this_verification": 0,
+  "user_limit_unused": 78,
+  "round_calls_unexecuted": 58,
+  "arithmetic_and_bounds": [
+    {
+      "case_id": "A1",
+      "amount": "115.63",
+      "reference": "113.88",
+      "lower": "91.10",
+      "upper": "125.27",
+      "grade": "PASS"
+    },
+    {
+      "case_id": "A7",
+      "amount": "126.14",
+      "reference": "113.88",
+      "lower": "91.10",
+      "upper": "125.27",
+      "grade": "PRICE_DEVIATION"
+    }
+  ],
+  "cost_usage_estimate_usd": "0.0011088",
+  "previous_code_files_unchanged": 37,
+  "historical_files_unchanged": 140,
+  "verified_source_sha256": "4e740e9b46bbb81eccdc0f046e642783d688e2e7aaba67c62ca9d8118c312e18",
+  "metadata_sha256": "b2be0ee0a7fbf50500ae8184e39ab3fb4013c8b04deee5b6d3148ec1016c9a80",
+  "preflight_sha256": "d181e7a572f578b1e2fa1b1b2cc7037c07f138b82f5d3718fb4d278f581962d4"
+}

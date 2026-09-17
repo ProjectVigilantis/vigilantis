@@ -1,0 +1,86 @@
+{
+  "checked_at": "2026-09-17T00:30:27.642842+00:00",
+  "branch": "feat/AI-347-action-savings",
+  "base": "dev",
+  "base_commit": "65e47d87aea1eafd152c89af10a76781f3d75716",
+  "integrated_pr": 358,
+  "upstream_files": [
+    "apps/core-api/tests/test_e2e_flow.py",
+    "tests/test_e2e_scenario.py"
+  ],
+  "pytest": {
+    "passed": 2259,
+    "skipped": 0,
+    "failures": 0,
+    "errors": 0,
+    "seconds": 75.35,
+    "exit_code": 0,
+    "ci_path_count": 7,
+    "junit_sha256": "c5939d99f038655f1b78855aa25019174fae608af70d8bb25c60343a7afd92c4"
+  },
+  "paid_calls": 0,
+  "dependency_sync": "uv sync --locked --all-packages --offline: exit 0",
+  "source_hashes_unchanged": 62,
+  "previous_source_hash_record": "../20260916-publication-cleanup/verification.json",
+  "open_pr_overlap": [
+    {
+      "number": 357,
+      "head": "ab9426774eeb8c232af053e004e6bb19b134576b",
+      "paths": []
+    },
+    {
+      "number": 353,
+      "head": "29b84588e861615a673d2de741683b1b66b6fcb0",
+      "paths": []
+    },
+    {
+      "number": 351,
+      "head": "ff7f4984525ff4d5676c3e91f919fd2c4eecdb78",
+      "paths": []
+    }
+  ],
+  "unchanged_paths": [
+    "apps/core-api/ai/evaluation/cases.py",
+    "tests/test_golden_ai_dataset.py"
+  ],
+  "previous_free_service": {
+    "record": "../20260916-publication-cleanup/free-service.json",
+    "paths": 6,
+    "fresh_api_reads": 24,
+    "read_model_calls": 0,
+    "rerun_this_round": false
+  },
+  "previous_lint": {
+    "record": "../20260916-publication-cleanup/lint-vs-dev.json",
+    "existing": 185,
+    "added_vs_dev": 0,
+    "source_files_unchanged": true
+  },
+  "github_ci": "not yet run",
+  "note": "New upstream E2E tests ran with test doubles and local PostgreSQL. This is not real AWS execution or a new model-quality experiment.",
+  "diff_check": {
+    "original_exit_code": 2,
+    "preserved_original_whitespace": {
+      "path": "apps/core-api/ai/evaluation/savings/results/20260916-numeric-service-1/pytest.xml",
+      "line": 3,
+      "kind": "spaces in captured JUnit output"
+    },
+    "excluding_that_original_record_exit_code": 0
+  },
+  "isolated_summary_commit_tests": {
+    "passed": 94,
+    "skipped": 0,
+    "failures": 0,
+    "seconds": 0.98,
+    "scope": "exported first-commit index, four AI test files"
+  },
+  "post_test_formatting": {
+    "path": "apps/core-api/ai/tests/test_savings_numeric.py",
+    "change": "Remove one blank line at EOF",
+    "before_sha256": "c70467b9cbfbcdb073f47fdfb107fec5fcf47fc64e0bc718fd742edea249f62e",
+    "after_sha256": "e635fb019c519fc325a90ad76dcf992e4d218b8043d8203ab718a45223009080",
+    "ast_equal": true,
+    "full_suite_repeated": false
+  },
+  "source_hashes_unchanged_after_formatting": 61
+}

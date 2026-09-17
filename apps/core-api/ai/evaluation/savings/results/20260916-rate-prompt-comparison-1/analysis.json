@@ -1,0 +1,1474 @@
+{
+  "execution_status": "COMPLETED",
+  "attempted_calls": 60,
+  "unused_calls": 0,
+  "usage": {
+    "prompt_tokens": 55150,
+    "completion_tokens": 20554,
+    "cached_prompt_tokens": 0
+  },
+  "calls_without_usage": 0,
+  "cost_without_cache_discount_usd": "0.0356948",
+  "cost_with_reported_cache_usd": "0.0356948",
+  "cost_note": "usage와 공개 단가의 추정. 미보고 usage·캐시 쓰기 비용·실제 청구는 미확인.",
+  "comparison_complete": true,
+  "columns": {
+    "v0.9.0": {
+      "execution_mode": "price_only_diagnostic",
+      "scorer_version": "v0.2.0",
+      "spec_version": "v0.2.0",
+      "prompt_version": "v0.9.0",
+      "prompt_sha256": "33f5eed50cc605620831faa75d148588c119236bdb837b6d42f29e808dae8d92",
+      "model_snapshots": [
+        "gpt-5.6-luna"
+      ],
+      "fixed_set": {
+        "inventory_ids": [
+          "001",
+          "002",
+          "003"
+        ],
+        "case_ids": [
+          "A1",
+          "A7",
+          "A11",
+          "A12",
+          "A14",
+          "A16"
+        ],
+        "input_sha256": "8fffd381a2e89d0d1c0c1b5530e7e4934e244b10978585715ba87c31731d9454"
+      },
+      "criteria": {
+        "repeats": 10,
+        "amount_policy": "ASYMMETRIC_SAVINGS",
+        "rate_relative_tolerance": "0.10",
+        "amount_overestimate_relative_tolerance": "0.10",
+        "amount_underestimate_relative_tolerance": "0.20",
+        "amount_absolute_tolerance_usd": "1.00",
+        "minimum_estimated_fraction": "0.95"
+      },
+      "probe_complete": true,
+      "probe_passed": false,
+      "service_baseline_evaluated": false,
+      "runs": 30,
+      "estimated": 30,
+      "not_estimated": 0,
+      "not_estimated_fraction": "0",
+      "status_counts": {
+        "PASS": 29,
+        "PRICE_DEVIATION": 1
+      },
+      "results": [
+        {
+          "case_id": "A1",
+          "repeat": 1,
+          "status": "PASS",
+          "amount": "115.63",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "1.75",
+          "relative_error": "0.01536705303828591499824376537",
+          "current_rate_relative_error": "0.01538461538461538461538461538",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.01536705303828591499824376537",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.01538461538461538461538461538",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        },
+        {
+          "case_id": "A7",
+          "repeat": 1,
+          "status": "PASS",
+          "amount": "115.63",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "1.75",
+          "relative_error": "0.01536705303828591499824376537",
+          "current_rate_relative_error": "0.01538461538461538461538461538",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.01536705303828591499824376537",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.01538461538461538461538461538",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        },
+        {
+          "case_id": "A11",
+          "repeat": 1,
+          "status": "PASS",
+          "amount": "45.55",
+          "expected_amount": "56.94",
+          "absolute_error_usd": "11.39",
+          "relative_error": "0.2000351246926589392342817000",
+          "current_rate_relative_error": "0.2",
+          "target_rate_relative_error": "0.2",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "UNDERSTATED",
+          "signed_relative_error": "-0.2000351246926589392342817000",
+          "amount_lower_bound_usd": "45.55",
+          "amount_upper_bound_usd": "62.63",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": false,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "-0.2",
+            "target_signed_relative_error": "-0.2"
+          }
+        },
+        {
+          "case_id": "A11",
+          "repeat": 2,
+          "status": "PASS",
+          "amount": "59.57",
+          "expected_amount": "56.94",
+          "absolute_error_usd": "2.63",
+          "relative_error": "0.04618897084650509308043554619",
+          "current_rate_relative_error": "0.04615384615384615384615384615",
+          "target_rate_relative_error": "0.04615384615384615384615384615",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.04618897084650509308043554619",
+          "amount_lower_bound_usd": "45.55",
+          "amount_upper_bound_usd": "62.63",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.04615384615384615384615384615",
+            "target_signed_relative_error": "0.04615384615384615384615384615"
+          }
+        },
+        {
+          "case_id": "A7",
+          "repeat": 2,
+          "status": "PASS",
+          "amount": "115.63",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "1.75",
+          "relative_error": "0.01536705303828591499824376537",
+          "current_rate_relative_error": "0.01538461538461538461538461538",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.01536705303828591499824376537",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.01538461538461538461538461538",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        },
+        {
+          "case_id": "A1",
+          "repeat": 2,
+          "status": "PASS",
+          "amount": "120.30",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "6.42",
+          "relative_error": "0.05637513171759747102212855638",
+          "current_rate_relative_error": "0.04615384615384615384615384615",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.05637513171759747102212855638",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.04615384615384615384615384615",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        },
+        {
+          "case_id": "A1",
+          "repeat": 3,
+          "status": "PASS",
+          "amount": "113.88",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "0.00",
+          "relative_error": "0",
+          "current_rate_relative_error": "0",
+          "target_rate_relative_error": "0",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "MATCH",
+          "signed_relative_error": "0",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0",
+            "target_signed_relative_error": "0"
+          }
+        },
+        {
+          "case_id": "A7",
+          "repeat": 3,
+          "status": "PASS",
+          "amount": "115.63",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "1.75",
+          "relative_error": "0.01536705303828591499824376537",
+          "current_rate_relative_error": "0.01538461538461538461538461538",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.01536705303828591499824376537",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.01538461538461538461538461538",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        },
+        {
+          "case_id": "A11",
+          "repeat": 3,
+          "status": "PASS",
+          "amount": "45.55",
+          "expected_amount": "56.94",
+          "absolute_error_usd": "11.39",
+          "relative_error": "0.2000351246926589392342817000",
+          "current_rate_relative_error": "0.2",
+          "target_rate_relative_error": "0.2",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "UNDERSTATED",
+          "signed_relative_error": "-0.2000351246926589392342817000",
+          "amount_lower_bound_usd": "45.55",
+          "amount_upper_bound_usd": "62.63",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": false,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "-0.2",
+            "target_signed_relative_error": "-0.2"
+          }
+        },
+        {
+          "case_id": "A11",
+          "repeat": 4,
+          "status": "PASS",
+          "amount": "58.69",
+          "expected_amount": "56.94",
+          "absolute_error_usd": "1.75",
+          "relative_error": "0.03073410607657182999648753073",
+          "current_rate_relative_error": "0.03076923076923076923076923077",
+          "target_rate_relative_error": "0.03076923076923076923076923077",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.03073410607657182999648753073",
+          "amount_lower_bound_usd": "45.55",
+          "amount_upper_bound_usd": "62.63",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.03076923076923076923076923077",
+            "target_signed_relative_error": "0.03076923076923076923076923077"
+          }
+        },
+        {
+          "case_id": "A7",
+          "repeat": 4,
+          "status": "PRICE_DEVIATION",
+          "amount": "136.66",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "22.78",
+          "relative_error": "0.2000351246926589392342817000",
+          "current_rate_relative_error": "0.2",
+          "target_rate_relative_error": "0.2",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.2000351246926589392342817000",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": false,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.2",
+            "target_signed_relative_error": "0.2"
+          }
+        },
+        {
+          "case_id": "A1",
+          "repeat": 4,
+          "status": "PASS",
+          "amount": "115.63",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "1.75",
+          "relative_error": "0.01536705303828591499824376537",
+          "current_rate_relative_error": "0.01538461538461538461538461538",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.01536705303828591499824376537",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.01538461538461538461538461538",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        },
+        {
+          "case_id": "A1",
+          "repeat": 5,
+          "status": "PASS",
+          "amount": "113.88",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "0.00",
+          "relative_error": "0",
+          "current_rate_relative_error": "0",
+          "target_rate_relative_error": "0",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "MATCH",
+          "signed_relative_error": "0",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0",
+            "target_signed_relative_error": "0"
+          }
+        },
+        {
+          "case_id": "A7",
+          "repeat": 5,
+          "status": "PASS",
+          "amount": "115.63",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "1.75",
+          "relative_error": "0.01536705303828591499824376537",
+          "current_rate_relative_error": "0.01538461538461538461538461538",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.01536705303828591499824376537",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.01538461538461538461538461538",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        },
+        {
+          "case_id": "A11",
+          "repeat": 5,
+          "status": "PASS",
+          "amount": "45.55",
+          "expected_amount": "56.94",
+          "absolute_error_usd": "11.39",
+          "relative_error": "0.2000351246926589392342817000",
+          "current_rate_relative_error": "0.2",
+          "target_rate_relative_error": "0.2",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "UNDERSTATED",
+          "signed_relative_error": "-0.2000351246926589392342817000",
+          "amount_lower_bound_usd": "45.55",
+          "amount_upper_bound_usd": "62.63",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": false,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "-0.2",
+            "target_signed_relative_error": "-0.2"
+          }
+        },
+        {
+          "case_id": "A11",
+          "repeat": 6,
+          "status": "PASS",
+          "amount": "57.82",
+          "expected_amount": "56.94",
+          "absolute_error_usd": "0.88",
+          "relative_error": "0.01545486476993326308394801545",
+          "current_rate_relative_error": "0.01538461538461538461538461538",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.01545486476993326308394801545",
+          "amount_lower_bound_usd": "45.55",
+          "amount_upper_bound_usd": "62.63",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.01538461538461538461538461538",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        },
+        {
+          "case_id": "A7",
+          "repeat": 6,
+          "status": "PASS",
+          "amount": "115.63",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "1.75",
+          "relative_error": "0.01536705303828591499824376537",
+          "current_rate_relative_error": "0.01538461538461538461538461538",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.01536705303828591499824376537",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.01538461538461538461538461538",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        },
+        {
+          "case_id": "A1",
+          "repeat": 6,
+          "status": "PASS",
+          "amount": "115.63",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "1.75",
+          "relative_error": "0.01536705303828591499824376537",
+          "current_rate_relative_error": "0.01538461538461538461538461538",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.01536705303828591499824376537",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.01538461538461538461538461538",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        },
+        {
+          "case_id": "A1",
+          "repeat": 7,
+          "status": "PASS",
+          "amount": "115.63",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "1.75",
+          "relative_error": "0.01536705303828591499824376537",
+          "current_rate_relative_error": "0.01538461538461538461538461538",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.01536705303828591499824376537",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.01538461538461538461538461538",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        },
+        {
+          "case_id": "A7",
+          "repeat": 7,
+          "status": "PASS",
+          "amount": "115.63",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "1.75",
+          "relative_error": "0.01536705303828591499824376537",
+          "current_rate_relative_error": "0.01538461538461538461538461538",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.01536705303828591499824376537",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.01538461538461538461538461538",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        },
+        {
+          "case_id": "A11",
+          "repeat": 7,
+          "status": "PASS",
+          "amount": "49.93",
+          "expected_amount": "56.94",
+          "absolute_error_usd": "7.01",
+          "relative_error": "0.1231120477695820161573586231",
+          "current_rate_relative_error": "0.1230769230769230769230769231",
+          "target_rate_relative_error": "0.1230769230769230769230769231",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "UNDERSTATED",
+          "signed_relative_error": "-0.1231120477695820161573586231",
+          "amount_lower_bound_usd": "45.55",
+          "amount_upper_bound_usd": "62.63",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": false,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "-0.1230769230769230769230769231",
+            "target_signed_relative_error": "-0.1230769230769230769230769231"
+          }
+        },
+        {
+          "case_id": "A11",
+          "repeat": 8,
+          "status": "PASS",
+          "amount": "57.82",
+          "expected_amount": "56.94",
+          "absolute_error_usd": "0.88",
+          "relative_error": "0.01545486476993326308394801545",
+          "current_rate_relative_error": "0.01538461538461538461538461538",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.01545486476993326308394801545",
+          "amount_lower_bound_usd": "45.55",
+          "amount_upper_bound_usd": "62.63",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.01538461538461538461538461538",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        },
+        {
+          "case_id": "A7",
+          "repeat": 8,
+          "status": "PASS",
+          "amount": "115.63",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "1.75",
+          "relative_error": "0.01536705303828591499824376537",
+          "current_rate_relative_error": "0.01538461538461538461538461538",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.01536705303828591499824376537",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.01538461538461538461538461538",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        },
+        {
+          "case_id": "A1",
+          "repeat": 8,
+          "status": "PASS",
+          "amount": "115.63",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "1.75",
+          "relative_error": "0.01536705303828591499824376537",
+          "current_rate_relative_error": "0.01538461538461538461538461538",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.01536705303828591499824376537",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.01538461538461538461538461538",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        },
+        {
+          "case_id": "A1",
+          "repeat": 9,
+          "status": "PASS",
+          "amount": "115.63",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "1.75",
+          "relative_error": "0.01536705303828591499824376537",
+          "current_rate_relative_error": "0.01538461538461538461538461538",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.01536705303828591499824376537",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.01538461538461538461538461538",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        },
+        {
+          "case_id": "A7",
+          "repeat": 9,
+          "status": "PASS",
+          "amount": "113.88",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "0.00",
+          "relative_error": "0",
+          "current_rate_relative_error": "0",
+          "target_rate_relative_error": "0",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "MATCH",
+          "signed_relative_error": "0",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0",
+            "target_signed_relative_error": "0"
+          }
+        },
+        {
+          "case_id": "A11",
+          "repeat": 9,
+          "status": "PASS",
+          "amount": "49.93",
+          "expected_amount": "56.94",
+          "absolute_error_usd": "7.01",
+          "relative_error": "0.1231120477695820161573586231",
+          "current_rate_relative_error": "0.1230769230769230769230769231",
+          "target_rate_relative_error": "0.1230769230769230769230769231",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "UNDERSTATED",
+          "signed_relative_error": "-0.1231120477695820161573586231",
+          "amount_lower_bound_usd": "45.55",
+          "amount_upper_bound_usd": "62.63",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": false,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "-0.1230769230769230769230769231",
+            "target_signed_relative_error": "-0.1230769230769230769230769231"
+          }
+        },
+        {
+          "case_id": "A11",
+          "repeat": 10,
+          "status": "PASS",
+          "amount": "45.55",
+          "expected_amount": "56.94",
+          "absolute_error_usd": "11.39",
+          "relative_error": "0.2000351246926589392342817000",
+          "current_rate_relative_error": "0.2",
+          "target_rate_relative_error": "0.2",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "UNDERSTATED",
+          "signed_relative_error": "-0.2000351246926589392342817000",
+          "amount_lower_bound_usd": "45.55",
+          "amount_upper_bound_usd": "62.63",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": false,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "-0.2",
+            "target_signed_relative_error": "-0.2"
+          }
+        },
+        {
+          "case_id": "A7",
+          "repeat": 10,
+          "status": "PASS",
+          "amount": "113.88",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "0.00",
+          "relative_error": "0",
+          "current_rate_relative_error": "0",
+          "target_rate_relative_error": "0",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "MATCH",
+          "signed_relative_error": "0",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0",
+            "target_signed_relative_error": "0"
+          }
+        },
+        {
+          "case_id": "A1",
+          "repeat": 10,
+          "status": "PASS",
+          "amount": "113.88",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "0.00",
+          "relative_error": "0",
+          "current_rate_relative_error": "0",
+          "target_rate_relative_error": "0",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "MATCH",
+          "signed_relative_error": "0",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0",
+            "target_signed_relative_error": "0"
+          }
+        }
+      ],
+      "planned_runs": 30,
+      "pending_runs": 0,
+      "estimated_fraction_of_planned": "1",
+      "over_limit_count": 1,
+      "under_limit_count": 0,
+      "maximum_overstatement_fraction": "0.2000351246926589392342817000",
+      "rate_diagnostic_outside_count": 7,
+      "per_case_status_counts": {
+        "A1": {
+          "PASS": 10
+        },
+        "A7": {
+          "PASS": 9,
+          "PRICE_DEVIATION": 1
+        },
+        "A11": {
+          "PASS": 10
+        }
+      }
+    },
+    "v0.9.1": {
+      "execution_mode": "price_only_diagnostic",
+      "scorer_version": "v0.2.0",
+      "spec_version": "v0.2.0",
+      "prompt_version": "v0.9.1",
+      "prompt_sha256": "f47b8c94781c712e81a7af1995944f1e86e6972623c3aa04c870f8a03ae23bb6",
+      "model_snapshots": [
+        "gpt-5.6-luna"
+      ],
+      "fixed_set": {
+        "inventory_ids": [
+          "001",
+          "002",
+          "003"
+        ],
+        "case_ids": [
+          "A1",
+          "A7",
+          "A11",
+          "A12",
+          "A14",
+          "A16"
+        ],
+        "input_sha256": "8fffd381a2e89d0d1c0c1b5530e7e4934e244b10978585715ba87c31731d9454"
+      },
+      "criteria": {
+        "repeats": 10,
+        "amount_policy": "ASYMMETRIC_SAVINGS",
+        "rate_relative_tolerance": "0.10",
+        "amount_overestimate_relative_tolerance": "0.10",
+        "amount_underestimate_relative_tolerance": "0.20",
+        "amount_absolute_tolerance_usd": "1.00",
+        "minimum_estimated_fraction": "0.95"
+      },
+      "probe_complete": true,
+      "probe_passed": false,
+      "service_baseline_evaluated": false,
+      "runs": 30,
+      "estimated": 30,
+      "not_estimated": 0,
+      "not_estimated_fraction": "0",
+      "status_counts": {
+        "PASS": 29,
+        "PRICE_DEVIATION": 1
+      },
+      "results": [
+        {
+          "case_id": "A1",
+          "repeat": 1,
+          "status": "PRICE_DEVIATION",
+          "amount": "82.93",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "30.95",
+          "relative_error": "0.2717773094485423252546540218",
+          "current_rate_relative_error": "0.2",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "UNDERSTATED",
+          "signed_relative_error": "-0.2717773094485423252546540218",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": false,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "-0.2",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        },
+        {
+          "case_id": "A7",
+          "repeat": 1,
+          "status": "PASS",
+          "amount": "120.30",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "6.42",
+          "relative_error": "0.05637513171759747102212855638",
+          "current_rate_relative_error": "0.04615384615384615384615384615",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.05637513171759747102212855638",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.04615384615384615384615384615",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        },
+        {
+          "case_id": "A11",
+          "repeat": 1,
+          "status": "PASS",
+          "amount": "45.55",
+          "expected_amount": "56.94",
+          "absolute_error_usd": "11.39",
+          "relative_error": "0.2000351246926589392342817000",
+          "current_rate_relative_error": "0.2",
+          "target_rate_relative_error": "0.2",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "UNDERSTATED",
+          "signed_relative_error": "-0.2000351246926589392342817000",
+          "amount_lower_bound_usd": "45.55",
+          "amount_upper_bound_usd": "62.63",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": false,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "-0.2",
+            "target_signed_relative_error": "-0.2"
+          }
+        },
+        {
+          "case_id": "A11",
+          "repeat": 2,
+          "status": "PASS",
+          "amount": "45.55",
+          "expected_amount": "56.94",
+          "absolute_error_usd": "11.39",
+          "relative_error": "0.2000351246926589392342817000",
+          "current_rate_relative_error": "0.2",
+          "target_rate_relative_error": "0.2",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "UNDERSTATED",
+          "signed_relative_error": "-0.2000351246926589392342817000",
+          "amount_lower_bound_usd": "45.55",
+          "amount_upper_bound_usd": "62.63",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": false,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "-0.2",
+            "target_signed_relative_error": "-0.2"
+          }
+        },
+        {
+          "case_id": "A7",
+          "repeat": 2,
+          "status": "PASS",
+          "amount": "113.88",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "0.00",
+          "relative_error": "0",
+          "current_rate_relative_error": "0",
+          "target_rate_relative_error": "0",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "MATCH",
+          "signed_relative_error": "0",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0",
+            "target_signed_relative_error": "0"
+          }
+        },
+        {
+          "case_id": "A1",
+          "repeat": 2,
+          "status": "PASS",
+          "amount": "115.63",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "1.75",
+          "relative_error": "0.01536705303828591499824376537",
+          "current_rate_relative_error": "0.01538461538461538461538461538",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.01536705303828591499824376537",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.01538461538461538461538461538",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        },
+        {
+          "case_id": "A1",
+          "repeat": 3,
+          "status": "PASS",
+          "amount": "113.88",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "0.00",
+          "relative_error": "0",
+          "current_rate_relative_error": "0",
+          "target_rate_relative_error": "0",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "MATCH",
+          "signed_relative_error": "0",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0",
+            "target_signed_relative_error": "0"
+          }
+        },
+        {
+          "case_id": "A7",
+          "repeat": 3,
+          "status": "PASS",
+          "amount": "125.27",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "11.39",
+          "relative_error": "0.1000175623463294696171408500",
+          "current_rate_relative_error": "0.1",
+          "target_rate_relative_error": "0.1",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.1000175623463294696171408500",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.1",
+            "target_signed_relative_error": "0.1"
+          }
+        },
+        {
+          "case_id": "A11",
+          "repeat": 3,
+          "status": "PASS",
+          "amount": "59.57",
+          "expected_amount": "56.94",
+          "absolute_error_usd": "2.63",
+          "relative_error": "0.04618897084650509308043554619",
+          "current_rate_relative_error": "0.04615384615384615384615384615",
+          "target_rate_relative_error": "0.04615384615384615384615384615",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.04618897084650509308043554619",
+          "amount_lower_bound_usd": "45.55",
+          "amount_upper_bound_usd": "62.63",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.04615384615384615384615384615",
+            "target_signed_relative_error": "0.04615384615384615384615384615"
+          }
+        },
+        {
+          "case_id": "A11",
+          "repeat": 4,
+          "status": "PASS",
+          "amount": "49.93",
+          "expected_amount": "56.94",
+          "absolute_error_usd": "7.01",
+          "relative_error": "0.1231120477695820161573586231",
+          "current_rate_relative_error": "0.1230769230769230769230769231",
+          "target_rate_relative_error": "0.1230769230769230769230769231",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "UNDERSTATED",
+          "signed_relative_error": "-0.1231120477695820161573586231",
+          "amount_lower_bound_usd": "45.55",
+          "amount_upper_bound_usd": "62.63",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": false,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "-0.1230769230769230769230769231",
+            "target_signed_relative_error": "-0.1230769230769230769230769231"
+          }
+        },
+        {
+          "case_id": "A7",
+          "repeat": 4,
+          "status": "PASS",
+          "amount": "113.88",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "0.00",
+          "relative_error": "0",
+          "current_rate_relative_error": "0",
+          "target_rate_relative_error": "0",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "MATCH",
+          "signed_relative_error": "0",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0",
+            "target_signed_relative_error": "0"
+          }
+        },
+        {
+          "case_id": "A1",
+          "repeat": 4,
+          "status": "PASS",
+          "amount": "113.88",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "0.00",
+          "relative_error": "0",
+          "current_rate_relative_error": "0",
+          "target_rate_relative_error": "0",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "MATCH",
+          "signed_relative_error": "0",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0",
+            "target_signed_relative_error": "0"
+          }
+        },
+        {
+          "case_id": "A1",
+          "repeat": 5,
+          "status": "PASS",
+          "amount": "115.63",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "1.75",
+          "relative_error": "0.01536705303828591499824376537",
+          "current_rate_relative_error": "0.01538461538461538461538461538",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.01536705303828591499824376537",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.01538461538461538461538461538",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        },
+        {
+          "case_id": "A7",
+          "repeat": 5,
+          "status": "PASS",
+          "amount": "115.63",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "1.75",
+          "relative_error": "0.01536705303828591499824376537",
+          "current_rate_relative_error": "0.01538461538461538461538461538",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.01536705303828591499824376537",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.01538461538461538461538461538",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        },
+        {
+          "case_id": "A11",
+          "repeat": 5,
+          "status": "PASS",
+          "amount": "45.55",
+          "expected_amount": "56.94",
+          "absolute_error_usd": "11.39",
+          "relative_error": "0.2000351246926589392342817000",
+          "current_rate_relative_error": "0.2",
+          "target_rate_relative_error": "0.2",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "UNDERSTATED",
+          "signed_relative_error": "-0.2000351246926589392342817000",
+          "amount_lower_bound_usd": "45.55",
+          "amount_upper_bound_usd": "62.63",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": false,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "-0.2",
+            "target_signed_relative_error": "-0.2"
+          }
+        },
+        {
+          "case_id": "A11",
+          "repeat": 6,
+          "status": "PASS",
+          "amount": "45.55",
+          "expected_amount": "56.94",
+          "absolute_error_usd": "11.39",
+          "relative_error": "0.2000351246926589392342817000",
+          "current_rate_relative_error": "0.2",
+          "target_rate_relative_error": "0.2",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "UNDERSTATED",
+          "signed_relative_error": "-0.2000351246926589392342817000",
+          "amount_lower_bound_usd": "45.55",
+          "amount_upper_bound_usd": "62.63",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": false,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "-0.2",
+            "target_signed_relative_error": "-0.2"
+          }
+        },
+        {
+          "case_id": "A7",
+          "repeat": 6,
+          "status": "PASS",
+          "amount": "115.63",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "1.75",
+          "relative_error": "0.01536705303828591499824376537",
+          "current_rate_relative_error": "0.01538461538461538461538461538",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.01536705303828591499824376537",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.01538461538461538461538461538",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        },
+        {
+          "case_id": "A1",
+          "repeat": 6,
+          "status": "PASS",
+          "amount": "115.63",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "1.75",
+          "relative_error": "0.01536705303828591499824376537",
+          "current_rate_relative_error": "0.01538461538461538461538461538",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.01536705303828591499824376537",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.01538461538461538461538461538",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        },
+        {
+          "case_id": "A1",
+          "repeat": 7,
+          "status": "PASS",
+          "amount": "115.63",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "1.75",
+          "relative_error": "0.01536705303828591499824376537",
+          "current_rate_relative_error": "0.01538461538461538461538461538",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.01536705303828591499824376537",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.01538461538461538461538461538",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        },
+        {
+          "case_id": "A7",
+          "repeat": 7,
+          "status": "PASS",
+          "amount": "115.63",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "1.75",
+          "relative_error": "0.01536705303828591499824376537",
+          "current_rate_relative_error": "0.01538461538461538461538461538",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.01536705303828591499824376537",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.01538461538461538461538461538",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        },
+        {
+          "case_id": "A11",
+          "repeat": 7,
+          "status": "PASS",
+          "amount": "50.81",
+          "expected_amount": "56.94",
+          "absolute_error_usd": "6.13",
+          "relative_error": "0.1076571829996487530734106077",
+          "current_rate_relative_error": "0.1076923076923076923076923077",
+          "target_rate_relative_error": "0.1076923076923076923076923077",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "UNDERSTATED",
+          "signed_relative_error": "-0.1076571829996487530734106077",
+          "amount_lower_bound_usd": "45.55",
+          "amount_upper_bound_usd": "62.63",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": false,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "-0.1076923076923076923076923077",
+            "target_signed_relative_error": "-0.1076923076923076923076923077"
+          }
+        },
+        {
+          "case_id": "A11",
+          "repeat": 8,
+          "status": "PASS",
+          "amount": "50.37",
+          "expected_amount": "56.94",
+          "absolute_error_usd": "6.57",
+          "relative_error": "0.1153846153846153846153846154",
+          "current_rate_relative_error": "0.1153846153846153846153846154",
+          "target_rate_relative_error": "0.1153846153846153846153846154",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "UNDERSTATED",
+          "signed_relative_error": "-0.1153846153846153846153846154",
+          "amount_lower_bound_usd": "45.55",
+          "amount_upper_bound_usd": "62.63",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": false,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "-0.1153846153846153846153846154",
+            "target_signed_relative_error": "-0.1153846153846153846153846154"
+          }
+        },
+        {
+          "case_id": "A7",
+          "repeat": 8,
+          "status": "PASS",
+          "amount": "115.63",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "1.75",
+          "relative_error": "0.01536705303828591499824376537",
+          "current_rate_relative_error": "0.01538461538461538461538461538",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.01536705303828591499824376537",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.01538461538461538461538461538",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        },
+        {
+          "case_id": "A1",
+          "repeat": 8,
+          "status": "PASS",
+          "amount": "113.88",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "0.00",
+          "relative_error": "0",
+          "current_rate_relative_error": "0",
+          "target_rate_relative_error": "0",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "MATCH",
+          "signed_relative_error": "0",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0",
+            "target_signed_relative_error": "0"
+          }
+        },
+        {
+          "case_id": "A1",
+          "repeat": 9,
+          "status": "PASS",
+          "amount": "115.63",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "1.75",
+          "relative_error": "0.01536705303828591499824376537",
+          "current_rate_relative_error": "0.01538461538461538461538461538",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.01536705303828591499824376537",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.01538461538461538461538461538",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        },
+        {
+          "case_id": "A7",
+          "repeat": 9,
+          "status": "PASS",
+          "amount": "113.88",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "0.00",
+          "relative_error": "0",
+          "current_rate_relative_error": "0",
+          "target_rate_relative_error": "0",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "MATCH",
+          "signed_relative_error": "0",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0",
+            "target_signed_relative_error": "0"
+          }
+        },
+        {
+          "case_id": "A11",
+          "repeat": 9,
+          "status": "PASS",
+          "amount": "51.25",
+          "expected_amount": "56.94",
+          "absolute_error_usd": "5.69",
+          "relative_error": "0.09992975061468212153143659993",
+          "current_rate_relative_error": "0.1",
+          "target_rate_relative_error": "0.1",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "UNDERSTATED",
+          "signed_relative_error": "-0.09992975061468212153143659993",
+          "amount_lower_bound_usd": "45.55",
+          "amount_upper_bound_usd": "62.63",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "-0.1",
+            "target_signed_relative_error": "-0.1"
+          }
+        },
+        {
+          "case_id": "A11",
+          "repeat": 10,
+          "status": "PASS",
+          "amount": "59.57",
+          "expected_amount": "56.94",
+          "absolute_error_usd": "2.63",
+          "relative_error": "0.04618897084650509308043554619",
+          "current_rate_relative_error": "0.04615384615384615384615384615",
+          "target_rate_relative_error": "0.04615384615384615384615384615",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.04618897084650509308043554619",
+          "amount_lower_bound_usd": "45.55",
+          "amount_upper_bound_usd": "62.63",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.04615384615384615384615384615",
+            "target_signed_relative_error": "0.04615384615384615384615384615"
+          }
+        },
+        {
+          "case_id": "A7",
+          "repeat": 10,
+          "status": "PASS",
+          "amount": "115.63",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "1.75",
+          "relative_error": "0.01536705303828591499824376537",
+          "current_rate_relative_error": "0.01538461538461538461538461538",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.01536705303828591499824376537",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.01538461538461538461538461538",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        },
+        {
+          "case_id": "A1",
+          "repeat": 10,
+          "status": "PASS",
+          "amount": "115.63",
+          "expected_amount": "113.88",
+          "absolute_error_usd": "1.75",
+          "relative_error": "0.01536705303828591499824376537",
+          "current_rate_relative_error": "0.01538461538461538461538461538",
+          "target_rate_relative_error": "0.01538461538461538461538461538",
+          "arithmetic_context_and_assumptions_valid": true,
+          "savings_direction": "OVERSTATED",
+          "signed_relative_error": "0.01536705303828591499824376537",
+          "amount_lower_bound_usd": "91.10",
+          "amount_upper_bound_usd": "125.27",
+          "rate_accuracy": {
+            "within_symmetric_tolerance": true,
+            "affects_savings_pass": false,
+            "current_signed_relative_error": "0.01538461538461538461538461538",
+            "target_signed_relative_error": "0.01538461538461538461538461538"
+          }
+        }
+      ],
+      "planned_runs": 30,
+      "pending_runs": 0,
+      "estimated_fraction_of_planned": "1",
+      "over_limit_count": 0,
+      "under_limit_count": 1,
+      "maximum_overstatement_fraction": "0.1000175623463294696171408500",
+      "rate_diagnostic_outside_count": 8,
+      "per_case_status_counts": {
+        "A1": {
+          "PRICE_DEVIATION": 1,
+          "PASS": 9
+        },
+        "A7": {
+          "PASS": 10
+        },
+        "A11": {
+          "PASS": 10
+        }
+      }
+    }
+  },
+  "service_baseline_evaluated": false,
+  "metadata_sha256": "919ce4a66887720bd74c0ce0a575c3756cb4880618de22ab383979cab68c9be2",
+  "preflight_sha256": "d83b92f21e1b6ac08bb7bbf494ed3530507ca2fa37dbf4d881834be1f0d9f635"
+}

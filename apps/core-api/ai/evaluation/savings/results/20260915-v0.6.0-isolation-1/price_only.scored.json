@@ -1,0 +1,102 @@
+{
+  "execution_mode": "price_only_diagnostic",
+  "scorer_version": "v1",
+  "spec_version": "v1",
+  "prompt_version": "v0.6.0",
+  "prompt_sha256": "6bbd22aeeaf3326acbc7c84102507c90db290c8d2b3da1e785266de7488fb1bb",
+  "model_snapshots": [
+    "gpt-5.6-luna"
+  ],
+  "fixed_set": {
+    "inventory_ids": [
+      "001",
+      "002",
+      "003"
+    ],
+    "case_ids": [
+      "A1",
+      "A7",
+      "A11",
+      "A12",
+      "A14",
+      "A16"
+    ],
+    "input_sha256": "8fffd381a2e89d0d1c0c1b5530e7e4934e244b10978585715ba87c31731d9454"
+  },
+  "criteria": {
+    "repeats": 10,
+    "rate_relative_tolerance": "0.10",
+    "amount_relative_tolerance": "0.10",
+    "amount_absolute_tolerance_usd": "1.00",
+    "minimum_estimated_fraction": "0.95"
+  },
+  "probe_complete": false,
+  "probe_passed": false,
+  "service_baseline_evaluated": false,
+  "runs": 5,
+  "estimated": 4,
+  "not_estimated": 1,
+  "not_estimated_fraction": "0.2",
+  "status_counts": {
+    "INVALID": 1,
+    "PASS": 4
+  },
+  "results": [
+    {
+      "case_id": "A1",
+      "repeat": 1,
+      "status": "PASS",
+      "amount": "120.30",
+      "expected_amount": "113.88",
+      "absolute_error_usd": "6.42",
+      "relative_error": "0.05637513171759747102212855638",
+      "current_rate_relative_error": "0.04615384615384615384615384615",
+      "target_rate_relative_error": "0.01538461538461538461538461538",
+      "arithmetic_context_and_assumptions_valid": true
+    },
+    {
+      "case_id": "A11",
+      "repeat": 1,
+      "status": "PASS",
+      "amount": "57.82",
+      "expected_amount": "56.94",
+      "absolute_error_usd": "0.88",
+      "relative_error": "0.01545486476993326308394801545",
+      "current_rate_relative_error": "0.01538461538461538461538461538",
+      "target_rate_relative_error": "0.01538461538461538461538461538",
+      "arithmetic_context_and_assumptions_valid": true
+    },
+    {
+      "case_id": "A1",
+      "repeat": 2,
+      "status": "PASS",
+      "amount": "115.63",
+      "expected_amount": "113.88",
+      "absolute_error_usd": "1.75",
+      "relative_error": "0.01536705303828591499824376537",
+      "current_rate_relative_error": "0.01538461538461538461538461538",
+      "target_rate_relative_error": "0.01538461538461538461538461538",
+      "arithmetic_context_and_assumptions_valid": true
+    },
+    {
+      "case_id": "A11",
+      "repeat": 2,
+      "status": "PASS",
+      "amount": "57.82",
+      "expected_amount": "56.94",
+      "absolute_error_usd": "0.88",
+      "relative_error": "0.01545486476993326308394801545",
+      "current_rate_relative_error": "0.01538461538461538461538461538",
+      "target_rate_relative_error": "0.01538461538461538461538461538",
+      "arithmetic_context_and_assumptions_valid": true
+    },
+    {
+      "case_id": "A1",
+      "repeat": 3,
+      "status": "INVALID",
+      "reason": "INVALID_ESTIMATE"
+    }
+  ],
+  "source_sha256": "d43ab7079854b570009a2cea3912972ba330c0f273ba4b62f54b6a21711839bc",
+  "spec_sha256": "acf507e478b61d724971f9a0237086a96a10f290d9ca3b963dc4427e0d810bb9"
+}

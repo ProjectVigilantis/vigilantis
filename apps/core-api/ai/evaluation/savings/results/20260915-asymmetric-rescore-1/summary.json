@@ -1,0 +1,232 @@
+{
+  "reason": "User kept overestimated savings tolerance at 10% and relaxed underestimated savings to 20%; rate accuracy is recorded separately.",
+  "spec_version": "v0.2.0",
+  "spec_sha256": "a9ed0222a39de8e6a56f7478acb3a0d0caf9df8a001ef3b8d4b6abffa8312b57",
+  "previous_spec_version": "v1",
+  "previous_spec_sha256": "acf507e478b61d724971f9a0237086a96a10f290d9ca3b963dc4427e0d810bb9",
+  "criteria": {
+    "repeats": 10,
+    "amount_policy": "ASYMMETRIC_SAVINGS",
+    "rate_relative_tolerance": "0.10",
+    "amount_overestimate_relative_tolerance": "0.10",
+    "amount_underestimate_relative_tolerance": "0.20",
+    "amount_absolute_tolerance_usd": "1.00",
+    "minimum_estimated_fraction": "0.95"
+  },
+  "legacy_reports_reproduced": 10,
+  "historical_files_unchanged": 50,
+  "new_model_calls": 0,
+  "model_outputs_changed": false,
+  "reports": [
+    {
+      "source": "results/20260915-v0.3.0-probe-1/scored.json",
+      "rescored_file": "scored/20260915-v0.3.0-probe-1/scored.json",
+      "source_sha256": "d61f6808701848f275e338479788916e852f59a796f610b90419c5bbcc2b89bb",
+      "runs": 2,
+      "previous_counts": {
+        "PASS": 1,
+        "PRICE_DEVIATION": 1
+      },
+      "new_counts": {
+        "PASS": 2
+      },
+      "rate_diagnostic_outside_tolerance": 1,
+      "savings_direction_counts": {
+        "UNDERSTATED": 2
+      },
+      "probe_complete": null,
+      "probe_passed": null,
+      "service_baseline_passed": false
+    },
+    {
+      "source": "results/20260915-v0.4.0-probe-1/scored.json",
+      "rescored_file": "scored/20260915-v0.4.0-probe-1/scored.json",
+      "source_sha256": "02d0dce89246a3f6f9ffa30b2eb6609877536d61532284f842be960e7d31daef",
+      "runs": 2,
+      "previous_counts": {
+        "PASS": 1,
+        "PRICE_DEVIATION": 1
+      },
+      "new_counts": {
+        "PASS": 2
+      },
+      "rate_diagnostic_outside_tolerance": 1,
+      "savings_direction_counts": {
+        "UNDERSTATED": 1,
+        "OVERSTATED": 1
+      },
+      "probe_complete": null,
+      "probe_passed": null,
+      "service_baseline_passed": false
+    },
+    {
+      "source": "results/20260915-v0.5.0-order-comparison-1/v0.4.0.scored.json",
+      "rescored_file": "scored/20260915-v0.5.0-order-comparison-1/v0.4.0.scored.json",
+      "source_sha256": "f3a1823f55a7b7f4037033dfcee3edc406d59d4279705d235929baf4e2296ad2",
+      "runs": 2,
+      "previous_counts": {
+        "PASS": 1,
+        "PRICE_DEVIATION": 1
+      },
+      "new_counts": {
+        "PASS": 1,
+        "PRICE_DEVIATION": 1
+      },
+      "rate_diagnostic_outside_tolerance": 1,
+      "savings_direction_counts": {
+        "UNDERSTATED": 1,
+        "OVERSTATED": 1
+      },
+      "probe_complete": null,
+      "probe_passed": null,
+      "service_baseline_passed": false
+    },
+    {
+      "source": "results/20260915-v0.5.0-order-comparison-1/v0.5.0.scored.json",
+      "rescored_file": "scored/20260915-v0.5.0-order-comparison-1/v0.5.0.scored.json",
+      "source_sha256": "b7ef9a22a0393ab199a660140b6cd78115cde8d3d4d5f87cbdbb3a1762d22ef9",
+      "runs": 3,
+      "previous_counts": {
+        "PASS": 2,
+        "PRICE_DEVIATION": 1
+      },
+      "new_counts": {
+        "PASS": 3
+      },
+      "rate_diagnostic_outside_tolerance": 1,
+      "savings_direction_counts": {
+        "OVERSTATED": 2,
+        "UNDERSTATED": 1
+      },
+      "probe_complete": null,
+      "probe_passed": null,
+      "service_baseline_passed": false
+    },
+    {
+      "source": "results/20260915-v0.6.0-isolation-1/combined.scored.json",
+      "rescored_file": "scored/20260915-v0.6.0-isolation-1/combined.scored.json",
+      "source_sha256": "934633f63e2b4700a8cf2853a34d27d9749d393798f6b17ac7f30140aaef9e06",
+      "runs": 5,
+      "previous_counts": {
+        "PASS": 3,
+        "PRICE_DEVIATION": 2
+      },
+      "new_counts": {
+        "PASS": 5
+      },
+      "rate_diagnostic_outside_tolerance": 2,
+      "savings_direction_counts": {
+        "UNDERSTATED": 2,
+        "OVERSTATED": 3
+      },
+      "probe_complete": null,
+      "probe_passed": null,
+      "service_baseline_passed": false
+    },
+    {
+      "source": "results/20260915-v0.6.0-isolation-1/price_only.scored.json",
+      "rescored_file": "scored/20260915-v0.6.0-isolation-1/price_only.scored.json",
+      "source_sha256": "d43ab7079854b570009a2cea3912972ba330c0f273ba4b62f54b6a21711839bc",
+      "runs": 5,
+      "previous_counts": {
+        "INVALID": 1,
+        "PASS": 4
+      },
+      "new_counts": {
+        "INVALID": 1,
+        "PASS": 4
+      },
+      "rate_diagnostic_outside_tolerance": 0,
+      "savings_direction_counts": {
+        "OVERSTATED": 4
+      },
+      "probe_complete": false,
+      "probe_passed": false,
+      "service_baseline_passed": false
+    },
+    {
+      "source": "results/20260915-v0.7.0-three-call-1/scored.json",
+      "rescored_file": "scored/20260915-v0.7.0-three-call-1/scored.json",
+      "source_sha256": "44a1640b23dfe65262de297bbc7a850b131f0323d77f31fa7fcf99c34fd8761d",
+      "runs": 1,
+      "previous_counts": {
+        "GRAPH_FAILED_OR_EMPTY": 1
+      },
+      "new_counts": {
+        "GRAPH_FAILED_OR_EMPTY": 1
+      },
+      "rate_diagnostic_outside_tolerance": 0,
+      "savings_direction_counts": {},
+      "probe_complete": null,
+      "probe_passed": null,
+      "service_baseline_passed": false
+    },
+    {
+      "source": "results/20260915-v0.7.0-three-call-2/scored.json",
+      "rescored_file": "scored/20260915-v0.7.0-three-call-2/scored.json",
+      "source_sha256": "784ba3e05454a864a2bf26a6162af4f3dad617ee31dbbabadfaac5022253d764",
+      "runs": 6,
+      "previous_counts": {
+        "PASS": 4,
+        "PRICE_DEVIATION": 2
+      },
+      "new_counts": {
+        "PASS": 5,
+        "PRICE_DEVIATION": 1
+      },
+      "rate_diagnostic_outside_tolerance": 2,
+      "savings_direction_counts": {
+        "OVERSTATED": 5,
+        "UNDERSTATED": 1
+      },
+      "probe_complete": null,
+      "probe_passed": null,
+      "service_baseline_passed": false
+    },
+    {
+      "source": "results/20260915-v0.8.0-price-table-1/pair-scored.json",
+      "rescored_file": "scored/20260915-v0.8.0-price-table-1/pair-scored.json",
+      "source_sha256": "1c4b643ab44a935a14d496f0aea45a8e528ffd11d2373718e9f79f394c7ee861",
+      "runs": 6,
+      "previous_counts": {
+        "PASS": 5,
+        "PRICE_DEVIATION": 1
+      },
+      "new_counts": {
+        "PASS": 6
+      },
+      "rate_diagnostic_outside_tolerance": 1,
+      "savings_direction_counts": {
+        "OVERSTATED": 4,
+        "UNDERSTATED": 1,
+        "MATCH": 1
+      },
+      "probe_complete": true,
+      "probe_passed": true,
+      "service_baseline_passed": false
+    },
+    {
+      "source": "results/20260915-v0.8.0-price-table-1/table-scored.json",
+      "rescored_file": "scored/20260915-v0.8.0-price-table-1/table-scored.json",
+      "source_sha256": "435ed707f8a9baa19e1d4fea7b5a313ea7141513b0790ce2c78e0229f6e75fb4",
+      "runs": 6,
+      "previous_counts": {
+        "INVALID": 3,
+        "PASS": 1,
+        "PRICE_DEVIATION": 2
+      },
+      "new_counts": {
+        "INVALID": 3,
+        "PASS": 3
+      },
+      "rate_diagnostic_outside_tolerance": 2,
+      "savings_direction_counts": {
+        "UNDERSTATED": 2,
+        "MATCH": 1
+      },
+      "probe_complete": true,
+      "probe_passed": false,
+      "service_baseline_passed": false
+    }
+  ]
+}

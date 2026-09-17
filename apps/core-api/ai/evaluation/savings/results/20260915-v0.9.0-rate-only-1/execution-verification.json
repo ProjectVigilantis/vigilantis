@@ -1,0 +1,119 @@
+{
+  "verified_at": "2026-09-15T10:55:30.248268+00:00",
+  "status": "PASS_WITH_RECORDED_QUALITY_LIMITATIONS",
+  "approved_steps_completed": [
+    1,
+    2,
+    3
+  ],
+  "branch": "feat/AI-347-action-savings",
+  "base_head": "3e482a4aed9bdae3308d1eabc58676963e1265c2",
+  "real_calls": {
+    "user_ceiling": 200,
+    "planned": 180,
+    "attempted": 180,
+    "retries": 0,
+    "stage_call_counts": [
+      54,
+      126
+    ],
+    "status_counts": {
+      "RETURNED": 180
+    }
+  },
+  "executions": {
+    "completed": 60,
+    "price_status_counts": {
+      "PASS": 60
+    },
+    "price_gate_passed": true
+  },
+  "reproduction": {
+    "score_reproduction": true,
+    "flow_reproduction": true,
+    "call_ledger_and_usage": true,
+    "pilot_prefix_and_snapshot": true,
+    "candidate_frozen_files": 19,
+    "historical_files_unchanged": 78,
+    "runtime_adoption": false,
+    "summary_paired_judge": false,
+    "analyze_command_exit_code": 0,
+    "cost_from_response_usage": true,
+    "staged_elapsed_time": true
+  },
+  "source_integrity": {
+    "frozen_implementation_files": 19,
+    "historical_files": 78,
+    "protected_files": 4,
+    "all_sha256_match": true
+  },
+  "tests": {
+    "command": ".venv/Scripts/python.exe -m pytest <CI roots> -q -rs -p no:cacheprovider -k \"savings or test_agent_dispatcher or test_mappers or test_secops_graph\"",
+    "passed": 183,
+    "failed": 0,
+    "skipped": 0,
+    "deselected": 1970,
+    "elapsed_seconds": 6.79,
+    "includes_live_db": true,
+    "model": "test doubles and SDK mock transport",
+    "first_run": "132 passed / 1 failed: SDK test constructor omitted timeout/backoff, fixed before final 183-pass run",
+    "rerun_after_document_only_changes": false,
+    "frozen_implementation_hashes_still_match": true
+  },
+  "ruff": {
+    "changed_candidate_and_runner": "PASS",
+    "dispatcher_incremental": {
+      "before_count": 30,
+      "after_count": 30,
+      "new_findings": [],
+      "comparison": "In-memory reversal of this scoped edit, normalized line endings; compares Ruff code/message multisets, not original source bytes."
+    }
+  },
+  "git_diff_check": {
+    "exit_code": 0,
+    "line_ending_warning_count": 13
+  },
+  "document_checks": {
+    "local_links_checked": 50,
+    "missing_local_links": 0,
+    "json_files_parsed": 16,
+    "report_key_metrics_match": true,
+    "review_examples_match_accepted_output": true,
+    "readme_latest_status_updated": true
+  },
+  "limitations": {
+    "per_rate_diagnostic_failures": 22,
+    "lower_bound_hits": 16,
+    "public_output_review": "public-output-review.json",
+    "summary_paired_judge": false,
+    "runtime_three_call_adoption": false,
+    "version_1_adoption": false,
+    "all_60_outputs_persisted_to_database": false,
+    "live_database_tests_use_model_doubles": true,
+    "cost_is_billed_amount": false
+  },
+  "artifact_sha256_excluding_this_manifest": {
+    "analysis.json": "3e16fb08ef4ec72174f26ebdd6eb4ac7f1973f81a92a4d04a10c76b8b3a7a0b3",
+    "analyze.py": "014303aed17e9e720a5f6415f7b048cf47f3408058abe00b8fb86e84e6d14080",
+    "approval.json": "94176fd4dadc144f96a6a72809e064382193ef47aac73f6baffba22e857b2b8a",
+    "before.json": "b2945a3b6ff5066c55b1cb474e753b6e373f83674a7a0b2f611b2647039eeacd",
+    "flow-scored.json": "059da44d20246ccf9ba0a2aa161ec4736b4614fd2d486ce5216ff7c57262c785",
+    "metadata.json": "6b48fabfaa76d1cf39fcc43e796d3dd33283f0adad14b9cf0425fdbfb0148509",
+    "pilot/flow-scored.json": "2a753cb9fea282c92906f0c3c25e4ee652e2b57eab4194307d345887692daa9f",
+    "pilot/metadata.json": "6f767df00db1fb2aaf86ff9edfabd11176f1f7b5177aca6bf0ac8de98f97ee2f",
+    "pilot/raw.json": "f482f7e9925b026c72cb1eef42db45fdaede17f17fb2d51b8e47ec264f650df6",
+    "pilot/scored.json": "1379014112d13c0f4e0f3eb530d80aed298482ad5014a998fbee5722afe0d7fc",
+    "pilot-snapshot.json": "46e57070ceb2aa933ea95d935e84df1696c3370692a42ebd04dcbacc4b6c209d",
+    "plan.md": "4a126816296224c72632203f14353b0726bc04a18f872925d2a2d2abad2e7eec",
+    "preflight.json": "ffdd6d123528ed0cd76dbc4dca028574b1328f37f21a527b8d2999238b5a5bc5",
+    "preparation-verification.json": "d294eaa94fb0caf4da19963876b8b00d0323308387f65f3df72569c9e3465261",
+    "public-output-review.json": "d2f37e9ea0dd82659d26d00845be6bf3dbb6eb5e4020dee37d305a090cc62ab0",
+    "raw.json": "88cb48692086c49f28cb31127d419e40d0d52fb36c54a9b85fb23f1a7e9d9e07",
+    "report.md": "2bdce550b6d1e84a2906465451c2d1da90ad3d64a6ad3181abc73486dce66bf0",
+    "run_round.py": "ed477988cec064753c0172d311752e8e82d92e38f6b779f3d2ce1895166a922e",
+    "scored.json": "9baa133da90721514fdf228786255c499453dbba5515e246d820fe00de859f48"
+  },
+  "related_document_sha256": {
+    "apps/core-api/ai/evaluation/savings/README.md": "f81205c5dfe7862ef1d57075a58b20d28bff12e004ed214a3e0daf9b280858bc"
+  }
+}

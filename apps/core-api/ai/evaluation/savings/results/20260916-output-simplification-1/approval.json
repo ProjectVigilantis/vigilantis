@@ -1,0 +1,19 @@
+{
+  "approved": true,
+  "user_statement": "검증 진행 해 유료호출 80회까지 승인함",
+  "user_total_call_limit": 80,
+  "round_maximum_calls": 60,
+  "candidate": "A",
+  "preflight_sha256": "d181e7a572f578b1e2fa1b1b2cc7037c07f138b82f5d3718fb4d278f581962d4",
+  "recorded_at": "2026-09-16T01:07:21.195737+00:00",
+  "estimated_cost_usd": [
+    "0.03",
+    "0.06"
+  ],
+  "estimated_minutes": [
+    4,
+    6
+  ],
+  "scope": "Candidate A verification; no automatic B, retries, replacements or repeated passing attempts.",
+  "prior_key_and_golden_transmission_authorization_reused": true
+}

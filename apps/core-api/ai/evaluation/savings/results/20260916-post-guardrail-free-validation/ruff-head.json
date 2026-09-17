@@ -1,0 +1,7023 @@
+[
+  {
+    "cell": null,
+    "code": "I001",
+    "end_location": {
+      "column": 36,
+      "row": 125
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from __future__ import annotations\n\nimport ipaddress\nimport logging\nfrom dataclasses import dataclass\nfrom datetime import datetime, timedelta, timezone\nfrom typing import Callable, Optional\n\nimport workflows\nfrom ai.agent import (\n    FINOPS_MODEL_CALLS,\n    SECOPS_MODEL_CALLS,\n    run_finops_graph,\n    run_secops_graph,\n)\nfrom ai.capabilities import (\n    build_finops_capabilities,\n    build_secops_capabilities,\n    secops_action_targets,\n)\nfrom ai.model_client import AIModelClient\nfrom ai.openai_client import build_openai_model_client\nfrom apscheduler.schedulers.asyncio import AsyncIOScheduler\nfrom apscheduler.triggers.interval import IntervalTrigger\nfrom asset_mapping import to_asset_item\nfrom config import Settings, get_settings\nfrom db import mappers\nfrom db.repositories import assets as assets_repo\nfrom db.repositories import executions as executions_repo\nfrom db.repositories import incidents as incidents_repo\nfrom db.session import get_session_factory\nfrom pydantic import ValidationError\nfrom realtime import incident_event\nfrom schemas.agents import (\n    AgentEvidenceInput,\n    AgentExecutionContext,\n    AgentGraphInput,\n    AgentGraphOutput,\n    FinOpsGraphInput,\n    SecOpsGraphInput,\n)\nfrom schemas.api.actions import ExecutionStatus\nfrom schemas.api.assets import AssetType, RelationType\nfrom schemas.api.incidents import IncidentCategory\nfrom schemas.api.ws import WsEvent, WsEventType\nfrom schemas.events import InitialRiskEvaluationResult, expected_mode_for\nfrom schemas.evidence import EvidenceItem, EvidenceType\nfrom schemas.incidents import AgentInvocationStatus\nfrom schemas.runbooks import RunbookId, TriggerSource\nfrom sqlalchemy.orm import Session, sessionmaker\n\n",
+          "end_location": {
+            "column": 1,
+            "row": 127
+          },
+          "location": {
+            "column": 1,
+            "row": 80
+          }
+        }
+      ],
+      "message": "Organize imports"
+    },
+    "location": {
+      "column": 1,
+      "row": 80
+    },
+    "message": "Import block is un-sorted or un-formatted",
+    "name": "unsorted-imports",
+    "noqa_row": 80,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unsorted-imports"
+  },
+  {
+    "cell": null,
+    "code": "UP035",
+    "end_location": {
+      "column": 38,
+      "row": 86
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from typing import Optional\nfrom collections.abc import Callable",
+          "end_location": {
+            "column": 38,
+            "row": 86
+          },
+          "location": {
+            "column": 1,
+            "row": 86
+          }
+        }
+      ],
+      "message": "Import from `collections.abc`"
+    },
+    "location": {
+      "column": 1,
+      "row": 86
+    },
+    "message": "Import from `collections.abc` instead: `Callable`",
+    "name": "deprecated-import",
+    "noqa_row": 86,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/deprecated-import"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 61,
+      "row": 165
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "Settings | None",
+          "end_location": {
+            "column": 61,
+            "row": 165
+          },
+          "location": {
+            "column": 43,
+            "row": 165
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 43,
+      "row": 165
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 165,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP017",
+    "end_location": {
+      "column": 39,
+      "row": 190
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from datetime import datetime, timedelta, timezone, UTC",
+          "end_location": {
+            "column": 51,
+            "row": 85
+          },
+          "location": {
+            "column": 1,
+            "row": 85
+          }
+        },
+        {
+          "content": "UTC",
+          "end_location": {
+            "column": 39,
+            "row": 190
+          },
+          "location": {
+            "column": 27,
+            "row": 190
+          }
+        }
+      ],
+      "message": "Convert to `datetime.UTC` alias"
+    },
+    "location": {
+      "column": 27,
+      "row": 190
+    },
+    "message": "Use `datetime.UTC` alias",
+    "name": "datetime-timezone-utc",
+    "noqa_row": 190,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/datetime-timezone-utc"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 65,
+      "row": 342
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 65,
+            "row": 342
+          },
+          "location": {
+            "column": 52,
+            "row": 342
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 52,
+      "row": 342
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 342,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 19,
+      "row": 371
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 19,
+            "row": 371
+          },
+          "location": {
+            "column": 6,
+            "row": 371
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 6,
+      "row": 371
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 371,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 31,
+      "row": 449
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "Publish | None",
+          "end_location": {
+            "column": 31,
+            "row": 449
+          },
+          "location": {
+            "column": 14,
+            "row": 449
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 14,
+      "row": 449
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 449,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP017",
+    "end_location": {
+      "column": 66,
+      "row": 454
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from datetime import datetime, timedelta, timezone, UTC",
+          "end_location": {
+            "column": 51,
+            "row": 85
+          },
+          "location": {
+            "column": 1,
+            "row": 85
+          }
+        },
+        {
+          "content": "UTC",
+          "end_location": {
+            "column": 66,
+            "row": 454
+          },
+          "location": {
+            "column": 54,
+            "row": 454
+          }
+        }
+      ],
+      "message": "Convert to `datetime.UTC` alias"
+    },
+    "location": {
+      "column": 54,
+      "row": 454
+    },
+    "message": "Use `datetime.UTC` alias",
+    "name": "datetime-timezone-utc",
+    "noqa_row": 454,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/datetime-timezone-utc"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 38,
+      "row": 499
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 64,
+            "row": 499
+          },
+          "location": {
+            "column": 22,
+            "row": 499
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 24,
+      "row": 499
+    },
+    "message": "Unused `noqa` directive (unused: `BLE001`)",
+    "name": "unused-noqa",
+    "noqa_row": 499,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 44,
+      "row": 509
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "Publish | None",
+          "end_location": {
+            "column": 44,
+            "row": 509
+          },
+          "location": {
+            "column": 27,
+            "row": 509
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 27,
+      "row": 509
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 509,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 87,
+      "row": 509
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "AIModelClient | None",
+          "end_location": {
+            "column": 87,
+            "row": 509
+          },
+          "location": {
+            "column": 64,
+            "row": 509
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 64,
+      "row": 509
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 509,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 42,
+      "row": 539
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 55,
+            "row": 539
+          },
+          "location": {
+            "column": 26,
+            "row": 539
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 28,
+      "row": 539
+    },
+    "message": "Unused `noqa` directive (unused: `BLE001`)",
+    "name": "unused-noqa",
+    "noqa_row": 539,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 71,
+      "row": 551
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "Publish | None",
+          "end_location": {
+            "column": 71,
+            "row": 551
+          },
+          "location": {
+            "column": 54,
+            "row": 551
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 54,
+      "row": 551
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 551,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 54,
+      "row": 561
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "Publish | None",
+          "end_location": {
+            "column": 54,
+            "row": 561
+          },
+          "location": {
+            "column": 37,
+            "row": 561
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 37,
+      "row": 561
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 561,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 92,
+      "row": 561
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "AsyncIOScheduler | None",
+          "end_location": {
+            "column": 92,
+            "row": 561
+          },
+          "location": {
+            "column": 66,
+            "row": 561
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 66,
+      "row": 561
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 561,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "I001",
+    "end_location": {
+      "column": 39,
+      "row": 49
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\ai\\agent.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from __future__ import annotations\n\nimport hashlib\nimport json\nfrom typing import Any, Optional, TypedDict\n\nfrom langgraph.graph import END, START, StateGraph\nfrom pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, ValidationError\nfrom schemas.agents import (\n    AgentAssetContext,\n    AgentGraphOutput,\n    FinOpsGraphInput,\n    RunbookCandidateDraft,\n    RunbookCapability,\n    SecOpsGraphInput,\n)\nfrom schemas.api.incidents import RiskLevel\nfrom schemas.evidence import EvidenceType\nfrom schemas.incidents import AgentInvocationStatus\nfrom schemas.rightsizing_policy import rightsizing_target_type\nfrom schemas.runbook_parameters import (\n    CANDIDATE_PARAMETER_MODELS,\n    ai_decided_parameter_names,\n)\nfrom schemas.runbooks import RunbookId\n\nfrom ai.capabilities import secops_action_targets\nfrom ai.model_client import AIModelClient, AIModelError, AIModelRequest\n\n",
+          "end_location": {
+            "column": 1,
+            "row": 51
+          },
+          "location": {
+            "column": 1,
+            "row": 25
+          }
+        }
+      ],
+      "message": "Organize imports"
+    },
+    "location": {
+      "column": 1,
+      "row": 25
+    },
+    "message": "Import block is un-sorted or un-formatted",
+    "name": "unsorted-imports",
+    "noqa_row": 25,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unsorted-imports"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 37,
+      "row": 176
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\ai\\agent.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "StrictInt | None",
+          "end_location": {
+            "column": 37,
+            "row": 176
+          },
+          "location": {
+            "column": 18,
+            "row": 176
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 18,
+      "row": 176
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 176,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 30,
+      "row": 177
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\ai\\agent.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 30,
+            "row": 177
+          },
+          "location": {
+            "column": 17,
+            "row": 177
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 17,
+      "row": 177
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 177,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 28,
+      "row": 178
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\ai\\agent.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 28,
+            "row": 178
+          },
+          "location": {
+            "column": 15,
+            "row": 178
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 15,
+      "row": 178
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 178,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 33,
+      "row": 179
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\ai\\agent.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "StrictBool | None",
+          "end_location": {
+            "column": 33,
+            "row": 179
+          },
+          "location": {
+            "column": 13,
+            "row": 179
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 13,
+      "row": 179
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 179,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 34,
+      "row": 180
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\ai\\agent.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "StrictInt | None",
+          "end_location": {
+            "column": 34,
+            "row": 180
+          },
+          "location": {
+            "column": 15,
+            "row": 180
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 15,
+      "row": 180
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 180,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 34,
+      "row": 181
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\ai\\agent.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "StrictInt | None",
+          "end_location": {
+            "column": 34,
+            "row": 181
+          },
+          "location": {
+            "column": 15,
+            "row": 181
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 15,
+      "row": 181
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 181,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "I001",
+    "end_location": {
+      "column": 2,
+      "row": 40
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\ai\\tests\\test_finops_graph.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "import json\nfrom pathlib import Path\n\nimport pytest\nfrom ai.agent import (\n    _FINOPS_PROPOSAL_SYSTEM_PROMPT,\n    _FINOPS_SUMMARY_SYSTEM_PROMPT,\n    _PARAMETER_CONSTRAINTS,\n    _SECOPS_PROPOSAL_PROMPT,\n    _SECOPS_RISK_PROMPT,\n    _SECOPS_SUMMARY_PROMPT,\n    FINOPS_PROMPT_VERSION,\n    CandidateProposalOutput,\n    EvidenceSummaryOutput,\n    ProposedCandidate,\n    finops_prompt_fingerprint,\n    finops_prompt_material,\n    run_finops_graph,\n)\nfrom ai.model_client import FakeAIModelClient\nfrom pydantic import ValidationError\nfrom schemas.agents import FinOpsGraphInput\nfrom schemas.incidents import AgentInvocationStatus\nfrom schemas.runbook_parameters import (\n    CANDIDATE_PARAMETER_MODELS,\n    Ec2EnableAutoscalingCandidateParameters,\n    Ec2RightsizingCandidateParameters,\n)\n\n",
+          "end_location": {
+            "column": 1,
+            "row": 42
+          },
+          "location": {
+            "column": 1,
+            "row": 12
+          }
+        }
+      ],
+      "message": "Organize imports"
+    },
+    "location": {
+      "column": 1,
+      "row": 12
+    },
+    "message": "Import block is un-sorted or un-formatted",
+    "name": "unsorted-imports",
+    "noqa_row": 12,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unsorted-imports"
+  },
+  {
+    "cell": null,
+    "code": "I001",
+    "end_location": {
+      "column": 26,
+      "row": 60
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from __future__ import annotations\n\nimport uuid\nfrom datetime import datetime, timezone\nfrom enum import Enum\nfrom typing import Optional\n\nfrom schemas.api.actions import ExecutionStatus\nfrom schemas.api.assets import AssetType, RelationType\nfrom schemas.api.incidents import (\n    IncidentCategory,\n    IncidentStatus,\n    ResolutionJudgement,\n    ResponseMode,\n    RiskLevel,\n)\nfrom schemas.candidates import CandidateStatus\nfrom schemas.collections import CollectionRunStatus\nfrom schemas.events import ThreatEventType\nfrom schemas.evidence import EvidenceType\nfrom schemas.executions import ExecutionEffect, ExecutionStepStatus\nfrom schemas.guardrails import (\n    GuardrailDecision,\n    GuardrailStep,\n    GuardrailValidationContext,\n    PrecheckReasonCode,\n)\nfrom schemas.incidents import AgentInvocationStatus\nfrom schemas.runbooks import RunbookId, TriggerSource\nfrom sqlalchemy import (\n    CheckConstraint,\n    DateTime,\n    Float,\n    ForeignKey,\n    Index,\n    Integer,\n    String,\n    UniqueConstraint,\n    Uuid,\n)\nfrom sqlalchemy import Enum as SAEnum\nfrom sqlalchemy.dialects.postgresql import JSONB\nfrom sqlalchemy.orm import Mapped, mapped_column\nfrom sqlalchemy.sql import text\n\nfrom .session import Base\n\n\n",
+          "end_location": {
+            "column": 1,
+            "row": 63
+          },
+          "location": {
+            "column": 1,
+            "row": 14
+          }
+        }
+      ],
+      "message": "Organize imports"
+    },
+    "location": {
+      "column": 1,
+      "row": 14
+    },
+    "message": "Import block is un-sorted or un-formatted",
+    "name": "unsorted-imports",
+    "noqa_row": 14,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unsorted-imports"
+  },
+  {
+    "cell": null,
+    "code": "UP017",
+    "end_location": {
+      "column": 37,
+      "row": 64
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from datetime import datetime, timezone, UTC",
+          "end_location": {
+            "column": 40,
+            "row": 17
+          },
+          "location": {
+            "column": 1,
+            "row": 17
+          }
+        },
+        {
+          "content": "UTC",
+          "end_location": {
+            "column": 37,
+            "row": 64
+          },
+          "location": {
+            "column": 25,
+            "row": 64
+          }
+        }
+      ],
+      "message": "Convert to `datetime.UTC` alias"
+    },
+    "location": {
+      "column": 25,
+      "row": 64
+    },
+    "message": "Use `datetime.UTC` alias",
+    "name": "datetime-timezone-utc",
+    "noqa_row": 64,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/datetime-timezone-utc"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 40,
+      "row": 112
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 40,
+            "row": 112
+          },
+          "location": {
+            "column": 27,
+            "row": 112
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 27,
+      "row": 112
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 112,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 43,
+      "row": 114
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "datetime | None",
+          "end_location": {
+            "column": 43,
+            "row": 114
+          },
+          "location": {
+            "column": 25,
+            "row": 114
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 25,
+      "row": 114
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 114,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 31,
+      "row": 130
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 31,
+            "row": 130
+          },
+          "location": {
+            "column": 18,
+            "row": 130
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 18,
+      "row": 130
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 130,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 32,
+      "row": 133
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 32,
+            "row": 133
+          },
+          "location": {
+            "column": 19,
+            "row": 133
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 19,
+      "row": 133
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 133,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 49,
+      "row": 136
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 49,
+            "row": 136
+          },
+          "location": {
+            "column": 36,
+            "row": 136
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 36,
+      "row": 136
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 136,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 44,
+      "row": 144
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "datetime | None",
+          "end_location": {
+            "column": 44,
+            "row": 144
+          },
+          "location": {
+            "column": 26,
+            "row": 144
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 26,
+      "row": 144
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 144,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 44,
+      "row": 167
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 44,
+            "row": 167
+          },
+          "location": {
+            "column": 31,
+            "row": 167
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 31,
+      "row": 167
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 167,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 36,
+      "row": 191
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "float | None",
+          "end_location": {
+            "column": 36,
+            "row": 191
+          },
+          "location": {
+            "column": 21,
+            "row": 191
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 21,
+      "row": 191
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 191,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 36,
+      "row": 192
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "float | None",
+          "end_location": {
+            "column": 36,
+            "row": 192
+          },
+          "location": {
+            "column": 21,
+            "row": 192
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 21,
+      "row": 192
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 192,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 39,
+      "row": 193
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "float | None",
+          "end_location": {
+            "column": 39,
+            "row": 193
+          },
+          "location": {
+            "column": 24,
+            "row": 193
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 24,
+      "row": 193
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 193,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 40,
+      "row": 194
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "float | None",
+          "end_location": {
+            "column": 40,
+            "row": 194
+          },
+          "location": {
+            "column": 25,
+            "row": 194
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 25,
+      "row": 194
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 194,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 34,
+      "row": 218
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 34,
+            "row": 218
+          },
+          "location": {
+            "column": 21,
+            "row": 218
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 21,
+      "row": 218
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 218,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 39,
+      "row": 219
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "int | None",
+          "end_location": {
+            "column": 39,
+            "row": 219
+          },
+          "location": {
+            "column": 26,
+            "row": 219
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 26,
+      "row": 219
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 219,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 43,
+      "row": 220
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 43,
+            "row": 220
+          },
+          "location": {
+            "column": 30,
+            "row": 220
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 30,
+      "row": 220
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 220,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 33,
+      "row": 221
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 33,
+            "row": 221
+          },
+          "location": {
+            "column": 20,
+            "row": 221
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 20,
+      "row": 221
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 221,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 32,
+      "row": 262
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 32,
+            "row": 262
+          },
+          "location": {
+            "column": 19,
+            "row": 262
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 19,
+      "row": 262
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 262,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 42,
+      "row": 270
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 42,
+            "row": 270
+          },
+          "location": {
+            "column": 29,
+            "row": 270
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 29,
+      "row": 270
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 270,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 51,
+      "row": 274
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "RiskLevel | None",
+          "end_location": {
+            "column": 51,
+            "row": 274
+          },
+          "location": {
+            "column": 32,
+            "row": 274
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 32,
+      "row": 274
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 274,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 52,
+      "row": 277
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "RiskLevel | None",
+          "end_location": {
+            "column": 52,
+            "row": 277
+          },
+          "location": {
+            "column": 33,
+            "row": 277
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 33,
+      "row": 277
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 277,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 49,
+      "row": 280
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "ResponseMode | None",
+          "end_location": {
+            "column": 49,
+            "row": 280
+          },
+          "location": {
+            "column": 27,
+            "row": 280
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 27,
+      "row": 280
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 280,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 59,
+      "row": 291
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "datetime | None",
+          "end_location": {
+            "column": 59,
+            "row": 291
+          },
+          "location": {
+            "column": 41,
+            "row": 291
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 41,
+      "row": 291
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 291,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 53,
+      "row": 294
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "datetime | None",
+          "end_location": {
+            "column": 53,
+            "row": 294
+          },
+          "location": {
+            "column": 35,
+            "row": 294
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 35,
+      "row": 294
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 294,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 52,
+      "row": 297
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "datetime | None",
+          "end_location": {
+            "column": 52,
+            "row": 297
+          },
+          "location": {
+            "column": 34,
+            "row": 297
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 34,
+      "row": 297
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 297,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 53,
+      "row": 302
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "ResolutionJudgement | None",
+          "end_location": {
+            "column": 53,
+            "row": 302
+          },
+          "location": {
+            "column": 24,
+            "row": 302
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 24,
+      "row": 302
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 302,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 43,
+      "row": 305
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "datetime | None",
+          "end_location": {
+            "column": 43,
+            "row": 305
+          },
+          "location": {
+            "column": 25,
+            "row": 305
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 25,
+      "row": 305
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 305,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 39,
+      "row": 441
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 39,
+            "row": 441
+          },
+          "location": {
+            "column": 26,
+            "row": 441
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 26,
+      "row": 441
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 441,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 39,
+      "row": 444
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 39,
+            "row": 444
+          },
+          "location": {
+            "column": 26,
+            "row": 444
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 26,
+      "row": 444
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 444,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 48,
+      "row": 450
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "GuardrailStep | None",
+          "end_location": {
+            "column": 48,
+            "row": 450
+          },
+          "location": {
+            "column": 25,
+            "row": 450
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 25,
+      "row": 450
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 450,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 45,
+      "row": 456
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "dict | None",
+          "end_location": {
+            "column": 45,
+            "row": 456
+          },
+          "location": {
+            "column": 31,
+            "row": 456
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 31,
+      "row": 456
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 456,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 39,
+      "row": 477
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 39,
+            "row": 477
+          },
+          "location": {
+            "column": 26,
+            "row": 477
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 26,
+      "row": 477
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 477,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 42,
+      "row": 489
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 42,
+            "row": 489
+          },
+          "location": {
+            "column": 29,
+            "row": 489
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 29,
+      "row": 489
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 489,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 44,
+      "row": 492
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 44,
+            "row": 492
+          },
+          "location": {
+            "column": 31,
+            "row": 492
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 31,
+      "row": 492
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 492,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 46,
+      "row": 496
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 46,
+            "row": 496
+          },
+          "location": {
+            "column": 33,
+            "row": 496
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 33,
+      "row": 496
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 496,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 43,
+      "row": 499
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 43,
+            "row": 499
+          },
+          "location": {
+            "column": 30,
+            "row": 499
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 30,
+      "row": 499
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 499,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 45,
+      "row": 505
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "dict | None",
+          "end_location": {
+            "column": 45,
+            "row": 505
+          },
+          "location": {
+            "column": 31,
+            "row": 505
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 31,
+      "row": 505
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 505,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 40,
+      "row": 506
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 40,
+            "row": 506
+          },
+          "location": {
+            "column": 27,
+            "row": 506
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 27,
+      "row": 506
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 506,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 43,
+      "row": 511
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "datetime | None",
+          "end_location": {
+            "column": 43,
+            "row": 511
+          },
+          "location": {
+            "column": 25,
+            "row": 511
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 25,
+      "row": 511
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 511,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 66,
+      "row": 518
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "PrecheckReasonCode | None",
+          "end_location": {
+            "column": 66,
+            "row": 518
+          },
+          "location": {
+            "column": 38,
+            "row": 518
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 38,
+      "row": 518
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 518,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 60,
+      "row": 524
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "datetime | None",
+          "end_location": {
+            "column": 60,
+            "row": 524
+          },
+          "location": {
+            "column": 42,
+            "row": 524
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 42,
+      "row": 524
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 524,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 59,
+      "row": 527
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "datetime | None",
+          "end_location": {
+            "column": 59,
+            "row": 527
+          },
+          "location": {
+            "column": 41,
+            "row": 527
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 41,
+      "row": 527
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 527,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 45,
+      "row": 584
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "ExecutionEffect | None",
+          "end_location": {
+            "column": 45,
+            "row": 584
+          },
+          "location": {
+            "column": 20,
+            "row": 584
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 20,
+      "row": 584
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 584,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 41,
+      "row": 587
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 41,
+            "row": 587
+          },
+          "location": {
+            "column": 28,
+            "row": 587
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 28,
+      "row": 587
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 587,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 41,
+      "row": 588
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 41,
+            "row": 588
+          },
+          "location": {
+            "column": 28,
+            "row": 588
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 28,
+      "row": 588
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 588,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 40,
+      "row": 589
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\models.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 40,
+            "row": 589
+          },
+          "location": {
+            "column": 27,
+            "row": 589
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 27,
+      "row": 589
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 589,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 45,
+      "row": 17
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\tests\\test_mappers.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 45,
+            "row": 17
+          },
+          "location": {
+            "column": 31,
+            "row": 17
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 33,
+      "row": 17
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 17,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 83,
+      "row": 18
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\tests\\test_mappers.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 83,
+            "row": 18
+          },
+          "location": {
+            "column": 69,
+            "row": 18
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 71,
+      "row": 18
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 18,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 80,
+      "row": 19
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\tests\\test_mappers.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 80,
+            "row": 19
+          },
+          "location": {
+            "column": 66,
+            "row": 19
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 68,
+      "row": 19
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 19,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 70,
+      "row": 20
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\tests\\test_mappers.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 70,
+            "row": 20
+          },
+          "location": {
+            "column": 56,
+            "row": 20
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 58,
+      "row": 20
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 20,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 47,
+      "row": 21
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\tests\\test_mappers.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 47,
+            "row": 21
+          },
+          "location": {
+            "column": 33,
+            "row": 21
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 35,
+      "row": 21
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 21,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 61,
+      "row": 26
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\tests\\test_mappers.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 61,
+            "row": 26
+          },
+          "location": {
+            "column": 47,
+            "row": 26
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 49,
+      "row": 26
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 26,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "UP017",
+    "end_location": {
+      "column": 58,
+      "row": 28
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\db\\tests\\test_mappers.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from datetime import datetime, timedelta, timezone, UTC",
+          "end_location": {
+            "column": 51,
+            "row": 8
+          },
+          "location": {
+            "column": 1,
+            "row": 8
+          }
+        },
+        {
+          "content": "UTC",
+          "end_location": {
+            "column": 58,
+            "row": 28
+          },
+          "location": {
+            "column": 46,
+            "row": 28
+          }
+        }
+      ],
+      "message": "Convert to `datetime.UTC` alias"
+    },
+    "location": {
+      "column": 46,
+      "row": 28
+    },
+    "message": "Use `datetime.UTC` alias",
+    "name": "datetime-timezone-utc",
+    "noqa_row": 28,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/datetime-timezone-utc"
+  },
+  {
+    "cell": null,
+    "code": "I001",
+    "end_location": {
+      "column": 36,
+      "row": 49
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\routers\\incidents.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from __future__ import annotations\n\nfrom typing import Optional\n\nimport workflows\nfrom db import models\nfrom db.repositories import executions as executions_repo\nfrom db.repositories import incidents as incidents_repo\nfrom db.session import get_db\nfrom exceptions import ApiError\nfrom fastapi import APIRouter, Depends, Request\nfrom identifiers import canonical_id\nfrom realtime import incident_event\nfrom schemas.api.errors import ErrorCode\nfrom schemas.api.incidents import (\n    IncidentCategory,\n    IncidentListItem,\n    IncidentResponse,\n    IncidentsResponse,\n    IncidentStatus,\n    ResolveIncidentRequest,\n)\nfrom schemas.api.ws import WsEventType\nfrom schemas.candidates import CandidateStatus\nfrom schemas.executions import EXECUTION_RECOVERABLE_STATUSES\nfrom schemas.runbooks import ROLLBACK_RUNBOOK_BY_MAIN_ID\nfrom sqlalchemy.orm import Session\n\n",
+          "end_location": {
+            "column": 1,
+            "row": 51
+          },
+          "location": {
+            "column": 1,
+            "row": 21
+          }
+        }
+      ],
+      "message": "Organize imports"
+    },
+    "location": {
+      "column": 1,
+      "row": 21
+    },
+    "message": "Import block is un-sorted or un-formatted",
+    "name": "unsorted-imports",
+    "noqa_row": 21,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unsorted-imports"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 76,
+      "row": 70
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\routers\\incidents.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "dict | None",
+          "end_location": {
+            "column": 76,
+            "row": 70
+          },
+          "location": {
+            "column": 62,
+            "row": 70
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 62,
+      "row": 70
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 70,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 37,
+      "row": 101
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\routers\\incidents.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "IncidentStatus | None",
+          "end_location": {
+            "column": 37,
+            "row": 101
+          },
+          "location": {
+            "column": 13,
+            "row": 101
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 13,
+      "row": 101
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 101,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 41,
+      "row": 102
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\routers\\incidents.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "IncidentCategory | None",
+          "end_location": {
+            "column": 41,
+            "row": 102
+          },
+          "location": {
+            "column": 15,
+            "row": 102
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 15,
+      "row": 102
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 102,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "B008",
+    "end_location": {
+      "column": 34,
+      "row": 103
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\routers\\incidents.py",
+    "fix": null,
+    "location": {
+      "column": 19,
+      "row": 103
+    },
+    "message": "Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable",
+    "name": "function-call-in-default-argument",
+    "noqa_row": 103,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/function-call-in-default-argument"
+  },
+  {
+    "cell": null,
+    "code": "B008",
+    "end_location": {
+      "column": 65,
+      "row": 178
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\routers\\incidents.py",
+    "fix": null,
+    "location": {
+      "column": 50,
+      "row": 178
+    },
+    "message": "Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable",
+    "name": "function-call-in-default-argument",
+    "noqa_row": 178,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/function-call-in-default-argument"
+  },
+  {
+    "cell": null,
+    "code": "B008",
+    "end_location": {
+      "column": 34,
+      "row": 187
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\routers\\incidents.py",
+    "fix": null,
+    "location": {
+      "column": 19,
+      "row": 187
+    },
+    "message": "Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable",
+    "name": "function-call-in-default-argument",
+    "noqa_row": 187,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/function-call-in-default-argument"
+  },
+  {
+    "cell": null,
+    "code": "I001",
+    "end_location": {
+      "column": 39,
+      "row": 56
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "import agent_dispatcher  # noqa: E402\nimport incident_intake  # noqa: E402\nimport workflows  # noqa: E402\nfrom ai.agent import (  # noqa: E402\n    CandidateProposalOutput,\n    EvidenceSummaryOutput,\n    ProposedCandidate,\n    RiskReassessmentOutput,\n)\nfrom ai.model_client import FakeAIModelClient  # noqa: E402\nfrom db.repositories import assets as assets_repo  # noqa: E402\nfrom db.repositories import guardrails as guardrails_repo  # noqa: E402\nfrom db.repositories import incidents as incidents_repo  # noqa: E402\nfrom schemas.agents import AgentGraphOutput, RunbookCandidateDraft  # noqa: E402\nfrom schemas.api.assets import AssetType  # noqa: E402\nfrom schemas.api.incidents import IncidentStatus, RiskLevel  # noqa: E402\nfrom schemas.assets import MetricSummary as MetricSummaryContract  # noqa: E402\nfrom schemas.candidates import CandidateStatus  # noqa: E402\nfrom schemas.evidence import EvidenceType  # noqa: E402\nfrom schemas.guardrails import GuardrailStep  # noqa: E402\nfrom schemas.incidents import (  # noqa: E402\n    AGENT_TERMINAL_STATUSES,\n    AgentInvocationStatus,\n)\nfrom schemas.intake import FinOpsIncidentIntake, SecOpsIncidentIntake  # noqa: E402\nfrom schemas.precheck import (  # noqa: E402\n    PrecheckOutcome,\n    PrecheckReasonCode,\n    VerificationMethod,\n    build_verification_summary,\n)\nfrom schemas.runbooks import RunbookId  # noqa: E402\n\n",
+          "end_location": {
+            "column": 1,
+            "row": 58
+          },
+          "location": {
+            "column": 1,
+            "row": 25
+          }
+        }
+      ],
+      "message": "Organize imports"
+    },
+    "location": {
+      "column": 1,
+      "row": 25
+    },
+    "message": "Import block is un-sorted or un-formatted",
+    "name": "unsorted-imports",
+    "noqa_row": 25,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unsorted-imports"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 38,
+      "row": 25
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 38,
+            "row": 25
+          },
+          "location": {
+            "column": 24,
+            "row": 25
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 26,
+      "row": 25
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 25,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 37,
+      "row": 26
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 37,
+            "row": 26
+          },
+          "location": {
+            "column": 23,
+            "row": 26
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 25,
+      "row": 26
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 26,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 31,
+      "row": 27
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 31,
+            "row": 27
+          },
+          "location": {
+            "column": 17,
+            "row": 27
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 19,
+      "row": 27
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 27,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 37,
+      "row": 28
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 37,
+            "row": 28
+          },
+          "location": {
+            "column": 23,
+            "row": 28
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 25,
+      "row": 28
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 28,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 60,
+      "row": 34
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 60,
+            "row": 34
+          },
+          "location": {
+            "column": 46,
+            "row": 34
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 48,
+      "row": 34
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 34,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 64,
+      "row": 35
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 64,
+            "row": 35
+          },
+          "location": {
+            "column": 50,
+            "row": 35
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 52,
+      "row": 35
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 35,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 72,
+      "row": 36
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 72,
+            "row": 36
+          },
+          "location": {
+            "column": 58,
+            "row": 36
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 60,
+      "row": 36
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 36,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 70,
+      "row": 37
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 70,
+            "row": 37
+          },
+          "location": {
+            "column": 56,
+            "row": 37
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 58,
+      "row": 37
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 37,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 81,
+      "row": 38
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 81,
+            "row": 38
+          },
+          "location": {
+            "column": 67,
+            "row": 38
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 69,
+      "row": 38
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 38,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 55,
+      "row": 39
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 55,
+            "row": 39
+          },
+          "location": {
+            "column": 41,
+            "row": 39
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 43,
+      "row": 39
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 39,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 80,
+      "row": 40
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 80,
+            "row": 40
+          },
+          "location": {
+            "column": 66,
+            "row": 40
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 68,
+      "row": 40
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 40,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 74,
+      "row": 41
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 74,
+            "row": 41
+          },
+          "location": {
+            "column": 60,
+            "row": 41
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 62,
+      "row": 41
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 41,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 61,
+      "row": 42
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 61,
+            "row": 42
+          },
+          "location": {
+            "column": 47,
+            "row": 42
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 49,
+      "row": 42
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 42,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 56,
+      "row": 43
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 56,
+            "row": 43
+          },
+          "location": {
+            "column": 42,
+            "row": 43
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 44,
+      "row": 43
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 43,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 59,
+      "row": 44
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 59,
+            "row": 44
+          },
+          "location": {
+            "column": 45,
+            "row": 44
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 47,
+      "row": 44
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 44,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 46,
+      "row": 45
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 46,
+            "row": 45
+          },
+          "location": {
+            "column": 32,
+            "row": 45
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 34,
+      "row": 45
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 45,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 84,
+      "row": 49
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 84,
+            "row": 49
+          },
+          "location": {
+            "column": 70,
+            "row": 49
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 72,
+      "row": 49
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 49,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 45,
+      "row": 50
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 45,
+            "row": 50
+          },
+          "location": {
+            "column": 31,
+            "row": 50
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 33,
+      "row": 50
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 50,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 53,
+      "row": 56
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 53,
+            "row": 56
+          },
+          "location": {
+            "column": 39,
+            "row": 56
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 41,
+      "row": 56
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 56,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "UP017",
+    "end_location": {
+      "column": 47,
+      "row": 187
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from datetime import datetime, timedelta, timezone, UTC",
+          "end_location": {
+            "column": 51,
+            "row": 14
+          },
+          "location": {
+            "column": 1,
+            "row": 14
+          }
+        },
+        {
+          "content": "UTC",
+          "end_location": {
+            "column": 47,
+            "row": 187
+          },
+          "location": {
+            "column": 35,
+            "row": 187
+          }
+        }
+      ],
+      "message": "Convert to `datetime.UTC` alias"
+    },
+    "location": {
+      "column": 35,
+      "row": 187
+    },
+    "message": "Use `datetime.UTC` alias",
+    "name": "datetime-timezone-utc",
+    "noqa_row": 187,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/datetime-timezone-utc"
+  },
+  {
+    "cell": null,
+    "code": "UP017",
+    "end_location": {
+      "column": 47,
+      "row": 370
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from datetime import datetime, timedelta, timezone, UTC",
+          "end_location": {
+            "column": 51,
+            "row": 14
+          },
+          "location": {
+            "column": 1,
+            "row": 14
+          }
+        },
+        {
+          "content": "UTC",
+          "end_location": {
+            "column": 47,
+            "row": 370
+          },
+          "location": {
+            "column": 35,
+            "row": 370
+          }
+        }
+      ],
+      "message": "Convert to `datetime.UTC` alias"
+    },
+    "location": {
+      "column": 35,
+      "row": 370
+    },
+    "message": "Use `datetime.UTC` alias",
+    "name": "datetime-timezone-utc",
+    "noqa_row": 370,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/datetime-timezone-utc"
+  },
+  {
+    "cell": null,
+    "code": "UP017",
+    "end_location": {
+      "column": 69,
+      "row": 378
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from datetime import datetime, timedelta, timezone, UTC",
+          "end_location": {
+            "column": 51,
+            "row": 14
+          },
+          "location": {
+            "column": 1,
+            "row": 14
+          }
+        },
+        {
+          "content": "UTC",
+          "end_location": {
+            "column": 69,
+            "row": 378
+          },
+          "location": {
+            "column": 57,
+            "row": 378
+          }
+        }
+      ],
+      "message": "Convert to `datetime.UTC` alias"
+    },
+    "location": {
+      "column": 57,
+      "row": 378
+    },
+    "message": "Use `datetime.UTC` alias",
+    "name": "datetime-timezone-utc",
+    "noqa_row": 378,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/datetime-timezone-utc"
+  },
+  {
+    "cell": null,
+    "code": "UP017",
+    "end_location": {
+      "column": 66,
+      "row": 379
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from datetime import datetime, timedelta, timezone, UTC",
+          "end_location": {
+            "column": 51,
+            "row": 14
+          },
+          "location": {
+            "column": 1,
+            "row": 14
+          }
+        },
+        {
+          "content": "UTC",
+          "end_location": {
+            "column": 66,
+            "row": 379
+          },
+          "location": {
+            "column": 54,
+            "row": 379
+          }
+        }
+      ],
+      "message": "Convert to `datetime.UTC` alias"
+    },
+    "location": {
+      "column": 54,
+      "row": 379
+    },
+    "message": "Use `datetime.UTC` alias",
+    "name": "datetime-timezone-utc",
+    "noqa_row": 379,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/datetime-timezone-utc"
+  },
+  {
+    "cell": null,
+    "code": "UP017",
+    "end_location": {
+      "column": 47,
+      "row": 380
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from datetime import datetime, timedelta, timezone, UTC",
+          "end_location": {
+            "column": 51,
+            "row": 14
+          },
+          "location": {
+            "column": 1,
+            "row": 14
+          }
+        },
+        {
+          "content": "UTC",
+          "end_location": {
+            "column": 47,
+            "row": 380
+          },
+          "location": {
+            "column": 35,
+            "row": 380
+          }
+        }
+      ],
+      "message": "Convert to `datetime.UTC` alias"
+    },
+    "location": {
+      "column": 35,
+      "row": 380
+    },
+    "message": "Use `datetime.UTC` alias",
+    "name": "datetime-timezone-utc",
+    "noqa_row": 380,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/datetime-timezone-utc"
+  },
+  {
+    "cell": null,
+    "code": "UP017",
+    "end_location": {
+      "column": 69,
+      "row": 673
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from datetime import datetime, timedelta, timezone, UTC",
+          "end_location": {
+            "column": 51,
+            "row": 14
+          },
+          "location": {
+            "column": 1,
+            "row": 14
+          }
+        },
+        {
+          "content": "UTC",
+          "end_location": {
+            "column": 69,
+            "row": 673
+          },
+          "location": {
+            "column": 57,
+            "row": 673
+          }
+        }
+      ],
+      "message": "Convert to `datetime.UTC` alias"
+    },
+    "location": {
+      "column": 57,
+      "row": 673
+    },
+    "message": "Use `datetime.UTC` alias",
+    "name": "datetime-timezone-utc",
+    "noqa_row": 673,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/datetime-timezone-utc"
+  },
+  {
+    "cell": null,
+    "code": "UP017",
+    "end_location": {
+      "column": 45,
+      "row": 695
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from datetime import datetime, timedelta, timezone, UTC",
+          "end_location": {
+            "column": 51,
+            "row": 14
+          },
+          "location": {
+            "column": 1,
+            "row": 14
+          }
+        },
+        {
+          "content": "UTC",
+          "end_location": {
+            "column": 45,
+            "row": 695
+          },
+          "location": {
+            "column": 33,
+            "row": 695
+          }
+        }
+      ],
+      "message": "Convert to `datetime.UTC` alias"
+    },
+    "location": {
+      "column": 33,
+      "row": 695
+    },
+    "message": "Use `datetime.UTC` alias",
+    "name": "datetime-timezone-utc",
+    "noqa_row": 695,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/datetime-timezone-utc"
+  },
+  {
+    "cell": null,
+    "code": "UP017",
+    "end_location": {
+      "column": 62,
+      "row": 711
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from datetime import datetime, timedelta, timezone, UTC",
+          "end_location": {
+            "column": 51,
+            "row": 14
+          },
+          "location": {
+            "column": 1,
+            "row": 14
+          }
+        },
+        {
+          "content": "UTC",
+          "end_location": {
+            "column": 62,
+            "row": 711
+          },
+          "location": {
+            "column": 50,
+            "row": 711
+          }
+        }
+      ],
+      "message": "Convert to `datetime.UTC` alias"
+    },
+    "location": {
+      "column": 50,
+      "row": 711
+    },
+    "message": "Use `datetime.UTC` alias",
+    "name": "datetime-timezone-utc",
+    "noqa_row": 711,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/datetime-timezone-utc"
+  },
+  {
+    "cell": null,
+    "code": "C408",
+    "end_location": {
+      "column": 64,
+      "row": 769
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "{\"runbook_id\": RunbookId.RUNBOOK_NACL_ADD_DENY, \"target_arn\": NACL_ARN,\n                  \"evidence_ids\": [evidence_id], \"rule_number\": 100,\n                  \"cidr_block\": \"203.0.113.10/32\", \"protocol\": \"tcp\"}",
+          "end_location": {
+            "column": 64,
+            "row": 769
+          },
+          "location": {
+            "column": 14,
+            "row": 767
+          }
+        }
+      ],
+      "message": "Rewrite as a literal"
+    },
+    "location": {
+      "column": 14,
+      "row": 767
+    },
+    "message": "Unnecessary `dict()` call (rewrite as a literal)",
+    "name": "unnecessary-collection-call",
+    "noqa_row": 767,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unnecessary-collection-call"
+  },
+  {
+    "cell": null,
+    "code": "I001",
+    "end_location": {
+      "column": 73,
+      "row": 896
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\tests\\test_agent_dispatcher.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "    import urllib.request\n\n    from services.aws.client import account_id, aws_client, endpoint_url\n",
+          "end_location": {
+            "column": 1,
+            "row": 897
+          },
+          "location": {
+            "column": 1,
+            "row": 895
+          }
+        }
+      ],
+      "message": "Organize imports"
+    },
+    "location": {
+      "column": 5,
+      "row": 895
+    },
+    "message": "Import block is un-sorted or un-formatted",
+    "name": "unsorted-imports",
+    "noqa_row": 895,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unsorted-imports"
+  },
+  {
+    "cell": null,
+    "code": "I001",
+    "end_location": {
+      "column": 44,
+      "row": 106
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from __future__ import annotations\n\nimport logging\nimport uuid\nfrom dataclasses import dataclass\nfrom datetime import datetime, timedelta, timezone\nfrom typing import Optional\n\nfrom ai import guardrails\nfrom config import get_settings\nfrom db import mappers, models\nfrom db.repositories import assets as assets_repo\nfrom db.repositories import executions as executions_repo\nfrom db.repositories import guardrails as guardrails_repo\nfrom db.repositories import incidents as incidents_repo\nfrom exceptions import ApiError\nfrom identifiers import canonical_id\nfrom pydantic import ValidationError\nfrom schemas.agents import AgentGraphOutput\nfrom schemas.api.actions import (\n    ExecuteActionRequest,\n    ExecuteActionResponse,\n    ExecutionStatus,\n)\nfrom schemas.api.errors import ErrorCode\nfrom schemas.api.incidents import (\n    IncidentCategory,\n    IncidentStatus,\n    ResolutionJudgement,\n    ResponseMode,\n)\nfrom schemas.backups import InstanceSpecBackup, NaclRuleIndexBackup\nfrom schemas.candidates import CandidateStatus, RunbookCandidateData\nfrom schemas.executions import (\n    ASSET_MAY_HAVE_CHANGED_EFFECTS,\n    EXECUTION_NON_TERMINAL_STATUSES,\n    EXECUTION_RECOVERABLE_STATUSES,\n    EXECUTION_SETTLED_STATUSES,\n    EXECUTION_TERMINAL_STATUSES,\n    ExecutionEffect,\n    ExecutionStepResult,\n    ExecutionStepStatus,\n)\nfrom schemas.guardrails import (\n    GuardrailDecision,\n    GuardrailValidationContext,\n    GuardrailValidationRequest,\n    GuardrailValidationResult,\n)\nfrom schemas.incidents import INCIDENT_RESOLVABLE_STATUSES, AgentWaitSchedule\nfrom schemas.precheck import (\n    PrecheckOutcome,\n    PrecheckReasonCode,\n    VerificationMethod,\n    build_verification_summary,\n)\nfrom schemas.runbook_parameters import (\n    NaclAddDenyParameters,\n    NaclRestoreParameters,\n    build_precheck_parameters,\n)\nfrom schemas.runbooks import (\n    ROLLBACK_RUNBOOK_BY_MAIN_ID,\n    ROLLBACK_RUNBOOK_IDS,\n    RunbookId,\n    TriggerSource,\n)\nfrom services.aws import backup, executor, rollback\nfrom services.aws.errors import is_retryable\nfrom services.aws.executor import parse_arn\nfrom sqlalchemy.exc import IntegrityError\nfrom sqlalchemy.orm import Session\n\n",
+          "end_location": {
+            "column": 1,
+            "row": 108
+          },
+          "location": {
+            "column": 1,
+            "row": 37
+          }
+        }
+      ],
+      "message": "Organize imports"
+    },
+    "location": {
+      "column": 1,
+      "row": 37
+    },
+    "message": "Import block is un-sorted or un-formatted",
+    "name": "unsorted-imports",
+    "noqa_row": 37,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unsorted-imports"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 19,
+      "row": 221
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 19,
+            "row": 221
+          },
+          "location": {
+            "column": 6,
+            "row": 221
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 6,
+      "row": 221
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 221,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 42,
+      "row": 421
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "models.BackupRecord | None",
+          "end_location": {
+            "column": 42,
+            "row": 421
+          },
+          "location": {
+            "column": 13,
+            "row": 421
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 13,
+      "row": 421
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 421,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 46,
+      "row": 423
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "PrecheckReasonCode | None",
+          "end_location": {
+            "column": 46,
+            "row": 423
+          },
+          "location": {
+            "column": 18,
+            "row": 423
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 18,
+      "row": 423
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 423,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 26,
+      "row": 424
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 26,
+            "row": 424
+          },
+          "location": {
+            "column": 13,
+            "row": 424
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 13,
+      "row": 424
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 424,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 46,
+      "row": 603
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "PrecheckReasonCode | None",
+          "end_location": {
+            "column": 46,
+            "row": 603
+          },
+          "location": {
+            "column": 18,
+            "row": 603
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 18,
+      "row": 603
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 603,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 33,
+      "row": 604
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 33,
+            "row": 604
+          },
+          "location": {
+            "column": 20,
+            "row": 604
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 20,
+      "row": 604
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 604,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 19,
+      "row": 644
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 19,
+            "row": 644
+          },
+          "location": {
+            "column": 6,
+            "row": 644
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 6,
+      "row": 644
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 644,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 37,
+      "row": 745
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "NaclAddDenyParameters | None",
+          "end_location": {
+            "column": 37,
+            "row": 745
+          },
+          "location": {
+            "column": 6,
+            "row": 745
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 6,
+      "row": 745
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 745,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 37,
+      "row": 752
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "NaclRestoreParameters | None",
+          "end_location": {
+            "column": 37,
+            "row": 752
+          },
+          "location": {
+            "column": 6,
+            "row": 752
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 6,
+      "row": 752
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 752,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 42,
+      "row": 869
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "models.BackupRecord | None",
+          "end_location": {
+            "column": 42,
+            "row": 869
+          },
+          "location": {
+            "column": 13,
+            "row": 869
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 13,
+      "row": 869
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 869,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 19,
+      "row": 872
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 19,
+            "row": 872
+          },
+          "location": {
+            "column": 6,
+            "row": 872
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 6,
+      "row": 872
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 872,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 43,
+      "row": 1038
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "ExecutionStatus | None",
+          "end_location": {
+            "column": 43,
+            "row": 1038
+          },
+          "location": {
+            "column": 18,
+            "row": 1038
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 18,
+      "row": 1038
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 1038,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 33,
+      "row": 1039
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 33,
+            "row": 1039
+          },
+          "location": {
+            "column": 20,
+            "row": 1039
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 20,
+      "row": 1039
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 1039,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 51,
+      "row": 1040
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "rollback.StatusCheckVerdict | None",
+          "end_location": {
+            "column": 51,
+            "row": 1040
+          },
+          "location": {
+            "column": 14,
+            "row": 1040
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 14,
+      "row": 1040
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 1040,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 45,
+      "row": 1041
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "PrecheckReasonCode | None",
+          "end_location": {
+            "column": 45,
+            "row": 1041
+          },
+          "location": {
+            "column": 17,
+            "row": 1041
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 17,
+      "row": 1041
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 1041,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 32,
+      "row": 1042
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 32,
+            "row": 1042
+          },
+          "location": {
+            "column": 19,
+            "row": 1042
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 19,
+      "row": 1042
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 1042,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 38,
+      "row": 1472
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "models.ActionExecution | None",
+          "end_location": {
+            "column": 38,
+            "row": 1472
+          },
+          "location": {
+            "column": 6,
+            "row": 1472
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 6,
+      "row": 1472
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 1472,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 45,
+      "row": 1490
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "models.ActionExecution | None",
+          "end_location": {
+            "column": 45,
+            "row": 1490
+          },
+          "location": {
+            "column": 13,
+            "row": 1490
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 13,
+      "row": 1490
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 1490,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP017",
+    "end_location": {
+      "column": 82,
+      "row": 1520
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from datetime import datetime, timedelta, timezone, UTC",
+          "end_location": {
+            "column": 51,
+            "row": 42
+          },
+          "location": {
+            "column": 1,
+            "row": 42
+          }
+        },
+        {
+          "content": "UTC",
+          "end_location": {
+            "column": 82,
+            "row": 1520
+          },
+          "location": {
+            "column": 70,
+            "row": 1520
+          }
+        }
+      ],
+      "message": "Convert to `datetime.UTC` alias"
+    },
+    "location": {
+      "column": 70,
+      "row": 1520
+    },
+    "message": "Use `datetime.UTC` alias",
+    "name": "datetime-timezone-utc",
+    "noqa_row": 1520,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/datetime-timezone-utc"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 33,
+      "row": 1540
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 33,
+            "row": 1540
+          },
+          "location": {
+            "column": 20,
+            "row": 1540
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 20,
+      "row": 1540
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 1540,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 32,
+      "row": 1542
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "ExecutionClosure | None",
+          "end_location": {
+            "column": 32,
+            "row": 1542
+          },
+          "location": {
+            "column": 6,
+            "row": 1542
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 6,
+      "row": 1542
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 1542,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP017",
+    "end_location": {
+      "column": 38,
+      "row": 1585
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from datetime import datetime, timedelta, timezone, UTC",
+          "end_location": {
+            "column": 51,
+            "row": 42
+          },
+          "location": {
+            "column": 1,
+            "row": 42
+          }
+        },
+        {
+          "content": "UTC",
+          "end_location": {
+            "column": 38,
+            "row": 1585
+          },
+          "location": {
+            "column": 26,
+            "row": 1585
+          }
+        }
+      ],
+      "message": "Convert to `datetime.UTC` alias"
+    },
+    "location": {
+      "column": 26,
+      "row": 1585
+    },
+    "message": "Use `datetime.UTC` alias",
+    "name": "datetime-timezone-utc",
+    "noqa_row": 1585,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/datetime-timezone-utc"
+  },
+  {
+    "cell": null,
+    "code": "UP037",
+    "end_location": {
+      "column": 56,
+      "row": 1673
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "VerificationRetryPolicy",
+          "end_location": {
+            "column": 56,
+            "row": 1673
+          },
+          "location": {
+            "column": 31,
+            "row": 1673
+          }
+        }
+      ],
+      "message": "Remove quotes"
+    },
+    "location": {
+      "column": 31,
+      "row": 1673
+    },
+    "message": "Remove quotes from type annotation",
+    "name": "quoted-annotation",
+    "noqa_row": 1673,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/quoted-annotation"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 40,
+      "row": 1700
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "ExecutionClosure | None",
+          "end_location": {
+            "column": 40,
+            "row": 1700
+          },
+          "location": {
+            "column": 14,
+            "row": 1700
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 14,
+      "row": 1700
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 1700,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 26,
+      "row": 1746
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 26,
+            "row": 1746
+          },
+          "location": {
+            "column": 13,
+            "row": 1746
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 13,
+      "row": 1746
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 1746,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 28,
+      "row": 1747
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "datetime | None",
+          "end_location": {
+            "column": 28,
+            "row": 1747
+          },
+          "location": {
+            "column": 10,
+            "row": 1747
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 10,
+      "row": 1747
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 1747,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 32,
+      "row": 1748
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "VerificationHold | None",
+          "end_location": {
+            "column": 32,
+            "row": 1748
+          },
+          "location": {
+            "column": 6,
+            "row": 1748
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 6,
+      "row": 1748
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 1748,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP017",
+    "end_location": {
+      "column": 49,
+      "row": 1760
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from datetime import datetime, timedelta, timezone, UTC",
+          "end_location": {
+            "column": 51,
+            "row": 42
+          },
+          "location": {
+            "column": 1,
+            "row": 42
+          }
+        },
+        {
+          "content": "UTC",
+          "end_location": {
+            "column": 49,
+            "row": 1760
+          },
+          "location": {
+            "column": 37,
+            "row": 1760
+          }
+        }
+      ],
+      "message": "Convert to `datetime.UTC` alias"
+    },
+    "location": {
+      "column": 37,
+      "row": 1760
+    },
+    "message": "Use `datetime.UTC` alias",
+    "name": "datetime-timezone-utc",
+    "noqa_row": 1760,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/datetime-timezone-utc"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 82,
+      "row": 1822
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "dict | None",
+          "end_location": {
+            "column": 82,
+            "row": 1822
+          },
+          "location": {
+            "column": 68,
+            "row": 1822
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 68,
+      "row": 1822
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 1822,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 35,
+      "row": 1823
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "models.BackupRecord | None",
+          "end_location": {
+            "column": 35,
+            "row": 1823
+          },
+          "location": {
+            "column": 6,
+            "row": 1823
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 6,
+      "row": 1823
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 1823,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 80,
+      "row": 1857
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "executor.BackupRecordView | None",
+          "end_location": {
+            "column": 80,
+            "row": 1857
+          },
+          "location": {
+            "column": 45,
+            "row": 1857
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 45,
+      "row": 1857
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 1857,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 38,
+      "row": 1865
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "dict | None",
+          "end_location": {
+            "column": 38,
+            "row": 1865
+          },
+          "location": {
+            "column": 24,
+            "row": 1865
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 24,
+      "row": 1865
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 1865,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 45,
+      "row": 1866
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "executor.BackupRecordView | None",
+          "end_location": {
+            "column": 45,
+            "row": 1866
+          },
+          "location": {
+            "column": 10,
+            "row": 1866
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 10,
+      "row": 1866
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 1866,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 69,
+      "row": 1875
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "dict | None",
+          "end_location": {
+            "column": 69,
+            "row": 1875
+          },
+          "location": {
+            "column": 55,
+            "row": 1875
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 55,
+      "row": 1875
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 1875,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 80,
+      "row": 1891
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "executor.BackupRecordView | None",
+          "end_location": {
+            "column": 80,
+            "row": 1891
+          },
+          "location": {
+            "column": 45,
+            "row": 1891
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 45,
+      "row": 1891
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 1891,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 80,
+      "row": 1894
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "executor.BackupRecordView | None",
+          "end_location": {
+            "column": 80,
+            "row": 1894
+          },
+          "location": {
+            "column": 45,
+            "row": 1894
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 45,
+      "row": 1894
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 1894,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 38,
+      "row": 1902
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "dict | None",
+          "end_location": {
+            "column": 38,
+            "row": 1902
+          },
+          "location": {
+            "column": 24,
+            "row": 1902
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 24,
+      "row": 1902
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 1902,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 45,
+      "row": 1903
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "executor.BackupRecordView | None",
+          "end_location": {
+            "column": 45,
+            "row": 1903
+          },
+          "location": {
+            "column": 10,
+            "row": 1903
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 10,
+      "row": 1903
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 1903,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 32,
+      "row": 1922
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 32,
+            "row": 1922
+          },
+          "location": {
+            "column": 19,
+            "row": 1922
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 19,
+      "row": 1922
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 1922,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 34,
+      "row": 1923
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 34,
+            "row": 1923
+          },
+          "location": {
+            "column": 21,
+            "row": 1923
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 21,
+      "row": 1923
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 1923,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 42,
+      "row": 1924
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "\"ExecutionClosure\" | None",
+          "end_location": {
+            "column": 42,
+            "row": 1924
+          },
+          "location": {
+            "column": 14,
+            "row": 1924
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 14,
+      "row": 1924
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 1924,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP037",
+    "end_location": {
+      "column": 41,
+      "row": 1924
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "ExecutionClosure",
+          "end_location": {
+            "column": 41,
+            "row": 1924
+          },
+          "location": {
+            "column": 23,
+            "row": 1924
+          }
+        }
+      ],
+      "message": "Remove quotes"
+    },
+    "location": {
+      "column": 23,
+      "row": 1924
+    },
+    "message": "Remove quotes from type annotation",
+    "name": "quoted-annotation",
+    "noqa_row": 1924,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/quoted-annotation"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 66,
+      "row": 2398
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "executor.BackupRecordLoader | None",
+          "end_location": {
+            "column": 66,
+            "row": 2398
+          },
+          "location": {
+            "column": 29,
+            "row": 2398
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 29,
+      "row": 2398
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 2398,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 61,
+      "row": 2491
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "executor.BackupRecordView | None",
+          "end_location": {
+            "column": 61,
+            "row": 2491
+          },
+          "location": {
+            "column": 26,
+            "row": 2491
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 26,
+      "row": 2491
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 2491,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 57,
+      "row": 2509
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "executor.BackupRecordLoader | None",
+          "end_location": {
+            "column": 57,
+            "row": 2509
+          },
+          "location": {
+            "column": 20,
+            "row": 2509
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 20,
+      "row": 2509
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 2509,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP017",
+    "end_location": {
+      "column": 49,
+      "row": 2656
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from datetime import datetime, timedelta, timezone, UTC",
+          "end_location": {
+            "column": 51,
+            "row": 42
+          },
+          "location": {
+            "column": 1,
+            "row": 42
+          }
+        },
+        {
+          "content": "UTC",
+          "end_location": {
+            "column": 49,
+            "row": 2656
+          },
+          "location": {
+            "column": 37,
+            "row": 2656
+          }
+        }
+      ],
+      "message": "Convert to `datetime.UTC` alias"
+    },
+    "location": {
+      "column": 37,
+      "row": 2656
+    },
+    "message": "Use `datetime.UTC` alias",
+    "name": "datetime-timezone-utc",
+    "noqa_row": 2656,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/datetime-timezone-utc"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 48,
+      "row": 2735
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "CandidateStatus | None",
+          "end_location": {
+            "column": 48,
+            "row": 2735
+          },
+          "location": {
+            "column": 23,
+            "row": 2735
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 23,
+      "row": 2735
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 2735,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 34,
+      "row": 2736
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 34,
+            "row": 2736
+          },
+          "location": {
+            "column": 21,
+            "row": 2736
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 21,
+      "row": 2736
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 2736,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 46,
+      "row": 2737
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "IncidentStatus | None",
+          "end_location": {
+            "column": 46,
+            "row": 2737
+          },
+          "location": {
+            "column": 22,
+            "row": 2737
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 22,
+      "row": 2737
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 2737,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 44,
+      "row": 2738
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "datetime | None",
+          "end_location": {
+            "column": 44,
+            "row": 2738
+          },
+          "location": {
+            "column": 26,
+            "row": 2738
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 26,
+      "row": 2738
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 2738,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 42,
+      "row": 2758
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "RunbookCandidateData | None",
+          "end_location": {
+            "column": 42,
+            "row": 2758
+          },
+          "location": {
+            "column": 12,
+            "row": 2758
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 12,
+      "row": 2758
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 2758,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 57,
+      "row": 2758
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\apps\\core-api\\workflows.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 57,
+            "row": 2758
+          },
+          "location": {
+            "column": 44,
+            "row": 2758
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 44,
+      "row": 2758
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 2758,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "I001",
+    "end_location": {
+      "column": 62,
+      "row": 45
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\packages\\schemas\\agents.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from __future__ import annotations\n\nfrom typing import Annotated, Literal, Optional, Union\n\nfrom pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator\n\nfrom .api.actions import ExecutionStatus\nfrom .api.assets import AssetItem, AssetType\nfrom .api.incidents import IncidentCategory, RiskLevel\nfrom .events import InitialRiskEvaluationResult\nfrom .evidence import (\n    EVIDENCE_CONTENT_MODELS,\n    EvidenceContent,\n    EvidenceType,\n    bind_evidence_content,\n)\nfrom .incidents import AGENT_TERMINAL_STATUSES, AgentInvocationStatus\nfrom .rules import RuleEvaluationResult\nfrom .runbook_parameters import (\n    CANDIDATE_PARAMETER_MODELS,\n    CandidateParameters,\n    bind_candidate_parameters,\n)\nfrom .runbooks import AI_RECOMMENDABLE_RUNBOOK_IDS, RunbookId\n\n",
+          "end_location": {
+            "column": 1,
+            "row": 47
+          },
+          "location": {
+            "column": 1,
+            "row": 27
+          }
+        }
+      ],
+      "message": "Organize imports"
+    },
+    "location": {
+      "column": 1,
+      "row": 27
+    },
+    "message": "Import block is un-sorted or un-formatted",
+    "name": "unsorted-imports",
+    "noqa_row": 27,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unsorted-imports"
+  },
+  {
+    "cell": null,
+    "code": "TRY004",
+    "end_location": {
+      "column": 14,
+      "row": 83
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\packages\\schemas\\agents.py",
+    "fix": null,
+    "location": {
+      "column": 13,
+      "row": 81
+    },
+    "message": "Prefer `TypeError` exception for invalid type",
+    "name": "type-check-without-type-error",
+    "noqa_row": 81,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/type-check-without-type-error"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 34,
+      "row": 96
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\packages\\schemas\\agents.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 34,
+            "row": 96
+          },
+          "location": {
+            "column": 21,
+            "row": 96
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 21,
+      "row": 96
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 96,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 57,
+      "row": 171
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\packages\\schemas\\agents.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "AgentExecutionContext | None",
+          "end_location": {
+            "column": 57,
+            "row": 171
+          },
+          "location": {
+            "column": 26,
+            "row": 171
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 26,
+      "row": 171
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 171,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP007",
+    "end_location": {
+      "column": 46,
+      "row": 181
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\packages\\schemas\\agents.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "FinOpsGraphInput | SecOpsGraphInput",
+          "end_location": {
+            "column": 46,
+            "row": 181
+          },
+          "location": {
+            "column": 5,
+            "row": 181
+          }
+        }
+      ],
+      "message": "Convert to `X | Y`"
+    },
+    "location": {
+      "column": 5,
+      "row": 181
+    },
+    "message": "Use `X | Y` for type annotations",
+    "name": "non-pep604-annotation-union",
+    "noqa_row": 181,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-union"
+  },
+  {
+    "cell": null,
+    "code": "TRY004",
+    "end_location": {
+      "column": 14,
+      "row": 213
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\packages\\schemas\\agents.py",
+    "fix": null,
+    "location": {
+      "column": 13,
+      "row": 211
+    },
+    "message": "Prefer `TypeError` exception for invalid type",
+    "name": "type-check-without-type-error",
+    "noqa_row": 211,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/type-check-without-type-error"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 45,
+      "row": 222
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\packages\\schemas\\agents.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "RiskLevel | None",
+          "end_location": {
+            "column": 45,
+            "row": 222
+          },
+          "location": {
+            "column": 26,
+            "row": 222
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 26,
+      "row": 222
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 222,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP017",
+    "end_location": {
+      "column": 45,
+      "row": 127
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\packages\\schemas\\api\\incidents.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from datetime import datetime, timezone, UTC",
+          "end_location": {
+            "column": 40,
+            "row": 36
+          },
+          "location": {
+            "column": 1,
+            "row": 36
+          }
+        },
+        {
+          "content": "UTC",
+          "end_location": {
+            "column": 45,
+            "row": 127
+          },
+          "location": {
+            "column": 33,
+            "row": 127
+          }
+        }
+      ],
+      "message": "Convert to `datetime.UTC` alias"
+    },
+    "location": {
+      "column": 33,
+      "row": 127
+    },
+    "message": "Use `datetime.UTC` alias",
+    "name": "datetime-timezone-utc",
+    "noqa_row": 127,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/datetime-timezone-utc"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 59,
+      "row": 187
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\packages\\schemas\\api\\incidents.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "ExecutionVerificationHold | None",
+          "end_location": {
+            "column": 59,
+            "row": 187
+          },
+          "location": {
+            "column": 24,
+            "row": 187
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 24,
+      "row": 187
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 187,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 25,
+      "row": 215
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\packages\\schemas\\api\\incidents.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 25,
+            "row": 215
+          },
+          "location": {
+            "column": 12,
+            "row": 215
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 12,
+      "row": 215
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 215,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 44,
+      "row": 219
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\packages\\schemas\\api\\incidents.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "RiskLevel | None",
+          "end_location": {
+            "column": 44,
+            "row": 219
+          },
+          "location": {
+            "column": 25,
+            "row": 219
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 25,
+      "row": 219
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 219,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 45,
+      "row": 220
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\packages\\schemas\\api\\incidents.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "RiskLevel | None",
+          "end_location": {
+            "column": 45,
+            "row": 220
+          },
+          "location": {
+            "column": 26,
+            "row": 220
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 26,
+      "row": 220
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 220,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 42,
+      "row": 221
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\packages\\schemas\\api\\incidents.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "ResponseMode | None",
+          "end_location": {
+            "column": 42,
+            "row": 221
+          },
+          "location": {
+            "column": 20,
+            "row": 221
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 20,
+      "row": 221
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 221,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 46,
+      "row": 226
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\packages\\schemas\\api\\incidents.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "ResolutionJudgement | None",
+          "end_location": {
+            "column": 46,
+            "row": 226
+          },
+          "location": {
+            "column": 17,
+            "row": 226
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 17,
+      "row": 226
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 226,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 39,
+      "row": 227
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\packages\\schemas\\api\\incidents.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "UtcDateTime | None",
+          "end_location": {
+            "column": 39,
+            "row": 227
+          },
+          "location": {
+            "column": 18,
+            "row": 227
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 18,
+      "row": 227
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 227,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 25,
+      "row": 309
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\packages\\schemas\\api\\incidents.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 25,
+            "row": 309
+          },
+          "location": {
+            "column": 12,
+            "row": 309
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 12,
+      "row": 309
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 309,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 44,
+      "row": 313
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\packages\\schemas\\api\\incidents.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "RiskLevel | None",
+          "end_location": {
+            "column": 44,
+            "row": 313
+          },
+          "location": {
+            "column": 25,
+            "row": 313
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 25,
+      "row": 313
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 313,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 45,
+      "row": 314
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\packages\\schemas\\api\\incidents.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "RiskLevel | None",
+          "end_location": {
+            "column": 45,
+            "row": 314
+          },
+          "location": {
+            "column": 26,
+            "row": 314
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 26,
+      "row": 314
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 314,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 42,
+      "row": 315
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\packages\\schemas\\api\\incidents.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "ResponseMode | None",
+          "end_location": {
+            "column": 42,
+            "row": 315
+          },
+          "location": {
+            "column": 20,
+            "row": 315
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 20,
+      "row": 315
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 315,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "TRY004",
+    "end_location": {
+      "column": 14,
+      "row": 68
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\packages\\schemas\\candidates.py",
+    "fix": null,
+    "location": {
+      "column": 13,
+      "row": 66
+    },
+    "message": "Prefer `TypeError` exception for invalid type",
+    "name": "type-check-without-type-error",
+    "noqa_row": 66,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/type-check-without-type-error"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 37,
+      "row": 56
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\scripts\\finops_eval.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 37,
+            "row": 56
+          },
+          "location": {
+            "column": 23,
+            "row": 56
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 25,
+      "row": 56
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 56,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 42,
+      "row": 63
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\scripts\\finops_eval.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 42,
+            "row": 63
+          },
+          "location": {
+            "column": 28,
+            "row": 63
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 30,
+      "row": 63
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 63,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 88,
+      "row": 73
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\scripts\\finops_eval.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 88,
+            "row": 73
+          },
+          "location": {
+            "column": 74,
+            "row": 73
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 76,
+      "row": 73
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 73,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 69,
+      "row": 74
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\scripts\\finops_eval.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 69,
+            "row": 74
+          },
+          "location": {
+            "column": 55,
+            "row": 74
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 57,
+      "row": 74
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 74,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 42,
+      "row": 75
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\scripts\\finops_eval.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 42,
+            "row": 75
+          },
+          "location": {
+            "column": 28,
+            "row": 75
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 30,
+      "row": 75
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 75,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "RUF100",
+    "end_location": {
+      "column": 56,
+      "row": 76
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\scripts\\finops_eval.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 56,
+            "row": 76
+          },
+          "location": {
+            "column": 42,
+            "row": 76
+          }
+        }
+      ],
+      "message": "Remove unused `noqa` directive"
+    },
+    "location": {
+      "column": 44,
+      "row": 76
+    },
+    "message": "Unused `noqa` directive (non-enabled: `E402`)",
+    "name": "unused-noqa",
+    "noqa_row": 76,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-noqa"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 39,
+      "row": 103
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\scripts\\finops_eval.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 39,
+            "row": 103
+          },
+          "location": {
+            "column": 26,
+            "row": 103
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 26,
+      "row": 103
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 103,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 45,
+      "row": 104
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\scripts\\finops_eval.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 45,
+            "row": 104
+          },
+          "location": {
+            "column": 32,
+            "row": 104
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 32,
+      "row": 104
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 104,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 39,
+      "row": 114
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\scripts\\finops_eval.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 39,
+            "row": 114
+          },
+          "location": {
+            "column": 26,
+            "row": 114
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 26,
+      "row": 114
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 114,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 45,
+      "row": 115
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\scripts\\finops_eval.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "str | None",
+          "end_location": {
+            "column": 45,
+            "row": 115
+          },
+          "location": {
+            "column": 32,
+            "row": 115
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 32,
+      "row": 115
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 115,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 69,
+      "row": 212
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\scripts\\finops_eval.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "float | None",
+          "end_location": {
+            "column": 69,
+            "row": 212
+          },
+          "location": {
+            "column": 54,
+            "row": 212
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 54,
+      "row": 212
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 212,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  },
+  {
+    "cell": null,
+    "code": "UP045",
+    "end_location": {
+      "column": 97,
+      "row": 212
+    },
+    "filename": "C:\\labs\\team\\vigilantis\\.worktrees\\issue-347\\scripts\\finops_eval.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "float | None",
+          "end_location": {
+            "column": 97,
+            "row": 212
+          },
+          "location": {
+            "column": 82,
+            "row": 212
+          }
+        }
+      ],
+      "message": "Convert to `X | None`"
+    },
+    "location": {
+      "column": 82,
+      "row": 212
+    },
+    "message": "Use `X | None` for type annotations",
+    "name": "non-pep604-annotation-optional",
+    "noqa_row": 212,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional"
+  }
+]

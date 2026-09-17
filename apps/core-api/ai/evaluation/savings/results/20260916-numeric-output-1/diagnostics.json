@@ -1,0 +1,105 @@
+{
+  "metadata_sha256": "712d05b1776f5b2206446b519a093290cbf94bd46b56a18b53872c015125fde2",
+  "model_call_count": 60,
+  "additional_calls_for_this_audit": 0,
+  "started_at_kst": "2026-09-16T10:29:27.975061+09:00",
+  "ended_at_kst": "2026-09-16T10:32:54.869296+09:00",
+  "wall_seconds": 206.893,
+  "call_latency_seconds": {
+    "sum": 206.014,
+    "min": 1.777,
+    "median": 2.9655,
+    "max": 7.322
+  },
+  "price_contexts": [
+    {
+      "region": "ap-northeast-2",
+      "current": "t3.xlarge",
+      "target": "t3.medium",
+      "calls": 20
+    },
+    {
+      "region": "ap-northeast-2",
+      "current": "t3.large",
+      "target": "t3.small",
+      "calls": 40
+    }
+  ],
+  "all_explanations_equal_server_template": true,
+  "all_wire_hashes_verified": true,
+  "response_models": {
+    "gpt-5.6-luna": 60
+  },
+  "amount_error_percent_range": [
+    "-20.00351246926589392342817000",
+    "4.618897084650509308043554619"
+  ],
+  "rate_diagnostic_outside_symmetric_10_percent": 13,
+  "lower_amount_boundary_count": 5,
+  "cases": {
+    "A1": {
+      "calls": 10,
+      "reference": "113.88",
+      "allowed_min": "91.10",
+      "allowed_max": "125.27",
+      "observed_min": "113.88",
+      "observed_max": "115.63",
+      "rate_diagnostic_outside": 0
+    },
+    "A7": {
+      "calls": 10,
+      "reference": "113.88",
+      "allowed_min": "91.10",
+      "allowed_max": "125.27",
+      "observed_min": "113.88",
+      "observed_max": "115.63",
+      "rate_diagnostic_outside": 0
+    },
+    "A11": {
+      "calls": 10,
+      "reference": "56.94",
+      "allowed_min": "45.55",
+      "allowed_max": "62.63",
+      "observed_min": "45.55",
+      "observed_max": "59.57",
+      "rate_diagnostic_outside": 5
+    },
+    "A12": {
+      "calls": 10,
+      "reference": "56.94",
+      "allowed_min": "45.55",
+      "allowed_max": "62.63",
+      "observed_min": "45.55",
+      "observed_max": "59.57",
+      "rate_diagnostic_outside": 4
+    },
+    "A14": {
+      "calls": 10,
+      "reference": "56.94",
+      "allowed_min": "45.55",
+      "allowed_max": "62.63",
+      "observed_min": "45.55",
+      "observed_max": "59.57",
+      "rate_diagnostic_outside": 4
+    },
+    "A16": {
+      "calls": 10,
+      "reference": "56.94",
+      "allowed_min": "45.55",
+      "allowed_max": "62.63",
+      "observed_min": "51.25",
+      "observed_max": "59.57",
+      "rate_diagnostic_outside": 0
+    }
+  },
+  "pytest_skips": [
+    {
+      "name": "test_t1_idle_ec2_downsize_and_auto_rollback_flow",
+      "reason": "Status Check 실패 주입 방법 없음 — 설계서 §대조 3번(주입 방법). FinOps 배선은 #306, 자동 원복은 3-B 로 해소됨 (#241 / PR #256) · 이슈 #301 · #246"
+    },
+    {
+      "name": "test_t2_ssh_bruteforce_block_and_one_click_release_flow",
+      "reason": "SECOPS Incident의 AI 분석(SecOps 그래프 #323) 미연결 — 차단 후보를 내는 주체 없음 (위협 접수 #322 · NACL 2종 실행 #297·#298 · 해제 후보 생성 #329로 해소, #306은 FinOps 배선) — 설계서 §대조 1번·9번. SSOT 5주차 판정 기준 ⓑ · 이슈 #301 · #246"
+    }
+  ]
+}

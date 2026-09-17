@@ -1,0 +1,1310 @@
+{
+  "mode": "SDK_MOCK",
+  "status": "COMPLETED",
+  "started_at": "2026-09-16T02:07:03.502103+00:00",
+  "calls": [
+    {
+      "number": 1,
+      "case_id": "A1",
+      "stage": "EvidenceSummaryOutput",
+      "status": "RETURNED",
+      "outbound_sha256": "ca49b371c31f23a4520e3016627e38cdb883a3ca52f754700e3b1d8ec9c4ef82",
+      "wire_sha256": "6a15b207f2d16dc78a7c88642ec04e4de2727d21f2a1f4e06042f78adeefddb4",
+      "request_shape_sha256": "3a8740cb2fe7262a393d83ce98d9f4057d854cdf2f3446a5b38a2094f155d6e7",
+      "usage": {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "cached_prompt_tokens": 0
+      },
+      "model": "gpt-5.6-luna",
+      "elapsed_seconds": 0.347
+    },
+    {
+      "number": 2,
+      "case_id": "A1",
+      "stage": "CandidateProposalOutput",
+      "status": "RETURNED",
+      "outbound_sha256": "436d227b385511a8e2923927e22e4280f5fc2217cb1039c3050efe3695ce4386",
+      "wire_sha256": "859ac07be1b54039fceb99b689508933fd43b333496131dc73073bf10260776d",
+      "request_shape_sha256": "760e8897b7e82943d812d8198f6c9493f202bf1e716aeeedfb086bd5172ca1b0",
+      "usage": {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "cached_prompt_tokens": 0
+      },
+      "model": "gpt-5.6-luna",
+      "elapsed_seconds": 0.004
+    },
+    {
+      "number": 3,
+      "case_id": "A1",
+      "stage": "ProposedHourlyRates",
+      "status": "RETURNED",
+      "outbound_sha256": "7800d1b95df8bbbf703379c1e53e81909f0017504edd7cb0ade04dcfe85d5bd0",
+      "wire_sha256": "25fdb3c40f5b4734bbb98c8f4e9948029f6ace92f701c790ce1cc0864ec7e285",
+      "request_shape_sha256": "2cc8edb03494cbc4ac6112bf06e1226720a243d69461de0e75cf0271d8b87270",
+      "b_request_matches_after_fixture_identity_mapping": true,
+      "usage": {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "cached_prompt_tokens": 0
+      },
+      "model": "gpt-5.6-luna",
+      "elapsed_seconds": 0.006
+    },
+    {
+      "number": 4,
+      "case_id": "A7",
+      "stage": "EvidenceSummaryOutput",
+      "status": "RETURNED",
+      "outbound_sha256": "3d9d1b79b5be2a2a7f9e4f741bee7923b2531f89763f81e456a89e08ec4383ca",
+      "wire_sha256": "fdd83cd89f8c218a9044a4539a26f252989666d2128534ac9b3e161fffd1eb80",
+      "request_shape_sha256": "3a8740cb2fe7262a393d83ce98d9f4057d854cdf2f3446a5b38a2094f155d6e7",
+      "usage": {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "cached_prompt_tokens": 0
+      },
+      "model": "gpt-5.6-luna",
+      "elapsed_seconds": 0.003
+    },
+    {
+      "number": 5,
+      "case_id": "A7",
+      "stage": "CandidateProposalOutput",
+      "status": "RETURNED",
+      "outbound_sha256": "9ece33ddcd38b4445e20df5e8ac2681f00168b56328e8e547fb7fdcd3159198b",
+      "wire_sha256": "25201c633e133fb8b3882d86bda35180516907a712236819ec53141c661c4e00",
+      "request_shape_sha256": "760e8897b7e82943d812d8198f6c9493f202bf1e716aeeedfb086bd5172ca1b0",
+      "usage": {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "cached_prompt_tokens": 0
+      },
+      "model": "gpt-5.6-luna",
+      "elapsed_seconds": 0.005
+    },
+    {
+      "number": 6,
+      "case_id": "A7",
+      "stage": "ProposedHourlyRates",
+      "status": "RETURNED",
+      "outbound_sha256": "b5ca1d3abcf4847b17dd23d804f41e1104a247c691cd8c2b206c8b139fadd268",
+      "wire_sha256": "26b285cd5fbab2280e9f63e5bf6badd3c20e1e15257ae2e0cafef4f4aa649b1c",
+      "request_shape_sha256": "2cc8edb03494cbc4ac6112bf06e1226720a243d69461de0e75cf0271d8b87270",
+      "b_request_matches_after_fixture_identity_mapping": true,
+      "usage": {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "cached_prompt_tokens": 0
+      },
+      "model": "gpt-5.6-luna",
+      "elapsed_seconds": 0.006
+    },
+    {
+      "number": 7,
+      "case_id": "A11",
+      "stage": "EvidenceSummaryOutput",
+      "status": "RETURNED",
+      "outbound_sha256": "9a8dca5932482ee704cefc4e2d9ec42ece405662d7812f554688bdbd79bbe365",
+      "wire_sha256": "45e710ad7d9c441d347acd682070c7b8ae561ff343beb5859148249bfbba8967",
+      "request_shape_sha256": "3a8740cb2fe7262a393d83ce98d9f4057d854cdf2f3446a5b38a2094f155d6e7",
+      "usage": {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "cached_prompt_tokens": 0
+      },
+      "model": "gpt-5.6-luna",
+      "elapsed_seconds": 0.003
+    },
+    {
+      "number": 8,
+      "case_id": "A11",
+      "stage": "CandidateProposalOutput",
+      "status": "RETURNED",
+      "outbound_sha256": "bdee79ca2deb5262f1164cb38aa5818ac26b2d5bc957c118cac8dce5a8ee868f",
+      "wire_sha256": "0b570b30d265d16055a6f859af3ea491311f868c846328ba7ca9bf264e2d8aa0",
+      "request_shape_sha256": "760e8897b7e82943d812d8198f6c9493f202bf1e716aeeedfb086bd5172ca1b0",
+      "usage": {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "cached_prompt_tokens": 0
+      },
+      "model": "gpt-5.6-luna",
+      "elapsed_seconds": 0.005
+    },
+    {
+      "number": 9,
+      "case_id": "A11",
+      "stage": "ProposedHourlyRates",
+      "status": "RETURNED",
+      "outbound_sha256": "3bbe9a6cc3313861db3f82a388f2285b805f9d13ba91127a54a9411890766297",
+      "wire_sha256": "c9b9ffbe580d7ae9da24084555e4140c841bc3fd063816249ea0faffc75680ab",
+      "request_shape_sha256": "2cc8edb03494cbc4ac6112bf06e1226720a243d69461de0e75cf0271d8b87270",
+      "b_request_matches_after_fixture_identity_mapping": true,
+      "usage": {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "cached_prompt_tokens": 0
+      },
+      "model": "gpt-5.6-luna",
+      "elapsed_seconds": 0.006
+    },
+    {
+      "number": 10,
+      "case_id": "A12",
+      "stage": "EvidenceSummaryOutput",
+      "status": "RETURNED",
+      "outbound_sha256": "8ae27442112afe6d80e4fd0202333464818fc46290e6175efd35ac8d571934c8",
+      "wire_sha256": "b8d5fe932985be0c375d5ad460a5f7e7ddeb583054472c063580445831083be1",
+      "request_shape_sha256": "3a8740cb2fe7262a393d83ce98d9f4057d854cdf2f3446a5b38a2094f155d6e7",
+      "usage": {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "cached_prompt_tokens": 0
+      },
+      "model": "gpt-5.6-luna",
+      "elapsed_seconds": 0.006
+    },
+    {
+      "number": 11,
+      "case_id": "A12",
+      "stage": "CandidateProposalOutput",
+      "status": "RETURNED",
+      "outbound_sha256": "18febc42619a0739388e857fa1ed8b5a3c27e99b8a1d4ed0e05c20422a6c105a",
+      "wire_sha256": "dc926fc6e70d83f85bc341ff619396a92ed34c4e861f9eb26c678623427927be",
+      "request_shape_sha256": "760e8897b7e82943d812d8198f6c9493f202bf1e716aeeedfb086bd5172ca1b0",
+      "usage": {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "cached_prompt_tokens": 0
+      },
+      "model": "gpt-5.6-luna",
+      "elapsed_seconds": 0.005
+    },
+    {
+      "number": 12,
+      "case_id": "A12",
+      "stage": "ProposedHourlyRates",
+      "status": "RETURNED",
+      "outbound_sha256": "2d43711c10300439b2b0c77a826bc4cbf9e9fc0df29985017054eec3be4206ff",
+      "wire_sha256": "ca5343e06f3f197872942bca097d016c1fc703aed9ce23d9067139399f869efc",
+      "request_shape_sha256": "2cc8edb03494cbc4ac6112bf06e1226720a243d69461de0e75cf0271d8b87270",
+      "b_request_matches_after_fixture_identity_mapping": true,
+      "usage": {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "cached_prompt_tokens": 0
+      },
+      "model": "gpt-5.6-luna",
+      "elapsed_seconds": 0.005
+    },
+    {
+      "number": 13,
+      "case_id": "A14",
+      "stage": "EvidenceSummaryOutput",
+      "status": "RETURNED",
+      "outbound_sha256": "9265f1252e68487fc1420ca09b5bd948eacf2453e8ce31aa59dff4c2ae78aa99",
+      "wire_sha256": "ba345b1ecd3fd3b1eb524f5dc7b30d74dc03edc50f09e3710316a40ae9c40e24",
+      "request_shape_sha256": "3a8740cb2fe7262a393d83ce98d9f4057d854cdf2f3446a5b38a2094f155d6e7",
+      "usage": {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "cached_prompt_tokens": 0
+      },
+      "model": "gpt-5.6-luna",
+      "elapsed_seconds": 0.004
+    },
+    {
+      "number": 14,
+      "case_id": "A14",
+      "stage": "CandidateProposalOutput",
+      "status": "RETURNED",
+      "outbound_sha256": "bcbcf4c424dfa9f07945d2613dbd60efd006f394adfd3c0db0c72be8a3979d51",
+      "wire_sha256": "851eb2768f3bd369422d17e66ac45861d0835bcd8e15b0605cbcc1d8c2ec14c3",
+      "request_shape_sha256": "760e8897b7e82943d812d8198f6c9493f202bf1e716aeeedfb086bd5172ca1b0",
+      "usage": {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "cached_prompt_tokens": 0
+      },
+      "model": "gpt-5.6-luna",
+      "elapsed_seconds": 0.006
+    },
+    {
+      "number": 15,
+      "case_id": "A14",
+      "stage": "ProposedHourlyRates",
+      "status": "RETURNED",
+      "outbound_sha256": "836241d4cd0d8fd2cd1254a4a9d36dc80dca9c686766a2736f3c05158ac6b628",
+      "wire_sha256": "9fdacd482c44457dce100a9360e1b080392919b35230c1eda455e0f7dde94c64",
+      "request_shape_sha256": "2cc8edb03494cbc4ac6112bf06e1226720a243d69461de0e75cf0271d8b87270",
+      "b_request_matches_after_fixture_identity_mapping": true,
+      "usage": {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "cached_prompt_tokens": 0
+      },
+      "model": "gpt-5.6-luna",
+      "elapsed_seconds": 0.006
+    },
+    {
+      "number": 16,
+      "case_id": "A16",
+      "stage": "EvidenceSummaryOutput",
+      "status": "RETURNED",
+      "outbound_sha256": "6d9ad598e131c36a5a478493160d1372de6d2656bd10619ffca1a5f4c57b9b04",
+      "wire_sha256": "d35d84e17b16a8083a759bc5af4630ab53f9d702bebfefefe3c40ba2d532d8a0",
+      "request_shape_sha256": "3a8740cb2fe7262a393d83ce98d9f4057d854cdf2f3446a5b38a2094f155d6e7",
+      "usage": {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "cached_prompt_tokens": 0
+      },
+      "model": "gpt-5.6-luna",
+      "elapsed_seconds": 0.006
+    },
+    {
+      "number": 17,
+      "case_id": "A16",
+      "stage": "CandidateProposalOutput",
+      "status": "RETURNED",
+      "outbound_sha256": "b6e41fa41dfebb953f94fda0ae9e7a8e5eedf09c62a63e043401fc87c8282fc4",
+      "wire_sha256": "d9bdff0a02216449c6ef8226975c872af817dfd1e367c509b469625cbfa66055",
+      "request_shape_sha256": "760e8897b7e82943d812d8198f6c9493f202bf1e716aeeedfb086bd5172ca1b0",
+      "usage": {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "cached_prompt_tokens": 0
+      },
+      "model": "gpt-5.6-luna",
+      "elapsed_seconds": 0.004
+    },
+    {
+      "number": 18,
+      "case_id": "A16",
+      "stage": "ProposedHourlyRates",
+      "status": "RETURNED",
+      "outbound_sha256": "35bd8905e1d527f7e88cf4d5e9eaaa1e40216dddc7d97d48a2c15f3bca963f00",
+      "wire_sha256": "cc47e46a324c1e77071211142edfc8b632c9128331b2f6caf09f24e1458d9b31",
+      "request_shape_sha256": "2cc8edb03494cbc4ac6112bf06e1226720a243d69461de0e75cf0271d8b87270",
+      "b_request_matches_after_fixture_identity_mapping": true,
+      "usage": {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "cached_prompt_tokens": 0
+      },
+      "model": "gpt-5.6-luna",
+      "elapsed_seconds": 0.006
+    }
+  ],
+  "cases": [
+    {
+      "case_id": "A1",
+      "incident_id": "e9dbb460-a9cf-5a84-92ce-2afaa0d1fbba",
+      "grade": {
+        "status": "PASS",
+        "amount": "113.88",
+        "expected_amount": "113.88",
+        "absolute_error_usd": "0.00",
+        "relative_error": "0",
+        "current_rate_relative_error": "0",
+        "target_rate_relative_error": "0",
+        "arithmetic_context_and_assumptions_valid": true,
+        "savings_direction": "MATCH",
+        "signed_relative_error": "0",
+        "amount_lower_bound_usd": "91.10",
+        "amount_upper_bound_usd": "125.27",
+        "rate_accuracy": {
+          "within_symmetric_tolerance": true,
+          "affects_savings_pass": false,
+          "current_signed_relative_error": "0",
+          "target_signed_relative_error": "0"
+        }
+      },
+      "estimate": {
+        "basis": {
+          "region": "ap-northeast-2",
+          "target_arn": "arn:aws:ec2:ap-northeast-2:000000000000:instance/i-5276085cbe8aa4059",
+          "assumptions": {
+            "hours": 730,
+            "tenancy": "SHARED",
+            "included_cost": "INSTANCE_COMPUTE_ONLY",
+            "pricing_source": "MODEL_KNOWLEDGE",
+            "purchase_option": "ON_DEMAND",
+            "operating_system": "LINUX"
+          },
+          "explanation": "ap-northeast-2 리전의 t3.xlarge에서 t3.medium으로 변경하는 비교입니다. Linux·공유형·온디맨드 컴퓨팅 요금만 포함합니다. 두 시간당 단가는 모델 지식 기반 추정값이며 실제 요금 조회 결과가 아닙니다. 서버가 두 단가의 차이에 월 730시간을 곱했습니다. 스토리지·네트워크·세금·할인·크레딧은 제외합니다.",
+          "explanation_source": "SERVER_TEMPLATE",
+          "target_hourly_rate": "0.052000",
+          "current_hourly_rate": "0.208000",
+          "target_instance_type": "t3.medium",
+          "current_instance_type": "t3.xlarge"
+        },
+        "amount": "113.88",
+        "period": "MONTH",
+        "reason": null,
+        "status": "ESTIMATED",
+        "currency": "USD"
+      },
+      "summary_lines": [
+        "관측된 CPU 사용률이 낮다.",
+        "과대 사양일 가능성이 있다.",
+        "사양 변경을 검토할 근거다."
+      ],
+      "guardrail_steps": [
+        {
+          "step": "SCHEMA_CHECK",
+          "result": "PASS",
+          "reason_code": null,
+          "verification_summary": null
+        },
+        {
+          "step": "ACTION_WHITELIST",
+          "result": "PASS",
+          "reason_code": null,
+          "verification_summary": null
+        },
+        {
+          "step": "ARN_MATCH",
+          "result": "PASS",
+          "reason_code": null,
+          "verification_summary": null
+        },
+        {
+          "step": "AWS_DRY_RUN",
+          "result": "PASS",
+          "reason_code": null,
+          "verification_summary": "DRY_RUN(ec2.modify_instance_attribute) | 확인: 호출 권한과 파라미터 형식(DryRun) | 미확인: 대상 자원 존재와 현재 상태(DryRun 비검증)·현재 스펙이 current_instance_type과 같은지"
+        }
+      ],
+      "order": [
+        "EvidenceSummaryOutput",
+        "CandidateProposalOutput",
+        "guardrail:PASS",
+        "ProposedHourlyRates",
+        "lock"
+      ],
+      "fresh_apps": 2,
+      "fresh_reads": 4,
+      "read_model_calls": 0,
+      "api_example": {
+        "incident_id": "e9dbb460-a9cf-5a84-92ce-2afaa0d1fbba",
+        "title": null,
+        "subject_arn": "arn:aws:ec2:ap-northeast-2:000000000000:instance/i-5276085cbe8aa4059",
+        "category": "FINOPS",
+        "status": "AWAITING_APPROVAL",
+        "initial_risk_level": null,
+        "reviewed_risk_level": null,
+        "response_mode": null,
+        "summary_lines": [
+          "관측된 CPU 사용률이 낮다.",
+          "과대 사양일 가능성이 있다.",
+          "사양 변경을 검토할 근거다."
+        ],
+        "evidence_ids": [
+          "6e8ac500-9d2b-52f6-83cb-11b5ab8baae9",
+          "4c93a47d-970e-5132-abab-ab09a7850bec",
+          "bc89afb1-d6d3-50c7-a5b5-9288af610b82"
+        ],
+        "recommendations": [
+          {
+            "runbook_id": "RUNBOOK_EC2_RIGHTSIZING",
+            "target_arn": "arn:aws:ec2:ap-northeast-2:000000000000:instance/i-5276085cbe8aa4059",
+            "display_parameters": {
+              "target_instance_type": "t3.medium"
+            },
+            "ai_savings_estimate": {
+              "status": "ESTIMATED",
+              "currency": "USD",
+              "period": "MONTH",
+              "amount": "113.88",
+              "basis": {
+                "target_arn": "arn:aws:ec2:ap-northeast-2:000000000000:instance/i-5276085cbe8aa4059",
+                "region": "ap-northeast-2",
+                "current_instance_type": "t3.xlarge",
+                "target_instance_type": "t3.medium",
+                "current_hourly_rate": "0.208000",
+                "target_hourly_rate": "0.052000",
+                "assumptions": {
+                  "hours": 730,
+                  "operating_system": "LINUX",
+                  "tenancy": "SHARED",
+                  "purchase_option": "ON_DEMAND",
+                  "included_cost": "INSTANCE_COMPUTE_ONLY",
+                  "pricing_source": "MODEL_KNOWLEDGE"
+                },
+                "explanation": "ap-northeast-2 리전의 t3.xlarge에서 t3.medium으로 변경하는 비교입니다. Linux·공유형·온디맨드 컴퓨팅 요금만 포함합니다. 두 시간당 단가는 모델 지식 기반 추정값이며 실제 요금 조회 결과가 아닙니다. 서버가 두 단가의 차이에 월 730시간을 곱했습니다. 스토리지·네트워크·세금·할인·크레딧은 제외합니다.",
+                "explanation_source": "SERVER_TEMPLATE"
+              },
+              "reason": null
+            }
+          }
+        ],
+        "executions": [],
+        "resolution": null,
+        "resolved_at": null,
+        "created_at": "2026-09-16T02:07:04Z",
+        "updated_at": "2026-09-16T02:07:04Z"
+      }
+    },
+    {
+      "case_id": "A7",
+      "incident_id": "2ef55e84-8472-57b3-bfdc-3fac09860a17",
+      "grade": {
+        "status": "PASS",
+        "amount": "113.88",
+        "expected_amount": "113.88",
+        "absolute_error_usd": "0.00",
+        "relative_error": "0",
+        "current_rate_relative_error": "0",
+        "target_rate_relative_error": "0",
+        "arithmetic_context_and_assumptions_valid": true,
+        "savings_direction": "MATCH",
+        "signed_relative_error": "0",
+        "amount_lower_bound_usd": "91.10",
+        "amount_upper_bound_usd": "125.27",
+        "rate_accuracy": {
+          "within_symmetric_tolerance": true,
+          "affects_savings_pass": false,
+          "current_signed_relative_error": "0",
+          "target_signed_relative_error": "0"
+        }
+      },
+      "estimate": {
+        "basis": {
+          "region": "ap-northeast-2",
+          "target_arn": "arn:aws:ec2:ap-northeast-2:000000000000:instance/i-e8d09802fd9100590",
+          "assumptions": {
+            "hours": 730,
+            "tenancy": "SHARED",
+            "included_cost": "INSTANCE_COMPUTE_ONLY",
+            "pricing_source": "MODEL_KNOWLEDGE",
+            "purchase_option": "ON_DEMAND",
+            "operating_system": "LINUX"
+          },
+          "explanation": "ap-northeast-2 리전의 t3.xlarge에서 t3.medium으로 변경하는 비교입니다. Linux·공유형·온디맨드 컴퓨팅 요금만 포함합니다. 두 시간당 단가는 모델 지식 기반 추정값이며 실제 요금 조회 결과가 아닙니다. 서버가 두 단가의 차이에 월 730시간을 곱했습니다. 스토리지·네트워크·세금·할인·크레딧은 제외합니다.",
+          "explanation_source": "SERVER_TEMPLATE",
+          "target_hourly_rate": "0.052000",
+          "current_hourly_rate": "0.208000",
+          "target_instance_type": "t3.medium",
+          "current_instance_type": "t3.xlarge"
+        },
+        "amount": "113.88",
+        "period": "MONTH",
+        "reason": null,
+        "status": "ESTIMATED",
+        "currency": "USD"
+      },
+      "summary_lines": [
+        "관측된 CPU 사용률이 낮다.",
+        "과대 사양일 가능성이 있다.",
+        "사양 변경을 검토할 근거다."
+      ],
+      "guardrail_steps": [
+        {
+          "step": "SCHEMA_CHECK",
+          "result": "PASS",
+          "reason_code": null,
+          "verification_summary": null
+        },
+        {
+          "step": "ACTION_WHITELIST",
+          "result": "PASS",
+          "reason_code": null,
+          "verification_summary": null
+        },
+        {
+          "step": "ARN_MATCH",
+          "result": "PASS",
+          "reason_code": null,
+          "verification_summary": null
+        },
+        {
+          "step": "AWS_DRY_RUN",
+          "result": "PASS",
+          "reason_code": null,
+          "verification_summary": "DRY_RUN(ec2.modify_instance_attribute) | 확인: 호출 권한과 파라미터 형식(DryRun) | 미확인: 대상 자원 존재와 현재 상태(DryRun 비검증)·현재 스펙이 current_instance_type과 같은지"
+        }
+      ],
+      "order": [
+        "EvidenceSummaryOutput",
+        "CandidateProposalOutput",
+        "guardrail:PASS",
+        "ProposedHourlyRates",
+        "lock"
+      ],
+      "fresh_apps": 2,
+      "fresh_reads": 4,
+      "read_model_calls": 0,
+      "api_example": {
+        "incident_id": "2ef55e84-8472-57b3-bfdc-3fac09860a17",
+        "title": null,
+        "subject_arn": "arn:aws:ec2:ap-northeast-2:000000000000:instance/i-e8d09802fd9100590",
+        "category": "FINOPS",
+        "status": "AWAITING_APPROVAL",
+        "initial_risk_level": null,
+        "reviewed_risk_level": null,
+        "response_mode": null,
+        "summary_lines": [
+          "관측된 CPU 사용률이 낮다.",
+          "과대 사양일 가능성이 있다.",
+          "사양 변경을 검토할 근거다."
+        ],
+        "evidence_ids": [
+          "2c725fb2-486e-5278-9842-5fd6f2c5b346",
+          "e10accce-80ad-52a8-88b8-5d88f807a717",
+          "cab40f05-c3f5-5172-b164-dfbe9b072560"
+        ],
+        "recommendations": [
+          {
+            "runbook_id": "RUNBOOK_EC2_RIGHTSIZING",
+            "target_arn": "arn:aws:ec2:ap-northeast-2:000000000000:instance/i-e8d09802fd9100590",
+            "display_parameters": {
+              "target_instance_type": "t3.medium"
+            },
+            "ai_savings_estimate": {
+              "status": "ESTIMATED",
+              "currency": "USD",
+              "period": "MONTH",
+              "amount": "113.88",
+              "basis": {
+                "target_arn": "arn:aws:ec2:ap-northeast-2:000000000000:instance/i-e8d09802fd9100590",
+                "region": "ap-northeast-2",
+                "current_instance_type": "t3.xlarge",
+                "target_instance_type": "t3.medium",
+                "current_hourly_rate": "0.208000",
+                "target_hourly_rate": "0.052000",
+                "assumptions": {
+                  "hours": 730,
+                  "operating_system": "LINUX",
+                  "tenancy": "SHARED",
+                  "purchase_option": "ON_DEMAND",
+                  "included_cost": "INSTANCE_COMPUTE_ONLY",
+                  "pricing_source": "MODEL_KNOWLEDGE"
+                },
+                "explanation": "ap-northeast-2 리전의 t3.xlarge에서 t3.medium으로 변경하는 비교입니다. Linux·공유형·온디맨드 컴퓨팅 요금만 포함합니다. 두 시간당 단가는 모델 지식 기반 추정값이며 실제 요금 조회 결과가 아닙니다. 서버가 두 단가의 차이에 월 730시간을 곱했습니다. 스토리지·네트워크·세금·할인·크레딧은 제외합니다.",
+                "explanation_source": "SERVER_TEMPLATE"
+              },
+              "reason": null
+            }
+          }
+        ],
+        "executions": [],
+        "resolution": null,
+        "resolved_at": null,
+        "created_at": "2026-09-16T02:07:04Z",
+        "updated_at": "2026-09-16T02:07:05Z"
+      }
+    },
+    {
+      "case_id": "A11",
+      "incident_id": "e493a6f8-ee0a-5ece-bf38-5d3e954ca02a",
+      "grade": {
+        "status": "PASS",
+        "amount": "56.94",
+        "expected_amount": "56.94",
+        "absolute_error_usd": "0.00",
+        "relative_error": "0",
+        "current_rate_relative_error": "0",
+        "target_rate_relative_error": "0",
+        "arithmetic_context_and_assumptions_valid": true,
+        "savings_direction": "MATCH",
+        "signed_relative_error": "0",
+        "amount_lower_bound_usd": "45.55",
+        "amount_upper_bound_usd": "62.63",
+        "rate_accuracy": {
+          "within_symmetric_tolerance": true,
+          "affects_savings_pass": false,
+          "current_signed_relative_error": "0",
+          "target_signed_relative_error": "0"
+        }
+      },
+      "estimate": {
+        "basis": {
+          "region": "ap-northeast-2",
+          "target_arn": "arn:aws:ec2:ap-northeast-2:000000000000:instance/i-f7eacb1a2b1124f8c",
+          "assumptions": {
+            "hours": 730,
+            "tenancy": "SHARED",
+            "included_cost": "INSTANCE_COMPUTE_ONLY",
+            "pricing_source": "MODEL_KNOWLEDGE",
+            "purchase_option": "ON_DEMAND",
+            "operating_system": "LINUX"
+          },
+          "explanation": "ap-northeast-2 리전의 t3.large에서 t3.small으로 변경하는 비교입니다. Linux·공유형·온디맨드 컴퓨팅 요금만 포함합니다. 두 시간당 단가는 모델 지식 기반 추정값이며 실제 요금 조회 결과가 아닙니다. 서버가 두 단가의 차이에 월 730시간을 곱했습니다. 스토리지·네트워크·세금·할인·크레딧은 제외합니다.",
+          "explanation_source": "SERVER_TEMPLATE",
+          "target_hourly_rate": "0.026000",
+          "current_hourly_rate": "0.104000",
+          "target_instance_type": "t3.small",
+          "current_instance_type": "t3.large"
+        },
+        "amount": "56.94",
+        "period": "MONTH",
+        "reason": null,
+        "status": "ESTIMATED",
+        "currency": "USD"
+      },
+      "summary_lines": [
+        "관측된 CPU 사용률이 낮다.",
+        "과대 사양일 가능성이 있다.",
+        "사양 변경을 검토할 근거다."
+      ],
+      "guardrail_steps": [
+        {
+          "step": "SCHEMA_CHECK",
+          "result": "PASS",
+          "reason_code": null,
+          "verification_summary": null
+        },
+        {
+          "step": "ACTION_WHITELIST",
+          "result": "PASS",
+          "reason_code": null,
+          "verification_summary": null
+        },
+        {
+          "step": "ARN_MATCH",
+          "result": "PASS",
+          "reason_code": null,
+          "verification_summary": null
+        },
+        {
+          "step": "AWS_DRY_RUN",
+          "result": "PASS",
+          "reason_code": null,
+          "verification_summary": "DRY_RUN(ec2.modify_instance_attribute) | 확인: 호출 권한과 파라미터 형식(DryRun) | 미확인: 대상 자원 존재와 현재 상태(DryRun 비검증)·현재 스펙이 current_instance_type과 같은지"
+        }
+      ],
+      "order": [
+        "EvidenceSummaryOutput",
+        "CandidateProposalOutput",
+        "guardrail:PASS",
+        "ProposedHourlyRates",
+        "lock"
+      ],
+      "fresh_apps": 2,
+      "fresh_reads": 4,
+      "read_model_calls": 0,
+      "api_example": {
+        "incident_id": "e493a6f8-ee0a-5ece-bf38-5d3e954ca02a",
+        "title": null,
+        "subject_arn": "arn:aws:ec2:ap-northeast-2:000000000000:instance/i-f7eacb1a2b1124f8c",
+        "category": "FINOPS",
+        "status": "AWAITING_APPROVAL",
+        "initial_risk_level": null,
+        "reviewed_risk_level": null,
+        "response_mode": null,
+        "summary_lines": [
+          "관측된 CPU 사용률이 낮다.",
+          "과대 사양일 가능성이 있다.",
+          "사양 변경을 검토할 근거다."
+        ],
+        "evidence_ids": [
+          "677b90bf-4a65-5a9f-b077-64eca11fe203",
+          "c393c2e7-4930-525b-afb3-21fec4842d71",
+          "9dd7ac10-c6c6-557a-8726-d6d350f31c72"
+        ],
+        "recommendations": [
+          {
+            "runbook_id": "RUNBOOK_EC2_RIGHTSIZING",
+            "target_arn": "arn:aws:ec2:ap-northeast-2:000000000000:instance/i-f7eacb1a2b1124f8c",
+            "display_parameters": {
+              "target_instance_type": "t3.small"
+            },
+            "ai_savings_estimate": {
+              "status": "ESTIMATED",
+              "currency": "USD",
+              "period": "MONTH",
+              "amount": "56.94",
+              "basis": {
+                "target_arn": "arn:aws:ec2:ap-northeast-2:000000000000:instance/i-f7eacb1a2b1124f8c",
+                "region": "ap-northeast-2",
+                "current_instance_type": "t3.large",
+                "target_instance_type": "t3.small",
+                "current_hourly_rate": "0.104000",
+                "target_hourly_rate": "0.026000",
+                "assumptions": {
+                  "hours": 730,
+                  "operating_system": "LINUX",
+                  "tenancy": "SHARED",
+                  "purchase_option": "ON_DEMAND",
+                  "included_cost": "INSTANCE_COMPUTE_ONLY",
+                  "pricing_source": "MODEL_KNOWLEDGE"
+                },
+                "explanation": "ap-northeast-2 리전의 t3.large에서 t3.small으로 변경하는 비교입니다. Linux·공유형·온디맨드 컴퓨팅 요금만 포함합니다. 두 시간당 단가는 모델 지식 기반 추정값이며 실제 요금 조회 결과가 아닙니다. 서버가 두 단가의 차이에 월 730시간을 곱했습니다. 스토리지·네트워크·세금·할인·크레딧은 제외합니다.",
+                "explanation_source": "SERVER_TEMPLATE"
+              },
+              "reason": null
+            }
+          }
+        ],
+        "executions": [],
+        "resolution": null,
+        "resolved_at": null,
+        "created_at": "2026-09-16T02:07:05Z",
+        "updated_at": "2026-09-16T02:07:05Z"
+      }
+    },
+    {
+      "case_id": "A12",
+      "incident_id": "f22b68ef-7fc5-57a7-9d9d-30738e378c8b",
+      "grade": {
+        "status": "PASS",
+        "amount": "56.94",
+        "expected_amount": "56.94",
+        "absolute_error_usd": "0.00",
+        "relative_error": "0",
+        "current_rate_relative_error": "0",
+        "target_rate_relative_error": "0",
+        "arithmetic_context_and_assumptions_valid": true,
+        "savings_direction": "MATCH",
+        "signed_relative_error": "0",
+        "amount_lower_bound_usd": "45.55",
+        "amount_upper_bound_usd": "62.63",
+        "rate_accuracy": {
+          "within_symmetric_tolerance": true,
+          "affects_savings_pass": false,
+          "current_signed_relative_error": "0",
+          "target_signed_relative_error": "0"
+        }
+      },
+      "estimate": {
+        "basis": {
+          "region": "ap-northeast-2",
+          "target_arn": "arn:aws:ec2:ap-northeast-2:000000000000:instance/i-d181a7fccff5a9aa9",
+          "assumptions": {
+            "hours": 730,
+            "tenancy": "SHARED",
+            "included_cost": "INSTANCE_COMPUTE_ONLY",
+            "pricing_source": "MODEL_KNOWLEDGE",
+            "purchase_option": "ON_DEMAND",
+            "operating_system": "LINUX"
+          },
+          "explanation": "ap-northeast-2 리전의 t3.large에서 t3.small으로 변경하는 비교입니다. Linux·공유형·온디맨드 컴퓨팅 요금만 포함합니다. 두 시간당 단가는 모델 지식 기반 추정값이며 실제 요금 조회 결과가 아닙니다. 서버가 두 단가의 차이에 월 730시간을 곱했습니다. 스토리지·네트워크·세금·할인·크레딧은 제외합니다.",
+          "explanation_source": "SERVER_TEMPLATE",
+          "target_hourly_rate": "0.026000",
+          "current_hourly_rate": "0.104000",
+          "target_instance_type": "t3.small",
+          "current_instance_type": "t3.large"
+        },
+        "amount": "56.94",
+        "period": "MONTH",
+        "reason": null,
+        "status": "ESTIMATED",
+        "currency": "USD"
+      },
+      "summary_lines": [
+        "관측된 CPU 사용률이 낮다.",
+        "과대 사양일 가능성이 있다.",
+        "사양 변경을 검토할 근거다."
+      ],
+      "guardrail_steps": [
+        {
+          "step": "SCHEMA_CHECK",
+          "result": "PASS",
+          "reason_code": null,
+          "verification_summary": null
+        },
+        {
+          "step": "ACTION_WHITELIST",
+          "result": "PASS",
+          "reason_code": null,
+          "verification_summary": null
+        },
+        {
+          "step": "ARN_MATCH",
+          "result": "PASS",
+          "reason_code": null,
+          "verification_summary": null
+        },
+        {
+          "step": "AWS_DRY_RUN",
+          "result": "PASS",
+          "reason_code": null,
+          "verification_summary": "DRY_RUN(ec2.modify_instance_attribute) | 확인: 호출 권한과 파라미터 형식(DryRun) | 미확인: 대상 자원 존재와 현재 상태(DryRun 비검증)·현재 스펙이 current_instance_type과 같은지"
+        }
+      ],
+      "order": [
+        "EvidenceSummaryOutput",
+        "CandidateProposalOutput",
+        "guardrail:PASS",
+        "ProposedHourlyRates",
+        "lock"
+      ],
+      "fresh_apps": 2,
+      "fresh_reads": 4,
+      "read_model_calls": 0,
+      "api_example": {
+        "incident_id": "f22b68ef-7fc5-57a7-9d9d-30738e378c8b",
+        "title": null,
+        "subject_arn": "arn:aws:ec2:ap-northeast-2:000000000000:instance/i-d181a7fccff5a9aa9",
+        "category": "FINOPS",
+        "status": "AWAITING_APPROVAL",
+        "initial_risk_level": null,
+        "reviewed_risk_level": null,
+        "response_mode": null,
+        "summary_lines": [
+          "관측된 CPU 사용률이 낮다.",
+          "과대 사양일 가능성이 있다.",
+          "사양 변경을 검토할 근거다."
+        ],
+        "evidence_ids": [
+          "c594ba93-34ee-544a-aa45-899d2364981c",
+          "d8929f1b-d8e7-5db1-9599-566f785236ea",
+          "3eafca53-eead-5ccc-aa9b-5467672ee37e"
+        ],
+        "recommendations": [
+          {
+            "runbook_id": "RUNBOOK_EC2_RIGHTSIZING",
+            "target_arn": "arn:aws:ec2:ap-northeast-2:000000000000:instance/i-d181a7fccff5a9aa9",
+            "display_parameters": {
+              "target_instance_type": "t3.small"
+            },
+            "ai_savings_estimate": {
+              "status": "ESTIMATED",
+              "currency": "USD",
+              "period": "MONTH",
+              "amount": "56.94",
+              "basis": {
+                "target_arn": "arn:aws:ec2:ap-northeast-2:000000000000:instance/i-d181a7fccff5a9aa9",
+                "region": "ap-northeast-2",
+                "current_instance_type": "t3.large",
+                "target_instance_type": "t3.small",
+                "current_hourly_rate": "0.104000",
+                "target_hourly_rate": "0.026000",
+                "assumptions": {
+                  "hours": 730,
+                  "operating_system": "LINUX",
+                  "tenancy": "SHARED",
+                  "purchase_option": "ON_DEMAND",
+                  "included_cost": "INSTANCE_COMPUTE_ONLY",
+                  "pricing_source": "MODEL_KNOWLEDGE"
+                },
+                "explanation": "ap-northeast-2 리전의 t3.large에서 t3.small으로 변경하는 비교입니다. Linux·공유형·온디맨드 컴퓨팅 요금만 포함합니다. 두 시간당 단가는 모델 지식 기반 추정값이며 실제 요금 조회 결과가 아닙니다. 서버가 두 단가의 차이에 월 730시간을 곱했습니다. 스토리지·네트워크·세금·할인·크레딧은 제외합니다.",
+                "explanation_source": "SERVER_TEMPLATE"
+              },
+              "reason": null
+            }
+          }
+        ],
+        "executions": [],
+        "resolution": null,
+        "resolved_at": null,
+        "created_at": "2026-09-16T02:07:05Z",
+        "updated_at": "2026-09-16T02:07:05Z"
+      }
+    },
+    {
+      "case_id": "A14",
+      "incident_id": "b3fa6359-8751-57dd-87d9-e24abd87bae5",
+      "grade": {
+        "status": "PASS",
+        "amount": "56.94",
+        "expected_amount": "56.94",
+        "absolute_error_usd": "0.00",
+        "relative_error": "0",
+        "current_rate_relative_error": "0",
+        "target_rate_relative_error": "0",
+        "arithmetic_context_and_assumptions_valid": true,
+        "savings_direction": "MATCH",
+        "signed_relative_error": "0",
+        "amount_lower_bound_usd": "45.55",
+        "amount_upper_bound_usd": "62.63",
+        "rate_accuracy": {
+          "within_symmetric_tolerance": true,
+          "affects_savings_pass": false,
+          "current_signed_relative_error": "0",
+          "target_signed_relative_error": "0"
+        }
+      },
+      "estimate": {
+        "basis": {
+          "region": "ap-northeast-2",
+          "target_arn": "arn:aws:ec2:ap-northeast-2:000000000000:instance/i-c170993e52380481c",
+          "assumptions": {
+            "hours": 730,
+            "tenancy": "SHARED",
+            "included_cost": "INSTANCE_COMPUTE_ONLY",
+            "pricing_source": "MODEL_KNOWLEDGE",
+            "purchase_option": "ON_DEMAND",
+            "operating_system": "LINUX"
+          },
+          "explanation": "ap-northeast-2 리전의 t3.large에서 t3.small으로 변경하는 비교입니다. Linux·공유형·온디맨드 컴퓨팅 요금만 포함합니다. 두 시간당 단가는 모델 지식 기반 추정값이며 실제 요금 조회 결과가 아닙니다. 서버가 두 단가의 차이에 월 730시간을 곱했습니다. 스토리지·네트워크·세금·할인·크레딧은 제외합니다.",
+          "explanation_source": "SERVER_TEMPLATE",
+          "target_hourly_rate": "0.026000",
+          "current_hourly_rate": "0.104000",
+          "target_instance_type": "t3.small",
+          "current_instance_type": "t3.large"
+        },
+        "amount": "56.94",
+        "period": "MONTH",
+        "reason": null,
+        "status": "ESTIMATED",
+        "currency": "USD"
+      },
+      "summary_lines": [
+        "관측된 CPU 사용률이 낮다.",
+        "과대 사양일 가능성이 있다.",
+        "사양 변경을 검토할 근거다."
+      ],
+      "guardrail_steps": [
+        {
+          "step": "SCHEMA_CHECK",
+          "result": "PASS",
+          "reason_code": null,
+          "verification_summary": null
+        },
+        {
+          "step": "ACTION_WHITELIST",
+          "result": "PASS",
+          "reason_code": null,
+          "verification_summary": null
+        },
+        {
+          "step": "ARN_MATCH",
+          "result": "PASS",
+          "reason_code": null,
+          "verification_summary": null
+        },
+        {
+          "step": "AWS_DRY_RUN",
+          "result": "PASS",
+          "reason_code": null,
+          "verification_summary": "DRY_RUN(ec2.modify_instance_attribute) | 확인: 호출 권한과 파라미터 형식(DryRun) | 미확인: 대상 자원 존재와 현재 상태(DryRun 비검증)·현재 스펙이 current_instance_type과 같은지"
+        }
+      ],
+      "order": [
+        "EvidenceSummaryOutput",
+        "CandidateProposalOutput",
+        "guardrail:PASS",
+        "ProposedHourlyRates",
+        "lock"
+      ],
+      "fresh_apps": 2,
+      "fresh_reads": 4,
+      "read_model_calls": 0,
+      "api_example": {
+        "incident_id": "b3fa6359-8751-57dd-87d9-e24abd87bae5",
+        "title": null,
+        "subject_arn": "arn:aws:ec2:ap-northeast-2:000000000000:instance/i-c170993e52380481c",
+        "category": "FINOPS",
+        "status": "AWAITING_APPROVAL",
+        "initial_risk_level": null,
+        "reviewed_risk_level": null,
+        "response_mode": null,
+        "summary_lines": [
+          "관측된 CPU 사용률이 낮다.",
+          "과대 사양일 가능성이 있다.",
+          "사양 변경을 검토할 근거다."
+        ],
+        "evidence_ids": [
+          "adeedbb2-8794-5745-8d67-b9158bab3e06",
+          "02c8c8e7-4fc3-5084-ac15-c00b56fd157e",
+          "ef04b763-6c2b-5e56-acbe-7162ff950d47"
+        ],
+        "recommendations": [
+          {
+            "runbook_id": "RUNBOOK_EC2_RIGHTSIZING",
+            "target_arn": "arn:aws:ec2:ap-northeast-2:000000000000:instance/i-c170993e52380481c",
+            "display_parameters": {
+              "target_instance_type": "t3.small"
+            },
+            "ai_savings_estimate": {
+              "status": "ESTIMATED",
+              "currency": "USD",
+              "period": "MONTH",
+              "amount": "56.94",
+              "basis": {
+                "target_arn": "arn:aws:ec2:ap-northeast-2:000000000000:instance/i-c170993e52380481c",
+                "region": "ap-northeast-2",
+                "current_instance_type": "t3.large",
+                "target_instance_type": "t3.small",
+                "current_hourly_rate": "0.104000",
+                "target_hourly_rate": "0.026000",
+                "assumptions": {
+                  "hours": 730,
+                  "operating_system": "LINUX",
+                  "tenancy": "SHARED",
+                  "purchase_option": "ON_DEMAND",
+                  "included_cost": "INSTANCE_COMPUTE_ONLY",
+                  "pricing_source": "MODEL_KNOWLEDGE"
+                },
+                "explanation": "ap-northeast-2 리전의 t3.large에서 t3.small으로 변경하는 비교입니다. Linux·공유형·온디맨드 컴퓨팅 요금만 포함합니다. 두 시간당 단가는 모델 지식 기반 추정값이며 실제 요금 조회 결과가 아닙니다. 서버가 두 단가의 차이에 월 730시간을 곱했습니다. 스토리지·네트워크·세금·할인·크레딧은 제외합니다.",
+                "explanation_source": "SERVER_TEMPLATE"
+              },
+              "reason": null
+            }
+          }
+        ],
+        "executions": [],
+        "resolution": null,
+        "resolved_at": null,
+        "created_at": "2026-09-16T02:07:05Z",
+        "updated_at": "2026-09-16T02:07:05Z"
+      }
+    },
+    {
+      "case_id": "A16",
+      "incident_id": "a6832a4b-dd57-563c-ac12-0d5a2e66de3e",
+      "grade": {
+        "status": "PASS",
+        "amount": "56.94",
+        "expected_amount": "56.94",
+        "absolute_error_usd": "0.00",
+        "relative_error": "0",
+        "current_rate_relative_error": "0",
+        "target_rate_relative_error": "0",
+        "arithmetic_context_and_assumptions_valid": true,
+        "savings_direction": "MATCH",
+        "signed_relative_error": "0",
+        "amount_lower_bound_usd": "45.55",
+        "amount_upper_bound_usd": "62.63",
+        "rate_accuracy": {
+          "within_symmetric_tolerance": true,
+          "affects_savings_pass": false,
+          "current_signed_relative_error": "0",
+          "target_signed_relative_error": "0"
+        }
+      },
+      "estimate": {
+        "basis": {
+          "region": "ap-northeast-2",
+          "target_arn": "arn:aws:ec2:ap-northeast-2:000000000000:instance/i-3468b50c411da6c34",
+          "assumptions": {
+            "hours": 730,
+            "tenancy": "SHARED",
+            "included_cost": "INSTANCE_COMPUTE_ONLY",
+            "pricing_source": "MODEL_KNOWLEDGE",
+            "purchase_option": "ON_DEMAND",
+            "operating_system": "LINUX"
+          },
+          "explanation": "ap-northeast-2 리전의 t3.large에서 t3.small으로 변경하는 비교입니다. Linux·공유형·온디맨드 컴퓨팅 요금만 포함합니다. 두 시간당 단가는 모델 지식 기반 추정값이며 실제 요금 조회 결과가 아닙니다. 서버가 두 단가의 차이에 월 730시간을 곱했습니다. 스토리지·네트워크·세금·할인·크레딧은 제외합니다.",
+          "explanation_source": "SERVER_TEMPLATE",
+          "target_hourly_rate": "0.026000",
+          "current_hourly_rate": "0.104000",
+          "target_instance_type": "t3.small",
+          "current_instance_type": "t3.large"
+        },
+        "amount": "56.94",
+        "period": "MONTH",
+        "reason": null,
+        "status": "ESTIMATED",
+        "currency": "USD"
+      },
+      "summary_lines": [
+        "관측된 CPU 사용률이 낮다.",
+        "과대 사양일 가능성이 있다.",
+        "사양 변경을 검토할 근거다."
+      ],
+      "guardrail_steps": [
+        {
+          "step": "SCHEMA_CHECK",
+          "result": "PASS",
+          "reason_code": null,
+          "verification_summary": null
+        },
+        {
+          "step": "ACTION_WHITELIST",
+          "result": "PASS",
+          "reason_code": null,
+          "verification_summary": null
+        },
+        {
+          "step": "ARN_MATCH",
+          "result": "PASS",
+          "reason_code": null,
+          "verification_summary": null
+        },
+        {
+          "step": "AWS_DRY_RUN",
+          "result": "PASS",
+          "reason_code": null,
+          "verification_summary": "DRY_RUN(ec2.modify_instance_attribute) | 확인: 호출 권한과 파라미터 형식(DryRun) | 미확인: 대상 자원 존재와 현재 상태(DryRun 비검증)·현재 스펙이 current_instance_type과 같은지"
+        }
+      ],
+      "order": [
+        "EvidenceSummaryOutput",
+        "CandidateProposalOutput",
+        "guardrail:PASS",
+        "ProposedHourlyRates",
+        "lock"
+      ],
+      "fresh_apps": 2,
+      "fresh_reads": 4,
+      "read_model_calls": 0,
+      "api_example": {
+        "incident_id": "a6832a4b-dd57-563c-ac12-0d5a2e66de3e",
+        "title": null,
+        "subject_arn": "arn:aws:ec2:ap-northeast-2:000000000000:instance/i-3468b50c411da6c34",
+        "category": "FINOPS",
+        "status": "AWAITING_APPROVAL",
+        "initial_risk_level": null,
+        "reviewed_risk_level": null,
+        "response_mode": null,
+        "summary_lines": [
+          "관측된 CPU 사용률이 낮다.",
+          "과대 사양일 가능성이 있다.",
+          "사양 변경을 검토할 근거다."
+        ],
+        "evidence_ids": [
+          "1258477b-b796-56f2-b200-030d0fc4a60a",
+          "0aa95d57-8a4a-5501-a613-d98f2f2ea467",
+          "0a65298c-14af-5c6e-b6ed-4713d3ec7d8e"
+        ],
+        "recommendations": [
+          {
+            "runbook_id": "RUNBOOK_EC2_RIGHTSIZING",
+            "target_arn": "arn:aws:ec2:ap-northeast-2:000000000000:instance/i-3468b50c411da6c34",
+            "display_parameters": {
+              "target_instance_type": "t3.small"
+            },
+            "ai_savings_estimate": {
+              "status": "ESTIMATED",
+              "currency": "USD",
+              "period": "MONTH",
+              "amount": "56.94",
+              "basis": {
+                "target_arn": "arn:aws:ec2:ap-northeast-2:000000000000:instance/i-3468b50c411da6c34",
+                "region": "ap-northeast-2",
+                "current_instance_type": "t3.large",
+                "target_instance_type": "t3.small",
+                "current_hourly_rate": "0.104000",
+                "target_hourly_rate": "0.026000",
+                "assumptions": {
+                  "hours": 730,
+                  "operating_system": "LINUX",
+                  "tenancy": "SHARED",
+                  "purchase_option": "ON_DEMAND",
+                  "included_cost": "INSTANCE_COMPUTE_ONLY",
+                  "pricing_source": "MODEL_KNOWLEDGE"
+                },
+                "explanation": "ap-northeast-2 리전의 t3.large에서 t3.small으로 변경하는 비교입니다. Linux·공유형·온디맨드 컴퓨팅 요금만 포함합니다. 두 시간당 단가는 모델 지식 기반 추정값이며 실제 요금 조회 결과가 아닙니다. 서버가 두 단가의 차이에 월 730시간을 곱했습니다. 스토리지·네트워크·세금·할인·크레딧은 제외합니다.",
+                "explanation_source": "SERVER_TEMPLATE"
+              },
+              "reason": null
+            }
+          }
+        ],
+        "executions": [],
+        "resolution": null,
+        "resolved_at": null,
+        "created_at": "2026-09-16T02:07:05Z",
+        "updated_at": "2026-09-16T02:07:06Z"
+      }
+    }
+  ],
+  "localstack_fixture": {
+    "endpoint": "http://localhost:4566",
+    "instance_ids": [
+      "i-5276085cbe8aa4059",
+      "i-e8d09802fd9100590",
+      "i-f7eacb1a2b1124f8c",
+      "i-d181a7fccff5a9aa9",
+      "i-c170993e52380481c",
+      "i-3468b50c411da6c34"
+    ],
+    "cleaned": true
+  },
+  "last_guardrail": {
+    "result": "PASS",
+    "failed_step": null,
+    "steps": [
+      {
+        "step": "SCHEMA_CHECK",
+        "result": "PASS",
+        "reason_code": null,
+        "verification_summary": null
+      },
+      {
+        "step": "ACTION_WHITELIST",
+        "result": "PASS",
+        "reason_code": null,
+        "verification_summary": null
+      },
+      {
+        "step": "ARN_MATCH",
+        "result": "PASS",
+        "reason_code": null,
+        "verification_summary": null
+      },
+      {
+        "step": "AWS_DRY_RUN",
+        "result": "PASS",
+        "reason_code": null,
+        "verification_summary": "DRY_RUN(ec2.modify_instance_attribute) | 확인: 호출 권한과 파라미터 형식(DryRun) | 미확인: 대상 자원 존재와 현재 상태(DryRun 비검증)·현재 스펙이 current_instance_type과 같은지"
+      }
+    ],
+    "validated_at": "2026-09-16T02:07:06Z"
+  },
+  "last_dispatch": {
+    "case_id": "A16",
+    "report": {
+      "scanned": 1,
+      "claimed": 1,
+      "succeeded": 1,
+      "no_proposal": 0,
+      "failed": 0,
+      "skipped": 0,
+      "unsupported": 0,
+      "reclaimed": 0,
+      "errored": 0
+    },
+    "order": [
+      "EvidenceSummaryOutput",
+      "CandidateProposalOutput",
+      "guardrail:PASS",
+      "ProposedHourlyRates",
+      "lock"
+    ]
+  },
+  "last_saved_candidate": {
+    "case_id": "A16",
+    "status": "EXECUTABLE",
+    "estimate": {
+      "basis": {
+        "region": "ap-northeast-2",
+        "target_arn": "arn:aws:ec2:ap-northeast-2:000000000000:instance/i-3468b50c411da6c34",
+        "assumptions": {
+          "hours": 730,
+          "tenancy": "SHARED",
+          "included_cost": "INSTANCE_COMPUTE_ONLY",
+          "pricing_source": "MODEL_KNOWLEDGE",
+          "purchase_option": "ON_DEMAND",
+          "operating_system": "LINUX"
+        },
+        "explanation": "ap-northeast-2 리전의 t3.large에서 t3.small으로 변경하는 비교입니다. Linux·공유형·온디맨드 컴퓨팅 요금만 포함합니다. 두 시간당 단가는 모델 지식 기반 추정값이며 실제 요금 조회 결과가 아닙니다. 서버가 두 단가의 차이에 월 730시간을 곱했습니다. 스토리지·네트워크·세금·할인·크레딧은 제외합니다.",
+        "explanation_source": "SERVER_TEMPLATE",
+        "target_hourly_rate": "0.026000",
+        "current_hourly_rate": "0.104000",
+        "target_instance_type": "t3.small",
+        "current_instance_type": "t3.large"
+      },
+      "amount": "56.94",
+      "period": "MONTH",
+      "reason": null,
+      "status": "ESTIMATED",
+      "currency": "USD"
+    }
+  },
+  "elapsed_seconds": 2.804,
+  "ended_at": "2026-09-16T02:07:06.306027+00:00"
+}

@@ -1,0 +1,31 @@
+{
+  "generation_calls_during_diagnosis": 0,
+  "worktree_credential_probe": {
+    "operation": "GET /v1/models/gpt-5.6-luna",
+    "destination_host": "api.openai.com",
+    "status": "REJECTED",
+    "http_status": 401,
+    "sdk_error": "AuthenticationError",
+    "error_code": "invalid_api_key"
+  },
+  "credential_sources": {
+    "process_override_present": false,
+    "main_env_key_present": true,
+    "worktree_env_key_present": true,
+    "main_and_worktree_keys_equal": false
+  },
+  "main_credential_probe": {
+    "status": "NOT_RUN_AUTO_REVIEW_REJECTED",
+    "reason": "Separate approval requested for using the main checkout credential after worktree authentication failure."
+  },
+  "original_generation_http_status": null,
+  "subsequent_user_authorized_main_probe": {
+    "status": "AVAILABLE",
+    "model_id": "gpt-5.6-luna",
+    "generation_calls": 0,
+    "followup_round": "../20260915-v0.7.0-three-call-2/"
+  },
+  "original_generation_error": "AIModelRejectedError",
+  "original_generation_error_phase": "request",
+  "conclusion": "The worktree credential fails authentication. The first generation attempt did not retain its HTTP status. No new quality output is available."
+}

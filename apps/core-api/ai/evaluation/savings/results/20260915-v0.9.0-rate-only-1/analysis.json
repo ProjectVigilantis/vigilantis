@@ -1,0 +1,226 @@
+{
+  "prompt_version": "v0.9.0",
+  "price_gate_passed": true,
+  "runs": 60,
+  "calls": 180,
+  "status_counts": {
+    "PASS": 60
+  },
+  "per_case": {
+    "A1": {
+      "status_counts": {
+        "PASS": 10
+      },
+      "amount_range_usd": [
+        "113.88",
+        "115.63"
+      ]
+    },
+    "A7": {
+      "status_counts": {
+        "PASS": 10
+      },
+      "amount_range_usd": [
+        "113.88",
+        "115.63"
+      ]
+    },
+    "A11": {
+      "status_counts": {
+        "PASS": 10
+      },
+      "amount_range_usd": [
+        "45.55",
+        "59.57"
+      ]
+    },
+    "A12": {
+      "status_counts": {
+        "PASS": 10
+      },
+      "amount_range_usd": [
+        "45.55",
+        "57.82"
+      ]
+    },
+    "A14": {
+      "status_counts": {
+        "PASS": 10
+      },
+      "amount_range_usd": [
+        "45.55",
+        "59.57"
+      ]
+    },
+    "A16": {
+      "status_counts": {
+        "PASS": 10
+      },
+      "amount_range_usd": [
+        "45.55",
+        "57.82"
+      ]
+    }
+  },
+  "largest_overestimate": {
+    "case_id": "A11",
+    "repeat": 2,
+    "status": "PASS",
+    "amount": "59.57",
+    "expected_amount": "56.94",
+    "absolute_error_usd": "2.63",
+    "relative_error": "0.04618897084650509308043554619",
+    "current_rate_relative_error": "0.04615384615384615384615384615",
+    "target_rate_relative_error": "0.04615384615384615384615384615",
+    "arithmetic_context_and_assumptions_valid": true,
+    "savings_direction": "OVERSTATED",
+    "signed_relative_error": "0.04618897084650509308043554619",
+    "amount_lower_bound_usd": "45.55",
+    "amount_upper_bound_usd": "62.63",
+    "rate_accuracy": {
+      "within_symmetric_tolerance": true,
+      "affects_savings_pass": false,
+      "current_signed_relative_error": "0.04615384615384615384615384615",
+      "target_signed_relative_error": "0.04615384615384615384615384615"
+    }
+  },
+  "largest_underestimate": {
+    "case_id": "A11",
+    "repeat": 1,
+    "status": "PASS",
+    "amount": "45.55",
+    "expected_amount": "56.94",
+    "absolute_error_usd": "11.39",
+    "relative_error": "0.2000351246926589392342817000",
+    "current_rate_relative_error": "0.2",
+    "target_rate_relative_error": "0.2",
+    "arithmetic_context_and_assumptions_valid": true,
+    "savings_direction": "UNDERSTATED",
+    "signed_relative_error": "-0.2000351246926589392342817000",
+    "amount_lower_bound_usd": "45.55",
+    "amount_upper_bound_usd": "62.63",
+    "rate_accuracy": {
+      "within_symmetric_tolerance": false,
+      "affects_savings_pass": false,
+      "current_signed_relative_error": "-0.2",
+      "target_signed_relative_error": "-0.2"
+    }
+  },
+  "per_rate_diagnostic_failures": 22,
+  "lower_bound_hits": 16,
+  "per_rate_diagnostic_cases": [
+    {
+      "case_id": "A11",
+      "repeat": 1
+    },
+    {
+      "case_id": "A12",
+      "repeat": 1
+    },
+    {
+      "case_id": "A14",
+      "repeat": 1
+    },
+    {
+      "case_id": "A16",
+      "repeat": 1
+    },
+    {
+      "case_id": "A16",
+      "repeat": 2
+    },
+    {
+      "case_id": "A12",
+      "repeat": 2
+    },
+    {
+      "case_id": "A11",
+      "repeat": 3
+    },
+    {
+      "case_id": "A11",
+      "repeat": 4
+    },
+    {
+      "case_id": "A11",
+      "repeat": 5
+    },
+    {
+      "case_id": "A12",
+      "repeat": 5
+    },
+    {
+      "case_id": "A16",
+      "repeat": 5
+    },
+    {
+      "case_id": "A14",
+      "repeat": 6
+    },
+    {
+      "case_id": "A16",
+      "repeat": 7
+    },
+    {
+      "case_id": "A16",
+      "repeat": 8
+    },
+    {
+      "case_id": "A12",
+      "repeat": 8
+    },
+    {
+      "case_id": "A11",
+      "repeat": 9
+    },
+    {
+      "case_id": "A12",
+      "repeat": 9
+    },
+    {
+      "case_id": "A14",
+      "repeat": 9
+    },
+    {
+      "case_id": "A16",
+      "repeat": 9
+    },
+    {
+      "case_id": "A16",
+      "repeat": 10
+    },
+    {
+      "case_id": "A12",
+      "repeat": 10
+    },
+    {
+      "case_id": "A11",
+      "repeat": 10
+    }
+  ],
+  "failures": [],
+  "cost_with_reported_cache_usd": "0.08031466",
+  "cost_without_cache_discount_usd": "0.111142",
+  "elapsed_seconds": 573.88,
+  "usage": {
+    "prompt_tokens": 303872,
+    "completion_tokens": 41973,
+    "cached_prompt_tokens": 171263
+  },
+  "verification": {
+    "score_reproduction": true,
+    "flow_reproduction": true,
+    "call_ledger_and_usage": true,
+    "pilot_prefix_and_snapshot": true,
+    "candidate_frozen_files": 19,
+    "historical_files_unchanged": 78,
+    "runtime_adoption": false,
+    "summary_paired_judge": false
+  },
+  "source_sha256": {
+    "raw.json": "88cb48692086c49f28cb31127d419e40d0d52fb36c54a9b85fb23f1a7e9d9e07",
+    "metadata.json": "6b48fabfaa76d1cf39fcc43e796d3dd33283f0adad14b9cf0425fdbfb0148509",
+    "scored.json": "9baa133da90721514fdf228786255c499453dbba5515e246d820fe00de859f48",
+    "flow-scored.json": "059da44d20246ccf9ba0a2aa161ec4736b4614fd2d486ce5216ff7c57262c785"
+  }
+}

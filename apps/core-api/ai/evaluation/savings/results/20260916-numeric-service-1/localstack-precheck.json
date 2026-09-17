@@ -1,0 +1,38 @@
+[
+  {
+    "case_id": "A1",
+    "passed": true,
+    "reason_code": null,
+    "verification_summary": "DRY_RUN(ec2.modify_instance_attribute) | 확인: 호출 권한과 파라미터 형식(DryRun) | 미확인: 대상 자원 존재와 현재 상태(DryRun 비검증)·현재 스펙이 current_instance_type과 같은지"
+  },
+  {
+    "case_id": "A7",
+    "passed": true,
+    "reason_code": null,
+    "verification_summary": "DRY_RUN(ec2.modify_instance_attribute) | 확인: 호출 권한과 파라미터 형식(DryRun) | 미확인: 대상 자원 존재와 현재 상태(DryRun 비검증)·현재 스펙이 current_instance_type과 같은지"
+  },
+  {
+    "case_id": "A11",
+    "passed": true,
+    "reason_code": null,
+    "verification_summary": "DRY_RUN(ec2.modify_instance_attribute) | 확인: 호출 권한과 파라미터 형식(DryRun) | 미확인: 대상 자원 존재와 현재 상태(DryRun 비검증)·현재 스펙이 current_instance_type과 같은지"
+  },
+  {
+    "case_id": "A12",
+    "passed": true,
+    "reason_code": null,
+    "verification_summary": "DRY_RUN(ec2.modify_instance_attribute) | 확인: 호출 권한과 파라미터 형식(DryRun) | 미확인: 대상 자원 존재와 현재 상태(DryRun 비검증)·현재 스펙이 current_instance_type과 같은지"
+  },
+  {
+    "case_id": "A14",
+    "passed": true,
+    "reason_code": null,
+    "verification_summary": "DRY_RUN(ec2.modify_instance_attribute) | 확인: 호출 권한과 파라미터 형식(DryRun) | 미확인: 대상 자원 존재와 현재 상태(DryRun 비검증)·현재 스펙이 current_instance_type과 같은지"
+  },
+  {
+    "case_id": "A16",
+    "passed": true,
+    "reason_code": null,
+    "verification_summary": "DRY_RUN(ec2.modify_instance_attribute) | 확인: 호출 권한과 파라미터 형식(DryRun) | 미확인: 대상 자원 존재와 현재 상태(DryRun 비검증)·현재 스펙이 current_instance_type과 같은지"
+  }
+]

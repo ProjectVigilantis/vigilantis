@@ -1,0 +1,365 @@
+{
+  "candidate_raw_sha256": "ec56cc7447726d27d4f43a4fe60366fe330929fefadeab0f3786c8724ab74974",
+  "explanations_read": 60,
+  "assumption_or_source_contradiction_found": 0,
+  "summary_with_internal_code": 44,
+  "explanation_with_internal_code": 1,
+  "matches": [
+    {
+      "case_id": "A7",
+      "repeat": 1,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A11",
+      "repeat": 1,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A12",
+      "repeat": 1,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A14",
+      "repeat": 1,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A16",
+      "repeat": 1,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A16",
+      "repeat": 2,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A14",
+      "repeat": 2,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A12",
+      "repeat": 2,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A11",
+      "repeat": 2,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": [
+        "MODEL_KNOWLEDGE",
+        "pricing_source"
+      ]
+    },
+    {
+      "case_id": "A7",
+      "repeat": 2,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A1",
+      "repeat": 2,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A1",
+      "repeat": 3,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A7",
+      "repeat": 3,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A11",
+      "repeat": 3,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A14",
+      "repeat": 3,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A16",
+      "repeat": 3,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A16",
+      "repeat": 4,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A14",
+      "repeat": 4,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A12",
+      "repeat": 4,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A11",
+      "repeat": 4,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A1",
+      "repeat": 4,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A1",
+      "repeat": 5,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A11",
+      "repeat": 5,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A12",
+      "repeat": 5,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A16",
+      "repeat": 5,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A16",
+      "repeat": 6,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A14",
+      "repeat": 6,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A12",
+      "repeat": 6,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A7",
+      "repeat": 7,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A16",
+      "repeat": 7,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A16",
+      "repeat": 8,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A14",
+      "repeat": 8,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A12",
+      "repeat": 8,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A1",
+      "repeat": 8,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A1",
+      "repeat": 9,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A11",
+      "repeat": 9,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A12",
+      "repeat": 9,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A14",
+      "repeat": 9,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A16",
+      "repeat": 9,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A14",
+      "repeat": 10,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A12",
+      "repeat": 10,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A11",
+      "repeat": 10,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A7",
+      "repeat": 10,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    },
+    {
+      "case_id": "A1",
+      "repeat": 10,
+      "summary_codes": [
+        "COST_CANDIDATE"
+      ],
+      "explanation_codes": []
+    }
+  ],
+  "note": "60개 공개 근거 원문과 가격 실패 2건의 전체 출력을 읽었다. 모델 지식 추정·서울·Linux·공유·온디맨드·컴퓨팅 범위와 모순되는 설명은 발견하지 못했다. 설명은 단가 선택의 내부 추론을 보여 주지 않으며 가격 정확도 근거가 아니다. 요약 의미 품질의 승인 판정은 미실행이다."
+}

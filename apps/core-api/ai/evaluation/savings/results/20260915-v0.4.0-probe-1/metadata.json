@@ -1,0 +1,69 @@
+{
+  "scope": "user-approved A1 and A11, one run each; at most four calls; no retries",
+  "comparison": "Luna/low held fixed; recommendation prompt v0.3.0 to v0.4.0",
+  "started_at": "2026-09-15T04:13:38.454747+00:00",
+  "prompt_version": "v0.4.0",
+  "model": "gpt-5.6-luna",
+  "reasoning_effort": "low",
+  "temperature": null,
+  "max_attempts": 1,
+  "timeout_seconds": 30.0,
+  "call_budget": 4,
+  "attempted_calls": 4,
+  "price_per_million_usd": {
+    "input": 0.2,
+    "cached_input": 0.02,
+    "output": 1.2
+  },
+  "pricing_source": "https://developers.openai.com/api/docs/models/gpt-5.6-luna",
+  "prompt_sha256": "68eb744564bf2b7ec7906a01e3a9cc45333e88e55b4d1f6bcfe81478ed1a1840",
+  "calls": [
+    {
+      "number": 1,
+      "response_model": "EvidenceSummaryOutput",
+      "status": "RETURNED",
+      "model": "gpt-5.6-luna",
+      "elapsed_seconds": 4.608
+    },
+    {
+      "number": 2,
+      "response_model": "FinOpsCandidateProposalOutput",
+      "status": "RETURNED",
+      "model": "gpt-5.6-luna",
+      "elapsed_seconds": 4.81
+    },
+    {
+      "number": 3,
+      "response_model": "EvidenceSummaryOutput",
+      "status": "RETURNED",
+      "model": "gpt-5.6-luna",
+      "elapsed_seconds": 3.406
+    },
+    {
+      "number": 4,
+      "response_model": "FinOpsCandidateProposalOutput",
+      "status": "RETURNED",
+      "model": "gpt-5.6-luna",
+      "elapsed_seconds": 5.591
+    }
+  ],
+  "status": "FINISHED",
+  "git_base_head": "3e482a4aed9bdae3308d1eabc58676963e1265c2",
+  "implementation_sha256": {
+    "apps/core-api/ai/agent.py": "58b57dd85a39e912108e1f66f5ed0ee28d9a2cd53e77f70841500de3893f9fa0",
+    "apps/core-api/ai/savings.py": "48202c84a97e159ff46416d9620de238f88970d045b34f08cc3eb5a1d083ff79",
+    "packages/schemas/savings.py": "baec5cae65044edf41fa77d9209a538fed25bf418fff28e18adb7a3b2da1d139",
+    "apps/core-api/ai/evaluation/savings/scoring.py": "3b271b2cd72bdbce83572f6e7238c96adc90f1930bf87c0709f38211cd64886d",
+    "apps/core-api/ai/evaluation/savings/spec.json": "acf507e478b61d724971f9a0237086a96a10f290d9ca3b963dc4427e0d810bb9"
+  },
+  "exit_code": 0,
+  "ended_at": "2026-09-15T04:13:57.504482+00:00",
+  "elapsed_seconds": 18.991,
+  "usage": {
+    "prompt_tokens": 9449,
+    "completion_tokens": 1369,
+    "cached_prompt_tokens": 1843
+  },
+  "cost_estimate_without_cache_discount_usd": "0.0035326",
+  "cost_note": "Token usage multiplied by public rates, without cache discount; not an invoice amount."
+}

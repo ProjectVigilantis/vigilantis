@@ -1,0 +1,191 @@
+{
+  "label": "gpt-5.6-luna (reasoning_effort=low), price_only",
+  "execution_mode": "price_only_diagnostic",
+  "prompt_version": "v0.6.0",
+  "prompt_sha256": "6bbd22aeeaf3326acbc7c84102507c90db290c8d2b3da1e785266de7488fb1bb",
+  "model_snapshots": [
+    "gpt-5.6-luna"
+  ],
+  "case_ids": [
+    "A1",
+    "A11"
+  ],
+  "repeats": 3,
+  "fixed_set": {
+    "inventory_ids": [
+      "001",
+      "002",
+      "003"
+    ],
+    "case_ids": [
+      "A1",
+      "A7",
+      "A11",
+      "A12",
+      "A14",
+      "A16"
+    ],
+    "input_sha256": "8fffd381a2e89d0d1c0c1b5530e7e4934e244b10978585715ba87c31731d9454"
+  },
+  "runs": [
+    {
+      "case_id": "A1",
+      "repeat": 1,
+      "response_status": "RETURNED",
+      "ai_savings_estimate": {
+        "status": "ESTIMATED",
+        "currency": "USD",
+        "period": "MONTH",
+        "amount": "120.30",
+        "basis": {
+          "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00001",
+          "region": "ap-northeast-2",
+          "current_instance_type": "t3.xlarge",
+          "target_instance_type": "t3.medium",
+          "current_hourly_rate": "0.217600",
+          "target_hourly_rate": "0.052800",
+          "assumptions": {
+            "hours": 730,
+            "operating_system": "LINUX",
+            "tenancy": "SHARED",
+            "purchase_option": "ON_DEMAND",
+            "included_cost": "INSTANCE_COMPUTE_ONLY",
+            "pricing_source": "MODEL_KNOWLEDGE"
+          },
+          "explanation": "ap-northeast-2(서울) 리전의 Linux 공유 테넌시 온디맨드 요금을 적용했습니다. 모델 지식 기반 추정 단가는 t3.xlarge $0.217600/시간, t3.medium $0.052800/시간입니다. 월 절감액은 ($0.217600 - $0.052800) × 730시간 = $120.30입니다. 인스턴스 컴퓨팅 요금만 포함했으며 스토리지·네트워크·세금·할인·크레딧은 제외했습니다. 출처는 요금 API나 청구서 조회가 아닌 모델 지식이므로 실제 청구액과 다를 수 있습니다."
+        },
+        "reason": null
+      },
+      "prompt_tokens": 1157,
+      "completion_tokens": 321,
+      "cached_prompt_tokens": 0,
+      "model": "gpt-5.6-luna",
+      "error": null,
+      "error_phase": null
+    },
+    {
+      "case_id": "A11",
+      "repeat": 1,
+      "response_status": "RETURNED",
+      "ai_savings_estimate": {
+        "status": "ESTIMATED",
+        "currency": "USD",
+        "period": "MONTH",
+        "amount": "57.82",
+        "basis": {
+          "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00021",
+          "region": "ap-northeast-2",
+          "current_instance_type": "t3.large",
+          "target_instance_type": "t3.small",
+          "current_hourly_rate": "0.105600",
+          "target_hourly_rate": "0.026400",
+          "assumptions": {
+            "hours": 730,
+            "operating_system": "LINUX",
+            "tenancy": "SHARED",
+            "purchase_option": "ON_DEMAND",
+            "included_cost": "INSTANCE_COMPUTE_ONLY",
+            "pricing_source": "MODEL_KNOWLEDGE"
+          },
+          "explanation": "AWS 아시아 태평양(서울) 리전(ap-northeast-2)의 Linux 공유형 온디맨드 인스턴스 요금을 적용했습니다. 인스턴스 컴퓨팅 비용만 포함하고, 월 730시간 기준으로 계산했습니다. 월 절감액 = (현재 $0.105600/시간 - 목표 $0.026400/시간) × 730시간 = $57.82. 스토리지·네트워크·세금·할인·크레딧은 제외했습니다. 단가는 요금 API나 청구서 조회가 아닌 모델 지식 기반 추정치이므로 실제 청구 금액과 다를 수 있습니다."
+        },
+        "reason": null
+      },
+      "prompt_tokens": 1156,
+      "completion_tokens": 383,
+      "cached_prompt_tokens": 0,
+      "model": "gpt-5.6-luna",
+      "error": null,
+      "error_phase": null
+    },
+    {
+      "case_id": "A1",
+      "repeat": 2,
+      "response_status": "RETURNED",
+      "ai_savings_estimate": {
+        "status": "ESTIMATED",
+        "currency": "USD",
+        "period": "MONTH",
+        "amount": "115.63",
+        "basis": {
+          "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00001",
+          "region": "ap-northeast-2",
+          "current_instance_type": "t3.xlarge",
+          "target_instance_type": "t3.medium",
+          "current_hourly_rate": "0.211200",
+          "target_hourly_rate": "0.052800",
+          "assumptions": {
+            "hours": 730,
+            "operating_system": "LINUX",
+            "tenancy": "SHARED",
+            "purchase_option": "ON_DEMAND",
+            "included_cost": "INSTANCE_COMPUTE_ONLY",
+            "pricing_source": "MODEL_KNOWLEDGE"
+          },
+          "explanation": "ap-northeast-2(아시아 태평양(서울)) 리전의 Linux, 공유 테넌시, 온디맨드 요금을 적용했습니다. 현재 t3.xlarge 단가는 시간당 USD 0.211200, 목표 t3.medium 단가는 시간당 USD 0.052800으로 추정했습니다. 월 절감액 계산: (0.211200 - 0.052800) × 730시간 = USD 115.63. 인스턴스 컴퓨팅 요금만 포함하며 스토리지·네트워크·세금·할인·크레딧은 제외했습니다. 단가는 요금 API나 청구서 조회가 아닌 모델 지식 기반 추정치입니다."
+        },
+        "reason": null
+      },
+      "prompt_tokens": 1157,
+      "completion_tokens": 373,
+      "cached_prompt_tokens": 1154,
+      "model": "gpt-5.6-luna",
+      "error": null,
+      "error_phase": null
+    },
+    {
+      "case_id": "A11",
+      "repeat": 2,
+      "response_status": "RETURNED",
+      "ai_savings_estimate": {
+        "status": "ESTIMATED",
+        "currency": "USD",
+        "period": "MONTH",
+        "amount": "57.82",
+        "basis": {
+          "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00021",
+          "region": "ap-northeast-2",
+          "current_instance_type": "t3.large",
+          "target_instance_type": "t3.small",
+          "current_hourly_rate": "0.105600",
+          "target_hourly_rate": "0.026400",
+          "assumptions": {
+            "hours": 730,
+            "operating_system": "LINUX",
+            "tenancy": "SHARED",
+            "purchase_option": "ON_DEMAND",
+            "included_cost": "INSTANCE_COMPUTE_ONLY",
+            "pricing_source": "MODEL_KNOWLEDGE"
+          },
+          "explanation": "ap-northeast-2(서울) 리전의 Linux, 공유 테넌시, 온디맨드 요금을 적용했습니다. 월 730시간 기준으로 (현재 $0.105600/시간 - 목표 $0.026400/시간) × 730 = $57.82입니다. 인스턴스 컴퓨팅 요금만 포함했으며 스토리지·네트워크·세금·할인·크레딧은 제외했습니다. 요금 API나 청구서 조회가 아닌 모델 지식 기반 추정이므로 실제 청구 금액과 다를 수 있습니다."
+        },
+        "reason": null
+      },
+      "prompt_tokens": 1156,
+      "completion_tokens": 322,
+      "cached_prompt_tokens": 1153,
+      "model": "gpt-5.6-luna",
+      "error": null,
+      "error_phase": null
+    },
+    {
+      "case_id": "A1",
+      "repeat": 3,
+      "response_status": "RETURNED",
+      "ai_savings_estimate": {
+        "status": "INVALID",
+        "currency": "USD",
+        "period": "MONTH",
+        "amount": null,
+        "basis": null,
+        "reason": "INVALID_ESTIMATE"
+      },
+      "prompt_tokens": 1157,
+      "completion_tokens": 301,
+      "cached_prompt_tokens": 1154,
+      "model": "gpt-5.6-luna",
+      "error": null,
+      "error_phase": null
+    }
+  ]
+}

@@ -1,0 +1,176 @@
+{
+  "at": "2026-09-16T07:35:31.823971+00:00",
+  "branch": "feat/AI-347-action-savings",
+  "base": "dev",
+  "base_commit": "a322387eb7464fb9408edf7506bf7e8a781314dc",
+  "change_scope": [
+    "Keep original ai/evaluation/cases.py implementation",
+    "Re-export EvalCase/finops_cases from summary/cases.py",
+    "Restore Golden test import",
+    "Chain #347 migration after merged #344",
+    "Refresh README, baseline, local PR draft and issue body"
+  ],
+  "cases_actual_move_deferred_until": "#353 merged and #324 resumed",
+  "full_pytest": {
+    "passed": 2238,
+    "skipped": 2,
+    "failures": 0,
+    "errors": 0,
+    "environment_skips": 0,
+    "elapsed_seconds": 90.25,
+    "skip_details": [
+      {
+        "test": "tests.test_e2e_scenario.test_t1_idle_ec2_downsize_and_auto_rollback_flow",
+        "reason": "본문 미작성 — 선행은 전부 해소됨(FinOps 배선 #306 · 자동 원복 #241 · 실패 주입은 stop_instances, ADR-0006 §4 2행 6차 개정) · SSOT 6주차 판정 기준 ⓐ"
+      },
+      {
+        "test": "tests.test_e2e_scenario.test_t2_ssh_bruteforce_block_and_one_click_release_flow",
+        "reason": "본문 미작성 — 선행은 전부 해소됨(위협 접수 #322 · SecOps 그래프 #323 · NACL 2종 #297·#298 · 해제 후보 #329, 설계서 §T2 관통 실측) · SSOT 6주차 판정 기준 ⓐ"
+      }
+    ],
+    "junit_xml_sha256": "9eeeab1194fadd36c49111389f7e9cee13d8701f3ca8486e7fc46781bfde3655",
+    "executed_at_base_commit": "ae428a618923581924697652eef7e086dd7af6c0"
+  },
+  "free_service": {
+    "service_paths": 6,
+    "sdk_mock_transmissions": 18,
+    "fresh_api_reads": 24,
+    "read_model_calls": 0,
+    "live_model_calls": 0,
+    "localstack_cleanup": true
+  },
+  "boundaries": {
+    "finops_prompt": "1e2e5c45cd1b1d250ebf371ba65699827bf3c42f88f6d77080515a07c22e1cc7",
+    "finops_request": "d4db912df457553800f07359421bd0ea2d311096eb74759c78a6342c6a578318",
+    "savings_prompt": "b52d6a31b0b7d0a632c8b61a58c6ad7de559ee2d8c6bbc0bb163f7db30e5bbc2",
+    "judge": "e582efcac19b88a544da17d90cccc320e152f74ac9164cf37b657d08422b76e9",
+    "fixed_set": {
+      "inventory_ids": [
+        "001",
+        "002",
+        "003"
+      ],
+      "case_ids": [
+        "A1",
+        "A7",
+        "A11",
+        "A12",
+        "A14",
+        "A16"
+      ],
+      "input_sha256": "8fffd381a2e89d0d1c0c1b5530e7e4934e244b10978585715ba87c31731d9454"
+    },
+    "summary_snapshot_sha256": "63f1e5a8605fa12a093648ab9529c88a5cb2388756674cbc68a7f0a5fa37d211"
+  },
+  "preservation": {
+    "history_files_unchanged": 203,
+    "frozen_324_files_unchanged": 409,
+    "frozen_324_head_unchanged": "4c9c90fcc25b4f7f0df9c3f30b972068c1f98b1a",
+    "frozen_324_status_unchanged": true,
+    "restored_paths_match_dev": [
+      "apps/core-api/ai/evaluation/cases.py",
+      "tests/test_golden_ai_dataset.py"
+    ],
+    "summary_exports_original_objects": true,
+    "input_fingerprint_paths_match": true,
+    "request_and_snapshot_boundaries_unchanged": true
+  },
+  "preserved_history_manifest_sha256": "7e645af64e3c290b9034136560e5fa43ea85dbabc4561021c89d78ab15dc91ca",
+  "frozen_324_manifest_sha256": "9372d936a4207b2a5e9d874a711d4e7796b46de9b8974b050db7590a8640c326",
+  "active_python_sha256": {
+    "apps/core-api/agent_dispatcher.py": "601c164236677aa8bec61c7c8bf5ec10b80744bddecc99b6892752dfcf4b8825",
+    "apps/core-api/ai/agent.py": "966b4d9460b13bc9030b92886fb24f4c41b203836520028c1f91b2c718837763",
+    "apps/core-api/ai/evaluation/__init__.py": "5be88b2f778de12f9e0f478da10ca556b2dba887bcdca8564de34003c8c6b030",
+    "apps/core-api/ai/evaluation/common/__init__.py": "1ee903b86c2be29765ef04760f0da714bad4d17fe190a018345266388fe67fa3",
+    "apps/core-api/ai/evaluation/common/fingerprints.py": "788dd619d2433433481bbd224f8669da6444198076b6ccde79b841b9d6f1a8f7",
+    "apps/core-api/ai/evaluation/common/paths.py": "dd4bbd8b70ed0866c517d398c0db216b05f210ae79be924bea3295f3f7848b5a",
+    "apps/core-api/ai/evaluation/common/reproducibility.py": "b3e227cc04b9190fcc3d84d3f23dd1a15f19dafbd3edd84d313e5c12251af8cd",
+    "apps/core-api/ai/evaluation/common/usage.py": "d397271fce21d13f9645da38924510593e248f79333d6c3ea760a7a13e388588",
+    "apps/core-api/ai/evaluation/judge.py": "202587aa475a32ec14eb2dea625e96652d7ce17aa1a880a41aa4c4301d5e98f8",
+    "apps/core-api/ai/evaluation/savings/__init__.py": "4075cebcafc745b40c408864f744c33217b545140f9643e92adf16578f6729d7",
+    "apps/core-api/ai/evaluation/savings/compact.py": "a9fb8c22de45dea3313c4e83478a23db6c249e8d6f7908871502e13aa40848c0",
+    "apps/core-api/ai/evaluation/savings/compact_validation.py": "ae213b053c74cacb51e93ad2be9e8f6250e8f5b61d97a94a5e5c8a6d801ca6ed",
+    "apps/core-api/ai/evaluation/savings/isolation.py": "486cc49d1e4ee6188eada7470738ec85345c362cf9bf08574e76761bbae8b727",
+    "apps/core-api/ai/evaluation/savings/legacy.py": "e4c934d4534ef47a040692f0f67da37b765993b247757a89726c2859519880b0",
+    "apps/core-api/ai/evaluation/savings/numeric.py": "ef1b9923257302ea7b79176f781034b8ca60b92ec77713149337b353c558620f",
+    "apps/core-api/ai/evaluation/savings/numeric_validation.py": "f82689a2b568cec8444ef22b1ed0cdc9346ccf0bc52052b5d432202ae473210e",
+    "apps/core-api/ai/evaluation/savings/price_table.py": "a1bdf33d4a159275ecc39b32285ed749123c67ab1fa5fde6c33bd8720597926c",
+    "apps/core-api/ai/evaluation/savings/rate_only.py": "b431aaf3ebeeaab48c889dc0728c90159c442d1abf9dd8ff264f42dbcf766788",
+    "apps/core-api/ai/evaluation/savings/replay.py": "60e937205d742a520f46f32af51ca13de9f093d3741e8d4d8fdc6c8920421f67",
+    "apps/core-api/ai/evaluation/savings/scoring.py": "e9cfe8fc49f2640bdc1c1537e2a81aed6881038713c67fdbe4818d970e362aee",
+    "apps/core-api/ai/evaluation/savings/service_validation.py": "1b6d00e48b40d8741ea46a5c07ef273b7fffdb708e9151e52fb4a0983395da16",
+    "apps/core-api/ai/evaluation/savings/three_call.py": "54e7fb4ebd3b8efacc7e969a9de4972522bde944050cccf14863b0904fe3f615",
+    "apps/core-api/ai/evaluation/savings/verify_service.py": "12746e268d5620743821289308d7aca7017c40edc854cee6107197d3f6f81634",
+    "apps/core-api/ai/evaluation/summary/__init__.py": "21e6469e608228eef5253b6466d200e9177e4daee6cf43a47595f26e53ea15e7",
+    "apps/core-api/ai/evaluation/summary/cases.py": "b59c1280d08c669889484456b1fafe5739d23702e754f811caf612508138719b",
+    "apps/core-api/ai/evaluation/summary/cli.py": "45d4031cd53ffd455defae1cc7ca5477071bfb931d1b0dc41a16a8ce92b084e0",
+    "apps/core-api/ai/evaluation/summary/factcheck.py": "0a4fc961382d4cc5cf2b9d4265c4e9fdab78a12bd14b4d12ab2ed5fdea1a0233",
+    "apps/core-api/ai/evaluation/summary/judge.py": "84d9a78980a15a9c3ce0823e918a388e341aabe6ca2634f8f0189af1f4579be1",
+    "apps/core-api/ai/evaluation/summary/judge_cli.py": "ce39dd8576d26d4a5627713c930002709aed4d775c5037b80b8e090c804c28c1",
+    "apps/core-api/ai/evaluation/summary/readback.py": "26eee167a0630575b5df72d73e4bfcd060d77bb9b7ddd3b4fc73366bf20eedd5",
+    "apps/core-api/ai/evaluation/summary/report.py": "e077da79bb8c09ce0905f49cad3388df3bb70d52edbc28e6c7ea997896760d4c",
+    "apps/core-api/ai/rate_estimator.py": "f44ebc9105adc6981b9b450eb94b4b6955932c48b311170a9d0d1b34f0e40a7b",
+    "apps/core-api/ai/savings.py": "3e6ca5d9c7463825987dd0b7d2fd745b6372399898988b84d928bf28e34fd000",
+    "apps/core-api/ai/tests/test_evaluation_cases.py": "0fae722eea7c7044af73b31fb41aa0b5aaec5b73ca2103584e2c8a8b084ce094",
+    "apps/core-api/ai/tests/test_evaluation_judgement.py": "325eb6d655750e9248a72ff47dfb5973df05bfd0b1038896f2a57b214f796793",
+    "apps/core-api/ai/tests/test_evaluation_metrics.py": "db639404bffafbdcb74564da7f56e61a459eca328db8725ccc023f09e8f56383",
+    "apps/core-api/ai/tests/test_finops_graph.py": "0d352486f0e45b5700ae5b74408d395ec9f66ebe080cd63ab2cf670069ee1bef",
+    "apps/core-api/ai/tests/test_rate_estimator.py": "a18f16cedbaca1b7ae3f7546831db8f8dfe98f3ad5db6e3058b504ebac2307bb",
+    "apps/core-api/ai/tests/test_savings_compact.py": "74716d2ba2e9d70e2ceabe7c84dd5823a7efa0e792f90947a31c13b49a33ca67",
+    "apps/core-api/ai/tests/test_savings_evaluation.py": "c9a091c2b331a4c5a25966fecea7c5650040db60cb86f66b5cd386b7283b3db5",
+    "apps/core-api/ai/tests/test_savings_followup.py": "ad6c6228f31e5c94d913ed1909ff08337505158e0f78e390297636133a7f03f3",
+    "apps/core-api/ai/tests/test_savings_numeric.py": "c70467b9cbfbcdb073f47fdfb107fec5fcf47fc64e0bc718fd742edea249f62e",
+    "apps/core-api/ai/tests/test_savings_price_table.py": "d20025fa6a85dd94eac4de1a1f2f080827bf3490bd58aa0f98480a2a3cae4e26",
+    "apps/core-api/ai/tests/test_savings_rate_only.py": "504326ebf913895ae927699d45c3aae91f801242967c695c9eda1f14dea200a2",
+    "apps/core-api/ai/tests/test_savings_request_boundary.py": "0c5e5e81306f66ef712ea9a277b60d63666c4852718305416c6b6837a5869b47",
+    "apps/core-api/ai/tests/test_savings_service_validation.py": "c74c9d09ff4c1e8a15233f1647b0221daae7702d2bd217a98c183492a51a0882",
+    "apps/core-api/ai/tests/test_savings_three_call.py": "6d04863f828defd6913a52106bccc1fa7b6140f0c36a4d89a4334dc4941252e3",
+    "apps/core-api/db/mappers.py": "8753efe88c4126fe79354fe50e059908643219e5a07568ff6329a917016045c3",
+    "apps/core-api/db/migrations/versions/20260915_c7a9e1d83f24_candidate_ai_savings.py": "fc104340fc00f30c35278294c51b37ccf87fdf70e4aea369a15d7019bf350e07",
+    "apps/core-api/db/models.py": "cf61b1c7d70e783b46e6cf188b69e5ceb3cebc1e826c0c8da432a83d0bbbb6cf",
+    "apps/core-api/db/tests/test_mappers.py": "daaa63a543d80dc181dee22ba7253cef45e1e0ddf9ab841251309e5dc35ad0e2",
+    "apps/core-api/routers/incidents.py": "30b93620c5d8ce9efd4412b6ab41df8fcf27d48a590e90c1587f7ef9c3b2846a",
+    "apps/core-api/tests/test_agent_dispatcher.py": "834f27694e631cf55a45157ad94da0a7eb80f1ead03ec230ab9118641ba601a6",
+    "apps/core-api/workflows.py": "3d92d376e42160b4e725fc5f26b215eb52d2dcd8b889ecc8134797220db996f0",
+    "packages/schemas/agents.py": "9c114a43f482dcb998459f321cac9811f307ecd2d1bed120fade82830b47e98f",
+    "packages/schemas/api/incidents.py": "9b74f4eb031f220a2e363e3f4bb949f9f6337bffd772b276043a8b409ad62639",
+    "packages/schemas/candidates.py": "5a98e08b577f45b3540aae538b21898de5a561efe7fe1f475824e2ceca15c600",
+    "packages/schemas/savings.py": "5dccfe974ef011ad2b04f52c082745285c35a35df0e76dfea7d33548b1226f6a",
+    "packages/schemas/tests/test_savings.py": "0fad59e343d79bbea2bedd52257952431a601e80ba68cff1c1cc32534976ca1a",
+    "scripts/finops_eval.py": "f7d36db0cfb196a93a46eaf07849352cb05a6a7cf9152a342a8ee3ba095701fc",
+    "scripts/finops_judge.py": "0d23287b674b19b735c5de0cab42c6324bbdebb23638c6cca6e3f85b90fbe553",
+    "scripts/savings_eval.py": "9c11481eb2f7cc2f468f88e589d2d6171025e03da5d3e563a189aac6c56e41c6"
+  },
+  "deferred_integration": [
+    {
+      "pr": 353,
+      "path": "apps/core-api/ai/evaluation/savings/service_validation.py",
+      "function": "mapped_graph",
+      "action": "Use schemas.arns.build_arn and run #353 static test in whichever PR merges second"
+    }
+  ],
+  "additional_paid_calls": 0,
+  "previous_approved_round_calls": 80,
+  "staged_files": 0,
+  "feature_commits_created": 0,
+  "pushed": false,
+  "pr_created": false,
+  "verification_harness_notes": [
+    "Frozen Git status compared using same directory grouping as the old snapshot.",
+    "Compose probe handles JSONL ps output and uses the application packages path and db.session.get_engine()."
+  ],
+  "post_validation_docs_update": {
+    "from": "ae428a618923581924697652eef7e086dd7af6c0",
+    "to": "a322387eb7464fb9408edf7506bf7e8a781314dc",
+    "pr": 354,
+    "changed_paths": [
+      "CLAUDE.md",
+      "docs/E2E_DEMO_SCENARIOS.md",
+      "docs/PROJECT_STATUS.md",
+      "scripts/load_golden_assets.py",
+      "tests/test_e2e_scenario.py"
+    ],
+    "python_ast_unchanged": true,
+    "active_347_python_sha256_unchanged": true
+  }
+}

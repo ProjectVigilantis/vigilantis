@@ -1,0 +1,30 @@
+{
+  "checked_at": "2026-09-15T11:45:01.077093+00:00",
+  "image_id": "sha256:f02f081800e92a88a4e4513c69107317bf0a15151e7e5281b0454d19ce916837",
+  "container_id": "1c106f68b9a749e374c1888837f8e76475436e56d031279bbe3c15fa701c70ba",
+  "build_exit_code": 0,
+  "running": true,
+  "workers": 1,
+  "background_settings": {
+    "DISPATCH_ENABLED": "false",
+    "SCAN_ENABLED": "false",
+    "MOCK_THREAT_INBOX_DIR": ""
+  },
+  "health": {
+    "status_code": 200,
+    "body": {
+      "status": "ok"
+    }
+  },
+  "recommendation_savings_in_openapi": true,
+  "startup_complete": true,
+  "scope": "Docker build and API liveness/OpenAPI; DB persistence verified separately",
+  "source_sha256": {
+    "apps/core-api/ai/agent.py": "2edfa225588e8a6deb031f49233c831c77810db084d4314ede5878f289af107c",
+    "apps/core-api/ai/savings.py": "ff918a00a0203dbf10f302e3707d1b150dd49f62a054499f7c2d786ce44933e6",
+    "apps/core-api/db/models.py": "633c65b921ddc2d7e23860efd338fa87b97982edeff7580531e47b72f4e8a1f3",
+    "packages/schemas/savings.py": "cdad492dcd50c567e518fd2c2f746f887417f7ac31c76652b03682c3ee780d26",
+    "apps/core-api/Dockerfile": "8a1b6fa8f35d4f3ae3a8cf5ea24a4b6e0a39590920eea70a6de377ee4423c811",
+    ".dockerignore": "529f192be988f0539c4e8bfd49abfe5d7cdf8e76a8b632f5d144bf5a8c15d88b"
+  }
+}
