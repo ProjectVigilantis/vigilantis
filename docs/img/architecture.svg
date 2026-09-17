@@ -55,11 +55,11 @@
     <path d="M386,406 L290,496"/>
     <path d="M552,406 L620,496"/>
     <path d="M709,406 L680,496"/>
-    <path d="M386,342 L473,342"/>
+    <path d="M465,342 L473,342"/>
     <path d="M295,342 L307,342"/>
     <path d="M627,342 L639,342"/>
   </g>
   <text x="470" y="200" text-anchor="middle" font-size="12" fill="#43566B">REST · WebSocket</text>
-  <text x="430" y="336" text-anchor="middle" font-size="11" fill="#43566B">판정 → Incident</text>
-  <text x="633" y="336" text-anchor="middle" font-size="11" fill="#43566B">가드레일 PASS</text>
+  <text x="469" y="424" text-anchor="middle" font-size="10" fill="#43566B">판정 → Incident</text>
+  <text x="635" y="424" text-anchor="middle" font-size="10" fill="#43566B">가드레일 PASS</text>
 </svg>
