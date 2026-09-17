@@ -17,7 +17,7 @@ const asset = (
     relationships: rels.map(([relation_type, target_arn]) => ({ relation_type, target_arn })),
   }) as AssetItem;
 
-/** mock 시드와 같은 모양 — EC2 2대, 6종 엣지, 미연결 EBS 1건. */
+/** 골든 시드와 같은 모양 — EC2 2대, 6종 엣지, 미연결 EBS 1건. */
 const inventory = (): AssetItem[] => [
   asset('ec2-a', 'EC2', [
     ['SECURED_BY', 'sg-open'],

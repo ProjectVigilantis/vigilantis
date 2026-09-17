@@ -7,15 +7,13 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useMemo, useRef, useState } from 'react';
 
-import {
-  ActionExecuteDialog,
-  type ActionRequest,
-} from '@/components/incidents/action-execute-dialog';
+import { ActionExecuteDialog } from '@/components/incidents/action-execute-dialog';
 import { EmptyState } from '@/components/empty-state';
 import { ErrorState } from '@/components/error-state';
 import { FilterSelect } from '@/components/filter-select';
 import { IncidentCard } from '@/components/incidents/incident-card';
 import { Badge } from '@/components/ui/badge';
+import { proposalRequest, type ActionRequest } from '@/lib/action-request';
 import { getAssets, getIncident, newIdempotencyKey } from '@/lib/api/client';
 import { INCIDENT_STATUS_LABELS, RISK_LEVEL_LABELS } from '@/lib/enum-labels';
 import {
@@ -29,7 +27,7 @@ import {
   type IncidentPreset,
 } from '@/lib/incident-filter';
 import { cn } from '@/lib/utils';
-import type { IncidentListItem, IncidentResponse } from '@/types/api';
+import type { IncidentListItem } from '@/types/api';
 
 /**
  * 프리셋은 **필터만 다르고 정렬은 같다**(§4.4). 링크로 두는 이유는 `승인 대기`·`히스토리`가
@@ -87,9 +85,7 @@ export function IncidentsView({
    * ACT-001 모달은 **목록 전체에 하나**다. 카드마다 두면 인스턴스가 목록 수만큼 생기고
    * 멱등 키도 그만큼 만들어진다 — §4.6은 모달 인스턴스당 키 1개를 전제한다.
    */
-  const [modal, setModal] = useState<{ incident: IncidentResponse; request: ActionRequest } | null>(
-    null,
-  );
+  const [request, setRequest] = useState<ActionRequest | null>(null);
   /** 상세를 조회 중인 카드. 누른 카드만 잠근다. */
   const [openingId, setOpeningId] = useState<string | null>(null);
   const [openError, setOpenError] = useState<unknown>(null);
@@ -123,20 +119,8 @@ export function IncidentsView({
         router.push(`/incidents/${encodeURIComponent(incidentId)}`);
         return;
       }
-      setModal({
-        incident,
-        request: {
-          // 모달을 여는 이 시점에 1회 생성해 인스턴스 수명 동안 고정한다(§4.6).
-          idempotencyKey: newIdempotencyKey(),
-          variant: 'ACTION',
-          candidates: incident.recommendations.map((r) => ({
-            runbookId: r.runbook_id,
-            targetArn: r.target_arn,
-            displayParameters: r.display_parameters,
-            targetAsset: assets?.items.find((a) => a.arn === r.target_arn) ?? null,
-          })),
-        },
-      });
+      // 멱등 키는 모달을 여는 이 시점에 1회 생성해 인스턴스 수명 동안 고정한다(§4.6).
+      setRequest(proposalRequest(incident, assets?.items ?? [], newIdempotencyKey()));
     } catch (error) {
       // 실패한 채로 열면 후보 없는 모달이 된다 — 열지 않고 §4.9 규칙대로 오류만 그린다.
       if (latestOpen.current === token) setOpenError(error);
@@ -291,18 +275,17 @@ export function IncidentsView({
       {/* 실행 결과는 INC-002 하단 ACT-002가 그린다 — 목록에는 만들지 않는다(§4.4·§4.7).
           판단 근거가 없는 자리에 실행 상태만 띄우면 근거 없이 후속 판단을 하게 된다.
           설계서 §2.2가 대시보드 경로에 정해 둔 "시작한 화면에서 INC-002로 이동"과 같다. */}
-      {modal !== null ? (
+      {request !== null ? (
         <ActionExecuteDialog
-          incident={modal.incident}
-          request={modal.request}
-          onClose={() => setModal(null)}
+          request={request}
+          onClose={() => setRequest(null)}
           onExecuted={(outcome) => {
-            const id = encodeURIComponent(modal.incident.incident_id);
+            const id = encodeURIComponent(request.incidentId);
             router.push(`/incidents/${id}?execution=${encodeURIComponent(outcome.execution.execution_id)}`);
           }}
           // 409 PROPOSAL_NOT_EXECUTABLE — 제안이 이미 실행됐거나 무효해졌다. 목록을 다시 읽는다.
           onProposalStale={() => {
-            setModal(null);
+            setRequest(null);
             router.refresh();
           }}
         />

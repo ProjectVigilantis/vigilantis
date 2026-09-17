@@ -15,8 +15,6 @@ import { CopyButton } from '@/components/copy-button';
 import { Row } from '@/components/detail-row';
 import {
   ActionExecuteDialog,
-  type ActionCandidate,
-  type ActionRequest,
   type ExecuteOutcome,
 } from '@/components/incidents/action-execute-dialog';
 import {
@@ -29,6 +27,7 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { useRealtime } from '@/components/realtime-provider';
+import type { ActionCandidate, ActionRequest } from '@/lib/action-request';
 import { agentWaitTimes, appendTransition, latchAgentWaitAt } from '@/lib/realtime-events';
 import { newIdempotencyKey } from '@/lib/api/client';
 import { isTerminalStatus } from '@/lib/execution-status';
@@ -474,7 +473,13 @@ export function IncidentDetail({
   const subjectHref = subject ? `/assets?asset=${encodeURIComponent(subject.arn)}` : null;
 
   function openAction(candidates: ActionCandidate[]) {
-    setRequest({ idempotencyKey: newIdempotencyKey(), candidates, variant: 'ACTION' });
+    setRequest({
+      idempotencyKey: newIdempotencyKey(),
+      incidentId: incident.incident_id,
+      subjectArn: incident.subject_arn,
+      candidates,
+      variant: 'ACTION',
+    });
   }
 
   function openRecovery(runbookId: RunbookId, originExecutionId: string) {
@@ -490,6 +495,8 @@ export function IncidentDetail({
         : null;
     setRequest({
       idempotencyKey: newIdempotencyKey(),
+      incidentId: incident.incident_id,
+      subjectArn: incident.subject_arn,
       candidates: [{ runbookId, targetArn: null, displayParameters: null, targetAsset: recoveryAsset }],
       variant: 'RECOVERY',
       originExecutionId,
@@ -642,7 +649,6 @@ export function IncidentDetail({
       ) : null}
 
       <ActionExecuteDialog
-        incident={incident}
         request={request}
         onClose={() => setRequest(null)}
         onExecuted={(next) => {

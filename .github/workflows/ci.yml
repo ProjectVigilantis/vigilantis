@@ -100,7 +100,9 @@ jobs:
         run: npm run lint
 
       # Next 16 빌드가 tsc 타입 체크까지 수행한다 — 타입 오류는 여기서 잡힌다.
-      # `NEXT_PUBLIC_API_BASE_URL` 미설정이 정상 경로다(자체 origin mock Route Handler 사용).
+      # `NEXT_PUBLIC_API_BASE_URL` 미설정이 정상 경로다 — 계약 조회는 전부 `cache: 'no-store'`라
+      # 라우트가 dynamic으로 잡히고, 빌드 중에 백엔드를 부르지 않는다. 미설정 시 기본값
+      # (`lib/api/client.ts`의 `DEFAULT_API_BASE_URL`)이 실 BE를 가리키는 것으로 충분하다.
       - name: Next build (tsc 타입 체크 포함)
         run: npm run build
 

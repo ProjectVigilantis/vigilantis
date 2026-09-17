@@ -14,6 +14,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import { executeBody, type ActionRequest } from '@/lib/action-request';
 import { ApiError, executeAction } from '@/lib/api/client';
 import {
   DESTRUCTIVE_RUNBOOK_IDS,
@@ -21,7 +22,7 @@ import {
   approvalAssetFacts,
   isDestructiveRunbook,
 } from '@/lib/enum-labels';
-import type { AssetItem, ExecuteActionResponse, IncidentResponse, RunbookId } from '@/types/api';
+import type { ExecuteActionResponse, RunbookId } from '@/types/api';
 
 /**
  * 파괴적 조치 경고는 **런북별로 다르다.** 2종에 한 문장을 공통으로 붙일 수 없다(PR #169 리뷰).
@@ -39,38 +40,6 @@ const DESTRUCTIVE_WARNINGS: Record<(typeof DESTRUCTIVE_RUNBOOK_IDS)[number], str
   RUNBOOK_SG_DELETE_ISOLATED:
     '보안 그룹을 삭제합니다. 삭제 직전 규칙 전체를 JSON으로 백업하고 「SG 재생성」으로 되돌릴 수 있습니다. 단 신규 sg-id가 발급되어, 원본 sg-id를 참조하던 다른 규칙은 자동 복원되지 않습니다.',
 };
-
-/** 실행 후보 1건. 주 조치는 `recommendations[]`의 값을 그대로 싣는다. */
-export interface ActionCandidate {
-  runbookId: RunbookId;
-  /**
-   * **실제로 바뀌는 자원**이다. `subject_arn`과 다를 수 있다 — 예를 들어 SG 인시던트의
-   * `RUNBOOK_NACL_ADD_DENY`는 NACL을 고친다(PR #169 리뷰). 복구 런북은 계약에 이 값이 없어 null이다.
-   */
-  targetArn: string | null;
-  /** 표시 전용. FE가 key 표시명을 지어내지 않고 원문을 쓴다. */
-  displayParameters: Record<string, string> | null;
-  /**
-   * `targetArn`을 `GET /assets`에 조인한 자산(#183 A안). 수집 목록에 없거나 조회가 실패하면 null이다.
-   * **조인은 호출부가 한다** — 두 진입 경로(INC-002 상세 · INC-001 목록)가 자산을 부르는 방식이
-   * 달라서(상세는 이미 부른 결과 재사용, 목록은 병렬 조회) 모달이 그 차이를 알 필요가 없다.
-   */
-  targetAsset: AssetItem | null;
-}
-
-/**
- * 모달 한 인스턴스가 다루는 요청. **`idempotencyKey`는 모달을 열 때 만들어 여기 고정한다**(§4.6) —
- * 버튼 클릭 시점에 만들면 중복 클릭이 서로 다른 키가 되어 멱등성이 무력화된다.
- * 취소 후 재진입은 호출부가 새 객체를 만들므로 자연히 새 키가 된다.
- */
-export interface ActionRequest {
-  idempotencyKey: string;
-  /** 실행 후보. 주 조치는 `recommendations`, 복구는 해제할 롤백 런북 1종. */
-  candidates: ActionCandidate[];
-  variant: 'ACTION' | 'RECOVERY';
-  /** B 변형 표시용 — 어느 실행을 해제하는지. 전송하지 않는다(계약에서 폐기된 필드다). */
-  originExecutionId?: string;
-}
 
 export interface ExecuteOutcome {
   execution: ExecuteActionResponse;
@@ -98,14 +67,15 @@ function messageFor(error: ApiError): { text: string; keepOpen: boolean } {
 }
 
 export function ActionExecuteDialog({
-  incident,
   request,
   onClose,
   onExecuted,
   onProposalStale,
 }: {
-  incident: IncidentResponse;
-  /** null이면 닫힌 상태다. 열 때마다 호출부가 새 객체(= 새 멱등 키)를 만든다. */
+  /**
+   * null이면 닫힌 상태다. 열 때마다 호출부가 새 객체(= 새 멱등 키)를 만든다.
+   * **전송할 인시던트도 이 객체에 있다** — 인시던트를 따로 받지 않는 이유는 `ActionRequest` 주석.
+   */
   request: ActionRequest | null;
   onClose: () => void;
   onExecuted: (outcome: ExecuteOutcome) => void;
@@ -150,12 +120,7 @@ export function ActionExecuteDialog({
     setPending(true);
     setError('');
     try {
-      const outcome = await executeAction({
-        // 전송은 3필드뿐이다 — 모달에 보이는 ARN·스펙·IP는 보내지 않는다(`extra=forbid` → 422).
-        incident_id: incident.incident_id,
-        runbook_id: runbookId,
-        idempotency_key: request.idempotencyKey,
-      });
+      const outcome = await executeAction(executeBody(request, runbookId));
       onExecuted(outcome);
       close();
     } catch (caught) {
@@ -194,7 +159,7 @@ export function ActionExecuteDialog({
                 복구 런북은 계약에 target이 없어 인시던트 대상으로 되돌린다. */}
             <dt className="text-muted-foreground">대상</dt>
             <dd className="text-right font-mono text-xs break-all">
-              {chosen?.targetArn ?? incident.subject_arn}
+              {chosen?.targetArn ?? request?.subjectArn}
             </dd>
           </div>
           {/* 조치 대상의 **자산 사실값**(#183). 서버 파생본인 display_parameters와 출처가 달라

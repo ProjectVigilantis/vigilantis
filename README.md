@@ -82,7 +82,10 @@ cp .env.example .env                 # 값 채우기 (OPENAI_API_KEY, AWS_* 등)
 docker compose up                    # api(:8000) + db(:${POSTGRES_PORT:-5432}) + localstack(:4566) [+ migrate 1회]
 docker compose --profile tools up    # ↑ + adminer(:${ADMINER_PORT:-8080}) — 선택 DB 웹 UI
 uv sync                              # (호스트 개발 시) 워크스페이스 의존성 동기화
+cd apps/web && npm ci && npm run dev # 대시보드(:3000)
 ```
+
+> **대시보드는 `api`(:8000)가 떠 있어야 화면이 선다.** FE에 mock 계층이 없어(PR #351) `apps/web`만 띄우면 모든 화면이 조회 오류다. BE 주소를 바꿨으면 `apps/web/.env.local`의 `NEXT_PUBLIC_API_BASE_URL`을 맞춘다(`apps/web/.env.example`).
 
 ---
 
