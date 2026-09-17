@@ -1,5 +1,5 @@
 # ==============================================================================
-# [파일 설명]  담당: 박지현 (QA & Scenario)
+# [파일 설명]  담당: 김승철 (QA & Scenario · 2026-09-16 박지현에게서 인수)
 # 자산 자동 원복(Auto-Rollback) 회귀 테스트입니다.
 #
 # 2/2 Status Check 판정 자체(#240)는 services/tests/test_status_check.py가 3분기
@@ -15,7 +15,8 @@
 #     — 발동과 확정: 원본당 1회, 원복 값의 출처, 자식↔원본↔Incident 상태 조합,
 #       가드레일 거절이 자동 재시도로 이어지지 않는가(ADR-0004 정책 ④).
 #
-# [남은 작업] 전 구간 흐름(수집 → 판정 → 추천 → 승인 → 실행 → 실패 → 자동 원복)은
-# test_e2e_scenario.py::test_t1_idle_ec2_downsize_and_auto_rollback_flow가 소유한다.
-# 그 skip의 선행 조건(Status Check 실패 주입·자동 원복)은 #241로 해소됐다.
+#   apps/core-api/tests/test_e2e_flow.py::test_t1_idle_ec2_downsize_and_auto_rollback_flow
+#     — 전 구간 흐름(수집 → 판정 → 추천 → 승인 → 실행 → 실패 → 자동 원복)이 한 줄로
+#       이어지는가, 그리고 원복이 실물을 되돌리는가. 종전 위치는 tests/test_e2e_scenario.py
+#       의 skip 자리였고, DB 픽스처 때문에 옮겼다(PR #358).
 # ==============================================================================
