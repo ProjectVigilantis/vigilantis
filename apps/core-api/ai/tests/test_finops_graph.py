@@ -29,22 +29,7 @@ from ai.agent import (
     finops_request_fingerprint,
     run_finops_graph,
 )
-from ai.evaluation.savings.legacy import (
-    _FINOPS_PROPOSAL_SYSTEM_PROMPT as LEGACY_PROPOSAL_PROMPT,
-)
-from ai.evaluation.savings.legacy import (
-    FinOpsCandidateProposalOutput as LegacyProposalOutput,
-)
-from ai.evaluation.savings.replay import (
-    V040_SAVINGS_ORDER,
-    proposal_model_in_order,
-    replay_recommendation,
-)
 from ai.model_client import FakeAIModelClient
-from ai.savings import (
-    ProposedHourlyRates,
-    savings_prompt_fingerprint,
-)
 from pydantic import ValidationError
 from schemas.agents import FinOpsGraphInput
 from schemas.incidents import AgentInvocationStatus
@@ -523,31 +508,13 @@ def test_prompt_material_covers_every_instruction_surface():
     # 출력 스키마 — 필드 이름이 모델에 나가므로 이름을 바꾸면 해시가 움직여야 한다
     for field in ("observation", "diagnosis", "rationale", "min_size"):
         assert f'"{field}"' in material
-    # 실행 목표는 서버 몫이다. #347의 추정 근거에는 입력받은 목표의 복사본이 있다.
+    # 실행 목표는 서버 몫이다. 단가 추정은 추천 요청과 분리한다.
     assert "target_instance_type" not in ProposedCandidate.model_fields
     assert "ai_savings_estimate" not in CandidateProposalOutput.model_json_schema()["properties"]
-    assert savings_prompt_fingerprint() not in material
 
 
 def test_summary_output_fields_are_the_three_roles():
     assert list(EvidenceSummaryOutput.model_fields) == ["observation", "diagnosis", "rationale"]
-
-
-def test_savings_fingerprint_detects_order_without_changing_summary(monkeypatch):
-    before = savings_prompt_fingerprint()
-    summary_before = finops_prompt_fingerprint()
-    request_before = finops_request_fingerprint()
-    schema = ProposedHourlyRates.model_json_schema()
-    estimate = schema
-    # required가 그대로여도 선택 필드의 생성 순서가 달라지면 다른 모델 입력이다.
-    assert "explanation" not in estimate["required"]
-    properties = estimate["properties"]
-    properties["explanation"] = properties.pop("explanation")
-    monkeypatch.setattr(ProposedHourlyRates, "model_json_schema", lambda: schema)
-
-    assert savings_prompt_fingerprint() != before
-    assert finops_prompt_fingerprint() == summary_before
-    assert finops_request_fingerprint() == request_before
 
 
 def test_summary_request_fingerprint_detects_schema_order(monkeypatch):
@@ -557,22 +524,6 @@ def test_summary_request_fingerprint_detects_schema_order(monkeypatch):
     properties["rule_number"] = properties.pop("rule_number")
     monkeypatch.setattr(CandidateProposalOutput, "model_json_schema", lambda: schema)
     assert finops_request_fingerprint() != before
-
-
-@pytest.mark.parametrize("original_order", [False, True])
-def test_recommendation_replay_uses_frozen_summary_and_one_call(original_order):
-    model = proposal_model_in_order(V040_SAVINGS_ORDER) if original_order else LegacyProposalOutput
-    response = model.model_validate(proposals(rightsizing_proposal()).model_dump())
-    client = FakeAIModelClient([response])
-    summary = [SUMMARY.observation, SUMMARY.diagnosis, SUMMARY.rationale]
-
-    output = replay_recommendation(make_input(), summary, client=client, response_model=model)
-
-    assert output.invocation_status is AgentInvocationStatus.SUCCEEDED
-    assert list(output.summary_lines) == summary
-    assert len(client.sent) == 1
-    assert client.sent[0]["system_prompt"] == LEGACY_PROPOSAL_PROMPT
-    assert client.sent[0]["user_payload"]["summary_lines"] == summary
 
 
 @pytest.mark.parametrize("prompt", [

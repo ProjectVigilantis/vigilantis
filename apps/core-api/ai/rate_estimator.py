@@ -1,18 +1,19 @@
 """PASS 후보의 단가만 모델이 추정한다. 서버가 비교 문맥·금액·설명을 구성한다 (#347).
 
 실험 B의 요청을 바이트 단위로 유지한 서비스 v1.0.0이다.
-이전 후보와 실험 자료는 ai.savings 및 ai.evaluation.savings에 보존한다.
+선정 근거와 재검증 범위는 SAVINGS_V1.md에 요약한다.
 """
 
 import hashlib
 import json
 import logging
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from schemas.agents import AgentAssetContext
 from schemas.candidates import RunbookCandidateData
+from schemas.rightsizing_policy import rightsizing_target_type
 from schemas.runbooks import RunbookId
 from schemas.savings import (
     AISavingsEstimate,
@@ -24,7 +25,6 @@ from schemas.savings import (
 )
 
 from ai.model_client import AIModelClient, AIModelError, AIModelRequest
-from ai.savings import HourlyRateText, invalid_estimate, savings_context
 
 SAVINGS_MODEL_CALLS = 1
 SAVINGS_PROMPT_VERSION = "v1.0.0"
@@ -39,6 +39,11 @@ SAVINGS_SYSTEM_PROMPT = (
 )
 
 
+HourlyRateText = Annotated[
+    str, Field(pattern=r"^(0|[1-9][0-9]{0,6})(\.[0-9]{1,6})?$"),
+]
+
+
 class ProposedHourlyRates(BaseModel):
     """서버가 준 EC2 변경 조건의 시간당 두 단가를 작성한다.
 
@@ -51,6 +56,26 @@ class ProposedHourlyRates(BaseModel):
     status: Literal["ESTIMATED", "UNAVAILABLE"]
     current_hourly_rate: HourlyRateText | None = None
     target_hourly_rate: HourlyRateText | None = None
+
+
+def savings_context(asset: AgentAssetContext) -> dict | None:
+    current = getattr(asset.spec, "instance_type", None)
+    target = rightsizing_target_type(current)
+    if target is None:
+        return None
+    return {
+        "target_arn": asset.arn,
+        "region": asset.region,
+        "current_instance_type": current,
+        "target_instance_type": target,
+        "currency": "USD",
+        "period": "MONTH",
+        "assumptions": SavingsAssumptions().model_dump(mode="json"),
+    }
+
+
+def invalid_estimate(reason: SavingsReason) -> AISavingsEstimate:
+    return AISavingsEstimate(status=SavingsStatus.INVALID, reason=reason)
 
 
 def savings_request(asset: AgentAssetContext) -> AIModelRequest:

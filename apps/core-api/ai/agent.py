@@ -50,7 +50,6 @@ from schemas.runbooks import RunbookId
 
 from ai.capabilities import secops_action_targets
 from ai.model_client import AIModelClient, AIModelError, AIModelRequest
-from ai.savings import ProposedSavingsEstimate
 
 # ------------------------------------------------------------------------------
 # 프롬프트 — v1 (Issue #243)
@@ -191,21 +190,6 @@ class CandidateProposalOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     candidates: list[ProposedCandidate]
-
-
-# 이전 통합 호출 실험의 출력 타입. 서비스 추천은 CandidateProposalOutput을 사용한다.
-class FinOpsProposedCandidate(ProposedCandidate):
-    """FinOps 추천과 별도 절감 예상. 실행 파라미터는 ProposedCandidate 계약을 따른다."""
-
-    ai_savings_estimate: ProposedSavingsEstimate | None = None
-
-
-class FinOpsCandidateProposalOutput(BaseModel):
-    """FinOps 추천 출력. 절감 예상 필드는 SecOps 출력 계약에 포함하지 않는다."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    candidates: list[FinOpsProposedCandidate]
 
 
 # ------------------------------------------------------------------------------

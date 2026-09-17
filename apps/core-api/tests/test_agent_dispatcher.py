@@ -488,7 +488,7 @@ def test_savings_call_failure_keeps_passed_candidate_in_db(
 
 
 def test_savings_runs_after_all_guardrails_and_ignores_graph_estimate(db, monkeypatch):
-    from ai.savings import invalid_estimate
+    from ai.rate_estimator import invalid_estimate
     from schemas.savings import SavingsReason
 
     incident_id = _pending_incident(db)

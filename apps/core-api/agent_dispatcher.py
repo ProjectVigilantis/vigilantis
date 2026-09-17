@@ -118,8 +118,7 @@ from ai.capabilities import (
 )
 from asset_mapping import to_asset_item
 from ai.model_client import AIModelClient
-from ai.rate_estimator import SAVINGS_MODEL_CALLS, estimate_candidate_savings
-from ai.savings import savings_context
+from ai.rate_estimator import SAVINGS_MODEL_CALLS, estimate_candidate_savings, savings_context
 from ai.openai_client import build_openai_model_client
 from config import Settings, get_settings
 from db import mappers
