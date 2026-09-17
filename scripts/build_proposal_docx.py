@@ -349,9 +349,31 @@ def drop_until(start_para, stop_texts):
         el = nxt
 
 
+DOC_TITLE = 'Vigilantis 프로젝트 기획서'
+
+
+def fix_headers(doc):
+    """모든 섹션의 머리글을 문서 제목으로 통일한다.
+
+    ⚠️ 양식에는 머리글이 둘이고 **본문 섹션 쪽이 「Vigilantis화면설계서」**다
+    (다른 문서에서 딸려 온 것 · 2026-09-17 실측). 표지만 맞고 본문 전 페이지에
+    남의 문서 이름이 찍히므로 여기서 덮어쓴다.
+    """
+    for s in doc.sections:
+        for hdr in (s.header, s.first_page_header, s.even_page_header):
+            for p in hdr.paragraphs:
+                if not p.text.strip():
+                    continue
+                for r in list(p.runs)[1:]:
+                    r._r.getparent().remove(r._r)
+                if p.runs:
+                    p.runs[0].text = DOC_TITLE
+
+
 def build():
     sec = load_sections()
     doc = Document(TPL)
+    fix_headers(doc)
 
     # ── 표지 날짜
     for p in doc.paragraphs[:6]:
