@@ -502,9 +502,17 @@ def lock_widths(table, grid_dxa):
     table.autofit = False
     for row in table.rows:
         seen = 0
-        for cell in row.cells:
-            span = cell._tc.grid_span
-            cell.width = Pt(sum(grid_dxa[seen:seen + span]) / 20.0)
+        # ⚠️ `row.cells`를 쓰면 안 된다 — 병합 셀을 gridSpan 수만큼 **반복**해 돌려주므로
+        # `seen`이 그리드를 넘어가고 폭이 0dxa로 박힌다. 원소 목록을 직접 돈다.
+        for tc in row._tr.findall(qn('w:tc')):
+            pr = tc.get_or_add_tcPr()
+            gs = pr.find(qn('w:gridSpan'))
+            span = int(gs.get(qn('w:val'))) if gs is not None else 1
+            width = sum(grid_dxa[seen:seen + span])
+            assert width, f'열 폭 0 — seen={seen} span={span}'
+            el = pr.get_or_add_tcW()   # 스키마 순서를 python-docx가 지켜 넣는다
+            el.set(qn('w:w'), str(width))
+            el.set(qn('w:type'), 'dxa')
             seen += span
 
 
