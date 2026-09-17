@@ -43,6 +43,7 @@ from .runbook_parameters import (
     bind_candidate_parameters,
 )
 from .runbooks import AI_RECOMMENDABLE_RUNBOOK_IDS, RunbookId
+from .savings import AISavingsEstimate, validate_candidate_savings
 
 # 자산 문맥은 공개 AssetItem을 그대로 재사용한다 — 대상 ARN·유형·상태·Spec·관계를
 # 이미 담고 있고, spec↔asset_type 정합 검증도 그쪽 계약이 강제한다. (#49 확정)
@@ -194,6 +195,7 @@ class RunbookCandidateDraft(BaseModel):
     runbook_id: RunbookId
     target_arn: str = Field(min_length=1)
     parameters: CandidateParameters
+    ai_savings_estimate: AISavingsEstimate | None = None
     # evidence_id(단수)를 여기 첫 항목에서 뽑으므로 비어 있을 수 없다(#154)
     evidence_ids: list[Annotated[str, Field(min_length=1)]] = Field(min_length=1)
 
@@ -211,6 +213,10 @@ class RunbookCandidateDraft(BaseModel):
             raise ValueError(
                 f"{self.runbook_id.value}의 parameters는 {expected.__name__}이어야 합니다"
             )
+        validate_candidate_savings(
+            self.ai_savings_estimate, self.runbook_id, self.target_arn,
+            getattr(self.parameters, "target_instance_type", None),
+        )
         return self
 
 

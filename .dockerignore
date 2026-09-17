@@ -12,6 +12,7 @@
 
 # --- VCS · 로컬 전용 문서 ---
 .git/
+.worktrees/
 .github/
 .gitignore
 vigilantis-docs/

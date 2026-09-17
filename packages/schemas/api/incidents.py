@@ -40,6 +40,7 @@ from typing import Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..runbooks import AI_RECOMMENDABLE_RUNBOOK_IDS, ROLLBACK_RUNBOOK_IDS, RunbookId
+from ..savings import AISavingsEstimate, validate_candidate_savings
 from .actions import ExecutionStatus
 from .assets import UtcDateTime
 
@@ -114,12 +115,26 @@ class RecommendationItem(BaseModel):
     runbook_id: RunbookId
     target_arn: str = Field(min_length=1)
     display_parameters: dict[str, str] = Field(default_factory=dict)
+    ai_savings_estimate: AISavingsEstimate | None = Field(
+        default=None,
+        description=(
+            "RIGHTSIZING 조치의 AI 참고 추정. USD/월 730시간의 Linux 공유 온디맨드 "
+            "컴퓨팅 비용만 비교하며 실제 청구액이 아니다. ESTIMATED만 금액·근거가 있고 "
+            "UNAVAILABLE/INVALID는 amount=null이다. 기존 후보·비대상 조치는 필드가 null이다. "
+            "단가는 AI 추정, 금액은 서버 계산이며 설명의 작성 주체는 "
+            "basis.explanation_source(MODEL_GENERATED/SERVER_TEMPLATE)로 구분한다."
+        ),
+    )
 
     @model_validator(mode="after")
     def _ai_recommendable_only(self):
         # ADR-0004 정책 ②: AI 추천은 본편 7종만 — 롤백 3종은 recommendations에 못 온다
         if self.runbook_id.value not in AI_RECOMMENDABLE_RUNBOOK_IDS:
             raise ValueError("recommendations에는 AI 추천 가능 Runbook(본편 7종)만 올 수 있습니다")
+        validate_candidate_savings(
+            self.ai_savings_estimate, self.runbook_id, self.target_arn,
+            self.display_parameters.get("target_instance_type"),
+        )
         return self
 
 

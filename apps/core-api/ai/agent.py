@@ -30,9 +30,6 @@ from typing import Any, Optional, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, ValidationError
-
-from ai.capabilities import secops_action_targets
-from ai.model_client import AIModelClient, AIModelError, AIModelRequest
 from schemas.agents import (
     AgentAssetContext,
     AgentGraphOutput,
@@ -45,8 +42,15 @@ from schemas.api.incidents import RiskLevel
 from schemas.evidence import EvidenceType
 from schemas.incidents import AgentInvocationStatus
 from schemas.rightsizing_policy import rightsizing_target_type
-from schemas.runbook_parameters import CANDIDATE_PARAMETER_MODELS, ai_decided_parameter_names
+from schemas.runbook_parameters import (
+    CANDIDATE_PARAMETER_MODELS,
+    ai_decided_parameter_names,
+)
 from schemas.runbooks import RunbookId
+
+from ai.capabilities import secops_action_targets
+from ai.model_client import AIModelClient, AIModelError, AIModelRequest
+from ai.savings import ProposedSavingsEstimate
 
 # ------------------------------------------------------------------------------
 # 프롬프트 — v1 (Issue #243)
@@ -189,13 +193,29 @@ class CandidateProposalOutput(BaseModel):
     candidates: list[ProposedCandidate]
 
 
+# 이전 통합 호출 실험의 출력 타입. 서비스 추천은 CandidateProposalOutput을 사용한다.
+class FinOpsProposedCandidate(ProposedCandidate):
+    """FinOps 추천과 별도 절감 예상. 실행 파라미터는 ProposedCandidate 계약을 따른다."""
+
+    ai_savings_estimate: ProposedSavingsEstimate | None = None
+
+
+class FinOpsCandidateProposalOutput(BaseModel):
+    """FinOps 추천 출력. 절감 예상 필드는 SecOps 출력 계약에 포함하지 않는다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidates: list[FinOpsProposedCandidate]
+
+
 # ------------------------------------------------------------------------------
 # 판 — 모델에게 나가는 지시 전부를 해시 하나로 접는다 (Issue #243)
 # ------------------------------------------------------------------------------
-# 시스템 프롬프트 2개와 제약 문구만이 아니라 구조화 출력 모델의 JSON Schema도 넣는다 —
+# 시스템 프롬프트와 제약 문구만이 아니라 구조화 출력 모델의 JSON Schema도 넣는다 —
 # openai_client.py가 response_format으로 스키마를 모델에 보내므로 필드 이름을 바꾸는
 # 것도 지시를 바꾸는 것이다. 문자열만 해시하면 이름을 바꿔도 해시가 서 있다.
 # RunbookId enum이 바뀌어도 움직이는데, 그것은 모델의 메뉴가 바뀐 것이라 재통과가 맞다.
+# 승인 v2 지문은 기존 키 정렬 형식을 유지한다. 실제 생성 순서는 별도 요청 지문으로 보존한다.
 
 
 def finops_prompt_material(*, preserve_schema_order: bool = False) -> str:
@@ -361,6 +381,9 @@ def _to_draft(proposal: ProposedCandidate, graph_input: FinOpsGraphInput) -> Run
         raise ValueError(f"입력 capabilities에 없는 Runbook입니다: {proposal.runbook_id.value}")
     if proposal.target_arn not in _allowed_target_arns(graph_input):
         raise ValueError("target_arn이 인시던트 자산·관계 자산 밖입니다")
+    is_rightsizing = proposal.runbook_id is RunbookId.RUNBOOK_EC2_RIGHTSIZING
+    if is_rightsizing and proposal.target_arn != graph_input.asset_context.arn:
+        raise ValueError("다운사이징 대상의 사양 스냅샷이 없습니다")
     return RunbookCandidateDraft.model_validate(
         {
             "runbook_id": proposal.runbook_id.value,
@@ -506,7 +529,7 @@ def _after_summarize(state: _FinOpsState) -> str:
 
 
 # ------------------------------------------------------------------------------
-# 그래프 — ADR-0005 §Decision의 FinOps 노드 순서 그대로
+# 그래프 — 요약·추천·출력 계약까지만 담당한다. 단가 추정은 Workflow 후속 처리다(#347).
 # ------------------------------------------------------------------------------
 
 

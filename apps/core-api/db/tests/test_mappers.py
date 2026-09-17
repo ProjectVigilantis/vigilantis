@@ -87,6 +87,29 @@ def test_candidate_round_trip():
         status=CandidateStatus.PENDING_VALIDATION,
     )
     row = mappers.new_candidate(contract)
+    assert row.ai_savings_estimate is None
+    assert mappers.to_candidate_data(row) == contract
+
+
+def test_candidate_savings_round_trip_preserves_decimal_strings():
+    contract = RunbookCandidateData(
+        candidate_id="cand-1", incident_id="in-1",
+        runbook_id="RUNBOOK_EC2_RIGHTSIZING", target_arn="arn:x",
+        parameters={"target_instance_type": "t3.medium"}, evidence_ids=["ev-1"],
+        status=CandidateStatus.PENDING_VALIDATION,
+        ai_savings_estimate={
+            "status": "ESTIMATED", "amount": "56.94",
+            "basis": {
+                "target_arn": "arn:x", "region": "ap-northeast-2",
+                "current_instance_type": "t3.xlarge", "target_instance_type": "t3.medium",
+                "current_hourly_rate": "0.104000", "target_hourly_rate": "0.026000",
+                "explanation": "단가 차이 × 730시간의 참고 추정",
+            },
+        },
+    )
+    row = mappers.new_candidate(contract)
+    assert row.ai_savings_estimate["amount"] == "56.94"
+    assert row.ai_savings_estimate["basis"]["current_hourly_rate"] == "0.104000"
     assert mappers.to_candidate_data(row) == contract
 
 

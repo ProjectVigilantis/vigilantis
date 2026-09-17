@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -91,6 +92,7 @@ from schemas.runbooks import (
     RunbookId,
     TriggerSource,
 )
+from schemas.savings import AISavingsEstimate
 
 from ai import guardrails
 from config import get_settings
@@ -2463,6 +2465,7 @@ def _draft_candidates(
             runbook_id=draft.runbook_id,
             target_arn=draft.target_arn,
             parameters=draft.parameters,
+            # 그래프·과거 실험의 추정은 신뢰하지 않는다. PASS 후 후속 결과만 붙인다.
             evidence_ids=list(draft.evidence_ids),
             status=CandidateStatus.PENDING_VALIDATION,
         )
@@ -2575,7 +2578,8 @@ def _log_dropped_summary(incident_id: str, output: AgentGraphOutput) -> None:
 
 
 def record_agent_analysis(
-    db: Session, incident_id: str, output: AgentGraphOutput
+    db: Session, incident_id: str, output: AgentGraphOutput, *,
+    savings_estimator: Callable[[RunbookCandidateData], AISavingsEstimate] | None = None,
 ) -> AgentAnalysisOutcome:
     """그래프 출력 1건 → 가드레일 1회 + 후보 저장 + ANALYZING 이탈. 순서는 파일 절 참조.
 
@@ -2592,6 +2596,11 @@ def record_agent_analysis(
     candidates = _draft_candidates(incident_id, output)
     managed = _managed_arns(db, candidates) if candidates else set()
     backups = _prefetch_candidate_backups(db, candidates)
+    incident_context = incidents_repo.get_incident(db, incident_id)
+    estimate_finops = (
+        savings_estimator is not None and incident_context is not None
+        and incident_context.category is IncidentCategory.FINOPS
+    )
     # 가드레일 ④가 AWS를 부르는 동안 트랜잭션을 열어 두지 않는다
     db.rollback()
 
@@ -2599,6 +2608,16 @@ def record_agent_analysis(
         (candidate, _guard_candidate(candidate, managed, backups))
         for candidate in candidates
     ]
+
+    # 모든 후보의 가드레일 뒤, 잠금·저장 전이다. 모델 대기 중 DB transaction을 열지 않는다.
+    if estimate_finops:
+        guarded = [
+            (candidate.model_copy(update={"ai_savings_estimate": savings_estimator(candidate)}), outcome)
+            if (outcome.result.result is GuardrailDecision.PASS
+                and candidate.runbook_id is RunbookId.RUNBOOK_EC2_RIGHTSIZING)
+            else (candidate, outcome)
+            for candidate, outcome in guarded
+        ]
 
     incident = incidents_repo.lock_incident(db, incident_id)
     if incident is None:
