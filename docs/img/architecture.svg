@@ -1,65 +1,90 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 580" width="920" height="580" font-family="Malgun Gothic, Apple SD Gothic Neo, sans-serif">
-  <rect width="920" height="580" fill="#FFFFFF"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 640" width="920" height="640" font-family="Malgun Gothic, Apple SD Gothic Neo, sans-serif">
+  <rect width="920" height="640" fill="#FFFFFF"/>
 
   <!-- 관제자 -->
   <rect x="360" y="20" width="200" height="48" rx="6" fill="#1B3A5C"/>
   <text x="460" y="50" text-anchor="middle" font-size="16" font-weight="bold" fill="#FFFFFF">관제자 (브라우저)</text>
 
   <!-- apps/web -->
-  <rect x="280" y="108" width="360" height="72" rx="6" fill="#EEF3F8" stroke="#4A6FA5" stroke-width="2"/>
-  <text x="460" y="132" text-anchor="middle" font-size="13" font-weight="bold" fill="#4A6FA5">apps/web — Next.js 16</text>
-  <text x="460" y="158" text-anchor="middle" font-size="14" fill="#1A2733">대시보드 · 인시던트 · 토폴로지</text>
+  <rect x="280" y="100" width="360" height="68" rx="6" fill="#EEF3F8" stroke="#4A6FA5" stroke-width="2"/>
+  <text x="460" y="124" text-anchor="middle" font-size="13" font-weight="bold" fill="#4A6FA5">apps/web — Next.js 16</text>
+  <text x="460" y="148" text-anchor="middle" font-size="14" fill="#1A2733">대시보드 · 인시던트 · 토폴로지</text>
 
   <!-- core-api -->
-  <rect x="120" y="230" width="680" height="200" rx="8" fill="#F7FAFD" stroke="#1B3A5C" stroke-width="2.5"/>
-  <text x="460" y="258" text-anchor="middle" font-size="14" font-weight="bold" fill="#1B3A5C">apps/core-api — 단일 FastAPI 백엔드</text>
+  <rect x="95" y="222" width="730" height="270" rx="8" fill="#F7FAFD" stroke="#1B3A5C" stroke-width="2.5"/>
+  <text x="460" y="244" text-anchor="middle" font-size="14" font-weight="bold" fill="#1B3A5C">apps/core-api — 단일 FastAPI 백엔드</text>
 
-  <rect x="145" y="278" width="150" height="128" rx="5" fill="#FFFFFF" stroke="#8FA8C4" stroke-width="1.5"/>
-  <text x="220" y="304" text-anchor="middle" font-size="14" font-weight="bold" fill="#1B3A5C">routers</text>
-  <text x="220" y="330" text-anchor="middle" font-size="12" fill="#43566B">REST · WebSocket</text>
+  <rect x="115" y="300" width="155" height="128" rx="5" fill="#FFFFFF" stroke="#8FA8C4" stroke-width="1.5"/>
+  <text x="192" y="326" text-anchor="middle" font-size="14" font-weight="bold" fill="#1B3A5C">services</text>
+  <text x="192" y="350" text-anchor="middle" font-size="12" fill="#43566B">collector</text>
+  <text x="192" y="370" text-anchor="middle" font-size="12" fill="#43566B">rule_engine</text>
+  <text x="192" y="390" text-anchor="middle" font-size="12" fill="#43566B">scheduler</text>
 
-  <rect x="311" y="278" width="150" height="128" rx="5" fill="#FFFFFF" stroke="#8FA8C4" stroke-width="1.5"/>
-  <text x="386" y="304" text-anchor="middle" font-size="14" font-weight="bold" fill="#1B3A5C">services</text>
-  <text x="386" y="328" text-anchor="middle" font-size="12" fill="#43566B">collector</text>
-  <text x="386" y="348" text-anchor="middle" font-size="12" fill="#43566B">rule_engine</text>
-  <text x="386" y="368" text-anchor="middle" font-size="12" fill="#43566B">scheduler</text>
+  <rect x="290" y="300" width="155" height="128" rx="5" fill="#FFFFFF" stroke="#C48A2E" stroke-width="2"/>
+  <text x="367" y="326" text-anchor="middle" font-size="14" font-weight="bold" fill="#8A5E12">ai</text>
+  <text x="367" y="350" text-anchor="middle" font-size="12" fill="#43566B">LangGraph 2그래프</text>
+  <text x="367" y="372" text-anchor="middle" font-size="12" font-weight="bold" fill="#8A5E12">가드레일 4단계</text>
+  <text x="367" y="394" text-anchor="middle" font-size="11" fill="#8A5E12">AWS를 직접 부르지 않는다</text>
 
-  <rect x="477" y="278" width="150" height="128" rx="5" fill="#FFFFFF" stroke="#C48A2E" stroke-width="2"/>
-  <text x="552" y="304" text-anchor="middle" font-size="14" font-weight="bold" fill="#8A5E12">ai</text>
-  <text x="552" y="328" text-anchor="middle" font-size="12" fill="#43566B">LangGraph 2그래프</text>
-  <text x="552" y="350" text-anchor="middle" font-size="12" font-weight="bold" fill="#8A5E12">가드레일 4단계</text>
+  <rect x="465" y="300" width="155" height="128" rx="5" fill="#FFFFFF" stroke="#8FA8C4" stroke-width="1.5"/>
+  <text x="542" y="326" text-anchor="middle" font-size="14" font-weight="bold" fill="#1B3A5C">routers</text>
+  <text x="542" y="350" text-anchor="middle" font-size="12" fill="#43566B">REST · WebSocket</text>
+  <text x="542" y="372" text-anchor="middle" font-size="12" fill="#43566B">승인 대기 · 승인 접수</text>
 
-  <rect x="643" y="278" width="132" height="128" rx="5" fill="#FFFFFF" stroke="#8FA8C4" stroke-width="1.5"/>
-  <text x="709" y="304" text-anchor="middle" font-size="13" font-weight="bold" fill="#1B3A5C">services/aws</text>
-  <text x="709" y="328" text-anchor="middle" font-size="12" fill="#43566B">executor</text>
-  <text x="709" y="348" text-anchor="middle" font-size="12" fill="#43566B">backup</text>
-  <text x="709" y="368" text-anchor="middle" font-size="12" fill="#43566B">rollback</text>
+  <rect x="640" y="300" width="170" height="128" rx="5" fill="#FFFFFF" stroke="#8FA8C4" stroke-width="1.5"/>
+  <text x="725" y="326" text-anchor="middle" font-size="13" font-weight="bold" fill="#1B3A5C">services/aws</text>
+  <text x="725" y="350" text-anchor="middle" font-size="12" fill="#43566B">executor</text>
+  <text x="725" y="370" text-anchor="middle" font-size="12" fill="#43566B">backup</text>
+  <text x="725" y="390" text-anchor="middle" font-size="12" fill="#43566B">rollback</text>
 
   <!-- DB / AWS -->
-  <rect x="180" y="500" width="220" height="60" rx="6" fill="#EEF3F8" stroke="#4A6FA5" stroke-width="2"/>
-  <text x="290" y="536" text-anchor="middle" font-size="15" font-weight="bold" fill="#1B3A5C">PostgreSQL</text>
+  <rect x="150" y="556" width="220" height="56" rx="6" fill="#EEF3F8" stroke="#4A6FA5" stroke-width="2"/>
+  <text x="260" y="590" text-anchor="middle" font-size="15" font-weight="bold" fill="#1B3A5C">PostgreSQL</text>
 
-  <rect x="520" y="500" width="240" height="60" rx="6" fill="#EEF3F8" stroke="#4A6FA5" stroke-width="2"/>
-  <text x="640" y="528" text-anchor="middle" font-size="15" font-weight="bold" fill="#1B3A5C">AWS</text>
-  <text x="640" y="548" text-anchor="middle" font-size="12" fill="#43566B">LocalStack / 실 AWS</text>
+  <rect x="470" y="556" width="290" height="56" rx="6" fill="#EEF3F8" stroke="#4A6FA5" stroke-width="2"/>
+  <text x="615" y="582" text-anchor="middle" font-size="15" font-weight="bold" fill="#1B3A5C">AWS</text>
+  <text x="615" y="602" text-anchor="middle" font-size="12" fill="#43566B">LocalStack / 실 AWS</text>
 
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" fill="#4A6FA5"/>
     </marker>
+    <marker id="g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8A5E12"/>
+    </marker>
   </defs>
+
+  <!-- 주 흐름 -->
   <g stroke="#4A6FA5" stroke-width="2" fill="none" marker-end="url(#a)">
-    <path d="M460,68 L460,104"/>
-    <path d="M460,180 L460,226" />
-    <path d="M220,406 L220,496"/>
-    <path d="M386,406 L290,496"/>
-    <path d="M552,406 L620,496"/>
-    <path d="M709,406 L680,496"/>
-    <path d="M465,342 L473,342"/>
-    <path d="M295,342 L307,342"/>
-    <path d="M627,342 L639,342"/>
+    <path d="M460,68 L460,96"/>
+    <path d="M460,168 L460,198 L542,198 L542,296"/>
+    <path d="M500,300 L500,274 L192,274 L192,296"/>
+    <path d="M274,364 L286,364"/>
+    <path d="M624,364 L636,364"/>
+    <path d="M150,428 L150,524 L560,524 L560,552"/>
+    <path d="M725,428 L725,552"/>
   </g>
-  <text x="470" y="200" text-anchor="middle" font-size="12" fill="#43566B">REST · WebSocket</text>
-  <text x="469" y="424" text-anchor="middle" font-size="10" fill="#43566B">판정 → Incident</text>
-  <text x="635" y="424" text-anchor="middle" font-size="10" fill="#43566B">가드레일 PASS</text>
+
+  <!-- 가드레일 통과는 실행이 아니라 승인 대기로 간다 -->
+  <g stroke="#C48A2E" stroke-width="2.5" fill="none" marker-end="url(#g)">
+    <path d="M449,364 L461,364"/>
+  </g>
+
+  <!-- 상태 원천 — 네 모듈이 모두 PostgreSQL을 읽고 쓴다 -->
+  <g stroke="#8FA8C4" stroke-width="1.6" fill="none" stroke-dasharray="5 4">
+    <path d="M192,428 L192,470"/>
+    <path d="M367,428 L367,470"/>
+    <path d="M542,428 L542,470"/>
+    <path d="M700,428 L700,470"/>
+    <path d="M192,470 L700,470"/>
+    <path d="M260,470 L260,552"/>
+  </g>
+
+  <text x="460" y="192" text-anchor="middle" font-size="12" fill="#43566B">REST · WebSocket</text>
+  <text x="346" y="268" text-anchor="middle" font-size="10" fill="#43566B">조회</text>
+  <text x="280" y="448" text-anchor="middle" font-size="10" fill="#43566B">판정 → Incident</text>
+  <text x="455" y="448" text-anchor="middle" font-size="10" font-weight="bold" fill="#8A5E12">가드레일 PASS → 승인 대기</text>
+  <text x="632" y="448" text-anchor="middle" font-size="10" font-weight="bold" fill="#1B3A5C">관제자 승인 → 원클릭 실행</text>
+  <text x="300" y="502" text-anchor="middle" font-size="10" fill="#43566B">읽기 · 쓰기</text>
+  <text x="430" y="516" text-anchor="middle" font-size="10" fill="#43566B">주기 수집</text>
 </svg>
