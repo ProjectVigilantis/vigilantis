@@ -58,7 +58,7 @@ from schemas.runbooks import RunbookId
 # "모델이 무엇을 보고 판단했는가"의 유일한 노출 경로이기 때문이다. NO_PROPOSAL도 요약
 # 3줄이 필수인데(schemas/agents.py), "왜 조치가 없는가"를 쓸 자리가 rationale이다.
 #
-# 지시문은 결함 체크리스트(ai/evaluation/summary_defects.md)와 1:1이다 — 항목 1 근거 없음
+# 지시문은 결함 체크리스트(ai/evaluation/summary/summary_defects.md)와 1:1이다 — 항목 1 근거 없음
 # → observation 줄 · 2 단정/추정 → diagnosis 줄 · 3 진단↔조치 → rationale 줄 · 4 같은 말
 # → "각각 새 정보" 줄 · 5 구조화 값 되읽기 → 마지막 줄. 금지형이 아니라 지시형으로 쓴다
 # — 금지가 쌓일수록 빈 후보가 가장 안전한 답이 되어 NO_PROPOSAL 도피가 는다.
@@ -77,9 +77,9 @@ from schemas.runbooks import RunbookId
 #     _PARAMETER_CONSTRAINTS로 싣는다. 프롬프트에 런북 이름을 박으면 그 런북이 메뉴에
 #     없는 인시던트에도 지시가 나가고, 런북 목록이 프롬프트와 계약 두 곳에 생긴다.
 #
-# 문구를 바꾸면 finops_prompt_fingerprint()가 움직여 승인 스냅샷(ai/evaluation/
+# 문구를 바꾸면 finops_prompt_fingerprint()가 움직여 승인 스냅샷(ai/evaluation/summary/
 # summary_prompt_snapshot.json) 대조 테스트가 실패한다 — 재통과 절차는
-# docs/AI_SUMMARY_BASELINE.md. 판 이름(FINOPS_PROMPT_VERSION)은 사람이 부르기 위한 것이고
+# apps/core-api/ai/evaluation/summary/baseline.md. 판 이름(FINOPS_PROMPT_VERSION)은 사람이 부르기 위한 것이고
 # 판정은 해시가 한다. 프롬프트 전문은 스냅샷에 남기지 않는다(ADR-0005 미보존 대상).
 #
 # 비밀값 라벨 표기(`token:`·`password:` 같은 형태)를 프롬프트에 쓰지 않는다 —
@@ -198,7 +198,7 @@ class CandidateProposalOutput(BaseModel):
 # RunbookId enum이 바뀌어도 움직이는데, 그것은 모델의 메뉴가 바뀐 것이라 재통과가 맞다.
 
 
-def finops_prompt_material() -> str:
+def finops_prompt_material(*, preserve_schema_order: bool = False) -> str:
     """해시 대상 전문. 테스트가 무엇이 해시에 들어가는지 확인하는 데도 쓴다."""
     constraints = {
         runbook_id.value: list(texts)
@@ -210,11 +210,13 @@ def finops_prompt_material() -> str:
         ("parameter_constraints", json.dumps(constraints, ensure_ascii=False, sort_keys=True)),
         (
             "summary_output_schema",
-            json.dumps(EvidenceSummaryOutput.model_json_schema(), ensure_ascii=False, sort_keys=True),
+            json.dumps(EvidenceSummaryOutput.model_json_schema(), ensure_ascii=False,
+                       sort_keys=not preserve_schema_order),
         ),
         (
             "proposal_output_schema",
-            json.dumps(CandidateProposalOutput.model_json_schema(), ensure_ascii=False, sort_keys=True),
+            json.dumps(CandidateProposalOutput.model_json_schema(), ensure_ascii=False,
+                       sort_keys=not preserve_schema_order),
         ),
     )
     return "\n".join(f"[{name}]\n{body}" for name, body in sections)
@@ -223,6 +225,12 @@ def finops_prompt_material() -> str:
 def finops_prompt_fingerprint() -> str:
     """승인 스냅샷과 대조하는 값. 사람이 부르는 이름은 FINOPS_PROMPT_VERSION이고 판정은 이것이 한다."""
     return hashlib.sha256(finops_prompt_material().encode("utf-8")).hexdigest()
+
+
+def finops_request_fingerprint() -> str:
+    """승인 지문과 별도로 출력 스키마의 필드 순서까지 추적한다."""
+    material = finops_prompt_material(preserve_schema_order=True)
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 # ------------------------------------------------------------------------------

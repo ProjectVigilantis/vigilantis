@@ -30,9 +30,14 @@ from typing import Optional
 from schemas.agents import AgentGraphOutput
 from schemas.incidents import AgentInvocationStatus
 
+from ai.evaluation.common.reproducibility import (
+    FieldAgreement,
+    output_fields,
+    unstable_fields,
+)
+
 from .factcheck import FactCheckResult
 from .readback import ReadbackResult
-from .reproducibility import FieldAgreement, output_fields, unstable_fields
 
 
 @dataclass(frozen=True)

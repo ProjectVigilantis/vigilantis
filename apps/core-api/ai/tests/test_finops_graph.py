@@ -6,7 +6,7 @@
 ③ 모델로 나간 값이 마스킹 경로를 지났는가
 
 프롬프트 문구의 품질은 여기서 보지 않는다. 문구·필드명·출력 스키마가 바뀌었는데 승인
-스냅샷이 갱신되지 않은 것만 잡는다(#243 — 재통과 절차는 docs/AI_SUMMARY_BASELINE.md).
+스냅샷이 갱신되지 않은 것만 잡는다(#243 — 재통과 절차는 apps/core-api/ai/evaluation/summary/baseline.md).
 """
 
 import json
@@ -467,18 +467,18 @@ def test_every_call_goes_through_the_masking_boundary(call_index):
 # 프롬프트 v1 — 판·해시·계약 사실 (Issue #243)
 # ------------------------------------------------------------------------------
 
-SNAPSHOT = Path(__file__).resolve().parents[1] / "evaluation" / "summary_prompt_snapshot.json"
+SNAPSHOT = Path(__file__).resolve().parents[1] / "evaluation" / "summary" / "summary_prompt_snapshot.json"
 
 
 def test_prompt_fingerprint_matches_approved_snapshot():
     # 문구·필드명·제약 문구·출력 스키마 중 하나라도 바뀌면 여기서 선다. 고의로 바꿨다면
-    # docs/AI_SUMMARY_BASELINE.md의 재통과 절차를 거친 뒤 스냅샷을 갱신한다 — 이 테스트가
+    # apps/core-api/ai/evaluation/summary/baseline.md의 재통과 절차를 거친 뒤 스냅샷을 갱신한다 — 이 테스트가
     # 있어야 "판 올리기를 잊어도 드러난다"가 말이 아니라 동작이다
     snapshot = json.loads(SNAPSHOT.read_text("utf-8"))
 
     assert snapshot["version"] == FINOPS_PROMPT_VERSION
     assert snapshot["prompt_sha256"] == finops_prompt_fingerprint(), (
-        "프롬프트가 승인 스냅샷과 다릅니다 — docs/AI_SUMMARY_BASELINE.md 절차로 재통과 후 갱신"
+        "프롬프트가 승인 스냅샷과 다릅니다 — apps/core-api/ai/evaluation/summary/baseline.md 절차로 재통과 후 갱신"
     )
 
 
