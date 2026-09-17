@@ -194,7 +194,7 @@ FE는 `NEXT_PUBLIC_API_BASE_URL`이 가리키는 백엔드만 본다(`apps/web/s
 | 5 | **관제자 승인 → 차단** | **[조치 실행]** 클릭 | `RUNBOOK_NACL_ADD_DENY`<br>`trigger_source: USER_APPROVAL`<br>`approval_mode: HUMAN_ONLY`<br>`ec2.create_network_acl_entry` | `EXECUTION_UPDATED` `SUCCESS` | — |
 | 6 | 관제자 확인 | 상세에서 **판단 근거** 확인 | `GET /api/v1/incidents/{id}` | — | — |
 | 7 | **원클릭 해제** | **[해제]** 클릭 | `RUNBOOK_NACL_RESTORE`<br>`trigger_source: USER_APPROVAL` | `EXECUTION_UPDATED` | **핵심 컷** |
-| 8 | 해제 완료 | 해제 실행 **성공** · Incident **종료 대기**(토폴로지 색은 바뀌지 않는다 — §10/1 컷 시트) | `ec2.delete_network_acl_entry` | `EXECUTION_UPDATED` `SUCCESS` · `INCIDENT_UPDATED` Incident `AWAITING_CLOSURE` | — |
+| 8 | 해제 완료 | 해제 실행 **성공** · Incident **종료 판단 대기**(토폴로지 색은 바뀌지 않는다 — §10/1 컷 시트) | `ec2.delete_network_acl_entry` | `EXECUTION_UPDATED` `SUCCESS` · `INCIDENT_UPDATED` Incident `AWAITING_CLOSURE` | — |
 
 ### 실행 축과 Incident 축은 다르다 (3번의 핵심)
 
@@ -239,7 +239,7 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 
 ## 10/1(목) 컷 시트
 
-> **기준**: LocalStack 시드 환경(`scripts/seed_localstack.py`) — 10/1(목) 시연은 LocalStack 기반이다(SSOT §확정 결정 로그 2026-09-14). **측정**: 2026-09-17, 시드 → 수집·판정 1회(`services.scheduler.run_pipeline`, 일회용 DB) — 앱 기동·모델 호출 없이. 실행 단계(T1-5~9 · T2-4~8)는 PR #346 실측(T1)과 §T2 관통 실측(2026-09-15)을 근거로 한다. **담당**: 김승철(#356 ③ · 기한 9/23(수)).
+> **기준**: LocalStack 시드 환경(`scripts/seed_localstack.py`) — 10/1(목) 시연은 LocalStack 기반이다(SSOT §확정 결정 로그 2026-09-14). **측정**: 2026-09-17, 시드 → 수집·판정 1회(`services.scheduler.run_pipeline`, 일회용 DB) — 앱 기동·모델 호출 없이. 실행 단계(T1 5–9번 · T2 4–8번)는 PR #346 실측(T1)과 §T2 관통 실측(2026-09-15)을 근거로 한다. **결정**: PR #371 리뷰(김세혁, 2026-09-17). **담당**: 김승철(#356 ③ · 기한 9/23(수)).
 >
 > 컷 시트는 단계표를 대신하지 않는다 — **각 칸을 10/1에 실경로로 보여줄 수 있는가, 막히면 무엇을 하는가**만 확정한다.
 
@@ -247,24 +247,43 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 
 | 트랙 | 시연 대상 (LocalStack 시드) | 실측 판정 | 테스트 기준(흐름 테스트) |
 | --- | --- | --- | --- |
-| **T1** | `vigilantis-seed-idle-dev` · m5.2xlarge · Environment `development` | **최적화 후보**(`COST_CANDIDATE`) | 골든 A1(`t3.xlarge`) |
+| **T1** | `vigilantis-seed-idle-dev` · m5.2xlarge · Environment `development` | **최적화 후보**(`COST_CANDIDATE`) — 시드 전체에서 이 한 대뿐 | 골든 A1(`t3.xlarge`) |
 | **T2** | `vigilantis-seed-idle` · t3.xlarge · Environment `production` — `scripts/inject_mock_threat.py --prepare-inbox --target-arn`으로 지정 | 판정은 운영 보호(`SKIP_PROD_PROTECTED`). 위협 접수는 판정과 무관하게 Incident를 만든다 | 골든 S3 대상(= A1) |
 
-**골든 인스턴스는 LocalStack에 없어 실행 단계가 성립하지 않는다** — 그래서 시연은 시드를 쓴다. 두 트랙의 대상이 달라 **"이 서버가 아까 그 서버"는 시연에서 쓰지 않는다.** T2를 `seed-idle`로 둔 이유는 ① §T2 관통 실측(2026-09-15)이 그 대상으로 끝까지 갔고 ② 옆 SG `vigilantis-seed-open-ssh`가 전체개방 **위협**(빨강)이라 "보안 사건이 난 서버"로 화면에서 짚을 수 있기 때문이다(결정 2026-09-17). 네 시드 인스턴스는 같은 서브넷이라 모두 시드 NACL(`vigilantis-seed-nacl`)에 걸린다.
+**골든 인스턴스는 LocalStack에 없어 실행 단계가 성립하지 않는다**(골든 계정 `123456789012` · LocalStack `000000000000`) — 그래서 시연은 시드를 쓴다. 두 트랙의 대상이 달라 **"이 서버가 아까 그 서버"는 시연에서 쓰지 않는다.** T2를 `seed-idle`로 둔 이유는 ① §T2 관통 실측(2026-09-15)이 그 대상으로 끝까지 갔고 ② 옆 SG `vigilantis-seed-open-ssh`가 전체개방 **위협**(빨강)이라 "보안 사건이 난 서버"로 화면에서 짚을 수 있기 때문이다. 네 시드 인스턴스는 같은 서브넷이라 모두 시드 NACL(`vigilantis-seed-nacl`)에 걸린다.
 
-### T1 · FinOps
+### 사전 준비 — 무대 전
+
+**T1 1–3번은 무대에서 하지 않는다**(결정 ①). 스캔 잡은 `IntervalTrigger`로만 등록돼 **기동 뒤 한 주기(300초)가 지나야 첫 스캔**이 돌고, 그 뒤 AI 분석(모델 호출)이 이어진다. 무대 밖에서 끝내 두면 실패가 무대 전에 드러나 고칠 시간이 있다. 잃는 것은 "스캔이 카드를 만드는 순간"의 실시간 장면이며, 그 장면은 T2 1번 주입이 보여준다.
+
+`docker compose up -d --wait db localstack` → 시드(`scripts/seed_localstack.py`) → `docker compose up -d api` → **첫 스캔과 AI 분석 완료 확인** — `GET /api/v1/incidents`에서 idle-dev 카드가 **승인 대기**(`AWAITING_APPROVAL`)인지 본다.
+
+같은 스캔이 **카드 3건**을 만든다(idle-dev · 미사용 SG `vigilantis-seed-unused` · 미연결 EBS). 나머지 둘은 시드에서 빼지 않는다 — LocalStack 사전 검증 테스트(`apps/core-api/services/tests/test_precheck_localstack.py`)가 그 자원을 쓴다. **대본에서 한 줄로 설명한다**: "스캔이 서버 1대 말고도 미사용 자원 2건을 함께 찾았다." EBS 카드는 이름 없이 리소스 ID(`vol-` 접두)로 보인다(수집이 EBS 이름을 비워 둔다). 모델 호출은 사전 준비 1회에 3건으로 고정된다.
+
+### 시연 환경변수 (결정 ② · 운영 머신 `.env`)
+
+| 변수 | 값 | 이유 |
+| --- | --- | --- |
+| `SCAN_INTERVAL_SECONDS` | **300**(기본) | 첫 스캔이 무대 밖으로 나갔다. 짧게 두면 무대 도중 스캔이 자산 정보를 중간값으로 바꿀 수 있다 |
+| `DISPATCH_INTERVAL_SECONDS` | **5** | T1-7 실패 주입 창의 길이다. 리허설에서 헬퍼가 3회 연속 창 안에 들면 확정, 한 번이라도 놓치면 10 |
+| `AGENT_DISPATCH_INTERVAL_SECONDS` | **3** | T2 주입 뒤 분석 시작까지의 지연 |
+| `STATUS_CHECK_WAIT_DELAY_SECONDS` · `STATUS_CHECK_WAIT_MAX_ATTEMPTS` | **2 · 3** | PR #346에서 이 값으로 판정이 4.2초에 났다. **LocalStack 전용** — 실 AWS 스모크(9주차) 전에 기본값으로 되돌린다 |
+| `MOCK_THREAT_INBOX_DIR` | `/app/apps/core-api/.mock-threat-inbox` | `.env.example` 값 · compose 마운트 안 경로(호스트는 `apps/core-api/.mock-threat-inbox`) |
+| `OPENAI_API_KEY` | 운영 머신 키 | 값은 적지 않는다 |
+
+### T1 · FinOps — 무대는 5번부터
 
 | # | 단계 | 10/1 판정 | 조작·전제 | 막히면 |
 | --- | --- | --- | --- | --- |
-| 1 | 수집·판정 | ✅ **실경로** — 실측 최적화 후보 | 시드 → 앱 기동. **첫 스캔은 기동 뒤 `SCAN_INTERVAL_SECONDS`가 지나야 돈다**(기본 300초 · 기동 즉시 실행 없음) | 시드 재실행 후 다음 스캔 |
-| 2 | Incident 생성 | ✅ **실경로** — 스캔 1회로 생성 실측 | 같은 스캔이 **Incident 3건**을 만든다(idle-dev · 미사용 SG · 미연결 EBS) — 아래 §결정 대기 ③ | **김세혁 결정 대기** — FE mock 제거로 종전 대체 컷이 없다(§결정 대기 ①) |
-| 3 | AI 판단 근거 + 추천 | 🔶 **실경로 · idle-dev 대상 모델 호출은 미측정** | `OPENAI_API_KEY` · `AGENT_DISPATCH_INTERVAL_SECONDS` | 미리 저장한 근거 텍스트 |
+| 1 | 수집·판정 | ✅ 실경로 · **사전 준비(무대 전)** — 실측 최적화 후보 | §사전 준비 | 사전 준비를 처음부터 |
+| 2 | Incident 생성 | ✅ 실경로 · **사전 준비(무대 전)** — 스캔 1회로 생성 실측 | 카드 3건 — §사전 준비 | **무대 전에 드러난다** → 사전 준비를 처음부터(대체 컷은 만들지 않는다 — 결정 ①) |
+| 3 | AI 판단 근거 + 추천 | 🔶 실경로 · **사전 준비(무대 전)** · idle-dev 모델 호출 미측정(§결정 기록 ④) | `OPENAI_API_KEY` · `AGENT_DISPATCH_INTERVAL_SECONDS` | 사전 준비를 처음부터 |
 | 4 | 가드레일 4단계 | ✅ 실경로 | — | 슬라이드 컷 |
-| 5 | 관제자 승인 | ✅ 실경로 | **[조치 실행]** 1회 | — |
-| 6 | 실행 | ✅ 실경로(PR #346) | `DISPATCH_INTERVAL_SECONDS` | LocalStack 재기동 후 재시도 |
-| 7 | Status Check 실패 | ✅ **실경로 · 수동 주입** | 실행 주기가 끝난 뒤·다음 판정 주기 전에 대상 인스턴스를 `stop_instances`로 멈춘다(§대조 3번 ⓑ). `STATUS_CHECK_WAIT_*`를 조여야 판정이 빨리 난다 | **창을 놓치면 실행이 `SUCCESS`로 닫혀 원복이 안 나온다** → 시드 재실행 후 T1 처음부터 |
-| 8 | 자동 원복 발동 | ✅ 실경로(PR #346) | 사람 조작 없음 | 접수만 화면으로 설명 |
-| 9 | 원복 완료 | ✅ 실경로 · **확인 화면을 바꾼다** | **AST-001의 인스턴스 유형은 수집만 갱신한다**(실행 경로는 자산 정보를 바꾸지 않는다) — 축소 전과 원복 뒤가 같은 값으로 보여 복귀를 증명하지 못한다. **실행 상태 패널의 "이전 상태로 복구했습니다."(원본 `ROLLED_BACK` — `apps/web/src/components/incidents/execution-status-panel.tsx`)로 확인**한다. 화면은 실행 단계(정지 → 유형 변경 → 기동)를 표시하지 않는다(API 계약에 단계 목록이 없다) | 관제자 [종료 판단]이 남는다 |
+| 5 | 관제자 승인 | ✅ 실경로 · **무대 시작** | 승인 대기 카드 → **[조치 실행]** 1회 | — |
+| 6 | 실행 | ✅ 실경로(PR #346) | `DISPATCH_INTERVAL_SECONDS` | **사전 준비를 처음부터** — LocalStack 재기동은 자원 ID가 새로 생겨 이 Incident의 대상이 사라진다 |
+| 7 | Status Check 실패 | 🔶 **실경로 · 헬퍼 머지 전까지** | **실패 주입 헬퍼 실행**(#356 ① · 김세혁 · 리허설 9/29(화) 전) — 대상 인스턴스를 조회하다가 유형이 바뀌고 `running`이 된 순간 `stop_instances`를 부른다. 사람이 창을 맞출 수 없다: 판정 대기 동안 실행 상태는 `IN_PROGRESS`이고 이벤트도 나가지 않는다 | 창을 놓치면 실행이 `SUCCESS`로 닫힌다 → 상세 화면 실행 항목의 **[이전 스펙 복원]**(`RUNBOOK_EC2_REVERT_SIZE` · 관제자 승인)으로 되돌린다. 자동 발동 장면은 빠지지만 같은 확인 화면(9번)까지 간다. **시드 재실행은 줄어든 유형을 되돌리지 않는다**(이름으로 찾아 건너뛴다) |
+| 8 | 자동 원복 발동 | ✅ 실경로(PR #346) | 사람 조작 없음 | 7번 "막히면"과 같다 |
+| 9 | 원복 완료 | ✅ 실경로 · **무대 끝** · 확인 화면을 바꾼다 | **AST-001의 인스턴스 유형은 수집만 갱신한다**(실행 경로는 자산 정보를 바꾸지 않는다) — 축소 전과 원복 뒤가 같은 값으로 보여 복귀를 증명하지 못한다. **실행 상태 패널의 "이전 상태로 복구했습니다."(원본 `ROLLED_BACK` — `apps/web/src/components/incidents/execution-status-panel.tsx`)로 확인**한다. 화면은 실행 단계(정지 → 유형 변경 → 기동)를 표시하지 않는다(API 계약에 단계 목록이 없다) | Incident는 **종료 판단 대기**로 남긴다 — **[종료 판단]은 무대에서 누르지 않는다**(§반복). 누르면 다음 스캔이 같은 서버에 새 카드를 만들고 모델까지 불러 T2 도중에 카드가 뜰 수 있다 |
 
 ### T2 · SecOps
 
@@ -272,29 +291,40 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 | --- | --- | --- | --- | --- |
 | 1 | 위협 주입 | ✅ 실경로(§T2 관통 실측) · **"붉은 노드" 문구를 바꾼다** | `MOCK_THREAT_INBOX_DIR` · 주입 명령에 `--target-arn`(seed-idle). **토폴로지 색은 자산 판정에서 온다** — 빨강은 대상 옆 SG이고 **주입 전부터** 빨갛다. 주입이 새로 만드는 것은 INC-001의 SecOps 카드다 | 토폴로지 정적 이미지 |
 | 2 | 위험도 판정 | ✅ 실경로 — 초기 `HIGH` 실측 | — | — |
-| 3 | 대응 경로 진입 | ✅ 실경로 — `PRE_MITIGATION_0_5S` 실측 · INC-001 카드의 **선제차단** 배지로 표시(`apps/web/src/components/incidents/incident-card.tsx`) | — | 경로 표시 없이 4번으로 |
+| 3 | 대응 경로 진입 | ✅ 실경로 — `PRE_MITIGATION_0_5S` 실측 · INC-001 카드의 **선제 차단됨** 배지로 표시(`apps/web/src/components/incidents/incident-card.tsx`) | — | 경로 표시 없이 4번으로 |
 | 4 | 가드레일 4단계 | ✅ 실경로 | 실 모델 호출(SecOps 그래프) | 슬라이드 컷 |
 | 5 | 관제자 승인 → 차단 | ✅ 실경로 | **[조치 실행]** ① · 시드 NACL 규칙 100 `203.0.113.10/32` | — |
 | 6 | 관제자 확인 | ✅ 실경로 | — | — |
 | 7 | 원클릭 해제 | ✅ 실경로 · 해제 후보는 차단이 닫힌 주기에 선다(#329) | **[조치 실행]** ② | 핵심 컷 |
-| 8 | 해제 완료 | ✅ 실경로 · **"노드 정상 복귀" 문구를 바꾼다** | 확인할 것은 해제 **성공** · 규칙 0건 · Incident **종료 대기**. **SG는 해제 뒤에도 빨강**이다(색은 판정에서 오고 해제는 판정을 바꾸지 않는다) | — |
+| 8 | 해제 완료 | ✅ 실경로 · **"노드 정상 복귀" 문구를 바꾼다** | 확인할 것은 해제 **성공** · 규칙 0건 · Incident **종료 판단 대기**. **SG는 해제 뒤에도 빨강**이다(색은 판정에서 오고 해제는 판정을 바꾸지 않는다). 질문 대비 한 줄: "NACL 차단은 공격 IP 대응이고, SG 전체개방은 따로 남은 설정 오류다" | — |
 
 ### 공통
 
 | 항목 | 10/1 판정 | 막히면 |
 | --- | --- | --- |
 | WS 실시간 갱신(§대조 6번) | 🔶 **실배달 미확인** — 7주차(9/21(월)–9/23(수)) FE 확인 | 화면 새로고침 |
-| 시드 NACL 재사용 | ✅ 시드 재실행이 커스텀 규칙을 비운다 — 리허설을 반복할 수 있다 | — |
+| 조치별 절감 예상(#347 · PR #361) | **9/23(수) 확정본에는 넣지 않는다** — FE 표기가 아직 없다. 9/28(월) 컷에 FE 표기가 있으면 T1-5 승인 화면에 한 줄 추가 | — |
 
-### 결정 대기
+### 반복 — Connect Day 하루 2세션
 
-| # | 결정 | 누구 | 이 시트에 미치는 것 |
-| --- | --- | --- | --- |
-| ① | **T1-2 대체 컷** — 새로 만들지, 대체 컷 없이 필수 항목으로 둘지 | 김세혁(0917 업무정리) | T1-2 "막히면" 칸 |
-| ② | **시연 환경변수 확정** — `SCAN_INTERVAL_SECONDS` · `DISPATCH_INTERVAL_SECONDS` · `AGENT_DISPATCH_INTERVAL_SECONDS` · `STATUS_CHECK_WAIT_DELAY_SECONDS`·`_MAX_ATTEMPTS` · `MOCK_THREAT_INBOX_DIR` · `OPENAI_API_KEY` | 김세혁(#349 ② · 운영 머신) | **이 시트의 요구치**: 첫 스캔이 대본 안에 서도록 스캔 주기를 짧게(기본 300초는 기동 뒤 5분 대기) · 상태 확인 대기를 조여 T1-7 판정을 수 초로(PR #346 실측 2초 × 3회 = 4.2초) |
-| ③ | **스캔이 함께 만드는 Incident 2건**(미사용 SG · 미연결 EBS) — 시드에서 뺄지, 대본에서 설명할지 | 김승철 + 김세혁(시드 소유) | 카드 그리드 구성 · AI 분석 호출 수(모델 비용) |
-| ④ | **T1-3 idle-dev 모델 호출 실측** | 김승철 | T1-3 🔶 해소 |
-| ⑤ | **공격 경로 표시(#362)** — 완성되면 T2-1·T2-8 대본을 되돌릴지 | 9/28(월) 릴리스 컷(#349) | T2-1·T2-8 문구 — 9/23(수) 확정은 **지금 화면(공격 경로 없음) 기준**이다 |
+10/1(목)은 하루 2세션이라 시연을 두 번 돌린다(SSOT §현재 위치 발표 일정 표). 세션 사이 초기화에서 셋을 한다.
+
+| 무엇 | 왜 · 어떻게 |
+| --- | --- |
+| **T1 Incident [종료 판단]** | 열린 Incident(종료 판단 대기 포함)가 있으면 스캔이 같은 서버에 새 카드를 만들지 않는다(`apps/core-api/incident_intake.py` `_create_finops`). 닫은 뒤 다음 스캔(최대 300초) → AI 분석 → 승인 대기 확인 = §사전 준비를 다시 하는 셈이다 |
+| **T2 재주입 시각** | 같은 관측 재전달은 멱등이라 새 Incident가 생기지 않는다. 주입 명령에 **`--occurred-at <새 ISO 시각>`**을 붙인다(`scripts/inject_mock_threat.py`) |
+| **시드 NACL 규칙** | 시드 재실행이 커스텀 규칙을 비운다 — 차단 슬롯을 다시 쓸 수 있다 |
+
+### 결정 기록과 남은 것
+
+| # | 항목 | 상태 |
+| --- | --- | --- |
+| ① | T1-2 대체 컷 | **결정 2026-09-17 · PR #371 리뷰** — 새로 만들지 않고 T1 1–3번을 사전 준비로 옮긴다 |
+| ② | 시연 환경변수 · T1 실패 주입 방식 | **결정 2026-09-17 · PR #371 리뷰** — §시연 환경변수 · 주입은 헬퍼(#356 ①) |
+| ③ | 스캔이 함께 만드는 Incident 2건 | **결정 2026-09-17** — 시드에서 빼지 않고 대본에서 한 줄 설명(§사전 준비) |
+| ④ | **T1-3 idle-dev 모델 호출 실측** — 절감 추정 호출(#347)이 함께 붙는다 | **남음** · 김승철 |
+| ⑤ | **T1-7 헬퍼** — 머지 후 T1-7 🔶 해소, 리허설에서 디스패치 5초 확정 | **남음** · 김세혁(#356 ①) |
+| ⑥ | **공격 경로 표시(#362)** — 완성되면 T2-1·T2-8 대본을 되돌릴지 | **남음** · 9/28(월) 릴리스 컷(#349). 9/23(수) 확정은 지금 화면(공격 경로 없음) 기준 |
 
 **재현**: `docker compose up -d --wait db localstack` → `AWS_ENDPOINT_URL=http://localhost:4566 uv run python scripts/seed_localstack.py` → 일회용 DB에 `alembic upgrade head` → `run_pipeline()` 1회. 판정 분포는 적지 않는다(시드가 바뀌면 낡는다) — 이 시트가 기대는 것은 두 대상의 판정과 SG 연결뿐이다.
 
