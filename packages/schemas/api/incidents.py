@@ -121,8 +121,8 @@ class RecommendationItem(BaseModel):
             "RIGHTSIZING 조치의 AI 참고 추정. USD/월 730시간의 Linux 공유 온디맨드 "
             "컴퓨팅 비용만 비교하며 실제 청구액이 아니다. ESTIMATED만 금액·근거가 있고 "
             "UNAVAILABLE/INVALID는 amount=null이다. 기존 후보·비대상 조치는 필드가 null이다. "
-            "단가는 AI 추정, 금액은 서버 계산이며 설명의 작성 주체는 "
-            "basis.explanation_source(MODEL_GENERATED/SERVER_TEMPLATE)로 구분한다."
+            "단가는 AI 추정, 금액·설명은 서버가 작성하며 "
+            "basis.explanation_source는 필수 SERVER_TEMPLATE이다."
         ),
     )
 

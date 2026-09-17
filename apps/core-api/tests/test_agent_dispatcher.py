@@ -487,7 +487,7 @@ def test_savings_call_failure_keeps_passed_candidate_in_db(
     assert len(attempted) == 3
 
 
-def test_savings_runs_after_all_guardrails_and_ignores_graph_estimate(db, monkeypatch):
+def test_savings_runs_after_all_guardrails(db, monkeypatch):
     from ai.rate_estimator import invalid_estimate
     from schemas.savings import SavingsReason
 
@@ -501,7 +501,6 @@ def test_savings_runs_after_all_guardrails_and_ignores_graph_estimate(db, monkey
             RunbookCandidateDraft(
                 runbook_id=RunbookId.RUNBOOK_EC2_RIGHTSIZING, target_arn=EC2_ARN,
                 parameters={"target_instance_type": "t3.medium"}, evidence_ids=[evidence_id],
-                ai_savings_estimate=invalid_estimate(SavingsReason.INVALID_ESTIMATE),
             ),
             RunbookCandidateDraft(
                 runbook_id=RunbookId.RUNBOOK_SG_DELETE_ISOLATED, target_arn=SG_ARN,

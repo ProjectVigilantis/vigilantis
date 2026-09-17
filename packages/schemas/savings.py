@@ -34,7 +34,6 @@ class SavingsReason(str, Enum):  # noqa: UP042
 
 
 class SavingsExplanationSource(str, Enum):  # noqa: UP042
-    MODEL_GENERATED = "MODEL_GENERATED"
     SERVER_TEMPLATE = "SERVER_TEMPLATE"
 
 
@@ -74,8 +73,7 @@ class RightsizingSavingsBasis(_SavingsModel):
     assumptions: SavingsAssumptions = Field(default_factory=SavingsAssumptions)
     explanation: str = Field(min_length=1, max_length=1000)
     explanation_source: SavingsExplanationSource = Field(
-        default=SavingsExplanationSource.MODEL_GENERATED,
-        description="설명 작성 주체. 출처 필드가 없는 기존 저장값은 모델 작성 설명이다.",
+        description="설명 작성 주체. 서버가 비교 조건·계산 방법·추정 한계를 작성한다.",
     )
 
     @field_validator("explanation")

@@ -104,12 +104,14 @@ def test_candidate_savings_round_trip_preserves_decimal_strings():
                 "current_instance_type": "t3.xlarge", "target_instance_type": "t3.medium",
                 "current_hourly_rate": "0.104000", "target_hourly_rate": "0.026000",
                 "explanation": "단가 차이 × 730시간의 참고 추정",
+                "explanation_source": "SERVER_TEMPLATE",
             },
         },
     )
     row = mappers.new_candidate(contract)
     assert row.ai_savings_estimate["amount"] == "56.94"
     assert row.ai_savings_estimate["basis"]["current_hourly_rate"] == "0.104000"
+    assert row.ai_savings_estimate["basis"]["explanation_source"] == "SERVER_TEMPLATE"
     assert mappers.to_candidate_data(row) == contract
 
 

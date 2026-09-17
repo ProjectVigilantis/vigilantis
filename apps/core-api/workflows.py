@@ -2465,7 +2465,6 @@ def _draft_candidates(
             runbook_id=draft.runbook_id,
             target_arn=draft.target_arn,
             parameters=draft.parameters,
-            # 그래프·과거 실험의 추정은 신뢰하지 않는다. PASS 후 후속 결과만 붙인다.
             evidence_ids=list(draft.evidence_ids),
             status=CandidateStatus.PENDING_VALIDATION,
         )

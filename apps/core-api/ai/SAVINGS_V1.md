@@ -3,7 +3,9 @@
 V1은 AI가 현재·목표 시간당 단가만 추정하고, 서버가 비교 문맥·월 절감액·설명을 구성한다.
 서비스 구현은 [rate_estimator.py](rate_estimator.py), 저장·조회 계약은
 [schemas/savings.py](../../../packages/schemas/savings.py)다.
-SSOT의 AI 금액·근거 동시 생성 계약에서 책임을 변경하는 제안이며, 팀 채택은 PR 리뷰에서 합의한다.
+AI가 두 단가를 추정하고 서버가 금액·설명을 작성하는 책임 분담은
+[2026-09-17 PM 리뷰](https://github.com/ProjectVigilantis/vigilantis/pull/361#pullrequestreview-5230358612)에서
+채택했다. SSOT 등재는 머지 뒤 PM의 갱신 시점에 진행한다.
 
 ## 서비스 계약
 
@@ -33,11 +35,11 @@ FE는 알림의 `incident_id`로 `GET /api/v1/incidents/{id}`를 조회한다.
 | 필드 전체 null | 기존 후보 또는 추정 비대상 | 해당 없음 |
 
 정상 금액 `"0.00"`과 미산출은 다르다. 실패해도 추천 후보와 가드레일 PASS는 유지한다.
-예전 저장 JSONB에 설명 출처가 없으면 `MODEL_GENERATED`로 읽는다.
+설명 출처 `explanation_source`는 필수이며 `SERVER_TEMPLATE`만 허용한다.
 
 재시도는 [공통 모델 클라이언트](openai_client.py)의 정책을 따른다. 기본값은 시도당 timeout 30초,
 최초 포함 최대 3회이며 타임아웃·연결 오류·HTTP 408/409/429/5xx에만 재시도한다.
-일반 대기는 약 0.75~1초 → 1.5~2초, 유효한 `Retry-After`가 60초 이내이면 우선 적용한다.
+일반 대기는 약 0.75–1초 → 1.5–2초, 유효한 `Retry-After`가 60초 이내이면 우선 적용한다.
 인증·요청 오류, 거절, SDK 파싱 실패와 수용 검증 실패에는 재시도하지 않는다.
 SDK 파싱 실패를 포함해 사용 가능한 응답을 얻지 못하면 `MISSING_ESTIMATE`, 단가 누락·범위·산식 등
 수용 실패면 `INVALID_ESTIMATE`, 후보와 서버 비교 문맥이 다르면 `CONTEXT_MISMATCH`다.
@@ -94,4 +96,4 @@ A가 조기 중단되었으므로 설명 제거의 인과 효과는 확정할 �
 - 요약·추천 요청을 바꾸면 [summary 재통과 절차](evaluation/summary/baseline.md)를 적용한다.
 
 자동 테스트의 합성 응답은 계산·계약·호출·저장 흐름을 검증한다. 실제 모델의 가격 품질은 위 실험의 관측 범위다.
-FE 표시와 SSOT 갱신은 계약 합의 후 담당 후속 작업으로 연결한다.
+FE 표시와 SSOT 갱신은 담당 후속 작업으로 연결한다.

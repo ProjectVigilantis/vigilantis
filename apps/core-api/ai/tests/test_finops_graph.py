@@ -154,11 +154,10 @@ def test_succeeded_carries_three_summary_lines_and_candidate():
     assert candidate.parameters.target_instance_type == "t3.medium"
     # 추정은 Workflow 후속 처리다. 그래프는 미실행을 오류로 만들지 않는다.
     assert len(client.sent) == 2
-    assert candidate.ai_savings_estimate is None
 
 
 
-def test_other_runbook_does_not_accept_savings():
+def test_other_runbook_uses_only_summary_and_proposal_calls():
     proposal = rightsizing_proposal(
         runbook_id="RUNBOOK_EBS_DELETE_UNATTACHED",
         target_arn=VOLUME_ARN,
@@ -167,7 +166,6 @@ def test_other_runbook_does_not_accept_savings():
     assert len(client.sent) == 2
 
     assert output.invocation_status is AgentInvocationStatus.SUCCEEDED
-    assert output.candidates[0].ai_savings_estimate is None
 
 
 
