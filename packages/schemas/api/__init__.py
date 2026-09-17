@@ -23,9 +23,12 @@ from .incidents import (
     IncidentResponse,
     IncidentsResponse,
     IncidentStatus,
+    OpenIpThreatContext,
     RecommendationItem,
     ResponseMode,
     RiskLevel,
+    SshBruteForceThreatContext,
+    ThreatContext,
 )
 from .ws import ExecutionEventData, IncidentEventData, WsEvent, WsEventType
 from .assets import (
@@ -67,9 +70,12 @@ __all__ = [
     "IncidentResponse",
     "IncidentsResponse",
     "IncidentStatus",
+    "OpenIpThreatContext",
     "RecommendationItem",
     "ResponseMode",
     "RiskLevel",
+    "SshBruteForceThreatContext",
+    "ThreatContext",
     "WsEvent",
     "WsEventType",
     "AlbTargetGroupSpec",

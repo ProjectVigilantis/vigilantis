@@ -79,7 +79,7 @@ def test_detail_and_list_after_resolve_still_serve_200(client_pg, db, seeded_inc
     assert listing.status_code == 200
     items = listing.json()["items"]
     assert [item["incident_id"] for item in items] == [incident.incident_id]
-    # 목록은 상세의 부분집합 10필드다 — 종료 판단은 상세에만 실린다
+    # 목록은 상세의 부분집합이다 — 종료 판단은 상세에만 실린다
     assert "resolution" not in items[0]
 
 

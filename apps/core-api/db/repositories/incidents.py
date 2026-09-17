@@ -11,8 +11,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
-from typing import Optional, Sequence
+from typing import Optional
 
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import Session
@@ -58,6 +59,20 @@ def get_threat_event_by_dedup_key(
             models.ThreatEvent.deduplication_key == deduplication_key
         )
     ).scalar_one_or_none()
+
+
+def get_threat_events_by_ids(
+    db: Session, threat_event_ids: Sequence[str],
+) -> dict[str, models.ThreatEvent]:
+    """목록의 위협 문맥을 한 번에 조회한다. 연결이 없으면 DB 조회도 생략한다."""
+    if not threat_event_ids:
+        return {}
+    rows = db.scalars(
+        select(models.ThreatEvent).where(
+            models.ThreatEvent.threat_event_id.in_(set(threat_event_ids))
+        )
+    )
+    return {row.threat_event_id: row for row in rows}
 
 
 # --- Incident ------------------------------------------------------------------
