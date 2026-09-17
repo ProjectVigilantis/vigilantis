@@ -8,7 +8,9 @@
 # 픽스처가 없다 — `db`·`pg_engine`·`client_pg`·`make_incident` 계열이 전부
 # `apps/core-api/tests/conftest.py`에 있고, `tests/execution_harness.py` 헤더가
 # 적은 이유(CI가 여러 디렉터리를 한 세션으로 돌릴 때 `conftest` 최상위 이름을
-# 이쪽이 먼저 차지한다)로 가져다 쓸 수도 없다. 두 흐름은 **DB 상태 전이**를
+# 이쪽이 먼저 차지한다)로 `conftest`를 직접 import 해 끌어올 수도 없다 — conftest가
+# 자기 디렉터리 아래에만 적용되는 스코프 제약과 직접 import의 이름 충돌 때문이지
+# 재사용 자체가 불가능한 것은 아니다. 두 흐름은 **DB 상태 전이**를
 # 검증하므로 구현을 이 디렉터리로 옮겼다(SSOT 2026-09-16 확정 · PR #354).
 # `tests/test_e2e_scenario.py`에는 옮긴 위치 안내만 남는다.
 #
@@ -24,6 +26,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -61,33 +64,46 @@ from services.rule_engine import run_rule_engine  # noqa: E402
 from services.scheduler import _build_finops_intakes  # noqa: E402
 from threat_ingress import receive_threat  # noqa: E402
 
-ACCOUNT = "123456789012"
-REGION = "ap-northeast-2"
-INSTANCE = "i-0a1b2c3d4e5f0e2e1"
-INSTANCE_ARN = f"arn:aws:ec2:{REGION}:{ACCOUNT}:instance/{INSTANCE}"
+# T1 — 골든 FinOps **A1**(`asset_inventory_001` · IDLE_CPU_AVG 바로 아래)을 **파일에서 그대로 읽는다.**
+# 정답지의 case_id 로 대상을 찾으므로 골든이 바뀌면 이 흐름도 따라간다 — 값을 옮겨 적던 종전에는
+# cpu_max 가 골든과 달랐다(12.0 vs 10.0). 계정·리전도 골든 인벤토리의 것이다. S3(T2)의 대상도
+# 같은 인스턴스다 — 설계서 §T2 "자산 조인".
+GOLDEN_FINOPS = REPO_ROOT / "datasets" / "golden" / "finops"
+_A1_INVENTORY = json.loads(
+    (GOLDEN_FINOPS / "input" / "asset_inventory_001.json").read_text(encoding="utf-8")
+)
+_A1_ARN = next(
+    e["asset_arn"]
+    for e in json.loads(
+        (GOLDEN_FINOPS / "expected" / "asset_inventory_001.json").read_text(encoding="utf-8")
+    )["evaluations"]
+    if e["case_id"] == "A1"
+)
+GOLDEN_A1 = next(i for i in _A1_INVENTORY["ec2_instances"] if i["arn"] == _A1_ARN)
 
-STARTING_TYPE = "t3.xlarge"   # 조치 이전 = 백업에 남고 원복이 되돌릴 값
+ACCOUNT = _A1_INVENTORY["account_id"]
+REGION = _A1_INVENTORY["region"]
+INSTANCE = GOLDEN_A1["instance_id"]
+INSTANCE_ARN = GOLDEN_A1["arn"]
+
+STARTING_TYPE = GOLDEN_A1["instance_type"]   # 조치 이전 = 백업에 남고 원복이 되돌릴 값
 TARGET_TYPE = "t3.large"      # AI 가 제안한 축소 대상 = 원복이 대조할 "조치 적용" 값
 NOW = datetime(2026, 9, 16, 6, 0, tzinfo=timezone.utc)
 
-# T2 — 골든 SecOps S3(`evt_ssh_bruteforce_001`)의 값 그대로다. 시나리오를 바꾸면
-# 정답지와 갈리므로 여기서 새로 짓지 않는다(설계서 §T2 입력).
-ACL = "acl-0a1b2c3d4e5f0e2e1"
+# T2 — 골든 SecOps S3(`evt_ssh_bruteforce_001`)를 **파일에서 그대로 읽는다.** 값을 옮겨 적으면
+# 골든이 바뀌어도 이 파일은 옛 값으로 계속 통과해 "골든과 대조된다"는 말이 거짓이 된다
+# (PR #358 리뷰 nit: 김세혁 — 옮겨 적은 occurred_at 이 골든과 달랐다).
+GOLDEN_S3 = REPO_ROOT / "datasets" / "golden" / "secops" / "input" / "evt_ssh_bruteforce_001.json"
+S3_OBSERVATION = {
+    k: v for k, v in json.loads(GOLDEN_S3.read_text(encoding="utf-8")).items() if k != "$schema"
+}
+ACL = "acl-0fedcba9876543210"   # 인스턴스 ID 와 모양이 겹치지 않게 둔다 — 실패 로그에서 둘을 가른다
 ACL_ARN = f"arn:aws:ec2:{REGION}:{ACCOUNT}:network-acl/{ACL}"
-THREAT_TARGET = "i-0a1b2c3d4e5f00001"
-THREAT_TARGET_ARN = f"arn:aws:ec2:{REGION}:{ACCOUNT}:instance/{THREAT_TARGET}"
-SOURCE_IP = "203.0.113.10"
+THREAT_TARGET_ARN = S3_OBSERVATION["target_arn"]
+THREAT_TARGET = THREAT_TARGET_ARN.rsplit("/", 1)[-1]
+SOURCE_IP = S3_OBSERVATION["source_ip"]
 BLOCK_CIDR = f"{SOURCE_IP}/32"      # /32 단일 주소 — 서브넷을 끊지 않는다
 BLOCK_RULE_NUMBER = 100
-S3_OBSERVATION = {
-    "event_id": "evt-ssh-bruteforce-001",
-    "event_type": "SSH_BRUTE_FORCE",
-    "target_arn": THREAT_TARGET_ARN,
-    "source_ip": SOURCE_IP,
-    "occurred_at": "2026-09-16T06:30:00Z",
-    "failed_attempt_count": 120,
-    "window_seconds": 300,
-}
 
 # 판정 재시도 상한 — 운영 설정과 무관하게 주기 수로 센다 (Issue #249)
 RETRY_NOW = workflows.VerificationRetryPolicy(max_attempts=3, interval_seconds=0)
@@ -249,11 +265,12 @@ def status_of(db, incident_id, execution_id):
 
 
 def _collect_idle_ec2(db):
-    """수집 1회 — Idle EC2 한 대를 자산과 메트릭 요약으로 남긴다.
+    """수집 1회 — 골든 A1 한 대를 자산과 메트릭 요약으로 남긴다.
 
-    `evaluate_ec2`가 `COST_CANDIDATE`로 읽을 값을 넣는다(cpu_avg 4.9 < IDLE 5.0 ·
-    cpu_max 12.0 < SPIKE 40.0 · 데이터포인트 336 ≥ 48 · prod 태그 없음). 값 자체의
-    경계 의미는 골든이 갖고, 여기서는 **판정이 실제로 떨어지는 입력**이면 된다.
+    값은 전부 골든에서 온다(인스턴스 타입·이름·상태·태그·메트릭 요약). 판정이 `COST_CANDIDATE`
+    로 떨어지는 것은 골든 정답지가 보장하는 성질이고, 이 흐름은 그 입력으로 뒤가 이어지는지를 본다.
+    골든 인벤토리 전체를 적재하지 않는 이유 — 다른 자산의 판정이 함께 Intake 로 올라와 T1 한 건의
+    전이를 흐린다.
     """
     run = assets_repo.start_collection_run(
         db, account_id=ACCOUNT, region=REGION, mode="localstack",
@@ -266,20 +283,17 @@ def _collect_idle_ec2(db):
         resource_id=INSTANCE,
         account_id=ACCOUNT,
         region=REGION,
-        spec={"instance_type": STARTING_TYPE},
+        spec={"instance_type": STARTING_TYPE, "tags": GOLDEN_A1["tags"]},
         collection_run_id=run.collection_run_id,
         collected_at=NOW,
-        name="golden-ec2-idle-boundary",
-        state="running",
+        name=GOLDEN_A1["name"],
+        state=GOLDEN_A1["state"],
     )
     assets_repo.add_metric_summary(
         db,
         asset_id=asset.asset_id,
         collection_run_id=run.collection_run_id,
-        summary=MetricSummaryContract(
-            cpu_datapoints=336, cpu_avg=4.9, cpu_max=12.0,
-            net_in_avg=1024.0, net_out_avg=512.0,
-        ),
+        summary=MetricSummaryContract(**GOLDEN_A1["metric_summary"]),
         window_start=NOW - timedelta(days=14),
         window_end=NOW,
         collected_at=NOW,
@@ -428,6 +442,9 @@ def test_t1_idle_ec2_downsize_and_auto_rollback_flow(db, client_pg, aws):
 
     # 원복이 **실물을 되돌렸다.** 상태 전이만 보면 아무것도 하지 않은 원복과 갈리지 않는다.
     assert aws.state["current_type"] == STARTING_TYPE
+    # 백업 state 가 running 이라 원복이 다시 켰다 — 기동 호출만 빠지면 "원복 성공인데
+    # 서비스가 꺼져 있다"가 된다(PR #358 리뷰: 김세혁 M3).
+    assert aws.state["current_state"] == "running"
     reverts = [
         kwargs for op, kwargs in aws.calls
         if op == "modify_instance_attribute"
@@ -533,6 +550,7 @@ def test_t2_ssh_bruteforce_block_and_one_click_release_flow(db, client_pg, aws):
         → Execution `SUCCESS` · 실물 규칙 1건
       → 차단 뒤 **해제 후보 제안**(#329) → 관제자 [해제]
       → `RUNBOOK_NACL_RESTORE`(`USER_APPROVAL`) → `SUCCESS` · 실물 규칙 0건
+        · Incident `AWAITING_CLOSURE`(T1 9번과 같은 자리 — 종료는 관제자 판단이다)
 
     핵심: 막는 것도 푸는 것도 **사람이 판단한다.** 오탐 시 서브넷 전체가 끊기므로
     의도적으로 사람을 넣었다 — 두 번의 `POST /actions/execute`가 그 자리다.
@@ -592,3 +610,5 @@ def test_t2_ssh_bruteforce_block_and_one_click_release_flow(db, client_pg, aws):
     assert release.status is ExecutionStatus.SUCCESS
     assert release.trigger_source is TriggerSource.USER_APPROVAL
     assert aws.state["acl_entries"] == []
+    # 해제가 닫히면 Incident 는 T1 과 같이 종료 대기로 간다 — 닫는 것은 사람이다.
+    assert incidents_repo.get_incident(db, incident_id).status is IncidentStatus.AWAITING_CLOSURE

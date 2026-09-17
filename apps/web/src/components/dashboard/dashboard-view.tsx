@@ -2,7 +2,9 @@
 // 파생한다(lib/dashboard). 서버 컴포넌트다 — 실시간 이벤트가 오면 RealtimeProvider의 `router.refresh()`가
 // 이 트리를 다시 그려 숫자가 따라온다.
 //
-// 아직 없는 것(#294 완료 기준): AI 조치 제안 카드와 `[원클릭 조치]`, 토폴로지의 외부 Source IP 노드·공격 경로.
+// AI 조치 제안 카드와 `[원클릭 조치]`는 이 본문 밖(`action-proposal-card.tsx`)에서 페이지가 위에 얹는다.
+// 아직 없는 것(#294 완료 기준): 토폴로지의 외부 Source IP 노드·공격 경로 — 공개 계약에 출발지 필드가 없어
+// 계약 추가(#362)가 먼저다.
 
 import { DashboardTopology } from '@/components/dashboard/dashboard-topology';
 import { EmptyState } from '@/components/empty-state';
