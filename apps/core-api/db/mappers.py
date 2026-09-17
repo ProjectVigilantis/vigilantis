@@ -134,6 +134,7 @@ def to_candidate_data(row: models.RunbookCandidate) -> RunbookCandidateData:
             "target_arn": row.target_arn,
             "parameters": row.parameters,
             "display_parameters": row.display_parameters,
+            "ai_savings_estimate": row.ai_savings_estimate,
             "evidence_ids": row.evidence_ids,
             "status": row.status,
         }
@@ -149,6 +150,10 @@ def new_candidate(contract: RunbookCandidateData) -> models.RunbookCandidate:
         # JSONB에 담기므로 Enum·bool이 아니라 JSON 스칼라로 떨어뜨린다
         parameters=contract.parameters.model_dump(mode="json"),
         display_parameters=dict(contract.display_parameters),
+        ai_savings_estimate=(
+            contract.ai_savings_estimate.model_dump(mode="json")
+            if contract.ai_savings_estimate is not None else None
+        ),
         evidence_ids=list(contract.evidence_ids),
         status=contract.status,
     )

@@ -420,6 +420,7 @@ class RunbookCandidate(Base):
     # 우회한 삽입이 빈 파라미터로 조용히 저장된다. 쓰는 쪽이 반드시 값을 낸다.
     parameters: Mapped[dict] = mapped_column(JSONB)
     display_parameters: Mapped[dict] = mapped_column(JSONB, default=dict)
+    ai_savings_estimate: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     evidence_ids: Mapped[list] = mapped_column(JSONB, default=list)
     status: Mapped[CandidateStatus] = mapped_column(
         _enum(CandidateStatus, "candidate_status"),

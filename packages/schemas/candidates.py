@@ -28,6 +28,7 @@ from .runbook_parameters import (
     build_display_parameters,
 )
 from .runbooks import AI_RECOMMENDABLE_RUNBOOK_IDS, RunbookId
+from .savings import AISavingsEstimate, validate_candidate_savings
 
 
 @unique
@@ -47,6 +48,7 @@ class RunbookCandidateData(BaseModel):
     runbook_id: RunbookId
     target_arn: str = Field(min_length=1)
     parameters: CandidateParameters
+    ai_savings_estimate: AISavingsEstimate | None = None
     # 생략하면 서버가 채운다. DB에서 되읽을 때는 저장된 값이 그대로 들어온다
     display_parameters: dict[str, str] = Field(default_factory=dict)
     evidence_ids: list[str] = Field(min_length=1)
@@ -75,4 +77,8 @@ class RunbookCandidateData(BaseModel):
                 "display_parameters는 서버가 parameters에서 생성합니다 — 직접 채울 수 없습니다"
             )
         self.display_parameters = derived
+        validate_candidate_savings(
+            self.ai_savings_estimate, self.runbook_id, self.target_arn,
+            getattr(self.parameters, "target_instance_type", None),
+        )
         return self
