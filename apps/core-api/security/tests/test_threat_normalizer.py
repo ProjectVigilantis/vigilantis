@@ -10,6 +10,7 @@ import json
 import sys
 import uuid
 from datetime import datetime, timezone
+from ipaddress import ip_address, ip_network
 from pathlib import Path
 
 import pytest
@@ -173,6 +174,41 @@ def test_open_ip_key_changes_with_identity(field, value):
     base = normalize_mock_input(OPEN_IP_RAW)
     other = normalize_mock_input({**OPEN_IP_RAW, field: value})
     assert base.deduplication_key != other.deduplication_key
+
+
+@pytest.mark.parametrize("spelled, canonical", [
+    ("2001:DB8::1", "2001:db8::1"),
+    ("2001:0db8:0000:0000:0000:0000:0000:0001", "2001:db8::1"),
+])
+def test_ssh_key_ignores_ipv6_spelling(spelled, canonical):
+    """#374 리뷰 ③-2: 같은 IPv6 주소를 다르게 적어도 같은 관측의 재배달이다."""
+    a = normalize_mock_input({**SSH_RAW, "source_ip": spelled})
+    b = normalize_mock_input({**SSH_RAW, "source_ip": canonical})
+    assert a.deduplication_key == b.deduplication_key
+    # 정준화는 키에서만 한다 — payload 는 받은 원문을 보존한다
+    assert a.payload.source_ip == spelled
+
+
+def test_open_ip_key_ignores_ipv6_spelling():
+    a = normalize_mock_input({**OPEN_IP_RAW, "source_cidr": "0::/0"})
+    b = normalize_mock_input({**OPEN_IP_RAW, "source_cidr": "::/0"})
+    assert a.deduplication_key == b.deduplication_key
+    assert a.payload.source_cidr == "0::/0"
+
+
+def test_golden_inputs_are_already_canonical():
+    """골든 입력이 정준 표기면 정준화 전후 키가 같다 — 이미 적재된 위협의 키가
+    바뀌어 같은 관측이 새 행으로 들어가는 일이 없다."""
+    checked = 0
+    for path in sorted(GOLDEN_INPUT.glob("*.json")):
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if "source_cidr" in raw:
+            assert str(ip_network(raw["source_cidr"])) == raw["source_cidr"], path.name
+            checked += 1
+        if "source_ip" in raw:
+            assert str(ip_address(raw["source_ip"])) == raw["source_ip"], path.name
+            checked += 1
+    assert checked, "골든 입력에서 IP 값을 찾지 못했다"
 
 
 def test_open_ip_port_none_is_distinct_from_zero():

@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+from ipaddress import ip_network
 from typing import Optional
 
 # schemas 는 진입점(main.py·conftest)이 sys.path 에 올린다 — collector.py·rule_engine.py 와
@@ -34,6 +35,9 @@ from schemas.events import (
 
 # ----- 판정 임계값 (2026-08-31 안성일 결정) -----
 WORLD_CIDRS = ("0.0.0.0/0", "::/0")     # IPv4·IPv6 전체개방 (S7 IPv6 누락 방지)
+# 비교는 네트워크 값으로 한다 — 문자열로 비교하면 같은 네트워크의 다른 표기(0::/0)가
+# "전체개방 아님"으로 거부된다. 위 문자열은 골든 정답의 임계값 기록과 대조되므로 그대로 둔다.
+_WORLD_NETWORKS = frozenset(ip_network(cidr) for cidr in WORLD_CIDRS)
 ALL_PROTOCOL = "-1"                     # 전 프로토콜 개방 표기
 ALL_PORTS = (0, 65535)                  # 단일 프로토콜 전 포트 개방 (S5)
 SENSITIVE_PORTS = (22, 3389)           # SSH·RDP — 노출 시 민감 (S1·S6)
@@ -56,7 +60,7 @@ def _is_all_ports(from_port: Optional[int], to_port: Optional[int]) -> bool:
 
 
 def _evaluate_open_ip(payload: OpenIpThreatPayload) -> tuple[RiskLevel, list[RiskReasonCode]]:
-    if payload.source_cidr not in WORLD_CIDRS:
+    if ip_network(payload.source_cidr) not in _WORLD_NETWORKS:
         # ③: 전체 공개가 아닌 OPEN_IP 는 접수 단계에서 거부된다 — 여기 도달하면 계약 위반.
         raise ValueError(
             f"전체 공개(0.0.0.0/0·::/0)가 아닌 OPEN_IP 는 접수 단계에서 거부되어야 한다: "
