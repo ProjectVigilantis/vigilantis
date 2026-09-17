@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 380" width="900" height="380" font-family="Malgun Gothic, Apple SD Gothic Neo, sans-serif">
+  <rect width="900" height="380" fill="#FFFFFF"/>
+
+  <!-- 왼쪽: 국내 클라우드 시장 규모 -->
+  <text x="40" y="34" font-size="15" font-weight="bold" fill="#1B3A5C">국내 클라우드 시장 규모</text>
+  <text x="40" y="54" font-size="12" fill="#43566B">단위: 억 달러 · 2031년은 전망치</text>
+
+  <line x1="40" y1="300" x2="420" y2="300" stroke="#8FA8C4" stroke-width="1.5"/>
+
+  <rect x="90" y="248" width="90" height="52" fill="#8FA8C4"/>
+  <text x="135" y="238" text-anchor="middle" font-size="16" font-weight="bold" fill="#1B3A5C">99.5</text>
+  <text x="135" y="320" text-anchor="middle" font-size="13" fill="#43566B">2025년</text>
+
+  <rect x="280" y="100" width="90" height="200" fill="#1B3A5C"/>
+  <text x="325" y="90" text-anchor="middle" font-size="16" font-weight="bold" fill="#1B3A5C">382.8</text>
+  <text x="325" y="320" text-anchor="middle" font-size="13" fill="#43566B">2031년</text>
+
+  <defs>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#C48A2E"/>
+    </marker>
+  </defs>
+  <path d="M188,232 L272,128" stroke="#C48A2E" stroke-width="2.5" fill="none" marker-end="url(#m)"/>
+  <text x="196" y="160" text-anchor="middle" font-size="13" font-weight="bold" fill="#8A5E12">약 3.8배</text>
+
+  <!-- 가운데 구분선 -->
+  <line x1="460" y1="30" x2="460" y2="350" stroke="#D5DAE6" stroke-width="1.5"/>
+
+  <!-- 오른쪽: 연평균 성장률 비교 -->
+  <text x="500" y="34" font-size="15" font-weight="bold" fill="#1B3A5C">연평균 성장률(CAGR) — 2026–2031</text>
+  <text x="500" y="54" font-size="12" fill="#43566B">우리가 겨냥한 구간이 시장 평균보다 빠르다</text>
+
+  <text x="500" y="122" font-size="13" fill="#43566B">전체 시장</text>
+  <rect x="500" y="132" width="252" height="34" fill="#C8D4E3"/>
+  <text x="764" y="156" font-size="16" font-weight="bold" fill="#43566B">25.18%</text>
+
+  <text x="500" y="212" font-size="13" font-weight="bold" fill="#8A5E12">중소기업 세그먼트</text>
+  <rect x="500" y="222" width="272" height="34" fill="#C48A2E"/>
+  <text x="784" y="246" font-size="16" font-weight="bold" fill="#8A5E12">27.2%</text>
+
+  <rect x="500" y="284" width="360" height="56" rx="5" fill="#F7FAFD" stroke="#8FA8C4" stroke-width="1.5"/>
+  <text x="516" y="308" font-size="12.5" fill="#1A2733">성장 동력: <tspan font-weight="bold">정부 클라우드 바우처</tspan>로 도입 장벽이</text>
+  <text x="516" y="328" font-size="12.5" fill="#1A2733">낮아지고, 그에 따라 관리형 DevOps 수요가 생긴다</text>
+
+  <!-- 출처 -->
+  <text x="40" y="366" font-size="11" fill="#7C8499">출처: Mordor Intelligence, South Korea Cloud Computing Market Size &amp; Share Analysis — Growth Trends and Forecast (2026–2031), 2026-01-15 갱신</text>
+</svg>
