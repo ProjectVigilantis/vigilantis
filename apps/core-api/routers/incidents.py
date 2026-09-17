@@ -5,7 +5,7 @@
 # (Issue #68·#199)
 #
 #   - 응답은 공개 계약 schemas.api.incidents로만 직렬화한다. 목록은 상세의
-#     부분집합 10필드, created_at 내림차순 전체 반환 — SSOT §API 계약.
+#     부분집합이며 created_at 내림차순으로 전체 반환한다 — SSOT §API 계약.
 #   - SQL은 db.repositories 경유 — 라우터는 응답 조립만 한다.
 #   - recommendations는 Guardrail PASS 제안(EXECUTABLE 후보)만 담는다.
 #   - available_recovery_runbook_ids는 실행 이력에서 파생한다 — 짝(ADR-0004)이
@@ -20,9 +20,12 @@
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Sequence
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Request
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from schemas.api.errors import ErrorCode
@@ -32,15 +35,19 @@ from schemas.api.incidents import (
     IncidentResponse,
     IncidentsResponse,
     IncidentStatus,
+    OpenIpThreatContext,
     ResolveIncidentRequest,
+    SshBruteForceThreatContext,
+    ThreatContext,
 )
 from schemas.api.ws import WsEventType
 from schemas.candidates import CandidateStatus
+from schemas.events import SshBruteForceThreatPayload
 from schemas.executions import EXECUTION_RECOVERABLE_STATUSES
 from schemas.runbooks import ROLLBACK_RUNBOOK_BY_MAIN_ID
 
 import workflows
-from db import models
+from db import mappers, models
 from db.repositories import executions as executions_repo
 from db.repositories import incidents as incidents_repo
 from db.session import get_db
@@ -49,6 +56,7 @@ from identifiers import canonical_id
 from realtime import incident_event
 
 router = APIRouter(prefix="/api/v1", tags=["incidents"])
+logger = logging.getLogger("vigilantis.incidents")
 
 
 def _recovery_ids(
@@ -79,7 +87,61 @@ def _verification_hold(execution: models.ActionExecution) -> Optional[dict]:
     }
 
 
-def _to_list_item(row: models.Incident) -> IncidentListItem:
+def _to_threat_context(
+    row: models.Incident, event: models.ThreatEvent | None,
+) -> ThreatContext | None:
+    """영속 위협 관측만 노출한다. 누락·불일치는 다른 Incident 조회를 막지 않는다."""
+    if row.category != IncidentCategory.SECOPS:
+        return None
+    if row.threat_event_id is None:
+        reason = "missing_threat_event_id"
+    elif event is None:
+        reason = "threat_event_not_found"
+    elif event.target_arn != row.subject_arn:
+        reason = "target_mismatch"
+    else:
+        try:
+            threat = mappers.to_threat_event(event)
+            if isinstance(threat.payload, SshBruteForceThreatPayload):
+                return SshBruteForceThreatContext(
+                    event_type=threat.event_type.value,
+                    source_ip=threat.payload.source_ip,
+                )
+            return OpenIpThreatContext(
+                event_type=threat.event_type.value,
+                exposed_cidr=threat.payload.source_cidr,
+            )
+        except ValidationError:
+            reason = "invalid_threat_event"
+
+    # 원문·ValidationError는 IP·payload를 포함할 수 있어 남기지 않는다.
+    logger.warning(
+        "incident_threat_context_unavailable",
+        extra={
+            "incident_id": row.incident_id,
+            "threat_event_id": row.threat_event_id,
+            "reason": reason,
+        },
+    )
+    return None
+
+
+def _load_threat_contexts(
+    db: Session, rows: Sequence[models.Incident],
+) -> dict[str, ThreatContext | None]:
+    events = incidents_repo.get_threat_events_by_ids(
+        db, [
+            row.threat_event_id for row in rows
+            if row.category == IncidentCategory.SECOPS and row.threat_event_id is not None
+        ],
+    )
+    return {
+        row.incident_id: _to_threat_context(row, events.get(row.threat_event_id))
+        for row in rows
+    }
+
+
+def _to_list_item(row: models.Incident, context: ThreatContext | None) -> IncidentListItem:
     return IncidentListItem.model_validate(
         {
             "incident_id": row.incident_id,
@@ -90,6 +152,7 @@ def _to_list_item(row: models.Incident) -> IncidentListItem:
             "initial_risk_level": row.initial_risk_level,
             "reviewed_risk_level": row.reviewed_risk_level,
             "response_mode": row.response_mode,
+            "threat_context": context,
             "created_at": row.created_at,
             "updated_at": row.updated_at,
         }
@@ -103,7 +166,8 @@ def list_incidents(
     db: Session = Depends(get_db),
 ) -> IncidentsResponse:
     rows = incidents_repo.list_incidents(db, status=status, category=category)
-    return IncidentsResponse(items=[_to_list_item(row) for row in rows])
+    contexts = _load_threat_contexts(db, rows)
+    return IncidentsResponse(items=[_to_list_item(row, contexts[row.incident_id]) for row in rows])
 
 
 def _load_incident(db: Session, incident_id: str) -> models.Incident:
@@ -163,6 +227,7 @@ def _to_detail(db: Session, row: models.Incident) -> IncidentResponse:
             "initial_risk_level": row.initial_risk_level,
             "reviewed_risk_level": row.reviewed_risk_level,
             "response_mode": row.response_mode,
+            "threat_context": _load_threat_contexts(db, [row])[row.incident_id],
             "summary_lines": row.summary_lines,
             "evidence_ids": evidence_ids,
             "recommendations": recommendations,

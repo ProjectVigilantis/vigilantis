@@ -8,11 +8,14 @@
 #     비면 제목이 자원 ID가 된다(Issue #200). 위협 이름은 만드는 시점에 이미 정해져
 #     있어 AI를 기다리지 않는다. FINOPS는 진단명이라 분석 전 null이며, 그 경우 FE가
 #     category+대상 ARN 축약으로 표시한다(Issue #45 코멘트).
-#   - 목록(IncidentListItem)은 상세의 부분집합 10필드다. 정렬 created_at 내림차순·
+#   - 목록(IncidentListItem)은 상세의 부분집합이다. 정렬 created_at 내림차순·
 #     전체 반환(페이지네이션 Post-MVP)·필터 검증은 라우터 계약이다.
 #   - 초기 판정과 AI 사후 평가 분리: initial_risk_level(불변)과 reviewed_risk_level을
 #     서로 덮어쓰지 않는다. 평가 전·실패 시 reviewed는 null.
 #   - FINOPS는 두 위험도·response_mode가 전부 null이다(위험 대응 축 없음).
+#   - threat_context는 저장된 위협 관측에서 파생한다. SSH 출발지 IP와 OPEN_IP의
+#     노출 CIDR을 구분하고 대상은 subject_arn을 쓴다. AI 분석 상태와 무관하며,
+#     FINOPS·조회 가능한 위협 문맥이 없는 SECOPS는 null이다(위협 없음 의미 아님).
 #   - summary_lines는 분석 완료 시 정확히 3개, 분석 중·분석 실패 시 빈 배열.
 #   - recommendations는 AI 추천 가능(본편 7종)·Guardrail PASS 제안만 담고,
 #     Incident당 같은 runbook_id는 최대 1개 — (incident_id, runbook_id)가 외부 식별자.
@@ -24,8 +27,7 @@
 #     RESOLVED인 것과 동시에 채워지고, 그 전에는 둘 다 null이다 — 상태만 옮기고
 #     판단을 빠뜨리면 왜 종료됐는지 남지 않는다. 관제자 복구 접수로 재개되면
 #     (ADR-0004) 다시 null이 된다 — "지금 이 인시던트가 종료된 이유"를 말하는
-#     값이라 재개된 뒤에는 거짓이 되기 때문이다. 목록에는 넣지 않는다(부분집합
-#     10필드 유지). (Issue #199)
+#     값이라 재개된 뒤에는 거짓이 되기 때문이다. 목록에는 넣지 않는다. (Issue #199)
 #   - executions의 verification_hold는 판정 불가 보류 기록이다 — AWS에 물어보지 못해
 #     실행 결과를 확정하지 못했을 때의 사유 코드·횟수·시각. status가 UNVERIFIED면
 #     반드시 있고, 판정이 내려진 SUCCESS·ROLLBACK_INITIATED에는 오지 않는다. (Issue #249)
@@ -35,7 +37,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum, unique
-from typing import Optional
+from ipaddress import ip_address, ip_network
+from typing import Annotated, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -107,6 +110,46 @@ class ResolveIncidentRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     resolution: ResolutionJudgement
+
+
+class SshBruteForceThreatContext(BaseModel):
+    """SSH 시도에서 관측한 출발지 IP. 대상은 Incident의 subject_arn이다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_type: Literal["SSH_BRUTE_FORCE"]
+    source_ip: str = Field(min_length=1, description="관측된 출발지 IPv4 또는 IPv6 주소")
+
+    @field_validator("source_ip")
+    @classmethod
+    def _valid_ip(cls, value: str) -> str:
+        ip_address(value)
+        return value
+
+
+class OpenIpThreatContext(BaseModel):
+    """보안 그룹 인그레스가 허용한 네트워크 범위. 관측된 공격자 IP가 아니다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_type: Literal["OPEN_IP"]
+    exposed_cidr: str = Field(min_length=1, description="노출된 IPv4 또는 IPv6 CIDR")
+
+    @field_validator("exposed_cidr")
+    @classmethod
+    def _valid_cidr(cls, value: str) -> str:
+        if "/" not in value:
+            raise ValueError("exposed_cidr에는 네트워크 prefix가 필요합니다")
+        ip_network(value)
+        return value
+
+
+# events는 이 모듈의 위험도·대응 타입을 사용한다. 공개 discriminator는 문자열
+# Literal로 두어 내부 이벤트 계약을 역으로 import하지 않는다 (Issue #362).
+ThreatContext = Annotated[
+    SshBruteForceThreatContext | OpenIpThreatContext,
+    Field(discriminator="event_type"),
+]
 
 
 class RecommendationItem(BaseModel):
@@ -234,6 +277,9 @@ class IncidentResponse(BaseModel):
     initial_risk_level: Optional[RiskLevel] = None
     reviewed_risk_level: Optional[RiskLevel] = None
     response_mode: Optional[ResponseMode] = None
+    threat_context: ThreatContext | None = Field(
+        None, description="저장된 위협 문맥. null은 문맥 부재이며 위협 없음 판정이 아니다.",
+    )
     summary_lines: list[str] = Field(default_factory=list)
     evidence_ids: list[str] = Field(default_factory=list)
     recommendations: list[RecommendationItem] = Field(default_factory=list)
@@ -254,6 +300,9 @@ class IncidentResponse(BaseModel):
             raise ValueError(
                 "FINOPS는 initial_risk_level·reviewed_risk_level·response_mode가 null이어야 합니다"
             )
+
+        if self.category == IncidentCategory.FINOPS and self.threat_context is not None:
+            raise ValueError("FINOPS는 threat_context가 null이어야 합니다")
 
         # SECOPS 카드 제목은 위협 이름이다 — null이면 FE fallback이 자원 ID를 제목으로 쓴다
         if self.category == IncidentCategory.SECOPS and self.title is None:
@@ -316,7 +365,7 @@ class IncidentResponse(BaseModel):
 
 
 class IncidentListItem(BaseModel):
-    """목록 항목 — 상세(IncidentResponse)의 부분집합 10필드 (Issue #45 코멘트 확정)."""
+    """목록 항목 — 상세(IncidentResponse)의 부분집합 (Issue #45 코멘트 확정)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -328,6 +377,9 @@ class IncidentListItem(BaseModel):
     initial_risk_level: Optional[RiskLevel] = None
     reviewed_risk_level: Optional[RiskLevel] = None
     response_mode: Optional[ResponseMode] = None
+    threat_context: ThreatContext | None = Field(
+        None, description="저장된 위협 문맥. null은 문맥 부재이며 위협 없음 판정이 아니다.",
+    )
     created_at: UtcDateTime
     updated_at: UtcDateTime
 
@@ -342,6 +394,9 @@ class IncidentListItem(BaseModel):
             raise ValueError(
                 "FINOPS는 initial_risk_level·reviewed_risk_level·response_mode가 null이어야 합니다"
             )
+
+        if self.category == IncidentCategory.FINOPS and self.threat_context is not None:
+            raise ValueError("FINOPS는 threat_context가 null이어야 합니다")
 
         # 상세와 같은 불변식: SECOPS 카드 제목은 위협 이름이다
         if self.category == IncidentCategory.SECOPS and self.title is None:

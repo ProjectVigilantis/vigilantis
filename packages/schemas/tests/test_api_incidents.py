@@ -346,7 +346,7 @@ def test_title_rejects_empty_string():
 
 LIST_ITEM_FIELDS = {
     "incident_id", "title", "subject_arn", "category", "status",
-    "initial_risk_level", "reviewed_risk_level", "response_mode",
+    "initial_risk_level", "reviewed_risk_level", "response_mode", "threat_context",
     "created_at", "updated_at",
 }
 
@@ -369,7 +369,7 @@ def make_list_item(**over):
 
 
 def test_list_item_is_exact_subset_of_detail():
-    # 부분집합 계약: 목록 10필드는 정확히 이 목록이고, 전부 상세 모델에도 존재한다
+    # 부분집합 계약: 목록은 LIST_ITEM_FIELDS와 같고, 전부 상세 모델에도 존재한다
     assert set(IncidentListItem.model_fields) == LIST_ITEM_FIELDS
     assert LIST_ITEM_FIELDS <= set(IncidentResponse.model_fields)
 
@@ -411,3 +411,71 @@ def test_list_envelope_rejects_bare_array_shape():
         IncidentsResponse.model_validate([make_list_item()])
     with pytest.raises(ValidationError):
         IncidentsResponse.model_validate({"items": [], "total": 0})
+
+
+# --- 위협 문맥 (Issue #362): 관측한 IP와 노출 CIDR은 다른 사실이다 ---
+
+@pytest.mark.parametrize("model,make", [
+    (IncidentResponse, make_secops_incident), (IncidentListItem, make_list_item),
+])
+@pytest.mark.parametrize("context", [
+    {"event_type": "SSH_BRUTE_FORCE", "source_ip": "203.0.113.10"},
+    {"event_type": "SSH_BRUTE_FORCE", "source_ip": "2001:db8::10"},
+    {"event_type": "OPEN_IP", "exposed_cidr": "0.0.0.0/0"},
+    {"event_type": "OPEN_IP", "exposed_cidr": "::/0"},
+])
+def test_threat_context_roundtrip(model, make, context):
+    dto = model.model_validate(make(threat_context=context))
+    assert dto.model_dump(mode="json")["threat_context"] == context
+    assert model.model_validate_json(dto.model_dump_json()) == dto
+
+
+@pytest.mark.parametrize("model,make", [
+    (IncidentResponse, make_secops_incident), (IncidentListItem, make_list_item),
+])
+@pytest.mark.parametrize("context", [
+    {},
+    {"event_type": "UNKNOWN", "source_ip": "203.0.113.10"},
+    {"event_type": "SSH_BRUTE_FORCE", "exposed_cidr": "0.0.0.0/0"},
+    {"event_type": "OPEN_IP", "source_ip": "203.0.113.10"},
+    {"event_type": "OPEN_IP", "source_cidr": "0.0.0.0/0"},
+    {"event_type": "SSH_BRUTE_FORCE", "source_ip": "not-an-ip"},
+    {"event_type": "SSH_BRUTE_FORCE", "source_ip": "203.0.113.10/32"},
+    {"event_type": "SSH_BRUTE_FORCE", "source_ip": 12345},
+    {"event_type": "OPEN_IP", "exposed_cidr": "0.0.0.0"},
+    {"event_type": "OPEN_IP", "exposed_cidr": "192.0.2.1/24"},
+    {"event_type": "OPEN_IP", "exposed_cidr": "::/129"},
+    {"event_type": "OPEN_IP", "exposed_cidr": "0.0.0.0/0", "source_ip": "203.0.113.10"},
+    [{"event_type": "SSH_BRUTE_FORCE", "source_ip": "203.0.113.10"}],
+])
+def test_threat_context_rejects_invalid_or_mixed_meanings(model, make, context):
+    with pytest.raises(ValidationError):
+        model.model_validate(make(threat_context=context))
+
+
+@pytest.mark.parametrize("model,make", [
+    (IncidentResponse, make_secops_incident), (IncidentListItem, make_list_item),
+])
+def test_missing_threat_context_is_explicit_null(model, make):
+    assert model.model_validate(make()).model_dump(mode="json")["threat_context"] is None
+
+
+@pytest.mark.parametrize("model", [IncidentResponse, IncidentListItem])
+@pytest.mark.parametrize("context", [
+    {"event_type": "SSH_BRUTE_FORCE", "source_ip": "203.0.113.10"},
+    {"event_type": "OPEN_IP", "exposed_cidr": "0.0.0.0/0"},
+])
+def test_finops_rejects_threat_context(model, context):
+    data = make_finops_incident(threat_context=context)
+    if model is IncidentListItem:
+        data = {key: value for key, value in data.items() if key in LIST_ITEM_FIELDS}
+    with pytest.raises(ValidationError, match="FINOPS는 threat_context가 null"):
+        model.model_validate(data)
+
+
+def test_public_threat_discriminator_covers_internal_event_types():
+    from schemas.events import ThreatEventType
+
+    schema = IncidentResponse.model_json_schema()
+    variants = schema["properties"]["threat_context"]["anyOf"][0]["discriminator"]["mapping"]
+    assert set(variants) == {item.value for item in ThreatEventType}

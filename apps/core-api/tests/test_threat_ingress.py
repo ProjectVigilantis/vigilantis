@@ -52,13 +52,15 @@ def _raw(name="evt_ssh_bruteforce_001"):
 
 
 @pytest.mark.parametrize(
-    ("name", "title"),
+    ("name", "title", "context_field", "input_field"),
     [
-        ("evt_open_ip_001", "보안 그룹 인그레스 전체 개방"),
-        ("evt_ssh_bruteforce_001", "SSH 브루트포스 시도"),
+        ("evt_open_ip_001", "보안 그룹 인그레스 전체 개방", "exposed_cidr", "source_cidr"),
+        ("evt_ssh_bruteforce_001", "SSH 브루트포스 시도", "source_ip", "source_ip"),
     ],
 )
-def test_real_workflow_preserves_judgement_evidence_and_read_api(db, client_pg, name, title):
+def test_real_workflow_preserves_judgement_evidence_and_read_api(
+    db, client_pg, name, title, context_field, input_field,
+):
     raw = _raw(name)
     expected = json.loads((GOLDEN / "expected" / f"{name}.json").read_text(encoding="utf-8"))
     events = []
@@ -91,6 +93,11 @@ def test_real_workflow_preserves_judgement_evidence_and_read_api(db, client_pg, 
     assert dto.response_mode == row.response_mode
     assert dto.evidence_ids == [evidence.evidence_id]
     assert dto.summary_lines == dto.recommendations == dto.executions == []
+    expected_context = {"event_type": raw["event_type"], context_field: raw[input_field]}
+    assert response.json()["threat_context"] == expected_context
+    listing = client_pg.get("/api/v1/incidents")
+    assert listing.status_code == 200
+    assert listing.json()["items"][0]["threat_context"] == expected_context
     assert len(events) == 1
     assert events[0].event_type == WsEventType.INCIDENT_CREATED
     assert events[0].data.incident_id == result.incident_id
@@ -364,6 +371,44 @@ def test_consumer_creates_inbox_under_existing_parent_and_logs_path(tmp_path, ca
     assert len(started) == 1
     assert started[0].inbox == str(inbox)
     assert started[0].interval_seconds == 2
+
+
+@pytest.mark.parametrize(("name", "field", "value"), [
+    ("evt_ssh_bruteforce_001", "source_ip", "private-invalid-ip"),
+    ("evt_open_ip_001", "source_cidr", "192.0.2.1/24"),
+])
+def test_invalid_source_is_rejected_without_storage_or_retry(
+    committed_sessions, tmp_path, caplog, name, field, value,
+):
+    raw = _raw(name)
+    raw[field] = value
+    inbox_path = tmp_path / "invalid-source.json"
+    inbox_path.write_text(json.dumps(raw), encoding="utf-8")
+    events = []
+    consumer = MockThreatConsumer(tmp_path, committed_sessions, events.append, interval_seconds=1)
+
+    with caplog.at_level(logging.WARNING, logger="vigilantis.mock_threat_source"):
+        assert consumer.consume_once() == {"created": 0, "existing": 0, "rejected": 1, "failed": 0}
+        assert consumer.consume_once() == {"created": 0, "existing": 0, "rejected": 0, "failed": 0}
+
+    assert not inbox_path.exists()
+    archived = list((tmp_path / "rejected").glob("*.json"))
+    assert len(archived) == 1
+    assert json.loads(archived[0].read_text(encoding="utf-8")) == raw
+    assert events == []
+    with committed_sessions() as check:
+        assert not list(check.scalars(select(models.ThreatEvent)))
+        assert not list(check.scalars(select(models.Incident)))
+        assert not list(check.scalars(select(models.Evidence)))
+
+    rejected = [r for r in caplog.records if r.message == "mock_threat_input_rejected"]
+    assert len(rejected) == 1
+    assert rejected[0].reason == "input_contract_rejected"
+    assert rejected[0].error_type == "ValidationError"
+    assert rejected[0].exc_info is None
+    from logging_config import JsonLineFormatter
+
+    assert value not in JsonLineFormatter().format(rejected[0])
 
 
 @pytest.mark.parametrize(("field", "length"), [("event_id", 300), ("target_arn", 600)])

@@ -71,6 +71,39 @@ def test_ssh_input_violations(over):
         MOCK_INPUT.validate_python(make_ssh_input(**over))
 
 
+@pytest.mark.parametrize(("make_input", "field", "value"), [
+    (make_ssh_input, "source_ip", "203.0.113.10"),
+    (make_ssh_input, "source_ip", "2001:0db8:0:0:0:0:0:10"),
+    (make_open_ip_input, "source_cidr", "0.0.0.0/0"),
+    (make_open_ip_input, "source_cidr", "::/0"),
+    # 형식 검증은 전체개방 여부를 판정하지 않는다. 그 정책은 Risk Evaluator 소유다.
+    (make_open_ip_input, "source_cidr", "192.0.2.0/24"),
+    (make_open_ip_input, "source_cidr", "2001:0db8:0:0::/64"),
+])
+def test_input_preserves_valid_source_observation(make_input, field, value):
+    observation = MOCK_INPUT.validate_python(make_input(**{field: value}))
+    assert getattr(observation, field) == value
+
+
+@pytest.mark.parametrize(("make_input", "field", "value"), [
+    (make_ssh_input, "source_ip", "not-an-ip"),
+    (make_ssh_input, "source_ip", "256.0.0.1"),
+    (make_ssh_input, "source_ip", "203.0.113.10/32"),
+    (make_ssh_input, "source_ip", " 203.0.113.10"),
+    (make_ssh_input, "source_ip", "203.0.113.10 "),
+    (make_open_ip_input, "source_cidr", "not-a-cidr"),
+    (make_open_ip_input, "source_cidr", "203.0.113.10"),
+    (make_open_ip_input, "source_cidr", "192.0.2.1/24"),
+    (make_open_ip_input, "source_cidr", "2001:db8::1/64"),
+    (make_open_ip_input, "source_cidr", "192.0.2.0/33"),
+    (make_open_ip_input, "source_cidr", " 0.0.0.0/0"),
+    (make_open_ip_input, "source_cidr", "0.0.0.0/0 "),
+])
+def test_input_rejects_invalid_source_format(make_input, field, value):
+    with pytest.raises(ValidationError):
+        MOCK_INPUT.validate_python(make_input(**{field: value}))
+
+
 def make_normalized(**over):
     base = {
         "threat_event_id": "thr-20260814-001",

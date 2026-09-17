@@ -18,9 +18,10 @@
 from __future__ import annotations
 
 from enum import Enum, unique
+from ipaddress import ip_address, ip_network
 from typing import Annotated, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .api.assets import UtcDateTime
 from .api.incidents import ResponseMode, RiskLevel
@@ -46,6 +47,14 @@ class OpenIpThreatInput(BaseModel):
     to_port: Optional[int] = Field(None, ge=0, le=65535)
     source_cidr: str = Field(min_length=1)
 
+    @field_validator("source_cidr")
+    @classmethod
+    def _valid_source_cidr(cls, value: str) -> str:
+        if "/" not in value:
+            raise ValueError("source_cidr는 CIDR 형식이어야 합니다")
+        ip_network(value)
+        return value
+
 
 class SshBruteForceThreatInput(BaseModel):
     """SSH 브루트포스 Mock 이벤트 — 비공개 Threat Ingress 입력."""
@@ -59,6 +68,12 @@ class SshBruteForceThreatInput(BaseModel):
     occurred_at: UtcDateTime
     failed_attempt_count: int = Field(ge=1)
     window_seconds: int = Field(ge=1)
+
+    @field_validator("source_ip")
+    @classmethod
+    def _valid_source_ip(cls, value: str) -> str:
+        ip_address(value)
+        return value
 
 
 MockThreatEventInput = Annotated[
