@@ -46,11 +46,35 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * 응답이 오기 전에 끊긴 실패(연결 거부·DNS 등) — 오류 봉투가 없으므로 원인 코드만 문구에 남긴다.
+ *
+ * `fetch`가 던진 오류를 그대로 올리지 않고 **여기서 새로 만든다.** Node의 연결 오류
+ * (`TypeError: fetch failed` → cause `connect ECONNREFUSED`)는 스택이 전부 `node:` 내부 프레임이다.
+ * 앱 코드 프레임이 하나도 없는 Error가 dev에서 서버 컴포넌트 prop(`<ErrorState error={…} />`)으로
+ * 넘어가면 React Flight 디버그 직렬화가 스트림을 깨뜨려 화면이 끝나지 않는다
+ * (`chunk.reason.enqueueModel is not a function` — BE 미기동 시 조회 화면 전부가 멈추던 원인).
+ * 같은 이유로 `cause`도 붙이지 않는다 — 붙이면 원래 오류가 그대로 직렬화된다.
+ */
+function networkFailure(error: unknown): Error {
+  const cause = error instanceof Error ? error.cause : undefined;
+  const code =
+    typeof cause === 'object' && cause !== null && 'code' in cause && typeof cause.code === 'string'
+      ? cause.code
+      : null;
+  return new Error(`요청이 실패했습니다 (네트워크 오류${code === null ? '' : `: ${code}`})`);
+}
+
 async function requestWithStatus<T>(
   path: string,
   init?: RequestInit,
 ): Promise<{ httpStatus: number; body: T }> {
-  const response = await fetch(`${apiBaseUrl()}/api/v1${path}`, { cache: 'no-store', ...init });
+  let response: Response;
+  try {
+    response = await fetch(`${apiBaseUrl()}/api/v1${path}`, { cache: 'no-store', ...init });
+  } catch (error) {
+    throw networkFailure(error);
+  }
   const body: unknown = await response.json().catch(() => null);
 
   if (!response.ok) {

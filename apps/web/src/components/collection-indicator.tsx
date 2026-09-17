@@ -6,8 +6,9 @@
 // ⚠️ 표시 이름이 **계정 ID**다 — 봉투가 `extra="forbid"`라 자산(회사) 이름을 담을 필드가 없다.
 // `권한 없음`도 계약에 없어 `COLLECTING`·`PARTIAL`·`FAILED`를 주황 하나로 묶었다(§9.2 G4에 요청).
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
+import { useRealtime } from '@/components/realtime-provider';
 import { getAssets } from '@/lib/api/client';
 import { COLLECTION_STATUS_LABELS } from '@/lib/enum-labels';
 import type { AssetsResponse, CollectionStatus } from '@/types/api';
@@ -48,8 +49,10 @@ function accountLabel(items: AssetsResponse['items']): string | null {
 }
 
 export function CollectionIndicator() {
+  const { connection } = useRealtime();
   const [env, setEnv] = useState<AssetsResponse | null>(null);
   const [failed, setFailed] = useState(false);
+  const loadRef = useRef<() => void>(() => {});
 
   // 클라이언트에서만 부른다 — 서버에서 그리면 수집 상태가 하이드레이션 시점과 어긋난다.
   useEffect(() => {
@@ -62,6 +65,7 @@ export function CollectionIndicator() {
           setFailed(false);
         })
         .catch(() => alive && setFailed(true));
+    loadRef.current = load;
     load();
     const timer = setInterval(load, REFRESH_MS);
     return () => {
@@ -69,6 +73,13 @@ export function CollectionIndicator() {
       clearInterval(timer);
     };
   }, []);
+
+  // WS 재연결 = 서버가 돌아왔다는 신호다. 본문은 RealtimeProvider의 `router.refresh()`로 바로 복구되지만
+  // 이 자리는 layout 소유라 refresh로 다시 부르지 않아, 주기를 기다리면 최대 REFRESH_MS 동안
+  // 본문은 정상인데 `확인 불가`가 남는다. 실패 상태일 때만 부른다 — 첫 진입의 연결 성립에서 중복 조회하지 않게.
+  useEffect(() => {
+    if (failed && connection === 'open') loadRef.current();
+  }, [failed, connection]);
 
   // 조회 실패는 `수집 실패`(서버가 답한 상태)와 다르다 — 서버에 못 물어본 것이다.
   if (failed) {
