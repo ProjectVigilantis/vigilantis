@@ -6,7 +6,7 @@
 # 이 파일이 지키는 핵심은 **매달렸다는 사실과 이상하다는 판단을 가르는 것**이다(#353 리뷰).
 # 위협 접수는 미등록 대상도 받고 가드레일 ③ 은 거절한 후보를 기록으로 남긴다 — 그 자리는
 # 매달린 것이 정상이라, 같은 통에 담으면 정상 보존분이 매 회차 같은 경고로 반복되며 새
-# 어긋남을 덮는다. 집계 단위가 행이 아니라 **ARN** 이라는 것도 함께 잠근다.
+# 어긋남을 덮는다. 집계 단위가 행이 아니라 **(종류, ARN)** 이라는 것도 함께 잠근다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -14,6 +14,8 @@ from __future__ import annotations
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 
 CORE_API = Path(__file__).resolve().parents[2]
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -169,21 +171,30 @@ def test_a_real_missing_reference_is_separated_from_preserved_observations(db):
     assert summary["investigate"] == 2  # 보존한 관측 1건은 빠진다
 
 
-def test_candidate_rejected_at_arn_match_is_expected_but_a_later_rejection_is_not(db):
-    """후보는 **상태가 아니라 어느 단계에서 넘어졌는지**로 가른다(#353 리뷰: 안성일).
+@pytest.mark.parametrize(
+    "failed_step",
+    [GuardrailStep.SCHEMA_CHECK, GuardrailStep.ACTION_WHITELIST, GuardrailStep.ARN_MATCH],
+)
+def test_candidate_not_past_arn_match_is_expected_but_others_investigate(db, failed_step):
+    """후보는 **상태가 아니라 가드레일 ③ 을 통과했는지**로 가른다(#353 리뷰·재리뷰: 안성일).
 
-    `REJECTED` 전체를 정상으로 치면 가드레일 ③ 을 통과한 뒤 ④(DryRun)에서 거절된 후보까지
-    함께 빠진다 — 그쪽은 ③ 이 대상을 관리 자산으로 인정했는데도 매달린 것이라 어긋남이다.
+    - ①·②·③ 중 어디서 넘어졌든 ③ 은 그 대상을 관리 자산으로 인정한 적이 없다 — 실패
+      단계 뒤는 전부 NOT_RUN 이다. 가드레일이 제대로 거절한 기록이니 **정상 보존**이다.
+      종전 구현은 ③ 실패만 이렇게 보고 ①·②에서 거절된 후보를 조사 대상으로 올렸다.
+    - ③ 을 통과한 뒤 ④(DryRun)에서 거절된 후보가 매달렸다면 **어긋남**이다. `REJECTED`
+      전체를 정상으로 치면 이것까지 빠진다.
+    - 평가 기록이 없는 후보는 판단할 근거가 없으니 **조사 대상**으로 남긴다.
     """
     inc = _incident(db, UNMANAGED, IncidentCategory.SECOPS)
-    at_three = _candidate(db, inc, UNMANAGED)
-    _guardrail(db, at_three, GuardrailStep.ARN_MATCH)
+    rejected_early = _candidate(db, inc, UNMANAGED)
+    _guardrail(db, rejected_early, failed_step)
 
-    later = _candidate(
-        db, inc, "arn:aws:ec2:ap-northeast-2:1:instance/i-passed-three",
-        runbook_id=RunbookId.RUNBOOK_NACL_RESTORE,
-    )
+    passed_three = "arn:aws:ec2:ap-northeast-2:1:instance/i-passed-three"
+    later = _candidate(db, inc, passed_three, runbook_id=RunbookId.RUNBOOK_NACL_RESTORE)
     _guardrail(db, later, GuardrailStep.AWS_DRY_RUN)
+
+    unevaluated = "arn:aws:ec2:ap-northeast-2:1:instance/i-no-evaluation"
+    _candidate(db, inc, unevaluated, runbook_id=RunbookId.RUNBOOK_SG_DELETE_ISOLATED)
     db.flush()
 
     found = assets_repo.find_dangling_arns(db)
@@ -192,7 +203,7 @@ def test_candidate_rejected_at_arn_match_is_expected_but_a_later_rejection_is_no
     assert [f.value for f in rejected] == [UNMANAGED]
 
     broken = _of_kind(found, assets_repo.KIND_BROKEN_REFERENCE)
-    assert [f.value for f in broken] == ["arn:aws:ec2:ap-northeast-2:1:instance/i-passed-three"]
+    assert {f.value for f in broken} == {passed_three, unevaluated}
 
 
 def test_execution_axis_counts_one_arn_once_and_always_investigates(db):

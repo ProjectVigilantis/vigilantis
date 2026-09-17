@@ -76,7 +76,7 @@ def test_run_pipeline_runs_and_releases_when_lock_free(pg_engine, monkeypatch):
     assert result == {
         "stored": {"stored": 1}, "verdicts": {"SKIP": 1},
         "incidents": {"created": 0, "existing": 0, "failed": 0},
-        # 점검했고 0건(#342). 집계 단위는 ARN 이고, 못 쟀으면 None 이다 — 아래 실패 테스트
+        # 점검했고 0건(#342). 집계 단위는 (종류, ARN) 이고, 못 쟀으면 None 이다 — 아래 실패 테스트
         "dangling_arns": {"total": 0, "investigate": 0, "by_kind": {}},
     }
 
@@ -124,6 +124,41 @@ def test_dangling_check_failure_does_not_swallow_the_run_summary(pg_engine, monk
     finally:
         conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": scheduler._ADVISORY_LOCK_KEY})
         conn.close()
+
+
+@pytest.mark.parametrize(
+    ("kinds", "warned"),
+    [
+        (("unmanaged_observation", "guardrail_rejected", "unobserved_relation"), False),
+        (("unmanaged_observation", "broken_reference"), True),
+    ],
+)
+def test_dangling_warning_fires_only_for_investigate_kinds(pg_engine, monkeypatch, caplog, kinds, warned):
+    """경고(`scan_dangling_arns`)는 **조사 대상 종류가 있을 때만** 올라간다(#353 재리뷰 nit: 김세혁).
+
+    정상 보존분(미등록 관측·가드레일 ③ 미통과 거절·미관측 관계)은 그 자리에 그렇게 남는
+    것이 정상이라, 경고에 섞이면 매 회차 같은 경고가 반복되며 새 어긋남을 덮는다. 요약의
+    `by_kind` 에는 둘 다 남는다 — 가르는 것은 경고뿐이다.
+    """
+    from db.repositories import assets as assets_repo
+    from services import scheduler
+
+    _bind_scheduler_to_test_db(monkeypatch, pg_engine)
+    _stub_pipeline(monkeypatch, {"collect": 0, "judge": 0})
+    findings = [
+        assets_repo.DanglingArn(kind, f"arn:aws:ec2:ap-northeast-2:1:instance/i-{i}", ("t.c",))
+        for i, kind in enumerate(kinds)
+    ]
+    monkeypatch.setattr("db.repositories.assets.find_dangling_arns", lambda db: findings)
+
+    with caplog.at_level("WARNING", logger="vigilantis.scheduler"):
+        result = scheduler.run_pipeline()
+
+    warnings = [r for r in caplog.records if r.getMessage() == "scan_dangling_arns"]
+    assert len(warnings) == (1 if warned else 0)
+    assert result["dangling_arns"]["total"] == len(kinds)
+    if warned:
+        assert warnings[0].count == 1  # 조사 대상만 센다 — 정상 보존분은 빠진다
 
 
 def test_two_ticks_do_not_overlap(pg_engine, monkeypatch):

@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session, aliased
 from schemas.api.assets import AssetType, RelationType
 from schemas.api.incidents import IncidentCategory
 from schemas.arns import arn_region
-from schemas.guardrails import GuardrailStep
+from schemas.guardrails import GUARDRAIL_STEP_ORDER, GuardrailStep
 from schemas.assets import MetricSummary as MetricSummaryContract
 from schemas.collections import CollectionRunStatus
 from schemas.rules import RuleEvaluationResult
@@ -520,7 +520,7 @@ def latest_rule_evaluation_by_asset_stmt():
 # 건수가 0 이 아닌 것만으로 조사 대상이다. 둘을 한 통에 담으면 정상 보존분이 같은 경고에
 # 영원히 섞여 새 어긋남을 덮는다(#353 리뷰: 안성일).
 KIND_UNMANAGED_OBSERVATION = "unmanaged_observation"  # 미등록 대상 관측을 보존한 것
-KIND_GUARDRAIL_REJECTED = "guardrail_rejected"        # 가드레일 ③ 이 거절해 남은 후보
+KIND_GUARDRAIL_REJECTED = "guardrail_rejected"        # ③ 을 통과하지 못하고 거절된 후보(①–③ 실패)
 KIND_UNOBSERVED_RELATION = "unobserved_relation"      # 그 회차가 대상 유형을 못 본 관계
 KIND_BROKEN_REFERENCE = "broken_reference"            # 위 어디에도 해당 없는 참조 누락
 KIND_EXECUTION_INTEGRITY = "execution_integrity"      # 실행·단계·백업 — 나오면 버그
@@ -533,7 +533,8 @@ INVESTIGATE_KINDS: frozenset[str] = frozenset(
 
 
 class DanglingArn(NamedTuple):
-    """어긋난 ARN **1개**. 집계 단위는 `value`(대상)이지 행이 아니다(#353 리뷰: 김세혁).
+    """한 종류 안의 어긋난 ARN **1개**. 집계 단위는 `(kind, value)` 이지 행이 아니다
+    (#353 리뷰: 김세혁). 같은 ARN 이 종류가 다르면 따로 센다 — 고칠 곳이 다르기 때문이다.
 
     `sources` 는 그 ARN 이 보인 자리(`table.column`) 목록이며 **상세 전용**이다 — 실행·
     단계·백업 3컬럼은 한 값을 세 번 복사한 것이라, 행으로 세면 어긋남 1건이 3건으로
@@ -541,7 +542,7 @@ class DanglingArn(NamedTuple):
     """
 
     kind: str
-    value: str                  # 어긋난 ARN — 집계 단위
+    value: str                  # 어긋난 ARN — kind 와 함께 집계 단위
     sources: tuple[str, ...]    # "table.column" 목록(상세 전용)
     detail: str = ""
 
@@ -577,6 +578,13 @@ _COLLECTION_OPTIONAL_TYPES: frozenset[AssetType] = frozenset(
 )
 
 
+# 가드레일 ③(ARN Match)을 통과하지 못한 실패 단계 — ①·②·③. 실패 단계 뒤는 NOT_RUN 이므로
+# 이 셋에서 거절된 후보는 ③ 이 대상을 관리 자산으로 인정한 적이 없다(schemas/guardrails.py).
+_STEPS_NOT_PAST_ARN_MATCH: tuple[GuardrailStep, ...] = GUARDRAIL_STEP_ORDER[
+    : GUARDRAIL_STEP_ORDER.index(GuardrailStep.ARN_MATCH) + 1
+]
+
+
 def find_dangling_arns(db: Session) -> list[DanglingArn]:
     """자산 조인 무결성을 점검한다(#342). 두 가지를 함께 본다:
 
@@ -591,8 +599,9 @@ def find_dangling_arns(db: Session) -> list[DanglingArn]:
     `absent_since` 는 거르지 않는다 — 소멸 표시된 자산을 가리키는 참조는 자산 행이 남아
     매달리지 않으며, 그 동작이 맞다(#353 리뷰에서 양쪽이 각각 실측).
 
-    집계 단위는 **ARN(대상)** 이다. 같은 ARN 이 여러 테이블에서 보이면 한 건으로 묶고
-    `sources` 에 자리를 적는다. 빈 리스트면 정합이며, 골든 적재·실수집 뒤 0 건이
+    집계 단위는 **`(kind, ARN)`** 이다. 한 종류 안에서 같은 ARN 이 여러 테이블에 보이면
+    한 건으로 묶고 `sources` 에 자리를 적는다. 종류가 다르면 따로 센다 — 그래서 `total` 은
+    고유 대상 수가 아니다. 빈 리스트면 정합이며, 골든 적재·실수집 뒤 0 건이
     기준선이다(2026-09-14 실측 0건 · 2026-09-16 김세혁 재현 0건).
     """
     found: dict[tuple[str, str], list[str]] = {}
@@ -630,11 +639,16 @@ def find_dangling_arns(db: Session) -> list[DanglingArn]:
 
     # ③ 런북 후보 — 상태로 가르지 않는다. REJECTED 전체를 정상으로 치면 ③ 을 통과한 뒤
     #    ④(DryRun)에서 거절된 후보까지 함께 빠진다(#353 리뷰: 안성일). 그래서 가드레일
-    #    판정 기록에서 **ARN Match 에서 넘어진 후보**만 골라 정상 보존으로 본다.
-    rejected_at_arn_match = set(
+    #    판정 기록에서 **③ 을 통과하지 못한 후보**만 골라 정상 보존으로 본다.
+    #    ①·②에서 넘어진 후보도 여기 든다 — 실패 단계 뒤는 전부 NOT_RUN 이라
+    #    (schemas/guardrails.py) ③ 이 그 대상을 관리 자산으로 인정한 적이 없다.
+    #    평가 기록이 없는 후보는 판단할 근거가 없으니 조사 대상으로 남긴다.
+    #    후보당 AI_CANDIDATE 평가는 저장 때 한 번뿐이라(workflows._store_candidate)
+    #    최신 평가를 고르지 않는다. (#353 재리뷰: 안성일·김세혁)
+    rejected_before_passing_arn_match = set(
         db.execute(
             select(models.GuardrailEvaluation.candidate_id).where(
-                models.GuardrailEvaluation.failed_step == GuardrailStep.ARN_MATCH,
+                models.GuardrailEvaluation.failed_step.in_(_STEPS_NOT_PAST_ARN_MATCH),
                 models.GuardrailEvaluation.candidate_id.is_not(None),
             )
         ).scalars()
@@ -643,12 +657,12 @@ def find_dangling_arns(db: Session) -> list[DanglingArn]:
         models.RunbookCandidate.target_arn, models.RunbookCandidate.candidate_id
     ).where(models.RunbookCandidate.target_arn.notin_(known_arns))
     for arn, candidate_id in db.execute(candidates):
-        at_arn_match = candidate_id in rejected_at_arn_match
+        not_past_arn_match = candidate_id in rejected_before_passing_arn_match
         _add(
-            KIND_GUARDRAIL_REJECTED if at_arn_match else KIND_BROKEN_REFERENCE,
+            KIND_GUARDRAIL_REJECTED if not_past_arn_match else KIND_BROKEN_REFERENCE,
             arn,
             "runbook_candidates.target_arn",
-            detail="" if at_arn_match else "가드레일 ③ 에서 거절된 기록이 없다",
+            detail="" if not_past_arn_match else "③ 을 통과했거나 가드레일 평가 기록이 없다",
         )
 
     # ④ 관계 — 그 회차가 대상 유형을 관측하지 못했으면(SUCCESS 로 끝나지 않은 회차 +
@@ -707,7 +721,8 @@ def find_dangling_arns(db: Session) -> list[DanglingArn]:
 
 
 def summarize_dangling(findings: Sequence[DanglingArn]) -> dict:
-    """점검 결과를 회차 요약에 실을 모양으로 접는다 — 집계 단위는 ARN 이다.
+    """점검 결과를 회차 요약에 실을 모양으로 접는다 — 집계 단위는 `(kind, ARN)` 이다.
+    `total` 은 고유 대상 수가 아니며, `investigate`·`by_kind` 는 한 종류 안에서 대상 수다.
 
     `investigate` 가 0 이 아닌 것만으로 조사 대상이다. 정상 보존분(관측·거절·미관측 관계)은
     `by_kind` 에만 남아, 같은 기록이 새 어긋남을 덮는 경고로 매 회차 반복되지 않는다.
