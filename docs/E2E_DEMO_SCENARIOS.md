@@ -314,10 +314,10 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 
 | 테스트 | 대응 트랙 | 검증 범위 | 선행(전부 해소) |
 | --- | --- | --- | --- |
-| `test_t1_idle_ec2_downsize_and_auto_rollback_flow` | **T1** | A1 경계값 → `COST_CANDIDATE` → 가드레일 → 실행 접수 → Status Check 실패 → 원복 자식이 정지·타입 복원·기동을 실제로 적용 → `ROLLED_BACK` · Incident `AWAITING_CLOSURE` | 대조 3번 — 실패 주입 방법 ✅ **2026-09-15 해소**(`stop_instances` 주입 · 자동 원복은 2026-09-03 해소) · 9번(#306) |
+| `test_t1_idle_ec2_downsize_and_auto_rollback_flow` | **T1** | Golden **A1** → `COST_CANDIDATE` → 가드레일 → 실행 접수 → Status Check 실패 → 원복 자식이 정지·타입 복원·기동을 실제로 적용 → `ROLLED_BACK` · Incident `AWAITING_CLOSURE` | 대조 3번 — 실패 주입 방법 ✅ **2026-09-15 해소**(`stop_instances` 주입 · 자동 원복은 2026-09-03 해소) · 9번(#306) |
 | `test_t2_ssh_bruteforce_block_and_one_click_release_flow` | **T2** | Golden **S3** → Incident → 승인 → `NACL_ADD_DENY`(`USER_APPROVAL`) · 규칙 1건 → 해제 후보(#329) → 원클릭 해제 → `NACL_RESTORE` · 규칙 0건 | 대조 1번(#322) · 9번(#306) |
 
-**입력이 골든과 같아야 "시연이 되면 테스트도 된다"가 성립한다 — 지금은 절반만 그렇다.** T2는 골든 S3를 입력으로 쓴다. **T1은 골든 A1 파일을 읽지 않고** 같은 성격의 경계값(`t3.xlarge` · `cpu_avg 4.9` · 데이터포인트 336)을 테스트 안에서 적재한다 — 판정 경계 자체는 골든 정답지 테스트(`tests/test_golden_dataset.py`)가 지키지만, 골든 A1이 바뀌어도 흐름 테스트는 따라가지 않는다.
+**두 테스트 모두 Golden Dataset을 입력으로 쓴다**(PR #365부터 파일에서 직접 읽는다 — T1은 정답지의 `case_id: A1`로 대상을 찾아 입력 인벤토리의 값을, T2는 `evt_ssh_bruteforce_001.json`을). 시연에 쓰는 데이터와 테스트에 쓰는 데이터가 같아야 "시연이 되면 테스트도 된다"가 성립한다 — 골든이 바뀌면 흐름 테스트도 따라간다.
 
 ~~**테스트 이름과 입력이 어긋난다**~~ ✅ 해소(2026-08-31, #219) — 옛 이름 `test_open_ssh_ip_block_flow`가 `OPEN_IP`를 가리키는데 입력은 `SSH_BRUTE_FORCE`(S3)였다. 1주차에 지은 이름이고 T2 입력이 PR #148 리뷰로 바뀐 결과다. 당시 skip 해제를 기다리지 않고 위 표의 이름으로 함께 고쳤다 — **이 표가 명세인 이상 이름이 어긋난 채로 두면 문서가 없는 테스트를 가리킨다.**
 
