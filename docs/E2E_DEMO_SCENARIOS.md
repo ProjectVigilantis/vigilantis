@@ -1,7 +1,7 @@
 # E2E 시연 시나리오 설계서 (1차)
 
-> **담당**: 박지현 (QA & Scenario) · **이슈**: #132 · **작성**: 2026-08-25 · **현황 갱신**: 2026-08-31 (김세혁 — §대조 필요 목록 1·2번 상태·원천 재지정 / 박지현 — 본문 🔶 잔여 정리·번호 표기) · 2026-09-01 (박지현 — §대조 1번 ② 해소 반영) · 2026-09-02 (박지현 — T1 1단계 골든 실경로 실측·기재, §대조 8·9번 신설) · 2026-09-04 (박지현 — 골든 EBS 편입 반영, §자산 화면의 분포 숫자를 재현 명령으로 대체) · 2026-09-08 (김세혁 — §T1 7·8·9번 상태 축 정정, §대조 3번 분리·9번 재서술) · 2026-09-09 (박지현 — §대조 8번 해소 반영, 골든 커버리지 표에 관계 축 추가) · 2026-09-15 (김세혁 — §대조 3번 ⓑ 실측 해소, §T1 7번 행·§T2 관통 실측 반영)
-> **목적**: 중간 발표(10/1) MVP 시연 대본의 원천이자 `tests/test_e2e_scenario.py`의 명세.
+> **담당**: 김승철 (QA & Scenario · 2026-09-16 박지현에게서 인수) · **이슈**: #132 · **작성**: 2026-08-25 · **현황 갱신**: 2026-08-31 (김세혁 — §대조 필요 목록 1·2번 상태·원천 재지정 / 박지현 — 본문 🔶 잔여 정리·번호 표기) · 2026-09-01 (박지현 — §대조 1번 ② 해소 반영) · 2026-09-02 (박지현 — T1 1단계 골든 실경로 실측·기재, §대조 8·9번 신설) · 2026-09-04 (박지현 — 골든 EBS 편입 반영, §자산 화면의 분포 숫자를 재현 명령으로 대체) · 2026-09-08 (김세혁 — §T1 7·8·9번 상태 축 정정, §대조 3번 분리·9번 재서술) · 2026-09-09 (박지현 — §대조 8번 해소 반영, 골든 커버리지 표에 관계 축 추가) · 2026-09-15 (김세혁 — §대조 3번 ⓑ 실측 해소, §T1 7번 행·§T2 관통 실측 반영) · 2026-09-17 (김승철 — FE mock 계층 제거(PR #351) 반영·T1 2번 대체 컷 없음 기재(#352), §대조 1·9번 해소 반영, 토폴로지 색 원천 정정, §테스트 대응을 흐름 테스트 이전(PR #358) 기준으로)
+> **목적**: 중간 발표(10/1) MVP 시연 대본의 원천이자 `tests/test_e2e_scenario.py`·`apps/core-api/tests/test_e2e_flow.py`의 명세.
 > **범위 기준**: `docs/PROJECT_STATUS.md`(SSOT)를 따른다. 충돌하면 SSOT가 이긴다.
 
 ---
@@ -44,9 +44,9 @@
 | `packages/schemas/runbooks.py`·`api/` — 실행 축 어휘·API 계약 | 확정(코드) |
 | `datasets/golden/` — 입력 케이스 | 확정 |
 
-**확정본 대조가 필요한 항목은 §대조 필요 목록에 모아뒀다.** 본문의 🔶 에는 **그 목록의 번호를 함께 적는다** — 번호가 없으면 무엇을 기다리는 표시인지 읽는 사람이 알 수 없다. 런북별 세부 실행 단계와 `parameters_schema`는 §대조 2번으로 해소됐고(2026-08-31, PR #205), **1번은 절반이 해소돼**(2026-09-01 — Golden SecOps 정답 12건, PR #223 · #242) `evaluate_threat()` 워크플로 배선 하나만 남았다.
+**확정본 대조가 필요한 항목은 §대조 필요 목록에 모아뒀다.** 본문의 🔶 에는 **그 목록의 번호를 함께 적는다** — 번호가 없으면 무엇을 기다리는 표시인지 읽는 사람이 알 수 없다. 런북별 세부 실행 단계와 `parameters_schema`는 §대조 2번으로 해소됐고(2026-08-31, PR #205), **1번도 해소됐다** — 정답 12건(2026-09-01, PR #223 · #242)에 이어 `evaluate_threat()`가 위협 접수 워크플로에 배선됐다(#322).
 
-남은 🔶 는 **셋**이다 — 그 배선(1번) · Status Check **실패 주입 방법**(3번 — 자동 원복 엔진은 2026-09-03에(#241 / PR #256), **`stop_instances` 주입 경로(ⓑ)는 2026-09-15 실측으로 해소됐고 `impaired`(ⓐ)만 실 AWS로 남는다**) · **판정→Intake 배선 부재로 T1 2단계 이후와 T2의 Incident 생성이 막힌 것(9번)**. **8번(토폴로지 뷰를 골든으로 못 채우는 것)은 2026-09-08에 해소됐다** — 자산 유형 **7/7종** · `RelationType` **6/6종**이 골든에서 선다(#271 / PR #314). 8·9번은 2026-09-02에 신설했다. **막혀 있던 것이 늘어난 게 아니라, mock으로 덮여 안 보이던 것을 목록에 올린 것이다** — 같은 날 자산 화면(T1 1단계)은 골든 실데이터로 서는 것을 실측해 mock을 벗겼고, 8번은 그 뒤 골든이 노드·엣지까지 채우며 닫혔다.
+남은 🔶 는 **둘**이다 — ① Status Check **실패 주입 방법**(3번 — 자동 원복 엔진은 2026-09-03에(#241 / PR #256), **`stop_instances` 주입 경로(ⓑ)는 2026-09-15 실측으로 해소됐고 `impaired`(ⓐ)만 실 AWS로 남는다**) ② **WS 이벤트 실배달**(6번 — 9번이 닫히며 독립 항목이 됐다). **1번 배선(#322)과 9번 판정→Intake 배선(#306 / PR #320)은 해소됐다** — T1 2단계 이후와 T2의 Incident가 실경로로 생긴다. **8번(토폴로지 뷰를 골든으로 못 채우는 것)은 2026-09-08에 해소됐다** — 자산 유형 **7/7종** · `RelationType` **6/6종**이 골든에서 선다(#271 / PR #314). 8·9번은 2026-09-02에 신설했다. **막혀 있던 것이 늘어난 게 아니라, mock으로 덮여 안 보이던 것을 목록에 올린 것이다** — 같은 날 자산 화면(T1 1단계)은 골든 실데이터로 서는 것을 실측해 mock을 벗겼고, 8번은 그 뒤 골든이 노드·엣지까지 채우며 닫혔다.
 
 ---
 
@@ -97,7 +97,7 @@ IN_PROGRESS → SUCCESS
 | # | 단계 | 화면(FE) | API | WS 이벤트 | 실패 시 대체 컷 |
 | --- | --- | --- | --- | --- | --- |
 | 1 | 수집·판정 | 자산 목록에 **최적화 후보** 배지 | `GET /api/v1/assets` — **골든 실데이터로 응답한다**(아래 §자산 화면) | — | 시드 스크립트 재실행 후 목록만 |
-| 2 | Incident 생성 | INC-001 **카드 그리드**에 신규 카드, `status: ANALYZING` | `GET /api/v1/incidents` | `INCIDENT_CREATED` | mock 데이터로 카드 표시 |
+| 2 | Incident 생성 | INC-001 **카드 그리드**에 신규 카드, `status: ANALYZING` | `GET /api/v1/incidents` | `INCIDENT_CREATED` | **대체 컷 없음**(FE mock 계층 제거, 2026-09-17 · PR #351) |
 | 3 | AI 판단 근거 + 추천 | 상세에 **판단 근거** 3줄 + 추천 `RUNBOOK_EC2_RIGHTSIZING` | `GET /api/v1/incidents/{id}` | `INCIDENT_UPDATED` | 미리 저장한 근거 텍스트 표시 |
 | 4 | 가드레일 4단계 | — (화면 표시 없음) · 통과 신호는 `status: AWAITING_APPROVAL`로 실행 버튼이 열리는 것 | (내부) | `INCIDENT_UPDATED` | 슬라이드 컷으로 분리 |
 | 5 | 관제자 승인 | **[조치 실행]** 클릭 | `POST /api/v1/actions/execute`<br>**`202 Accepted`** → `IN_PROGRESS`<br>*(같은 `idempotency_key` 재요청은 `200 OK` 멱등 재생)* | `EXECUTION_UPDATED` | — |
@@ -126,9 +126,9 @@ IN_PROGRESS → SUCCESS
 
 `ec2.modify_instance_attribute`는 RIGHTSIZING·REVERT_SIZE 양쪽이 쓰며 LocalStack에서 `DryRunOperation`이 정상적으로 뜬다(ADR-0007 실측표 1행). **T1은 로컬에서 전 구간 시연 가능하다.**
 
-### 자산 화면(1단계)은 mock이 필요 없다
+### 자산 화면(1단계)은 골든 실데이터로 선다
 
-**1단계는 골든 실데이터로 응답한다**(2026-09-02 실측 · 2026-09-04 재확인). 지금까지 이 문서는 그 경로를 적지 않았고, 그래서 FE가 자산 화면을 별도 mock(`apps/web/src/app/api/v1/_mock/data.ts`)으로 채워 왔다. **경로가 없어서가 아니라 경로가 적혀 있지 않아서다** — 아래 세 단계는 전부 원래 있던 프로덕션 함수다.
+**1단계는 골든 실데이터로 응답한다**(2026-09-02 실측 · 2026-09-04 재확인). 지금까지 이 문서는 그 경로를 적지 않았고, 그래서 FE가 한동안 자산 화면을 별도 mock(당시 `apps/web/src/app/api/v1/_mock/data.ts` — 2026-09-17 PR #351로 제거)으로 채웠다. **경로가 없어서가 아니라 경로가 적혀 있지 않아서다** — 아래 세 단계는 전부 원래 있던 프로덕션 함수다.
 
 ```text
 datasets/golden/finops/input/*.json
@@ -158,13 +158,13 @@ uv run python scripts/load_golden_assets.py --verify
 
 **화면의 배지·사유 분기는 골든만으로 전부 눌러 볼 수 있다.** 마지막까지 비어 있던 `SKIP_UNSUPPORTED_STATE`는 판정 규칙 확정(#276 / PR #284) 뒤 정답지에 편입돼 예외 목록(`UNCOVERED_SKIP_REASONS`)이 비워졌다 — 그 목록이 실제로 "낡았다"고 먼저 실패해 **이 표를 고치라고 알렸다.** 게다가 이 값들은 임의로 적은 것이 아니라 `tests/test_golden_dataset.py`가 임계값 드리프트까지 지키는 정답지에서 나온다 — 판정 규칙이 바뀌면 화면에 앞서 테스트가 먼저 깨진다.
 
-FE는 `NEXT_PUBLIC_API_BASE_URL`을 이 백엔드로 걸면 mock 대신 실 API를 본다(`apps/web/src/lib/api/client.ts` — 미설정 시 자체 origin의 mock Route Handler).
+FE는 `NEXT_PUBLIC_API_BASE_URL`이 가리키는 백엔드만 본다(`apps/web/src/lib/api/client.ts` `apiBaseUrl()` — 미설정 시 `http://localhost:8000` = compose `api` 서비스(core-api 앱)). **FE mock 계층은 없다**(PR #351) — 백엔드가 떠 있지 않으면 화면은 조회 오류다. 기동 순서는 루트 `README.md` §로컬 실행이다.
 
 경계가 깨지지 않는지는 `apps/core-api/tests/test_golden_assets_api.py` **6건**이 CI에서 지킨다(판정 축 3 + 토폴로지 축 3 — 자산 유형·관계 유형·끊긴 엣지).
 
-**🔶 아직 mock이 필요한 것**
-- **2단계 이후**(Incident 카드·AI 3줄·추천)는 그대로 mock이다 — **§대조 필요 9번**. Intake 본문은 **채워졌고**(#265 / PR #286), 남은 것은 **판정 계층에서 그 진입점을 부르는 배선 하나**다(**#306**).
-- ~~**토폴로지 뷰**는 골든으로 못 채운다 — §대조 필요 8번~~ ✅ **해소**(2026-09-08 · #271 / PR #314). 자산 유형 **7/7종** · `RelationType` **6/6종** · 끊긴 엣지 **0** — 노드와 엣지 모두 골든에서 온다. **FE 쪽은 위와 같은 조건이다**(`NEXT_PUBLIC_API_BASE_URL`을 백엔드로 걸면 mock Route Handler 대신 실 API를 본다).
+~~**🔶 아직 mock이 필요한 것**~~ → **없다**(2026-09-17 · PR #351 FE mock 계층 제거)
+- ~~**2단계 이후**(Incident 카드·AI 3줄·추천)는 그대로 mock이다~~ ✅ 실 API다 — Incident를 만드는 판정→Intake 배선이 섰다(#306 / PR #320 · §대조 필요 9번 해소).
+- ~~**토폴로지 뷰**는 골든으로 못 채운다 — §대조 필요 8번~~ ✅ **해소**(2026-09-08 · #271 / PR #314). 자산 유형 **7/7종** · `RelationType` **6/6종** · 끊긴 엣지 **0** — 노드와 엣지 모두 골든에서 온다. 화면 조건은 위와 같다(백엔드 기동).
 
 ---
 
@@ -186,7 +186,7 @@ FE는 `NEXT_PUBLIC_API_BASE_URL`을 이 백엔드로 걸면 mock 대신 실 API�
 | # | 단계 | 화면(FE) | API | WS 이벤트 | 실패 시 대체 컷 |
 | --- | --- | --- | --- | --- | --- |
 | 1 | 위협 주입 | 토폴로지에 **붉은 노드** | (mock 주입) | `INCIDENT_CREATED` | 토폴로지 정적 이미지 |
-| 2 | 위험도 판정 | 위험도 배지 | `GET /api/v1/incidents/{id}` | `INCIDENT_UPDATED` | 🔶 **판정기 워크플로 배선 미완** — §대조 필요 1번 |
+| 2 | 위험도 판정 | 위험도 배지 | `GET /api/v1/incidents/{id}`<br>*(배지는 실 판정값 — 위협 접수가 `evaluate_threat()`를 부른다 · #322 · 아래 관통 실측 `HIGH`)* | `INCIDENT_UPDATED` | — |
 | 3 | 대응 경로 진입 | "선제 차단" 경로 표시 | `response_mode: PRE_MITIGATION_0_5S`<br>*(Incident 축 — 실행 축 아님)* | `INCIDENT_UPDATED` | 경로 표시 없이 4번으로 |
 | 4 | 가드레일 4단계 | — (화면 표시 없음) | (내부) | — | 슬라이드 컷으로 분리 |
 | 5 | **관제자 승인 → 차단** | **[조치 실행]** 클릭 | `RUNBOOK_NACL_ADD_DENY`<br>`trigger_source: USER_APPROVAL`<br>`approval_mode: HUMAN_ONLY`<br>`ec2.create_network_acl_entry` | `EXECUTION_UPDATED` `SUCCESS` | — |
@@ -251,14 +251,14 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 
 ## 시연 선행 조건 — 화면 (PR #148 리뷰: @yoogh3546)
 
-두 트랙의 **시작·종료 컷**에 필요한 화면은 **둘 다 확보됐다**(2026-08-26 · 2026-08-31). 남은 것은 화면이 아니라 **그 화면에 실을 데이터**이며, 아래 두 행이 기다리는 곳은 같다 — **§대조 필요 9번**(판정→Intake 배선).
+두 트랙의 **시작·종료 컷**에 필요한 화면은 **둘 다 확보됐다**(2026-08-26 · 2026-08-31). 데이터도 실 API로 온다 — 판정→Intake 배선(§대조 필요 9번)이 섰고 FE mock 계층은 없다(PR #351).
 
 | 컷 | 필요한 화면 | 현재 상태 |
 | --- | --- | --- |
 | T1-2 Incident 카드 | **INC-001** 카드 그리드 | ✅ **확보**(2026-08-26, #167 / PR #171 — 카드 그리드·위험도 정렬·승인 대기 프리셋). 목록에서 조치 실행·ACT-002 딥링크까지 연결됨(#179 / PR #180) |
-| T2-1 · T2-8 붉은 노드 | **AST-001 토폴로지 뷰**(#146) 또는 **DSH-001** 통합 위협 토폴로지 | ✅ **화면은 확보**(2026-08-31 · #146 CLOSED) — `AssetGraph`가 `GET /api/v1/assets` 응답을 그대로 그린다(`apps/web/src/components/assets/assets-view.tsx:189`). **남은 것은 노드를 붉게 만들 Incident다** — §대조 필요 9번. DSH-001은 **#294**로 카드가 생겼다(PR #299 리뷰 중) |
+| T2-1 · T2-8 붉은 노드 | **AST-001 토폴로지 뷰**(#146) 또는 **DSH-001** 통합 위협 토폴로지 | ✅ **화면은 확보**(2026-08-31 · #146 CLOSED) — `AssetGraph`가 `GET /api/v1/assets` 응답을 그대로 그린다(`apps/web/src/components/assets/assets-view.tsx:189`). 노드 테두리 색은 **Incident가 아니라 자산 판정(`verdict`)** 에서 온다 — `THREAT`만 빨강이고(`apps/web/src/components/assets/asset-graph.tsx` `VERDICT_BORDER`), `THREAT`는 SG 전체개방에서만 나온다(`services/rule_engine.py`). DSH-001 토폴로지도 같은 `AssetGraph`를 쓴다(#294 / PR #351) |
 
-**붉은 노드 컷은 여전히 mock 기준이다** — 노드를 붉게 만드는 것은 Incident인데 그 Incident가 아직 안 생기기 때문이다(§대조 필요 9번). **다만 그래프 자체는 더 이상 mock이 아니다.**
+**붉은 노드 컷에 mock 기준은 없다**(PR #351). **다만 골든 적재 기준으로 T2-1·T2-8의 "붉은 노드"는 S3 대상 인스턴스에 서지 않는다.** S3 대상 `i-0a1b2c3d4e5f00001`은 골든 A1이라 판정이 `COST_CANDIDATE` — 테두리는 **주황**이다. 빨강은 그 인스턴스와 `SECURED_BY`로 이어진 SG `sg-0a1b2c3d4e5f00005`(`golden-sg-open-ssh` · A5 · 22번 전체개방 `THREAT`)다. 두 색 모두 **적재할 때 정해지고** 위협 주입이나 NACL 해제로 바뀌지 않는다 — 위협 접수가 쓰는 것은 `ThreatEvent`·`Incident`뿐이다. 그래서 T2-1("주입 → 붉은 노드")은 **주입 전부터 옆 SG가 빨강**이고, T2-8("해제 → 정상 복귀")은 **해제 뒤에도 SG가 빨강**이다. LocalStack 시드 경로(`vigilantis-seed-idle`)의 색은 재지 않았다. 대본을 어떻게 바꿀지는 10/1(목) 컷 시트 확정(9/23(수))에서 판단한다.
 
 **어느 경로로 채우느냐에 따라 갈린다.**
 
@@ -275,16 +275,16 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 
 | # | 항목 | 막힌 이유 | 풀리는 시점 |
 | --- | --- | --- | --- |
-| 1 | T2 2번 위험도 판정값(`initial_risk_level`) | **판정 규칙과 `RiskReasonCode` 6종은 확정**(#210 / PR #206 — `packages/schemas/events.py`, `apps/core-api/security/risk_evaluator.py::evaluate_threat`). **② 정답지는 해소됐다**(2026-09-01) — `datasets/golden/secops/expected/`에 입력 12건과 1:1로 대응하는 정답 12건이 있다(PR #223 10건 · PR #242 SSH MEDIUM 밴드 2건). **남은 것은 ① 하나다** — `evaluate_threat()`가 **Security Workflow에 배선되지 않아** 위협 접수 → 배지 경로가 아직 없다(현재 호출처는 테스트뿐) | ① SecOps 워크플로 배선 |
+| 1 | ~~T2 2번 위험도 판정값(`initial_risk_level`)~~ ✅ **해소**(#322 — `threat_ingress.py`가 `evaluate_threat()`를 부른다) | **판정 규칙과 `RiskReasonCode` 6종은 확정**(#210 / PR #206 — `packages/schemas/events.py`, `apps/core-api/security/risk_evaluator.py::evaluate_threat`). **② 정답지는 해소됐다**(2026-09-01) — `datasets/golden/secops/expected/`에 입력 12건과 1:1로 대응하는 정답 12건이 있다(PR #223 10건 · PR #242 SSH MEDIUM 밴드 2건). **① 배선도 해소됐다** — `threat_ingress.py`가 `evaluate_threat()`를 부른다(#322). 관통 실측의 초기 위험도는 `HIGH`다(§T2 관통 실측) | — |
 | 2 | ~~런북별 세부 실행 단계·`parameters_schema`~~ ✅ 해소(2026-08-31) | 확정본이 SSOT §Action Whitelist로 이관되고, `parameters_schema`는 `packages/schemas/runbook_parameters.py`(#154 / PR #178), 세부 실행 단계·`target_api`는 [ADR-0007](adr/0007-guardrail-dryrun-executor-precheck-contract.md) §Context·§5가 갖는다 | — |
 | 3 | Status Check 실패 **주입 방법** — **ⓑ 해소(2026-09-15)** · ⓐ만 남음 | **판정기(`wait_for_status_check()` 3분기)와 자동 원복 엔진은 둘 다 섰다**(아래 3-B). 막힌 것은 주입이었고 분기가 둘이다. **ⓑ `_NOT_BOOTING_STATES` 분기는 LocalStack에서 선다**(2026-09-15 실측 · [ADR-0006](adr/0006-localstack-team-standard-env.md) §4 2행 6차 개정). 6번 실행 주기가 끝난 뒤 대상 인스턴스를 `stop_instances`로 멈추면 `describe_instance_status(IncludeAllInstances=True)`가 `stopped`를 돌려줘 판정이 `FAILED`("기동 실패 — 인스턴스 상태가 stopped입니다")로 떨어진다 — 사유가 `PRECHECK_TARGET_NOT_FOUND`로 갈리지 않는다. 그 뒤 7·8·9번이 단계표의 상태값 그대로 흐른다(원본 `ROLLBACK_INITIATED` → `REVERT_SIZE` 자식 `AUTO_ON_FAILURE` → 원본 `ROLLED_BACK` · Incident `AWAITING_CLOSURE`). 가짜 AWS의 상태만 바꾸므로 프로덕션 코드에 데모 분기가 없고, 에뮬레이터 동작은 `apps/core-api/services/tests/test_status_check_localstack.py`가 지킨다. **대본이 지킬 조건 둘** — ① 창: 실행 주기 뒤·판정 주기 전(`DISPATCH_INTERVAL_SECONDS`, 기본 10초). 대기 도중에는 틈이 없다 ② 대기: 멈춘 인스턴스는 waiter가 `STATUS_CHECK_WAIT_*` 전량(기본 3분)을 쓴 뒤 `FAILED`가 나므로 시연에서는 조인다. **ⓐ `impaired` 분기만 남는다** — LocalStack에 헬스체크가 없어 만들 수 없다 | **ⓑ 해소 → T1 7·8·9번을 10/1(목) 시연에서 실경로로 세울 수 있다**(판정 기준 ⓑ).<br>**ⓐ 해소 = 9주차(10/02–10/08) 실 AWS 스모크**(ADR-0006 §4, PR #244 본문 — 2026-09-14 일정 재편으로 7주차에서 옮겼다) |
 | 3-B | ~~자동 원복 엔진~~ ✅ 해소(2026-09-03) | `RUNBOOK_EC2_REVERT_SIZE` 실행과 `AUTO_ON_FAILURE` 자동 발동이 dev에 들어갔다(#241 / PR #256). 2/2 판정 자체는 #240 / PR #244로 먼저 섰다. **3번을 한 줄로 두면 이 머지가 3번 전체를 해소한 것처럼 읽히므로 갈라 둔다** — 주입 방법은 그대로 남는다 | — |
 | 4 | ~~가드레일 ③ 실제 통과~~ ✅ 해소(2026-08-31) | **4단계가 전부 섰다.** ③ ARN Match 구현(#177 / PR #202 — DB 수집 ARN 대조로 Scope Escalation 차단, ① NUL 문자 차단 포함)으로 `tests/test_guardrails.py`의 placeholder skip 1건이 해제됐다. ④ Dry-Run은 `precheck()` 확정 10종 구현 완료(#129 / PR #147 · 실측 #130 / PR #170) | — |
 | 5 | 화면 구현 상태 | 아래 표 | 카드별 |
-| 6 | **WS 이벤트로 화면이 실시간 갱신되는 것** | FE 연동 구현됨 — 소켓 수명주기·이벤트 3종·Toast·재연결(#168 / PR #181). 로컬 `core-api`로 **연결·중단·자동 복구 확인**. 다만 **이벤트 실배달은 미확인**. 막던 이유였던 "코어 DB가 비었다"는 **자산에 대해서는 풀렸다**(2026-09-02 — `scripts/load_golden_assets.py`로 골든 FinOps 전량 적재). 남은 것은 **Incident를 만드는 계층**(아래 9번)이다 | 9번 해소 후 |
+| 6 | **WS 이벤트로 화면이 실시간 갱신되는 것** | FE 연동 구현됨 — 소켓 수명주기·이벤트 3종·Toast·재연결(#168 / PR #181). 로컬 `core-api`로 **연결·중단·자동 복구 확인**. 다만 **이벤트 실배달은 미확인**. 막던 이유였던 "코어 DB가 비었다"는 **자산에 대해서는 풀렸다**(2026-09-02 — `scripts/load_golden_assets.py`로 골든 FinOps 전량 적재). Incident를 만드는 계층(아래 9번)도 섰다 — **남은 것은 이벤트 실배달 확인**이다 | **7주차(9/21(월)–9/23(수)) · FE(김세혁)** — 리허설에서 알면 9/30(수) 시연물 마감 전에 고칠 날이 없다 |
 | 7 | ~~T1 5번 `POST /actions/execute` HTTP 상태 코드~~ ✅ 해소(2026-08-27) | 라우터·멱등 처리 구현 완료(#116 / PR #119), 롤백 3종 실행 접수는 #126 / PR #158. **신규 접수 `202 Accepted` · 같은 `idempotency_key` 재요청 `200 OK`** 로 확정돼 SSOT §API 계약에 등재됐다. 남은 것은 `execute` 본체(Boto3 실행·자동 원복 — 김세혁) | — |
-| 8 | ~~**토폴로지 뷰를 골든으로 못 채운다**~~ ✅ **해소** (2026-09-02 신설 · 2026-09-04 EBS 편입 · **2026-09-08 해소**) | **노드와 엣지가 모두 골든에서 선다.** 마지막까지 0건이던 NACL·Launch Template·ASG·ALB Target Group이 `asset_inventory_005`로 들어와 **자산 유형 7/7종**이 되고, `RelationType` **6/6종**이 파생되며 **끊긴 엣지 0**이다(**#271** / PR #314). 셋 다 `apps/core-api/tests/test_golden_assets_api.py`가 **CI에서 등식으로** 지킨다 — 계약에 유형·관계가 늘면 여기가 먼저 실패한다. **자산을 넣는 것과 엣지가 서는 것은 다르다**: 관계는 `collector.persist_inventory`가 **같은 인벤토리 파일 안의 참조**에서만 파생시켜서, 골든에 EBS가 들어온 뒤에도(#264 · #276) `ATTACHED_TO`는 **한 번도 파생된 적이 없었다** — 004의 볼륨이 부착 대상으로 적은 EC2가 골든 어디에도 없었기 때문이다. 아무도 세지 않아 아무도 몰랐고, 그래서 등식 가드를 함께 세웠다. **화면에 띄우는 것은 별개 조건이다** — FE가 `NEXT_PUBLIC_API_BASE_URL`을 백엔드로 걸어야 mock Route Handler 대신 이 데이터를 본다(위 T1 §자산 화면과 같은 축) | — |
-| 9 | **판정→Intake 배선이 없다** — T1 2단계 이후와 **T2의 Incident 생성**이 걸린 자리 (2026-09-02 신설 · **2026-09-08 정정·범위 명시**) | **본문은 섰고, 그것을 부르는 자리가 없다.** 종전 서술(*"본문이 비어 있다 · `create_incident_from_intake()`는 아직 `NotImplementedError`다"*)은 **낡았다** — 본문은 #265 / PR #286으로 채워졌고 `NotImplementedError`는 없다. 남은 것은 **판정 계층에서 이 진입점을 부르는 배선 하나**다: `services/scheduler.py:run_pipeline()`이 판정까지만 하고, `create_incident_from_intake` 호출부가 `tests/` 밖에 **0건**이다(`grep -rn "create_incident_from_intake" --include=*.py . \| grep -v "/tests/"`). 자산 화면까지는 골든이 실데이터로 가지만 카드 그리드부터는 그 앞이 끊겨 있다. **이 배선은 두 트랙 공통이다** — 진입점이 `IncidentCategory.SECOPS`를 `_create_secops`로 받으므로(`apps/core-api/incident_intake.py:220-222`) **T2도 같은 자리를 기다린다**. **Incident만 생기면 그 뒤는 자동으로 흐른다** — `agent_dispatcher`가 앱 lifespan에 배선돼(#285 / PR #290) AI 호출 → 승인 대기까지 사람 손이 없다. 단 **그 자동 흐름만은 FINOPS 전용이다**(`dispatch_pending_analysis`가 SECOPS는 `unsupported`로 남긴다) — SecOps의 **AI 분석 축**은 대조 1번이 별도로 든다 | **#306** 판정→Intake 배선 (김승철 · 6주차) |
+| 8 | ~~**토폴로지 뷰를 골든으로 못 채운다**~~ ✅ **해소** (2026-09-02 신설 · 2026-09-04 EBS 편입 · **2026-09-08 해소**) | **노드와 엣지가 모두 골든에서 선다.** 마지막까지 0건이던 NACL·Launch Template·ASG·ALB Target Group이 `asset_inventory_005`로 들어와 **자산 유형 7/7종**이 되고, `RelationType` **6/6종**이 파생되며 **끊긴 엣지 0**이다(**#271** / PR #314). 셋 다 `apps/core-api/tests/test_golden_assets_api.py`가 **CI에서 등식으로** 지킨다 — 계약에 유형·관계가 늘면 여기가 먼저 실패한다. **자산을 넣는 것과 엣지가 서는 것은 다르다**: 관계는 `collector.persist_inventory`가 **같은 인벤토리 파일 안의 참조**에서만 파생시켜서, 골든에 EBS가 들어온 뒤에도(#264 · #276) `ATTACHED_TO`는 **한 번도 파생된 적이 없었다** — 004의 볼륨이 부착 대상으로 적은 EC2가 골든 어디에도 없었기 때문이다. 아무도 세지 않아 아무도 몰랐고, 그래서 등식 가드를 함께 세웠다. **화면에 띄우는 조건은 백엔드 기동 하나다** — FE mock 계층이 없어(PR #351) 화면은 `NEXT_PUBLIC_API_BASE_URL`(미설정 시 `http://localhost:8000`)의 이 데이터만 본다(위 T1 §자산 화면과 같은 축) | — |
+| 9 | ~~**판정→Intake 배선이 없다**~~ ✅ **해소**(2026-09-10 · #306 / PR #320) | `services/scheduler.py` `run_pipeline()`이 판정 뒤 `create_incident_from_intake`를 부르고(FINOPS), 위협 접수(`threat_ingress.py` · #322)가 같은 진입점을 부른다(SECOPS). 두 트랙의 Incident가 실경로로 생긴다. 종전 서술(*"호출부가 `tests/` 밖에 0건"*)은 git 이력에 있다 | — |
 
 **문서의 WS 이벤트 열은 "서버가 그 시점에 보내는 이벤트"로는 정확하다.** 다만 그 이벤트로 화면이 실시간으로 바뀌는 것을 시연하려면 6번이 필요하다.
 
@@ -299,26 +299,26 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 | INC-001 | ✅ 완료(#167 / PR #171) · INC-001 → ACT-001 연결(#179 / PR #180) |
 | CMN-001 실시간 | ✅ 연동 완료(#168 / PR #181). **이벤트 실배달만 미확인** — 위 대조 6번 |
 
-## `tests/test_e2e_scenario.py` 대응
+## 테스트 대응 — `tests/test_e2e_scenario.py` · `apps/core-api/tests/test_e2e_flow.py`
 
-이 파일은 **두 층**이다(#219).
+시나리오 회귀는 **두 층**이고(#219), 2026-09-17부터 **두 파일**에 나뉜다 — ② 흐름은 DB 픽스처가 있는 `apps/core-api/tests/`로 옮겼다(PR #354 확정 · PR #358).
 
 | 층 | 무엇 | 상태 |
 | --- | --- | --- |
-| ① **시연 전제 대조 11건** | 이 설계서가 인용한 값(입력 수치·런북 짝·계약 제약)을 원천과 결속한다. 파이프라인 없이 지금 돈다 | ✅ 실행 중 |
-| ② **전 구간 흐름 2건** | 아래 표. 파이프라인이 서야 열린다 | ⏸ skip |
+| ① **시연 전제 대조 11건** — `tests/test_e2e_scenario.py` | 이 설계서가 인용한 값(입력 수치·런북 짝·계약 제약)을 원천과 결속한다. 파이프라인 없이 돈다 | ✅ 실행 중 |
+| ② **전 구간 흐름 2건** — `apps/core-api/tests/test_e2e_flow.py` | 아래 표. 프로덕션 진입점만 불러 상태 전이를 잇는다(AWS는 가짜) | ✅ 실행 중(PR #358 · 2026-09-17 머지 · 판정 기준 ⓐ) |
 
 ①이 있는 이유는 이 문서가 인용한 값들이 **지금은 참이지만 아무도 지켜보지 않는 주장**이기 때문이다. 골든 숫자 하나, 런북 분류 하나가 바뀌면 대본이 조용히 틀어지고 게이트 당일에야 드러난다.
 
-②의 skip 2건이 본 설계서의 어느 범위를 검증할지 고정한다.
+②의 2건이 본 설계서의 어느 범위를 검증하는지 고정한다.
 
-| 테스트 | 대응 트랙 | 검증 범위 | 여는 조건 |
+| 테스트 | 대응 트랙 | 검증 범위 | 선행(전부 해소) |
 | --- | --- | --- | --- |
-| `test_t1_idle_ec2_downsize_and_auto_rollback_flow` | **T1** | Golden A1 → `COST_CANDIDATE` → 가드레일 → 실행 접수 → Status Check 실패 → `ROLLED_BACK` | 대조 3번 — 실패 주입 방법 ✅ **2026-09-15 해소**(`stop_instances` 주입 · 자동 원복은 2026-09-03 해소) · 9번(판정→Intake 배선) |
-| `test_t2_ssh_bruteforce_block_and_one_click_release_flow` | **T2** | Golden **S3** → Incident → `response_mode` 진입 → 승인 → `NACL_ADD_DENY`(`USER_APPROVAL`) → 원클릭 해제 → `NACL_RESTORE` | 대조 1번(판정기 워크플로 배선) · 9번(판정→Intake 배선) |
+| `test_t1_idle_ec2_downsize_and_auto_rollback_flow` | **T1** | Golden **A1** → `COST_CANDIDATE` → 가드레일 → 실행 접수 → Status Check 실패 → 원복 자식이 정지·타입 복원·기동을 실제로 적용 → `ROLLED_BACK` · Incident `AWAITING_CLOSURE` | 대조 3번 — 실패 주입 방법 ✅ **2026-09-15 해소**(`stop_instances` 주입 · 자동 원복은 2026-09-03 해소) · 9번(#306) |
+| `test_t2_ssh_bruteforce_block_and_one_click_release_flow` | **T2** | Golden **S3** → Incident → 승인 → `NACL_ADD_DENY`(`USER_APPROVAL`) · 규칙 1건 → 해제 후보(#329) → 원클릭 해제 → `NACL_RESTORE` · 규칙 0건 | 대조 1번(#322) · 9번(#306) |
 
-**두 테스트 모두 Golden Dataset을 입력으로 쓴다.** 시연에 쓰는 데이터와 테스트에 쓰는 데이터가 같아야 "시연이 되면 테스트도 된다"가 성립한다.
+**두 테스트 모두 Golden Dataset을 입력으로 쓴다**(PR #365부터 파일에서 직접 읽는다 — T1은 정답지의 `case_id: A1`로 대상을 찾아 입력 인벤토리의 값을, T2는 `evt_ssh_bruteforce_001.json`을). 시연에 쓰는 데이터와 테스트에 쓰는 데이터가 같아야 "시연이 되면 테스트도 된다"가 성립한다 — 골든이 바뀌면 흐름 테스트도 따라간다.
 
-~~**테스트 이름과 입력이 어긋난다**~~ ✅ 해소(2026-08-31, #219) — 옛 이름 `test_open_ssh_ip_block_flow`가 `OPEN_IP`를 가리키는데 입력은 `SSH_BRUTE_FORCE`(S3)였다. 1주차에 지은 이름이고 T2 입력이 PR #148 리뷰로 바뀐 결과다. skip 해제를 기다리지 않고 위 표의 이름으로 함께 고쳤다 — **이 표가 명세인 이상 이름이 어긋난 채로 두면 문서가 없는 테스트를 가리킨다.**
+~~**테스트 이름과 입력이 어긋난다**~~ ✅ 해소(2026-08-31, #219) — 옛 이름 `test_open_ssh_ip_block_flow`가 `OPEN_IP`를 가리키는데 입력은 `SSH_BRUTE_FORCE`(S3)였다. 1주차에 지은 이름이고 T2 입력이 PR #148 리뷰로 바뀐 결과다. 당시 skip 해제를 기다리지 않고 위 표의 이름으로 함께 고쳤다 — **이 표가 명세인 이상 이름이 어긋난 채로 두면 문서가 없는 테스트를 가리킨다.**
 
 실행 계열 공통 fixture는 **#136**에서 선구축한다. 그 픽스처가 P2 3종의 로컬 FAIL을 `GuardrailValidationContext` 문맥별로 표현해야 한다는 전제도 같은 이슈에 적었다.
