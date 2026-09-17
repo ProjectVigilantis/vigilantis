@@ -1,4 +1,4 @@
-"""Repository entry point; implementation lives in ai/evaluation."""
+"""저장소 루트의 평가 명령 진입점. 구현은 ai/evaluation/summary에 둔다."""
 
 # 저장소 경로를 등록한 뒤 실제 CLI와 과거 실험용 이름을 가져온다.
 # ruff: noqa: E402

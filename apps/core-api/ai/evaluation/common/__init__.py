@@ -1,1 +1,1 @@
-"""Offline AI evaluation utilities."""
+"""AI 오프라인 평가에서 공통으로 사용하는 도구."""

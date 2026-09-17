@@ -1,4 +1,4 @@
-"""Stable input serialization shared by experiment runners."""
+"""실험 실행기가 공유하는 입력 직렬화와 지문 계산."""
 
 import hashlib
 import json

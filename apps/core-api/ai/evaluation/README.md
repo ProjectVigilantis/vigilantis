@@ -1,11 +1,19 @@
 # AI 평가 자료
 
-서비스 코드와 분리한 평가 도구·기준선·실험 기록이다. 운영 앱은 이 패키지를 import하지 않는다.
+AI 평가 도구·기준선·실험 기록을 기능별로 관리하는 위치다.
+`docs/AI_SUMMARY_BASELINE.md`에 있던 FinOps summary 기준선 본문을 프로젝트 공통 문서에서
+분리하는 것에서 시작해, 앞으로 진행할 실험의 평가 코드·판정 기준·결과를 함께 찾을 수 있도록
+`ai/evaluation/` 아래에 모은다. 운영 앱은 이 패키지를 import하지 않는다.
 
 | 영역 | 책임 | 안내 |
 | --- | --- | --- |
 | `common/` | 모델 호출의 사용량·실패 단계, 구조화 값 재현성, 입력 지문·경로 | 도메인별 판정 기준은 포함하지 않음 |
 | `summary/` | FinOps 요약·추천 평가, 승인 v2 스냅샷과 재통과 절차 | [기준선](summary/baseline.md) |
+
+첫 이관 대상은 기존 FinOps summary 자료다. 기준선 본문은 `summary/baseline.md`로 옮기고,
+`docs/AI_SUMMARY_BASELINE.md`에는 기존 링크를 위한 이동 안내만 남긴다.
+새 summary 실험의 생성 원자료와 판정 결과는 [summary/results/](summary/results/README.md)에
+라운드별로 보존한다. 다른 평가에서도 재사용할 계측은 `common/`으로 분리한다.
 
 summary와 공통 계측은 #324에서 준비한 이관을 #347에 편입했다.
 단, `cases.py` 구현과 Golden 테스트의 기존 import는 유지한다. `summary/cases.py`는
