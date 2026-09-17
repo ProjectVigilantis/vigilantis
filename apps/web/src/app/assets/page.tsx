@@ -1,6 +1,7 @@
 // AST-001 자산 관제 — 화면설계서 v1.5 §4.2.
 
 import { AssetsView } from '@/components/assets/assets-view';
+import { ErrorState } from '@/components/error-state';
 import { getAssets, getIncidents } from '@/lib/api/client';
 import type { IncidentListItem } from '@/types/api';
 
@@ -17,10 +18,17 @@ import type { IncidentListItem } from '@/types/api';
  */
 export default async function AssetsPage({ searchParams }: PageProps<'/assets'>) {
   const { asset } = await searchParams;
-  const [assets, incidents] = await Promise.all([
-    getAssets(),
-    getIncidents().catch(() => null),
-  ]);
+  const incidentsPromise = getIncidents().catch(() => null);
+
+  let assets;
+  try {
+    assets = await getAssets();
+  } catch (error) {
+    // 자산 실패는 화면 전체 CMN-002다 — 대시보드(app/page.tsx)와 같은 규칙.
+    // 잡지 않고 던지면 레이아웃(GNB)째 전역 오류 셸로 넘어가 다른 화면으로 빠져나갈 길이 없어진다.
+    return <ErrorState error={error} />;
+  }
+  const incidents = await incidentsPromise;
 
   let incidentsByArn: Record<string, IncidentListItem[]> | null = null;
   if (incidents !== null) {
