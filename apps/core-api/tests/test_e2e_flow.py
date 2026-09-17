@@ -8,7 +8,9 @@
 # 픽스처가 없다 — `db`·`pg_engine`·`client_pg`·`make_incident` 계열이 전부
 # `apps/core-api/tests/conftest.py`에 있고, `tests/execution_harness.py` 헤더가
 # 적은 이유(CI가 여러 디렉터리를 한 세션으로 돌릴 때 `conftest` 최상위 이름을
-# 이쪽이 먼저 차지한다)로 가져다 쓸 수도 없다. 두 흐름은 **DB 상태 전이**를
+# 이쪽이 먼저 차지한다)로 `conftest`를 직접 import 해 끌어올 수도 없다 — conftest가
+# 자기 디렉터리 아래에만 적용되는 스코프 제약과 직접 import의 이름 충돌 때문이지
+# 재사용 자체가 불가능한 것은 아니다. 두 흐름은 **DB 상태 전이**를
 # 검증하므로 구현을 이 디렉터리로 옮겼다(SSOT 2026-09-16 확정 · PR #354).
 # `tests/test_e2e_scenario.py`에는 옮긴 위치 안내만 남는다.
 #
