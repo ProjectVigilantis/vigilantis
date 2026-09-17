@@ -9,6 +9,7 @@ import type {
   AssetItem,
   AssetType,
   IncidentListItem,
+  IncidentResponse,
   IncidentStatus,
   OpenPortRule,
   Verdict,
@@ -33,12 +34,38 @@ export const WASTE_VERDICTS = ['COST_CANDIDATE', 'UNUSED'] as const satisfies re
  *
  * 정렬은 INC-001 목록과 공유하는 `sortByRisk` 하나다(`incident-sort.ts`) — 대시보드와 목록이
  * 서로 다른 1순위를 내면 관제자가 어느 화면을 믿을지 알 수 없다.
+ *
+ * 목록 조회 실패(null)는 **빈 큐가 아니라 null로 돌려준다** — 지표의 `unhandled`와 같은 규칙이다.
  */
-export function actionQueue(incidents: readonly IncidentListItem[] | null): IncidentListItem[] {
-  if (incidents === null) return [];
+export function actionQueue(
+  incidents: readonly IncidentListItem[] | null,
+): IncidentListItem[] | null {
+  if (incidents === null) return null;
   return sortByRisk(
     incidents.filter((i) => (UNHANDLED_STATUSES as readonly IncidentStatus[]).includes(i.status)),
   );
+}
+
+/**
+ * AI 조치 제안 카드가 그릴 것. **조회 실패와 대기 0건을 가른다** — 목록 조회가 실패했는데
+ * `승인을 기다리는 조치 제안이 없습니다`를 띄우면, 같은 화면의 `미조치 인시던트` 지표는 `—`(조회 실패)라고
+ * 말하는데 카드만 할 일이 없다고 말한다(PR #351 리뷰 2). 대기 0건 문구는 **조회에 성공한 빈 목록**에만 쓴다.
+ */
+export type ProposalView =
+  | { kind: 'LIST_FAILED' }
+  | { kind: 'EMPTY' }
+  | { kind: 'TOP_FAILED' }
+  | { kind: 'READY'; top: IncidentResponse; next: IncidentListItem[] };
+
+/** `top`은 큐 1순위의 상세 조회 결과다. 큐가 비지 않았는데 null이면 그 조회가 실패한 것이다. */
+export function proposalView(
+  queue: readonly IncidentListItem[] | null,
+  top: IncidentResponse | null,
+): ProposalView {
+  if (queue === null) return { kind: 'LIST_FAILED' };
+  if (queue.length === 0) return { kind: 'EMPTY' };
+  if (top === null) return { kind: 'TOP_FAILED' };
+  return { kind: 'READY', top, next: queue.slice(1) };
 }
 
 /**

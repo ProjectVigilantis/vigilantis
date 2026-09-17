@@ -5,7 +5,7 @@
 // 응답을 캐시하지 않아 새로고침·실시간 이벤트의 `router.refresh()`가 곧 재조회다.
 //
 // 호출 3종의 실패 처리가 서로 다르다(§4.1 예외) — 자산은 화면 전체 CMN-002, 인시던트 목록은
-// 지표 하나만 비움, AI 카드 1건의 상세는 그 카드만 인라인 오류다.
+// 그것을 쓰는 두 자리(`미조치 인시던트` 지표 · AI 카드)만 오류, AI 카드 1건의 상세는 그 카드만 인라인 오류다.
 
 import { ActionProposalCard } from '@/components/dashboard/action-proposal-card';
 import { DashboardView } from '@/components/dashboard/dashboard-view';
@@ -15,8 +15,12 @@ import { actionQueue } from '@/lib/dashboard';
 import type { IncidentResponse } from '@/types/api';
 
 export default async function DashboardPage() {
-  // 인시던트 실패는 지표 하나만 비운다 — 자산 화면과 같은 규칙(null = 조회 실패)이다.
-  const incidentsPromise = getIncidents().catch(() => null);
+  // 인시던트 실패는 대시보드를 죽이지 않는다 — 자산 화면과 같은 규칙(null = 조회 실패)이다.
+  // 오류를 버리지 않고 들고 간다: AI 카드가 그것을 **대기 0건이 아니라 오류로** 그려야 한다(PR #351 리뷰 2).
+  const incidentsPromise = getIncidents().then(
+    (res) => ({ items: res.items, error: null }),
+    (error: unknown) => ({ items: null, error }),
+  );
 
   let assets;
   try {
@@ -26,18 +30,20 @@ export default async function DashboardPage() {
     return <ErrorState error={error} />;
   }
 
-  const incidents = (await incidentsPromise)?.items ?? null;
+  const listed = await incidentsPromise;
+  const incidents = listed.items;
 
   // AI 조치 제안 카드의 대상 1건. 목록 계약에 `summary_lines`·`recommendations`가 없어
   // **1순위 한 건만** 상세를 더 부른다(§4.1 API 호출).
   const queue = actionQueue(incidents);
   let top: IncidentResponse | null = null;
-  let topError: unknown = null;
-  if (queue.length > 0) {
+  // 카드 자리의 오류 — 목록 조회가 실패했거나, 목록은 됐는데 1순위 상세가 실패한 경우다.
+  let cardError: unknown = listed.error;
+  if (queue !== null && queue.length > 0) {
     try {
       top = await getIncident(queue[0].incident_id);
     } catch (error) {
-      topError = error;
+      cardError = error;
     }
   }
 
@@ -49,7 +55,7 @@ export default async function DashboardPage() {
           top={top}
           // CMN-002를 **서버에서 그려 넘긴다** — `ErrorState`를 클라이언트 경계 너머로 보내면
           // RSC 직렬화가 `ApiError`의 code·requestId를 버려 분기가 무너진다(error-state.tsx 주의).
-          errorSlot={topError === null ? null : <ErrorState error={topError} variant="inline" />}
+          errorSlot={cardError === null ? null : <ErrorState error={cardError} variant="inline" />}
           queue={queue}
           assets={assets.items}
         />

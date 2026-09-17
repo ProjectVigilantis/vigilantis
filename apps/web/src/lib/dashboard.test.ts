@@ -10,9 +10,16 @@ import {
   healthSummary,
   inventoryCounts,
   openPortLabel,
+  proposalView,
   verdictCounts,
 } from './dashboard.ts';
-import type { AssetItem, IncidentListItem, IncidentStatus, OpenPortRule } from '../types/api.ts';
+import type {
+  AssetItem,
+  IncidentListItem,
+  IncidentResponse,
+  IncidentStatus,
+  OpenPortRule,
+} from '../types/api.ts';
 
 type Common = Omit<AssetItem, 'asset_type' | 'spec'>;
 
@@ -180,6 +187,7 @@ test('조치 큐는 미조치 지표와 같은 집합이다 — 한 화면이 �
     incident('running', 'ACTION_IN_PROGRESS'),
   ];
   const queue = actionQueue(items);
+  assert.ok(queue !== null);
   assert.deepEqual(
     queue.map((i) => i.incident_id).sort(),
     ['analyzing', 'pending', 'running'],
@@ -200,7 +208,7 @@ test('큐는 위험도 순, 동점은 오래 기다린 건이 먼저다 — INC-
     at('high-late', 'HIGH', '2026-09-02T00:00:00Z'),
     at('high-early', 'HIGH', '2026-09-01T00:00:00Z'),
   ]);
-  assert.deepEqual(queue.map((i) => i.incident_id), [
+  assert.deepEqual(queue?.map((i) => i.incident_id), [
     'high-early',
     'high-late',
     'low',
@@ -208,6 +216,43 @@ test('큐는 위험도 순, 동점은 오래 기다린 건이 먼저다 — INC-
   ]);
 });
 
-test('인시던트 조회 실패(null)면 큐가 비어 카드가 대기 0건으로 그린다', () => {
-  assert.deepEqual(actionQueue(null), []);
+// PR #351 리뷰 2 — 목록 조회 실패를 대기 0건으로 뭉개면 카드가 지표(`—` 조회 실패)와 반대로 말한다.
+
+test('인시던트 조회 실패(null)는 빈 큐가 아니다 — 지표의 unhandled와 같은 null이다', () => {
+  assert.equal(actionQueue(null), null);
+  assert.equal(dashboardMetrics([], null).unhandled, null);
+});
+
+function detail(item: IncidentListItem): IncidentResponse {
+  return {
+    ...item,
+    summary_lines: [],
+    evidence_ids: [],
+    recommendations: [],
+    executions: [],
+    resolution: null,
+    resolved_at: null,
+  };
+}
+
+test('카드는 목록 조회 실패를 오류로, 성공한 빈 목록만 대기 0건으로 그린다', () => {
+  assert.equal(proposalView(actionQueue(null), null).kind, 'LIST_FAILED');
+  assert.equal(proposalView(actionQueue([]), null).kind, 'EMPTY');
+  // 미조치가 아닌 건만 있는 목록도 조회는 성공했다 — 대기 0건이 맞다
+  assert.equal(proposalView(actionQueue([incident('done', 'RESOLVED')]), null).kind, 'EMPTY');
+});
+
+test('큐가 있는데 1순위 상세가 없으면 상세 조회 실패다 — 대기 0건이 아니다', () => {
+  const queue = actionQueue([incident('a', 'AWAITING_APPROVAL')]);
+  assert.equal(proposalView(queue, null).kind, 'TOP_FAILED');
+});
+
+test('1순위 상세가 있으면 그 건과 나머지 대기를 낸다', () => {
+  const queue = actionQueue([incident('a', 'AWAITING_APPROVAL'), incident('b', 'ANALYZING')]);
+  assert.ok(queue !== null);
+  const view = proposalView(queue, detail(queue[0]));
+  assert.equal(view.kind, 'READY');
+  if (view.kind !== 'READY') return;
+  assert.equal(view.top.incident_id, queue[0].incident_id);
+  assert.deepEqual(view.next.map((i) => i.incident_id), [queue[1].incident_id]);
 });

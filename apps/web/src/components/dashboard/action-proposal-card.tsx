@@ -11,16 +11,14 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 
-import {
-  ActionExecuteDialog,
-  type ActionCandidate,
-  type ActionRequest,
-} from '@/components/incidents/action-execute-dialog';
+import { ActionExecuteDialog } from '@/components/incidents/action-execute-dialog';
 import { EmptyState } from '@/components/empty-state';
 import { StatusBadge } from '@/components/status-badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { proposalRequest, type ActionRequest } from '@/lib/action-request';
 import { newIdempotencyKey } from '@/lib/api/client';
+import { proposalView } from '@/lib/dashboard';
 import { arnShort, incidentTitle, RUNBOOK_LABELS } from '@/lib/enum-labels';
 import { formatKst } from '@/lib/utils';
 import type { AssetItem, IncidentListItem, IncidentResponse } from '@/types/api';
@@ -86,28 +84,39 @@ export function ActionProposalCard({
 }: {
   top: IncidentResponse | null;
   /**
-   * 1순위 상세 조회가 실패했을 때 그 자리에 놓을 CMN-002. **카드만** 오류로 두고 대시보드는
-   * 살린다(§4.1 예외).
+   * 조회가 실패했을 때 그 자리에 놓을 CMN-002 — **인시던트 목록**이나 **1순위 상세** 중 실패한 쪽이다.
+   * **카드만** 오류로 두고 대시보드는 살린다(§4.1 예외).
    *
    * 오류 객체가 아니라 **서버에서 그린 엘리먼트**를 받는다 — `ErrorState`는 RSC 직렬화가
    * `ApiError`의 `code`·`requestId`를 조용히 버려서 클라이언트로 넘기면 6종 분기가 무너진다
    * (`error-state.tsx` 파일 상단 주의).
    */
   errorSlot: React.ReactNode;
-  /** `미조치` 전량(위험도 정렬). 1순위는 `top`과 같은 건이다. */
-  queue: IncidentListItem[];
+  /**
+   * `미조치` 전량(위험도 정렬). 1순위는 `top`과 같은 건이다.
+   * **null은 목록 조회 실패**다 — 빈 배열(대기 0건)과 다르게 그린다(PR #351 리뷰 2).
+   */
+  queue: IncidentListItem[] | null;
   /** 제안의 `target_arn`을 조인해 승인 모달에 자산 사실값을 넘긴다(#183). */
   assets: AssetItem[];
 }) {
   const router = useRouter();
+  /**
+   * 열린 승인 모달의 요청. **1순위(`top`)와 따로 산다** — 모달을 연 사이 WebSocket 재조회로 1순위가
+   * 바뀌어도 모달은 연 건의 대상과 `incident_id`를 함께 유지한다(PR #351 리뷰 1). 연 건이 그 사이
+   * 실행 불가가 됐으면 서버가 409로 돌려주고 아래 `onProposalStale`이 닫고 다시 읽는다.
+   */
   const [request, setRequest] = useState<ActionRequest | null>(null);
+  const view = proposalView(queue, top);
 
   const body = (() => {
-    if (queue.length === 0) {
+    if (view.kind === 'LIST_FAILED' || view.kind === 'TOP_FAILED') return errorSlot;
+    if (view.kind === 'EMPTY') {
       // "지금 승인할 것이 없다"도 관제 정보다(§3.1) — 오류나 빈 화면으로 그리지 않는다.
+      // 조회에 **성공한** 빈 목록만 여기 온다. 실패를 이 문구로 그리면 위 지표와 반대로 말한다.
       return <EmptyState message="승인을 기다리는 조치 제안이 없습니다." />;
     }
-    if (top === null) return errorSlot;
+    const { top, next } = view;
 
     // §4.5 버튼 노출 규칙 그대로 — `recommendations`가 비면 버튼을 만들지 않는다(조회 전용).
     // `ANALYZING`은 계약이 빈 배열을 강제하므로 자연히 여기서 걸린다.
@@ -150,20 +159,9 @@ export function ActionProposalCard({
                 type="button"
                 disabled={locked}
                 onClick={() =>
-                  setRequest({
-                    // 멱등 키는 **모달을 열 때 1회** 만든다(§4.6). 클릭마다 만들면 중복 클릭이
-                    // 서로 다른 키가 되어 멱등성이 무력화된다.
-                    idempotencyKey: newIdempotencyKey(),
-                    variant: 'ACTION',
-                    candidates: top.recommendations.map(
-                      (r): ActionCandidate => ({
-                        runbookId: r.runbook_id,
-                        targetArn: r.target_arn,
-                        displayParameters: r.display_parameters,
-                        targetAsset: assets.find((a) => a.arn === r.target_arn) ?? null,
-                      }),
-                    ),
-                  })
+                  // 멱등 키는 **모달을 열 때 1회** 만든다(§4.6). 클릭마다 만들면 중복 클릭이
+                  // 서로 다른 키가 되어 멱등성이 무력화된다.
+                  setRequest(proposalRequest(top, assets, newIdempotencyKey()))
                 }
               >
                 {approveLabel}
@@ -181,7 +179,7 @@ export function ActionProposalCard({
           </p>
         )}
 
-        <NextUp items={queue.slice(1)} />
+        <NextUp items={next} />
       </div>
     );
   })();
@@ -196,15 +194,15 @@ export function ActionProposalCard({
       </CardHeader>
       <CardContent>{body}</CardContent>
 
-      {top !== null ? (
+      {request !== null ? (
         <ActionExecuteDialog
-          incident={top}
           request={request}
           onClose={() => setRequest(null)}
           onExecuted={(outcome) => {
             // ACT-002는 INC-002가 그린다 — 실행 id를 실어 그 패널이 열린 채로 진입한다.
+            // 이동할 곳도 **보낸 요청의** 인시던트다 — 지금의 1순위가 아니다.
             router.push(
-              `${href(top.incident_id)}?execution=${encodeURIComponent(outcome.execution.execution_id)}`,
+              `${href(request.incidentId)}?execution=${encodeURIComponent(outcome.execution.execution_id)}`,
             );
           }}
           // 409 PROPOSAL_NOT_EXECUTABLE — 제안이 이미 실행됐거나 무효해졌다. 대시보드를 다시 읽는다.
