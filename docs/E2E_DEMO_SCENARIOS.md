@@ -265,7 +265,7 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 | 변수 | 값 | 이유 |
 | --- | --- | --- |
 | `SCAN_INTERVAL_SECONDS` | **300**(기본) | 첫 스캔이 무대 밖으로 나갔다. 짧게 두면 무대 도중 스캔이 자산 정보를 중간값으로 바꿀 수 있다 |
-| `DISPATCH_INTERVAL_SECONDS` | **5** | T1-7 실패 주입 창의 길이다. 리허설에서 헬퍼가 3회 연속 창 안에 들면 확정, 한 번이라도 놓치면 10 |
+| `DISPATCH_INTERVAL_SECONDS` | **5** | T1-7 실패 주입 창의 길이다. 5초 실측: 창 약 4.6초 · 헬퍼 반응 0.05초 · 승인 → 원복 완료 16초 · 3/3(#349 실측 코멘트). 리허설에서 헬퍼가 3회 연속 창 안에 들면 확정, 한 번이라도 놓치면 10 |
 | `AGENT_DISPATCH_INTERVAL_SECONDS` | **3** | T2 주입 뒤 분석 시작까지의 지연 |
 | `STATUS_CHECK_WAIT_DELAY_SECONDS` · `STATUS_CHECK_WAIT_MAX_ATTEMPTS` | **2 · 3** | PR #346에서 이 값으로 판정이 4.2초에 났다. **LocalStack 전용** — 실 AWS 스모크(9주차) 전에 기본값으로 되돌린다 |
 | `MOCK_THREAT_INBOX_DIR` | `/app/apps/core-api/.mock-threat-inbox` | `.env.example` 값 · compose 마운트 안 경로(호스트는 `apps/core-api/.mock-threat-inbox`) |
@@ -279,7 +279,7 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 | 2 | Incident 생성 | ✅ 실경로 · **사전 준비(무대 전)** — 스캔 1회로 생성 실측 | 카드 3건 — §사전 준비 | **무대 전에 드러난다** → 사전 준비를 처음부터(대체 컷은 만들지 않는다 — 결정 ①) |
 | 3 | AI 판단 근거 + 추천 | 🔶 실경로 · **사전 준비(무대 전)** · idle-dev 모델 호출 미측정(§결정 기록 ④) | `OPENAI_API_KEY` · `AGENT_DISPATCH_INTERVAL_SECONDS` | 사전 준비를 처음부터 |
 | 4 | 가드레일 4단계 | ✅ 실경로 | — | 슬라이드 컷 |
-| 5 | 관제자 승인 | ✅ 실경로 · **무대 시작** | 승인 대기 카드 → **[조치 실행]** 1회 | — |
+| 5 | 관제자 승인 | ✅ 실경로 · **무대 시작** | 승인 대기 카드 → **[조치 실행]** 1회. **시작 전에 `docker compose logs api`의 스캔 잡 `next run at`을 보고, 다음 스캔이 약 20초 안이면 기다렸다 시작한다** — 원복(약 16초) 도중 스캔이 돌면 AST-001이 중간값(`m5.large · stopped`)으로 다음 스캔까지 최대 300초 남는다(#349 실측) | — |
 | 6 | 실행 | ✅ 실경로(PR #346) | `DISPATCH_INTERVAL_SECONDS` | **사전 준비를 처음부터** — LocalStack 재기동은 자원 ID가 새로 생겨 이 Incident의 대상이 사라진다 |
 | 7 | Status Check 실패 | 🔶 **실경로 · 헬퍼 머지 전까지** | **실패 주입 헬퍼 실행**(#356 ① · 김세혁 · 리허설 9/29(화) 전) — 대상 인스턴스를 조회하다가 유형이 바뀌고 `running`이 된 순간 `stop_instances`를 부른다. 사람이 창을 맞출 수 없다: 판정 대기 동안 실행 상태는 `IN_PROGRESS`이고 이벤트도 나가지 않는다 | 창을 놓치면 실행이 `SUCCESS`로 닫힌다 → 상세 화면 실행 항목의 **[이전 스펙 복원]**(`RUNBOOK_EC2_REVERT_SIZE` · 관제자 승인)으로 되돌린다. 자동 발동 장면은 빠지지만 같은 확인 화면(9번)까지 간다. **시드 재실행은 줄어든 유형을 되돌리지 않는다**(이름으로 찾아 건너뛴다) |
 | 8 | 자동 원복 발동 | ✅ 실경로(PR #346) | 사람 조작 없음 | 7번 "막히면"과 같다 |
