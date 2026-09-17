@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 from botocore.exceptions import BotoCoreError, ClientError
 
 from config import get_collector_settings
+from schemas.arns import build_arn
 from schemas.assets import (
     AlbTargetGroupAsset,
     AssetInventory,
@@ -149,10 +150,8 @@ def _runtime_config() -> dict:
     }
 
 
-def _arn(resource_type: str, resource_id: str, region: str, account_id: str) -> str:
-    """가드레일 3단계(ARN Match)가 이 문자열을 그대로 비교하므로 포맷을 반드시 고정한다.
-    예) arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0abc123"""
-    return f"arn:aws:ec2:{region}:{account_id}:{resource_type}/{resource_id}"
+# ARN 조립은 schemas.arns.build_arn 하나로 모은다(#342) — 여기 있던 _arn 헬퍼는 그 함수로
+# 대체됐다. 가드레일 ③ 이 대조하는 문자열이라 조립 원천이 갈리면 안 된다.
 
 
 # ------------------------------------------------------------------ 정형화 헬퍼
@@ -377,7 +376,7 @@ def collect_region(
         series = metrics.get(iid, {})
         ec2_assets.append(
             Ec2Asset(
-                arn=_arn("instance", iid, region, account_id),
+                arn=build_arn("instance", iid, region, account_id),
                 instance_id=iid,
                 name=_name_tag(i.get("Tags", [])),
                 instance_type=i.get("InstanceType"),
@@ -397,7 +396,7 @@ def collect_region(
 
     sg_assets = [
         SecurityGroupAsset(
-            arn=_arn("security-group", sg["GroupId"], region, account_id),
+            arn=build_arn("security-group", sg["GroupId"], region, account_id),
             group_id=sg["GroupId"],
             name=sg.get("GroupName"),
             description=sg.get("Description"),
@@ -411,7 +410,7 @@ def collect_region(
 
     nacl_assets = [
         NaclAsset(
-            arn=_arn("network-acl", n["NetworkAclId"], region, account_id),
+            arn=build_arn("network-acl", n["NetworkAclId"], region, account_id),
             nacl_id=n["NetworkAclId"],
             region=region,
             vpc_id=n.get("VpcId"),
@@ -425,7 +424,7 @@ def collect_region(
 
     ebs_assets = [
         EbsAsset(
-            arn=_arn("volume", v["VolumeId"], region, account_id),
+            arn=build_arn("volume", v["VolumeId"], region, account_id),
             volume_id=v["VolumeId"],
             region=region,
             volume_type=v.get("VolumeType"),
@@ -442,7 +441,7 @@ def collect_region(
 
     lt_assets = [
         LaunchTemplateAsset(
-            arn=_arn("launch-template", lt["LaunchTemplateId"], region, account_id),
+            arn=build_arn("launch-template", lt["LaunchTemplateId"], region, account_id),
             launch_template_id=lt["LaunchTemplateId"],
             name=lt.get("LaunchTemplateName"),
             region=region,
@@ -632,7 +631,7 @@ def persist_inventory(
         )
         # SG(SECURED_BY) + NACL(PROTECTED_BY) + EBS(ATTACHED_TO) 를 한 번에 교체(replace 는 덮어쓰기)
         rel_items = [
-            (RelationType.SECURED_BY, f"arn:aws:ec2:{inv.region}:{inv.account_id}:security-group/{sg_id}")
+            (RelationType.SECURED_BY, build_arn("security-group", sg_id, inv.region, inv.account_id))
             for sg_id in a.security_group_ids
         ]
         nacl_arn = subnet_to_nacl.get(a.subnet_id)
@@ -766,7 +765,7 @@ def persist_inventory(
         # USES 는 스냅샷 의미론(source 관계 전량 교체)이라 조건 밖에서 호출한다.
         # LT 를 떼어낸 ASG 는 items=[] 로 이전 수집의 stale USES 엣지가 지워진다.
         lt_items = (
-            [(RelationType.USES, _arn("launch-template", g.launch_template_id, inv.region, inv.account_id))]
+            [(RelationType.USES, build_arn("launch-template", g.launch_template_id, inv.region, inv.account_id))]
             if g.launch_template_id
             else []
         )
