@@ -125,16 +125,29 @@ def test_refuses_without_localstack_endpoint(monkeypatch, endpoint):
         inject.main([])
 
 
-def test_refuses_an_instance_already_downsized_by_a_previous_demo(monkeypatch):
-    """이전 시연의 유형이 남아 있으면 기다리지 않는다 — 시작 유형이 틀려 변화를 못 알아본다."""
-    ec2 = FakeEc2([(APPLIED, "running")])
+@pytest.mark.parametrize(
+    ("state", "reason"),
+    [((APPLIED, "running"), "시드와 다르다"), ((START, "stopped"), "running이 아니다")],
+    ids=["already-downsized", "not-running"],
+)
+def test_refuses_without_waiting_and_guides_both_causes(monkeypatch, state, reason):
+    """출발 상태가 틀리면 기다리지 않고, 늦게 띄운 경우와 세션 사이를 함께 안내한다.
+
+    시작 유형이 틀리면 변화를 못 알아보고, 멈춰 있으면 기동이 오지 않는다. 같은 상태가 이전 시연의 흔적에서도, [조치 실행]보다 늦게 띄운 데서도 나온다. 늦게 띄운 경우
+    LocalStack 재기동은 준비한 Incident의 대상을 없애므로 안내는 두 갈래를 함께 보인다(PR #373 리뷰).
+    """
+    ec2 = FakeEc2([state])
     monkeypatch.setattr(inject, "endpoint_url", lambda: "http://localhost:4566")
     monkeypatch.setattr(inject, "aws_client", lambda *_a, **_k: ec2)
 
     with pytest.raises(SystemExit) as exc:
         inject.main([])
 
-    assert "시드와 다르다" in str(exc.value)
+    message = str(exc.value)
+    assert reason in message
+    assert "LocalStack을 재기동하지 않는다" in message
+    assert "[이전 스펙 복원]" in message
+    assert "사전 준비를 처음부터" in message
     assert ec2.stop_calls == []
 
 

@@ -53,6 +53,21 @@ STARTED_STATES = frozenset({"pending", "running"})
 POLL_SECONDS = 0.1
 TIMEOUT_SECONDS = 600.0
 
+# 컷 시트(PR #371)의 복구 칸과 같은 말로 맞춘다. LocalStack을 재기동하면 자원 ID가 새로 생겨
+# 준비해 둔 Incident의 대상이 사라지므로, 첫 스캔·AI 분석까지 다시 한다.
+REPREPARE_STEPS = (
+    "`docker compose restart localstack` → `uv run python scripts/seed_localstack.py`"
+    " → 첫 스캔·AI 분석 완료(승인 대기) 확인"
+)
+# AWS 상태만으로는 "이전 시연의 흔적"과 "[조치 실행]보다 늦게 띄움"을 가를 수 없어 두 갈래를
+# 함께 보인다. 늦게 띄운 경우에 재기동을 따르면 무대가 깨진다(PR #373 리뷰).
+RECOVERY_HINT = (
+    "  · 방금 [조치 실행]을 눌렀다면(이 스크립트를 늦게 띄움) — LocalStack을 재기동하지 않는다.\n"
+    "    화면에서 실행의 최종 상태를 먼저 확인하고, SUCCESS로 끝났으면 상세 화면 실행 항목의\n"
+    "    [이전 스펙 복원]으로 되돌린다.\n"
+    f"  · 시연 세션 사이라면 — 사전 준비를 처음부터:\n    {REPREPARE_STEPS}"
+)
+
 
 @dataclass(frozen=True)
 class Injection:
@@ -101,7 +116,7 @@ def find_instance(ec2, name: str) -> dict:
         ids = ", ".join(i["InstanceId"] for i in found) or "없음"
         sys.exit(
             f"중단: {name} 인스턴스가 정확히 한 대가 아니다({ids}).\n"
-            "  `docker compose restart localstack` 후 `uv run python scripts/seed_localstack.py`"
+            f"  사전 준비를 처음부터: {REPREPARE_STEPS}"
         )
     return found[0]
 
@@ -153,16 +168,17 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if state != "running":
         sys.exit(
-            f"중단: {args.name}({instance_id})가 running이 아니다({state}) — 실행기는 멈춰 있던 "
-            "인스턴스를 다시 켜지 않으므로 주입할 순간이 오지 않는다.\n"
-            "  `docker compose restart localstack` 후 시드를 다시 돌릴 것"
+            f"중단: {args.name}({instance_id})가 running이 아니다({state}) — 주입하지 않았다.\n"
+            "  조치 전부터 멈춰 있던 인스턴스는 실행기가 다시 켜지 않아 주입할 순간이 오지 않는다.\n"
+            + RECOVERY_HINT
         )
     seed_type = _seed_instance_types().get(args.name)
     if seed_type is not None and start_type != seed_type:
         sys.exit(
-            f"중단: {args.name}의 유형이 시드와 다르다(현재 {start_type} != 시드 {seed_type}) — "
-            "이전 시연에서 이미 바뀐 상태다. 이대로 기다리면 변화를 알아보지 못한다.\n"
-            "  `docker compose restart localstack` 후 시드를 다시 돌릴 것"
+            f"중단: {args.name}의 유형이 시드와 다르다(현재 {start_type} != 시드 {seed_type})"
+            " — 주입하지 않았다.\n"
+            "  이미 바뀐 유형에서 출발하면 다운사이징 기동을 알아보지 못한다.\n"
+            + RECOVERY_HINT
         )
 
     print(f"대상: {args.name} ({instance_id}) · 현재 {start_type} {state}")
