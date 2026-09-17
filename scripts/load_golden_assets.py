@@ -250,13 +250,13 @@ def _resolve_seed_binding() -> SeedBinding:
     """LocalStack에서 살아있는 시드 인스턴스를 찾아 바인딩을 만든다. (게이트 전용)
 
     실 AWS에는 실행하지 않는다 — `scripts/seed_localstack.py`와 같은 가드다.
-    ARN 조립은 **수집기의 것을 그대로 쓴다**(`services/collector._arn`). 문자열이 한 글자만
-    갈라져도 시드 스캔이 돌 때 같은 인스턴스가 자산 두 행이 된다.
+    ARN 조립은 **수집기와 같은 원천을 쓴다**(`schemas.arns.build_arn` · #342). 문자열이 한
+    글자만 갈라져도 시드 스캔이 돌 때 같은 인스턴스가 자산 두 행이 된다.
 
     막을 때는 적재 전에 막는다 — 절반만 적재된 DB로 게이트를 시작하는 것이 가장 나쁘다.
     """
+    from schemas.arns import build_arn
     from services.aws.client import account_id, aws_client, endpoint_url, regions
-    from services.collector import _arn
 
     endpoint = endpoint_url()
     if not endpoint or "amazonaws.com" in endpoint:
@@ -308,7 +308,7 @@ def _resolve_seed_binding() -> SeedBinding:
 
     return SeedBinding(
         old_arn=GOLDEN_A1_ARN,
-        new_arn=_arn("instance", instance["InstanceId"], region, account_id(region)),
+        new_arn=build_arn("instance", instance["InstanceId"], region, account_id(region)),
         new_instance_id=instance["InstanceId"],
     )
 
