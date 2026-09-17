@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -72,24 +73,20 @@ STARTING_TYPE = "t3.xlarge"   # 조치 이전 = 백업에 남고 원복이 되�
 TARGET_TYPE = "t3.large"      # AI 가 제안한 축소 대상 = 원복이 대조할 "조치 적용" 값
 NOW = datetime(2026, 9, 16, 6, 0, tzinfo=timezone.utc)
 
-# T2 — 골든 SecOps S3(`evt_ssh_bruteforce_001`)의 값 그대로다. 시나리오를 바꾸면
-# 정답지와 갈리므로 여기서 새로 짓지 않는다(설계서 §T2 입력).
-ACL = "acl-0a1b2c3d4e5f0e2e1"
+# T2 — 골든 SecOps S3(`evt_ssh_bruteforce_001`)를 **파일에서 그대로 읽는다.** 값을 옮겨 적으면
+# 골든이 바뀌어도 이 파일은 옛 값으로 계속 통과해 "골든과 대조된다"는 말이 거짓이 된다
+# (PR #358 리뷰 nit: 김세혁 — 옮겨 적은 occurred_at 이 골든과 달랐다).
+GOLDEN_S3 = REPO_ROOT / "datasets" / "golden" / "secops" / "input" / "evt_ssh_bruteforce_001.json"
+S3_OBSERVATION = {
+    k: v for k, v in json.loads(GOLDEN_S3.read_text(encoding="utf-8")).items() if k != "$schema"
+}
+ACL = "acl-0f9e8d7c6b5a40001"   # INSTANCE 와 접미사를 겹치지 않게 둔다 — 실패 로그에서 둘을 가른다
 ACL_ARN = f"arn:aws:ec2:{REGION}:{ACCOUNT}:network-acl/{ACL}"
-THREAT_TARGET = "i-0a1b2c3d4e5f00001"
-THREAT_TARGET_ARN = f"arn:aws:ec2:{REGION}:{ACCOUNT}:instance/{THREAT_TARGET}"
-SOURCE_IP = "203.0.113.10"
+THREAT_TARGET_ARN = S3_OBSERVATION["target_arn"]
+THREAT_TARGET = THREAT_TARGET_ARN.rsplit("/", 1)[-1]
+SOURCE_IP = S3_OBSERVATION["source_ip"]
 BLOCK_CIDR = f"{SOURCE_IP}/32"      # /32 단일 주소 — 서브넷을 끊지 않는다
 BLOCK_RULE_NUMBER = 100
-S3_OBSERVATION = {
-    "event_id": "evt-ssh-bruteforce-001",
-    "event_type": "SSH_BRUTE_FORCE",
-    "target_arn": THREAT_TARGET_ARN,
-    "source_ip": SOURCE_IP,
-    "occurred_at": "2026-09-16T06:30:00Z",
-    "failed_attempt_count": 120,
-    "window_seconds": 300,
-}
 
 # 판정 재시도 상한 — 운영 설정과 무관하게 주기 수로 센다 (Issue #249)
 RETRY_NOW = workflows.VerificationRetryPolicy(max_attempts=3, interval_seconds=0)
@@ -430,6 +427,9 @@ def test_t1_idle_ec2_downsize_and_auto_rollback_flow(db, client_pg, aws):
 
     # 원복이 **실물을 되돌렸다.** 상태 전이만 보면 아무것도 하지 않은 원복과 갈리지 않는다.
     assert aws.state["current_type"] == STARTING_TYPE
+    # 백업 state 가 running 이라 원복이 다시 켰다 — 기동 호출만 빠지면 "원복 성공인데
+    # 서비스가 꺼져 있다"가 된다(PR #358 리뷰: 김세혁 M3).
+    assert aws.state["current_state"] == "running"
     reverts = [
         kwargs for op, kwargs in aws.calls
         if op == "modify_instance_attribute"
@@ -535,6 +535,7 @@ def test_t2_ssh_bruteforce_block_and_one_click_release_flow(db, client_pg, aws):
         → Execution `SUCCESS` · 실물 규칙 1건
       → 차단 뒤 **해제 후보 제안**(#329) → 관제자 [해제]
       → `RUNBOOK_NACL_RESTORE`(`USER_APPROVAL`) → `SUCCESS` · 실물 규칙 0건
+        · Incident `AWAITING_CLOSURE`(T1 9번과 같은 자리 — 종료는 관제자 판단이다)
 
     핵심: 막는 것도 푸는 것도 **사람이 판단한다.** 오탐 시 서브넷 전체가 끊기므로
     의도적으로 사람을 넣었다 — 두 번의 `POST /actions/execute`가 그 자리다.
@@ -594,3 +595,5 @@ def test_t2_ssh_bruteforce_block_and_one_click_release_flow(db, client_pg, aws):
     assert release.status is ExecutionStatus.SUCCESS
     assert release.trigger_source is TriggerSource.USER_APPROVAL
     assert aws.state["acl_entries"] == []
+    # 해제가 닫히면 Incident 는 T1 과 같이 종료 대기로 간다 — 닫는 것은 사람이다.
+    assert incidents_repo.get_incident(db, incident_id).status is IncidentStatus.AWAITING_CLOSURE
