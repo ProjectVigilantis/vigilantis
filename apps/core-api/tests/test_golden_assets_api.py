@@ -290,3 +290,36 @@ def test_stale_binding_from_a_previous_boot_is_caught(db, golden, binding):
     assert golden._stale_a1_assets(db, next_boot) == [binding.new_arn]
     # 같은 바인딩으로 다시 적재하는 것은 막지 않는다 — 그 행은 upsert로 덮인다.
     assert golden._stale_a1_assets(db, binding) == []
+
+
+def test_resolve_seed_binding_assembles_arn_like_the_collector(monkeypatch, golden):
+    """시드 실물 조회 → 바인딩 ARN 조립이 수집기와 같은 원천(`build_arn`)으로 끝까지 돈다.
+
+    이 함수는 import 를 본문 안에서 하므로, 참조하던 이름이 사라져도 **부를 때까지** 아무도
+    모른다. #342 가 `services.collector._arn` 을 지웠을 때 실제로 그랬다 — 사전 준비 ④가
+    `ImportError` 로 죽었는데 CI 는 초록이었다(스크립트 경로를 부르는 테스트가 없었다).
+    LocalStack 없이 AWS 호출만 가짜로 두고 본문 전체를 한 번 태운다.
+    """
+    from schemas.arns import build_arn
+    from services.aws import client as aws
+
+    region = golden.GOLDEN_A1_ARN.split(":")[3]
+    instance_id = "i-0feedfacecafe0003"
+    a1_type = golden._golden_instance(golden.GOLDEN_A1_ARN)["instance_type"]
+
+    class FakeEc2:
+        def describe_instances(self, **_):
+            return {"Reservations": [{"Instances": [
+                {"InstanceId": instance_id, "InstanceType": a1_type}
+            ]}]}
+
+    monkeypatch.setattr(aws, "endpoint_url", lambda: "http://localhost:4566")
+    monkeypatch.setattr(aws, "regions", lambda: [region])
+    monkeypatch.setattr(aws, "account_id", lambda _region=None: "000000000000")
+    monkeypatch.setattr(aws, "aws_client", lambda *_a, **_k: FakeEc2())
+
+    bound = golden._resolve_seed_binding()
+
+    assert bound.new_instance_id == instance_id
+    assert bound.new_arn == build_arn("instance", instance_id, region, "000000000000")
+    assert bound.old_arn == golden.GOLDEN_A1_ARN
