@@ -115,7 +115,20 @@ class CollectionRun(Base):
         DateTime(timezone=True), nullable=True
     )
 
-    __table_args__ = (Index("ix_collection_runs_started_at", "started_at"),)
+    __table_args__ = (
+        # 리전별 최신 run 조회(latest_collection_run_per_region)가 5분 스캔으로 쌓이는
+        # 행을 전부 정렬하지 않게 — (region, started_at DESC, id DESC) 순서로 LIMIT 1 을
+        # 찍는다. 세 번째 키 id 는 동시각 tie-break 다.
+        # 종전의 started_at 단독 인덱스(ix_collection_runs_started_at)는 #343 에서 지웠다 —
+        # 플래너가 그쪽을 최신순으로 훑다가 리전 필터로 수천 행을 버리는 경쟁 경로였고
+        # (PR #344 리뷰), 시작 시각 단독으로 정렬·범위 조회하는 문장이 운영 코드에 없다.
+        Index(
+            "ix_collection_runs_region_started_at",
+            "region",
+            text("started_at DESC"),
+            text("collection_run_id DESC"),
+        ),
+    )
 
 
 class Asset(Base):
@@ -199,6 +212,9 @@ class MetricSummary(Base):
     __table_args__ = (
         UniqueConstraint("asset_id", "collection_run_id"),
         CheckConstraint("window_end >= window_start", name="window_ordered"),
+        # 신선한 메트릭 재사용(fresh_ec2_metric_summaries)의 window_end >= 기준 시각 —
+        # 회차마다 쌓이는 요약을 전부 훑지 않고 최근 구간만 읽는다.
+        Index("ix_metric_summaries_window_end", text("window_end DESC")),
     )
 
 
@@ -228,6 +244,14 @@ class RuleEvaluation(Base):
             name="health_score_range",
         ),
         Index("ix_rule_evaluations_verdict", "verdict"),
+        # 자산별 최신 판정(latest_rule_evaluation / latest_rule_evaluation_by_asset) —
+        # 정렬 키와 같은 순서라 자산마다 인덱스 첫 항목 1건으로 끝난다.
+        Index(
+            "ix_rule_evaluations_asset_evaluated_at",
+            "asset_id",
+            text("evaluated_at DESC"),
+            text("rule_evaluation_id DESC"),
+        ),
     )
 
 
@@ -396,6 +420,7 @@ class RunbookCandidate(Base):
     # 우회한 삽입이 빈 파라미터로 조용히 저장된다. 쓰는 쪽이 반드시 값을 낸다.
     parameters: Mapped[dict] = mapped_column(JSONB)
     display_parameters: Mapped[dict] = mapped_column(JSONB, default=dict)
+    ai_savings_estimate: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     evidence_ids: Mapped[list] = mapped_column(JSONB, default=list)
     status: Mapped[CandidateStatus] = mapped_column(
         _enum(CandidateStatus, "candidate_status"),

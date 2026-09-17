@@ -64,6 +64,7 @@
 #
 # SecOps는 고정 THREAT 근거·초기 판정과 분석 시점 수집 자산을 조립한다.
 # 후보는 입력 근거·조치 대상·저장 가능성을 검증한 뒤 Workflow에 넘긴다.
+# FinOps 절감 예상만 잘못된 경우에는 INVALID로 남기고 실행 후보를 유지한다(#347).
 # SecOps의 위험도 재평가는 초기 위험도·사유·대응 모드를 덮어쓰지 않는다.
 #
 # SecOps도 FAILED에서는 요약·재평가를 비운다. 선행 실행이 진행 중이면 ACTION_IN_PROGRESS,
@@ -83,6 +84,7 @@ import logging
 import ipaddress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import partial
 from typing import Callable, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -116,6 +118,7 @@ from ai.capabilities import (
 )
 from asset_mapping import to_asset_item
 from ai.model_client import AIModelClient
+from ai.rate_estimator import SAVINGS_MODEL_CALLS, estimate_candidate_savings, savings_context
 from ai.openai_client import build_openai_model_client
 from config import Settings, get_settings
 from db import mappers
@@ -129,10 +132,6 @@ logger = logging.getLogger("vigilantis.agent_dispatcher")
 Publish = Callable[[WsEvent], None]
 
 JOB_ID = "agent_dispatch"
-
-# FinOps 2회·SecOps 3회 중 최대값으로 회수 상한을 계산한다.
-_MODEL_CALLS_PER_GRAPH = max(FINOPS_MODEL_CALLS, SECOPS_MODEL_CALLS)
-
 
 class _UnsupportedIncident(Exception):
     """그래프가 아직 없는 분류 — 선점하지 않고 남긴다."""
@@ -165,7 +164,8 @@ class AgentDispatchReport:
 def stale_claim_ceiling_seconds(settings: Optional[Settings] = None) -> float:
     """IN_PROGRESS Claim을 고아로 볼 시간 상한. 새 설정 키를 만들지 않고 파생한다.
 
-    **모델 호출 1회의 최악값 × 그래프가 부르는 호출 수**다. 최악값은 매 시도가
+    **모델 호출 1회의 최악값 × 분석 전체의 최대 호출 수**다. 그래프 뒤 단가 호출도 센다.
+    최악값은 매 시도가
     제한시간을 다 쓰고(OPENAI_TIMEOUT_SECONDS × OPENAI_MAX_ATTEMPTS) 시도 사이마다
     서버가 지시한 최대 대기를 따르는 경우다(OPENAI_MAX_RETRY_AFTER_SECONDS ×
     (시도 수 − 1) — ai/openai_client.py _retry_delay는 상한 이내의 Retry-After를
@@ -182,7 +182,9 @@ def stale_claim_ceiling_seconds(settings: Optional[Settings] = None) -> float:
         settings.OPENAI_TIMEOUT_SECONDS * attempts
         + settings.OPENAI_MAX_RETRY_AFTER_SECONDS * (attempts - 1)
     )
-    return per_call * _MODEL_CALLS_PER_GRAPH
+    # 그래프 종료 뒤의 단가 대기도 Claim 수명에 포함한다. SecOps 호출 수에 기대지 않는다.
+    model_calls = max(FINOPS_MODEL_CALLS + SAVINGS_MODEL_CALLS, SECOPS_MODEL_CALLS)
+    return per_call * model_calls
 
 
 def _reclaim_stale_claims(db: Session, report: AgentDispatchReport) -> None:
@@ -383,6 +385,12 @@ def _contract_violation(
 
     offered = {item.evidence_id for item in graph_input.evidences}
     for candidate in output.candidates:
+        if (isinstance(graph_input, FinOpsGraphInput)
+                and candidate.runbook_id is RunbookId.RUNBOOK_EC2_RIGHTSIZING):
+            context = savings_context(graph_input.asset_context)
+            if (context is None or candidate.target_arn != context["target_arn"]
+                    or candidate.parameters.target_instance_type != context["target_instance_type"]):
+                return "다운사이징 대상·목표 타입이 입력 스냅샷의 서버 계산과 다릅니다"
         unknown = sorted(set(candidate.evidence_ids) - offered)
         if unknown:
             return (
@@ -485,7 +493,16 @@ def _dispatch_one(
                 incident_id,
             )
 
-        outcome = workflows.record_agent_analysis(db, incident_id, output)
+        savings_estimator = None
+        if isinstance(graph_input, FinOpsGraphInput):
+            # 입력 스냅샷·클라이언트 공급만 담당한다. 실행 시점·대상 선택은 Workflow 몫이다.
+            savings_estimator = partial(
+                estimate_candidate_savings, asset=graph_input.asset_context, client=client,
+            )
+
+        outcome = workflows.record_agent_analysis(
+            db, incident_id, output, savings_estimator=savings_estimator,
+        )
         counter = _TERMINAL_COUNTER[output.invocation_status]
         setattr(report, counter, getattr(report, counter) + 1)
         if publish is not None:

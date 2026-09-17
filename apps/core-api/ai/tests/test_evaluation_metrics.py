@@ -9,7 +9,8 @@ from pathlib import Path
 
 import pytest
 from ai.agent import _incident_payload
-from ai.evaluation import (
+from ai.evaluation.common.reproducibility import MISSING
+from ai.evaluation.summary import (
     CaseRun,
     build_column_report,
     check_summary_facts,
@@ -17,7 +18,6 @@ from ai.evaluation import (
     finops_cases,
     unstable_fields,
 )
-from ai.evaluation.reproducibility import MISSING
 from schemas.agents import AgentGraphOutput
 from schemas.assets import AssetInventory
 from schemas.incidents import AgentInvocationStatus

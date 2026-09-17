@@ -11,7 +11,7 @@
 """
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -27,8 +27,10 @@ import incident_intake  # noqa: E402
 import workflows  # noqa: E402
 from ai.agent import (  # noqa: E402
     CandidateProposalOutput,
+    CandidateProposalOutput as SecOpsCandidateProposalOutput,
     EvidenceSummaryOutput,
     ProposedCandidate,
+    ProposedCandidate as SecOpsProposedCandidate,
     RiskReassessmentOutput,
 )
 from ai.model_client import FakeAIModelClient  # noqa: E402
@@ -322,6 +324,108 @@ def test_detail_and_list_stay_readable_after_success(db, client_pg, precheck_pas
     assert client_pg.get("/api/v1/incidents").status_code == 200
 
 
+@pytest.mark.parametrize("rate, expected_status", [
+    ("0.104000", "ESTIMATED"),
+    ("저장할 수 없는\x00단가", "INVALID"),
+    (None, "UNAVAILABLE"),
+])
+def test_savings_survive_db_and_fresh_app_reads_without_new_model_calls(
+    db, client_pg, monkeypatch, rate, expected_status,
+):
+    from db.session import get_db
+    from fastapi.testclient import TestClient
+    from main import create_app
+    from sqlalchemy.orm import Session
+
+    incident_id = _pending_incident(db)
+    estimate = {
+        "status": "ESTIMATED",
+        # 합성 단가. 이 테스트는 가격 정확도를 검증하지 않는다.
+        "current_hourly_rate": rate, "target_hourly_rate": "0.026000",
+    }
+    if expected_status == "UNAVAILABLE":
+        estimate.update(status="UNAVAILABLE",
+                        current_hourly_rate=None, target_hourly_rate=None)
+    evidence_id = _rule_evidence_id(db, incident_id)
+    from ai.rate_estimator import ProposedHourlyRates
+
+    # 서비스 기본 그래프를 그대로 사용하고 모델 응답만 대역으로 제공한다.
+    model = _client(
+        SUMMARY, CandidateProposalOutput(candidates=[_proposal(evidence_id)]),
+        ProposedHourlyRates.model_construct(**estimate),
+    )
+    order = []
+    original_complete = model.complete
+    original_lock = incidents_repo.lock_incident
+
+    def complete(request, response_model):
+        assert not db.in_transaction()
+        order.append(response_model.__name__)
+        return original_complete(request, response_model)
+
+    def precheck(command, backup_loader=None):
+        assert not db.in_transaction()
+        order.append("guardrail")
+        return _passing_precheck(command)
+
+    def lock(*args):
+        order.append("lock")
+        return original_lock(*args)
+
+    model.complete = complete
+    monkeypatch.setattr(workflows, "_candidate_precheck", precheck)
+    monkeypatch.setattr(incidents_repo, "lock_incident", lock)
+    report = _cycle(db, model)
+    assert report.succeeded == 1
+    assert order == [
+        "EvidenceSummaryOutput", "CandidateProposalOutput", "guardrail", "ProposedHourlyRates", "lock",
+    ]
+
+    url = f"/api/v1/incidents/{incident_id}"
+    response = client_pg.get(url)
+    assert response.status_code == 200
+    first = response.json()
+    recommendation = first["recommendations"][0]
+    saved = recommendation["ai_savings_estimate"]
+    assert first["status"] == "AWAITING_APPROVAL"
+    assert saved["status"] == expected_status
+    assert saved["amount"] == ("56.94" if expected_status == "ESTIMATED" else None)
+    if expected_status == "ESTIMATED":
+        assert saved["basis"]["explanation_source"] == "SERVER_TEMPLATE"
+        assert saved["basis"]["assumptions"]["pricing_source"] == "MODEL_KNOWLEDGE"
+        assert saved["basis"]["current_instance_type"] == "t3.xlarge"
+        assert "실제 요금 조회 결과가 아닙니다" in saved["basis"]["explanation"]
+    assert recommendation["display_parameters"] == {"target_instance_type": "t3.medium"}
+    candidate = incidents_repo.list_candidates(db, incident_id)[0]
+    db.refresh(candidate)
+    assert candidate.ai_savings_estimate == saved
+    assert candidate.status is CandidateStatus.EXECUTABLE
+    evaluation = guardrails_repo.latest_for_candidate(db, candidate.candidate_id)
+    assert evaluation.result.value == "PASS"
+    assert "ai_savings_estimate" not in evaluation.validated_command
+    assert evaluation.validated_command["parameters"] == {"target_instance_type": "t3.medium"}
+
+    # 앱·ORM identity map을 새로 만들어도 DB에 저장한 값을 그대로 조회한다.
+    # 테스트 격리용 외부 트랜잭션은 공유하지만 새 Session에서 다시 SELECT한다.
+    connection = db.get_bind()
+    db.close()
+
+    def fresh_db():
+        with Session(bind=connection, join_transaction_mode="create_savepoint") as session:
+            yield session
+
+    app = create_app()
+    app.dependency_overrides[get_db] = fresh_db
+    with TestClient(app) as restarted:
+        for _ in range(2):
+            restored = restarted.get(url)
+            assert restored.status_code == 200
+            assert restored.json() == first
+    with Session(bind=connection, join_transaction_mode="create_savepoint") as session:
+        assert _cycle(session, model).claimed == 0
+    assert len(model.sent) == 3
+
+
 def test_unattached_sg_incident_gets_a_menu(db):
     """미부착 SG의 조치는 Registry에서 SECOPS다 — 도메인으로 거르면 메뉴가 빈다."""
     incident_id = _pending_incident(db, sg=True)
@@ -331,6 +435,116 @@ def test_unattached_sg_incident_gets_a_menu(db):
     assert [c.runbook_id for c in graph_input.capabilities] == [
         RunbookId.RUNBOOK_SG_DELETE_ISOLATED
     ]
+
+
+def test_non_rightsizing_candidate_skips_savings(db, client_pg, precheck_pass):
+    incident_id = _pending_incident(db, sg=True)
+    model = _client(SUMMARY, CandidateProposalOutput(candidates=[_proposal(
+        _rule_evidence_id(db, incident_id),
+        runbook_id=RunbookId.RUNBOOK_SG_DELETE_ISOLATED, target_arn=SG_ARN,
+    )]))
+    assert _cycle(db, model).succeeded == 1
+    assert len(model.sent) == 2
+    data = client_pg.get(f"/api/v1/incidents/{incident_id}").json()
+    assert data["recommendations"][0]["ai_savings_estimate"] is None
+
+
+@pytest.mark.parametrize("error_kind", ["timeout", "contract"])
+def test_savings_call_failure_keeps_passed_candidate_in_db(
+    db, client_pg, precheck_pass, error_kind,
+):
+    from ai.model_client import AIModelContractError, AIModelTimeoutError
+    from ai.rate_estimator import ProposedHourlyRates
+
+    incident_id = _pending_incident(db)
+    model = _client(SUMMARY, CandidateProposalOutput(candidates=[_proposal(
+        _rule_evidence_id(db, incident_id),
+    )]))
+    original = model.complete
+    attempted = []
+
+    def complete(request, response_model):
+        assert not db.in_transaction()
+        attempted.append(response_model)
+        if response_model is ProposedHourlyRates:
+            error = AIModelTimeoutError if error_kind == "timeout" else AIModelContractError
+            raise error("synthetic failure")
+        return original(request, response_model)
+
+    model.complete = complete
+    report = _cycle(db, model)
+    assert (report.succeeded, report.errored) == (1, 0)
+    assert len(attempted) == 3
+    data = client_pg.get(f"/api/v1/incidents/{incident_id}").json()
+    assert data["status"] == "AWAITING_APPROVAL"
+    estimate = data["recommendations"][0]["ai_savings_estimate"]
+    assert estimate["status"] == "INVALID" and estimate["amount"] is None
+    assert estimate["reason"] == "MISSING_ESTIMATE"
+    candidate = incidents_repo.list_candidates(db, incident_id)[0]
+    assert candidate.status is CandidateStatus.EXECUTABLE
+    assert guardrails_repo.latest_for_candidate(db, candidate.candidate_id).result.value == "PASS"
+    assert _cycle(db, model).claimed == 0
+    assert len(attempted) == 3
+
+
+def test_savings_runs_after_all_guardrails(db, monkeypatch):
+    from ai.rate_estimator import invalid_estimate
+    from schemas.savings import SavingsReason
+
+    incident_id = _pending_incident(db)
+    evidence_id = _rule_evidence_id(db, incident_id)
+    incidents_repo.claim_agent_invocation(db, incident_id, started_at=datetime.now(UTC))
+    db.commit()
+    output = AgentGraphOutput(
+        invocation_status=AgentInvocationStatus.SUCCEEDED, summary_lines=list(SUMMARY.model_dump().values()),
+        candidates=[
+            RunbookCandidateDraft(
+                runbook_id=RunbookId.RUNBOOK_EC2_RIGHTSIZING, target_arn=EC2_ARN,
+                parameters={"target_instance_type": "t3.medium"}, evidence_ids=[evidence_id],
+            ),
+            RunbookCandidateDraft(
+                runbook_id=RunbookId.RUNBOOK_SG_DELETE_ISOLATED, target_arn=SG_ARN,
+                parameters={}, evidence_ids=[evidence_id],
+            ),
+        ],
+    )
+    seen = []
+    original_guard = workflows._guard_candidate
+
+    def guard(candidate, managed, backups):
+        assert not db.in_transaction()
+        assert candidate.ai_savings_estimate is None
+        outcome = original_guard(candidate, managed, backups)
+        seen.append(candidate.candidate_id)
+        return outcome
+
+    def estimate(candidate):
+        assert not db.in_transaction()
+        assert len(seen) == 2  # 다른 후보가 거절된 뒤에도 통과 후보만 보강한다.
+        assert candidate.candidate_id == seen[0]
+        return invalid_estimate(SavingsReason.MISSING_ESTIMATE)
+
+    monkeypatch.setattr(workflows, "_candidate_precheck", _passing_precheck)
+    monkeypatch.setattr(workflows, "_guard_candidate", guard)
+    outcome = workflows.record_agent_analysis(db, incident_id, output, savings_estimator=estimate)
+    assert (outcome.executable, outcome.rejected) == (1, 1)
+    candidates = {c.candidate_id: c for c in incidents_repo.list_candidates(db, incident_id)}
+    assert candidates[seen[0]].ai_savings_estimate["reason"] == "MISSING_ESTIMATE"
+    assert candidates[seen[1]].ai_savings_estimate is None
+
+
+def test_finops_claim_ceiling_explicitly_includes_followup_calls(monkeypatch):
+    from ai.agent import FINOPS_MODEL_CALLS
+    from ai.rate_estimator import SAVINGS_MODEL_CALLS
+    from config import Settings
+
+    assert FINOPS_MODEL_CALLS == 2
+    assert SAVINGS_MODEL_CALLS == 1
+    # SecOps가 3회여서 우연히 상한이 맞는 구현은 잡는다.
+    monkeypatch.setattr(agent_dispatcher, "SECOPS_MODEL_CALLS", 1)
+    settings = Settings(OPENAI_TIMEOUT_SECONDS=30, OPENAI_MAX_ATTEMPTS=3,
+                        OPENAI_MAX_RETRY_AFTER_SECONDS=60)
+    assert agent_dispatcher.stale_claim_ceiling_seconds(settings) == 630
 
 
 def test_graph_input_reads_the_rule_and_asset_evidence_rows(db):
@@ -499,7 +713,9 @@ def test_no_proposal_closes_as_failed_with_an_empty_summary(db, client_pg):
     """요약만 있고 후보가 0개인 것은 정상 종착이 아니라 분석 실패다."""
     incident_id = _pending_incident(db)
 
-    report = _cycle(db, _client(SUMMARY, CandidateProposalOutput(candidates=[])))
+    model = _client(SUMMARY, CandidateProposalOutput(candidates=[]))
+    report = _cycle(db, model)
+    assert len(model.sent) == 2
 
     assert report.no_proposal == 1
     incident = incidents_repo.get_incident(db, incident_id)
@@ -518,9 +734,9 @@ def test_all_candidates_rejected_closes_as_failed(db, monkeypatch):
     incident_id = _pending_incident(db)
     evidence_id = _rule_evidence_id(db, incident_id)
 
-    report = _cycle(
-        db, _client(SUMMARY, CandidateProposalOutput(candidates=[_proposal(evidence_id)]))
-    )
+    model = _client(SUMMARY, CandidateProposalOutput(candidates=[_proposal(evidence_id)]))
+    report = _cycle(db, model)
+    assert len(model.sent) == 2
 
     assert report.succeeded == 1  # 그래프는 성공했다
     incident = incidents_repo.get_incident(db, incident_id)
@@ -529,6 +745,7 @@ def test_all_candidates_rejected_closes_as_failed(db, monkeypatch):
     assert incident.summary_lines == []
     candidates = incidents_repo.list_candidates(db, incident_id)
     assert [c.status for c in candidates] == [CandidateStatus.REJECTED]
+    assert candidates[0].ai_savings_estimate is None
     # 어느 단계가 왜 막았는지가 남아야 관제 화면이 "왜 사라졌나"를 답한다
     evaluation = guardrails_repo.latest_for_candidate(db, candidates[0].candidate_id)
     assert evaluation.failed_step is GuardrailStep.AWS_DRY_RUN
@@ -772,7 +989,7 @@ def _secops_client(db, incident_id, *, candidates=True, **over):
         EvidenceSummaryOutput(observation="300초 동안 SSH 실패 120회", diagnosis="SSH 공격 추정",
                               rationale="출발지 차단 필요"),
         RiskReassessmentOutput(reviewed_risk_level=RiskLevel.HIGH),
-        CandidateProposalOutput(candidates=[ProposedCandidate(**values)] if candidates else []),
+        SecOpsCandidateProposalOutput(candidates=[SecOpsProposedCandidate(**values)] if candidates else []),
     )
 
 
@@ -811,7 +1028,9 @@ def test_secops_dispatch_stores_risk_candidates_wait_and_commit_event(db, client
     assert row.initial_risk_reason_codes == ["RISK_SSH_BRUTEFORCE"]
     assert (row.response_deadline_at - row.agent_wait_started_at).total_seconds() == 60
     assert len(published) == 1
+    assert len(client.sent) == 3  # SecOps 본래 3호출뿐이며 단가 호출은 없다.
     candidate = incidents_repo.list_candidates(db, incident_id)[0]
+    assert candidate.ai_savings_estimate is None
     evaluation = guardrails_repo.latest_for_candidate(db, candidate.candidate_id)
     assert len(evaluation.steps) == 4
     assert _cycle(db, client).claimed == 0

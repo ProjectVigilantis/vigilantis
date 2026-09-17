@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 import pytest
-from ai.evaluation import EvalCase, finops_cases
+from ai.evaluation.summary import EvalCase, finops_cases
 from schemas.api.assets import AssetType, RelationType, Verdict
 from schemas.assets import AssetInventory
 from schemas.runbooks import RunbookId

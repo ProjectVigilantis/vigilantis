@@ -6,31 +6,31 @@
 ③ 모델로 나간 값이 마스킹 경로를 지났는가
 
 프롬프트 문구의 품질은 여기서 보지 않는다. 문구·필드명·출력 스키마가 바뀌었는데 승인
-스냅샷이 갱신되지 않은 것만 잡는다(#243 — 재통과 절차는 docs/AI_SUMMARY_BASELINE.md).
+스냅샷이 갱신되지 않은 것만 잡는다(#243 — 재통과 절차는 apps/core-api/ai/evaluation/summary/baseline.md).
 """
 
 import json
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
-
 from ai.agent import (
-    _PARAMETER_CONSTRAINTS,
     _FINOPS_PROPOSAL_SYSTEM_PROMPT,
     _FINOPS_SUMMARY_SYSTEM_PROMPT,
-    _SECOPS_SUMMARY_PROMPT,
-    _SECOPS_RISK_PROMPT,
+    _PARAMETER_CONSTRAINTS,
     _SECOPS_PROPOSAL_PROMPT,
+    _SECOPS_RISK_PROMPT,
+    _SECOPS_SUMMARY_PROMPT,
     FINOPS_PROMPT_VERSION,
     CandidateProposalOutput,
     EvidenceSummaryOutput,
     ProposedCandidate,
     finops_prompt_fingerprint,
     finops_prompt_material,
+    finops_request_fingerprint,
     run_finops_graph,
 )
 from ai.model_client import FakeAIModelClient
+from pydantic import ValidationError
 from schemas.agents import FinOpsGraphInput
 from schemas.incidents import AgentInvocationStatus
 from schemas.runbook_parameters import (
@@ -152,8 +152,21 @@ def test_succeeded_carries_three_summary_lines_and_candidate():
     assert candidate.evidence_ids == ["ev-0001"]
     assert isinstance(candidate.parameters, Ec2RightsizingCandidateParameters)
     assert candidate.parameters.target_instance_type == "t3.medium"
-    # 노드 2개가 각각 1회씩 부른다
+    # 추정은 Workflow 후속 처리다. 그래프는 미실행을 오류로 만들지 않는다.
     assert len(client.sent) == 2
+
+
+
+def test_other_runbook_uses_only_summary_and_proposal_calls():
+    proposal = rightsizing_proposal(
+        runbook_id="RUNBOOK_EBS_DELETE_UNATTACHED",
+        target_arn=VOLUME_ARN,
+    )
+    output, client = run(SUMMARY, proposals(proposal))
+    assert len(client.sent) == 2
+
+    assert output.invocation_status is AgentInvocationStatus.SUCCEEDED
+
 
 
 def test_no_proposal_when_model_returns_empty_candidates():
@@ -415,7 +428,7 @@ def test_rule_evaluation_is_not_sent_twice():
     # 그대로 두면 같은 판정이 한 실행에서 네 번 나간다
     _, client = run(SUMMARY, proposals(rightsizing_proposal()))
 
-    for sent in client.sent:
+    for sent in client.sent[:2]:
         payload = sent["user_payload"]
         assert "rule_evaluation" not in payload
         # 판정은 사라지지 않는다 — 근거 쪽에 그대로 있다
@@ -467,18 +480,18 @@ def test_every_call_goes_through_the_masking_boundary(call_index):
 # 프롬프트 v1 — 판·해시·계약 사실 (Issue #243)
 # ------------------------------------------------------------------------------
 
-SNAPSHOT = Path(__file__).resolve().parents[1] / "evaluation" / "summary_prompt_snapshot.json"
+SNAPSHOT = Path(__file__).resolve().parents[1] / "evaluation" / "summary" / "summary_prompt_snapshot.json"
 
 
 def test_prompt_fingerprint_matches_approved_snapshot():
     # 문구·필드명·제약 문구·출력 스키마 중 하나라도 바뀌면 여기서 선다. 고의로 바꿨다면
-    # docs/AI_SUMMARY_BASELINE.md의 재통과 절차를 거친 뒤 스냅샷을 갱신한다 — 이 테스트가
+    # apps/core-api/ai/evaluation/summary/baseline.md의 재통과 절차를 거친 뒤 스냅샷을 갱신한다 — 이 테스트가
     # 있어야 "판 올리기를 잊어도 드러난다"가 말이 아니라 동작이다
     snapshot = json.loads(SNAPSHOT.read_text("utf-8"))
 
     assert snapshot["version"] == FINOPS_PROMPT_VERSION
     assert snapshot["prompt_sha256"] == finops_prompt_fingerprint(), (
-        "프롬프트가 승인 스냅샷과 다릅니다 — docs/AI_SUMMARY_BASELINE.md 절차로 재통과 후 갱신"
+        "프롬프트가 승인 스냅샷과 다릅니다 — apps/core-api/ai/evaluation/summary/baseline.md 절차로 재통과 후 갱신"
     )
 
 
@@ -493,12 +506,22 @@ def test_prompt_material_covers_every_instruction_surface():
     # 출력 스키마 — 필드 이름이 모델에 나가므로 이름을 바꾸면 해시가 움직여야 한다
     for field in ("observation", "diagnosis", "rationale", "min_size"):
         assert f'"{field}"' in material
-    # 목표 타입은 그래프가 계산한다(#251) — 모델에게 나가는 지시 어디에도 없어야 한다
-    assert '"target_instance_type"' not in material
+    # 실행 목표는 서버 몫이다. 단가 추정은 추천 요청과 분리한다.
+    assert "target_instance_type" not in ProposedCandidate.model_fields
+    assert "ai_savings_estimate" not in CandidateProposalOutput.model_json_schema()["properties"]
 
 
 def test_summary_output_fields_are_the_three_roles():
     assert list(EvidenceSummaryOutput.model_fields) == ["observation", "diagnosis", "rationale"]
+
+
+def test_summary_request_fingerprint_detects_schema_order(monkeypatch):
+    before = finops_request_fingerprint()
+    schema = CandidateProposalOutput.model_json_schema()
+    properties = schema["$defs"]["ProposedCandidate"]["properties"]
+    properties["rule_number"] = properties.pop("rule_number")
+    monkeypatch.setattr(CandidateProposalOutput, "model_json_schema", lambda: schema)
+    assert finops_request_fingerprint() != before
 
 
 @pytest.mark.parametrize("prompt", [

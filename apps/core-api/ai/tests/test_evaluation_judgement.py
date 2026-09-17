@@ -8,9 +8,8 @@ import json
 from pathlib import Path
 
 import pytest
-
 from ai.agent import _incident_payload
-from ai.evaluation import (
+from ai.evaluation.summary import (
     CaseRun,
     DefectJudgement,
     FactCheckResult,

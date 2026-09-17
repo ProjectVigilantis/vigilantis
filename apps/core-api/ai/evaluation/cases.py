@@ -31,6 +31,7 @@ from typing import Any, Mapping, Optional, Sequence
 
 from schemas.agents import FinOpsGraphInput
 from schemas.api.assets import AssetType, RelationType, SkipReasonCode, Verdict
+from schemas.arns import build_arn
 from schemas.assets import AssetInventory, Ec2Asset, MetricName
 
 from ai.capabilities import build_finops_capabilities
@@ -56,21 +57,16 @@ class EvalCase:
     purpose: str
 
 
-def _arn(resource_type: str, resource_id: str, region: str, account_id: str) -> str:
-    """services/collector.py의 _arn과 같은 형식이다.
-
-    가드레일 ③ ARN Match가 이 문자열을 그대로 비교하므로, 형식이 갈리면 골든 자산이
-    조치 대상 밖으로 떨어진다.
-    """
-    return f"arn:aws:ec2:{region}:{account_id}:{resource_type}/{resource_id}"
-
-
 def _relationships(ec2: Ec2Asset, inventory: AssetInventory) -> list[dict[str, str]]:
-    """SECURED_BY(SG)·ATTACHED_TO(EBS) 파생 — services/collector.py의 순서 그대로."""
+    """SECURED_BY(SG)·ATTACHED_TO(EBS) 파생 — services/collector.py의 순서 그대로.
+
+    ARN 조립은 schemas.arns.build_arn 하나로 모은다(#342) — 여기 있던 _arn 복제본은
+    지웠다. 가드레일 ③ 이 대조하는 문자열이라 수집기와 조립 원천이 갈리면 안 된다.
+    """
     items = [
         {
             "relation_type": RelationType.SECURED_BY.value,
-            "target_arn": _arn("security-group", sg_id, inventory.region, inventory.account_id),
+            "target_arn": build_arn("security-group", sg_id, inventory.region, inventory.account_id),
         }
         for sg_id in ec2.security_group_ids
     ]

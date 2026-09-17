@@ -130,6 +130,7 @@ def _to_detail(db: Session, row: models.Incident) -> IncidentResponse:
             "runbook_id": candidate.runbook_id,
             "target_arn": candidate.target_arn,
             "display_parameters": candidate.display_parameters,
+            "ai_savings_estimate": candidate.ai_savings_estimate,
         }
         for candidate in sorted(executable, key=lambda c: c.created_at)
     ]

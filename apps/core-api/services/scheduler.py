@@ -83,6 +83,7 @@ def run_pipeline(publish: Callable[[WsEvent], None] | None = None) -> dict:
     """
     from sqlalchemy import text
 
+    from db.repositories import assets as assets_repo
     from db.session import get_engine, get_session_factory
     from services.collector import collect_and_store
     from services.rule_engine import run_rule_engine
@@ -144,7 +145,46 @@ def run_pipeline(publish: Callable[[WsEvent], None] | None = None) -> dict:
                     occurred_at=outcome.occurred_at,
                 ))
 
-        summary = {"stored": store, "verdicts": judged["counts"], "incidents": incidents}
+        # ARN 조인 무결성 점검 — 자산을 가리키는 키가 assets.arn 과 어긋나거나 자산 리전이
+        # 자기 ARN 과 다르면 건수를 회차 요약에 싣고 경고로 남긴다. FK 가 없어 DB 가 막지
+        # 못하는 어긋남의 조기 신호다 — 정합 실패로 스캔을 세우지는 않는다(경고만). (#342)
+        #
+        # 점검은 회차의 **산출물이 아니라 진단**이다. 여기 닿았을 때 수집·판정·Incident 는
+        # 이미 commit 됐고 WebSocket 이벤트도 나갔다 — 진단이 던져서 그 회차 요약을 지우면
+        # 안 된다. 그래서 쿼리 자체의 예외도 받아 넘긴다(#353 리뷰: 김세혁).
+        # 요약에는 **"못 쟀음"(None)과 "0건"(0)을 구분해** 싣는다. 둘이 같은 값이면 요약을
+        # 읽는 쪽이 "정합했다" 와 "점검이 깨졌다" 를 가를 수 없다.
+        dangling: list[assets_repo.DanglingArn] | None
+        check_db = session_factory()  # 위 Intake 반복문의 db 와 다른 세션이다(#353 nit)
+        try:
+            dangling = assets_repo.find_dangling_arns(check_db)
+        except Exception:
+            dangling = None
+            logger.exception("scan_dangling_check_failed")
+        finally:
+            check_db.close()
+        # 경고는 **조사 대상 축만** 올린다. 미등록 대상 관측·가드레일 ③ 거절·대상을 못 본
+        # 관계는 그 자리에 그렇게 남는 것이 정상이라, 같은 통에 담으면 매 회차 같은 경고가
+        # 반복되며 새 어긋남을 덮는다(#353 리뷰: 안성일). 정상 보존분은 요약에만 남는다.
+        if dangling:
+            investigate = [d for d in dangling if d.kind in assets_repo.INVESTIGATE_KINDS]
+            if investigate:
+                logger.warning(
+                    "scan_dangling_arns",
+                    extra={
+                        "count": len(investigate),
+                        "findings": [d._asdict() for d in investigate[:20]],
+                    },
+                )
+
+        summary = {
+            "stored": store,
+            "verdicts": judged["counts"],
+            "incidents": incidents,
+            "dangling_arns": (
+                None if dangling is None else assets_repo.summarize_dangling(dangling)
+            ),
+        }
         logger.info("scan pipeline done: %s", summary)
         return summary
     finally:

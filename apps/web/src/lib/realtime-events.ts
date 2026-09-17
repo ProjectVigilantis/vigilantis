@@ -158,11 +158,12 @@ export function backoffMs(attempt: number): number {
 }
 
 /**
- * WS 주소. 계약 경로는 `/api/v1/ws`이고 오리진은 REST와 같은 곳을 쓴다.
+ * WS 주소. 계약 경로는 `/api/v1/ws`이고 오리진은 REST와 같은 곳을 쓴다 — 호출자가
+ * `apiBaseUrl()`(`lib/api/client`)이 정한 하나를 넘긴다.
  *
- * `NEXT_PUBLIC_API_BASE_URL`이 없으면 **mock 단계**다 — 자체 origin의 Route Handler에는
- * WS가 없으므로 `null`을 돌려 연결을 시도하지 않는다. 무한 재접속으로 콘솔을 채우는 대신
- * 인디케이터가 그 사실을 그린다(2026-08-14 확정: mock 단계 WS 제외).
+ * `null`은 **넘어온 오리진이 소켓 주소로 성립하지 않는다**는 뜻이다(빈 값, 또는 스킴 없는
+ * `localhost:8000`). 그 값으로는 연결할 수 없으므로 무한 재접속으로 콘솔을 채우는 대신
+ * 인디케이터가 미연동임을 그린다. 원인이 설정 오류이지 서버 장애가 아니라는 표시다.
  */
 export function websocketUrl(apiBaseUrl: string | undefined): string | null {
   if (!apiBaseUrl) return null;
