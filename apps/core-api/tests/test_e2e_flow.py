@@ -64,12 +64,29 @@ from services.rule_engine import run_rule_engine  # noqa: E402
 from services.scheduler import _build_finops_intakes  # noqa: E402
 from threat_ingress import receive_threat  # noqa: E402
 
-ACCOUNT = "123456789012"
-REGION = "ap-northeast-2"
-INSTANCE = "i-0a1b2c3d4e5f0e2e1"
-INSTANCE_ARN = f"arn:aws:ec2:{REGION}:{ACCOUNT}:instance/{INSTANCE}"
+# T1 — 골든 FinOps **A1**(`asset_inventory_001` · IDLE_CPU_AVG 바로 아래)을 **파일에서 그대로 읽는다.**
+# 정답지의 case_id 로 대상을 찾으므로 골든이 바뀌면 이 흐름도 따라간다 — 값을 옮겨 적던 종전에는
+# cpu_max 가 골든과 달랐다(12.0 vs 10.0). 계정·리전도 골든 인벤토리의 것이다. S3(T2)의 대상도
+# 같은 인스턴스다 — 설계서 §T2 "자산 조인".
+GOLDEN_FINOPS = REPO_ROOT / "datasets" / "golden" / "finops"
+_A1_INVENTORY = json.loads(
+    (GOLDEN_FINOPS / "input" / "asset_inventory_001.json").read_text(encoding="utf-8")
+)
+_A1_ARN = next(
+    e["asset_arn"]
+    for e in json.loads(
+        (GOLDEN_FINOPS / "expected" / "asset_inventory_001.json").read_text(encoding="utf-8")
+    )["evaluations"]
+    if e["case_id"] == "A1"
+)
+GOLDEN_A1 = next(i for i in _A1_INVENTORY["ec2_instances"] if i["arn"] == _A1_ARN)
 
-STARTING_TYPE = "t3.xlarge"   # 조치 이전 = 백업에 남고 원복이 되돌릴 값
+ACCOUNT = _A1_INVENTORY["account_id"]
+REGION = _A1_INVENTORY["region"]
+INSTANCE = GOLDEN_A1["instance_id"]
+INSTANCE_ARN = GOLDEN_A1["arn"]
+
+STARTING_TYPE = GOLDEN_A1["instance_type"]   # 조치 이전 = 백업에 남고 원복이 되돌릴 값
 TARGET_TYPE = "t3.large"      # AI 가 제안한 축소 대상 = 원복이 대조할 "조치 적용" 값
 NOW = datetime(2026, 9, 16, 6, 0, tzinfo=timezone.utc)
 
@@ -80,7 +97,7 @@ GOLDEN_S3 = REPO_ROOT / "datasets" / "golden" / "secops" / "input" / "evt_ssh_br
 S3_OBSERVATION = {
     k: v for k, v in json.loads(GOLDEN_S3.read_text(encoding="utf-8")).items() if k != "$schema"
 }
-ACL = "acl-0f9e8d7c6b5a40001"   # INSTANCE 와 접미사를 겹치지 않게 둔다 — 실패 로그에서 둘을 가른다
+ACL = "acl-0fedcba9876543210"   # 인스턴스 ID 와 모양이 겹치지 않게 둔다 — 실패 로그에서 둘을 가른다
 ACL_ARN = f"arn:aws:ec2:{REGION}:{ACCOUNT}:network-acl/{ACL}"
 THREAT_TARGET_ARN = S3_OBSERVATION["target_arn"]
 THREAT_TARGET = THREAT_TARGET_ARN.rsplit("/", 1)[-1]
@@ -248,11 +265,12 @@ def status_of(db, incident_id, execution_id):
 
 
 def _collect_idle_ec2(db):
-    """수집 1회 — Idle EC2 한 대를 자산과 메트릭 요약으로 남긴다.
+    """수집 1회 — 골든 A1 한 대를 자산과 메트릭 요약으로 남긴다.
 
-    `evaluate_ec2`가 `COST_CANDIDATE`로 읽을 값을 넣는다(cpu_avg 4.9 < IDLE 5.0 ·
-    cpu_max 12.0 < SPIKE 40.0 · 데이터포인트 336 ≥ 48 · prod 태그 없음). 값 자체의
-    경계 의미는 골든이 갖고, 여기서는 **판정이 실제로 떨어지는 입력**이면 된다.
+    값은 전부 골든에서 온다(인스턴스 타입·이름·상태·태그·메트릭 요약). 판정이 `COST_CANDIDATE`
+    로 떨어지는 것은 골든 정답지가 보장하는 성질이고, 이 흐름은 그 입력으로 뒤가 이어지는지를 본다.
+    골든 인벤토리 전체를 적재하지 않는 이유 — 다른 자산의 판정이 함께 Intake 로 올라와 T1 한 건의
+    전이를 흐린다.
     """
     run = assets_repo.start_collection_run(
         db, account_id=ACCOUNT, region=REGION, mode="localstack",
@@ -265,20 +283,17 @@ def _collect_idle_ec2(db):
         resource_id=INSTANCE,
         account_id=ACCOUNT,
         region=REGION,
-        spec={"instance_type": STARTING_TYPE},
+        spec={"instance_type": STARTING_TYPE, "tags": GOLDEN_A1["tags"]},
         collection_run_id=run.collection_run_id,
         collected_at=NOW,
-        name="golden-ec2-idle-boundary",
-        state="running",
+        name=GOLDEN_A1["name"],
+        state=GOLDEN_A1["state"],
     )
     assets_repo.add_metric_summary(
         db,
         asset_id=asset.asset_id,
         collection_run_id=run.collection_run_id,
-        summary=MetricSummaryContract(
-            cpu_datapoints=336, cpu_avg=4.9, cpu_max=12.0,
-            net_in_avg=1024.0, net_out_avg=512.0,
-        ),
+        summary=MetricSummaryContract(**GOLDEN_A1["metric_summary"]),
         window_start=NOW - timedelta(days=14),
         window_end=NOW,
         collected_at=NOW,
