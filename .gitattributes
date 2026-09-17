@@ -1,0 +1,5 @@
+# 바이너리는 줄바꿈 변환 대상이 아니다 — 변환되면 파일이 조용히 깨진다.
+# core.autocrlf=true 인 윈도우 클론에서 Git의 자동 판별에 맡기지 않고 못 박는다.
+*.png binary
+*.docx binary
+*.ico binary
