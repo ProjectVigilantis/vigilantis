@@ -384,6 +384,10 @@ def test_arn_columns_cover_every_arn_column_in_models():
     새 ARN 컬럼이 생기면 점검에서 조용히 빠지고 나머지 테스트는 그대로 통과한다.
     원형은 #342 초기 시도 `ec1454d` 의 `test_arn_columns_cover_every_arn_column_in_models`
     이며 PR #353 으로 옮기면서 빠졌다.
+
+    예외는 **`assets.arn` 한 칸**이다 — 점검이 대조하는 기준 자체라 조인 키가 아니다.
+    `Asset` 모델 전체를 빼면 거기 새로 생긴 ARN 컬럼이 가드를 그냥 지나간다
+    (PR #383 리뷰: 안성일).
     """
     from sqlalchemy import inspect as sa_inspect
 
@@ -392,7 +396,7 @@ def test_arn_columns_cover_every_arn_column_in_models():
         model = mapper.class_
         for column in sa_inspect(model).columns:
             name = column.key
-            if (name == "arn" or name.endswith("_arn")) and model is not models.Asset:
+            if (name == "arn" or name.endswith("_arn")) and (model, name) != (models.Asset, "arn"):
                 in_models.add((model.__tablename__, name))
     checked = {(model.__tablename__, column) for model, column in assets_repo._ARN_COLUMNS}
     assert checked == in_models
