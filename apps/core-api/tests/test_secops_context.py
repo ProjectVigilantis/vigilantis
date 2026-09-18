@@ -21,6 +21,7 @@ from ai.model_client import FakeAIModelClient
 from db import mappers, models
 from db.repositories import assets as assets_repo
 from db.repositories import incidents as incidents_repo
+from logging_config import JsonLineFormatter
 from mock_threat_source import MockThreatConsumer, parse_submission
 from pydantic import ValidationError
 from schemas.api.assets import AssetType, RelationType
@@ -180,6 +181,75 @@ def test_secops_context_failure_rolls_back_event_and_incident(db, tmp_path, monk
     assert not list(db.scalars(select(models.Incident)))
     assert not list(db.scalars(select(models.ThreatEvent)))
     assert not list(db.scalars(select(models.Evidence)))
+
+
+@pytest.mark.parametrize("asset_arn", [TARGET, NACL])
+def test_secops_context_invalid_stored_asset_retries_after_correction(db, client_pg, tmp_path, caplog, asset_arn):
+    seed(db)
+    asset = assets_repo.get_asset_by_arn(db, asset_arn)
+    original_spec = dict(asset.spec)
+    asset.spec = {**original_spec, "platform_details": "Linux/UNIX"}
+    db.commit()
+    path, _ = submission(tmp_path)
+    original_input = path.read_bytes()
+    published = []
+    consumer = MockThreatConsumer(tmp_path, lambda: nullcontext(db), published.append, interval_seconds=1)
+
+    assert consumer.consume_once() == {"created": 0, "existing": 0, "rejected": 0, "failed": 1}
+    assert path.read_bytes() == original_input
+    assert not (tmp_path / "rejected").exists()
+    assert published == []
+    failure = next(r for r in caplog.records if r.message == "mock_threat_delivery_failed")
+    assert failure.reason == "stored_data_validation_failed"
+    assert failure.error_type == "ValidationError"
+    logged = json.loads(JsonLineFormatter().format(failure))
+    assert "exc_info" not in logged
+    assert "platform_details" not in json.dumps(logged) and "Linux/UNIX" not in json.dumps(logged)
+    for model in (models.Incident, models.ThreatEvent, models.Evidence):
+        assert not list(db.scalars(select(model)))
+
+    assets_repo.get_asset_by_arn(db, asset_arn).spec = original_spec
+    db.commit()
+    assert consumer.consume_once() == {"created": 1, "existing": 0, "rejected": 0, "failed": 0}
+    assert not path.exists()
+    assert len(list((tmp_path / "done").glob("*.json"))) == 1
+    incident_id = published[0].data.incident_id
+    response = client_pg.get(f"/api/v1/incidents/{incident_id}")
+    assert response.status_code == 200
+    assert response.json()["initial_risk_level"] == "HIGH"
+    assert len(response.json()["evidence_ids"]) == 1
+    context = saved(db, incident_id).context
+    assert context.target_status == "available" and len(context.related_assets) == 2
+
+
+@pytest.mark.parametrize("relation_count", [64, 65])
+def test_secops_context_relationship_limit_remains_an_explicit_rejection(db, tmp_path, caplog, relation_count):
+    run = seed(db)
+    target = assets_repo.get_asset_by_arn(db, TARGET)
+    assets_repo.replace_relationships(
+        db, target.asset_id,
+        [(RelationType.SECURED_BY, PREFIX + f"security-group/sg-{i:017x}") for i in range(relation_count)],
+        collection_run_id=run.collection_run_id,
+    )
+    db.commit()
+    path, _ = submission(tmp_path)
+    published = []
+    consumer = MockThreatConsumer(tmp_path, lambda: nullcontext(db), published.append, interval_seconds=1)
+    report = consumer.consume_once()
+    assert not path.exists()
+    if relation_count == 64:
+        assert report == {"created": 1, "existing": 0, "rejected": 0, "failed": 0}
+        context = saved(db, published[0].data.incident_id).context
+        assert len(context.related_assets) + len(context.relation_issues) == 64
+    else:
+        assert report == {"created": 0, "existing": 0, "rejected": 1, "failed": 0}
+        assert len(list((tmp_path / "rejected").glob("*.json"))) == 1
+        assert published == []
+        for model in (models.Incident, models.ThreatEvent, models.Evidence):
+            assert not list(db.scalars(select(model)))
+        rejection = next(r for r in caplog.records if r.message == "mock_threat_input_rejected")
+        assert rejection.error_type == "SecOpsContextLimitExceeded"
+        assert consumer.consume_once() == {"created": 0, "existing": 0, "rejected": 0, "failed": 0}
 
 
 @pytest.mark.parametrize("case", [f"C{i:02}" for i in range(1, 8)])

@@ -21,6 +21,10 @@ from schemas.mock_logs import MockSshLogEvidence
 from sqlalchemy.orm import Session
 
 
+class SecOpsContextLimitExceeded(ValueError):
+    """직접 SG/NACL 관계가 MVP 근거 저장 상한을 넘은 접수 거부."""
+
+
 def _unavailable(row) -> str | None:
     if row is None:
         return "not_collected"
@@ -42,7 +46,7 @@ def capture_secops_context(
         return SecOpsEvidenceContext(captured_at=captured_at, target_status=status,
                                      log_evidence=log_evidence)
     if len(rows) > 64:
-        raise ValueError("MVP SecOps context exceeds 64 direct SG/NACL relationships")
+        raise SecOpsContextLimitExceeded("MVP SecOps context exceeds 64 direct SG/NACL relationships")
     selected, related, issues = [], [], []
     expected_types = {RelationType.SECURED_BY: AssetType.SG, RelationType.PROTECTED_BY: AssetType.NACL}
     for _, relation, target in rows:

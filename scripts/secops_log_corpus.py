@@ -225,7 +225,8 @@ def render(source: Path, repo: Path = REPO) -> dict[str, bytes]:
                              "selection": spec["selection"],
                              "coverage": {"state": "sampled", "scope": "selected_process_records_only"},
                              "transformations": ["selected_three_records", "allowlisted_fields",
-                                                 "identity_and_port_pseudonyms", "key_fingerprint_redacted"],
+                                                 "identity_and_port_pseudonyms", "key_fingerprint_redacted",
+                                                 "pam_uid_redacted"],
                              "source_lines": [row["source_line"] for row in rows]})
         summary = aggregate(rows, manifest)
         event = observation(manifest, summary)
@@ -258,6 +259,8 @@ def check_public_records(records: list[dict]) -> None:
         require(isinstance(message, str) and len(message) <= 512, "invalid message length")
         require("\n" not in message and "\r" not in message and "\x00" not in message, "invalid message characters")
         require("SHA256:" not in message and "PRIVATE KEY" not in message, "unredacted key material")
+        if message.startswith("pam_unix(sshd:"):
+            require(re.search(r"\b(?:e?uid)=\d+", message) is None, "unredacted PAM UID")
         for text in re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", message):
             ip = ipaddress.ip_address(text)
             require(any(ip in network for network in DOC_NETWORKS), "non-documentation IP")
@@ -266,10 +269,15 @@ def check_public_records(records: list[dict]) -> None:
             require(re.fullmatch(r"(?:mock-user|user-\d{3})", match["user"]) is not None, "unredacted auth user")
 
 
-def check_runtime(event: dict, expected: dict, golden: dict) -> None:
+def _ensure_runtime_paths() -> None:
+    """앱 계약을 사용하는 진입점마다 필요한 모듈 경로를 명시적으로 준비한다."""
     for path in (REPO / "packages", REPO / "apps" / "core-api"):
         if str(path) not in sys.path:
             sys.path.insert(0, str(path))
+
+
+def check_runtime(event: dict, expected: dict, golden: dict) -> None:
+    _ensure_runtime_paths()
     from schemas.events import SshBruteForceThreatInput
     from security.risk_evaluator import evaluate_threat
     from security.threat_normalizer import normalize_mock_input
@@ -321,6 +329,7 @@ def prepare_case(case_id: str, inbox: Path, target_arn: str, occurred_at: str | 
     and target mapping describe replay. Preparation never claims DB delivery.
     """
     require(case_id in CASE_IDS[:7], "only C01..C07 project to threat input")
+    _ensure_runtime_paths()
     check(CORPUS)
     from mock_threat_source import parse_observation, prepare_observation
     from schemas.mock_logs import MockSshLogEvidence

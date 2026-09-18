@@ -47,7 +47,8 @@
       "source_ip",
       "remote_port",
       "process_id",
-      "public_key_fingerprint"
+      "public_key_fingerprint",
+      "PAM_uid"
     ],
     "omitted_fields": [
       "journal_cursor",
@@ -61,7 +62,6 @@
       "original_journal_received_timestamp",
       "auth_method",
       "key_algorithm",
-      "PAM_uid",
       "source_line"
     ],
     "coverage": "Private export read completely; published controls are selected process excerpts only. No assertion of exhaustive authentication visibility.",

@@ -17,6 +17,7 @@ from schemas.api.ws import WsEvent, WsEventType
 from schemas.events import MockThreatEventInput, ThreatEventType
 from schemas.intake import SecOpsIncidentIntake
 from schemas.mock_logs import MockSshLogEvidence
+from secops_context import SecOpsContextLimitExceeded
 from security.risk_evaluator import evaluate_threat
 from security.threat_normalizer import normalize_threat_event
 
@@ -58,9 +59,9 @@ def receive_threat(
 
     try:
         outcome = create_incident_from_intake(db, intake)
-    except ValueError as exc:
+    except SecOpsContextLimitExceeded as exc:
         db.rollback()
-        raise ThreatInputRejected("MVP 근거 선택·저장 계약 거부") from exc
+        raise ThreatInputRejected("MVP 근거 관계 수 상한 초과") from exc
     except Exception:
         db.rollback()
         raise

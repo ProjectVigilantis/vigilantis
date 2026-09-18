@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import copy
+import json
 import shutil
+import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -129,12 +132,45 @@ def test_secops_log_corpus_acceptance_control_does_not_make_invalid_zero_threat(
     {"message": "Accepted password for user-001 from 8.8.8.8 port 41000 ssh2"},
     {"message": "Accepted publickey for user-001 from 198.51.100.10 port 41000 ssh2: ED25519 SHA256:secret"},
     {"message": "Accepted password for realusername from 198.51.100.10 port 41000 ssh2"},
+    {"message": "pam_unix(sshd:session): session opened for user user-001(uid=REDACTED) by user-001(uid=0)"},
+    {"message": "pam_unix(sshd:auth): authentication failure; uid=REDACTED euid=0 rhost=198.51.100.10"},
     {"host": "private-original-host"},
     {"_MACHINE_ID": "original-private-metadata"},
 ])
 def test_secops_log_corpus_rejects_unredacted_public_records(change):
     with pytest.raises(ValueError):
         corpus.check_public_records([record(**change)])
+
+
+def test_secops_log_corpus_prepare_imports_do_not_depend_on_runtime_validation(tmp_path):
+    # 검증기가 앱 모듈을 읽지 않아도 준비 명령이 자신의 의존성을 로드해야 한다.
+    code = textwrap.dedent("""
+        import sys
+        from pathlib import Path
+
+        repo, inbox = map(Path, sys.argv[1:])
+        runtime_paths = {repo / "packages", repo / "apps" / "core-api"}
+        sys.path = [p for p in sys.path if Path(p).resolve() not in runtime_paths]
+        sys.path.insert(0, str(repo / "scripts"))
+        import secops_log_corpus as corpus
+
+        corpus.check_runtime = lambda *args: None
+        path = corpus.prepare_case(
+            "C01", inbox, "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00001",
+            "2026-09-17T00:00:00Z",
+        )
+        print(path)
+    """)
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", code, str(corpus.REPO), str(tmp_path)],
+        cwd=tmp_path, capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    path = Path(result.stdout.strip())
+    assert path.parent == tmp_path
+    submission = json.loads(path.read_text(encoding="utf-8"))
+    assert submission["observation"]["failed_attempt_count"] == 120
+    assert submission["log_evidence"]["case_id"] == "C01"
 
 
 @pytest.mark.parametrize("relative", ["cases/C01/observation.json", "cases/C01/expected.json"])

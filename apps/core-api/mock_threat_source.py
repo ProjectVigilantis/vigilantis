@@ -20,7 +20,7 @@ import uuid
 from pathlib import Path
 from typing import Callable
 
-from pydantic import BaseModel, ConfigDict, TypeAdapter, model_validator
+from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError, model_validator
 from sqlalchemy.exc import DataError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -159,6 +159,14 @@ class MockThreatConsumer:
                     self._archive(path, "rejected")
                 except OSError:
                     logger.exception("mock_threat_archive_failed", extra={"file": path.name})
+            except ValidationError as exc:
+                report["failed"] += 1
+                # 저장 자료를 고친 뒤 재시도한다. 검증 예외에 포함된 원문은 로그에 남기지 않는다.
+                logger.error("mock_threat_delivery_failed", extra={
+                    "file": path.name,
+                    "reason": "stored_data_validation_failed",
+                    "error_type": type(exc).__name__,
+                })
             except Exception:  # noqa: BLE001 — 한 건의 실패가 다음 관측을 막지 않는다
                 report["failed"] += 1
                 logger.exception("mock_threat_delivery_failed", extra={"file": path.name})
