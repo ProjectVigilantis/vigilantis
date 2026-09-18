@@ -197,8 +197,11 @@ def test_open_ip_key_ignores_ipv6_spelling():
 
 
 def test_golden_inputs_are_already_canonical():
-    """골든 입력이 정준 표기면 정준화 전후 키가 같다 — 이미 적재된 위협의 키가
-    바뀌어 같은 관측이 새 행으로 들어가는 일이 없다."""
+    """골든 입력이 정준 표기임을 고정한다 — 키를 계산하지 않고 표기만 본다.
+
+    표기가 정준이면 정준화 전후의 키가 같으므로, 적재된 골든 위협의 키가 바뀌어
+    같은 관측이 새 행으로 들어가는 일이 없다(PR #378 리뷰 nit).
+    """
     checked = 0
     for path in sorted(GOLDEN_INPUT.glob("*.json")):
         raw = json.loads(path.read_text(encoding="utf-8"))

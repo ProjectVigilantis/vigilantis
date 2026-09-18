@@ -137,6 +137,9 @@ def test_non_world_open_ip_rejected():
 @pytest.mark.parametrize("cidr, same_as", [
     ("0::/0", "::/0"),
     ("0:0:0:0:0:0:0:0/0", "::/0"),
+    # IPv4 넷마스크 표기도 같다 — dev 에서는 이 입력이 거부돼 전체 개방 위협이
+    # 조용히 버려졌다(PR #378 리뷰: 김세혁)
+    ("0.0.0.0/0.0.0.0", "0.0.0.0/0"),
 ])
 def test_world_open_is_matched_by_network_not_spelling(cidr, same_as):
     # #374 리뷰 ③-1: 입력 검증을 통과한 같은 네트워크의 다른 표기가 문자열 비교로

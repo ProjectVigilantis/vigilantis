@@ -36,7 +36,8 @@ from schemas.events import (
 # ----- 판정 임계값 (2026-08-31 안성일 결정) -----
 WORLD_CIDRS = ("0.0.0.0/0", "::/0")     # IPv4·IPv6 전체개방 (S7 IPv6 누락 방지)
 # 비교는 네트워크 값으로 한다 — 문자열로 비교하면 같은 네트워크의 다른 표기(0::/0)가
-# "전체개방 아님"으로 거부된다. 위 문자열은 골든 정답의 임계값 기록과 대조되므로 그대로 둔다.
+# "전체개방 아님"으로 거부된다. 위 문자열은 골든 정답의 임계값 기록(thresholds_at_authoring)과
+# 대조되므로 그대로 둔다 — tests/test_golden_dataset.py::test_secops_thresholds_not_drifted.
 _WORLD_NETWORKS = frozenset(ip_network(cidr) for cidr in WORLD_CIDRS)
 ALL_PROTOCOL = "-1"                     # 전 프로토콜 개방 표기
 ALL_PORTS = (0, 65535)                  # 단일 프로토콜 전 포트 개방 (S5)
