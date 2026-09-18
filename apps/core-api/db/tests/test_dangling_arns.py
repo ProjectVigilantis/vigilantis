@@ -255,10 +255,13 @@ def test_relation_to_an_unobserved_type_is_explained_by_a_degraded_run(db):
     LocalStack Community 는 `autoscaling`·`elbv2` 가 라이선스 밖이라 회차가 매번 PARTIAL 로
     끝난다(ADR-0006). 그 조건에서 만들어진 ASG 관계를 누락으로 세면 팀 표준 환경에서
     조사 대상이 매 회차 올라온다. 반대로 SUCCESS 로 끝난 회차의 같은 관계는 누락이다.
+
+    판단은 회차 상태가 아니라 `error_summary` 의 실패 라벨이 한다(#364).
     """
     a = _asset(db, "arn:aws:ec2:ap-northeast-2:1:instance/i-ok", "ap-northeast-2")
     degraded = _run(db)
     degraded.status = CollectionRunStatus.PARTIAL
+    degraded.error_summary = '{"auto_scaling_groups":"InternalFailure"}'
     clean = _run(db)
     clean.status = CollectionRunStatus.SUCCESS
     db.flush()
@@ -315,13 +318,81 @@ def test_region_mismatch_skips_assets_marked_absent(db):
     assert _of_kind(assets_repo.find_dangling_arns(db), assets_repo.KIND_REGION_MISMATCH) == []
 
 
-def test_optional_types_match_the_collector_map():
-    """미관측 판정에 쓰는 유형 집합이 수집기의 지도와 어긋나지 않는다.
+def _dangling_relation(db, error_summary, relation_type=RelationType.USES,
+                       target="arn:aws:ec2:ap-northeast-2:1:launch-template/lt-unseen"):
+    """PARTIAL 회차에서 만들어진, 대상 자산이 없는 관계 1건을 심고 점검을 돌린다."""
+    a = _asset(db, f"arn:aws:ec2:ap-northeast-2:1:instance/i-{abs(hash(target)) % 10**6}",
+               "ap-northeast-2")
+    run = _run(db)
+    run.status = CollectionRunStatus.PARTIAL
+    run.error_summary = error_summary
+    db.flush()
+    db.add(models.AssetRelationship(
+        source_asset_id=a.asset_id, relation_type=relation_type.value,
+        target_arn=target, collection_run_id=run.collection_run_id,
+    ))
+    db.flush()
+    found = assets_repo.find_dangling_arns(db)
+    unobserved = [f.value for f in _of_kind(found, assets_repo.KIND_UNOBSERVED_RELATION)]
+    broken = [f.value for f in _of_kind(found, assets_repo.KIND_BROKEN_REFERENCE)]
+    return target, unobserved, broken
 
-    원천은 collector 의 `_UNOBSERVED_TYPES_BY_FAILURE` 다(#332 의 fail-closed 지도).
-    누가 흡수 조회를 새로 더하고 한쪽만 고치면 미관측이 누락으로, 또는 그 반대로 뒤집힌다.
+
+def test_relation_is_broken_when_the_failed_label_does_not_blind_its_type(db):
+    """관계없는 조회 하나만 실패한 PARTIAL 회차의 끊긴 참조는 **누락**이다(#364).
+
+    `alb_target_health` 는 못 보게 만드는 자산 유형이 없다
+    (`schemas.collections.UNOBSERVED_TYPES_BY_FAILURE`). 종전처럼 회차 상태만 보면
+    같은 회차의 끊긴 ASG→Launch Template 관계가 미관측으로 덮여 경고가 사라졌다.
     """
-    from services.collector import _UNOBSERVED_TYPES_BY_FAILURE
+    target, unobserved, broken = _dangling_relation(
+        db, '{"alb_target_health":"Throttling"}')
+    assert unobserved == []
+    assert broken == [target]
 
-    from_collector = {t for types in _UNOBSERVED_TYPES_BY_FAILURE.values() for t in types}
-    assert from_collector == {t.value for t in assets_repo._COLLECTION_OPTIONAL_TYPES}
+
+def test_relation_is_unobserved_when_the_failed_label_blinds_its_type(db):
+    """그 회차가 실제로 못 본 유형이면 미관측이다 — 경고하지 않는다."""
+    target, unobserved, broken = _dangling_relation(
+        db, '{"launch_templates":"AccessDenied"}')
+    assert unobserved == [target]
+    assert broken == []
+
+
+@pytest.mark.parametrize("error_summary", [
+    '{"brand_new_lookup":"InternalFailure"}',            # 지도에 없는 라벨
+    '{"_truncated":"7"}',                               # 항목을 버리고 남긴 표식
+    '{"launch_templates":"X","brand_new_lookup":"Y"}',   # 아는 라벨과 섞여도
+    "not json at all",                                   # 파싱 실패
+    "[]",                                                # 객체가 아님
+    "",                                                  # 요약 없음
+])
+def test_unknown_or_unreadable_failure_summary_warns(db, error_summary):
+    """무엇을 못 봤는지 모르면 **누락으로 보낸다** — 점검은 놓치기보다 경고한다(#364).
+
+    소멸 표시(#332)는 반대 방향으로 넘어진다(잘못 지우기보다 안 지우기). 같은 지도를
+    쓰면서 방향이 다른 것은 각 판단이 틀렸을 때의 피해가 다르기 때문이다.
+    """
+    target, unobserved, broken = _dangling_relation(db, error_summary)
+    assert unobserved == []
+    assert broken == [target]
+
+
+def test_arn_columns_cover_every_arn_column_in_models():
+    """점검이 훑는 조인 키가 `models` 의 ARN 컬럼 전수와 같다(#364).
+
+    새 ARN 컬럼이 생기면 점검에서 조용히 빠지고 나머지 테스트는 그대로 통과한다.
+    원형은 #342 초기 시도 `ec1454d` 의 `test_arn_columns_cover_every_arn_column_in_models`
+    이며 PR #353 으로 옮기면서 빠졌다.
+    """
+    from sqlalchemy import inspect as sa_inspect
+
+    in_models = set()
+    for mapper in models.Base.registry.mappers:
+        model = mapper.class_
+        for column in sa_inspect(model).columns:
+            name = column.key
+            if (name == "arn" or name.endswith("_arn")) and model is not models.Asset:
+                in_models.add((model.__tablename__, name))
+    checked = {(model.__tablename__, column) for model, column in assets_repo._ARN_COLUMNS}
+    assert checked == in_models

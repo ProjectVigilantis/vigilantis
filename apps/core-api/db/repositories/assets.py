@@ -17,7 +17,7 @@ from schemas.api.incidents import IncidentCategory
 from schemas.arns import arn_region
 from schemas.guardrails import GUARDRAIL_STEP_ORDER, GuardrailStep
 from schemas.assets import MetricSummary as MetricSummaryContract
-from schemas.collections import CollectionRunStatus
+from schemas.collections import CollectionRunStatus, unobserved_asset_types
 from schemas.rules import RuleEvaluationResult
 
 from .. import mappers, models
@@ -589,14 +589,28 @@ _RELATION_TARGET_TYPE: dict[RelationType, AssetType] = {
     RelationType.PROTECTED_BY: AssetType.NACL,
 }
 
-# 수집이 **흡수할 수 있는** 조회로만 채워지는 유형 — 그 조회가 degrade 하면 회차가
-# SUCCESS 로 끝나지 않고 대상을 확인하지 못한 관계가 남는다. EC2·SG·NACL·EBS 조회는
-# 흡수하지 않아 실패하면 리전이 FAILED 로 끝나므로 여기 없다.
-# 원천은 collector 의 `_UNOBSERVED_TYPES_BY_FAILURE` 이고, 둘이 어긋나지 않는지는
-# `db/tests/test_dangling_arns.py::test_optional_types_match_the_collector_map` 이 잠근다.
-_COLLECTION_OPTIONAL_TYPES: frozenset[AssetType] = frozenset(
-    {AssetType.LAUNCH_TEMPLATE, AssetType.AUTO_SCALING_GROUP, AssetType.ALB_TARGET_GROUP}
+# 점검이 훑는 조인 키 — `models` 의 ARN 컬럼(`Asset.arn` 제외) **전수**와 같아야 한다.
+# 블록마다 테이블·컬럼 이름을 따로 적으면 새 ARN 컬럼이 점검에서 조용히 빠지므로
+# (#342 초기 시도 `ec1454d` 의 전수 가드가 PR #353 으로 옮기며 빠졌다) 여기 모으고
+# `db/tests/test_dangling_arns.py::test_arn_columns_cover_every_arn_column_in_models`
+# 가 models 와 대조한다(#364).
+_THREAT_ARN: tuple[type, str] = (models.ThreatEvent, "target_arn")
+_INCIDENT_ARN: tuple[type, str] = (models.Incident, "subject_arn")
+_CANDIDATE_ARN: tuple[type, str] = (models.RunbookCandidate, "target_arn")
+_RELATION_ARN: tuple[type, str] = (models.AssetRelationship, "target_arn")
+_ARN_COLUMNS: tuple[tuple[type, str], ...] = (
+    _THREAT_ARN, _INCIDENT_ARN, _CANDIDATE_ARN, _RELATION_ARN, *_EXECUTION_ARN_KEYS,
 )
+
+
+def _arn_column(key: tuple[type, str]):
+    model, column = key
+    return getattr(model, column)
+
+
+def _arn_source(key: tuple[type, str]) -> str:
+    model, column = key
+    return f"{model.__tablename__}.{column}"
 
 
 # 가드레일 ③(ARN Match)을 통과하지 못한 실패 단계 — ①·②·③. 실패 단계 뒤는 NOT_RUN 이므로
@@ -639,16 +653,16 @@ def find_dangling_arns(db: Session) -> list[DanglingArn]:
     known_arns = select(models.Asset.arn)
 
     # ① 위협 관측 — 미등록 대상도 접수한다. 매달린 것이 정상이다.
-    threats = select(models.ThreatEvent.target_arn).where(
-        models.ThreatEvent.target_arn.notin_(known_arns)
+    threats = select(_arn_column(_THREAT_ARN)).where(
+        _arn_column(_THREAT_ARN).notin_(known_arns)
     ).distinct()
     for arn in db.execute(threats).scalars():
-        _add(KIND_UNMANAGED_OBSERVATION, arn, "threat_events.target_arn")
+        _add(KIND_UNMANAGED_OBSERVATION, arn, _arn_source(_THREAT_ARN))
 
     # ② Incident — SECOPS 는 미등록 관측에서도 생기지만, FINOPS 는 등록 자산의 판정에서만
     #    생긴다. 그래서 FINOPS 가 매달리면 참조가 실제로 끊긴 것이다.
-    incidents = select(models.Incident.subject_arn, models.Incident.category).where(
-        models.Incident.subject_arn.notin_(known_arns)
+    incidents = select(_arn_column(_INCIDENT_ARN), models.Incident.category).where(
+        _arn_column(_INCIDENT_ARN).notin_(known_arns)
     ).distinct()
     for arn, category in db.execute(incidents):
         kind = (
@@ -656,7 +670,7 @@ def find_dangling_arns(db: Session) -> list[DanglingArn]:
             if category is IncidentCategory.SECOPS
             else KIND_BROKEN_REFERENCE
         )
-        _add(kind, arn, "incidents.subject_arn", detail=f"category={category.value}")
+        _add(kind, arn, _arn_source(_INCIDENT_ARN), detail=f"category={category.value}")
 
     # ③ 런북 후보 — 상태로 가르지 않는다. REJECTED 전체를 정상으로 치면 ③ 을 통과한 뒤
     #    ④(DryRun)에서 거절된 후보까지 함께 빠진다(#353 리뷰: 안성일). 그래서 가드레일
@@ -675,24 +689,30 @@ def find_dangling_arns(db: Session) -> list[DanglingArn]:
         ).scalars()
     )
     candidates = select(
-        models.RunbookCandidate.target_arn, models.RunbookCandidate.candidate_id
-    ).where(models.RunbookCandidate.target_arn.notin_(known_arns))
+        _arn_column(_CANDIDATE_ARN), models.RunbookCandidate.candidate_id
+    ).where(_arn_column(_CANDIDATE_ARN).notin_(known_arns))
     for arn, candidate_id in db.execute(candidates):
         not_past_arn_match = candidate_id in rejected_before_passing_arn_match
         _add(
             KIND_GUARDRAIL_REJECTED if not_past_arn_match else KIND_BROKEN_REFERENCE,
             arn,
-            "runbook_candidates.target_arn",
+            _arn_source(_CANDIDATE_ARN),
             detail="" if not_past_arn_match else "③ 을 통과했거나 가드레일 평가 기록이 없다",
         )
 
-    # ④ 관계 — 그 회차가 대상 유형을 관측하지 못했으면(SUCCESS 로 끝나지 않은 회차 +
-    #    흡수 가능한 조회로만 채워지는 유형) 대상을 확인하지 못한 것이고, 그 밖은 누락이다.
+    # ④ 관계 — **그 회차가 실제로 못 본 유형일 때만** 대상을 확인하지 못한 것이고,
+    #    그 밖은 누락이다. 회차 상태(PARTIAL)로 가르지 않는 것은 그 단위가 너무 거칠기
+    #    때문이다(#364) — 관계없는 조회 하나만 degrade 해도 회차는 PARTIAL 이라,
+    #    상태만 보면 **실제로 끊긴 참조가 미관측으로 덮여 경고가 사라진다.** 회차의
+    #    `error_summary` 가 어느 조회를 못 봤는지 라벨로 담고 있으므로 그 라벨이 채우는
+    #    유형만 미관측으로 본다. 소멸 표시(#332)가 같은 지도를 같은 이유로 쓴다.
+    #    모르는 라벨·`_truncated`·JSON 파싱 실패는 빈 집합이라 누락으로 간다 —
+    #    소멸 표시는 "잘못 지우기보다 안 지우기"로, 점검은 "놓치기보다 경고하기"로 넘어진다.
     relations = (
         select(
-            models.AssetRelationship.target_arn,
+            _arn_column(_RELATION_ARN),
             models.AssetRelationship.relation_type,
-            models.CollectionRun.status,
+            models.CollectionRun.error_summary,
         )
         .join(
             models.CollectionRun,
@@ -700,27 +720,25 @@ def find_dangling_arns(db: Session) -> list[DanglingArn]:
             == models.CollectionRun.collection_run_id,
             isouter=True,
         )
-        .where(models.AssetRelationship.target_arn.notin_(known_arns))
+        .where(_arn_column(_RELATION_ARN).notin_(known_arns))
         .distinct()
     )
-    for arn, relation_type, run_status in db.execute(relations):
+    for arn, relation_type, error_summary in db.execute(relations):
         target_type = _RELATION_TARGET_TYPE.get(RelationType(relation_type))
-        unobserved = (
-            run_status is not CollectionRunStatus.SUCCESS
-            and target_type in _COLLECTION_OPTIONAL_TYPES
-        )
+        # 성공 회차·회차 행이 없는 관계는 요약이 비어 빈 집합이 된다 — 누락으로 간다.
+        unobserved = target_type in unobserved_asset_types(error_summary)
         _add(
             KIND_UNOBSERVED_RELATION if unobserved else KIND_BROKEN_REFERENCE,
             arn,
-            "asset_relationships.target_arn",
+            _arn_source(_RELATION_ARN),
             detail=f"relation_type={relation_type}",
         )
 
     # ⑤ 실행 축 — 한 값의 사본 3개다. ARN 으로 묶어 1건으로 센다.
-    for model, column in _EXECUTION_ARN_KEYS:
-        col = getattr(model, column)
+    for key in _EXECUTION_ARN_KEYS:
+        col = _arn_column(key)
         for arn in db.execute(select(col).where(col.notin_(known_arns)).distinct()).scalars():
-            _add(KIND_EXECUTION_INTEGRITY, arn, f"{model.__tablename__}.{column}")
+            _add(KIND_EXECUTION_INTEGRITY, arn, _arn_source(key))
 
     # ⑥ 리전 불일치 — 매달림과 별개 종류다(#353 리뷰: 안성일).
     #    소멸 표시된 자산은 보지 않는다(#353 nit 3: 김세혁). #261 이 말하는 해(리전 필터에서
