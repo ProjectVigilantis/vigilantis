@@ -3,7 +3,7 @@
 // 해석하지 못한다(타입 전용 import는 스트리핑돼 사라진다).
 
 import { isJudgedAsset } from './asset-filter.ts';
-import { ASSET_TYPE_LABELS, VERDICT_LABELS } from './enum-labels.ts';
+import { ASSET_TYPE_ORDER, VERDICT_LABELS } from './enum-labels.ts';
 import { sortByRisk } from './incident-sort.ts';
 import type {
   AssetItem,
@@ -12,6 +12,7 @@ import type {
   IncidentResponse,
   IncidentStatus,
   OpenPortRule,
+  UncollectedAssetType,
   Verdict,
 } from '@/types/api';
 
@@ -106,15 +107,43 @@ export function dashboardMetrics(
   };
 }
 
+export interface InventoryRow {
+  type: AssetType;
+  /** 그 유형으로 수집된 자산 전량. */
+  count: number;
+  /**
+   * 그중 **목록(AST-001)에 서는 판정 대상** 수. `NOT_APPLICABLE` 4종(NACL·ASG·시작 템플릿·대상 그룹)은
+   * 0이다 — 자산 관제 지표 띠가 "목록에 있는 유형"과 "토폴로지에만 있는 유형"을 가르는 근거다.
+   * 이 값이 없으면 그 띠에서 NACL을 눌렀을 때 목록이 비는 이유를 화면이 설명하지 못한다.
+   */
+  judged: number;
+  uncollectedReason: string | null;
+}
+
 /**
  * 유형 7종을 **0건까지 전부** 낸다 — 빠지면 "수집이 안 된 것"과 "원래 없는 것"이 구분되지 않는다(§4.1).
  * 순서와 표시명은 표기 사전(§3.2) 하나를 따른다.
+ *
+ * 대시보드의 「자산 인벤토리」 패널과 자산 관제(AST-001)의 유형 지표 띠가 **이 함수 하나**를 쓴다 —
+ * 세는 자리가 둘이면 같은 화면 흐름 안에서 EC2 대수가 갈린다.
  */
-export function inventoryCounts(items: readonly AssetItem[]): { type: AssetType; count: number }[] {
-  return (Object.keys(ASSET_TYPE_LABELS) as AssetType[]).map((type) => ({
-    type,
-    count: items.filter((a) => a.asset_type === type).length,
-  }));
+export function inventoryCounts(
+  items: readonly AssetItem[],
+  /** 이번 수집에서 조회를 못 한 유형(`GET /assets` 봉투의 `uncollected`). 없으면 전부 정상 0건이다. */
+  uncollected: readonly UncollectedAssetType[] = [],
+): InventoryRow[] {
+  // 0건 유형을 남기는 이 패널의 목적이 "수집 누락과 구분"인데, 정작 누락 여부를 셈만으로는
+  // 알 수 없었다 — 못 가져온 유형은 0이 아니라 **모름**으로 그려야 한다.
+  const reasons = new Map(uncollected.map((u) => [u.asset_type, u.reason_code]));
+  return ASSET_TYPE_ORDER.map((type) => {
+    const ofType = items.filter((a) => a.asset_type === type);
+    return {
+      type,
+      count: ofType.length,
+      judged: ofType.filter(isJudgedAsset).length,
+      uncollectedReason: reasons.get(type) ?? null,
+    };
+  });
 }
 
 /**
