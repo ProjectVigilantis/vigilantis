@@ -17,7 +17,7 @@ Next.js 16(App Router) + React 19 + TypeScript + Tailwind CSS v4 + Shadcn UI(rad
 src/
 ├── app/                        # App Router
 │   ├── page.tsx                #   메인 대시보드 (DSH-001)
-│   ├── assets/                 #   자산 목록·상세
+│   ├── assets/                 #   자산 목록 — 상세는 별도 라우트가 아니라 목록 화면의 Sheet다
 │   ├── incidents/              #   보안 인시던트 목록 (INC-001) · [id] 상세
 │   ├── asset-incidents/        #   자산 인시던트 목록 (INC-004)
 │   ├── layout.tsx              #   GNB · 실시간 연결 provider · 토스트
@@ -43,7 +43,7 @@ src/
 | `npm run dev` | 개발 서버 (:3000) — **core-api가 떠 있어야 한다** |
 | `npm run lint` | ESLint — CI `web` 잡과 같은 명령 |
 | `npm run build` | `next build`. **tsc 타입 체크를 포함**하므로 타입 오류는 여기서 잡힌다 |
-| `npm run test` | `node --test` — `src/lib/*.test.ts` |
+| `npm run test` | `node --test` — 인자 없이 재귀 탐색이라 `src/lib/**/*.test.ts` 전부 돈다(`lib/api/client.test.ts` 포함) |
 
 푸시 전에 `lint` · `build` · `test` 셋을 로컬에서 돌린다. CI `web` 잡이 같은 순서로 검사하며, 세 잡(`test` · `web` · `ai-signature`) 전부 통과해야 머지된다.
 

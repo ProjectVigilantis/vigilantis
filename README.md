@@ -98,11 +98,12 @@
 | `GET /api/v1/assets` | EC2/SG 상태·스펙·연결관계·헬스 스코어(0–100 정수)·Skip 사유 코드 |
 | `GET /api/v1/incidents` | 목록(상세의 부분집합) — `status`·`category` 필터, `created_at` 내림차순 |
 | `GET /api/v1/incidents/{id}` | AI CoT 3줄 요약, Evidence ID, 추천 Runbook(본편 7종), 실행 요약(복구 조치는 롤백 3종) |
+| `POST /api/v1/incidents/{id}/resolve` | 관제자 종료 판단 기록 — **Idempotency Key를 받지 않는다**(AWS를 바꾸지 않고 Incident 상태 하나만 옮기므로 재요청도 `200`) |
 | `POST /api/v1/actions/execute` | Request `{ incident_id, runbook_id, idempotency_key }` — 신규 접수 `202`, 멱등 재요청 `200` |
 | `WS /api/v1/ws` | `INCIDENT_CREATED` · `INCIDENT_UPDATED` · `EXECUTION_UPDATED` (DB commit 이후 전송) |
 
 * **실행 상태 7종**: `IN_PROGRESS` · `SUCCESS` · `FAILED` · `ROLLBACK_INITIATED` · `ROLLED_BACK` · `ROLLBACK_FAILED` · `UNVERIFIED`
-* **REST 공통 오류 봉투**: `{"error": {code, message, request_id}}` — 코드 5종(404 · 409×2 · 422 · 500)
+* **REST 공통 오류 봉투**: `{"error": {code, message, request_id}}` — 코드 6종(404 · 409×3 · 422 · 500). 409 셋은 `IDEMPOTENCY_KEY_CONFLICT`·`PROPOSAL_NOT_EXECUTABLE`·`INCIDENT_NOT_RESOLVABLE`(종료 처리할 수 있는 상태가 아닌 Incident에 종료를 요청했을 때)이다.
 
 ---
 
@@ -131,7 +132,7 @@ vigilantis/
 │       │   └── scheduler.py     #     [김승철] APScheduler 수집→판정 스캔
 │       ├── ai/                  #   [안성일] LangGraph 2그래프(agent.py) · 4단계 가드레일 · Whitelist
 │       │   └── evaluation/      #     AI 요약 품질 계측·판정 하네스 (기준선: docs/AI_SUMMARY_BASELINE.md)
-│       ├── security/            #   [김세혁] 위협 정형화 · Risk Evaluator · SOAR 차단/해제
+│       ├── security/            #   [디렉터리 오너 김세혁 · 정형화/판정 김승철] 위협 정형화 · Risk Evaluator · SOAR 차단/해제
 │       ├── incident_intake.py   #   판정·위협 → Incident 1건 생성
 │       ├── agent_dispatcher.py  #   AI 분석 대기 Incident → LangGraph 호출
 │       ├── dispatcher.py        #   승인된 조치 → AWS 실행 디스패치 · 비종료 실행 회수
@@ -212,14 +213,16 @@ GitHub Actions CI는 **`dev`·`main` 대상 PR·push에서 3잡**이 돈다.
 
 ---
 
-## 📚 문서 지도 (신뢰 우선순위 — 충돌 시 위가 이김)
+## 📚 문서 지도
 
-1. **[`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md)** — **SSOT.** 범위·확정 결정·역할·현황·Action Whitelist
-2. [`docs/adr/`](docs/adr) — 결정 배경(왜 그렇게 했나)
-3. [`packages/schemas/`](packages/schemas) — 계약의 코드 소재
-4. [`docs/E2E_DEMO_SCENARIOS.md`](docs/E2E_DEMO_SCENARIOS.md) — 시연 대본의 원천이자 E2E 회귀 테스트의 명세
-5. [`docs/AI_SUMMARY_BASELINE.md`](docs/AI_SUMMARY_BASELINE.md) — AI 요약 3줄의 기준선과 재통과 절차
-6. `README.md` (이 문서) — 포트폴리오·소개용. **현황·결정의 기준이 아니다**
+**신뢰 우선순위는 SSOT [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) §문서 지도가 갖는다 — 프로젝트의 우선순위 목록은 그것 하나뿐이다.** 아래는 각 문서가 무엇을 담는지의 안내이며 순위표가 아니다. 문서끼리 어긋나면 순위를 여기서 판단하지 말고 그 목록을 본다.
+
+* **[`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md)** — **SSOT.** 범위·확정 결정·역할·현황·Action Whitelist
+* [`docs/adr/`](docs/adr) — 결정 배경(왜 그렇게 했나)
+* [`packages/schemas/`](packages/schemas) — 계약의 코드 소재
+* [`docs/E2E_DEMO_SCENARIOS.md`](docs/E2E_DEMO_SCENARIOS.md) — 시연 대본의 원천이자 E2E 회귀 테스트의 명세
+* [`docs/AI_SUMMARY_BASELINE.md`](docs/AI_SUMMARY_BASELINE.md) — AI 요약 3줄의 기준선과 재통과 절차
+* `README.md` (이 문서) — 포트폴리오·소개용. **현황·결정의 기준이 아니다**
 
 ### ADR
 
