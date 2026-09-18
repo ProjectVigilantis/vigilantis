@@ -17,7 +17,7 @@
   "golden_input": "evt_ssh_bruteforce_003.json",
   "origin_provider": "official_example",
   "purpose": "threat_boundary",
-  "registry_fingerprint": "18d712f4f1e1bcd41bcc0acdf22deac0504902b081a807aae0e637b0198efae4",
+  "registry_fingerprint": "311a9ad5a578c2868772e289ef8273bb58849430de7f14e50509a3d240f04d12",
   "schema_version": 1,
   "selection": {
     "bounds": "[start,end)",

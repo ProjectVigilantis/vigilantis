@@ -10,7 +10,7 @@
   "fingerprint_format": "sha256-canonical-json-v1",
   "origin_provider": "NCP",
   "purpose": "acceptance_control",
-  "registry_fingerprint": "18d712f4f1e1bcd41bcc0acdf22deac0504902b081a807aae0e637b0198efae4",
+  "registry_fingerprint": "311a9ad5a578c2868772e289ef8273bb58849430de7f14e50509a3d240f04d12",
   "schema_version": 1,
   "selection": {
     "bounds": "[start,end)",
@@ -21,7 +21,7 @@
     "time_field": "source_time"
   },
   "selection_policy": "ssh-observed-password-results-v1",
-  "source_fingerprint": "5b2dac4c8cbcedc0ae49e2691d9b92db9d15883b7188c702432e499beb6ddaf2",
+  "source_fingerprint": "c4e04b7c577fb2a348bdf3ad734ae217567539190820d3a96bf83bbd9669c3e2",
   "source_id": "ncp-sshd-export-20260917",
   "source_lines": [
     3,
@@ -33,6 +33,7 @@
     "selected_three_records",
     "allowlisted_fields",
     "identity_and_port_pseudonyms",
-    "key_fingerprint_redacted"
+    "key_fingerprint_redacted",
+    "pam_uid_redacted"
   ]
 }
