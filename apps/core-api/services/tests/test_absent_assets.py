@@ -342,7 +342,7 @@ def test_unobserved_types_map_matches_labels_and_asset_types():
     source = Path(collector.__file__).read_text(encoding="utf-8")
     labels = set(re.findall(r'"([a-z_]+)", failures,', source))
     assert labels, "_safe_describe 호출 라벨을 하나도 찾지 못했다 — 정규식을 다시 봐라"
-    assert set(collector._UNOBSERVED_TYPES_BY_FAILURE) == labels
+    assert set(collector.UNOBSERVED_TYPES_BY_FAILURE) == labels
     valid = {t.value for t in AssetType}
-    for label, types in collector._UNOBSERVED_TYPES_BY_FAILURE.items():
+    for label, types in collector.UNOBSERVED_TYPES_BY_FAILURE.items():
         assert set(types) <= valid, (label, types)

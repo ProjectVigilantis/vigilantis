@@ -26,6 +26,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from config import get_collector_settings
 from schemas.arns import build_arn
+from schemas.collections import UNOBSERVED_TYPES_BY_FAILURE
 from schemas.assets import (
     AlbTargetGroupAsset,
     AssetInventory,
@@ -58,12 +59,6 @@ _QUERY_BATCH = 100
 # **이 지도에 없는 라벨이 섞이면 아무것도 판단하지 않는다**(fail-closed) — 누가 흡수
 # 조회를 새로 더하고 이 지도를 안 고치면, 조용히 잘못 지우는 대신 조용히 안 지우는
 # 쪽으로 넘어지게 한다. (Issue #332 · PR #339 리뷰: 김세혁)
-_UNOBSERVED_TYPES_BY_FAILURE: dict[str, tuple[str, ...]] = {
-    "launch_templates": ("LAUNCH_TEMPLATE",),
-    "auto_scaling_groups": ("AUTO_SCALING_GROUP",),
-    "alb_target_groups": ("ALB_TARGET_GROUP",),
-    "alb_target_health": (),
-}
 
 
 def _failure_reason(exc: BaseException) -> str:
@@ -532,7 +527,7 @@ def persist_inventory(
 
     ``prune_absent`` 는 실수집 경로에서 켠다(#332). 켜면 이번 회차가 관측에 성공한 유형 중
     관측되지 않은 그 리전의 자산에 소멸 표시를 찍는다 — 어느 유형을 판단할지는
-    ``_UNOBSERVED_TYPES_BY_FAILURE`` 가 정한다. 기본이 꺼짐인
+    ``schemas.collections.UNOBSERVED_TYPES_BY_FAILURE`` 가 정한다. 기본이 꺼짐인
     이유는 이 함수가 실수집 말고도 불리기 때문이다 — `scripts/load_golden_assets.py` 는
     **골든 파일 1건마다** 이 함수를 부르고 그 파일들이 전부 같은 리전이라, 켜져 있으면
     두 번째 파일이 첫 번째 파일의 자산을 통째로 소멸 처리한다.
@@ -836,7 +831,7 @@ def persist_inventory(
                 *inv.alb_target_groups,
             )
         }
-        unknown = set(inv.collector_failures) - _UNOBSERVED_TYPES_BY_FAILURE.keys()
+        unknown = set(inv.collector_failures) - UNOBSERVED_TYPES_BY_FAILURE.keys()
         if unknown:
             # 무엇을 못 봤는지 모르면 판단하지 않는다. 라벨을 늘린 쪽이 지도를 고치게
             # 하려고 조용히 넘기지 않고 경고로 남긴다.
@@ -848,9 +843,9 @@ def persist_inventory(
             absent_marked = []
         else:
             blind = {
-                AssetType(t)
+                t
                 for label in inv.collector_failures
-                for t in _UNOBSERVED_TYPES_BY_FAILURE[label]
+                for t in UNOBSERVED_TYPES_BY_FAILURE[label]
             }
             absent_marked = assets_repo.mark_absent_assets(
                 db,
