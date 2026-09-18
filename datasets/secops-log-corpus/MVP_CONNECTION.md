@@ -88,7 +88,7 @@ Dispatcher는 새 Inventory를 조회하지 않고 THREAT 안의 대상 사본�
 파일 공급·실제 PostgreSQL 저장/조회·Inventory 갱신 뒤 사본 유지·모델 요청 조립을 검증한다.
 모델은 FakeAIModelClient이므로 실제 모델의 판단 품질을 증명하지 않는다.
 
-[2026-09-17 서비스 실행 결과 요약](OBSERVATION_SUMMARY.md)에서는 별도로 C01~C07을
+[2026-09-17 서비스 실행 결과 요약](OBSERVATION_SUMMARY.md)에서는 별도로 C01–C07을
 실제 모델에 각 1회 전달하고, 저장 근거와 실제 모델 입력의 일치·화면 승인·가드레일·
 LocalStack NACL 변경·완료 표시를 확인했다. N01/N02는 위협 입력을 만들지 않았다.
 같은 응답의 품질도 평가했다. 구조화 기대값은 5건 통과·2건 조치 필요성 미확정이고,

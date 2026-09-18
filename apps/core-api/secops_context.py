@@ -1,4 +1,9 @@
-"""Select available inventory once at mock intake; never recover it during analysis."""
+# ==============================================================================
+# [파일 설명]
+# SecOps 모의 위협 접수 시 자산·직접 SG/NACL 관계 사본을 조립합니다. (Issue #350)
+# 접수 때 확보한 자료를 보존하며, 분석 시점의 최신 Inventory로 대체하지 않습니다.
+# 저장·전달 계약: datasets/secops-log-corpus/MVP_CONNECTION.md
+# ==============================================================================
 
 from __future__ import annotations
 

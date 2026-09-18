@@ -152,11 +152,11 @@ def get_asset_by_arn(db: Session, arn: str) -> Optional[models.Asset]:
 
 
 def read_secops_context_rows(db: Session, arn: str):
-    """Target and direct SG/NACL observations from one database statement.
+    """대상 자산과 직접 연결된 SG/NACL 관측을 한 SQL 문장으로 조회한다.
 
-    A join avoids combining source/relationship rows from different committed
-    collection updates under READ COMMITTED. 65 rows detect the 64-link bound.
-    Missing targets remain outer-join rows so the caller records their absence.
+    READ COMMITTED에서 서로 다른 수집 갱신의 자산·관계 행이 섞이지 않도록 JOIN한다.
+    관계 64개 상한 초과를 판별하기 위해 최대 65행을 조회한다.
+    관계 대상이 없어도 OUTER JOIN 행을 남겨 호출자가 누락 사유를 기록할 수 있게 한다.
     """
     source, target = aliased(models.Asset), aliased(models.Asset)
     relation = models.AssetRelationship

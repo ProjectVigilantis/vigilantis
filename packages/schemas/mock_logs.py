@@ -1,4 +1,9 @@
-"""Bounded evidence supplied by the MVP synthetic SSH corpus, not a live collector."""
+# ==============================================================================
+# [파일 설명]
+# MVP 합성 SSH 로그의 출처·집계·발췌 계약입니다. (Issue #350)
+# 생성한 모의 자료의 전체 집계와 최대 12행 발췌를 위협 관측과 대조합니다.
+# 저장·전달 계약: datasets/secops-log-corpus/MVP_CONNECTION.md
+# ==============================================================================
 
 from __future__ import annotations
 
@@ -25,11 +30,10 @@ class MockLogRecord(BaseModel):
 
 
 class MockSshLogEvidence(BaseModel):
-    """Whole-fixture aggregate with bounded excerpts; no claim of live coverage.
+    """모의 자료 전체의 집계와 제한된 발췌이며, 실시간 수집 범위를 보장하지 않는다.
 
-    The full corpus remains a versioned dataset. Its canonical JSON fingerprint
-    identifies those records, while these excerpts are preserved in PostgreSQL.
-    Counts are supplied by the mock producer and matched to the observation.
+    전체 자료는 버전 관리하며 정규화된 JSON 지문으로 식별한다.
+    PostgreSQL에는 발췌를 보존한다. 모의 입력 생성기가 제공한 집계값은 위협 관측과 대조한다.
     """
 
     model_config = ConfigDict(extra="forbid")

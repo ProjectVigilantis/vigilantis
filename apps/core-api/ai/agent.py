@@ -617,8 +617,8 @@ def _secops_payload(graph_input: SecOpsGraphInput) -> dict[str, Any]:
         context = value["content"].get("context")
         if context is not None:
             context_at = "incident_intake"
-            # The same target is already in asset; retain capture/run metadata
-            # and related snapshots/log excerpts without duplicating its body.
+            # 대상 본문은 이미 asset에 있으므로 중복을 제거한다.
+            # 사본 확보 시각·수집 회차와 관계 사본·로그 발췌는 유지한다.
             target = context.pop("target")
             context["target_collection_run_id"] = target["collection_run_id"] if target else None
         evidences.append(value)

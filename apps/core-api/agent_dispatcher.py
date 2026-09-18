@@ -271,10 +271,10 @@ def build_graph_input(db: Session, incident_id: str) -> AgentGraphInput:
 
 
 def _build_secops_input(db: Session, incident) -> SecOpsGraphInput:
-    """Read the intake snapshot only; later execution outcomes remain separate.
+    """접수 시 저장한 사본을 읽으며, 이후 실행 결과는 별도 근거로 유지한다.
 
-    Legacy/missing snapshots cannot be reconstructed from current inventory.
-    The existing FAILED analysis path handles these without polling collection.
+    기존 근거에 사본이 없거나 누락됐어도 최신 Inventory로 재구성하지 않는다.
+    수집을 기다리며 재조회하지 않고 기존 분석 실패 처리 경로를 따른다.
     """
     try:
         evidences = [mappers.to_evidence_item(row)

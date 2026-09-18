@@ -6,7 +6,8 @@
 #
 # 계약 원칙 (#49 확정)
 #   - content는 새 구조를 발명하지 않고 기존 확정 계약을 재사용한다:
-#     RULE→RuleEvaluationResult, THREAT→NormalizedThreatEvent,
+#     RULE→RuleEvaluationResult,
+#     THREAT→NormalizedThreatEvent + 접수 시 확보한 자산·관계·로그 context(선택),
 #     METRIC→관측 구간+MetricSummary(수집 요약), EXECUTION→실행 요약 최소 필드,
 #     ASSET→판정 회차+공개 AssetItem.
 #   - evidence_type과 content 모델은 반드시 일치한다(JSON 저장·조회 양쪽 검증).
@@ -112,10 +113,10 @@ class SecOpsContextIssue(BaseModel):
 
 
 class SecOpsEvidenceContext(BaseModel):
-    """MVP mock-ingress snapshot. Revisit when operational log collection is added.
+    """MVP 모의 위협 접수 시 확보한 사본이며, 운영 로그 수집 도입 시 재검토한다.
 
-    Captured inventory is what was available at intake, not historical state at
-    the synthetic event timestamp. Related assets are only direct SG/NACL links.
+    Inventory는 접수 때 조회 가능한 자료로, 합성 이벤트 발생 시점의 과거 상태를
+    복원하지 않는다. 관련 자산은 직접 연결된 SG/NACL로 제한한다.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -126,7 +127,7 @@ class SecOpsEvidenceContext(BaseModel):
     target: DetectionAssetSnapshot | None = None
     related_assets: list[DetectionAssetSnapshot] = Field(default_factory=list, max_length=64)
     relation_issues: list[SecOpsContextIssue] = Field(default_factory=list, max_length=64)
-    # None means not supplied, never zero observed failures.
+    # None은 로그 미첨부를 뜻하며, 관측된 실패 0건과 구분한다.
     log_evidence: MockSshLogEvidence | None = None
 
     @model_validator(mode="after")
@@ -154,7 +155,7 @@ class SecOpsEvidenceContext(BaseModel):
 
 
 class ThreatEvidence(BaseModel):
-    """Normalized event plus optional intake snapshot (None for legacy evidence)."""
+    """정규화된 위협 이벤트와 선택적 접수 시점 사본. 기존 근거의 context는 None이다."""
 
     model_config = ConfigDict(extra="forbid")
 
