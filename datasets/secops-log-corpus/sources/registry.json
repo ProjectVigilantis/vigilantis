@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "recorded_on": "2026-09-17",
+  "aws-directory-service-password-example": {
+    "kind": "official_example",
+    "provider": "AWS documentation",
+    "url": "https://docs.aws.amazon.com/directoryservice/latest/admin-guide/ms_ad_troubleshooting_join_linux.html",
+    "local_template": "failed-password.txt",
+    "meaning": "Password failure message format from domain-join troubleshooting, not evidence of an attack.",
+    "transformations": [
+      "message-body template extraction",
+      "identifiers replaced"
+    ],
+    "auxiliary_messages": "Constructed OpenSSH-style context; not copied from NCP or asserted as an actual daemon execution."
+  },
+  "ncp-sshd-export-20260917": {
+    "kind": "observed_private_export",
+    "provider": "NCP",
+    "source_export_sha256": "ced521a42142d45969aeccd6a6209a5efec0cbf2173c99e81a6a2a7224acce99",
+    "source_export_bytes": 974277,
+    "source_export_records": 888,
+    "observed_accepted_publickey": 199,
+    "observed_accepted_password": 2,
+    "observed_failed_results": 0,
+    "os": "Ubuntu 24.04.4 LTS",
+    "openssh_package": "1:9.6p1-3ubuntu13.18",
+    "server_timezone": "Asia/Seoul",
+    "requested_start_utc": "2026-08-28T00:00:00Z",
+    "requested_end_utc": "2026-09-17T07:30:00Z",
+    "first_source_time_utc": "2026-08-28T06:22:07.959214Z",
+    "last_source_time_utc": "2026-09-16T16:44:16.188701Z",
+    "selected_sources": {
+      "N01.jsonl": [
+        10,
+        11,
+        23
+      ],
+      "N02.jsonl": [
+        3,
+        4,
+        20
+      ]
+    },
+    "redactions": [
+      "hostname",
+      "username",
+      "source_ip",
+      "remote_port",
+      "process_id",
+      "public_key_fingerprint"
+    ],
+    "omitted_fields": [
+      "journal_cursor",
+      "boot_id",
+      "machine_id",
+      "command_line",
+      "environment"
+    ],
+    "retained_fields": [
+      "original_source_timestamp",
+      "original_journal_received_timestamp",
+      "auth_method",
+      "key_algorithm",
+      "PAM_uid",
+      "source_line"
+    ],
+    "coverage": "Private export read completely; published controls are selected process excerpts only. No assertion of exhaustive authentication visibility.",
+    "authenticity_limit": "Export fingerprint identifies supplied bytes, not attestation of original journal integrity.",
+    "full_export_distribution": "Not included. Reproduction uses only the published anonymized excerpts."
+  },
+  "timestamp_semantics": {
+    "source_time": "_SOURCE_REALTIME_TIMESTAMP: earliest trusted message timestamp known to journald, not a guarantee of exact authentication time.",
+    "received_at": "__REALTIME_TIMESTAMP: journal reception time.",
+    "url": "https://github.com/systemd/systemd/blob/main/man/systemd.journal-fields.xml",
+    "observed_max_difference_seconds": 14.988051
+  },
+  "openssh_reference": {
+    "version": "V_9_6_P1",
+    "url": "https://github.com/openssh/openssh-portable/blob/V_9_6_P1/auth.c",
+    "limit": "Upstream reference; Ubuntu patch set and full effective LogLevel were not verified. Some publickey failures may not be logged at INFO."
+  }
+}

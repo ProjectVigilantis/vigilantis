@@ -564,7 +564,8 @@ _SECOPS_SUMMARY_PROMPT = (
     "AWS 보안 관측을 관제자에게 한국어 세 문장으로 요약한다. "
     "observation에는 위협 근거의 발생 시각·출발지·횟수·관측 구간 또는 개방 포트를, "
     "diagnosis에는 그 사실이 뜻하는 위협과 추정의 한계를, rationale에는 제공된 조치가 "
-    "필요한 이유 또는 제안할 수 없는 이유를 쓴다. 자산은 분석 시점 수집 문맥이며 "
+    "필요한 이유 또는 제안할 수 없는 이유를 쓴다. 자산은 asset_context_at에 표시된 "
+    "시점에 보존한 수집 문맥이며 "
     "위협 관측 시점과 구분한다. occurred_at은 이벤트 발생 시각, window_seconds는 "
     "집계구간 길이로 각각 설명한다. 구간의 시작·종료 시각은 입력에 명시된 경우에만 쓴다. "
     "initial_risk는 서버의 초기 판정이다. "
@@ -609,12 +610,24 @@ class _SecOpsState(TypedDict, total=False):
 
 
 def _secops_payload(graph_input: SecOpsGraphInput) -> dict[str, Any]:
+    evidences = []
+    context_at = "legacy_unspecified"
+    for item in graph_input.evidences:
+        value = item.model_dump(mode="json")
+        context = value["content"].get("context")
+        if context is not None:
+            context_at = "incident_intake"
+            # The same target is already in asset; retain capture/run metadata
+            # and related snapshots/log excerpts without duplicating its body.
+            target = context.pop("target")
+            context["target_collection_run_id"] = target["collection_run_id"] if target else None
+        evidences.append(value)
     return {
         "incident_id": graph_input.incident_id,
-        "asset_context_at": "analysis_collection",
+        "asset_context_at": context_at,
         "asset": graph_input.asset_context.model_dump(mode="json"),
         "initial_risk": graph_input.initial_risk.model_dump(mode="json"),
-        "evidences": [item.model_dump(mode="json") for item in graph_input.evidences],
+        "evidences": evidences,
         "isolation_execution": (
             graph_input.isolation_execution.model_dump(mode="json")
             if graph_input.isolation_execution else None

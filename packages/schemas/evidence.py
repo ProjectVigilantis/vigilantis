@@ -27,14 +27,15 @@
 from __future__ import annotations
 
 from enum import Enum, unique
-from typing import Optional, Union
+from typing import Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .api.actions import ExecutionStatus
-from .api.assets import AssetItem, UtcDateTime
+from .api.assets import AssetItem, AssetType, RelationType, UtcDateTime
 from .assets import MetricName, MetricSummary
 from .events import NormalizedThreatEvent
+from .mock_logs import MockSshLogEvidence
 from .rules import RuleEvaluationResult
 from .runbooks import RunbookId
 
@@ -73,14 +74,6 @@ class RuleEvidence(BaseModel):
     evaluation: RuleEvaluationResult
 
 
-class ThreatEvidence(BaseModel):
-    """위협 이벤트 근거 — 정규화된 이벤트 계약을 그대로 보존한다."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    event: NormalizedThreatEvent
-
-
 class ExecutionEvidence(BaseModel):
     """실행 결과 근거(예: 사전 격리) — 최소 요약만 보존한다."""
 
@@ -108,6 +101,83 @@ class DetectionAssetSnapshot(BaseModel):
 
     collection_run_id: str = Field(min_length=1)
     asset: AssetItem
+
+
+class SecOpsContextIssue(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_arn: str = Field(min_length=1, max_length=512)
+    reason: Literal["not_collected", "absent", "missing_collection", "relation_run_mismatch",
+                    "type_or_scope_mismatch"]
+
+
+class SecOpsEvidenceContext(BaseModel):
+    """MVP mock-ingress snapshot. Revisit when operational log collection is added.
+
+    Captured inventory is what was available at intake, not historical state at
+    the synthetic event timestamp. Related assets are only direct SG/NACL links.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal["mvp-mock-v1"] = "mvp-mock-v1"
+    captured_at: UtcDateTime
+    target_status: Literal["available", "not_collected", "absent", "missing_collection"]
+    target: DetectionAssetSnapshot | None = None
+    related_assets: list[DetectionAssetSnapshot] = Field(default_factory=list, max_length=64)
+    relation_issues: list[SecOpsContextIssue] = Field(default_factory=list, max_length=64)
+    # None means not supplied, never zero observed failures.
+    log_evidence: MockSshLogEvidence | None = None
+
+    @model_validator(mode="after")
+    def _target_shape(self):
+        if (self.target_status == "available") != (self.target is not None):
+            raise ValueError("target_status and target snapshot disagree")
+        arns = [r.asset.arn for r in self.related_assets]
+        if len(set(arns)) != len(arns):
+            raise ValueError("duplicate related asset snapshot")
+        if self.target is None and (self.related_assets or self.relation_issues):
+            raise ValueError("related context requires a target snapshot")
+        if self.target is not None:
+            asset = self.target.asset
+            by_arn = {r.asset.arn: r.asset for r in self.related_assets}
+            kinds = {RelationType.SECURED_BY: AssetType.SG, RelationType.PROTECTED_BY: AssetType.NACL}
+            if set(by_arn) != {r.target_arn for r in asset.relationships}:
+                raise ValueError("snapshot relationships and related assets differ")
+            for relation in asset.relationships:
+                linked = by_arn[relation.target_arn]
+                if (asset.asset_type is not AssetType.EC2
+                        or linked.asset_type is not kinds.get(relation.relation_type)
+                        or linked.account_id != asset.account_id or linked.region != asset.region):
+                    raise ValueError("related snapshot type or scope mismatch")
+        return self
+
+
+class ThreatEvidence(BaseModel):
+    """Normalized event plus optional intake snapshot (None for legacy evidence)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event: NormalizedThreatEvent
+    context: SecOpsEvidenceContext | None = None
+
+    @model_validator(mode="after")
+    def _context_matches_event(self):
+        if self.context is not None:
+            target = self.context.target
+            if target is not None and target.asset.arn != self.event.target_arn:
+                raise ValueError("context target differs from threat event")
+            logs = self.context.log_evidence
+            if logs is not None:
+                payload = self.event.payload
+                if (logs.target_arn != self.event.target_arn
+                        or getattr(payload, "source_ip", None) != logs.source_ip
+                        or self.event.occurred_at != logs.window_end
+                        or getattr(payload, "failed_attempt_count", None) != logs.failed_attempt_count
+                        or getattr(payload, "window_seconds", None)
+                        != (logs.window_end - logs.window_start).total_seconds()):
+                    raise ValueError("log evidence differs from threat event")
+        return self
 
 
 EvidenceContent = Union[

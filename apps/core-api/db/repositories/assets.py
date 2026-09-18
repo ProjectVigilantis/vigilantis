@@ -151,6 +151,27 @@ def get_asset_by_arn(db: Session, arn: str) -> Optional[models.Asset]:
     ).scalar_one_or_none()
 
 
+def read_secops_context_rows(db: Session, arn: str):
+    """Target and direct SG/NACL observations from one database statement.
+
+    A join avoids combining source/relationship rows from different committed
+    collection updates under READ COMMITTED. 65 rows detect the 64-link bound.
+    Missing targets remain outer-join rows so the caller records their absence.
+    """
+    source, target = aliased(models.Asset), aliased(models.Asset)
+    relation = models.AssetRelationship
+    return list(db.execute(
+        select(source, relation, target)
+        .outerjoin(relation, (relation.source_asset_id == source.asset_id)
+                   & relation.relation_type.in_([RelationType.SECURED_BY, RelationType.PROTECTED_BY]))
+        .outerjoin(target, target.arn == relation.target_arn)
+        .where(source.arn == arn)
+        .order_by(relation.relation_type, relation.target_arn)
+        .limit(65)
+        .execution_options(populate_existing=True)
+    ))
+
+
 def list_assets(
     db: Session,
     *,

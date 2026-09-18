@@ -20,12 +20,13 @@ import uuid
 from pathlib import Path
 from typing import Callable
 
-from pydantic import TypeAdapter
+from pydantic import BaseModel, ConfigDict, TypeAdapter, model_validator
 from sqlalchemy.exc import DataError
 from sqlalchemy.orm import Session, sessionmaker
 
 from schemas.api.ws import WsEvent
 from schemas.events import MockThreatEventInput
+from schemas.mock_logs import MockSshLogEvidence
 from threat_ingress import ThreatInputRejected, receive_threat
 
 logger = logging.getLogger("vigilantis.mock_threat_source")
@@ -40,9 +41,34 @@ def parse_observation(raw: dict) -> MockThreatEventInput:
     return _INPUT.validate_python({key: value for key, value in raw.items() if key != "$schema"})
 
 
-def prepare_observation(inbox: Path, observation: MockThreatEventInput) -> Path:
+class MockThreatSubmission(BaseModel):
+    """Optional MVP log attachment; plain legacy observations remain accepted."""
+
+    model_config = ConfigDict(extra="forbid")
+    observation: MockThreatEventInput
+    log_evidence: MockSshLogEvidence
+
+    @model_validator(mode="after")
+    def _same_observation(self):
+        if not self.log_evidence.matches_observation(self.observation):
+            raise ValueError("log evidence differs from mock observation")
+        return self
+
+
+def parse_submission(raw: dict) -> tuple[MockThreatEventInput, MockSshLogEvidence | None]:
+    if isinstance(raw, dict) and "observation" in raw:
+        value = MockThreatSubmission.model_validate(raw)
+        return value.observation, value.log_evidence
+    return parse_observation(raw), None
+
+
+def prepare_observation(
+    inbox: Path, observation: MockThreatEventInput, *, log_evidence: MockSshLogEvidence | None = None,
+) -> Path:
     """관측 준비만 수행한다. 파일명은 배달 ID이고 업무 중복 키는 정형화 단계가 소유한다."""
-    payload = observation.model_dump_json().encode("utf-8")
+    value = (MockThreatSubmission(observation=observation, log_evidence=log_evidence)
+             if log_evidence is not None else observation)
+    payload = value.model_dump_json().encode("utf-8")
     if len(payload) > MAX_OBSERVATION_BYTES:
         raise ValueError("모의 관측 파일은 64 KiB 이하여야 합니다")
     inbox.mkdir(parents=True, exist_ok=True)
@@ -109,12 +135,13 @@ class MockThreatConsumer:
                 try:
                     if len(payload) > MAX_OBSERVATION_BYTES:
                         raise ValueError("모의 관측 파일 크기 초과")
-                    observation = parse_observation(json.loads(payload))
+                    observation, log_evidence = parse_submission(json.loads(payload))
                 except (ValueError, UnicodeError, RecursionError) as exc:
                     raise ThreatInputRejected("모의 관측 파일 계약 거부") from exc
 
                 with self._sessions() as db:
-                    outcome = receive_threat(db, observation, self._publish)
+                    options = {"log_evidence": log_evidence} if log_evidence is not None else {}
+                    outcome = receive_threat(db, observation, self._publish, **options)
                 report["created" if outcome.created else "existing"] += 1
                 self._archive(path, "done")
             except (ThreatInputRejected, DataError) as exc:

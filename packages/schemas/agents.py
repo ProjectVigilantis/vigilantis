@@ -174,6 +174,11 @@ class SecOpsGraphInput(BaseModel):
     @model_validator(mode="after")
     def _enforce_contract(self):
         _validate_capabilities(self.capabilities)
+        for item in self.evidences:
+            if item.evidence_type is EvidenceType.THREAT and item.content.context is not None:
+                target = item.content.context.target
+                if target is None or target.asset != self.asset_context:
+                    raise ValueError("SecOps asset_context must match the stored intake snapshot")
         return self
 
 

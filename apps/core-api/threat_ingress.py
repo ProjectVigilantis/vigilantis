@@ -16,6 +16,7 @@ from realtime import incident_event
 from schemas.api.ws import WsEvent, WsEventType
 from schemas.events import MockThreatEventInput, ThreatEventType
 from schemas.intake import SecOpsIncidentIntake
+from schemas.mock_logs import MockSshLogEvidence
 from security.risk_evaluator import evaluate_threat
 from security.threat_normalizer import normalize_threat_event
 
@@ -35,6 +36,7 @@ def receive_threat(
     db: Session,
     observation: MockThreatEventInput,
     publish: Callable[[WsEvent], None] | None = None,
+    *, log_evidence: MockSshLogEvidence | None = None,
 ) -> IntakeOutcome:
     """독립 세션에서 관측 1건 처리. 신규 저장 성공에만 생성 이벤트를 발행한다.
 
@@ -42,17 +44,23 @@ def receive_threat(
     발행 실패는 별도 로그로 남기며 이미 commit된 저장 결과를 실패로 바꾸지 않는다.
     """
     try:
+        if log_evidence is not None and not log_evidence.matches_observation(observation):
+            raise ValueError("log evidence differs from mock observation")
         event = normalize_threat_event(observation)
         intake = SecOpsIncidentIntake(
             title=_THREAT_TITLES[event.event_type],
             threat_event=event,
             initial_risk=evaluate_threat(event),
+            log_evidence=log_evidence,
         )
     except ValueError as exc:
         raise ThreatInputRejected("위협 입력·초기 판정 계약 거부") from exc
 
     try:
         outcome = create_incident_from_intake(db, intake)
+    except ValueError as exc:
+        db.rollback()
+        raise ThreatInputRejected("MVP 근거 선택·저장 계약 거부") from exc
     except Exception:
         db.rollback()
         raise

@@ -1,0 +1,197 @@
+{
+  "C01": {
+    "aggregate": {
+      "record_count": 200,
+      "failed": 120,
+      "accepted": 0,
+      "auxiliary": 80,
+      "unsupported": 0
+    },
+    "initial_risk": {
+      "initial_risk_level": "HIGH",
+      "response_mode": "PRE_MITIGATION_0_5S",
+      "reason_codes": [
+        "RISK_SSH_BRUTEFORCE"
+      ]
+    },
+    "derivation": "120*60/300=24/min; count>=10 and rate>=20. Auxiliary rows = 2 per connection, at most 3 failures per connection.",
+    "forbidden_claims": [
+      "real_attack_observed",
+      "successful_compromise",
+      "mitigation_executed"
+    ],
+    "ai_action_expectation": null
+  },
+  "C02": {
+    "aggregate": {
+      "record_count": 1668,
+      "failed": 1000,
+      "accepted": 0,
+      "auxiliary": 668,
+      "unsupported": 0
+    },
+    "initial_risk": {
+      "initial_risk_level": "HIGH",
+      "response_mode": "PRE_MITIGATION_0_5S",
+      "reason_codes": [
+        "RISK_SSH_BRUTEFORCE"
+      ]
+    },
+    "derivation": "1000*60/60=1000/min; count>=10 and rate>=20. Auxiliary rows = 2 per connection, at most 3 failures per connection.",
+    "forbidden_claims": [
+      "real_attack_observed",
+      "successful_compromise",
+      "mitigation_executed"
+    ],
+    "ai_action_expectation": null
+  },
+  "C03": {
+    "aggregate": {
+      "record_count": 200,
+      "failed": 120,
+      "accepted": 0,
+      "auxiliary": 80,
+      "unsupported": 0
+    },
+    "initial_risk": {
+      "initial_risk_level": "HIGH",
+      "response_mode": "PRE_MITIGATION_0_5S",
+      "reason_codes": [
+        "RISK_SSH_BRUTEFORCE"
+      ]
+    },
+    "derivation": "Same counts/rate as C01; production context does not change initial risk. Auxiliary rows = 2 per connection, at most 3 failures per connection.",
+    "forbidden_claims": [
+      "real_attack_observed",
+      "successful_compromise",
+      "mitigation_executed"
+    ],
+    "ai_action_expectation": null
+  },
+  "C04": {
+    "aggregate": {
+      "record_count": 100,
+      "failed": 60,
+      "accepted": 0,
+      "auxiliary": 40,
+      "unsupported": 0
+    },
+    "initial_risk": {
+      "initial_risk_level": "MEDIUM",
+      "response_mode": "AGENT_WAIT",
+      "reason_codes": [
+        "RISK_SSH_BRUTEFORCE"
+      ]
+    },
+    "derivation": "60*60/600=6/min; only count>=10. Auxiliary rows = 2 per connection, at most 3 failures per connection.",
+    "forbidden_claims": [
+      "real_attack_observed",
+      "successful_compromise",
+      "mitigation_executed"
+    ],
+    "ai_action_expectation": null
+  },
+  "C05": {
+    "aggregate": {
+      "record_count": 9,
+      "failed": 5,
+      "accepted": 0,
+      "auxiliary": 4,
+      "unsupported": 0
+    },
+    "initial_risk": {
+      "initial_risk_level": "MEDIUM",
+      "response_mode": "AGENT_WAIT",
+      "reason_codes": [
+        "RISK_SSH_BRUTEFORCE"
+      ]
+    },
+    "derivation": "5*60/10=30/min; only rate>=20. Auxiliary rows = 2 per connection, at most 3 failures per connection.",
+    "forbidden_claims": [
+      "real_attack_observed",
+      "successful_compromise",
+      "mitigation_executed"
+    ],
+    "ai_action_expectation": null
+  },
+  "C06": {
+    "aggregate": {
+      "record_count": 15,
+      "failed": 5,
+      "accepted": 0,
+      "auxiliary": 10,
+      "unsupported": 0
+    },
+    "initial_risk": {
+      "initial_risk_level": "LOW",
+      "response_mode": "AGENT_WAIT",
+      "reason_codes": [
+        "RISK_SSH_LOW_SIGNAL"
+      ]
+    },
+    "derivation": "5*60/3600=1/12 per minute; both conditions below threshold. Five observations 720 seconds apart use five distinct connections, with 2 auxiliary rows each.",
+    "forbidden_claims": [
+      "real_attack_observed",
+      "successful_compromise",
+      "mitigation_executed"
+    ],
+    "ai_action_expectation": null
+  },
+  "C07": {
+    "aggregate": {
+      "record_count": 3,
+      "failed": 1,
+      "accepted": 0,
+      "auxiliary": 2,
+      "unsupported": 0
+    },
+    "initial_risk": {
+      "initial_risk_level": "LOW",
+      "response_mode": "AGENT_WAIT",
+      "reason_codes": [
+        "RISK_SSH_LOW_SIGNAL"
+      ]
+    },
+    "derivation": "Single-attempt rule precedes rate comparison (60/min). Auxiliary rows = 2 per connection, at most 3 failures per connection.",
+    "forbidden_claims": [
+      "real_attack_observed",
+      "successful_compromise",
+      "mitigation_executed"
+    ],
+    "ai_action_expectation": null
+  },
+  "N01": {
+    "aggregate": {
+      "record_count": 3,
+      "failed": 0,
+      "accepted": 1,
+      "auxiliary": 2,
+      "unsupported": 0
+    },
+    "initial_risk": null,
+    "derivation": "One actual Accepted publickey result and two PAM session rows in the selected process excerpt. No threat projection.",
+    "forbidden_claims": [
+      "all_access_legitimate",
+      "no_failures_outside_sample",
+      "incident_created"
+    ],
+    "ai_action_expectation": null
+  },
+  "N02": {
+    "aggregate": {
+      "record_count": 3,
+      "failed": 0,
+      "accepted": 1,
+      "auxiliary": 2,
+      "unsupported": 0
+    },
+    "initial_risk": null,
+    "derivation": "One actual Accepted password result and two PAM session rows in the selected process excerpt. No threat projection.",
+    "forbidden_claims": [
+      "all_access_legitimate",
+      "no_failures_outside_sample",
+      "incident_created"
+    ],
+    "ai_action_expectation": null
+  }
+}
