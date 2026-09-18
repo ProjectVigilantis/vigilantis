@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
@@ -78,11 +79,23 @@ class MockSshLogEvidence(BaseModel):
         return self
 
     def matches_observation(self, observation) -> bool:
+        return self.matches_threat_fields(
+            target_arn=observation.target_arn,
+            source_ip=getattr(observation, "source_ip", None),
+            occurred_at=observation.occurred_at,
+            failed_attempt_count=getattr(observation, "failed_attempt_count", None),
+            window_seconds=getattr(observation, "window_seconds", None),
+        )
+
+    def matches_threat_fields(
+        self, *, target_arn: str, source_ip: str | None, occurred_at: datetime,
+        failed_attempt_count: int | None, window_seconds: int | None,
+    ) -> bool:
+        """평면 관측·중첩 저장 이벤트가 추출한 다섯 필드를 같은 규칙으로 대조한다."""
         return (
-            observation.target_arn == self.target_arn
-            and getattr(observation, "source_ip", None) == self.source_ip
-            and observation.occurred_at == self.window_end
-            and getattr(observation, "failed_attempt_count", None) == self.failed_attempt_count
-            and getattr(observation, "window_seconds", None)
-            == (self.window_end - self.window_start).total_seconds()
+            target_arn == self.target_arn
+            and source_ip == self.source_ip
+            and occurred_at == self.window_end
+            and failed_attempt_count == self.failed_attempt_count
+            and window_seconds == (self.window_end - self.window_start).total_seconds()
         )
