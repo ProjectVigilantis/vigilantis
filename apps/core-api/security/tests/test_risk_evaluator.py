@@ -132,3 +132,37 @@ def test_non_world_open_ip_rejected():
     }
     with pytest.raises(ValueError):
         evaluate_threat(_normalized_from_input(raw))
+
+
+@pytest.mark.parametrize("cidr, same_as", [
+    ("0::/0", "::/0"),
+    ("0:0:0:0:0:0:0:0/0", "::/0"),
+    # IPv4 넷마스크 표기도 같다 — dev 에서는 이 입력이 거부돼 전체 개방 위협이
+    # 조용히 버려졌다(PR #378 리뷰: 김세혁)
+    ("0.0.0.0/0.0.0.0", "0.0.0.0/0"),
+])
+def test_world_open_is_matched_by_network_not_spelling(cidr, same_as):
+    # #374 리뷰 ③-1: 입력 검증을 통과한 같은 네트워크의 다른 표기가 문자열 비교로
+    # "전체개방 아님"이 되어 rejected/ 로 가던 것
+    base = {
+        "event_id": "evt-v6", "event_type": "OPEN_IP",
+        "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-x",
+        "occurred_at": "2026-08-20T06:10:00Z",
+        "protocol": "tcp", "from_port": 22, "to_port": 22,
+    }
+    spelled = evaluate_threat(_normalized_from_input({**base, "source_cidr": cidr}))
+    canonical = evaluate_threat(_normalized_from_input({**base, "source_cidr": same_as}))
+    assert spelled.initial_risk_level == canonical.initial_risk_level
+    assert set(spelled.reason_codes) == set(canonical.reason_codes)
+
+
+def test_ipv6_non_world_open_ip_still_rejected():
+    # 네트워크 비교로 바꿔도 전체개방이 아닌 IPv6 대역은 그대로 거절된다
+    raw = {
+        "event_id": "evt-v6-narrow", "event_type": "OPEN_IP",
+        "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-x",
+        "occurred_at": "2026-08-20T06:10:00Z",
+        "protocol": "tcp", "from_port": 22, "to_port": 22, "source_cidr": "::/1",
+    }
+    with pytest.raises(ValueError):
+        evaluate_threat(_normalized_from_input(raw))

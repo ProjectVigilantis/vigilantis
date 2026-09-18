@@ -21,6 +21,12 @@
 #   OPEN_IP         : 대상 SG + 프로토콜 + 포트 범위 + 출발지 CIDR + 발생 시각
 #   SSH_BRUTE_FORCE : 대상 EC2 + 공격 IP + 시도 횟수 + 관측 창 + 발생 시각
 #
+# IP·CIDR 은 **키에서만 정준 표기로** 넣는다 — IPv6 는 대소문자·축약만 달라도 같은 주소라
+# (2001:DB8::1 = 2001:db8::1) 원문으로 넣으면 같은 관측의 재배달이 별개 위협이 된다.
+# payload 에는 받은 원문을 그대로 둔다. IPv4 도 예외가 아니다 — 넷마스크·호스트마스크
+# 표기(0.0.0.0/0.0.0.0 · 192.0.2.0/255.255.255.0)가 입력 검증을 통과하므로 여기서
+# 표기가 접힌다. 입력 단계가 거르는 것은 앞뒤 공백·호스트 비트·잘못된 값이다(PR #374).
+#
 # 정하면서 버린 두 안과 이유:
 #   ① 입력 event_id 를 그대로 쓴다(종전 테스트 헬퍼) — 건마다 유일해 중복이 영원히
 #      성립하지 않는다. 생산자가 id 를 안정적으로 재발급한다는 전제도 필요하다.
@@ -46,6 +52,7 @@ from __future__ import annotations
 import hashlib
 import uuid
 from datetime import datetime, timezone
+from ipaddress import ip_address, ip_network
 from typing import Any
 
 from pydantic import TypeAdapter
@@ -101,13 +108,13 @@ def _identity_parts(event) -> tuple[str, ...]:
             event.protocol.strip().lower(),
             _PORT_ANY if event.from_port is None else str(event.from_port),
             _PORT_ANY if event.to_port is None else str(event.to_port),
-            event.source_cidr.strip(),
+            str(ip_network(event.source_cidr)),
             occurred,
         )
     return (
         ThreatEventType.SSH_BRUTE_FORCE.value,
         event.target_arn,
-        event.source_ip.strip(),
+        str(ip_address(event.source_ip)),
         str(event.failed_attempt_count),
         str(event.window_seconds),
         occurred,
