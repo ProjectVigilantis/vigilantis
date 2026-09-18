@@ -5,18 +5,22 @@
 #
 #   - 실행은 스텁이라 AWS 호출은 없다. 검증 대상은 예약 레코드와 상태 전이다.
 #   - 동시 요청은 결정적 재현(첫 멱등 조회만 경합 창처럼 비움) 2건 + 독립 세션
-#     2개의 실제 경합 1건으로 검증한다. 실경합 테스트는 rollback 픽스처 밖이라
+#     2개의 실제 경합(같은 Incident 잠금·다른 Incident의 유니크 충돌)으로 검증한다.
+#     실경합 테스트는 rollback 픽스처 밖이라
 #     commit한 데이터를 직접 정리한다.
 # ==============================================================================
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import threading
+from time import monotonic
 import uuid
 
 import pytest
 
 from schemas.api.actions import ExecuteActionRequest, ExecutionStatus
+from schemas.api.errors import ErrorCode
 from schemas.api.incidents import (
     IncidentStatus,
 )
@@ -27,6 +31,7 @@ import workflows
 from db import models
 from db.repositories import executions as executions_repo
 from db.repositories import incidents as incidents_repo
+from exceptions import ApiError
 
 URL = "/api/v1/actions/execute"
 KEY = "6dbfe076-1da1-4d35-88f8-b869dce44e61"
@@ -371,107 +376,101 @@ def test_duplicate_key_race_recovers_to_existing_execution(
 # --- 실제 동시 경합(독립 세션) --------------------------------------------------
 
 
-def test_concurrent_same_key_requests_reserve_exactly_once(pg_engine, make_incident, make_candidate, monkeypatch):
-    """독립 트랜잭션 2개가 같은 Key로 실제 경합한다 — 트랜잭션 간 유니크 충돌,
-    선행 commit 대기, 충돌 후 재조회 가시성은 같은 세션 재현으로는 검증되지
-    않는다. INSERT 직전 게이트로 두 트랜잭션이 모두 멱등 조회·후보 확인을
-    통과한 뒤에야 INSERT를 시도하게 고정한다 — 한쪽이 먼저 commit을 끝내
-    다른 쪽이 최초 멱등 조회에서 바로 재생해 버리는(충돌 경로를 건너뛰는)
-    인터리빙을 배제한다. 결과는 신규 202 하나 + 재요청 200 하나여야 한다."""
-    from sqlalchemy import delete
+@pytest.mark.parametrize("same_incident", [True, False], ids=["same-incident", "different-incidents"])
+def test_concurrent_same_key_requests_reserve_exactly_once(
+    pg_engine, make_incident, make_candidate, same_incident,
+):
+    """실제 PG 대기를 관찰한다. 같은 사건이면 재생, 다른 사건이면 키 충돌이다."""
+    from sqlalchemy import delete, event, text
     from sqlalchemy.orm import Session
 
     race_key = "race-" + uuid.uuid4().hex  # 다른 테스트와 키를 공유하지 않는다
-
-    setup = Session(bind=pg_engine)
-    try:
-        incident = make_incident(setup)
-        candidate = make_candidate(setup, incident)
-        incident_id, candidate_id = incident.incident_id, candidate.candidate_id
+    with Session(pg_engine) as setup:
+        seeded = []
+        for _ in range(1 if same_incident else 2):
+            incident = make_incident(setup)
+            candidate = make_candidate(setup, incident)
+            seeded.append((incident.incident_id, candidate.candidate_id, incident.status))
         setup.commit()
-    finally:
-        setup.close()
+    requests = [ExecuteActionRequest(
+        incident_id=row[0], runbook_id=DEFAULT_RUNBOOK, idempotency_key=race_key,
+    ) for row in (seeded[0], seeded[-1])]
+    pending_commit = threading.Event()
+    release_commit = threading.Event()
 
-    request = ExecuteActionRequest.model_validate(
-        {
-            "incident_id": incident_id,
-            "runbook_id": DEFAULT_RUNBOOK.value,
-            "idempotency_key": race_key,
-        }
-    )
+    def hold_first_commit(session):
+        if not session.in_nested_transaction():
+            pending_commit.set()
+            assert release_commit.wait(timeout=10), "첫 예약의 commit 해제 신호가 오지 않음"
 
-    real_create = executions_repo.create_execution
-    insert_gate = threading.Barrier(2, timeout=10)
-    entered: list[int] = []
-
-    def _gated_create(*args, **kwargs):
-        # 두 트랜잭션이 모두 여기 도달할 때까지 대기 → 둘 다 INSERT를 시도한다.
-        # 늦게 flush한 쪽은 상대의 미커밋 유니크 엔트리에 블로킹됐다가
-        # 상대 commit 후 IntegrityError를 받는다 — 검증하려는 경로 그 자체다
-        entered.append(threading.get_ident())
-        insert_gate.wait()
-        return real_create(*args, **kwargs)
-
-    monkeypatch.setattr(workflows.executions_repo, "create_execution", _gated_create)
-
-    results: list = [None, None]
-
-    def _run(slot: int) -> None:
-        session = Session(bind=pg_engine)
+    def reserve(session, request):
+        session.execute(text("SET LOCAL lock_timeout = '5s'"))
         try:
-            results[slot] = workflows.reserve_execution(session, request)
-        except Exception as exc:  # noqa: BLE001 — 실패도 수집해 assert가 보여 준다
-            results[slot] = exc
-        finally:
-            session.close()
+            return workflows.reserve_execution(session, request)
+        except ApiError as exc:
+            return exc.code
 
-    threads = [threading.Thread(target=_run, args=(slot,)) for slot in range(2)]
     try:
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join(timeout=30)
-        assert not any(thread.is_alive() for thread in threads), "경합 요청이 끝나지 않음"
-        assert all(
-            isinstance(row, workflows.ExecutionReservation) for row in results
-        ), f"예약 대신 예외가 나왔다: {results}"
-        # 둘 다 INSERT까지 진입했다 — 재요청 200이 최초 멱등 조회가 아니라
-        # 유니크 충돌 → 재조회 경로에서 나왔다는 뜻이다
-        assert len(entered) == 2
-        # 한쪽은 신규 예약(202 경로), 다른 쪽은 같은 Key 재요청(200 경로)
-        assert sorted(row.created for row in results) == [False, True]
-        assert results[0].response.execution_id == results[1].response.execution_id
+        # 연결 생성 지연을 경합 시간으로 세지 않는다. 각 연결은 작업 스레드 하나만 쓴다.
+        with pg_engine.connect() as first_conn, pg_engine.connect() as second_conn, pg_engine.connect() as observer:
+            first_pid = first_conn.scalar(text("SELECT pg_backend_pid()"))
+            second_pid = second_conn.scalar(text("SELECT pg_backend_pid()"))
+            first_conn.rollback()
+            second_conn.rollback()
+            with Session(first_conn) as first, Session(second_conn) as second, ThreadPoolExecutor(max_workers=2) as pool:
+                event.listen(first, "before_commit", hold_first_commit)
+                first_future = pool.submit(reserve, first, requests[0])
+                try:
+                    assert pending_commit.wait(timeout=5), "첫 예약이 commit 직전까지 도달하지 않음"
+                    second_future = pool.submit(reserve, second, requests[1])
+                    deadline = monotonic() + 3
+                    while True:
+                        blockers = observer.scalar(text("SELECT pg_blocking_pids(:pid)"), {"pid": second_pid})
+                        if first_pid in blockers:
+                            break
+                        assert not second_future.done(), f"대기 없이 요청 종료: {second_future.result()}"
+                        assert monotonic() < deadline, "두 번째 요청의 PostgreSQL 잠금 대기가 관찰되지 않음"
+                finally:
+                    release_commit.set()
+                created = first_future.result(timeout=5)
+                raced = second_future.result(timeout=5)
+                assert created.created is True
+                if same_incident:
+                    assert isinstance(raced, workflows.ExecutionReservation)
+                    assert raced.created is False
+                    assert raced.response.execution_id == created.response.execution_id
+                else:
+                    # 부모 행이 다르므로 Incident 잠금은 통과한다. 미커밋 실행 INSERT의
+                    # 유니크 충돌을 SAVEPOINT로 복구한 뒤 다른 사건의 같은 Key를 거절한다.
+                    assert raced is ErrorCode.IDEMPOTENCY_KEY_CONFLICT
 
-        verify = Session(bind=pg_engine)
-        try:
-            stored = executions_repo.list_by_incident(verify, incident_id)
+        with Session(pg_engine) as verify:
+            stored = executions_repo.list_by_incident(verify, seeded[0][0])
             assert len(stored) == 1
-            assert stored[0].execution_id == results[0].response.execution_id
-            assert (
-                incidents_repo.get_candidate(verify, candidate_id).status
-                is CandidateStatus.CLAIMED
-            )
-        finally:
-            verify.close()
+            assert stored[0].execution_id == created.response.execution_id
+            assert incidents_repo.get_candidate(verify, seeded[0][1]).status is CandidateStatus.CLAIMED
+            if not same_incident:
+                incident_id, candidate_id, original_status = seeded[1]
+                assert executions_repo.list_by_incident(verify, incident_id) == []
+                assert incidents_repo.get_candidate(verify, candidate_id).status is CandidateStatus.EXECUTABLE
+                assert incidents_repo.get_incident(verify, incident_id).status is original_status
     finally:
-        cleanup = Session(bind=pg_engine)
-        try:
+        with Session(pg_engine) as cleanup:
+            incident_ids = [row[0] for row in seeded]
             cleanup.execute(
                 delete(models.ActionExecution).where(
-                    models.ActionExecution.incident_id == incident_id
+                    models.ActionExecution.incident_id.in_(incident_ids)
                 )
             )
             cleanup.execute(
                 delete(models.RunbookCandidate).where(
-                    models.RunbookCandidate.incident_id == incident_id
+                    models.RunbookCandidate.incident_id.in_(incident_ids)
                 )
             )
             cleanup.execute(
-                delete(models.Incident).where(models.Incident.incident_id == incident_id)
+                delete(models.Incident).where(models.Incident.incident_id.in_(incident_ids))
             )
             cleanup.commit()
-        finally:
-            cleanup.close()
 
 
 # --- 롤백 3종 접수 (Issue #126) --------------------------------------------------

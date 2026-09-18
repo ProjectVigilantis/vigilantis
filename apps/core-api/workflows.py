@@ -74,7 +74,7 @@ from schemas.guardrails import (
     GuardrailValidationRequest,
     GuardrailValidationResult,
 )
-from schemas.incidents import INCIDENT_RESOLVABLE_STATUSES
+from schemas.incidents import AGENT_TERMINAL_STATUSES, INCIDENT_RESOLVABLE_STATUSES, AgentInvocationStatus
 from schemas.precheck import (
     PrecheckOutcome,
     PrecheckReasonCode,
@@ -172,8 +172,12 @@ def _executable_candidate(
 ) -> models.RunbookCandidate:
     """요청한 Runbook과 일치하는 EXECUTABLE 후보. 없으면 409로 거절한다."""
     incident_id = canonical_id(request.incident_id)
-    if incident_id is None or incidents_repo.get_incident(db, incident_id) is None:
+    incident = incidents_repo.lock_incident(db, incident_id) if incident_id else None
+    if incident is None:
         raise ApiError(ErrorCode.INCIDENT_NOT_FOUND)
+    # 종료와 같은 부모→후보 잠금 순서다. 늦은 승인으로 종료된 사건을 재개하지 않는다.
+    if incident.status is IncidentStatus.RESOLVED:
+        raise ApiError(ErrorCode.PROPOSAL_NOT_EXECUTABLE)
 
     executable = incidents_repo.list_candidates(
         db, incident_id, status=CandidateStatus.EXECUTABLE
@@ -368,7 +372,8 @@ def reserve_execution(
 
 
 def resolve_incident(
-    db: Session, incident_id: str, resolution: ResolutionJudgement
+    db: Session, incident_id: str, resolution: ResolutionJudgement,
+    *, resolution_note: str | None = None,
 ) -> bool:
     """관제자 종료 처리 — 상태 확인 → 잔여 제안 무효화 → RESOLVED 전이.
 
@@ -387,6 +392,15 @@ def resolve_incident(
     if incident.status not in INCIDENT_RESOLVABLE_STATUSES:
         raise ApiError(ErrorCode.INCIDENT_NOT_RESOLVABLE)
 
+    executions = executions_repo.list_by_incident(db, incident_id)
+    if any(item.status in EXECUTION_NON_TERMINAL_STATUSES for item in executions):
+        raise ApiError(ErrorCode.INCIDENT_NOT_RESOLVABLE)
+    if incident.category is IncidentCategory.SECOPS:
+        if incident.agent_invocation_status not in AGENT_TERMINAL_STATUSES:
+            raise ApiError(ErrorCode.INCIDENT_NOT_RESOLVABLE)
+    elif resolution is ResolutionJudgement.NO_FURTHER_ACTION:
+        raise ApiError(ErrorCode.INCIDENT_NOT_RESOLVABLE)
+
     # 남은 제안을 함께 정리한다 — 상세 응답 계약이 RESOLVED에 빈 제안 목록을
     # 요구하므로(api/incidents.py), 두고 가면 종료 직후 조회가 500이 된다
     for candidate in incidents_repo.list_candidates(
@@ -400,7 +414,8 @@ def resolve_incident(
         )
 
     moved = incidents_repo.resolve_incident(
-        db, incident_id, expected=incident.status, resolution=resolution
+        db, incident_id, expected=incident.status, resolution=resolution,
+        resolution_note=resolution_note,
     )
     if not moved:
         # 행을 잠그고 들어왔으므로 여기까지 와서 전이가 실패할 이유가 없다. 그래도
@@ -2582,14 +2597,9 @@ def record_agent_analysis(
 ) -> AgentAnalysisOutcome:
     """그래프 출력 1건 → 가드레일 1회 + 후보 저장 + ANALYZING 이탈. 순서는 파일 절 참조.
 
-    **NO_PROPOSAL과 "후보 전부 REJECTED"는 실행 가능한 제안이 없다.** 관제자에게 보여줄 조치가
-    0개인데 AWAITING_APPROVAL은 실행 가능한 제안 1개 이상을 요구한다(api/incidents.py
-    _enforce_contract). 새 상태를 만들지 않고 FAILED로 닫되 agent_invocation_status는
-    그래프가 낸 Terminal 값을 그대로 남겨 그래프 오류(FAILED)와 구분한다 — 결함 계측과
-    감사가 그 둘을 갈라 봐야 한다(Issue #237 도피 비율).
-
-    SecOps는 실행 중이면 ACTION_IN_PROGRESS, 성공·원복 완료 실행이 있고 제안이
-    없으면 AWAITING_CLOSURE로 둔다. FAILED에서는 요약·재평가를 비운다.
+    FinOps의 무제안·전체 거절은 기존 FAILED 정책을 유지한다. SecOps는 정상 분석 후
+    제안이 없어도 AWAITING_CLOSURE에서 사용자 판단을 기다리고 분석·거절 근거를 보존한다.
+    실행 중이면 ACTION_IN_PROGRESS가 우선이다. 분석 실패는 요약·재평가를 비운다.
     AGENT_WAIT의 승인 대기 시각만 기록하며 자동 격리 엔진은 기동하지 않는다.
     """
     candidates = _draft_candidates(incident_id, output)
@@ -2639,11 +2649,15 @@ def record_agent_analysis(
         executions = executions_repo.list_by_incident(db, incident_id)
         if any(item.status in EXECUTION_NON_TERMINAL_STATUSES for item in executions):
             target = IncidentStatus.ACTION_IN_PROGRESS
-        elif not executable and any(
-            item.status in EXECUTION_SETTLED_STATUSES for item in executions
+        elif not executable and (
+            (not executions and output.invocation_status is not AgentInvocationStatus.FAILED)
+            or any(item.status in EXECUTION_SETTLED_STATUSES for item in executions)
         ):
             target = IncidentStatus.AWAITING_CLOSURE
-    keep_summary = target is not IncidentStatus.FAILED
+    keep_summary = (
+        output.invocation_status is not AgentInvocationStatus.FAILED
+        and (is_secops or target is not IncidentStatus.FAILED)
+    )
     if not keep_summary:
         _log_dropped_summary(incident_id, output)
     if not incidents_repo.finish_agent_invocation(

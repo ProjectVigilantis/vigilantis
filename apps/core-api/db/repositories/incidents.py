@@ -178,7 +178,7 @@ def update_incident_status(
     RESOLVED 밖의 판단을 거절한다. 전이와 한 UPDATE로 묶어 중간 상태를 만들지 않는다."""
     values: dict = {"status": next_status}
     if clear_resolution:
-        values |= {"resolution": None, "resolved_at": None}
+        values |= {"resolution": None, "resolved_at": None, "resolution_note": None}
     result = db.execute(
         update(models.Incident)
         .where(
@@ -196,6 +196,7 @@ def resolve_incident(
     *,
     expected: IncidentStatus,
     resolution: ResolutionJudgement,
+    resolution_note: str | None = None,
 ) -> bool:
     """expected 상태에서만 RESOLVED로 옮기고 관제자 판단을 함께 남긴다.
 
@@ -214,7 +215,10 @@ def resolve_incident(
         .values(
             status=IncidentStatus.RESOLVED,
             resolution=resolution,
+            resolution_note=resolution_note,
             resolved_at=models._utcnow(),
+            agent_wait_started_at=None,
+            response_deadline_at=None,
         )
     )
     return result.rowcount == 1

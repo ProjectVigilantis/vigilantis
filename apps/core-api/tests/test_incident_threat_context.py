@@ -99,7 +99,7 @@ def test_ai_failure_and_resolution_preserve_the_observation(db, client_pg, linke
     assert failed.json()["threat_context"] == context
     assert failed.json()["summary_lines"] == failed.json()["recommendations"] == []
 
-    resolved = client_pg.post(f"{url}/resolve", json={"resolution": "JUSTIFIED"})
+    resolved = client_pg.post(f"{url}/resolve", json={"resolution": "NO_FURTHER_ACTION"})
     assert resolved.status_code == 200
     assert resolved.json()["status"] == "RESOLVED"
     assert resolved.json()["threat_context"] == context

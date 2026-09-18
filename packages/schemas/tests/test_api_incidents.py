@@ -7,6 +7,7 @@
 import pytest
 from pydantic import ValidationError
 
+from schemas.api.analysis import AnalysisResult, AnalysisResultStatus
 from schemas.api.incidents import (
     ExecutionSummaryItem,
     IncidentCategory,
@@ -347,7 +348,7 @@ def test_title_rejects_empty_string():
 LIST_ITEM_FIELDS = {
     "incident_id", "title", "subject_arn", "category", "status",
     "initial_risk_level", "reviewed_risk_level", "response_mode", "threat_context",
-    "created_at", "updated_at",
+    "analysis_result", "created_at", "updated_at",
 }
 
 
@@ -479,3 +480,82 @@ def test_public_threat_discriminator_covers_internal_event_types():
     schema = IncidentResponse.model_json_schema()
     variants = schema["properties"]["threat_context"]["anyOf"][0]["discriminator"]["mapping"]
     assert set(variants) == {item.value for item in ThreatEventType}
+
+
+@pytest.mark.parametrize("status", ["NO_PROPOSAL", "GUARDRAIL_REJECTED"])
+def test_awaiting_closure_accepts_normal_analysis_without_execution(status):
+    data = make_secops_incident(
+        status="AWAITING_CLOSURE", recommendations=[], executions=[],
+        analysis_result={"status": status},
+    )
+    dto = IncidentResponse.model_validate(data)
+    assert dto.analysis_result.status.value == status
+    assert IncidentResponse.model_validate_json(dto.model_dump_json()) == dto
+
+
+@pytest.mark.parametrize("status", [
+    None, "PENDING", "IN_PROGRESS", "PROPOSALS_GENERATED", "FAILED", "UNAVAILABLE",
+])
+def test_awaiting_closure_rejects_other_analysis_without_execution(status):
+    data = make_secops_incident(
+        status="AWAITING_CLOSURE", recommendations=[], executions=[],
+        analysis_result={"status": status} if status else None,
+    )
+    with pytest.raises(ValidationError, match="실행 이력 또는 정상 SecOps 무제안"):
+        IncidentResponse.model_validate(data)
+
+
+@pytest.mark.parametrize("model", [IncidentResponse, IncidentListItem])
+def test_finops_rejects_analysis_result(model):
+    data = make_finops_incident(analysis_result={"status": "NO_PROPOSAL"})
+    if model is IncidentListItem:
+        data = {key: value for key, value in data.items() if key in LIST_ITEM_FIELDS}
+    with pytest.raises(ValidationError, match="SECOPS 전용|FINOPS는 analysis_result"):
+        model.model_validate(data)
+
+
+def test_finops_rejects_no_further_action_resolution():
+    data = make_finops_incident(
+        status="RESOLVED", recommendations=[], resolution="NO_FURTHER_ACTION",
+        resolved_at="2026-08-12T09:01:03Z",
+    )
+    with pytest.raises(ValidationError, match="SECOPS 전용"):
+        IncidentResponse.model_validate(data)
+
+
+def test_resolution_note_requires_resolution():
+    with pytest.raises(ValidationError, match="종료 사유는 종료 판단과 함께"):
+        IncidentResponse.model_validate(make_secops_incident(resolution_note="별도 조치"))
+
+
+@pytest.mark.parametrize("status", list(AnalysisResultStatus))
+def test_analysis_result_roundtrip_and_default_rejections(status):
+    dto = AnalysisResult(status=status)
+    assert dto.model_dump(mode="json") == {"status": status.value, "guardrail_rejections": []}
+    assert AnalysisResult.model_validate_json(dto.model_dump_json()) == dto
+
+
+@pytest.mark.parametrize("reason_code", [None, "PRECHECK_AWS_ERROR"])
+def test_analysis_result_serializes_public_rejection(reason_code):
+    data = {"status": "GUARDRAIL_REJECTED", "guardrail_rejections": [{
+        "runbook_id": "RUNBOOK_NACL_ADD_DENY", "failed_step": "AWS_DRY_RUN",
+        "reason_code": reason_code,
+    }]}
+    assert AnalysisResult.model_validate(data).model_dump(mode="json") == data
+
+
+@pytest.mark.parametrize("over", [
+    {"runbook_id": "UNKNOWN"}, {"failed_step": "UNKNOWN"}, {"reason_code": "UNKNOWN"},
+    {"verification_summary": "internal AWS response"},
+])
+def test_analysis_result_rejects_invalid_or_internal_rejection_fields(over):
+    rejection = {"runbook_id": "RUNBOOK_NACL_ADD_DENY", "failed_step": "AWS_DRY_RUN"}
+    rejection.update(over)
+    with pytest.raises(ValidationError):
+        AnalysisResult.model_validate({"status": "GUARDRAIL_REJECTED", "guardrail_rejections": [rejection]})
+
+
+@pytest.mark.parametrize("data", [{"status": "UNKNOWN"}, {"status": "FAILED", "raw_response": "model output"}])
+def test_analysis_result_rejects_invalid_status_or_internal_fields(data):
+    with pytest.raises(ValidationError):
+        AnalysisResult.model_validate(data)
