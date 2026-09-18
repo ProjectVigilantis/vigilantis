@@ -1,0 +1,42 @@
+{
+  "ai_evaluation": true,
+  "asset_mapping": "synthetic_aws_golden",
+  "case_id": "C02",
+  "coverage": {
+    "scope": "generated_fixture_only",
+    "state": "complete"
+  },
+  "data_kind": "synthetic",
+  "event_id": "evt-ssh-bruteforce-004",
+  "fingerprint_format": "sha256-canonical-json-v1",
+  "generation": {
+    "max_failure_span_seconds": 60,
+    "max_failures_per_connection": 3
+  },
+  "golden_fingerprint": "325d2b0b383bed6d7fc40f8a3cd7dd29c551ea356c75c45a10970014c8824856",
+  "golden_input": "evt_ssh_bruteforce_004.json",
+  "origin_provider": "official_example",
+  "purpose": "threat_boundary",
+  "registry_fingerprint": "18d712f4f1e1bcd41bcc0acdf22deac0504902b081a807aae0e637b0198efae4",
+  "schema_version": 1,
+  "selection": {
+    "bounds": "[start,end)",
+    "end": "2026-08-20T06:50:00.000000Z",
+    "host": "mock-ec2-C02",
+    "source_ip": "203.0.113.55",
+    "start": "2026-08-20T06:49:00.000000Z",
+    "time_field": "source_time"
+  },
+  "selection_policy": "ssh-observed-password-results-v1",
+  "source_fingerprint": "e0481279d9ffc11490f9317dd831912d782c054064e5b60f4cf596ea56b985aa",
+  "source_id": "aws-directory-service-password-example",
+  "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00012",
+  "transformations": [
+    "message_template_expansion",
+    "synthetic_identity",
+    "uniform_source_times",
+    "bounded_connection_groups",
+    "constructed_auxiliary_messages",
+    "synthetic_50ms_receipt_offset"
+  ]
+}

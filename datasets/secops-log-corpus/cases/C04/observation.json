@@ -1,0 +1,9 @@
+{
+  "event_id": "evt-ssh-bruteforce-006",
+  "event_type": "SSH_BRUTE_FORCE",
+  "failed_attempt_count": 60,
+  "occurred_at": "2026-08-20T07:00:00.000000Z",
+  "source_ip": "198.51.100.20",
+  "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00012",
+  "window_seconds": 600
+}

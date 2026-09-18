@@ -1,0 +1,38 @@
+{
+  "ai_evaluation": false,
+  "asset_mapping": null,
+  "case_id": "N01",
+  "coverage": {
+    "scope": "selected_process_records_only",
+    "state": "sampled"
+  },
+  "data_kind": "anonymized_observation",
+  "fingerprint_format": "sha256-canonical-json-v1",
+  "origin_provider": "NCP",
+  "purpose": "acceptance_control",
+  "registry_fingerprint": "18d712f4f1e1bcd41bcc0acdf22deac0504902b081a807aae0e637b0198efae4",
+  "schema_version": 1,
+  "selection": {
+    "bounds": "[start,end)",
+    "end": "2026-08-28T06:34:55.000000Z",
+    "host": "ncp-host-001",
+    "source_ip": "198.51.100.10",
+    "start": "2026-08-28T06:29:15.000000Z",
+    "time_field": "source_time"
+  },
+  "selection_policy": "ssh-observed-password-results-v1",
+  "source_fingerprint": "6ee64644d8eb6afbcd11ef25f6950b8fec50ca1d3d1751aa704bb2ac2937dea7",
+  "source_id": "ncp-sshd-export-20260917",
+  "source_lines": [
+    10,
+    11,
+    23
+  ],
+  "target_arn": null,
+  "transformations": [
+    "selected_three_records",
+    "allowlisted_fields",
+    "identity_and_port_pseudonyms",
+    "key_fingerprint_redacted"
+  ]
+}

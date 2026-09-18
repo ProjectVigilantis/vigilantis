@@ -1,0 +1,17 @@
+{
+  "aggregate": {
+    "accepted": 1,
+    "auxiliary": 2,
+    "failed": 0,
+    "record_count": 3,
+    "unsupported": 0
+  },
+  "ai_action_expectation": null,
+  "derivation": "One actual Accepted password result and two PAM session rows in the selected process excerpt. No threat projection.",
+  "forbidden_claims": [
+    "all_access_legitimate",
+    "no_failures_outside_sample",
+    "incident_created"
+  ],
+  "initial_risk": null
+}
