@@ -370,6 +370,147 @@ def fix_headers(doc):
                     p.runs[0].text = DOC_TITLE
 
 
+def polish_layout(doc):
+    """읽기 흐름을 위한 줄바꿈·페이지 규칙 (2026-09-18).
+
+    - 기본 스타일 `a`: 양식이 「한글 단어 잘림 허용」(w:wordWrap=0)이라 '라면'이 '라/면'으로
+      갈렸다. 단어 단위 줄바꿈(=1)으로 바꾸고, 과부/고아 줄 제어(widowControl)를 켠다.
+    - 표 행은 페이지에 걸쳐 쪼개지지 않게 한다(cantSplit).
+    - 「□ 소제목」·표 바로 앞 문단·그림 문단은 다음 블록과 같은 페이지에 붙인다(keepNext).
+    """
+    # 1) 기본 문단 스타일
+    for st in doc.styles.element.findall(qn('w:style')):
+        if st.get(qn('w:default')) == '1' and st.get(qn('w:type')) == 'paragraph':
+            ppr = st.find(qn('w:pPr'))
+            if ppr is None:
+                ppr = OxmlElement('w:pPr')
+                st.append(ppr)
+            for tag in ('w:wordWrap', 'w:widowControl'):
+                el = ppr.find(qn(tag))
+                if el is None:
+                    el = OxmlElement(tag)
+                    ppr.insert(0, el)
+                el.set(qn('w:val'), '1')
+
+    body = doc.element.body
+    outer = doc.tables[0]._tbl          # 양식 표 1 — 행 하나가 페이지보다 길다
+
+    # 2) 표 행 분할 금지 — 양식 표 1의 행은 제외한다. 그 행(추진배경·주요 서비스…)은
+    #    한 페이지를 넘기므로 cantSplit을 걸면 Word가 행 전체를 다음 페이지로 밀어
+    #    앞 페이지 절반이 빈다. 그 안의 중첩 표와 나머지 표만 건다.
+    for tr in body.iter(qn('w:tr')):
+        if tr.getparent() is outer:
+            continue
+        trpr = tr.find(qn('w:trPr'))
+        if trpr is None:
+            trpr = OxmlElement('w:trPr')
+            tr.insert(0, trpr)
+        if trpr.find(qn('w:cantSplit')) is None:
+            trpr.insert(0, OxmlElement('w:cantSplit'))
+
+    # 2-B) 유사 서비스 비교 표(양식 표 2)는 페이지에 걸치므로 머리행을 반복한다.
+    #    인덱스로 찾지 않는다 — render()가 앞에 표를 끼워 넣어 doc.tables 순서가 밀린다.
+    cmp_tbl = next(t for t in doc.tables if t.rows[0].cells[0].text.strip() == '비교 항목')
+    tr0 = cmp_tbl._tbl.find(qn('w:tr'))
+    if tr0 is not None:
+        trpr = tr0.find(qn('w:trPr'))
+        if trpr is None:
+            trpr = OxmlElement('w:trPr')
+            tr0.insert(0, trpr)
+        if trpr.find(qn('w:tblHeader')) is None:
+            trpr.append(OxmlElement('w:tblHeader'))
+
+    # 3) keepNext
+    def keep_next(p_el):
+        ppr = p_el.find(qn('w:pPr'))
+        if ppr is None:
+            ppr = OxmlElement('w:pPr')
+            p_el.insert(0, ppr)
+        if ppr.find(qn('w:keepNext')) is None:
+            ppr.insert(0, OxmlElement('w:keepNext'))
+
+    for p_el in body.iter(qn('w:p')):
+        text = ''.join(t.text or '' for t in p_el.iter(qn('w:t'))).strip()
+        nxt = p_el.getnext()
+        if text.startswith('□') or text.startswith('['):
+            keep_next(p_el)
+        elif re.match(r'^(\d+|[a-zA-Z])\.\s\S', text) and len(text) <= 40:   # 「1. SWOT 매트릭스」·「c. WO 전략 …」류
+            keep_next(p_el)
+        elif nxt is not None and nxt.tag == qn('w:tbl'):
+            keep_next(p_el)
+        elif p_el.find('.//' + qn('w:drawing')) is not None:
+            keep_next(p_el)
+
+    # 3-B) 머리행이 페이지 끝에 혼자 남지 않게 — 모든 표(양식 표 1 제외)의 첫 행 문단을 다음 행과 묶는다.
+    #      양식의 SWOT·STP 표는 tblHeader가 없어 "tblHeader 있는 행"만 잡으면 빠진다(v6에서 SWOT 머리행 고아).
+    for tbl in body.iter(qn('w:tbl')):
+        if tbl is outer:
+            continue
+        tr0 = tbl.find(qn('w:tr'))
+        if tr0 is None:
+            continue
+        for p_el in tr0.iter(qn('w:p')):
+            keep_next(p_el)
+        # 양식 SWOT(첫 셀 '내부')·STP(첫 셀 '구분') 표는 쪽에 걸치면 머리행을 반복하게 한다
+        first = ''.join(t.text or '' for t in tr0.iter(qn('w:t'))).strip()
+        if first.startswith(('내부', '구분')):      # 첫 행 텍스트는 셀들이 이어 붙는다('내부강점(S)약점(W)')
+            trpr = tr0.find(qn('w:trPr'))
+            if trpr is None:
+                trpr = OxmlElement('w:trPr')
+                tr0.insert(0, trpr)
+            if trpr.find(qn('w:tblHeader')) is None:
+                trpr.append(OxmlElement('w:tblHeader'))
+
+    # 4) 양식 표 1 셀의 마지막 빈 문단(표 뒤 간격용)이 다음 페이지로 넘어가면
+    #    빈 셀 조각이 한 줄 생긴다. 지울 수는 없으므로(셀은 문단으로 끝나야 한다) 1pt로 줄인다.
+    def shrink(p_el):
+        ppr = p_el.find(qn('w:pPr'))
+        if ppr is None:
+            ppr = OxmlElement('w:pPr')
+            p_el.insert(0, ppr)
+        for old in ppr.findall(qn('w:spacing')):
+            ppr.remove(old)
+        sp = OxmlElement('w:spacing')
+        sp.set(qn('w:before'), '0'); sp.set(qn('w:after'), '0')
+        sp.set(qn('w:line'), '20'); sp.set(qn('w:lineRule'), 'exact')
+        ppr.append(sp)
+        rpr = OxmlElement('w:rPr')
+        sz = OxmlElement('w:sz'); sz.set(qn('w:val'), '2')
+        rpr.append(sz)
+        ppr.append(rpr)
+
+    def is_empty_p(el):
+        return el.tag == qn('w:p') and not ''.join(t.text or '' for t in el.iter(qn('w:t'))).strip() \
+            and el.find('.//' + qn('w:drawing')) is None
+
+    for tc in outer.iter(qn('w:tc')):
+        if tc.getparent().getparent() is not outer:
+            continue
+        # 셀 끝의 빈 문단은 둘일 수 있다 — render_table의 간격 문단 + python-docx가 표 뒤에 붙이는 문단
+        for el in reversed(list(tc)):
+            if not is_empty_p(el):
+                break
+            shrink(el)
+
+    # 5) 유사 서비스 비교 표(양식 표 2)는 반 쪽짜리라 페이지에 걸치면 머리행 없이 이어진다.
+    #    마지막 행 빼고 전부 keepNext → 표가 통째로 다음 쪽으로 간다.
+    t2_rows = cmp_tbl._tbl.findall(qn('w:tr'))
+    for tr in t2_rows[:-1]:
+        for p_el in tr.iter(qn('w:p')):
+            keep_next(p_el)
+
+    # 6) 문서 마지막 「□ …」 블록은 통째로 붙인다 — 끝 문단 두 줄만 다음 쪽에 남는 것을 막는다
+    tops = [el for el in body if el.tag in (qn('w:p'), qn('w:tbl'))]
+    last_box = None
+    for i, el in enumerate(tops):
+        if el.tag == qn('w:p') and ''.join(t.text or '' for t in el.iter(qn('w:t'))).strip().startswith('□'):
+            last_box = i
+    if last_box is not None:
+        for el in tops[last_box:-1]:
+            if el.tag == qn('w:p'):
+                keep_next(el)
+
+
 def build():
     sec = load_sections()
     doc = Document(TPL)
@@ -480,6 +621,7 @@ def build():
     drop_until(anchor, set())
     render(sec['차별성'], doc, after=anchor)
 
+    polish_layout(doc)
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     doc.save(OUT)
     return OUT
