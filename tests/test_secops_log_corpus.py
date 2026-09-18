@@ -152,6 +152,12 @@ def test_secops_log_corpus_rejects_unredacted_public_records(change):
     "pam_unix(sshd:auth): authentication failure; user={user} rhost=203.0.113.10",
     "pam_unix(sshd:auth): authentication failure; ruser={user} rhost=203.0.113.10",
     "pam_unix(sshd:auth): authentication failure; logname={user} rhost=203.0.113.10",
+    "Disconnecting invalid user {user} 198.51.100.10 port 41000: Too many authentication failures [preauth]",
+    "input_userauth_request: invalid user {user} [preauth]",
+    "error: maximum authentication attempts exceeded for {user} from 198.51.100.10 port 41000 ssh2 [preauth]",
+    "Disconnected from authenticating user {user} 198.51.100.10 port 41000 [preauth]",
+    "error: PAM: Authentication failure for {user} from 198.51.100.10",
+    "subsystem request for sftp by user {user}",
 ])
 def test_secops_log_corpus_auxiliary_user_fields_require_aliases(message):
     # 각 위치에서 별칭은 허용하고, 비식별화되지 않은 사용자명은 거부한다.
@@ -170,11 +176,56 @@ def test_secops_log_corpus_connection_without_user_does_not_treat_ip_as_username
     assert summary["failed"] == 0
 
 
-@pytest.mark.parametrize("candidate", ["06:29:15", "aa:bb:cc:dd:ee:ff", "2001:db8::1."])
+@pytest.mark.parametrize("candidate", ["2001:db8::1.", "2001:db8:::1", "2001:db8:1:2:3"])
 def test_secops_log_corpus_invalid_ip_candidate_has_a_stable_rejection_reason(candidate):
     row = record(message=f"pam_unix(sshd:auth): authentication failure; detail={candidate}")
     with pytest.raises(ValueError, match="^invalid IP candidate$"):
         corpus.check_public_records([row])
+
+
+@pytest.mark.parametrize("address", ["198.51.100.10", "2001:db8::1"])
+@pytest.mark.parametrize("port", [4100, 41001])
+def test_secops_log_corpus_disconnect_port_and_reason_are_not_an_ip(scope, address, port):
+    row = record(message=f"Received disconnect from {address} port {port}:11: disconnected by user")
+    corpus.check_public_records([row])
+    # 공개 표본 검사 통과가 집계기의 지원 형식을 늘리지는 않는다.
+    summary = corpus.aggregate([row], scope)
+    assert summary["unsupported"] == 1
+    assert summary["failed"] == 0
+
+
+@pytest.mark.parametrize("address", ["8.8.8.8", "2606:4700::1111"])
+def test_secops_log_corpus_disconnect_still_checks_the_source_address(address):
+    row = record(message=f"Received disconnect from {address} port 41001:11: disconnected by user")
+    with pytest.raises(ValueError, match="^non-documentation IP$"):
+        corpus.check_public_records([row])
+
+
+def test_secops_log_corpus_port_like_token_is_only_ignored_in_disconnect_context():
+    row = record(message="pam_unix(sshd:auth): authentication failure; detail=41001:11:")
+    with pytest.raises(ValueError, match="^invalid IP candidate$"):
+        corpus.check_public_records([row])
+
+
+@pytest.mark.parametrize("time", ["00:00:00", "06:29:15", "23:59:59"])
+def test_secops_log_corpus_clock_time_is_not_an_ip(time):
+    corpus.check_public_records([record(message=f"pam_unix(sshd:auth): authentication failure; time={time}")])
+
+
+@pytest.mark.parametrize("address", ["aa:bb:cc:dd:ee:ff", "00:01:02:03:04:05"])
+def test_secops_log_corpus_mac_address_has_its_own_rejection_reason(address):
+    row = record(message=f"pam_unix(sshd:auth): authentication failure; detail={address}")
+    with pytest.raises(ValueError, match="^unredacted MAC address$"):
+        corpus.check_public_records([row])
+
+
+@pytest.mark.parametrize("message", [
+    "Accepted password for root from 198.51.100.10 port 41000 ssh2",
+    "pam_unix(sshd:auth): authentication failure; user=root rhost=198.51.100.10",
+])
+def test_secops_log_corpus_system_accounts_also_require_aliases(message):
+    with pytest.raises(ValueError, match="unredacted.*user"):
+        corpus.check_public_records([record(message=message)])
 
 
 @pytest.mark.parametrize("message", [
@@ -192,13 +243,17 @@ def test_secops_log_corpus_ipv6_is_checked_in_auth_and_auxiliary_fields(message)
 @pytest.mark.parametrize("address, allowed", [
     ("2001:0DB8:0000:0000:0000:0000:0000:0001", True),
     ("2001:db8:ffff:ffff:ffff:ffff:ffff:ffff", True),
+    ("2001:db8:0:0:0:0:192.0.2.1", True),
     ("2001:db9::1", False),
+    ("2001:db9:0:0:0:0:192.0.2.1", False),
+    ("1111:2222:3333:4444:5555:6666:7777:8888", False),
+    ("00:01:02:03:04:05:06:07", False),
+    ("06::29:15", False),
     ("fd00::1", False),
-    ("fe80::1%eth0", False),
     ("::1", False),
     ("::ffff:198.51.100.10", False),
     ("::ffff:8.8.8.8", False),
-    ("2001:db8::1%private-interface", False),
+    ("0:0:0:0:0:ffff:198.51.100.10", False),
 ])
 def test_secops_log_corpus_ipv6_public_range_and_spelling(address, allowed):
     row = record(message=f"Failed password for mock-user from {address} port 41000 ssh2")
@@ -207,6 +262,13 @@ def test_secops_log_corpus_ipv6_public_range_and_spelling(address, allowed):
     else:
         with pytest.raises(ValueError, match="non-documentation IP"):
             corpus.check_public_records([row])
+
+
+@pytest.mark.parametrize("address", ["fe80::1%eth0", "2001:db8::1%private-interface"])
+def test_secops_log_corpus_ip_interface_has_its_own_rejection_reason(address):
+    row = record(message=f"Failed password for mock-user from {address} port 41000 ssh2")
+    with pytest.raises(ValueError, match="^IP interface identifier is not allowed$"):
+        corpus.check_public_records([row])
 
 
 def test_secops_log_corpus_prepare_imports_do_not_depend_on_runtime_validation(tmp_path):
@@ -238,6 +300,28 @@ def test_secops_log_corpus_prepare_imports_do_not_depend_on_runtime_validation(t
     submission = json.loads(path.read_text(encoding="utf-8"))
     assert submission["observation"]["failed_attempt_count"] == 120
     assert submission["log_evidence"]["case_id"] == "C01"
+
+
+@pytest.mark.parametrize("extra", ["excluded", "duplicate"])
+def test_secops_log_corpus_prepare_rejects_excluded_or_duplicate_records_before_delivery(tmp_path, monkeypatch, extra):
+    destination, inbox = tmp_path / "corpus", tmp_path / "inbox"
+    corpus.build(corpus.CORPUS, destination)
+    folder = destination / "cases/C01"
+    rows = corpus.read_records(folder / "logs.jsonl")
+    additional = dict(rows[0])
+    if extra == "excluded":
+        manifest = corpus.read_json(folder / "manifest.json")
+        additional.update(record_id="outside-window", source_time=manifest["selection"]["end"])
+        # 기대값의 행 수도 맞춰 제외 행에 대한 고정 제한 자체를 확인한다.
+        expected = corpus.read_json(folder / "expected.json")
+        expected["aggregate"]["record_count"] += 1
+        (folder / "expected.json").write_bytes(corpus.json_bytes(expected))
+    (folder / "logs.jsonl").write_bytes(corpus.records_bytes([*rows, additional]))
+    monkeypatch.setattr(corpus, "CORPUS", destination)
+
+    with pytest.raises(ValueError, match="^C01: unexpected exclusion/duplicate$"):
+        corpus.prepare_case("C01", inbox, "test-target")
+    assert not inbox.exists()
 
 
 @pytest.mark.parametrize("relative", ["cases/C01/observation.json", "cases/C01/expected.json"])

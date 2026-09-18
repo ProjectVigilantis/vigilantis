@@ -35,7 +35,9 @@ DOC_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
 ))
 PUBLIC_USER = re.compile(r"(?:mock-user|user-\d{3})")
 AUX_USERS = re.compile(
-    r"(?:\b(?:Invalid user|Connection closed by invalid user|for user) "
+    r"(?:\b(?:[Ii]nvalid user|authenticating user|for user"
+    r"|Authentication failure for|attempts exceeded for) "
+    r"|\bsubsystem request for \S+ by user "
     r"|\b(?:user|ruser|logname)=)([^\s();]+)"
 )
 PAM_SESSION_ACTOR = re.compile(
@@ -46,6 +48,11 @@ PUBLIC_IPS = re.compile(
     r"(?<!\w)(?:[0-9a-fA-F]*:){2,}[0-9a-fA-F:.]*(?:%[\w.-]+)?"
     r"|\b(?:\d{1,3}\.){3}\d{1,3}\b"
 )
+DISCONNECT_PORT = re.compile(
+    r"^Received disconnect from \S+ port (?P<port_code>\d{1,5}:\d+:)(?= )"
+)
+CLOCK_TIME = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d")
+MAC_ADDRESS = re.compile(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}")
 
 
 def require(condition: bool, message: str) -> None:
@@ -274,8 +281,16 @@ def check_public_records(records: list[dict]) -> None:
         require("SHA256:" not in message and "PRIVATE KEY" not in message, "unredacted key material")
         if message.startswith("pam_unix(sshd:"):
             require(re.search(r"\b(?:e?uid)=\d+", message) is None, "unredacted PAM UID")
-        for text in PUBLIC_IPS.findall(message):
-            require("%" not in text, "non-documentation IP")
+        disconnect = DISCONNECT_PORT.match(message)
+        for candidate in PUBLIC_IPS.finditer(message):
+            # 종료 행의 포트·사유 코드만 제외하고 출발지 주소는 계속 검사한다.
+            if disconnect and candidate.span() == disconnect.span("port_code"):
+                continue
+            text = candidate.group()
+            if CLOCK_TIME.fullmatch(text):
+                continue
+            require(MAC_ADDRESS.fullmatch(text) is None, "unredacted MAC address")
+            require("%" not in text, "IP interface identifier is not allowed")
             try:
                 ip = ipaddress.ip_address(text)
             except ValueError:
