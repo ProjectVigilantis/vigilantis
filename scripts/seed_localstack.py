@@ -38,6 +38,8 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from botocore.exceptions import ClientError
+
 # Windows 콘솔(cp949)은 em dash 등 출력 시 UnicodeEncodeError로 죽는다 — UTF-8로 강제
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -220,6 +222,32 @@ def _default_vpc(ec2) -> str:
     return vpcs[0]["VpcId"]
 
 
+def _sweep_orphan_nacls(ec2) -> int:
+    """VPC 가 이미 사라진 NACL 을 치운다. 지운 개수를 돌려준다.
+
+    **LocalStack 은 VPC 를 지울 때 그 VPC 의 기본 NACL 을 남긴다**(실 AWS 는 함께 없앤다).
+    VPC 를 만드는 통합 테스트가 1건당 1개씩 남기므로, 스위트를 몇 번 돌리면 없어진 VPC 를
+    가리키는 NACL 이 수십 개가 되고, 5분 주기 수집이 그것을 자산으로 적재해 대시보드의
+    "트래픽 경로 밖" 목록을 덮는다.
+
+    발생원은 테스트 픽스처가 막지만(거기서 기본 NACL 까지 지운다), 이미 쌓인 것과 앞으로
+    생길 누락분은 여기서 쓸어 낸다 — LocalStack 재시작 없이 시드만 다시 돌려도 화면이
+    깨끗해진다. **실재하는 VPC 의 NACL 은 건드리지 않는다.**
+    """
+    live_vpcs = {v["VpcId"] for v in ec2.describe_vpcs()["Vpcs"]}
+    swept = 0
+    for acl in ec2.describe_network_acls()["NetworkAcls"]:
+        if acl["VpcId"] in live_vpcs:
+            continue
+        try:
+            ec2.delete_network_acl(NetworkAclId=acl["NetworkAclId"])
+            swept += 1
+        except ClientError:
+            # 지우지 못해도 시드를 멈추지 않는다 — 청소는 부수 작업이다.
+            pass
+    return swept
+
+
 def _instance_subnet(ec2, instance_id: str) -> str | None:
     res = ec2.describe_instances(InstanceIds=[instance_id])["Reservations"]
     return res[0]["Instances"][0].get("SubnetId") if res else None
@@ -333,6 +361,10 @@ def _put_metrics(cw, instance_id: str, profile: str) -> None:
 
 # ------------------------------------------------------------------ 실행 모드
 def seed_all(ec2, cw, region: str) -> None:
+    swept = _sweep_orphan_nacls(ec2)
+    if swept:
+        print(f"[seed] 고아 NACL {swept}건 정리 — VPC 가 사라진 NACL(LocalStack 잔해)")
+
     sg_ids: dict[str, str] = {}
     for sg_name, open_ssh in ((SG_OPEN, True), (SG_USED, False), (SG_UNUSED, False)):
         sg_id, created = _ensure_sg(ec2, sg_name, open_ssh)

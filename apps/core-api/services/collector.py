@@ -60,6 +60,11 @@ _QUERY_BATCH = 100
 # 조회를 새로 더하고 이 지도를 안 고치면, 조용히 잘못 지우는 대신 조용히 안 지우는
 # 쪽으로 넘어지게 한다. (Issue #332 · PR #339 리뷰: 김세혁)
 
+# 리전 수집이 통째로 엎어진 회차의 라벨(_collect_region_failed). 특정 유형이 아니라 **전부**를
+# 못 본 것이라 유형으로 환원하지 않는다 — 그 회차는 collection_status 가 FAILED 로 나가고,
+# 화면은 유형별 안내가 아니라 전체 실패로 그려야 한다. 모르는 라벨과 구분하려고 이름을 남긴다.
+REGION_FAILURE_LABEL = "collect_region"
+
 
 def _failure_reason(exc: BaseException) -> str:
     """degrade 사유를 사람이 읽을 짧은 코드로. ClientError 는 AWS 오류 코드
@@ -183,12 +188,22 @@ def _used_sg_ids(instances: list[dict], enis: list[dict]) -> set[str]:
     return used
 
 
-def _fetch_metrics(cw, instance_ids: list[str], start: datetime, end: datetime, period: int) -> dict[str, dict[MetricName, MetricSeries]]:
+def _fetch_metrics(
+    cw,
+    instance_ids: list[str],
+    start: datetime,
+    end: datetime,
+    period: int,
+    metrics: tuple[MetricName, ...] = _METRIC_NAMES,
+) -> dict[str, dict[MetricName, MetricSeries]]:
     """인스턴스별 CPU/Network 시계열을 get_metric_data 로 배치 조회.
-    실 계정 비용 = 호출 수이므로 단건 반복 대신 배치 조회를 유지한다."""
+    실 계정 비용 = 호출 수이므로 단건 반복 대신 배치 조회를 유지한다.
+
+    ``metrics`` 로 받을 메트릭을 좁힐 수 있다 — 시계열 차트(services/metrics.py)는 CPU 만
+    필요해서 쿼리 수를 3분의 1로 줄인다. 기본값은 수집 경로가 쓰는 3종 그대로다."""
     queries, ref = [], {}
     for idx, iid in enumerate(instance_ids):
-        for m in _METRIC_NAMES:
+        for m in metrics:
             qid = f"q{idx}_{m.name.lower()}"
             ref[qid] = (iid, m)
             queries.append(
@@ -949,7 +964,7 @@ def _record_failed_region(region: str, cfg: dict, exc: BaseException, session_fa
             status=CollectionRunStatus.FAILED,
             finished_at=datetime.now(timezone.utc),
             # error_summary 키 축을 PARTIAL(서비스 라벨)과 통일 — 실패 단계 라벨. 리전은 run.region 이 담는다.
-            error_summary=_failures_summary({"collect_region": _failure_reason(exc)}),
+            error_summary=_failures_summary({REGION_FAILURE_LABEL: _failure_reason(exc)}),
         )
         db.commit()
     except Exception:
