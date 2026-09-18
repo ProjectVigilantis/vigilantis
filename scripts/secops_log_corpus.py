@@ -31,8 +31,21 @@ AUX = re.compile(
     r"pam_unix\(sshd:(?:auth|session)\): .+)$"
 )
 DOC_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
-    "192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24",
+    "192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32",
 ))
+PUBLIC_USER = re.compile(r"(?:mock-user|user-\d{3})")
+AUX_USERS = re.compile(
+    r"(?:\b(?:Invalid user|Connection closed by invalid user|for user) "
+    r"|\b(?:user|ruser|logname)=)([^\s();]+)"
+)
+PAM_SESSION_ACTOR = re.compile(
+    r"^pam_unix\(sshd:session\): session opened for user \S+ by ([^\s();]+)"
+)
+# 압축·확장·IPv4 매핑 IPv6를 한 주소로 추출한 뒤 ipaddress로 검사한다.
+PUBLIC_IPS = re.compile(
+    r"(?<!\w)(?:[0-9a-fA-F]*:){2,}[0-9a-fA-F:.]*(?:%[\w.-]+)?"
+    r"|\b(?:\d{1,3}\.){3}\d{1,3}\b"
+)
 
 
 def require(condition: bool, message: str) -> None:
@@ -261,12 +274,18 @@ def check_public_records(records: list[dict]) -> None:
         require("SHA256:" not in message and "PRIVATE KEY" not in message, "unredacted key material")
         if message.startswith("pam_unix(sshd:"):
             require(re.search(r"\b(?:e?uid)=\d+", message) is None, "unredacted PAM UID")
-        for text in re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", message):
-            ip = ipaddress.ip_address(text)
+        for text in PUBLIC_IPS.findall(message):
+            require("%" not in text, "non-documentation IP")
+            try:
+                ip = ipaddress.ip_address(text)
+            except ValueError:
+                raise ValueError("invalid IP candidate") from None
             require(any(ip in network for network in DOC_NETWORKS), "non-documentation IP")
         match = AUTH.fullmatch(message)
         if match:
-            require(re.fullmatch(r"(?:mock-user|user-\d{3})", match["user"]) is not None, "unredacted auth user")
+            require(PUBLIC_USER.fullmatch(match["user"]) is not None, "unredacted auth user")
+        for user in AUX_USERS.findall(message) + PAM_SESSION_ACTOR.findall(message):
+            require(PUBLIC_USER.fullmatch(user) is not None, "unredacted auxiliary user")
 
 
 def _ensure_runtime_paths() -> None:

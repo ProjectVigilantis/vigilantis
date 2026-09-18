@@ -171,12 +171,13 @@ class ThreatEvidence(BaseModel):
             logs = self.context.log_evidence
             if logs is not None:
                 payload = self.event.payload
-                if (logs.target_arn != self.event.target_arn
-                        or getattr(payload, "source_ip", None) != logs.source_ip
-                        or self.event.occurred_at != logs.window_end
-                        or getattr(payload, "failed_attempt_count", None) != logs.failed_attempt_count
-                        or getattr(payload, "window_seconds", None)
-                        != (logs.window_end - logs.window_start).total_seconds()):
+                if not logs.matches_threat_fields(
+                    target_arn=self.event.target_arn,
+                    source_ip=getattr(payload, "source_ip", None),
+                    occurred_at=self.event.occurred_at,
+                    failed_attempt_count=getattr(payload, "failed_attempt_count", None),
+                    window_seconds=getattr(payload, "window_seconds", None),
+                ):
                     raise ValueError("log evidence differs from threat event")
         return self
 
