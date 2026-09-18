@@ -1,0 +1,3 @@
+{"host": "mock-ec2-C07", "message": "Invalid user mock-user from 198.51.100.20 port 41000", "process_id": 10001, "received_at": "2026-08-20T06:39:59.549000Z", "record_id": "C07-000001", "source_time": "2026-08-20T06:39:59.499000Z"}
+{"host": "mock-ec2-C07", "message": "Failed password for invalid user mock-user from 198.51.100.20 port 41000 ssh2", "process_id": 10001, "received_at": "2026-08-20T06:39:59.550000Z", "record_id": "C07-000002", "source_time": "2026-08-20T06:39:59.500000Z"}
+{"host": "mock-ec2-C07", "message": "Connection closed by invalid user mock-user 198.51.100.20 port 41000 [preauth]", "process_id": 10001, "received_at": "2026-08-20T06:39:59.551000Z", "record_id": "C07-000003", "source_time": "2026-08-20T06:39:59.501000Z"}

@@ -62,7 +62,7 @@
 # 입력 불가도 같은 처분이다. 근거 누락·빈 메뉴를 PENDING으로 남기면 다음 스캔에서도
 # 같은 입력으로 실패를 반복하기 때문이다(_GraphInputUnavailable).
 #
-# SecOps는 고정 THREAT 근거·초기 판정과 분석 시점 수집 자산을 조립한다.
+# SecOps는 고정 THREAT 근거·초기 판정과 Incident 접수 시 보존한 자산을 조립한다.
 # 후보는 입력 근거·조치 대상·저장 가능성을 검증한 뒤 Workflow에 넘긴다.
 # FinOps 절감 예상만 잘못된 경우에는 INVALID로 남기고 실행 후보를 유지한다(#347).
 # SecOps의 위험도 재평가는 초기 위험도·사유·대응 모드를 덮어쓰지 않는다.
@@ -100,7 +100,6 @@ from schemas.agents import (
     SecOpsGraphInput,
     AgentExecutionContext,
 )
-from schemas.api.assets import AssetType, RelationType
 from schemas.api.actions import ExecutionStatus
 from schemas.api.incidents import IncidentCategory
 from schemas.events import InitialRiskEvaluationResult, expected_mode_for
@@ -116,14 +115,13 @@ from ai.capabilities import (
     build_secops_capabilities,
     secops_action_targets,
 )
-from asset_mapping import to_asset_item
 from ai.model_client import AIModelClient
 from ai.rate_estimator import SAVINGS_MODEL_CALLS, estimate_candidate_savings, savings_context
 from ai.openai_client import build_openai_model_client
 from config import Settings, get_settings
 from db import mappers
 from db.repositories import incidents as incidents_repo
-from db.repositories import assets as assets_repo, executions as executions_repo
+from db.repositories import executions as executions_repo
 from db.session import get_session_factory
 from realtime import incident_event
 
@@ -273,11 +271,10 @@ def build_graph_input(db: Session, incident_id: str) -> AgentGraphInput:
 
 
 def _build_secops_input(db: Session, incident) -> SecOpsGraphInput:
-    """관측은 고정 THREAT 근거, 자산은 분석 시점의 최신 수집 행에서 읽는다.
+    """접수 시 저장한 사본을 읽으며, 이후 실행 결과는 별도 근거로 유지한다.
 
-    SecOps Intake에는 Detection 자산 스냅샷이 없다. 자산 collected_at을 모델에
-    함께 보내 시점을 구분한다. 직접 PROTECTED_BY 관계 중 같은 계정·리전의
-    수집된 NACL만 남긴다. SG 역방향·VPC 전체로 대상 범위를 추측하지 않는다.
+    기존 근거에 사본이 없거나 누락됐어도 최신 Inventory로 재구성하지 않는다.
+    수집을 기다리며 재조회하지 않고 기존 분석 실패 처리 경로를 따른다.
     """
     try:
         evidences = [mappers.to_evidence_item(row)
@@ -287,18 +284,12 @@ def _build_secops_input(db: Session, incident) -> SecOpsGraphInput:
         if (event.target_arn != incident.subject_arn
                 or event.threat_event_id != incident.threat_event_id):
             raise _GraphInputUnavailable("위협 근거와 Incident 대상이 다릅니다")
-        row = assets_repo.get_asset_by_arn(db, incident.subject_arn)
-        if row is None:
-            raise _GraphInputUnavailable("위협 대상 자산이 수집되지 않았습니다")
-        relations = []
-        for relation in assets_repo.list_relationships_by_source(db, row.asset_id):
-            if relation.relation_type is not RelationType.PROTECTED_BY:
-                continue
-            target = assets_repo.get_asset_by_arn(db, relation.target_arn)
-            if (target is not None and target.asset_type is AssetType.NACL
-                    and target.account_id == row.account_id and target.region == row.region):
-                relations.append(relation)
-        asset = to_asset_item(row, relations, None)
+        context = threat.content.context
+        if context is None:
+            raise _GraphInputUnavailable("기존 Incident에 생성 시점 근거가 없습니다")
+        if context.target is None:
+            raise _GraphInputUnavailable(f"생성 시점 대상 자산 근거 부족: {context.target_status}")
+        asset = context.target.asset
         capabilities = build_secops_capabilities(asset=asset, event_type=event.event_type)
         if not capabilities:
             raise _GraphInputUnavailable("이 위협에 제공할 조치·조회 의존성이 없습니다")

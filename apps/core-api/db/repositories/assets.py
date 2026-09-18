@@ -151,6 +151,27 @@ def get_asset_by_arn(db: Session, arn: str) -> Optional[models.Asset]:
     ).scalar_one_or_none()
 
 
+def read_secops_context_rows(db: Session, arn: str):
+    """대상 자산과 직접 연결된 SG/NACL 관측을 한 SQL 문장으로 조회한다.
+
+    READ COMMITTED에서 서로 다른 수집 갱신의 자산·관계 행이 섞이지 않도록 JOIN한다.
+    관계 64개 상한 초과를 판별하기 위해 최대 65행을 조회한다.
+    관계 대상이 없어도 OUTER JOIN 행을 남겨 호출자가 누락 사유를 기록할 수 있게 한다.
+    """
+    source, target = aliased(models.Asset), aliased(models.Asset)
+    relation = models.AssetRelationship
+    return list(db.execute(
+        select(source, relation, target)
+        .outerjoin(relation, (relation.source_asset_id == source.asset_id)
+                   & relation.relation_type.in_([RelationType.SECURED_BY, RelationType.PROTECTED_BY]))
+        .outerjoin(target, target.arn == relation.target_arn)
+        .where(source.arn == arn)
+        .order_by(relation.relation_type, relation.target_arn)
+        .limit(65)
+        .execution_options(populate_existing=True)
+    ))
+
+
 def list_assets(
     db: Session,
     *,

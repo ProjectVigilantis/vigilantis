@@ -89,6 +89,7 @@ from schemas.evidence import (
     ThreatEvidence,
 )
 from schemas.intake import FinOpsIncidentIntake, IncidentIntake, SecOpsIncidentIntake
+from secops_context import capture_secops_context
 
 from db import mappers, models
 from db.repositories import assets as assets_repo
@@ -279,7 +280,10 @@ def _create_secops(db: Session, intake: SecOpsIncidentIntake) -> IntakeOutcome:
         evidence_type=EvidenceType.THREAT,
         source_type="threat_event",
         source_id=event.threat_event_id,
-        content=ThreatEvidence(event=event),
+        content=ThreatEvidence(
+            event=event,
+            context=capture_secops_context(db, event.target_arn, intake.log_evidence),
+        ),
         occurred_at=event.occurred_at,
     )
     db.commit()

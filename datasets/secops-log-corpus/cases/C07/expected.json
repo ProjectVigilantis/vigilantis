@@ -1,0 +1,23 @@
+{
+  "aggregate": {
+    "accepted": 0,
+    "auxiliary": 2,
+    "failed": 1,
+    "record_count": 3,
+    "unsupported": 0
+  },
+  "ai_action_expectation": null,
+  "derivation": "Single-attempt rule precedes rate comparison (60/min). Auxiliary rows = 2 per connection, at most 3 failures per connection.",
+  "forbidden_claims": [
+    "real_attack_observed",
+    "successful_compromise",
+    "mitigation_executed"
+  ],
+  "initial_risk": {
+    "initial_risk_level": "LOW",
+    "reason_codes": [
+      "RISK_SSH_LOW_SIGNAL"
+    ],
+    "response_mode": "AGENT_WAIT"
+  }
+}

@@ -54,6 +54,7 @@ from .api.assets import Verdict
 from .api.incidents import IncidentCategory
 from .events import InitialRiskEvaluationResult, NormalizedThreatEvent
 from .evidence import DetectionAssetSnapshot
+from .mock_logs import MockSshLogEvidence
 from .rules import RuleEvaluationResult
 
 # 자산 판정 4종 중 Incident가 되는 2종. THREAT·SKIP이 빠진 이유는 파일 헤더에 있다.
@@ -134,9 +135,8 @@ class FinOpsIncidentIntake(BaseModel):
 class SecOpsIncidentIntake(BaseModel):
     """위협 이벤트 1건 + 초기 위험 판정 → SECOPS Incident 생성 입력.
 
-    자산 스냅샷을 받지 않는다 — 위협 판정은 자산 문맥에 의존하지 않고 들어온 위협
-    정보만 본다(security/risk_evaluator.py 판정 규칙 ②). 대상 자산은 target_arn이
-    가리키며, 그래프 입력의 자산 문맥은 SecOps 경로를 구현할 때 함께 정한다.
+    위협 판정은 자산 문맥에 의존하지 않는다. Intake Workflow가 생성 시점에
+    수집 자산·직접 관계를 선택해 고정한다. 선택된 모의 로그 근거는 별도로 받는다.
 
     title은 필수다 — 카드 제목이 곧 위협 이름이고, 비면 제목이 자원 ID가 된다
     (Issue #200, api/incidents.py). 위협 이름은 만드는 시점에 이미 정해져 있어
@@ -149,6 +149,7 @@ class SecOpsIncidentIntake(BaseModel):
     title: str = Field(min_length=1)
     threat_event: NormalizedThreatEvent
     initial_risk: InitialRiskEvaluationResult
+    log_evidence: MockSshLogEvidence | None = None
 
     @property
     def subject_arn(self) -> str:
