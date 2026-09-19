@@ -482,8 +482,8 @@ def test_public_threat_discriminator_covers_internal_event_types():
     assert set(variants) == {item.value for item in ThreatEventType}
 
 
-@pytest.mark.parametrize("status", ["NO_PROPOSAL", "GUARDRAIL_REJECTED"])
-def test_awaiting_closure_accepts_normal_analysis_without_execution(status):
+@pytest.mark.parametrize("status", ["NO_PROPOSAL", "GUARDRAIL_REJECTED", "UNAVAILABLE"])
+def test_awaiting_closure_accepts_no_proposal_or_unavailable_analysis_without_execution(status):
     data = make_secops_incident(
         status="AWAITING_CLOSURE", recommendations=[], executions=[],
         analysis_result={"status": status},
@@ -494,14 +494,14 @@ def test_awaiting_closure_accepts_normal_analysis_without_execution(status):
 
 
 @pytest.mark.parametrize("status", [
-    None, "PENDING", "IN_PROGRESS", "PROPOSALS_GENERATED", "FAILED", "UNAVAILABLE",
+    None, "PENDING", "IN_PROGRESS", "PROPOSALS_GENERATED", "FAILED",
 ])
 def test_awaiting_closure_rejects_other_analysis_without_execution(status):
     data = make_secops_incident(
         status="AWAITING_CLOSURE", recommendations=[], executions=[],
         analysis_result={"status": status} if status else None,
     )
-    with pytest.raises(ValidationError, match="실행 이력 또는 정상 SecOps 무제안"):
+    with pytest.raises(ValidationError, match="실행 이력 또는 SecOps 무제안·평가 기록 없음"):
         IncidentResponse.model_validate(data)
 
 

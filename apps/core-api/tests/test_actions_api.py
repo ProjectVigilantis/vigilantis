@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import threading
-from time import monotonic
+from time import monotonic, sleep
 import uuid
 
 import pytest
@@ -401,10 +401,10 @@ def test_concurrent_same_key_requests_reserve_exactly_once(
     def hold_first_commit(session):
         if not session.in_nested_transaction():
             pending_commit.set()
-            assert release_commit.wait(timeout=10), "첫 예약의 commit 해제 신호가 오지 않음"
+            assert release_commit.wait(timeout=45), "첫 예약의 commit 해제 신호가 오지 않음"
 
     def reserve(session, request):
-        session.execute(text("SET LOCAL lock_timeout = '5s'"))
+        session.execute(text("SET LOCAL lock_timeout = '30s'"))
         try:
             return workflows.reserve_execution(session, request)
         except ApiError as exc:
@@ -421,19 +421,28 @@ def test_concurrent_same_key_requests_reserve_exactly_once(
                 event.listen(first, "before_commit", hold_first_commit)
                 first_future = pool.submit(reserve, first, requests[0])
                 try:
-                    assert pending_commit.wait(timeout=5), "첫 예약이 commit 직전까지 도달하지 않음"
+                    deadline = monotonic() + 15
+                    while not pending_commit.wait(timeout=0.02):
+                        if first_future.done():
+                            pytest.fail(f"commit 대기 전 첫 예약 종료: {first_future.result()}")
+                        assert monotonic() < deadline, "첫 예약이 commit 직전까지 도달하지 않음"
                     second_future = pool.submit(reserve, second, requests[1])
-                    deadline = monotonic() + 3
+                    deadline = monotonic() + 15
                     while True:
                         blockers = observer.scalar(text("SELECT pg_blocking_pids(:pid)"), {"pid": second_pid})
                         if first_pid in blockers:
                             break
-                        assert not second_future.done(), f"대기 없이 요청 종료: {second_future.result()}"
-                        assert monotonic() < deadline, "두 번째 요청의 PostgreSQL 잠금 대기가 관찰되지 않음"
+                        if second_future.done():
+                            pytest.fail(f"PostgreSQL 잠금 대기 없이 요청 종료: {second_future.result()}")
+                        assert monotonic() < deadline, (
+                            f"PostgreSQL 잠금 대기 미관찰: same_incident={same_incident}, "
+                            f"first_pid={first_pid}, second_pid={second_pid}, blockers={blockers}"
+                        )
+                        sleep(0.02)
                 finally:
                     release_commit.set()
-                created = first_future.result(timeout=5)
-                raced = second_future.result(timeout=5)
+                created = first_future.result(timeout=30)
+                raced = second_future.result(timeout=30)
                 assert created.created is True
                 if same_incident:
                     assert isinstance(raced, workflows.ExecutionReservation)

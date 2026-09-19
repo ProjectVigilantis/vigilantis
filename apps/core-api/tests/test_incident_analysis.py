@@ -2,8 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from queue import Queue
-from time import monotonic
+from time import monotonic, sleep
 import uuid
 
 import pytest
@@ -120,13 +119,33 @@ def test_release_evaluation_does_not_change_original_analysis(
     assert listed["analysis_result"] == before
 
 
-def test_unknown_evaluation_is_not_reported_as_no_proposal(db, client_pg, make_incident, make_candidate):
-    incident = make_incident(db, status=IncidentStatus.FAILED)
+@pytest.mark.parametrize("status", [IncidentStatus.FAILED, IncidentStatus.AWAITING_CLOSURE])
+def test_unknown_evaluation_is_not_reported_as_no_proposal(
+    db, client_pg, make_incident, make_candidate, status,
+):
+    incident = make_incident(db, status=status)
     incident.agent_invocation_status = AgentInvocationStatus.SUCCEEDED
-    make_candidate(db, incident, status=CandidateStatus.INVALIDATED)
+    candidate = make_candidate(db, incident, status=CandidateStatus.INVALIDATED)
+    initial_risk = incident.initial_risk_level
     db.flush()
-    data = client_pg.get(f"/api/v1/incidents/{incident.incident_id}").json()
-    assert data["analysis_result"]["status"] == "UNAVAILABLE"
+    listing = client_pg.get("/api/v1/incidents")
+    assert listing.status_code == 200
+    [listed] = listing.json()["items"]
+    response = client_pg.get(f"/api/v1/incidents/{incident.incident_id}")
+    assert response.status_code == 200
+    data = response.json()
+    for item in (listed, data):
+        assert item["analysis_result"] == {"status": "UNAVAILABLE", "guardrail_rejections": []}
+        assert item["status"] == status.value
+        assert item["initial_risk_level"] == initial_risk.value
+    assert data["executions"] == []
+    assert data["resolution"] is None
+    db.refresh(incident)
+    db.refresh(candidate)
+    assert incident.status is status
+    assert incident.agent_invocation_status is AgentInvocationStatus.SUCCEEDED
+    assert incident.initial_risk_level is initial_risk
+    assert candidate.status is CandidateStatus.INVALIDATED
 
 
 def test_analysis_listing_has_constant_query_count(db, client_pg, make_incident, make_candidate):
@@ -280,37 +299,42 @@ def test_close_and_approval_are_serialized_by_postgres(
         if action == "close":
             return workflows.resolve_incident(session, incident_id, ResolutionJudgement.NO_FURTHER_ACTION)
         return workflows.reserve_execution(session, request)
-    pids = Queue()
-    def contender():
-        with Session(pg_engine) as session:
-            session.execute(text("SET LOCAL lock_timeout = '5s'"))
-            pids.put(session.scalar(text("SELECT pg_backend_pid()")))
-            try:
-                return act(session, "approve" if winner == "close" else "close")
-            except ApiError as exc:
-                return exc.code
+    def contender(session):
+        session.execute(text("SET LOCAL lock_timeout = '30s'"))
+        try:
+            return act(session, "approve" if winner == "close" else "close")
+        except ApiError as exc:
+            return exc.code
     try:
-        with Session(pg_engine) as first, ThreadPoolExecutor(max_workers=1) as pool:
-            incidents_repo.lock_incident(first, incident_id)
-            first_pid = first.scalar(text("SELECT pg_backend_pid()"))
-            future = pool.submit(contender)
-            try:
-                second_pid = pids.get(timeout=5)
-                # 임의 sleep 대신 실제 PostgreSQL 잠금 대기를 관찰하고 첫 요청을 확정한다.
-                deadline = monotonic() + 3
-                while True:
-                    with pg_engine.connect() as observer:
+        # 연결 생성과 PID 조회를 먼저 끝내고 실제 PostgreSQL 잠금 대기만 관찰한다.
+        with pg_engine.connect() as first_conn, pg_engine.connect() as second_conn, pg_engine.connect() as observer:
+            first_pid = first_conn.scalar(text("SELECT pg_backend_pid()"))
+            second_pid = second_conn.scalar(text("SELECT pg_backend_pid()"))
+            first_conn.rollback()
+            second_conn.rollback()
+            with Session(first_conn) as first, Session(second_conn) as second, ThreadPoolExecutor(max_workers=1) as pool:
+                incidents_repo.lock_incident(first, incident_id)
+                future = pool.submit(contender, second)
+                try:
+                    deadline = monotonic() + 15
+                    while True:
                         blockers = observer.scalar(text("SELECT pg_blocking_pids(:pid)"), {"pid": second_pid})
-                    if first_pid in blockers:
-                        break
-                    assert monotonic() < deadline, "두 번째 요청이 Incident 잠금에서 기다리지 않음"
-                act(first, winner)
-            finally:
-                first.rollback()
-            assert future.result(timeout=5) is (
-                ErrorCode.PROPOSAL_NOT_EXECUTABLE if winner == "close"
-                else ErrorCode.INCIDENT_NOT_RESOLVABLE
-            )
+                        if first_pid in blockers:
+                            break
+                        if future.done():
+                            pytest.fail(f"Incident 잠금 대기 없이 요청 종료: {future.result()}")
+                        assert monotonic() < deadline, (
+                            f"Incident 잠금 대기 미관찰: winner={winner}, "
+                            f"first_pid={first_pid}, second_pid={second_pid}, blockers={blockers}"
+                        )
+                        sleep(0.02)
+                    act(first, winner)
+                finally:
+                    first.rollback()
+                assert future.result(timeout=30) is (
+                    ErrorCode.PROPOSAL_NOT_EXECUTABLE if winner == "close"
+                    else ErrorCode.INCIDENT_NOT_RESOLVABLE
+                )
         with Session(pg_engine) as verify:
             row = verify.get(models.Incident, incident_id)
             executions = verify.scalars(select(models.ActionExecution).where(

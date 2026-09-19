@@ -205,6 +205,9 @@ def resolve_incident(
     종료 시각은 여기서 찍는다(touch_incident와 같은 자리) — updated_at은 자식 상태
     변경으로도 올라가 종료 시점을 가리키지 못한다. 허용 출발 상태 판단은 Workflow
     몫이다(3층 분리).
+
+    끝난 승인 대기 시각도 지워 이전 기한이 이후 대기 판단에 쓰이지 않게 한다.
+    새 대기가 필요하면 set_agent_wait로 설정해야 하며, 재개만으로 시작되지는 않는다.
     """
     result = db.execute(
         update(models.Incident)

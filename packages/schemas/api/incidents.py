@@ -360,17 +360,19 @@ class IncidentResponse(BaseModel):
         if self.status == IncidentStatus.ACTION_IN_PROGRESS and not in_progress:
             raise ValueError("ACTION_IN_PROGRESS이면 진행 중인 실행이 1개 이상이어야 합니다")
         if self.status == IncidentStatus.AWAITING_CLOSURE:
-            # 정상 SecOps 분석에서 실행 가능한 제안이 없어도 사용자 종료 판단을 기다린다.
-            no_proposal = (
+            # 무제안·전체 거절 외에 평가 기록이 없는 기존 사건도 조회한다.
+            # UNAVAILABLE 허용은 읽기 계약이며 분석 성공이나 종료 가능 여부를 뜻하지 않는다.
+            closure_without_execution = (
                 self.category == IncidentCategory.SECOPS
                 and self.analysis_result is not None
                 and self.analysis_result.status in (
                     AnalysisResultStatus.NO_PROPOSAL,
                     AnalysisResultStatus.GUARDRAIL_REJECTED,
+                    AnalysisResultStatus.UNAVAILABLE,
                 )
             )
-            if not self.executions and not no_proposal:
-                raise ValueError("AWAITING_CLOSURE에는 실행 이력 또는 정상 SecOps 무제안 결과가 필요합니다")
+            if not self.executions and not closure_without_execution:
+                raise ValueError("AWAITING_CLOSURE에는 실행 이력 또는 SecOps 무제안·평가 기록 없음 결과가 필요합니다")
             if in_progress:
                 raise ValueError("AWAITING_CLOSURE이면 진행 중인 실행이 없어야 합니다")
         if (

@@ -396,6 +396,9 @@ def resolve_incident(
     if any(item.status in EXECUTION_NON_TERMINAL_STATUSES for item in executions):
         raise ApiError(ErrorCode.INCIDENT_NOT_RESOLVABLE)
     if incident.category is IncidentCategory.SECOPS:
+        # 분석이 결과를 더 만들 수 있는 동안에는 사용자 종료를 확정하지 않는다.
+        # 선제 차단 엔진 연결 시 FAILED + PENDING 등이 분석 스캔에서 빠지지 않는지
+        # 이 게이트와 함께 확인해야 한다. 현재 정상 경로에는 해당 조합이 없다.
         if incident.agent_invocation_status not in AGENT_TERMINAL_STATUSES:
             raise ApiError(ErrorCode.INCIDENT_NOT_RESOLVABLE)
     elif resolution is ResolutionJudgement.NO_FURTHER_ACTION:
