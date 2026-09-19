@@ -1053,14 +1053,32 @@ def test_secops_non_executable_results_remain_readable(db, client_pg, monkeypatc
     report = _cycle(db, client)
     assert report.errored == 0
     data = client_pg.get(f"/api/v1/incidents/{incident_id}").json()
-    assert data["status"] == "FAILED" and data["recommendations"] == []
+    completed = kind in ("no_proposal", "rejected")
+    assert data["status"] == ("AWAITING_CLOSURE" if completed else "FAILED")
+    assert data["recommendations"] == []
     assert data["initial_risk_level"] == "HIGH"
-    assert data["summary_lines"] == [] and data["reviewed_risk_level"] is None
-    if kind in ("no_proposal", "rejected"):
+    if completed:
+        assert len(data["summary_lines"]) == 3 and data["reviewed_risk_level"] == "HIGH"
         dropped = [record for record in caplog.records if record.message == "agent_summary_dropped"]
-        assert len(dropped) == 1
-        assert dropped[0].incident_id == incident_id
-        assert len(dropped[0].summary_lines) == 3
+        assert dropped == []
+    else:
+        assert data["summary_lines"] == [] and data["reviewed_risk_level"] is None
+    expected_result = {"no_proposal": "NO_PROPOSAL", "rejected": "GUARDRAIL_REJECTED"}.get(kind, "FAILED")
+    assert data["analysis_result"]["status"] == expected_result
+    if kind == "rejected":
+        assert data["analysis_result"]["guardrail_rejections"] == [{
+            "runbook_id": "RUNBOOK_NACL_ADD_DENY", "failed_step": "AWS_DRY_RUN",
+            "reason_code": "PRECHECK_TARGET_NOT_FOUND",
+        }]
+    resolved = client_pg.post(f"/api/v1/incidents/{incident_id}/resolve", json={
+        "resolution": "NO_FURTHER_ACTION", "resolution_note": "서비스 밖에서 판단 후 종료",
+    })
+    assert resolved.status_code == 200
+    after = client_pg.get(f"/api/v1/incidents/{incident_id}").json()
+    assert after["status"] == "RESOLVED"
+    assert after["analysis_result"] == data["analysis_result"]
+    assert after["initial_risk_level"] == data["initial_risk_level"]
+    assert after["executions"] == []
 
 
 @pytest.mark.parametrize("status, expected", [
@@ -1095,10 +1113,10 @@ def test_secops_prior_execution_controls_state_and_input(db, client_pg, status, 
     data = client_pg.get(f"/api/v1/incidents/{incident_id}").json()
     assert data["status"] == expected
     assert len(data["executions"]) == 1
-    if expected == "FAILED":
-        assert data["summary_lines"] == [] and data["reviewed_risk_level"] is None
-    else:
-        assert len(data["summary_lines"]) == 3 and data["reviewed_risk_level"] == "HIGH"
+    # 실행 실패와 분석 성공은 독립이다. 실행 실패를 정상화하지 않고 분석은 보존한다.
+    assert data["executions"][0]["status"] == status
+    assert data["analysis_result"]["status"] == "NO_PROPOSAL"
+    assert len(data["summary_lines"]) == 3 and data["reviewed_risk_level"] == "HIGH"
 
 
 def test_secops_claim_ceiling_covers_three_model_calls():

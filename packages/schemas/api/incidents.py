@@ -17,6 +17,8 @@
 #     노출 CIDR을 구분하고 대상은 subject_arn을 쓴다. AI 분석 상태와 무관하며,
 #     FINOPS·조회 가능한 위협 문맥이 없는 SECOPS는 null이다(위협 없음 의미 아님).
 #   - summary_lines는 분석 완료 시 정확히 3개, 분석 중·분석 실패 시 빈 배열.
+#   - analysis_result는 SECOPS의 저장된 분석 결과다. 무제안·전체 거절·실패를 구분하며
+#     현재 제안 목록·실행 결과·사용자 종료 판단과 독립이다. FINOPS는 null이다.
 #   - recommendations는 AI 추천 가능(본편 7종)·Guardrail PASS 제안만 담고,
 #     Incident당 같은 runbook_id는 최대 1개 — (incident_id, runbook_id)가 외부 식별자.
 #     display_parameters는 화면 표시 전용이라 실행 요청에 되돌려 받지 않는다.
@@ -28,6 +30,8 @@
 #     판단을 빠뜨리면 왜 종료됐는지 남지 않는다. 관제자 복구 접수로 재개되면
 #     (ADR-0004) 다시 null이 된다 — "지금 이 인시던트가 종료된 이유"를 말하는
 #     값이라 재개된 뒤에는 거짓이 되기 때문이다. 목록에는 넣지 않는다. (Issue #199)
+#     SECOPS의 NO_FURTHER_ACTION은 서비스 추가 조치 없는 종료이며 위협 해소가 아니다.
+#     선택적 resolution_note는 종료 판단과 함께 저장하고 복구 재개 시 함께 비운다.
 #   - executions의 verification_hold는 판정 불가 보류 기록이다 — AWS에 물어보지 못해
 #     실행 결과를 확정하지 못했을 때의 사유 코드·횟수·시각. status가 UNVERIFIED면
 #     반드시 있고, 판정이 내려진 SUCCESS·ROLLBACK_INITIATED에는 오지 않는다. (Issue #249)
@@ -40,11 +44,12 @@ from enum import Enum, unique
 from ipaddress import ip_address, ip_network
 from typing import Annotated, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
 from ..runbooks import AI_RECOMMENDABLE_RUNBOOK_IDS, ROLLBACK_RUNBOOK_IDS, RunbookId
 from ..savings import AISavingsEstimate, validate_candidate_savings
 from .actions import ExecutionStatus
+from .analysis import AnalysisResult, AnalysisResultStatus
 from .assets import UtcDateTime
 
 
@@ -59,11 +64,9 @@ class IncidentStatus(str, Enum):
     ANALYZING = "ANALYZING"                  # AI 분석 또는 Guardrail 검증 미완
     AWAITING_APPROVAL = "AWAITING_APPROVAL"  # 실행 가능한 제안 ≥1, 진행 중 실행 없음
     ACTION_IN_PROGRESS = "ACTION_IN_PROGRESS"
-    # 조치가 끝났고 관제자 종료 판단만 남음 — 남은 제안·진행 중 실행이 없고, 마지막
-    # 으로 확정된 실행이 SUCCESS·ROLLED_BACK인 자리다. RESOLVED로 시스템이 먼저
-    # 옮기지 않는 이유는 그러면 관제자 종료 API가 멱등 경로로 떨어져 종료 판단이
-    # 영구히 비어 남기 때문이고(Issue #199), FAILED로 두지 않는 이유는 성공한 조치가
-    # 화면에서 '진행 불가'로 읽히기 때문이다. (Issue #240)
+    # 실행 완료 뒤 또는 정상 SecOps 분석의 무제안·전체 거절 뒤 사용자 판단 대기.
+    # 남은 제안·진행 중 실행은 없다. 시스템이 먼저 RESOLVED로 옮기면 사용자
+    # 종료 API가 멱등 경로로 떨어져 판단을 남길 수 없으므로 자동 종료하지 않는다.
     AWAITING_CLOSURE = "AWAITING_CLOSURE"
     RESOLVED = "RESOLVED"                    # 더 진행할 제안·실행 없음(자산 원복 의미 아님)
     FAILED = "FAILED"                        # 흐름 진행 불가(수행된 조치 결과는 executions)
@@ -87,16 +90,34 @@ class ResponseMode(str, Enum):
 
 @unique
 class ResolutionJudgement(str, Enum):
-    """종료 처리 시 관제자가 남기는 판단 (2026-08-27 회의 결정 ④).
+    """사용자 종료 판단. 추가 조치 없이 종료해도 위협 해소·차단 해제를 뜻하지 않는다.
 
-    JUSTIFIED 1종이다. 모달의 다른 선택지 `과잉이었다`는 종료 값이 아니라 해제
-    실행으로 넘어가는 트리거라(#196 §D — 해제는 실행이라 결과를 보고 종료를
-    판단한다) 이 API에 도달하지 않으며, 과잉 판단의 기록은 해제 실행 레코드가
-    남긴다. 해제를 마친 뒤의 종료도 JUSTIFIED다 — 그 시점의 대응 상태(해제 완료)를
-    정당하다고 보고 닫는 것이기 때문이다.
+    JUSTIFIED는 수행한 대응에 대한 판단이다. NO_FURTHER_ACTION은 SecOps 제안
+    거절·무제안·가드레일 전체 거절·분석 실패 뒤 추가 조치를 하지 않는 공통 판단이다.
+    기존 FE와의 호환성을 위해 실행 이력 없는 JUSTIFIED 종료도 계속 허용한다.
+    저장된 JUSTIFIED만으로 실제 조치 수행 여부를 판단하지 않는다.
+    `과잉이었다`는 기존 해제 실행 경로이며 종료 값으로 추가하지 않는다.
     """
 
     JUSTIFIED = "JUSTIFIED"    # 수행된 대응이 정당했다
+    NO_FURTHER_ACTION = "NO_FURTHER_ACTION"
+
+
+def _storable_resolution_note(value: str) -> str:
+    if "\x00" in value:
+        raise ValueError("종료 사유에 NUL 문자를 사용할 수 없습니다")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("종료 사유는 유효한 UTF-8 문자열이어야 합니다") from exc
+    return value
+
+
+ResolutionNote = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=1000),
+    AfterValidator(_storable_resolution_note),
+]
 
 
 class ResolveIncidentRequest(BaseModel):
@@ -110,6 +131,7 @@ class ResolveIncidentRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     resolution: ResolutionJudgement
+    resolution_note: ResolutionNote | None = None
 
 
 class SshBruteForceThreatContext(BaseModel):
@@ -281,10 +303,12 @@ class IncidentResponse(BaseModel):
         None, description="저장된 위협 문맥. null은 문맥 부재이며 위협 없음 판정이 아니다.",
     )
     summary_lines: list[str] = Field(default_factory=list)
+    analysis_result: AnalysisResult | None = None
     evidence_ids: list[str] = Field(default_factory=list)
     recommendations: list[RecommendationItem] = Field(default_factory=list)
     executions: list[ExecutionSummaryItem] = Field(default_factory=list)
     resolution: Optional[ResolutionJudgement] = None
+    resolution_note: ResolutionNote | None = None
     resolved_at: Optional[UtcDateTime] = None
     created_at: UtcDateTime
     updated_at: UtcDateTime
@@ -303,6 +327,12 @@ class IncidentResponse(BaseModel):
 
         if self.category == IncidentCategory.FINOPS and self.threat_context is not None:
             raise ValueError("FINOPS는 threat_context가 null이어야 합니다")
+
+        if self.category == IncidentCategory.FINOPS and (
+            self.analysis_result is not None
+            or self.resolution == ResolutionJudgement.NO_FURTHER_ACTION
+        ):
+            raise ValueError("분석 결과 구분과 추가 조치 없는 종료는 SECOPS 전용입니다")
 
         # SECOPS 카드 제목은 위협 이름이다 — null이면 FE fallback이 자원 ID를 제목으로 쓴다
         if self.category == IncidentCategory.SECOPS and self.title is None:
@@ -330,12 +360,19 @@ class IncidentResponse(BaseModel):
         if self.status == IncidentStatus.ACTION_IN_PROGRESS and not in_progress:
             raise ValueError("ACTION_IN_PROGRESS이면 진행 중인 실행이 1개 이상이어야 합니다")
         if self.status == IncidentStatus.AWAITING_CLOSURE:
-            # "조치가 끝났고 종료 판단만 남았다"는 세 조건이 함께여야 성립한다.
-            # 수행된 조치가 없으면 판단할 것이 없고(그건 ANALYZING·FAILED 자리다),
-            # 남은 제안이 있으면 아직 승인 대기이며(v1.6 결정 ⑤ — 남은 제안이 있으면
-            # 종료 불가), 진행 중 실행이 있으면 조치가 끝나지 않았다
-            if not self.executions:
-                raise ValueError("AWAITING_CLOSURE이면 수행된 실행이 1개 이상이어야 합니다")
+            # 무제안·전체 거절 외에 평가 기록이 없는 기존 사건도 조회한다.
+            # UNAVAILABLE 허용은 읽기 계약이며 분석 성공이나 종료 가능 여부를 뜻하지 않는다.
+            closure_without_execution = (
+                self.category == IncidentCategory.SECOPS
+                and self.analysis_result is not None
+                and self.analysis_result.status in (
+                    AnalysisResultStatus.NO_PROPOSAL,
+                    AnalysisResultStatus.GUARDRAIL_REJECTED,
+                    AnalysisResultStatus.UNAVAILABLE,
+                )
+            )
+            if not self.executions and not closure_without_execution:
+                raise ValueError("AWAITING_CLOSURE에는 실행 이력 또는 SecOps 무제안·평가 기록 없음 결과가 필요합니다")
             if in_progress:
                 raise ValueError("AWAITING_CLOSURE이면 진행 중인 실행이 없어야 합니다")
         if (
@@ -360,6 +397,8 @@ class IncidentResponse(BaseModel):
             raise ValueError("resolution과 resolved_at은 함께 채워지거나 함께 null이어야 합니다")
         if self.status != IncidentStatus.RESOLVED and self.resolution is not None:
             raise ValueError("RESOLVED가 아니면 resolution·resolved_at은 null이어야 합니다")
+        if self.resolution_note is not None and self.resolution is None:
+            raise ValueError("종료 사유는 종료 판단과 함께 저장합니다")
 
         return self
 
@@ -377,6 +416,7 @@ class IncidentListItem(BaseModel):
     initial_risk_level: Optional[RiskLevel] = None
     reviewed_risk_level: Optional[RiskLevel] = None
     response_mode: Optional[ResponseMode] = None
+    analysis_result: AnalysisResult | None = None
     threat_context: ThreatContext | None = Field(
         None, description="저장된 위협 문맥. null은 문맥 부재이며 위협 없음 판정이 아니다.",
     )
@@ -397,6 +437,8 @@ class IncidentListItem(BaseModel):
 
         if self.category == IncidentCategory.FINOPS and self.threat_context is not None:
             raise ValueError("FINOPS는 threat_context가 null이어야 합니다")
+        if self.category == IncidentCategory.FINOPS and self.analysis_result is not None:
+            raise ValueError("FINOPS는 analysis_result가 null이어야 합니다")
 
         # 상세와 같은 불변식: SECOPS 카드 제목은 위협 이름이다
         if self.category == IncidentCategory.SECOPS and self.title is None:
