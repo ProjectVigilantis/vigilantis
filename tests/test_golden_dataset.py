@@ -1,5 +1,5 @@
 # ==============================================================================
-# [파일 설명]  담당: 박지현 (QA & Scenario)
+# [파일 설명]  담당: 김승철 (QA & Scenario · 2026-09-16 박지현에게서 인수)
 # datasets/golden/ 의 Golden Dataset 회귀 테스트.
 #
 #   1) 입력 JSON 이 packages/schemas 의 Pydantic 모델로 검증되는가

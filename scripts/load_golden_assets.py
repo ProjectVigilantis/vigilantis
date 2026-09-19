@@ -1,5 +1,5 @@
 # ==============================================================================
-# [파일 설명]  담당: 박지현 (QA & Scenario)
+# [파일 설명]  담당: 김승철 (QA & Scenario · 2026-09-16 박지현에게서 인수)
 # Golden Dataset(FinOps) 자산 적재 스크립트 — `datasets/golden/finops/input/`의
 # `AssetInventory`를 DB에 넣고 rule_engine 판정까지 돌려 `GET /api/v1/assets`가
 # 골든 데이터를 그대로 서빙하게 만든다.
