@@ -33,6 +33,8 @@ function naclDeny(naclId: string, ip: string): RecommendationItem {
     runbook_id: 'RUNBOOK_NACL_ADD_DENY',
     target_arn: `arn:aws:ec2:ap-northeast-2:1:network-acl/${naclId}`,
     display_parameters: { source_ip: ip },
+    // 절감 예상은 EC2 RIGHTSIZING 후보에만 실린다 — NACL 차단 후보에서는 계약상 null이다.
+    ai_savings_estimate: null,
   };
 }
 

@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from collections import defaultdict
 
 from fastapi import APIRouter, Depends
@@ -17,7 +19,9 @@ from sqlalchemy.orm import Session
 
 from schemas.api.assets import (
     AssetsResponse,
+    AssetType,
     CollectionStatus,
+    UncollectedAssetType,
 )
 from schemas.collections import CollectionRunStatus
 
@@ -26,6 +30,9 @@ from config import get_aws_settings
 from db import models
 from db.repositories import assets as assets_repo
 from db.session import get_db
+from services.collector import REGION_FAILURE_LABEL, UNOBSERVED_TYPES_BY_FAILURE
+
+_log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1", tags=["assets"])
 
@@ -86,6 +93,49 @@ def _collection_status(
     return _COLLECTION_STATUS[worst]
 
 
+def _uncollected(runs: list[models.CollectionRun]) -> list[UncollectedAssetType]:
+    """리전별 최신 run 의 `error_summary`(= collector 가 남긴 {수집 라벨: 사유 코드} JSON)를
+    **자산 유형**으로 환원한다. 화면이 가진 축은 유형이지 수집기 라벨이 아니기 때문이다 —
+    "대상 그룹 열이 왜 비었나"에 답하려면 `ALB_TARGET_GROUP`이 와야 한다.
+
+    세 가지를 고의로 하지 않는다.
+
+    1. **모르는 라벨은 지어내지 않는다.** 누가 흡수 조회를 새로 더하고
+       ``UNOBSERVED_TYPES_BY_FAILURE``(라벨 → 그 조회로만 채워지는 유형)를 안 고치면,
+       엉뚱한 유형을 지목하는 대신 아무 유형도 싣지 않고 경고만 남긴다. 적재 쪽 소멸 표시와
+       같은 fail-closed 태도다. 이때도 `collection_status`는 PARTIAL·FAILED로 나가 이상은 보인다.
+    2. **리전 전체 실패(`collect_region`)는 유형으로 펴지 않는다.** 그 회차는 전부를 못 본
+       것이고 status 가 이미 FAILED다. 유형 7개를 나열하면 화면이 "이 일곱만 문제"라고 말한다.
+    3. **사유가 여러 리전에서 갈려도 유형당 한 줄만 낸다.** 계약이 유형 중복을 금지한다.
+       먼저 만난 사유를 남긴다 — 사유는 보조 정보이고, 유형이 빠졌다는 사실이 본론이다.
+    """
+    reason_by_type: dict[AssetType, str] = {}
+    for run in runs:
+        if not run.error_summary:
+            continue
+        try:
+            failures: dict[str, str] = json.loads(run.error_summary)
+        except (ValueError, TypeError):
+            # 상한 초과로 항목을 버린 `_truncated` 표식도 여기 온다 — 유형을 모르므로 건너뛴다.
+            _log.warning("리전 %s: error_summary 를 JSON 으로 읽지 못해 uncollected 산출에서 제외", run.region)
+            continue
+        for label, reason in failures.items():
+            if label == REGION_FAILURE_LABEL:
+                continue
+            types = UNOBSERVED_TYPES_BY_FAILURE.get(label)
+            if types is None:
+                _log.warning("리전 %s: 모르는 수집 실패 라벨 %r — uncollected 에 싣지 않는다", run.region, label)
+                continue
+            for name in types:
+                reason_by_type.setdefault(AssetType(name), reason)
+
+    return [
+        UncollectedAssetType(asset_type=t, reason_code=reason_by_type[t])
+        for t in AssetType  # enum 선언 순서로 고정 — 응답이 회차마다 뒤바뀌지 않게
+        if t in reason_by_type
+    ]
+
+
 @router.get("/assets", response_model=AssetsResponse)
 def get_assets(db: Session = Depends(get_db)) -> AssetsResponse:
     # 관제 대상 = 설정된 리전(AWS_REGIONS). 세 필드를 모두 이 범위로 좁혀 응답 안에서
@@ -111,4 +161,5 @@ def get_assets(db: Session = Depends(get_db)) -> AssetsResponse:
         collection_status=_collection_status(runs, regions),
         last_collected_at=assets_repo.last_finished_collection_at(db, regions=regions),
         items=items,
+        uncollected=_uncollected(runs),
     )

@@ -206,10 +206,25 @@ export type AssetItem =
   | AssetItemOf<'LAUNCH_TEMPLATE', LaunchTemplateSpec>
   | AssetItemOf<'ALB_TARGET_GROUP', AlbTargetGroupSpec>;
 
+/**
+ * 이번 수집에서 **조회 자체를 못 한** 자산 유형. `items`에 그 유형이 0건인 것만으로는
+ * "원래 없다"와 "못 가져왔다"가 구분되지 않아 계약이 따로 싣는다.
+ */
+export interface UncollectedAssetType {
+  asset_type: AssetType;
+  /** AWS 오류 코드(`AccessDenied`·`InternalFailure` 등) 또는 예외 클래스명. 번역하지 않고 원문 노출. */
+  reason_code: string;
+}
+
 export interface AssetsResponse {
   collection_status: CollectionStatus;
   last_collected_at: IsoDateTime | null;
   items: AssetItem[];
+  /**
+   * **비어 있다고 전부 성공했다는 뜻은 아니다** — 서버가 원인을 유형으로 환원하지 못하면
+   * 지어내는 대신 비워 둔다. 그 경우에도 `collection_status`는 PARTIAL·FAILED로 남는다.
+   */
+  uncollected: UncollectedAssetType[];
 }
 
 /* ───────────────────────────── actions.py ───────────────────────────── */
@@ -275,11 +290,72 @@ export const RESPONSE_MODES = [
 
 export type ResponseMode = (typeof RESPONSE_MODES)[number];
 
+/**
+ * 절감 예상의 결과 상태. **`ESTIMATED`만 금액이 있다** — `UNAVAILABLE`·`INVALID`는
+ * `amount`가 null이고, 화면은 그 둘을 0원으로 그리지 않는다(0원은 "절감이 없다"는 단언이다).
+ */
+export type SavingsStatus = 'ESTIMATED' | 'UNAVAILABLE' | 'INVALID';
+
+/**
+ * 미산출 사유. `MODEL_UNAVAILABLE`은 모델이 못 낸 것이고 나머지 셋은 서버가 계약 위반으로
+ * 버린 것이다 — 화면은 둘을 같은 말로 덮지 않는다.
+ */
+export type SavingsReason =
+  | 'MODEL_UNAVAILABLE'
+  | 'MISSING_ESTIMATE'
+  | 'INVALID_ESTIMATE'
+  | 'CONTEXT_MISMATCH';
+
+/**
+ * 비교 가정. 서버가 **고정 리터럴**로 싣는다 — 730시간·Linux·공유 테넌시·온디맨드의
+ * 인스턴스 컴퓨팅 비용만 비교한다는 뜻이고, `pricing_source`가 `MODEL_KNOWLEDGE`인 것은
+ * 단가가 **AI 추정**이라는 표시다(AWS Cost Explorer·Price List가 아니다).
+ */
+export interface SavingsAssumptions {
+  hours: number;
+  operating_system: string;
+  tenancy: string;
+  purchase_option: string;
+  included_cost: string;
+  pricing_source: 'MODEL_KNOWLEDGE';
+}
+
+/** 추정 근거. `explanation`은 서버가 쓴 문장이다(`explanation_source = SERVER_TEMPLATE`). */
+export interface SavingsBasis {
+  target_arn: string;
+  region: string;
+  current_instance_type: string;
+  target_instance_type: string;
+  /** USD/시간. 계약이 소수점 6자리 **문자열**로 직렬화한다 — 부동소수 오차를 옮기지 않으려고. */
+  current_hourly_rate: string;
+  target_hourly_rate: string;
+  assumptions: SavingsAssumptions;
+  explanation: string;
+  explanation_source: 'SERVER_TEMPLATE';
+}
+
+/**
+ * RIGHTSIZING 조치 1건의 **AI 참고 추정**. 실제 청구액이 아니다(#347) — 화면은 금액 옆에
+ * 그 사실을 반드시 함께 적는다. AWS Cost Explorer 연동이 아니라 모델 추정 단가 × 730시간이다.
+ */
+export interface AiSavingsEstimate {
+  status: SavingsStatus;
+  currency: 'USD';
+  period: 'MONTH';
+  /** 월 절감 예상액. `ESTIMATED`가 아니면 null이다. 계약이 소수점 2자리 **문자열**로 싣는다. */
+  amount: string | null;
+  basis: SavingsBasis | null;
+  /** 미산출 사유. `ESTIMATED`면 null이다. */
+  reason: SavingsReason | null;
+}
+
 export interface RecommendationItem {
   runbook_id: AiRecommendableRunbookId;
   target_arn: string;
   /** 화면 표시 전용 — 실행 요청에 되돌려 보내지 않는다. */
   display_parameters: Record<string, string>;
+  /** RIGHTSIZING 조치에만 실린다. 그 밖의 런북에서는 null이다. */
+  ai_savings_estimate: AiSavingsEstimate | null;
 }
 
 /**
@@ -383,3 +459,78 @@ export type WsEvent =
       occurred_at: IsoDateTime;
       data: ExecutionEventData;
     };
+
+/* ───────────────────────────── metrics.py ───────────────────────────── */
+/* GET /api/v1/metrics/timeseries — 대시보드 시계열 2축(DSH). 축마다 상태를 따로 받는다:
+   CPU는 CloudWatch를 그 자리에서 부르고, SG 개방 건수는 적재된 판정 이력을 읽는다. */
+
+/** 축 하나의 조회 결과. `UNAVAILABLE`이면 데이터는 비고 `reason_code`가 원인을 싣는다. */
+export type AxisStatus = 'READY' | 'UNAVAILABLE';
+
+export interface TimeseriesPoint {
+  at: IsoDateTime;
+  value: number;
+}
+
+/** EC2 한 대의 CPU 곡선. `name`은 Name 태그가 없으면 null — 화면은 `resource_id`로 대신한다. */
+export interface CpuSeries {
+  arn: string;
+  resource_id: string;
+  name: string | null;
+  points: TimeseriesPoint[];
+}
+
+/** 축 1. 값은 CloudWatch 원계열이다 — 적재된 14일 롤링 평균(`metric_summaries`)이 아니다. */
+export interface CpuAxis {
+  status: AxisStatus;
+  period_seconds: number | null;
+  window_start: IsoDateTime | null;
+  window_end: IsoDateTime | null;
+  /** Rule Evaluator의 저활성 임계치. 임계선 값을 서버가 싣는다 — FE가 상수를 갖지 않는다. */
+  idle_cpu_avg_threshold: number | null;
+  series: CpuSeries[];
+  reason_code: string | null;
+}
+
+/**
+ * EC2 한 대의 네트워크 처리량 곡선. **In·Out이 한 자산 안에 짝으로 온다** — 화면이 두 방향을
+ * 겹쳐 그려야 "받기만 하는가"가 읽히기 때문이다.
+ *
+ * 값의 단위는 **period당 바이트 총량**이다(CloudWatch `Sum`) — 표본값이 그 표본 구간에 오간
+ * 바이트라, period 안에 표본이 여럿이면 합계만이 그 구간의 총량이 된다. 초당 처리량으로 읽으려면
+ * 축의 `period_seconds`로 나눈다 — 나누는 쪽이 화면인 것은 서버가 관측값을 가공하지 않기 때문이다.
+ */
+export interface NetworkSeries {
+  arn: string;
+  resource_id: string;
+  name: string | null;
+  in_points: TimeseriesPoint[];
+  out_points: TimeseriesPoint[];
+}
+
+/**
+ * 축 3. CPU와 원천은 같은 CloudWatch지만 **호출이 갈려 있어 상태도 따로 온다** — 쿼리가
+ * 인스턴스당 2개 더 붙는 쪽이라 이 축만 한도에 걸리는 경우가 있다.
+ */
+export interface NetworkAxis {
+  status: AxisStatus;
+  period_seconds: number | null;
+  window_start: IsoDateTime | null;
+  window_end: IsoDateTime | null;
+  series: NetworkSeries[];
+  reason_code: string | null;
+}
+
+/** 축 2. `value` = 그 회차에 `THREAT` 판정을 받은 SG 수(default SG는 화이트리스트로 빠진다). */
+export interface SgExposureAxis {
+  status: AxisStatus;
+  points: TimeseriesPoint[];
+  reason_code: string | null;
+}
+
+export interface MetricsTimeseriesResponse {
+  generated_at: IsoDateTime;
+  cpu: CpuAxis;
+  network: NetworkAxis;
+  sg_exposure: SgExposureAxis;
+}

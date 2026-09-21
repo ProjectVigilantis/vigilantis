@@ -6,13 +6,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Collection, NamedTuple, Optional, Sequence
 
 from sqlalchemy import String, column, delete, func, select, true, update, values
 from sqlalchemy.orm import Session, aliased
 
-from schemas.api.assets import AssetType, RelationType
+from schemas.api.assets import AssetType, RelationType, Verdict
 from schemas.api.incidents import IncidentCategory
 from schemas.arns import arn_region
 from schemas.guardrails import GUARDRAIL_STEP_ORDER, GuardrailStep
@@ -502,6 +502,73 @@ def latest_rule_evaluation(
         )
         .limit(1)
     ).scalar_one_or_none()
+
+
+class SgExposureBucket(NamedTuple):
+    observed_at: datetime
+    open_count: int
+
+
+#: date_bin 의 기준점. 값 자체는 아무 고정 시각이어도 되지만 **호출마다 같아야** 한다 —
+#: 기준이 흔들리면 같은 회차가 조회 시점에 따라 다른 칸에 떨어져 곡선이 미묘하게 달라진다.
+_BUCKET_ORIGIN = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+def sg_exposure_history(
+    db: Session,
+    *,
+    regions: Sequence[str],
+    since: datetime,
+    bucket_seconds: int,
+) -> list[SgExposureBucket]:
+    """수집 회차별 '인터넷 개방 SG' 건수 이력 — 대시보드 시계열 축 2.
+
+    ``assets.spec`` 은 회차마다 덮어쓰므로 개방 여부의 **이력은 자산 행에 없다.**
+    판정은 (자산 × 회차) 단위로 보존되므로(``rule_evaluations``) 이력은 그쪽에서만 나온다.
+    센다 = 그 회차에 SG 가 ``THREAT`` 판정을 받은 건수. default SG 는 화이트리스트로
+    먼저 빠져(``SKIP_WHITELISTED``) 포함되지 않는다 — 삭제·변경 대상이 아니라서다.
+
+    **리전마다 회차가 따로 생기므로 시간 칸(``bucket_seconds``)으로 묶어 합산한다**(#231 의
+    리전 격리 이후 한 사이클에 CollectionRun 이 리전 수만큼 생긴다). 묶지 않으면 2리전
+    환경에서 곡선이 리전별 건수 사이를 오가는 톱니가 된다. 칸 크기는 스캔 주기를 쓴다 —
+    한 사이클의 리전 run 들은 수 초 안에 시작하므로 같은 칸에 떨어진다. 사이클이 칸 경계에
+    걸치면 그 한 사이클만 두 점으로 갈린다(1리전에서는 일어나지 않는다).
+
+    판정 행이 하나도 없는 회차는 점이 없다 — **0건과 '못 봤다'를 구분하기 위해서다.**
+    SG 를 봤지만 개방이 없던 회차는 판정 행이 있으므로 0 인 점이 선다.
+    """
+    if not regions:
+        return []
+
+    bucket = func.date_bin(
+        timedelta(seconds=bucket_seconds), models.CollectionRun.started_at, _BUCKET_ORIGIN
+    ).label("observed_at")
+    open_count = (
+        func.count(models.RuleEvaluation.rule_evaluation_id)
+        .filter(models.RuleEvaluation.verdict == Verdict.THREAT.value)
+        .label("open_count")
+    )
+
+    stmt = (
+        select(bucket, open_count)
+        .select_from(models.CollectionRun)
+        .join(
+            models.RuleEvaluation,
+            models.RuleEvaluation.collection_run_id == models.CollectionRun.collection_run_id,
+        )
+        .join(
+            models.Asset,
+            (models.Asset.asset_id == models.RuleEvaluation.asset_id)
+            & (models.Asset.asset_type == AssetType.SG),
+        )
+        .where(
+            models.CollectionRun.region.in_(regions),
+            models.CollectionRun.started_at >= since,
+        )
+        .group_by(bucket)
+        .order_by(bucket)
+    )
+    return [SgExposureBucket(row.observed_at, int(row.open_count)) for row in db.execute(stmt)]
 
 
 def latest_rule_evaluation_by_asset(db: Session) -> dict[str, models.RuleEvaluation]:

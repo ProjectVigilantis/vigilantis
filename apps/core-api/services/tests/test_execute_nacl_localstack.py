@@ -10,7 +10,7 @@
 받았는데 우리가 기대한 모양으로 남지 않는" 어긋남이 실제로 가능하다 — 조용히
 통과하면 게이트 시연에서 처음 발견된다.
 
-시드 자산을 쓰지 않고 **이 파일이 VPC·NACL을 직접 만들고 지운다.** 규칙 삽입은
+시드 자산을 쓰지 않고 **이 파일이 NACL을 직접 만들고 지운다**(기본 VPC 안에). 규칙 삽입은
 슬롯을 점유하는 조치라, 공용 자원에 남기면 다음 실행이 NetworkAclEntryAlreadyExists로
 깨진다(probe_dryrun.py가 파괴적 작업에 자기 자원을 쓰는 것과 같은 이유).
 
@@ -63,18 +63,33 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _default_vpc(ec2) -> str:
+    """기본 VPC. **여기에 전용 NACL 을 만든다 — VPC 를 새로 만들지 않는다.**
+
+    격리가 필요한 단위는 VPC 가 아니라 NACL 이다(위 모듈 주석: 규칙 삽입이 슬롯을 점유한다).
+    VPC 를 따로 만들면 그 대가만 따라온다 — **LocalStack 은 VPC 를 지울 때 그 VPC 의 기본
+    NACL 을 남긴다**(실 AWS 는 함께 없앤다). 남은 NACL 은 사라진 VPC 를 가리킨 채 describe 에
+    계속 잡혀 수집이 자산으로 적재하고, 화면의 "트래픽 경로 밖" 목록에 쌓인다. VPC 를 만드는
+    테스트 1건당 1개씩 늘어 스위트를 몇 번 돌리면 수십 개가 됐다.
+
+    기본 VPC 안의 **비default** NACL 은 만들고 지워도 잔해가 남지 않는다(2026-09-18 실측).
+    """
+    vpcs = ec2.describe_vpcs(Filters=[{"Name": "is-default", "Values": ["true"]}])["Vpcs"]
+    if not vpcs:
+        pytest.skip("기본 VPC 없음 — LocalStack 초기화 상태를 확인할 것")
+    return vpcs[0]["VpcId"]
+
+
 @pytest.fixture
 def nacl():
-    """빈 NACL 1개를 만들어 쓰고 VPC까지 지운다. (network_acl_id, target_arn) 짝."""
+    """빈 NACL 1개를 기본 VPC 에 만들어 쓰고 지운다. (network_acl_id, target_arn) 짝."""
     ec2 = aws_client("ec2")
-    vpc_id = ec2.create_vpc(CidrBlock="10.97.0.0/16")["Vpc"]["VpcId"]
-    acl_id = ec2.create_network_acl(VpcId=vpc_id)["NetworkAcl"]["NetworkAclId"]
+    acl_id = ec2.create_network_acl(VpcId=_default_vpc(ec2))["NetworkAcl"]["NetworkAclId"]
     arn = f"arn:aws:ec2:{default_region()}:{account_id()}:network-acl/{acl_id}"
     try:
         yield acl_id, arn
     finally:
         ec2.delete_network_acl(NetworkAclId=acl_id)
-        ec2.delete_vpc(VpcId=vpc_id)
 
 
 def _inbound_entry(acl_id: str, rule_number: int):

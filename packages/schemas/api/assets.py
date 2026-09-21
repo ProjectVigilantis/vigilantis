@@ -269,16 +269,53 @@ class AssetItem(BaseModel):
         return self
 
 
+class UncollectedAssetType(BaseModel):
+    """이번 회차에 **조회 자체를 못 한** 자산 유형 하나.
+
+    `items`에 그 유형이 0건인 것만으로는 "원래 없다"와 "못 가져왔다"가 구분되지 않는다.
+    화면은 그 둘에 서로 다른 것을 해야 한다 — 앞은 정상이고, 뒤는 조치가 필요하다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    asset_type: AssetType
+    #: AWS 오류 코드(`AccessDenied`·`InternalFailure`·`Throttling` 등) 또는 예외 클래스명.
+    #: 자유 문자열이다 — AWS가 코드를 늘려도 계약을 고치지 않게 enum으로 닫지 않는다.
+    #: 화면은 번역하지 말고 원문 그대로 보조 정보로 노출한다.
+    reason_code: str = Field(min_length=1)
+
+
 class AssetsResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     collection_status: CollectionStatus
     last_collected_at: Optional[UtcDateTime] = None
     items: list[AssetItem] = Field(default_factory=list)
+    #: 조회를 못 한 유형 목록. **비어 있다고 해서 전부 성공했다는 뜻은 아니다** — 서버가
+    #: 원인을 유형으로 환원하지 못하면(모르는 수집 실패 라벨) 지어내는 대신 비워 둔다.
+    #: 그 경우에도 `collection_status`는 PARTIAL·FAILED로 남아 이상을 알린다.
+    uncollected: list[UncollectedAssetType] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _enforce_contract(self):
         if self.collection_status == CollectionStatus.NOT_COLLECTED:
             if self.last_collected_at is not None or self.items:
                 raise ValueError("NOT_COLLECTED이면 last_collected_at과 items는 비어 있어야 합니다")
+            if self.uncollected:
+                raise ValueError("NOT_COLLECTED이면 uncollected도 비어 있어야 합니다")
+
+        # 한 유형이 두 번 나오면 화면이 같은 줄을 두 번 그린다. 리전이 여럿이면 같은 유형이
+        # 여러 리전에서 실패할 수 있으므로, 접는 책임은 서버에 있다(사유가 다르면 하나만 싣는다).
+        types = [u.asset_type for u in self.uncollected]
+        if len(types) != len(set(types)):
+            raise ValueError("uncollected의 asset_type은 중복될 수 없습니다")
+
+        # 조회를 못 한 유형이 있는데 READY면 화면이 "정상"이라 말하게 된다.
+        if self.uncollected and self.collection_status in (
+            CollectionStatus.READY,
+            CollectionStatus.COLLECTING,
+        ):
+            raise ValueError(
+                "uncollected가 있으면 collection_status는 PARTIAL·FAILED여야 합니다"
+            )
         return self

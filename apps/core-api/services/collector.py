@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+from typing import NamedTuple
 
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -60,10 +61,22 @@ _QUERY_BATCH = 100
 # 조회를 새로 더하고 이 지도를 안 고치면, 조용히 잘못 지우는 대신 조용히 안 지우는
 # 쪽으로 넘어지게 한다. (Issue #332 · PR #339 리뷰: 김세혁)
 
+# 리전 수집이 통째로 엎어진 회차의 라벨(_collect_region_failed). 특정 유형이 아니라 **전부**를
+# 못 본 것이라 유형으로 환원하지 않는다 — 그 회차는 collection_status 가 FAILED 로 나가고,
+# 화면은 유형별 안내가 아니라 전체 실패로 그려야 한다. 모르는 라벨과 구분하려고 이름을 남긴다.
+REGION_FAILURE_LABEL = "collect_region"
+
 
 def _failure_reason(exc: BaseException) -> str:
     """degrade 사유를 사람이 읽을 짧은 코드로. ClientError 는 AWS 오류 코드
-    (InternalFailure·AccessDenied·Throttling 등), 그 외는 예외 클래스명."""
+    (InternalFailure·AccessDenied·Throttling 등), 그 외는 예외 클래스명.
+
+    **자체 사유 코드를 지닌 예외는 그 코드를 그대로 쓴다** — get_metric_data 의 지표 단위
+    실패처럼 AWS 가 준 코드가 예외 타입이 아니라 응답 본문에 있는 경우가 있다
+    (services/metrics.MetricDataError). 클래스명으로 환원하면 그 코드가 사라진다."""
+    code = getattr(exc, "reason_code", None)
+    if isinstance(code, str) and code:
+        return code
     if isinstance(exc, ClientError):
         return exc.response.get("Error", {}).get("Code") or "ClientError"
     return type(exc).__name__
@@ -183,12 +196,47 @@ def _used_sg_ids(instances: list[dict], enis: list[dict]) -> set[str]:
     return used
 
 
-def _fetch_metrics(cw, instance_ids: list[str], start: datetime, end: datetime, period: int) -> dict[str, dict[MetricName, MetricSeries]]:
+class MetricFetch(NamedTuple):
+    """`_fetch_metrics` 의 결과 — 시계열과 **지표 단위 오류**를 함께 싣는다.
+
+    get_metric_data 는 쿼리 하나가 실패해도 호출 자체는 200 으로 돌아오고, 실패는
+    `MetricDataResult.StatusCode`(`Complete`·`PartialData`·`InternalError`·`Forbidden`)
+    에만 남는다. 그 상태를 버리면 실패한 지표가 **관측이 없는 지표와 같은 빈 시리즈**가 되어,
+    호출자는 실패를 정상 무관측으로 다루게 된다.
+
+    **판단은 호출자 몫이라 여기서는 사실만 싣는다** — 수집 경로는 부분 수집이 목적이라
+    degrade 하고(요약이 비면 rule_engine 이 데이터부족으로 Skip 한다), 차트 경로는
+    축을 UNAVAILABLE 로 내린다(services/metrics.MetricDataError).
+    """
+
+    series: dict[str, dict[MetricName, MetricSeries]]
+    #: (instance_id, metric) → `Complete` 가 아닌 **최종** StatusCode. 정상이면 비어 있다.
+    errors: dict[tuple[str, MetricName], str]
+
+
+def _fetch_metrics(
+    cw,
+    instance_ids: list[str],
+    start: datetime,
+    end: datetime,
+    period: int,
+    metrics: tuple[MetricName, ...] = _METRIC_NAMES,
+    stat: str = "Average",
+) -> MetricFetch:
     """인스턴스별 CPU/Network 시계열을 get_metric_data 로 배치 조회.
-    실 계정 비용 = 호출 수이므로 단건 반복 대신 배치 조회를 유지한다."""
+    실 계정 비용 = 호출 수이므로 단건 반복 대신 배치 조회를 유지한다.
+
+    ``metrics`` 로 받을 메트릭을 좁힐 수 있다 — 시계열 차트(services/metrics.py)는 CPU 만
+    필요해서 쿼리 수를 3분의 1로 줄인다. 기본값은 수집 경로가 쓰는 3종 그대로다.
+
+    ``stat`` 은 CloudWatch 통계다. 기본 ``Average`` 는 요약(`_summarize`)이 평균을 쓰기
+    때문이고, **기간 총량이 필요한 쪽은 ``Sum`` 을 준다**(네트워크 차트). NetworkIn/Out 의
+    표본값은 그 표본 구간에 오간 바이트라, period 안에 표본이 여럿이면 Average 는 표본
+    하나치가 되어 period 로 나눈 초당 값이 표본 수만큼 작아진다(1,000 B/s → 16.67 B/s).
+    """
     queries, ref = [], {}
     for idx, iid in enumerate(instance_ids):
-        for m in _METRIC_NAMES:
+        for m in metrics:
             qid = f"q{idx}_{m.name.lower()}"
             ref[qid] = (iid, m)
             queries.append(
@@ -201,13 +249,16 @@ def _fetch_metrics(cw, instance_ids: list[str], start: datetime, end: datetime, 
                             "Dimensions": [{"Name": "InstanceId", "Value": iid}],
                         },
                         "Period": period,
-                        "Stat": "Average",
+                        "Stat": stat,
                     },
                     "ReturnData": True,
                 }
             )
 
     out: dict[str, dict[MetricName, MetricSeries]] = {iid: {} for iid in instance_ids}
+    # 쿼리별 **마지막** 상태만 남긴다 — 페이지가 갈리면 중간 페이지는 PartialData 로 오고
+    # 마지막 페이지에서 Complete 가 된다. 상태를 싣지 않는 구현(일부 스텁)은 판단하지 않는다.
+    status_by_query: dict[str, str] = {}
     for i in range(0, len(queries), _QUERY_BATCH):
         batch = queries[i : i + _QUERY_BATCH]
         token = None
@@ -224,10 +275,20 @@ def _fetch_metrics(cw, instance_ids: list[str], start: datetime, end: datetime, 
                     out[iid][m] = series
                 series.timestamps.extend(r.get("Timestamps", []))
                 series.values.extend(r.get("Values", []))
+                status = r.get("StatusCode")
+                if status is not None:
+                    status_by_query[r["Id"]] = status
             token = res.get("NextToken")
             if not token:
                 break
-    return out
+
+    errors = {ref[qid]: code for qid, code in status_by_query.items() if code != "Complete"}
+    if errors:
+        _log.warning(
+            "CloudWatch 지표 조회 실패 %d건(전체 %d) — 상태 %s",
+            len(errors), len(queries), sorted(set(errors.values())),
+        )
+    return MetricFetch(series=out, errors=errors)
 
 
 def _summarize(series_by_metric: dict[MetricName, MetricSeries]) -> MetricSummary:
@@ -363,7 +424,10 @@ def collect_region(
             region, len(ids), fresh_window_end,
         )
     elif ids:
-        metrics = _fetch_metrics(cw, ids, start, end, cfg["period_seconds"])
+        # 지표 단위 실패(MetricFetch.errors)는 여기서 막지 않는다 — 수집은 부분 실패에도
+        # 나머지를 살리는 경로고, 빈 요약은 rule_engine 이 데이터부족으로 Skip 한다.
+        # 실패를 사용자에게 보이는 쪽은 차트 경로다(services/metrics.py).
+        metrics = _fetch_metrics(cw, ids, start, end, cfg["period_seconds"]).series
 
     ec2_assets: list[Ec2Asset] = []
     for i in instances_raw:
@@ -949,7 +1013,7 @@ def _record_failed_region(region: str, cfg: dict, exc: BaseException, session_fa
             status=CollectionRunStatus.FAILED,
             finished_at=datetime.now(timezone.utc),
             # error_summary 키 축을 PARTIAL(서비스 라벨)과 통일 — 실패 단계 라벨. 리전은 run.region 이 담는다.
-            error_summary=_failures_summary({"collect_region": _failure_reason(exc)}),
+            error_summary=_failures_summary({REGION_FAILURE_LABEL: _failure_reason(exc)}),
         )
         db.commit()
     except Exception:
