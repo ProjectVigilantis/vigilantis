@@ -46,48 +46,54 @@ export function TopologyPicker({
     <>
       {/* 인스턴스 — 폭을 고정한다. 240px은 `이름 + 판정 배지`가 한 줄에 서는 최소 폭이다(실측:
           가장 긴 시연 이름 + `최적화 후보` = 221px). 카드가 전폭이라 이만큼 줘도 그래프는
-          1300px 넘게 남는다 — 5열 정렬(768px)에 한참 여유가 있다. */}
-      <div className={cn(COLUMN, '@5xl/topology:w-60 shrink-0')}>
-        <p className="text-muted-foreground text-xs">
-          EC2 <span className="tabular-nums">{rows.length}</span>대
-        </p>
+          1300px 넘게 남는다 — 5열 정렬(768px)에 한참 여유가 있다.
 
-        {/* **목록만 스크롤한다.** 옆에 설 때는 칸 높이를 채우고(`flex-1`) 그 안에서만 넘친다 —
-            자산이 늘어도 카드가 자라지 않는다. 세로로 쌓인 배치에는 채울 높이가 없으므로
-            고정 상한(`max-h-60`)으로 같은 일을 한다. */}
-        <ul className="flex max-h-60 min-h-0 flex-col overflow-y-auto @5xl/topology:max-h-none @5xl/topology:flex-1">
-          {rows.map((row) => {
-            const selected = row.ec2.arn === selectedArn;
-            return (
-              <li key={row.ec2.arn}>
-                <button
-                  type="button"
-                  onClick={() => onSelect(row.ec2.arn)}
-                  aria-pressed={selected}
-                  title={row.ec2.resource_id}
-                  className={cn(
-                    // `min-h-8` — 배지가 붙은 줄만 4px 높아지면 짧은 목록에서 줄 간격이 들쭉날쭉해진다.
-                    'flex min-h-8 w-full min-w-0 items-center gap-1.5 rounded px-1.5 py-1 text-left',
-                    selected ? 'bg-muted' : 'hover:bg-muted/50',
-                  )}
-                >
-                  <span
+          **경로 밖 칸과 조건을 나눈다.** EC2가 0대면 고를 것이 없어 이 칸은 빠지지만, 그때도
+          미연결 EBS·미사용 SG는 남아 있어야 한다 — 그것까지 함께 숨기면 EC2가 없는 계정은
+          비용만 내는 자원을 홈에서 영영 못 본다. */}
+      {rows.length > 0 ? (
+        <div className={cn(COLUMN, '@5xl/topology:w-60 shrink-0')}>
+          <p className="text-muted-foreground text-xs">
+            EC2 <span className="tabular-nums">{rows.length}</span>대
+          </p>
+
+          {/* **목록만 스크롤한다.** 옆에 설 때는 칸 높이를 채우고(`flex-1`) 그 안에서만 넘친다 —
+              자산이 늘어도 카드가 자라지 않는다. 세로로 쌓인 배치에는 채울 높이가 없으므로
+              고정 상한(`max-h-60`)으로 같은 일을 한다. */}
+          <ul className="flex max-h-60 min-h-0 flex-col overflow-y-auto @5xl/topology:max-h-none @5xl/topology:flex-1">
+            {rows.map((row) => {
+              const selected = row.ec2.arn === selectedArn;
+              return (
+                <li key={row.ec2.arn}>
+                  <button
+                    type="button"
+                    onClick={() => onSelect(row.ec2.arn)}
+                    aria-pressed={selected}
+                    title={row.ec2.resource_id}
                     className={cn(
-                      'min-w-0 flex-1 truncate text-xs',
-                      selected ? 'font-medium' : 'text-muted-foreground',
+                      // `min-h-8` — 배지가 붙은 줄만 4px 높아지면 짧은 목록에서 줄 간격이 들쭉날쭉해진다.
+                      'flex min-h-8 w-full min-w-0 items-center gap-1.5 rounded px-1.5 py-1 text-left',
+                      selected ? 'bg-muted' : 'hover:bg-muted/50',
                     )}
                   >
-                    {row.ec2.name ?? row.ec2.resource_id}
-                  </span>
-                  {rowVerdicts(row).map((verdict) => (
-                    <StatusBadge key={verdict} field="verdict" value={verdict} className={BADGE} />
-                  ))}
-                </button>
-              </li>
-            );
-          })}
-        </ul>
-      </div>
+                    <span
+                      className={cn(
+                        'min-w-0 flex-1 truncate text-xs',
+                        selected ? 'font-medium' : 'text-muted-foreground',
+                      )}
+                    >
+                      {row.ec2.name ?? row.ec2.resource_id}
+                    </span>
+                    {rowVerdicts(row).map((verdict) => (
+                      <StatusBadge key={verdict} field="verdict" value={verdict} className={BADGE} />
+                    ))}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      ) : null}
 
       {/* 경로 밖 — 자산 화면은 같은 목록을 가로 한 줄(`유형 │ 건수 │ 이름들`)로 그리지만, 이 칸은
           224px뿐이라 그 형식으로는 이름 시작점도 못 잡는다. 유형 머리줄 아래 이름을 세로로 쌓는다.

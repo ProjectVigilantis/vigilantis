@@ -72,15 +72,16 @@ export function DashboardTopology({
           />
         </div>
 
-        {rows.length > 0 ? (
-          <TopologyPicker
-            rows={rows}
-            orphans={topology.orphans}
-            selectedArn={selectedArn}
-            onSelect={setPicked}
-            onOpen={open}
-          />
-        ) : null}
+        {/* **EC2 유무로 묶지 않는다.** 경로 밖 자원(미연결 EBS·미사용 SG)은 EC2가 한 대도
+            없어도 관제 대상이고, 오히려 그때가 전부 비용만 내는 상태다. 두 칸은 각자
+            비어 있을 때만 사라진다 — 칸을 고르는 조건은 `TopologyPicker` 안에 있다. */}
+        <TopologyPicker
+          rows={rows}
+          orphans={topology.orphans}
+          selectedArn={selectedArn}
+          onSelect={setPicked}
+          onOpen={open}
+        />
       </div>
     </div>
   );
