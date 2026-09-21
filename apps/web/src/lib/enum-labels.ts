@@ -60,6 +60,13 @@ export const ASSET_TYPE_LABELS: LabelMap<AssetType> = {
   ALB_TARGET_GROUP: { label: '대상 그룹', tone: 'neutral' },
 };
 
+/**
+ * 유형을 나열할 때의 순서. **사전 하나에서 파생시킨다** — 목록마다 배열을 따로 적으면
+ * 유형이 늘 때 한쪽만 고쳐져 화면마다 순서가 달라진다(§8: 매핑을 화면마다 복제하지 않는다).
+ * 선언 순서가 곧 관제 중요도 순이다(EC2가 척추이고, 부속이 뒤따른다).
+ */
+export const ASSET_TYPE_ORDER = Object.keys(ASSET_TYPE_LABELS) as AssetType[];
+
 export const RESOURCE_ROLE_LABELS: LabelMap<ResourceRole> = {
   PRIMARY: null, // 주요 관제 자산 — 배지 미표시
   RUNBOOK_SUPPORT: { label: '지원 자산', tone: 'gray' },

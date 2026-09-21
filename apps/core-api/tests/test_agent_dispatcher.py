@@ -1143,10 +1143,16 @@ def test_secops_ssh_reaches_approval_through_localstack_guardrail(db, client_pg,
 
     ec2 = aws_client("ec2", REGION)
     account = account_id(REGION)
-    vpc_id = ec2.create_vpc(CidrBlock="10.233.0.0/16")["Vpc"]["VpcId"]
+    # **기본 VPC 안에 전용 NACL 만 만든다 — VPC 를 새로 만들지 않는다.** 격리가 필요한 단위는
+    # NACL 이고, VPC 를 만들면 대가만 따라온다: LocalStack 은 VPC 를 지울 때 그 VPC 의 기본
+    # NACL 을 남겨(실 AWS 는 함께 없앤다) 사라진 VPC 를 가리키는 자산이 수집에 쌓인다.
+    # (services/tests/test_execute_nacl_localstack.py `_default_vpc` 주석)
+    vpcs = ec2.describe_vpcs(Filters=[{"Name": "is-default", "Values": ["true"]}])["Vpcs"]
+    if not vpcs:
+        pytest.skip("기본 VPC 없음 — LocalStack 초기화 상태를 확인할 것")
     nacl_id = None
     try:
-        nacl_id = ec2.create_network_acl(VpcId=vpc_id)["NetworkAcl"]["NetworkAclId"]
+        nacl_id = ec2.create_network_acl(VpcId=vpcs[0]["VpcId"])["NetworkAcl"]["NetworkAclId"]
         module = sys.modules[__name__]
         monkeypatch.setattr(module, "ACCOUNT", account)
         monkeypatch.setattr(module, "EC2_ARN", f"arn:aws:ec2:{REGION}:{account}:instance/{INSTANCE_ID}")
@@ -1167,7 +1173,6 @@ def test_secops_ssh_reaches_approval_through_localstack_guardrail(db, client_pg,
     finally:
         if nacl_id:
             ec2.delete_network_acl(NetworkAclId=nacl_id)
-        ec2.delete_vpc(VpcId=vpc_id)
 
 
 def test_incident_claimed_by_another_scanner_is_skipped(db, monkeypatch):

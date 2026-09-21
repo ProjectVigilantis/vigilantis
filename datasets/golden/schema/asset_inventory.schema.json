@@ -555,7 +555,7 @@
           "type": "array"
         },
         "values": {
-          "description": "관측값(period 별 Average)",
+          "description": "관측값(period 별 집계 — 조회 시 준 Stat 에 따른다. 수집 경로는 Average, 네트워크 차트는 Sum)",
           "items": {
             "type": "number"
           },

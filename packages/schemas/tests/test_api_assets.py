@@ -154,3 +154,44 @@ def test_assets_response_states():
             "last_collected_at": "2026-08-12T09:00:00Z",
             "items": [],
         })
+
+
+def test_uncollected_contract():
+    """조회를 못 한 유형 목록의 불변식 3종."""
+    ok = AssetsResponse.model_validate({
+        "collection_status": "PARTIAL",
+        "last_collected_at": "2026-08-12T09:00:00Z",
+        "items": [],
+        "uncollected": [{"asset_type": "ALB_TARGET_GROUP", "reason_code": "InternalFailure"}],
+    })
+    assert ok.uncollected[0].reason_code == "InternalFailure"
+
+    # 필드를 안 주면 빈 목록 — 기존 클라이언트·테스트가 그대로 통과해야 한다
+    assert AssetsResponse.model_validate({"collection_status": "READY", "items": []}).uncollected == []
+
+    # ① 못 가져온 유형이 있는데 READY 면 화면이 "정상"이라 말하게 된다
+    with pytest.raises(ValidationError):
+        AssetsResponse.model_validate({
+            "collection_status": "READY",
+            "items": [],
+            "uncollected": [{"asset_type": "EC2", "reason_code": "AccessDenied"}],
+        })
+
+    # ② 유형 중복 — 화면이 같은 줄을 두 번 그린다. 접는 책임은 서버에 있다
+    with pytest.raises(ValidationError):
+        AssetsResponse.model_validate({
+            "collection_status": "PARTIAL",
+            "items": [],
+            "uncollected": [
+                {"asset_type": "EC2", "reason_code": "AccessDenied"},
+                {"asset_type": "EC2", "reason_code": "Throttling"},
+            ],
+        })
+
+    # ③ NOT_COLLECTED 는 아무것도 시도하지 않은 상태다
+    with pytest.raises(ValidationError):
+        AssetsResponse.model_validate({
+            "collection_status": "NOT_COLLECTED",
+            "items": [],
+            "uncollected": [{"asset_type": "EC2", "reason_code": "AccessDenied"}],
+        })

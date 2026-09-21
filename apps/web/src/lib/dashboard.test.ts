@@ -154,6 +154,26 @@ test('인벤토리는 0건 유형까지 7종 전부 낸다', () => {
   assert.equal(inv.find((r) => r.type === 'ALB_TARGET_GROUP')?.count, 0);
 });
 
+// AST-001 지표 띠가 "목록에 서는 유형"과 "토폴로지 전용"을 가르는 근거다 — count는 같아도
+// judged가 0이면 그 유형은 명함 카드가 없다. 두 값이 한 행에서 갈리는 것을 고정한다.
+test('인벤토리는 수집 전량(count)과 목록 대상 수(judged)를 따로 센다', () => {
+  const inv = inventoryCounts([ec2('a', 1), sg('s', []), nacl('n1'), nacl('n2')]);
+
+  const ec2Row = inv.find((r) => r.type === 'EC2');
+  assert.equal(ec2Row?.count, 1);
+  assert.equal(ec2Row?.judged, 1);
+
+  // NACL은 NOT_APPLICABLE이라 수집은 됐지만 목록 대상이 아니다
+  const naclRow = inv.find((r) => r.type === 'NACL');
+  assert.equal(naclRow?.count, 2);
+  assert.equal(naclRow?.judged, 0);
+
+  // 수집이 0건인 유형은 둘 다 0 — 토폴로지 전용과 구분되는 자리다
+  const tgRow = inv.find((r) => r.type === 'ALB_TARGET_GROUP');
+  assert.equal(tgRow?.count, 0);
+  assert.equal(tgRow?.judged, 0);
+});
+
 test('미조치는 분석·승인 대기·조치 중 3종이고, 인시던트 조회 실패는 0이 아니라 null이다', () => {
   const statuses: IncidentStatus[] = [
     'ANALYZING',
@@ -255,4 +275,24 @@ test('1순위 상세가 있으면 그 건과 나머지 대기를 낸다', () => 
   if (view.kind !== 'READY') return;
   assert.equal(view.top.incident_id, queue[0].incident_id);
   assert.deepEqual(view.next.map((i) => i.incident_id), [queue[1].incident_id]);
+});
+
+test('조회를 못 한 유형은 0건이 아니라 사유를 달고 나온다 — "없다"와 "모른다"를 가른다', () => {
+  const inv = inventoryCounts([ec2('a', 1)], [
+    { asset_type: 'ALB_TARGET_GROUP', reason_code: 'InternalFailure' },
+  ]);
+
+  const tg = inv.find((r) => r.type === 'ALB_TARGET_GROUP');
+  assert.equal(tg?.count, 0);
+  assert.equal(tg?.uncollectedReason, 'InternalFailure');
+
+  // 수집된 유형은 그대로 0건/실건수로 남는다 — 사유가 번지면 안 된다
+  assert.equal(inv.find((r) => r.type === 'EC2')?.uncollectedReason, null);
+  assert.equal(inv.find((r) => r.type === 'SG')?.uncollectedReason, null);
+  assert.equal(inv.find((r) => r.type === 'SG')?.count, 0);
+});
+
+test('uncollected를 안 넘기면 전부 정상 0건으로 본다', () => {
+  const inv = inventoryCounts([ec2('a', 1)]);
+  assert.ok(inv.every((r) => r.uncollectedReason === null));
 });

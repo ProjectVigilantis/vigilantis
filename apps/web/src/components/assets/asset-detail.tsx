@@ -6,6 +6,7 @@ import Link from 'next/link';
 
 import { CopyButton } from '@/components/copy-button';
 import { HealthArea, VerdictArea } from '@/components/assets/asset-card';
+import { CpuSparkline, NetworkSparkline } from '@/components/charts/sparkline';
 import { Row } from '@/components/detail-row';
 import { EnumBadge, StatusBadge } from '@/components/status-badge';
 import { Separator } from '@/components/ui/separator';
@@ -23,8 +24,15 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet';
+import { IDLE_CPU_AVG } from '@/lib/dashboard';
+import { cpuPointsFor, networkRowsFor } from '@/lib/metrics-chart';
 import { formatKst } from '@/lib/utils';
-import type { AssetItem, IncidentListItem, OpenPortRule } from '@/types/api';
+import type {
+  AssetItem,
+  IncidentListItem,
+  MetricsTimeseriesResponse,
+  OpenPortRule,
+} from '@/types/api';
 
 /** `from_port`·`to_port`가 null이면 포트 지정 없이 전부 열린 규칙이다(계약: nullable). */
 function portRuleText(rule: OpenPortRule): string {
@@ -83,6 +91,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 export function AssetDetail({
   asset,
   incidents,
+  metrics,
   open,
   onOpenChange,
 }: {
@@ -94,10 +103,20 @@ export function AssetDetail({
   asset: AssetItem | null;
   /** 목록 API의 `subject_arn` 역조인 결과(§3.3). `null`은 조회 실패 — 0건과 구분한다. */
   incidents: IncidentListItem[] | null;
+  /**
+   * CloudWatch 시계열 3축(`GET /api/v1/metrics/timeseries`). **이 패널도 신규 페치를 하지
+   * 않는다**(§4.3) — 화면이 이미 받아 둔 응답에서 이 자산의 줄만 골라 그린다.
+   * `null`이면 조회 실패이고, 그때는 스파크라인 자리에 그 사실을 적는다.
+   */
+  metrics: MetricsTimeseriesResponse | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
   const state = asset ? assetStateEntry(asset) : null;
+  // 메트릭은 EC2 전용이다 — 계약상 SG·EBS 에는 이 곡선이 없다(있는 척하면 빈 차트가 결측처럼 읽힌다).
+  const showCharts = asset !== null && asset.asset_type === 'EC2';
+  const cpuPoints = showCharts && metrics ? cpuPointsFor(metrics.cpu, asset.arn) : null;
+  const networkRows = showCharts && metrics ? networkRowsFor(metrics.network, asset.arn) : null;
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -139,6 +158,35 @@ export function AssetDetail({
               </Row>
               <Row label="수집">{formatKst(asset.collected_at)}</Row>
             </div>
+
+            {/* CloudWatch 추이 — EC2 에만 있는 값이라 그 유형에서만 그린다.
+                판정(위) 바로 아래에 두는 이유: "저활성"이라는 판정을 그 근거인 곡선과 한
+                화면에서 대조해야 다운사이징 승인을 판단할 수 있다. */}
+            {showCharts ? (
+              <>
+                <Separator />
+                <div className="flex flex-col gap-4 p-4">
+                  <Section title={`CPU 추이 (저활성 임계 ${metrics?.cpu.idle_cpu_avg_threshold ?? IDLE_CPU_AVG}% 파선)`}>
+                    {metrics === null ? (
+                      <p className="text-muted-foreground text-xs">
+                        추이를 불러오지 못했습니다. 새로고침하면 다시 조회합니다.
+                      </p>
+                    ) : (
+                      <CpuSparkline points={cpuPoints} threshold={metrics.cpu.idle_cpu_avg_threshold} />
+                    )}
+                  </Section>
+                  <Section title="네트워크 추이 (수신·송신, 초당)">
+                    {metrics === null ? (
+                      <p className="text-muted-foreground text-xs">
+                        추이를 불러오지 못했습니다. 새로고침하면 다시 조회합니다.
+                      </p>
+                    ) : (
+                      <NetworkSparkline rows={networkRows} />
+                    )}
+                  </Section>
+                </div>
+              </>
+            ) : null}
 
             {/* NOT_APPLICABLE(NACL·ASG·LT·TG)은 Rule 판정 블록 전체를 숨긴다(§4.3 예외).
                 판정 사유 코드는 계약에 필드가 없어 verdict 배지만 표시한다(9장 #6). */}

@@ -38,7 +38,11 @@ class MetricSeries(BaseModel):
     """단일 메트릭의 시계열. timestamps[i] 와 values[i] 가 짝을 이룬다."""
     metric_name: MetricName = Field(..., description="CloudWatch 메트릭 이름")
     timestamps: list[datetime] = Field(default_factory=list, description="정렬된 관측 시각(UTC)")
-    values: list[float] = Field(default_factory=list, description="관측값(period 별 Average)")
+    values: list[float] = Field(
+        default_factory=list,
+        description="관측값(period 별 집계 — 조회 시 준 Stat 에 따른다. 수집 경로는 Average, "
+                    "네트워크 차트는 Sum)",
+    )
 
 
 class MetricSummary(BaseModel):

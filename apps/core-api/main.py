@@ -47,6 +47,7 @@ from realtime import RealtimeManager  # noqa: E402
 from routers import actions as actions_router  # noqa: E402
 from routers import assets as assets_router  # noqa: E402
 from routers import incidents as incidents_router  # noqa: E402
+from routers import metrics as metrics_router  # noqa: E402
 from routers import ws as ws_router  # noqa: E402
 from services.scheduler import start_scheduler as start_scan_scheduler  # noqa: E402
 
@@ -154,6 +155,7 @@ def create_app() -> FastAPI:
     app.include_router(actions_router.router)
     app.include_router(assets_router.router)
     app.include_router(incidents_router.router)
+    app.include_router(metrics_router.router)
     app.include_router(ws_router.router)
 
     @app.get("/health")

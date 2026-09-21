@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -410,3 +411,99 @@ def test_worst_status_picks_the_worst(statuses, expected):
     from routers.assets import _worst_status
 
     assert _worst_status([_Run(s) for s in statuses]) == expected
+
+
+# --- uncollected: "원래 없다"와 "못 가져왔다"를 가른다 --------------------------
+#
+# 화면은 그 둘에 서로 다른 것을 해야 한다 — 앞은 정상이고 뒤는 조치 대상이다.
+# items 의 유형별 0건만으로는 구분이 서지 않아 봉투가 따로 싣는다.
+
+
+class _RunStub:
+    """_uncollected 는 error_summary·region 만 읽는다 — DB 없이 그 둘만 준다."""
+
+    def __init__(self, error_summary, region="ap-northeast-2"):
+        self.error_summary = error_summary
+        self.region = region
+
+
+def test_uncollected_maps_collector_labels_to_asset_types():
+    from routers.assets import _uncollected
+
+    got = _uncollected([
+        _RunStub('{"alb_target_groups":"InternalFailure","auto_scaling_groups":"AccessDenied"}')
+    ])
+
+    assert [(u.asset_type.value, u.reason_code) for u in got] == [
+        # AssetType 선언 순서로 고정 — 회차마다 뒤바뀌면 화면이 깜빡인다
+        ("AUTO_SCALING_GROUP", "AccessDenied"),
+        ("ALB_TARGET_GROUP", "InternalFailure"),
+    ]
+
+
+def test_uncollected_is_empty_without_failures():
+    from routers.assets import _uncollected
+
+    assert _uncollected([_RunStub(None), _RunStub("")]) == []
+
+
+def test_uncollected_skips_region_wide_failure():
+    """리전 전체 실패는 유형으로 펴지 않는다 — 전부를 못 본 것이고 status 가 FAILED 로 말한다.
+    유형 몇 개를 나열하면 화면이 '이것들만 문제'라고 잘못 말하게 된다."""
+    from routers.assets import _uncollected
+
+    assert _uncollected([_RunStub('{"collect_region":"EndpointConnectionError"}')]) == []
+
+
+def test_uncollected_ignores_unknown_label_instead_of_guessing(caplog):
+    """모르는 라벨이면 유형을 지어내지 않는다(fail-closed). 흡수 조회를 새로 더하고
+    UNOBSERVED_TYPES_BY_FAILURE 를 안 고친 경우이며, 경고로 드러낸다."""
+    from routers.assets import _uncollected
+
+    with caplog.at_level(logging.WARNING):
+        assert _uncollected([_RunStub('{"brand_new_collector":"AccessDenied"}')]) == []
+    assert "brand_new_collector" in caplog.text
+
+
+def test_uncollected_survives_unparsable_error_summary(caplog):
+    from routers.assets import _uncollected
+
+    with caplog.at_level(logging.WARNING):
+        assert _uncollected([_RunStub("not json at all")]) == []
+    assert "JSON" in caplog.text
+
+
+def test_uncollected_folds_same_type_across_regions():
+    """리전이 여럿이면 같은 유형이 여러 번 실패한다. 계약이 유형 중복을 금지하므로 서버가 접는다."""
+    from routers.assets import _uncollected
+
+    got = _uncollected([
+        _RunStub('{"alb_target_groups":"InternalFailure"}', region="ap-northeast-2"),
+        _RunStub('{"alb_target_groups":"AccessDenied"}', region=US_EAST),
+    ])
+
+    assert len(got) == 1
+    assert got[0].asset_type.value == "ALB_TARGET_GROUP"
+
+
+def test_partial_run_surfaces_uncollected_in_response(client_pg, db, set_regions):
+    """엔드투엔드: PARTIAL 회차의 error_summary 가 봉투의 uncollected 로 나온다."""
+    set_regions(SEOUL)
+    run = assets_repo.start_collection_run(
+        db, account_id=ACCOUNT, region=SEOUL, mode="localstack", lookback_days=3, period_seconds=3600
+    )
+    assets_repo.finish_collection_run(
+        db,
+        collection_run_id=run.collection_run_id,
+        status=CollectionRunStatus.PARTIAL,
+        finished_at=NOW,
+        error_summary='{"alb_target_groups":"InternalFailure"}',
+    )
+    db.commit()
+
+    body = client_pg.get("/api/v1/assets").json()
+
+    assert body["collection_status"] == "PARTIAL"
+    assert body["uncollected"] == [
+        {"asset_type": "ALB_TARGET_GROUP", "reason_code": "InternalFailure"}
+    ]

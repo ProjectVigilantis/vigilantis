@@ -44,7 +44,9 @@ const TONE_CLASS: Record<LabelTone, string> = {
   neutral: 'bg-muted text-foreground',
   gray: 'bg-muted text-muted-foreground',
   yellow: 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300',
-  orange: 'bg-orange-100 text-orange-800 dark:bg-orange-950 dark:text-orange-300',
+  // 낭비 후보 계열. **위협 빨강과 겹치지 않게 노랑 쪽으로 둔다** — 주황(orange-300)은 다크에서
+  // `--danger`와 ΔE 19였고 배지처럼 작은 면적에서는 같은 색으로 읽혔다. amber-400은 ΔE 23이다.
+  orange: 'bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-400',
   red: 'bg-danger/15 text-danger',
   blue: 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300',
   green: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300',
@@ -60,7 +62,7 @@ const TONE_CLASS: Record<LabelTone, string> = {
  */
 export const RISK_BAND_CLASS: Record<RiskLevel, string> = {
   HIGH: 'bg-danger',
-  MEDIUM: 'bg-orange-500',
+  MEDIUM: 'bg-amber-500',
   LOW: 'bg-amber-400',
 };
 

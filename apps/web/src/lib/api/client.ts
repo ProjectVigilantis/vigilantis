@@ -10,6 +10,7 @@ import type {
   IncidentResponse,
   IncidentStatus,
   IncidentsResponse,
+  MetricsTimeseriesResponse,
   ResolutionJudgement,
 } from '@/types/api';
 
@@ -95,6 +96,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function getAssets(): Promise<AssetsResponse> {
   return request<AssetsResponse>('/assets');
+}
+
+/**
+ * 대시보드 시계열 2축(DSH). `hours`는 조회 창이며 서버가 1–336으로 막는다 —
+ * 계약 밖 값은 422다. 기본 72는 시드가 넣는 CPU 관측 구간과 같다.
+ */
+export function getMetricsTimeseries(hours?: number): Promise<MetricsTimeseriesResponse> {
+  const suffix = hours === undefined ? '' : `?hours=${hours}`;
+  return request<MetricsTimeseriesResponse>(`/metrics/timeseries${suffix}`);
 }
 
 export function getIncidents(filter?: {
