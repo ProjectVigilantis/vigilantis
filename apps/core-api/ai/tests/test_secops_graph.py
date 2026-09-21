@@ -59,28 +59,41 @@ def proposal(**over):
 def test_secops_three_calls_and_typed_output():
     data = graph_input()
     before = data.model_dump(mode="json")
-    client = FakeAIModelClient([SUMMARY, RISK, CandidateProposalOutput(candidates=[proposal()])])
+    # 서버 초기 판정과 다른 AI 재평가를 넣어 요약 표기의 원천을 대조한다.
+    reviewed = RiskReassessmentOutput(reviewed_risk_level=RiskLevel.MEDIUM)
+    client = FakeAIModelClient([reviewed, CandidateProposalOutput(candidates=[proposal()]), SUMMARY])
     output = run_secops_graph(data, client=client)
     assert output.invocation_status is AgentInvocationStatus.SUCCEEDED
-    assert output.reviewed_risk_level is RiskLevel.HIGH
+    assert output.reviewed_risk_level is RiskLevel.MEDIUM
     assert output.candidates[0].target_arn == NACL
     assert len(client.sent) == 3
     assert data.model_dump(mode="json") == before
     assert client.sent[0]["user_payload"]["isolation_execution"] is None
-    assert client.sent[2]["user_payload"]["reviewed_risk_level"] == "HIGH"
+    assert "reviewed_risk_level" not in client.sent[0]["user_payload"]
+    assert "reviewed_risk_label" not in client.sent[0]["user_payload"]
+    assert "reviewed_risk_label" not in client.sent[1]["user_payload"]
+    assert client.sent[1]["user_payload"]["reviewed_risk_level"] == "MEDIUM"
+    assert client.sent[2]["user_payload"]["reviewed_risk_level"] == "MEDIUM"
+    assert client.sent[2]["user_payload"]["reviewed_risk_label"] == "중간"
+    assert client.sent[2]["user_payload"]["initial_risk"]["initial_risk_level"] == "HIGH"
+    assert client.sent[2]["user_payload"]["candidates"] == [
+        output.candidates[0].model_dump(mode="json")
+    ]
 
 
 def test_secops_no_proposal_keeps_summary_and_reviewed_risk():
-    client = FakeAIModelClient([SUMMARY, RISK, CandidateProposalOutput(candidates=[])])
+    client = FakeAIModelClient([RISK, CandidateProposalOutput(candidates=[]), SUMMARY])
     output = run_secops_graph(graph_input(), client=client)
     assert output.invocation_status is AgentInvocationStatus.NO_PROPOSAL
     assert len(output.summary_lines) == 3
     assert output.reviewed_risk_level is RiskLevel.HIGH
+    assert client.sent[2]["user_payload"]["candidates"] == []
+    assert client.sent[2]["user_payload"]["reviewed_risk_label"] == "높음"
 
 
 @pytest.mark.parametrize("completed", [0, 1, 2])
 def test_node_failure_stops_later_model_calls(completed):
-    client = FakeAIModelClient([SUMMARY, RISK][:completed])
+    client = FakeAIModelClient([RISK, CandidateProposalOutput(candidates=[])][:completed])
     output = run_secops_graph(graph_input(), client=client)
     assert output.invocation_status is AgentInvocationStatus.FAILED
     assert output.summary_lines == [] and output.candidates == []
@@ -96,8 +109,9 @@ def test_node_failure_stops_later_model_calls(completed):
     {"evidence_ids": []},
 ])
 def test_invalid_proposal_fails_whole_graph(over):
-    client = FakeAIModelClient([SUMMARY, RISK, CandidateProposalOutput(candidates=[proposal(**over)])])
+    client = FakeAIModelClient([RISK, CandidateProposalOutput(candidates=[proposal(**over)]), SUMMARY])
     assert run_secops_graph(graph_input(), client=client).invocation_status is AgentInvocationStatus.FAILED
+    assert len(client.sent) == 2  # 잘못된 후보는 요약 생성 전에 그래프를 중단시킨다.
 
 
 def test_capability_menu_requires_ssh_and_direct_nacl_relation():

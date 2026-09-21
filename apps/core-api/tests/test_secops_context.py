@@ -1,4 +1,4 @@
-"""MVP mock evidence → PostgreSQL → saved graph input. No live model or AWS calls."""
+"""MVP 모의 근거 → PostgreSQL → 저장된 그래프 입력을 검증한다. 실제 모델·AWS 호출은 없다."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from agent_dispatcher import _GraphInputUnavailable, build_graph_input
+from agent_dispatcher import GraphInputUnavailable, build_graph_input
 from ai.agent import (
     CandidateProposalOutput,
     EvidenceSummaryOutput,
@@ -85,7 +85,7 @@ def test_secops_context_inbox_freezes_logs_inventory_and_actual_model_payload(db
     payload = _secops_payload(before)
     assert payload["asset_context_at"] == "incident_intake"
     assert "target" not in payload["evidences"][0]["content"]["context"]
-    assert evidence.context.target is not None  # Projection did not mutate saved/typed evidence.
+    assert evidence.context.target is not None  # 모델 입력 투영이 저장된 근거 객체를 바꾸지 않았다.
 
     row = assets_repo.get_asset_by_arn(db, TARGET)
     row.spec = {"instance_type": "t3.large"}
@@ -99,9 +99,9 @@ def test_secops_context_inbox_freezes_logs_inventory_and_actual_model_payload(db
     assert saved(db, incident_id) == evidence
 
     client = FakeAIModelClient([
-        EvidenceSummaryOutput(observation="합성 fixture 관측", diagnosis="SSH 실패 집계", rationale="평가용"),
         RiskReassessmentOutput(reviewed_risk_level=RiskLevel.HIGH),
         CandidateProposalOutput(candidates=[]),
+        EvidenceSummaryOutput(observation="합성 fixture 관측", diagnosis="SSH 실패 집계", rationale="평가용"),
     ])
     run_secops_graph(build_graph_input(db, incident_id), client=client)
     assert len(client.sent) == 3
@@ -121,7 +121,7 @@ def test_secops_context_missing_target_is_not_backfilled_on_later_collection(db,
     assert evidence.context.target_status == "not_collected"
     assert evidence.context.target is None and evidence.context.log_evidence is not None
     seed(db)
-    with pytest.raises(_GraphInputUnavailable, match="not_collected"):
+    with pytest.raises(GraphInputUnavailable, match="not_collected"):
         build_graph_input(db, outcome.incident_id)
     assert saved(db, outcome.incident_id) == evidence
     assert client_pg.get(f"/api/v1/incidents/{outcome.incident_id}").json()["initial_risk_level"] == "HIGH"
@@ -136,7 +136,7 @@ def test_secops_context_legacy_evidence_is_readable_but_not_rebuilt_from_latest_
     db.commit()
     assert saved(db, result.incident_id).context is None
     assert client_pg.get(f"/api/v1/incidents/{result.incident_id}").status_code == 200
-    with pytest.raises(_GraphInputUnavailable, match="기존 Incident"):
+    with pytest.raises(GraphInputUnavailable, match="기존 Incident"):
         build_graph_input(db, result.incident_id)
 
 
@@ -164,7 +164,7 @@ def test_secops_context_invalid_related_observations_are_recorded_not_offered(db
     assert context.target_status == "available"
     assert [r.asset.arn for r in context.related_assets] == [SG]
     assert [(r.target_arn, r.reason) for r in context.relation_issues] == [(NACL, problem)]
-    with pytest.raises(_GraphInputUnavailable, match="조치"):
+    with pytest.raises(GraphInputUnavailable, match="조치"):
         build_graph_input(db, result.incident_id)
     assert incidents_repo.get_incident(db, result.incident_id).initial_risk_level is RiskLevel.HIGH
 

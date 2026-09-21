@@ -1,0 +1,2212 @@
+{
+  "cases": [
+    {
+      "case_id": "C01",
+      "title": "SSH 실패 120회 / 300초 · HIGH",
+      "provenance": {
+        "threat_source": "datasets/golden/secops/input/evt_ssh_bruteforce_001.json",
+        "threat_sha256": "b6a4b6a5141c8e36343d30d23c18754c4c84a4ef31b348ff689bb8e072f3443f",
+        "risk_source": "datasets/golden/secops/expected/evt_ssh_bruteforce_001.json",
+        "risk_sha256": "7acc190409fda0312a6b40ab62a271f57c1576e8415f69ad8bdb858db9bf47f0",
+        "asset_source": "datasets/golden/finops/input/asset_inventory_001.json",
+        "asset_sha256": "377d4a95c5f4a786a3faf04493d8f66ea1bc32899071486da127142c081b8bfa",
+        "synthetic_nacl_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001",
+        "synthesis": [
+          "EC2 fields originate from the stated Golden inventory; direct SG/NACL and their snapshots are explicit synthetic prerequisites in inventory.json.",
+          "UUIDs, collection run, event collection (+1 second), and evidence capture (+5 seconds) are fixed evaluation identities/times, not recorded live collection.",
+          "Logs come from the #350 corpus with its full aggregate and at most 12 deterministic excerpt rows. No time shift or target remapping is used."
+        ],
+        "reachability": "모의 위협으로 공급한 뒤의 서비스 접수·조립 경로. 수집기가 이런 관측을 위협으로 탐지하거나 Incident로 올려야 한다는 증거가 아니다.",
+        "log_manifest_source": "datasets/secops-log-corpus/cases/C01/manifest.json",
+        "log_manifest_sha256": "487591d9e6ba91597b1dcf69ca4e205419379729c3509f9d05b4ce731b6951be",
+        "log_expected_source": "datasets/secops-log-corpus/cases/C01/expected.json",
+        "log_expected_sha256": "6949f1fb380e3eeeb12e8f9bbe91bc543c4cc264acb7722d65d38c9bab4692f4",
+        "log_records_source": "datasets/secops-log-corpus/cases/C01/logs.jsonl",
+        "log_records_sha256": "2c3b65c39e096247799f0195c3436be80466b9ea7afd7597bd88d071d511310c",
+        "context_source": "apps/core-api/ai/evaluation/secops/inventory.json",
+        "context_sha256": "721e48bfd52bc740356f79a14360a42861606c686482ed9522e0f9fde0a489e4"
+      },
+      "graph_input": {
+        "domain": "SECOPS",
+        "incident_id": "a994056a-2958-5800-93ac-6848fa58a56c",
+        "asset_context": {
+          "arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00001",
+          "resource_id": "i-0a1b2c3d4e5f00001",
+          "asset_type": "EC2",
+          "resource_role": "PRIMARY",
+          "name": "golden-ec2-idle-boundary",
+          "account_id": "123456789012",
+          "region": "ap-northeast-2",
+          "state": "running",
+          "spec": {
+            "instance_type": "t3.xlarge",
+            "availability_zone": "ap-northeast-2a",
+            "vpc_id": "vpc-0a1b2c3d4e5f0f001",
+            "subnet_id": "subnet-0a1b2c3d4e5f0f001",
+            "private_ip": "10.0.1.11",
+            "tags": {
+              "Name": "golden-ec2-idle-boundary",
+              "Environment": "staging",
+              "Owner": "qa"
+            }
+          },
+          "relationships": [
+            {
+              "relation_type": "PROTECTED_BY",
+              "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001"
+            },
+            {
+              "relation_type": "SECURED_BY",
+              "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00001"
+            }
+          ],
+          "evaluation_status": "PENDING",
+          "health_score": null,
+          "verdict": null,
+          "skip_reason_code": null,
+          "collected_at": "2026-08-19T06:00:00Z"
+        },
+        "initial_risk": {
+          "threat_event_id": "133bb985-8be9-5f0b-96f8-cd56e05b7fe2",
+          "initial_risk_level": "HIGH",
+          "response_mode": "PRE_MITIGATION_0_5S",
+          "reason_codes": [
+            "RISK_SSH_BRUTEFORCE"
+          ]
+        },
+        "evidences": [
+          {
+            "evidence_id": "5956549c-9536-56ed-883a-4ddeecf2de4d",
+            "evidence_type": "THREAT",
+            "content": {
+              "event": {
+                "threat_event_id": "133bb985-8be9-5f0b-96f8-cd56e05b7fe2",
+                "source_event_id": "evt-ssh-bruteforce-001",
+                "event_type": "SSH_BRUTE_FORCE",
+                "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00001",
+                "occurred_at": "2026-08-19T06:30:00Z",
+                "payload": {
+                  "source_ip": "203.0.113.10",
+                  "failed_attempt_count": 120,
+                  "window_seconds": 300
+                },
+                "deduplication_key": "SSH_BRUTE_FORCE|2622da8137d86bb250437b241e65c8412ff94aad4a9510301f7bf99bae97851e",
+                "collected_at": "2026-08-19T06:30:01Z"
+              },
+              "context": {
+                "version": "mvp-mock-v1",
+                "captured_at": "2026-08-19T06:30:05Z",
+                "target_status": "available",
+                "target": {
+                  "collection_run_id": "c04d7179-4e31-5492-8dd0-9dc3d9fe2a10",
+                  "asset": {
+                    "arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00001",
+                    "resource_id": "i-0a1b2c3d4e5f00001",
+                    "asset_type": "EC2",
+                    "resource_role": "PRIMARY",
+                    "name": "golden-ec2-idle-boundary",
+                    "account_id": "123456789012",
+                    "region": "ap-northeast-2",
+                    "state": "running",
+                    "spec": {
+                      "instance_type": "t3.xlarge",
+                      "availability_zone": "ap-northeast-2a",
+                      "vpc_id": "vpc-0a1b2c3d4e5f0f001",
+                      "subnet_id": "subnet-0a1b2c3d4e5f0f001",
+                      "private_ip": "10.0.1.11",
+                      "tags": {
+                        "Name": "golden-ec2-idle-boundary",
+                        "Environment": "staging",
+                        "Owner": "qa"
+                      }
+                    },
+                    "relationships": [
+                      {
+                        "relation_type": "PROTECTED_BY",
+                        "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001"
+                      },
+                      {
+                        "relation_type": "SECURED_BY",
+                        "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00001"
+                      }
+                    ],
+                    "evaluation_status": "PENDING",
+                    "health_score": null,
+                    "verdict": null,
+                    "skip_reason_code": null,
+                    "collected_at": "2026-08-19T06:00:00Z"
+                  }
+                },
+                "related_assets": [
+                  {
+                    "collection_run_id": "c04d7179-4e31-5492-8dd0-9dc3d9fe2a10",
+                    "asset": {
+                      "arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001",
+                      "resource_id": "acl-0a1b2c3d4e5f00001",
+                      "asset_type": "NACL",
+                      "resource_role": "RUNBOOK_SUPPORT",
+                      "name": null,
+                      "account_id": "123456789012",
+                      "region": "ap-northeast-2",
+                      "state": null,
+                      "spec": {
+                        "vpc_id": null,
+                        "is_default": false,
+                        "associated_subnet_ids": [
+                          "subnet-0a1b2c3d4e5f0f001"
+                        ]
+                      },
+                      "relationships": [],
+                      "evaluation_status": "NOT_APPLICABLE",
+                      "health_score": null,
+                      "verdict": null,
+                      "skip_reason_code": null,
+                      "collected_at": "2026-08-19T06:00:00Z"
+                    }
+                  },
+                  {
+                    "collection_run_id": "c04d7179-4e31-5492-8dd0-9dc3d9fe2a10",
+                    "asset": {
+                      "arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00001",
+                      "resource_id": "sg-0a1b2c3d4e5f00001",
+                      "asset_type": "SG",
+                      "resource_role": "PRIMARY",
+                      "name": null,
+                      "account_id": "123456789012",
+                      "region": "ap-northeast-2",
+                      "state": null,
+                      "spec": {
+                        "description": null,
+                        "vpc_id": null,
+                        "attached": true,
+                        "open_to_world": []
+                      },
+                      "relationships": [],
+                      "evaluation_status": "PENDING",
+                      "health_score": null,
+                      "verdict": null,
+                      "skip_reason_code": null,
+                      "collected_at": "2026-08-19T06:00:00Z"
+                    }
+                  }
+                ],
+                "relation_issues": [],
+                "log_evidence": {
+                  "version": 1,
+                  "data_kind": "synthetic",
+                  "coverage": "complete_generated_fixture",
+                  "case_id": "C01",
+                  "corpus_fingerprint": "2c3b65c39e096247799f0195c3436be80466b9ea7afd7597bd88d071d511310c",
+                  "source_id": "aws-directory-service-password-example",
+                  "source_fingerprint": "e0481279d9ffc11490f9317dd831912d782c054064e5b60f4cf596ea56b985aa",
+                  "selection_policy": "ssh-observed-password-results-v1",
+                  "excerpt_policy": "first_6_last_6",
+                  "host": "mock-ec2-C01",
+                  "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00001",
+                  "mapping_kind": "explicit_mock_target",
+                  "time_shift_seconds": 0,
+                  "source_ip": "203.0.113.10",
+                  "window_start": "2026-08-19T06:25:00Z",
+                  "window_end": "2026-08-19T06:30:00Z",
+                  "record_count": 200,
+                  "failed_attempt_count": 120,
+                  "accepted_count": 0,
+                  "auxiliary_count": 80,
+                  "records": [
+                    {
+                      "record_id": "C01-000001",
+                      "source_time": "2026-08-19T06:25:01.249000Z",
+                      "received_at": "2026-08-19T06:25:01.299000Z",
+                      "host": "mock-ec2-C01",
+                      "process_id": 10001,
+                      "message": "Invalid user mock-user from 203.0.113.10 port 41000"
+                    },
+                    {
+                      "record_id": "C01-000002",
+                      "source_time": "2026-08-19T06:25:01.250000Z",
+                      "received_at": "2026-08-19T06:25:01.300000Z",
+                      "host": "mock-ec2-C01",
+                      "process_id": 10001,
+                      "message": "Failed password for invalid user mock-user from 203.0.113.10 port 41000 ssh2"
+                    },
+                    {
+                      "record_id": "C01-000003",
+                      "source_time": "2026-08-19T06:25:03.750000Z",
+                      "received_at": "2026-08-19T06:25:03.800000Z",
+                      "host": "mock-ec2-C01",
+                      "process_id": 10001,
+                      "message": "Failed password for invalid user mock-user from 203.0.113.10 port 41000 ssh2"
+                    },
+                    {
+                      "record_id": "C01-000004",
+                      "source_time": "2026-08-19T06:25:06.250000Z",
+                      "received_at": "2026-08-19T06:25:06.300000Z",
+                      "host": "mock-ec2-C01",
+                      "process_id": 10001,
+                      "message": "Failed password for invalid user mock-user from 203.0.113.10 port 41000 ssh2"
+                    },
+                    {
+                      "record_id": "C01-000005",
+                      "source_time": "2026-08-19T06:25:06.251000Z",
+                      "received_at": "2026-08-19T06:25:06.301000Z",
+                      "host": "mock-ec2-C01",
+                      "process_id": 10001,
+                      "message": "Connection closed by invalid user mock-user 203.0.113.10 port 41000 [preauth]"
+                    },
+                    {
+                      "record_id": "C01-000006",
+                      "source_time": "2026-08-19T06:25:08.749000Z",
+                      "received_at": "2026-08-19T06:25:08.799000Z",
+                      "host": "mock-ec2-C01",
+                      "process_id": 10002,
+                      "message": "Invalid user mock-user from 203.0.113.10 port 41001"
+                    },
+                    {
+                      "record_id": "C01-000195",
+                      "source_time": "2026-08-19T06:29:51.251000Z",
+                      "received_at": "2026-08-19T06:29:51.301000Z",
+                      "host": "mock-ec2-C01",
+                      "process_id": 10039,
+                      "message": "Connection closed by invalid user mock-user 203.0.113.10 port 41038 [preauth]"
+                    },
+                    {
+                      "record_id": "C01-000196",
+                      "source_time": "2026-08-19T06:29:53.749000Z",
+                      "received_at": "2026-08-19T06:29:53.799000Z",
+                      "host": "mock-ec2-C01",
+                      "process_id": 10040,
+                      "message": "Invalid user mock-user from 203.0.113.10 port 41039"
+                    },
+                    {
+                      "record_id": "C01-000197",
+                      "source_time": "2026-08-19T06:29:53.750000Z",
+                      "received_at": "2026-08-19T06:29:53.800000Z",
+                      "host": "mock-ec2-C01",
+                      "process_id": 10040,
+                      "message": "Failed password for invalid user mock-user from 203.0.113.10 port 41039 ssh2"
+                    },
+                    {
+                      "record_id": "C01-000198",
+                      "source_time": "2026-08-19T06:29:56.250000Z",
+                      "received_at": "2026-08-19T06:29:56.300000Z",
+                      "host": "mock-ec2-C01",
+                      "process_id": 10040,
+                      "message": "Failed password for invalid user mock-user from 203.0.113.10 port 41039 ssh2"
+                    },
+                    {
+                      "record_id": "C01-000199",
+                      "source_time": "2026-08-19T06:29:58.750000Z",
+                      "received_at": "2026-08-19T06:29:58.800000Z",
+                      "host": "mock-ec2-C01",
+                      "process_id": 10040,
+                      "message": "Failed password for invalid user mock-user from 203.0.113.10 port 41039 ssh2"
+                    },
+                    {
+                      "record_id": "C01-000200",
+                      "source_time": "2026-08-19T06:29:58.751000Z",
+                      "received_at": "2026-08-19T06:29:58.801000Z",
+                      "host": "mock-ec2-C01",
+                      "process_id": 10040,
+                      "message": "Connection closed by invalid user mock-user 203.0.113.10 port 41039 [preauth]"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "isolation_execution": null,
+        "capabilities": [
+          {
+            "runbook_id": "RUNBOOK_NACL_ADD_DENY",
+            "purpose": "출발지 CIDR을 NACL 거부 규칙으로 차단",
+            "allowed_target_asset_types": [
+              "NACL"
+            ]
+          }
+        ]
+      },
+      "evaluation_role": "mvp_scenario"
+    },
+    {
+      "case_id": "C02",
+      "title": "SSH 실패 1000회 / 60초 · HIGH",
+      "provenance": {
+        "threat_source": "datasets/golden/secops/input/evt_ssh_bruteforce_004.json",
+        "threat_sha256": "325d2b0b383bed6d7fc40f8a3cd7dd29c551ea356c75c45a10970014c8824856",
+        "risk_source": "datasets/golden/secops/expected/evt_ssh_bruteforce_004.json",
+        "risk_sha256": "ee56fd67bf59ca8f396add1cf9e5e740aecfc74e1c8404d0f5a8f013834768fe",
+        "asset_source": "datasets/golden/finops/input/asset_inventory_002.json",
+        "asset_sha256": "f248e6cf432e4a81bd9e19e0afac40a81bacd7a906be107d9a118d5a9966b40e",
+        "synthetic_nacl_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00002",
+        "synthesis": [
+          "EC2 fields originate from the stated Golden inventory; direct SG/NACL and their snapshots are explicit synthetic prerequisites in inventory.json.",
+          "UUIDs, collection run, event collection (+1 second), and evidence capture (+5 seconds) are fixed evaluation identities/times, not recorded live collection.",
+          "Logs come from the #350 corpus with its full aggregate and at most 12 deterministic excerpt rows. No time shift or target remapping is used."
+        ],
+        "reachability": "모의 위협으로 공급한 뒤의 서비스 접수·조립 경로. 수집기가 이런 관측을 위협으로 탐지하거나 Incident로 올려야 한다는 증거가 아니다.",
+        "log_manifest_source": "datasets/secops-log-corpus/cases/C02/manifest.json",
+        "log_manifest_sha256": "bf0bd8d4969743acf6b89f06f6b2b1d726cb718d4f86ad2c5f2a3db65284768a",
+        "log_expected_source": "datasets/secops-log-corpus/cases/C02/expected.json",
+        "log_expected_sha256": "58ddbd285931ac0af6b6aef791b1f9219f019a234f0eb6bb403001361e1eb7d7",
+        "log_records_source": "datasets/secops-log-corpus/cases/C02/logs.jsonl",
+        "log_records_sha256": "412546fb5d787793f39425b724aa71bca12016b57fd728e4df7e5e20fc974aeb",
+        "context_source": "apps/core-api/ai/evaluation/secops/inventory.json",
+        "context_sha256": "721e48bfd52bc740356f79a14360a42861606c686482ed9522e0f9fde0a489e4"
+      },
+      "graph_input": {
+        "domain": "SECOPS",
+        "incident_id": "83de738e-6f6f-544a-8e0f-2243961a9459",
+        "asset_context": {
+          "arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00012",
+          "resource_id": "i-0a1b2c3d4e5f00012",
+          "asset_type": "EC2",
+          "resource_role": "PRIMARY",
+          "name": "golden-ec2-dp-boundary",
+          "account_id": "123456789012",
+          "region": "ap-northeast-2",
+          "state": "running",
+          "spec": {
+            "instance_type": "t3.xlarge",
+            "availability_zone": "ap-northeast-2c",
+            "vpc_id": "vpc-0a1b2c3d4e5f0f001",
+            "subnet_id": "subnet-0a1b2c3d4e5f0f002",
+            "private_ip": "10.0.2.22",
+            "tags": {
+              "Name": "golden-ec2-dp-boundary",
+              "Environment": "staging",
+              "Owner": "qa"
+            }
+          },
+          "relationships": [
+            {
+              "relation_type": "PROTECTED_BY",
+              "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00002"
+            },
+            {
+              "relation_type": "SECURED_BY",
+              "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00002"
+            }
+          ],
+          "evaluation_status": "PENDING",
+          "health_score": null,
+          "verdict": null,
+          "skip_reason_code": null,
+          "collected_at": "2026-08-20T06:00:00Z"
+        },
+        "initial_risk": {
+          "threat_event_id": "1589a128-3b8a-5d57-92ff-24ae0825b87c",
+          "initial_risk_level": "HIGH",
+          "response_mode": "PRE_MITIGATION_0_5S",
+          "reason_codes": [
+            "RISK_SSH_BRUTEFORCE"
+          ]
+        },
+        "evidences": [
+          {
+            "evidence_id": "68694052-d9f6-5480-8977-f059de21b062",
+            "evidence_type": "THREAT",
+            "content": {
+              "event": {
+                "threat_event_id": "1589a128-3b8a-5d57-92ff-24ae0825b87c",
+                "source_event_id": "evt-ssh-bruteforce-004",
+                "event_type": "SSH_BRUTE_FORCE",
+                "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00012",
+                "occurred_at": "2026-08-20T06:50:00Z",
+                "payload": {
+                  "source_ip": "203.0.113.55",
+                  "failed_attempt_count": 1000,
+                  "window_seconds": 60
+                },
+                "deduplication_key": "SSH_BRUTE_FORCE|12465ef3d4dacb843800a4957eabb409aca213c888b912ec8207704602c91601",
+                "collected_at": "2026-08-20T06:50:01Z"
+              },
+              "context": {
+                "version": "mvp-mock-v1",
+                "captured_at": "2026-08-20T06:50:05Z",
+                "target_status": "available",
+                "target": {
+                  "collection_run_id": "e446c45e-fc77-5756-aa39-676a08e4ebda",
+                  "asset": {
+                    "arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00012",
+                    "resource_id": "i-0a1b2c3d4e5f00012",
+                    "asset_type": "EC2",
+                    "resource_role": "PRIMARY",
+                    "name": "golden-ec2-dp-boundary",
+                    "account_id": "123456789012",
+                    "region": "ap-northeast-2",
+                    "state": "running",
+                    "spec": {
+                      "instance_type": "t3.xlarge",
+                      "availability_zone": "ap-northeast-2c",
+                      "vpc_id": "vpc-0a1b2c3d4e5f0f001",
+                      "subnet_id": "subnet-0a1b2c3d4e5f0f002",
+                      "private_ip": "10.0.2.22",
+                      "tags": {
+                        "Name": "golden-ec2-dp-boundary",
+                        "Environment": "staging",
+                        "Owner": "qa"
+                      }
+                    },
+                    "relationships": [
+                      {
+                        "relation_type": "PROTECTED_BY",
+                        "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00002"
+                      },
+                      {
+                        "relation_type": "SECURED_BY",
+                        "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00002"
+                      }
+                    ],
+                    "evaluation_status": "PENDING",
+                    "health_score": null,
+                    "verdict": null,
+                    "skip_reason_code": null,
+                    "collected_at": "2026-08-20T06:00:00Z"
+                  }
+                },
+                "related_assets": [
+                  {
+                    "collection_run_id": "e446c45e-fc77-5756-aa39-676a08e4ebda",
+                    "asset": {
+                      "arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00002",
+                      "resource_id": "acl-0a1b2c3d4e5f00002",
+                      "asset_type": "NACL",
+                      "resource_role": "RUNBOOK_SUPPORT",
+                      "name": null,
+                      "account_id": "123456789012",
+                      "region": "ap-northeast-2",
+                      "state": null,
+                      "spec": {
+                        "vpc_id": null,
+                        "is_default": false,
+                        "associated_subnet_ids": [
+                          "subnet-0a1b2c3d4e5f0f002"
+                        ]
+                      },
+                      "relationships": [],
+                      "evaluation_status": "NOT_APPLICABLE",
+                      "health_score": null,
+                      "verdict": null,
+                      "skip_reason_code": null,
+                      "collected_at": "2026-08-20T06:00:00Z"
+                    }
+                  },
+                  {
+                    "collection_run_id": "e446c45e-fc77-5756-aa39-676a08e4ebda",
+                    "asset": {
+                      "arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00002",
+                      "resource_id": "sg-0a1b2c3d4e5f00002",
+                      "asset_type": "SG",
+                      "resource_role": "PRIMARY",
+                      "name": null,
+                      "account_id": "123456789012",
+                      "region": "ap-northeast-2",
+                      "state": null,
+                      "spec": {
+                        "description": null,
+                        "vpc_id": null,
+                        "attached": true,
+                        "open_to_world": []
+                      },
+                      "relationships": [],
+                      "evaluation_status": "PENDING",
+                      "health_score": null,
+                      "verdict": null,
+                      "skip_reason_code": null,
+                      "collected_at": "2026-08-20T06:00:00Z"
+                    }
+                  }
+                ],
+                "relation_issues": [],
+                "log_evidence": {
+                  "version": 1,
+                  "data_kind": "synthetic",
+                  "coverage": "complete_generated_fixture",
+                  "case_id": "C02",
+                  "corpus_fingerprint": "412546fb5d787793f39425b724aa71bca12016b57fd728e4df7e5e20fc974aeb",
+                  "source_id": "aws-directory-service-password-example",
+                  "source_fingerprint": "e0481279d9ffc11490f9317dd831912d782c054064e5b60f4cf596ea56b985aa",
+                  "selection_policy": "ssh-observed-password-results-v1",
+                  "excerpt_policy": "first_6_last_6",
+                  "host": "mock-ec2-C02",
+                  "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00012",
+                  "mapping_kind": "explicit_mock_target",
+                  "time_shift_seconds": 0,
+                  "source_ip": "203.0.113.55",
+                  "window_start": "2026-08-20T06:49:00Z",
+                  "window_end": "2026-08-20T06:50:00Z",
+                  "record_count": 1668,
+                  "failed_attempt_count": 1000,
+                  "accepted_count": 0,
+                  "auxiliary_count": 668,
+                  "records": [
+                    {
+                      "record_id": "C02-000001",
+                      "source_time": "2026-08-20T06:49:00.029000Z",
+                      "received_at": "2026-08-20T06:49:00.079000Z",
+                      "host": "mock-ec2-C02",
+                      "process_id": 10001,
+                      "message": "Invalid user mock-user from 203.0.113.55 port 41000"
+                    },
+                    {
+                      "record_id": "C02-000002",
+                      "source_time": "2026-08-20T06:49:00.030000Z",
+                      "received_at": "2026-08-20T06:49:00.080000Z",
+                      "host": "mock-ec2-C02",
+                      "process_id": 10001,
+                      "message": "Failed password for invalid user mock-user from 203.0.113.55 port 41000 ssh2"
+                    },
+                    {
+                      "record_id": "C02-000003",
+                      "source_time": "2026-08-20T06:49:00.090000Z",
+                      "received_at": "2026-08-20T06:49:00.140000Z",
+                      "host": "mock-ec2-C02",
+                      "process_id": 10001,
+                      "message": "Failed password for invalid user mock-user from 203.0.113.55 port 41000 ssh2"
+                    },
+                    {
+                      "record_id": "C02-000004",
+                      "source_time": "2026-08-20T06:49:00.150000Z",
+                      "received_at": "2026-08-20T06:49:00.200000Z",
+                      "host": "mock-ec2-C02",
+                      "process_id": 10001,
+                      "message": "Failed password for invalid user mock-user from 203.0.113.55 port 41000 ssh2"
+                    },
+                    {
+                      "record_id": "C02-000005",
+                      "source_time": "2026-08-20T06:49:00.151000Z",
+                      "received_at": "2026-08-20T06:49:00.201000Z",
+                      "host": "mock-ec2-C02",
+                      "process_id": 10001,
+                      "message": "Connection closed by invalid user mock-user 203.0.113.55 port 41000 [preauth]"
+                    },
+                    {
+                      "record_id": "C02-000006",
+                      "source_time": "2026-08-20T06:49:00.209000Z",
+                      "received_at": "2026-08-20T06:49:00.259000Z",
+                      "host": "mock-ec2-C02",
+                      "process_id": 10002,
+                      "message": "Invalid user mock-user from 203.0.113.55 port 41001"
+                    },
+                    {
+                      "record_id": "C02-001663",
+                      "source_time": "2026-08-20T06:49:59.850000Z",
+                      "received_at": "2026-08-20T06:49:59.900000Z",
+                      "host": "mock-ec2-C02",
+                      "process_id": 10333,
+                      "message": "Failed password for invalid user mock-user from 203.0.113.55 port 41332 ssh2"
+                    },
+                    {
+                      "record_id": "C02-001664",
+                      "source_time": "2026-08-20T06:49:59.910000Z",
+                      "received_at": "2026-08-20T06:49:59.960000Z",
+                      "host": "mock-ec2-C02",
+                      "process_id": 10333,
+                      "message": "Failed password for invalid user mock-user from 203.0.113.55 port 41332 ssh2"
+                    },
+                    {
+                      "record_id": "C02-001665",
+                      "source_time": "2026-08-20T06:49:59.911000Z",
+                      "received_at": "2026-08-20T06:49:59.961000Z",
+                      "host": "mock-ec2-C02",
+                      "process_id": 10333,
+                      "message": "Connection closed by invalid user mock-user 203.0.113.55 port 41332 [preauth]"
+                    },
+                    {
+                      "record_id": "C02-001666",
+                      "source_time": "2026-08-20T06:49:59.969000Z",
+                      "received_at": "2026-08-20T06:50:00.019000Z",
+                      "host": "mock-ec2-C02",
+                      "process_id": 10334,
+                      "message": "Invalid user mock-user from 203.0.113.55 port 41333"
+                    },
+                    {
+                      "record_id": "C02-001667",
+                      "source_time": "2026-08-20T06:49:59.970000Z",
+                      "received_at": "2026-08-20T06:50:00.020000Z",
+                      "host": "mock-ec2-C02",
+                      "process_id": 10334,
+                      "message": "Failed password for invalid user mock-user from 203.0.113.55 port 41333 ssh2"
+                    },
+                    {
+                      "record_id": "C02-001668",
+                      "source_time": "2026-08-20T06:49:59.971000Z",
+                      "received_at": "2026-08-20T06:50:00.021000Z",
+                      "host": "mock-ec2-C02",
+                      "process_id": 10334,
+                      "message": "Connection closed by invalid user mock-user 203.0.113.55 port 41333 [preauth]"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "isolation_execution": null,
+        "capabilities": [
+          {
+            "runbook_id": "RUNBOOK_NACL_ADD_DENY",
+            "purpose": "출발지 CIDR을 NACL 거부 규칙으로 차단",
+            "allowed_target_asset_types": [
+              "NACL"
+            ]
+          }
+        ]
+      },
+      "evaluation_role": "mvp_scenario"
+    },
+    {
+      "case_id": "C03",
+      "title": "SSH 실패 120회 / 300초 · HIGH",
+      "provenance": {
+        "threat_source": "datasets/golden/secops/input/evt_ssh_bruteforce_005.json",
+        "threat_sha256": "b9ea6778fc5ca6c5cbc3d00f873bec0d1a8993a74176185933b02c0bda170a22",
+        "risk_source": "datasets/golden/secops/expected/evt_ssh_bruteforce_005.json",
+        "risk_sha256": "1164a260d44b9fdb0df9bb103bbd89adaf62432f243ec1abe5b5dec881330fda",
+        "asset_source": "datasets/golden/finops/input/asset_inventory_002.json",
+        "asset_sha256": "f248e6cf432e4a81bd9e19e0afac40a81bacd7a906be107d9a118d5a9966b40e",
+        "synthetic_nacl_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001",
+        "synthesis": [
+          "EC2 fields originate from the stated Golden inventory; direct SG/NACL and their snapshots are explicit synthetic prerequisites in inventory.json.",
+          "UUIDs, collection run, event collection (+1 second), and evidence capture (+5 seconds) are fixed evaluation identities/times, not recorded live collection.",
+          "Logs come from the #350 corpus with its full aggregate and at most 12 deterministic excerpt rows. No time shift or target remapping is used."
+        ],
+        "reachability": "모의 위협으로 공급한 뒤의 서비스 접수·조립 경로. 수집기가 이런 관측을 위협으로 탐지하거나 Incident로 올려야 한다는 증거가 아니다.",
+        "log_manifest_source": "datasets/secops-log-corpus/cases/C03/manifest.json",
+        "log_manifest_sha256": "a3d6c36ed4d49801c86d0e168757f66c8accf6121cdff45aed359ba88741a9cf",
+        "log_expected_source": "datasets/secops-log-corpus/cases/C03/expected.json",
+        "log_expected_sha256": "b5ffdb681325f65e8547626dad1a85da3120f66ac1601da7140baca710887cb1",
+        "log_records_source": "datasets/secops-log-corpus/cases/C03/logs.jsonl",
+        "log_records_sha256": "61981412546c62841def65c7413d6c992d689332087d1c20e86cdec52678031d",
+        "context_source": "apps/core-api/ai/evaluation/secops/inventory.json",
+        "context_sha256": "721e48bfd52bc740356f79a14360a42861606c686482ed9522e0f9fde0a489e4"
+      },
+      "graph_input": {
+        "domain": "SECOPS",
+        "incident_id": "0cbb64cd-6a84-5f6e-8f4d-1afb87281489",
+        "asset_context": {
+          "arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00011",
+          "resource_id": "i-0a1b2c3d4e5f00011",
+          "asset_type": "EC2",
+          "resource_role": "PRIMARY",
+          "name": "golden-ec2-billing-worker",
+          "account_id": "123456789012",
+          "region": "ap-northeast-2",
+          "state": "running",
+          "spec": {
+            "instance_type": "t3.large",
+            "availability_zone": "ap-northeast-2a",
+            "vpc_id": "vpc-0a1b2c3d4e5f0f001",
+            "subnet_id": "subnet-0a1b2c3d4e5f0f001",
+            "private_ip": "10.0.1.21",
+            "tags": {
+              "Name": "golden-ec2-billing-worker",
+              "Environment": "production",
+              "Owner": "qa"
+            }
+          },
+          "relationships": [
+            {
+              "relation_type": "PROTECTED_BY",
+              "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001"
+            },
+            {
+              "relation_type": "SECURED_BY",
+              "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00001"
+            }
+          ],
+          "evaluation_status": "PENDING",
+          "health_score": null,
+          "verdict": null,
+          "skip_reason_code": null,
+          "collected_at": "2026-08-20T06:00:00Z"
+        },
+        "initial_risk": {
+          "threat_event_id": "83091a59-c43d-59e7-a2e2-dd58dd547d8c",
+          "initial_risk_level": "HIGH",
+          "response_mode": "PRE_MITIGATION_0_5S",
+          "reason_codes": [
+            "RISK_SSH_BRUTEFORCE"
+          ]
+        },
+        "evidences": [
+          {
+            "evidence_id": "9697dd70-6fe2-59b7-ae07-65050bcdb074",
+            "evidence_type": "THREAT",
+            "content": {
+              "event": {
+                "threat_event_id": "83091a59-c43d-59e7-a2e2-dd58dd547d8c",
+                "source_event_id": "evt-ssh-bruteforce-005",
+                "event_type": "SSH_BRUTE_FORCE",
+                "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00011",
+                "occurred_at": "2026-08-20T07:00:00Z",
+                "payload": {
+                  "source_ip": "203.0.113.10",
+                  "failed_attempt_count": 120,
+                  "window_seconds": 300
+                },
+                "deduplication_key": "SSH_BRUTE_FORCE|32c9d9dd6911033ac1aa5fbedf0563f93b14df55a2277b7a2d34209304c9f243",
+                "collected_at": "2026-08-20T07:00:01Z"
+              },
+              "context": {
+                "version": "mvp-mock-v1",
+                "captured_at": "2026-08-20T07:00:05Z",
+                "target_status": "available",
+                "target": {
+                  "collection_run_id": "b0a87d60-0388-5c44-b8f8-16d074ed1be9",
+                  "asset": {
+                    "arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00011",
+                    "resource_id": "i-0a1b2c3d4e5f00011",
+                    "asset_type": "EC2",
+                    "resource_role": "PRIMARY",
+                    "name": "golden-ec2-billing-worker",
+                    "account_id": "123456789012",
+                    "region": "ap-northeast-2",
+                    "state": "running",
+                    "spec": {
+                      "instance_type": "t3.large",
+                      "availability_zone": "ap-northeast-2a",
+                      "vpc_id": "vpc-0a1b2c3d4e5f0f001",
+                      "subnet_id": "subnet-0a1b2c3d4e5f0f001",
+                      "private_ip": "10.0.1.21",
+                      "tags": {
+                        "Name": "golden-ec2-billing-worker",
+                        "Environment": "production",
+                        "Owner": "qa"
+                      }
+                    },
+                    "relationships": [
+                      {
+                        "relation_type": "PROTECTED_BY",
+                        "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001"
+                      },
+                      {
+                        "relation_type": "SECURED_BY",
+                        "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00001"
+                      }
+                    ],
+                    "evaluation_status": "PENDING",
+                    "health_score": null,
+                    "verdict": null,
+                    "skip_reason_code": null,
+                    "collected_at": "2026-08-20T06:00:00Z"
+                  }
+                },
+                "related_assets": [
+                  {
+                    "collection_run_id": "b0a87d60-0388-5c44-b8f8-16d074ed1be9",
+                    "asset": {
+                      "arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001",
+                      "resource_id": "acl-0a1b2c3d4e5f00001",
+                      "asset_type": "NACL",
+                      "resource_role": "RUNBOOK_SUPPORT",
+                      "name": null,
+                      "account_id": "123456789012",
+                      "region": "ap-northeast-2",
+                      "state": null,
+                      "spec": {
+                        "vpc_id": null,
+                        "is_default": false,
+                        "associated_subnet_ids": [
+                          "subnet-0a1b2c3d4e5f0f001"
+                        ]
+                      },
+                      "relationships": [],
+                      "evaluation_status": "NOT_APPLICABLE",
+                      "health_score": null,
+                      "verdict": null,
+                      "skip_reason_code": null,
+                      "collected_at": "2026-08-20T06:00:00Z"
+                    }
+                  },
+                  {
+                    "collection_run_id": "b0a87d60-0388-5c44-b8f8-16d074ed1be9",
+                    "asset": {
+                      "arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00001",
+                      "resource_id": "sg-0a1b2c3d4e5f00001",
+                      "asset_type": "SG",
+                      "resource_role": "PRIMARY",
+                      "name": null,
+                      "account_id": "123456789012",
+                      "region": "ap-northeast-2",
+                      "state": null,
+                      "spec": {
+                        "description": null,
+                        "vpc_id": null,
+                        "attached": true,
+                        "open_to_world": []
+                      },
+                      "relationships": [],
+                      "evaluation_status": "PENDING",
+                      "health_score": null,
+                      "verdict": null,
+                      "skip_reason_code": null,
+                      "collected_at": "2026-08-20T06:00:00Z"
+                    }
+                  }
+                ],
+                "relation_issues": [],
+                "log_evidence": {
+                  "version": 1,
+                  "data_kind": "synthetic",
+                  "coverage": "complete_generated_fixture",
+                  "case_id": "C03",
+                  "corpus_fingerprint": "61981412546c62841def65c7413d6c992d689332087d1c20e86cdec52678031d",
+                  "source_id": "aws-directory-service-password-example",
+                  "source_fingerprint": "e0481279d9ffc11490f9317dd831912d782c054064e5b60f4cf596ea56b985aa",
+                  "selection_policy": "ssh-observed-password-results-v1",
+                  "excerpt_policy": "first_6_last_6",
+                  "host": "mock-ec2-C03",
+                  "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00011",
+                  "mapping_kind": "explicit_mock_target",
+                  "time_shift_seconds": 0,
+                  "source_ip": "203.0.113.10",
+                  "window_start": "2026-08-20T06:55:00Z",
+                  "window_end": "2026-08-20T07:00:00Z",
+                  "record_count": 200,
+                  "failed_attempt_count": 120,
+                  "accepted_count": 0,
+                  "auxiliary_count": 80,
+                  "records": [
+                    {
+                      "record_id": "C03-000001",
+                      "source_time": "2026-08-20T06:55:01.249000Z",
+                      "received_at": "2026-08-20T06:55:01.299000Z",
+                      "host": "mock-ec2-C03",
+                      "process_id": 10001,
+                      "message": "Invalid user mock-user from 203.0.113.10 port 41000"
+                    },
+                    {
+                      "record_id": "C03-000002",
+                      "source_time": "2026-08-20T06:55:01.250000Z",
+                      "received_at": "2026-08-20T06:55:01.300000Z",
+                      "host": "mock-ec2-C03",
+                      "process_id": 10001,
+                      "message": "Failed password for invalid user mock-user from 203.0.113.10 port 41000 ssh2"
+                    },
+                    {
+                      "record_id": "C03-000003",
+                      "source_time": "2026-08-20T06:55:03.750000Z",
+                      "received_at": "2026-08-20T06:55:03.800000Z",
+                      "host": "mock-ec2-C03",
+                      "process_id": 10001,
+                      "message": "Failed password for invalid user mock-user from 203.0.113.10 port 41000 ssh2"
+                    },
+                    {
+                      "record_id": "C03-000004",
+                      "source_time": "2026-08-20T06:55:06.250000Z",
+                      "received_at": "2026-08-20T06:55:06.300000Z",
+                      "host": "mock-ec2-C03",
+                      "process_id": 10001,
+                      "message": "Failed password for invalid user mock-user from 203.0.113.10 port 41000 ssh2"
+                    },
+                    {
+                      "record_id": "C03-000005",
+                      "source_time": "2026-08-20T06:55:06.251000Z",
+                      "received_at": "2026-08-20T06:55:06.301000Z",
+                      "host": "mock-ec2-C03",
+                      "process_id": 10001,
+                      "message": "Connection closed by invalid user mock-user 203.0.113.10 port 41000 [preauth]"
+                    },
+                    {
+                      "record_id": "C03-000006",
+                      "source_time": "2026-08-20T06:55:08.749000Z",
+                      "received_at": "2026-08-20T06:55:08.799000Z",
+                      "host": "mock-ec2-C03",
+                      "process_id": 10002,
+                      "message": "Invalid user mock-user from 203.0.113.10 port 41001"
+                    },
+                    {
+                      "record_id": "C03-000195",
+                      "source_time": "2026-08-20T06:59:51.251000Z",
+                      "received_at": "2026-08-20T06:59:51.301000Z",
+                      "host": "mock-ec2-C03",
+                      "process_id": 10039,
+                      "message": "Connection closed by invalid user mock-user 203.0.113.10 port 41038 [preauth]"
+                    },
+                    {
+                      "record_id": "C03-000196",
+                      "source_time": "2026-08-20T06:59:53.749000Z",
+                      "received_at": "2026-08-20T06:59:53.799000Z",
+                      "host": "mock-ec2-C03",
+                      "process_id": 10040,
+                      "message": "Invalid user mock-user from 203.0.113.10 port 41039"
+                    },
+                    {
+                      "record_id": "C03-000197",
+                      "source_time": "2026-08-20T06:59:53.750000Z",
+                      "received_at": "2026-08-20T06:59:53.800000Z",
+                      "host": "mock-ec2-C03",
+                      "process_id": 10040,
+                      "message": "Failed password for invalid user mock-user from 203.0.113.10 port 41039 ssh2"
+                    },
+                    {
+                      "record_id": "C03-000198",
+                      "source_time": "2026-08-20T06:59:56.250000Z",
+                      "received_at": "2026-08-20T06:59:56.300000Z",
+                      "host": "mock-ec2-C03",
+                      "process_id": 10040,
+                      "message": "Failed password for invalid user mock-user from 203.0.113.10 port 41039 ssh2"
+                    },
+                    {
+                      "record_id": "C03-000199",
+                      "source_time": "2026-08-20T06:59:58.750000Z",
+                      "received_at": "2026-08-20T06:59:58.800000Z",
+                      "host": "mock-ec2-C03",
+                      "process_id": 10040,
+                      "message": "Failed password for invalid user mock-user from 203.0.113.10 port 41039 ssh2"
+                    },
+                    {
+                      "record_id": "C03-000200",
+                      "source_time": "2026-08-20T06:59:58.751000Z",
+                      "received_at": "2026-08-20T06:59:58.801000Z",
+                      "host": "mock-ec2-C03",
+                      "process_id": 10040,
+                      "message": "Connection closed by invalid user mock-user 203.0.113.10 port 41039 [preauth]"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "isolation_execution": null,
+        "capabilities": [
+          {
+            "runbook_id": "RUNBOOK_NACL_ADD_DENY",
+            "purpose": "출발지 CIDR을 NACL 거부 규칙으로 차단",
+            "allowed_target_asset_types": [
+              "NACL"
+            ]
+          }
+        ]
+      },
+      "evaluation_role": "mvp_scenario"
+    },
+    {
+      "case_id": "C04",
+      "title": "SSH 실패 60회 / 600초 · MEDIUM",
+      "provenance": {
+        "threat_source": "datasets/golden/secops/input/evt_ssh_bruteforce_006.json",
+        "threat_sha256": "e5b60c9e40b0e5db1cc57ba2111f38c5aa82f2d983516d572cd89418c0eb6de6",
+        "risk_source": "datasets/golden/secops/expected/evt_ssh_bruteforce_006.json",
+        "risk_sha256": "5d4185d65b573701d272c4aa546919e0222123ff8f4a8d5d497286b685961c46",
+        "asset_source": "datasets/golden/finops/input/asset_inventory_002.json",
+        "asset_sha256": "f248e6cf432e4a81bd9e19e0afac40a81bacd7a906be107d9a118d5a9966b40e",
+        "synthetic_nacl_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00002",
+        "synthesis": [
+          "EC2 fields originate from the stated Golden inventory; direct SG/NACL and their snapshots are explicit synthetic prerequisites in inventory.json.",
+          "UUIDs, collection run, event collection (+1 second), and evidence capture (+5 seconds) are fixed evaluation identities/times, not recorded live collection.",
+          "Logs come from the #350 corpus with its full aggregate and at most 12 deterministic excerpt rows. No time shift or target remapping is used."
+        ],
+        "reachability": "모의 위협으로 공급한 뒤의 서비스 접수·조립 경로. 수집기가 이런 관측을 위협으로 탐지하거나 Incident로 올려야 한다는 증거가 아니다.",
+        "log_manifest_source": "datasets/secops-log-corpus/cases/C04/manifest.json",
+        "log_manifest_sha256": "0afb954e728cbabfe8ac1fc5a76bd746e85bce4ad4476f3117732e10033ea118",
+        "log_expected_source": "datasets/secops-log-corpus/cases/C04/expected.json",
+        "log_expected_sha256": "8599530afa5e0c202136a947adf225c181ae776e5a1794f680c85d932aa90be4",
+        "log_records_source": "datasets/secops-log-corpus/cases/C04/logs.jsonl",
+        "log_records_sha256": "a216ccc5975cd30e1a670154a9a23c13e19b157624007acaca5fea1d3722e49f",
+        "context_source": "apps/core-api/ai/evaluation/secops/inventory.json",
+        "context_sha256": "721e48bfd52bc740356f79a14360a42861606c686482ed9522e0f9fde0a489e4"
+      },
+      "graph_input": {
+        "domain": "SECOPS",
+        "incident_id": "3cde1487-6ba3-5d6d-8adb-59489455685f",
+        "asset_context": {
+          "arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00012",
+          "resource_id": "i-0a1b2c3d4e5f00012",
+          "asset_type": "EC2",
+          "resource_role": "PRIMARY",
+          "name": "golden-ec2-dp-boundary",
+          "account_id": "123456789012",
+          "region": "ap-northeast-2",
+          "state": "running",
+          "spec": {
+            "instance_type": "t3.xlarge",
+            "availability_zone": "ap-northeast-2c",
+            "vpc_id": "vpc-0a1b2c3d4e5f0f001",
+            "subnet_id": "subnet-0a1b2c3d4e5f0f002",
+            "private_ip": "10.0.2.22",
+            "tags": {
+              "Name": "golden-ec2-dp-boundary",
+              "Environment": "staging",
+              "Owner": "qa"
+            }
+          },
+          "relationships": [
+            {
+              "relation_type": "PROTECTED_BY",
+              "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00002"
+            },
+            {
+              "relation_type": "SECURED_BY",
+              "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00002"
+            }
+          ],
+          "evaluation_status": "PENDING",
+          "health_score": null,
+          "verdict": null,
+          "skip_reason_code": null,
+          "collected_at": "2026-08-20T06:00:00Z"
+        },
+        "initial_risk": {
+          "threat_event_id": "7d86fc5a-bc1e-5fa3-ac61-3677e3aa98d3",
+          "initial_risk_level": "MEDIUM",
+          "response_mode": "AGENT_WAIT",
+          "reason_codes": [
+            "RISK_SSH_BRUTEFORCE"
+          ]
+        },
+        "evidences": [
+          {
+            "evidence_id": "971cf07a-e942-5dd8-b2e5-87218ff024d8",
+            "evidence_type": "THREAT",
+            "content": {
+              "event": {
+                "threat_event_id": "7d86fc5a-bc1e-5fa3-ac61-3677e3aa98d3",
+                "source_event_id": "evt-ssh-bruteforce-006",
+                "event_type": "SSH_BRUTE_FORCE",
+                "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00012",
+                "occurred_at": "2026-08-20T07:00:00Z",
+                "payload": {
+                  "source_ip": "198.51.100.20",
+                  "failed_attempt_count": 60,
+                  "window_seconds": 600
+                },
+                "deduplication_key": "SSH_BRUTE_FORCE|ae1aac3b36a44cd55bdabd38adb39745e47ed5c34764c215e9c67bd8a3f76385",
+                "collected_at": "2026-08-20T07:00:01Z"
+              },
+              "context": {
+                "version": "mvp-mock-v1",
+                "captured_at": "2026-08-20T07:00:05Z",
+                "target_status": "available",
+                "target": {
+                  "collection_run_id": "b138cb80-484d-54ed-861d-6d3b4bc5be71",
+                  "asset": {
+                    "arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00012",
+                    "resource_id": "i-0a1b2c3d4e5f00012",
+                    "asset_type": "EC2",
+                    "resource_role": "PRIMARY",
+                    "name": "golden-ec2-dp-boundary",
+                    "account_id": "123456789012",
+                    "region": "ap-northeast-2",
+                    "state": "running",
+                    "spec": {
+                      "instance_type": "t3.xlarge",
+                      "availability_zone": "ap-northeast-2c",
+                      "vpc_id": "vpc-0a1b2c3d4e5f0f001",
+                      "subnet_id": "subnet-0a1b2c3d4e5f0f002",
+                      "private_ip": "10.0.2.22",
+                      "tags": {
+                        "Name": "golden-ec2-dp-boundary",
+                        "Environment": "staging",
+                        "Owner": "qa"
+                      }
+                    },
+                    "relationships": [
+                      {
+                        "relation_type": "PROTECTED_BY",
+                        "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00002"
+                      },
+                      {
+                        "relation_type": "SECURED_BY",
+                        "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00002"
+                      }
+                    ],
+                    "evaluation_status": "PENDING",
+                    "health_score": null,
+                    "verdict": null,
+                    "skip_reason_code": null,
+                    "collected_at": "2026-08-20T06:00:00Z"
+                  }
+                },
+                "related_assets": [
+                  {
+                    "collection_run_id": "b138cb80-484d-54ed-861d-6d3b4bc5be71",
+                    "asset": {
+                      "arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00002",
+                      "resource_id": "acl-0a1b2c3d4e5f00002",
+                      "asset_type": "NACL",
+                      "resource_role": "RUNBOOK_SUPPORT",
+                      "name": null,
+                      "account_id": "123456789012",
+                      "region": "ap-northeast-2",
+                      "state": null,
+                      "spec": {
+                        "vpc_id": null,
+                        "is_default": false,
+                        "associated_subnet_ids": [
+                          "subnet-0a1b2c3d4e5f0f002"
+                        ]
+                      },
+                      "relationships": [],
+                      "evaluation_status": "NOT_APPLICABLE",
+                      "health_score": null,
+                      "verdict": null,
+                      "skip_reason_code": null,
+                      "collected_at": "2026-08-20T06:00:00Z"
+                    }
+                  },
+                  {
+                    "collection_run_id": "b138cb80-484d-54ed-861d-6d3b4bc5be71",
+                    "asset": {
+                      "arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00002",
+                      "resource_id": "sg-0a1b2c3d4e5f00002",
+                      "asset_type": "SG",
+                      "resource_role": "PRIMARY",
+                      "name": null,
+                      "account_id": "123456789012",
+                      "region": "ap-northeast-2",
+                      "state": null,
+                      "spec": {
+                        "description": null,
+                        "vpc_id": null,
+                        "attached": true,
+                        "open_to_world": []
+                      },
+                      "relationships": [],
+                      "evaluation_status": "PENDING",
+                      "health_score": null,
+                      "verdict": null,
+                      "skip_reason_code": null,
+                      "collected_at": "2026-08-20T06:00:00Z"
+                    }
+                  }
+                ],
+                "relation_issues": [],
+                "log_evidence": {
+                  "version": 1,
+                  "data_kind": "synthetic",
+                  "coverage": "complete_generated_fixture",
+                  "case_id": "C04",
+                  "corpus_fingerprint": "a216ccc5975cd30e1a670154a9a23c13e19b157624007acaca5fea1d3722e49f",
+                  "source_id": "aws-directory-service-password-example",
+                  "source_fingerprint": "e0481279d9ffc11490f9317dd831912d782c054064e5b60f4cf596ea56b985aa",
+                  "selection_policy": "ssh-observed-password-results-v1",
+                  "excerpt_policy": "first_6_last_6",
+                  "host": "mock-ec2-C04",
+                  "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00012",
+                  "mapping_kind": "explicit_mock_target",
+                  "time_shift_seconds": 0,
+                  "source_ip": "198.51.100.20",
+                  "window_start": "2026-08-20T06:50:00Z",
+                  "window_end": "2026-08-20T07:00:00Z",
+                  "record_count": 100,
+                  "failed_attempt_count": 60,
+                  "accepted_count": 0,
+                  "auxiliary_count": 40,
+                  "records": [
+                    {
+                      "record_id": "C04-000001",
+                      "source_time": "2026-08-20T06:50:04.999000Z",
+                      "received_at": "2026-08-20T06:50:05.049000Z",
+                      "host": "mock-ec2-C04",
+                      "process_id": 10001,
+                      "message": "Invalid user mock-user from 198.51.100.20 port 41000"
+                    },
+                    {
+                      "record_id": "C04-000002",
+                      "source_time": "2026-08-20T06:50:05Z",
+                      "received_at": "2026-08-20T06:50:05.050000Z",
+                      "host": "mock-ec2-C04",
+                      "process_id": 10001,
+                      "message": "Failed password for invalid user mock-user from 198.51.100.20 port 41000 ssh2"
+                    },
+                    {
+                      "record_id": "C04-000003",
+                      "source_time": "2026-08-20T06:50:15Z",
+                      "received_at": "2026-08-20T06:50:15.050000Z",
+                      "host": "mock-ec2-C04",
+                      "process_id": 10001,
+                      "message": "Failed password for invalid user mock-user from 198.51.100.20 port 41000 ssh2"
+                    },
+                    {
+                      "record_id": "C04-000004",
+                      "source_time": "2026-08-20T06:50:25Z",
+                      "received_at": "2026-08-20T06:50:25.050000Z",
+                      "host": "mock-ec2-C04",
+                      "process_id": 10001,
+                      "message": "Failed password for invalid user mock-user from 198.51.100.20 port 41000 ssh2"
+                    },
+                    {
+                      "record_id": "C04-000005",
+                      "source_time": "2026-08-20T06:50:25.001000Z",
+                      "received_at": "2026-08-20T06:50:25.051000Z",
+                      "host": "mock-ec2-C04",
+                      "process_id": 10001,
+                      "message": "Connection closed by invalid user mock-user 198.51.100.20 port 41000 [preauth]"
+                    },
+                    {
+                      "record_id": "C04-000006",
+                      "source_time": "2026-08-20T06:50:34.999000Z",
+                      "received_at": "2026-08-20T06:50:35.049000Z",
+                      "host": "mock-ec2-C04",
+                      "process_id": 10002,
+                      "message": "Invalid user mock-user from 198.51.100.20 port 41001"
+                    },
+                    {
+                      "record_id": "C04-000095",
+                      "source_time": "2026-08-20T06:59:25.001000Z",
+                      "received_at": "2026-08-20T06:59:25.051000Z",
+                      "host": "mock-ec2-C04",
+                      "process_id": 10019,
+                      "message": "Connection closed by invalid user mock-user 198.51.100.20 port 41018 [preauth]"
+                    },
+                    {
+                      "record_id": "C04-000096",
+                      "source_time": "2026-08-20T06:59:34.999000Z",
+                      "received_at": "2026-08-20T06:59:35.049000Z",
+                      "host": "mock-ec2-C04",
+                      "process_id": 10020,
+                      "message": "Invalid user mock-user from 198.51.100.20 port 41019"
+                    },
+                    {
+                      "record_id": "C04-000097",
+                      "source_time": "2026-08-20T06:59:35Z",
+                      "received_at": "2026-08-20T06:59:35.050000Z",
+                      "host": "mock-ec2-C04",
+                      "process_id": 10020,
+                      "message": "Failed password for invalid user mock-user from 198.51.100.20 port 41019 ssh2"
+                    },
+                    {
+                      "record_id": "C04-000098",
+                      "source_time": "2026-08-20T06:59:45Z",
+                      "received_at": "2026-08-20T06:59:45.050000Z",
+                      "host": "mock-ec2-C04",
+                      "process_id": 10020,
+                      "message": "Failed password for invalid user mock-user from 198.51.100.20 port 41019 ssh2"
+                    },
+                    {
+                      "record_id": "C04-000099",
+                      "source_time": "2026-08-20T06:59:55Z",
+                      "received_at": "2026-08-20T06:59:55.050000Z",
+                      "host": "mock-ec2-C04",
+                      "process_id": 10020,
+                      "message": "Failed password for invalid user mock-user from 198.51.100.20 port 41019 ssh2"
+                    },
+                    {
+                      "record_id": "C04-000100",
+                      "source_time": "2026-08-20T06:59:55.001000Z",
+                      "received_at": "2026-08-20T06:59:55.051000Z",
+                      "host": "mock-ec2-C04",
+                      "process_id": 10020,
+                      "message": "Connection closed by invalid user mock-user 198.51.100.20 port 41019 [preauth]"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "isolation_execution": null,
+        "capabilities": [
+          {
+            "runbook_id": "RUNBOOK_NACL_ADD_DENY",
+            "purpose": "출발지 CIDR을 NACL 거부 규칙으로 차단",
+            "allowed_target_asset_types": [
+              "NACL"
+            ]
+          }
+        ]
+      },
+      "evaluation_role": "mvp_scenario"
+    },
+    {
+      "case_id": "C05",
+      "title": "SSH 실패 5회 / 10초 · MEDIUM",
+      "provenance": {
+        "threat_source": "datasets/golden/secops/input/evt_ssh_bruteforce_007.json",
+        "threat_sha256": "0300afd37eee2cac2f47e948ed3ca9f495538b1ae57eabce393eae97641dc59f",
+        "risk_source": "datasets/golden/secops/expected/evt_ssh_bruteforce_007.json",
+        "risk_sha256": "740f358b5151e5fa08f692e98f27023b15a8a06421706bafd76f01724b144c16",
+        "asset_source": "datasets/golden/finops/input/asset_inventory_001.json",
+        "asset_sha256": "377d4a95c5f4a786a3faf04493d8f66ea1bc32899071486da127142c081b8bfa",
+        "synthetic_nacl_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001",
+        "synthesis": [
+          "EC2 fields originate from the stated Golden inventory; direct SG/NACL and their snapshots are explicit synthetic prerequisites in inventory.json.",
+          "UUIDs, collection run, event collection (+1 second), and evidence capture (+5 seconds) are fixed evaluation identities/times, not recorded live collection.",
+          "Logs come from the #350 corpus with its full aggregate and at most 12 deterministic excerpt rows. No time shift or target remapping is used."
+        ],
+        "reachability": "모의 위협으로 공급한 뒤의 서비스 접수·조립 경로. 수집기가 이런 관측을 위협으로 탐지하거나 Incident로 올려야 한다는 증거가 아니다.",
+        "log_manifest_source": "datasets/secops-log-corpus/cases/C05/manifest.json",
+        "log_manifest_sha256": "6462c6e0cfa32216eb0f888256d4f0019821ff8d17b039093919cfec9836e8d3",
+        "log_expected_source": "datasets/secops-log-corpus/cases/C05/expected.json",
+        "log_expected_sha256": "1e0b9bf53c8267b09d7e050bc38b2dd2d8ea93427e705bf576eae14a7a622578",
+        "log_records_source": "datasets/secops-log-corpus/cases/C05/logs.jsonl",
+        "log_records_sha256": "7cb3895719e04067992604f858d17d12af7712aa0698a70fb183f6118cfe00b5",
+        "context_source": "apps/core-api/ai/evaluation/secops/inventory.json",
+        "context_sha256": "721e48bfd52bc740356f79a14360a42861606c686482ed9522e0f9fde0a489e4"
+      },
+      "graph_input": {
+        "domain": "SECOPS",
+        "incident_id": "a1e5793f-9cf5-5cc6-9900-3ae25bd257cd",
+        "asset_context": {
+          "arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00002",
+          "resource_id": "i-0a1b2c3d4e5f00002",
+          "asset_type": "EC2",
+          "resource_role": "PRIMARY",
+          "name": "golden-ec2-active-boundary",
+          "account_id": "123456789012",
+          "region": "ap-northeast-2",
+          "state": "running",
+          "spec": {
+            "instance_type": "t3.large",
+            "availability_zone": "ap-northeast-2a",
+            "vpc_id": "vpc-0a1b2c3d4e5f0f001",
+            "subnet_id": "subnet-0a1b2c3d4e5f0f001",
+            "private_ip": "10.0.1.12",
+            "tags": {
+              "Name": "golden-ec2-active-boundary",
+              "Environment": "staging",
+              "Owner": "qa"
+            }
+          },
+          "relationships": [
+            {
+              "relation_type": "PROTECTED_BY",
+              "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001"
+            },
+            {
+              "relation_type": "SECURED_BY",
+              "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00001"
+            }
+          ],
+          "evaluation_status": "PENDING",
+          "health_score": null,
+          "verdict": null,
+          "skip_reason_code": null,
+          "collected_at": "2026-08-19T06:00:00Z"
+        },
+        "initial_risk": {
+          "threat_event_id": "d637ad52-25b8-5960-9a78-c61ceb30cbae",
+          "initial_risk_level": "MEDIUM",
+          "response_mode": "AGENT_WAIT",
+          "reason_codes": [
+            "RISK_SSH_BRUTEFORCE"
+          ]
+        },
+        "evidences": [
+          {
+            "evidence_id": "f7fbbbfb-dfdc-5e7f-9a8e-e8ef9efeb4e0",
+            "evidence_type": "THREAT",
+            "content": {
+              "event": {
+                "threat_event_id": "d637ad52-25b8-5960-9a78-c61ceb30cbae",
+                "source_event_id": "evt-ssh-bruteforce-007",
+                "event_type": "SSH_BRUTE_FORCE",
+                "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00002",
+                "occurred_at": "2026-08-20T07:10:00Z",
+                "payload": {
+                  "source_ip": "198.51.100.77",
+                  "failed_attempt_count": 5,
+                  "window_seconds": 10
+                },
+                "deduplication_key": "SSH_BRUTE_FORCE|c6b1c1af1f9202a6be9ef353858affd3217f5245b65a67a6391a0c4d24adc53b",
+                "collected_at": "2026-08-20T07:10:01Z"
+              },
+              "context": {
+                "version": "mvp-mock-v1",
+                "captured_at": "2026-08-20T07:10:05Z",
+                "target_status": "available",
+                "target": {
+                  "collection_run_id": "0fb79e3f-9d8a-5fc3-abbc-77c17ebebc1d",
+                  "asset": {
+                    "arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00002",
+                    "resource_id": "i-0a1b2c3d4e5f00002",
+                    "asset_type": "EC2",
+                    "resource_role": "PRIMARY",
+                    "name": "golden-ec2-active-boundary",
+                    "account_id": "123456789012",
+                    "region": "ap-northeast-2",
+                    "state": "running",
+                    "spec": {
+                      "instance_type": "t3.large",
+                      "availability_zone": "ap-northeast-2a",
+                      "vpc_id": "vpc-0a1b2c3d4e5f0f001",
+                      "subnet_id": "subnet-0a1b2c3d4e5f0f001",
+                      "private_ip": "10.0.1.12",
+                      "tags": {
+                        "Name": "golden-ec2-active-boundary",
+                        "Environment": "staging",
+                        "Owner": "qa"
+                      }
+                    },
+                    "relationships": [
+                      {
+                        "relation_type": "PROTECTED_BY",
+                        "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001"
+                      },
+                      {
+                        "relation_type": "SECURED_BY",
+                        "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00001"
+                      }
+                    ],
+                    "evaluation_status": "PENDING",
+                    "health_score": null,
+                    "verdict": null,
+                    "skip_reason_code": null,
+                    "collected_at": "2026-08-19T06:00:00Z"
+                  }
+                },
+                "related_assets": [
+                  {
+                    "collection_run_id": "0fb79e3f-9d8a-5fc3-abbc-77c17ebebc1d",
+                    "asset": {
+                      "arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001",
+                      "resource_id": "acl-0a1b2c3d4e5f00001",
+                      "asset_type": "NACL",
+                      "resource_role": "RUNBOOK_SUPPORT",
+                      "name": null,
+                      "account_id": "123456789012",
+                      "region": "ap-northeast-2",
+                      "state": null,
+                      "spec": {
+                        "vpc_id": null,
+                        "is_default": false,
+                        "associated_subnet_ids": [
+                          "subnet-0a1b2c3d4e5f0f001"
+                        ]
+                      },
+                      "relationships": [],
+                      "evaluation_status": "NOT_APPLICABLE",
+                      "health_score": null,
+                      "verdict": null,
+                      "skip_reason_code": null,
+                      "collected_at": "2026-08-19T06:00:00Z"
+                    }
+                  },
+                  {
+                    "collection_run_id": "0fb79e3f-9d8a-5fc3-abbc-77c17ebebc1d",
+                    "asset": {
+                      "arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00001",
+                      "resource_id": "sg-0a1b2c3d4e5f00001",
+                      "asset_type": "SG",
+                      "resource_role": "PRIMARY",
+                      "name": null,
+                      "account_id": "123456789012",
+                      "region": "ap-northeast-2",
+                      "state": null,
+                      "spec": {
+                        "description": null,
+                        "vpc_id": null,
+                        "attached": true,
+                        "open_to_world": []
+                      },
+                      "relationships": [],
+                      "evaluation_status": "PENDING",
+                      "health_score": null,
+                      "verdict": null,
+                      "skip_reason_code": null,
+                      "collected_at": "2026-08-19T06:00:00Z"
+                    }
+                  }
+                ],
+                "relation_issues": [],
+                "log_evidence": {
+                  "version": 1,
+                  "data_kind": "synthetic",
+                  "coverage": "complete_generated_fixture",
+                  "case_id": "C05",
+                  "corpus_fingerprint": "7cb3895719e04067992604f858d17d12af7712aa0698a70fb183f6118cfe00b5",
+                  "source_id": "aws-directory-service-password-example",
+                  "source_fingerprint": "e0481279d9ffc11490f9317dd831912d782c054064e5b60f4cf596ea56b985aa",
+                  "selection_policy": "ssh-observed-password-results-v1",
+                  "excerpt_policy": "first_6_last_6",
+                  "host": "mock-ec2-C05",
+                  "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00002",
+                  "mapping_kind": "explicit_mock_target",
+                  "time_shift_seconds": 0,
+                  "source_ip": "198.51.100.77",
+                  "window_start": "2026-08-20T07:09:50Z",
+                  "window_end": "2026-08-20T07:10:00Z",
+                  "record_count": 9,
+                  "failed_attempt_count": 5,
+                  "accepted_count": 0,
+                  "auxiliary_count": 4,
+                  "records": [
+                    {
+                      "record_id": "C05-000001",
+                      "source_time": "2026-08-20T07:09:50.999000Z",
+                      "received_at": "2026-08-20T07:09:51.049000Z",
+                      "host": "mock-ec2-C05",
+                      "process_id": 10001,
+                      "message": "Invalid user mock-user from 198.51.100.77 port 41000"
+                    },
+                    {
+                      "record_id": "C05-000002",
+                      "source_time": "2026-08-20T07:09:51Z",
+                      "received_at": "2026-08-20T07:09:51.050000Z",
+                      "host": "mock-ec2-C05",
+                      "process_id": 10001,
+                      "message": "Failed password for invalid user mock-user from 198.51.100.77 port 41000 ssh2"
+                    },
+                    {
+                      "record_id": "C05-000003",
+                      "source_time": "2026-08-20T07:09:53Z",
+                      "received_at": "2026-08-20T07:09:53.050000Z",
+                      "host": "mock-ec2-C05",
+                      "process_id": 10001,
+                      "message": "Failed password for invalid user mock-user from 198.51.100.77 port 41000 ssh2"
+                    },
+                    {
+                      "record_id": "C05-000004",
+                      "source_time": "2026-08-20T07:09:55Z",
+                      "received_at": "2026-08-20T07:09:55.050000Z",
+                      "host": "mock-ec2-C05",
+                      "process_id": 10001,
+                      "message": "Failed password for invalid user mock-user from 198.51.100.77 port 41000 ssh2"
+                    },
+                    {
+                      "record_id": "C05-000005",
+                      "source_time": "2026-08-20T07:09:55.001000Z",
+                      "received_at": "2026-08-20T07:09:55.051000Z",
+                      "host": "mock-ec2-C05",
+                      "process_id": 10001,
+                      "message": "Connection closed by invalid user mock-user 198.51.100.77 port 41000 [preauth]"
+                    },
+                    {
+                      "record_id": "C05-000006",
+                      "source_time": "2026-08-20T07:09:56.999000Z",
+                      "received_at": "2026-08-20T07:09:57.049000Z",
+                      "host": "mock-ec2-C05",
+                      "process_id": 10002,
+                      "message": "Invalid user mock-user from 198.51.100.77 port 41001"
+                    },
+                    {
+                      "record_id": "C05-000007",
+                      "source_time": "2026-08-20T07:09:57Z",
+                      "received_at": "2026-08-20T07:09:57.050000Z",
+                      "host": "mock-ec2-C05",
+                      "process_id": 10002,
+                      "message": "Failed password for invalid user mock-user from 198.51.100.77 port 41001 ssh2"
+                    },
+                    {
+                      "record_id": "C05-000008",
+                      "source_time": "2026-08-20T07:09:59Z",
+                      "received_at": "2026-08-20T07:09:59.050000Z",
+                      "host": "mock-ec2-C05",
+                      "process_id": 10002,
+                      "message": "Failed password for invalid user mock-user from 198.51.100.77 port 41001 ssh2"
+                    },
+                    {
+                      "record_id": "C05-000009",
+                      "source_time": "2026-08-20T07:09:59.001000Z",
+                      "received_at": "2026-08-20T07:09:59.051000Z",
+                      "host": "mock-ec2-C05",
+                      "process_id": 10002,
+                      "message": "Connection closed by invalid user mock-user 198.51.100.77 port 41001 [preauth]"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "isolation_execution": null,
+        "capabilities": [
+          {
+            "runbook_id": "RUNBOOK_NACL_ADD_DENY",
+            "purpose": "출발지 CIDR을 NACL 거부 규칙으로 차단",
+            "allowed_target_asset_types": [
+              "NACL"
+            ]
+          }
+        ]
+      },
+      "evaluation_role": "mvp_scenario"
+    },
+    {
+      "case_id": "C06",
+      "title": "SSH 실패 5회 / 3600초 · LOW",
+      "provenance": {
+        "threat_source": "datasets/golden/secops/input/evt_ssh_bruteforce_002.json",
+        "threat_sha256": "97212be9eb7d3e3c6161a64dbfd4b36ad2b565db130fb77794c101298ef4fd1d",
+        "risk_source": "datasets/golden/secops/expected/evt_ssh_bruteforce_002.json",
+        "risk_sha256": "09ac7089f4a479f1c0dab2f00ed5a3d82219b9dd4cb912e71955fd6b7dba5a3f",
+        "asset_source": "datasets/golden/finops/input/asset_inventory_001.json",
+        "asset_sha256": "377d4a95c5f4a786a3faf04493d8f66ea1bc32899071486da127142c081b8bfa",
+        "synthetic_nacl_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001",
+        "synthesis": [
+          "EC2 fields originate from the stated Golden inventory; direct SG/NACL and their snapshots are explicit synthetic prerequisites in inventory.json.",
+          "UUIDs, collection run, event collection (+1 second), and evidence capture (+5 seconds) are fixed evaluation identities/times, not recorded live collection.",
+          "Logs come from the #350 corpus with its full aggregate and at most 12 deterministic excerpt rows. No time shift or target remapping is used."
+        ],
+        "reachability": "모의 위협으로 공급한 뒤의 서비스 접수·조립 경로. 수집기가 이런 관측을 위협으로 탐지하거나 Incident로 올려야 한다는 증거가 아니다.",
+        "log_manifest_source": "datasets/secops-log-corpus/cases/C06/manifest.json",
+        "log_manifest_sha256": "42f3a3cf834ce770382d64d4b8f6c2e57e52ac4551c3b9b2e70d01da299b3958",
+        "log_expected_source": "datasets/secops-log-corpus/cases/C06/expected.json",
+        "log_expected_sha256": "6ff2e026c4e021917b5a9db52a9d0b73ed7e9d789838164ccdcdaad068d10d7c",
+        "log_records_source": "datasets/secops-log-corpus/cases/C06/logs.jsonl",
+        "log_records_sha256": "abea5e46d8860025200d6d0a77d1d2855d2727eb922af0175232bc1b3f35bd79",
+        "context_source": "apps/core-api/ai/evaluation/secops/inventory.json",
+        "context_sha256": "721e48bfd52bc740356f79a14360a42861606c686482ed9522e0f9fde0a489e4"
+      },
+      "graph_input": {
+        "domain": "SECOPS",
+        "incident_id": "81338c7f-a99a-52e2-9b19-8bc1975bd6ce",
+        "asset_context": {
+          "arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00002",
+          "resource_id": "i-0a1b2c3d4e5f00002",
+          "asset_type": "EC2",
+          "resource_role": "PRIMARY",
+          "name": "golden-ec2-active-boundary",
+          "account_id": "123456789012",
+          "region": "ap-northeast-2",
+          "state": "running",
+          "spec": {
+            "instance_type": "t3.large",
+            "availability_zone": "ap-northeast-2a",
+            "vpc_id": "vpc-0a1b2c3d4e5f0f001",
+            "subnet_id": "subnet-0a1b2c3d4e5f0f001",
+            "private_ip": "10.0.1.12",
+            "tags": {
+              "Name": "golden-ec2-active-boundary",
+              "Environment": "staging",
+              "Owner": "qa"
+            }
+          },
+          "relationships": [
+            {
+              "relation_type": "PROTECTED_BY",
+              "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001"
+            },
+            {
+              "relation_type": "SECURED_BY",
+              "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00001"
+            }
+          ],
+          "evaluation_status": "PENDING",
+          "health_score": null,
+          "verdict": null,
+          "skip_reason_code": null,
+          "collected_at": "2026-08-19T06:00:00Z"
+        },
+        "initial_risk": {
+          "threat_event_id": "bd070f0c-0ca6-5afb-af02-2df0b8e557a5",
+          "initial_risk_level": "LOW",
+          "response_mode": "AGENT_WAIT",
+          "reason_codes": [
+            "RISK_SSH_LOW_SIGNAL"
+          ]
+        },
+        "evidences": [
+          {
+            "evidence_id": "0c6bb2d0-59b0-5abd-96e1-06f7f1278985",
+            "evidence_type": "THREAT",
+            "content": {
+              "event": {
+                "threat_event_id": "bd070f0c-0ca6-5afb-af02-2df0b8e557a5",
+                "source_event_id": "evt-ssh-bruteforce-002",
+                "event_type": "SSH_BRUTE_FORCE",
+                "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00002",
+                "occurred_at": "2026-08-19T06:40:00Z",
+                "payload": {
+                  "source_ip": "198.51.100.77",
+                  "failed_attempt_count": 5,
+                  "window_seconds": 3600
+                },
+                "deduplication_key": "SSH_BRUTE_FORCE|73c21228a5b3f4beb154fc0de8ccd8b8e6b21833279d493bfd6aaa8b240d1806",
+                "collected_at": "2026-08-19T06:40:01Z"
+              },
+              "context": {
+                "version": "mvp-mock-v1",
+                "captured_at": "2026-08-19T06:40:05Z",
+                "target_status": "available",
+                "target": {
+                  "collection_run_id": "39638b1a-822f-56cc-8080-8a2ea41709cc",
+                  "asset": {
+                    "arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00002",
+                    "resource_id": "i-0a1b2c3d4e5f00002",
+                    "asset_type": "EC2",
+                    "resource_role": "PRIMARY",
+                    "name": "golden-ec2-active-boundary",
+                    "account_id": "123456789012",
+                    "region": "ap-northeast-2",
+                    "state": "running",
+                    "spec": {
+                      "instance_type": "t3.large",
+                      "availability_zone": "ap-northeast-2a",
+                      "vpc_id": "vpc-0a1b2c3d4e5f0f001",
+                      "subnet_id": "subnet-0a1b2c3d4e5f0f001",
+                      "private_ip": "10.0.1.12",
+                      "tags": {
+                        "Name": "golden-ec2-active-boundary",
+                        "Environment": "staging",
+                        "Owner": "qa"
+                      }
+                    },
+                    "relationships": [
+                      {
+                        "relation_type": "PROTECTED_BY",
+                        "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001"
+                      },
+                      {
+                        "relation_type": "SECURED_BY",
+                        "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00001"
+                      }
+                    ],
+                    "evaluation_status": "PENDING",
+                    "health_score": null,
+                    "verdict": null,
+                    "skip_reason_code": null,
+                    "collected_at": "2026-08-19T06:00:00Z"
+                  }
+                },
+                "related_assets": [
+                  {
+                    "collection_run_id": "39638b1a-822f-56cc-8080-8a2ea41709cc",
+                    "asset": {
+                      "arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001",
+                      "resource_id": "acl-0a1b2c3d4e5f00001",
+                      "asset_type": "NACL",
+                      "resource_role": "RUNBOOK_SUPPORT",
+                      "name": null,
+                      "account_id": "123456789012",
+                      "region": "ap-northeast-2",
+                      "state": null,
+                      "spec": {
+                        "vpc_id": null,
+                        "is_default": false,
+                        "associated_subnet_ids": [
+                          "subnet-0a1b2c3d4e5f0f001"
+                        ]
+                      },
+                      "relationships": [],
+                      "evaluation_status": "NOT_APPLICABLE",
+                      "health_score": null,
+                      "verdict": null,
+                      "skip_reason_code": null,
+                      "collected_at": "2026-08-19T06:00:00Z"
+                    }
+                  },
+                  {
+                    "collection_run_id": "39638b1a-822f-56cc-8080-8a2ea41709cc",
+                    "asset": {
+                      "arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00001",
+                      "resource_id": "sg-0a1b2c3d4e5f00001",
+                      "asset_type": "SG",
+                      "resource_role": "PRIMARY",
+                      "name": null,
+                      "account_id": "123456789012",
+                      "region": "ap-northeast-2",
+                      "state": null,
+                      "spec": {
+                        "description": null,
+                        "vpc_id": null,
+                        "attached": true,
+                        "open_to_world": []
+                      },
+                      "relationships": [],
+                      "evaluation_status": "PENDING",
+                      "health_score": null,
+                      "verdict": null,
+                      "skip_reason_code": null,
+                      "collected_at": "2026-08-19T06:00:00Z"
+                    }
+                  }
+                ],
+                "relation_issues": [],
+                "log_evidence": {
+                  "version": 1,
+                  "data_kind": "synthetic",
+                  "coverage": "complete_generated_fixture",
+                  "case_id": "C06",
+                  "corpus_fingerprint": "abea5e46d8860025200d6d0a77d1d2855d2727eb922af0175232bc1b3f35bd79",
+                  "source_id": "aws-directory-service-password-example",
+                  "source_fingerprint": "e0481279d9ffc11490f9317dd831912d782c054064e5b60f4cf596ea56b985aa",
+                  "selection_policy": "ssh-observed-password-results-v1",
+                  "excerpt_policy": "first_6_last_6",
+                  "host": "mock-ec2-C06",
+                  "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00002",
+                  "mapping_kind": "explicit_mock_target",
+                  "time_shift_seconds": 0,
+                  "source_ip": "198.51.100.77",
+                  "window_start": "2026-08-19T05:40:00Z",
+                  "window_end": "2026-08-19T06:40:00Z",
+                  "record_count": 15,
+                  "failed_attempt_count": 5,
+                  "accepted_count": 0,
+                  "auxiliary_count": 10,
+                  "records": [
+                    {
+                      "record_id": "C06-000001",
+                      "source_time": "2026-08-19T05:45:59.999000Z",
+                      "received_at": "2026-08-19T05:46:00.049000Z",
+                      "host": "mock-ec2-C06",
+                      "process_id": 10001,
+                      "message": "Invalid user mock-user from 198.51.100.77 port 41000"
+                    },
+                    {
+                      "record_id": "C06-000002",
+                      "source_time": "2026-08-19T05:46:00Z",
+                      "received_at": "2026-08-19T05:46:00.050000Z",
+                      "host": "mock-ec2-C06",
+                      "process_id": 10001,
+                      "message": "Failed password for invalid user mock-user from 198.51.100.77 port 41000 ssh2"
+                    },
+                    {
+                      "record_id": "C06-000003",
+                      "source_time": "2026-08-19T05:46:00.001000Z",
+                      "received_at": "2026-08-19T05:46:00.051000Z",
+                      "host": "mock-ec2-C06",
+                      "process_id": 10001,
+                      "message": "Connection closed by invalid user mock-user 198.51.100.77 port 41000 [preauth]"
+                    },
+                    {
+                      "record_id": "C06-000004",
+                      "source_time": "2026-08-19T05:57:59.999000Z",
+                      "received_at": "2026-08-19T05:58:00.049000Z",
+                      "host": "mock-ec2-C06",
+                      "process_id": 10002,
+                      "message": "Invalid user mock-user from 198.51.100.77 port 41001"
+                    },
+                    {
+                      "record_id": "C06-000005",
+                      "source_time": "2026-08-19T05:58:00Z",
+                      "received_at": "2026-08-19T05:58:00.050000Z",
+                      "host": "mock-ec2-C06",
+                      "process_id": 10002,
+                      "message": "Failed password for invalid user mock-user from 198.51.100.77 port 41001 ssh2"
+                    },
+                    {
+                      "record_id": "C06-000006",
+                      "source_time": "2026-08-19T05:58:00.001000Z",
+                      "received_at": "2026-08-19T05:58:00.051000Z",
+                      "host": "mock-ec2-C06",
+                      "process_id": 10002,
+                      "message": "Connection closed by invalid user mock-user 198.51.100.77 port 41001 [preauth]"
+                    },
+                    {
+                      "record_id": "C06-000010",
+                      "source_time": "2026-08-19T06:21:59.999000Z",
+                      "received_at": "2026-08-19T06:22:00.049000Z",
+                      "host": "mock-ec2-C06",
+                      "process_id": 10004,
+                      "message": "Invalid user mock-user from 198.51.100.77 port 41003"
+                    },
+                    {
+                      "record_id": "C06-000011",
+                      "source_time": "2026-08-19T06:22:00Z",
+                      "received_at": "2026-08-19T06:22:00.050000Z",
+                      "host": "mock-ec2-C06",
+                      "process_id": 10004,
+                      "message": "Failed password for invalid user mock-user from 198.51.100.77 port 41003 ssh2"
+                    },
+                    {
+                      "record_id": "C06-000012",
+                      "source_time": "2026-08-19T06:22:00.001000Z",
+                      "received_at": "2026-08-19T06:22:00.051000Z",
+                      "host": "mock-ec2-C06",
+                      "process_id": 10004,
+                      "message": "Connection closed by invalid user mock-user 198.51.100.77 port 41003 [preauth]"
+                    },
+                    {
+                      "record_id": "C06-000013",
+                      "source_time": "2026-08-19T06:33:59.999000Z",
+                      "received_at": "2026-08-19T06:34:00.049000Z",
+                      "host": "mock-ec2-C06",
+                      "process_id": 10005,
+                      "message": "Invalid user mock-user from 198.51.100.77 port 41004"
+                    },
+                    {
+                      "record_id": "C06-000014",
+                      "source_time": "2026-08-19T06:34:00Z",
+                      "received_at": "2026-08-19T06:34:00.050000Z",
+                      "host": "mock-ec2-C06",
+                      "process_id": 10005,
+                      "message": "Failed password for invalid user mock-user from 198.51.100.77 port 41004 ssh2"
+                    },
+                    {
+                      "record_id": "C06-000015",
+                      "source_time": "2026-08-19T06:34:00.001000Z",
+                      "received_at": "2026-08-19T06:34:00.051000Z",
+                      "host": "mock-ec2-C06",
+                      "process_id": 10005,
+                      "message": "Connection closed by invalid user mock-user 198.51.100.77 port 41004 [preauth]"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "isolation_execution": null,
+        "capabilities": [
+          {
+            "runbook_id": "RUNBOOK_NACL_ADD_DENY",
+            "purpose": "출발지 CIDR을 NACL 거부 규칙으로 차단",
+            "allowed_target_asset_types": [
+              "NACL"
+            ]
+          }
+        ]
+      },
+      "evaluation_role": "mvp_scenario"
+    },
+    {
+      "case_id": "C07",
+      "title": "SSH 실패 1회 / 1초 · LOW",
+      "provenance": {
+        "threat_source": "datasets/golden/secops/input/evt_ssh_bruteforce_003.json",
+        "threat_sha256": "c01d1ba23ba2bd93099e4caddcd997bf388e48322b9e951b281f0515ebe47268",
+        "risk_source": "datasets/golden/secops/expected/evt_ssh_bruteforce_003.json",
+        "risk_sha256": "4afdb5fe695ee76b36fa4b2eb35b8dee2d8683a25c1117df6b71a638d16b9434",
+        "asset_source": "datasets/golden/finops/input/asset_inventory_002.json",
+        "asset_sha256": "f248e6cf432e4a81bd9e19e0afac40a81bacd7a906be107d9a118d5a9966b40e",
+        "synthetic_nacl_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00002",
+        "synthesis": [
+          "EC2 fields originate from the stated Golden inventory; direct SG/NACL and their snapshots are explicit synthetic prerequisites in inventory.json.",
+          "UUIDs, collection run, event collection (+1 second), and evidence capture (+5 seconds) are fixed evaluation identities/times, not recorded live collection.",
+          "Logs come from the #350 corpus with its full aggregate and at most 12 deterministic excerpt rows. No time shift or target remapping is used."
+        ],
+        "reachability": "모의 위협으로 공급한 뒤의 서비스 접수·조립 경로. 수집기가 이런 관측을 위협으로 탐지하거나 Incident로 올려야 한다는 증거가 아니다.",
+        "log_manifest_source": "datasets/secops-log-corpus/cases/C07/manifest.json",
+        "log_manifest_sha256": "ce7a64c519187f3108054941fab2040a0f2c14aa3ff65a6fde75c0cabd52e0a0",
+        "log_expected_source": "datasets/secops-log-corpus/cases/C07/expected.json",
+        "log_expected_sha256": "18f50b3210ab42c8be015968effab03013cc4e1c2ca78f2ce24ced31d3c73cc5",
+        "log_records_source": "datasets/secops-log-corpus/cases/C07/logs.jsonl",
+        "log_records_sha256": "9fe261af85b4a841ea2d791be42dc99ed74c46a90ef5bb88fcfaf913d6180527",
+        "context_source": "apps/core-api/ai/evaluation/secops/inventory.json",
+        "context_sha256": "721e48bfd52bc740356f79a14360a42861606c686482ed9522e0f9fde0a489e4"
+      },
+      "graph_input": {
+        "domain": "SECOPS",
+        "incident_id": "d826e5f4-2c8f-56d9-a488-2295a3083430",
+        "asset_context": {
+          "arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00012",
+          "resource_id": "i-0a1b2c3d4e5f00012",
+          "asset_type": "EC2",
+          "resource_role": "PRIMARY",
+          "name": "golden-ec2-dp-boundary",
+          "account_id": "123456789012",
+          "region": "ap-northeast-2",
+          "state": "running",
+          "spec": {
+            "instance_type": "t3.xlarge",
+            "availability_zone": "ap-northeast-2c",
+            "vpc_id": "vpc-0a1b2c3d4e5f0f001",
+            "subnet_id": "subnet-0a1b2c3d4e5f0f002",
+            "private_ip": "10.0.2.22",
+            "tags": {
+              "Name": "golden-ec2-dp-boundary",
+              "Environment": "staging",
+              "Owner": "qa"
+            }
+          },
+          "relationships": [
+            {
+              "relation_type": "PROTECTED_BY",
+              "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00002"
+            },
+            {
+              "relation_type": "SECURED_BY",
+              "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00002"
+            }
+          ],
+          "evaluation_status": "PENDING",
+          "health_score": null,
+          "verdict": null,
+          "skip_reason_code": null,
+          "collected_at": "2026-08-20T06:00:00Z"
+        },
+        "initial_risk": {
+          "threat_event_id": "fdd5a6ba-69b3-59d9-b653-ffbcb7115600",
+          "initial_risk_level": "LOW",
+          "response_mode": "AGENT_WAIT",
+          "reason_codes": [
+            "RISK_SSH_LOW_SIGNAL"
+          ]
+        },
+        "evidences": [
+          {
+            "evidence_id": "b95d9874-2d69-54a1-92b9-47fcc30053ea",
+            "evidence_type": "THREAT",
+            "content": {
+              "event": {
+                "threat_event_id": "fdd5a6ba-69b3-59d9-b653-ffbcb7115600",
+                "source_event_id": "evt-ssh-bruteforce-003",
+                "event_type": "SSH_BRUTE_FORCE",
+                "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00012",
+                "occurred_at": "2026-08-20T06:40:00Z",
+                "payload": {
+                  "source_ip": "198.51.100.20",
+                  "failed_attempt_count": 1,
+                  "window_seconds": 1
+                },
+                "deduplication_key": "SSH_BRUTE_FORCE|02fa035b2f9389b811d94be866b32d988222566b5cf7e2f7e3a4fce35915069d",
+                "collected_at": "2026-08-20T06:40:01Z"
+              },
+              "context": {
+                "version": "mvp-mock-v1",
+                "captured_at": "2026-08-20T06:40:05Z",
+                "target_status": "available",
+                "target": {
+                  "collection_run_id": "e3a33046-7a60-54a4-a1d5-e6fc40b4563b",
+                  "asset": {
+                    "arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00012",
+                    "resource_id": "i-0a1b2c3d4e5f00012",
+                    "asset_type": "EC2",
+                    "resource_role": "PRIMARY",
+                    "name": "golden-ec2-dp-boundary",
+                    "account_id": "123456789012",
+                    "region": "ap-northeast-2",
+                    "state": "running",
+                    "spec": {
+                      "instance_type": "t3.xlarge",
+                      "availability_zone": "ap-northeast-2c",
+                      "vpc_id": "vpc-0a1b2c3d4e5f0f001",
+                      "subnet_id": "subnet-0a1b2c3d4e5f0f002",
+                      "private_ip": "10.0.2.22",
+                      "tags": {
+                        "Name": "golden-ec2-dp-boundary",
+                        "Environment": "staging",
+                        "Owner": "qa"
+                      }
+                    },
+                    "relationships": [
+                      {
+                        "relation_type": "PROTECTED_BY",
+                        "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00002"
+                      },
+                      {
+                        "relation_type": "SECURED_BY",
+                        "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00002"
+                      }
+                    ],
+                    "evaluation_status": "PENDING",
+                    "health_score": null,
+                    "verdict": null,
+                    "skip_reason_code": null,
+                    "collected_at": "2026-08-20T06:00:00Z"
+                  }
+                },
+                "related_assets": [
+                  {
+                    "collection_run_id": "e3a33046-7a60-54a4-a1d5-e6fc40b4563b",
+                    "asset": {
+                      "arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00002",
+                      "resource_id": "acl-0a1b2c3d4e5f00002",
+                      "asset_type": "NACL",
+                      "resource_role": "RUNBOOK_SUPPORT",
+                      "name": null,
+                      "account_id": "123456789012",
+                      "region": "ap-northeast-2",
+                      "state": null,
+                      "spec": {
+                        "vpc_id": null,
+                        "is_default": false,
+                        "associated_subnet_ids": [
+                          "subnet-0a1b2c3d4e5f0f002"
+                        ]
+                      },
+                      "relationships": [],
+                      "evaluation_status": "NOT_APPLICABLE",
+                      "health_score": null,
+                      "verdict": null,
+                      "skip_reason_code": null,
+                      "collected_at": "2026-08-20T06:00:00Z"
+                    }
+                  },
+                  {
+                    "collection_run_id": "e3a33046-7a60-54a4-a1d5-e6fc40b4563b",
+                    "asset": {
+                      "arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00002",
+                      "resource_id": "sg-0a1b2c3d4e5f00002",
+                      "asset_type": "SG",
+                      "resource_role": "PRIMARY",
+                      "name": null,
+                      "account_id": "123456789012",
+                      "region": "ap-northeast-2",
+                      "state": null,
+                      "spec": {
+                        "description": null,
+                        "vpc_id": null,
+                        "attached": true,
+                        "open_to_world": []
+                      },
+                      "relationships": [],
+                      "evaluation_status": "PENDING",
+                      "health_score": null,
+                      "verdict": null,
+                      "skip_reason_code": null,
+                      "collected_at": "2026-08-20T06:00:00Z"
+                    }
+                  }
+                ],
+                "relation_issues": [],
+                "log_evidence": {
+                  "version": 1,
+                  "data_kind": "synthetic",
+                  "coverage": "complete_generated_fixture",
+                  "case_id": "C07",
+                  "corpus_fingerprint": "9fe261af85b4a841ea2d791be42dc99ed74c46a90ef5bb88fcfaf913d6180527",
+                  "source_id": "aws-directory-service-password-example",
+                  "source_fingerprint": "e0481279d9ffc11490f9317dd831912d782c054064e5b60f4cf596ea56b985aa",
+                  "selection_policy": "ssh-observed-password-results-v1",
+                  "excerpt_policy": "first_6_last_6",
+                  "host": "mock-ec2-C07",
+                  "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00012",
+                  "mapping_kind": "explicit_mock_target",
+                  "time_shift_seconds": 0,
+                  "source_ip": "198.51.100.20",
+                  "window_start": "2026-08-20T06:39:59Z",
+                  "window_end": "2026-08-20T06:40:00Z",
+                  "record_count": 3,
+                  "failed_attempt_count": 1,
+                  "accepted_count": 0,
+                  "auxiliary_count": 2,
+                  "records": [
+                    {
+                      "record_id": "C07-000001",
+                      "source_time": "2026-08-20T06:39:59.499000Z",
+                      "received_at": "2026-08-20T06:39:59.549000Z",
+                      "host": "mock-ec2-C07",
+                      "process_id": 10001,
+                      "message": "Invalid user mock-user from 198.51.100.20 port 41000"
+                    },
+                    {
+                      "record_id": "C07-000002",
+                      "source_time": "2026-08-20T06:39:59.500000Z",
+                      "received_at": "2026-08-20T06:39:59.550000Z",
+                      "host": "mock-ec2-C07",
+                      "process_id": 10001,
+                      "message": "Failed password for invalid user mock-user from 198.51.100.20 port 41000 ssh2"
+                    },
+                    {
+                      "record_id": "C07-000003",
+                      "source_time": "2026-08-20T06:39:59.501000Z",
+                      "received_at": "2026-08-20T06:39:59.551000Z",
+                      "host": "mock-ec2-C07",
+                      "process_id": 10001,
+                      "message": "Connection closed by invalid user mock-user 198.51.100.20 port 41000 [preauth]"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "isolation_execution": null,
+        "capabilities": [
+          {
+            "runbook_id": "RUNBOOK_NACL_ADD_DENY",
+            "purpose": "출발지 CIDR을 NACL 거부 규칙으로 차단",
+            "allowed_target_asset_types": [
+              "NACL"
+            ]
+          }
+        ]
+      },
+      "evaluation_role": "mvp_scenario"
+    }
+  ],
+  "excluded": [
+    "C08-C11 and B01 remain historical policy/contract probes outside the current seven-case baseline."
+  ],
+  "scope": "C01-C07: saved mock-log evidence, EC2 and direct SG/NACL snapshots. N01/N02: corpus controls with no threat projection or model calls.",
+  "control_cases": [
+    "N01",
+    "N02"
+  ]
+}
