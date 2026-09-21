@@ -46,6 +46,15 @@ INSTANCE = "i-0abc123456789def0"
 INSTANCE_ARN = f"arn:aws:ec2:{REGION}:{ACCOUNT}:instance/{INSTANCE}"
 VOLUME_ARN = f"arn:aws:ec2:{REGION}:{ACCOUNT}:volume/vol-0abc123456789def0"
 CANDIDATE_TYPE = "t3.medium"
+
+# 실행 함수가 아직 없는 런북 — "미구현을 실패로 확정하지 않는다"를 보는 테스트가 쓴다.
+# 종전에는 EBS 삭제였고 그것이 구현되면서(Issue #369) 여기로 옮겼다. 이 런북이 구현되면
+# 그 테스트의 precondition assert가 먼저 걸린다 — 그때 아직 남은 런북으로 바꾼다.
+UNSUPPORTED_RUNBOOK = RunbookId.RUNBOOK_EC2_ENABLE_AUTOSCALING
+UNSUPPORTED_TARGET_ARN = (
+    f"arn:aws:autoscaling:{REGION}:{ACCOUNT}:autoScalingGroup:"
+    "0abc1234-5678-90ab-cdef-000000000000:autoScalingGroupName/vigilantis-asg"
+)
 ACL = "acl-0abc123456789def0"
 ACL_ARN = f"arn:aws:ec2:{REGION}:{ACCOUNT}:network-acl/{ACL}"
 NACL_RULE_NUMBER = 100
@@ -175,9 +184,11 @@ def reserved(db, make_incident, make_candidate):
             incident,
             runbook_id=runbook,
             target_arn=INSTANCE_ARN,
+            # RIGHTSIZING 말고는 런북별 기본값을 conftest의 _SEED_PARAMETERS에서 가져온다
+            # (None이 그 뜻이다) — 빈 dict로 고정하면 파라미터가 필수인 런북에서 깨진다
             parameters={"target_instance_type": CANDIDATE_TYPE}
             if runbook is RunbookId.RUNBOOK_EC2_RIGHTSIZING
-            else {},
+            else None,
             status=CandidateStatus.CLAIMED,
         )
         incidents_repo.update_incident_status(
@@ -250,9 +261,9 @@ def test_successful_execution_waits_for_the_status_check(db, reserved, aws):
 
 def test_unsupported_runbook_is_not_dispatched(db, reserved, aws):
     """실행 함수가 없는 런북을 실패로 확정하면 미구현이 조치 실패로 둔갑한다."""
-    incident_id, execution_id = reserved(
-        runbook=RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED
-    )
+    # 이 테스트는 런북이 _RUNNERS에 **없어야** 성립한다 — 구현되면 여기서 먼저 알린다
+    assert UNSUPPORTED_RUNBOOK not in dispatcher._RUNNERS
+    incident_id, execution_id = reserved(runbook=UNSUPPORTED_RUNBOOK)
 
     report = cycle(db)
 
@@ -345,12 +356,15 @@ def test_incident_returns_to_awaiting_approval_when_a_proposal_remains(
 
 def test_incident_stays_in_progress_while_another_execution_runs(db, reserved, aws):
     """진행 중인 실행이 하나라도 남으면 나가지 않는다 — 상세 응답 계약이 그것을 요구한다."""
+    # 나란히 두는 실행은 이 주기에 **디스패치되지 않아야** 한다 — 그래야 "진행 중 1건"이
+    # 유지된다. 실행 함수가 없는 런북을 쓰는 이유다(UNSUPPORTED_RUNBOOK 주석).
+    assert UNSUPPORTED_RUNBOOK not in dispatcher._RUNNERS
     incident_id, execution_id = reserved()
     other_id = exec_repo.create_execution(
         db,
         incident_id=incident_id,
-        runbook_id=RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED,
-        target_arn=VOLUME_ARN,
+        runbook_id=UNSUPPORTED_RUNBOOK,
+        target_arn=UNSUPPORTED_TARGET_ARN,
         trigger_source=TriggerSource.USER_APPROVAL,
     ).execution_id
     db.commit()

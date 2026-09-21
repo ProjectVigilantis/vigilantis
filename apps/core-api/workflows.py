@@ -1029,6 +1029,53 @@ def run_nacl_restore_execution(db: Session, execution_id: str) -> ExecutionRunOu
     return ExecutionRunOutcome(succeeded=True, steps=outcome.steps)
 
 
+def run_ebs_delete_unattached_execution(
+    db: Session, execution_id: str
+) -> ExecutionRunOutcome:
+    """`RUNBOOK_EBS_DELETE_UNATTACHED` 실행 — 상태 재확인·스냅숏·삭제. (Issue #369)
+
+    **백업 레코드를 쓰지 않는 유일한 주 조치다.** BackupType 4종에 EBS가 없고
+    (ADR-0008 §5) 등록 롤백도 없어, 되돌릴 근거는 DB가 아니라 **AWS 스냅숏**이다.
+    그래서 다른 런북이 백업 commit으로 여는 자리를 이 함수는 갖지 않는다 — 지켜야 할
+    순서는 전부 executor 안에 있다(스냅숏 완료 전에는 삭제 호출을 내보내지 않는다).
+
+    대상 볼륨은 **실행의 target_arn 하나로 정한다.** 후보의 `volume_id` 파라미터를 다시
+    읽지 않는 이유는 가드레일 ③(ARN 일치)이 둘을 이미 문자열 완전일치로 대조했기
+    때문이며, 여기서 다시 읽으면 대조를 통과한 값과 실행하는 값이 갈릴 자리를 새로
+    만든다. execute_rightsizing이 인스턴스 ID를 ARN에서 얻는 것과 같은 결이다.
+
+    종료 상태도 Incident 전이도 여기서 하지 않는다 — 확정은 dispatcher.py의
+    close_execution 하나가 한다.
+    """
+    execution = executions_repo.get_execution(db, execution_id)
+    if execution is None:
+        raise ValueError(f"실행 레코드를 찾을 수 없습니다: {execution_id}")
+    if execution.runbook_id is not RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED:
+        # 배선 오류다 — 런북마다 단계와 되돌릴 근거가 다르다
+        raise ValueError(
+            f"EBS_DELETE_UNATTACHED 실행이 아닙니다: {execution.runbook_id.value}"
+        )
+    if execution.status is not ExecutionStatus.IN_PROGRESS:
+        # 끝난 실행을 다시 돌리면 이미 지운 볼륨에 두 번째 삭제가 나간다. 선점은
+        # 호출부(dispatcher.py) 몫이라 여기서는 상태만 본다.
+        raise ValueError(f"진행 중인 실행이 아닙니다: {execution.status.value}")
+
+    outcome = executor.execute_ebs_delete_unattached(
+        execution.target_arn,
+        record_step=_step_recorder(db, execution_id),
+    )
+    if outcome.deferred:
+        return ExecutionRunOutcome(
+            succeeded=False,
+            reason_code=outcome.reason_code,
+            error_summary=outcome.error_summary,
+            deferred=True,
+        )
+    if not outcome.succeeded:
+        return _run_failed(outcome.reason_code, outcome.error_summary, outcome.steps)
+    return ExecutionRunOutcome(succeeded=True, steps=outcome.steps)
+
+
 # --- 2/2 Status Check 판정 (Issue #240) -----------------------------------------
 
 
@@ -1407,6 +1454,61 @@ def judge_nacl_restore(db: Session, execution_id: str) -> ExecutionJudgement:
             },
         )
     return ExecutionJudgement(next_status=ExecutionStatus.SUCCESS)
+
+
+def judge_ebs_delete_unattached(db: Session, execution_id: str) -> ExecutionJudgement:
+    """단계를 남긴 채 IN_PROGRESS인 EBS 삭제 실행 1건의 종료 판정. (Issue #369)
+
+    여기로 오는 것은 **실행 도중 끊긴 삭제**뿐이다. 정상 경로는 실행이 끝난 그 주기에
+    dispatcher가 반환값으로 확정한다 — 성공의 경계가 실행 안에 있기 때문이다(삭제는
+    원자적이고 뒤따르는 판정 축이 없다). 판정 주체를 runner와 **짝으로** 두는 이유는
+    judge_nacl_add_deny와 같다(ADR-0008 §6).
+
+    **성공의 경계는 실자산이다.** 볼륨이 지금 있는지가 답한다 — 끊긴 지점이 스냅숏
+    직후든 삭제 호출 도중이든 그 답은 같다. 단계 기록은 "어디까지 갔는가"만 말하고
+    "지워졌는가"는 말하지 못한다(삭제 호출이 5xx로 끊겨도 적용됐을 수 있다).
+
+    볼륨이 남아 있으면 삭제되지 않은 것이라 FAILED다. 스냅숏이 만들어진 채 실패했을
+    수 있지만 **자동으로 지우지 않는다** — 그 스냅숏은 되살릴 근거이고, 다음 회차가
+    같은 볼륨을 다시 후보로 올리면 스냅숏을 새로 만든다(중복은 비용이지 손실이 아니다).
+
+    조회하지 못하면 확정하지 않고 보류한다 — judge_nacl_add_deny와 같은 이유이며,
+    보류의 재시도·소진은 record_verification_failure가 처분한다(Issue #249).
+    """
+    execution = executions_repo.get_execution(db, execution_id)
+    if execution is None:
+        raise ValueError(f"실행 레코드를 찾을 수 없습니다: {execution_id}")
+    if execution.runbook_id is not RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED:
+        raise ValueError(
+            f"EBS_DELETE_UNATTACHED 실행이 아닙니다: {execution.runbook_id.value}"
+        )
+    if execution.status is not ExecutionStatus.IN_PROGRESS:
+        raise ValueError(f"진행 중인 실행이 아닙니다: {execution.status.value}")
+
+    target = parse_arn(execution.target_arn)
+    if target is None or target.resource_type != "volume":
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary=f"EBS 볼륨 ARN이 아닙니다: {execution.target_arn}",
+        )
+
+    volume, code = executor.current_volume(target.resource_id, target.region)
+    if code is not None and code is not PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND:
+        # 자산 상태를 본 적이 없다 — 확정하면 검증기의 실패가 조치의 실패로 저장된다
+        return ExecutionJudgement(
+            defer_code=code,
+            defer_reason=f"{code.value}: 삭제 대상 볼륨 조회 실패로 판정 보류",
+        )
+    if volume is None:
+        # InvalidVolume.NotFound — 볼륨이 없다. 삭제가 적용된 것이다
+        return ExecutionJudgement(next_status=ExecutionStatus.SUCCESS)
+    return ExecutionJudgement(
+        next_status=ExecutionStatus.FAILED,
+        error_summary=(
+            f"삭제 미완 — 볼륨 {target.resource_id}이 아직 있습니다"
+            f"(state={volume.get('State') or '알 수 없음'})"
+        ),
+    )
 
 
 # --- 실행 종료 확정 (Issue #232) -------------------------------------------------
