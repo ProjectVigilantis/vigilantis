@@ -67,9 +67,9 @@
 # FinOps 절감 예상만 잘못된 경우에는 INVALID로 남기고 실행 후보를 유지한다(#347).
 # SecOps의 위험도 재평가는 초기 위험도·사유·대응 모드를 덮어쓰지 않는다.
 #
-# SecOps도 FAILED에서는 요약·재평가를 비운다. 선행 실행이 진행 중이면 ACTION_IN_PROGRESS,
-# 성공·원복 완료 실행이 있고 제안이 없으면 AWAITING_CLOSURE다. 그 밖에 실행 가능한
-# 제안이 없으면 FAILED다(workflows.record_agent_analysis).
+# SecOps는 분석 자체가 실패했을 때만 요약·재평가를 비운다. 선행 실행 상태를 우선하며,
+# 실행 이력 없이 정상 분석된 무제안·전체 거절은 AWAITING_CLOSURE에서 사용자 종료를
+# 기다린다. 분석 결과와 실행 결과는 따로 보존한다(workflows.record_agent_analysis).
 # 승인 대기 시각·60초 기한을 기록하되 자동 격리 발동 엔진은 이 모듈 범위 밖이다.
 #
 # 기동 worker 개수는 dispatcher.py와 같은 전제입니다 — worker 1개. 선점의 잠금 수명이

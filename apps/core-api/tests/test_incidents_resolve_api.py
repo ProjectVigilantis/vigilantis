@@ -21,6 +21,7 @@ from schemas.api.incidents import (
 )
 from schemas.api.actions import ExecutionStatus
 from schemas.candidates import CandidateStatus
+from schemas.incidents import AgentInvocationStatus
 from schemas.runbooks import RunbookId
 
 from db import models
@@ -38,7 +39,13 @@ def seeded_incident(db, make_incident, seed_summary_lines):
     """
 
     def _make(status: IncidentStatus = IncidentStatus.AWAITING_APPROVAL):
-        return make_incident(db, status=status, summary_lines=seed_summary_lines)
+        incident = make_incident(db, status=status, summary_lines=seed_summary_lines)
+        incident.agent_invocation_status = AgentInvocationStatus.SUCCEEDED
+        if status is IncidentStatus.FAILED:
+            incident.agent_invocation_status = AgentInvocationStatus.FAILED
+            incident.summary_lines = []
+        db.flush()
+        return incident
 
     return _make
 
@@ -51,12 +58,12 @@ def test_resolve_stores_judgement_and_invalidates_remaining_proposals(client_pg,
     incident = seeded_incident()
     candidate = make_candidate(db, incident)
 
-    response = client_pg.post(_url(incident), json={"resolution": "JUSTIFIED"})
+    response = client_pg.post(_url(incident), json={"resolution": "NO_FURTHER_ACTION"})
 
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "RESOLVED"
-    assert body["resolution"] == "JUSTIFIED"
+    assert body["resolution"] == "NO_FURTHER_ACTION"
     assert body["resolved_at"] is not None
     # RESOLVED는 제안이 비어 있어야 한다(api/incidents.py) — 정리가 응답에도 보인다
     assert body["recommendations"] == []
@@ -69,11 +76,11 @@ def test_detail_and_list_after_resolve_still_serve_200(client_pg, db, seeded_inc
     """종료가 만든 상태를 읽는 쪽 계약 회귀 — 잔여 제안이 남으면 여기서 500이 된다."""
     incident = seeded_incident()
     make_candidate(db, incident)
-    client_pg.post(_url(incident), json={"resolution": "JUSTIFIED"})
+    client_pg.post(_url(incident), json={"resolution": "NO_FURTHER_ACTION"})
 
     detail = client_pg.get(f"/api/v1/incidents/{incident.incident_id}")
     assert detail.status_code == 200
-    assert detail.json()["resolution"] == "JUSTIFIED"
+    assert detail.json()["resolution"] == "NO_FURTHER_ACTION"
 
     listing = client_pg.get("/api/v1/incidents", params={"status": "RESOLVED"})
     assert listing.status_code == 200
@@ -87,24 +94,25 @@ def test_resolve_twice_keeps_the_first_resolved_at(client_pg, db, seeded_inciden
     """Idempotency Key 없이 재요청이 안전한 지점 — 조건부 UPDATE라 두 번째 요청은
     아무것도 바꾸지 않고, 종료 시각도 처음 찍힌 값이 남는다."""
     incident = seeded_incident()
-    first = client_pg.post(_url(incident), json={"resolution": "JUSTIFIED"})
+    first = client_pg.post(_url(incident), json={"resolution": "NO_FURTHER_ACTION"})
     resolved_at = first.json()["resolved_at"]
 
-    again = client_pg.post(_url(incident), json={"resolution": "JUSTIFIED"})
+    again = client_pg.post(_url(incident), json={"resolution": "NO_FURTHER_ACTION"})
 
     assert again.status_code == 200
-    assert again.json()["resolution"] == "JUSTIFIED"
+    assert again.json()["resolution"] == "NO_FURTHER_ACTION"
     assert again.json()["resolved_at"] == resolved_at
 
 
 def test_resolve_allows_failed_incident(client_pg, db, seeded_incident, make_candidate):
-    """흐름이 멈춘 건에도 정당성 판단은 남겨야 한다."""
+    """현재 FE의 JUSTIFIED 요청으로 실행 이력 없는 분석 실패도 종료할 수 있다."""
     incident = seeded_incident(IncidentStatus.FAILED)
 
     response = client_pg.post(_url(incident), json={"resolution": "JUSTIFIED"})
 
     assert response.status_code == 200
     assert response.json()["status"] == "RESOLVED"
+    assert response.json()["resolution"] == "JUSTIFIED"
 
 
 @pytest.mark.parametrize(
@@ -117,7 +125,7 @@ def test_resolve_rejects_statuses_that_would_break_the_contract(
     ANALYZING은 분석이 끝나며 제안이 붙어 종료가 뒤집히기 때문에 거절한다."""
     incident = seeded_incident(status)
 
-    response = client_pg.post(_url(incident), json={"resolution": "JUSTIFIED"})
+    response = client_pg.post(_url(incident), json={"resolution": "NO_FURTHER_ACTION"})
 
     assert response.status_code == 409
     body = response.json()
@@ -132,14 +140,14 @@ def test_resolve_rejects_statuses_that_would_break_the_contract(
 @pytest.mark.parametrize("path_id", [str(uuid.uuid4()), "not-a-uuid"])
 def test_resolve_unknown_or_malformed_id_returns_404(client_pg, path_id):
     response = client_pg.post(
-        f"/api/v1/incidents/{path_id}/resolve", json={"resolution": "JUSTIFIED"}
+        f"/api/v1/incidents/{path_id}/resolve", json={"resolution": "NO_FURTHER_ACTION"}
     )
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "INCIDENT_NOT_FOUND"
 
 
 @pytest.mark.parametrize(
-    "payload", [{"resolution": "MAYBE"}, {}, {"resolution": "JUSTIFIED", "note": "x"}]
+    "payload", [{"resolution": "MAYBE"}, {}, {"resolution": "NO_FURTHER_ACTION", "note": "x"}]
 )
 def test_resolve_rejects_payloads_outside_the_contract(client_pg, db, seeded_incident, payload):
     incident = seeded_incident()
@@ -159,13 +167,13 @@ def test_resolve_publishes_incident_updated_once(client_pg, db, seeded_incident,
         client_pg.app.state.realtime, "publish", published.append
     )
 
-    client_pg.post(_url(incident), json={"resolution": "JUSTIFIED"})
+    client_pg.post(_url(incident), json={"resolution": "NO_FURTHER_ACTION"})
     assert len(published) == 1
     event = published[0]
     assert event.event_type.value == "INCIDENT_UPDATED"
     assert event.data.incident_id == incident.incident_id
 
-    client_pg.post(_url(incident), json={"resolution": "JUSTIFIED"})
+    client_pg.post(_url(incident), json={"resolution": "NO_FURTHER_ACTION"})
     assert len(published) == 1
 
 
@@ -176,15 +184,16 @@ def test_resolve_rejected_status_publishes_nothing(client_pg, db, seeded_inciden
         client_pg.app.state.realtime, "publish", published.append
     )
 
-    client_pg.post(_url(incident), json={"resolution": "JUSTIFIED"})
+    client_pg.post(_url(incident), json={"resolution": "NO_FURTHER_ACTION"})
 
     assert published == []
 
 
-def test_resolution_judgement_values_match_db_enum(client_pg, db, seeded_incident, make_candidate):
+def test_resolution_judgement_values_match_db_enum(client_pg, db, seeded_incident, make_execution):
     """계약 Enum 값 전수가 DB 타입에 그대로 저장된다 — migration의 값 목록 회귀."""
     for judgement in ResolutionJudgement:
         incident = seeded_incident()
+        make_execution(db, incident, status=ExecutionStatus.SUCCESS)
         response = client_pg.post(_url(incident), json={"resolution": judgement.value})
         assert response.status_code == 200
         db.refresh(incident)
@@ -210,8 +219,10 @@ def test_recovery_after_resolve_resumes_and_clears_the_judgement(
     )
     detail_url = f"/api/v1/incidents/{incident.incident_id}"
 
-    resolved = client_pg.post(_url(incident), json={"resolution": "JUSTIFIED"})
-    assert (resolved.status_code, resolved.json()["resolution"]) == (200, "JUSTIFIED")
+    resolved = client_pg.post(_url(incident), json={
+        "resolution": "NO_FURTHER_ACTION", "resolution_note": "차단을 유지하고 종료",
+    })
+    assert (resolved.status_code, resolved.json()["resolution"]) == (200, "NO_FURTHER_ACTION")
 
     recovery = client_pg.post(
         "/api/v1/actions/execute",
@@ -228,4 +239,5 @@ def test_recovery_after_resolve_resumes_and_clears_the_judgement(
     body = detail.json()
     assert body["status"] == "ACTION_IN_PROGRESS"
     assert (body["resolution"], body["resolved_at"]) == (None, None)
+    assert body["resolution_note"] is None
     assert origin.execution_id in {e["execution_id"] for e in body["executions"]}

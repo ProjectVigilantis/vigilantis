@@ -178,7 +178,7 @@ def update_incident_status(
     RESOLVED 밖의 판단을 거절한다. 전이와 한 UPDATE로 묶어 중간 상태를 만들지 않는다."""
     values: dict = {"status": next_status}
     if clear_resolution:
-        values |= {"resolution": None, "resolved_at": None}
+        values |= {"resolution": None, "resolved_at": None, "resolution_note": None}
     result = db.execute(
         update(models.Incident)
         .where(
@@ -196,6 +196,7 @@ def resolve_incident(
     *,
     expected: IncidentStatus,
     resolution: ResolutionJudgement,
+    resolution_note: str | None = None,
 ) -> bool:
     """expected 상태에서만 RESOLVED로 옮기고 관제자 판단을 함께 남긴다.
 
@@ -204,6 +205,9 @@ def resolve_incident(
     종료 시각은 여기서 찍는다(touch_incident와 같은 자리) — updated_at은 자식 상태
     변경으로도 올라가 종료 시점을 가리키지 못한다. 허용 출발 상태 판단은 Workflow
     몫이다(3층 분리).
+
+    끝난 승인 대기 시각도 지워 이전 기한이 이후 대기 판단에 쓰이지 않게 한다.
+    새 대기가 필요하면 set_agent_wait로 설정해야 하며, 재개만으로 시작되지는 않는다.
     """
     result = db.execute(
         update(models.Incident)
@@ -214,7 +218,10 @@ def resolve_incident(
         .values(
             status=IncidentStatus.RESOLVED,
             resolution=resolution,
+            resolution_note=resolution_note,
             resolved_at=models._utcnow(),
+            agent_wait_started_at=None,
+            response_deadline_at=None,
         )
     )
     return result.rowcount == 1

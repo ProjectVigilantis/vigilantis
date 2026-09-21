@@ -329,6 +329,7 @@ class Incident(Base):
     resolved_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    resolution_note: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
@@ -379,6 +380,11 @@ class Incident(Base):
             "((resolution IS NULL) = (resolved_at IS NULL))"
             " AND (resolution IS NULL OR status = 'RESOLVED')",
             name="resolution_with_resolved_status",
+        ),
+        CheckConstraint(
+            "resolution_note IS NULL OR"
+            " (resolution IS NOT NULL AND length(btrim(resolution_note)) > 0)",
+            name="resolution_note_with_judgement",
         ),
         Index("ix_incidents_status", "status"),
         Index("ix_incidents_category", "category"),

@@ -29,6 +29,7 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from schemas.api.errors import ErrorCode
+from schemas.api.analysis import AnalysisResult
 from schemas.api.incidents import (
     IncidentCategory,
     IncidentListItem,
@@ -53,6 +54,7 @@ from db.repositories import incidents as incidents_repo
 from db.session import get_db
 from exceptions import ApiError
 from identifiers import canonical_id
+from incident_analysis import load_analysis_results
 from realtime import incident_event
 
 router = APIRouter(prefix="/api/v1", tags=["incidents"])
@@ -141,7 +143,9 @@ def _load_threat_contexts(
     }
 
 
-def _to_list_item(row: models.Incident, context: ThreatContext | None) -> IncidentListItem:
+def _to_list_item(
+    row: models.Incident, context: ThreatContext | None, analysis_result: AnalysisResult | None,
+) -> IncidentListItem:
     return IncidentListItem.model_validate(
         {
             "incident_id": row.incident_id,
@@ -153,6 +157,7 @@ def _to_list_item(row: models.Incident, context: ThreatContext | None) -> Incide
             "reviewed_risk_level": row.reviewed_risk_level,
             "response_mode": row.response_mode,
             "threat_context": context,
+            "analysis_result": analysis_result,
             "created_at": row.created_at,
             "updated_at": row.updated_at,
         }
@@ -167,7 +172,10 @@ def list_incidents(
 ) -> IncidentsResponse:
     rows = incidents_repo.list_incidents(db, status=status, category=category)
     contexts = _load_threat_contexts(db, rows)
-    return IncidentsResponse(items=[_to_list_item(row, contexts[row.incident_id]) for row in rows])
+    analyses = load_analysis_results(db, rows)
+    return IncidentsResponse(items=[
+        _to_list_item(row, contexts[row.incident_id], analyses[row.incident_id]) for row in rows
+    ])
 
 
 def _load_incident(db: Session, incident_id: str) -> models.Incident:
@@ -229,10 +237,12 @@ def _to_detail(db: Session, row: models.Incident) -> IncidentResponse:
             "response_mode": row.response_mode,
             "threat_context": _load_threat_contexts(db, [row])[row.incident_id],
             "summary_lines": row.summary_lines,
+            "analysis_result": load_analysis_results(db, [row])[row.incident_id],
             "evidence_ids": evidence_ids,
             "recommendations": recommendations,
             "executions": executions,
             "resolution": row.resolution,
+            "resolution_note": row.resolution_note,
             "resolved_at": row.resolved_at,
             "created_at": row.created_at,
             "updated_at": row.updated_at,
@@ -254,7 +264,9 @@ def resolve_incident(
 ) -> IncidentResponse:
     """이미 종료된 건의 재요청도 200이며, 처음 저장된 판단을 그대로 돌려준다."""
     row = _load_incident(db, incident_id)
-    changed = workflows.resolve_incident(db, row.incident_id, payload.resolution)
+    changed = workflows.resolve_incident(
+        db, row.incident_id, payload.resolution, resolution_note=payload.resolution_note,
+    )
     response = _to_detail(db, row)
     if changed:
         # 발행은 commit 이후에만 한다(realtime.py 규약). 재요청은 상태가 그대로라

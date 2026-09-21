@@ -42,6 +42,7 @@ from schemas.api.incidents import (  # noqa: E402
 from schemas.api.ws import WsEventType  # noqa: E402
 from schemas.candidates import CandidateStatus  # noqa: E402
 from schemas.guardrails import GuardrailDecision, GuardrailValidationContext  # noqa: E402
+from schemas.incidents import AgentInvocationStatus  # noqa: E402
 from schemas.runbooks import RunbookId  # noqa: E402
 from services.aws import backup as bk  # noqa: E402
 from services.aws import executor as ex  # noqa: E402
@@ -147,6 +148,8 @@ def reserved_block(db, make_incident, make_candidate, make_execution, seed_summa
             status=IncidentStatus.ACTION_IN_PROGRESS,
             summary_lines=seed_summary_lines,
         )
+        # 승인된 AI 제안에서 시작한 실행이다. 분석 대기 상태를 기본값으로 남기지 않는다.
+        incident.agent_invocation_status = AgentInvocationStatus.SUCCEEDED
         candidate = make_candidate(
             db,
             incident,
