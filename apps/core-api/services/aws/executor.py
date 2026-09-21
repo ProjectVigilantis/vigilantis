@@ -1133,6 +1133,17 @@ _OP_DELETE_VOLUME = "ec2.delete_volume"
 # 볼륨을 붙였을 수 있어 **삭제 직전에 다시 본다**(Issue #369 §1단계).
 _VOLUME_DELETABLE_STATE = "available"
 
+# 삭제가 **이미 접수된** 볼륨의 상태. AWS는 delete_volume을 받은 뒤 볼륨을 곧바로
+# 지우지 않고 deleting에 몇 분간 둘 수 있으며, 이 구간은 되돌아오지 않는다
+# (deleting → deleted, DeleteVolume API 문서). 조회에 잡힌다는 이유로 "남아 있다"로
+# 세면 지워지는 중인 볼륨이 실패로 확정된다(PR #390 리뷰).
+#
+# 이 런북의 **성공의 경계는 "AWS가 삭제를 접수했다"** 이다 — 정상 경로도 delete_volume
+# 200으로 확정한다(dispatcher._close_and_publish). 끊긴 실행의 현물 판정
+# (workflows.judge_ebs_delete_unattached)만 그 경계를 실자산에서 다시 읽으므로,
+# 두 경로가 같은 것을 성공이라 부르도록 이 상태 집합을 여기 한 곳에 둔다.
+_VOLUME_DELETE_ACCEPTED_STATES: frozenset[str] = frozenset({"deleting", "deleted"})
+
 # TCP·UDP 규칙에는 PortRange가 필수다(CreateNetworkAclEntry API 계약). LocalStack은
 # 빠뜨린 요청도 받아 주지만 실 AWS는 InvalidParameterValue로 거절한다 — 로컬에서만
 # 통과하는 차단이 되지 않도록 여기서 채운다(PR #313 리뷰).
@@ -1148,7 +1159,11 @@ _NACL_PORT_RANGE_PROTOCOLS: frozenset[str] = frozenset({"6", "17"})  # tcp · ud
 STOP_WAIT_DELAY_SECONDS = 5
 STOP_WAIT_MAX_ATTEMPTS = 40
 
-# 스냅숏 완료 대기 — 5초 간격 24회(최대 120초). 초과하면 **삭제하지 않는다**(Issue #369).
+# 스냅숏 완료 대기 — 5초 간격 24회. 초과하면 **삭제하지 않는다**(Issue #369).
+#
+# 120초는 **폴링 간격의 합**이지 실행 점유 시간의 상한이 아니다 — describe_snapshots
+# 호출 시간과 botocore 재시도가 그 위에 얹힌다(PR #390 리뷰). 아래 근거도 "몇 번
+# 물어보는가"의 크기다.
 #
 # 정지 대기(200초)보다 짧게 잡은 이유는 **이 대기가 dispatcher 한 주기를 붙잡기**
 # 때문이다. 실행 스캔은 겹쳐 돌지 않으므로(max_instances=1) 기다리는 동안 다른 실행이
@@ -1865,6 +1880,20 @@ def volume_is_deletable(volume: Mapping[str, Any]) -> bool:
         volume.get("State") == _VOLUME_DELETABLE_STATE
         and not volume.get("Attachments")
     )
+
+
+def volume_delete_accepted(volume: Mapping[str, Any]) -> bool:
+    """이 볼륨에 삭제가 **이미 접수**됐는가 — `deleting`·`deleted`.
+
+    끊긴 실행의 현물 판정이 쓴다(workflows.judge_ebs_delete_unattached). 삭제 호출이
+    5xx·응답 유실로 끝나도 AWS가 이미 받았을 수 있고, 그때 볼륨은 몇 분간 deleting에
+    머문다 — 조회에 잡혔다는 것만으로 실패로 확정하면 **실제로 지워진 삭제가 실패로
+    남는다**(PR #390 리뷰). 이 두 상태는 available로 돌아오지 않으므로 성공이다.
+
+    volume_is_deletable과 반대 축이 아니다. 저쪽은 "지금 지워도 되는가"(실행 전),
+    이쪽은 "지우라는 요청이 이미 들어갔는가"(실행 후)를 묻는다.
+    """
+    return volume.get("State") in _VOLUME_DELETE_ACCEPTED_STATES
 
 
 def execute_ebs_delete_unattached(

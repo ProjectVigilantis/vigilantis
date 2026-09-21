@@ -26,6 +26,8 @@ for p in (str(CORE_API), str(REPO_ROOT / "packages")):
 
 import dispatcher  # noqa: E402
 import workflows  # noqa: E402
+from db.repositories import executions as exec_repo  # noqa: E402
+from db.repositories import incidents as incidents_repo  # noqa: E402
 from schemas.api.actions import ExecutionStatus  # noqa: E402
 from schemas.api.incidents import IncidentCategory, IncidentStatus  # noqa: E402
 from schemas.candidates import CandidateStatus  # noqa: E402
@@ -46,6 +48,16 @@ SNAPSHOT = "snap-0abc123456789def0"
 
 UNATTACHED = {"Volumes": [{"VolumeId": VOLUME, "State": "available", "Attachments": []}]}
 SNAPSHOT_RESPONSE = {"SnapshotId": SNAPSHOT, "State": "pending"}
+
+
+def volumes(state: str) -> dict:
+    """describe_volumes 응답 1건 — 상태만 갈아 끼운다(부착은 없는 채로)."""
+    return {"Volumes": [{"VolumeId": VOLUME, "State": state, "Attachments": []}]}
+
+
+# 판정 불가 재시도 — 상한 3회·간격 없음. 운영값(설정)과 무관하게 주기 수로 세게 한다
+# (test_dispatcher와 같은 이유, Issue #249)
+RETRY_NOW = workflows.VerificationRetryPolicy(max_attempts=3, interval_seconds=0)
 
 
 def client_error(code: str, status: int = 400) -> ClientError:
@@ -238,9 +250,29 @@ def test_judges_success_when_the_volume_is_gone(db, reserved_execution, aws):
     assert judgement.next_status is ExecutionStatus.SUCCESS
 
 
-def test_judges_failed_when_the_volume_is_still_there(db, reserved_execution, aws):
-    """삭제가 UNKNOWN으로 끝난 실행이 오는 자리 — 볼륨이 남았으면 미완이다."""
+@pytest.mark.parametrize("state", ["deleting", "deleted"])
+def test_judges_success_while_aws_is_still_deleting(db, reserved_execution, aws, state):
+    """조회에 잡혔다고 실패가 아니다 — 삭제가 이미 접수된 상태는 성공이다. (PR #390 리뷰)
+
+    AWS는 delete_volume을 받은 뒤 볼륨을 몇 분간 `deleting`에 둘 수 있고 그 구간은
+    available로 돌아오지 않는다. 여기서 FAILED로 닫으면 종료는 되돌아오지 않으므로
+    **실제로 지워진 삭제가 실패로 남는다.**
+    """
     execution = reserved_execution()
+    aws(describe_volumes=volumes(state))
+
+    judgement = judge(db, execution)
+
+    assert judgement.next_status is ExecutionStatus.SUCCESS
+
+
+@pytest.mark.parametrize("state", ["available", "in-use", "error"])
+def test_judges_failed_when_the_volume_is_still_there(
+    db, reserved_execution, aws, state
+):
+    """삭제가 UNKNOWN으로 끝난 실행이 오는 자리 — 전이 상태가 아니면 미완이다."""
+    execution = reserved_execution()
+    aws(describe_volumes=volumes(state))
 
     judgement = judge(db, execution)
 
@@ -277,3 +309,45 @@ def test_interrupted_delete_goes_to_the_judge_not_to_a_rollback(db, reserved_exe
         RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED
         not in dispatcher._AUTO_ROLLBACK_ON_ASSET_CHANGE
     )
+
+
+def cycle(db):
+    """스캔 1회 — 세션은 픽스처가 소유한다(test_dispatcher의 cycle과 같은 껍질)."""
+    return dispatcher.dispatch_pending(db, None, RETRY_NOW)
+
+
+def test_delete_that_ended_unknown_closes_as_success_while_aws_is_deleting(
+    db, reserved_execution, aws
+):
+    """dispatcher 두 주기를 거친 회귀 — UNKNOWN → `deleting` → SUCCESS. (PR #390 리뷰)
+
+    ① 삭제가 5xx로 끝나 effect가 UNKNOWN이라 IN_PROGRESS로 남고(자동 원복 짝 없음)
+    ② 다음 주기의 현물 판정이 `deleting`을 보고 성공으로 확정한다.
+
+    고치기 전에는 ②가 FAILED로 닫았고, **종료 상태는 되돌아오지 않아** 삭제가 실제로
+    끝나도 실패 기록이 그대로 남았다. 이 축은 판정 함수 단독 호출로는 드러나지 않는다 —
+    "판정이 한 번뿐"이라는 성질이 dispatcher 쪽에 있기 때문이다.
+    """
+    execution = reserved_execution()
+    incident_id, execution_id = execution.incident_id, execution.execution_id
+    incidents_repo.update_incident_status(
+        db,
+        incident_id,
+        expected=IncidentStatus.ANALYZING,
+        next_status=IncidentStatus.ACTION_IN_PROGRESS,
+    )
+    db.commit()
+    aws(delete_volume=client_error("InternalError", 500))
+
+    first = cycle(db)
+
+    assert first.awaiting_judgement == 1
+    assert (
+        exec_repo.get_execution(db, execution_id).status is ExecutionStatus.IN_PROGRESS
+    )
+
+    aws(describe_volumes=volumes("deleting"))
+    second = cycle(db)
+
+    assert second.judged == 1
+    assert exec_repo.get_execution(db, execution_id).status is ExecutionStatus.SUCCESS

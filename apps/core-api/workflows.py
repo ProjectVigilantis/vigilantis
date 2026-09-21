@@ -1464,11 +1464,18 @@ def judge_ebs_delete_unattached(db: Session, execution_id: str) -> ExecutionJudg
     원자적이고 뒤따르는 판정 축이 없다). 판정 주체를 runner와 **짝으로** 두는 이유는
     judge_nacl_add_deny와 같다(ADR-0008 §6).
 
-    **성공의 경계는 실자산이다.** 볼륨이 지금 있는지가 답한다 — 끊긴 지점이 스냅숏
-    직후든 삭제 호출 도중이든 그 답은 같다. 단계 기록은 "어디까지 갔는가"만 말하고
-    "지워졌는가"는 말하지 못한다(삭제 호출이 5xx로 끊겨도 적용됐을 수 있다).
+    **성공의 경계는 "AWS가 삭제를 접수했다"** 이다 — 정상 경로도 delete_volume 200으로
+    확정한다(dispatcher). 여기서는 그 경계를 실자산에서 다시 읽는다. 끊긴 지점이 스냅숏
+    직후든 삭제 호출 도중이든 묻는 것은 같다. 단계 기록은 "어디까지 갔는가"만 말하고
+    "접수됐는가"는 말하지 못한다(삭제 호출이 5xx로 끊겨도 적용됐을 수 있다).
 
-    볼륨이 남아 있으면 삭제되지 않은 것이라 FAILED다. 스냅숏이 만들어진 채 실패했을
+    그래서 **조회에 잡혔다는 것만으로 실패가 아니다.** `deleting`·`deleted`는 삭제가 이미
+    들어갔다는 증거이고 available로 돌아오지 않으므로 SUCCESS다(executor.
+    volume_delete_accepted). AWS는 삭제를 받은 뒤 볼륨을 몇 분간 deleting에 둘 수 있어
+    (DeleteVolume API 문서), 이 구간을 남아 있는 볼륨으로 세면 **실제로 지워진 삭제가
+    실패로 확정되고 그 뒤로는 다시 묻지 않는다**(PR #390 리뷰).
+
+    그 밖의 상태로 남아 있으면 삭제되지 않은 것이라 FAILED다. 스냅숏이 만들어진 채 실패했을
     수 있지만 **자동으로 지우지 않는다** — 그 스냅숏은 되살릴 근거이고, 다음 회차가
     같은 볼륨을 다시 후보로 올리면 스냅숏을 새로 만든다(중복은 비용이지 손실이 아니다).
 
@@ -1501,6 +1508,10 @@ def judge_ebs_delete_unattached(db: Session, execution_id: str) -> ExecutionJudg
         )
     if volume is None:
         # InvalidVolume.NotFound — 볼륨이 없다. 삭제가 적용된 것이다
+        return ExecutionJudgement(next_status=ExecutionStatus.SUCCESS)
+    if executor.volume_delete_accepted(volume):
+        # deleting·deleted — AWS가 삭제를 받아 진행 중이다. 여기서 FAILED로 닫으면
+        # 판정이 한 번뿐이라(종료는 되돌아오지 않는다) 성공한 삭제가 실패로 남는다
         return ExecutionJudgement(next_status=ExecutionStatus.SUCCESS)
     return ExecutionJudgement(
         next_status=ExecutionStatus.FAILED,
