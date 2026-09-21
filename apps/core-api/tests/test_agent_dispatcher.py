@@ -226,7 +226,7 @@ def _rule_evidence_id(db, incident_id: str) -> str:
 
 
 # ------------------------------------------------------------------------------
-# Test Double
+# 테스트 대역
 # ------------------------------------------------------------------------------
 
 
@@ -668,7 +668,7 @@ def test_reviewed_risk_level_on_a_finops_output_is_rejected(db):
         reviewed_risk_level=RiskLevel.HIGH,
     )
 
-    verified = agent_dispatcher._verified_output(graph_input, violating, incident_id)
+    verified = agent_dispatcher.verify_graph_output(graph_input, violating, incident_id)
 
     assert verified.invocation_status is AgentInvocationStatus.FAILED
     assert verified.summary_lines == []
@@ -699,7 +699,7 @@ def test_evidence_subset_check_reads_the_input_not_the_incident(db):
         ],
     )
 
-    verified = agent_dispatcher._verified_output(graph_input, citing_asset, incident_id)
+    verified = agent_dispatcher.verify_graph_output(graph_input, citing_asset, incident_id)
 
     assert verified.invocation_status is AgentInvocationStatus.FAILED
 
@@ -986,10 +986,10 @@ def _secops_client(db, incident_id, *, candidates=True, **over):
                   cidr_block="203.0.113.10/32", protocol="tcp")
     values.update(over)
     return _client(
-        EvidenceSummaryOutput(observation="300초 동안 SSH 실패 120회", diagnosis="SSH 공격 추정",
-                              rationale="출발지 차단 필요"),
         RiskReassessmentOutput(reviewed_risk_level=RiskLevel.HIGH),
         SecOpsCandidateProposalOutput(candidates=[SecOpsProposedCandidate(**values)] if candidates else []),
+        EvidenceSummaryOutput(observation="300초 동안 SSH 실패 120회", diagnosis="SSH 공격 추정",
+                              rationale="출발지 차단 필요"),
     )
 
 
@@ -1048,7 +1048,7 @@ def test_secops_non_executable_results_remain_readable(db, client_pg, monkeypatc
         over["cidr_block"] = "203.0.113.0/24"
     client = _secops_client(db, incident_id, candidates=kind != "no_proposal", **over)
     if kind == "nul":
-        client._outputs[0] = EvidenceSummaryOutput(observation="bad\x00text",
+        client._outputs[2] = EvidenceSummaryOutput(observation="bad\x00text",
                                                    diagnosis="추정", rationale="차단")
     report = _cycle(db, client)
     assert report.errored == 0

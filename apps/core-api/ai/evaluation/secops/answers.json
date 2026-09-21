@@ -1,0 +1,173 @@
+{
+  "scope": "v0.5.3 C01-C07 fixed-input graph evaluation. Candidate and NO_PROPOSAL are both structurally allowed when observations, action scope and explanation support the decision. Candidate creation is separate from current application, guardrail acceptance, approval, execution and closure. Risk expectations and typed candidate constraints remain fixed; this defines no new detector or server response policy.",
+  "cases": [
+    {
+      "case_id": "C01",
+      "reviewed_risk_levels": [
+        "HIGH"
+      ],
+      "allowed_statuses": [
+        "SUCCEEDED",
+        "NO_PROPOSAL"
+      ],
+      "action_policy": "EITHER",
+      "risk_basis": "120*60/300=24/min; count>=10 and rate>=20. Auxiliary rows = 2 per connection, at most 3 failures per connection. 합성 관측의 강도를 판단한다. accepted=0은 이 자료의 집계이며 실제 침해 부재나 무해함을 확정하지 않는다.",
+      "action_basis": "반복·집중을 인정한다. 후보는 해당 출발지의 후속 시도를 제한하는 선택지로 설명한다. 무제안이면 강도를 축소하지 않고 정상 사용·영향 등 확인할 판단 근거와 보류 이유를 연결한다.",
+      "candidate": {
+        "runbook_id": "RUNBOOK_NACL_ADD_DENY",
+        "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001",
+        "evidence_ids": [
+          "5956549c-9536-56ed-883a-4ddeecf2de4d"
+        ],
+        "cidr_block": "203.0.113.10/32",
+        "protocol": "tcp",
+        "rule_number_min": 1,
+        "rule_number_max": 32766
+      }
+    },
+    {
+      "case_id": "C02",
+      "reviewed_risk_levels": [
+        "HIGH"
+      ],
+      "allowed_statuses": [
+        "SUCCEEDED",
+        "NO_PROPOSAL"
+      ],
+      "action_policy": "EITHER",
+      "risk_basis": "1000*60/60=1000/min; count>=10 and rate>=20. Auxiliary rows = 2 per connection, at most 3 failures per connection. 합성 관측의 강도를 판단한다. accepted=0은 이 자료의 집계이며 실제 침해 부재나 무해함을 확정하지 않는다.",
+      "action_basis": "매우 집중된 실패를 인정한다. 미확인 침해 성공을 근거로 시도 강도를 낮추지 않는다. 제안 또는 보류의 이유가 이 강도와 충돌하지 않아야 한다.",
+      "candidate": {
+        "runbook_id": "RUNBOOK_NACL_ADD_DENY",
+        "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00002",
+        "evidence_ids": [
+          "68694052-d9f6-5480-8977-f059de21b062"
+        ],
+        "cidr_block": "203.0.113.55/32",
+        "protocol": "tcp",
+        "rule_number_min": 1,
+        "rule_number_max": 32766
+      }
+    },
+    {
+      "case_id": "C03",
+      "reviewed_risk_levels": [
+        "HIGH"
+      ],
+      "allowed_statuses": [
+        "SUCCEEDED",
+        "NO_PROPOSAL"
+      ],
+      "action_policy": "EITHER",
+      "risk_basis": "Same counts/rate as C01; production context does not change initial risk. Auxiliary rows = 2 per connection, at most 3 failures per connection. 합성 관측의 강도를 판단한다. accepted=0은 이 자료의 집계이며 실제 침해 부재나 무해함을 확정하지 않는다.",
+      "action_basis": "C01과 같은 관측 강도이며 production 문맥을 가용성·정상 통신 영향 판단에 사용할 수 있다. production이라는 이름만으로 피해·승인·차단 필요성을 확정하지 않는다.",
+      "candidate": {
+        "runbook_id": "RUNBOOK_NACL_ADD_DENY",
+        "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001",
+        "evidence_ids": [
+          "9697dd70-6fe2-59b7-ae07-65050bcdb074"
+        ],
+        "cidr_block": "203.0.113.10/32",
+        "protocol": "tcp",
+        "rule_number_min": 1,
+        "rule_number_max": 32766
+      }
+    },
+    {
+      "case_id": "C04",
+      "reviewed_risk_levels": [
+        "MEDIUM"
+      ],
+      "allowed_statuses": [
+        "SUCCEEDED",
+        "NO_PROPOSAL"
+      ],
+      "action_policy": "EITHER",
+      "risk_basis": "60*60/600=6/min; only count>=10. Auxiliary rows = 2 per connection, at most 3 failures per connection. 합성 관측의 강도를 판단한다. accepted=0은 이 자료의 집계이며 실제 침해 부재나 무해함을 확정하지 않는다.",
+      "action_basis": "10분간 60회의 반복을 인정한다. 대상과 연관된 차단 선택지 또는 확인 후 판단의 이유를 설명한다. 단발이나 무위협으로 축소하지 않는다.",
+      "candidate": {
+        "runbook_id": "RUNBOOK_NACL_ADD_DENY",
+        "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00002",
+        "evidence_ids": [
+          "971cf07a-e942-5dd8-b2e5-87218ff024d8"
+        ],
+        "cidr_block": "198.51.100.20/32",
+        "protocol": "tcp",
+        "rule_number_min": 1,
+        "rule_number_max": 32766
+      }
+    },
+    {
+      "case_id": "C05",
+      "reviewed_risk_levels": [
+        "MEDIUM"
+      ],
+      "allowed_statuses": [
+        "SUCCEEDED",
+        "NO_PROPOSAL"
+      ],
+      "action_policy": "EITHER",
+      "risk_basis": "5*60/10=30/min; only rate>=20. Auxiliary rows = 2 per connection, at most 3 failures per connection. 합성 관측의 강도를 판단한다. accepted=0은 이 자료의 집계이며 실제 침해 부재나 무해함을 확정하지 않는다.",
+      "action_basis": "짧은 창에 집중된 5회를 C06의 성긴 5회와 구분한다. 후보 수는 실패 횟수만으로 정하지 않으며 제안·보류 근거가 이 차이를 반영해야 한다.",
+      "candidate": {
+        "runbook_id": "RUNBOOK_NACL_ADD_DENY",
+        "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001",
+        "evidence_ids": [
+          "f7fbbbfb-dfdc-5e7f-9a8e-e8ef9efeb4e0"
+        ],
+        "cidr_block": "198.51.100.77/32",
+        "protocol": "tcp",
+        "rule_number_min": 1,
+        "rule_number_max": 32766
+      }
+    },
+    {
+      "case_id": "C06",
+      "reviewed_risk_levels": [
+        "LOW"
+      ],
+      "allowed_statuses": [
+        "SUCCEEDED",
+        "NO_PROPOSAL"
+      ],
+      "action_policy": "EITHER",
+      "risk_basis": "5회/3600초 = 분당 1/12회. 합성 전체 집계는 실패 5회이며 720초 간격의 서로 다른 연결에서 발생한다. 긴 관측 창의 성긴 실패가 LOW의 근거다. 반복 자체를 없었다고 설명하거나 C05의 5회/10초와 같은 강도로 판단하면 실패다. accepted=0과 invalid user는 이 모의 자료의 사실이며 실제 무해함·악의·침해 부재를 확정하지 않는다.",
+      "action_basis": "긴 창의 낮은 빈도 반복을 유지한다. 관측 출발지에 대한 선택지와 현재 적용 보류는 공존할 수 있다. 후보만 있다는 이유로 즉시 차단 필수·악성 확정으로 강화하지 않는다. 무제안이면 낮은 빈도와 필요한 다음 확인을 연결한다.",
+      "candidate": {
+        "runbook_id": "RUNBOOK_NACL_ADD_DENY",
+        "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001",
+        "evidence_ids": [
+          "0c6bb2d0-59b0-5abd-96e1-06f7f1278985"
+        ],
+        "cidr_block": "198.51.100.77/32",
+        "protocol": "tcp",
+        "rule_number_min": 1,
+        "rule_number_max": 32766
+      }
+    },
+    {
+      "case_id": "C07",
+      "reviewed_risk_levels": [
+        "LOW"
+      ],
+      "allowed_statuses": [
+        "SUCCEEDED",
+        "NO_PROPOSAL"
+      ],
+      "action_policy": "EITHER",
+      "risk_basis": "1회/1초의 단발 관측이다. 보조 로그 2행은 추가 인증 실패가 아니며, 60회/분 환산으로 반복·집중이 관측됐다고 해석할 수 없다. 단발이라는 낮은 근거 강도가 LOW의 이유다. accepted=0은 합성 자료 범위의 사실이며 정상 접속자·오타·침해 부재를 확정하지 않는다.",
+      "action_basis": "단발이며 반복·집중의 관측을 만들어 내지 않는다. 출발지가 식별된 조치 선택지를 제시할 수 있으나 즉시 차단 필요성이나 정상·무해함을 확정하지 않는다. 무제안이면 단발·근거 부족과 다음 확인을 연결한다.",
+      "candidate": {
+        "runbook_id": "RUNBOOK_NACL_ADD_DENY",
+        "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00002",
+        "evidence_ids": [
+          "b95d9874-2d69-54a1-92b9-47fcc30053ea"
+        ],
+        "cidr_block": "198.51.100.20/32",
+        "protocol": "tcp",
+        "rule_number_min": 1,
+        "rule_number_max": 32766
+      }
+    }
+  ]
+}

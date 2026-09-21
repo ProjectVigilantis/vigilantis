@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 for path in (ROOT / "apps/core-api", ROOT / "packages"):
     sys.path.insert(0, str(path))
 
-from agent_dispatcher import build_graph_input, _verified_output  # noqa: E402
+from agent_dispatcher import build_graph_input, verify_graph_output  # noqa: E402
 from ai.agent import run_secops_graph  # noqa: E402
 from ai.openai_client import build_openai_model_client  # noqa: E402
 from db.session import get_session_factory  # noqa: E402
@@ -33,9 +33,11 @@ def main():
         print(json.dumps({"input_valid": True, "model_calls": 0,
                           "capabilities": [item.runbook_id.value for item in graph_input.capabilities]}))
         return
-    output = _verified_output(graph_input,
-                              run_secops_graph(graph_input, client=build_openai_model_client()),
-                              args.incident_id)
+    output = verify_graph_output(
+        graph_input,
+        run_secops_graph(graph_input, client=build_openai_model_client()),
+        args.incident_id,
+    )
     # 원본 모델 응답·프롬프트 대신 공개 계약으로 검증한 분석 결과만 출력한다.
     print(output.model_dump_json(indent=2))
     if output.invocation_status.value == "FAILED":

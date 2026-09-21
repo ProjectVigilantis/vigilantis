@@ -17,9 +17,6 @@ from ai.agent import (
     _FINOPS_PROPOSAL_SYSTEM_PROMPT,
     _FINOPS_SUMMARY_SYSTEM_PROMPT,
     _PARAMETER_CONSTRAINTS,
-    _SECOPS_PROPOSAL_PROMPT,
-    _SECOPS_RISK_PROMPT,
-    _SECOPS_SUMMARY_PROMPT,
     FINOPS_PROMPT_VERSION,
     CandidateProposalOutput,
     EvidenceSummaryOutput,
@@ -527,12 +524,11 @@ def test_summary_request_fingerprint_detects_schema_order(monkeypatch):
 @pytest.mark.parametrize("prompt", [
     _FINOPS_SUMMARY_SYSTEM_PROMPT,
     _FINOPS_PROPOSAL_SYSTEM_PROMPT,
-    _SECOPS_SUMMARY_PROMPT,
-    _SECOPS_RISK_PROMPT,
-    _SECOPS_PROPOSAL_PROMPT,
-])
-def test_prompts_are_directive_not_prohibitive(prompt):
+], ids=["finops_summary", "finops_proposal"])
+def test_finops_prompts_are_directive_not_prohibitive(prompt):
     # 금지가 쌓일수록 빈 후보가 가장 안전한 답이 된다(#243) — 금지형 표지를 잡는다
+    # SecOps #324의 승인된 프롬프트는 의미 rubric·실측으로 평가한다.
+    # 부정어 유무는 후보 강제/억제나 사용자 판단권 보존을 입증하지 않는다.
     for marker in ("않는다", "마라", "금지"):
         assert marker not in prompt
 

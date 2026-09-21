@@ -60,7 +60,7 @@
 # FinOps는 그래프 오류·출력 검증 위반·NO_PROPOSAL·가드레일 전부 거절을 FAILED로 닫는다.
 # 뒤 둘은 관제자에게 보여 줄 실행 가능한 조치가 없어 요약을 로그로만 남긴다(#285).
 # 입력 불가도 같은 처분이다. 근거 누락·빈 메뉴를 PENDING으로 남기면 다음 스캔에서도
-# 같은 입력으로 실패를 반복하기 때문이다(_GraphInputUnavailable).
+# 같은 입력으로 실패를 반복하기 때문이다(GraphInputUnavailable).
 #
 # SecOps는 고정 THREAT 근거·초기 판정과 Incident 접수 시 보존한 자산을 조립한다.
 # 후보는 입력 근거·조치 대상·저장 가능성을 검증한 뒤 Workflow에 넘긴다.
@@ -135,7 +135,7 @@ class _UnsupportedIncident(Exception):
     """그래프가 아직 없는 분류 — 선점하지 않고 남긴다."""
 
 
-class _GraphInputUnavailable(Exception):
+class GraphInputUnavailable(Exception):
     """그래프 입력을 만들 수 없다 — 다시 시도해도 같으므로 분석 실패로 닫는다."""
 
 
@@ -215,7 +215,7 @@ def _sole_evidence(
     """
     found = [item for item in evidences if item.evidence_type is evidence_type]
     if len(found) != 1:
-        raise _GraphInputUnavailable(
+        raise GraphInputUnavailable(
             f"{evidence_type.value} 근거가 {len(found)}건입니다 (1건이어야 합니다)"
         )
     return found[0]
@@ -225,7 +225,7 @@ def build_graph_input(db: Session, incident_id: str) -> AgentGraphInput:
     """Incident 1건 → 그래프 입력 1건. 최상위 rule_evaluation은 RULE 근거 행에서 읽는다."""
     incident = incidents_repo.get_incident(db, incident_id)
     if incident is None:
-        raise _GraphInputUnavailable(f"Incident를 찾을 수 없습니다: {incident_id}")
+        raise GraphInputUnavailable(f"Incident를 찾을 수 없습니다: {incident_id}")
     if incident.category is IncidentCategory.SECOPS:
         return _build_secops_input(db, incident)
     if incident.category is not IncidentCategory.FINOPS:
@@ -239,7 +239,7 @@ def build_graph_input(db: Session, incident_id: str) -> AgentGraphInput:
     asset = _sole_evidence(evidences, EvidenceType.ASSET).content.asset
 
     if rule_evaluation.verdict is None:
-        raise _GraphInputUnavailable("RULE 근거에 판정이 없습니다")
+        raise GraphInputUnavailable("RULE 근거에 판정이 없습니다")
     capabilities = build_finops_capabilities(
         asset_type=asset.asset_type,
         verdict=rule_evaluation.verdict,
@@ -248,7 +248,7 @@ def build_graph_input(db: Session, incident_id: str) -> AgentGraphInput:
     if not capabilities:
         # 조치 공간의 공백 — 판정이 조치 가능하다고 본 자산에 걸 조치가 메뉴에 없다.
         # 앞단(rule 제외·whitelist)이 고칠 문제이고 이 계층은 실패로 닫는다(Issue #285 범위 밖)
-        raise _GraphInputUnavailable(
+        raise GraphInputUnavailable(
             f"조치 메뉴가 비었습니다: {asset.asset_type.value}/{rule_evaluation.verdict.value}"
         )
 
@@ -280,19 +280,34 @@ def _build_secops_input(db: Session, incident) -> SecOpsGraphInput:
         evidences = [mappers.to_evidence_item(row)
                      for row in incidents_repo.list_evidence(db, incident.incident_id)]
         threat = _sole_evidence(evidences, EvidenceType.THREAT)
+        return assemble_secops_input(
+            incident=incident, threat=threat,
+            executions=executions_repo.list_by_incident(db, incident.incident_id),
+        )
+    except ValidationError as exc:
+        raise GraphInputUnavailable("저장된 SecOps 입력이 계약과 다릅니다") from exc
+
+
+def assemble_secops_input(*, incident, threat: EvidenceItem, executions) -> SecOpsGraphInput:
+    """저장된 THREAT와 이후 실행 기록을 조립한다. 서비스·평가가 같은 경계를 쓴다.
+
+    자산·관계·로그는 THREAT의 접수 시 사본에서만 읽는다. 이 함수는 DB·모델·AWS를
+    호출하지 않으며 별도 asset 인자로 저장 사본을 덮어쓸 수 없다.
+    """
+    try:
         event = threat.content.event
         if (event.target_arn != incident.subject_arn
                 or event.threat_event_id != incident.threat_event_id):
-            raise _GraphInputUnavailable("위협 근거와 Incident 대상이 다릅니다")
+            raise GraphInputUnavailable("위협 근거와 Incident 대상이 다릅니다")
         context = threat.content.context
         if context is None:
-            raise _GraphInputUnavailable("기존 Incident에 생성 시점 근거가 없습니다")
+            raise GraphInputUnavailable("기존 Incident에 생성 시점 근거가 없습니다")
         if context.target is None:
-            raise _GraphInputUnavailable(f"생성 시점 대상 자산 근거 부족: {context.target_status}")
+            raise GraphInputUnavailable(f"생성 시점 대상 자산 근거 부족: {context.target_status}")
         asset = context.target.asset
         capabilities = build_secops_capabilities(asset=asset, event_type=event.event_type)
         if not capabilities:
-            raise _GraphInputUnavailable("이 위협에 제공할 조치·조회 의존성이 없습니다")
+            raise GraphInputUnavailable("이 위협에 제공할 조치·조회 의존성이 없습니다")
         # response_mode는 이후 타이머가 바꿀 수 있다. 초기 입력에는 초기 위험도에
         # 대응하는 원래 모드를 복원하고 현재 Incident 대응 모드는 수정하지 않는다.
         initial = InitialRiskEvaluationResult(
@@ -301,7 +316,7 @@ def _build_secops_input(db: Session, incident) -> SecOpsGraphInput:
             response_mode=expected_mode_for(incident.initial_risk_level),
             reason_codes=incident.initial_risk_reason_codes,
         )
-        prior = [execution for execution in executions_repo.list_by_incident(db, incident.incident_id)
+        prior = [execution for execution in executions
                  if execution.trigger_source is TriggerSource.PRE_MITIGATION_0_5S
                  and execution.runbook_id in (RunbookId.RUNBOOK_EC2_ISOLATE,
                                               RunbookId.RUNBOOK_NACL_ADD_DENY)]
@@ -324,7 +339,7 @@ def _build_secops_input(db: Session, incident) -> SecOpsGraphInput:
             isolation_execution=isolation, capabilities=capabilities,
         )
     except ValidationError as exc:
-        raise _GraphInputUnavailable("저장된 SecOps 입력이 계약과 다릅니다") from exc
+        raise GraphInputUnavailable("저장된 SecOps 입력이 계약과 다릅니다") from exc
 
 
 # ------------------------------------------------------------------------------
@@ -416,9 +431,10 @@ def _contract_violation(
     return None
 
 
-def _verified_output(
+def verify_graph_output(
     graph_input: AgentGraphInput, output: AgentGraphOutput, incident_id: str
 ) -> AgentGraphOutput:
+    """그래프 출력을 서비스 수용 계약에 대조하고 위반 시 분석 실패로 반환한다."""
     violation = _contract_violation(graph_input, output)
     if violation is None:
         return output
@@ -462,7 +478,7 @@ def _dispatch_one(
 
         try:
             graph_input = build_graph_input(db, incident_id)
-        except _GraphInputUnavailable as exc:
+        except GraphInputUnavailable as exc:
             logger.warning(
                 "agent_graph_input_unavailable",
                 extra={"incident_id": incident_id, "detail": str(exc)},
@@ -476,7 +492,7 @@ def _dispatch_one(
             # 읽기 트랜잭션을 닫는다 — autobegin으로 다시 열린 것을 여기서 끊어야
             # 그래프 호출이 트랜잭션 밖에서 돈다
             db.rollback()
-            output = _verified_output(
+            output = verify_graph_output(
                 graph_input,
                 (run_secops_graph(graph_input, client=client)
                  if isinstance(graph_input, SecOpsGraphInput)
