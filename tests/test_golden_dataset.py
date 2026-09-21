@@ -190,7 +190,8 @@ def _evaluate_inventory(inventory: AssetInventory) -> dict[str, tuple[str, str |
 
     for sg in inventory.security_groups:
         # collector.py 가 open_to_world(list) → bool 로 넘기는 규약과 동일하게 맞춘다.
-        verdict, skip = evaluate_sg(sg.name, sg.attached, bool(sg.open_to_world))
+        # 태그도 rule_engine SG 분기처럼 넘긴다(#359) — 골든 입력에 없으면 빈 dict 다.
+        verdict, skip = evaluate_sg(sg.name, sg.attached, bool(sg.open_to_world), sg.tags)
         results[sg.arn] = (verdict.value, skip.value if skip else None)
 
     # EBS 도 판정 대상(_RULE_TARGET_TYPES). 미부착·available → UNUSED.

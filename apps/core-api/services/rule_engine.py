@@ -16,6 +16,8 @@ from __future__ import annotations
 from enum import Enum
 from typing import Optional
 
+from schemas.asset_roles import ROLE_ISOLATION, ROLE_TAG_KEY
+
 # ----- 임계치 (실 계정 데이터로 재보정 대상) -----
 IDLE_CPU_AVG = 5.0        # 평균 CPU 이 값 미만이면 저활성 후보
 SPIKE_CPU_MAX = 40.0      # 평균은 낮아도 최대가 이 값 이상이면 스파이크 → 다운사이징 부적합
@@ -88,13 +90,25 @@ def evaluate_ebs(state: Optional[str],
     return Verdict.SKIP, SkipReason.SKIP_UNSUPPORTED_STATE
 
 
+def _is_isolation_sg(tags: dict | None) -> bool:
+    """격리용 SG 여부 — 자리 태그(schemas.asset_roles)가 키·값 모두 정확히 맞을 때만 True.
+    이름이나 규칙 수로 추정하지 않는다(#359)."""
+    return (tags or {}).get(ROLE_TAG_KEY) == ROLE_ISOLATION
+
+
 def evaluate_sg(name: Optional[str], attached: Optional[bool],
-                open_to_world: Optional[bool]) -> tuple[Verdict, Optional[SkipReason]]:
-    """SG 1개 판정 → (verdict, skip_reason)."""
+                open_to_world: Optional[bool],
+                tags: dict | None = None) -> tuple[Verdict, Optional[SkipReason]]:
+    """SG 1개 판정 → (verdict, skip_reason). 판정 우선순위대로 검사."""
     if (name or "").lower() == "default":
         return Verdict.SKIP, SkipReason.SKIP_WHITELISTED   # default SG 는 삭제/변경 불가
     if open_to_world:
         return Verdict.THREAT, None                        # 22/3389 등 전체개방
+    # 격리용 SG 는 EC2_ISOLATE 전까지 미부착이 정상이라 UNUSED 로 두면 첫 회차부터 삭제 후보다.
+    # 위협(전체개방) 뒤에 둔다 — 태그가 빼는 것은 "미사용이니 지우자" 하나뿐이고, 격리 SG 가
+    # 전체개방이면 그건 진짜 위협이라 태그로 가리지 않는다(#359).
+    if _is_isolation_sg(tags):
+        return Verdict.SKIP, SkipReason.SKIP_WHITELISTED
     if attached is False:
         return Verdict.UNUSED, None                        # 미부착(미사용 후보)
     return Verdict.SKIP, SkipReason.SKIP_ACTIVE
@@ -152,7 +166,8 @@ def run_rule_engine(db, collection_run_id: str | None = None) -> dict:
         elif a.asset_type == AssetType.SG:
             attached = (a.spec or {}).get("attached")
             open_to_world = bool((a.spec or {}).get("open_to_world"))
-            verdict, skip = evaluate_sg(a.name, attached, open_to_world)
+            tags = (a.spec or {}).get("tags", {})
+            verdict, skip = evaluate_sg(a.name, attached, open_to_world, tags)
             health_int = None
         elif a.asset_type == AssetType.EBS:
             # EBS 는 판정 대상(_RULE_TARGET_TYPES). 분기를 두지 않으면 판정행이 없어

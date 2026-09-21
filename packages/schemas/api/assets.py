@@ -116,6 +116,8 @@ class SgSpec(BaseModel):
     vpc_id: Optional[str] = None
     attached: bool
     open_to_world: list[OpenPortRule] = Field(default_factory=list)
+    # #359 이전 적재 행에는 이 키가 없다 — 기본값으로 읽는다(재수집 전까지 빈 dict).
+    tags: dict[str, str] = Field(default_factory=dict)
 
 
 class NaclSpec(BaseModel):
