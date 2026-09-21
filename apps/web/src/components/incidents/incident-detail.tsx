@@ -32,6 +32,7 @@ import { agentWaitTimes, appendTransition, latchAgentWaitAt } from '@/lib/realti
 import { newIdempotencyKey } from '@/lib/api/client';
 import { isTerminalStatus } from '@/lib/execution-status';
 import { isResolvable } from '@/lib/incident-filter';
+import { proposalButtons } from '@/lib/proposal-buttons';
 import { RUNBOOK_LABELS, incidentTitle } from '@/lib/enum-labels';
 import { formatKst } from '@/lib/utils';
 import type { AssetItem, IncidentResponse, IsoDateTime, RunbookId } from '@/types/api';
@@ -259,10 +260,12 @@ function ExecutionsArea({
  *
  * | 조건 | 버튼 |
  * | --- | --- |
- * | `recommendations ≥ 1` · FINOPS | `이 조치 실행` |
- * | `recommendations ≥ 1` · SECOPS | `승인하고 차단` |
- * | 〃 + `response_mode = AGENT_WAIT` | `승인하고 차단` `차단 안 함` — 실행 전 상태 |
+ * | `recommendations ≥ 1` | 후보 런북의 동작 계열로 정한 문구 — `proposalButtons` |
+ * | 〃 + 차단 계열 + `response_mode = AGENT_WAIT` | 실행 문구 옆에 `차단 안 함` — 실행 전 상태 |
  * | `recommendations = []` | 없음(조회 전용) |
+ *
+ * **문구의 축은 인시던트 분류가 아니라 후보 런북이다**(#363). 규칙 본문과 계열 표는
+ * `@/lib/proposal-buttons`에 있고 DSH-001 「AI 조치 제안」 카드가 같은 함수를 쓴다 — 여기에 복제하지 않는다.
  *
  * `status = ANALYZING`은 계약이 `recommendations`를 빈 배열로 강제하므로 자연히 버튼이 사라진다.
  * `ACTION_IN_PROGRESS`면 같은 Incident의 실행 버튼을 전부 비활성화한다.
@@ -284,10 +287,8 @@ function ProposalActions({
 }) {
   if (incident.recommendations.length === 0) return null;
 
-  const isSecOps = incident.category === 'SECOPS';
-  const approveLabel = isSecOps ? '승인하고 차단' : '이 조치 실행';
-  // 반려(`차단 안 함`)는 아직 실행되지 않은 AGENT_WAIT 상태에서만 의미가 있다(§4.5 B-Medium).
-  const canReject = isSecOps && incident.response_mode === 'AGENT_WAIT';
+  // 반려(`차단 안 함`)는 **차단 후보**가 아직 실행되지 않은 AGENT_WAIT 상태일 때만 의미가 있다(§4.5 B-Medium).
+  const { approveLabel, canReject } = proposalButtons(incident);
 
   return (
     <div className="flex flex-wrap items-center gap-3">
