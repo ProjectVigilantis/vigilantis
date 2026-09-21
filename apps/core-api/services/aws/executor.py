@@ -1106,6 +1106,16 @@ STEP_DELETE_NACL_ENTRY = "DELETE_NACL_ENTRY"
 # 규칙)만 남긴다.
 STEP_COMPARE_NACL_ENTRY = "COMPARE_NACL_ENTRY"
 
+STEP_CREATE_SNAPSHOT = "CREATE_SNAPSHOT"
+STEP_WAIT_SNAPSHOT = "WAIT_SNAPSHOT"
+STEP_DELETE_VOLUME = "DELETE_VOLUME"
+# 삭제 전 볼륨 상태 대조(Issue #369). STEP_COMPARE_INSTANCE_TYPE과 같은 규칙이다 —
+# 삭제로 **진행하는** 경우에는 기록하지 않고, 대조 자체가 결론인 경우(붙어 있어
+# 거절·볼륨 없음)만 남긴다. 진행하면서 기록하면 "단계 1건 이상 = 자산이 바뀌었을 수
+# 있다"는 회수 규약(ADR-0008 §7)이 거짓이 되어, 스냅숏도 만들기 전에 끝난 실행이
+# 재실행 대신 종료 판정으로 가서 실패로 확정된다.
+STEP_COMPARE_VOLUME_STATE = "COMPARE_VOLUME_STATE"
+
 _OP_STOP = "ec2.stop_instances"
 _OP_MODIFY = "ec2.modify_instance_attribute"
 _OP_START = "ec2.start_instances"
@@ -1113,6 +1123,26 @@ _OP_DESCRIBE = "ec2.describe_instances"
 _OP_CREATE_NACL_ENTRY = "ec2.create_network_acl_entry"
 _OP_DELETE_NACL_ENTRY = "ec2.delete_network_acl_entry"
 _OP_DESCRIBE_NACL = "ec2.describe_network_acls"
+_OP_DESCRIBE_VOLUMES = "ec2.describe_volumes"
+_OP_CREATE_SNAPSHOT = "ec2.create_snapshot"
+_OP_DESCRIBE_SNAPSHOTS = "ec2.describe_snapshots"
+_OP_DELETE_VOLUME = "ec2.delete_volume"
+
+# 삭제해도 되는 볼륨의 상태 — 부착 목록이 비어 있고 available이어야 한다.
+# 판정(rule_engine.evaluate_ebs)이 본 것과 같은 축이지만, 판정과 실행 사이에 누군가
+# 볼륨을 붙였을 수 있어 **삭제 직전에 다시 본다**(Issue #369 §1단계).
+_VOLUME_DELETABLE_STATE = "available"
+
+# 삭제가 **이미 접수된** 볼륨의 상태. AWS는 delete_volume을 받은 뒤 볼륨을 곧바로
+# 지우지 않고 deleting에 몇 분간 둘 수 있으며, 이 구간은 되돌아오지 않는다
+# (deleting → deleted, DeleteVolume API 문서). 조회에 잡힌다는 이유로 "남아 있다"로
+# 세면 지워지는 중인 볼륨이 실패로 확정된다(PR #390 리뷰).
+#
+# 이 런북의 **성공의 경계는 "AWS가 삭제를 접수했다"** 이다 — 정상 경로도 delete_volume
+# 200으로 확정한다(dispatcher._close_and_publish). 끊긴 실행의 현물 판정
+# (workflows.judge_ebs_delete_unattached)만 그 경계를 실자산에서 다시 읽으므로,
+# 두 경로가 같은 것을 성공이라 부르도록 이 상태 집합을 여기 한 곳에 둔다.
+_VOLUME_DELETE_ACCEPTED_STATES: frozenset[str] = frozenset({"deleting", "deleted"})
 
 # TCP·UDP 규칙에는 PortRange가 필수다(CreateNetworkAclEntry API 계약). LocalStack은
 # 빠뜨린 요청도 받아 주지만 실 AWS는 InvalidParameterValue로 거절한다 — 로컬에서만
@@ -1128,6 +1158,23 @@ _NACL_PORT_RANGE_PROTOCOLS: frozenset[str] = frozenset({"6", "17"})  # tcp · ud
 # 단계 effect가 UNKNOWN이 되고, 타입 변경으로 넘어가지 않는다.
 STOP_WAIT_DELAY_SECONDS = 5
 STOP_WAIT_MAX_ATTEMPTS = 40
+
+# 스냅숏 완료 대기 — 5초 간격 24회. 초과하면 **삭제하지 않는다**(Issue #369).
+#
+# 120초는 **폴링 간격의 합**이지 실행 점유 시간의 상한이 아니다 — describe_snapshots
+# 호출 시간과 botocore 재시도가 그 위에 얹힌다(PR #390 리뷰). 아래 근거도 "몇 번
+# 물어보는가"의 크기다.
+#
+# 정지 대기(200초)보다 짧게 잡은 이유는 **이 대기가 dispatcher 한 주기를 붙잡기**
+# 때문이다. 실행 스캔은 겹쳐 돌지 않으므로(max_instances=1) 기다리는 동안 다른 실행이
+# 밀린다. 삭제는 미뤄도 손해가 없는 조치라(낭비 비용이 몇 분 더 날 뿐) 대기를 늘리는
+# 쪽보다 다음 승인으로 넘기는 쪽이 싸다 — 초과는 실패로 닫히고 후보가 다시 선다.
+#
+# 120초의 근거는 **1 GiB 볼륨**이다(ADR-0009 §4가 스모크 대상으로 준비한 크기).
+# LocalStack은 스냅숏을 즉시 completed로 만들어(2026-09-21 실측) 이 상한이 로컬에서는
+# 걸리지 않는다 — 실 AWS 완료 시간은 10/6(화) 스모크에서 재고, 모자라면 그때 조정한다.
+SNAPSHOT_WAIT_DELAY_SECONDS = 5
+SNAPSHOT_WAIT_MAX_ATTEMPTS = 24
 
 # 요약 문자열 저장 한도는 1024자(db.models)다. 그보다 넉넉히 줄여 원인 앞부분을 남긴다.
 _SUMMARY_LIMIT = 400
@@ -1789,6 +1836,204 @@ def execute_nacl_restore(
     log.succeed(
         ExecutionEffect.APPLIED,
         f"deny 규칙 삭제: {slot} · {backup.cidr_block} · protocol {backup.protocol}",
+        response=response,
+    )
+    return ExecutionOutcome(steps=tuple(log.steps))
+
+
+def _volume(volume_id: str, region: str):
+    """볼륨 1건. (볼륨, 코드) 짝 — 없으면 PRECHECK_TARGET_NOT_FOUND가 채워진다.
+
+    AWS는 없는 볼륨을 빈 목록이 아니라 `InvalidVolume.NotFound`(ClientError)로 답하고,
+    그 코드는 `NotFound`로 끝나 reason_code_for가 TARGET_NOT_FOUND로 분류한다
+    (services/aws/errors.py). **LocalStack도 같게 답한다**(2026-09-21 실측 · Issue #369).
+    """
+    res, code = _call(
+        aws_client("ec2", region).describe_volumes, VolumeIds=[volume_id]
+    )
+    if code is not None:
+        return None, code
+    for volume in res.get("Volumes", []):
+        return volume, None
+    return None, R.PRECHECK_TARGET_NOT_FOUND
+
+
+def current_volume(volume_id: str, region: str):
+    """(볼륨, 사유 코드) 짝. 실행과 종료 판정이 같은 축을 같은 방법으로 읽도록 공개한다
+    (workflows.judge_ebs_delete_unattached) — current_nacl_entry를 공개한 이유와 같다.
+
+    **볼륨이 없는 것과 조회를 못 한 것은 다른 사건이다.** 앞은 PRECHECK_TARGET_NOT_FOUND,
+    뒤는 그 밖의 코드로 나온다 — 판정이 둘을 섞으면 지우지 못한 볼륨이 성공으로 닫힌다.
+    """
+    return _volume(volume_id, region)
+
+
+def volume_is_deletable(volume: Mapping[str, Any]) -> bool:
+    """지금 이 볼륨을 지워도 되는가 — `available`이고 부착이 없어야 한다.
+
+    두 축을 함께 본다. `State`만 보면 부착이 진행 중인 구간을 놓칠 수 있고, 부착
+    목록만 보면 `deleting`·`error` 같은 전이 상태를 삭제 가능으로 읽는다. 판정
+    (rule_engine.evaluate_ebs)이 `UNUSED`로 고른 축과 같으며(#276), 여기서 다시 보는
+    이유는 판정과 실행 사이에 누군가 붙였을 수 있기 때문이다.
+    """
+    return (
+        volume.get("State") == _VOLUME_DELETABLE_STATE
+        and not volume.get("Attachments")
+    )
+
+
+def volume_delete_accepted(volume: Mapping[str, Any]) -> bool:
+    """이 볼륨에 삭제가 **이미 접수**됐는가 — `deleting`·`deleted`.
+
+    끊긴 실행의 현물 판정이 쓴다(workflows.judge_ebs_delete_unattached). 삭제 호출이
+    5xx·응답 유실로 끝나도 AWS가 이미 받았을 수 있고, 그때 볼륨은 몇 분간 deleting에
+    머문다 — 조회에 잡혔다는 것만으로 실패로 확정하면 **실제로 지워진 삭제가 실패로
+    남는다**(PR #390 리뷰). 이 두 상태는 available로 돌아오지 않으므로 성공이다.
+
+    volume_is_deletable과 반대 축이 아니다. 저쪽은 "지금 지워도 되는가"(실행 전),
+    이쪽은 "지우라는 요청이 이미 들어갔는가"(실행 후)를 묻는다.
+    """
+    return volume.get("State") in _VOLUME_DELETE_ACCEPTED_STATES
+
+
+def execute_ebs_delete_unattached(
+    target_arn: str,
+    *,
+    record_step: Optional[StepRecorder] = None,
+) -> ExecutionOutcome:
+    """`RUNBOOK_EBS_DELETE_UNATTACHED` 실행 — 상태 재확인 → 최종 스냅숏 → 완료 확인 → 삭제.
+    (Issue #369)
+
+    **이 런북은 되돌릴 수 없다.** 등록 롤백이 없고(SSOT §Action Whitelist) 백업 레코드
+    4종에도 EBS가 없다(ADR-0008 §5). 데이터를 지키는 장치는 **삭제 직전의 스냅숏 하나**
+    뿐이라, 순서가 곧 계약이다.
+
+    단계 4종 — 위에서 아래로, 앞이 성립할 때만 뒤로 간다.
+      ① 상태 재확인: `available`이고 부착이 없는가. 어긋나면 **스냅숏도 만들지 않고**
+         거절한다 — 가드레일 ④는 후보 생성 시점에 돌고, 관제자가 [조치 실행]을 누르기까지
+         그 사이에 누군가 볼륨을 붙였을 수 있다.
+      ② 최종 스냅숏: `create_snapshot`. 거절이면 삭제로 가지 않는다.
+      ③ 완료 확인: `snapshot_completed` 대기. 시간 초과·`error`면 **삭제하지 않는다** —
+         진행 중(`pending`) 스냅숏으로 지워도 되는지를 AWS 동작에 기대지 않는다.
+      ④ 삭제: `delete_volume`.
+
+    **볼륨이 이미 없으면 성공이다**(execute_nacl_restore ①과 같은 결) — 관제자가 원한
+    상태가 이미 서 있고, 다시 물어도 답이 같다. 우리가 지운 것이 아니므로 스냅숏도
+    없으며 그 사실을 단계 요약에 적는다.
+
+    조회를 못 하면 자산을 만지지 않고 **보류**한다 — 확정하면 검증기의 실패가 조치의
+    실패로 저장된다(Issue #249).
+
+    **스냅숏에 태그를 달지 않는다**(2026-09-21 결정). 달면 ADR-0009 §3의 "스냅숏은 태그가
+    없어 우리 것인지 가릴 수 없으므로 보고만 한다"를 자동 정리로 바꿀 수 있지만, 스모크
+    IAM 정책·`provision_smoke_aws.py`·ADR 본문을 함께 고쳐야 해 이 카드 밖이다. 지금은
+    스모크마다 남는 1 GiB 스냅숏을 손으로 지운다.
+
+    되돌릴 근거는 **스냅숏 ID**다 — ②의 단계 요약에 원본 볼륨 ID와 함께 남긴다. 볼륨을
+    되살리려면 관제자가 그 ID로 손수 만든다(복구 런북은 Whitelist 10종 밖이다).
+    """
+    target = parse_arn(target_arn)
+    if target is None or target.resource_type != "volume":
+        return _rejected(f"EBS 볼륨 ARN이 아닙니다: {target_arn}")
+
+    volume_id = target.resource_id
+    volume, code = current_volume(volume_id, target.region)
+    if code is not None and code is not R.PRECHECK_TARGET_NOT_FOUND:
+        return _deferred(
+            code,
+            f"볼륨 상태 조회 실패로 삭제 보류: {code.value}",
+            event="ebs_delete_deferred",
+            aws_operation=_OP_DESCRIBE_VOLUMES,
+        )
+
+    log = _StepLog(target_arn, record_step)
+
+    if volume is None:
+        # 이미 없다 — 지울 것이 없고 다시 물어도 답이 같다. 대조 자체가 결론인 경우라
+        # 단계를 남긴다(STEP_COMPARE_VOLUME_STATE 주석의 예외 두 경우 중 하나)
+        log.begin(1, STEP_COMPARE_VOLUME_STATE, _OP_DESCRIBE_VOLUMES)
+        log.succeed(
+            ExecutionEffect.NOT_APPLIED,
+            f"볼륨 {volume_id}이 이미 없습니다 — 스냅숏 없이 삭제할 것이 없음",
+        )
+        return ExecutionOutcome(steps=tuple(log.steps))
+
+    if not volume_is_deletable(volume):
+        state = volume.get("State") or "알 수 없음"
+        attached = len(volume.get("Attachments") or ())
+        log.begin(1, STEP_COMPARE_VOLUME_STATE, _OP_DESCRIBE_VOLUMES)
+        log.succeed(
+            ExecutionEffect.NOT_APPLIED,
+            f"삭제 조건 불충족(state={state} · 부착 {attached}건) — 스냅숏도 만들지 않음",
+        )
+        return ExecutionOutcome(
+            steps=tuple(log.steps),
+            reason_code=R.PRECHECK_INVALID_STATE,
+            error_summary=(
+                f"판정 이후 볼륨 상태가 바뀌었습니다: state={state} · 부착 {attached}건"
+            )[:_SUMMARY_LIMIT],
+        )
+
+    ec2 = aws_client("ec2", target.region)
+
+    # ② 최종 스냅숏 — 삭제로 가는 유일한 안전장치라 여기서 실패하면 멈춘다
+    log.begin(2, STEP_CREATE_SNAPSHOT, _OP_CREATE_SNAPSHOT)
+    try:
+        snapshot = ec2.create_snapshot(
+            VolumeId=volume_id,
+            Description=f"vigilantis final snapshot before delete: {volume_id}",
+        )
+    except (ClientError, BotoCoreError) as exc:
+        return _abort(log, exc, detail="최종 스냅숏 생성 실패")
+    snapshot_id = str(snapshot.get("SnapshotId") or "")
+    if not _non_empty_str(snapshot_id):
+        # 200을 받았는데 ID가 없다 — 스냅숏이 만들어졌는지조차 알 수 없고(effect UNKNOWN),
+        # 완료를 확인할 방법도 되살릴 근거를 남길 방법도 없다. 실패로 닫고 삭제하지 않는다.
+        log.fail(
+            ValueError("응답에 SnapshotId가 없습니다"),
+            detail="최종 스냅숏 생성 결과 확인 실패",
+        )
+        return ExecutionOutcome(
+            steps=tuple(log.steps),
+            reason_code=R.PRECHECK_AWS_ERROR,
+            error_summary="최종 스냅숏 ID를 받지 못해 삭제를 중단했습니다",
+        )
+    log.succeed(
+        ExecutionEffect.APPLIED,
+        f"최종 스냅숏 생성: {snapshot_id} (원본 볼륨 {volume_id})",
+        response=snapshot,
+    )
+
+    # ③ 완료 확인 — pending 상태로 지우지 않는다
+    log.begin(3, STEP_WAIT_SNAPSHOT, _OP_DESCRIBE_SNAPSHOTS)
+    try:
+        ec2.get_waiter("snapshot_completed").wait(
+            SnapshotIds=[snapshot_id],
+            WaiterConfig={
+                "Delay": SNAPSHOT_WAIT_DELAY_SECONDS,
+                "MaxAttempts": SNAPSHOT_WAIT_MAX_ATTEMPTS,
+            },
+        )
+    except (ClientError, BotoCoreError) as exc:
+        # WaiterError는 BotoCoreError라 _effect_for가 UNKNOWN을 준다 — 스냅숏이 끝났는지
+        # 모르는 상태다. 볼륨은 그대로이므로 종료 판정이 현물을 보고 실패로 닫는다
+        return _abort(log, exc, detail=f"최종 스냅숏 완료 확인 실패({snapshot_id})")
+    log.succeed(
+        ExecutionEffect.APPLIED,
+        f"최종 스냅숏 완료 확인: {snapshot_id}",
+    )
+
+    # ④ 삭제 — 여기부터 되돌릴 수 없다
+    log.begin(4, STEP_DELETE_VOLUME, _OP_DELETE_VOLUME)
+    try:
+        response = ec2.delete_volume(VolumeId=volume_id)
+    except (ClientError, BotoCoreError) as exc:
+        # 대조와 삭제 사이에 붙었으면 VolumeInUse(4xx)로 온다 — _effect_for가
+        # NOT_APPLIED로 분류해 되돌릴 것 없는 실패로 확정된다
+        return _abort(log, exc, detail="볼륨 삭제 실패")
+    log.succeed(
+        ExecutionEffect.APPLIED,
+        f"볼륨 삭제: {volume_id} (복구 근거 스냅숏 {snapshot_id})",
         response=response,
     )
     return ExecutionOutcome(steps=tuple(log.steps))

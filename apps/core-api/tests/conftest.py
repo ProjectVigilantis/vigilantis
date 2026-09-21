@@ -224,6 +224,10 @@ _SEED_PARAMETERS: dict[str, dict] = {
         "rule_number": 100, "cidr_block": "203.0.113.5/32", "protocol": "-1",
     },
     "RUNBOOK_SG_DELETE_ISOLATED": {},
+    # 삭제 2종은 AI가 고를 값이 없다 — 무엇을 지울지는 후보의 target_arn이 정한다
+    "RUNBOOK_EBS_DELETE_UNATTACHED": {},
+    # 실행 함수가 아직 없는 런북 — test_dispatcher가 "미구현은 확정하지 않는다"를 볼 때 쓴다
+    "RUNBOOK_EC2_ENABLE_AUTOSCALING": {"min_size": 1, "max_size": 3},
 }
 
 

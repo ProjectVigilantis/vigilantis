@@ -105,6 +105,7 @@ _RUNNERS: dict[RunbookId, Callable[[Session, str], workflows.ExecutionRunOutcome
     RunbookId.RUNBOOK_EC2_REVERT_SIZE: workflows.run_revert_size_execution,
     RunbookId.RUNBOOK_NACL_ADD_DENY: workflows.run_nacl_add_deny_execution,
     RunbookId.RUNBOOK_NACL_RESTORE: workflows.run_nacl_restore_execution,
+    RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED: workflows.run_ebs_delete_unattached_execution,
 }
 
 # 런북별 종료 판정 진입점 — AWS 변경이 이미 시작된 실행을 어느 종료 상태로 확정할지
@@ -115,6 +116,7 @@ _JUDGES: dict[RunbookId, Callable[[Session, str], workflows.ExecutionJudgement]]
     RunbookId.RUNBOOK_EC2_REVERT_SIZE: workflows.judge_revert_size,
     RunbookId.RUNBOOK_NACL_ADD_DENY: workflows.judge_nacl_add_deny,
     RunbookId.RUNBOOK_NACL_RESTORE: workflows.judge_nacl_restore,
+    RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED: workflows.judge_ebs_delete_unattached,
 }
 
 # 실행이 성공을 반환해도 확정하지 않는 런북 — **성공의 경계가 실행 밖에 있다.**
