@@ -20,6 +20,7 @@ import { proposalRequest, type ActionRequest } from '@/lib/action-request';
 import { newIdempotencyKey } from '@/lib/api/client';
 import { proposalView } from '@/lib/dashboard';
 import { arnShort, incidentTitle, RUNBOOK_LABELS } from '@/lib/enum-labels';
+import { proposalButtons } from '@/lib/proposal-buttons';
 import { formatKst } from '@/lib/utils';
 import type { AssetItem, IncidentListItem, IncidentResponse } from '@/types/api';
 
@@ -121,7 +122,9 @@ export function ActionProposalCard({
     // §4.5 버튼 노출 규칙 그대로 — `recommendations`가 비면 버튼을 만들지 않는다(조회 전용).
     // `ANALYZING`은 계약이 빈 배열을 강제하므로 자연히 여기서 걸린다.
     const canExecute = top.recommendations.length > 0;
-    const approveLabel = top.category === 'SECOPS' ? '승인하고 차단' : '이 조치 실행';
+    // 문구는 INC-002 상세와 **같은 함수**로 정한다 — 후보 런북의 동작 계열이 축이다(#363).
+    // 반려(`차단 안 함`)는 상세(§4.5 B-Medium) 자리이므로 이 카드는 `approveLabel`만 쓴다.
+    const { approveLabel } = proposalButtons(top);
     // 진행 중 실행이 있으면 같은 Incident의 실행 버튼을 잠근다(§4.5).
     const locked = top.status === 'ACTION_IN_PROGRESS';
 
