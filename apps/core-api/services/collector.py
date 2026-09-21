@@ -167,6 +167,11 @@ def _name_tag(tags: list[dict]) -> str | None:
     return next((t["Value"] for t in tags or [] if t["Key"] == "Name"), None)
 
 
+def _tag_dict(tags: list[dict] | None) -> dict[str, str]:
+    """AWS 의 [{Key, Value}] 태그 목록을 {Key: Value} 로. EC2·SG 가 같은 변환을 쓴다."""
+    return {t["Key"]: t["Value"] for t in tags or []}
+
+
 def _open_to_world(sg: dict) -> list[OpenPort]:
     """0.0.0.0/0 또는 ::/0 로 열린 인그레스만 추린다(22/tcp, 3389/tcp 위협 탐지용)."""
     ports: list[OpenPort] = []
@@ -447,7 +452,7 @@ def collect_region(
                 private_ip=i.get("PrivateIpAddress"),
                 launch_time=i.get("LaunchTime"),
                 security_group_ids=[g["GroupId"] for g in i.get("SecurityGroups", [])],
-                tags={t["Key"]: t["Value"] for t in i.get("Tags", [])},
+                tags=_tag_dict(i.get("Tags")),
                 metrics=series,
                 metric_summary=reuse[iid] if reuse else _summarize(series),
             )
@@ -463,6 +468,7 @@ def collect_region(
             vpc_id=sg.get("VpcId"),
             attached=sg["GroupId"] in used,
             open_to_world=_open_to_world(sg),
+            tags=_tag_dict(sg.get("Tags")),
         )
         for sg in sgs_raw
     ]
@@ -720,6 +726,7 @@ def persist_inventory(
             "vpc_id": g.vpc_id,
             "attached": g.attached,
             "open_to_world": [p.model_dump(mode="json") for p in g.open_to_world],
+            "tags": g.tags or {},
         }
         assets_repo.upsert_asset(
             db,
