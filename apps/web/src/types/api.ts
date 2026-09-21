@@ -496,8 +496,9 @@ export interface CpuAxis {
  * EC2 한 대의 네트워크 처리량 곡선. **In·Out이 한 자산 안에 짝으로 온다** — 화면이 두 방향을
  * 겹쳐 그려야 "받기만 하는가"가 읽히기 때문이다.
  *
- * 값의 단위는 **period당 바이트**다(CloudWatch Average). 초당 처리량으로 읽으려면 축의
- * `period_seconds`로 나눈다 — 나누는 쪽이 화면인 것은 서버가 관측값을 가공하지 않기 때문이다.
+ * 값의 단위는 **period당 바이트 총량**이다(CloudWatch `Sum`) — 표본값이 그 표본 구간에 오간
+ * 바이트라, period 안에 표본이 여럿이면 합계만이 그 구간의 총량이 된다. 초당 처리량으로 읽으려면
+ * 축의 `period_seconds`로 나눈다 — 나누는 쪽이 화면인 것은 서버가 관측값을 가공하지 않기 때문이다.
  */
 export interface NetworkSeries {
   arn: string;

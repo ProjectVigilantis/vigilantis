@@ -131,7 +131,11 @@ class NetworkSeries(BaseModel):
     두 방향을 각각의 series 로 쪼개지 않는 이유: 화면이 한 인스턴스의 In/Out 을 겹쳐 그려야
     "받기만 하는가, 내보내기만 하는가"가 읽힌다. 따로 실으면 화면이 arn 으로 다시 짝지어야 한다.
 
-    **값의 단위는 period 당 바이트다**(CloudWatch ``NetworkIn``/``NetworkOut`` 의 Average).
+    **값의 단위는 period 당 바이트 총량이다** — CloudWatch ``NetworkIn``/``NetworkOut`` 을
+    ``Sum`` 으로 집계한 값이다. 두 메트릭의 표본은 그 표본 구간에 오간 바이트 수이므로,
+    period 안에 표본이 여럿일 때 합계만이 "그 구간에 오간 총 바이트"가 된다(Average 는
+    표본 하나치라 아래 환산이 표본 수만큼 작아진다).
+
     초당 처리량으로 읽으려면 축의 ``period_seconds`` 로 나눈다 — 나누는 쪽을 화면에 두는 것은
     CPU 축이 원계열을 그대로 싣는 것과 같은 원칙이다(서버는 관측값을 가공하지 않는다).
     """

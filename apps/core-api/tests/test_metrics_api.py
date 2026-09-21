@@ -266,6 +266,33 @@ def test_네트워크_조회가_실패해도_CPU축은_그려진다(client_pg, s
     assert body["cpu"]["series"][0]["resource_id"] == "i-0aaa"
 
 
+def test_지표_단위_실패는_AWS_상태코드를_그대로_사유로_싣는다(
+    client_pg, set_regions, monkeypatch, no_cloudwatch
+):
+    """get_metric_data 는 쿼리 하나가 실패해도 **호출 자체는 200** 이라, 실패가
+    `MetricDataResult.StatusCode` 에만 남는다(services/metrics.MetricDataError).
+
+    그 코드를 예외 클래스명으로 환원하면 화면은 권한 문제(`Forbidden`)인지 일시 장애
+    (`InternalError`)인지 구분하지 못한다 — 관제자가 할 일이 다른 두 상태다.
+    """
+    from schemas.assets import MetricName
+
+    from services.metrics import MetricDataError
+
+    set_regions(SEOUL)
+
+    def _boom(*a, **k):
+        raise MetricDataError({("i-0aaa", MetricName.NETWORK_IN): "Forbidden"})
+
+    monkeypatch.setattr("routers.metrics.network_timeseries", _boom)
+
+    axis = client_pg.get("/api/v1/metrics/timeseries").json()["network"]
+
+    assert axis["status"] == "UNAVAILABLE"
+    assert axis["reason_code"] == "Forbidden"
+    assert axis["series"] == []
+
+
 def test_조회_창은_상한을_넘길_수_없다(client_pg, set_regions, no_cloudwatch):
     """점이 인스턴스당 수백 개가 되면 화면이 읽히지 않는다 — 계약 밖 값은 422."""
     set_regions(SEOUL)

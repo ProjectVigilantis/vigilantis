@@ -34,6 +34,24 @@ class Ec2Ref(NamedTuple):
     region: str
 
 
+class MetricDataError(RuntimeError):
+    """get_metric_data 가 **지표 단위 오류**를 돌려준 경우(`StatusCode` != `Complete`).
+
+    호출 자체는 200 이라 botocore 는 예외를 내지 않는다. 그대로 두면 실패한 지표가 빈
+    시리즈로 남아 축이 `READY` + 빈 곡선이 되고, 화면은 "조회 실패"를 "관측 없음"으로
+    그린다 — 둘은 관제자가 해야 할 일이 다르다(권한·한도를 고치는 일 ↔ 기다리는 일).
+    그래서 **예외로 세워 축 상태로 올린다.**
+
+    ``reason_code`` 는 라우터가 축의 사유로 그대로 싣는다(collector._failure_reason 이
+    이 속성을 먼저 본다) — `Forbidden` 처럼 AWS 가 준 코드가 클래스명으로 환원되지 않게 한다.
+    """
+
+    def __init__(self, errors: dict[tuple[str, MetricName], str]) -> None:
+        codes = sorted({code for code in errors.values()})
+        self.reason_code = "|".join(codes) or "MetricDataError"
+        super().__init__(f"CloudWatch 지표 오류 {len(errors)}건 — {self.reason_code}")
+
+
 def cpu_timeseries(
     instances: Sequence[Ec2Ref],
     *,
@@ -48,7 +66,9 @@ def cpu_timeseries(
     재시작 후 시드를 다시 넣기 전까지 실제로 이 상태가 된다.
 
     조회 실패는 삼키지 않는다 — 호출자(라우터)가 축 전체를 UNAVAILABLE 로 내린다.
-    일부 리전만 성공한 반쪽 곡선을 성공처럼 보여 주지 않기 위해서다.
+    일부 리전만 성공한 반쪽 곡선을 성공처럼 보여 주지 않기 위해서다. **지표 단위 실패도
+    같다**(MetricDataError) — 한 대만 Forbidden 이어도 나머지 곡선을 성공으로 그리면
+    그 화면에는 "한 대가 빠졌다"고 적을 자리가 없다.
     """
     by_region: dict[str, list[Ec2Ref]] = {}
     for ref in instances:
@@ -65,7 +85,9 @@ def cpu_timeseries(
             period_seconds,
             metrics=(MetricName.CPU_UTILIZATION,),
         )
-        for instance_id, by_metric in fetched.items():
+        if fetched.errors:
+            raise MetricDataError(fetched.errors)
+        for instance_id, by_metric in fetched.series.items():
             series = by_metric.get(MetricName.CPU_UTILIZATION)
             if series is None:
                 continue
@@ -96,7 +118,13 @@ def network_timeseries(
     않으려고 만든 것이다(schemas/api/metrics.NetworkAxis).
 
     조회 비용: 인스턴스 1대당 쿼리 2개(In·Out), 리전당 get_metric_data 1회.
-    값은 **period 당 바이트**를 그대로 싣는다 — 초당으로 환산하는 것은 화면 몫이다.
+
+    **통계는 ``Sum`` 이다 — 수집 경로의 ``Average`` 와 다르다.** NetworkIn/Out 의 표본값은
+    그 표본 구간(실 AWS 는 5분, 상세 모니터링이면 1분)에 오간 **바이트 수**이므로, period
+    안에 표본이 여럿이면 Average 는 표본 하나치가 된다. 계약은 이 값을 period 전체의
+    바이트로 적고 화면은 `period_seconds` 로 나눠 초당으로 읽으므로, Average 를 실으면
+    초당 값이 표본 수만큼 작아진다(1시간 period·1분 표본이면 60분의 1). Sum 만이
+    "그 구간에 오간 총 바이트"라는 계약의 뜻과 맞는다.
     """
     by_region: dict[str, list[Ec2Ref]] = {}
     for ref in instances:
@@ -112,8 +140,11 @@ def network_timeseries(
             window_end,
             period_seconds,
             metrics=(MetricName.NETWORK_IN, MetricName.NETWORK_OUT),
+            stat="Sum",
         )
-        for instance_id, by_metric in fetched.items():
+        if fetched.errors:
+            raise MetricDataError(fetched.errors)
+        for instance_id, by_metric in fetched.series.items():
             points_by_id[instance_id] = {
                 name: _points(series) for name, series in by_metric.items()
             }

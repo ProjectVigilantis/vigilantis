@@ -63,8 +63,13 @@ IDLE_CPU = round(IDLE_CPU_AVG * 0.4, 1)      # 평균 < IDLE_CPU_AVG → RIGHTSI
 NORMAL_CPU = round(IDLE_CPU_AVG * 7.0, 1)    # 평균 ≥ IDLE_CPU_AVG → 후보 아님
 SPIKE_BASE = round(IDLE_CPU_AVG * 0.2, 1)    # 평균은 낮게 유지
 SPIKE_PEAK = round(SPIKE_CPU_MAX * 2.0, 1)   # 최대 ≥ SPIKE_CPU_MAX → SKIP_LOW_UTIL
-METRIC_HOURS = 72                            # 최근 3일 × 1시간 해상도
+METRIC_HOURS = 72                            # 최근 3일 × 1시간 해상도(CPU 판정 입자)
 SPIKE_PEAK_COUNT = 2
+# 네트워크만 **한 시간 안에 표본 여럿**을 넣는다(15분 간격). 표본이 시간당 하나뿐이면
+# 같은 구간의 Sum 과 Average 가 같은 값이라, 차트가 어느 통계로 읽는지가 드러나지 않는다 —
+# 실 AWS 의 표본 간격은 5분(상세 모니터링이면 1분)이라 그쪽이 오히려 정상 상태다.
+# 시간당 총량은 프로필 값 그대로 유지하도록 표본값을 나눠 넣는다.
+NET_SAMPLES_PER_HOUR = 4
 
 # 파생만으로는 보장되지 않는 불변식 2개 — 깨지면 시드가 조용히 무의미해지므로 즉시 종료.
 # (assert 금지: python -O / PYTHONOPTIMIZE 에서 제거된다)
@@ -336,27 +341,46 @@ def _has_metrics(cw, instance_id: str) -> bool:
     )
 
 
+#: put_metric_data 1회에 실을 표본 수 상한. 실 AWS 는 요청당 1,000건·40KB 라, 네트워크처럼
+#: 표본이 시간당 여러 개면 한 번에 다 싣지 못한다.
+_PUT_CHUNK = 100
+
+
+def _put_series(cw, instance_id: str, metric: MetricName, points: list[tuple[datetime, float]]) -> None:
+    data = [{
+        "MetricName": metric.value,
+        "Dimensions": [{"Name": "InstanceId", "Value": instance_id}],
+        "Timestamp": ts,
+        "Value": value,
+        "Unit": "Percent" if metric is MetricName.CPU_UTILIZATION else "Bytes",
+    } for ts, value in points]
+    for i in range(0, len(data), _PUT_CHUNK):
+        cw.put_metric_data(Namespace="AWS/EC2", MetricData=data[i : i + _PUT_CHUNK])
+
+
 def _put_metrics(cw, instance_id: str, profile: str) -> None:
     """CPU/Network 시계열을 AWS/EC2 네임스페이스에 직접 주입.
-    실 AWS는 AWS/ 네임스페이스 커스텀 주입이 불가 — LocalStack 전용 경로다(ADR-0006 §2)."""
+    실 AWS는 AWS/ 네임스페이스 커스텀 주입이 불가 — LocalStack 전용 경로다(ADR-0006 §2).
+
+    **두 계열의 표본 간격이 다르다.** CPU 는 시간당 1개(판정이 쓰는 입자 그대로), 네트워크는
+    시간당 `NET_SAMPLES_PER_HOUR` 개다 — 차트가 네트워크를 Sum 으로 읽는다는 계약이
+    표본 하나짜리 시드에서는 검증되지 않기 때문이다(Sum 과 Average 가 같은 값이 된다).
+    """
     now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-    cpu = _cpu_series(profile)
-    net = {"idle": 5_000.0, "spike": 50_000.0, "normal": 5_000_000.0}[profile]
-    for metric, values in (
-        (MetricName.CPU_UTILIZATION, cpu),
-        (MetricName.NETWORK_IN, [net] * METRIC_HOURS),
-        (MetricName.NETWORK_OUT, [net] * METRIC_HOURS),
-    ):
-        cw.put_metric_data(
-            Namespace="AWS/EC2",
-            MetricData=[{
-                "MetricName": metric.value,
-                "Dimensions": [{"Name": "InstanceId", "Value": instance_id}],
-                "Timestamp": now - timedelta(hours=METRIC_HOURS - i),
-                "Value": v,
-                "Unit": "Percent" if metric is MetricName.CPU_UTILIZATION else "Bytes",
-            } for i, v in enumerate(values)],
-        )
+    _put_series(
+        cw, instance_id, MetricName.CPU_UTILIZATION,
+        [(now - timedelta(hours=METRIC_HOURS - i), v) for i, v in enumerate(_cpu_series(profile))],
+    )
+
+    net = {"idle": 5_000.0, "spike": 50_000.0, "normal": 5_000_000.0}[profile]  # 시간당 총 바이트
+    step = timedelta(hours=1) / NET_SAMPLES_PER_HOUR
+    net_points = [
+        (now - timedelta(hours=METRIC_HOURS - i) + step * s, net / NET_SAMPLES_PER_HOUR)
+        for i in range(METRIC_HOURS)
+        for s in range(NET_SAMPLES_PER_HOUR)
+    ]
+    for metric in (MetricName.NETWORK_IN, MetricName.NETWORK_OUT):
+        _put_series(cw, instance_id, metric, net_points)
 
 
 # ------------------------------------------------------------------ 실행 모드
