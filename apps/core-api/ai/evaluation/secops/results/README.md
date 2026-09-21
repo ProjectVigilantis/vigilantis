@@ -68,7 +68,9 @@ C01–C03은 강한 반복과 높음, C04는 60회/10분·분당 6회와 중간,
 | 입력 | `03ee93bce312951dd1abb5c8efc3c7471c6bb4d607de8fe9dc274b0f5518307d` |
 | 답지 | `b565541f90d630b63177165e3d19998ac64bc7ddbdc38dbf48cae8ea298e77ca` |
 | rubric | `62c3c181f23e9cd4b380fd0c174d031bb6f158394705c942a8d3f3827af567e0` |
-| 프롬프트 | `07108dfe7743a79e4abf32550efd842417e0e74db3a0cd67bdb3de0661e80ab6` |
+| 프롬프트 — 측정 당시 계산 방식 | `07108dfe7743a79e4abf32550efd842417e0e74db3a0cd67bdb3de0661e80ab6` |
 | 요청 | `c934bb34c76c022bcd5dc5dfab29d72bec0863f01f118cbe382ecdd55a8f9b8a` |
 
 지문은 측정 조건을 식별하며 의미 판정의 독립 검증을 대신하지 않는다. 기존 결과의 재집계와 새 측정의 선택은 [재검증 절차](../baseline.md#프롬프트입력rubric이-바뀌면-무엇을-다시-돌리는가)를 따른다.
+
+2026-09-21 리뷰 반영으로 프롬프트 지문의 파라미터 제약 범위를 SecOps 메뉴로 좁혔다. 현재 승인 지문은 `36def556ec4fa5a6d762adbf6a3a75584a943943a29fa1436d1fdd51d4b14387`이다. 위의 측정 당시 지문과 원자료는 유지하고, [prompt_snapshot.json](../prompt_snapshot.json)의 `measured_prompt_sha256`에도 당시 값을 남겼다. 실제 프롬프트·전달 입력·응답 스키마·서비스 설정과 요청 지문은 같으므로 v1.0.0과 9차 판정을 유지하며 새 측정으로 세지 않는다.

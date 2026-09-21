@@ -529,6 +529,7 @@ def test_finops_prompts_are_directive_not_prohibitive(prompt):
     # 금지가 쌓일수록 빈 후보가 가장 안전한 답이 된다(#243) — 금지형 표지를 잡는다
     # SecOps #324의 승인된 프롬프트는 의미 rubric·실측으로 평가한다.
     # 부정어 유무는 후보 강제/억제나 사용자 판단권 보존을 입증하지 않는다.
+    # 대체 검증은 EITHER 답지·action_reason 의미 기준·라운드별 후보/무제안 관측이다.
     for marker in ("않는다", "마라", "금지"):
         assert marker not in prompt
 

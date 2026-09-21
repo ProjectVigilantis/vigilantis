@@ -4,7 +4,8 @@
     "measured_version": "v0.5.6",
     "run_id": "20260919T040016Z-7aec24a0",
     "approved_at": "2026-09-21",
-    "prompt_sha256": "07108dfe7743a79e4abf32550efd842417e0e74db3a0cd67bdb3de0661e80ab6",
+    "prompt_sha256": "36def556ec4fa5a6d762adbf6a3a75584a943943a29fa1436d1fdd51d4b14387",
+    "measured_prompt_sha256": "07108dfe7743a79e4abf32550efd842417e0e74db3a0cd67bdb3de0661e80ab6",
     "rubric_sha256": "62c3c181f23e9cd4b380fd0c174d031bb6f158394705c942a8d3f3827af567e0",
     "qualification": "v0.5.6 9차에서 구조화 21/21·의미 168/168·내부 식별자 21/21 PASS와 최종 기능 회귀를 확인한 내용을 첫 공개 평가 기준선으로 확정했다.",
     "result": "results/README.md"

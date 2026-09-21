@@ -38,6 +38,7 @@ from ai.model_client import (
 )
 from config import Settings
 from schemas.agents import AgentGraphOutput
+from schemas.runbooks import RunbookId
 
 
 @pytest.fixture(autouse=True)
@@ -145,18 +146,25 @@ def test_request_manifest_covers_both_allowed_paths_without_paid_calls(monkeypat
         assert variants[0]["requests"][-1]["sha256"] != variants[1]["requests"][-1]["sha256"]
 
 
-def test_unrelated_finops_or_file_changes_do_not_invalidate_secops_requests(monkeypatch):
+@pytest.mark.parametrize("change", ["prompt", "constraints"])
+def test_unrelated_finops_or_file_changes_do_not_invalidate_secops_requests(monkeypatch, change):
     cases = load_cases()
     run = _run(cases)
     run["service_sha256"] = "이전 파일 전문 지문"
-    monkeypatch.setattr(agent, "_FINOPS_SUMMARY_SYSTEM_PROMPT", "FinOps만 변경했다.")
+    if change == "prompt":
+        monkeypatch.setattr(agent, "_FINOPS_SUMMARY_SYSTEM_PROMPT", "FinOps만 변경했다.")
+    else:
+        monkeypatch.setitem(agent._PARAMETER_CONSTRAINTS,
+                            RunbookId.RUNBOOK_EC2_ENABLE_AUTOSCALING, ("FinOps 전용 제약 변경",))
     result = runner.report(run, cases, load_answers(cases))
+    assert runner.prompt_fingerprint() == run["prompt_sha256"]
+    assert result["request_sha256"] == run["request_sha256"]
     assert result["current_service"]
     assert not result["source_files_match"]
     assert not result["quality_pass"]
 
 
-@pytest.mark.parametrize("change", ["prompt", "payload", "response_schema"])
+@pytest.mark.parametrize("change", ["prompt", "payload", "response_schema", "constraints"])
 def test_request_change_requires_remeasurement(monkeypatch, change):
     cases = load_cases()
     run = _run(cases)
@@ -165,11 +173,16 @@ def test_request_change_requires_remeasurement(monkeypatch, change):
     elif change == "payload":
         original = agent._secops_payload
         monkeypatch.setattr(agent, "_secops_payload", lambda value: {**original(value), "new_context": True})
+    elif change == "constraints":
+        monkeypatch.setitem(agent._PARAMETER_CONSTRAINTS,
+                            RunbookId.RUNBOOK_NACL_ADD_DENY, ("SecOps 제약 변경",))
     else:
         original = RiskReassessmentOutput.model_json_schema
         monkeypatch.setattr(RiskReassessmentOutput, "model_json_schema",
                             classmethod(lambda cls, **kwargs: {**original(**kwargs), "description": "새 계약 설명"}))
     result = runner.report(run, cases, load_answers(cases))
+    if change != "payload":
+        assert runner.prompt_fingerprint() != run["prompt_sha256"]
     assert result["request_sha256"] != run["request_sha256"]
     assert not result["current_service"]
 

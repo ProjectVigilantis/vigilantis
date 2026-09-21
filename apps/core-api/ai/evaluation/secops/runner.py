@@ -43,11 +43,16 @@ SERVICE_FILES = (
     "packages/schemas/evidence.py", "packages/schemas/mock_logs.py",
     "apps/core-api/secops_context.py", "apps/core-api/incident_intake.py",
     "apps/core-api/mock_threat_source.py", "apps/core-api/threat_ingress.py",
+    "apps/core-api/security/risk_evaluator.py", "apps/core-api/security/threat_normalizer.py",
     "scripts/secops_log_corpus.py",
 )
 
 
 def prompt_fingerprint() -> str:
+    # 현재 서비스로 재조립·대조한 전체 동결 세트의 메뉴만 사용한다.
+    # 공유 맵의 FinOps 전용 제약 변경이 SecOps 승인 지문을 흔들지 않게 한다.
+    runbooks = {capability.runbook_id for case in load_cases()
+                for capability in case.graph_input.capabilities}
     return digest({
         "summary": agent._SECOPS_SUMMARY_PROMPT,
         "risk": agent._SECOPS_RISK_PROMPT,
@@ -55,7 +60,9 @@ def prompt_fingerprint() -> str:
         "schemas": [model.model_json_schema() for model in (
             agent.EvidenceSummaryOutput, agent.RiskReassessmentOutput, agent.CandidateProposalOutput,
         )],
-        "parameter_constraints": agent._PARAMETER_CONSTRAINTS,
+        "parameter_constraints": {
+            runbook: agent._PARAMETER_CONSTRAINTS.get(runbook, ()) for runbook in runbooks
+        },
     })
 
 
