@@ -26,6 +26,7 @@ import {
 } from '@/components/ui/sheet';
 import { IDLE_CPU_AVG } from '@/lib/dashboard';
 import { cpuPointsFor, networkRowsFor } from '@/lib/metrics-chart';
+import { specValueView } from '@/lib/spec-value';
 import { formatKst } from '@/lib/utils';
 import type {
   AssetItem,
@@ -50,18 +51,18 @@ function isPortRule(value: unknown): value is OpenPortRule {
 }
 
 /**
- * spec 값 렌더. 계약의 spec 필드 타입이 유형마다 달라(문자열·수치·불리언·배열) 값 모양으로 가른다.
+ * spec 값 렌더. 계약의 spec 필드 타입이 유형마다 달라(문자열·수치·불리언·배열·Key→Value)
+ * **값 모양으로** 가른다 — 그 분기는 `lib/spec-value`가 정하고 여기서는 모양별 표기만 정한다.
  * `[]`는 `null`과 의미가 다르지만(3.3) 둘 다 화면에는 값이 없으므로 같은 `—`로 적는다.
  */
 function SpecValue({ value, threat }: { value: unknown; threat: boolean }) {
-  if (value === null || (Array.isArray(value) && value.length === 0)) {
-    return <span className="text-muted-foreground">{NO_VALUE}</span>;
-  }
-  if (typeof value === 'boolean') return <>{value ? '예' : '아니오'}</>;
-  if (Array.isArray(value)) {
+  const view = specValueView(value);
+  if (view.kind === 'EMPTY') return <span className="text-muted-foreground">{NO_VALUE}</span>;
+  if (view.kind === 'BOOLEAN') return <>{view.value ? '예' : '아니오'}</>;
+  if (view.kind === 'LIST') {
     return (
       <span className="flex flex-wrap justify-end gap-1">
-        {value.map((item, i) =>
+        {view.items.map((item, i) =>
           isPortRule(item) ? (
             <EnumBadge
               key={i}
@@ -76,7 +77,21 @@ function SpecValue({ value, threat }: { value: unknown; threat: boolean }) {
       </span>
     );
   }
-  return <span className={typeof value === 'number' ? 'tabular-nums' : undefined}>{String(value)}</span>;
+  // 태그(`tags`)처럼 Key→Value 로 오는 값. 키는 AWS가 준 철자 그대로라 mono 로 두고,
+  // 사람이 읽을 값과 색으로 가른다 — ACT-001 승인 모달의 `display_parameters` 줄과 같은 모양이다.
+  if (view.kind === 'MAP') {
+    return (
+      <span className="flex flex-col items-end gap-0.5">
+        {view.entries.map(([key, text]) => (
+          <span key={key} className="flex flex-wrap justify-end gap-1.5 text-xs">
+            <span className="text-muted-foreground font-mono break-all">{key}</span>
+            <span className="break-all">{text}</span>
+          </span>
+        ))}
+      </span>
+    );
+  }
+  return <span className={view.numeric ? 'tabular-nums' : undefined}>{view.text}</span>;
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
