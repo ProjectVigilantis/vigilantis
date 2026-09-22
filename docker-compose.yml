@@ -8,6 +8,18 @@
 # 사용: cp .env.example .env  →  docker compose up
 #       → 시드 주입: scripts/seed_localstack.py (파일 docstring 참고)
 # ==============================================================================
+# 프로젝트명 고정 — 이 줄이 없으면 compose 는 **디렉터리명**을 프로젝트명으로 쓴다.
+# 워크트리(wt-392·wt-348 등)에서 띄우면 wt392-db-1 처럼 이름이 갈리고 볼륨도 따로
+# 생겨(wt392_pgdata), Docker Desktop 목록에서 어느 것이 현재 스택인지 분간할 수 없다.
+# 어느 트리에서 띄우든 같은 스택(vigilantis-db-1 · vigilantis_pgdata)을 쓰게 한다.
+#
+# **환경변수 COMPOSE_PROJECT_NAME 이 이 값보다 우선한다** — 시연 절차
+# (docs/E2E_DEMO_SCENARIOS.md)가 vigilantis-demo 로 스택을 갈라 쓰는 근거가 그것이다.
+# 같은 이유로 서비스에 container_name 을 달지 않는다: 그 이름은 프로젝트명이 접두되지
+# 않아 전역 유일이라, 평소 스택이 정지 상태로 남아 있기만 해도 시연 up 이 이름 충돌로
+# 죽는다(포트는 실행 중일 때만 다투지만 컨테이너 이름은 정지 중에도 다툰다).
+name: vigilantis
+
 services:
   db:
     image: postgres:16-alpine
