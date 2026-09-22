@@ -12,6 +12,7 @@ import {
   type TopologyRow,
 } from '@/lib/asset-graph';
 import { arnShort, ASSET_TYPE_LABELS } from '@/lib/enum-labels';
+import { rowThreats, undrawnThreats, type RowThreat, type ThreatPath } from '@/lib/threat-path';
 import { cn } from '@/lib/utils';
 import type { AssetItem, AssetType, UncollectedAssetType, Verdict } from '@/types/api';
 
@@ -58,6 +59,15 @@ const HEAD_TYPES: { label: string; types: readonly AssetType[] }[] = [
 ];
 
 /**
+ * 공격 경로 열의 머리글. 자산 유형을 담지 않는 열이라 수집 실패 표시가 없다 — 이 열의 값은
+ * 자산 수집이 아니라 인시던트 계약(`threat_context`)에서 온다.
+ */
+const THREAT_HEAD: { label: string; types: readonly AssetType[] } = {
+  label: '외부 출발지 (인터넷)',
+  types: [],
+};
+
+/**
  * 열 머리글 한 칸. **열 정렬이 설 때만 그린다** — 좁아서 세로로 쌓인 배치에는 열이 없으므로
  * 머리글이 아래 내용과 어긋난 거짓말이 된다(아래 `hidden @3xl/graph:contents` 참조).
  * 그래서 수집 실패 안내는 여기에만 두지 않고 격자 아래 한 줄로도 남긴다.
@@ -76,6 +86,50 @@ function Head({ label, failed }: { label: string; failed: UncollectedAssetType[]
           수집 실패
         </span>
       ) : null}
+    </span>
+  );
+}
+
+/**
+ * 외부 출발지 노드 + 공격 경로 엣지 1건. **자산 노드가 아니다** — 계정 안에 없는 것이라
+ * 누를 곳도, 상세로 갈 곳도 없다. 그래서 상자 모양은 자산 노드와 맞추되 버튼이 아니고,
+ * 색은 `THREAT` 판정과 같은 `--danger` 하나만 쓴다(§0.3 — 빨강은 토큰 하나뿐이다).
+ *
+ * **문구가 값의 의미를 가른다.** 관측된 공격자 IP와 규칙이 허용한 대역은 서로 다른 사실이라
+ * (`threat-path.ts`), `0.0.0.0/0`이 "여기서 공격이 왔다"로 읽히면 안 된다.
+ *
+ * 대상 이름은 **그 행의 EC2가 아닐 때만** 덧붙인다. 전체 개방 SG의 공격 대상은 EC2가 아니라
+ * 부속 칩으로 그려진 그 보안 그룹이라, 화살표만 두면 무엇이 열려 있는지 화면이 말하지 않는다.
+ *
+ * **폭을 상자 하나로 묶는다**(관계 이름·대상을 옆으로 늘어놓지 않고 상자 안에 쌓는다). 이 열은
+ * 격자의 `auto` 트랙이라 내용의 max-content까지 자라는데, 옆으로 늘어놓으면 한 셀이 400px을
+ * 넘어 **마지막 `1fr` 열(부속 — 보안 그룹·NACL)이 0px로 찌부러진다.** 실측: 옆으로 늘어놓은
+ * 배치에서 부속 열이 0px가 되어 SG·NACL 칩이 그래프 밖으로 밀려났다. 계약값 `event_type`은
+ * 툴팁과 아래 범례가 맡는다.
+ */
+function ThreatSource({ threat, ec2Arn }: { threat: RowThreat; ec2Arn: string }) {
+  const { path, target } = threat;
+  const targetName = target !== null ? (target.name ?? target.resource_id) : arnShort(path.targetArn);
+
+  return (
+    <span className="flex min-w-0 items-center gap-1.5">
+      <span
+        title={`${path.source} → ${targetName} (${path.eventType})`}
+        className="border-danger bg-card flex max-w-40 min-w-0 flex-col items-start gap-0.5 rounded-md border px-2.5 py-1.5"
+      >
+        <span className="text-danger text-[10px] whitespace-nowrap">
+          {path.observed ? '관측 출발지' : '노출 대역'}
+        </span>
+        <span className="w-full min-w-0 truncate font-mono text-sm font-medium">{path.source}</span>
+        {path.targetArn !== ec2Arn ? (
+          <span className="text-muted-foreground w-full min-w-0 truncate font-mono text-[10px]">
+            → {targetName}
+          </span>
+        ) : null}
+      </span>
+      <span aria-hidden className="text-danger text-xs">
+        ▶
+      </span>
     </span>
   );
 }
@@ -172,16 +226,36 @@ function Row({
   row,
   onSelect,
   dimmedArns,
+  threats,
 }: {
   row: TopologyRow;
   onSelect: (asset: AssetItem) => void;
   dimmedArns: ReadonlySet<string> | null;
+  /**
+   * 이 행으로 들어오는 공격 경로. **null이면 열 자체가 없다** — 빈 배열과 다르다:
+   * 빈 배열은 "공격 경로 열이 있는 그래프인데 이 행에는 경로가 없다"이므로 셀을 비워 두고,
+   * null은 열이 서지 않은 그래프라 셀을 아예 그리지 않는다(그리면 열이 하나씩 밀린다).
+   */
+  threats: RowThreat[] | null;
 }) {
   const az = azOf(row.ec2);
   // `contents`로 셀을 부모 그리드에 직접 얹는다 — 행마다 따로 그리드를 만들면 열 너비가
   // 행끼리 안 맞아 3계층(TG → EC2 → EBS)이 성립하지 않는다.
   return (
     <div className="contents">
+      {threats !== null ? (
+        // **경로는 세로로 쌓는다.** 다른 열처럼 옆으로 흘리면 경로가 둘만 돼도 이 `auto` 열이
+        // 280px까지 자라, 마지막 `1fr` 열(부속)이 그만큼 좁아진다(실측: 137px까지 눌렸다).
+        <span className="flex min-w-0 flex-col items-start gap-1.5 self-center">
+          {threats.map((threat) => (
+            <ThreatSource
+              key={`${threat.path.targetArn}:${threat.path.source}`}
+              threat={threat}
+              ec2Arn={row.ec2.arn}
+            />
+          ))}
+        </span>
+      ) : null}
       <span className="text-muted-foreground bg-muted self-center justify-self-start rounded px-1.5 py-0.5 font-mono text-[10px]">
         {az ?? 'AZ 미상'}
       </span>
@@ -288,8 +362,10 @@ export function OffPath({
 }
 
 /**
- * 자산 그래프. DSH-001 통합 위협 토폴로지가 이 컴포넌트에 외부 Source IP 노드와 공격 경로
- * 엣지를 덧붙이는 구조라(설계서 §8), 배치 계산과 렌더를 여기서 닫아 둔다.
+ * 자산 그래프. DSH-001 통합 위협 토폴로지의 **외부 출발지 노드와 공격 경로 엣지도 이 컴포넌트가
+ * 그린다**(설계서 §8 · #362) — `threatPaths`를 받으면 격자 왼쪽에 열이 하나 더 서고, 경로가 향한
+ * 자산을 담은 행에 `[출발지] ▶ [대상]`이 덧붙는다. 별도 컴포넌트로 가르지 않는 이유는 그 엣지의
+ * 도착점이 **이 그래프가 이미 배치한 자산 노드**라서다. 따로 그리면 두 배치가 어긋난다.
  *
  * `dimmedArns`는 **숨김이 아니라 초점**이다 — 유형 필터로 노드를 빼면 엣지의 도착 노드가
  * 사라져 그래프가 끊어진 것처럼 보인다. 연결성은 유지하고 필터 밖 노드만 흐리게 둔다.
@@ -301,6 +377,7 @@ export function AssetGraph({
   uncollected = [],
   maxRows,
   rowArns,
+  threatPaths = [],
   showOffPath = true,
 }: {
   items: readonly AssetItem[];
@@ -326,6 +403,14 @@ export function AssetGraph({
    */
   rowArns?: readonly string[];
   /**
+   * 공개 계약 `threat_context`에서 파생한 **외부 공격 경로**(`lib/threat-path`). 있으면 격자 왼쪽에
+   * `외부 출발지` 열이 서고, 경로가 향한 자산을 담은 행에 `[출발지] ▶ [대상]`이 덧붙는다.
+   *
+   * **DSH-001 전용이다** — 자산 화면(AST-001)은 인시던트를 조회하지 않아 넘기지 않는다. 기본값이
+   * 빈 배열이라 안 넘기는 호출부는 지금까지처럼 5열로 그린다.
+   */
+  threatPaths?: readonly ThreatPath[];
+  /**
    * `트래픽 경로 밖` 목록을 이 그래프 아래에 그릴지. **대시보드만 끈다** — 거기서는 같은 목록을
    * 인스턴스 선택 목록 옆에 세우기 때문이다. 끈다고 계산이 달라지지는 않는다(경로 안/밖 판정은
    * 언제나 전량 기준이다). 그리는 자리만 옮기는 스위치다.
@@ -336,6 +421,13 @@ export function AssetGraph({
   const rows = pickRows(allRows, { maxRows, arns: rowArns });
   // 목록이 그래프를 몰면 접힌 행을 여기서 세지 않는다 — 그 자리는 목록이 맡는다.
   const hiddenRows = rowArns === undefined ? allRows.length - rows.length : 0;
+
+  // 열은 **경로가 하나라도 있을 때만** 세운다. 늘 세우면 위협이 없는 계정에서 빈 열이 그래프
+  // 왼쪽을 차지해, 정작 5열 정렬이 좁은 카드에서 먼저 접힌다.
+  const hasThreatColumn = threatPaths.length > 0;
+  // 그리지 않은 경로 — 고르지 않은 EC2와 경로 밖 자원(미사용 SG)으로 향한 것이다. 세어서
+  // 밝히지 않으면 지금 그려진 선이 전부라고 읽힌다.
+  const undrawn = hasThreatColumn ? undrawnThreats(threatPaths, rows) : [];
 
   return (
     <div className="@container/graph flex flex-col gap-4">
@@ -348,12 +440,22 @@ export function AssetGraph({
           접는 기준이 1024px가 아니라 **768px**인 이유: 노드 상자에 폭 상한(`max-w-56`)과 말줄임이
           생겨 "억지로 밀어 넣으면 이름이 잘린다"는 옛 걱정이 사라졌다. 접힌 배치가 이 카드에서
           가장 높으므로, 열이 설 수 있는 폭이면 세우는 편이 낫다. */}
-      <div className="grid gap-x-4 gap-y-3 @3xl/graph:grid-cols-[auto_auto_auto_auto_minmax(0,1fr)] @3xl/graph:items-start">
+      {/* 공격 경로 열이 서면 트랙이 하나 는다. 두 문자열을 통째로 갈아 끼우는 이유는 Tailwind가
+          **소스에 적힌 클래스 문자열**만 찾아 만들기 때문이다 — 조각을 이어 붙이면 그 클래스가
+          빌드에서 사라져 격자가 통째로 무너진다. */}
+      <div
+        className={cn(
+          'grid gap-x-4 gap-y-3 @3xl/graph:items-start',
+          hasThreatColumn
+            ? '@3xl/graph:grid-cols-[auto_auto_auto_auto_auto_minmax(0,1fr)]'
+            : '@3xl/graph:grid-cols-[auto_auto_auto_auto_minmax(0,1fr)]',
+        )}
+      >
         {/* 머리글도 `contents`로 얹어야 아래 행들과 같은 열 트랙을 쓴다. 열이 없는 접힌 배치에서는
             통째로 감춘다 — 그때는 각 행이 `AZ → 진입 → EC2 → 후속 → 부속` 순서로 쌓이므로
             머리글이 첫 행에만 붙은 것처럼 보이게 된다. */}
         <div className="hidden @3xl/graph:contents">
-          {HEAD_TYPES.map(({ label, types }) => (
+          {(hasThreatColumn ? [THREAT_HEAD, ...HEAD_TYPES] : HEAD_TYPES).map(({ label, types }) => (
             <Head
               key={label}
               label={label}
@@ -363,7 +465,13 @@ export function AssetGraph({
         </div>
 
         {rows.map((row) => (
-          <Row key={row.ec2.arn} row={row} onSelect={onSelect} dimmedArns={focusedArns} />
+          <Row
+            key={row.ec2.arn}
+            row={row}
+            onSelect={onSelect}
+            dimmedArns={focusedArns}
+            threats={hasThreatColumn ? rowThreats(row, threatPaths) : null}
+          />
         ))}
       </div>
 
@@ -372,6 +480,17 @@ export function AssetGraph({
         <p className="text-muted-foreground text-xs">
           위험 신호가 큰 <span className="tabular-nums">{rows.length}</span>대만 그렸습니다 — 나머지{' '}
           <span className="tabular-nums">{hiddenRows}</span>대는 자산 목록에서 전체 보기
+        </p>
+      ) : null}
+
+      {/* 그리지 않은 공격 경로. 대시보드는 한 번에 EC2 한 대만 그리므로(dashboard-topology.tsx)
+          고르지 않은 대로 향한 경로는 선이 없다 — 숨기지 않고 **센다.** 대상 이름까지 적어 두어야
+          목록에서 무엇을 골라야 그 선이 보이는지 알 수 있다. */}
+      {undrawn.length > 0 ? (
+        <p className="text-xs text-amber-400">
+          그래프에 그리지 않은 공격 경로 <span className="tabular-nums">{undrawn.length}</span>건 —{' '}
+          {undrawn.map((path) => `${path.source} → ${arnShort(path.targetArn)}`).join(' · ')}. 대상
+          자산을 목록에서 고르면 경로가 그려집니다.
         </p>
       ) : null}
 
@@ -415,6 +534,15 @@ export function AssetGraph({
       <p className="text-muted-foreground text-xs">
         ▶ 관계 방향(출발 → 도착) · 위협 빨강 · 낭비 후보 노랑 · <code>PROTECTED_BY</code>는 서브넷
         일치 파생 관계입니다(직접 부착 아님).
+        {hasThreatColumn ? (
+          <>
+            {' '}
+            외부 출발지는 인시던트 계약의 <code>threat_context</code>에서 옵니다 —{' '}
+            <strong>관측 출발지</strong>는 SSH 시도에서 실제로 관측된 IP(<code>SSH_BRUTE_FORCE</code>),{' '}
+            <strong>노출 대역</strong>은 보안 그룹 규칙이 허용한 범위(<code>OPEN_IP</code>)이며 공격자
+            IP가 아닙니다.
+          </>
+        ) : null}
       </p>
     </div>
   );

@@ -382,7 +382,28 @@ export interface ExecutionSummaryItem {
   updated_at: IsoDateTime;
 }
 
-/** 목록 항목 — 상세(IncidentResponse)의 부분집합 10필드. */
+/**
+ * SSH 무차별 대입에서 **관측된** 공격자 IP. 대상은 인시던트의 `subject_arn`(그 EC2)이다.
+ */
+export interface SshBruteForceThreatContext {
+  event_type: 'SSH_BRUTE_FORCE';
+  source_ip: string;
+}
+
+/**
+ * 보안 그룹 인그레스가 **허용한** 대역. 관측된 공격자 IP가 아니다 — `0.0.0.0/0`은 "전부 열려
+ * 있다"는 뜻이지 누가 들어왔다는 뜻이 아니라, 화면은 두 값을 같은 말로 덮지 않는다.
+ * 대상은 인시던트의 `subject_arn`(그 보안 그룹)이다.
+ */
+export interface OpenIpThreatContext {
+  event_type: 'OPEN_IP';
+  exposed_cidr: string;
+}
+
+/** `event_type`이 판별자다 — 위협 유형마다 싣는 값의 **의미**가 달라 한 필드로 합치지 않았다. */
+export type ThreatContext = SshBruteForceThreatContext | OpenIpThreatContext;
+
+/** 목록 항목 — 상세(IncidentResponse)의 부분집합. */
 export interface IncidentListItem {
   incident_id: string;
   /** nullable·빈 문자열 금지. null이면 category 표시명 + ARN 축약으로 fallback. */
@@ -394,6 +415,14 @@ export interface IncidentListItem {
   initial_risk_level: RiskLevel | null;
   reviewed_risk_level: RiskLevel | null;
   response_mode: ResponseMode | null;
+  /**
+   * 저장된 위협 관측 1건에서 파생하는 문맥(#362 · PR #374). AI 분석 상태·근거 인용 여부와
+   * 무관하게 실린다 — 분석 중이거나 실패해도 "어디서 들어왔나"는 남는다.
+   *
+   * **null은 문맥 부재이지 위협 없음 판정이 아니다.** FINOPS는 언제나 null이고, SECOPS도
+   * 위협 연결 누락·대상 불일치·값 오류로 조회할 문맥이 없으면 null이다.
+   */
+  threat_context: ThreatContext | null;
   created_at: IsoDateTime;
   updated_at: IsoDateTime;
 }

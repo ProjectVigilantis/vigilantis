@@ -17,11 +17,31 @@
 import { StatusBadge } from '@/components/status-badge';
 import { groupOrphansByType, rowVerdicts, type TopologyRow } from '@/lib/asset-graph';
 import { ASSET_TYPE_LABELS } from '@/lib/enum-labels';
+import { assetThreats, rowThreats, type ThreatPath } from '@/lib/threat-path';
 import { cn } from '@/lib/utils';
 import type { AssetItem } from '@/types/api';
 
 /** 배지를 줄 높이 안에 눕히는 치수. 사전(§3.2)의 문구·색은 그대로 쓴다. */
 const BADGE = 'shrink-0 px-1 py-0 text-[10px] font-normal';
+
+/**
+ * 공격 경로 표시. **판정 배지가 아니다** — 판정은 규칙 엔진이 자산에 내린 것이고 이것은
+ * 인시던트 계약(`threat_context`)에서 온 경로 수라, 사전(§3.2)의 배지 어휘를 빌리지 않는다.
+ *
+ * 그래프는 한 번에 EC2 한 대만 그리므로 **고르기 전에는 그 대에 들어오는 경로가 보이지 않는다.**
+ * 이 표시가 그 자리를 메운다 — 어느 줄을 골라야 공격 경로가 그려지는지 목록이 말해 준다.
+ */
+function ThreatMark({ paths }: { paths: readonly ThreatPath[] }) {
+  if (paths.length === 0) return null;
+  return (
+    <span
+      className="text-danger border-danger shrink-0 rounded border px-1 text-[10px] whitespace-nowrap"
+      title={paths.map((p) => `${p.source} → ${p.eventType}`).join(' · ')}
+    >
+      공격 <span className="tabular-nums">{paths.length}</span>
+    </span>
+  );
+}
 
 /** 좁으면 그래프 아래로 내려간다. 옆에 설 때만 세로선으로 가른다 — 접힌 배치에서 세로선은 여백만 먹는다. */
 const COLUMN =
@@ -33,6 +53,7 @@ export function TopologyPicker({
   selectedArn,
   onSelect,
   onOpen,
+  threatPaths = [],
 }: {
   /** 위험 순으로 이미 정렬된 EC2 행 목록(`sortRowsByRisk`). */
   rows: readonly TopologyRow[];
@@ -41,6 +62,8 @@ export function TopologyPicker({
   selectedArn: string;
   onSelect: (arn: string) => void;
   onOpen: (asset: AssetItem) => void;
+  /** 외부 공격 경로(`lib/threat-path`). 목록 항목마다 몇 건이 들어오는지 표시한다. */
+  threatPaths?: readonly ThreatPath[];
 }) {
   return (
     <>
@@ -84,6 +107,7 @@ export function TopologyPicker({
                     >
                       {row.ec2.name ?? row.ec2.resource_id}
                     </span>
+                    <ThreatMark paths={rowThreats(row, threatPaths).map((t) => t.path)} />
                     {rowVerdicts(row).map((verdict) => (
                       <StatusBadge key={verdict} field="verdict" value={verdict} className={BADGE} />
                     ))}
@@ -126,6 +150,9 @@ export function TopologyPicker({
                     <span className="min-w-0 flex-1 truncate font-mono text-[11px]">
                       {asset.name ?? asset.resource_id}
                     </span>
+                    {/* 경로 밖 자원도 공격 대상이 된다 — 어떤 EC2에도 안 붙은 전체 개방 SG가 그
+                        자리다. 그래프에 그릴 행이 없어 선이 없으므로 여기서만 알릴 수 있다. */}
+                    <ThreatMark paths={assetThreats(asset.arn, threatPaths)} />
                     {/* 판정이 붙은 자원(미사용 EBS 등)은 배지를 남긴다 — 이 목록에서 조치할 것이다. */}
                     {asset.verdict !== null ? (
                       <StatusBadge field="verdict" value={asset.verdict} className={BADGE} />

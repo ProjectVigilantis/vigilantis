@@ -31,6 +31,8 @@ function item(
     initial_risk_level: risk,
     reviewed_risk_level: null,
     response_mode: responseMode,
+    // 이 파일이 보는 축이 아니다 — 공격 경로 파생은 `threat-path.test.ts`가 맡는다.
+    threat_context: null,
     created_at: '2026-08-01T00:00:00Z',
     updated_at: '2026-08-01T00:00:00Z',
   };
