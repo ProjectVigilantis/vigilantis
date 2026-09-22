@@ -18,11 +18,17 @@
 from __future__ import annotations
 
 from enum import Enum, unique
-from typing import Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .runbook_parameters import Ipv4Cidr, NaclProtocolNumber, RuleNumber
+from .runbook_parameters import (
+    Ipv4Cidr,
+    NaclProtocolNumber,
+    RuleNumber,
+    SecurityGroupId,
+    VpcId,
+)
 
 
 @unique
@@ -83,6 +89,54 @@ class InstanceSpecBackup(BaseModel):
     public_ip_address: Optional[str] = None
     # 값이 있으면 EIP가 붙어 있었다는 뜻이라 주소가 유지된다 — 위 고지의 반대 근거다.
     elastic_ip_association_id: Optional[str] = None
+
+
+# CreateSecurityGroup API의 GroupName·Description 상한이 255자다. AWS가 거절할 값을
+# 백업에 담아 두면 원복 시점에야 드러나는데, 그때는 SG가 이미 지워진 뒤다.
+_SgText = Annotated[str, Field(min_length=1, max_length=255)]
+
+# describe_security_groups가 돌려주는 규칙 1건. **모델로 더 쪼개지 않는다.**
+# 이 목록은 우리가 해석할 값이 아니라 authorize_security_group_*에 **그대로 되붓는**
+# 값이라, 필드를 우리가 다시 적으면 AWS가 늘린 필드(전송 규칙·접두 목록 등)가 백업에서
+# 조용히 떨어져 나가 원복된 SG가 원본보다 좁아진다. extra="forbid"를 여기까지 밀면
+# 그 손실이 검증 실패로 드러나지도 않는다 — 규칙이 통째로 사라진다.
+SgIpPermission = dict[str, Any]
+
+
+class SgFullRulesBackup(BaseModel):
+    """`SAVE_SG_FULL_RULES_JSON` payload — `SG_DELETE_ISOLATED` 삭제 직전 SG 전체.
+
+    `RUNBOOK_SG_RECREATE`가 읽는 값이다. 이 백업은 **원복에 필요한 전부**여야 한다 —
+    SG를 지우고 나면 그 이름도 설명도 규칙도 AWS에 다시 물을 수 없고, `SG_RECREATE`는
+    복원 대상 SG ID를 파라미터로 받지도 않는다(`SgRecreateParameters`).
+
+    필수 5항목의 근거
+      - `group_name`·`description`·`vpc_id` — `create_security_group` 호출의 인자 3종이다.
+        하나라도 없으면 그룹 자체를 만들 수 없다.
+      - `ingress_permissions`·`egress_permissions` — 되붓을 규칙 목록. **빈 목록을
+        허용한다.** 규칙이 0개인 SG가 실재하고(미부착 SG는 대개 그렇다), 빈 목록과
+        "백업이 규칙을 놓쳤다"는 모델 검증이 아니라 캡처 시점에 갈린다.
+
+    `group_id`는 부가다(ADR-0008 §5 신설). 원복은 AWS가 새로 발급한 ID를 받으므로 원본
+    ID는 복원 값이 아니라 **한계 고지의 근거**다 — 원본 ID를 참조하던 다른 SG 규칙과 ENI
+    연결은 돌아오지 않으므로(ADR-0008 §참조 무결성), 관제자에게 "무엇을 손수 다시 이어야
+    하는가"를 말하려면 조치 이전 ID가 남아 있어야 한다. `InstanceSpecBackup`의
+    `public_ip_address`와 같은 성격이다.
+
+    그리고 원복 실행이 **자기 참조 규칙을 고쳐 붓는 근거**이기도 하다. 규칙의
+    `UserIdGroupPairs`에 원본 자기 ID가 있으면 그대로 주입할 수 없다 — 그 SG는 이미
+    없다. 무엇을 새 ID로 바꿔야 하는지는 이 값과 대조해야만 알 수 있다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    group_name: _SgText
+    description: _SgText
+    vpc_id: VpcId
+    ingress_permissions: list[SgIpPermission]
+    egress_permissions: list[SgIpPermission]
+
+    group_id: Optional[SecurityGroupId] = None
 
 
 class NaclRuleIndexBackup(BaseModel):

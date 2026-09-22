@@ -32,11 +32,12 @@
 # 거절해 자식이 FAILED로 끝난 뒤에도 다시 발동하지 않습니다(ADR-0004 정책 ④).
 #
 # **자산이 바뀐 채 실패했다고 모두 그리로 가지는 않습니다.** ROLLBACK_INITIATED는
-# "되돌릴 것이 남았다"는 표시가 아니라 **자동 원복을 발동하라는 신호**라, 자동 원복
-# 짝이 있는 런북에만 씁니다(_AUTO_ROLLBACK_ON_ASSET_CHANGE). 짝이 없는 차단
-# (NACL_ADD_DENY — 해제가 관제자 승인 런북 NACL_RESTORE입니다)의 "적용 여부 불명확"은
-# 되돌릴 대상이 아니라 **실자산에 물을 질문**이므로, 확정하지 않고 다음 주기의 현물
-# 판정으로 보냅니다(Issue #297).
+# "되돌릴 것이 남았다"는 표시가 아니라 **자동 원복을 발동하라는 신호**라, ADR-0004가
+# **사람 승인 없는 발동을 허용한** 짝에만 씁니다(_AUTO_ROLLBACK_ON_ASSET_CHANGE,
+# Issue #368). 나머지의 "적용 여부 불명확"은 되돌릴 대상이 아니라 **실자산에 물을
+# 질문**이므로, 확정하지 않고 다음 주기의 현물 판정으로 보냅니다 — 짝이 아예 없는 차단
+# (NACL_ADD_DENY, Issue #297)과 짝이 관제자 승인 전용인 SG 삭제(SG_DELETE_ISOLATED →
+# SG_RECREATE는 HUMAN_ONLY)가 같은 갈래입니다.
 #
 # **SUCCESS로 끝난 차단은 해제 제안을 낳는 자리로 한 번 더 지나갑니다**(_offer_release_one,
 # Issue #329). 해제(NACL_RESTORE)는 관제자가 승인하는 주 조치라 [해제] 버튼이 EXECUTABLE
@@ -53,8 +54,9 @@
 # 규칙은 workflows.record_verification_failure가 소유합니다 (Issue #249).
 #
 # [남은 작업]
-# 1. RIGHTSIZING·REVERT_SIZE·NACL 2종 외 6종 실행 — 실행 함수가 생기는 대로
-#    _RUNNERS에 등록하고, _JUDGES에 **짝으로** 함께 등록합니다(ADR-0008 §6, 아래 짝 검사).
+# 1. 나머지 3종 실행(EC2_ISOLATE·EC2_ENABLE_AUTOSCALING·EC2_UNISOLATE) — 실행 함수가
+#    생기는 대로 _RUNNERS에 등록하고, _JUDGES에 **짝으로** 함께 등록합니다
+#    (ADR-0008 §6, 아래 짝 검사).
 #
 # 기동 worker 개수는 미정입니다 — ADR-0005가 다중 worker·replica 실행 토폴로지를
 # 별도 결정 대상으로 남겼고, 이 모듈은 worker 1개를 전제합니다. 선점(_claim)의
@@ -83,7 +85,11 @@ from schemas.executions import (
     EXECUTION_NON_TERMINAL_STATUSES,
 )
 from schemas.precheck import PrecheckReasonCode
-from schemas.runbooks import ROLLBACK_RUNBOOK_BY_MAIN_ID, RunbookId
+from schemas.runbooks import (
+    AUTO_ROLLBACK_RUNBOOK_BY_MAIN_ID,
+    ROLLBACK_RUNBOOK_BY_MAIN_ID,
+    RunbookId,
+)
 
 import workflows
 from config import get_settings
@@ -106,6 +112,8 @@ _RUNNERS: dict[RunbookId, Callable[[Session, str], workflows.ExecutionRunOutcome
     RunbookId.RUNBOOK_NACL_ADD_DENY: workflows.run_nacl_add_deny_execution,
     RunbookId.RUNBOOK_NACL_RESTORE: workflows.run_nacl_restore_execution,
     RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED: workflows.run_ebs_delete_unattached_execution,
+    RunbookId.RUNBOOK_SG_DELETE_ISOLATED: workflows.run_sg_delete_isolated_execution,
+    RunbookId.RUNBOOK_SG_RECREATE: workflows.run_sg_recreate_execution,
 }
 
 # 런북별 종료 판정 진입점 — AWS 변경이 이미 시작된 실행을 어느 종료 상태로 확정할지
@@ -117,6 +125,8 @@ _JUDGES: dict[RunbookId, Callable[[Session, str], workflows.ExecutionJudgement]]
     RunbookId.RUNBOOK_NACL_ADD_DENY: workflows.judge_nacl_add_deny,
     RunbookId.RUNBOOK_NACL_RESTORE: workflows.judge_nacl_restore,
     RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED: workflows.judge_ebs_delete_unattached,
+    RunbookId.RUNBOOK_SG_DELETE_ISOLATED: workflows.judge_sg_delete_isolated,
+    RunbookId.RUNBOOK_SG_RECREATE: workflows.judge_sg_recreate,
 }
 
 # 실행이 성공을 반환해도 확정하지 않는 런북 — **성공의 경계가 실행 밖에 있다.**
@@ -125,25 +135,38 @@ _JUDGES: dict[RunbookId, Callable[[Session, str], workflows.ExecutionJudgement]]
 #
 # 나머지는 여기 없다. REVERT_SIZE는 되돌린 것이 성공이고, 되돌린 인스턴스가 또
 # 부팅에 실패해도 되돌릴 곳이 없어(원복의 원복은 없다, ADR-0008 §6) 판정이 바뀌지
-# 않는다. NACL 2종은 규칙 삽입·삭제가 원자적이고 뒤따르는 판정 축이 없어 성공의
-# 경계가 실행 반환 그 자체다. 여기 잘못 넣으면 끝난 실행이 확정되지 않은 채 다음
+# 않는다. NACL 2종·삭제 2종(EBS·SG)은 조치가 원자적이거나 마지막 호출이 곧 완료라
+# 뒤따르는 판정 축이 없고, SG_RECREATE도 마지막 규칙 주입이 성공의 경계다 — 전부
+# 성공의 경계가 실행 반환 그 자체다. 여기 잘못 넣으면 끝난 실행이 확정되지 않은 채 다음
 # 주기의 판정으로 넘어가고, 그 판정은 재실행이 아니라 실자산 대조라 조치가 끝난
 # 뒤에도 "미완"으로 읽힐 수 있다.
 _AWAIT_JUDGEMENT_ON_SUCCESS: frozenset[RunbookId] = frozenset(
     {RunbookId.RUNBOOK_EC2_RIGHTSIZING}
 )
 
-# 자산이 바뀐 채 실패했을 때 **ROLLBACK_INITIATED로 보낼** 런북 — 등록 롤백 런북이 있는
-# 주 조치만이다. 이 표를 따로 적지 않고 ROLLBACK_RUNBOOK_BY_MAIN_ID에서 파생하는 이유는
-# 그 맵이 "자동 원복 짝이 있는가"의 원천이기 때문이다(ADR-0004로 등록된 3종).
+# 자산이 바뀐 채 실패했을 때 **ROLLBACK_INITIATED로 보낼** 런북.
 #
-# NACL_ADD_DENY는 여기 없다. **차단 해제는 자동 원복이 아니라 관제자가 승인하는 주 조치
-# (NACL_RESTORE)** 라 짝이 없고, 그래서 실패를 ROLLBACK_INITIATED로 닫으면 낳을 자식이
-# 없어 매 주기 unsupported로 되돌아온다 — 실행은 그 상태에 갇히고 judge_nacl_add_deny에는
-# 영원히 닿지 못한다(PR #313 리뷰). 짝이 없는 런북의 "적용 여부 불명확"이 가는 곳은
-# _dispatch_one의 현물 판정이다.
+# 기준은 "등록 롤백 짝이 있는가"가 아니라 **"ADR-0004가 그 짝의 자동 발동을 허용하는가"**
+# 다(Issue #368). ROLLBACK_INITIATED는 "되돌릴 것이 남았다"는 표시가 아니라 **자동 원복을
+# 발동하라는 신호**이므로, 사람 승인 없이 시작해도 되는 짝에만 쓸 수 있다.
+#
+# 짝의 존재로 파생하면 `HUMAN_ONLY` 원복이 시스템 자동 실행으로 나간다. 실제로
+# SG_DELETE_ISOLATED가 그랬다 — 삭제가 UNKNOWN(AWS 5xx·응답 유실)으로 끝나면 시스템이
+# 관제자 승인 없이 SG를 다시 만들었을 것이고, ADR-0004 결정 표는 `SG_RECREATE`를
+# `USER_APPROVAL`·`HUMAN_ONLY`로 정했다. 가드레일 ②는 이것을 막지 못한다 — "원복 문맥이면
+# 롤백 3종인가"만 대조하고 런북별 trigger_source 허용 목록은 아직 보지 않는다
+# (packages/schemas/guardrails.py 주석). **현재 이 자리를 지키는 것은 이 집합 하나뿐이다.**
+#
+# 자동 발동이 허용되는 것은 REVERT_SIZE(`SYSTEM_OR_HUMAN`) 하나이므로 지금 이 집합의
+# 원소는 RIGHTSIZING 하나다. EC2_ISOLATE도 짝(UNISOLATE)이 `HUMAN_ONLY`라 들어오지 않는다.
+#
+# 여기 없는 런북의 "적용 여부 불명확"은 되돌릴 대상이 아니라 **실자산에 물을 질문**이므로
+# 확정하지 않고 다음 주기의 현물 판정으로 보낸다(_dispatch_one). NACL_ADD_DENY가 애초에
+# 그 갈래였다 — 차단 해제는 자동 원복이 아니라 관제자가 승인하는 주 조치(NACL_RESTORE)라
+# 짝 자체가 없고, ROLLBACK_INITIATED로 닫으면 낳을 자식이 없어 매 주기 unsupported로
+# 되돌아온다(PR #313 리뷰). 이제 SG_DELETE_ISOLATED도 같은 갈래로 간다.
 _AUTO_ROLLBACK_ON_ASSET_CHANGE: frozenset[RunbookId] = frozenset(
-    RunbookId(main_id) for main_id in ROLLBACK_RUNBOOK_BY_MAIN_ID
+    RunbookId(main_id) for main_id in AUTO_ROLLBACK_RUNBOOK_BY_MAIN_ID
 )
 
 # 두 표는 **짝으로** 등록한다(ADR-0008 §6). runner만 등록하면 실행 도중 끊긴 실행이

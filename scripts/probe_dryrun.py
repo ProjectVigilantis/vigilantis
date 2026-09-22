@@ -74,6 +74,7 @@ TARGET_API_MATRIX: tuple[TargetApi, ...] = (
     TargetApi("ec2.delete_security_group", ("SG_DELETE_ISOLATED",), DRY_RUN),
     TargetApi("ec2.authorize_security_group_ingress", ("SG_RECREATE",), DRY_RUN),
     TargetApi("ec2.authorize_security_group_egress", ("SG_RECREATE",), DRY_RUN),
+    TargetApi("ec2.revoke_security_group_egress", ("SG_RECREATE",), DRY_RUN),
     TargetApi("ec2.create_launch_template", ("ENABLE_AUTOSCALING",), DRY_RUN),
     TargetApi("ec2.create_snapshot", ("EBS_DELETE_UNATTACHED",), DRY_RUN),
     TargetApi("ec2.delete_volume", ("EBS_DELETE_UNATTACHED",), DRY_RUN),
@@ -421,6 +422,23 @@ def _probe_ec2(fx, operation: str):
             lambda: _sg_permissions(ec2, group),
             GroupId=group,
             IpPermissions=permission,
+        )
+        _delete_probe_sg(ec2)
+        return result
+
+    if operation == "revoke_security_group_egress":
+        # 걷어 낼 대상은 생성 직후 AWS가 **자동으로** 붙인 전체 허용 egress다
+        # (services/aws/executor.py DEFAULT_EGRESS_PERMISSION). 우리가 먼저 넣은
+        # 규칙을 지우면 "DryRun이 듣지 않아 실제로 지워졌는가"를 가릴 대상이 이
+        # 런북의 실제 대상과 달라진다.
+        group = _ensure_probe_sg(ec2, fx["vpc_id"])
+        result = attempt(
+            ec2.revoke_security_group_egress,
+            lambda: _sg_permissions(ec2, group),
+            GroupId=group,
+            IpPermissions=[
+                {"IpProtocol": "-1", "IpRanges": [{"CidrIp": "0.0.0.0/0"}]}
+            ],
         )
         _delete_probe_sg(ec2)
         return result
