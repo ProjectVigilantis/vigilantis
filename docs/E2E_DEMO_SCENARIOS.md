@@ -23,7 +23,7 @@
 
 | 축 | 왜 적는가 |
 | --- | --- |
-| 화면(FE) | 유건희 구현 범위와 대조 |
+| 화면(FE) | 구현된 화면 범위와 대조 |
 | API | `POST /actions/execute` 6종 상태 중 무엇이 언제 나오는가 |
 | WS 이벤트 | 실시간 갱신 시점 |
 | 입력 출처 | Golden Dataset 케이스 ID — 시연 재현성 |
@@ -102,7 +102,7 @@ IN_PROGRESS → SUCCESS
 | 2 | Incident 생성 | **INC-004 자산 인시던트** 카드 그리드에 신규 카드, `status: ANALYZING` | `GET /api/v1/incidents` | `INCIDENT_CREATED` | **대체 컷 없음**(FE mock 계층 제거, 2026-09-17 · PR #351) |
 | 3 | AI 판단 근거 + 추천 | 상세에 **판단 근거** 3줄 + 추천 `RUNBOOK_EC2_RIGHTSIZING` | `GET /api/v1/incidents/{id}` | `INCIDENT_UPDATED` | 미리 저장한 근거 텍스트 표시 |
 | 4 | 가드레일 4단계 | — (화면 표시 없음) · 통과 신호는 `status: AWAITING_APPROVAL`로 실행 버튼이 열리는 것 | (내부) | `INCIDENT_UPDATED` | 슬라이드 컷으로 분리 |
-| 5 | 관제자 승인 | **[조치 실행]** 클릭 | `POST /api/v1/actions/execute`<br>**`202 Accepted`** → `IN_PROGRESS`<br>*(같은 `idempotency_key` 재요청은 `200 OK` 멱등 재생)* | `EXECUTION_UPDATED` | — |
+| 5 | 관제자 승인 | **INC-004 목록에서 「승인 대기」를 켠 뒤 [조치 실행] → ACT-001 [실행]**(승인 1건 · 실행 클릭 2회) | `POST /api/v1/actions/execute`<br>**`202 Accepted`** → `IN_PROGRESS`<br>*(같은 `idempotency_key` 재요청은 `200 OK` 멱등 재생)* | `EXECUTION_UPDATED` | — |
 | 6 | 실행 | 진행 표시 | `ec2.modify_instance_attribute` | `EXECUTION_UPDATED` | LocalStack 재기동 후 재시도 |
 | 7 | **Status Check 실패** | 실패 표시 | `get_waiter` 2/2 실패 — 6번 실행 주기가 끝난 뒤 대상 인스턴스를 **`stop_instances`로 멈춰** 만든다(§대조 필요 3번 ⓑ) | `EXECUTION_UPDATED` **Execution `ROLLBACK_INITIATED`**<br>`INCIDENT_UPDATED` **Incident `ACTION_IN_PROGRESS`** | **핵심 컷** — 주입 창(실행 주기 뒤·판정 주기 전)을 놓치면 판정이 `OK`로 끝나 원복이 일어나지 않는다 |
 | 8 | **자동 원복 발동** | **복구 중** | `RUNBOOK_EC2_REVERT_SIZE` **자식 실행 접수**<br>`trigger_source: AUTO_ON_FAILURE` · `parent_execution_id` = 원본<br>*(상태 전이가 아니라 새 실행 레코드다)* | **없다** — 접수는 발행하지 않는다(`dispatcher.py:335-337`). 화면의 "복구 중"은 **7번 이벤트로 이미 그려져 있다** | 접수만 화면으로 설명 |
@@ -120,7 +120,7 @@ IN_PROGRESS → SUCCESS
 
 ### 이 트랙이 증명하는 것
 
-- **버튼은 하나뿐이다.** 5번의 [조치 실행] 이후 사람은 아무것도 누르지 않는다. 8–9번은 전부 시스템이 한다.
+- **승인은 한 번뿐이다(카드와 확인 모달에서 실행 클릭 2회).** 5번의 ACT-001 [실행] 이후 사람은 아무것도 누르지 않는다. 8–9번은 전부 시스템이 한다.
 - `RUNBOOK_EC2_REVERT_SIZE`는 `ai_recommendable: false`(ADR-0004)라 **AI가 제안한 적이 없다.** 확정값은 `trigger_source: [AUTO_ON_FAILURE, USER_APPROVAL]` · `approval_mode: SYSTEM_OR_HUMAN`이라 관제자 수동 원복 경로도 열려 있지만, **이 시나리오에서는 시스템이 발동한다.**
 - 원복 파라미터는 AI나 화면이 아니라 **DB 백업 레코드(`backup_record_id`)** 에서만 온다.
 
@@ -172,7 +172,7 @@ FE는 `NEXT_PUBLIC_API_BASE_URL`이 가리키는 백엔드만 본다(`apps/web/s
 
 ## T2 · SecOps — 위협 차단과 원클릭 해제
 
-**한 줄**: 한 IP가 SSH를 두드려대는 걸 잡아 그 주소만 핀셋으로 막고, 관제자가 확인한 뒤 한 번 클릭으로 되돌린다.
+**한 줄**: 한 IP가 SSH를 두드려대는 걸 잡아 그 주소만 핀셋으로 막고, 관제자가 확인한 뒤 한 번 승인으로 되돌린다(상세 버튼 → 확인 모달, 실행 클릭 2회).
 
 **입력**: Golden `secops/input/evt_ssh_bruteforce_001.json` **S3**
 `SSH_BRUTE_FORCE` · `source_ip 203.0.113.10` · `120회 / 300초` · 대상 `i-0a1b2c3d4e5f00001`
@@ -191,9 +191,9 @@ FE는 `NEXT_PUBLIC_API_BASE_URL`이 가리키는 백엔드만 본다(`apps/web/s
 | 2 | 위험도 판정 | 위험도 배지 | `GET /api/v1/incidents/{id}`<br>*(배지는 실 판정값 — 위협 접수가 `evaluate_threat()`를 부른다 · #322 · 아래 관통 실측 `HIGH`)* | `INCIDENT_UPDATED` | — |
 | 3 | 대응 경로 진입 | "선제 차단" 경로 표시 | `response_mode: PRE_MITIGATION_0_5S`<br>*(Incident 축 — 실행 축 아님)* | `INCIDENT_UPDATED` | 경로 표시 없이 4번으로 |
 | 4 | 가드레일 4단계 | — (화면 표시 없음) | (내부) | — | 슬라이드 컷으로 분리 |
-| 5 | **관제자 승인 → 차단** | **[조치 실행]** 클릭 | `RUNBOOK_NACL_ADD_DENY`<br>`trigger_source: USER_APPROVAL`<br>`approval_mode: HUMAN_ONLY`<br>`ec2.create_network_acl_entry` | `EXECUTION_UPDATED` `SUCCESS` | — |
+| 5 | **관제자 승인 → 차단** | **INC-002 상세 [승인하고 차단] → ACT-001 [실행]** | `RUNBOOK_NACL_ADD_DENY`<br>`trigger_source: USER_APPROVAL`<br>`approval_mode: HUMAN_ONLY`<br>`ec2.create_network_acl_entry` | `EXECUTION_UPDATED` `SUCCESS` | — |
 | 6 | 관제자 확인 | 상세에서 **판단 근거** 확인 | `GET /api/v1/incidents/{id}` | — | — |
-| 7 | **원클릭 해제** | **[해제]** 클릭 | `RUNBOOK_NACL_RESTORE`<br>`trigger_source: USER_APPROVAL` | `EXECUTION_UPDATED` | **핵심 컷** |
+| 7 | **원클릭 해제** | **INC-002 상세 [승인하고 해제] → ACT-001 [실행]** | `RUNBOOK_NACL_RESTORE`<br>`trigger_source: USER_APPROVAL` | `EXECUTION_UPDATED` | **핵심 컷** |
 | 8 | 해제 완료 | 해제 실행 **성공** · Incident **종료 판단 대기**(토폴로지 색은 바뀌지 않는다 — §10/1 컷 시트) | `ec2.delete_network_acl_entry` | `EXECUTION_UPDATED` `SUCCESS` · `INCIDENT_UPDATED` Incident `AWAITING_CLOSURE` | — |
 
 ### 실행 축과 Incident 축은 다르다 (3번의 핵심)
@@ -209,7 +209,7 @@ FE는 `NEXT_PUBLIC_API_BASE_URL`이 가리키는 백엔드만 본다(`apps/web/s
 
 ### [해제] 버튼이 렌더되는 필드
 
-`RUNBOOK_NACL_RESTORE`는 **본편 7종**이라 `ExecutionSummary.available_recovery_runbook_ids`로 올 수 없다 — 그 필드는 validator가 **롤백 3종만** 허용한다. 따라서 [해제] 버튼은 **`recommendations`** 로 렌더된다.
+`RUNBOOK_NACL_RESTORE`는 **본편 7종**이라 `ExecutionSummary.available_recovery_runbook_ids`로 올 수 없다 — 그 필드는 validator가 **롤백 3종만** 허용한다. 따라서 [해제] 버튼은 **`recommendations`** 로 렌더된다. 이 경로는 `proposalRequest()`의 `variant: ACTION`이므로 ACT-001의 버튼은 **[실행]**이다. 복구 계열(`RECOVERY`)의 [해제 실행]과 구분한다.
 
 ### 이 트랙이 증명하는 것
 
@@ -225,7 +225,7 @@ NACL 2종은 LocalStack이 `DryRun`을 지원하지 않아 **조회 대체 검�
 
 ### 관통 실측 — 2026-09-15 (SSOT 6주차 판정 기준 ⓔ)
 
-**위협 관측부터 해제까지 LocalStack에서 끝까지 갔고, 사람 조작은 [조치 실행] 2회뿐이었다.** 입력은 S3이고, 대상만 시드 인스턴스 `vigilantis-seed-idle`로 바꿨다(`--target-arn`) — 그 서브넷에 시드 NACL이 연결돼 있어 `PROTECTED_BY` 관계가 선다.
+**위협 관측부터 해제까지 LocalStack에서 끝까지 갔고, 관제자 승인 요청은 [조치 실행] 2건이었다.** HTTP를 `TestClient`로 보낸 기록이므로 브라우저 클릭 횟수의 실측은 아니다. 현재 화면에서는 승인 2건에 **실행 클릭 4회**(각 화면 버튼 → ACT-001 [실행])가 필요하며, 화면 이동·필터 조작은 이 수에 포함하지 않는다. 입력은 S3이고, 대상만 시드 인스턴스 `vigilantis-seed-idle`로 바꿨다(`--target-arn`) — 그 서브넷에 시드 NACL이 연결돼 있어 `PROTECTED_BY` 관계가 선다.
 
 | # | 단계 | 누가 부르나 | 결과 |
 | --- | --- | --- | --- |
@@ -277,7 +277,7 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 > - **키가 틀리면** 카드 3장이 **진행 불가**(빨강 배지 · `FAILED`)로 끝난다(2026-09-17 자리표시자 키로 재현). 진행 불가 카드도 **열린 Incident**라(`INCIDENT_OPEN_STATUSES`) 키만 고치고 다음 스캔을 기다려도 새 카드가 생기지 않는다 → **키를 고친 뒤 사전 준비를 처음부터** 한다.
 > - **키가 비어 있으면** 카드가 **분석 중**에서 넘어가지 않고, `docker compose logs api`에 `agent_model_client_unavailable`이 분석 주기마다 찍힌다 → 키를 넣고 사전 준비를 처음부터 한다.
 
-같은 스캔이 **카드 3건**을 만든다(idle-dev · 미사용 SG `vigilantis-seed-unused` · 미연결 EBS). 나머지 둘은 시드에서 빼지 않는다 — LocalStack 사전 검증 테스트(`apps/core-api/services/tests/test_precheck_localstack.py`)가 그 자원을 쓴다. **대본에서 한 줄로 설명한다**: "스캔이 서버 1대 말고도 미사용 자원 2건을 함께 찾았다." EBS 카드는 이름 없이 리소스 ID(`vol-` 접두)로 보인다(수집이 EBS 이름을 비워 둔다). 모델 호출은 사전 준비 1회에 **카드 3건**이고, 모두 한 번에 성공하면 **7회**다 — idle-dev 3회(근거 요약 · 추천 · 절감 단가), 미사용 SG · 미연결 EBS 각 2회(근거 요약 · 추천). 일시 오류(제한시간 · 429 · 5xx 등)가 나면 호출 1건을 최대 3번까지 보내므로(`OPENAI_MAX_ATTEMPTS`) 늘어날 수 있다. 근거 요약이 실패하면 추천을 건너뛰어 줄어든다(PR #376 리뷰 재현: 잘못된 키 3회).
+같은 스캔이 **카드 3건**을 만든다(idle-dev · 미사용 SG `vigilantis-seed-unused` · 미연결 EBS). 나머지 둘은 공통 시드 구성으로 유지한다 — LocalStack 사전 검증 테스트(`apps/core-api/services/tests/test_precheck_localstack.py`)도 같은 시드 구성을 쓴다. 시연 프로젝트 `vigilantis-demo`의 LocalStack은 개발 프로젝트와 별개이므로 시연 쪽 삭제가 개발 테스트 자원을 지우지는 않는다. **대본에서 한 줄로 설명한다**: "스캔이 서버 1대 말고도 미사용 자원 2건을 함께 찾았다." **두 카드는 시연 중 누르지 않는다**(결정 ⑦) — INC-004 목록의 「승인 대기」 프리셋에서는 `조치 실행`, INC-002 상세에서는 `승인하고 삭제`로 보인다(PR #388). EBS 카드는 이름 없이 리소스 ID(`vol-` 접두)로 보인다(수집이 EBS 이름을 비워 둔다). 모델 호출은 사전 준비 1회에 **카드 3건**이고, 모두 한 번에 성공하면 **7회**다 — idle-dev 3회(근거 요약 · 추천 · 절감 단가), 미사용 SG · 미연결 EBS 각 2회(근거 요약 · 추천). 일시 오류(제한시간 · 429 · 5xx 등)가 나면 호출 1건을 최대 3번까지 보내므로(`OPENAI_MAX_ATTEMPTS`) 늘어날 수 있다. 근거 요약이 실패하면 추천을 건너뛰어 줄어든다(PR #376 리뷰 재현: 잘못된 키 3회).
 
 ### 시연 환경변수 (결정 ② · 운영 머신 `.env`)
 
@@ -298,7 +298,7 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 | 2 | Incident 생성 | ✅ 실경로 · **사전 준비(무대 전)** — 스캔 1회로 생성 실측 | 카드 3건 — §사전 준비 | **무대 전에 드러난다** → 사전 준비를 처음부터(대체 컷은 만들지 않는다 — 결정 ①) |
 | 3 | AI 판단 근거 + 추천 | ✅ 실경로 · **사전 준비(무대 전)** — idle-dev 실측(§결정 기록 ④): 추천 `RUNBOOK_EC2_RIGHTSIZING` m5.2xlarge → m5.large · 승인 대기 도달 · 약 16초 | `OPENAI_API_KEY` · `AGENT_DISPATCH_INTERVAL_SECONDS` | 카드가 **진행 불가**(`FAILED`)이거나 **분석 중**에서 멈춰 있으면 키부터 확인 → 사전 준비를 처음부터(§사전 준비 경고) |
 | 4 | 가드레일 4단계 | ✅ 실경로 | — | 슬라이드 컷 |
-| 5 | 관제자 승인 | ✅ 실경로 · **무대 시작** | 순서대로 셋. **① 스캔 시점 확인** — `docker compose logs api \| Select-String -SimpleMatch 'interval[0:05:00]' \| Select-Object -Last 1`의 `next run at:` 시각(**UTC** — 한국 시각 +9시간)이 지금부터 20초 안이면 기다렸다 시작한다. 필터가 필요한 이유: 실행·AI 분석 주기도 `next run at`을 1초에 1줄꼴로 찍어, 필터 없이 마지막 줄을 보면 거의 항상 몇 초 뒤가 보인다. 원복(약 16초) 도중 스캔이 돌면 AST-001이 중간값(`m5.large · stopped`)으로 다음 스캔까지 최대 300초 남는다(#349 실측). **② 헬퍼 띄우기** — 호스트 셸에서 `$env:AWS_ENDPOINT_URL='http://localhost:4566'; uv run python scripts/inject_status_check_failure.py`(PR #373)를 실행하고 `대기 중` 출력을 확인한다. **헬퍼가 `중단`을 출력하면 누르지 않고 출력의 안내를 따른다.** **③ [조치 실행]** — **자산 인시던트(INC-004)** 화면의 승인 대기 카드에서 1회 누른다(FinOps 카드는 보안 인시던트 INC-001이 아니라 이 화면에 뜬다) | — |
+| 5 | 관제자 승인 | ✅ 실경로 · **무대 시작** | 순서대로 셋. **① 스캔 시점 확인** — `docker compose logs api \| Select-String -SimpleMatch 'interval[0:05:00]' \| Select-Object -Last 1`의 `next run at:` 시각(**UTC** — 한국 시각 +9시간)이 지금부터 20초 안이면 기다렸다 시작한다. 필터가 필요한 이유: 실행·AI 분석 주기도 `next run at`을 1초에 1줄꼴로 찍어, 필터 없이 마지막 줄을 보면 거의 항상 몇 초 뒤가 보인다. 원복(약 16초) 도중 스캔이 돌면 AST-001이 중간값(`m5.large · stopped`)으로 다음 스캔까지 최대 300초 남는다(#349 실측). **② 헬퍼 띄우기** — 호스트 셸에서 `$env:AWS_ENDPOINT_URL='http://localhost:4566'; uv run python scripts/inject_status_check_failure.py`(PR #373)를 실행하고 `대기 중` 출력을 확인한다. **헬퍼가 `중단`을 출력하면 누르지 않고 출력의 안내를 따른다.** **③ 승인 1건 · 실행 클릭 2회** — **자산 인시던트(INC-004)에서 「승인 대기」 프리셋을 켠 뒤** idle-dev 카드의 **[조치 실행] → ACT-001 [실행]**을 누른다. 기본 목록에는 실행 버튼이 없다(FinOps 카드는 보안 인시던트 INC-001이 아니라 이 화면에 뜬다) | — |
 | 6 | 실행 | ✅ 실경로(PR #346) | `DISPATCH_INTERVAL_SECONDS` | **사전 준비를 처음부터** — LocalStack 재기동은 자원 ID가 새로 생겨 이 Incident의 대상이 사라진다 |
 | 7 | Status Check 실패 | ✅ 실경로 · 헬퍼(PR #373) | **사람 조작 없음** — 5번에서 띄운 헬퍼가 축소된 유형으로 기동되는 순간 멈춘다(`주입: stop_instances` 출력). 헬퍼가 필요한 이유: 판정 대기 동안 실행 상태는 `IN_PROGRESS`이고 이벤트도 나가지 않아 사람이 창을 맞출 수 없다. **7번에서 띄우면 늦다** — 이미 유형이 바뀌었거나 정지 구간이라 헬퍼가 주입 없이 끝나고 실행이 `SUCCESS`로 닫힌다 | 창을 놓치면 실행이 `SUCCESS`로 닫힌다 → 상세 화면 실행 항목의 **[이전 스펙 복원]**(`RUNBOOK_EC2_REVERT_SIZE` · 관제자 승인)으로 되돌린다. 자동 발동 장면은 빠지지만 같은 확인 화면(9번)까지 간다. **시드 재실행은 줄어든 유형을 되돌리지 않는다**(이름으로 찾아 건너뛴다) |
 | 8 | 자동 원복 발동 | ✅ 실경로(PR #346) | 사람 조작 없음 | 7번 "막히면"과 같다 |
@@ -306,23 +306,25 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 
 ### T2 · SecOps
 
+**주입 전 전제(#380)**: 사전 준비 스캔이 끝나 `vigilantis-seed-idle`이 수집 회차와 함께 DB에 존재하고 소멸 상태가 아닌지 확인한다. 접수 시 대상 EC2와 직접 SG/NACL 관계 사본을 근거로 보존하며, 대상 근거를 확보하지 못하면 최신 자료로 대체하지 않고 분석이 실패한다. 이 경우 주입을 진행하지 않고 수집 상태부터 확인한다.
+
 | # | 단계 | 10/1 판정 | 조작·전제 | 막히면 |
 | --- | --- | --- | --- | --- |
 | 1 | 위협 주입 | ✅ 실경로(§T2 관통 실측) · **"붉은 노드" 문구를 바꾼다** | `MOCK_THREAT_INBOX_DIR` · 주입 명령에 `--target-arn`(seed-idle). **토폴로지 색은 자산 판정에서 온다** — 빨강은 대상 옆 SG이고 **주입 전부터** 빨갛다. 주입이 새로 만드는 것은 INC-001의 SecOps 카드다 | 토폴로지 정적 이미지 |
 | 2 | 위험도 판정 | ✅ 실경로 — 초기 `HIGH` 실측 | — | — |
 | 3 | 대응 경로 진입 | ✅ 실경로 — `PRE_MITIGATION_0_5S` 실측 · INC-001 카드의 **선제 차단됨** 배지로 표시(`apps/web/src/components/incidents/incident-card.tsx`) | — | 경로 표시 없이 4번으로 |
 | 4 | 가드레일 4단계 | ✅ 실경로 | 실 모델 호출(SecOps 그래프) | 슬라이드 컷 |
-| 5 | 관제자 승인 → 차단 | ✅ 실경로 | **[조치 실행]** ① · 시드 NACL 규칙 100 `203.0.113.10/32` | — |
-| 6 | 관제자 확인 | ✅ 실경로 | — | — |
-| 7 | 원클릭 해제 | ✅ 실경로 · 해제 후보는 차단이 닫힌 주기에 선다(#329) | **[조치 실행]** ② | 핵심 컷 |
+| 5 | 관제자 승인 → 차단 | ✅ 실경로 | **INC-002 상세로 이동 → [승인하고 차단] → ACT-001 [실행]**(첫 승인 · 실행 클릭 2회) · 시드 NACL 규칙 100 `203.0.113.10/32` | — |
+| 6 | 관제자 확인 | ✅ 실경로 | **같은 INC-002 상세**에서 판단 근거를 읽는다. #389의 SecOps 프롬프트 변경으로 과거 실측과 문구가 달라질 수 있어 9/29 리허설에서 다시 확인한다 | — |
+| 7 | 원클릭 해제 | ✅ 실경로 · 해제 후보는 차단이 닫힌 주기에 선다(#329) | **같은 INC-002 상세 [승인하고 해제] → ACT-001 [실행]**(둘째 승인 · 실행 클릭 2회, T2 합계 4회) — 해제 후보에는 `차단 안 함`이 붙지 않는다(#363 · PR #388) | 핵심 컷 |
 | 8 | 해제 완료 | ✅ 실경로 · **"노드 정상 복귀" 문구를 바꾼다** | 확인할 것은 해제 **성공** · 규칙 0건 · Incident **종료 판단 대기**. **SG는 해제 뒤에도 빨강**이다(색은 판정에서 오고 해제는 판정을 바꾸지 않는다). 질문 대비 한 줄: "NACL 차단은 공격 IP 대응이고, SG 전체개방은 따로 남은 설정 오류다" | — |
 
 ### 공통
 
 | 항목 | 10/1 판정 | 막히면 |
 | --- | --- | --- |
-| WS 실시간 갱신(§대조 6번) | 🔶 **실배달 미확인** — 7주차(9/21(월)–9/23(수)) FE 확인 | 화면 새로고침 |
-| 조치별 절감 예상(#347 · PR #361) | **9/23(수) 확정본에는 넣지 않는다** — FE 표기가 아직 없다. 서버 값은 붙는다(2026-09-17 실측 idle-dev 월 $258.42 · 단가가 모델 지식 기반 추정이라 호출마다 달라질 수 있다 · §결정 기록 ④). 9/28(월) 컷에 FE 표기가 있으면 T1-5 승인 화면에 한 줄 추가 | — |
+| WS 실시간 갱신(§대조 6번) | 🔶 **실배달 확인은 9/29(화) 리허설 사전 준비**로 확정(김세혁 9/22 리뷰 승인). 코드 경로는 `apps/web/src/components/realtime-provider.tsx` → `/api/v1/ws`. 카드가 새로고침 없이 승인 대기로 바뀌는지 확인·기록은 김승철, FE 수정 담당은 김세혁 | **리허설에서 실배달이 실패하면 FE를 고치지 않고 새로고침 컷으로 확정한다.** 대본의 동작 하나가 늘 뿐 흐름은 같다 |
+| 조치별 절감 예상(#347 · PR #361) | **9/23(수) 확정본의 대본에는 넣지 않는다.** FE 표기는 자산 관제(AST-001)의 「절감 예상(AI 추정)」 카드로 생겼지만(PR #387), T1 무대(INC-004 → INC-002)에는 없다. 서버 값은 붙는다(2026-09-17 실측 idle-dev 월 $258.42 · 단가가 모델 지식 기반 추정이라 호출마다 달라질 수 있다 · §결정 기록 ④). AI 추정값 ↔ 서버 파생 사실값 구분(#347 · 김세혁)이 9/28(월) 컷에 서면 T1-9 뒤 AST-001에서 한 줄로 보여줄지 그때 정한다 | — |
 
 ### 반복 — Connect Day 하루 2세션
 
@@ -344,6 +346,24 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 | ④ | T1-3 idle-dev 모델 호출 실측 — 절감 추정 호출(#347)이 함께 붙는다 | **실측 2026-09-17 · 김승철** — 카드 3장 모두 승인 대기 · 모델 호출 7회 · 실패·재시도 0. **idle-dev**: 근거 요약 7.7초 · 추천 3.5초 · 절감 단가 4.7초(약 16초). 근거 3줄(14일 CPU 평균·최대 2.0% · 개발 환경 m5.2xlarge · 다운사이징 부합) · 추천 `RUNBOOK_EC2_RIGHTSIZING` → m5.large(서버 계산과 일치 — 다르면 계약 검증에서 진행 불가) · 절감 예상 월 $258.42(시간당 $0.472 → $0.118 × 730시간 · `MODEL_KNOWLEDGE`). 미사용 SG · 미연결 EBS 각 약 6초. 스캔 8.3초 · 분석 스캔 합계 28.6초. **모델 응답은 호출마다 달라질 수 있다** — 리허설 9/29(화)에서 사전 준비를 실제로 돌려 다시 보고, **`api` 기동부터 카드 3장이 모두 승인 대기가 될 때까지 걸린 시간**을 재서 이 칸에 적는다(그러면 준비 시간이 추정에서 실측이 된다 · PR #376 리뷰) |
 | ⑤ | T1-7 헬퍼 | **헬퍼 머지(PR #373 · 9/17(목))**. 남은 것은 리허설 9/29(화)에서 실행 디스패치 5초를 3회 연속 확인하는 것 · 김세혁 |
 | ⑥ | **공격 경로 표시(#362)** — 완성되면 T2-1·T2-8 대본을 되돌릴지 | **남음** — 계약(DoD ①·②)은 PR #374로 9/17(목) 머지됐고, 남은 것은 화면(DSH-001 토폴로지의 공격 경로 · DoD ③)이다. 판단은 9/28(월) 릴리스 컷(#349). 9/23(수) 확정은 지금 화면(공격 경로 없음) 기준 |
+| ⑦ | 미사용 SG · 미연결 EBS 카드 — 시연 중 누르는가 | **누르지 않는다 — 김세혁 2026-09-22 리뷰에서 처분 승인, 근거 정정은 재검토 대상.** 두 자원은 **시연 트랙(T1·T2)에 쓰이지 않는다.** 따라서 실행 구현이 추가돼도 이 처분은 유지한다. 코드 대조 기준 `dev 7969bb7`에서 SG 삭제 런북은 `_RUNNERS`에 없어 미지원 예약이 비종료로 남는다(#368). EBS 삭제는 구현됐지만(PR #390), 삭제 후 시드를 재실행하면 이름표로 찾아 없어진 볼륨을 **새 ID로 생성**한다(`scripts/seed_localstack.py`의 EBS 생성부). 시연 LocalStack은 개발 것과 별개이고, 세션 사이 시드 재실행도 예정돼 있어 개발 테스트 대상 소실이나 준비 전체 재시작이 근거는 아니다. 실제 위험은 새 ID가 새 자산·EBS Incident로 이어져 기존 카드와 함께 남으며 **카드 3건이라는 대본이 어긋날 수 있음**이다. INC-004 목록의 버튼은 `조치 실행`, INC-002 상세에서는 `승인하고 삭제`다. 잘못 눌렀다면 ACT-001의 **「⚠ 파괴적 조치입니다」 경고를 보고 [취소]**한다 |
+| ⑧ | 9/18 이후 머지분 대조 | **2026-09-22 · 김승철 — 코드 대조 완료 · 반영 문구 재리뷰 대기.** **#376 머지 `5235a41` 이후 `dev 7969bb7`까지 전량**(#380·#378·#383·#385·#384·#386·#388·#387·#390·#389·#392·#393)을 대조했다. 영향과 제외 이유는 아래 표. 코드 확인과 화면 실측은 구분하며 **실경로 재확인은 9/29(화) 리허설**에서 한다 |
+
+**결정 ⑧ 대조 범위** — 아래의 영향 없음은 이 컷 시트의 T1/T2 동선·입력에 한정한다.
+
+| PR | 컷 시트 영향 · 반영 |
+| --- | --- |
+| #380 | 접수 시 대상 EC2·직접 SG/NACL 근거 보존. 대상 근거가 없으면 분석 실패, 최신 자료로 대체하지 않음 → T2 주입 전 DB 수집 상태 확인 추가 |
+| #378 | IPv6 표기 정규화. T2 입력 S3는 IPv4 `203.0.113.10/32`이므로 동선·입력 변경 없음 |
+| #383 | 관계 분류를 회차 상태 대신 실패 라벨 기준으로 정정. 대상 ARN·버튼·시드 입력 변경 없음 |
+| #385 · #384 | 각각 모의 로그 익명화 검사·README 정리. 기존 S3 골든 주입 명령과 컷 동선 변경 없음 |
+| #386 | 분석 결과와 종료 조건 정리. FE 변경 없음. 세션 사이 [종료 판단]은 비종료 실행이 없고 SecOps 분석이 종료된 상태에서 수행(`workflows.resolve_incident`) |
+| #388 | 동작별 버튼 문구는 DSH-001 제안 카드·INC-002 상세에만 적용. T1은 INC-004 「승인 대기」 → `조치 실행` → 모달 `실행`, T2는 상세 → 차단/해제 버튼 → 모달 `실행`으로 반영 |
+| #387 · 시드 #294 | 자산 관제 대시보드 추가. INC-004 `/asset-incidents` · INC-001 `/incidents` · AST-001 `/assets` · INC-002 상세 경로 유지. 네트워크 메트릭 시간당 4표본·분할 적재와 고아 NACL 정리 추가, idle-dev CPU 프로필 유지. 절감 예상은 AST-001에 있어 T1 대본 편입은 9/28 컷에서 판단 |
+| #390 | EBS 삭제 구현 → 결정 ⑦에 구현 상태와 새 ID 재생성 위험 반영 |
+| #389 | SecOps 입력·프롬프트 변경 → T2-6 판단 근거 문구를 9/29 리허설에서 재확인 |
+| #392 | 정확한 `vigilantis:role=isolation` 태그의 SG를 미사용 판정에서 제외. 시드 `vigilantis-seed-unused`에는 그 태그가 없어 기존 카드 전제 유지. 전체개방 SG는 태그보다 위협 판정이 우선이라 T2 옆 SG의 빨강 전제도 유지 |
+| #393 | 자산 상세의 객체·태그 표시 수정. AST-001 상세 표시는 개선되며 승인 버튼·T1/T2 동선 변경 없음 |
 
 **재현**: `docker compose up -d --wait db localstack` → `AWS_ENDPOINT_URL=http://localhost:4566 uv run python scripts/seed_localstack.py` → 일회용 DB에 `alembic upgrade head` → `run_pipeline()` 1회. 판정 분포는 적지 않는다(시드가 바뀌면 낡는다) — 이 시트가 기대는 것은 두 대상의 판정과 SG 연결뿐이다.
 
@@ -355,7 +375,7 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 | `RUNBOOK_EC2_ENABLE_AUTOSCALING` (P2) | `autoscaling` 동일. 구현량도 최대 |
 | `TIMEOUT_ISOLATION_1M` | 위 `ISOLATE`에 의존한다. 1분을 실시간으로 기다리는 것도 시연에 부적합 |
 | `RUNBOOK_SG_DELETE_ISOLATED` / `SG_RECREATE` (P1) | 두 트랙이 이미 양방향 회복을 각각 보여준다. 세 번째는 중복 |
-| `RUNBOOK_EBS_DELETE_UNATTACHED` (P1) | 입력 스키마에 `ebs_volumes`가 아직 없다 |
+| `RUNBOOK_EBS_DELETE_UNATTACHED` (P1) | 입력 스키마와 실행 경로는 구현됐다(PR #390). 시드 볼륨을 보존하고 T1·T2에 집중하기 위해 제외한다(결정 ⑦의 확정안) |
 
 **2차 설계서 대상**: 실 AWS 전환(9주차 10/02–10/08) 후 P2 트랙 추가 여부를 다시 판단한다 — P2 3종의 실 AWS 첫 검증은 10주차(10/12–10/15)다.
 
@@ -393,7 +413,7 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 | 3-B | ~~자동 원복 엔진~~ ✅ 해소(2026-09-03) | `RUNBOOK_EC2_REVERT_SIZE` 실행과 `AUTO_ON_FAILURE` 자동 발동이 dev에 들어갔다(#241 / PR #256). 2/2 판정 자체는 #240 / PR #244로 먼저 섰다. **3번을 한 줄로 두면 이 머지가 3번 전체를 해소한 것처럼 읽히므로 갈라 둔다** — 주입 방법은 그대로 남는다 | — |
 | 4 | ~~가드레일 ③ 실제 통과~~ ✅ 해소(2026-08-31) | **4단계가 전부 섰다.** ③ ARN Match 구현(#177 / PR #202 — DB 수집 ARN 대조로 Scope Escalation 차단, ① NUL 문자 차단 포함)으로 `tests/test_guardrails.py`의 placeholder skip 1건이 해제됐다. ④ Dry-Run은 `precheck()` 확정 10종 구현 완료(#129 / PR #147 · 실측 #130 / PR #170) | — |
 | 5 | 화면 구현 상태 | 아래 표 | 카드별 |
-| 6 | **WS 이벤트로 화면이 실시간 갱신되는 것** | FE 연동 구현됨 — 소켓 수명주기·이벤트 3종·Toast·재연결(#168 / PR #181). 로컬 `core-api`로 **연결·중단·자동 복구 확인**. 다만 **이벤트 실배달은 미확인**. 막던 이유였던 "코어 DB가 비었다"는 **자산에 대해서는 풀렸다**(2026-09-02 — `scripts/load_golden_assets.py`로 골든 FinOps 전량 적재). Incident를 만드는 계층(아래 9번)도 섰다 — **남은 것은 이벤트 실배달 확인**이다 | **7주차(9/21(월)–9/23(수)) · FE(김세혁)** — 리허설에서 알면 9/30(수) 시연물 마감 전에 고칠 날이 없다 |
+| 6 | **WS 이벤트로 화면이 실시간 갱신되는 것** | FE 연동 구현됨 — 소켓 수명주기·이벤트 3종·Toast·재연결(#168 / PR #181). 로컬 `core-api`로 **연결·중단·자동 복구 확인**. 다만 **이벤트 실배달은 미확인**. 막던 이유였던 "코어 DB가 비었다"는 **자산에 대해서는 풀렸다**(2026-09-02 — `scripts/load_golden_assets.py`로 골든 FinOps 전량 적재). Incident를 만드는 계층(아래 9번)도 섰다 — **남은 것은 이벤트 실배달 확인**이다 | **9/29(화) 리허설 사전 준비로 확정**(김세혁 9/22 리뷰 승인). 확인·기록 김승철 / FE 수정 담당 김세혁. **실배달이 실패하면 이번 시연을 위한 FE 수정 없이 새로고침 컷으로 확정한다**(§공통과 같은 결정) |
 | 7 | ~~T1 5번 `POST /actions/execute` HTTP 상태 코드~~ ✅ 해소(2026-08-27) | 라우터·멱등 처리 구현 완료(#116 / PR #119), 롤백 3종 실행 접수는 #126 / PR #158. **신규 접수 `202 Accepted` · 같은 `idempotency_key` 재요청 `200 OK`** 로 확정돼 SSOT §API 계약에 등재됐다. 남은 것은 `execute` 본체(Boto3 실행·자동 원복 — 김세혁) | — |
 | 8 | ~~**토폴로지 뷰를 골든으로 못 채운다**~~ ✅ **해소** (2026-09-02 신설 · 2026-09-04 EBS 편입 · **2026-09-08 해소**) | **노드와 엣지가 모두 골든에서 선다.** 마지막까지 0건이던 NACL·Launch Template·ASG·ALB Target Group이 `asset_inventory_005`로 들어와 **자산 유형 7/7종**이 되고, `RelationType` **6/6종**이 파생되며 **끊긴 엣지 0**이다(**#271** / PR #314). 셋 다 `apps/core-api/tests/test_golden_assets_api.py`가 **CI에서 등식으로** 지킨다 — 계약에 유형·관계가 늘면 여기가 먼저 실패한다. **자산을 넣는 것과 엣지가 서는 것은 다르다**: 관계는 `collector.persist_inventory`가 **같은 인벤토리 파일 안의 참조**에서만 파생시켜서, 골든에 EBS가 들어온 뒤에도(#264 · #276) `ATTACHED_TO`는 **한 번도 파생된 적이 없었다** — 004의 볼륨이 부착 대상으로 적은 EC2가 골든 어디에도 없었기 때문이다. 아무도 세지 않아 아무도 몰랐고, 그래서 등식 가드를 함께 세웠다. **화면에 띄우는 조건은 백엔드 기동 하나다** — FE mock 계층이 없어(PR #351) 화면은 `NEXT_PUBLIC_API_BASE_URL`(미설정 시 `http://localhost:8000`)의 이 데이터만 본다(위 T1 §자산 화면과 같은 축) | — |
 | 9 | ~~**판정→Intake 배선이 없다**~~ ✅ **해소**(2026-09-10 · #306 / PR #320) | `services/scheduler.py` `run_pipeline()`이 판정 뒤 `create_incident_from_intake`를 부르고(FINOPS), 위협 접수(`threat_ingress.py` · #322)가 같은 진입점을 부른다(SECOPS). 두 트랙의 Incident가 실경로로 생긴다. 종전 서술(*"호출부가 `tests/` 밖에 0건"*)은 git 이력에 있다 | — |
