@@ -5,7 +5,8 @@
 //
 // **대시보드는 한 번에 EC2 한 대만 그린다.** 전수는 자산 화면(AST-001)이 맡는다 — 요약 자리에
 // 전부 그리면 자산이 늘 때마다 이 카드가 페이지를 덮고, 정작 한 대의 경로와 보호 계층은 더
-// 안 보인다. 무엇을 그릴지는 아래 `TopologyPicker`가 정하고, 기본값은 **위험 순 1위**다.
+// 안 보인다. 무엇을 그릴지는 아래 `TopologyPicker`가 정하고, 기본값은 **공격 경로가 들어오는
+// 첫 대**이며 그런 대가 없으면 **위험 순 1위**다.
 //
 // 카드는 **`그래프 │ 인스턴스 │ 경로 밖` 세 칸**이 나란히 선 구조다. 목록 두 칸이 400px쯤 가져가므로
 // 그래프에는 900px 남짓이 남는데, 그래도 5열 정렬이 서도록 그래프의 접힘 기준을 768px로 내렸다
@@ -13,6 +14,14 @@
 //
 // 배치 계산은 **언제나 전량으로 한다**(`items` 전부를 넘긴다). 고른 한 대만 넣고 계산하면 나머지
 // EC2에 달린 볼륨·보안 그룹이 갈 곳을 잃어 `트래픽 경로 밖`으로 내려가 — 없는 낭비를 만들어 낸다.
+//
+// **외부 공격 경로(#362)는 인시던트에서 온다.** 자산 응답에는 "어디서 들어왔나"가 없어, 목록 계약의
+// `threat_context`를 `lib/threat-path`가 경로로 바꾸고 그래프가 자산 노드 위에 덧그린다. 자산 화면
+// (AST-001)은 인시던트를 조회하지 않으므로 이 축은 대시보드에만 선다.
+//
+// 그 축이 서면 **열이 하나 늘어 그래프의 접힘 기준도 768px에서 978px로 오른다**(asset-graph.tsx).
+// 위의 900px 남짓은 5열 기준이라, 경로가 있는 계정에서 열 정렬이 서려면 이 카드가 더 넓은 본문 폭을
+// 받아야 한다 — 좁으면 세로로 쌓이고, 그때도 가려지는 것은 없다(PR #398 리뷰).
 
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
@@ -20,15 +29,22 @@ import { useState } from 'react';
 import { AssetGraph } from '@/components/assets/asset-graph';
 import { TopologyPicker } from '@/components/dashboard/topology-picker';
 import { buildTopology, sortRowsByRisk } from '@/lib/asset-graph';
-import type { AssetItem, UncollectedAssetType } from '@/types/api';
+import { rowThreats, threatPaths } from '@/lib/threat-path';
+import type { AssetItem, IncidentListItem, UncollectedAssetType } from '@/types/api';
 
 export function DashboardTopology({
   items,
   uncollected,
+  incidents,
 }: {
   items: AssetItem[];
   /** 조회를 못 한 유형 — 그래프가 빈 열을 "없음"이 아니라 "못 가져옴"으로 그리는 근거다. */
   uncollected: UncollectedAssetType[];
+  /**
+   * 인시던트 목록. 여기서 쓰는 것은 `threat_context` 하나이며 **조회 실패(null)와 0건을 가르지
+   * 않는다** — 둘 다 그릴 경로가 없고, 그 구분은 대시보드 상태줄이 이미 맡고 있다.
+   */
+  incidents: IncidentListItem[] | null;
 }) {
   const router = useRouter();
   const [picked, setPicked] = useState<string | null>(null);
@@ -36,13 +52,19 @@ export function DashboardTopology({
   // AST-002는 Drawer라 자체 URL이 없다 — 자산 화면이 그 항목을 고른 상태로 여는 딥링크로 보낸다(§4.2).
   const open = (asset: AssetItem) => router.push(`/assets?asset=${encodeURIComponent(asset.arn)}`);
 
-  // 목록 순서는 위험 순이고 기본 선택은 그 1위다 — 아무것도 고르지 않은 채 들어온 관제자가
-  // 가장 먼저 봐야 할 대를 이미 보고 있게 한다.
+  // 목록 순서는 위험 순이다 — 아무것도 고르지 않은 채 들어온 관제자가 가장 먼저 봐야 할 대를
+  // 이미 보고 있게 한다.
   const topology = buildTopology(items);
   const rows = sortRowsByRisk(topology.rows);
+  const paths = threatPaths(incidents);
+
+  // **기본 선택은 공격 경로가 들어오는 대가 먼저다.** 위험 순 1위와 대개 같지만 항상 같지는
+  // 않다 — 전체 개방 SG가 달린 EC2는 스스로 `SKIP`이어도 인터넷에서 들어오는 경로가 있다.
+  // 경로가 없으면 종전대로 위험 순 1위다.
+  const attacked = rows.find((row) => rowThreats(row, paths).length > 0);
   const selectedArn = picked !== null && rows.some((r) => r.ec2.arn === picked)
     ? picked
-    : (rows[0]?.ec2.arn ?? '');
+    : (attacked?.ec2.arn ?? rows[0]?.ec2.arn ?? '');
 
   return (
     // 폭 기준은 뷰포트가 아니라 **이 카드가 실제로 받은 폭**이다 — 대시보드 왼쪽 열은 자산 화면보다
@@ -64,6 +86,7 @@ export function DashboardTopology({
           <AssetGraph
             items={items}
             uncollected={uncollected}
+            threatPaths={paths}
             rowArns={[selectedArn]}
             // 경로 밖 목록은 그래프가 아니라 오른쪽 칸에서 그린다 — 그래프에 그릴 자리가 없는
             // 것들이라, 고르는 목록과 나란히 두는 편이 읽힌다.
@@ -81,6 +104,7 @@ export function DashboardTopology({
           selectedArn={selectedArn}
           onSelect={setPicked}
           onOpen={open}
+          threatPaths={paths}
         />
       </div>
     </div>

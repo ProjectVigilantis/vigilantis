@@ -3,8 +3,8 @@
 // 이 트리를 다시 그려 숫자가 따라온다.
 //
 // AI 조치 제안 카드(`action-proposal-card.tsx`)는 페이지가 `proposalSlot`으로 넘기고 이 격자가 자리를 준다.
-// 아직 없는 것(#294 완료 기준): 토폴로지의 외부 Source IP 노드·공격 경로 — 공개 계약에 출발지 필드가 없어
-// 계약 추가(#362)가 먼저다.
+// 토폴로지의 외부 출발지 노드·공격 경로는 인시던트 목록 계약의 `threat_context`에서 온다(#362 · PR #374) —
+// 그래서 이 컴포넌트가 이미 들고 있는 `incidents`를 토폴로지 카드로 그대로 내려보낸다.
 //
 // ## 배치 — 9칸 | 3칸 두 열 (`xl` 이상)
 //
@@ -318,12 +318,16 @@ export function DashboardView({
           AI 카드가 길 때 그 높이만큼 빈 자리가 생긴다. */}
       <Panel
         title="자산 토폴로지"
-        description="트래픽 경로(대상 그룹 → EC2 → EBS)와 보호 계층 — 노드를 누르면 자산 상세로 이동합니다"
+        description="외부 출발지 → 트래픽 경로(대상 그룹 → EC2 → EBS)와 보호 계층 — 노드를 누르면 자산 상세로 이동합니다"
       >
         {items.length === 0 ? (
           <EmptyState message="수집된 자산이 없습니다." />
         ) : (
-          <DashboardTopology items={items} uncollected={assets.uncollected} />
+          <DashboardTopology
+            items={items}
+            uncollected={assets.uncollected}
+            incidents={incidents}
+          />
         )}
       </Panel>
     </div>
