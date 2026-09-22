@@ -12,7 +12,13 @@ import {
   type TopologyRow,
 } from '@/lib/asset-graph';
 import { arnShort, ASSET_TYPE_LABELS } from '@/lib/enum-labels';
-import { rowThreats, undrawnThreats, type RowThreat, type ThreatPath } from '@/lib/threat-path';
+import {
+  rowThreats,
+  splitUndrawn,
+  undrawnThreats,
+  type RowThreat,
+  type ThreatPath,
+} from '@/lib/threat-path';
 import { cn } from '@/lib/utils';
 import type { AssetItem, AssetType, UncollectedAssetType, Verdict } from '@/types/api';
 
@@ -69,7 +75,8 @@ const THREAT_HEAD: { label: string; types: readonly AssetType[] } = {
 
 /**
  * 열 머리글 한 칸. **열 정렬이 설 때만 그린다** — 좁아서 세로로 쌓인 배치에는 열이 없으므로
- * 머리글이 아래 내용과 어긋난 거짓말이 된다(아래 `hidden @3xl/graph:contents` 참조).
+ * 머리글이 아래 내용과 어긋난 거짓말이 된다(아래 `hidden …:contents` 참조. 기준 폭은 공격 경로
+ * 열이 서는지에 따라 768px과 978px로 갈린다).
  * 그래서 수집 실패 안내는 여기에만 두지 않고 격자 아래 한 줄로도 남긴다.
  */
 function Head({ label, failed }: { label: string; failed: UncollectedAssetType[] }) {
@@ -101,21 +108,26 @@ function Head({ label, failed }: { label: string; failed: UncollectedAssetType[]
  * 대상 이름은 **그 행의 EC2가 아닐 때만** 덧붙인다. 전체 개방 SG의 공격 대상은 EC2가 아니라
  * 부속 칩으로 그려진 그 보안 그룹이라, 화살표만 두면 무엇이 열려 있는지 화면이 말하지 않는다.
  *
- * **폭을 상자 하나로 묶는다**(관계 이름·대상을 옆으로 늘어놓지 않고 상자 안에 쌓는다). 이 열은
- * 격자의 `auto` 트랙이라 내용의 max-content까지 자라는데, 옆으로 늘어놓으면 한 셀이 400px을
- * 넘어 **마지막 `1fr` 열(부속 — 보안 그룹·NACL)이 0px로 찌부러진다.** 실측: 옆으로 늘어놓은
- * 배치에서 부속 열이 0px가 되어 SG·NACL 칩이 그래프 밖으로 밀려났다. 계약값 `event_type`은
- * 툴팁과 아래 범례가 맡는다.
+ * **상자 폭을 176px로 못 박는다**(`w-44`. 화살표까지 합한 트랙은 194px). 값이 들어가는 폭이라
+ * 늘리지도 줄이지도 않는다 — 안쪽 154px은 IPv4 CIDR 최대 길이(`255.255.255.255/32` = 151px)가
+ * 들어가는 최소이며, 그보다 좁으면 **출발지 값 자체가 잘린다.** 첫 구현은 `max-w-40`(안쪽
+ * 138px)이라 1300px 화면에서도 그 값이 잘렸다(PR #398 리뷰 실측). 계약은 IPv6 CIDR도 허용하므로
+ * (`packages/schemas/api/incidents.py`) 그 길이는 말줄임으로 접고 전체 값은 툴팁이 맡는다.
+ *
+ * **고정 폭이라 이 열은 다른 열과 폭을 다투지 않는다.** 대신 열이 하나 늘어난 만큼 격자가 설
+ * 최소 폭이 커지므로 그 판단은 아래 `AssetGraph`의 기준 폭(978px)이 맡는다. 관계 이름·대상을
+ * 옆으로 늘어놓지 않고 상자 안에 쌓는 것도 같은 이유다. 계약값 `event_type`은 툴팁과 아래
+ * 범례가 맡는다.
  */
 function ThreatSource({ threat, ec2Arn }: { threat: RowThreat; ec2Arn: string }) {
   const { path, target } = threat;
   const targetName = target !== null ? (target.name ?? target.resource_id) : arnShort(path.targetArn);
 
   return (
-    <span className="flex min-w-0 items-center gap-1.5">
+    <span className="flex items-center gap-1.5">
       <span
         title={`${path.source} → ${targetName} (${path.eventType})`}
-        className="border-danger bg-card flex max-w-40 min-w-0 flex-col items-start gap-0.5 rounded-md border px-2.5 py-1.5"
+        className="border-danger bg-card flex w-44 shrink-0 flex-col items-start gap-0.5 rounded-md border px-2.5 py-1.5"
       >
         <span className="text-danger text-[10px] whitespace-nowrap">
           {path.observed ? '관측 출발지' : '노출 대역'}
@@ -244,9 +256,14 @@ function Row({
   return (
     <div className="contents">
       {threats !== null ? (
-        // **경로는 세로로 쌓는다.** 다른 열처럼 옆으로 흘리면 경로가 둘만 돼도 이 `auto` 열이
-        // 280px까지 자라, 마지막 `1fr` 열(부속)이 그만큼 좁아진다(실측: 137px까지 눌렸다).
-        <span className="flex min-w-0 flex-col items-start gap-1.5 self-center">
+        // **경로는 세로로 쌓는다.** 한 행에 경로가 여럿이어도(그 EC2와 그 대에 붙은 SG가 함께
+        // 대상인 경우) 열 폭은 상자 하나(194px)에 머문다 — 옆으로 흘리면 경로 수만큼 열이 넓어져
+        // 나머지 열이 그만큼 좁아진다.
+        //
+        // **`min-w-0`을 걸지 않는 것도 의도다.** 걸면 이 셀의 최소 폭이 0이 되어 트랙이 상자보다
+        // 좁아지고, 고정 폭 상자가 옆 열 위로 삐져나온다(PR #398 리뷰 실측: 780px에서 트랙이
+        // 121px로 줄어 상자가 AZ 열을 덮었다).
+        <span className="flex flex-col items-start gap-1.5 self-center">
           {threats.map((threat) => (
             <ThreatSource
               key={`${threat.path.targetArn}:${threat.path.source}`}
@@ -426,8 +443,9 @@ export function AssetGraph({
   // 왼쪽을 차지해, 정작 5열 정렬이 좁은 카드에서 먼저 접힌다.
   const hasThreatColumn = threatPaths.length > 0;
   // 그리지 않은 경로 — 고르지 않은 EC2와 경로 밖 자원(미사용 SG)으로 향한 것이다. 세어서
-  // 밝히지 않으면 지금 그려진 선이 전부라고 읽힌다.
-  const undrawn = hasThreatColumn ? undrawnThreats(threatPaths, rows) : [];
+  // 밝히지 않으면 지금 그려진 선이 전부라고 읽힌다. **두 갈래로 가른다** — 고르면 그려지는 것과
+  // 그릴 행이 없는 것의 안내가 서로 다르다(`splitUndrawn`).
+  const undrawn = splitUndrawn(hasThreatColumn ? undrawnThreats(threatPaths, rows) : [], allRows);
 
   return (
     <div className="@container/graph flex flex-col gap-4">
@@ -440,21 +458,36 @@ export function AssetGraph({
           접는 기준이 1024px가 아니라 **768px**인 이유: 노드 상자에 폭 상한(`max-w-56`)과 말줄임이
           생겨 "억지로 밀어 넣으면 이름이 잘린다"는 옛 걱정이 사라졌다. 접힌 배치가 이 카드에서
           가장 높으므로, 열이 설 수 있는 폭이면 세우는 편이 낫다. */}
-      {/* 공격 경로 열이 서면 트랙이 하나 는다. 두 문자열을 통째로 갈아 끼우는 이유는 Tailwind가
-          **소스에 적힌 클래스 문자열**만 찾아 만들기 때문이다 — 조각을 이어 붙이면 그 클래스가
-          빌드에서 사라져 격자가 통째로 무너진다. */}
+      {/* 공격 경로 열이 서면 트랙이 하나 늘고 **기준 폭도 함께 오른다** — 5열 기준 768px + 출발지
+          트랙 194px + 격자 간격 16px = **978px**. 그 아래에서 6열을 세우면 열을 하나 더 끼울 폭이
+          없어 어딘가는 잘리는데, 잘릴 자리를 고를 수 없다(PR #398 리뷰 실측: 963px에서 부속 열이
+          93px로, 820px에서는 0px로 눌려 SG·NACL 칩이 그래프 밖으로 밀려났다). 그래서 **6열이 못
+          서는 폭이면 세우지 않고 세로로 쌓는다** — 접힌 배치는 높지만 아무것도 가리지 않는다.
+          실측(1536px 뷰포트 = 그래프 폭 987px)에서 대시보드는 6열을 유지한다.
+
+          마지막 열은 `minmax(0,1fr)`이 아니라 **`minmax(min-content,1fr)`** 이다. 부속 열의 칩은
+          관계 이름이 `whitespace-nowrap`이라 줄지 못하는데 `0` 바닥값을 주면 격자가 **줄 수 없는
+          이 열부터** 깎아 칩을 그래프 밖으로 밀어낸다. 바닥값을 주면 부족한 폭은 노드 이름 열이
+          받고, 그쪽은 폭 상한(`max-w-56`)·말줄임·툴팁이 있어 줄어도 읽을 길이 남는다.
+
+          두 문자열을 통째로 갈아 끼우는 이유는 Tailwind가 **소스에 적힌 클래스 문자열**만 찾아
+          만들기 때문이다 — 조각을 이어 붙이면 그 클래스가 빌드에서 사라져 격자가 통째로 무너진다. */}
       <div
         className={cn(
-          'grid gap-x-4 gap-y-3 @3xl/graph:items-start',
+          'grid gap-x-4 gap-y-3',
           hasThreatColumn
-            ? '@3xl/graph:grid-cols-[auto_auto_auto_auto_auto_minmax(0,1fr)]'
-            : '@3xl/graph:grid-cols-[auto_auto_auto_auto_minmax(0,1fr)]',
+            ? '@min-[978px]/graph:grid-cols-[auto_auto_auto_auto_auto_minmax(min-content,1fr)] @min-[978px]/graph:items-start'
+            : '@3xl/graph:grid-cols-[auto_auto_auto_auto_minmax(min-content,1fr)] @3xl/graph:items-start',
         )}
       >
         {/* 머리글도 `contents`로 얹어야 아래 행들과 같은 열 트랙을 쓴다. 열이 없는 접힌 배치에서는
             통째로 감춘다 — 그때는 각 행이 `AZ → 진입 → EC2 → 후속 → 부속` 순서로 쌓이므로
             머리글이 첫 행에만 붙은 것처럼 보이게 된다. */}
-        <div className="hidden @3xl/graph:contents">
+        <div
+          className={
+            hasThreatColumn ? 'hidden @min-[978px]/graph:contents' : 'hidden @3xl/graph:contents'
+          }
+        >
           {(hasThreatColumn ? [THREAT_HEAD, ...HEAD_TYPES] : HEAD_TYPES).map(({ label, types }) => (
             <Head
               key={label}
@@ -485,12 +518,30 @@ export function AssetGraph({
 
       {/* 그리지 않은 공격 경로. 대시보드는 한 번에 EC2 한 대만 그리므로(dashboard-topology.tsx)
           고르지 않은 대로 향한 경로는 선이 없다 — 숨기지 않고 **센다.** 대상 이름까지 적어 두어야
-          목록에서 무엇을 골라야 그 선이 보이는지 알 수 있다. */}
-      {undrawn.length > 0 ? (
+          목록에서 무엇을 골라야 그 선이 보이는지 알 수 있다.
+
+          문구가 `공격 경로`가 아니라 **`외부 출발지 경로`** 인 이유는 이 수에 노출 대역이 함께
+          세어지기 때문이다(`topology-picker.tsx`의 같은 판단).
+
+          **두 줄로 가른다**(PR #398 리뷰). 위는 목록에서 고르면 이 그래프에 선이 그려지는 것이고,
+          아래는 어떤 EC2에도 붙지 않아 그릴 행 자체가 없는 것이다 — 후자를 누르면 그래프가 바뀌지
+          않고 자산 상세(`/assets?asset=…`)로 이동하며, 그 화면은 인시던트를 조회하지 않아 공격
+          경로를 그리지 않는다. 한 문장으로 둘을 함께 안내하면 절반이 거짓이 된다. */}
+      {undrawn.selectable.length > 0 ? (
         <p className="text-xs text-amber-400">
-          그래프에 그리지 않은 공격 경로 <span className="tabular-nums">{undrawn.length}</span>건 —{' '}
-          {undrawn.map((path) => `${path.source} → ${arnShort(path.targetArn)}`).join(' · ')}. 대상
-          자산을 목록에서 고르면 경로가 그려집니다.
+          이 그래프에 그리지 않은 외부 출발지 경로{' '}
+          <span className="tabular-nums">{undrawn.selectable.length}</span>건 —{' '}
+          {undrawn.selectable.map((p) => `${p.source} → ${arnShort(p.targetArn)}`).join(' · ')}. 대상
+          EC2를 목록에서 고르면 이 그래프에 경로가 그려집니다.
+        </p>
+      ) : null}
+      {undrawn.offPath.length > 0 ? (
+        <p className="text-xs text-amber-400">
+          그릴 행이 없는 외부 출발지 경로{' '}
+          <span className="tabular-nums">{undrawn.offPath.length}</span>건 —{' '}
+          {undrawn.offPath.map((p) => `${p.source} → ${arnShort(p.targetArn)}`).join(' · ')}. 어떤
+          EC2에도 연결되지 않은 자원이라 그래프에 그릴 자리가 없습니다 — 목록에서 누르면 자산
+          상세로 열리며, 그 화면에는 이 경로를 그리지 않습니다.
         </p>
       ) : null}
 

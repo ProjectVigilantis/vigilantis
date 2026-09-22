@@ -5,7 +5,13 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { buildTopology } from './asset-graph.ts';
-import { assetThreats, rowThreats, threatPaths, undrawnThreats } from './threat-path.ts';
+import {
+  assetThreats,
+  rowThreats,
+  splitUndrawn,
+  threatPaths,
+  undrawnThreats,
+} from './threat-path.ts';
 import type {
   AssetItem,
   AssetType,
@@ -166,4 +172,41 @@ test('그리지 않은 행·경로 밖 자원으로 향한 경로를 센다', ()
     assetThreats('sg-unused', paths).map((p) => p.source),
     ['0.0.0.0/0'],
   );
+});
+
+test('그리지 않은 경로를 "고르면 그려지는 것"과 "그릴 행이 없는 것"으로 가른다', () => {
+  const { rows } = buildTopology(inventory());
+  const paths = threatPaths([
+    incident('inc-1', 'ec2-b', ssh('203.0.113.20')),
+    incident('inc-2', 'sg-unused', openIp('0.0.0.0/0')),
+  ]);
+
+  // 고른 대가 ec2-a라 두 경로 모두 지금은 선이 없다 — 그 둘의 **안내가 서로 다르다.**
+  const drawn = rows.filter((r) => r.ec2.arn === 'ec2-a');
+  const split = splitUndrawn(undrawnThreats(paths, drawn), rows);
+
+  assert.deepEqual(
+    split.selectable.map((p) => p.targetArn),
+    ['ec2-b'],
+    '목록에서 고르면 그려지는 경로다 — "고르면 그려집니다" 안내가 맞는 것은 이쪽뿐이다',
+  );
+  assert.deepEqual(
+    split.offPath.map((p) => p.targetArn),
+    ['sg-unused'],
+    '어떤 EC2에도 안 붙은 자원은 눌러도 그래프가 아니라 자산 상세로 가므로 같은 안내가 거짓이 된다',
+  );
+});
+
+test('행에 붙은 SG로 향한 경로는 그 EC2를 고르면 그려지므로 selectable이다', () => {
+  const { rows } = buildTopology(inventory());
+  const paths = threatPaths([incident('inc-1', 'sg-open', openIp('0.0.0.0/0'))]);
+
+  const split = splitUndrawn(undrawnThreats(paths, []), rows);
+
+  assert.deepEqual(
+    split.selectable.map((p) => p.targetArn),
+    ['sg-open'],
+    'sg-open은 ec2-a 행의 부속 칩이라 그 대를 고르면 경로가 그려진다 — 경로 밖으로 세면 안 된다',
+  );
+  assert.deepEqual(split.offPath, []);
 });

@@ -39,9 +39,11 @@ function sourceOf(context: ThreatContext): { source: string; observed: boolean }
  *
  * - **조회 실패(null)와 0건을 가르지 않는다** — 둘 다 그릴 경로가 없다. 그 구분은 대시보드
  *   상태줄과 지표가 이미 맡고 있어 여기서 또 갈라 봐야 화면에 쓸 곳이 없다.
- * - **종료된 인시던트는 뺀다.** 관제자가 닫은 건의 경로까지 그리면 지금 열려 있는 공격과
- *   끝난 공격이 같은 굵기로 겹쳐 그려진다. 조치가 실패한 건(`FAILED`)은 **남긴다** — 위협은
- *   그대로이므로 화면에서 사라지면 안 된다.
+ * - **종료된 인시던트는 뺀다.** `RESOLVED`는 관제자가 **그 건을 닫았다**는 판단이며 위협이
+ *   제거됐다는 보장이 아니다 — 그래서 이 제외는 사실 판정이 아니라 **표시 정책**이다(PR #398
+ *   리뷰). 닫힌 건까지 그리면 지금 열려 있는 인시던트의 경로와 종료된 인시던트의 경로가 같은
+ *   굵기로 겹쳐 그려진다. 조치가 실패한 건(`FAILED`)은 **남긴다** — 위협은 그대로이므로 화면에서
+ *   사라지면 안 된다.
  * - **같은 대상·같은 출발지·같은 유형은 한 번만 그린다.** 같은 위협으로 인시던트가 여러 건
  *   열려도 그래프에서는 같은 선 하나다.
  *
@@ -120,6 +122,39 @@ export function undrawnThreats(
     for (const arn of rowArns(row)) drawn.add(arn);
   }
   return paths.filter((path) => !drawn.has(path.targetArn));
+}
+
+/** `undrawnThreats`를 안내 문구가 갈라 쓸 두 갈래로 나눈 결과. */
+export interface UndrawnSplit {
+  /** 대상이 **어떤 EC2 행에든 담긴** 경로 — 그 대를 목록에서 고르면 그래프에 선이 그려진다. */
+  selectable: ThreatPath[];
+  /** 대상이 어떤 EC2 행에도 없는 경로(미사용 SG 등) — 그래프에 그릴 행 자체가 없다. */
+  offPath: ThreatPath[];
+}
+
+/**
+ * 그리지 않은 경로를 **고르면 그려지는 것**과 **그릴 행이 없는 것**으로 가른다.
+ *
+ * 한 문장으로 안내하면 절반이 거짓이 된다 — 경로 밖 자원(어떤 EC2에도 안 붙은 전체 개방 SG)은
+ * 목록에서 눌러도 그래프가 바뀌지 않고 자산 상세(`/assets?asset=…`)로 이동하며, 그 화면은
+ * 인시던트를 조회하지 않아 공격 경로를 아예 그리지 않는다(PR #398 리뷰).
+ *
+ * 기준은 **전량 행**(`buildTopology`가 만든 EC2 행 전부)이다. 그려진 행이 아니라 전량이어야
+ * "고를 수 있는가"를 답한다 — 지금 선이 없는 이유가 **안 골랐기 때문인지**, 애초에 **자리가
+ * 없어서인지**가 그 둘을 가른다.
+ */
+export function splitUndrawn(
+  undrawn: readonly ThreatPath[],
+  allRows: readonly TopologyRow[],
+): UndrawnSplit {
+  const inRows = new Set<string>();
+  for (const row of allRows) {
+    for (const arn of rowArns(row)) inRows.add(arn);
+  }
+  return {
+    selectable: undrawn.filter((path) => inRows.has(path.targetArn)),
+    offPath: undrawn.filter((path) => !inRows.has(path.targetArn)),
+  };
 }
 
 /** 이 자산을 향한 경로 — 목록 칸이 "고르면 보인다"를 표시하는 데 쓴다. */
