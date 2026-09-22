@@ -5,15 +5,17 @@
 #
 #   capture_instance_spec      SAVE_INSTANCE_SPEC_JSON   RIGHTSIZING → REVERT_SIZE
 #   capture_nacl_rule_index    RECORD_NACL_RULE_INDEX    NACL_ADD_DENY → NACL_RESTORE
+#   capture_sg_full_rules      SAVE_SG_FULL_RULES_JSON   SG_DELETE_ISOLATED → SG_RECREATE
 #
 # 이 모듈이 존재하는 이유는 하나다. **자산을 바꾼 뒤에는 되돌릴 근거를 어디서도
 # 얻을 수 없다.** `RUNBOOK_EC2_REVERT_SIZE`는 원복 타입을 백업 레코드에서만
 # 로드하므로(ADR-0004 정책 ③), 여기서 캡처에 실패하면 조치를 시작해서는 안 된다 —
 # Auto-Rollback 셀링포인트가 통째로 근거를 잃는다.
 #
-# 두 캡처가 읽는 것은 다르다. 스펙 JSON은 **바꾸기 전 값**을 읽고, NACL 규칙 index는
-# 삽입이 기존 값을 덮지 않으므로 **넣을 규칙의 좌표**를 적으면서 그 슬롯이 비어 있는지
-# 확인한다. 어느 쪽이든 실패하면 조치를 시작하지 않는다는 계약은 같다(ADR-0008 §1 ①).
+# 세 캡처가 읽는 것은 다르다. 스펙 JSON과 SG 전체 규칙은 **바꾸기 전 값**을 읽고, NACL
+# 규칙 index는 삽입이 기존 값을 덮지 않으므로 **넣을 규칙의 좌표**를 적으면서 그 슬롯이
+# 비어 있는지 확인한다. 어느 쪽이든 실패하면 조치를 시작하지 않는다는 계약은 같다
+# (ADR-0008 §1 ①).
 #
 # 경계
 #   - DB를 모른다. executor.precheck()가 백업 **조회**를 주입받는 것과 같은 이유로
@@ -22,7 +24,7 @@
 #   - 예외를 던지지 않는다. AWS 오류는 errors.reason_code_for()의 공용 표로
 #     분류해 사유 코드로 돌려준다 — precheck·실행·롤백이 같은 표를 쓴다.
 #
-# [남은 작업] 나머지 백업 2종(SAVE_SG_FULL_RULES_JSON·SAVE_CURRENT_SG_AND_TG_MAPPING).
+# [남은 작업] 나머지 백업 1종(SAVE_CURRENT_SG_AND_TG_MAPPING — EC2_ISOLATE).
 # payload 형태는 executor의 롤백 precheck가 이미 읽고 있으므로 계약은 정해져
 # 있다 — 캡처 함수만 이 파일에 붙이면 된다.
 # ==============================================================================
@@ -36,7 +38,12 @@ from typing import Any, Mapping, Optional
 from botocore.exceptions import BotoCoreError, ClientError
 from pydantic import ValidationError
 
-from schemas.backups import BackupType, InstanceSpecBackup, NaclRuleIndexBackup
+from schemas.backups import (
+    BackupType,
+    InstanceSpecBackup,
+    NaclRuleIndexBackup,
+    SgFullRulesBackup,
+)
 from schemas.precheck import PrecheckReasonCode
 from schemas.runbook_parameters import (
     NACL_ADD_DENY_EGRESS,
@@ -253,5 +260,64 @@ def capture_nacl_rule_index(
             backup_type,
             R.PRECHECK_PARAM_INVALID,
             f"규칙 fingerprint 값이 계약을 벗어났습니다: {', '.join(invalid) or '알 수 없음'}",
+        )
+    return BackupCapture(backup_type=backup_type, payload=record.model_dump(mode="json"))
+
+
+# ------------------------------------------------------------------ SG 전체 규칙
+def _describe_security_group(group_id: str, region: str):
+    """보안 그룹 1건. (SG, 사유 코드) 짝 — 없으면 코드가 채워진다.
+
+    executor._security_group과 같은 조회지만 import하지 않는다 — _describe_instance와
+    같은 이유다(위 주석).
+    """
+    try:
+        res = aws_client("ec2", region).describe_security_groups(GroupIds=[group_id])
+    except (ClientError, BotoCoreError) as exc:
+        return None, reason_code_for(exc)
+    groups = res.get("SecurityGroups") or []
+    if not groups:
+        return None, R.PRECHECK_TARGET_NOT_FOUND
+    return groups[0], None
+
+
+def capture_sg_full_rules(group_id: str, region: str) -> BackupCapture:
+    """`SAVE_SG_FULL_RULES_JSON` — SG_DELETE_ISOLATED 삭제 직전 보안 그룹 전체.
+
+    이 캡처가 담는 것이 원복의 **전부**다. SG를 지우고 나면 이름도 설명도 규칙도 AWS에
+    다시 물을 수 없고, `RUNBOOK_SG_RECREATE`는 복원 대상 SG ID조차 파라미터로 받지
+    않는다(schemas.backups.SgFullRulesBackup). 그래서 여기서 실패하면 삭제를 시작하지
+    않는다(ADR-0008 §1 ①).
+
+    규칙 목록은 `describe_security_groups`가 준 모양 그대로 담는다. 해석해서 담으면
+    되붓는 쪽(`authorize_security_group_*`)이 받을 모양과 갈리고, 그 어긋남은 SG가 이미
+    지워진 뒤에야 드러난다.
+
+    **규칙이 0개인 SG도 정상 캡처다.** 미부착 SG는 대개 규칙이 비어 있고, 그것이 곧
+    "이 SG는 아무것도 열지 않는다"는 사실이다 — 빈 목록을 실패로 보면 정작 지워야 할
+    대상이 조치 대상에서 빠진다.
+    """
+    backup_type = BackupType.SAVE_SG_FULL_RULES_JSON.value
+    group, code = _describe_security_group(group_id, region)
+    if code is not None:
+        return _fail(backup_type, code, f"보안 그룹 조회 실패: {group_id}")
+
+    try:
+        record = SgFullRulesBackup(
+            group_name=_optional(group.get("GroupName")),
+            description=_optional(group.get("Description")),
+            vpc_id=_optional(group.get("VpcId")),
+            ingress_permissions=list(group.get("IpPermissions") or []),
+            egress_permissions=list(group.get("IpPermissionsEgress") or []),
+            group_id=_optional(group.get("GroupId")),
+        )
+    except ValidationError as exc:
+        # 조회는 됐는데 재생성에 필요한 값이 없다. VPC 밖 SG(EC2-Classic)가 그렇고,
+        # 그런 SG는 이 백업으로 되살릴 수 없으므로 삭제도 시작하지 않는다.
+        missing = sorted({str(err["loc"][0]) for err in exc.errors() if err.get("loc")})
+        return _fail(
+            backup_type,
+            R.PRECHECK_INVALID_STATE,
+            f"SG 재생성 필수 값 누락: {', '.join(missing) or '알 수 없음'}",
         )
     return BackupCapture(backup_type=backup_type, payload=record.model_dump(mode="json"))

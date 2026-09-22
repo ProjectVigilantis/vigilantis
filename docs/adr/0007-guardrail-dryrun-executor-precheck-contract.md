@@ -14,6 +14,8 @@
 
 문제는 `DryRun`이 모든 작업에서 쓸 수 있는 수단이 아니라는 점이다. 확정 10종(ADR-0002 본편 7 + ADR-0004 롤백 3)이 사용하는 AWS 작업 전수를 LocalStack 4.14.0에서 실측했다.
 
+> **1차 보강(2026-09-22 · Issue #368)** — `ec2.revoke_security_group_egress` 1행을 더했다. `SG_RECREATE` 실행을 세우면서 `create_security_group`이 VPC 보안 그룹에 **전체 허용 아웃바운드 1건을 자동으로 붙인다**는 것이 드러났고, 걷어 내지 않으면 복원된 SG가 원본보다 넓어지거나 같은 규칙 주입이 `InvalidPermission.Duplicate`로 거절된다. 그래서 회수가 이 런북의 고정 단계가 됐고, 허용 작업도 한 종 늘었다. 판정은 나머지 SG 작업과 같은 `DryRun`이다(2026-09-22 LocalStack 실측 — `DryRunOperation` 예외, 자원 변경 없음). 표 밖의 결정은 바뀌지 않았다.
+
 ### 실측 — 확정 10종 `target_api` 전수 (LocalStack 4.14.0)
 
 | AWS 작업 | 사용 런북 | 예외 | 자원 변경 | 판정 |
@@ -24,6 +26,7 @@
 | `ec2.delete_security_group` | SG_DELETE_ISOLATED | `DryRunOperation` | 없음 | DryRun |
 | `ec2.authorize_security_group_ingress` | SG_RECREATE | `DryRunOperation` | 없음 | DryRun |
 | `ec2.authorize_security_group_egress` | SG_RECREATE | `DryRunOperation` | 없음 | DryRun |
+| `ec2.revoke_security_group_egress` | SG_RECREATE | `DryRunOperation` | 없음 | DryRun |
 | `ec2.create_launch_template` | ENABLE_AUTOSCALING | `DryRunOperation` | 없음 | DryRun |
 | `ec2.create_snapshot` | EBS_DELETE_UNATTACHED | `DryRunOperation` | 없음 | DryRun |
 | `ec2.delete_volume` | EBS_DELETE_UNATTACHED | `DryRunOperation` | 없음 | DryRun |
