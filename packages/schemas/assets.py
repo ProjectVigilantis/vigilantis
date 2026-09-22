@@ -95,6 +95,10 @@ class SecurityGroupAsset(BaseModel):
     open_to_world: list[OpenPort] = Field(
         default_factory=list, description="전체개방 포트 목록. 비어있지 않으면 위협 후보"
     )
+    tags: dict[str, str] = Field(
+        default_factory=dict,
+        description="SG 태그(Key→Value). 자리 태그(schemas.asset_roles)로 판정 제외를 가린다(#359)",
+    )
 
 
 class NaclAsset(BaseModel):

@@ -806,6 +806,14 @@
           },
           "title": "Open To World",
           "type": "array"
+        },
+        "tags": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "SG 태그(Key→Value). 자리 태그(schemas.asset_roles)로 판정 제외를 가린다(#359)",
+          "title": "Tags",
+          "type": "object"
         }
       },
       "required": [
