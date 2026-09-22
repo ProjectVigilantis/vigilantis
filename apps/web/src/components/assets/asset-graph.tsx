@@ -162,11 +162,23 @@ function Node({
       // 이름이 잘리면 확인할 길이 없어진다 — 툴팁에 전체 이름과 리소스 ID를 남긴다.
       title={asset.name !== null ? `${asset.name} · ${asset.resource_id}` : asset.resource_id}
       className={cn(
-        // `max-w-56`이 이름이 상자를 뚫는 것을 막는 실제 장치다. 격자의 열은 `auto`라 **내용의
-        // max-content까지 자란다** — 이름이 길면 EC2 열이 그만큼 벌어져 상자가 카드 밖으로 나가고,
-        // 마지막 `1fr` 열(부속)은 남는 폭이 없어 찌부러진다. 상자 폭을 묶으면 열도 함께 묶인다.
+        // 상한이 **둘**이고 둘 다 필요하다 — `max-w-[min(14rem,100%)]`의 두 항이다.
+        //
+        // `14rem`(=224px)은 **이름이 길 때** 열이 그만큼 벌어지는 것을 막는다. 격자의 열은 `auto`라
+        // 내용의 max-content까지 자라므로, 상자를 묶지 않으면 EC2 열이 벌어져 상자가 카드 밖으로
+        // 나가고 마지막 `1fr` 열(부속)은 남는 폭이 없어 찌부러진다.
         // 실측: 170자 이름에서 상자가 1314px로 자라 카드를 186px 뚫고 나갔다.
-        'bg-card flex max-w-56 min-w-0 flex-col items-start gap-1 rounded-md border px-2.5 py-1.5 text-left',
+        //
+        // `100%`는 **반대쪽 — 열이 상자보다 좁아질 때**를 막는다. `<button>`은 `display:flex`를 줘도
+        // 폭이 내용(max-content)에 머물러, 셀이 줄어도 상자는 그대로 남아 옆 열을 덮는다. 셀을
+        // 넘지 못하게 해야 그때 이름이 말줄임된다(PR #398 2차 리뷰 실측: 978px에서 EC2 상자가 열보다
+        // 69.2px 넓어 후속 열을 53.2px 침범했다. 이 상한을 준 뒤 침범 0).
+        // `w-full`로 셀을 **채우게** 하면 같은 겹침은 막지만 넓은 폭에서 상자가 열 끝까지 늘어나
+        // 배치가 달라진다 — 상한이라 좁아질 때만 듣는다.
+        // 격자가 컨테이너를 넘지 않는 것(`scrollWidth - clientWidth`)만으로는 이 겹침이 드러나지
+        // 않는다 — 셀은 줄어도 그 안의 상자가 넘친 것이라, 잴 대상이 컨테이너가 아니라 **셀과
+        // 그 안 상자**다.
+        'bg-card flex max-w-[min(14rem,100%)] min-w-0 flex-col items-start gap-1 rounded-md border px-2.5 py-1.5 text-left',
         // 링 색은 판정 표에서 오고, 켜는 것은 hover뿐이다 — 색과 조건을 한 군데서 읽히게 갈라 둔다.
         'hover:ring-1',
         VERDICT_BORDER[asset.verdict as Verdict] ?? NODE_BORDER_PLAIN,
@@ -200,19 +212,30 @@ function Edge({
   towardLeft = false,
   onSelect,
   dimmedArns,
+  wrap = false,
 }: {
   edge: GraphEdge;
   towardLeft?: boolean;
   onSelect: (asset: AssetItem) => void;
   dimmedArns: ReadonlySet<string> | null;
+  /**
+   * 열이 이 엣지의 한 줄 폭보다 좁아지면 **노드를 관계 이름 아래로 내린다.** 관계 이름은
+   * `whitespace-nowrap`이라 줄지 못하므로, 접지 않으면 엣지가 열 밖으로 나가 옆 열을 덮는다
+   * (PR #398 2차 리뷰 실측: 978px에서 대상 그룹 칩이 EC2 열을 29.7px 침범).
+   *
+   * **부속 열(SG·NACL·ASG)에는 주지 않는다.** 그 열만 `minmax(min-content,1fr)`이라 접을 수
+   * 있게 만들면 min-content가 265px에서 181px로 낮아지고, 그만큼 바닥이 내려가 **1300px처럼
+   * 넉넉한 폭에서도 부속 칩이 접힌다**(실측). 접히지 못하는 대신 그 열은 바닥값이 지켜 준다.
+   */
+  wrap?: boolean;
 }) {
   return (
-    <span className="flex min-w-0 items-center gap-1.5">
+    <span className={cn('flex min-w-0 items-center gap-1.5', wrap && 'flex-wrap')}>
       <span aria-hidden className="text-muted-foreground text-xs">
         {towardLeft ? '◀' : '▶'}
       </span>
-      {/* 관계 이름은 줄바꿈하지 않는다 — 두 줄로 접히면 엣지 한 줄이 노드 상자보다 높아져,
-          좁은 열에서 화살표가 무엇을 가리키는지 흐려진다.
+      {/* 관계 이름 **자체는** 줄바꿈하지 않는다 — 이름 가운데가 접히면 무슨 관계인지 한눈에
+          읽히지 않는다. 폭이 부족할 때 접는 것은 이름이 아니라 **이름과 노드 사이**다(`wrap`).
           `PROTECTED_BY`가 직접 부착이 아니라 **서브넷 일치로 파생된 관계**라는 사실(§4.2)은
           아래 범례 한 줄이 맡는다 — 엣지마다 `(파생)`을 달면 관계 이름보다 꼬리표가 길어진다. */}
       <span className="text-muted-foreground font-mono text-[10px] whitespace-nowrap">
@@ -276,9 +299,19 @@ function Row({
       <span className="text-muted-foreground bg-muted self-center justify-self-start rounded px-1.5 py-0.5 font-mono text-[10px]">
         {az ?? 'AZ 미상'}
       </span>
+      {/* 진입·후속 열은 `auto` 트랙이고 셀에 `min-w-0`이 걸려 있어 **내용보다 좁아질 수 있다.**
+          그 폭에서 엣지가 한 줄을 고집하면 옆 열을 덮으므로 `wrap`으로 접는다 — 부속 열만은
+          바닥값이 지켜 주므로 접지 않는다(`Edge`의 `wrap` 주석). */}
       <span className="flex min-w-0 flex-wrap items-center gap-2 self-center">
         {row.targetGroups.map((e) => (
-          <Edge key={e.targetArn} edge={e} towardLeft onSelect={onSelect} dimmedArns={dimmedArns} />
+          <Edge
+            key={e.targetArn}
+            edge={e}
+            towardLeft
+            wrap
+            onSelect={onSelect}
+            dimmedArns={dimmedArns}
+          />
         ))}
       </span>
       <span className="min-w-0 self-center">
@@ -290,7 +323,7 @@ function Row({
       </span>
       <span className="flex min-w-0 flex-wrap items-center gap-2 self-center">
         {row.volumes.map((e) => (
-          <Edge key={e.targetArn} edge={e} onSelect={onSelect} dimmedArns={dimmedArns} />
+          <Edge key={e.targetArn} edge={e} wrap onSelect={onSelect} dimmedArns={dimmedArns} />
         ))}
       </span>
       <span className="flex min-w-0 flex-wrap items-center gap-2 self-center">
