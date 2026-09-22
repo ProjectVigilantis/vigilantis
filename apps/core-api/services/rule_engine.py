@@ -107,6 +107,7 @@ def evaluate_sg(name: Optional[str], attached: Optional[bool],
     # 격리용 SG 는 EC2_ISOLATE 전까지 미부착이 정상이라 UNUSED 로 두면 첫 회차부터 삭제 후보다.
     # 위협(전체개방) 뒤에 둔다 — 태그가 빼는 것은 "미사용이니 지우자" 하나뿐이고, 격리 SG 가
     # 전체개방이면 그건 진짜 위협이라 태그로 가리지 않는다(#359).
+    # 미부착 UNUSED보다 먼저 격리 역할을 제외하며, 부착 후에도 SKIP_WHITELISTED를 유지한다.
     if _is_isolation_sg(tags):
         return Verdict.SKIP, SkipReason.SKIP_WHITELISTED
     if attached is False:
