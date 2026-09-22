@@ -326,14 +326,41 @@ def test_only_system_approved_rollbacks_open_auto_rollback():
 # ------------------------------------------------------------------ 삭제 실행
 
 
-def test_backup_is_committed_before_the_delete_call(db, reserved_delete, aws):
-    """순서가 계약이다 — 지운 뒤에는 이름도 규칙도 AWS에 다시 물을 수 없다."""
+def test_backup_is_committed_before_the_delete_call(
+    db, reserved_delete, aws, monkeypatch
+):
+    """순서가 계약이다 — 지운 뒤에는 이름도 규칙도 AWS에 다시 물을 수 없다.
+
+    **실행이 끝난 뒤의 기록은 순서를 증명하지 못한다.** 무엇이 남았는지에는 답해도 언제
+    남았는지에는 답하지 않아, 삭제 뒤에 commit하도록 배선이 바뀌어도 그대로 통과한다.
+    그래서 commit을 AWS 호출과 **같은 타임라인**에 올리고, 삭제를 부르는 시점에 백업이
+    이미 실행에 결속된 채 commit돼 있었는지를 본다. (PR #399 리뷰)
+    """
     execution = reserved_delete()
+    real_commit = db.commit
+
+    def spy_commit():
+        real_commit()
+        bound = exec_repo.get_execution(db, execution.execution_id).backup_record_id
+        aws.calls.append(("commit", {"backup_record_id": bound}))
+
+    monkeypatch.setattr(db, "commit", spy_commit)
 
     outcome = run_delete(db, execution)
 
     assert outcome.succeeded
-    assert operations(aws) == ["describe_security_groups", "delete_security_group"]
+    timeline = operations(aws)
+    assert [name for name in timeline if name != "commit"] == [
+        "describe_security_groups",
+        "delete_security_group",
+    ]
+    committed_before_delete = [
+        payload["backup_record_id"]
+        for name, payload in aws.calls[: timeline.index("delete_security_group")]
+        if name == "commit"
+    ]
+    assert execution.backup_record_id in committed_before_delete
+
     record = exec_repo.get_backup_record(db, execution.backup_record_id)
     assert record.backup_type == BackupType.SAVE_SG_FULL_RULES_JSON.value
     assert record.payload["group_name"] == GROUP_NAME
