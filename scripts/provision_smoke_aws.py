@@ -235,6 +235,11 @@ def build_app_policy(account: str, region: str, vpc_id: str) -> dict:
             },
             {
                 # SG_DELETE_ISOLATED·SG_RECREATE(규칙 복원)·EC2_ISOLATE·EC2_UNISOLATE(ENI의 SG 교체)
+                #
+                # RevokeSecurityGroupEgress는 SG_RECREATE가 **생성 직후** 쓴다(Issue #368).
+                # create_security_group이 전체 허용 egress 1건을 자동으로 붙이므로, 걷어
+                # 내지 않으면 재생성 SG가 원본보다 넓어지거나 같은 규칙 주입이 Duplicate로
+                # 거절된다 — 복원이 아니라 확장이 된다.
                 "Sid": "SecurityGroupsAndEnisInSmokeVpc",
                 "Effect": "Allow",
                 "Action": [
@@ -242,6 +247,7 @@ def build_app_policy(account: str, region: str, vpc_id: str) -> dict:
                     "ec2:AuthorizeSecurityGroupIngress",
                     "ec2:DeleteSecurityGroup",
                     "ec2:ModifyNetworkInterfaceAttribute",
+                    "ec2:RevokeSecurityGroupEgress",
                 ],
                 "Resource": [f"{arn}:security-group/*", f"{arn}:network-interface/*"],
                 "Condition": {"ArnEquals": {"ec2:Vpc": vpc_arn}},

@@ -100,6 +100,10 @@ InstanceId = Annotated[str, _fullmatch(r"i-[a-f0-9]{8,17}")]
 SecurityGroupId = Annotated[str, _fullmatch(r"sg-[a-f0-9]{8,17}")]
 NetworkAclId = Annotated[str, _fullmatch(r"acl-[a-f0-9]{8,17}")]
 VolumeId = Annotated[str, _fullmatch(r"vol-[a-f0-9]{8,17}")]
+# 런북 파라미터가 아니라 **백업 payload 계약**(backups.SgFullRulesBackup)이 쓰는 형식이다.
+# 그래도 여기 두는 이유는 executor가 백업 payload의 식별자를 파라미터 계약과 같은 타입으로
+# 읽기 때문이다 — AWS 자원 ID 패턴을 두 파일에 적으면 한쪽만 고쳐진 채로 남는다.
+VpcId = Annotated[str, _fullmatch(r"vpc-[a-f0-9]{8,17}")]
 TargetGroupArn = Annotated[
     str, _fullmatch(r"arn:aws:elasticloadbalancing:.*:targetgroup/.*")
 ]

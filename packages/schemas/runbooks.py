@@ -116,6 +116,32 @@ ROLLBACK_RUNBOOK_BY_MAIN_ID: dict[str, str] = {
     RunbookId.RUNBOOK_EC2_RIGHTSIZING.value: RunbookId.RUNBOOK_EC2_REVERT_SIZE.value,
 }
 
+# 롤백 3종의 승인 정책 — ADR-0004 §Decision 결정 표를 그대로 옮긴 것이다.
+# `HUMAN_ONLY`는 **사람이 누르기 전에는 시작되지 않는다**는 뜻이고, 셋 중 그 반대는
+# `REVERT_SIZE` 하나뿐이다(`trigger_source`에 `AUTO_ON_FAILURE`가 있다).
+#
+# 본편 7종을 여기 두지 않는 이유는 이 표를 읽는 질문이 하나이기 때문이다 — "주 조치가
+# 실패했을 때 **시스템이 스스로** 그 짝을 발동해도 되는가"(dispatcher._AUTO_ROLLBACK_ON_
+# ASSET_CHANGE). 본편의 승인 정책은 그 질문에 답하지 않는다.
+APPROVAL_MODE_BY_ROLLBACK_ID: dict[str, ApprovalMode] = {
+    RunbookId.RUNBOOK_EC2_UNISOLATE.value: ApprovalMode.HUMAN_ONLY,
+    RunbookId.RUNBOOK_SG_RECREATE.value: ApprovalMode.HUMAN_ONLY,
+    RunbookId.RUNBOOK_EC2_REVERT_SIZE.value: ApprovalMode.SYSTEM_OR_HUMAN,
+}
+
+# 주 조치 → **자동 발동이 허용된** 등록 롤백. 위 표에서 파생하므로 ADR-0004 결정 표
+# 하나가 원천이다.
+#
+# ROLLBACK_RUNBOOK_BY_MAIN_ID와 갈라 두는 것이 이 상수의 존재 이유다. 저쪽은 "짝이
+# 있는가"(관제자 복구 버튼이 무엇을 여는가)를 답하고, 이쪽은 "**사람 없이** 발동해도
+# 되는가"를 답한다. 둘을 같은 표로 쓰면 짝이 있다는 이유만으로 `HUMAN_ONLY` 원복이
+# 시스템 자동 실행으로 나가, ADR-0004가 사람에게 맡긴 판단을 스케줄러가 대신하게 된다.
+AUTO_ROLLBACK_RUNBOOK_BY_MAIN_ID: dict[str, str] = {
+    main_id: rollback_id
+    for main_id, rollback_id in ROLLBACK_RUNBOOK_BY_MAIN_ID.items()
+    if APPROVAL_MODE_BY_ROLLBACK_ID[rollback_id] is ApprovalMode.SYSTEM_OR_HUMAN
+}
+
 
 def domain_of(runbook_id: str) -> RunbookDomain | None:
     """등록 Runbook의 도메인 분류. 미등록 ID는 None."""

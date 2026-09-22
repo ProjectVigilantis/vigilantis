@@ -14,18 +14,22 @@
 #   - DryRun을 쓸 수 없는 작업은 환경과 무관하게 조회로 대체한다(§4). LocalStack일
 #     때만 조회하도록 나누는 것은 ADR-0006 §3이 금지한다.
 #
-# 실행 범위: RUNBOOK_EC2_RIGHTSIZING = execute_rightsizing(). (Issue #211, §실행)
-#            RUNBOOK_EC2_REVERT_SIZE  = execute_revert_size(). (Issue #241, §원복)
-#            RUNBOOK_NACL_ADD_DENY    = execute_nacl_add_deny(). (Issue #297, §차단)
-#            RUNBOOK_NACL_RESTORE     = execute_nacl_restore().  (Issue #298, §해제)
+# 실행 범위: RUNBOOK_EC2_RIGHTSIZING    = execute_rightsizing(). (Issue #211, §실행)
+#            RUNBOOK_EC2_REVERT_SIZE     = execute_revert_size(). (Issue #241, §원복)
+#            RUNBOOK_NACL_ADD_DENY       = execute_nacl_add_deny(). (Issue #297, §차단)
+#            RUNBOOK_NACL_RESTORE        = execute_nacl_restore().  (Issue #298, §해제)
+#            RUNBOOK_EBS_DELETE_UNATTACHED = execute_ebs_delete_unattached(). (Issue #369)
+#            RUNBOOK_SG_DELETE_ISOLATED  = execute_sg_delete_isolated(). (Issue #368)
+#            RUNBOOK_SG_RECREATE         = execute_sg_recreate().  (Issue #368, §SG 원복)
 #   - precheck과 같은 규약으로 예외를 던지지 않는다. 단계별 결과는 ExecutionStepResult로
 #     돌려주고, 저장·커밋 순서는 workflows.py가 소유한다.
 #   - 원복은 되돌릴 값을 인자로만 받는다 — 백업 레코드 조회는 호출부(workflows) 몫이다.
 #     원천이 하나라는 정책(ADR-0004 정책 ③)은 값을 뽑는 자리가 하나일 때만 성립한다.
 #
 # [남은 작업]
-# 1. 나머지 6종 실행 함수 — 백업이 필요한 런북은 백업 commit 이후에만 진입한다
-# 2. 롤백 나머지 2종(RUNBOOK_EC2_UNISOLATE·RUNBOOK_SG_RECREATE) 실행도 executor 경유 —
+# 1. 나머지 3종 실행 함수(EC2_ISOLATE·EC2_ENABLE_AUTOSCALING·EC2_UNISOLATE) — 백업이
+#    필요한 런북은 백업 commit 이후에만 진입한다
+# 2. 롤백 나머지 1종(RUNBOOK_EC2_UNISOLATE) 실행도 executor 경유 —
 #    트리거 판단·감시는 rollback.py 담당
 #
 # 파라미터 계약의 원천은 packages/schemas/runbook_parameters.py의 typed 모델이다(#154).
@@ -41,6 +45,7 @@
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Optional, Protocol
@@ -48,7 +53,7 @@ from typing import Any, Callable, Mapping, Optional, Protocol
 from botocore.exceptions import BotoCoreError, ClientError, ParamValidationError
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
-from schemas.backups import BackupType, NaclRuleIndexBackup
+from schemas.backups import BackupType, NaclRuleIndexBackup, SgFullRulesBackup
 from schemas.executions import (
     ExecutionEffect,
     ExecutionStepResult,
@@ -95,6 +100,18 @@ _DRY_RUN_VERIFIES = "호출 권한과 파라미터 형식(DryRun)"
 _DRY_RUN_MISSES = "대상 자원 존재와 현재 상태(DryRun 비검증)"
 # 조회 대체 경로는 어느 환경에서도 IAM 권한을 확인하지 못한다(ADR-0007 §3).
 _DESCRIBE_MISSES = "IAM 권한(조회 대체 경로)"
+
+# create_security_group이 VPC 보안 그룹에 **자동으로** 붙이는 전체 허용 아웃바운드 1건.
+# 우리가 요청하지 않아도 붙으므로, 백업과 같은 규칙 집합으로 맞추려면 생성 직후 걷어
+# 내야 한다(execute_sg_recreate ②). 그러지 않으면 두 갈래로 틀린다 — 백업에 같은 규칙이
+# 있으면 주입이 InvalidPermission.Duplicate로 실패하고, 없으면 원본보다 **넓은** SG가 된다.
+#
+# 실측(2026-09-22 LocalStack Community): 생성 직후 IpPermissionsEgress가 정확히 이 모양
+# 1건이고, 같은 값을 authorize로 다시 넣으면 InvalidPermission.Duplicate로 거절된다.
+DEFAULT_EGRESS_PERMISSION: Mapping[str, Any] = {
+    "IpProtocol": "-1",
+    "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
+}
 
 
 # ------------------------------------------------------------------ 백업 레코드
@@ -305,6 +322,10 @@ RUNBOOK_SPECS: Mapping[str, _Spec] = {
         method=M.DRY_RUN,
         operations=(
             "ec2.create_security_group",
+            # 생성 직후 AWS가 자동으로 붙이는 전체 허용 egress를 걷어 내는 호출이다
+            # (execute_sg_recreate ②). 백업과 같은 규칙 집합으로 맞추려면 반드시
+            # 부르므로 ④도 함께 본다 — 여기 없으면 권한이 없을 때 실행 중에 드러난다.
+            "ec2.revoke_security_group_egress",
             "ec2.authorize_security_group_ingress",
             "ec2.authorize_security_group_egress",
         ),
@@ -570,46 +591,60 @@ def _precheck_ebs_delete(ctx: _Ctx) -> PrecheckOutcome:
     )
 
 
+def sg_full_rules_backup(payload: Mapping[str, Any]) -> Optional[SgFullRulesBackup]:
+    """백업 payload를 SG 복원 계약으로 읽는다. 계약을 벗어나면 None.
+
+    precheck·실행·종료 판정이 같은 모델로 읽는다 — `dict.get` 문자열로 읽으면 만든 쪽과
+    읽는 쪽이 다른 시점에 사는 계약이 원복 시점에야 어긋난다(ADR-0008 §5).
+    nacl_rule_backup과 같은 자리다.
+    """
+    try:
+        return SgFullRulesBackup.model_validate(dict(payload or {}))
+    except ValidationError:
+        return None
+
+
 def _precheck_sg_recreate(ctx: _Ctx) -> PrecheckOutcome:
-    payload = ctx.backup.payload
-    group_name, description, vpc_id = (
-        payload.get("group_name"),
-        payload.get("description"),
-        payload.get("vpc_id"),
-    )
-    if not all(_non_empty_str(v) for v in (group_name, description, vpc_id)):
+    # 그룹 정의·규칙 목록이 계약을 벗어나면 되살릴 근거가 없다 — AWS를 부르기 전에
+    # 판정 불가로 끝낸다(ADR-0008 §5 "백업 payload에 항목이 없다" 칸)
+    backup = sg_full_rules_backup(ctx.backup.payload)
+    if backup is None:
         return _fail(
             ctx,
             R.PRECHECK_PARAM_INVALID,
-            verified=["없음(백업 레코드에 그룹 정의 없음)"],
-            unverified=[_DRY_RUN_MISSES],
-        )
-    if not all(
-        isinstance(payload.get(key), list)
-        for key in ("ingress_permissions", "egress_permissions")
-    ):
-        return _fail(
-            ctx,
-            R.PRECHECK_PARAM_INVALID,
-            verified=["없음(백업 레코드에 규칙 목록 없음)"],
+            verified=["없음(백업 레코드가 SG 복원 계약을 벗어남)"],
             unverified=[_DRY_RUN_MISSES],
         )
 
     ec2 = aws_client("ec2", ctx.target.region)
-    # ADR-0007 §Context 표 4·5행은 authorize 2종도 DryRun 대상으로 뒀다. create만
+    # ADR-0007 §Context 표는 authorize 2종과 revoke도 DryRun 대상으로 둔다. create만
     # 보고 통과시키면 빈 SG만 만들어지고 규칙 복원이 권한 부족으로 실패하는 경로를
     # precheck가 그대로 통과시킨다 — ④가 막아야 할 실패가 실행 중에 난다.
     # 그룹이 아직 없는 시점에도 성립한다: 존재하지 않는 GroupId로도
-    # DryRunOperation이 돌아온다(#133 ① 실측). 실 AWS 확인은 6-7주차 스모크.
+    # DryRunOperation이 돌아온다(#133 ① 실측 · revoke도 2026-09-22 실측).
     calls = [
         (
             ec2.create_security_group,
-            {"GroupName": group_name, "Description": description, "VpcId": vpc_id},
-        )
+            {
+                "GroupName": backup.group_name,
+                "Description": backup.description,
+                "VpcId": backup.vpc_id,
+            },
+        ),
+        # 회수는 백업 내용과 무관하게 **항상** 부른다(execute_sg_recreate ②) — 실행이
+        # 회수할 규칙은 AWS가 붙일 기본 egress이지 백업에 실린 규칙이 아니다. 그래서
+        # DryRun도 그 기본 규칙의 모양으로 건다.
+        (
+            ec2.revoke_security_group_egress,
+            {
+                "GroupId": ctx.target.resource_id,
+                "IpPermissions": [dict(DEFAULT_EGRESS_PERMISSION)],
+            },
+        ),
     ]
     for operation, permissions in (
-        (ec2.authorize_security_group_ingress, payload["ingress_permissions"]),
-        (ec2.authorize_security_group_egress, payload["egress_permissions"]),
+        (ec2.authorize_security_group_ingress, backup.ingress_permissions),
+        (ec2.authorize_security_group_egress, backup.egress_permissions),
     ):
         # 빈 목록으로 authorize를 부르면 DryRun 이전에 파라미터 오류가 난다.
         # 복원할 규칙이 없는 방향은 실행도 하지 않으므로 검증 대상이 아니다.
@@ -1116,6 +1151,14 @@ STEP_DELETE_VOLUME = "DELETE_VOLUME"
 # 재실행 대신 종료 판정으로 가서 실패로 확정된다.
 STEP_COMPARE_VOLUME_STATE = "COMPARE_VOLUME_STATE"
 
+STEP_DELETE_SECURITY_GROUP = "DELETE_SECURITY_GROUP"
+STEP_CREATE_SECURITY_GROUP = "CREATE_SECURITY_GROUP"
+# 생성 직후 AWS가 붙인 기본 egress 회수(Issue #368). 자산을 바꾸는 단계라 STEP_COMPARE_*
+# 계열이 아니다 — 회수하지 않으면 재생성 SG가 백업보다 넓어진 채로 남는다.
+STEP_REVOKE_DEFAULT_EGRESS = "REVOKE_DEFAULT_EGRESS"
+STEP_AUTHORIZE_SG_INGRESS = "AUTHORIZE_SG_INGRESS"
+STEP_AUTHORIZE_SG_EGRESS = "AUTHORIZE_SG_EGRESS"
+
 _OP_STOP = "ec2.stop_instances"
 _OP_MODIFY = "ec2.modify_instance_attribute"
 _OP_START = "ec2.start_instances"
@@ -1127,6 +1170,12 @@ _OP_DESCRIBE_VOLUMES = "ec2.describe_volumes"
 _OP_CREATE_SNAPSHOT = "ec2.create_snapshot"
 _OP_DESCRIBE_SNAPSHOTS = "ec2.describe_snapshots"
 _OP_DELETE_VOLUME = "ec2.delete_volume"
+_OP_DESCRIBE_SGS = "ec2.describe_security_groups"
+_OP_DELETE_SG = "ec2.delete_security_group"
+_OP_CREATE_SG = "ec2.create_security_group"
+_OP_REVOKE_SG_EGRESS = "ec2.revoke_security_group_egress"
+_OP_AUTHORIZE_SG_INGRESS = "ec2.authorize_security_group_ingress"
+_OP_AUTHORIZE_SG_EGRESS = "ec2.authorize_security_group_egress"
 
 # 삭제해도 되는 볼륨의 상태 — 부착 목록이 비어 있고 available이어야 한다.
 # 판정(rule_engine.evaluate_ebs)이 본 것과 같은 축이지만, 판정과 실행 사이에 누군가
@@ -2035,5 +2084,356 @@ def execute_ebs_delete_unattached(
         ExecutionEffect.APPLIED,
         f"볼륨 삭제: {volume_id} (복구 근거 스냅숏 {snapshot_id})",
         response=response,
+    )
+    return ExecutionOutcome(steps=tuple(log.steps))
+
+
+# ------------------------------------------------------------------ SG 삭제 (Issue #368)
+def _security_group(group_id: str, region: str):
+    """보안 그룹 1건. (SG, 코드) 짝 — 없으면 PRECHECK_TARGET_NOT_FOUND가 채워진다.
+
+    AWS는 없는 SG를 빈 목록이 아니라 `InvalidGroup.NotFound`(ClientError)로 답하고,
+    그 코드는 `NotFound`로 끝나 reason_code_for가 TARGET_NOT_FOUND로 분류한다
+    (services/aws/errors.py). **LocalStack도 같게 답한다**(2026-09-22 실측 · Issue #368).
+    """
+    res, code = _call(
+        aws_client("ec2", region).describe_security_groups, GroupIds=[group_id]
+    )
+    if code is not None:
+        return None, code
+    for group in res.get("SecurityGroups", []):
+        return group, None
+    return None, R.PRECHECK_TARGET_NOT_FOUND
+
+
+def current_security_group(group_id: str, region: str):
+    """(보안 그룹, 사유 코드) 짝. 실행과 종료 판정이 같은 축을 같은 방법으로 읽도록
+    공개한다(workflows.judge_sg_delete_isolated) — current_volume과 같은 이유다.
+
+    **SG가 없는 것과 조회를 못 한 것은 다른 사건이다.** 앞은 PRECHECK_TARGET_NOT_FOUND,
+    뒤는 그 밖의 코드로 나온다 — 판정이 둘을 섞으면 지우지 못한 SG가 성공으로 닫힌다.
+    """
+    return _security_group(group_id, region)
+
+
+def security_group_by_name(group_name: str, vpc_id: str, region: str):
+    """(보안 그룹, 사유 코드) 짝 — 이름과 VPC로 찾는다. 없으면 둘 다 None.
+
+    `SG_RECREATE`의 종료 판정이 쓴다(workflows.judge_sg_recreate). **새 SG ID로는 찾을
+    수 없기 때문이다** — 생성 직후 프로세스가 끊기면 AWS가 발급한 ID가 어디에도 기록되지
+    않고, 그때 "재생성됐는가"에 답할 수 있는 좌표는 백업의 이름과 VPC뿐이다. VPC 안에서
+    보안 그룹 이름은 유일하므로 이 둘이면 하나로 좁혀진다(CreateSecurityGroup API 문서 —
+    같은 VPC에 같은 이름을 만들면 InvalidGroup.Duplicate).
+
+    이름 필터는 없는 이름에 오류를 내지 않고 **빈 목록**을 준다. 그래서 대상 부재는
+    사유 코드가 아니라 (None, None)이다 — current_nacl_entry가 빈 슬롯을 다루는 것과
+    같은 결이며, "못 찾았다"와 "못 물어봤다"를 섞지 않는다.
+    """
+    res, code = _call(
+        aws_client("ec2", region).describe_security_groups,
+        Filters=[
+            {"Name": "group-name", "Values": [group_name]},
+            {"Name": "vpc-id", "Values": [vpc_id]},
+        ],
+    )
+    if code is not None:
+        return None, code
+    for group in res.get("SecurityGroups", []):
+        return group, None
+    return None, None
+
+
+def execute_sg_delete_isolated(
+    target_arn: str,
+    *,
+    record_step: Optional[StepRecorder] = None,
+) -> ExecutionOutcome:
+    """`RUNBOOK_SG_DELETE_ISOLATED` 실행 — 미부착 보안 그룹 1개 삭제. (Issue #368)
+
+    **SG 전체 규칙 백업이 commit된 뒤에만 부른다**(workflows.store_sg_full_rules_backup).
+    지우고 나면 그 이름도 설명도 규칙도 AWS에 다시 물을 수 없어, 백업 없이 지운 SG는
+    되돌릴 수 없는 변경이 된다(ADR-0004 롤백 공통 정책 ③, ADR-0008 §1 ①).
+
+    단계는 하나다. EBS 삭제와 달리 **삭제 직전 상태 재확인을 두지 않는다** — "지금 이
+    SG가 어디에도 안 붙었는가"를 우리가 조회로 판정하면 ENI·다른 SG 규칙·참조 관계를
+    빠짐없이 세야 하고, 그 목록이 우리 쪽에 생기는 순간 AWS가 아는 참조와 갈린다.
+    **AWS가 그 판정을 이미 한다**: 무엇이라도 참조하고 있으면 `DependencyViolation`으로
+    거절한다. 그 거절은 4xx라 `_effect_for`가 `NOT_APPLIED`로 적어, 자산이 그대로인
+    실패로 확정된다.
+
+    **LocalStack은 이 거절을 흉내 내지 않는다**(2026-09-22 실측 · Issue #368) — ENI에
+    붙은 SG도 다른 SG가 참조하는 SG도 그냥 지워진다. 그래서 이 갈래는 단위 테스트가
+    거절을 주입해 고정하고, 실물 확인은 10/6(화) 실 AWS 스모크 몫이다(ADR-0006 §4).
+
+    종료 판정은 `describe_security_groups`로 한다 — `InvalidGroup.NotFound`면 삭제
+    확인이다(workflows.judge_sg_delete_isolated).
+    """
+    target = parse_arn(target_arn)
+    if target is None or target.resource_type != "security-group":
+        return _rejected(f"보안 그룹 ARN이 아닙니다: {target_arn}")
+
+    group_id = target.resource_id
+    ec2 = aws_client("ec2", target.region)
+    log = _StepLog(target_arn, record_step)
+
+    log.begin(1, STEP_DELETE_SECURITY_GROUP, _OP_DELETE_SG)
+    try:
+        response = ec2.delete_security_group(GroupId=group_id)
+    except (ClientError, BotoCoreError) as exc:
+        # DependencyViolation(4xx) · InvalidGroup.NotFound(4xx) 모두 _effect_for가
+        # NOT_APPLIED로 분류한다 — 되돌릴 것 없는 실패로 확정된다
+        return _abort(log, exc, detail="보안 그룹 삭제 실패")
+    log.succeed(
+        ExecutionEffect.APPLIED,
+        f"보안 그룹 삭제: {group_id}",
+        response=response,
+    )
+    return ExecutionOutcome(steps=tuple(log.steps))
+
+
+# ------------------------------------------------------------------ SG 원복 (Issue #368)
+def rebind_self_reference(
+    permissions: list[Mapping[str, Any]],
+    *,
+    original_group_id: Optional[str],
+    new_group_id: str,
+) -> list[dict[str, Any]]:
+    """백업 규칙의 **자기 참조**를 새 그룹 ID로 바꾼다. 나머지는 그대로 둔다.
+
+    원본 SG가 자기 자신을 허용하던 규칙(`UserIdGroupPairs`에 자기 ID)은 그대로 주입할
+    수 없다 — 그 ID의 SG는 이미 없어 `InvalidGroup.NotFound`로 거절된다. 원본이 뜻한
+    것은 "이 SG를 단 대상끼리 통신"이므로, 새 ID로 바꿔 넣는 것이 같은 뜻이다.
+
+    **다른 SG를 가리키는 쌍은 건드리지 않는다.** 그 SG들은 살아 있고, 바꾸면 원본이
+    허용하지 않던 통신을 우리가 여는 것이 된다.
+
+    공개 함수다. 실행과 종료 판정이 **같은 치환을 거친 규칙**을 대조해야 하기 때문이다
+    (workflows.judge_sg_recreate) — 판정이 치환 없이 대조하면 정상 복원이 불일치로 읽힌다.
+
+    `original_group_id`가 없는 백업(부가 항목이라 빌 수 있다)은 무엇이 자기 참조인지
+    가릴 수 없으므로 아무것도 바꾸지 않는다 — 그 경우 자기 참조 규칙의 주입은 AWS가
+    거절하고, 실패가 사실대로 남는다. 짐작으로 바꾸면 엉뚱한 SG를 여는 쪽이 더 나쁘다.
+    """
+    if not original_group_id:
+        return [dict(permission) for permission in permissions]
+
+    def rebound_pair(pair: Any) -> Any:
+        if isinstance(pair, Mapping) and pair.get("GroupId") == original_group_id:
+            return {**pair, "GroupId": new_group_id}
+        return pair
+
+    result: list[dict[str, Any]] = []
+    for permission in permissions:
+        item = dict(permission)
+        pairs = item.get("UserIdGroupPairs")
+        if isinstance(pairs, list):
+            item["UserIdGroupPairs"] = [rebound_pair(pair) for pair in pairs]
+        result.append(item)
+    return result
+
+
+
+
+def sg_permission_fingerprint(permission: Mapping[str, Any]) -> tuple:
+    """규칙 1건을 **비교 가능한 값**으로 줄인다.
+
+    `describe_security_groups`가 돌려주는 규칙은 우리가 보낸 것과 글자 그대로 같지 않다 —
+    AWS가 빈 목록 키(`Ipv6Ranges`·`PrefixListIds`)를 채워 주고, 규칙 설명(`Description`)이
+    붙거나 빠지며, 목록 순서도 보장되지 않는다. 그 차이를 규칙이 달라진 것으로 읽으면
+    멀쩡히 복원된 SG가 "원복 미완"으로 확정된다(workflows.judge_sg_recreate).
+
+    반대로 **허용 범위를 결정하는 축은 전부 남긴다** — 프로토콜·포트 범위와 네 갈래
+    출발지(IPv4·IPv6·SG·접두 목록)다. 이 중 하나라도 빠뜨리면 원본보다 넓어진 SG가
+    복원 완료로 닫힌다.
+    """
+
+    def identifiers(key: str, field: str) -> tuple:
+        return tuple(
+            sorted(
+                str(item[field])
+                for item in (permission.get(key) or [])
+                if isinstance(item, Mapping) and item.get(field)
+            )
+        )
+
+    return (
+        str(permission.get("IpProtocol")),
+        permission.get("FromPort"),
+        permission.get("ToPort"),
+        identifiers("IpRanges", "CidrIp"),
+        identifiers("Ipv6Ranges", "CidrIpv6"),
+        identifiers("UserIdGroupPairs", "GroupId"),
+        identifiers("PrefixListIds", "PrefixListId"),
+    )
+
+
+def sg_permissions_match(
+    actual: Any, expected: list[Mapping[str, Any]]
+) -> bool:
+    """두 규칙 목록이 같은 허용 범위를 뜻하는가. 순서와 표기 차이는 무시한다.
+
+    Counter로 세는 이유는 **같은 규칙이 두 번 있는 것과 한 번 있는 것이 다르기** 때문이
+    아니라(AWS가 중복을 거절한다), 정렬할 수 없는 값이 섞이기 때문이다 — `FromPort`는
+    프로토콜에 따라 int이거나 없어서(None) 튜플 정렬이 TypeError로 끊긴다.
+    """
+    return Counter(
+        sg_permission_fingerprint(item)
+        for item in (actual or [])
+        if isinstance(item, Mapping)
+    ) == Counter(sg_permission_fingerprint(item) for item in expected)
+def execute_sg_recreate(
+    target_arn: str,
+    *,
+    backup: SgFullRulesBackup,
+    record_step: Optional[StepRecorder] = None,
+) -> ExecutionOutcome:
+    """`RUNBOOK_SG_RECREATE` 실행 — 생성 → 기본 egress 회수 → 규칙 주입. (Issue #368)
+
+    **복원 값은 백업 레코드에서만 온다.** 이 함수는 DB를 읽지 않고 호출부가 넘긴 계약
+    모델을 받는다 — execute_revert_size가 되돌릴 타입을 인자로만 받는 것과 같은 이유다
+    (ADR-0004 롤백 공통 정책 ③).
+
+    **되붓기로 끝나지 않는 지점이 셋이다.**
+
+      ① 새 SG ID — 원본 ID를 참조하던 다른 SG 규칙과 ENI 연결은 **돌아오지 않는다**
+         (ADR-0008 §참조 무결성). 되돌리지 않고, 첫 단계 요약에 `원본 ID → 새 ID`를
+         남겨 관제자가 수동 재연결 대상을 알게 한다.
+      ② 자기 참조 규칙 — 원본 자기 ID를 가리키는 쌍만 새 ID로 바꿔 넣는다
+         (rebind_self_reference).
+      ③ 기본 egress — `create_security_group`이 전체 허용 egress 1건을 자동으로 붙인다
+         (DEFAULT_EGRESS_PERMISSION). 걷어 내지 않으면 백업에 같은 규칙이 있을 때
+         주입이 `InvalidPermission.Duplicate`로 실패하고, 없을 때는 원본보다 **넓은**
+         SG가 남는다. 그래서 회수는 백업 내용과 무관하게 **항상** 거친다.
+
+    회수 대상은 **새 SG를 조회해 실제로 붙은 규칙**으로 정한다. 상수로 지우면 AWS가
+    다른 모양을 붙였을 때 그 규칙이 조용히 남아 SG가 넓어진다.
+
+    **원복의 원복은 없다**(ADR-0008 §6). 중간에 끊기면 규칙 일부만 선 SG가 남고, 그
+    상태는 자동 재시도가 아니라 사람에게 간다 — 자식이 FAILED로 닫히면 원본이
+    ROLLBACK_FAILED로 확정된다(workflows._settle_rollback_origin).
+
+    종료 판정은 **백업의 `group_name` + `vpc_id`** 로 재생성 SG를 찾는다
+    (workflows.judge_sg_recreate) — 생성 직후 끊겨 새 ID가 기록되지 않았어도 찾을 수 있다.
+    """
+    target = parse_arn(target_arn)
+    if target is None or target.resource_type != "security-group":
+        return _rejected(f"보안 그룹 ARN이 아닙니다: {target_arn}")
+
+    ec2 = aws_client("ec2", target.region)
+    log = _StepLog(target_arn, record_step)
+    original_group_id = backup.group_id or target.resource_id
+
+    # ① 생성 — 여기부터 자산이 바뀐다
+    log.begin(1, STEP_CREATE_SECURITY_GROUP, _OP_CREATE_SG)
+    try:
+        created = ec2.create_security_group(
+            GroupName=backup.group_name,
+            Description=backup.description,
+            VpcId=backup.vpc_id,
+        )
+    except (ClientError, BotoCoreError) as exc:
+        # 같은 VPC에 같은 이름이 이미 있으면 InvalidGroup.Duplicate(4xx)로 온다 —
+        # NOT_APPLIED라 되돌릴 것 없는 실패로 확정된다
+        return _abort(log, exc, detail="보안 그룹 생성 실패")
+    new_group_id = str(created.get("GroupId") or "")
+    if not _non_empty_str(new_group_id):
+        # 200을 받았는데 ID가 없다 — 만들어졌는지조차 알 수 없고(effect UNKNOWN),
+        # 규칙을 주입할 대상도 특정할 수 없다. 여기서 멈추고 판정에 넘긴다
+        log.fail(
+            ValueError("응답에 GroupId가 없습니다"),
+            detail="보안 그룹 생성 결과 확인 실패",
+        )
+        return ExecutionOutcome(
+            steps=tuple(log.steps),
+            reason_code=R.PRECHECK_AWS_ERROR,
+            error_summary="재생성된 보안 그룹 ID를 받지 못해 규칙 복원을 중단했습니다",
+        )
+    log.succeed(
+        ExecutionEffect.APPLIED,
+        f"보안 그룹 재생성: {backup.group_name} · 원본 {original_group_id} → 새 {new_group_id}",
+        response=created,
+    )
+
+    # ② 기본 egress 회수 — 실제로 붙은 것을 조회해 그것만 걷어 낸다
+    log.begin(2, STEP_REVOKE_DEFAULT_EGRESS, _OP_REVOKE_SG_EGRESS)
+    group, code = _security_group(new_group_id, target.region)
+    if code is not None:
+        # 방금 만든 SG를 조회하지 못했다. 회수 없이 규칙을 주입하면 백업보다 넓은 SG가
+        # 남을 수 있으므로 여기서 멈춘다 — 단계가 남아 있어 판정이 현물을 본다
+        log.fail(
+            RuntimeError(f"재생성 SG 조회 실패: {code.value}"),
+            detail="기본 egress 확인 실패",
+        )
+        return ExecutionOutcome(
+            steps=tuple(log.steps),
+            reason_code=code,
+            error_summary=(
+                f"재생성 SG({new_group_id}) 조회에 실패해 기본 egress를 회수하지 못했습니다"
+            ),
+        )
+    attached_egress = list(group.get("IpPermissionsEgress") or [])
+    if not attached_egress:
+        # 붙은 것이 없다 — 회수할 대상이 없을 뿐 실패가 아니다
+        log.succeed(
+            ExecutionEffect.NOT_APPLIED,
+            f"자동 부착된 기본 egress가 없습니다 — 회수할 규칙 없음({new_group_id})",
+        )
+    else:
+        try:
+            revoked = ec2.revoke_security_group_egress(
+                GroupId=new_group_id, IpPermissions=attached_egress
+            )
+        except (ClientError, BotoCoreError) as exc:
+            return _abort(log, exc, detail="기본 egress 회수 실패")
+        log.succeed(
+            ExecutionEffect.APPLIED,
+            f"자동 부착 egress {len(attached_egress)}건 회수({new_group_id})",
+            response=revoked,
+        )
+
+    # ③ 규칙 주입 — 복원할 규칙이 없는 방향은 호출하지 않는다(빈 목록은 파라미터 오류다)
+    sequence = 3
+    for step_type, aws_operation, operation, permissions, label in (
+        (
+            STEP_AUTHORIZE_SG_INGRESS,
+            _OP_AUTHORIZE_SG_INGRESS,
+            ec2.authorize_security_group_ingress,
+            backup.ingress_permissions,
+            "인바운드",
+        ),
+        (
+            STEP_AUTHORIZE_SG_EGRESS,
+            _OP_AUTHORIZE_SG_EGRESS,
+            ec2.authorize_security_group_egress,
+            backup.egress_permissions,
+            "아웃바운드",
+        ),
+    ):
+        if not permissions:
+            continue
+        payload = rebind_self_reference(
+            permissions,
+            original_group_id=backup.group_id,
+            new_group_id=new_group_id,
+        )
+        log.begin(sequence, step_type, aws_operation)
+        try:
+            response = operation(GroupId=new_group_id, IpPermissions=payload)
+        except (ClientError, BotoCoreError) as exc:
+            return _abort(log, exc, detail=f"{label} 규칙 복원 실패")
+        log.succeed(
+            ExecutionEffect.APPLIED,
+            f"{label} 규칙 {len(payload)}건 복원({new_group_id})",
+            response=response,
+        )
+        sequence += 1
+
+    logger.info(
+        "sg_recreated",
+        extra={
+            "original_group_id": original_group_id,
+            "new_group_id": new_group_id,
+            "group_name": backup.group_name,
+        },
     )
     return ExecutionOutcome(steps=tuple(log.steps))

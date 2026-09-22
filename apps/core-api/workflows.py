@@ -56,7 +56,7 @@ from schemas.api.actions import (
 from schemas.api.errors import ErrorCode
 from schemas.api.incidents import IncidentStatus, ResolutionJudgement, IncidentCategory, ResponseMode
 from schemas.incidents import AgentWaitSchedule
-from schemas.backups import InstanceSpecBackup, NaclRuleIndexBackup
+from schemas.backups import InstanceSpecBackup, NaclRuleIndexBackup, SgFullRulesBackup
 from schemas.candidates import CandidateStatus, RunbookCandidateData
 from schemas.executions import (
     ASSET_MAY_HAVE_CHANGED_EFFECTS,
@@ -589,6 +589,69 @@ def store_nacl_rule_index_backup(
     return BackupOutcome(record=record, created=True)
 
 
+def store_sg_full_rules_backup(db: Session, execution_id: str) -> BackupOutcome:
+    """SG_DELETE_ISOLATED 삭제 직전 전체 규칙 백업 — 캡처 → 저장 → 실행 결속 → commit. (Issue #368)
+
+    **AWS 삭제 호출 이전에 commit까지 끝나야 한다.** SG를 지우고 나면 그 이름도 설명도
+    규칙도 AWS에 다시 물을 수 없어, 삭제와 백업 기록 사이에서 프로세스가 죽으면
+    `RUNBOOK_SG_RECREATE`가 되살릴 근거를 잃는다 — 그 런북은 복원 값을 백업 레코드에서만
+    로드하고 복원 대상 SG ID조차 파라미터로 받지 않는다(ADR-0004 롤백 공통 정책 ③).
+    store_instance_spec_backup과 같은 이유로 호출부 트랜잭션에 얹히지 않고 스스로 커밋한다.
+
+    **파라미터를 받지 않는다.** 대상 SG는 실행의 target_arn 하나로 정한다 — 가드레일 ③이
+    후보의 `group_id`와 target_arn을 이미 문자열 완전일치로 대조했으므로, 여기서 후보를
+    다시 읽으면 대조를 통과한 값과 백업이 향하는 값이 갈릴 자리를 새로 만든다
+    (run_ebs_delete_unattached_execution과 같은 결).
+
+    같은 실행에 두 번 불러도 백업은 하나다(ADR-0008 §1 ③).
+    """
+    execution = executions_repo.lock_execution(db, execution_id)
+    if execution is None:
+        return _backup_failed(
+            PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND, "실행 레코드를 찾을 수 없습니다"
+        )
+    if execution.runbook_id is not RunbookId.RUNBOOK_SG_DELETE_ISOLATED:
+        # 배선 오류다 — SG 전체 규칙 백업을 쓰는 런북은 SG_DELETE_ISOLATED 하나뿐이다
+        # (schemas.backups.BackupType). 판정으로 삼키면 다른 런북이 엉뚱한 백업 종류를
+        # 달고 조용히 진행된다.
+        raise ValueError(
+            f"SG 전체 규칙 백업 대상 런북이 아닙니다: {execution.runbook_id.value}"
+        )
+    if execution.backup_record_id is not None:
+        return BackupOutcome(
+            record=executions_repo.get_backup_record(db, execution.backup_record_id)
+        )
+
+    target = parse_arn(execution.target_arn)
+    if target is None or target.resource_type != "security-group":
+        return _backup_failed(
+            PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+            f"보안 그룹 ARN이 아닙니다: {execution.target_arn}",
+        )
+
+    capture = backup.capture_sg_full_rules(target.resource_id, target.region)
+    if not capture.captured:
+        return _backup_failed(capture.reason_code, capture.detail or "")
+
+    record = executions_repo.create_backup_record(
+        db,
+        execution_id=execution.execution_id,
+        target_arn=execution.target_arn,
+        backup_type=capture.backup_type,
+        payload=capture.payload,
+    )
+    if not executions_repo.bind_backup_record(
+        db, execution.execution_id, record.backup_record_id
+    ):
+        db.rollback()
+        return _backup_failed(
+            PrecheckReasonCode.PRECHECK_INVALID_STATE, "백업 레코드 결속 실패"
+        )
+
+    db.commit()
+    return BackupOutcome(record=record, created=True)
+
+
 # --- 실행 (Issue #211) ---------------------------------------------------------
 
 
@@ -1076,6 +1139,58 @@ def run_ebs_delete_unattached_execution(
     return ExecutionRunOutcome(succeeded=True, steps=outcome.steps)
 
 
+def run_sg_delete_isolated_execution(
+    db: Session, execution_id: str
+) -> ExecutionRunOutcome:
+    """`RUNBOOK_SG_DELETE_ISOLATED` 실행 — 백업 확보 → SG 삭제 → 결과 반환. (Issue #368)
+
+    순서가 계약이다. **전체 규칙 백업이 commit된 뒤에만 AWS 삭제가 시작된다**
+    (store_sg_full_rules_backup) — 지우고 나면 그 SG의 이름도 설명도 규칙도 AWS에 다시
+    물을 수 없어, 백업 없이 지운 SG는 되돌릴 수 없는 변경이 된다(ADR-0004 롤백 공통
+    정책 ③). 백업에 실패하면 삭제를 시작하지 않고 실패 결과로 돌아간다.
+
+    **대상 SG가 이미 없으면 여기서 실패로 끝난다** — 백업 캡처가 조회에 실패해
+    `PRECHECK_TARGET_NOT_FOUND`로 돌아오기 때문이다. EBS 삭제가 같은 상황을 성공으로
+    보는 것과 다른데(execute_ebs_delete_unattached), 그 차이는 **등록 롤백의 유무**다.
+    여기서 성공이라 적으면 백업 없는 SUCCESS가 남고, 그 실행은 관제자 복구 목록에
+    `SG_RECREATE`를 여는데(EXECUTION_RECOVERABLE_STATUSES) 되살릴 근거가 없어 그 원복은
+    반드시 실패한다 — 누를 수 있지만 반드시 실패하는 버튼을 세우지 않는다.
+
+    성공의 경계가 실행 안에 있다 — NACL 2종·EBS 삭제와 같다. 삭제는 원자적이고 뒤따르는
+    판정 축이 없으므로 dispatcher가 반환값으로 그 자리에서 확정한다. 판정
+    (judge_sg_delete_isolated)으로 오는 것은 실행 도중 끊긴 경우뿐이다.
+
+    종료 상태도 Incident 전이도 여기서 하지 않는다 — 확정은 close_execution 하나가 한다.
+    """
+    execution = executions_repo.get_execution(db, execution_id)
+    if execution is None:
+        raise ValueError(f"실행 레코드를 찾을 수 없습니다: {execution_id}")
+    if execution.runbook_id is not RunbookId.RUNBOOK_SG_DELETE_ISOLATED:
+        # 배선 오류다 — 런북마다 단계와 백업 종류가 다르다
+        raise ValueError(
+            f"SG_DELETE_ISOLATED 실행이 아닙니다: {execution.runbook_id.value}"
+        )
+    if execution.status is not ExecutionStatus.IN_PROGRESS:
+        # 끝난 실행을 다시 돌리면 백업 없는 두 번째 변경이 된다. 선점은 호출부
+        # (dispatcher.py) 몫이라 여기서는 상태만 본다.
+        raise ValueError(f"진행 중인 실행이 아닙니다: {execution.status.value}")
+
+    stored = store_sg_full_rules_backup(db, execution_id)
+    if not stored.stored:
+        return _run_failed(
+            stored.reason_code,
+            f"SG 전체 규칙 백업 실패: {stored.detail or ''}".strip(),
+        )
+
+    outcome = executor.execute_sg_delete_isolated(
+        execution.target_arn,
+        record_step=_step_recorder(db, execution_id),
+    )
+    if not outcome.succeeded:
+        return _run_failed(outcome.reason_code, outcome.error_summary, outcome.steps)
+    return ExecutionRunOutcome(succeeded=True, steps=outcome.steps)
+
+
 # --- 2/2 Status Check 판정 (Issue #240) -----------------------------------------
 
 
@@ -1522,6 +1637,76 @@ def judge_ebs_delete_unattached(db: Session, execution_id: str) -> ExecutionJudg
     )
 
 
+
+
+def judge_sg_delete_isolated(db: Session, execution_id: str) -> ExecutionJudgement:
+    """단계를 남긴 채 IN_PROGRESS인 SG 삭제 실행 1건의 종료 판정. (Issue #368)
+
+    여기로 오는 것은 **실행 도중 끊긴 삭제**뿐이다 — 삭제 호출이 5xx·연결 실패로 적용
+    여부를 알 수 없게 끝났거나 프로세스가 죽은 경우다. 정상 경로는 실행이 끝난 그
+    주기에 dispatcher가 반환값으로 확정한다. 판정 주체를 runner와 **짝으로** 두는 이유는
+    judge_nacl_add_deny와 같다(ADR-0008 §6).
+
+    **성공의 경계는 실자산이다** — 지금 그 SG가 있는지가 답한다. 단계 기록은 "어디까지
+    갔는가"만 말하고 "지워졌는가"는 말하지 못한다.
+
+    **이 런북은 `_AUTO_ROLLBACK_ON_ASSET_CHANGE`에 없다**(dispatcher.py). 짝
+    `SG_RECREATE`가 `HUMAN_ONLY`라 시스템이 스스로 발동할 수 없기 때문이며, 그래서
+    "적용 여부 불명확"이 가는 곳은 자동 원복이 아니라 이 현물 판정이다.
+
+    SG가 남아 있으면 삭제되지 않은 것이라 FAILED다. **자동으로 다시 지우지 않는다** —
+    재개 단위는 실행이고(ADR-0008 §7), 끊긴 삭제를 판정이 대신 이어 하면 판정이 실행이
+    된다. 자산이 그대로이므로 되돌릴 것도 남지 않는다.
+
+    조회하지 못하면 확정하지 않고 보류한다 — judge_ebs_delete_unattached와 같은 이유이며,
+    보류의 재시도·소진은 record_verification_failure가 처분한다(Issue #249).
+    """
+    execution = executions_repo.get_execution(db, execution_id)
+    if execution is None:
+        raise ValueError(f"실행 레코드를 찾을 수 없습니다: {execution_id}")
+    if execution.runbook_id is not RunbookId.RUNBOOK_SG_DELETE_ISOLATED:
+        raise ValueError(
+            f"SG_DELETE_ISOLATED 실행이 아닙니다: {execution.runbook_id.value}"
+        )
+    if execution.status is not ExecutionStatus.IN_PROGRESS:
+        raise ValueError(f"진행 중인 실행이 아닙니다: {execution.status.value}")
+
+    if execution.backup_record_id is None:
+        # 백업은 AWS 삭제 호출 이전에 commit된다 — 단계가 남았는데 결속이 없다면 이
+        # 경로가 만든 실행이 아니다. SG가 사라졌더라도 SUCCESS로 적으면 되살릴 근거
+        # 없는 복구 버튼이 서므로(EXECUTION_RECOVERABLE_STATUSES) 사람에게 넘긴다
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary="삭제 판정 불가: 결속된 백업 레코드를 찾을 수 없습니다",
+        )
+    target = parse_arn(execution.target_arn)
+    if target is None or target.resource_type != "security-group":
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary=f"보안 그룹 ARN이 아닙니다: {execution.target_arn}",
+        )
+
+    group, code = executor.current_security_group(target.resource_id, target.region)
+    if code is not None and code is not PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND:
+        # 자산 상태를 본 적이 없다 — 확정하면 검증기의 실패가 조치의 실패로 저장된다
+        return ExecutionJudgement(
+            defer_code=code,
+            defer_reason=f"{code.value}: 삭제 대상 보안 그룹 조회 실패로 판정 보류",
+        )
+    if group is None:
+        # InvalidGroup.NotFound — SG가 없다. 삭제가 적용된 것이다
+        return ExecutionJudgement(next_status=ExecutionStatus.SUCCESS)
+    logger.warning(
+        "sg_delete_incomplete",
+        extra={"execution_id": execution_id, "group_id": target.resource_id},
+    )
+    return ExecutionJudgement(
+        next_status=ExecutionStatus.FAILED,
+        error_summary=(
+            f"삭제 미완 — 보안 그룹 {target.resource_id}이 아직 있습니다."
+            " 자동 재시도 없이 수동 확인으로 전환합니다"
+        ),
+    )
 # --- 실행 종료 확정 (Issue #232) -------------------------------------------------
 
 
@@ -2456,6 +2641,278 @@ def judge_revert_size(db: Session, execution_id: str) -> ExecutionJudgement:
     )
 
 
+
+
+# --- SG 원복 (Issue #368) ---------------------------------------------------------
+
+
+def _sg_recreate_command_payload(
+    execution: models.ActionExecution,
+    record: models.BackupRecord,
+    evidence_ids: list[str],
+) -> dict:
+    """가드레일 ①에 넘길 SG 원복 실행 명령.
+
+    `_revert_command_payload`와 같은 규약이되 **자원 ID를 싣지 않는다.** 복원 대상은
+    백업 레코드가 가리키고 `SgRecreateParameters`에는 자원 ID 자리가 없다 — 원본 SG는
+    이미 지워졌고, 재생성 SG의 ID는 AWS가 실행 중에 발급하므로 명령이 나를 수 있는
+    값이 아니다. ④ precheck가 backup_record_id로 레코드를 다시 읽어 종류·대상까지
+    대조한다.
+    """
+    return {
+        "runbook_id": execution.runbook_id.value,
+        "target_arn": execution.target_arn,
+        "parameters": {
+            "backup_record_id": record.backup_record_id,
+            "evidence_id": evidence_ids[0],
+        },
+        "evidence_ids": evidence_ids,
+    }
+
+
+def run_sg_recreate_execution(db: Session, execution_id: str) -> ExecutionRunOutcome:
+    """`RUNBOOK_SG_RECREATE` 실행 — 백업 로드 → 가드레일 4단계 → 재생성. (Issue #368)
+
+    순서가 계약이다. **가드레일 4단계가 AWS 변경보다 먼저 끝난다**(ADR-0004 정책 ①).
+    거절이면 자산을 만지지 않고 실패로 돌아가며 자동 재시도는 없다(정책 ④).
+
+    **원복 값은 백업 레코드에서만 온다**(정책 ③). 이 함수가 읽는 것은 자기 행에 결속된
+    backup_record_id 하나이고 요청 페이로드도 후보도 보지 않는다 —
+    run_revert_size_execution과 같다.
+
+    `REVERT_SIZE`와 **다른 점이 둘**이다.
+
+      ① 이 원복은 `HUMAN_ONLY`다(ADR-0004 결정 표 · schemas.runbooks.
+         APPROVAL_MODE_BY_ROLLBACK_ID). 그래서 여기로 오는 실행은 **관제자가 누른 것**
+         뿐이고, 시스템 자동 발동은 애초에 열려 있지 않다(dispatcher.
+         _AUTO_ROLLBACK_ON_ASSET_CHANGE가 이 짝을 갖지 않는다).
+      ② 원본이 적용한 값을 읽지 않는다. `REVERT_SIZE`는 제3자 변경을 가리려고 원본의
+         목표 타입을 대조 축으로 읽지만(ADR-0008 §3-2), 삭제된 SG에는 대조할 현물이
+         없다 — 원본이 지웠다는 사실 자체가 대조 결과다.
+
+    종료 상태도 Incident 전이도 여기서 하지 않는다 — 확정은 close_execution 하나가 한다.
+    자식이 FAILED로 닫히면 원본이 ROLLBACK_FAILED로 확정된다(_settle_rollback_origin).
+    """
+    execution = executions_repo.get_execution(db, execution_id)
+    if execution is None:
+        raise ValueError(f"실행 레코드를 찾을 수 없습니다: {execution_id}")
+    if execution.runbook_id is not RunbookId.RUNBOOK_SG_RECREATE:
+        # 배선 오류다 — 런북마다 단계와 되돌릴 축이 다르다
+        raise ValueError(f"SG_RECREATE 실행이 아닙니다: {execution.runbook_id.value}")
+    if execution.status is not ExecutionStatus.IN_PROGRESS:
+        raise ValueError(f"진행 중인 실행이 아닙니다: {execution.status.value}")
+    if execution.parent_execution_id is None:
+        # 원복은 언제나 되돌릴 원본을 가리킨다 — 근거 ID를 그 원본에서 잇는다
+        raise ValueError(f"원본을 가리키지 않는 원복 실행입니다: {execution_id}")
+
+    target = parse_arn(execution.target_arn)
+    if target is None or target.resource_type != "security-group":
+        return _run_failed(
+            PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+            f"보안 그룹 ARN이 아닙니다: {execution.target_arn}",
+        )
+
+    record = (
+        executions_repo.get_backup_record(db, execution.backup_record_id)
+        if execution.backup_record_id is not None
+        else None
+    )
+    if record is None:
+        return _run_failed(
+            PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND,
+            "원복 근거 없음: 결속된 백업 레코드를 찾을 수 없습니다",
+        )
+    if record.backup_type != executor.BACKUP_SG_FULL_RULES:
+        return _run_failed(
+            PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+            f"백업 레코드 종류 불일치: {record.backup_type}",
+        )
+    restored = executor.sg_full_rules_backup(record.payload)
+    if restored is None:
+        # 계약을 벗어난 payload로 재생성하면 이름도 규칙도 원본과 다른 SG가 선다.
+        # 그것은 원복이 아니라 새 조치다 — 시작하지 않는다(ADR-0008 §5)
+        logger.critical(
+            "sg_backup_payload_invalid",
+            extra={
+                "execution_id": execution_id,
+                "backup_record_id": record.backup_record_id,
+            },
+        )
+        return _run_failed(
+            PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+            "원복 근거 없음: 백업 payload가 SG 복원 계약을 벗어났습니다",
+        )
+
+    origin = executions_repo.get_execution(db, execution.parent_execution_id)
+    if origin is None:
+        raise ValueError(f"원본 실행이 없습니다: {execution.parent_execution_id}")
+    evidence_ids = _rollback_evidence_ids(db, origin)
+    if not evidence_ids:
+        return _run_failed(
+            PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+            "원복 명령에 실을 근거 ID가 없습니다",
+        )
+
+    payload = _sg_recreate_command_payload(execution, record, evidence_ids)
+    guardrail = _run_rollback_guardrails(db, execution, payload)
+    if guardrail.command is None:
+        detail = _guardrail_rejection_summary(guardrail.result)
+        logger.critical(
+            "sg_recreate_guardrail_rejected",
+            extra={
+                "execution_id": execution_id,
+                "parent_execution_id": origin.execution_id,
+                "failed_step": (
+                    guardrail.result.failed_step.value
+                    if guardrail.result.failed_step is not None
+                    else None
+                ),
+            },
+        )
+        return _run_failed(PrecheckReasonCode.PRECHECK_INVALID_STATE, detail)
+
+    outcome = executor.execute_sg_recreate(
+        execution.target_arn,
+        backup=restored,
+        record_step=_step_recorder(db, execution_id),
+    )
+    if not outcome.succeeded:
+        return _run_failed(outcome.reason_code, outcome.error_summary, outcome.steps)
+    return ExecutionRunOutcome(succeeded=True, steps=outcome.steps)
+
+
+def judge_sg_recreate(db: Session, execution_id: str) -> ExecutionJudgement:
+    """단계를 남긴 채 IN_PROGRESS인 SG 원복 실행 1건의 종료 판정. (Issue #368, ADR-0008 §6)
+
+    여기로 오는 것은 **실행 도중 끊긴 원복**뿐이다. 정상 경로는 실행이 끝난 그 주기에
+    dispatcher가 확정한다. 자동 재시도를 하지 않는다는 것이 종료 판정을 하지 않는다는
+    뜻은 아니므로(ADR-0008 §6) 판정 주체를 runner와 짝으로 둔다.
+
+    **재생성 SG는 백업의 `group_name` + `vpc_id`로 찾는다.** 새 ID로 찾을 수 없기
+    때문이다 — 생성 직후 끊기면 AWS가 발급한 ID가 어디에도 기록되지 않는다. VPC 안에서
+    보안 그룹 이름은 유일하므로 이 둘이면 하나로 좁혀진다(executor.security_group_by_name).
+
+    **성공의 경계는 "규칙까지 백업과 같다"** 이다. 그룹이 섰다는 것만으로 성공이라 하면
+    **생성 → [중단]** 으로 끊긴 원복이 성공으로 확정되고, 그때 남는 것은 규칙이 하나도
+    없는 빈 SG이거나 전체 허용 egress만 달린 SG다 — 둘 다 원본이 아니다. 자식이
+    SUCCESS면 원본까지 ROLLED_BACK으로 닫혀 인시던트가 내려가고, 절반만 선 SG를 다시
+    볼 자리가 사라진다(judge_revert_size가 "타입은 돌아왔으나 멈춰 있다"를 가르는 것과
+    같은 이유).
+
+    규칙 대조는 **자기 참조를 새 ID로 바꾼 뒤** 한다 — 실행이 그렇게 주입했으므로
+    (executor._rebind_self_reference) 바꾸지 않고 대조하면 정상 복원이 불일치로 읽힌다.
+
+    **원복의 원복은 없다**(ADR-0008 §6). 미완이면 FAILED로 두고 사람에게 넘기며, 그
+    확정이 원본을 ROLLBACK_FAILED로 옮긴다(_settle_rollback_origin).
+
+    조회하지 못하면 확정하지 않고 보류한다(Issue #249).
+    """
+    execution = executions_repo.get_execution(db, execution_id)
+    if execution is None:
+        raise ValueError(f"실행 레코드를 찾을 수 없습니다: {execution_id}")
+    if execution.runbook_id is not RunbookId.RUNBOOK_SG_RECREATE:
+        raise ValueError(f"SG_RECREATE 실행이 아닙니다: {execution.runbook_id.value}")
+    if execution.status is not ExecutionStatus.IN_PROGRESS:
+        raise ValueError(f"진행 중인 실행이 아닙니다: {execution.status.value}")
+
+    record = (
+        executions_repo.get_backup_record(db, execution.backup_record_id)
+        if execution.backup_record_id is not None
+        else None
+    )
+    if record is None:
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary="원복 판정 불가: 결속된 백업 레코드를 찾을 수 없습니다",
+        )
+    target = parse_arn(execution.target_arn)
+    if target is None or target.resource_type != "security-group":
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary=f"보안 그룹 ARN이 아닙니다: {execution.target_arn}",
+        )
+    expected = executor.sg_full_rules_backup(record.payload)
+    if expected is None:
+        logger.critical(
+            "sg_backup_payload_invalid",
+            extra={
+                "execution_id": execution_id,
+                "backup_record_id": record.backup_record_id,
+            },
+        )
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary="원복 판정 불가: 백업 payload가 SG 복원 계약을 벗어났습니다",
+        )
+
+    group, code = executor.security_group_by_name(
+        expected.group_name, expected.vpc_id, target.region
+    )
+    if code is not None:
+        # 자산 상태를 본 적이 없다 — 확정하면 검증기의 실패가 원복의 실패로 저장된다
+        return ExecutionJudgement(
+            defer_code=code,
+            defer_reason=f"{code.value}: 재생성 보안 그룹 조회 실패로 판정 보류",
+        )
+    if group is None:
+        logger.critical(
+            "sg_recreate_incomplete",
+            extra={"execution_id": execution_id, "group_name": expected.group_name},
+        )
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary=(
+                f"원복 미완 — 보안 그룹 {expected.group_name}이 재생성되지 않았습니다."
+                " 자동 재시도 없이 수동 개입으로 전환합니다"
+            ),
+        )
+
+    new_group_id = str(group.get("GroupId") or "")
+    rebound = {
+        "IpPermissions": executor.rebind_self_reference(
+            expected.ingress_permissions,
+            original_group_id=expected.group_id,
+            new_group_id=new_group_id,
+        ),
+        "IpPermissionsEgress": executor.rebind_self_reference(
+            expected.egress_permissions,
+            original_group_id=expected.group_id,
+            new_group_id=new_group_id,
+        ),
+    }
+    mismatched = [
+        label
+        for key, label in (
+            ("IpPermissions", "인바운드"),
+            ("IpPermissionsEgress", "아웃바운드"),
+        )
+        if not executor.sg_permissions_match(group.get(key), rebound[key])
+    ]
+    if mismatched:
+        logger.critical(
+            "sg_recreate_rules_incomplete",
+            extra={
+                "execution_id": execution_id,
+                "group_id": new_group_id,
+                "mismatched": ",".join(mismatched),
+            },
+        )
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary=(
+                f"원복 미완 — 재생성 SG {new_group_id}의 {' · '.join(mismatched)} 규칙이"
+                " 백업과 다릅니다. 자동 재시도 없이 수동 개입으로 전환합니다"
+            ),
+        )
+    logger.info(
+        "sg_recreate_verified",
+        extra={
+            "execution_id": execution_id,
+            "original_group_id": expected.group_id,
+            "new_group_id": new_group_id,
+        },
+    )
+    return ExecutionJudgement(next_status=ExecutionStatus.SUCCESS)
 # --- AI 분석 결과 저장·전이 (Issue #285) ------------------------------------------
 #
 # agent_dispatcher가 그래프를 부르고 계약 검증까지 마친 출력 1건을 여기서 저장한다.
