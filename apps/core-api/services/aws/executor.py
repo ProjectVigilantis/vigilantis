@@ -2116,6 +2116,23 @@ def current_security_group(group_id: str, region: str):
     return _security_group(group_id, region)
 
 
+def escape_filter_value(value: str) -> str:
+    """EC2 필터 값을 **글자 그대로** 찾도록 와일드카드 문자를 이스케이프한다.
+
+    EC2 필터는 값에 든 `*`(0자 이상)와 `?`(0–1자)를 와일드카드로 해석하고, 앞에 붙인
+    백슬래시가 그 해석을 끈다(EC2 User Guide — Using_Filtering §Wildcards). 그런데
+    **보안 그룹 이름에는 `*`를 쓸 수 있어**(CreateSecurityGroup 유효 문자) 이름을 그대로
+    넣으면 필터가 이름이 아니라 패턴이 된다 — `prod-*`로 찾으면 `prod-api`가 잡힌다.
+
+    백슬래시를 **먼저** 바꾼다. 나중에 바꾸면 `*`를 이스케이프하며 넣은 백슬래시까지
+    한 번 더 이스케이프돼, 이스케이프가 백슬래시 자신에게 걸리고 `*`는 다시 와일드카드로
+    풀린다.
+    """
+    for char in ("\\", "*", "?"):
+        value = value.replace(char, "\\" + char)
+    return value
+
+
 def security_group_by_name(group_name: str, vpc_id: str, region: str):
     """(보안 그룹, 사유 코드) 짝 — 이름과 VPC로 찾는다. 없으면 둘 다 None.
 
@@ -2125,6 +2142,15 @@ def security_group_by_name(group_name: str, vpc_id: str, region: str):
     보안 그룹 이름은 유일하므로 이 둘이면 하나로 좁혀진다(CreateSecurityGroup API 문서 —
     같은 VPC에 같은 이름을 만들면 InvalidGroup.Duplicate).
 
+    **이름은 필터에 그대로 넣지 않고, 돌아온 것도 그대로 믿지 않는다.** 필터 값은
+    이스케이프해 보내고(escape_filter_value), 돌아온 `GroupName`·`VpcId`가 찾던 값과
+    글자 그대로 같은 것만 고른다. 둘 중 하나만 해도 이 조회는 **다른 SG를 재생성된 SG로
+    착각할 수 있다** — 그러면 복원된 것이 없어도 원복이 SUCCESS로, 원본이 ROLLED_BACK으로
+    확정되고 절반만 선 SG를 다시 볼 자리가 사라진다(PR #399 리뷰).
+
+    **첫 결과가 아니라 일치하는 결과를 고른다.** 유사 이름이 섞여 돌아올 때 찾던 SG가
+    목록 뒤에 있으면, 앞만 보는 조회는 있는 것을 없다고 답한다.
+
     이름 필터는 없는 이름에 오류를 내지 않고 **빈 목록**을 준다. 그래서 대상 부재는
     사유 코드가 아니라 (None, None)이다 — current_nacl_entry가 빈 슬롯을 다루는 것과
     같은 결이며, "못 찾았다"와 "못 물어봤다"를 섞지 않는다.
@@ -2132,14 +2158,15 @@ def security_group_by_name(group_name: str, vpc_id: str, region: str):
     res, code = _call(
         aws_client("ec2", region).describe_security_groups,
         Filters=[
-            {"Name": "group-name", "Values": [group_name]},
-            {"Name": "vpc-id", "Values": [vpc_id]},
+            {"Name": "group-name", "Values": [escape_filter_value(group_name)]},
+            {"Name": "vpc-id", "Values": [escape_filter_value(vpc_id)]},
         ],
     )
     if code is not None:
         return None, code
     for group in res.get("SecurityGroups", []):
-        return group, None
+        if group.get("GroupName") == group_name and group.get("VpcId") == vpc_id:
+            return group, None
     return None, None
 
 

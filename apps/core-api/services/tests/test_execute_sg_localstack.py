@@ -8,8 +8,8 @@
 시드를 지우면 다음 스캔·다른 테스트가 그 자산을 잃는다. 이 파일이 자기 SG를 만들어 쓰고,
 실패해도 남지 않게 정리한다(test_execute_ebs_localstack.py와 같은 이유).
 
-전제 실측(2026-09-22 LocalStack Community) — 이 카드 착수 첫 단계에서 이슈 #368이 지목한
-두 항목을 쟀다.
+전제 실측(2026-09-22 LocalStack Community) — ①②는 이 카드 착수 첫 단계에서 이슈 #368이
+지목한 두 항목이고, ③은 리뷰에서 지적된 뒤 추가로 쟀다.
 
   ① `create_security_group`의 **기본 egress 자동 부착**: 실 AWS와 같다. 생성 직후
      `IpPermissionsEgress`가 전체 허용 1건이고, 같은 규칙을 다시 주입하면
@@ -18,6 +18,9 @@
      SG도, 다른 SG 규칙이 참조하는 SG도 그냥 지워진다. 그래서 그 갈래는 여기서 재현할 수
      없고 단위 테스트가 거절을 주입해 고정한다(test_execute_sg.py) — 실물 확인은 10/6(화)
      실 AWS 스모크 몫이다(ADR-0006 §4 이월 목록).
+  ③ **필터 값의 와일드카드**(2026-09-22 추가 실측 · PR #399 리뷰): 실 AWS와 같다. 이름에
+     `*`가 든 SG를 만들 수 있고, 그 이름을 그대로 필터에 넣으면 유사 이름까지 잡히며,
+     백슬래시로 이스케이프하면 정확히 하나로 좁혀진다. 아래 테스트가 그대로 확인한다.
 
 그 밖에 확인한 것: 삭제 뒤 조회는 `InvalidGroup.NotFound`, `group-name` + `vpc-id` 필터
 조회 동작, 자기 참조 규칙이 `UserIdGroupPairs`에 `{UserId, GroupId}`로 담기는 것.
@@ -303,3 +306,48 @@ def test_finding_a_group_by_name_returns_nothing_instead_of_an_error(scratch_gro
     )
 
     assert group is None and code is None
+
+
+def test_a_wildcard_in_the_name_does_not_widen_the_lookup():
+    """SG 이름에 쓸 수 있는 `*`는 필터에서 **와일드카드로 풀린다** — LocalStack이 이
+    갈래를 실 AWS와 같게 동작시킨다(2026-09-22 실측).
+
+    이름을 그대로 필터에 넣으면 `...-*`가 `...-api`까지 잡고, 그 SG의 규칙이 백업과 같으면
+    **복원된 것이 없어도 원복이 SUCCESS로, 원본이 ROLLED_BACK으로 확정된다.** 여기서는 그
+    덫이 실재하는 것(날 필터가 둘을 잡는 것)과 조회가 거기 걸리지 않는 것을 함께 본다.
+    (PR #399 리뷰)
+    """
+    ec2 = aws_client("ec2")
+    region = default_region()
+    vpc_id = ec2.describe_vpcs()["Vpcs"][0]["VpcId"]
+    stem = f"vigilantis-test-sg-{uuid.uuid4().hex[:8]}"
+    group_ids = {}
+    try:
+        for suffix in ("*", "api"):
+            group_ids[suffix] = ec2.create_security_group(
+                GroupName=f"{stem}-{suffix}",
+                Description="vigilantis sg name filter test",
+                VpcId=vpc_id,
+            )["GroupId"]
+
+        # 이스케이프하지 않은 필터는 둘 다 잡는다 — 이 조회가 막는 대상이 실재한다
+        raw = ec2.describe_security_groups(
+            Filters=[
+                {"Name": "group-name", "Values": [f"{stem}-*"]},
+                {"Name": "vpc-id", "Values": [vpc_id]},
+            ]
+        )["SecurityGroups"]
+        assert {g["GroupId"] for g in raw} == set(group_ids.values())
+
+        group, code = ex.security_group_by_name(f"{stem}-*", vpc_id, region)
+
+        assert code is None
+        assert group["GroupId"] == group_ids["*"]
+
+        # 유사 이름만 남으면 찾지 못해야 한다 — 여기서 잘못 찾으면 원복이 헛성공한다
+        _delete_quietly(ec2, group_ids.pop("*"))
+
+        assert ex.security_group_by_name(f"{stem}-*", vpc_id, region) == (None, None)
+    finally:
+        for group_id in group_ids.values():
+            _delete_quietly(ec2, group_id)

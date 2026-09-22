@@ -2791,6 +2791,9 @@ def judge_sg_recreate(db: Session, execution_id: str) -> ExecutionJudgement:
     **재생성 SG는 백업의 `group_name` + `vpc_id`로 찾는다.** 새 ID로 찾을 수 없기
     때문이다 — 생성 직후 끊기면 AWS가 발급한 ID가 어디에도 기록되지 않는다. VPC 안에서
     보안 그룹 이름은 유일하므로 이 둘이면 하나로 좁혀진다(executor.security_group_by_name).
+    그 조회는 **이름이 글자 그대로 같은 SG만** 돌려준다 — 이름에 쓸 수 있는 `*`가 필터에서
+    와일드카드로 풀려 유사 이름의 다른 SG가 잡히면, 복원된 것이 없어도 여기서 SUCCESS가
+    나고 원본까지 ROLLED_BACK으로 닫힌다(PR #399 리뷰).
 
     **성공의 경계는 "규칙까지 백업과 같다"** 이다. 그룹이 섰다는 것만으로 성공이라 하면
     **생성 → [중단]** 으로 끊긴 원복이 성공으로 확정되고, 그때 남는 것은 규칙이 하나도

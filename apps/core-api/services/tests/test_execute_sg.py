@@ -2,7 +2,7 @@
 
 AWS 불필요 — boto3 클라이언트를 가짜로 갈아 끼우고 **단계 순서와 effect**를 본다.
 
-이 파일이 지키는 것은 셋이다.
+이 파일이 지키는 것은 넷이다.
 
   ① 삭제가 `DependencyViolation`으로 거절되면 `effect=NOT_APPLIED`다. **LocalStack은 이
      거절을 흉내 내지 않으므로**(2026-09-22 실측 — ENI에 붙은 SG도 다른 SG가 참조하는
@@ -12,6 +12,9 @@ AWS 불필요 — boto3 클라이언트를 가짜로 갈아 끼우고 **단계 �
      무관하게 항상 거친다.
   ③ 자기 참조 규칙만 새 ID로 바뀌고 다른 SG를 가리키는 쌍은 그대로다 — 바꾸면 원본이
      허용하지 않던 통신을 우리가 여는 것이 된다.
+  ④ 재생성 SG 조회가 **이름이 글자 그대로 같은 SG만** 고른다. 유사 이름을 고르면 복원된
+     것이 없어도 원복이 성공으로 닫힌다 — LocalStack이 필터 와일드카드를 실 AWS와 같게
+     해석하는지에 기대지 않으려고 이 축도 여기서 고정한다.
 
 LocalStack 실물 왕복(삭제 → 원복)은 test_execute_sg_localstack.py가 맡는다.
 """
@@ -438,3 +441,83 @@ def test_permissions_match_handles_rules_without_ports():
 def test_permissions_match_on_empty_lists():
     assert ex.sg_permissions_match([], [])
     assert not ex.sg_permissions_match([SSH_FROM_BASTION], [])
+
+
+# ------------------------------------------------------------------ 재생성 SG 조회
+#
+# 종료 판정이 재생성 SG를 찾는 조회다(workflows.judge_sg_recreate). **여기서 다른 SG를
+# 고르면 복원된 것이 없어도 원복이 SUCCESS로, 원본이 ROLLED_BACK으로 확정된다** — 절반만
+# 선 SG를 다시 볼 자리가 사라진다. SG 이름에는 `*`를 쓸 수 있고(CreateSecurityGroup 유효
+# 문자) EC2 필터는 그것을 와일드카드로 읽으므로(Using_Filtering §Wildcards), 이름을 그대로
+# 보내면 `prod-*`가 `prod-api`를 잡는다. (PR #399 리뷰)
+
+WILDCARD_NAME = "prod-*"
+SIMILAR_GROUP = {
+    "GroupId": OTHER_GROUP,
+    "GroupName": "prod-api",
+    "VpcId": VPC,
+    "IpPermissions": [],
+    "IpPermissionsEgress": [],
+}
+EXACT_GROUP = {
+    "GroupId": NEW_GROUP,
+    "GroupName": WILDCARD_NAME,
+    "VpcId": VPC,
+    "IpPermissions": [],
+    "IpPermissionsEgress": [],
+}
+
+
+def by_name(aws, *groups, name=WILDCARD_NAME, vpc_id=VPC):
+    aws(describe_security_groups={"SecurityGroups": [dict(g) for g in groups]})
+    return ex.security_group_by_name(name, vpc_id, REGION)
+
+
+def test_lookup_sends_the_group_name_escaped(aws):
+    """이름을 그대로 보내면 필터가 이름이 아니라 패턴이 된다."""
+    by_name(aws, EXACT_GROUP)
+
+    assert kwargs_of(aws, "describe_security_groups")[0]["Filters"] == [
+        {"Name": "group-name", "Values": ["prod-\\*"]},
+        {"Name": "vpc-id", "Values": [VPC]},
+    ]
+
+
+def test_escaping_covers_the_backslash_itself():
+    """백슬래시를 나중에 바꾸면 이스케이프가 백슬래시에 걸리고 `*`가 다시 풀린다."""
+    assert ex.escape_filter_value("a\\b*c?") == "a\\\\b\\*c\\?"
+
+
+def test_lookup_does_not_take_a_similar_name_for_the_recreated_group(aws):
+    """유사 이름만 있을 때 성공하지 않는다 — 이스케이프가 풀려도 여기서 걸린다."""
+    group, code = by_name(aws, SIMILAR_GROUP)
+
+    assert group is None and code is None
+
+
+def test_lookup_finds_the_exact_match_behind_other_results(aws):
+    """첫 결과만 보면 찾던 SG가 목록 뒤에 있을 때 있는 것을 없다고 답한다."""
+    group, code = by_name(aws, SIMILAR_GROUP, EXACT_GROUP)
+
+    assert code is None
+    assert group["GroupId"] == NEW_GROUP
+
+
+def test_lookup_requires_the_same_vpc(aws):
+    """이름은 VPC 안에서만 유일하다 — 다른 VPC의 같은 이름은 그 SG가 아니다."""
+    elsewhere = {**EXACT_GROUP, "GroupId": OTHER_GROUP, "VpcId": "vpc-0999888877776666a"}
+
+    group, code = by_name(aws, elsewhere)
+
+    assert group is None and code is None
+
+
+def test_lookup_separates_a_missing_group_from_a_failed_call(aws):
+    """대상 부재는 사유 코드 없이, 조회 실패는 사유 코드로 나온다 — 뒤엣것은 판정을
+    확정하지 않고 보류시킨다(workflows.judge_sg_recreate)."""
+    aws(describe_security_groups=EndpointConnectionError(endpoint_url="https://ec2"))
+
+    group, code = ex.security_group_by_name(WILDCARD_NAME, VPC, REGION)
+
+    assert group is None
+    assert code is R.PRECHECK_AWS_ERROR
