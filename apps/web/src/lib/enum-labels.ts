@@ -236,6 +236,7 @@ export const SPEC_KEY_LABELS: Record<string, string> = {
   port: '포트',
   target_type: '대상 유형',
   health_check_path: '헬스 체크 경로',
+  tags: '태그',
 };
 
 /**
