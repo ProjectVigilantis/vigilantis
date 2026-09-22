@@ -56,6 +56,7 @@ for _p in (str(_REPO_ROOT / "apps" / "core-api"), str(_REPO_ROOT / "packages")):
 
 from botocore.exceptions import ClientError  # noqa: E402
 
+from schemas.asset_roles import ROLE_ISOLATION, ROLE_TAG_KEY  # noqa: E402
 from schemas.rightsizing_policy import rightsizing_target_type  # noqa: E402
 
 # 리전·엔드포인트·자격증명 해석과 클라이언트 생성의 단일 원천(ADR-0006 §3, Issue #128).
@@ -71,10 +72,9 @@ INIT_TAG_KEY = "vigilantis:smoke-init"
 INIT_PENDING = "pending"
 INIT_DONE = "done"
 # 자원이 맡은 자리를 판정 규칙에 알리는 표지. 격리용 SG는 격리 전까지 어디에도 붙지 않아
-# evaluate_sg가 UNUSED(삭제 후보)로 보는데, 이름·규칙 수로 가리는 것은 추정이라 태그로 가둔다.
-# 값의 뜻(어느 role을 판정에서 빼는가)은 규칙 쪽이 정한다 — 여기는 자리만 선언한다(#348 리뷰).
-ROLE_TAG_KEY = "vigilantis:role"
-ROLE_ISOLATION = "isolation"
+# 태그가 없으면 evaluate_sg가 UNUSED(삭제 후보)로 보는데, 이름·규칙 수로 가리는 것은 추정이라
+# 태그로 가둔다. 값의 뜻(어느 role을 판정에서 빼는가)은 규칙 쪽이 정한다 — 여기는 자리만
+# 선언한다(#348 리뷰). 문자열은 규칙과 같은 단일 원천(schemas.asset_roles)에서 가져온다(#359).
 
 VPC_NAME = f"{PREFIX}-vpc"
 VPC_CIDR = "10.42.0.0/16"  # 기본 VPC(172.31.0.0/16)와 겹치지 않게
