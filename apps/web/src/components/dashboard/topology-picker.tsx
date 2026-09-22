@@ -25,20 +25,34 @@ import type { AssetItem } from '@/types/api';
 const BADGE = 'shrink-0 px-1 py-0 text-[10px] font-normal';
 
 /**
- * 공격 경로 표시. **판정 배지가 아니다** — 판정은 규칙 엔진이 자산에 내린 것이고 이것은
- * 인시던트 계약(`threat_context`)에서 온 경로 수라, 사전(§3.2)의 배지 어휘를 빌리지 않는다.
+ * 이 자산으로 들어오는 **외부 출발지 경로** 수. **판정 배지가 아니다** — 판정은 규칙 엔진이
+ * 자산에 내린 것이고 이것은 인시던트 계약(`threat_context`)에서 온 경로 수라, 사전(§3.2)의
+ * 배지 어휘를 빌리지 않는다. 색은 `THREAT`와 같은 `--danger` 하나만 쓴다(§0.3).
  *
  * 그래프는 한 번에 EC2 한 대만 그리므로 **고르기 전에는 그 대에 들어오는 경로가 보이지 않는다.**
- * 이 표시가 그 자리를 메운다 — 어느 줄을 골라야 공격 경로가 그려지는지 목록이 말해 준다.
+ * 이 표시가 그 자리를 메운다 — 어느 줄을 골라야 그 경로가 그려지는지 목록이 말해 준다.
+ *
+ * **`공격 N`이라고 적지 않는다**(PR #398 리뷰). 이 수에는 실제로 **관측된** SSH 시도와, 보안 그룹
+ * 규칙이 **허용만 한** 대역(`OPEN_IP`의 `exposed_cidr`)이 함께 들어 있다 — `0.0.0.0/0`은 전부
+ * 열렸다는 뜻이지 누가 들어왔다는 뜻이 아니어서, `공격`으로 적으면 목록이 계약에 없는 사실을
+ * 주장한다. 그래서 둘을 함께 덮는 말로 두고, 문구는 그래프 열 이름(`외부 출발지 (인터넷)`)과
+ * 같은 어휘를 쓴다.
+ *
+ * **관측·노출 구분은 툴팁이 맡는다.** 이 목록 칸은 240px뿐이고 줄에는 이름과 판정 배지가 함께
+ * 서므로, 문구를 늘리거나 유형별로 칸을 나누면 그만큼 **이름이 잘린다**(실측: 같은 줄에서 이름이
+ * `위협 경로 N` 한 칸은 52px, `관측 N`·`노출 N` 두 칸은 30px, 지금 형태는 73px). 대신 그래프
+ * 노드는 두 의미를 문구로 갈라 그리므로, 고른 뒤에는 화면이 그 차이를 말한다.
  */
 function ThreatMark({ paths }: { paths: readonly ThreatPath[] }) {
   if (paths.length === 0) return null;
   return (
     <span
       className="text-danger border-danger shrink-0 rounded border px-1 text-[10px] whitespace-nowrap"
-      title={paths.map((p) => `${p.source} → ${p.eventType}`).join(' · ')}
+      title={`외부 출발지 ${paths.length}건 — ${paths
+        .map((p) => `${p.observed ? '관측 출발지' : '노출 대역'} ${p.source} (${p.eventType})`)
+        .join(' · ')}`}
     >
-      공격 <span className="tabular-nums">{paths.length}</span>
+      외부 <span className="tabular-nums">{paths.length}</span>
     </span>
   );
 }
