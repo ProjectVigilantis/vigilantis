@@ -105,11 +105,13 @@ class IntakeOutcome:
     incident_id: str
     created: bool          # False = 중복이라 기존 Incident를 그대로 돌려줬다
     occurred_at: datetime  # 저장된 Incident.updated_at — WS 봉투의 occurred_at
+    category: IncidentCategory  # 저장된 Incident.category — INCIDENT_CREATED data의 category
 
 
 def _existing(incident: models.Incident) -> IntakeOutcome:
     return IntakeOutcome(
-        incident_id=incident.incident_id, created=False, occurred_at=incident.updated_at
+        incident_id=incident.incident_id, created=False, occurred_at=incident.updated_at,
+        category=incident.category,
     )
 
 
@@ -224,7 +226,8 @@ def _create_finops(db: Session, intake: FinOpsIncidentIntake) -> IntakeOutcome:
         )
     db.commit()
     return IntakeOutcome(
-        incident_id=incident.incident_id, created=True, occurred_at=incident.updated_at
+        incident_id=incident.incident_id, created=True, occurred_at=incident.updated_at,
+        category=incident.category,
     )
 
 
@@ -288,7 +291,8 @@ def _create_secops(db: Session, intake: SecOpsIncidentIntake) -> IntakeOutcome:
     )
     db.commit()
     return IntakeOutcome(
-        incident_id=incident.incident_id, created=True, occurred_at=incident.updated_at
+        incident_id=incident.incident_id, created=True, occurred_at=incident.updated_at,
+        category=incident.category,
     )
 
 

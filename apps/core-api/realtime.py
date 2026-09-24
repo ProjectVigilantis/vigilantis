@@ -27,9 +27,9 @@ from typing import Optional
 from fastapi import WebSocket
 
 from schemas.api.actions import ExecutionStatus
+from schemas.api.incidents import IncidentCategory
 from schemas.api.ws import (
     ExecutionEventData,
-    IncidentEventData,
     WsEvent,
     WsEventType,
 )
@@ -38,15 +38,26 @@ logger = logging.getLogger("vigilantis.realtime")
 
 
 def incident_event(
-    event_type: WsEventType, *, incident_id: str, occurred_at: datetime
+    event_type: WsEventType,
+    *,
+    incident_id: str,
+    occurred_at: datetime,
+    category: Optional[IncidentCategory] = None,
 ) -> WsEvent:
     """INCIDENT_CREATED·INCIDENT_UPDATED 봉투. occurred_at은 새 시각을 만들지 않고
-    호출부 트랜잭션에서 저장된 Incident.updated_at을 받는다."""
+    호출부 트랜잭션에서 저장된 Incident.updated_at을 받는다.
+
+    category는 INCIDENT_CREATED에만 싣는다(저장된 Incident.category). data 모델은
+    계약(schemas/api/ws.py)이 이벤트 종류로 고르므로, 생성인데 category가 없거나
+    수정인데 category가 오면 봉투 검증이 거부한다."""
+    data: dict = {"incident_id": incident_id}
+    if category is not None:
+        data["category"] = category
     return WsEvent(
         event_id=uuid.uuid4().hex,
         event_type=event_type,
         occurred_at=occurred_at,
-        data=IncidentEventData(incident_id=incident_id),
+        data=data,
     )
 
 

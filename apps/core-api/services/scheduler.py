@@ -143,6 +143,7 @@ def run_pipeline(publish: Callable[[WsEvent], None] | None = None) -> dict:
                     WsEventType.INCIDENT_CREATED,
                     incident_id=outcome.incident_id,
                     occurred_at=outcome.occurred_at,
+                    category=outcome.category,
                 ))
 
         # ARN 조인 무결성 점검 — 자산을 가리키는 키가 assets.arn 과 어긋나거나 자산 리전이

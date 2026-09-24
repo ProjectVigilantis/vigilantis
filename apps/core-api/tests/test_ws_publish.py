@@ -9,7 +9,11 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
+import pytest
+from pydantic import ValidationError
+
 from schemas.api.actions import ExecutionStatus
+from schemas.api.incidents import IncidentCategory
 from schemas.api.ws import WsEventType
 
 from realtime import execution_event, incident_event
@@ -21,7 +25,8 @@ def test_incident_event_reaches_connected_client(client):
     manager = client.app.state.realtime
     with client.websocket_connect("/api/v1/ws") as ws:
         event = incident_event(
-            WsEventType.INCIDENT_CREATED, incident_id="inc-1", occurred_at=T0
+            WsEventType.INCIDENT_CREATED, incident_id="inc-1", occurred_at=T0,
+            category=IncidentCategory.FINOPS,
         )
         manager.publish(event)
         received = json.loads(ws.receive_text())
@@ -29,8 +34,18 @@ def test_incident_event_reaches_connected_client(client):
         "event_id": event.event_id,
         "event_type": "INCIDENT_CREATED",
         "occurred_at": "2026-08-19T09:30:00Z",
-        "data": {"incident_id": "inc-1"},
+        "data": {"incident_id": "inc-1", "category": "FINOPS"},
     }
+
+
+@pytest.mark.parametrize(("event_type", "category"), [
+    (WsEventType.INCIDENT_CREATED, None),  # 생성인데 트랙이 없다
+    (WsEventType.INCIDENT_UPDATED, IncidentCategory.FINOPS),  # 수정 이벤트에 트랙
+])
+def test_incident_event_rejects_category_mismatch(event_type, category):
+    # 빌더가 category를 조용히 버리거나 비워 보내지 않는다 — 계약 모델이 거부한다
+    with pytest.raises(ValidationError):
+        incident_event(event_type, incident_id="inc-4", occurred_at=T0, category=category)
 
 
 def test_execution_event_carries_status_and_updated_at(client):
@@ -73,7 +88,10 @@ def test_all_connections_receive_same_event(client):
 def test_publish_with_no_connections_is_noop(client):
     manager = client.app.state.realtime
     manager.publish(
-        incident_event(WsEventType.INCIDENT_CREATED, incident_id="inc-3", occurred_at=T0)
+        incident_event(
+            WsEventType.INCIDENT_CREATED, incident_id="inc-3", occurred_at=T0,
+            category=IncidentCategory.SECOPS,
+        )
     )  # 수신자 0 — 예외 없이 지나가야 한다
 
 
@@ -82,7 +100,8 @@ def test_publish_log_reads_identifiers_from_event(client, capsys):
     with client.websocket_connect("/api/v1/ws") as ws:
         manager.publish(
             incident_event(
-                WsEventType.INCIDENT_CREATED, incident_id="inc-log", occurred_at=T0
+                WsEventType.INCIDENT_CREATED, incident_id="inc-log", occurred_at=T0,
+                category=IncidentCategory.SECOPS,
             )
         )
         ws.receive_text()

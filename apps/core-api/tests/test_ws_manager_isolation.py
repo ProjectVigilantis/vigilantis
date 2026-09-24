@@ -16,13 +16,16 @@ import pytest
 from config import Settings
 from pydantic import ValidationError
 from realtime import RealtimeManager, incident_event
+from schemas.api.incidents import IncidentCategory
 from schemas.api.ws import WsEventType
 
 T0 = datetime(2026, 8, 19, 10, 0, 0, tzinfo=UTC)
 
 
 def _ev(incident_id: str, event_type: WsEventType = WsEventType.INCIDENT_CREATED):
-    return incident_event(event_type, incident_id=incident_id, occurred_at=T0)
+    # 생성 이벤트만 트랙을 싣는다(schemas/api/ws.py)
+    category = IncidentCategory.SECOPS if event_type is WsEventType.INCIDENT_CREATED else None
+    return incident_event(event_type, incident_id=incident_id, occurred_at=T0, category=category)
 
 
 def _logs(caplog, message: str) -> list:

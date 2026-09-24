@@ -21,7 +21,7 @@ import incident_intake
 from db import models
 from db.repositories import assets as assets_repo
 from db.repositories import incidents as incidents_repo
-from schemas.api.incidents import IncidentStatus
+from schemas.api.incidents import IncidentCategory, IncidentStatus
 from schemas.api.ws import WsEventType
 from schemas.assets import AssetInventory
 from schemas.evidence import EvidenceType
@@ -78,6 +78,8 @@ def test_pipeline_creates_only_finops_and_preserves_first_detection_on_rescan(
     assert len(events) == len(expected)
     assert all(e.event_type is WsEventType.INCIDENT_CREATED for e in events)
     assert {e.data.incident_id for e in events} == {item.incident_id for item in incidents}
+    # 생성 알림은 저장된 트랙을 싣는다 — FE가 자산 건에 보안 위협 제목을 붙이지 않게
+    assert all(e.data.category is IncidentCategory.FINOPS for e in events)
 
     first_inputs = {}
     for item in incidents:
