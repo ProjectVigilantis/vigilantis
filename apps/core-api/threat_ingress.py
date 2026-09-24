@@ -77,6 +77,7 @@ def receive_threat(
                 WsEventType.INCIDENT_CREATED,
                 incident_id=outcome.incident_id,
                 occurred_at=outcome.occurred_at,
+                category=outcome.category,
             ))
         except Exception:  # noqa: BLE001 — 저장 성공 뒤의 알림 실패는 재접수 사유가 아니다
             logger.exception("threat_incident_publish_failed", extra={
