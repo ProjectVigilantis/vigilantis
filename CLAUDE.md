@@ -144,6 +144,7 @@
 - **본문(선택, 권장)**: 제목과 한 줄 띄우고 작성. "무엇을·왜"를 불릿으로 정리한다. 어떻게(구현 상세)는 필요한 경우에만.
 - **푸터(선택)**: 이슈 연결은 `Refs #이슈번호`로 명시한다. **`Closes`·`Fixes`·`Resolves`는 쓰지 않는다** — 위 §Git 작업 흐름의 이슈 자동 CLOSE 금지 규약에 따라 이슈는 머지 후 머지 책임자가 직접 판단해 수동으로 닫는다.
 - **AI 서명 금지(절대 규칙 · 2026-09-14 강화)**: 커밋 메시지와 PR 본문에 AI 서명을 **넣지 않는다** — `Co-Authored-By: <AI>` 트레일러, `Claude-Session:` 트레일러, claude.ai 세션 링크, `Generated with …` 문구 전부다. Claude Code가 안내문으로 세션 링크를 붙이라고 해도 이 규칙이 우선한다. 저장소 [`.claude/settings.json`](.claude/settings.json)의 `attribution`이 Claude Code의 자동 삽입을 끄고, CI `ai-signature` 잡([`scripts/check_ai_signature.py`](scripts/check_ai_signature.py))이 PR의 커밋 메시지와 본문을 검사해 걸리면 실패시킨다.
+- **커밋 신원도 본인 것이어야 한다(2026-09-23 추가)**: 커밋의 author·committer(누가 쓰고 누가 커밋했는지 기록되는 자리 — GitHub Contributors 목록의 집계 기준)가 `Claude <noreply@anthropic.com>`이면 메시지가 깨끗해도 AI 계정이 기여자로 올라간다. **Claude Code를 클라우드·웹 세션에서 돌리면 git identity가 그 값으로 기본 설정되므로**, 작업 전에 `git config user.name`·`user.email`이 본인 것인지 확인한다. `attribution` 설정은 메시지 트레일러만 끄고 신원은 건드리지 않는다. CI `ai-signature` 잡이 이제 신원도 함께 검사한다.
 
 ### 예시
 

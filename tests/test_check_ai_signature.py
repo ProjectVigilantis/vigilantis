@@ -64,9 +64,9 @@ def test_rule_mentions_and_human_coauthors_pass(line):
     assert result.returncode == 0, result.stdout
 
 
-def _git(repo: Path, *args: str) -> str:
+def _git(repo: Path, *args: str, name: str = "t", email: str = "t@example.com") -> str:
     return subprocess.run(
-        ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *args],
+        ["git", "-c", f"user.name={name}", "-c", f"user.email={email}", *args],
         cwd=repo,
         capture_output=True,
         text=True,
@@ -111,3 +111,81 @@ def test_missing_base_falls_back_to_head_commit(repo):
     result = _run("--commits", f"{'0' * 40}..{head}", cwd=repo)
 
     assert result.returncode == 1, result.stdout
+
+
+# --- 커밋 신원(author·committer) — 메시지가 깨끗해도 Contributors 목록에 남는 경로 ---
+
+
+def test_ai_author_identity_fails(repo):
+    # 9149b00(PR #392) 재현 — 메시지는 규칙대로인데 author가 Claude
+    base = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "commit", "-q", "--allow-empty", "--author=Claude <noreply@anthropic.com>", "-m", "feat\n\nRefs #1")
+    head = _git(repo, "rev-parse", "HEAD")
+
+    result = _run("--commits", f"{base}..{head}", cwd=repo)
+
+    assert result.returncode == 1, result.stdout
+    assert "author Claude <noreply@anthropic.com>" in result.stdout
+    # 메시지만 지워선 안 된다는 것을 CI 로그에서 알려야 한다
+    assert "--reset-author" in result.stdout
+
+
+def test_ai_committer_identity_fails(repo):
+    # 9e42db6(PR #391) 재현 — author는 사람, committer만 Claude
+    base = _git(repo, "rev-parse", "HEAD")
+    _git(
+        repo,
+        "commit",
+        "-q",
+        "--allow-empty",
+        "--author=KimSeungCheol4589 <ksclove4589@example.com>",
+        "-m",
+        "docs\n\nRefs #2",
+        name="Claude",
+        email="noreply@anthropic.com",
+    )
+    head = _git(repo, "rev-parse", "HEAD")
+
+    result = _run("--commits", f"{base}..{head}", cwd=repo)
+
+    assert result.returncode == 1, result.stdout
+    assert "committer Claude <noreply@anthropic.com>" in result.stdout
+
+
+def test_ai_mail_domain_fails_even_with_human_name(repo):
+    # 이름을 사람으로 바꿔도 메일 도메인이 남으면 같은 계정으로 집계된다
+    base = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "commit", "-q", "--allow-empty", "--author=Bot Runner <agent@openai.com>", "-m", "feat\n\nRefs #3")
+    head = _git(repo, "rev-parse", "HEAD")
+
+    result = _run("--commits", f"{base}..{head}", cwd=repo)
+
+    assert result.returncode == 1, result.stdout
+    assert "AI 제공사 메일 도메인" in result.stdout
+
+
+def test_human_identity_passes(repo):
+    base = _git(repo, "rev-parse", "HEAD")
+    _git(
+        repo,
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "feat\n\nRefs #4",
+        name="Se Hyeok Kim",
+        email="kimseh0418@gmail.com",
+    )
+    head = _git(repo, "rev-parse", "HEAD")
+
+    assert _run("--commits", f"{base}..{head}", cwd=repo).returncode == 0
+
+
+def test_identity_outside_range_is_not_checked(repo):
+    # 범위 밖(이미 dev에 있는) 커밋은 이 PR의 책임이 아니다 — 메시지 검사와 같은 경계
+    _git(repo, "commit", "-q", "--allow-empty", "--author=Claude <noreply@anthropic.com>", "-m", "old")
+    base = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "clean\n\nRefs #5")
+    head = _git(repo, "rev-parse", "HEAD")
+
+    assert _run("--commits", f"{base}..{head}", cwd=repo).returncode == 0

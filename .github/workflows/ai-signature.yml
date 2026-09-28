@@ -1,5 +1,5 @@
 # ==============================================================================
-# AI 서명 검사 — 커밋 메시지·PR 본문에 AI 서명이 있으면 실패한다.
+# AI 서명 검사 — 커밋 메시지·커밋 신원·PR 본문에 AI 서명이 있으면 실패한다.
 # 규칙 원천: CLAUDE.md §커밋 메시지 규칙. 검사 로직: scripts/check_ai_signature.py
 #
 # ci.yml과 파일을 가르는 이유: PR 본문을 고칠 때(`edited`)도 다시 돌아야 하는데,
@@ -24,7 +24,9 @@ jobs:
           fetch-depth: 0 # base..head 범위의 커밋 메시지를 읽어야 한다
 
       # 표준 라이브러리만 쓴다 — 러너 기본 python3로 충분해 uv 설치를 건너뛴다.
-      - name: 커밋 메시지 검사
+      # 메시지와 함께 author·committer 신원도 본다 — 메시지가 깨끗해도 신원이 AI면
+      # GitHub Contributors 목록에 AI 계정이 올라간다(2026-09-21 PR #392·#391).
+      - name: 커밋 메시지·신원 검사
         env:
           RANGE: ${{ github.event_name == 'pull_request' && format('{0}..{1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha) || format('{0}..{1}', github.event.before, github.sha) }}
         run: python3 scripts/check_ai_signature.py --commits "$RANGE"
