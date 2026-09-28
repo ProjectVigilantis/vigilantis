@@ -14,12 +14,16 @@ import {
 } from './realtime-events.ts';
 import type { WsEvent } from '../types/api.ts';
 
-const incidentEvent = (type: 'INCIDENT_CREATED' | 'INCIDENT_UPDATED'): WsEvent =>
+const incidentEvent = (
+  type: 'INCIDENT_CREATED' | 'INCIDENT_UPDATED',
+  category: 'FINOPS' | 'SECOPS' = 'SECOPS',
+): WsEvent =>
   ({
     event_id: 'e1',
     event_type: type,
     occurred_at: '2026-08-26T00:00:00Z',
-    data: { incident_id: 'inc-1' },
+    // 생성 이벤트만 트랙을 싣는다(계약 `ws.py`)
+    data: type === 'INCIDENT_CREATED' ? { incident_id: 'inc-1', category } : { incident_id: 'inc-1' },
   }) as WsEvent;
 
 const executionEvent = (status: string): WsEvent =>
@@ -41,6 +45,17 @@ test('INCIDENT_CREATED는 Toast를 띄우고 재조회시킨다', () => {
     incidentId: 'inc-1',
     occurredAt: '2026-08-26T00:00:00Z',
     toast: true,
+    category: 'SECOPS',
+  });
+});
+
+test('INCIDENT_CREATED는 트랙을 옮긴다 — 자산(FinOps) 생성도 알림 대상이고 제목은 트랙으로 고른다', () => {
+  assert.deepEqual(actionFor(incidentEvent('INCIDENT_CREATED', 'FINOPS')), {
+    kind: 'refresh',
+    incidentId: 'inc-1',
+    occurredAt: '2026-08-26T00:00:00Z',
+    toast: true,
+    category: 'FINOPS',
   });
 });
 
@@ -76,6 +91,7 @@ test('인시던트 계열은 봉투의 occurred_at을 싣는다 — B-Medium 대
     incidentId: 'inc-1',
     occurredAt: '2026-08-26T00:00:00Z',
     toast: false,
+    category: null,
   });
 });
 

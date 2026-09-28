@@ -467,6 +467,12 @@ export interface IncidentEventData {
   incident_id: string;
 }
 
+/** `INCIDENT_CREATED`만 트랙을 함께 싣는다 — 받자마자 알림 제목을 트랙별로 고른다. */
+export interface IncidentCreatedData {
+  incident_id: string;
+  category: IncidentCategory;
+}
+
 export interface ExecutionEventData {
   incident_id: string;
   execution_id: string;
@@ -478,7 +484,13 @@ export interface ExecutionEventData {
 export type WsEvent =
   | {
       event_id: string;
-      event_type: 'INCIDENT_CREATED' | 'INCIDENT_UPDATED';
+      event_type: 'INCIDENT_CREATED';
+      occurred_at: IsoDateTime;
+      data: IncidentCreatedData;
+    }
+  | {
+      event_id: string;
+      event_type: 'INCIDENT_UPDATED';
       occurred_at: IsoDateTime;
       data: IncidentEventData;
     }

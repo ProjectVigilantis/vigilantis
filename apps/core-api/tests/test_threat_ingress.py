@@ -33,7 +33,7 @@ from mock_threat_source import (
     parse_observation,
     prepare_observation,
 )
-from schemas.api.incidents import IncidentResponse, IncidentStatus, RiskLevel
+from schemas.api.incidents import IncidentCategory, IncidentResponse, IncidentStatus, RiskLevel
 from schemas.api.ws import WsEventType
 from schemas.events import ThreatEventType
 from schemas.incidents import AgentInvocationStatus
@@ -101,6 +101,7 @@ def test_real_workflow_preserves_judgement_evidence_and_read_api(
     assert len(events) == 1
     assert events[0].event_type == WsEventType.INCIDENT_CREATED
     assert events[0].data.incident_id == result.incident_id
+    assert events[0].data.category is IncidentCategory.SECOPS  # 저장된 트랙 그대로
     assert events[0].occurred_at == result.occurred_at
 
 
@@ -187,7 +188,7 @@ def test_inbox_retries_failed_delivery_and_continues_other_files(tmp_path, monke
         calls.append(observation.event_id)
         if observation.event_id == failing:
             raise RuntimeError("storage unavailable")
-        return IntakeOutcome("stored", True, datetime.now(timezone.utc))
+        return IntakeOutcome("stored", True, datetime.now(timezone.utc), IncidentCategory.SECOPS)
 
     monkeypatch.setattr(mock_threat_source, "receive_threat", receive)
     consumer = MockThreatConsumer(tmp_path, MagicMock(), MagicMock(), interval_seconds=1)
@@ -220,7 +221,7 @@ def test_stop_waits_for_inflight_delivery_and_leaves_queued_file(tmp_path, monke
     def receive(db, observation, publish):
         entered.set()
         assert release.wait(5)
-        return IntakeOutcome("stored", True, datetime.now(timezone.utc))
+        return IntakeOutcome("stored", True, datetime.now(timezone.utc), IncidentCategory.SECOPS)
 
     monkeypatch.setattr(mock_threat_source, "receive_threat", receive)
 

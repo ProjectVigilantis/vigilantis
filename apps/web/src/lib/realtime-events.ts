@@ -2,7 +2,7 @@
 
 // 최종 상태 정의는 한 곳이다 — `node --test`가 별칭을 못 풀어 상대 경로를 쓴다(incident-filter와 같은 이유).
 import { isTerminalStatus } from './execution-status.ts';
-import type { ExecutionStatus, IsoDateTime, WsEvent } from '@/types/api';
+import type { ExecutionStatus, IncidentCategory, IsoDateTime, WsEvent } from '@/types/api';
 
 /**
  * 이벤트 하나가 화면에 시키는 일. **판단은 여기서 끝나고 소켓은 배달만 한다.**
@@ -12,7 +12,14 @@ import type { ExecutionStatus, IsoDateTime, WsEvent } from '@/types/api';
  * 직접 오므로(§4.8 표) ACT-002가 그 값을 바로 그린다.
  */
 export type RealtimeAction =
-  | { kind: 'refresh'; incidentId: string; occurredAt: IsoDateTime; toast: boolean }
+  | {
+      kind: 'refresh';
+      incidentId: string;
+      occurredAt: IsoDateTime;
+      toast: boolean;
+      /** 생성 이벤트만 싣는 트랙 — 알림 제목을 고르는 데만 쓴다. 수정 이벤트는 null. */
+      category: IncidentCategory | null;
+    }
   | {
       kind: 'execution';
       incidentId: string;
@@ -23,10 +30,9 @@ export type RealtimeAction =
     };
 
 /**
- * `INCIDENT_CREATED`·`INCIDENT_UPDATED`는 **SecOps 전용**이고 `EXECUTION_UPDATED`만 FinOps
- * 공통이다(§4.8). Toast 정책도 이벤트별로 다르다.
+ * 세 이벤트 모두 SecOps·FinOps 두 트랙에서 온다(계약 `ws.py`). Toast 정책은 이벤트별로 다르다.
  *
- * - `INCIDENT_CREATED` — 항상 표시
+ * - `INCIDENT_CREATED` — 항상 표시. 제목은 `data.category`로 트랙별로 고른다
  * - `INCIDENT_UPDATED` — Toast 없음(REST 재조회만). 상태 변화마다 띄우면 소음이 된다
  * - `EXECUTION_UPDATED` — **최종 상태에서만**
  */
@@ -50,6 +56,7 @@ export function actionFor(event: WsEvent): RealtimeAction {
     // 항상 fallback 안내문으로 떨어진다(계약 합의 2026-08-14 · #155 · PR #181 리뷰).
     occurredAt: event.occurred_at,
     toast: event.event_type === 'INCIDENT_CREATED',
+    category: event.event_type === 'INCIDENT_CREATED' ? event.data.category : null,
   };
 }
 
