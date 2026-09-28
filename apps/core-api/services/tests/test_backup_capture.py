@@ -114,7 +114,83 @@ def test_capture_keeps_only_the_declared_fields(aws):
         "availability_zone",
         "vpc_id",
         "subnet_id",
+        # 원복 값이 아니라 한계 고지의 근거다 — 되돌려도 퍼블릭 IPv4는 돌아오지
+        # 않으므로, 조치 이전 주소를 여기 남기지 않으면 영영 알 수 없다 (ADR-0008 §5)
+        "public_ip_address",
+        "elastic_ip_association_id",
     }
+
+
+# ------------------------------------------------- 한계 고지 근거 (ADR-0008 §5)
+
+
+def test_capture_records_the_public_ip_before_the_change(aws):
+    """되돌려도 퍼블릭 IPv4는 돌아오지 않는다 — 조치 이전 주소를 남기지 않으면
+    조치 후에는 영영 알 수 없어 관제자에게 사실대로 말할 수 없다."""
+    aws({"Reservations": [{"Instances": [{**FULL_INSTANCE, "PublicIpAddress": "3.35.1.1"}]}]})
+
+    payload = bk.capture_instance_spec(INSTANCE, REGION).payload
+
+    assert payload["public_ip_address"] == "3.35.1.1"
+
+
+def test_capture_records_the_eip_association_when_present(aws):
+    """EIP가 붙어 있었으면 주소가 유지된다 — 위 고지의 반대 근거다."""
+    aws(
+        {
+            "Reservations": [
+                {
+                    "Instances": [
+                        {
+                            **FULL_INSTANCE,
+                            "PublicIpAddress": "3.35.1.1",
+                            "NetworkInterfaces": [
+                                {"Association": {"AssociationId": "eipassoc-1"}}
+                            ],
+                        }
+                    ]
+                }
+            ]
+        }
+    )
+
+    payload = bk.capture_instance_spec(INSTANCE, REGION).payload
+
+    assert payload["elastic_ip_association_id"] == "eipassoc-1"
+
+
+def test_auto_assigned_public_ip_leaves_the_eip_association_empty(aws):
+    """자동 할당 주소에는 AssociationId가 없다 — 그 부재가 곧 "정지하면 바뀐다"다."""
+    aws(
+        {
+            "Reservations": [
+                {
+                    "Instances": [
+                        {
+                            **FULL_INSTANCE,
+                            "PublicIpAddress": "3.35.1.1",
+                            "NetworkInterfaces": [
+                                {"Association": {"IpOwnerId": "amazon", "PublicIp": "3.35.1.1"}}
+                            ],
+                        }
+                    ]
+                }
+            ]
+        }
+    )
+
+    payload = bk.capture_instance_spec(INSTANCE, REGION).payload
+
+    assert payload["public_ip_address"] == "3.35.1.1"
+    assert payload["elastic_ip_association_id"] is None
+
+
+def test_missing_public_ip_does_not_block_the_capture(aws):
+    """부가 항목의 부재는 조치를 막지 않는다 — 되돌리지 못하는 것과 다른 사건이다."""
+    capture = bk.capture_instance_spec(INSTANCE, REGION)
+
+    assert capture.captured
+    assert capture.payload["public_ip_address"] is None
 
 
 def test_capture_uses_the_region_it_was_given(aws):
@@ -183,3 +259,289 @@ def test_capture_result_cannot_be_both_success_and_failure():
         bk.BackupCapture(backup_type="X", payload={"a": 1}, reason_code=R.PRECHECK_AWS_ERROR)
     with pytest.raises(ValueError):
         bk.BackupCapture(backup_type="X")
+
+
+# ------------------------------------------------- NACL 규칙 index (Issue #297)
+
+ACL = "acl-0abc123456789def0"
+RULE_NUMBER = 100
+CIDR = "198.51.100.0/24"
+
+EMPTY_ACL = {"NetworkAcls": [{"NetworkAclId": ACL, "Entries": []}]}
+
+
+class FakeNaclEc2:
+    def __init__(self, outcome, calls):
+        self._outcome = outcome
+        self.calls = calls
+
+    def describe_network_acls(self, **kwargs):
+        self.calls.append(kwargs)
+        if isinstance(self._outcome, BaseException):
+            raise self._outcome
+        return self._outcome
+
+
+@pytest.fixture
+def nacl(monkeypatch):
+    """NACL 조회를 가짜로 갈아 끼운다. 기본은 슬롯이 비어 있는 NACL 1건."""
+    state = {"outcome": EMPTY_ACL, "calls": [], "clients": []}
+
+    def factory(service, region=None, **_):
+        state["clients"].append((service, region))
+        return FakeNaclEc2(state["outcome"], state["calls"])
+
+    monkeypatch.setattr(bk, "aws_client", factory)
+
+    def configure(outcome):
+        state["outcome"] = outcome
+
+    configure.calls = state["calls"]
+    configure.clients = state["clients"]
+    return configure
+
+
+def capture_nacl(**overrides):
+    values = {"rule_number": RULE_NUMBER, "cidr_block": CIDR, "protocol": "tcp"}
+    values.update(overrides)
+    return bk.capture_nacl_rule_index(ACL, REGION, **values)
+
+
+def entry(**overrides) -> dict:
+    values = {
+        "RuleNumber": RULE_NUMBER,
+        "Egress": False,
+        "CidrBlock": "203.0.113.0/24",
+        "Protocol": "-1",
+        "RuleAction": "deny",
+    }
+    values.update(overrides)
+    return values
+
+
+def test_nacl_capture_carries_the_declared_backup_type(nacl):
+    capture = capture_nacl()
+    assert capture.captured
+    assert capture.backup_type == BackupType.RECORD_NACL_RULE_INDEX.value
+
+
+def test_nacl_capture_records_the_slot_and_the_fingerprint(nacl):
+    payload = capture_nacl().payload
+    assert set(payload) == {
+        "rule_number",
+        "egress",
+        "cidr_block",
+        "protocol",
+        "rule_action",
+    }
+    assert payload["rule_number"] == RULE_NUMBER
+    # ADD_DENY는 인바운드 차단 규칙이다(ADR-0007 §5 파라미터 표에 egress가 없다)
+    assert payload["egress"] is False
+    assert payload["rule_action"] == "deny"
+
+
+def test_nacl_capture_stores_the_protocol_as_an_aws_number(nacl):
+    """이름으로 받아 번호로 저장한다 — 대조 상대가 describe의 Protocol이라 축을 맞춘다."""
+    assert capture_nacl(protocol="tcp").payload["protocol"] == "6"
+    assert capture_nacl(protocol="-1").payload["protocol"] == "-1"
+
+
+def test_nacl_capture_refuses_a_slot_that_is_already_used(nacl):
+    """가드레일 ④가 같은 것을 이미 봤더라도 승인 대기 동안 제3자가 그 번호를 쓸 수
+    있다. 확인 없이 레코드를 남기면 남의 규칙을 가리키는 백업이 생기고,
+    NACL_RESTORE가 그것을 근거로 삭제한다 — 삭제는 되돌릴 수 없다."""
+    nacl({"NetworkAcls": [{"NetworkAclId": ACL, "Entries": [entry()]}]})
+
+    capture = capture_nacl()
+
+    assert not capture.captured
+    assert capture.reason_code is R.PRECHECK_INVALID_STATE
+    assert str(RULE_NUMBER) in capture.detail
+
+
+def test_nacl_capture_ignores_an_outbound_rule_in_the_same_slot(nacl):
+    """아웃바운드는 다른 축이다 — 인바운드 슬롯이 비어 있으면 삽입할 수 있다."""
+    nacl({"NetworkAcls": [{"NetworkAclId": ACL, "Entries": [entry(Egress=True)]}]})
+
+    assert capture_nacl().captured
+
+
+def test_nacl_capture_ignores_other_rule_numbers(nacl):
+    nacl({"NetworkAcls": [{"NetworkAclId": ACL, "Entries": [entry(RuleNumber=101)]}]})
+
+    assert capture_nacl().captured
+
+
+@pytest.mark.parametrize(
+    "error,expected",
+    [
+        (client_error("InvalidNetworkAclID.NotFound"), R.PRECHECK_TARGET_NOT_FOUND),
+        (client_error("UnauthorizedOperation"), R.PRECHECK_UNAUTHORIZED),
+        (EndpointConnectionError(endpoint_url="http://x"), R.PRECHECK_AWS_ERROR),
+    ],
+)
+def test_nacl_capture_turns_aws_errors_into_reason_codes(nacl, error, expected):
+    nacl(error)
+    capture = capture_nacl()
+    assert not capture.captured
+    assert capture.reason_code is expected
+
+
+def test_missing_nacl_is_target_not_found(nacl):
+    nacl({"NetworkAcls": []})
+    assert capture_nacl().reason_code is R.PRECHECK_TARGET_NOT_FOUND
+
+
+def test_nacl_capture_rejects_an_unknown_protocol_spelling(nacl):
+    """계약(NaclProtocol)이 이미 거르는 값이다 — 여기 오면 배선 문제라 AWS를 부르지 않는다."""
+    capture = capture_nacl(protocol="TCP")
+    assert not capture.captured
+    assert capture.reason_code is R.PRECHECK_PARAM_INVALID
+    assert nacl.calls == []
+
+
+def test_nacl_capture_rejects_a_host_cidr(nacl):
+    """호스트 비트가 남은 CIDR은 계약을 벗어난다 — 그대로 넣으면 되돌릴 근거가
+    실제로 들어간 규칙과 어긋난다."""
+    capture = capture_nacl(cidr_block="198.51.100.7/24")
+    assert not capture.captured
+    assert capture.reason_code is R.PRECHECK_PARAM_INVALID
+
+
+# ==============================================================================
+# SG 전체 규칙 (capture_sg_full_rules, Issue #368)
+# ==============================================================================
+
+GROUP = "sg-0abc123456789def0"
+VPC = "vpc-0abc123456789def0"
+GROUP_NAME = "vigilantis-seed-unused"
+
+SSH_FROM_BASTION = {
+    "IpProtocol": "tcp",
+    "FromPort": 22,
+    "ToPort": 22,
+    "IpRanges": [{"CidrIp": "10.0.0.0/8", "Description": "bastion"}],
+    "Ipv6Ranges": [],
+    "PrefixListIds": [],
+    "UserIdGroupPairs": [],
+}
+
+FULL_GROUP = {
+    "GroupId": GROUP,
+    "GroupName": GROUP_NAME,
+    "Description": "unused security group",
+    "VpcId": VPC,
+    "OwnerId": "123456789012",
+    "IpPermissions": [SSH_FROM_BASTION],
+    "IpPermissionsEgress": [{"IpProtocol": "-1", "IpRanges": [{"CidrIp": "0.0.0.0/0"}]}],
+    # 캡처 대상이 아닌 필드 — payload에 새어 들어가면 안 된다
+    "Tags": [{"Key": "Name", "Value": GROUP_NAME}],
+}
+
+
+class FakeSgEc2:
+    def __init__(self, outcome, calls):
+        self._outcome = outcome
+        self.calls = calls
+
+    def describe_security_groups(self, **kwargs):
+        self.calls.append(kwargs)
+        if isinstance(self._outcome, BaseException):
+            raise self._outcome
+        return self._outcome
+
+
+@pytest.fixture
+def sg(monkeypatch):
+    """SG 조회를 가짜로 갈아 끼운다. 기본은 규칙이 실린 미부착 SG 1건."""
+    state = {"outcome": {"SecurityGroups": [FULL_GROUP]}, "calls": [], "clients": []}
+
+    def factory(service, region=None, **_):
+        state["clients"].append((service, region))
+        return FakeSgEc2(state["outcome"], state["calls"])
+
+    monkeypatch.setattr(bk, "aws_client", factory)
+
+    def configure(outcome):
+        state["outcome"] = outcome
+
+    configure.calls = state["calls"]
+    configure.clients = state["clients"]
+    return configure
+
+
+def test_sg_capture_carries_the_declared_backup_type(sg):
+    capture = bk.capture_sg_full_rules(GROUP, REGION)
+
+    assert capture.captured
+    assert capture.backup_type == BackupType.SAVE_SG_FULL_RULES_JSON.value
+    assert capture.reason_code is None
+
+
+def test_sg_capture_records_everything_recreate_needs(sg):
+    """지우고 나면 AWS에 다시 물을 수 없다 — 원복에 필요한 전부가 여기 있어야 한다."""
+    payload = bk.capture_sg_full_rules(GROUP, REGION).payload
+
+    assert payload["group_name"] == GROUP_NAME
+    assert payload["description"] == "unused security group"
+    assert payload["vpc_id"] == VPC
+    assert payload["ingress_permissions"] == [SSH_FROM_BASTION]
+    # 원본 ID는 복원 값이 아니라 한계 고지와 자기 참조 치환의 근거다
+    assert payload["group_id"] == GROUP
+
+
+def test_sg_capture_keeps_only_the_declared_fields(sg):
+    """모델이 extra=forbid라 응답을 통째로 싣지 않는다는 사실을 고정한다."""
+    payload = bk.capture_sg_full_rules(GROUP, REGION).payload
+
+    assert set(payload) == {
+        "group_name",
+        "description",
+        "vpc_id",
+        "ingress_permissions",
+        "egress_permissions",
+        "group_id",
+    }
+
+
+def test_sg_capture_accepts_a_group_with_no_rules(sg):
+    """미부착 SG는 대개 규칙이 비어 있다 — 그것이 곧 "아무것도 열지 않는다"는 사실이다."""
+    sg({"SecurityGroups": [{**FULL_GROUP, "IpPermissions": [], "IpPermissionsEgress": []}]})
+
+    capture = bk.capture_sg_full_rules(GROUP, REGION)
+
+    assert capture.captured
+    assert capture.payload["ingress_permissions"] == []
+
+
+def test_sg_capture_fails_when_the_group_is_gone(sg):
+    """지울 대상이 없으면 백업도 없다 — 삭제를 시작하지 않는 근거가 된다."""
+    sg(client_error("InvalidGroup.NotFound"))
+
+    capture = bk.capture_sg_full_rules(GROUP, REGION)
+
+    assert not capture.captured
+    assert capture.reason_code is R.PRECHECK_TARGET_NOT_FOUND
+
+
+def test_sg_capture_fails_when_the_group_is_outside_a_vpc(sg):
+    """VPC 밖 SG는 이 백업으로 되살릴 수 없다 — create_security_group의 인자가 없다.
+
+    조회는 됐으므로 대상 상태 문제로 분류한다(capture_instance_spec과 같은 결).
+    """
+    outside = {k: v for k, v in FULL_GROUP.items() if k != "VpcId"}
+    sg({"SecurityGroups": [outside]})
+
+    capture = bk.capture_sg_full_rules(GROUP, REGION)
+
+    assert not capture.captured
+    assert capture.reason_code is R.PRECHECK_INVALID_STATE
+    assert "vpc_id" in capture.detail
+
+
+def test_sg_capture_defers_to_the_shared_error_table(sg):
+    sg(EndpointConnectionError(endpoint_url="https://ec2"))
+
+    capture = bk.capture_sg_full_rules(GROUP, REGION)
+
+    assert capture.reason_code is R.PRECHECK_AWS_ERROR

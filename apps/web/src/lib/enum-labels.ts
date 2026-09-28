@@ -60,6 +60,13 @@ export const ASSET_TYPE_LABELS: LabelMap<AssetType> = {
   ALB_TARGET_GROUP: { label: '대상 그룹', tone: 'neutral' },
 };
 
+/**
+ * 유형을 나열할 때의 순서. **사전 하나에서 파생시킨다** — 목록마다 배열을 따로 적으면
+ * 유형이 늘 때 한쪽만 고쳐져 화면마다 순서가 달라진다(§8: 매핑을 화면마다 복제하지 않는다).
+ * 선언 순서가 곧 관제 중요도 순이다(EC2가 척추이고, 부속이 뒤따른다).
+ */
+export const ASSET_TYPE_ORDER = Object.keys(ASSET_TYPE_LABELS) as AssetType[];
+
 export const RESOURCE_ROLE_LABELS: LabelMap<ResourceRole> = {
   PRIMARY: null, // 주요 관제 자산 — 배지 미표시
   RUNBOOK_SUPPORT: { label: '지원 자산', tone: 'gray' },
@@ -98,6 +105,7 @@ export const SKIP_REASON_LABELS: LabelMap<SkipReasonCode> = {
   SKIP_LOW_UTIL: { label: '저사용 임계 미달', tone: 'orange' }, // 기준만 못 넘음 — 재검토 여지
   SKIP_WHITELISTED: { label: '예외 등록됨', tone: 'purple' }, // 사람이 등록한 예외
   SKIP_ACTIVE: { label: '활성 자산', tone: 'green' }, // 정상 사용 중
+  SKIP_UNSUPPORTED_STATE: { label: '판정 보류 상태', tone: 'yellow' }, // EBS 전이·비정상·미상(available/in-use 외) — 삭제 후보 아님
 };
 
 export const CATEGORY_LABELS: LabelMap<IncidentCategory> = {
@@ -110,6 +118,9 @@ export const INCIDENT_STATUS_LABELS: LabelMap<IncidentStatus> = {
   ANALYZING: { label: '분석 중', tone: 'gray', spinner: true },
   AWAITING_APPROVAL: { label: '승인 대기', tone: 'yellow' },
   ACTION_IN_PROGRESS: { label: '조치 진행 중', tone: 'blue' },
+  // 조치는 끝났고 관제자 종료 판단만 남은 자리 — 실패가 아니므로 '진행 불가'(빨강)와
+  // 색이 갈려야 한다. v1.6 ④ [종료 판단] 모달이 열리는 상태다 (#240).
+  AWAITING_CLOSURE: { label: '종료 판단 대기', tone: 'green' },
   RESOLVED: { label: '종료', tone: 'gray' },
   FAILED: { label: '진행 불가', tone: 'red' },
 };
@@ -127,8 +138,9 @@ export const RESPONSE_MODE_LABELS: LabelMap<ResponseMode> = {
 };
 
 /**
- * 실행 status 6종 — 라벨은 4.7 "진행 표시기 매핑", 기호·색은 5장과 4.7 "최종 상태 표시".
+ * 실행 status 7종 — 라벨은 4.7 "진행 표시기 매핑", 기호·색은 5장과 4.7 "최종 상태 표시".
  * FAILED(AWS 변경 없음)와 ROLLBACK_FAILED(변경된 채 복구 실패·CRITICAL)를 합치지 않는다.
+ * UNVERIFIED(결과 확인 불가, #249)는 실패가 아니라 "모른다"라서 빨강과 색을 가른다.
  */
 export const EXECUTION_STATUS_LABELS: LabelMap<ExecutionStatus> = {
   // IN_PROGRESS 색은 문서에 없다 — 3.2의 진행 중 표기(회색 + 스피너) 관례를 따른다
@@ -138,6 +150,7 @@ export const EXECUTION_STATUS_LABELS: LabelMap<ExecutionStatus> = {
   ROLLBACK_INITIATED: { label: '복구 중', tone: 'orange', glyph: '⟲' },
   ROLLED_BACK: { label: '복구 완료', tone: 'blue', glyph: '⟲' },
   ROLLBACK_FAILED: { label: '복구 실패', tone: 'red', glyph: '⚠' },
+  UNVERIFIED: { label: '결과 확인 불가', tone: 'yellow', glyph: '?' },
 };
 
 /** 3.2.1 Runbook 사전의 "표시" 열. 파라미터·실행 상세는 서버 계약(schemas) 소관이라 옮기지 않는다. */
@@ -223,7 +236,48 @@ export const SPEC_KEY_LABELS: Record<string, string> = {
   port: '포트',
   target_type: '대상 유형',
   health_check_path: '헬스 체크 경로',
+  tags: '태그',
 };
+
+/**
+ * **승인 판단에 필요한 자산 사실값** — ACT-001 `조치 대상` 블록이 쓴다 (#183).
+ *
+ * `display_parameters`(서버 파생본)에 섞지 않고 별도로 그린다. 두 값의 출처가 다르기 때문이다:
+ * 저쪽은 서버가 typed `parameters`에서 파생한 값이고, 이쪽은 FE가 `target_arn`으로
+ * `GET /assets`를 조인한 자산 사실값이다(2026-09-01 A안 확정, 안성일).
+ *
+ * 고르는 축은 런북이 아니라 **자산 유형**이다 — 그래서 같은 EC2를 겨누는 `RUNBOOK_EC2_ISOLATE`
+ * 모달에도 `instance_type`이 뜨며, 해롭지 않은 문맥이다. 유형별로 고르는 근거는 **그 값이 없으면
+ * 승인을 판단할 수 없는가**이고, 그 값이 승인 근거가 되는 런북은 다음과 같다.
+ *   - `EC2` `instance_type` — `RUNBOOK_EC2_RIGHTSIZING`의 **변경 폭**. 목표값만 보이면
+ *     `t3.xlarge → t3.small`인지 `t3.small → t3.small`인지 가를 근거가 없다
+ *   - `EBS` `size_gib`·`volume_type` — `RUNBOOK_EBS_DELETE_UNATTACHED`의 **삭제 규모**.
+ *     등록된 롤백 런북이 없는 유일한 파괴적 조치라, 규모를 모르고 되돌릴 수 없는 조치를 승인하게 된다
+ *
+ * 나머지 유형이 빈 배열인 것은 누락이 아니다 — 그 유형을 건드리는 런북들은 잃은 문맥이
+ * `target_arn`에 이미 들어 있어 실손실이 아니라고 판정했다(#183 §2). 필요해지면 한 줄 추가한다.
+ */
+export function approvalAssetFacts(asset: AssetItem): { key: string; label: string; value: string }[] {
+  const picked: [string, string | number | null | undefined][] =
+    asset.asset_type === 'EC2'
+      ? [['instance_type', asset.spec.instance_type]]
+      : asset.asset_type === 'EBS'
+        ? [
+            ['size_gib', asset.spec.size_gib],
+            ['volume_type', asset.spec.volume_type],
+          ]
+        : [];
+
+  // 계약이 전부 Optional이라 값이 없을 수 있다. 빈 줄을 그리면 "0 GiB"·"—"가 근거로 읽히므로
+  // 아예 내지 않는다 — 없는 값은 없다고 두는 편이 잘못된 확신을 주지 않는다.
+  return picked
+    .filter((entry): entry is [string, string | number] => entry[1] !== null && entry[1] !== undefined)
+    .map(([key, value]) => ({
+      key,
+      label: SPEC_KEY_LABELS[key] ?? key,
+      value: String(value),
+    }));
+}
 
 /**
  * ARN의 마지막 세그먼트. 카드의 `대상` 줄과 `incidentTitle` fallback이 같은 축약을 쓴다 —

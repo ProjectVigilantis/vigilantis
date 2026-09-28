@@ -26,6 +26,8 @@
 #   OpenIP SG(0.0.0.0/0 22/tcp)            → 위협 탐지·토폴로지 붉은 노드
 #   사용 중/미사용 SG                        → 미사용 SG 판별
 #   미연결(available) EBS 볼륨               → EBS_DELETE_UNATTACHED (P1)
+#   전용 NACL(idle 서브넷에 연결)             → NACL_ADD_DENY (P0) 의 조치 대상
+#     default NACL 을 쓰지 않는 이유와 재실행 시 규칙을 비우는 이유는 NACL_NAME 주석 참조
 # ==============================================================================
 
 from __future__ import annotations
@@ -35,6 +37,8 @@ import sys
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from botocore.exceptions import ClientError
 
 # Windows 콘솔(cp949)은 em dash 등 출력 시 UnicodeEncodeError로 죽는다 — UTF-8로 강제
 sys.stdout.reconfigure(encoding="utf-8")
@@ -48,7 +52,7 @@ for _p in (str(_REPO_ROOT / "apps" / "core-api"), str(_REPO_ROOT / "packages")):
 from schemas.assets import MetricName  # noqa: E402
 
 # 리전·엔드포인트·자격증명 해석과 클라이언트 생성의 단일 원천(ADR-0006 §3, Issue #128).
-from services.aws.client import aws_client, endpoint_url, regions  # noqa: E402
+from services.aws.client import account_id, aws_client, endpoint_url, regions  # noqa: E402
 from services.rule_engine import IDLE_CPU_AVG, MIN_DATAPOINTS, SPIKE_CPU_MAX  # noqa: E402
 
 SEED_TAG_KEY = "vigilantis:seed"
@@ -59,8 +63,13 @@ IDLE_CPU = round(IDLE_CPU_AVG * 0.4, 1)      # 평균 < IDLE_CPU_AVG → RIGHTSI
 NORMAL_CPU = round(IDLE_CPU_AVG * 7.0, 1)    # 평균 ≥ IDLE_CPU_AVG → 후보 아님
 SPIKE_BASE = round(IDLE_CPU_AVG * 0.2, 1)    # 평균은 낮게 유지
 SPIKE_PEAK = round(SPIKE_CPU_MAX * 2.0, 1)   # 최대 ≥ SPIKE_CPU_MAX → SKIP_LOW_UTIL
-METRIC_HOURS = 72                            # 최근 3일 × 1시간 해상도
+METRIC_HOURS = 72                            # 최근 3일 × 1시간 해상도(CPU 판정 입자)
 SPIKE_PEAK_COUNT = 2
+# 네트워크만 **한 시간 안에 표본 여럿**을 넣는다(15분 간격). 표본이 시간당 하나뿐이면
+# 같은 구간의 Sum 과 Average 가 같은 값이라, 차트가 어느 통계로 읽는지가 드러나지 않는다 —
+# 실 AWS 의 표본 간격은 5분(상세 모니터링이면 1분)이라 그쪽이 오히려 정상 상태다.
+# 시간당 총량은 프로필 값 그대로 유지하도록 표본값을 나눠 넣는다.
+NET_SAMPLES_PER_HOUR = 4
 
 # 파생만으로는 보장되지 않는 불변식 2개 — 깨지면 시드가 조용히 무의미해지므로 즉시 종료.
 # (assert 금지: python -O / PYTHONOPTIMIZE 에서 제거된다)
@@ -87,6 +96,16 @@ INSTANCES = (
     ("vigilantis-seed-idle-dev", "m5.2xlarge", SG_USED, "idle", "development"),
 )
 VOLUME_NAME = "vigilantis-seed-unattached"
+
+# NACL_ADD_DENY(P0 보안 런북)가 겨눌 대상. LocalStack 기본 VPC의 **default NACL을 쓰지
+# 않는** 이유가 둘이다 — ① 인바운드 rule 100이 이미 점유돼 있고, ② 서브넷 전부가 물려
+# 있어 규칙을 남기면 되돌릴 자리가 공용이 된다.
+# 규칙 삽입은 **슬롯을 점유하는 조치**라 같은 번호로 두 번 실행하면
+# NetworkAclEntryAlreadyExists로 깨진다 — 시연을 두 번 못 돌린다. 그래서 전용 NACL을
+# 두고, 재실행 때마다 커스텀 규칙을 비운다(통합 테스트가 자기 VPC·NACL을 만들고 지우는
+# 것과 같은 이유 — apps/core-api/services/tests/test_execute_nacl_localstack.py).
+NACL_NAME = "vigilantis-seed-nacl"
+NACL_DEFAULT_RULE = 32767  # 커스텀 NACL이 기본으로 갖는 deny-all 슬롯 — 지우지 않는다
 # Launch Template — ec2 네임스페이스라 Community 지원(ASG/elbv2 와 달리 로컬 수집 검증 가능).
 # ASG(autoscaling)는 Pro 전용이라 시드 불가 → USES 관계는 실 AWS 스모크에서만 확인된다(ADR-0006 §4).
 LAUNCH_TEMPLATE_NAME = "vigilantis-seed-lt"
@@ -201,6 +220,104 @@ def _ensure_launch_template(ec2, ami: str) -> tuple[str, bool]:
     return created["LaunchTemplateId"], True
 
 
+def _default_vpc(ec2) -> str:
+    vpcs = ec2.describe_vpcs(Filters=[{"Name": "is-default", "Values": ["true"]}])["Vpcs"]
+    if not vpcs:
+        sys.exit("[seed] 기본 VPC 없음 — LocalStack 초기화 상태를 확인할 것")
+    return vpcs[0]["VpcId"]
+
+
+def _sweep_orphan_nacls(ec2) -> int:
+    """VPC 가 이미 사라진 NACL 을 치운다. 지운 개수를 돌려준다.
+
+    **LocalStack 은 VPC 를 지울 때 그 VPC 의 기본 NACL 을 남긴다**(실 AWS 는 함께 없앤다).
+    VPC 를 만드는 통합 테스트가 1건당 1개씩 남기므로, 스위트를 몇 번 돌리면 없어진 VPC 를
+    가리키는 NACL 이 수십 개가 되고, 5분 주기 수집이 그것을 자산으로 적재해 대시보드의
+    "트래픽 경로 밖" 목록을 덮는다.
+
+    발생원은 테스트 픽스처가 막지만(거기서 기본 NACL 까지 지운다), 이미 쌓인 것과 앞으로
+    생길 누락분은 여기서 쓸어 낸다 — LocalStack 재시작 없이 시드만 다시 돌려도 화면이
+    깨끗해진다. **실재하는 VPC 의 NACL 은 건드리지 않는다.**
+    """
+    live_vpcs = {v["VpcId"] for v in ec2.describe_vpcs()["Vpcs"]}
+    swept = 0
+    for acl in ec2.describe_network_acls()["NetworkAcls"]:
+        if acl["VpcId"] in live_vpcs:
+            continue
+        try:
+            ec2.delete_network_acl(NetworkAclId=acl["NetworkAclId"])
+            swept += 1
+        except ClientError:
+            # 지우지 못해도 시드를 멈추지 않는다 — 청소는 부수 작업이다.
+            pass
+    return swept
+
+
+def _instance_subnet(ec2, instance_id: str) -> str | None:
+    res = ec2.describe_instances(InstanceIds=[instance_id])["Reservations"]
+    return res[0]["Instances"][0].get("SubnetId") if res else None
+
+
+def _clear_nacl_entries(ec2, acl: dict) -> int:
+    """전용 NACL의 커스텀 규칙만 지운다 — 시연을 두 번 돌릴 수 있게 하는 자리다.
+
+    default 슬롯(32767, deny-all)은 남긴다. 그 둘은 NACL이 태어날 때부터 있는 것이고
+    지우면 자원의 모양 자체가 달라진다.
+    """
+    cleared = 0
+    for entry in acl["Entries"]:
+        if entry["RuleNumber"] == NACL_DEFAULT_RULE:
+            continue
+        ec2.delete_network_acl_entry(
+            NetworkAclId=acl["NetworkAclId"],
+            RuleNumber=entry["RuleNumber"],
+            Egress=entry["Egress"],
+        )
+        cleared += 1
+    return cleared
+
+
+def _associate_nacl(ec2, acl_id: str, subnet_id: str) -> bool:
+    """대상 서브넷의 NACL 연결을 이 NACL로 바꾼다. 이미 이 NACL이면 그대로 둔다.
+
+    연결하지 않으면 수집기가 그리는 EC2→NACL(PROTECTED_BY) 엣지는 **default NACL**을
+    가리키는데 조치는 **이 NACL**에 들어간다 — 화면이 가리키는 자원과 조치가 닿는
+    자원이 조용히 갈린다. 시연에서 가장 늦게, 가장 나쁘게 드러나는 종류의 어긋남이다.
+    """
+    for acl in ec2.describe_network_acls()["NetworkAcls"]:
+        for assoc in acl["Associations"]:
+            if assoc.get("SubnetId") != subnet_id:
+                continue
+            if acl["NetworkAclId"] == acl_id:
+                return False
+            ec2.replace_network_acl_association(
+                AssociationId=assoc["NetworkAclAssociationId"], NetworkAclId=acl_id
+            )
+            return True
+    return False
+
+
+def _ensure_nacl(ec2, subnet_id: str | None) -> tuple[str, bool, int]:
+    """(nacl_id, 신규생성, 정리한 커스텀 규칙 수)."""
+    found = ec2.describe_network_acls(
+        Filters=[{"Name": "tag:Name", "Values": [NACL_NAME]}]
+    )["NetworkAcls"]
+    if found:
+        acl_id, created, cleared = found[0]["NetworkAclId"], False, _clear_nacl_entries(ec2, found[0])
+    else:
+        acl_id = ec2.create_network_acl(
+            VpcId=_default_vpc(ec2),
+            TagSpecifications=[
+                {"ResourceType": "network-acl", "Tags": _seed_tags(NACL_NAME)}
+            ],
+        )["NetworkAcl"]["NetworkAclId"]
+        created, cleared = True, 0
+    # 연결은 생성 여부와 무관하게 매번 확인한다 — 연결이 풀린 채 남으면 위 갈림이 그대로 생긴다
+    if subnet_id:
+        _associate_nacl(ec2, acl_id, subnet_id)
+    return acl_id, created, cleared
+
+
 # ------------------------------------------------------------------ 메트릭 주입
 def _cpu_series(profile: str) -> list[float]:
     if profile == "idle":
@@ -224,31 +341,54 @@ def _has_metrics(cw, instance_id: str) -> bool:
     )
 
 
+#: put_metric_data 1회에 실을 표본 수 상한. 실 AWS 는 요청당 1,000건·40KB 라, 네트워크처럼
+#: 표본이 시간당 여러 개면 한 번에 다 싣지 못한다.
+_PUT_CHUNK = 100
+
+
+def _put_series(cw, instance_id: str, metric: MetricName, points: list[tuple[datetime, float]]) -> None:
+    data = [{
+        "MetricName": metric.value,
+        "Dimensions": [{"Name": "InstanceId", "Value": instance_id}],
+        "Timestamp": ts,
+        "Value": value,
+        "Unit": "Percent" if metric is MetricName.CPU_UTILIZATION else "Bytes",
+    } for ts, value in points]
+    for i in range(0, len(data), _PUT_CHUNK):
+        cw.put_metric_data(Namespace="AWS/EC2", MetricData=data[i : i + _PUT_CHUNK])
+
+
 def _put_metrics(cw, instance_id: str, profile: str) -> None:
     """CPU/Network 시계열을 AWS/EC2 네임스페이스에 직접 주입.
-    실 AWS는 AWS/ 네임스페이스 커스텀 주입이 불가 — LocalStack 전용 경로다(ADR-0006 §2)."""
+    실 AWS는 AWS/ 네임스페이스 커스텀 주입이 불가 — LocalStack 전용 경로다(ADR-0006 §2).
+
+    **두 계열의 표본 간격이 다르다.** CPU 는 시간당 1개(판정이 쓰는 입자 그대로), 네트워크는
+    시간당 `NET_SAMPLES_PER_HOUR` 개다 — 차트가 네트워크를 Sum 으로 읽는다는 계약이
+    표본 하나짜리 시드에서는 검증되지 않기 때문이다(Sum 과 Average 가 같은 값이 된다).
+    """
     now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-    cpu = _cpu_series(profile)
-    net = {"idle": 5_000.0, "spike": 50_000.0, "normal": 5_000_000.0}[profile]
-    for metric, values in (
-        (MetricName.CPU_UTILIZATION, cpu),
-        (MetricName.NETWORK_IN, [net] * METRIC_HOURS),
-        (MetricName.NETWORK_OUT, [net] * METRIC_HOURS),
-    ):
-        cw.put_metric_data(
-            Namespace="AWS/EC2",
-            MetricData=[{
-                "MetricName": metric.value,
-                "Dimensions": [{"Name": "InstanceId", "Value": instance_id}],
-                "Timestamp": now - timedelta(hours=METRIC_HOURS - i),
-                "Value": v,
-                "Unit": "Percent" if metric is MetricName.CPU_UTILIZATION else "Bytes",
-            } for i, v in enumerate(values)],
-        )
+    _put_series(
+        cw, instance_id, MetricName.CPU_UTILIZATION,
+        [(now - timedelta(hours=METRIC_HOURS - i), v) for i, v in enumerate(_cpu_series(profile))],
+    )
+
+    net = {"idle": 5_000.0, "spike": 50_000.0, "normal": 5_000_000.0}[profile]  # 시간당 총 바이트
+    step = timedelta(hours=1) / NET_SAMPLES_PER_HOUR
+    net_points = [
+        (now - timedelta(hours=METRIC_HOURS - i) + step * s, net / NET_SAMPLES_PER_HOUR)
+        for i in range(METRIC_HOURS)
+        for s in range(NET_SAMPLES_PER_HOUR)
+    ]
+    for metric in (MetricName.NETWORK_IN, MetricName.NETWORK_OUT):
+        _put_series(cw, instance_id, metric, net_points)
 
 
 # ------------------------------------------------------------------ 실행 모드
 def seed_all(ec2, cw, region: str) -> None:
+    swept = _sweep_orphan_nacls(ec2)
+    if swept:
+        print(f"[seed] 고아 NACL {swept}건 정리 — VPC 가 사라진 NACL(LocalStack 잔해)")
+
     sg_ids: dict[str, str] = {}
     for sg_name, open_ssh in ((SG_OPEN, True), (SG_USED, False), (SG_UNUSED, False)):
         sg_id, created = _ensure_sg(ec2, sg_name, open_ssh)
@@ -269,6 +409,19 @@ def seed_all(ec2, cw, region: str) -> None:
 
     lt_id, created = _ensure_launch_template(ec2, ami)
     print(f"[seed] LaunchTemplate {LAUNCH_TEMPLATE_NAME}: {lt_id} ({'생성' if created else '존재 — skip'})")
+
+    # NACL 은 붉은 노드(idle = OpenIP SG)의 서브넷에 붙인다 — 위협 시나리오가 겨누는
+    # 인스턴스와 조치가 닿는 자원을 같은 자리로 모으기 위해서다.
+    idle_iid = _find_instance(ec2, INSTANCES[0][0])
+    subnet_id = _instance_subnet(ec2, idle_iid) if idle_iid else None
+    acl_id, created, cleared = _ensure_nacl(ec2, subnet_id)
+    state = "생성" if created else "존재 — skip"
+    if cleared:
+        state += f", 커스텀 규칙 {cleared}건 정리"
+    print(f"[seed] NACL {NACL_NAME}: {acl_id} ({state})")
+    # 조치의 target_arn 은 이 문자열이다 — 대본이 손으로 조립하지 않게 여기서 찍는다
+    print(f"[seed]   └ arn:aws:ec2:{region}:{account_id(region)}:network-acl/{acl_id}"
+          f" · 연결 서브넷 {subnet_id or '없음(인스턴스 미생성)'}")
 
 
 def reinject_metrics(ec2, cw) -> None:

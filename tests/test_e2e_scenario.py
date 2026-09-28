@@ -1,5 +1,5 @@
 # ==============================================================================
-# [파일 설명]  담당: 박지현 (QA & Scenario)
+# [파일 설명]  담당: 김승철 (QA & Scenario · 2026-09-16 박지현에게서 인수)
 # E2E 시연 시나리오 회귀입니다. 원천 명세는 `docs/E2E_DEMO_SCENARIOS.md`이며,
 # 그 문서가 스스로를 "이 파일의 명세"라고 규정한다.
 #
@@ -7,9 +7,9 @@
 # ① **시연 전제 대조 (지금 돈다)** — 설계서가 시연 대본으로 못 박은 값들이 코드·데이터와
 #    계속 맞는가. 입력 케이스 ID·런북 짝·계약 제약이 여기 해당한다. 파이프라인이
 #    없어도 전부 확인 가능하며, 어긋나면 **대본이 틀린 채로 발표까지 간다.**
-# ② **전 구간 흐름 (skip 유지)** — 감지 → Rule Engine → AI CoT → 가드레일 4단계 →
-#    원클릭 실행 → 자동 원복. `execute` 본체(Boto3 실행·`get_waiter`·자동 원복)가
-#    미구현이라 아직 못 돈다. 무엇을 검증할지는 docstring에 적어 둔다.
+# ② **전 구간 흐름 (이 파일 밖)** — 감지 → Rule Engine → AI CoT → 가드레일 4단계 →
+#    원클릭 실행 → 자동 원복/해제. 구현은 `apps/core-api/tests/test_e2e_flow.py`가
+#    갖는다(DB 픽스처가 그 디렉터리에 있다). 옮긴 사유는 파일 끝 안내에 적어 둔다.
 #
 # ①이 필요한 이유: 설계서는 200줄인데 대응 코드가 주석 한 줄이었다. 그동안 문서의
 # 주장(어느 골든 케이스를 쓰는지, 어느 런북이 짝인지)은 **아무것도 검증되지 않았다.**
@@ -261,47 +261,28 @@ def test_finops_incident_carries_no_risk_fields():
 
 
 # ==============================================================================
-# ② 전 구간 흐름 — 자동 원복까지 서면 skip 해제
-# Boto3 실행 경로는 dev 에 들어갔다(#211 / PR #216 — run_rightsizing_execution).
-# 남은 것은 Status Check 실패 주입과 자동 원복 둘이다(설계서 §대조 3번).
+# ② 전 구간 흐름 — **구현 위치가 apps/core-api/tests/test_e2e_flow.py 로 옮겨졌다**
 # ==============================================================================
 #
-# 아래 2건은 김세혁의 `execute` 본체(Boto3 실행 → `get_waiter` Status Check → 자동
-# 원복)가 서면 열린다. 그때 이 파일 위쪽의 전제 테스트가 이미 입력·런북 짝을
-# 보증하고 있으므로, 흐름 테스트는 **상태 전이만** 보면 된다.
-
-
-@pytest.mark.skip(reason="Status Check 실패 주입·자동 원복 미구현 — 설계서 §대조 3번(김세혁)")
-def test_t1_idle_ec2_downsize_and_auto_rollback_flow():
-    """T1 전 구간 — 설계서 §T1 단계표 1~9번.
-
-    검증할 상태 전이:
-      A1 수집 → `COST_CANDIDATE` 판정
-      → Incident `ANALYZING` → 추천 `RUNBOOK_EC2_RIGHTSIZING` → `AWAITING_APPROVAL`
-      → `POST /actions/execute` **202** → Execution `IN_PROGRESS`
-      → Status Check 2/2 실패 → `FAILED`
-      → `RUNBOOK_EC2_REVERT_SIZE` (`trigger_source: AUTO_ON_FAILURE`)
-        → 원본 Execution `ROLLBACK_INITIATED` → `ROLLED_BACK`
-
-    핵심: **5번 [조치 실행] 이후 사람 입력이 없다.** 8~9번은 전부 시스템이 한다.
-    원복 파라미터는 AI도 화면도 아닌 **DB 백업 레코드(`backup_record_id`)** 에서만 온다.
-    """
-
-
-@pytest.mark.skip(reason="Status Check 실패 주입·자동 원복 미구현 — 설계서 §대조 3번(김세혁)")
-def test_t2_ssh_bruteforce_block_and_one_click_release_flow():
-    """T2 전 구간 — 설계서 §T2 단계표 1~8번.
-
-    **시나리오는 SSH 브루트포스(S3)다.** `0.0.0.0/0` 개방(S1)이 아니다 —
-    위 `test_t2_must_not_use_the_open_ip_case` 참조.
-
-    검증할 상태 전이:
-      S3 주입 → Incident `SECOPS` 생성
-      → `RUNBOOK_NACL_ADD_DENY` (`trigger_source: USER_APPROVAL`,
-         `approval_mode: HUMAN_ONLY`, `cidr_block: 203.0.113.10/32`)
-        → Execution `SUCCESS`
-      → 관제자 [해제] → `RUNBOOK_NACL_RESTORE` (`USER_APPROVAL`) → `SUCCESS`
-
-    핵심: 막는 것도 푸는 것도 **사람이 판단한다**(`HUMAN_ONLY`). 오탐 시 서브넷
-    전체가 끊기므로 의도적으로 사람을 넣었다. 차단 대상은 `/32` 단일 주소다.
-    """
+# 종전에는 이 자리에 skip 된 빈 테스트 둘이 있었다(T1 자동 원복 · T2 차단→해제).
+# 선행이 전부 닫히고 본문을 쓰려 하니 **이 디렉터리에서는 쓸 수 없었다** — 두 흐름은
+# Incident·Execution 의 상태 전이와 백업 연결을 DB 로 검증해야 하는데, `tests/` 에는
+# `db`·`pg_engine`·`client_pg`·`make_incident` 계열 픽스처가 하나도 없다. 그 셋은
+# `apps/core-api/tests/conftest.py` 에 있고, 이 파일 옆 `execution_harness.py` 헤더가
+# 적은 이유(CI 가 여러 디렉터리를 한 세션으로 돌릴 때 `conftest` 최상위 이름을 그쪽이
+# 먼저 차지한다) 때문에 `conftest` 를 직접 import 해 끌어올 수도 없다. 픽스처 재사용
+# 자체가 불가능한 것이 아니라, conftest 가 **자기 디렉터리 아래에만** 적용되고 직접
+# import 가 이름 충돌을 내는 두 제약 때문이다 — 그래서 픽스처를 두 벌 만드는 대신
+# 테스트를 픽스처 쪽으로 옮겼다.
+#
+# 그래서 **구현은 `apps/core-api/tests/test_e2e_flow.py` 가 갖는다**(2026-09-16 확정 ·
+# SSOT §담당별 카드). 그 디렉터리는 CI `test` 잡의 pytest 경로에 이미 들어 있어
+# 워크플로 변경이 필요 없다.
+#
+#   test_t1_idle_ec2_downsize_and_auto_rollback_flow   — 설계서 §T1 단계표 1~9번
+#   test_t2_ssh_bruteforce_block_and_one_click_release_flow — §T2 단계표 1~8번
+#
+# **이 파일이 그 흐름에 대해 계속 갖는 몫**은 ① 층이다 — 어느 골든 케이스를 쓰는지,
+# 어느 런북이 짝인지, 쓰지 않기로 한 케이스는 무엇인지(`test_t2_must_not_use_the_open_ip_case`).
+# 흐름 테스트는 그 전제를 다시 확인하지 않고 **상태 전이만** 본다. 실경로/대체 컷
+# 경계는 `docs/E2E_DEMO_SCENARIOS.md`.

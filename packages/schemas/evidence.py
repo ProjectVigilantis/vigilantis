@@ -1,27 +1,42 @@
 # ==============================================================================
 # [파일 설명]  담당: 안성일 (AI/Guardrail · Architect)
 # AI 판단 근거(Evidence)의 유형·내용 계약입니다. (Issue #49)
-# ThreatEvent·RuleEvaluation·Metric·Execution 근거를 Incident에 고정해 AI 입력과
+# ThreatEvent·RuleEvaluation·Metric·Execution·Asset 근거를 Incident에 고정해 AI 입력과
 # 감사에 사용한다. MVP 외부 API에는 evidence_ids(ID 목록)만 공개한다.
 #
 # 계약 원칙 (#49 확정)
 #   - content는 새 구조를 발명하지 않고 기존 확정 계약을 재사용한다:
-#     RULE→RuleEvaluationResult, THREAT→NormalizedThreatEvent,
-#     METRIC→관측 구간+MetricSummary(수집 요약), EXECUTION→실행 요약 최소 필드.
+#     RULE→RuleEvaluationResult,
+#     THREAT→NormalizedThreatEvent + 접수 시 확보한 자산·관계·로그 context(선택),
+#     METRIC→관측 구간+MetricSummary(수집 요약), EXECUTION→실행 요약 최소 필드,
+#     ASSET→판정 회차+공개 AssetItem.
 #   - evidence_type과 content 모델은 반드시 일치한다(JSON 저장·조회 양쪽 검증).
+#
+# ASSET 근거는 나머지 넷과 쓰임이 다르다 (Issue #265)
+#   - 다른 근거는 "무엇을 보고 판단했나"를 남기고 그래프 입력의 evidences로도 나가지만,
+#     ASSET은 **판정 시점의 자산 상태를 되살리기 위한 것**이라 그래프에는 asset_context로
+#     들어간다. 그래서 AgentEvidenceInput은 이 유형을 거절한다(agents.py) — 근거로도
+#     실으면 같은 값이 모델 입력에 두 번 간다.
+#   - 후보의 evidence_ids가 ASSET 근거를 가리키지 못하는 것은 "후보 evidence_ids ⊆
+#     그래프 입력 Evidence" 검증이 설 때 따라 나온다. 그 검증은 Workflow 몫이고
+#     (agents.py 계약 원칙 · apps/core-api/agent_dispatcher.py 5번) 아직 없다 —
+#     그래프 자체는 모델이 돌려준 evidence_ids를 입력과 대조하지 않는다.
+#   - 자산 행은 수집 회차마다 덮어써지므로(db/repositories/assets.py upsert_asset)
+#     이 근거가 그 회차 자산의 유일한 사본이다.
 # ==============================================================================
 
 from __future__ import annotations
 
 from enum import Enum, unique
-from typing import Optional, Union
+from typing import Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .api.actions import ExecutionStatus
-from .api.assets import UtcDateTime
+from .api.assets import AssetItem, AssetType, RelationType, UtcDateTime
 from .assets import MetricName, MetricSummary
 from .events import NormalizedThreatEvent
+from .mock_logs import MockSshLogEvidence
 from .rules import RuleEvaluationResult
 from .runbooks import RunbookId
 
@@ -32,6 +47,7 @@ class EvidenceType(str, Enum):
     RULE = "RULE"
     THREAT = "THREAT"
     EXECUTION = "EXECUTION"
+    ASSET = "ASSET"
 
 
 class MetricEvidence(BaseModel):
@@ -59,14 +75,6 @@ class RuleEvidence(BaseModel):
     evaluation: RuleEvaluationResult
 
 
-class ThreatEvidence(BaseModel):
-    """위협 이벤트 근거 — 정규화된 이벤트 계약을 그대로 보존한다."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    event: NormalizedThreatEvent
-
-
 class ExecutionEvidence(BaseModel):
     """실행 결과 근거(예: 사전 격리) — 최소 요약만 보존한다."""
 
@@ -78,7 +86,105 @@ class ExecutionEvidence(BaseModel):
     summary: Optional[str] = Field(None, min_length=1)
 
 
-EvidenceContent = Union[MetricEvidence, RuleEvidence, ThreatEvidence, ExecutionEvidence]
+class DetectionAssetSnapshot(BaseModel):
+    """판정이 내려진 그 회차의 자산 상태 — Intake가 나르고 ASSET 근거로 보존된다.
+
+    자산 표현은 공개 AssetItem을 그대로 쓴다. 대상 ARN·유형·상태·Spec·관계를 이미
+    담고 있고 spec↔asset_type 정합도 그쪽 계약이 강제하며, 그래프 입력의 자산 문맥과
+    같은 타입이라(agents.py AgentAssetContext) 되살릴 때 변환이 필요 없다.
+
+    collection_run_id를 따로 받는 것은 공개 AssetItem이 그 값을 담지 않기 때문이다
+    (FE 계약이라 여기 필요한 필드를 늘리지 않는다). 자산 행의 last_collection_run_id에서
+    채우며, 판정의 collection_run_id와 대조하는 것이 이 필드의 쓸모다(intake.py).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    collection_run_id: str = Field(min_length=1)
+    asset: AssetItem
+
+
+class SecOpsContextIssue(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_arn: str = Field(min_length=1, max_length=512)
+    reason: Literal["not_collected", "absent", "missing_collection", "relation_run_mismatch",
+                    "type_or_scope_mismatch"]
+
+
+class SecOpsEvidenceContext(BaseModel):
+    """MVP 모의 위협 접수 시 확보한 사본이며, 운영 로그 수집 도입 시 재검토한다.
+
+    Inventory는 접수 때 조회 가능한 자료로, 합성 이벤트 발생 시점의 과거 상태를
+    복원하지 않는다. 관련 자산은 직접 연결된 SG/NACL로 제한한다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal["mvp-mock-v1"] = "mvp-mock-v1"
+    captured_at: UtcDateTime
+    target_status: Literal["available", "not_collected", "absent", "missing_collection"]
+    target: DetectionAssetSnapshot | None = None
+    related_assets: list[DetectionAssetSnapshot] = Field(default_factory=list, max_length=64)
+    relation_issues: list[SecOpsContextIssue] = Field(default_factory=list, max_length=64)
+    # None은 로그 미첨부를 뜻하며, 관측된 실패 0건과 구분한다.
+    log_evidence: MockSshLogEvidence | None = None
+
+    @model_validator(mode="after")
+    def _target_shape(self):
+        if (self.target_status == "available") != (self.target is not None):
+            raise ValueError("target_status and target snapshot disagree")
+        arns = [r.asset.arn for r in self.related_assets]
+        if len(set(arns)) != len(arns):
+            raise ValueError("duplicate related asset snapshot")
+        if self.target is None and (self.related_assets or self.relation_issues):
+            raise ValueError("related context requires a target snapshot")
+        if self.target is not None:
+            asset = self.target.asset
+            by_arn = {r.asset.arn: r.asset for r in self.related_assets}
+            kinds = {RelationType.SECURED_BY: AssetType.SG, RelationType.PROTECTED_BY: AssetType.NACL}
+            if set(by_arn) != {r.target_arn for r in asset.relationships}:
+                raise ValueError("snapshot relationships and related assets differ")
+            for relation in asset.relationships:
+                linked = by_arn[relation.target_arn]
+                if (asset.asset_type is not AssetType.EC2
+                        or linked.asset_type is not kinds.get(relation.relation_type)
+                        or linked.account_id != asset.account_id or linked.region != asset.region):
+                    raise ValueError("related snapshot type or scope mismatch")
+        return self
+
+
+class ThreatEvidence(BaseModel):
+    """정규화된 위협 이벤트와 선택적 접수 시점 사본. 기존 근거의 context는 None이다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event: NormalizedThreatEvent
+    context: SecOpsEvidenceContext | None = None
+
+    @model_validator(mode="after")
+    def _context_matches_event(self):
+        if self.context is not None:
+            target = self.context.target
+            if target is not None and target.asset.arn != self.event.target_arn:
+                raise ValueError("context target differs from threat event")
+            logs = self.context.log_evidence
+            if logs is not None:
+                payload = self.event.payload
+                if not logs.matches_threat_fields(
+                    target_arn=self.event.target_arn,
+                    source_ip=getattr(payload, "source_ip", None),
+                    occurred_at=self.event.occurred_at,
+                    failed_attempt_count=getattr(payload, "failed_attempt_count", None),
+                    window_seconds=getattr(payload, "window_seconds", None),
+                ):
+                    raise ValueError("log evidence differs from threat event")
+        return self
+
+
+EvidenceContent = Union[
+    MetricEvidence, RuleEvidence, ThreatEvidence, ExecutionEvidence, DetectionAssetSnapshot
+]
 
 # evidence_type → content 모델 매핑의 단일 원천 (AgentEvidenceInput도 이 매핑을 쓴다)
 EVIDENCE_CONTENT_MODELS: dict[EvidenceType, type[BaseModel]] = {
@@ -86,6 +192,9 @@ EVIDENCE_CONTENT_MODELS: dict[EvidenceType, type[BaseModel]] = {
     EvidenceType.RULE: RuleEvidence,
     EvidenceType.THREAT: ThreatEvidence,
     EvidenceType.EXECUTION: ExecutionEvidence,
+    # ASSET만 *Evidence 이름이 아닌 것은, 같은 객체를 Intake도 나르기 때문이다
+    # (packages/schemas/intake.py). 이름을 갈면 같은 값이 두 이름을 갖는다.
+    EvidenceType.ASSET: DetectionAssetSnapshot,
 }
 
 

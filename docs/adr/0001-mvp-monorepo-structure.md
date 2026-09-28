@@ -6,7 +6,7 @@
 
 ## Context (배경)
 
-초기 저장소는 풀비전(마이크로서비스) 기준으로 앱이 4개로 분리돼 있었다: `core-api`, `ai-engine`, `scan-worker`(Step Functions/Fargate), `security-soar`(Lambda). 그러나 1차 발표 MVP 범위는 다음과 같이 좁다.
+초기 저장소는 풀비전(마이크로서비스) 기준으로 앱이 4개로 분리돼 있었다: `core-api`, `ai-engine`, `scan-worker`(Step Functions/Fargate), `security-soar`(Lambda). 그러나 MVP 범위(중간 발표 10/1 시연)는 다음과 같이 좁다.
 
 - AWS **단일 계정 / 1–2개 리전 / EC2·SG 한정**
 - 대용량 분산 스캔·서버리스 불필요 (Step Functions/Lambda 과함)

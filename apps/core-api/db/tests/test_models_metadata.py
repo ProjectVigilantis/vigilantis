@@ -52,7 +52,12 @@ def test_row_invariant_constraints_registered():
             "ck_incidents_summary_lines_len",
             "ck_incidents_wait_deadline_60s",
         },
-        "action_executions": {"ck_action_executions_rollback_child_status"},
+        "action_executions": {
+            "ck_action_executions_rollback_child_status",
+            # 판정 불가 보류 기록의 모양과 UNVERIFIED의 기록 필수 (Issue #249)
+            "ck_action_executions_verification_hold_shape",
+            "ck_action_executions_unverified_has_hold",
+        },
         "execution_steps": {
             "ck_execution_steps_effect_matches_status",
             "ck_execution_steps_sequence_positive",

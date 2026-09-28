@@ -1,7 +1,7 @@
 """POST /api/v1/actions/execute 외부 DTO 계약 테스트.
 
 확정 계약(4.4): 요청은 SSOT 3필드만, 추가 필드 거부, runbook_id는 확정 10종 원천,
-실행 상태 6종(SSOT 4종 + 복구 최종 결과 2종), "Z" 시각 직렬화.
+실행 상태 7종(SSOT 4종 + 복구 최종 결과 2종 + 결과 확인 불가 1종), "Z" 시각 직렬화.
 """
 
 import pytest
@@ -14,7 +14,7 @@ from schemas.api.actions import (
 )
 from schemas.runbooks import ALLOWED_RUNBOOK_IDS
 
-# SSOT 4종 + FE 합의 확장 2종. 코드가 아니라 이 리터럴 집합이 기대값이다.
+# SSOT 4종 + FE 합의 확장 3종. 코드가 아니라 이 리터럴 집합이 기대값이다.
 CONTRACT_EXECUTION_STATUSES = {
     "IN_PROGRESS",
     "SUCCESS",
@@ -22,6 +22,7 @@ CONTRACT_EXECUTION_STATUSES = {
     "ROLLBACK_INITIATED",
     "ROLLED_BACK",
     "ROLLBACK_FAILED",
+    "UNVERIFIED",  # 결과 확인 불가 — 판정 불가 재시도 소진 (Issue #249)
 }
 
 

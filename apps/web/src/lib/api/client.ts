@@ -1,4 +1,4 @@
-// API 호출 계층 — 오류 봉투를 ApiError로 변환하고 계약 엔드포인트 4종의 타입드 함수를 제공합니다.
+// API 호출 계층 — 오류 봉투를 ApiError로 변환하고 계약 엔드포인트 5종의 타입드 함수를 제공합니다.
 
 import type {
   AssetsResponse,
@@ -10,18 +10,26 @@ import type {
   IncidentResponse,
   IncidentStatus,
   IncidentsResponse,
+  MetricsTimeseriesResponse,
+  ResolutionJudgement,
 } from '@/types/api';
 
 /**
- * NEXT_PUBLIC_API_BASE_URL 미설정이면 자체 origin(= mock Route Handler).
- * 서버 실행 구간은 상대 경로 fetch가 불가능해 로컬 dev 서버 origin으로 대체한다.
+ * 계약 엔드포인트의 오리진 — **언제나 실 백엔드(core-api)를 가리킨다.**
+ *
+ * 자체 origin으로 떨어지는 경로를 남기지 않는다. mock Route Handler(`src/app/api/v1/**`)를 걷어낸
+ * 뒤에도 그 fallback이 남아 있으면 미설정 환경에서 Next 서버가 **자기 자신에게 계약 요청을 보내고**,
+ * 돌아온 404를 화면이 계약 오류로 그린다 — 원인이 설정 누락인데 화면은 백엔드 장애라고 말한다.
+ * 그래서 미설정이면 compose의 core-api 기본 주소(루트 `.env`의 `APP_PORT=8000`)로 간다.
  */
-function baseUrl(): string {
-  const configured = process.env.NEXT_PUBLIC_API_BASE_URL;
-  if (configured) return configured.replace(/\/$/, '');
-  // ponytail: 서버 측 자체 origin은 localhost 가정 — 실 BE 전환은 환경변수로만 한다.
-  if (typeof window === 'undefined') return `http://127.0.0.1:${process.env.PORT ?? 3000}`;
-  return '';
+export const DEFAULT_API_BASE_URL = 'http://localhost:8000';
+
+/**
+ * REST와 WebSocket이 **같은 오리진**을 쓴다(§4.8). 소켓 쪽이 raw env를 따로 읽으면 기본값이
+ * 한쪽에만 걸려 REST는 붙는데 인디케이터만 `실시간 미연동`으로 남는다 — 그래서 여기 하나로 모은다.
+ */
+export function apiBaseUrl(): string {
+  return (process.env.NEXT_PUBLIC_API_BASE_URL || DEFAULT_API_BASE_URL).replace(/\/$/, '');
 }
 
 /** REST 오류 봉투({"error":{code,message,request_id}})를 담은 typed error. */
@@ -39,11 +47,35 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * 응답이 오기 전에 끊긴 실패(연결 거부·DNS 등) — 오류 봉투가 없으므로 원인 코드만 문구에 남긴다.
+ *
+ * `fetch`가 던진 오류를 그대로 올리지 않고 **여기서 새로 만든다.** Node의 연결 오류
+ * (`TypeError: fetch failed` → cause `connect ECONNREFUSED`)는 스택이 전부 `node:` 내부 프레임이다.
+ * 앱 코드 프레임이 하나도 없는 Error가 dev에서 서버 컴포넌트 prop(`<ErrorState error={…} />`)으로
+ * 넘어가면 React Flight 디버그 직렬화가 스트림을 깨뜨려 화면이 끝나지 않는다
+ * (`chunk.reason.enqueueModel is not a function` — BE 미기동 시 조회 화면 전부가 멈추던 원인).
+ * 같은 이유로 `cause`도 붙이지 않는다 — 붙이면 원래 오류가 그대로 직렬화된다.
+ */
+function networkFailure(error: unknown): Error {
+  const cause = error instanceof Error ? error.cause : undefined;
+  const code =
+    typeof cause === 'object' && cause !== null && 'code' in cause && typeof cause.code === 'string'
+      ? cause.code
+      : null;
+  return new Error(`요청이 실패했습니다 (네트워크 오류${code === null ? '' : `: ${code}`})`);
+}
+
 async function requestWithStatus<T>(
   path: string,
   init?: RequestInit,
 ): Promise<{ httpStatus: number; body: T }> {
-  const response = await fetch(`${baseUrl()}/api/v1${path}`, { cache: 'no-store', ...init });
+  let response: Response;
+  try {
+    response = await fetch(`${apiBaseUrl()}/api/v1${path}`, { cache: 'no-store', ...init });
+  } catch (error) {
+    throw networkFailure(error);
+  }
   const body: unknown = await response.json().catch(() => null);
 
   if (!response.ok) {
@@ -66,6 +98,15 @@ export function getAssets(): Promise<AssetsResponse> {
   return request<AssetsResponse>('/assets');
 }
 
+/**
+ * 대시보드 시계열 2축(DSH). `hours`는 조회 창이며 서버가 1–336으로 막는다 —
+ * 계약 밖 값은 422다. 기본 72는 시드가 넣는 CPU 관측 구간과 같다.
+ */
+export function getMetricsTimeseries(hours?: number): Promise<MetricsTimeseriesResponse> {
+  const suffix = hours === undefined ? '' : `?hours=${hours}`;
+  return request<MetricsTimeseriesResponse>(`/metrics/timeseries${suffix}`);
+}
+
 export function getIncidents(filter?: {
   status?: IncidentStatus;
   category?: IncidentCategory;
@@ -79,6 +120,22 @@ export function getIncidents(filter?: {
 
 export function getIncident(incidentId: string): Promise<IncidentResponse> {
   return request<IncidentResponse>(`/incidents/${encodeURIComponent(incidentId)}`);
+}
+
+/**
+ * 관제자 종료 처리(#199). **Idempotency Key를 받지 않는다** — 종료는 AWS를 바꾸지 않고
+ * Incident 상태 하나만 옮기므로 조건부 갱신 자체가 멱등이다. 이미 종료된 건의 재요청도
+ * 200이며 처음 저장된 판단을 그대로 돌려준다(schemas/api/incidents.py `ResolveIncidentRequest`).
+ */
+export function resolveIncident(
+  incidentId: string,
+  resolution: ResolutionJudgement,
+): Promise<IncidentResponse> {
+  return request<IncidentResponse>(`/incidents/${encodeURIComponent(incidentId)}/resolve`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ resolution }),
+  });
 }
 
 /**

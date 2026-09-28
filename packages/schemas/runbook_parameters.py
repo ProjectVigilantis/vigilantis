@@ -4,8 +4,10 @@
 # ID 수준 판정은 runbooks.py가 담당하고, 이 파일은 그 아래 층 — "각 Runbook이
 # 어떤 값을 받는가"를 정의한다. 원천은 ADR-0007 §5 파라미터 표이며, 전 키가 required다.
 #
-# 두 계열로 나뉜다. 같은 Runbook이라도 AI가 채우는 값과 실행이 받는 값이 다르다.
-#   ① 후보 파라미터(본편 7종) — AI가 정하는 값만. 나머지는 지어낼 수 없다.
+# 두 계열로 나뉜다. 같은 Runbook이라도 후보가 싣는 값과 실행이 받는 값이 다르다.
+#   ① 후보 파라미터(본편 7종) — 후보 시점에 정해지는 값만. 대부분 AI가 정하고, 답이 규칙
+#      하나로 정해지는 값은 서버가 계산한다(SERVER_COMPUTED_CANDIDATE_PARAMS — #251의
+#      RIGHTSIZING 목표 타입). 나머지는 지어낼 수 없다.
 #      RUNBOOK_EC2_ISOLATE·SG_DELETE_ISOLATED·EBS_DELETE_UNATTACHED는 AI가 정할
 #      값이 0개라 빈 모델이다. 빈 모델은 낭비가 아니라 방어다 — extra=forbid가
 #      "이 Runbook에는 AI가 값을 실을 자리가 없다"를 강제한다.
@@ -42,6 +44,7 @@ from pydantic import (
     model_validator,
 )
 
+from .rightsizing_policy import KNOWN_INSTANCE_TYPES
 from .runbooks import ROLLBACK_RUNBOOK_IDS, RunbookId
 
 # ------------------------------------------------------------------------------
@@ -97,6 +100,10 @@ InstanceId = Annotated[str, _fullmatch(r"i-[a-f0-9]{8,17}")]
 SecurityGroupId = Annotated[str, _fullmatch(r"sg-[a-f0-9]{8,17}")]
 NetworkAclId = Annotated[str, _fullmatch(r"acl-[a-f0-9]{8,17}")]
 VolumeId = Annotated[str, _fullmatch(r"vol-[a-f0-9]{8,17}")]
+# 런북 파라미터가 아니라 **백업 payload 계약**(backups.SgFullRulesBackup)이 쓰는 형식이다.
+# 그래도 여기 두는 이유는 executor가 백업 payload의 식별자를 파라미터 계약과 같은 타입으로
+# 읽기 때문이다 — AWS 자원 ID 패턴을 두 파일에 적으면 한쪽만 고쳐진 채로 남는다.
+VpcId = Annotated[str, _fullmatch(r"vpc-[a-f0-9]{8,17}")]
 TargetGroupArn = Annotated[
     str, _fullmatch(r"arn:aws:elasticloadbalancing:.*:targetgroup/.*")
 ]
@@ -105,6 +112,43 @@ AutoScalingSize = Annotated[StrictInt, Field(ge=1, le=4)]
 Ipv4Cidr = Annotated[str, AfterValidator(_require_network_cidr)]
 # "-1"은 AWS의 전체 프로토콜 표기다
 NaclProtocol = Literal["tcp", "udp", "icmp", "-1"]
+
+
+def _require_known_instance_type(value: str) -> str:
+    if value not in KNOWN_INSTANCE_TYPES:
+        raise ValueError("사양 표(schemas/rightsizing_policy.py)에 있는 인스턴스 타입이어야 합니다")
+    return value
+
+
+# 다운사이징 목표 타입(#251). 서버 규칙이 사양 표 안에서만 계산하므로, 표 밖 값은 규칙이
+# 낼 수 없는 값이다 — ④ AWS Dry-Run까지 보내지 않고 ① Schema Check에서 끝낸다.
+RightsizingTargetType = Annotated[str, AfterValidator(_require_known_instance_type)]
+
+# NACL 규칙을 AWS에 넣고 다시 읽을 때 쓰는 표기. describe_network_acls가 돌려주는
+# Protocol 값이 이쪽이라, 백업 fingerprint 대조(ADR-0008 §5)가 보는 축도 이쪽이다.
+NaclProtocolNumber = Literal["6", "17", "1", "-1"]
+
+# 이름 → 번호. **보내는 값도 번호로 맞춘다.**
+# 실측(2026-09-08 LocalStack Community): Protocol="tcp"로 넣으면 그 문자열이 그대로
+# 저장돼 describe도 "tcp"를 돌려준다. 실 AWS는 같은 요청을 번호로 정규화하므로 같은
+# 코드가 환경마다 다른 값을 저장하게 된다 — 그러면 NACL_RESTORE의 fingerprint 대조가
+# LocalStack에서는 맞고 실 AWS에서는 어긋난다(백업 "tcp" vs 엔트리 "6"). 삽입 시점에
+# 번호로 바꿔 두 환경이 같은 값을 저장하게 한다.
+NACL_PROTOCOL_NUMBERS: Mapping[NaclProtocol, NaclProtocolNumber] = {
+    "tcp": "6",
+    "udp": "17",
+    "icmp": "1",
+    "-1": "-1",
+}
+
+# ADD_DENY는 인바운드 차단 규칙이다 — ADR-0007 §5 파라미터 표에 egress가 없다.
+# precheck·백업 캡처·실행이 같은 축을 봐야 하므로 값을 한자리에 둔다. 세 자리가
+# 각자 False를 적으면 한쪽만 바뀌었을 때 백업이 가리키는 슬롯과 실제로 넣은 슬롯이
+# 갈리고, 그 어긋남은 NACL_RESTORE가 규칙을 못 찾는 형태로 뒤늦게 드러난다.
+NACL_ADD_DENY_EGRESS = False
+
+# ADD_DENY가 넣는 RuleAction. 백업 fingerprint의 rule_action 항목과 같은 값이다.
+NACL_DENY_ACTION = "deny"
 
 
 class _Parameters(BaseModel):
@@ -143,7 +187,9 @@ class SgDeleteIsolatedCandidateParameters(_Parameters):
 
 
 class Ec2RightsizingCandidateParameters(_Parameters):
-    target_instance_type: _FreeText
+    """목표 타입은 AI가 아니라 그래프가 규칙으로 계산해 싣는다(#251, SERVER_COMPUTED_CANDIDATE_PARAMS)."""
+
+    target_instance_type: RightsizingTargetType
 
 
 class Ec2EnableAutoscalingCandidateParameters(_Parameters):
@@ -276,6 +322,23 @@ CANDIDATE_PARAMETER_MODELS: Mapping[RunbookId, type[BaseModel]] = {
     RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED: EbsDeleteUnattachedCandidateParameters,
 }
 
+# 후보 파라미터 중 그래프가 규칙으로 계산해 채우는 키(#251). AI 출력 스키마와 capability
+# 명세에서 빠진다 — 모델에게 채우라고 하지 않은 값은 모델이 채울 자리도 두지 않는다.
+# 계산하는 곳은 ai/agent.py _server_parameter_values다.
+SERVER_COMPUTED_CANDIDATE_PARAMS: Mapping[RunbookId, frozenset[str]] = {
+    RunbookId.RUNBOOK_EC2_RIGHTSIZING: frozenset({"target_instance_type"}),
+}
+
+
+def ai_decided_parameter_names(runbook_id: RunbookId) -> list[str]:
+    """그 Runbook의 후보 파라미터 중 AI가 정하는 키(정렬). 롤백 3종은 빈 목록이다."""
+    model = CANDIDATE_PARAMETER_MODELS.get(runbook_id)
+    if model is None:
+        return []
+    computed = SERVER_COMPUTED_CANDIDATE_PARAMS.get(runbook_id, frozenset())
+    return sorted(name for name in model.model_fields if name not in computed)
+
+
 PRECHECK_PARAMETER_MODELS: Mapping[RunbookId, type[BaseModel]] = {
     RunbookId.RUNBOOK_EC2_ISOLATE: Ec2IsolateParameters,
     RunbookId.RUNBOOK_NACL_ADD_DENY: NaclAddDenyParameters,
@@ -324,6 +387,28 @@ def bind_candidate_parameters(data: Any) -> Any:
     model = CANDIDATE_PARAMETER_MODELS.get(runbook_id)
     if model is None:
         return data  # 롤백 3종 — 후보가 될 수 없다는 판정은 모델 검증기가 한다
+    raw = data.get("parameters", {})
+    if not isinstance(raw, dict):
+        return data
+    return {**data, "parameters": model.model_validate(raw)}
+
+
+def bind_precheck_parameters(data: Any) -> Any:
+    """dict 입력의 parameters를 runbook_id가 지정한 **실행 파라미터** 모델로 검증한다.
+
+    bind_candidate_parameters와 같은 규약이고 표만 다르다 — 이쪽은 확정 10종 전부를
+    가진 PRECHECK_PARAMETER_MODELS다. 후보가 될 수 없는 롤백 3종(ADR-0004 정책 ②)도
+    실행 파라미터 계약은 가지므로, 원복 경로의 가드레일 ①이 이 표로 대조한다.
+    """
+    if not isinstance(data, dict):
+        return data
+    try:
+        runbook_id = RunbookId(data.get("runbook_id"))
+    except (ValueError, TypeError):
+        return data  # runbook_id 오류는 필드 검증이 보고한다
+    model = PRECHECK_PARAMETER_MODELS.get(runbook_id)
+    if model is None:
+        return data  # 확정 10종 밖 — 목록 대조는 가드레일 ②가 한다
     raw = data.get("parameters", {})
     if not isinstance(raw, dict):
         return data

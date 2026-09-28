@@ -16,6 +16,8 @@ from __future__ import annotations
 from enum import Enum
 from typing import Optional
 
+from schemas.asset_roles import ROLE_ISOLATION, ROLE_TAG_KEY
+
 # ----- 임계치 (실 계정 데이터로 재보정 대상) -----
 IDLE_CPU_AVG = 5.0        # 평균 CPU 이 값 미만이면 저활성 후보
 SPIKE_CPU_MAX = 40.0      # 평균은 낮아도 최대가 이 값 이상이면 스파이크 → 다운사이징 부적합
@@ -41,6 +43,7 @@ class SkipReason(str, Enum):
     SKIP_LOW_UTIL = "SKIP_LOW_UTIL"                    # 스파이크 등으로 다운사이징 부적합
     SKIP_WHITELISTED = "SKIP_WHITELISTED"              # 화이트리스트(예: default SG)
     SKIP_ACTIVE = "SKIP_ACTIVE"                        # 정상 가동(낭비 아님)
+    SKIP_UNSUPPORTED_STATE = "SKIP_UNSUPPORTED_STATE"  # EBS: available/in-use 외 상태 — 판정 보류(오삭제 방지, #276)
 
 
 def _is_prod(tags: dict) -> bool:
@@ -71,24 +74,42 @@ def evaluate_ec2(cpu_avg: Optional[float], cpu_max: Optional[float], cpu_datapoi
 
 def evaluate_ebs(state: Optional[str],
                  attached_instance_ids: Optional[list[str]]) -> tuple[Verdict, Optional[SkipReason]]:
-    """EBS 볼륨 1개 판정 → (verdict, skip_reason).
+    """EBS 볼륨 1개 판정 → (verdict, skip_reason). (#276 정책 확정)
 
-    정리 후보(UNUSED)는 **state == "available"(미부착·정상 유휴)** 이면서 부착 인스턴스가 없는
-    경우로 한정한다. in-use 는 SKIP_ACTIVE, creating/deleting/error 등 전이·비정상 상태는
-    삭제 후보가 아니므로 UNUSED 로 보지 않는다(오삭제 방지). SG 미부착 판정과 같은 결.
+    - 정리 후보(UNUSED): **state == "available" 이면서 부착 인스턴스가 없음** — 유일한 삭제 후보.
+    - SKIP_ACTIVE: in-use 이거나 부착된 볼륨(정상 가동). available + 부착 같은 모순 조합은 부착을 우선.
+    - SKIP_UNSUPPORTED_STATE: creating·deleting·error·deleted·미상(null·기타) — available/in-use 가
+      아닌 상태. 삭제 후보가 아니므로 UNUSED 로 보지 않고, "정상 가동" 오해를 주는 SKIP_ACTIVE 대신
+      판정 보류 코드로 처리한다(오삭제 방지 + 관제 화면·AI 요약 정확성).
     """
-    if not attached_instance_ids and (state or "").lower() == "available":
+    s = (state or "").lower()
+    if not attached_instance_ids and s == "available":
         return Verdict.UNUSED, None
-    return Verdict.SKIP, SkipReason.SKIP_ACTIVE
+    if attached_instance_ids or s == "in-use":
+        return Verdict.SKIP, SkipReason.SKIP_ACTIVE
+    return Verdict.SKIP, SkipReason.SKIP_UNSUPPORTED_STATE
+
+
+def _is_isolation_sg(tags: dict | None) -> bool:
+    """격리용 SG 여부 — 자리 태그(schemas.asset_roles)가 키·값 모두 정확히 맞을 때만 True.
+    이름이나 규칙 수로 추정하지 않는다(#359)."""
+    return (tags or {}).get(ROLE_TAG_KEY) == ROLE_ISOLATION
 
 
 def evaluate_sg(name: Optional[str], attached: Optional[bool],
-                open_to_world: Optional[bool]) -> tuple[Verdict, Optional[SkipReason]]:
-    """SG 1개 판정 → (verdict, skip_reason)."""
+                open_to_world: Optional[bool],
+                tags: dict | None = None) -> tuple[Verdict, Optional[SkipReason]]:
+    """SG 1개 판정 → (verdict, skip_reason). 판정 우선순위대로 검사."""
     if (name or "").lower() == "default":
         return Verdict.SKIP, SkipReason.SKIP_WHITELISTED   # default SG 는 삭제/변경 불가
     if open_to_world:
         return Verdict.THREAT, None                        # 22/3389 등 전체개방
+    # 격리용 SG 는 EC2_ISOLATE 전까지 미부착이 정상이라 UNUSED 로 두면 첫 회차부터 삭제 후보다.
+    # 위협(전체개방) 뒤에 둔다 — 태그가 빼는 것은 "미사용이니 지우자" 하나뿐이고, 격리 SG 가
+    # 전체개방이면 그건 진짜 위협이라 태그로 가리지 않는다(#359).
+    # 미부착 UNUSED보다 먼저 격리 역할을 제외하며, 부착 후에도 SKIP_WHITELISTED를 유지한다.
+    if _is_isolation_sg(tags):
+        return Verdict.SKIP, SkipReason.SKIP_WHITELISTED
     if attached is False:
         return Verdict.UNUSED, None                        # 미부착(미사용 후보)
     return Verdict.SKIP, SkipReason.SKIP_ACTIVE
@@ -96,7 +117,7 @@ def evaluate_sg(name: Optional[str], attached: Optional[bool],
 
 def run_rule_engine(db, collection_run_id: str | None = None) -> dict:
     """assets 및 metric_summaries 테이블을 읽어 RuleEvaluation 결과(RuleEvaluationResult 계약)를 기록한다.
-    반환: verdict 별 집계 + 각 자산 판정 목록.
+    반환: verdict 별 집계 + 표시 요약 + 이번 호출의 typed 판정 목록(Intake 조립용).
     """
     from datetime import datetime, timezone
 
@@ -114,8 +135,12 @@ def run_rule_engine(db, collection_run_id: str | None = None) -> dict:
     )
     from schemas.rules import RuleEvaluationResult
 
+    # 소멸 자산은 list_assets 가 기본으로 제외한다(#332) — 실물이 없는 자산을 여기서
+    # 판정하면 마지막 관측 회차의 낡은 메트릭으로 후보가 서고, 그 후보가 승인 화면까지
+    # 올라간 뒤 실행에서야 깨진다.
     assets = assets_repo.list_assets(db)
     results = []
+    evaluations: list[RuleEvaluationResult] = []
     counts: dict[str, int] = {}
     now = datetime.now(timezone.utc)
 
@@ -142,7 +167,8 @@ def run_rule_engine(db, collection_run_id: str | None = None) -> dict:
         elif a.asset_type == AssetType.SG:
             attached = (a.spec or {}).get("attached")
             open_to_world = bool((a.spec or {}).get("open_to_world"))
-            verdict, skip = evaluate_sg(a.name, attached, open_to_world)
+            tags = (a.spec or {}).get("tags", {})
+            verdict, skip = evaluate_sg(a.name, attached, open_to_world, tags)
             health_int = None
         elif a.asset_type == AssetType.EBS:
             # EBS 는 판정 대상(_RULE_TARGET_TYPES). 분기를 두지 않으면 판정행이 없어
@@ -186,6 +212,7 @@ def run_rule_engine(db, collection_run_id: str | None = None) -> dict:
             existing_eval.reason = contract.reason
             existing_eval.evaluated_at = contract.evaluated_at
 
+        evaluations.append(contract)
         counts[api_verdict.value] = counts.get(api_verdict.value, 0) + 1
         results.append(
             {
@@ -196,5 +223,5 @@ def run_rule_engine(db, collection_run_id: str | None = None) -> dict:
             }
         )
 
-    return {"counts": counts, "results": results}
+    return {"counts": counts, "results": results, "evaluations": evaluations}
 

@@ -85,13 +85,20 @@ class SchemaCheckReasonCode(str, Enum):
 class ActionWhitelistReasonCode(str, Enum):
     """② Action Whitelist 거절 사유.
 
-    "목록에 없음"과 "목록에는 있으나 AI가 제안하면 안 됨"을 가른다 — 후자는 롤백
-    3종을 AI에게 추천시키려는 인젝션 시도의 신호라 기록에서 섞이면 안 된다
-    (ADR-0004 정책 ②).
+    "목록에 없음"과 "목록에는 있으나 이 문맥에서 실행할 수 없음"을 가른다. 후자는
+    검증 문맥마다 허용 목록이 다르기 때문에 생긴다 — 확정 10종 중 AI가 제안할 수
+    있는 것은 7종이고(ADR-0004 정책 ②), 시스템·관제자가 여는 원복 경로에서 실행할
+    수 있는 것은 롤백 3종뿐이다. 두 방향을 한 코드로 묶으면 거절 기록만 보고는
+    어느 목록을 벗어났는지 알 수 없다.
+
+    `WHITELIST_NOT_AI_RECOMMENDABLE`은 롤백 3종을 AI에게 추천시키려는 인젝션 시도의
+    신호이고, `WHITELIST_NOT_ROLLBACK_RUNBOOK`은 원복 경로에 본편 런북이 실린
+    배선·주입 시도의 신호다. 성격이 반대라 기록에서 섞이면 안 된다.
     """
 
     WHITELIST_UNKNOWN_RUNBOOK = "WHITELIST_UNKNOWN_RUNBOOK"
     WHITELIST_NOT_AI_RECOMMENDABLE = "WHITELIST_NOT_AI_RECOMMENDABLE"
+    WHITELIST_NOT_ROLLBACK_RUNBOOK = "WHITELIST_NOT_ROLLBACK_RUNBOOK"
 
 
 @unique

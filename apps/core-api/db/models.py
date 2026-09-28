@@ -52,6 +52,7 @@ from schemas.guardrails import (
     GuardrailDecision,
     GuardrailStep,
     GuardrailValidationContext,
+    PrecheckReasonCode,
 )
 from schemas.incidents import AgentInvocationStatus
 from schemas.runbooks import RunbookId, TriggerSource
@@ -114,7 +115,20 @@ class CollectionRun(Base):
         DateTime(timezone=True), nullable=True
     )
 
-    __table_args__ = (Index("ix_collection_runs_started_at", "started_at"),)
+    __table_args__ = (
+        # 리전별 최신 run 조회(latest_collection_run_per_region)가 5분 스캔으로 쌓이는
+        # 행을 전부 정렬하지 않게 — (region, started_at DESC, id DESC) 순서로 LIMIT 1 을
+        # 찍는다. 세 번째 키 id 는 동시각 tie-break 다.
+        # 종전의 started_at 단독 인덱스(ix_collection_runs_started_at)는 #343 에서 지웠다 —
+        # 플래너가 그쪽을 최신순으로 훑다가 리전 필터로 수천 행을 버리는 경쟁 경로였고
+        # (PR #344 리뷰), 시작 시각 단독으로 정렬·범위 조회하는 문장이 운영 코드에 없다.
+        Index(
+            "ix_collection_runs_region_started_at",
+            "region",
+            text("started_at DESC"),
+            text("collection_run_id DESC"),
+        ),
+    )
 
 
 class Asset(Base):
@@ -136,6 +150,13 @@ class Asset(Base):
         _ID, ForeignKey("collection_runs.collection_run_id"), nullable=True
     )
     collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    # AWS 에서 사라진 자산의 표시. 하드 삭제하지 않는 이유는 MetricSummary·RuleEvaluation·
+    # AssetRelationship 이 asset_id 를 참조해 이력이 함께 끊기기 때문이다. 값은 그 유형을
+    # 실제로 관측한 수집 회차가 그 리전에서 이 자산을 보지 못한 시각이고, 다시 관측되면
+    # upsert_asset 이 None 으로 되돌린다. (Issue #332)
+    absent_since: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
     )
@@ -191,6 +212,9 @@ class MetricSummary(Base):
     __table_args__ = (
         UniqueConstraint("asset_id", "collection_run_id"),
         CheckConstraint("window_end >= window_start", name="window_ordered"),
+        # 신선한 메트릭 재사용(fresh_ec2_metric_summaries)의 window_end >= 기준 시각 —
+        # 회차마다 쌓이는 요약을 전부 훑지 않고 최근 구간만 읽는다.
+        Index("ix_metric_summaries_window_end", text("window_end DESC")),
     )
 
 
@@ -220,6 +244,14 @@ class RuleEvaluation(Base):
             name="health_score_range",
         ),
         Index("ix_rule_evaluations_verdict", "verdict"),
+        # 자산별 최신 판정(latest_rule_evaluation / latest_rule_evaluation_by_asset) —
+        # 정렬 키와 같은 순서라 자산마다 인덱스 첫 항목 1건으로 끝난다.
+        Index(
+            "ix_rule_evaluations_asset_evaluated_at",
+            "asset_id",
+            text("evaluated_at DESC"),
+            text("rule_evaluation_id DESC"),
+        ),
     )
 
 
@@ -297,6 +329,7 @@ class Incident(Base):
     resolved_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    resolution_note: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
@@ -348,6 +381,11 @@ class Incident(Base):
             " AND (resolution IS NULL OR status = 'RESOLVED')",
             name="resolution_with_resolved_status",
         ),
+        CheckConstraint(
+            "resolution_note IS NULL OR"
+            " (resolution IS NOT NULL AND length(btrim(resolution_note)) > 0)",
+            name="resolution_note_with_judgement",
+        ),
         Index("ix_incidents_status", "status"),
         Index("ix_incidents_category", "category"),
         Index("ix_incidents_created_at", "created_at"),
@@ -388,6 +426,7 @@ class RunbookCandidate(Base):
     # 우회한 삽입이 빈 파라미터로 조용히 저장된다. 쓰는 쪽이 반드시 값을 낸다.
     parameters: Mapped[dict] = mapped_column(JSONB)
     display_parameters: Mapped[dict] = mapped_column(JSONB, default=dict)
+    ai_savings_estimate: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     evidence_ids: Mapped[list] = mapped_column(JSONB, default=list)
     status: Mapped[CandidateStatus] = mapped_column(
         _enum(CandidateStatus, "candidate_status"),
@@ -460,7 +499,7 @@ class GuardrailEvaluation(Base):
 
 
 class ActionExecution(Base):
-    """런북 실행 1건. 상태 6종은 공개 계약(api/actions.py)이 원천."""
+    """런북 실행 1건. 상태 7종은 공개 계약(api/actions.py)이 원천."""
 
     __tablename__ = "action_executions"
 
@@ -503,14 +542,48 @@ class ActionExecution(Base):
     finished_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # 판정 불가 보류 기록 (Issue #249) — AWS에 물어보지 못해 결과를 확정하지 못한 이력.
+    # 재시도 여부와 소진 판단의 입력이라 사유는 typed 코드로만 두고, 사람이 읽는
+    # error_summary를 근거로 쓰지 않는다. 판정이 내려지면 지워지고(workflows.close_execution)
+    # 소진으로 확정한 기록만 남는다.
+    verification_reason_code: Mapped[Optional[PrecheckReasonCode]] = mapped_column(
+        _enum(PrecheckReasonCode, "precheck_reason_code"), nullable=True
+    )
+    verification_attempts: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0")
+    )
+    verification_first_failed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    verification_last_failed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     __table_args__ = (
-        # ROLLBACK_INITIATED·ROLLED_BACK·ROLLBACK_FAILED는 원본 Execution 전용 —
+        # ROLLBACK_INITIATED·ROLLED_BACK·ROLLBACK_FAILED·UNVERIFIED는 원본 Execution 전용 —
         # 롤백 자식은 진행·성공·실패만 갖는다 (SSOT §API 계약)
         CheckConstraint(
             "parent_execution_id IS NULL"
             " OR status IN ('IN_PROGRESS', 'SUCCESS', 'FAILED')",
             name="rollback_child_status",
+        ),
+        # 보류 기록 네 칸은 함께 채워지거나 함께 비어 있다 (Issue #249). 마지막 실패
+        # 시각의 IS NOT NULL을 명시한다 — 없으면 NULL 비교가 NULL이 되어 CHECK를 통과한다
+        CheckConstraint(
+            "(verification_attempts = 0 AND verification_reason_code IS NULL"
+            " AND verification_first_failed_at IS NULL"
+            " AND verification_last_failed_at IS NULL)"
+            " OR (verification_attempts >= 1 AND verification_reason_code IS NOT NULL"
+            " AND verification_first_failed_at IS NOT NULL"
+            " AND verification_last_failed_at IS NOT NULL"
+            " AND verification_last_failed_at >= verification_first_failed_at)",
+            name="verification_hold_shape",
+        ),
+        # UNVERIFIED는 무엇을 확인하지 못했는지가 남아야 한다. text로 비교하는 것은 새
+        # enum 값을 추가한 트랜잭션에서 그 값을 쓰지 않기 위해서다(20260914 마이그레이션)
+        CheckConstraint(
+            "status::text <> 'UNVERIFIED' OR verification_attempts >= 1",
+            name="unverified_has_hold",
         ),
         Index("ix_action_executions_incident_id", "incident_id"),
         # Dispatcher 회수 스캔용 — 진행 중 상태만 부분 인덱스로 좁힌다

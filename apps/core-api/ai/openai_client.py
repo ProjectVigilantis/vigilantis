@@ -8,6 +8,9 @@
 #   - SDK 자체 재시도를 껐으므로(max_retries=0) SDK가 하던 Retry-After 존중과 지터를
 #     이 래퍼가 승계한다. 서버 지시 대기가 상한을 넘으면 무시하고 backoff로 간다.
 #   - 구조화 출력은 SDK의 parse 경로로 받는다 — 응답 텍스트를 직접 파싱하지 않는다.
+#   - 모델 동작 파라미터(temperature·reasoning_effort)는 설정에 값이 있을 때만 싣는다
+#     (#237). 모델 계열마다 받는 것이 달라(gpt-4o는 temperature, gpt-5 계열 추론
+#     모델은 reasoning_effort) 안 쓰는 노브는 요청 본문에 나타나지도 않아야 한다.
 #   - 남기는 로그는 토큰 사용량·시도 횟수 같은 호출 메타뿐이다. Prompt 전문과 원문
 #     응답은 남기지 않는다(ADR-0005 미보존 대상).
 # ==============================================================================
@@ -65,6 +68,8 @@ class OpenAIModelClient:
         max_attempts: int,
         retry_backoff_seconds: float,
         max_retry_after_seconds: float = 60.0,
+        temperature: Optional[float] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> None:
         self._client = client
         self._model = model
@@ -72,6 +77,17 @@ class OpenAIModelClient:
         self._max_attempts = max_attempts
         self._retry_backoff_seconds = retry_backoff_seconds
         self._max_retry_after_seconds = max_retry_after_seconds
+        # 값이 없는 노브는 키 자체를 만들지 않는다 — 모델이 받지 않는 파라미터는
+        # 요청 본문에 나타나지도 않아야 한다. 전 호출이 같은 dict를 쓰므로 요약·후보
+        # 호출에 서로 다른 설정이 실릴 여지가 없다.
+        self._model_params: dict[str, Any] = {
+            name: value
+            for name, value in (
+                ("temperature", temperature),
+                ("reasoning_effort", reasoning_effort),
+            )
+            if value is not None
+        }
 
     def complete(
         self,
@@ -101,6 +117,7 @@ class OpenAIModelClient:
                     messages=messages,
                     response_format=response_model,
                     timeout=self._timeout_seconds,
+                    **self._model_params,
                 )
             except APITimeoutError:
                 transient = AIModelTimeoutError("모델 호출 제한시간을 초과했습니다")
@@ -110,8 +127,11 @@ class OpenAIModelClient:
                 )
                 retry_after = _retry_after_seconds(exc)
             except ValidationError:
-                # SDK가 응답을 구조화 출력으로 검증하다 실패 — 재호출해도 같다
-                rejected = AIModelContractError("응답을 요구한 구조로 파싱하지 못했습니다")
+                # SDK가 응답을 구조화 출력으로 검증하다 실패 — 재호출해도 같다.
+                # 응답은 받은 실패라 phase=response다(usage는 SDK가 예외를 던져 없다)
+                rejected = AIModelContractError(
+                    "응답을 요구한 구조로 파싱하지 못했습니다", phase="response"
+                )
             except APIStatusError as exc:
                 # SDK 재시도 정책(_base_client._should_retry)은 408·409·429·5xx를
                 # 일시 오류로 본다. SDK 재시도를 꺼 놨으므로(max_retries=0) 전용
@@ -181,21 +201,26 @@ class OpenAIModelClient:
                 "prompt_tokens": usage.prompt_tokens,
                 "completion_tokens": usage.completion_tokens,
                 "total_tokens": usage.total_tokens,
+                "cached_prompt_tokens": usage.cached_prompt_tokens,
             },
         )
 
+        # 여기서부터의 실패는 전부 phase=response다 — 왕복은 섰고 토큰도 이미
+        # 발생했다. usage를 예외에 실어, 계측이 실패한 호출의 비용을 잃지 않게 한다
         choices = getattr(completion, "choices", None) or []
         if not choices:
-            raise AIModelContractError("응답에 선택지가 없습니다")
+            raise AIModelContractError("응답에 선택지가 없습니다", usage=usage, phase="response")
 
         message = choices[0].message
         if getattr(message, "refusal", None):
-            raise AIModelRejectedError("모델이 응답을 거절했습니다")
+            raise AIModelRejectedError("모델이 응답을 거절했습니다", usage=usage, phase="response")
 
         parsed = getattr(message, "parsed", None)
         if not isinstance(parsed, response_model):
             raise AIModelContractError(
-                f"응답을 {response_model.__name__}으로 파싱하지 못했습니다"
+                f"응답을 {response_model.__name__}으로 파싱하지 못했습니다",
+                usage=usage,
+                phase="response",
             )
 
         return AIModelResponse(output=parsed, usage=usage, model=model)
@@ -226,8 +251,15 @@ def _token_usage(raw: Any) -> TokenUsage:
     prompt = int(getattr(raw, "prompt_tokens", 0) or 0)
     completion = int(getattr(raw, "completion_tokens", 0) or 0)
     total = int(getattr(raw, "total_tokens", 0) or 0) or (prompt + completion)
+    # 캐시된 입력은 prompt_tokens에 포함돼 오지만 단가가 다르다. 필드가 없는 응답도
+    # 있으므로(구버전·타 제공자) 0으로 떨어뜨린다
+    details = getattr(raw, "prompt_tokens_details", None)
+    cached = int(getattr(details, "cached_tokens", 0) or 0)
     return TokenUsage(
-        prompt_tokens=prompt, completion_tokens=completion, total_tokens=total
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        total_tokens=total,
+        cached_prompt_tokens=min(cached, prompt),
     )
 
 
@@ -249,4 +281,6 @@ def build_openai_model_client(settings: Optional[Settings] = None) -> OpenAIMode
         max_attempts=settings.OPENAI_MAX_ATTEMPTS,
         retry_backoff_seconds=settings.OPENAI_RETRY_BACKOFF_SECONDS,
         max_retry_after_seconds=settings.OPENAI_MAX_RETRY_AFTER_SECONDS,
+        temperature=settings.OPENAI_TEMPERATURE,
+        reasoning_effort=settings.OPENAI_REASONING_EFFORT,
     )

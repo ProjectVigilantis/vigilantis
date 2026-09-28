@@ -11,13 +11,15 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Iterable, Optional
 
-from sqlalchemy import select, update
-from sqlalchemy.orm import Session
+from sqlalchemy import exists, select, update
+from sqlalchemy.orm import Session, aliased
 
 from schemas.api.actions import ExecutionStatus
+from schemas.api.incidents import IncidentStatus
 from schemas.executions import EXECUTION_NON_TERMINAL_STATUSES, ExecutionStepResult
+from schemas.guardrails import PrecheckReasonCode
 from schemas.runbooks import RunbookId, TriggerSource
 
 from .. import mappers, models
@@ -119,6 +121,40 @@ def list_non_terminal(db: Session) -> list[models.ActionExecution]:
     )
 
 
+def list_release_offer_pending(
+    db: Session, *, incident_statuses: Iterable[IncidentStatus]
+) -> list[str]:
+    """해제 제안을 기다리는 차단 실행 — SUCCESS로 끝났는데 그 인시던트에 해제 후보가 없다.
+    (Issue #329)
+
+    해제 후보는 **상태를 가리지 않고** 센다. 거절(REJECTED)·무효(INVALIDATED)된 제안도
+    "이미 한 번 냈다"는 기록이라, 빼면 매 주기 같은 제안을 다시 만든다.
+
+    식별자만 돌려준다 — 처리 중 커밋이 일어나 들고 있던 행 상태는 곧 낡는다
+    (list_non_terminal을 받는 dispatch_pending과 같은 이유).
+    """
+    release = aliased(models.RunbookCandidate)
+    return list(
+        db.execute(
+            select(models.ActionExecution.execution_id)
+            .join(
+                models.Incident,
+                models.Incident.incident_id == models.ActionExecution.incident_id,
+            )
+            .where(
+                models.ActionExecution.runbook_id == RunbookId.RUNBOOK_NACL_ADD_DENY,
+                models.ActionExecution.status == ExecutionStatus.SUCCESS,
+                models.Incident.status.in_(list(incident_statuses)),
+                ~exists().where(
+                    release.incident_id == models.ActionExecution.incident_id,
+                    release.runbook_id == RunbookId.RUNBOOK_NACL_RESTORE,
+                ),
+            )
+            .order_by(models.ActionExecution.finished_at)
+        ).scalars()
+    )
+
+
 def update_execution_status(
     db: Session,
     execution_id: str,
@@ -127,13 +163,25 @@ def update_execution_status(
     next_status: ExecutionStatus,
     error_summary: Optional[str] = None,
     finished_at: Optional[datetime] = None,
+    clear_verification_hold: bool = False,
 ) -> bool:
-    """롤백 자식의 상태 제한(SUCCESS|FAILED)은 DB CheckConstraint가 함께 강제한다."""
+    """롤백 자식의 상태 제한(SUCCESS|FAILED)은 DB CheckConstraint가 함께 강제한다.
+
+    clear_verification_hold는 판정 불가 보류 기록을 같은 UPDATE에서 지운다 — 판정이
+    내려진 확정이면 보류는 더 이상 사실이 아니다 (Issue #249).
+    """
     values: dict = {"status": next_status}
     if error_summary is not None:
         values["error_summary"] = error_summary
     if finished_at is not None:
         values["finished_at"] = finished_at
+    if clear_verification_hold:
+        values.update(
+            verification_reason_code=None,
+            verification_attempts=0,
+            verification_first_failed_at=None,
+            verification_last_failed_at=None,
+        )
     result = db.execute(
         update(models.ActionExecution)
         .where(
@@ -143,6 +191,31 @@ def update_execution_status(
         .values(**values)
     )
     return result.rowcount == 1
+
+
+def record_verification_failure(
+    db: Session,
+    row: models.ActionExecution,
+    *,
+    reason_code: PrecheckReasonCode,
+    failed_at: datetime,
+) -> int:
+    """판정 불가 1회를 누적한다. 누적 횟수를 돌려준다. (Issue #249)
+
+    **호출부가 잠근 행을 받는다**(lock_execution). 조건부 UPDATE로 가지 않는 것은 같은
+    트랜잭션의 뒤이은 판단(소진했는가)이 이 행을 다시 읽기 때문이다 — Core UPDATE는
+    세션이 든 행을 갱신하지 않아 그 판단이 옛 횟수를 본다.
+
+    사유는 **마지막 실패의 코드**다. 처음 시각은 첫 실패에서 한 번만 적는다 — 관제자가
+    "언제부터 확인하지 못했는가"를 읽는 자리다.
+    """
+    row.verification_reason_code = reason_code
+    row.verification_attempts = (row.verification_attempts or 0) + 1
+    if row.verification_first_failed_at is None:
+        row.verification_first_failed_at = failed_at
+    row.verification_last_failed_at = failed_at
+    db.flush()
+    return row.verification_attempts
 
 
 def bind_backup_record(db: Session, execution_id: str, backup_record_id: str) -> bool:
@@ -233,4 +306,53 @@ def get_backup_record(
         select(models.BackupRecord).where(
             models.BackupRecord.backup_record_id == backup_record_id
         )
+    ).scalar_one_or_none()
+
+
+def latest_backup_for_target(
+    db: Session,
+    *,
+    target_arn: str,
+    backup_type: str,
+    payload_match: Optional[dict] = None,
+    consumed_by: Optional[RunbookId] = None,
+) -> Optional[models.BackupRecord]:
+    """대상 기준 최신 백업 1건 — backup_record_id를 모르는 원복이 레코드를 찾는 자리.
+
+    종류·target_arn·payload_match 3중 대조(ADR-0008 §1 ④)에 두 조건을 더 건다.
+
+      - **백업을 만든 실행이 SUCCESS인 것만.** 실패한 조치도 백업은 남긴다(백업이 AWS
+        변경보다 먼저 커밋되므로). 그 레코드는 들어가지 않은 변경을 가리키므로, 최신이라는
+        이유로 고르면 실제로 적용된 변경의 레코드를 가린다.
+      - **consumed_by 런북의 SUCCESS 실행이 이미 결속한 레코드는 뺀다.** 원복은 쓴 레코드를
+        자기 행에 결속하므로(ADR-0008 §4) 그 결속이 곧 "이 레코드로 이미 되돌렸다"는
+        기록이다. 빼지 않으면 같은 값으로 다시 생긴 제3자 자원을 우리 것으로 읽는다.
+
+    그래도 여러 건이 남으면 가장 최근 것이다. payload_match는 JSONB 포함(@>)으로 본다.
+    """
+    query = (
+        select(models.BackupRecord)
+        .join(
+            models.ActionExecution,
+            models.ActionExecution.execution_id == models.BackupRecord.execution_id,
+        )
+        .where(
+            models.BackupRecord.target_arn == target_arn,
+            models.BackupRecord.backup_type == backup_type,
+            models.ActionExecution.status == ExecutionStatus.SUCCESS,
+        )
+    )
+    if payload_match:
+        query = query.where(models.BackupRecord.payload.contains(payload_match))
+    if consumed_by is not None:
+        consumer = aliased(models.ActionExecution)
+        query = query.where(
+            ~exists().where(
+                consumer.backup_record_id == models.BackupRecord.backup_record_id,
+                consumer.runbook_id == consumed_by,
+                consumer.status == ExecutionStatus.SUCCESS,
+            )
+        )
+    return db.execute(
+        query.order_by(models.BackupRecord.created_at.desc()).limit(1)
     ).scalar_one_or_none()

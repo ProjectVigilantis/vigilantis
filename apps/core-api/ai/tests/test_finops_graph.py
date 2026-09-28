@@ -5,20 +5,36 @@
 ② 모델이 지어낼 수 없는 값(메뉴 밖 Runbook·대상 밖 ARN)이 FAILED로 막히는가
 ③ 모델로 나간 값이 마스킹 경로를 지났는가
 
-프롬프트 문구와 요약 품질은 여기서 보지 않는다(#209 §범위 밖).
+프롬프트 문구의 품질은 여기서 보지 않는다. 문구·필드명·출력 스키마가 바뀌었는데 승인
+스냅샷이 갱신되지 않은 것만 잡는다(#243 — 재통과 절차는 apps/core-api/ai/evaluation/summary/baseline.md).
 """
+
+import json
+from pathlib import Path
 
 import pytest
 from ai.agent import (
+    _FINOPS_PROPOSAL_SYSTEM_PROMPT,
+    _FINOPS_SUMMARY_SYSTEM_PROMPT,
+    _PARAMETER_CONSTRAINTS,
+    FINOPS_PROMPT_VERSION,
     CandidateProposalOutput,
     EvidenceSummaryOutput,
     ProposedCandidate,
+    finops_prompt_fingerprint,
+    finops_prompt_material,
+    finops_request_fingerprint,
     run_finops_graph,
 )
 from ai.model_client import FakeAIModelClient
+from pydantic import ValidationError
 from schemas.agents import FinOpsGraphInput
 from schemas.incidents import AgentInvocationStatus
-from schemas.runbook_parameters import Ec2RightsizingCandidateParameters
+from schemas.runbook_parameters import (
+    CANDIDATE_PARAMETER_MODELS,
+    Ec2EnableAutoscalingCandidateParameters,
+    Ec2RightsizingCandidateParameters,
+)
 
 ACCOUNT = "123456789012"
 REGION = "ap-northeast-2"
@@ -72,9 +88,9 @@ EBS_CAPABILITY = {
 }
 
 SUMMARY = EvidenceSummaryOutput(
-    situation="t3.xlarge 인스턴스의 3일 평균 CPU가 3%다.",
-    analysis="규칙 판정은 COST_CANDIDATE이고 health_score는 3이다.",
-    recommendation="t3.medium으로 다운사이징한다.",
+    observation="t3.xlarge 인스턴스의 3일 평균 CPU가 3%다.",
+    diagnosis="현재 스펙에 비해 사용률이 낮아 과대 스펙으로 보인다.",
+    rationale="3일 내내 낮은 사용률이라 다운사이징으로 비용을 줄일 수 있다.",
 )
 
 
@@ -96,7 +112,6 @@ def rightsizing_proposal(**over) -> ProposedCandidate:
         "runbook_id": "RUNBOOK_EC2_RIGHTSIZING",
         "target_arn": EC2_ARN,
         "evidence_ids": ["ev-0001"],
-        "target_instance_type": "t3.medium",
     }
     base.update(over)
     return ProposedCandidate.model_validate(base)
@@ -123,9 +138,9 @@ def test_succeeded_carries_three_summary_lines_and_candidate():
 
     assert output.invocation_status == AgentInvocationStatus.SUCCEEDED
     assert output.summary_lines == [
-        SUMMARY.situation,
-        SUMMARY.analysis,
-        SUMMARY.recommendation,
+        SUMMARY.observation,
+        SUMMARY.diagnosis,
+        SUMMARY.rationale,
     ]
     assert len(output.candidates) == 1
     candidate = output.candidates[0]
@@ -134,8 +149,21 @@ def test_succeeded_carries_three_summary_lines_and_candidate():
     assert candidate.evidence_ids == ["ev-0001"]
     assert isinstance(candidate.parameters, Ec2RightsizingCandidateParameters)
     assert candidate.parameters.target_instance_type == "t3.medium"
-    # 노드 2개가 각각 1회씩 부른다
+    # 추정은 Workflow 후속 처리다. 그래프는 미실행을 오류로 만들지 않는다.
     assert len(client.sent) == 2
+
+
+
+def test_other_runbook_uses_only_summary_and_proposal_calls():
+    proposal = rightsizing_proposal(
+        runbook_id="RUNBOOK_EBS_DELETE_UNATTACHED",
+        target_arn=VOLUME_ARN,
+    )
+    output, client = run(SUMMARY, proposals(proposal))
+    assert len(client.sent) == 2
+
+    assert output.invocation_status is AgentInvocationStatus.SUCCEEDED
+
 
 
 def test_no_proposal_when_model_returns_empty_candidates():
@@ -190,7 +218,6 @@ def test_failed_when_runbook_is_outside_offered_capabilities():
         rule_number=100,
         cidr_block="203.0.113.0/24",
         protocol="-1",
-        target_instance_type=None,
     )
     output, _ = run(SUMMARY, proposals(proposal))
 
@@ -227,9 +254,44 @@ def test_relationship_arn_is_an_allowed_target():
 
 
 def test_failed_when_required_parameter_is_missing():
-    # 다운사이징 목표 타입은 AI가 정해야 하는 값이다 — 서버가 대신 채우지 않는다
-    proposal = rightsizing_proposal(target_instance_type=None)
-    output, _ = run(SUMMARY, proposals(proposal))
+    # AI가 정해야 하는 값이 빠지면 서버가 대신 채우지 않는다
+    autoscaling = {
+        "runbook_id": "RUNBOOK_EC2_ENABLE_AUTOSCALING",
+        "purpose": "고정 대수 EC2를 Auto Scaling 그룹으로 전환",
+        "allowed_target_asset_types": ["EC2"],
+    }
+    proposal = rightsizing_proposal(runbook_id="RUNBOOK_EC2_ENABLE_AUTOSCALING", min_size=1)
+    output, _ = run(
+        SUMMARY, proposals(proposal), graph_input=make_input(capabilities=[autoscaling])
+    )
+
+    assert output.invocation_status == AgentInvocationStatus.FAILED
+
+
+def test_model_has_no_slot_for_the_rightsizing_target():
+    # 목표 타입은 서버 규칙이 정한다(#251) — 모델 출력에 자리가 없어 실어 보내면 거절된다
+    with pytest.raises(ValidationError):
+        rightsizing_proposal(target_instance_type="t3.nano")
+
+
+@pytest.mark.parametrize(
+    "current,expected",
+    [("t3.xlarge", "t3.medium"), ("t3.large", "t3.small"), ("t3a.medium", "t3a.small")],
+)
+def test_rightsizing_target_is_computed_from_the_asset_snapshot(current, expected):
+    graph_input = make_input(asset_context={**ASSET_CONTEXT, "spec": {"instance_type": current}})
+    output, _ = run(SUMMARY, proposals(rightsizing_proposal()), graph_input=graph_input)
+
+    assert output.invocation_status == AgentInvocationStatus.SUCCEEDED
+    assert output.candidates[0].parameters.target_instance_type == expected
+
+
+@pytest.mark.parametrize("current", ["t3.small", "m5.large", "c5.large", None])
+def test_failed_when_the_server_cannot_compute_the_target(current):
+    # 메뉴 빌더가 이런 자산에는 다운사이징을 올리지 않는다(ai/capabilities.py 축 ③).
+    # 메뉴를 거치지 않은 입력이 와도 규칙이 내지 않은 값을 지어 채우지 않는다
+    graph_input = make_input(asset_context={**ASSET_CONTEXT, "spec": {"instance_type": current}})
+    output, _ = run(SUMMARY, proposals(rightsizing_proposal()), graph_input=graph_input)
 
     assert output.invocation_status == AgentInvocationStatus.FAILED
 
@@ -257,6 +319,37 @@ def test_failed_when_evidence_ids_are_empty():
     assert output.invocation_status == AgentInvocationStatus.FAILED
 
 
+def test_evidence_ids_follow_the_input_order_not_the_model_order():
+    # 첫 항목이 실행 파라미터 evidence_id가 된다 — 순서는 모델이 아니라 입력이 정한다
+    # (#251 v2 재계측에서 같은 두 근거의 순서만 뒤집힌 회차가 나왔다)
+    from schemas.assets import MetricName
+
+    metric = {
+        "evidence_id": "ev-0002",
+        "evidence_type": "METRIC",
+        "content": {
+            "metric_name": MetricName.CPU_UTILIZATION.value,
+            "window_start": "2026-08-28T09:00:00Z",
+            "window_end": "2026-08-31T09:00:00Z",
+            "summary": {"cpu_datapoints": 72, "cpu_avg": 3.0, "cpu_max": 9.0},
+        },
+    }
+    graph_input = make_input(evidences=[EVIDENCE, metric])
+    proposal = rightsizing_proposal(evidence_ids=["ev-0002", "ev-0001"])
+    output, _ = run(SUMMARY, proposals(proposal), graph_input=graph_input)
+
+    assert output.invocation_status == AgentInvocationStatus.SUCCEEDED
+    assert output.candidates[0].evidence_ids == ["ev-0001", "ev-0002"]
+
+
+def test_evidence_ids_outside_the_input_are_kept_for_the_workflow_to_reject():
+    # 그래프는 거르지 않는다 — 입력 밖 인용의 거절은 Workflow ⓐ가 한다(agent_dispatcher.py)
+    proposal = rightsizing_proposal(evidence_ids=["ev-unknown", "ev-0001"])
+    output, _ = run(SUMMARY, proposals(proposal))
+
+    assert output.candidates[0].evidence_ids == ["ev-0001", "ev-unknown"]
+
+
 def test_parameters_of_other_runbooks_are_dropped():
     # 고른 Runbook이 받지 않는 키를 모델이 채워도 실행으로 나가지 않는다
     proposal = rightsizing_proposal(rule_number=100, cidr_block="203.0.113.0/24")
@@ -272,8 +365,13 @@ def test_parameters_of_other_runbooks_are_dropped():
 
 
 def test_outbound_payload_is_masked():
+    # RULE 근거와 최상위는 같은 객체여야 하므로(FinOpsGraphInput 계약, #265) 둘 다 바꾼다.
+    # 페이로드에 실리는 쪽은 근거이고, 마스킹이 그 content까지 닿는지가 이 테스트다.
     rule = dict(RULE_RESULT, reason="수집 계정 키 AKIAIOSFODNN7EXAMPLE 로 조회함")
-    graph_input = make_input(rule_evaluation=rule)
+    graph_input = make_input(
+        rule_evaluation=rule,
+        evidences=[dict(EVIDENCE, content={"evaluation": rule})],
+    )
     _, client = run(SUMMARY, proposals(), graph_input=graph_input)
 
     for sent in client.sent:
@@ -291,33 +389,71 @@ def test_proposal_payload_carries_the_menu_and_summary():
         "RUNBOOK_EBS_DELETE_UNATTACHED",
     ]
     assert proposal_payload["summary_lines"] == [
-        SUMMARY.situation,
-        SUMMARY.analysis,
-        SUMMARY.recommendation,
+        SUMMARY.observation,
+        SUMMARY.diagnosis,
+        SUMMARY.rationale,
     ]
 
 
 def test_proposal_payload_carries_required_parameters_per_runbook():
     # 이걸 빼면 모델은 어느 키를 채워야 하는지 알 수 없고, 빈 값으로 온 후보가
     # 계약 검증에서 거절되어 호출 전체가 FAILED가 된다(#209 실제 호출에서 확인)
-    _, client = run(SUMMARY, proposals(rightsizing_proposal()))
+    autoscaling = {
+        "runbook_id": "RUNBOOK_EC2_ENABLE_AUTOSCALING",
+        "purpose": "고정 대수 EC2를 Auto Scaling 그룹으로 전환",
+        "allowed_target_asset_types": ["EC2"],
+    }
+    graph_input = make_input(capabilities=[RIGHTSIZING_CAPABILITY, autoscaling, EBS_CAPABILITY])
+    _, client = run(SUMMARY, proposals(rightsizing_proposal()), graph_input=graph_input)
     by_id = {c["runbook_id"]: c for c in client.sent[1]["user_payload"]["capabilities"]}
 
-    rightsizing = by_id["RUNBOOK_EC2_RIGHTSIZING"]
-    assert rightsizing["required_parameters"] == ["target_instance_type"]
-    assert rightsizing["parameter_schema"]["target_instance_type"]["type"] == "string"
+    assert by_id["RUNBOOK_EC2_ENABLE_AUTOSCALING"]["required_parameters"] == ["max_size", "min_size"]
+    assert set(by_id["RUNBOOK_EC2_ENABLE_AUTOSCALING"]["parameter_schema"]) == {"max_size", "min_size"}
+
+    # 목표 타입은 그래프가 규칙으로 계산한다(#251) — 명세에 실으면 모델에게 채우라는 지시가 된다
+    assert by_id["RUNBOOK_EC2_RIGHTSIZING"]["required_parameters"] == []
+    assert by_id["RUNBOOK_EC2_RIGHTSIZING"]["parameter_schema"] == {}
 
     # AI가 정할 값이 0개인 Runbook은 빈 목록이다 — 채울 자리가 없다는 것도 정보다
     assert by_id["RUNBOOK_EBS_DELETE_UNATTACHED"]["required_parameters"] == []
     assert by_id["RUNBOOK_EBS_DELETE_UNATTACHED"]["parameter_schema"] == {}
 
 
-def test_summary_payload_does_not_carry_the_menu():
-    # 요약 노드는 조치를 고르지 않는다 — capabilities를 보낼 이유가 없다
+def test_rule_evaluation_is_not_sent_twice():
+    # RuleEvidence는 RuleEvaluationResult를 그대로 감싼 모델이라, RULE 근거가 있으면
+    # 최상위 rule_evaluation은 그 복사본이다. 후보 호출이 이 페이로드를 다시 보내므로
+    # 그대로 두면 같은 판정이 한 실행에서 네 번 나간다
+    _, client = run(SUMMARY, proposals(rightsizing_proposal()))
+
+    for sent in client.sent[:2]:
+        payload = sent["user_payload"]
+        assert "rule_evaluation" not in payload
+        # 판정은 사라지지 않는다 — 근거 쪽에 그대로 있다
+        assert payload["evidences"][0]["content"]["evaluation"]["verdict"] == (
+            RULE_RESULT["verdict"]
+        )
+
+
+def test_rule_evaluation_is_sent_when_no_evidence_carries_it():
+    # 근거가 없거나 값이 다르면 빼지 않는다 — 빼면 판정이 페이로드에서 사라진다
+    _, client = run(SUMMARY, proposals(), graph_input=make_input(evidences=[]))
+
+    assert client.sent[0]["user_payload"]["rule_evaluation"]["verdict"] == (
+        RULE_RESULT["verdict"]
+    )
+
+
+def test_summary_payload_carries_action_purposes_but_not_runbook_ids():
+    # rationale이 카드의 조치를 설명하려면 메뉴에 무엇이 있는지 알아야 한다(#243). 다만
+    # 요약 노드는 조치를 고르지 않으므로 Runbook 이름·파라미터 명세·허용 대상은 싣지 않는다
+    # — 이름을 주면 문장이 이름을 되읽고, 메뉴 전체를 열거한다(v1 2차 실측)
     _, client = run(SUMMARY, proposals())
     summary_payload = client.sent[0]["user_payload"]
 
+    assert summary_payload["available_actions"] == ["과대 스펙 EC2 다운사이징", "미연결 EBS 볼륨 삭제"]
     assert "capabilities" not in summary_payload
+    assert "RUNBOOK_EC2_RIGHTSIZING" not in client.sent[0]["user_json"]
+    assert "allowed_target_arns" not in summary_payload
     assert summary_payload["incident_id"] == "inc-20260831-001"
     assert [e["evidence_id"] for e in summary_payload["evidences"]] == ["ev-0001"]
 
@@ -335,3 +471,90 @@ def test_every_call_goes_through_the_masking_boundary(call_index):
 
     # build_outbound_payload()가 만든 키 3종이 그대로 있어야 경계를 지난 것이다
     assert set(client.sent[call_index]) == {"system_prompt", "user_payload", "user_json"}
+
+
+# ------------------------------------------------------------------------------
+# 프롬프트 v1 — 판·해시·계약 사실 (Issue #243)
+# ------------------------------------------------------------------------------
+
+SNAPSHOT = Path(__file__).resolve().parents[1] / "evaluation" / "summary" / "summary_prompt_snapshot.json"
+
+
+def test_prompt_fingerprint_matches_approved_snapshot():
+    # 문구·필드명·제약 문구·출력 스키마 중 하나라도 바뀌면 여기서 선다. 고의로 바꿨다면
+    # apps/core-api/ai/evaluation/summary/baseline.md의 재통과 절차를 거친 뒤 스냅샷을 갱신한다 — 이 테스트가
+    # 있어야 "판 올리기를 잊어도 드러난다"가 말이 아니라 동작이다
+    snapshot = json.loads(SNAPSHOT.read_text("utf-8"))
+
+    assert snapshot["version"] == FINOPS_PROMPT_VERSION
+    assert snapshot["prompt_sha256"] == finops_prompt_fingerprint(), (
+        "프롬프트가 승인 스냅샷과 다릅니다 — apps/core-api/ai/evaluation/summary/baseline.md 절차로 재통과 후 갱신"
+    )
+
+
+def test_prompt_material_covers_every_instruction_surface():
+    material = finops_prompt_material()
+
+    assert _FINOPS_SUMMARY_SYSTEM_PROMPT in material
+    assert _FINOPS_PROPOSAL_SYSTEM_PROMPT in material
+    for texts in _PARAMETER_CONSTRAINTS.values():
+        for text in texts:
+            assert text in material
+    # 출력 스키마 — 필드 이름이 모델에 나가므로 이름을 바꾸면 해시가 움직여야 한다
+    for field in ("observation", "diagnosis", "rationale", "min_size"):
+        assert f'"{field}"' in material
+    # 실행 목표는 서버 몫이다. 단가 추정은 추천 요청과 분리한다.
+    assert "target_instance_type" not in ProposedCandidate.model_fields
+    assert "ai_savings_estimate" not in CandidateProposalOutput.model_json_schema()["properties"]
+
+
+def test_summary_output_fields_are_the_three_roles():
+    assert list(EvidenceSummaryOutput.model_fields) == ["observation", "diagnosis", "rationale"]
+
+
+def test_summary_request_fingerprint_detects_schema_order(monkeypatch):
+    before = finops_request_fingerprint()
+    schema = CandidateProposalOutput.model_json_schema()
+    properties = schema["$defs"]["ProposedCandidate"]["properties"]
+    properties["rule_number"] = properties.pop("rule_number")
+    monkeypatch.setattr(CandidateProposalOutput, "model_json_schema", lambda: schema)
+    assert finops_request_fingerprint() != before
+
+
+@pytest.mark.parametrize("prompt", [
+    _FINOPS_SUMMARY_SYSTEM_PROMPT,
+    _FINOPS_PROPOSAL_SYSTEM_PROMPT,
+], ids=["finops_summary", "finops_proposal"])
+def test_finops_prompts_are_directive_not_prohibitive(prompt):
+    # 금지가 쌓일수록 빈 후보가 가장 안전한 답이 된다(#243) — 금지형 표지를 잡는다
+    # SecOps #324의 승인된 프롬프트는 의미 rubric·실측으로 평가한다.
+    # 부정어 유무는 후보 강제/억제나 사용자 판단권 보존을 입증하지 않는다.
+    # 대체 검증은 EITHER 답지·action_reason 의미 기준·라운드별 후보/무제안 관측이다.
+    for marker in ("않는다", "마라", "금지"):
+        assert marker not in prompt
+
+
+def test_proposal_payload_carries_parameter_constraints_only_where_the_contract_has_them():
+    autoscaling = {
+        "runbook_id": "RUNBOOK_EC2_ENABLE_AUTOSCALING",
+        "purpose": "고정 대수 EC2를 Auto Scaling 그룹으로 전환",
+        "allowed_target_asset_types": ["EC2"],
+    }
+    graph_input = make_input(capabilities=[RIGHTSIZING_CAPABILITY, autoscaling])
+    _, client = run(SUMMARY, proposals(rightsizing_proposal()), graph_input=graph_input)
+    by_id = {c["runbook_id"]: c for c in client.sent[1]["user_payload"]["capabilities"]}
+
+    # min ≤ max는 model_validator라 parameter_schema에 없다 — 문구로만 모델에 닿는다
+    assert "min_size" in by_id["RUNBOOK_EC2_ENABLE_AUTOSCALING"]["parameter_schema"]
+    assert by_id["RUNBOOK_EC2_ENABLE_AUTOSCALING"]["parameter_constraints"] == [
+        "min_size는 max_size 이하로 정한다"
+    ]
+    assert by_id["RUNBOOK_EC2_RIGHTSIZING"]["parameter_constraints"] == []
+
+
+def test_parameter_constraint_text_describes_a_live_contract_rule():
+    # 문구의 원천은 계약의 model_validator다 — 계약에서 그 규칙이 사라지면 문구가 거짓이 된다
+    for runbook_id in _PARAMETER_CONSTRAINTS:
+        assert runbook_id in CANDIDATE_PARAMETER_MODELS
+    with pytest.raises(ValidationError):
+        Ec2EnableAutoscalingCandidateParameters(min_size=3, max_size=1)

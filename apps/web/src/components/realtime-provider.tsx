@@ -6,6 +6,7 @@
 import { useRouter } from 'next/navigation';
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 
+import { apiBaseUrl } from '@/lib/api/client';
 import {
   SeenEvents,
   actionFor,
@@ -42,11 +43,11 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   /**
    * 초기값은 **소켓을 열기 전에** 정해 둔다 — effect 안에서 동기로 setState하면 React Compiler
-   * 규칙에 걸리고, 이 값은 빌드 시 인라인되는 env에서만 파생하므로 서버·클라 결과가 같다.
+   * 규칙에 걸리고, 이 값은 빌드 시 인라인되는 env와 상수에서만 파생하므로 서버·클라 결과가 같다.
    * 이후 전이는 전부 소켓 콜백(onopen·onclose)이 만든다.
    */
   const [connection, setConnection] = useState<ConnectionState>(() =>
-    websocketUrl(process.env.NEXT_PUBLIC_API_BASE_URL) === null ? 'disabled' : 'connecting',
+    websocketUrl(apiBaseUrl()) === null ? 'disabled' : 'connecting',
   );
 
   const socketRef = useRef<WebSocket | null>(null);
@@ -95,8 +96,9 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const connect = useCallback(() => {
-    const url = websocketUrl(process.env.NEXT_PUBLIC_API_BASE_URL);
-    // mock 단계에는 WS가 없다 — 초기값이 이미 `disabled`이므로 상태를 건드리지 않는다.
+    const url = websocketUrl(apiBaseUrl());
+    // 설정값이 소켓 주소로 성립하지 않으면 붙을 곳이 없다 — 초기값이 이미 `disabled`이므로
+    // 상태를 건드리지 않는다. 재시도해도 같은 값이라 백오프를 돌릴 이유도 없다.
     if (url === null || !aliveRef.current) return;
 
     let socket: WebSocket;

@@ -23,8 +23,13 @@ from services.rule_engine import (  # noqa: E402
 EBS_CASES = [
     ("available", [], Verdict.UNUSED, None),                 # 미부착·available → 정리 후보
     ("in-use", ["i-abc"], Verdict.SKIP, SkipReason.SKIP_ACTIVE),  # 부착 → 정상 사용
-    ("creating", [], Verdict.SKIP, SkipReason.SKIP_ACTIVE),  # 전이 상태 → UNUSED 아님(오삭제 방지)
-    ("error", [], Verdict.SKIP, SkipReason.SKIP_ACTIVE),     # 비정상 상태 → UNUSED 아님
+    ("available", ["i-abc"], Verdict.SKIP, SkipReason.SKIP_ACTIVE),  # 모순(available+부착) → 부착 우선
+    # 전이·비정상·미상 상태 → UNUSED 아님, "정상 가동"도 아님 → 판정 보류(#276)
+    ("creating", [], Verdict.SKIP, SkipReason.SKIP_UNSUPPORTED_STATE),
+    ("deleting", [], Verdict.SKIP, SkipReason.SKIP_UNSUPPORTED_STATE),
+    ("error", [], Verdict.SKIP, SkipReason.SKIP_UNSUPPORTED_STATE),
+    ("deleted", [], Verdict.SKIP, SkipReason.SKIP_UNSUPPORTED_STATE),
+    (None, [], Verdict.SKIP, SkipReason.SKIP_UNSUPPORTED_STATE),  # state 미상(null) fail-safe
 ]
 
 # (name, cpu_avg, cpu_max, datapoints, tags) -> (verdict, skip_reason)
@@ -34,6 +39,10 @@ EC2_CASES = [
     ("prod-web-01", 54.5, 71.9, 332, {"Environment": "production"}, Verdict.SKIP, SkipReason.SKIP_PROD_PROTECTED),
     ("dev-spiky-worker-03", 4.9, 91.82, 332, {}, Verdict.SKIP, SkipReason.SKIP_LOW_UTIL),
     ("dev-new-04", 3.23, 4.98, 24, {}, Verdict.SKIP, SkipReason.SKIP_INSUFFICIENT_DATA),
+    # cpu_max 없음 — 수집기는 avg·max를 같은 목록에서 뽑아 이 조합을 만들지 않는다(도달 불가 입력).
+    # 계약이 아니라 수집기 구현의 성질이다 — 스키마·DB는 두 값이 독립 nullable이라 막지 않는다.
+    # 그래도 null 가드가 빠지면 TypeError라 방어 동작을 여기서 고정한다. 골든 A7에서 옮겨 왔다(#243).
+    ("null-max-guard", 4.9, None, 48, {}, Verdict.COST_CANDIDATE, None),
 ]
 
 # (name, attached, open_to_world) -> (verdict, skip_reason)

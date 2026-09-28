@@ -1,0 +1,23 @@
+{
+  "aggregate": {
+    "accepted": 0,
+    "auxiliary": 80,
+    "failed": 120,
+    "record_count": 200,
+    "unsupported": 0
+  },
+  "ai_action_expectation": null,
+  "derivation": "Same counts/rate as C01; production context does not change initial risk. Auxiliary rows = 2 per connection, at most 3 failures per connection.",
+  "forbidden_claims": [
+    "real_attack_observed",
+    "successful_compromise",
+    "mitigation_executed"
+  ],
+  "initial_risk": {
+    "initial_risk_level": "HIGH",
+    "reason_codes": [
+      "RISK_SSH_BRUTEFORCE"
+    ],
+    "response_mode": "PRE_MITIGATION_0_5S"
+  }
+}

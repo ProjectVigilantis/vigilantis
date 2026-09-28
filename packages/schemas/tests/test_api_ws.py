@@ -1,12 +1,20 @@
 """WebSocket 공통 이벤트 봉투 계약 테스트 (확정 설계 4.5).
 
-이벤트 3종, event_type ↔ data 형태 정합, Incident data는 incident_id만, "Z" 직렬화.
+이벤트 3종, event_type ↔ data 형태 정합, Incident data는 incident_id만(생성 이벤트만
+category를 더 싣는다), "Z" 직렬화.
 """
 
 import pytest
 from pydantic import ValidationError
 
-from schemas.api.ws import ExecutionEventData, IncidentEventData, WsEvent, WsEventType
+from schemas.api.incidents import IncidentCategory
+from schemas.api.ws import (
+    ExecutionEventData,
+    IncidentCreatedData,
+    IncidentEventData,
+    WsEvent,
+    WsEventType,
+)
 
 
 def make_execution_event(**over):
@@ -26,11 +34,14 @@ def make_execution_event(**over):
 
 
 def make_incident_event(event_type="INCIDENT_CREATED", **over):
+    data = {"incident_id": "inc-20260812-001"}
+    if event_type == "INCIDENT_CREATED":
+        data["category"] = "FINOPS"
     base = {
         "event_id": "evt-20260812-002",
         "event_type": event_type,
         "occurred_at": "2026-08-12T09:01:00Z",
-        "data": {"incident_id": "inc-20260812-001"},
+        "data": data,
     }
     base.update(over)
     return base
@@ -50,9 +61,16 @@ def test_execution_event_roundtrip_and_z():
     assert WsEvent.model_validate_json(dumped) == evt
 
 
-@pytest.mark.parametrize("event_type", ["INCIDENT_CREATED", "INCIDENT_UPDATED"])
-def test_incident_events_carry_incident_id_only(event_type):
-    evt = WsEvent.model_validate(make_incident_event(event_type))
+def test_incident_created_carries_category():
+    # 받자마자 트랙별 알림 제목을 고르므로 생성 이벤트만 category를 싣는다
+    evt = WsEvent.model_validate(make_incident_event("INCIDENT_CREATED"))
+    assert isinstance(evt.data, IncidentCreatedData)
+    assert evt.data.incident_id == "inc-20260812-001"
+    assert evt.data.category is IncidentCategory.FINOPS
+
+
+def test_incident_updated_carries_incident_id_only():
+    evt = WsEvent.model_validate(make_incident_event("INCIDENT_UPDATED"))
     assert isinstance(evt.data, IncidentEventData)
     assert evt.data.incident_id == "inc-20260812-001"
 
@@ -75,7 +93,12 @@ def test_incident_events_carry_incident_id_only(event_type):
     # 빈 event_id / 봉투·data extra 거부
     make_execution_event(event_id=""),
     {**make_execution_event(), "channel": "ws"},
-    make_incident_event(data={"incident_id": "inc-1", "detail": "x"}),
+    make_incident_event(data={"incident_id": "inc-1", "category": "FINOPS", "detail": "x"}),
+    # 생성 이벤트인데 category가 없거나 계약에 없는 값
+    make_incident_event(data={"incident_id": "inc-1"}),
+    make_incident_event(data={"incident_id": "inc-1", "category": "ASSET"}),
+    # 수정 이벤트에 category — 재조회 신호라 incident_id만 담는다
+    make_incident_event("INCIDENT_UPDATED", data={"incident_id": "inc-1", "category": "FINOPS"}),
 ])
 def test_event_contract_violations(data):
     with pytest.raises(ValidationError):

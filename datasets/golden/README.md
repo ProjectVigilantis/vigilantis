@@ -1,9 +1,9 @@
-# Golden Dataset (담당: 박지현)
+# Golden Dataset (담당: 김승철 · 2026-09-16 박지현에게서 인수)
 
-MVP 공통 테스트 정답지. 위협/자산 더미 데이터 26건을 `*.json`으로 적재.
+MVP 공통 테스트 정답지. 위협/자산 더미 데이터 48건을 `*.json`으로 적재.
 
-- 낭비 자원 시나리오 16건 (예: CPU 2% 미만 Idle EC2, Unattached SG, `_is_prod` 경계)
-- 보안 위협 시나리오 10건 (예: 22번 포트 전체 개방 0.0.0.0/0, SSH 브루트포스)
+- 낭비 자원 시나리오 32건 (예: CPU 2% 미만 Idle EC2, Unattached SG, `_is_prod` 경계, 미부착 EBS, EBS 전이·비정상·미상 상태, 토폴로지 노드 4종)
+- 보안 위협 시나리오 16건 (예: 22번 포트 전체 개방 0.0.0.0/0, SSH 브루트포스, `OPEN_IP` 네 번째 분기)
 
 전체 팀(UI/AI/백엔드)이 공유하며 pytest 회귀 테스트(`tests/`)의 입력으로 사용한다.
 
@@ -23,6 +23,8 @@ MVP 공통 테스트 정답지. 위협/자산 더미 데이터 26건을 `*.json`
   조용히 무시되므로 Pydantic 검증만으로는 잡히지 않는다. `tests/test_golden_dataset.py`의
   `test_finops_input_has_no_verdict_fields`가 원문 JSON을 직접 검사해 막는다.
 - 스키마는 추출본이다. `packages/schemas` 모델이 바뀌면 재추출 필요(원천은 항상 Pydantic 모델).
+  재추출은 `uv run python scripts/extract_golden_schema.py` 한 줄이고, 빠뜨리면
+  `tests/test_golden_schema_drift.py` 가 CI 에서 잡는다(#309).
 
 ## 폴더 구조
 
@@ -34,14 +36,24 @@ datasets/golden/
 ├── schema/                     # 입력 양식 (Pydantic 추출본)
 ├── finops/
 │   ├── input/                  # AssetInventory — 한 리전 1회 수집 결과
-│   └── expected/               # rule_engine 판정 정답
+│   ├── expected/               # rule_engine 판정 정답 (Rule Engine 축)
+│   └── expected_ai/            # AI 그래프 산출 정답 (LangGraph 축 — #234, 아래 §정답 축이 둘인 이유)
 └── secops/
     ├── input/                  # MockThreatEventInput — 위협 1건 = 1파일
-    └── expected/               # (작성 보류 — 사유는 해당 폴더 README 참고)
+    └── expected/               # 초기 위험 판정 정답 (Risk Evaluator 축)
 ```
+
+**같은 입력에 정답 폴더가 둘인 것은 검증 대상이 둘이기 때문이다.** `finops/input/`의 자산 하나가
+`expected/`에서는 **규칙 엔진**의 판정 대상이고, `expected_ai/`에서는 **AI 그래프**의 입력이다.
+입력을 복제하지 않는 이유가 그것이다 — 복제하면 두 축이 다른 자산을 보게 되고, 그 어긋남은
+아무 테스트도 잡지 못한다. 자세한 것은 [`finops/expected_ai/README.md`](finops/expected_ai/README.md).
 
 자산은 `AssetInventory`가 "한 리전 1회 수집 결과" 단위이므로 여러 자산을 한 파일에 담는다.
 위협은 이벤트 1건이 곧 1단위이므로 파일을 나눈다.
+
+> **총계 48건에 `expected_ai/`는 더하지 않는다.** 48은 **입력** 건수(자산 32 + 위협 이벤트 16)이고,
+> `expected_ai/`는 그 입력 중 6건에 **두 번째 정답 축**을 얹은 것이지 새 입력이 아니다.
+> 더해 세면 같은 자산을 두 번 세게 된다.
 
 ## 정답(expected) 형식
 
@@ -95,7 +107,7 @@ import할 수 없으므로 `tests/test_golden_dataset.py`가 현재 상수와 �
 | ID | 자산 | 입력 | 판정 | 목적 |
 | --- | --- | --- | --- | --- |
 | A6 | EC2 | 이름에 `prod` 없음 / `Environment: production` 태그 / `cpu_avg 1.0` · `dp 336` | `SKIP_PROD_PROTECTED` | 태그 경로 검증 + prod 보호가 idle보다 우선 |
-| A7 | EC2 | `dp 48` (경계 정확히) / `cpu_avg 4.9` / `cpu_max` **null** | `COST_CANDIDATE` | `<`를 `<=`로 쓰면 실패 + `cpu_max` null 가드 |
+| A7 | EC2 | `dp 48` (경계 정확히) / `cpu_avg 4.9` / `cpu_max 10.0` | `COST_CANDIDATE` | `<`를 `<=`로 쓰면 실패 (`cpu_max` null 가드는 `apps/core-api/services/tests/test_rule_engine.py`로 — 수집기는 avg·max를 같은 목록에서 뽑아 null max를 만들지 않는다, #243) |
 | A8 | SG | 이름 `default` / `attached false` / `tcp 22` 전체개방 | `SKIP_WHITELISTED` | 화이트리스트가 `THREAT`·`UNUSED`를 모두 이김 |
 | A9 | SG | `attached false` / 개방 없음 | `UNUSED` | 미사용 SG 정리 후보 |
 | A10 | SG | `attached true` / 개방 없음 | `SKIP_ACTIVE` | 정상 SG — 오탐 방지 음성 대조군 |
@@ -156,20 +168,31 @@ prod로 안 잡는" 구현이 전부 통과하기 때문이다.
 
 | 항목 | 사유 |
 | --- | --- |
-| EBS | 입력 스키마(`AssetInventory`)에 `ebs_volumes`가 없고 `rule_engine`에도 판정 분기가 없다 — 지금 채우면 규칙을 지어내는 셈. 3~5주차에 collector(`describe_volumes`)·schema·rule을 함께 도입 예정(김승철, P1 `RUNBOOK_EBS_DELETE_UNATTACHED` 전 완료). 확정 규칙은 아래 참고 |
+| ~~EBS~~ ✅ 4차 E1·E2 · 5차 E4~E8로 편입 | 작성 시점에는 `ebs_volumes`도 판정 분기도 없어 미뤘다. #156으로 collector·schema·rule이 모두 들어와 아래 §EBS 판정 규칙 2행을 정답으로 굳혔고(4차), 남아 있던 전이·비정상 상태와 `state` 미상은 **이슈 #276이 정책을 확정해 5차로 편입했다** — 그 표가 2행에서 4행이 됐다 |
 | 화이트리스트 태그(`finops:ignore` 등) | `feat/DATA-27-rule-engine-handoff`가 stale(dev가 47커밋 앞섬). 담당자가 현재 dev로 rebase·재작업 예정이며 **2차는 이를 기다리지 않는다** |
 | 미부착+개방 → `THREAT` 우선순위 / `dp` 부족 + prod 우선순위 | 3차 파일은 `_is_prod` 단일 변수 설계(다른 입력 전부 동일)라 우선순위 케이스를 섞으면 그 성질이 깨진다. 4차에서 별도 파일로 작성 |
 | ~~`non-prod` 부분 문자열 오탐~~ ✅ 3차 A12로 편입 | 당시 "버그 가능성"이라 정답으로 굳히지 못했으나, #95 / PR #97이 **부분일치 영구 금지**를 확정해 정답이 정해졌다 |
 | ~~이름 기반 prod 탐지~~ ❌ 성립 불가 | `evaluate_ec2`의 `name` 인자가 #96 / PR #110으로 제거됐다. 이름 경로 자체가 없어 케이스로 만들 수 없다 |
 
-### EBS 판정 규칙 (도입 확정 — 4차 골든셋 작성 근거)
+### EBS 판정 규칙 (도입 확정 — 4차·5차 골든셋 작성 근거)
 
-| 입력 | 판정 |
-| --- | --- |
-| 미연결 (`attached_instance_ids` 비어있음 / `state: available`) | `UNUSED` → `RUNBOOK_EBS_DELETE_UNATTACHED` 후보 |
-| 연결됨 (`state: in-use`) | `SKIP` / `SKIP_ACTIVE` |
+**2행 → 4행.** 아래 3·4행은 이슈 #276의 정책 확정(2026-09-03 · 김승철 DATA/Rule Engine owner)으로 더해졌고,
+5차 E4~E8이 그 두 행에서 도출됐다. 구현은 `services/rule_engine.evaluate_ebs` 3분기다.
 
-새 `Verdict`·`SkipReasonCode` 값은 추가되지 않는다(기존 값 재사용). `health_score`는 EBS에서
+| 입력 | 판정 | 근거 |
+| --- | --- | --- |
+| 미연결 (`attached_instance_ids` 비어있음 / `state: available`) | `UNUSED` → `RUNBOOK_EBS_DELETE_UNATTACHED` 후보 | 도입 확정(#156) |
+| 연결됨 (`state: in-use` 이거나 부착됨) | `SKIP` / `SKIP_ACTIVE` | 도입 확정(#156) |
+| `creating`·`deleting`·`error`·`deleted` + 미부착 | `SKIP` / `SKIP_UNSUPPORTED_STATE` | #276 결정 ①② |
+| `state` 미상(`null`) + 미부착 — fail-safe | `SKIP` / `SKIP_UNSUPPORTED_STATE` | #276 결정 ③ |
+
+`available` + 미부착만 `UNUSED`다 — 전이·비정상·미상 상태를 삭제 후보로 보면 생성 중·삭제 중·오류
+볼륨을 지우는 오삭제가 난다. 사유 코드로 `SKIP_ACTIVE`("정상 가동")를 재사용하지 않은 것도 같은
+이유다 — 관제 화면과 AI 요약이 이 코드를 **사람이 읽는 사유로 그대로 노출**한다(#276 결정 ②).
+
+4차 시점에는 새 `Verdict`·`SkipReasonCode` 값이 추가되지 않았으나(기존 값 재사용),
+**5차에서는 `SKIP_UNSUPPORTED_STATE` 1종이 늘었다** — 계약에는 #276 / PR #284로 먼저 들어왔고
+골든은 그 뒤를 따른다(정답지가 계약보다 앞서 나가지 않는다). `health_score`는 EBS에서
 `null`이어야 한다 — 계약상 EC2 전용이다. `resource_role`은 `RUNBOOK_SUPPORT`다(`_PRIMARY_TYPES`에
 EBS가 없음). 세 항목 모두 `AssetItem` 계약이 위반 시 거부하는 것을 확인했다.
 
@@ -177,3 +200,115 @@ EBS가 없음). 세 항목 모두 `AssetItem` 계약이 위반 시 거부하는 
 `tests/test_golden_dataset.py`의 `_evaluate_inventory`에 순회를 함께 추가해야 한다.
 빠뜨리면 EBS 자산이 판정도 대조도 없이 무시되는데,
 `test_finops_expected_covers_every_input_asset`이 이를 감지한다.
+→ #156에서 둘 다 들어왔고, 4차 작성 시 `tests/test_guardrails.py`의 `_GOLDEN_ASSET_RUNBOOKS`에
+`ebs_volumes` 매핑을 추가하는 것이 **세 번째 선행 조건**이었다. 그 dict가 골든의 자산 종류를
+전부 덮는지 검사하므로, 매핑 없이 EBS를 넣으면 가드레일 회귀가 즉시 실패한다.
+
+## 4차 작성 케이스 (자산 2건 — 누적 30건)
+
+**자산 2건** — `finops/input/asset_inventory_004.json` (EBS 전용)
+
+| case | 입력 | 정답 | 막는 것 |
+| --- | --- | --- | --- |
+| E1 | `state: available` · 부착 없음 | `UNUSED` | 아무것도 `UNUSED`로 만들지 않는 구현 (미탐) |
+| E2 | `state: in-use` · 부착 있음 | `SKIP` / `SKIP_ACTIVE` | 사용 중인 볼륨을 삭제 후보로 넘기는 구현 (오탐) |
+
+**두 행은 위 §EBS 판정 규칙 표에서 그대로 도출했다.** 그 표에 없는 입력은 넣지 않았다 —
+정답지는 정답을 적는 곳이지 현재 구현을 기록하는 곳이 아니다.
+
+**4차에서 정답으로 굳히지 않은 입력과 그 사유** (당시 이슈 #264에서 정책 확인 중)
+
+앞 2행은 **이슈 #276으로 답이 나와 5차에서 편입**했다(아래 §5차 작성 케이스). 뒤 2행은 그대로 제외다.
+
+| 입력 | 수집 경로에서 나오나 | 확정 규칙에 답이 있나 | 처리 |
+| --- | --- | --- | --- |
+| `creating` · `deleting` · `error` · `deleted` + 미부착 | ✅ AWS `VolumeState` 유효값 | ✅ #276 결정 ①② | **5차 E4~E7로 편입** |
+| `state` 없음(null) | ❌ `describe_volumes`가 `State`를 돌려주므로 수집 경로에선 안 나온다. `EbsAsset.state`가 `Optional`이라 형식만 허용 | ✅ #276 결정 ③(fail-safe 승인) | **5차 E8로 편입** |
+| `available` + 부착 있음 | ❌ 볼륨 상태와 부착 상태는 별개 필드이며(`VolumeState` vs `VolumeAttachment.status`), 부착이 있는 볼륨은 `in-use`다 | ❌ | **제외** |
+| `AVAILABLE`(대문자) | ❌ AWS `VolumeState` 유효값은 전부 소문자 | ❌ | **제외** |
+
+제외 2행은 수집 경로에서 나올 수 없는 입력이라, 정답을 못박아도 막는 것이 **실제 판정 결과를
+바꾸지 않는 구현 차이**뿐이다. 실측으로 확인했다 — 부착 조건을 통째로 지우는 변형(`evaluate_ebs`에서
+`not attached_instance_ids` 제거)은 골든·단위 테스트 **어느 쪽도 실패시키지 않는다.** AWS가
+`state`와 부착을 함께 옮기기 때문이며, 그 조건은 수집단 버그에 대한 방어층이다.
+**커버리지가 늘어난다는 것은 정답성의 근거가 아니다.**
+
+**`state` 없음(null)은 왜 제외가 아닌가** — 이 입력도 수집 경로에서는 나오지 않는다. 갈리는 축은
+"수집 경로에서 나오나"가 아니라 **"확정 규칙에 답이 있나"** 다. `EbsAsset.state`가 `Optional[str]`이라
+계약이 허용하는 입력이고, #276 결정 ③이 그 입력의 fail-safe 판정을 명시적으로 승인했다. 제외 2행에는
+그 승인이 없다 — 정답을 적으려면 규칙이 아니라 현재 구현을 베껴야 한다.
+
+## 5차 작성 케이스 (자산 5건 — 누적 39건)
+
+**자산 5건** — `finops/input/asset_inventory_004.json` (4차와 같은 파일에 추가. EBS 전용)
+
+| case | 입력 | 정답 | 막는 것 |
+| --- | --- | --- | --- |
+| E4 | `state: creating` · 부착 없음 | `SKIP` / `SKIP_UNSUPPORTED_STATE` | 부착 여부만 보고 판정하는 구현 (#276 §배경 2의 계약 충돌 지점) |
+| E5 | `state: deleting` · 부착 없음 | 〃 | 전이 상태 중 하나만 예외 처리하는 **부분 허용목록** |
+| E6 | `state: error` · 부착 없음 | 〃 | 사유 코드를 `SKIP_ACTIVE`("정상 가동")로 재사용하는 구현 |
+| E7 | `state: deleted` · 부착 없음 | 〃 | `creating`·`deleting`·`error` 3종만 열거하는 허용목록 |
+| E8 | `state: null` · 부착 없음 | 〃 | 미상 상태에 기본값을 채우는 구현(`(state or "available")`) |
+
+**다섯 행은 위 §EBS 판정 규칙 표의 3·4행에서 그대로 도출했다** — #276이 확정한 규칙이며 구현 산출을
+베끼지 않았다. 정답이 다섯 건 모두 같으므로, 케이스를 나눈 이유를 위 표의 "막는 것" 열에 적었다:
+**한 건으로 묶으면 부분 허용목록이 통과한다.** E7이 그 사실의 증거다 — `deleted`는 원복된 8건
+(PR #275)에도, #264 본문의 케이스 표에도 없었다. 집합을 AWS `VolumeState` 계약 6종에서 도출하지 않고
+손으로 골랐던 결과다.
+
+**case_id는 #264 본문의 E 번호를 잇지 않는다.** E3(`available` + 부착)·E5(대문자)가 제외 확정이라
+E3을 비우고 E4부터 시작했고, #264의 E4는 3종을 한 행으로 묶은 데다 정답을 `SKIP_ACTIVE`로 적어
+#276이 그 답을 뒤집었다. 대응 관계는 `finops/expected/asset_inventory_004.json`의 `design_note`에 있다.
+
+**판정 커버리지**: 5차로 `skip_reason_code` 6종이 골든에서 전부 채워진다 —
+`SKIP_UNSUPPORTED_STATE`가 마지막 미충족 값이었다. `apps/core-api/tests/test_golden_assets_api.py`의
+예외 목록(`UNCOVERED_SKIP_REASONS`)이 같은 PR에서 비워졌다.
+
+## 6차 작성 케이스 (자산 9건 — 누적 48건)
+
+**목적이 다른 회차다.** 1~5차는 **판정**을 굳혔다. 6차는 **관계 그래프**를 세운다 — 토폴로지 뷰(#146)가
+그릴 노드와 엣지가 골든에 하나도 없어 화면이 계속 당시의 FE mock(`apps/web/src/app/api/v1/_mock/data.ts` — 2026-09-17 PR #351로 제거)에서 왔다.
+(이슈 #271 ③ · 설계서 `docs/E2E_DEMO_SCENARIOS.md` §대조 필요 8번)
+
+**자산 8건** — `finops/input/asset_inventory_005.json` (신규 · 자족 파일)
+
+| case | 입력 | 정답 | 이 파일에서 맡는 것 |
+| --- | --- | --- | --- |
+| A17 | EC2 `t3.large` · `cpu_avg 18.5` · subnet **A** | `SKIP` / `SKIP_ACTIVE` | 관계 앵커 A — `SECURED_BY`·`PROTECTED_BY`·`MEMBER_OF`·`ATTACHED_TO` |
+| A18 | EC2 `t3.medium` · `cpu_avg 40.0` · subnet **B** | `SKIP` / `SKIP_ACTIVE` | 관계 앵커 B — `SECURED_BY`·`MEMBER_OF`·`REGISTERED_IN` |
+| A19 | SG 부착됨 · 개방 없음 | `SKIP` / `SKIP_ACTIVE` | 두 앵커가 함께 참조하는 `SECURED_BY` 대상 |
+| E9 | EBS `in-use` · A17 에 부착 | `SKIP` / `SKIP_ACTIVE` | `ATTACHED_TO` 의 유일한 파생 자리 |
+| — | NACL(subnet **A** 에만 연관) | 정답 없음 (`NOT_APPLICABLE`) | `PROTECTED_BY` 의 대상 |
+| — | Launch Template | 〃 | ASG `USES` 의 대상 |
+| — | Auto Scaling Group(`instance_ids: [A17, A18]`) | 〃 | `MEMBER_OF` 의 대상 · `USES` 의 출발점 |
+| — | ALB Target Group(`target_instance_ids: [A18]`) | 〃 | `REGISTERED_IN` 의 대상 |
+
+**정답이 4건뿐인 것은 누락이 아니라 계약이다.** 아래 4종은 판정 대상이 아니라
+(`packages/schemas/api/assets.py` `_RULE_TARGET_TYPES`) 항상 `NOT_APPLICABLE` 이고,
+`tests/golden_contract.py::judgement_free_list_fields()` 가 그 면제를 **계약에서 파생**시켜
+1:1 대조에서 뺀다(#271 ① / PR #270).
+
+**NACL 을 subnet A 에만, TG 를 A18 에만 붙인 것이 설계의 요점이다.** 관계가 "전부 다 붙는" 상태면
+파생 조건이 틀려도 드러나지 않는다. 두 앵커의 관계 집합이 실제로 다르게 나오는지를 회귀가 본다.
+
+**앵커 EC2 두 대는 일부러 `COST_CANDIDATE` 가 아니다.** 하나라도 후보가 되면 AI 정답지의 고정 세트가
+6건에서 7건이 되어 `tests/test_golden_ai_dataset.py` 의 가드 2종이 깨진다(#234 / PR #303).
+이 파일의 목적은 판정이 아니라 관계이고, 판정 축은 A1~A16·E1~E8 이 이미 덮는다.
+
+**자산 1건** — `finops/input/asset_inventory_001.json` (기존 파일 보정)
+
+| case | 입력 | 정답 | 막는 것 |
+| --- | --- | --- | --- |
+| A20 | SG `sg-…00006` 부착됨 · 개방 없음 | `SKIP` / `SKIP_ACTIVE` | **끊긴 엣지** — A2·A3·A4 가 `security_group_ids` 로 이 SG 를 가리키는데 자산으로는 없어, 세 EC2 의 `SECURED_BY` 가 응답에 없는 노드를 향하고 있었다 |
+
+**관계는 같은 인벤토리 파일 안에서만 파생된다.** `collector.persist_inventory` 가 `subnet_id`→NACL,
+`instance_id`→ASG/TG, `attached_instance_ids`→EBS, ASG→LT 를 잇는데, 짝이 다른 파일에 있으면
+조용히 0건이 된다. `ATTACHED_TO` 가 실제로 그랬다 — 4차 EBS(#264 · #276)가 부착 대상으로 적은
+`i-0a1b2c3d4e5f00041` 이 골든 어디에도 EC2 로 없어, EBS 가 들어온 뒤에도 이 관계는 **한 번도 파생된
+적이 없다.** 아무도 세지 않아 아무도 몰랐다.
+
+**커버리지**: 6차로 **자산 유형 7종 전량**과 **`RelationType` 6종 전량**이 골든에서 파생된다.
+`apps/core-api/tests/test_golden_assets_api.py` 의 가드 3종이 그 등식을 지킨다 —
+노드(`test_golden_covers_every_asset_type`) · 엣지(`test_golden_derives_every_relation_type`) ·
+끊긴 엣지 없음(`test_golden_relations_point_at_served_assets`). 계약에 유형이나 관계가 추가되면
+그 등식이 먼저 실패하고, 고칠 곳은 테스트가 아니라 이 디렉터리다.

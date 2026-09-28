@@ -3,6 +3,7 @@
 # Dashboard(FE)와의 외부 API DTO 네임스페이스입니다.
 # 수집·정형화 계층(packages/schemas/*.py 최상위 모듈)과 계약 계층을 분리합니다.
 #   - assets:    GET /api/v1/assets 응답 (이슈 #31)
+#   - metrics:   GET /api/v1/metrics/timeseries 응답 — 시계열 3축(CPU·네트워크·SG 개방)
 #   - incidents: GET /api/v1/incidents/{id} 응답 (이슈 #32)
 #   - actions:   POST /api/v1/actions/execute 요청·응답 (이슈 #32)
 #   - ws:        WebSocket(/api/v1/ws) 공통 이벤트 봉투 (이슈 #32)
@@ -17,16 +18,36 @@ from .actions import (
 from .errors import ErrorCode, ErrorDetail, ErrorResponse
 from .incidents import (
     ExecutionSummaryItem,
+    ExecutionVerificationHold,
     IncidentCategory,
     IncidentListItem,
     IncidentResponse,
     IncidentsResponse,
     IncidentStatus,
+    OpenIpThreatContext,
     RecommendationItem,
     ResponseMode,
     RiskLevel,
+    SshBruteForceThreatContext,
+    ThreatContext,
 )
-from .ws import ExecutionEventData, IncidentEventData, WsEvent, WsEventType
+from .metrics import (
+    AxisStatus,
+    CpuAxis,
+    CpuSeries,
+    MetricsTimeseriesResponse,
+    NetworkAxis,
+    NetworkSeries,
+    SgExposureAxis,
+    TimeseriesPoint,
+)
+from .ws import (
+    ExecutionEventData,
+    IncidentCreatedData,
+    IncidentEventData,
+    WsEvent,
+    WsEventType,
+)
 from .assets import (
     AlbTargetGroupSpec,
     AsgSpec,
@@ -59,15 +80,20 @@ __all__ = [
     "ExecutionEventData",
     "ExecutionStatus",
     "ExecutionSummaryItem",
+    "ExecutionVerificationHold",
     "IncidentCategory",
+    "IncidentCreatedData",
     "IncidentEventData",
     "IncidentListItem",
     "IncidentResponse",
     "IncidentsResponse",
     "IncidentStatus",
+    "OpenIpThreatContext",
     "RecommendationItem",
     "ResponseMode",
     "RiskLevel",
+    "SshBruteForceThreatContext",
+    "ThreatContext",
     "WsEvent",
     "WsEventType",
     "AlbTargetGroupSpec",
@@ -90,4 +116,12 @@ __all__ = [
     "SkipReasonCode",
     "UtcDateTime",
     "Verdict",
+    "AxisStatus",
+    "CpuAxis",
+    "CpuSeries",
+    "MetricsTimeseriesResponse",
+    "NetworkAxis",
+    "NetworkSeries",
+    "SgExposureAxis",
+    "TimeseriesPoint",
 ]

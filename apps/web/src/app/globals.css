@@ -75,6 +75,13 @@
   --chart-3: oklch(0.439 0 0);
   --chart-4: oklch(0.371 0 0);
   --chart-5: oklch(0.269 0 0);
+  /* 시계열 계열 색 4종 — UI 토큰이 무채색이라 차트만 유채색을 쓴다. 고정 순서이며 돌려 쓰지
+     않는다(components/dashboard/trend-charts.tsx). 라이트·다크 각각 따로 고른 단계이고
+     명도대·채도 하한·색각 분리(ΔE)·표면 대비 검사를 통과한 값이다 — 임의로 바꾸지 말 것. */
+  --chart-series-1: #2563eb;
+  --chart-series-2: #d97706;
+  --chart-series-3: #0d9488;
+  --chart-series-4: #7c3aed;
   --radius: 0.625rem;
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0 0);
@@ -113,6 +120,11 @@
   --chart-3: oklch(0.439 0 0);
   --chart-4: oklch(0.371 0 0);
   --chart-5: oklch(0.269 0 0);
+  /* 다크 표면(#1a1a19 급)에서 다시 검증한 단계 — 라이트 값을 그대로 쓰면 명도대를 벗어난다. */
+  --chart-series-1: #4b8df8;
+  --chart-series-2: #d97706;
+  --chart-series-3: #10a89a;
+  --chart-series-4: #8b5cf6;
   --sidebar: oklch(0.205 0 0);
   --sidebar-foreground: oklch(0.985 0 0);
   --sidebar-primary: oklch(0.488 0.243 264.376);

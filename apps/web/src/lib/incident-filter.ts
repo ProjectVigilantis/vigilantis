@@ -16,13 +16,37 @@ export const ALL = '전체';
 export const INCIDENT_PRESETS = ['ACTIVE', 'PENDING', 'PREEMPTIVE', 'HISTORY'] as const;
 export type IncidentPreset = (typeof INCIDENT_PRESETS)[number];
 
-/** 진행 중 = 종료(`RESOLVED`)가 아닌 4종. `FAILED`는 사람 개입이 남아 여기 잔류한다(§4.4). */
+/**
+ * 진행 중 = 종료(`RESOLVED`)가 아닌 5종. `FAILED`는 사람 개입이 남아 여기 잔류하고(§4.4),
+ * `AWAITING_CLOSURE`도 같은 이유로 남는다 — 관제자 종료 판단이 아직 끝나지 않았으므로
+ * 기본 목록에서 빠지면 조치에 성공한 건이 화면에서 통째로 사라진다 (#240).
+ */
 export const ACTIVE_STATUSES = [
   'ANALYZING',
   'AWAITING_APPROVAL',
   'ACTION_IN_PROGRESS',
+  'AWAITING_CLOSURE',
   'FAILED',
 ] as const satisfies readonly IncidentStatus[];
+
+/**
+ * 관제자 종료 처리가 **출발할 수 있는** 상태 3종. 원천은 서버 계약
+ * `INCIDENT_RESOLVABLE_STATUSES`(packages/schemas/incidents.py)이며 그대로 옮긴 것이다 —
+ * 여기 없는 상태에서 `[종료 처리]`를 누르면 409 `INCIDENT_NOT_RESOLVABLE`이 온다.
+ *
+ * `ANALYZING`은 분석이 끝나며 제안이 붙어 종료가 뒤집히고, `ACTION_IN_PROGRESS`는
+ * 진행 중 실행이 있어 `RESOLVED` 응답 불변식을 깬다. `RESOLVED` 재요청은 거절이 아니라
+ * 멱등 200이라 이 집합에 없다 — 이미 종료된 건에는 버튼 자체를 내지 않는다.
+ */
+export const RESOLVABLE_STATUSES = [
+  'AWAITING_APPROVAL',
+  'AWAITING_CLOSURE',
+  'FAILED',
+] as const satisfies readonly IncidentStatus[];
+
+export function isResolvable(status: IncidentStatus): boolean {
+  return (RESOLVABLE_STATUSES as readonly IncidentStatus[]).includes(status);
+}
 
 /**
  * 선제차단 계열 — **승인 없이 이미 격리가 수행된** 두 `response_mode`다.

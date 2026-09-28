@@ -21,10 +21,13 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+from typing import NamedTuple
 
 from botocore.exceptions import BotoCoreError, ClientError
 
 from config import get_collector_settings
+from schemas.arns import build_arn
+from schemas.collections import UNOBSERVED_TYPES_BY_FAILURE
 from schemas.assets import (
     AlbTargetGroupAsset,
     AssetInventory,
@@ -50,9 +53,30 @@ _METRIC_NAMES = (MetricName.CPU_UTILIZATION, MetricName.NETWORK_IN, MetricName.N
 _QUERY_BATCH = 100
 
 
+# collector_failures 라벨(_safe_describe 가 흡수한 조회) → 그 조회로만 채워지는 자산 유형.
+# EC2·SG·NACL·EBS 조회는 흡수하지 않아 실패하면 리전이 FAILED 로 끝나므로 여기 없다 —
+# 소멸 표시 블록에 도달했다면 그 넷은 전량 관측된 것이다.
+# alb_target_health 는 TG 목록이 아니라 등록 대상 조회라 TG 자산을 못 본 것이 아니다.
+# **이 지도에 없는 라벨이 섞이면 아무것도 판단하지 않는다**(fail-closed) — 누가 흡수
+# 조회를 새로 더하고 이 지도를 안 고치면, 조용히 잘못 지우는 대신 조용히 안 지우는
+# 쪽으로 넘어지게 한다. (Issue #332 · PR #339 리뷰: 김세혁)
+
+# 리전 수집이 통째로 엎어진 회차의 라벨(_collect_region_failed). 특정 유형이 아니라 **전부**를
+# 못 본 것이라 유형으로 환원하지 않는다 — 그 회차는 collection_status 가 FAILED 로 나가고,
+# 화면은 유형별 안내가 아니라 전체 실패로 그려야 한다. 모르는 라벨과 구분하려고 이름을 남긴다.
+REGION_FAILURE_LABEL = "collect_region"
+
+
 def _failure_reason(exc: BaseException) -> str:
     """degrade 사유를 사람이 읽을 짧은 코드로. ClientError 는 AWS 오류 코드
-    (InternalFailure·AccessDenied·Throttling 등), 그 외는 예외 클래스명."""
+    (InternalFailure·AccessDenied·Throttling 등), 그 외는 예외 클래스명.
+
+    **자체 사유 코드를 지닌 예외는 그 코드를 그대로 쓴다** — get_metric_data 의 지표 단위
+    실패처럼 AWS 가 준 코드가 예외 타입이 아니라 응답 본문에 있는 경우가 있다
+    (services/metrics.MetricDataError). 클래스명으로 환원하면 그 코드가 사라진다."""
+    code = getattr(exc, "reason_code", None)
+    if isinstance(code, str) and code:
+        return code
     if isinstance(exc, ClientError):
         return exc.response.get("Error", {}).get("Code") or "ClientError"
     return type(exc).__name__
@@ -134,15 +158,18 @@ def _runtime_config() -> dict:
     }
 
 
-def _arn(resource_type: str, resource_id: str, region: str, account_id: str) -> str:
-    """가드레일 3단계(ARN Match)가 이 문자열을 그대로 비교하므로 포맷을 반드시 고정한다.
-    예) arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0abc123"""
-    return f"arn:aws:ec2:{region}:{account_id}:{resource_type}/{resource_id}"
+# ARN 조립은 schemas.arns.build_arn 하나로 모은다(#342) — 여기 있던 _arn 헬퍼는 그 함수로
+# 대체됐다. 가드레일 ③ 이 대조하는 문자열이라 조립 원천이 갈리면 안 된다.
 
 
 # ------------------------------------------------------------------ 정형화 헬퍼
 def _name_tag(tags: list[dict]) -> str | None:
     return next((t["Value"] for t in tags or [] if t["Key"] == "Name"), None)
+
+
+def _tag_dict(tags: list[dict] | None) -> dict[str, str]:
+    """AWS 의 [{Key, Value}] 태그 목록을 {Key: Value} 로. EC2·SG 가 같은 변환을 쓴다."""
+    return {t["Key"]: t["Value"] for t in tags or []}
 
 
 def _open_to_world(sg: dict) -> list[OpenPort]:
@@ -174,12 +201,47 @@ def _used_sg_ids(instances: list[dict], enis: list[dict]) -> set[str]:
     return used
 
 
-def _fetch_metrics(cw, instance_ids: list[str], start: datetime, end: datetime, period: int) -> dict[str, dict[MetricName, MetricSeries]]:
+class MetricFetch(NamedTuple):
+    """`_fetch_metrics` 의 결과 — 시계열과 **지표 단위 오류**를 함께 싣는다.
+
+    get_metric_data 는 쿼리 하나가 실패해도 호출 자체는 200 으로 돌아오고, 실패는
+    `MetricDataResult.StatusCode`(`Complete`·`PartialData`·`InternalError`·`Forbidden`)
+    에만 남는다. 그 상태를 버리면 실패한 지표가 **관측이 없는 지표와 같은 빈 시리즈**가 되어,
+    호출자는 실패를 정상 무관측으로 다루게 된다.
+
+    **판단은 호출자 몫이라 여기서는 사실만 싣는다** — 수집 경로는 부분 수집이 목적이라
+    degrade 하고(요약이 비면 rule_engine 이 데이터부족으로 Skip 한다), 차트 경로는
+    축을 UNAVAILABLE 로 내린다(services/metrics.MetricDataError).
+    """
+
+    series: dict[str, dict[MetricName, MetricSeries]]
+    #: (instance_id, metric) → `Complete` 가 아닌 **최종** StatusCode. 정상이면 비어 있다.
+    errors: dict[tuple[str, MetricName], str]
+
+
+def _fetch_metrics(
+    cw,
+    instance_ids: list[str],
+    start: datetime,
+    end: datetime,
+    period: int,
+    metrics: tuple[MetricName, ...] = _METRIC_NAMES,
+    stat: str = "Average",
+) -> MetricFetch:
     """인스턴스별 CPU/Network 시계열을 get_metric_data 로 배치 조회.
-    실 계정 비용 = 호출 수이므로 단건 반복 대신 배치 조회를 유지한다."""
+    실 계정 비용 = 호출 수이므로 단건 반복 대신 배치 조회를 유지한다.
+
+    ``metrics`` 로 받을 메트릭을 좁힐 수 있다 — 시계열 차트(services/metrics.py)는 CPU 만
+    필요해서 쿼리 수를 3분의 1로 줄인다. 기본값은 수집 경로가 쓰는 3종 그대로다.
+
+    ``stat`` 은 CloudWatch 통계다. 기본 ``Average`` 는 요약(`_summarize`)이 평균을 쓰기
+    때문이고, **기간 총량이 필요한 쪽은 ``Sum`` 을 준다**(네트워크 차트). NetworkIn/Out 의
+    표본값은 그 표본 구간에 오간 바이트라, period 안에 표본이 여럿이면 Average 는 표본
+    하나치가 되어 period 로 나눈 초당 값이 표본 수만큼 작아진다(1,000 B/s → 16.67 B/s).
+    """
     queries, ref = [], {}
     for idx, iid in enumerate(instance_ids):
-        for m in _METRIC_NAMES:
+        for m in metrics:
             qid = f"q{idx}_{m.name.lower()}"
             ref[qid] = (iid, m)
             queries.append(
@@ -192,13 +254,16 @@ def _fetch_metrics(cw, instance_ids: list[str], start: datetime, end: datetime, 
                             "Dimensions": [{"Name": "InstanceId", "Value": iid}],
                         },
                         "Period": period,
-                        "Stat": "Average",
+                        "Stat": stat,
                     },
                     "ReturnData": True,
                 }
             )
 
     out: dict[str, dict[MetricName, MetricSeries]] = {iid: {} for iid in instance_ids}
+    # 쿼리별 **마지막** 상태만 남긴다 — 페이지가 갈리면 중간 페이지는 PartialData 로 오고
+    # 마지막 페이지에서 Complete 가 된다. 상태를 싣지 않는 구현(일부 스텁)은 판단하지 않는다.
+    status_by_query: dict[str, str] = {}
     for i in range(0, len(queries), _QUERY_BATCH):
         batch = queries[i : i + _QUERY_BATCH]
         token = None
@@ -215,10 +280,20 @@ def _fetch_metrics(cw, instance_ids: list[str], start: datetime, end: datetime, 
                     out[iid][m] = series
                 series.timestamps.extend(r.get("Timestamps", []))
                 series.values.extend(r.get("Values", []))
+                status = r.get("StatusCode")
+                if status is not None:
+                    status_by_query[r["Id"]] = status
             token = res.get("NextToken")
             if not token:
                 break
-    return out
+
+    errors = {ref[qid]: code for qid, code in status_by_query.items() if code != "Complete"}
+    if errors:
+        _log.warning(
+            "CloudWatch 지표 조회 실패 %d건(전체 %d) — 상태 %s",
+            len(errors), len(queries), sorted(set(errors.values())),
+        )
+    return MetricFetch(series=out, errors=errors)
 
 
 def _summarize(series_by_metric: dict[MetricName, MetricSeries]) -> MetricSummary:
@@ -236,6 +311,23 @@ def _summarize(series_by_metric: dict[MetricName, MetricSeries]) -> MetricSummar
         net_in_avg=avg(net_in.values if net_in else []),
         net_out_avg=avg(net_out.values if net_out else []),
     )
+
+
+def _reusable_summaries(
+    instance_ids: list[str],
+    fresh: dict[str, MetricSummary] | None,
+) -> dict[str, MetricSummary] | None:
+    """이번 회차의 CloudWatch 조회를 건너뛸 수 있으면 재사용할 요약을, 아니면 None 을 준다(#255).
+
+    **전부 아니면 전무다.** get_metric_data 는 인스턴스 전량을 한 번에 배치 조회하므로
+    한 대라도 새로 받아야 하면 나머지를 아껴도 호출 수가 줄지 않는다. 부분 재사용은
+    같은 회차 안에 창이 다른 요약을 섞어 metric_summaries 의 window 를 못 믿게 만들기만 한다.
+    """
+    if not instance_ids or not fresh:
+        return None
+    if any(iid not in fresh for iid in instance_ids):
+        return None  # 신규 인스턴스가 있으면 전량 재조회
+    return fresh
 
 
 def _asg_launch_template(g: dict) -> tuple[str | None, str | None]:
@@ -276,8 +368,18 @@ def _registered_instance_ids(target_health: list) -> list[str]:
 
 
 # ------------------------------------------------------------------ 공개 API
-def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
-    """한 리전의 EC2/SG 인벤토리 + 메트릭을 수집해 AssetInventory 로 정형화한다."""
+def collect_region(
+    region: str,
+    cfg: dict | None = None,
+    fresh_metrics: dict[str, MetricSummary] | None = None,
+    fresh_window_end: datetime | None = None,
+) -> AssetInventory:
+    """한 리전의 EC2/SG 인벤토리 + 메트릭을 수집해 AssetInventory 로 정형화한다.
+
+    fresh_metrics 는 아직 유효한(= 메트릭 입자 안에서 수집된) 요약이다. 인스턴스 전량이
+    덮이면 CloudWatch 를 건너뛰고 그 값을 그대로 쓴다(#255). DB 는 여기서 읽지 않는다 —
+    조회는 호출자(_collect_store_region)가 하고 이 함수는 결과만 받는다.
+    """
     cfg = cfg or _runtime_config()
 
     ec2 = aws_client("ec2", region)
@@ -317,7 +419,20 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=cfg["lookback_days"])
     ids = [i["InstanceId"] for i in instances_raw]
-    metrics = _fetch_metrics(cw, ids, start, end, cfg["period_seconds"]) if ids else {}
+    reuse = _reusable_summaries(ids, fresh_metrics)
+    # 재사용 시 시계열은 받지 않는다 — 원자료를 쓰는 곳은 _summarize 뿐이고 그 결과를
+    # 그대로 물려받기 때문이다(Ec2Asset.metrics 를 읽는 소비자는 없다).
+    metrics: dict[str, dict[MetricName, MetricSeries]] = {}
+    if reuse is not None:
+        _log.info(
+            "리전 %s 메트릭 재사용 — CloudWatch 조회 생략(인스턴스 %d대, 창 끝 %s)",
+            region, len(ids), fresh_window_end,
+        )
+    elif ids:
+        # 지표 단위 실패(MetricFetch.errors)는 여기서 막지 않는다 — 수집은 부분 실패에도
+        # 나머지를 살리는 경로고, 빈 요약은 rule_engine 이 데이터부족으로 Skip 한다.
+        # 실패를 사용자에게 보이는 쪽은 차트 경로다(services/metrics.py).
+        metrics = _fetch_metrics(cw, ids, start, end, cfg["period_seconds"]).series
 
     ec2_assets: list[Ec2Asset] = []
     for i in instances_raw:
@@ -325,7 +440,7 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
         series = metrics.get(iid, {})
         ec2_assets.append(
             Ec2Asset(
-                arn=_arn("instance", iid, region, account_id),
+                arn=build_arn("instance", iid, region, account_id),
                 instance_id=iid,
                 name=_name_tag(i.get("Tags", [])),
                 instance_type=i.get("InstanceType"),
@@ -337,15 +452,15 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
                 private_ip=i.get("PrivateIpAddress"),
                 launch_time=i.get("LaunchTime"),
                 security_group_ids=[g["GroupId"] for g in i.get("SecurityGroups", [])],
-                tags={t["Key"]: t["Value"] for t in i.get("Tags", [])},
+                tags=_tag_dict(i.get("Tags")),
                 metrics=series,
-                metric_summary=_summarize(series),
+                metric_summary=reuse[iid] if reuse else _summarize(series),
             )
         )
 
     sg_assets = [
         SecurityGroupAsset(
-            arn=_arn("security-group", sg["GroupId"], region, account_id),
+            arn=build_arn("security-group", sg["GroupId"], region, account_id),
             group_id=sg["GroupId"],
             name=sg.get("GroupName"),
             description=sg.get("Description"),
@@ -353,13 +468,14 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
             vpc_id=sg.get("VpcId"),
             attached=sg["GroupId"] in used,
             open_to_world=_open_to_world(sg),
+            tags=_tag_dict(sg.get("Tags")),
         )
         for sg in sgs_raw
     ]
 
     nacl_assets = [
         NaclAsset(
-            arn=_arn("network-acl", n["NetworkAclId"], region, account_id),
+            arn=build_arn("network-acl", n["NetworkAclId"], region, account_id),
             nacl_id=n["NetworkAclId"],
             region=region,
             vpc_id=n.get("VpcId"),
@@ -373,7 +489,7 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
 
     ebs_assets = [
         EbsAsset(
-            arn=_arn("volume", v["VolumeId"], region, account_id),
+            arn=build_arn("volume", v["VolumeId"], region, account_id),
             volume_id=v["VolumeId"],
             region=region,
             volume_type=v.get("VolumeType"),
@@ -390,7 +506,7 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
 
     lt_assets = [
         LaunchTemplateAsset(
-            arn=_arn("launch-template", lt["LaunchTemplateId"], region, account_id),
+            arn=build_arn("launch-template", lt["LaunchTemplateId"], region, account_id),
             launch_template_id=lt["LaunchTemplateId"],
             name=lt.get("LaunchTemplateName"),
             region=region,
@@ -450,6 +566,7 @@ def collect_region(region: str, cfg: dict | None = None) -> AssetInventory:
         mode=deployment_mode(),
         lookback_days=cfg["lookback_days"],
         period_seconds=cfg["period_seconds"],
+        metrics_window_end=fresh_window_end if reuse else None,
         ec2_instances=ec2_assets,
         security_groups=sg_assets,
         nacls=nacl_assets,
@@ -468,9 +585,25 @@ def collect() -> list[AssetInventory]:
 
 
 # ------------------------------------------------------------------ DB 적재
-def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = None) -> dict:
+def persist_inventory(
+    inv: AssetInventory,
+    db,
+    collection_run_id: str | None = None,
+    *,
+    prune_absent: bool = False,
+) -> dict:
     """AssetInventory 를 DB(CollectionRun, Asset, MetricSummary, AssetRelationship)에 적재한다.
     Repository는 commit하지 않으므로 호출부에서 트랜잭션을 관리한다.
+
+    ``prune_absent`` 는 실수집 경로에서 켠다(#332). 켜면 이번 회차가 관측에 성공한 유형 중
+    관측되지 않은 그 리전의 자산에 소멸 표시를 찍는다 — 어느 유형을 판단할지는
+    ``schemas.collections.UNOBSERVED_TYPES_BY_FAILURE`` 가 정한다. 기본이 꺼짐인
+    이유는 이 함수가 실수집 말고도 불리기 때문이다 — `scripts/load_golden_assets.py` 는
+    **골든 파일 1건마다** 이 함수를 부르고 그 파일들이 전부 같은 리전이라, 켜져 있으면
+    두 번째 파일이 첫 번째 파일의 자산을 통째로 소멸 처리한다.
+
+    ``collection_run_id`` 를 받은 호출(회차를 남이 연 경우)에서는 ``prune_absent`` 를
+    켜도 아무것도 하지 않는다 — 회차를 마감하는 쪽이 관측 범위를 안다.
     """
     from datetime import timedelta
 
@@ -524,7 +657,9 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
         for iid in tg.target_instance_ids:
             instance_to_tgs.setdefault(iid, []).append(tg.arn)
 
-    window_end = inv.collected_at
+    # 재사용 요약은 이번 회차가 아니라 원본 창을 적는다 — 안 받은 구간을 관측한 것처럼
+    # 남기지 않으려는 것이다(#255). 직접 조회했으면 metrics_window_end 가 None 이다.
+    window_end = inv.metrics_window_end or inv.collected_at
     window_start = window_end - timedelta(days=inv.lookback_days)
 
     # 1. EC2 적재
@@ -561,7 +696,7 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
         )
         # SG(SECURED_BY) + NACL(PROTECTED_BY) + EBS(ATTACHED_TO) 를 한 번에 교체(replace 는 덮어쓰기)
         rel_items = [
-            (RelationType.SECURED_BY, f"arn:aws:ec2:{inv.region}:{inv.account_id}:security-group/{sg_id}")
+            (RelationType.SECURED_BY, build_arn("security-group", sg_id, inv.region, inv.account_id))
             for sg_id in a.security_group_ids
         ]
         nacl_arn = subnet_to_nacl.get(a.subnet_id)
@@ -591,6 +726,7 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
             "vpc_id": g.vpc_id,
             "attached": g.attached,
             "open_to_world": [p.model_dump(mode="json") for p in g.open_to_world],
+            "tags": g.tags or {},
         }
         assets_repo.upsert_asset(
             db,
@@ -695,7 +831,7 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
         # USES 는 스냅샷 의미론(source 관계 전량 교체)이라 조건 밖에서 호출한다.
         # LT 를 떼어낸 ASG 는 items=[] 로 이전 수집의 stale USES 엣지가 지워진다.
         lt_items = (
-            [(RelationType.USES, _arn("launch-template", g.launch_template_id, inv.region, inv.account_id))]
+            [(RelationType.USES, build_arn("launch-template", g.launch_template_id, inv.region, inv.account_id))]
             if g.launch_template_id
             else []
         )
@@ -746,6 +882,56 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
             error_summary=error_summary,
         )
 
+    # 소멸 자산 표시 — **이번 회차가 실제로 관측한 유형에 대해서만** 한다(#332).
+    # 회차 상태(PARTIAL)로 가르지 않는 이유는 그 단위가 너무 거칠기 때문이다 —
+    # LocalStack Community 는 autoscaling·elbv2 가 라이선스 밖이라 실수집 회차가
+    # **매번** PARTIAL 이고, 회차 단위로 막으면 팀 표준 환경에서 소멸 표시가 한 번도
+    # 발동하지 않는다(PR #339 리뷰: 김세혁). collector_failures 는 이미 *어느 조회를
+    # 못 봤는지* 를 라벨로 담고 있으므로, 그 라벨이 채우는 유형만 판단에서 뺀다.
+    absent_marked: list[str] = []
+    if prune_absent and started_own_run:
+        observed_arns = {
+            a.arn
+            for a in (
+                *inv.ec2_instances,
+                *inv.security_groups,
+                *inv.nacls,
+                *inv.ebs_volumes,
+                *inv.launch_templates,
+                *inv.auto_scaling_groups,
+                *inv.alb_target_groups,
+            )
+        }
+        unknown = set(inv.collector_failures) - UNOBSERVED_TYPES_BY_FAILURE.keys()
+        if unknown:
+            # 무엇을 못 봤는지 모르면 판단하지 않는다. 라벨을 늘린 쪽이 지도를 고치게
+            # 하려고 조용히 넘기지 않고 경고로 남긴다.
+            _log.warning(
+                "리전 %s: 모르는 수집 실패 라벨 %s — 소멸 표시를 건너뛴다",
+                inv.region,
+                sorted(unknown),
+            )
+            absent_marked = []
+        else:
+            blind = {
+                t
+                for label in inv.collector_failures
+                for t in UNOBSERVED_TYPES_BY_FAILURE[label]
+            }
+            absent_marked = assets_repo.mark_absent_assets(
+                db,
+                region=inv.region,
+                observed_arns=observed_arns,
+                absent_at=inv.collected_at,
+                asset_types=[t for t in AssetType if t not in blind],
+            )
+        if absent_marked:
+            _log.info(
+                "리전 %s: 이번 회차에 관측되지 않은 자산 %d건을 소멸로 표시",
+                inv.region,
+                len(absent_marked),
+            )
+
     return {
         "region": inv.region,
         "collection_run_id": collection_run_id,
@@ -759,6 +945,7 @@ def persist_inventory(inv: AssetInventory, db, collection_run_id: str | None = N
         "total": total,
         "degraded_collectors": list(inv.degraded_collectors),
         "collector_failures": dict(inv.collector_failures),
+        "absent_marked": len(absent_marked),
     }
 
 
@@ -779,16 +966,24 @@ def collect_and_store() -> list[dict]:
 def _collect_store_region(region: str, cfg: dict, session_factory) -> dict:
     """한 리전을 독립 트랜잭션으로 수집·적재. core describe 가 일시 오류로 실패하면 1회
     재시도하고, 그래도 실패하면 그 리전만 FAILED 로 기록한 뒤 예외를 삼켜 다음 리전이 계속되게 한다."""
+    from db.repositories import assets as assets_repo
+
     db = session_factory()
     try:
+        # 스캔 주기가 메트릭 입자보다 짧으면 같은 입자를 반복 조회하게 된다(#255).
+        # 입자 안에서 이미 받아 둔 요약이 있으면 그것으로 대신한다.
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=cfg["period_seconds"])
+        fresh_window_end, fresh_metrics = assets_repo.fresh_ec2_metric_summaries(
+            db, region=region, not_older_than=cutoff
+        )
         try:
-            inv = collect_region(region, cfg)
+            inv = collect_region(region, cfg, fresh_metrics, fresh_window_end)
         except (ClientError, BotoCoreError) as exc:
             if not _is_retryable(exc):
                 raise  # 비재시도성(AccessDenied·InternalFailure 등)은 즉시 실패로
             _log.warning("리전 %s 수집 일시 실패 — 1회 재시도(%s)", region, _failure_reason(exc))
-            inv = collect_region(region, cfg)
-        summary = persist_inventory(inv, db)
+            inv = collect_region(region, cfg, fresh_metrics, fresh_window_end)
+        summary = persist_inventory(inv, db, prune_absent=True)
         db.commit()
         return summary
     except Exception as exc:  # 리전 격리 — 이 리전만 실패로 마감하고 다른 리전은 계속
@@ -825,7 +1020,7 @@ def _record_failed_region(region: str, cfg: dict, exc: BaseException, session_fa
             status=CollectionRunStatus.FAILED,
             finished_at=datetime.now(timezone.utc),
             # error_summary 키 축을 PARTIAL(서비스 라벨)과 통일 — 실패 단계 라벨. 리전은 run.region 이 담는다.
-            error_summary=_failures_summary({"collect_region": _failure_reason(exc)}),
+            error_summary=_failures_summary({REGION_FAILURE_LABEL: _failure_reason(exc)}),
         )
         db.commit()
     except Exception:

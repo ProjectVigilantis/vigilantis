@@ -1,5 +1,5 @@
 # ==============================================================================
-# [파일 설명]  담당: 박지현 (QA & Scenario)
+# [파일 설명]  담당: 김승철 (QA & Scenario · 2026-09-16 박지현에게서 인수)
 # datasets/golden/ 의 Golden Dataset 회귀 테스트.
 #
 #   1) 입력 JSON 이 packages/schemas 의 Pydantic 모델로 검증되는가
@@ -27,13 +27,19 @@ for _path in (ROOT / "apps" / "core-api", ROOT / "packages"):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
+# _RULE_TARGET_TYPES는 계약 모듈의 판정 대상 정의를 단일 원천으로 재사용한다 —
+# 여기서 재정의하면 계약 개정 시 어긋난다(`routers/assets.py`가 같은 취지로 쓴다).
+# `_` 접두라 사적 이름이지만, 이 파일이 그 계약에서 면제를 파생시키므로 필요하다.
+from schemas.api.assets import _RULE_TARGET_TYPES  # noqa: E402
+from golden_contract import (  # noqa: E402
+    asset_list_fields,
+    judgement_free_list_fields,
+)
 from schemas.assets import AssetInventory  # noqa: E402
 from schemas.events import (  # noqa: E402
     MockThreatEventInput,
     NormalizedThreatEvent,
-    OpenIpThreatPayload,
-    SshBruteForceThreatPayload,
-    ThreatEventType,
+    RiskReasonCode,
 )
 from security.risk_evaluator import (  # noqa: E402
     ALL_PORTS,
@@ -45,6 +51,7 @@ from security.risk_evaluator import (  # noqa: E402
     WORLD_CIDRS,
     evaluate_threat,
 )
+from security.threat_normalizer import normalize_mock_input  # noqa: E402
 from services.rule_engine import (  # noqa: E402
     IDLE_CPU_AVG,
     MIN_DATAPOINTS,
@@ -82,46 +89,30 @@ def _finops_pairs() -> list[tuple[Path, Path]]:
 
 
 def _secops_pairs() -> list[tuple[Path, Path]]:
-    """위협 입력 1건 = 정답 1건. 누락되면 여기서 즉시 걸린다."""
-    pairs = []
-    for src in sorted(SECOPS_INPUT.glob("*.json")):
-        expected = SECOPS_EXPECTED / src.name
-        assert expected.exists(), f"정답 파일 누락: {expected}"
-        pairs.append((src, expected))
-    return pairs
+    """위협 입력 1건 = 정답 1건. **양방향으로 본다.**
+
+    정답 누락만 잡으면, 입력이 삭제·개명될 때 그 시나리오가 회귀에서 조용히 빠진다
+    (PR #223 리뷰). 남은 정답 파일은 짝이 없어 아무도 태우지 않는다.
+    """
+    inputs = {p.name for p in SECOPS_INPUT.glob("*.json")}
+    answers = {p.name for p in SECOPS_EXPECTED.glob("*.json")}
+    assert inputs == answers, (
+        f"입력↔정답 짝이 어긋납니다 — "
+        f"정답 없는 입력: {sorted(inputs - answers)} / "
+        f"입력 없는 정답: {sorted(answers - inputs)}"
+    )
+    return [(SECOPS_INPUT / name, SECOPS_EXPECTED / name) for name in sorted(inputs)]
 
 
 def _normalized(raw: dict) -> NormalizedThreatEvent:
     """Mock 위협 입력 → NormalizedThreatEvent.
 
-    수집·정규화 단계가 아직 없어 테스트가 그 자리를 대신한다. 실제 정규화가 구현되면
-    이 헬퍼를 그쪽으로 옮기고 여기서는 호출만 한다 —
-    `apps/core-api/security/tests/test_risk_evaluator.py` 에도 같은 형태가 있다.
+    정형화는 프로덕션 코드(security/threat_normalizer.py)가 한다 — 여기서는 호출만
+    한다. 종전에는 이 함수가 변환을 직접 들고 있어, 골든 정답 12건이 **프로덕션이
+    공유하지 않는 변환**을 검증했다(#268). collected_at 을 occurred_at 으로 고정해
+    시각이 실행마다 흔들리지 않게 한다.
     """
-    etype = ThreatEventType(raw["event_type"])
-    if etype == ThreatEventType.OPEN_IP:
-        payload = OpenIpThreatPayload(
-            protocol=raw["protocol"],
-            from_port=raw.get("from_port"),
-            to_port=raw.get("to_port"),
-            source_cidr=raw["source_cidr"],
-        )
-    else:
-        payload = SshBruteForceThreatPayload(
-            source_ip=raw["source_ip"],
-            failed_attempt_count=raw["failed_attempt_count"],
-            window_seconds=raw["window_seconds"],
-        )
-    return NormalizedThreatEvent(
-        threat_event_id=f"te-{raw['event_id']}",
-        source_event_id=raw["event_id"],
-        event_type=etype,
-        target_arn=raw["target_arn"],
-        occurred_at=raw["occurred_at"],
-        payload=payload,
-        deduplication_key=raw["event_id"],
-        collected_at=raw["occurred_at"],
-    )
+    return normalize_mock_input(raw, collected_at=raw["occurred_at"])
 
 
 # ---------------------------------------------------------------- 입력 계약 검증
@@ -206,7 +197,8 @@ def _evaluate_inventory(inventory: AssetInventory) -> dict[str, tuple[str, str |
 
     for sg in inventory.security_groups:
         # collector.py 가 open_to_world(list) → bool 로 넘기는 규약과 동일하게 맞춘다.
-        verdict, skip = evaluate_sg(sg.name, sg.attached, bool(sg.open_to_world))
+        # 태그도 rule_engine SG 분기처럼 넘긴다(#359) — 골든 입력에 없으면 빈 dict 다.
+        verdict, skip = evaluate_sg(sg.name, sg.attached, bool(sg.open_to_world), sg.tags)
         results[sg.arn] = (verdict.value, skip.value if skip else None)
 
     # EBS 도 판정 대상(_RULE_TARGET_TYPES). 미부착·available → UNUSED.
@@ -256,9 +248,24 @@ def test_finops_expected_has_no_runtime_fields() -> None:
 # ---------------------------------------------------------------- 자산 누락 감지
 
 
+# 파생식은 tests/golden_contract.py 가 갖는다 — 같은 식을 test_guardrails.py 도 쓰고,
+# 두 벌로 두면 한쪽만 고쳐져 가드가 조용히 헐거워진다(#271 ②). 이 파일이 세운 fail-open
+# 방지(PydanticUndefined 를 면제로 보지 않는다)가 그 모듈의 docstring 에 그대로 있다.
+_JUDGEMENT_FREE_LIST_FIELDS = judgement_free_list_fields()
+
+
 def _count_asset_arns(raw: dict) -> int:
-    """입력 JSON 원문에서 자산 ARN 개수를 센다(중첩 포함)."""
+    """입력 JSON 원문에서 **판정 대상** 자산 ARN 개수를 센다(중첩 포함).
+
+    판정 비대상 리스트는 세지 않는다. 그 자산들은 계약상 항상 NOT_APPLICABLE 이라
+    (api/assets.py AssetItem._enforce_contract) 정답으로 적을 판정 자체가 없다.
+    토폴로지가 그릴 노드를 골든에 넣으려면 이 면제가 필요하다.
+
+    **모델이 모르는 키는 계속 센다.** 면제는 "판정 비대상임을 계약으로 증명한" 리스트에만
+    준다 — 오타로 생긴 키나 모델보다 앞서 추가된 자산 리스트는 여기서 걸려야 한다.
+    """
     count = 0
+    counted = {key: value for key, value in raw.items() if key not in _JUDGEMENT_FREE_LIST_FIELDS}
 
     def walk(node) -> None:
         nonlocal count
@@ -271,8 +278,36 @@ def _count_asset_arns(raw: dict) -> int:
             for item in node:
                 walk(item)
 
-    walk(raw)
+    walk(counted)
     return count
+
+
+def test_judgement_free_exemption_is_derived_from_the_contract() -> None:
+    """면제 집합이 계약에서 파생됐는지 — 하드코딩으로 되돌아가면 여기서 걸린다.
+
+    두 방향을 함께 본다. 면제된 것에 판정 대상이 섞이면 정답 누락을 못 잡고,
+    판정 대상인데 리스트 필드가 없으면 그 유형은 골든에 담길 자리가 없다.
+    """
+    fields = asset_list_fields()
+
+    for name in _JUDGEMENT_FREE_LIST_FIELDS:
+        declared = fields.get(name)
+        # 파생식이 담은 이름만 면제될 수 있다. 하드코딩으로 되돌아가거나 오타 키가
+        # 섞이면 여기서 먼저 걸린다 — fields[name] 로 받으면 KeyError 가 나서 아래
+        # 메시지가 보이지 않는다.
+        assert declared is not None, (
+            f"{name}은 유형을 증명한 자산 리스트가 아닌데 면제됐다 — "
+            "면제 집합이 계약 파생이 아니라 손으로 적힌 것은 아닌가"
+        )
+        assert declared not in _RULE_TARGET_TYPES, (
+            f"{name}({declared.value})은 판정 대상인데 면제됐다 — 정답 누락을 못 잡는다"
+        )
+
+    judged_fields = {t for n, t in fields.items() if n not in _JUDGEMENT_FREE_LIST_FIELDS}
+    assert judged_fields == set(_RULE_TARGET_TYPES), (
+        f"판정 대상 유형과 자산 리스트가 어긋난다: 계약 {sorted(t.value for t in _RULE_TARGET_TYPES)} / "
+        f"리스트 {sorted(t.value for t in judged_fields)}"
+    )
 
 
 @pytest.mark.parametrize("input_path, expected_path", _finops_pairs(), ids=lambda p: getattr(p, "name", ""))
@@ -327,6 +362,13 @@ def test_secops_thresholds_not_drifted(_: Path, expected_path: Path) -> None:
         "SSH_HIGH_RATE_PER_MIN": SSH_HIGH_RATE_PER_MIN,
     }
     # 케이스가 실제로 의존하는 상수만 기록한다 — 기록된 것만 대조한다.
+    # 다만 **기록된 키가 전부 실재하는 상수명이어야 한다.** 오타나 개명된 키를 그냥
+    # 건너뛰면(유효 키 1개만 있어도 통과) 결합 원칙이 조용히 풀린다 (PR #223 리뷰).
+    unknown = set(recorded) - set(current) - {"note"}
+    assert not unknown, (
+        f"{expected_path.name}: risk_evaluator 에 없는 임계 키가 기록돼 있습니다 "
+        f"{sorted(unknown)} — 오타이거나 상수가 개명됐습니다."
+    )
     checked = [name for name in current if name in recorded]
     assert checked, f"{expected_path.name}: thresholds_at_authoring 에 대조할 상수가 없습니다."
     for name in checked:
@@ -381,6 +423,20 @@ def test_secops_case_ids_are_unique() -> None:
     ids = [_load(p)["case_id"] for _, p in _secops_pairs()]
     duplicated = sorted({i for i in ids if ids.count(i) > 1})
     assert not duplicated, f"중복된 case_id: {duplicated}"
+
+
+def test_secops_expected_covers_every_reason_code() -> None:
+    """정답 전량이 RiskReasonCode 6종을 전부 담는다.
+
+    FinOps 쪽 기준(Verdict 4종·SkipReasonCode 5종 전량 커버)의 SecOps 대응물이다
+    (PR #223 리뷰). 한 코드가 어느 정답에도 안 나오면 그 판정 분기는 골든이 못 잡는다.
+    """
+    used = {code for _, path in _secops_pairs() for code in _load(path)["reason_codes"]}
+    missing = {code.value for code in RiskReasonCode} - used
+    assert not missing, (
+        f"정답에 한 번도 안 나오는 RiskReasonCode: {sorted(missing)}. "
+        f"그 분기를 내는 입력 케이스를 secops/input 에 추가해야 합니다."
+    )
 
 
 def test_secops_expected_covers_every_risk_level() -> None:

@@ -1,0 +1,23 @@
+{
+  "aggregate": {
+    "accepted": 0,
+    "auxiliary": 668,
+    "failed": 1000,
+    "record_count": 1668,
+    "unsupported": 0
+  },
+  "ai_action_expectation": null,
+  "derivation": "1000*60/60=1000/min; count>=10 and rate>=20. Auxiliary rows = 2 per connection, at most 3 failures per connection.",
+  "forbidden_claims": [
+    "real_attack_observed",
+    "successful_compromise",
+    "mitigation_executed"
+  ],
+  "initial_risk": {
+    "initial_risk_level": "HIGH",
+    "reason_codes": [
+      "RISK_SSH_BRUTEFORCE"
+    ],
+    "response_mode": "PRE_MITIGATION_0_5S"
+  }
+}

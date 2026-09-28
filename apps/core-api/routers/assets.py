@@ -10,28 +10,29 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from collections import defaultdict
-from typing import Optional
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-# _PRIMARY_TYPES·_RULE_TARGET_TYPES는 계약 모듈의 판정 대상 정의를 단일 원천으로
-# 재사용한다 — 여기서 재정의하면 계약 개정 시 어긋난다
 from schemas.api.assets import (
-    _PRIMARY_TYPES,
-    _RULE_TARGET_TYPES,
-    AssetItem,
     AssetsResponse,
+    AssetType,
     CollectionStatus,
-    EvaluationStatus,
-    ResourceRole,
+    UncollectedAssetType,
 )
 from schemas.collections import CollectionRunStatus
 
+from asset_mapping import to_asset_item
+from config import get_aws_settings
 from db import models
 from db.repositories import assets as assets_repo
 from db.session import get_db
+from services.collector import REGION_FAILURE_LABEL, UNOBSERVED_TYPES_BY_FAILURE
+
+_log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1", tags=["assets"])
 
@@ -42,65 +43,109 @@ _COLLECTION_STATUS = {
     CollectionRunStatus.FAILED: CollectionStatus.FAILED,
 }
 
+# 리전별 최신 run 을 하나로 접을 때의 우선순위 — 나쁜 쪽이 이긴다. (Issue #231)
+# IN_PROGRESS 가 SUCCESS 보다 위인 이유: 아직 안 끝난 리전이 있는데 READY 로 확정하면
+# 다음 순간 FAILED 로 뒤집힌다. 실패는 진행 중보다 위다 — 실패를 늦게 보여줄 이유가 없다.
+_STATUS_SEVERITY = {
+    CollectionRunStatus.SUCCESS: 0,
+    CollectionRunStatus.IN_PROGRESS: 1,
+    CollectionRunStatus.PARTIAL: 2,
+    CollectionRunStatus.FAILED: 3,
+}
 
-def _to_item(
-    asset: models.Asset,
-    relationships: list[models.AssetRelationship],
-    evaluation: Optional[models.RuleEvaluation],
-) -> AssetItem:
-    if asset.asset_type in _RULE_TARGET_TYPES:
-        if evaluation is not None:
-            evaluation_fields = {
-                "evaluation_status": evaluation.evaluation_status,
-                "verdict": evaluation.verdict,
-                "health_score": evaluation.health_score,
-                "skip_reason_code": evaluation.skip_reason_code,
-            }
-        else:
-            # 판정 대상인데 판정 행이 아직 없음 — 계약상 PENDING
-            evaluation_fields = {
-                "evaluation_status": EvaluationStatus.PENDING,
-                "verdict": None,
-                "health_score": None,
-                "skip_reason_code": None,
-            }
-    else:
-        evaluation_fields = {
-            "evaluation_status": EvaluationStatus.NOT_APPLICABLE,
-            "verdict": None,
-            "health_score": None,
-            "skip_reason_code": None,
-        }
-    return AssetItem.model_validate(
-        {
-            "arn": asset.arn,
-            "resource_id": asset.resource_id,
-            "asset_type": asset.asset_type,
-            "resource_role": (
-                ResourceRole.PRIMARY
-                if asset.asset_type in _PRIMARY_TYPES
-                else ResourceRole.RUNBOOK_SUPPORT
-            ),
-            "name": asset.name,
-            "account_id": asset.account_id,
-            "region": asset.region,
-            "state": asset.state,
-            "spec": asset.spec,
-            "relationships": [
-                {"relation_type": rel.relation_type, "target_arn": rel.target_arn}
-                for rel in relationships
-            ],
-            **evaluation_fields,
-            "collected_at": asset.collected_at,
-        }
-    )
+
+def _worst_status(runs: list[models.CollectionRun]) -> CollectionRunStatus:
+    """리전별 최신 run 들 중 가장 나쁜 상태. 빈 목록은 호출 전에 걸러야 한다."""
+    return max((run.status for run in runs), key=_STATUS_SEVERITY.__getitem__)
+
+
+def _configured_regions() -> list[str]:
+    """관제 대상 리전 = 설정된 리전(AWS_REGIONS, 없으면 AWS_REGION). (#261)
+
+    collection_status·items·last_collected_at 을 이 범위로 함께 좁혀 응답 안에서
+    리전 범위가 갈리지 않게 한다. (테스트는 이 함수를 monkeypatch 로 대체한다)
+    """
+    regions = get_aws_settings().regions_list()
+    if not regions:
+        # 관제 범위가 비면 세 필드가 빈 스코프가 되어 조용히 NOT_COLLECTED 가 된다 —
+        # "아직 수집 안 함"과 "설정 오류"가 화면에서 구분되지 않는다. 같은 오설정에서
+        # services/aws/client.default_region() 은 소리내어 죽으므로 여기서도 같은 결로 실패한다.
+        raise RuntimeError("리전 해석 실패 — AWS_REGION / AWS_REGIONS 값을 확인할 것")
+    return regions
+
+
+def _collection_status(
+    runs: list[models.CollectionRun], regions: list[str]
+) -> CollectionStatus:
+    """설정 리전 스코프 안에서 collection_status 산출. (#261)
+
+    설정 리전 중 아직 run 이 없는 리전이 있으면(최초 수집 대기·수집 중 모두 해당)
+    '전체 관제 범위 수집 미완료'로 보아 COLLECTING 을 하한으로 깐다 — 기존 리전의
+    SUCCESS 만으로 READY 를 주지 않는다. 단 IN_PROGRESS 는 심각도상 PARTIAL·FAILED
+    아래라, 다른 리전의 실제 실패는 그대로 드러난다(안성일 확정).
+    """
+    worst = _worst_status(runs)
+    covered = {run.region for run in runs}
+    if not set(regions) <= covered:  # 아직 run 이 없는 설정 리전이 있음
+        worst = max(
+            worst, CollectionRunStatus.IN_PROGRESS, key=_STATUS_SEVERITY.__getitem__
+        )
+    return _COLLECTION_STATUS[worst]
+
+
+def _uncollected(runs: list[models.CollectionRun]) -> list[UncollectedAssetType]:
+    """리전별 최신 run 의 `error_summary`(= collector 가 남긴 {수집 라벨: 사유 코드} JSON)를
+    **자산 유형**으로 환원한다. 화면이 가진 축은 유형이지 수집기 라벨이 아니기 때문이다 —
+    "대상 그룹 열이 왜 비었나"에 답하려면 `ALB_TARGET_GROUP`이 와야 한다.
+
+    세 가지를 고의로 하지 않는다.
+
+    1. **모르는 라벨은 지어내지 않는다.** 누가 흡수 조회를 새로 더하고
+       ``UNOBSERVED_TYPES_BY_FAILURE``(라벨 → 그 조회로만 채워지는 유형)를 안 고치면,
+       엉뚱한 유형을 지목하는 대신 아무 유형도 싣지 않고 경고만 남긴다. 적재 쪽 소멸 표시와
+       같은 fail-closed 태도다. 이때도 `collection_status`는 PARTIAL·FAILED로 나가 이상은 보인다.
+    2. **리전 전체 실패(`collect_region`)는 유형으로 펴지 않는다.** 그 회차는 전부를 못 본
+       것이고 status 가 이미 FAILED다. 유형 7개를 나열하면 화면이 "이 일곱만 문제"라고 말한다.
+    3. **사유가 여러 리전에서 갈려도 유형당 한 줄만 낸다.** 계약이 유형 중복을 금지한다.
+       먼저 만난 사유를 남긴다 — 사유는 보조 정보이고, 유형이 빠졌다는 사실이 본론이다.
+    """
+    reason_by_type: dict[AssetType, str] = {}
+    for run in runs:
+        if not run.error_summary:
+            continue
+        try:
+            failures: dict[str, str] = json.loads(run.error_summary)
+        except (ValueError, TypeError):
+            # 상한 초과로 항목을 버린 `_truncated` 표식도 여기 온다 — 유형을 모르므로 건너뛴다.
+            _log.warning("리전 %s: error_summary 를 JSON 으로 읽지 못해 uncollected 산출에서 제외", run.region)
+            continue
+        for label, reason in failures.items():
+            if label == REGION_FAILURE_LABEL:
+                continue
+            types = UNOBSERVED_TYPES_BY_FAILURE.get(label)
+            if types is None:
+                _log.warning("리전 %s: 모르는 수집 실패 라벨 %r — uncollected 에 싣지 않는다", run.region, label)
+                continue
+            for name in types:
+                reason_by_type.setdefault(AssetType(name), reason)
+
+    return [
+        UncollectedAssetType(asset_type=t, reason_code=reason_by_type[t])
+        for t in AssetType  # enum 선언 순서로 고정 — 응답이 회차마다 뒤바뀌지 않게
+        if t in reason_by_type
+    ]
 
 
 @router.get("/assets", response_model=AssetsResponse)
 def get_assets(db: Session = Depends(get_db)) -> AssetsResponse:
-    latest_run = assets_repo.latest_collection_run(db)
-    if latest_run is None:
-        # 수집 이력이 전혀 없음 — 계약상 목록·last_collected_at도 비어 있어야 한다
+    # 관제 대상 = 설정된 리전(AWS_REGIONS). 세 필드를 모두 이 범위로 좁혀 응답 안에서
+    # 리전 범위가 갈리지 않게 한다 — 수집 대상서 빠진 리전의 옛 run 이 화면을 붙잡던
+    # 문제를 막는다. (Issue #261, 안성일 확정) 리전별 최신 run 을 최악 상태로 접는
+    # 것은 #231 그대로 — 리전 격리(C4) 이후 실패가 실행 순서에 가려지지 않게 한다.
+    regions = _configured_regions()
+    runs = assets_repo.latest_collection_run_per_region(db, regions=regions)
+    if not runs:
+        # 설정 리전 전체에 수집 이력이 없음 — 계약상 목록·last_collected_at도 비어야 한다
         return AssetsResponse(collection_status=CollectionStatus.NOT_COLLECTED)
 
     relationships: dict[str, list[models.AssetRelationship]] = defaultdict(list)
@@ -109,11 +154,12 @@ def get_assets(db: Session = Depends(get_db)) -> AssetsResponse:
     evaluations = assets_repo.latest_rule_evaluation_by_asset(db)
 
     items = [
-        _to_item(asset, relationships.get(asset.asset_id, []), evaluations.get(asset.asset_id))
-        for asset in assets_repo.list_assets(db)
+        to_asset_item(asset, relationships.get(asset.asset_id, []), evaluations.get(asset.asset_id))
+        for asset in assets_repo.list_assets(db, regions=regions)
     ]
     return AssetsResponse(
-        collection_status=_COLLECTION_STATUS[latest_run.status],
-        last_collected_at=assets_repo.last_finished_collection_at(db),
+        collection_status=_collection_status(runs, regions),
+        last_collected_at=assets_repo.last_finished_collection_at(db, regions=regions),
         items=items,
+        uncollected=_uncollected(runs),
     )

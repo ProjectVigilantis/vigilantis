@@ -38,7 +38,11 @@ class MetricSeries(BaseModel):
     """단일 메트릭의 시계열. timestamps[i] 와 values[i] 가 짝을 이룬다."""
     metric_name: MetricName = Field(..., description="CloudWatch 메트릭 이름")
     timestamps: list[datetime] = Field(default_factory=list, description="정렬된 관측 시각(UTC)")
-    values: list[float] = Field(default_factory=list, description="관측값(period 별 Average)")
+    values: list[float] = Field(
+        default_factory=list,
+        description="관측값(period 별 집계 — 조회 시 준 Stat 에 따른다. 수집 경로는 Average, "
+                    "네트워크 차트는 Sum)",
+    )
 
 
 class MetricSummary(BaseModel):
@@ -91,6 +95,10 @@ class SecurityGroupAsset(BaseModel):
     open_to_world: list[OpenPort] = Field(
         default_factory=list, description="전체개방 포트 목록. 비어있지 않으면 위협 후보"
     )
+    tags: dict[str, str] = Field(
+        default_factory=dict,
+        description="SG 태그(Key→Value). 자리 태그(schemas.asset_roles)로 판정 제외를 가린다(#359)",
+    )
 
 
 class NaclAsset(BaseModel):
@@ -109,8 +117,17 @@ class NaclAsset(BaseModel):
 class EbsAsset(BaseModel):
     """EBS Volume. 토폴로지 EC2→EBS(ATTACHED_TO) 산출용이자 미부착 볼륨 정리 판정 대상.
 
-    NACL 등과 달리 EBS 는 Rule 판정 대상(`_RULE_TARGET_TYPES`)이라, 미부착(=attached_instance_ids
-    비어있음)이면 rule_engine 이 UNUSED, 부착이면 SKIP_ACTIVE 로 판정한다.
+    NACL 등과 달리 EBS 는 Rule 판정 대상(`_RULE_TARGET_TYPES`)이라 rule_engine 이 판정한다.
+    판정 계약은 `services/rule_engine.evaluate_ebs` 이며(#276 결정 ④), 세 갈래다.
+
+    - `state == "available"` 이면서 미부착 → `UNUSED` (삭제 후보)
+    - `in-use` 이거나 부착됨 → `SKIP` / `SKIP_ACTIVE`
+    - 그 밖의 상태(`creating`·`deleting`·`error`·`deleted`·미상 `None`)
+      → `SKIP` / `SKIP_UNSUPPORTED_STATE` (판정 보류 — 오삭제 방지)
+
+    **미부착이라는 것만으로 UNUSED 가 되지 않는다** — `state` 를 함께 본다. 이 문장이
+    이전에는 "미부착이면 UNUSED"였고, 그 서술이 `evaluate_ebs` 와 다른 답을 내 #276 이
+    열렸다. 정답지 고정은 `datasets/golden/finops/expected/asset_inventory_004.json`.
     """
     asset_type: AssetType = Field(default=AssetType.EBS, frozen=True)
     arn: str = Field(..., description="Volume ARN (안정 키)")
@@ -122,7 +139,8 @@ class EbsAsset(BaseModel):
     encrypted: Optional[bool] = None
     state: Optional[str] = Field(None, description="available(미부착)/in-use 등")
     attached_instance_ids: list[str] = Field(
-        default_factory=list, description="부착된 인스턴스 목록. 비어있으면 미사용(UNUSED) 후보"
+        default_factory=list,
+        description="부착된 인스턴스 목록. 비어있고 state 가 available 일 때만 UNUSED 후보 (#276)",
     )
 
 
@@ -186,6 +204,14 @@ class AssetInventory(BaseModel):
     collected_at: datetime = Field(default_factory=_utcnow, description="수집 시각(UTC)")
     lookback_days: int = Field(..., description="메트릭 조회 기간(일)")
     period_seconds: int = Field(..., description="메트릭 집계 주기(초)")
+    metrics_window_end: Optional[datetime] = Field(
+        None,
+        description=(
+            "메트릭 요약을 재사용했을 때 그 **원본 창의 끝**(UTC). None 이면 이번 회차에 직접 "
+            "조회했다는 뜻이고 창의 끝은 collected_at 이다. 재사용 시 창을 collected_at 으로 "
+            "적으면 받지도 않은 구간을 관측한 것처럼 남는다(#255)."
+        ),
+    )
     ec2_instances: list[Ec2Asset] = Field(default_factory=list)
     security_groups: list[SecurityGroupAsset] = Field(default_factory=list)
     nacls: list[NaclAsset] = Field(default_factory=list)

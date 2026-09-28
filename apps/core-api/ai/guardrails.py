@@ -30,8 +30,21 @@
 #   - 종합 판정은 첫 FAIL에서 멈추고 이후 단계를 NOT_RUN으로 남긴다. 이 단락이 곧
 #     "거절된 대상으로 AWS를 부르지 않는다"는 보장이다 — ③이 막은 ARN이 ④까지 가면
 #     범위를 벗어난 자원에 실제로 요청이 나간다.
-#   - 검증 문맥은 AI_CANDIDATE만 구현한다. 다른 문맥은 payload 모양이 달라 여기서
-#     판정하면 거절 기록이 틀리므로, FAIL이 아니라 예외로 막는다.
+#   - 검증 문맥은 AI_CANDIDATE와 ROLLBACK_EXECUTION 둘을 구현한다. 롤백도 4단계를
+#     본편과 동일하게 전부 통과한다(ADR-0004 롤백 공통 정책 ①) — 시스템이 시작한
+#     원복이라고 해서 우회하지 않는다. 두 문맥이 다른 것은 **문맥별 허용 목록과
+#     파라미터 계약**이지 단계 수가 아니다.
+#       ①은 문맥에 따라 다른 파라미터 계약을 쓴다 — AI 후보는 후보 계약
+#         (CANDIDATE_PARAMETER_MODELS), 원복은 실행 파라미터 계약
+#         (PRECHECK_PARAMETER_MODELS)이다. 원복 명령에는 후보 계약이 없다.
+#       ②는 문맥별 허용 목록을 대조한다 — AI 후보는 추천 가능 7종, 원복은 롤백 3종.
+#       ③④는 문맥을 보지 않는다. 대조 대상이 target_arn과 AWS 판정뿐이라 문맥에
+#         따라 달라질 것이 없다.
+#     AUTO_ISOLATION은 아직 없다. payload 모양이 달라 여기서 판정하면 거절 기록이
+#     틀리므로, FAIL이 아니라 예외로 막는다.
+#   - ②를 통과한 명령의 운반 타입은 문맥이 정한다 — AI 후보는 RunbookCandidateDraft,
+#     원복은 RollbackExecutionCommand다. 롤백 3종은 Draft가 될 수 없다(그 모델이 AI
+#     추천 7종만 받는다, ADR-0004 정책 ②).
 # ==============================================================================
 
 from __future__ import annotations
@@ -49,6 +62,7 @@ from pydantic import (
     StrictBool,
     StrictInt,
     ValidationError,
+    model_validator,
 )
 
 from schemas.agents import RunbookCandidateDraft
@@ -67,8 +81,13 @@ from schemas.guardrails import (
     SchemaCheckReasonCode,
 )
 from schemas.precheck import PrecheckOutcome
-from schemas.runbook_parameters import CANDIDATE_PARAMETER_MODELS
-from schemas.runbooks import RunbookId
+from schemas.runbook_parameters import (
+    CANDIDATE_PARAMETER_MODELS,
+    PRECHECK_PARAMETER_MODELS,
+    RunbookParameters,
+    bind_precheck_parameters,
+)
+from schemas.runbooks import ROLLBACK_RUNBOOK_IDS, RunbookId
 
 from .whitelist import is_ai_recommendable, is_allowed_runbook
 
@@ -83,6 +102,9 @@ SCHEMA_INVALID_PAYLOAD: Final = SchemaCheckReasonCode.SCHEMA_INVALID_PAYLOAD
 WHITELIST_UNKNOWN_RUNBOOK: Final = ActionWhitelistReasonCode.WHITELIST_UNKNOWN_RUNBOOK
 WHITELIST_NOT_AI_RECOMMENDABLE: Final = (
     ActionWhitelistReasonCode.WHITELIST_NOT_AI_RECOMMENDABLE
+)
+WHITELIST_NOT_ROLLBACK_RUNBOOK: Final = (
+    ActionWhitelistReasonCode.WHITELIST_NOT_ROLLBACK_RUNBOOK
 )
 ARN_TARGET_NOT_MANAGED: Final = ArnMatchReasonCode.ARN_TARGET_NOT_MANAGED
 
@@ -162,6 +184,50 @@ class SchemaCheckedCommand(BaseModel):
     ]
 
 
+class RollbackExecutionCommand(BaseModel):
+    """②가 ROLLBACK_EXECUTION 문맥에서 승격한 실행 명령 — Draft의 원복판.
+
+    RunbookCandidateDraft를 쓸 수 없다. 그 모델은 AI 추천 7종만 받고(ADR-0004 정책
+    ②) parameters도 후보 계약으로 좁히는데, 롤백 3종은 둘 다 해당하지 않는다.
+    필드 이름은 Draft와 같게 둔다 — ③④가 두 운반 타입을 같은 속성으로 읽는다
+    (GuardedCommand).
+
+    parameters는 **실행 파라미터 계약**(PRECHECK_PARAMETER_MODELS)의 typed 값이다.
+    ④가 그대로 executor.precheck()에 넘길 수 있어야 하기 때문이다. 원복 값이 요청
+    페이로드가 아니라 백업 레코드에서 왔음을 보장하는 것은 이 모델이 아니라 명령을
+    만드는 쪽이다(ADR-0004 정책 ③ — workflows).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    runbook_id: RunbookId
+    target_arn: str = Field(min_length=1)
+    parameters: RunbookParameters
+    # Draft와 같은 이유로 비어 있을 수 없다 — precheck의 evidence_id(단수)의 출처다
+    evidence_ids: list[Annotated[str, Field(min_length=1)]] = Field(min_length=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _bind_parameters(cls, data):
+        return bind_precheck_parameters(data)
+
+    @model_validator(mode="after")
+    def _enforce_contract(self):
+        if self.runbook_id.value not in ROLLBACK_RUNBOOK_IDS:
+            raise ValueError("원복 실행 명령에는 롤백 3종만 올 수 있습니다")
+        expected = PRECHECK_PARAMETER_MODELS[self.runbook_id]
+        if not isinstance(self.parameters, expected):
+            raise ValueError(
+                f"{self.runbook_id.value}의 parameters는 {expected.__name__}이어야 합니다"
+            )
+        return self
+
+
+# ②가 승격한 명령의 운반 타입 — 문맥이 어느 쪽인지 정한다. ③④는 둘을 구분하지 않고
+# runbook_id·target_arn·parameters만 읽는다.
+GuardedCommand = Union[RunbookCandidateDraft, RollbackExecutionCommand]
+
+
 @dataclass(frozen=True)
 class SchemaCheckOutcome:
     """① 결과. command는 PASS일 때만 있다."""
@@ -172,35 +238,36 @@ class SchemaCheckOutcome:
 
 @dataclass(frozen=True)
 class ActionWhitelistOutcome:
-    """② 결과. draft는 PASS일 때만 있다."""
+    """② 결과. command는 PASS일 때만 있다."""
 
     step_result: GuardrailStepResult
-    draft: RunbookCandidateDraft | None
+    command: GuardedCommand | None
 
 
 @dataclass(frozen=True)
 class ArnMatchOutcome:
-    """③ 결과. draft는 PASS일 때만 있고, ②가 넘긴 것을 그대로 통과시킨다."""
+    """③ 결과. command는 PASS일 때만 있고, ②가 넘긴 것을 그대로 통과시킨다."""
 
     step_result: GuardrailStepResult
-    draft: RunbookCandidateDraft | None
+    command: GuardedCommand | None
 
 
 @dataclass(frozen=True)
 class AwsDryRunOutcome:
-    """④ 결과. draft는 PASS일 때만 있고, ③이 넘긴 것을 그대로 통과시킨다."""
+    """④ 결과. command는 PASS일 때만 있고, ③이 넘긴 것을 그대로 통과시킨다."""
 
     step_result: GuardrailStepResult
-    draft: RunbookCandidateDraft | None
+    command: GuardedCommand | None
 
 
 @dataclass(frozen=True)
 class GuardrailOutcome:
-    """네 단계 종합 결과. draft는 네 단계를 모두 통과했을 때만 있다 — 후보를
-    EXECUTABLE로 저장하는 근거이며, 거절이면 남는 것은 result의 거절 기록뿐이다."""
+    """네 단계 종합 결과. command는 네 단계를 모두 통과했을 때만 있다 — AI 후보를
+    EXECUTABLE로 저장하거나 원복 실행을 시작하는 근거이며, 거절이면 남는 것은
+    result의 거절 기록뿐이다."""
 
     result: GuardrailValidationResult
-    draft: RunbookCandidateDraft | None
+    command: GuardedCommand | None
 
 
 def _step_pass(
@@ -253,15 +320,25 @@ def _schema_check_fail(
     )
 
 
-def _candidate_parameters_model(runbook_id: str) -> type[BaseModel] | None:
-    """runbook_id가 가진 후보 파라미터 모델. 모르는 ID면 None.
+# ①이 문맥별로 쓰는 파라미터 계약. 원복 명령에는 후보 계약이 없다 — 후보가 될 수
+# 없는 3종이기 때문이다(ADR-0004 정책 ②). 실행 파라미터 계약은 확정 10종 전부가 갖는다.
+_PARAMETER_MODELS_BY_CONTEXT: Final = {
+    GuardrailValidationContext.AI_CANDIDATE: CANDIDATE_PARAMETER_MODELS,
+    GuardrailValidationContext.ROLLBACK_EXECUTION: PRECHECK_PARAMETER_MODELS,
+}
 
-    확정 목록에 없는 ID와 롤백 3종이 모두 None이다 — 전자는 ②의 대조 대상이고
-    후자는 애초에 AI 후보가 될 수 없다(ADR-0004 정책 ②). 둘 다 ①이 거절하면
-    거절 기록에 실제로 막은 단계가 남지 않으므로, 여기서는 통과시킨다.
+
+def _parameters_model(
+    runbook_id: str, context: GuardrailValidationContext
+) -> type[BaseModel] | None:
+    """runbook_id가 이 문맥에서 갖는 파라미터 모델. 모르는 ID면 None.
+
+    확정 목록에 없는 ID는 어느 문맥에서도 None이다 — ②의 대조 대상이라, ①이 먼저
+    거절하면 거절 기록에 실제로 막은 단계가 남지 않는다. AI_CANDIDATE 문맥에서는
+    롤백 3종도 None인데(후보 계약이 없다) 같은 이유로 여기서 막지 않는다.
     """
     try:
-        return CANDIDATE_PARAMETER_MODELS.get(RunbookId(runbook_id))
+        return _PARAMETER_MODELS_BY_CONTEXT[context].get(RunbookId(runbook_id))
     except ValueError:
         return None
 
@@ -272,8 +349,14 @@ def run_schema_check(request: GuardrailValidationRequest) -> SchemaCheckOutcome:
     추가 필드·필수 누락·타입 불일치·빈 문자열은 SCHEMA_INVALID_PAYLOAD로 거절한다.
     봉투를 통과하면 parameters를 Runbook별 typed 계약(#154)에 한 번 더 대조한다 —
     형식 위반이 ④ AWS Dry-Run까지 가지 않고 여기서 끝난다.
+
+    **대조할 계약은 문맥이 고른다**(_PARAMETER_MODELS_BY_CONTEXT). AI 후보는 후보
+    계약, 원복 실행은 실행 파라미터 계약이다. 시스템이 시작한 원복이라 payload에
+    LLM 저작 문자열이 없더라도 이 단계를 건너뛰지 않는다 — ADR-0004 정책 ①이
+    "롤백도 4단계를 전부 통과한다"이고, 여기서 걸러 내는 것이 형식 위반이라
+    자기가 만든 payload에도 값이 있다(배선 오류가 ④의 AWS 호출까지 가지 않는다).
     """
-    if request.validation_context != GuardrailValidationContext.AI_CANDIDATE:
+    if request.validation_context not in _PARAMETER_MODELS_BY_CONTEXT:
         raise NotImplementedError(
             f"{request.validation_context.value} 문맥의 Schema Check는 아직 없습니다"
         )
@@ -283,7 +366,7 @@ def run_schema_check(request: GuardrailValidationRequest) -> SchemaCheckOutcome:
     except ValidationError as exc:
         return _schema_check_fail(request.candidate_id, exc)
 
-    model = _candidate_parameters_model(command.runbook_id)
+    model = _parameters_model(command.runbook_id, request.validation_context)
     if model is not None:
         try:
             model.model_validate(command.parameters)
@@ -311,27 +394,48 @@ def _whitelist_fail(
         },
     )
     return ActionWhitelistOutcome(
-        step_result=_step_fail(GuardrailStep.ACTION_WHITELIST, reason_code), draft=None
+        step_result=_step_fail(GuardrailStep.ACTION_WHITELIST, reason_code),
+        command=None,
     )
 
 
-def run_action_whitelist(command: SchemaCheckedCommand) -> ActionWhitelistOutcome:
-    """② Action Whitelist — 확정 10종을 대조하고 AI 추천 가능 7종만 통과시킨다.
+def run_action_whitelist(
+    command: SchemaCheckedCommand,
+    context: GuardrailValidationContext = GuardrailValidationContext.AI_CANDIDATE,
+) -> ActionWhitelistOutcome:
+    """② Action Whitelist — 확정 10종을 대조하고, **문맥이 허용하는 목록**만 통과시킨다.
 
-    **AI_CANDIDATE 문맥 전용이다.** 승격 대상 RunbookCandidateDraft가 "Graph가 출력하는
-    후보 초안"이고, AI 추천 불가 판정(WHITELIST_NOT_AI_RECOMMENDABLE)도 AI가 제안한
-    경우에만 옳다 — 롤백 3종은 ROLLBACK_EXECUTION에서는 정당한 실행 대상이다(ADR-0004
-    정책 ②의 "트리거는 시스템·관제자"). 지금은 ①이 다른 문맥을 앞에서 막지만 이 함수
-    자체는 문맥을 받지 않으므로, 나머지 문맥을 구현할 때 문맥 인자를 받는 형태로
-    바꾼다 — 그 문맥들은 호출 시점 자체가 아직 결정되지 않았다(ADR-0007 §Consequences).
-    (PR #123 리뷰)
+    확정 10종 밖이면 어느 문맥에서도 WHITELIST_UNKNOWN_RUNBOOK이다. 목록 안이어도
+    문맥이 가른다 — AI_CANDIDATE는 추천 가능 7종, ROLLBACK_EXECUTION은 롤백 3종이다
+    (ADR-0004 정책 ②의 "AI 추천 목록과 실행 Whitelist를 분리한다"). 두 거절은 성격이
+    반대라 사유 코드도 다르다: 전자는 롤백을 AI에게 추천시키려는 인젝션의 신호이고,
+    후자는 원복 경로에 본편 런북이 실린 신호다.
 
-    통과한 명령만 RunbookCandidateDraft로 승격한다. 두 판정을 이미 거쳤으므로 Draft의
-    AI 추천 검증(packages/schemas/agents.py)이 여기서 실패할 수는 없다. parameters도
-    같다 — 승격되는 ID는 ①이 typed 계약으로 이미 대조한 ID다.
+    승격 타입도 문맥이 정한다 — AI 후보는 RunbookCandidateDraft, 원복은
+    RollbackExecutionCommand다. 두 판정을 이미 거쳤으므로 두 모델의 자체 검증이
+    여기서 실패할 수는 없다. parameters도 같다 — 승격되는 ID는 ①이 그 문맥의 typed
+    계약으로 이미 대조한 ID다.
+
+    기본값을 AI_CANDIDATE로 둔 것은 이 단계만 따로 부르는 호출부·테스트가 문맥을
+    적지 않아도 종전과 같게 동작하게 하기 위해서다. run_guardrail_validation은
+    언제나 명시적으로 넘긴다.
     """
     if not is_allowed_runbook(command.runbook_id):
         return _whitelist_fail(command.runbook_id, WHITELIST_UNKNOWN_RUNBOOK)
+
+    if context is GuardrailValidationContext.ROLLBACK_EXECUTION:
+        if command.runbook_id not in ROLLBACK_RUNBOOK_IDS:
+            return _whitelist_fail(command.runbook_id, WHITELIST_NOT_ROLLBACK_RUNBOOK)
+        return ActionWhitelistOutcome(
+            step_result=_step_pass(GuardrailStep.ACTION_WHITELIST),
+            command=RollbackExecutionCommand(
+                runbook_id=RunbookId(command.runbook_id),
+                target_arn=command.target_arn,
+                parameters=command.parameters,
+                evidence_ids=command.evidence_ids,
+            ),
+        )
+
     if not is_ai_recommendable(command.runbook_id):
         return _whitelist_fail(command.runbook_id, WHITELIST_NOT_AI_RECOMMENDABLE)
 
@@ -342,7 +446,7 @@ def run_action_whitelist(command: SchemaCheckedCommand) -> ActionWhitelistOutcom
         evidence_ids=command.evidence_ids,
     )
     return ActionWhitelistOutcome(
-        step_result=_step_pass(GuardrailStep.ACTION_WHITELIST), draft=draft
+        step_result=_step_pass(GuardrailStep.ACTION_WHITELIST), command=draft
     )
 
 
@@ -358,7 +462,7 @@ class ManagedAssetLookup(Protocol):
 
 
 def run_arn_match(
-    draft: RunbookCandidateDraft, is_managed_arn: ManagedAssetLookup
+    command: GuardedCommand, is_managed_arn: ManagedAssetLookup
 ) -> ArnMatchOutcome:
     """③ ARN Match — 대상이 우리가 수집한 자산인지 대조한다(Scope Escalation 차단).
 
@@ -371,10 +475,14 @@ def run_arn_match(
     이 단계가 쓸 수 있는 사유 코드가 ARN_TARGET_NOT_MANAGED 하나뿐이라, 짝
     불일치를 여기서 거절하면 수집된 자산이 "미수집"으로 기록돼 거절 사유가
     사실과 달라진다.
+
+    문맥을 보지 않는다 — AI 후보든 원복 실행이든 대조하는 것은 target_arn 하나이고,
+    "수집된 자산인가"의 답이 발동 주체에 따라 달라질 이유가 없다. 원복이 여기서
+    막히는 경우는 실재한다: 조치 뒤 자산이 수집 목록에서 사라졌을 때다.
     """
-    if is_managed_arn(draft.target_arn):
+    if is_managed_arn(command.target_arn):
         return ArnMatchOutcome(
-            step_result=_step_pass(GuardrailStep.ARN_MATCH), draft=draft
+            step_result=_step_pass(GuardrailStep.ARN_MATCH), command=command
         )
 
     # 범위를 벗어난 대상을 지목했다는 것 자체가 조사 대상이라 ARN을 남긴다.
@@ -383,14 +491,14 @@ def run_arn_match(
     logger.warning(
         "guardrail_arn_match_rejected",
         extra={
-            "runbook_id": draft.runbook_id.value,
-            "target_arn": draft.target_arn[:_MAX_ARN_CHARS],
+            "runbook_id": command.runbook_id.value,
+            "target_arn": command.target_arn[:_MAX_ARN_CHARS],
             "reason_code": ARN_TARGET_NOT_MANAGED.value,
         },
     )
     return ArnMatchOutcome(
         step_result=_step_fail(GuardrailStep.ARN_MATCH, ARN_TARGET_NOT_MANAGED),
-        draft=None,
+        command=None,
     )
 
 
@@ -404,19 +512,25 @@ class CandidatePrecheck(Protocol):
     조회로 채운다. ai/가 services/aws/를 직접 부르지 않는 이유는 ManagedAssetLookup과
     같다.
 
-    감싸는 쪽이 지켜야 하는 것 둘.
+    감싸는 쪽이 지켜야 하는 것 셋.
       - **RUNBOOK_NACL_RESTORE 후보에는 backup_loader를 배선한다.** 백업 레코드가
         필요한 4종 중 이 하나만 롤백 3종이 아니라 AI 추천 7종이라(schemas/runbooks.py)
         ②를 통과해 여기까지 온다. 미배선이면 precheck는 FAIL이 아니라 RuntimeError다
         (ADR-0007 §1 — 배선 오류를 거절로 기록하면 멀쩡한 명령에 거절 사유가 붙는다).
+      - **ROLLBACK_EXECUTION 문맥에도 backup_loader를 배선한다.** 롤백 3종은 전부
+        백업 레코드를 읽는다(ADR-0004 정책 ③). 미배선의 처분은 위와 같다.
       - **동기 함수다**(ADR-0007 §1). async 문맥에서 threadpool로 감싸는 것도 호출부다.
+
+    파라미터 변환도 문맥이 가른다 — AI 후보는 build_precheck_parameters로 실행
+    파라미터를 조립해야 하지만, RollbackExecutionCommand의 parameters는 이미 실행
+    파라미터 계약의 값이라 그대로 넘긴다.
     """
 
-    def __call__(self, draft: RunbookCandidateDraft, /) -> PrecheckOutcome: ...
+    def __call__(self, command: GuardedCommand, /) -> PrecheckOutcome: ...
 
 
 def run_aws_dry_run(
-    draft: RunbookCandidateDraft, precheck: CandidatePrecheck
+    command: GuardedCommand, precheck: CandidatePrecheck
 ) -> AwsDryRunOutcome:
     """④ AWS Dry-Run — 실제 AWS에 물어 판정한다(ADR-0007).
 
@@ -431,14 +545,14 @@ def run_aws_dry_run(
     미구현 런북을 호출 전에 거르지 않는다 — 그 판정의 소유권은 디스패치 테이블을
     가진 executor다(PRECHECK_NOT_IMPLEMENTED).
     """
-    outcome = precheck(draft)
+    outcome = precheck(command)
 
     if outcome.passed:
         return AwsDryRunOutcome(
             step_result=_step_pass(
                 GuardrailStep.AWS_DRY_RUN, outcome.verification_summary
             ),
-            draft=draft,
+            command=command,
         )
 
     # executor도 자체 로그를 남기지만(vigilantis.aws) AWS에 닿기 전에 끝난 거절은
@@ -447,8 +561,8 @@ def run_aws_dry_run(
     logger.warning(
         "guardrail_aws_dry_run_rejected",
         extra={
-            "runbook_id": draft.runbook_id.value,
-            "target_arn": draft.target_arn[:_MAX_ARN_CHARS],
+            "runbook_id": command.runbook_id.value,
+            "target_arn": command.target_arn[:_MAX_ARN_CHARS],
             "reason_code": outcome.reason_code.value if outcome.reason_code else None,
         },
     )
@@ -458,7 +572,7 @@ def run_aws_dry_run(
             outcome.reason_code,
             outcome.verification_summary,
         ),
-        draft=None,
+        command=None,
     )
 
 
@@ -498,23 +612,28 @@ def run_guardrail_validation(
     조회 경계 둘(is_managed_arn·precheck)은 키워드로만 받는다 — 호출부가 순서를
     바꿔 넘기면 두 경계가 조용히 뒤바뀐다.
 
-    AI_CANDIDATE 문맥 전용이다(①이 다른 문맥을 NotImplementedError로 막는다).
+    AI_CANDIDATE와 ROLLBACK_EXECUTION 문맥을 받는다. 원복도 같은 네 단계를 같은
+    순서로 지난다(ADR-0004 정책 ①) — 다른 것은 ①의 파라미터 계약과 ②의 허용
+    목록뿐이고, 그 둘은 request.validation_context가 고른다. 아직 없는 문맥은
+    ①이 NotImplementedError로 막는다.
     """
     schema_check = run_schema_check(request)
     steps = [schema_check.step_result]
     if schema_check.command is None:
-        return GuardrailOutcome(result=_validation_result(steps), draft=None)
+        return GuardrailOutcome(result=_validation_result(steps), command=None)
 
-    whitelist = run_action_whitelist(schema_check.command)
+    whitelist = run_action_whitelist(
+        schema_check.command, request.validation_context
+    )
     steps.append(whitelist.step_result)
-    if whitelist.draft is None:
-        return GuardrailOutcome(result=_validation_result(steps), draft=None)
+    if whitelist.command is None:
+        return GuardrailOutcome(result=_validation_result(steps), command=None)
 
-    arn_match = run_arn_match(whitelist.draft, is_managed_arn)
+    arn_match = run_arn_match(whitelist.command, is_managed_arn)
     steps.append(arn_match.step_result)
-    if arn_match.draft is None:
-        return GuardrailOutcome(result=_validation_result(steps), draft=None)
+    if arn_match.command is None:
+        return GuardrailOutcome(result=_validation_result(steps), command=None)
 
-    dry_run = run_aws_dry_run(arn_match.draft, precheck)
+    dry_run = run_aws_dry_run(arn_match.command, precheck)
     steps.append(dry_run.step_result)
-    return GuardrailOutcome(result=_validation_result(steps), draft=dry_run.draft)
+    return GuardrailOutcome(result=_validation_result(steps), command=dry_run.command)

@@ -14,6 +14,8 @@
 
 문제는 `DryRun`이 모든 작업에서 쓸 수 있는 수단이 아니라는 점이다. 확정 10종(ADR-0002 본편 7 + ADR-0004 롤백 3)이 사용하는 AWS 작업 전수를 LocalStack 4.14.0에서 실측했다.
 
+> **1차 보강(2026-09-22 · Issue #368)** — `ec2.revoke_security_group_egress` 1행을 더했다. `SG_RECREATE` 실행을 세우면서 `create_security_group`이 VPC 보안 그룹에 **전체 허용 아웃바운드 1건을 자동으로 붙인다**는 것이 드러났고, 걷어 내지 않으면 복원된 SG가 원본보다 넓어지거나 같은 규칙 주입이 `InvalidPermission.Duplicate`로 거절된다. 그래서 회수가 이 런북의 고정 단계가 됐고, 허용 작업도 한 종 늘었다. 판정은 나머지 SG 작업과 같은 `DryRun`이다(2026-09-22 LocalStack 실측 — `DryRunOperation` 예외, 자원 변경 없음). 표 밖의 결정은 바뀌지 않았다.
+
 ### 실측 — 확정 10종 `target_api` 전수 (LocalStack 4.14.0)
 
 | AWS 작업 | 사용 런북 | 예외 | 자원 변경 | 판정 |
@@ -24,6 +26,7 @@
 | `ec2.delete_security_group` | SG_DELETE_ISOLATED | `DryRunOperation` | 없음 | DryRun |
 | `ec2.authorize_security_group_ingress` | SG_RECREATE | `DryRunOperation` | 없음 | DryRun |
 | `ec2.authorize_security_group_egress` | SG_RECREATE | `DryRunOperation` | 없음 | DryRun |
+| `ec2.revoke_security_group_egress` | SG_RECREATE | `DryRunOperation` | 없음 | DryRun |
 | `ec2.create_launch_template` | ENABLE_AUTOSCALING | `DryRunOperation` | 없음 | DryRun |
 | `ec2.create_snapshot` | EBS_DELETE_UNATTACHED | `DryRunOperation` | 없음 | DryRun |
 | `ec2.delete_volume` | EBS_DELETE_UNATTACHED | `DryRunOperation` | 없음 | DryRun |
@@ -38,7 +41,7 @@
 - **NACL 2종**: AWS는 `DryRun` 성공도 `DryRunOperation` **예외**로 돌려준다. 예외가 나지 않았다는 것은 플래그가 적용되지 않았다는 뜻이고, 실제로 규칙이 생성·삭제됐다. LocalStack 구현 결함이며 실 AWS는 정상 지원한다.
 - **`elbv2`·`autoscaling` 3종**: `ParamValidationError`는 botocore 클라이언트 단에서 발생한다. 네트워크 호출 전에 나므로 LocalStack 특성이 아니라 **실 AWS API에 `DryRun` 파라미터 자체가 없다**는 뜻이다. 환경과 무관하게 확정이다.
 
-NACL 2종은 "LocalStack일 때만 조회로 확인"으로 나눌 수 있어 보이지만, [ADR-0006](0006-localstack-team-standard-env.md) §3(전환 스위치 규약 — 코드 분기 금지)이 이를 금지한다. 나누면 게이트까지 LocalStack에서는 조회 경로만 돌고 `DryRun` 경로는 실 AWS에서 처음 실행된다 — 그 조항이 막으려는 상황 그대로다. `RUNBOOK_NACL_ADD_DENY`·`NACL_RESTORE`는 9/13 게이트 P0 4종이므로 여기서 틀리면 SecOps 시연 경로가 통째로 막힌다.
+NACL 2종은 "LocalStack일 때만 조회로 확인"으로 나눌 수 있어 보이지만, [ADR-0006](0006-localstack-team-standard-env.md) §3(전환 스위치 규약 — 코드 분기 금지)이 이를 금지한다. 나누면 게이트까지 LocalStack에서는 조회 경로만 돌고 `DryRun` 경로는 실 AWS에서 처음 실행된다 — 그 조항이 막으려는 상황 그대로다. `RUNBOOK_NACL_ADD_DENY`·`NACL_RESTORE`는 9/11 게이트 P0 4종이므로 여기서 틀리면 SecOps 시연 경로가 통째로 막힌다.
 
 ### 추가로 확인된 제약 — `elbv2`·`autoscaling`은 LocalStack Community에 없다
 
@@ -224,7 +227,7 @@ authorize_security_group_ingress(GroupId='sg-000...0')  # 부재 -> DryRunOperat
 - executor ↔ 가드레일 경계가 함수 하나로 좁혀져 양쪽이 서로를 기다리지 않고 4주차 병렬 개발이 가능하다(3주차 종료 판정 ⓐ).
 - 거절 사유가 코드로 분류되고 확인 한계가 문자열로 남아, 관제자가 "왜 실행되지 않았는가"를 대시보드에서 설명할 수 있다.
 - `DryRunOperation` 예외 강제 규약이 에뮬레이터 결함·SDK 변경을 상시 탐지한다. 이번 NACL 결함도 같은 방식으로 발견됐다.
-- P0 4종(`RIGHTSIZING`+`REVERT_SIZE`, `NACL_ADD_DENY`+`NACL_RESTORE`)은 전부 로컬에서 통과 경로가 있어 9/13 게이트에 영향이 없다.
+- P0 4종(`RIGHTSIZING`+`REVERT_SIZE`, `NACL_ADD_DENY`+`NACL_RESTORE`)은 전부 로컬에서 통과 경로가 있어 9/11 게이트에 영향이 없다.
 
 **비용/유의**
 

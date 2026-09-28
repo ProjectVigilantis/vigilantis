@@ -3,8 +3,9 @@
 두 가지를 고정한다.
   ① precheck 모델 10종의 키 집합이 ADR-0007 §5 표와 같은가 — 표를 아래에 그대로
      옮겨 적었다. 문서가 바뀌었는데 코드가 안 바뀌면(또는 반대면) 여기서 걸린다.
-  ② 후보 모델 7종이 "AI가 정하는 값"만 담는가 — 나머지 키가 후보에 새어 들어오면
-     AI가 지어낼 수 있는 자리가 늘어난다.
+  ② 후보 모델 7종이 "후보 시점에 정해지는 값"만 담는가 — 나머지 키가 후보에 새어
+     들어오면 AI가 지어낼 수 있는 자리가 늘어난다. 그중 서버가 계산하는 키(#251)는
+     AI 몫에서 빠진다.
 """
 
 import pytest
@@ -14,8 +15,10 @@ from schemas.runbook_parameters import (
     CANDIDATE_PARAMETER_MODELS,
     PRECHECK_PARAMETER_MODELS,
     RESOURCE_ID_PARAM,
+    SERVER_COMPUTED_CANDIDATE_PARAMS,
     Ec2RightsizingCandidateParameters,
     NaclAddDenyCandidateParameters,
+    ai_decided_parameter_names,
     build_display_parameters,
     build_precheck_parameters,
 )
@@ -54,7 +57,9 @@ SPEC_KEYS = {
     "RUNBOOK_EC2_REVERT_SIZE": {"instance_id", "backup_record_id", "evidence_id"},
 }
 
-# AI가 정하는 값 (#154 결정 ①). 나머지는 target_arn 파생·조회·evidence_ids 첫 항목이다.
+# 후보 시점에 정해지는 값 (#154 결정 ①). 나머지는 target_arn 파생·조회·evidence_ids 첫 항목이다.
+# RIGHTSIZING의 target_instance_type은 AI가 아니라 그래프가 규칙으로 계산한다(#251 —
+# SERVER_COMPUTED_KEYS). 후보에 실리는 값이라는 점은 같다.
 CANDIDATE_KEYS = {
     "RUNBOOK_EC2_ISOLATE": set(),
     "RUNBOOK_NACL_ADD_DENY": {"rule_number", "cidr_block", "protocol"},
@@ -187,10 +192,31 @@ def test_canonical_cidr_blocks_pass_unchanged(cidr):
     assert model.cidr_block == cidr
 
 
-@pytest.mark.parametrize("value", ["", "   ", "v" * 257])
-def test_free_text_bounds(value):
+@pytest.mark.parametrize(
+    "value", ["", "   ", "v" * 257, "t3.mega", "T3.SMALL", "c5.large", " t3.small"]
+)
+def test_rightsizing_target_must_be_in_the_spec_table(value):
+    """규칙이 사양 표 안에서만 계산하므로(#251) 표 밖 값은 ①에서 끝난다."""
     with pytest.raises(ValidationError):
         Ec2RightsizingCandidateParameters(target_instance_type=value)
+
+
+@pytest.mark.parametrize("value", ["t3.small", "t3a.medium", "t4g.large", "t2.micro"])
+def test_rightsizing_target_accepts_spec_table_types(value):
+    assert Ec2RightsizingCandidateParameters(target_instance_type=value).target_instance_type == value
+
+
+def test_server_computed_keys_are_candidate_keys_outside_the_ai_share():
+    """서버 몫 키는 후보 모델에 있고, AI 몫 목록에서는 빠진다 — 겹치면 두 출처가 한 값을 쓴다."""
+    for runbook_id, computed in SERVER_COMPUTED_CANDIDATE_PARAMS.items():
+        fields = set(CANDIDATE_PARAMETER_MODELS[runbook_id].model_fields)
+        assert computed <= fields
+        assert not computed & set(ai_decided_parameter_names(runbook_id))
+    assert ai_decided_parameter_names(RunbookId.RUNBOOK_EC2_RIGHTSIZING) == []
+    assert ai_decided_parameter_names(RunbookId.RUNBOOK_EC2_ENABLE_AUTOSCALING) == [
+        "max_size", "min_size",
+    ]
+    assert ai_decided_parameter_names(RunbookId.RUNBOOK_EC2_REVERT_SIZE) == []
 
 
 @pytest.mark.parametrize("bad_id", ["i-XYZ0123456", "i-0abc", "xi-0abc12345678", INSTANCE + "\n"])

@@ -43,7 +43,7 @@
       "security_group_ids": ["sg-0a1b2c3d4e5f00015"],
       "tags": { "Name": "golden-ec2-dp-boundary", "Environment": "staging", "Owner": "qa" },
       "metric_summary": {
-        "cpu_datapoints": 48, "cpu_avg": 4.9, "cpu_max": null,
+        "cpu_datapoints": 48, "cpu_avg": 4.9, "cpu_max": 10.0,
         "net_in_avg": 1024.0, "net_out_avg": 512.0
       }
     }

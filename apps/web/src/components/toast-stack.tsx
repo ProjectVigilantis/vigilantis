@@ -49,6 +49,7 @@ export function ToastStack() {
   );
 
   // 인시던트 — `INCIDENT_CREATED`만 띄운다. `INCIDENT_UPDATED`는 재조회만 하고 알리지 않는다(§4.8).
+  // 제목은 트랙별이다 — 자산(FinOps) 건에 보안 위협 제목을 붙이지 않는다.
   useEffect(
     () =>
       subscribeIncident((action) => {
@@ -56,7 +57,7 @@ export function ToastStack() {
         push({
           id: `incident:${action.incidentId}`,
           incidentId: action.incidentId,
-          title: '보안 위협 감지',
+          title: action.category === 'FINOPS' ? '최적화 대상 감지' : '보안 위협 감지',
           body: action.incidentId,
         });
       }),

@@ -19,9 +19,9 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Optional
+from typing import Literal, Optional
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # .env에는 POSTGRES_USER 등 다른 서비스용 변수도 있으므로 extra는 무시한다.
@@ -50,12 +50,72 @@ class Settings(BaseSettings):
     # 제거·종료 시 연결 close() 정리도 같은 값을 상한으로 쓴다.
     # 0 이하면 모든 연결이 즉시 제거되므로 양수만 허용한다 (Issue #75)
     WS_SEND_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0)
+    # 접수된 조치 실행 디스패치·회수 스캔 주기(초) — dispatcher.py 잡 1개가 쓴다.
+    # 승인부터 AWS 호출까지의 지연 상한이자 부분 인덱스
+    # (ix_action_executions_non_terminal) 조회 빈도다 (Issue #232)
+    DISPATCH_INTERVAL_SECONDS: int = Field(default=10, gt=0)
+    # AI 분석 대기 Incident 스캔 주기(초) — agent_dispatcher.py 잡 1개가 쓴다.
+    # Incident 생성부터 그래프 호출까지의 지연 상한이다. 실행 디스패치보다 성긴 것은
+    # 그 앞단인 수집·판정 주기가 SCAN_INTERVAL_SECONDS(기본 300초)라 이 값을 더 조여도
+    # 체감 지연이 그만큼 줄지 않기 때문이다. 한 주기가 대상 전부를 직렬로 돌고 건마다
+    # 모델을 부르므로, 밀리면 다음 주기는 max_instances=1이 미룬다 (Issue #285)
+    AGENT_DISPATCH_INTERVAL_SECONDS: int = Field(default=30, gt=0)
+    # 스캔 잡 기동 스위치 — 테스트가 앱을 띄울 때 스캔이 따라 돌지 않게 끈다
+    # (apps/core-api/tests/conftest.py, PR #236 리뷰). 실행 디스패치와 AI 디스패치가
+    # 이 하나를 공유한다 — 끄는 목적이 같다
+    DISPATCH_ENABLED: bool = True
+    # 모의 관측 공급자는 경로를 지정했을 때만 기동한다(#322). 수집·AI 실행 스위치와
+    # 독립이다. 폴더 안 JSON을 소비하며 DB 결과는 앱의 조회 API에서 확인한다.
+    MOCK_THREAT_INBOX_DIR: str = ""
+    MOCK_THREAT_POLL_SECONDS: float = Field(default=1.0, gt=0)
+    # 2/2 Status Check 대기 — services/aws/rollback.py의 waiter 설정 (Issue #240).
+    # 기본 15초×12회=3분으로 boto3 기본값(15초×40회=10분)보다 짧다. 판정 1건이
+    # 그만큼 다음 스캔을 미루므로(max_instances=1) 시연에서 조일 수 있어야 한다.
+    STATUS_CHECK_WAIT_DELAY_SECONDS: int = Field(default=15, gt=0)
+    STATUS_CHECK_WAIT_MAX_ATTEMPTS: int = Field(default=12, ge=1)
+    # 판정 불가 재시도 — AWS에 물어보지 못해 실행 결과를 확정하지 못했을 때 (Issue #249).
+    # MAX_ATTEMPTS는 받아 주는 실패 횟수(첫 실패 포함)이고, 소진하면 자동 원복하지 않고
+    # 결과 확인 불가(UNVERIFIED)로 확정해 관제자에게 넘긴다. INTERVAL은 마지막 실패로부터
+    # 다음 질문까지의 최소 간격이다 — 스캔 주기(DISPATCH_INTERVAL_SECONDS)마다 되물으면
+    # 스로틀링 같은 일시 오류를 우리가 키운다. 기본 5회·60초면 첫 실패부터 최소 4분을
+    # 기다린 뒤 사람에게 넘긴다. 권한 거부처럼 다시 물어도 같은 사유는 이 값과 무관하게
+    # 첫 실패에서 넘긴다(services/aws/errors.py RETRYABLE_REASON_CODES).
+    VERIFICATION_RETRY_MAX_ATTEMPTS: int = Field(default=5, ge=1)
+    VERIFICATION_RETRY_INTERVAL_SECONDS: int = Field(default=60, ge=0)
 
     # --- AI 모델 호출 (Issue #115) ---
     # 키는 Optional이다 — AI 호출 경로가 앱에 배선되기 전이라 키 없이도 기동해야 하고,
     # 누락은 실제 클라이언트를 만드는 build_openai_model_client()가 거절한다.
     OPENAI_API_KEY: Optional[str] = None
-    OPENAI_MODEL: str = "gpt-4o"
+    OPENAI_MODEL: str = "gpt-5.6-luna"
+    # 모델 동작 노브 2종. **값이 있는 것만 호출에 실린다**(#237) — 모델 계열마다
+    # 받는 파라미터가 다르기 때문이다. gpt-4o는 temperature를 받고 reasoning_effort가
+    # 없으며, gpt-5 계열 추론 모델은 그 반대다. 받지 않는 쪽을 켜면 호출이 400으로
+    # 거절된다(ai/openai_client.py가 AIModelRejectedError로 옮기며 재시도하지 않는다)
+    # — 조용히 무시되지 않으므로 오설정이 드러난다.
+    #
+    # **두 노브의 기본값은 위 OPENAI_MODEL과 한 쌍이다**(#237 비교표). 기본 모델이
+    # 추론 모델이라 temperature는 미설정이고 reasoning_effort만 켜져 있다. 벤더 기본값에
+    # 맡기지 않고 low로 박는 것은 그 기본값이 우리 것이 아니라 우리 코드 변경 없이 바뀔
+    # 수 있기 때문이다 — 비교표가 보증하는 것은 low라고 명시한 열이지 그때의 벤더
+    # 기본값이 아니다. 모델 계열은 두 노브를 뒤집어 환경변수만으로 바꾼다(gpt-4o 계열이면
+    # OPENAI_TEMPERATURE=0 · OPENAI_REASONING_EFFORT=unset).
+    OPENAI_TEMPERATURE: Optional[float] = Field(default=None, ge=0, le=2)
+    # 값 집합은 SDK의 openai.types.shared.ReasoningEffort에 "unset" 하나를 더한 것이다.
+    # 기본값이 low라 노브를 끌 표기가 필요한데, 빈 값은 아래 Literal 검증에 걸리고
+    # "none"은 모델에게 실제로 보내는 값이라 끄기로 못 쓴다. "unset"은 아래 검증기가
+    # None으로 접으므로, 이 필드를 읽는 쪽(호출 경계·계측 도구)은 미설정과 구별하지
+    # 않는다. SDK 타입을 여기서 import하지 않는 것은 SDK를 부르는 지점을
+    # ai/openai_client.py 하나로 유지하기 위해서다(ADR-0005 설계 원칙 3).
+    #
+    # 이 Literal은 **오타 방지용이며 모델별 지원 목록이 아니다.** 어느 값을 실제로
+    # 받는지는 모델마다 다르다 — 계측 대상 3종(gpt-5.6-luna·terra·gpt-5.4-nano)은
+    # none·low·medium·high·xhigh를 받고 minimal·max를 400으로 거절했다(#237 실측).
+    # 좁히지 않는 것은 모델이 늘 때마다 이 목록을 고쳐야 하기 때문이고, 지원하지 않는
+    # 값은 기동이 아니라 첫 호출에서 드러난다.
+    OPENAI_REASONING_EFFORT: Optional[
+        Literal["unset", "none", "minimal", "low", "medium", "high", "xhigh", "max"]
+    ] = "low"
     OPENAI_TIMEOUT_SECONDS: float = Field(default=30.0, gt=0)
     # 재시도 대상은 일시 오류뿐이다(ai/openai_client.py). 1이면 재시도 없음
     OPENAI_MAX_ATTEMPTS: int = Field(default=3, ge=1)
@@ -63,6 +123,14 @@ class Settings(BaseSettings):
     # 서버가 Retry-After로 지시한 대기의 상한. 이보다 길게 지시하면 따르지 않고
     # backoff로 간다 — 요청 경로에서 부르는 호출이라 무한정 붙잡지 않는다
     OPENAI_MAX_RETRY_AFTER_SECONDS: float = Field(default=60.0, ge=0)
+
+    @field_validator("OPENAI_REASONING_EFFORT", mode="after")
+    @classmethod
+    def _fold_unset_reasoning_effort(cls, value: Optional[str]) -> Optional[str]:
+        # 접는 자리를 호출 경계가 아니라 여기로 둔다 — 이 필드를 읽는 곳이 호출 경계
+        # 말고도 있어(scripts/finops_eval.py의 열 이름) 경계에서 접으면 "unset"이 값인
+        # 것처럼 표에 찍힌다.
+        return None if value == "unset" else value
 
     def cors_allow_origins_list(self) -> list[str]:
         return [
@@ -97,12 +165,21 @@ class AwsSettings(BaseSettings):
 
 
 class CollectorSettings(BaseSettings):
-    """CloudWatch 조회 창 설정 — 수집 비용·판정 신뢰도에 직접 영향을 준다."""
+    """CloudWatch 조회 창·스캔 주기 설정 — 수집 비용·판정 신뢰도에 직접 영향을 준다.
+
+    SCAN_INTERVAL_SECONDS 는 인벤토리 describe 주기다. METRIC_PERIOD_SECONDS(메트릭 입자)
+    보다 짧아도 된다 — SG 전체개방 같은 위협은 빨리 봐야 하기 때문이다. 그 경우 collector 가
+    같은 입자를 다시 받아오지 않도록 적재된 요약을 재사용한다(#255).
+    """
 
     model_config = _ENV_ONLY
 
     METRIC_LOOKBACK_DAYS: int = Field(default=14, gt=0)
     METRIC_PERIOD_SECONDS: int = Field(default=3600, gt=0)
+    SCAN_INTERVAL_SECONDS: int = Field(default=300, gt=0)
+    # 스캔 파이프라인 잡 기동 여부. false 면 start_scheduler 가 None 을 돌려준다 —
+    # 테스트가 앱을 띄울 때 실제 수집·판정이 도는 것을 막는다(DISPATCH_ENABLED 와 같은 결).
+    SCAN_ENABLED: bool = True
 
 
 @lru_cache

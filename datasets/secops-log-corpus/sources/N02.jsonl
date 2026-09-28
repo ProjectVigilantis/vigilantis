@@ -1,0 +1,3 @@
+{"record_id":"N02-001","source_time":"2026-08-28T06:23:49.058138Z","received_at":"2026-08-28T06:23:49.058167Z","host":"ncp-host-001","process_id":20002,"message":"Accepted password for user-001 from 198.51.100.10 port 41002 ssh2","source_line":3}
+{"record_id":"N02-002","source_time":"2026-08-28T06:23:49.060171Z","received_at":"2026-08-28T06:23:49.060279Z","host":"ncp-host-001","process_id":20002,"message":"pam_unix(sshd:session): session opened for user user-001(uid=REDACTED) by user-001(uid=REDACTED)","source_line":4}
+{"record_id":"N02-003","source_time":"2026-08-28T06:34:08.069799Z","received_at":"2026-08-28T06:34:08.070268Z","host":"ncp-host-001","process_id":20002,"message":"pam_unix(sshd:session): session closed for user user-001","source_line":20}

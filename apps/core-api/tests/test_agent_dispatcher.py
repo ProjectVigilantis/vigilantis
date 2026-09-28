@@ -1,0 +1,1206 @@
+"""Agent Dispatcher 통합 테스트 — 실제 PostgreSQL 필요(미기동 시 skip). (Issue #285)
+
+**이 파일이 지키는 것은 오케스트레이션이다** — 선점·트랜잭션 경계·계약 검증 ⓐⓑ·
+상태 전이·회수·발행. 아래 넷은 다른 자리가 이미 지키므로 여기서 다시 보지 않는다.
+  - 그래프 내부 분기(SUCCEEDED·NO_PROPOSAL·FAILED)  → ai/tests/test_finops_graph.py
+  - 가드레일 단계별 판정과 거절 사유              → ai/tests/test_guardrail_steps.py
+  - AWS Dry-Run 판정                              → services/tests/test_precheck_dispatch.py
+  - 계약 불변식(출력 3갈래·근거 유형)             → packages/schemas/tests
+그래서 가드레일 ④만 Test Double로 바꾸고 ①②③은 실제로 돌린다 — ③이 대조하는 자산 행도
+실제로 적재한다. 모델은 FakeAIModelClient로만 부른다(실호출 0회).
+"""
+
+import sys
+from datetime import UTC, datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+CORE_API = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[3]
+for p in (str(CORE_API), str(REPO_ROOT / "packages")):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+import agent_dispatcher  # noqa: E402
+import incident_intake  # noqa: E402
+import workflows  # noqa: E402
+from ai.agent import (  # noqa: E402
+    CandidateProposalOutput,
+    CandidateProposalOutput as SecOpsCandidateProposalOutput,
+    EvidenceSummaryOutput,
+    ProposedCandidate,
+    ProposedCandidate as SecOpsProposedCandidate,
+    RiskReassessmentOutput,
+)
+from ai.model_client import FakeAIModelClient  # noqa: E402
+from db.repositories import assets as assets_repo  # noqa: E402
+from db.repositories import guardrails as guardrails_repo  # noqa: E402
+from db.repositories import incidents as incidents_repo  # noqa: E402
+from schemas.agents import AgentGraphOutput, RunbookCandidateDraft  # noqa: E402
+from schemas.api.assets import AssetType  # noqa: E402
+from schemas.assets import MetricSummary as MetricSummaryContract  # noqa: E402
+from schemas.api.incidents import IncidentStatus, RiskLevel  # noqa: E402
+from schemas.candidates import CandidateStatus  # noqa: E402
+from schemas.evidence import EvidenceType  # noqa: E402
+from schemas.guardrails import GuardrailStep  # noqa: E402
+from schemas.incidents import (  # noqa: E402
+    AGENT_TERMINAL_STATUSES,
+    AgentInvocationStatus,
+)
+from schemas.intake import FinOpsIncidentIntake, SecOpsIncidentIntake  # noqa: E402
+from schemas.precheck import (  # noqa: E402
+    PrecheckOutcome,
+    PrecheckReasonCode,
+    VerificationMethod,
+    build_verification_summary,
+)
+from schemas.runbooks import RunbookId  # noqa: E402
+
+ACCOUNT = "123456789012"
+REGION = "ap-northeast-2"
+INSTANCE_ID = "i-0abc123456789def0"
+GROUP_ID = "sg-0abc123456789def0"
+EC2_ARN = f"arn:aws:ec2:{REGION}:{ACCOUNT}:instance/{INSTANCE_ID}"
+SG_ARN = f"arn:aws:ec2:{REGION}:{ACCOUNT}:security-group/{GROUP_ID}"
+RUN_ID = "1f2e3d4c-5b6a-4978-8899-aabbccddee00"
+COLLECTED_AT = "2026-09-02T09:00:00Z"
+EVALUATED_AT = "2026-09-02T09:00:05Z"
+
+SUMMARY = EvidenceSummaryOutput(
+    observation="3일 평균 CPU가 4.9%이고 규칙 판정은 COST_CANDIDATE다.",
+    diagnosis="이 인스턴스는 할당된 스펙을 쓰지 못하고 있다.",
+    rationale="관측 구간 내내 저활성이라 한 단계 낮은 유형으로 줄여도 된다.",
+)
+
+
+# ------------------------------------------------------------------------------
+# 시드
+# ------------------------------------------------------------------------------
+
+
+def _ec2_asset(**over):
+    base = {
+        "arn": EC2_ARN,
+        "resource_id": INSTANCE_ID,
+        "asset_type": "EC2",
+        "resource_role": "PRIMARY",
+        "name": "batch-dev",
+        "account_id": ACCOUNT,
+        "region": REGION,
+        "state": "running",
+        "spec": {"instance_type": "t3.xlarge"},
+        "relationships": [],
+        "evaluation_status": "COMPLETED",
+        "health_score": 4,
+        "verdict": "COST_CANDIDATE",
+        "skip_reason_code": None,
+        "collected_at": COLLECTED_AT,
+    }
+    base.update(over)
+    return base
+
+
+def _sg_asset():
+    return {
+        "arn": SG_ARN,
+        "resource_id": GROUP_ID,
+        "asset_type": "SG",
+        "resource_role": "PRIMARY",
+        "name": "orphan-sg",
+        "account_id": ACCOUNT,
+        "region": REGION,
+        "state": None,
+        "spec": {"attached": False, "open_to_world": []},
+        "relationships": [],
+        "evaluation_status": "COMPLETED",
+        "health_score": None,
+        "verdict": "UNUSED",
+        "skip_reason_code": None,
+        "collected_at": COLLECTED_AT,
+    }
+
+
+def _intake(asset, *, verdict="COST_CANDIDATE", health_score=4) -> FinOpsIncidentIntake:
+    return FinOpsIncidentIntake.model_validate(
+        {
+            "asset_snapshot": {"collection_run_id": RUN_ID, "asset": asset},
+            "rule_evaluation": {
+                "asset_arn": asset["arn"],
+                "collection_run_id": RUN_ID,
+                "evaluation_status": "COMPLETED",
+                "verdict": verdict,
+                "health_score": health_score,
+                "skip_reason_code": None,
+                "reason": f"{asset['asset_type']} rule evaluation: verdict={verdict}",
+                "evaluated_at": EVALUATED_AT,
+            },
+        }
+    )
+
+
+def _secops_intake() -> SecOpsIncidentIntake:
+    return SecOpsIncidentIntake.model_validate(
+        {
+            "title": "SSH 브루트포스 시도",
+            "threat_event": {
+                "threat_event_id": "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c60",
+                "source_event_id": "evt-mock-001",
+                "event_type": "SSH_BRUTE_FORCE",
+                "target_arn": EC2_ARN,
+                "occurred_at": "2026-09-02T09:00:00Z",
+                "payload": {
+                    "source_ip": "203.0.113.10",
+                    "failed_attempt_count": 120,
+                    "window_seconds": 300,
+                },
+                "deduplication_key": "SSH_BRUTE_FORCE:i-0abc123456789def0:203.0.113.10",
+                "collected_at": "2026-09-02T09:00:01Z",
+            },
+            "initial_risk": {
+                "threat_event_id": "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c60",
+                "initial_risk_level": "HIGH",
+                "response_mode": "PRE_MITIGATION_0_5S",
+                "reason_codes": ["RISK_SSH_BRUTEFORCE"],
+            },
+        }
+    )
+
+
+def _seed_asset_row(db, *, arn, asset_type, resource_id, spec, state):
+    """③ ARN Match가 대조하는 자산 행. 근거와 별개 계층이라 따로 적재한다."""
+    run = assets_repo.start_collection_run(
+        db,
+        account_id=ACCOUNT,
+        region=REGION,
+        mode="localstack",
+        lookback_days=3,
+        period_seconds=3600,
+    )
+    assets_repo.upsert_asset(
+        db,
+        arn=arn,
+        asset_type=asset_type,
+        resource_id=resource_id,
+        account_id=ACCOUNT,
+        region=REGION,
+        spec=spec,
+        collection_run_id=run.collection_run_id,
+        collected_at=datetime.now(timezone.utc),
+        state=state,
+    )
+    db.commit()
+
+
+def _pending_incident(db, *, sg=False) -> str:
+    """ANALYZING · PENDING 인시던트 1건 + 그 자산 행. incident_id를 돌려준다."""
+    if sg:
+        _seed_asset_row(
+            db,
+            arn=SG_ARN,
+            asset_type=AssetType.SG,
+            resource_id=GROUP_ID,
+            spec={"attached": False, "open_to_world": []},
+            state=None,
+        )
+        intake = _intake(_sg_asset(), verdict="UNUSED", health_score=None)
+    else:
+        _seed_asset_row(
+            db,
+            arn=EC2_ARN,
+            asset_type=AssetType.EC2,
+            resource_id=INSTANCE_ID,
+            spec={"instance_type": "t3.xlarge"},
+            state="running",
+        )
+        intake = _intake(_ec2_asset())
+    return incident_intake.create_incident_from_intake(db, intake).incident_id
+
+
+def _rule_evidence_id(db, incident_id: str) -> str:
+    return next(
+        row.evidence_id
+        for row in incidents_repo.list_evidence(db, incident_id)
+        if row.evidence_type is EvidenceType.RULE
+    )
+
+
+# ------------------------------------------------------------------------------
+# 테스트 대역
+# ------------------------------------------------------------------------------
+
+
+# 대역도 실제 _candidate_precheck와 같은 호출 모양을 받는다 — 가드레일이 NACL_RESTORE
+# 후보용 backup_loader를 함께 넘기기 때문이다(#298)
+def _passing_precheck(_command, backup_loader=None) -> PrecheckOutcome:
+    return PrecheckOutcome(
+        passed=True,
+        verification_summary=build_verification_summary(
+            VerificationMethod.DRY_RUN,
+            verified=["AWS 대상 상태"],
+            unverified=["IAM 권한(테스트 대역)"],
+        ),
+    )
+
+
+def _failing_precheck(_command, backup_loader=None) -> PrecheckOutcome:
+    return PrecheckOutcome(
+        passed=False,
+        reason_code=PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND,
+        verification_summary=build_verification_summary(
+            VerificationMethod.DRY_RUN,
+            verified=["없음(DryRun 거절)"],
+            unverified=["IAM 권한(테스트 대역)"],
+        ),
+    )
+
+
+@pytest.fixture()
+def precheck_pass(monkeypatch):
+    """④만 대역으로 바꾼다 — ①②③은 실제로 돈다."""
+    monkeypatch.setattr(workflows, "_candidate_precheck", _passing_precheck)
+
+
+def _client(*outputs) -> FakeAIModelClient:
+    return FakeAIModelClient(list(outputs))
+
+
+def _proposal(evidence_id: str, **over) -> ProposedCandidate:
+    base = {
+        "runbook_id": "RUNBOOK_EC2_RIGHTSIZING",
+        "target_arn": EC2_ARN,
+        "evidence_ids": [evidence_id],
+    }
+    base.update(over)
+    return ProposedCandidate.model_validate(base)
+
+
+def _cycle(db, client, publish=None):
+    return agent_dispatcher.dispatch_pending_analysis(db, publish, client=client)
+
+
+# ------------------------------------------------------------------------------
+# Golden — 정상 입력, 기대값은 조회 계약과 카드 결정에서 도출한다
+# ------------------------------------------------------------------------------
+
+
+def test_successful_analysis_moves_the_incident_to_awaiting_approval(db, precheck_pass):
+    incident_id = _pending_incident(db)
+    evidence_id = _rule_evidence_id(db, incident_id)
+
+    report = _cycle(
+        db, _client(SUMMARY, CandidateProposalOutput(candidates=[_proposal(evidence_id)]))
+    )
+
+    assert (report.scanned, report.claimed, report.succeeded) == (1, 1, 1)
+    incident = incidents_repo.get_incident(db, incident_id)
+    db.refresh(incident)
+    # AWAITING_APPROVAL은 실행 가능한 제안 1개 이상을 요구한다(api/incidents.py)
+    assert incident.status is IncidentStatus.AWAITING_APPROVAL
+    assert incident.agent_invocation_status is AgentInvocationStatus.SUCCEEDED
+    assert len(incident.summary_lines) == 3
+
+    candidates = incidents_repo.list_candidates(db, incident_id)
+    assert [c.status for c in candidates] == [CandidateStatus.EXECUTABLE]
+    # 거절이든 통과든 판정은 남는다 — 관제 화면이 "왜 사라졌나"를 답할 근거다
+    assert guardrails_repo.latest_for_candidate(db, candidates[0].candidate_id) is not None
+
+
+def test_detail_and_list_stay_readable_after_success(db, client_pg, precheck_pass):
+    incident_id = _pending_incident(db)
+    evidence_id = _rule_evidence_id(db, incident_id)
+    _cycle(
+        db, _client(SUMMARY, CandidateProposalOutput(candidates=[_proposal(evidence_id)]))
+    )
+
+    detail = client_pg.get(f"/api/v1/incidents/{incident_id}")
+    assert detail.status_code == 200
+    body = detail.json()
+    assert body["status"] == IncidentStatus.AWAITING_APPROVAL.value
+    assert len(body["summary_lines"]) == 3
+    assert [r["runbook_id"] for r in body["recommendations"]] == [
+        RunbookId.RUNBOOK_EC2_RIGHTSIZING.value
+    ]
+    assert client_pg.get("/api/v1/incidents").status_code == 200
+
+
+@pytest.mark.parametrize("rate, expected_status", [
+    ("0.104000", "ESTIMATED"),
+    ("저장할 수 없는\x00단가", "INVALID"),
+    (None, "UNAVAILABLE"),
+])
+def test_savings_survive_db_and_fresh_app_reads_without_new_model_calls(
+    db, client_pg, monkeypatch, rate, expected_status,
+):
+    from db.session import get_db
+    from fastapi.testclient import TestClient
+    from main import create_app
+    from sqlalchemy.orm import Session
+
+    incident_id = _pending_incident(db)
+    estimate = {
+        "status": "ESTIMATED",
+        # 합성 단가. 이 테스트는 가격 정확도를 검증하지 않는다.
+        "current_hourly_rate": rate, "target_hourly_rate": "0.026000",
+    }
+    if expected_status == "UNAVAILABLE":
+        estimate.update(status="UNAVAILABLE",
+                        current_hourly_rate=None, target_hourly_rate=None)
+    evidence_id = _rule_evidence_id(db, incident_id)
+    from ai.rate_estimator import ProposedHourlyRates
+
+    # 서비스 기본 그래프를 그대로 사용하고 모델 응답만 대역으로 제공한다.
+    model = _client(
+        SUMMARY, CandidateProposalOutput(candidates=[_proposal(evidence_id)]),
+        ProposedHourlyRates.model_construct(**estimate),
+    )
+    order = []
+    original_complete = model.complete
+    original_lock = incidents_repo.lock_incident
+
+    def complete(request, response_model):
+        assert not db.in_transaction()
+        order.append(response_model.__name__)
+        return original_complete(request, response_model)
+
+    def precheck(command, backup_loader=None):
+        assert not db.in_transaction()
+        order.append("guardrail")
+        return _passing_precheck(command)
+
+    def lock(*args):
+        order.append("lock")
+        return original_lock(*args)
+
+    model.complete = complete
+    monkeypatch.setattr(workflows, "_candidate_precheck", precheck)
+    monkeypatch.setattr(incidents_repo, "lock_incident", lock)
+    report = _cycle(db, model)
+    assert report.succeeded == 1
+    assert order == [
+        "EvidenceSummaryOutput", "CandidateProposalOutput", "guardrail", "ProposedHourlyRates", "lock",
+    ]
+
+    url = f"/api/v1/incidents/{incident_id}"
+    response = client_pg.get(url)
+    assert response.status_code == 200
+    first = response.json()
+    recommendation = first["recommendations"][0]
+    saved = recommendation["ai_savings_estimate"]
+    assert first["status"] == "AWAITING_APPROVAL"
+    assert saved["status"] == expected_status
+    assert saved["amount"] == ("56.94" if expected_status == "ESTIMATED" else None)
+    if expected_status == "ESTIMATED":
+        assert saved["basis"]["explanation_source"] == "SERVER_TEMPLATE"
+        assert saved["basis"]["assumptions"]["pricing_source"] == "MODEL_KNOWLEDGE"
+        assert saved["basis"]["current_instance_type"] == "t3.xlarge"
+        assert "실제 요금 조회 결과가 아닙니다" in saved["basis"]["explanation"]
+    assert recommendation["display_parameters"] == {"target_instance_type": "t3.medium"}
+    candidate = incidents_repo.list_candidates(db, incident_id)[0]
+    db.refresh(candidate)
+    assert candidate.ai_savings_estimate == saved
+    assert candidate.status is CandidateStatus.EXECUTABLE
+    evaluation = guardrails_repo.latest_for_candidate(db, candidate.candidate_id)
+    assert evaluation.result.value == "PASS"
+    assert "ai_savings_estimate" not in evaluation.validated_command
+    assert evaluation.validated_command["parameters"] == {"target_instance_type": "t3.medium"}
+
+    # 앱·ORM identity map을 새로 만들어도 DB에 저장한 값을 그대로 조회한다.
+    # 테스트 격리용 외부 트랜잭션은 공유하지만 새 Session에서 다시 SELECT한다.
+    connection = db.get_bind()
+    db.close()
+
+    def fresh_db():
+        with Session(bind=connection, join_transaction_mode="create_savepoint") as session:
+            yield session
+
+    app = create_app()
+    app.dependency_overrides[get_db] = fresh_db
+    with TestClient(app) as restarted:
+        for _ in range(2):
+            restored = restarted.get(url)
+            assert restored.status_code == 200
+            assert restored.json() == first
+    with Session(bind=connection, join_transaction_mode="create_savepoint") as session:
+        assert _cycle(session, model).claimed == 0
+    assert len(model.sent) == 3
+
+
+def test_unattached_sg_incident_gets_a_menu(db):
+    """미부착 SG의 조치는 Registry에서 SECOPS다 — 도메인으로 거르면 메뉴가 빈다."""
+    incident_id = _pending_incident(db, sg=True)
+
+    graph_input = agent_dispatcher.build_graph_input(db, incident_id)
+
+    assert [c.runbook_id for c in graph_input.capabilities] == [
+        RunbookId.RUNBOOK_SG_DELETE_ISOLATED
+    ]
+
+
+def test_non_rightsizing_candidate_skips_savings(db, client_pg, precheck_pass):
+    incident_id = _pending_incident(db, sg=True)
+    model = _client(SUMMARY, CandidateProposalOutput(candidates=[_proposal(
+        _rule_evidence_id(db, incident_id),
+        runbook_id=RunbookId.RUNBOOK_SG_DELETE_ISOLATED, target_arn=SG_ARN,
+    )]))
+    assert _cycle(db, model).succeeded == 1
+    assert len(model.sent) == 2
+    data = client_pg.get(f"/api/v1/incidents/{incident_id}").json()
+    assert data["recommendations"][0]["ai_savings_estimate"] is None
+
+
+@pytest.mark.parametrize("error_kind", ["timeout", "contract"])
+def test_savings_call_failure_keeps_passed_candidate_in_db(
+    db, client_pg, precheck_pass, error_kind,
+):
+    from ai.model_client import AIModelContractError, AIModelTimeoutError
+    from ai.rate_estimator import ProposedHourlyRates
+
+    incident_id = _pending_incident(db)
+    model = _client(SUMMARY, CandidateProposalOutput(candidates=[_proposal(
+        _rule_evidence_id(db, incident_id),
+    )]))
+    original = model.complete
+    attempted = []
+
+    def complete(request, response_model):
+        assert not db.in_transaction()
+        attempted.append(response_model)
+        if response_model is ProposedHourlyRates:
+            error = AIModelTimeoutError if error_kind == "timeout" else AIModelContractError
+            raise error("synthetic failure")
+        return original(request, response_model)
+
+    model.complete = complete
+    report = _cycle(db, model)
+    assert (report.succeeded, report.errored) == (1, 0)
+    assert len(attempted) == 3
+    data = client_pg.get(f"/api/v1/incidents/{incident_id}").json()
+    assert data["status"] == "AWAITING_APPROVAL"
+    estimate = data["recommendations"][0]["ai_savings_estimate"]
+    assert estimate["status"] == "INVALID" and estimate["amount"] is None
+    assert estimate["reason"] == "MISSING_ESTIMATE"
+    candidate = incidents_repo.list_candidates(db, incident_id)[0]
+    assert candidate.status is CandidateStatus.EXECUTABLE
+    assert guardrails_repo.latest_for_candidate(db, candidate.candidate_id).result.value == "PASS"
+    assert _cycle(db, model).claimed == 0
+    assert len(attempted) == 3
+
+
+def test_savings_runs_after_all_guardrails(db, monkeypatch):
+    from ai.rate_estimator import invalid_estimate
+    from schemas.savings import SavingsReason
+
+    incident_id = _pending_incident(db)
+    evidence_id = _rule_evidence_id(db, incident_id)
+    incidents_repo.claim_agent_invocation(db, incident_id, started_at=datetime.now(UTC))
+    db.commit()
+    output = AgentGraphOutput(
+        invocation_status=AgentInvocationStatus.SUCCEEDED, summary_lines=list(SUMMARY.model_dump().values()),
+        candidates=[
+            RunbookCandidateDraft(
+                runbook_id=RunbookId.RUNBOOK_EC2_RIGHTSIZING, target_arn=EC2_ARN,
+                parameters={"target_instance_type": "t3.medium"}, evidence_ids=[evidence_id],
+            ),
+            RunbookCandidateDraft(
+                runbook_id=RunbookId.RUNBOOK_SG_DELETE_ISOLATED, target_arn=SG_ARN,
+                parameters={}, evidence_ids=[evidence_id],
+            ),
+        ],
+    )
+    seen = []
+    original_guard = workflows._guard_candidate
+
+    def guard(candidate, managed, backups):
+        assert not db.in_transaction()
+        assert candidate.ai_savings_estimate is None
+        outcome = original_guard(candidate, managed, backups)
+        seen.append(candidate.candidate_id)
+        return outcome
+
+    def estimate(candidate):
+        assert not db.in_transaction()
+        assert len(seen) == 2  # 다른 후보가 거절된 뒤에도 통과 후보만 보강한다.
+        assert candidate.candidate_id == seen[0]
+        return invalid_estimate(SavingsReason.MISSING_ESTIMATE)
+
+    monkeypatch.setattr(workflows, "_candidate_precheck", _passing_precheck)
+    monkeypatch.setattr(workflows, "_guard_candidate", guard)
+    outcome = workflows.record_agent_analysis(db, incident_id, output, savings_estimator=estimate)
+    assert (outcome.executable, outcome.rejected) == (1, 1)
+    candidates = {c.candidate_id: c for c in incidents_repo.list_candidates(db, incident_id)}
+    assert candidates[seen[0]].ai_savings_estimate["reason"] == "MISSING_ESTIMATE"
+    assert candidates[seen[1]].ai_savings_estimate is None
+
+
+def test_finops_claim_ceiling_explicitly_includes_followup_calls(monkeypatch):
+    from ai.agent import FINOPS_MODEL_CALLS
+    from ai.rate_estimator import SAVINGS_MODEL_CALLS
+    from config import Settings
+
+    assert FINOPS_MODEL_CALLS == 2
+    assert SAVINGS_MODEL_CALLS == 1
+    # SecOps가 3회여서 우연히 상한이 맞는 구현은 잡는다.
+    monkeypatch.setattr(agent_dispatcher, "SECOPS_MODEL_CALLS", 1)
+    settings = Settings(OPENAI_TIMEOUT_SECONDS=30, OPENAI_MAX_ATTEMPTS=3,
+                        OPENAI_MAX_RETRY_AFTER_SECONDS=60)
+    assert agent_dispatcher.stale_claim_ceiling_seconds(settings) == 630
+
+
+def test_graph_input_reads_the_rule_and_asset_evidence_rows(db):
+    """최상위 rule_evaluation은 RULE 근거에서, 자산 문맥은 ASSET 근거에서 (불변식 ⓐⓑ)."""
+    incident_id = _pending_incident(db)
+
+    graph_input = agent_dispatcher.build_graph_input(db, incident_id)
+
+    rule_evidence = next(
+        item for item in graph_input.evidences if item.evidence_type is EvidenceType.RULE
+    )
+    assert rule_evidence.content.evaluation == graph_input.rule_evaluation
+    assert graph_input.asset_context.arn == EC2_ARN
+    assert graph_input.asset_context.spec.instance_type == "t3.xlarge"
+    # ASSET 근거는 자산 문맥으로 이미 들어갔다 — 근거로도 실으면 같은 값이 두 번 간다
+    assert all(
+        item.evidence_type is not EvidenceType.ASSET for item in graph_input.evidences
+    )
+
+
+def test_graph_input_carries_the_cpu_numbers_when_the_run_has_metrics(db):
+    """METRIC 근거가 있으면 CPU 수치가 그래프 입력에 실린다 — 추천의 유일한 수치 근거다.
+
+    이 경로가 비면 모델이 받는 입력에 사용률이 **한 군데도** 없다. rule_evaluation은
+    판정 결과 한 줄이고(reason) 자산 문맥은 판정 표기만 담기 때문이다. 2026-09-10
+    게이트 예비 실행에서 같은 자산·같은 입력이 NO_PROPOSAL과 SUCCEEDED로 갈렸고,
+    모델이 요약 3줄에 "평균·최대 사용률은 입력에 없다"를 직접 적었다.
+    """
+    run = assets_repo.start_collection_run(
+        db, account_id=ACCOUNT, region=REGION,
+        mode="localstack", lookback_days=3, period_seconds=3600,
+    )
+    asset = assets_repo.upsert_asset(
+        db, arn=EC2_ARN, asset_type=AssetType.EC2, resource_id=INSTANCE_ID,
+        account_id=ACCOUNT, region=REGION, spec={"instance_type": "t3.xlarge"},
+        collection_run_id=run.collection_run_id,
+        collected_at=datetime.now(timezone.utc), state="running",
+    )
+    assets_repo.add_metric_summary(
+        db, asset_id=asset.asset_id, collection_run_id=run.collection_run_id,
+        summary=MetricSummaryContract(
+            cpu_datapoints=336, cpu_avg=4.9, cpu_max=7.2,
+            net_in_avg=1024.0, net_out_avg=512.0,
+        ),
+        window_start=datetime(2026, 8, 31, 9, 0, tzinfo=timezone.utc),
+        window_end=datetime(2026, 9, 2, 9, 0, tzinfo=timezone.utc),
+        collected_at=datetime.now(timezone.utc),
+    )
+    db.commit()
+    intake = FinOpsIncidentIntake.model_validate(
+        {
+            "asset_snapshot": {
+                "collection_run_id": run.collection_run_id, "asset": _ec2_asset()
+            },
+            "rule_evaluation": {
+                "asset_arn": EC2_ARN,
+                "collection_run_id": run.collection_run_id,
+                "evaluation_status": "COMPLETED",
+                "verdict": "COST_CANDIDATE",
+                "health_score": 4,
+                "skip_reason_code": None,
+                "reason": "3일 평균 CPU 4.9% — 다운사이징 후보",
+                "evaluated_at": EVALUATED_AT,
+            },
+        }
+    )
+    incident_id = incident_intake.create_incident_from_intake(db, intake).incident_id
+
+    graph_input = agent_dispatcher.build_graph_input(db, incident_id)
+
+    metric = next(
+        item for item in graph_input.evidences
+        if item.evidence_type is EvidenceType.METRIC
+    )
+    assert metric.content.summary.cpu_avg == 4.9
+    assert metric.content.summary.cpu_max == 7.2
+    assert metric.content.summary.cpu_datapoints == 336
+
+
+# ------------------------------------------------------------------------------
+# 계약 거부 — 계약이 Workflow 몫으로 못 박은 둘
+# ------------------------------------------------------------------------------
+
+
+def test_candidate_citing_evidence_outside_the_input_fails_the_whole_output(
+    db, precheck_pass
+):
+    incident_id = _pending_incident(db)
+
+    report = _cycle(
+        db,
+        _client(
+            SUMMARY,
+            CandidateProposalOutput(
+                candidates=[_proposal("2f0d2f2e-0000-4000-8000-000000000000")]
+            ),
+        ),
+    )
+
+    assert report.failed == 1
+    incident = incidents_repo.get_incident(db, incident_id)
+    db.refresh(incident)
+    assert incident.status is IncidentStatus.FAILED
+    assert incident.summary_lines == []
+    # 성한 후보만 골라 남기지 않는다 — 출력 전체가 FAILED다
+    assert incidents_repo.list_candidates(db, incident_id) == []
+
+
+def test_reviewed_risk_level_on_a_finops_output_is_rejected(db):
+    """FINOPS 출력에는 사후 위험도가 올 수 없다(계약 원칙 ⓑ).
+
+    그래프가 이 값을 채우는 경로는 없어(ai/agent.py _validate_output_contract) 검증기를
+    직접 부른다 — 통합 경로로는 만들 수 없는 입력이다.
+    """
+    incident_id = _pending_incident(db)
+    graph_input = agent_dispatcher.build_graph_input(db, incident_id)
+
+    violating = AgentGraphOutput(
+        invocation_status=AgentInvocationStatus.NO_PROPOSAL,
+        summary_lines=[SUMMARY.observation, SUMMARY.diagnosis, SUMMARY.rationale],
+        reviewed_risk_level=RiskLevel.HIGH,
+    )
+
+    verified = agent_dispatcher.verify_graph_output(graph_input, violating, incident_id)
+
+    assert verified.invocation_status is AgentInvocationStatus.FAILED
+    assert verified.summary_lines == []
+
+
+def test_evidence_subset_check_reads_the_input_not_the_incident(db):
+    """ⓐ의 기준은 그래프 입력에 실린 Evidence다 — ASSET 근거는 거기 없다."""
+    incident_id = _pending_incident(db)
+    graph_input = agent_dispatcher.build_graph_input(db, incident_id)
+    asset_evidence_id = next(
+        row.evidence_id
+        for row in incidents_repo.list_evidence(db, incident_id)
+        if row.evidence_type is EvidenceType.ASSET
+    )
+
+    citing_asset = AgentGraphOutput(
+        invocation_status=AgentInvocationStatus.SUCCEEDED,
+        summary_lines=[SUMMARY.observation, SUMMARY.diagnosis, SUMMARY.rationale],
+        candidates=[
+            RunbookCandidateDraft.model_validate(
+                {
+                    "runbook_id": "RUNBOOK_EC2_RIGHTSIZING",
+                    "target_arn": EC2_ARN,
+                    "parameters": {"target_instance_type": "t3.medium"},
+                    "evidence_ids": [asset_evidence_id],
+                }
+            )
+        ],
+    )
+
+    verified = agent_dispatcher.verify_graph_output(graph_input, citing_asset, incident_id)
+
+    assert verified.invocation_status is AgentInvocationStatus.FAILED
+
+
+# ------------------------------------------------------------------------------
+# 정책 — 카드가 결정한 처분
+# ------------------------------------------------------------------------------
+
+
+def test_no_proposal_closes_as_failed_with_an_empty_summary(db, client_pg):
+    """요약만 있고 후보가 0개인 것은 정상 종착이 아니라 분석 실패다."""
+    incident_id = _pending_incident(db)
+
+    model = _client(SUMMARY, CandidateProposalOutput(candidates=[]))
+    report = _cycle(db, model)
+    assert len(model.sent) == 2
+
+    assert report.no_proposal == 1
+    incident = incidents_repo.get_incident(db, incident_id)
+    db.refresh(incident)
+    assert incident.status is IncidentStatus.FAILED
+    assert incident.summary_lines == []
+    # 그래프 오류와 구분해 남긴다 — 결함 계측·감사가 그 둘을 갈라 봐야 한다
+    assert incident.agent_invocation_status is AgentInvocationStatus.NO_PROPOSAL
+    assert client_pg.get(f"/api/v1/incidents/{incident_id}").status_code == 200
+    assert client_pg.get("/api/v1/incidents").status_code == 200
+
+
+def test_all_candidates_rejected_closes_as_failed(db, monkeypatch):
+    """가드레일이 후보를 전부 거절하면 실행 가능한 제안이 0개다 — 같은 처분이다."""
+    monkeypatch.setattr(workflows, "_candidate_precheck", _failing_precheck)
+    incident_id = _pending_incident(db)
+    evidence_id = _rule_evidence_id(db, incident_id)
+
+    model = _client(SUMMARY, CandidateProposalOutput(candidates=[_proposal(evidence_id)]))
+    report = _cycle(db, model)
+    assert len(model.sent) == 2
+
+    assert report.succeeded == 1  # 그래프는 성공했다
+    incident = incidents_repo.get_incident(db, incident_id)
+    db.refresh(incident)
+    assert incident.status is IncidentStatus.FAILED
+    assert incident.summary_lines == []
+    candidates = incidents_repo.list_candidates(db, incident_id)
+    assert [c.status for c in candidates] == [CandidateStatus.REJECTED]
+    assert candidates[0].ai_savings_estimate is None
+    # 어느 단계가 왜 막았는지가 남아야 관제 화면이 "왜 사라졌나"를 답한다
+    evaluation = guardrails_repo.latest_for_candidate(db, candidates[0].candidate_id)
+    assert evaluation.failed_step is GuardrailStep.AWS_DRY_RUN
+    assert evaluation.steps[-1]["reason_code"] == (
+        PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND.value
+    )
+
+
+def test_dropped_summary_is_logged_for_no_proposal(db, caplog):
+    """인시던트에 안 쓰는 요약은 로그로 남긴다 — 후보 0개의 이유를 볼 자리가 그것뿐이다."""
+    incident_id = _pending_incident(db)
+
+    with caplog.at_level("INFO", logger="vigilantis.workflow"):
+        _cycle(db, _client(SUMMARY, CandidateProposalOutput(candidates=[])))
+
+    dropped = [r for r in caplog.records if r.msg == "agent_summary_dropped"]
+    assert len(dropped) == 1
+    assert dropped[0].incident_id == incident_id
+    assert dropped[0].summary_lines == [
+        SUMMARY.observation,
+        SUMMARY.diagnosis,
+        SUMMARY.rationale,
+    ]
+    # 로그로 남겼다고 인시던트에 쓰지는 않는다(조회 계약)
+    incident = incidents_repo.get_incident(db, incident_id)
+    db.refresh(incident)
+    assert incident.summary_lines == []
+
+
+def test_guardrails_run_outside_a_transaction(db, monkeypatch):
+    """④ AWS Dry-Run이 트랜잭션에 걸치면 AWS 응답·재시도 동안 커넥션이 묶인다."""
+    seen = []
+
+    def _spy(command, backup_loader=None):
+        seen.append(db.in_transaction())
+        return _passing_precheck(command)
+
+    monkeypatch.setattr(workflows, "_candidate_precheck", _spy)
+    incident_id = _pending_incident(db)
+    evidence_id = _rule_evidence_id(db, incident_id)
+
+    _cycle(
+        db, _client(SUMMARY, CandidateProposalOutput(candidates=[_proposal(evidence_id)]))
+    )
+
+    assert seen == [False]
+
+
+def test_graph_is_called_outside_a_transaction(db, monkeypatch, precheck_pass):
+    """모델 호출이 트랜잭션에 걸치면 커넥션 1개가 그 시간만큼 묶인다."""
+    seen = {}
+    real = agent_dispatcher.run_finops_graph
+
+    def _spy(graph_input, *, client):
+        seen["in_transaction"] = db.in_transaction()
+        return real(graph_input, client=client)
+
+    monkeypatch.setattr(agent_dispatcher, "run_finops_graph", _spy)
+    incident_id = _pending_incident(db)
+    evidence_id = _rule_evidence_id(db, incident_id)
+
+    _cycle(
+        db, _client(SUMMARY, CandidateProposalOutput(candidates=[_proposal(evidence_id)]))
+    )
+
+    assert seen["in_transaction"] is False
+
+
+def test_incident_updated_is_published_after_commit(db, precheck_pass):
+    incident_id = _pending_incident(db)
+    evidence_id = _rule_evidence_id(db, incident_id)
+    published = []
+
+    _cycle(
+        db,
+        _client(SUMMARY, CandidateProposalOutput(candidates=[_proposal(evidence_id)])),
+        publish=published.append,
+    )
+
+    assert [event.data.incident_id for event in published] == [incident_id]
+    incident = incidents_repo.get_incident(db, incident_id)
+    db.refresh(incident)
+    # occurred_at은 새 시각이 아니라 저장된 updated_at이다(realtime.incident_event)
+    assert published[0].occurred_at == incident.updated_at
+
+
+UNSTORABLE_SUMMARY = EvidenceSummaryOutput(observation="관측\x00", diagnosis="진단", rationale="근거")
+
+
+def test_output_with_unstorable_characters_closes_as_failed(db, precheck_pass):
+    """PostgreSQL이 담지 못하는 NUL은 거절이지 예외가 아니다.
+
+    막지 않으면 저장이 DataError로 터져 그 건이 ANALYZING·IN_PROGRESS에 남고, 회수를 거쳐
+    **같은 출력을 다시 받는다** — 모델 호출만 되풀이된다.
+
+    FinOps 후보 parameters에는 모델이 쓰는 문자열이 없어 이 경로로 NUL을 싣지 못한다 —
+    다운사이징 목표 타입은 그래프가 규칙으로 계산하고(#251), 나머지 FinOps 파라미터는
+    정수다. 모델이 쓰는 문자열 자리인 요약 줄로 확인한다.
+    """
+    incident_id = _pending_incident(db)
+    evidence_id = _rule_evidence_id(db, incident_id)
+
+    report = _cycle(
+        db,
+        _client(
+            UNSTORABLE_SUMMARY,
+            CandidateProposalOutput(candidates=[_proposal(evidence_id)]),
+        ),
+    )
+
+    assert (report.failed, report.errored) == (1, 0)
+    incident = incidents_repo.get_incident(db, incident_id)
+    db.refresh(incident)
+    assert incident.status is IncidentStatus.FAILED
+    assert incident.agent_invocation_status is AgentInvocationStatus.FAILED
+    assert incident.summary_lines == []
+    assert incidents_repo.list_candidates(db, incident_id) == []
+
+
+def test_unstorable_output_is_closed_beyond_the_reclaimer_s_reach(
+    db, precheck_pass, client_pg
+):
+    """회수가 되살릴 수 없어야 한다 — 되살아나면 같은 출력으로 모델 호출만 되풀이한다.
+
+    갇힌 IN_PROGRESS도 PENDING 스캔에는 안 잡히므로 `scanned == 0`만으로는 구분되지
+    않는다. 상한을 넘긴 시각을 심어 **회수 경로에 직접 걸어 본다.**
+    """
+    incident_id = _pending_incident(db)
+    evidence_id = _rule_evidence_id(db, incident_id)
+    _cycle(
+        db,
+        _client(
+            UNSTORABLE_SUMMARY,
+            CandidateProposalOutput(candidates=[_proposal(evidence_id)]),
+        ),
+    )
+    incident = incidents_repo.get_incident(db, incident_id)
+    db.refresh(incident)
+    assert incident.agent_invocation_status in AGENT_TERMINAL_STATUSES
+
+    ceiling = agent_dispatcher.stale_claim_ceiling_seconds()
+    incident.agent_invocation_started_at = datetime.now(timezone.utc) - timedelta(
+        seconds=ceiling + 60
+    )
+    db.commit()
+
+    again = agent_dispatcher.dispatch_pending_analysis(db, client=_client())
+
+    assert (again.scanned, again.reclaimed, again.errored) == (0, 0, 0)
+    assert client_pg.get(f"/api/v1/incidents/{incident_id}").status_code == 200
+
+
+# ------------------------------------------------------------------------------
+# 방어 — 손상·도달 불가 상태의 안전 동작
+# ------------------------------------------------------------------------------
+
+
+def test_stale_in_progress_claim_is_returned_to_pending(db):
+    incident_id = _pending_incident(db)
+    ceiling = agent_dispatcher.stale_claim_ceiling_seconds()
+    incidents_repo.claim_agent_invocation(
+        db,
+        incident_id,
+        started_at=datetime.now(timezone.utc) - timedelta(seconds=ceiling + 60),
+    )
+    db.commit()
+
+    report = agent_dispatcher.dispatch_pending_analysis(
+        db, client=_client(SUMMARY, CandidateProposalOutput(candidates=[]))
+    )
+
+    assert report.reclaimed == 1
+    # 같은 주기에서 곧바로 다시 집어 간다 — 회수가 스캔보다 앞선다
+    assert report.scanned == 1
+
+
+def test_a_claim_within_the_ceiling_is_left_alone(db):
+    incident_id = _pending_incident(db)
+    incidents_repo.claim_agent_invocation(
+        db, incident_id, started_at=datetime.now(timezone.utc)
+    )
+    db.commit()
+
+    report = agent_dispatcher.dispatch_pending_analysis(db, client=_client())
+
+    assert report.reclaimed == 0
+    assert report.scanned == 0  # IN_PROGRESS는 스캔 대상이 아니다
+    incident = incidents_repo.get_incident(db, incident_id)
+    db.refresh(incident)
+    assert incident.agent_invocation_status is AgentInvocationStatus.IN_PROGRESS
+
+
+def test_secops_without_collected_asset_finishes_as_input_failure(db):
+    """입력 불가는 모델 호출 없이 끝내며 위협의 초기 판정은 보존한다."""
+    incident_id = incident_intake.create_incident_from_intake(
+        db, _secops_intake()
+    ).incident_id
+
+    report = agent_dispatcher.dispatch_pending_analysis(db, client=_client())
+
+    assert (report.scanned, report.unsupported, report.claimed, report.failed) == (1, 0, 1, 1)
+    incident = incidents_repo.get_incident(db, incident_id)
+    db.refresh(incident)
+    assert incident.agent_invocation_status is AgentInvocationStatus.FAILED
+    assert incident.status is IncidentStatus.FAILED
+    assert incident.initial_risk_level is RiskLevel.HIGH
+
+
+NACL_ID = "acl-0abc123456789def0"
+NACL_ARN = f"arn:aws:ec2:{REGION}:{ACCOUNT}:network-acl/{NACL_ID}"
+
+
+def _pending_secops(db, *, medium=False):
+    from schemas.api.assets import RelationType
+
+    _seed_asset_row(db, arn=EC2_ARN, asset_type=AssetType.EC2,
+                    resource_id=INSTANCE_ID, spec={"instance_type": "t3.small"}, state="running")
+    _seed_asset_row(db, arn=NACL_ARN, asset_type=AssetType.NACL,
+                    resource_id=NACL_ID, spec={"is_default": False}, state=None)
+    asset = assets_repo.get_asset_by_arn(db, EC2_ARN)
+    assets_repo.replace_relationships(db, asset.asset_id,
+                                     [(RelationType.PROTECTED_BY, NACL_ARN)],
+                                     collection_run_id=asset.last_collection_run_id)
+    db.commit()
+    intake = _secops_intake()
+    if medium:
+        from schemas.api.incidents import ResponseMode
+        intake.initial_risk = intake.initial_risk.model_copy(update={
+            "initial_risk_level": RiskLevel.MEDIUM, "response_mode": ResponseMode.AGENT_WAIT,
+        })
+    return incident_intake.create_incident_from_intake(db, intake).incident_id
+
+
+def _secops_client(db, incident_id, *, candidates=True, **over):
+    evidence_id = incidents_repo.list_evidence(db, incident_id)[0].evidence_id
+    values = dict(runbook_id=RunbookId.RUNBOOK_NACL_ADD_DENY, target_arn=NACL_ARN,
+                  evidence_ids=[evidence_id], rule_number=100,
+                  cidr_block="203.0.113.10/32", protocol="tcp")
+    values.update(over)
+    return _client(
+        RiskReassessmentOutput(reviewed_risk_level=RiskLevel.HIGH),
+        SecOpsCandidateProposalOutput(candidates=[SecOpsProposedCandidate(**values)] if candidates else []),
+        EvidenceSummaryOutput(observation="300초 동안 SSH 실패 120회", diagnosis="SSH 공격 추정",
+                              rationale="출발지 차단 필요"),
+    )
+
+
+def test_secops_dispatch_stores_risk_candidates_wait_and_commit_event(db, client_pg, monkeypatch):
+    from schemas.api.incidents import ResponseMode
+
+    incident_id = _pending_secops(db, medium=True)
+    client = _secops_client(db, incident_id)
+    original_complete = client.complete
+    def complete(*args):
+        assert not db.in_transaction()
+        return original_complete(*args)
+    client.complete = complete
+    def precheck(command, backup_loader=None):
+        assert not db.in_transaction()
+        assert command.target_arn == NACL_ARN
+        return _passing_precheck(command)
+    monkeypatch.setattr(workflows, "_candidate_precheck", precheck)
+    commits = []
+    from sqlalchemy import event
+    event.listen(db, "after_commit", lambda session: commits.append(True))
+    published = []
+    def publish(envelope):
+        assert len(commits) == 3  # 회수 주기·선점·분석 결과 commit 뒤
+        published.append(envelope)
+    report = _cycle(db, client, publish)
+    assert (report.succeeded, report.failed, report.errored) == (1, 0, 0)
+    data = client_pg.get(f"/api/v1/incidents/{incident_id}").json()
+    assert data["status"] == "AWAITING_APPROVAL"
+    assert data["initial_risk_level"] == "MEDIUM"
+    assert data["reviewed_risk_level"] == "HIGH"
+    assert data["response_mode"] == ResponseMode.AGENT_WAIT.value
+    assert data["recommendations"][0]["target_arn"] == NACL_ARN
+    row = incidents_repo.get_incident(db, incident_id)
+    db.refresh(row)
+    assert row.initial_risk_reason_codes == ["RISK_SSH_BRUTEFORCE"]
+    assert (row.response_deadline_at - row.agent_wait_started_at).total_seconds() == 60
+    assert len(published) == 1
+    assert len(client.sent) == 3  # SecOps 본래 3호출뿐이며 단가 호출은 없다.
+    candidate = incidents_repo.list_candidates(db, incident_id)[0]
+    assert candidate.ai_savings_estimate is None
+    evaluation = guardrails_repo.latest_for_candidate(db, candidate.candidate_id)
+    assert len(evaluation.steps) == 4
+    assert _cycle(db, client).claimed == 0
+
+
+@pytest.mark.parametrize("kind", ["no_proposal", "rejected", "unknown_evidence", "broad_cidr", "nul"])
+def test_secops_non_executable_results_remain_readable(db, client_pg, monkeypatch, caplog, kind):
+    caplog.set_level("INFO", logger="workflows")
+    incident_id = _pending_secops(db)
+    monkeypatch.setattr(workflows, "_candidate_precheck", _failing_precheck)
+    over = {}
+    if kind == "unknown_evidence":
+        over["evidence_ids"] = ["unknown"]
+    if kind == "broad_cidr":
+        over["cidr_block"] = "203.0.113.0/24"
+    client = _secops_client(db, incident_id, candidates=kind != "no_proposal", **over)
+    if kind == "nul":
+        client._outputs[2] = EvidenceSummaryOutput(observation="bad\x00text",
+                                                   diagnosis="추정", rationale="차단")
+    report = _cycle(db, client)
+    assert report.errored == 0
+    data = client_pg.get(f"/api/v1/incidents/{incident_id}").json()
+    completed = kind in ("no_proposal", "rejected")
+    assert data["status"] == ("AWAITING_CLOSURE" if completed else "FAILED")
+    assert data["recommendations"] == []
+    assert data["initial_risk_level"] == "HIGH"
+    if completed:
+        assert len(data["summary_lines"]) == 3 and data["reviewed_risk_level"] == "HIGH"
+        dropped = [record for record in caplog.records if record.message == "agent_summary_dropped"]
+        assert dropped == []
+    else:
+        assert data["summary_lines"] == [] and data["reviewed_risk_level"] is None
+    expected_result = {"no_proposal": "NO_PROPOSAL", "rejected": "GUARDRAIL_REJECTED"}.get(kind, "FAILED")
+    assert data["analysis_result"]["status"] == expected_result
+    if kind == "rejected":
+        assert data["analysis_result"]["guardrail_rejections"] == [{
+            "runbook_id": "RUNBOOK_NACL_ADD_DENY", "failed_step": "AWS_DRY_RUN",
+            "reason_code": "PRECHECK_TARGET_NOT_FOUND",
+        }]
+    resolved = client_pg.post(f"/api/v1/incidents/{incident_id}/resolve", json={
+        "resolution": "NO_FURTHER_ACTION", "resolution_note": "서비스 밖에서 판단 후 종료",
+    })
+    assert resolved.status_code == 200
+    after = client_pg.get(f"/api/v1/incidents/{incident_id}").json()
+    assert after["status"] == "RESOLVED"
+    assert after["analysis_result"] == data["analysis_result"]
+    assert after["initial_risk_level"] == data["initial_risk_level"]
+    assert after["executions"] == []
+
+
+@pytest.mark.parametrize("status, expected", [
+    ("IN_PROGRESS", "ACTION_IN_PROGRESS"),
+    ("SUCCESS", "AWAITING_CLOSURE"),
+    ("ROLLED_BACK", "AWAITING_CLOSURE"),
+    ("FAILED", "FAILED"),
+])
+def test_secops_prior_execution_controls_state_and_input(db, client_pg, status, expected):
+    from db.repositories import executions as executions_repo
+    from schemas.api.actions import ExecutionStatus
+    from schemas.runbooks import TriggerSource
+
+    incident_id = _pending_secops(db)
+    execution = executions_repo.create_execution(
+        db, incident_id=incident_id, runbook_id=RunbookId.RUNBOOK_NACL_ADD_DENY,
+        target_arn=NACL_ARN, trigger_source=TriggerSource.PRE_MITIGATION_0_5S,
+    )
+    execution.status = ExecutionStatus(status)
+    row = incidents_repo.get_incident(db, incident_id)
+    # FAILED 실행만 남은 종료 대기는 현재 서비스가 만들지 않는 손상 상태다.
+    # 이 경우에도 실행 존재만으로 종료 대기를 유지하지 않는지 함께 확인한다.
+    row.status = (IncidentStatus.ACTION_IN_PROGRESS if status == "IN_PROGRESS"
+                  else IncidentStatus.AWAITING_CLOSURE)
+    db.commit()
+    graph_input = agent_dispatcher.build_graph_input(db, incident_id)
+    assert graph_input.isolation_execution.execution_id == execution.execution_id
+    assert graph_input.isolation_execution.status.value == status
+    client = _secops_client(db, incident_id, candidates=False)
+    report = _cycle(db, client)
+    assert report.errored == 0
+    data = client_pg.get(f"/api/v1/incidents/{incident_id}").json()
+    assert data["status"] == expected
+    assert len(data["executions"]) == 1
+    # 실행 실패와 분석 성공은 독립이다. 실행 실패를 정상화하지 않고 분석은 보존한다.
+    assert data["executions"][0]["status"] == status
+    assert data["analysis_result"]["status"] == "NO_PROPOSAL"
+    assert len(data["summary_lines"]) == 3 and data["reviewed_risk_level"] == "HIGH"
+
+
+def test_secops_claim_ceiling_covers_three_model_calls():
+    from config import Settings
+
+    settings = Settings(OPENAI_TIMEOUT_SECONDS=30, OPENAI_MAX_ATTEMPTS=3,
+                        OPENAI_MAX_RETRY_AFTER_SECONDS=60)
+    assert agent_dispatcher.stale_claim_ceiling_seconds(settings) == 630
+
+
+def test_secops_ssh_reaches_approval_through_localstack_guardrail(db, client_pg, monkeypatch):
+    """모델만 대역. 관계 NACL 후보가 실제 4단계 가드레일·DB·조회 API를 통과한다."""
+    import urllib.request
+    from services.aws.client import aws_client, endpoint_url, account_id
+
+    endpoint = endpoint_url()
+    if not endpoint:
+        pytest.skip("LocalStack 엔드포인트 미설정")
+    try:
+        with urllib.request.urlopen(f"{endpoint}/_localstack/health", timeout=2) as response:
+            assert response.status == 200
+    except OSError:
+        pytest.skip("LocalStack 미기동")
+
+    ec2 = aws_client("ec2", REGION)
+    account = account_id(REGION)
+    # **기본 VPC 안에 전용 NACL 만 만든다 — VPC 를 새로 만들지 않는다.** 격리가 필요한 단위는
+    # NACL 이고, VPC 를 만들면 대가만 따라온다: LocalStack 은 VPC 를 지울 때 그 VPC 의 기본
+    # NACL 을 남겨(실 AWS 는 함께 없앤다) 사라진 VPC 를 가리키는 자산이 수집에 쌓인다.
+    # (services/tests/test_execute_nacl_localstack.py `_default_vpc` 주석)
+    vpcs = ec2.describe_vpcs(Filters=[{"Name": "is-default", "Values": ["true"]}])["Vpcs"]
+    if not vpcs:
+        pytest.skip("기본 VPC 없음 — LocalStack 초기화 상태를 확인할 것")
+    nacl_id = None
+    try:
+        nacl_id = ec2.create_network_acl(VpcId=vpcs[0]["VpcId"])["NetworkAcl"]["NetworkAclId"]
+        module = sys.modules[__name__]
+        monkeypatch.setattr(module, "ACCOUNT", account)
+        monkeypatch.setattr(module, "EC2_ARN", f"arn:aws:ec2:{REGION}:{account}:instance/{INSTANCE_ID}")
+        monkeypatch.setattr(module, "NACL_ID", nacl_id)
+        monkeypatch.setattr(module, "NACL_ARN", f"arn:aws:ec2:{REGION}:{account}:network-acl/{nacl_id}")
+        incident_id = _pending_secops(db, medium=True)
+        report = _cycle(db, _secops_client(db, incident_id))
+        assert (report.succeeded, report.errored) == (1, 0)
+        data = client_pg.get(f"/api/v1/incidents/{incident_id}").json()
+        assert data["status"] == "AWAITING_APPROVAL"
+        assert data["recommendations"][0]["target_arn"] == NACL_ARN
+        candidate = incidents_repo.list_candidates(db, incident_id)[0]
+        evaluation = guardrails_repo.latest_for_candidate(db, candidate.candidate_id)
+        assert [step["result"] for step in evaluation.steps] == ["PASS"] * 4
+        # 분석·가드레일은 조치를 실행하지 않는다.
+        entries = ec2.describe_network_acls(NetworkAclIds=[nacl_id])["NetworkAcls"][0]["Entries"]
+        assert all(entry["RuleNumber"] != 100 for entry in entries)
+    finally:
+        if nacl_id:
+            ec2.delete_network_acl(NetworkAclId=nacl_id)
+
+
+def test_incident_claimed_by_another_scanner_is_skipped(db, monkeypatch):
+    _pending_incident(db)
+    monkeypatch.setattr(
+        incidents_repo, "claim_agent_invocation", lambda *a, **k: False
+    )
+
+    report = agent_dispatcher.dispatch_pending_analysis(db, client=_client())
+
+    assert (report.scanned, report.skipped, report.claimed) == (1, 1, 0)
+
+
+def test_missing_asset_evidence_closes_the_incident_as_failed(db):
+    """근거가 빠진 건은 다음 주기에도 결과가 같다 — PENDING으로 두면 영원히 반복한다."""
+    incident_id = _pending_incident(db)
+    asset_evidence = next(
+        row
+        for row in incidents_repo.list_evidence(db, incident_id)
+        if row.evidence_type is EvidenceType.ASSET
+    )
+    db.delete(asset_evidence)
+    db.commit()
+
+    report = agent_dispatcher.dispatch_pending_analysis(db, client=_client())
+
+    assert report.failed == 1
+    incident = incidents_repo.get_incident(db, incident_id)
+    db.refresh(incident)
+    assert incident.status is IncidentStatus.FAILED
+    assert incident.agent_invocation_status is AgentInvocationStatus.FAILED

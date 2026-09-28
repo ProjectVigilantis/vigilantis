@@ -1,0 +1,82 @@
+[
+  {
+    "case_id": "C01",
+    "golden_input": "evt_ssh_bruteforce_001.json",
+    "failed_count": 120,
+    "window_seconds": 300,
+    "host": "mock-ec2-C01",
+    "ai_evaluation": true
+  },
+  {
+    "case_id": "C02",
+    "golden_input": "evt_ssh_bruteforce_004.json",
+    "failed_count": 1000,
+    "window_seconds": 60,
+    "host": "mock-ec2-C02",
+    "ai_evaluation": true
+  },
+  {
+    "case_id": "C03",
+    "golden_input": "evt_ssh_bruteforce_005.json",
+    "failed_count": 120,
+    "window_seconds": 300,
+    "host": "mock-ec2-C03",
+    "ai_evaluation": true
+  },
+  {
+    "case_id": "C04",
+    "golden_input": "evt_ssh_bruteforce_006.json",
+    "failed_count": 60,
+    "window_seconds": 600,
+    "host": "mock-ec2-C04",
+    "ai_evaluation": true
+  },
+  {
+    "case_id": "C05",
+    "golden_input": "evt_ssh_bruteforce_007.json",
+    "failed_count": 5,
+    "window_seconds": 10,
+    "host": "mock-ec2-C05",
+    "ai_evaluation": true
+  },
+  {
+    "case_id": "C06",
+    "golden_input": "evt_ssh_bruteforce_002.json",
+    "failed_count": 5,
+    "window_seconds": 3600,
+    "host": "mock-ec2-C06",
+    "ai_evaluation": false
+  },
+  {
+    "case_id": "C07",
+    "golden_input": "evt_ssh_bruteforce_003.json",
+    "failed_count": 1,
+    "window_seconds": 1,
+    "host": "mock-ec2-C07",
+    "ai_evaluation": false
+  },
+  {
+    "case_id": "N01",
+    "ai_evaluation": false,
+    "selection": {
+      "host": "ncp-host-001",
+      "source_ip": "198.51.100.10",
+      "time_field": "source_time",
+      "start": "2026-08-28T06:29:15.000000Z",
+      "end": "2026-08-28T06:34:55.000000Z",
+      "bounds": "[start,end)"
+    }
+  },
+  {
+    "case_id": "N02",
+    "ai_evaluation": false,
+    "selection": {
+      "host": "ncp-host-001",
+      "source_ip": "198.51.100.10",
+      "time_field": "source_time",
+      "start": "2026-08-28T06:23:49.000000Z",
+      "end": "2026-08-28T06:34:09.000000Z",
+      "bounds": "[start,end)"
+    }
+  }
+]

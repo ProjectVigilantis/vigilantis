@@ -15,8 +15,6 @@ import { CopyButton } from '@/components/copy-button';
 import { Row } from '@/components/detail-row';
 import {
   ActionExecuteDialog,
-  type ActionCandidate,
-  type ActionRequest,
   type ExecuteOutcome,
 } from '@/components/incidents/action-execute-dialog';
 import {
@@ -29,9 +27,12 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { useRealtime } from '@/components/realtime-provider';
+import type { ActionCandidate, ActionRequest } from '@/lib/action-request';
 import { agentWaitTimes, appendTransition, latchAgentWaitAt } from '@/lib/realtime-events';
 import { newIdempotencyKey } from '@/lib/api/client';
 import { isTerminalStatus } from '@/lib/execution-status';
+import { isResolvable } from '@/lib/incident-filter';
+import { proposalButtons } from '@/lib/proposal-buttons';
 import { RUNBOOK_LABELS, incidentTitle } from '@/lib/enum-labels';
 import { formatKst } from '@/lib/utils';
 import type { AssetItem, IncidentResponse, IsoDateTime, RunbookId } from '@/types/api';
@@ -237,10 +238,12 @@ function ExecutionsArea({
         ))}
       </ul>
 
-      {/* v1.6 종료 판단 — 선제 차단은 이미 일어난 일이고(§7.1) 관제자가 할 일은 "정당했나"다.
+      {/* v1.6 종료 판단 — 수행된 대응은 이미 일어난 일이고(§7.1) 관제자가 할 일은 "정당했나"다.
           구 `차단 유지`는 목록으로 돌아갈 뿐 아무 판단도 남기지 않았다(§4.5).
-          SECOPS이고 아직 종료되지 않은 건에만 둔다 — FINOPS는 선제 차단 개념이 없다. */}
-      {incident.category === 'SECOPS' && incident.status !== 'RESOLVED' ? (
+          노출 조건은 **서버가 종료를 받아 주는 상태**와 같다(RESOLVABLE_STATUSES) — 여기서 넓히면
+          409가 나고, 좁히면 그 상태가 막다른 길이 된다. FINOPS도 RIGHTSIZING 종료 판정으로
+          `AWAITING_CLOSURE`에 들어오므로 카테고리로 가르지 않는다(#240). */}
+      {isResolvable(incident.status) ? (
         <div className="flex justify-end pt-1">
           <Button type="button" variant="outline" size="sm" onClick={onCloseJudgement}>
             종료 판단
@@ -257,10 +260,12 @@ function ExecutionsArea({
  *
  * | 조건 | 버튼 |
  * | --- | --- |
- * | `recommendations ≥ 1` · FINOPS | `이 조치 실행` |
- * | `recommendations ≥ 1` · SECOPS | `승인하고 차단` |
- * | 〃 + `response_mode = AGENT_WAIT` | `승인하고 차단` `차단 안 함` — 실행 전 상태 |
+ * | `recommendations ≥ 1` | 후보 런북의 동작 계열로 정한 문구 — `proposalButtons` |
+ * | 〃 + 차단 계열 + `response_mode = AGENT_WAIT` | 실행 문구 옆에 `차단 안 함` — 실행 전 상태 |
  * | `recommendations = []` | 없음(조회 전용) |
+ *
+ * **문구의 축은 인시던트 분류가 아니라 후보 런북이다**(#363). 규칙 본문과 계열 표는
+ * `@/lib/proposal-buttons`에 있고 DSH-001 「AI 조치 제안」 카드가 같은 함수를 쓴다 — 여기에 복제하지 않는다.
  *
  * `status = ANALYZING`은 계약이 `recommendations`를 빈 배열로 강제하므로 자연히 버튼이 사라진다.
  * `ACTION_IN_PROGRESS`면 같은 Incident의 실행 버튼을 전부 비활성화한다.
@@ -270,19 +275,20 @@ function ExecutionsArea({
  */
 function ProposalActions({
   incident,
+  assets,
   locked,
   onExecute,
 }: {
   incident: IncidentResponse;
+  /** 제안의 `target_arn`을 조인해 승인 모달에 자산 사실값을 넘긴다(#183). */
+  assets: AssetItem[];
   locked: boolean;
   onExecute: (candidates: ActionCandidate[]) => void;
 }) {
   if (incident.recommendations.length === 0) return null;
 
-  const isSecOps = incident.category === 'SECOPS';
-  const approveLabel = isSecOps ? '승인하고 차단' : '이 조치 실행';
-  // 반려(`차단 안 함`)는 아직 실행되지 않은 AGENT_WAIT 상태에서만 의미가 있다(§4.5 B-Medium).
-  const canReject = isSecOps && incident.response_mode === 'AGENT_WAIT';
+  // 반려(`차단 안 함`)는 **차단 후보**가 아직 실행되지 않은 AGENT_WAIT 상태일 때만 의미가 있다(§4.5 B-Medium).
+  const { approveLabel, canReject } = proposalButtons(incident);
 
   return (
     <div className="flex flex-wrap items-center gap-3">
@@ -295,6 +301,7 @@ function ProposalActions({
               runbookId: r.runbook_id,
               targetArn: r.target_arn,
               displayParameters: r.display_parameters,
+              targetAsset: assets.find((a) => a.arn === r.target_arn) ?? null,
             })),
           )
         }
@@ -318,12 +325,16 @@ function ProposalActions({
 
 export function IncidentDetail({
   incident,
-  subject,
+  assets,
   openExecutionId = null,
 }: {
   incident: IncidentResponse;
-  /** `subject_arn` → `GET /assets`의 `arn` 조인 결과(§4.5). 조회 실패·미수집이면 null이다. */
-  subject: AssetItem | null;
+  /**
+   * `GET /assets`의 수집 목록. 조회가 실패하면 빈 배열이다 — 인시던트 화면은 그래도 떠야 한다.
+   * 두 곳이 조인해 쓴다: `subject_arn`(§4.5 대상 자산 블록)과 각 제안의 `target_arn`
+   * (§4.6 승인 모달 조치 대상, #183 A안).
+   */
+  assets: AssetItem[];
   /**
    * `?execution=<id>` 딥링크(§4.4 목록에서 실행한 경우). 자체 URL이 없는 ACT-002를
    * 부모 화면이 열어 준다 — `?asset=`(AST-002, #138)과 같은 방식이다.
@@ -332,6 +343,9 @@ export function IncidentDetail({
   openExecutionId?: string | null;
 }) {
   const router = useRouter();
+  // 조인은 목록에서 찾는 것뿐이라 props에서만 파생한다(하이드레이션 안전). 시연 규모(자산 약 22건)에서
+  // Map을 세울 이유가 없다 — 후보는 많아야 몇 건이다.
+  const subject = assets.find((a) => a.arn === incident.subject_arn) ?? null;
   // 모달 인스턴스 = 이 객체 하나. 열 때마다 새로 만들어 **멱등 키를 인스턴스에 고정**한다(§4.6).
   const [request, setRequest] = useState<ActionRequest | null>(null);
   /** ACT-001 C 종료 확인 모달(v1.6). 실행 모달과 동시에 뜨지 않게 별도 상태로 둔다. */
@@ -460,14 +474,31 @@ export function IncidentDetail({
   const subjectHref = subject ? `/assets?asset=${encodeURIComponent(subject.arn)}` : null;
 
   function openAction(candidates: ActionCandidate[]) {
-    setRequest({ idempotencyKey: newIdempotencyKey(), candidates, variant: 'ACTION' });
+    setRequest({
+      idempotencyKey: newIdempotencyKey(),
+      incidentId: incident.incident_id,
+      subjectArn: incident.subject_arn,
+      candidates,
+      variant: 'ACTION',
+    });
   }
 
   function openRecovery(runbookId: RunbookId, originExecutionId: string) {
+    // 복구 런북은 `available_recovery_runbook_ids`의 ID뿐이다 — 계약에 target·파라미터가 없다.
+    // EC2 계열 둘은 되돌릴 대상이 인시던트 자산과 같지만, `RUNBOOK_SG_RECREATE`는 삭제된 SG를
+    // 백업 레코드로만 가리켜(`SgRecreateParameters`) FE가 알 수 없다. 인시던트 자산이 EC2가 아닌
+    // 격리 해제(SG 개방 뒤 인스턴스를 격리한 건)도 같다. 모르는 것을 인시던트 자산으로 메우면
+    // 승인 화면이 틀린 사실을 근거로 내밀므로, 알 수 없으면 넘기지 않는다(자산 줄이 빠진다).
+    const recoveryAsset =
+      (runbookId === 'RUNBOOK_EC2_UNISOLATE' || runbookId === 'RUNBOOK_EC2_REVERT_SIZE') &&
+      subject?.asset_type === 'EC2'
+        ? subject
+        : null;
     setRequest({
       idempotencyKey: newIdempotencyKey(),
-      // 복구 런북은 `available_recovery_runbook_ids`의 ID뿐이다 — 계약에 target·파라미터가 없다.
-      candidates: [{ runbookId, targetArn: null, displayParameters: null }],
+      incidentId: incident.incident_id,
+      subjectArn: incident.subject_arn,
+      candidates: [{ runbookId, targetArn: null, displayParameters: null, targetAsset: recoveryAsset }],
       variant: 'RECOVERY',
       originExecutionId,
     });
@@ -549,6 +580,16 @@ export function IncidentDetail({
         <CloseIncidentDialog
           incident={incident}
           onClose={() => setClosing(false)}
+          // 종료 처리 성공 — 서버가 상태를 RESOLVED로 옮기고 남은 제안을 정리했다. 다시 읽는다.
+          onResolved={() => {
+            setClosing(false);
+            router.refresh();
+          }}
+          // 409 INCIDENT_NOT_RESOLVABLE·404 — 화면이 낡았다(§4.6 응답 처리).
+          onStale={() => {
+            setClosing(false);
+            router.refresh();
+          }}
           // `과잉이었다` → 종료하지 않고 해제 흐름으로. 되돌릴 실행이 여럿이면 첫 번째를 연다
           // — 계약이 복구를 **실행 항목별**로 매다는 구조라 인시던트 단위 해제가 없다(§4.5).
           onChooseRecovery={() => {
@@ -593,7 +634,7 @@ export function IncidentDetail({
         )}
       </Section>
 
-      <ProposalActions incident={incident} locked={locked} onExecute={openAction} />
+      <ProposalActions incident={incident} assets={assets} locked={locked} onExecute={openAction} />
 
       {/* ACT-002 — 실행 흐름은 여기서 끝난다. 위쪽 판단 근거·근거 데이터·제안 조치는 그대로 남는다(§4.7). */}
       {shownOutcome ? (
@@ -609,7 +650,6 @@ export function IncidentDetail({
       ) : null}
 
       <ActionExecuteDialog
-        incident={incident}
         request={request}
         onClose={() => setRequest(null)}
         onExecuted={(next) => {

@@ -193,10 +193,17 @@ def test_nacl_restore_passes_and_deletes_nothing(fx):
                 "egress": False,
                 "evidence_id": "ev-1",
             },
+            # add_probe_rule이 넣은 규칙의 fingerprint(ADR-0008 §5)
             backup_loader=backup(
                 target_arn,
                 ex.BACKUP_NACL_RULE_INDEX,
-                {"rule_number": PROBE_RULE, "egress": False},
+                {
+                    "rule_number": PROBE_RULE,
+                    "egress": False,
+                    "cidr_block": "203.0.113.5/32",
+                    "protocol": "-1",
+                    "rule_action": "deny",
+                },
             ),
         )
         entries = ec2.describe_network_acls(NetworkAclIds=[acl])["NetworkAcls"][0]["Entries"]

@@ -158,13 +158,23 @@ class _ErringClient:
 
 
 class _NaclBackupLoader:
-    """NACL_RESTORE의 백업 조회 — 대상·종류·rule index가 맞는 레코드를 돌려준다."""
+    """NACL_RESTORE의 백업 조회 — 대상·종류·rule index가 맞는 레코드를 돌려준다.
+
+    fingerprint 3항목까지 채운다 — 없으면 precheck가 AWS에 닿기 전에 판정 불가로
+    끝나(ADR-0008 §5) 이 테스트가 보려는 "경계를 지나갔다"를 증명하지 못한다.
+    """
 
     def get(self, backup_record_id):
         return None
 
     def latest_for_target(self, target_arn, backup_type, payload_match=None):
-        return ex.BackupRecordView("bk-1", target_arn, backup_type, dict(payload_match or {}))
+        payload = {
+            **dict(payload_match or {}),
+            "cidr_block": "203.0.113.5/32",
+            "protocol": "6",
+            "rule_action": "deny",
+        }
+        return ex.BackupRecordView("bk-1", target_arn, backup_type, payload)
 
 
 @pytest.mark.parametrize("runbook_id", sorted(CANDIDATES))

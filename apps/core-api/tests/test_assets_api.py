@@ -6,22 +6,64 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from schemas.api.assets import AssetType, RelationType
 from schemas.collections import CollectionRunStatus
 from schemas.rules import RuleEvaluationResult
 
+import routers.assets as assets_router
+from config import AwsSettings
 from db.repositories import assets as assets_repo
 
 NOW = datetime(2026, 8, 19, 6, 0, 0, tzinfo=timezone.utc)
 ACCOUNT = "123456789012"
+SEOUL = "ap-northeast-2"
 EC2_ARN = f"arn:aws:ec2:ap-northeast-2:{ACCOUNT}:instance/i-0aaa"
 SG_ARN = f"arn:aws:ec2:ap-northeast-2:{ACCOUNT}:security-group/sg-0bbb"
 NACL_ARN = f"arn:aws:ec2:ap-northeast-2:{ACCOUNT}:network-acl/acl-0ccc"
 
 
-def test_no_collection_history_returns_not_collected(client_pg):
+@pytest.fixture
+def set_regions(monkeypatch):
+    """관제 대상(설정) 리전을 테스트에서 고정한다 — #261 스코프. get_assets 가 부르는
+    routers.assets._configured_regions 를 대체해 AWS_REGIONS 환경설정에 의존하지 않는다."""
+
+    def _apply(*regions: str) -> None:
+        monkeypatch.setattr("routers.assets._configured_regions", lambda: list(regions))
+
+    return _apply
+
+
+def test_configured_regions_reads_aws_settings(monkeypatch):
+    """설정 → 라우터 배선을 여기서만 고정한다 — 다른 테스트는 _configured_regions 를
+    통째로 monkeypatch 하므로 이 한 줄(get_aws_settings().regions_list())을 안 지나간다.
+    regions_list 를 리네임하면 이 테스트만 잡는다(김세혁 #278 리뷰)."""
+    monkeypatch.setattr(
+        assets_router,
+        "get_aws_settings",
+        lambda: AwsSettings(_env_file=None, AWS_REGIONS="ap-northeast-2, us-east-1"),
+    )
+    assert assets_router._configured_regions() == ["ap-northeast-2", "us-east-1"]
+
+
+def test_no_configured_region_fails_loudly(monkeypatch):
+    """관제 범위가 비면 소리내어 실패한다 — 빈 목록으로 NOT_COLLECTED 를 주면 설정 오류가
+    '아직 수집 안 함'과 같아진다(services/aws/client.default_region() 과 같은 규약, 김세혁 #278)."""
+    monkeypatch.setattr(
+        assets_router,
+        "get_aws_settings",
+        lambda: AwsSettings(_env_file=None, AWS_REGION="", AWS_REGIONS=""),
+    )
+    with pytest.raises(RuntimeError, match="리전 해석 실패"):
+        assets_router._configured_regions()
+
+
+def test_no_collection_history_returns_not_collected(client_pg, set_regions):
+    set_regions(SEOUL)
     response = client_pg.get("/api/v1/assets")
     assert response.status_code == 200
     body = response.json()
@@ -101,7 +143,8 @@ def _seed(db):
     )
 
 
-def test_assets_assemble_latest_evaluation_and_relationships(client_pg, db):
+def test_assets_assemble_latest_evaluation_and_relationships(client_pg, db, set_regions):
+    set_regions(SEOUL)
     _seed(db)
     response = client_pg.get("/api/v1/assets")
     assert response.status_code == 200
@@ -134,7 +177,8 @@ def test_assets_assemble_latest_evaluation_and_relationships(client_pg, db):
     assert nacl["verdict"] is None and nacl["skip_reason_code"] is None
 
 
-def test_assets_use_latest_evaluation_when_multiple_runs(client_pg, db):
+def test_assets_use_latest_evaluation_when_multiple_runs(client_pg, db, set_regions):
+    set_regions(SEOUL)
     _seed(db)
     second = assets_repo.start_collection_run(
         db,
@@ -164,3 +208,302 @@ def test_assets_use_latest_evaluation_when_multiple_runs(client_pg, db):
     assert ec2["verdict"] == "SKIP"
     assert ec2["skip_reason_code"] == "SKIP_LOW_UTIL"
     assert ec2["health_score"] is None
+
+
+# --- #231: collection_status 를 리전별 최신 run 의 최악 상태로 산출 ---------------
+
+US_EAST = "us-east-1"
+
+
+def _run(db, region: str, status: CollectionRunStatus | None, started_at=None, finished_at=NOW):
+    """리전에 수집 실행을 1건 남긴다. status 를 주면 그 상태로 마감한다."""
+    run = assets_repo.start_collection_run(
+        db,
+        account_id=ACCOUNT,
+        region=region,
+        mode="localstack",
+        lookback_days=3,
+        period_seconds=3600,
+    )
+    if started_at is not None:
+        run.started_at = started_at
+    if status is not None:
+        assets_repo.finish_collection_run(
+            db,
+            collection_run_id=run.collection_run_id,
+            status=status,
+            finished_at=finished_at,
+        )
+    db.flush()
+    return run
+
+
+def test_failed_region_is_not_hidden_by_later_success(client_pg, db, set_regions):
+    """리전1 FAILED → 리전2 SUCCESS 순서. 전역 최신 1행만 보면 READY 로 실패가 사라졌다."""
+    set_regions(SEOUL, US_EAST)  # 두 리전 모두 관제 대상
+    _run(db, "ap-northeast-2", CollectionRunStatus.FAILED, started_at=NOW)
+    _run(db, US_EAST, CollectionRunStatus.SUCCESS, started_at=NOW + timedelta(minutes=1))
+
+    body = client_pg.get("/api/v1/assets").json()
+    assert body["collection_status"] == "FAILED"
+
+
+def test_failed_region_surfaces_regardless_of_order(client_pg, db, set_regions):
+    """반대 순서(SUCCESS 가 먼저)에서도 같은 답이어야 한다 — 순서에 의존하지 않는다."""
+    set_regions(SEOUL, US_EAST)
+    _run(db, "ap-northeast-2", CollectionRunStatus.SUCCESS, started_at=NOW)
+    _run(db, US_EAST, CollectionRunStatus.FAILED, started_at=NOW + timedelta(minutes=1))
+
+    body = client_pg.get("/api/v1/assets").json()
+    assert body["collection_status"] == "FAILED"
+
+
+def test_partial_region_outranks_success(client_pg, db, set_regions):
+    set_regions(SEOUL, US_EAST)
+    _run(db, "ap-northeast-2", CollectionRunStatus.PARTIAL, started_at=NOW)
+    _run(db, US_EAST, CollectionRunStatus.SUCCESS, started_at=NOW + timedelta(minutes=1))
+
+    body = client_pg.get("/api/v1/assets").json()
+    assert body["collection_status"] == "PARTIAL"
+
+
+def test_all_regions_success_is_ready(client_pg, db, set_regions):
+    set_regions(SEOUL, US_EAST)
+    _run(db, "ap-northeast-2", CollectionRunStatus.SUCCESS, started_at=NOW)
+    _run(db, US_EAST, CollectionRunStatus.SUCCESS, started_at=NOW + timedelta(minutes=1))
+
+    body = client_pg.get("/api/v1/assets").json()
+    assert body["collection_status"] == "READY"
+
+
+def test_only_latest_run_per_region_counts(client_pg, db, set_regions):
+    """같은 리전의 옛 FAILED 는 그 리전이 이후 성공하면 더는 화면을 잡지 않는다."""
+    set_regions(SEOUL, US_EAST)
+    _run(db, "ap-northeast-2", CollectionRunStatus.FAILED, started_at=NOW)
+    _run(db, "ap-northeast-2", CollectionRunStatus.SUCCESS, started_at=NOW + timedelta(minutes=5))
+    _run(db, US_EAST, CollectionRunStatus.SUCCESS, started_at=NOW + timedelta(minutes=6))
+
+    body = client_pg.get("/api/v1/assets").json()
+    assert body["collection_status"] == "READY"
+
+
+# --- #261: 세 필드를 설정 리전으로 함께 스코프 ---------------------------------
+
+
+def test_de_configured_region_failure_is_excluded(client_pg, db, set_regions):
+    """수집 대상에서 빠진 리전의 옛 FAILED 는 더 이상 집계되지 않는다. (#261 — #231 한계 해소)
+
+    US_EAST 를 관제 범위(설정 리전)에서 빼면 그 리전의 마지막 FAILED 가 collection_status 를
+    붙잡지 못한다. 남은 설정 리전(SEOUL)이 SUCCESS 라 READY 다.
+    """
+    set_regions(SEOUL)  # US_EAST 는 관제 대상에서 제외됨
+    _run(db, US_EAST, CollectionRunStatus.FAILED, started_at=NOW)
+    _run(db, SEOUL, CollectionRunStatus.SUCCESS, started_at=NOW + timedelta(minutes=1))
+
+    body = client_pg.get("/api/v1/assets").json()
+    assert body["collection_status"] == "READY"
+
+
+def test_configured_region_with_no_run_is_collecting(client_pg, db, set_regions):
+    """설정 리전 중 아직 run 이 없는 리전이 있으면 COLLECTING — 기존 리전 SUCCESS 만으로
+    READY 를 주지 않는다(안 본 리전이 있는데 준비됐다고 하지 않는다)."""
+    set_regions(SEOUL, US_EAST)
+    _run(db, SEOUL, CollectionRunStatus.SUCCESS, started_at=NOW)  # US_EAST 는 run 없음
+
+    body = client_pg.get("/api/v1/assets").json()
+    assert body["collection_status"] == "COLLECTING"
+
+
+def test_missing_region_does_not_mask_failure(client_pg, db, set_regions):
+    """아직 run 없는 설정 리전(COLLECTING 기여)이 있어도 다른 리전의 실제 FAILED 는
+    그대로 드러난다 — IN_PROGRESS 는 심각도상 FAILED 아래다(안성일 확정)."""
+    set_regions(SEOUL, US_EAST)
+    _run(db, SEOUL, CollectionRunStatus.FAILED, started_at=NOW)  # US_EAST 는 run 없음
+
+    body = client_pg.get("/api/v1/assets").json()
+    assert body["collection_status"] == "FAILED"
+
+
+def test_all_configured_regions_missing_is_not_collected(client_pg, db, set_regions):
+    """설정 리전 전체에 run 이 없으면 NOT_COLLECTED 유지 — 관제 밖 리전의 run 은
+    스코프에서 빠져 상태를 만들지 않는다(안성일 확정)."""
+    set_regions(SEOUL, US_EAST)
+    _run(db, "us-west-2", CollectionRunStatus.SUCCESS, started_at=NOW)  # 관제 밖 리전
+
+    body = client_pg.get("/api/v1/assets").json()
+    assert body["collection_status"] == "NOT_COLLECTED"
+    assert body["items"] == []
+
+
+def _seed_ec2(db, region: str, suffix: str, finished_at=NOW) -> str:
+    run = _run(db, region, CollectionRunStatus.SUCCESS, started_at=NOW, finished_at=finished_at)
+    arn = f"arn:aws:ec2:{region}:{ACCOUNT}:instance/i-{suffix}"
+    assets_repo.upsert_asset(
+        db,
+        arn=arn,
+        asset_type=AssetType.EC2,
+        resource_id=f"i-{suffix}",
+        account_id=ACCOUNT,
+        region=region,
+        spec={"instance_type": "t3.micro", "availability_zone": f"{region}a"},
+        collection_run_id=run.collection_run_id,
+        collected_at=NOW,
+    )
+    return arn
+
+
+def test_items_scoped_to_configured_regions(client_pg, db, set_regions):
+    """items 도 설정 리전으로 좁혀진다 — collection_status 와 같은 스코프. 관제 밖 리전의
+    자산은 목록에서 사라진다(DB 삭제 아님)."""
+    set_regions(SEOUL)
+    seoul_arn = _seed_ec2(db, SEOUL, "0seoul")
+    east_arn = _seed_ec2(db, US_EAST, "0east")
+
+    body = client_pg.get("/api/v1/assets").json()
+    arns = {item["arn"] for item in body["items"]}
+    assert seoul_arn in arns
+    assert east_arn not in arns  # 관제 밖 리전 자산 제외
+
+
+def test_three_fields_share_configured_region_scope(client_pg, db, set_regions):
+    """세 필드(collection_status·items·last_collected_at)가 한 응답에서 모두 설정 리전
+    기준으로 산출된다 — 이 PR 의 핵심 계약. 제외 리전(US_EAST)의 종료 시각을 설정
+    리전보다 **늦게** 둬도 last_collected_at 이 그 늦은 시각을 집지 않아야 한다
+    (#278 안성일 요청 — #259 revert 를 부른 '응답 내 범위 불일치'의 정상 계약 사례)."""
+    set_regions(SEOUL)
+    seoul_finished = NOW + timedelta(minutes=1)   # 2026-08-19T06:01:00Z
+    east_finished = NOW + timedelta(hours=2)       # 2026-08-19T08:00:00Z — 더 늦음(제외 대상)
+    seoul_arn = _seed_ec2(db, SEOUL, "0seoul", finished_at=seoul_finished)
+    east_arn = _seed_ec2(db, US_EAST, "0east", finished_at=east_finished)
+
+    body = client_pg.get("/api/v1/assets").json()
+    # ① collection_status — 제외 리전 무시, SEOUL SUCCESS 만
+    assert body["collection_status"] == "READY"
+    # ② last_collected_at — SEOUL 종료 시각. US_EAST 의 더 늦은 08:00 을 집으면 실패
+    assert body["last_collected_at"] == "2026-08-19T06:01:00Z"
+    # ③ items — SEOUL 자산만, US_EAST 제외
+    arns = {item["arn"] for item in body["items"]}
+    assert arns == {seoul_arn} and east_arn not in arns
+
+
+# --- 순수 함수: 심각도 순서 (DB 불필요) ---
+
+
+class _Run:
+    def __init__(self, status):
+        self.status = status
+
+
+@pytest.mark.parametrize(
+    "statuses, expected",
+    [
+        ([CollectionRunStatus.SUCCESS, CollectionRunStatus.FAILED], CollectionRunStatus.FAILED),
+        ([CollectionRunStatus.SUCCESS, CollectionRunStatus.PARTIAL], CollectionRunStatus.PARTIAL),
+        ([CollectionRunStatus.PARTIAL, CollectionRunStatus.FAILED], CollectionRunStatus.FAILED),
+        # 아직 안 끝난 리전이 있으면 READY 로 확정하지 않는다
+        ([CollectionRunStatus.SUCCESS, CollectionRunStatus.IN_PROGRESS], CollectionRunStatus.IN_PROGRESS),
+        # 실패는 진행 중보다 위 — 늦게 보여줄 이유가 없다
+        ([CollectionRunStatus.IN_PROGRESS, CollectionRunStatus.FAILED], CollectionRunStatus.FAILED),
+        ([CollectionRunStatus.SUCCESS], CollectionRunStatus.SUCCESS),
+    ],
+)
+def test_worst_status_picks_the_worst(statuses, expected):
+    from routers.assets import _worst_status
+
+    assert _worst_status([_Run(s) for s in statuses]) == expected
+
+
+# --- uncollected: "원래 없다"와 "못 가져왔다"를 가른다 --------------------------
+#
+# 화면은 그 둘에 서로 다른 것을 해야 한다 — 앞은 정상이고 뒤는 조치 대상이다.
+# items 의 유형별 0건만으로는 구분이 서지 않아 봉투가 따로 싣는다.
+
+
+class _RunStub:
+    """_uncollected 는 error_summary·region 만 읽는다 — DB 없이 그 둘만 준다."""
+
+    def __init__(self, error_summary, region="ap-northeast-2"):
+        self.error_summary = error_summary
+        self.region = region
+
+
+def test_uncollected_maps_collector_labels_to_asset_types():
+    from routers.assets import _uncollected
+
+    got = _uncollected([
+        _RunStub('{"alb_target_groups":"InternalFailure","auto_scaling_groups":"AccessDenied"}')
+    ])
+
+    assert [(u.asset_type.value, u.reason_code) for u in got] == [
+        # AssetType 선언 순서로 고정 — 회차마다 뒤바뀌면 화면이 깜빡인다
+        ("AUTO_SCALING_GROUP", "AccessDenied"),
+        ("ALB_TARGET_GROUP", "InternalFailure"),
+    ]
+
+
+def test_uncollected_is_empty_without_failures():
+    from routers.assets import _uncollected
+
+    assert _uncollected([_RunStub(None), _RunStub("")]) == []
+
+
+def test_uncollected_skips_region_wide_failure():
+    """리전 전체 실패는 유형으로 펴지 않는다 — 전부를 못 본 것이고 status 가 FAILED 로 말한다.
+    유형 몇 개를 나열하면 화면이 '이것들만 문제'라고 잘못 말하게 된다."""
+    from routers.assets import _uncollected
+
+    assert _uncollected([_RunStub('{"collect_region":"EndpointConnectionError"}')]) == []
+
+
+def test_uncollected_ignores_unknown_label_instead_of_guessing(caplog):
+    """모르는 라벨이면 유형을 지어내지 않는다(fail-closed). 흡수 조회를 새로 더하고
+    UNOBSERVED_TYPES_BY_FAILURE 를 안 고친 경우이며, 경고로 드러낸다."""
+    from routers.assets import _uncollected
+
+    with caplog.at_level(logging.WARNING):
+        assert _uncollected([_RunStub('{"brand_new_collector":"AccessDenied"}')]) == []
+    assert "brand_new_collector" in caplog.text
+
+
+def test_uncollected_survives_unparsable_error_summary(caplog):
+    from routers.assets import _uncollected
+
+    with caplog.at_level(logging.WARNING):
+        assert _uncollected([_RunStub("not json at all")]) == []
+    assert "JSON" in caplog.text
+
+
+def test_uncollected_folds_same_type_across_regions():
+    """리전이 여럿이면 같은 유형이 여러 번 실패한다. 계약이 유형 중복을 금지하므로 서버가 접는다."""
+    from routers.assets import _uncollected
+
+    got = _uncollected([
+        _RunStub('{"alb_target_groups":"InternalFailure"}', region="ap-northeast-2"),
+        _RunStub('{"alb_target_groups":"AccessDenied"}', region=US_EAST),
+    ])
+
+    assert len(got) == 1
+    assert got[0].asset_type.value == "ALB_TARGET_GROUP"
+
+
+def test_partial_run_surfaces_uncollected_in_response(client_pg, db, set_regions):
+    """엔드투엔드: PARTIAL 회차의 error_summary 가 봉투의 uncollected 로 나온다."""
+    set_regions(SEOUL)
+    run = assets_repo.start_collection_run(
+        db, account_id=ACCOUNT, region=SEOUL, mode="localstack", lookback_days=3, period_seconds=3600
+    )
+    assets_repo.finish_collection_run(
+        db,
+        collection_run_id=run.collection_run_id,
+        status=CollectionRunStatus.PARTIAL,
+        finished_at=NOW,
+        error_summary='{"alb_target_groups":"InternalFailure"}',
+    )
+    db.commit()
+
+    body = client_pg.get("/api/v1/assets").json()
+
+    assert body["collection_status"] == "PARTIAL"
+    assert body["uncollected"] == [
+        {"asset_type": "ALB_TARGET_GROUP", "reason_code": "InternalFailure"}
+    ]

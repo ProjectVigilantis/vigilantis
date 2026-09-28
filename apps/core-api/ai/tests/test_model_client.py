@@ -77,26 +77,36 @@ class _FakeCompletions:
         return outcome
 
 
-def _completion(parsed, refusal=None, usage=(11, 7, 18), model="gpt-4o"):
+def _completion(parsed, refusal=None, usage=(11, 7, 18), model="gpt-5.6-luna", cached=None):
     message = SimpleNamespace(parsed=parsed, refusal=refusal)
     usage_obj = SimpleNamespace(
         prompt_tokens=usage[0], completion_tokens=usage[1], total_tokens=usage[2]
     )
+    if cached is not None:
+        usage_obj.prompt_tokens_details = SimpleNamespace(cached_tokens=cached)
     return SimpleNamespace(
         choices=[SimpleNamespace(message=message)], usage=usage_obj, model=model
     )
 
 
-def _client(results, max_attempts=3, max_retry_after_seconds=60.0):
+def _client(
+    results,
+    max_attempts=3,
+    max_retry_after_seconds=60.0,
+    temperature=None,
+    reasoning_effort=None,
+):
     completions = _FakeCompletions(results)
     sdk = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     client = OpenAIModelClient(
         client=sdk,
-        model="gpt-4o",
+        model="gpt-5.6-luna",
         timeout_seconds=1.0,
         max_attempts=max_attempts,
         retry_backoff_seconds=0.0,  # 테스트에서 실제로 대기하지 않는다
         max_retry_after_seconds=max_retry_after_seconds,
+        temperature=temperature,
+        reasoning_effort=reasoning_effort,
     )
     return client, completions
 
@@ -328,6 +338,189 @@ def test_sdk_debug_logs_are_silenced(caplog):
     assert not caplog.records
 
 
+# --- 캐시된 입력 토큰 (#237) ------------------------------------------------------
+# 캐시분은 prompt_tokens에 포함돼 오지만 단가가 다르다. 기록하지 않으면 계측이 낸
+# 비용이 실제 청구와 어긋나고, 반복 계측(같은 프롬프트 N회)과 실경로(인시던트마다
+# 다른 입력)의 비용을 구분해 말할 수 없다.
+
+
+def test_cached_prompt_tokens_are_recorded():
+    client, _ = _client([_completion(Answer(verdict="ok"), usage=(1200, 40, 1240), cached=1024)])
+
+    response = client.complete(_request(), Answer)
+
+    assert response.usage.prompt_tokens == 1200
+    assert response.usage.cached_prompt_tokens == 1024
+
+
+def test_missing_cache_details_fall_back_to_zero():
+    # 필드를 주지 않는 응답(구버전·타 제공자)에서도 서야 한다
+    client, _ = _client([_completion(Answer(verdict="ok"))])
+
+    assert client.complete(_request(), Answer).usage.cached_prompt_tokens == 0
+
+
+def test_cached_tokens_cannot_exceed_prompt_tokens():
+    # 캐시분이 입력보다 크면 비용이 음수가 된다 — 상한을 건다
+    client, _ = _client([_completion(Answer(verdict="ok"), usage=(100, 5, 105), cached=999)])
+
+    assert client.complete(_request(), Answer).usage.cached_prompt_tokens == 100
+
+
+# --- 실패 위상·usage 보존 (#237) --------------------------------------------------
+# 예외 클래스만으로는 실패가 왕복의 어느 자리에서 났는지 갈리지 않는다(계약 위반은
+# 요청·응답 양쪽에 쓰인다). 응답을 받은 실패는 토큰이 이미 발생했으므로 usage를
+# 예외에 실어 보존한다 — 버리면 계측 비용이 실제 청구보다 적게 잡힌다.
+
+
+def test_response_side_failures_carry_phase_and_usage():
+    client, _ = _client([_completion(None, refusal="거절", usage=(1200, 0, 1200), cached=1024)])
+
+    with pytest.raises(AIModelRejectedError) as excinfo:
+        client.complete(_request(), Answer)
+
+    assert excinfo.value.phase == "response"
+    assert excinfo.value.usage.prompt_tokens == 1200
+    assert excinfo.value.usage.cached_prompt_tokens == 1024
+
+
+def test_contract_failure_after_response_preserves_usage():
+    empty = SimpleNamespace(
+        choices=[],
+        usage=SimpleNamespace(prompt_tokens=900, completion_tokens=0, total_tokens=900),
+        model="gpt-5.6-luna",
+    )
+    client, _ = _client([empty])
+
+    with pytest.raises(AIModelContractError) as excinfo:
+        client.complete(_request(), Answer)
+
+    assert excinfo.value.phase == "response"
+    assert excinfo.value.usage.prompt_tokens == 900
+
+
+def test_transport_failures_carry_transport_phase():
+    client, _ = _client([APITimeoutError(_REQUEST)], max_attempts=1)
+
+    with pytest.raises(AIModelTimeoutError) as excinfo:
+        client.complete(_request(), Answer)
+
+    assert excinfo.value.phase == "transport"
+    assert excinfo.value.usage is None
+
+
+# --- 모델 동작 노브 (#237) --------------------------------------------------------
+# 켠 노브만 요청에 실려야 한다. 모델 계열마다 받는 파라미터가 달라(gpt-4o는
+# temperature, gpt-5 계열 추론 모델은 reasoning_effort) 안 쓰는 노브가 요청 본문에
+# 나타나면 그 호출 자체가 400으로 거절된다.
+
+
+@pytest.mark.parametrize(
+    ("temperature", "reasoning_effort", "expected"),
+    [
+        (None, None, {}),
+        # temperature=0은 falsy다 — 값의 참거짓이 아니라 None 여부로 갈라야 한다.
+        # 재현성 측정에서 가장 먼저 쓸 값이 0이라 이 칸이 비면 측정이 통째로 어긋난다
+        (0.0, None, {"temperature": 0.0}),
+        (None, "low", {"reasoning_effort": "low"}),
+        (0.2, "high", {"temperature": 0.2, "reasoning_effort": "high"}),
+    ],
+)
+def test_only_configured_model_params_reach_the_sdk(temperature, reasoning_effort, expected):
+    client, completions = _client(
+        [_completion(Answer(verdict="ok"))],
+        temperature=temperature,
+        reasoning_effort=reasoning_effort,
+    )
+
+    client.complete(_request(), Answer)
+
+    sent = completions.calls[0]
+    assert {k: sent[k] for k in ("temperature", "reasoning_effort") if k in sent} == expected
+
+
+def test_model_params_are_carried_into_retries():
+    # 재시도는 같은 호출의 재실행이다 — 1회차와 다른 파라미터로 가면 재현성 측정에서
+    # 같은 케이스가 두 설정으로 돈 셈이 된다
+    client, completions = _client(
+        [APITimeoutError(_REQUEST), _completion(Answer(verdict="ok"))],
+        max_attempts=2,
+        temperature=0.0,
+    )
+
+    client.complete(_request(), Answer)
+
+    assert [call["temperature"] for call in completions.calls] == [0.0, 0.0]
+
+
+def test_builder_carries_model_params_only_when_set():
+    from config import Settings
+
+    base = {
+        "DATABASE_URL": "postgresql+psycopg://t:t@localhost:5432/t",
+        "OPENAI_API_KEY": "sk-test",
+    }
+    # 명시 인자가 .env·환경변수보다 우선하므로 None 주입이 "미설정"을 재현한다
+    unset = build_openai_model_client(
+        Settings(**base, OPENAI_TEMPERATURE=None, OPENAI_REASONING_EFFORT=None)
+    )
+    tuned = build_openai_model_client(
+        Settings(**base, OPENAI_TEMPERATURE=0, OPENAI_REASONING_EFFORT="low")
+    )
+
+    assert unset._model_params == {}
+    assert tuned._model_params == {"temperature": 0.0, "reasoning_effort": "low"}
+
+
+def test_shipped_defaults_pair_the_reasoning_model_with_its_knob(monkeypatch):
+    from config import Settings
+
+    # 기본 모델과 노브는 한 쌍이다(#237 비교표) — 위 테스트는 None을 명시 주입해
+    # "미설정"을 재현하므로 기본값이 바뀌어도 통과한다. 출하되는 조합은 여기서 고정한다.
+    # 코드 기본값만 봐야 하므로 .env와 환경변수를 둘 다 끊는다(Settings는 env_file=".env")
+    for name in ("OPENAI_MODEL", "OPENAI_TEMPERATURE", "OPENAI_REASONING_EFFORT"):
+        monkeypatch.delenv(name, raising=False)
+    client = build_openai_model_client(
+        Settings(
+            _env_file=None,
+            DATABASE_URL="postgresql+psycopg://t:t@localhost:5432/t",
+            OPENAI_API_KEY="sk-test",
+        )
+    )
+
+    assert client._model == "gpt-5.6-luna"
+    assert client._model_params == {"reasoning_effort": "low"}
+
+
+def test_unset_reasoning_effort_carries_no_knob():
+    from config import Settings
+
+    # "unset"은 값이 아니라 "이 노브를 싣지 말라"는 표기다 — 기본값이 low라 끌 표기가
+    # 필요한데 빈 값은 Literal에 걸리고 "none"은 모델에게 실제로 보내는 값이다.
+    # Settings에서 None으로 접으므로 이 필드를 읽는 다른 곳(계측 도구의 열 이름)도
+    # 미설정과 똑같이 읽는다
+    settings = Settings(
+        _env_file=None,
+        DATABASE_URL="postgresql+psycopg://t:t@localhost:5432/t",
+        OPENAI_API_KEY="sk-test",
+        OPENAI_REASONING_EFFORT="unset",
+    )
+
+    assert settings.OPENAI_REASONING_EFFORT is None
+    assert build_openai_model_client(settings)._model_params == {}
+
+
+def test_unknown_reasoning_effort_is_rejected_at_startup():
+    from config import Settings
+
+    # 오타를 호출 시점 400이 아니라 기동 시점 검증 오류로 드러낸다
+    with pytest.raises(ValidationError):
+        Settings(
+            DATABASE_URL="postgresql+psycopg://t:t@localhost:5432/t",
+            OPENAI_REASONING_EFFORT="lowest",
+        )
+
+
 # --- 성공 경로 -------------------------------------------------------------------
 
 
@@ -337,7 +530,7 @@ def test_successful_call_returns_parsed_output_and_usage():
     response = client.complete(_request({"arn": INSTANCE_ARN}), Answer)
 
     assert response.output.verdict == "isolate"
-    assert response.model == "gpt-4o"
+    assert response.model == "gpt-5.6-luna"
     assert (response.usage.prompt_tokens, response.usage.total_tokens) == (11, 18)
     assert completions.calls[0]["response_format"] is Answer
     assert completions.calls[0]["timeout"] == 1.0
@@ -543,7 +736,7 @@ def test_refusal_is_rejected_not_parsed():
 
 
 def test_empty_choices_is_a_contract_error():
-    client, _ = _client([SimpleNamespace(choices=[], usage=None, model="gpt-4o")])
+    client, _ = _client([SimpleNamespace(choices=[], usage=None, model="gpt-5.6-luna")])
 
     with pytest.raises(AIModelContractError):
         client.complete(_request(), Answer)

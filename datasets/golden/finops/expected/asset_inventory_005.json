@@ -1,0 +1,51 @@
+{
+  "source": "finops/input/asset_inventory_005.json",
+  "contract": "packages/schemas/rules.py :: RuleEvaluationResult (부분집합)",
+  "excluded_fields": {
+    "collection_run_id": "실행 시점에 생성되는 런타임 값 — 정답 대조 대상 아님",
+    "evaluated_at": "실행 시점에 생성되는 런타임 값 — 정답 대조 대상 아님",
+    "health_score": "정수 변환은 run_rule_engine(rule_engine.py) 소관 — 골든셋은 evaluate_* 직접 호출이라 검증 범위 밖. SG 는 계약상 항상 null",
+    "reason": "사람이 읽는 자유 서술 — 문자열 대조 대상 아님"
+  },
+  "thresholds_at_authoring": {
+    "IDLE_CPU_AVG": 5.0,
+    "SPIKE_CPU_MAX": 40.0,
+    "MIN_DATAPOINTS": 48,
+    "note": "작성 시점의 apps/core-api/services/rule_engine.py 상수. 값이 바뀌면 tests/test_golden_dataset.py 가 실패하므로 본 정답을 함께 갱신할 것 (ADR-0006 임계값 결합 원칙)"
+  },
+  "design_note": "이 파일의 목적은 판정이 아니라 **관계**다 — 토폴로지 뷰(#146)가 그릴 노드 4종(NACL·Launch Template·ASG·ALB Target Group)을 골든에 처음 넣는다(#271 ③ · 설계서 §대조 8번). 판정 축은 A1~A16 과 E1~E8 이 이미 덮으므로 여기서는 중복해서 세우지 않는다. 정답이 3건뿐인 것은 누락이 아니라 계약이다 — 나머지 4종은 판정 대상이 아니라(schemas/api/assets.py _RULE_TARGET_TYPES) 항상 NOT_APPLICABLE 이고, tests/golden_contract.py::judgement_free_list_fields() 가 그 면제를 계약에서 파생시켜 1:1 대조에서 뺀다(#271 ① / PR #270). ⚠️ 앵커 EC2 두 대는 **일부러 COST_CANDIDATE 가 아니게** 잡았다(cpu_avg 18.5 · 40.0 — 둘 다 IDLE_CPU_AVG 5.0 이상). 하나라도 후보가 되면 AI 정답지의 고정 세트가 6건에서 7건이 되어 tests/test_golden_ai_dataset.py 의 가드 2종이 깨진다(#234 / PR #303). 여기서 cpu_avg 를 낮추려면 expected_ai/ 정답지를 함께 만들어야 한다. 또한 EBS 1건을 함께 담아 ATTACHED_TO 를 닫는다 — #264 가 넣은 004 의 EBS 는 골든에 없는 EC2(i-0a1b2c3d4e5f00041)를 가리켜 이 관계가 서지 않았다.",
+  "evaluations": [
+    {
+      "case_id": "A17",
+      "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00051",
+      "purpose": "관계 앵커 A — subnet A 소속이라 NACL(PROTECTED_BY)이 붙고 ASG(MEMBER_OF)·SG(SECURED_BY)까지 3종을 파생시킨다. 판정은 부수적이다(cpu_avg 18.5 ≥ IDLE_CPU_AVG)",
+      "evaluation_status": "COMPLETED",
+      "verdict": "SKIP",
+      "skip_reason_code": "SKIP_ACTIVE"
+    },
+    {
+      "case_id": "A18",
+      "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00052",
+      "purpose": "관계 앵커 B — subnet B 라 NACL 이 붙지 않고, 대신 ALB TG(REGISTERED_IN)가 붙는다. A17 과 관계 집합이 달라야 파생 조건이 틀렸을 때 드러난다",
+      "evaluation_status": "COMPLETED",
+      "verdict": "SKIP",
+      "skip_reason_code": "SKIP_ACTIVE"
+    },
+    {
+      "case_id": "A19",
+      "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00051",
+      "purpose": "두 EC2 가 함께 참조하는 SG — SECURED_BY 의 대상. 부착됨·전체개방 없음이라 THREAT·UNUSED 어느 쪽도 아니다",
+      "evaluation_status": "COMPLETED",
+      "verdict": "SKIP",
+      "skip_reason_code": "SKIP_ACTIVE"
+    },
+    {
+      "case_id": "E9",
+      "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:volume/vol-0a1b2c3d4e5f00051",
+      "purpose": "A17 에 부착된 볼륨 — ATTACHED_TO 를 파생시키는 유일한 자리다. 004 의 EBS 는 i-0a1b2c3d4e5f00041 을 가리키는데 그 EC2 가 골든 어디에도 없어 이 관계는 지금껏 한 번도 파생된 적이 없다(관계는 같은 파일 안에서만 파생된다). 판정은 in-use 라 SKIP_ACTIVE — 삭제 후보가 아니다",
+      "evaluation_status": "COMPLETED",
+      "verdict": "SKIP",
+      "skip_reason_code": "SKIP_ACTIVE"
+    }
+  ]
+}

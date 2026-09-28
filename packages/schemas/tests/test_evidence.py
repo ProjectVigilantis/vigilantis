@@ -9,11 +9,31 @@ from pydantic import ValidationError
 
 from schemas.evidence import (
     EVIDENCE_CONTENT_MODELS,
+    DetectionAssetSnapshot,
     EvidenceItem,
     EvidenceType,
     RuleEvidence,
 )
 from schemas.rules import RuleEvaluationResult
+
+ASSET_CONTENT = {
+    "collection_run_id": "run-20260814-001",
+    "asset": {
+        "arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0123",
+        "resource_id": "i-0123",
+        "asset_type": "EC2",
+        "resource_role": "PRIMARY",
+        "account_id": "123456789012",
+        "region": "ap-northeast-2",
+        "state": "running",
+        "spec": {"instance_type": "t3.xlarge"},
+        "relationships": [],
+        "evaluation_status": "COMPLETED",
+        "health_score": 3,
+        "verdict": "COST_CANDIDATE",
+        "collected_at": "2026-08-14T09:00:00Z",
+    },
+}
 
 RULE_CONTENT = {
     "evaluation": {
@@ -45,8 +65,32 @@ def make_item(**over):
 
 
 def test_types_match_contract_exactly():
-    assert {t.value for t in EvidenceType} == {"METRIC", "RULE", "THREAT", "EXECUTION"}
+    assert {t.value for t in EvidenceType} == {"METRIC", "RULE", "THREAT", "EXECUTION", "ASSET"}
     assert set(EVIDENCE_CONTENT_MODELS) == set(EvidenceType)
+
+
+def test_asset_content_preserves_run_and_public_asset_item():
+    """판정 회차의 자산은 이 근거가 유일한 사본이다 — 자산 행은 회차마다 덮어써진다."""
+    item = EvidenceItem.model_validate(make_item(
+        evidence_type="ASSET", source_type="asset", source_id="run-20260814-001",
+        content=ASSET_CONTENT,
+    ))
+    assert isinstance(item.content, DetectionAssetSnapshot)
+    assert item.content.collection_run_id == "run-20260814-001"
+    assert item.content.asset.spec.instance_type == "t3.xlarge"
+    assert EvidenceItem.model_validate_json(item.model_dump_json()) == item
+
+
+@pytest.mark.parametrize("over", [
+    {"content": RULE_CONTENT},                                   # 유형↔content 불일치
+    {"content": dict(ASSET_CONTENT, collection_run_id="")},      # 회차 없음
+])
+def test_asset_content_rejects_bad_shape(over):
+    with pytest.raises(ValidationError):
+        EvidenceItem.model_validate(make_item(
+            evidence_type="ASSET", source_type="asset", source_id="run-20260814-001",
+            **over,
+        ))
 
 
 def test_rule_content_reuses_rule_evaluation_result():

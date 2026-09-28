@@ -6,6 +6,7 @@ import Link from 'next/link';
 
 import { CopyButton } from '@/components/copy-button';
 import { HealthArea, VerdictArea } from '@/components/assets/asset-card';
+import { CpuSparkline, NetworkSparkline } from '@/components/charts/sparkline';
 import { Row } from '@/components/detail-row';
 import { EnumBadge, StatusBadge } from '@/components/status-badge';
 import { Separator } from '@/components/ui/separator';
@@ -23,8 +24,16 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet';
+import { IDLE_CPU_AVG } from '@/lib/dashboard';
+import { cpuPointsFor, networkRowsFor } from '@/lib/metrics-chart';
+import { specValueView } from '@/lib/spec-value';
 import { formatKst } from '@/lib/utils';
-import type { AssetItem, IncidentListItem, OpenPortRule } from '@/types/api';
+import type {
+  AssetItem,
+  IncidentListItem,
+  MetricsTimeseriesResponse,
+  OpenPortRule,
+} from '@/types/api';
 
 /** `from_port`·`to_port`가 null이면 포트 지정 없이 전부 열린 규칙이다(계약: nullable). */
 function portRuleText(rule: OpenPortRule): string {
@@ -42,18 +51,18 @@ function isPortRule(value: unknown): value is OpenPortRule {
 }
 
 /**
- * spec 값 렌더. 계약의 spec 필드 타입이 유형마다 달라(문자열·수치·불리언·배열) 값 모양으로 가른다.
+ * spec 값 렌더. 계약의 spec 필드 타입이 유형마다 달라(문자열·수치·불리언·배열·Key→Value)
+ * **값 모양으로** 가른다 — 그 분기는 `lib/spec-value`가 정하고 여기서는 모양별 표기만 정한다.
  * `[]`는 `null`과 의미가 다르지만(3.3) 둘 다 화면에는 값이 없으므로 같은 `—`로 적는다.
  */
 function SpecValue({ value, threat }: { value: unknown; threat: boolean }) {
-  if (value === null || (Array.isArray(value) && value.length === 0)) {
-    return <span className="text-muted-foreground">{NO_VALUE}</span>;
-  }
-  if (typeof value === 'boolean') return <>{value ? '예' : '아니오'}</>;
-  if (Array.isArray(value)) {
+  const view = specValueView(value);
+  if (view.kind === 'EMPTY') return <span className="text-muted-foreground">{NO_VALUE}</span>;
+  if (view.kind === 'BOOLEAN') return <>{view.value ? '예' : '아니오'}</>;
+  if (view.kind === 'LIST') {
     return (
       <span className="flex flex-wrap justify-end gap-1">
-        {value.map((item, i) =>
+        {view.items.map((item, i) =>
           isPortRule(item) ? (
             <EnumBadge
               key={i}
@@ -68,7 +77,21 @@ function SpecValue({ value, threat }: { value: unknown; threat: boolean }) {
       </span>
     );
   }
-  return <span className={typeof value === 'number' ? 'tabular-nums' : undefined}>{String(value)}</span>;
+  // 태그(`tags`)처럼 Key→Value 로 오는 값. 키는 AWS가 준 철자 그대로라 mono 로 두고,
+  // 사람이 읽을 값과 색으로 가른다 — ACT-001 승인 모달의 `display_parameters` 줄과 같은 모양이다.
+  if (view.kind === 'MAP') {
+    return (
+      <span className="flex flex-col items-end gap-0.5">
+        {view.entries.map(([key, text]) => (
+          <span key={key} className="flex flex-wrap justify-end gap-1.5 text-xs">
+            <span className="text-muted-foreground font-mono break-all">{key}</span>
+            <span className="break-all">{text}</span>
+          </span>
+        ))}
+      </span>
+    );
+  }
+  return <span className={view.numeric ? 'tabular-nums' : undefined}>{view.text}</span>;
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
@@ -83,6 +106,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 export function AssetDetail({
   asset,
   incidents,
+  metrics,
   open,
   onOpenChange,
 }: {
@@ -94,10 +118,20 @@ export function AssetDetail({
   asset: AssetItem | null;
   /** 목록 API의 `subject_arn` 역조인 결과(§3.3). `null`은 조회 실패 — 0건과 구분한다. */
   incidents: IncidentListItem[] | null;
+  /**
+   * CloudWatch 시계열 3축(`GET /api/v1/metrics/timeseries`). **이 패널도 신규 페치를 하지
+   * 않는다**(§4.3) — 화면이 이미 받아 둔 응답에서 이 자산의 줄만 골라 그린다.
+   * `null`이면 조회 실패이고, 그때는 스파크라인 자리에 그 사실을 적는다.
+   */
+  metrics: MetricsTimeseriesResponse | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
   const state = asset ? assetStateEntry(asset) : null;
+  // 메트릭은 EC2 전용이다 — 계약상 SG·EBS 에는 이 곡선이 없다(있는 척하면 빈 차트가 결측처럼 읽힌다).
+  const showCharts = asset !== null && asset.asset_type === 'EC2';
+  const cpuPoints = showCharts && metrics ? cpuPointsFor(metrics.cpu, asset.arn) : null;
+  const networkRows = showCharts && metrics ? networkRowsFor(metrics.network, asset.arn) : null;
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -139,6 +173,35 @@ export function AssetDetail({
               </Row>
               <Row label="수집">{formatKst(asset.collected_at)}</Row>
             </div>
+
+            {/* CloudWatch 추이 — EC2 에만 있는 값이라 그 유형에서만 그린다.
+                판정(위) 바로 아래에 두는 이유: "저활성"이라는 판정을 그 근거인 곡선과 한
+                화면에서 대조해야 다운사이징 승인을 판단할 수 있다. */}
+            {showCharts ? (
+              <>
+                <Separator />
+                <div className="flex flex-col gap-4 p-4">
+                  <Section title={`CPU 추이 (저활성 임계 ${metrics?.cpu.idle_cpu_avg_threshold ?? IDLE_CPU_AVG}% 파선)`}>
+                    {metrics === null ? (
+                      <p className="text-muted-foreground text-xs">
+                        추이를 불러오지 못했습니다. 새로고침하면 다시 조회합니다.
+                      </p>
+                    ) : (
+                      <CpuSparkline points={cpuPoints} threshold={metrics.cpu.idle_cpu_avg_threshold} />
+                    )}
+                  </Section>
+                  <Section title="네트워크 추이 (수신·송신, 초당)">
+                    {metrics === null ? (
+                      <p className="text-muted-foreground text-xs">
+                        추이를 불러오지 못했습니다. 새로고침하면 다시 조회합니다.
+                      </p>
+                    ) : (
+                      <NetworkSparkline rows={networkRows} />
+                    )}
+                  </Section>
+                </div>
+              </>
+            ) : null}
 
             {/* NOT_APPLICABLE(NACL·ASG·LT·TG)은 Rule 판정 블록 전체를 숨긴다(§4.3 예외).
                 판정 사유 코드는 계약에 필드가 없어 verdict 배지만 표시한다(9장 #6). */}

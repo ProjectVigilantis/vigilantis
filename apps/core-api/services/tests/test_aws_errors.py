@@ -23,7 +23,9 @@ for p in (str(CORE_API), str(REPO_ROOT / "packages")):
 from schemas.precheck import PrecheckReasonCode  # noqa: E402
 from services.aws.errors import (  # noqa: E402
     DRY_RUN_SUCCESS_ERROR_CODE,
+    RETRYABLE_REASON_CODES,
     aws_error_code,
+    is_retryable,
     reason_code_for,
     run_dry_run,
 )
@@ -145,3 +147,36 @@ def test_dry_run_param_validation_error_is_param_invalid():
         raise ParamValidationError(report="Unknown parameter in input: DryRun")
 
     assert run_dry_run(operation, TargetGroupArn="arn:...") == R.PRECHECK_PARAM_INVALID
+
+
+# --- 판정 불가 재시도 대상 (Issue #249) ------------------------------------------
+
+
+def test_only_transient_aws_errors_are_retried():
+    """다시 물으면 답이 바뀔 수 있는 사유만 재시도한다 — 권한 거부·파라미터 오류는 같다."""
+    assert RETRYABLE_REASON_CODES == {R.PRECHECK_AWS_ERROR}
+    for code in set(R) - RETRYABLE_REASON_CODES:
+        assert not is_retryable(code), code
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ClientError(
+            {
+                "Error": {"Code": "RequestLimitExceeded"},
+                "ResponseMetadata": {"HTTPStatusCode": 503},
+            },
+            "DescribeInstanceStatus",
+        ),
+        EndpointConnectionError(endpoint_url="http://localhost:4566"),
+    ],
+)
+def test_throttling_and_transport_failures_are_retryable(exc):
+    """판정 불가의 대표 두 갈래 — 스로틀링과 접속 실패는 재시도 대상으로 분류된다."""
+    assert is_retryable(reason_code_for(exc))
+
+
+def test_denied_probe_is_not_retryable():
+    """권한 거부는 사람이 고치기 전에는 몇 번을 물어도 같다 — 곧바로 넘긴다."""
+    assert not is_retryable(reason_code_for(_client_error("UnauthorizedOperation")))

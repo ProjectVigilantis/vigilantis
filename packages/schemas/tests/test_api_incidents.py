@@ -7,7 +7,9 @@
 import pytest
 from pydantic import ValidationError
 
+from schemas.api.analysis import AnalysisResult, AnalysisResultStatus
 from schemas.api.incidents import (
+    ExecutionSummaryItem,
     IncidentCategory,
     IncidentListItem,
     IncidentResponse,
@@ -88,7 +90,8 @@ def make_finops_incident(**over):
 
 def test_enums_match_contract_exactly():
     assert {s.value for s in IncidentStatus} == {
-        "ANALYZING", "AWAITING_APPROVAL", "ACTION_IN_PROGRESS", "RESOLVED", "FAILED",
+        "ANALYZING", "AWAITING_APPROVAL", "ACTION_IN_PROGRESS",
+        "AWAITING_CLOSURE", "RESOLVED", "FAILED",
     }
     assert {c.value for c in IncidentCategory} == {"FINOPS", "SECOPS"}
     assert {r.value for r in RiskLevel} == {"HIGH", "MEDIUM", "LOW"}
@@ -131,6 +134,89 @@ def test_action_in_progress_valid():
     assert inc.status == IncidentStatus.ACTION_IN_PROGRESS
 
 
+# ---------------------------------------------------- 판정 불가 보류 (Issue #249)
+
+HOLD = {
+    "reason_code": "PRECHECK_AWS_ERROR",
+    "attempts": 5,
+    "first_failed_at": "2026-09-14T09:00:00Z",
+    "last_failed_at": "2026-09-14T09:04:00Z",
+}
+
+
+def make_execution_item(status, **over):
+    base = {
+        "execution_id": "exec-1",
+        "runbook_id": "RUNBOOK_EC2_RIGHTSIZING",
+        "status": status,
+        "available_recovery_runbook_ids": [],
+        "updated_at": "2026-09-14T09:04:00Z",
+    }
+    base.update(over)
+    return base
+
+
+def test_unverified_execution_requires_its_hold():
+    """무엇을 확인하지 못했는지가 관제자 판단의 근거다 — 기록 없는 UNVERIFIED는 오지 않는다."""
+    with pytest.raises(ValidationError):
+        ExecutionSummaryItem.model_validate(make_execution_item("UNVERIFIED"))
+
+    item = ExecutionSummaryItem.model_validate(
+        make_execution_item("UNVERIFIED", verification_hold=HOLD)
+    )
+
+    assert item.verification_hold.reason_code == "PRECHECK_AWS_ERROR"
+    assert '"2026-09-14T09:04:00Z"' in item.model_dump_json()
+
+
+@pytest.mark.parametrize("status", ["SUCCESS", "ROLLBACK_INITIATED"])
+def test_judged_execution_carries_no_hold(status):
+    """판정이 내려진 상태에 보류가 붙어 있으면 성공한 실행에 경고가 그려진다."""
+    with pytest.raises(ValidationError):
+        ExecutionSummaryItem.model_validate(
+            make_execution_item(status, verification_hold=HOLD)
+        )
+
+
+@pytest.mark.parametrize(
+    "status", ["IN_PROGRESS", "FAILED", "ROLLED_BACK", "ROLLBACK_FAILED"]
+)
+def test_hold_rides_on_retrying_or_handed_over_executions(status):
+    """재시도 중(IN_PROGRESS)·대조 전 멈춤(FAILED)·관제자 복구가 이어받은 원본은 기록을 싣는다."""
+    item = ExecutionSummaryItem.model_validate(
+        make_execution_item(status, verification_hold=HOLD)
+    )
+    assert item.verification_hold.attempts == 5
+
+
+@pytest.mark.parametrize("over", [
+    {"reason_code": "ARN_TARGET_NOT_MANAGED"},   # 다른 단계의 사유 코드
+    {"reason_code": "THROTTLED"},                # 등록되지 않은 코드
+    {"attempts": 0},
+    {"last_failed_at": "2026-09-14T08:59:59Z"},  # 처음보다 앞선 마지막 실패
+    {"detail": "조회 실패"},                      # extra 거부
+])
+def test_hold_contract_violations(over):
+    with pytest.raises(ValidationError):
+        ExecutionSummaryItem.model_validate(
+            make_execution_item("UNVERIFIED", verification_hold={**HOLD, **over})
+        )
+
+
+def test_unverified_execution_leaves_the_incident_failed_and_recoverable():
+    """UNVERIFIED는 종료 상태라 인시던트는 FAILED(흐름 진행 불가)로 서고 관제자 원복이 열린다."""
+    inc = IncidentResponse.model_validate(make_finops_incident(
+        status="FAILED",
+        recommendations=[],
+        executions=[make_execution_item(
+            "UNVERIFIED",
+            verification_hold=HOLD,
+            available_recovery_runbook_ids=["RUNBOOK_EC2_REVERT_SIZE"],
+        )],
+    ))
+    assert inc.executions[0].status.value == "UNVERIFIED"
+
+
 @pytest.mark.parametrize("runbook_id", sorted(AI_RECOMMENDABLE_RUNBOOK_IDS))
 def test_recommendations_accept_all_main_runbooks(runbook_id):
     item = RecommendationItem.model_validate({
@@ -169,6 +255,42 @@ def test_recommendations_reject_rollback_runbooks(runbook_id):
     {"unknown_field": 1},
 ])
 def test_incident_contract_violations(over):
+    with pytest.raises(ValidationError):
+        IncidentResponse.model_validate(make_secops_incident(**over))
+
+
+def test_awaiting_closure_valid_after_a_settled_execution():
+    """조치가 끝나고 종료 판단만 남은 자리 — 제안 없음 + 진행 중 실행 없음 + 실행 1건."""
+    inc = IncidentResponse.model_validate(
+        make_secops_incident(status="AWAITING_CLOSURE", recommendations=[])
+    )
+    assert inc.status == IncidentStatus.AWAITING_CLOSURE
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        # 제안이 남았으면 아직 승인 대기다 (v1.6 ⑤ — 남은 제안이 있으면 종료 불가)
+        {"status": "AWAITING_CLOSURE"},
+        # 수행된 조치가 없으면 판단할 것이 없다
+        {"status": "AWAITING_CLOSURE", "recommendations": [], "executions": []},
+        # 진행 중 실행이 있으면 조치가 끝나지 않았다
+        {
+            "status": "AWAITING_CLOSURE",
+            "recommendations": [],
+            "executions": [
+                {
+                    "execution_id": "exec-1",
+                    "runbook_id": "RUNBOOK_EC2_RIGHTSIZING",
+                    "status": "IN_PROGRESS",
+                    "available_recovery_runbook_ids": [],
+                    "updated_at": "2026-08-12T09:01:01Z",
+                }
+            ],
+        },
+    ],
+)
+def test_awaiting_closure_contract_violations(over):
     with pytest.raises(ValidationError):
         IncidentResponse.model_validate(make_secops_incident(**over))
 
@@ -225,8 +347,8 @@ def test_title_rejects_empty_string():
 
 LIST_ITEM_FIELDS = {
     "incident_id", "title", "subject_arn", "category", "status",
-    "initial_risk_level", "reviewed_risk_level", "response_mode",
-    "created_at", "updated_at",
+    "initial_risk_level", "reviewed_risk_level", "response_mode", "threat_context",
+    "analysis_result", "created_at", "updated_at",
 }
 
 
@@ -248,7 +370,7 @@ def make_list_item(**over):
 
 
 def test_list_item_is_exact_subset_of_detail():
-    # 부분집합 계약: 목록 10필드는 정확히 이 목록이고, 전부 상세 모델에도 존재한다
+    # 부분집합 계약: 목록은 LIST_ITEM_FIELDS와 같고, 전부 상세 모델에도 존재한다
     assert set(IncidentListItem.model_fields) == LIST_ITEM_FIELDS
     assert LIST_ITEM_FIELDS <= set(IncidentResponse.model_fields)
 
@@ -290,3 +412,150 @@ def test_list_envelope_rejects_bare_array_shape():
         IncidentsResponse.model_validate([make_list_item()])
     with pytest.raises(ValidationError):
         IncidentsResponse.model_validate({"items": [], "total": 0})
+
+
+# --- 위협 문맥 (Issue #362): 관측한 IP와 노출 CIDR은 다른 사실이다 ---
+
+@pytest.mark.parametrize("model,make", [
+    (IncidentResponse, make_secops_incident), (IncidentListItem, make_list_item),
+])
+@pytest.mark.parametrize("context", [
+    {"event_type": "SSH_BRUTE_FORCE", "source_ip": "203.0.113.10"},
+    {"event_type": "SSH_BRUTE_FORCE", "source_ip": "2001:db8::10"},
+    {"event_type": "OPEN_IP", "exposed_cidr": "0.0.0.0/0"},
+    {"event_type": "OPEN_IP", "exposed_cidr": "::/0"},
+])
+def test_threat_context_roundtrip(model, make, context):
+    dto = model.model_validate(make(threat_context=context))
+    assert dto.model_dump(mode="json")["threat_context"] == context
+    assert model.model_validate_json(dto.model_dump_json()) == dto
+
+
+@pytest.mark.parametrize("model,make", [
+    (IncidentResponse, make_secops_incident), (IncidentListItem, make_list_item),
+])
+@pytest.mark.parametrize("context", [
+    {},
+    {"event_type": "UNKNOWN", "source_ip": "203.0.113.10"},
+    {"event_type": "SSH_BRUTE_FORCE", "exposed_cidr": "0.0.0.0/0"},
+    {"event_type": "OPEN_IP", "source_ip": "203.0.113.10"},
+    {"event_type": "OPEN_IP", "source_cidr": "0.0.0.0/0"},
+    {"event_type": "SSH_BRUTE_FORCE", "source_ip": "not-an-ip"},
+    {"event_type": "SSH_BRUTE_FORCE", "source_ip": "203.0.113.10/32"},
+    {"event_type": "SSH_BRUTE_FORCE", "source_ip": 12345},
+    {"event_type": "OPEN_IP", "exposed_cidr": "0.0.0.0"},
+    {"event_type": "OPEN_IP", "exposed_cidr": "192.0.2.1/24"},
+    {"event_type": "OPEN_IP", "exposed_cidr": "::/129"},
+    {"event_type": "OPEN_IP", "exposed_cidr": "0.0.0.0/0", "source_ip": "203.0.113.10"},
+    [{"event_type": "SSH_BRUTE_FORCE", "source_ip": "203.0.113.10"}],
+])
+def test_threat_context_rejects_invalid_or_mixed_meanings(model, make, context):
+    with pytest.raises(ValidationError):
+        model.model_validate(make(threat_context=context))
+
+
+@pytest.mark.parametrize("model,make", [
+    (IncidentResponse, make_secops_incident), (IncidentListItem, make_list_item),
+])
+def test_missing_threat_context_is_explicit_null(model, make):
+    assert model.model_validate(make()).model_dump(mode="json")["threat_context"] is None
+
+
+@pytest.mark.parametrize("model", [IncidentResponse, IncidentListItem])
+@pytest.mark.parametrize("context", [
+    {"event_type": "SSH_BRUTE_FORCE", "source_ip": "203.0.113.10"},
+    {"event_type": "OPEN_IP", "exposed_cidr": "0.0.0.0/0"},
+])
+def test_finops_rejects_threat_context(model, context):
+    data = make_finops_incident(threat_context=context)
+    if model is IncidentListItem:
+        data = {key: value for key, value in data.items() if key in LIST_ITEM_FIELDS}
+    with pytest.raises(ValidationError, match="FINOPS는 threat_context가 null"):
+        model.model_validate(data)
+
+
+def test_public_threat_discriminator_covers_internal_event_types():
+    from schemas.events import ThreatEventType
+
+    schema = IncidentResponse.model_json_schema()
+    variants = schema["properties"]["threat_context"]["anyOf"][0]["discriminator"]["mapping"]
+    assert set(variants) == {item.value for item in ThreatEventType}
+
+
+@pytest.mark.parametrize("status", ["NO_PROPOSAL", "GUARDRAIL_REJECTED", "UNAVAILABLE"])
+def test_awaiting_closure_accepts_no_proposal_or_unavailable_analysis_without_execution(status):
+    data = make_secops_incident(
+        status="AWAITING_CLOSURE", recommendations=[], executions=[],
+        analysis_result={"status": status},
+    )
+    dto = IncidentResponse.model_validate(data)
+    assert dto.analysis_result.status.value == status
+    assert IncidentResponse.model_validate_json(dto.model_dump_json()) == dto
+
+
+@pytest.mark.parametrize("status", [
+    None, "PENDING", "IN_PROGRESS", "PROPOSALS_GENERATED", "FAILED",
+])
+def test_awaiting_closure_rejects_other_analysis_without_execution(status):
+    data = make_secops_incident(
+        status="AWAITING_CLOSURE", recommendations=[], executions=[],
+        analysis_result={"status": status} if status else None,
+    )
+    with pytest.raises(ValidationError, match="실행 이력 또는 SecOps 무제안·평가 기록 없음"):
+        IncidentResponse.model_validate(data)
+
+
+@pytest.mark.parametrize("model", [IncidentResponse, IncidentListItem])
+def test_finops_rejects_analysis_result(model):
+    data = make_finops_incident(analysis_result={"status": "NO_PROPOSAL"})
+    if model is IncidentListItem:
+        data = {key: value for key, value in data.items() if key in LIST_ITEM_FIELDS}
+    with pytest.raises(ValidationError, match="SECOPS 전용|FINOPS는 analysis_result"):
+        model.model_validate(data)
+
+
+def test_finops_rejects_no_further_action_resolution():
+    data = make_finops_incident(
+        status="RESOLVED", recommendations=[], resolution="NO_FURTHER_ACTION",
+        resolved_at="2026-08-12T09:01:03Z",
+    )
+    with pytest.raises(ValidationError, match="SECOPS 전용"):
+        IncidentResponse.model_validate(data)
+
+
+def test_resolution_note_requires_resolution():
+    with pytest.raises(ValidationError, match="종료 사유는 종료 판단과 함께"):
+        IncidentResponse.model_validate(make_secops_incident(resolution_note="별도 조치"))
+
+
+@pytest.mark.parametrize("status", list(AnalysisResultStatus))
+def test_analysis_result_roundtrip_and_default_rejections(status):
+    dto = AnalysisResult(status=status)
+    assert dto.model_dump(mode="json") == {"status": status.value, "guardrail_rejections": []}
+    assert AnalysisResult.model_validate_json(dto.model_dump_json()) == dto
+
+
+@pytest.mark.parametrize("reason_code", [None, "PRECHECK_AWS_ERROR"])
+def test_analysis_result_serializes_public_rejection(reason_code):
+    data = {"status": "GUARDRAIL_REJECTED", "guardrail_rejections": [{
+        "runbook_id": "RUNBOOK_NACL_ADD_DENY", "failed_step": "AWS_DRY_RUN",
+        "reason_code": reason_code,
+    }]}
+    assert AnalysisResult.model_validate(data).model_dump(mode="json") == data
+
+
+@pytest.mark.parametrize("over", [
+    {"runbook_id": "UNKNOWN"}, {"failed_step": "UNKNOWN"}, {"reason_code": "UNKNOWN"},
+    {"verification_summary": "internal AWS response"},
+])
+def test_analysis_result_rejects_invalid_or_internal_rejection_fields(over):
+    rejection = {"runbook_id": "RUNBOOK_NACL_ADD_DENY", "failed_step": "AWS_DRY_RUN"}
+    rejection.update(over)
+    with pytest.raises(ValidationError):
+        AnalysisResult.model_validate({"status": "GUARDRAIL_REJECTED", "guardrail_rejections": [rejection]})
+
+
+@pytest.mark.parametrize("data", [{"status": "UNKNOWN"}, {"status": "FAILED", "raw_response": "model output"}])
+def test_analysis_result_rejects_invalid_status_or_internal_fields(data):
+    with pytest.raises(ValidationError):
+        AnalysisResult.model_validate(data)

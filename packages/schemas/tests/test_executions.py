@@ -6,6 +6,8 @@ from pydantic import ValidationError
 from schemas.api.actions import ExecutionStatus
 from schemas.executions import (
     EXECUTION_NON_TERMINAL_STATUSES,
+    EXECUTION_RECOVERABLE_STATUSES,
+    EXECUTION_SETTLED_STATUSES,
     EXECUTION_TERMINAL_STATUSES,
     ExecutionEffect,
     ExecutionStepResult,
@@ -76,7 +78,7 @@ def test_contract_violations(over):
 
 
 def test_status_sets_partition_execution_status():
-    """두 집합이 ExecutionStatus 6종을 겹침 없이 정확히 나눈다."""
+    """두 집합이 ExecutionStatus 7종을 겹침 없이 정확히 나눈다."""
     assert not EXECUTION_NON_TERMINAL_STATUSES & EXECUTION_TERMINAL_STATUSES
     assert EXECUTION_NON_TERMINAL_STATUSES | EXECUTION_TERMINAL_STATUSES == set(ExecutionStatus)
 
@@ -86,3 +88,15 @@ def test_rollback_initiated_is_non_terminal():
     이 값이 종료 집합에 들어가면 Dispatcher 회수와 Incident RESOLVED 전이가 어긋난다."""
     assert ExecutionStatus.ROLLBACK_INITIATED in EXECUTION_NON_TERMINAL_STATUSES
     assert ExecutionStatus.ROLLBACK_FAILED in EXECUTION_TERMINAL_STATUSES
+
+
+def test_unverified_is_terminal_recoverable_but_not_settled():
+    """결과 확인 불가(Issue #249)는 자동 판정이 멈춘 자리다.
+
+    회수 스캔이 다시 집으면 안 되므로 종료이고, 자산이 바뀌었을 수 있는데 자동 원복은
+    하지 않았으므로 관제자 복구를 연다. 조치가 제 갈 데까지 간 것은 아니라 SETTLED가
+    아니다 — 넣으면 인시던트가 '종료 판단 대기'로 가서 확인할 것이 남은 건이 닫힌다.
+    """
+    assert ExecutionStatus.UNVERIFIED in EXECUTION_TERMINAL_STATUSES
+    assert ExecutionStatus.UNVERIFIED in EXECUTION_RECOVERABLE_STATUSES
+    assert ExecutionStatus.UNVERIFIED not in EXECUTION_SETTLED_STATUSES

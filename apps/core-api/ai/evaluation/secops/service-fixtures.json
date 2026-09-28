@@ -1,0 +1,1288 @@
+{
+  "description": "CI 전용 동결 원자료. 자산 적재와 모의 위협 접수를 거쳐 inputs.json의 독립된 기대 입력과 비교한다. 원본 변경 확인은 계측 CLI에서 수행한다.",
+  "cases": {
+    "C01": {
+      "inventory": {
+        "$schema": "../../schema/asset_inventory.schema.json",
+        "account_id": "123456789012",
+        "region": "ap-northeast-2",
+        "mode": "localstack",
+        "collected_at": "2026-08-19T06:00:00Z",
+        "lookback_days": 14,
+        "period_seconds": 3600,
+        "ec2_instances": [
+          {
+            "asset_type": "EC2",
+            "arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00001",
+            "instance_id": "i-0a1b2c3d4e5f00001",
+            "name": "golden-ec2-idle-boundary",
+            "instance_type": "t3.xlarge",
+            "state": "running",
+            "region": "ap-northeast-2",
+            "availability_zone": "ap-northeast-2a",
+            "vpc_id": "vpc-0a1b2c3d4e5f0f001",
+            "subnet_id": "subnet-0a1b2c3d4e5f0f001",
+            "private_ip": "10.0.1.11",
+            "launch_time": "2026-07-20T02:00:00Z",
+            "security_group_ids": [
+              "sg-0a1b2c3d4e5f00001"
+            ],
+            "tags": {
+              "Name": "golden-ec2-idle-boundary",
+              "Environment": "staging",
+              "Owner": "qa"
+            },
+            "metric_summary": {
+              "cpu_datapoints": 336,
+              "cpu_avg": 4.9,
+              "cpu_max": 10.0,
+              "net_in_avg": 1024.0,
+              "net_out_avg": 768.0
+            }
+          }
+        ],
+        "security_groups": [
+          {
+            "arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00001",
+            "region": "ap-northeast-2",
+            "description": null,
+            "vpc_id": null,
+            "attached": true,
+            "open_to_world": [],
+            "group_id": "sg-0a1b2c3d4e5f00001",
+            "name": null
+          }
+        ],
+        "nacls": [
+          {
+            "arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001",
+            "region": "ap-northeast-2",
+            "vpc_id": null,
+            "is_default": false,
+            "associated_subnet_ids": [
+              "subnet-0a1b2c3d4e5f0f001"
+            ],
+            "nacl_id": "acl-0a1b2c3d4e5f00001"
+          }
+        ]
+      },
+      "submission": {
+        "observation": {
+          "event_id": "evt-ssh-bruteforce-001",
+          "event_type": "SSH_BRUTE_FORCE",
+          "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00001",
+          "source_ip": "203.0.113.10",
+          "occurred_at": "2026-08-19T06:30:00Z",
+          "failed_attempt_count": 120,
+          "window_seconds": 300
+        },
+        "log_evidence": {
+          "version": 1,
+          "data_kind": "synthetic",
+          "coverage": "complete_generated_fixture",
+          "case_id": "C01",
+          "corpus_fingerprint": "2c3b65c39e096247799f0195c3436be80466b9ea7afd7597bd88d071d511310c",
+          "source_id": "aws-directory-service-password-example",
+          "source_fingerprint": "e0481279d9ffc11490f9317dd831912d782c054064e5b60f4cf596ea56b985aa",
+          "selection_policy": "ssh-observed-password-results-v1",
+          "excerpt_policy": "first_6_last_6",
+          "host": "mock-ec2-C01",
+          "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00001",
+          "mapping_kind": "explicit_mock_target",
+          "time_shift_seconds": 0,
+          "source_ip": "203.0.113.10",
+          "window_start": "2026-08-19T06:25:00Z",
+          "window_end": "2026-08-19T06:30:00Z",
+          "record_count": 200,
+          "failed_attempt_count": 120,
+          "accepted_count": 0,
+          "auxiliary_count": 80,
+          "records": [
+            {
+              "record_id": "C01-000001",
+              "source_time": "2026-08-19T06:25:01.249000Z",
+              "received_at": "2026-08-19T06:25:01.299000Z",
+              "host": "mock-ec2-C01",
+              "process_id": 10001,
+              "message": "Invalid user mock-user from 203.0.113.10 port 41000"
+            },
+            {
+              "record_id": "C01-000002",
+              "source_time": "2026-08-19T06:25:01.250000Z",
+              "received_at": "2026-08-19T06:25:01.300000Z",
+              "host": "mock-ec2-C01",
+              "process_id": 10001,
+              "message": "Failed password for invalid user mock-user from 203.0.113.10 port 41000 ssh2"
+            },
+            {
+              "record_id": "C01-000003",
+              "source_time": "2026-08-19T06:25:03.750000Z",
+              "received_at": "2026-08-19T06:25:03.800000Z",
+              "host": "mock-ec2-C01",
+              "process_id": 10001,
+              "message": "Failed password for invalid user mock-user from 203.0.113.10 port 41000 ssh2"
+            },
+            {
+              "record_id": "C01-000004",
+              "source_time": "2026-08-19T06:25:06.250000Z",
+              "received_at": "2026-08-19T06:25:06.300000Z",
+              "host": "mock-ec2-C01",
+              "process_id": 10001,
+              "message": "Failed password for invalid user mock-user from 203.0.113.10 port 41000 ssh2"
+            },
+            {
+              "record_id": "C01-000005",
+              "source_time": "2026-08-19T06:25:06.251000Z",
+              "received_at": "2026-08-19T06:25:06.301000Z",
+              "host": "mock-ec2-C01",
+              "process_id": 10001,
+              "message": "Connection closed by invalid user mock-user 203.0.113.10 port 41000 [preauth]"
+            },
+            {
+              "record_id": "C01-000006",
+              "source_time": "2026-08-19T06:25:08.749000Z",
+              "received_at": "2026-08-19T06:25:08.799000Z",
+              "host": "mock-ec2-C01",
+              "process_id": 10002,
+              "message": "Invalid user mock-user from 203.0.113.10 port 41001"
+            },
+            {
+              "record_id": "C01-000195",
+              "source_time": "2026-08-19T06:29:51.251000Z",
+              "received_at": "2026-08-19T06:29:51.301000Z",
+              "host": "mock-ec2-C01",
+              "process_id": 10039,
+              "message": "Connection closed by invalid user mock-user 203.0.113.10 port 41038 [preauth]"
+            },
+            {
+              "record_id": "C01-000196",
+              "source_time": "2026-08-19T06:29:53.749000Z",
+              "received_at": "2026-08-19T06:29:53.799000Z",
+              "host": "mock-ec2-C01",
+              "process_id": 10040,
+              "message": "Invalid user mock-user from 203.0.113.10 port 41039"
+            },
+            {
+              "record_id": "C01-000197",
+              "source_time": "2026-08-19T06:29:53.750000Z",
+              "received_at": "2026-08-19T06:29:53.800000Z",
+              "host": "mock-ec2-C01",
+              "process_id": 10040,
+              "message": "Failed password for invalid user mock-user from 203.0.113.10 port 41039 ssh2"
+            },
+            {
+              "record_id": "C01-000198",
+              "source_time": "2026-08-19T06:29:56.250000Z",
+              "received_at": "2026-08-19T06:29:56.300000Z",
+              "host": "mock-ec2-C01",
+              "process_id": 10040,
+              "message": "Failed password for invalid user mock-user from 203.0.113.10 port 41039 ssh2"
+            },
+            {
+              "record_id": "C01-000199",
+              "source_time": "2026-08-19T06:29:58.750000Z",
+              "received_at": "2026-08-19T06:29:58.800000Z",
+              "host": "mock-ec2-C01",
+              "process_id": 10040,
+              "message": "Failed password for invalid user mock-user from 203.0.113.10 port 41039 ssh2"
+            },
+            {
+              "record_id": "C01-000200",
+              "source_time": "2026-08-19T06:29:58.751000Z",
+              "received_at": "2026-08-19T06:29:58.801000Z",
+              "host": "mock-ec2-C01",
+              "process_id": 10040,
+              "message": "Connection closed by invalid user mock-user 203.0.113.10 port 41039 [preauth]"
+            }
+          ]
+        }
+      }
+    },
+    "C02": {
+      "inventory": {
+        "$schema": "../../schema/asset_inventory.schema.json",
+        "account_id": "123456789012",
+        "region": "ap-northeast-2",
+        "mode": "localstack",
+        "collected_at": "2026-08-20T06:00:00Z",
+        "lookback_days": 14,
+        "period_seconds": 3600,
+        "ec2_instances": [
+          {
+            "asset_type": "EC2",
+            "arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00012",
+            "instance_id": "i-0a1b2c3d4e5f00012",
+            "name": "golden-ec2-dp-boundary",
+            "instance_type": "t3.xlarge",
+            "state": "running",
+            "region": "ap-northeast-2",
+            "availability_zone": "ap-northeast-2c",
+            "vpc_id": "vpc-0a1b2c3d4e5f0f001",
+            "subnet_id": "subnet-0a1b2c3d4e5f0f002",
+            "private_ip": "10.0.2.22",
+            "launch_time": "2026-08-18T03:00:00Z",
+            "security_group_ids": [
+              "sg-0a1b2c3d4e5f00002"
+            ],
+            "tags": {
+              "Name": "golden-ec2-dp-boundary",
+              "Environment": "staging",
+              "Owner": "qa"
+            },
+            "metric_summary": {
+              "cpu_datapoints": 48,
+              "cpu_avg": 4.9,
+              "cpu_max": 10.0,
+              "net_in_avg": 1024.0,
+              "net_out_avg": 512.0
+            }
+          }
+        ],
+        "security_groups": [
+          {
+            "arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00002",
+            "region": "ap-northeast-2",
+            "description": null,
+            "vpc_id": null,
+            "attached": true,
+            "open_to_world": [],
+            "group_id": "sg-0a1b2c3d4e5f00002",
+            "name": null
+          }
+        ],
+        "nacls": [
+          {
+            "arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00002",
+            "region": "ap-northeast-2",
+            "vpc_id": null,
+            "is_default": false,
+            "associated_subnet_ids": [
+              "subnet-0a1b2c3d4e5f0f002"
+            ],
+            "nacl_id": "acl-0a1b2c3d4e5f00002"
+          }
+        ]
+      },
+      "submission": {
+        "observation": {
+          "event_id": "evt-ssh-bruteforce-004",
+          "event_type": "SSH_BRUTE_FORCE",
+          "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00012",
+          "source_ip": "203.0.113.55",
+          "occurred_at": "2026-08-20T06:50:00Z",
+          "failed_attempt_count": 1000,
+          "window_seconds": 60
+        },
+        "log_evidence": {
+          "version": 1,
+          "data_kind": "synthetic",
+          "coverage": "complete_generated_fixture",
+          "case_id": "C02",
+          "corpus_fingerprint": "412546fb5d787793f39425b724aa71bca12016b57fd728e4df7e5e20fc974aeb",
+          "source_id": "aws-directory-service-password-example",
+          "source_fingerprint": "e0481279d9ffc11490f9317dd831912d782c054064e5b60f4cf596ea56b985aa",
+          "selection_policy": "ssh-observed-password-results-v1",
+          "excerpt_policy": "first_6_last_6",
+          "host": "mock-ec2-C02",
+          "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00012",
+          "mapping_kind": "explicit_mock_target",
+          "time_shift_seconds": 0,
+          "source_ip": "203.0.113.55",
+          "window_start": "2026-08-20T06:49:00Z",
+          "window_end": "2026-08-20T06:50:00Z",
+          "record_count": 1668,
+          "failed_attempt_count": 1000,
+          "accepted_count": 0,
+          "auxiliary_count": 668,
+          "records": [
+            {
+              "record_id": "C02-000001",
+              "source_time": "2026-08-20T06:49:00.029000Z",
+              "received_at": "2026-08-20T06:49:00.079000Z",
+              "host": "mock-ec2-C02",
+              "process_id": 10001,
+              "message": "Invalid user mock-user from 203.0.113.55 port 41000"
+            },
+            {
+              "record_id": "C02-000002",
+              "source_time": "2026-08-20T06:49:00.030000Z",
+              "received_at": "2026-08-20T06:49:00.080000Z",
+              "host": "mock-ec2-C02",
+              "process_id": 10001,
+              "message": "Failed password for invalid user mock-user from 203.0.113.55 port 41000 ssh2"
+            },
+            {
+              "record_id": "C02-000003",
+              "source_time": "2026-08-20T06:49:00.090000Z",
+              "received_at": "2026-08-20T06:49:00.140000Z",
+              "host": "mock-ec2-C02",
+              "process_id": 10001,
+              "message": "Failed password for invalid user mock-user from 203.0.113.55 port 41000 ssh2"
+            },
+            {
+              "record_id": "C02-000004",
+              "source_time": "2026-08-20T06:49:00.150000Z",
+              "received_at": "2026-08-20T06:49:00.200000Z",
+              "host": "mock-ec2-C02",
+              "process_id": 10001,
+              "message": "Failed password for invalid user mock-user from 203.0.113.55 port 41000 ssh2"
+            },
+            {
+              "record_id": "C02-000005",
+              "source_time": "2026-08-20T06:49:00.151000Z",
+              "received_at": "2026-08-20T06:49:00.201000Z",
+              "host": "mock-ec2-C02",
+              "process_id": 10001,
+              "message": "Connection closed by invalid user mock-user 203.0.113.55 port 41000 [preauth]"
+            },
+            {
+              "record_id": "C02-000006",
+              "source_time": "2026-08-20T06:49:00.209000Z",
+              "received_at": "2026-08-20T06:49:00.259000Z",
+              "host": "mock-ec2-C02",
+              "process_id": 10002,
+              "message": "Invalid user mock-user from 203.0.113.55 port 41001"
+            },
+            {
+              "record_id": "C02-001663",
+              "source_time": "2026-08-20T06:49:59.850000Z",
+              "received_at": "2026-08-20T06:49:59.900000Z",
+              "host": "mock-ec2-C02",
+              "process_id": 10333,
+              "message": "Failed password for invalid user mock-user from 203.0.113.55 port 41332 ssh2"
+            },
+            {
+              "record_id": "C02-001664",
+              "source_time": "2026-08-20T06:49:59.910000Z",
+              "received_at": "2026-08-20T06:49:59.960000Z",
+              "host": "mock-ec2-C02",
+              "process_id": 10333,
+              "message": "Failed password for invalid user mock-user from 203.0.113.55 port 41332 ssh2"
+            },
+            {
+              "record_id": "C02-001665",
+              "source_time": "2026-08-20T06:49:59.911000Z",
+              "received_at": "2026-08-20T06:49:59.961000Z",
+              "host": "mock-ec2-C02",
+              "process_id": 10333,
+              "message": "Connection closed by invalid user mock-user 203.0.113.55 port 41332 [preauth]"
+            },
+            {
+              "record_id": "C02-001666",
+              "source_time": "2026-08-20T06:49:59.969000Z",
+              "received_at": "2026-08-20T06:50:00.019000Z",
+              "host": "mock-ec2-C02",
+              "process_id": 10334,
+              "message": "Invalid user mock-user from 203.0.113.55 port 41333"
+            },
+            {
+              "record_id": "C02-001667",
+              "source_time": "2026-08-20T06:49:59.970000Z",
+              "received_at": "2026-08-20T06:50:00.020000Z",
+              "host": "mock-ec2-C02",
+              "process_id": 10334,
+              "message": "Failed password for invalid user mock-user from 203.0.113.55 port 41333 ssh2"
+            },
+            {
+              "record_id": "C02-001668",
+              "source_time": "2026-08-20T06:49:59.971000Z",
+              "received_at": "2026-08-20T06:50:00.021000Z",
+              "host": "mock-ec2-C02",
+              "process_id": 10334,
+              "message": "Connection closed by invalid user mock-user 203.0.113.55 port 41333 [preauth]"
+            }
+          ]
+        }
+      }
+    },
+    "C03": {
+      "inventory": {
+        "$schema": "../../schema/asset_inventory.schema.json",
+        "account_id": "123456789012",
+        "region": "ap-northeast-2",
+        "mode": "localstack",
+        "collected_at": "2026-08-20T06:00:00Z",
+        "lookback_days": 14,
+        "period_seconds": 3600,
+        "ec2_instances": [
+          {
+            "asset_type": "EC2",
+            "arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00011",
+            "instance_id": "i-0a1b2c3d4e5f00011",
+            "name": "golden-ec2-billing-worker",
+            "instance_type": "t3.large",
+            "state": "running",
+            "region": "ap-northeast-2",
+            "availability_zone": "ap-northeast-2a",
+            "vpc_id": "vpc-0a1b2c3d4e5f0f001",
+            "subnet_id": "subnet-0a1b2c3d4e5f0f001",
+            "private_ip": "10.0.1.21",
+            "launch_time": "2026-06-30T01:00:00Z",
+            "security_group_ids": [
+              "sg-0a1b2c3d4e5f00001"
+            ],
+            "tags": {
+              "Name": "golden-ec2-billing-worker",
+              "Environment": "production",
+              "Owner": "qa"
+            },
+            "metric_summary": {
+              "cpu_datapoints": 336,
+              "cpu_avg": 1.0,
+              "cpu_max": 3.0,
+              "net_in_avg": 2048.0,
+              "net_out_avg": 1536.0
+            }
+          }
+        ],
+        "security_groups": [
+          {
+            "arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00001",
+            "region": "ap-northeast-2",
+            "description": null,
+            "vpc_id": null,
+            "attached": true,
+            "open_to_world": [],
+            "group_id": "sg-0a1b2c3d4e5f00001",
+            "name": null
+          }
+        ],
+        "nacls": [
+          {
+            "arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001",
+            "region": "ap-northeast-2",
+            "vpc_id": null,
+            "is_default": false,
+            "associated_subnet_ids": [
+              "subnet-0a1b2c3d4e5f0f001"
+            ],
+            "nacl_id": "acl-0a1b2c3d4e5f00001"
+          }
+        ]
+      },
+      "submission": {
+        "observation": {
+          "event_id": "evt-ssh-bruteforce-005",
+          "event_type": "SSH_BRUTE_FORCE",
+          "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00011",
+          "source_ip": "203.0.113.10",
+          "occurred_at": "2026-08-20T07:00:00Z",
+          "failed_attempt_count": 120,
+          "window_seconds": 300
+        },
+        "log_evidence": {
+          "version": 1,
+          "data_kind": "synthetic",
+          "coverage": "complete_generated_fixture",
+          "case_id": "C03",
+          "corpus_fingerprint": "61981412546c62841def65c7413d6c992d689332087d1c20e86cdec52678031d",
+          "source_id": "aws-directory-service-password-example",
+          "source_fingerprint": "e0481279d9ffc11490f9317dd831912d782c054064e5b60f4cf596ea56b985aa",
+          "selection_policy": "ssh-observed-password-results-v1",
+          "excerpt_policy": "first_6_last_6",
+          "host": "mock-ec2-C03",
+          "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00011",
+          "mapping_kind": "explicit_mock_target",
+          "time_shift_seconds": 0,
+          "source_ip": "203.0.113.10",
+          "window_start": "2026-08-20T06:55:00Z",
+          "window_end": "2026-08-20T07:00:00Z",
+          "record_count": 200,
+          "failed_attempt_count": 120,
+          "accepted_count": 0,
+          "auxiliary_count": 80,
+          "records": [
+            {
+              "record_id": "C03-000001",
+              "source_time": "2026-08-20T06:55:01.249000Z",
+              "received_at": "2026-08-20T06:55:01.299000Z",
+              "host": "mock-ec2-C03",
+              "process_id": 10001,
+              "message": "Invalid user mock-user from 203.0.113.10 port 41000"
+            },
+            {
+              "record_id": "C03-000002",
+              "source_time": "2026-08-20T06:55:01.250000Z",
+              "received_at": "2026-08-20T06:55:01.300000Z",
+              "host": "mock-ec2-C03",
+              "process_id": 10001,
+              "message": "Failed password for invalid user mock-user from 203.0.113.10 port 41000 ssh2"
+            },
+            {
+              "record_id": "C03-000003",
+              "source_time": "2026-08-20T06:55:03.750000Z",
+              "received_at": "2026-08-20T06:55:03.800000Z",
+              "host": "mock-ec2-C03",
+              "process_id": 10001,
+              "message": "Failed password for invalid user mock-user from 203.0.113.10 port 41000 ssh2"
+            },
+            {
+              "record_id": "C03-000004",
+              "source_time": "2026-08-20T06:55:06.250000Z",
+              "received_at": "2026-08-20T06:55:06.300000Z",
+              "host": "mock-ec2-C03",
+              "process_id": 10001,
+              "message": "Failed password for invalid user mock-user from 203.0.113.10 port 41000 ssh2"
+            },
+            {
+              "record_id": "C03-000005",
+              "source_time": "2026-08-20T06:55:06.251000Z",
+              "received_at": "2026-08-20T06:55:06.301000Z",
+              "host": "mock-ec2-C03",
+              "process_id": 10001,
+              "message": "Connection closed by invalid user mock-user 203.0.113.10 port 41000 [preauth]"
+            },
+            {
+              "record_id": "C03-000006",
+              "source_time": "2026-08-20T06:55:08.749000Z",
+              "received_at": "2026-08-20T06:55:08.799000Z",
+              "host": "mock-ec2-C03",
+              "process_id": 10002,
+              "message": "Invalid user mock-user from 203.0.113.10 port 41001"
+            },
+            {
+              "record_id": "C03-000195",
+              "source_time": "2026-08-20T06:59:51.251000Z",
+              "received_at": "2026-08-20T06:59:51.301000Z",
+              "host": "mock-ec2-C03",
+              "process_id": 10039,
+              "message": "Connection closed by invalid user mock-user 203.0.113.10 port 41038 [preauth]"
+            },
+            {
+              "record_id": "C03-000196",
+              "source_time": "2026-08-20T06:59:53.749000Z",
+              "received_at": "2026-08-20T06:59:53.799000Z",
+              "host": "mock-ec2-C03",
+              "process_id": 10040,
+              "message": "Invalid user mock-user from 203.0.113.10 port 41039"
+            },
+            {
+              "record_id": "C03-000197",
+              "source_time": "2026-08-20T06:59:53.750000Z",
+              "received_at": "2026-08-20T06:59:53.800000Z",
+              "host": "mock-ec2-C03",
+              "process_id": 10040,
+              "message": "Failed password for invalid user mock-user from 203.0.113.10 port 41039 ssh2"
+            },
+            {
+              "record_id": "C03-000198",
+              "source_time": "2026-08-20T06:59:56.250000Z",
+              "received_at": "2026-08-20T06:59:56.300000Z",
+              "host": "mock-ec2-C03",
+              "process_id": 10040,
+              "message": "Failed password for invalid user mock-user from 203.0.113.10 port 41039 ssh2"
+            },
+            {
+              "record_id": "C03-000199",
+              "source_time": "2026-08-20T06:59:58.750000Z",
+              "received_at": "2026-08-20T06:59:58.800000Z",
+              "host": "mock-ec2-C03",
+              "process_id": 10040,
+              "message": "Failed password for invalid user mock-user from 203.0.113.10 port 41039 ssh2"
+            },
+            {
+              "record_id": "C03-000200",
+              "source_time": "2026-08-20T06:59:58.751000Z",
+              "received_at": "2026-08-20T06:59:58.801000Z",
+              "host": "mock-ec2-C03",
+              "process_id": 10040,
+              "message": "Connection closed by invalid user mock-user 203.0.113.10 port 41039 [preauth]"
+            }
+          ]
+        }
+      }
+    },
+    "C04": {
+      "inventory": {
+        "$schema": "../../schema/asset_inventory.schema.json",
+        "account_id": "123456789012",
+        "region": "ap-northeast-2",
+        "mode": "localstack",
+        "collected_at": "2026-08-20T06:00:00Z",
+        "lookback_days": 14,
+        "period_seconds": 3600,
+        "ec2_instances": [
+          {
+            "asset_type": "EC2",
+            "arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00012",
+            "instance_id": "i-0a1b2c3d4e5f00012",
+            "name": "golden-ec2-dp-boundary",
+            "instance_type": "t3.xlarge",
+            "state": "running",
+            "region": "ap-northeast-2",
+            "availability_zone": "ap-northeast-2c",
+            "vpc_id": "vpc-0a1b2c3d4e5f0f001",
+            "subnet_id": "subnet-0a1b2c3d4e5f0f002",
+            "private_ip": "10.0.2.22",
+            "launch_time": "2026-08-18T03:00:00Z",
+            "security_group_ids": [
+              "sg-0a1b2c3d4e5f00002"
+            ],
+            "tags": {
+              "Name": "golden-ec2-dp-boundary",
+              "Environment": "staging",
+              "Owner": "qa"
+            },
+            "metric_summary": {
+              "cpu_datapoints": 48,
+              "cpu_avg": 4.9,
+              "cpu_max": 10.0,
+              "net_in_avg": 1024.0,
+              "net_out_avg": 512.0
+            }
+          }
+        ],
+        "security_groups": [
+          {
+            "arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00002",
+            "region": "ap-northeast-2",
+            "description": null,
+            "vpc_id": null,
+            "attached": true,
+            "open_to_world": [],
+            "group_id": "sg-0a1b2c3d4e5f00002",
+            "name": null
+          }
+        ],
+        "nacls": [
+          {
+            "arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00002",
+            "region": "ap-northeast-2",
+            "vpc_id": null,
+            "is_default": false,
+            "associated_subnet_ids": [
+              "subnet-0a1b2c3d4e5f0f002"
+            ],
+            "nacl_id": "acl-0a1b2c3d4e5f00002"
+          }
+        ]
+      },
+      "submission": {
+        "observation": {
+          "event_id": "evt-ssh-bruteforce-006",
+          "event_type": "SSH_BRUTE_FORCE",
+          "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00012",
+          "source_ip": "198.51.100.20",
+          "occurred_at": "2026-08-20T07:00:00Z",
+          "failed_attempt_count": 60,
+          "window_seconds": 600
+        },
+        "log_evidence": {
+          "version": 1,
+          "data_kind": "synthetic",
+          "coverage": "complete_generated_fixture",
+          "case_id": "C04",
+          "corpus_fingerprint": "a216ccc5975cd30e1a670154a9a23c13e19b157624007acaca5fea1d3722e49f",
+          "source_id": "aws-directory-service-password-example",
+          "source_fingerprint": "e0481279d9ffc11490f9317dd831912d782c054064e5b60f4cf596ea56b985aa",
+          "selection_policy": "ssh-observed-password-results-v1",
+          "excerpt_policy": "first_6_last_6",
+          "host": "mock-ec2-C04",
+          "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00012",
+          "mapping_kind": "explicit_mock_target",
+          "time_shift_seconds": 0,
+          "source_ip": "198.51.100.20",
+          "window_start": "2026-08-20T06:50:00Z",
+          "window_end": "2026-08-20T07:00:00Z",
+          "record_count": 100,
+          "failed_attempt_count": 60,
+          "accepted_count": 0,
+          "auxiliary_count": 40,
+          "records": [
+            {
+              "record_id": "C04-000001",
+              "source_time": "2026-08-20T06:50:04.999000Z",
+              "received_at": "2026-08-20T06:50:05.049000Z",
+              "host": "mock-ec2-C04",
+              "process_id": 10001,
+              "message": "Invalid user mock-user from 198.51.100.20 port 41000"
+            },
+            {
+              "record_id": "C04-000002",
+              "source_time": "2026-08-20T06:50:05Z",
+              "received_at": "2026-08-20T06:50:05.050000Z",
+              "host": "mock-ec2-C04",
+              "process_id": 10001,
+              "message": "Failed password for invalid user mock-user from 198.51.100.20 port 41000 ssh2"
+            },
+            {
+              "record_id": "C04-000003",
+              "source_time": "2026-08-20T06:50:15Z",
+              "received_at": "2026-08-20T06:50:15.050000Z",
+              "host": "mock-ec2-C04",
+              "process_id": 10001,
+              "message": "Failed password for invalid user mock-user from 198.51.100.20 port 41000 ssh2"
+            },
+            {
+              "record_id": "C04-000004",
+              "source_time": "2026-08-20T06:50:25Z",
+              "received_at": "2026-08-20T06:50:25.050000Z",
+              "host": "mock-ec2-C04",
+              "process_id": 10001,
+              "message": "Failed password for invalid user mock-user from 198.51.100.20 port 41000 ssh2"
+            },
+            {
+              "record_id": "C04-000005",
+              "source_time": "2026-08-20T06:50:25.001000Z",
+              "received_at": "2026-08-20T06:50:25.051000Z",
+              "host": "mock-ec2-C04",
+              "process_id": 10001,
+              "message": "Connection closed by invalid user mock-user 198.51.100.20 port 41000 [preauth]"
+            },
+            {
+              "record_id": "C04-000006",
+              "source_time": "2026-08-20T06:50:34.999000Z",
+              "received_at": "2026-08-20T06:50:35.049000Z",
+              "host": "mock-ec2-C04",
+              "process_id": 10002,
+              "message": "Invalid user mock-user from 198.51.100.20 port 41001"
+            },
+            {
+              "record_id": "C04-000095",
+              "source_time": "2026-08-20T06:59:25.001000Z",
+              "received_at": "2026-08-20T06:59:25.051000Z",
+              "host": "mock-ec2-C04",
+              "process_id": 10019,
+              "message": "Connection closed by invalid user mock-user 198.51.100.20 port 41018 [preauth]"
+            },
+            {
+              "record_id": "C04-000096",
+              "source_time": "2026-08-20T06:59:34.999000Z",
+              "received_at": "2026-08-20T06:59:35.049000Z",
+              "host": "mock-ec2-C04",
+              "process_id": 10020,
+              "message": "Invalid user mock-user from 198.51.100.20 port 41019"
+            },
+            {
+              "record_id": "C04-000097",
+              "source_time": "2026-08-20T06:59:35Z",
+              "received_at": "2026-08-20T06:59:35.050000Z",
+              "host": "mock-ec2-C04",
+              "process_id": 10020,
+              "message": "Failed password for invalid user mock-user from 198.51.100.20 port 41019 ssh2"
+            },
+            {
+              "record_id": "C04-000098",
+              "source_time": "2026-08-20T06:59:45Z",
+              "received_at": "2026-08-20T06:59:45.050000Z",
+              "host": "mock-ec2-C04",
+              "process_id": 10020,
+              "message": "Failed password for invalid user mock-user from 198.51.100.20 port 41019 ssh2"
+            },
+            {
+              "record_id": "C04-000099",
+              "source_time": "2026-08-20T06:59:55Z",
+              "received_at": "2026-08-20T06:59:55.050000Z",
+              "host": "mock-ec2-C04",
+              "process_id": 10020,
+              "message": "Failed password for invalid user mock-user from 198.51.100.20 port 41019 ssh2"
+            },
+            {
+              "record_id": "C04-000100",
+              "source_time": "2026-08-20T06:59:55.001000Z",
+              "received_at": "2026-08-20T06:59:55.051000Z",
+              "host": "mock-ec2-C04",
+              "process_id": 10020,
+              "message": "Connection closed by invalid user mock-user 198.51.100.20 port 41019 [preauth]"
+            }
+          ]
+        }
+      }
+    },
+    "C05": {
+      "inventory": {
+        "$schema": "../../schema/asset_inventory.schema.json",
+        "account_id": "123456789012",
+        "region": "ap-northeast-2",
+        "mode": "localstack",
+        "collected_at": "2026-08-19T06:00:00Z",
+        "lookback_days": 14,
+        "period_seconds": 3600,
+        "ec2_instances": [
+          {
+            "asset_type": "EC2",
+            "arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00002",
+            "instance_id": "i-0a1b2c3d4e5f00002",
+            "name": "golden-ec2-active-boundary",
+            "instance_type": "t3.large",
+            "state": "running",
+            "region": "ap-northeast-2",
+            "availability_zone": "ap-northeast-2a",
+            "vpc_id": "vpc-0a1b2c3d4e5f0f001",
+            "subnet_id": "subnet-0a1b2c3d4e5f0f001",
+            "private_ip": "10.0.1.12",
+            "launch_time": "2026-07-20T02:05:00Z",
+            "security_group_ids": [
+              "sg-0a1b2c3d4e5f00001"
+            ],
+            "tags": {
+              "Name": "golden-ec2-active-boundary",
+              "Environment": "staging",
+              "Owner": "qa"
+            },
+            "metric_summary": {
+              "cpu_datapoints": 336,
+              "cpu_avg": 5.0,
+              "cpu_max": 10.0,
+              "net_in_avg": 52428.0,
+              "net_out_avg": 41943.0
+            }
+          }
+        ],
+        "security_groups": [
+          {
+            "arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00001",
+            "region": "ap-northeast-2",
+            "description": null,
+            "vpc_id": null,
+            "attached": true,
+            "open_to_world": [],
+            "group_id": "sg-0a1b2c3d4e5f00001",
+            "name": null
+          }
+        ],
+        "nacls": [
+          {
+            "arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001",
+            "region": "ap-northeast-2",
+            "vpc_id": null,
+            "is_default": false,
+            "associated_subnet_ids": [
+              "subnet-0a1b2c3d4e5f0f001"
+            ],
+            "nacl_id": "acl-0a1b2c3d4e5f00001"
+          }
+        ]
+      },
+      "submission": {
+        "observation": {
+          "event_id": "evt-ssh-bruteforce-007",
+          "event_type": "SSH_BRUTE_FORCE",
+          "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00002",
+          "source_ip": "198.51.100.77",
+          "occurred_at": "2026-08-20T07:10:00Z",
+          "failed_attempt_count": 5,
+          "window_seconds": 10
+        },
+        "log_evidence": {
+          "version": 1,
+          "data_kind": "synthetic",
+          "coverage": "complete_generated_fixture",
+          "case_id": "C05",
+          "corpus_fingerprint": "7cb3895719e04067992604f858d17d12af7712aa0698a70fb183f6118cfe00b5",
+          "source_id": "aws-directory-service-password-example",
+          "source_fingerprint": "e0481279d9ffc11490f9317dd831912d782c054064e5b60f4cf596ea56b985aa",
+          "selection_policy": "ssh-observed-password-results-v1",
+          "excerpt_policy": "first_6_last_6",
+          "host": "mock-ec2-C05",
+          "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00002",
+          "mapping_kind": "explicit_mock_target",
+          "time_shift_seconds": 0,
+          "source_ip": "198.51.100.77",
+          "window_start": "2026-08-20T07:09:50Z",
+          "window_end": "2026-08-20T07:10:00Z",
+          "record_count": 9,
+          "failed_attempt_count": 5,
+          "accepted_count": 0,
+          "auxiliary_count": 4,
+          "records": [
+            {
+              "record_id": "C05-000001",
+              "source_time": "2026-08-20T07:09:50.999000Z",
+              "received_at": "2026-08-20T07:09:51.049000Z",
+              "host": "mock-ec2-C05",
+              "process_id": 10001,
+              "message": "Invalid user mock-user from 198.51.100.77 port 41000"
+            },
+            {
+              "record_id": "C05-000002",
+              "source_time": "2026-08-20T07:09:51Z",
+              "received_at": "2026-08-20T07:09:51.050000Z",
+              "host": "mock-ec2-C05",
+              "process_id": 10001,
+              "message": "Failed password for invalid user mock-user from 198.51.100.77 port 41000 ssh2"
+            },
+            {
+              "record_id": "C05-000003",
+              "source_time": "2026-08-20T07:09:53Z",
+              "received_at": "2026-08-20T07:09:53.050000Z",
+              "host": "mock-ec2-C05",
+              "process_id": 10001,
+              "message": "Failed password for invalid user mock-user from 198.51.100.77 port 41000 ssh2"
+            },
+            {
+              "record_id": "C05-000004",
+              "source_time": "2026-08-20T07:09:55Z",
+              "received_at": "2026-08-20T07:09:55.050000Z",
+              "host": "mock-ec2-C05",
+              "process_id": 10001,
+              "message": "Failed password for invalid user mock-user from 198.51.100.77 port 41000 ssh2"
+            },
+            {
+              "record_id": "C05-000005",
+              "source_time": "2026-08-20T07:09:55.001000Z",
+              "received_at": "2026-08-20T07:09:55.051000Z",
+              "host": "mock-ec2-C05",
+              "process_id": 10001,
+              "message": "Connection closed by invalid user mock-user 198.51.100.77 port 41000 [preauth]"
+            },
+            {
+              "record_id": "C05-000006",
+              "source_time": "2026-08-20T07:09:56.999000Z",
+              "received_at": "2026-08-20T07:09:57.049000Z",
+              "host": "mock-ec2-C05",
+              "process_id": 10002,
+              "message": "Invalid user mock-user from 198.51.100.77 port 41001"
+            },
+            {
+              "record_id": "C05-000007",
+              "source_time": "2026-08-20T07:09:57Z",
+              "received_at": "2026-08-20T07:09:57.050000Z",
+              "host": "mock-ec2-C05",
+              "process_id": 10002,
+              "message": "Failed password for invalid user mock-user from 198.51.100.77 port 41001 ssh2"
+            },
+            {
+              "record_id": "C05-000008",
+              "source_time": "2026-08-20T07:09:59Z",
+              "received_at": "2026-08-20T07:09:59.050000Z",
+              "host": "mock-ec2-C05",
+              "process_id": 10002,
+              "message": "Failed password for invalid user mock-user from 198.51.100.77 port 41001 ssh2"
+            },
+            {
+              "record_id": "C05-000009",
+              "source_time": "2026-08-20T07:09:59.001000Z",
+              "received_at": "2026-08-20T07:09:59.051000Z",
+              "host": "mock-ec2-C05",
+              "process_id": 10002,
+              "message": "Connection closed by invalid user mock-user 198.51.100.77 port 41001 [preauth]"
+            }
+          ]
+        }
+      }
+    },
+    "C06": {
+      "inventory": {
+        "$schema": "../../schema/asset_inventory.schema.json",
+        "account_id": "123456789012",
+        "region": "ap-northeast-2",
+        "mode": "localstack",
+        "collected_at": "2026-08-19T06:00:00Z",
+        "lookback_days": 14,
+        "period_seconds": 3600,
+        "ec2_instances": [
+          {
+            "asset_type": "EC2",
+            "arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00002",
+            "instance_id": "i-0a1b2c3d4e5f00002",
+            "name": "golden-ec2-active-boundary",
+            "instance_type": "t3.large",
+            "state": "running",
+            "region": "ap-northeast-2",
+            "availability_zone": "ap-northeast-2a",
+            "vpc_id": "vpc-0a1b2c3d4e5f0f001",
+            "subnet_id": "subnet-0a1b2c3d4e5f0f001",
+            "private_ip": "10.0.1.12",
+            "launch_time": "2026-07-20T02:05:00Z",
+            "security_group_ids": [
+              "sg-0a1b2c3d4e5f00001"
+            ],
+            "tags": {
+              "Name": "golden-ec2-active-boundary",
+              "Environment": "staging",
+              "Owner": "qa"
+            },
+            "metric_summary": {
+              "cpu_datapoints": 336,
+              "cpu_avg": 5.0,
+              "cpu_max": 10.0,
+              "net_in_avg": 52428.0,
+              "net_out_avg": 41943.0
+            }
+          }
+        ],
+        "security_groups": [
+          {
+            "arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00001",
+            "region": "ap-northeast-2",
+            "description": null,
+            "vpc_id": null,
+            "attached": true,
+            "open_to_world": [],
+            "group_id": "sg-0a1b2c3d4e5f00001",
+            "name": null
+          }
+        ],
+        "nacls": [
+          {
+            "arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001",
+            "region": "ap-northeast-2",
+            "vpc_id": null,
+            "is_default": false,
+            "associated_subnet_ids": [
+              "subnet-0a1b2c3d4e5f0f001"
+            ],
+            "nacl_id": "acl-0a1b2c3d4e5f00001"
+          }
+        ]
+      },
+      "submission": {
+        "observation": {
+          "event_id": "evt-ssh-bruteforce-002",
+          "event_type": "SSH_BRUTE_FORCE",
+          "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00002",
+          "source_ip": "198.51.100.77",
+          "occurred_at": "2026-08-19T06:40:00Z",
+          "failed_attempt_count": 5,
+          "window_seconds": 3600
+        },
+        "log_evidence": {
+          "version": 1,
+          "data_kind": "synthetic",
+          "coverage": "complete_generated_fixture",
+          "case_id": "C06",
+          "corpus_fingerprint": "abea5e46d8860025200d6d0a77d1d2855d2727eb922af0175232bc1b3f35bd79",
+          "source_id": "aws-directory-service-password-example",
+          "source_fingerprint": "e0481279d9ffc11490f9317dd831912d782c054064e5b60f4cf596ea56b985aa",
+          "selection_policy": "ssh-observed-password-results-v1",
+          "excerpt_policy": "first_6_last_6",
+          "host": "mock-ec2-C06",
+          "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00002",
+          "mapping_kind": "explicit_mock_target",
+          "time_shift_seconds": 0,
+          "source_ip": "198.51.100.77",
+          "window_start": "2026-08-19T05:40:00Z",
+          "window_end": "2026-08-19T06:40:00Z",
+          "record_count": 15,
+          "failed_attempt_count": 5,
+          "accepted_count": 0,
+          "auxiliary_count": 10,
+          "records": [
+            {
+              "record_id": "C06-000001",
+              "source_time": "2026-08-19T05:45:59.999000Z",
+              "received_at": "2026-08-19T05:46:00.049000Z",
+              "host": "mock-ec2-C06",
+              "process_id": 10001,
+              "message": "Invalid user mock-user from 198.51.100.77 port 41000"
+            },
+            {
+              "record_id": "C06-000002",
+              "source_time": "2026-08-19T05:46:00Z",
+              "received_at": "2026-08-19T05:46:00.050000Z",
+              "host": "mock-ec2-C06",
+              "process_id": 10001,
+              "message": "Failed password for invalid user mock-user from 198.51.100.77 port 41000 ssh2"
+            },
+            {
+              "record_id": "C06-000003",
+              "source_time": "2026-08-19T05:46:00.001000Z",
+              "received_at": "2026-08-19T05:46:00.051000Z",
+              "host": "mock-ec2-C06",
+              "process_id": 10001,
+              "message": "Connection closed by invalid user mock-user 198.51.100.77 port 41000 [preauth]"
+            },
+            {
+              "record_id": "C06-000004",
+              "source_time": "2026-08-19T05:57:59.999000Z",
+              "received_at": "2026-08-19T05:58:00.049000Z",
+              "host": "mock-ec2-C06",
+              "process_id": 10002,
+              "message": "Invalid user mock-user from 198.51.100.77 port 41001"
+            },
+            {
+              "record_id": "C06-000005",
+              "source_time": "2026-08-19T05:58:00Z",
+              "received_at": "2026-08-19T05:58:00.050000Z",
+              "host": "mock-ec2-C06",
+              "process_id": 10002,
+              "message": "Failed password for invalid user mock-user from 198.51.100.77 port 41001 ssh2"
+            },
+            {
+              "record_id": "C06-000006",
+              "source_time": "2026-08-19T05:58:00.001000Z",
+              "received_at": "2026-08-19T05:58:00.051000Z",
+              "host": "mock-ec2-C06",
+              "process_id": 10002,
+              "message": "Connection closed by invalid user mock-user 198.51.100.77 port 41001 [preauth]"
+            },
+            {
+              "record_id": "C06-000010",
+              "source_time": "2026-08-19T06:21:59.999000Z",
+              "received_at": "2026-08-19T06:22:00.049000Z",
+              "host": "mock-ec2-C06",
+              "process_id": 10004,
+              "message": "Invalid user mock-user from 198.51.100.77 port 41003"
+            },
+            {
+              "record_id": "C06-000011",
+              "source_time": "2026-08-19T06:22:00Z",
+              "received_at": "2026-08-19T06:22:00.050000Z",
+              "host": "mock-ec2-C06",
+              "process_id": 10004,
+              "message": "Failed password for invalid user mock-user from 198.51.100.77 port 41003 ssh2"
+            },
+            {
+              "record_id": "C06-000012",
+              "source_time": "2026-08-19T06:22:00.001000Z",
+              "received_at": "2026-08-19T06:22:00.051000Z",
+              "host": "mock-ec2-C06",
+              "process_id": 10004,
+              "message": "Connection closed by invalid user mock-user 198.51.100.77 port 41003 [preauth]"
+            },
+            {
+              "record_id": "C06-000013",
+              "source_time": "2026-08-19T06:33:59.999000Z",
+              "received_at": "2026-08-19T06:34:00.049000Z",
+              "host": "mock-ec2-C06",
+              "process_id": 10005,
+              "message": "Invalid user mock-user from 198.51.100.77 port 41004"
+            },
+            {
+              "record_id": "C06-000014",
+              "source_time": "2026-08-19T06:34:00Z",
+              "received_at": "2026-08-19T06:34:00.050000Z",
+              "host": "mock-ec2-C06",
+              "process_id": 10005,
+              "message": "Failed password for invalid user mock-user from 198.51.100.77 port 41004 ssh2"
+            },
+            {
+              "record_id": "C06-000015",
+              "source_time": "2026-08-19T06:34:00.001000Z",
+              "received_at": "2026-08-19T06:34:00.051000Z",
+              "host": "mock-ec2-C06",
+              "process_id": 10005,
+              "message": "Connection closed by invalid user mock-user 198.51.100.77 port 41004 [preauth]"
+            }
+          ]
+        }
+      }
+    },
+    "C07": {
+      "inventory": {
+        "$schema": "../../schema/asset_inventory.schema.json",
+        "account_id": "123456789012",
+        "region": "ap-northeast-2",
+        "mode": "localstack",
+        "collected_at": "2026-08-20T06:00:00Z",
+        "lookback_days": 14,
+        "period_seconds": 3600,
+        "ec2_instances": [
+          {
+            "asset_type": "EC2",
+            "arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00012",
+            "instance_id": "i-0a1b2c3d4e5f00012",
+            "name": "golden-ec2-dp-boundary",
+            "instance_type": "t3.xlarge",
+            "state": "running",
+            "region": "ap-northeast-2",
+            "availability_zone": "ap-northeast-2c",
+            "vpc_id": "vpc-0a1b2c3d4e5f0f001",
+            "subnet_id": "subnet-0a1b2c3d4e5f0f002",
+            "private_ip": "10.0.2.22",
+            "launch_time": "2026-08-18T03:00:00Z",
+            "security_group_ids": [
+              "sg-0a1b2c3d4e5f00002"
+            ],
+            "tags": {
+              "Name": "golden-ec2-dp-boundary",
+              "Environment": "staging",
+              "Owner": "qa"
+            },
+            "metric_summary": {
+              "cpu_datapoints": 48,
+              "cpu_avg": 4.9,
+              "cpu_max": 10.0,
+              "net_in_avg": 1024.0,
+              "net_out_avg": 512.0
+            }
+          }
+        ],
+        "security_groups": [
+          {
+            "arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00002",
+            "region": "ap-northeast-2",
+            "description": null,
+            "vpc_id": null,
+            "attached": true,
+            "open_to_world": [],
+            "group_id": "sg-0a1b2c3d4e5f00002",
+            "name": null
+          }
+        ],
+        "nacls": [
+          {
+            "arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00002",
+            "region": "ap-northeast-2",
+            "vpc_id": null,
+            "is_default": false,
+            "associated_subnet_ids": [
+              "subnet-0a1b2c3d4e5f0f002"
+            ],
+            "nacl_id": "acl-0a1b2c3d4e5f00002"
+          }
+        ]
+      },
+      "submission": {
+        "observation": {
+          "event_id": "evt-ssh-bruteforce-003",
+          "event_type": "SSH_BRUTE_FORCE",
+          "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00012",
+          "source_ip": "198.51.100.20",
+          "occurred_at": "2026-08-20T06:40:00Z",
+          "failed_attempt_count": 1,
+          "window_seconds": 1
+        },
+        "log_evidence": {
+          "version": 1,
+          "data_kind": "synthetic",
+          "coverage": "complete_generated_fixture",
+          "case_id": "C07",
+          "corpus_fingerprint": "9fe261af85b4a841ea2d791be42dc99ed74c46a90ef5bb88fcfaf913d6180527",
+          "source_id": "aws-directory-service-password-example",
+          "source_fingerprint": "e0481279d9ffc11490f9317dd831912d782c054064e5b60f4cf596ea56b985aa",
+          "selection_policy": "ssh-observed-password-results-v1",
+          "excerpt_policy": "first_6_last_6",
+          "host": "mock-ec2-C07",
+          "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00012",
+          "mapping_kind": "explicit_mock_target",
+          "time_shift_seconds": 0,
+          "source_ip": "198.51.100.20",
+          "window_start": "2026-08-20T06:39:59Z",
+          "window_end": "2026-08-20T06:40:00Z",
+          "record_count": 3,
+          "failed_attempt_count": 1,
+          "accepted_count": 0,
+          "auxiliary_count": 2,
+          "records": [
+            {
+              "record_id": "C07-000001",
+              "source_time": "2026-08-20T06:39:59.499000Z",
+              "received_at": "2026-08-20T06:39:59.549000Z",
+              "host": "mock-ec2-C07",
+              "process_id": 10001,
+              "message": "Invalid user mock-user from 198.51.100.20 port 41000"
+            },
+            {
+              "record_id": "C07-000002",
+              "source_time": "2026-08-20T06:39:59.500000Z",
+              "received_at": "2026-08-20T06:39:59.550000Z",
+              "host": "mock-ec2-C07",
+              "process_id": 10001,
+              "message": "Failed password for invalid user mock-user from 198.51.100.20 port 41000 ssh2"
+            },
+            {
+              "record_id": "C07-000003",
+              "source_time": "2026-08-20T06:39:59.501000Z",
+              "received_at": "2026-08-20T06:39:59.551000Z",
+              "host": "mock-ec2-C07",
+              "process_id": 10001,
+              "message": "Connection closed by invalid user mock-user 198.51.100.20 port 41000 [preauth]"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

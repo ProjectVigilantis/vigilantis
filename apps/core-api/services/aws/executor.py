@@ -14,24 +14,38 @@
 #   - DryRun을 쓸 수 없는 작업은 환경과 무관하게 조회로 대체한다(§4). LocalStack일
 #     때만 조회하도록 나누는 것은 ADR-0006 §3이 금지한다.
 #
-# 실행 범위: RUNBOOK_EC2_RIGHTSIZING = execute_rightsizing(). (Issue #211, §실행)
+# 실행 범위: RUNBOOK_EC2_RIGHTSIZING    = execute_rightsizing(). (Issue #211, §실행)
+#            RUNBOOK_EC2_REVERT_SIZE     = execute_revert_size(). (Issue #241, §원복)
+#            RUNBOOK_NACL_ADD_DENY       = execute_nacl_add_deny(). (Issue #297, §차단)
+#            RUNBOOK_NACL_RESTORE        = execute_nacl_restore().  (Issue #298, §해제)
+#            RUNBOOK_EBS_DELETE_UNATTACHED = execute_ebs_delete_unattached(). (Issue #369)
+#            RUNBOOK_SG_DELETE_ISOLATED  = execute_sg_delete_isolated(). (Issue #368)
+#            RUNBOOK_SG_RECREATE         = execute_sg_recreate().  (Issue #368, §SG 원복)
 #   - precheck과 같은 규약으로 예외를 던지지 않는다. 단계별 결과는 ExecutionStepResult로
 #     돌려주고, 저장·커밋 순서는 workflows.py가 소유한다.
+#   - 원복은 되돌릴 값을 인자로만 받는다 — 백업 레코드 조회는 호출부(workflows) 몫이다.
+#     원천이 하나라는 정책(ADR-0004 정책 ③)은 값을 뽑는 자리가 하나일 때만 성립한다.
 #
 # [남은 작업]
-# 1. 나머지 9종 실행 함수 — 백업이 필요한 런북은 백업 commit 이후에만 진입한다
-# 2. 롤백 3종 실행도 executor 경유 — 트리거 판단·감시는 rollback.py 담당
+# 1. 나머지 3종 실행 함수(EC2_ISOLATE·EC2_ENABLE_AUTOSCALING·EC2_UNISOLATE) — 백업이
+#    필요한 런북은 백업 commit 이후에만 진입한다
+# 2. 롤백 나머지 1종(RUNBOOK_EC2_UNISOLATE) 실행도 executor 경유 —
+#    트리거 판단·감시는 rollback.py 담당
 #
 # 파라미터 계약의 원천은 packages/schemas/runbook_parameters.py의 typed 모델이다(#154).
-# 형식 위반은 AI 후보라면 ① Schema Check에서 먼저 걸리고, 여기 _validate_params는 같은
-# 모델로 한 번 더 본다 — ④를 타는 경로가 그것만이 아니기 때문이다(롤백 3종·시스템
-# 트리거는 ①을 거치지 않는다). 후보(RunbookCandidateDraft)를 여기 parameters로 바꾸는
-# 변환은 runbook_parameters.py의 build_precheck_parameters()다.
+# 형식 위반은 ① Schema Check에서 먼저 걸리고, 여기 _validate_params는 같은 모델로 한 번
+# 더 본다 — ④를 타는 경로가 그것만이 아니기 때문이다. **롤백 3종도 ①을 거친다**
+# (ADR-0004 정책 ①, Issue #241): ①이 문맥별 파라미터 계약을 골라 대조하므로
+# (ai/guardrails.py `_PARAMETER_MODELS_BY_CONTEXT`) 후보가 없는 원복 명령도 통과한다.
+# 후보(RunbookCandidateDraft)를 여기 parameters로 바꾸는 변환은
+# runbook_parameters.py의 build_precheck_parameters()이며, 원복 명령의 parameters는
+# 이미 실행 파라미터 계약의 값이라 변환이 없다.
 # ==============================================================================
 
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Optional, Protocol
@@ -39,7 +53,7 @@ from typing import Any, Callable, Mapping, Optional, Protocol
 from botocore.exceptions import BotoCoreError, ClientError, ParamValidationError
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
-from schemas.backups import BackupType
+from schemas.backups import BackupType, NaclRuleIndexBackup, SgFullRulesBackup
 from schemas.executions import (
     ExecutionEffect,
     ExecutionStepResult,
@@ -52,6 +66,9 @@ from schemas.precheck import (
     build_verification_summary,
 )
 from schemas.runbook_parameters import (
+    NACL_ADD_DENY_EGRESS,
+    NACL_DENY_ACTION,
+    NACL_PROTOCOL_NUMBERS,
     EbsDeleteUnattachedParameters,
     Ec2EnableAutoscalingParameters,
     Ec2IsolateParameters,
@@ -83,6 +100,18 @@ _DRY_RUN_VERIFIES = "호출 권한과 파라미터 형식(DryRun)"
 _DRY_RUN_MISSES = "대상 자원 존재와 현재 상태(DryRun 비검증)"
 # 조회 대체 경로는 어느 환경에서도 IAM 권한을 확인하지 못한다(ADR-0007 §3).
 _DESCRIBE_MISSES = "IAM 권한(조회 대체 경로)"
+
+# create_security_group이 VPC 보안 그룹에 **자동으로** 붙이는 전체 허용 아웃바운드 1건.
+# 우리가 요청하지 않아도 붙으므로, 백업과 같은 규칙 집합으로 맞추려면 생성 직후 걷어
+# 내야 한다(execute_sg_recreate ②). 그러지 않으면 두 갈래로 틀린다 — 백업에 같은 규칙이
+# 있으면 주입이 InvalidPermission.Duplicate로 실패하고, 없으면 원본보다 **넓은** SG가 된다.
+#
+# 실측(2026-09-22 LocalStack Community): 생성 직후 IpPermissionsEgress가 정확히 이 모양
+# 1건이고, 같은 값을 authorize로 다시 넣으면 InvalidPermission.Duplicate로 거절된다.
+DEFAULT_EGRESS_PERMISSION: Mapping[str, Any] = {
+    "IpProtocol": "-1",
+    "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
+}
 
 
 # ------------------------------------------------------------------ 백업 레코드
@@ -293,6 +322,10 @@ RUNBOOK_SPECS: Mapping[str, _Spec] = {
         method=M.DRY_RUN,
         operations=(
             "ec2.create_security_group",
+            # 생성 직후 AWS가 자동으로 붙이는 전체 허용 egress를 걷어 내는 호출이다
+            # (execute_sg_recreate ②). 백업과 같은 규칙 집합으로 맞추려면 반드시
+            # 부르므로 ④도 함께 본다 — 여기 없으면 권한이 없을 때 실행 중에 드러난다.
+            "ec2.revoke_security_group_egress",
             "ec2.authorize_security_group_ingress",
             "ec2.authorize_security_group_egress",
         ),
@@ -558,46 +591,60 @@ def _precheck_ebs_delete(ctx: _Ctx) -> PrecheckOutcome:
     )
 
 
+def sg_full_rules_backup(payload: Mapping[str, Any]) -> Optional[SgFullRulesBackup]:
+    """백업 payload를 SG 복원 계약으로 읽는다. 계약을 벗어나면 None.
+
+    precheck·실행·종료 판정이 같은 모델로 읽는다 — `dict.get` 문자열로 읽으면 만든 쪽과
+    읽는 쪽이 다른 시점에 사는 계약이 원복 시점에야 어긋난다(ADR-0008 §5).
+    nacl_rule_backup과 같은 자리다.
+    """
+    try:
+        return SgFullRulesBackup.model_validate(dict(payload or {}))
+    except ValidationError:
+        return None
+
+
 def _precheck_sg_recreate(ctx: _Ctx) -> PrecheckOutcome:
-    payload = ctx.backup.payload
-    group_name, description, vpc_id = (
-        payload.get("group_name"),
-        payload.get("description"),
-        payload.get("vpc_id"),
-    )
-    if not all(_non_empty_str(v) for v in (group_name, description, vpc_id)):
+    # 그룹 정의·규칙 목록이 계약을 벗어나면 되살릴 근거가 없다 — AWS를 부르기 전에
+    # 판정 불가로 끝낸다(ADR-0008 §5 "백업 payload에 항목이 없다" 칸)
+    backup = sg_full_rules_backup(ctx.backup.payload)
+    if backup is None:
         return _fail(
             ctx,
             R.PRECHECK_PARAM_INVALID,
-            verified=["없음(백업 레코드에 그룹 정의 없음)"],
-            unverified=[_DRY_RUN_MISSES],
-        )
-    if not all(
-        isinstance(payload.get(key), list)
-        for key in ("ingress_permissions", "egress_permissions")
-    ):
-        return _fail(
-            ctx,
-            R.PRECHECK_PARAM_INVALID,
-            verified=["없음(백업 레코드에 규칙 목록 없음)"],
+            verified=["없음(백업 레코드가 SG 복원 계약을 벗어남)"],
             unverified=[_DRY_RUN_MISSES],
         )
 
     ec2 = aws_client("ec2", ctx.target.region)
-    # ADR-0007 §Context 표 4·5행은 authorize 2종도 DryRun 대상으로 뒀다. create만
+    # ADR-0007 §Context 표는 authorize 2종과 revoke도 DryRun 대상으로 둔다. create만
     # 보고 통과시키면 빈 SG만 만들어지고 규칙 복원이 권한 부족으로 실패하는 경로를
     # precheck가 그대로 통과시킨다 — ④가 막아야 할 실패가 실행 중에 난다.
     # 그룹이 아직 없는 시점에도 성립한다: 존재하지 않는 GroupId로도
-    # DryRunOperation이 돌아온다(#133 ① 실측). 실 AWS 확인은 6-7주차 스모크.
+    # DryRunOperation이 돌아온다(#133 ① 실측 · revoke도 2026-09-22 실측).
     calls = [
         (
             ec2.create_security_group,
-            {"GroupName": group_name, "Description": description, "VpcId": vpc_id},
-        )
+            {
+                "GroupName": backup.group_name,
+                "Description": backup.description,
+                "VpcId": backup.vpc_id,
+            },
+        ),
+        # 회수는 백업 내용과 무관하게 **항상** 부른다(execute_sg_recreate ②) — 실행이
+        # 회수할 규칙은 AWS가 붙일 기본 egress이지 백업에 실린 규칙이 아니다. 그래서
+        # DryRun도 그 기본 규칙의 모양으로 건다.
+        (
+            ec2.revoke_security_group_egress,
+            {
+                "GroupId": ctx.target.resource_id,
+                "IpPermissions": [dict(DEFAULT_EGRESS_PERMISSION)],
+            },
+        ),
     ]
     for operation, permissions in (
-        (ec2.authorize_security_group_ingress, payload["ingress_permissions"]),
-        (ec2.authorize_security_group_egress, payload["egress_permissions"]),
+        (ec2.authorize_security_group_ingress, backup.ingress_permissions),
+        (ec2.authorize_security_group_egress, backup.egress_permissions),
     ):
         # 빈 목록으로 authorize를 부르면 DryRun 이전에 파라미터 오류가 난다.
         # 복원할 규칙이 없는 방향은 실행도 하지 않으므로 검증 대상이 아니다.
@@ -647,8 +694,10 @@ def _precheck_nacl_add_deny(ctx: _Ctx) -> PrecheckOutcome:
         return _fail(
             ctx, code, verified=["없음(NACL 조회 실패)"], unverified=[_DESCRIBE_MISSES]
         )
-    # ADD_DENY는 인바운드 차단 규칙이다 — ADR-0007 §5 파라미터 표에 egress가 없다
-    if _find_entry(acl, ctx.params["rule_number"], egress=False) is not None:
+    # ADD_DENY는 인바운드 차단 규칙이다 — ADR-0007 §5 파라미터 표에 egress가 없다.
+    # 값은 상수 하나로 둔다: 여기와 백업 캡처와 실행이 서로 다른 슬롯을 보면, 백업이
+    # 가리키는 규칙과 실제로 넣은 규칙이 갈린다
+    if _find_entry(acl, ctx.params["rule_number"], NACL_ADD_DENY_EGRESS) is not None:
         return _fail(
             ctx,
             R.PRECHECK_INVALID_STATE,
@@ -662,7 +711,30 @@ def _precheck_nacl_add_deny(ctx: _Ctx) -> PrecheckOutcome:
     )
 
 
+def nacl_rule_backup(payload: Mapping[str, Any]) -> Optional[NaclRuleIndexBackup]:
+    """백업 payload를 규칙 fingerprint 계약으로 읽는다. 계약을 벗어나면 None.
+
+    precheck·실행·종료 판정이 같은 모델로 읽는다 — `dict.get` 문자열로 읽으면 만든 쪽과
+    읽는 쪽이 다른 시점에 사는 계약이 원복 시점에야 어긋난다(ADR-0008 §5).
+    """
+    try:
+        return NaclRuleIndexBackup.model_validate(dict(payload or {}))
+    except ValidationError:
+        return None
+
+
 def _precheck_nacl_restore(ctx: _Ctx) -> PrecheckOutcome:
+    # fingerprint 항목이 없으면 슬롯에 있는 규칙이 우리 것인지 가릴 수 없다 — AWS를
+    # 부르기 전에 판정 불가로 끝낸다(ADR-0008 §5 "백업 payload에 항목이 없다" 칸)
+    backup = nacl_rule_backup(ctx.backup.payload)
+    if backup is None:
+        return _fail(
+            ctx,
+            R.PRECHECK_PARAM_INVALID,
+            verified=["없음(백업 레코드에 규칙 fingerprint 없음)"],
+            unverified=[_DESCRIBE_MISSES],
+        )
+
     acl, code = _network_acl(ctx.params["network_acl_id"], ctx.target.region)
     if code is not None:
         return _fail(
@@ -686,17 +758,30 @@ def _precheck_nacl_restore(ctx: _Ctx) -> PrecheckOutcome:
             unverified=[_DESCRIBE_MISSES],
         )
     # 삭제 대상이 우리가 넣은 그 규칙인지 — 백업 레코드의 rule index와 대조한다
-    payload = ctx.backup.payload
-    if payload.get("rule_number") != rule_number or bool(payload.get("egress")) != egress:
+    if (backup.rule_number, backup.egress) != (rule_number, egress):
         return _fail(
             ctx,
             R.PRECHECK_PARAM_INVALID,
             verified=["NACL 존재", "대상 규칙이 deny 상태"],
             unverified=[_DESCRIBE_MISSES],
         )
+    # rule_number는 재사용되는 슬롯 번호다 — 같은 슬롯의 제3자 deny 규칙을 우리 것으로
+    # 오인해 지우지 않도록 fingerprint 3항목을 통과 조건으로 본다(ADR-0008 §5)
+    if not nacl_entry_fingerprint_matches(entry, backup):
+        return _fail(
+            ctx,
+            R.PRECHECK_INVALID_STATE,
+            verified=["NACL 존재", "대상 규칙이 deny 상태", "백업 레코드 rule index 일치"],
+            unverified=[_DESCRIBE_MISSES],
+        )
     return _ok(
         ctx,
-        verified=["NACL 존재", "대상 규칙이 deny 상태", "백업 레코드 rule index 일치"],
+        verified=[
+            "NACL 존재",
+            "대상 규칙이 deny 상태",
+            "백업 레코드 rule index 일치",
+            "규칙 fingerprint 일치",
+        ],
         unverified=[_DESCRIBE_MISSES, "삭제 자체의 AWS 검증(DryRun 미지원 작업)"],
     )
 
@@ -1043,15 +1128,102 @@ def precheck(
 STEP_STOP_INSTANCE = "STOP_INSTANCE"
 STEP_MODIFY_INSTANCE_TYPE = "MODIFY_INSTANCE_TYPE"
 STEP_START_INSTANCE = "START_INSTANCE"
+# 원복 전 상태 대조(ADR-0008 §3-2). 자산을 바꾸지 않는 단계라, 원복을 **진행하는**
+# 경우에는 기록하지 않는다 — 기록하면 "단계 1건 이상 = 자산이 바뀌었을 수 있다"는
+# 회수 규약(ADR-0008 §7)이 거짓이 되어, 아무것도 안 바꾼 실행이 재실행 대신 종료
+# 판정으로 가서 실패로 확정된다. 남기는 것은 대조 자체가 결론인 두 경우뿐이다.
+STEP_COMPARE_INSTANCE_TYPE = "COMPARE_INSTANCE_TYPE"
+
+STEP_CREATE_NACL_ENTRY = "CREATE_NACL_ENTRY"
+STEP_DELETE_NACL_ENTRY = "DELETE_NACL_ENTRY"
+# 해제 전 슬롯 대조(ADR-0008 §5). STEP_COMPARE_INSTANCE_TYPE과 같은 규칙이다 — 삭제로
+# **진행하는** 경우에는 기록하지 않고, 대조 자체가 결론인 두 경우(이미 해제됨·제3자
+# 규칙)만 남긴다.
+STEP_COMPARE_NACL_ENTRY = "COMPARE_NACL_ENTRY"
+
+STEP_CREATE_SNAPSHOT = "CREATE_SNAPSHOT"
+STEP_WAIT_SNAPSHOT = "WAIT_SNAPSHOT"
+STEP_DELETE_VOLUME = "DELETE_VOLUME"
+# 삭제 전 볼륨 상태 대조(Issue #369). STEP_COMPARE_INSTANCE_TYPE과 같은 규칙이다 —
+# 삭제로 **진행하는** 경우에는 기록하지 않고, 대조 자체가 결론인 경우(붙어 있어
+# 거절·볼륨 없음)만 남긴다. 진행하면서 기록하면 "단계 1건 이상 = 자산이 바뀌었을 수
+# 있다"는 회수 규약(ADR-0008 §7)이 거짓이 되어, 스냅숏도 만들기 전에 끝난 실행이
+# 재실행 대신 종료 판정으로 가서 실패로 확정된다.
+STEP_COMPARE_VOLUME_STATE = "COMPARE_VOLUME_STATE"
+
+STEP_DELETE_SECURITY_GROUP = "DELETE_SECURITY_GROUP"
+STEP_CREATE_SECURITY_GROUP = "CREATE_SECURITY_GROUP"
+# 생성 직후 AWS가 붙인 기본 egress 회수(Issue #368). 자산을 바꾸는 단계라 STEP_COMPARE_*
+# 계열이 아니다 — 회수하지 않으면 재생성 SG가 백업보다 넓어진 채로 남는다.
+STEP_REVOKE_DEFAULT_EGRESS = "REVOKE_DEFAULT_EGRESS"
+STEP_AUTHORIZE_SG_INGRESS = "AUTHORIZE_SG_INGRESS"
+STEP_AUTHORIZE_SG_EGRESS = "AUTHORIZE_SG_EGRESS"
 
 _OP_STOP = "ec2.stop_instances"
 _OP_MODIFY = "ec2.modify_instance_attribute"
 _OP_START = "ec2.start_instances"
+_OP_DESCRIBE = "ec2.describe_instances"
+_OP_CREATE_NACL_ENTRY = "ec2.create_network_acl_entry"
+_OP_DELETE_NACL_ENTRY = "ec2.delete_network_acl_entry"
+_OP_DESCRIBE_NACL = "ec2.describe_network_acls"
+_OP_DESCRIBE_VOLUMES = "ec2.describe_volumes"
+_OP_CREATE_SNAPSHOT = "ec2.create_snapshot"
+_OP_DESCRIBE_SNAPSHOTS = "ec2.describe_snapshots"
+_OP_DELETE_VOLUME = "ec2.delete_volume"
+_OP_DESCRIBE_SGS = "ec2.describe_security_groups"
+_OP_DELETE_SG = "ec2.delete_security_group"
+_OP_CREATE_SG = "ec2.create_security_group"
+_OP_REVOKE_SG_EGRESS = "ec2.revoke_security_group_egress"
+_OP_AUTHORIZE_SG_INGRESS = "ec2.authorize_security_group_ingress"
+_OP_AUTHORIZE_SG_EGRESS = "ec2.authorize_security_group_egress"
+
+# 삭제해도 되는 볼륨의 상태 — 부착 목록이 비어 있고 available이어야 한다.
+# 판정(rule_engine.evaluate_ebs)이 본 것과 같은 축이지만, 판정과 실행 사이에 누군가
+# 볼륨을 붙였을 수 있어 **삭제 직전에 다시 본다**(Issue #369 §1단계).
+_VOLUME_DELETABLE_STATE = "available"
+
+# 삭제가 **이미 접수된** 볼륨의 상태. AWS는 delete_volume을 받은 뒤 볼륨을 곧바로
+# 지우지 않고 deleting에 몇 분간 둘 수 있으며, 이 구간은 되돌아오지 않는다
+# (deleting → deleted, DeleteVolume API 문서). 조회에 잡힌다는 이유로 "남아 있다"로
+# 세면 지워지는 중인 볼륨이 실패로 확정된다(PR #390 리뷰).
+#
+# 이 런북의 **성공의 경계는 "AWS가 삭제를 접수했다"** 이다 — 정상 경로도 delete_volume
+# 200으로 확정한다(dispatcher._close_and_publish). 끊긴 실행의 현물 판정
+# (workflows.judge_ebs_delete_unattached)만 그 경계를 실자산에서 다시 읽으므로,
+# 두 경로가 같은 것을 성공이라 부르도록 이 상태 집합을 여기 한 곳에 둔다.
+_VOLUME_DELETE_ACCEPTED_STATES: frozenset[str] = frozenset({"deleting", "deleted"})
+
+# TCP·UDP 규칙에는 PortRange가 필수다(CreateNetworkAclEntry API 계약). LocalStack은
+# 빠뜨린 요청도 받아 주지만 실 AWS는 InvalidParameterValue로 거절한다 — 로컬에서만
+# 통과하는 차단이 되지 않도록 여기서 채운다(PR #313 리뷰).
+#
+# 범위는 **전체**다. 이 조치가 막는 것은 포트가 아니라 **출발지 주소**이며
+# (ADR-0007 §5 파라미터 표에 포트가 없다), 일부 포트만 막으면 같은 출발지가 다른
+# 포트로 그대로 들어온다. 포트를 고르는 입력은 그래서 두지 않는다.
+_NACL_ALL_PORTS = {"From": 0, "To": 65535}
+_NACL_PORT_RANGE_PROTOCOLS: frozenset[str] = frozenset({"6", "17"})  # tcp · udp
 
 # 정지 확인 대기 — 5초 간격 40회(최대 200초). 초과는 "실패"가 아니라 "상태 불명"이라
 # 단계 effect가 UNKNOWN이 되고, 타입 변경으로 넘어가지 않는다.
 STOP_WAIT_DELAY_SECONDS = 5
 STOP_WAIT_MAX_ATTEMPTS = 40
+
+# 스냅숏 완료 대기 — 5초 간격 24회. 초과하면 **삭제하지 않는다**(Issue #369).
+#
+# 120초는 **폴링 간격의 합**이지 실행 점유 시간의 상한이 아니다 — describe_snapshots
+# 호출 시간과 botocore 재시도가 그 위에 얹힌다(PR #390 리뷰). 아래 근거도 "몇 번
+# 물어보는가"의 크기다.
+#
+# 정지 대기(200초)보다 짧게 잡은 이유는 **이 대기가 dispatcher 한 주기를 붙잡기**
+# 때문이다. 실행 스캔은 겹쳐 돌지 않으므로(max_instances=1) 기다리는 동안 다른 실행이
+# 밀린다. 삭제는 미뤄도 손해가 없는 조치라(낭비 비용이 몇 분 더 날 뿐) 대기를 늘리는
+# 쪽보다 다음 승인으로 넘기는 쪽이 싸다 — 초과는 실패로 닫히고 후보가 다시 선다.
+#
+# 120초의 근거는 **1 GiB 볼륨**이다(ADR-0009 §4가 스모크 대상으로 준비한 크기).
+# LocalStack은 스냅숏을 즉시 completed로 만들어(2026-09-21 실측) 이 상한이 로컬에서는
+# 걸리지 않는다 — 실 AWS 완료 시간은 10/6(화) 스모크에서 재고, 모자라면 그때 조정한다.
+SNAPSHOT_WAIT_DELAY_SECONDS = 5
+SNAPSHOT_WAIT_MAX_ATTEMPTS = 24
 
 # 요약 문자열 저장 한도는 1024자(db.models)다. 그보다 넉넉히 줄여 원인 앞부분을 남긴다.
 _SUMMARY_LIMIT = 400
@@ -1059,15 +1231,31 @@ _SUMMARY_LIMIT = 400
 
 @dataclass(frozen=True)
 class ExecutionOutcome:
-    """실행 1건의 결과. steps는 시도한 순서 그대로다."""
+    """실행 1건의 결과. steps는 시도한 순서 그대로다.
+
+    deferred는 **판정을 못 해 자산을 만지지 않았다**는 뜻이다(원복 경로 전용).
+    실패와 나누는 이유는 rollback.StatusCheckOutcome.probe_failed와 같다 — AWS에
+    물어보지 못한 것은 조치가 실패했다는 근거가 아니고, 확정하면 되돌릴 것이 없는
+    자산에 "원복 실패" 기록이 붙는다. 보류는 단계를 남기지 않으므로 다음 재시도가
+    처음부터 다시 시도한다(ADR-0008 §7). 재시도 상한과 소진 뒤의 처분은
+    workflows.record_verification_failure가 정하며, 다시 물을지를 reason_code가 가르므로
+    보류에도 코드가 필요하다 (Issue #249).
+    """
 
     steps: tuple[ExecutionStepResult, ...] = ()
     reason_code: Optional[PrecheckReasonCode] = None
     error_summary: Optional[str] = None
+    deferred: bool = False
 
     def __post_init__(self) -> None:
         if (self.reason_code is None) != (self.error_summary is None):
             raise ValueError("실패에는 reason_code와 error_summary가 함께 필요합니다")
+        if self.deferred:
+            if self.reason_code is None:
+                raise ValueError("보류에도 분류 코드가 필요합니다")
+            if self.steps:
+                # 자산을 만졌으면 보류가 아니다 — 되돌릴 것이 남은 실패다
+                raise ValueError("보류 결과에는 단계 기록이 없어야 합니다")
 
     @property
     def succeeded(self) -> bool:
@@ -1305,5 +1493,974 @@ def execute_rightsizing(
         ExecutionEffect.APPLIED,
         "기동 요청 접수(2/2 Status Check 확인은 별도 축)",
         response=response,
+    )
+    return ExecutionOutcome(steps=tuple(log.steps))
+
+
+# ------------------------------------------------------------------ 원복 (Issue #241)
+def current_instance_type_and_state(instance_id: str, region: str):
+    """(현재 인스턴스 타입, 현재 state, 사유 코드) 3짝. 타입을 못 읽으면 코드가 채워진다.
+
+    실행과 종료 판정이 같은 축을 같은 방법으로 읽어야 해서 공개한다(ADR-0008 §3-2의
+    대조와 workflows.judge_revert_size의 실자산 대조가 그 둘이다). 읽는 방법이 갈리면
+    "되돌아왔는가"의 답이 자리마다 달라진다.
+
+    **타입과 state를 describe 한 번으로 함께 읽는다.** 나눠 부르면 두 호출 사이에
+    상태가 바뀌어 "타입은 되돌아왔는데 state는 그 이전 것"인 조합을 판정이 보게 되고,
+    그 조합은 실재한 적 없는 자산이다.
+
+    state는 부가 축이라 없다고 판정을 막지 않는다(None으로 돌려준다) — 대조의 축은
+    타입이고, state는 "기동까지 끝났는가"를 덧붙여 묻는 자리이기 때문이다.
+    """
+    instance, code = _instance(instance_id, region)
+    if code is not None:
+        return None, None, code
+    found = instance.get("InstanceType")
+    if not _non_empty_str(found):
+        # 조회는 됐는데 타입이 없다 — 대조할 축이 없으므로 대상 상태 문제다
+        return None, None, R.PRECHECK_INVALID_STATE
+    state = instance.get("State", {}).get("Name")
+    return str(found), (str(state) if _non_empty_str(state) else None), None
+
+
+def current_instance_type(instance_id: str, region: str):
+    """(현재 인스턴스 타입, 사유 코드) 짝 — state가 필요 없는 자리의 축약형."""
+    found, _state, code = current_instance_type_and_state(instance_id, region)
+    return found, code
+
+
+def _deferred(
+    code: PrecheckReasonCode,
+    detail: str,
+    *,
+    event: str = "revert_size_deferred",
+    aws_operation: str = _OP_DESCRIBE,
+) -> ExecutionOutcome:
+    """대조하지 못해 원복을 시작하지 않았다 — 실패가 아니라 보류다."""
+    logger.warning(
+        event, extra={"reason_code": code.value, "aws_operation": aws_operation}
+    )
+    return ExecutionOutcome(reason_code=code, error_summary=detail, deferred=True)
+
+
+def execute_revert_size(
+    target_arn: str,
+    *,
+    restore_instance_type: str,
+    applied_instance_type: str,
+    restore_state: str,
+    record_step: Optional[StepRecorder] = None,
+) -> ExecutionOutcome:
+    """`RUNBOOK_EC2_REVERT_SIZE` 실행 — 상태 대조 → 정지 → 타입 원복 → 기동. (Issue #241)
+
+    execute_rightsizing과 같은 규약이다 — **예외를 던지지 않고** 단계별 결과를
+    돌려준다. 다른 것은 앞에 붙는 대조 하나다.
+
+    **되돌릴 값은 전부 인자로 받는다.** 이 함수는 백업 레코드도 DB도 읽지 않는다 —
+    원복 값의 유일한 원천이 백업 레코드라는 정책(ADR-0004 정책 ③)은 호출부가 그
+    레코드에서만 값을 뽑아 넘길 때 성립하며, 여기서 다시 조회하면 원천이 둘이 된다.
+    `restore_state`도 같은 이유로 백업 payload의 `state`다 — 원본 실행이 정지 응답에서
+    읽은 PreviousState는 그 실행 안에서만 쓴다(ADR-0008 §4).
+
+    **`applied_instance_type`은 원본 조치가 적용한 타입이다.** 되돌릴 값이 아니라
+    대조 축이며, 이것이 없으면 아래 3분기 중 ②와 ③을 가를 수 없다.
+
+    상태 대조 3분기(ADR-0008 §3-2) — 위에서 아래로, 처음 일치하는 곳에서 멈춘다.
+      ① 현재 타입 == 백업 값: 변경이 적용되지 않았거나 누군가 이미 되돌렸다 →
+         **AWS 변경 호출을 하지 않는다.** 되돌릴 것이 없음을 NOT_APPLIED 단계로 남긴다.
+         원본 조치가 타입을 실제로 바꾸지 않은 경우 ①과 ②가 동시에 참인데 ①이 이긴다 —
+         할 일이 없는 실행을 거절로 올려 사람을 부르지 않기 위해서다.
+      ② 현재 타입 == 원본이 적용한 값: 우리가 바꾼 그대로다 → 원복을 진행한다.
+      ③ 둘 다 아님: 제3자가 그사이 타입을 바꿨다 → **중단하고 CRITICAL.** 자동
+         재시도는 없다(ADR-0008 §6). 백업을 무조건 진실로 삼으면 원복이 남의 변경을
+         조용히 덮어쓴다 — 조회 1회로 막을 수 있으면 막는다.
+
+    대조 자체를 하지 못하면(AWS 조회 실패) 원복을 진행하지 않고 **보류**한다.
+    검증기의 실패는 자산이 제3자에게 바뀌었다는 근거가 아니다.
+    """
+    target = parse_arn(target_arn)
+    if target is None or target.resource_type != "instance":
+        return _rejected(f"인스턴스 ARN이 아닙니다: {target_arn}")
+    if not _non_empty_str(restore_instance_type):
+        return _rejected("백업 레코드의 instance_type이 비어 있습니다")
+    if not _non_empty_str(applied_instance_type):
+        return _rejected("원본 조치가 적용한 instance_type을 알 수 없습니다")
+
+    instance_id = target.resource_id
+    current, code = current_instance_type(instance_id, target.region)
+    if code is not None:
+        if code is R.PRECHECK_TARGET_NOT_FOUND:
+            # 인스턴스가 없으면 되돌릴 대상이 없다 — 다시 물어도 답은 같으므로 확정한다
+            return ExecutionOutcome(
+                reason_code=code,
+                error_summary=f"원복 대상 인스턴스를 찾을 수 없습니다: {instance_id}",
+            )
+        return _deferred(code, f"상태 대조 실패로 원복 보류: {code.value}")
+
+    log = _StepLog(target_arn, record_step)
+
+    if current == restore_instance_type:
+        log.begin(1, STEP_COMPARE_INSTANCE_TYPE, _OP_DESCRIBE)
+        log.succeed(
+            ExecutionEffect.NOT_APPLIED,
+            f"이미 백업 스펙 상태입니다({current}) — 되돌릴 것이 없어 변경하지 않음",
+        )
+        return ExecutionOutcome(steps=tuple(log.steps))
+
+    if current != applied_instance_type:
+        log.begin(1, STEP_COMPARE_INSTANCE_TYPE, _OP_DESCRIBE)
+        detail = (
+            f"제3자 변경 감지 — 현재 {current}, 백업 {restore_instance_type},"
+            f" 조치 적용 {applied_instance_type}"
+        )
+        log.succeed(ExecutionEffect.NOT_APPLIED, f"{detail}. 원복을 중단합니다")
+        logger.critical(
+            "revert_size_third_party_drift",
+            extra={
+                "instance_id": instance_id,
+                "current_instance_type": current,
+                "restore_instance_type": restore_instance_type,
+                "applied_instance_type": applied_instance_type,
+            },
+        )
+        return ExecutionOutcome(
+            steps=tuple(log.steps),
+            reason_code=R.PRECHECK_INVALID_STATE,
+            error_summary=detail[:_SUMMARY_LIMIT],
+        )
+
+    # ② 우리가 바꾼 그대로다 — 대조는 기록하지 않는다(STEP_COMPARE_INSTANCE_TYPE 주석)
+    ec2 = aws_client("ec2", target.region)
+    log.begin(1, STEP_STOP_INSTANCE, _OP_STOP)
+    try:
+        response = ec2.stop_instances(InstanceIds=[instance_id])
+    except (ClientError, BotoCoreError) as exc:
+        return _abort(log, exc, detail="인스턴스 정지 요청 실패")
+    try:
+        ec2.get_waiter("instance_stopped").wait(
+            InstanceIds=[instance_id],
+            WaiterConfig={
+                "Delay": STOP_WAIT_DELAY_SECONDS,
+                "MaxAttempts": STOP_WAIT_MAX_ATTEMPTS,
+            },
+        )
+    except (ClientError, BotoCoreError) as exc:
+        return _abort(log, exc, detail="정지 확인 실패")
+    log.succeed(
+        ExecutionEffect.APPLIED,
+        f"정지 확인(조치 직전 상태: {_previous_state(response) or '알 수 없음'})",
+        response=response,
+    )
+
+    log.begin(2, STEP_MODIFY_INSTANCE_TYPE, _OP_MODIFY)
+    try:
+        response = ec2.modify_instance_attribute(
+            InstanceId=instance_id, InstanceType={"Value": restore_instance_type}
+        )
+    except (ClientError, BotoCoreError) as exc:
+        return _abort(log, exc, detail="인스턴스 타입 원복 실패")
+    log.succeed(
+        ExecutionEffect.APPLIED,
+        f"타입 원복: {restore_instance_type}",
+        response=response,
+    )
+
+    # 다시 켤지는 백업 레코드의 state가 정한다(ADR-0008 §4) — 조치 이전에 멈춰 있던
+    # 인스턴스를 원복하면서 켜는 것은 되돌리기가 아니라 새 변경이다
+    log.begin(3, STEP_START_INSTANCE, _OP_START)
+    if restore_state != "running":
+        log.succeed(
+            ExecutionEffect.NOT_APPLIED,
+            f"조치 이전 상태가 {restore_state}라 기동하지 않음",
+        )
+        return ExecutionOutcome(steps=tuple(log.steps))
+    try:
+        response = ec2.start_instances(InstanceIds=[instance_id])
+    except (ClientError, BotoCoreError) as exc:
+        # 타입은 되돌아갔고 멈춰 있다 — 원복의 원복은 없으므로 수동 개입이 남는다
+        return _abort(log, exc, detail="원복 후 기동 요청 실패")
+    log.succeed(
+        ExecutionEffect.APPLIED,
+        "기동 요청 접수(2/2 Status Check는 원복 성공 판정의 축이 아니다)",
+        response=response,
+    )
+    return ExecutionOutcome(steps=tuple(log.steps))
+
+
+# ------------------------------------------------------------------ 차단 (Issue #297)
+def current_nacl_entry(
+    network_acl_id: str, region: str, *, rule_number: int, egress: bool
+):
+    """(그 슬롯의 엔트리, 사유 코드) 짝. 슬롯이 비어 있으면 둘 다 None이다.
+
+    공개 함수다. 실행과 종료 판정이 같은 축을 같은 방법으로 읽어야 하기 때문이며
+    (workflows.judge_nacl_add_deny), current_instance_type_and_state를 공개한 이유와
+    같다 — 읽는 방법이 갈리면 "규칙이 들어갔는가"의 답이 자리마다 달라진다.
+
+    **NACL이 없는 것과 슬롯이 빈 것은 다른 사건이다.** 앞은 사유 코드
+    (PRECHECK_TARGET_NOT_FOUND)로, 뒤는 엔트리 None으로 나온다 — 판정이 "삽입이 안
+    됐다"와 "대상을 못 찾았다"를 섞으면 안 되기 때문이다.
+    """
+    acl, code = _network_acl(network_acl_id, region)
+    if code is not None:
+        return None, code
+    return _find_entry(acl, rule_number, egress), None
+
+
+def nacl_entry_fingerprint_matches(
+    entry: Mapping[str, Any], backup: NaclRuleIndexBackup
+) -> bool:
+    """그 슬롯의 엔트리가 백업이 가리키는 **우리 규칙**인가 — fingerprint 3항목 대조.
+
+    `rule_number`는 재사용되는 슬롯 번호라 슬롯만 맞아서는 우리 것이라 말할 수 없다
+    (ADR-0008 §5). 그래서 판정도 삭제도 이 대조를 통과한 뒤에만 한다.
+
+    Protocol은 양쪽 모두 AWS 번호 표기여야 맞는다 — 백업이 그 표기로 저장되는 이유가
+    이 비교다(schemas.runbook_parameters.NACL_PROTOCOL_NUMBERS).
+    """
+    return (
+        entry.get("RuleAction") == backup.rule_action
+        and entry.get("CidrBlock") == backup.cidr_block
+        and entry.get("Protocol") == backup.protocol
+    )
+
+
+def execute_nacl_add_deny(
+    target_arn: str,
+    *,
+    rule_number: int,
+    cidr_block: str,
+    protocol: str,
+    record_step: Optional[StepRecorder] = None,
+) -> ExecutionOutcome:
+    """`RUNBOOK_NACL_ADD_DENY` 실행 — 서브넷 NACL에 인바운드 deny 규칙 1건 삽입.
+
+    **규칙 index 백업이 commit된 뒤에만 부른다**(workflows.store_nacl_rule_index_backup).
+    규칙을 넣고 나면 그것이 우리가 넣은 것인지 말해 줄 근거가 어디에도 없다 —
+    `RUNBOOK_NACL_RESTORE`는 삭제 대상을 백업 레코드의 fingerprint로만 특정하므로
+    (ADR-0004 롤백 공통 정책 ③, ADR-0008 §5), 백업 없이 넣은 규칙은 되돌릴 수 없는
+    변경이 된다.
+
+    단계는 하나다. 삽입은 원자적이라 부분 적용이 없고, 성공의 경계도 실행 안에 있다 —
+    RIGHTSIZING처럼 뒤따르는 판정 축(2/2 Status Check)이 없다.
+
+    TCP·UDP는 PortRange가 필수 필드라 **전체 범위(0-65535)** 를 함께 보낸다. 막는
+    축이 포트가 아니라 출발지 주소이기 때문이며, LocalStack이 빠진 요청도 받아 줘
+    실 AWS에서만 드러나는 차이라 여기 적어 둔다(_NACL_ALL_PORTS).
+
+    protocol은 이름 표기(`NaclProtocol`)로 받아 **AWS 번호 표기로 바꿔 보낸다.**
+    LocalStack은 보낸 문자열을 그대로 저장하고 실 AWS는 번호로 정규화하므로, 이름을
+    그대로 보내면 저장 값이 환경마다 갈려 백업 fingerprint 대조가 한쪽에서만 맞는다
+    (schemas.runbook_parameters.NACL_PROTOCOL_NUMBERS의 실측 주석).
+    """
+    target = parse_arn(target_arn)
+    if target is None or target.resource_type != "network-acl":
+        return _rejected(f"NACL ARN이 아닙니다: {target_arn}")
+    protocol_number = NACL_PROTOCOL_NUMBERS.get(protocol)
+    if protocol_number is None:
+        return _rejected(f"알 수 없는 프로토콜 표기: {protocol}")
+
+    ec2 = aws_client("ec2", target.region)
+    log = _StepLog(target_arn, record_step)
+
+    request: dict[str, Any] = {
+        "NetworkAclId": target.resource_id,
+        "RuleNumber": rule_number,
+        "Protocol": protocol_number,
+        "RuleAction": NACL_DENY_ACTION,
+        "Egress": NACL_ADD_DENY_EGRESS,
+        "CidrBlock": cidr_block,
+    }
+    if protocol_number in _NACL_PORT_RANGE_PROTOCOLS:
+        # 백업 fingerprint는 이 값을 보지 않는다(rule_action·cidr_block·protocol 3항목,
+        # ADR-0008 §5) — 대조 축이 아니라 요청 유효성의 문제라 요청에만 싣는다
+        request["PortRange"] = dict(_NACL_ALL_PORTS)
+
+    log.begin(1, STEP_CREATE_NACL_ENTRY, _OP_CREATE_NACL_ENTRY)
+    try:
+        response = ec2.create_network_acl_entry(**request)
+    except (ClientError, BotoCoreError) as exc:
+        # 규칙 번호가 그사이 점유됐으면 NetworkAclEntryAlreadyExists(4xx)로 온다 —
+        # _effect_for가 NOT_APPLIED로 분류하므로 되돌릴 것 없는 실패로 확정된다
+        return _abort(log, exc, detail="NACL deny 규칙 삽입 실패")
+    log.succeed(
+        ExecutionEffect.APPLIED,
+        f"deny 규칙 삽입: rule {rule_number} · {cidr_block} · protocol {protocol_number}",
+        response=response,
+    )
+    return ExecutionOutcome(steps=tuple(log.steps))
+
+
+# ------------------------------------------------------------------ 해제 (Issue #298)
+def execute_nacl_restore(
+    target_arn: str,
+    *,
+    backup: NaclRuleIndexBackup,
+    record_step: Optional[StepRecorder] = None,
+) -> ExecutionOutcome:
+    """`RUNBOOK_NACL_RESTORE` 실행 — 슬롯 대조 → 우리가 넣은 deny 규칙 1건 삭제.
+
+    **삭제할 규칙은 백업 레코드로만 특정한다.** 이 함수는 DB를 읽지 않고, 호출부가 백업
+    payload에서 뽑은 fingerprint를 받는다 — execute_revert_size가 되돌릴 값을 인자로만
+    받는 것과 같은 이유다(ADR-0004 정책 ③).
+
+    가드레일 ④가 같은 대조를 이미 했다(_precheck_nacl_restore). 그래도 삭제 직전에 다시
+    본다 — ④는 후보 생성 시점에 1회 돌고, 관제자가 [해제]를 누르기까지 시간이 있다. 그
+    사이 슬롯이 바뀌었는지는 지금 조회해야 알 수 있고, **삭제는 되돌릴 수 없다.**
+
+    슬롯 대조 3분기 — 위에서 아래로, 처음 일치하는 곳에서 멈춘다.
+      ① 슬롯이 비어 있다: 이미 해제됐다 → **AWS 변경 호출을 하지 않는다.** 되돌릴 것이
+         없음을 NOT_APPLIED 단계로 남기고 성공이다 — 관제자가 원한 상태가 이미 서 있다.
+      ② fingerprint가 일치한다: 우리가 넣은 그 규칙이다 → 삭제한다.
+      ③ 슬롯에 다른 규칙이 있다: 제3자 규칙이다 → **삭제하지 않고 중단, CRITICAL.**
+
+    NACL 자체가 없으면 지울 대상이 없다 — 다시 물어도 답이 같으므로 실패로 확정한다.
+    조회를 못 하면 판정 근거가 없으므로 자산을 만지지 않고 **보류**한다.
+    """
+    target = parse_arn(target_arn)
+    if target is None or target.resource_type != "network-acl":
+        return _rejected(f"NACL ARN이 아닙니다: {target_arn}")
+
+    entry, code = current_nacl_entry(
+        target.resource_id,
+        target.region,
+        rule_number=backup.rule_number,
+        egress=backup.egress,
+    )
+    if code is not None:
+        if code is R.PRECHECK_TARGET_NOT_FOUND:
+            return ExecutionOutcome(
+                reason_code=code,
+                error_summary=f"해제 대상 NACL을 찾을 수 없습니다: {target.resource_id}",
+            )
+        return _deferred(
+            code,
+            f"슬롯 대조 실패로 해제 보류: {code.value}",
+            event="nacl_restore_deferred",
+            aws_operation=_OP_DESCRIBE_NACL,
+        )
+
+    log = _StepLog(target_arn, record_step)
+    slot = f"rule {backup.rule_number}({'아웃바운드' if backup.egress else '인바운드'})"
+
+    if entry is None:
+        log.begin(1, STEP_COMPARE_NACL_ENTRY, _OP_DESCRIBE_NACL)
+        log.succeed(
+            ExecutionEffect.NOT_APPLIED,
+            f"{slot}이 이미 비어 있습니다 — 해제할 규칙이 없어 삭제하지 않음",
+        )
+        return ExecutionOutcome(steps=tuple(log.steps))
+
+    if not nacl_entry_fingerprint_matches(entry, backup):
+        log.begin(1, STEP_COMPARE_NACL_ENTRY, _OP_DESCRIBE_NACL)
+        detail = f"{slot}에 우리가 넣지 않은 규칙이 있습니다 — 제3자 규칙이라 삭제하지 않음"
+        log.succeed(ExecutionEffect.NOT_APPLIED, f"{detail}. 해제를 중단합니다")
+        logger.critical(
+            "nacl_restore_slot_taken_by_other_rule",
+            extra={
+                "network_acl_id": target.resource_id,
+                "rule_number": backup.rule_number,
+                "egress": backup.egress,
+            },
+        )
+        return ExecutionOutcome(
+            steps=tuple(log.steps),
+            reason_code=R.PRECHECK_INVALID_STATE,
+            error_summary=detail[:_SUMMARY_LIMIT],
+        )
+
+    # ② 우리 규칙이다 — 대조는 기록하지 않는다(STEP_COMPARE_NACL_ENTRY 주석)
+    ec2 = aws_client("ec2", target.region)
+    log.begin(1, STEP_DELETE_NACL_ENTRY, _OP_DELETE_NACL_ENTRY)
+    try:
+        response = ec2.delete_network_acl_entry(
+            NetworkAclId=target.resource_id,
+            RuleNumber=backup.rule_number,
+            Egress=backup.egress,
+        )
+    except (ClientError, BotoCoreError) as exc:
+        # 대조와 삭제 사이에 규칙이 사라졌으면 InvalidNetworkAclEntry.NotFound(4xx)로
+        # 온다 — _effect_for가 NOT_APPLIED로 분류해 되돌릴 것 없는 실패로 확정된다
+        return _abort(log, exc, detail="NACL deny 규칙 삭제 실패")
+    log.succeed(
+        ExecutionEffect.APPLIED,
+        f"deny 규칙 삭제: {slot} · {backup.cidr_block} · protocol {backup.protocol}",
+        response=response,
+    )
+    return ExecutionOutcome(steps=tuple(log.steps))
+
+
+def _volume(volume_id: str, region: str):
+    """볼륨 1건. (볼륨, 코드) 짝 — 없으면 PRECHECK_TARGET_NOT_FOUND가 채워진다.
+
+    AWS는 없는 볼륨을 빈 목록이 아니라 `InvalidVolume.NotFound`(ClientError)로 답하고,
+    그 코드는 `NotFound`로 끝나 reason_code_for가 TARGET_NOT_FOUND로 분류한다
+    (services/aws/errors.py). **LocalStack도 같게 답한다**(2026-09-21 실측 · Issue #369).
+    """
+    res, code = _call(
+        aws_client("ec2", region).describe_volumes, VolumeIds=[volume_id]
+    )
+    if code is not None:
+        return None, code
+    for volume in res.get("Volumes", []):
+        return volume, None
+    return None, R.PRECHECK_TARGET_NOT_FOUND
+
+
+def current_volume(volume_id: str, region: str):
+    """(볼륨, 사유 코드) 짝. 실행과 종료 판정이 같은 축을 같은 방법으로 읽도록 공개한다
+    (workflows.judge_ebs_delete_unattached) — current_nacl_entry를 공개한 이유와 같다.
+
+    **볼륨이 없는 것과 조회를 못 한 것은 다른 사건이다.** 앞은 PRECHECK_TARGET_NOT_FOUND,
+    뒤는 그 밖의 코드로 나온다 — 판정이 둘을 섞으면 지우지 못한 볼륨이 성공으로 닫힌다.
+    """
+    return _volume(volume_id, region)
+
+
+def volume_is_deletable(volume: Mapping[str, Any]) -> bool:
+    """지금 이 볼륨을 지워도 되는가 — `available`이고 부착이 없어야 한다.
+
+    두 축을 함께 본다. `State`만 보면 부착이 진행 중인 구간을 놓칠 수 있고, 부착
+    목록만 보면 `deleting`·`error` 같은 전이 상태를 삭제 가능으로 읽는다. 판정
+    (rule_engine.evaluate_ebs)이 `UNUSED`로 고른 축과 같으며(#276), 여기서 다시 보는
+    이유는 판정과 실행 사이에 누군가 붙였을 수 있기 때문이다.
+    """
+    return (
+        volume.get("State") == _VOLUME_DELETABLE_STATE
+        and not volume.get("Attachments")
+    )
+
+
+def volume_delete_accepted(volume: Mapping[str, Any]) -> bool:
+    """이 볼륨에 삭제가 **이미 접수**됐는가 — `deleting`·`deleted`.
+
+    끊긴 실행의 현물 판정이 쓴다(workflows.judge_ebs_delete_unattached). 삭제 호출이
+    5xx·응답 유실로 끝나도 AWS가 이미 받았을 수 있고, 그때 볼륨은 몇 분간 deleting에
+    머문다 — 조회에 잡혔다는 것만으로 실패로 확정하면 **실제로 지워진 삭제가 실패로
+    남는다**(PR #390 리뷰). 이 두 상태는 available로 돌아오지 않으므로 성공이다.
+
+    volume_is_deletable과 반대 축이 아니다. 저쪽은 "지금 지워도 되는가"(실행 전),
+    이쪽은 "지우라는 요청이 이미 들어갔는가"(실행 후)를 묻는다.
+    """
+    return volume.get("State") in _VOLUME_DELETE_ACCEPTED_STATES
+
+
+def execute_ebs_delete_unattached(
+    target_arn: str,
+    *,
+    record_step: Optional[StepRecorder] = None,
+) -> ExecutionOutcome:
+    """`RUNBOOK_EBS_DELETE_UNATTACHED` 실행 — 상태 재확인 → 최종 스냅숏 → 완료 확인 → 삭제.
+    (Issue #369)
+
+    **이 런북은 되돌릴 수 없다.** 등록 롤백이 없고(SSOT §Action Whitelist) 백업 레코드
+    4종에도 EBS가 없다(ADR-0008 §5). 데이터를 지키는 장치는 **삭제 직전의 스냅숏 하나**
+    뿐이라, 순서가 곧 계약이다.
+
+    단계 4종 — 위에서 아래로, 앞이 성립할 때만 뒤로 간다.
+      ① 상태 재확인: `available`이고 부착이 없는가. 어긋나면 **스냅숏도 만들지 않고**
+         거절한다 — 가드레일 ④는 후보 생성 시점에 돌고, 관제자가 [조치 실행]을 누르기까지
+         그 사이에 누군가 볼륨을 붙였을 수 있다.
+      ② 최종 스냅숏: `create_snapshot`. 거절이면 삭제로 가지 않는다.
+      ③ 완료 확인: `snapshot_completed` 대기. 시간 초과·`error`면 **삭제하지 않는다** —
+         진행 중(`pending`) 스냅숏으로 지워도 되는지를 AWS 동작에 기대지 않는다.
+      ④ 삭제: `delete_volume`.
+
+    **볼륨이 이미 없으면 성공이다**(execute_nacl_restore ①과 같은 결) — 관제자가 원한
+    상태가 이미 서 있고, 다시 물어도 답이 같다. 우리가 지운 것이 아니므로 스냅숏도
+    없으며 그 사실을 단계 요약에 적는다.
+
+    조회를 못 하면 자산을 만지지 않고 **보류**한다 — 확정하면 검증기의 실패가 조치의
+    실패로 저장된다(Issue #249).
+
+    **스냅숏에 태그를 달지 않는다**(2026-09-21 결정). 달면 ADR-0009 §3의 "스냅숏은 태그가
+    없어 우리 것인지 가릴 수 없으므로 보고만 한다"를 자동 정리로 바꿀 수 있지만, 스모크
+    IAM 정책·`provision_smoke_aws.py`·ADR 본문을 함께 고쳐야 해 이 카드 밖이다. 지금은
+    스모크마다 남는 1 GiB 스냅숏을 손으로 지운다.
+
+    되돌릴 근거는 **스냅숏 ID**다 — ②의 단계 요약에 원본 볼륨 ID와 함께 남긴다. 볼륨을
+    되살리려면 관제자가 그 ID로 손수 만든다(복구 런북은 Whitelist 10종 밖이다).
+    """
+    target = parse_arn(target_arn)
+    if target is None or target.resource_type != "volume":
+        return _rejected(f"EBS 볼륨 ARN이 아닙니다: {target_arn}")
+
+    volume_id = target.resource_id
+    volume, code = current_volume(volume_id, target.region)
+    if code is not None and code is not R.PRECHECK_TARGET_NOT_FOUND:
+        return _deferred(
+            code,
+            f"볼륨 상태 조회 실패로 삭제 보류: {code.value}",
+            event="ebs_delete_deferred",
+            aws_operation=_OP_DESCRIBE_VOLUMES,
+        )
+
+    log = _StepLog(target_arn, record_step)
+
+    if volume is None:
+        # 이미 없다 — 지울 것이 없고 다시 물어도 답이 같다. 대조 자체가 결론인 경우라
+        # 단계를 남긴다(STEP_COMPARE_VOLUME_STATE 주석의 예외 두 경우 중 하나)
+        log.begin(1, STEP_COMPARE_VOLUME_STATE, _OP_DESCRIBE_VOLUMES)
+        log.succeed(
+            ExecutionEffect.NOT_APPLIED,
+            f"볼륨 {volume_id}이 이미 없습니다 — 스냅숏 없이 삭제할 것이 없음",
+        )
+        return ExecutionOutcome(steps=tuple(log.steps))
+
+    if not volume_is_deletable(volume):
+        state = volume.get("State") or "알 수 없음"
+        attached = len(volume.get("Attachments") or ())
+        log.begin(1, STEP_COMPARE_VOLUME_STATE, _OP_DESCRIBE_VOLUMES)
+        log.succeed(
+            ExecutionEffect.NOT_APPLIED,
+            f"삭제 조건 불충족(state={state} · 부착 {attached}건) — 스냅숏도 만들지 않음",
+        )
+        return ExecutionOutcome(
+            steps=tuple(log.steps),
+            reason_code=R.PRECHECK_INVALID_STATE,
+            error_summary=(
+                f"판정 이후 볼륨 상태가 바뀌었습니다: state={state} · 부착 {attached}건"
+            )[:_SUMMARY_LIMIT],
+        )
+
+    ec2 = aws_client("ec2", target.region)
+
+    # ② 최종 스냅숏 — 삭제로 가는 유일한 안전장치라 여기서 실패하면 멈춘다
+    log.begin(2, STEP_CREATE_SNAPSHOT, _OP_CREATE_SNAPSHOT)
+    try:
+        snapshot = ec2.create_snapshot(
+            VolumeId=volume_id,
+            Description=f"vigilantis final snapshot before delete: {volume_id}",
+        )
+    except (ClientError, BotoCoreError) as exc:
+        return _abort(log, exc, detail="최종 스냅숏 생성 실패")
+    snapshot_id = str(snapshot.get("SnapshotId") or "")
+    if not _non_empty_str(snapshot_id):
+        # 200을 받았는데 ID가 없다 — 스냅숏이 만들어졌는지조차 알 수 없고(effect UNKNOWN),
+        # 완료를 확인할 방법도 되살릴 근거를 남길 방법도 없다. 실패로 닫고 삭제하지 않는다.
+        log.fail(
+            ValueError("응답에 SnapshotId가 없습니다"),
+            detail="최종 스냅숏 생성 결과 확인 실패",
+        )
+        return ExecutionOutcome(
+            steps=tuple(log.steps),
+            reason_code=R.PRECHECK_AWS_ERROR,
+            error_summary="최종 스냅숏 ID를 받지 못해 삭제를 중단했습니다",
+        )
+    log.succeed(
+        ExecutionEffect.APPLIED,
+        f"최종 스냅숏 생성: {snapshot_id} (원본 볼륨 {volume_id})",
+        response=snapshot,
+    )
+
+    # ③ 완료 확인 — pending 상태로 지우지 않는다
+    log.begin(3, STEP_WAIT_SNAPSHOT, _OP_DESCRIBE_SNAPSHOTS)
+    try:
+        ec2.get_waiter("snapshot_completed").wait(
+            SnapshotIds=[snapshot_id],
+            WaiterConfig={
+                "Delay": SNAPSHOT_WAIT_DELAY_SECONDS,
+                "MaxAttempts": SNAPSHOT_WAIT_MAX_ATTEMPTS,
+            },
+        )
+    except (ClientError, BotoCoreError) as exc:
+        # WaiterError는 BotoCoreError라 _effect_for가 UNKNOWN을 준다 — 스냅숏이 끝났는지
+        # 모르는 상태다. 볼륨은 그대로이므로 종료 판정이 현물을 보고 실패로 닫는다
+        return _abort(log, exc, detail=f"최종 스냅숏 완료 확인 실패({snapshot_id})")
+    log.succeed(
+        ExecutionEffect.APPLIED,
+        f"최종 스냅숏 완료 확인: {snapshot_id}",
+    )
+
+    # ④ 삭제 — 여기부터 되돌릴 수 없다
+    log.begin(4, STEP_DELETE_VOLUME, _OP_DELETE_VOLUME)
+    try:
+        response = ec2.delete_volume(VolumeId=volume_id)
+    except (ClientError, BotoCoreError) as exc:
+        # 대조와 삭제 사이에 붙었으면 VolumeInUse(4xx)로 온다 — _effect_for가
+        # NOT_APPLIED로 분류해 되돌릴 것 없는 실패로 확정된다
+        return _abort(log, exc, detail="볼륨 삭제 실패")
+    log.succeed(
+        ExecutionEffect.APPLIED,
+        f"볼륨 삭제: {volume_id} (복구 근거 스냅숏 {snapshot_id})",
+        response=response,
+    )
+    return ExecutionOutcome(steps=tuple(log.steps))
+
+
+# ------------------------------------------------------------------ SG 삭제 (Issue #368)
+def _security_group(group_id: str, region: str):
+    """보안 그룹 1건. (SG, 코드) 짝 — 없으면 PRECHECK_TARGET_NOT_FOUND가 채워진다.
+
+    AWS는 없는 SG를 빈 목록이 아니라 `InvalidGroup.NotFound`(ClientError)로 답하고,
+    그 코드는 `NotFound`로 끝나 reason_code_for가 TARGET_NOT_FOUND로 분류한다
+    (services/aws/errors.py). **LocalStack도 같게 답한다**(2026-09-22 실측 · Issue #368).
+    """
+    res, code = _call(
+        aws_client("ec2", region).describe_security_groups, GroupIds=[group_id]
+    )
+    if code is not None:
+        return None, code
+    for group in res.get("SecurityGroups", []):
+        return group, None
+    return None, R.PRECHECK_TARGET_NOT_FOUND
+
+
+def current_security_group(group_id: str, region: str):
+    """(보안 그룹, 사유 코드) 짝. 실행과 종료 판정이 같은 축을 같은 방법으로 읽도록
+    공개한다(workflows.judge_sg_delete_isolated) — current_volume과 같은 이유다.
+
+    **SG가 없는 것과 조회를 못 한 것은 다른 사건이다.** 앞은 PRECHECK_TARGET_NOT_FOUND,
+    뒤는 그 밖의 코드로 나온다 — 판정이 둘을 섞으면 지우지 못한 SG가 성공으로 닫힌다.
+    """
+    return _security_group(group_id, region)
+
+
+def escape_filter_value(value: str) -> str:
+    """EC2 필터 값을 **글자 그대로** 찾도록 와일드카드 문자를 이스케이프한다.
+
+    EC2 필터는 값에 든 `*`(0자 이상)와 `?`(0–1자)를 와일드카드로 해석하고, 앞에 붙인
+    백슬래시가 그 해석을 끈다(EC2 User Guide — Using_Filtering §Wildcards). 그런데
+    **보안 그룹 이름에는 `*`를 쓸 수 있어**(CreateSecurityGroup 유효 문자) 이름을 그대로
+    넣으면 필터가 이름이 아니라 패턴이 된다 — `prod-*`로 찾으면 `prod-api`가 잡힌다.
+
+    백슬래시를 **먼저** 바꾼다. 나중에 바꾸면 `*`를 이스케이프하며 넣은 백슬래시까지
+    한 번 더 이스케이프돼, 이스케이프가 백슬래시 자신에게 걸리고 `*`는 다시 와일드카드로
+    풀린다.
+    """
+    for char in ("\\", "*", "?"):
+        value = value.replace(char, "\\" + char)
+    return value
+
+
+def security_group_by_name(group_name: str, vpc_id: str, region: str):
+    """(보안 그룹, 사유 코드) 짝 — 이름과 VPC로 찾는다. 없으면 둘 다 None.
+
+    `SG_RECREATE`의 종료 판정이 쓴다(workflows.judge_sg_recreate). **새 SG ID로는 찾을
+    수 없기 때문이다** — 생성 직후 프로세스가 끊기면 AWS가 발급한 ID가 어디에도 기록되지
+    않고, 그때 "재생성됐는가"에 답할 수 있는 좌표는 백업의 이름과 VPC뿐이다. VPC 안에서
+    보안 그룹 이름은 유일하므로 이 둘이면 하나로 좁혀진다(CreateSecurityGroup API 문서 —
+    같은 VPC에 같은 이름을 만들면 InvalidGroup.Duplicate).
+
+    **이름은 필터에 그대로 넣지 않고, 돌아온 것도 그대로 믿지 않는다.** 필터 값은
+    이스케이프해 보내고(escape_filter_value), 돌아온 `GroupName`·`VpcId`가 찾던 값과
+    글자 그대로 같은 것만 고른다. 둘 중 하나만 해도 이 조회는 **다른 SG를 재생성된 SG로
+    착각할 수 있다** — 그러면 복원된 것이 없어도 원복이 SUCCESS로, 원본이 ROLLED_BACK으로
+    확정되고 절반만 선 SG를 다시 볼 자리가 사라진다(PR #399 리뷰).
+
+    **첫 결과가 아니라 일치하는 결과를 고른다.** 유사 이름이 섞여 돌아올 때 찾던 SG가
+    목록 뒤에 있으면, 앞만 보는 조회는 있는 것을 없다고 답한다.
+
+    이름 필터는 없는 이름에 오류를 내지 않고 **빈 목록**을 준다. 그래서 대상 부재는
+    사유 코드가 아니라 (None, None)이다 — current_nacl_entry가 빈 슬롯을 다루는 것과
+    같은 결이며, "못 찾았다"와 "못 물어봤다"를 섞지 않는다.
+    """
+    res, code = _call(
+        aws_client("ec2", region).describe_security_groups,
+        Filters=[
+            {"Name": "group-name", "Values": [escape_filter_value(group_name)]},
+            {"Name": "vpc-id", "Values": [escape_filter_value(vpc_id)]},
+        ],
+    )
+    if code is not None:
+        return None, code
+    for group in res.get("SecurityGroups", []):
+        if group.get("GroupName") == group_name and group.get("VpcId") == vpc_id:
+            return group, None
+    return None, None
+
+
+def execute_sg_delete_isolated(
+    target_arn: str,
+    *,
+    record_step: Optional[StepRecorder] = None,
+) -> ExecutionOutcome:
+    """`RUNBOOK_SG_DELETE_ISOLATED` 실행 — 미부착 보안 그룹 1개 삭제. (Issue #368)
+
+    **SG 전체 규칙 백업이 commit된 뒤에만 부른다**(workflows.store_sg_full_rules_backup).
+    지우고 나면 그 이름도 설명도 규칙도 AWS에 다시 물을 수 없어, 백업 없이 지운 SG는
+    되돌릴 수 없는 변경이 된다(ADR-0004 롤백 공통 정책 ③, ADR-0008 §1 ①).
+
+    단계는 하나다. EBS 삭제와 달리 **삭제 직전 상태 재확인을 두지 않는다** — "지금 이
+    SG가 어디에도 안 붙었는가"를 우리가 조회로 판정하면 ENI·다른 SG 규칙·참조 관계를
+    빠짐없이 세야 하고, 그 목록이 우리 쪽에 생기는 순간 AWS가 아는 참조와 갈린다.
+    **AWS가 그 판정을 이미 한다**: 무엇이라도 참조하고 있으면 `DependencyViolation`으로
+    거절한다. 그 거절은 4xx라 `_effect_for`가 `NOT_APPLIED`로 적어, 자산이 그대로인
+    실패로 확정된다.
+
+    **LocalStack은 이 거절을 흉내 내지 않는다**(2026-09-22 실측 · Issue #368) — ENI에
+    붙은 SG도 다른 SG가 참조하는 SG도 그냥 지워진다. 그래서 이 갈래는 단위 테스트가
+    거절을 주입해 고정하고, 실물 확인은 10/6(화) 실 AWS 스모크 몫이다(ADR-0006 §4).
+
+    종료 판정은 `describe_security_groups`로 한다 — `InvalidGroup.NotFound`면 삭제
+    확인이다(workflows.judge_sg_delete_isolated).
+    """
+    target = parse_arn(target_arn)
+    if target is None or target.resource_type != "security-group":
+        return _rejected(f"보안 그룹 ARN이 아닙니다: {target_arn}")
+
+    group_id = target.resource_id
+    ec2 = aws_client("ec2", target.region)
+    log = _StepLog(target_arn, record_step)
+
+    log.begin(1, STEP_DELETE_SECURITY_GROUP, _OP_DELETE_SG)
+    try:
+        response = ec2.delete_security_group(GroupId=group_id)
+    except (ClientError, BotoCoreError) as exc:
+        # DependencyViolation(4xx) · InvalidGroup.NotFound(4xx) 모두 _effect_for가
+        # NOT_APPLIED로 분류한다 — 되돌릴 것 없는 실패로 확정된다
+        return _abort(log, exc, detail="보안 그룹 삭제 실패")
+    log.succeed(
+        ExecutionEffect.APPLIED,
+        f"보안 그룹 삭제: {group_id}",
+        response=response,
+    )
+    return ExecutionOutcome(steps=tuple(log.steps))
+
+
+# ------------------------------------------------------------------ SG 원복 (Issue #368)
+def rebind_self_reference(
+    permissions: list[Mapping[str, Any]],
+    *,
+    original_group_id: Optional[str],
+    new_group_id: str,
+) -> list[dict[str, Any]]:
+    """백업 규칙의 **자기 참조**를 새 그룹 ID로 바꾼다. 나머지는 그대로 둔다.
+
+    원본 SG가 자기 자신을 허용하던 규칙(`UserIdGroupPairs`에 자기 ID)은 그대로 주입할
+    수 없다 — 그 ID의 SG는 이미 없어 `InvalidGroup.NotFound`로 거절된다. 원본이 뜻한
+    것은 "이 SG를 단 대상끼리 통신"이므로, 새 ID로 바꿔 넣는 것이 같은 뜻이다.
+
+    **다른 SG를 가리키는 쌍은 건드리지 않는다.** 그 SG들은 살아 있고, 바꾸면 원본이
+    허용하지 않던 통신을 우리가 여는 것이 된다.
+
+    공개 함수다. 실행과 종료 판정이 **같은 치환을 거친 규칙**을 대조해야 하기 때문이다
+    (workflows.judge_sg_recreate) — 판정이 치환 없이 대조하면 정상 복원이 불일치로 읽힌다.
+
+    `original_group_id`가 없는 백업(부가 항목이라 빌 수 있다)은 무엇이 자기 참조인지
+    가릴 수 없으므로 아무것도 바꾸지 않는다 — 그 경우 자기 참조 규칙의 주입은 AWS가
+    거절하고, 실패가 사실대로 남는다. 짐작으로 바꾸면 엉뚱한 SG를 여는 쪽이 더 나쁘다.
+    """
+    if not original_group_id:
+        return [dict(permission) for permission in permissions]
+
+    def rebound_pair(pair: Any) -> Any:
+        if isinstance(pair, Mapping) and pair.get("GroupId") == original_group_id:
+            return {**pair, "GroupId": new_group_id}
+        return pair
+
+    result: list[dict[str, Any]] = []
+    for permission in permissions:
+        item = dict(permission)
+        pairs = item.get("UserIdGroupPairs")
+        if isinstance(pairs, list):
+            item["UserIdGroupPairs"] = [rebound_pair(pair) for pair in pairs]
+        result.append(item)
+    return result
+
+
+
+
+def sg_permission_fingerprint(permission: Mapping[str, Any]) -> tuple:
+    """규칙 1건을 **비교 가능한 값**으로 줄인다.
+
+    `describe_security_groups`가 돌려주는 규칙은 우리가 보낸 것과 글자 그대로 같지 않다 —
+    AWS가 빈 목록 키(`Ipv6Ranges`·`PrefixListIds`)를 채워 주고, 규칙 설명(`Description`)이
+    붙거나 빠지며, 목록 순서도 보장되지 않는다. 그 차이를 규칙이 달라진 것으로 읽으면
+    멀쩡히 복원된 SG가 "원복 미완"으로 확정된다(workflows.judge_sg_recreate).
+
+    반대로 **허용 범위를 결정하는 축은 전부 남긴다** — 프로토콜·포트 범위와 네 갈래
+    출발지(IPv4·IPv6·SG·접두 목록)다. 이 중 하나라도 빠뜨리면 원본보다 넓어진 SG가
+    복원 완료로 닫힌다.
+    """
+
+    def identifiers(key: str, field: str) -> tuple:
+        return tuple(
+            sorted(
+                str(item[field])
+                for item in (permission.get(key) or [])
+                if isinstance(item, Mapping) and item.get(field)
+            )
+        )
+
+    return (
+        str(permission.get("IpProtocol")),
+        permission.get("FromPort"),
+        permission.get("ToPort"),
+        identifiers("IpRanges", "CidrIp"),
+        identifiers("Ipv6Ranges", "CidrIpv6"),
+        identifiers("UserIdGroupPairs", "GroupId"),
+        identifiers("PrefixListIds", "PrefixListId"),
+    )
+
+
+def sg_permissions_match(
+    actual: Any, expected: list[Mapping[str, Any]]
+) -> bool:
+    """두 규칙 목록이 같은 허용 범위를 뜻하는가. 순서와 표기 차이는 무시한다.
+
+    Counter로 세는 이유는 **같은 규칙이 두 번 있는 것과 한 번 있는 것이 다르기** 때문이
+    아니라(AWS가 중복을 거절한다), 정렬할 수 없는 값이 섞이기 때문이다 — `FromPort`는
+    프로토콜에 따라 int이거나 없어서(None) 튜플 정렬이 TypeError로 끊긴다.
+    """
+    return Counter(
+        sg_permission_fingerprint(item)
+        for item in (actual or [])
+        if isinstance(item, Mapping)
+    ) == Counter(sg_permission_fingerprint(item) for item in expected)
+def execute_sg_recreate(
+    target_arn: str,
+    *,
+    backup: SgFullRulesBackup,
+    record_step: Optional[StepRecorder] = None,
+) -> ExecutionOutcome:
+    """`RUNBOOK_SG_RECREATE` 실행 — 생성 → 기본 egress 회수 → 규칙 주입. (Issue #368)
+
+    **복원 값은 백업 레코드에서만 온다.** 이 함수는 DB를 읽지 않고 호출부가 넘긴 계약
+    모델을 받는다 — execute_revert_size가 되돌릴 타입을 인자로만 받는 것과 같은 이유다
+    (ADR-0004 롤백 공통 정책 ③).
+
+    **되붓기로 끝나지 않는 지점이 셋이다.**
+
+      ① 새 SG ID — 원본 ID를 참조하던 다른 SG 규칙과 ENI 연결은 **돌아오지 않는다**
+         (ADR-0008 §참조 무결성). 되돌리지 않고, 첫 단계 요약에 `원본 ID → 새 ID`를
+         남겨 관제자가 수동 재연결 대상을 알게 한다.
+      ② 자기 참조 규칙 — 원본 자기 ID를 가리키는 쌍만 새 ID로 바꿔 넣는다
+         (rebind_self_reference).
+      ③ 기본 egress — `create_security_group`이 전체 허용 egress 1건을 자동으로 붙인다
+         (DEFAULT_EGRESS_PERMISSION). 걷어 내지 않으면 백업에 같은 규칙이 있을 때
+         주입이 `InvalidPermission.Duplicate`로 실패하고, 없을 때는 원본보다 **넓은**
+         SG가 남는다. 그래서 회수는 백업 내용과 무관하게 **항상** 거친다.
+
+    회수 대상은 **새 SG를 조회해 실제로 붙은 규칙**으로 정한다. 상수로 지우면 AWS가
+    다른 모양을 붙였을 때 그 규칙이 조용히 남아 SG가 넓어진다.
+
+    **원복의 원복은 없다**(ADR-0008 §6). 중간에 끊기면 규칙 일부만 선 SG가 남고, 그
+    상태는 자동 재시도가 아니라 사람에게 간다 — 자식이 FAILED로 닫히면 원본이
+    ROLLBACK_FAILED로 확정된다(workflows._settle_rollback_origin).
+
+    종료 판정은 **백업의 `group_name` + `vpc_id`** 로 재생성 SG를 찾는다
+    (workflows.judge_sg_recreate) — 생성 직후 끊겨 새 ID가 기록되지 않았어도 찾을 수 있다.
+    """
+    target = parse_arn(target_arn)
+    if target is None or target.resource_type != "security-group":
+        return _rejected(f"보안 그룹 ARN이 아닙니다: {target_arn}")
+
+    ec2 = aws_client("ec2", target.region)
+    log = _StepLog(target_arn, record_step)
+    original_group_id = backup.group_id or target.resource_id
+
+    # ① 생성 — 여기부터 자산이 바뀐다
+    log.begin(1, STEP_CREATE_SECURITY_GROUP, _OP_CREATE_SG)
+    try:
+        created = ec2.create_security_group(
+            GroupName=backup.group_name,
+            Description=backup.description,
+            VpcId=backup.vpc_id,
+        )
+    except (ClientError, BotoCoreError) as exc:
+        # 같은 VPC에 같은 이름이 이미 있으면 InvalidGroup.Duplicate(4xx)로 온다 —
+        # NOT_APPLIED라 되돌릴 것 없는 실패로 확정된다
+        return _abort(log, exc, detail="보안 그룹 생성 실패")
+    new_group_id = str(created.get("GroupId") or "")
+    if not _non_empty_str(new_group_id):
+        # 200을 받았는데 ID가 없다 — 만들어졌는지조차 알 수 없고(effect UNKNOWN),
+        # 규칙을 주입할 대상도 특정할 수 없다. 여기서 멈추고 판정에 넘긴다
+        log.fail(
+            ValueError("응답에 GroupId가 없습니다"),
+            detail="보안 그룹 생성 결과 확인 실패",
+        )
+        return ExecutionOutcome(
+            steps=tuple(log.steps),
+            reason_code=R.PRECHECK_AWS_ERROR,
+            error_summary="재생성된 보안 그룹 ID를 받지 못해 규칙 복원을 중단했습니다",
+        )
+    log.succeed(
+        ExecutionEffect.APPLIED,
+        f"보안 그룹 재생성: {backup.group_name} · 원본 {original_group_id} → 새 {new_group_id}",
+        response=created,
+    )
+
+    # ② 기본 egress 회수 — 실제로 붙은 것을 조회해 그것만 걷어 낸다
+    log.begin(2, STEP_REVOKE_DEFAULT_EGRESS, _OP_REVOKE_SG_EGRESS)
+    group, code = _security_group(new_group_id, target.region)
+    if code is not None:
+        # 방금 만든 SG를 조회하지 못했다. 회수 없이 규칙을 주입하면 백업보다 넓은 SG가
+        # 남을 수 있으므로 여기서 멈춘다 — 단계가 남아 있어 판정이 현물을 본다
+        log.fail(
+            RuntimeError(f"재생성 SG 조회 실패: {code.value}"),
+            detail="기본 egress 확인 실패",
+        )
+        return ExecutionOutcome(
+            steps=tuple(log.steps),
+            reason_code=code,
+            error_summary=(
+                f"재생성 SG({new_group_id}) 조회에 실패해 기본 egress를 회수하지 못했습니다"
+            ),
+        )
+    attached_egress = list(group.get("IpPermissionsEgress") or [])
+    if not attached_egress:
+        # 붙은 것이 없다 — 회수할 대상이 없을 뿐 실패가 아니다
+        log.succeed(
+            ExecutionEffect.NOT_APPLIED,
+            f"자동 부착된 기본 egress가 없습니다 — 회수할 규칙 없음({new_group_id})",
+        )
+    else:
+        try:
+            revoked = ec2.revoke_security_group_egress(
+                GroupId=new_group_id, IpPermissions=attached_egress
+            )
+        except (ClientError, BotoCoreError) as exc:
+            return _abort(log, exc, detail="기본 egress 회수 실패")
+        log.succeed(
+            ExecutionEffect.APPLIED,
+            f"자동 부착 egress {len(attached_egress)}건 회수({new_group_id})",
+            response=revoked,
+        )
+
+    # ③ 규칙 주입 — 복원할 규칙이 없는 방향은 호출하지 않는다(빈 목록은 파라미터 오류다)
+    sequence = 3
+    for step_type, aws_operation, operation, permissions, label in (
+        (
+            STEP_AUTHORIZE_SG_INGRESS,
+            _OP_AUTHORIZE_SG_INGRESS,
+            ec2.authorize_security_group_ingress,
+            backup.ingress_permissions,
+            "인바운드",
+        ),
+        (
+            STEP_AUTHORIZE_SG_EGRESS,
+            _OP_AUTHORIZE_SG_EGRESS,
+            ec2.authorize_security_group_egress,
+            backup.egress_permissions,
+            "아웃바운드",
+        ),
+    ):
+        if not permissions:
+            continue
+        payload = rebind_self_reference(
+            permissions,
+            original_group_id=backup.group_id,
+            new_group_id=new_group_id,
+        )
+        log.begin(sequence, step_type, aws_operation)
+        try:
+            response = operation(GroupId=new_group_id, IpPermissions=payload)
+        except (ClientError, BotoCoreError) as exc:
+            return _abort(log, exc, detail=f"{label} 규칙 복원 실패")
+        log.succeed(
+            ExecutionEffect.APPLIED,
+            f"{label} 규칙 {len(payload)}건 복원({new_group_id})",
+            response=response,
+        )
+        sequence += 1
+
+    logger.info(
+        "sg_recreated",
+        extra={
+            "original_group_id": original_group_id,
+            "new_group_id": new_group_id,
+            "group_name": backup.group_name,
+        },
     )
     return ExecutionOutcome(steps=tuple(log.steps))
