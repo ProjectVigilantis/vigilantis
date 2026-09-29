@@ -1,6 +1,6 @@
 """ORM 메타데이터 계약 테스트 — DB 없이 항상 실행된다. (Issue #60)
 
-13종 등록·제약 존재·Enum 타입 단일화처럼 모델 정의 자체가 지켜야 하는 형태를
+14종 등록·제약 존재·Enum 타입 단일화처럼 모델 정의 자체가 지켜야 하는 형태를
 검증한다. 실제 거절 동작(제약 위반)은 test_repositories.py(통합)가 확인한다.
 """
 
@@ -16,8 +16,9 @@ for p in (str(CORE_API), str(REPO_ROOT / "packages")):
 from db.models import Base  # noqa: E402
 
 EXPECTED_TABLES = {
-    # 자산·인시던트 계열 9종
+    # 자산·인시던트 계열 10종
     "collection_runs",
+    "asset_inventory_counts",  # 회차별 유형별 자산 수 — 시계열 축 5 (2026-09-29)
     "assets",
     "asset_relationships",
     "metric_summaries",
@@ -34,7 +35,7 @@ EXPECTED_TABLES = {
 }
 
 
-def test_thirteen_tables_registered():
+def test_fourteen_tables_registered():
     assert set(Base.metadata.tables) == EXPECTED_TABLES
 
 

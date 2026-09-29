@@ -882,6 +882,35 @@ def persist_inventory(
             error_summary=error_summary,
         )
 
+        # 유형별 자산 수 스냅샷(축 5) — 관측한 유형만 남긴다. 못 본 유형(degrade)을 0으로 남기면
+        # 추이가 자산이 사라진 것처럼 떨어진다. 어느 유형을 못 봤는지는 아래 소멸 표시와 같은
+        # 지도(UNOBSERVED_TYPES_BY_FAILURE)가 정하고, 모르는 라벨이 섞이면 이 회차는 남기지 않는다.
+        unknown_labels = set(inv.collector_failures) - UNOBSERVED_TYPES_BY_FAILURE.keys()
+        if unknown_labels:
+            _log.warning(
+                "리전 %s: 모르는 수집 실패 라벨 %s — 자산 수 스냅샷을 건너뛴다",
+                inv.region,
+                sorted(unknown_labels),
+            )
+        else:
+            unseen = {
+                t for label in inv.collector_failures for t in UNOBSERVED_TYPES_BY_FAILURE[label]
+            }
+            by_type = {
+                AssetType.EC2: ec2_count,
+                AssetType.SG: sg_count,
+                AssetType.NACL: nacl_count,
+                AssetType.EBS: ebs_count,
+                AssetType.LAUNCH_TEMPLATE: lt_count,
+                AssetType.AUTO_SCALING_GROUP: asg_count,
+                AssetType.ALB_TARGET_GROUP: tg_count,
+            }
+            assets_repo.record_inventory_counts(
+                db,
+                collection_run_id=collection_run_id,
+                counts={t: n for t, n in by_type.items() if t not in unseen},
+            )
+
     # 소멸 자산 표시 — **이번 회차가 실제로 관측한 유형에 대해서만** 한다(#332).
     # 회차 상태(PARTIAL)로 가르지 않는 이유는 그 단위가 너무 거칠기 때문이다 —
     # LocalStack Community 는 autoscaling·elbv2 가 라이선스 밖이라 실수집 회차가

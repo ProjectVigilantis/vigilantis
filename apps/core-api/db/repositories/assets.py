@@ -571,6 +571,82 @@ def sg_exposure_history(
     return [SgExposureBucket(row.observed_at, int(row.open_count)) for row in db.execute(stmt)]
 
 
+def record_inventory_counts(
+    db: Session,
+    *,
+    collection_run_id: str,
+    counts: dict[AssetType, int],
+) -> None:
+    """회차 1회가 관측한 유형별 자산 수를 남긴다 — 축 5의 원천(``models.AssetInventoryCount``).
+
+    ``counts`` 에는 **관측한 유형만** 담아 넘긴다. 못 본 유형을 0으로 넣으면 추이가 자산이
+    사라진 것처럼 떨어진다(호출부 ``persist_inventory`` 가 degrade 유형을 뺀다).
+    """
+    for asset_type, count in counts.items():
+        db.add(
+            models.AssetInventoryCount(
+                collection_run_id=collection_run_id, asset_type=asset_type, count=count
+            )
+        )
+    db.flush()
+
+
+class AssetInventoryBucket(NamedTuple):
+    observed_at: datetime
+    asset_type: AssetType
+    count: int
+
+
+def asset_inventory_history(
+    db: Session,
+    *,
+    regions: Sequence[str],
+    since: datetime,
+    bucket_seconds: int,
+) -> list[AssetInventoryBucket]:
+    """시간 칸 × 유형별 자산 수 — 시계열 축 5.
+
+    시간 칸 규칙은 ``sg_exposure_history`` 와 같다 — 리전마다 갈리는 회차를 ``bucket_seconds``
+    칸으로 묶어 합산한다. 한 칸에 **같은 리전의 회차가 둘** 들면(스캔 주기보다 짧게 재수집)
+    합산하면 자산이 두 배로 보이므로, 리전마다 그 칸의 **마지막 회차** 하나만 센다.
+
+    그 칸에서 한 유형을 본 회차가 없으면 그 (칸, 유형) 행이 없다 — 0건과 구분된다.
+    """
+    if not regions:
+        return []
+
+    run = models.CollectionRun
+    bucket = func.date_bin(timedelta(seconds=bucket_seconds), run.started_at, _BUCKET_ORIGIN)
+    # 리전 × 칸마다 가장 늦게 시작한 회차 1건.
+    ranked = (
+        select(
+            run.collection_run_id,
+            bucket.label("observed_at"),
+            func.row_number()
+            .over(
+                partition_by=(run.region, bucket),
+                order_by=(run.started_at.desc(), run.collection_run_id.desc()),
+            )
+            .label("rn"),
+        )
+        .where(run.region.in_(regions), run.started_at >= since)
+        .subquery()
+    )
+    counts = models.AssetInventoryCount
+    stmt = (
+        select(ranked.c.observed_at, counts.asset_type, func.sum(counts.count).label("count"))
+        .select_from(ranked)
+        .join(counts, counts.collection_run_id == ranked.c.collection_run_id)
+        .where(ranked.c.rn == 1)
+        .group_by(ranked.c.observed_at, counts.asset_type)
+        .order_by(ranked.c.observed_at, counts.asset_type)
+    )
+    return [
+        AssetInventoryBucket(row.observed_at, AssetType(row.asset_type), int(row.count))
+        for row in db.execute(stmt)
+    ]
+
+
 def latest_rule_evaluation_by_asset(db: Session) -> dict[str, models.RuleEvaluation]:
     """자산별 최신 판정 1건 일괄 조회 — 자산마다 latest_rule_evaluation()을 반복
     호출하는 N+1을 피한다. (Issue #68)
