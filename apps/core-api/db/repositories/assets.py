@@ -571,6 +571,80 @@ def sg_exposure_history(
     return [SgExposureBucket(row.observed_at, int(row.open_count)) for row in db.execute(stmt)]
 
 
+class AssetStatusBucket(NamedTuple):
+    observed_at: datetime
+    threat: int
+    cost_candidate: int
+    unused: int
+    skip: int
+    undecided: int
+
+
+def asset_status_history(
+    db: Session,
+    *,
+    regions: Sequence[str],
+    since: datetime,
+    bucket_seconds: int,
+) -> list[AssetStatusBucket]:
+    """수집 회차별 자산 현황(판정별 건수) 이력 — 시계열 축 4.
+
+    원천과 시간 칸 규칙은 ``sg_exposure_history`` 와 같다(그쪽 docstring 참조) — 판정은
+    (자산 × 회차)로 보존되고, 리전마다 갈리는 회차를 ``bucket_seconds`` 칸으로 묶어 합산한다.
+    다른 점은 **자산 유형을 가리지 않고, 판정값마다 따로 센다**는 것이다.
+
+    ``undecided`` 는 verdict 가 없는 판정 행(판정 대기·실패)이다. 판정 행 자체가 없는 자산
+    (NACL 등 판정 비대상)은 어느 칸에도 세지 않는다 — 이력이 없는 것을 0으로 지어내지 않는다.
+    판정 행이 하나도 없는 칸은 점이 없다.
+    """
+    if not regions:
+        return []
+
+    bucket = func.date_bin(
+        timedelta(seconds=bucket_seconds), models.CollectionRun.started_at, _BUCKET_ORIGIN
+    ).label("observed_at")
+
+    def counted(verdict: Verdict):
+        return func.count(models.RuleEvaluation.rule_evaluation_id).filter(
+            models.RuleEvaluation.verdict == verdict.value
+        )
+
+    stmt = (
+        select(
+            bucket,
+            counted(Verdict.THREAT).label("threat"),
+            counted(Verdict.COST_CANDIDATE).label("cost_candidate"),
+            counted(Verdict.UNUSED).label("unused"),
+            counted(Verdict.SKIP).label("skip"),
+            func.count(models.RuleEvaluation.rule_evaluation_id)
+            .filter(models.RuleEvaluation.verdict.is_(None))
+            .label("undecided"),
+        )
+        .select_from(models.CollectionRun)
+        .join(
+            models.RuleEvaluation,
+            models.RuleEvaluation.collection_run_id == models.CollectionRun.collection_run_id,
+        )
+        .where(
+            models.CollectionRun.region.in_(regions),
+            models.CollectionRun.started_at >= since,
+        )
+        .group_by(bucket)
+        .order_by(bucket)
+    )
+    return [
+        AssetStatusBucket(
+            row.observed_at,
+            int(row.threat),
+            int(row.cost_candidate),
+            int(row.unused),
+            int(row.skip),
+            int(row.undecided),
+        )
+        for row in db.execute(stmt)
+    ]
+
+
 def record_inventory_counts(
     db: Session,
     *,

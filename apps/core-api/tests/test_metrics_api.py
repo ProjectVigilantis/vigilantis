@@ -1,8 +1,8 @@
 # ==============================================================================
 # [파일 설명]
-# GET /api/v1/metrics/timeseries 통합 검증(PostgreSQL) — 대시보드 시계열 2축.
+# GET /api/v1/metrics/timeseries 통합 검증(PostgreSQL) — 시계열 5축.
 #
-#   축 2(SG 개방 건수)는 실제 DB 로 검증한다. 회차별 보존이 이 기능의 전제라,
+#   축 2(SG 개방 건수)·축 4(자산 현황)·축 5(자산 수)는 실제 DB 로 검증한다. 회차별 보존이 이 기능의 전제라,
 #   가짜로 대신하면 "판정이 회차마다 남는가"라는 정작 중요한 것을 안 보게 된다.
 #   축 1(CPU)은 CloudWatch 호출이라 services.metrics.cpu_timeseries 를 대체한다 —
 #   AWS 연동 자체는 LocalStack 테스트의 몫이다.
@@ -91,6 +91,139 @@ def _seed_sg(db, run, *, region: str, suffix: str, verdict: str, evaluated_at: d
     )
 
 
+def _seed_judged(
+    db,
+    run,
+    *,
+    region: str,
+    asset_type: AssetType,
+    suffix: str,
+    verdict: str | None,
+    evaluated_at: datetime,
+):
+    """판정 대상 자산 1건 + 그 회차의 판정 1건 — 축 4용. ``verdict=None`` 은 판정 실패다."""
+    kind = {AssetType.EC2: "instance/i", AssetType.SG: "security-group/sg", AssetType.EBS: "volume/vol"}
+    arn = f"arn:aws:ec2:{region}:{ACCOUNT}:{kind[asset_type]}-{suffix}"
+    assets_repo.upsert_asset(
+        db,
+        arn=arn,
+        asset_type=asset_type,
+        resource_id=arn.rsplit("/", 1)[-1],
+        account_id=ACCOUNT,
+        region=region,
+        spec={},
+        collection_run_id=run.collection_run_id,
+        collected_at=evaluated_at,
+    )
+    assets_repo.add_rule_evaluation(
+        db,
+        RuleEvaluationResult(
+            asset_arn=arn,
+            collection_run_id=run.collection_run_id,
+            evaluation_status="COMPLETED" if verdict is not None else "FAILED",
+            verdict=verdict,
+            health_score=None,
+            skip_reason_code="SKIP_ACTIVE" if verdict == "SKIP" else None,
+            reason="테스트 시드",
+            evaluated_at=evaluated_at,
+        ),
+    )
+
+
+def test_자산_현황은_회차마다_판정별_건수로_선다(client_pg, db, set_regions, no_cloudwatch):
+    """축 4 — 유형을 가리지 않고 판정값마다 센다. 조치가 반영되면 다음 회차의 건수가 바뀐다."""
+    set_regions(SEOUL)
+    now = datetime.now(timezone.utc)
+
+    before = now - timedelta(hours=2)
+    run = _seed_run(db, region=SEOUL, started_at=before)
+    for asset_type, suffix, verdict in (
+        (AssetType.SG, "0001", "THREAT"),
+        (AssetType.EC2, "0002", "COST_CANDIDATE"),
+        (AssetType.EBS, "0003", "UNUSED"),
+        (AssetType.EC2, "0004", "SKIP"),
+        (AssetType.EC2, "0005", None),
+    ):
+        _seed_judged(db, run, region=SEOUL, asset_type=asset_type, suffix=suffix,
+                     verdict=verdict, evaluated_at=before)
+
+    # 다음 회차 — SG 를 닫았고(THREAT → SKIP) 미연결 볼륨을 지웠다(판정 행이 없다)
+    after = now - timedelta(hours=1)
+    run = _seed_run(db, region=SEOUL, started_at=after)
+    for asset_type, suffix, verdict in (
+        (AssetType.SG, "0001", "SKIP"),
+        (AssetType.EC2, "0002", "COST_CANDIDATE"),
+        (AssetType.EC2, "0004", "SKIP"),
+        (AssetType.EC2, "0005", "SKIP"),
+    ):
+        _seed_judged(db, run, region=SEOUL, asset_type=asset_type, suffix=suffix,
+                     verdict=verdict, evaluated_at=after)
+    db.commit()
+
+    axis = client_pg.get("/api/v1/metrics/timeseries").json()["asset_status"]
+
+    assert axis["status"] == "READY"
+    assert axis["reason_code"] is None
+    counts = [{k: v for k, v in p.items() if k != "at"} for p in axis["points"]]
+    assert counts == [
+        {"judged": 5, "threat": 1, "cost_candidate": 1, "unused": 1, "skip": 1, "undecided": 1},
+        {"judged": 4, "threat": 0, "cost_candidate": 1, "unused": 0, "skip": 3, "undecided": 0},
+    ]
+    assert [p["at"] for p in axis["points"]] == sorted(p["at"] for p in axis["points"])
+
+
+def test_자산_현황도_창과_리전을_따르고_두_리전은_한_점으로_합산된다(
+    client_pg, db, set_regions, no_cloudwatch
+):
+    set_regions(SEOUL, TOKYO)
+    now = datetime.now(timezone.utc)
+    # 같은 사이클의 두 리전 run — 수 초 차이로 시작해 같은 시간 칸에 떨어진다
+    cycle = (now - timedelta(hours=1)).replace(minute=1, second=0, microsecond=0)
+    for region, offset in ((SEOUL, 0), (TOKYO, 5)):
+        at = cycle + timedelta(seconds=offset)
+        run = _seed_run(db, region=region, started_at=at)
+        _seed_judged(db, run, region=region, asset_type=AssetType.EC2, suffix="0001",
+                     verdict="COST_CANDIDATE", evaluated_at=at)
+    # 창 밖(기본 72시간)의 회차와 관제 대상이 아닌 리전의 회차는 빠진다
+    old = now - timedelta(hours=100)
+    run = _seed_run(db, region=SEOUL, started_at=old)
+    _seed_judged(db, run, region=SEOUL, asset_type=AssetType.EC2, suffix="0009",
+                 verdict="SKIP", evaluated_at=old)
+    run = _seed_run(db, region="us-east-1", started_at=cycle)
+    _seed_judged(db, run, region="us-east-1", asset_type=AssetType.EC2, suffix="0008",
+                 verdict="SKIP", evaluated_at=cycle)
+    db.commit()
+
+    points = client_pg.get("/api/v1/metrics/timeseries").json()["asset_status"]["points"]
+
+    assert [(p["judged"], p["cost_candidate"]) for p in points] == [(2, 2)]
+
+
+def test_CloudWatch가_죽어도_자산_현황_축은_그려진다(
+    client_pg, db, set_regions, monkeypatch, no_cloudwatch
+):
+    """대시보드가 쓰는 축이다 — 원천이 DB 라 CPU·네트워크 축의 실패에 끌려가지 않아야 한다."""
+    set_regions(SEOUL)
+    at = datetime.now(timezone.utc) - timedelta(hours=1)
+    run = _seed_run(db, region=SEOUL, started_at=at)
+    _seed_judged(db, run, region=SEOUL, asset_type=AssetType.SG, suffix="0001",
+                 verdict="THREAT", evaluated_at=at)
+    db.commit()
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("CloudWatch 에 닿지 못했다")
+
+    monkeypatch.setattr("routers.metrics.cpu_timeseries", boom)
+    monkeypatch.setattr("routers.metrics.network_timeseries", boom)
+
+    body = client_pg.get("/api/v1/metrics/timeseries").json()
+
+    assert body["cpu"]["status"] == "UNAVAILABLE"
+    assert body["network"]["status"] == "UNAVAILABLE"
+    assert body["asset_status"]["status"] == "READY"
+    assert [p["threat"] for p in body["asset_status"]["points"]] == [1]
+
+
 def test_회차마다_개방_건수가_점으로_선다(client_pg, db, set_regions, no_cloudwatch):
     """이 기능의 전제 — 자산 행은 덮어써도 판정은 (자산 × 회차)로 보존된다."""
     set_regions(SEOUL)
@@ -135,7 +268,9 @@ def test_두_리전의_같은_사이클은_한_점으로_합산된다(client_pg,
     곡선이 리전별 건수 사이를 오가는 톱니가 된다."""
     set_regions(SEOUL, TOKYO)
     now = datetime.now(timezone.utc)
-    at = now - timedelta(hours=1)
+    # 시간 칸(스캔 주기 300초) 안쪽에 못 박는다 — `now - 1h` 를 그대로 쓰면 xx:x9:58 에 도는 실행에서
+    # 두 리전 run(2초 차)이 칸 경계를 넘어 두 점으로 갈린다(2026-09-28 09:49:58 실행에서 실제 발생).
+    at = (now - timedelta(hours=1)).replace(minute=1, second=0, microsecond=0)
 
     seoul = _seed_run(db, region=SEOUL, started_at=at)
     _seed_sg(db, seoul, region=SEOUL, suffix="0001", verdict="THREAT", evaluated_at=at)
@@ -298,3 +433,66 @@ def test_조회_창은_상한을_넘길_수_없다(client_pg, set_regions, no_cl
     set_regions(SEOUL)
     assert client_pg.get("/api/v1/metrics/timeseries?hours=337").status_code == 422
     assert client_pg.get("/api/v1/metrics/timeseries?hours=0").status_code == 422
+
+
+# ----- 축 5 자산 수 -----
+
+
+def _seed_inventory(db, *, region: str, started_at: datetime, counts: dict[AssetType, int]):
+    run = _seed_run(db, region=region, started_at=started_at)
+    assets_repo.record_inventory_counts(db, collection_run_id=run.collection_run_id, counts=counts)
+    return run
+
+
+def test_자산_수는_회차마다_관측한_유형별로_선다(client_pg, db, set_regions, no_cloudwatch):
+    """축 5 — 판정과 무관한 전 유형의 건수. 못 본 유형은 0이 아니라 counts 에서 빠진다."""
+    set_regions(SEOUL)
+    now = datetime.now(timezone.utc)
+    _seed_inventory(db, region=SEOUL, started_at=now - timedelta(hours=2),
+                    counts={AssetType.EC2: 4, AssetType.NACL: 2, AssetType.AUTO_SCALING_GROUP: 1})
+    # 다음 회차 — EC2 하나를 지웠고, ASG 는 조회가 막혀 못 봤다(행이 없다)
+    _seed_inventory(db, region=SEOUL, started_at=now - timedelta(hours=1),
+                    counts={AssetType.EC2: 3, AssetType.NACL: 2})
+    db.commit()
+
+    axis = client_pg.get("/api/v1/metrics/timeseries").json()["asset_inventory"]
+
+    assert axis["status"] == "READY"
+    assert [(p["total"], p["counts"]) for p in axis["points"]] == [
+        (7, {"EC2": 4, "NACL": 2, "AUTO_SCALING_GROUP": 1}),
+        (5, {"EC2": 3, "NACL": 2}),
+    ]
+
+
+def test_자산_수는_리전을_합산하고_같은_칸의_재수집은_마지막_회차만_센다(
+    client_pg, db, set_regions, no_cloudwatch
+):
+    set_regions(SEOUL, TOKYO)
+    now = datetime.now(timezone.utc)
+    cycle = (now - timedelta(hours=1)).replace(minute=1, second=0, microsecond=0)
+    # 서울은 같은 칸에서 두 번 수집했다 — 합치면 자산이 두 배로 보이므로 마지막 것만 센다
+    _seed_inventory(db, region=SEOUL, started_at=cycle, counts={AssetType.EC2: 9})
+    _seed_inventory(db, region=SEOUL, started_at=cycle + timedelta(seconds=30),
+                    counts={AssetType.EC2: 4})
+    _seed_inventory(db, region=TOKYO, started_at=cycle + timedelta(seconds=5),
+                    counts={AssetType.EC2: 1, AssetType.SG: 2})
+    # 창 밖·관제 대상 밖 리전은 빠진다
+    _seed_inventory(db, region=SEOUL, started_at=now - timedelta(hours=100),
+                    counts={AssetType.EC2: 50})
+    _seed_inventory(db, region="us-east-1", started_at=cycle, counts={AssetType.EC2: 50})
+    db.commit()
+
+    points = client_pg.get("/api/v1/metrics/timeseries").json()["asset_inventory"]["points"]
+
+    assert [(p["total"], p["counts"]) for p in points] == [(7, {"EC2": 5, "SG": 2})]
+
+
+def test_스냅샷이_없으면_자산_수_축은_빈_READY다(client_pg, db, set_regions, no_cloudwatch):
+    """표가 생기기 전 회차는 점이 없다 — 실패가 아니다."""
+    set_regions(SEOUL)
+    _seed_run(db, region=SEOUL, started_at=datetime.now(timezone.utc) - timedelta(hours=1))
+    db.commit()
+
+    axis = client_pg.get("/api/v1/metrics/timeseries").json()["asset_inventory"]
+
+    assert axis == {"status": "READY", "points": [], "reason_code": None}
