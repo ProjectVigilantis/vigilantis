@@ -5,12 +5,13 @@ import { test } from 'node:test';
 
 import {
   actionQueue,
+  assetComposition,
   dashboardMetrics,
   exposureRows,
   healthSummary,
   inventoryCounts,
   openPortLabel,
-  proposalView,
+  proposalRows,
   verdictCounts,
 } from './dashboard.ts';
 import type {
@@ -176,7 +177,7 @@ test('인벤토리는 수집 전량(count)과 목록 대상 수(judged)를 따�
   assert.equal(tgRow?.judged, 0);
 });
 
-test('미조치는 분석·승인 대기·조치 중 3종이고, 인시던트 조회 실패는 0이 아니라 null이다', () => {
+test('미조치는 분석·승인 대기·조치 중 3종을 카테고리별로 세고, 인시던트 조회 실패는 0이 아니라 null이다', () => {
   const statuses: IncidentStatus[] = [
     'ANALYZING',
     'AWAITING_APPROVAL',
@@ -186,15 +187,58 @@ test('미조치는 분석·승인 대기·조치 중 3종이고, 인시던트 �
     'RESOLVED',
   ];
   const items = [ec2('a', 3, { verdict: 'COST_CANDIDATE' }), sg('s', [SSH], { verdict: 'THREAT' })];
+  // 미조치 3건 중 승인 대기 1건만 SECOPS — 지표 띠의 `자산`·`보안` 칸이 갈리는 것을 고정한다.
   const metrics = dashboardMetrics(
     items,
-    statuses.map((s, i) => incident(`i${i}`, s)),
+    statuses.map((s, i) => ({
+      ...incident(`i${i}`, s),
+      ...(s === 'AWAITING_APPROVAL' ? { category: 'SECOPS' as const } : {}),
+    })),
   );
-  assert.equal(metrics.unhandled, 3);
+  assert.deepEqual(metrics.unhandled, { FINOPS: 2, SECOPS: 1 });
   assert.equal(metrics.openSg, 1);
   assert.equal(metrics.threat, 1);
   assert.equal(metrics.waste, 1);
   assert.equal(dashboardMetrics(items, null).unhandled, null);
+});
+
+// ── 자산 분류 비율(도넛) ─────────────────────────────────────────────────────
+
+test('분류 비율은 판정 대상 3종을 따로, 판정 비대상을 한 조각으로 접는다', () => {
+  const c = assetComposition([
+    ec2('a', 1),
+    ec2('b', 1),
+    sg('s', []),
+    nacl('n1'),
+    nacl('n2'),
+  ]);
+  assert.equal(c.total, 5);
+  assert.deepEqual(
+    c.slices.map((s) => [s.key, s.count]),
+    [
+      ['EC2', 2],
+      ['SG', 1],
+      ['OTHER', 2],
+    ],
+  );
+  // 비율의 합은 1 — 접힌 조각까지 전량이 분모다
+  assert.equal(c.slices.reduce((n, s) => n + s.ratio, 0), 1);
+  // 접힌 조각은 무엇이 접혔는지 남긴다(0건 유형은 빼고)
+  assert.deepEqual(c.slices.at(-1)?.members, [{ type: 'NACL', count: 2 }]);
+});
+
+test('0건 유형은 조각이 없고, 수집 실패 유형은 비율 밖에 따로 남는다', () => {
+  const c = assetComposition(
+    [sg('s', [])],
+    [{ asset_type: 'ALB_TARGET_GROUP', reason_code: 'InternalFailure' }],
+  );
+  assert.deepEqual(
+    c.slices.map((s) => s.key),
+    ['SG'],
+  );
+  assert.deepEqual(c.uncollected, ['ALB_TARGET_GROUP']);
+  // 자산이 없으면 조각도 없다 — 0으로 나누지 않는다
+  assert.deepEqual(assetComposition([]).slices, []);
 });
 
 // ── AI 조치 제안 카드의 큐(§4.1) ──────────────────────────────────────────────
@@ -214,7 +258,10 @@ test('조치 큐는 미조치 지표와 같은 집합이다 — 한 화면이 �
     queue.map((i) => i.incident_id).sort(),
     ['analyzing', 'pending', 'running'],
   );
-  assert.equal(queue.length, dashboardMetrics([], items).unhandled);
+  // 지표는 카테고리별 두 칸이라 합으로 견준다
+  const unhandled = dashboardMetrics([], items).unhandled;
+  assert.ok(unhandled !== null);
+  assert.equal(queue.length, unhandled.FINOPS + unhandled.SECOPS);
 });
 
 test('큐는 위험도 순, 동점은 오래 기다린 건이 먼저다 — INC-001과 같은 셀렉터다', () => {
@@ -239,44 +286,70 @@ test('큐는 위험도 순, 동점은 오래 기다린 건이 먼저다 — INC-
 });
 
 // PR #351 리뷰 2 — 목록 조회 실패를 대기 0건으로 뭉개면 카드가 지표(`—` 조회 실패)와 반대로 말한다.
+// 카드는 이 null을 오류로, 빈 배열만 대기 0건으로 그린다(action-proposal-card.tsx).
 
 test('인시던트 조회 실패(null)는 빈 큐가 아니다 — 지표의 unhandled와 같은 null이다', () => {
   assert.equal(actionQueue(null), null);
   assert.equal(dashboardMetrics([], null).unhandled, null);
 });
 
-function detail(item: IncidentListItem): IncidentResponse {
+/** 추정 금액만 필요한 상세 — `bestSavings`는 `basis`를 읽지 않는다. */
+function withSavings(item: IncidentListItem, amounts: (string | null)[]): IncidentResponse {
   return {
     ...item,
     summary_lines: [],
     evidence_ids: [],
-    recommendations: [],
+    recommendations: amounts.map((amount) => ({
+      runbook_id: 'RUNBOOK_EC2_RIGHTSIZING',
+      target_arn: item.subject_arn,
+      display_parameters: {},
+      ai_savings_estimate: {
+        status: amount === null ? 'UNAVAILABLE' : 'ESTIMATED',
+        currency: 'USD',
+        period: 'MONTH',
+        amount,
+        basis: null,
+        reason: null,
+      },
+    })),
     executions: [],
     resolution: null,
     resolved_at: null,
-  };
+  } as IncidentResponse;
 }
 
-test('카드는 목록 조회 실패를 오류로, 성공한 빈 목록만 대기 0건으로 그린다', () => {
-  assert.equal(proposalView(actionQueue(null), null).kind, 'LIST_FAILED');
-  assert.equal(proposalView(actionQueue([]), null).kind, 'EMPTY');
-  // 미조치가 아닌 건만 있는 목록도 조회는 성공했다 — 대기 0건이 맞다
-  assert.equal(proposalView(actionQueue([incident('done', 'RESOLVED')]), null).kind, 'EMPTY');
-});
+test('카드 줄은 보안 건이 위험도순으로 먼저, 자산 건은 추정 절감액 내림차순이다', () => {
+  const at = (id: string, created: string): IncidentListItem => ({
+    ...incident(id, 'AWAITING_APPROVAL'),
+    created_at: created,
+  });
+  const sec = { ...at('sec', '2026-09-03T00:00:00Z'), category: 'SECOPS' as const, initial_risk_level: 'HIGH' as const };
+  const cheap = at('cheap', '2026-09-01T00:00:00Z');
+  const pricey = at('pricey', '2026-09-02T00:00:00Z');
+  const unknownOld = at('unknown-old', '2026-08-01T00:00:00Z');
+  const failed = at('failed', '2026-08-15T00:00:00Z');
 
-test('큐가 있는데 1순위 상세가 없으면 상세 조회 실패다 — 대기 0건이 아니다', () => {
-  const queue = actionQueue([incident('a', 'AWAITING_APPROVAL')]);
-  assert.equal(proposalView(queue, null).kind, 'TOP_FAILED');
-});
-
-test('1순위 상세가 있으면 그 건과 나머지 대기를 낸다', () => {
-  const queue = actionQueue([incident('a', 'AWAITING_APPROVAL'), incident('b', 'ANALYZING')]);
+  const queue = actionQueue([cheap, unknownOld, sec, failed, pricey]);
   assert.ok(queue !== null);
-  const view = proposalView(queue, detail(queue[0]));
-  assert.equal(view.kind, 'READY');
-  if (view.kind !== 'READY') return;
-  assert.equal(view.top.incident_id, queue[0].incident_id);
-  assert.deepEqual(view.next.map((i) => i.incident_id), [queue[1].incident_id]);
+  const details = new Map([
+    // 후보가 둘이면 큰 쪽이 그 제안의 절감액이다
+    ['cheap', withSavings(cheap, ['12.50', '3.00'])],
+    ['pricey', withSavings(pricey, ['120.00'])],
+    ['unknown-old', withSavings(unknownOld, [null])],
+    // `failed`는 상세 조회 실패라 Map에 없다
+  ]);
+  const rows = proposalRows(queue, details);
+  assert.deepEqual(
+    rows.map((r) => [r.incident.incident_id, r.savings]),
+    [
+      ['sec', null],
+      ['pricey', 120],
+      ['cheap', 12.5],
+      // 금액을 모르는 건은 0달러가 아니라 맨 뒤 — 오래 기다린 순
+      ['unknown-old', null],
+      ['failed', null],
+    ],
+  );
 });
 
 test('조회를 못 한 유형은 0건이 아니라 사유를 달고 나온다 — "없다"와 "모른다"를 가른다', () => {

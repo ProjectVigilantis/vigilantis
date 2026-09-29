@@ -5,13 +5,13 @@
 // 응답을 캐시하지 않아 새로고침·실시간 이벤트의 `router.refresh()`가 곧 재조회다.
 //
 // 호출 3종의 실패 처리가 서로 다르다(§4.1 예외) — 자산은 화면 전체 CMN-002, 인시던트 목록은
-// 그것을 쓰는 두 자리(`미조치 인시던트` 지표 · AI 카드)만 오류, AI 카드 1건의 상세는 그 카드만 인라인 오류다.
+// 그것을 쓰는 자리(`미조치 자산·보안 인시던트` 지표 두 칸 · AI 카드)만 오류, 시계열은 추이 자리만 비운다.
 
 import { ActionProposalCard } from '@/components/dashboard/action-proposal-card';
 import { DashboardView } from '@/components/dashboard/dashboard-view';
 import { ErrorState } from '@/components/error-state';
 import { getAssets, getIncident, getIncidents, getMetricsTimeseries } from '@/lib/api/client';
-import { actionQueue } from '@/lib/dashboard';
+import { actionQueue, proposalRows } from '@/lib/dashboard';
 import type { IncidentResponse } from '@/types/api';
 
 export default async function DashboardPage() {
@@ -22,8 +22,9 @@ export default async function DashboardPage() {
     (error: unknown) => ({ items: null, error }),
   );
 
-  // 시계열도 실패가 화면을 죽이지 않는다 — 추이는 현재 상태를 읽는 데 필요한 것이 아니라
-  // 그 옆에 붙는 맥락이다. 자산 조회와 나란히 시작해 CloudWatch 왕복이 첫 화면을 늦추지 않게 한다.
+  // 시계열에서 대시보드가 쓰는 축은 `asset_inventory`(축 5, 자산 수)와 `asset_status`(축 4, 위협 판정)다 — CPU·네트워크는 자산 관제, 개방 SG는
+  // 보안 관제가 그린다(dashboard-view.tsx 머리말). 실패는 화면을 죽이지 않는다: 추이는 현재 상태를 읽는
+  // 데 필요한 것이 아니라 그 옆에 붙는 맥락이다. 자산 조회와 나란히 시작해 첫 화면을 늦추지 않게 한다.
   const metricsPromise = getMetricsTimeseries().then(
     (res) => res,
     () => null,
@@ -41,18 +42,18 @@ export default async function DashboardPage() {
   const incidents = listed.items;
   const metrics = await metricsPromise;
 
-  // AI 조치 제안 카드의 대상 1건. 목록 계약에 `summary_lines`·`recommendations`가 없어
-  // **1순위 한 건만** 상세를 더 부른다(§4.1 API 호출).
+  // AI 조치 제안 카드는 요약 목록이다. 목록 계약에 없는 것은 **자산 건의 추정 절감액** 하나라
+  // 자산(FINOPS) 건만 상세를 나란히 부른다(자산 관제 AST-001의 절감 카드와 같은 방식). 실패한 건은
+  // 버리고 금액 없음으로 그린다 — 카드 전체를 오류로 내리지 않는다.
   const queue = actionQueue(incidents);
-  let top: IncidentResponse | null = null;
-  // 카드 자리의 오류 — 목록 조회가 실패했거나, 목록은 됐는데 1순위 상세가 실패한 경우다.
-  let cardError: unknown = listed.error;
-  if (queue !== null && queue.length > 0) {
-    try {
-      top = await getIncident(queue[0].incident_id);
-    } catch (error) {
-      cardError = error;
-    }
+  const details = new Map<string, IncidentResponse>();
+  if (queue !== null) {
+    const settled = await Promise.all(
+      queue
+        .filter((i) => i.category === 'FINOPS')
+        .map((i) => getIncident(i.incident_id).then((res) => res, () => null)),
+    );
+    for (const detail of settled) if (detail !== null) details.set(detail.incident_id, detail);
   }
 
   return (
@@ -64,15 +65,14 @@ export default async function DashboardPage() {
       <DashboardView
         assets={assets}
         incidents={incidents}
-        metrics={metrics}
+        assetStatus={metrics === null ? null : metrics.asset_status}
+        assetInventory={metrics === null ? null : metrics.asset_inventory}
         proposalSlot={
           <ActionProposalCard
-            top={top}
+            rows={queue === null ? null : proposalRows(queue, details)}
             // CMN-002를 **서버에서 그려 넘긴다** — `ErrorState`를 클라이언트 경계 너머로 보내면
             // RSC 직렬화가 `ApiError`의 code·requestId를 버려 분기가 무너진다(error-state.tsx 주의).
-            errorSlot={cardError === null ? null : <ErrorState error={cardError} variant="inline" />}
-            queue={queue}
-            assets={assets.items}
+            errorSlot={listed.error === null ? null : <ErrorState error={listed.error} variant="inline" />}
           />
         }
       />

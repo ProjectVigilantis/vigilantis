@@ -17,15 +17,17 @@ Next.js 16(App Router) + React 19 + TypeScript + Tailwind CSS v4 + Shadcn UI(rad
 src/
 ├── app/                        # App Router
 │   ├── page.tsx                #   메인 대시보드 (DSH-001)
-│   ├── assets/                 #   자산 목록 — 상세는 별도 라우트가 아니라 목록 화면의 Sheet다
-│   ├── incidents/              #   보안 인시던트 목록 (INC-001) · [id] 상세
-│   ├── asset-incidents/        #   자산 인시던트 목록 (INC-004)
+│   ├── assets/                 #   자산 관제 (AST-001) — 목록·토폴로지·인시던트(FinOps) 탭, 상세는 Sheet
+│   ├── security/               #   보안 관제 (SEC-001) — 개방 SG·위협 출발지·보안 그룹 목록·인시던트(SecOps) 탭
+│   ├── incidents/              #   [id] 상세(INC-002)만 — 목록(구 INC-001)은 /security 인시던트 탭으로 redirect
+│   ├── asset-incidents/        #   구 INC-004 — /assets 인시던트 탭으로 redirect
 │   ├── layout.tsx              #   GNB · 실시간 연결 provider · 토스트
 │   └── global-error.tsx
 ├── components/
 │   ├── assets/                 #   자산 카드·상세·토폴로지 그래프
 │   ├── dashboard/              #   대시보드 뷰·토폴로지·AI 조치 제안 카드
-│   ├── incidents/              #   인시던트 카드·상세·실행 모달·종료 처리 모달
+│   ├── incidents/              #   인시던트 탭 본체·카드·상세·실행 모달·종료 처리 모달
+│   ├── security/               #   보안 관제 뷰·요약 패널(개방 SG·인시던트 현황·위협 출발지)
 │   └── ui/                     #   shadcn 프리미티브 (badge·button·card·dialog 등)
 ├── lib/
 │   ├── api/client.ts           #   계약 조회 클라이언트 — apiBaseUrl() · 오류 구분

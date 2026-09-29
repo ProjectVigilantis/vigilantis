@@ -569,9 +569,57 @@ export interface SgExposureAxis {
   reason_code: string | null;
 }
 
+/**
+ * 시간 칸 하나의 자산 현황 — 그 회차에 판정 행이 남은 자산을 판정별로 센 값.
+ * `judged`는 아래 다섯 값의 합이다(서버 불변식) — 화면이 다시 더하지 않는다.
+ */
+export interface AssetStatusPoint {
+  at: IsoDateTime;
+  judged: number;
+  threat: number;
+  cost_candidate: number;
+  unused: number;
+  /** 정상·제외. */
+  skip: number;
+  /** verdict가 없는 판정 행 — 판정 대기·실패다. `skip`과 축이 달라 합치지 않는다. */
+  undecided: number;
+}
+
+/**
+ * 축 4. 판정 대상 자산(EC2·SG·EBS)의 판정별 건수 추이. 원천은 축 2와 같은 회차별 Rule 판정
+ * 이력이다 — 자산 행은 회차마다 덮어써 이력이 없어, NACL 등 판정 비대상은 이 축에 없다.
+ */
+export interface AssetStatusAxis {
+  status: AxisStatus;
+  points: AssetStatusPoint[];
+  reason_code: string | null;
+}
+
+/**
+ * 시간 칸 하나의 자산 수 — 그 칸의 수집 회차가 **관측한** 유형별 건수(리전 합산).
+ * `counts`에 없는 유형은 그 칸에서 관측하지 못한 것이다(0건과 다르다). `total`은 `counts`의 합(서버 불변식).
+ */
+export interface AssetInventoryPoint {
+  at: IsoDateTime;
+  total: number;
+  counts: Partial<Record<AssetType, number>>;
+}
+
+/**
+ * 축 5. 전 유형의 자산이 회차마다 몇 건 있었나 — "내 자산이 늘었나 줄었나"(2026-09-29).
+ * 원천은 수집 회차가 마감 때 남기는 유형별 건수라, 그 기록이 생기기 전 회차는 점이 없다.
+ */
+export interface AssetInventoryAxis {
+  status: AxisStatus;
+  points: AssetInventoryPoint[];
+  reason_code: string | null;
+}
+
 export interface MetricsTimeseriesResponse {
   generated_at: IsoDateTime;
   cpu: CpuAxis;
   network: NetworkAxis;
   sg_exposure: SgExposureAxis;
+  asset_status: AssetStatusAxis;
+  asset_inventory: AssetInventoryAxis;
 }

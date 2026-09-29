@@ -1,4 +1,4 @@
-// DSH-001 메인 대시보드 본문 — 구성은 PR #299가 채택한 5지표 + 카드 구성이고, 값은 전부 계약 필드에서
+// DSH-001 메인 대시보드 본문 — 구성은 PR #299가 채택한 지표 + 카드 구성이고, 값은 전부 계약 필드에서
 // 파생한다(lib/dashboard). 서버 컴포넌트다 — 실시간 이벤트가 오면 RealtimeProvider의 `router.refresh()`가
 // 이 트리를 다시 그려 숫자가 따라온다.
 //
@@ -6,107 +6,117 @@
 // 토폴로지의 외부 출발지 노드·공격 경로는 인시던트 목록 계약의 `threat_context`에서 온다(#362 · PR #374) —
 // 그래서 이 컴포넌트가 이미 들고 있는 `incidents`를 토폴로지 카드로 그대로 내려보낸다.
 //
+// ## 대시보드는 요약만 남긴다 (2026-09-28)
+//
+// 종전에는 지표 띠 아래에 집계 3열(자산 인벤토리 · 헬스 스코어 · 판정 현황)과 추이 2축(EC2 CPU ·
+// 인터넷 개방 SG), 오른쪽 레일에 개방 SG 목록이 있었다. 전부 **들여다보는 것**이라 축마다 제 화면으로
+// 갔다 — 집계 3열·CPU 추이는 자산 관제(AST-001, `assets/asset-summary-panels.tsx`), 개방 SG 목록·추이는
+// 보안 관제(SEC-001, `security/security-summary-panels.tsx`). 한 화면 흐름 안에서 같은 수를 두 곳이
+// 말하면 관제자가 어느 쪽을 봐야 할지부터 정해야 한다. 여기 남는 것은 **셈(지표 띠 두 묶음) ·
+// 구성과 흐름(자산 분류 비율 · 자산 현황 추이 · 위협 판정 추이) · 조치(AI 제안) · 구조(토폴로지)** 넷이다.
+//
+// ## 차트 3열 — 지금의 구성 | 자산 수의 흐름 | 위협의 흐름 (2026-09-29)
+//
+// 띠가 "지금 몇 건"이라면 도넛은 "그 전량이 **무엇으로** 이뤄졌나"(유형별 비율), 자산 현황 추이는
+// "**내 자산이 늘었나 줄었나**"(유형별 자산 수 — 시계열 축 5 `asset_inventory`), 위협 판정 추이는
+// "위협이 줄고 있나"(축 4 `asset_status`의 `threat`)다. 위협을 자산 수와 한 차트에 두지 않는 이유는
+// 눈금이다 — 0–2건이 10여 건과 한 축에 서면 바닥에 붙어 변화가 안 읽힌다. 낭비 후보는 띠의 한 칸으로만
+// 둔다: 추이 자리는 자산의 증감을 보는 곳이다(사용자 지시).
+//
+// ## 지표 띠는 자산 | 보안 두 묶음이다
+//
+// 5종을 한 줄에 늘어놓던 것을 **관제 축**으로 갈랐다 — GNB가 인시던트를 `보안 인시던트`·`자산 인시던트`로
+// 가르는 것과 같은 축이다(gnb.tsx). 그래서 `미조치 인시던트` 한 칸도 카테고리별 두 칸이 됐다
+// (FINOPS → 자산, SECOPS → 보안). 두 칸의 합은 종전 한 칸과 같고, AI 조치 제안 카드의 큐와도 같은
+// 집합이다(`lib/dashboard` `actionQueue`). 묶음 캡션의 링크는 그 축의 상세 화면으로 간다 — 요약은
+// 여기, 들여다보는 것은 거기라는 이 화면의 규칙을 캡션이 그대로 말한다.
+//
 // ## 배치 — 9칸 | 3칸 두 열 (`xl` 이상)
 //
-// 전부 전폭으로 쌓으면 한 화면에 지표밖에 안 들어와 관제자가 스크롤로 상태를 재구성해야 한다.
-// 왼쪽 9칸은 **보는 것**, 오른쪽 3칸은 **누르는 것과 그 근거**로 가른다.
+// 왼쪽 9칸은 **보는 것**, 오른쪽 3칸은 **누르는 것**으로 가른다.
 //
 //   상태줄 (테두리 없는 얇은 캡션 — 격자 밖 맨 위)
-//   ┌ 지표 5종 띠 ─────────────────────────┬ AI 조치 제안 ────┐
-//   │ 인벤토리(4) │ 헬스 스코어(4) │ 판정(4)   │ 인터넷 개방 SG    │
-//   │ 추이 2축(CPU · 개방 SG) ──────────────┤                  │
-//   └───────────────────────────────┴───────────────┘
+//   ┌ 자산 (3) ──────┬ 보안 (3) ──────┬ AI 조치 제안 ────┐
+//   │ 자산 분류 비율   │ 자산 현황 추이   │                  │
+//   └───────────────┴───────────────┴───────────────┘
 //   ┌ 자산 토폴로지 (전폭 — 격자 밖) ─────────────────────────┐
 //   │ 그래프 │ 인스턴스 목록 │ 트래픽 경로 밖                    │
 //   └──────────────────────────────────────────────┘
 //
-// **두 열은 각자 쌓는다.** 맞추는 것은 윗선 하나 — 두 열의 첫 카드(지표 띠 · AI 제안) 윗변이다.
-// 그 아래로는 각자 제 내용 길이대로 붙는다. 그래서 왼쪽의 세 덩이(지표 띠 → 집계 3열 → 추이)는
-// 오른쪽 AI 카드가 아무리 길어도 서로 붙어 있고, 왼쪽 것들의 폭은 열 하나를 공유하니 저절로 같다.
+// **두 열은 윗선과 아랫선을 함께 맞춘다(2026-09-29).** AI 제안 카드는 왼쪽 열(띠 + 차트 두 장) 높이를
+// 그대로 받고, 건수가 많으면 카드 안 목록만 스크롤한다 — 카드가 길어져 왼쪽 열을 늘리지 않는다.
 //
 // **토폴로지만 격자 밖 전폭이다.** 그 카드는 안에서 다시 세 칸으로 갈라지는데(그래프 │ 인스턴스 │
 // 경로 밖), 9칸 열 안에 두면 목록 두 칸을 빼고 그래프에 900px도 남지 않아 5열 정렬이 눌린다.
+// 위 격자 **밖**에 두는 이유: 격자 안에서 12칸을 차지하게 하면 둘째 행에 묶여 오른쪽 AI 카드가 길 때
+// 그 높이만큼 빈 자리가 생긴다. 상태줄도 같은 이유로 격자 밖이다 — 왼쪽 열 안에 두면 띠가 그 높이만큼
+// 내려앉아 맞춰야 할 윗선 하나가 어긋난다.
 //
-// 조각들을 한 격자에 평평하게 늘어놓으면(= 9·3·9·3을 auto-placement에 맡기면) 둘째 덩이부터
-// 행 높이에 묶여 위아래 사이가 벌어진다. **상태줄과 토폴로지가 격자 밖**인데, 상태줄은 왼쪽 열
-// 안에 두면 지표 띠가 그 높이만큼 내려앉아 맞춰야 할 윗선 하나가 어긋나기 때문이고, 토폴로지는
-// 폭 때문이다(바로 위 문단).
-//
-// **집계 3열은 균등이다(4 : 4 : 4).** 셋 다 `이름 + 숫자 + 막대` 한 줄짜리라 같은 폭이면 된다.
-// 종전에는 헬스 스코어가 넓어야 해서 4 : 5 : 3이었는데, 그 카드에서 판정 배지를 뺀 뒤로 이름 옆에
-// 자리를 다투는 것이 없어졌다 — 폭이 갈리면 나란히 선 세 카드의 막대 길이를 서로 견줄 수 없다.
-//
-// `xl` 미만에서는 한 열로 접힌다. 이때는 왼쪽 열이 통째로 먼저 와서 AI 제안이 집계 3열 아래로
-// 밀린다 — 두 열을 각자 쌓는 대가다. 토폴로지 그래프의 열 전환 기준은 뷰포트가 아니라 **그래프가
-// 실제로 받은 폭**이다(`asset-graph.tsx`의 `@container/graph`) — 자산 화면(AST-001)과 폭이 달라서다.
+// `xl` 미만에서는 한 열로 접힌다 — 띠 두 묶음, AI 제안, 토폴로지 순이다. 토폴로지 그래프의 열 전환
+// 기준은 뷰포트가 아니라 **그래프가 실제로 받은 폭**이다(`asset-graph.tsx`의 `@container/graph`) —
+// 자산 화면(AST-001)과 폭이 달라서다.
 
+import Link from 'next/link';
+
+import { AssetCompositionChart } from '@/components/dashboard/asset-composition-chart';
 import { DashboardTopology } from '@/components/dashboard/dashboard-topology';
-import { HealthScoreList } from '@/components/dashboard/health-score-list';
+import { InventoryTrendChart, ThreatTrendChart } from '@/components/dashboard/trend-charts';
 import { EmptyState } from '@/components/empty-state';
 import { MetricStrip, MetricTile } from '@/components/metric-strip';
 import { Panel } from '@/components/panel';
+import { Muted } from '@/components/panel-parts';
 import { StatusBadge } from '@/components/status-badge';
-import {
-  dashboardMetrics,
-  exposureRows,
-  healthSummary,
-  IDLE_CPU_AVG,
-  inventoryCounts,
-  verdictCounts,
-} from '@/lib/dashboard';
-import { ASSET_TYPE_LABELS, NO_VALUE, VERDICT_LABELS } from '@/lib/enum-labels';
-import { cn, formatKst } from '@/lib/utils';
+import { assetComposition, dashboardMetrics } from '@/lib/dashboard';
+import { formatKst } from '@/lib/utils';
 import type {
+  AssetInventoryAxis,
+  AssetStatusAxis,
   AssetsResponse,
   IncidentListItem,
-  MetricsTimeseriesResponse,
-  Verdict,
 } from '@/types/api';
 
-import { CpuTrendChart, SgExposureTrendChart } from './trend-charts';
-
-function StatLine({ label, value }: { label: string; value: number }) {
+/** 띠 한 묶음 — 캡션(축 이름 + 상세 화면 링크) 아래 타일 3칸. 두 묶음이 같은 모양이어야 나란히 읽힌다. */
+function MetricGroup({
+  label,
+  href,
+  hrefLabel,
+  children,
+}: {
+  label: string;
+  href: string;
+  hrefLabel: string;
+  children: React.ReactNode;
+}) {
   return (
-    <div className="mt-3 flex items-center justify-between border-t pt-3 text-xs">
-      <span className="text-muted-foreground">{label}</span>
-      <span className="font-mono tabular-nums">{value}</span>
-    </div>
-  );
-}
-
-function Muted({ children }: { children: React.ReactNode }) {
-  return <p className="text-muted-foreground py-4 text-center text-sm">{children}</p>;
-}
-
-const VERDICT_BAR: Record<Verdict, string> = {
-  THREAT: 'bg-danger',
-  COST_CANDIDATE: 'bg-amber-400',
-  UNUSED: 'bg-amber-400',
-  SKIP: 'bg-muted-foreground/50',
-};
-
-function Bar({ ratio, className }: { ratio: number; className: string }) {
-  return (
-    <span className="bg-muted block h-1.5 overflow-hidden rounded-full">
-      <span className={cn('block h-full rounded-full', className)} style={{ width: `${ratio * 100}%` }} />
-    </span>
+    <section className="flex flex-col gap-1.5" aria-label={label}>
+      <div className="flex items-center justify-between px-1 text-xs">
+        <span className="font-medium">{label}</span>
+        <Link href={href} className="text-muted-foreground hover:text-foreground hover:underline">
+          {hrefLabel} →
+        </Link>
+      </div>
+      <MetricStrip className="grid-cols-3">{children}</MetricStrip>
+    </section>
   );
 }
 
 export function DashboardView({
   assets,
   incidents,
-  metrics: timeseries,
+  assetStatus,
+  assetInventory,
   proposalSlot,
 }: {
   assets: AssetsResponse;
   /** 인시던트 조회 실패면 null — 자산 화면과 같은 규칙으로 0건과 구분한다. */
   incidents: IncidentListItem[] | null;
   /**
-   * 시계열 2축. **조회 실패면 null** — 인시던트와 같은 규칙이다. 자산과 달리 화면 전체를
-   * 죽이지 않는다: 추이는 현재 상태를 읽는 데 필요한 것이 아니라 그 옆에 붙는 맥락이다.
+   * 시계열 축 4(자산 현황). **시계열 조회 자체가 실패면 null** — 축은 왔는데 그 축만 실패한 것
+   * (`status: UNAVAILABLE`)과 다르고, 그쪽은 차트가 사유와 함께 그린다. 어느 쪽이든 화면은 뜬다.
    */
-  metrics: MetricsTimeseriesResponse | null;
+  assetStatus: AssetStatusAxis | null;
+  /** 시계열 축 5(자산 수). null 규칙은 `assetStatus`와 같다. */
+  assetInventory: AssetInventoryAxis | null;
   /**
    * 「AI 조치 제안」 카드 — 페이지가 서버에서 그려 넘긴다(`app/page.tsx`).
    * 이 컴포넌트는 **자리만** 준다. 카드를 여기서 만들면 그 안의 CMN-002(`ErrorState`)가
@@ -116,16 +126,12 @@ export function DashboardView({
 }) {
   const items = assets.items;
   const metrics = dashboardMetrics(items, incidents);
-  const inventory = inventoryCounts(items, assets.uncollected);
-  const exposure = exposureRows(items);
-  const health = healthSummary(items);
-  const verdicts = verdictCounts(items);
+  const unhandledNote = metrics.unhandled === null ? '인시던트 조회 실패' : '분석·승인 대기·조치 중';
 
   return (
     <div className="flex flex-col gap-4">
-      {/* 상태줄은 격자 밖 맨 위다 — 테두리 없는 얇은 캡션이라 왼쪽 열 안에 두면 지표 띠가 그
-          높이만큼 내려앉아 오른쪽 AI 카드와 **윗선이 어긋난다.**
-          collection_status가 READY면 배지를 그리지 않는다(§3.2) — 자산 화면과 같은 줄이다. */}
+      {/* 상태줄 — 격자 밖 맨 위(파일 머리말). collection_status가 READY면 배지를 그리지 않는다(§3.2) —
+          자산 화면과 같은 줄이다. */}
       <div className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs">
         <StatusBadge field="collection_status" value={assets.collection_status} />
         <span>마지막 수집 {formatKst(assets.last_collected_at)}</span>
@@ -133,189 +139,77 @@ export function DashboardView({
         <span>{incidents === null ? '인시던트 조회 실패' : `인시던트 ${incidents.length}건`}</span>
       </div>
 
-      {/* 두 열은 **각자 쌓는다.** 윗선은 두 열의 첫 카드(지표 띠 · AI 제안)끼리 맞고, 그 아래로는
-          각자 제 내용 길이대로 붙는다 — 오른쪽 AI 카드가 길어도 왼쪽 집계 3열은 지표 띠 바로
-          아래에 온다. 네 조각을 한 격자에 평평하게 넣으면 그 자리가 행 높이에 묶여 빈 채로 남는다. */}
       <div className="grid gap-4 xl:grid-cols-12">
-        {/* 왼쪽 — 보는 것. 지표 띠 + 집계 3열. */}
+        {/* 왼쪽 — 보는 것. 띠 두 묶음. 캡션 링크가 각 축의 상세 화면(AST-001 · SEC-001)이다. */}
         <div className="flex flex-col gap-4 xl:col-span-9">
-          <MetricStrip className="lg:grid-cols-5">
-            <MetricTile label="전체 자산" value={metrics.total} note="수집된 자산 전량" />
-            <MetricTile
-              label="인터넷 개방 보안 그룹"
-              value={metrics.openSg}
-              note="전체 대역 인바운드 허용"
-              tone="warn"
-            />
-            <MetricTile label="위협 판정 자산" value={metrics.threat} note="규칙 엔진 위협 판정" tone="danger" />
-            <MetricTile
-              label="미조치 인시던트"
-              value={metrics.unhandled}
-              note={metrics.unhandled === null ? '인시던트 조회 실패' : '분석·승인 대기·조치 중'}
-              tone="warn"
-            />
-            {/* 홀수(5종)라 2열에서 마지막 칸이 빈다 — 칸 사이를 `gap-px` 테두리로 그리는 띠라
-                빈 칸이 색 덩어리로 보인다. 마지막만 2칸을 먹여 줄을 채운다. */}
-            <MetricTile
-              label="낭비 후보"
-              value={metrics.waste}
-              note="최적화 후보 + 미사용"
-              tone="ok"
-              className="col-span-2 lg:col-span-1"
-            />
-          </MetricStrip>
-
-          {/* 집계 3열 — 지표 띠 바로 아래에 붙는다. 폭을 균등하게 주지 않는다: 자산 인벤토리는
-              `유형 이름 + 숫자` 한 줄짜리라 좁아도 읽히고, 헬스 스코어는 인스턴스 이름과
-              막대·임계선을 한 줄에 담아 가장 넓어야 하며, 판정 현황은 짧은 판정명과 막대뿐이다.
-              4 : 5 : 3으로 나눈 근거다. */}
-          <div className="grid gap-4 md:grid-cols-12">
-            <Panel
-              className="md:col-span-4"
-              title="자산 인벤토리"
-              description="유형 7종 — 0건도 남겨 수집 누락과 구분합니다"
-            >
-              <ul className="flex flex-col text-sm">
-                {inventory.map(({ type, count, uncollectedReason }) => (
-                  <li key={type} className="flex items-center justify-between gap-2 border-b py-2">
-                    <span className="text-muted-foreground">{ASSET_TYPE_LABELS[type]?.label ?? type}</span>
-                    {/* 조회를 못 한 유형은 0으로 적지 않는다 — 0은 "없다"는 단언이고 여기서 사실은
-                        "모른다"다. 이 패널이 0건 유형을 남기는 목적이 수집 누락과의 구분인데,
-                        셈만으로는 그 구분이 서지 않았다. 사유는 AWS 오류 코드 원문 그대로 툴팁에. */}
-                    {uncollectedReason !== null ? (
-                      <span className="text-xs text-amber-400" title={`수집 실패: ${uncollectedReason}`}>
-                        수집 실패
-                      </span>
-                    ) : (
-                      <span className={cn('font-mono tabular-nums', count === 0 && 'text-muted-foreground')}>
-                        {count}
-                      </span>
-                    )}
-                  </li>
-                ))}
-                <li className="flex items-center justify-between pt-2 font-medium">
-                  <span>합계</span>
-                  <span className="font-mono tabular-nums">{items.length}</span>
-                </li>
-              </ul>
-            </Panel>
-
-            <Panel
-              className="md:col-span-4"
-              title="헬스 스코어"
-              description={`EC2 ${health.ec2Total}대 · 임계선 ${IDLE_CPU_AVG} 미만은 저활성(스펙 조정 후보)`}
-            >
-              {health.ec2Total === 0 ? (
-                <Muted>EC2 자산이 없습니다.</Muted>
-              ) : health.scored.length === 0 ? (
-                <Muted>{NO_VALUE} 확인 불가</Muted>
-              ) : (
-                <HealthScoreList scored={health.scored} threshold={IDLE_CPU_AVG} />
-              )}
-              {health.ec2Total > 0 ? <StatLine label="확인 불가 (점수 없는 EC2)" value={health.unknown} /> : null}
-            </Panel>
-
-            <Panel
-              className="md:col-span-4"
-              title="판정 현황"
-              description={`판정 대상 ${verdicts.judged}건 (NACL · Auto Scaling 그룹 · 시작 템플릿 · 대상 그룹 제외)`}
-            >
-              <ul className="flex flex-col gap-3 text-xs">
-                {verdicts.byVerdict.map(({ verdict, count }) => (
-                  <li key={verdict} className="flex flex-col gap-1">
-                    <span className="flex items-center justify-between">
-                      <span className="text-muted-foreground">{VERDICT_LABELS[verdict]?.label ?? verdict}</span>
-                      <span className="font-mono tabular-nums">{count}</span>
-                    </span>
-                    <Bar ratio={verdicts.judged === 0 ? 0 : count / verdicts.judged} className={VERDICT_BAR[verdict]} />
-                  </li>
-                ))}
-                <li className="flex flex-col gap-1">
-                  <span className="flex items-center justify-between">
-                    <span className="text-muted-foreground">판정 대기·실패</span>
-                    <span className="font-mono tabular-nums">{verdicts.pending}</span>
-                  </span>
-                  <Bar
-                    ratio={verdicts.judged === 0 ? 0 : verdicts.pending / verdicts.judged}
-                    className="bg-muted-foreground/30"
-                  />
-                </li>
-              </ul>
-              <StatLine label="판정 불가 (데이터 부족 · 대기 · 실패)" value={verdicts.undecidable} />
-            </Panel>
-          </div>
-
-          {/* 추이 2축 — 집계(현재)와 토폴로지(구조) 사이다. 위 지표 띠가 "지금 몇 건"을
-              말하고 여기가 "그 수가 어디서 왔나"를 말한다. 두 차트를 나란히 두되 **한 격자에
-              겹치지 않는다** — 단위가 %와 건수로 달라 y축을 공유할 수 없다. */}
           <div className="grid gap-4 md:grid-cols-2">
-            <Panel
-              title="EC2 CPU 추이"
-              description={`CloudWatch 원계열(1시간 입자) — 파선(저활성 임계 ${
-                timeseries?.cpu.idle_cpu_avg_threshold ?? IDLE_CPU_AVG
-              }%) 아래에 머무는 인스턴스가 다운사이징 후보입니다`}
-            >
-              {timeseries === null ? (
+            <MetricGroup label="자산" href="/assets" hrefLabel="자산 관제">
+              <MetricTile label="전체 자산" value={metrics.total} note="수집된 자산 전량" />
+              <MetricTile label="낭비 후보" value={metrics.waste} note="최적화 후보 + 미사용" tone="ok" />
+              <MetricTile
+                label="미조치 자산 인시던트"
+                value={metrics.unhandled === null ? null : metrics.unhandled.FINOPS}
+                note={unhandledNote}
+                tone="warn"
+              />
+            </MetricGroup>
+
+            <MetricGroup label="보안" href="/security" hrefLabel="보안 관제">
+              <MetricTile
+                label="인터넷 개방 보안 그룹"
+                value={metrics.openSg}
+                note="전체 대역 인바운드 허용"
+                tone="warn"
+              />
+              <MetricTile label="위협 판정 자산" value={metrics.threat} note="규칙 엔진 위협 판정" tone="danger" />
+              <MetricTile
+                label="미조치 보안 인시던트"
+                value={metrics.unhandled === null ? null : metrics.unhandled.SECOPS}
+                note={unhandledNote}
+                tone="warn"
+              />
+            </MetricGroup>
+          </div>
+
+          {/* 차트 3열(파일 머리말). 추이 하나를 9칸 전폭에 펴면 회차 몇 개짜리 계단이 옆으로 늘어져
+              변화가 안 읽힌다. */}
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <Panel title="자산 분류 비율" description="수집된 자산의 유형별 구성">
+              <AssetCompositionChart composition={assetComposition(items, assets.uncollected)} />
+            </Panel>
+
+            {/* 띠의 `전체 자산`을 시간 축으로 편 것이다 — 도넛과 같은 조각·색으로 쌓아 맨 윗선이 전량이다.
+                수집 회차가 남기는 유형별 건수가 원천이라 그 기록 전의 회차는 점이 없다(축 5 계약). */}
+            <Panel title="자산 현황 추이" description="수집 회차별 유형별 자산 수">
+              {assetInventory === null ? (
                 <Muted>추이를 불러오지 못했습니다.</Muted>
               ) : (
-                <CpuTrendChart axis={timeseries.cpu} />
+                <InventoryTrendChart axis={assetInventory} />
               )}
             </Panel>
 
-            <Panel
-              title="인터넷 개방 보안 그룹 추이"
-              description="수집 회차별 위협 판정 건수 — 조치가 반영되면 선이 내려갑니다"
-            >
-              {timeseries === null ? (
+            <Panel title="위협 판정 추이" description="수집 회차별 위협 판정 자산 건수">
+              {assetStatus === null ? (
                 <Muted>추이를 불러오지 못했습니다.</Muted>
               ) : (
-                <SgExposureTrendChart axis={timeseries.sg_exposure} />
+                <ThreatTrendChart axis={assetStatus} />
               )}
             </Panel>
           </div>
-
         </div>
 
-        {/* 오른쪽 — 누르는 것과 그 근거. 개방 SG가 AI 카드 바로 아래인 이유: 위 지표 띠도 같은
-            위협을 세지만 거기는 **건수**뿐이고, 여기는 어느 SG의 어느 규칙이 몇 대에 걸리는지를
-            준다 — 승인 버튼을 누르기 전에 볼 것이다. */}
-        <div className="flex flex-col gap-4 xl:col-span-3">
-          {proposalSlot}
-
-          <Panel
-            title="인터넷 개방 보안 그룹"
-            description="전체 대역(0.0.0.0/0 · ::/0)에 열린 인바운드"
-          >
-            {exposure.length === 0 ? (
-              <Muted>인터넷에 열린 보안 그룹이 없습니다.</Muted>
-            ) : (
-              <ul className="flex flex-col gap-3">
-                {exposure.map(({ sg, rules, affectedEc2 }) => (
-                  <li key={sg.arn} className="flex flex-col gap-1 border-b pb-3 last:border-b-0 last:pb-0">
-                    <span className="flex flex-wrap items-center justify-between gap-2">
-                      <span className="font-mono text-xs">{sg.name ?? sg.resource_id}</span>
-                      {/* verdict가 없으면 판정 대기·실패다 — 사유를 evaluation_status로 적는다. */}
-                      {sg.verdict !== null ? (
-                        <StatusBadge field="verdict" value={sg.verdict} />
-                      ) : (
-                        <StatusBadge field="evaluation_status" value={sg.evaluation_status} />
-                      )}
-                    </span>
-                    <span className="text-muted-foreground font-mono text-xs">{rules.join(', ')}</span>
-                    <span className="text-muted-foreground text-xs">영향 EC2 {affectedEc2}대</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </Panel>
+        {/* 오른쪽 — 누르는 것. 격자 칸은 왼쪽 열 높이로 늘어나고, 카드는 그 칸에 absolute로 꽉 찬다 —
+            카드 내용이 행 높이 계산에 들지 않아 아랫선이 왼쪽 차트 하단에 맞는다(파일 머리말). */}
+        {/* 윗변은 띠의 **박스** 윗변에 맞춘다 — 캡션 줄(`MetricGroup`의 text-xs 1rem + gap-1.5)만큼 내린다.
+            캡션 글자에 맞추면 카드가 띠 박스보다 한 줄 높이 솟는다. 캡션 모양을 바꾸면 이 값도 함께 고친다. */}
+        <div className="flex flex-col xl:col-span-3 xl:pt-[1.375rem]">
+          <div className="flex flex-1 flex-col gap-4 xl:relative">{proposalSlot}</div>
         </div>
       </div>
 
-      {/* 토폴로지 — **두 열 밖, 전폭이다.** 안에는 `그래프 │ 인스턴스 │ 경로 밖` 세 칸이 나란히
-          서는데(dashboard-topology.tsx), 목록 두 칸이 400px쯤 가져가므로 9칸 열 안에서는 그래프에
-          900px도 남지 않는다. 전폭으로 내리면 그래프가 1400px을 받아 5열 정렬이 여유 있게 선다.
-          위 격자 **밖**에 두는 이유: 격자 안에서 12칸을 차지하게 하면 둘째 행에 묶여 오른쪽
-          AI 카드가 길 때 그 높이만큼 빈 자리가 생긴다. */}
+      {/* 토폴로지 — **두 열 밖, 전폭이다**(파일 머리말). 안에는 `그래프 │ 인스턴스 │ 경로 밖` 세 칸이
+          나란히 서는데(dashboard-topology.tsx), 목록 두 칸이 400px쯤 가져가므로 9칸 열 안에서는 그래프에
+          900px도 남지 않는다. 전폭으로 내리면 그래프가 1400px을 받아 5열 정렬이 여유 있게 선다. */}
       <Panel
         title="자산 토폴로지"
         description="외부 출발지 → 트래픽 경로(대상 그룹 → EC2 → EBS)와 보호 계층 — 노드를 누르면 자산 상세로 이동합니다"

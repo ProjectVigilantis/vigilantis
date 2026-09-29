@@ -1,220 +1,114 @@
-'use client';
-
-// DSH-001 「AI 조치 제안」 카드 — 화면설계서 §4.1. 위험도 1순위 1건의 판단 근거·추천 런북·
-// `[원클릭 조치]`를 첫 화면에 세우고, 2순위 이하는 `다음 대기`로 줄만 남깁니다.
+// DSH-001 「AI 조치 제안」 카드 — 화면설계서 §4.1. **요약 자리다(2026-09-29).** 미조치 인시던트
+// 전량을 한 줄씩 세운다. 줄마다 공통으로 이름 · 유형(자산/보안) · 상태 · 발생 시각을 싣고,
+// 보안 건은 위험도 배지를, 자산 건은 채택 시 추정 절감액을 더한다. 순서는 `lib/dashboard` `proposalRows`.
 //
-// **실행 결과(ACT-002)는 여기서 그리지 않는다** — 202를 받으면 INC-002 상세로 보낸다(§2.2가
-// 대시보드 경로에 정해 둔 "시작한 화면에서 INC-002로 이동"이며 INC-001 목록과 같은 처리다).
-// 판단 근거가 없는 자리에 실행 상태만 띄우면 관제자가 근거 없이 후속 판단을 하게 된다.
+// 판단 근거·추천 런북·실행 버튼은 싣지 않는다 — 줄을 누르면 가는 INC-002 상세가 그 자리다.
+// 대시보드에서 근거 일부만 보고 실행하게 두면, 상세의 근거 3줄·대상 확인을 건너뛴 실행이 생긴다.
 
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
-import { useState } from 'react';
 
-import { ActionExecuteDialog } from '@/components/incidents/action-execute-dialog';
 import { EmptyState } from '@/components/empty-state';
 import { StatusBadge } from '@/components/status-badge';
-import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { proposalRequest, type ActionRequest } from '@/lib/action-request';
-import { newIdempotencyKey } from '@/lib/api/client';
-import { proposalView } from '@/lib/dashboard';
-import { arnShort, incidentTitle, RUNBOOK_LABELS } from '@/lib/enum-labels';
-import { proposalButtons } from '@/lib/proposal-buttons';
+import type { ProposalRow } from '@/lib/dashboard';
+import { incidentTitle } from '@/lib/enum-labels';
+import { formatTick } from '@/lib/metrics-chart';
+import { formatUsd } from '@/lib/savings';
 import { formatKst } from '@/lib/utils';
-import type { AssetItem, IncidentListItem, IncidentResponse } from '@/types/api';
 
 function href(incidentId: string): string {
   return `/incidents/${encodeURIComponent(incidentId)}`;
 }
 
-/**
- * 판단 근거 3줄. 계약이 분석 완료 시 정확히 3개, 분석 중·실패 시 빈 배열로 강제한다 —
- * 빈 배열을 "근거 없음"으로 적으면 분석이 아직 안 끝난 건이 근거가 없는 건으로 읽힌다(§4.5와 같다).
- */
-function Summary({ incident }: { incident: IncidentResponse }) {
-  if (incident.summary_lines.length === 0) {
-    return (
-      <p className="text-muted-foreground text-sm">
-        {incident.status === 'ANALYZING' ? '분석 중' : '분석 실패'}
-      </p>
-    );
-  }
+function Row({ row }: { row: ProposalRow }) {
+  const { incident, savings } = row;
   return (
-    <ol className="flex list-decimal flex-col gap-1.5 pl-5 text-sm">
-      {incident.summary_lines.map((line, i) => (
-        <li key={i}>{line}</li>
-      ))}
-    </ol>
-  );
-}
-
-/** 2순위 이하 — 판단 근거는 싣지 않는다. 여기서 고르는 자리가 아니라 다음이 무엇인지 아는 자리다. */
-function NextUp({ items }: { items: IncidentListItem[] }) {
-  if (items.length === 0) return null;
-  return (
-    <div className="mt-4 border-t pt-3">
-      <p className="text-muted-foreground mb-2 text-xs">다음 대기 {items.length}건</p>
-      <ul className="flex flex-col">
-        {items.map((incident) => (
-          <li key={incident.incident_id}>
-            <Link
-              href={href(incident.incident_id)}
-              className="hover:bg-muted flex items-center justify-between gap-2 rounded-md px-2 py-1.5 text-xs"
-            >
-              <span className="truncate">{incidentTitle(incident)}</span>
-              <span className="flex shrink-0 items-center gap-1.5">
-                {incident.initial_risk_level !== null ? (
-                  <StatusBadge field="risk_level" value={incident.initial_risk_level} />
-                ) : null}
-                <StatusBadge field="incident_status" value={incident.status} />
-              </span>
-            </Link>
-          </li>
-        ))}
-      </ul>
-    </div>
+    <Link
+      href={href(incident.incident_id)}
+      className="hover:bg-muted flex flex-col gap-1 rounded-md px-2 py-1.5"
+    >
+      <span className="flex items-baseline gap-2">
+        <span className="min-w-0 flex-1 truncate text-sm">{incidentTitle(incident)}</span>
+        {/* 3칸 폭에 전체 시각(`2026. 9. 21. 오전 9:44:51 KST`)이 서지 않는다 — 월·일·시·분으로 줄이고
+            초·연도까지는 호버 제목으로 남긴다. */}
+        <span
+          title={formatKst(incident.created_at)}
+          className="text-muted-foreground shrink-0 font-mono text-xs tabular-nums"
+        >
+          {formatTick(Date.parse(incident.created_at))}
+        </span>
+      </span>
+      <span className="flex flex-wrap items-center gap-1.5">
+        <StatusBadge field="category" value={incident.category} />
+        <StatusBadge field="incident_status" value={incident.status} />
+        {incident.category === 'SECOPS' ? (
+          // 계약상 분석 전 SECOPS도 위험도가 null일 수 있다 — 없는 등급을 지어내지 않는다.
+          incident.initial_risk_level !== null ? (
+            <StatusBadge field="risk_level" value={incident.initial_risk_level} />
+          ) : null
+        ) : (
+          // AI 참고 추정이지 청구액이 아니다(#347) — 금액 옆에 "추정"을 함께 적는다(`lib/savings.ts` 머리말).
+          <span className="text-muted-foreground ml-auto font-mono text-xs tabular-nums">
+            {savings === null ? '절감 추정 없음' : `추정 ${formatUsd(savings)}/월`}
+          </span>
+        )}
+      </span>
+    </Link>
   );
 }
 
 export function ActionProposalCard({
-  top,
+  rows,
   errorSlot,
-  queue,
-  assets,
 }: {
-  top: IncidentResponse | null;
   /**
-   * 조회가 실패했을 때 그 자리에 놓을 CMN-002 — **인시던트 목록**이나 **1순위 상세** 중 실패한 쪽이다.
-   * **카드만** 오류로 두고 대시보드는 살린다(§4.1 예외).
-   *
-   * 오류 객체가 아니라 **서버에서 그린 엘리먼트**를 받는다 — `ErrorState`는 RSC 직렬화가
-   * `ApiError`의 `code`·`requestId`를 조용히 버려서 클라이언트로 넘기면 6종 분기가 무너진다
-   * (`error-state.tsx` 파일 상단 주의).
-   */
-  errorSlot: React.ReactNode;
-  /**
-   * `미조치` 전량(위험도 정렬). 1순위는 `top`과 같은 건이다.
+   * `미조치` 전량을 줄 순서대로(`proposalRows`). 지표 띠의 `미조치` 두 칸 합과 같은 집합이다.
    * **null은 목록 조회 실패**다 — 빈 배열(대기 0건)과 다르게 그린다(PR #351 리뷰 2).
    */
-  queue: IncidentListItem[] | null;
-  /** 제안의 `target_arn`을 조인해 승인 모달에 자산 사실값을 넘긴다(#183). */
-  assets: AssetItem[];
-}) {
-  const router = useRouter();
+  rows: ProposalRow[] | null;
   /**
-   * 열린 승인 모달의 요청. **1순위(`top`)와 따로 산다** — 모달을 연 사이 WebSocket 재조회로 1순위가
-   * 바뀌어도 모달은 연 건의 대상과 `incident_id`를 함께 유지한다(PR #351 리뷰 1). 연 건이 그 사이
-   * 실행 불가가 됐으면 서버가 409로 돌려주고 아래 `onProposalStale`이 닫고 다시 읽는다.
+   * 목록 조회가 실패했을 때 그 자리에 놓을 CMN-002. **카드만** 오류로 두고 대시보드는 살린다(§4.1 예외).
+   * 서버에서 그린 엘리먼트를 받는다 — `ErrorState`를 클라이언트 경계 너머로 보내면 RSC 직렬화가
+   * `ApiError`의 `code`·`requestId`를 버린다(`error-state.tsx` 파일 상단 주의).
    */
-  const [request, setRequest] = useState<ActionRequest | null>(null);
-  const view = proposalView(queue, top);
-
+  errorSlot: React.ReactNode;
+}) {
   const body = (() => {
-    if (view.kind === 'LIST_FAILED' || view.kind === 'TOP_FAILED') return errorSlot;
-    if (view.kind === 'EMPTY') {
-      // "지금 승인할 것이 없다"도 관제 정보다(§3.1) — 오류나 빈 화면으로 그리지 않는다.
-      // 조회에 **성공한** 빈 목록만 여기 온다. 실패를 이 문구로 그리면 위 지표와 반대로 말한다.
+    if (rows === null) return errorSlot;
+    if (rows.length === 0) {
+      // "지금 승인할 것이 없다"도 관제 정보다(§3.1) — 조회에 **성공한** 빈 목록만 여기 온다.
       return <EmptyState message="승인을 기다리는 조치 제안이 없습니다." />;
     }
-    const { top, next } = view;
-
-    // §4.5 버튼 노출 규칙 그대로 — `recommendations`가 비면 버튼을 만들지 않는다(조회 전용).
-    // `ANALYZING`은 계약이 빈 배열을 강제하므로 자연히 여기서 걸린다.
-    const canExecute = top.recommendations.length > 0;
-    // 문구는 INC-002 상세와 **같은 함수**로 정한다 — 후보 런북의 동작 계열이 축이다(#363).
-    // 반려(`차단 안 함`)는 상세(§4.5 B-Medium) 자리이므로 이 카드는 `approveLabel`만 쓴다.
-    const { approveLabel } = proposalButtons(top);
-    // 진행 중 실행이 있으면 같은 Incident의 실행 버튼을 잠근다(§4.5).
-    const locked = top.status === 'ACTION_IN_PROGRESS';
-
     return (
-      <div className="flex flex-col gap-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <Link href={href(top.incident_id)} className="text-sm font-medium hover:underline">
-            {incidentTitle(top)}
-          </Link>
-          <StatusBadge field="category" value={top.category} />
-          {top.initial_risk_level !== null ? (
-            <StatusBadge field="risk_level" value={top.initial_risk_level} />
-          ) : null}
-          <StatusBadge field="incident_status" value={top.status} />
-          <span className="text-muted-foreground ml-auto text-xs">{formatKst(top.created_at)}</span>
-        </div>
-
-        <Summary incident={top} />
-
-        {canExecute ? (
-          <>
-            <ul className="flex flex-col gap-1 border-t pt-3 text-xs">
-              {top.recommendations.map((rec) => (
-                <li key={rec.runbook_id} className="flex flex-wrap items-center gap-2">
-                  <span className="font-medium">{RUNBOOK_LABELS[rec.runbook_id] ?? rec.runbook_id}</span>
-                  {/* 복구 런북은 계약에 `target_arn`이 없어 null이다 — 없는 대상을 지어내지 않는다. */}
-                  <span className="text-muted-foreground font-mono">
-                    {rec.target_arn === null ? '대상 미지정' : arnShort(rec.target_arn)}
-                  </span>
-                </li>
-              ))}
-            </ul>
-            <div className="flex flex-wrap items-center gap-3">
-              <Button
-                type="button"
-                disabled={locked}
-                onClick={() =>
-                  // 멱등 키는 **모달을 열 때 1회** 만든다(§4.6). 클릭마다 만들면 중복 클릭이
-                  // 서로 다른 키가 되어 멱등성이 무력화된다.
-                  setRequest(proposalRequest(top, assets, newIdempotencyKey()))
-                }
-              >
-                {approveLabel}
-              </Button>
-              {locked ? (
-                <span className="text-muted-foreground text-xs">
-                  진행 중인 실행이 있어 새 실행을 받지 않습니다.
-                </span>
-              ) : null}
-            </div>
-          </>
-        ) : (
-          <p className="text-muted-foreground border-t pt-3 text-xs">
-            추천된 조치가 아직 없습니다 — 분석이 끝나면 이 자리에 실행 버튼이 생깁니다.
-          </p>
-        )}
-
-        <NextUp items={next} />
-      </div>
+      // 토폴로지 목록(`topology-picker.tsx`)과 같은 스크롤 — 넓은 화면에서는 카드가 받은 높이(왼쪽 열)를
+      // 다 쓰고, 한 열로 접히면 고정 상한(`max-h-60`)으로 같은 일을 한다.
+      <ul className="-mx-2 flex max-h-60 min-h-0 flex-col divide-y overflow-y-auto xl:max-h-none xl:flex-1">
+        {rows.map((row) => (
+          <li key={row.incident.incident_id}>
+            <Row row={row} />
+          </li>
+        ))}
+      </ul>
     );
   })();
 
   return (
-    <Card>
+    // `xl`에서 격자 칸(dashboard-view.tsx 오른쪽 열)에 꽉 찬다 — 높이는 왼쪽 열이 정한다.
+    <Card className="xl:absolute xl:inset-0">
       <CardHeader className="border-b">
-        <CardTitle className="text-sm">AI 조치 제안</CardTitle>
+        <CardTitle className="text-sm">
+          AI 조치 제안
+          {rows !== null && rows.length > 0 ? (
+            <span className="text-muted-foreground ml-1.5 font-mono font-normal tabular-nums">
+              {rows.length}건
+            </span>
+          ) : null}
+        </CardTitle>
         <CardDescription className="text-xs">
-          위험도 1순위 1건의 판단 근거와 추천 런북 — 실행하면 인시던트 상세에서 진행 상태를 봅니다
+          보안은 위험도순, 자산은 추정 절감액순 — 누르면 상세에서 판단 근거와 조치를 봅니다
         </CardDescription>
       </CardHeader>
-      <CardContent>{body}</CardContent>
-
-      {request !== null ? (
-        <ActionExecuteDialog
-          request={request}
-          onClose={() => setRequest(null)}
-          onExecuted={(outcome) => {
-            // ACT-002는 INC-002가 그린다 — 실행 id를 실어 그 패널이 열린 채로 진입한다.
-            // 이동할 곳도 **보낸 요청의** 인시던트다 — 지금의 1순위가 아니다.
-            router.push(
-              `${href(request.incidentId)}?execution=${encodeURIComponent(outcome.execution.execution_id)}`,
-            );
-          }}
-          // 409 PROPOSAL_NOT_EXECUTABLE — 제안이 이미 실행됐거나 무효해졌다. 대시보드를 다시 읽는다.
-          onProposalStale={() => {
-            setRequest(null);
-            router.refresh();
-          }}
-        />
-      ) : null}
+      <CardContent className="flex min-h-0 flex-1 flex-col">{body}</CardContent>
     </Card>
   );
 }
