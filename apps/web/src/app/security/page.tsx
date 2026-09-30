@@ -4,6 +4,7 @@
 // 그것을 쓰는 패널만 "조회 실패"로 그린다(null = 조회 실패, 0건과 구분). 응답을 캐시하지 않아
 // 새로고침·실시간 이벤트의 `router.refresh()`가 곧 재조회다.
 
+import { AutoRefresh } from '@/components/auto-refresh';
 import { ErrorState } from '@/components/error-state';
 import { SecurityView } from '@/components/security/security-view';
 import { getAssets, getIncidents, getMetricsTimeseries } from '@/lib/api/client';
@@ -46,6 +47,7 @@ export default async function SecurityPage({ searchParams }: PageProps<'/securit
   // 화면 이름(h1)은 뷰 안에 있다 — 지표 띠와 한 덩이로 스크롤을 따라와야 해서다(security-view.tsx).
   return (
     <>
+      <AutoRefresh />
       <SecurityView
         data={assets}
         incidents={incidents}

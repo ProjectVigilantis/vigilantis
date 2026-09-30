@@ -98,6 +98,9 @@ export function AssetCompositionChart({ composition }: { composition: AssetCompo
               allowEscapeViewBox={{ x: true, y: true }}
               // 가운데 전량 라벨(아래 absolute)보다 위에 뜬다.
               wrapperStyle={{ zIndex: 20 }}
+              // Recharts 기본은 위치 이동을 transition으로 그려, 첫 등장 때 원점(왼쪽 위)에서 포인터까지
+              // 끌려온다. 포인터 자리에 바로 선다.
+              isAnimationActive={false}
             />
             <Pie
               data={slices}

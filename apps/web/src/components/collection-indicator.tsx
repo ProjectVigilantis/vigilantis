@@ -21,9 +21,10 @@ import type { AssetsResponse, CollectionStatus } from '@/types/api';
 /**
  * GNB는 layout 소유라 라우트 전환으로 remount되지 않는다 — 다시 부르지 않으면 새로고침 전까지
  * 수집 상태가 고정된다(PR #299 리뷰). 수집 상태를 알리는 WS 이벤트가 계약에 없어 주기로 따라간다.
- * 스캔 주기(`SCAN_INTERVAL_SECONDS`)보다 짧기만 하면 된다.
+ * 스캔 주기(`SCAN_INTERVAL_SECONDS`)보다 짧기만 하면 되는데, 옆 `실시간` 칩이 이 값으로 "자산이
+ * 붙었나"를 가르므로 첫 수집 뒤 늦게 켜지지 않게 요약 화면 자동 갱신(15초)과 맞춘다.
  */
-const REFRESH_MS = 60_000;
+const REFRESH_MS = 15_000;
 
 /** `collection_status` 5종 → 칩 색조 3종. 정상만 초록이고, 손볼 것이 있는 셋은 주황으로 묶는다. */
 const TONE: Record<CollectionStatus, ChipTone> = {
@@ -65,7 +66,18 @@ function scopeLabel(items: AssetsResponse['items']): { name: string; accounts: s
   return { name, accounts: accounts.length > 0 ? `AWS 계정 ${accounts.join(', ')}` : undefined };
 }
 
-export function CollectionIndicator() {
+export interface AssetsEnvelopeState {
+  /** 마지막으로 받은 `GET /assets` 봉투. 첫 응답 전에는 null. */
+  env: AssetsResponse | null;
+  /** 마지막 조회가 실패했나. */
+  failed: boolean;
+}
+
+/**
+ * GNB 두 칩이 함께 쓰는 `GET /assets` 봉투 — 한 번만 부른다(gnb.tsx가 쥐고 두 칩에 내린다).
+ * 수집 칩은 수집 상태를, 실시간 칩은 "자산이 붙었나"(수집된 자산이 있나)를 읽는다.
+ */
+export function useAssetsEnvelope(): AssetsEnvelopeState {
   const { connection } = useRealtime();
   const [env, setEnv] = useState<AssetsResponse | null>(null);
   const [failed, setFailed] = useState(false);
@@ -98,6 +110,10 @@ export function CollectionIndicator() {
     if (failed && connection === 'open') loadRef.current();
   }, [failed, connection]);
 
+  return { env, failed };
+}
+
+export function CollectionIndicator({ env, failed }: AssetsEnvelopeState) {
   // 조회 실패는 `수집 실패`(서버가 답한 상태)와 다르다 — 서버에 못 물어본 것이다.
   if (failed) {
     return <StatusChip tone="idle" label="수집" value="확인 불가" title="수집 상태를 조회하지 못했습니다" />;

@@ -38,7 +38,7 @@ import { useMemo, useState } from 'react';
 import { AssetCard } from '@/components/assets/asset-card';
 import { AssetDetail } from '@/components/assets/asset-detail';
 import { AssetGraph } from '@/components/assets/asset-graph';
-import { SgExposureTrendChart } from '@/components/dashboard/trend-charts';
+import { ThreatActivityChart } from '@/components/dashboard/trend-charts';
 import { EmptyState } from '@/components/empty-state';
 import { ErrorState } from '@/components/error-state';
 import { FilterSelect } from '@/components/filter-select';
@@ -48,7 +48,7 @@ import { Panel } from '@/components/panel';
 import { Muted } from '@/components/panel-parts';
 import {
   OpenSgPanel,
-  SecurityIncidentStatusPanel,
+  SecurityIncidentStatusList,
   ThreatSourcePanel,
 } from '@/components/security/security-summary-panels';
 import { StatusBadge } from '@/components/status-badge';
@@ -76,12 +76,12 @@ const ALL = '전체';
 
 /** 칸의 표기. 집합의 정의는 `lib/security`의 `focusAssets`가 쥔다 — 여기는 이름·설명·색뿐이다. */
 const FOCUS_LABEL: Record<Focus, { label: string; note: string; tone?: MetricTone }> = {
-  SG: { label: '보안 그룹', note: '수집된 보안 그룹 전량 — 기본 목록' },
+  SG: { label: '보안 그룹', note: '수집된 보안 그룹 전량' },
   OPEN_SG: { label: '인터넷 개방', note: '전체 대역 인바운드 허용', tone: 'warn' },
-  AFFECTED_EC2: { label: '영향 EC2', note: '개방 SG 뒤의 인스턴스(중복 없이)', tone: 'warn' },
+  AFFECTED_EC2: { label: '영향 EC2', note: '개방 SG 뒤의 인스턴스', tone: 'warn' },
   THREAT: { label: '위협 판정 자산', note: '규칙 엔진 위협 판정', tone: 'danger' },
-  UNHANDLED: { label: '미조치 보안 인시던트', note: '분석·승인 대기·조치 중 — 누르면 그 대상 자산', tone: 'warn' },
-  NACL: { label: 'NACL', note: '차단 런북 대상 — 토폴로지에서 봅니다' },
+  UNHANDLED: { label: '미조치 보안 인시던트', note: '분석·승인 대기·조치 중', tone: 'warn' },
+  NACL: { label: 'NACL', note: '차단 런북 대상' },
 };
 
 export function SecurityView({
@@ -101,7 +101,7 @@ export function SecurityView({
   incidentsError: unknown;
   /** 목록 API의 `subject_arn` 역조인(자산 관제와 같다). `null`은 조회 실패. */
   incidentsByArn: Record<string, IncidentListItem[]> | null;
-  /** CloudWatch 시계열 — 여기서는 `sg_exposure` 축과 상세 Drawer의 스파크라인이 쓴다. 실패면 null. */
+  /** CloudWatch 시계열 — 여기서는 `asset_status`(축 4)·`threat_events`(축 6)로 「전체 위협 추이」를, 상세 Drawer가 스파크라인을 그린다. 실패면 null. */
   metrics: MetricsTimeseriesResponse | null;
   /** `?asset=<arn>` 딥링크 — 그 자산의 상세를 연 채로 시작한다. 목록에 없으면 무시한다. */
   openArn?: string;
@@ -198,26 +198,30 @@ export function SecurityView({
       </MetricStrip>
       </div>
 
-      {/* 상태 행 — 자산 관제의 헬스 스코어 자리다. 개방 SG 목록이 2칸을 받는 이유: 항목이 격자로
-          깔리는 목록이라 좁으면 한 열로 길어진다. 셋째 칸의 인시던트 현황은 막대 여섯 줄이라 좁아도 읽힌다. */}
-      <div className="grid gap-4 lg:grid-cols-3">
-        <OpenSgPanel items={data.items} onSelect={select} className="lg:col-span-2" />
-        <SecurityIncidentStatusPanel incidents={incidents} />
-      </div>
-
-      {/* 추이 행 — 위 상태가 **어디서 왔나**. 왼쪽은 시간 축(회차별 위협 판정 건수), 오른쪽은 출처 축
-          (누가·어느 대역이 들어왔나). 개방 SG 추이는 종전 대시보드 카드를 그대로 옮긴 것이다. */}
-      <div className="grid gap-4 lg:grid-cols-2">
+      {/* 요약 행 — 한 줄 4칸(2026-09-30). 전체 위협 추이가 2칸으로 가장 크고 맨 앞이다 — 이 화면에서 먼저
+          읽을 것은 "위협이 얼마나 들어왔고 얼마가 남았나"다. 그 옆에 어느 SG가·무엇이 열렸나(개방 SG + 노출
+          포트)와 누가·어느 대역이 들어왔나(외부 위협 출발지)가 1칸씩 선다. 전체 위협 박스는 2칸이라 넓은
+          화면에서는 추이 옆에 현황을 나란히 두고, 좁아지면 아래로 쌓는다. */}
+      <div className="grid gap-4 lg:grid-cols-4">
         <Panel
-          title="인터넷 개방 보안 그룹 추이"
-          description="수집 회차별 위협 판정 건수 — 조치가 반영되면 선이 내려갑니다"
+          className="lg:col-span-2"
+          title="전체 위협 추이"
+          description="위협 판정 자산(선)과 외부 위협 이벤트 발생(막대) · 보안 인시던트 처리 현황"
         >
-          {metrics === null ? (
-            <Muted>추이를 불러오지 못했습니다.</Muted>
-          ) : (
-            <SgExposureTrendChart axis={metrics.sg_exposure} />
-          )}
+          <div className="grid gap-4 xl:grid-cols-5">
+            <div className="xl:col-span-3">
+              {metrics === null ? (
+                <Muted>추이를 불러오지 못했습니다.</Muted>
+              ) : (
+                <ThreatActivityChart assetStatus={metrics.asset_status} threatEvents={metrics.threat_events} />
+              )}
+            </div>
+            <div className="border-t pt-3 xl:col-span-2 xl:border-t-0 xl:border-l xl:pt-0 xl:pl-4">
+              <SecurityIncidentStatusList incidents={incidents} />
+            </div>
+          </div>
         </Panel>
+        <OpenSgPanel items={data.items} onSelect={select} />
         <ThreatSourcePanel paths={paths} items={data.items} />
       </div>
 

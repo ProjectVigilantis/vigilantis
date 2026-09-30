@@ -297,23 +297,10 @@ export function AssetsView({
       </MetricStrip>
       </div>
 
-      {/* 상태 3열 — 띠(지금 몇 건)와 목록(무엇이) 사이에서 **지금 어떤 상태인가**를 말한다.
-          순서가 질문 순서다: 이 EC2가 한가한가(헬스 스코어) → 규칙이 뭐라 했나(판정 현황) →
-          그래서 얼마를 아끼나(절감 예상). 셋 다 현재 회차의 값이라 한 줄에 선다. */}
-      <div className="grid gap-4 lg:grid-cols-3">
-        <HealthScorePanel items={data.items} />
-        <VerdictPanel items={data.items} />
-        <Panel
-          title="절감 예상 (AI 추정)"
-          description="다운사이징 후보의 월 절감 예상액 — 모델 추정 단가 × 730시간이며 실제 청구액이 아닙니다"
-        >
-          <SavingsCard summary={savings} failed={savingsFailed} onSelect={openAsset} />
-        </Panel>
-      </div>
-
-      {/* 추이 2열 — 위 상태가 **어디서 왔나**를 시간 축으로 말한다. 헬스 스코어가 CPU 14일 평균이라
-          그 원계열이 바로 아래 온다. CPU·네트워크는 같은 CloudWatch 원계열이지만 단위가 %와 B/s라
-          한 격자에 겹치지 않는다. */}
+      {/* 추이 2열 — 띠 바로 아래, 박스 중 맨 위다(2026-09-30 · 보안 관제와 같은 순서: 추이 → 상태).
+          아래 상태 3열이 **어디서 왔나**를 시간 축으로 먼저 보여 준다 — 헬스 스코어가 CPU 14일 평균이라
+          그 원계열이 앞선다. CPU·네트워크는 같은 CloudWatch 원계열이지만 단위가 %와 B/s라 한 격자에
+          겹치지 않는다. */}
       <div className="grid gap-4 lg:grid-cols-2">
         <Panel
           title="EC2 CPU 추이"
@@ -337,6 +324,19 @@ export function AssetsView({
           ) : (
             <NetworkTrendChart axis={metrics.network} arns={chartArns} />
           )}
+        </Panel>
+      </div>
+
+      {/* 상태 3열 — 위 추이가 만든 **지금 상태**다. 순서가 질문 순서다: 이 EC2가 한가한가(헬스 스코어)
+          → 규칙이 뭐라 했나(판정 현황) → 그래서 얼마를 아끼나(절감 예상). 셋 다 현재 회차의 값이라 한 줄에 선다. */}
+      <div className="grid gap-4 lg:grid-cols-3">
+        <HealthScorePanel items={data.items} />
+        <VerdictPanel items={data.items} />
+        <Panel
+          title="절감 예상 (AI 추정)"
+          description="다운사이징 후보의 월 절감 예상액 — 모델 추정 단가 × 730시간이며 실제 청구액이 아닙니다"
+        >
+          <SavingsCard summary={savings} failed={savingsFailed} onSelect={openAsset} />
         </Panel>
       </div>
 

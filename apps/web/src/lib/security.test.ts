@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { focusAssets, focusScope, secopsStatusCounts, securityMetrics } from './security.ts';
+import { exposedPorts, focusAssets, focusScope, secopsStatusCounts, securityMetrics } from './security.ts';
 import type { AssetItem, IncidentListItem, IncidentStatus, OpenPortRule } from '../types/api.ts';
 
 type Common = Omit<AssetItem, 'asset_type' | 'spec'>;
@@ -163,4 +163,27 @@ test('상태 분포는 SECOPS만, 상태 6종을 0건까지 전부 낸다', () =
     { ANALYZING: 0, AWAITING_APPROVAL: 2, ACTION_IN_PROGRESS: 0, AWAITING_CLOSURE: 0, RESOLVED: 0, FAILED: 1 },
   );
   assert.equal(secopsStatusCounts(null), null);
+});
+
+test('노출 포트 — 같은 포트를 연 SG를 한 줄로 모으고, IPv4·IPv6 개방은 한 SG로 센다', () => {
+  const items = [
+    sg('sg-a', [SSH, { ...SSH, ipv6: true }]),
+    sg('sg-b', [SSH, { protocol: 'tcp', from_port: 443, to_port: 443, ipv6: false }]),
+    sg('sg-c', [{ protocol: 'all', from_port: null, to_port: null, ipv6: false }]),
+    sg('sg-closed', []),
+    ec2('i-1', ['sg-a', 'sg-b']),
+    ec2('i-2', ['sg-c']),
+  ];
+  assert.deepEqual(exposedPorts(items), [
+    { label: 'tcp/22', service: 'SSH', sgCount: 2, affectedEc2: 1 },
+    { label: '전체 트래픽', service: null, sgCount: 1, affectedEc2: 1 },
+    { label: 'tcp/443', service: 'HTTPS', sgCount: 1, affectedEc2: 1 },
+  ]);
+});
+
+test('노출 포트 — 범위 포트는 서비스 이름을 붙이지 않고, 개방 SG가 없으면 빈 목록이다', () => {
+  assert.deepEqual(exposedPorts([sg('sg-r', [{ protocol: 'tcp', from_port: 1000, to_port: 2000, ipv6: false }])]), [
+    { label: 'tcp/1000-2000', service: null, sgCount: 1, affectedEc2: 0 },
+  ]);
+  assert.deepEqual(exposedPorts([sg('sg-closed', [])]), []);
 });

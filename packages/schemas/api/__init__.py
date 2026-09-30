@@ -3,7 +3,7 @@
 # Dashboard(FE)와의 외부 API DTO 네임스페이스입니다.
 # 수집·정형화 계층(packages/schemas/*.py 최상위 모듈)과 계약 계층을 분리합니다.
 #   - assets:    GET /api/v1/assets 응답 (이슈 #31)
-#   - metrics:   GET /api/v1/metrics/timeseries 응답 — 시계열 5축(CPU·SG 개방·네트워크·자산 현황·자산 수)
+#   - metrics:   GET /api/v1/metrics/timeseries 응답 — 시계열 6축(CPU·SG 개방·네트워크·자산 현황·자산 수·위협 이벤트)
 #   - incidents: GET /api/v1/incidents/{id} 응답 (이슈 #32)
 #   - actions:   POST /api/v1/actions/execute 요청·응답 (이슈 #32)
 #   - ws:        WebSocket(/api/v1/ws) 공통 이벤트 봉투 (이슈 #32)
@@ -43,6 +43,9 @@ from .metrics import (
     NetworkAxis,
     NetworkSeries,
     SgExposureAxis,
+    ThreatEventAxis,
+    ThreatEventKind,
+    ThreatEventPoint,
     TimeseriesPoint,
 )
 from .ws import (
@@ -127,5 +130,8 @@ __all__ = [
     "NetworkAxis",
     "NetworkSeries",
     "SgExposureAxis",
+    "ThreatEventAxis",
+    "ThreatEventKind",
+    "ThreatEventPoint",
     "TimeseriesPoint",
 ]

@@ -1,7 +1,8 @@
 # ==============================================================================
 # [파일 설명]  담당: 김세혁 (PM · Infra & DevSecOps)
-# GET /api/v1/metrics/timeseries 외부 응답 DTO입니다. 시계열 차트 5축(CPU · SG 개방 ·
-# 네트워크 · 자산 현황 · 자산 수)의 공개 계약이며, GET /api/v1/assets(스냅샷)와는 별개의 엔드포인트입니다.
+# GET /api/v1/metrics/timeseries 외부 응답 DTO입니다. 시계열 차트 6축(CPU · SG 개방 ·
+# 네트워크 · 자산 현황 · 자산 수 · 위협 이벤트)의 공개 계약이며, GET /api/v1/assets(스냅샷)와는
+# 별개의 엔드포인트입니다.
 #
 # 왜 /assets 에 얹지 않았나
 #   - /assets 응답은 `extra="forbid"` 인 자산 1건의 **현재 상태**다. 시계열을 얹으면
@@ -18,7 +19,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Annotated, Optional
+from typing import Annotated, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, model_validator
 
@@ -348,6 +349,60 @@ class AssetInventoryAxis(BaseModel):
         return self
 
 
+#: 위협 이벤트 유형 — 인시던트 계약 `threat_context.event_type` 과 같은 값이다(incidents.py).
+ThreatEventKind = Literal["OPEN_IP", "SSH_BRUTE_FORCE"]
+
+
+class ThreatEventPoint(BaseModel):
+    """시간 칸 하나에 **발생한** 위협 이벤트 수 — 유형별(2026-09-30)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    at: UtcDateTime
+    #: `counts` 값의 합(불변식) — 화면이 다시 더하지 않는다.
+    total: int = Field(ge=1)
+    #: 그 칸에 한 건도 없던 유형은 키가 없다. 이 축에서 빠진 키는 0건이다(아래 축 docstring).
+    counts: dict[ThreatEventKind, int]
+
+    @model_validator(mode="after")
+    def _enforce_contract(self):
+        if any(n < 1 for n in self.counts.values()):
+            raise ValueError("counts 는 1 이상이어야 합니다 — 0건 유형은 키를 싣지 않습니다")
+        if sum(self.counts.values()) != self.total:
+            raise ValueError("total 은 counts 의 합이어야 합니다")
+        return self
+
+
+class ThreatEventAxis(BaseModel):
+    """축 6 — 위협 이벤트 발생 추이. 정규화된 외부 위협(`threat_events`)이 칸마다 몇 건 **일어났나**.
+
+    축 4(`asset_status.threat`)가 회차마다 "지금 위협 판정 상태인 자산 수"(상태량)라면, 이 축은
+    "그 사이 들어온 위협 신호 수"(발생량)다. 화면은 둘을 한 차트에 겹쳐 **전체 위협 추이**로 읽는다
+    — 판정은 규칙 엔진이 본 노출, 이벤트는 밖에서 들어온 관측(무차별 대입 · 전체 개방 등)이다.
+
+    **다른 축과 달리 점이 없는 칸은 0건이다.** 판정·자산 수 축은 회차가 없으면 "못 봤다"라 점을
+    비우지만, 이벤트는 들어올 때 기록되는 것이라 "못 본 칸"이 없다. 그래서 이벤트가 있는 칸만 싣는다.
+    칸은 이벤트의 **발생 시각**(`occurred_at`)으로 나누고, 관제 대상 리전은 대상 ARN 의 리전으로 거른다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: AxisStatus
+    points: list[ThreatEventPoint] = Field(default_factory=list)
+    reason_code: Optional[str] = Field(None, min_length=1)
+
+    @model_validator(mode="after")
+    def _enforce_contract(self):
+        _enforce_axis_status(self, data_fields=("points",))
+
+        ats = [p.at for p in self.points]
+        if ats != sorted(ats):
+            raise ValueError("points 는 시각 오름차순이어야 합니다")
+        if len(ats) != len(set(ats)):
+            raise ValueError("points 의 at 은 중복될 수 없습니다")
+        return self
+
+
 def _enforce_axis_status(axis, *, data_fields: tuple[str, ...]) -> None:
     """축 공통 불변식 — 상태와 데이터·사유가 어긋나지 않게 한다.
 
@@ -374,3 +429,4 @@ class MetricsTimeseriesResponse(BaseModel):
     sg_exposure: SgExposureAxis
     asset_status: AssetStatusAxis
     asset_inventory: AssetInventoryAxis
+    threat_events: ThreatEventAxis

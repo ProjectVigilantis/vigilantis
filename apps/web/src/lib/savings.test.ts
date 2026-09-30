@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { formatUsd, savingsSummary } from './savings.ts';
+import { formatUsd, savingsBreakdown, savingsSummary } from './savings.ts';
 import type { AiSavingsEstimate, AssetItem, IncidentResponse, RecommendationItem } from '@/types/api';
 
 const ARN_A = 'arn:aws:ec2:ap-northeast-2:1:instance/i-0aaa';
@@ -137,4 +137,31 @@ test('이름이 없는 자산은 resource_id로, 목록에 없으면 ARN 꼬리�
 
 test('금액 표기는 소수 둘째 자리까지 고정이다', () => {
   assert.equal(formatUsd(1234.5), '$1,234.50');
+});
+
+// --- INC-002 절감 막대 분해 -------------------------------------------------------
+
+test('막대 분해 — 현재 비용 = 조정 후 비용 + 절감이고, 절감은 서버 금액 그대로다', () => {
+  // 0.208 × 730 = 151.84, 절감 75.92 → 조정 후 75.92
+  assert.deepEqual(savingsBreakdown(estimate('75.92')), {
+    current: 151.84,
+    remaining: 75.92,
+    saving: 75.92,
+    ratio: 0.5,
+  });
+});
+
+test('막대 분해 — 금액이 없는 추정은 그리지 않는다(0원 막대 금지)', () => {
+  assert.equal(
+    savingsBreakdown(estimate('1.00', { status: 'UNAVAILABLE', amount: null, reason: 'MODEL_UNAVAILABLE' })),
+    null,
+  );
+  assert.equal(savingsBreakdown(estimate('1.00', { basis: null })), null);
+  assert.equal(savingsBreakdown(estimate('abc')), null);
+});
+
+test('막대 분해 — 절감이 현재 비용을 넘으면(계약 위반) 그리지 않는다', () => {
+  assert.equal(savingsBreakdown(estimate('151.85')), null);
+  assert.equal(savingsBreakdown(estimate('-1.00')), null);
+  assert.ok(savingsBreakdown(estimate('151.84')) !== null);
 });

@@ -19,6 +19,8 @@ from schemas.api import (
     NetworkAxis,
     NetworkSeries,
     SgExposureAxis,
+    ThreatEventAxis,
+    ThreatEventPoint,
 )
 
 ARN = "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0123"
@@ -115,6 +117,21 @@ def make_inventory_point(**over):
     return base
 
 
+def make_threat_event_point(**over):
+    base = {"at": "2026-09-18T00:00:00Z", "total": 3, "counts": {"SSH_BRUTE_FORCE": 2, "OPEN_IP": 1}}
+    base.update(over)
+    return base
+
+
+def make_threat_event_axis(**over):
+    base = {
+        "status": "READY",
+        "points": [make_threat_event_point(at="2026-09-17T23:00:00Z"), make_threat_event_point()],
+    }
+    base.update(over)
+    return base
+
+
 def make_inventory_axis(**over):
     base = {
         "status": "READY",
@@ -132,6 +149,7 @@ def test_정상_응답이_Z_시각으로_직렬화된다():
         sg_exposure=make_sg_axis(),
         asset_status=make_asset_status_axis(),
         asset_inventory=make_inventory_axis(),
+        threat_events=make_threat_event_axis(),
     )
     dumped = res.model_dump(mode="json")
 
@@ -152,6 +170,7 @@ def test_모르는_필드는_거부한다():
             sg_exposure=make_sg_axis(),
             asset_status=make_asset_status_axis(),
             asset_inventory=make_inventory_axis(),
+            threat_events=make_threat_event_axis(),
             extra_axis={},
         )
 
@@ -165,6 +184,7 @@ def test_자산_현황_축이_빠지면_거부한다():
             network=make_network_axis(),
             sg_exposure=make_sg_axis(),
             asset_inventory=make_inventory_axis(),
+            threat_events=make_threat_event_axis(),
         )
 
 
@@ -176,6 +196,7 @@ def test_자산_수_축이_빠지면_거부한다():
             network=make_network_axis(),
             sg_exposure=make_sg_axis(),
             asset_status=make_asset_status_axis(),
+            threat_events=make_threat_event_axis(),
         )
 
 
@@ -392,3 +413,41 @@ def test_빈_축도_READY일_수_있다():
     """수집이 아직 없어 점이 0개인 것은 실패가 아니다 — 화면은 빈 차트를 그린다."""
     axis = SgExposureAxis(status="READY", points=[])
     assert axis.reason_code is None
+
+
+# ----- 축 6 위협 이벤트 -----
+
+
+def test_위협_이벤트_축이_빠지면_거부한다():
+    with pytest.raises(ValidationError):
+        MetricsTimeseriesResponse(
+            generated_at="2026-09-18T01:00:00Z",
+            cpu=make_cpu_axis(),
+            network=make_network_axis(),
+            sg_exposure=make_sg_axis(),
+            asset_status=make_asset_status_axis(),
+            asset_inventory=make_inventory_axis(),
+        )
+
+
+def test_위협_이벤트의_total은_유형별_합이고_0건_유형은_키를_싣지_않는다():
+    ThreatEventPoint(**make_threat_event_point())
+    with pytest.raises(ValidationError):
+        ThreatEventPoint(**make_threat_event_point(total=4))
+    with pytest.raises(ValidationError):
+        ThreatEventPoint(**make_threat_event_point(total=2, counts={"SSH_BRUTE_FORCE": 2, "OPEN_IP": 0}))
+    with pytest.raises(ValidationError):
+        ThreatEventPoint(**make_threat_event_point(total=0, counts={}))
+
+
+def test_위협_이벤트는_모르는_유형을_거부한다():
+    with pytest.raises(ValidationError):
+        ThreatEventPoint(**make_threat_event_point(total=1, counts={"PORT_SCAN": 1}))
+
+
+def test_위협_이벤트_점은_시각_오름차순이고_상태와_데이터가_어긋나면_거부한다():
+    with pytest.raises(ValidationError):
+        ThreatEventAxis(**make_threat_event_axis(points=[make_threat_event_point(), make_threat_event_point(at="2026-09-17T23:00:00Z")]))
+    with pytest.raises(ValidationError):
+        ThreatEventAxis(**make_threat_event_axis(status="UNAVAILABLE", reason_code="Boom"))
+    ThreatEventAxis(status="UNAVAILABLE", reason_code="Boom")

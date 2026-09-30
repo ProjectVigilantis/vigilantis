@@ -19,14 +19,17 @@ import {
   toCpuRows,
   toInventoryRows,
   toSgRows,
+  threatActivityChartState,
 } from './metrics-chart.ts';
 import type {
+  AssetStatusAxis,
   AssetStatusPoint,
   CpuAxis,
   CpuSeries,
   NetworkAxis,
   NetworkSeries,
   SgExposureAxis,
+  ThreatEventAxis,
 } from '@/types/api';
 
 function series(over: Partial<CpuSeries> = {}): CpuSeries {
@@ -317,4 +320,99 @@ test('자산 수 축도 조회 실패와 회차 없음을 가른다', () => {
     'UNAVAILABLE',
   );
   assert.equal(inventoryChartState({ status: 'READY', points: [], reason_code: null }).kind, 'EMPTY');
+});
+
+// --- 전체 위협 추이(축 4 threat + 축 6) ----------------------------------------------
+
+test('전체 위협 — 판정 칸과 이벤트 칸을 시각으로 합치고, 이벤트 없는 칸은 0 · 회차 없는 칸은 판정값이 없다', () => {
+  const state = threatActivityChartState(
+    {
+      status: 'READY',
+      reason_code: null,
+      points: [
+        { at: '2026-09-18T00:00:00Z', judged: 3, threat: 1, cost_candidate: 0, unused: 0, skip: 2, undecided: 0 },
+      ],
+    },
+    {
+      status: 'READY',
+      reason_code: null,
+      points: [
+        { at: '2026-09-17T23:00:00Z', total: 2, counts: { SSH_BRUTE_FORCE: 2 } },
+        { at: '2026-09-18T00:00:00Z', total: 1, counts: { OPEN_IP: 1 } },
+      ],
+    },
+  );
+  assert.equal(state.kind, 'READY');
+  if (state.kind !== 'READY') return;
+  assert.deepEqual(state.data.rows, [
+    { at: Date.parse('2026-09-17T23:00:00Z'), SSH_BRUTE_FORCE: 2, OPEN_IP: 0, events: 2 },
+    { at: Date.parse('2026-09-18T00:00:00Z'), threat: 1, SSH_BRUTE_FORCE: 0, OPEN_IP: 1, events: 1 },
+  ]);
+});
+
+test('전체 위협 — 한쪽 축만 실패하면 다른 쪽은 그리고 사유를 남긴다, 둘 다 실패면 UNAVAILABLE', () => {
+  const downVerdict: AssetStatusAxis = { status: 'UNAVAILABLE', reason_code: 'Boom', points: [] };
+  const downEvents: ThreatEventAxis = { status: 'UNAVAILABLE', reason_code: 'Boom', points: [] };
+  const verdict: AssetStatusAxis = {
+    status: 'READY',
+    reason_code: null,
+    points: [{ at: '2026-09-18T00:00:00Z', judged: 1, threat: 1, cost_candidate: 0, unused: 0, skip: 0, undecided: 0 }],
+  };
+  const partial = threatActivityChartState(verdict, downEvents);
+  assert.equal(partial.kind, 'READY');
+  if (partial.kind === 'READY') assert.equal(partial.data.eventsUnavailable, 'Boom');
+  assert.equal(threatActivityChartState(downVerdict, downEvents).kind, 'UNAVAILABLE');
+});
+
+test('전체 위협 — 한쪽이 실패하고 다른 쪽이 비었으면 "기록 없음"이 아니라 조회 실패다', () => {
+  const emptyVerdict: AssetStatusAxis = { status: 'READY', reason_code: null, points: [] };
+  const emptyEvents: ThreatEventAxis = { status: 'READY', reason_code: null, points: [] };
+  const downVerdict: AssetStatusAxis = { status: 'UNAVAILABLE', reason_code: 'VerdictDown', points: [] };
+  const downEvents: ThreatEventAxis = { status: 'UNAVAILABLE', reason_code: 'EventsDown', points: [] };
+  assert.deepEqual(threatActivityChartState(downVerdict, emptyEvents), { kind: 'UNAVAILABLE', reason: 'VerdictDown' });
+  assert.deepEqual(threatActivityChartState(emptyVerdict, downEvents), { kind: 'UNAVAILABLE', reason: 'EventsDown' });
+  // 둘 다 조회에 성공했는데 비었으면 그때만 "기록 없음"이다
+  assert.equal(threatActivityChartState(emptyVerdict, emptyEvents).kind, 'EMPTY');
+});
+
+test('전체 위협 — 실패한 이벤트 축의 칸은 0으로 채우지 않는다', () => {
+  const state = threatActivityChartState(
+    {
+      status: 'READY',
+      reason_code: null,
+      points: [{ at: '2026-09-18T00:00:00Z', judged: 1, threat: 1, cost_candidate: 0, unused: 0, skip: 0, undecided: 0 }],
+    },
+    { status: 'UNAVAILABLE', reason_code: 'Boom', points: [] },
+  );
+  assert.equal(state.kind, 'READY');
+  if (state.kind !== 'READY') return;
+  // 0이 있으면 툴팁이 "0건"으로 읽는다 — 값이 없어야 "조회 실패"로 적는다
+  assert.deepEqual(state.data.rows, [{ at: Date.parse('2026-09-18T00:00:00Z'), threat: 1 }]);
+});
+
+test('전체 위협 — 회차 없는 칸에는 직전 회차의 판정값을 따로 남긴다(선이 이어 그린 값)', () => {
+  const state = threatActivityChartState(
+    {
+      status: 'READY',
+      reason_code: null,
+      points: [{ at: '2026-09-18T00:00:00Z', judged: 2, threat: 2, cost_candidate: 0, unused: 0, skip: 0, undecided: 0 }],
+    },
+    {
+      status: 'READY',
+      reason_code: null,
+      points: [
+        { at: '2026-09-17T23:00:00Z', total: 1, counts: { SSH_BRUTE_FORCE: 1 } },
+        { at: '2026-09-18T01:00:00Z', total: 1, counts: { OPEN_IP: 1 } },
+      ],
+    },
+  );
+  assert.equal(state.kind, 'READY');
+  if (state.kind !== 'READY') return;
+  const [before, judged, after] = state.data.rows;
+  // 앞선 회차가 없으면 이어 그릴 값도 없다
+  assert.equal(before.carriedThreat, undefined);
+  assert.equal(judged.threat, 2);
+  assert.equal(judged.carriedThreat, undefined);
+  assert.equal(after.threat, undefined);
+  assert.equal(after.carriedThreat, 2);
 });

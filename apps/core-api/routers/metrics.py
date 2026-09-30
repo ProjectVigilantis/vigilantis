@@ -1,12 +1,13 @@
 # ==============================================================================
 # [파일 설명]
-# GET /api/v1/metrics/timeseries — 시계열 차트 5축 조회 라우터입니다.
+# GET /api/v1/metrics/timeseries — 시계열 차트 6축 조회 라우터입니다.
 #
 #   축 1 CPU        : CloudWatch 원계열(services/metrics.cpu_timeseries) + 판정 임계선
 #   축 2 SG 개방 건수 : 회차별 Rule 판정 이력(db.repositories.assets.sg_exposure_history)
 #   축 3 네트워크     : CloudWatch 원계열(services/metrics.network_timeseries)
 #   축 4 자산 현황    : 회차별 Rule 판정 이력(db.repositories.assets.asset_status_history)
 #   축 5 자산 수      : 회차별 유형별 자산 수(db.repositories.assets.asset_inventory_history)
+#   축 6 위협 이벤트   : 칸별 유형별 위협 이벤트 발생 수(db.repositories.assets.threat_event_history)
 #
 #   - 응답은 공개 계약 schemas.api.metrics.MetricsTimeseriesResponse 로만 직렬화한다.
 #   - **두 축의 실패를 따로 받는다.** 원천이 다르므로(AWS 호출 ↔ DB 조회) 한쪽 실패가
@@ -33,6 +34,8 @@ from schemas.api.metrics import (
     MetricsTimeseriesResponse,
     NetworkAxis,
     SgExposureAxis,
+    ThreatEventAxis,
+    ThreatEventPoint,
     TimeseriesPoint,
 )
 
@@ -55,7 +58,9 @@ _MAX_HOURS = 336
 
 @router.get("/metrics/timeseries", response_model=MetricsTimeseriesResponse)
 def get_metrics_timeseries(
-    hours: int = Query(72, ge=1, le=_MAX_HOURS, description="조회 창(시간). 기본 72."),
+    hours: int | None = Query(
+        None, ge=1, le=_MAX_HOURS, description="조회 창(시간). 생략하면 METRICS_WINDOW_HOURS(기본 72)."
+    ),
     db: Session = Depends(get_db),
 ) -> MetricsTimeseriesResponse:
     # 관제 대상 리전은 /assets 와 같은 근거를 쓴다(#261) — 두 화면이 서로 다른 범위를
@@ -63,6 +68,8 @@ def get_metrics_timeseries(
     # 테스트가 routers.assets._configured_regions 를 monkeypatch 하면 이쪽도 함께 따른다.
     regions = assets_router._configured_regions()
     settings = get_collector_settings()
+    if hours is None:
+        hours = settings.METRICS_WINDOW_HOURS
     now = datetime.now(timezone.utc)
     window_start = now - timedelta(hours=hours)
 
@@ -78,6 +85,8 @@ def get_metrics_timeseries(
                                         bucket_seconds=settings.SCAN_INTERVAL_SECONDS),
         asset_inventory=_asset_inventory_axis(db, regions=regions, since=window_start,
                                               bucket_seconds=settings.SCAN_INTERVAL_SECONDS),
+        threat_events=_threat_event_axis(db, regions=regions, since=window_start, until=now,
+                                         bucket_seconds=settings.SCAN_INTERVAL_SECONDS),
     )
 
 
@@ -224,6 +233,31 @@ def _asset_inventory_axis(
         points=[
             # 합은 서버가 싣는다 — 화면이 다시 더하면 계약의 불변식과 따로 논다.
             AssetInventoryPoint(at=at, total=sum(counts.values()), counts=counts)
+            for at, counts in sorted(by_at.items())
+        ],
+    )
+
+
+def _threat_event_axis(
+    db: Session, *, regions: list[str], since: datetime, until: datetime, bucket_seconds: int
+) -> ThreatEventAxis:
+    """축 6. DB 만 본다 — 판정 축(4)과 한 차트에 겹치므로 같은 칸 크기를 쓴다."""
+    try:
+        buckets = assets_repo.threat_event_history(
+            db, regions=regions, since=since, until=until, bucket_seconds=bucket_seconds
+        )
+    except Exception as exc:
+        reason = _failure_reason(exc)
+        _log.warning("위협 이벤트 이력 조회 실패 — 축을 UNAVAILABLE 로 내린다(%s)", reason)
+        return ThreatEventAxis(status=AxisStatus.UNAVAILABLE, reason_code=reason)
+
+    by_at: dict[datetime, dict[str, int]] = {}
+    for b in buckets:
+        by_at.setdefault(b.observed_at, {})[b.event_type] = b.count
+    return ThreatEventAxis(
+        status=AxisStatus.READY,
+        points=[
+            ThreatEventPoint(at=at, total=sum(counts.values()), counts=counts)
             for at, counts in sorted(by_at.items())
         ],
     )

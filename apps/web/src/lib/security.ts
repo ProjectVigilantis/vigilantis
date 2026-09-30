@@ -4,7 +4,7 @@
 
 import { isOpenSg, UNHANDLED_STATUSES } from './dashboard.ts';
 import { INCIDENT_STATUS_LABELS } from './enum-labels.ts';
-import type { AssetItem, IncidentListItem, IncidentStatus } from '@/types/api';
+import type { AssetItem, IncidentListItem, IncidentStatus, OpenPortRule } from '@/types/api';
 
 export interface SecurityMetrics {
   /** 보안 그룹 전량. */
@@ -140,4 +140,76 @@ export function secopsStatusCounts(
     status,
     count: secops.filter((i) => i.status === status).length,
   }));
+}
+
+/** 잘 알려진 관리·데이터 포트 — 막대 옆에 서비스 이름을 붙여 "무엇이 열렸나"를 바로 읽게 한다. */
+const WELL_KNOWN_PORTS: Record<number, string> = {
+  22: 'SSH',
+  23: 'Telnet',
+  80: 'HTTP',
+  443: 'HTTPS',
+  1433: 'MSSQL',
+  3306: 'MySQL',
+  3389: 'RDP',
+  5432: 'PostgreSQL',
+  6379: 'Redis',
+  27017: 'MongoDB',
+};
+
+export interface ExposedPort {
+  /** `tcp/22` · `tcp/1000-2000` · `전체 트래픽` 꼴. IPv4·IPv6 개방은 한 줄로 합친다. */
+  label: string;
+  /** 잘 알려진 서비스 이름. 범위·전체 트래픽·모르는 포트는 null. */
+  service: string | null;
+  /** 이 포트를 전체 대역에 연 보안 그룹 수. 한 SG가 IPv4·IPv6로 같은 포트를 열어도 1이다. */
+  sgCount: number;
+  /** 그 보안 그룹들 뒤의 EC2 — 중복 없이(`securityMetrics.affectedEc2`와 같은 셈). */
+  affectedEc2: number;
+}
+
+function portKey(rule: OpenPortRule): string {
+  if (rule.protocol === 'all') return '전체 트래픽';
+  const ports =
+    rule.from_port === null || rule.to_port === null
+      ? '전체 포트'
+      : rule.from_port === rule.to_port
+        ? String(rule.from_port)
+        : `${rule.from_port}-${rule.to_port}`;
+  return `${rule.protocol}/${ports}`;
+}
+
+/**
+ * SEC-001 「노출 포트」 — 인터넷 개방 규칙을 **포트 기준**으로 센다. 개방 SG 목록이 "어느 SG가
+ * 열렸나"라면 이 셈은 "무엇이 열렸나"다. 순서는 SG 수가 많은 것부터, 같으면 전체 트래픽이 먼저다
+ * (가장 넓게 열린 구성).
+ */
+export function exposedPorts(items: readonly AssetItem[]): ExposedPort[] {
+  const byKey = new Map<string, { rule: OpenPortRule; sgArns: Set<string> }>();
+  for (const sg of items.filter(isOpenSg)) {
+    for (const rule of sg.spec.open_to_world) {
+      const key = portKey(rule);
+      const entry = byKey.get(key) ?? { rule, sgArns: new Set<string>() };
+      entry.sgArns.add(sg.arn);
+      byKey.set(key, entry);
+    }
+  }
+  const ec2 = items.filter((a) => a.asset_type === 'EC2');
+  return [...byKey.entries()]
+    .map(([label, { rule, sgArns }]) => ({
+      label,
+      service:
+        rule.protocol !== 'all' && rule.from_port !== null && rule.from_port === rule.to_port
+          ? (WELL_KNOWN_PORTS[rule.from_port] ?? null)
+          : null,
+      sgCount: sgArns.size,
+      affectedEc2: ec2.filter((a) =>
+        a.relationships.some((r) => r.relation_type === 'SECURED_BY' && sgArns.has(r.target_arn)),
+      ).length,
+    }))
+    .sort(
+      (a, b) =>
+        b.sgCount - a.sgCount ||
+        Number(b.label === '전체 트래픽') - Number(a.label === '전체 트래픽') ||
+        a.label.localeCompare(b.label),
+    );
 }
