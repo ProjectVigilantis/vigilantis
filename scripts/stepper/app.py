@@ -18,11 +18,15 @@
 # 라우터는 공개 주기 함수의 보고를 그대로 돌려주고 ok로 성공 여부만 가른다. SQL·Boto3·업무
 # 흐름을 직접 조정하지 않는다. 예외는 inject 결과 조회다 — 주입한 관측의 Incident를 목록의
 # 최신 건으로 추정하지 않고, 정형화 함수가 만든 중복 키로 기존 repository에서 찾는다.
+# collect는 WebSocket 이벤트가 없어 FE가 모른다 — 끝나면 열린 WebSocket을 끊는다. FE는 재연결
+# 때 화면을 다시 조회하므로(apps/web realtime-provider) 새로고침 없이 자산이 보인다. 계약에 없는
+# 이벤트를 만들지 않으려고 끊기를 쓴다.
 # 버튼은 한 번에 하나만 돈다. 처리 중에 들어온 요청은 409와 처리 중인 버튼 이름을 받는다.
 # ==============================================================================
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import logging
@@ -195,10 +199,11 @@ def build_router(*, token: str, inbox: Path) -> APIRouter:
         return {"incidents": items}
 
     @router.post("/collect")
-    def collect() -> dict:
+    def collect(request: Request) -> dict:
         def work() -> tuple[bool, dict]:
             regions = collector.collect_and_store()
-            return not _failed_regions(regions), {"report": regions}
+            dropped = _drop_websockets(request.app.state.realtime)
+            return not _failed_regions(regions), {"report": regions, "reconnected": dropped}
 
         return press("collect", work)
 
@@ -258,6 +263,35 @@ def build_router(*, token: str, inbox: Path) -> APIRouter:
         return press("dispatch", work)
 
     return router
+
+
+_DROP_MARGIN_SECONDS = 2.0
+
+
+def _drop_websockets(realtime) -> int | None:
+    """열린 WebSocket을 모두 끊는다 — FE가 재연결하며 화면을 다시 조회한다. 끊은 수.
+
+    연결 하나의 close는 전송 제한시간(`_send_timeout`)으로 상한이 걸려 있어, 기다림은 그보다
+    여유를 둔다. 그래도 넘기면 None — 수집은 이미 저장됐으므로 버튼을 500으로 끝내지 않는다.
+    """
+    loop = realtime._loop
+    if loop is None:
+        return 0
+
+    async def drop() -> int:
+        sockets = list(realtime._connections)
+        for websocket in sockets:
+            realtime.unregister(websocket)
+        await asyncio.gather(*(realtime._close_quietly(websocket) for websocket in sockets))
+        return len(sockets)
+
+    future = asyncio.run_coroutine_threadsafe(drop(), loop)
+    try:
+        return future.result(timeout=realtime._send_timeout + _DROP_MARGIN_SECONDS)
+    except TimeoutError:
+        future.cancel()
+        logger.warning("collect 뒤 WebSocket 끊기가 제한시간을 넘겼다 — 수집 결과는 저장됐다")
+        return None
 
 
 def _publisher(request: Request):

@@ -157,7 +157,7 @@ vigilantis/
 
 | 스크립트 | 하는 일 |
 | :--- | :--- |
-| `devstack/` | 개발 스택(DB · LocalStack · API · FE) 한 번에 띄우기 · 내리기 — `up.ps1` · `down.ps1`(Windows, [사용법](scripts/devstack/README.md)) |
+| `stepper/` | 시연 · FE 관찰용 테스트 서버 — 타이머 없이 명령 한 번에 한 칸씩 진행(기동 · 자산 연결 · 위협 주입 · 초기화, [사용법](scripts/stepper/README.md)) |
 | `seed_localstack.py` | LocalStack 더미 AWS 자산 주입 — **시드 단일 원천**(멱등 · 실 AWS 실행 거부) |
 | `load_golden_assets.py` | Golden FinOps 자산을 DB에 적재하고 판정까지 돌려 `GET /assets`가 골든을 서빙하게 한다 |
 | `inject_mock_threat.py` | 모의 위협 주입 — 골든 SecOps 입력 정형화 + 초기 위험 판정 |
@@ -185,7 +185,7 @@ AWS_ENDPOINT_URL=http://localhost:4566 uv run python scripts/seed_localstack.py 
 cd apps/web && npm ci && npm run dev  # 대시보드(:3000)
 ```
 
-Windows에서는 위 절차를 `scripts\devstack\up.ps1` 하나로 대신할 수 있다(내리기 `down.ps1`, AI 과금 없이 띄우기 `-NoAi` — [scripts/devstack/README.md](scripts/devstack/README.md)).
+시연은 위 절차 대신 단계 진행 테스트 서버로 한다 — `uv run python scripts/stepper/cli.py up`이 DB · LocalStack · API · FE를 한 번에 띄운다([scripts/stepper/README.md](scripts/stepper/README.md)).
 
 > * **대시보드는 `api`(:8000)가 떠 있어야 화면이 선다.** FE에 mock 계층이 없어 `apps/web`만 띄우면 모든 화면이 조회 오류다. BE 주소를 바꿨으면 `apps/web/.env.local`의 `NEXT_PUBLIC_API_BASE_URL`을 맞춘다([`apps/web/.env.example`](apps/web/.env.example)).
 > * **LocalStack은 재시작하면 비워진다** — 다시 띄웠으면 시드를 다시 돌린다. 호스트에서 실행할 땐 `AWS_ENDPOINT_URL`이 `http://localhost:4566`이어야 한다(`.env`의 `localstack:4566`은 compose 네트워크 안의 이름이다).
