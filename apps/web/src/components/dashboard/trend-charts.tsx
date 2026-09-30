@@ -385,7 +385,10 @@ export function InventoryTrendChart({ axis }: { axis: AssetInventoryAxis }) {
           width={56}
         />
         <Tooltip content={(props) => <InventoryTooltip {...props} />} />
+        {/* 범례는 쌓는 순서(INVENTORY_KEYS)대로 선다 — Recharts 기본은 키 이름순이라
+            옆 도넛 범례와 순서가 갈린다. */}
         <Legend
+          itemSorter={null}
           formatter={(key) => (
             <span className="text-muted-foreground text-xs">
               {sliceLabel(String(key) as CompositionKey)}
