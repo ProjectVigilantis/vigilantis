@@ -314,6 +314,8 @@ function withSavings(item: IncidentListItem, amounts: (string | null)[]): Incide
     })),
     executions: [],
     resolution: null,
+    resolution_note: null,
+    analysis_result: null,
     resolved_at: null,
   } as IncidentResponse;
 }

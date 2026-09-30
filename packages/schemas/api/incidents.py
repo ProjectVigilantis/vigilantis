@@ -30,7 +30,7 @@
 #     판단을 빠뜨리면 왜 종료됐는지 남지 않는다. 관제자 복구 접수로 재개되면
 #     (ADR-0004) 다시 null이 된다 — "지금 이 인시던트가 종료된 이유"를 말하는
 #     값이라 재개된 뒤에는 거짓이 되기 때문이다. 목록에는 넣지 않는다. (Issue #199)
-#     SECOPS의 NO_FURTHER_ACTION은 서비스 추가 조치 없는 종료이며 위협 해소가 아니다.
+#     NO_FURTHER_ACTION은 서비스 추가 조치 없는 종료이며 위협 해소·최적화 완료가 아니다.
 #     선택적 resolution_note는 종료 판단과 함께 저장하고 복구 재개 시 함께 비운다.
 #   - executions의 verification_hold는 판정 불가 보류 기록이다 — AWS에 물어보지 못해
 #     실행 결과를 확정하지 못했을 때의 사유 코드·횟수·시각. status가 UNVERIFIED면
@@ -92,7 +92,7 @@ class ResponseMode(str, Enum):
 class ResolutionJudgement(str, Enum):
     """사용자 종료 판단. 추가 조치 없이 종료해도 위협 해소·차단 해제를 뜻하지 않는다.
 
-    JUSTIFIED는 수행한 대응에 대한 판단이다. NO_FURTHER_ACTION은 SecOps 제안
+    JUSTIFIED는 수행한 대응에 대한 판단이다. NO_FURTHER_ACTION은 SecOps·FinOps 제안
     거절·무제안·가드레일 전체 거절·분석 실패 뒤 추가 조치를 하지 않는 공통 판단이다.
     기존 FE와의 호환성을 위해 실행 이력 없는 JUSTIFIED 종료도 계속 허용한다.
     저장된 JUSTIFIED만으로 실제 조치 수행 여부를 판단하지 않는다.
@@ -328,11 +328,8 @@ class IncidentResponse(BaseModel):
         if self.category == IncidentCategory.FINOPS and self.threat_context is not None:
             raise ValueError("FINOPS는 threat_context가 null이어야 합니다")
 
-        if self.category == IncidentCategory.FINOPS and (
-            self.analysis_result is not None
-            or self.resolution == ResolutionJudgement.NO_FURTHER_ACTION
-        ):
-            raise ValueError("분석 결과 구분과 추가 조치 없는 종료는 SECOPS 전용입니다")
+        if self.category == IncidentCategory.FINOPS and self.analysis_result is not None:
+            raise ValueError("FINOPS는 analysis_result가 null이어야 합니다")
 
         # SECOPS 카드 제목은 위협 이름이다 — null이면 FE fallback이 자원 ID를 제목으로 쓴다
         if self.category == IncidentCategory.SECOPS and self.title is None:
