@@ -1,7 +1,7 @@
 # ==============================================================================
 # [파일 설명]  담당: 김세혁 (PM · Infra & DevSecOps)
-# GET /api/v1/metrics/timeseries 외부 응답 DTO입니다. 대시보드 시계열 차트 2종의
-# 공개 계약이며, GET /api/v1/assets(스냅샷)와는 별개의 엔드포인트입니다.
+# GET /api/v1/metrics/timeseries 외부 응답 DTO입니다. 시계열 차트 5축(CPU · SG 개방 ·
+# 네트워크 · 자산 현황 · 자산 수)의 공개 계약이며, GET /api/v1/assets(스냅샷)와는 별개의 엔드포인트입니다.
 #
 # 왜 /assets 에 얹지 않았나
 #   - /assets 응답은 `extra="forbid"` 인 자산 1건의 **현재 상태**다. 시계열을 얹으면
@@ -21,6 +21,8 @@ from enum import Enum
 from typing import Annotated, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, model_validator
+
+from .assets import AssetType
 
 
 def _to_utc_z(v: datetime) -> str:
@@ -233,6 +235,119 @@ class SgExposureAxis(BaseModel):
         return self
 
 
+class AssetStatusPoint(BaseModel):
+    """시간 칸 하나의 자산 현황 — 그 회차에 판정 행이 남은 자산을 판정별로 센 값.
+
+    다른 축과 달리 `TimeseriesPoint`(값 하나)를 쓰지 않는다. 판정별 건수를 계열로 쪼개 실으면
+    계열끼리 시각이 어긋날 수 있고, 화면이 그것을 다시 맞춰야 한다 — 한 시각의 값들은 한 점에 싣는다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    at: UtcDateTime
+    #: 그 칸의 판정 대상 자산 수. 아래 다섯 값의 합과 같다(불변식) — 화면이 다시 더하지 않는다.
+    judged: int = Field(ge=0)
+    threat: int = Field(ge=0)
+    cost_candidate: int = Field(ge=0)
+    unused: int = Field(ge=0)
+    #: 정상·제외. 사유(`skip_reason_code`)는 싣지 않는다 — 추이가 보는 것은 건수다.
+    skip: int = Field(ge=0)
+    #: verdict 가 없는 판정 행 — 판정 대기·실패다. `skip` 과 축이 달라 합치지 않는다.
+    undecided: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _enforce_contract(self):
+        parts = self.threat + self.cost_candidate + self.unused + self.skip + self.undecided
+        if parts != self.judged:
+            raise ValueError("judged 는 판정별 건수(threat·cost_candidate·unused·skip·undecided)의 합이어야 합니다")
+        return self
+
+
+class AssetStatusAxis(BaseModel):
+    """축 4 — 자산 현황 추이. 판정 대상 자산(EC2·SG·EBS)의 판정별 건수다.
+
+    원천은 축 2와 같다 — 수집 회차마다 남는 Rule 판정(`rule_evaluations`). 자산 행은 회차마다
+    덮어써 이력이 없으므로, **과거의 자산 현황은 판정 이력으로만 복원된다.** 그래서 이 축이 세는
+    것은 판정 대상뿐이다: NACL · Auto Scaling 그룹 · 시작 템플릿 · 대상 그룹은 판정 행이 없어
+    이력도 없다(그 유형의 지금 수는 `GET /assets` 가 준다).
+
+    축 2(`sg_exposure`)와의 관계: 그쪽 `value` 는 **SG 만** 센 `THREAT` 건수이고, 이쪽 `threat`
+    는 유형을 가리지 않는다. 지금 규칙 엔진은 `THREAT` 를 SG 에만 내므로 두 값이 같지만,
+    계약은 그것을 약속하지 않는다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: AxisStatus
+    #: x축은 시간 칸의 시작 시각이다. 판정 행이 없는 칸은 점이 없다 — 0건과 구분된다.
+    points: list[AssetStatusPoint] = Field(default_factory=list)
+    reason_code: Optional[str] = Field(None, min_length=1)
+
+    @model_validator(mode="after")
+    def _enforce_contract(self):
+        _enforce_axis_status(self, data_fields=("points",))
+
+        ats = [p.at for p in self.points]
+        if ats != sorted(ats):
+            raise ValueError("points 는 시각 오름차순이어야 합니다")
+        if len(ats) != len(set(ats)):
+            raise ValueError("points 의 at 은 중복될 수 없습니다")
+        return self
+
+
+class AssetInventoryPoint(BaseModel):
+    """시간 칸 하나의 자산 수 — 그 칸의 수집 회차가 **관측한** 유형별 건수(리전 합산).
+
+    `counts` 에 없는 유형은 **그 칸에서 관측하지 못한 것**이다(PARTIAL 회차의 degrade — 예:
+    LocalStack Community 의 ASG·대상 그룹). 0건과 다르다 — 화면은 그 유형을 0으로 그리지 않는다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    at: UtcDateTime
+    #: 관측한 유형의 합. `counts` 값의 합과 같다(불변식) — 화면이 다시 더하지 않는다.
+    total: int = Field(ge=0)
+    counts: dict[AssetType, int]
+
+    @model_validator(mode="after")
+    def _enforce_contract(self):
+        if any(n < 0 for n in self.counts.values()):
+            raise ValueError("counts 는 0 이상이어야 합니다")
+        if sum(self.counts.values()) != self.total:
+            raise ValueError("total 은 counts 의 합이어야 합니다")
+        return self
+
+
+class AssetInventoryAxis(BaseModel):
+    """축 5 — 자산 수 추이. **전 유형**의 자산이 회차마다 몇 건 있었나(2026-09-29).
+
+    축 4(`asset_status`)가 판정 대상 3종의 **판정별** 건수라면, 이 축은 판정과 무관하게
+    "내 자산이 늘었나 줄었나"를 본다. 원천은 수집 회차가 마감 때 남기는 유형별 건수
+    (`asset_inventory_counts`)다 — 자산 행은 회차마다 덮어써 이력이 없어서다. 그래서 그 표가
+    생기기 전 회차는 점이 없다.
+
+    한 칸에 같은 리전 회차가 둘 들면 그 리전의 마지막 회차만 센다 — 합치면 자산이 두 배로 보인다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: AxisStatus
+    #: x축은 시간 칸의 시작 시각이다. 관측 기록이 없는 칸은 점이 없다 — 0건과 구분된다.
+    points: list[AssetInventoryPoint] = Field(default_factory=list)
+    reason_code: Optional[str] = Field(None, min_length=1)
+
+    @model_validator(mode="after")
+    def _enforce_contract(self):
+        _enforce_axis_status(self, data_fields=("points",))
+
+        ats = [p.at for p in self.points]
+        if ats != sorted(ats):
+            raise ValueError("points 는 시각 오름차순이어야 합니다")
+        if len(ats) != len(set(ats)):
+            raise ValueError("points 의 at 은 중복될 수 없습니다")
+        return self
+
+
 def _enforce_axis_status(axis, *, data_fields: tuple[str, ...]) -> None:
     """축 공통 불변식 — 상태와 데이터·사유가 어긋나지 않게 한다.
 
@@ -257,3 +372,5 @@ class MetricsTimeseriesResponse(BaseModel):
     cpu: CpuAxis
     network: NetworkAxis
     sg_exposure: SgExposureAxis
+    asset_status: AssetStatusAxis
+    asset_inventory: AssetInventoryAxis

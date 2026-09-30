@@ -1,9 +1,12 @@
 # ==============================================================================
 # [파일 설명]
-# GET /api/v1/metrics/timeseries — 대시보드 시계열 차트 2축 조회 라우터입니다.
+# GET /api/v1/metrics/timeseries — 시계열 차트 5축 조회 라우터입니다.
 #
 #   축 1 CPU        : CloudWatch 원계열(services/metrics.cpu_timeseries) + 판정 임계선
 #   축 2 SG 개방 건수 : 회차별 Rule 판정 이력(db.repositories.assets.sg_exposure_history)
+#   축 3 네트워크     : CloudWatch 원계열(services/metrics.network_timeseries)
+#   축 4 자산 현황    : 회차별 Rule 판정 이력(db.repositories.assets.asset_status_history)
+#   축 5 자산 수      : 회차별 유형별 자산 수(db.repositories.assets.asset_inventory_history)
 #
 #   - 응답은 공개 계약 schemas.api.metrics.MetricsTimeseriesResponse 로만 직렬화한다.
 #   - **두 축의 실패를 따로 받는다.** 원천이 다르므로(AWS 호출 ↔ DB 조회) 한쪽 실패가
@@ -21,6 +24,10 @@ from sqlalchemy.orm import Session
 
 from schemas.api.assets import AssetType
 from schemas.api.metrics import (
+    AssetInventoryAxis,
+    AssetInventoryPoint,
+    AssetStatusAxis,
+    AssetStatusPoint,
     AxisStatus,
     CpuAxis,
     MetricsTimeseriesResponse,
@@ -67,6 +74,10 @@ def get_metrics_timeseries(
                               period_seconds=settings.METRIC_PERIOD_SECONDS),
         sg_exposure=_sg_axis(db, regions=regions, since=window_start,
                              bucket_seconds=settings.SCAN_INTERVAL_SECONDS),
+        asset_status=_asset_status_axis(db, regions=regions, since=window_start,
+                                        bucket_seconds=settings.SCAN_INTERVAL_SECONDS),
+        asset_inventory=_asset_inventory_axis(db, regions=regions, since=window_start,
+                                              bucket_seconds=settings.SCAN_INTERVAL_SECONDS),
     )
 
 
@@ -157,4 +168,62 @@ def _sg_axis(
     return SgExposureAxis(
         status=AxisStatus.READY,
         points=[TimeseriesPoint(at=b.observed_at, value=b.open_count) for b in buckets],
+    )
+
+
+def _asset_status_axis(
+    db: Session, *, regions: list[str], since: datetime, bucket_seconds: int
+) -> AssetStatusAxis:
+    """축 4. 축 2와 같이 DB 만 본다 — 대시보드가 쓰는 축이라 CloudWatch 가 죽어도 그려져야 한다."""
+    try:
+        buckets = assets_repo.asset_status_history(
+            db, regions=regions, since=since, bucket_seconds=bucket_seconds
+        )
+    except Exception as exc:
+        reason = _failure_reason(exc)
+        _log.warning("자산 현황 이력 조회 실패 — 축을 UNAVAILABLE 로 내린다(%s)", reason)
+        return AssetStatusAxis(status=AxisStatus.UNAVAILABLE, reason_code=reason)
+
+    return AssetStatusAxis(
+        status=AxisStatus.READY,
+        points=[
+            AssetStatusPoint(
+                at=b.observed_at,
+                # 합은 서버가 싣는다 — 화면이 다시 더하면 계약의 불변식과 따로 논다.
+                judged=b.threat + b.cost_candidate + b.unused + b.skip + b.undecided,
+                threat=b.threat,
+                cost_candidate=b.cost_candidate,
+                unused=b.unused,
+                skip=b.skip,
+                undecided=b.undecided,
+            )
+            for b in buckets
+        ],
+    )
+
+
+def _asset_inventory_axis(
+    db: Session, *, regions: list[str], since: datetime, bucket_seconds: int
+) -> AssetInventoryAxis:
+    """축 5. DB 만 본다 — 축 4와 같은 이유로 CloudWatch 와 따로 살아야 한다."""
+    try:
+        buckets = assets_repo.asset_inventory_history(
+            db, regions=regions, since=since, bucket_seconds=bucket_seconds
+        )
+    except Exception as exc:
+        reason = _failure_reason(exc)
+        _log.warning("자산 수 이력 조회 실패 — 축을 UNAVAILABLE 로 내린다(%s)", reason)
+        return AssetInventoryAxis(status=AxisStatus.UNAVAILABLE, reason_code=reason)
+
+    # 저장소는 (칸, 유형) 행으로 준다 — 칸 하나를 점 하나로 접는다(행은 칸 순으로 정렬돼 온다).
+    by_at: dict[datetime, dict[AssetType, int]] = {}
+    for b in buckets:
+        by_at.setdefault(b.observed_at, {})[b.asset_type] = b.count
+    return AssetInventoryAxis(
+        status=AxisStatus.READY,
+        points=[
+            # 합은 서버가 싣는다 — 화면이 다시 더하면 계약의 불변식과 따로 논다.
+            AssetInventoryPoint(at=at, total=sum(counts.values()), counts=counts)
+            for at, counts in sorted(by_at.items())
+        ],
     )
