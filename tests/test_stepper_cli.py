@@ -177,6 +177,7 @@ def _ctx(tmp_path: Path, repo: Path, runner: FakeRunner, *, snap: dict | None = 
     opened: list = []
     listening: set[int] = set()
     alive: set[int] = set()
+    identities: dict[int, str] = {}
 
     def popen(*args, **kwargs):
         popen_calls.append(args)
@@ -209,9 +210,11 @@ def _ctx(tmp_path: Path, repo: Path, runner: FakeRunner, *, snap: dict | None = 
         launch_web=launch_web,
         pid_alive=lambda pid: pid in alive,
         kill_web=kill_web,
+        process_identity=lambda pid: identities.get(pid, f"started-{pid}"),
         open_url=opened.append,
     )
     ctx.web_calls, ctx.killed, ctx.opened = web_calls, killed, opened
+    ctx.alive, ctx.identities = alive, identities
     return ctx, output, popen_calls
 
 
@@ -284,7 +287,9 @@ def test_override_file_binds_every_port_to_loopback_and_disables_timers():
     assert env["AWS_ENDPOINT_URL"] == "http://localstack:4566"
     # 호스트 포트는 CLI가 고른 값을 따른다 — CORS 허용 출처도 CLI가 띄운 FE 포트를 따라간다
     assert override["services"]["localstack"]["ports"]["!override"] == ["127.0.0.1:${LOCALSTACK_PORT:-4566}:4566"]
-    assert env["CORS_ALLOW_ORIGINS"] == "http://localhost:${STEPPER_WEB_PORT:-3000}"
+    assert env["CORS_ALLOW_ORIGINS"] == (
+        "http://localhost:${STEPPER_WEB_PORT:-3000},http://127.0.0.1:${STEPPER_WEB_PORT:-3000}"
+    )
 
 
 # ------------------------------------------------------------------------------
@@ -459,6 +464,110 @@ def test_web_is_skipped_on_request_or_without_dependencies(tmp_path, repo):
     assert cli.main(["reset"], ctx) == 0  # apps/web/node_modules 없음
     assert ctx.web_calls == []
     assert "apps/web에서 npm ci" in "\n".join(output)
+
+
+# ------------------------------------------------------------------------------
+# 다시 띄울 때 — 기록된 포트 유지 · 주소가 바뀐 FE 재기동 · 이전 기록 호환 · 같은 체크아웃의 next dev
+# ------------------------------------------------------------------------------
+
+
+def _ours_at(repo_root: Path, db: int, localstack: int, api: int) -> str:
+    return "\n".join([
+        _ps_line("vigilantis-test-db-1", "vigilantis-test", "db", f"127.0.0.1:{db}->5432/tcp", str(repo_root)),
+        _ps_line("vigilantis-test-localstack-1", "vigilantis-test", "localstack",
+                 f"127.0.0.1:{localstack}->4566/tcp", str(repo_root)),
+        _ps_line("vigilantis-test-api-1", "vigilantis-test", "api", f"127.0.0.1:{api}->8000/tcp", str(repo_root)),
+    ])
+
+
+def test_recorded_port_is_preferred_over_a_default_that_freed_up():
+    ours = server.Container("vigilantis-test-api-1", "vigilantis-test", "api", None, frozenset({8001}))
+    ports = server.pick_ports([ours], lambda port: False, prefer={"api": 8001, "web": 3001})
+    assert ports["api"] == 8001 and ports["web"] == 3001
+    # 기록된 번호라도 남이 잡았으면 쓰지 않고 기본 번호부터 다시 본다
+    theirs = server.Container("proxy", None, "", None, frozenset({8001}))
+    assert server.pick_ports([theirs], lambda port: False, prefer={"api": 8001})["api"] == 8000
+
+
+def test_reset_keeps_stepped_ports_after_the_other_stack_goes_away(tmp_path, repo):
+    (repo / "apps" / "web" / "node_modules").mkdir(parents=True)
+    proxy = _ps_line("proxy", None, "", "127.0.0.1:8000->80/tcp")
+    runner = FakeRunner(ps=DEV_STACK + "\n" + proxy)
+    blocked = {3000}
+    ctx, output, _ = _ctx(tmp_path, repo, runner, answers=lambda port: port in blocked)
+    assert cli.main(["up"], ctx) == 0
+    first = server.State(ctx.data_root).load()["ports"]
+    assert first == {"db": 5433, "localstack": 4567, "api": 8001, "web": 3001}
+
+    # 개발 스택과 3000번 프로그램이 내려갔다 — reset은 기본 번호로 돌아가지 않는다
+    runner.ps = _ours_at(repo, 5433, 4567, 8001)
+    blocked.clear()
+    assert cli.main(["reset"], ctx) == 0
+    assert server.State(ctx.data_root).load()["ports"] == first
+    assert len(ctx.web_calls) == 1 and ctx.killed == []
+    assert "api 기록된 8001번 포트를 그대로 쓴다" in "\n".join(output)
+
+
+def test_web_is_restarted_when_the_api_it_points_at_moves(tmp_path, repo):
+    (repo / "apps" / "web" / "node_modules").mkdir(parents=True)
+    runner = FakeRunner()
+    ctx, output, _ = _ctx(tmp_path, repo, runner)
+    assert cli.main(["reset"], ctx) == 0
+    assert server.State(ctx.data_root).load()["web_api"] == "http://127.0.0.1:8000"
+
+    # 기록된 8000번을 남이 차지했다 — api가 8001로 옮기면 옛 주소를 보는 FE를 닫고 다시 띄운다
+    runner.ps = _ps_line("proxy", None, "", "127.0.0.1:8000->80/tcp")
+    assert cli.main(["reset"], ctx) == 0
+    assert ctx.killed == [4242]
+    assert len(ctx.web_calls) == 2
+    assert ctx.web_calls[-1][2]["NEXT_PUBLIC_API_BASE_URL"] == "http://127.0.0.1:8001"
+    assert server.State(ctx.data_root).load()["web_api"] == "http://127.0.0.1:8001"
+    assert "FE: 주소가 바뀌어 다시 띄운다" in "\n".join(output)
+
+
+def test_up_on_a_state_recorded_before_the_web_port_existed(tmp_path, repo):
+    """FE 포트(web)가 없던 이전 기록으로 떠 있는 서버 — KeyError 없이 기본 FE 포트로 띄운다."""
+    (repo / "apps" / "web" / "node_modules").mkdir(parents=True)
+    ctx, output, _ = _ctx(tmp_path, repo, FakeRunner(ps=_ours(repo)))
+    _running_round(ctx, repo)
+    assert "web" not in server.State(ctx.data_root).load()["ports"]
+    assert cli.main(["up"], ctx) == 0
+    (command, _, _), = ctx.web_calls
+    assert command[-1] == "3000"
+
+
+def test_web_is_not_launched_next_to_another_next_dev_in_this_checkout(tmp_path, repo):
+    web_dir = repo / "apps" / "web"
+    (web_dir / "node_modules").mkdir(parents=True)
+    (web_dir / ".next" / "dev").mkdir(parents=True)
+    lock = web_dir / ".next" / "dev" / "lock"
+    lock.write_text(json.dumps({"pid": 777, "appUrl": "http://localhost:3000"}), encoding="utf-8")
+    # 개발 FE가 3000을 잡아 이 도구의 FE는 3001을 고른다 — 포트는 비었어도 Next 잠금에 막힌다
+    ctx, output, _ = _ctx(tmp_path, repo, FakeRunner(), answers=lambda port: port == 3000)
+    ctx.alive.add(777)
+    assert cli.main(["reset"], ctx) == 0
+    assert ctx.web_calls == []
+    text = "\n".join(output)
+    assert "다른 next dev가 돌고 있다(http://localhost:3000 · PID 777)" in text and "--no-web" in text
+
+    # 잠금 파일만 남고 그 서버는 끝났다 — 막지 않는다
+    ctx.alive.discard(777)
+    assert cli.main(["reset"], ctx) == 0
+    assert len(ctx.web_calls) == 1
+
+
+def test_down_does_not_kill_a_process_that_reused_the_recorded_pid(tmp_path, repo):
+    (repo / "apps" / "web" / "node_modules").mkdir(parents=True)
+    ctx, output, _ = _ctx(tmp_path, repo, FakeRunner())
+    assert cli.main(["reset"], ctx) == 0
+    assert server.State(ctx.data_root).load()["web_identity"] == "started-4242"
+
+    ctx.identities[4242] = "someone-else"  # FE 창을 직접 닫았고 같은 PID를 다른 프로세스가 받았다
+    assert cli.main(["down"], ctx) == 0
+    assert ctx.killed == []
+    saved = server.State(ctx.data_root).load()
+    assert saved["web_pid"] is None and saved["web_identity"] is None
+    assert "지금은 다른 프로세스다" in "\n".join(output)
 
 
 def test_inject_ssh_defaults_to_the_demo_threat():

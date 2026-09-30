@@ -203,18 +203,24 @@ def foreign_holders(containers: Iterable[Container], ports: Iterable[int]) -> li
 
 def pick_ports(
     containers: Iterable[Container], answers: Callable[[int], bool], *, ours: Iterable[int] = (),
+    prefer: dict | None = None,
 ) -> dict[str, int]:
-    """서비스·FE별 호스트 포트. 기본 번호부터 +1씩 보며 남이 잡은 번호는 건너뛴다.
+    """서비스·FE별 호스트 포트. `prefer`(state.json에 기록된 번호)를 먼저 보고, 그다음 기본
+    번호부터 +1씩 보며 남이 잡은 번호는 건너뛴다.
 
     이 프로젝트 컨테이너가 잡은 번호와 `ours`(이 CLI가 띄운 FE)는 비어 있는 것으로 본다 —
-    초기화가 내리고 같은 번호로 다시 연다. 그래야 떠 있는 FE가 가리키는 주소가 그대로다.
+    초기화가 내리고 같은 번호로 다시 연다. 기록된 번호를 먼저 보는 이유: 기본 번호를 잡고 있던
+    스택이 그사이 내려가도 비켜 간 번호를 그대로 써야 떠 있는 FE가 가리키는 API 주소와 api의
+    CORS 허용 출처(FE 포트)가 바뀌지 않는다.
     """
     containers = list(containers)
     mine = set(ours).union(*(c.host_ports for c in containers if c.project == PROJECT))
     theirs = set().union(*(c.host_ports for c in containers if c.project != PROJECT))
     chosen: dict[str, int] = {}
     for name, base in {**DEFAULT_PORTS, "web": DEFAULT_WEB_PORT}.items():
-        for port in range(base, base + PORT_SPAN):
+        recorded = (prefer or {}).get(name)
+        candidates = ([recorded] if recorded else []) + list(range(base, base + PORT_SPAN))
+        for port in candidates:
             if port in chosen.values() or port in theirs:
                 continue
             if port not in mine and answers(port):
@@ -512,6 +518,50 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
+def process_identity(pid: int) -> str | None:
+    """프로세스 생성 시각 — 기록한 PID가 그사이 다른 프로세스에 재사용됐는지 가른다.
+    알 수 없으면 None."""
+    if os.name == "nt":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return None
+        created, exited, kernel, user = (ctypes.c_ulonglong() for _ in range(4))
+        try:
+            ok = kernel32.GetProcessTimes(
+                handle, ctypes.byref(created), ctypes.byref(exited),
+                ctypes.byref(kernel), ctypes.byref(user),
+            )
+            return str(created.value) if ok else None
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        proc = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return proc.stdout.strip() or None
+
+
+def lock_holder(web_dir: Path, pid_alive: Callable[[int], bool]) -> dict | None:
+    """같은 체크아웃에서 도는 다른 `next dev` — `.next/dev/lock`의 서버 정보(appUrl·pid).
+
+    Next는 체크아웃마다 dev 서버를 하나만 허용해, 두 번째는 포트가 달라도 잠금에 막혀 바로
+    끝난다. 잠금 파일은 서버가 끝나도 남을 수 있어 기록된 PID가 살아 있을 때만 잡힌 것으로 본다.
+    """
+    try:
+        info = json.loads((web_dir / ".next" / "dev" / "lock").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    pid = info.get("pid") if isinstance(info, dict) else None
+    if not isinstance(pid, int) or not pid_alive(pid):
+        return None
+    return info
+
+
 def kill_tree(pid: int, run: Runner = subprocess.run) -> None:
     """FE 창과 그 아래 npm·node를 함께 끝낸다."""
     if os.name == "nt":
@@ -542,6 +592,7 @@ class Context:
     launch_web: Callable[[list[str], Path, dict, Path], int] = launch_web
     pid_alive: Callable[[int], bool] = pid_alive
     kill_web: Callable[[int], None] = kill_tree
+    process_identity: Callable[[int], str | None] = process_identity
     open_url: Callable[[str], Any] = webbrowser.open
 
     @property
@@ -563,11 +614,23 @@ class Live:
     round_dir: Path
 
 
+def _web_is_ours(ctx: Context, saved: dict) -> bool:
+    """기록된 FE PID가 살아 있고 그 PID가 이 CLI가 띄운 그 프로세스인지.
+
+    생성 시각을 기록하지 않은 이전 버전의 기록은 PID만 본다(종전 동작).
+    """
+    pid = saved.get("web_pid")
+    if not pid or not ctx.pid_alive(pid):
+        return False
+    recorded = saved.get("web_identity")
+    return recorded is None or ctx.process_identity(pid) == recorded
+
+
 def running_web(ctx: Context) -> int | None:
     """이 CLI가 띄운 FE가 살아 있으면 그 포트."""
     saved = ctx.state.load()
-    pid, port = saved.get("web_pid"), (saved.get("ports") or {}).get("web")
-    if pid and port and ctx.pid_alive(pid) and ctx.port_answers(port):
+    port = (saved.get("ports") or {}).get("web")
+    if port and _web_is_ours(ctx, saved) and ctx.port_answers(port):
         return port
     return None
 
@@ -576,10 +639,17 @@ def check_can_start(ctx: Context, token: str) -> dict:
     """기동 전 확인 — 빈 포트를 고르고, 그 포트로 렌더링한 설정을 검사한다.
     통과하면 서비스·FE별 호스트 포트를 돌려준다."""
     web = running_web(ctx)
-    ports = pick_ports(ctx.docker.running(), ctx.port_answers, ours=[web] if web else [])
+    recorded = ctx.state.load().get("ports") or {}
+    ports = pick_ports(
+        ctx.docker.running(), ctx.port_answers, ours=[web] if web else [], prefer=recorded,
+    )
     for name, port in ports.items():
         default = DEFAULT_PORTS.get(name, DEFAULT_WEB_PORT)
-        if port != default:
+        if port == default:
+            continue
+        if port == recorded.get(name):
+            ctx.out(f"      {name} 기록된 {port}번 포트를 그대로 쓴다(떠 있는 FE가 이 주소를 본다)")
+        else:
             ctx.out(f"      {name} {default}번 포트를 다른 프로그램이 쓰고 있어 {port}번으로 띄운다")
     rendered, problems = check_rendered_config(ctx.docker.rendered_config(token, ports))
     if problems:
@@ -595,7 +665,8 @@ def connect(ctx: Context) -> Live:
     """명령마다 소유 확인 — 이 프로젝트가 포트를 잡고 있고 토큰 ping이 통해야 진행한다."""
     state = ctx.state
     saved = state.load()
-    ports = saved.get("ports") or dict(DEFAULT_PORTS)
+    # 빠진 번호는 기본값으로 채운다 — FE 포트(web)가 없던 이전 버전의 기록으로도 KeyError 없이 돈다
+    ports = {**DEFAULT_PORTS, "web": DEFAULT_WEB_PORT, **(saved.get("ports") or {})}
     containers = ctx.docker.running()
     _refuse_foreign(containers, [ports[name] for name in SERVICES])
     ours = {container.service: container for container in containers if container.project == PROJECT}
@@ -683,15 +754,30 @@ def down(ctx: Context) -> None:
 def ensure_web(ctx: Context, ports: dict) -> None:
     """FE dev 서버 — 이 CLI가 띄운 것이 살아 있으면 두고, 없으면 띄운 뒤 브라우저로 연다."""
     url = web_url(ports)
-    if running_web(ctx) == ports["web"]:
-        ctx.out(f"FE: 이미 떠 있다 → {url}")
-        return
+    running = running_web(ctx)
+    saved_api = ctx.state.load().get("web_api")
+    if running is not None:
+        # FE의 API 주소는 기동 때 고정된다 — 포트가 바뀌었으면 옛 주소를 보는 FE를 내리고 다시 띄운다
+        if running == ports["web"] and saved_api in (None, api_url(ports)):
+            ctx.out(f"FE: 이미 떠 있다 → {url}")
+            return
+        ctx.out(f"FE: 주소가 바뀌어 다시 띄운다(FE :{running} → :{ports['web']} · API {api_url(ports)})")
+        stop_web(ctx)
+        _wait_port_closed(ctx, running)
     if ctx.port_answers(ports["web"]):
         ctx.out(f"! FE를 띄우지 않았다 — {ports['web']}번 포트를 다른 프로그램이 쓰고 있다. reset하면 빈 포트로 옮긴다")
         return
     web_dir = ctx.repo_root / "apps" / "web"
     if not (web_dir / "node_modules").is_dir():
         ctx.out("! FE를 띄우지 않았다 — apps/web에서 npm ci를 한 번 한 뒤 up")
+        return
+    holder = lock_holder(web_dir, ctx.pid_alive)
+    if holder:
+        ctx.out(
+            f"! FE를 띄우지 않았다 — 이 체크아웃에서 다른 next dev가 돌고 있다"
+            f"({holder.get('appUrl', '주소 모름')} · PID {holder['pid']}). Next는 체크아웃마다 dev 서버를 "
+            "하나만 띄운다 — 그 창에서 Ctrl+C로 끈 뒤 up을 다시 하거나, 그 FE를 쓰려면 --no-web으로 실행하세요"
+        )
         return
     npm = shutil.which("npm") or "npm"
     # 이 서버의 API를 가리키게 고정한다 — 프로세스 환경이 apps/web/.env.local보다 우선한다
@@ -700,7 +786,7 @@ def ensure_web(ctx: Context, ports: dict) -> None:
         [npm, "run", "dev", "--", "-H", "localhost", "-p", str(ports["web"])],
         web_dir, env, ctx.data_root / "web.log",
     )
-    ctx.state.save(web_pid=pid)
+    ctx.state.save(web_pid=pid, web_identity=ctx.process_identity(pid), web_api=api_url(ports))
     waited = 0.0
     while not ctx.port_answers(ports["web"]):
         if waited >= WEB_READY_SECONDS:
@@ -713,12 +799,25 @@ def ensure_web(ctx: Context, ports: dict) -> None:
 
 
 def stop_web(ctx: Context) -> None:
-    pid = ctx.state.load().get("web_pid")
+    saved = ctx.state.load()
+    pid = saved.get("web_pid")
     if pid and ctx.pid_alive(pid):
-        ctx.kill_web(pid)
-        ctx.out(f"FE를 닫았다(PID {pid})")
+        if _web_is_ours(ctx, saved):
+            ctx.kill_web(pid)
+            ctx.out(f"FE를 닫았다(PID {pid})")
+        else:
+            # 기록한 FE는 이미 끝났고 그 PID를 다른 프로세스가 받았다 — 트리째 강제 종료하지 않는다
+            ctx.out(f"FE 기록(PID {pid})이 지금은 다른 프로세스다 — 닫지 않고 기록만 지운다")
     if pid:
-        ctx.state.save(web_pid=None)
+        ctx.state.save(web_pid=None, web_identity=None, web_api=None)
+
+
+def _wait_port_closed(ctx: Context, port: int, timeout: float = 10.0) -> None:
+    """닫은 FE가 포트를 놓을 때까지 — 곧바로 다시 띄우면 같은 번호가 아직 잡혀 있을 수 있다."""
+    waited = 0.0
+    while ctx.port_answers(port) and waited < timeout:
+        ctx.sleep(0.5)
+        waited += 0.5
 
 
 def seed(ctx: Context, ports: dict, round_dir: Path) -> str:

@@ -453,7 +453,8 @@ def cmd_up(ctx, args) -> None:
 
 
 def cmd_reset(ctx, args) -> None:
-    # 떠 있는 FE는 그대로 둔다 — api가 다시 뜨면 WebSocket 재연결로 FE가 빈 화면을 다시 조회한다
+    # 떠 있는 FE는 그대로 둔다 — api가 다시 뜨면 WebSocket 재연결로 FE가 빈 화면을 다시 조회한다.
+    # 포트는 기록된 번호를 다시 고르므로 주소가 그대로다. 그래도 바뀌면 ensure_web이 FE를 다시 띄운다
     live = server.reset(ctx)
     if not args.no_web:
         server.ensure_web(ctx, live.ports)

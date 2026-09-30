@@ -41,8 +41,9 @@ services:
       MOCK_THREAT_INBOX_DIR: ""
       STEPPER_INBOX_DIR: /app/apps/core-api/.mock-threat-inbox/stepper
       STEPPER_TOKEN: ${STEPPER_TOKEN:?scripts/stepper/cli.py로 띄워야 합니다}
-      # CLI가 띄우는 FE 주소 — CORS·WebSocket 허용 출처. FE 포트가 비켜 가면 따라간다
-      CORS_ALLOW_ORIGINS: http://localhost:${STEPPER_WEB_PORT:-3000}
+      # CLI가 띄우는 FE 주소 — CORS·WebSocket 허용 출처(콤마 구분). FE 포트가 비켜 가면 따라간다.
+      # 브라우저를 127.0.0.1로 열어도 막히지 않게 두 이름을 함께 둔다
+      CORS_ALLOW_ORIGINS: http://localhost:${STEPPER_WEB_PORT:-3000},http://127.0.0.1:${STEPPER_WEB_PORT:-3000}
       # dispatch 한 번이 판정 대기로 붙잡히는 시간(2×3초) — 시연 실측값(docs/E2E_DEMO_SCENARIOS.md)
       STATUS_CHECK_WAIT_DELAY_SECONDS: "2"
       STATUS_CHECK_WAIT_MAX_ATTEMPTS: "3"

@@ -265,8 +265,15 @@ def build_router(*, token: str, inbox: Path) -> APIRouter:
     return router
 
 
-def _drop_websockets(realtime, timeout: float = 5.0) -> int:
-    """열린 WebSocket을 모두 끊는다 — FE가 재연결하며 화면을 다시 조회한다. 끊은 수."""
+_DROP_MARGIN_SECONDS = 2.0
+
+
+def _drop_websockets(realtime) -> int | None:
+    """열린 WebSocket을 모두 끊는다 — FE가 재연결하며 화면을 다시 조회한다. 끊은 수.
+
+    연결 하나의 close는 전송 제한시간(`_send_timeout`)으로 상한이 걸려 있어, 기다림은 그보다
+    여유를 둔다. 그래도 넘기면 None — 수집은 이미 저장됐으므로 버튼을 500으로 끝내지 않는다.
+    """
     loop = realtime._loop
     if loop is None:
         return 0
@@ -278,7 +285,13 @@ def _drop_websockets(realtime, timeout: float = 5.0) -> int:
         await asyncio.gather(*(realtime._close_quietly(websocket) for websocket in sockets))
         return len(sockets)
 
-    return asyncio.run_coroutine_threadsafe(drop(), loop).result(timeout=timeout)
+    future = asyncio.run_coroutine_threadsafe(drop(), loop)
+    try:
+        return future.result(timeout=realtime._send_timeout + _DROP_MARGIN_SECONDS)
+    except TimeoutError:
+        future.cancel()
+        logger.warning("collect 뒤 WebSocket 끊기가 제한시간을 넘겼다 — 수집 결과는 저장됐다")
+        return None
 
 
 def _publisher(request: Request):
