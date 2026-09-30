@@ -160,6 +160,20 @@ def test_collect_failed_region_is_not_reported_as_success(stepper_client, monkey
     assert _press(stepper_client, "collect")["ok"] is False
 
 
+def test_collect_drops_open_websockets_so_the_web_refetches(stepper_client, monkeypatch):
+    """collect는 이벤트가 없다 — 연결을 끊어 FE가 재연결하며 다시 조회하게 한다."""
+    from services import collector
+    from starlette.websockets import WebSocketDisconnect
+
+    monkeypatch.setattr(collector, "collect_and_store", lambda: [{"region": "ap-northeast-2", "total": 16}])
+    with stepper_client.websocket_connect("/api/v1/ws") as socket:
+        body = _press(stepper_client, "collect")
+        with pytest.raises(WebSocketDisconnect):
+            socket.receive_text()
+    assert body["ok"] is True and body["reconnected"] == 1
+    assert stepper_client.app.state.realtime.connection_count == 0
+
+
 def test_dispatch_and_analyze_pass_the_app_publisher_and_report_errors(stepper_client, monkeypatch):
     import agent_dispatcher
     import dispatcher

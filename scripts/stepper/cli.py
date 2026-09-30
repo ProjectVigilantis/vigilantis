@@ -56,6 +56,8 @@ EXECUTION_STATUS = {
 CATEGORY = {"FINOPS": "최적화", "SECOPS": "보안"}
 RISK = {"HIGH": "높음", "MEDIUM": "중간", "LOW": "낮음"}
 RUNNING_EXECUTIONS = {"IN_PROGRESS", "ROLLBACK_INITIATED"}
+# 시연 T2 대상(docs/E2E_DEMO_SCENARIOS.md §시연 대상) — `inject ssh`의 기본 대상
+T2_TARGET = "vigilantis-seed-idle"
 
 # 버튼 한 번을 기다리는 시간(초). analyze는 대기 건마다 모델을 직렬로 부른다
 TIMEOUTS = {"collect": 300, "scan": 300, "consume": 120, "analyze": 900, "dispatch": 300}
@@ -71,7 +73,7 @@ TITLES = {
 # 보인다). 보안 인시던트 목록의 「승인 대기 N」 칩과 T1 원복 안내 패널은 그렇지 않다(PR #402가 기록한
 # FE 동작. 자산 인시던트 목록의 칩은 따라 바뀐다). 대신 카드 배지와 「수행된 조치」를 본다.
 FE_HINTS = {
-    "collect": "자산 — 새로고침하면 목록이 바뀐다(WebSocket 이벤트가 없다. 카드는 생기지 않는다)",
+    "collect": "자산 — 서버가 WebSocket을 끊어 FE가 재연결하며 목록을 다시 불러온다(1–2초. 카드는 생기지 않는다)",
     "scan": "자산 인시던트 — 새 카드가 '분석 중'으로 뜬다 · 자산 — 판정 배지와 토폴로지 색",
     "consume": "보안 인시던트 — 새 카드('분석 중'). 선제 차단 경로면 '선제 차단됨' 배지가 붙는다",
     "analyze": "카드 배지 — '승인 대기' 또는 '진행 불가'로 바뀐다"
@@ -185,7 +187,7 @@ def next_actions(snap: dict) -> list[str]:
             actions.append("scan — 판정으로 FinOps 카드를 만든다")
         if not any(incident["category"] == "SECOPS" for incident in open_):
             actions.append(
-                "inject ssh --case C01 --target vigilantis-seed-idle — 로그 근거가 붙은 SSH 관측 1건"
+                f"inject ssh — 로그 근거가 붙은 SSH 관측 1건(C01 · {T2_TARGET})"
             )
     return actions
 
@@ -198,7 +200,8 @@ def next_actions(snap: dict) -> list[str]:
 def describe(button: str, body: dict) -> list[str]:
     report = body.get("report")
     if button == "collect":
-        return _region_lines(report or [])
+        return [*_region_lines(report or []),
+                f"FE 연결 {body.get('reconnected', 0)}개를 끊어 재조회를 일으켰다"]
     if button == "scan":
         if report.get("skipped"):
             return ["다른 스캔이 advisory lock을 잡고 있어 건너뛰었다(성공 아님)"]
@@ -367,7 +370,7 @@ def finish_step(
             f"  ({label(incident, snap['asset_names'])} · "
             f"{INCIDENT_STATUS.get(incident['status'], incident['status'])})"
         )
-        ctx.out(f"  {args.fe_url}/incidents/{incident_id}{what}")
+        ctx.out(f"  {_fe(args, live)}/incidents/{incident_id}{what}")
     show_next(ctx, snap)
     ctx.out(f"기록: {path}")
 
@@ -443,20 +446,29 @@ class Injector:
 def cmd_up(ctx, args) -> None:
     live, started = server.up(ctx)
     if not started:
-        ctx.out("테스트 서버가 이미 떠 있다 — 데이터를 그대로 쓴다")
+        ctx.out("테스트 서버가 이미 떠 있다 — 데이터를 그대로 쓴다(빈 화면부터 다시 하려면 reset)")
+    if not args.no_web:
+        server.ensure_web(ctx, live.ports)
     _show_ready(ctx, live, args, command="up" if not started else "up(처음부터 준비)")
 
 
 def cmd_reset(ctx, args) -> None:
+    # 떠 있는 FE는 그대로 둔다 — api가 다시 뜨면 WebSocket 재연결로 FE가 빈 화면을 다시 조회한다
     live = server.reset(ctx)
+    if not args.no_web:
+        server.ensure_web(ctx, live.ports)
     _show_ready(ctx, live, args, command="reset")
+
+
+def _fe(args, live) -> str:
+    return args.fe_url or server.web_url(live.ports)
 
 
 def _show_ready(ctx, live, args, *, command: str) -> None:
     snap = snapshot(live.remote)
     record(ctx, live, {"command": command, "snapshot": snap})
     ctx.out(f"회차 {live.round_id} · API {server.api_url(live.ports)} · 사건 {len(snap['incidents'])}건")
-    ctx.out(f"FE: apps/web에서 npm run dev -- -H localhost → {args.fe_url}")
+    ctx.out(f"FE: {_fe(args, live)}")
     show_next(ctx, snap)
     ctx.out(f"기록: {live.round_dir}")
 
@@ -489,7 +501,7 @@ def cmd_status(ctx, args) -> None:
             f"  [{INCIDENT_STATUS.get(incident['status'], incident['status'])}] "
             f"{label(incident, names)}{risk_text}" + (f" · 실행: {executions}" if executions else "")
         )
-        ctx.out(f"      {args.fe_url}/incidents/{incident['incident_id']}")
+        ctx.out(f"      {_fe(args, live)}/incidents/{incident['incident_id']}")
     show_next(ctx, snap)
 
 
@@ -605,12 +617,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--data-root", type=Path, default=None,
         help=f"토큰·회차 기록 폴더 (기본 {server.DEFAULT_DATA_ROOT})",
     )
-    parser.add_argument("--fe-url", default="http://localhost:3000", help="안내에 쓰는 FE 주소")
+    parser.add_argument("--fe-url", default=None, help="안내에 쓰는 FE 주소(기본: 이 CLI가 띄운 FE)")
     commands = parser.add_subparsers(dest="command", required=True, metavar="명령")
     for name, handler, text in (
-        ("up", cmd_up, "테스트 서버를 띄운다(떠 있으면 그대로 쓴다)"),
-        ("reset", cmd_reset, "볼륨째 지우고 처음 상태로 준비한다"),
-        ("down", cmd_down, "테스트 서버를 볼륨째 내린다(회차 기록은 남는다)"),
+        ("up", cmd_up, "테스트 서버와 FE를 띄운다(떠 있으면 그대로 쓴다)"),
+        ("reset", cmd_reset, "볼륨째 지우고 데이터 없는 처음 상태로 되돌린다(FE는 그대로)"),
+    ):
+        starter = commands.add_parser(name, help=text)
+        starter.add_argument("--no-web", action="store_true", help="FE를 띄우지 않는다")
+        starter.set_defaults(handler=handler)
+    for name, handler, text in (
+        ("down", cmd_down, "FE를 닫고 테스트 서버를 볼륨째 내린다(회차 기록은 남는다)"),
         ("status", cmd_status, "사건·실행 상태와 다음에 할 수 있는 것"),
         ("collect", cmd_collect, "자산·메트릭 수집·적재만(판정·카드 없음)"),
         ("scan", cmd_scan, "수집 → 판정 → FinOps 사건 생성"),
@@ -620,11 +637,15 @@ def build_parser() -> argparse.ArgumentParser:
     inject = commands.add_parser("inject", help="위협 관측 1건 주입 → 소비 1회")
     kinds = inject.add_subparsers(dest="kind", required=True, metavar="종류")
     ssh = kinds.add_parser("ssh", help="로그 근거가 붙은 SSH 관측(datasets/secops-log-corpus)")
-    ssh.add_argument("--case", required=True, choices=[f"C{i:02}" for i in range(1, 8)])
+    # 기본값은 시연 T2 — `inject ssh` 한 번으로 SSH 관측 C01을 seed-idle에 넣는다
+    ssh.add_argument("--case", default="C01", choices=[f"C{i:02}" for i in range(1, 8)],
+                     help="관측 사례(기본 C01)")
+    ssh.add_argument("--target", default=T2_TARGET,
+                     help=f"대상 자산의 Name — 수집된 목록에서 정확히 1건(기본 {T2_TARGET})")
     golden = kinds.add_parser("golden", help="골든 위협 입력(datasets/golden/secops/input)")
     golden.add_argument("file", help="입력 파일명(확장자 생략 가능). 예: evt_open_ip_001")
+    golden.add_argument("--target", required=True, help="대상 자산의 Name — 수집된 목록에서 정확히 1건")
     for sub in (ssh, golden):
-        sub.add_argument("--target", required=True, help="대상 자산의 Name — 수집된 목록에서 정확히 1건")
         sub.add_argument("--occurred-at", help="관측 시각(ISO 8601). 생략하면 누른 시각(UTC, 초 단위)")
         sub.set_defaults(handler=cmd_inject)
 

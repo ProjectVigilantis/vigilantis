@@ -18,11 +18,15 @@
 # 라우터는 공개 주기 함수의 보고를 그대로 돌려주고 ok로 성공 여부만 가른다. SQL·Boto3·업무
 # 흐름을 직접 조정하지 않는다. 예외는 inject 결과 조회다 — 주입한 관측의 Incident를 목록의
 # 최신 건으로 추정하지 않고, 정형화 함수가 만든 중복 키로 기존 repository에서 찾는다.
+# collect는 WebSocket 이벤트가 없어 FE가 모른다 — 끝나면 열린 WebSocket을 끊는다. FE는 재연결
+# 때 화면을 다시 조회하므로(apps/web realtime-provider) 새로고침 없이 자산이 보인다. 계약에 없는
+# 이벤트를 만들지 않으려고 끊기를 쓴다.
 # 버튼은 한 번에 하나만 돈다. 처리 중에 들어온 요청은 409와 처리 중인 버튼 이름을 받는다.
 # ==============================================================================
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import logging
@@ -195,10 +199,11 @@ def build_router(*, token: str, inbox: Path) -> APIRouter:
         return {"incidents": items}
 
     @router.post("/collect")
-    def collect() -> dict:
+    def collect(request: Request) -> dict:
         def work() -> tuple[bool, dict]:
             regions = collector.collect_and_store()
-            return not _failed_regions(regions), {"report": regions}
+            dropped = _drop_websockets(request.app.state.realtime)
+            return not _failed_regions(regions), {"report": regions, "reconnected": dropped}
 
         return press("collect", work)
 
@@ -258,6 +263,22 @@ def build_router(*, token: str, inbox: Path) -> APIRouter:
         return press("dispatch", work)
 
     return router
+
+
+def _drop_websockets(realtime, timeout: float = 5.0) -> int:
+    """열린 WebSocket을 모두 끊는다 — FE가 재연결하며 화면을 다시 조회한다. 끊은 수."""
+    loop = realtime._loop
+    if loop is None:
+        return 0
+
+    async def drop() -> int:
+        sockets = list(realtime._connections)
+        for websocket in sockets:
+            realtime.unregister(websocket)
+        await asyncio.gather(*(realtime._close_quietly(websocket) for websocket in sockets))
+        return len(sockets)
+
+    return asyncio.run_coroutine_threadsafe(drop(), loop).result(timeout=timeout)
 
 
 def _publisher(request: Request):

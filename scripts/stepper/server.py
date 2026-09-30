@@ -5,10 +5,12 @@
 #
 # 안전장치
 #   · compose 명령에는 항상 -p vigilantis-test와 override를 붙인다. 다른 프로젝트명을 받지 않는다.
-#   · 테스트 서버 포트(5432·4566·8000)를 다른 compose 프로젝트나 compose 밖 프로세스가 잡고
-#     있으면 아무것도 하지 않고 거부한다. CLI의 시드·주입기·HTTP 호출은 이 노트북의 같은 포트
-#     번호로 가므로, 그 자리에 개발·시연 스택이 있으면 시드가 그 LocalStack의 NACL 규칙을 비우고
-#     실패 주입기가 그 인스턴스를 멈춘다. 남의 스택을 대신 내리지도 않는다.
+#   · 띄울 때(reset) 호스트 포트를 고른다 — 기본 번호(5432·4566·8000·FE 3000)를 다른 compose
+#     프로젝트나 compose 밖 프로세스가 잡고 있으면 +1씩 비켜 간다. 남의 스택은 내리지 않는다.
+#     고른 포트는 state.json에 남기고, 시드·주입기·HTTP 호출은 그 번호로만 간다.
+#   · 떠 있는 서버에 명령할 때는 기록된 포트를 남이 잡고 있으면 거부한다. CLI의 시드·주입기는
+#     그 포트로 가므로, 그 자리에 개발·시연 스택이 있으면 시드가 그 LocalStack의 NACL 규칙을 비우고
+#     실패 주입기가 그 인스턴스를 멈춘다.
 #   · 띄우기 전에 렌더링된 설정을 본다 — 포트가 전부 127.0.0.1인지, 볼륨이 이 프로젝트 것인지.
 #     `!override`를 모르는 Compose는 포트를 덧붙여 모든 인터페이스에 열 수 있다. 렌더링 결과에는
 #     .env 값이 섞이므로 포트·이름 말고는 읽지도 출력하지도 않는다.
@@ -29,6 +31,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import webbrowser
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -40,6 +43,11 @@ PROJECT = "vigilantis-test"
 LOOPBACK = "127.0.0.1"
 SERVICES = ("db", "localstack", "api")
 DEFAULT_PORTS = {"db": 5432, "localstack": 4566, "api": 8000}
+DEFAULT_WEB_PORT = 3000
+# override가 호스트 포트로 읽는 변수 — compose의 변수 치환은 프로세스 환경이 .env보다 우선한다
+PORT_ENV = {"db": "POSTGRES_PORT", "localstack": "LOCALSTACK_PORT", "api": "APP_PORT", "web": "STEPPER_WEB_PORT"}
+PORT_SPAN = 10  # 기본 번호가 잡혀 있으면 +1씩 이만큼 찾는다
+WEB_READY_SECONDS = 90.0
 SERVER_ID = "vigilantis-stepper"  # scripts/stepper/app.py의 ping 응답과 같은 값
 TOKEN_HEADER = "X-Stepper-Token"
 DEFAULT_DATA_ROOT = Path.home() / ".vigilantis" / "stepper"
@@ -67,6 +75,11 @@ def host_inbox(repo_root: Path = REPO_ROOT) -> Path:
 
 def api_url(ports: dict) -> str:
     return f"http://{LOOPBACK}:{ports['api']}"
+
+
+def web_url(ports: dict) -> str:
+    # 127.0.0.1이 아니라 localhost — api의 CORS·WebSocket 허용 출처가 http://localhost:<FE 포트>다
+    return f"http://localhost:{ports.get('web', DEFAULT_WEB_PORT)}"
 
 
 def ws_url(ports: dict) -> str:
@@ -188,6 +201,34 @@ def foreign_holders(containers: Iterable[Container], ports: Iterable[int]) -> li
     return held
 
 
+def pick_ports(
+    containers: Iterable[Container], answers: Callable[[int], bool], *, ours: Iterable[int] = (),
+) -> dict[str, int]:
+    """서비스·FE별 호스트 포트. 기본 번호부터 +1씩 보며 남이 잡은 번호는 건너뛴다.
+
+    이 프로젝트 컨테이너가 잡은 번호와 `ours`(이 CLI가 띄운 FE)는 비어 있는 것으로 본다 —
+    초기화가 내리고 같은 번호로 다시 연다. 그래야 떠 있는 FE가 가리키는 주소가 그대로다.
+    """
+    containers = list(containers)
+    mine = set(ours).union(*(c.host_ports for c in containers if c.project == PROJECT))
+    theirs = set().union(*(c.host_ports for c in containers if c.project != PROJECT))
+    chosen: dict[str, int] = {}
+    for name, base in {**DEFAULT_PORTS, "web": DEFAULT_WEB_PORT}.items():
+        for port in range(base, base + PORT_SPAN):
+            if port in chosen.values() or port in theirs:
+                continue
+            if port not in mine and answers(port):
+                continue  # compose 밖 프로세스
+            chosen[name] = port
+            break
+        else:
+            raise Refused(
+                f"{name} 포트 {base}–{base + PORT_SPAN - 1}이 모두 사용 중이라 띄우지 않았다 — "
+                "안 쓰는 스택을 내린 뒤 다시 실행하세요"
+            )
+    return chosen
+
+
 def port_answers(port: int, *, timeout: float = 0.3) -> bool:
     """loopback(IPv4·IPv6)에서 누가 이 포트를 받고 있는지. 컨테이너 밖 프로세스를 잡는다."""
     for host in (LOOPBACK, "::1"):
@@ -226,9 +267,13 @@ class Docker:
 
     def compose(
         self, *args: str, token: str, capture: bool = False, check: bool = True,
+        ports: dict | None = None,
     ) -> subprocess.CompletedProcess:
         # override가 ${STEPPER_TOKEN:?}로 요구한다 — 모든 compose 명령에 넘긴다
         env = dict(os.environ, STEPPER_TOKEN=token)
+        # 고른 호스트 포트 — 셸·.env의 같은 이름 값보다 우선한다. 없으면 override 기본값
+        for name, port in (ports or {}).items():
+            env[PORT_ENV[name]] = str(port)
         proc = self._run(
             self.compose_args(*args), cwd=self.repo_root, env=env, capture_output=capture,
             text=True, encoding="utf-8", errors="replace",
@@ -240,8 +285,10 @@ class Docker:
             )
         return proc
 
-    def rendered_config(self, token: str) -> dict:
-        proc = self.compose("config", "--format", "json", token=token, capture=True, check=False)
+    def rendered_config(self, token: str, ports: dict | None = None) -> dict:
+        proc = self.compose(
+            "config", "--format", "json", token=token, capture=True, check=False, ports=ports,
+        )
         if proc.returncode != 0:
             # 오류 출력에는 설정값이 섞이지 않는다 — 문법·버전 문제를 알아보도록 보여 준다
             tail = "\n".join((proc.stderr or "").strip().splitlines()[-5:])
@@ -419,6 +466,65 @@ def ask_tty(prompt: str) -> bool:
     return input(prompt).strip().lower() in ("y", "yes")
 
 
+# ------------------------------------------------------------------------------
+# FE dev 서버 — 새 창(Windows)이나 백그라운드 프로세스로 띄우고 PID를 state.json에 남긴다
+# ------------------------------------------------------------------------------
+
+
+def launch_web(command: list[str], cwd: Path, env: dict, log: Path) -> int:
+    """FE 프로세스를 띄우고 PID를 돌려준다. 이 CLI가 끝나도 살아 있어야 한다."""
+    if os.name == "nt":
+        # cmd /k — npm이 오류로 끝나도 창이 남아 출력을 읽을 수 있다
+        proc = subprocess.Popen(
+            ["cmd", "/k", *command], cwd=cwd, env=env,
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+        )
+    else:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("ab") as stream:
+            proc = subprocess.Popen(
+                command, cwd=cwd, env=env, stdout=stream, stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+    return proc.pid
+
+
+def pid_alive(pid: int) -> bool:
+    if os.name == "nt":
+        # os.kill(pid, 0)은 Windows에서 프로세스를 끝낸다 — 상태 조회 API로 본다
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        code = ctypes.c_ulong()
+        try:
+            return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def kill_tree(pid: int, run: Runner = subprocess.run) -> None:
+    """FE 창과 그 아래 npm·node를 함께 끝낸다."""
+    if os.name == "nt":
+        run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True)
+        return
+    import signal
+
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
 @dataclass
 class Context:
     """명령이 쓰는 바깥 세계 — 테스트가 대역으로 바꾼다."""
@@ -433,6 +539,10 @@ class Context:
     out: Callable[[str], None] = print
     now: Callable[[], datetime] = lambda: datetime.now().astimezone()
     sleep: Callable[[float], None] = time.sleep
+    launch_web: Callable[[list[str], Path, dict, Path], int] = launch_web
+    pid_alive: Callable[[int], bool] = pid_alive
+    kill_web: Callable[[int], None] = kill_tree
+    open_url: Callable[[str], Any] = webbrowser.open
 
     @property
     def docker(self) -> Docker:
@@ -453,19 +563,30 @@ class Live:
     round_dir: Path
 
 
+def running_web(ctx: Context) -> int | None:
+    """이 CLI가 띄운 FE가 살아 있으면 그 포트."""
+    saved = ctx.state.load()
+    pid, port = saved.get("web_pid"), (saved.get("ports") or {}).get("web")
+    if pid and port and ctx.pid_alive(pid) and ctx.port_answers(port):
+        return port
+    return None
+
+
 def check_can_start(ctx: Context, token: str) -> dict:
-    """기동 전 확인 — 렌더링된 설정과 포트 점유. 통과하면 서비스별 호스트 포트를 돌려준다."""
-    ports, problems = check_rendered_config(ctx.docker.rendered_config(token))
+    """기동 전 확인 — 빈 포트를 고르고, 그 포트로 렌더링한 설정을 검사한다.
+    통과하면 서비스·FE별 호스트 포트를 돌려준다."""
+    web = running_web(ctx)
+    ports = pick_ports(ctx.docker.running(), ctx.port_answers, ours=[web] if web else [])
+    for name, port in ports.items():
+        default = DEFAULT_PORTS.get(name, DEFAULT_WEB_PORT)
+        if port != default:
+            ctx.out(f"      {name} {default}번 포트를 다른 프로그램이 쓰고 있어 {port}번으로 띄운다")
+    rendered, problems = check_rendered_config(ctx.docker.rendered_config(token, ports))
     if problems:
         raise Refused("렌더링된 compose 설정이 안전하지 않아 띄우지 않았다:\n" + _bullets(problems))
-    containers = ctx.docker.running()
-    _refuse_foreign(containers, ports)
-    held = set().union(*(container.host_ports for container in containers)) if containers else set()
-    strangers = [port for port in ports.values() if port not in held and ctx.port_answers(port)]
-    if strangers:
+    if rendered != {name: ports[name] for name in SERVICES}:
         raise Refused(
-            f"compose 밖의 프로세스가 {', '.join(map(str, strangers))}번 포트를 쓰고 있어 "
-            "아무것도 하지 않았다 — 그 프로세스를 끈 뒤 다시 실행하세요"
+            f"렌더링된 포트({rendered})가 고른 포트와 다르다 — override가 포트 변수를 쓰는지 확인하세요"
         )
     return ports
 
@@ -476,7 +597,7 @@ def connect(ctx: Context) -> Live:
     saved = state.load()
     ports = saved.get("ports") or dict(DEFAULT_PORTS)
     containers = ctx.docker.running()
-    _refuse_foreign(containers, ports)
+    _refuse_foreign(containers, [ports[name] for name in SERVICES])
     ours = {container.service: container for container in containers if container.project == PROJECT}
     missing = [name for name in SERVICES if name not in ours]
     if missing:
@@ -519,13 +640,13 @@ def reset(ctx: Context) -> Live:
 
     docker = ctx.docker
     ctx.out(f"[1/5] {PROJECT} 프로젝트만 볼륨째 내린다")
-    docker.compose("down", "-v", "--remove-orphans", token=token)
-    ctx.out("[2/5] db·localstack 기동")
-    docker.compose("up", "-d", "--wait", "db", "localstack", token=token)
+    docker.compose("down", "-v", "--remove-orphans", token=token, ports=ports)
+    ctx.out(f"[2/5] db·localstack 기동(:{ports['db']} · :{ports['localstack']})")
+    docker.compose("up", "-d", "--wait", "db", "localstack", token=token, ports=ports)
     ctx.out("[3/5] LocalStack 시드")
     ctx.out("      " + seed(ctx, ports, round_dir))
-    ctx.out("[4/5] api 기동(migrate가 먼저 돈다)")
-    docker.compose("up", "-d", "--wait", "api", token=token)
+    ctx.out(f"[4/5] api 기동(:{ports['api']} · migrate가 먼저 돈다)")
+    docker.compose("up", "-d", "--wait", "api", token=token, ports=ports)
     ctx.out("[5/5] 준비 확인")
     remote = ctx.remote_factory(api_url(ports), token)
     wait_ready(ctx, remote, expect_empty=True)
@@ -549,13 +670,55 @@ def up(ctx: Context) -> tuple[Live, bool]:
 
 
 def down(ctx: Context) -> None:
-    """이 프로젝트를 볼륨째 내린다. 회차 기록은 데이터 루트에 남는다."""
+    """FE를 닫고 이 프로젝트를 볼륨째 내린다. 회차 기록은 데이터 루트에 남는다."""
     state = ctx.state
+    stop_web(ctx)
     token = state.token() or state.new_token()
     problems = scope_problems(ctx.docker.rendered_config(token))
     if problems:
         raise Refused("볼륨 범위를 확인하지 못해 내리지 않았다:\n" + _bullets(problems))
     ctx.docker.compose("down", "-v", "--remove-orphans", token=token)
+
+
+def ensure_web(ctx: Context, ports: dict) -> None:
+    """FE dev 서버 — 이 CLI가 띄운 것이 살아 있으면 두고, 없으면 띄운 뒤 브라우저로 연다."""
+    url = web_url(ports)
+    if running_web(ctx) == ports["web"]:
+        ctx.out(f"FE: 이미 떠 있다 → {url}")
+        return
+    if ctx.port_answers(ports["web"]):
+        ctx.out(f"! FE를 띄우지 않았다 — {ports['web']}번 포트를 다른 프로그램이 쓰고 있다. reset하면 빈 포트로 옮긴다")
+        return
+    web_dir = ctx.repo_root / "apps" / "web"
+    if not (web_dir / "node_modules").is_dir():
+        ctx.out("! FE를 띄우지 않았다 — apps/web에서 npm ci를 한 번 한 뒤 up")
+        return
+    npm = shutil.which("npm") or "npm"
+    # 이 서버의 API를 가리키게 고정한다 — 프로세스 환경이 apps/web/.env.local보다 우선한다
+    env = dict(os.environ, NEXT_PUBLIC_API_BASE_URL=api_url(ports))
+    pid = ctx.launch_web(
+        [npm, "run", "dev", "--", "-H", "localhost", "-p", str(ports["web"])],
+        web_dir, env, ctx.data_root / "web.log",
+    )
+    ctx.state.save(web_pid=pid)
+    waited = 0.0
+    while not ctx.port_answers(ports["web"]):
+        if waited >= WEB_READY_SECONDS:
+            ctx.out(f"! FE가 {WEB_READY_SECONDS:g}초 안에 {ports['web']}번 포트를 열지 않았다 — FE 창의 출력을 확인하세요")
+            return
+        ctx.sleep(1.0)
+        waited += 1.0
+    ctx.out(f"FE: 띄웠다 → {url} (브라우저로 연다)")
+    ctx.open_url(url)
+
+
+def stop_web(ctx: Context) -> None:
+    pid = ctx.state.load().get("web_pid")
+    if pid and ctx.pid_alive(pid):
+        ctx.kill_web(pid)
+        ctx.out(f"FE를 닫았다(PID {pid})")
+    if pid:
+        ctx.state.save(web_pid=None)
 
 
 def seed(ctx: Context, ports: dict, round_dir: Path) -> str:
@@ -599,8 +762,8 @@ def check_model_key(docker: Docker, token: str) -> bool:
     return proc.returncode == 0 and bool(lines) and lines[-1].strip() == "OK"
 
 
-def _refuse_foreign(containers: list[Container], ports: dict) -> None:
-    held = foreign_holders(containers, ports.values())
+def _refuse_foreign(containers: list[Container], ports: Iterable[int]) -> None:
+    held = foreign_holders(containers, ports)
     if held:
         raise Refused(
             "다른 스택이 테스트 서버 포트를 쓰고 있어 아무것도 하지 않았다:\n" + _bullets(held)
