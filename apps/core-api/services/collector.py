@@ -604,6 +604,10 @@ def persist_inventory(
 
     ``collection_run_id`` 를 받은 호출(회차를 남이 연 경우)에서는 ``prune_absent`` 를
     켜도 아무것도 하지 않는다 — 회차를 마감하는 쪽이 관측 범위를 안다.
+
+    유형별 자산 수 스냅샷(축 5)도 같은 조건에서만 남긴다. 스냅샷은 "이 회차가 리전 전체를
+    이만큼 봤다"는 기록인데, 골든 적재처럼 파일 하나를 넘기는 호출은 리전의 일부만 담고
+    있어 그 건수가 리전 전체로 그려진다(PR #411 리뷰).
     """
     from datetime import timedelta
 
@@ -882,20 +886,31 @@ def persist_inventory(
             error_summary=error_summary,
         )
 
-        # 유형별 자산 수 스냅샷(축 5) — 관측한 유형만 남긴다. 못 본 유형(degrade)을 0으로 남기면
-        # 추이가 자산이 사라진 것처럼 떨어진다. 어느 유형을 못 봤는지는 아래 소멸 표시와 같은
-        # 지도(UNOBSERVED_TYPES_BY_FAILURE)가 정하고, 모르는 라벨이 섞이면 이 회차는 남기지 않는다.
-        unknown_labels = set(inv.collector_failures) - UNOBSERVED_TYPES_BY_FAILURE.keys()
-        if unknown_labels:
+    # 아래 둘(자산 수 스냅샷·소멸 표시)은 **이 호출이 리전 전체를 관측했을 때만** 한다.
+    # 판단 근거도 하나다 — 이번 회차가 실제로 관측한 유형(#332). 회차 상태(PARTIAL)로
+    # 가르지 않는 이유는 그 단위가 너무 거칠기 때문이다 — LocalStack Community 는
+    # autoscaling·elbv2 가 라이선스 밖이라 실수집 회차가 **매번** PARTIAL 이고, 회차 단위로
+    # 막으면 팀 표준 환경에서 한 번도 발동하지 않는다(PR #339 리뷰: 김세혁).
+    # collector_failures 는 이미 *어느 조회를 못 봤는지* 를 라벨로 담고 있으므로, 그 라벨이
+    # 채우는 유형만 뺀다. 모르는 라벨이 섞이면 무엇을 못 봤는지 모르므로 둘 다 건너뛴다 —
+    # 라벨을 늘린 쪽이 지도를 고치게 하려고 조용히 넘기지 않고 경고로 남긴다.
+    absent_marked: list[str] = []
+    if prune_absent and started_own_run:
+        unknown = set(inv.collector_failures) - UNOBSERVED_TYPES_BY_FAILURE.keys()
+        if unknown:
             _log.warning(
-                "리전 %s: 모르는 수집 실패 라벨 %s — 자산 수 스냅샷을 건너뛴다",
+                "리전 %s: 모르는 수집 실패 라벨 %s — 자산 수 스냅샷·소멸 표시를 건너뛴다",
                 inv.region,
-                sorted(unknown_labels),
+                sorted(unknown),
             )
         else:
-            unseen = {
-                t for label in inv.collector_failures for t in UNOBSERVED_TYPES_BY_FAILURE[label]
+            blind = {
+                t
+                for label in inv.collector_failures
+                for t in UNOBSERVED_TYPES_BY_FAILURE[label]
             }
+            # 유형별 자산 수 스냅샷(축 5) — 못 본 유형(blind)을 0으로 남기면 추이가 자산이
+            # 사라진 것처럼 떨어지므로 관측한 유형만 남긴다. 관측했지만 없는 유형은 0건이다.
             by_type = {
                 AssetType.EC2: ec2_count,
                 AssetType.SG: sg_count,
@@ -908,44 +923,21 @@ def persist_inventory(
             assets_repo.record_inventory_counts(
                 db,
                 collection_run_id=collection_run_id,
-                counts={t: n for t, n in by_type.items() if t not in unseen},
+                counts={t: n for t, n in by_type.items() if t not in blind},
             )
 
-    # 소멸 자산 표시 — **이번 회차가 실제로 관측한 유형에 대해서만** 한다(#332).
-    # 회차 상태(PARTIAL)로 가르지 않는 이유는 그 단위가 너무 거칠기 때문이다 —
-    # LocalStack Community 는 autoscaling·elbv2 가 라이선스 밖이라 실수집 회차가
-    # **매번** PARTIAL 이고, 회차 단위로 막으면 팀 표준 환경에서 소멸 표시가 한 번도
-    # 발동하지 않는다(PR #339 리뷰: 김세혁). collector_failures 는 이미 *어느 조회를
-    # 못 봤는지* 를 라벨로 담고 있으므로, 그 라벨이 채우는 유형만 판단에서 뺀다.
-    absent_marked: list[str] = []
-    if prune_absent and started_own_run:
-        observed_arns = {
-            a.arn
-            for a in (
-                *inv.ec2_instances,
-                *inv.security_groups,
-                *inv.nacls,
-                *inv.ebs_volumes,
-                *inv.launch_templates,
-                *inv.auto_scaling_groups,
-                *inv.alb_target_groups,
-            )
-        }
-        unknown = set(inv.collector_failures) - UNOBSERVED_TYPES_BY_FAILURE.keys()
-        if unknown:
-            # 무엇을 못 봤는지 모르면 판단하지 않는다. 라벨을 늘린 쪽이 지도를 고치게
-            # 하려고 조용히 넘기지 않고 경고로 남긴다.
-            _log.warning(
-                "리전 %s: 모르는 수집 실패 라벨 %s — 소멸 표시를 건너뛴다",
-                inv.region,
-                sorted(unknown),
-            )
-            absent_marked = []
-        else:
-            blind = {
-                t
-                for label in inv.collector_failures
-                for t in UNOBSERVED_TYPES_BY_FAILURE[label]
+            # 소멸 자산 표시(#332) — 관측한 유형에서 이번에 안 보인 그 리전의 자산.
+            observed_arns = {
+                a.arn
+                for a in (
+                    *inv.ec2_instances,
+                    *inv.security_groups,
+                    *inv.nacls,
+                    *inv.ebs_volumes,
+                    *inv.launch_templates,
+                    *inv.auto_scaling_groups,
+                    *inv.alb_target_groups,
+                )
             }
             absent_marked = assets_repo.mark_absent_assets(
                 db,
