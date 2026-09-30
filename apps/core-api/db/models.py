@@ -168,6 +168,28 @@ class Asset(Base):
     )
 
 
+class AssetInventoryCount(Base):
+    """수집 회차 1회가 **관측한** 유형별 자산 수 — 시계열 축 5(자산 수 추이)의 원천.
+
+    `assets` 행은 회차마다 덮어써 이력이 없고, 판정 이력(`rule_evaluations`)은 판정 대상
+    3종(EC2·SG·EBS)만 남긴다. 그래서 "내 자산이 늘었나 줄었나"를 전 유형으로 복원할 자리가
+    없다 — 회차를 마감할 때 유형별 건수를 여기 남긴다(2026-09-29).
+
+    **그 회차가 못 본 유형은 행을 남기지 않는다**(PARTIAL 회차의 degrade 유형). 0건 행과
+    "모름"을 가르기 위해서다 — 0을 남기면 추이가 자산이 사라진 것처럼 떨어진다.
+    """
+
+    __tablename__ = "asset_inventory_counts"
+
+    collection_run_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("collection_runs.collection_run_id"), primary_key=True
+    )
+    asset_type: Mapped[AssetType] = mapped_column(_enum(AssetType, "asset_type"), primary_key=True)
+    count: Mapped[int] = mapped_column(Integer)
+
+    __table_args__ = (CheckConstraint("count >= 0", name="count_non_negative"),)
+
+
 class AssetRelationship(Base):
     """자산 간 방향 연결(source → target). 토폴로지 맵의 역방향 조회를 지원한다."""
 
