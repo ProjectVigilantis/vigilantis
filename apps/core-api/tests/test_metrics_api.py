@@ -1,6 +1,6 @@
 # ==============================================================================
 # [파일 설명]
-# GET /api/v1/metrics/timeseries 통합 검증(PostgreSQL) — 시계열 5축.
+# GET /api/v1/metrics/timeseries 통합 검증(PostgreSQL) — 시계열 6축.
 #
 #   축 2(SG 개방 건수)·축 4(자산 현황)·축 5(자산 수)는 실제 DB 로 검증한다. 회차별 보존이 이 기능의 전제라,
 #   가짜로 대신하면 "판정이 회차마다 남는가"라는 정작 중요한 것을 안 보게 된다.
@@ -18,6 +18,7 @@ from schemas.api.assets import AssetType
 from schemas.api.metrics import CpuSeries, NetworkSeries
 from schemas.rules import RuleEvaluationResult
 
+from db import models
 from db.repositories import assets as assets_repo
 
 ACCOUNT = "123456789012"
@@ -496,3 +497,68 @@ def test_스냅샷이_없으면_자산_수_축은_빈_READY다(client_pg, db, se
     axis = client_pg.get("/api/v1/metrics/timeseries").json()["asset_inventory"]
 
     assert axis == {"status": "READY", "points": [], "reason_code": None}
+
+
+def _seed_threat_event(db, *, region: str, event_type: str, occurred_at: datetime, key: str):
+    db.add(
+        models.ThreatEvent(
+            source_event_id=key,
+            event_type=event_type,
+            target_arn=_arn(region, key),
+            payload={},
+            deduplication_key=key,
+            occurred_at=occurred_at,
+        )
+    )
+    db.flush()
+
+
+def test_위협_이벤트는_발생_칸마다_유형별로_선다(client_pg, db, set_regions, no_cloudwatch):
+    """축 6 — 발생량이다. 이벤트가 없는 칸은 점이 없고(0건), 창·리전 밖은 세지 않는다."""
+    set_regions(SEOUL, TOKYO)
+    now = datetime.now(timezone.utc)
+    t1 = (now - timedelta(hours=2)).replace(minute=1, second=0, microsecond=0)
+    t2 = (now - timedelta(hours=1)).replace(minute=1, second=0, microsecond=0)
+    _seed_threat_event(db, region=SEOUL, event_type="SSH_BRUTE_FORCE", occurred_at=t1, key="a")
+    _seed_threat_event(db, region=TOKYO, event_type="SSH_BRUTE_FORCE", occurred_at=t1 + timedelta(seconds=20), key="b")
+    _seed_threat_event(db, region=SEOUL, event_type="OPEN_IP", occurred_at=t1 + timedelta(seconds=40), key="c")
+    _seed_threat_event(db, region=SEOUL, event_type="OPEN_IP", occurred_at=t2, key="d")
+    # 창 밖 · 관제 대상 밖 리전
+    _seed_threat_event(db, region=SEOUL, event_type="OPEN_IP", occurred_at=now - timedelta(hours=100), key="e")
+    _seed_threat_event(db, region="us-east-1", event_type="OPEN_IP", occurred_at=t2, key="f")
+    db.commit()
+
+    axis = client_pg.get("/api/v1/metrics/timeseries").json()["threat_events"]
+
+    assert axis["status"] == "READY"
+    assert [(p["total"], p["counts"]) for p in axis["points"]] == [
+        (3, {"OPEN_IP": 1, "SSH_BRUTE_FORCE": 2}),
+        (1, {"OPEN_IP": 1}),
+    ]
+
+
+def test_위협_이벤트가_없으면_빈_READY다(client_pg, db, set_regions, no_cloudwatch):
+    set_regions(SEOUL)
+
+    axis = client_pg.get("/api/v1/metrics/timeseries").json()["threat_events"]
+
+    assert axis == {"status": "READY", "points": [], "reason_code": None}
+
+
+def test_같은_칸에서_다시_수집하면_판정_축은_마지막_회차만_센다(client_pg, db, set_regions, no_cloudwatch):
+    """즉시 스캔과 타이머 스캔이 한 칸에 겹쳐도 건수가 회차 수만큼 부풀지 않는다(2026-09-30)."""
+    set_regions(SEOUL)
+    at = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(minute=1, second=0, microsecond=0)
+    first = _seed_run(db, region=SEOUL, started_at=at)
+    _seed_sg(db, first, region=SEOUL, suffix="0001", verdict="THREAT", evaluated_at=at)
+    second = _seed_run(db, region=SEOUL, started_at=at + timedelta(seconds=20))
+    _seed_sg(db, second, region=SEOUL, suffix="0001", verdict="THREAT", evaluated_at=at)
+    _seed_sg(db, second, region=SEOUL, suffix="0002", verdict="THREAT", evaluated_at=at)
+    # 판정 없이 끝난(실패) 회차가 칸 끝에 와도 앞선 판정이 사라지지 않는다
+    _seed_run(db, region=SEOUL, started_at=at + timedelta(seconds=40))
+    db.commit()
+
+    body = client_pg.get("/api/v1/metrics/timeseries").json()
+
+    assert [p["value"] for p in body["sg_exposure"]["points"]] == [2]
+    assert [(p["judged"], p["threat"]) for p in body["asset_status"]["points"]] == [(2, 2)]

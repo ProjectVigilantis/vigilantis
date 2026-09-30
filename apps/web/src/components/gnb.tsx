@@ -4,7 +4,7 @@
 
 import Link from 'next/link';
 
-import { CollectionIndicator } from '@/components/collection-indicator';
+import { CollectionIndicator, useAssetsEnvelope } from '@/components/collection-indicator';
 import { ConnectionIndicator } from '@/components/connection-indicator';
 import { usePathname } from 'next/navigation';
 
@@ -29,6 +29,7 @@ const NAV = [
 
 export function Gnb() {
   const pathname = usePathname();
+  const assets = useAssetsEnvelope();
 
   return (
     <header className="flex h-14 shrink-0 items-center gap-6 border-b px-4">
@@ -64,11 +65,11 @@ export function Gnb() {
       </nav>
 
       {/* 두 인디케이터는 축이 다르다 — 왼쪽은 서버↔클라우드 수집 상태(`GET /assets` 봉투), 오른쪽은
-          브라우저↔서버 실시간 소켓(CMN-001 §4.8, RealtimeProvider 소유). 자리를 다투지 않고, WS 쪽을
+          관제 자산↔화면 실시간 연결(소켓이 열렸고 수집된 자산이 있을 때만 초록 — connection-indicator.tsx). 자리를 다투지 않고, WS 쪽을
           빼면 끊겼을 때 [재연결] 버튼(§4.8 4)이 사라져 둘 다 둔다(PR #299 리뷰). */}
       <div className="ml-auto flex shrink-0 items-center gap-4">
-        <CollectionIndicator />
-        <ConnectionIndicator />
+        <CollectionIndicator env={assets.env} failed={assets.failed} />
+        <ConnectionIndicator hasAssets={!assets.failed && (assets.env?.items.length ?? 0) > 0} />
       </div>
     </header>
   );

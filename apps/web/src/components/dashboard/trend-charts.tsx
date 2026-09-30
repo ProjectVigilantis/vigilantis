@@ -13,7 +13,9 @@
 import {
   Area,
   AreaChart,
+  Bar,
   CartesianGrid,
+  ComposedChart,
   Legend,
   Line,
   LineChart,
@@ -36,6 +38,9 @@ import {
   inventoryChartState,
   networkChartState,
   sgChartState,
+  THREAT_EVENT_KINDS,
+  threatActivityChartState,
+  type ThreatActivityRow,
   type AssetStatusRow,
   type ChartState,
   type CpuLine,
@@ -48,6 +53,8 @@ import type {
   CpuAxis,
   NetworkAxis,
   SgExposureAxis,
+  ThreatEventAxis,
+  ThreatEventKind,
 } from '@/types/api';
 
 /**
@@ -145,6 +152,7 @@ export function CpuTrendChart({
           width={56}
         />
         <Tooltip
+          isAnimationActive={false}
           contentStyle={TOOLTIP_STYLE}
           labelFormatter={(at) => formatTick(Number(at))}
           formatter={(value, key) => [
@@ -227,6 +235,7 @@ export function NetworkTrendChart({
           width={72}
         />
         <Tooltip
+          isAnimationActive={false}
           contentStyle={TOOLTIP_STYLE}
           labelFormatter={(at) => formatTick(Number(at))}
           formatter={(value, key) => [
@@ -288,6 +297,7 @@ export function SgExposureTrendChart({ axis }: { axis: SgExposureAxis }) {
           width={56}
         />
         <Tooltip
+          isAnimationActive={false}
           contentStyle={TOOLTIP_STYLE}
           labelFormatter={(at) => formatTick(Number(at))}
           formatter={(value) => [`${value}건`, '인터넷 개방 SG']}
@@ -384,7 +394,7 @@ export function InventoryTrendChart({ axis }: { axis: AssetInventoryAxis }) {
           tick={{ fontSize: 11 }}
           width={56}
         />
-        <Tooltip content={(props) => <InventoryTooltip {...props} />} />
+        <Tooltip content={(props) => <InventoryTooltip {...props} />} isAnimationActive={false} />
         {/* 범례는 쌓는 순서(INVENTORY_KEYS)대로 선다 — Recharts 기본은 키 이름순이라
             옆 도넛 범례와 순서가 갈린다. */}
         <Legend
@@ -467,7 +477,7 @@ export function ThreatTrendChart({ axis }: { axis: AssetStatusAxis }) {
           tick={{ fontSize: 11 }}
           width={56}
         />
-        <Tooltip content={(props) => <ThreatTooltip {...props} />} />
+        <Tooltip content={(props) => <ThreatTooltip {...props} />} isAnimationActive={false} />
         {/* 선이 하나라 범례를 두지 않는다 — 카드 제목이 이름이다. */}
         <Line
           type="stepAfter"
@@ -480,5 +490,125 @@ export function ThreatTrendChart({ axis }: { axis: AssetStatusAxis }) {
         />
       </LineChart>
     </ChartFrame>
+  );
+}
+
+/**
+ * 전체 위협 추이(SEC-001, 2026-09-30) — 축 4 `threat`(판정 상태량, 선)와 축 6(이벤트 발생량, 쌓은 막대)을
+ * 한 x축에 겹친다. 둘 다 "건"이라 y축은 하나다. 선은 "지금 위협 상태인 자산이 몇인가", 막대는 "그 사이
+ * 밖에서 무엇이 들어왔나"다.
+ *
+ * 색: 이벤트 두 유형은 계열 1(파랑)·3(청록), 판정 선은 앱의 유일한 빨강(`--danger`)이다 — 대시보드
+ * 「위협 판정 추이」와 같은 뜻의 같은 색. 세 색은 dataviz 팔레트 검사(라이트·다크, 전 쌍)를 통과했다.
+ */
+const THREAT_EVENT_COLOR: Record<ThreatEventKind, string> = {
+  SSH_BRUTE_FORCE: 'var(--chart-series-1)',
+  OPEN_IP: 'var(--chart-series-3)',
+};
+const THREAT_EVENT_LABEL: Record<ThreatEventKind, string> = {
+  SSH_BRUTE_FORCE: 'SSH 무차별 대입',
+  OPEN_IP: '전체 대역 개방',
+};
+
+function ThreatActivityTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: ReadonlyArray<{ payload?: ThreatActivityRow }>;
+}) {
+  const row = payload?.[0]?.payload;
+  if (!active || row === undefined) return null;
+  const line = (color: string, label: string, value: string) => (
+    <span key={label} className="flex items-center justify-between gap-6">
+      <span className="flex items-center gap-1.5">
+        <span aria-hidden className="inline-block size-2 rounded-full" style={{ backgroundColor: color }} />
+        {label}
+      </span>
+      <span className="font-mono tabular-nums">{value}</span>
+    </span>
+  );
+  return (
+    <div style={TOOLTIP_STYLE} className="flex w-max flex-col gap-1 px-3 py-2 whitespace-nowrap">
+      <span className="text-muted-foreground">{formatTick(row.at)}</span>
+      {line('var(--danger)', '위협 판정 자산', row.threat === undefined ? '회차 없음' : `${row.threat}건`)}
+      {THREAT_EVENT_KINDS.map((k) => line(THREAT_EVENT_COLOR[k], THREAT_EVENT_LABEL[k], `${row[k]}건`))}
+    </div>
+  );
+}
+
+export function ThreatActivityChart({
+  assetStatus,
+  threatEvents,
+}: {
+  assetStatus: AssetStatusAxis;
+  threatEvents: ThreatEventAxis;
+}) {
+  const state = threatActivityChartState(assetStatus, threatEvents);
+  if (state.kind !== 'READY') return <Fallback state={state} empty="위협 기록이 아직 없습니다" />;
+  const { rows, verdictUnavailable, eventsUnavailable } = state.data;
+
+  return (
+    <div className="flex flex-col gap-1">
+      <ChartFrame>
+        <ComposedChart data={rows} margin={{ top: 8, right: 8, bottom: 0, left: -16 }}>
+          <CartesianGrid stroke={GRID_INK} strokeDasharray="3 3" vertical={false} />
+          <XAxis
+            dataKey="at"
+            type="number"
+            scale="time"
+            domain={['dataMin', 'dataMax']}
+            tickFormatter={formatTick}
+            stroke={AXIS_INK}
+            tick={{ fontSize: 11 }}
+            minTickGap={48}
+          />
+          <YAxis
+            allowDecimals={false}
+            domain={[0, (max: number) => Math.max(1, max)]}
+            stroke={AXIS_INK}
+            tick={{ fontSize: 11 }}
+            width={56}
+          />
+          <Tooltip content={(props) => <ThreatActivityTooltip {...props} />} isAnimationActive={false} />
+          <Legend
+            itemSorter={null}
+            formatter={(key) => (
+              <span className="text-muted-foreground text-xs">
+                {key === 'threat' ? '위협 판정 자산' : THREAT_EVENT_LABEL[String(key) as ThreatEventKind]}
+              </span>
+            )}
+          />
+          {THREAT_EVENT_KINDS.map((kind) => (
+            <Bar
+              key={kind}
+              dataKey={kind}
+              name={kind}
+              stackId="events"
+              fill={THREAT_EVENT_COLOR[kind]}
+              barSize={6}
+              isAnimationActive={false}
+            />
+          ))}
+          <Line
+            type="stepAfter"
+            dataKey="threat"
+            name="threat"
+            stroke="var(--danger)"
+            strokeWidth={2}
+            dot={false}
+            activeDot={{ r: 4 }}
+            connectNulls
+            isAnimationActive={false}
+          />
+        </ComposedChart>
+      </ChartFrame>
+      {verdictUnavailable !== null || eventsUnavailable !== null ? (
+        <p className="text-xs text-amber-400">
+          {verdictUnavailable !== null ? `위협 판정 조회 실패(${verdictUnavailable})` : `위협 이벤트 조회 실패(${eventsUnavailable})`}
+          — 나머지만 그렸습니다
+        </p>
+      ) : null}
+    </div>
   );
 }

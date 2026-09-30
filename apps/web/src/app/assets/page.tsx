@@ -1,6 +1,7 @@
 // AST-001 자산 관제 — 화면설계서 v1.5 §4.2.
 
 import { AssetsView } from '@/components/assets/assets-view';
+import { AutoRefresh } from '@/components/auto-refresh';
 import { ErrorState } from '@/components/error-state';
 import { getAssets, getIncident, getIncidents, getMetricsTimeseries } from '@/lib/api/client';
 import { WASTE_VERDICTS } from '@/lib/dashboard';
@@ -101,6 +102,7 @@ export default async function AssetsPage({ searchParams }: PageProps<'/assets'>)
   // 화면 이름(h1)은 뷰 안에 있다 — 지표 띠와 한 덩이로 스크롤을 따라와야 해서다(assets-view.tsx).
   return (
     <>
+      <AutoRefresh />
       <AssetsView
         data={assets}
         incidents={incidents}

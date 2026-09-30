@@ -15,6 +15,8 @@ import type {
   NetworkAxis,
   NetworkSeries,
   SgExposureAxis,
+  ThreatEventAxis,
+  ThreatEventKind,
   TimeseriesPoint,
 } from '@/types/api';
 
@@ -341,4 +343,70 @@ export function inventoryChartState(axis: AssetInventoryAxis): ChartState<Invent
   const rows = toInventoryRows(axis.points);
   if (rows.length === 0) return { kind: 'EMPTY' };
   return { kind: 'READY', data: rows };
+}
+
+// ── 전체 위협 추이(축 4 `threat` + 축 6)
+
+/** 이벤트 유형 순서 — 막대를 쌓는 순서이자 범례 순서다. */
+export const THREAT_EVENT_KINDS: readonly ThreatEventKind[] = ['SSH_BRUTE_FORCE', 'OPEN_IP'];
+
+/**
+ * 한 시각의 전체 위협. `threat`는 판정 상태량(축 4 — 그 회차에 위협 판정인 자산 수)이고 회차가 없던
+ * 시각은 값을 두지 않는다(0이 아니라 "못 봤다"). 이벤트 유형 열은 발생량(축 6)이고 없으면 0이다 —
+ * 이 축에서는 점이 없는 칸이 곧 0건이다.
+ */
+export interface ThreatActivityRow {
+  at: number;
+  threat?: number;
+  SSH_BRUTE_FORCE: number;
+  OPEN_IP: number;
+  events: number;
+}
+
+export interface ThreatActivityChart {
+  rows: ThreatActivityRow[];
+  /** 한쪽 축만 실패했을 때의 사유 — 살아 있는 쪽은 그대로 그리고 실패는 캡션으로 밝힌다. */
+  verdictUnavailable: string | null;
+  eventsUnavailable: string | null;
+}
+
+export function threatActivityChartState(
+  assetStatus: AssetStatusAxis,
+  threatEvents: ThreatEventAxis,
+): ChartState<ThreatActivityChart> {
+  const verdictUnavailable =
+    assetStatus.status === 'UNAVAILABLE' ? (assetStatus.reason_code ?? '알 수 없는 오류') : null;
+  const eventsUnavailable =
+    threatEvents.status === 'UNAVAILABLE' ? (threatEvents.reason_code ?? '알 수 없는 오류') : null;
+  if (verdictUnavailable !== null && eventsUnavailable !== null) {
+    return { kind: 'UNAVAILABLE', reason: verdictUnavailable };
+  }
+
+  const byAt = new Map<number, ThreatActivityRow>();
+  const rowAt = (at: number): ThreatActivityRow => {
+    let row = byAt.get(at);
+    if (row === undefined) {
+      row = { at, SSH_BRUTE_FORCE: 0, OPEN_IP: 0, events: 0 };
+      byAt.set(at, row);
+    }
+    return row;
+  };
+  if (verdictUnavailable === null) {
+    for (const p of assetStatus.points) {
+      const at = Date.parse(p.at);
+      if (!Number.isNaN(at)) rowAt(at).threat = p.threat;
+    }
+  }
+  if (eventsUnavailable === null) {
+    for (const p of threatEvents.points) {
+      const at = Date.parse(p.at);
+      if (Number.isNaN(at)) continue;
+      const row = rowAt(at);
+      for (const kind of THREAT_EVENT_KINDS) row[kind] = p.counts[kind] ?? 0;
+      row.events = p.total;
+    }
+  }
+  const rows = [...byAt.values()].sort((a, b) => a.at - b.at);
+  if (rows.length === 0) return { kind: 'EMPTY' };
+  return { kind: 'READY', data: { rows, verdictUnavailable, eventsUnavailable } };
 }

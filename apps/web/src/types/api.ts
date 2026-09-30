@@ -615,6 +615,28 @@ export interface AssetInventoryAxis {
   reason_code: string | null;
 }
 
+/** 위협 이벤트 유형 — 인시던트 `threat_context.event_type`과 같은 값이다. */
+export type ThreatEventKind = 'OPEN_IP' | 'SSH_BRUTE_FORCE';
+
+/**
+ * 축 6 한 칸에 **발생한** 위협 이벤트 수. 0건 유형은 키가 없다. `total`은 `counts`의 합(서버 불변식).
+ */
+export interface ThreatEventPoint {
+  at: IsoDateTime;
+  total: number;
+  counts: Partial<Record<ThreatEventKind, number>>;
+}
+
+/**
+ * 축 6. 위협 이벤트 발생 추이(2026-09-30). 축 4 `threat`(판정 상태량)와 겹쳐 「전체 위협 추이」로 그린다.
+ * **다른 축과 달리 점이 없는 칸은 0건이다** — 이벤트는 들어올 때 기록되므로 "못 본 칸"이 없다.
+ */
+export interface ThreatEventAxis {
+  status: AxisStatus;
+  points: ThreatEventPoint[];
+  reason_code: string | null;
+}
+
 export interface MetricsTimeseriesResponse {
   generated_at: IsoDateTime;
   cpu: CpuAxis;
@@ -622,4 +644,5 @@ export interface MetricsTimeseriesResponse {
   sg_exposure: SgExposureAxis;
   asset_status: AssetStatusAxis;
   asset_inventory: AssetInventoryAxis;
+  threat_events: ThreatEventAxis;
 }

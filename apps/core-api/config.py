@@ -177,6 +177,9 @@ class CollectorSettings(BaseSettings):
     METRIC_LOOKBACK_DAYS: int = Field(default=14, gt=0)
     METRIC_PERIOD_SECONDS: int = Field(default=3600, gt=0)
     SCAN_INTERVAL_SECONDS: int = Field(default=300, gt=0)
+    # GET /api/v1/metrics/timeseries 의 기본 조회 창(시간). 화면은 hours 를 넘기지 않으므로 이 값이
+    # 곧 그래프의 가로 폭이다. 줄이면(예: 1) 분 단위 변화가 보인다.
+    METRICS_WINDOW_HOURS: int = Field(default=72, ge=1, le=336)
     # 스캔 파이프라인 잡 기동 여부. false 면 start_scheduler 가 None 을 돌려준다 —
     # 테스트가 앱을 띄울 때 실제 수집·판정이 도는 것을 막는다(DISPATCH_ENABLED 와 같은 결).
     SCAN_ENABLED: bool = True

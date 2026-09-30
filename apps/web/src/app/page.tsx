@@ -9,6 +9,7 @@
 
 import { ActionProposalCard } from '@/components/dashboard/action-proposal-card';
 import { DashboardView } from '@/components/dashboard/dashboard-view';
+import { AutoRefresh } from '@/components/auto-refresh';
 import { ErrorState } from '@/components/error-state';
 import { getAssets, getIncident, getIncidents, getMetricsTimeseries } from '@/lib/api/client';
 import { actionQueue, proposalRows } from '@/lib/dashboard';
@@ -58,6 +59,7 @@ export default async function DashboardPage() {
 
   return (
     <>
+      <AutoRefresh />
       <h1 className="mb-4 text-lg font-semibold">대시보드</h1>
       {/* AI 카드를 본문 위에 쌓지 않고 **슬롯으로 넘긴다** — 넓은 화면에서 본문 오른쪽 레일에
           세워야 하는데, 그 자리를 아는 것은 격자를 가진 `DashboardView`다. 여기서 만들어 넘기는

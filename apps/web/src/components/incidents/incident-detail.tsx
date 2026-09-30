@@ -34,7 +34,7 @@ import { isTerminalStatus } from '@/lib/execution-status';
 import { isResolvable } from '@/lib/incident-filter';
 import { proposalButtons } from '@/lib/proposal-buttons';
 import { RUNBOOK_LABELS, incidentTitle } from '@/lib/enum-labels';
-import { formatUsd } from '@/lib/savings';
+import { formatUsd, savingsBreakdown, type SavingsBreakdown } from '@/lib/savings';
 import { formatKst } from '@/lib/utils';
 import type {
   AssetItem,
@@ -132,6 +132,67 @@ const SAVINGS_REASON_LABELS: Record<SavingsReason, string> = {
  * 청구액이 아니라 모델 추정 단가 × 730시간(#347). 금액 옆에 그 사실을 함께 적는다(`lib/savings.ts` 머리말).
  * 추정이 없거나 실패한 후보를 $0으로 그리지 않는다 — 0원은 "절감이 없다"는 단언이다.
  */
+/**
+ * 절감 막대 — 현재 월 비용 한 줄을 "조정 후 비용 | 절감"으로 쪼갠다. 막대 길이는 **이 영역에서
+ * 가장 비싼 현재 비용** 기준이라 후보가 둘 이상이어도 한 축으로 비교된다(축은 하나).
+ *
+ * 색: 절감은 계열 색 `--chart-series-3`, 남는 비용은 물러서는 무채색이다. 두 색은 dataviz 팔레트
+ * 검사에서 색각 분리·명도 차를 통과했지만 무채색은 표면 대비가 3:1에 못 미쳐(WARN) **금액을
+ * 글자로 함께 적는다** — 색만으로 값을 읽게 두지 않는다.
+ */
+function SavingsBar({ breakdown, scale }: { breakdown: SavingsBreakdown; scale: number }) {
+  const { current, remaining, saving, ratio } = breakdown;
+  const pct = (v: number) => `${scale === 0 ? 0 : (v / scale) * 100}%`;
+  const percent = Math.round(ratio * 100);
+  return (
+    <div className="flex flex-col gap-1">
+      <div
+        role="img"
+        aria-label={`현재 월 ${formatUsd(current)} 중 ${formatUsd(saving)}(${percent}%) 절감, 조정 후 ${formatUsd(remaining)}`}
+        className="flex h-3 gap-0.5 overflow-hidden rounded-sm"
+      >
+        {remaining > 0 ? (
+          <span
+            title={`조정 후 월 비용 ${formatUsd(remaining)}`}
+            className="h-full bg-neutral-300 dark:bg-neutral-600"
+            style={{ width: pct(remaining) }}
+          />
+        ) : null}
+        {saving > 0 ? (
+          <span
+            title={`월 절감 예상 ${formatUsd(saving)} (${percent}%)`}
+            className="h-full"
+            style={{ width: pct(saving), backgroundColor: 'var(--chart-series-3)' }}
+          />
+        ) : null}
+      </div>
+      <div className="text-muted-foreground flex justify-between gap-3 font-mono text-xs tabular-nums">
+        <span>
+          조정 후 {formatUsd(remaining)} / 현재 {formatUsd(current)}
+        </span>
+        <span className="text-foreground">
+          −{formatUsd(saving)} ({percent}%)
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function SavingsLegend() {
+  return (
+    <div className="text-muted-foreground flex gap-3 text-xs">
+      <span className="flex items-center gap-1.5">
+        <span className="size-2.5 rounded-sm bg-neutral-300 dark:bg-neutral-600" />
+        조정 후 월 비용
+      </span>
+      <span className="flex items-center gap-1.5">
+        <span className="size-2.5 rounded-sm" style={{ backgroundColor: 'var(--chart-series-3)' }} />
+        절감
+      </span>
+    </div>
+  );
+}
+
 function SavingsArea({ incident }: { incident: IncidentResponse }) {
   if (incident.category !== 'FINOPS') return null;
 
@@ -143,6 +204,13 @@ function SavingsArea({ incident }: { incident: IncidentResponse }) {
     .map(({ estimate }) => Number(estimate.amount))
     .filter(Number.isFinite);
   const best = amounts.length > 0 ? Math.max(...amounts) : null;
+  const breakdowns = new Map(
+    estimates.flatMap(({ rec, estimate }) => {
+      const b = savingsBreakdown(estimate);
+      return b === null ? [] : [[rec.runbook_id, b] as const];
+    }),
+  );
+  const scale = Math.max(0, ...[...breakdowns.values()].map((b) => b.current));
 
   return (
     <Section title="절감 예상 (AI 추정)">
@@ -179,12 +247,16 @@ function SavingsArea({ incident }: { incident: IncidentResponse }) {
                       : `추정 불가 · ${estimate.reason === null ? '사유 없음' : SAVINGS_REASON_LABELS[estimate.reason]}`}
                   </span>
                 </span>
+                {breakdowns.has(rec.runbook_id) ? (
+                  <SavingsBar breakdown={breakdowns.get(rec.runbook_id)!} scale={scale} />
+                ) : null}
                 {estimate.basis !== null ? (
                   <span className="text-muted-foreground text-xs">{estimate.basis.explanation}</span>
                 ) : null}
               </li>
             ))}
           </ul>
+          {breakdowns.size > 0 ? <SavingsLegend /> : null}
           <p className="text-muted-foreground text-xs">
             모델 추정 단가 × 730시간(온디맨드·Linux 인스턴스 비용) — 실제 청구액이 아닙니다.
           </p>

@@ -3,8 +3,6 @@
 // 이 트리를 다시 그려 숫자가 따라온다.
 //
 // AI 조치 제안 카드(`action-proposal-card.tsx`)는 페이지가 `proposalSlot`으로 넘기고 이 격자가 자리를 준다.
-// 토폴로지의 외부 출발지 노드·공격 경로는 인시던트 목록 계약의 `threat_context`에서 온다(#362 · PR #374) —
-// 그래서 이 컴포넌트가 이미 들고 있는 `incidents`를 토폴로지 카드로 그대로 내려보낸다.
 //
 // ## 대시보드는 요약만 남긴다 (2026-09-28)
 //
@@ -13,7 +11,10 @@
 // 갔다 — 집계 3열·CPU 추이는 자산 관제(AST-001, `assets/asset-summary-panels.tsx`), 개방 SG 목록·추이는
 // 보안 관제(SEC-001, `security/security-summary-panels.tsx`). 한 화면 흐름 안에서 같은 수를 두 곳이
 // 말하면 관제자가 어느 쪽을 봐야 할지부터 정해야 한다. 여기 남는 것은 **셈(지표 띠 두 묶음) ·
-// 구성과 흐름(자산 분류 비율 · 자산 현황 추이 · 위협 판정 추이) · 조치(AI 제안) · 구조(토폴로지)** 넷이다.
+// 구성과 흐름(자산 분류 비율 · 자산 현황 추이 · 위협 판정 추이) · 조치(AI 제안)** 셋이다.
+//
+// **토폴로지도 제 화면으로 갔다(2026-09-30).** 자산 관제·보안 관제에 각각 토폴로지 탭이 있어, 대시보드
+// 아래 전폭 카드는 같은 그래프를 한 번 더 그리는 자리였다. 구조는 들여다보는 것이라 위 규칙을 따른다.
 //
 // ## 차트 3열 — 지금의 구성 | 자산 수의 흐름 | 위협의 흐름 (2026-09-29)
 //
@@ -39,29 +40,18 @@
 //   ┌ 자산 (3) ──────┬ 보안 (3) ──────┬ AI 조치 제안 ────┐
 //   │ 자산 분류 비율   │ 자산 현황 추이   │                  │
 //   └───────────────┴───────────────┴───────────────┘
-//   ┌ 자산 토폴로지 (전폭 — 격자 밖) ─────────────────────────┐
-//   │ 그래프 │ 인스턴스 목록 │ 트래픽 경로 밖                    │
-//   └──────────────────────────────────────────────┘
 //
 // **두 열은 윗선과 아랫선을 함께 맞춘다(2026-09-29).** AI 제안 카드는 왼쪽 열(띠 + 차트 두 장) 높이를
 // 그대로 받고, 건수가 많으면 카드 안 목록만 스크롤한다 — 카드가 길어져 왼쪽 열을 늘리지 않는다.
 //
-// **토폴로지만 격자 밖 전폭이다.** 그 카드는 안에서 다시 세 칸으로 갈라지는데(그래프 │ 인스턴스 │
-// 경로 밖), 9칸 열 안에 두면 목록 두 칸을 빼고 그래프에 900px도 남지 않아 5열 정렬이 눌린다.
-// 위 격자 **밖**에 두는 이유: 격자 안에서 12칸을 차지하게 하면 둘째 행에 묶여 오른쪽 AI 카드가 길 때
-// 그 높이만큼 빈 자리가 생긴다. 상태줄도 같은 이유로 격자 밖이다 — 왼쪽 열 안에 두면 띠가 그 높이만큼
-// 내려앉아 맞춰야 할 윗선 하나가 어긋난다.
+// **상태줄은 격자 밖이다** — 왼쪽 열 안에 두면 띠가 그 높이만큼 내려앉아 맞춰야 할 윗선 하나가 어긋난다.
 //
-// `xl` 미만에서는 한 열로 접힌다 — 띠 두 묶음, AI 제안, 토폴로지 순이다. 토폴로지 그래프의 열 전환
-// 기준은 뷰포트가 아니라 **그래프가 실제로 받은 폭**이다(`asset-graph.tsx`의 `@container/graph`) —
-// 자산 화면(AST-001)과 폭이 달라서다.
+// `xl` 미만에서는 한 열로 접힌다 — 띠 두 묶음, 차트, AI 제안 순이다.
 
 import Link from 'next/link';
 
 import { AssetCompositionChart } from '@/components/dashboard/asset-composition-chart';
-import { DashboardTopology } from '@/components/dashboard/dashboard-topology';
 import { InventoryTrendChart, ThreatTrendChart } from '@/components/dashboard/trend-charts';
-import { EmptyState } from '@/components/empty-state';
 import { MetricStrip, MetricTile } from '@/components/metric-strip';
 import { Panel } from '@/components/panel';
 import { Muted } from '@/components/panel-parts';
@@ -206,24 +196,6 @@ export function DashboardView({
           <div className="flex flex-1 flex-col gap-4 xl:relative">{proposalSlot}</div>
         </div>
       </div>
-
-      {/* 토폴로지 — **두 열 밖, 전폭이다**(파일 머리말). 안에는 `그래프 │ 인스턴스 │ 경로 밖` 세 칸이
-          나란히 서는데(dashboard-topology.tsx), 목록 두 칸이 400px쯤 가져가므로 9칸 열 안에서는 그래프에
-          900px도 남지 않는다. 전폭으로 내리면 그래프가 1400px을 받아 5열 정렬이 여유 있게 선다. */}
-      <Panel
-        title="자산 토폴로지"
-        description="외부 출발지 → 트래픽 경로(대상 그룹 → EC2 → EBS)와 보호 계층 — 노드를 누르면 자산 상세로 이동합니다"
-      >
-        {items.length === 0 ? (
-          <EmptyState message="수집된 자산이 없습니다." />
-        ) : (
-          <DashboardTopology
-            items={items}
-            uncollected={assets.uncollected}
-            incidents={incidents}
-          />
-        )}
-      </Panel>
     </div>
   );
 }

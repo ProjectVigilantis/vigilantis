@@ -514,6 +514,37 @@ class SgExposureBucket(NamedTuple):
 _BUCKET_ORIGIN = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
+def _latest_judged_runs(*, regions: Sequence[str], since: datetime, bucket_seconds: int):
+    """리전 × 시간 칸마다 **판정 행을 남긴 마지막 회차** 1건 — 축 2·4 의 공통 원천(2026-09-30).
+
+    칸 안의 회차를 모두 더하면 같은 리전을 스캔 주기보다 짧게 다시 수집했을 때(즉시 스캔 ·
+    재기동 직후 스캔) 건수가 회차 수만큼 부풀어 곡선이 튄다. 축 5(``asset_inventory_history``)와
+    같은 규칙으로 리전마다 마지막 회차만 남기고, 리전끼리는 호출부가 더한다. 판정 행이 없는
+    회차(실패)를 고르면 같은 칸의 앞선 판정까지 사라지므로 판정이 있는 회차 중에서 고른다.
+    """
+    run = models.CollectionRun
+    bucket = func.date_bin(timedelta(seconds=bucket_seconds), run.started_at, _BUCKET_ORIGIN)
+    has_judgement = (
+        select(models.RuleEvaluation.rule_evaluation_id)
+        .where(models.RuleEvaluation.collection_run_id == run.collection_run_id)
+        .exists()
+    )
+    return (
+        select(
+            run.collection_run_id,
+            bucket.label("observed_at"),
+            func.row_number()
+            .over(
+                partition_by=(run.region, bucket),
+                order_by=(run.started_at.desc(), run.collection_run_id.desc()),
+            )
+            .label("rn"),
+        )
+        .where(run.region.in_(regions), run.started_at >= since, has_judgement)
+        .subquery()
+    )
+
+
 def sg_exposure_history(
     db: Session,
     *,
@@ -530,7 +561,8 @@ def sg_exposure_history(
 
     **리전마다 회차가 따로 생기므로 시간 칸(``bucket_seconds``)으로 묶어 합산한다**(#231 의
     리전 격리 이후 한 사이클에 CollectionRun 이 리전 수만큼 생긴다). 묶지 않으면 2리전
-    환경에서 곡선이 리전별 건수 사이를 오가는 톱니가 된다. 칸 크기는 스캔 주기를 쓴다 —
+    환경에서 곡선이 리전별 건수 사이를 오가는 톱니가 된다. 같은 리전의 회차가 한 칸에 둘 들면
+    마지막 것만 센다(``_latest_judged_runs``). 칸 크기는 스캔 주기를 쓴다 —
     한 사이클의 리전 run 들은 수 초 안에 시작하므로 같은 칸에 떨어진다. 사이클이 칸 경계에
     걸치면 그 한 사이클만 두 점으로 갈린다(1리전에서는 일어나지 않는다).
 
@@ -540,9 +572,7 @@ def sg_exposure_history(
     if not regions:
         return []
 
-    bucket = func.date_bin(
-        timedelta(seconds=bucket_seconds), models.CollectionRun.started_at, _BUCKET_ORIGIN
-    ).label("observed_at")
+    runs = _latest_judged_runs(regions=regions, since=since, bucket_seconds=bucket_seconds)
     open_count = (
         func.count(models.RuleEvaluation.rule_evaluation_id)
         .filter(models.RuleEvaluation.verdict == Verdict.THREAT.value)
@@ -550,23 +580,20 @@ def sg_exposure_history(
     )
 
     stmt = (
-        select(bucket, open_count)
-        .select_from(models.CollectionRun)
+        select(runs.c.observed_at, open_count)
+        .select_from(runs)
         .join(
             models.RuleEvaluation,
-            models.RuleEvaluation.collection_run_id == models.CollectionRun.collection_run_id,
+            models.RuleEvaluation.collection_run_id == runs.c.collection_run_id,
         )
         .join(
             models.Asset,
             (models.Asset.asset_id == models.RuleEvaluation.asset_id)
             & (models.Asset.asset_type == AssetType.SG),
         )
-        .where(
-            models.CollectionRun.region.in_(regions),
-            models.CollectionRun.started_at >= since,
-        )
-        .group_by(bucket)
-        .order_by(bucket)
+        .where(runs.c.rn == 1)
+        .group_by(runs.c.observed_at)
+        .order_by(runs.c.observed_at)
     )
     return [SgExposureBucket(row.observed_at, int(row.open_count)) for row in db.execute(stmt)]
 
@@ -600,9 +627,7 @@ def asset_status_history(
     if not regions:
         return []
 
-    bucket = func.date_bin(
-        timedelta(seconds=bucket_seconds), models.CollectionRun.started_at, _BUCKET_ORIGIN
-    ).label("observed_at")
+    runs = _latest_judged_runs(regions=regions, since=since, bucket_seconds=bucket_seconds)
 
     def counted(verdict: Verdict):
         return func.count(models.RuleEvaluation.rule_evaluation_id).filter(
@@ -611,7 +636,7 @@ def asset_status_history(
 
     stmt = (
         select(
-            bucket,
+            runs.c.observed_at,
             counted(Verdict.THREAT).label("threat"),
             counted(Verdict.COST_CANDIDATE).label("cost_candidate"),
             counted(Verdict.UNUSED).label("unused"),
@@ -620,17 +645,14 @@ def asset_status_history(
             .filter(models.RuleEvaluation.verdict.is_(None))
             .label("undecided"),
         )
-        .select_from(models.CollectionRun)
+        .select_from(runs)
         .join(
             models.RuleEvaluation,
-            models.RuleEvaluation.collection_run_id == models.CollectionRun.collection_run_id,
+            models.RuleEvaluation.collection_run_id == runs.c.collection_run_id,
         )
-        .where(
-            models.CollectionRun.region.in_(regions),
-            models.CollectionRun.started_at >= since,
-        )
-        .group_by(bucket)
-        .order_by(bucket)
+        .where(runs.c.rn == 1)
+        .group_by(runs.c.observed_at)
+        .order_by(runs.c.observed_at)
     )
     return [
         AssetStatusBucket(
@@ -640,6 +662,55 @@ def asset_status_history(
             int(row.unused),
             int(row.skip),
             int(row.undecided),
+        )
+        for row in db.execute(stmt)
+    ]
+
+
+class ThreatEventBucket(NamedTuple):
+    observed_at: datetime
+    event_type: str
+    count: int
+
+
+def threat_event_history(
+    db: Session,
+    *,
+    regions: Sequence[str],
+    since: datetime,
+    bucket_seconds: int,
+) -> list[ThreatEventBucket]:
+    """시간 칸 × 유형별 위협 이벤트 **발생** 건수 — 시계열 축 6.
+
+    칸은 이벤트의 발생 시각(``occurred_at``)으로 나눈다 — 수집 시각으로 나누면 적체된 이벤트가
+    한 번에 들어온 칸에 몰려 실제로 없던 급증이 선다. 칸 기준점은 다른 축과 같아(``_BUCKET_ORIGIN``)
+    화면이 판정 축과 한 x축에 겹칠 수 있다.
+
+    리전은 대상 ARN 의 넷째 칸(``arn:aws:<svc>:<region>:...``)으로 거른다 — 이벤트 행에 리전 열이
+    없고, 관제 대상이 아닌 리전의 위협까지 세면 ``/assets`` 와 다른 범위를 말하게 된다.
+    이벤트가 없는 (칸, 유형) 행은 없다 — 이 축에서는 그것이 0건이다(축 docstring).
+    """
+    if not regions:
+        return []
+
+    event = models.ThreatEvent
+    bucket = func.date_bin(
+        timedelta(seconds=bucket_seconds), event.occurred_at, _BUCKET_ORIGIN
+    ).label("observed_at")
+    stmt = (
+        select(bucket, event.event_type, func.count(event.threat_event_id).label("count"))
+        .where(
+            func.split_part(event.target_arn, ":", 4).in_(regions),
+            event.occurred_at >= since,
+        )
+        .group_by(bucket, event.event_type)
+        .order_by(bucket, event.event_type)
+    )
+    return [
+        ThreatEventBucket(
+            row.observed_at,
+            getattr(row.event_type, "value", row.event_type),
+            int(row.count),
         )
         for row in db.execute(stmt)
     ]

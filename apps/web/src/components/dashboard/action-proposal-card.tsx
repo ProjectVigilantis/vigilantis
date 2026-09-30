@@ -80,7 +80,7 @@ export function ActionProposalCard({
       return <EmptyState message="승인을 기다리는 조치 제안이 없습니다." />;
     }
     return (
-      // 토폴로지 목록(`topology-picker.tsx`)과 같은 스크롤 — 넓은 화면에서는 카드가 받은 높이(왼쪽 열)를
+      // 목록 스크롤 — 넓은 화면에서는 카드가 받은 높이(왼쪽 열)를
       // 다 쓰고, 한 열로 접히면 고정 상한(`max-h-60`)으로 같은 일을 한다.
       <ul className="-mx-2 flex max-h-60 min-h-0 flex-col divide-y overflow-y-auto xl:max-h-none xl:flex-1">
         {rows.map((row) => (

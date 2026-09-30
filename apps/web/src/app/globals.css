@@ -145,4 +145,39 @@
   html {
     @apply font-sans;
   }
+
+  /* 스크롤바 — 브라우저 기본(굵은 회색 막대·화살표)이 무채색 UI 위에서 도드라져, 얇고 물러서는
+     막대로 통일한다. 색은 테마 토큰에서 파생해 라이트·다크가 따로 맞춰진다.
+     Chromium·Safari는 WebKit 의사 요소로, Firefox만 표준 속성으로 그린다. Chromium에 표준 속성
+     (`scrollbar-width`·`scrollbar-color`)을 주면 의사 요소가 무시되고 위아래 화살표 버튼이 남는다. */
+  html {
+    --scrollbar-thumb: color-mix(in oklch, var(--muted-foreground) 35%, transparent);
+    --scrollbar-thumb-hover: color-mix(in oklch, var(--muted-foreground) 60%, transparent);
+  }
+  @supports (-moz-appearance: none) {
+    html {
+      scrollbar-width: thin;
+      scrollbar-color: var(--scrollbar-thumb) transparent;
+    }
+  }
+  @supports not (-moz-appearance: none) {
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    ::-webkit-scrollbar-thumb {
+      border: 2px solid transparent;
+      border-radius: 9999px;
+      background: var(--scrollbar-thumb) padding-box;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: var(--scrollbar-thumb-hover) padding-box;
+    }
+    ::-webkit-scrollbar-corner {
+      background: transparent;
+    }
+  }
 }
