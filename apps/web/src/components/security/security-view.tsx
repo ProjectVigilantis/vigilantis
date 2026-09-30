@@ -101,7 +101,7 @@ export function SecurityView({
   incidentsError: unknown;
   /** 목록 API의 `subject_arn` 역조인(자산 관제와 같다). `null`은 조회 실패. */
   incidentsByArn: Record<string, IncidentListItem[]> | null;
-  /** CloudWatch 시계열 — 여기서는 `sg_exposure` 축과 상세 Drawer의 스파크라인이 쓴다. 실패면 null. */
+  /** CloudWatch 시계열 — 여기서는 `asset_status`(축 4)·`threat_events`(축 6)로 「전체 위협 추이」를, 상세 Drawer가 스파크라인을 그린다. 실패면 null. */
   metrics: MetricsTimeseriesResponse | null;
   /** `?asset=<arn>` 딥링크 — 그 자산의 상세를 연 채로 시작한다. 목록에 없으면 무시한다. */
   openArn?: string;

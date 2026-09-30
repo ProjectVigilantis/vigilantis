@@ -514,7 +514,7 @@ def _seed_threat_event(db, *, region: str, event_type: str, occurred_at: datetim
 
 
 def test_위협_이벤트는_발생_칸마다_유형별로_선다(client_pg, db, set_regions, no_cloudwatch):
-    """축 6 — 발생량이다. 이벤트가 없는 칸은 점이 없고(0건), 창·리전 밖은 세지 않는다."""
+    """축 6 — 발생량이다. 이벤트가 없는 칸은 점이 없고(0건), 창(시작·끝)·리전 밖은 세지 않는다."""
     set_regions(SEOUL, TOKYO)
     now = datetime.now(timezone.utc)
     t1 = (now - timedelta(hours=2)).replace(minute=1, second=0, microsecond=0)
@@ -526,6 +526,10 @@ def test_위협_이벤트는_발생_칸마다_유형별로_선다(client_pg, db,
     # 창 밖 · 관제 대상 밖 리전
     _seed_threat_event(db, region=SEOUL, event_type="OPEN_IP", occurred_at=now - timedelta(hours=100), key="e")
     _seed_threat_event(db, region="us-east-1", event_type="OPEN_IP", occurred_at=t2, key="f")
+    # 발생 시각이 미래인 이벤트(시계 어긋남 · 수동 주입) — x축을 지금 이후로 늘리지 않는다
+    _seed_threat_event(
+        db, region=SEOUL, event_type="SSH_BRUTE_FORCE", occurred_at=now + timedelta(hours=2), key="g"
+    )
     db.commit()
 
     axis = client_pg.get("/api/v1/metrics/timeseries").json()["threat_events"]

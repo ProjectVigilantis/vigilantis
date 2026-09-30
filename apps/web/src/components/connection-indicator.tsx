@@ -6,6 +6,8 @@
 // **이 칩이 말하는 것은 "관제 자산과 화면이 실시간으로 이어졌나"다(2026-09-30).** 소켓이 붙어도
 // 수집된 자산이 없으면(빈 계정 · 첫 수집 전) 화면에 흘러올 것이 없으므로 초록을 켜지 않고
 // `연결 안됨`으로 둔다. 초록은 소켓이 열렸고 **수집된 자산이 1건 이상**일 때뿐이다.
+// 봉투의 첫 응답 전에는 자산 유무를 모르므로 소켓 상태를 그대로 보이고(페이지를 열 때 회색으로
+// 깜빡이지 않게), 조회가 실패하면 "자산 없음"이 아니라 "자산 조회 실패"로 사유를 가른다.
 //
 // 표기는 옆 칩과 **같은 구조**다: `속성 │ 상태값 · 대상명`. 종전에는 값만 있었고 그 값에
 // 속성이 붙었다 말았다 해서(`실시간 연결됨` vs `연결 중…`) 무엇에 대한 상태인지가 상태마다
@@ -55,14 +57,22 @@ function socketUrl(): string | undefined {
 /** 소켓은 열렸지만 이어진 자산이 없다 — 초록을 켜지 않는다(파일 머리말). */
 const NO_ASSETS: View = { value: '연결 안됨', tone: 'idle' };
 
-export function ConnectionIndicator({
-  hasAssets,
-}: {
-  /** 수집된 자산이 1건 이상인가. 봉투를 아직 못 받았거나 조회가 실패했으면 false. */
-  hasAssets: boolean;
-}) {
+/**
+ * `GET /assets` 봉투로 본 자산 유무. `pending`은 첫 응답 전(모름), `failed`는 마지막 조회 실패,
+ * `none`은 조회는 됐고 0건, `present`는 1건 이상이다.
+ */
+export type AssetPresence = 'pending' | 'failed' | 'none' | 'present';
+
+/** 소켓이 열렸는데 초록을 켜지 않는 사유 — 툴팁이 소켓 주소 뒤에 붙인다. */
+const NOT_LINKED_REASON: Partial<Record<AssetPresence, string>> = {
+  none: '서버에는 붙었지만 수집된 자산이 없습니다',
+  failed: '서버에는 붙었지만 자산 조회에 실패했습니다',
+};
+
+export function ConnectionIndicator({ assets }: { assets: AssetPresence }) {
   const { connection, reconnect } = useRealtime();
-  const view = connection === 'open' && !hasAssets ? NO_ASSETS : PRESENTATION[connection];
+  const reason = connection === 'open' ? NOT_LINKED_REASON[assets] : undefined;
+  const view = reason !== undefined ? NO_ASSETS : PRESENTATION[connection];
   const url = socketUrl();
 
   return (
@@ -74,8 +84,8 @@ export function ConnectionIndicator({
       title={
         url === undefined
           ? 'NEXT_PUBLIC_API_BASE_URL이 소켓 주소로 성립하지 않습니다'
-          : connection === 'open' && !hasAssets
-            ? `${url} — 서버에는 붙었지만 수집된 자산이 없습니다`
+          : reason !== undefined
+            ? `${url} — ${reason}`
             : url
       }
     >

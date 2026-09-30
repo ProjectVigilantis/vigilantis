@@ -1,8 +1,8 @@
 'use client';
 
-// 시계열 차트 5종 — EC2별 CPU 추이(+저활성 임계선) · 네트워크 처리량 · 인터넷 개방 SG 건수 ·
-// 자산 수 추이 · 위협 판정 추이. 앞의 둘은 자산 관제(AST-001), 셋째는 보안 관제(SEC-001), 뒤의 둘은
-// 대시보드(DSH-001)가 쓴다.
+// 시계열 차트 5종 — EC2별 CPU 추이(+저활성 임계선) · 네트워크 처리량 · 자산 수 추이 · 위협 판정 추이 ·
+// 전체 위협 추이. 앞의 둘은 자산 관제(AST-001), 다음 둘은 대시보드(DSH-001), 마지막은 보안 관제(SEC-001)가
+// 쓴다.
 //
 // **두 축을 한 차트에 겹치지 않는다.** 단위(%와 건수)가 달라 y축이 둘이 되면 두 곡선의
 // 교차가 아무 뜻도 없으면서 관계처럼 읽힌다. 카드를 나눠 세운다.
@@ -37,7 +37,6 @@ import {
   INVENTORY_KEYS,
   inventoryChartState,
   networkChartState,
-  sgChartState,
   THREAT_EVENT_KINDS,
   threatActivityChartState,
   type ThreatActivityRow,
@@ -52,7 +51,6 @@ import type {
   AssetType,
   CpuAxis,
   NetworkAxis,
-  SgExposureAxis,
   ThreatEventAxis,
   ThreatEventKind,
 } from '@/types/api';
@@ -269,54 +267,6 @@ export function NetworkTrendChart({
   );
 }
 
-/** 축 2 — 인터넷 개방 SG 건수 추이. 조치가 먹히면 이 선이 내려간다. */
-export function SgExposureTrendChart({ axis }: { axis: SgExposureAxis }) {
-  const state = sgChartState(axis);
-  if (state.kind !== 'READY') return <Fallback state={state} empty="수집 회차가 아직 없습니다" />;
-
-  return (
-    <ChartFrame>
-      <LineChart data={state.data} margin={{ top: 8, right: 8, bottom: 0, left: -16 }}>
-        <CartesianGrid stroke={GRID_INK} strokeDasharray="3 3" vertical={false} />
-        <XAxis
-          dataKey="at"
-          type="number"
-          scale="time"
-          domain={['dataMin', 'dataMax']}
-          tickFormatter={formatTick}
-          stroke={AXIS_INK}
-          tick={{ fontSize: 11 }}
-          minTickGap={48}
-        />
-        {/* 건수는 정수다 — 소수 눈금이 서면 "1.5건"이 읽힌다. */}
-        <YAxis
-          allowDecimals={false}
-          domain={[0, (max: number) => Math.max(1, max)]}
-          stroke={AXIS_INK}
-          tick={{ fontSize: 11 }}
-          width={56}
-        />
-        <Tooltip
-          isAnimationActive={false}
-          contentStyle={TOOLTIP_STYLE}
-          labelFormatter={(at) => formatTick(Number(at))}
-          formatter={(value) => [`${value}건`, '인터넷 개방 SG']}
-        />
-        {/* 계열이 하나라 범례를 두지 않는다 — 카드 제목이 이미 그 이름이다. */}
-        <Line
-          type="stepAfter"
-          dataKey="open"
-          stroke={seriesColor(0)}
-          strokeWidth={2}
-          dot={false}
-          activeDot={{ r: 4 }}
-          isAnimationActive={false}
-        />
-      </LineChart>
-    </ChartFrame>
-  );
-}
-
 /**
  * 축 5 — 자산 현황 추이(2026-09-29). **"내 자산이 늘었나 줄었나"** 를 본다 — 판정과 무관하게 전 유형의
  * 자산이 회차마다 몇 건 있었나. 옆 도넛(`자산 분류 비율`)과 같은 조각·색으로 쌓아(`INVENTORY_KEYS` ·
@@ -513,9 +463,13 @@ const THREAT_EVENT_LABEL: Record<ThreatEventKind, string> = {
 function ThreatActivityTooltip({
   active,
   payload,
+  verdictUnavailable,
+  eventsUnavailable,
 }: {
   active?: boolean;
   payload?: ReadonlyArray<{ payload?: ThreatActivityRow }>;
+  verdictUnavailable: string | null;
+  eventsUnavailable: string | null;
 }) {
   const row = payload?.[0]?.payload;
   if (!active || row === undefined) return null;
@@ -531,10 +485,20 @@ function ThreatActivityTooltip({
   return (
     <div style={TOOLTIP_STYLE} className="flex w-max flex-col gap-1 px-3 py-2 whitespace-nowrap">
       <span className="text-muted-foreground">{formatTick(row.at)}</span>
-      {line('var(--danger)', '위협 판정 자산', row.threat === undefined ? '회차 없음' : `${row.threat}건`)}
-      {THREAT_EVENT_KINDS.map((k) => line(THREAT_EVENT_COLOR[k], THREAT_EVENT_LABEL[k], `${row[k]}건`))}
+      {line('var(--danger)', '위협 판정 자산', verdictValue(row, verdictUnavailable))}
+      {THREAT_EVENT_KINDS.map((k) =>
+        line(THREAT_EVENT_COLOR[k], THREAT_EVENT_LABEL[k], eventsUnavailable !== null ? '조회 실패' : `${row[k] ?? 0}건`),
+      )}
     </div>
   );
+}
+
+/** 조회 실패 · 그 칸의 회차 · 직전 회차(선이 이어 그린 값) · 회차 없음을 가른다. */
+function verdictValue(row: ThreatActivityRow, verdictUnavailable: string | null): string {
+  if (verdictUnavailable !== null) return '조회 실패';
+  if (row.threat !== undefined) return `${row.threat}건`;
+  if (row.carriedThreat !== undefined) return `${row.carriedThreat}건 (직전 회차)`;
+  return '회차 없음';
 }
 
 export function ThreatActivityChart({
@@ -570,7 +534,16 @@ export function ThreatActivityChart({
             tick={{ fontSize: 11 }}
             width={56}
           />
-          <Tooltip content={(props) => <ThreatActivityTooltip {...props} />} isAnimationActive={false} />
+          <Tooltip
+            content={(props) => (
+              <ThreatActivityTooltip
+                {...props}
+                verdictUnavailable={verdictUnavailable}
+                eventsUnavailable={eventsUnavailable}
+              />
+            )}
+            isAnimationActive={false}
+          />
           <Legend
             itemSorter={null}
             formatter={(key) => (

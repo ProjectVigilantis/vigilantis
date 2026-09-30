@@ -5,7 +5,7 @@
 import Link from 'next/link';
 
 import { CollectionIndicator, useAssetsEnvelope } from '@/components/collection-indicator';
-import { ConnectionIndicator } from '@/components/connection-indicator';
+import { ConnectionIndicator, type AssetPresence } from '@/components/connection-indicator';
 import { usePathname } from 'next/navigation';
 
 import { cn } from '@/lib/utils';
@@ -30,6 +30,13 @@ const NAV = [
 export function Gnb() {
   const pathname = usePathname();
   const assets = useAssetsEnvelope();
+  const presence: AssetPresence = assets.failed
+    ? 'failed'
+    : assets.env === null
+      ? 'pending'
+      : assets.env.items.length > 0
+        ? 'present'
+        : 'none';
 
   return (
     <header className="flex h-14 shrink-0 items-center gap-6 border-b px-4">
@@ -69,7 +76,7 @@ export function Gnb() {
           빼면 끊겼을 때 [재연결] 버튼(§4.8 4)이 사라져 둘 다 둔다(PR #299 리뷰). */}
       <div className="ml-auto flex shrink-0 items-center gap-4">
         <CollectionIndicator env={assets.env} failed={assets.failed} />
-        <ConnectionIndicator hasAssets={!assets.failed && (assets.env?.items.length ?? 0) > 0} />
+        <ConnectionIndicator assets={presence} />
       </div>
     </header>
   );

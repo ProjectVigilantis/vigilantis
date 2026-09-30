@@ -85,7 +85,7 @@ def get_metrics_timeseries(
                                         bucket_seconds=settings.SCAN_INTERVAL_SECONDS),
         asset_inventory=_asset_inventory_axis(db, regions=regions, since=window_start,
                                               bucket_seconds=settings.SCAN_INTERVAL_SECONDS),
-        threat_events=_threat_event_axis(db, regions=regions, since=window_start,
+        threat_events=_threat_event_axis(db, regions=regions, since=window_start, until=now,
                                          bucket_seconds=settings.SCAN_INTERVAL_SECONDS),
     )
 
@@ -239,12 +239,12 @@ def _asset_inventory_axis(
 
 
 def _threat_event_axis(
-    db: Session, *, regions: list[str], since: datetime, bucket_seconds: int
+    db: Session, *, regions: list[str], since: datetime, until: datetime, bucket_seconds: int
 ) -> ThreatEventAxis:
     """축 6. DB 만 본다 — 판정 축(4)과 한 차트에 겹치므로 같은 칸 크기를 쓴다."""
     try:
         buckets = assets_repo.threat_event_history(
-            db, regions=regions, since=since, bucket_seconds=bucket_seconds
+            db, regions=regions, since=since, until=until, bucket_seconds=bucket_seconds
         )
     except Exception as exc:
         reason = _failure_reason(exc)

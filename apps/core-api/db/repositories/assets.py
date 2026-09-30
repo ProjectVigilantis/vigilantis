@@ -678,6 +678,7 @@ def threat_event_history(
     *,
     regions: Sequence[str],
     since: datetime,
+    until: datetime,
     bucket_seconds: int,
 ) -> list[ThreatEventBucket]:
     """시간 칸 × 유형별 위협 이벤트 **발생** 건수 — 시계열 축 6.
@@ -688,6 +689,12 @@ def threat_event_history(
 
     리전은 대상 ARN 의 넷째 칸(``arn:aws:<svc>:<region>:...``)으로 거른다 — 이벤트 행에 리전 열이
     없고, 관제 대상이 아닌 리전의 위협까지 세면 ``/assets`` 와 다른 범위를 말하게 된다.
+    **대상이 ARN 형식이 아니면(``i-...`` 같은 리소스 ID) 리전 칸이 비어 세지 않는다** — 입력 계약은
+    길이만 검사하므로, 이벤트를 만드는 경로가 전체 ARN 을 싣는 것이 전제다.
+
+    창의 끝(``until``)도 거른다 — 발생 시각은 이벤트 원천이 적은 값이라 시계가 어긋나거나 수동으로
+    넣은 미래 시각이 오면, 거르지 않을 때 x축이 지금 이후로 늘어난다. 시작(``since``)과 같은 ``now``
+    에서 나온 값을 받는다.
     이벤트가 없는 (칸, 유형) 행은 없다 — 이 축에서는 그것이 0건이다(축 docstring).
     """
     if not regions:
@@ -702,6 +709,7 @@ def threat_event_history(
         .where(
             func.split_part(event.target_arn, ":", 4).in_(regions),
             event.occurred_at >= since,
+            event.occurred_at <= until,
         )
         .group_by(bucket, event.event_type)
         .order_by(bucket, event.event_type)
