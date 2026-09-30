@@ -684,14 +684,25 @@ def asset_inventory_history(
     칸으로 묶어 합산한다. 한 칸에 **같은 리전의 회차가 둘** 들면(스캔 주기보다 짧게 재수집)
     합산하면 자산이 두 배로 보이므로, 리전마다 그 칸의 **마지막 회차** 하나만 센다.
 
+    "마지막 회차"는 **스냅샷을 남긴 회차 중에서** 고른다. 실패(``FAILED``)·모르는 실패 라벨로
+    스냅샷을 건너뛴 회차가 칸의 마지막에 오면, 그 회차를 고른 뒤 조인해서는 같은 칸의 앞선
+    관측값까지 사라진다(PR #411 리뷰).
+
     그 칸에서 한 유형을 본 회차가 없으면 그 (칸, 유형) 행이 없다 — 0건과 구분된다.
     """
     if not regions:
         return []
 
     run = models.CollectionRun
+    counts = models.AssetInventoryCount
     bucket = func.date_bin(timedelta(seconds=bucket_seconds), run.started_at, _BUCKET_ORIGIN)
-    # 리전 × 칸마다 가장 늦게 시작한 회차 1건.
+    # 리전 × 칸마다 스냅샷을 남긴 회차 중 가장 늦게 시작한 1건. 순위를 매긴 뒤 조인하므로
+    # 회차당 행이 유형 수만큼 불어나지 않는다.
+    has_snapshot = (
+        select(counts.collection_run_id)
+        .where(counts.collection_run_id == run.collection_run_id)
+        .exists()
+    )
     ranked = (
         select(
             run.collection_run_id,
@@ -703,10 +714,9 @@ def asset_inventory_history(
             )
             .label("rn"),
         )
-        .where(run.region.in_(regions), run.started_at >= since)
+        .where(run.region.in_(regions), run.started_at >= since, has_snapshot)
         .subquery()
     )
-    counts = models.AssetInventoryCount
     stmt = (
         select(ranked.c.observed_at, counts.asset_type, func.sum(counts.count).label("count"))
         .select_from(ranked)

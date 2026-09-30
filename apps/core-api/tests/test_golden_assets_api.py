@@ -71,6 +71,20 @@ def test_golden_load_has_no_dangling_or_mismatched_arns(loaded, db):
     assert dangling == [], "\n".join(str(d) for d in dangling)
 
 
+def test_golden_load_leaves_no_inventory_snapshot(loaded, db):
+    """골든 적재는 유형별 자산 수 스냅샷(시계열 축 5의 원천)을 남기지 않는다. (PR #411 리뷰)
+
+    적재는 골든 파일마다 회차를 따로 열어 리전의 **일부**만 넘긴다. 스냅샷이 남으면 마지막
+    파일의 건수가 리전 전체로 그려지고, 뒤이은 실수집이 자산이 늘어난 것처럼 보인다.
+    """
+    from sqlalchemy import func, select
+
+    from db import models
+
+    assert loaded["runs"] > 1  # 파일마다 회차 — 이 경계가 문제되는 전제
+    assert db.scalar(select(func.count()).select_from(models.AssetInventoryCount)) == 0
+
+
 def test_golden_inventory_reaches_the_assets_api(client_pg, loaded, golden):
     """골든이 적재되면 자산 목록이 mock 없이 채워진다 — 화면 1단계의 전제.
 
