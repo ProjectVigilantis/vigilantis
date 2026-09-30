@@ -16,27 +16,49 @@
 //
 // 리전·낭비 후보 필터는 띠에 반영하지 않는다 — 띠는 "이 계정에 무엇이 있나"를 말하는 자리이고,
 // 거기까지 필터를 먹이면 분모가 흔들려 두 수집 회차를 견줄 수 없다.
+//
+// ## 띠 아래 요약 2행 (2026-09-28 대시보드에서 이전)
+//
+// 헬스 스코어·판정 현황은 종전에 메인 대시보드(DSH-001)의 집계 3열이었다. 대시보드는 요약(지표 띠)만
+// 남기고 **자산을 들여다보는 것**은 전부 이 화면으로 모았다(`asset-summary-panels.tsx`). 두 패널도
+// 띠와 같은 이유로 **필터를 따르지 않는다** — 분모(EC2 전량 · 판정 대상 전량)가 흔들리면 임계선
+// 아래 몇 대인지, 위협이 몇 건인지를 회차끼리 견줄 수 없다. 추이 카드만 리전·낭비 후보를 따른다(아래).
+//
+// ## 띠는 스크롤을 따라온다 · 인시던트 탭 (2026-09-28)
+//
+// 띠는 `sticky`다 — 목록이 길어 아래로 내려가도 "이 계정에 무엇이 있나"와 유형 필터(타일 클릭)가
+// 손에 남는다. 배경을 본문 여백(`main`의 `p-6`)까지 넓혀야 밑을 지나는 카드가 띠 옆으로 비치지 않는다.
+//
+// 구 자산 인시던트 목록(INC-004 `/asset-incidents`)은 이 화면의 세 번째 탭 `인시던트`가 됐다
+// (`incidents/incidents-view.tsx`). 자원과 그 자원의 진단이 한 화면에 있어야 **띠의 타일·필터 하나로
+// 둘을 같이 좁힐 수 있다** — 인시던트는 `subject_arn`으로 자산에 걸리므로 유형·리전·낭비 후보 필터가
+// 고른 자산 집합(`focusedArns`)이 그 탭에도 그대로 걸린다. 옛 경로는 이 탭으로 redirect한다.
 
 import { useMemo, useState } from 'react';
 
 import { AssetCard } from '@/components/assets/asset-card';
 import { AssetGraph } from '@/components/assets/asset-graph';
 import { AssetDetail } from '@/components/assets/asset-detail';
+import { HealthScorePanel, VerdictPanel } from '@/components/assets/asset-summary-panels';
 import { SavingsCard } from '@/components/assets/savings-card';
 import { CpuTrendChart, NetworkTrendChart } from '@/components/dashboard/trend-charts';
 import { EmptyState } from '@/components/empty-state';
+import { ErrorState } from '@/components/error-state';
 import { FilterSelect } from '@/components/filter-select';
+import { FilterToggle } from '@/components/filter-toggle';
+import { IncidentsView } from '@/components/incidents/incidents-view';
 import { MetricStrip, MetricTile } from '@/components/metric-strip';
 import { Panel } from '@/components/panel';
+import { Muted } from '@/components/panel-parts';
 import { isJudgedAsset } from '@/lib/asset-filter';
 import { StatusBadge } from '@/components/status-badge';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { inventoryCounts, IDLE_CPU_AVG } from '@/lib/dashboard';
 import { ASSET_TYPE_LABELS } from '@/lib/enum-labels';
+import type { IncidentPreset } from '@/lib/incident-filter';
 import type { SavingsSummary } from '@/lib/savings';
-import { cn, formatKst } from '@/lib/utils';
+import { formatKst } from '@/lib/utils';
 import type {
   AssetItem,
   AssetsResponse,
@@ -51,13 +73,21 @@ const ALL = '전체';
 
 export function AssetsView({
   data,
+  incidents,
+  incidentsError,
   incidentsByArn,
   metrics,
   savings,
   savingsFailed,
   openArn,
+  initialTab,
+  initialPreset,
 }: {
   data: AssetsResponse;
+  /** 인시던트 목록 전량 — `인시던트` 탭이 FINOPS만 골라 쓴다. `null`은 조회 실패. */
+  incidents: IncidentListItem[] | null;
+  /** 조회 실패의 오류 원본 — 인시던트 탭이 CMN-002 인라인으로 그린다. 성공이면 null. */
+  incidentsError: unknown;
   /**
    * 인시던트는 자산 계약에 없다 — 목록 API의 `subject_arn` 역조인 결과다(§4.2·§4.3).
    * `null`은 **조회 실패**다. 0건과 구분해서 화면에 그대로 전달한다.
@@ -74,6 +104,10 @@ export function AssetsView({
   savingsFailed: number;
   /** INC-002에서 넘어온 딥링크 대상 ARN(§4.5 액션). 목록에 없으면 무시한다. */
   openArn?: string;
+  /** URL `?tab=` — 인시던트 탭 딥링크(구 `/asset-incidents` redirect). 모르는 값은 목록이다. */
+  initialTab?: string;
+  /** URL `?preset=` — 인시던트 탭의 첫 프리셋. */
+  initialPreset?: IncidentPreset;
 }) {
   const [assetType, setAssetType] = useState<string>(ALL);
   // AST-002는 이 목록이 이미 받은 단건을 그대로 넘겨 연다 — 신규 페치 없음(§4.3).
@@ -85,8 +119,16 @@ export function AssetsView({
   const [region, setRegion] = useState<string>(ALL);
   const [wasteOnly, setWasteOnly] = useState(false);
   // 탭을 상태로 쥔다 — 토폴로지 전용 유형(NACL 등)을 띠에서 눌렀을 때 빈 목록에 세워 두지 않고
-  // 그 자산이 실제로 있는 토폴로지로 넘겨야 한다.
-  const [tab, setTab] = useState('list');
+  // 그 자산이 실제로 있는 토폴로지로 넘겨야 한다. 첫 탭만 URL에서 받는다(딥링크).
+  const [tab, setTab] = useState(
+    initialTab === 'topology' || initialTab === 'incidents' ? initialTab : 'list',
+  );
+
+  // 인시던트 탭의 몫 — 이 화면은 자산 인시던트(FINOPS)만 담는다. 보안(SECOPS)은 보안 관제의 탭이다.
+  const finopsIncidents = useMemo(
+    () => (incidents === null ? null : incidents.filter((i) => i.category === 'FINOPS')),
+    [incidents],
+  );
 
   /**
    * v1.6 팀 회의 결정 — 목록 뷰에서 **판정 대상이 아닌 자산을 뺀다**(§4.2).
@@ -218,7 +260,12 @@ export function AssetsView({
 
   return (
     <Tabs value={tab} onValueChange={setTab} className="gap-4">
-      {/* 지표 띠 — 화면 맨 위. 전체 + 유형 7종이라 8칸이고, 2 → 4 → 8열로 접힌다(빈 칸이 없다). */}
+      {/* 화면 이름 + 지표 띠 — 한 덩이로 **스크롤을 따라온다**(파일 머리말). 이름은 페이지가 아니라
+          여기 있다: 띠만 따라오면 어느 화면의 띠인지가 스크롤과 함께 사라진다. 음수 상단 여백은 본문
+          여백(`p-6`)을 되돌려 안 붙었을 때의 자리가 종전과 같게 한다. 띠는 전체 + 유형 7종이라 8칸이고,
+          2 → 4 → 8열로 접힌다(빈 칸이 없다). z-index는 상세 Drawer(z-50)보다 낮게 둔다. */}
+      <div className="bg-background sticky top-0 z-20 -mx-6 -mt-6 px-6 pt-6 pb-3">
+      <h1 className="mb-3 text-lg font-semibold">자산 관제</h1>
       <MetricStrip className="sm:grid-cols-4 xl:grid-cols-8">
         <MetricTile
           label="전체 자산"
@@ -248,12 +295,26 @@ export function AssetsView({
           />
         ))}
       </MetricStrip>
+      </div>
 
-      {/* 추이·비용 3열 — 띠(지금 몇 건)와 목록(무엇이) 사이에서 **그 수가 어디서 왔나**를 말한다.
-          CPU·네트워크는 같은 CloudWatch 원계열이지만 단위가 %와 B/s라 한 격자에 겹치지 않는다.
-          셋째 칸이 비용인 이유: 앞의 두 칸이 "이 자산이 한가한가"를 보이고, 그 답이 예라면
-          다음 질문이 "그래서 얼마를 아끼나"이기 때문이다. */}
+      {/* 상태 3열 — 띠(지금 몇 건)와 목록(무엇이) 사이에서 **지금 어떤 상태인가**를 말한다.
+          순서가 질문 순서다: 이 EC2가 한가한가(헬스 스코어) → 규칙이 뭐라 했나(판정 현황) →
+          그래서 얼마를 아끼나(절감 예상). 셋 다 현재 회차의 값이라 한 줄에 선다. */}
       <div className="grid gap-4 lg:grid-cols-3">
+        <HealthScorePanel items={data.items} />
+        <VerdictPanel items={data.items} />
+        <Panel
+          title="절감 예상 (AI 추정)"
+          description="다운사이징 후보의 월 절감 예상액 — 모델 추정 단가 × 730시간이며 실제 청구액이 아닙니다"
+        >
+          <SavingsCard summary={savings} failed={savingsFailed} onSelect={openAsset} />
+        </Panel>
+      </div>
+
+      {/* 추이 2열 — 위 상태가 **어디서 왔나**를 시간 축으로 말한다. 헬스 스코어가 CPU 14일 평균이라
+          그 원계열이 바로 아래 온다. CPU·네트워크는 같은 CloudWatch 원계열이지만 단위가 %와 B/s라
+          한 격자에 겹치지 않는다. */}
+      <div className="grid gap-4 lg:grid-cols-2">
         <Panel
           title="EC2 CPU 추이"
           description={`CloudWatch 원계열 — 파선(저활성 임계 ${
@@ -277,19 +338,13 @@ export function AssetsView({
             <NetworkTrendChart axis={metrics.network} arns={chartArns} />
           )}
         </Panel>
-
-        <Panel
-          title="절감 예상 (AI 추정)"
-          description="다운사이징 후보의 월 절감 예상액 — 모델 추정 단가 × 730시간이며 실제 청구액이 아닙니다"
-        >
-          <SavingsCard summary={savings} failed={savingsFailed} onSelect={openAsset} />
-        </Panel>
       </div>
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <TabsList>
           <TabsTrigger value="list">목록</TabsTrigger>
           <TabsTrigger value="topology">토폴로지</TabsTrigger>
+          <TabsTrigger value="incidents">인시던트</TabsTrigger>
         </TabsList>
 
         <div className="flex flex-wrap items-center gap-3">
@@ -300,7 +355,7 @@ export function AssetsView({
             options={[{ value: ALL, label: ALL }, ...regions.map((r) => ({ value: r, label: r }))]}
             onChange={setRegion}
           />
-          <Toggle checked={wasteOnly} onChange={setWasteOnly} label="낭비 후보만" />
+          <FilterToggle checked={wasteOnly} onChange={setWasteOnly} label="낭비 후보만" />
         </div>
       </div>
 
@@ -325,12 +380,15 @@ export function AssetsView({
               <span>판정 비대상 {supportCount}건 제외 (NACL·ASG·시작 템플릿·대상 그룹 · 토폴로지에는 남는다)</span>
             ) : null}
           </>
-        ) : (
+        ) : tab === 'topology' ? (
           <span aria-live="polite">
             {focusedArns === null
               ? `${data.items.length}건`
               : `초점 ${focusedArns.size} / ${data.items.length}건`}
           </span>
+        ) : (
+          // 건수는 탭 안의 목록이 프리셋 기준으로 센다 — 여기서는 필터가 걸린다는 사실만 말한다.
+          <span>자산 인시던트(FinOps) — 위 유형·리전·낭비 후보 필터가 이 탭에도 걸립니다</span>
         )}
       </div>
 
@@ -386,6 +444,22 @@ export function AssetsView({
         />
       </TabsContent>
 
+      <TabsContent value="incidents">
+        {/* 조회 실패는 대기 0건이 아니라 오류다 — 인라인으로 강제한다(주변 화면이 살아 있다). */}
+        {finopsIncidents === null ? (
+          <ErrorState error={incidentsError} variant="inline" />
+        ) : (
+          <IncidentsView
+            items={finopsIncidents}
+            assets={data.items}
+            initialPreset={initialPreset}
+            // FINOPS는 `response_mode`가 없어 선제차단 프리셋이 항상 0건이다.
+            showPreemptive={false}
+            subjectArns={focusedArns}
+          />
+        )}
+      </TabsContent>
+
       <AssetDetail
         asset={selected}
         incidents={
@@ -396,35 +470,5 @@ export function AssetsView({
         onOpenChange={setDetailOpen}
       />
     </Tabs>
-  );
-}
-
-/** 카드 안에서 값 대신 쓰는 한 줄. 대시보드의 같은 자리와 무게를 맞춘다. */
-function Muted({ children }: { children: React.ReactNode }) {
-  return <p className="text-muted-foreground py-4 text-center text-sm">{children}</p>;
-}
-
-function Toggle({
-  checked,
-  onChange,
-  label,
-}: {
-  checked: boolean;
-  onChange: (v: boolean) => void;
-  label: string;
-}) {
-  return (
-    <label className="flex cursor-pointer items-center gap-1.5 text-sm">
-      <input
-        type="checkbox"
-        checked={checked}
-        onChange={(e) => onChange(e.target.checked)}
-        aria-label={label}
-        className="accent-primary size-4"
-      />
-      <Badge variant="outline" className={cn(checked && 'border-ring text-foreground')}>
-        {label}
-      </Badge>
-    </label>
   );
 }

@@ -4,6 +4,7 @@ import { AssetsView } from '@/components/assets/assets-view';
 import { ErrorState } from '@/components/error-state';
 import { getAssets, getIncident, getIncidents, getMetricsTimeseries } from '@/lib/api/client';
 import { WASTE_VERDICTS } from '@/lib/dashboard';
+import { parsePreset } from '@/lib/incident-filter';
 import { savingsSummary } from '@/lib/savings';
 import type { AssetItem, IncidentListItem, IncidentResponse } from '@/types/api';
 
@@ -38,11 +39,16 @@ function savingsTargets(
  * 합치면 관제 화면이 "연결된 인시던트 없음"으로 조회 실패를 덮어버린다(PR #137 리뷰).
  *
  * `?asset=<arn>`은 INC-002 대상 자산에서 넘어오는 딥링크다(§4.5 액션). AST-002는 Drawer라
- * 자체 URL이 없어, 목록 화면이 그 항목을 고른 상태로 열어 준다.
+ * 자체 URL이 없어, 목록 화면이 그 항목을 고른 상태로 열어 준다. `?tab=incidents`·`?preset=`은
+ * 구 자산 인시던트 목록(`/asset-incidents`)에서 redirect돼 오는 딥링크다(2026-09-28).
  */
 export default async function AssetsPage({ searchParams }: PageProps<'/assets'>) {
-  const { asset } = await searchParams;
-  const incidentsPromise = getIncidents().catch(() => null);
+  const { asset, tab, preset } = await searchParams;
+  // 오류를 버리지 않고 들고 간다 — 인시던트 탭이 그것을 **대기 0건이 아니라 오류로** 그려야 한다.
+  const incidentsPromise = getIncidents().then(
+    (res) => ({ items: res.items, error: null as unknown }),
+    (error: unknown) => ({ items: null, error }),
+  );
   // 시계열 실패는 화면을 죽이지 않는다 — 추이는 현재 상태를 읽는 데 필요한 것이 아니라 그
   // 옆에 붙는 맥락이다(대시보드와 같은 규칙). 자산 조회와 나란히 시작해 CloudWatch 왕복이
   // 첫 화면을 늦추지 않게 한다.
@@ -59,12 +65,13 @@ export default async function AssetsPage({ searchParams }: PageProps<'/assets'>)
     // 잡지 않고 던지면 레이아웃(GNB)째 전역 오류 셸로 넘어가 다른 화면으로 빠져나갈 길이 없어진다.
     return <ErrorState error={error} />;
   }
-  const incidents = await incidentsPromise;
+  const listed = await incidentsPromise;
+  const incidents = listed.items;
 
   let incidentsByArn: Record<string, IncidentListItem[]> | null = null;
   if (incidents !== null) {
     incidentsByArn = {};
-    for (const incident of incidents.items) {
+    for (const incident of incidents) {
       (incidentsByArn[incident.subject_arn] ??= []).push(incident);
     }
   }
@@ -76,7 +83,7 @@ export default async function AssetsPage({ searchParams }: PageProps<'/assets'>)
   let savingsFailed = 0;
   if (incidents !== null) {
     const settled = await Promise.all(
-      savingsTargets(incidents.items, assets.items).map((i) =>
+      savingsTargets(incidents, assets.items).map((i) =>
         getIncident(i.incident_id).then(
           (res) => res,
           () => null,
@@ -91,16 +98,20 @@ export default async function AssetsPage({ searchParams }: PageProps<'/assets'>)
 
   const metrics = await metricsPromise;
 
+  // 화면 이름(h1)은 뷰 안에 있다 — 지표 띠와 한 덩이로 스크롤을 따라와야 해서다(assets-view.tsx).
   return (
     <>
-      <h1 className="mb-4 text-lg font-semibold">자산 관제</h1>
       <AssetsView
         data={assets}
+        incidents={incidents}
+        incidentsError={listed.error}
         incidentsByArn={incidentsByArn}
         metrics={metrics}
         savings={savingsSummary(details, assets.items)}
         savingsFailed={savingsFailed}
         openArn={typeof asset === 'string' ? asset : undefined}
+        initialTab={typeof tab === 'string' ? tab : undefined}
+        initialPreset={parsePreset(preset)}
       />
     </>
   );

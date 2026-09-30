@@ -1,9 +1,21 @@
 'use client';
 
 // 인시던트 목록 본체 — 프리셋·상태 필터·카드 그리드를 담습니다(화면설계서 v1.6 §4.4).
-// INC-001 보안과 INC-004 자산이 이 컴포넌트를 공유한다 — 다른 건 `category`와 선제차단 프리셋뿐이다.
+//
+// 2026-09-28부터 독립 화면(INC-001 `/incidents` · INC-004 `/asset-incidents`)이 아니라 **자산 관제(AST-001)·
+// 보안 관제(SEC-001)의 `인시던트` 탭**이다. 두 탭이 이 컴포넌트를 공유한다 — 다른 건 담긴 `category`와
+// 선제차단 프리셋뿐이다. 옛 경로는 그 탭으로 redirect한다(app/incidents/page.tsx).
+//
+// **프리셋은 클라이언트 상태다.** 종전에는 `승인 대기`·`히스토리`가 서버 필터(`?status=`)를 부르는
+// 링크였는데, 이제 이 목록이 사는 화면이 인시던트 전량을 이미 들고 있다(상태 패널·토폴로지 공격 경로·
+// 상세 Drawer가 같은 응답을 쓴다) — 프리셋마다 다시 부르면 같은 화면이 같은 목록을 두 번 받는다.
+// `byPreset`이 네 프리셋을 전부 클라이언트에서 거르므로 결과는 같고, 대기·선제차단 건수 배지도 항상
+// 셀 수 있다. 첫 프리셋만 URL(`?preset=`)에서 받는다 — `승인 대기`로 바로 들어오는 딥링크다.
+//
+// **화면 위 지표 띠·필터가 이 탭에도 걸린다**(`subjectArns`). 인시던트는 `subject_arn`으로 자산에
+// 걸리므로, 자산 화면에서 `EC2` 타일을 누른 채 이 탭을 열면 EC2에 걸린 건만 남는다 — 자원과 그 자원의
+// 진단을 한 화면에 둔 이유가 그것이다.
 
-import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useMemo, useRef, useState } from 'react';
 
@@ -14,72 +26,75 @@ import { FilterSelect } from '@/components/filter-select';
 import { IncidentCard } from '@/components/incidents/incident-card';
 import { Badge } from '@/components/ui/badge';
 import { proposalRequest, type ActionRequest } from '@/lib/action-request';
-import { getAssets, getIncident, newIdempotencyKey } from '@/lib/api/client';
+import { getIncident, newIdempotencyKey } from '@/lib/api/client';
 import { INCIDENT_STATUS_LABELS, RISK_LEVEL_LABELS } from '@/lib/enum-labels';
 import {
   ALL,
   byPreset,
   clampOption,
-  PRESET_SLUG,
   riskOptionsOf,
   statusOptionsOf,
   visibleIncidents,
   type IncidentPreset,
 } from '@/lib/incident-filter';
 import { cn } from '@/lib/utils';
-import type { IncidentListItem } from '@/types/api';
+import type { AssetItem, IncidentListItem } from '@/types/api';
 
-/**
- * 프리셋은 **필터만 다르고 정렬은 같다**(§4.4). 링크로 두는 이유는 `승인 대기`·`히스토리`가
- * 서버 필터(`?status=`)로 부르는 프리셋이기 때문이다 — 클라이언트에서만 걸러내면 계약이 정한
- * 서버 필터를 쓰지 않는 화면이 된다. `선제차단`은 `response_mode`에 서버 필터가 없어
- * 클라이언트가 거르지만(§4.4), 링크 형태를 갈라 두면 어느 것이 주소로 남는지 알 수 없어진다.
- */
+/** 프리셋 토글 — **필터만 다르고 정렬은 같다**(§4.4). 켠 것을 다시 누르면 기본(`ACTIVE`)으로 돌아온다. */
 function Preset({
-  href,
   active,
+  onClick,
   children,
 }: {
-  href: string;
   active: boolean;
+  onClick: () => void;
   children: React.ReactNode;
 }) {
   return (
-    <Link
-      href={href}
-      aria-current={active ? 'page' : undefined}
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
       className={cn(
-        'flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors',
+        'flex cursor-pointer items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors',
         active ? 'bg-muted text-foreground font-medium' : 'text-muted-foreground hover:text-foreground',
       )}
     >
       {children}
-    </Link>
+    </button>
   );
 }
 
 export function IncidentsView({
   items,
-  preset,
-  basePath,
+  assets,
+  initialPreset = 'ACTIVE',
   showPreemptive,
-  pendingCount,
-  preemptiveCount,
+  subjectArns = null,
 }: {
+  /** 이 탭이 담는 카테고리의 인시던트 전량 — 프리셋은 여기서 클라이언트가 거른다. */
   items: IncidentListItem[];
-  /** 현재 프리셋. `ACTIVE`가 기본이며 `전체` 칸은 없다(§4.4). */
-  preset: IncidentPreset;
-  /** 프리셋 링크가 붙을 경로 — 보안 `/incidents`, 자산 `/asset-incidents`. */
-  basePath: string;
+  /** 화면이 이미 받은 자산 전량 — 승인 모달의 `조치 대상` 블록 조인에 쓴다(#183). 다시 부르지 않는다. */
+  assets: readonly AssetItem[];
+  /** URL `?preset=`에서 온 첫 프리셋. 이후 전환은 이 컴포넌트의 상태다. `전체` 칸은 없다(§4.4). */
+  initialPreset?: IncidentPreset;
   /** FINOPS에는 `response_mode`가 없어 선제차단 프리셋을 두지 않는다. */
   showPreemptive: boolean;
-  /** 셀 수 없는 응답이면 null — 배지를 감춘다. */
-  pendingCount: number | null;
-  preemptiveCount: number | null;
+  /** 화면 위 띠·필터가 고른 자산 집합. `null`이면 거르지 않는다(파일 머리말). */
+  subjectArns?: ReadonlySet<string> | null;
 }) {
   const router = useRouter();
+  const [preset, setPreset] = useState<IncidentPreset>(initialPreset);
   const [status, setStatus] = useState<string>(ALL);
   const [risk, setRisk] = useState<string>(ALL);
+  /** 켠 프리셋을 다시 누르면 끈다 — `전체` 칸이 없으므로 기본(진행 중 전량)이 곧 끈 상태다. */
+  const toggle = (p: IncidentPreset) => setPreset((prev) => (prev === p ? 'ACTIVE' : p));
+
+  // 화면 위 필터가 먼저 건다 — 프리셋·셀렉트·건수 배지 전부 이 집합 안에서 센다.
+  const scoped = useMemo(
+    () => (subjectArns === null ? items : items.filter((i) => subjectArns.has(i.subject_arn))),
+    [items, subjectArns],
+  );
 
   /**
    * ACT-001 모달은 **목록 전체에 하나**다. 카드마다 두면 인스턴스가 목록 수만큼 생기고
@@ -105,13 +120,9 @@ export function IncidentsView({
     setOpeningId(incidentId);
     setOpenError(null);
     try {
-      // 자산은 승인 모달의 `조치 대상` 블록 조인에만 쓴다(#183 A안) — **병렬로** 부른다.
-      // 순차로 부르면 지연이 합이 되지만 병렬이면 max라 모달 진입 체감이 사실상 그대로다.
-      // 자산 조회 실패가 실행을 막아서는 안 되므로 여기서 접고 조인 결과만 비운다.
-      const [incident, assets] = await Promise.all([
-        getIncident(incidentId),
-        getAssets().catch(() => null),
-      ]);
+      // 자산은 승인 모달의 `조치 대상` 블록 조인에만 쓴다(#183 A안) — 이 탭이 사는 화면이 이미
+      // 받아 둔 목록(`assets`)을 그대로 쓰므로 여기서는 상세 하나만 부른다.
+      const incident = await getIncident(incidentId);
       if (latestOpen.current !== token) return; // 이전 선택의 응답 — 버린다
       // 조회 사이에 상태가 바뀌었으면 모달을 열지 않는다 — 실행 잠금은 §4.5가 정한 규칙이고,
       // 후보가 비어 있으면 고를 것이 없는 모달이 뜬다.
@@ -120,7 +131,7 @@ export function IncidentsView({
         return;
       }
       // 멱등 키는 모달을 여는 이 시점에 1회 생성해 인스턴스 수명 동안 고정한다(§4.6).
-      setRequest(proposalRequest(incident, assets?.items ?? [], newIdempotencyKey()));
+      setRequest(proposalRequest(incident, assets, newIdempotencyKey()));
     } catch (error) {
       // 실패한 채로 열면 후보 없는 모달이 된다 — 열지 않고 §4.9 규칙대로 오류만 그린다.
       if (latestOpen.current === token) setOpenError(error);
@@ -132,7 +143,7 @@ export function IncidentsView({
 
   // 셀렉트 옵션은 **프리셋이 거른 뒤의** 목록에 실제로 있는 값만, 순서는 계약 상수 순서다.
   // 프리셋 전 목록으로 세면 지금 보이지 않는 상태가 옵션에 남는다(§lib/incident-filter).
-  const inPreset = useMemo(() => byPreset(items, preset), [items, preset]);
+  const inPreset = useMemo(() => byPreset(scoped, preset), [scoped, preset]);
   const statusOptions = useMemo(() => statusOptionsOf(inPreset), [inPreset]);
   // 위험도 셀렉트는 값이 있을 때만 그린다 — FINOPS는 계약이 두 위험도를 null로 강제해 늘 빈다.
   const riskOptions = useMemo(() => riskOptionsOf(inPreset), [inPreset]);
@@ -141,12 +152,13 @@ export function IncidentsView({
   const effectiveStatus = clampOption(status, statusOptions);
   const effectiveRisk = clampOption(risk, riskOptions);
   const visible = useMemo(
-    () => visibleIncidents(items, preset, status, risk),
-    [items, preset, status, risk],
+    () => visibleIncidents(scoped, preset, status, risk),
+    [scoped, preset, status, risk],
   );
   const pendingOnly = preset === 'PENDING';
-  const presetHref = (p: IncidentPreset) =>
-    PRESET_SLUG[p] === null ? basePath : `${basePath}?preset=${PRESET_SLUG[p]}`;
+  // 건수 배지 — 전량을 들고 있으므로 늘 셀 수 있다(종전 서버 필터 응답의 "셀 수 없음"이 사라졌다).
+  const pendingCount = useMemo(() => byPreset(scoped, 'PENDING').length, [scoped]);
+  const preemptiveCount = useMemo(() => byPreset(scoped, 'PREEMPTIVE').length, [scoped]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -155,30 +167,21 @@ export function IncidentsView({
             어느 것이 목록을 갈아끼우고 어느 것이 그 안을 좁히는지 구분되지 않는다(§4.4).
             `전체` 칸은 없다 — 켠 프리셋을 다시 눌러 끄면 기본(진행 중 전량)으로 돌아온다. */}
         <nav className="flex items-center gap-1" aria-label="프리셋">
-          <Preset href={presetHref(pendingOnly ? 'ACTIVE' : 'PENDING')} active={pendingOnly}>
+          <Preset active={pendingOnly} onClick={() => toggle('PENDING')}>
             승인 대기
             {/* 대기 건수 배지 — 이 프리셋에 뜨는 건 전부 지금 누를 수 있는 건이다.
-                계약이 AWAITING_APPROVAL을 "실행 가능한 제안 ≥ 1 · 진행 중 실행 없음"으로 강제한다.
-                셀 수 없는 응답(서버가 status로 걸러 준 것)에서는 배지를 감춘다 — 0은 거짓말이 된다. */}
-            {pendingCount !== null ? <Badge variant="secondary">{pendingCount}</Badge> : null}
+                계약이 AWAITING_APPROVAL을 "실행 가능한 제안 ≥ 1 · 진행 중 실행 없음"으로 강제한다. */}
+            <Badge variant="secondary">{pendingCount}</Badge>
           </Preset>
           {/* 선제차단 = 승인 없이 이미 격리된 건. `승인 대기`와 성격이 반대라(누를 일이 아니라
               정당성을 판단할 일) 상태 필터에 묻지 않고 앞에 세운다(§4.4). FINOPS에는 없다. */}
           {showPreemptive ? (
-            <Preset
-              href={presetHref(preset === 'PREEMPTIVE' ? 'ACTIVE' : 'PREEMPTIVE')}
-              active={preset === 'PREEMPTIVE'}
-            >
+            <Preset active={preset === 'PREEMPTIVE'} onClick={() => toggle('PREEMPTIVE')}>
               선제차단
-              {preemptiveCount !== null ? (
-                <Badge variant="secondary">{preemptiveCount}</Badge>
-              ) : null}
+              <Badge variant="secondary">{preemptiveCount}</Badge>
             </Preset>
           ) : null}
-          <Preset
-            href={presetHref(preset === 'HISTORY' ? 'ACTIVE' : 'HISTORY')}
-            active={preset === 'HISTORY'}
-          >
+          <Preset active={preset === 'HISTORY'} onClick={() => toggle('HISTORY')}>
             히스토리
           </Preset>
         </nav>
@@ -228,6 +231,10 @@ export function IncidentsView({
             ? `${inPreset.length}건`
             : `${visible.length} / ${inPreset.length}건`}
         </span>
+        {/* 위 띠·필터가 걸려 있으면 그 사실을 말한다 — 숨긴 줄 모르면 "인시던트가 없다"로 읽힌다. */}
+        {subjectArns !== null ? (
+          <span>위 자산 필터에 걸린 자산의 건만 — 전체 {items.length}건</span>
+        ) : null}
         {preset === 'HISTORY' ? (
           // 종료된 건은 실행 버튼이 없다 — 계약이 RESOLVED면 recommendations를 비우기 때문이다.
           // 그 강제가 "종료해도 제안을 폐기하지 않는다"는 v1.6 결정과 충돌한다(9장 #32).

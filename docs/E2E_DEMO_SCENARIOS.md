@@ -99,7 +99,7 @@ IN_PROGRESS → SUCCESS
 | # | 단계 | 화면(FE) | API | WS 이벤트 | 실패 시 대체 컷 |
 | --- | --- | --- | --- | --- | --- |
 | 1 | 수집·판정 | 자산 목록에 **최적화 후보** 배지 | `GET /api/v1/assets` — **골든 실데이터로 응답한다**(아래 §자산 화면) | — | 시드 스크립트 재실행 후 목록만 |
-| 2 | Incident 생성 | **INC-004 자산 인시던트** 카드 그리드에 신규 카드, `status: ANALYZING` | `GET /api/v1/incidents` | `INCIDENT_CREATED` | **대체 컷 없음**(FE mock 계층 제거, 2026-09-17 · PR #351) |
+| 2 | Incident 생성 | **자산 관제(`/assets`) 「인시던트」 탭**(구 INC-004) 카드 그리드에 신규 카드, `status: ANALYZING` | `GET /api/v1/incidents` | `INCIDENT_CREATED` | **대체 컷 없음**(FE mock 계층 제거, 2026-09-17 · PR #351) |
 | 3 | AI 판단 근거 + 추천 | 상세에 **판단 근거** 3줄 + 추천 `RUNBOOK_EC2_RIGHTSIZING` | `GET /api/v1/incidents/{id}` | `INCIDENT_UPDATED` | 미리 저장한 근거 텍스트 표시 |
 | 4 | 가드레일 4단계 | — (화면 표시 없음) · 통과 신호는 `status: AWAITING_APPROVAL`로 실행 버튼이 열리는 것 | (내부) | `INCIDENT_UPDATED` | 슬라이드 컷으로 분리 |
 | 5 | 관제자 승인 | **INC-004 목록에서 「승인 대기」를 켠 뒤 [조치 실행] → ACT-001 [실행]**(승인 1건 · 실행 클릭 2회) | `POST /api/v1/actions/execute`<br>**`202 Accepted`** → `IN_PROGRESS`<br>*(같은 `idempotency_key` 재요청은 `200 OK` 멱등 재생)* | 별도 발행 없음 — HTTP 접수 응답으로 확인 | — |
@@ -298,7 +298,7 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 | 2 | Incident 생성 | ✅ 실경로 · **사전 준비(무대 전)** — 스캔 1회로 생성 실측 | 카드 3건 — §사전 준비 | **무대 전에 드러난다** → 사전 준비를 처음부터(대체 컷은 만들지 않는다 — 결정 ①) |
 | 3 | AI 판단 근거 + 추천 | ✅ 실경로 · **사전 준비(무대 전)** — idle-dev 실측(§결정 기록 ④): 추천 `RUNBOOK_EC2_RIGHTSIZING` m5.2xlarge → m5.large · 승인 대기 도달 · 약 16초 | `OPENAI_API_KEY` · `AGENT_DISPATCH_INTERVAL_SECONDS` | 카드가 **진행 불가**(`FAILED`)이거나 **분석 중**에서 멈춰 있으면 키부터 확인 → 사전 준비를 처음부터(§사전 준비 경고) |
 | 4 | 가드레일 4단계 | ✅ 실경로 | — | 슬라이드 컷 |
-| 5 | 관제자 승인 | ✅ 실경로 · **무대 시작** | 순서대로 셋. **① 스캔 시점 확인** — `docker compose logs api \| Select-String -SimpleMatch 'interval[0:05:00]' \| Select-Object -Last 1`의 `next run at:` 시각(**UTC** — 한국 시각 +9시간)이 지금부터 20초 안이면 기다렸다 시작한다. 필터가 필요한 이유: 실행·AI 분석 주기도 `next run at`을 1초에 1줄꼴로 찍어, 필터 없이 마지막 줄을 보면 거의 항상 몇 초 뒤가 보인다. 원복(약 16초) 도중 스캔이 돌면 AST-001이 중간값(`m5.large · stopped`)으로 다음 스캔까지 최대 300초 남는다(#349 실측). **② 헬퍼 띄우기** — 호스트 셸에서 `$env:AWS_ENDPOINT_URL='http://localhost:4566'; uv run python scripts/inject_status_check_failure.py`(PR #373)를 실행하고 `대기 중` 출력을 확인한다. **헬퍼가 `중단`을 출력하면 누르지 않고 출력의 안내를 따른다.** **③ 승인 1건 · 실행 클릭 2회** — **자산 인시던트(INC-004)에서 「승인 대기」 프리셋을 켠 뒤** idle-dev 카드의 **[조치 실행] → ACT-001 [실행]**을 누른다. 기본 목록에는 실행 버튼이 없다(FinOps 카드는 보안 인시던트 INC-001이 아니라 이 화면에 뜬다). **실행 접수 뒤 INC-002 상세로 자동 이동하며 6–8번은 그 상세의 실행 패널에서 본다** | — |
+| 5 | 관제자 승인 | ✅ 실경로 · **무대 시작** | 순서대로 셋. **① 스캔 시점 확인** — `docker compose logs api \| Select-String -SimpleMatch 'interval[0:05:00]' \| Select-Object -Last 1`의 `next run at:` 시각(**UTC** — 한국 시각 +9시간)이 지금부터 20초 안이면 기다렸다 시작한다. 필터가 필요한 이유: 실행·AI 분석 주기도 `next run at`을 1초에 1줄꼴로 찍어, 필터 없이 마지막 줄을 보면 거의 항상 몇 초 뒤가 보인다. 원복(약 16초) 도중 스캔이 돌면 AST-001이 중간값(`m5.large · stopped`)으로 다음 스캔까지 최대 300초 남는다(#349 실측). **② 헬퍼 띄우기** — 호스트 셸에서 `$env:AWS_ENDPOINT_URL='http://localhost:4566'; uv run python scripts/inject_status_check_failure.py`(PR #373)를 실행하고 `대기 중` 출력을 확인한다. **헬퍼가 `중단`을 출력하면 누르지 않고 출력의 안내를 따른다.** **③ 승인 1건 · 실행 클릭 2회** — **자산 관제(`/assets`) 「인시던트」 탭(구 INC-004)에서 「승인 대기」 프리셋을 켠 뒤** idle-dev 카드의 **[조치 실행] → ACT-001 [실행]**을 누른다. 기본 목록에는 실행 버튼이 없다(FinOps 카드는 보안 관제가 아니라 이 탭에 뜬다). **실행 접수 뒤 INC-002 상세로 자동 이동하며 6–8번은 그 상세의 실행 패널에서 본다** | — |
 | 6 | 실행 | ✅ 실경로(PR #346) | `DISPATCH_INTERVAL_SECONDS` | **사전 준비를 처음부터** — LocalStack 재기동은 자원 ID가 새로 생겨 이 Incident의 대상이 사라진다 |
 | 7 | Status Check 실패 | ✅ 실경로 · 헬퍼(PR #373) | **사람 조작 없음** — 5번에서 띄운 헬퍼가 축소된 유형으로 기동되는 순간 멈춘다(`주입: stop_instances` 출력). 헬퍼가 필요한 이유: 판정 대기 동안 실행 상태는 `IN_PROGRESS`이고 이벤트도 나가지 않아 사람이 창을 맞출 수 없다. **7번에서 띄우면 늦다** — 이미 유형이 바뀌었거나 정지 구간이라 헬퍼가 주입 없이 끝나고 실행이 `SUCCESS`로 닫힌다 | 창을 놓치면 실행이 `SUCCESS`로 닫힌다 → 상세 화면 실행 항목의 **[이전 스펙 복원]**(`RUNBOOK_EC2_REVERT_SIZE` · 관제자 승인)으로 되돌린다. 자동 발동 장면은 빠지지만 같은 확인 화면(9번)까지 간다. **시드 재실행은 줄어든 유형을 되돌리지 않는다**(이름으로 찾아 건너뛴다) |
 | 8 | 자동 원복 발동 | ✅ 실경로(PR #346) | 사람 조작 없음 | 7번 "막히면"과 같다 |
@@ -312,7 +312,7 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 | --- | --- | --- | --- | --- |
 | 1 | 위협 주입 | ✅ 실경로(§T2 관통 실측) · **"붉은 노드" 문구를 바꾼다** | `MOCK_THREAT_INBOX_DIR` · 주입 명령에 `--target-arn`(seed-idle). **토폴로지 색은 자산 판정에서 온다** — 빨강은 대상 옆 SG이고 **주입 전부터** 빨갛다. 주입이 새로 만드는 것은 INC-001의 SecOps 카드다 | 토폴로지 정적 이미지 |
 | 2 | 위험도 판정 | ✅ 실경로 — 초기 `HIGH` 실측 | — | — |
-| 3 | 대응 경로 진입 | ✅ 실경로 — `PRE_MITIGATION_0_5S` 실측 · INC-001 카드의 **선제 차단됨** 배지로 표시(`apps/web/src/components/incidents/incident-card.tsx`) | — | 경로 표시 없이 4번으로 |
+| 3 | 대응 경로 진입 | ✅ 실경로 — `PRE_MITIGATION_0_5S` 실측 · 보안 관제(`/security`) 「인시던트」 탭 카드(구 INC-001)의 **선제 차단됨** 배지로 표시(`apps/web/src/components/incidents/incident-card.tsx`) | — | 경로 표시 없이 4번으로 |
 | 4 | 가드레일 4단계 | ✅ 실경로 | 실 모델 호출(SecOps 그래프) | 슬라이드 컷 |
 | 5 | 관제자 승인 → 차단 | ✅ 실경로 | **INC-001 목록 카드에서 INC-002 상세로 이동 → [승인하고 차단] → ACT-001 [실행]**(첫 승인 · 실행 클릭 2회) · 시드 NACL 규칙 100 `203.0.113.10/32` | — |
 | 6 | 관제자 확인 | ✅ 실경로 | **같은 INC-002 상세**에서 판단 근거를 읽는다. #389의 SecOps 프롬프트 변경으로 과거 실측과 문구가 달라질 수 있어 9/29 리허설에서 다시 확인한다 | — |

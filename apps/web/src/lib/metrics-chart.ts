@@ -2,7 +2,14 @@
 // 렌더와 분리해 `node --test`로 검증한다. 같은 디렉터리 상대 경로만 쓴다 — `node --test`는 `@/`
 // 별칭을 해석하지 못한다(타입 전용 import는 스트리핑돼 사라진다).
 
+import { COMPOSITION_TYPES, type CompositionKey } from './dashboard.ts';
+import { ASSET_TYPE_ORDER } from './enum-labels.ts';
 import type {
+  AssetInventoryAxis,
+  AssetInventoryPoint,
+  AssetStatusAxis,
+  AssetStatusPoint,
+  AssetType,
   CpuAxis,
   CpuSeries,
   NetworkAxis,
@@ -123,6 +130,49 @@ export function sgChartState(axis: SgExposureAxis): ChartState<SgRow[]> {
   return { kind: 'READY', data: rows };
 }
 
+// ── 자산 현황 축(축 4)
+
+/**
+ * 한 시각의 자산 현황. **대시보드 지표 띠와 같은 셈으로 접는다** — `waste`는 최적화 후보 + 미사용이고
+ * (`lib/dashboard`의 `WASTE_VERDICTS`), 띠의 `낭비 후보` 칸이 세는 것과 같은 집합이다. 선이 띠와 다른
+ * 수를 말하면 같은 화면이 같은 것을 두 숫자로 말하게 된다. 원값 둘도 남긴다 — 툴팁이 풀어 적는다.
+ */
+export interface AssetStatusRow {
+  at: number;
+  judged: number;
+  threat: number;
+  waste: number;
+  costCandidate: number;
+  unused: number;
+  skip: number;
+  undecided: number;
+}
+
+export function toAssetStatusRows(points: readonly AssetStatusPoint[]): AssetStatusRow[] {
+  return points
+    .map((p) => ({
+      at: Date.parse(p.at),
+      judged: p.judged,
+      threat: p.threat,
+      waste: p.cost_candidate + p.unused,
+      costCandidate: p.cost_candidate,
+      unused: p.unused,
+      skip: p.skip,
+      undecided: p.undecided,
+    }))
+    .filter((r) => !Number.isNaN(r.at))
+    .sort((a, b) => a.at - b.at);
+}
+
+export function assetStatusChartState(axis: AssetStatusAxis): ChartState<AssetStatusRow[]> {
+  if (axis.status === 'UNAVAILABLE') {
+    return { kind: 'UNAVAILABLE', reason: axis.reason_code ?? '알 수 없는 오류' };
+  }
+  const rows = toAssetStatusRows(axis.points);
+  if (rows.length === 0) return { kind: 'EMPTY' };
+  return { kind: 'READY', data: rows };
+}
+
 // ── 네트워크 축(축 3)
 
 /** 한 시각의 In·Out 한 쌍. 단위는 **초당 바이트**다 — 행을 만들 때 `period_seconds`로 나눈다. */
@@ -237,4 +287,58 @@ export function formatTick(at: number): string {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+
+// ── 자산 수 축(축 5)
+
+/**
+ * 한 시각의 자산 수. **도넛(`자산 분류 비율`)과 같은 조각으로 접는다** — EC2 · 보안 그룹 · EBS는 따로,
+ * 나머지 유형은 `OTHER` 한 조각(`lib/dashboard` `assetComposition`과 같은 규칙). 옆 도넛과 다른 조각으로
+ * 나누면 같은 화면이 같은 자산을 두 가지로 가른다.
+ *
+ * 그 칸에서 관측하지 못한 유형은 **값을 두지 않는다**(undefined) — 0으로 채우면 쌓인 면이 자산이 사라진
+ * 것처럼 꺼진다. 못 본 유형은 `unobserved`에 남겨 툴팁이 밝힌다.
+ */
+export interface InventoryRow {
+  at: number;
+  total: number;
+  EC2?: number;
+  SG?: number;
+  EBS?: number;
+  OTHER?: number;
+  /** 유형별 원값(관측한 것만) — 툴팁이 `OTHER`를 풀어 적는다. */
+  counts: Partial<Record<AssetType, number>>;
+  unobserved: AssetType[];
+}
+
+export const INVENTORY_KEYS: readonly CompositionKey[] = [...COMPOSITION_TYPES, 'OTHER'];
+
+export function toInventoryRows(points: readonly AssetInventoryPoint[]): InventoryRow[] {
+  const split = new Set<AssetType>(COMPOSITION_TYPES);
+  return points
+    .map((p) => {
+      const row: InventoryRow = {
+        at: Date.parse(p.at),
+        total: p.total,
+        counts: p.counts,
+        unobserved: ASSET_TYPE_ORDER.filter((t) => p.counts[t] === undefined),
+      };
+      for (const t of COMPOSITION_TYPES) row[t] = p.counts[t];
+      const others = ASSET_TYPE_ORDER.filter((t) => !split.has(t) && p.counts[t] !== undefined);
+      // 나머지 유형을 하나도 못 봤으면 `OTHER`도 모름이다 — 0으로 적지 않는다.
+      if (others.length > 0) row.OTHER = others.reduce((sum, t) => sum + (p.counts[t] ?? 0), 0);
+      return row;
+    })
+    .filter((r) => !Number.isNaN(r.at))
+    .sort((a, b) => a.at - b.at);
+}
+
+export function inventoryChartState(axis: AssetInventoryAxis): ChartState<InventoryRow[]> {
+  if (axis.status === 'UNAVAILABLE') {
+    return { kind: 'UNAVAILABLE', reason: axis.reason_code ?? '알 수 없는 오류' };
+  }
+  const rows = toInventoryRows(axis.points);
+  if (rows.length === 0) return { kind: 'EMPTY' };
+  return { kind: 'READY', data: rows };
 }

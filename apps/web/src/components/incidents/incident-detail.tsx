@@ -34,8 +34,15 @@ import { isTerminalStatus } from '@/lib/execution-status';
 import { isResolvable } from '@/lib/incident-filter';
 import { proposalButtons } from '@/lib/proposal-buttons';
 import { RUNBOOK_LABELS, incidentTitle } from '@/lib/enum-labels';
+import { formatUsd } from '@/lib/savings';
 import { formatKst } from '@/lib/utils';
-import type { AssetItem, IncidentResponse, IsoDateTime, RunbookId } from '@/types/api';
+import type {
+  AssetItem,
+  IncidentResponse,
+  IsoDateTime,
+  RunbookId,
+  SavingsReason,
+} from '@/types/api';
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -109,8 +116,86 @@ function RiskArea({
   );
 }
 
+/** 미산출 사유 표시 — 모델이 못 낸 것과 서버가 계약 위반으로 버린 것을 같은 말로 덮지 않는다. */
+const SAVINGS_REASON_LABELS: Record<SavingsReason, string> = {
+  MODEL_UNAVAILABLE: 'AI가 추정을 내지 못함',
+  MISSING_ESTIMATE: '추정값 누락',
+  INVALID_ESTIMATE: '추정값 오류',
+  CONTEXT_MISMATCH: '대상 정보 불일치',
+};
+
 /**
- * B-Medium 타임아웃 창 — **고지를 그리는 조건이자 기준 시각을 래치하는 조건**이다.
+ * 절감 예상 영역 — FINOPS(A 변형) 전용이다. SECOPS의 `위험도` 자리에 선다(2026-09-29).
+ * 자산 인시던트에서 관제자가 가장 먼저 알아야 할 수는 "이 제안을 채택하면 월 얼마를 아끼나"다.
+ *
+ * 값은 후보 런북의 `ai_savings_estimate`(RIGHTSIZING에만 실림)이며 **AI 참고 추정**이다 — 실제
+ * 청구액이 아니라 모델 추정 단가 × 730시간(#347). 금액 옆에 그 사실을 함께 적는다(`lib/savings.ts` 머리말).
+ * 추정이 없거나 실패한 후보를 $0으로 그리지 않는다 — 0원은 "절감이 없다"는 단언이다.
+ */
+function SavingsArea({ incident }: { incident: IncidentResponse }) {
+  if (incident.category !== 'FINOPS') return null;
+
+  const estimates = incident.recommendations.flatMap((rec) =>
+    rec.ai_savings_estimate === null ? [] : [{ rec, estimate: rec.ai_savings_estimate }],
+  );
+  const amounts = estimates
+    .filter(({ estimate }) => estimate.status === 'ESTIMATED' && estimate.amount !== null)
+    .map(({ estimate }) => Number(estimate.amount))
+    .filter(Number.isFinite);
+  const best = amounts.length > 0 ? Math.max(...amounts) : null;
+
+  return (
+    <Section title="절감 예상 (AI 추정)">
+      {estimates.length === 0 ? (
+        <p className="text-muted-foreground text-sm">
+          {incident.status === 'ANALYZING'
+            ? '분석 중 — 분석이 끝나면 이 자리에 월 절감액이 생깁니다.'
+            : '이 제안에는 비용 추정이 없습니다(스펙 조정 조치에만 추정이 붙습니다).'}
+        </p>
+      ) : (
+        <Card className="gap-2 p-4">
+          <div className="flex items-baseline justify-between gap-3">
+            <span className="text-muted-foreground text-xs">채택 시 월 절감 예상</span>
+            <span className="font-mono text-2xl font-semibold tabular-nums">
+              {best === null ? '—' : `${formatUsd(best)}`}
+              {best === null ? null : <span className="text-muted-foreground text-sm font-normal"> /월</span>}
+            </span>
+          </div>
+          <ul className="flex flex-col gap-1.5 border-t pt-2 text-sm">
+            {estimates.map(({ rec, estimate }) => (
+              <li key={rec.runbook_id} className="flex flex-col gap-0.5">
+                <span className="flex items-baseline justify-between gap-3">
+                  <span>
+                    {RUNBOOK_LABELS[rec.runbook_id]}
+                    {estimate.basis !== null ? (
+                      <span className="text-muted-foreground ml-2 font-mono text-xs">
+                        {estimate.basis.current_instance_type} → {estimate.basis.target_instance_type}
+                      </span>
+                    ) : null}
+                  </span>
+                  <span className="font-mono tabular-nums">
+                    {estimate.status === 'ESTIMATED' && estimate.amount !== null
+                      ? `${formatUsd(Number(estimate.amount))}/월`
+                      : `추정 불가 · ${estimate.reason === null ? '사유 없음' : SAVINGS_REASON_LABELS[estimate.reason]}`}
+                  </span>
+                </span>
+                {estimate.basis !== null ? (
+                  <span className="text-muted-foreground text-xs">{estimate.basis.explanation}</span>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+          <p className="text-muted-foreground text-xs">
+            모델 추정 단가 × 730시간(온디맨드·Linux 인스턴스 비용) — 실제 청구액이 아닙니다.
+          </p>
+        </Card>
+      )}
+    </Section>
+  );
+}
+
+/**
+ * B-Medium 타임아웃 창 —**고지를 그리는 조건이자 기준 시각을 래치하는 조건**이다.
  * 두 곳이 따로 판정하면 화면에는 시각이 떠 있는데 기준은 안 잡히는 식으로 어긋난다.
  */
 function inAgentWaitWindow(incident: IncidentResponse): boolean {
@@ -520,6 +605,7 @@ export function IncidentDetail({
       </header>
 
       <RiskArea incident={incident} agentWaitAt={waitBase} />
+      <SavingsArea incident={incident} />
 
       <Separator />
 

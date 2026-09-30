@@ -1,14 +1,18 @@
 'use client';
 
-// DSH 시계열 차트 2종 — EC2별 CPU 추이(+저활성 임계선) · 인터넷 개방 SG 건수 추이.
+// 시계열 차트 5종 — EC2별 CPU 추이(+저활성 임계선) · 네트워크 처리량 · 인터넷 개방 SG 건수 ·
+// 자산 수 추이 · 위협 판정 추이. 앞의 둘은 자산 관제(AST-001), 셋째는 보안 관제(SEC-001), 뒤의 둘은
+// 대시보드(DSH-001)가 쓴다.
 //
 // **두 축을 한 차트에 겹치지 않는다.** 단위(%와 건수)가 달라 y축이 둘이 되면 두 곡선의
-// 교차가 아무 뜻도 없으면서 관계처럼 읽힌다. 카드 두 장으로 나란히 세운다.
+// 교차가 아무 뜻도 없으면서 관계처럼 읽힌다. 카드를 나눠 세운다.
 //
 // 클라이언트 컴포넌트인 이유는 Recharts가 브라우저 측정(ResponsiveContainer)에 기대서다.
 // 조회·상태 판정은 서버에서 끝내고(`lib/metrics-chart.ts`) 여기로는 **그릴 것만** 넘어온다.
 
 import {
+  Area,
+  AreaChart,
   CartesianGrid,
   Legend,
   Line,
@@ -20,16 +24,31 @@ import {
   YAxis,
 } from 'recharts';
 
+import { SLICE_COLOR, sliceLabel } from '@/components/dashboard/asset-composition-chart';
+import type { CompositionKey } from '@/lib/dashboard';
+import { ASSET_TYPE_LABELS, ASSET_TYPE_ORDER } from '@/lib/enum-labels';
 import {
+  assetStatusChartState,
   cpuChartState,
   formatThroughput,
   formatTick,
+  INVENTORY_KEYS,
+  inventoryChartState,
   networkChartState,
   sgChartState,
+  type AssetStatusRow,
   type ChartState,
   type CpuLine,
+  type InventoryRow,
 } from '@/lib/metrics-chart';
-import type { CpuAxis, NetworkAxis, SgExposureAxis } from '@/types/api';
+import type {
+  AssetInventoryAxis,
+  AssetStatusAxis,
+  AssetType,
+  CpuAxis,
+  NetworkAxis,
+  SgExposureAxis,
+} from '@/types/api';
 
 /**
  * 계열 색 — 검증된 4색 고정 순서다(dataviz 팔레트 검사 통과: 명도대·채도 하한·CVD 분리·대비).
@@ -278,6 +297,182 @@ export function SgExposureTrendChart({ axis }: { axis: SgExposureAxis }) {
           type="stepAfter"
           dataKey="open"
           stroke={seriesColor(0)}
+          strokeWidth={2}
+          dot={false}
+          activeDot={{ r: 4 }}
+          isAnimationActive={false}
+        />
+      </LineChart>
+    </ChartFrame>
+  );
+}
+
+/**
+ * 축 5 — 자산 현황 추이(2026-09-29). **"내 자산이 늘었나 줄었나"** 를 본다 — 판정과 무관하게 전 유형의
+ * 자산이 회차마다 몇 건 있었나. 옆 도넛(`자산 분류 비율`)과 같은 조각·색으로 쌓아(`INVENTORY_KEYS` ·
+ * `SLICE_COLOR`), 맨 윗선이 전체 자산 수이고 면의 두께가 유형별 수다.
+ *
+ * 면은 계단(`stepAfter`)이다 — 값은 수집 회차에만 바뀐다. 못 본 유형은 값이 비어 그 칸의 면이 끊긴다
+ * (0으로 꺼지지 않는다 — `lib/metrics-chart` `InventoryRow`).
+ */
+function InventoryTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: ReadonlyArray<{ payload?: InventoryRow }>;
+}) {
+  const row = payload?.[0]?.payload;
+  if (!active || row === undefined) return null;
+  return (
+    <div style={TOOLTIP_STYLE} className="flex w-max flex-col gap-1 px-3 py-2 whitespace-nowrap">
+      <span className="text-muted-foreground">{formatTick(row.at)}</span>
+      <span className="flex justify-between gap-6 font-medium">
+        <span>전체 자산</span>
+        <span className="font-mono tabular-nums">{row.total}건</span>
+      </span>
+      {ASSET_TYPE_ORDER.filter((t) => row.counts[t] !== undefined).map((t) => (
+        <span key={t} className="flex items-center justify-between gap-6">
+          <span className="flex items-center gap-1.5">
+            <span
+              aria-hidden
+              className="inline-block size-2 rounded-full"
+              style={{ backgroundColor: SLICE_COLOR[sliceKey(t)] }}
+            />
+            {ASSET_TYPE_LABELS[t]?.label ?? t}
+          </span>
+          <span className="font-mono tabular-nums">{row.counts[t]}건</span>
+        </span>
+      ))}
+      {row.unobserved.length > 0 ? (
+        // 0건으로 적지 않는다 — 그 회차가 조회하지 못한 유형이라 합계에도 없다.
+        <span className="text-muted-foreground">
+          미관측: {row.unobserved.map((t) => ASSET_TYPE_LABELS[t]?.label ?? t).join(' · ')}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+const sliceKey = (t: AssetType): CompositionKey =>
+  (INVENTORY_KEYS as readonly string[]).includes(t) ? (t as CompositionKey) : 'OTHER';
+
+export function InventoryTrendChart({ axis }: { axis: AssetInventoryAxis }) {
+  const state = inventoryChartState(axis);
+  if (state.kind !== 'READY') return <Fallback state={state} empty="수집 회차가 아직 없습니다" />;
+
+  return (
+    <ChartFrame>
+      <AreaChart data={state.data} margin={{ top: 8, right: 8, bottom: 0, left: -16 }}>
+        <CartesianGrid stroke={GRID_INK} strokeDasharray="3 3" vertical={false} />
+        <XAxis
+          dataKey="at"
+          type="number"
+          scale="time"
+          // 공백이 보이도록 실제 시각 축이다 — 회차 순번으로 찍으면 스캔이 멈춘 구간이 사라진다.
+          domain={['dataMin', 'dataMax']}
+          tickFormatter={formatTick}
+          stroke={AXIS_INK}
+          tick={{ fontSize: 11 }}
+          minTickGap={48}
+        />
+        {/* 건수는 정수다 — 소수 눈금이 서면 "1.5건"이 읽힌다. */}
+        <YAxis
+          allowDecimals={false}
+          domain={[0, (max: number) => Math.max(1, max)]}
+          stroke={AXIS_INK}
+          tick={{ fontSize: 11 }}
+          width={56}
+        />
+        <Tooltip content={(props) => <InventoryTooltip {...props} />} />
+        {/* 범례는 쌓는 순서(INVENTORY_KEYS)대로 선다 — Recharts 기본은 키 이름순이라
+            옆 도넛 범례와 순서가 갈린다. */}
+        <Legend
+          itemSorter={null}
+          formatter={(key) => (
+            <span className="text-muted-foreground text-xs">
+              {sliceLabel(String(key) as CompositionKey)}
+            </span>
+          )}
+        />
+        {INVENTORY_KEYS.map((key) => (
+          <Area
+            key={key}
+            type="stepAfter"
+            dataKey={key}
+            name={key}
+            stackId="inventory"
+            stroke={SLICE_COLOR[key]}
+            fill={SLICE_COLOR[key]}
+            fillOpacity={0.35}
+            strokeWidth={1.5}
+            isAnimationActive={false}
+          />
+        ))}
+      </AreaChart>
+    </ChartFrame>
+  );
+}
+
+/**
+ * 축 4의 위협 판정 한 선 — 대시보드 「위협 판정 추이」. 위협은 건수가 작아(0–2) 자산 수(10여 건)와
+ * 한 눈금에 두면 바닥에 붙어 변화가 안 읽힌다 — 따로 세워 제 눈금을 받는다(2026-09-29).
+ * 앱의 유일한 빨강(`--danger`)을 입는다 — 지표 띠의 `위협 판정 자산`과 같은 뜻이다.
+ */
+function ThreatTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: ReadonlyArray<{ payload?: AssetStatusRow }>;
+}) {
+  const row = payload?.[0]?.payload;
+  if (!active || row === undefined) return null;
+  return (
+    <div style={TOOLTIP_STYLE} className="flex w-max flex-col gap-1 px-3 py-2 whitespace-nowrap">
+      <span className="text-muted-foreground">{formatTick(row.at)}</span>
+      <span className="flex items-center justify-between gap-6">
+        <span className="flex items-center gap-1.5">
+          <span aria-hidden className="inline-block size-2 rounded-full" style={{ backgroundColor: 'var(--danger)' }} />
+          위협 판정
+        </span>
+        <span className="font-mono tabular-nums">{row.threat}건</span>
+      </span>
+    </div>
+  );
+}
+
+export function ThreatTrendChart({ axis }: { axis: AssetStatusAxis }) {
+  const state = assetStatusChartState(axis);
+  if (state.kind !== 'READY') return <Fallback state={state} empty="수집 회차가 아직 없습니다" />;
+
+  return (
+    <ChartFrame>
+      <LineChart data={state.data} margin={{ top: 8, right: 8, bottom: 0, left: -16 }}>
+        <CartesianGrid stroke={GRID_INK} strokeDasharray="3 3" vertical={false} />
+        <XAxis
+          dataKey="at"
+          type="number"
+          scale="time"
+          domain={['dataMin', 'dataMax']}
+          tickFormatter={formatTick}
+          stroke={AXIS_INK}
+          tick={{ fontSize: 11 }}
+          minTickGap={48}
+        />
+        <YAxis
+          allowDecimals={false}
+          domain={[0, (max: number) => Math.max(1, max)]}
+          stroke={AXIS_INK}
+          tick={{ fontSize: 11 }}
+          width={56}
+        />
+        <Tooltip content={(props) => <ThreatTooltip {...props} />} />
+        {/* 선이 하나라 범례를 두지 않는다 — 카드 제목이 이름이다. */}
+        <Line
+          type="stepAfter"
+          dataKey="threat"
+          stroke="var(--danger)"
           strokeWidth={2}
           dot={false}
           activeDot={{ r: 4 }}
