@@ -56,7 +56,7 @@ from schemas.api.actions import (
 from schemas.api.errors import ErrorCode
 from schemas.api.incidents import IncidentStatus, ResolutionJudgement, IncidentCategory, ResponseMode
 from schemas.incidents import AgentWaitSchedule
-from schemas.backups import InstanceSpecBackup, NaclRuleIndexBackup, SgFullRulesBackup
+from schemas.backups import InstanceSpecBackup, NaclRuleIndexBackup
 from schemas.candidates import CandidateStatus, RunbookCandidateData
 from schemas.executions import (
     ASSET_MAY_HAVE_CHANGED_EFFECTS,
@@ -401,8 +401,6 @@ def resolve_incident(
         # 이 게이트와 함께 확인해야 한다. 현재 정상 경로에는 해당 조합이 없다.
         if incident.agent_invocation_status not in AGENT_TERMINAL_STATUSES:
             raise ApiError(ErrorCode.INCIDENT_NOT_RESOLVABLE)
-    elif resolution is ResolutionJudgement.NO_FURTHER_ACTION:
-        raise ApiError(ErrorCode.INCIDENT_NOT_RESOLVABLE)
 
     # 남은 제안을 함께 정리한다 — 상세 응답 계약이 RESOLVED에 빈 제안 목록을
     # 요구하므로(api/incidents.py), 두고 가면 종료 직후 조회가 500이 된다

@@ -130,11 +130,12 @@ export function getIncident(incidentId: string): Promise<IncidentResponse> {
 export function resolveIncident(
   incidentId: string,
   resolution: ResolutionJudgement,
+  resolutionNote: string | null = null,
 ): Promise<IncidentResponse> {
   return request<IncidentResponse>(`/incidents/${encodeURIComponent(incidentId)}/resolve`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ resolution }),
+    body: JSON.stringify({ resolution, resolution_note: resolutionNote }),
   });
 }
 
