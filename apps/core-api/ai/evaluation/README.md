@@ -12,7 +12,7 @@ AI 평가 도구·기준선·공개 실험 요약을 기능별로 관리하는 �
 | `secops/` | SecOps 위험 재평가·후보·요약 품질, 동결 입력과 요청 호환성 검사 | [기준선](secops/baseline.md) |
 
 첫 이관 대상은 기존 FinOps summary 자료다. 기준선 본문은 `summary/baseline.md`로 옮기고,
-`docs/AI_SUMMARY_BASELINE.md`에는 기존 링크를 위한 이동 안내만 남긴다.
+`docs/AI_SUMMARY_BASELINE.md`에 남겼던 이동 안내는 2026-09-30에 삭제했다.
 새 summary 실험의 생성 원자료와 판정 결과는 [summary/results/](summary/results/README.md)에
 라운드별로 보존한다. 다른 평가에서도 재사용할 계측은 `common/`으로 분리한다.
 

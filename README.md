@@ -131,7 +131,7 @@ vigilantis/
 │       │   ├── rule_engine.py   #     [김승철] Idle EC2·미사용 SG 판정, Skip 사유 코드 산출
 │       │   └── scheduler.py     #     [김승철] APScheduler 수집→판정 스캔
 │       ├── ai/                  #   [안성일] LangGraph 2그래프(agent.py) · 4단계 가드레일 · Whitelist
-│       │   └── evaluation/      #     AI 요약 품질 계측·판정 하네스 (기준선: docs/AI_SUMMARY_BASELINE.md)
+│       │   └── evaluation/      #     AI 요약 품질 계측·판정 하네스 (기준선: evaluation/summary/baseline.md)
 │       ├── security/            #   [디렉터리 오너 김세혁 · 정형화/판정 김승철] 위협 정형화 · Risk Evaluator · SOAR 차단/해제
 │       ├── incident_intake.py   #   판정·위협 → Incident 1건 생성
 │       ├── agent_dispatcher.py  #   AI 분석 대기 Incident → LangGraph 호출
@@ -150,7 +150,7 @@ vigilantis/
 │   └── secops-log-corpus/       # [김승철] SSH 모의 로그 9사례 — 근거 저장·전달 검증용
 ├── tests/                       # [김승철] 시연 전제 대조 · 가드레일 · 골든 · 롤백 · 실행 하네스 회귀
 └── docs/                        # PROJECT_STATUS.md (SSOT) · E2E_DEMO_SCENARIOS.md ·
-                                 # AI_SUMMARY_BASELINE.md · adr/ (의사결정 기록 9건)
+                                 # adr/ (의사결정 기록 9건)
 ```
 
 ### scripts/
@@ -224,7 +224,7 @@ GitHub Actions CI는 **`dev`·`main` 대상 PR·push에서 3잡**이 돈다.
 * [`docs/adr/`](docs/adr) — 결정 배경(왜 그렇게 했나)
 * [`packages/schemas/`](packages/schemas) — 계약의 코드 소재
 * [`docs/E2E_DEMO_SCENARIOS.md`](docs/E2E_DEMO_SCENARIOS.md) — 시연 대본의 원천이자 E2E 회귀 테스트의 명세
-* [`docs/AI_SUMMARY_BASELINE.md`](docs/AI_SUMMARY_BASELINE.md) — AI 요약 3줄의 기준선과 재통과 절차
+* [`apps/core-api/ai/evaluation/summary/baseline.md`](apps/core-api/ai/evaluation/summary/baseline.md) — AI 요약 3줄의 기준선과 재통과 절차
 * `README.md` (이 문서) — 포트폴리오·소개용. **현황·결정의 기준이 아니다**
 
 ### ADR
