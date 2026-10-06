@@ -15,6 +15,25 @@
 - **시각은 KST**, 명령은 실행한 그대로(비밀 값은 `***`로 가린다).
 - 한 줄로 안 되는 것은 §7 관찰 기록에 길게 적고 표에서는 그 줄을 가리킨다.
 
+### 검증 항목 번호 — 이 표가 번호의 정의다
+
+아래 표 밖의 번호는 쓰지 않는다. 번호는 칸 이름이므로, 채우는 사람은 이 표에서 그 번호가 무엇을 확인하는 칸인지 읽는다.
+
+| 번호 | 확인할 것 | 이 문서의 칸 |
+| --- | --- | --- |
+| A1 | 환경 기동 `up --yes` · `status`의 TG 대상 `healthy` · Budget $50 알림 선행 생성 | §1 |
+| A2 | 앱 키 발급과 `.env` 전환(키 교체 + `AWS_ENDPOINT_URL` 삭제를 **함께**) · `sts get-caller-identity` Arn이 `user/vigilantis-smoke-app` · `AWS_REGIONS` 빈 값 | §1 |
+| A3 | 앱 키로 스캔 1회 — 회차 상태와 실패 라벨, elbv2·autoscaling 조회가 실 AWS에서 채워지는지 | §2-1 · §2-2 |
+| A4 | 가드레일 ④ `DryRun=True` — 런북별 1회, 실제 IAM 권한 검증 | §3 A4-1–A4-7 |
+| A5 | `DryRun`의 대상 존재 검사 — 없는 인스턴스 ID를 실 AWS가 거르는지(미측정 항목) | §3 A5 |
+| A6 | `NACL_ADD_DENY` → `NACL_RESTORE` 실동작과 저장된 `Protocol`·`PortRange` 값 | §4 A6 |
+| A7 | `RIGHTSIZING`(`idle-dev`) → `REVERT_SIZE` 실동작 — 관측치 48개 확보 뒤에만 가능 | §4 A7 |
+| A8 | Status Check 2/2 실 대기 + `stopped` 주입 → `FAILED` → `AUTO_ON_FAILURE` 자동 원복 | §4 A8 |
+| A8-impaired | Status Check `impaired` 검사 결과 경로 — A8의 `stopped` 결과로 대체하지 않는 별도 칸 | §4 A8-impaired |
+| A9 | `SKIP_PROD_PROTECTED`(`web-1`·`web-2`) 판정 — 관측치 확보 뒤 | §2-3 |
+| A10 | P1 3종 실동작(`SG_DELETE_ISOLATED`·`SG_RECREATE`·`EBS_DELETE_UNATTACHED`) — 선택 | §4 A10 |
+| A11 | 스모크 결과 기록 — 이 문서 자체 | 이 문서 전체 |
+
 ---
 
 ## 1. 환경 — 기동과 전환
@@ -27,7 +46,7 @@
 | `up --yes` 실행 시각 | ______ |
 | `status` TG 대상 `healthy` 확인 시각 | ______ |
 | 앱 키 Arn (`sts get-caller-identity`) | `arn:aws:iam::***:user/vigilantis-smoke-app` 확인 ☐ |
-| `.env` 전환 — `AWS_ENDPOINT_URL` 삭제 ☐ · 키 교체 ☐ · `AWS_REGIONS` 빈 값 ☐ | 동시 수행 시각 ______ |
+| `.env` 전환(A2) — `AWS_ENDPOINT_URL` 삭제 ☐ · 키 교체 ☐ · `AWS_REGIONS` 빈 값 ☐ | 동시 수행 시각 ______ |
 | 전환을 돌린 자리 | 본진 / 전용 worktree(권장) — ______ |
 | Budget $50 알림 생성 | ☐ |
 
@@ -50,12 +69,26 @@ Rule Engine은 경과 시간이 아니라 **실제 CPU 관측치 수(`cpu_datapo
 
 ## 2. 수집·판정 대조 (A3 · A9) — 김승철
 
+### 2-0. 시험 적용 회차 (ADR-0009 §6 1단계 · 10/1(목) 전 1회)
+
+ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 실측으로 정했다. 실행했으면 결과를, 안 했으면 미실행과 사유를 적는다. 본 스모크 회차(§2-1)와 섞지 않는다.
+
+| 항목 | 값 |
+| --- | --- |
+| 실행 여부 · 시각 | 실행 / 미실행 — ______ · 미실행이면 사유 ______ |
+| `collection_runs.status` | ______ |
+| elbv2·autoscaling 조회 결과 | ______ |
+| 이월 4행 처분에 보태는 근거 | ______ |
+
 ### 2-1. 스캔 1회 결과
+
+`collector_failures`는 `_safe_describe`가 흡수한 조회의 **라벨 → 사유 코드** 묶음이며, 적재 시 `error_summary`에 compact JSON으로 실린다(`collector.py` `_failures_summary`). 회차가 `PARTIAL`이면 이 사유 코드에서 권한 누락인지가 갈린다 — LocalStack의 라이선스 실패는 `InternalFailure`, 실 AWS의 권한 누락은 `AccessDenied`이고, 둘 다 빈 목록으로 강등되므로 "정상 0건"과 구별되지 않는다.
 
 | 항목 | LocalStack 기준선 | 실 AWS 관측 | 판정 |
 | --- | --- | --- | --- |
 | `collection_runs.status` | `PARTIAL`(매 회차) | ______ | |
 | `error_summary` | `auto_scaling_groups`·`alb_target_groups` 실패 | ______ | |
+| `collector_failures` 라벨 → 사유 코드 | `auto_scaling_groups`·`alb_target_groups` → `InternalFailure`(라이선스 밖) | 라벨 ______ → 사유 ______ | `AccessDenied`면 **권한 누락** — 빠진 조회 권한을 §7에 적고 `policy` 대조 |
 | `elbv2`(ALB Target Group) 조회 | 라이선스 밖 — 항상 실패 | ______ | **이월 4행 처분 근거** |
 | `autoscaling`(ASG) 조회 | 라이선스 밖 — 항상 실패 | ______ | **이월 4행 처분 근거** |
 | CloudWatch 메트릭 | 시드 주입(즉시·균일) | ______ | **이월 3행 처분 근거** |
@@ -79,7 +112,7 @@ Rule Engine은 경과 시간이 아니라 **실제 CPU 관측치 수(`cpu_datapo
 | `COST_CANDIDATE` | | | CPU 관측치 48개 이상 확보 후 태그·사용률 조건도 대조 |
 | `SKIP_INSUFFICIENT_DATA` | | | CPU 관측치 없음 또는 48개 미만인지 대조 |
 | `SKIP_PROD_PROTECTED` | | `web-1`·`web-2` | **A9** |
-| `SKIP_WHITELISTED` | | `smoke-isolation` | 격리 SG 제외(#359) 확인 |
+| `SKIP_WHITELISTED` | | `vigilantis-smoke-isolation` | 격리 SG 제외(#359) 확인 — 판정은 이름이 아니라 `vigilantis:role=isolation` 태그로 갈린다 |
 | `UNUSED` | | | |
 | `THREAT` | | | |
 | 그 밖 | | | |
@@ -140,7 +173,7 @@ Rule Engine은 경과 시간이 아니라 **실제 CPU 관측치 수(`cpu_datapo
 | 1 | 가드레일 ④ `DryRun=True` — 실제 IAM 권한 검증 | 해소 / 미해소 | §3 A4 |
 | 2 | `get_waiter` Status Check — `impaired`(ⓐ)만 | 해소 / 미해소 | §4 A8-impaired (stopped 실험 제외) |
 | 3 | CloudWatch 메트릭 수집(지연·해상도) | 해소 / 미해소 | §2-1 |
-| 4 | ALB Target Group · ASG 경로(P2 3종) | 해소 / 미해소 | §2-1 · §2-2 · 10주차 §8 |
+| 4 | ALB Target Group · ASG 경로(P2 3종) | 해소 / 미해소 | §2-0 · §2-1 · §2-2 · 10주차 §8 · §8-1 |
 | 5 | NACL 생성·삭제의 `DryRun=True` | 해소 / 미해소 | §3 A4-3·A4-4 |
 | 6 | `Protocol` 표기 | 해소 / 미해소 | §4 A6 |
 | 7 | `PortRange` | 해소 / 미해소 | §4 A6 |
@@ -178,7 +211,18 @@ Rule Engine은 경과 시간이 아니라 **실제 CPU 관측치 수(`cpu_datapo
 | --- | --- | --- | --- | --- |
 | P2-1 | `EC2_ISOLATE` → `EC2_UNISOLATE` | | | TG 등록 해제 + 격리 SG 교체 → 백업 기준 원복 |
 | P2-2 | `EC2_ENABLE_AUTOSCALING` | | | ASG 상한 4대 · **검증 직후 정리**(비용이 예산표 밖) |
-| P2-3 | 위 경로의 가드레일 ④ DryRun | | | |
+
+### 8-1. 가드레일 ④ — DryRun 부분과 조회 대체 통과 조건 확정 (P2-3)
+
+[ADR-0007](adr/0007-guardrail-dryrun-executor-precheck-contract.md) §4는 이 3종을 MIXED(일부 DryRun + 일부 조회)로 규정하고, **조회 쪽 통과 조건을 "실 AWS 스모크에서 확정한다(현재는 잠정안)"** 으로 남겼다. LocalStack Community에 elbv2·autoscaling이 없어 로컬에서 그 조회가 돈 적이 없다. 이 칸을 비워 두면 10주차 뒤에도 §4의 3행은 잠정으로 남는다. DryRun 부분과 describe 부분을 섞어 적지 않는다.
+
+| # | 런북 | DryRun 부분 결과 | describe 통과 조건 실측(①②③④ 각각) | 잠정 조건 확정 / 수정 필요 |
+| --- | --- | --- | --- | --- |
+| P2-3a | `EC2_ISOLATE`<br>ENI `modify_network_interface_attribute` DryRun + `describe_target_health`·`describe_security_groups` | | ① DryRun 통과 ______<br>② `isolation_group_id` SG 존재 ______<br>③ TG 존재·대상 등록됨(`Target.NotRegistered` 설명은 미등록으로 본다) ______ | 확정 / 수정 필요 — ______ |
+| P2-3b | `EC2_UNISOLATE`<br>ENI DryRun + `describe_target_groups`·`describe_security_groups` | | ① DryRun 통과 ______<br>② 백업 레코드의 복원 대상 SG 전부 현존 ______<br>③ TG 존재·대상이 같은 VPC(`describe_target_groups`의 `VpcId`) ______ | 확정 / 수정 필요 — ______ |
+| P2-3c | `EC2_ENABLE_AUTOSCALING`<br>LT `create_launch_template` DryRun + `describe_instances`·`describe_auto_scaling_groups` | | ① DryRun 통과 ______<br>② 원본 EC2 존재·`running` ______<br>③ 동명 ASG 부재 ______<br>④ `min_size <= max_size <= 4` ______ | 확정 / 수정 필요 — ______ |
+
+> 거절이 났으면 사유 코드(`PRECHECK_TARGET_NOT_FOUND` · `PRECHECK_INVALID_STATE` · `PRECHECK_PARAM_INVALID`)와 `verification_summary`를 그대로 적는다. 조건을 고쳐야 하면 ADR-0007 §4 개정 대상으로 §7에 남긴다.
 
 **이월 4행 최종 처분**: ______
 
@@ -188,8 +232,8 @@ Rule Engine은 경과 시간이 아니라 **실제 CPU 관측치 수(`cpu_datapo
 
 | 항목 | 값 |
 | --- | --- |
-| 실제 자원 기동~정리 기간(재기동 시 구간별 기록) | ______ ~ ______ |
-| 비용 집계 기간 · 확인 시각 | ______ ~ ______ · 확인 ______ |
+| 실제 자원 기동–정리 기간(재기동 시 구간별 기록) | ______ – ______ |
+| 비용 집계 기간 · 확인 시각 | ______ – ______ · 확인 ______ |
 | Budget 알림 수신 | ☐ 50% ☐ 80% ☐ 100% ☐ 예측 100% |
 | 실제 청구(확인 가능 시점에) | ______ |
 
