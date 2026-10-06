@@ -428,14 +428,20 @@ export interface IncidentListItem {
 }
 
 /**
- * 종료 처리 시 관제자가 남기는 판단 — **`JUSTIFIED` 1종이다.**
+ * 종료 처리 시 관제자가 남기는 판단. 추가 조치 없는 종료는 조치 성공을 뜻하지 않는다.
  * 모달의 다른 선택지 `과잉이었다`는 종료 값이 아니라 복구 실행으로 넘어가는 트리거라
  * 이 API에 도달하지 않는다(§4.6 · packages/schemas/api/incidents.py `ResolutionJudgement`).
  */
-export const RESOLUTION_JUDGEMENTS = ['JUSTIFIED'] as const;
+export const RESOLUTION_JUDGEMENTS = ['JUSTIFIED', 'NO_FURTHER_ACTION'] as const;
 export type ResolutionJudgement = (typeof RESOLUTION_JUDGEMENTS)[number];
 
+export type AnalysisResultStatus =
+  | 'PENDING' | 'IN_PROGRESS' | 'PROPOSALS_GENERATED' | 'NO_PROPOSAL'
+  | 'GUARDRAIL_REJECTED' | 'FAILED' | 'UNAVAILABLE';
+
 export interface IncidentResponse extends IncidentListItem {
+  /** 저장된 SECOPS 분석 결과. 종료나 제안 소진으로 바뀌지 않는다. */
+  analysis_result: { status: AnalysisResultStatus } | null;
   /** 분석 완료 시 정확히 3개, 분석 중·실패 시 빈 배열. */
   summary_lines: string[];
   evidence_ids: string[];
@@ -447,6 +453,7 @@ export interface IncidentResponse extends IncidentListItem {
    * 관제자 복구 접수로 재개되면 다시 null이 된다(ADR-0004).
    */
   resolution: ResolutionJudgement | null;
+  resolution_note: string | null;
   resolved_at: IsoDateTime | null;
 }
 
