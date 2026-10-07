@@ -10,6 +10,9 @@
 실제로 적재한다. 모델은 FakeAIModelClient로만 부른다(실호출 0회).
 """
 
+import io
+import json
+import logging
 import sys
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -37,6 +40,7 @@ from ai.model_client import FakeAIModelClient  # noqa: E402
 from db.repositories import assets as assets_repo  # noqa: E402
 from db.repositories import guardrails as guardrails_repo  # noqa: E402
 from db.repositories import incidents as incidents_repo  # noqa: E402
+from logging_config import JsonLineFormatter  # noqa: E402
 from schemas.agents import AgentGraphOutput, RunbookCandidateDraft  # noqa: E402
 from schemas.api.assets import AssetType  # noqa: E402
 from schemas.assets import MetricSummary as MetricSummaryContract  # noqa: E402
@@ -279,18 +283,39 @@ def _cycle(db, client, publish=None):
     return agent_dispatcher.dispatch_pending_analysis(db, publish, client=client)
 
 
+def _recorded(caplog) -> dict:
+    """분석 종결 로그 1줄(#424) — 도메인과 결과에 무관하게 저장마다 남는다."""
+    records = [r for r in caplog.records if r.getMessage() == "agent_analysis_recorded"]
+    assert len(records) == 1
+    return records[0].__dict__
+
+
+def _violation_reasons(caplog) -> list[tuple[str, str]]:
+    return [
+        (record.incident_id, record.reason_code)
+        for record in caplog.records
+        if record.getMessage() == "agent_output_contract_violation"
+    ]
+
+
 # ------------------------------------------------------------------------------
 # Golden — 정상 입력, 기대값은 조회 계약과 카드 결정에서 도출한다
 # ------------------------------------------------------------------------------
 
 
-def test_successful_analysis_moves_the_incident_to_awaiting_approval(db, precheck_pass):
+def test_successful_analysis_moves_the_incident_to_awaiting_approval(db, precheck_pass, caplog):
     incident_id = _pending_incident(db)
     evidence_id = _rule_evidence_id(db, incident_id)
 
-    report = _cycle(
-        db, _client(SUMMARY, CandidateProposalOutput(candidates=[_proposal(evidence_id)]))
+    with caplog.at_level(logging.INFO, logger="vigilantis.workflow"):
+        report = _cycle(
+            db, _client(SUMMARY, CandidateProposalOutput(candidates=[_proposal(evidence_id)]))
+        )
+    recorded = _recorded(caplog)
+    assert (recorded["incident_id"], recorded["analysis_result"]) == (
+        incident_id, "PROPOSALS_GENERATED"
     )
+    assert recorded["incident_status"] == "AWAITING_APPROVAL"
 
     assert (report.scanned, report.claimed, report.succeeded) == (1, 1, 1)
     incident = incidents_repo.get_incident(db, incident_id)
@@ -630,21 +655,24 @@ def test_graph_input_carries_the_cpu_numbers_when_the_run_has_metrics(db):
 
 
 def test_candidate_citing_evidence_outside_the_input_fails_the_whole_output(
-    db, precheck_pass
+    db, precheck_pass, caplog
 ):
     incident_id = _pending_incident(db)
 
-    report = _cycle(
-        db,
-        _client(
-            SUMMARY,
-            CandidateProposalOutput(
-                candidates=[_proposal("2f0d2f2e-0000-4000-8000-000000000000")]
+    with caplog.at_level(logging.WARNING, logger="vigilantis.agent_dispatcher"):
+        report = _cycle(
+            db,
+            _client(
+                SUMMARY,
+                CandidateProposalOutput(
+                    candidates=[_proposal("2f0d2f2e-0000-4000-8000-000000000000")]
+                ),
             ),
-        ),
-    )
+        )
 
     assert report.failed == 1
+    # 사유 코드가 incident_id와 함께 남는다(#424)
+    assert _violation_reasons(caplog) == [(incident_id, "EVIDENCE_NOT_IN_INPUT")]
     incident = incidents_repo.get_incident(db, incident_id)
     db.refresh(incident)
     assert incident.status is IncidentStatus.FAILED
@@ -653,7 +681,7 @@ def test_candidate_citing_evidence_outside_the_input_fails_the_whole_output(
     assert incidents_repo.list_candidates(db, incident_id) == []
 
 
-def test_reviewed_risk_level_on_a_finops_output_is_rejected(db):
+def test_reviewed_risk_level_on_a_finops_output_is_rejected(db, caplog):
     """FINOPS 출력에는 사후 위험도가 올 수 없다(계약 원칙 ⓑ).
 
     그래프가 이 값을 채우는 경로는 없어(ai/agent.py _validate_output_contract) 검증기를
@@ -668,10 +696,12 @@ def test_reviewed_risk_level_on_a_finops_output_is_rejected(db):
         reviewed_risk_level=RiskLevel.HIGH,
     )
 
-    verified = agent_dispatcher.verify_graph_output(graph_input, violating, incident_id)
+    with caplog.at_level(logging.WARNING, logger="vigilantis.agent_dispatcher"):
+        verified = agent_dispatcher.verify_graph_output(graph_input, violating, incident_id)
 
     assert verified.invocation_status is AgentInvocationStatus.FAILED
     assert verified.summary_lines == []
+    assert _violation_reasons(caplog) == [(incident_id, "REVIEWED_RISK_MISMATCH")]
 
 
 def test_evidence_subset_check_reads_the_input_not_the_incident(db):
@@ -709,12 +739,17 @@ def test_evidence_subset_check_reads_the_input_not_the_incident(db):
 # ------------------------------------------------------------------------------
 
 
-def test_no_proposal_closes_as_failed_with_an_empty_summary(db, client_pg):
+def test_no_proposal_closes_as_failed_with_an_empty_summary(db, client_pg, caplog):
     """요약만 있고 후보가 0개인 것은 정상 종착이 아니라 분석 실패다."""
     incident_id = _pending_incident(db)
 
     model = _client(SUMMARY, CandidateProposalOutput(candidates=[]))
-    report = _cycle(db, model)
+    with caplog.at_level(logging.INFO, logger="vigilantis.workflow"):
+        report = _cycle(db, model)
+    # Incident는 FAILED지만 분석은 무제안으로 끝났다 — 응답에는 없는 구분을 로그가 남긴다(#424)
+    recorded = _recorded(caplog)
+    assert (recorded["analysis_result"], recorded["incident_status"]) == ("NO_PROPOSAL", "FAILED")
+    assert recorded["guardrail_rejections"] == []
     assert len(model.sent) == 2
 
     assert report.no_proposal == 1
@@ -728,14 +763,24 @@ def test_no_proposal_closes_as_failed_with_an_empty_summary(db, client_pg):
     assert client_pg.get("/api/v1/incidents").status_code == 200
 
 
-def test_all_candidates_rejected_closes_as_failed(db, monkeypatch):
+def test_all_candidates_rejected_closes_as_failed(db, monkeypatch, caplog):
     """가드레일이 후보를 전부 거절하면 실행 가능한 제안이 0개다 — 같은 처분이다."""
     monkeypatch.setattr(workflows, "_candidate_precheck", _failing_precheck)
     incident_id = _pending_incident(db)
     evidence_id = _rule_evidence_id(db, incident_id)
 
     model = _client(SUMMARY, CandidateProposalOutput(candidates=[_proposal(evidence_id)]))
-    report = _cycle(db, model)
+    with caplog.at_level(logging.INFO, logger="vigilantis.workflow"):
+        report = _cycle(db, model)
+    # 전체 거절과 그 단계·사유가 로그에 남는다 — 무제안·분석 실패와 같은 FAILED라도 갈린다(#424)
+    recorded = _recorded(caplog)
+    assert (recorded["analysis_result"], recorded["incident_status"]) == (
+        "GUARDRAIL_REJECTED", "FAILED"
+    )
+    assert recorded["guardrail_rejections"] == [{
+        "runbook_id": "RUNBOOK_EC2_RIGHTSIZING", "failed_step": "AWS_DRY_RUN",
+        "reason_code": "PRECHECK_TARGET_NOT_FOUND",
+    }]
     assert len(model.sent) == 2
 
     assert report.succeeded == 1  # 그래프는 성공했다
@@ -993,6 +1038,41 @@ def _secops_client(db, incident_id, *, candidates=True, **over):
     )
 
 
+def test_secops_target_outside_the_menu_is_logged_with_that_target(db, caplog):
+    """대상 밖 거절 로그에 그 ARN이 남는다 — 가드레일 ③ 거절 로그와 같은 처분이다(#424).
+
+    그래프가 대상 밖 후보를 먼저 거절하므로(ai/agent.py) 검증기를 직접 부른다.
+    """
+    incident_id = _pending_secops(db)
+    graph_input = agent_dispatcher.build_graph_input(db, incident_id)
+    outside = NACL_ARN.replace(NACL_ID, "acl-0def123456789abc0")
+    output = AgentGraphOutput(
+        invocation_status=AgentInvocationStatus.SUCCEEDED,
+        summary_lines=["관찰", "진단", "근거"],
+        reviewed_risk_level=RiskLevel.HIGH,
+        candidates=[
+            RunbookCandidateDraft.model_validate(
+                {
+                    "runbook_id": "RUNBOOK_NACL_ADD_DENY",
+                    "target_arn": outside,
+                    "parameters": {
+                        "rule_number": 100, "cidr_block": "203.0.113.10/32", "protocol": "tcp",
+                    },
+                    "evidence_ids": [graph_input.evidences[0].evidence_id],
+                }
+            )
+        ],
+    )
+
+    with caplog.at_level(logging.WARNING, logger="vigilantis.agent_dispatcher"):
+        verified = agent_dispatcher.verify_graph_output(graph_input, output, incident_id)
+
+    assert verified.invocation_status is AgentInvocationStatus.FAILED
+    assert _violation_reasons(caplog) == [(incident_id, "TARGET_NOT_ALLOWED")]
+    [record] = [r for r in caplog.records if r.getMessage() == "agent_output_contract_violation"]
+    assert record.target_arn == outside
+
+
 def test_secops_dispatch_stores_risk_candidates_wait_and_commit_event(db, client_pg, monkeypatch):
     from schemas.api.incidents import ResponseMode
 
@@ -1038,7 +1118,7 @@ def test_secops_dispatch_stores_risk_candidates_wait_and_commit_event(db, client
 
 @pytest.mark.parametrize("kind", ["no_proposal", "rejected", "unknown_evidence", "broad_cidr", "nul"])
 def test_secops_non_executable_results_remain_readable(db, client_pg, monkeypatch, caplog, kind):
-    caplog.set_level("INFO", logger="workflows")
+    caplog.set_level("INFO", logger="vigilantis.workflow")
     incident_id = _pending_secops(db)
     monkeypatch.setattr(workflows, "_candidate_precheck", _failing_precheck)
     over = {}
@@ -1070,6 +1150,13 @@ def test_secops_non_executable_results_remain_readable(db, client_pg, monkeypatc
             "runbook_id": "RUNBOOK_NACL_ADD_DENY", "failed_step": "AWS_DRY_RUN",
             "reason_code": "PRECHECK_TARGET_NOT_FOUND",
         }]
+    # 종결 로그는 조회 응답과 같은 판정을 남긴다(#424)
+    recorded = _recorded(caplog)
+    assert {
+        "status": recorded["analysis_result"],
+        "guardrail_rejections": recorded["guardrail_rejections"],
+    } == data["analysis_result"]
+    assert recorded["incident_status"] == data["status"]
     resolved = client_pg.post(f"/api/v1/incidents/{incident_id}/resolve", json={
         "resolution": "NO_FURTHER_ACTION", "resolution_note": "서비스 밖에서 판단 후 종료",
     })
@@ -1186,7 +1273,7 @@ def test_incident_claimed_by_another_scanner_is_skipped(db, monkeypatch):
     assert (report.scanned, report.skipped, report.claimed) == (1, 1, 0)
 
 
-def test_missing_asset_evidence_closes_the_incident_as_failed(db):
+def test_missing_asset_evidence_closes_the_incident_as_failed(db, caplog):
     """근거가 빠진 건은 다음 주기에도 결과가 같다 — PENDING으로 두면 영원히 반복한다."""
     incident_id = _pending_incident(db)
     asset_evidence = next(
@@ -1197,10 +1284,82 @@ def test_missing_asset_evidence_closes_the_incident_as_failed(db):
     db.delete(asset_evidence)
     db.commit()
 
-    report = agent_dispatcher.dispatch_pending_analysis(db, client=_client())
+    with caplog.at_level(logging.INFO):
+        report = agent_dispatcher.dispatch_pending_analysis(db, client=_client())
+    assert (_recorded(caplog)["analysis_result"], _recorded(caplog)["incident_status"]) == (
+        "FAILED", "FAILED"
+    )
 
     assert report.failed == 1
     incident = incidents_repo.get_incident(db, incident_id)
     db.refresh(incident)
     assert incident.status is IncidentStatus.FAILED
     assert incident.agent_invocation_status is AgentInvocationStatus.FAILED
+    unavailable = [r for r in caplog.records if r.getMessage() == "agent_graph_input_unavailable"]
+    assert [(r.incident_id, r.reason_code) for r in unavailable] == [
+        (incident_id, "GRAPH_INPUT_UNAVAILABLE")
+    ]
+
+
+# ------------------------------------------------------------------------------
+# 분석 회차 로그 묶음 (#424)
+# ------------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def json_log_lines():
+    """실제 출력 형식으로 받는다 — 문맥 필드는 포매터가 합쳐 caplog 레코드에는 없다."""
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(JsonLineFormatter())
+    root = logging.getLogger()
+    previous_level = root.level
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+    try:
+        yield lambda: [json.loads(line) for line in stream.getvalue().splitlines()]
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(previous_level)
+
+
+def test_one_analysis_shares_the_incident_and_the_claim_time_across_its_logs(
+    db, precheck_pass, monkeypatch, json_log_lines
+):
+    # 그래프 두 호출과 그래프 뒤 단가 추정 호출이 한 회차로 묶이는가. 선점 시각은 DB에 쓰인
+    # agent_invocation_started_at과 같은 값이라, 회수 뒤 다시 분석한 회차와 갈린다
+    incident_id = _pending_incident(db)
+    evidence_id = _rule_evidence_id(db, incident_id)
+
+    claimed_at = []
+    claim = incidents_repo.claim_agent_invocation
+
+    def recording_claim(db_, incident_id_, *, started_at):
+        claimed_at.append(started_at)
+        return claim(db_, incident_id_, started_at=started_at)
+
+    monkeypatch.setattr(incidents_repo, "claim_agent_invocation", recording_claim)
+
+    model = _client(SUMMARY, CandidateProposalOutput(candidates=[_proposal(evidence_id)]))
+    original = model.complete
+
+    def probing_complete(request, response_model):
+        logging.getLogger("vigilantis.test").info("model_probe")
+        return original(request, response_model)  # 단가 호출은 응답이 없어 추정 실패로 남는다
+
+    model.complete = probing_complete
+    report = _cycle(db, model)
+    assert report.succeeded == 1
+
+    lines = json_log_lines()
+    probes = [line for line in lines if line["event"] == "model_probe"]
+    assert [line["analysis_step"] for line in probes] == [
+        "summarize_evidence", "propose_candidates", "estimate_savings",
+    ]
+    assert {line["incident_id"] for line in probes} == {incident_id}
+    assert {
+        datetime.fromisoformat(line["agent_invocation_started_at"]) for line in probes
+    } == set(claimed_at)
+    # 한 건이 끝나면 문맥이 풀린다 — 스캔 요약 줄에는 건의 식별자가 없다
+    done = [line for line in lines if line["event"] == "agent_dispatch_cycle_done"]
+    assert done and "incident_id" not in done[-1]

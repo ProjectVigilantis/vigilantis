@@ -72,6 +72,10 @@
 # 기다린다. 분석 결과와 실행 결과는 따로 보존한다(workflows.record_agent_analysis).
 # 승인 대기 시각·60초 기한을 기록하되 자동 격리 발동 엔진은 이 모듈 범위 밖이다.
 #
+# FAILED로 닫히는 자리마다 사유 코드(ai.agent.AnalysisFailureReason)를 로그에 싣는다(#424).
+# 이 모듈은 입력 불가와 5번 검증 위반을, 그래프 안의 실패는 ai/agent.py가 남긴다. 한 건의
+# 로그 전부에는 incident_id와 선점 시각(agent_invocation_started_at)이 문맥으로 붙는다.
+#
 # 기동 worker 개수는 dispatcher.py와 같은 전제입니다 — worker 1개. 선점의 잠금 수명이
 # 2번의 commit에서 끝나므로, "그래프 진입은 한 주체뿐"이라는 보장은 그 전제 + 스캔
 # 비중첩(max_instances=1)에서 성립합니다. ADR-0005가 다중 worker 토폴로지를 별도 결정
@@ -85,7 +89,7 @@ import ipaddress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import partial
-from typing import Callable, Optional
+from typing import Callable, NamedTuple, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -109,7 +113,14 @@ from schemas.evidence import EvidenceItem, EvidenceType
 from schemas.incidents import AgentInvocationStatus
 
 import workflows
-from ai.agent import run_finops_graph, run_secops_graph, FINOPS_MODEL_CALLS, SECOPS_MODEL_CALLS
+from ai.agent import (
+    FINOPS_MODEL_CALLS,
+    REJECTED_TARGET_ARN_LOG_CHARS,
+    SECOPS_MODEL_CALLS,
+    AnalysisFailureReason,
+    run_finops_graph,
+    run_secops_graph,
+)
 from ai.capabilities import (
     build_finops_capabilities,
     build_secops_capabilities,
@@ -123,6 +134,7 @@ from db import mappers
 from db.repositories import incidents as incidents_repo
 from db.repositories import executions as executions_repo
 from db.session import get_session_factory
+from logging_config import log_context
 from realtime import incident_event
 
 logger = logging.getLogger("vigilantis.agent_dispatcher")
@@ -374,20 +386,30 @@ def _unstorable_field(output: AgentGraphOutput) -> Optional[str]:
     return None
 
 
+class _Violation(NamedTuple):
+    """ⓐ·ⓑ·ⓒ 위반 1건. target_arn은 대상 밖으로 거절했을 때만 잘라서 싣는다."""
+
+    reason: AnalysisFailureReason
+    message: str
+    target_arn: Optional[str] = None
+
+
 def _contract_violation(
     graph_input: AgentGraphInput, output: AgentGraphOutput
-) -> Optional[str]:
-    """ⓐ·ⓑ·ⓒ 위반 사유 한 줄. 위반이 없으면 None."""
+) -> Optional[_Violation]:
+    """ⓐ·ⓑ·ⓒ 위반의 사유 코드와 한 줄 설명. 위반이 없으면 None."""
     if (
         graph_input.domain is IncidentCategory.FINOPS
         and output.reviewed_risk_level is not None
     ):
-        return "FINOPS 출력에 reviewed_risk_level이 실렸습니다"
+        return _Violation(AnalysisFailureReason.REVIEWED_RISK_MISMATCH,
+                          "FINOPS 출력에 reviewed_risk_level이 실렸습니다")
 
     if (graph_input.domain is IncidentCategory.SECOPS
             and output.invocation_status is not AgentInvocationStatus.FAILED
             and output.reviewed_risk_level is None):
-        return "SECOPS 분석 결과에 재평가 위험도가 없습니다"
+        return _Violation(AnalysisFailureReason.REVIEWED_RISK_MISMATCH,
+                          "SECOPS 분석 결과에 재평가 위험도가 없습니다")
 
     offered = {item.evidence_id for item in graph_input.evidences}
     for candidate in output.candidates:
@@ -396,21 +418,29 @@ def _contract_violation(
             context = savings_context(graph_input.asset_context)
             if (context is None or candidate.target_arn != context["target_arn"]
                     or candidate.parameters.target_instance_type != context["target_instance_type"]):
-                return "다운사이징 대상·목표 타입이 입력 스냅샷의 서버 계산과 다릅니다"
+                return _Violation(AnalysisFailureReason.SERVER_VALUE_MISMATCH,
+                                  "다운사이징 대상·목표 타입이 입력 스냅샷의 서버 계산과 다릅니다")
         unknown = sorted(set(candidate.evidence_ids) - offered)
         if unknown:
-            return (
-                f"{candidate.runbook_id.value} 후보가 입력 밖 evidence_id를 인용했습니다: "
-                f"{unknown}"
+            # 인용한 ID 문자열은 모델이 쓴 값이라 싣지 않고 건수만 남긴다 — 가리키는 실물이
+            # 없어 조사에 쓸 것이 없고, 사유를 가르는 데는 건수로 충분하다(#424)
+            return _Violation(
+                AnalysisFailureReason.EVIDENCE_NOT_IN_INPUT,
+                f"{candidate.runbook_id.value} 후보가 입력 밖 evidence_id {len(unknown)}건을 "
+                "인용했습니다",
             )
 
     if isinstance(graph_input, SecOpsGraphInput):
         targets = secops_action_targets(graph_input.asset_context)
         menu = {item.runbook_id for item in graph_input.capabilities}
         for candidate in output.candidates:
-            if (candidate.runbook_id not in menu or candidate.target_arn not in
-                    targets.get(candidate.runbook_id.value, [])):
-                return "SECOPS 후보의 조치·대상이 입력 메뉴 밖입니다"
+            if candidate.runbook_id not in menu:
+                return _Violation(AnalysisFailureReason.RUNBOOK_NOT_OFFERED,
+                                  "SECOPS 후보의 조치가 입력 메뉴 밖입니다")
+            if candidate.target_arn not in targets.get(candidate.runbook_id.value, []):
+                return _Violation(AnalysisFailureReason.TARGET_NOT_ALLOWED,
+                                  "SECOPS 후보의 대상이 입력 메뉴 밖입니다",
+                                  candidate.target_arn[:REJECTED_TARGET_ARN_LOG_CHARS])
             if candidate.runbook_id is RunbookId.RUNBOOK_NACL_ADD_DENY:
                 threats = [item.content.event for item in graph_input.evidences
                            if item.evidence_type is EvidenceType.THREAT
@@ -421,13 +451,16 @@ def _contract_violation(
                     if (len(threats) != 1 or network.num_addresses != 1
                             or network.network_address != source
                             or candidate.parameters.protocol != "tcp"):
-                        return "SSH 차단 파라미터가 인용한 위협 근거와 다릅니다"
+                        return _Violation(AnalysisFailureReason.SSH_DENY_PARAMETER_MISMATCH,
+                                          "SSH 차단 파라미터가 인용한 위협 근거와 다릅니다")
                 except (ValueError, AttributeError, IndexError):
-                    return "SSH 차단의 출발지 근거를 확인할 수 없습니다"
+                    return _Violation(AnalysisFailureReason.SSH_DENY_PARAMETER_MISMATCH,
+                                      "SSH 차단의 출발지 근거를 확인할 수 없습니다")
 
     unstorable = _unstorable_field(output)
     if unstorable is not None:
-        return f"저장할 수 없는 문자(NUL)가 있습니다: {unstorable}"
+        return _Violation(AnalysisFailureReason.UNSTORABLE_VALUE,
+                          f"저장할 수 없는 문자(NUL)가 있습니다: {unstorable}")
     return None
 
 
@@ -435,13 +468,15 @@ def verify_graph_output(
     graph_input: AgentGraphInput, output: AgentGraphOutput, incident_id: str
 ) -> AgentGraphOutput:
     """그래프 출력을 서비스 수용 계약에 대조하고 위반 시 분석 실패로 반환한다."""
-    violation = _contract_violation(graph_input, output)
-    if violation is None:
+    found = _contract_violation(graph_input, output)
+    if found is None:
         return output
-    logger.warning(
-        "agent_output_contract_violation",
-        extra={"incident_id": incident_id, "violation": violation},
-    )
+    extra = {
+        "incident_id": incident_id, "reason_code": found.reason.value, "violation": found.message,
+    }
+    if found.target_arn is not None:
+        extra["target_arn"] = found.target_arn
+    logger.warning("agent_output_contract_violation", extra=extra)
     return AgentGraphOutput(invocation_status=AgentInvocationStatus.FAILED)
 
 
@@ -464,69 +499,79 @@ def _dispatch_one(
     publish: Optional[Publish],
     report: AgentDispatchReport,
 ) -> None:
-    try:
-        if not incidents_repo.claim_agent_invocation(
-            db, incident_id, started_at=datetime.now(timezone.utc)
-        ):
-            # 다른 주체가 이미 가져갔다 — 조건부 UPDATE가 걸러 낸 정상 경로다
-            db.rollback()
-            report.skipped += 1
-            return
-        # 선점 직후 commit — 여기서 끊지 않으면 모델 호출 시간 내내 행이 잠긴다
-        db.commit()
-        report.claimed += 1
-
+    started_at = datetime.now(timezone.utc)
+    # 이 건의 로그 전부(그래프·단가 호출·Workflow 포함)를 한 분석 회차로 묶는다(#424). 선점
+    # 시각은 DB의 agent_invocation_started_at과 같은 값이라, 회수 뒤 다시 분석한 회차와 갈린다
+    with log_context(
+        incident_id=incident_id, agent_invocation_started_at=started_at.isoformat()
+    ):
         try:
-            graph_input = build_graph_input(db, incident_id)
-        except GraphInputUnavailable as exc:
-            logger.warning(
-                "agent_graph_input_unavailable",
-                extra={"incident_id": incident_id, "detail": str(exc)},
-            )
-            db.rollback()
-            graph_input = None
+            if not incidents_repo.claim_agent_invocation(
+                db, incident_id, started_at=started_at
+            ):
+                # 다른 주체가 이미 가져갔다 — 조건부 UPDATE가 걸러 낸 정상 경로다
+                db.rollback()
+                report.skipped += 1
+                return
+            # 선점 직후 commit — 여기서 끊지 않으면 모델 호출 시간 내내 행이 잠긴다
+            db.commit()
+            report.claimed += 1
 
-        if graph_input is None:
-            output = AgentGraphOutput(invocation_status=AgentInvocationStatus.FAILED)
-        else:
-            # 읽기 트랜잭션을 닫는다 — autobegin으로 다시 열린 것을 여기서 끊어야
-            # 그래프 호출이 트랜잭션 밖에서 돈다
-            db.rollback()
-            output = verify_graph_output(
-                graph_input,
-                (run_secops_graph(graph_input, client=client)
-                 if isinstance(graph_input, SecOpsGraphInput)
-                 else run_finops_graph(graph_input, client=client)),
-                incident_id,
-            )
-
-        savings_estimator = None
-        if isinstance(graph_input, FinOpsGraphInput):
-            # 입력 스냅샷·클라이언트 공급만 담당한다. 실행 시점·대상 선택은 Workflow 몫이다.
-            savings_estimator = partial(
-                estimate_candidate_savings, asset=graph_input.asset_context, client=client,
-            )
-
-        outcome = workflows.record_agent_analysis(
-            db, incident_id, output, savings_estimator=savings_estimator,
-        )
-        counter = _TERMINAL_COUNTER[output.invocation_status]
-        setattr(report, counter, getattr(report, counter) + 1)
-        if publish is not None:
-            publish(
-                incident_event(
-                    WsEventType.INCIDENT_UPDATED,
-                    incident_id=incident_id,
-                    occurred_at=outcome.occurred_at,
+            try:
+                graph_input = build_graph_input(db, incident_id)
+            except GraphInputUnavailable as exc:
+                logger.warning(
+                    "agent_graph_input_unavailable",
+                    extra={
+                        "incident_id": incident_id,
+                        "reason_code": AnalysisFailureReason.GRAPH_INPUT_UNAVAILABLE.value,
+                        "detail": str(exc),
+                    },
                 )
+                db.rollback()
+                graph_input = None
+
+            if graph_input is None:
+                output = AgentGraphOutput(invocation_status=AgentInvocationStatus.FAILED)
+            else:
+                # 읽기 트랜잭션을 닫는다 — autobegin으로 다시 열린 것을 여기서 끊어야
+                # 그래프 호출이 트랜잭션 밖에서 돈다
+                db.rollback()
+                output = verify_graph_output(
+                    graph_input,
+                    (run_secops_graph(graph_input, client=client)
+                     if isinstance(graph_input, SecOpsGraphInput)
+                     else run_finops_graph(graph_input, client=client)),
+                    incident_id,
+                )
+
+            savings_estimator = None
+            if isinstance(graph_input, FinOpsGraphInput):
+                # 입력 스냅샷·클라이언트 공급만 담당한다. 실행 시점·대상 선택은 Workflow 몫이다.
+                savings_estimator = partial(
+                    estimate_candidate_savings, asset=graph_input.asset_context, client=client,
+                )
+
+            outcome = workflows.record_agent_analysis(
+                db, incident_id, output, savings_estimator=savings_estimator,
             )
-    except Exception:  # noqa: BLE001 — 한 건의 실패가 스캔 전체를 멈추지 않는다
-        # 선점 이후에 터졌다면 IN_PROGRESS가 남는다. 여기서 되돌리지 않는 것은, 그래프를
-        # 이미 불렀는지 알 수 없어 되돌리면 과금되는 호출이 다음 주기에 한 번 더 나갈 수
-        # 있기 때문이다. 상한을 넘긴 뒤 회수가 집어 간다(_reclaim_stale_claims)
-        logger.exception("agent_dispatch_failed", extra={"incident_id": incident_id})
-        db.rollback()
-        report.errored += 1
+            counter = _TERMINAL_COUNTER[output.invocation_status]
+            setattr(report, counter, getattr(report, counter) + 1)
+            if publish is not None:
+                publish(
+                    incident_event(
+                        WsEventType.INCIDENT_UPDATED,
+                        incident_id=incident_id,
+                        occurred_at=outcome.occurred_at,
+                    )
+                )
+        except Exception:  # noqa: BLE001 — 한 건의 실패가 스캔 전체를 멈추지 않는다
+            # 선점 이후에 터졌다면 IN_PROGRESS가 남는다. 여기서 되돌리지 않는 것은, 그래프를
+            # 이미 불렀는지 알 수 없어 되돌리면 과금되는 호출이 다음 주기에 한 번 더 나갈 수
+            # 있기 때문이다. 상한을 넘긴 뒤 회수가 집어 간다(_reclaim_stale_claims)
+            logger.exception("agent_dispatch_failed", extra={"incident_id": incident_id})
+            db.rollback()
+            report.errored += 1
 
 
 def dispatch_pending_analysis(

@@ -60,7 +60,10 @@ _REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 def create_app() -> FastAPI:
     settings = get_settings()
-    setup_logging(settings.LOG_LEVEL)
+    setup_logging(
+        settings.LOG_LEVEL,
+        log_file_path=settings.LOG_FILE_PATH if settings.LOG_FILE_ENABLED else None,
+    )
 
     realtime = RealtimeManager(send_timeout_seconds=settings.WS_SEND_TIMEOUT_SECONDS)
 

@@ -40,6 +40,9 @@ services:
       DISPATCH_ENABLED: "false"
       MOCK_THREAT_INBOX_DIR: ""
       STEPPER_INBOX_DIR: /app/apps/core-api/.mock-threat-inbox/stepper
+      # 파일 로그를 켜면(.env의 LOG_FILE_ENABLED) 같은 체크아웃의 개발 스택과 같은 폴더를 마운트하므로
+      # 경로를 갈라 둔다 — 한 파일을 두 스택이 쓰면 줄이 섞이고 회전이 서로를 깨뜨린다
+      LOG_FILE_PATH: .logs/stepper/api.log
       STEPPER_TOKEN: ${STEPPER_TOKEN:?scripts/stepper/cli.py로 띄워야 합니다}
       # CLI가 띄우는 FE 주소 — CORS·WebSocket 허용 출처(콤마 구분). FE 포트가 비켜 가면 따라간다.
       # 브라우저를 127.0.0.1로 열어도 막히지 않게 두 이름을 함께 둔다
