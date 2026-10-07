@@ -17,7 +17,7 @@
 
 ### 검증 항목 번호 — 이 표가 번호의 정의다
 
-아래 표 밖의 번호는 쓰지 않는다. 번호는 칸 이름이므로, 채우는 사람은 이 표에서 그 번호가 무엇을 확인하는 칸인지 읽는다.
+아래 표 밖의 번호는 쓰지 않는다. 번호는 칸 이름이므로, 채우는 사람은 이 표에서 그 번호가 무엇을 확인하는 칸인지 읽는다. 하위 번호(`A4-n` · `P2-n`)는 각 절의 표가 정의한다.
 
 | 번호 | 확인할 것 | 이 문서의 칸 |
 | --- | --- | --- |
@@ -69,6 +69,16 @@ Rule Engine은 경과 시간이 아니라 **실제 CPU 관측치 수(`cpu_datapo
 
 ## 2. 수집·판정 대조 (A3 · A9) — 김승철
 
+이 절의 값은 **`scripts/qa_scan_compare.py`** 가 이 순서대로 찍는다(읽기 전용). 스모크 당일에 쿼리를 손으로 조립하지 않는다.
+
+```bash
+uv run python scripts/qa_scan_compare.py
+```
+
+`.env` 의 DSN 은 컨테이너용(`db:5432`)이라 호스트 셸에서 돌릴 때는 `--database-url` 로 호스트에 열린 포트를 넘긴다. 출력의 `mode` 열이 **그 회차가 실 AWS 였는지**의 원천이다 — `localstack` 회차를 실 AWS 결과로 적는 것이 이 대조에서 가장 비싼 실수다.
+
+**LocalStack 값을 비교 기준선으로 두지 않는다.** 시드(`seed_localstack.py`)와 스모크(`provision_smoke_aws.py`)는 자산 구성이 다르고, 이월 목록 자체가 "LocalStack이 보여 주지 못한 것"의 목록이라 비교할 짝이 없다. 로컬에서 가져올 값은 **실패 사유 코드의 모양** 하나이며, 필요한 곳의 비고에 적어 뒀다.
+
 ### 2-0. 시험 적용 회차 (ADR-0009 §6 1단계 · 10/1(목) 전 1회)
 
 ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 실측으로 정했다. 실행했으면 결과를, 안 했으면 미실행과 사유를 적는다. 본 스모크 회차(§2-1)와 섞지 않는다.
@@ -82,28 +92,31 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 
 ### 2-1. 스캔 1회 결과
 
-`collector_failures`는 `_safe_describe`가 흡수한 조회의 **라벨 → 사유 코드** 묶음이며, 적재 시 `error_summary`에 compact JSON으로 실린다(`collector.py` `_failures_summary`). 회차가 `PARTIAL`이면 이 사유 코드에서 권한 누락인지가 갈린다 — LocalStack의 라이선스 실패는 `InternalFailure`, 실 AWS의 권한 누락은 `AccessDenied`이고, 둘 다 빈 목록으로 강등되므로 "정상 0건"과 구별되지 않는다.
+`collector_failures`는 `_safe_describe`가 흡수한 조회의 **라벨 → 사유 코드** 묶음이며, 적재 시 `error_summary`에 compact JSON으로 실린다(`collector.py` `_failures_summary`). 흡수된 조회는 빈 목록으로 강등되므로, 사유 코드 없이는 **"정상 0건"과 구별되지 않는다.**
 
-| 항목 | LocalStack 기준선 | 실 AWS 관측 | 판정 |
-| --- | --- | --- | --- |
-| `collection_runs.status` | `PARTIAL`(매 회차) | ______ | |
-| `error_summary` | `auto_scaling_groups`·`alb_target_groups` 실패 | ______ | |
-| `collector_failures` 라벨 → 사유 코드 | `auto_scaling_groups`·`alb_target_groups` → `InternalFailure`(라이선스 밖) | 라벨 ______ → 사유 ______ | `AccessDenied`면 **권한 누락** — 빠진 조회 권한을 §7에 적고 `policy` 대조 |
-| `elbv2`(ALB Target Group) 조회 | 라이선스 밖 — 항상 실패 | ______ | **이월 4행 처분 근거** |
-| `autoscaling`(ASG) 조회 | 라이선스 밖 — 항상 실패 | ______ | **이월 4행 처분 근거** |
-| CloudWatch 메트릭 | 시드 주입(즉시·균일) | ______ | **이월 3행 처분 근거** |
+| 항목 | 실 AWS 관측 | 판정 · 비고 |
+| --- | --- | --- |
+| `mode` | ______ | `aws` 가 아니면 실 AWS 회차가 아니다 — 아래 칸을 채우기 전에 먼저 본다 |
+| `collection_runs.status` | ______ | `PARTIAL` 이면 아래 사유 코드로 권한 누락인지 가린다 |
+| `error_summary` | ______ | `collector_failures` 가 compact JSON 으로 실린 자리다. 로컬에서 나오는 모양은 `{"alb_target_groups":"InternalFailure","auto_scaling_groups":"InternalFailure"}` — **같은 라벨에 `AccessDenied` 가 오면 권한 누락이다** |
+| `collector_failures` 라벨 → 사유 코드 | 라벨 ______ → 사유 ______ | 사유 코드가 판별 기준이다. `AccessDenied` 는 **권한 누락** — 빠진 조회 권한을 §7에 적고 `policy` 대조. **`InternalFailure` 는 회차의 `mode` 로 뜻이 갈린다** — `localstack` 이면 라이선스 밖이고, **`aws` 면 AWS 측 내부 오류이므로 재시도 후에도 같으면 §7에 적는다**(실 AWS 에서도 나오는 코드다). 어느 코드든 빈 목록으로 강등되므로 "정상 0건"과 구별되지 않는다 |
+| `elbv2`(ALB Target Group) 조회 | ______ | **이월 4행 처분 근거.** LocalStack Community 에 없어 로컬에서 성공한 적이 없다 |
+| `autoscaling`(ASG) 조회 | ______ | **이월 4행 처분 근거.** 같은 이유로 로컬에서 성공한 적이 없다 |
+| CloudWatch 메트릭 | ______ | **이월 3행 처분 근거.** **시드 회차는 관측치를 즉시 72개로 채우므로 48개 게이트가 걸리지 않는다**(2026-10-06 실측 — 자산 4대 모두 72개). 게이트 자체는 골든 A4(`dp 47`)가 검증한다. 지연·해상도는 실 AWS에서 처음 관측된다 |
 
 ### 2-2. 자산 유형별 수집 수
 
-| 자산 유형 | 기대(provision 스펙) | 수집 수 | 비고 |
+수집기는 **리전 전체**를 훑으므로, 수집 수는 아래 스모크 자원 수보다 많을 수 있다(기본 VPC 등 이미 있던 자원). 적을 때 그 차이를 비고에 남긴다 — 많은 것이 이상은 아니고, **적은 것이 이상이다**. **수가 같거나 많아도 스모크 자원이 전부 잡혔다는 뜻은 아니다** — 이름은 §2-3 대상 목록으로 대조한다.
+
+| 자산 유형 | 기대 — 스모크 자원(`provision_smoke_aws.py` 스펙) | 수집 수 | 비고 |
 | --- | --- | --- | --- |
-| EC2 | | | |
-| SG | | | |
-| NACL | | | |
-| EBS | | | |
-| Launch Template | | | |
-| Auto Scaling Group | | | LocalStack Community에서는 조회 실패로 미확인(자산 0개를 뜻하지 않음) |
-| ALB Target Group | | | LocalStack Community에서는 조회 실패로 미확인(자산 0개를 뜻하지 않음) |
+| EC2 | 3 — `web-1`·`web-2`·`idle-dev` | | |
+| SG | 6 — 명명 5종(`alb`·`web`·`open-ssh`·`unused`·`isolation`) + 스모크 VPC 기본 SG | | |
+| NACL | 2 — `vigilantis-smoke-nacl` + 스모크 VPC 기본 NACL | | |
+| EBS | 4 — 인스턴스 루트 3 + 미연결 `vigilantis-smoke-unattached` 1 | | |
+| Launch Template | 0 — `up` 은 만들지 않는다(`EC2_ENABLE_AUTOSCALING` 이 `vigilantis-lt-` 접두로 만든다) | | 0이 정상. **있으면 출처(이름·생성 시각)를 §7에 적는다** — 수집이 리전 전체를 훑으므로 스모크 밖에서 만든 LT도 잡힌다 |
+| Auto Scaling Group | 0 — `up` 은 만들지 않는다(P2 검증이 만들고 직후 정리) | | 0과 미관측을 구분한다. precheck 조건 ③이 **동명 ASG 부재**라 0이 정상 |
+| ALB Target Group | 1 — `vigilantis-smoke-tg` | | LocalStack에서는 조회 실패로 **미관측**(자산 0개를 뜻하지 않음) |
 
 ### 2-3. 판정 분포
 
@@ -112,7 +125,7 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 | `COST_CANDIDATE` | | | CPU 관측치 48개 이상 확보 후 태그·사용률 조건도 대조 |
 | `SKIP_INSUFFICIENT_DATA` | | | CPU 관측치 없음 또는 48개 미만인지 대조 |
 | `SKIP_PROD_PROTECTED` | | `web-1`·`web-2` | **A9** |
-| `SKIP_WHITELISTED` | | `vigilantis-smoke-isolation` | 격리 SG 제외(#359) 확인 — 판정은 이름이 아니라 `vigilantis:role=isolation` 태그로 갈린다 |
+| `SKIP_WHITELISTED` | | `vigilantis-smoke-isolation` + 이름이 `default` 인 SG 전부 | **경로가 둘이다** — 이름 `default`(삭제·변경 불가)와 `vigilantis:role=isolation` 태그(#359). `default` SG가 이 칸에 함께 뜨는 것이 정상이다 |
 | `UNUSED` | | | |
 | `THREAT` | | | |
 | 그 밖 | | | |
