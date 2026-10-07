@@ -102,11 +102,11 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 | `collector_failures` 라벨 → 사유 코드 | 라벨 ______ → 사유 ______ | 사유 코드가 판별 기준이다 — `InternalFailure` 는 LocalStack 라이선스 밖, `AccessDenied` 는 **권한 누락**(빠진 조회 권한을 §7에 적고 `policy` 대조). 둘 다 빈 목록으로 강등되므로 "정상 0건"과 구별되지 않는다 |
 | `elbv2`(ALB Target Group) 조회 | ______ | **이월 4행 처분 근거.** LocalStack Community 에 없어 로컬에서 성공한 적이 없다 |
 | `autoscaling`(ASG) 조회 | ______ | **이월 4행 처분 근거.** 같은 이유로 로컬에서 성공한 적이 없다 |
-| CloudWatch 메트릭 | ______ | **이월 3행 처분 근거.** 시드는 관측치를 즉시·균일하게 채우므로 **LocalStack에서는 48개 게이트가 걸린 적이 없다** — 지연·해상도는 실 AWS에서 처음 관측된다 |
+| CloudWatch 메트릭 | ______ | **이월 3행 처분 근거.** **시드 회차는 관측치를 즉시 72개로 채우므로 48개 게이트가 걸리지 않는다**(2026-10-06 실측 — 자산 4대 모두 72개). 게이트 자체는 골든 A4(`dp 47`)가 검증한다. 지연·해상도는 실 AWS에서 처음 관측된다 |
 
 ### 2-2. 자산 유형별 수집 수
 
-수집기는 **리전 전체**를 훑으므로, 수집 수는 아래 스모크 자원 수보다 많을 수 있다(기본 VPC 등 이미 있던 자원). 적을 때 그 차이를 비고에 남긴다 — 많은 것이 이상은 아니고, **적은 것이 이상이다**.
+수집기는 **리전 전체**를 훑으므로, 수집 수는 아래 스모크 자원 수보다 많을 수 있다(기본 VPC 등 이미 있던 자원). 적을 때 그 차이를 비고에 남긴다 — 많은 것이 이상은 아니고, **적은 것이 이상이다**. **수가 같거나 많아도 스모크 자원이 전부 잡혔다는 뜻은 아니다** — 이름은 §2-3 대상 목록으로 대조한다.
 
 | 자산 유형 | 기대 — 스모크 자원(`provision_smoke_aws.py` 스펙) | 수집 수 | 비고 |
 | --- | --- | --- | --- |
@@ -114,7 +114,7 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 | SG | 6 — 명명 5종(`alb`·`web`·`open-ssh`·`unused`·`isolation`) + 스모크 VPC 기본 SG | | |
 | NACL | 2 — `vigilantis-smoke-nacl` + 스모크 VPC 기본 NACL | | |
 | EBS | 4 — 인스턴스 루트 3 + 미연결 `vigilantis-smoke-unattached` 1 | | |
-| Launch Template | 0 — `up` 은 만들지 않는다(`EC2_ENABLE_AUTOSCALING` 이 `vigilantis-lt-` 접두로 만든다) | | 0이 정상. 검증 전에 있으면 앞선 실행의 잔존이다 |
+| Launch Template | 0 — `up` 은 만들지 않는다(`EC2_ENABLE_AUTOSCALING` 이 `vigilantis-lt-` 접두로 만든다) | | 0이 정상. **있으면 출처(이름·생성 시각)를 §7에 적는다** — 수집이 리전 전체를 훑으므로 스모크 밖에서 만든 LT도 잡힌다 |
 | Auto Scaling Group | 0 — `up` 은 만들지 않는다(P2 검증이 만들고 직후 정리) | | 0과 미관측을 구분한다. precheck 조건 ③이 **동명 ASG 부재**라 0이 정상 |
 | ALB Target Group | 1 — `vigilantis-smoke-tg` | | LocalStack에서는 조회 실패로 **미관측**(자산 0개를 뜻하지 않음) |
 

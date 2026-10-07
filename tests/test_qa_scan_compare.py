@@ -77,3 +77,51 @@ def test_failures_unreadable_summary_reports_raw_text(raw):
 def test_inventory_table_covers_every_asset_type():
     assert set(qa._ALL_TYPES) == set(AssetType)
     assert len(qa._ALL_TYPES) == 7
+
+
+# ④ 출력 단계가 "읽지 못했다"를 "(없음)"으로 삼키지 않는다 (PR #421 리뷰 ③-1)
+#    파싱이 깨진 회차를 실패 없음으로 적으면 그 기록이 이월 4행 처분의 근거가 된다.
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "AccessDenied: autoscaling",   # JSON 이 아닌 값
+        '"alb_target_groups"',         # dict 가 아닌 JSON
+        '{"_truncated":"5"}',          # 상한 초과로 항목이 버려진 표식
+    ],
+)
+def test_failure_lines_never_report_none_when_summary_is_unreadable(raw):
+    lines = qa._failure_lines(raw, "localstack")
+    joined = "\n".join(lines)
+    assert "(없음)" not in joined
+    assert "확인 불가" in joined
+
+
+def test_failure_lines_report_none_only_for_an_empty_summary():
+    assert qa._failure_lines(None, "localstack") == ["  collector_failures : (없음)"]
+    assert qa._failure_lines("", "aws") == ["  collector_failures : (없음)"]
+    # 빈 묶음은 읽기는 됐으므로 "확인 불가" 가 아니다 — 둘을 구별해 적는다.
+    assert "빈 묶음" in "\n".join(qa._failure_lines("{}", "localstack"))
+
+
+# ⑤ InternalFailure 설명은 회차의 mode 로 갈린다 — 실 AWS 에서도 나오는 코드다
+def test_internal_failure_note_depends_on_run_mode():
+    raw = '{"auto_scaling_groups":"InternalFailure"}'
+    local = "\n".join(qa._failure_lines(raw, "localstack"))
+    real = "\n".join(qa._failure_lines(raw, "aws"))
+    assert "LocalStack 라이선스 밖" in local
+    assert "LocalStack" not in real
+    assert "AWS 측 내부 오류" in real
+
+
+# ⑥ AccessDenied 는 환경과 무관하게 권한 누락을 가리킨다
+@pytest.mark.parametrize("mode", ["localstack", "aws"])
+def test_access_denied_points_at_a_missing_permission(mode):
+    line = "\n".join(qa._failure_lines('{"alb_target_groups":"AccessDenied"}', mode))
+    assert "권한 누락" in line
+
+
+# ⑦ 다른 계정 표시의 근거 — ARN 계정 칸을 읽는다
+def test_arn_account_reads_the_account_field():
+    arn = "arn:aws:elasticloadbalancing:ap-northeast-2:123456789012:targetgroup/x/y"
+    assert qa._arn_account(arn) == "123456789012"
+    assert qa._arn_account("not-an-arn") == ""

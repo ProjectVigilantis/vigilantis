@@ -17,8 +17,9 @@
 # 리전이 남아 있으면 그 리전 회차가 매번 FAILED 로 마감되는데(ADR-0009 §6-3), 좁혀 보면
 # 그 사실이 보이지 않는다 — 리전이 둘 이상 찍히는 것 자체가 관측 결과다.
 #
-# 종료 코드는 언제나 0 이다. 이 스크립트는 판정하지 않고 적을 값을 보여 준다 —
-# 해소/미해소 판단은 사람이 §5 에 적는다.
+# 종료 코드는 **판정과 무관하게 0** 이다 — 이 스크립트는 판정하지 않고 적을 값을 보여 주며,
+# 해소/미해소 판단은 사람이 §5 에 적는다. 단 인자 오류(2)·처리 안 된 예외(1)는 예외이고,
+# DB 접속 실패는 화면에 사유를 찍고 0 으로 끝낸다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -56,7 +57,6 @@ from db.repositories.assets import (  # noqa: E402
     latest_collection_run_per_region,
     summarize_dangling,
 )
-from db.session import get_session_factory  # noqa: E402
 from schemas.api.assets import AssetType  # noqa: E402
 from services.rule_engine import MIN_DATAPOINTS  # noqa: E402
 
@@ -103,6 +103,43 @@ def _failures(error_summary: Optional[str]) -> tuple[dict[str, str], str]:
     return {str(k): str(v) for k, v in parsed.items()}, "JSON"
 
 
+def _arn_account(arn: str) -> str:
+    """ARN 의 계정 칸. 형식이 아니면 빈 문자열 — 계정 비교는 표시용이라 여기서 거절하지 않는다."""
+    parts = arn.split(":")
+    return parts[4] if len(parts) > 5 else ""
+
+
+def _failure_lines(error_summary: Optional[str], mode: str) -> list[str]:
+    """`collector_failures` 구역의 출력 줄. 순수 함수로 떼어 둔 이유는 **빈 값과 "읽지
+    못했다"를 가르는 책임이 여기 있기** 때문이다. 둘을 섞으면 실패가 없었던 것처럼
+    기록되고, 그 기록이 이월 4행 처분의 근거가 된다(PR #421 리뷰 ③-1).
+
+    사유 코드 주석은 회차의 `mode` 로 가른다 — `InternalFailure` 는 실 AWS 에서도
+    나오는 코드라, LocalStack 라이선스 설명을 실 AWS 회차에 붙이면 거짓이 된다.
+    """
+    failures, how = _failures(error_summary)
+    if failures:
+        lines = ["  collector_failures : 라벨 → 사유 코드"]
+        for label, reason in sorted(failures.items()):
+            note = ""
+            if reason == "AccessDenied":
+                note = "  <- 권한 누락. provision_smoke_aws.py policy 와 대조"
+            elif reason == "InternalFailure":
+                note = (
+                    "  <- LocalStack 라이선스 밖"
+                    if mode != "aws"
+                    else "  <- AWS 측 내부 오류 — 재시도 후에도 같으면 §7에 기록"
+                )
+            lines.append(f"      {label:<24} {reason}{note}")
+        return lines
+    if how == "빈 값":
+        return ["  collector_failures : (없음)"]
+    # JSON 으로 읽혔는데 항목이 비는 경우({})와, 아예 읽지 못한 경우를 가른다.
+    if how == "JSON":
+        return ["  collector_failures : (없음 — error_summary 가 빈 묶음이다)"]
+    return ["  collector_failures : 확인 불가 — 위 원문 참조"]
+
+
 def _section(title: str) -> None:
     print()
     print(title)
@@ -117,19 +154,10 @@ def _report_run(db: Session, run: models.CollectionRun) -> None:
     print(f"  started / finished : {_kst(run.started_at)} / {_kst(run.finished_at)}")
     print(f"  lookback / period  : {run.lookback_days}일 / {run.period_seconds}초")
 
-    failures, how = _failures(run.error_summary)
+    _, how = _failures(run.error_summary)
     print(f"  error_summary      : {run.error_summary or '(빈 값)'}  [{how}]")
-    if failures:
-        print("  collector_failures : 라벨 → 사유 코드")
-        for label, reason in sorted(failures.items()):
-            note = ""
-            if reason == "AccessDenied":
-                note = "  <- 권한 누락. provision_smoke_aws.py policy 와 대조"
-            elif reason == "InternalFailure":
-                note = "  <- LocalStack 라이선스 밖(실 AWS 라면 이 코드가 아니어야 한다)"
-            print(f"      {label:<24} {reason}{note}")
-    else:
-        print("  collector_failures : (없음)")
+    for line in _failure_lines(run.error_summary, run.mode):
+        print(line)
 
     # ----- §2-2 자산 유형별 수집 수
     counts = dict(
@@ -162,7 +190,12 @@ def _report_run(db: Session, run: models.CollectionRun) -> None:
     print()
     print(f"  §2-3 판정 분포 (판정 {len(rows)}건)")
     if not rows:
-        print("      (판정 없음 — rule_engine 이 이 회차를 아직 돌지 않았다)")
+        # 원인을 단정하지 않는다 — 판정이 안 돈 회차뿐 아니라 FAILED 회차나 자산 0건
+        # 회차도 판정 행이 없다. 스크립트는 그 원인을 확인하지 않는다(리뷰 ③-2).
+        print(
+            f"      (이 회차에 판정 행이 없다 — status={run.status.value},"
+            f" 수집 자산 {sum(counts.values())}건)"
+        )
     else:
         buckets: Counter[tuple[str, str]] = Counter()
         targets: dict[tuple[str, str], list[str]] = {}
@@ -265,17 +298,23 @@ def main() -> int:
             print("\n수집 회차가 없다 — 스캔을 먼저 돌릴 것.")
             return 0
         if not args.run and len(runs) > 1:
-            print(
-                f"\n주의: 리전이 {len(runs)}개 찍혔다 — 설정에 남은 리전의 회차가"
-                " 매번 FAILED 로 마감되는 경로다(ADR-0009 §6-3)."
-            )
+            # 원인을 단정하지 않고 사실만 찍는다 — 리전이 둘인 이유를 스크립트는 모른다.
+            # ADR-0009 §6-3 은 "이럴 수 있다"는 참고로만 붙인다(리뷰 ③-2).
+            states = ", ".join(f"{r.region}={r.status.value}" for r in runs)
+            print(f"\n주의: 리전이 {len(runs)}개 찍혔다 — {states}")
+            print("  참고: 설정에 남은 리전이 매 회차 FAILED 로 마감되는 경로가 있다(ADR-0009 §6-3).")
         for run in runs:
             _report_run(db, run)
 
         # ----- §2-4 조인 무결성
+        # `find_dangling_arns` 에는 회차·계정 범위 인자가 없어 **DB 전체**를 본다. --run 으로
+        # 회차를 좁혀도 이 구역은 좁혀지지 않는다 — 이전 회차나 골든 적재의 잔존 행이 함께
+        # 찍히므로, 제목과 표기로 그 사실을 드러낸다. 그러지 않으면 남의 결과가 실 AWS 회차
+        # 기록에 "조사 대상"으로 실린다(리뷰 ③-3, 리뷰어 로컬 재현).
         findings = find_dangling_arns(db)
         summary = summarize_dangling(findings)
-        _section("[§2-4] 조인 무결성 — find_dangling_arns")
+        _section("[§2-4] 조인 무결성 — DB 전체 기준(선택 회차와 무관)")
+        run_accounts = {r.account_id for r in runs}
         print(f"  total {summary['total']} / investigate {summary['investigate']}")
         print(f"  종류별: {summary['by_kind'] or '(없음)'}")
         if summary["investigate"]:
@@ -286,9 +325,15 @@ def main() -> int:
             for finding in findings:
                 if finding.kind not in INVESTIGATE_KINDS:
                     continue
-                print(f"      [{finding.kind}] {finding.value}  자리={','.join(finding.sources)}")
+                mark = "" if _arn_account(finding.value) in run_accounts else "  (다른 계정)"
+                print(
+                    f"      [{finding.kind}] {finding.value}"
+                    f"  자리={','.join(finding.sources)}{mark}"
+                )
         else:
-            print("  investigate 0 건 — 기준선(2026-09-14·09-16 실측 0건)과 같다.")
+            print(
+                "  investigate 0 건 — DB 전체 기준으로 기준선(2026-09-14·09-16 실측 0건)과 같다."
+            )
 
     print()
     print("해소/미해소 판단은 이 출력이 하지 않는다 — AWS_SMOKE_RESULT.md §5 에 사람이 적는다.")
