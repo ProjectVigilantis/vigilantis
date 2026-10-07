@@ -12,7 +12,7 @@
 가드레일 Step 2는 "Whitelist에 없는 런북은 실행 차단"이 원칙이고 **롤백 실행도 런북 실행**이므로, 이대로 구현하면:
 
 - 다운사이징 실패 → 자동 원복(`REVERT_SIZE`) 시도 → Whitelist 미등록 → **가드레일이 자체 자동 원복을 차단** (Auto-Rollback 셀링포인트 무력화)
-- 보안 [원클릭 해제](`UNISOLATE`)도 `POST /api/v1/actions/execute` 경로에서 Step 2 거절
+- 보안 원클릭 해제(`UNISOLATE`)도 `POST /api/v1/actions/execute` 경로에서 Step 2 거절
 
 두 가지 대안을 비교했다:
 

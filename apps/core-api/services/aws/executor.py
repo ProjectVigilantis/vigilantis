@@ -308,8 +308,10 @@ RUNBOOK_SPECS: Mapping[str, _Spec] = {
         operations=(
             "ec2.modify_network_interface_attribute",
             "ec2.describe_security_groups",
-            # ADR-0007 §4는 describe_target_health를 적었지만 그 응답에는 VpcId가 없다 —
-            # "대상이 같은 VPC"를 확인할 수 있는 조회는 describe_target_groups다.
+            # ADR-0007 §4가 이 런북에 describe_target_groups를 적은 이유 — 통과 조건 ③이
+            # 요구하는 "대상이 같은 VPC"는 describe_target_health의 응답
+            # (TargetHealthDescriptions)에 VpcId가 없어 확인할 수 없다. 같은 §4에서
+            # describe_target_health는 ISOLATE의 등록 여부 판별에만 쓴다(1차 개정 ②).
             "elbv2.describe_target_groups",
         ),
         handler="_precheck_unisolate",
