@@ -31,7 +31,7 @@ import sys
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Collection, Optional, Sequence
 
 # Windows 기본 콘솔(cp949)은 이 파일의 한국어·em dash 를 못 낸다 — 팀 개발 환경이
 # Windows 라 출력 스트림을 UTF-8 로 고정한다(scripts/inject_mock_threat.py 와 같은 이유).
@@ -121,6 +121,19 @@ def _arn_account(arn: str) -> str:
     """ARN 의 계정 칸. 형식이 아니면 빈 문자열 — 계정 비교는 표시용이라 여기서 거절하지 않는다."""
     parts = arn.split(":")
     return parts[4] if len(parts) > 5 else ""
+
+
+def _account_mark(account: str, run_accounts: Collection[str]) -> str:
+    """조사 대상 한 줄에 붙일 계정 표시.
+
+    **계정 칸을 읽지 못한 것을 "다른 계정"으로 적지 않는다.** ARN 형식이 아니거나 계정 칸이
+    비면(서비스 전용 ARN 등) `_arn_account` 가 빈 문자열을 주는데, 그것을 그대로 비교하면
+    회차 계정 집합에 없으니 타 계정으로 찍힌다 — 기록하는 사람이 "남의 것"으로 보고 빼
+    버린다. 모르는 것은 모른다고 적고 §7 조사로 넘긴다.
+    """
+    if not account:
+        return "  (계정 확인 불가)"
+    return "" if account in run_accounts else "  (다른 계정)"
 
 
 def _failure_lines(error_summary: Optional[str], mode: str) -> list[str]:
@@ -336,7 +349,7 @@ def main() -> int:
             for finding in findings:
                 if finding.kind not in INVESTIGATE_KINDS:
                     continue
-                mark = "" if _arn_account(finding.value) in run_accounts else "  (다른 계정)"
+                mark = _account_mark(_arn_account(finding.value), run_accounts)
                 print(
                     f"      [{finding.kind}] {finding.value}"
                     f"  자리={','.join(finding.sources)}{mark}"
