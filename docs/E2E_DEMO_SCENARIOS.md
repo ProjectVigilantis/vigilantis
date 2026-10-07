@@ -1,6 +1,6 @@
 # E2E 시연 시나리오 설계서 (1차)
 
-> **담당**: 김승철 (QA & Scenario · 2026-09-16 박지현에게서 인수) · **이슈**: #132 · **작성**: 2026-08-25 · **현황 갱신**: 2026-08-31 (김세혁 — §대조 필요 목록 1·2번 상태·원천 재지정 / 박지현 — 본문 🔶 잔여 정리·번호 표기) · 2026-09-01 (박지현 — §대조 1번 ② 해소 반영) · 2026-09-02 (박지현 — T1 1단계 골든 실경로 실측·기재, §대조 8·9번 신설) · 2026-09-04 (박지현 — 골든 EBS 편입 반영, §자산 화면의 분포 숫자를 재현 명령으로 대체) · 2026-09-08 (김세혁 — §T1 7·8·9번 상태 축 정정, §대조 3번 분리·9번 재서술) · 2026-09-09 (박지현 — §대조 8번 해소 반영, 골든 커버리지 표에 관계 축 추가) · 2026-09-15 (김세혁 — §대조 3번 ⓑ 실측 해소, §T1 7번 행·§T2 관통 실측 반영) · 2026-09-17 (김승철 — FE mock 계층 제거(PR #351) 반영·T1 2번 대체 컷 없음 기재(#352), §대조 1·9번 해소 반영, 토폴로지 색 원천 정정, §테스트 대응을 흐름 테스트 이전(PR #358) 기준으로) · 2026-09-17 (김승철 — §10/1 컷 시트 신설(LocalStack 시드 실측), T2 단계표 1·8번 화면 문구·자산 조인을 시연 기준으로) · 2026-09-17 (김승철 — §10/1 컷 시트 T1-3 idle-dev 모델 호출 실측 반영) · 2026-09-23 (김승철 — §결정 기록 ⑩ R10 사전 실측 · ④ 준비 시간 실측 · WS 화면 관찰 반영 · ⑦ 근거를 PR #399 머지 기준으로 정정) · 2026-09-23 (김세혁 — §결정 기록 ⑪ 브라우저 관통 실측 · T1-9 확인점 · §공통 프리셋 칩 행 · ⑥ 화면 머지 반영)
+> **담당**: 김승철 (QA & Scenario · 2026-09-16 박지현에게서 인수) · **이슈**: #132 · **작성**: 2026-08-25 · **현황 갱신**: 2026-08-31 (김세혁 — §대조 필요 목록 1·2번 상태·원천 재지정 / 박지현 — 본문 🔶 잔여 정리·번호 표기) · 2026-09-01 (박지현 — §대조 1번 ② 해소 반영) · 2026-09-02 (박지현 — T1 1단계 골든 실경로 실측·기재, §대조 8·9번 신설) · 2026-09-04 (박지현 — 골든 EBS 편입 반영, §자산 화면의 분포 숫자를 재현 명령으로 대체) · 2026-09-08 (김세혁 — §T1 7·8·9번 상태 축 정정, §대조 3번 분리·9번 재서술) · 2026-09-09 (박지현 — §대조 8번 해소 반영, 골든 커버리지 표에 관계 축 추가) · 2026-09-15 (김세혁 — §대조 3번 ⓑ 실측 해소, §T1 7번 행·§T2 관통 실측 반영) · 2026-09-17 (김승철 — FE mock 계층 제거(PR #351) 반영·T1 2번 대체 컷 없음 기재(#352), §대조 1·9번 해소 반영, 토폴로지 색 원천 정정, §테스트 대응을 흐름 테스트 이전(PR #358) 기준으로) · 2026-09-17 (김승철 — §10/1 컷 시트 신설(LocalStack 시드 실측), T2 단계표 1·8번 화면 문구·자산 조인을 시연 기준으로) · 2026-09-17 (김승철 — §10/1 컷 시트 T1-3 idle-dev 모델 호출 실측 반영) · 2026-09-23 (김승철 — §결정 기록 ⑩ R10 사전 실측 · ④ 준비 시간 실측 · WS 화면 관찰 반영 · ⑦ 근거를 PR #399 머지 기준으로 정정) · 2026-09-23 (김세혁 — §결정 기록 ⑪ 브라우저 관통 실측 · T1-9 확인점 · §공통 프리셋 칩 행 · ⑥ 화면 머지 반영) · 2026-10-07 (김승철 — §T3·T4 P2 트랙 2차 설계 신설, §테스트 대응에 T3·T4 확장 요건 추가, 가짜 AWS 가 `ec2` 만 모델링한다는 사실을 테스트 가드로 고정)
 > **목적**: 중간 발표(10/1) MVP 시연 대본의 원천이자 `tests/test_e2e_scenario.py`·`apps/core-api/tests/test_e2e_flow.py`의 명세.
 > **범위 기준**: `docs/PROJECT_STATUS.md`(SSOT)를 따른다. 충돌하면 SSOT가 이긴다.
 
@@ -427,6 +427,71 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 
 **이 실측이 확인하지 않은 것**: 시연 값 주기의 소요 시간(위 참고) · 2회차 반복(세션 사이 초기화) · 실 AWS. **`elbv2`·`autoscaling`이 필요한 P2 런북 3종은 LocalStack Community에 없어 여기서도 재현하지 못한다.**
 
+## T3 · T4 — P2 트랙 2차 설계 (10주차 검증용)
+
+> **상태**: 설계만 서 있고 **아직 돌지 않는다.** 실행 코드와 발동 경로가 없고(아래 §선행 조건), `elbv2`·`autoscaling`이 LocalStack Community에 없어 **로컬에서는 조회 대체조차 안 돈다**(ADR-0007 §Context). 10주차(10/12(월)–10/15(목)) 실 AWS 첫 검증이 이 두 트랙의 첫 실행이다.
+> **성격**: T1·T2와 달리 **시연 컷이 아니라 검증 경로**다. 10/15(목) MVP 마감 판정의 근거이고, 12/11(금) 최종 발표에 올릴지는 범위 확정 뒤에 따로 판단한다.
+> **왜 P1 SG 2종과 달리 넣는가**: §1차 시연에서 빼는 것은 P1 SG 쌍을 "양방향 회복 세 번째라 중복"으로 뺐다. T3는 중복이 아니다 — **High 위험도의 선제 차단(`PRE_MITIGATION_0_5S`)과 1분 미응답 자동 격리(`TIMEOUT_ISOLATION_1M`)는 지금 어느 트랙도 보여주지 않는다.** T4는 양방향 회복이 아니라 **등록 롤백이 없는 단방향 구조 전환**이라 축 자체가 다르다.
+
+### T3 · SecOps(P2) — 선제 차단 격리와 원클릭 해제
+
+**한 줄**: High로 판정된 위협에 승인을 기다리지 않고 0.5초 선차단으로 대상을 격리하고, 관제자가 확인한 뒤 한 번 승인으로 백업 기준으로 되돌린다.
+
+**대상**: ALB Target Group에 등록된 EC2 1대 + 규칙 0개인 격리 SG. 스모크 환경에서는 `vigilantis-smoke-web-1`(TG `vigilantis-smoke-tg` 등록)과 `vigilantis-smoke-isolation`이다. 격리 뒤에도 서비스를 잇는 두 번째 대상으로 `web-2`가 있다.
+
+**파라미터 계약**: `Ec2IsolateParameters` = `instance_id` · `target_group_arn` · `isolation_group_id` · `evidence_id` / `Ec2UnisolateParameters` = `instance_id` · `backup_record_id` · `evidence_id`(복원 값은 백업 레코드에서만 — ADR-0004 정책 ③)
+
+| # | 단계 | 화면(FE) | API·호출 | WS 이벤트 | 검증 포인트 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 위협 주입(High) | SecOps 카드 신규 | (mock 주입) | `INCIDENT_CREATED` | `evaluate_threat()`가 `HIGH`를 내는 입력인지 |
+| 2 | 대응 경로 — **선제 차단** | "선제 차단" 경로 표시 | `response_mode: PRE_MITIGATION_0_5S` | `INCIDENT_UPDATED` | **Incident 축이다.** `trigger_source`와 다른 축(§실행 축과 Incident 축은 다르다) |
+| 3 | 백업 캡처 | — | `SAVE_CURRENT_SG_AND_TG_MAPPING` | — | 격리 **전** SG·TG 매핑이 저장되는가. 이것이 7번 원복의 유일한 원천이다 |
+| 4 | 가드레일 4단계 | — | ④는 **MIXED** — ENI `DryRun` + `describe_security_groups` + `describe_target_health` | — | 통과 조건 ①DryRun ②`isolation_group_id` SG 존재 ③TG 존재·대상 등록(`Target.NotRegistered`는 미등록으로 본다) |
+| 5 | **격리 실행** | 실행 패널 | `RUNBOOK_EC2_ISOLATE`<br>`trigger_source: PRE_MITIGATION_0_5S`<br>TG 등록 해제 + ENI SG 교체 | `EXECUTION_UPDATED` | 승인 없이 발동한다 — **`approval_mode`가 T2와 다르다** |
+| 6 | 서비스 유지 확인 | 토폴로지 | `describe_target_health` | — | `web-2`가 TG에 남아 서비스가 끊기지 않는가 |
+| 7 | **원클릭 해제** | 상세 [승인하고 해제] → [실행] | `RUNBOOK_EC2_UNISOLATE`<br>`trigger_source: USER_APPROVAL` | `EXECUTION_UPDATED` | 3번 백업 레코드로만 원복하는가. TG 재등록과 SG 복원이 **같은 집합**인가 |
+| 8 | 해제 완료 | Incident 종료 판단 대기 | — | `EXECUTION_UPDATED` `SUCCESS` · `INCIDENT_UPDATED` `AWAITING_CLOSURE` | — |
+
+**분기 — 1분 미응답 자동 격리**: 2번이 `AGENT_WAIT`(Medium)로 간 뒤 관제자가 1분간 응답하지 않으면 `TIMEOUT_ISOLATION_1M`으로 전환해 같은 5번을 발동한다. **초기 판정 결과가 아니라 응답 기한 만료 시 전환이다**(`packages/schemas/events.py`). Low는 이 전환 대상이 아니다. 이 분기는 **발동 경로(B5)가 서야 검증 가능**하다.
+
+### T4 · FinOps(P2) — stateless 한정 구조 전환
+
+**한 줄**: 다운사이징으로 줄일 수 없는 자산을 Launch Template과 ASG로 바꿔 상한 4대까지 늘어나게 하고, **검증 직후 정리한다.**
+
+**파라미터 계약**: `Ec2EnableAutoscalingParameters` = `instance_id` · `min_size` · `max_size` · `evidence_id`. `min_size <= max_size`는 모델 검증기가 막고, `max_size <= 4`는 precheck 통과 조건 ④다.
+
+| # | 단계 | API·호출 | 검증 포인트 |
+| --- | --- | --- | --- |
+| 1 | 후보 제시 | — | 어떤 판정이 이 런북을 부르는지. `RIGHTSIZING`과 **후보 조건이 갈리는 지점**을 기록한다 |
+| 2 | 가드레일 ④ | **MIXED** — LT `create_launch_template` `DryRun` + `describe_instances` + `describe_auto_scaling_groups` | ①DryRun ②원본 EC2 존재·`running` ③**동명 ASG 부재** ④`min_size <= max_size <= 4` |
+| 3 | 실행 | `RUNBOOK_EC2_ENABLE_AUTOSCALING`<br>`trigger_source: USER_APPROVAL` | LT·ASG가 실제로 생기는가. 서비스 연결 역할은 `up`이 선생성한다 |
+| 4 | **정리** | ASG 삭제 | **등록 롤백이 없다**(SSOT §Action Whitelist) — 되돌리는 것이 아니라 **검증 직후 지운다.** ASG 인스턴스 비용은 예산표 밖(ADR-0009 §3) |
+
+> **4번이 T1·T2와 가장 다른 자리다.** 두 트랙은 롤백 런북이 짝으로 등록돼 있어 "되돌아갔는가"를 보면 되는데, 이 런북은 짝이 없다. 그래서 **정리했는지와 비용이 남지 않았는지**가 검증 대상이고, 그 기록은 `docs/AWS_SMOKE_RESULT.md` §8 · §9로 간다.
+
+### 선행 조건 — 이것이 서지 않으면 두 트랙은 검증 대상이 없다
+
+| 항목 | 상태 | 막는 단계 |
+| --- | --- | --- |
+| 백업 `SAVE_CURRENT_SG_AND_TG_MAPPING` 캡처 | **없음** — `services/aws/backup.py` 머리말 `[남은 작업]` | T3-3 → T3-7 전체 |
+| `execute_ec2_isolate` · `execute_ec2_unisolate` | **없음** — `executor.py` 머리말 TODO 1번 | T3-5 · T3-7 |
+| `execute_ec2_enable_autoscaling` | **없음** | T4-3 |
+| `PRE_MITIGATION_0_5S` · `TIMEOUT_ISOLATION_1M` 발동 경로 | **없음** — `security/soar.py`에 범위 선언만 있다 | T3-2 · T3 자동 격리 분기 |
+| Medium `실행 예정 시간` 서버 응답 필드 | 없음 | T3 자동 격리 분기의 화면 |
+
+`precheck()`는 **10종 전부 서 있다**(`RUNBOOK_SPECS`) — 막힌 것은 실행과 발동이다. 그래서 **가드레일 ④까지는 지금도 검증할 수 있고**, 5번 이후가 10주차 대상이다.
+
+### 로컬 실행 가능성 ❌
+
+| 축 | 가능 | 이유 |
+| --- | --- | --- |
+| 가드레일 ④ DryRun 부분 | ⚠️ 부분 | ENI·LT `DryRun`은 LocalStack에서 돈다. 조회 부분(`elbv2`·`autoscaling`)은 안 돈다 |
+| 조회 대체 통과 조건 | ❌ | `elbv2`·`autoscaling`이 Community에 없어 **조회 자체가 실패**한다. 그 3행 통과 조건은 ADR-0007 §4가 아직 잠정으로 남겨 둔 것이고, 기록 자리는 `docs/AWS_SMOKE_RESULT.md` §8-1이다 |
+| 실행·원복 | ❌ | 코드가 없고(위 표) 환경도 없다 |
+| **골든 데이터로 대체** | ❌ | 골든에 **격리 SG가 없다** — `vigilantis:role=isolation` 태그를 쓰는 자산이 없어 T3-4 통과 조건 ②를 골든만으로 만들 수 없다. `golden-tg-topology`·`golden-asg-topology`는 **토폴로지 전용 노드**(판정 대상 아님)라 TG 등록 상태를 갖지 않는다 |
+
+---
+
 ## 1차 시연에서 빼는 것과 그 이유
 
 | 항목 | 빼는 이유 |
@@ -514,3 +579,20 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 ~~**테스트 이름과 입력이 어긋난다**~~ ✅ 해소(2026-08-31, #219) — 옛 이름 `test_open_ssh_ip_block_flow`가 `OPEN_IP`를 가리키는데 입력은 `SSH_BRUTE_FORCE`(S3)였다. 1주차에 지은 이름이고 T2 입력이 PR #148 리뷰로 바뀐 결과다. 당시 skip 해제를 기다리지 않고 위 표의 이름으로 함께 고쳤다 — **이 표가 명세인 이상 이름이 어긋난 채로 두면 문서가 없는 테스트를 가리킨다.**
 
 실행 계열 공통 fixture는 **#136**에서 선구축한다. 그 픽스처가 P2 3종의 로컬 FAIL을 `GuardrailValidationContext` 문맥별로 표현해야 한다는 전제도 같은 이슈에 적었다.
+
+### T3 · T4 확장 요건 — 지금 상태로는 흐름 테스트를 쓸 수 없다
+
+§T3·T4 2차 설계가 흐름 테스트 층(②)에 요구하는 것을 고정한다. **코드가 서기 전에 테스트를 먼저 쓸 수 없는 범위와, 먼저 쓸 수 있는 범위를 가른다.**
+
+| 범위 | 지금 가능 | 막는 것 |
+| --- | --- | --- |
+| 가드레일 ④ **DryRun 부분**(ENI · LT) | ✅ 가능 | — `precheck()`는 10종 전부 서 있다 |
+| 가드레일 ④ **조회 부분**(`describe_target_health` · `describe_target_groups` · `describe_auto_scaling_groups`) | ⚠️ **가짜를 만들면 가능** | 아래 ①. 실환경은 LocalStack Community에 두 서비스가 없다 |
+| 실행·원복(T3-5·T3-7·T4-3) | ❌ 불가 | 실행 함수와 백업 캡처가 없다(§선행 조건) |
+| 선제 차단·자동 격리 발동(T3-2·분기) | ❌ 불가 | 발동 경로가 없다(§선행 조건) |
+
+**① 가짜 AWS가 `ec2` 하나만 모델링한다 — 2026-10-07 수정.** `apps/core-api/tests/test_e2e_flow.py`의 `aws` 픽스처는 `aws_client`를 가로채 `FakeEc2`를 돌려주는데, **`service` 인자를 무시했다.** P2의 precheck는 `elbv2`를 부르므로(`executor._precheck_isolate`의 `describe_target_health`) 그대로 두면 그 호출이 EC2 가짜에 닿아 **테스트가 틀린 채 통과하거나 엉뚱한 곳에서 터진다.** 모델이 없는 서비스에는 `NotImplementedError`를 던지도록 고쳤다 — T3·T4 테스트를 쓰려면 **`elbv2`·`autoscaling` 가짜를 먼저 만들어야** 하고, 그 사실이 실패 메시지로 드러난다. 기존 T1·T2 2건은 `ec2`만 쓰므로 영향이 없다(통과 확인).
+
+**② 골든 데이터로 T3를 세울 수 없다.** 골든에 `vigilantis:role=isolation` 태그를 쓰는 자산이 없어 T3-4 통과 조건 ②(격리 SG 존재)를 만들 수 없고, `golden-tg-topology`는 **판정 대상이 아닌 토폴로지 전용 노드**라 TG 등록 상태를 갖지 않는다. T1·T2가 지켜 온 "시연 데이터 = 테스트 데이터" 전제를 T3에서는 그대로 쓸 수 없다. 선택지는 둘이다 — **골든에 격리 SG와 TG 등록 상태를 추가**하거나, **T3 흐름 테스트만 픽스처로 조립**하고 골든 결속을 포기한다. 전자가 전제를 지키지만 골든 건수(입력 32 · 판정 정답 28)가 바뀌어 `test_golden_dataset.py`와 SSOT §MVP 확정 범위의 숫자를 함께 고쳐야 한다. **어느 쪽으로 갈지는 P2 실행 코드가 선 뒤에 정한다** — 그때 실제 파라미터 모양을 보고 결정하는 것이 순서다.
+
+**③ 테스트를 쓰는 시점.** 실행 함수가 머지되기 전에 쓸 수 있는 것은 **precheck 층까지**다. 흐름 테스트(②)는 "실행 접수 → 상태 전이"를 재는 층이라 실행 함수 없이는 쓸 대상이 없다. 그래서 **T3·T4 흐름 테스트는 P2 실행 코드 머지와 같은 PR 또는 그 직후 PR로 들어가는 것이 맞고**, 이 설계서가 그 PR의 명세가 된다.
