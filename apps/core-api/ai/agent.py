@@ -20,13 +20,20 @@
 #     명세에서 그 키를 빼 모델이 채울 자리 자체를 두지 않는다.
 #   - 후보 evidence_ids가 입력 Evidence 안에 있는지와 FINOPS의 reviewed_risk_level=null은
 #     여기서 보지 않는다 — 계약이 Workflow 몫으로 못 박았다(schemas/agents.py 계약 원칙).
+#   - FAILED로 끝나면 어느 단계가 어떤 사유로 막았는지를 agent_analysis_failed 로그 1건으로
+#     남긴다(#424). 사유는 AnalysisFailureReason 코드와 위반 위치까지이며, 모델 출력 값은
+#     대상 밖으로 거절한 target_arn만 잘라서 싣는다(가드레일 ③ 거절 로그와 같다).
+#     노드 안의 로그(모델 호출 등)에는 log_context로 analysis_step이 붙는다.
 # ==============================================================================
 
 from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Optional, TypedDict
+import logging
+from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import Any, Callable, Mapping, Optional, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, ValidationError
@@ -54,7 +61,16 @@ from security.risk_evaluator import (
 )
 
 from ai.capabilities import secops_action_targets
-from ai.model_client import AIModelClient, AIModelError, AIModelRequest
+from ai.model_client import (
+    AIModelClient,
+    AIModelContractError,
+    AIModelError,
+    AIModelRejectedError,
+    AIModelRequest,
+)
+from logging_config import log_context
+
+_logger = logging.getLogger("vigilantis.ai.agent")
 
 # ------------------------------------------------------------------------------
 # 프롬프트 — v1 (Issue #243)
@@ -243,6 +259,149 @@ def finops_request_fingerprint() -> str:
 
 
 # ------------------------------------------------------------------------------
+# 실패 사유 — FAILED가 된 자리와 이유를 로그로 남긴다 (Issue #424)
+# ------------------------------------------------------------------------------
+# 운영 로그의 분류 코드이며 공개 계약이 아니다. 업무 기록(DB)에 둘지는 별도 결정이다.
+# 주입 시도로 거절된 제안(메뉴 밖 Runbook·대상 밖 ARN)과 형식 실패·모델 거절을 나중에
+# 가를 수 있게 하는 것이 목적이다.
+
+
+class AnalysisFailureReason(StrEnum):
+    """분석이 FAILED로 끝난 사유. 그래프(이 모듈)와 Workflow 검증(agent_dispatcher)이 함께 쓴다."""
+
+    # 모델 호출 — ai/model_client.py 경계 예외 3갈래. 왕복의 어느 자리인지는 phase가 가른다
+    MODEL_REJECTED = "MODEL_REJECTED"                    # 인증·요청 거절, 모델 refusal
+    MODEL_CONTRACT_VIOLATION = "MODEL_CONTRACT_VIOLATION"  # 요청 직렬화·응답 파싱 실패
+    MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"              # 제한시간·일시 오류(재시도 소진)
+    # 후보 — 모델이 지어낼 수 없는 값을 지어낸 경우
+    RUNBOOK_NOT_OFFERED = "RUNBOOK_NOT_OFFERED"          # 입력 capabilities 밖 Runbook
+    TARGET_NOT_ALLOWED = "TARGET_NOT_ALLOWED"            # 허용 대상 밖 target_arn
+    SERVER_PARAMETER_UNAVAILABLE = "SERVER_PARAMETER_UNAVAILABLE"  # 서버 몫 값을 계산 못 함
+    CANDIDATE_CONTRACT_VIOLATION = "CANDIDATE_CONTRACT_VIOLATION"  # RunbookCandidateDraft 위반
+    OUTPUT_CONTRACT_VIOLATION = "OUTPUT_CONTRACT_VIOLATION"        # AgentGraphOutput 위반
+    # Workflow 검증 — 출력 모델 단독으로 볼 수 없는 것(agent_dispatcher._contract_violation)
+    EVIDENCE_NOT_IN_INPUT = "EVIDENCE_NOT_IN_INPUT"
+    REVIEWED_RISK_MISMATCH = "REVIEWED_RISK_MISMATCH"
+    SERVER_VALUE_MISMATCH = "SERVER_VALUE_MISMATCH"
+    SSH_DENY_PARAMETER_MISMATCH = "SSH_DENY_PARAMETER_MISMATCH"
+    UNSTORABLE_VALUE = "UNSTORABLE_VALUE"
+    GRAPH_INPUT_UNAVAILABLE = "GRAPH_INPUT_UNAVAILABLE"
+
+
+@dataclass(frozen=True)
+class _Failure:
+    """노드가 State에 남기는 실패. details에 싣는 모델 출력 값은 대상 밖 target_arn뿐이다."""
+
+    step: str
+    reason: AnalysisFailureReason
+    details: Mapping[str, Any] = field(default_factory=dict)
+
+
+class _CandidateRejected(ValueError):
+    """후보 1건을 계약으로 옮길 수 없는 이유가 사유 코드로 정해진 경우."""
+
+    def __init__(self, reason: AnalysisFailureReason, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+# 위반 위치 목록의 상한 — 로그 한 줄이 모델 출력 크기에 끌려 커지지 않게 한다
+_MAX_ERROR_LOCATIONS = 10
+
+# 대상 밖으로 거절한 target_arn을 로그에 남길 때의 상한 — 가드레일 ③ 거절 로그
+# (ai/guardrails.py)와 같은 512자다. Workflow 검증(agent_dispatcher)도 같은 값을 쓴다
+REJECTED_TARGET_ARN_LOG_CHARS = 512
+
+
+def _error_locations(exc: ValidationError) -> list[dict[str, str]]:
+    """검증 실패의 위치·유형만. input·msg는 모델이 낸 값을 되읽을 수 있어 남기지 않는다."""
+    return [
+        {"loc": ".".join(str(part) for part in error["loc"]), "type": error["type"]}
+        for error in exc.errors(include_url=False, include_context=False, include_input=False)[
+            :_MAX_ERROR_LOCATIONS
+        ]
+    ]
+
+
+def _model_failure(step: str, exc: AIModelError) -> _Failure:
+    """경계 예외 → 사유. 메시지는 싣지 않고 클래스 이름과 phase만 남긴다."""
+    if isinstance(exc, AIModelRejectedError):
+        reason = AnalysisFailureReason.MODEL_REJECTED
+    elif isinstance(exc, AIModelContractError):
+        reason = AnalysisFailureReason.MODEL_CONTRACT_VIOLATION
+    else:
+        reason = AnalysisFailureReason.MODEL_UNAVAILABLE
+    return _Failure(step, reason, {"error_class": type(exc).__name__, "phase": exc.phase})
+
+
+def _convert_candidates(
+    proposals: list[ProposedCandidate],
+    convert: Callable[[ProposedCandidate], RunbookCandidateDraft],
+    *,
+    step: str,
+) -> tuple[list[RunbookCandidateDraft], Optional[_Failure]]:
+    """후보를 차례로 계약으로 옮긴다. 1건이라도 못 옮기면 그 사유로 전체를 실패시킨다.
+
+    runbook_id는 ProposedCandidate가 RunbookId로 검증한 enum 값이라 남긴다.
+    대상 밖으로 거절한 target_arn은 잘라서 남긴다 — 범위 밖 대상을 지목한 것 자체가 조사
+    대상이다(가드레일 ③ 거절 로그와 같다). 그 밖에 모델이 쓴 문자열은 남기지 않는다.
+    """
+    drafts: list[RunbookCandidateDraft] = []
+    for proposal in proposals:
+        details: dict[str, Any] = {"runbook_id": proposal.runbook_id.value}
+        try:
+            drafts.append(convert(proposal))
+        except _CandidateRejected as exc:
+            if exc.reason is AnalysisFailureReason.TARGET_NOT_ALLOWED:
+                details["target_arn"] = proposal.target_arn[:REJECTED_TARGET_ARN_LOG_CHARS]
+            return [], _Failure(step, exc.reason, details)
+        except ValidationError as exc:
+            details["errors"] = _error_locations(exc)
+            return [], _Failure(step, AnalysisFailureReason.CANDIDATE_CONTRACT_VIOLATION, details)
+        except ValueError:
+            return [], _Failure(step, AnalysisFailureReason.CANDIDATE_CONTRACT_VIOLATION, details)
+    return drafts, None
+
+
+def _build_output(
+    step: str, **fields: Any
+) -> tuple[Optional[AgentGraphOutput], Optional[_Failure]]:
+    """AgentGraphOutput을 만든다. 계약 위반이면 출력 대신 실패를 돌려준다."""
+    try:
+        return AgentGraphOutput(**fields), None
+    except ValidationError as exc:
+        return None, _Failure(
+            step, AnalysisFailureReason.OUTPUT_CONTRACT_VIOLATION, {"errors": _error_locations(exc)}
+        )
+    except ValueError:
+        return None, _Failure(step, AnalysisFailureReason.OUTPUT_CONTRACT_VIOLATION)
+
+
+def _log_failure(graph_input: FinOpsGraphInput | SecOpsGraphInput, failure: _Failure) -> None:
+    """FAILED 1건당 1줄. failed_step은 실패가 난 노드이고 analysis_step(문맥)과 다를 수 있다."""
+    _logger.warning(
+        "agent_analysis_failed",
+        extra={
+            **failure.details,
+            "incident_id": graph_input.incident_id,
+            "domain": graph_input.domain.value,
+            "failed_step": failure.step,
+            "reason_code": failure.reason.value,
+        },
+    )
+
+
+def _in_step(name: str, node: Callable[[Any], dict[str, Any]]) -> Callable[[Any], dict[str, Any]]:
+    """노드 안의 로그(모델 호출·재시도 등)에 analysis_step을 붙인다."""
+
+    def run(state: Any) -> dict[str, Any]:
+        with log_context(analysis_step=name):
+            return node(state)
+
+    return run
+
+
+# ------------------------------------------------------------------------------
 # 그래프 State — 노드 사이 전달용이며 외부로 나가지 않는다
 # ------------------------------------------------------------------------------
 
@@ -258,7 +417,7 @@ class _FinOpsState(TypedDict, total=False):
     client: AIModelClient
     summary_lines: list[str]
     proposals: list[ProposedCandidate]
-    failure: str
+    failure: _Failure
     output: AgentGraphOutput
 
 
@@ -341,7 +500,10 @@ def _server_parameter_values(runbook_id: RunbookId, asset: AgentAssetContext) ->
         return {}
     target = rightsizing_target_type(getattr(asset.spec, "instance_type", None))
     if target is None:
-        raise ValueError("다운사이징 목표 타입을 계산할 수 없는 자산입니다")
+        raise _CandidateRejected(
+            AnalysisFailureReason.SERVER_PARAMETER_UNAVAILABLE,
+            "다운사이징 목표 타입을 계산할 수 없는 자산입니다",
+        )
     return {"target_instance_type": target}
 
 
@@ -367,12 +529,19 @@ def _to_draft(proposal: ProposedCandidate, graph_input: FinOpsGraphInput) -> Run
     """후보 1건을 계약으로 옮긴다. 옮길 수 없으면 예외를 올려 FAILED로 간다."""
     offered = {capability.runbook_id for capability in graph_input.capabilities}
     if proposal.runbook_id not in offered:
-        raise ValueError(f"입력 capabilities에 없는 Runbook입니다: {proposal.runbook_id.value}")
+        raise _CandidateRejected(
+            AnalysisFailureReason.RUNBOOK_NOT_OFFERED,
+            f"입력 capabilities에 없는 Runbook입니다: {proposal.runbook_id.value}",
+        )
     if proposal.target_arn not in _allowed_target_arns(graph_input):
-        raise ValueError("target_arn이 인시던트 자산·관계 자산 밖입니다")
+        raise _CandidateRejected(
+            AnalysisFailureReason.TARGET_NOT_ALLOWED, "target_arn이 인시던트 자산·관계 자산 밖입니다"
+        )
     is_rightsizing = proposal.runbook_id is RunbookId.RUNBOOK_EC2_RIGHTSIZING
     if is_rightsizing and proposal.target_arn != graph_input.asset_context.arn:
-        raise ValueError("다운사이징 대상의 사양 스냅샷이 없습니다")
+        raise _CandidateRejected(
+            AnalysisFailureReason.TARGET_NOT_ALLOWED, "다운사이징 대상의 사양 스냅샷이 없습니다"
+        )
     return RunbookCandidateDraft.model_validate(
         {
             "runbook_id": proposal.runbook_id.value,
@@ -453,8 +622,8 @@ def _proposal_payload(graph_input: FinOpsGraphInput, summary_lines: list[str]) -
 # ------------------------------------------------------------------------------
 # 노드
 # ------------------------------------------------------------------------------
-# 실패 사유 문자열에 모델 응답이나 프롬프트를 담지 않는다(ADR-0005 미보존 대상).
-# 경계 예외의 클래스 이름까지만 남긴다.
+# 실패 사유에 모델 응답이나 프롬프트를 담지 않는다(ADR-0005 미보존 대상).
+# 경계 예외는 클래스 이름과 phase까지만 남긴다(_model_failure).
 
 
 def _summarize_evidence(state: _FinOpsState) -> dict[str, Any]:
@@ -466,7 +635,7 @@ def _summarize_evidence(state: _FinOpsState) -> dict[str, Any]:
     try:
         response = state["client"].complete(request, EvidenceSummaryOutput)
     except AIModelError as exc:
-        return {"failure": f"summarize_evidence: {type(exc).__name__}"}
+        return {"failure": _model_failure("summarize_evidence", exc)}
     summary = response.output
     return {"summary_lines": [summary.observation, summary.diagnosis, summary.rationale]}
 
@@ -480,7 +649,7 @@ def _propose_candidates(state: _FinOpsState) -> dict[str, Any]:
     try:
         response = state["client"].complete(request, CandidateProposalOutput)
     except AIModelError as exc:
-        return {"failure": f"propose_candidates: {type(exc).__name__}"}
+        return {"failure": _model_failure("propose_candidates", exc)}
     return {"proposals": list(response.output.candidates)}
 
 
@@ -491,21 +660,27 @@ def _validate_output_contract(state: _FinOpsState) -> dict[str, Any]:
     NO_PROPOSAL은 "조치할 것이 없다"는 업무 판단이라, 형식 실패를 거기에 접으면 서버가
     하지 않은 판단이 관제 화면과 DB에 남는다.
     """
-    if state.get("failure"):
-        return {"output": _failed_output()}
-
-    try:
-        drafts = [_to_draft(proposal, state["graph_input"]) for proposal in state["proposals"]]
-        output = AgentGraphOutput(
+    graph_input = state["graph_input"]
+    failure = state.get("failure")
+    if failure is None:
+        drafts, failure = _convert_candidates(
+            state["proposals"],
+            lambda proposal: _to_draft(proposal, graph_input),
+            step="validate_output_contract",
+        )
+    if failure is None:
+        output, failure = _build_output(
+            "validate_output_contract",
             invocation_status=(
                 AgentInvocationStatus.SUCCEEDED if drafts else AgentInvocationStatus.NO_PROPOSAL
             ),
             summary_lines=state["summary_lines"],
             candidates=drafts,
         )
-    except (ValidationError, ValueError):
-        return {"output": _failed_output()}
-    return {"output": output}
+        if output is not None:
+            return {"output": output}
+    _log_failure(graph_input, failure)
+    return {"output": _failed_output()}
 
 
 def _failed_output() -> AgentGraphOutput:
@@ -524,9 +699,11 @@ def _after_summarize(state: _FinOpsState) -> str:
 
 def _build_finops_graph():
     builder = StateGraph(_FinOpsState)
-    builder.add_node("summarize_evidence", _summarize_evidence)
-    builder.add_node("propose_candidates", _propose_candidates)
-    builder.add_node("validate_output_contract", _validate_output_contract)
+    builder.add_node("summarize_evidence", _in_step("summarize_evidence", _summarize_evidence))
+    builder.add_node("propose_candidates", _in_step("propose_candidates", _propose_candidates))
+    builder.add_node(
+        "validate_output_contract", _in_step("validate_output_contract", _validate_output_contract)
+    )
 
     builder.add_edge(START, "summarize_evidence")
     # 요약이 실패하면 후보 생성을 건너뛴다. 그래도 validate를 지나게 두는 것은
@@ -557,8 +734,12 @@ def run_finops_graph(
 
     호출부(Workflow)가 할 일은 그래프 밖이다 — AI 호출 상태 선점(Claim), 후보의
     Guardrail 검증, DB 저장, 승인·실행은 여기서 하지 않는다.
+
+    그래프 안의 로그(모델 호출 포함)에는 incident_id가 붙는다 — 호출부가 dispatcher가
+    아니어도(평가 하네스 등) 한 인시던트의 호출을 묶어 볼 수 있게 여기서 건다.
     """
-    final_state = FINOPS_GRAPH.invoke({"graph_input": graph_input, "client": client})
+    with log_context(incident_id=graph_input.incident_id):
+        final_state = FINOPS_GRAPH.invoke({"graph_input": graph_input, "client": client})
     return final_state["output"]
 
 # SecOps는 독립 State·프롬프트를 쓴다. FinOps 승인 지문에는 포함하지 않는다.
@@ -693,7 +874,7 @@ class _SecOpsState(TypedDict, total=False):
     reviewed_risk_level: RiskLevel
     proposals: list[ProposedCandidate]
     candidates: list[RunbookCandidateDraft]
-    failure: str
+    failure: _Failure
     output: AgentGraphOutput
 
 
@@ -738,7 +919,7 @@ def _secops_summarize(state: _SecOpsState) -> dict[str, Any]:
         ).output
         return {"summary_lines": [result.observation, result.diagnosis, result.rationale]}
     except AIModelError as exc:
-        return {"failure": f"summarize_evidence: {type(exc).__name__}"}
+        return {"failure": _model_failure("summarize_evidence", exc)}
 
 
 def _secops_reassess(state: _SecOpsState) -> dict[str, Any]:
@@ -750,7 +931,7 @@ def _secops_reassess(state: _SecOpsState) -> dict[str, Any]:
         ).output
         return {"reviewed_risk_level": result.reviewed_risk_level}
     except AIModelError as exc:
-        return {"failure": f"reassess_risk: {type(exc).__name__}"}
+        return {"failure": _model_failure("reassess_risk", exc)}
 
 
 def _secops_propose(state: _SecOpsState) -> dict[str, Any]:
@@ -763,7 +944,7 @@ def _secops_propose(state: _SecOpsState) -> dict[str, Any]:
         ).output
         return {"proposals": list(result.candidates)}
     except AIModelError as exc:
-        return {"failure": f"propose_candidates: {type(exc).__name__}"}
+        return {"failure": _model_failure("propose_candidates", exc)}
 
 
 def _secops_validate_candidates(state: _SecOpsState) -> dict[str, Any]:
@@ -771,48 +952,57 @@ def _secops_validate_candidates(state: _SecOpsState) -> dict[str, Any]:
     graph_input = state["graph_input"]
     targets = secops_action_targets(graph_input.asset_context)
     offered = {item.runbook_id for item in graph_input.capabilities}
-    try:
-        drafts = []
-        for proposal in state["proposals"]:
-            if proposal.runbook_id not in offered or proposal.target_arn not in targets.get(
-                proposal.runbook_id.value, []
-            ):
-                raise ValueError("제공한 조치·대상 조합 밖입니다")
-            drafts.append(RunbookCandidateDraft(
-                runbook_id=proposal.runbook_id,
-                target_arn=proposal.target_arn,
-                parameters=_parameter_values(
-                    proposal.runbook_id, proposal, graph_input.asset_context
-                ),
-                evidence_ids=_canonical_evidence_ids(proposal.evidence_ids, graph_input),
-            ))
-        return {"candidates": drafts}
-    except (ValidationError, ValueError):
-        return {"failure": "validate_candidates: contract violation"}
+
+    def convert(proposal: ProposedCandidate) -> RunbookCandidateDraft:
+        if proposal.runbook_id not in offered:
+            raise _CandidateRejected(
+                AnalysisFailureReason.RUNBOOK_NOT_OFFERED, "제공한 조치 메뉴 밖입니다"
+            )
+        if proposal.target_arn not in targets.get(proposal.runbook_id.value, []):
+            raise _CandidateRejected(
+                AnalysisFailureReason.TARGET_NOT_ALLOWED, "제공한 조치 대상 밖입니다"
+            )
+        return RunbookCandidateDraft(
+            runbook_id=proposal.runbook_id,
+            target_arn=proposal.target_arn,
+            parameters=_parameter_values(proposal.runbook_id, proposal, graph_input.asset_context),
+            evidence_ids=_canonical_evidence_ids(proposal.evidence_ids, graph_input),
+        )
+
+    drafts, failure = _convert_candidates(state["proposals"], convert, step="validate_candidates")
+    if failure is not None:
+        return {"failure": failure}
+    return {"candidates": drafts}
 
 
 def _secops_validate(state: _SecOpsState) -> dict[str, Any]:
-    if state.get("failure"):
-        return {"output": _failed_output()}
-    try:
-        return {"output": AgentGraphOutput(
+    failure = state.get("failure")
+    if failure is None:
+        output, failure = _build_output(
+            "validate_output_contract",
             invocation_status=(AgentInvocationStatus.SUCCEEDED if state["candidates"]
                                else AgentInvocationStatus.NO_PROPOSAL),
             summary_lines=state["summary_lines"],
             reviewed_risk_level=state["reviewed_risk_level"],
             candidates=state["candidates"],
-        )}
-    except (ValidationError, ValueError):
-        return {"output": _failed_output()}
+        )
+        if output is not None:
+            return {"output": output}
+    _log_failure(state["graph_input"], failure)
+    return {"output": _failed_output()}
 
 
 def _build_secops_graph():
     builder = StateGraph(_SecOpsState)
-    builder.add_node("summarize_evidence", _secops_summarize)
-    builder.add_node("reassess_risk", _secops_reassess)
-    builder.add_node("propose_candidates", _secops_propose)
-    builder.add_node("validate_candidates", _secops_validate_candidates)
-    builder.add_node("validate_output_contract", _secops_validate)
+    builder.add_node("summarize_evidence", _in_step("summarize_evidence", _secops_summarize))
+    builder.add_node("reassess_risk", _in_step("reassess_risk", _secops_reassess))
+    builder.add_node("propose_candidates", _in_step("propose_candidates", _secops_propose))
+    builder.add_node(
+        "validate_candidates", _in_step("validate_candidates", _secops_validate_candidates)
+    )
+    builder.add_node(
+        "validate_output_contract", _in_step("validate_output_contract", _secops_validate)
+    )
     builder.add_edge(START, "reassess_risk")
     builder.add_conditional_edges(
         "reassess_risk",
@@ -838,5 +1028,9 @@ SECOPS_GRAPH = _build_secops_graph()
 
 
 def run_secops_graph(graph_input: SecOpsGraphInput, *, client: AIModelClient) -> AgentGraphOutput:
-    """위험 재평가 → 후보 생성·계약 검증 → 요약. DB·가드레일·실행은 호출부가 소유한다."""
-    return SECOPS_GRAPH.invoke({"graph_input": graph_input, "client": client})["output"]
+    """위험 재평가 → 후보 생성·계약 검증 → 요약. DB·가드레일·실행은 호출부가 소유한다.
+
+    로그 문맥은 run_finops_graph와 같다.
+    """
+    with log_context(incident_id=graph_input.incident_id):
+        return SECOPS_GRAPH.invoke({"graph_input": graph_input, "client": client})["output"]

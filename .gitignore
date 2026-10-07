@@ -48,3 +48,6 @@ CLAUDE.local.md
 
 # 모의 위협 배달·처리 원문 (로컬 시연 전용)
 .mock-threat-inbox/
+
+# 작동 로그 파일 출력 (LOG_FILE_ENABLED, #424)
+.logs/

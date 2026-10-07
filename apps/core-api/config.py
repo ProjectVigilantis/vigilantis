@@ -1,6 +1,6 @@
 # ==============================================================================
 # [파일 설명]
-# pydantic-settings 기반 런타임 환경설정 로더입니다. (Issue #60·#68·#115·#128, ADR-0001)
+# pydantic-settings 기반 런타임 환경설정 로더입니다. (Issue #60·#68·#115·#128·#424, ADR-0001)
 #
 # 설정 단위를 셋으로 나눈다 — 필수 항목이 서로 다르기 때문이다.
 #   Settings          : Core API 프로세스 설정. DATABASE_URL 필수이고
@@ -43,6 +43,12 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str
     LOG_LEVEL: str = "INFO"
+    # 작동 로그 파일 출력(Issue #424) — 기본은 stdout만. 켜면 같은 JSON 줄을 LOG_FILE_PATH의
+    # 회전 파일에도 쓴다. 상대 경로는 apps/core-api 기준(logging_config.resolve_log_file_path)이라
+    # compose가 공유하는 폴더에 남아 컨테이너를 다시 만들어도 사라지지 않는다. 같은 체크아웃에서
+    # 뜨는 다른 스택(stepper 테스트 서버)은 override에서 경로를 따로 준다
+    LOG_FILE_ENABLED: bool = False
+    LOG_FILE_PATH: str = ".logs/api.log"
     # 콤마 구분 허용 출처 목록 — 기본값은 FE 개발 서버. CORS와 WebSocket
     # Handshake Origin 검증이 같은 목록을 쓴다
     CORS_ALLOW_ORIGINS: str = "http://localhost:3000"

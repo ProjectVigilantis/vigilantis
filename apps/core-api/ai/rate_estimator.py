@@ -25,6 +25,7 @@ from schemas.savings import (
 )
 
 from ai.model_client import AIModelClient, AIModelError, AIModelRequest
+from logging_config import log_context
 
 SAVINGS_MODEL_CALLS = 1
 SAVINGS_PROMPT_VERSION = "v1.0.0"
@@ -181,7 +182,9 @@ def estimate_candidate_savings(
             != context["target_instance_type"]):
         return invalid_estimate(SavingsReason.CONTEXT_MISMATCH)
     try:
-        response = client.complete(savings_request(asset), ProposedHourlyRates)
+        # 그래프 노드와 같은 축으로 단계를 붙인다 — incident_id는 호출부(dispatcher) 문맥이 준다
+        with log_context(analysis_step="estimate_savings"):
+            response = client.complete(savings_request(asset), ProposedHourlyRates)
     except AIModelError as exc:
         # 공급자 원문·traceback을 남기지 않는다. 저장 상태와 호출 오류 분류는 별개다.
         _logger.warning("FinOps 단가 추정 호출 실패: %s", type(exc).__name__)

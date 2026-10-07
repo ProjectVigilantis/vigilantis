@@ -9,9 +9,13 @@
 스냅샷이 갱신되지 않은 것만 잡는다(#243 — 재통과 절차는 apps/core-api/ai/evaluation/summary/baseline.md).
 """
 
+import io
 import json
+import logging
 from pathlib import Path
+from types import SimpleNamespace
 
+import httpx2
 import pytest
 from ai.agent import (
     _FINOPS_PROPOSAL_SYSTEM_PROMPT,
@@ -26,7 +30,10 @@ from ai.agent import (
     finops_request_fingerprint,
     run_finops_graph,
 )
-from ai.model_client import FakeAIModelClient
+from ai.model_client import AIModelRejectedError, FakeAIModelClient
+from ai.openai_client import OpenAIModelClient
+from logging_config import JsonLineFormatter
+from openai import APITimeoutError
 from pydantic import ValidationError
 from schemas.agents import FinOpsGraphInput
 from schemas.incidents import AgentInvocationStatus
@@ -558,3 +565,205 @@ def test_parameter_constraint_text_describes_a_live_contract_rule():
         assert runbook_id in CANDIDATE_PARAMETER_MODELS
     with pytest.raises(ValidationError):
         Ec2EnableAutoscalingCandidateParameters(min_size=3, max_size=1)
+
+
+# ------------------------------------------------------------------------------
+# 실패 사유 로그 (#424) — FAILED가 된 자리와 이유가 incident_id와 함께 남는가
+# ------------------------------------------------------------------------------
+# 사유 코드로 "주입 시도로 거절된 제안"(메뉴 밖·대상 밖)과 형식 실패·모델 거절을 가른다.
+# 모델이 쓴 문자열 중 남기는 것은 대상 밖으로 거절한 target_arn뿐이다(가드레일 ③ 거절 로그와
+# 같이 512자로 자른다). 요약 등 그 밖의 값은 남지 않아야 한다.
+
+# 모델이 지어낸 대상 — 주입 시도가 지목한 대상이라 거절 로그에 남아야 한다
+INJECTED_ARN = f"arn:aws:ec2:{REGION}:{ACCOUNT}:instance/i-ignore-previous-instructions"
+
+
+class _RejectingClient:
+    """모델이 응답을 거절한 경우(refusal) — 경계 예외만 낸다."""
+
+    def complete(self, request, response_model):
+        raise AIModelRejectedError("모델이 응답을 거절했습니다", phase="response")
+
+
+def _failure_fields(caplog, *outputs, graph_input=None, client=None):
+    """그래프를 1회 돌려 FAILED와 실패 로그 1건을 확인하고 그 필드를 돌려준다."""
+    with caplog.at_level(logging.WARNING, logger="vigilantis.ai.agent"):
+        output = run_finops_graph(
+            graph_input or make_input(), client=client or FakeAIModelClient(list(outputs))
+        )
+    assert output.invocation_status == AgentInvocationStatus.FAILED
+    records = [r for r in caplog.records if r.getMessage() == "agent_analysis_failed"]
+    assert len(records) == 1
+    fields = records[0].__dict__
+    assert fields["incident_id"] == "inc-20260831-001"
+    assert fields["domain"] == "FINOPS"
+    return fields
+
+
+def test_failure_log_names_model_refusal(caplog):
+    fields = _failure_fields(caplog, client=_RejectingClient())
+
+    assert fields["reason_code"] == "MODEL_REJECTED"
+    assert fields["failed_step"] == "summarize_evidence"
+    assert fields["error_class"] == "AIModelRejectedError"
+    assert fields["phase"] == "response"
+
+
+@pytest.mark.parametrize(
+    "outputs,step,reason",
+    [
+        # 준비한 응답이 없으면 경계가 일시 오류(재시도 소진과 같은 갈래)를 낸다
+        ((), "summarize_evidence", "MODEL_UNAVAILABLE"),
+        ((SUMMARY,), "propose_candidates", "MODEL_UNAVAILABLE"),
+        # 요구한 구조가 아닌 응답 — 구조화 출력 파싱 실패와 같은 갈래
+        ((SUMMARY, SUMMARY), "propose_candidates", "MODEL_CONTRACT_VIOLATION"),
+    ],
+)
+def test_failure_log_names_the_model_call_that_failed(caplog, outputs, step, reason):
+    fields = _failure_fields(caplog, *outputs)
+
+    assert fields["reason_code"] == reason
+    assert fields["failed_step"] == step
+
+
+def test_failure_log_separates_runbook_outside_menu(caplog):
+    proposal = rightsizing_proposal(
+        runbook_id="RUNBOOK_NACL_ADD_DENY",
+        rule_number=100,
+        cidr_block="203.0.113.0/24",
+        protocol="-1",
+    )
+    fields = _failure_fields(caplog, SUMMARY, proposals(proposal))
+
+    assert fields["reason_code"] == "RUNBOOK_NOT_OFFERED"
+    assert fields["failed_step"] == "validate_output_contract"
+    assert fields["runbook_id"] == "RUNBOOK_NACL_ADD_DENY"
+
+
+@pytest.mark.parametrize("target_arn", [INJECTED_ARN, INJECTED_ARN + "x" * 1000])
+def test_failure_log_keeps_the_target_outside_asset_cut_to_512(caplog, target_arn):
+    fields = _failure_fields(
+        caplog, SUMMARY, proposals(rightsizing_proposal(target_arn=target_arn))
+    )
+
+    assert fields["reason_code"] == "TARGET_NOT_ALLOWED"
+    assert fields["runbook_id"] == "RUNBOOK_EC2_RIGHTSIZING"
+    assert fields["target_arn"] == target_arn[:512]
+    assert SUMMARY.observation not in json.dumps(fields, ensure_ascii=False, default=str)
+
+
+def test_failure_log_names_missing_parameter_as_candidate_contract(caplog):
+    autoscaling = {
+        "runbook_id": "RUNBOOK_EC2_ENABLE_AUTOSCALING",
+        "purpose": "고정 대수 EC2를 Auto Scaling 그룹으로 전환",
+        "allowed_target_asset_types": ["EC2"],
+    }
+    proposal = rightsizing_proposal(runbook_id="RUNBOOK_EC2_ENABLE_AUTOSCALING", min_size=1)
+    fields = _failure_fields(
+        caplog, SUMMARY, proposals(proposal), graph_input=make_input(capabilities=[autoscaling])
+    )
+
+    assert fields["reason_code"] == "CANDIDATE_CONTRACT_VIOLATION"
+    assert fields["runbook_id"] == "RUNBOOK_EC2_ENABLE_AUTOSCALING"
+    # 위치·유형만 남긴다 — 입력값(input)·문구(msg)는 모델 출력을 되읽을 수 있다
+    assert fields["errors"]
+    assert all(set(error) == {"loc", "type"} for error in fields["errors"])
+
+
+def test_failure_log_names_server_parameter_gap(caplog):
+    graph_input = make_input(asset_context={**ASSET_CONTEXT, "spec": {"instance_type": None}})
+    fields = _failure_fields(
+        caplog, SUMMARY, proposals(rightsizing_proposal()), graph_input=graph_input
+    )
+
+    assert fields["reason_code"] == "SERVER_PARAMETER_UNAVAILABLE"
+
+
+def test_failure_log_names_output_contract_violation(caplog):
+    # 후보 하나하나는 계약을 지키지만 출력 전체가 같은 runbook_id 중복으로 거절된다
+    ebs = ProposedCandidate.model_validate(
+        {
+            "runbook_id": "RUNBOOK_EBS_DELETE_UNATTACHED",
+            "target_arn": VOLUME_ARN,
+            "evidence_ids": ["ev-0001"],
+        }
+    )
+    fields = _failure_fields(caplog, SUMMARY, proposals(ebs, ebs))
+
+    assert fields["reason_code"] == "OUTPUT_CONTRACT_VIOLATION"
+    assert fields["failed_step"] == "validate_output_contract"
+
+
+def test_no_failure_log_when_the_analysis_succeeds(caplog):
+    with caplog.at_level(logging.WARNING, logger="vigilantis.ai.agent"):
+        run(SUMMARY, proposals(rightsizing_proposal()))
+        run(SUMMARY, proposals())
+
+    assert not [r for r in caplog.records if r.getMessage() == "agent_analysis_failed"]
+
+
+# --- 모델 호출 로그 묶음 -----------------------------------------------------------
+# 문맥 필드(incident_id·analysis_step)는 포매터가 합친다 — caplog 레코드에는 없으므로 실제
+# 출력 형식(JsonLineFormatter)으로 받아 확인한다.
+
+
+@pytest.fixture
+def json_log_lines():
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(JsonLineFormatter())
+    root = logging.getLogger()
+    previous_level = root.level
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+    try:
+        yield lambda: [json.loads(line) for line in stream.getvalue().splitlines()]
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(previous_level)
+
+
+def _sdk_completion(parsed):
+    usage = SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15)
+    message = SimpleNamespace(parsed=parsed, refusal=None)
+    return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=usage, model="m")
+
+
+def test_model_call_logs_of_one_analysis_share_the_incident_and_name_the_step(json_log_lines):
+    # 실제 경계 구현(OpenAIModelClient)에 SDK만 바꿔 낀다 — 재시도 1회를 섞어 retry 로그도 본다
+    results = [
+        APITimeoutError(httpx2.Request("POST", "https://api.openai.com/v1/chat/completions")),
+        _sdk_completion(SUMMARY),
+        _sdk_completion(proposals(rightsizing_proposal())),
+    ]
+
+    def parse(**kwargs):
+        outcome = results.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    client = OpenAIModelClient(
+        client=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(parse=parse))),
+        model="m",
+        timeout_seconds=1.0,
+        max_attempts=2,
+        retry_backoff_seconds=0.0,
+    )
+    output = run_finops_graph(make_input(), client=client)
+    assert output.invocation_status == AgentInvocationStatus.SUCCEEDED
+
+    lines = [
+        line for line in json_log_lines() if line["event"] in ("ai_model_call", "ai_model_retry")
+    ]
+    assert [(line["event"], line["analysis_step"]) for line in lines] == [
+        ("ai_model_retry", "summarize_evidence"),
+        ("ai_model_call", "summarize_evidence"),
+        ("ai_model_call", "propose_candidates"),
+    ]
+    assert {line["incident_id"] for line in lines} == {"inc-20260831-001"}
+
+    # 그래프 밖으로 나오면 문맥이 풀린다 — 같은 스레드의 다음 로그에 붙지 않는다
+    logging.getLogger("vigilantis.test").info("after_graph")
+    after = [line for line in json_log_lines() if line["event"] == "after_graph"]
+    assert after and "incident_id" not in after[0] and "analysis_step" not in after[0]

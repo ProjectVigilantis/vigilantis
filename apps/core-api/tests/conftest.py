@@ -70,6 +70,9 @@ os.environ.setdefault("SCAN_ENABLED", "false")
 # 외부 환경·.env의 실제 inbox를 테스트 앱이 소비하지 않게 강제로 끈다.
 # 소비자 검증은 해당 테스트가 임시 경로와 테스트 세션을 명시해 켠다.
 os.environ["MOCK_THREAT_INBOX_DIR"] = ""
+# .env가 파일 로그를 켜 두었어도 테스트 앱은 쓰지 않는다 — 켜면 개발 스택 api와 같은 파일을
+# 두 프로세스가 회전시킨다. 파일 출력 검증은 해당 테스트가 임시 경로로 setup_logging을 직접 부른다.
+os.environ["LOG_FILE_ENABLED"] = "false"
 
 TEST_DB_NAME = f"vigilantis_test_{uuid.uuid4().hex[:8]}"
 TEST_URL = ADMIN_URL.rsplit("/", 1)[0] + "/" + TEST_DB_NAME
