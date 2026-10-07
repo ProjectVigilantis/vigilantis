@@ -99,7 +99,7 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 | `mode` | ______ | `aws` 가 아니면 실 AWS 회차가 아니다 — 아래 칸을 채우기 전에 먼저 본다 |
 | `collection_runs.status` | ______ | `PARTIAL` 이면 아래 사유 코드로 권한 누락인지 가린다 |
 | `error_summary` | ______ | `collector_failures` 가 compact JSON 으로 실린 자리다. 로컬에서 나오는 모양은 `{"alb_target_groups":"InternalFailure","auto_scaling_groups":"InternalFailure"}` — **같은 라벨에 `AccessDenied` 가 오면 권한 누락이다** |
-| `collector_failures` 라벨 → 사유 코드 | 라벨 ______ → 사유 ______ | 사유 코드가 판별 기준이다 — `InternalFailure` 는 LocalStack 라이선스 밖, `AccessDenied` 는 **권한 누락**(빠진 조회 권한을 §7에 적고 `policy` 대조). 둘 다 빈 목록으로 강등되므로 "정상 0건"과 구별되지 않는다 |
+| `collector_failures` 라벨 → 사유 코드 | 라벨 ______ → 사유 ______ | 사유 코드가 판별 기준이다. `AccessDenied` 는 **권한 누락** — 빠진 조회 권한을 §7에 적고 `policy` 대조. **`InternalFailure` 는 회차의 `mode` 로 뜻이 갈린다** — `localstack` 이면 라이선스 밖이고, **`aws` 면 AWS 측 내부 오류이므로 재시도 후에도 같으면 §7에 적는다**(실 AWS 에서도 나오는 코드다). 어느 코드든 빈 목록으로 강등되므로 "정상 0건"과 구별되지 않는다 |
 | `elbv2`(ALB Target Group) 조회 | ______ | **이월 4행 처분 근거.** LocalStack Community 에 없어 로컬에서 성공한 적이 없다 |
 | `autoscaling`(ASG) 조회 | ______ | **이월 4행 처분 근거.** 같은 이유로 로컬에서 성공한 적이 없다 |
 | CloudWatch 메트릭 | ______ | **이월 3행 처분 근거.** **시드 회차는 관측치를 즉시 72개로 채우므로 48개 게이트가 걸리지 않는다**(2026-10-06 실측 — 자산 4대 모두 72개). 게이트 자체는 골든 A4(`dp 47`)가 검증한다. 지연·해상도는 실 AWS에서 처음 관측된다 |

@@ -103,6 +103,19 @@ def _failures(error_summary: Optional[str]) -> tuple[dict[str, str], str]:
     return {str(k): str(v) for k, v in parsed.items()}, "JSON"
 
 
+def _region_notice(pairs: Sequence[tuple[str, str]]) -> list[str]:
+    """리전이 둘 이상일 때의 주의 줄. `(리전, 회차 상태)` 쌍만 받는다 — 원인을 단정하지
+    않고 **사실만** 찍기 위해서다. 스크립트는 리전이 둘인 이유를 모른다(리뷰 ③-2).
+    ADR-0009 §6-3 은 "이럴 수 있다"는 참고로만 붙인다."""
+    if len(pairs) <= 1:
+        return []
+    states = ", ".join(f"{region}={status}" for region, status in pairs)
+    return [
+        f"\n주의: 리전이 {len(pairs)}개 찍혔다 — {states}",
+        "  참고: 설정에 남은 리전이 매 회차 FAILED 로 마감되는 경로가 있다(ADR-0009 §6-3).",
+    ]
+
+
 def _arn_account(arn: str) -> str:
     """ARN 의 계정 칸. 형식이 아니면 빈 문자열 — 계정 비교는 표시용이라 여기서 거절하지 않는다."""
     parts = arn.split(":")
@@ -297,12 +310,9 @@ def main() -> int:
         if not runs:
             print("\n수집 회차가 없다 — 스캔을 먼저 돌릴 것.")
             return 0
-        if not args.run and len(runs) > 1:
-            # 원인을 단정하지 않고 사실만 찍는다 — 리전이 둘인 이유를 스크립트는 모른다.
-            # ADR-0009 §6-3 은 "이럴 수 있다"는 참고로만 붙인다(리뷰 ③-2).
-            states = ", ".join(f"{r.region}={r.status.value}" for r in runs)
-            print(f"\n주의: 리전이 {len(runs)}개 찍혔다 — {states}")
-            print("  참고: 설정에 남은 리전이 매 회차 FAILED 로 마감되는 경로가 있다(ADR-0009 §6-3).")
+        if not args.run:
+            for line in _region_notice([(r.region, r.status.value) for r in runs]):
+                print(line)
         for run in runs:
             _report_run(db, run)
 

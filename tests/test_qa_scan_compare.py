@@ -120,7 +120,23 @@ def test_access_denied_points_at_a_missing_permission(mode):
     assert "권한 누락" in line
 
 
-# ⑦ 다른 계정 표시의 근거 — ARN 계정 칸을 읽는다
+# ⑦ 다중 리전 주의 줄은 원인을 단정하지 않고 리전=상태 사실만 적는다
+def test_region_notice_states_facts_without_claiming_a_cause():
+    lines = qa._region_notice([("ap-northeast-2", "PARTIAL"), ("us-east-1", "FAILED")])
+    head = lines[0]
+    assert "리전이 2개" in head
+    assert "ap-northeast-2=PARTIAL" in head and "us-east-1=FAILED" in head
+    # 원인 단정("매번 FAILED 로 마감된다")이 주의 줄에 섞이지 않는다 — 참고 줄로 내려간다.
+    assert "매번" not in head
+    assert any("참고:" in line and "ADR-0009" in line for line in lines[1:])
+
+
+@pytest.mark.parametrize("pairs", [[], [("ap-northeast-2", "SUCCESS")]])
+def test_region_notice_is_silent_for_one_region_or_none(pairs):
+    assert qa._region_notice(pairs) == []
+
+
+# ⑧ 다른 계정 표시의 근거 — ARN 계정 칸을 읽는다
 def test_arn_account_reads_the_account_field():
     arn = "arn:aws:elasticloadbalancing:ap-northeast-2:123456789012:targetgroup/x/y"
     assert qa._arn_account(arn) == "123456789012"
