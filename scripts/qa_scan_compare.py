@@ -14,8 +14,9 @@
 # 결과로 적는 것이 이 대조에서 가장 비싼 실수다. 회차의 `mode` 열이 그 구분의 원천이다.
 #
 # 리전은 좁히지 않는다(`latest_collection_run_per_region(db, None)`). 설정에 두 번째
-# 리전이 남아 있으면 그 리전 회차가 매번 FAILED 로 마감되는데(ADR-0009 §6-3), 좁혀 보면
-# 그 사실이 보이지 않는다 — 리전이 둘 이상 찍히는 것 자체가 관측 결과다.
+# 리전이 남아 있으면 그 리전 회차가 매번 FAILED 로 마감될 수 있는데(ADR-0009 §6-3), 좁혀
+# 보면 그 사실이 보이지 않는다 — 리전이 둘 이상 찍히는 것 자체가 관측 결과다. 출력은
+# 원인을 단정하지 않고 리전별 상태만 적는다(`_region_notice`).
 #
 # 종료 코드는 **판정과 무관하게 0** 이다 — 이 스크립트는 판정하지 않고 적을 값을 보여 주며,
 # 해소/미해소 판단은 사람이 §5 에 적는다. 단 인자 오류(2)·처리 안 된 예외(1)는 예외이고,
@@ -30,7 +31,7 @@ import sys
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Collection, Optional, Sequence
 
 # Windows 기본 콘솔(cp949)은 이 파일의 한국어·em dash 를 못 낸다 — 팀 개발 환경이
 # Windows 라 출력 스트림을 UTF-8 로 고정한다(scripts/inject_mock_threat.py 와 같은 이유).
@@ -120,6 +121,19 @@ def _arn_account(arn: str) -> str:
     """ARN 의 계정 칸. 형식이 아니면 빈 문자열 — 계정 비교는 표시용이라 여기서 거절하지 않는다."""
     parts = arn.split(":")
     return parts[4] if len(parts) > 5 else ""
+
+
+def _account_mark(account: str, run_accounts: Collection[str]) -> str:
+    """조사 대상 한 줄에 붙일 계정 표시.
+
+    **계정 칸을 읽지 못한 것을 "다른 계정"으로 적지 않는다.** ARN 형식이 아니거나 계정 칸이
+    비면(서비스 전용 ARN 등) `_arn_account` 가 빈 문자열을 주는데, 그것을 그대로 비교하면
+    회차 계정 집합에 없으니 타 계정으로 찍힌다 — 기록하는 사람이 "남의 것"으로 보고 빼
+    버린다. 모르는 것은 모른다고 적고 §7 조사로 넘긴다.
+    """
+    if not account:
+        return "  (계정 확인 불가)"
+    return "" if account in run_accounts else "  (다른 계정)"
 
 
 def _failure_lines(error_summary: Optional[str], mode: str) -> list[str]:
@@ -335,7 +349,7 @@ def main() -> int:
             for finding in findings:
                 if finding.kind not in INVESTIGATE_KINDS:
                     continue
-                mark = "" if _arn_account(finding.value) in run_accounts else "  (다른 계정)"
+                mark = _account_mark(_arn_account(finding.value), run_accounts)
                 print(
                     f"      [{finding.kind}] {finding.value}"
                     f"  자리={','.join(finding.sources)}{mark}"

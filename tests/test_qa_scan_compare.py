@@ -141,3 +141,24 @@ def test_arn_account_reads_the_account_field():
     arn = "arn:aws:elasticloadbalancing:ap-northeast-2:123456789012:targetgroup/x/y"
     assert qa._arn_account(arn) == "123456789012"
     assert qa._arn_account("not-an-arn") == ""
+
+
+# ⑨ 계정 칸을 읽지 못한 것을 "다른 계정"으로 적지 않는다 (이슈 #427)
+#    기록하는 사람이 "남의 것"으로 보고 빼 버리면 조사 대상이 조용히 사라진다.
+def test_account_mark_does_not_call_an_unreadable_account_someone_elses():
+    runs = {"000000000000"}
+    assert qa._account_mark("", runs) == "  (계정 확인 불가)"
+    assert "다른 계정" not in qa._account_mark("", runs)
+
+
+def test_account_mark_marks_only_a_readable_foreign_account():
+    runs = {"000000000000"}
+    assert qa._account_mark("123456789012", runs) == "  (다른 계정)"
+    assert qa._account_mark("000000000000", runs) == ""
+
+
+def test_account_mark_compares_against_every_run_account():
+    # 기본 실행은 리전별 최신 회차를 모두 찍으므로 계정이 섞일 수 있다 — 집합 전체와 비교한다.
+    runs = {"000000000000", "111111111111"}
+    assert qa._account_mark("111111111111", runs) == ""
+    assert qa._account_mark("222222222222", runs) == "  (다른 계정)"
