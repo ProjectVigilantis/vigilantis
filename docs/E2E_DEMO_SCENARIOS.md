@@ -448,11 +448,11 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 | 3 | 백업 캡처 | — | `SAVE_CURRENT_SG_AND_TG_MAPPING` | — | 격리 **전** SG·TG 매핑이 저장되는가. 이것이 7번 원복의 유일한 원천이다 |
 | 4 | 가드레일 4단계 | — | ④는 **MIXED** — ENI `DryRun` + `describe_security_groups` + `describe_target_health` | — | 통과 조건 ①DryRun ②`isolation_group_id` SG 존재 ③TG 존재·대상 등록(`Target.NotRegistered`는 미등록으로 본다) |
 | 5 | **격리 실행** | 실행 패널 | `RUNBOOK_EC2_ISOLATE`<br>`trigger_source: PRE_MITIGATION_0_5S`<br>TG 등록 해제 + ENI SG 교체 | `EXECUTION_UPDATED` | 승인 없이 발동한다 — **`approval_mode`가 T2와 다르다** |
-| 6 | 서비스 유지 확인 | 토폴로지 | `describe_target_health` | — | `web-2`가 TG에 남아 서비스가 끊기지 않는가 |
+| 6 | 대상 상태·서비스 응답 확인 | 토폴로지는 보조 관측 | `describe_target_health` + ALB 경유 HTTP 요청 | — | 격리 전·중·해제 후 `web-2`의 등록·health 상태와 ALB 경유 응답을 각각 기록한다. 등록 여부만으로 서비스 유지를 판정하지 않는다. 요청 경로·기대 상태 코드·관측 간격·실패 수를 실행 전에 정하고, HTTP 관측이 없으면 서비스 유지는 미확인으로 남긴다 |
 | 7 | **원클릭 해제** | 상세 [승인하고 해제] → [실행] | `RUNBOOK_EC2_UNISOLATE`<br>`trigger_source: USER_APPROVAL` | `EXECUTION_UPDATED` | 3번 백업 레코드로만 원복하는가. TG 재등록과 SG 복원이 **같은 집합**인가 |
 | 8 | 해제 완료 | Incident 종료 판단 대기 | — | `EXECUTION_UPDATED` `SUCCESS` · `INCIDENT_UPDATED` `AWAITING_CLOSURE` | — |
 
-**분기 — 1분 미응답 자동 격리**: 2번이 `AGENT_WAIT`(Medium)로 간 뒤 관제자가 1분간 응답하지 않으면 `TIMEOUT_ISOLATION_1M`으로 전환해 같은 5번을 발동한다. **초기 판정 결과가 아니라 응답 기한 만료 시 전환이다**(`packages/schemas/events.py`). Low는 이 전환 대상이 아니다. 이 분기는 **발동 경로(B5)가 서야 검증 가능**하다.
+**분기 — 1분 미응답 자동 격리**: 2번이 `AGENT_WAIT`(Medium)로 간 뒤 관제자가 1분간 응답하지 않으면 `TIMEOUT_ISOLATION_1M`으로 전환해 같은 5번을 발동한다. **초기 판정 결과가 아니라 응답 기한 만료 시 전환이다**(`packages/schemas/events.py`). Low는 이 전환 대상이 아니다. 이 분기는 **선제 차단·자동 격리 발동 경로가 구현돼야 검증 가능**하다(아래 §선행 조건).
 
 ### T4 · FinOps(P2) — stateless 한정 구조 전환
 
@@ -479,7 +479,7 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 | `PRE_MITIGATION_0_5S` · `TIMEOUT_ISOLATION_1M` 발동 경로 | **없음** — `security/soar.py`에 범위 선언만 있다 | T3-2 · T3 자동 격리 분기 |
 | Medium `실행 예정 시간` 서버 응답 필드 | 없음 | T3 자동 격리 분기의 화면 |
 
-`precheck()`는 **10종 전부 서 있다**(`RUNBOOK_SPECS`) — 막힌 것은 실행과 발동이다. 그래서 **가드레일 ④까지는 지금도 검증할 수 있고**, 5번 이후가 10주차 대상이다.
+`precheck()`는 **10종 전부 구현돼 있다**(`RUNBOOK_SPECS`). 다만 구현 존재와 환경 검증 완료는 다르다. **필요한 EC2·ELBv2·Auto Scaling 응답을 가짜로 구성하면 precheck의 분기·실패 처리를 먼저 테스트할 수 있다.** LocalStack Community에서는 `elbv2`·`autoscaling` 조회가 막혀 P2 precheck 전체 통과를 확인할 수 없다. 실제 AWS 권한·조회 응답·통과 조건은 실 AWS에서 확인하고 `docs/AWS_SMOKE_RESULT.md` §8-1에 기록한다. 실행·백업·발동 경로를 잇는 흐름은 별도의 선행 구현이 필요하다.
 
 ### 로컬 실행 가능성 ❌
 
@@ -488,7 +488,7 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 | 가드레일 ④ DryRun 부분 | ⚠️ 부분 | ENI·LT `DryRun`은 LocalStack에서 돈다. 조회 부분(`elbv2`·`autoscaling`)은 안 돈다 |
 | 조회 대체 통과 조건 | ❌ | `elbv2`·`autoscaling`이 Community에 없어 **조회 자체가 실패**한다. 그 3행 통과 조건은 ADR-0007 §4가 아직 잠정으로 남겨 둔 것이고, 기록 자리는 `docs/AWS_SMOKE_RESULT.md` §8-1이다 |
 | 실행·원복 | ❌ | 코드가 없고(위 표) 환경도 없다 |
-| **골든 데이터로 대체** | ❌ | 골든에 **격리 SG가 없다** — `vigilantis:role=isolation` 태그를 쓰는 자산이 없어 T3-4 통과 조건 ②를 골든만으로 만들 수 없다. `golden-tg-topology`·`golden-asg-topology`는 **토폴로지 전용 노드**(판정 대상 아님)라 TG 등록 상태를 갖지 않는다 |
+| **골든 데이터 재사용** | ⚠️ 일부 가능 | `asset_inventory_005.json`의 EC2·SG·TG 식별자와 TG의 `target_instance_ids`는 재사용할 수 있다. 실제 `describe_target_health` 응답, 격리용 SG의 ingress·egress 규칙, 격리 전후 SG·TG 상태와 백업 응답은 별도로 구성·확인해야 한다. 데이터 재사용은 실 AWS 검증을 대체하지 않는다 |
 
 ---
 
@@ -580,19 +580,21 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 
 실행 계열 공통 fixture는 **#136**에서 선구축한다. 그 픽스처가 P2 3종의 로컬 FAIL을 `GuardrailValidationContext` 문맥별로 표현해야 한다는 전제도 같은 이슈에 적었다.
 
-### T3 · T4 확장 요건 — 지금 상태로는 흐름 테스트를 쓸 수 없다
+### T3 · T4 확장 요건 — 선행 작성과 실행 검증의 경계
 
-§T3·T4 2차 설계가 흐름 테스트 층(②)에 요구하는 것을 고정한다. **코드가 서기 전에 테스트를 먼저 쓸 수 없는 범위와, 먼저 쓸 수 있는 범위를 가른다.**
+§T3·T4 2차 설계가 흐름 테스트 층(②)에 요구하는 것을 정리한다. **구현 전에 테스트 입력·기대값을 설계하는 것과, 실제 실행 경로를 연결해 통과를 확인하는 것을 구분한다.**
 
 | 범위 | 지금 가능 | 막는 것 |
 | --- | --- | --- |
-| 가드레일 ④ **DryRun 부분**(ENI · LT) | ✅ 가능 | — `precheck()`는 10종 전부 서 있다 |
+| 가드레일 ④ **DryRun 부분**(ENI · LT) | ⚠️ 필요한 EC2 응답을 가짜로 구성하면 분기 테스트 가능 | 현재 `FakeEc2`가 P2의 인스턴스·ENI·SG 조회 응답까지 제공하는지 추가 대조 필요. LocalStack의 DryRun 부분 관측은 precheck 전체 통과가 아니다 |
 | 가드레일 ④ **조회 부분**(`describe_target_health` · `describe_target_groups` · `describe_auto_scaling_groups`) | ⚠️ **가짜를 만들면 가능** | 아래 ①. 실환경은 LocalStack Community에 두 서비스가 없다 |
-| 실행·원복(T3-5·T3-7·T4-3) | ❌ 불가 | 실행 함수와 백업 캡처가 없다(§선행 조건) |
-| 선제 차단·자동 격리 발동(T3-2·분기) | ❌ 불가 | 발동 경로가 없다(§선행 조건) |
+| 실행·원복(T3-5·T3-7·T4-3) | 입력·기대값 설계 가능 / 관통 검증 불가 | 실행 함수와 백업 캡처가 없다(§선행 조건) |
+| 선제 차단·자동 격리 발동(T3-2·분기) | 입력·기대값 설계 가능 / 관통 검증 불가 | 발동 경로가 없다(§선행 조건) |
 
 **① 가짜 AWS가 `ec2` 하나만 모델링한다 — 2026-10-07 수정.** `apps/core-api/tests/test_e2e_flow.py`의 `aws` 픽스처는 `aws_client`를 가로채 `FakeEc2`를 돌려주는데, **`service` 인자를 무시했다.** P2의 precheck는 `elbv2`를 부르므로(`executor._precheck_isolate`의 `describe_target_health`) 그대로 두면 그 호출이 EC2 가짜에 닿아 **테스트가 틀린 채 통과하거나 엉뚱한 곳에서 터진다.** 모델이 없는 서비스에는 `NotImplementedError`를 던지도록 고쳤다 — T3·T4 테스트를 쓰려면 **`elbv2`·`autoscaling` 가짜를 먼저 만들어야** 하고, 그 사실이 실패 메시지로 드러난다. 기존 T1·T2 2건은 `ec2`만 쓰므로 영향이 없다(통과 확인).
 
-**② 골든 데이터로 T3를 세울 수 없다.** 골든에 `vigilantis:role=isolation` 태그를 쓰는 자산이 없어 T3-4 통과 조건 ②(격리 SG 존재)를 만들 수 없고, `golden-tg-topology`는 **판정 대상이 아닌 토폴로지 전용 노드**라 TG 등록 상태를 갖지 않는다. T1·T2가 지켜 온 "시연 데이터 = 테스트 데이터" 전제를 T3에서는 그대로 쓸 수 없다. 선택지는 둘이다 — **골든에 격리 SG와 TG 등록 상태를 추가**하거나, **T3 흐름 테스트만 픽스처로 조립**하고 골든 결속을 포기한다. 전자가 전제를 지키지만 골든 건수(입력 32 · 판정 정답 28)가 바뀌어 `test_golden_dataset.py`와 SSOT §MVP 확정 범위의 숫자를 함께 고쳐야 한다. **어느 쪽으로 갈지는 P2 실행 코드가 선 뒤에 정한다** — 그때 실제 파라미터 모양을 보고 결정하는 것이 순서다.
+**② 골든에서 재사용할 데이터와 추가할 응답을 구분한다.** `asset_inventory_005.json`의 `golden-tg-topology`에는 `target_instance_ids`가 있으므로 등록 대상 식별자는 재사용할 수 있다. 다만 이것은 `describe_target_health`의 `TargetHealthDescriptions` 응답이나 실제 health 상태가 아니다. `vigilantis:role=isolation` 태그 부재만으로 precheck 실패나 골든 사용 불가를 단정하지 않는다 — `_precheck_isolate()`는 전달받은 `isolation_group_id`로 SG 존재를 조회하며 태그를 검사하지 않는다. 격리용 SG가 트랙의 규칙 0개 조건을 충족하는지는 별도로 확인해야 한다.
 
-**③ 테스트를 쓰는 시점.** 실행 함수가 머지되기 전에 쓸 수 있는 것은 **precheck 층까지**다. 흐름 테스트(②)는 "실행 접수 → 상태 전이"를 재는 층이라 실행 함수 없이는 쓸 대상이 없다. 그래서 **T3·T4 흐름 테스트는 P2 실행 코드 머지와 같은 PR 또는 그 직후 PR로 들어가는 것이 맞고**, 이 설계서가 그 PR의 명세가 된다.
+골든 식별자·관계 정보를 읽고, P2에 필요한 EC2·ELBv2·Auto Scaling 응답과 격리 전후 상태·백업을 픽스처로 보충하는 방식부터 검토한다. **픽스처를 보충한다고 골든과의 연결을 포기할 필요는 없다.** 공통 입력에 새 자산을 추가할지는 재사용 범위를 정한 뒤 판단한다. 추가하더라도 입력 자산 수와 판정 정답 수가 함께 증가한다고 가정하지 않고 해당 테스트로 각각 확인한다. SSOT 변경이 필요하면 PM에게 별도로 요청한다. 파라미터 계약은 이미 `runbook_parameters.py`에 있으므로 이를 기준으로 테스트 입력과 기대값을 먼저 설계할 수 있다.
+
+**③ 테스트를 쓰는 시점(제안).** 계약에 따른 입력·기대값과 precheck 분기 테스트는 선행 작성할 수 있다. 실행·백업·발동 구현이 없는 동안에는 이를 잇는 흐름의 성공을 확인할 수 없다. **T3·T4 흐름 테스트를 해당 구현 PR에 함께 넣거나 연결 직후 후속 PR에서 검증하는 방안**을 제안한다. 실제 작업 분할·일정은 담당자와 리뷰에서 확정하며, 이 문서만으로 새 일정을 확정하지 않는다.
