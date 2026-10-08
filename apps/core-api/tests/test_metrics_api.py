@@ -10,9 +10,11 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import text
 
 from schemas.api.assets import AssetType
 from schemas.api.metrics import CpuSeries, NetworkSeries
@@ -20,6 +22,7 @@ from schemas.rules import RuleEvaluationResult
 
 from db import models
 from db.repositories import assets as assets_repo
+from routers import metrics as metrics_router
 
 ACCOUNT = "123456789012"
 SEOUL = "ap-northeast-2"
@@ -47,6 +50,18 @@ def no_cloudwatch(monkeypatch):
     로컬에서는 조용히 UNAVAILABLE 로, CI 에서는 느린 실패로 나타난다."""
     monkeypatch.setattr("routers.metrics.cpu_timeseries", lambda *a, **k: [])
     monkeypatch.setattr("routers.metrics.network_timeseries", lambda *a, **k: [])
+
+
+@pytest.fixture(autouse=True)
+def _fresh_cloudwatch_cache():
+    """CloudWatch 축 결과 캐시는 프로세스 전역이다 — 테스트마다 비워 앞 테스트의 결과가 새지 않게 한다.
+    대부분의 테스트가 같은 창(같은 시간대·같은 hours·빈 EC2 목록)으로 조회하므로 비우지 않으면
+    앞 테스트가 담은 빈 곡선이 뒤 테스트의 가짜 곡선을 가린다."""
+    metrics_router._cloudwatch_cache.clear()
+    metrics_router._cloudwatch_inflight.clear()
+    yield
+    metrics_router._cloudwatch_cache.clear()
+    metrics_router._cloudwatch_inflight.clear()
 
 
 def _seed_run(db, *, region: str, started_at: datetime):
@@ -566,3 +581,413 @@ def test_같은_칸에서_다시_수집하면_판정_축은_마지막_회차만_
 
     assert [p["value"] for p in body["sg_exposure"]["points"]] == [2]
     assert [(p["judged"], p["threat"]) for p in body["asset_status"]["points"]] == [(2, 2)]
+
+
+# ── 축 격리: DB 오류 (#425) ───────────────────────────────────────────────────
+# 여섯 축이 요청의 세션 하나를 차례로 쓴다. PostgreSQL 은 SQL 오류가 난 트랜잭션을 되돌릴
+# 때까지 다음 문장을 전부 거절하므로, 한 축의 실패가 뒤 축을 InternalError 로 끌고 간다.
+# Python 예외 주입으로는 이 경로가 열리지 않아 **실제 SQL 오류**를 같은 세션에 낸다.
+
+
+def _fail_with_sql_error(db) -> None:
+    """같은 세션에서 실제 SQL 오류를 낸다 — 트랜잭션이 중단 상태로 남는다."""
+    db.execute(text("SELECT 1/0"))
+
+
+def _seed_every_db_axis(db, *, at: datetime) -> None:
+    """DB 축 4개(SG·자산 현황·자산 수·위협 이벤트)가 각자 점 하나씩 갖게 시드한다."""
+    run = _seed_run(db, region=SEOUL, started_at=at)
+    _seed_sg(db, run, region=SEOUL, suffix="0001", verdict="THREAT", evaluated_at=at)
+    _seed_inventory(db, region=SEOUL, started_at=at + timedelta(seconds=10),
+                    counts={AssetType.EC2: 2})
+    _seed_threat_event(db, region=SEOUL, event_type="OPEN_IP", occurred_at=at, key="a")
+    db.commit()
+
+
+def test_DB_축의_SQL_오류는_그_축만_내리고_뒤_축은_그려진다(
+    client_pg, db, set_regions, monkeypatch, no_cloudwatch
+):
+    """축 2(SG)에서 SQL 오류가 나도 뒤의 축 4·5·6은 시드한 값 그대로 READY 다."""
+    set_regions(SEOUL)
+    _seed_every_db_axis(
+        db, at=(datetime.now(timezone.utc) - timedelta(hours=1)).replace(minute=1, second=0, microsecond=0)
+    )
+    monkeypatch.setattr(
+        "db.repositories.assets.sg_exposure_history",
+        lambda session, **kwargs: _fail_with_sql_error(session),
+    )
+
+    body = client_pg.get("/api/v1/metrics/timeseries").json()
+
+    assert body["sg_exposure"]["status"] == "UNAVAILABLE"
+    assert body["sg_exposure"]["reason_code"] == "DataError"
+    assert body["asset_status"]["status"] == "READY"
+    assert [(p["judged"], p["threat"]) for p in body["asset_status"]["points"]] == [(1, 1)]
+    assert body["asset_inventory"]["status"] == "READY"
+    assert [p["counts"] for p in body["asset_inventory"]["points"]] == [{"EC2": 2}]
+    assert body["threat_events"]["status"] == "READY"
+    assert [p["counts"] for p in body["threat_events"]["points"]] == [{"OPEN_IP": 1}]
+
+
+def test_CPU_축의_자산_조회_SQL_오류는_네트워크와_DB_축을_끌고_가지_않는다(
+    client_pg, db, set_regions, monkeypatch, no_cloudwatch
+):
+    """축 1(CPU)도 곡선을 그릴 EC2 목록을 DB 에서 읽는다 — 맨 앞 축의 SQL 오류가 뒤 다섯 축에 번지지 않는다."""
+    set_regions(SEOUL)
+    _seed_every_db_axis(
+        db, at=(datetime.now(timezone.utc) - timedelta(hours=1)).replace(minute=1, second=0, microsecond=0)
+    )
+    original = assets_repo.list_assets
+    calls = []
+
+    def _first_call_fails(session, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:  # CPU 축의 호출만 — 네트워크 축은 같은 함수를 다시 부른다
+            _fail_with_sql_error(session)
+        return original(session, **kwargs)
+
+    monkeypatch.setattr("db.repositories.assets.list_assets", _first_call_fails)
+
+    body = client_pg.get("/api/v1/metrics/timeseries").json()
+
+    assert body["cpu"]["status"] == "UNAVAILABLE"
+    assert body["cpu"]["reason_code"] == "DataError"
+    assert body["network"]["status"] == "READY"
+    assert [p["value"] for p in body["sg_exposure"]["points"]] == [1]
+    for axis in ("sg_exposure", "asset_status", "asset_inventory", "threat_events"):
+        assert body[axis]["status"] == "READY", axis
+
+
+def test_세션을_되돌리지_못해도_응답은_축마다_상태를_싣는다(
+    client_pg, db, set_regions, monkeypatch, no_cloudwatch
+):
+    """되돌리기마저 실패하면(연결 단절 등) 뒤 축은 각자 UNAVAILABLE 로 내려간다 — 응답 전체가 500 이 되지 않는다."""
+    set_regions(SEOUL)
+    _seed_every_db_axis(
+        db, at=(datetime.now(timezone.utc) - timedelta(hours=1)).replace(minute=1, second=0, microsecond=0)
+    )
+    broken = {"after_sg": False}
+
+    def _sg_fails(session, **kwargs):
+        broken["after_sg"] = True
+        _fail_with_sql_error(session)
+
+    monkeypatch.setattr("db.repositories.assets.sg_exposure_history", _sg_fails)
+    real_rollback = db.rollback
+
+    def _rollback_fails_after_sg():
+        # 앞 축(CPU·네트워크)이 EC2 목록을 읽고 끝내는 되돌리기는 그대로 둔다 — SG 오류 뒤부터 끊긴다
+        if broken["after_sg"]:
+            raise RuntimeError("연결이 끊겼다")
+        real_rollback()
+
+    monkeypatch.setattr(db, "rollback", _rollback_fails_after_sg)
+
+    response = client_pg.get("/api/v1/metrics/timeseries")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["cpu"]["status"] == "READY"
+    assert body["network"]["status"] == "READY"
+    assert body["sg_exposure"]["reason_code"] == "DataError"
+    for axis in ("asset_status", "asset_inventory", "threat_events"):
+        assert body[axis]["status"] == "UNAVAILABLE", axis
+        assert body[axis]["reason_code"] == "InternalError", axis
+
+
+# ── CloudWatch 축: 조회 창 정렬과 결과 재사용 (#425) ─────────────────────────────
+# 실제 cpu_timeseries·network_timeseries·_fetch_metrics 를 지나게 두고 클라이언트만 가짜로 바꾼다 —
+# "CloudWatch 를 몇 번 불렀나"는 get_metric_data 호출 수로 세야 의미가 있다.
+
+HOUR = timedelta(hours=1)
+BOUNDARY = datetime(2026, 10, 7, 10, 0, tzinfo=timezone.utc)
+
+
+def _at(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+class _CountingCloudWatch:
+    """get_metric_data 만 흉내 낸다 — 받은 창을 period 로 잘라 칸마다 점 하나를 돌려준다.
+
+    값은 칸 시작 시각에서 만든다. 창 경계가 움직이면 같은 시각대라도 칸과 값이 달라지므로,
+    두 조회의 점이 같다는 단언이 "같은 창으로 불렀다"를 함께 증명한다. ``statuses`` 는 호출마다
+    하나씩 꺼내 쓰는 StatusCode 다(비면 ``Complete``).
+    """
+
+    def __init__(self, statuses: list[str] | None = None):
+        self.calls: list[dict] = []
+        self._statuses = list(statuses or [])
+
+    def get_metric_data(self, **kwargs):
+        self.calls.append(kwargs)
+        start, end = kwargs["StartTime"], kwargs["EndTime"]
+        period = timedelta(seconds=kwargs["MetricDataQueries"][0]["MetricStat"]["Period"])
+        stamps = []
+        t = start
+        while t < end:
+            stamps.append(t)
+            t += period
+        status = self._statuses.pop(0) if self._statuses else "Complete"
+        return {
+            "MetricDataResults": [
+                {
+                    "Id": q["Id"],
+                    "StatusCode": status,
+                    "Timestamps": stamps if status == "Complete" else [],
+                    "Values": [round(s.timestamp() / 3600 % 100, 2) for s in stamps]
+                    if status == "Complete" else [],
+                }
+                for q in kwargs["MetricDataQueries"]
+            ]
+        }
+
+
+@pytest.fixture
+def cloudwatch(monkeypatch):
+    """services.metrics 가 부르는 클라이언트를 가짜로 바꾸고, 조회 시각을 테스트가 정하게 한다."""
+
+    def _install(client: _CountingCloudWatch, clock: dict) -> None:
+        monkeypatch.setattr("services.metrics.aws_client", lambda service, region: client)
+        monkeypatch.setattr("routers.metrics._now", lambda: clock["now"])
+
+    return _install
+
+
+def _seed_ec2(db, *, suffix: str) -> None:
+    run = _seed_run(db, region=SEOUL, started_at=BOUNDARY - 2 * HOUR)
+    assets_repo.upsert_asset(
+        db,
+        arn=f"arn:aws:ec2:{SEOUL}:{ACCOUNT}:instance/i-{suffix}",
+        asset_type=AssetType.EC2,
+        resource_id=f"i-{suffix}",
+        account_id=ACCOUNT,
+        region=SEOUL,
+        spec={},
+        collection_run_id=run.collection_run_id,
+        collected_at=BOUNDARY - 2 * HOUR,
+    )
+    db.commit()
+
+
+def _cloudwatch_axes(body: dict) -> dict:
+    """CPU·네트워크 축에서 창과 점만 — 재사용 여부를 비교할 단위."""
+    return {name: {k: body[name][k] for k in ("window_start", "window_end", "series")}
+            for name in ("cpu", "network")}
+
+
+@pytest.mark.parametrize(
+    ("now", "hours", "period", "expected"),
+    [
+        # 정착 지연(10분)이 지난 뒤 — 끝은 직전 정각, 진행 중인 칸은 빠진다
+        (BOUNDARY + timedelta(minutes=12), 3, 3600, (BOUNDARY - 3 * HOUR, BOUNDARY)),
+        # 정착 지연 안 — 아직 한 칸 앞의 창이다
+        (BOUNDARY + timedelta(minutes=9, seconds=59), 3, 3600, (BOUNDARY - 4 * HOUR, BOUNDARY - HOUR)),
+        (BOUNDARY + timedelta(minutes=10), 3, 3600, (BOUNDARY - 3 * HOUR, BOUNDARY)),
+        # 입자가 5분이면 경계도 5분 단위다
+        (BOUNDARY + timedelta(minutes=17), 1, 300, (BOUNDARY - timedelta(minutes=55), BOUNDARY + timedelta(minutes=5))),
+        # 창 길이가 입자 배수가 아니면 올려 잡는다(5시간 → 1일)
+        (BOUNDARY, 5, 86400,
+         (datetime(2026, 10, 6, tzinfo=timezone.utc), datetime(2026, 10, 7, tzinfo=timezone.utc))),
+    ],
+)
+def test_CloudWatch_조회_창은_입자_경계에_맞춘다(now, hours, period, expected):
+    assert metrics_router._cloudwatch_window(now, hours=hours, period_seconds=period) == expected
+
+
+def test_같은_입자_안에서는_CloudWatch를_다시_부르지_않고_점도_같다(client_pg, db, set_regions, cloudwatch):
+    """완료 조건 2 — 성공한 조회는 입자당 한 번이고, 그 사이의 조회는 시각·값이 같은 점을 받는다."""
+    set_regions(SEOUL)
+    _seed_ec2(db, suffix="0001")
+    cw, clock = _CountingCloudWatch(), {}
+    cloudwatch(cw, clock)
+
+    bodies = []
+    # 10:12 · 10:48 · 다음 정각을 넘겼지만 정착 지연 안인 11:05 — 셋 다 같은 창이다
+    for minutes in (12, 48, 65):
+        clock["now"] = BOUNDARY + timedelta(minutes=minutes)
+        bodies.append(client_pg.get("/api/v1/metrics/timeseries?hours=3").json())
+
+    assert len(cw.calls) == 2  # CPU 1회 + 네트워크 1회
+    assert _cloudwatch_axes(bodies[0]) == _cloudwatch_axes(bodies[1]) == _cloudwatch_axes(bodies[2])
+    cpu = bodies[0]["cpu"]
+    assert cpu["status"] == "READY"
+    assert (_at(cpu["window_start"]), _at(cpu["window_end"])) == (BOUNDARY - 3 * HOUR, BOUNDARY)
+    # 마지막 점은 끝난 칸이다 — 진행 중인 10시 칸은 그리지 않는다
+    assert [_at(p["at"]) for p in cpu["series"][0]["points"]] == [
+        BOUNDARY - 3 * HOUR, BOUNDARY - 2 * HOUR, BOUNDARY - HOUR
+    ]
+    assert {(c["StartTime"], c["EndTime"]) for c in cw.calls} == {(BOUNDARY - 3 * HOUR, BOUNDARY)}
+
+
+def test_입자_경계를_지나면_한_칸_밀리고_그때만_다시_부른다(client_pg, db, set_regions, cloudwatch):
+    set_regions(SEOUL)
+    _seed_ec2(db, suffix="0001")
+    cw, clock = _CountingCloudWatch(), {}
+    cloudwatch(cw, clock)
+
+    clock["now"] = BOUNDARY + timedelta(minutes=48)
+    before = client_pg.get("/api/v1/metrics/timeseries?hours=3").json()
+    clock["now"] = BOUNDARY + timedelta(minutes=72)
+    after = client_pg.get("/api/v1/metrics/timeseries?hours=3").json()
+
+    assert len(cw.calls) == 4
+    for name, points_key in (("cpu", "points"), ("network", "in_points")):
+        before_at = [_at(p["at"]) for p in before[name]["series"][0][points_key]]
+        after_at = [_at(p["at"]) for p in after[name]["series"][0][points_key]]
+        assert after_at == [at + HOUR for at in before_at], name
+        assert _at(after[name]["window_end"]) == BOUNDARY + HOUR, name
+    # 지난 창의 결과는 버린다 — 단일 프로세스에 입자마다 쌓이지 않는다
+    assert {k.window_end for k in metrics_router._cloudwatch_cache} == {BOUNDARY + HOUR}
+
+
+def test_실패한_조회는_재사용하지_않고_다음_조회에서_다시_부른다(client_pg, db, set_regions, cloudwatch):
+    """스로틀·권한 오류 한 번으로 그 축이 한 입자 내내 비지 않는다 — 실패는 담지 않는다."""
+    set_regions(SEOUL)
+    _seed_ec2(db, suffix="0001")
+    cw, clock = _CountingCloudWatch(statuses=["Forbidden"]), {"now": BOUNDARY + timedelta(minutes=12)}
+    cloudwatch(cw, clock)
+
+    first = client_pg.get("/api/v1/metrics/timeseries?hours=3").json()
+    second = client_pg.get("/api/v1/metrics/timeseries?hours=3").json()
+
+    assert (first["cpu"]["status"], first["cpu"]["reason_code"]) == ("UNAVAILABLE", "Forbidden")
+    assert first["network"]["status"] == "READY"
+    assert second["cpu"]["status"] == "READY"
+    assert len(second["cpu"]["series"][0]["points"]) == 3
+    # CPU 는 두 번(실패 → 재시도), 성공한 네트워크는 첫 조회의 결과를 다시 쓴다
+    assert len(cw.calls) == 3
+
+
+def test_곡선_대상이_바뀌면_같은_창에서도_다시_부른다(client_pg, db, set_regions, cloudwatch):
+    """입자 중간에 새로 수집된 인스턴스가 다음 경계까지 곡선 목록에서 빠지지 않는다."""
+    set_regions(SEOUL)
+    _seed_ec2(db, suffix="0001")
+    cw, clock = _CountingCloudWatch(), {"now": BOUNDARY + timedelta(minutes=12)}
+    cloudwatch(cw, clock)
+
+    client_pg.get("/api/v1/metrics/timeseries?hours=3")
+    _seed_ec2(db, suffix="0002")
+    body = client_pg.get("/api/v1/metrics/timeseries?hours=3").json()
+
+    assert len(cw.calls) == 4
+    assert [len(s["points"]) for s in body["cpu"]["series"]] == [3, 3]
+
+
+def test_CloudWatch를_부르는_동안_DB_트랜잭션을_쥐지_않는다(client_pg, db, set_regions, cloudwatch):
+    """조회를 기다리는 동안 풀 연결을 쥐면 CloudWatch 가 느릴 때 다른 API 까지 연결을 못 얻는다."""
+    set_regions(SEOUL)
+    _seed_ec2(db, suffix="0001")
+    seen: list[bool] = []
+
+    class _Observing(_CountingCloudWatch):
+        def get_metric_data(self, **kwargs):
+            seen.append(db.in_transaction())
+            return super().get_metric_data(**kwargs)
+
+    cloudwatch(_Observing(), {"now": BOUNDARY + timedelta(minutes=12)})
+    client_pg.get("/api/v1/metrics/timeseries?hours=3")
+
+    assert seen == [False, False]  # CPU · 네트워크
+
+
+# ── 동시 조회: 진행 중인 조회 하나를 나눈다 (#425) ─────────────────────────────
+# 동기 엔드포인트라 요청이 스레드풀에서 겹친다. 스레드로 그 겹침을 직접 만든다 — 조회 함수가
+# 붙잡혀 있는 동안 다른 요청이 무엇을 하는지(기다리는가 · 따로 부르는가 · 막히는가)를 본다.
+
+WAIT = 5  # 초 — 실패 시 테스트가 영원히 멈추지 않게 하는 상한일 뿐, 정상 경로는 즉시 끝난다
+
+
+def _key(axis: str = "cpu") -> metrics_router._CloudWatchKey:
+    return metrics_router._CloudWatchKey(axis, BOUNDARY - 3 * HOUR, BOUNDARY, 3600, ())
+
+
+class _HeldFetch:
+    """부르면 ``release`` 될 때까지 붙잡히는 조회 함수. 호출 수를 센다."""
+
+    def __init__(self, *, result: list | None = None, error: Exception | None = None):
+        self.calls = 0
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self._result = result if result is not None else ["series"]
+        self._error = error
+
+    def __call__(self):
+        self.calls += 1
+        self.entered.set()
+        self.release.wait(WAIT)
+        if self._error is not None:
+            raise self._error
+        return self._result
+
+
+def _call_in_thread(key, fetch) -> tuple[threading.Thread, dict]:
+    outcome: dict = {}
+
+    def _run():
+        try:
+            outcome["value"] = metrics_router._cached_cloudwatch(key, fetch)
+        except Exception as exc:  # 스레드 밖에서 단언하려고 담아 둔다
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=_run)
+    thread.start()
+    return thread, outcome
+
+
+def test_같은_키로_동시에_들어온_조회는_진행_중인_한_번을_나눠_받는다():
+    fetch = _HeldFetch()
+    first, first_out = _call_in_thread(_key(), fetch)
+    try:
+        assert fetch.entered.wait(WAIT)
+        second, second_out = _call_in_thread(_key(), fetch)
+        second.join(0.2)
+        assert second.is_alive()  # 따로 부르지 않고 기다린다
+        assert fetch.calls == 1
+    finally:
+        fetch.release.set()
+    first.join(WAIT)
+    second.join(WAIT)
+
+    assert fetch.calls == 1
+    assert first_out["value"] is second_out["value"]
+
+
+def test_진행_중인_실패는_기다리던_요청도_받고_다음_조회는_다시_부른다():
+    """기다리던 요청은 같은 조회의 실패를 받는다. 실패는 담지 않으므로 끝난 뒤의 조회는 새로 부른다."""
+    fetch = _HeldFetch(error=RuntimeError("스로틀"))
+    first, first_out = _call_in_thread(_key(), fetch)
+    try:
+        assert fetch.entered.wait(WAIT)
+        second, second_out = _call_in_thread(_key(), fetch)
+        second.join(0.2)
+    finally:
+        fetch.release.set()
+    first.join(WAIT)
+    second.join(WAIT)
+
+    assert fetch.calls == 1
+    assert isinstance(first_out["error"], RuntimeError)
+    assert second_out["error"] is first_out["error"]
+
+    retry = _HeldFetch(result=["recovered"])
+    retry.release.set()
+    assert metrics_router._cached_cloudwatch(_key(), retry) == ["recovered"]
+    assert retry.calls == 1
+
+
+def test_한_키의_조회가_붙잡혀_있어도_다른_키는_기다리지_않는다():
+    """느리게 실패하는 CPU 조회 뒤로 네트워크 축이 줄을 서지 않는다."""
+    slow = _HeldFetch()
+    held, _ = _call_in_thread(_key("cpu"), slow)
+    try:
+        assert slow.entered.wait(WAIT)
+        fast = _HeldFetch(result=["network"])
+        fast.release.set()
+        other, other_out = _call_in_thread(_key("network"), fast)
+        other.join(WAIT)
+        assert not other.is_alive()
+        assert other_out["value"] == ["network"]
+    finally:
+        slow.release.set()
+    held.join(WAIT)
