@@ -479,12 +479,36 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 | 항목 | 상태 | 막는 단계 |
 | --- | --- | --- |
 | 백업 `SAVE_CURRENT_SG_AND_TG_MAPPING` 캡처 | **없음** — `services/aws/backup.py` 머리말 `[남은 작업]` | T3-4 → T3-7 전체 |
-| `execute_ec2_isolate` · `execute_ec2_unisolate` | **없음** — `executor.py` 머리말 TODO 1번 | T3-5 · T3-7 |
+| `execute_ec2_isolate` · `execute_ec2_unisolate` | **없음** — `executor.py` 머리말 `[남은 작업]` 1·2번 | T3-5 · T3-7 |
 | `execute_ec2_enable_autoscaling` | **없음** | T4-3 |
 | `PRE_MITIGATION_0_5S` · `TIMEOUT_ISOLATION_1M` 발동 경로 | **없음** — `security/soar.py`에 범위 선언만 있다 | T3-2 · T3 자동 격리 분기 |
 | Medium `실행 예정 시간` 서버 응답 필드 | 없음 | T3 자동 격리 분기의 화면 |
 
 `precheck()`는 **10종 전부 구현돼 있다**(`RUNBOOK_SPECS`). 다만 구현 존재와 환경 검증 완료는 다르다. **필요한 EC2·ELBv2·Auto Scaling 응답을 가짜로 구성하면 precheck의 분기·실패 처리를 먼저 테스트할 수 있다.** LocalStack Community에서는 `elbv2`·`autoscaling` 조회가 막혀 P2 precheck 전체 통과를 확인할 수 없다. 실제 AWS 권한·조회 응답·통과 조건은 실 AWS에서 확인하고 `docs/AWS_SMOKE_RESULT.md` §8-1에 기록한다. 실행·백업·발동 경로를 잇는 흐름은 별도의 선행 구현이 필요하다.
+
+### 반복 검증의 사전 조건 — 한 번의 복구 실패가 이후 검증을 막는다
+
+T3·T4는 10/14(수)–10/15(목)에 **여러 번 돌릴 수 있다.** 그때 되돌려 놓아야 하는 것이 둘이고, 둘 다 대본이 먼저 알고 있어야 한다. 아래 근거는 전부 현행 `dev` 코드다.
+
+**① TG 재등록의 자동 경로는 `EC2_UNISOLATE` 하나뿐이다 — `up --yes`가 받쳐 주지 않는다.**
+
+`scripts/provision_smoke_aws.py`는 초기화 태그가 붙은 뒤의 `up`에서 **대상 등록을 건너뛴다.** 코드 주석이 이유를 적는다 — *"등록은 초기화 때 한 번만 한다 — 다시 돌린 up이 격리(등록 해제)를 되돌리면 안 된다."* 격리 검증 중에 `up`을 돌려도 격리가 풀리지 않아야 하므로 **그 설계가 맞다.**
+
+결과로 T3-5(격리)가 대상을 TG에서 뺀 뒤 T3-7(해제)이 실패하면 **되돌릴 자동 경로가 없다.** 그리고 다음 T3 시도는 `_precheck_isolate`의 통과 조건 ③(TG 존재·대상 등록)에서 `PRECHECK_TARGET_NOT_FOUND`로 멈춘다 — **한 번의 복구 실패가 이후 반복 검증 전부를 막는다.**
+
+→ 수동 복구: 관리자 프로필로 `aws elbv2 register-targets --target-group-arn <TG ARN> --targets Id=<인스턴스 ID>` 를 돌리고, `provision_smoke_aws.py status`에서 그 대상이 `healthy`인지 확인한다. 복구했다는 사실과 시각을 `docs/AWS_SMOKE_RESULT.md` §7에 남긴다 — 그 회차의 T3 결과를 읽을 때 필요한 사실이다.
+
+> B1–B3(백업 캡처·격리·해제)이 서기 전에는 T3-5·T3-7 자체가 돌지 않으므로, 이 조건은 **그 코드가 선 뒤 첫 T3부터** 적용된다. 그리고 그 첫 T3이 곧 `EC2_UNISOLATE`의 첫 실행이라, 실패 확률이 낮지 않은 자리다.
+
+**② 검증 창에는 그 검증을 돌리는 앱 하나만 발동을 켠다.**
+
+T3은 격리된 **중간 상태**를 읽어 판정하는 경로다(T3-6에서 대상 상태·서비스 응답을 확인한다). 그 사이 다른 앱이 접수된 조치를 실행하면 무엇이 검증 결과인지 가릴 수 없다.
+
+→ 발동 스위치는 `DISPATCH_ENABLED`다(`apps/core-api/config.py`). `apps/core-api/main.py` 머리말이 **회수 스캔(dispatcher)과 AI 분석 대기 스캔(agent_dispatcher)을 그 스위치 하나로** 묶는다고 적는다. 검증 전에 끄고, 끝난 뒤 되돌린다. 되돌리기 전에 그사이 접수된 실행이 없는지 본다.
+
+→ **수집(`SCAN_ENABLED`)은 끄지 않는다.** 수집은 describe만 하는 읽기 전용이라 AWS 상태를 바꾸지 않는다. 다른 앱의 회차가 늘어나는 것은 그 앱의 DB 문제이고, T3·T4가 읽는 중간 상태를 바꾸지 않는다.
+
+> 환경 운영 쪽 절차(언제 `.env`를 실 AWS로 전환하고 누가 되돌리는지)는 ADR-0009 1차 개정이 다룬다 — **PR #436, 리뷰 중**이다. 머지되면 그 절과 이 칸이 같은 사실을 가리킨다. 이 칸의 근거는 ADR이 아니라 위에 적은 코드이므로 ADR이 개정돼도 흔들리지 않는다.
 
 ### 로컬 실행 가능성 ❌
 
