@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 for _path in (REPO_ROOT / "apps" / "core-api", REPO_ROOT / "packages"):
@@ -137,6 +138,62 @@ def test_region_notice_is_silent_for_one_region_or_none(pairs):
 
 
 # ⑧ 다른 계정 표시의 근거 — ARN 계정 칸을 읽는다
+# ⑩ §2-4 줄 조립이 계정 표시를 실제로 쓰고, 정상 보존분을 조사 대상에 섞지 않는다
+#    (PR #428 리뷰 nit 2 — 표시 함수만 테스트하면 호출부에서 빼도 통과한다)
+class _Finding(NamedTuple):
+    kind: str
+    value: str
+    sources: tuple[str, ...]
+
+
+_SMOKE_ACCOUNT = "000000000000"
+
+
+def _summary(total, investigate, by_kind=None):
+    return {"total": total, "investigate": investigate, "by_kind": by_kind or {}}
+
+
+def test_dangling_lines_marks_a_foreign_account_on_the_assembled_line():
+    other = _Finding("broken_reference",
+                     f"arn:aws:elasticloadbalancing:ap-northeast-2:123456789012:targetgroup/x/y",
+                     ("asset_relationships.target_arn",))
+    lines = qa._dangling_lines([other], _summary(1, 1), {_SMOKE_ACCOUNT})
+    joined = "\n".join(lines)
+    assert "조사 대상:" in joined
+    assert "(다른 계정)" in joined, "호출부가 _account_mark 를 쓰지 않으면 이 표시가 사라진다"
+
+
+def test_dangling_lines_marks_an_unreadable_account_on_the_assembled_line():
+    broken = _Finding("broken_reference", "not-an-arn", ("action_executions.target_arn",))
+    joined = "\n".join(qa._dangling_lines([broken], _summary(1, 1), {_SMOKE_ACCOUNT}))
+    assert "(계정 확인 불가)" in joined
+    assert "다른 계정" not in joined
+
+
+def test_dangling_lines_keeps_a_same_account_line_unmarked():
+    mine = _Finding("broken_reference",
+                    f"arn:aws:ec2:ap-northeast-2:{_SMOKE_ACCOUNT}:instance/i-1",
+                    ("backup_records.target_arn",))
+    joined = "\n".join(qa._dangling_lines([mine], _summary(1, 1), {_SMOKE_ACCOUNT}))
+    assert "다른 계정" not in joined and "계정 확인 불가" not in joined
+
+
+def test_dangling_lines_excludes_kinds_that_are_normal_to_dangle():
+    kept = _Finding("broken_reference", "not-an-arn", ("x.y",))
+    dropped = _Finding("threat_unregistered_target", "arn:aws:ec2:r:1:instance/i-2", ("t.z",))
+    assert dropped.kind not in qa.INVESTIGATE_KINDS
+    joined = "\n".join(qa._dangling_lines([kept, dropped], _summary(2, 1), {_SMOKE_ACCOUNT}))
+    assert "not-an-arn" in joined
+    assert "i-2" not in joined, "정상 보존분이 조사 대상으로 찍히면 기록이 오염된다"
+
+
+def test_dangling_lines_reports_the_baseline_scope_when_nothing_to_investigate():
+    joined = "\n".join(qa._dangling_lines([], _summary(0, 0), {_SMOKE_ACCOUNT}))
+    assert "investigate 0 건" in joined
+    assert "DB 전체 기준" in joined
+    assert "조사 대상:" not in joined
+
+
 def test_arn_account_reads_the_account_field():
     arn = "arn:aws:elasticloadbalancing:ap-northeast-2:123456789012:targetgroup/x/y"
     assert qa._arn_account(arn) == "123456789012"

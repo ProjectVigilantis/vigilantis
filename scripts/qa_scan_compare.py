@@ -31,7 +31,7 @@ import sys
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Collection, Optional, Sequence
+from typing import Any, Collection, Mapping, Optional, Sequence
 
 # Windows 기본 콘솔(cp949)은 이 파일의 한국어·em dash 를 못 낸다 — 팀 개발 환경이
 # Windows 라 출력 스트림을 UTF-8 로 고정한다(scripts/inject_mock_threat.py 와 같은 이유).
@@ -165,6 +165,40 @@ def _failure_lines(error_summary: Optional[str], mode: str) -> list[str]:
     if how == "JSON":
         return ["  collector_failures : (없음 — error_summary 가 빈 묶음이다)"]
     return ["  collector_failures : 확인 불가 — 위 원문 참조"]
+
+
+def _dangling_lines(
+    findings: Sequence[Any], summary: Mapping[str, Any], run_accounts: Collection[str]
+) -> list[str]:
+    """§2-4 조인 무결성 구역의 출력 줄.
+
+    **줄 조립을 호출부에서 떼어 둔 이유**는 `_account_mark` 가 실제로 쓰이는지까지
+    테스트가 지키게 하려는 것이다(PR #428 리뷰 nit 2). 표시 함수만 테스트하면 호출부에서
+    그 함수를 빼도 통과한다 — 리뷰어가 되돌려 보고 통과를 확인했다.
+
+    조사 대상은 `INVESTIGATE_KINDS` 로 좁힌다. 위협 접수의 미등록 대상이나 가드레일 ③ 이
+    거절한 후보처럼 **매달린 것이 정상인 자리**가 있어서, 전부 찍으면 정상 보존분이 조사
+    대상으로 읽힌다(`repositories/assets.find_dangling_arns`).
+    """
+    lines = [
+        f"  total {summary['total']} / investigate {summary['investigate']}",
+        f"  종류별: {summary['by_kind'] or '(없음)'}",
+    ]
+    if not summary["investigate"]:
+        lines.append(
+            "  investigate 0 건 — DB 전체 기준으로 기준선(2026-09-14·09-16 실측 0건)과 같다."
+        )
+        return lines
+    lines.append("  조사 대상:")
+    for finding in findings:
+        if finding.kind not in INVESTIGATE_KINDS:
+            continue
+        mark = _account_mark(_arn_account(finding.value), run_accounts)
+        lines.append(
+            f"      [{finding.kind}] {finding.value}"
+            f"  자리={','.join(finding.sources)}{mark}"
+        )
+    return lines
 
 
 def _section(title: str) -> None:
@@ -338,26 +372,8 @@ def main() -> int:
         findings = find_dangling_arns(db)
         summary = summarize_dangling(findings)
         _section("[§2-4] 조인 무결성 — DB 전체 기준(선택 회차와 무관)")
-        run_accounts = {r.account_id for r in runs}
-        print(f"  total {summary['total']} / investigate {summary['investigate']}")
-        print(f"  종류별: {summary['by_kind'] or '(없음)'}")
-        if summary["investigate"]:
-            # 조사 대상은 INVESTIGATE_KINDS 로 좁힌다 — 위협 접수의 미등록 대상이나 가드레일 ③
-            # 이 거절한 후보처럼 **매달린 것이 정상인 자리**가 있어서, 전부 찍으면 정상 보존분이
-            # 조사 대상으로 읽힌다(repositories/assets.find_dangling_arns).
-            print("  조사 대상:")
-            for finding in findings:
-                if finding.kind not in INVESTIGATE_KINDS:
-                    continue
-                mark = _account_mark(_arn_account(finding.value), run_accounts)
-                print(
-                    f"      [{finding.kind}] {finding.value}"
-                    f"  자리={','.join(finding.sources)}{mark}"
-                )
-        else:
-            print(
-                "  investigate 0 건 — DB 전체 기준으로 기준선(2026-09-14·09-16 실측 0건)과 같다."
-            )
+        for line in _dangling_lines(findings, summary, {r.account_id for r in runs}):
+            print(line)
 
     print()
     print("해소/미해소 판단은 이 출력이 하지 않는다 — AWS_SMOKE_RESULT.md §5 에 사람이 적는다.")
