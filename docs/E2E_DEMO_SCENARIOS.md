@@ -488,7 +488,7 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 
 ### 반복 검증의 사전 조건 — 한 번의 복구 실패가 이후 검증을 막는다
 
-T3·T4는 10/14(수)–10/15(목)에 **여러 번 돌릴 수 있다.** 그때 챙겨야 하는 것이 셋이고(①② T3 · ③ T4), 셋 다 대본이 먼저 알고 있어야 한다. 아래 근거는 전부 현행 `dev` 코드다.
+T3·T4는 10/14(수)–10/15(목)에 **여러 번 돌릴 수 있다.** 그때 되돌려 놓아야 하는 것이 둘이고, 둘 다 대본이 먼저 알고 있어야 한다. 아래 근거는 전부 현행 `dev` 코드다.
 
 **① TG 재등록의 자동 경로는 `EC2_UNISOLATE` 하나뿐이다 — `up --yes`가 받쳐 주지 않는다.**
 
@@ -508,13 +508,7 @@ T3은 격리된 **중간 상태**를 읽어 판정하는 경로다(T3-6에서 �
 
 → **수집(`SCAN_ENABLED`)은 끄지 않는다.** 수집은 describe만 하는 읽기 전용이라 AWS 상태를 바꾸지 않는다. 다른 앱의 회차가 늘어나는 것은 그 앱의 DB 문제이고, T3·T4가 읽는 중간 상태를 바꾸지 않는다.
 
-**③ T4는 정리를 끝까지 해야 다음 회차가 선다 — ASG와 Launch Template을 둘 다 지운다.**
-
-T4-4(정리)는 되돌리기가 아니라 삭제이고, 이름이 인스턴스 ID에서 고정된다 — ASG `vigilantis-asg-<인스턴스 ID>` · Launch Template `vigilantis-lt-<인스턴스 ID>`(`executor.py`의 `_asg_name`·`_launch_template_name`). 그래서 정리가 빠지거나 반쯤 되면 같은 인스턴스로 도는 다음 T4가 막힌다 — ASG가 남으면 `_precheck_enable_autoscaling`의 통과 조건 ③(동명 ASG 부재)에서 거절되고, Launch Template만 남으면 실행 단계의 생성이 이름 충돌로 실패할 수 있다(실행 함수는 B4 — 아직 없음).
-
-→ 정리 뒤 `aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names vigilantis-asg-<인스턴스 ID>`와 `aws ec2 describe-launch-templates --launch-template-names vigilantis-lt-<인스턴스 ID>`가 둘 다 비어 있는지 본다. ASG가 띄운 인스턴스가 종료됐는지도 함께 본다(비용이 예산표 밖 — ADR-0009 §3).
-
-> 환경 운영 쪽 절차(언제 `.env`를 실 AWS로 전환하고 누가 되돌리는지)는 ADR-0009 §6(1차 개정 · PR #436, 10/12(월) 머지)이 다룬다 — 검증 창의 발동 정지와 TG 수동 재등록이 그 절에도 같은 사실로 적혀 있다. 이 칸의 근거는 ADR이 아니라 위에 적은 코드이므로 ADR이 다시 개정돼도 흔들리지 않는다.
+> 환경 운영 쪽 절차(언제 `.env`를 실 AWS로 전환하고 누가 되돌리는지)는 ADR-0009 1차 개정이 다룬다 — **PR #436, 리뷰 중**이다. 머지되면 그 절과 이 칸이 같은 사실을 가리킨다. 이 칸의 근거는 ADR이 아니라 위에 적은 코드이므로 ADR이 개정돼도 흔들리지 않는다.
 
 ### 로컬 실행 가능성 ❌
 
