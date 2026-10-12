@@ -155,6 +155,8 @@ def _runtime_config() -> dict:
         "regions": regions(),
         "lookback_days": settings.METRIC_LOOKBACK_DAYS,
         "period_seconds": settings.METRIC_PERIOD_SECONDS,
+        # None 이면 범위 제한 없음(리전 전체). 아래 _apply_vpc_scope 참고.
+        "vpc_scope": settings.collect_vpc_ids(),
     }
 
 
@@ -367,6 +369,109 @@ def _registered_instance_ids(target_health: list) -> list[str]:
     return list(dict.fromkeys(ids))
 
 
+class _RawInventory(NamedTuple):
+    """describe 원응답 묶음 — 범위 필터(_apply_vpc_scope)의 입출력."""
+
+    instances: list
+    sgs: list
+    nacls: list
+    volumes: list
+    lts: list
+    asgs: list
+    tgs: list
+
+
+def _apply_vpc_scope(
+    raw: _RawInventory, scope: frozenset[str] | None, region: str = ""
+) -> _RawInventory:
+    """수집 범위 VPC(COLLECT_VPC_IDS) 밖의 자산을 원응답 단계에서 걸러 낸다.
+
+    **왜 있나**: 단일 계정·같은 리전에 플랫폼 자신(ECS·RDS·ALB·NAT 가 든 별도 VPC)을
+    배포하면 플랫폼 자원까지 관제 대상으로 수집·판정된다(플랫폼 ALB SG 의 0.0.0.0/0 →
+    THREAT 등). 포함 목록으로 계정 경계를 흉내 낸다. Post-MVP SaaS 는 관제 범위 = 고객
+    계정이라 필요 없고, ``scope`` 가 None(설정 빈 값)이면 입력을 그대로 돌려준다.
+
+    원응답에서 거르는 이유: 뒤따르는 메트릭 조회·target health 조회·관계 파생·자산 수
+    스냅샷이 전부 걸러진 결과만 보게 하려는 것이다. 걸러진 자산은 이번 회차에 관측되지
+    않은 것으로 처리되어, 전에 적재된 행이 있으면 persist_inventory 가 소멸 표시를 찍는다
+    — list_assets 가 소멸분을 빼므로 화면·판정에서 함께 빠지는 것이 의도한 결과다. 범위를
+    넓히면 다음 회차 upsert_asset 이 표시를 지운다.
+
+    유형별 기준:
+      - EC2·SG·NACL·ALB TG : 응답의 VpcId 가 범위 안일 때만. VpcId 가 없으면 범위 밖.
+      - EBS : VPC 소속이 없다. 붙은 볼륨은 **붙은 인스턴스가 하나라도 범위 밖이 아니면**
+        유지(범위 밖 인스턴스에만 붙은 볼륨만 제외), 미연결 볼륨은 그대로 수집한다.
+        플랫폼은 Fargate·RDS 라 계정에 보이는 EBS 를 만들지 않으므로 미연결 볼륨이
+        플랫폼 것일 일이 없다.
+      - ASG : VPCZoneIdentifier 의 서브넷 → VPC 로 가른다. 서브넷 → VPC 지도는 NACL
+        연결에서 얻는다(서브넷은 반드시 NACL 하나에 연결되므로 describe_subnets 를 더
+        부르지 않아도 리전 전체가 덮인다). 서브넷으로 못 가르면 소속 인스턴스로, 그것도
+        없으면 판단 근거가 없으므로 **수집 유지**한다.
+      - Launch Template : VPC 소속이 없다(describe_launch_templates 는 네트워크 설정을
+        싣지 않는다). 범위 밖 ASG 만 쓰는 LT 는 제외하고, 그 밖(범위 안 ASG 가 쓰거나
+        아무 ASG 도 안 쓰는 LT)은 판단 근거가 없어 유지한다. ASG 조회가 degrade 된
+        회차는 참조를 모르므로 전부 유지된다.
+    """
+    if scope is None:
+        return raw
+
+    def in_scope(item: dict) -> bool:
+        return item.get("VpcId") in scope
+
+    instances = [i for i in raw.instances if in_scope(i)]
+    out_instance_ids = {i["InstanceId"] for i in raw.instances if not in_scope(i)}
+    in_instance_ids = {i["InstanceId"] for i in instances}
+
+    def volume_in_scope(v: dict) -> bool:
+        attached = [a["InstanceId"] for a in v.get("Attachments", []) if a.get("InstanceId")]
+        return not attached or any(iid not in out_instance_ids for iid in attached)
+
+    subnet_vpc = {
+        a["SubnetId"]: n.get("VpcId")
+        for n in raw.nacls
+        for a in n.get("Associations", [])
+        if a.get("SubnetId")
+    }
+    subnet_vpc.update({i["SubnetId"]: i.get("VpcId") for i in raw.instances if i.get("SubnetId")})
+
+    def asg_in_scope(g: dict) -> bool:
+        subnets = [s.strip() for s in (g.get("VPCZoneIdentifier") or "").split(",") if s.strip()]
+        vpcs = {subnet_vpc[s] for s in subnets if s in subnet_vpc}
+        if vpcs:
+            return bool(vpcs & scope)
+        members = {i["InstanceId"] for i in g.get("Instances", [])}
+        if members & in_instance_ids:
+            return True
+        if members & out_instance_ids:
+            return False
+        return True  # 근거 없음 — 유지
+
+    asgs, asgs_out = [], []
+    for g in raw.asgs:
+        (asgs if asg_in_scope(g) else asgs_out).append(g)
+    lt_in = {_asg_launch_template(g)[0] for g in asgs} - {None}
+    lt_out = {_asg_launch_template(g)[0] for g in asgs_out} - {None}
+    lts = [
+        lt for lt in raw.lts
+        if lt["LaunchTemplateId"] in lt_in or lt["LaunchTemplateId"] not in lt_out
+    ]
+
+    scoped = _RawInventory(
+        instances=instances,
+        sgs=[sg for sg in raw.sgs if in_scope(sg)],
+        nacls=[n for n in raw.nacls if in_scope(n)],
+        volumes=[v for v in raw.volumes if volume_in_scope(v)],
+        lts=lts,
+        asgs=asgs,
+        tgs=[tg for tg in raw.tgs if in_scope(tg)],
+    )
+    # 리전마다 VPC 가 다르므로 이 리전에 범위 VPC 가 하나도 없는 것은 복수 리전에서 정상이다.
+    # 다만 오타와 구분이 안 되므로 경고 대신 건수를 남겨 둔다(VPC 마다 기본 SG 가 있다).
+    if not {sg.get("VpcId") for sg in raw.sgs} & scope:
+        _log.info("리전 %s: 수집 범위 VPC %s 가 이 리전에 없음 — 범위 안 자산 0건", region, sorted(scope))
+    return scoped
+
+
 # ------------------------------------------------------------------ 공개 API
 def collect_region(
     region: str,
@@ -414,6 +519,15 @@ def collect_region(
         lambda: _paginate(elbv2, "describe_target_groups", "TargetGroups"),
         "alb_target_groups", failures,
     )
+    # 수집 범위 VPC(COLLECT_VPC_IDS) 밖 자산을 여기서 걸러 낸다 — 단일 계정에 플랫폼 VPC 가
+    # 함께 있을 때만 쓰는 설정이고 비어 있으면 그대로 통과한다(_apply_vpc_scope).
+    # 메트릭·target health 조회와 관계·건수 집계가 모두 걸러진 결과 기준이 된다.
+    (instances_raw, sgs_raw, nacls_raw, volumes_raw, lts_raw, asgs_raw, tgs_raw) = _apply_vpc_scope(
+        _RawInventory(instances_raw, sgs_raw, nacls_raw, volumes_raw, lts_raw, asgs_raw, tgs_raw),
+        cfg.get("vpc_scope"),
+        region,
+    )
+    # ENI 는 거르지 않는다 — SG 는 VPC 에 묶여 다른 VPC 의 ENI 가 범위 안 SG 를 쓸 수 없다.
     used = _used_sg_ids(instances_raw, enis_raw)
 
     end = datetime.now(timezone.utc)
