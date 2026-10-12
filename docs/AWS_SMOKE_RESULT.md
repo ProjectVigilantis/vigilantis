@@ -43,6 +43,7 @@
 | 계정 ID | (저장소에 적지 않는다 — `--account` 인자로만) |
 | 리전 | `ap-northeast-2` |
 | 검증 기준 커밋 | 앱: `origin/dev` `fd38c01` · 기동 스크립트: PR #436 head `e7787c2`(Budget $300·크레딧 제외 정의) |
+| A6 실행 기준(배포 이미지) | 배포 이미지 태그 `mvp-7a7209d` — **PR #440(수집 범위 필터)·#441(배포 플랫폼)을 로컬에서 합친 미머지 병합본**이며 위 `fd38c01`과 다르다(§7 10/12 14:41). 두 PR 머지 뒤 `dev`로 재빌드하면 A6 근거 이미지의 커밋은 `dev`에 남지 않는다 — A6을 재현할 기준은 이 줄의 태그다 |
 | `up --yes` 실행 시각 | 10/12(월) 11:19 KST(인스턴스 `LaunchTime`) · 학원 계정(멤버 계정) — vCPU 한도 5 → 64 상향 승인 직후 |
 | `status` TG 대상 `healthy` 확인 시각 | 10/12(월) `up` 직후(ALB 생성 11:20 KST) — `web-1`·`web-2` 2/2 `healthy` |
 | 앱 키 Arn (`sts get-caller-identity`) | `arn:aws:iam::***:user/vigilantis-smoke-app` 확인 ☑ |
@@ -99,20 +100,20 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 | `mode` | `aws` — 회차 `3bb8e0e5-a6e7-4a05-8387-600d73bb77d5` · 10/12(월) 13:24 KST | `aws` 가 아니면 실 AWS 회차가 아니다 — 아래 칸을 채우기 전에 먼저 본다 |
 | `collection_runs.status` | `SUCCESS` | `PARTIAL` 이면 아래 사유 코드로 권한 누락인지 가린다 |
 | `error_summary` | 빈 값 | `collector_failures` 가 compact JSON 으로 실린 자리다. 로컬에서 나오는 모양은 `{"alb_target_groups":"InternalFailure","auto_scaling_groups":"InternalFailure"}` — **같은 라벨에 `AccessDenied` 가 오면 권한 누락이다** |
-| `collector_failures` 라벨 → 사유 코드 | 없음(빈 묶음) — 흡수된 조회 0건 | 사유 코드가 판별 기준이다. `AccessDenied` 는 **권한 누락** — 빠진 조회 권한을 §7에 적고 `policy` 대조. **`InternalFailure` 는 회차의 `mode` 로 뜻이 갈린다** — `localstack` 이면 라이선스 밖이고, **`aws` 면 AWS 측 내부 오류이므로 재시도 후에도 같으면 §7에 적는다**(실 AWS 에서도 나오는 코드다). 어느 코드든 빈 목록으로 강등되므로 "정상 0건"과 구별되지 않는다 |
+| `collector_failures` 라벨 → 사유 코드 | 없음(`error_summary` 빈 값 — 빈 묶음 `{}`이 아니다. PR #439 본문 `## 원본 출력` ③ `(없음)`) — 흡수된 조회 0건 | 사유 코드가 판별 기준이다. `AccessDenied` 는 **권한 누락** — 빠진 조회 권한을 §7에 적고 `policy` 대조. **`InternalFailure` 는 회차의 `mode` 로 뜻이 갈린다** — `localstack` 이면 라이선스 밖이고, **`aws` 면 AWS 측 내부 오류이므로 재시도 후에도 같으면 §7에 적는다**(실 AWS 에서도 나오는 코드다). 어느 코드든 빈 목록으로 강등되므로 "정상 0건"과 구별되지 않는다 |
 | `elbv2`(ALB Target Group) 조회 | **성공 — TG 1건 수집**(`vigilantis-smoke-tg`). 실 AWS 첫 성공 | **이월 4행 처분 근거.** LocalStack Community 에 없어 로컬에서 성공한 적이 없다 |
 | `autoscaling`(ASG) 조회 | **성공 — 0건**(ASG 없음이 정상). `collector_failures`가 비어 있어 권한 누락으로 인한 강등이 아니다 | **이월 4행 처분 근거.** 같은 이유로 로컬에서 성공한 적이 없다 |
 | CloudWatch 메트릭 | 기동 2시간 뒤 3대 모두 관측치 3개(1시간 해상도) — 지연 없이 시간당 1개씩 쌓임 | **이월 3행 처분 근거.** **시드 회차는 관측치를 즉시 72개로 채우므로 48개 게이트가 걸리지 않는다**(2026-10-06 실측 — 자산 4대 모두 72개). 게이트 자체는 골든 A4(`dp 47`)가 검증한다. 지연·해상도는 실 AWS에서 처음 관측된다 |
 
 ### 2-2. 자산 유형별 수집 수
 
-수집기는 **리전 전체**를 훑으므로, 수집 수는 아래 스모크 자원 수보다 많을 수 있다(기본 VPC 등 이미 있던 자원). 적을 때 그 차이를 비고에 남긴다 — 많은 것이 이상은 아니고, **적은 것이 이상이다**. **수가 같거나 많아도 스모크 자원이 전부 잡혔다는 뜻은 아니다** — 이름은 §2-3 대상 목록으로 대조한다.
+**PR #440(수집 범위 필터) 머지 전 기준:** 수집기는 **리전 전체**를 훑으므로, 수집 수는 아래 스모크 자원 수보다 많을 수 있다(기본 VPC 등 이미 있던 자원). 적을 때 그 차이를 비고에 남긴다 — 많은 것이 이상은 아니고, **적은 것이 이상이다**. **수가 같거나 많아도 스모크 자원이 전부 잡혔다는 뜻은 아니다** — 이름은 §2-3 대상 목록으로 대조한다.
 
 | 자산 유형 | 기대 — 스모크 자원(`provision_smoke_aws.py` 스펙) | 수집 수 | 비고 |
 | --- | --- | --- | --- |
 | EC2 | 3 — `web-1`·`web-2`·`idle-dev` | 3 | |
-| SG | 6 — 명명 5종(`alb`·`web`·`open-ssh`·`unused`·`isolation`) + 스모크 VPC 기본 SG | 7 | +1은 계정 기본 VPC의 기본 SG(`SKIP_WHITELISTED`) |
-| NACL | 2 — `vigilantis-smoke-nacl` + 스모크 VPC 기본 NACL | 3 | +1은 계정 기본 VPC의 기본 NACL |
+| SG | 6 — 명명 5종(`alb`·`web`·`open-ssh`·`unused`·`isolation`) + 스모크 VPC 기본 SG | 7 | +1은 계정 기본 VPC의 기본 SG(`SKIP_WHITELISTED`) — #440 전 동작(리전 전체 수집). #440이 들어간 배포 회차는 6(§7 10/12 14:41) |
+| NACL | 2 — `vigilantis-smoke-nacl` + 스모크 VPC 기본 NACL | 3 | +1은 계정 기본 VPC의 기본 NACL — #440 전 동작(리전 전체 수집). #440이 들어간 배포 회차는 2(§7 10/12 14:41) |
 | EBS | 4 — 인스턴스 루트 3 + 미연결 `vigilantis-smoke-unattached` 1 | 4 | |
 | Launch Template | 0 — `up` 은 만들지 않는다(`EC2_ENABLE_AUTOSCALING` 이 `vigilantis-lt-` 접두로 만든다) | 0 | 0이 정상. **있으면 출처(이름·생성 시각)를 §7에 적는다** — 수집이 리전 전체를 훑으므로 스모크 밖에서 만든 LT도 잡힌다 |
 | Auto Scaling Group | 0 — `up` 은 만들지 않는다(P2 검증이 만들고 직후 정리) | 0 — 조회 성공(§2-1) | 0과 미관측을 구분한다. precheck 조건 ③이 **동명 ASG 부재**라 0이 정상 |
@@ -138,7 +139,7 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 | --- | --- |
 | `find_dangling_arns` 원출력 (**DB 전체 기준**) | total 2 / investigate 2 |
 | 종류별 | `broken_reference` 2 |
-| 계정별 조사 대상 기록의 기준 | `--run`으로 지정한 스모크 회차 ID `3bb8e0e5-a6e7-4a05-8387-600d73bb77d5` · 해당 회차가 대상 스모크 계정인지 확인 ☑(`mode=aws`) |
+| 계정별 조사 대상 기록의 기준 | `--run`으로 지정한 스모크 회차 ID `3bb8e0e5-a6e7-4a05-8387-600d73bb77d5` · 해당 회차가 대상 스모크 계정인지 `mode=aws` 확인 ☑ · `account_id`(회차를 수집한 계정 — PR #439 본문 `## 원본 출력` ③에 있으나 가림)가 §1 계정과 같은지는 **미확인 — 재실측 필요**(가린 값끼리는 대조할 수 없고 대조 기록을 남기지 않았다) |
 | 위 조건을 확인한 경우에만 — `(다른 계정)` 조사 대상 제외 후 | investigate 0 · 제외한 조사 대상 2 건 |
 | 제외 기준과 남은 조사 대상의 성격 | 2건 모두 `(다른 계정)` — 로컬 DB에 남은 골든 데이터셋(LocalStack 계정)의 ASG·TG 관계 기록이다. 스모크 계정의 조사 대상은 0건 |
 | 판정 | 대상 계정의 조사 대상이 0건인지 또는 남아 있는지를 기록하고, 남으면 §7에 원인을 적는다. 같은 계정의 **다른 회차·자원**까지 걸러진 수가 아니므로 "이 회차의 결과"나 스모크 전체 통과로 적지 않는다 |
@@ -169,8 +170,8 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 | --- | --- |
 | 쓴 가짜 인스턴스 ID | `i-0f3a9c2b7d1e4a5b6`(및 대조용 `vol-0f3a9c2b7d1e4a5b6` · `sg-0f3a9c2b7d1e4a5b6`) |
 | 실 AWS 응답 | 인스턴스 `modify_instance_attribute` DryRun — **관리자 키 `DryRunOperation` / 앱 키 `UnauthorizedOperation`** · 볼륨 `delete_volume` DryRun — 두 키 모두 `InvalidVolume.NotFound` · SG `delete_security_group` DryRun — 두 키 모두 `InvalidGroup.NotFound`. `precheck()`로는 EBS가 `PRECHECK_TARGET_NOT_FOUND`, 다운사이징이 `PRECHECK_UNAUTHORIZED` |
-| 걸러졌는가 | **예 — 단, 사유가 작업마다 다르다**(§7 A5 행) |
-| 판정 | 걸러지면 **이월 8행 해소**. 아니면 가드레일 ④가 대상 존재를 보증하지 않는다는 사실이 실 AWS에서도 확인된 것 — 그대로 적는다 |
+| 걸러졌는가 | **작업마다 다르다.** 볼륨·SG 삭제 = **예** — 실 AWS가 `InvalidVolume.NotFound`·`InvalidGroup.NotFound`로 대상 존재를 검사한다(두 키 동일). 다운사이징(`modify_instance_attribute` — 인스턴스 타입 변경 API) = **아니오** — 관리자 키에서 없는 인스턴스에도 `DryRunOperation`(DryRun 통과 응답)이 온다. 앱 키의 `UnauthorizedOperation`은 앱 키 정책의 태그 조건(`aws:ResourceTag/vigilantis:smoke` — 스모크 태그가 붙은 자원에만 변경을 허용하는 IAM 조건 키)을 없는 대상에서 평가할 수 없어 생긴 부수효과이며, 가드레일 ④가 대상 존재를 보증한 것이 아니다 |
+| 판정 | **이월 8행 미해소 — 가정 반증.** 8행이 든 사례(`modify_instance_attribute` DryRun)를 실 AWS도 거르지 않는다 — 8행의 "실 AWS는 여기서 걸러 줄 것으로 보인다"는 관리자 키 `DryRunOperation`으로 반증됐다. 런북별로 갈린다: `EC2_ISOLATE`(격리)는 사전 검사 `_precheck_isolate`가 인스턴스 조회로 시작해 존재를 검사하고, `EC2_RIGHTSIZING`(다운사이징)의 `_precheck_rightsizing`만 DryRun 호출뿐이다(`apps/core-api/services/aws/executor.py`). 처분은 §5 8행에서 PM이 정한다(§7 A5 행) |
 
 ---
 
@@ -178,7 +179,7 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 
 | # | 시나리오 | 결과 | 시각 | 비고 |
 | --- | --- | --- | --- | --- |
-| A6 | `NACL_ADD_DENY` → `NACL_RESTORE` | **둘 다 `SUCCESS`** — 차단 뒤 NACL에 규칙 100(인바운드 deny · `203.0.113.10/32`)이 실제로 생기고, 해제 뒤 실제로 지워짐(describe 확인) | 차단 10/12 15:04 · 해제 15:06 KST | 저장된 `Protocol` 표기 `6`(번호) · `PortRange` `0–65535`(CloudTrail `CreateNetworkAclEntry` 요청값) (이월 6·7행 — 코드로 닫은 것이 실 AWS에서 맞는지). **배포된 플랫폼으로 실행**(로컬 앱 아님) — 호출 주체가 `assumed-role/vigilantis-access/vigilantis-platform`(§7) |
+| A6 | `NACL_ADD_DENY` → `NACL_RESTORE` | **둘 다 `SUCCESS`** — 차단 뒤 NACL에 규칙 100(인바운드 deny · `203.0.113.10/32`)이 실제로 생기고, 해제 뒤 실제로 지워짐(describe 확인 — 응답 원본은 남기지 않았다) | 차단 10/12(월) 15:04 · 해제 15:06 KST | **저장값은 미확인 — 재실측 필요.** 이월 6·7행이 묻는 것은 AWS가 저장해 `describe_network_acls`(NACL 규칙 조회 — `NACL_RESTORE`가 백업과 대조하는 상대)가 돌려주는 `Protocol`·`PortRange`인데, 그 응답 원본을 보존하지 않았다. 참고로 CloudTrail `CreateNetworkAclEntry` 이벤트의 **요청값**은 프로토콜 번호 6 · 포트 범위 0–65535 — 코드가 번호·전체 범위로 바꿔 보냈다는 사실일 뿐 AWS가 저장한 값의 근거가 아니다. A6의 원본 출력(CloudTrail 이벤트·차단 후/해제 후 describe·실행 결과 `SUCCESS` 2건)도 미보존 — 재실측 때 PR #439 본문 `## 원본 출력` ⑥으로 붙인다. **배포된 플랫폼으로 실행**(로컬 앱 아님) — 호출 주체가 `assumed-role/vigilantis-access/vigilantis-platform`(§7) |
 | A7 | `RIGHTSIZING`(`idle-dev`) → `REVERT_SIZE` | | | §1의 관측치 수·실제 판정과 실행 전제 확인 |
 | A8 | Status Check 2/2 실 대기 → `stopped` 주입 → `FAILED` → 자동 원복 | | | 실 대기와 stopped 실패 분기의 결과. impaired 경로 해소 근거로 쓰지 않음 |
 | A8-impaired | Status Check `impaired` 검사 결과 경로 | | | **이월 2행** — 미검증이면 미해소와 사유 기록; stopped 결과로 대체하지 않음 |
@@ -225,10 +226,10 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 | --- | --- | --- |
 | 10/12 11:17 | 학원 계정의 On-Demand vCPU 한도가 5라 스모크 3대(6 vCPU)가 들어가지 않음 | Service Quotas로 16 요청 → Support 케이스 → 64로 승인. 그 뒤 `up` |
 | 10/12 13:24 | A3 회차의 조인 무결성 조사 대상 2건 | 로컬 DB의 골든 데이터셋(다른 계정) 기록 — 스모크 무관(§2-4) |
-| 10/12 14:41 | **배포된 플랫폼의 첫 스캔**(ADR-0010 · PR #441) — 회차 `SUCCESS`, `collector_failures` 없음. 수집 수 SG 6·NACL 2로 **스모크 VPC만** 잡힘(로컬 A3 회차의 7·3에서 기본 VPC분이 빠짐 — 수집 범위 필터 PR #440) | 앱은 장기 키 없이 태스크 역할 → `vigilantis-access` 전환으로만 AWS에 닿는다. 배포 이미지는 #440·#441을 로컬에서 합친 `mvp-7a7209d`(두 PR 머지 뒤 `dev` 기준으로 재빌드 예정) |
+| 10/12 14:41 | **배포된 플랫폼의 첫 스캔**(ADR-0010 · PR #441) — 회차 `SUCCESS`, 흡수된 조회 0건(`error_summary`가 빈 값인지 빈 묶음 `{}`인지는 이 회차의 `qa_scan_compare.py` 원본을 남기지 않아 미확인 — 재실측 필요). 수집 수 SG 6·NACL 2로 **스모크 VPC만** 잡힘(로컬 A3 회차의 7·3에서 기본 VPC분이 빠짐 — 수집 범위 필터 PR #440) | 앱은 장기 키 없이 태스크 역할 → `vigilantis-access` 전환으로만 AWS에 닿는다. 배포 이미지는 #440·#441을 로컬에서 합친 `mvp-7a7209d`(두 PR 머지 뒤 `dev` 기준으로 재빌드 예정) |
 | 10/12 15:00 | 배포 환경에는 모의 위협 폴더가 없다 — SSH 무차별 대입 관측(`evt_ssh_bruteforce_001`, 대상 `web-1`, 출발지 `203.0.113.10`)을 **일회성 ECS 태스크**로 운영 DB에 넣었다 | AI 분석 `PROPOSALS_GENERATED` · 위험도 HIGH · 후보 `NACL_ADD_DENY` 가드레일 거절 0건 → 배포 주소로 승인(A6). 대응 방식이 `PRE_MITIGATION_0_5S`로 정해졌지만 발동 경로(B5)가 없어 자동 선차단은 없었다 — 사람 승인 실행이다 |
-| 10/12 15:04 | A6 차단의 CloudTrail 기록 — `CreateNetworkAclEntry` 호출 주체 **`assumed-role/vigilantis-access/vigilantis-platform`** | 배포된 앱이 접근 역할 전환으로 조치했다는 직접 증거(ADR-0010 §3) |
-| 10/12 오후 | **A5 — 없는 대상에 대한 DryRun 응답이 작업마다 다르다.** 볼륨·SG 삭제는 실 AWS가 대상 존재를 검사해 `NotFound`를 준다(LocalStack은 없는 SG에도 `DryRunOperation` — ADR-0007 실측과 다름). 인스턴스 `modify_instance_attribute`는 존재를 검사하지 않고(관리자 키 `DryRunOperation`), **앱 키에서는 태그 조건(`vigilantis:smoke=true`)을 평가할 수 없어 `UnauthorizedOperation`**이 된다 | 다운사이징 대상이 사라진 경우 가드레일 ④는 막지만 사유 코드가 `PRECHECK_UNAUTHORIZED`(권한 문제)로 찍힌다 — 관제자가 "대상 없음"이 아니라 "권한 누락"으로 읽을 수 있다. 처분(사유 매핑을 고칠지, describe를 앞세울지)은 이월 8행 처분과 함께 PM이 정한다 |
+| 10/12 15:04 | A6 차단의 CloudTrail 기록 — `CreateNetworkAclEntry` 호출 주체 **`assumed-role/vigilantis-access/vigilantis-platform`** | 배포된 앱이 접근 역할 전환으로 조치했다는 직접 증거(ADR-0010 §3). 이벤트 원본(주체·요청 파라미터)은 보존하지 않았다 — 재실측 때 PR #439 본문 `## 원본 출력` ⑥으로 붙인다 |
+| 10/12 오후 | **A5 — 없는 대상에 대한 DryRun 응답이 작업마다 다르다.** 볼륨·SG 삭제는 실 AWS가 대상 존재를 검사해 `NotFound`를 준다(LocalStack은 없는 SG에도 `DryRunOperation` — ADR-0007 실측과 다름). 인스턴스 `modify_instance_attribute`는 존재를 검사하지 않고(관리자 키 `DryRunOperation`), **앱 키에서는 태그 조건(`vigilantis:smoke=true`)을 평가할 수 없어 `UnauthorizedOperation`**이 된다 | **ADR-0006 이월 8행의 "실 AWS는 여기서 걸러 줄 것으로 보인다"는 가정이 반증됐다**(관리자 키 `DryRunOperation` 실측 — §3 A5 판정). 앱 키에서 막힌 것은 IAM 태그 조건 덕이라, 울타리가 느슨한 키에서는 가드레일 ④가 통과한다. 앱 키에서도 다운사이징 대상이 사라진 경우 사유 코드가 `PRECHECK_UNAUTHORIZED`(권한 문제)로 찍힌다 — 관제자가 "대상 없음"이 아니라 "권한 누락"으로 읽을 수 있다. 처분(사유 매핑을 고칠지, describe를 앞세울지)은 이월 8행 처분과 함께 PM이 정한다 |
 
 ---
 
@@ -245,9 +246,9 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 
 | # | 런북 | DryRun 부분 결과 | describe 통과 조건 실측(①②③④ 각각) | 잠정 조건 확정 / 수정 필요 |
 | --- | --- | --- | --- | --- |
-| P2-3a | `EC2_ISOLATE`<br>ENI `modify_network_interface_attribute` DryRun + `describe_target_health`·`describe_security_groups` | `precheck()` 통과(앱 키 · `web-1`) — ENI 교체 DryRun 통과 | ① DryRun 통과 ______<br>② `isolation_group_id` SG 존재 ______<br>③ TG 존재·대상 등록됨(`Target.NotRegistered` 설명은 미등록으로 본다) ______ | 확정 / 수정 필요 — ______ |
+| P2-3a | `EC2_ISOLATE`<br>ENI `modify_network_interface_attribute` DryRun + `describe_target_health`·`describe_security_groups` | `precheck()` 통과(앱 키 · `web-1`) — ENI 교체 DryRun 통과 | ① DryRun 통과 **통과**<br>② `isolation_group_id` SG 존재 **통과**<br>③ TG 존재·대상 등록됨(`Target.NotRegistered` 설명은 미등록으로 본다) **통과**<br>(근거: PR #439 본문 `## 원본 출력` ④ P2 행 `summary` — "ENI 교체 DryRun 통과·격리용 SG 존재·TG 존재와 대상 등록") | 확정 / 수정 필요 — ______ · 비고: **통과 경로만 실측** — 거절 경로(예: `Target.NotRegistered`만 오는 대상)는 미측정이라 조건 확정을 아직 고르지 않는다 |
 | P2-3b | `EC2_UNISOLATE`<br>ENI DryRun + `describe_target_groups`·`describe_security_groups` | | ① DryRun 통과 ______<br>② 백업 레코드의 복원 대상 SG 전부 현존 ______<br>③ TG 존재·대상이 같은 VPC(`describe_target_groups`의 `VpcId`) ______ | 확정 / 수정 필요 — ______ |
-| P2-3c | `EC2_ENABLE_AUTOSCALING`<br>LT `create_launch_template` DryRun + `describe_instances`·`describe_auto_scaling_groups` | `precheck()` 통과(앱 키 · `idle-dev`) — LT DryRun 통과 | ① DryRun 통과 ______<br>② 원본 EC2 존재·`running` ______<br>③ 동명 ASG 부재 ______<br>④ `min_size <= max_size <= 4` ______ | 확정 / 수정 필요 — ______ |
+| P2-3c | `EC2_ENABLE_AUTOSCALING`<br>LT `create_launch_template` DryRun + `describe_instances`·`describe_auto_scaling_groups` | `precheck()` 통과(앱 키 · `idle-dev`) — LT DryRun 통과 | ① DryRun 통과 **통과**<br>② 원본 EC2 존재·`running` **통과**<br>③ 동명 ASG 부재 **통과**<br>④ `min_size <= max_size <= 4` **통과**<br>(근거: PR #439 본문 `## 원본 출력` ④ P2 행 `summary` — "인스턴스 running·Launch Template DryRun 통과·동명 ASG 부재·min_size/max_size 범위") | 확정 / 수정 필요 — ______ · 비고: **통과 경로만 실측** — 거절 경로(예: 동명 ASG가 이미 있는 경우)는 미측정이라 조건 확정을 아직 고르지 않는다 |
 
 > 거절이 났으면 사유 코드(`PRECHECK_TARGET_NOT_FOUND` · `PRECHECK_INVALID_STATE` · `PRECHECK_PARAM_INVALID`)와 `verification_summary`를 그대로 적는다. 조건을 고쳐야 하면 ADR-0007 §4 개정 대상으로 §7에 남긴다.
 
