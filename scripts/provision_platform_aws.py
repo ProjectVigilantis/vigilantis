@@ -984,6 +984,32 @@ def _upsert_service(ecs, name: str, task_def: str, network: dict, tg_arn: str, c
     print(f"[platform] 서비스 {name} 생성")
 
 
+def deployment_problems(services: list[dict], expected: dict[str, str]) -> list[str]:
+    """요청한 task definition으로 배포가 **끝났는지** 본다. 빈 목록이면 성공이다.
+
+    `services_stable` 대기만으로는 모자란다 — 서킷 브레이커가 새 태스크 실패를 보고 이전 버전으로
+    롤백해도 서비스는 다시 안정되므로 대기가 통과한다. 그러면 요청한 버전이 돌지 않는데 "배포
+    완료"가 찍힌다(PR #441 리뷰). 그래서 PRIMARY 배포의 task definition과 rolloutState를 함께 본다.
+    """
+    by_name = {svc.get("serviceName"): svc for svc in services}
+    problems = []
+    for name, task_def in expected.items():
+        svc = by_name.get(name)
+        if svc is None:
+            problems.append(f"{name}: 서비스가 없다")
+            continue
+        primary = next((d for d in svc.get("deployments", []) if d.get("status") == "PRIMARY"), None)
+        if primary is None:
+            problems.append(f"{name}: PRIMARY 배포가 없다")
+        elif primary.get("taskDefinition") != task_def:
+            problems.append(f"{name}: 요청한 {task_def}가 아니라 {primary.get('taskDefinition')}가 돌고 있다"
+                            " — 새 태스크가 실패해 자동 롤백됐다")
+        elif primary.get("rolloutState") != "COMPLETED":
+            problems.append(f"{name}: 배포 상태 {primary.get('rolloutState')}"
+                            f" ({primary.get('rolloutStateReason', '사유 없음')})")
+    return problems
+
+
 def deploy(c: dict, account: str, region: str, tag: str, dispatch_enabled: bool) -> None:
     ec2, ecs = c["ec2"], c["ecs"]
     vpc_id = _find_vpc(ec2)
@@ -1018,6 +1044,12 @@ def deploy(c: dict, account: str, region: str, tag: str, dispatch_enabled: bool)
     print("[platform] 서비스 안정화 대기")
     ecs.get_waiter("services_stable").wait(cluster=CLUSTER, services=[API_SERVICE, WEB_SERVICE],
                                            WaiterConfig={"Delay": 15, "MaxAttempts": 60})
+    problems = deployment_problems(
+        ecs.describe_services(cluster=CLUSTER, services=[API_SERVICE, WEB_SERVICE])["services"],
+        {API_SERVICE: api_def, WEB_SERVICE: web_def},
+    )
+    if problems:
+        sys.exit("배포 실패 — " + " · ".join(problems) + f" (로그: {LOG_GROUPS['api']})")
     print(f"[platform] 배포 완료 — https://{dist['DomainName']} (AI 분석·조치 실행 디스패치 {'켬' if dispatch_enabled else '끔'})")
     if not dispatch_enabled:
         print("[platform] 주의: 디스패치가 꺼져 있어 화면에서 승인한 조치도 실행되지 않고 접수 상태로 멈춘다 — "
@@ -1053,6 +1085,39 @@ def _delete_roles(iam, account: str) -> None:
         print(f"[platform] IAM 역할 {role} 삭제")
 
 
+def ecs_remaining(services: list[dict], tasks: list[dict]) -> list[str]:
+    """클러스터를 지우기 전에 끝나 있어야 하는 것 중 아직 남은 것. 빈 목록이면 지워도 된다.
+
+    `services_inactive` 대기는 서비스 **하나만** INACTIVE여도 통과하고, INACTIVE 서비스에도 STOPPING
+    태스크가 남을 수 있다. 그 상태에서 delete_cluster가 실패하면 뒤의 RDS·NAT 정리까지 멈춘다(PR #441
+    리뷰) — 그래서 서비스 전부와 태스크 전부를 함께 본다. describe_services의 failures(MISSING)는
+    이미 지워진 것이라 여기 들어오지 않는다.
+    """
+    left = [f"서비스 {svc.get('serviceName')}({svc.get('status')})"
+            for svc in services if svc.get("status") != "INACTIVE"]
+    left += [f"태스크 {task.get('taskArn', '').rsplit('/', 1)[-1]}({task.get('lastStatus')})"
+             for task in tasks if task.get("lastStatus") != "STOPPED"]
+    return left
+
+
+def _ecs_drained(ecs, services: list[str], *, delay: float = 15, attempts: int = 40,
+                 sleep: Callable[[float], None] = time.sleep) -> bool:
+    """서비스 전부 INACTIVE + 태스크 전부 STOPPED까지 기다린다. 시간 안에 안 되면 False."""
+    left: list[str] = []
+    for _ in range(attempts):
+        described = ecs.describe_services(cluster=CLUSTER, services=services)["services"] if services else []
+        arns = [arn for status in ("RUNNING", "STOPPED")
+                for arn in ecs.list_tasks(cluster=CLUSTER, desiredStatus=status)["taskArns"]]
+        tasks = ecs.describe_tasks(cluster=CLUSTER, tasks=arns)["tasks"] if arns else []
+        left = ecs_remaining(described, tasks)
+        if not left:
+            return True
+        print(f"[platform] ECS 종료 대기 — 남음: {', '.join(left)}")
+        sleep(delay)
+    print(f"[platform] 경고: ECS 종료 대기 시간 초과 — 남음: {', '.join(left)}")
+    return False
+
+
 def down(c: dict, account: str) -> None:
     ec2, ecs, elbv2 = c["ec2"], c["ecs"], c["elbv2"]
     if _find_cluster(ecs):
@@ -1063,9 +1128,11 @@ def down(c: dict, account: str) -> None:
                 ecs.delete_service(cluster=CLUSTER, service=name, force=True)
                 deleted.append(name)
                 print(f"[platform] 서비스 {name} 삭제")
-        if deleted:
-            ecs.get_waiter("services_inactive").wait(cluster=CLUSTER, services=deleted)
-        ecs.delete_cluster(cluster=CLUSTER)
+        if _ecs_drained(ecs, deleted):
+            ecs.delete_cluster(cluster=CLUSTER)
+        else:
+            # 클러스터만 남기고 나머지(RDS·NAT 등 과금 자원)는 계속 정리한다 — 재실행하면 이어서 지운다
+            print("[platform] 경고: 클러스터를 지우지 않고 넘어간다 — 정리가 끝나면 down을 다시 돌릴 것")
     for family in (API_TASK_FAMILY, WEB_TASK_FAMILY):
         for arn in ecs.list_task_definitions(familyPrefix=family, status="ACTIVE")["taskDefinitionArns"]:
             ecs.deregister_task_definition(taskDefinition=arn)

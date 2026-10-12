@@ -12,6 +12,7 @@
 #      · 비밀은 값이 아니라 참조로만
 #   가드: 실 AWS·계정 대조 · 스모크 환경을 비싼 자원보다 먼저 확인 · DB 비밀번호는 RDS 생성 전에 저장
 #         · 플랫폼 태그 없는 IAM 역할은 덮어쓰거나 지우지 않음
+#         · 자동 롤백된 배포를 성공으로 보고하지 않음 · ECS가 전부 내려간 뒤에만 클러스터 삭제
 #
 # scripts/ 는 CI pytest 경로에 없어 여기(루트 tests/)에 둔다.
 # ==============================================================================
@@ -143,6 +144,100 @@ def test_api_service_never_runs_two_tasks_during_deploy():
     web = platform.service_deployment(platform.WEB_SERVICE)
     assert web["maximumPercent"] > 100  # web은 상태가 없어 기본 롤링
 
+
+
+API_V2 = "arn:aws:ecs:ap-northeast-2:1:task-definition/vigilantis-platform-api:2"
+API_V1 = "arn:aws:ecs:ap-northeast-2:1:task-definition/vigilantis-platform-api:1"
+WEB_V2 = "arn:aws:ecs:ap-northeast-2:1:task-definition/vigilantis-platform-web:2"
+
+
+def _svc(name: str, task_def: str, rollout: str = "COMPLETED", **extra) -> dict:
+    primary = {"status": "PRIMARY", "taskDefinition": task_def, "rolloutState": rollout, **extra}
+    return {"serviceName": name, "deployments": [primary]}
+
+
+def test_deploy_succeeds_only_on_the_requested_task_definitions():
+    services = [_svc(platform.API_SERVICE, API_V2), _svc(platform.WEB_SERVICE, WEB_V2)]
+    assert platform.deployment_problems(
+        services, {platform.API_SERVICE: API_V2, platform.WEB_SERVICE: WEB_V2}) == []
+
+
+def test_rolled_back_deploy_is_a_failure_even_though_the_service_is_stable():
+    """서킷 브레이커 롤백 뒤에도 services_stable은 통과한다 — PRIMARY가 이전 버전이면 실패다."""
+    services = [_svc(platform.API_SERVICE, API_V1), _svc(platform.WEB_SERVICE, WEB_V2)]
+    (problem,) = platform.deployment_problems(
+        services, {platform.API_SERVICE: API_V2, platform.WEB_SERVICE: WEB_V2})
+    assert platform.API_SERVICE in problem and "롤백" in problem
+
+
+@pytest.mark.parametrize("rollout", ["IN_PROGRESS", "FAILED"])
+def test_unfinished_rollout_is_a_failure(rollout):
+    services = [_svc(platform.API_SERVICE, API_V2, rollout, rolloutStateReason="circuit breaker"),
+                _svc(platform.WEB_SERVICE, WEB_V2)]
+    (problem,) = platform.deployment_problems(
+        services, {platform.API_SERVICE: API_V2, platform.WEB_SERVICE: WEB_V2})
+    assert rollout in problem
+
+
+def test_missing_service_is_a_failure():
+    (problem,) = platform.deployment_problems(
+        [_svc(platform.API_SERVICE, API_V2)], {platform.API_SERVICE: API_V2, platform.WEB_SERVICE: WEB_V2})
+    assert platform.WEB_SERVICE in problem
+
+
+class DrainingEcs:
+    """폴링마다 다음 상태를 돌려주는 가짜 ECS — 서비스·태스크가 서로 다른 시점에 내려가는 경우를 만든다.
+    한 번의 폴링은 describe_services로 시작한다(_ecs_drained의 호출 순서)."""
+
+    def __init__(self, timeline: list[tuple[list[dict], list[dict]]]):
+        self._timeline = timeline
+        self.polls = 0
+
+    def _state(self):
+        return self._timeline[min(self.polls - 1, len(self._timeline) - 1)]
+
+    def describe_services(self, cluster, services):
+        self.polls += 1
+        return {"services": [s for s in self._state()[0] if s["serviceName"] in services]}
+
+    def list_tasks(self, cluster, desiredStatus):
+        return {"taskArns": [t["taskArn"] for t in self._state()[1] if t["desired"] == desiredStatus]}
+
+    def describe_tasks(self, cluster, tasks):
+        return {"tasks": [t for t in self._state()[1] if t["taskArn"] in tasks]}
+
+
+def _s(name, status):
+    return {"serviceName": name, "status": status}
+
+
+def _t(arn, desired, last):
+    return {"taskArn": f"arn:aws:ecs:r:1:task/c/{arn}", "desired": desired, "lastStatus": last}
+
+
+API, WEB = platform.API_SERVICE, platform.WEB_SERVICE
+
+
+def test_drain_waits_for_both_services_and_their_stopping_tasks():
+    """api가 먼저 INACTIVE가 돼도, web이 남았거나 STOPPING 태스크가 남았으면 클러스터를 지우지 않는다."""
+    ecs = DrainingEcs([
+        ([_s(API, "INACTIVE"), _s(WEB, "DRAINING")], [_t("a", "STOPPED", "STOPPING"), _t("w", "RUNNING", "RUNNING")]),
+        ([_s(API, "INACTIVE"), _s(WEB, "INACTIVE")], [_t("a", "STOPPED", "STOPPED"), _t("w", "STOPPED", "STOPPING")]),
+        ([_s(API, "INACTIVE"), _s(WEB, "INACTIVE")], [_t("a", "STOPPED", "STOPPED"), _t("w", "STOPPED", "STOPPED")]),
+    ])
+    assert platform._ecs_drained(ecs, [API, WEB], delay=0, attempts=5, sleep=lambda _: None)
+    assert ecs.polls == 3  # 앞의 두 상태에서는 끝났다고 보지 않는다
+
+
+def test_drain_gives_up_without_claiming_success():
+    ecs = DrainingEcs([([_s(API, "INACTIVE")], [_t("a", "STOPPED", "STOPPING")])])
+    assert not platform._ecs_drained(ecs, [API], delay=0, attempts=3, sleep=lambda _: None)
+
+
+def test_remaining_ignores_only_finished_things():
+    assert platform.ecs_remaining([_s(API, "INACTIVE")], [_t("a", "STOPPED", "STOPPED")]) == []
+    assert platform.ecs_remaining([_s(API, "ACTIVE")], []) == [f"서비스 {API}(ACTIVE)"]
+    assert platform.ecs_remaining([], [_t("a", "STOPPED", "DEPROVISIONING")]) == ["태스크 a(DEPROVISIONING)"]
 
 def _api(dispatch: bool = False) -> dict:
     return platform.api_container(
