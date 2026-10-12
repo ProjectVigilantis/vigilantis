@@ -191,6 +191,32 @@ class CollectorSettings(BaseSettings):
     # 스캔 파이프라인 잡 기동 여부. false 면 start_scheduler 가 None 을 돌려준다 —
     # 테스트가 앱을 띄울 때 실제 수집·판정이 도는 것을 막는다(DISPATCH_ENABLED 와 같은 결).
     SCAN_ENABLED: bool = True
+    # 수집 범위 VPC(콤마 구분, 포함 목록). 비어 있으면 리전 전체를 수집한다(기존 동작).
+    # 단일 계정에 플랫폼 자신(ECS·RDS·ALB가 든 별도 VPC)을 함께 배포할 때 계정 경계를
+    # 흉내 내는 설정이다 — 플랫폼 ALB SG 의 0.0.0.0/0 이 THREAT 로 판정되는 일을 막는다.
+    # Post-MVP SaaS 는 관제 범위 = 고객 계정이라 이 설정이 필요 없다. 거르는 규칙은
+    # services/collector._apply_vpc_scope 가 단일 원천이다.
+    COLLECT_VPC_IDS: str = ""
+
+    @field_validator("COLLECT_VPC_IDS", mode="after")
+    @classmethod
+    def _check_vpc_ids(cls, value: str) -> str:
+        # 여기서는 형식만 막는다. 형식은 맞는 오타(존재하지 않는 vpc-…)는 매 회차
+        # services/collector._check_vpc_scope 가 존재 확인으로 잡고, 없으면 그 회차의
+        # 소멸 표시·자산 수 스냅샷을 건너뛴다 — 범위 VPC 자산이 전부 소멸 표시되지 않게.
+        bad = [v for v in _split_csv(value) if not v.startswith("vpc-")]
+        if bad:
+            raise ValueError(f"COLLECT_VPC_IDS 는 vpc- 로 시작하는 ID 목록이어야 한다: {bad}")
+        return value
+
+    def collect_vpc_ids(self) -> frozenset[str] | None:
+        """수집 범위 VPC 집합. 비어 있으면 None — 범위 제한 없음(리전 전체)."""
+        ids = frozenset(_split_csv(self.COLLECT_VPC_IDS))
+        return ids or None
+
+
+def _split_csv(raw: str) -> list[str]:
+    return [item.strip() for item in raw.split(",") if item.strip()]
 
 
 @lru_cache

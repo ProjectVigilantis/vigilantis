@@ -734,6 +734,8 @@ def record_inventory_counts(
 
     ``counts`` 에는 **관측한 유형만** 담아 넘긴다. 못 본 유형을 0으로 넣으면 추이가 자산이
     사라진 것처럼 떨어진다(호출부 ``persist_inventory`` 가 degrade 유형을 뺀다).
+    ``COLLECT_VPC_IDS`` 가 켜진 회차의 0건은 "범위 안에 없음"이다 — 범위를 좁힌 시점에
+    추이가 계단으로 떨어지는 것은 자산 소멸이 아니다.
     """
     for asset_type, count in counts.items():
         db.add(
