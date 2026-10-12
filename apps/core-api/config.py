@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     # 뜨는 다른 스택(stepper 테스트 서버)은 override에서 경로를 따로 준다
     LOG_FILE_ENABLED: bool = False
     LOG_FILE_PATH: str = ".logs/api.log"
+    # 회전 백업 파일 수(파일당 10 MiB, 압축 없음) — 양수만 허용. 0이면 회전 없이 계속 커진다
+    LOG_FILE_BACKUP_COUNT: int = Field(default=20, ge=1)
     # 콤마 구분 허용 출처 목록 — 기본값은 FE 개발 서버. CORS와 WebSocket
     # Handshake Origin 검증이 같은 목록을 쓴다
     CORS_ALLOW_ORIGINS: str = "http://localhost:3000"

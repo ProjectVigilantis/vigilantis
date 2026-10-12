@@ -63,6 +63,7 @@ def create_app() -> FastAPI:
     setup_logging(
         settings.LOG_LEVEL,
         log_file_path=settings.LOG_FILE_PATH if settings.LOG_FILE_ENABLED else None,
+        backup_count=settings.LOG_FILE_BACKUP_COUNT,
     )
 
     realtime = RealtimeManager(send_timeout_seconds=settings.WS_SEND_TIMEOUT_SECONDS)

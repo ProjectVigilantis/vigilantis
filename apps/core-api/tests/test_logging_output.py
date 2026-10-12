@@ -8,13 +8,17 @@ from __future__ import annotations
 
 import json
 import logging
+import logging.config
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import logging_config
+import main
 import pytest
-from config import get_settings
+import uvicorn.config
+from config import Settings, get_settings
 from logging_config import log_context, resolve_log_file_path, setup_logging
+from pydantic import ValidationError
 
 
 def _access_log_lines(captured: str) -> list[dict]:
@@ -59,8 +63,22 @@ def test_access_log_excludes_request_payload(client, capsys):
 @pytest.fixture
 def restore_logging():
     """파일 핸들러를 붙인 테스트 뒤에 stdout 구성으로 되돌린다 — 임시 파일을 닫는다."""
+    names = ("uvicorn", "uvicorn.error", "uvicorn.access")
+    saved = {
+        name: (
+            list(logging.getLogger(name).handlers),
+            logging.getLogger(name).propagate,
+            logging.getLogger(name).level,
+        )
+        for name in names
+    }
     yield
     setup_logging("INFO")
+    for name, (handlers, propagate, level) in saved.items():
+        target = logging.getLogger(name)
+        target.handlers[:] = handlers
+        target.propagate = propagate
+        target.setLevel(level)
 
 
 def _file_handlers():
@@ -106,6 +124,116 @@ def test_file_output_rotates_within_the_size_cap(tmp_path, restore_logging):
     names = sorted(path.name for path in tmp_path.iterdir())
     assert names == ["api.log", "api.log.1", "api.log.2"]
     assert all(path.stat().st_size <= 2_000 for path in tmp_path.iterdir())
+
+
+def test_backup_count_default_is_20_and_must_be_positive():
+    assert Settings(DATABASE_URL="postgresql://x").LOG_FILE_BACKUP_COUNT == 20
+    assert Settings(DATABASE_URL="postgresql://x", LOG_FILE_BACKUP_COUNT=3).LOG_FILE_BACKUP_COUNT == 3
+    for invalid in (0, -1):
+        with pytest.raises(ValidationError):
+            Settings(DATABASE_URL="postgresql://x", LOG_FILE_BACKUP_COUNT=invalid)
+
+
+def test_create_app_passes_backup_count_to_setup_logging(monkeypatch, tmp_path):
+    calls = []
+    settings = Settings(
+        DATABASE_URL="postgresql://x",
+        LOG_FILE_ENABLED=True,
+        LOG_FILE_PATH=str(tmp_path / "api.log"),
+        LOG_FILE_BACKUP_COUNT=7,
+    )
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr(main, "setup_logging", lambda *a, **kw: calls.append((a, kw)))
+    main.create_app()
+    assert calls == [
+        (
+            ("INFO",),
+            {"log_file_path": str(tmp_path / "api.log"), "backup_count": 7},
+        )
+    ]
+
+    calls.clear()
+    monkeypatch.setattr(main, "get_settings", lambda: settings.model_copy(update={"LOG_FILE_ENABLED": False}))
+    main.create_app()
+    assert calls[0][1]["log_file_path"] is None  # 꺼 두면 파일 경로가 넘어가지 않는다
+
+
+def test_rotation_keeps_exactly_backup_count_uncompressed_files(tmp_path, restore_logging):
+    setup_logging("INFO", log_file_path=str(tmp_path / "api.log"), max_bytes=500, backup_count=3)
+    probe = logging.getLogger("vigilantis.test")
+    for index in range(300):
+        probe.info("retention_probe", extra={"index": index})
+
+    names = sorted(path.name for path in tmp_path.iterdir())
+    assert names == ["api.log", "api.log.1", "api.log.2", "api.log.3"]  # 압축(.gz) 없음
+
+
+def test_uvicorn_errors_reach_root_json_handlers_once(tmp_path, restore_logging, capsys):
+    logging.config.dictConfig(uvicorn.config.LOGGING_CONFIG)
+    log_file = tmp_path / "api.log"
+    setup_logging("INFO", log_file_path=str(log_file))
+
+    uvicorn_error = logging.getLogger("uvicorn.error")
+    uvicorn_error.info("uvicorn_probe")
+    try:
+        raise RuntimeError("boom")
+    except RuntimeError:
+        uvicorn_error.exception("uvicorn_exception_probe")
+    for handler in _file_handlers():
+        handler.flush()
+
+    captured = capsys.readouterr()
+    stdout_events = [json.loads(line) for line in captured.out.splitlines()]
+    assert [e["event"] for e in stdout_events].count("uvicorn_probe") == 1
+    exception_lines = [e for e in stdout_events if e["event"] == "uvicorn_exception_probe"]
+    assert len(exception_lines) == 1
+    assert exception_lines[0]["logger"] == "uvicorn.error"
+    assert "RuntimeError: boom" in exception_lines[0]["exc_info"]
+    assert captured.err == ""  # uvicorn 자체 평문 핸들러로 새지 않는다
+    file_events = [e["event"] for e in _json_lines(log_file)]
+    assert file_events.count("uvicorn_probe") == 1
+    assert file_events.count("uvicorn_exception_probe") == 1
+
+
+def test_uvicorn_access_log_stays_suppressed(restore_logging, capsys):
+    logging.config.dictConfig(uvicorn.config.LOGGING_CONFIG)
+    setup_logging("INFO")
+    access = logging.getLogger("uvicorn.access")
+    access.info('127.0.0.1 - "GET /health HTTP/1.1" 200')
+    captured = capsys.readouterr()
+    assert "GET /health" not in captured.out + captured.err
+
+
+def test_repeated_configuration_neither_duplicates_lines_nor_leaks_handlers(
+    tmp_path, restore_logging, capsys
+):
+    logging.config.dictConfig(uvicorn.config.LOGGING_CONFIG)
+    log_file = tmp_path / "api.log"
+    previous = []
+    for _ in range(3):
+        setup_logging("INFO", log_file_path=str(log_file))
+        previous.extend(_file_handlers())
+    capsys.readouterr()
+
+    logging.getLogger("uvicorn.error").info("repeat_probe")
+    for handler in _file_handlers():
+        handler.flush()
+
+    root_handlers = logging.getLogger().handlers
+    assert sum(isinstance(h, logging_config._StdoutHandler) for h in root_handlers) == 1
+    assert len(_file_handlers()) == 1
+    assert logging.getLogger("uvicorn").handlers == []
+    assert [h.stream for h in previous[:-1]] == [None, None]  # 이전 파일 핸들은 닫혔다
+    assert capsys.readouterr().out.count('"event": "repeat_probe"') == 1
+    assert [e["event"] for e in _json_lines(log_file)].count("repeat_probe") == 1
+
+
+def test_file_disabled_adds_no_file_handler_and_keeps_uvicorn_routing(restore_logging, capsys):
+    logging.config.dictConfig(uvicorn.config.LOGGING_CONFIG)
+    setup_logging("INFO", log_file_path=None)
+    logging.getLogger("uvicorn.error").warning("stdout_only_probe")
+    assert _file_handlers() == []
+    assert capsys.readouterr().out.count('"event": "stdout_only_probe"') == 1
 
 
 def test_reconfiguring_closes_the_previous_log_file(tmp_path, restore_logging):

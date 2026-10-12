@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from sqlalchemy import text
 
 CORE_API = Path(__file__).resolve().parents[1]
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -878,6 +879,36 @@ def test_incident_updated_is_published_after_commit(db, precheck_pass):
 
 
 UNSTORABLE_SUMMARY = EvidenceSummaryOutput(observation="관측\x00", diagnosis="진단", rationale="근거")
+
+
+def test_analysis_log_query_failure_rolls_back_result_and_does_not_publish(
+    db, precheck_pass, monkeypatch, caplog,
+):
+    incident_id = _pending_incident(db)
+    evidence_id = _rule_evidence_id(db, incident_id)
+    published = []
+
+    def failing_query(session, incident_ids):
+        # 실제 DB 오류로 트랜잭션을 중단한다 — 커밋 뒤 조회였다면 결과 저장은 되돌릴 수 없다.
+        session.execute(text("SELECT 1 / 0"))
+
+    monkeypatch.setattr(guardrails_repo, "candidate_evaluations_by_incident", failing_query)
+    with caplog.at_level(logging.INFO):
+        report = _cycle(
+            db,
+            _client(SUMMARY, CandidateProposalOutput(candidates=[_proposal(evidence_id)])),
+            publish=published.append,
+        )
+
+    assert (report.claimed, report.succeeded, report.errored) == (1, 0, 1)
+    incident = incidents_repo.get_incident(db, incident_id)
+    db.refresh(incident)
+    assert incident.status is IncidentStatus.ANALYZING
+    assert incident.agent_invocation_status is AgentInvocationStatus.IN_PROGRESS
+    assert incident.summary_lines == []
+    assert incidents_repo.list_candidates(db, incident_id) == []
+    assert published == []
+    assert not any(record.getMessage() == "agent_analysis_recorded" for record in caplog.records)
 
 
 def test_output_with_unstorable_characters_closes_as_failed(db, precheck_pass):

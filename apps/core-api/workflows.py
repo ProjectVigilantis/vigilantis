@@ -3266,17 +3266,20 @@ def record_agent_analysis(
             response_deadline_at=wait_started + timedelta(seconds=60),
         ))
 
-    db.commit()
-    incident = incidents_repo.get_incident(db, incident_id)
-    # Core UPDATE는 세션이 든 객체를 갱신하지 않는다 — 발행에 실을 시각을 되읽는다
-    db.refresh(incident)
     # 분석이 어떻게 끝났는지를 도메인과 무관하게 남긴다(#424) — SecOps 조회 응답의
     # analysis_result와 같은 판정이다. FinOps는 무제안·전체 거절도 Incident FAILED로 닫혀
-    # 응답만으로는 갈리지 않으므로 이 줄이 그 구분을 남기는 자리다
+    # 응답만으로는 갈리지 않으므로 이 줄이 그 구분을 남기는 자리다.
+    # 조회 실패도 저장과 함께 되돌릴 수 있게 commit 전에 계산한다. autoflush=False인
+    # 세션에서도 방금 저장한 후보·평가를 읽도록 먼저 flush한다.
+    db.flush()
     analysis = analysis_result_from(
         output.invocation_status,
         guardrails_repo.candidate_evaluations_by_incident(db, [incident_id]).get(incident_id, []),
     )
+    db.commit()
+    incident = incidents_repo.get_incident(db, incident_id)
+    # Core UPDATE는 세션이 든 객체를 갱신하지 않는다 — 발행에 실을 시각을 되읽는다
+    db.refresh(incident)
     logger.info(
         "agent_analysis_recorded",
         extra={

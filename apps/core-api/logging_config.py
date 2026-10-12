@@ -37,9 +37,10 @@ _log_context_var: ContextVar[Mapping[str, Any]] = ContextVar(
     "log_context", default=_EMPTY_CONTEXT
 )
 
-# 파일 출력 상한 — 파일 1개 10 MiB × (현재 + 백업 5개) = 스택당 최대 60 MiB
+# 파일 출력 상한 — 파일 1개 10 MiB × (현재 + 백업 20개) = 스택당 최대 210 MiB (압축 없음).
+# 백업 수는 Settings.LOG_FILE_BACKUP_COUNT로 바꾼다
 LOG_FILE_MAX_BYTES = 10 * 1024 * 1024
-LOG_FILE_BACKUP_COUNT = 5
+LOG_FILE_BACKUP_COUNT = 20
 
 _CORE_API_DIR = Path(__file__).resolve().parent
 
@@ -162,6 +163,14 @@ def setup_logging(
         root.addHandler(file_handler)
 
     root.setLevel(level.upper())
+    # uvicorn 기동 시 dictConfig(LOGGING_CONFIG)가 "uvicorn" 로거에 자체 핸들러를 달고
+    # propagate=False로 막는다 — 그대로면 uvicorn.error 줄이 JSON 밖의 평문으로 나가고 파일에도
+    # 남지 않는다. 그 핸들러를 떼고 루트로 흘려 같은 JSON 핸들러가 한 번씩만 쓰게 한다
+    # (자식 uvicorn.error는 uvicorn을 거쳐 루트로 간다). 핸들러는 uvicorn 소유(stderr)라 닫지 않는다.
+    uvicorn_logger = logging.getLogger("uvicorn")
+    for handler in list(uvicorn_logger.handlers):
+        uvicorn_logger.removeHandler(handler)
+    uvicorn_logger.propagate = True
     # 접근 로그는 request_context 미들웨어가 남긴다 — uvicorn 기본 접근 로그와 중복 방지
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
