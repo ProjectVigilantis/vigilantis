@@ -32,6 +32,10 @@
 #   ③ up·deploy·down은 --yes 없이는 아무것도 바꾸지 않는다.
 #   ④ down이 지우는 것은 플랫폼 태그 자원과 **플랫폼 VPC 안의 것**뿐이다. 스모크 환경과
 #      그 앱 정책(vigilantis-smoke-app)은 건드리지 않는다 — 접근 역할은 그 정책을 빌려 쓸 뿐이다.
+#      반대로 스모크 down은 접근 역할이 그 정책을 붙잡고 있으면 멈춘다 — 정리 순서는
+#      **플랫폼 down → 스모크 down**이다(ADR-0010 §7).
+#   ⑤ 이름이 같아도 플랫폼 태그(vigilantis:platform=true)가 없는 IAM 역할은 덮어쓰거나 지우지 않는다.
+#   ⑥ --allow-cidr는 IPv4 CIDR이고 /24보다 넓으면 거부한다 — 로그인 없는 MVP에서 허용 IP가 출입문이다.
 #
 # 비밀값은 출력하지 않는다. OpenAI 키 비밀은 자리만 만들고 값은 PM이 직접 넣는다:
 #   aws secretsmanager put-secret-value --secret-id vigilantis-platform/openai-api-key --secret-string <키>
@@ -40,6 +44,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import ipaddress
 import json
 import secrets
 import subprocess
@@ -47,6 +53,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
+from urllib.parse import urlsplit
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 for _p in (str(_REPO_ROOT / "apps" / "core-api"), str(_REPO_ROOT / "packages")):
@@ -81,10 +88,15 @@ WEB_PORT = 3000
 DB_INSTANCE = f"{PREFIX}-db"
 DB_SUBNET_GROUP = f"{PREFIX}-db"
 DB_CLASS = "db.t4g.micro"
-DB_MAJOR = "16"  # compose의 postgres:16과 맞춘다
+# compose의 postgres:16과 맞춘다. 메이저만 넘기면 RDS가 그 메이저의 기본 마이너를 고른다 —
+# 버전 목록을 조회해 고르지 않는다(목록이 페이지로 나뉘면 16.x를 놓친다)
+DB_MAJOR = "16"
 DB_STORAGE_GB = 20
 DB_NAME = "vigilantis"
 DB_USER = "vigilantis"
+# RDS 생성 요청 전에 접속 문자열 비밀을 먼저 저장할 때의 호스트 자리 — 대기 뒤 실제 엔드포인트로 채운다.
+# .invalid는 절대 풀리지 않는 예약 도메인이라 채워지기 전 배포가 엉뚱한 곳에 붙지 않는다
+DB_HOST_PENDING = "pending.invalid"
 
 ECR_REPOS = {"api": f"{PREFIX}-api", "web": f"{PREFIX}-web"}
 
@@ -102,6 +114,8 @@ ROLE_ACCESS = "vigilantis-access"
 SMOKE_POLICY_NAME = "vigilantis-smoke-app"
 SMOKE_VPC_NAME = "vigilantis-smoke-vpc"
 SESSION_SECONDS = 900  # 원격 회수(#438 ②)의 노출 상한과 같은 값
+# WAF 허용 CIDR의 최소 접두 길이 — 이보다 넓은 범위(/0–/23)는 받지 않는다. WAF는 /0만 거절한다
+MIN_ALLOW_PREFIX = 24
 
 CLUSTER = PREFIX
 LOG_GROUPS = {"api": f"/{PREFIX}/api", "web": f"/{PREFIX}/web"}
@@ -213,7 +227,9 @@ def api_container(image: str, *, region: str, cors_origin: str, access_role_arn:
         "COLLECT_VPC_IDS": collect_vpc_ids,
         "VIGILANTIS_ACCESS_ROLE_ARN": access_role_arn,
         "VIGILANTIS_ACCESS_SESSION_SECONDS": str(SESSION_SECONDS),
-        # AI 분석·실행 디스패치 — 켜면 인시던트마다 OpenAI가 과금된다. 기본은 끈다(배포 시 --enable-dispatch)
+        # AI 분석과 조치 실행 디스패치를 **한 스위치로** 켜고 끈다(config.py — 둘이 이 값을 공유한다).
+        # 끄면 승인한 조치도 실행되지 않고 접수 상태로 멈춘다. 켜면 인시던트마다 OpenAI가 과금된다.
+        # 기본은 끈다(배포 시 --enable-dispatch)
         "DISPATCH_ENABLED": "true" if dispatch_enabled else "false",
         "SCAN_ENABLED": "true",
         # 파일 로그는 끈다 — 컨테이너 파일은 태스크와 함께 사라진다. stdout이 CloudWatch Logs로 간다
@@ -255,6 +271,36 @@ def service_deployment(service: str) -> dict:
                 "deploymentCircuitBreaker": {"enable": True, "rollback": True}}
     return {"minimumHealthyPercent": 100, "maximumPercent": 200,
             "deploymentCircuitBreaker": {"enable": True, "rollback": True}}
+
+
+def validate_allow_cidrs(cidrs: list[str]) -> list[str]:
+    """WAF 허용 목록 검사 — IPv4 CIDR만, /MIN_ALLOW_PREFIX보다 넓으면 거부한다.
+
+    로그인이 없는 MVP라 허용 IP가 출입문이다(ADR-0010 §4). WAF는 /0만 거절하므로 0.0.0.0/1 같은
+    광역이 그대로 통과한다 — 여기서 막는다. 호스트 비트가 섞인 값(1.2.3.4/24)도 오타로 보고 거부한다.
+    """
+    out = []
+    for raw in cidrs:
+        try:
+            net = ipaddress.ip_network(raw, strict=True)
+        except ValueError as exc:
+            sys.exit(f"--allow-cidr {raw!r}는 올바른 CIDR가 아니다 — {exc}")
+        if net.version != 4:
+            sys.exit(f"--allow-cidr {raw}: IPv4만 받는다(WAF IP 집합이 IPV4다)")
+        if net.prefixlen < MIN_ALLOW_PREFIX:
+            sys.exit(f"--allow-cidr {raw}: /{MIN_ALLOW_PREFIX}보다 넓은 범위는 받지 않는다 — "
+                     "로그인이 없는 MVP라 허용 IP가 출입문이다(ADR-0010 §4)")
+        out.append(str(net))
+    return out
+
+
+def database_url(password: str, host: str) -> str:
+    return f"postgresql+psycopg://{DB_USER}:{password}@{host}:5432/{DB_NAME}"
+
+
+def is_platform_tagged(tags: list[dict]) -> bool:
+    """이름이 같아도 이 태그가 없으면 플랫폼 스크립트가 만든 자원이 아니다."""
+    return any(t.get("Key") == TAG_KEY and t.get("Value") == TAG_VALUE for t in tags or [])
 
 
 # ------------------------------------------------------------------ 공통
@@ -354,13 +400,18 @@ def _find_secret(sm, name: str) -> Optional[str]:
         raise
 
 
-def _find_role(iam, name: str) -> Optional[str]:
+def _get_role(iam, name: str) -> Optional[dict]:
     try:
-        return iam.get_role(RoleName=name)["Role"]["Arn"]
+        return iam.get_role(RoleName=name)["Role"]
     except ClientError as exc:
         if _code(exc) == "NoSuchEntity":
             return None
         raise
+
+
+def _find_role(iam, name: str) -> Optional[str]:
+    role = _get_role(iam, name)
+    return role["Arn"] if role else None
 
 
 def _find_repo(ecr, name: str) -> Optional[str]:
@@ -599,14 +650,23 @@ def _secret_value(sm, name: str) -> str:
     return sm.get_secret_value(SecretId=name)["SecretString"]
 
 
-def _db_engine_version(rds) -> str:
-    versions = rds.describe_db_engine_versions(Engine="postgres")["DBEngineVersions"]
-    majors = [v["EngineVersion"] for v in versions if v["EngineVersion"].split(".")[0] == DB_MAJOR]
-    return max(majors, key=lambda v: tuple(int(x) for x in v.split(".") if x.isdigit()))
-
-
 def _ensure_db(rds, sm, subnets: dict[str, str], sg_db: str) -> None:
+    """비밀번호는 **RDS 생성 요청 전에** 비밀로 저장한다 — 대기(수 분–30분) 중 중단돼도 잃지 않는다.
+
+    순서: 접속 문자열 비밀(호스트 자리 DB_HOST_PENDING) → create_db_instance → available 대기 →
+    호스트를 채워 put_secret_value. 어디서 끊겨도 재실행이 비밀의 비밀번호를 다시 쓰고 호스트만 채운다.
+    RDS 관리 비밀(ManageMasterUserPassword)을 쓰지 않는 이유: 그 비밀은 기본 7일마다 회전되는데
+    앱은 접속 문자열 하나(DATABASE_URL)를 받으므로, 회전 때마다 사본이 낡는다.
+    """
     db = _find_db(rds)
+    if not db and not _find_secret(sm, SECRET_DATABASE_URL):
+        # 비밀번호는 출력하지 않고 DATABASE_URL 비밀로만 남긴다. URL에 넣을 수 있는 문자만 쓴다
+        password = secrets.token_urlsafe(24).replace("-", "a").replace("_", "b")
+        _put_secret(sm, SECRET_DATABASE_URL, database_url(password, DB_HOST_PENDING))
+    if not _find_secret(sm, SECRET_DATABASE_URL):
+        sys.exit(f"RDS {DB_INSTANCE}는 있는데 {SECRET_DATABASE_URL} 비밀이 없다 — 비밀번호를 알 수 없으므로 "
+                 "RDS 마스터 비밀번호를 재설정하고 비밀을 직접 만들 것.")
+    url = urlsplit(_secret_value(sm, SECRET_DATABASE_URL))
     if not db:
         try:
             rds.create_db_subnet_group(
@@ -616,24 +676,20 @@ def _ensure_db(rds, sm, subnets: dict[str, str], sg_db: str) -> None:
         except ClientError as exc:
             if _code(exc) != "DBSubnetGroupAlreadyExists":
                 raise
-        # 비밀번호는 출력하지 않고 DATABASE_URL 비밀로만 남긴다. URL에 넣을 수 있는 문자만 쓴다
-        password = secrets.token_urlsafe(24).replace("-", "a").replace("_", "b")
         rds.create_db_instance(
             DBInstanceIdentifier=DB_INSTANCE, DBInstanceClass=DB_CLASS, Engine="postgres",
-            EngineVersion=_db_engine_version(rds), AllocatedStorage=DB_STORAGE_GB, StorageType="gp3",
-            StorageEncrypted=True, DBName=DB_NAME, MasterUsername=DB_USER, MasterUserPassword=password,
+            EngineVersion=DB_MAJOR, AllocatedStorage=DB_STORAGE_GB, StorageType="gp3",
+            StorageEncrypted=True, DBName=DB_NAME, MasterUsername=DB_USER, MasterUserPassword=url.password,
             DBSubnetGroupName=DB_SUBNET_GROUP, VpcSecurityGroupIds=[sg_db], PubliclyAccessible=False,
             MultiAZ=False, BackupRetentionPeriod=1, DeletionProtection=False,
             Tags=[{"Key": TAG_KEY, "Value": TAG_VALUE}, {"Key": "Name", "Value": DB_INSTANCE}])
         print(f"[platform] RDS {DB_INSTANCE} 생성 요청 — available 대기(수 분)")
+    # 새로 만들었으면 호스트를 항상 다시 적는다(비밀이 지운 옛 인스턴스의 호스트를 들고 있을 수 있다)
+    if not db or url.hostname == DB_HOST_PENDING:
         rds.get_waiter("db_instance_available").wait(DBInstanceIdentifier=DB_INSTANCE)
-        db = _find_db(rds)
-        host = db["Endpoint"]["Address"]
-        _put_secret(sm, SECRET_DATABASE_URL,
-                    f"postgresql+psycopg://{DB_USER}:{password}@{host}:5432/{DB_NAME}")
-    elif not _find_secret(sm, SECRET_DATABASE_URL):
-        sys.exit(f"RDS {DB_INSTANCE}는 있는데 {SECRET_DATABASE_URL} 비밀이 없다 — 비밀번호를 알 수 없으므로 "
-                 "RDS 마스터 비밀번호를 재설정하고 비밀을 직접 만들 것.")
+        host = _find_db(rds)["Endpoint"]["Address"]
+        sm.put_secret_value(SecretId=SECRET_DATABASE_URL, SecretString=database_url(url.password, host))
+        print(f"[platform] Secret {SECRET_DATABASE_URL}에 RDS 호스트 기록")
 
 
 def _ensure_repos(ecr) -> dict[str, str]:
@@ -649,25 +705,44 @@ def _ensure_repos(ecr) -> dict[str, str]:
 
 
 def _ensure_role(iam, name: str, trust: dict, description: str) -> str:
-    arn = _find_role(iam, name)
-    if arn:
+    role = _get_role(iam, name)
+    if role:
+        # 이름만 같은 남의 역할이면 신뢰 정책을 덮어쓰지 않는다(안전 가드 ⑤)
+        if not is_platform_tagged(role.get("Tags", [])):
+            sys.exit(f"IAM 역할 {name}이 이미 있는데 플랫폼 태그({TAG_KEY}={TAG_VALUE})가 없다 — "
+                     "다른 용도의 역할일 수 있어 덮어쓰지 않는다. 확인 뒤 이름을 비우거나 태그를 달 것.")
         iam.update_assume_role_policy(RoleName=name, PolicyDocument=json.dumps(trust))
-        return arn
+        return role["Arn"]
     arn = iam.create_role(RoleName=name, AssumeRolePolicyDocument=json.dumps(trust), Description=description,
                           MaxSessionDuration=3600, Tags=[{"Key": TAG_KEY, "Value": TAG_VALUE}])["Role"]["Arn"]
     print(f"[platform] IAM 역할 {name} 생성")
     return arn
 
 
-def _ensure_roles(iam, account: str, secret_arns: list[str], external_id: str) -> dict[str, str]:
-    smoke_policy = f"arn:aws:iam::{account}:policy/{SMOKE_POLICY_NAME}"
+def _smoke_policy_arn(account: str) -> str:
+    return f"arn:aws:iam::{account}:policy/{SMOKE_POLICY_NAME}"
+
+
+def _require_smoke_env(iam, ec2, account: str) -> None:
+    """스모크 환경(앱 정책·VPC)이 먼저 있어야 한다 — **비싼 자원을 만들기 전에** 본다.
+
+    접근 역할은 스모크의 Action Whitelist 거울 정책을 빌려 쓰고, 배포는 스모크 VPC를 관제 범위로
+    넣는다. 둘 중 하나라도 없으면 NAT·RDS(시간 과금)를 세운 뒤에야 멈추게 되므로 up의 맨 앞에 둔다.
+    """
     try:
-        iam.get_policy(PolicyArn=smoke_policy)
+        iam.get_policy(PolicyArn=_smoke_policy_arn(account))
     except ClientError as exc:
         if _code(exc) == "NoSuchEntity":
             sys.exit(f"{SMOKE_POLICY_NAME} 정책이 없다 — scripts/provision_smoke_aws.py up을 먼저 돌릴 것"
                      "(접근 역할은 그 Action Whitelist 거울 정책을 빌려 쓴다).")
         raise
+    if not _find_smoke_vpc(ec2):
+        sys.exit(f"스모크 VPC({SMOKE_VPC_NAME})가 없다 — scripts/provision_smoke_aws.py up을 먼저 돌릴 것"
+                 "(배포가 그 VPC를 관제 범위 COLLECT_VPC_IDS로 넣는다).")
+
+
+def _ensure_roles(iam, account: str, secret_arns: list[str], external_id: str) -> dict[str, str]:
+    smoke_policy = _smoke_policy_arn(account)  # 존재는 up 맨 앞(_require_smoke_env)에서 확인했다
     exec_arn = _ensure_role(iam, ROLE_EXEC, ecs_tasks_trust_policy(), "ECS image pull and secret injection")
     iam.attach_role_policy(RoleName=ROLE_EXEC,
                            PolicyArn="arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy")
@@ -774,7 +849,8 @@ def distribution_config(alb_dns: str, origin_value: str, acl_arn: str, caller_re
         "Origins": {"Quantity": 1, "Items": [{
             "Id": "alb",
             "DomainName": alb_dns,
-            # 도메인이 없어 ALB에 인증서를 못 단다 — CloudFront→ALB는 HTTP(같은 리전 AWS 망, ADR-0010 §4)
+            # 도메인이 없어 ALB에 인증서를 못 단다 — CloudFront→ALB는 평문 HTTP다. 오리진은 공개 ALB의
+            # 공인 주소라 이 구간과 비밀 헤더 값은 인터넷 구간을 평문으로 지날 수 있다(ADR-0010 §4)
             "CustomOriginConfig": {"HTTPPort": 80, "HTTPSPort": 443, "OriginProtocolPolicy": "http-only",
                                    "OriginReadTimeout": 60, "OriginKeepaliveTimeout": 5},
             "CustomHeaders": {"Quantity": 1, "Items": [{"HeaderName": ORIGIN_HEADER, "HeaderValue": origin_value}]},
@@ -805,6 +881,7 @@ def _ensure_distribution(cf, alb_dns: str, origin_value: str, acl_arn: str) -> s
 
 def up(c: dict, account: str, region: str, allow_cidrs: list[str]) -> None:
     ec2 = c["ec2"]
+    _require_smoke_env(c["iam"], ec2, account)  # 무엇이든 만들기 전에
     vpc_id = _ensure_vpc(ec2)
     subnets = _ensure_subnets(ec2, vpc_id, region)
     nat_ip = _ensure_network(ec2, vpc_id, subnets)
@@ -845,7 +922,6 @@ def build(c: dict, region: str, tag: str) -> None:
         sys.exit("CloudFront 배포가 없다 — 웹 이미지에 박을 API 주소를 정할 수 없다")
     registry = repos["api"].split("/")[0]
     token = c["ecr"].get_authorization_token()["authorizationData"][0]["authorizationToken"]
-    import base64
     user, password = base64.b64decode(token).decode().split(":", 1)
     subprocess.run(["docker", "login", "--username", user, "--password-stdin", registry],
                    input=password.encode(), check=True)
@@ -918,7 +994,7 @@ def deploy(c: dict, account: str, region: str, tag: str, dispatch_enabled: bool)
     if not smoke_vpc:
         sys.exit("스모크 VPC가 없다 — 관제 범위(COLLECT_VPC_IDS)를 정할 수 없다")
     if _secret_value(c["sm"], SECRET_OPENAI) == OPENAI_PLACEHOLDER and dispatch_enabled:
-        sys.exit(f"{SECRET_OPENAI}가 아직 자리표시값이다 — AI 분석을 켜려면 키를 먼저 넣을 것")
+        sys.exit(f"{SECRET_OPENAI}가 아직 자리표시값이다 — AI 분석·조치 실행 디스패치를 켜려면 키를 먼저 넣을 것")
     subnets = _find_subnets(ec2, vpc_id)
     sgs = _find_sgs(ec2, vpc_id)
     repos = {k: _find_repo(c["ecr"], n) for k, n in ECR_REPOS.items()}
@@ -942,7 +1018,10 @@ def deploy(c: dict, account: str, region: str, tag: str, dispatch_enabled: bool)
     print("[platform] 서비스 안정화 대기")
     ecs.get_waiter("services_stable").wait(cluster=CLUSTER, services=[API_SERVICE, WEB_SERVICE],
                                            WaiterConfig={"Delay": 15, "MaxAttempts": 60})
-    print(f"[platform] 배포 완료 — https://{dist['DomainName']} (AI 분석 {'켬' if dispatch_enabled else '끔'})")
+    print(f"[platform] 배포 완료 — https://{dist['DomainName']} (AI 분석·조치 실행 디스패치 {'켬' if dispatch_enabled else '끔'})")
+    if not dispatch_enabled:
+        print("[platform] 주의: 디스패치가 꺼져 있어 화면에서 승인한 조치도 실행되지 않고 접수 상태로 멈춘다 — "
+              "조치 실행을 실측하려면 deploy --enable-dispatch(OpenAI 과금도 함께 켜진다)")
 
 
 # ------------------------------------------------------------------ 정리(down)
@@ -952,6 +1031,26 @@ def _try(fn: Callable[[], Any], *ignore: str) -> None:
     except ClientError as exc:
         if _code(exc) not in ignore:
             raise
+
+
+def _delete_roles(iam, account: str) -> None:
+    for role, managed, inline in (
+        (ROLE_ACCESS, [_smoke_policy_arn(account)], []),
+        (ROLE_TASK, [], ["assume-access-role"]),
+        (ROLE_EXEC, ["arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"], ["read-platform-secrets"]),
+    ):
+        found = _get_role(iam, role)
+        if not found:
+            continue
+        if not is_platform_tagged(found.get("Tags", [])):  # 안전 가드 ⑤ — 이름만 같은 남의 역할
+            print(f"[platform] IAM 역할 {role}은 플랫폼 태그가 없어 건드리지 않았다 — 확인 뒤 직접 정리할 것")
+            continue
+        for arn in managed:
+            _try(lambda arn=arn: iam.detach_role_policy(RoleName=role, PolicyArn=arn), "NoSuchEntity")
+        for name in inline:
+            _try(lambda name=name: iam.delete_role_policy(RoleName=role, PolicyName=name), "NoSuchEntity")
+        iam.delete_role(RoleName=role)
+        print(f"[platform] IAM 역할 {role} 삭제")
 
 
 def down(c: dict, account: str) -> None:
@@ -1017,20 +1116,7 @@ def down(c: dict, account: str) -> None:
     for name in LOG_GROUPS.values():
         _try(lambda name=name: c["logs"].delete_log_group(logGroupName=name), "ResourceNotFoundException")
 
-    iam = c["iam"]
-    for role, managed, inline in (
-        (ROLE_ACCESS, [f"arn:aws:iam::{account}:policy/{SMOKE_POLICY_NAME}"], []),
-        (ROLE_TASK, [], ["assume-access-role"]),
-        (ROLE_EXEC, ["arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"], ["read-platform-secrets"]),
-    ):
-        if not _find_role(iam, role):
-            continue
-        for arn in managed:
-            _try(lambda arn=arn: iam.detach_role_policy(RoleName=role, PolicyArn=arn), "NoSuchEntity")
-        for name in inline:
-            _try(lambda name=name: iam.delete_role_policy(RoleName=role, PolicyName=name), "NoSuchEntity")
-        iam.delete_role(RoleName=role)
-        print(f"[platform] IAM 역할 {role} 삭제")
+    _delete_roles(c["iam"], account)
 
     vpc_id = _find_vpc(ec2)
     if vpc_id:
@@ -1071,10 +1157,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Vigilantis 플랫폼 배포 환경 (ADR-0010)")
     parser.add_argument("command", choices=("status", "up", "build", "deploy", "down"))
     parser.add_argument("--account", required=True, help="대상 AWS 계정 ID — 호출 주체(sts)와 같아야 한다")
-    parser.add_argument("--allow-cidr", action="append", default=[], help="up: WAF 허용 CIDR(여러 번 줄 수 있다)")
+    parser.add_argument("--allow-cidr", action="append", default=[],
+                        help=f"up: WAF 허용 IPv4 CIDR(/{MIN_ALLOW_PREFIX} 이상 좁게 · 여러 번 줄 수 있다)")
     parser.add_argument("--tag", help="build·deploy: 이미지 태그")
     parser.add_argument("--enable-dispatch", action="store_true",
-                        help="deploy: AI 분석·실행 디스패치를 켠다(OpenAI 과금 경로)")
+                        help="deploy: AI 분석과 조치 실행 디스패치를 함께 켠다(한 스위치 — 끄면 승인한 조치도 "
+                             "실행되지 않는다. 켜면 OpenAI 과금 경로)")
     parser.add_argument("--yes", action="store_true", help="up·deploy·down: 실제로 바꾼다")
     args = parser.parse_args()
 
@@ -1095,23 +1183,26 @@ def main() -> None:
     if args.command == "build":
         build(c, region, args.tag)
         return
+    if args.command == "up":
+        if not args.allow_cidr:
+            sys.exit("up에는 --allow-cidr가 필요하다 — 허용 IP 없이 공개 진입점을 세우지 않는다")
+        allow_cidrs = validate_allow_cidrs(args.allow_cidr)
+        # 미리 보기에서도 먼저 본다 — --yes로 돌렸을 때 중간에 멈출 일을 여기서 알린다
+        _require_smoke_env(c["iam"], c["ec2"], account)
     if not args.yes:
         if args.command == "up":
-            if not args.allow_cidr:
-                sys.exit("up에는 --allow-cidr가 필요하다 — 허용 IP 없이 공개 진입점을 세우지 않는다")
             missing = [row for row in inventory(c) if row[2] is None and row[0] != "EcsService"]
             print(f"[platform] 생성 예정 {len(missing)}건 — 실제로 만들려면 --yes")
             _print_rows(missing)
         elif args.command == "deploy":
-            print(f"[platform] 배포 예정 — 태그 {args.tag} · AI 분석 {'켬' if args.enable_dispatch else '끔'} — 실제로 하려면 --yes")
+            print(f"[platform] 배포 예정 — 태그 {args.tag} · AI 분석·조치 실행 디스패치 "
+                  f"{'켬' if args.enable_dispatch else '끔'} — 실제로 하려면 --yes")
         else:
             print("[platform] 삭제 대상(플랫폼 태그 자원 + 플랫폼 VPC 안 전부) — 실제로 지우려면 --yes")
             _print_rows([row for row in inventory(c) if row[2]])
         return
     if args.command == "up":
-        if not args.allow_cidr:
-            sys.exit("up에는 --allow-cidr가 필요하다")
-        up(c, account, region, args.allow_cidr)
+        up(c, account, region, allow_cidrs)
     elif args.command == "deploy":
         deploy(c, account, region, args.tag, args.enable_dispatch)
     else:

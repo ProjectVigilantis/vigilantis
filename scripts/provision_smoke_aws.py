@@ -973,7 +973,28 @@ def _delete_app_policy(iam, account: str) -> None:
     print(f"[smoke] IAM 관리형 정책 {APP_POLICY} 삭제")
 
 
+def _roles_holding_app_policy(iam, account: str) -> list[str]:
+    """앱 정책을 붙잡고 있는 IAM 역할 — 플랫폼의 접근 역할(vigilantis-access, ADR-0010 §3)이 빌려 쓴다.
+
+    역할에 붙어 있으면 delete_policy가 DeleteConflict로 실패한다. 남의 역할에서 정책을 떼는 것은
+    이 스크립트의 몫이 아니므로 떼지 않고 알린다.
+    """
+    arn = _app_policy_arn(account)
+    if not _managed_policy_exists(iam, arn):
+        return []
+    roles = []
+    for page in iam.get_paginator("list_entities_for_policy").paginate(PolicyArn=arn, EntityFilter="Role"):
+        roles += [r["RoleName"] for r in page.get("PolicyRoles", [])]
+    return roles
+
+
 def down(clients: dict, account: str) -> None:
+    # 무엇이든 지우기 전에 — 정책 삭제는 맨 끝이라, 여기서 안 막으면 VPC까지 다 지운 뒤 멈춘다
+    holders = _roles_holding_app_policy(clients["iam"], account)
+    if holders:
+        sys.exit(f"[smoke] {APP_POLICY} 정책이 IAM 역할 {', '.join(holders)}에 붙어 있다 — 플랫폼 배포의 "
+                 "접근 역할이 빌려 쓰는 중이다. 정리 순서는 플랫폼 down → 스모크 down이다"
+                 "(scripts/provision_platform_aws.py down, ADR-0010 §7).")
     ec2, elbv2, asg = clients["ec2"], clients["elbv2"], clients["asg"]
     vpc_id = _find_vpc(ec2)
     if vpc_id:

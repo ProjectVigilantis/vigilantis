@@ -15,7 +15,9 @@ FROM node:22-alpine AS build
 WORKDIR /app
 ARG NEXT_PUBLIC_API_BASE_URL
 ARG NEXT_PUBLIC_ORG_NAME
-ENV NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL}     NEXT_PUBLIC_ORG_NAME=${NEXT_PUBLIC_ORG_NAME}     NEXT_TELEMETRY_DISABLED=1
+ENV NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL} \
+    NEXT_PUBLIC_ORG_NAME=${NEXT_PUBLIC_ORG_NAME} \
+    NEXT_TELEMETRY_DISABLED=1
 COPY --from=deps /app/node_modules ./node_modules
 COPY apps/web ./
 RUN test -n "$NEXT_PUBLIC_API_BASE_URL" || (echo "NEXT_PUBLIC_API_BASE_URL 빌드 인자가 필요하다" && exit 1)
@@ -24,7 +26,10 @@ RUN npm run build
 # standalone 출력만 옮긴다(next.config.ts output: "standalone") — node_modules 전체가 들어가지 않는다
 FROM node:22-alpine AS run
 WORKDIR /app
-ENV NODE_ENV=production     NEXT_TELEMETRY_DISABLED=1     PORT=3000     HOSTNAME=0.0.0.0
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    PORT=3000 \
+    HOSTNAME=0.0.0.0
 RUN addgroup -S app && adduser -S app -G app
 COPY --from=build --chown=app:app /app/.next/standalone ./
 COPY --from=build --chown=app:app /app/.next/static ./.next/static

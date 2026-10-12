@@ -51,9 +51,9 @@ MVP는 단일 계정(SSOT §MVP 확정 범위)이므로 계정을 가를 수 없
 ### 4. 공개 — CloudFront 기본 도메인 + WAF
 
 - 주소는 CloudFront 기본 도메인(`d….cloudfront.net`)이다. HTTPS 인증서를 AWS가 준다. 도메인은 학원 확인 뒤 12/11(금) 최종 발표 전에 붙인다 — 배포를 다시 만들 필요 없이 대체 도메인과 ACM 인증서만 더한다.
-- **WAF(CLOUDFRONT 범위) 기본 차단 + 허용 IP만 통과.** 로그인(#438 ④)이 없는 MVP라 이것이 출입문이다. 허용 목록에는 PM이 준 IP와 **플랫폼 NAT의 공인 IP**가 들어간다 — 웹의 서버 측 API 호출이 CloudFront를 거치기 때문이다(Context 3). 허용 IP는 저장소에 적지 않고 `--allow-cidr`로 받는다.
+- **WAF(CLOUDFRONT 범위) 기본 차단 + 허용 IP만 통과.** 로그인(#438 ④)이 없는 MVP라 이것이 출입문이다. 허용 목록에는 PM이 준 IP와 **플랫폼 NAT의 공인 IP**가 들어간다 — 웹의 서버 측 API 호출이 CloudFront를 거치기 때문이다(Context 3). 허용 IP는 저장소에 적지 않고 `--allow-cidr`로 받는다. 스크립트는 IPv4 CIDR만 받고 **/24보다 넓은 범위는 거부한다** — WAF 자체는 `/0`만 거절하므로 `0.0.0.0/1` 같은 광역이 출입문을 무력화하지 않게 한다.
 - **ALB는 공개지만 CloudFront만 받는다.** 두 겹이다 — ① ALB 보안그룹은 CloudFront 관리형 prefix list(`com.amazonaws.global.cloudfront.origin-facing`)만 허용 ② 리스너 규칙은 CloudFront가 붙이는 비밀 헤더(`X-Vigilantis-Origin`)가 있어야 앱으로 보내고, 없으면 기본 403.
-- CloudFront → ALB는 **HTTP**다. ALB에 붙일 인증서는 도메인이 있어야 받는다. 외부에 보이는 구간(브라우저 → CloudFront)은 HTTPS이고 이 구간은 같은 리전의 AWS 망이다. 도메인을 붙일 때 HTTPS로 바꾼다.
+- CloudFront → ALB는 **평문 HTTP**다. ALB에 붙일 인증서는 도메인이 있어야 받는다. 브라우저 → CloudFront는 HTTPS지만, 오리진이 internet-facing ALB의 공인 주소이고 요청을 넘기는 엣지가 서울 밖일 수도 있어 **이 구간과 비밀 헤더 값은 인터넷 구간을 평문으로 지날 수 있다.** 헤더 값이 새면 남의 CloudFront 배포를 거쳐 WAF를 우회할 수 있다(ALB 보안그룹은 **모든** CloudFront 배포의 prefix list를 허용한다). 도메인·인증서 확보 전까지의 대가로 받으며, 도메인을 붙일 때 HTTPS로 바꾼다.
 - 캐시는 끈다(관리형 `CachingDisabled`). 헤더·쿼리는 Host만 빼고 넘긴다(`AllViewerExceptHostHeader`) — WebSocket(`/api/v1/ws`) 업그레이드가 그대로 간다.
 
 ### 5. 실행 — ECS Fargate · RDS
@@ -64,9 +64,9 @@ MVP는 단일 계정(SSOT §MVP 확정 범위)이므로 계정을 가를 수 없
 | web | Fargate 0.25 vCPU / 0.5 GiB · Next.js `output: "standalone"` 이미지 · 기본 롤링 |
 | DB | RDS PostgreSQL 16 · `db.t4g.micro` · 단일 AZ · 암호화 · 백업 1일 · 비공개 |
 | 마이그레이션 | api 이미지로 `alembic upgrade head` 일회성 태스크를 배포 때마다 먼저 돌린다(compose `migrate`와 같은 자리) |
-| 비밀 | Secrets Manager — DB 접속 문자열 · OpenAI 키 · ExternalId · CloudFront 비밀 헤더 값. OpenAI 키는 **PM이 직접 넣는다**(스크립트는 자리만 만든다) |
+| 비밀 | Secrets Manager — DB 접속 문자열 · OpenAI 키 · ExternalId · CloudFront 비밀 헤더 값. OpenAI 키는 **PM이 직접 넣는다**(스크립트는 자리만 만든다). DB 비밀번호는 **RDS 생성 요청 전에** 접속 문자열 비밀(호스트 자리표시)로 먼저 저장하고, 인스턴스가 뜬 뒤 호스트를 채운다 — 대기 중에 끊겨도 비밀번호를 잃지 않는다. RDS 관리 비밀(`ManageMasterUserPassword`)은 기본 7일마다 회전돼 접속 문자열 사본이 낡으므로 쓰지 않는다 |
 | 로그 | stdout → CloudWatch Logs(30일). 파일 로그는 끈다 — 컨테이너 파일은 태스크와 함께 사라진다 |
-| AI 분석 | **기본 끔**(`DISPATCH_ENABLED=false`). 켜면 인시던트마다 OpenAI가 과금되므로 `deploy --enable-dispatch`로 명시한다 |
+| AI 분석 · 조치 실행 | **기본 끔**(`DISPATCH_ENABLED=false`). 이 값 하나가 AI 디스패처와 **조치 실행 디스패처를 함께** 켜고 끈다(`apps/core-api/config.py`) — 끈 채로는 화면에서 조치를 승인해도 실행되지 않고 접수 상태로 멈춘다. 켜면 인시던트마다 OpenAI가 과금되므로 `deploy --enable-dispatch`로 명시한다. 조치 실행을 실측하려면 켜야 하며, 과금 경로와 떼어 켤 수 없다(스위치 분리는 앱 코드 변경이라 이 결정 밖) |
 
 ### 6. 수집 범위 — 계정 경계를 흉내 낸다
 
@@ -79,7 +79,9 @@ MVP는 단일 계정(SSOT §MVP 확정 범위)이므로 계정을 가를 수 없
 
 - **Boto3 스크립트다**(ADR-0006 §2 — IaC는 Post-MVP, #438 ⑨). 방식은 스모크 스크립트와 같다 — 태그(`vigilantis:platform=true`) 식별 · 멱등 · `--yes` 없으면 미리 보기 · 실 AWS 전용 가드 · `--account` 대조.
 - 순서: `up --allow-cidr <IP>/32 --yes` → OpenAI 키 넣기 → `build --tag <태그>`(ECR 푸시 — 웹은 CloudFront 주소를 박아 빌드) → `deploy --tag <태그> --yes`(마이그레이션 → 서비스) → 판정 기준 실측.
-- `down`은 플랫폼 태그 자원과 플랫폼 VPC 안만 지운다. 스모크 환경과 그 앱 정책은 건드리지 않는다.
+- `up`은 무엇이든 만들기 전에(미리 보기에서도) 스모크 앱 정책과 스모크 VPC가 있는지 본다 — 없으면 NAT·RDS를 세우기 전에 멈춘다.
+- `down`은 플랫폼 태그 자원과 플랫폼 VPC 안만 지운다. 스모크 환경과 그 앱 정책은 건드리지 않는다. 이름이 같아도 플랫폼 태그(`vigilantis:platform=true`)가 없는 IAM 역할은 `up`이 덮어쓰지 않고 `down`이 지우지 않는다.
+- **정리 순서는 플랫폼 `down` → 스모크 `down`이다.** 접근 역할이 스모크 앱 정책을 붙잡고 있는 동안 스모크 `down`은 정책을 지울 수 없어(IAM `DeleteConflict`) 무엇이든 지우기 전에 멈춘다. 반대로 스모크 VPC를 다시 세우면 앱 정책의 VPC ARN은 따라가지만 플랫폼의 `COLLECT_VPC_IDS`는 다음 `deploy` 전까지 옛 VPC를 가리킨다 — 스모크를 다시 세웠으면 `deploy`를 다시 돌린다.
 
 ## Consequences (결과·트레이드오프)
 
@@ -103,4 +105,4 @@ MVP는 단일 계정(SSOT §MVP 확정 범위)이므로 계정을 가를 수 없
 
 - 스모크 환경과 앱 정책: [ADR-0009](0009-real-aws-smoke-environment.md) §2
 - Post-MVP SaaS 전환·IaC: #438 ①②⑨
-- 구현: `scripts/provision_platform_aws.py` · `tests/test_provision_platform_aws.py` · `apps/core-api/serve.py` · `apps/core-api/tests/test_serve.py` · `apps/core-api/Dockerfile` · `apps/web/Dockerfile` · `apps/web/next.config.ts`
+- 구현: `scripts/provision_platform_aws.py` · `tests/test_provision_platform_aws.py` · `scripts/provision_smoke_aws.py`(`down`의 정리 순서 가드) · `apps/core-api/serve.py` · `apps/core-api/tests/test_serve.py` · `apps/core-api/Dockerfile` · `apps/web/Dockerfile` · `apps/web/next.config.ts`
