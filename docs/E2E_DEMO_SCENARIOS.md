@@ -445,11 +445,11 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 | --- | --- | --- | --- | --- | --- |
 | 1 | 위협 주입(High) | SecOps 카드 신규 | (mock 주입) | `INCIDENT_CREATED` | `evaluate_threat()`가 `HIGH`를 내는 입력인지 |
 | 2 | 대응 경로 — **선제 차단** | "선제 차단" 경로 표시 | `response_mode: PRE_MITIGATION_0_5S` | `INCIDENT_UPDATED` | **Incident 축이다.** `trigger_source`와 다른 축(§실행 축과 Incident 축은 다르다) |
-| 3 | 백업 캡처 | — | `SAVE_CURRENT_SG_AND_TG_MAPPING` | — | 격리 **전** SG·TG 매핑이 저장되는가. 이것이 7번 원복의 유일한 원천이다 |
-| 4 | 가드레일 4단계 | — | ④는 **MIXED** — ENI `DryRun` + `describe_security_groups` + `describe_target_health` | — | 통과 조건 ①DryRun ②`isolation_group_id` SG 존재 ③TG 존재·대상 등록(`Target.NotRegistered`는 미등록으로 본다) |
+| 3 | 가드레일 4단계 | — | ④는 **MIXED** — ENI `DryRun` + `describe_security_groups` + `describe_target_health` | — | 통과 조건 ①DryRun ②`isolation_group_id` SG 존재 ③TG 존재·대상 등록(`Target.NotRegistered`는 미등록으로 본다) |
+| 4 | 백업 캡처 | — | `SAVE_CURRENT_SG_AND_TG_MAPPING` | — | 격리 **전** SG·TG 매핑이 저장되는가. 이것이 7번 원복의 유일한 원천이다. **가드레일 뒤·실행 직전이다** — 백업은 접수된 실행 행을 잠근 뒤 잡는다(`workflows.store_*_backup` 이 `lock_execution` 뒤에 `capture_*` 를 부른다) |
 | 5 | **격리 실행** | 실행 패널 | `RUNBOOK_EC2_ISOLATE`<br>`trigger_source: PRE_MITIGATION_0_5S`<br>TG 등록 해제 + ENI SG 교체 | `EXECUTION_UPDATED` | 승인 없이 발동한다 — **`approval_mode`가 T2와 다르다** |
 | 6 | 대상 상태·서비스 응답 확인 | 토폴로지는 보조 관측 | `describe_target_health` + ALB 경유 HTTP 요청 | — | 격리 전·중·해제 후 `web-2`의 등록·health 상태와 ALB 경유 응답을 각각 기록한다. 등록 여부만으로 서비스 유지를 판정하지 않는다. 요청 경로·기대 상태 코드·관측 간격·실패 수를 실행 전에 정하고, HTTP 관측이 없으면 서비스 유지는 미확인으로 남긴다 |
-| 7 | **원클릭 해제** | 상세 [승인하고 해제] → [실행] | `RUNBOOK_EC2_UNISOLATE`<br>`trigger_source: USER_APPROVAL` | `EXECUTION_UPDATED` | 3번 백업 레코드로만 원복하는가. TG 재등록과 SG 복원이 **같은 집합**인가 |
+| 7 | **원클릭 해제** | 상세 [승인하고 해제] → [실행] | `RUNBOOK_EC2_UNISOLATE`<br>`trigger_source: USER_APPROVAL` | `EXECUTION_UPDATED` | 4번 백업 레코드로만 원복하는가. TG 재등록과 SG 복원이 **같은 집합**인가 |
 | 8 | 해제 완료 | Incident 종료 판단 대기 | — | `EXECUTION_UPDATED` `SUCCESS` · `INCIDENT_UPDATED` `AWAITING_CLOSURE` | — |
 
 **분기 — 1분 미응답 자동 격리**: 2번이 `AGENT_WAIT`(Medium)로 간 뒤 관제자가 1분간 응답하지 않으면 `TIMEOUT_ISOLATION_1M`으로 전환해 같은 5번을 발동한다. **초기 판정 결과가 아니라 응답 기한 만료 시 전환이다**(`packages/schemas/events.py`). Low는 이 전환 대상이 아니다. 이 분기는 **선제 차단·자동 격리 발동 경로가 구현돼야 검증 가능**하다(아래 §선행 조건).
@@ -473,7 +473,7 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 
 | 항목 | 상태 | 막는 단계 |
 | --- | --- | --- |
-| 백업 `SAVE_CURRENT_SG_AND_TG_MAPPING` 캡처 | **없음** — `services/aws/backup.py` 머리말 `[남은 작업]` | T3-3 → T3-7 전체 |
+| 백업 `SAVE_CURRENT_SG_AND_TG_MAPPING` 캡처 | **없음** — `services/aws/backup.py` 머리말 `[남은 작업]` | T3-4 → T3-7 전체 |
 | `execute_ec2_isolate` · `execute_ec2_unisolate` | **없음** — `executor.py` 머리말 TODO 1번 | T3-5 · T3-7 |
 | `execute_ec2_enable_autoscaling` | **없음** | T4-3 |
 | `PRE_MITIGATION_0_5S` · `TIMEOUT_ISOLATION_1M` 발동 경로 | **없음** — `security/soar.py`에 범위 선언만 있다 | T3-2 · T3 자동 격리 분기 |
