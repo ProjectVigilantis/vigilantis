@@ -21,7 +21,7 @@
 
 | 번호 | 확인할 것 | 이 문서의 칸 |
 | --- | --- | --- |
-| A1 | 환경 기동 `up --yes` · `status`의 TG 대상 `healthy` · Budget $50 알림 선행 생성 | §1 |
+| A1 | 환경 기동 `up --yes` · `status`의 TG 대상 `healthy` · Budget 알림 선행 생성(월 $300 · 크레딧 제외 — ADR-0009 1차 개정, 당초 $50) | §1 |
 | A2 | 앱 키 발급과 `.env` 전환(키 교체 + `AWS_ENDPOINT_URL` 삭제를 **함께**) · `sts get-caller-identity` Arn이 `user/vigilantis-smoke-app` · `AWS_REGIONS` 빈 값 | §1 |
 | A3 | 앱 키로 스캔 1회 — 회차 상태와 실패 라벨, elbv2·autoscaling 조회가 실 AWS에서 채워지는지 | §2-1 · §2-2 |
 | A4 | 가드레일 ④ `DryRun=True` — 런북별 1회, 실제 IAM 권한 검증 | §3 A4-1–A4-7 |
@@ -48,7 +48,7 @@
 | 앱 키 Arn (`sts get-caller-identity`) | `arn:aws:iam::***:user/vigilantis-smoke-app` 확인 ☐ |
 | `.env` 전환(A2) — `AWS_ENDPOINT_URL` 삭제 ☐ · 키 교체 ☐ · `AWS_REGIONS` 빈 값 ☐ | 동시 수행 시각 ______ |
 | 전환을 돌린 자리 | 본진 / 전용 worktree(권장) — ______ |
-| Budget $50 알림 생성 | ☐ |
+| Budget 알림 생성(월 $300 · 크레딧 제외 — ADR-0009 1차 개정, 당초 $50) | ☐ |
 
 ### 관측치 확보와 최초 판정 기록
 
@@ -261,7 +261,7 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 
 ---
 
-## 10. 정리 (10/16(금))
+## 10. 정리 (12/11(금) 최종 발표 뒤 — ADR-0009 1차 개정, 당초 10/16(금))
 
 | 항목 | 값 |
 | --- | --- |
