@@ -518,7 +518,7 @@ Launch Template 도 함께 본다. 이름은 `executor._launch_template_name` �
 
 → 지울 것 둘과 확인: ASG(이름) · Launch Template(`vigilantis-lt-` 접두). 지운 뒤 `provision_smoke_aws.py status` 의 잔여가 `up` 직후와 같은지 본다. ASG 가 띄운 인스턴스는 비용 추산 밖이라(ADR-0009 §3) 검증 직후 정리가 전제다.
 
-> 환경 운영 쪽 절차(언제 `.env`를 실 AWS로 전환하고 누가 되돌리는지)는 ADR-0009 1차 개정이 다룬다 — **PR #436, 리뷰 중**이다. 머지되면 그 절과 이 칸이 같은 사실을 가리킨다. 이 칸의 근거는 ADR이 아니라 위에 적은 코드이므로 ADR이 개정돼도 흔들리지 않는다.
+> 환경 운영 쪽 절차(언제 `.env`를 실 AWS로 전환하고 누가 되돌리는지)는 [ADR-0009](adr/0009-real-aws-smoke-environment.md) §6 5단계가 다룬다(1차 개정 · PR #436 머지됨). 그 절과 이 칸은 같은 사실을 가리킨다 — 다만 **이 칸의 근거는 ADR이 아니라 위에 적은 코드다.** ADR이 다시 개정돼도 흔들리지 않는다.
 
 ### 로컬 실행 가능성 ❌
 
