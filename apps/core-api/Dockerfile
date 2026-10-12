@@ -1,4 +1,4 @@
-# Vigilantis Core API — MVP 개발용 이미지 (uv 기반)
+# Vigilantis Core API 이미지 (uv 기반) — 운영 기동이 기본, 개발 스택은 compose가 명령을 덮는다
 # build context는 저장소 루트(.)여야 합니다 (packages/*, uv.lock 참조).
 FROM python:3.11-slim
 
@@ -17,4 +17,6 @@ RUN uv sync --frozen --all-packages || uv sync --all-packages
 
 WORKDIR /app/apps/core-api
 EXPOSE 8000
-CMD ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# 운영 기동(ADR-0010): worker 1개 · --reload 없음 · 관제 대상 접근 역할 프로필 준비(serve.py).
+# compose 개발 스택은 docker-compose.yml의 command가 --reload 명령으로 덮는다.
+CMD ["uv", "run", "--no-sync", "python", "serve.py"]
