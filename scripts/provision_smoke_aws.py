@@ -138,7 +138,10 @@ APP_POLICY = APP_USER
 MANAGED_POLICY_MAX_CHARS = 6144
 _POLICY_VERSION_LIMIT = 5  # 관리형 정책 하나가 가질 수 있는 버전 수
 BUDGET_NAME = f"{PREFIX}-monthly"
-BUDGET_USD = "50"  # 알림선이지 상한이 아니다(ADR-0009 §3)
+BUDGET_USD = "100"  # 알림선이지 상한이 아니다(ADR-0009 §3 — 2026-10-12 개정, 12/11까지 유지)
+# 크레딧을 빼기 전 사용액으로 잰다. CostTypes.IncludeCredit 기본값이 True라 그대로 두면 크레딧이
+# 비용을 상쇄해 사용액이 0에 가깝게 보이고 알림이 울리지 않는다 — 크레딧을 얼마나 쓰는지가 잴 대상이다
+BUDGET_COST_TYPES = {"IncludeCredit": False}
 BUDGET_ALERTS = (("ACTUAL", 50), ("ACTUAL", 80), ("ACTUAL", 100), ("FORECASTED", 100))
 # 앱이 ENABLE_AUTOSCALING으로 만드는 Launch Template 이름(executor._launch_template_name).
 # 태그가 없고 VPC 자원도 아니라 이름으로만 가린다.
@@ -848,17 +851,35 @@ def _ensure_asg_service_role(iam) -> None:
         print(f"[smoke] 서비스 연결 역할 {ASG_SERVICE_ROLE} 생성")
 
 
+def _budget_definition() -> dict:
+    return {
+        "BudgetName": BUDGET_NAME,
+        "BudgetLimit": {"Amount": BUDGET_USD, "Unit": "USD"},
+        "TimeUnit": "MONTHLY",
+        "BudgetType": "COST",
+        "CostTypes": dict(BUDGET_COST_TYPES),
+    }
+
+
+def _budget_drifted(current: dict) -> bool:
+    """이미 있는 Budget이 지금 정의와 다른가 — 금액(문자열 표기 차이는 무시)과 크레딧 포함 여부만 본다."""
+    limit = float(current.get("BudgetLimit", {}).get("Amount", "0"))
+    include_credit = current.get("CostTypes", {}).get("IncludeCredit", True)
+    return limit != float(BUDGET_USD) or include_credit != BUDGET_COST_TYPES["IncludeCredit"]
+
+
 def _ensure_budget(budgets, account: str, email: str) -> None:
     if _budget_exists(budgets, account):
+        # 이미 선 Budget은 만들 때의 정의 그대로 남는다 — 개정(월 $50 → $100 · 크레딧 제외)이 실제 계정에
+        # 닿게 다르면 갱신한다. 알림 구독은 비율이라 금액이 바뀌어도 그대로 둔다
+        current = budgets.describe_budget(AccountId=account, BudgetName=BUDGET_NAME)["Budget"]
+        if _budget_drifted(current):
+            budgets.update_budget(AccountId=account, NewBudget=_budget_definition())
+            print(f"[smoke] Budget {BUDGET_NAME} 갱신 — 월 ${BUDGET_USD}, 크레딧 제외")
         return
     budgets.create_budget(
         AccountId=account,
-        Budget={
-            "BudgetName": BUDGET_NAME,
-            "BudgetLimit": {"Amount": BUDGET_USD, "Unit": "USD"},
-            "TimeUnit": "MONTHLY",
-            "BudgetType": "COST",
-        },
+        Budget=_budget_definition(),
         NotificationsWithSubscribers=[
             {
                 "Notification": {
