@@ -42,13 +42,13 @@
 | --- | --- |
 | 계정 ID | (저장소에 적지 않는다 — `--account` 인자로만) |
 | 리전 | `ap-northeast-2` |
-| 검증 기준 커밋 | `origin/dev` ______ |
-| `up --yes` 실행 시각 | ______ |
-| `status` TG 대상 `healthy` 확인 시각 | ______ |
-| 앱 키 Arn (`sts get-caller-identity`) | `arn:aws:iam::***:user/vigilantis-smoke-app` 확인 ☐ |
-| `.env` 전환(A2) — `AWS_ENDPOINT_URL` 삭제 ☐ · 키 교체 ☐ · `AWS_REGIONS` 빈 값 ☐ | 동시 수행 시각 ______ |
-| 전환을 돌린 자리 | 본진 / 전용 worktree(권장) — ______ |
-| Budget $50 알림 생성 | ☐ |
+| 검증 기준 커밋 | 앱: `origin/dev` `fd38c01` · 기동 스크립트: PR #436 head `e7787c2`(Budget $300·크레딧 제외 정의) |
+| `up --yes` 실행 시각 | 10/12(월) 11:19 KST(인스턴스 `LaunchTime`) · 학원 계정(멤버 계정) — vCPU 한도 5 → 64 상향 승인 직후 |
+| `status` TG 대상 `healthy` 확인 시각 | 10/12(월) `up` 직후(ALB 생성 11:20 KST) — `web-1`·`web-2` 2/2 `healthy` |
+| 앱 키 Arn (`sts get-caller-identity`) | `arn:aws:iam::***:user/vigilantis-smoke-app` 확인 ☑ |
+| `.env` 전환(A2) — `AWS_ENDPOINT_URL` 삭제 ☑ · 키 교체 ☑ · `AWS_REGIONS` 빈 값 ☑ | 10/12(월) 13:22 KST 확인(PM 수행 — 키 값은 출력하지 않고 프로필과 일치만 대조) |
+| 전환을 돌린 자리 | 전용 worktree — `docs/INFRA-aws-smoke-run` 브랜치 폴더. 본진 `.env`는 LocalStack 그대로 |
+| Budget $50 알림 생성 | ☑ — 단, PR #436 정의대로 **월 $300 · `IncludeCredit=false`**로 섰다(`describe-budgets` 실측) |
 
 ### 관측치 확보와 최초 판정 기록
 
@@ -56,10 +56,10 @@ Rule Engine은 경과 시간이 아니라 **실제 CPU 관측치 수(`cpu_datapo
 
 | 항목 | 값 |
 | --- | --- |
-| 인스턴스 기동 시각(A1) | ______ |
-| 실제 `METRIC_PERIOD_SECONDS` / `METRIC_LOOKBACK_DAYS` | ______ / ______ |
-| 관측치 확보 예상 시각(확정 시각 아님) | 예상: ______ · 산정 근거 ______ |
-| 대상별 실제 CPU 관측치 수 · 스캔 시각 | 대상 ______ · 개수 ______ · 시각 ______ |
+| 인스턴스 기동 시각(A1) | 10/12(월) 11:19 KST — 3대 동시 |
+| 실제 `METRIC_PERIOD_SECONDS` / `METRIC_LOOKBACK_DAYS` | 3600 / 14 |
+| 관측치 확보 예상 시각(확정 시각 아님) | 예상: 10/14(수) 11:19 KST 무렵 · 산정 근거: 기동 + 48 × 3600초(`status` 출력과 같음) |
+| 대상별 실제 CPU 관측치 수 · 스캔 시각 | `web-1`·`web-2`·`idle-dev` · 각 3개 · 10/12(월) 13:24 KST |
 | 최초 실제 판정 · 대상 · 시각 | 판정 ______ · 대상 ______ · 시각 ______ |
 | 일정 내 검증 가능 여부와 제약 | ______ |
 
@@ -85,10 +85,10 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 
 | 항목 | 값 |
 | --- | --- |
-| 실행 여부 · 시각 | 실행 / 미실행 — ______ · 미실행이면 사유 ______ |
-| `collection_runs.status` | ______ |
-| elbv2·autoscaling 조회 결과 | ______ |
-| 이월 4행 처분에 보태는 근거 | ______ |
+| 실행 여부 · 시각 | 미실행 — 9/29(화)까지 환경이 서지 않았다(대상 계정이 학원 계정으로 바뀌어 10/12에 처음 기동). §2-1 본 회차가 첫 실측이다 |
+| `collection_runs.status` | (미실행) |
+| elbv2·autoscaling 조회 결과 | (미실행 — §2-1 참조) |
+| 이월 4행 처분에 보태는 근거 | (미실행 — §2-1 참조) |
 
 ### 2-1. 스캔 1회 결과
 
@@ -96,13 +96,13 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 
 | 항목 | 실 AWS 관측 | 판정 · 비고 |
 | --- | --- | --- |
-| `mode` | ______ | `aws` 가 아니면 실 AWS 회차가 아니다 — 아래 칸을 채우기 전에 먼저 본다 |
-| `collection_runs.status` | ______ | `PARTIAL` 이면 아래 사유 코드로 권한 누락인지 가린다 |
-| `error_summary` | ______ | `collector_failures` 가 compact JSON 으로 실린 자리다. 로컬에서 나오는 모양은 `{"alb_target_groups":"InternalFailure","auto_scaling_groups":"InternalFailure"}` — **같은 라벨에 `AccessDenied` 가 오면 권한 누락이다** |
-| `collector_failures` 라벨 → 사유 코드 | 라벨 ______ → 사유 ______ | 사유 코드가 판별 기준이다. `AccessDenied` 는 **권한 누락** — 빠진 조회 권한을 §7에 적고 `policy` 대조. **`InternalFailure` 는 회차의 `mode` 로 뜻이 갈린다** — `localstack` 이면 라이선스 밖이고, **`aws` 면 AWS 측 내부 오류이므로 재시도 후에도 같으면 §7에 적는다**(실 AWS 에서도 나오는 코드다). 어느 코드든 빈 목록으로 강등되므로 "정상 0건"과 구별되지 않는다 |
-| `elbv2`(ALB Target Group) 조회 | ______ | **이월 4행 처분 근거.** LocalStack Community 에 없어 로컬에서 성공한 적이 없다 |
-| `autoscaling`(ASG) 조회 | ______ | **이월 4행 처분 근거.** 같은 이유로 로컬에서 성공한 적이 없다 |
-| CloudWatch 메트릭 | ______ | **이월 3행 처분 근거.** **시드 회차는 관측치를 즉시 72개로 채우므로 48개 게이트가 걸리지 않는다**(2026-10-06 실측 — 자산 4대 모두 72개). 게이트 자체는 골든 A4(`dp 47`)가 검증한다. 지연·해상도는 실 AWS에서 처음 관측된다 |
+| `mode` | `aws` — 회차 `3bb8e0e5-a6e7-4a05-8387-600d73bb77d5` · 10/12(월) 13:24 KST | `aws` 가 아니면 실 AWS 회차가 아니다 — 아래 칸을 채우기 전에 먼저 본다 |
+| `collection_runs.status` | `SUCCESS` | `PARTIAL` 이면 아래 사유 코드로 권한 누락인지 가린다 |
+| `error_summary` | 빈 값 | `collector_failures` 가 compact JSON 으로 실린 자리다. 로컬에서 나오는 모양은 `{"alb_target_groups":"InternalFailure","auto_scaling_groups":"InternalFailure"}` — **같은 라벨에 `AccessDenied` 가 오면 권한 누락이다** |
+| `collector_failures` 라벨 → 사유 코드 | 없음(빈 묶음) — 흡수된 조회 0건 | 사유 코드가 판별 기준이다. `AccessDenied` 는 **권한 누락** — 빠진 조회 권한을 §7에 적고 `policy` 대조. **`InternalFailure` 는 회차의 `mode` 로 뜻이 갈린다** — `localstack` 이면 라이선스 밖이고, **`aws` 면 AWS 측 내부 오류이므로 재시도 후에도 같으면 §7에 적는다**(실 AWS 에서도 나오는 코드다). 어느 코드든 빈 목록으로 강등되므로 "정상 0건"과 구별되지 않는다 |
+| `elbv2`(ALB Target Group) 조회 | **성공 — TG 1건 수집**(`vigilantis-smoke-tg`). 실 AWS 첫 성공 | **이월 4행 처분 근거.** LocalStack Community 에 없어 로컬에서 성공한 적이 없다 |
+| `autoscaling`(ASG) 조회 | **성공 — 0건**(ASG 없음이 정상). `collector_failures`가 비어 있어 권한 누락으로 인한 강등이 아니다 | **이월 4행 처분 근거.** 같은 이유로 로컬에서 성공한 적이 없다 |
+| CloudWatch 메트릭 | 기동 2시간 뒤 3대 모두 관측치 3개(1시간 해상도) — 지연 없이 시간당 1개씩 쌓임 | **이월 3행 처분 근거.** **시드 회차는 관측치를 즉시 72개로 채우므로 48개 게이트가 걸리지 않는다**(2026-10-06 실측 — 자산 4대 모두 72개). 게이트 자체는 골든 A4(`dp 47`)가 검증한다. 지연·해상도는 실 AWS에서 처음 관측된다 |
 
 ### 2-2. 자산 유형별 수집 수
 
@@ -110,25 +110,25 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 
 | 자산 유형 | 기대 — 스모크 자원(`provision_smoke_aws.py` 스펙) | 수집 수 | 비고 |
 | --- | --- | --- | --- |
-| EC2 | 3 — `web-1`·`web-2`·`idle-dev` | | |
-| SG | 6 — 명명 5종(`alb`·`web`·`open-ssh`·`unused`·`isolation`) + 스모크 VPC 기본 SG | | |
-| NACL | 2 — `vigilantis-smoke-nacl` + 스모크 VPC 기본 NACL | | |
-| EBS | 4 — 인스턴스 루트 3 + 미연결 `vigilantis-smoke-unattached` 1 | | |
-| Launch Template | 0 — `up` 은 만들지 않는다(`EC2_ENABLE_AUTOSCALING` 이 `vigilantis-lt-` 접두로 만든다) | | 0이 정상. **있으면 출처(이름·생성 시각)를 §7에 적는다** — 수집이 리전 전체를 훑으므로 스모크 밖에서 만든 LT도 잡힌다 |
-| Auto Scaling Group | 0 — `up` 은 만들지 않는다(P2 검증이 만들고 직후 정리) | | 0과 미관측을 구분한다. precheck 조건 ③이 **동명 ASG 부재**라 0이 정상 |
-| ALB Target Group | 1 — `vigilantis-smoke-tg` | | LocalStack에서는 조회 실패로 **미관측**(자산 0개를 뜻하지 않음) |
+| EC2 | 3 — `web-1`·`web-2`·`idle-dev` | 3 | |
+| SG | 6 — 명명 5종(`alb`·`web`·`open-ssh`·`unused`·`isolation`) + 스모크 VPC 기본 SG | 7 | +1은 계정 기본 VPC의 기본 SG(`SKIP_WHITELISTED`) |
+| NACL | 2 — `vigilantis-smoke-nacl` + 스모크 VPC 기본 NACL | 3 | +1은 계정 기본 VPC의 기본 NACL |
+| EBS | 4 — 인스턴스 루트 3 + 미연결 `vigilantis-smoke-unattached` 1 | 4 | |
+| Launch Template | 0 — `up` 은 만들지 않는다(`EC2_ENABLE_AUTOSCALING` 이 `vigilantis-lt-` 접두로 만든다) | 0 | 0이 정상. **있으면 출처(이름·생성 시각)를 §7에 적는다** — 수집이 리전 전체를 훑으므로 스모크 밖에서 만든 LT도 잡힌다 |
+| Auto Scaling Group | 0 — `up` 은 만들지 않는다(P2 검증이 만들고 직후 정리) | 0 — 조회 성공(§2-1) | 0과 미관측을 구분한다. precheck 조건 ③이 **동명 ASG 부재**라 0이 정상 |
+| ALB Target Group | 1 — `vigilantis-smoke-tg` | 1 | LocalStack에서는 조회 실패로 **미관측**(자산 0개를 뜻하지 않음) |
 
 ### 2-3. 판정 분포
 
 | 판정 | 건수 | 대상 | 비고 |
 | --- | --- | --- | --- |
-| `COST_CANDIDATE` | | | CPU 관측치 48개 이상 확보 후 태그·사용률 조건도 대조 |
-| `SKIP_INSUFFICIENT_DATA` | | | CPU 관측치 없음 또는 48개 미만인지 대조 |
-| `SKIP_PROD_PROTECTED` | | `web-1`·`web-2` | **A9** |
-| `SKIP_WHITELISTED` | | `vigilantis-smoke-isolation` + 이름이 `default` 인 SG 전부 | **경로가 둘이다** — 이름 `default`(삭제·변경 불가)와 `vigilantis:role=isolation` 태그(#359). `default` SG가 이 칸에 함께 뜨는 것이 정상이다 |
-| `UNUSED` | | | |
-| `THREAT` | | | |
-| 그 밖 | | | |
+| `COST_CANDIDATE` | 0 | — | CPU 관측치 48개 이상 확보 후 태그·사용률 조건도 대조 |
+| `SKIP_INSUFFICIENT_DATA` | 3 | `web-1`·`web-2`·`idle-dev` | 각 관측치 3개(48개 미만) — CPU 관측치 없음 또는 48개 미만인지 대조 |
+| `SKIP_PROD_PROTECTED` | 0 | `web-1`·`web-2` | **A9** — 관측치 게이트가 prod 검사보다 앞이라 아직 보이지 않는다. 10/14(수) 11:19 KST 뒤 재확인 |
+| `SKIP_WHITELISTED` | 3 | `vigilantis-smoke-isolation` + 이름이 `default` 인 SG 전부 | **경로가 둘이다** — 이름 `default`(삭제·변경 불가)와 `vigilantis:role=isolation` 태그(#359). `default` SG가 이 칸에 함께 뜨는 것이 정상이다 |
+| `UNUSED` | 2 | `vigilantis-smoke-unused`(SG) · `vol-0c4297aea92109f3b`(EBS) | 인시던트 2건 생성 — AI 분석은 끈 회차라 분석 대기로 남음 |
+| `THREAT` | 1 | `vigilantis-smoke-open-ssh` | |
+| 그 밖 | 5 | `SKIP_ACTIVE` — SG `alb`·`web`, 인스턴스 루트 EBS 3 | |
 
 ### 2-4. 조인 무결성
 
@@ -136,11 +136,11 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 
 | 항목 | 값 |
 | --- | --- |
-| `find_dangling_arns` 원출력 (**DB 전체 기준**) | total ____ / investigate ____ |
-| 종류별 | ______ |
-| 계정별 조사 대상 기록의 기준 | `--run`으로 지정한 스모크 회차 ID ____ · 해당 회차가 대상 스모크 계정인지 확인 ☐ |
-| 위 조건을 확인한 경우에만 — `(다른 계정)` 조사 대상 제외 후 | investigate ____ · 제외한 조사 대상 ____ 건 / 조건 미확인이면 미산정 |
-| 제외 기준과 남은 조사 대상의 성격 | ______ |
+| `find_dangling_arns` 원출력 (**DB 전체 기준**) | total 2 / investigate 2 |
+| 종류별 | `broken_reference` 2 |
+| 계정별 조사 대상 기록의 기준 | `--run`으로 지정한 스모크 회차 ID `3bb8e0e5-a6e7-4a05-8387-600d73bb77d5` · 해당 회차가 대상 스모크 계정인지 확인 ☑(`mode=aws`) |
+| 위 조건을 확인한 경우에만 — `(다른 계정)` 조사 대상 제외 후 | investigate 0 · 제외한 조사 대상 2 건 |
+| 제외 기준과 남은 조사 대상의 성격 | 2건 모두 `(다른 계정)` — 로컬 DB에 남은 골든 데이터셋(LocalStack 계정)의 ASG·TG 관계 기록이다. 스모크 계정의 조사 대상은 0건 |
 | 판정 | 대상 계정의 조사 대상이 0건인지 또는 남아 있는지를 기록하고, 남으면 §7에 원인을 적는다. 같은 계정의 **다른 회차·자원**까지 걸러진 수가 아니므로 "이 회차의 결과"나 스모크 전체 통과로 적지 않는다 |
 
 > 계정별 조사 대상 수를 적을 때는 `scripts/qa_scan_compare.py --run <collection_run_id>`로 대상 스모크 회차를 지정하고, 출력의 `mode=aws`와 `account_id`를 확인한다(계정 ID는 저장소에 적지 않는다). 스크립트는 **출력한 회차들의 계정 집합**에 없는 ARN에 `(다른 계정)`을 붙이므로, 여러 계정의 최신 회차가 섞일 수 있는 기본 실행의 표시를 단일 스모크 계정 기준으로 쓰지 않는다.
@@ -155,21 +155,21 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 
 | # | 런북 | 검사 방식 · API · 응답/결과 | 권한 누락 | 비고 |
 | --- | --- | --- | --- | --- |
-| A4-1 | `EC2_RIGHTSIZING` | | | |
-| A4-2 | `EC2_REVERT_SIZE` | | | |
-| A4-3 | `NACL_ADD_DENY` | | | 런타임 describe와 별도 직접 DryRun 실측을 구분 — **이월 5행** |
-| A4-4 | `NACL_RESTORE` | | | 런타임 describe와 별도 직접 DryRun 실측을 구분 — **이월 5행** |
-| A4-5 | `SG_DELETE_ISOLATED` | | | |
-| A4-6 | `SG_RECREATE` | | | |
-| A4-7 | `EBS_DELETE_UNATTACHED` | | | |
+| A4-1 | `EC2_RIGHTSIZING` | `precheck()` 통과 — DryRun `ec2.modify_instance_attribute`(`idle-dev` t3.medium→t3.small) | 없음 | 앱 키 · 10/12 오후(A3 스캔 뒤) |
+| A4-2 | `EC2_REVERT_SIZE` | 직접 DryRun `ec2.modify_instance_attribute`(`idle-dev`→t3.medium) → `DryRunOperation` | 없음 | `precheck()`는 백업 레코드가 있어야 돌므로 A7 실동작에서 다시 본다 |
+| A4-3 | `NACL_ADD_DENY` | `precheck()` 통과(describe `ec2.describe_network_acls`) · 직접 DryRun `ec2.create_network_acl_entry` → `DryRunOperation` | 없음 | 런타임 describe와 별도 직접 DryRun 실측을 구분 — **이월 5행.** DryRun 뒤 규칙 100이 실제로 생기지 않았음을 describe로 확인 |
+| A4-4 | `NACL_RESTORE` | 직접 DryRun `ec2.delete_network_acl_entry` → `DryRunOperation` | 없음 | 런타임 describe와 별도 직접 DryRun 실측을 구분 — **이월 5행.** `precheck()`는 백업 필요 — A6에서 다시 본다 |
+| A4-5 | `SG_DELETE_ISOLATED` | `precheck()` 통과 — DryRun `ec2.delete_security_group`(`unused` SG) | 없음 | |
+| A4-6 | `SG_RECREATE` | 직접 DryRun `create_security_group`(스모크 VPC)·`authorize_security_group_ingress`·`authorize_security_group_egress` → 모두 `DryRunOperation` | 없음 | **울타리 대조**: 기본 VPC에 `create_security_group` → `UnauthorizedOperation`(ADR-0009 §2의 VPC 문장이 의도대로 막음). `precheck()`는 백업 필요 |
+| A4-7 | `EBS_DELETE_UNATTACHED` | `precheck()` 통과 — DryRun `ec2.create_snapshot`·`ec2.delete_volume`(미연결 볼륨) | 없음 | |
 
 **A5 — 대상 존재 검사(이월 8행 · 미측정 항목)**
 
 | 항목 | 값 |
 | --- | --- |
-| 쓴 가짜 인스턴스 ID | ______ |
-| 실 AWS 응답 | ______ |
-| 걸러졌는가 | 예 / 아니오 |
+| 쓴 가짜 인스턴스 ID | `i-0f3a9c2b7d1e4a5b6`(및 대조용 `vol-0f3a9c2b7d1e4a5b6` · `sg-0f3a9c2b7d1e4a5b6`) |
+| 실 AWS 응답 | 인스턴스 `modify_instance_attribute` DryRun — **관리자 키 `DryRunOperation` / 앱 키 `UnauthorizedOperation`** · 볼륨 `delete_volume` DryRun — 두 키 모두 `InvalidVolume.NotFound` · SG `delete_security_group` DryRun — 두 키 모두 `InvalidGroup.NotFound`. `precheck()`로는 EBS가 `PRECHECK_TARGET_NOT_FOUND`, 다운사이징이 `PRECHECK_UNAUTHORIZED` |
+| 걸러졌는가 | **예 — 단, 사유가 작업마다 다르다**(§7 A5 행) |
 | 판정 | 걸러지면 **이월 8행 해소**. 아니면 가드레일 ④가 대상 존재를 보증하지 않는다는 사실이 실 AWS에서도 확인된 것 — 그대로 적는다 |
 
 ---
@@ -223,7 +223,9 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 
 | 시각 | 무엇 | 어떻게 처리했나 |
 | --- | --- | --- |
-| | | |
+| 10/12 11:17 | 학원 계정의 On-Demand vCPU 한도가 5라 스모크 3대(6 vCPU)가 들어가지 않음 | Service Quotas로 16 요청 → Support 케이스 → 64로 승인. 그 뒤 `up` |
+| 10/12 13:24 | A3 회차의 조인 무결성 조사 대상 2건 | 로컬 DB의 골든 데이터셋(다른 계정) 기록 — 스모크 무관(§2-4) |
+| 10/12 오후 | **A5 — 없는 대상에 대한 DryRun 응답이 작업마다 다르다.** 볼륨·SG 삭제는 실 AWS가 대상 존재를 검사해 `NotFound`를 준다(LocalStack은 없는 SG에도 `DryRunOperation` — ADR-0007 실측과 다름). 인스턴스 `modify_instance_attribute`는 존재를 검사하지 않고(관리자 키 `DryRunOperation`), **앱 키에서는 태그 조건(`vigilantis:smoke=true`)을 평가할 수 없어 `UnauthorizedOperation`**이 된다 | 다운사이징 대상이 사라진 경우 가드레일 ④는 막지만 사유 코드가 `PRECHECK_UNAUTHORIZED`(권한 문제)로 찍힌다 — 관제자가 "대상 없음"이 아니라 "권한 누락"으로 읽을 수 있다. 처분(사유 매핑을 고칠지, describe를 앞세울지)은 이월 8행 처분과 함께 PM이 정한다 |
 
 ---
 
@@ -240,9 +242,9 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 
 | # | 런북 | DryRun 부분 결과 | describe 통과 조건 실측(①②③④ 각각) | 잠정 조건 확정 / 수정 필요 |
 | --- | --- | --- | --- | --- |
-| P2-3a | `EC2_ISOLATE`<br>ENI `modify_network_interface_attribute` DryRun + `describe_target_health`·`describe_security_groups` | | ① DryRun 통과 ______<br>② `isolation_group_id` SG 존재 ______<br>③ TG 존재·대상 등록됨(`Target.NotRegistered` 설명은 미등록으로 본다) ______ | 확정 / 수정 필요 — ______ |
+| P2-3a | `EC2_ISOLATE`<br>ENI `modify_network_interface_attribute` DryRun + `describe_target_health`·`describe_security_groups` | `precheck()` 통과(앱 키 · `web-1`) — ENI 교체 DryRun 통과 | ① DryRun 통과 ______<br>② `isolation_group_id` SG 존재 ______<br>③ TG 존재·대상 등록됨(`Target.NotRegistered` 설명은 미등록으로 본다) ______ | 확정 / 수정 필요 — ______ |
 | P2-3b | `EC2_UNISOLATE`<br>ENI DryRun + `describe_target_groups`·`describe_security_groups` | | ① DryRun 통과 ______<br>② 백업 레코드의 복원 대상 SG 전부 현존 ______<br>③ TG 존재·대상이 같은 VPC(`describe_target_groups`의 `VpcId`) ______ | 확정 / 수정 필요 — ______ |
-| P2-3c | `EC2_ENABLE_AUTOSCALING`<br>LT `create_launch_template` DryRun + `describe_instances`·`describe_auto_scaling_groups` | | ① DryRun 통과 ______<br>② 원본 EC2 존재·`running` ______<br>③ 동명 ASG 부재 ______<br>④ `min_size <= max_size <= 4` ______ | 확정 / 수정 필요 — ______ |
+| P2-3c | `EC2_ENABLE_AUTOSCALING`<br>LT `create_launch_template` DryRun + `describe_instances`·`describe_auto_scaling_groups` | `precheck()` 통과(앱 키 · `idle-dev`) — LT DryRun 통과 | ① DryRun 통과 ______<br>② 원본 EC2 존재·`running` ______<br>③ 동명 ASG 부재 ______<br>④ `min_size <= max_size <= 4` ______ | 확정 / 수정 필요 — ______ |
 
 > 거절이 났으면 사유 코드(`PRECHECK_TARGET_NOT_FOUND` · `PRECHECK_INVALID_STATE` · `PRECHECK_PARAM_INVALID`)와 `verification_summary`를 그대로 적는다. 조건을 고쳐야 하면 ADR-0007 §4 개정 대상으로 §7에 남긴다.
 
