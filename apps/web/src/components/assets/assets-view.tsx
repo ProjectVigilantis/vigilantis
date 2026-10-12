@@ -41,6 +41,7 @@ import { AssetGraph } from '@/components/assets/asset-graph';
 import { AssetDetail } from '@/components/assets/asset-detail';
 import { HealthScorePanel, VerdictPanel } from '@/components/assets/asset-summary-panels';
 import { SavingsCard } from '@/components/assets/savings-card';
+import { AutoRefresh } from '@/components/auto-refresh';
 import { CpuTrendChart, NetworkTrendChart } from '@/components/dashboard/trend-charts';
 import { EmptyState } from '@/components/empty-state';
 import { ErrorState } from '@/components/error-state';
@@ -82,6 +83,7 @@ export function AssetsView({
   openArn,
   initialTab,
   initialPreset,
+  renderedAt,
 }: {
   data: AssetsResponse;
   /** 인시던트 목록 전량 — `인시던트` 탭이 FINOPS만 골라 쓴다. `null`은 조회 실패. */
@@ -108,6 +110,8 @@ export function AssetsView({
   initialTab?: string;
   /** URL `?preset=` — 인시던트 탭의 첫 프리셋. */
   initialPreset?: IncidentPreset;
+  /** 페이지가 데이터를 읽은 시각(ISO) — 제목 옆 `마지막 갱신`이 쓴다(`auto-refresh.tsx`). */
+  renderedAt: string;
 }) {
   const [assetType, setAssetType] = useState<string>(ALL);
   // AST-002는 이 목록이 이미 받은 단건을 그대로 넘겨 연다 — 신규 페치 없음(§4.3).
@@ -265,7 +269,10 @@ export function AssetsView({
           여백(`p-6`)을 되돌려 안 붙었을 때의 자리가 종전과 같게 한다. 띠는 전체 + 유형 7종이라 8칸이고,
           2 → 4 → 8열로 접힌다(빈 칸이 없다). z-index는 상세 Drawer(z-50)보다 낮게 둔다. */}
       <div className="bg-background sticky top-0 z-20 -mx-6 -mt-6 px-6 pt-6 pb-3">
-      <h1 className="mb-3 text-lg font-semibold">자산 관제</h1>
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <h1 className="text-lg font-semibold">자산 관제</h1>
+        <AutoRefresh renderedAt={renderedAt} />
+      </div>
       <MetricStrip className="sm:grid-cols-4 xl:grid-cols-8">
         <MetricTile
           label="전체 자산"

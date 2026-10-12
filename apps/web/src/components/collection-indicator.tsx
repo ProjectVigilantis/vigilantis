@@ -22,7 +22,8 @@ import type { AssetsResponse, CollectionStatus } from '@/types/api';
  * GNB는 layout 소유라 라우트 전환으로 remount되지 않는다 — 다시 부르지 않으면 새로고침 전까지
  * 수집 상태가 고정된다(PR #299 리뷰). 수집 상태를 알리는 WS 이벤트가 계약에 없어 주기로 따라간다.
  * 스캔 주기(`SCAN_INTERVAL_SECONDS`)보다 짧기만 하면 되는데, 옆 `실시간` 칩이 이 값으로 "자산이
- * 붙었나"를 가르므로 첫 수집 뒤 늦게 켜지지 않게 요약 화면 자동 갱신(15초)과 맞춘다.
+ * 붙었나"를 가르므로 첫 수집 뒤 늦게 켜지지 않게 15초로 둔다. 요약 화면 자동 갱신(5분, auto-refresh.tsx)과
+ * 따로 간다 — 그쪽은 화면 전체를 다시 읽고, 이쪽은 자산 봉투 하나만 읽는다.
  */
 const REFRESH_MS = 15_000;
 

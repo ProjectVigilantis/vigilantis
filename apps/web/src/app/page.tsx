@@ -16,6 +16,9 @@ import { actionQueue, proposalRows } from '@/lib/dashboard';
 import type { IncidentResponse } from '@/types/api';
 
 export default async function DashboardPage() {
+  // 제목 옆 `마지막 갱신` — 다시 그려질 때마다 새로 찍힌다(auto-refresh.tsx).
+  const renderedAt = new Date().toISOString();
+
   // 인시던트 실패는 대시보드를 죽이지 않는다 — 자산 화면과 같은 규칙(null = 조회 실패)이다.
   // 오류를 버리지 않고 들고 간다: AI 카드가 그것을 **대기 0건이 아니라 오류로** 그려야 한다(PR #351 리뷰 2).
   const incidentsPromise = getIncidents().then(
@@ -59,8 +62,10 @@ export default async function DashboardPage() {
 
   return (
     <>
-      <AutoRefresh />
-      <h1 className="mb-4 text-lg font-semibold">대시보드</h1>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+        <h1 className="text-lg font-semibold">대시보드</h1>
+        <AutoRefresh renderedAt={renderedAt} />
+      </div>
       {/* AI 카드를 본문 위에 쌓지 않고 **슬롯으로 넘긴다** — 넓은 화면에서 본문 오른쪽 레일에
           세워야 하는데, 그 자리를 아는 것은 격자를 가진 `DashboardView`다. 여기서 만들어 넘기는
           것은 그대로다: 서버에서 그려야 `errorSlot`의 RSC 직렬화 제약(아래)을 지킬 수 있다. */}

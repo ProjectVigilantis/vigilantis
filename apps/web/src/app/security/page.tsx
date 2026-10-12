@@ -4,7 +4,6 @@
 // 그것을 쓰는 패널만 "조회 실패"로 그린다(null = 조회 실패, 0건과 구분). 응답을 캐시하지 않아
 // 새로고침·실시간 이벤트의 `router.refresh()`가 곧 재조회다.
 
-import { AutoRefresh } from '@/components/auto-refresh';
 import { ErrorState } from '@/components/error-state';
 import { SecurityView } from '@/components/security/security-view';
 import { getAssets, getIncidents, getMetricsTimeseries } from '@/lib/api/client';
@@ -12,6 +11,8 @@ import { parsePreset } from '@/lib/incident-filter';
 import type { IncidentListItem } from '@/types/api';
 
 export default async function SecurityPage({ searchParams }: PageProps<'/security'>) {
+  // 제목 옆 `마지막 갱신` — 다시 그려질 때마다 새로 찍힌다(auto-refresh.tsx).
+  const renderedAt = new Date().toISOString();
   // `?tab=incidents`·`?preset=`은 구 보안 인시던트 목록(`/incidents`)에서 redirect돼 오는 딥링크다.
   const { asset, tab, preset } = await searchParams;
   // 오류를 버리지 않고 들고 간다 — 인시던트 탭이 그것을 **대기 0건이 아니라 오류로** 그려야 한다.
@@ -47,7 +48,6 @@ export default async function SecurityPage({ searchParams }: PageProps<'/securit
   // 화면 이름(h1)은 뷰 안에 있다 — 지표 띠와 한 덩이로 스크롤을 따라와야 해서다(security-view.tsx).
   return (
     <>
-      <AutoRefresh />
       <SecurityView
         data={assets}
         incidents={incidents}
@@ -57,6 +57,7 @@ export default async function SecurityPage({ searchParams }: PageProps<'/securit
         openArn={typeof asset === 'string' ? asset : undefined}
         initialTab={typeof tab === 'string' ? tab : undefined}
         initialPreset={parsePreset(preset)}
+        renderedAt={renderedAt}
       />
     </>
   );
