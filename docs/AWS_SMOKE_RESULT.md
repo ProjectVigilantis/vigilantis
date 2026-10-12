@@ -48,7 +48,7 @@
 | 앱 키 Arn (`sts get-caller-identity`) | `arn:aws:iam::***:user/vigilantis-smoke-app` 확인 ☐ |
 | `.env` 전환(A2) — `AWS_ENDPOINT_URL` 삭제 ☐ · 키 교체 ☐ · `AWS_REGIONS` 빈 값 ☐ | 동시 수행 시각 ______ |
 | 전환을 돌린 자리 | 본진 / 전용 worktree(권장) — ______ |
-| Budget 알림 생성(월 $300 · 크레딧 제외 — 9/29 `up`이 만든 $50은 개정 뒤 `up --yes`가 갱신) | ☐ |
+| Budget 알림 생성(월 $300 · 크레딧 제외 — ADR-0009 1차 개정, 당초 $50) | ☐ |
 
 ### 관측치 확보와 최초 판정 기록
 

@@ -864,17 +864,29 @@ def _budget_definition() -> dict:
 
 
 def _budget_drifted(current: dict) -> bool:
-    """이미 있는 Budget이 지금 정의와 다른가 — 금액(문자열 표기 차이는 무시)과 크레딧 포함 여부만 본다."""
+    """이미 있는 Budget이 지금 정의와 다른가 — update_budget이 정의 전체를 덮어쓰므로 정의의 네 값
+    (금액 · 크레딧 포함 여부 · 기간 단위 · 종류)을 모두 본다. 금액은 문자열 표기 차이("300" · "300.0")를 무시한다."""
+    want = _budget_definition()
     limit = float(current.get("BudgetLimit", {}).get("Amount", "0"))
     include_credit = current.get("CostTypes", {}).get("IncludeCredit", True)
-    return limit != float(BUDGET_USD) or include_credit != BUDGET_COST_TYPES["IncludeCredit"]
+    return (
+        limit != float(BUDGET_USD)
+        or include_credit != BUDGET_COST_TYPES["IncludeCredit"]
+        or current.get("TimeUnit") != want["TimeUnit"]
+        or current.get("BudgetType") != want["BudgetType"]
+    )
 
 
 def _ensure_budget(budgets, account: str, email: str) -> None:
-    if _budget_exists(budgets, account):
-        # 이미 선 Budget은 만들 때의 정의 그대로 남는다 — 개정(월 $50 → $300 · 크레딧 제외)이 실제 계정에
-        # 닿게 다르면 갱신한다. 알림 구독은 비율이라 금액이 바뀌어도 그대로 둔다
+    try:
         current = budgets.describe_budget(AccountId=account, BudgetName=BUDGET_NAME)["Budget"]
+    except ClientError as exc:
+        if _code(exc) != "NotFoundException":
+            raise
+        current = None
+    if current is not None:
+        # 이미 선 Budget은 만들 때의 정의 그대로 남는다 — 정의(금액·크레딧 포함 여부 등)가 바뀐 뒤 다시 돌린
+        # up이 계정에 닿도록, 다르면 갱신한다. 알림 구독은 비율이라 금액이 바뀌어도 그대로 둔다
         if _budget_drifted(current):
             budgets.update_budget(AccountId=account, NewBudget=_budget_definition())
             print(f"[smoke] Budget {BUDGET_NAME} 갱신 — 월 ${BUDGET_USD}, 크레딧 제외")
