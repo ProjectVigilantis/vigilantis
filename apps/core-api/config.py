@@ -201,8 +201,9 @@ class CollectorSettings(BaseSettings):
     @field_validator("COLLECT_VPC_IDS", mode="after")
     @classmethod
     def _check_vpc_ids(cls, value: str) -> str:
-        # 오타 하나가 조용히 넘어가면 그 VPC 자산이 전부 범위 밖으로 걸러져 다음 회차에
-        # 소멸 표시된다. 기동 단계에서 형식만이라도 막는다.
+        # 여기서는 형식만 막는다. 형식은 맞는 오타(존재하지 않는 vpc-…)는 매 회차
+        # services/collector._check_vpc_scope 가 존재 확인으로 잡고, 없으면 그 회차의
+        # 소멸 표시·자산 수 스냅샷을 건너뛴다 — 범위 VPC 자산이 전부 소멸 표시되지 않게.
         bad = [v for v in _split_csv(value) if not v.startswith("vpc-")]
         if bad:
             raise ValueError(f"COLLECT_VPC_IDS 는 vpc- 로 시작하는 ID 목록이어야 한다: {bad}")

@@ -66,6 +66,12 @@ _QUERY_BATCH = 100
 # 화면은 유형별 안내가 아니라 전체 실패로 그려야 한다. 모르는 라벨과 구분하려고 이름을 남긴다.
 REGION_FAILURE_LABEL = "collect_region"
 
+# 수집 범위 VPC 확인 실패(COLLECT_VPC_IDS 의 ID 가 설정 리전 어디에도 없거나 확인 조회가
+# 실패)의 라벨. 특정 유형을 못 본 것이 아니라 **이 회차의 관측 전체를 소멸 판단에 쓸 수
+# 없는** 것이라 UNOBSERVED_TYPES_BY_FAILURE 로 환원하지 않는다 — 범위 필터가 오타로 전량을
+# 거른 회차는 "AWS 가 비었다"와 구별되지 않기 때문이다(PR #440 리뷰: 김승철).
+VPC_SCOPE_FAILURE_LABEL = "vpc_scope"
+
 
 def _failure_reason(exc: BaseException) -> str:
     """degrade 사유를 사람이 읽을 짧은 코드로. ClientError 는 AWS 오류 코드
@@ -151,13 +157,54 @@ def _paginate(client, operation_name: str, key: str) -> list:
 def _runtime_config() -> dict:
     """수집 1회에 필요한 설정. 리전은 클라이언트 팩토리가 해석한 목록을 그대로 쓴다."""
     settings = get_collector_settings()
+    scope = settings.collect_vpc_ids()
+    region_list = regions()
     return {
-        "regions": regions(),
+        "regions": region_list,
         "lookback_days": settings.METRIC_LOOKBACK_DAYS,
         "period_seconds": settings.METRIC_PERIOD_SECONDS,
         # None 이면 범위 제한 없음(리전 전체). 아래 _apply_vpc_scope 참고.
-        "vpc_scope": settings.collect_vpc_ids(),
+        "vpc_scope": scope,
+        # None 이 아니면 범위 VPC 를 확인하지 못한 사유 코드 — 회차 소멸 표시를 막는다.
+        "vpc_scope_error": _check_vpc_scope(scope, region_list),
     }
+
+
+def _check_vpc_scope(scope: frozenset[str] | None, region_list: list[str]) -> str | None:
+    """범위 VPC 가 설정 리전 중 어딘가에 실재하는지 회차마다 확인한다. 이상 없으면 None.
+
+    VPC 는 리전 하나에만 있으므로 리전별 부재는 정상이고, **전 리전을 합쳐** 빠진 ID 가
+    하나라도 있을 때만 문제다 — 둘 중 하나만 오타여도 그 VPC 자산은 전량 소멸 표시된다.
+    형식 검사(config._check_vpc_ids)를 통과한 오타는 여기서만 잡힌다. 필터 형식(vpc-id)으로
+    묻는 이유: VpcIds= 로 물으면 없는 ID 하나에 InvalidVpcID.NotFound 가 나 나머지 ID 의
+    확인 결과까지 잃는다. 확인 조회 자체가 실패해도(AccessDenied 등) 같은 쪽으로 넘어진다.
+
+    기동 시점이 아니라 회차마다 확인하는 이유: 기동 뒤에 VPC 가 지워지는 경우도 덮으려는 것이다.
+    """
+    if scope is None:
+        return None
+    found: set[str] = set()
+    try:
+        for region in region_list:
+            # 변수에 대입해 부른다 — tests/test_provision_smoke_aws.py 의 정책 대조가 이 형태만 잡는다.
+            ec2 = aws_client("ec2", region)
+            vpcs = ec2.describe_vpcs(Filters=[{"Name": "vpc-id", "Values": sorted(scope)}])["Vpcs"]
+            found.update(v["VpcId"] for v in vpcs)
+    except (ClientError, BotoCoreError) as exc:
+        reason = _failure_reason(exc)
+        _log.warning(
+            "수집 범위 VPC 확인 실패(%s) — 이번 회차 소멸 표시·자산 수 스냅샷을 건너뛴다: %s", reason, exc
+        )
+        return reason
+    missing = scope - found
+    if missing:
+        _log.warning(
+            "수집 범위 VPC %s 가 설정 리전 %s 어디에도 없음(오타 의심) — "
+            "이번 회차 소멸 표시·자산 수 스냅샷을 건너뛴다",
+            sorted(missing), region_list,
+        )
+        return "VpcScopeNotFound"
+    return None
 
 
 # ARN 조립은 schemas.arns.build_arn 하나로 모은다(#342) — 여기 있던 _arn 헬퍼는 그 함수로
@@ -397,8 +444,17 @@ def _apply_vpc_scope(
     — list_assets 가 소멸분을 빼므로 화면·판정에서 함께 빠지는 것이 의도한 결과다. 범위를
     넓히면 다음 회차 upsert_asset 이 표시를 지운다.
 
+    근거가 없을 때의 방향은 **유지**가 원칙이다 — 잘못 빼면 소멸 표시·판정 이탈로 관제
+    공백이 생기고(안 보임), 잘못 남기면 오탐이 생긴다(보임). 관제 도구에선 보이는 쪽이
+    안전하다. SG·NACL·ALB TG 만 예외로 VpcId 가 없으면 범위 밖인데, 이 셋은 응답에
+    VpcId 가 항상 있어 그 분기가 실제로 닿지 않는다(lambda 대상 TG 는 _is_alb_target_group
+    이 따로 거른다). EC2 는 종료 인스턴스에서 VpcId 가 빠지므로 원칙대로 유지한다.
+
     유형별 기준:
-      - EC2·SG·NACL·ALB TG : 응답의 VpcId 가 범위 안일 때만. VpcId 가 없으면 범위 밖.
+      - EC2 : 응답의 VpcId 가 범위 안일 때만. VpcId 가 없으면(종료된 인스턴스 — AWS 가
+        응답에서 VpcId·SubnetId 를 뺀다) 근거 없음이라 유지한다. 플랫폼은 Fargate·RDS 라
+        계정에 EC2 를 만들지 않으므로 유지해도 플랫폼 자산이 새지 않는다(PR #440 리뷰).
+      - SG·NACL·ALB TG : 응답의 VpcId 가 범위 안일 때만. VpcId 가 없으면 범위 밖.
       - EBS : VPC 소속이 없다. 붙은 볼륨은 **붙은 인스턴스가 하나라도 범위 밖이 아니면**
         유지(범위 밖 인스턴스에만 붙은 볼륨만 제외), 미연결 볼륨은 그대로 수집한다.
         플랫폼은 Fargate·RDS 라 계정에 보이는 EBS 를 만들지 않으므로 미연결 볼륨이
@@ -418,8 +474,12 @@ def _apply_vpc_scope(
     def in_scope(item: dict) -> bool:
         return item.get("VpcId") in scope
 
-    instances = [i for i in raw.instances if in_scope(i)]
-    out_instance_ids = {i["InstanceId"] for i in raw.instances if not in_scope(i)}
+    def instance_in_scope(i: dict) -> bool:
+        # 종료된 인스턴스는 응답에서 VpcId 가 빠진다 — 근거 없음이라 유지(플랫폼은 EC2 를 만들지 않는다).
+        return "VpcId" not in i or in_scope(i)
+
+    instances = [i for i in raw.instances if instance_in_scope(i)]
+    out_instance_ids = {i["InstanceId"] for i in raw.instances if not instance_in_scope(i)}
     in_instance_ids = {i["InstanceId"] for i in instances}
 
     def volume_in_scope(v: dict) -> bool:
@@ -466,7 +526,9 @@ def _apply_vpc_scope(
         tgs=[tg for tg in raw.tgs if in_scope(tg)],
     )
     # 리전마다 VPC 가 다르므로 이 리전에 범위 VPC 가 하나도 없는 것은 복수 리전에서 정상이다.
-    # 다만 오타와 구분이 안 되므로 경고 대신 건수를 남겨 둔다(VPC 마다 기본 SG 가 있다).
+    # 오타(전 리전 어디에도 없음)는 회차 시작 전 _check_vpc_scope 가 warning 으로 따로 잡는다.
+    # SG 조회는 흡수되지 않아(실패 시 리전 FAILED) 여기 도달한 raw.sgs 는 전량 관측이다 —
+    # VPC 마다 기본 SG 가 있으므로 SG 의 VpcId 로 이 리전의 VPC 존재를 볼 수 있다.
     if not {sg.get("VpcId") for sg in raw.sgs} & scope:
         _log.info("리전 %s: 수집 범위 VPC %s 가 이 리전에 없음 — 범위 안 자산 0건", region, sorted(scope))
     return scoped
@@ -504,6 +566,9 @@ def collect_region(
     # Launch Template 은 ec2(Community 지원). ASG 는 autoscaling(Pro 전용)이라 로컬에선
     # _safe_describe 가 빈 목록으로 degrade 하고 failures 에 (서비스→사유)를 남긴다(ADR-0006 §4, C4).
     failures: dict[str, str] = {}
+    # 범위 VPC 확인 실패는 회차 전체의 소멸 판단을 막는 라벨로 싣는다(persist_inventory 가 본다).
+    if cfg.get("vpc_scope_error"):
+        failures[VPC_SCOPE_FAILURE_LABEL] = cfg["vpc_scope_error"]
     lts_raw = _safe_describe(
         lambda: _paginate(ec2, "describe_launch_templates", "LaunchTemplates"),
         "launch_templates", failures,
@@ -1010,8 +1075,20 @@ def persist_inventory(
     # 라벨을 늘린 쪽이 지도를 고치게 하려고 조용히 넘기지 않고 경고로 남긴다.
     absent_marked: list[str] = []
     if prune_absent and started_own_run:
-        unknown = set(inv.collector_failures) - UNOBSERVED_TYPES_BY_FAILURE.keys()
-        if unknown:
+        unknown = (
+            set(inv.collector_failures)
+            - UNOBSERVED_TYPES_BY_FAILURE.keys()
+            - {VPC_SCOPE_FAILURE_LABEL}
+        )
+        if VPC_SCOPE_FAILURE_LABEL in inv.collector_failures:
+            # 범위 필터가 오타로 전량을 거른 회차는 "관측했는데 없음"과 구별되지 않는다.
+            # 잘못 지우기보다 안 지우는 쪽으로 넘어진다(#332 와 같은 방향, PR #440 리뷰: 김승철).
+            _log.warning(
+                "리전 %s: 수집 범위 VPC 확인 실패(%s) — 자산 수 스냅샷·소멸 표시를 건너뛴다",
+                inv.region,
+                inv.collector_failures[VPC_SCOPE_FAILURE_LABEL],
+            )
+        elif unknown:
             _log.warning(
                 "리전 %s: 모르는 수집 실패 라벨 %s — 자산 수 스냅샷·소멸 표시를 건너뛴다",
                 inv.region,
@@ -1024,7 +1101,8 @@ def persist_inventory(
                 for t in UNOBSERVED_TYPES_BY_FAILURE[label]
             }
             # 유형별 자산 수 스냅샷(축 5) — 못 본 유형(blind)을 0으로 남기면 추이가 자산이
-            # 사라진 것처럼 떨어지므로 관측한 유형만 남긴다. 관측했지만 없는 유형은 0건이다.
+            # 사라진 것처럼 떨어지므로 관측한 유형만 남긴다. 관측했지만 없는 유형은 0건이다
+            # (COLLECT_VPC_IDS 가 켜졌으면 범위 안에 없는 것도 0건이다).
             by_type = {
                 AssetType.EC2: ec2_count,
                 AssetType.SG: sg_count,

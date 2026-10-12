@@ -10,6 +10,9 @@
 #      미연결 EBS 는 남는다. ASG 는 서브넷 → VPC, LT 는 범위 밖 ASG 전용일 때만 빠진다.
 #   3. 걸러진 자산은 메트릭·target health 조회 대상에서도 빠진다(호출 비용).
 #   4. (DB) 전에 적재된 범위 밖 자산은 소멸 표시되고, 자산 수 스냅샷·관계는 걸러진 결과 기준이다.
+#   5. 범위 VPC 가 설정 리전 어디에도 없으면(형식만 맞는 오타) 그 회차는 소멸 표시·자산 수
+#      스냅샷을 건너뛰고 PARTIAL + vpc_scope 라벨로 남는다(PR #440 리뷰).
+#   6. VpcId 가 빠진 EC2(종료 인스턴스)는 근거 없음이라 유지한다.
 #
 # AWS 는 스텁 클라이언트로 대신한다 — LocalStack 은 autoscaling·elbv2 가 없어(ADR-0006 §4)
 # ASG·TG 경로를 재현할 수 없다.
@@ -78,7 +81,8 @@ def _asg(name, subnets="", lt=None, members=()):
         "VPCZoneIdentifier": subnets,
     }
     if lt:
-        g["LaunchTemplate"] = {"LaunchTemplateId": lt, "LaunchTemplateName": lt}
+        # 이름을 ID 와 다르게 둔다 — 같으면 _asg_launch_template 의 [0]/[1] 뒤바뀜이 통과한다(PR #440 리뷰).
+        g["LaunchTemplate"] = {"LaunchTemplateId": lt, "LaunchTemplateName": f"name-{lt}"}
     return g
 
 
@@ -102,7 +106,7 @@ NACLS = [
 ]
 VOLUMES = [_volume("vol-app", "i-app"), _volume("vol-plat", "i-plat"), _volume("vol-free")]
 LTS = [
-    {"LaunchTemplateId": lt, "LaunchTemplateName": lt, "LatestVersionNumber": 1, "DefaultVersionNumber": 1}
+    {"LaunchTemplateId": lt, "LaunchTemplateName": f"name-{lt}", "LatestVersionNumber": 1, "DefaultVersionNumber": 1}
     for lt in ("lt-app", "lt-plat", "lt-orphan")
 ]
 ASGS = [
@@ -149,6 +153,10 @@ class _FakeAws:
 
     def describe_network_acls(self, **_kw):
         return {"NetworkAcls": NACLS}
+
+    def describe_vpcs(self, Filters=(), **_kw):
+        wanted = set(Filters[0]["Values"]) if Filters else None
+        return {"Vpcs": [{"VpcId": v} for v in (APP_VPC, PLAT_VPC) if wanted is None or v in wanted]}
 
     def get_metric_data(self, MetricDataQueries, **_kw):
         for q in MetricDataQueries:
@@ -251,11 +259,47 @@ def test_asg_falls_back_to_member_instances():
 
 
 def test_scope_absent_from_region_yields_empty(aws):
-    # 복수 리전에서 다른 리전의 VPC 만 적힌 경우 — 이 리전의 범위 안 자산은 0건이다.
+    # 리전별 부재는 정상이다(복수 리전에서 다른 리전에 있음) — 이 리전의 범위 안 자산은 0건이다.
+    # cfg 를 직접 넘겨 사전 확인(_check_vpc_scope)을 타지 않는다. 오타 판정은 아래 별도 테스트.
     inv = C.collect_region(REGION, cfg={**CFG, "vpc_scope": frozenset({"vpc-elsewhere"})})
     ids = _ids(inv)
     assert ids["ec2"] == ids["sg"] == ids["nacl"] == ids["tg"] == set()
     assert ids["ebs"] == {"vol-free"}
+    assert C.VPC_SCOPE_FAILURE_LABEL not in inv.collector_failures
+
+
+def test_scope_keeps_instance_without_vpc_id():
+    # 종료된 인스턴스는 AWS 응답에서 VpcId·SubnetId 가 빠진다. 범위 밖으로 거르면 범위 안 VPC 에서
+    # 종료된 인스턴스가 그 회차에 바로 소멸 표시되어, 설정 유무에 따라 동작이 갈린다 — 유지한다.
+    terminated = {k: v for k, v in _instance("i-term", APP_VPC, "subnet-app", "sg-app").items()
+                  if k not in ("VpcId", "SubnetId")}
+    terminated["State"] = {"Name": "terminated"}
+    vol = _volume("vol-term", "i-term")
+    raw = C._RawInventory([*INSTANCES, terminated], SGS, NACLS, [*VOLUMES, vol], [], [], [])
+    scoped = C._apply_vpc_scope(raw, frozenset({APP_VPC}))
+    assert {i["InstanceId"] for i in scoped.instances} == {"i-app", "i-term"}
+    assert "vol-term" in {v["VolumeId"] for v in scoped.volumes}
+
+
+def test_check_vpc_scope(aws):
+    assert C._check_vpc_scope(None, [REGION]) is None
+    assert C._check_vpc_scope(frozenset({APP_VPC}), [REGION]) is None
+    # 하나라도 없으면 문제 — 둘 중 하나만 오타여도 그 VPC 자산이 전량 소멸 표시되기 때문이다
+    assert C._check_vpc_scope(frozenset({APP_VPC, "vpc-typo"}), [REGION]) == "VpcScopeNotFound"
+    # 리전별 부재는 정상 — 전 리전을 합쳐 본다
+    assert C._check_vpc_scope(frozenset({APP_VPC}), [REGION, "us-east-1"]) is None
+
+
+def test_check_vpc_scope_lookup_failure_fails_closed(monkeypatch):
+    # 확인 조회 자체가 실패(AccessDenied 등)해도 "확인 못 함"으로 넘어져 소멸 표시를 막는다.
+    from botocore.exceptions import ClientError
+
+    class _Denied:
+        def describe_vpcs(self, **_kw):
+            raise ClientError({"Error": {"Code": "AccessDenied", "Message": "no"}}, "DescribeVpcs")
+
+    monkeypatch.setattr(C, "aws_client", lambda _svc, _region: _Denied())
+    assert C._check_vpc_scope(frozenset({APP_VPC}), [REGION]) == "AccessDenied"
 
 
 # --- 3) 적재 — 소멸 표시·자산 수·관계 (DB) ---------------------------------------
@@ -313,4 +357,33 @@ def test_scope_marks_out_of_scope_rows_absent_and_counts_filtered(aws, db):
     C.persist_inventory(again, db, prune_absent=True)
     db.flush()
     assert all(a.absent_since is None for a in db.execute(select(models.Asset)).scalars())
+
+
+def test_scope_typo_skips_absence_marking_and_counts(aws, db):
+    """형식은 맞고 존재하지 않는 VPC 가 적힌 회차 — 소멸 표시·자산 수 스냅샷을 건너뛰고
+    PARTIAL + vpc_scope 라벨로 남는다. 누가 "경고 후 진행"으로 바꾸면 전 인벤토리가 소멸 표시돼
+    여기서 걸린다(PR #440 리뷰: 김승철)."""
+    from db import models
+    from schemas.collections import CollectionRunStatus
+
+    before = C.collect_region(REGION, cfg=CFG)
+    C.persist_inventory(before, db, prune_absent=True)
+
+    scope = frozenset({"vpc-0123456789abcdef1"})
+    cfg = {**CFG, "vpc_scope": scope, "vpc_scope_error": C._check_vpc_scope(scope, [REGION])}
+    after = C.collect_region(REGION, cfg=cfg)
+    after = after.model_copy(update={"collected_at": before.collected_at + timedelta(minutes=5)})
+    summary = C.persist_inventory(after, db, prune_absent=True)
+    db.flush()
+
+    assert summary["collector_failures"] == {C.VPC_SCOPE_FAILURE_LABEL: "VpcScopeNotFound"}
+    assert summary["absent_marked"] == 0
+    assert all(a.absent_since is None for a in db.execute(select(models.Asset)).scalars())
+    run = db.get(models.CollectionRun, summary["collection_run_id"])
+    assert run.status == CollectionRunStatus.PARTIAL
+    assert not db.execute(
+        select(models.AssetInventoryCount).where(
+            models.AssetInventoryCount.collection_run_id == summary["collection_run_id"]
+        )
+    ).scalars().all()
 

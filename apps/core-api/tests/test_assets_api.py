@@ -455,6 +455,16 @@ def test_uncollected_skips_region_wide_failure():
     assert _uncollected([_RunStub('{"collect_region":"EndpointConnectionError"}')]) == []
 
 
+def test_uncollected_skips_vpc_scope_failure_without_unknown_warning(caplog):
+    """수집 범위 확인 실패(vpc_scope)도 유형으로 펴지 않는다 — 특정 유형이 아니라 회차의
+    소멸 판단을 막은 것이고 status 가 PARTIAL 로 이미 알린다. 모르는 라벨 경고도 내지 않는다."""
+    from routers.assets import _uncollected
+
+    with caplog.at_level(logging.WARNING):
+        assert _uncollected([_RunStub('{"vpc_scope":"VpcScopeNotFound"}')]) == []
+    assert "vpc_scope" not in caplog.text
+
+
 def test_uncollected_ignores_unknown_label_instead_of_guessing(caplog):
     """모르는 라벨이면 유형을 지어내지 않는다(fail-closed). 흡수 조회를 새로 더하고
     UNOBSERVED_TYPES_BY_FAILURE 를 안 고친 경우이며, 경고로 드러낸다."""
@@ -507,3 +517,24 @@ def test_partial_run_surfaces_uncollected_in_response(client_pg, db, set_regions
     assert body["uncollected"] == [
         {"asset_type": "ALB_TARGET_GROUP", "reason_code": "InternalFailure"}
     ]
+
+
+def test_vpc_scope_failure_run_is_partial_with_empty_uncollected(client_pg, db, set_regions):
+    """엔드투엔드: 수집 범위 확인 실패 회차는 PARTIAL 로 나가고 uncollected 는 비어 있다."""
+    set_regions(SEOUL)
+    run = assets_repo.start_collection_run(
+        db, account_id=ACCOUNT, region=SEOUL, mode="localstack", lookback_days=3, period_seconds=3600
+    )
+    assets_repo.finish_collection_run(
+        db,
+        collection_run_id=run.collection_run_id,
+        status=CollectionRunStatus.PARTIAL,
+        finished_at=NOW,
+        error_summary='{"vpc_scope":"VpcScopeNotFound"}',
+    )
+    db.commit()
+
+    body = client_pg.get("/api/v1/assets").json()
+
+    assert body["collection_status"] == "PARTIAL"
+    assert body["uncollected"] == []
