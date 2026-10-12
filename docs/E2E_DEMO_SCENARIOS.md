@@ -508,6 +508,16 @@ T3은 격리된 **중간 상태**를 읽어 판정하는 경로다(T3-6에서 �
 
 → **수집(`SCAN_ENABLED`)은 끄지 않는다.** 수집은 describe만 하는 읽기 전용이라 AWS 상태를 바꾸지 않는다. 다른 앱의 회차가 늘어나는 것은 그 앱의 DB 문제이고, T3·T4가 읽는 중간 상태를 바꾸지 않는다.
 
+**③ T4 를 다시 돌리기 전에 ASG·Launch Template 을 지운다 — 짝 롤백 런북이 없다.**
+
+T4-3(실행)이 만든 것을 T4-4(정리)가 **손으로** 지운다. `EC2_ENABLE_AUTOSCALING` 에는 짝 롤백 런북이 없다(§T4 4번 행 — "등록 롤백이 없다").
+
+정리하지 않으면 다음 T4 가 **가드레일 ④에서 멈춘다.** `_precheck_enable_autoscaling` 의 통과 조건 ③이 **동명 ASG 부재**이고, 코드 주석이 그 기준을 "같은 이름이 이미 있는가만 본다"로 적는다. 즉 T3 의 TG 와 같은 구조다 — **정리를 빠뜨리면 그 뒤 T4 가 전부 막힌다.**
+
+Launch Template 도 함께 본다. 이름은 `executor._launch_template_name` 이 정하고(`vigilantis-lt-` 접두), `provision_smoke_aws.py` 는 **태그가 없고 VPC 자원도 아니라 이름으로만 가린다**고 적어 둔다. 남으면 다음 회차 수집에 `LAUNCH_TEMPLATE` 자산으로 잡히고, `AWS_SMOKE_RESULT.md` §2-2 가 "Launch Template 0 이 정상 — 있으면 출처(이름·생성 시각)를 §7 에 적는다"로 둔 칸이 그것을 받는다.
+
+→ 지울 것 둘과 확인: ASG(이름) · Launch Template(`vigilantis-lt-` 접두). 지운 뒤 `provision_smoke_aws.py status` 의 잔여가 `up` 직후와 같은지 본다. ASG 가 띄운 인스턴스는 비용 추산 밖이라(ADR-0009 §3) 검증 직후 정리가 전제다.
+
 > 환경 운영 쪽 절차(언제 `.env`를 실 AWS로 전환하고 누가 되돌리는지)는 ADR-0009 1차 개정이 다룬다 — **PR #436, 리뷰 중**이다. 머지되면 그 절과 이 칸이 같은 사실을 가리킨다. 이 칸의 근거는 ADR이 아니라 위에 적은 코드이므로 ADR이 개정돼도 흔들리지 않는다.
 
 ### 로컬 실행 가능성 ❌
