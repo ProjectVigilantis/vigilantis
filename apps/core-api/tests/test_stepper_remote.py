@@ -202,15 +202,20 @@ def test_websocket_drop_that_overruns_its_deadline_does_not_fail_collect(monkeyp
         loop.close()
 
 
-def test_dispatch_and_analyze_pass_the_app_publisher_and_report_errors(stepper_client, monkeypatch):
+@pytest.mark.parametrize("failed_lane", ["main", "autoscaling"])
+def test_dispatch_and_analyze_pass_the_app_publisher_and_report_errors(
+    stepper_client, monkeypatch, failed_lane
+):
     import agent_dispatcher
     import dispatcher
 
     calls = []
 
-    def fake_dispatch(sessions, publish):
-        calls.append(("dispatch", publish))
-        return dispatcher.DispatchReport(scanned=2, closed=1, errored=1)
+    def fake_dispatch(sessions, publish, *, lane):
+        calls.append(("dispatch", lane, publish))
+        return dispatcher.DispatchReport(
+            lane=lane, scanned=2, closed=1, errored=int(lane == failed_lane)
+        )
 
     def fake_analyze(sessions, publish):
         calls.append(("analyze", publish))
@@ -221,10 +226,19 @@ def test_dispatch_and_analyze_pass_the_app_publisher_and_report_errors(stepper_c
 
     dispatched = _press(stepper_client, "dispatch")
     analyzed = _press(stepper_client, "analyze")
-    assert dispatched["ok"] is False and dispatched["report"]["closed"] == 1
+    assert dispatched["ok"] is False and dispatched["report"]["closed"] == 2
+    assert dispatched["report"]["scanned"] == 4
+    assert dispatched["report"]["errored"] == 1
+    assert [report["lane"] for report in dispatched["lane_reports"]] == [
+        dispatcher.LANE_MAIN, dispatcher.LANE_AUTOSCALING
+    ]
     assert analyzed["ok"] is False and analyzed["report"]["failed"] == 1
     publish = stepper_client.app.state.realtime.publish
-    assert calls == [("dispatch", publish), ("analyze", publish)]
+    assert calls == [
+        ("dispatch", dispatcher.LANE_MAIN, publish),
+        ("dispatch", dispatcher.LANE_AUTOSCALING, publish),
+        ("analyze", publish),
+    ]
 
 
 # ------------------------------------------------------------------------------

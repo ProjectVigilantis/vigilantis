@@ -81,6 +81,14 @@ class Settings(BaseSettings):
     # 그만큼 다음 스캔을 미루므로(max_instances=1) 시연에서 조일 수 있어야 한다.
     STATUS_CHECK_WAIT_DELAY_SECONDS: int = Field(default=15, gt=0)
     STATUS_CHECK_WAIT_MAX_ATTEMPTS: int = Field(default=12, ge=1)
+    # EC2_ENABLE_AUTOSCALING 대기 (Issue #446) — **조회 횟수의 상한**이다. 벽시계 상한이 아니다
+    # (조회 호출 시간·SDK 재시도가 그 위에 얹힌다). 둘 다 dispatcher 한 주기를 붙잡는다.
+    #   IMAGE: 실행 단계 1이 AMI available을 기다린다 — 기본 15초 간격 40회 조회.
+    #   READY: 판정이 ASG 인스턴스 InService·2/2를 기다린다 — 기본 15초 간격 20회 조회.
+    AUTOSCALING_IMAGE_WAIT_DELAY_SECONDS: int = Field(default=15, gt=0)
+    AUTOSCALING_IMAGE_WAIT_MAX_ATTEMPTS: int = Field(default=40, ge=1)
+    AUTOSCALING_READY_WAIT_DELAY_SECONDS: int = Field(default=15, gt=0)
+    AUTOSCALING_READY_WAIT_MAX_ATTEMPTS: int = Field(default=20, ge=1)
     # 판정 불가 재시도 — AWS에 물어보지 못해 실행 결과를 확정하지 못했을 때 (Issue #249).
     # MAX_ATTEMPTS는 받아 주는 실패 횟수(첫 실패 포함)이고, 소진하면 자동 원복하지 않고
     # 결과 확인 불가(UNVERIFIED)로 확정해 관제자에게 넘긴다. INTERVAL은 마지막 실패로부터
