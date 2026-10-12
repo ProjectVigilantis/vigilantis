@@ -186,10 +186,12 @@ def test_dangling_lines_keeps_a_same_account_line_unmarked():
 
 @pytest.mark.parametrize(
     "normal_kind",
-    # **실재하는 종류 이름을 쓴다.** 지어낸 이름이면 `not in INVESTIGATE_KINDS` 가 늘 참이라
-    # 이 테스트가 아무것도 지키지 않는다(PR #431 리뷰 nit 2). 아래 셋은 매달린 것이 정상인
-    # 자리다 — 위협 접수의 미등록 대상 관측 · 가드레일 ③ 이 거절한 후보 · 그 회차가 대상
-    # 유형을 못 본 관계(`db/repositories/assets.py`).
+    # **실재하는 종류 이름을 쓴다.** 지어낸 이름이면 첫 단언(`not in INVESTIGATE_KINDS`)이 늘
+    # 참이라, 누가 정상 보존 종류를 조사 대상 목록에 잘못 넣어도 이 테스트가 잡지 못한다
+    # (PR #431 리뷰 nit 2). 뒤쪽 단언(`"i-2" not in joined`)은 지어낸 이름으로도 호출부 필터를
+    # 지켰다 — 무력했던 것은 **분류**를 보는 첫 단언 하나다(PR #442 리뷰 실측).
+    # 아래 셋은 매달린 것이 정상인 자리다 — 위협 접수의 미등록 대상 관측 · 가드레일 ③ 이
+    # 거절한 후보 · 그 회차가 대상 유형을 못 본 관계(`db/repositories/assets.py`).
     [KIND_UNMANAGED_OBSERVATION, KIND_GUARDRAIL_REJECTED, KIND_UNOBSERVED_RELATION],
 )
 def test_dangling_lines_excludes_kinds_that_are_normal_to_dangle(normal_kind):
