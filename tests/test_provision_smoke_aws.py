@@ -670,7 +670,7 @@ def test_budget_measures_usage_before_credits():
     smoke._ensure_budget(budgets, ACCOUNT, "pm@example.com")
     assert budgets.created == 1
     assert budgets.budget["CostTypes"]["IncludeCredit"] is False
-    assert float(budgets.budget["BudgetLimit"]["Amount"]) == 100
+    assert float(budgets.budget["BudgetLimit"]["Amount"]) == float(smoke.BUDGET_USD)
 
 
 def test_existing_budget_from_before_the_amendment_is_brought_up_to_date():
@@ -685,7 +685,7 @@ def test_existing_budget_from_before_the_amendment_is_brought_up_to_date():
     smoke._ensure_budget(budgets, ACCOUNT, "pm@example.com")
     assert budgets.updated == 1
     assert budgets.budget["CostTypes"]["IncludeCredit"] is False
-    assert float(budgets.budget["BudgetLimit"]["Amount"]) == 100
+    assert float(budgets.budget["BudgetLimit"]["Amount"]) == float(smoke.BUDGET_USD)
 
     smoke._ensure_budget(budgets, ACCOUNT, "pm@example.com")
     assert budgets.updated == 1, "정의가 같으면 다시 갱신하지 않는다"

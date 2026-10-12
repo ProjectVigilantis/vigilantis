@@ -29,7 +29,7 @@
 
 | # | 확인할 것 | 근거 칸 | 충족 | 비고 |
 | --- | --- | --- | --- | --- |
-| A1 | 환경 기동 · TG 대상 `healthy` · Budget $50 알림 | §1 | ☐ | |
+| A1 | 환경 기동 · TG 대상 `healthy` · Budget 알림(월 $300 · 크레딧 제외) | §1 | ☐ | |
 | A2 | 앱 키 전환 · Arn `user/vigilantis-smoke-app` · `AWS_REGIONS` 빈 값 | §1 | ☐ | |
 | A3 | 앱 키 스캔 — 회차 상태와 `collector_failures` 사유 코드 | §2-1 · §2-2 | ☐ | `PARTIAL`이면 `AccessDenied` 여부가 갈림 |
 | A4 | 가드레일 ④ `DryRun=True` 런북별 1회 | §3 | ☐ | |
