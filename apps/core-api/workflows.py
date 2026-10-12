@@ -53,7 +53,9 @@ from schemas.api.actions import (
     ExecuteActionResponse,
     ExecutionStatus,
 )
+from schemas.api.assets import AssetType, RelationType
 from schemas.api.errors import ErrorCode
+from schemas.asset_roles import ROLE_ISOLATION, ROLE_TAG_KEY
 from schemas.api.incidents import IncidentStatus, ResolutionJudgement, IncidentCategory, ResponseMode
 from schemas.incidents import AgentWaitSchedule
 from schemas.backups import InstanceSpecBackup, NaclRuleIndexBackup
@@ -82,6 +84,7 @@ from schemas.precheck import (
     build_verification_summary,
 )
 from schemas.runbook_parameters import (
+    Ec2IsolateParameters,
     NaclAddDenyParameters,
     NaclRestoreParameters,
     build_precheck_parameters,
@@ -651,6 +654,70 @@ def store_sg_full_rules_backup(db: Session, execution_id: str) -> BackupOutcome:
     return BackupOutcome(record=record, created=True)
 
 
+def store_sg_and_tg_mapping_backup(
+    db: Session, execution_id: str, params: Ec2IsolateParameters
+) -> BackupOutcome:
+    """EC2_ISOLATE 격리 직전 SG/TG 매핑 백업 — 캡처 → 저장 → 실행 결속 → commit.
+
+    **AWS 변경 호출 이전에 commit까지 끝나야 한다.** 격리는 ENI의 SG를 덮어쓰고 TG에서
+    대상을 빼므로, 그 뒤에는 원래 SG도 등록 포트도 AWS에 다시 물을 수 없다 —
+    `RUNBOOK_EC2_UNISOLATE`는 원복 값을 백업 레코드에서만 로드한다(ADR-0004 롤백 공통 정책
+    ③). store_instance_spec_backup과 같은 이유로 호출부 트랜잭션에 얹히지 않고 스스로 커밋한다.
+
+    **파라미터를 인자로 받는다** — 등록을 확인할 TG가 `target_group_arn`이고, 그 값이
+    가드레일 ④가 본 값과 같아야 하기 때문이다(store_nacl_rule_index_backup과 같은 이유).
+
+    같은 실행에 두 번 불러도 백업은 하나다(ADR-0008 §1 ③). 두 번째 캡처는 이미 격리 SG가
+    붙은 뒤의 값을 "조치 직전"으로 기록해, 해제가 격리 SG로 "복원"하게 된다.
+    """
+    execution = executions_repo.lock_execution(db, execution_id)
+    if execution is None:
+        return _backup_failed(
+            PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND, "실행 레코드를 찾을 수 없습니다"
+        )
+    if execution.runbook_id is not RunbookId.RUNBOOK_EC2_ISOLATE:
+        # 배선 오류다 — SG/TG 매핑 백업을 쓰는 런북은 EC2_ISOLATE 하나뿐이다
+        # (schemas.backups.BackupType)
+        raise ValueError(
+            f"SG/TG 매핑 백업 대상 런북이 아닙니다: {execution.runbook_id.value}"
+        )
+    if execution.backup_record_id is not None:
+        return BackupOutcome(
+            record=executions_repo.get_backup_record(db, execution.backup_record_id)
+        )
+
+    target = parse_arn(execution.target_arn)
+    if target is None or target.resource_type != "instance":
+        return _backup_failed(
+            PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+            f"인스턴스 ARN이 아닙니다: {execution.target_arn}",
+        )
+
+    capture = backup.capture_sg_and_tg_mapping(
+        target.resource_id, target.region, target_group_arn=params.target_group_arn
+    )
+    if not capture.captured:
+        return _backup_failed(capture.reason_code, capture.detail or "")
+
+    record = executions_repo.create_backup_record(
+        db,
+        execution_id=execution.execution_id,
+        target_arn=execution.target_arn,
+        backup_type=capture.backup_type,
+        payload=capture.payload,
+    )
+    if not executions_repo.bind_backup_record(
+        db, execution.execution_id, record.backup_record_id
+    ):
+        db.rollback()
+        return _backup_failed(
+            PrecheckReasonCode.PRECHECK_INVALID_STATE, "백업 레코드 결속 실패"
+        )
+
+    db.commit()
+    return BackupOutcome(record=record, created=True)
+
+
 # --- 실행 (Issue #211) ---------------------------------------------------------
 
 
@@ -841,7 +908,14 @@ def _nacl_restore_params(
 
 
 def _nacl_execution_params(db: Session, execution: models.ActionExecution, model):
-    """NACL 2종의 실행 파라미터. 계약 모델을 거쳐서만 돌려준다.
+    """NACL 2종의 실행 파라미터. 계약 모델을 거쳐서만 돌려준다."""
+    return _execution_params(db, execution, model, resource_type="network-acl")
+
+
+def _execution_params(
+    db: Session, execution: models.ActionExecution, model, *, resource_type: str
+):
+    """실행 파라미터. 계약 모델을 거쳐서만 돌려준다(NACL 2종·EC2_ISOLATE).
 
     Guardrail PASS의 불변 실행 명령(validated_command)이 채워지면 그것이 원천이다.
     아직 배선되지 않은 동안에는 후보의 typed 파라미터를 **④가 쓴 것과 같은 변환**
@@ -849,7 +923,7 @@ def _nacl_execution_params(db: Session, execution: models.ActionExecution, model
     규칙과 실행하는 규칙이 달라진다. _rightsizing_target_type과 같은 자리다.
     """
     target = parse_arn(execution.target_arn)
-    if target is None or target.resource_type != "network-acl":
+    if target is None or target.resource_type != resource_type:
         return None
 
     stored = (execution.validated_command or {}).get("parameters")
@@ -874,11 +948,28 @@ def _nacl_execution_params(db: Session, execution: models.ActionExecution, model
         return None
     try:
         data = mappers.to_candidate_data(candidate)
+        # 조회로 채우는 값은 ④ 경로(_candidate_precheck)와 **같은 함수**로 얻는다 — 판정한
+        # 값과 실행하는 값이 갈리지 않게 한다. EC2_ISOLATE 하나가 해당한다.
+        lookups: dict = {}
+        if data.runbook_id is RunbookId.RUNBOOK_EC2_ISOLATE:
+            isolation = resolve_isolation_parameters(db, execution.target_arn)
+            if not isolation.resolved:
+                logger.warning(
+                    "isolation_parameters_unresolved",
+                    extra={
+                        "execution_id": execution.execution_id,
+                        "reason_code": isolation.reason_code.value,
+                        "detail": isolation.detail,
+                    },
+                )
+                return None
+            lookups = isolation.as_lookups()
         built = build_precheck_parameters(
             data.runbook_id,
             data.parameters,
             resource_id=target.resource_id,
             evidence_ids=data.evidence_ids,
+            **lookups,
         )
     except (ValidationError, ValueError):
         logger.warning(
@@ -1183,6 +1274,222 @@ def run_sg_delete_isolated_execution(
 
     outcome = executor.execute_sg_delete_isolated(
         execution.target_arn,
+        record_step=_step_recorder(db, execution_id),
+    )
+    if not outcome.succeeded:
+        return _run_failed(outcome.reason_code, outcome.error_summary, outcome.steps)
+    return ExecutionRunOutcome(succeeded=True, steps=outcome.steps)
+
+
+@dataclass(frozen=True)
+class IsolationParameters:
+    """resolve_isolation_parameters의 결과 — 두 값이 모두 있거나, 거절 사유가 있다."""
+
+    target_group_arn: Optional[str] = None
+    isolation_group_id: Optional[str] = None
+    reason_code: Optional[PrecheckReasonCode] = None
+    detail: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        values = (self.target_group_arn, self.isolation_group_id)
+        if self.reason_code is None:
+            if not all(values) or self.detail is not None:
+                raise ValueError("성공 결과에는 두 값이 모두 있고 사유가 없어야 합니다")
+        elif any(values) or not self.detail:
+            raise ValueError("거절 결과에는 값 없이 사유 코드와 사유만 둡니다")
+
+    @property
+    def resolved(self) -> bool:
+        return self.reason_code is None
+
+    def as_lookups(self) -> dict[str, str]:
+        """build_precheck_parameters의 조회 키워드로 — RIGHTSIZING의 current_instance_type 자리."""
+        if not self.resolved:
+            raise ValueError("정해지지 않은 격리 파라미터를 실행 파라미터로 옮길 수 없습니다")
+        return {
+            "target_group_arn": self.target_group_arn,
+            "isolation_group_id": self.isolation_group_id,
+        }
+
+
+def _isolation_unresolved(code: PrecheckReasonCode, detail: str) -> IsolationParameters:
+    return IsolationParameters(reason_code=code, detail=detail)
+
+
+def resolve_isolation_parameters(db: Session, target_arn: str) -> IsolationParameters:
+    """`EC2_ISOLATE`의 시스템 공급 값 2개를 **수집기가 적재한 자산 DB**에서 찾는다.
+
+    입력: 격리 대상 인스턴스 ARN(`target_arn`)과 DB 세션. **AWS를 부르지 않고 쓰지도
+    않는다** — 읽기만 하며 commit·rollback도 하지 않으므로 트랜잭션 처분은 호출부 몫이다.
+    출력: `IsolationParameters` — 성공이면 `target_group_arn`·`isolation_group_id`가 둘 다
+    있고 `as_lookups()`가 build_precheck_parameters의 키워드가 된다. 실패면 값 없이
+    `reason_code`(PrecheckReasonCode)·`detail`(사람이 읽는 한 줄)만 있다. 예외를 던지지 않는다.
+
+    두 값은 AI가 정하지 않는다(`Ec2IsolateCandidateParameters`가 빈 이유). 가드레일 ④
+    경로(_candidate_precheck — 미리 조회해 넘긴다)와 실행 폴백(_execution_params)이 이
+    함수 하나를 써서 "④가 판정한 값 = 실행하는 값"을 지킨다. 선차단·자동 격리 발동 경로도
+    이 함수를 부르면 같은 값을 얻는다.
+
+      - `target_group_arn`: 대상 EC2 자산의 관계 `REGISTERED_IN`(EC2 → ALB TG). 소멸 표시된
+        TG 자산을 가리키는 관계는 세지 않는다.
+      - `isolation_group_id`: 대상 EC2와 **같은 계정·리전·VPC**의 SG 자산 중 자리 태그
+        `vigilantis:role=isolation`(schemas.asset_roles — rule_engine._is_isolation_sg와 같은
+        정확일치 판정)이고 소멸 표시가 없는 것.
+
+    **짐작하지 않는 것.** 둘 다 **정확히 1개일 때만** 채운다. 0개면
+    `PRECHECK_TARGET_NOT_FOUND`, 2개 이상이면 어느 것인지 고를 근거가 없으므로
+    `PRECHECK_PARAM_INVALID`(실행 파라미터를 하나로 조립할 수 없다 — _precheck_param_invalid와
+    같은 분류)다. 이름(`*-isolation`)·규칙 수·첫 번째 행으로 고르지 않는다. 대상 EC2 자산이
+    없거나 소멸 표시면 `PRECHECK_TARGET_NOT_FOUND`, VPC를 모르면 `PRECHECK_PARAM_INVALID`다.
+
+    DB는 수집 시점의 관측이다 — 지금도 등록돼 있는지·SG가 있는지는 가드레일 ④
+    (`_precheck_isolate`)와 백업 캡처가 AWS에서 다시 확인한다.
+    """
+    target = parse_arn(target_arn)
+    if target is None or target.resource_type != "instance":
+        return _isolation_unresolved(
+            PrecheckReasonCode.PRECHECK_PARAM_INVALID, f"인스턴스 ARN이 아닙니다: {target_arn}"
+        )
+    asset = assets_repo.get_asset_by_arn(db, target_arn)
+    if asset is None or asset.absent_since is not None or asset.asset_type is not AssetType.EC2:
+        return _isolation_unresolved(
+            PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND,
+            f"격리 대상 EC2가 수집된 자산에 없습니다: {target.resource_id}",
+        )
+
+    target_groups: set[str] = set()
+    for relation in assets_repo.list_relationships_by_source(db, asset.asset_id):
+        if relation.relation_type is not RelationType.REGISTERED_IN:
+            continue
+        group_asset = assets_repo.get_asset_by_arn(db, relation.target_arn)
+        if group_asset is not None and group_asset.absent_since is not None:
+            continue
+        target_groups.add(relation.target_arn)
+    if not target_groups:
+        return _isolation_unresolved(
+            PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND,
+            "대상 EC2가 등록된 Target Group(REGISTERED_IN)이 없습니다",
+        )
+    if len(target_groups) > 1:
+        return _isolation_unresolved(
+            PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+            f"대상 EC2가 Target Group {len(target_groups)}개에 등록돼 있어 하나로 정할 수 없습니다",
+        )
+
+    vpc_id = (asset.spec or {}).get("vpc_id")
+    if not isinstance(vpc_id, str) or not vpc_id:
+        return _isolation_unresolved(
+            PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+            "대상 EC2의 VPC를 알 수 없어 격리 SG를 고를 수 없습니다",
+        )
+    isolation_groups = sorted(
+        group.resource_id
+        for group in assets_repo.list_assets(db, asset_type=AssetType.SG, regions=[asset.region])
+        if group.account_id == asset.account_id
+        and (group.spec or {}).get("vpc_id") == vpc_id
+        and ((group.spec or {}).get("tags") or {}).get(ROLE_TAG_KEY) == ROLE_ISOLATION
+    )
+    if not isolation_groups:
+        return _isolation_unresolved(
+            PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND,
+            f"VPC {vpc_id}에 격리용 SG({ROLE_TAG_KEY}={ROLE_ISOLATION})가 없습니다",
+        )
+    if len(isolation_groups) > 1:
+        return _isolation_unresolved(
+            PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+            f"VPC {vpc_id}에 격리용 SG가 {len(isolation_groups)}개라 하나로 정할 수 없습니다",
+        )
+    return IsolationParameters(
+        target_group_arn=next(iter(target_groups)),
+        isolation_group_id=isolation_groups[0],
+    )
+
+
+def _ec2_isolate_params(
+    db: Session, execution: models.ActionExecution
+) -> Optional[Ec2IsolateParameters]:
+    """격리의 실행 파라미터 — 격리 SG(`isolation_group_id`)와 등록을 뺄 TG.
+
+    두 값은 AI가 정하지 않는다(`Ec2IsolateCandidateParameters`가 비어 있는 이유). 원천은
+    Guardrail PASS의 불변 실행 명령(validated_command)이고, 없으면 후보에서 옮기되 두 값은
+    가드레일 ④와 같은 resolve_isolation_parameters로 자산 DB에서 찾는다(_execution_params).
+    정확히 하나로 정해지지 않으면 짐작하지 않고 None으로 돌려준다.
+    """
+    params = _execution_params(
+        db, execution, Ec2IsolateParameters, resource_type="instance"
+    )
+    if params is None:
+        return None
+    target = parse_arn(execution.target_arn)
+    if target is None or params.instance_id != target.resource_id:
+        # 가드레일 ④가 이미 대조했다(_validate_scope) — 여기 오면 다른 자원의 명령이다
+        logger.warning(
+            "execution_command_scope_mismatch",
+            extra={"execution_id": execution.execution_id},
+        )
+        return None
+    return params
+
+
+def run_ec2_isolate_execution(db: Session, execution_id: str) -> ExecutionRunOutcome:
+    """`RUNBOOK_EC2_ISOLATE` 실행 — 백업 확보 → TG 등록 해제 → ENI SG 격리. (§2-1 B2)
+
+    순서가 계약이다. **SG/TG 매핑 백업이 commit된 뒤에만 AWS 변경이 시작된다**
+    (store_sg_and_tg_mapping_backup) — 백업 캡처가 실패하면 조치를 시작하지 않는다
+    (ADR-0008 §1 ①). 격리 대상(ENI 목록·등록 포트)은 그 백업에서 읽는다
+    (executor.execute_ec2_isolate).
+
+    **성공의 경계는 실행 반환이다** — 마지막 호출(ENI SG 교체)이 곧 격리 완료이고
+    뒤따르는 판정 축이 없다(dispatcher._AWAIT_JUDGEMENT_ON_SUCCESS에 넣지 않는 이유).
+    판정(judge_ec2_isolate)으로 오는 것은 실행 도중 끊기거나 자산이 바뀐 채 실패한
+    경우다 — 짝 `EC2_UNISOLATE`가 `HUMAN_ONLY`라 자동 원복이 아니라 현물 판정으로 간다
+    (dispatcher._AUTO_ROLLBACK_ON_ASSET_CHANGE 밖).
+
+    발동 경로(`PRE_MITIGATION_0_5S`·`TIMEOUT_ISOLATION_1M`·관제자 승인)는 이 함수가
+    가르지 않는다 — 실행 행의 trigger_source가 담고, 실행 절차는 셋 모두 같다.
+
+    **부분 격리의 한계 — MVP 처분, 상태 계약 보강은 Post-MVP(#435).** 자산이 일부만 바뀐
+    채 끝난 격리는 judge_ec2_isolate가 FAILED + CRITICAL(백업 레코드 ID 포함)로 확정한다.
+    FAILED는 관제자 복구 목록을 열지 않아 [원클릭 해제]가 서지 않으므로 복원은 수동이다.
+
+    종료 상태도 Incident 전이도 여기서 하지 않는다 — 확정은 close_execution 하나가 한다.
+    """
+    execution = executions_repo.get_execution(db, execution_id)
+    if execution is None:
+        raise ValueError(f"실행 레코드를 찾을 수 없습니다: {execution_id}")
+    if execution.runbook_id is not RunbookId.RUNBOOK_EC2_ISOLATE:
+        # 배선 오류다 — 런북마다 단계와 백업 종류가 다르다
+        raise ValueError(f"EC2_ISOLATE 실행이 아닙니다: {execution.runbook_id.value}")
+    if execution.status is not ExecutionStatus.IN_PROGRESS:
+        # 끝난 실행을 다시 돌리면 백업 없는 두 번째 변경이 된다
+        raise ValueError(f"진행 중인 실행이 아닙니다: {execution.status.value}")
+
+    params = _ec2_isolate_params(db, execution)
+    if params is None:
+        return _run_failed(
+            PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+            "실행 파라미터에서 격리 SG·Target Group을 찾지 못했습니다",
+        )
+
+    stored = store_sg_and_tg_mapping_backup(db, execution_id, params)
+    if not stored.stored:
+        return _run_failed(
+            stored.reason_code,
+            f"SG/TG 매핑 백업 실패: {stored.detail or ''}".strip(),
+        )
+    mapping = executor.sg_tg_mapping_backup(stored.record.payload)
+    if mapping is None or mapping.target_group_arn != params.target_group_arn:
+        # 재시도가 이전 시도의 결속 백업을 재사용한 경우에만 올 수 있다. 다른 TG를 가리키는
+        # 백업으로 격리하면 해제가 엉뚱한 등록을 되살린다 — 시작하지 않는다
+        return _run_failed(
+            PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+            "결속된 백업이 SG/TG 매핑 계약을 벗어났거나 다른 Target Group을 가리킵니다",
+        )
+
+    outcome = executor.execute_ec2_isolate(
+        execution.target_arn,
+        backup=mapping,
+        isolation_group_id=params.isolation_group_id,
         record_step=_step_recorder(db, execution_id),
     )
     if not outcome.succeeded:
@@ -1706,6 +2013,131 @@ def judge_sg_delete_isolated(db: Session, execution_id: str) -> ExecutionJudgeme
             " 자동 재시도 없이 수동 확인으로 전환합니다"
         ),
     )
+
+
+def _target_deregistered(state: Optional[str]) -> bool:
+    """TG가 이 대상에 새 트래픽을 보내지 않는가 — 미등록이거나 드레이닝 중."""
+    return state is None or state == executor.TARGET_DRAINING_STATE
+
+
+def judge_ec2_isolate(db: Session, execution_id: str) -> ExecutionJudgement:
+    """단계를 남긴 채 IN_PROGRESS인 격리 실행 1건의 종료 판정. (§2-1 B2)
+
+    여기로 오는 것은 **실행 도중 끊긴 격리**와 **자산이 바뀐 채 실패한 격리**다 — 짝
+    `EC2_UNISOLATE`가 `HUMAN_ONLY`라 dispatcher가 자동 원복이 아니라 다음 주기의 현물
+    판정으로 보낸다. 판정 주체를 runner와 **짝으로** 두는 이유는 judge_nacl_add_deny와
+    같다(ADR-0008 §6).
+
+    **성공의 경계는 실자산이다** — 백업의 모든 ENI에 격리 SG 하나만 붙어 있고, 백업의
+    등록(TG·포트)이 빠져 있으면(미등록 또는 `draining`) 격리가 된 것이다.
+
+    **자동으로 마저 격리하지 않는다** — 재개 단위는 실행이고(ADR-0008 §7), 끊긴 격리를
+    판정이 이어 하면 판정이 실행이 된다.
+
+    **부분 적용은 FAILED로 확정하고 CRITICAL로 알린다.** 지금 실행 상태 계약에는 "자산이
+    바뀐 채 실패했고 사람 승인 원복만 허용되는" 자리가 없다 — ROLLBACK_INITIATED는 자동
+    원복을 발동하고(UNISOLATE는 HUMAN_ONLY), UNVERIFIED는 조회 실패 기록을 요구한다(DB
+    CheckConstraint). 성공으로 적으면 열린 ENI가 남은 인스턴스를 "격리됨"으로 보고하게
+    되므로, 사실대로 실패로 두고 error_summary에 무엇이 바뀌었는지와 원복 근거(백업 레코드)
+    를 남긴다. 이 경우 [원클릭 해제]가 열리지 않으므로 복원은 수동이다 — MVP 처분이며
+    상태 계약 보강은 Post-MVP(#435)다.
+
+    조회하지 못하면 확정하지 않고 보류한다(Issue #249).
+    """
+    execution = executions_repo.get_execution(db, execution_id)
+    if execution is None:
+        raise ValueError(f"실행 레코드를 찾을 수 없습니다: {execution_id}")
+    if execution.runbook_id is not RunbookId.RUNBOOK_EC2_ISOLATE:
+        raise ValueError(f"EC2_ISOLATE 실행이 아닙니다: {execution.runbook_id.value}")
+    if execution.status is not ExecutionStatus.IN_PROGRESS:
+        raise ValueError(f"진행 중인 실행이 아닙니다: {execution.status.value}")
+
+    record = (
+        executions_repo.get_backup_record(db, execution.backup_record_id)
+        if execution.backup_record_id is not None
+        else None
+    )
+    if record is None:
+        # 백업은 AWS 호출 이전에 commit된다 — 단계가 남았는데 레코드가 없다면 이 경로가
+        # 만든 실행이 아니다. 무엇을 바꿨는지 대조할 근거가 없으므로 사람에게 넘긴다
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary="격리 판정 불가: 결속된 백업 레코드를 찾을 수 없습니다",
+        )
+    target = parse_arn(execution.target_arn)
+    if target is None or target.resource_type != "instance":
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary=f"인스턴스 ARN이 아닙니다: {execution.target_arn}",
+        )
+    expected = executor.sg_tg_mapping_backup(record.payload)
+    params = _ec2_isolate_params(db, execution)
+    if expected is None or params is None:
+        logger.critical(
+            "isolate_judgement_inputs_invalid",
+            extra={"execution_id": execution_id, "backup_record_id": record.backup_record_id},
+        )
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary="격리 판정 불가: 백업 payload 또는 실행 파라미터가 계약을 벗어났습니다",
+        )
+
+    current, code = executor.current_eni_security_groups(target.resource_id, target.region)
+    if code is PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND:
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary=f"격리 판정 불가 — 인스턴스 {target.resource_id}를 찾을 수 없습니다",
+        )
+    if code is not None:
+        return ExecutionJudgement(
+            defer_code=code,
+            defer_reason=f"{code.value}: 격리 대상 ENI 조회 실패로 판정 보류",
+        )
+    state, code = executor.current_target_registration(
+        expected.target_group_arn, target.resource_id, expected.target_port, target.region
+    )
+    if code is PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND:
+        # TG 자체가 없다 — 그 TG에서 오는 트래픽도 없으므로 등록은 빠진 것으로 센다
+        state, code = None, None
+    if code is not None:
+        return ExecutionJudgement(
+            defer_code=code,
+            defer_reason=f"{code.value}: Target Group 등록 조회 실패로 판정 보류",
+        )
+
+    enis = [eni.network_interface_id for eni in expected.network_interfaces]
+    isolated = [eni for eni in enis if current.get(eni) == [params.isolation_group_id]]
+    untouched = [
+        eni.network_interface_id
+        for eni in expected.network_interfaces
+        if set(current.get(eni.network_interface_id) or ()) == set(eni.security_group_ids)
+    ]
+    deregistered = _target_deregistered(state)
+
+    if deregistered and len(isolated) == len(enis):
+        return ExecutionJudgement(next_status=ExecutionStatus.SUCCESS)
+    if not deregistered and len(untouched) == len(enis):
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary="격리 미적용 — TG 등록과 ENI SG가 조치 이전 그대로입니다(자산 변경 없음)",
+        )
+    detail = (
+        f"격리 미완(부분 적용) — TG 등록 {'해제됨' if deregistered else '유지'},"
+        f" 격리 SG가 붙은 ENI {len(isolated)}/{len(enis)}."
+        f" [원클릭 해제] 대상이 아니므로 백업 레코드 {record.backup_record_id}의 값으로"
+        " 수동 복원이 필요합니다"
+    )
+    logger.critical(
+        "ec2_isolate_partial",
+        extra={
+            "execution_id": execution_id,
+            "instance_id": target.resource_id,
+            "isolated_enis": len(isolated),
+            "total_enis": len(enis),
+            "deregistered": deregistered,
+        },
+    )
+    return ExecutionJudgement(next_status=ExecutionStatus.FAILED, error_summary=detail[:1024])
 # --- 실행 종료 확정 (Issue #232) -------------------------------------------------
 
 
@@ -2203,10 +2635,26 @@ class _PrefetchedBackupLoader:
 
     **미리 뽑지 않은 조회가 오면 None이 아니라 예외다.** None은 "백업 레코드 없음"
     거절이 되어 배선 누락이 판정으로 둔갑한다(ADR-0007 §1).
+
+    **EC2_ISOLATE의 시스템 공급 값도 여기 싣는다**(isolation_parameters). 같은 이유 —
+    ④는 트랜잭션 밖이라 자산 DB를 읽을 수 없고, 가드레일 전에 resolve_isolation_parameters로
+    뽑아 둔 값만 쓴다. 백업과 한 객체에 두는 것은 _guard_candidate·_candidate_precheck의
+    호출 모양(후보, 관리 자산, 미리 뽑은 조회)을 바꾸지 않기 위해서다.
     """
 
-    def __init__(self, records: dict[tuple, Optional[executor.BackupRecordView]]) -> None:
+    def __init__(
+        self,
+        records: dict[tuple, Optional[executor.BackupRecordView]],
+        isolation: Optional[dict[str, "IsolationParameters"]] = None,
+    ) -> None:
         self._records = records
+        self._isolation = dict(isolation or {})
+
+    def isolation_parameters(self, target_arn: str) -> "IsolationParameters":
+        """가드레일 전에 뽑아 둔 격리 파라미터. 뽑지 않은 대상이면 배선 누락이라 예외다."""
+        if target_arn not in self._isolation:
+            raise RuntimeError(f"가드레일 전에 조회하지 않은 격리 파라미터입니다: {target_arn}")
+        return self._isolation[target_arn]
 
     def get(self, backup_record_id: str) -> Optional[executor.BackupRecordView]:
         # backup_record_id를 받는 런북은 롤백 3종뿐이고 후보가 될 수 없다(ADR-0004 정책 ②)
@@ -2915,6 +3363,220 @@ def judge_sg_recreate(db: Session, execution_id: str) -> ExecutionJudgement:
         },
     )
     return ExecutionJudgement(next_status=ExecutionStatus.SUCCESS)
+
+
+# --- 격리 해제 (MVP 체크리스트 §2-1 B3) ----------------------------------------------
+
+
+def run_ec2_unisolate_execution(db: Session, execution_id: str) -> ExecutionRunOutcome:
+    """`RUNBOOK_EC2_UNISOLATE` 실행 — 백업 로드 → 가드레일 4단계 → ENI SG 복원·TG 재등록.
+
+    순서가 계약이다. **가드레일 4단계가 AWS 변경보다 먼저 끝난다**(ADR-0004 정책 ①).
+    거절이면 자산을 만지지 않고 실패로 돌아가며 자동 재시도는 없다(정책 ④).
+
+    **원복 값은 백업 레코드에서만 온다**(정책 ③). 이 함수가 읽는 것은 자기 행에 결속된
+    backup_record_id 하나다 — 관제자 접수가 원본의 레코드를 결속해 둔다
+    (_recovery_backup_record_id). 요청 페이로드도 후보도 보지 않는다.
+
+    이 원복은 `HUMAN_ONLY`다(ADR-0004 결정 표). 여기로 오는 실행은 관제자가 [원클릭 해제]를
+    누른 것뿐이며, 시스템 자동 발동은 열려 있지 않다(dispatcher._AUTO_ROLLBACK_ON_ASSET_CHANGE
+    밖) — run_sg_recreate_execution과 같은 갈래다.
+
+    종료 상태도 Incident 전이도 여기서 하지 않는다 — 확정은 close_execution 하나가 한다.
+    자식이 FAILED로 닫히면 원본이 ROLLBACK_FAILED로 확정된다(_settle_rollback_origin).
+    """
+    execution = executions_repo.get_execution(db, execution_id)
+    if execution is None:
+        raise ValueError(f"실행 레코드를 찾을 수 없습니다: {execution_id}")
+    if execution.runbook_id is not RunbookId.RUNBOOK_EC2_UNISOLATE:
+        raise ValueError(f"EC2_UNISOLATE 실행이 아닙니다: {execution.runbook_id.value}")
+    if execution.status is not ExecutionStatus.IN_PROGRESS:
+        raise ValueError(f"진행 중인 실행이 아닙니다: {execution.status.value}")
+    if execution.parent_execution_id is None:
+        # 원복은 언제나 되돌릴 원본을 가리킨다 — 근거 ID를 그 원본에서 잇는다
+        raise ValueError(f"원본을 가리키지 않는 원복 실행입니다: {execution_id}")
+
+    target = parse_arn(execution.target_arn)
+    if target is None or target.resource_type != "instance":
+        return _run_failed(
+            PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+            f"인스턴스 ARN이 아닙니다: {execution.target_arn}",
+        )
+
+    record = (
+        executions_repo.get_backup_record(db, execution.backup_record_id)
+        if execution.backup_record_id is not None
+        else None
+    )
+    if record is None:
+        return _run_failed(
+            PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND,
+            "원복 근거 없음: 결속된 백업 레코드를 찾을 수 없습니다",
+        )
+    if record.backup_type != executor.BACKUP_SG_AND_TG_MAPPING:
+        return _run_failed(
+            PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+            f"백업 레코드 종류 불일치: {record.backup_type}",
+        )
+    restored = executor.sg_tg_mapping_backup(record.payload)
+    if restored is None:
+        # 계약을 벗어난 payload로 복원하면 원본과 다른 SG·등록이 선다 — 시작하지 않는다
+        logger.critical(
+            "sg_tg_backup_payload_invalid",
+            extra={"execution_id": execution_id, "backup_record_id": record.backup_record_id},
+        )
+        return _run_failed(
+            PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+            "원복 근거 없음: 백업 payload가 SG/TG 매핑 계약을 벗어났습니다",
+        )
+
+    origin = executions_repo.get_execution(db, execution.parent_execution_id)
+    if origin is None:
+        raise ValueError(f"원본 실행이 없습니다: {execution.parent_execution_id}")
+    evidence_ids = _rollback_evidence_ids(db, origin)
+    if not evidence_ids:
+        return _run_failed(
+            PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+            "원복 명령에 실을 근거 ID가 없습니다",
+        )
+
+    # REVERT_SIZE와 같은 명령 모양이다 — 원복 값 없이 레코드를 가리키는 id만 싣는다
+    payload = _revert_command_payload(execution, record, evidence_ids, target.resource_id)
+    guardrail = _run_rollback_guardrails(db, execution, payload)
+    if guardrail.command is None:
+        detail = _guardrail_rejection_summary(guardrail.result)
+        logger.critical(
+            "unisolate_guardrail_rejected",
+            extra={
+                "execution_id": execution_id,
+                "parent_execution_id": origin.execution_id,
+                "failed_step": (
+                    guardrail.result.failed_step.value
+                    if guardrail.result.failed_step is not None
+                    else None
+                ),
+            },
+        )
+        return _run_failed(PrecheckReasonCode.PRECHECK_INVALID_STATE, detail)
+
+    outcome = executor.execute_ec2_unisolate(
+        execution.target_arn,
+        backup=restored,
+        record_step=_step_recorder(db, execution_id),
+    )
+    if outcome.deferred:
+        return ExecutionRunOutcome(
+            succeeded=False,
+            reason_code=outcome.reason_code,
+            error_summary=outcome.error_summary,
+            deferred=True,
+        )
+    if not outcome.succeeded:
+        return _run_failed(outcome.reason_code, outcome.error_summary, outcome.steps)
+    return ExecutionRunOutcome(succeeded=True, steps=outcome.steps)
+
+
+def judge_ec2_unisolate(db: Session, execution_id: str) -> ExecutionJudgement:
+    """단계를 남긴 채 IN_PROGRESS인 격리 해제 1건의 종료 판정. (§2-1 B3, ADR-0008 §6)
+
+    여기로 오는 것은 **실행 도중 끊긴 해제**뿐이다. 정상 경로는 dispatcher가 실행 반환으로
+    확정한다. 자동 재시도를 하지 않는다는 것이 종료 판정을 하지 않는다는 뜻은 아니므로
+    (ADR-0008 §6) 판정 주체를 runner와 짝으로 둔다.
+
+    **성공의 경계는 "백업과 같은 집합이 돌아왔다"** 이다(E2E_DEMO_SCENARIOS §T3-7) — 백업의
+    모든 ENI에 백업의 SG 집합이 붙어 있고, 백업의 등록(TG·포트)이 다시 서 있어야 한다
+    (`draining`은 등록으로 세지 않는다). SG만 돌아오고 재등록 전에 끊긴 해제를 성공이라
+    하면 원본까지 ROLLED_BACK으로 닫혀, 서비스에서 빠진 인스턴스를 다시 볼 자리가 사라진다
+    (judge_revert_size가 "타입은 돌아왔으나 멈춰 있다"를 가르는 것과 같은 이유).
+
+    **원복의 원복은 없다**(ADR-0008 §6). 미완이면 FAILED로 두고 사람에게 넘기며, 그 확정이
+    원본을 ROLLBACK_FAILED로 옮긴다(_settle_rollback_origin). 조회하지 못하면 보류한다.
+    """
+    execution = executions_repo.get_execution(db, execution_id)
+    if execution is None:
+        raise ValueError(f"실행 레코드를 찾을 수 없습니다: {execution_id}")
+    if execution.runbook_id is not RunbookId.RUNBOOK_EC2_UNISOLATE:
+        raise ValueError(f"EC2_UNISOLATE 실행이 아닙니다: {execution.runbook_id.value}")
+    if execution.status is not ExecutionStatus.IN_PROGRESS:
+        raise ValueError(f"진행 중인 실행이 아닙니다: {execution.status.value}")
+
+    record = (
+        executions_repo.get_backup_record(db, execution.backup_record_id)
+        if execution.backup_record_id is not None
+        else None
+    )
+    if record is None:
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary="해제 판정 불가: 결속된 백업 레코드를 찾을 수 없습니다",
+        )
+    target = parse_arn(execution.target_arn)
+    if target is None or target.resource_type != "instance":
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary=f"인스턴스 ARN이 아닙니다: {execution.target_arn}",
+        )
+    expected = executor.sg_tg_mapping_backup(record.payload)
+    if expected is None:
+        logger.critical(
+            "sg_tg_backup_payload_invalid",
+            extra={"execution_id": execution_id, "backup_record_id": record.backup_record_id},
+        )
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary="해제 판정 불가: 백업 payload가 SG/TG 매핑 계약을 벗어났습니다",
+        )
+
+    current, code = executor.current_eni_security_groups(target.resource_id, target.region)
+    if code is PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND:
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary=f"해제 판정 불가 — 인스턴스 {target.resource_id}를 찾을 수 없습니다",
+        )
+    if code is not None:
+        return ExecutionJudgement(
+            defer_code=code,
+            defer_reason=f"{code.value}: 해제 대상 ENI 조회 실패로 판정 보류",
+        )
+    state, code = executor.current_target_registration(
+        expected.target_group_arn, target.resource_id, expected.target_port, target.region
+    )
+    if code is PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND:
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary=(
+                f"해제 미완 — Target Group을 찾을 수 없어 재등록을 확인할 수 없습니다:"
+                f" {expected.target_group_arn}"
+            )[:1024],
+        )
+    if code is not None:
+        return ExecutionJudgement(
+            defer_code=code,
+            defer_reason=f"{code.value}: Target Group 등록 조회 실패로 판정 보류",
+        )
+
+    not_restored = [
+        eni.network_interface_id
+        for eni in expected.network_interfaces
+        if set(current.get(eni.network_interface_id) or ()) != set(eni.security_group_ids)
+    ]
+    registered = not _target_deregistered(state)
+    if not not_restored and registered:
+        return ExecutionJudgement(next_status=ExecutionStatus.SUCCESS)
+    detail = (
+        f"해제 미완 — SG 미복원 ENI {len(not_restored)}/{len(expected.network_interfaces)},"
+        f" TG 재등록 {'됨' if registered else '안 됨'}(포트 {expected.target_port})."
+        " 자동 재시도 없이 수동 개입으로 전환합니다"
+    )
+    logger.critical(
+        "ec2_unisolate_incomplete",
+        extra={
+            "execution_id": execution_id,
+            "not_restored": ",".join(not_restored),
+            "registered": registered,
+        },
+    )
+    return ExecutionJudgement(next_status=ExecutionStatus.FAILED, error_summary=detail[:1024])
 # --- AI 분석 결과 저장·전이 (Issue #285) ------------------------------------------
 #
 # agent_dispatcher가 그래프를 부르고 계약 검증까지 마친 출력 1건을 여기서 저장한다.
@@ -2995,7 +3657,9 @@ def _candidate_precheck(
     ④는 "지금 이 조치가 나가는가"를 보는 단계이고 스냅샷은 Incident 생성 근거라 보장의
     종류가 다르다(agent_dispatcher.py 불변식 ⓑ · schemas/intake.py 계약 원칙).
 
-    지금 배선하는 조회는 RIGHTSIZING의 current_instance_type 하나다. 나머지 FinOps
+    지금 배선하는 조회는 RIGHTSIZING의 current_instance_type(AWS 조회)과 EC2_ISOLATE의
+    target_group_arn·isolation_group_id(자산 DB — resolve_isolation_parameters를 가드레일
+    전에 뽑아 backup_loader에 실어 온다) 둘이다. 나머지 FinOps
     후보(ENABLE_AUTOSCALING·EBS_DELETE_UNATTACHED·SG_DELETE_ISOLATED)는 실행 파라미터가
     후보 값과 대상 자원 ID만으로 선다. SecOps NACL_ADD_DENY도 같은 변환을 사용한다.
     현재 SecOps 그래프 메뉴는 NACL_ADD_DENY만 제공한다.
@@ -3027,6 +3691,31 @@ def _candidate_precheck(
                 ),
             )
         lookups["current_instance_type"] = current
+    elif command.runbook_id is RunbookId.RUNBOOK_EC2_ISOLATE:
+        # 격리 SG·TG는 AI가 정하지 않는다 — 실행 폴백(_execution_params)과 같은
+        # resolve_isolation_parameters의 결과를 가드레일 전에 뽑아 둔 것을 읽는다
+        source = getattr(backup_loader, "isolation_parameters", None)
+        if source is None:
+            # 배선 오류다 — 판정으로 삼키면 "격리 SG 없음" 같은 거절로 둔갑한다(ADR-0007 §1)
+            raise RuntimeError(
+                "EC2_ISOLATE 후보인데 미리 조회한 격리 파라미터가 배선되지 않았습니다"
+            )
+        isolation = source(command.target_arn)
+        if not isolation.resolved:
+            logger.warning(
+                "candidate_isolation_parameters_unresolved",
+                extra={"detail": (isolation.detail or "")[:256]},
+            )
+            return PrecheckOutcome(
+                passed=False,
+                reason_code=isolation.reason_code,
+                verification_summary=build_verification_summary(
+                    VerificationMethod.DESCRIBE,
+                    verified=["없음(자산 DB에서 격리 SG·Target Group을 하나로 정하지 못함)"],
+                    unverified=["AWS 대상 상태", "IAM 권한"],
+                ),
+            )
+        lookups.update(isolation.as_lookups())
 
     try:
         parameters = build_precheck_parameters(
@@ -3079,6 +3768,8 @@ def _prefetch_candidate_backups(
     조회 키는 executor가 부를 그대로다 — 런북 명세의 backup_match_params를 후보 값에서
     뽑는다. 후보 → 실행 파라미터 변환이 그 값을 바꾸지 않으므로(build_precheck_parameters)
     ④가 부르는 키와 같다. 키가 갈리면 로더가 예외로 알린다.
+
+    EC2_ISOLATE 후보의 격리 SG·TG도 여기서 뽑는다(_PrefetchedBackupLoader.isolation_parameters).
     """
     records: dict[tuple, Optional[executor.BackupRecordView]] = {}
     for candidate in candidates:
@@ -3092,7 +3783,13 @@ def _prefetch_candidate_backups(
             continue
         record = _latest_backup_record(db, candidate.target_arn, spec.backup_type, match)
         records[key] = None if record is None else _backup_view(record)
-    return _PrefetchedBackupLoader(records)
+    # EC2_ISOLATE의 시스템 공급 값 — 실행 폴백과 같은 함수로 뽑는다(resolve_isolation_parameters)
+    isolation = {
+        candidate.target_arn: resolve_isolation_parameters(db, candidate.target_arn)
+        for candidate in candidates
+        if candidate.runbook_id is RunbookId.RUNBOOK_EC2_ISOLATE
+    }
+    return _PrefetchedBackupLoader(records, isolation)
 
 
 def _guard_candidate(

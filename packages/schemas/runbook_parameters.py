@@ -104,6 +104,8 @@ VolumeId = Annotated[str, _fullmatch(r"vol-[a-f0-9]{8,17}")]
 # 그래도 여기 두는 이유는 executor가 백업 payload의 식별자를 파라미터 계약과 같은 타입으로
 # 읽기 때문이다 — AWS 자원 ID 패턴을 두 파일에 적으면 한쪽만 고쳐진 채로 남는다.
 VpcId = Annotated[str, _fullmatch(r"vpc-[a-f0-9]{8,17}")]
+# 위와 같은 자리다 — 백업 payload 계약(backups.SgAndTgMappingBackup)의 ENI 식별자.
+NetworkInterfaceId = Annotated[str, _fullmatch(r"eni-[a-f0-9]{8,17}")]
 TargetGroupArn = Annotated[
     str, _fullmatch(r"arn:aws:elasticloadbalancing:.*:targetgroup/.*")
 ]

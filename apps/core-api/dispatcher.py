@@ -54,9 +54,8 @@
 # 규칙은 workflows.record_verification_failure가 소유합니다 (Issue #249).
 #
 # [남은 작업]
-# 1. 나머지 3종 실행(EC2_ISOLATE·EC2_ENABLE_AUTOSCALING·EC2_UNISOLATE) — 실행 함수가
-#    생기는 대로 _RUNNERS에 등록하고, _JUDGES에 **짝으로** 함께 등록합니다
-#    (ADR-0008 §6, 아래 짝 검사).
+# 1. 나머지 1종 실행(EC2_ENABLE_AUTOSCALING) — 실행 함수가 생기면 _RUNNERS에 등록하고,
+#    _JUDGES에 **짝으로** 함께 등록합니다(ADR-0008 §6, 아래 짝 검사).
 #
 # 기동 worker 개수는 미정입니다 — ADR-0005가 다중 worker·replica 실행 토폴로지를
 # 별도 결정 대상으로 남겼고, 이 모듈은 worker 1개를 전제합니다. 선점(_claim)의
@@ -114,6 +113,8 @@ _RUNNERS: dict[RunbookId, Callable[[Session, str], workflows.ExecutionRunOutcome
     RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED: workflows.run_ebs_delete_unattached_execution,
     RunbookId.RUNBOOK_SG_DELETE_ISOLATED: workflows.run_sg_delete_isolated_execution,
     RunbookId.RUNBOOK_SG_RECREATE: workflows.run_sg_recreate_execution,
+    RunbookId.RUNBOOK_EC2_ISOLATE: workflows.run_ec2_isolate_execution,
+    RunbookId.RUNBOOK_EC2_UNISOLATE: workflows.run_ec2_unisolate_execution,
 }
 
 # 런북별 종료 판정 진입점 — AWS 변경이 이미 시작된 실행을 어느 종료 상태로 확정할지
@@ -127,6 +128,8 @@ _JUDGES: dict[RunbookId, Callable[[Session, str], workflows.ExecutionJudgement]]
     RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED: workflows.judge_ebs_delete_unattached,
     RunbookId.RUNBOOK_SG_DELETE_ISOLATED: workflows.judge_sg_delete_isolated,
     RunbookId.RUNBOOK_SG_RECREATE: workflows.judge_sg_recreate,
+    RunbookId.RUNBOOK_EC2_ISOLATE: workflows.judge_ec2_isolate,
+    RunbookId.RUNBOOK_EC2_UNISOLATE: workflows.judge_ec2_unisolate,
 }
 
 # 실행이 성공을 반환해도 확정하지 않는 런북 — **성공의 경계가 실행 밖에 있다.**
@@ -136,7 +139,8 @@ _JUDGES: dict[RunbookId, Callable[[Session, str], workflows.ExecutionJudgement]]
 # 나머지는 여기 없다. REVERT_SIZE는 되돌린 것이 성공이고, 되돌린 인스턴스가 또
 # 부팅에 실패해도 되돌릴 곳이 없어(원복의 원복은 없다, ADR-0008 §6) 판정이 바뀌지
 # 않는다. NACL 2종·삭제 2종(EBS·SG)은 조치가 원자적이거나 마지막 호출이 곧 완료라
-# 뒤따르는 판정 축이 없고, SG_RECREATE도 마지막 규칙 주입이 성공의 경계다 — 전부
+# 뒤따르는 판정 축이 없고, SG_RECREATE도 마지막 규칙 주입이 성공의 경계다. 격리 2종
+# (EC2_ISOLATE·EC2_UNISOLATE)도 마지막 호출(ENI SG 교체·TG 재등록)이 곧 완료다 — 전부
 # 성공의 경계가 실행 반환 그 자체다. 여기 잘못 넣으면 끝난 실행이 확정되지 않은 채 다음
 # 주기의 판정으로 넘어가고, 그 판정은 재실행이 아니라 실자산 대조라 조치가 끝난
 # 뒤에도 "미완"으로 읽힐 수 있다.

@@ -268,6 +268,19 @@ def build_app_policy(account: str, region: str, vpc_id: str) -> dict:
                 "Resource": vpc_arn,
             },
             {
+                # EC2_ISOLATE(등록 해제)·EC2_UNISOLATE(백업 포트로 재등록). ENI 쪽 SG 교체는 위
+                # SecurityGroupsAndEnisInSmokeVpc 문장이 맡는다. TG는 VPC 조건 키가 없어 스모크
+                # 태그로 가둔다 — 스모크 TG는 생성 때 같은 태그를 단다(_ensure_load_balancer).
+                "Sid": "SmokeTargetGroupTargets",
+                "Effect": "Allow",
+                "Action": [
+                    "elasticloadbalancing:DeregisterTargets",
+                    "elasticloadbalancing:RegisterTargets",
+                ],
+                "Resource": f"arn:aws:elasticloadbalancing:{region}:{account}:targetgroup/*",
+                "Condition": smoke_tagged,
+            },
+            {
                 "Sid": "LaunchTemplatesForAutoscaling",  # ENABLE_AUTOSCALING precheck(DryRun)
                 "Effect": "Allow",
                 "Action": ["ec2:CreateLaunchTemplate"],
