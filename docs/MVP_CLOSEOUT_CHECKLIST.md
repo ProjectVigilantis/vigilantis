@@ -146,6 +146,7 @@
 
 | 항목 | 상태 | 사유 | 처분(이월 / 범위 밖 / 후속 이슈) |
 | --- | --- | --- | --- |
+| P2 3종 실행 경로의 확인 강도(B7 · #449) | **스텁 단위 테스트만 있다** — 다른 7종의 LocalStack 왕복 겹이 없다 | LocalStack Community에 `elbv2`·`autoscaling`이 없다([ADR-0006](adr/0006-localstack-team-standard-env.md) §4). 스텁은 호출 순서·부분 성공 분기·백업 → 가드레일 ④ 왕복·예외 미전파까지만 고정하고, AWS 응답 모양·IAM 태그 조건·연결 추적 동작은 보지 못한다. `EC2_ENABLE_AUTOSCALING`은 실행 함수(B4 #446)가 없어 스텁도 없다 | 머지 기준 = **스텁 통과 + 10주차(10/12–10/15) 실 AWS 실측**. 초록만으로 "검증됨"으로 세지 않는다. 실측 결과는 [AWS_SMOKE_RESULT.md](AWS_SMOKE_RESULT.md) §8 |
 
 | 항목 | 기록 |
 | --- | --- |

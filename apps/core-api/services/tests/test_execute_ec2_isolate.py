@@ -18,6 +18,16 @@ LocalStack Community에 `elbv2`가 없어(ADR-0006 §4 · ADR-0007 §Context) �
      인스턴스에 없으면 아무것도 바꾸지 않는다(다른 자산의 SG를 바꾸지 않는다).
   ⑤ 실행 함수와 판정 함수가 디스패치 경로에 **짝으로** 등록되고, 격리가 자동 원복
      트리거가 아니다(짝 UNISOLATE가 HUMAN_ONLY — ADR-0004).
+  ⑥ 가짜가 **조용히 넓어지지 않는다**(#449). 모델링한 작업(`MODELED`) 밖을 부르면 그
+     테스트가 실패한다 — 실행 함수가 새 AWS 작업을 부르기 시작하면 여기서 먼저 드러나고,
+     그 작업의 응답 모양은 실 AWS 실측(AWS_SMOKE_RESULT §8)이 처음 본다.
+  ⑦ 백업 캡처가 만든 payload가 **실제 `_precheck_unisolate`를 통과**한다 — 생산처(B1)와
+     소비처(가드레일 ④)를 한 테스트로 묶는다. 키 이름만 맞추는 대조로는 값 형식이
+     어긋나도 초록이다.
+  ⑧ 어느 AWS 호출이 실패해도 실행 함수는 **예외를 던지지 않는다**(executor.py 머리말 규약).
+
+**이 파일이 초록이어도 P2는 실 AWS에서 처음 돈다**(MVP 체크리스트 §2-1 B7 · §4). 스텁은
+호출 순서와 분기를 고정할 뿐, AWS 응답 모양·IAM 조건·연결 추적 동작은 보지 못한다.
 """
 
 import sys
@@ -110,6 +120,21 @@ REGISTERED = health((PORT, "healthy", None))
 NOT_REGISTERED = health((80, "unused", "Target.NotRegistered"))
 
 
+# 가짜가 응답을 아는 작업 — 격리·해제·캡처와 해제 가드레일(_precheck_unisolate)이 부르는 것만.
+# 여기 없는 작업을 부르면 즉시 실패한다(⑥). 넓히려면 그 작업의 응답 모양을 근거와 함께 더한다.
+MODELED = frozenset(
+    {
+        "ec2.describe_instances",
+        "ec2.describe_security_groups",
+        "ec2.modify_network_interface_attribute",
+        "elbv2.describe_target_groups",
+        "elbv2.describe_target_health",
+        "elbv2.deregister_targets",
+        "elbv2.register_targets",
+    }
+)
+
+
 class FakeAws:
     """ec2·elbv2를 한 기록에 모은다 — 서비스를 넘나드는 **순서**가 검증 대상이다."""
 
@@ -118,9 +143,14 @@ class FakeAws:
         self._state = state
 
     def __getattr__(self, operation):
+        key = f"{self._service}.{operation}"
+        if key not in MODELED:
+            # 실행 함수가 예외를 삼켜도 놓치지 않게 기록해 두고, fixture 정리에서 실패시킨다
+            self._state["unmodeled"].append(key)
+            raise NotImplementedError(f"가짜 AWS가 모델링하지 않은 작업: {key}")
+
         def call(**kwargs):
-            self._state["calls"].append((f"{self._service}.{operation}", kwargs))
-            key = f"{self._service}.{operation}"
+            self._state["calls"].append((key, kwargs))
             outcome = self._state["overrides"].get(key)
             if isinstance(outcome, list):
                 outcome = outcome.pop(0) if outcome else None
@@ -139,7 +169,7 @@ class FakeAws:
 
 @pytest.fixture
 def aws(monkeypatch):
-    state = {"overrides": {}, "calls": []}
+    state = {"overrides": {}, "calls": [], "unmodeled": []}
 
     def factory(service, region=None, **_):
         assert region == REGION
@@ -154,7 +184,8 @@ def aws(monkeypatch):
 
     configure.calls = state["calls"]
     configure.set = lambda key, value: state["overrides"].__setitem__(key, value)
-    return configure
+    yield configure
+    assert state["unmodeled"] == [], f"모델링하지 않은 AWS 작업 호출: {state['unmodeled']}"
 
 
 def operations(aws) -> list[str]:
@@ -550,3 +581,174 @@ def test_isolate_is_not_an_auto_rollback_trigger():
     # 성공의 경계가 실행 반환이다 — 다음 주기 판정을 기다리지 않는다
     assert RunbookId.RUNBOOK_EC2_ISOLATE not in dispatcher._AWAIT_JUDGEMENT_ON_SUCCESS
     assert RunbookId.RUNBOOK_EC2_UNISOLATE not in dispatcher._AWAIT_JUDGEMENT_ON_SUCCESS
+
+
+# ============================================================ ⑥ 가짜의 경계 (#449)
+
+
+def test_the_fake_fails_on_an_operation_it_does_not_model():
+    """모델링하지 않은 작업은 기본 응답(OK)으로 흘려보내지 않는다. 흘려보내면 실행 함수가
+    새 AWS 작업을 부르기 시작해도 초록이고, 그 작업은 실 AWS에서 처음 돈다."""
+    state = {"overrides": {}, "calls": [], "unmodeled": []}
+    with pytest.raises(NotImplementedError):
+        FakeAws("ec2", state).terminate_instances
+    with pytest.raises(NotImplementedError):
+        FakeAws("autoscaling", state).create_auto_scaling_group
+    assert state["unmodeled"] == ["ec2.terminate_instances", "autoscaling.create_auto_scaling_group"]
+    assert state["calls"] == []
+
+
+# ============================================================ ⑦ 백업 → 가드레일 ④ 왕복 (#449)
+
+VPC = "vpc-0abc123456789def0"
+
+
+def in_vpc(response: dict) -> dict:
+    response["Reservations"][0]["Instances"][0]["VpcId"] = VPC
+    return response
+
+
+class OneRecordLoader:
+    """백업 레코드 1건짜리 조회 — UNISOLATE는 `backup_record_id`로만 찾는다."""
+
+    def __init__(self, record: ex.BackupRecordView):
+        self._record = record
+
+    def get(self, backup_record_id):
+        return self._record if backup_record_id == self._record.backup_record_id else None
+
+    def latest_for_target(self, *_args, **_kwargs):
+        raise AssertionError("UNISOLATE는 대상 기준 최신 백업으로 찾지 않는다")
+
+
+def unisolate_precheck_with(captured) -> "ex.PrecheckOutcome":
+    record = ex.BackupRecordView(
+        backup_record_id="bk-1",
+        target_arn=INSTANCE_ARN,
+        backup_type=captured.backup_type,
+        payload=captured.payload,
+    )
+    return ex.precheck(
+        RunbookId.RUNBOOK_EC2_UNISOLATE,
+        INSTANCE_ARN,
+        {"instance_id": INSTANCE, "backup_record_id": "bk-1", "evidence_id": "ev-1"},
+        backup_loader=OneRecordLoader(record),
+    )
+
+
+def test_captured_payload_passes_the_real_unisolate_precheck(aws):
+    """캡처(B1)가 저장한 payload 그대로 가드레일 ④를 통과해야 원클릭 해제가 선다.
+    키 이름 대조(위 ①)와 달리 **실제 `_precheck_unisolate`** 가 읽는다."""
+    aws.set("ec2.describe_instances", in_vpc(instance_with(
+        eni(SECONDARY_ENI, 1, DB_SG),
+        eni(PRIMARY_ENI, 0, WEB_SG, SSH_SG),
+    )))
+    captured = capture(aws)
+    assert captured.captured
+
+    # 해제 직전 — 두 ENI 모두 격리 SG다. 보조 ENI가 응답 앞에 온다
+    aws.set("ec2.describe_instances", in_vpc(instance_with(
+        eni(SECONDARY_ENI, 1, ISOLATION_SG),
+        eni(PRIMARY_ENI, 0, ISOLATION_SG),
+    )))
+    aws.set("ec2.modify_network_interface_attribute", client_error("DryRunOperation", 412))
+    aws.set(
+        "elbv2.describe_target_groups",
+        {"TargetGroups": [{"TargetGroupArn": TG_ARN, "VpcId": VPC}]},
+    )
+    outcome = unisolate_precheck_with(captured)
+
+    assert outcome.passed, outcome
+    # DryRun은 **주 ENI**(DeviceIndex 0)에 **주 ENI의 원래 SG**를 댄다 — 응답 순서가 아니다
+    (dry_run,) = [kw for name, kw in aws.calls if name == "ec2.modify_network_interface_attribute"]
+    assert dry_run == {"DryRun": True, "NetworkInterfaceId": PRIMARY_ENI, "Groups": [WEB_SG, SSH_SG]}
+    (exists,) = [kw for name, kw in aws.calls if name == "ec2.describe_security_groups"]
+    assert exists == {"GroupIds": [WEB_SG, SSH_SG]}
+
+
+def test_unisolate_precheck_refuses_a_target_group_in_another_vpc(aws):
+    """왕복의 반대쪽 — 캡처 뒤 TG가 다른 VPC 것으로 보이면 해제를 시작하지 않는다."""
+    aws.set("ec2.describe_instances", in_vpc(instance_with(eni(PRIMARY_ENI, 0, WEB_SG))))
+    captured = capture(aws)
+    aws.set("ec2.modify_network_interface_attribute", client_error("DryRunOperation", 412))
+    aws.set(
+        "elbv2.describe_target_groups",
+        {"TargetGroups": [{"TargetGroupArn": TG_ARN, "VpcId": "vpc-0fff000011112222f"}]},
+    )
+    outcome = unisolate_precheck_with(captured)
+    assert (outcome.passed, outcome.reason_code) == (False, R.PRECHECK_INVALID_STATE)
+
+
+def test_unisolate_puts_back_exactly_what_the_capture_saw(aws):
+    """캡처 → 격리 → 해제 한 바퀴. 해제가 복원한 ENI별 SG와 재등록 좌표가 캡처 시점의
+    현물과 같아야 한다 — 격리가 바꾼 집합과 해제가 되돌리는 집합이 같다(T3-7)."""
+    before = {
+        e["NetworkInterfaceId"]: [g["GroupId"] for g in e["Groups"]]
+        for e in TWO_ENIS["Reservations"][0]["Instances"][0]["NetworkInterfaces"]
+    }
+    backup = ex.sg_tg_mapping_backup(capture(aws).payload)
+    assert backup is not None
+
+    isolated, _ = isolate(aws, backup=backup)
+    assert isolated.succeeded
+    aws.set("ec2.describe_instances", ISOLATED)
+    start = len(aws.calls)
+    restored, _ = unisolate(aws, backup)
+    assert restored.succeeded
+
+    after = {
+        kw["NetworkInterfaceId"]: kw["Groups"]
+        for name, kw in aws.calls[start:]
+        if name == "ec2.modify_network_interface_attribute"
+    }
+    assert after == before
+    (deregister,) = [kw for name, kw in aws.calls if name == "elbv2.deregister_targets"]
+    (register,) = [kw for name, kw in aws.calls if name == "elbv2.register_targets"]
+    assert register == deregister
+
+
+# ============================================================ ⑧ 예외를 던지지 않는다 (#449)
+
+FAILURES = [
+    pytest.param(client_error("AccessDenied", 403), id="4xx"),
+    pytest.param(client_error("InternalFailure", 500), id="5xx"),
+    pytest.param(client_error("Throttling", None), id="no-status"),
+    pytest.param(EndpointConnectionError(endpoint_url="x"), id="unreachable"),
+]
+
+
+@pytest.mark.parametrize("failure", FAILURES)
+@pytest.mark.parametrize(
+    "operation", ["elbv2.deregister_targets", "ec2.modify_network_interface_attribute"]
+)
+def test_isolate_never_raises(aws, operation, failure):
+    aws.set(operation, failure)
+    outcome, _ = isolate(aws)
+    assert not outcome.succeeded
+    assert outcome.reason_code is not None
+
+
+@pytest.mark.parametrize("failure", FAILURES)
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "ec2.describe_instances",
+        "ec2.modify_network_interface_attribute",
+        "elbv2.register_targets",
+    ],
+)
+def test_unisolate_never_raises(aws, operation, failure):
+    aws.set("ec2.describe_instances", ISOLATED)
+    aws.set(operation, failure)
+    outcome, _ = unisolate(aws)
+    assert not outcome.succeeded
+    assert outcome.reason_code is not None
+
+
+@pytest.mark.parametrize("failure", FAILURES)
+@pytest.mark.parametrize("operation", ["ec2.describe_instances", "elbv2.describe_target_health"])
+def test_capture_never_raises(aws, operation, failure):
+    aws.set(operation, failure)
+    result = capture(aws)
+    assert not result.captured
+    assert result.reason_code is not None
