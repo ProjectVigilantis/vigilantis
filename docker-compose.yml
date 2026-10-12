@@ -83,6 +83,8 @@ services:
       context: .
       dockerfile: apps/core-api/Dockerfile
     env_file: .env
+    # 개발 스택은 코드 마운트 + 자동 재기동. 이미지의 기본 명령(serve.py)은 운영 배포용이다(ADR-0010)
+    command: ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     environment:
       # compose 스택은 파일 로그를 기본 켠다(Settings 기본값은 False). 끄려면 셸/.env에서 false
       LOG_FILE_ENABLED: ${LOG_FILE_ENABLED:-true}
