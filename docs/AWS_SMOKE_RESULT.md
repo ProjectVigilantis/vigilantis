@@ -178,7 +178,7 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 
 | # | 시나리오 | 결과 | 시각 | 비고 |
 | --- | --- | --- | --- | --- |
-| A6 | `NACL_ADD_DENY` → `NACL_RESTORE` | | | 저장된 `Protocol` 표기 ____ · `PortRange` ____ (이월 6·7행 — 코드로 닫은 것이 실 AWS에서 맞는지) |
+| A6 | `NACL_ADD_DENY` → `NACL_RESTORE` | **둘 다 `SUCCESS`** — 차단 뒤 NACL에 규칙 100(인바운드 deny · `203.0.113.10/32`)이 실제로 생기고, 해제 뒤 실제로 지워짐(describe 확인) | 차단 10/12 15:04 · 해제 15:06 KST | 저장된 `Protocol` 표기 `6`(번호) · `PortRange` `0–65535`(CloudTrail `CreateNetworkAclEntry` 요청값) (이월 6·7행 — 코드로 닫은 것이 실 AWS에서 맞는지). **배포된 플랫폼으로 실행**(로컬 앱 아님) — 호출 주체가 `assumed-role/vigilantis-access/vigilantis-platform`(§7) |
 | A7 | `RIGHTSIZING`(`idle-dev`) → `REVERT_SIZE` | | | §1의 관측치 수·실제 판정과 실행 전제 확인 |
 | A8 | Status Check 2/2 실 대기 → `stopped` 주입 → `FAILED` → 자동 원복 | | | 실 대기와 stopped 실패 분기의 결과. impaired 경로 해소 근거로 쓰지 않음 |
 | A8-impaired | Status Check `impaired` 검사 결과 경로 | | | **이월 2행** — 미검증이면 미해소와 사유 기록; stopped 결과로 대체하지 않음 |
@@ -225,6 +225,9 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 | --- | --- | --- |
 | 10/12 11:17 | 학원 계정의 On-Demand vCPU 한도가 5라 스모크 3대(6 vCPU)가 들어가지 않음 | Service Quotas로 16 요청 → Support 케이스 → 64로 승인. 그 뒤 `up` |
 | 10/12 13:24 | A3 회차의 조인 무결성 조사 대상 2건 | 로컬 DB의 골든 데이터셋(다른 계정) 기록 — 스모크 무관(§2-4) |
+| 10/12 14:41 | **배포된 플랫폼의 첫 스캔**(ADR-0010 · PR #441) — 회차 `SUCCESS`, `collector_failures` 없음. 수집 수 SG 6·NACL 2로 **스모크 VPC만** 잡힘(로컬 A3 회차의 7·3에서 기본 VPC분이 빠짐 — 수집 범위 필터 PR #440) | 앱은 장기 키 없이 태스크 역할 → `vigilantis-access` 전환으로만 AWS에 닿는다. 배포 이미지는 #440·#441을 로컬에서 합친 `mvp-7a7209d`(두 PR 머지 뒤 `dev` 기준으로 재빌드 예정) |
+| 10/12 15:00 | 배포 환경에는 모의 위협 폴더가 없다 — SSH 무차별 대입 관측(`evt_ssh_bruteforce_001`, 대상 `web-1`, 출발지 `203.0.113.10`)을 **일회성 ECS 태스크**로 운영 DB에 넣었다 | AI 분석 `PROPOSALS_GENERATED` · 위험도 HIGH · 후보 `NACL_ADD_DENY` 가드레일 거절 0건 → 배포 주소로 승인(A6). 대응 방식이 `PRE_MITIGATION_0_5S`로 정해졌지만 발동 경로(B5)가 없어 자동 선차단은 없었다 — 사람 승인 실행이다 |
+| 10/12 15:04 | A6 차단의 CloudTrail 기록 — `CreateNetworkAclEntry` 호출 주체 **`assumed-role/vigilantis-access/vigilantis-platform`** | 배포된 앱이 접근 역할 전환으로 조치했다는 직접 증거(ADR-0010 §3) |
 | 10/12 오후 | **A5 — 없는 대상에 대한 DryRun 응답이 작업마다 다르다.** 볼륨·SG 삭제는 실 AWS가 대상 존재를 검사해 `NotFound`를 준다(LocalStack은 없는 SG에도 `DryRunOperation` — ADR-0007 실측과 다름). 인스턴스 `modify_instance_attribute`는 존재를 검사하지 않고(관리자 키 `DryRunOperation`), **앱 키에서는 태그 조건(`vigilantis:smoke=true`)을 평가할 수 없어 `UnauthorizedOperation`**이 된다 | 다운사이징 대상이 사라진 경우 가드레일 ④는 막지만 사유 코드가 `PRECHECK_UNAUTHORIZED`(권한 문제)로 찍힌다 — 관제자가 "대상 없음"이 아니라 "권한 누락"으로 읽을 수 있다. 처분(사유 매핑을 고칠지, describe를 앞세울지)은 이월 8행 처분과 함께 PM이 정한다 |
 
 ---
