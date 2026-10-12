@@ -17,15 +17,22 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
-from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 for _path in (REPO_ROOT / "apps" / "core-api", REPO_ROOT / "packages"):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
+# 종류 이름은 원천에서 받는다 — 문자열을 베끼면 실재하지 않는 이름으로도 통과한다.
+from db.repositories.assets import (  # noqa: E402
+    KIND_BROKEN_REFERENCE,
+    KIND_GUARDRAIL_REJECTED,
+    KIND_UNMANAGED_OBSERVATION,
+    KIND_UNOBSERVED_RELATION,
+)
 from schemas.api.assets import AssetType  # noqa: E402
 
 
@@ -137,8 +144,7 @@ def test_region_notice_is_silent_for_one_region_or_none(pairs):
     assert qa._region_notice(pairs) == []
 
 
-# ⑧ 다른 계정 표시의 근거 — ARN 계정 칸을 읽는다
-# ⑩ §2-4 줄 조립이 계정 표시를 실제로 쓰고, 정상 보존분을 조사 대상에 섞지 않는다
+# ⑧ §2-4 줄 조립이 계정 표시를 실제로 쓰고, 정상 보존분을 조사 대상에 섞지 않는다
 #    (PR #428 리뷰 nit 2 — 표시 함수만 테스트하면 호출부에서 빼도 통과한다)
 class _Finding(NamedTuple):
     kind: str
@@ -154,8 +160,8 @@ def _summary(total, investigate, by_kind=None):
 
 
 def test_dangling_lines_marks_a_foreign_account_on_the_assembled_line():
-    other = _Finding("broken_reference",
-                     f"arn:aws:elasticloadbalancing:ap-northeast-2:123456789012:targetgroup/x/y",
+    other = _Finding(KIND_BROKEN_REFERENCE,
+                     "arn:aws:elasticloadbalancing:ap-northeast-2:123456789012:targetgroup/x/y",
                      ("asset_relationships.target_arn",))
     lines = qa._dangling_lines([other], _summary(1, 1), {_SMOKE_ACCOUNT})
     joined = "\n".join(lines)
@@ -164,24 +170,34 @@ def test_dangling_lines_marks_a_foreign_account_on_the_assembled_line():
 
 
 def test_dangling_lines_marks_an_unreadable_account_on_the_assembled_line():
-    broken = _Finding("broken_reference", "not-an-arn", ("action_executions.target_arn",))
+    broken = _Finding(KIND_BROKEN_REFERENCE, "not-an-arn", ("action_executions.target_arn",))
     joined = "\n".join(qa._dangling_lines([broken], _summary(1, 1), {_SMOKE_ACCOUNT}))
     assert "(계정 확인 불가)" in joined
     assert "다른 계정" not in joined
 
 
 def test_dangling_lines_keeps_a_same_account_line_unmarked():
-    mine = _Finding("broken_reference",
+    mine = _Finding(KIND_BROKEN_REFERENCE,
                     f"arn:aws:ec2:ap-northeast-2:{_SMOKE_ACCOUNT}:instance/i-1",
                     ("backup_records.target_arn",))
     joined = "\n".join(qa._dangling_lines([mine], _summary(1, 1), {_SMOKE_ACCOUNT}))
     assert "다른 계정" not in joined and "계정 확인 불가" not in joined
 
 
-def test_dangling_lines_excludes_kinds_that_are_normal_to_dangle():
-    kept = _Finding("broken_reference", "not-an-arn", ("x.y",))
-    dropped = _Finding("threat_unregistered_target", "arn:aws:ec2:r:1:instance/i-2", ("t.z",))
-    assert dropped.kind not in qa.INVESTIGATE_KINDS
+@pytest.mark.parametrize(
+    "normal_kind",
+    # **실재하는 종류 이름을 쓴다.** 지어낸 이름이면 첫 단언(`not in INVESTIGATE_KINDS`)이 늘
+    # 참이라, 누가 정상 보존 종류를 조사 대상 목록에 잘못 넣어도 이 테스트가 잡지 못한다
+    # (PR #431 리뷰 nit 2). 뒤쪽 단언(`"i-2" not in joined`)은 지어낸 이름으로도 호출부 필터를
+    # 지켰다 — 무력했던 것은 **분류**를 보는 첫 단언 하나다(PR #442 리뷰 실측).
+    # 아래 셋은 매달린 것이 정상인 자리다 — 위협 접수의 미등록 대상 관측 · 가드레일 ③ 이
+    # 거절한 후보 · 그 회차가 대상 유형을 못 본 관계(`db/repositories/assets.py`).
+    [KIND_UNMANAGED_OBSERVATION, KIND_GUARDRAIL_REJECTED, KIND_UNOBSERVED_RELATION],
+)
+def test_dangling_lines_excludes_kinds_that_are_normal_to_dangle(normal_kind):
+    assert normal_kind not in qa.INVESTIGATE_KINDS, "이 종류가 조사 대상에 들어오면 전제가 깨진다"
+    kept = _Finding(KIND_BROKEN_REFERENCE, "not-an-arn", ("x.y",))
+    dropped = _Finding(normal_kind, "arn:aws:ec2:ap-northeast-2:1:instance/i-2", ("t.z",))
     joined = "\n".join(qa._dangling_lines([kept, dropped], _summary(2, 1), {_SMOKE_ACCOUNT}))
     assert "not-an-arn" in joined
     assert "i-2" not in joined, "정상 보존분이 조사 대상으로 찍히면 기록이 오염된다"
@@ -194,13 +210,14 @@ def test_dangling_lines_reports_the_baseline_scope_when_nothing_to_investigate()
     assert "조사 대상:" not in joined
 
 
+# ⑨ 계정 표시의 근거 — ARN 계정 칸을 읽는다
 def test_arn_account_reads_the_account_field():
     arn = "arn:aws:elasticloadbalancing:ap-northeast-2:123456789012:targetgroup/x/y"
     assert qa._arn_account(arn) == "123456789012"
     assert qa._arn_account("not-an-arn") == ""
 
 
-# ⑨ 계정 칸을 읽지 못한 것을 "다른 계정"으로 적지 않는다 (이슈 #427)
+# ⑩ 계정 칸을 읽지 못한 것을 "다른 계정"으로 적지 않는다 (이슈 #427)
 #    기록하는 사람이 "남의 것"으로 보고 빼 버리면 조사 대상이 조용히 사라진다.
 def test_account_mark_does_not_call_an_unreadable_account_someone_elses():
     runs = {"000000000000"}
