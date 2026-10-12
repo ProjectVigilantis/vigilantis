@@ -1,7 +1,6 @@
 // AST-001 자산 관제 — 화면설계서 v1.5 §4.2.
 
 import { AssetsView } from '@/components/assets/assets-view';
-import { AutoRefresh } from '@/components/auto-refresh';
 import { ErrorState } from '@/components/error-state';
 import { getAssets, getIncident, getIncidents, getMetricsTimeseries } from '@/lib/api/client';
 import { WASTE_VERDICTS } from '@/lib/dashboard';
@@ -44,6 +43,8 @@ function savingsTargets(
  * 구 자산 인시던트 목록(`/asset-incidents`)에서 redirect돼 오는 딥링크다(2026-09-28).
  */
 export default async function AssetsPage({ searchParams }: PageProps<'/assets'>) {
+  // 제목 옆 `마지막 갱신` — 다시 그려질 때마다 새로 찍힌다(auto-refresh.tsx).
+  const renderedAt = new Date().toISOString();
   const { asset, tab, preset } = await searchParams;
   // 오류를 버리지 않고 들고 간다 — 인시던트 탭이 그것을 **대기 0건이 아니라 오류로** 그려야 한다.
   const incidentsPromise = getIncidents().then(
@@ -102,7 +103,6 @@ export default async function AssetsPage({ searchParams }: PageProps<'/assets'>)
   // 화면 이름(h1)은 뷰 안에 있다 — 지표 띠와 한 덩이로 스크롤을 따라와야 해서다(assets-view.tsx).
   return (
     <>
-      <AutoRefresh />
       <AssetsView
         data={assets}
         incidents={incidents}
@@ -114,6 +114,7 @@ export default async function AssetsPage({ searchParams }: PageProps<'/assets'>)
         openArn={typeof asset === 'string' ? asset : undefined}
         initialTab={typeof tab === 'string' ? tab : undefined}
         initialPreset={parsePreset(preset)}
+        renderedAt={renderedAt}
       />
     </>
   );

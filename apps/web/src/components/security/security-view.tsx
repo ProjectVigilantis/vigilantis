@@ -38,6 +38,7 @@ import { useMemo, useState } from 'react';
 import { AssetCard } from '@/components/assets/asset-card';
 import { AssetDetail } from '@/components/assets/asset-detail';
 import { AssetGraph } from '@/components/assets/asset-graph';
+import { AutoRefresh } from '@/components/auto-refresh';
 import { ThreatActivityChart } from '@/components/dashboard/trend-charts';
 import { EmptyState } from '@/components/empty-state';
 import { ErrorState } from '@/components/error-state';
@@ -93,6 +94,7 @@ export function SecurityView({
   openArn,
   initialTab,
   initialPreset,
+  renderedAt,
 }: {
   data: AssetsResponse;
   /** 인시던트 목록 전량. `null`은 조회 실패 — 0건과 구분해 패널마다 그 사실을 적는다. */
@@ -109,6 +111,8 @@ export function SecurityView({
   initialTab?: string;
   /** URL `?preset=` — 인시던트 탭의 첫 프리셋. */
   initialPreset?: IncidentPreset;
+  /** 페이지가 데이터를 읽은 시각(ISO) — 제목 옆 `마지막 갱신`이 쓴다(`auto-refresh.tsx`). */
+  renderedAt: string;
 }) {
   const [focus, setFocus] = useState<Focus>('SG');
   const [region, setRegion] = useState<string>(ALL);
@@ -177,7 +181,10 @@ export function SecurityView({
       {/* 화면 이름 + 지표 띠 — 한 덩이로 스크롤을 따라온다(자산 관제와 같은 틀 · 그쪽 주석 참조).
           띠는 6칸이라 3 → 6열로 접힌다(빈 칸이 없다). 칸은 전부 필터다(파일 머리말). */}
       <div className="bg-background sticky top-0 z-20 -mx-6 -mt-6 px-6 pt-6 pb-3">
-      <h1 className="mb-3 text-lg font-semibold">보안 관제</h1>
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <h1 className="text-lg font-semibold">보안 관제</h1>
+        <AutoRefresh renderedAt={renderedAt} />
+      </div>
       <MetricStrip className="sm:grid-cols-3 xl:grid-cols-6">
         {FOCUSES.map((f) => {
           const value = focusValue[f];
