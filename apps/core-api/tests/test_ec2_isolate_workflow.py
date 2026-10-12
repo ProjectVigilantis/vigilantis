@@ -97,14 +97,31 @@ def mapping() -> SgAndTgMappingBackup:
     )
 
 
+# 응답을 아는 작업만 — 밖을 부르면 즉시 실패한다(#449, 가짜가 조용히 넓어지지 않게)
+MODELED = frozenset(
+    {
+        "ec2.describe_instances",
+        "ec2.modify_network_interface_attribute",
+        "elbv2.describe_target_health",
+        "elbv2.deregister_targets",
+        "elbv2.register_targets",
+    }
+)
+
+
 class FakeAws:
     def __init__(self, service: str, state: dict):
         self._service = service
         self._state = state
 
     def __getattr__(self, operation):
+        key = f"{self._service}.{operation}"
+        if key not in MODELED:
+            # 워크플로가 예외를 삼켜도 놓치지 않게 기록해 두고, fixture 정리에서 실패시킨다
+            self._state["unmodeled"].append(key)
+            raise NotImplementedError(f"가짜 AWS가 모델링하지 않은 작업: {key}")
+
         def call(**kwargs):
-            key = f"{self._service}.{operation}"
             self._state["calls"].append((key, kwargs))
             outcome = self._state["overrides"].get(key)
             if isinstance(outcome, BaseException):
@@ -122,7 +139,7 @@ class FakeAws:
 
 @pytest.fixture
 def aws(monkeypatch):
-    state = {"overrides": {}, "calls": []}
+    state = {"overrides": {}, "calls": [], "unmodeled": []}
 
     def factory(service, region=None, **_):
         return FakeAws(service, state)
@@ -131,7 +148,8 @@ def aws(monkeypatch):
     monkeypatch.setattr(bk, "aws_client", factory)
     handle = SimpleNamespace(calls=state["calls"])
     handle.set = lambda key, value: state["overrides"].__setitem__(key, value)
-    return handle
+    yield handle
+    assert state["unmodeled"] == [], f"모델링하지 않은 AWS 작업 호출: {state['unmodeled']}"
 
 
 def changes(aws) -> list[str]:

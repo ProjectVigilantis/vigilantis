@@ -334,8 +334,12 @@ def capture_sg_full_rules(group_id: str, region: str) -> BackupCapture:
 TARGET_NOT_REGISTERED = "Target.NotRegistered"
 
 
-def _device_index(eni: Mapping[str, Any]) -> int:
-    """정렬 키. DeviceIndex를 못 읽은 ENI는 맨 뒤로 — 주 ENI(0)를 잘못 고르지 않게."""
+def device_index(eni: Mapping[str, Any]) -> int:
+    """정렬 키. DeviceIndex를 못 읽은 ENI는 맨 뒤로 — 주 ENI(0)를 잘못 고르지 않게.
+
+    가드레일 ④의 주 ENI 선택(executor._primary_eni)도 이 키를 쓴다 — 캡처가 `security_group_ids`로
+    담은 주 ENI와 DryRun이 대는 ENI가 같아야 하기 때문이다.
+    """
     index = (eni.get("Attachment") or {}).get("DeviceIndex")
     return index if isinstance(index, int) else 1 << 30
 
@@ -360,7 +364,7 @@ def eni_security_groups(instance: Mapping[str, Any]) -> list[EniSecurityGroups]:
                 if isinstance(group, Mapping)
             ],
         )
-        for eni in sorted(interfaces, key=_device_index)
+        for eni in sorted(interfaces, key=device_index)
     ]
 
 

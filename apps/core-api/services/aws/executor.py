@@ -91,7 +91,7 @@ from schemas.runbook_parameters import (
 )
 from schemas.runbooks import RunbookId
 
-from .backup import eni_security_groups, registered_ports
+from .backup import device_index, eni_security_groups, registered_ports
 from .client import aws_client
 from .errors import aws_error_code, reason_code_for, run_dry_run
 
@@ -526,11 +526,20 @@ def _instance(instance_id: str, region: str):
 
 
 def _primary_eni(instance: Mapping[str, Any]) -> Optional[str]:
-    for interface in instance.get("NetworkInterfaces", []):
-        eni = interface.get("NetworkInterfaceId")
-        if eni:
-            return eni
-    return None
+    """주 ENI(DeviceIndex 0) — 응답 순서가 아니라 DeviceIndex로 고른다.
+
+    describe_instances는 ENI 순서를 보장하지 않는다. 응답의 첫 ENI를 쓰면 보조 ENI가 앞에
+    온 인스턴스에서 해제 DryRun이 **주 ENI의 SG를 보조 ENI에 대고** 검증한다 — 백업
+    `security_group_ids`는 주 ENI 값이다(backup.eni_security_groups와 같은 정렬 키). #449
+    """
+    interfaces = [
+        interface
+        for interface in instance.get("NetworkInterfaces") or []
+        if isinstance(interface, Mapping) and interface.get("NetworkInterfaceId")
+    ]
+    if not interfaces:
+        return None
+    return min(interfaces, key=device_index)["NetworkInterfaceId"]
 
 
 # --- DryRun 전면 (ADR-0007 §Context 표) ---
