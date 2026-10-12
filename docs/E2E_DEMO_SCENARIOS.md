@@ -496,7 +496,7 @@ T3·T4는 10/14(수)–10/15(목)에 **여러 번 돌릴 수 있다.** 그때 �
 
 결과로 T3-5(격리)가 대상을 TG에서 뺀 뒤 T3-7(해제)이 실패하면 **되돌릴 자동 경로가 없다.** 그리고 다음 T3 시도는 `_precheck_isolate`의 통과 조건 ③(TG 존재·대상 등록)에서 `PRECHECK_TARGET_NOT_FOUND`로 멈춘다 — **한 번의 복구 실패가 이후 반복 검증 전부를 막는다.**
 
-→ 수동 복구: 관리자 프로필로 `aws elbv2 register-targets --target-group-arn <TG ARN> --targets Id=<인스턴스 ID>` 를 돌리고, `provision_smoke_aws.py status`에서 그 대상이 `healthy`인지 확인한다. 복구했다는 사실과 시각을 `docs/AWS_SMOKE_RESULT.md` §7에 남긴다 — 그 회차의 T3 결과를 읽을 때 필요한 사실이다.
+→ 수동 복구: 관리자 프로필로 `aws elbv2 register-targets --target-group-arn <TG ARN> --targets Id=<인스턴스 ID>` 를 돌리고, `provision_smoke_aws.py status`에서 그 대상이 `healthy`인지 확인한다. 복구했다는 사실과 시각을 `docs/AWS_SMOKE_RESULT.md` §7에 남기고, 그 회차 결과가 들어가는 §8 P2-1 비고에 「수동 복구 — §7 참조」를 적는다 — 그 회차의 T3 결과를 읽을 때 필요한 사실이다.
 
 > B1–B3(백업 캡처·격리·해제)이 서기 전에는 T3-5·T3-7 자체가 돌지 않으므로, 이 조건은 **그 코드가 선 뒤 첫 T3부터** 적용된다. 그리고 그 첫 T3이 곧 `EC2_UNISOLATE`의 첫 실행이라, 실패 확률이 낮지 않은 자리다.
 
@@ -504,7 +504,7 @@ T3·T4는 10/14(수)–10/15(목)에 **여러 번 돌릴 수 있다.** 그때 �
 
 T3은 격리된 **중간 상태**를 읽어 판정하는 경로다(T3-6에서 대상 상태·서비스 응답을 확인한다). 그 사이 다른 앱이 접수된 조치를 실행하면 무엇이 검증 결과인지 가릴 수 없다.
 
-→ 발동 스위치는 `DISPATCH_ENABLED`다(`apps/core-api/config.py`). `apps/core-api/main.py` 머리말이 **회수 스캔(dispatcher)과 AI 분석 대기 스캔(agent_dispatcher)을 그 스위치 하나로** 묶는다고 적는다. 검증 전에 끄고, 끝난 뒤 되돌린다. 되돌리기 전에 그사이 접수된 실행이 없는지 본다.
+→ 발동 스위치는 `DISPATCH_ENABLED`다(`apps/core-api/config.py`). `apps/core-api/main.py` 머리말이 **회수 스캔(dispatcher)과 AI 분석 대기 스캔(agent_dispatcher)을 그 스위치 하나로** 묶는다고 적는다. **검증을 돌리지 않는 다른 앱의** `DISPATCH_ENABLED`를 검증 전에 끄고, 끝난 뒤 되돌린다(검증 앱 자신은 켜 둔다). 되돌리기 전에 그사이 접수된 실행이 없는지 본다.
 
 → **수집(`SCAN_ENABLED`)은 끄지 않는다.** 수집은 describe만 하는 읽기 전용이라 AWS 상태를 바꾸지 않는다. 다른 앱의 회차가 늘어나는 것은 그 앱의 DB 문제이고, T3·T4가 읽는 중간 상태를 바꾸지 않는다.
 
