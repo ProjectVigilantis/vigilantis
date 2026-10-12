@@ -24,7 +24,7 @@
 | 축 | 왜 적는가 |
 | --- | --- |
 | 화면(FE) | 구현된 화면 범위와 대조 |
-| API | `POST /actions/execute` 6종 상태 중 무엇이 언제 나오는가 |
+| API | `POST /actions/execute` 7종 상태 중 무엇이 언제 나오는가 |
 | WS 이벤트 | 실시간 갱신 시점 |
 | 입력 출처 | Golden Dataset 케이스 ID — 시연 재현성 |
 | 실패 시 대체 컷 | 그 단계가 안 되면 무엇을 보여줄지 |
@@ -54,16 +54,19 @@
 
 ## 공통 축 — 두 트랙이 함께 쓰는 계약
 
-### 실행 상태 6종 (`ExecutionStatus`)
+### 실행 상태 7종 (`ExecutionStatus`)
 
 ```
 IN_PROGRESS → SUCCESS
             → FAILED
+            → UNVERIFIED
             → ROLLBACK_INITIATED → ROLLED_BACK
                                  → ROLLBACK_FAILED
 ```
 
-뒤 2종은 **복구의 최종 결과**이며 원본 Execution에만 기록된다(SSOT §API 계약).
+`ROLLED_BACK`·`ROLLBACK_FAILED` 2종은 **복구의 최종 결과**이며 원본 Execution에만 기록된다(SSOT §API 계약).
+
+`UNVERIFIED`는 **결과 확인 불가**다 — AWS 조회 실패로 종료 판정을 내리지 못한 채 재시도를 소진한 자리다(FE 합의 확장 · Issue #249). 종료 상태이고 **자동 원복하지 않는다**: 자산이 바뀌었을 수 있으나 성공으로도 실패로도 확정하지 않고 관제자 확인으로 넘긴다. 원본 실행 전용이라 자식(원복) 실행에는 찍히지 않는다. **시연 대본에는 나오지 않는다** — 두 트랙 모두 조회가 되는 경로만 밟기 때문이며, 상태를 6종으로 적으면 이 칸이 화면에 떴을 때 대본에 없는 값이 된다.
 
 ### 실행 사유 4종 (`TriggerSource`) — 시연에서 2종이 나온다
 
@@ -105,18 +108,18 @@ IN_PROGRESS → SUCCESS
 | 5 | 관제자 승인 | **INC-004 목록에서 「승인 대기」를 켠 뒤 [조치 실행] → ACT-001 [실행]**(승인 1건 · 실행 클릭 2회) | `POST /api/v1/actions/execute`<br>**`202 Accepted`** → `IN_PROGRESS`<br>*(같은 `idempotency_key` 재요청은 `200 OK` 멱등 재생)* | 별도 발행 없음 — HTTP 접수 응답으로 확인 | — |
 | 6 | 실행 | 진행 표시 | `ec2.modify_instance_attribute` | 시작 이벤트 없음 — 판정 결과 확정 시 발행 | LocalStack 재기동 후 재시도 |
 | 7 | **Status Check 실패** | 실패 표시 | `get_waiter` 2/2 실패 — 6번 실행 주기가 끝난 뒤 대상 인스턴스를 **`stop_instances`로 멈춰** 만든다(§대조 필요 3번 ⓑ) | `EXECUTION_UPDATED` **Execution `ROLLBACK_INITIATED`**<br>`INCIDENT_UPDATED` **Incident `ACTION_IN_PROGRESS`** | **핵심 컷** — 주입 창(실행 주기 뒤·판정 주기 전)을 놓치면 판정이 `OK`로 끝나 원복이 일어나지 않는다 |
-| 8 | **자동 원복 발동** | **복구 중** | `RUNBOOK_EC2_REVERT_SIZE` **자식 실행 접수**<br>`trigger_source: AUTO_ON_FAILURE` · `parent_execution_id` = 원본<br>*(상태 전이가 아니라 새 실행 레코드다)* | **없다** — 접수는 발행하지 않는다(`dispatcher.py:335-337`). 화면의 "복구 중"은 **7번 이벤트로 이미 그려져 있다** | 접수만 화면으로 설명 |
+| 8 | **자동 원복 발동** | **복구 중** | `RUNBOOK_EC2_REVERT_SIZE` **자식 실행 접수**<br>`trigger_source: AUTO_ON_FAILURE` · `parent_execution_id` = 원본<br>*(상태 전이가 아니라 새 실행 레코드다)* | **없다** — 접수는 발행하지 않는다(`dispatcher._initiate_rollback_one()` — `initiation.execution_id`가 있으면 집계만 올리고 돌아간다). 화면의 "복구 중"은 **7번 이벤트로 이미 그려져 있다** | 접수만 화면으로 설명 |
 | 9 | 원복 완료 | **AST-001로 이동해** 인스턴스 유형 복귀 확인 | 자식 `SUCCESS` → 원본 Execution `ROLLED_BACK`(함께 확정) | `EXECUTION_UPDATED` **자식 `SUCCESS`**<br>`INCIDENT_UPDATED` **Incident `AWAITING_CLOSURE`** | 관제자 [종료 판단]이 남는다 |
 
 ### 7·8·9번의 상태값은 어느 축인가
 
 **어느 값이 무엇인지는 위 단계표가 이미 적는다.** 여기서는 그 값이 **왜 그래야 하는지**만 코드 좌표와 함께 남긴다 — 축을 다시 뭉개는 서술이 들어오는 것을 막는 것은 표가 아니라 아래 세 문단이다.
 
-**7번 Incident가 `FAILED`가 아닌 이유**: `_incident_status_after()`는 실행의 성패가 아니라 **그 인시던트에 남은 것**으로 목적 상태를 가른다(`workflows.py:843`). `ROLLBACK_INITIATED`가 비종료 상태라(`packages/schemas/executions.py:28 EXECUTION_NON_TERMINAL_STATUSES`) *"진행 중 실행이 있다"* 가 되어 `ACTION_IN_PROGRESS`다. **되돌릴 것이 남았는데 `FAILED`로 적으면 화면이 복구 중인 조치를 '진행 불가'로 그린다.**
+**7번 Incident가 `FAILED`가 아닌 이유**: `_incident_status_after()`는 실행의 성패가 아니라 **그 인시던트에 남은 것**으로 목적 상태를 가른다(`workflows._incident_status_after()`). `ROLLBACK_INITIATED`가 비종료 상태라(`packages/schemas/executions.py` `EXECUTION_NON_TERMINAL_STATUSES`) *"진행 중 실행이 있다"* 가 되어 `ACTION_IN_PROGRESS`다. **되돌릴 것이 남았는데 `FAILED`로 적으면 화면이 복구 중인 조치를 '진행 불가'로 그린다.**
 
-**8번이 상태 전이가 아닌 이유**: #241은 원본을 옮기지 않고 **`parent_execution_id`로 묶인 자식 행을 새로 만든다**(`workflows.py:1146 initiate_auto_rollback()`). 원본과 자식을 한 축으로 적으면 7번과 8번이 같은 값(`ROLLBACK_INITIATED`)을 두 번 말하게 되어 **무엇이 새로 일어났는지가 사라진다.** **이 시점에 원본과 Incident는 그대로다** — 원본은 `ROLLBACK_INITIATED`, Incident는 `ACTION_IN_PROGRESS`에 머문다(단계표 8번 행은 새로 생기는 자식만 적는다).
+**8번이 상태 전이가 아닌 이유**: #241은 원본을 옮기지 않고 **`parent_execution_id`로 묶인 자식 행을 새로 만든다**(`workflows.initiate_auto_rollback()`). 원본과 자식을 한 축으로 적으면 7번과 8번이 같은 값(`ROLLBACK_INITIATED`)을 두 번 말하게 되어 **무엇이 새로 일어났는지가 사라진다.** **이 시점에 원본과 Incident는 그대로다** — 원본은 `ROLLBACK_INITIATED`, Incident는 `ACTION_IN_PROGRESS`에 머문다(단계표 8번 행은 새로 생기는 자식만 적는다).
 
-**9번이 두 실행을 함께 확정하는 이유**: `_ORIGIN_STATUS_AFTER_ROLLBACK`(`workflows.py:895`)이 자식 `SUCCESS` → 원본 `ROLLED_BACK`으로 잇는다. 원본이 `ROLLBACK_INITIATED`에 남으면 비종료라 인시던트가 영원히 진행 중이 된다.
+**9번이 두 실행을 함께 확정하는 이유**: `workflows._ORIGIN_STATUS_AFTER_ROLLBACK`이 자식 `SUCCESS` → 원본 `ROLLED_BACK`으로 잇는다. 원본이 `ROLLBACK_INITIATED`에 남으면 비종료라 인시던트가 영원히 진행 중이 된다.
 
 ### 이 트랙이 증명하는 것
 
@@ -162,7 +165,7 @@ uv run python scripts/load_golden_assets.py --verify
 
 FE는 `NEXT_PUBLIC_API_BASE_URL`이 가리키는 백엔드만 본다(`apps/web/src/lib/api/client.ts` `apiBaseUrl()` — 미설정 시 `http://localhost:8000` = compose `api` 서비스(core-api 앱)). **FE mock 계층은 없다**(PR #351) — 백엔드가 떠 있지 않으면 화면은 조회 오류다. 기동 순서는 루트 `README.md` §로컬 실행이다.
 
-경계가 깨지지 않는지는 `apps/core-api/tests/test_golden_assets_api.py` **6건**이 CI에서 지킨다(판정 축 3 + 토폴로지 축 3 — 자산 유형·관계 유형·끊긴 엣지).
+경계가 깨지지 않는지는 `apps/core-api/tests/test_golden_assets_api.py` **12건**이 CI에서 지킨다 — 골든 적재·조회 8건(매달린/어긋난 ARN 0건 · 회차 스냅샷 미생성 · API 도달 · 판정 정답 대조 · 판정·Skip 사유 전수 · 자산 유형 전수 · 관계 유형 전수 · 관계가 제공되는 자산을 가리키는지)과 시드 바인딩 4건(식별자만 바뀌는지 · 정답 키 재작성 · 지난 부팅의 낡은 바인딩 검출 · 수집기와 같은 방식의 ARN 조립).
 
 ~~**🔶 아직 mock이 필요한 것**~~ → **없다**(2026-09-17 · PR #351 FE mock 계층 제거)
 - ~~**2단계 이후**(Incident 카드·AI 3줄·추천)는 그대로 mock이다~~ ✅ 실 API다 — Incident를 만드는 판정→Intake 배선이 섰다(#306 / PR #320 · §대조 필요 9번 해소).
@@ -177,6 +180,8 @@ FE는 `NEXT_PUBLIC_API_BASE_URL`이 가리키는 백엔드만 본다(`apps/web/s
 **입력**: Golden `secops/input/evt_ssh_bruteforce_001.json` **S3**
 `SSH_BRUTE_FORCE` · `source_ip 203.0.113.10` · `120회 / 300초` · 대상 `i-0a1b2c3d4e5f00001`
 
+> **이 트랙의 위협은 모의(mock)다 — 실제 공격을 만들지 않는다.** `scripts/inject_mock_threat.py`는 골든 입력을 정형화해 초기 위험 판정까지만 돌리고 **AWS를 부르지 않는다**(그래서 LocalStack·자격증명도 필요 없다). `--prepare-inbox`는 모의 관측 파일만 준비하고, 앱이 그 폴더를 읽어 정형화·판정·Intake를 호출한다(#322). `source_ip 203.0.113.10`도 **RFC 5737 문서용 예약 대역**(`203.0.113.0/24`)이라 실재하는 공격자 주소가 아니다. 막는 쪽(NACL 차단)은 실제로 AWS를 바꾸지만, **주입하는 쪽은 끝까지 모의다.**
+
 **입력 선택 근거**: `RUNBOOK_NACL_ADD_DENY`의 `cidr_block`은 *"차단할 악성 IP 대역"* 이고, 명세서 `[SecOps-02]` 안전장치가 **"특정 IP/32 단일 주소만 핀셋 지정"** 을 요구한다. S3의 `source_ip`는 /32 단일 주소라 그대로 들어간다. `parameters_schema`에 포트 필드가 없어 "22번만 골라 막기"는 불가능하다.
 
 > `evt_open_ip_001.json`(S1)을 쓰면 `cidr_block`이 `0.0.0.0/0`이 되어 **서브넷 인바운드가 전면 차단**된다. 명세서의 트리거 조건도 *"특정 IP의 반복적 브루트포스 공격 감지"* 로 OPEN_IP 설정 오류가 아니다.
@@ -187,7 +192,7 @@ FE는 `NEXT_PUBLIC_API_BASE_URL`이 가리키는 백엔드만 본다(`apps/web/s
 
 | # | 단계 | 화면(FE) | API | WS 이벤트 | 실패 시 대체 컷 |
 | --- | --- | --- | --- | --- | --- |
-| 1 | 위협 주입 | INC-001에 **SecOps 카드** 신규 · 토폴로지에서 대상 옆 전체개방 SG가 **빨강**(주입 전부터 — §10/1 컷 시트) | (mock 주입) | `INCIDENT_CREATED` | 토폴로지 정적 이미지 |
+| 1 | **모의** 위협 주입 | INC-001에 **SecOps 카드** 신규 · 토폴로지에서 대상 옆 전체개방 SG가 **빨강**(주입 전부터 — §10/1 컷 시트) | (mock 주입) | `INCIDENT_CREATED` | 토폴로지 정적 이미지 |
 | 2 | 위험도 판정 | 위험도 배지 | `GET /api/v1/incidents/{id}`<br>*(배지는 실 판정값 — 위협 접수가 `evaluate_threat()`를 부른다 · #322 · 아래 관통 실측 `HIGH`)* | `INCIDENT_UPDATED` | — |
 | 3 | 대응 경로 진입 | "선제 차단" 경로 표시 | `response_mode: PRE_MITIGATION_0_5S`<br>*(Incident 축 — 실행 축 아님)* | `INCIDENT_UPDATED` | 경로 표시 없이 4번으로 |
 | 4 | 가드레일 4단계 | — (화면 표시 없음) | (내부) | — | 슬라이드 컷으로 분리 |
@@ -324,7 +329,7 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 | 항목 | 10/1 판정 | 막히면 |
 | --- | --- | --- |
 | WS 실시간 갱신(§대조 6번) | 🔶 **실배달 확인은 9/29(화) 리허설 사전 준비**로 확정(김세혁 9/22 리뷰 승인). 코드 경로는 `apps/web/src/components/realtime-provider.tsx` → `/api/v1/ws`. 카드가 새로고침 없이 승인 대기로 바뀌는지 확인·기록은 김승철, FE 수정 담당은 김세혁 **· 2026-09-22 결정 ⑨ 자동 실측에서 서버 이벤트 23건 직접 수신(연결 표식 1건은 별도) 확인 — 화면 확인은 아니어서 9/29 정식 확인은 유지한다.** **2026-09-23 결정 ⑩ 사람 조작 실측에서 새로고침 없이 T1 원복 문구 · T2 카드 생성 · 차단·해제 문구가 화면에 나타났다 — 9/29 정식 확인은 유지한다.** 같은 날 결정 ⑪ 브라우저 관통 실측에서도 T2 카드가 새로고침 없이 **분석 중 → 승인 대기**로 바뀌는 것을 화면에서 봤다. | **리허설에서 실배달이 실패하면 FE를 고치지 않고 새로고침 컷으로 확정한다.** 대본의 동작 하나가 늘 뿐 흐름은 같다 |
-| 목록 프리셋 칩 — T2 카드는 「승인 대기」 칩에 세지 않는다 | ✅ **의도된 집계 규칙이다(결함 아님).** 2026-09-23 결정 ⑪에서 INC-001의 T2 카드 배지가 「승인 대기」인데 「승인 대기」 칩이 `0`으로 보였다. 원인은 갱신이 아니라 집계다 — 프리셋별로 목록을 거르는 `byPreset()`(`apps/web/src/lib/incident-filter.ts`)은 「승인 대기」 칩에 **선제차단이 아닌** 승인 대기 건만 세고, 선제차단 건(`response_mode`(Incident의 위험 대응 경로)가 `PRE_MITIGATION_0_5S`·`TIMEOUT_ISOLATION_1M`)은 「선제차단」 칩으로 보낸다. T2 카드는 `PRE_MITIGATION_0_5S`라 「선제차단」 칩에 세진다. 칩 숫자는 그 화면에 있는 다른 Incident에 따라 달라지므로 대본에 숫자를 적지 않는다. 이 관찰로 WS 갱신 결함을 입증할 수는 없다(카드와 칩은 같은 목록에서 만들어진다 — `incident-list-page.tsx`) | **칩을 가리키지 않고 카드만 짚는다.** 질문이 나오면 "이미 선제 차단된 건은 「선제차단」 큐에서 따로 본다"로 답한다 |
+| 목록 프리셋 칩 — T2 카드는 「승인 대기」 칩에 세지 않는다 | ✅ **의도된 집계 규칙이다(결함 아님).** 2026-09-23 결정 ⑪에서 INC-001의 T2 카드 배지가 「승인 대기」인데 「승인 대기」 칩이 `0`으로 보였다. 원인은 갱신이 아니라 집계다 — 프리셋별로 목록을 거르는 `byPreset()`(`apps/web/src/lib/incident-filter.ts`)은 「승인 대기」 칩에 **선제차단이 아닌** 승인 대기 건만 세고, 선제차단 건(`response_mode`(Incident의 위험 대응 경로)가 `PRE_MITIGATION_0_5S`·`TIMEOUT_ISOLATION_1M`)은 「선제차단」 칩으로 보낸다. T2 카드는 `PRE_MITIGATION_0_5S`라 「선제차단」 칩에 세진다. 칩 숫자는 그 화면에 있는 다른 Incident에 따라 달라지므로 대본에 숫자를 적지 않는다. 이 관찰로 WS 갱신 결함을 입증할 수는 없다(카드와 칩은 같은 목록에서 만들어진다 — `apps/web/src/components/incidents/incidents-view.tsx`. 2026-09-23 결정 ⑪ 당시의 `incident-list-page.tsx`는 그 뒤 삭제됐다) | **칩을 가리키지 않고 카드만 짚는다.** 질문이 나오면 "이미 선제 차단된 건은 「선제차단」 큐에서 따로 본다"로 답한다 |
 | 조치별 절감 예상(#347 · PR #361) | **9/23(수) 확정본의 대본에는 넣지 않는다.** FE 표기는 자산 관제(AST-001)의 「절감 예상(AI 추정)」 카드로 생겼지만(PR #387), T1 무대(INC-004 → INC-002)에는 없다. 서버 값은 붙는다(2026-09-17 실측 idle-dev 월 $258.42 · 단가가 모델 지식 기반 추정이라 호출마다 달라질 수 있다 · §결정 기록 ④). AI 추정값 ↔ 서버 파생 사실값 구분(#347 · 김세혁)이 9/28(월) 컷에 서면 T1-9 뒤 AST-001에서 한 줄로 보여줄지 그때 정한다 | — |
 
 ### 반복 — Connect Day 하루 2세션
@@ -363,7 +368,7 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 | #385 · #384 | 각각 모의 로그 익명화 검사·README 정리. 기존 S3 골든 주입 명령과 컷 동선 변경 없음 |
 | #386 | 분석 결과와 종료 조건 정리. FE 변경 없음. 세션 사이 [종료 판단]은 비종료 실행이 없고 SecOps 분석이 종료된 상태에서 수행(`workflows.resolve_incident`) |
 | #388 | 동작별 버튼 문구는 DSH-001 제안 카드·INC-002 상세에만 적용. T1은 INC-004 「승인 대기」 → `조치 실행` → 모달 `실행`, T2는 상세 → 차단/해제 버튼 → 모달 `실행`으로 반영 |
-| #387 · 시드 #294 | 자산 관제 대시보드 추가. INC-004 `/asset-incidents` · INC-001 `/incidents` · AST-001 `/assets` · INC-002 상세 경로 유지. 네트워크 메트릭 시간당 4표본·분할 적재와 고아 NACL 정리 추가, idle-dev CPU 프로필 유지. 절감 예상은 AST-001에 있어 T1 대본 편입은 9/28 컷에서 판단 |
+| #387 · 시드 #294 | 자산 관제 대시보드 추가. AST-001 `/assets` · INC-002 상세 경로 유지. **INC-004 `/asset-incidents`와 INC-001 `/incidents`는 2026-09-28부터 화면을 그리지 않고 redirect만 한다** — 각각 `/assets?tab=incidents`(AST-001)·`/security?tab=incidents`(SEC-001)의 `인시던트` 탭으로 흡수됐고, 옛 링크와 `?preset=` 딥링크를 그 탭으로 보내려고 경로만 남는다. 상세 `/incidents/[id]`와 ACT-002 딥링크는 그대로다. 네트워크 메트릭 시간당 4표본·분할 적재와 고아 NACL 정리 추가, idle-dev CPU 프로필 유지. 절감 예상은 AST-001에 있어 T1 대본 편입은 9/28 컷에서 판단 |
 | #390 | EBS 삭제 구현 → 결정 ⑦에 구현 상태와 새 ID 재생성 위험 반영 |
 | #389 | SecOps 입력·프롬프트 변경 → T2-6 판단 근거 문구를 9/29 리허설에서 재확인 |
 | #392 | 정확한 `vigilantis:role=isolation` 태그의 SG를 미사용 판정에서 제외. 시드 `vigilantis-seed-unused`에는 그 태그가 없어 기존 카드 전제 유지. 전체개방 SG는 태그보다 위협 판정이 우선이라 T2 옆 SG의 빨강 전제도 유지 |
@@ -513,7 +518,7 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 | 컷 | 필요한 화면 | 현재 상태 |
 | --- | --- | --- |
 | T1-2 Incident 카드 | **INC-004** 자산 인시던트 카드 그리드(v1.6 · PR #197에서 INC-001과 분리 — FinOps 카드가 뜨는 화면) | ✅ **확보**(2026-08-26, #167 / PR #171 — 카드 그리드·위험도 정렬·승인 대기 프리셋). 목록에서 조치 실행·ACT-002 딥링크까지 연결됨(#179 / PR #180) |
-| T2-1 · T2-8 붉은 노드 | **AST-001 토폴로지 뷰**(#146) 또는 **DSH-001** 통합 위협 토폴로지 | ✅ **화면은 확보**(2026-08-31 · #146 CLOSED) — `AssetGraph`가 `GET /api/v1/assets` 응답을 그대로 그린다(`apps/web/src/components/assets/assets-view.tsx:189`). 노드 테두리 색은 **Incident가 아니라 자산 판정(`verdict`)** 에서 온다 — `THREAT`만 빨강이고(`apps/web/src/components/assets/asset-graph.tsx` `VERDICT_BORDER`), `THREAT`는 SG 전체개방에서만 나온다(`services/rule_engine.py`). DSH-001 토폴로지도 같은 `AssetGraph`를 쓴다(#294 / PR #351) |
+| T2-1 · T2-8 붉은 노드 | **AST-001 토폴로지 뷰**(#146) 또는 **DSH-001** 통합 위협 토폴로지 | ✅ **화면은 확보**(2026-08-31 · #146 CLOSED) — `AssetGraph`가 `GET /api/v1/assets` 응답을 그대로 그린다(`apps/web/src/components/assets/assets-view.tsx`의 `<AssetGraph>`). 노드 테두리 색은 **Incident가 아니라 자산 판정(`verdict`)** 에서 온다 — `THREAT`만 빨강이고(`apps/web/src/components/assets/asset-graph.tsx` `VERDICT_BORDER`), `THREAT`는 SG 전체개방에서만 나온다(`services/rule_engine.py`). DSH-001 토폴로지도 같은 `AssetGraph`를 쓴다(#294 / PR #351) |
 
 **붉은 노드 컷에 mock 기준은 없다**(PR #351). **다만 골든 적재 기준으로 T2-1·T2-8의 "붉은 노드"는 S3 대상 인스턴스에 서지 않는다.** S3 대상 `i-0a1b2c3d4e5f00001`은 골든 A1이라 판정이 `COST_CANDIDATE` — 테두리는 **주황**이다. 빨강은 그 인스턴스와 `SECURED_BY`로 이어진 SG `sg-0a1b2c3d4e5f00005`(`golden-sg-open-ssh` · A5 · 22번 전체개방 `THREAT`)다. 두 색 모두 **적재할 때 정해지고** 위협 주입이나 NACL 해제로 바뀌지 않는다 — 위협 접수가 쓰는 것은 `ThreatEvent`·`Incident`뿐이다. 그래서 T2-1("주입 → 붉은 노드")은 **주입 전부터 옆 SG가 빨강**이고, T2-8("해제 → 정상 복귀")은 **해제 뒤에도 SG가 빨강**이다. LocalStack 시드 경로(`vigilantis-seed-idle`)의 색은 재지 않았다. 대본을 어떻게 바꿀지는 10/1(목) 컷 시트 확정(9/23(수))에서 판단한다.
 
