@@ -229,6 +229,16 @@ def test_drain_waits_for_both_services_and_their_stopping_tasks():
     assert ecs.polls == 3  # 앞의 두 상태에서는 끝났다고 보지 않는다
 
 
+def test_drain_waits_for_the_second_service_even_when_every_task_has_stopped():
+    """services_inactive가 놓치던 바로 그 상태 — api만 INACTIVE이고 태스크는 전부 STOPPED여도 web이 남았으면 기다린다."""
+    ecs = DrainingEcs([
+        ([_s(API, "INACTIVE"), _s(WEB, "DRAINING")], [_t("a", "STOPPED", "STOPPED"), _t("w", "STOPPED", "STOPPED")]),
+        ([_s(API, "INACTIVE"), _s(WEB, "INACTIVE")], [_t("a", "STOPPED", "STOPPED"), _t("w", "STOPPED", "STOPPED")]),
+    ])
+    assert platform._ecs_drained(ecs, [API, WEB], delay=0, attempts=5, sleep=lambda _: None)
+    assert ecs.polls == 2
+
+
 def test_drain_gives_up_without_claiming_success():
     ecs = DrainingEcs([([_s(API, "INACTIVE")], [_t("a", "STOPPED", "STOPPING")])])
     assert not platform._ecs_drained(ecs, [API], delay=0, attempts=3, sleep=lambda _: None)
@@ -238,6 +248,7 @@ def test_remaining_ignores_only_finished_things():
     assert platform.ecs_remaining([_s(API, "INACTIVE")], [_t("a", "STOPPED", "STOPPED")]) == []
     assert platform.ecs_remaining([_s(API, "ACTIVE")], []) == [f"서비스 {API}(ACTIVE)"]
     assert platform.ecs_remaining([], [_t("a", "STOPPED", "DEPROVISIONING")]) == ["태스크 a(DEPROVISIONING)"]
+
 
 def _api(dispatch: bool = False) -> dict:
     return platform.api_container(
