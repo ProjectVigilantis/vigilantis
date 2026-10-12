@@ -163,7 +163,9 @@ def build_secops_capabilities(
 ) -> list[RunbookCapability]:
     """조회·실행 의존성이 연결된 SSH 차단만 제공한다.
 
-    EC2_ISOLATE의 isolation_group_id·target_group_arn 공급은 아직 없다.
+    EC2_ISOLATE는 메뉴에 내지 않는다. isolation_group_id·target_group_arn은 시스템이 자산 DB에서
+    공급하지만(workflows.resolve_isolation_parameters), 격리는 관제자 승인 메뉴가 아니라
+    선차단·자동 격리로 시스템이 발동하는 런북이다(SSOT §Action Whitelist) — 발동 경로의 몫이다.
     OPEN_IP의 SG를 NACL 또는 미부착 삭제 대상으로 추측하지 않는다.
     빈 메뉴의 처분은 Dispatcher가 소유한다.
     """

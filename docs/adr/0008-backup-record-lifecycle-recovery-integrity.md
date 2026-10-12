@@ -2,6 +2,7 @@
 
 - **Status**: Accepted (2026-09-02 — 안성일(AI·Architect) 검토 완료, PR #253 승인)
 - **Date**: 2026-09-02
+- **Amended**: 2026-10-12 — §5 `SAVE_CURRENT_SG_AND_TG_MAPPING`에 ENI별 원래 SG(`network_interfaces`) 추가(하단 "개정 이력" 참조, 핵심 결정 불변)
 - **Deciders**: 김세혁(PM/Infra — `backup.py`·`rollback.py`·실행 경로 소유자) 결정, 안성일(AI·Architect — `ExecutionStep` 계약 소유자) 검토 완료
 - **Refs**: 4주차 P0 카드 `[DOCS] ADR-0008 백업 레코드 수명주기·드리프트·복구 무결성`
 
@@ -119,13 +120,14 @@ ADR-0004 정책 ③을 실행 규칙으로 못 박는다.
 | BackupType | 사용 런북(생성 → 소비) | 필수 항목 | 부가 항목(판단 근거) |
 | --- | --- | --- | --- |
 | `SAVE_INSTANCE_SPEC_JSON` | RIGHTSIZING → REVERT_SIZE | `instance_id` · `instance_type` · `state` | `image_id` · `architecture` · `root_device_type` · `ebs_optimized` · `availability_zone` · `vpc_id` · `subnet_id` **+ 신설: `public_ip_address` · `elastic_ip_association_id`** |
-| `SAVE_CURRENT_SG_AND_TG_MAPPING` | EC2_ISOLATE → UNISOLATE | `security_group_ids[]` · `target_group_arn` **+ 신설: `target_port`** | — |
+| `SAVE_CURRENT_SG_AND_TG_MAPPING` | EC2_ISOLATE → UNISOLATE | `security_group_ids[]` · `target_group_arn` **+ 신설: `target_port`** **+ 신설(2026-10-12): `network_interfaces[]`**(ENI별 원래 SG, DeviceIndex 순, 첫 원소 = 주 ENI — `security_group_ids`는 그 첫 원소의 SG와 같다) | — |
 | `SAVE_SG_FULL_RULES_JSON` | SG_DELETE_ISOLATED → SG_RECREATE | `group_name` · `description` · `vpc_id` · `ingress_permissions[]` · `egress_permissions[]` | **신설: `group_id`**(원본 ID — 신규 발급 ID와 대조해 수동 재연결 대상을 짚는 근거) |
 | `RECORD_NACL_RULE_INDEX` | NACL_ADD_DENY → NACL_RESTORE | `rule_number` · `egress` **+ 승격: `cidr_block` · `protocol` · `rule_action`**(규칙 fingerprint) | — |
 
 **신설 3항목의 성격은 서로 다르다.**
 
 - `target_port`는 **원복 값이다.** 없으면 비기본 포트로 등록돼 있던 대상이 TG 기본 포트로 재등록돼 원상 복구가 아니다.
+- `network_interfaces`도 **원복 값이다**(2026-10-12 추가). 격리는 인스턴스의 **모든** ENI를 격리 SG로 바꾸므로, 주 ENI의 목록(`security_group_ids`) 하나로는 보조 ENI를 원래대로 되돌릴 수 없다.
 - `public_ip_address`·`elastic_ip_association_id`·`group_id`는 **원복 값이 아니라 한계 고지의 근거다.** 되돌릴 수 없는 것(퍼블릭 IPv4 변경, 신규 `sg-id`)을 관제자에게 사실대로 말하려면 조치 이전 값이 어딘가 남아 있어야 한다. 없으면 조치 후에는 영영 알 수 없다.
 - **부가 항목의 부재는 조치를 막지 않는다.** 필수 항목이 없어 되돌리지 못하는 것과 부가 정보가 비어 있는 것은 다른 사건이다.
 
@@ -194,3 +196,9 @@ ADR-0004 정책 ③을 실행 규칙으로 못 박는다.
 - 계약 소재: `packages/schemas/backups.py`(payload) · `packages/schemas/executions.py`(`ExecutionStep`·`effect`) · `packages/schemas/runbook_parameters.py`(원복 파라미터)
 - 후속: #241(원복 발동 — §3-2 대조 3분기·§4 결속 보강·`_RUNNERS`↔`_JUDGES` 짝 등록) · #249(판정 불가·재시도 상한) · `BackupRecordLoader` DB 구현 · `NACL_RESTORE` precheck fingerprint 대조(§5) · 백업 3종 캡처와 typed payload · 백업 시각 상세 응답 노출(FE)
 - 영향 범위: `packages/schemas/backups.py`, `apps/core-api/services/aws/backup.py`, `apps/core-api/services/aws/rollback.py`, `apps/core-api/services/aws/executor.py`, `apps/core-api/workflows.py`, `apps/core-api/dispatcher.py`, `apps/core-api/db/repositories/executions.py`
+
+## 개정 이력
+
+- **2026-10-12 (1차 개정)** — §5 백업 payload 표의 `SAVE_CURRENT_SG_AND_TG_MAPPING`에 `network_interfaces[]`(ENI별 원래 SG, DeviceIndex 순, 첫 원소 = 주 ENI)를 필수 항목으로 더한다.
+  격리 실행(`execute_ec2_isolate`)이 인스턴스의 모든 ENI를 격리 SG로 바꾸는데, 종전 표의 `security_group_ids[]`는 ENI 하나의 목록이라 ENI가 둘 이상인 인스턴스를 원상 복구할 수 없었다.
+  `security_group_ids[]`는 주 ENI의 목록으로 남겨 가드레일 ④(`_precheck_unisolate`)의 대조 계약을 바꾸지 않는다. 계약 소재는 `packages/schemas/backups.py`의 `SgAndTgMappingBackup`이다. 수명주기·드리프트·재개 단위 등 **핵심 결정은 바뀌지 않는다.**
