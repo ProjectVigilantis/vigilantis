@@ -674,7 +674,7 @@ def test_budget_measures_usage_before_credits():
 
 
 def test_existing_budget_from_before_the_amendment_is_brought_up_to_date():
-    """9/29 up이 만든 월 $50·크레딧 포함 Budget은 그대로 두면 개정이 계정에 닿지 않는다."""
+    """개정 전 정의(월 $50·크레딧 포함)로 이미 선 Budget은 그대로 두면 개정이 계정에 닿지 않는다."""
     budgets = FakeBudgets({
         "BudgetName": smoke.BUDGET_NAME,
         "BudgetLimit": {"Amount": "50.0", "Unit": "USD"},

@@ -139,10 +139,10 @@ MANAGED_POLICY_MAX_CHARS = 6144
 _POLICY_VERSION_LIMIT = 5  # 관리형 정책 하나가 가질 수 있는 버전 수
 BUDGET_NAME = f"{PREFIX}-monthly"
 # 알림선이지 상한이 아니다(ADR-0009 §3 — 2026-10-12 개정, 12/11까지 유지). 비용 필터가 없어 계정 전체를
-# 잰다. 금액은 크레딧 100만 원 ÷ 74일(약 2.4개월) ≈ 월 $295 — 100%가 "12/11에 크레딧이 바닥나는 속도"다
+# 잰다. 학원 사용 한도 100만 원(AWS 크레딧 아님) ÷ 10/12–12/11 61일 ≈ 월 $355 — 그보다 일찍 울리게 $300
 BUDGET_USD = "300"
-# 크레딧을 빼기 전 사용액으로 잰다. CostTypes.IncludeCredit 기본값이 True라 그대로 두면 크레딧이
-# 비용을 상쇄해 사용액이 0에 가깝게 보이고 알림이 울리지 않는다 — 크레딧을 얼마나 쓰는지가 잴 대상이다
+# 크레딧을 빼기 전 사용액으로 잰다. 지금 계정에 크레딧은 없지만, 등록되면 IncludeCredit 기본값 True가
+# 비용을 상쇄해 사용액이 0에 가깝게 보이고 알림이 울리지 않는다 — 한도를 얼마나 쓰는지가 잴 대상이다
 BUDGET_COST_TYPES = {"IncludeCredit": False}
 BUDGET_ALERTS = (("ACTUAL", 50), ("ACTUAL", 80), ("ACTUAL", 100), ("FORECASTED", 100))
 # 앱이 ENABLE_AUTOSCALING으로 만드는 Launch Template 이름(executor._launch_template_name).
