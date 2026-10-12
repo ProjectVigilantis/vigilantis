@@ -30,7 +30,11 @@ from config import get_aws_settings
 from db import models
 from db.repositories import assets as assets_repo
 from db.session import get_db
-from services.collector import REGION_FAILURE_LABEL, UNOBSERVED_TYPES_BY_FAILURE
+from services.collector import (
+    REGION_FAILURE_LABEL,
+    UNOBSERVED_TYPES_BY_FAILURE,
+    VPC_SCOPE_FAILURE_LABEL,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -106,6 +110,8 @@ def _uncollected(runs: list[models.CollectionRun]) -> list[UncollectedAssetType]
        같은 fail-closed 태도다. 이때도 `collection_status`는 PARTIAL·FAILED로 나가 이상은 보인다.
     2. **리전 전체 실패(`collect_region`)는 유형으로 펴지 않는다.** 그 회차는 전부를 못 본
        것이고 status 가 이미 FAILED다. 유형 7개를 나열하면 화면이 "이 일곱만 문제"라고 말한다.
+       수집 범위 확인 실패(`vpc_scope`)도 유형으로 펴지 않는다 — 특정 유형이 아니라 회차의
+       소멸 판단을 막은 것이며, status 가 PARTIAL로 이미 이상을 알린다.
     3. **사유가 여러 리전에서 갈려도 유형당 한 줄만 낸다.** 계약이 유형 중복을 금지한다.
        먼저 만난 사유를 남긴다 — 사유는 보조 정보이고, 유형이 빠졌다는 사실이 본론이다.
     """
@@ -120,7 +126,7 @@ def _uncollected(runs: list[models.CollectionRun]) -> list[UncollectedAssetType]
             _log.warning("리전 %s: error_summary 를 JSON 으로 읽지 못해 uncollected 산출에서 제외", run.region)
             continue
         for label, reason in failures.items():
-            if label == REGION_FAILURE_LABEL:
+            if label in (REGION_FAILURE_LABEL, VPC_SCOPE_FAILURE_LABEL):
                 continue
             types = UNOBSERVED_TYPES_BY_FAILURE.get(label)
             if types is None:
