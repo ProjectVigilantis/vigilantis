@@ -893,7 +893,8 @@ class BoundaryAws:
         return {"Snapshots": [self.snapshots[s] for s in ids if s in self.snapshots]}
 
     def _create_launch_template(
-        self, LaunchTemplateName, LaunchTemplateData, TagSpecifications, VersionDescription
+        self, LaunchTemplateName, LaunchTemplateData, TagSpecifications, VersionDescription,
+        ClientToken,
     ):
         template_id = self._id("lt")
         self.templates[template_id] = {
@@ -1043,6 +1044,60 @@ def test_real_executor_lost_image_response_is_judged_from_the_real_inspection(db
     assert plan.image_name == next(iter(transport.images.values()))["Name"]
     image_id = next(iter(transport.images))
     assert image_id in execution.error_summary  # 잔여 자원이 실제 ID로 이름 붙는다
+
+def _duplicate_error(code):
+    from botocore.exceptions import ClientError
+
+    return ClientError(
+        {"Error": {"Code": code, "Message": code}, "ResponseMetadata": {"HTTPStatusCode": 400}},
+        "Op",
+    )
+
+
+def test_real_executor_duplicate_ami_after_server_side_creation_is_not_closed_as_no_change(
+    db, reserved, transport
+):
+    """첫 요청이 AMI를 만든 뒤 SDK 재시도가 InvalidAMIName.Duplicate를 받았다 — 읽기 전용 관측이 잔여를 기록한다."""
+    _incident_id, execution_id = reserved()
+    transport.current["execution_id"] = execution_id
+    transport.faults["create_image"] = (_duplicate_error("InvalidAMIName.Duplicate"), True)
+
+    for _ in range(3):
+        asg_cycle(db)
+
+    execution = exec_repo.get_execution(db, execution_id)
+    steps = steps_by_sequence(db, execution_id)
+    first = mappers.to_step_result(steps[1])
+    assert (first.status, first.effect) == (ExecutionStepStatus.FAILED, ExecutionEffect.UNKNOWN)
+    assert transport.mutations() == ["create_image"]  # 재요청·보상 삭제 없음
+    assert "describe_images" in [op for op, _ in transport.calls]  # 관측이 실제로 읽었다
+    assert execution.status is ExecutionStatus.FAILED
+    image_id, snapshot_id = next(iter(transport.images)), next(iter(transport.snapshots))
+    observation = mappers.to_step_result(steps[5])
+    for text in (execution.error_summary, observation.error_summary or observation.result_summary):
+        assert image_id in text and snapshot_id in text
+
+
+def test_real_executor_duplicate_asg_after_server_side_creation_keeps_the_owned_group(
+    db, reserved, transport
+):
+    _incident_id, execution_id = reserved()
+    transport.current["execution_id"] = execution_id
+    transport.faults["create_auto_scaling_group"] = (_duplicate_error("AlreadyExists"), True)
+
+    for _ in range(3):
+        asg_cycle(db)
+
+    execution = exec_repo.get_execution(db, execution_id)
+    plan = AutoscalingExecutionPlan.model_validate(exec_repo.get_autoscaling_plan(db, execution_id))
+    third = mappers.to_step_result(steps_by_sequence(db, execution_id)[3])
+    assert (third.status, third.effect) == (ExecutionStepStatus.FAILED, ExecutionEffect.UNKNOWN)
+    assert transport.mutations() == [
+        "create_image", "create_launch_template", "create_auto_scaling_group",
+    ]
+    assert execution.status is ExecutionStatus.FAILED
+    assert plan.asg_name in execution.error_summary
+
 
 def test_real_executor_applied_lost_asg_response_names_ami_lt_asg_despite_many_snapshots(
     db, reserved, transport

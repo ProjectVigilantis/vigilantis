@@ -26,7 +26,9 @@ import boto3
 import pytest
 from botocore.config import Config
 from botocore.exceptions import ClientError, EndpointConnectionError, ReadTimeoutError
+from botocore.session import get_session
 from botocore.stub import Stubber
+from botocore.validate import validate_parameters
 
 CORE_API = Path(__file__).resolve().parents[2]
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -46,6 +48,10 @@ from schemas.executions import ExecutionEffect, ExecutionStepStatus  # noqa: E40
 from schemas.precheck import PrecheckReasonCode  # noqa: E402
 from services.aws import autoscaling as asg  # noqa: E402
 from services.aws import executor as ex  # noqa: E402
+
+_CREATE_LT_INPUT = (
+    get_session().get_service_model("ec2").operation_model("CreateLaunchTemplate").input_shape
+)
 
 R = PrecheckReasonCode
 S = ExecutionStepStatus
@@ -334,6 +340,7 @@ class FakeAws:
         self.repeat_token = False
         self.on_group_describe = None
         self.group_describes = 0
+        self.client_tokens: list[str] = []
         self._ids = 0
 
     # --- 테스트 조작
@@ -444,10 +451,17 @@ class FakeAws:
 
     def _create_launch_template(
         self, LaunchTemplateName, LaunchTemplateData, TagSpecifications=None,
-        VersionDescription=None, DryRun=False,
+        VersionDescription=None, DryRun=False, ClientToken=None,
     ):
         if DryRun:
             raise client_error("DryRunOperation", 412)
+        # 실행 요청은 토큰이 필수이고 실제 SDK 요청 검증을 통과해야 한다(idempotencyToken 문자열)
+        assert ClientToken is not None
+        validate_parameters(
+            {"LaunchTemplateName": LaunchTemplateName, "LaunchTemplateData": {}, "ClientToken": ClientToken},
+            _CREATE_LT_INPUT,
+        )
+        self.client_tokens.append(ClientToken)
         if any(t["LaunchTemplateName"] == LaunchTemplateName for t in self.templates.values()):
             raise client_error("InvalidLaunchTemplateName.AlreadyExistsException")
         template_id = self._new_id("lt")
@@ -1043,11 +1057,75 @@ def test_group_name_taken_after_prepare_is_rejected_not_adopted(aws):
     outcome = execute(plan)
     inspection = ex.inspect_ec2_autoscaling(plan)
 
-    assert steps(outcome)[-1] == (3, ex.STEP_CREATE_AUTO_SCALING_GROUP, S.FAILED, E.NOT_APPLIED)
+    # AlreadyExists는 SDK 재시도 뒤 중복일 수 있어 효과를 모른다 — 그래도 남의 그룹은 소유로 읽지 않는다
+    assert steps(outcome)[-1] == (3, ex.STEP_CREATE_AUTO_SCALING_GROUP, S.FAILED, E.UNKNOWN)
     assert "put_scaling_policy" not in [op for _, op, _ in aws.calls]
     assert inspection.status == "incomplete"
     assert f"ASG {ASG_NAME}" not in residual_part(inspection.summary)
     assert "시작 템플릿 lt-" in residual_part(inspection.summary)
+    assert aws.groups[ASG_NAME]["Tags"] == [
+        {"ResourceId": ASG_NAME, "ResourceType": "auto-scaling-group", "PropagateAtLaunch": False, **t}
+        for t in FOREIGN_TAGS
+    ]
+
+
+def test_launch_template_request_carries_the_execution_id_as_a_deterministic_client_token(aws):
+    plan = make_plan(aws)
+
+    assert execute(plan).succeeded
+
+    assert [c["ClientToken"] for c in aws.kwargs("create_launch_template")] == [EXECUTION]
+    assert aws.client_tokens == [plan.execution_id] == [EXECUTION]
+
+
+@pytest.mark.parametrize("execution_id", ["a", "A" + "-".join(["9"] * 31), "a" * 64])
+def test_client_token_boundary_ids_pass_sdk_request_validation(aws, execution_id):
+    plan, code, detail = prepare(execution_id=execution_id)
+    assert (code, detail) == (None, None)
+    aws.calls.clear()
+
+    assert execute(plan).succeeded
+    assert aws.client_tokens == [execution_id]
+
+
+def test_duplicate_ami_name_after_server_side_creation_is_unknown_and_inspected(aws):
+    """SDK 재시도가 중복 오류를 받았다 — 첫 요청은 서버에서 AMI를 만들었다. 닫지 않고 UNKNOWN."""
+    plan = make_plan(aws)
+    aws.fail("create_image", client_error("InvalidAMIName.Duplicate"), applied=True)
+
+    outcome = execute(plan)
+    inspection = ex.inspect_ec2_autoscaling(plan)
+
+    assert steps(outcome)[-1] == (1, ex.STEP_CREATE_IMAGE, S.FAILED, E.UNKNOWN)
+    assert aws.operations().count("ec2.create_image") == 1  # 재시도·이어 쓰기 없음
+    assert "create_launch_template" not in [op for _, op, _ in aws.calls]
+    assert inspection.status == "incomplete"
+    assert "AMI ami-" in residual_part(inspection.summary)
+    assert "스냅숏 snap-" in residual_part(inspection.summary)
+
+
+def test_duplicate_asg_after_server_side_creation_is_unknown_and_keeps_the_owned_group(aws):
+    plan = make_plan(aws)
+    aws.fail("create_auto_scaling_group", client_error("AlreadyExists"), applied=True)
+
+    outcome = execute(plan)
+    inspection = ex.inspect_ec2_autoscaling(plan)
+
+    assert steps(outcome)[-1] == (3, ex.STEP_CREATE_AUTO_SCALING_GROUP, S.FAILED, E.UNKNOWN)
+    assert aws.operations().count("autoscaling.create_auto_scaling_group") == 1
+    assert "put_scaling_policy" not in [op for _, op, _ in aws.calls]
+    assert inspection.status == "incomplete"
+    assert f"ASG {ASG_NAME}" in residual_part(inspection.summary)
+
+
+def test_other_ami_and_group_errors_keep_their_classification(aws):
+    plan = make_plan(aws)
+    aws.fail("create_image", client_error("InvalidAMIName.Malformed"))
+    assert steps(execute(plan))[-1] == (1, ex.STEP_CREATE_IMAGE, S.FAILED, E.NOT_APPLIED)
+
+    plan = make_plan(aws)
+    aws.fail("create_auto_scaling_group", client_error("ValidationError"))
+    assert steps(execute(plan))[-1][2:] == (S.FAILED, E.NOT_APPLIED)
 
 
 def test_recorder_failure_propagates_before_the_next_aws_call(aws):
@@ -1713,6 +1791,7 @@ def test_execute_request_shapes(stubbed):
         {
             "LaunchTemplateName": LT_NAME,
             "VersionDescription": f"vigilantis {EXECUTION}",
+            "ClientToken": EXECUTION,  # 같은 실행의 SDK 재시도는 같은 토큰 — Stubber가 SDK 검증을 거친다
             "LaunchTemplateData": expected_template_data(IMAGE_ID),
             "TagSpecifications": [{"ResourceType": "launch-template", "Tags": TAGS}],
         },

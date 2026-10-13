@@ -46,6 +46,7 @@ def _load_script():
 
 smoke = _load_script()  # 스크립트가 apps/core-api·packages를 sys.path에 넣는다
 
+from schemas import autoscaling as autoscaling_schema  # noqa: E402
 from schemas.rightsizing_policy import rightsizing_target_type  # noqa: E402
 from schemas.runbook_parameters import RuleNumber  # noqa: E402
 from services.aws import autoscaling as aws_autoscaling  # noqa: E402
@@ -318,6 +319,11 @@ def test_create_tags_is_limited_to_creation_time_tagging_of_runtime_resources():
     }
     assert set(smoke.CREATE_TAG_KEYS) == {
         "vigilantis:smoke", "vigilantis:execution-id", "vigilantis:source-instance", "Environment", "environment",
+    }
+    assert set(smoke.CREATE_TAG_KEYS) == {
+        autoscaling_schema.EXECUTION_TAG_KEY,
+        autoscaling_schema.SOURCE_INSTANCE_TAG_KEY,
+        *autoscaling_schema.PRESERVED_SOURCE_TAG_KEYS,
     }
     kinds = sorted(r.split(":")[-1].split("/")[0] for r in _resources(statement))
     assert kinds == ["image", "instance", "launch-template", "snapshot", "volume"]

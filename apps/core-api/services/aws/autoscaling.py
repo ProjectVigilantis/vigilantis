@@ -485,6 +485,11 @@ def _wait_image_available(ec2: Any, image_id: str) -> tuple[PrecheckReasonCode, 
     )
 
 
+def _is_duplicate(exc: BaseException, code: str) -> bool:
+    """이름이 실행으로 정해지는 자원의 중복 거절 — SDK 재시도 앞선 요청이 만들었을 수 있어 효과를 모른다."""
+    return isinstance(exc, ClientError) and aws_error_code(exc) == code
+
+
 def execute_ec2_enable_autoscaling(
     target_arn: str,
     *,
@@ -496,9 +501,11 @@ def execute_ec2_enable_autoscaling(
     **계획이 commit된 뒤에만 부른다**(workflows). 값은 계획에서만 온다 — 원본을 다시 읽지 않는다.
 
     단계마다 호출 직전 IN_PROGRESS를 기록하고, 앞 단계가 성립할 때만 뒤로 간다. 기존 자원을
-    채택하지 않는다 — 같은 이름이 있으면 AWS가 거절(4xx·NOT_APPLIED)하고 그대로 실패로 닫는다.
-    응답 유실(5xx·연결 끊김)은 effect UNKNOWN이며 여기서 되묻거나 지우지 않는다 — 현물 판정은
-    inspect 몫이다. record_step이 던지는 예외는 막지 않는다(executor 실행 규약).
+    채택하지 않는다. AMI의 `InvalidAMIName.Duplicate`·ASG의 `AlreadyExists` 중복 오류와 응답
+    유실(5xx·연결 끊김)은 첫 요청이 이미 적용됐을 수 있어 effect UNKNOWN으로 기록하고 뒤 변경을
+    멈춘다. 시작 템플릿 생성은 execution_id를 `ClientToken`으로 보낸다. 재개·재사용·보상(삭제)은
+    하지 않는다 — 소유 태그·계획으로 하는 읽기 전용 현물 판정은 inspect 몫이다. record_step이
+    던지는 예외는 막지 않는다(executor 실행 규약).
 
     성공은 **요청 4건이 접수됐다**까지다. ASG 인스턴스 기동·2/2·설정 일치는 inspect가 본다.
     """
@@ -526,7 +533,13 @@ def execute_ec2_enable_autoscaling(
             ],
         )
     except (ClientError, BotoCoreError) as exc:
-        return _abort(log, exc, detail="AMI 생성 요청 실패")
+        # 이름은 실행으로 결정된다 — SDK 재시도의 중복 오류는 첫 요청이 서버에서 이미 만든 것일 수 있다
+        return _abort(
+            log,
+            exc,
+            detail="AMI 생성 요청 실패",
+            effect=ExecutionEffect.UNKNOWN if _is_duplicate(exc, "InvalidAMIName.Duplicate") else None,
+        )
     image_id = created.get("ImageId")
     if not _non_empty_str(image_id):
         return _unconfirmed(
@@ -548,6 +561,7 @@ def execute_ec2_enable_autoscaling(
         created = ec2.create_launch_template(
             LaunchTemplateName=plan.launch_template_name,
             VersionDescription=f"vigilantis {plan.execution_id}",
+            ClientToken=plan.execution_id,
             LaunchTemplateData=_launch_template_data(plan, image_id),
             TagSpecifications=[{"ResourceType": "launch-template", "Tags": tags}],
         )
@@ -611,7 +625,12 @@ def execute_ec2_enable_autoscaling(
             ],
         )
     except (ClientError, BotoCoreError) as exc:
-        return _abort(log, exc, detail="ASG 생성 실패")
+        return _abort(
+            log,
+            exc,
+            detail="ASG 생성 실패",
+            effect=ExecutionEffect.UNKNOWN if _is_duplicate(exc, "AlreadyExists") else None,
+        )
     log.succeed(
         ExecutionEffect.APPLIED,
         f"ASG {plan.asg_name} 생성 접수(min {plan.min_size}/max {plan.max_size}"

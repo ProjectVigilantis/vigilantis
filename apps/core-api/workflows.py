@@ -2368,6 +2368,8 @@ def judge_ec2_isolate(db: Session, execution_id: str) -> ExecutionJudgement:
         },
     )
     return ExecutionJudgement(next_status=ExecutionStatus.FAILED, error_summary=detail[:1024])
+
+
 def _autoscaling_planned_names(plan: AutoscalingExecutionPlan) -> str:
     """계획이 정한 자원 이름. **존재를 확인한 것이 아니라 계획한 이름**이다 — 호출부가 그렇게 적는다."""
     return (
@@ -2447,8 +2449,8 @@ def judge_ec2_enable_autoscaling(db: Session, execution_id: str) -> ExecutionJud
     - incomplete → FAILED. 아직 만들어지는 중인 정상 대기를 조회 실패로 위장하지 않는다.
     - query_failed → 보류. 재시도·소진(UNVERIFIED)은 record_verification_failure 몫이다.
 
-    관측 요약은 단계 5에 남겨 현재 API로 보이게 한다. 조회 실패는 관측이 없으므로
-    단계를 남기지 않는다.
+    관측 요약은 단계 5에 남겨 현재 API로 보이게 한다. 조회 실패도 FAILED·NOT_APPLIED로
+    단계를 남기며, 조회 실패 사유와 계획한 자원(존재 미확인)을 기록한다.
     """
     execution = executions_repo.get_execution(db, execution_id)
     if execution is None:
