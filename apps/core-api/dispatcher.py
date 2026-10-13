@@ -109,6 +109,9 @@ Publish = Callable[[WsEvent], None]
 # 백업·단계 commit을 넘어 같은 실행 구간을 직렬화한다. DB 행 잠금만으로는
 # runner 중간 commit 뒤의 재진입을 막을 수 없다. 다중 프로세스 lease는 아니다.
 _DISPATCH_LOCK = RLock()
+# Auto Scaling 레인(#446)은 AMI/READY 대기로 오래 걸릴 수 있어 main 락과 분리한다.
+# 그렇지 않으면 대기 한 번이 즉시 High 격리와 main 스캔을 막는다. 레인 안에서는 직렬이다.
+_AUTOSCALING_DISPATCH_LOCK = RLock()
 
 # 런북별 실행 진입점. 여기 없는 런북의 예약은 넘기지 않는다 — 실행 함수가 없다는
 # 사실을 실패 확정으로 바꾸면, 미구현이 "조치가 실패했다"는 기록으로 둔갑한다.
@@ -770,7 +773,11 @@ def dispatch_pending(
     policy: workflows.VerificationRetryPolicy | None = None,
     lane: str = LANE_MAIN,
 ) -> DispatchReport:
-    with _DISPATCH_LOCK:
+    # 락은 호출 시점에 읽는다(테스트가 모듈 락을 교체한다). 잘못된 레인은 락 전에 거절한다.
+    if lane not in _LANES:
+        raise ValueError(f"알 수 없는 디스패치 레인: {lane}")
+    lock = _AUTOSCALING_DISPATCH_LOCK if lane == LANE_AUTOSCALING else _DISPATCH_LOCK
+    with lock:
         return _dispatch_pending(db, publish, policy, lane)
 
 

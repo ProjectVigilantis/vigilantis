@@ -912,6 +912,143 @@ def test_dispatch_now_and_scan_cannot_enter_runner_while_first_holds_after_commi
                 cleanup.commit()
 
 
+def test_held_autoscaling_dispatch_does_not_block_main_lane_but_excludes_its_own_lane(
+    committed_sessions, make_incident, make_execution, monkeypatch,
+):
+    """STUB 한계: runner/judge는 제어용 대역이다 — AWS·AI 호출 없음.
+
+    오래 걸리는 autoscaling 실행(AMI/READY 대기 모사)이 락을 쥔 채여도 main 레인의
+    즉시 실행(dispatch_now)과 main 스캔은 끝난다. 같은 autoscaling 레인의 두 번째 스캔은
+    runner에 못 들어온다. 시간 성능이 아니라 이벤트·유한 join으로 판정한다.
+    """
+    asg = RunbookId.RUNBOOK_EC2_ENABLE_AUTOSCALING
+    asg_entered = threading.Event()
+    asg_release = threading.Event()
+    calls = []
+
+    active = []
+    max_active = [0]
+
+    def asg_runner(db, execution_id):
+        calls.append(("asg", threading.current_thread().name))
+        active.append(1)
+        max_active[0] = max(max_active[0], len(active))
+        db.commit()
+        asg_entered.set()
+        try:
+            assert asg_release.wait(10)
+        finally:
+            active.pop()
+        return SimpleNamespace(succeeded=True, deferred=False, steps=[], reason_code=None,
+                               error_summary=None)
+
+    def main_runner(db, execution_id):
+        calls.append(("main", threading.current_thread().name))
+        return SimpleNamespace(succeeded=True, deferred=False, steps=[], reason_code=None,
+                               error_summary=None)
+
+    success = lambda db, eid: workflows.ExecutionJudgement(next_status=ExecutionStatus.SUCCESS)
+    monkeypatch.setitem(dispatcher._RUNNERS, asg, asg_runner)
+    monkeypatch.setitem(dispatcher._JUDGES, asg, success)
+    monkeypatch.setitem(dispatcher._RUNNERS, ISOLATE, main_runner)
+    monkeypatch.setitem(dispatcher._JUDGES, ISOLATE, success)
+
+    class ObservedLock:
+        def __init__(self, inner):
+            self.inner = inner
+            self.attempted = threading.Event()
+
+        def __enter__(self):
+            if threading.current_thread().name == "asg-second":
+                self.attempted.set()
+            self.inner.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            self.inner.release()
+
+    observed = ObservedLock(dispatcher._AUTOSCALING_DISPATCH_LOCK)
+    monkeypatch.setattr(dispatcher, "_AUTOSCALING_DISPATCH_LOCK", observed)
+
+    with committed_sessions() as seed:
+        incidents = [make_incident(seed) for _ in range(3)]
+        asg_exec = make_execution(seed, incidents[0], runbook_id=asg,
+                                  status=ExecutionStatus.IN_PROGRESS)
+        now_exec = make_execution(seed, incidents[1], runbook_id=ISOLATE,
+                                  trigger_source=TriggerSource.PRE_MITIGATION_0_5S,
+                                  status=ExecutionStatus.IN_PROGRESS)
+        scan_exec = make_execution(seed, incidents[2], runbook_id=ISOLATE,
+                                   status=ExecutionStatus.IN_PROGRESS)
+        seed.commit()
+        incident_ids = [i.incident_id for i in incidents]
+        asg_id, now_id, scan_id = asg_exec.execution_id, now_exec.execution_id, scan_exec.execution_id
+
+    errors = []
+
+    def run(fn, name):
+        def body():
+            try:
+                with committed_sessions() as db:
+                    fn(db)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+        return threading.Thread(target=body, name=name)
+
+    def status_of(execution_id):
+        with committed_sessions() as check:
+            return executions_repo.get_execution(check, execution_id).status
+
+    held = run(lambda db: dispatcher.dispatch_pending(db, lane=dispatcher.LANE_AUTOSCALING), "asg-first")
+    second = run(lambda db: dispatcher.dispatch_pending(db, lane=dispatcher.LANE_AUTOSCALING), "asg-second")
+    now = run(lambda db: dispatcher.dispatch_now(db, now_id), "main-now")
+    scan = run(lambda db: dispatcher.dispatch_pending(db), "main-scan")
+    threads = [held, second, now, scan]
+    try:
+        held.start()
+        assert asg_entered.wait(10), "autoscaling dispatch never reached the runner"
+        now.start()
+        now.join(10)
+        assert not now.is_alive(), "main immediate dispatch blocked by held autoscaling lane"
+        scan.start()
+        scan.join(10)
+        assert not scan.is_alive(), "main scan blocked by held autoscaling lane"
+        assert status_of(now_id) is ExecutionStatus.SUCCESS
+        assert status_of(scan_id) is ExecutionStatus.SUCCESS
+        assert status_of(asg_id) is ExecutionStatus.IN_PROGRESS
+
+        second.start()
+        assert observed.attempted.wait(10), "second autoscaling scan never reached its lock"
+        second.join(0.5)
+        assert second.is_alive(), "same-lane scan entered while autoscaling lane was held"
+        assert [c for c in calls if c[0] == "asg"] == [("asg", "asg-first")]
+    finally:
+        asg_release.set()
+        for t in threads:
+            if t.ident is not None:
+                t.join(15)
+        try:
+            assert not errors, errors
+            assert not any(t.is_alive() for t in threads)
+            # 풀린 뒤 두 번째 스캔은 순차로 이어받는다(판정 대기 실행은 비종료) — 겹치지 않는다.
+            assert [c[1] for c in calls if c[0] == "asg"] == ["asg-first", "asg-second"]
+            assert max_active == [1]
+            assert sorted(c[1] for c in calls if c[0] == "main") == ["main-now", "main-scan"]
+        finally:
+            with committed_sessions() as cleanup:
+                cleanup.execute(delete(models.ExecutionStep).where(
+                    models.ExecutionStep.execution_id.in_([asg_id, now_id, scan_id])))
+                cleanup.execute(delete(models.ActionExecution).where(
+                    models.ActionExecution.incident_id.in_(incident_ids)))
+                cleanup.execute(delete(models.Incident).where(
+                    models.Incident.incident_id.in_(incident_ids)))
+                cleanup.commit()
+
+
+def test_dispatch_pending_rejects_unknown_lane_before_taking_any_lock():
+    with pytest.raises(ValueError):
+        dispatcher.dispatch_pending(MagicMock(), lane="unknown")
+
+
 # ---------------------------------------------------------------- agent_dispatcher High 선차단 훅 (모델은 Fake, #452·계측 없음)
 
 def _prior_execution_creator(db, incident_id, status, events):
