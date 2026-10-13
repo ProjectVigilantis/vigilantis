@@ -248,91 +248,53 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 
 **이월 4행 최종 처분**: ______
 
-### 8-2. #447 자동 격리 — 지연 계측과 측정 보류
+### 8-2. #447 자동 격리 — 팀 실 AWS 검증과 시간 기록
 
-> **상태: 측정 미수행.** 사용자가 30회 시뮬레이션 측정을 보류했고, 그 보류는 유지된다. 선행 PR #452는 머지돼 이 브랜치에 코드로 통합됐고, 통합 경로의 기능 검증과 독립 리뷰를 마쳤다(아래 "통합 검증 결과"). 이 검증은 기능 경계만 확인했으며 성능 판정이 아니다. 30회 결과는 없고, 실 AWS 실행은 이 측정 범위에 들어가지 않는다. 잠정 목표 500 ms는 **판정하지 않은 상태**이며, 달성이나 실패로 읽지 않는다. 이 측정은 시뮬레이션이므로 결과가 나와도 §8 P2-1·§8-1 P2-3a의 실 AWS 칸을 채우지 않는다.
+> **상태: 팀 실 AWS 실행 기록 대기.** 이 절은 #447 자동 발동 경로가 팀 실 AWS 환경에서 `EC2_ISOLATE`로 이어진 실행과 걸린 시간을 기록하는 자리다. 실행을 마치면 아래 표를 채운다. 개인 AWS 참고 측정은 PR #469 본문에 두고, 이 절에는 팀 실 AWS 실행 결과를 적는다.
 
-**선행 조건 — #452 (머지됨 · `902df9b`에 코드 통합 · 기능 검증·독립 리뷰 완료)**
+**판정 기준과의 관계**
 
-| 항목 | 기록 |
-| --- | --- |
-| 선행 PR | #452 · 2026-10-12T07:23:42Z 머지(DanzzaN-il) · merge commit `902df9b533c1af73339a792cee4770d5cd8edded` · 리뷰한 source head `7ac71cbec873247fb018a09255d2e10468d5312e` · base `dev` `fd38c01cda7a7e2800a058b9096fa4267d6d883e` · #443 백업 / #444 격리 / #445 해제를 합친 PR |
-| 대상 해석 | `resolve_isolation_parameters`가 해당 EC2가 `REGISTERED_IN`인 TG 정확히 1개와, 같은 계정·리전·VPC에서 부재가 아니며 `vigilantis:role=isolation` 태그가 붙은 SG 정확히 1개를 고른다. 대상이 없거나 둘 이상이면 거부한다 |
-| 완료 확인 | #452의 runner(`run_ec2_isolate_execution`)는 상태를 다시 조회하지 않고 API 호출 성공을 반환한다. 자동 발동(`PRE_MITIGATION_0_5S`·`TIMEOUT_ISOLATION_1M`)에서 runner가 성공하면 dispatcher가 `judge_ec2_isolate`로 판정한 뒤에만 SUCCESS로 확정한다 |
-| #447의 의존 | 해석기·runner·judge는 #452의 것을 쓰고 복제하지 않는다 |
-| 현재 브랜치 | merge commit `902df9b`를 기반으로 #452 코드를 통합했고 #447 변경을 유지했다. 운영 준비 관문(`dispatcher.supports_isolation()`)은 EC2_ISOLATE runner/judge가 모두 등록된 경우에만 예약을 허용하며, 없으면 `prerequisite_blocked`로 끝낸다 |
+- 10/15(목) MVP 마감 판정의 공식 기준은 [`PROJECT_STATUS.md`](PROJECT_STATUS.md) §현재 위치의 판정 기준 ⓑ다. 그중 #447의 몫은 머지된 자동 발동 경로(High `PRE_MITIGATION_0_5S` · Medium `TIMEOUT_ISOLATION_1M`)가 실 AWS에서 `EC2_ISOLATE`까지 이어지는 것이다(2026-10-13 PM 결정).
+- 발동부터 격리 확인까지 걸린 시간은 이 절에 기록한다. 0.5초 목표의 개정 여부는 판정 뒤에 따로 정한다.
 
-**계측 구현 현황 (현재 브랜치 · #452 통합 후)**
+**실행 전제**
 
-- `apps/core-api/isolation_timing.py`가 단조 시계(`perf_counter_ns`)로 phase를 기록한다.
-- phase별 호출 지점:
-  - `risk_evaluated`·`incident_committed`: `threat_ingress.py`
-  - `guardrail_passed`·`execution_reserved`: `security/soar.py`
-  - `backup_committed`: `workflows.store_sg_and_tg_mapping_backup`의 백업 commit 직후
-  - `execution_started`: `workflows.run_ec2_isolate_execution`에서 `executor.execute_ec2_isolate` 호출 직전
-  - `isolation_confirmed`: 확인된 `finish(success, confirmed=True)`에서만 기록
-- 위 7개 훅이 모두 기능상 동작하는 것을 확인했다(아래 "통합 검증 결과"). 성능은 판정하지 않았다.
-- `end_to_end_ms`는 격리 확인이 있을 때만 채운다. 실행 생성, AWS 요청 수락, phase 기록만으로 확인을 추론하지 않는다.
+- 격리 대상은 EC2다. `resolve_isolation_parameters`가 그 EC2가 `REGISTERED_IN`인 TG 1개와, 같은 계정·리전·VPC에 있는 `vigilantis:role=isolation` 태그 SG 1개를 정확히 하나씩 찾으면 실행으로 이어진다.
+- 해석 거부·TG/SG 부재·대상 복수는 차단 요인으로 따로 기록한다.
+- 예약은 `EC2_ISOLATE` runner와 judge가 모두 등록된 상태(`dispatcher.supports_isolation()`)에서 진행되고, 그 밖의 상태는 `prerequisite_blocked`로 끝난다.
 
-**통합 검증 결과 (`902df9b` 기반 통합 코드 · 기능 검증, 성능 아님)**
+**회차마다 확인할 경계**
 
-- 실행 경로: AWS SDK만 상태를 가진 대역으로 바꾸고, 나머지 운영 경로는 실제 코드로 돌렸다.
-- 확인한 경계:
-  - 첫 AWS 변경 전에 백업 commit이 별도 PostgreSQL 세션에서 보인다.
-  - 가드레일이 거부하면 AWS 변경이 없다.
-  - 백업이 실패하면 AWS 변경이 없다.
-  - 확인 완료 전에 `judge_ec2_isolate` 판정을 거친다.
-  - 7개 timing 훅이 모두 기록된다.
-- 독립 리뷰에서 차단 결함이 없음을 확인했다. 독립 실행 결과는 다음과 같다.
-  - 집중 테스트 5개 파일: 248 passed · skip 0
-  - 수정한 Medium 통합 테스트: 1 passed · skip 0
-  - `git diff --check`: 통과(CRLF 경고만)
-- 최종 전체 검증: 로컬 PostgreSQL 16.15와 시드한 LocalStack에서 **3068 passed · 0 failed · 0 skipped**(95.53 s, 종료 코드 0, 2026-10-12T07:54:32Z 완료)
-  - 명령: `uv run pytest tests apps/core-api/services/tests apps/core-api/ai/tests packages/schemas/tests apps/core-api/db/tests apps/core-api/tests apps/core-api/security/tests -q -rs`
-  - 환경 변수: `AWS_ENDPOINT_URL=http://localhost:4566`, `AWS_ACCESS_KEY_ID=test`, `AWS_SECRET_ACCESS_KEY=test`
-  - LocalStack 기반 기능 검증이며, 실 AWS 실행이나 성능 측정이 아니다.
-- Compose 기동 확인: 격리된 전용 Compose 프로젝트에서 빈 DB, 더미 AWS 자격 증명과 LocalStack 엔드포인트, OpenAI 키 없이 `docker compose up --build --wait`를 실행해 종료 코드 0으로 끝났다. tracked 소스와 Compose 파일은 바꾸지 않았다.
-  - 기본 서비스 db·localstack·migrate·api: api·migrate 이미지가 빌드됐고(`uv sync` frozen 성공), db·localstack은 healthy, migrate는 종료 코드 0으로 끝났으며, api의 정상 기동을 확인했다. 확인 후 전용 스택만 중지하고 볼륨·설정은 보존했다. 선택 프로필 adminer는 실행하지 않았다. Compose에는 프런트엔드 서비스가 없다.
-  - `GET /health`: HTTP 200, 응답 `{"status":"ok"}`
-  - `alembic current`(api 컨테이너): `a3d8f1c6e742 (head)`
-  - 기동 로그에 `automatic_isolation_watcher_started`(poll_seconds 1.0)가 찍혔고, 이후 `automatic_isolation_timeout_cycle`이 scanned 0·errored 0으로 반복됐다. 빈 DB를 실제로 스캔했다는 뜻이며, 격리가 일어났다는 뜻은 아니다.
-- 정적 검사: tidy 진단에 스타일·타입·import 항목이 남아 있다(테스트의 미사용 import 2건 포함). lint 무결로 보지 않는다.
-- #452의 한계: 부분 격리는 `judge_ec2_isolate`가 FAILED로 확정하고, 복원은 수동이다(Post-MVP #435).
+- 백업 선행: SG·TG 매핑 백업이 첫 AWS 변경 전에 commit된다. `backup_committed`가 `execution_started`보다 앞서는지 확인한다.
+- 실제 격리: 대상 ENI의 SG가 격리 SG로 교체되고 TG에서 대상이 등록 해제됐는지 AWS 조회로 확인한다.
+- 확인된 성공: `judge_ec2_isolate` 판정을 거쳐 `outcome=success`·`confirmed=True`로 남은 회차다. runner의 API 호출 성공과 AWS 요청 수락은 그 앞 단계의 기록이다.
+- 부분 격리는 `judge_ec2_isolate`가 FAILED로 확정하고, 복원은 수동으로 한다(Post-MVP #435).
 
-**High와 Medium의 구간 구분**
+**기록 방법**
 
-- High: `end_to_end_ms`는 위협 접수부터 격리 확인까지의 단조 시계 구간이다(`start_boundary=threat_received`).
-- Medium: 기존 `agent_wait_started_at`과 저장된 `response_deadline_at`(= 시작 + 60초)을 그대로 쓴다. 1초 감시 주기(`AGENT_WAIT_POLL_SECONDS`)는 스캔 주기이며 지연 상한으로 보지 않는다. Medium은 `end_to_end_ms`를 채우지 않으며(`start_boundary=timeout_scan`), 아래 값을 High 총 소요와 섞지 않고 따로 적는다.
+- 원천은 `vigilantis.isolation_timing` 로거의 `isolation_latency` 로그다. 로그 1건이 시도 1건이다.
+- 실패·중단을 포함해 모든 시도를 순서대로 적는다. 시도 시각은 계측 값(`started_at`·`response_deadline_at`)에 맞춰 §0의 KST 규칙 대신 **UTC**로 적는다.
+- 시도마다 `started_at`, `trigger_source`, IncidentID, ExecutionID, `outcome`, `confirmed`, `elapsed_to_outcome_ms`, phase 7개(`risk_evaluated` · `incident_committed` · `execution_reserved` · `guardrail_passed` · `backup_committed` · `execution_started` · `isolation_confirmed`)의 `elapsed_ms`·`delta_ms`를 남긴다. `isolation_confirmed`는 확인된 성공에서 찍힌다.
+- 결과 구분: `success`(확인된 성공) · `unconfirmed`(확인 전에 끝난 종료) · `failed` · `interrupted`(예외로 중단) · `prerequisite_blocked`(실행 전제 미충족).
+
+**High와 Medium의 구간**
+
+- High(`start_boundary=threat_received`): `end_to_end_ms`가 위협 접수부터 격리 확인까지의 단조 시계 구간이다. 확인된 성공에서 채워지며, 그 밖의 종료는 `elapsed_to_outcome_ms`로 기록한다.
+- Medium(`start_boundary=timeout_scan`): 저장된 `agent_wait_started_at`과 `response_deadline_at`(= 시작 + 60초)을 기준으로 아래 값을 High 총 소요와 별도 칸에 적는다. 1초 감시 주기(`AGENT_WAIT_POLL_SECONDS`)는 스캔 주기다.
   - `deadline_to_reservation_ms`: 저장된 마감부터 예약까지의 UTC 차이
   - `deadline_to_confirmation_ms`: 저장된 마감부터 확인까지의 UTC 차이
   - `scan_to_confirmation_ms`·`reservation_to_confirmation_ms`: 스캔 시작 또는 예약부터 확인까지의 단조 시계 구간
 
-**대상 공급 불가**
-
-EC2가 아닌 대상을 EC2 격리 대상으로 추정하지 않는다. 대상 공급이 불가능한 경우(해석 거부·TG/SG 없음·대상 둘 이상)는 차단 요인으로 기록하며, Low 판정이나 격리 성공으로 집계하지 않는다.
-
-**측정 재개 조건**
-
-- 기능 검증과 리뷰를 마쳤어도 사용자 보류가 유지되므로 실행하지 않는다. 사용자가 보류를 풀 때 재개한다.
-- AWS SDK만 대역으로 바꾼다. 실제 `receive_threat`의 정규화·위험 평가, 가드레일 4단계, PostgreSQL 예약·백업 commit, #452의 runner/judge는 그대로 둔다.
-- 같은 조건에서 30회 시도한다. 실패·중단·500 ms 초과 시도를 모두 기록한다. 목표를 맞추려고 구간을 줄이거나 시도를 빼지 않는다.
-- 이 표의 시도 시각은 §0의 KST 규칙 대신 **UTC**로 적는다(계측 값 `started_at`·`response_deadline_at`이 UTC다).
-- 판정 기준은 **30회 모두 확인된 성공이고, 각 회차가 500 ms 이하**인 것이다. 하나라도 어긋나면 미충족이다.
-
-| 측정 조건 | 기록 |
+| 항목 | 기록 |
 | --- | --- |
-| 환경 · AWS SDK 대역 방식 | ______ |
-| 코드 버전(commit) · 소스 지문 | ______ · ______ |
-| 회차별 시간(1–30) | 미측정 — 사용자 보류 |
-| 최대값 · 결과별 건수(success/failed/interrupted/unconfirmed/prerequisite_blocked) · 500 ms 초과 건수 | 미측정 |
-| 판정(30/30 확인 성공 · 전 회차 ≤ 500 ms) | 미판정 |
-
-회차별 기록에는 UTC 시각, IncidentID, ExecutionID, 결과, 접수부터 확인까지의 단조 시계 총 소요, phase별 `elapsed_ms`·`delta_ms`를 남긴다. Medium 회차는 위의 Medium 값을 함께 적는다.
-
-**통합 순서와 범위 밖 항목**
-
-- #446과 `workflows`·`dispatcher`가 겹치므로 #446을 먼저 통합하고 #447을 통합한다. 이때 registry의 추가 항목과 #452의 IAM을 유지한다. #447은 executor나 IAM 구조를 바꾸지 않는다.
-- #448(공개 DTO·FE)과 #449는 이 기록의 범위에 들어가지 않는다.
+| 실행 환경(리전·VPC) · 코드 버전(commit) | ______ |
+| 대상 EC2 · TG · 격리 SG | ______ |
+| High 발동 → `EC2_ISOLATE`(UTC · IncidentID · ExecutionID · `outcome` · `confirmed`) | 기록 대기 |
+| High `end_to_end_ms` · phase별 `elapsed_ms`/`delta_ms` | 기록 대기 |
+| Medium 발동 → `EC2_ISOLATE`(UTC · IncidentID · ExecutionID · `outcome` · `confirmed`) | 기록 대기 |
+| Medium `deadline_to_reservation_ms` · `deadline_to_confirmation_ms` · `scan_to_confirmation_ms` · `reservation_to_confirmation_ms` | 기록 대기 |
+| 백업 선행(`backup_committed` → `execution_started`) · AWS 조회로 본 SG 교체·TG 등록 해제 | 기록 대기 |
+| 그 밖의 시도(`failed` · `interrupted` · `unconfirmed` · `prerequisite_blocked`)와 사유 | 기록 대기 |
 
 ---
 
