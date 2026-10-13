@@ -6,13 +6,14 @@
 #   capture_instance_spec      SAVE_INSTANCE_SPEC_JSON   RIGHTSIZING → REVERT_SIZE
 #   capture_nacl_rule_index    RECORD_NACL_RULE_INDEX    NACL_ADD_DENY → NACL_RESTORE
 #   capture_sg_full_rules      SAVE_SG_FULL_RULES_JSON   SG_DELETE_ISOLATED → SG_RECREATE
+#   capture_sg_and_tg_mapping  SAVE_CURRENT_SG_AND_TG_MAPPING  EC2_ISOLATE → EC2_UNISOLATE
 #
 # 이 모듈이 존재하는 이유는 하나다. **자산을 바꾼 뒤에는 되돌릴 근거를 어디서도
 # 얻을 수 없다.** `RUNBOOK_EC2_REVERT_SIZE`는 원복 타입을 백업 레코드에서만
 # 로드하므로(ADR-0004 정책 ③), 여기서 캡처에 실패하면 조치를 시작해서는 안 된다 —
 # Auto-Rollback 셀링포인트가 통째로 근거를 잃는다.
 #
-# 세 캡처가 읽는 것은 다르다. 스펙 JSON과 SG 전체 규칙은 **바꾸기 전 값**을 읽고, NACL
+# 캡처가 읽는 것은 다르다. 스펙 JSON·SG 전체 규칙·SG/TG 매핑은 **바꾸기 전 값**을 읽고, NACL
 # 규칙 index는 삽입이 기존 값을 덮지 않으므로 **넣을 규칙의 좌표**를 적으면서 그 슬롯이
 # 비어 있는지 확인한다. 어느 쪽이든 실패하면 조치를 시작하지 않는다는 계약은 같다
 # (ADR-0008 §1 ①).
@@ -24,9 +25,10 @@
 #   - 예외를 던지지 않는다. AWS 오류는 errors.reason_code_for()의 공용 표로
 #     분류해 사유 코드로 돌려준다 — precheck·실행·롤백이 같은 표를 쓴다.
 #
-# [남은 작업] 나머지 백업 1종(SAVE_CURRENT_SG_AND_TG_MAPPING — EC2_ISOLATE).
-# payload 형태는 executor의 롤백 precheck가 이미 읽고 있으므로 계약은 정해져
-# 있다 — 캡처 함수만 이 파일에 붙이면 된다.
+# 백업 4종(ADR-0008 §5)의 캡처가 전부 이 파일에 있다 — 남은 작업 없음.
+# SG/TG 매핑은 롤백 precheck(UNISOLATE)가 읽던 키(security_group_ids·target_group_arn)를
+# 그대로 두고 ADR-0008 §5의 target_port와 ENI별 목록(network_interfaces)을 더했다
+# (schemas.backups.SgAndTgMappingBackup).
 # ==============================================================================
 
 from __future__ import annotations
@@ -40,8 +42,10 @@ from pydantic import ValidationError
 
 from schemas.backups import (
     BackupType,
+    EniSecurityGroups,
     InstanceSpecBackup,
     NaclRuleIndexBackup,
+    SgAndTgMappingBackup,
     SgFullRulesBackup,
 )
 from schemas.precheck import PrecheckReasonCode
@@ -319,5 +323,149 @@ def capture_sg_full_rules(group_id: str, region: str) -> BackupCapture:
             backup_type,
             R.PRECHECK_INVALID_STATE,
             f"SG 재생성 필수 값 누락: {', '.join(missing) or '알 수 없음'}",
+        )
+    return BackupCapture(backup_type=backup_type, payload=record.model_dump(mode="json"))
+
+
+# ------------------------------------------------------------------ SG·TG 매핑
+# describe_target_health가 **등록되지 않은** 대상에도 돌려주는 설명의 사유 코드.
+# Targets를 지정해 물으면 미등록 대상도 빈 목록이 아니라 unused / Target.NotRegistered
+# 설명으로 온다(ADR-0007 §4 1차 개정 ④ — executor._precheck_isolate와 같은 판별).
+TARGET_NOT_REGISTERED = "Target.NotRegistered"
+
+
+def device_index(eni: Mapping[str, Any]) -> int:
+    """정렬 키. DeviceIndex를 못 읽은 ENI는 맨 뒤로 — 주 ENI(0)를 잘못 고르지 않게.
+
+    가드레일 ④의 주 ENI 선택(executor._primary_eni)도 이 키를 쓴다 — 캡처가 `security_group_ids`로
+    담은 주 ENI와 DryRun이 대는 ENI가 같아야 하기 때문이다.
+    """
+    index = (eni.get("Attachment") or {}).get("DeviceIndex")
+    return index if isinstance(index, int) else 1 << 30
+
+
+def eni_security_groups(instance: Mapping[str, Any]) -> list[EniSecurityGroups]:
+    """인스턴스의 ENI별 SG 목록. DeviceIndex 오름차순 — 첫 원소가 주 ENI다.
+
+    응답 해석만 하는 공개 함수다. 실행(executor.current_eni_security_groups)과 판정이 같은 축을 같은
+    방법으로 읽어야 하기 때문이다 — 캡처가 본 ENI 집합과 원복·판정이 보는 집합이
+    갈리면 "되돌아왔는가"의 답이 자리마다 달라진다. 계약을 벗어난 값(ENI ID 형식·빈
+    SG 목록)이면 ValidationError를 그대로 올린다.
+    """
+    interfaces = [
+        eni for eni in instance.get("NetworkInterfaces") or [] if isinstance(eni, Mapping)
+    ]
+    return [
+        EniSecurityGroups(
+            network_interface_id=eni.get("NetworkInterfaceId"),
+            security_group_ids=[
+                group.get("GroupId")
+                for group in eni.get("Groups") or []
+                if isinstance(group, Mapping)
+            ],
+        )
+        for eni in sorted(interfaces, key=device_index)
+    ]
+
+
+def registered_ports(response: Mapping[str, Any], instance_id: str) -> dict[int, str]:
+    """describe_target_health 응답 → 이 인스턴스가 등록된 포트 → TargetHealth State.
+
+    `Target.NotRegistered` 설명은 등록으로 세지 않는다(위 상수 주석). 응답 해석만 하는
+    공개 함수다 — 실행·판정(executor.current_target_registration)이 같은 판별로 등록
+    여부를 읽어야 하기 때문이다. 조회는 각 모듈이 자기 클라이언트로 한다(_describe_instance
+    주석과 같은 이유로 executor를 import하지 않는다).
+    """
+    ports: dict[int, str] = {}
+    for description in response.get("TargetHealthDescriptions") or []:
+        target = description.get("Target") or {}
+        health = description.get("TargetHealth") or {}
+        if target.get("Id") != instance_id:
+            continue
+        if health.get("Reason") == TARGET_NOT_REGISTERED:
+            continue
+        port = target.get("Port")
+        if isinstance(port, int):
+            ports[port] = str(health.get("State") or "")
+    return ports
+
+
+def _registered_ports(target_group_arn: str, instance_id: str, region: str):
+    """(등록 포트 → State, 사유 코드) 짝."""
+    try:
+        res = aws_client("elbv2", region).describe_target_health(
+            TargetGroupArn=target_group_arn, Targets=[{"Id": instance_id}]
+        )
+    except (ClientError, BotoCoreError) as exc:
+        return None, reason_code_for(exc)
+    return registered_ports(res, instance_id), None
+
+
+def capture_sg_and_tg_mapping(
+    instance_id: str, region: str, *, target_group_arn: str
+) -> BackupCapture:
+    """`SAVE_CURRENT_SG_AND_TG_MAPPING` — EC2_ISOLATE 격리 직전 ENI별 SG와 TG 등록.
+
+    격리는 ENI의 SG를 격리 SG로 **덮어쓰고** TG에서 대상을 뺀다. 조치 뒤에는 원래 SG도
+    등록 포트도 AWS에 다시 물을 수 없으므로 여기서 실패하면 격리를 시작하지 않는다
+    (ADR-0008 §1 ①) — `RUNBOOK_EC2_UNISOLATE`는 원복 값을 이 백업에서만 읽는다.
+
+    **ENI는 전부 담는다.** 격리 실행이 인스턴스의 모든 ENI를 바꾸므로 원복도 ENI 단위다
+    (schemas.backups.SgAndTgMappingBackup의 `network_interfaces`).
+
+    **TG 등록은 포트까지 담는다**(ADR-0008 §5 `target_port`). 등록이 없으면 실패다 —
+    가드레일 ④가 같은 조건(`Target.NotRegistered`는 미등록)으로 이미 거르지만, 판정과
+    실행 사이에 대상이 빠졌을 수 있다(capture_nacl_rule_index가 슬롯을 다시 보는 것과
+    같은 이유). 미등록 대상을 격리하면 재등록할 포트가 없어 해제가 원상 복구가 아니다.
+
+    **같은 TG에 여러 포트로 등록된 인스턴스는 받지 않는다.** 계약의 `target_port`는
+    하나라(ADR-0008 §5), 한 포트만 담으면 해제가 나머지 등록을 되살리지 못한다 — 되돌릴
+    수 없는 변경을 만들지 않도록 시작 전에 멈춘다.
+    """
+    backup_type = BackupType.SAVE_CURRENT_SG_AND_TG_MAPPING.value
+    instance, code = _describe_instance(instance_id, region)
+    if code is not None:
+        return _fail(backup_type, code, f"인스턴스 조회 실패: {instance_id}")
+
+    try:
+        interfaces = eni_security_groups(instance)
+    except ValidationError:
+        return _fail(
+            backup_type,
+            R.PRECHECK_INVALID_STATE,
+            "ENI 식별자 또는 SG 목록을 읽지 못했습니다",
+        )
+    if not interfaces:
+        return _fail(backup_type, R.PRECHECK_INVALID_STATE, "인스턴스에 ENI가 없습니다")
+
+    ports, code = _registered_ports(target_group_arn, instance_id, region)
+    if code is not None:
+        return _fail(backup_type, code, "Target Group 등록 조회 실패")
+    if not ports:
+        return _fail(
+            backup_type,
+            R.PRECHECK_TARGET_NOT_FOUND,
+            "대상이 Target Group에 등록돼 있지 않습니다",
+        )
+    if len(ports) > 1:
+        return _fail(
+            backup_type,
+            R.PRECHECK_INVALID_STATE,
+            f"같은 Target Group에 여러 포트로 등록돼 있습니다({sorted(ports)})",
+        )
+
+    try:
+        record = SgAndTgMappingBackup(
+            security_group_ids=list(interfaces[0].security_group_ids),
+            target_group_arn=target_group_arn,
+            target_port=next(iter(ports)),
+            network_interfaces=interfaces,
+        )
+    except ValidationError as exc:
+        invalid = sorted({str(err["loc"][0]) for err in exc.errors() if err.get("loc")})
+        return _fail(
+            backup_type,
+            R.PRECHECK_INVALID_STATE,
+            f"SG/TG 매핑이 계약을 벗어났습니다: {', '.join(invalid) or '알 수 없음'}",
         )
     return BackupCapture(backup_type=backup_type, payload=record.model_dump(mode="json"))

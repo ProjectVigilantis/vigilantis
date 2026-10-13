@@ -20,13 +20,15 @@ from __future__ import annotations
 from enum import Enum, unique
 from typing import Annotated, Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .runbook_parameters import (
     Ipv4Cidr,
     NaclProtocolNumber,
+    NetworkInterfaceId,
     RuleNumber,
     SecurityGroupId,
+    TargetGroupArn,
     VpcId,
 )
 
@@ -177,3 +179,59 @@ class NaclRuleIndexBackup(BaseModel):
     cidr_block: Ipv4Cidr
     protocol: NaclProtocolNumber
     rule_action: Literal["deny"]
+
+
+# 등록 포트의 범위 — RegisterTargets의 Port 계약(1–65535).
+_TargetPort = Annotated[int, Field(ge=1, le=65535)]
+
+
+class EniSecurityGroups(BaseModel):
+    """ENI 1개의 조치 직전 SG 목록 — `SgAndTgMappingBackup.network_interfaces`의 원소."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    network_interface_id: NetworkInterfaceId
+    # ENI에는 SG가 최소 1개 붙는다(AWS 계약). 빈 목록은 캡처가 무언가를 놓쳤다는 뜻이고,
+    # 그 값으로 원복하면 modify_network_interface_attribute가 파라미터 오류로 거절한다.
+    security_group_ids: list[SecurityGroupId] = Field(min_length=1)
+
+
+class SgAndTgMappingBackup(BaseModel):
+    """`SAVE_CURRENT_SG_AND_TG_MAPPING` payload — `EC2_ISOLATE` 격리 직전 SG·TG 매핑.
+
+    `RUNBOOK_EC2_UNISOLATE`가 읽는 값이다. 격리는 ENI의 SG를 격리 SG로 **덮어쓰므로**
+    원래 SG는 조치 뒤 AWS 어디에도 남지 않는다 — 원복 값은 전부 여기 있어야 한다.
+
+    필수 항목(ADR-0008 §5)
+      - `security_group_ids` — **주 ENI(DeviceIndex 0)의** 원래 SG. 가드레일 ④
+        `_precheck_unisolate`가 이 키를 읽어 DryRun·현존 확인을 한다(ADR-0007 §4).
+      - `target_group_arn` — 재등록할 Target Group.
+      - `target_port` — 등록 포트. **원복 값이다** — 없으면 비기본 포트로 등록돼 있던
+        대상이 TG 기본 포트로 재등록돼 원상 복구가 아니다(ADR-0008 §참조 무결성).
+
+    **신설: `network_interfaces`** — ENI가 여럿인 인스턴스의 ENI별 원래 SG. 격리는
+    인스턴스의 **모든** ENI를 격리 SG로 바꾸므로(보조 ENI를 남기면 그쪽으로 트래픽이
+    그대로 든다), 원복도 ENI 단위여야 한다. 주 ENI 하나의 목록(`security_group_ids`)만
+    있으면 보조 ENI는 주 ENI의 SG로 "복원"되어 원본보다 넓거나 좁은 SG가 붙는다.
+    순서는 DeviceIndex 오름차순이고 **첫 원소가 주 ENI다** — 아래 검증이 그 첫 원소와
+    `security_group_ids`가 같은지 본다(두 자리가 다른 값을 말하면 원천이 둘이 된다).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    security_group_ids: list[SecurityGroupId] = Field(min_length=1)
+    target_group_arn: TargetGroupArn
+    target_port: _TargetPort
+    network_interfaces: list[EniSecurityGroups] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _primary_matches_and_unique(self) -> "SgAndTgMappingBackup":
+        primary = self.network_interfaces[0]
+        if list(primary.security_group_ids) != list(self.security_group_ids):
+            raise ValueError(
+                "security_group_ids는 주 ENI(network_interfaces[0])의 SG 목록과 같아야 합니다"
+            )
+        ids = [eni.network_interface_id for eni in self.network_interfaces]
+        if len(ids) != len(set(ids)):
+            raise ValueError("network_interfaces에 같은 ENI가 두 번 있습니다")
+        return self

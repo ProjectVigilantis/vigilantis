@@ -11,6 +11,7 @@
 #   ⑤ 앱 정책 저장 — 사용자 인라인 한도(합계 2,048자)로는 들어가지 않아 관리형으로 붙는다.
 #      크기가 관리형 한도(6,144자)를 넘기는 PR은 up이 아니라 여기서 깨진다. 전환 전에 붙은
 #      인라인이 남으면 앱 권한이 두 문서의 합집합이 되므로 up이 걷는다.
+#   ⑥ 비용 알림 — Budget은 크레딧을 빼기 전 사용액으로 재고, 이미 선 Budget도 개정된 정의로 맞춘다.
 #
 # scripts/ 는 CI pytest 경로에 없어 여기(루트 tests/)에 둔다. AWS를 부르지 않는다(④⑤는 대역).
 
@@ -629,6 +630,43 @@ def test_down_removes_the_app_user_and_its_managed_policy():
     assert iam.versions == {}
 
 
+class FakeIamWithRoles(FakeIam):
+    """플랫폼 접근 역할(ADR-0010 §3)이 앱 정책을 빌려 붙인 상태."""
+
+    def __init__(self, roles):
+        super().__init__()
+        self.policy_roles = list(roles)
+
+    def get_paginator(self, name):
+        assert name == "list_entities_for_policy"
+        iam = self
+
+        class _Pages:
+            def paginate(self, PolicyArn, EntityFilter):
+                assert EntityFilter == "Role"
+                yield {"PolicyRoles": [{"RoleName": r} for r in iam.policy_roles]}
+        return _Pages()
+
+
+def test_down_stops_first_when_a_role_still_holds_the_app_policy():
+    """정책 삭제는 down의 맨 끝이다 — 역할이 붙잡고 있으면 VPC까지 지운 뒤 DeleteConflict로 멈춘다.
+    무엇이든 지우기 전에 "플랫폼 down 먼저"로 멈춰야 한다."""
+    iam = FakeIamWithRoles(["vigilantis-access"])
+    smoke._ensure_app_user(iam, ACCOUNT, REGION, VPC_ID)
+    iam.writes.clear()
+    # ec2·elbv2·asg 자리는 비워 둔다 — 건드리면 KeyError로 드러난다
+    with pytest.raises(SystemExit, match="플랫폼 down → 스모크 down"):
+        smoke.down({"iam": iam}, ACCOUNT)
+    assert iam.writes == []
+
+
+def test_down_guard_passes_when_no_role_holds_the_app_policy():
+    iam = FakeIamWithRoles([])
+    smoke._ensure_app_user(iam, ACCOUNT, REGION, VPC_ID)
+    assert smoke._roles_holding_app_policy(iam, ACCOUNT) == []
+    assert smoke._roles_holding_app_policy(FakeIamWithRoles(["x"]), ACCOUNT) == []  # 정책이 없으면 볼 것도 없다
+
+
 def test_up_clears_an_inline_policy_left_from_before_the_managed_switch():
     """앱 권한은 관리형 정책 하나여야 한다 — 전환 전에 붙은 인라인이 남으면 권한이 합집합이 된다."""
     iam = FakeIam()
@@ -638,3 +676,75 @@ def test_up_clears_an_inline_policy_left_from_before_the_managed_switch():
     smoke._ensure_app_user(iam, ACCOUNT, REGION, VPC_ID)
     assert iam.inline[smoke.APP_USER] == set()
     assert iam.users[smoke.APP_USER] == {smoke._app_policy_arn(ACCOUNT)}
+
+
+# ⑥ 비용 알림 (ADR-0009 §3 2026-10-12 개정) ----------------------------------------------------
+
+
+class FakeBudgets:
+    def __init__(self, existing: dict | None = None):
+        self.budget = copy.deepcopy(existing)
+        self.created = 0
+        self.updated = 0
+
+    def describe_budget(self, AccountId, BudgetName):
+        if self.budget is None:
+            raise _client_error("NotFoundException", "DescribeBudget")
+        return {"Budget": copy.deepcopy(self.budget)}
+
+    def create_budget(self, AccountId, Budget, NotificationsWithSubscribers):
+        self.budget = copy.deepcopy(Budget)
+        self.created += 1
+
+    def update_budget(self, AccountId, NewBudget):
+        self.budget = copy.deepcopy(NewBudget)
+        self.updated += 1
+
+
+def test_budget_measures_usage_before_credits():
+    """크레딧이 비용을 상쇄하면 사용액이 0에 가깝게 보여 알림이 울리지 않는다 — 크레딧 제외로 만든다."""
+    budgets = FakeBudgets()
+    smoke._ensure_budget(budgets, ACCOUNT, "pm@example.com")
+    assert budgets.created == 1
+    assert budgets.budget["CostTypes"]["IncludeCredit"] is False
+    assert float(budgets.budget["BudgetLimit"]["Amount"]) == float(smoke.BUDGET_USD)
+
+
+def test_existing_budget_from_before_the_amendment_is_brought_up_to_date():
+    """정의가 바뀌기 전(월 $50·크레딧 포함)에 선 Budget은 그대로 두면 바뀐 정의가 계정에 닿지 않는다 — 다시 돌린 up이 맞춘다."""
+    budgets = FakeBudgets({
+        "BudgetName": smoke.BUDGET_NAME,
+        "BudgetLimit": {"Amount": "50.0", "Unit": "USD"},
+        "TimeUnit": "MONTHLY",
+        "BudgetType": "COST",
+        "CostTypes": {"IncludeCredit": True},
+    })
+    smoke._ensure_budget(budgets, ACCOUNT, "pm@example.com")
+    assert budgets.updated == 1
+    assert budgets.budget["CostTypes"]["IncludeCredit"] is False
+    assert float(budgets.budget["BudgetLimit"]["Amount"]) == float(smoke.BUDGET_USD)
+
+    smoke._ensure_budget(budgets, ACCOUNT, "pm@example.com")
+    assert budgets.updated == 1, "정의가 같으면 다시 갱신하지 않는다"
+
+
+def test_existing_budget_with_other_time_unit_is_brought_up_to_date():
+    """update_budget은 정의 전체를 덮어쓰므로 금액·크레딧이 같아도 기간 단위가 다르면 갱신 대상이다."""
+    budgets = FakeBudgets({**smoke._budget_definition(), "TimeUnit": "QUARTERLY"})
+    smoke._ensure_budget(budgets, ACCOUNT, "pm@example.com")
+    assert budgets.updated == 1
+    assert budgets.created == 0
+    assert budgets.budget["TimeUnit"] == "MONTHLY"
+
+
+def test_budget_lookup_error_other_than_not_found_is_not_swallowed():
+    """권한 거절 같은 조회 실패를 '없음'으로 읽으면 이미 선 Budget 위에 생성을 시도한다 — 그대로 올린다."""
+
+    class DeniedBudgets(FakeBudgets):
+        def describe_budget(self, AccountId, BudgetName):
+            raise _client_error("AccessDeniedException", "DescribeBudget")
+
+    budgets = DeniedBudgets()
+    with pytest.raises(ClientError):
+        smoke._ensure_budget(budgets, ACCOUNT, "pm@example.com")
+    assert budgets.created == 0

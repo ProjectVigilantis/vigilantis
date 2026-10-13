@@ -11,6 +11,7 @@ from schemas.backups import (
     BackupType,
     InstanceSpecBackup,
     NaclRuleIndexBackup,
+    SgAndTgMappingBackup,
     SgFullRulesBackup,
 )
 
@@ -208,3 +209,45 @@ def test_sg_backup_rejects_unknown_keys():
     """읽는 쪽이 dict.get으로 더듬지 않게 하려는 계약이다(ADR-0008 §5)."""
     with pytest.raises(ValidationError):
         SgFullRulesBackup(**{**SG_FULL_RULES, "tags": []})
+
+
+# ------------------------------------------------------------------ SG/TG 매핑 (EC2_ISOLATE)
+_MAPPING = {
+    "security_group_ids": ["sg-0aaa111122223333a"],
+    "target_group_arn": "arn:aws:elasticloadbalancing:ap-northeast-2:123456789012:targetgroup/tg/0123456789abcdef",
+    "target_port": 8080,
+    "network_interfaces": [
+        {"network_interface_id": "eni-0aaa111122223333a", "security_group_ids": ["sg-0aaa111122223333a"]},
+        {"network_interface_id": "eni-0bbb444455556666b", "security_group_ids": ["sg-0bbb111122223333b"]},
+    ],
+}
+
+
+def test_sg_tg_mapping_round_trips_as_plain_json():
+    record = SgAndTgMappingBackup(**_MAPPING)
+    assert SgAndTgMappingBackup.model_validate(record.model_dump(mode="json")) == record
+
+
+@pytest.mark.parametrize("field", ["security_group_ids", "target_group_arn", "target_port", "network_interfaces"])
+def test_sg_tg_mapping_restore_inputs_are_required(field):
+    """ADR-0008 §5 필수 3항목 + ENI별 목록 — 하나라도 없으면 해제가 원상 복구가 아니다."""
+    payload = {**_MAPPING}
+    payload.pop(field)
+    with pytest.raises(ValidationError):
+        SgAndTgMappingBackup(**payload)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"security_group_ids": ["sg-0bbb111122223333b"]},  # 주 ENI의 SG가 아니다
+        {"target_port": 0},
+        {"network_interfaces": []},
+        {"network_interfaces": [{"network_interface_id": "eni-0aaa111122223333a", "security_group_ids": []}]},
+        {"extra": 1},
+    ],
+    ids=["primary-mismatch", "port-out-of-range", "no-eni", "eni-without-sg", "unknown-key"],
+)
+def test_sg_tg_mapping_rejects_payloads_that_cannot_restore(overrides):
+    with pytest.raises(ValidationError):
+        SgAndTgMappingBackup(**{**_MAPPING, **overrides})

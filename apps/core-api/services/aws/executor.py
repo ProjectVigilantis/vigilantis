@@ -21,16 +21,18 @@
 #            RUNBOOK_EBS_DELETE_UNATTACHED = execute_ebs_delete_unattached(). (Issue #369)
 #            RUNBOOK_SG_DELETE_ISOLATED  = execute_sg_delete_isolated(). (Issue #368)
 #            RUNBOOK_SG_RECREATE         = execute_sg_recreate().  (Issue #368, §SG 원복)
+#            RUNBOOK_EC2_ISOLATE         = execute_ec2_isolate().  (MVP 체크리스트 §2-1 B2, §격리)
+#            RUNBOOK_EC2_UNISOLATE       = execute_ec2_unisolate(). (MVP 체크리스트 §2-1 B3, §격리 해제)
 #   - precheck과 같은 규약으로 예외를 던지지 않는다. 단계별 결과는 ExecutionStepResult로
 #     돌려주고, 저장·커밋 순서는 workflows.py가 소유한다.
 #   - 원복은 되돌릴 값을 인자로만 받는다 — 백업 레코드 조회는 호출부(workflows) 몫이다.
 #     원천이 하나라는 정책(ADR-0004 정책 ③)은 값을 뽑는 자리가 하나일 때만 성립한다.
 #
 # [남은 작업]
-# 1. 나머지 3종 실행 함수(EC2_ISOLATE·EC2_ENABLE_AUTOSCALING·EC2_UNISOLATE) — 백업이
-#    필요한 런북은 백업 commit 이후에만 진입한다
-# 2. 롤백 나머지 1종(RUNBOOK_EC2_UNISOLATE) 실행도 executor 경유 —
-#    트리거 판단·감시는 rollback.py 담당
+# 1. 나머지 1종 실행 함수(EC2_ENABLE_AUTOSCALING) — 등록 롤백이 없는 단방향 구조 전환이라
+#    백업 없이 들어간다(ADR-0008 §5 표에 없다)
+# 2. 롤백 3종의 트리거 판단·감시는 rollback.py 담당(UNISOLATE는 HUMAN_ONLY라 관제자
+#    [원클릭 해제]로만 발동한다 — dispatcher._AUTO_ROLLBACK_ON_ASSET_CHANGE 밖)
 #
 # 파라미터 계약의 원천은 packages/schemas/runbook_parameters.py의 typed 모델이다(#154).
 # 형식 위반은 ① Schema Check에서 먼저 걸리고, 여기 _validate_params는 같은 모델로 한 번
@@ -53,7 +55,12 @@ from typing import Any, Callable, Mapping, Optional, Protocol
 from botocore.exceptions import BotoCoreError, ClientError, ParamValidationError
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
-from schemas.backups import BackupType, NaclRuleIndexBackup, SgFullRulesBackup
+from schemas.backups import (
+    BackupType,
+    NaclRuleIndexBackup,
+    SgAndTgMappingBackup,
+    SgFullRulesBackup,
+)
 from schemas.executions import (
     ExecutionEffect,
     ExecutionStepResult,
@@ -84,6 +91,7 @@ from schemas.runbook_parameters import (
 )
 from schemas.runbooks import RunbookId
 
+from .backup import device_index, eni_security_groups, registered_ports
 from .client import aws_client
 from .errors import aws_error_code, reason_code_for, run_dry_run
 
@@ -518,11 +526,20 @@ def _instance(instance_id: str, region: str):
 
 
 def _primary_eni(instance: Mapping[str, Any]) -> Optional[str]:
-    for interface in instance.get("NetworkInterfaces", []):
-        eni = interface.get("NetworkInterfaceId")
-        if eni:
-            return eni
-    return None
+    """주 ENI(DeviceIndex 0) — 응답 순서가 아니라 DeviceIndex로 고른다.
+
+    describe_instances는 ENI 순서를 보장하지 않는다. 응답의 첫 ENI를 쓰면 보조 ENI가 앞에
+    온 인스턴스에서 해제 DryRun이 **주 ENI의 SG를 보조 ENI에 대고** 검증한다 — 백업
+    `security_group_ids`는 주 ENI 값이다(backup.eni_security_groups와 같은 정렬 키). #449
+    """
+    interfaces = [
+        interface
+        for interface in instance.get("NetworkInterfaces") or []
+        if isinstance(interface, Mapping) and interface.get("NetworkInterfaceId")
+    ]
+    if not interfaces:
+        return None
+    return min(interfaces, key=device_index)["NetworkInterfaceId"]
 
 
 # --- DryRun 전면 (ADR-0007 §Context 표) ---
@@ -1161,6 +1178,18 @@ STEP_REVOKE_DEFAULT_EGRESS = "REVOKE_DEFAULT_EGRESS"
 STEP_AUTHORIZE_SG_INGRESS = "AUTHORIZE_SG_INGRESS"
 STEP_AUTHORIZE_SG_EGRESS = "AUTHORIZE_SG_EGRESS"
 
+# 격리·해제(EC2_ISOLATE·EC2_UNISOLATE). ENI SG 교체는 ENI가 여럿이어도 **단계 1건**이다 —
+# 한 ENI만 바뀐 채 끊기면 그 단계의 effect가 PARTIAL로 남는다(schemas.executions의
+# FAILED 허용 effect). ENI마다 단계를 나누면 "격리가 어디까지 됐는가"가 여러 행에 흩어져
+# 부분 적용이 effect 하나로 드러나지 않는다.
+STEP_DEREGISTER_TARGET = "DEREGISTER_TARGET"
+STEP_ISOLATE_ENI_SECURITY_GROUPS = "ISOLATE_ENI_SECURITY_GROUPS"
+STEP_RESTORE_ENI_SECURITY_GROUPS = "RESTORE_ENI_SECURITY_GROUPS"
+STEP_REGISTER_TARGET = "REGISTER_TARGET"
+# 해제 전 ENI 대조. STEP_COMPARE_INSTANCE_TYPE과 같은 규칙이다 — 복원으로 **진행하는**
+# 경우에는 기록하지 않고, 대조 자체가 결론인 경우(백업의 ENI가 이 인스턴스에 없음)만 남긴다.
+STEP_COMPARE_NETWORK_INTERFACES = "COMPARE_NETWORK_INTERFACES"
+
 _OP_STOP = "ec2.stop_instances"
 _OP_MODIFY = "ec2.modify_instance_attribute"
 _OP_START = "ec2.start_instances"
@@ -1178,6 +1207,10 @@ _OP_CREATE_SG = "ec2.create_security_group"
 _OP_REVOKE_SG_EGRESS = "ec2.revoke_security_group_egress"
 _OP_AUTHORIZE_SG_INGRESS = "ec2.authorize_security_group_ingress"
 _OP_AUTHORIZE_SG_EGRESS = "ec2.authorize_security_group_egress"
+_OP_MODIFY_ENI = "ec2.modify_network_interface_attribute"
+_OP_DESCRIBE_TARGET_HEALTH = "elbv2.describe_target_health"
+_OP_DEREGISTER_TARGETS = "elbv2.deregister_targets"
+_OP_REGISTER_TARGETS = "elbv2.register_targets"
 
 # 삭제해도 되는 볼륨의 상태 — 부착 목록이 비어 있고 available이어야 한다.
 # 판정(rule_engine.evaluate_ebs)이 본 것과 같은 축이지만, 판정과 실행 사이에 누군가
@@ -1347,10 +1380,18 @@ class _StepLog:
             aws_request_id=_request_id(response),
         )
 
-    def fail(self, exc: BaseException, *, detail: str) -> None:
+    def fail(
+        self,
+        exc: BaseException,
+        *,
+        detail: str,
+        effect: Optional[ExecutionEffect] = None,
+    ) -> None:
+        """effect를 주면 그것을 쓴다 — 한 단계 안에서 호출이 여럿일 때(ENI SG 교체) 앞선
+        호출이 이미 적용됐다면 마지막 예외만으로는 단계의 effect를 정할 수 없다."""
         self._emit(
             status=ExecutionStepStatus.FAILED,
-            effect=_effect_for(exc),
+            effect=effect if effect is not None else _effect_for(exc),
             error_summary=f"{detail}: {_summarize(exc)}"[:_SUMMARY_LIMIT],
             aws_request_id=_request_id(
                 exc.response if isinstance(exc, ClientError) else None
@@ -1376,9 +1417,15 @@ def _ignore_step(step: ExecutionStepResult) -> None:
     """기록하지 않는 호출부(단위 테스트·스모크)의 기본 콜백."""
 
 
-def _abort(log: _StepLog, exc: BaseException, *, detail: str) -> ExecutionOutcome:
+def _abort(
+    log: _StepLog,
+    exc: BaseException,
+    *,
+    detail: str,
+    effect: Optional[ExecutionEffect] = None,
+) -> ExecutionOutcome:
     """실패 단계를 남기고 실행을 끝낸다. 뒤 단계는 시도하지 않는다."""
-    log.fail(exc, detail=detail)
+    log.fail(exc, detail=detail, effect=effect)
     logger.warning(
         "execution_step_failed",
         extra={"aws_operation": log.steps[-1].aws_operation, "detail": detail},
@@ -2463,6 +2510,313 @@ def execute_sg_recreate(
             "original_group_id": original_group_id,
             "new_group_id": new_group_id,
             "group_name": backup.group_name,
+        },
+    )
+    return ExecutionOutcome(steps=tuple(log.steps))
+
+
+# ------------------------------------------------------------------ 격리 (MVP 체크리스트 §2-1 B2)
+def sg_tg_mapping_backup(payload: Mapping[str, Any]) -> Optional[SgAndTgMappingBackup]:
+    """백업 payload를 SG/TG 매핑 계약으로 읽는다. 계약을 벗어나면 None.
+
+    실행·종료 판정이 같은 모델로 읽는다 — sg_full_rules_backup과 같은 자리다. 가드레일 ④
+    `_precheck_unisolate`는 이 계약의 부분집합(`security_group_ids`·`target_group_arn`)을
+    읽으며, 그 두 키의 뜻은 이 모델이 고정한다(주 ENI의 SG · 재등록 TG).
+    """
+    try:
+        return SgAndTgMappingBackup.model_validate(dict(payload or {}))
+    except ValidationError:
+        return None
+
+
+def current_eni_security_groups(instance_id: str, region: str):
+    """(ENI ID → 지금 붙은 SG 목록, 사유 코드) 짝.
+
+    공개 함수다. 해제 전 대조와 격리·해제의 종료 판정이 같은 축을 같은 방법으로 읽어야
+    하기 때문이다(current_nacl_entry와 같은 이유). ENI 목록 해석은 캡처와 같은
+    backup.eni_security_groups가 한다 — 캡처가 본 ENI 집합과 판정이 보는 집합이 갈리지
+    않게 한다.
+
+    **인스턴스가 없는 것과 조회를 못 한 것은 다른 사건이다.** 앞은
+    PRECHECK_TARGET_NOT_FOUND, 뒤는 그 밖의 코드로 나온다.
+    """
+    instance, code = _instance(instance_id, region)
+    if code is not None:
+        return None, code
+    try:
+        interfaces = eni_security_groups(instance)
+    except ValidationError:
+        # 조회는 됐는데 ENI·SG 식별자를 읽지 못했다 — 대조할 축이 없다
+        return None, R.PRECHECK_INVALID_STATE
+    return {
+        eni.network_interface_id: list(eni.security_group_ids) for eni in interfaces
+    }, None
+
+
+def current_target_registration(
+    target_group_arn: str, instance_id: str, port: int, region: str
+):
+    """(그 포트 등록의 TargetHealth State, 사유 코드) 짝. 미등록이면 State가 None이다.
+
+    `draining`도 State로 돌려준다 — 해제가 **접수돼 진행 중**이라는 뜻이라, 격리 판정은
+    그것을 이탈로 세고(volume_delete_accepted가 deleting을 삭제로 세는 것과 같은 결),
+    해제 판정은 등록으로 세지 않는다. 등록 판별은 캡처와 같은 backup.registered_ports다.
+    """
+    res, code = _call(
+        aws_client("elbv2", region).describe_target_health,
+        TargetGroupArn=target_group_arn,
+        Targets=[{"Id": instance_id, "Port": port}],
+    )
+    if code is not None:
+        return None, code
+    return registered_ports(res, instance_id).get(port), None
+
+
+# 등록 해제가 접수돼 진행 중인 대상의 TargetHealth State. 다시 등록되지 않는 한
+# 트래픽을 새로 받지 않으므로 격리 판정은 이것을 이탈로, 해제 판정은 미등록으로 센다.
+TARGET_DRAINING_STATE = "draining"
+
+
+def _swap_eni_groups(
+    ec2: Any,
+    log: _StepLog,
+    assignments: list[tuple[str, list[str]]],
+    *,
+    label: str,
+) -> Optional[ExecutionOutcome]:
+    """ENI마다 SG를 바꾼다(단계 1건 안에서). 실패면 그 결과를, 성공이면 None을 돌려준다.
+
+    **effect는 앞선 ENI가 이미 바뀌었는지로 정한다.** 첫 ENI에서 실패하면 그 예외의
+    분류(_effect_for)가 곧 단계의 effect이고, 하나라도 바뀐 뒤 실패하면 마지막 예외가
+    4xx여도 자산은 이미 바뀌었으므로 PARTIAL이다 — NOT_APPLIED로 적으면 바뀐 ENI가
+    기록상 사라진다.
+
+    남은 ENI는 시도하지 않는다. 실패 이후 단계를 만들지 않는 규칙(ADR-0008 §6)과 같은
+    이유다 — 실패 원인을 모르는 채 다음 ENI를 바꾸면 부분 적용의 범위가 넓어진다.
+    """
+    changed: list[str] = []
+    for eni_id, groups in assignments:
+        try:
+            ec2.modify_network_interface_attribute(
+                NetworkInterfaceId=eni_id, Groups=list(groups)
+            )
+        except (ClientError, BotoCoreError) as exc:
+            detail = f"{label} 실패({eni_id})"
+            if changed:
+                detail += f" — 이미 바뀐 ENI {len(changed)}개: {', '.join(changed)}"
+            return _abort(
+                log,
+                exc,
+                detail=detail,
+                effect=ExecutionEffect.PARTIAL if changed else None,
+            )
+        changed.append(eni_id)
+    return None
+
+
+def execute_ec2_isolate(
+    target_arn: str,
+    *,
+    backup: SgAndTgMappingBackup,
+    isolation_group_id: str,
+    record_step: Optional[StepRecorder] = None,
+) -> ExecutionOutcome:
+    """`RUNBOOK_EC2_ISOLATE` 실행 — TG 등록 해제 → 모든 ENI의 SG를 격리 SG로 교체.
+
+    **SG/TG 매핑 백업이 commit된 뒤에만 부른다**(workflows.store_sg_and_tg_mapping_backup).
+    SG를 덮어쓰고 나면 원래 SG를 AWS 어디에도 물을 수 없어, 백업 없이 격리한 인스턴스는
+    `RUNBOOK_EC2_UNISOLATE`가 되돌릴 근거가 없다(ADR-0004 정책 ③, ADR-0008 §1 ①).
+
+    **무엇을 바꾸는가는 백업이 정한다.** 해제할 등록(TG ARN·포트)과 바꿀 ENI 목록을 백업
+    payload에서 읽는다 — 격리가 바꾼 것과 해제가 되돌리는 것이 같은 집합이어야 하기
+    때문이다(E2E_DEMO_SCENARIOS §T3-7 검증 포인트). 백업은 조치 직전에 같은 인스턴스를
+    조회해 만든 것이므로 이 값이 곧 "지금"의 값이다.
+
+    **순서 — 등록 해제가 먼저다**(E2E_DEMO_SCENARIOS §T3-5 "TG 등록 해제 + ENI SG 교체").
+      ① SG를 먼저 바꾸면 ALB는 헬스체크가 실패로 집계될 때까지(간격 × 임계치) 그 대상에
+         새 요청을 계속 보내고, 그 요청은 격리 SG에 막혀 사용자 오류가 된다. 해제를 먼저
+         하면 ALB가 곧바로 새 요청을 다른 대상(스모크의 `web-2`)으로 돌린다.
+      ② 실패 모드도 이쪽이 낫다. 해제가 거절되면(4xx) 자산은 그대로라 NOT_APPLIED로 깨끗이
+         끝난다. 해제 뒤 SG 교체가 실패하면 서비스에서는 빠졌으나 네트워크는 열린 상태가
+         남는데, 반대 순서의 실패(SG만 격리·TG 등록 유지)는 서비스 오류를 계속 낸다.
+    해제의 연결 드레이닝(deregistration delay)은 **기다리지 않는다** — 이 런북의 주 발동은
+    0.5초 선차단(`PRE_MITIGATION_0_5S`)이고, 드레이닝 중 남은 연결은 곧이은 SG 교체가 끊는
+    것이 격리의 뜻이다.
+
+    **ENI는 전부 바꾼다.** 보조 ENI를 남기면 그쪽 경로로 트래픽이 그대로 든다. ENI 교체는
+    단계 1건이며, 일부만 바뀐 채 실패하면 effect가 PARTIAL이다(_swap_eni_groups).
+
+    **부분 격리의 한계 — MVP 처분, 상태 계약 보강은 Post-MVP(#435).** 일부만 적용된 격리는
+    종료 판정(workflows.judge_ec2_isolate)이 FAILED + CRITICAL로 확정하고 백업 레코드 ID를
+    남긴다. FAILED는 관제자 복구 목록을 열지 않으므로 [원클릭 해제](`EC2_UNISOLATE`)가
+    서지 않고, 복원은 그 백업 값을 근거로 **수동**으로 한다.
+
+    가드레일 ④가 같은 대상을 이미 봤다(_precheck_isolate — ENI DryRun·격리 SG 존재·TG
+    등록). 그래도 등록 여부는 백업 캡처가 조치 직전에 다시 본다 — 미등록이면 캡처가
+    실패해 여기까지 오지 않는다.
+    """
+    target = parse_arn(target_arn)
+    if target is None or target.resource_type != "instance":
+        return _rejected(f"인스턴스 ARN이 아닙니다: {target_arn}")
+    if not _conforms(_SG_ID, isolation_group_id):
+        return _rejected(f"격리 SG ID 형식 위반: {isolation_group_id}")
+
+    instance_id = target.resource_id
+    log = _StepLog(target_arn, record_step)
+    registration = {"Id": instance_id, "Port": backup.target_port}
+
+    # ① TG 등록 해제 — 트래픽을 먼저 뺀다
+    log.begin(1, STEP_DEREGISTER_TARGET, _OP_DEREGISTER_TARGETS)
+    try:
+        response = aws_client("elbv2", target.region).deregister_targets(
+            TargetGroupArn=backup.target_group_arn, Targets=[registration]
+        )
+    except (ClientError, BotoCoreError) as exc:
+        return _abort(log, exc, detail="Target Group 등록 해제 실패")
+    log.succeed(
+        ExecutionEffect.APPLIED,
+        f"TG 등록 해제: {instance_id}:{backup.target_port} (드레이닝 대기 없음)",
+        response=response,
+    )
+
+    # ② 모든 ENI의 SG를 격리 SG 하나로
+    log.begin(2, STEP_ISOLATE_ENI_SECURITY_GROUPS, _OP_MODIFY_ENI)
+    failed = _swap_eni_groups(
+        aws_client("ec2", target.region),
+        log,
+        [(eni.network_interface_id, [isolation_group_id]) for eni in backup.network_interfaces],
+        label="ENI SG 격리",
+    )
+    if failed is not None:
+        return failed
+    log.succeed(
+        ExecutionEffect.APPLIED,
+        f"ENI {len(backup.network_interfaces)}개 SG → {isolation_group_id}",
+    )
+    logger.info(
+        "ec2_isolated",
+        extra={
+            "instance_id": instance_id,
+            "isolation_group_id": isolation_group_id,
+            "network_interfaces": len(backup.network_interfaces),
+        },
+    )
+    return ExecutionOutcome(steps=tuple(log.steps))
+
+
+# ------------------------------------------------------------------ 격리 해제 (MVP 체크리스트 §2-1 B3)
+def execute_ec2_unisolate(
+    target_arn: str,
+    *,
+    backup: SgAndTgMappingBackup,
+    record_step: Optional[StepRecorder] = None,
+) -> ExecutionOutcome:
+    """`RUNBOOK_EC2_UNISOLATE` 실행 — ENI 대조 → ENI별 원래 SG 복원 → TG 재등록.
+
+    **복원 값은 백업 레코드에서만 온다**(ADR-0004 정책 ③ · ADR-0008 §4). 이 함수는 DB를
+    읽지 않고 호출부가 넘긴 계약 모델을 받는다 — execute_sg_recreate와 같은 규약이다.
+    ENI별 SG는 `network_interfaces`, 재등록 좌표는 `target_group_arn`·`target_port`다
+    (포트를 백업에서 읽지 않으면 비기본 포트 등록이 TG 기본 포트로 돌아온다 — ADR-0008
+    §참조 무결성).
+
+    **순서 — 격리의 역순이다.** SG를 먼저 복원하고 그다음 재등록한다.
+      ① 격리 SG가 붙은 채 재등록하면 ALB 헬스체크가 막혀 대상이 unhealthy로 머문다.
+         복원을 먼저 하면 재등록 직후 헬스체크가 통과한다.
+      ② SG 복원이 실패하면 재등록하지 않는다 — 네트워크 상태를 모르는 대상을 서비스에
+         다시 넣지 않는다.
+
+    **ENI 대조 1회**(ADR-0008 §3 — 시간이 아니라 상태로 판단한다). 백업의 ENI가 지금도
+    이 인스턴스에 붙어 있는지 본다. 보조 ENI는 떼어 다른 인스턴스에 붙일 수 있어, 확인
+    없이 ENI ID로 SG를 바꾸면 **다른 자산의 SG를 바꾸게 된다**(Scope Escalation). 하나라도
+    없으면 아무것도 바꾸지 않고 CRITICAL로 멈춘다 — 원복의 원복은 없다(ADR-0008 §6).
+
+    조회를 못 하면 자산을 만지지 않고 **보류**한다(execute_revert_size와 같은 규약).
+    인스턴스가 없으면 되돌릴 대상이 없으므로 실패로 확정한다.
+
+    **제3자 변경 대조(ADR-0008 §3-2의 3분기)는 하지 않는다.** 그 규칙은 `REVERT_SIZE`
+    한정이고, 이 런북의 현물 대조는 가드레일 ④의 "복원 대상 SG 전부 현존"이다(ADR-0008
+    §3-3 표). 격리 SG가 아닌 다른 SG로 바뀌어 있어도 백업 값으로 덮어쓴다.
+    """
+    target = parse_arn(target_arn)
+    if target is None or target.resource_type != "instance":
+        return _rejected(f"인스턴스 ARN이 아닙니다: {target_arn}")
+
+    instance_id = target.resource_id
+    current, code = current_eni_security_groups(instance_id, target.region)
+    if code is not None:
+        if code is R.PRECHECK_TARGET_NOT_FOUND:
+            return ExecutionOutcome(
+                reason_code=code,
+                error_summary=f"해제 대상 인스턴스를 찾을 수 없습니다: {instance_id}",
+            )
+        return _deferred(
+            code,
+            f"ENI 대조 실패로 격리 해제 보류: {code.value}",
+            event="unisolate_deferred",
+            aws_operation=_OP_DESCRIBE,
+        )
+
+    log = _StepLog(target_arn, record_step)
+    missing = [
+        eni.network_interface_id
+        for eni in backup.network_interfaces
+        if eni.network_interface_id not in current
+    ]
+    if missing:
+        log.begin(1, STEP_COMPARE_NETWORK_INTERFACES, _OP_DESCRIBE)
+        detail = (
+            f"백업의 ENI가 이 인스턴스에 없습니다({', '.join(missing)})"
+            " — 다른 자산의 SG를 바꿀 수 있어 복원하지 않음"
+        )
+        log.succeed(ExecutionEffect.NOT_APPLIED, f"{detail}. 해제를 중단합니다")
+        logger.critical(
+            "unisolate_network_interface_missing",
+            extra={"instance_id": instance_id, "missing": ",".join(missing)},
+        )
+        return ExecutionOutcome(
+            steps=tuple(log.steps),
+            reason_code=R.PRECHECK_INVALID_STATE,
+            error_summary=detail[:_SUMMARY_LIMIT],
+        )
+
+    # ① ENI별 원래 SG 복원 — 대조는 기록하지 않는다(STEP_COMPARE_NETWORK_INTERFACES 주석)
+    log.begin(1, STEP_RESTORE_ENI_SECURITY_GROUPS, _OP_MODIFY_ENI)
+    failed = _swap_eni_groups(
+        aws_client("ec2", target.region),
+        log,
+        [
+            (eni.network_interface_id, list(eni.security_group_ids))
+            for eni in backup.network_interfaces
+        ],
+        label="ENI SG 복원",
+    )
+    if failed is not None:
+        return failed
+    log.succeed(
+        ExecutionEffect.APPLIED,
+        f"ENI {len(backup.network_interfaces)}개 SG를 백업 값으로 복원",
+    )
+
+    # ② TG 재등록 — 백업의 포트로
+    log.begin(2, STEP_REGISTER_TARGET, _OP_REGISTER_TARGETS)
+    try:
+        response = aws_client("elbv2", target.region).register_targets(
+            TargetGroupArn=backup.target_group_arn,
+            Targets=[{"Id": instance_id, "Port": backup.target_port}],
+        )
+    except (ClientError, BotoCoreError) as exc:
+        # SG는 이미 복원됐고 서비스에만 빠져 있다 — 원복의 원복은 없으므로 수동 개입이 남는다
+        return _abort(log, exc, detail="Target Group 재등록 실패")
+    log.succeed(
+        ExecutionEffect.APPLIED,
+        f"TG 재등록: {instance_id}:{backup.target_port}",
+        response=response,
+    )
+    logger.info(
+        "ec2_unisolated",
+        extra={
+            "instance_id": instance_id,
+            "network_interfaces": len(backup.network_interfaces),
         },
     )
     return ExecutionOutcome(steps=tuple(log.steps))
