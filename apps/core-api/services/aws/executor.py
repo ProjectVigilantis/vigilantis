@@ -418,7 +418,18 @@ def _call(operation: Callable[..., Any], **kwargs: Any):
     try:
         return operation(**kwargs), None
     except (ClientError, BotoCoreError) as exc:
-        return None, reason_code_for(exc)
+        code = reason_code_for(exc)
+        logger.warning(
+            "aws_call_failed",
+            extra={
+                "aws_operation": getattr(operation, "__name__", type(operation).__name__)[:128],
+                "aws_error_code": (
+                    aws_error_code(exc) if isinstance(exc, ClientError) else type(exc).__name__
+                )[:128],
+                "reason_code": code.value,
+            },
+        )
+        return None, code
 
 
 # ------------------------------------------------------------------ 파라미터 계약
@@ -734,16 +745,72 @@ def _find_entry(acl: Mapping[str, Any], rule_number: int, egress: bool):
     return None
 
 
+def _log_nacl_add_deny_precheck(ctx: _Ctx, acl, code, conflicting_entry) -> None:
+    """판정에 사용한 응답만 남긴다. 사후 재조회나 AWS 원본 응답 전체를 기록하지 않는다."""
+    observed = acl is not None and code is None
+    numbers = sorted(
+        entry["RuleNumber"] for entry in acl.get("Entries", [])
+        if not entry.get("Egress", False)
+    ) if observed else []
+    entry = None
+    if conflicting_entry is not None:
+        entry = {
+            key: value[:128] if isinstance(value, str) else value
+            for key in ("RuleNumber", "Egress", "Protocol", "RuleAction", "CidrBlock", "Ipv6CidrBlock")
+            if (value := conflicting_entry.get(key)) is not None
+        }
+        for key, fields in (("PortRange", ("From", "To")), ("IcmpTypeCode", ("Type", "Code"))):
+            if key in conflicting_entry:
+                entry[key] = {
+                    field: conflicting_entry[key][field]
+                    for field in fields if field in conflicting_entry[key]
+                }
+    detail = (
+        "acl_lookup_unavailable" if not observed else
+        "inbound_rule_number_occupied" if conflicting_entry is not None else
+        "inbound_rule_number_available"
+    )
+    logger.log(
+        logging.WARNING if code is not None or conflicting_entry is not None else logging.INFO,
+        "nacl_add_deny_precheck",
+        extra={
+            "runbook_id": ctx.runbook_id,
+            "target_arn": ctx.target_arn[:512],
+            "precheck_evidence": {
+                "source": "precheck_describe_network_acls",
+                "detail": detail,
+                "reason_code": code.value if code is not None else (
+                    R.PRECHECK_INVALID_STATE.value if conflicting_entry is not None else None
+                ),
+                "parameters": {
+                    key: ctx.params[key]
+                    for key in ("network_acl_id", "rule_number", "cidr_block", "protocol")
+                },
+                "egress": NACL_ADD_DENY_EGRESS,
+                "acl_observed": observed,
+                "snapshot_scope": "inbound_rule_numbers_and_conflicting_entry",
+                "inbound_rule_numbers": numbers[:40] if observed else None,
+                "inbound_rule_count": len(numbers) if observed else None,
+                "inbound_rule_numbers_truncated": len(numbers) > 40,
+                "conflicting_entry": entry,
+            },
+        },
+    )
+
+
 def _precheck_nacl_add_deny(ctx: _Ctx) -> PrecheckOutcome:
     acl, code = _network_acl(ctx.params["network_acl_id"], ctx.target.region)
     if code is not None:
+        _log_nacl_add_deny_precheck(ctx, acl, code, None)
         return _fail(
             ctx, code, verified=["없음(NACL 조회 실패)"], unverified=[_DESCRIBE_MISSES]
         )
     # ADD_DENY는 인바운드 차단 규칙이다 — ADR-0007 §5 파라미터 표에 egress가 없다.
     # 값은 상수 하나로 둔다: 여기와 백업 캡처와 실행이 서로 다른 슬롯을 보면, 백업이
     # 가리키는 규칙과 실제로 넣은 규칙이 갈린다
-    if _find_entry(acl, ctx.params["rule_number"], NACL_ADD_DENY_EGRESS) is not None:
+    conflicting_entry = _find_entry(acl, ctx.params["rule_number"], NACL_ADD_DENY_EGRESS)
+    _log_nacl_add_deny_precheck(ctx, acl, None, conflicting_entry)
+    if conflicting_entry is not None:
         return _fail(
             ctx,
             R.PRECHECK_INVALID_STATE,

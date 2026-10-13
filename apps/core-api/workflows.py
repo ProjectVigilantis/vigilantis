@@ -112,6 +112,7 @@ from schemas.savings import AISavingsEstimate
 from ai import guardrails
 from config import get_settings
 from isolation_timing import current_trace
+from logging_config import log_context
 from db import mappers, models
 from db.repositories import assets as assets_repo
 from db.repositories import executions as executions_repo
@@ -4608,17 +4609,18 @@ def _guard_candidate(
     backup_loader: Optional[executor.BackupRecordLoader] = None,
 ) -> guardrails.GuardrailOutcome:
     """후보 1건에 가드레일 4단계를 1회 수행한다. **DB를 만지지 않는다.**"""
-    return guardrails.run_guardrail_validation(
-        GuardrailValidationRequest(
-            validation_context=GuardrailValidationContext.AI_CANDIDATE,
-            candidate_id=candidate.candidate_id,
-            command_payload=_candidate_command_payload(candidate),
-        ),
-        is_managed_arn=lambda arn: arn in managed,
-        precheck=lambda command: _candidate_precheck(
-            command, backup_loader=backup_loader
-        ),
-    )
+    with log_context(incident_id=candidate.incident_id, candidate_id=candidate.candidate_id):
+        return guardrails.run_guardrail_validation(
+            GuardrailValidationRequest(
+                validation_context=GuardrailValidationContext.AI_CANDIDATE,
+                candidate_id=candidate.candidate_id,
+                command_payload=_candidate_command_payload(candidate),
+            ),
+            is_managed_arn=lambda arn: arn in managed,
+            precheck=lambda command: _candidate_precheck(
+                command, backup_loader=backup_loader
+            ),
+        )
 
 
 def _store_candidate(
