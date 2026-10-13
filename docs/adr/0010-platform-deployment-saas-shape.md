@@ -1,6 +1,6 @@
 # ADR-0010: 플랫폼 배포 — 단일 계정이지만 SaaS 모양으로 (CloudFront 기본 도메인 · 역할 전환 · 수집 범위)
 
-- **Status**: Accepted
+- **Status**: Accepted (2026-10-13 — 안성일 검토 PR #441 · 김세혁 확인 PR #464)
 - **Date**: 2026-10-12
 - **Deciders**: 김세혁(PM/Infra — `INFRA` 담당 결정), 안성일(AI·Architect — FastAPI 아키텍처·DB 검토)
 - **Refs**: [ADR-0006](0006-localstack-team-standard-env.md) §2(IaC Post-MVP) · [ADR-0009](0009-real-aws-smoke-environment.md)(스모크 환경 · 앱 정책) · #435 4-2·6-1
@@ -104,5 +104,5 @@ MVP는 단일 계정(SSOT §MVP 확정 범위)이므로 계정을 가를 수 없
 ## Related
 
 - 스모크 환경과 앱 정책: [ADR-0009](0009-real-aws-smoke-environment.md) §2
-- Post-MVP SaaS 전환·IaC: #438 ①②⑨
+- Post-MVP SaaS 전환·IaC: #438 ①②④⑨
 - 구현: `scripts/provision_platform_aws.py` · `tests/test_provision_platform_aws.py` · `scripts/provision_smoke_aws.py`(`down`의 정리 순서 가드) · `apps/core-api/serve.py` · `apps/core-api/tests/test_serve.py` · `apps/core-api/Dockerfile` · `apps/web/Dockerfile` · `apps/web/next.config.ts`
