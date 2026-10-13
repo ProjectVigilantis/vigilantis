@@ -457,7 +457,7 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 | 7 | **원클릭 해제** | 상세 [승인하고 해제] → [실행] | `RUNBOOK_EC2_UNISOLATE`<br>`trigger_source: USER_APPROVAL` | `EXECUTION_UPDATED` | 4번 백업 레코드로만 원복하는가. TG 재등록과 SG 복원이 **같은 집합**인가. **검증은 백업 payload 4개 필드 전부를 본다** — `security_group_ids`·`target_group_arn`·`target_port`·`network_interfaces`(`SgAndTgMappingBackup`). 「SG 가 복원됐나」만 보면 둘을 놓친다: **포트**(비기본 포트로 등록돼 있던 대상이 TG 기본 포트로 재등록되면 원상 복구가 아니다)와 **ENI별 SG**(주 ENI 목록만 복원하면 보조 ENI 가 주 ENI 의 SG 로 "복원"돼 원본보다 넓거나 좁아진다). 순서는 **SG 복원 → TG 재등록**이다 |
 | 8 | 해제 완료 | Incident 종료 판단 대기 | — | `EXECUTION_UPDATED` `SUCCESS` · `INCIDENT_UPDATED` `AWAITING_CLOSURE` | — |
 
-**분기 — 1분 미응답 자동 격리**: 2번이 `AGENT_WAIT`(Medium)로 간 뒤 관제자가 1분간 응답하지 않으면 `TIMEOUT_ISOLATION_1M`으로 전환해 같은 5번을 발동한다. **초기 판정 결과가 아니라 응답 기한 만료 시 전환이다**(`packages/schemas/events.py`). Low는 이 전환 대상이 아니다. 이 분기는 **선제 차단·자동 격리 발동 경로가 구현돼야 검증 가능**하다(아래 §선행 조건).
+**분기 — 1분 미응답 자동 격리**: 2번이 `AGENT_WAIT`(Medium)로 간 뒤 관제자가 1분간 응답하지 않으면 `TIMEOUT_ISOLATION_1M`으로 전환해 같은 5번을 발동한다. **초기 판정 결과가 아니라 응답 기한 만료 시 전환이다**(`packages/schemas/events.py`). Low는 이 전환 대상이 아니다. 이 분기는 **선제 차단·자동 격리 발동 경로가 구현돼야 검증 가능**하다(아래 §선행 조건). **전환이 이기면 그 인시던트의 대기 제안은 `EXECUTABLE` 을 벗어난다** — 후보 상태 갱신은 `expected` 가 일치할 때만 한 행을 바꾸는 CAS 이고(`incidents.update_candidate_status`), 허용 전이에 `EXECUTABLE→INVALIDATED` 가 있다. 그러므로 **전환 뒤에 도착한 승인은 409 `PROPOSAL_NOT_EXECUTABLE` 로 떨어진다**(`exceptions.py` 의 코드→HTTP 상태 매핑 · 회귀는 `apps/core-api/tests/test_actions_api.py`). 대조할 때 **늦은 승인이 거부된 것을 실패로 적지 않는다** — 승인·거절·타임아웃 중 먼저 확정된 하나만 반영하는 계약의 정상 동작이다. 어느 쪽이 이겼는지는 Incident 축의 `response_mode` 값으로 가린다(2번).
 
 ### T4 · FinOps(P2) — stateless 한정 구조 전환
 
