@@ -140,6 +140,12 @@ def test_certificate_must_cover_the_domain(cert, covered):
     assert platform.certificate_covers(cert, "vigilantis.example") is covered
 
 
+def test_target_groups_drain_in_30_seconds_not_the_300_second_default():
+    # api는 이전 태스크를 내린 뒤 띄우므로 이 대기가 그대로 중단 시간이 된다
+    assert platform.target_group_attributes() == [
+        {"Key": "deregistration_delay.timeout_seconds", "Value": "30"}]
+
+
 def test_down_removes_only_alias_records_that_point_at_this_distribution():
     records = [
         {"Name": "vigilantis.example.", "Type": "A", "AliasTarget": {"DNSName": "d1.cloudfront.net."}},

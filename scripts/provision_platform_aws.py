@@ -129,6 +129,7 @@ TG_WEB = f"{PREFIX}-web"
 ORIGIN_HEADER = "X-Vigilantis-Origin"
 API_PATHS = ("/api/*", "/health")
 WEB_HEALTH_PATH = "/favicon.ico"  # 페이지는 서버에서 API를 부르므로 정적 파일로 생존만 본다
+DEREGISTRATION_DELAY_SECONDS = 30  # TG 연결 비우기 대기 — target_group_attributes
 
 WAF_IPSET = f"{PREFIX}-allow"
 WAF_ACL = f"{PREFIX}-waf"
@@ -260,6 +261,16 @@ def web_container(image: str, *, region: str) -> dict:
         "logConfiguration": {"logDriver": "awslogs", "options": {
             "awslogs-group": LOG_GROUPS["web"], "awslogs-region": region, "awslogs-stream-prefix": "web"}},
     }
+
+
+def target_group_attributes() -> list[dict]:
+    """연결 비우기 대기(deregistration delay)를 기본 300초에서 줄인다.
+
+    api는 겹쳐 뜨지 않게 이전 태스크를 내린 뒤 새 태스크를 띄우므로(service_deployment) 이 대기가
+    그대로 api 중단 시간에 더해진다 — 기본값이면 재배포마다 6–8분 끊겼다(10/13 실측). 요청은 짧은
+    REST라 30초면 비워지고, WS는 끊겨도 화면이 재연결한다.
+    """
+    return [{"Key": "deregistration_delay.timeout_seconds", "Value": str(DEREGISTRATION_DELAY_SECONDS)}]
 
 
 def service_deployment(service: str) -> dict:
@@ -835,13 +846,14 @@ def _ensure_cluster(ecs) -> None:
 
 def _ensure_target_group(elbv2, vpc_id: str, name: str, port: int, health: str) -> str:
     arn = _find_tg(elbv2, name)
-    if arn:
-        return arn
-    arn = elbv2.create_target_group(
-        Name=name, Protocol="HTTP", Port=port, VpcId=vpc_id, TargetType="ip",
-        HealthCheckPath=health, Matcher={"HttpCode": "200-399"}, Tags=_kv_tags(name))["TargetGroups"][0][
-        "TargetGroupArn"]
-    print(f"[platform] TG {name} 생성")
+    if not arn:
+        arn = elbv2.create_target_group(
+            Name=name, Protocol="HTTP", Port=port, VpcId=vpc_id, TargetType="ip",
+            HealthCheckPath=health, Matcher={"HttpCode": "200-399"}, Tags=_kv_tags(name))["TargetGroups"][0][
+            "TargetGroupArn"]
+        print(f"[platform] TG {name} 생성")
+    # 이미 있는 TG에도 매번 맞춘다 — 같은 값이면 바뀌는 것이 없다
+    elbv2.modify_target_group_attributes(TargetGroupArn=arn, Attributes=target_group_attributes())
     return arn
 
 
