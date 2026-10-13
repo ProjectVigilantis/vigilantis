@@ -34,17 +34,23 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional
+from typing import Any
 
 from botocore.exceptions import BotoCoreError, ClientError
 from pydantic import ValidationError
-
+from schemas.autoscaling import (
+    EXECUTION_TAG_KEY,
+    SOURCE_INSTANCE_TAG_KEY,
+    AutoscalingExecutionPlan,
+)
 from schemas.backups import (
     BackupType,
     EniSecurityGroups,
     InstanceSpecBackup,
     NaclRuleIndexBackup,
+    ScaleInProtectionBackup,
     SgAndTgMappingBackup,
     SgFullRulesBackup,
 )
@@ -68,9 +74,9 @@ class BackupCapture:
     """캡처 1회분. payload가 있으면 성공, 없으면 reason_code·detail이 사유다."""
 
     backup_type: str
-    payload: Optional[dict] = None
-    reason_code: Optional[PrecheckReasonCode] = None
-    detail: Optional[str] = None
+    payload: dict | None = None
+    reason_code: PrecheckReasonCode | None = None
+    detail: str | None = None
 
     def __post_init__(self) -> None:
         if (self.payload is None) == (self.reason_code is None):
@@ -105,7 +111,7 @@ def _describe_instance(instance_id: str, region: str):
     return None, R.PRECHECK_TARGET_NOT_FOUND
 
 
-def _optional(value: Any) -> Optional[str]:
+def _optional(value: Any) -> str | None:
     """AWS가 비워 보낸 값은 None으로 둔다 — 빈 문자열을 스펙으로 기록하지 않는다."""
     return value if isinstance(value, str) and value.strip() else None
 
@@ -134,7 +140,7 @@ def capture_instance_spec(instance_id: str, region: str) -> BackupCapture:
     return BackupCapture(backup_type=backup_type, payload=spec.model_dump(mode="json"))
 
 
-def _eip_association_id(instance: Mapping[str, Any]) -> Optional[str]:
+def _eip_association_id(instance: Mapping[str, Any]) -> str | None:
     """EIP 연결 ID. 자동 할당 퍼블릭 IPv4에는 없다 — 그 부재가 곧 "정지하면 주소가
     바뀐다"는 뜻이라(ADR-0008 §5) None을 그대로 남긴다.
 
@@ -163,7 +169,9 @@ def _to_instance_spec(instance: Mapping[str, Any]) -> InstanceSpecBackup:
         ebs_optimized=(
             bool(instance["EbsOptimized"]) if "EbsOptimized" in instance else None
         ),
-        availability_zone=_optional((instance.get("Placement") or {}).get("AvailabilityZone")),
+        availability_zone=_optional(
+            (instance.get("Placement") or {}).get("AvailabilityZone")
+        ),
         vpc_id=_optional(instance.get("VpcId")),
         subnet_id=_optional(instance.get("SubnetId")),
         public_ip_address=_optional(instance.get("PublicIpAddress")),
@@ -195,7 +203,10 @@ def _slot_taken(acl: Mapping[str, Any], rule_number: int, egress: bool) -> bool:
     for entry in acl.get("Entries") or []:
         if not isinstance(entry, Mapping):
             continue
-        if entry.get("RuleNumber") == rule_number and bool(entry.get("Egress")) == egress:
+        if (
+            entry.get("RuleNumber") == rule_number
+            and bool(entry.get("Egress")) == egress
+        ):
             return True
     return False
 
@@ -265,7 +276,9 @@ def capture_nacl_rule_index(
             R.PRECHECK_PARAM_INVALID,
             f"규칙 fingerprint 값이 계약을 벗어났습니다: {', '.join(invalid) or '알 수 없음'}",
         )
-    return BackupCapture(backup_type=backup_type, payload=record.model_dump(mode="json"))
+    return BackupCapture(
+        backup_type=backup_type, payload=record.model_dump(mode="json")
+    )
 
 
 # ------------------------------------------------------------------ SG 전체 규칙
@@ -324,7 +337,9 @@ def capture_sg_full_rules(group_id: str, region: str) -> BackupCapture:
             R.PRECHECK_INVALID_STATE,
             f"SG 재생성 필수 값 누락: {', '.join(missing) or '알 수 없음'}",
         )
-    return BackupCapture(backup_type=backup_type, payload=record.model_dump(mode="json"))
+    return BackupCapture(
+        backup_type=backup_type, payload=record.model_dump(mode="json")
+    )
 
 
 # ------------------------------------------------------------------ SG·TG 매핑
@@ -353,7 +368,9 @@ def eni_security_groups(instance: Mapping[str, Any]) -> list[EniSecurityGroups]:
     SG 목록)이면 ValidationError를 그대로 올린다.
     """
     interfaces = [
-        eni for eni in instance.get("NetworkInterfaces") or [] if isinstance(eni, Mapping)
+        eni
+        for eni in instance.get("NetworkInterfaces") or []
+        if isinstance(eni, Mapping)
     ]
     return [
         EniSecurityGroups(
@@ -401,8 +418,149 @@ def _registered_ports(target_group_arn: str, instance_id: str, region: str):
     return registered_ports(res, instance_id), None
 
 
+# ASG가 기동한 인스턴스에 AWS가 자동으로 다는 태그. 이 태그가 없는 인스턴스는 ASG를 더
+# 조회하지 않는다 — 다른 격리 대상은 호출도 동작도 그대로다.
+ASG_NAME_TAG_KEY = "aws:autoscaling:groupName"
+# 우리 스모크 울타리 태그(schemas.autoscaling.PRESERVED_SOURCE_TAG_KEYS)
+SMOKE_TAG_KEY = "vigilantis:smoke"
+
+# 보조 조치(ASG 보호)의 AWS 호출 한계. 격리가 이 호출 때문에 늘어지지 않게 SDK 재시도와
+# 타임아웃을 좁힌다 — 호출 횟수는 각 함수가 고정한다(반복·대기 없음).
+AUTOSCALING_BOUNDED_CLIENT: dict[str, Any] = {
+    # botocore의 max_attempts는 "재시도 횟수"라 총 시도 수는 total_max_attempts로 못 박는다
+    "retries": {"total_max_attempts": 2, "mode": "standard"},
+    "connect_timeout": 3,
+    "read_timeout": 5,
+}
+# 보호 **쓰기·확인**용 — SDK가 응답 유실을 재전송하지 않는다(총 1회). 재전송 여부는 우리가
+# 확인 조회로 정한다. #446의 기본 클라이언트 설정은 바꾸지 않는다.
+AUTOSCALING_PROTECTION_CLIENT: dict[str, Any] = {
+    "retries": {"total_max_attempts": 1, "mode": "standard"},
+    "connect_timeout": 3,
+    "read_timeout": 5,
+}
+
+# 소유 ASG를 가린 저장 계획 조회 — 호출부(workflows)가 DB로 구현한다. 이 모듈은 DB를 모른다.
+ManagedPlanLookup = Callable[[str], AutoscalingExecutionPlan | None]
+
+
+def _unknown(reason: str) -> ScaleInProtectionBackup:
+    return ScaleInProtectionBackup(status="UNKNOWN", reason=reason)
+
+
+def _not_managed(reason: str) -> ScaleInProtectionBackup:
+    return ScaleInProtectionBackup(status="NOT_MANAGED", reason=reason)
+
+
+def _tag_map(items: Any) -> dict[str, Any]:
+    return {
+        str(tag.get("Key")): tag.get("Value")
+        for tag in items or ()
+        if isinstance(tag, Mapping)
+    }
+
+
+def capture_scale_in_protection(
+    instance: Mapping[str, Any],
+    instance_id: str,
+    region: str,
+    plan_lookup: ManagedPlanLookup | None,
+) -> ScaleInProtectionBackup:
+    """격리 직전 ASG scale-in 보호 상태 관측. **실패해도 예외·캡처 실패가 되지 않는다.**
+
+    보호는 보조 조치라 이 관측이 SG/TG 백업 캡처의 성패를 바꾸지 않는다 — 못 읽으면
+    `UNKNOWN`(보호 안 됨이 아니다)으로 남기고, 그 상태에서는 보호 쓰기도 복원도 없다.
+
+    "managed 스모크 ASG"의 판정은 이름이 아니라 **소유 근거 셋의 일치**다.
+      ① 인스턴스가 ASG 멤버임(`aws:autoscaling:groupName` 태그 + ASG 응답의 Instances)
+      ② ASG의 `vigilantis:execution-id`·`vigilantis:source-instance` 태그
+      ③ 그 실행의 저장된 #446 계획(plan_lookup) — ASG 이름·원본·실행 ID가 같고 스모크 태그가 있음
+    하나라도 다르면 `NOT_MANAGED`다.
+    """
+    asg_name = next(
+        (
+            tag.get("Value")
+            for tag in instance.get("Tags") or ()
+            if isinstance(tag, Mapping) and tag.get("Key") == ASG_NAME_TAG_KEY
+        ),
+        None,
+    )
+    if not isinstance(asg_name, str) or not asg_name.strip():
+        return _not_managed("NOT_ASG_MEMBER")
+
+    try:
+        response = aws_client(
+            "autoscaling", region, **AUTOSCALING_BOUNDED_CLIENT
+        ).describe_auto_scaling_groups(AutoScalingGroupNames=[asg_name])
+    except (ClientError, BotoCoreError):
+        return _unknown("LOOKUP_FAILED")
+    group = next(
+        (
+            item
+            for item in response.get("AutoScalingGroups") or ()
+            if isinstance(item, Mapping)
+            and item.get("AutoScalingGroupName") == asg_name
+        ),
+        None,
+    )
+    if group is None:
+        return _unknown("ASG_NOT_FOUND")
+    member = next(
+        (
+            item
+            for item in group.get("Instances") or ()
+            if isinstance(item, Mapping) and item.get("InstanceId") == instance_id
+        ),
+        None,
+    )
+    if member is None:
+        return _unknown("MEMBERSHIP_UNVERIFIED")
+
+    tags = _tag_map(group.get("Tags"))
+    execution_id = tags.get(EXECUTION_TAG_KEY)
+    source_instance = tags.get(SOURCE_INSTANCE_TAG_KEY)
+    if not isinstance(execution_id, str) or not isinstance(source_instance, str):
+        return _not_managed("NO_OWNERSHIP_TAGS")
+    if plan_lookup is None:
+        return _unknown("PLAN_LOOKUP_UNAVAILABLE")
+    try:
+        plan = plan_lookup(execution_id)
+    except Exception:  # noqa: BLE001 — 보조 관측이라 DB 오류가 캡처를 깨지 않는다
+        logger.warning(
+            "scale_in_plan_lookup_failed", extra={"execution_id": execution_id}
+        )
+        return _unknown("PLAN_LOOKUP_FAILED")
+    if plan is None:
+        return _not_managed("NO_SOURCE_PLAN")
+    smoke = {tag.key: tag.value for tag in plan.source.preserved_tags}.get(
+        SMOKE_TAG_KEY
+    )
+    if (
+        plan.execution_id != execution_id
+        or plan.asg_name != asg_name
+        or plan.source.instance_id != source_instance
+        or smoke is None
+        or tags.get(SMOKE_TAG_KEY) != smoke
+    ):
+        return _not_managed("OWNERSHIP_MISMATCH")
+
+    previous = member.get("ProtectedFromScaleIn")
+    if not isinstance(previous, bool):
+        return _unknown("PRIOR_STATE_UNKNOWN")
+    return ScaleInProtectionBackup(
+        status="MANAGED",
+        asg_name=asg_name,
+        previous_protected=previous,
+        autoscaling_execution_id=execution_id,
+    )
+
+
 def capture_sg_and_tg_mapping(
-    instance_id: str, region: str, *, target_group_arn: str
+    instance_id: str,
+    region: str,
+    *,
+    target_group_arn: str,
+    plan_lookup: ManagedPlanLookup | None = None,
 ) -> BackupCapture:
     """`SAVE_CURRENT_SG_AND_TG_MAPPING` — EC2_ISOLATE 격리 직전 ENI별 SG와 TG 등록.
 
@@ -460,6 +618,10 @@ def capture_sg_and_tg_mapping(
             target_group_arn=target_group_arn,
             target_port=next(iter(ports)),
             network_interfaces=interfaces,
+            # 보조 관측 — 실패·미확인이어도 위 SG/TG 캡처는 그대로 성공이다
+            scale_in_protection=capture_scale_in_protection(
+                instance, instance_id, region, plan_lookup
+            ),
         )
     except ValidationError as exc:
         invalid = sorted({str(err["loc"][0]) for err in exc.errors() if err.get("loc")})
@@ -468,4 +630,6 @@ def capture_sg_and_tg_mapping(
             R.PRECHECK_INVALID_STATE,
             f"SG/TG 매핑이 계약을 벗어났습니다: {', '.join(invalid) or '알 수 없음'}",
         )
-    return BackupCapture(backup_type=backup_type, payload=record.model_dump(mode="json"))
+    return BackupCapture(
+        backup_type=backup_type, payload=record.model_dump(mode="json")
+    )

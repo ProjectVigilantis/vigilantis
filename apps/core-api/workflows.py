@@ -40,13 +40,19 @@ import logging
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta, timezone
-from typing import Optional
+from datetime import UTC, datetime, timedelta
 
+from ai import guardrails
+from config import get_settings
+from db import mappers, models
+from db.repositories import assets as assets_repo
+from db.repositories import executions as executions_repo
+from db.repositories import guardrails as guardrails_repo
+from db.repositories import incidents as incidents_repo
+from exceptions import ApiError
+from identifiers import canonical_id
+from incident_analysis import analysis_result_from
 from pydantic import ValidationError
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
-
 from schemas.agents import AgentGraphOutput
 from schemas.api.actions import (
     ExecuteActionRequest,
@@ -55,18 +61,27 @@ from schemas.api.actions import (
 )
 from schemas.api.assets import AssetType, RelationType
 from schemas.api.errors import ErrorCode
+from schemas.api.incidents import (
+    IncidentCategory,
+    IncidentStatus,
+    ResolutionJudgement,
+    ResponseMode,
+)
 from schemas.asset_roles import ROLE_ISOLATION, ROLE_TAG_KEY
-from schemas.api.incidents import IncidentStatus, ResolutionJudgement, IncidentCategory, ResponseMode
 from schemas.autoscaling import AutoscalingExecutionPlan
-from schemas.incidents import AgentWaitSchedule
-from schemas.backups import InstanceSpecBackup, NaclRuleIndexBackup
+from schemas.backups import (
+    InstanceSpecBackup,
+    NaclRuleIndexBackup,
+    ScaleInProtectionBackup,
+    ScaleInProtectionResult,
+)
 from schemas.candidates import CandidateStatus, RunbookCandidateData
 from schemas.executions import (
     ASSET_MAY_HAVE_CHANGED_EFFECTS,
     EXECUTION_NON_TERMINAL_STATUSES,
+    EXECUTION_RECOVERABLE_STATUSES,
     EXECUTION_SETTLED_STATUSES,
     EXECUTION_TERMINAL_STATUSES,
-    EXECUTION_RECOVERABLE_STATUSES,
     ExecutionEffect,
     ExecutionStepResult,
     ExecutionStepStatus,
@@ -77,7 +92,12 @@ from schemas.guardrails import (
     GuardrailValidationRequest,
     GuardrailValidationResult,
 )
-from schemas.incidents import AGENT_TERMINAL_STATUSES, INCIDENT_RESOLVABLE_STATUSES, AgentInvocationStatus
+from schemas.incidents import (
+    AGENT_TERMINAL_STATUSES,
+    INCIDENT_RESOLVABLE_STATUSES,
+    AgentInvocationStatus,
+    AgentWaitSchedule,
+)
 from schemas.precheck import (
     PrecheckOutcome,
     PrecheckReasonCode,
@@ -98,20 +118,11 @@ from schemas.runbooks import (
     TriggerSource,
 )
 from schemas.savings import AISavingsEstimate
-
-from ai import guardrails
-from config import get_settings
-from db import mappers, models
-from db.repositories import assets as assets_repo
-from db.repositories import executions as executions_repo
-from db.repositories import guardrails as guardrails_repo
-from db.repositories import incidents as incidents_repo
-from exceptions import ApiError
-from identifiers import canonical_id
-from incident_analysis import analysis_result_from
 from services.aws import backup, executor, rollback
 from services.aws.errors import is_retryable
 from services.aws.executor import parse_arn
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger("vigilantis.workflow")
 
@@ -230,7 +241,7 @@ def _recoverable_origin(
 
 def _recovery_backup_record_id(
     db: Session, origin: models.ActionExecution
-) -> Optional[str]:
+) -> str | None:
     """관제자 복구 접수가 자식에 결속할 백업 레코드 id — 원본 실행에서만 조회한다. (Issue #241)
 
     **요청은 원복 값의 출처를 나르지 않는다.** ExecuteActionRequest에 backup_record_id가
@@ -378,8 +389,11 @@ def reserve_execution(
 
 
 def resolve_incident(
-    db: Session, incident_id: str, resolution: ResolutionJudgement,
-    *, resolution_note: str | None = None,
+    db: Session,
+    incident_id: str,
+    resolution: ResolutionJudgement,
+    *,
+    resolution_note: str | None = None,
 ) -> bool:
     """관제자 종료 처리 — 상태 확인 → 잔여 제안 무효화 → RESOLVED 전이.
 
@@ -401,12 +415,14 @@ def resolve_incident(
     executions = executions_repo.list_by_incident(db, incident_id)
     if any(item.status in EXECUTION_NON_TERMINAL_STATUSES for item in executions):
         raise ApiError(ErrorCode.INCIDENT_NOT_RESOLVABLE)
-    if incident.category is IncidentCategory.SECOPS:
-        # 분석이 결과를 더 만들 수 있는 동안에는 사용자 종료를 확정하지 않는다.
-        # 선제 차단 엔진 연결 시 FAILED + PENDING 등이 분석 스캔에서 빠지지 않는지
-        # 이 게이트와 함께 확인해야 한다. 현재 정상 경로에는 해당 조합이 없다.
-        if incident.agent_invocation_status not in AGENT_TERMINAL_STATUSES:
-            raise ApiError(ErrorCode.INCIDENT_NOT_RESOLVABLE)
+    # 분석이 결과를 더 만들 수 있는 동안에는 사용자 종료를 확정하지 않는다.
+    # 선제 차단 엔진 연결 시 FAILED + PENDING 등이 분석 스캔에서 빠지지 않는지
+    # 이 게이트와 함께 확인해야 한다. 현재 정상 경로에는 해당 조합이 없다.
+    if (
+        incident.category is IncidentCategory.SECOPS
+        and incident.agent_invocation_status not in AGENT_TERMINAL_STATUSES
+    ):
+        raise ApiError(ErrorCode.INCIDENT_NOT_RESOLVABLE)
 
     # 남은 제안을 함께 정리한다 — 상세 응답 계약이 RESOLVED에 빈 제안 목록을
     # 요구하므로(api/incidents.py), 두고 가면 종료 직후 조회가 500이 된다
@@ -421,7 +437,10 @@ def resolve_incident(
         )
 
     moved = incidents_repo.resolve_incident(
-        db, incident_id, expected=incident.status, resolution=resolution,
+        db,
+        incident_id,
+        expected=incident.status,
+        resolution=resolution,
         resolution_note=resolution_note,
     )
     if not moved:
@@ -442,10 +461,10 @@ def resolve_incident(
 class BackupOutcome:
     """record가 있으면 백업이 확보된 것 — AWS 변경 호출은 그 이후에만 시작한다."""
 
-    record: Optional[models.BackupRecord] = None
-    created: bool = False           # False = 이미 결속돼 있던 백업을 그대로 쓴 것
-    reason_code: Optional[PrecheckReasonCode] = None
-    detail: Optional[str] = None
+    record: models.BackupRecord | None = None
+    created: bool = False  # False = 이미 결속돼 있던 백업을 그대로 쓴 것
+    reason_code: PrecheckReasonCode | None = None
+    detail: str | None = None
 
     @property
     def stored(self) -> bool:
@@ -476,7 +495,8 @@ def store_instance_spec_backup(db: Session, execution_id: str) -> BackupOutcome:
     execution = executions_repo.lock_execution(db, execution_id)
     if execution is None:
         return _backup_failed(
-            PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND, "실행 레코드를 찾을 수 없습니다"
+            PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND,
+            "실행 레코드를 찾을 수 없습니다",
         )
     if execution.runbook_id is not RunbookId.RUNBOOK_EC2_RIGHTSIZING:
         # 배선 오류다 — 스펙 JSON 백업을 쓰는 런북은 RIGHTSIZING 하나뿐이다
@@ -543,7 +563,8 @@ def store_nacl_rule_index_backup(
     execution = executions_repo.lock_execution(db, execution_id)
     if execution is None:
         return _backup_failed(
-            PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND, "실행 레코드를 찾을 수 없습니다"
+            PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND,
+            "실행 레코드를 찾을 수 없습니다",
         )
     if execution.runbook_id is not RunbookId.RUNBOOK_NACL_ADD_DENY:
         # 배선 오류다 — 규칙 index 백업을 쓰는 런북은 NACL_ADD_DENY 하나뿐이다
@@ -612,7 +633,8 @@ def store_sg_full_rules_backup(db: Session, execution_id: str) -> BackupOutcome:
     execution = executions_repo.lock_execution(db, execution_id)
     if execution is None:
         return _backup_failed(
-            PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND, "실행 레코드를 찾을 수 없습니다"
+            PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND,
+            "실행 레코드를 찾을 수 없습니다",
         )
     if execution.runbook_id is not RunbookId.RUNBOOK_SG_DELETE_ISOLATED:
         # 배선 오류다 — SG 전체 규칙 백업을 쓰는 런북은 SG_DELETE_ISOLATED 하나뿐이다
@@ -656,6 +678,170 @@ def store_sg_full_rules_backup(db: Session, execution_id: str) -> BackupOutcome:
     return BackupOutcome(record=record, created=True)
 
 
+def _prefetch_autoscaling_plans(db: Session) -> dict[str, AutoscalingExecutionPlan]:
+    """#446 실행의 저장 계획을 **AWS 호출 전에** 전부 읽어 둔다(execution_id → 계획).
+
+    캡처의 소유 대조(capture_scale_in_protection)가 이 dict만 쓰므로 AWS 호출 중에 DB 조회가
+    끼지 않는다. 나이·개수로 자르지 않는다 — 자르면 오래 살아 있는 승인 ASG가 무관한 뒤 실행
+    때문에 보호를 잃는다. 계약을 벗어난 계획은 건너뛴다(소유를 증명하지 못한 것이다).
+    """
+    plans: dict[str, AutoscalingExecutionPlan] = {}
+    for execution_id, stored in executions_repo.list_autoscaling_plans(db):
+        try:
+            plans[execution_id] = AutoscalingExecutionPlan.model_validate(stored)
+        except ValidationError:
+            continue
+    return plans
+
+
+def _parse_protection_result(stored: dict | None) -> ScaleInProtectionResult | None:
+    """저장된 보호 결과 → 계약 모델. 없거나 계약을 벗어나면 None(= 복원 근거 아님)."""
+    if not stored:
+        return None
+    try:
+        return ScaleInProtectionResult.model_validate(stored)
+    except ValidationError:
+        logger.warning("scale_in_protection_result_invalid")
+        return None
+
+
+def _store_protection_result(
+    db: Session, execution_id: str, result: ScaleInProtectionResult
+) -> None:
+    """보호 결과를 실행 행에 덮어쓰고 commit한다(commit 소유는 이 워크플로). 잔여는 로그에도 남긴다.
+
+    의미는 **한 번의 시도** 안의 "의도 → 최종 결과"다. 쓰기 직전 의도(UNKNOWN, 쓰기가 시작됐을 수
+    있음)를 먼저 commit하고, 같은 시도의 최종 결과(확정 거절 포함)가 그것을 덮어쓴다. 단계를 남긴
+    실행은 다시 돌리지 않으므로(ADR-0008) 시도 사이로 근거를 이어 붙이지 않는다.
+    """
+    executions_repo.set_scale_in_protection_result(
+        db, execution_id, result.model_dump(mode="json")
+    )
+    db.commit()
+    if result.residual:
+        logger.warning(
+            "scale_in_protection_residual",
+            extra={
+                "execution_id": execution_id,
+                "phase": result.phase,
+                "outcome": result.outcome,
+                "reason": result.reason,
+                "asg_name": result.asg_name,
+            },
+        )
+
+
+def _best_effort_protection(
+    db: Session, execution_id: str, action: Callable[[], ScaleInProtectionResult | None]
+) -> None:
+    """보조 조치 1회. **어떤 실패도 호출한 격리·해제의 결과를 바꾸지 않는다.**
+
+    기록이 남지 못한 실패는 로그(CRITICAL)로만 남는다 — 이미 commit된 시도 의도 기록이 있으면
+    그것이 잔여 근거다.
+    """
+    try:
+        result = action()
+        if result is not None:
+            _store_protection_result(db, execution_id, result)
+    except Exception:
+        db.rollback()
+        logger.critical(
+            "scale_in_protection_unrecorded",
+            extra={"execution_id": execution_id},
+            exc_info=True,
+        )
+
+
+def _interrupted_protection_residual(
+    db: Session,
+    execution: models.ActionExecution,
+    protection: ScaleInProtectionBackup | None,
+    *,
+    phase: str,
+) -> None:
+    """잔여 기록은 보조라 실패해도 판정(SUCCESS)을 막지 않는다 — 안쪽 함수의 설명을 본다.
+
+    SAVEPOINT 안에서 쓴다: SQL 오류가 나도 바깥 트랜잭션은 살아 있어 이어지는 종료(close)가
+    InFailedSqlTransaction 으로 깨지지 않는다.
+    """
+    try:
+        with db.begin_nested():
+            _add_interrupted_residual(db, execution, protection, phase=phase)
+    except Exception:
+        logger.critical(
+            "scale_in_protection_residual_unrecorded",
+            extra={"execution_id": execution.execution_id, "phase": phase},
+            exc_info=True,
+        )
+
+
+def _add_interrupted_residual(
+    db: Session,
+    execution: models.ActionExecution,
+    protection: ScaleInProtectionBackup | None,
+    *,
+    phase: str,
+) -> None:
+    """판정이 SUCCESS로 확정하는 끊긴 실행에서, 보조 조치 기록이 없을 때 잔여를 명시한다.
+
+    **AWS를 부르지도 마저 하지도 않는다**(판정이 실행이 되지 않는다 — ADR-0008 §7). 결과만
+    저장하며 commit은 close_execution이 한다. 옛 백업(None)은 UNKNOWN과 같다(ADR-0008 §8-1).
+    보호가 필요 없던 경우(NOT_MANAGED)와,
+    복원이라면 원본에 "쓰기가 시작됐을 수 있다"는 근거가 없던 경우는 남기지 않는다.
+    """
+    target = parse_arn(execution.target_arn)
+    if target is None:
+        return
+    if (
+        executions_repo.get_scale_in_protection_result(db, execution.execution_id)
+        is not None
+    ):
+        return
+    if phase == "PROTECT":
+        needed = protection is None or protection.status in ("UNKNOWN", "MANAGED")
+    else:
+        parent = (
+            _parse_protection_result(
+                executions_repo.get_scale_in_protection_result(
+                    db, execution.parent_execution_id
+                )
+            )
+            if execution.parent_execution_id
+            else None
+        )
+        needed = (
+            protection is not None
+            and protection.status == "MANAGED"
+            and parent is not None
+            and parent.may_have_changed_protection
+        )
+    if not needed:
+        return
+    result = ScaleInProtectionResult(
+        phase=phase,
+        outcome="NOT_ATTEMPTED",
+        reason="EXECUTION_INTERRUPTED",
+        asg_name=protection.asg_name if protection is not None else None,
+        instance_id=target.resource_id,
+        write_may_have_begun=False,
+        residual=True,
+        observed_at=datetime.now(UTC),
+    )
+    executions_repo.set_scale_in_protection_result(
+        db, execution.execution_id, result.model_dump(mode="json")
+    )
+    logger.warning(
+        "scale_in_protection_residual",
+        extra={
+            "execution_id": execution.execution_id,
+            "phase": phase,
+            "outcome": result.outcome,
+            "reason": result.reason,
+            "asg_name": result.asg_name,
+        },
+    )
+
+
 def store_sg_and_tg_mapping_backup(
     db: Session, execution_id: str, params: Ec2IsolateParameters
 ) -> BackupOutcome:
@@ -675,7 +861,8 @@ def store_sg_and_tg_mapping_backup(
     execution = executions_repo.lock_execution(db, execution_id)
     if execution is None:
         return _backup_failed(
-            PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND, "실행 레코드를 찾을 수 없습니다"
+            PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND,
+            "실행 레코드를 찾을 수 없습니다",
         )
     if execution.runbook_id is not RunbookId.RUNBOOK_EC2_ISOLATE:
         # 배선 오류다 — SG/TG 매핑 백업을 쓰는 런북은 EC2_ISOLATE 하나뿐이다
@@ -695,8 +882,13 @@ def store_sg_and_tg_mapping_backup(
             f"인스턴스 ARN이 아닙니다: {execution.target_arn}",
         )
 
+    # ASG 소유 대조용 저장 계획은 AWS 호출 전에 읽어 둔다 — 캡처 중에는 DB를 읽지 않는다
+    plans = _prefetch_autoscaling_plans(db)
     capture = backup.capture_sg_and_tg_mapping(
-        target.resource_id, target.region, target_group_arn=params.target_group_arn
+        target.resource_id,
+        target.region,
+        target_group_arn=params.target_group_arn,
+        plan_lookup=plans.get,
     )
     if not capture.captured:
         return _backup_failed(capture.reason_code, capture.detail or "")
@@ -751,8 +943,8 @@ class ExecutionRunOutcome:
     """
 
     succeeded: bool
-    reason_code: Optional[PrecheckReasonCode] = None
-    error_summary: Optional[str] = None
+    reason_code: PrecheckReasonCode | None = None
+    error_summary: str | None = None
     steps: tuple[ExecutionStepResult, ...] = ()
     deferred: bool = False
 
@@ -778,7 +970,9 @@ def _step_recorder(db: Session, execution_id: str):
     def record(step: ExecutionStepResult) -> None:
         if step.status is ExecutionStepStatus.IN_PROGRESS:
             executions_repo.add_step(db, step, execution_id=execution_id)
-        elif not executions_repo.update_step_result(db, step, execution_id=execution_id):
+        elif not executions_repo.update_step_result(
+            db, step, execution_id=execution_id
+        ):
             # AWS 호출 직전에 같은 sequence의 IN_PROGRESS 행이 반드시 먼저 저장된다.
             # 없다면 기록 순서가 깨진 것이므로 조용히 넘기지 않는다.
             logger.warning(
@@ -792,7 +986,7 @@ def _step_recorder(db: Session, execution_id: str):
 
 def _rightsizing_target_type(
     db: Session, execution: models.ActionExecution
-) -> Optional[str]:
+) -> str | None:
     """조치가 적용할 인스턴스 타입.
 
     Guardrail PASS의 불변 실행 명령(validated_command)이 채워지면 그것이 원천이다.
@@ -814,7 +1008,10 @@ def _rightsizing_target_type(
     except ValidationError:
         logger.warning(
             "candidate_contract_invalid",
-            extra={"candidate_id": candidate.candidate_id, "runbook_id": candidate.runbook_id.value},
+            extra={
+                "candidate_id": candidate.candidate_id,
+                "runbook_id": candidate.runbook_id.value,
+            },
         )
         return None
     return getattr(data.parameters, "target_instance_type", None)
@@ -893,14 +1090,14 @@ def run_rightsizing_execution(db: Session, execution_id: str) -> ExecutionRunOut
 
 def _nacl_add_deny_params(
     db: Session, execution: models.ActionExecution
-) -> Optional[NaclAddDenyParameters]:
+) -> NaclAddDenyParameters | None:
     """조치가 넣을 deny 규칙의 실행 파라미터."""
     return _nacl_execution_params(db, execution, NaclAddDenyParameters)
 
 
 def _nacl_restore_params(
     db: Session, execution: models.ActionExecution
-) -> Optional[NaclRestoreParameters]:
+) -> NaclRestoreParameters | None:
     """해제할 규칙 슬롯의 실행 파라미터 — 지울 값이 아니라 **백업을 찾는 좌표**다.
 
     지울 규칙의 fingerprint는 여기 없다. 그것은 백업 레코드에서만 온다(ADR-0008 §5 —
@@ -1041,10 +1238,10 @@ def run_nacl_add_deny_execution(db: Session, execution_id: str) -> ExecutionRunO
 
 
 def _usable_nacl_backup(
-    record: Optional[models.BackupRecord],
+    record: models.BackupRecord | None,
     execution: models.ActionExecution,
     params: NaclRestoreParameters,
-) -> Optional[str]:
+) -> str | None:
     """이 레코드로 이 슬롯을 해제해도 되는가. 안 되면 사유, 되면 None.
 
     새로 찾은 레코드는 조회 조건이 이미 걸렀지만, 이전 시도가 결속해 둔 레코드는 조회를
@@ -1083,7 +1280,8 @@ def load_nacl_restore_backup(
     execution = executions_repo.lock_execution(db, execution_id)
     if execution is None:
         return _backup_failed(
-            PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND, "실행 레코드를 찾을 수 없습니다"
+            PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND,
+            "실행 레코드를 찾을 수 없습니다",
         )
     if execution.runbook_id is not RunbookId.RUNBOOK_NACL_RESTORE:
         # 배선 오류다 — 대상 기준으로 백업을 찾아 결속하는 런북은 NACL_RESTORE 하나뿐이다
@@ -1287,10 +1485,10 @@ def run_sg_delete_isolated_execution(
 class IsolationParameters:
     """resolve_isolation_parameters의 결과 — 두 값이 모두 있거나, 거절 사유가 있다."""
 
-    target_group_arn: Optional[str] = None
-    isolation_group_id: Optional[str] = None
-    reason_code: Optional[PrecheckReasonCode] = None
-    detail: Optional[str] = None
+    target_group_arn: str | None = None
+    isolation_group_id: str | None = None
+    reason_code: PrecheckReasonCode | None = None
+    detail: str | None = None
 
     def __post_init__(self) -> None:
         values = (self.target_group_arn, self.isolation_group_id)
@@ -1307,7 +1505,9 @@ class IsolationParameters:
     def as_lookups(self) -> dict[str, str]:
         """build_precheck_parameters의 조회 키워드로 — RIGHTSIZING의 current_instance_type 자리."""
         if not self.resolved:
-            raise ValueError("정해지지 않은 격리 파라미터를 실행 파라미터로 옮길 수 없습니다")
+            raise ValueError(
+                "정해지지 않은 격리 파라미터를 실행 파라미터로 옮길 수 없습니다"
+            )
         return {
             "target_group_arn": self.target_group_arn,
             "isolation_group_id": self.isolation_group_id,
@@ -1350,10 +1550,15 @@ def resolve_isolation_parameters(db: Session, target_arn: str) -> IsolationParam
     target = parse_arn(target_arn)
     if target is None or target.resource_type != "instance":
         return _isolation_unresolved(
-            PrecheckReasonCode.PRECHECK_PARAM_INVALID, f"인스턴스 ARN이 아닙니다: {target_arn}"
+            PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+            f"인스턴스 ARN이 아닙니다: {target_arn}",
         )
     asset = assets_repo.get_asset_by_arn(db, target_arn)
-    if asset is None or asset.absent_since is not None or asset.asset_type is not AssetType.EC2:
+    if (
+        asset is None
+        or asset.absent_since is not None
+        or asset.asset_type is not AssetType.EC2
+    ):
         return _isolation_unresolved(
             PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND,
             f"격리 대상 EC2가 수집된 자산에 없습니다: {target.resource_id}",
@@ -1386,7 +1591,9 @@ def resolve_isolation_parameters(db: Session, target_arn: str) -> IsolationParam
         )
     isolation_groups = sorted(
         group.resource_id
-        for group in assets_repo.list_assets(db, asset_type=AssetType.SG, regions=[asset.region])
+        for group in assets_repo.list_assets(
+            db, asset_type=AssetType.SG, regions=[asset.region]
+        )
         if group.account_id == asset.account_id
         and (group.spec or {}).get("vpc_id") == vpc_id
         and ((group.spec or {}).get("tags") or {}).get(ROLE_TAG_KEY) == ROLE_ISOLATION
@@ -1409,7 +1616,7 @@ def resolve_isolation_parameters(db: Session, target_arn: str) -> IsolationParam
 
 def _ec2_isolate_params(
     db: Session, execution: models.ActionExecution
-) -> Optional[Ec2IsolateParameters]:
+) -> Ec2IsolateParameters | None:
     """격리의 실행 파라미터 — 격리 SG(`isolation_group_id`)와 등록을 뺄 TG.
 
     두 값은 AI가 정하지 않는다(`Ec2IsolateCandidateParameters`가 비어 있는 이유). 원천은
@@ -1488,14 +1695,31 @@ def run_ec2_isolate_execution(db: Session, execution_id: str) -> ExecutionRunOut
             "결속된 백업이 SG/TG 매핑 계약을 벗어났거나 다른 Target Group을 가리킵니다",
         )
 
+    target_arn = (
+        execution.target_arn
+    )  # 단계 commit 뒤 expire된 ORM 객체를 AWS 호출 중에 다시 읽지 않는다
     outcome = executor.execute_ec2_isolate(
-        execution.target_arn,
+        target_arn,
         backup=mapping,
         isolation_group_id=params.isolation_group_id,
         record_step=_step_recorder(db, execution_id),
     )
     if not outcome.succeeded:
         return _run_failed(outcome.reason_code, outcome.error_summary, outcome.steps)
+    # 보조 ASG scale-in 보호 — 격리(TG/ENI)가 끝난 **뒤에** best-effort로만 한다. 결과는 별도
+    # 레코드(ScaleInProtectionResult)이고, 어떤 결과여도 아래 SUCCESS는 바뀌지 않는다.
+    # 보호는 같은 인스턴스의 생존을 보장하지 않는다(진행 중인 scale-in·교체·수동 삭제는 못 막는다).
+    _best_effort_protection(
+        db,
+        execution_id,
+        lambda: executor.protect_scale_in(
+            target_arn,
+            mapping.scale_in_protection,
+            record_intent=lambda intent: _store_protection_result(
+                db, execution_id, intent
+            ),
+        ),
+    )
     return ExecutionRunOutcome(succeeded=True, steps=outcome.steps)
 
 
@@ -1604,7 +1828,10 @@ def _plan_matches_intent(
 
 
 def _stored_plan(
-    db: Session, execution_id: str, target_arn: str, params: Ec2EnableAutoscalingParameters
+    db: Session,
+    execution_id: str,
+    target_arn: str,
+    params: Ec2EnableAutoscalingParameters,
 ) -> AutoscalingExecutionPlan | None:
     """저장된 계획 중 현재 불변 의도와 정확히 맞는 것. 없거나 어긋나면 None이 아니라 호출부가 구분한다."""
     stored = executions_repo.get_autoscaling_plan(db, execution_id)
@@ -1724,7 +1951,9 @@ def run_ec2_enable_autoscaling_execution(
 
 # 단계 5 — 판정이 남기는 읽기 전용 관측 요약. 1~4는 executor가 쓴다.
 _AUTOSCALING_JUDGEMENT_SEQUENCE = 5
-_AUTOSCALING_UNVERIFIED_NOTE = "원본 인스턴스는 유지했고 애플리케이션 서비스 가능 여부는 검증하지 않았습니다"
+_AUTOSCALING_UNVERIFIED_NOTE = (
+    "원본 인스턴스는 유지했고 애플리케이션 서비스 가능 여부는 검증하지 않았습니다"
+)
 
 
 # --- 2/2 Status Check 판정 (Issue #240) -----------------------------------------
@@ -1753,11 +1982,11 @@ class ExecutionJudgement:
     판정이 error_summary를 싣지 않는 것도 같은 이유다 (Issue #249).
     """
 
-    next_status: Optional[ExecutionStatus] = None
-    error_summary: Optional[str] = None
-    verdict: Optional[rollback.StatusCheckVerdict] = None
-    defer_code: Optional[PrecheckReasonCode] = None
-    defer_reason: Optional[str] = None
+    next_status: ExecutionStatus | None = None
+    error_summary: str | None = None
+    verdict: rollback.StatusCheckVerdict | None = None
+    defer_code: PrecheckReasonCode | None = None
+    defer_reason: str | None = None
 
     @property
     def deferred(self) -> bool:
@@ -1772,7 +2001,9 @@ class ExecutionJudgement:
             return
         if self.defer_code is not None or self.defer_reason is not None:
             raise ValueError("확정 판정에는 보류 사유를 두지 않습니다")
-        if (self.next_status is ExecutionStatus.SUCCESS) != (self.error_summary is None):
+        if (self.next_status is ExecutionStatus.SUCCESS) != (
+            self.error_summary is None
+        ):
             raise ValueError("성공이 아닌 판정에만 error_summary를 채웁니다")
 
 
@@ -1837,9 +2068,7 @@ def judge_rightsizing_boot(db: Session, execution_id: str) -> ExecutionJudgement
         raise ValueError(f"단계 기록이 없는 실행입니다: {execution_id}")
 
     unsettled = [
-        step
-        for step in steps
-        if step.status is not ExecutionStepStatus.SUCCESS
+        step for step in steps if step.status is not ExecutionStepStatus.SUCCESS
     ]
     if unsettled:
         detail = (unsettled[-1].error_summary or "").strip() or (
@@ -2173,8 +2402,6 @@ def judge_ebs_delete_unattached(db: Session, execution_id: str) -> ExecutionJudg
     )
 
 
-
-
 def judge_sg_delete_isolated(db: Session, execution_id: str) -> ExecutionJudgement:
     """단계를 남긴 채 IN_PROGRESS인 SG 삭제 실행 1건의 종료 판정. (Issue #368)
 
@@ -2245,7 +2472,7 @@ def judge_sg_delete_isolated(db: Session, execution_id: str) -> ExecutionJudgeme
     )
 
 
-def _target_deregistered(state: Optional[str]) -> bool:
+def _target_deregistered(state: str | None) -> bool:
     """TG가 이 대상에 새 트래픽을 보내지 않는가 — 미등록이거나 드레이닝 중."""
     return state is None or state == executor.TARGET_DRAINING_STATE
 
@@ -2305,14 +2532,19 @@ def judge_ec2_isolate(db: Session, execution_id: str) -> ExecutionJudgement:
     if expected is None or params is None:
         logger.critical(
             "isolate_judgement_inputs_invalid",
-            extra={"execution_id": execution_id, "backup_record_id": record.backup_record_id},
+            extra={
+                "execution_id": execution_id,
+                "backup_record_id": record.backup_record_id,
+            },
         )
         return ExecutionJudgement(
             next_status=ExecutionStatus.FAILED,
             error_summary="격리 판정 불가: 백업 payload 또는 실행 파라미터가 계약을 벗어났습니다",
         )
 
-    current, code = executor.current_eni_security_groups(target.resource_id, target.region)
+    current, code = executor.current_eni_security_groups(
+        target.resource_id, target.region
+    )
     if code is PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND:
         return ExecutionJudgement(
             next_status=ExecutionStatus.FAILED,
@@ -2324,7 +2556,10 @@ def judge_ec2_isolate(db: Session, execution_id: str) -> ExecutionJudgement:
             defer_reason=f"{code.value}: 격리 대상 ENI 조회 실패로 판정 보류",
         )
     state, code = executor.current_target_registration(
-        expected.target_group_arn, target.resource_id, expected.target_port, target.region
+        expected.target_group_arn,
+        target.resource_id,
+        expected.target_port,
+        target.region,
     )
     if code is PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND:
         # TG 자체가 없다 — 그 TG에서 오는 트래픽도 없으므로 등록은 빠진 것으로 센다
@@ -2340,11 +2575,16 @@ def judge_ec2_isolate(db: Session, execution_id: str) -> ExecutionJudgement:
     untouched = [
         eni.network_interface_id
         for eni in expected.network_interfaces
-        if set(current.get(eni.network_interface_id) or ()) == set(eni.security_group_ids)
+        if set(current.get(eni.network_interface_id) or ())
+        == set(eni.security_group_ids)
     ]
     deregistered = _target_deregistered(state)
 
     if deregistered and len(isolated) == len(enis):
+        # TG/ENI 판정이 SUCCESS의 전부다. 끊긴 격리가 보호에 닿지 못했다면 잔여만 명시한다
+        _interrupted_protection_residual(
+            db, execution, expected.scale_in_protection, phase="PROTECT"
+        )
         return ExecutionJudgement(next_status=ExecutionStatus.SUCCESS)
     if not deregistered and len(untouched) == len(enis):
         return ExecutionJudgement(
@@ -2367,7 +2607,9 @@ def judge_ec2_isolate(db: Session, execution_id: str) -> ExecutionJudgement:
             "deregistered": deregistered,
         },
     )
-    return ExecutionJudgement(next_status=ExecutionStatus.FAILED, error_summary=detail[:1024])
+    return ExecutionJudgement(
+        next_status=ExecutionStatus.FAILED, error_summary=detail[:1024]
+    )
 
 
 def _autoscaling_planned_names(plan: AutoscalingExecutionPlan) -> str:
@@ -2424,15 +2666,21 @@ def _record_autoscaling_observation(
         affected_arn=execution.target_arn,
         step_type="AUTOSCALING_JUDGEMENT",
         aws_operation="autoscaling.inspect(read-only)",
-        status=ExecutionStepStatus.FAILED if query_failed else ExecutionStepStatus.SUCCESS,
+        status=ExecutionStepStatus.FAILED
+        if query_failed
+        else ExecutionStepStatus.SUCCESS,
         effect=ExecutionEffect.NOT_APPLIED,
         result_summary=None if query_failed else summary[:1024],
         error_summary=summary[:1024] if query_failed else None,
         occurred_at=datetime.now(UTC),
     )
-    existing = {s.sequence for s in executions_repo.list_steps(db, execution.execution_id)}
+    existing = {
+        s.sequence for s in executions_repo.list_steps(db, execution.execution_id)
+    }
     if _AUTOSCALING_JUDGEMENT_SEQUENCE in existing:
-        executions_repo.update_step_result(db, step, execution_id=execution.execution_id)
+        executions_repo.update_step_result(
+            db, step, execution_id=execution.execution_id
+        )
     else:
         executions_repo.add_step(db, step, execution_id=execution.execution_id)
     db.commit()
@@ -2601,7 +2849,7 @@ _ORIGIN_STATUS_AFTER_ROLLBACK: dict[ExecutionStatus, ExecutionStatus] = {
 
 def _lock_rollback_origin(
     db: Session, execution: models.ActionExecution
-) -> Optional[models.ActionExecution]:
+) -> models.ActionExecution | None:
     """이 실행이 되돌리려는 원본. 롤백 자식이 아니면 None.
 
     자식을 잠근 뒤에 잠근다 — 잠금 방향을 자식 → 원본으로 고정하지 않으면 관제자
@@ -2619,7 +2867,7 @@ def _lock_rollback_origin(
 
 def _settle_rollback_origin(
     db: Session,
-    origin: Optional[models.ActionExecution],
+    origin: models.ActionExecution | None,
     *,
     child_status: ExecutionStatus,
 ) -> tuple[str, ...]:
@@ -2648,9 +2896,7 @@ def _settle_rollback_origin(
         next_status=next_status,
         # 성공으로 끝났던 원본의 종료 시각은 그대로 둔다 — 그 조치가 끝난 시각이고,
         # 되돌린 시각은 자식 실행 행이 갖는다
-        finished_at=(
-            None if origin.finished_at is not None else datetime.now(timezone.utc)
-        ),
+        finished_at=(None if origin.finished_at is not None else datetime.now(UTC)),
     ):
         raise ValueError(f"원본 실행 상태 전이 실패: {origin.execution_id}")
     logger.info(
@@ -2669,9 +2915,9 @@ def close_execution(
     execution_id: str,
     *,
     next_status: ExecutionStatus,
-    error_summary: Optional[str] = None,
+    error_summary: str | None = None,
     keep_verification_hold: bool = False,
-) -> Optional[ExecutionClosure]:
+) -> ExecutionClosure | None:
     """실행 상태 확정과 Incident 전이를 **한 트랜잭션**으로 커밋한다. (Issue #232)
 
     나눠 커밋하면 그 사이의 조회가 "ACTION_IN_PROGRESS인데 진행 중인 실행이 없는"
@@ -2714,9 +2960,7 @@ def close_execution(
         next_status=next_status,
         error_summary=error_summary,
         finished_at=(
-            datetime.now(timezone.utc)
-            if next_status in EXECUTION_TERMINAL_STATUSES
-            else None
+            datetime.now(UTC) if next_status in EXECUTION_TERMINAL_STATUSES else None
         ),
         clear_verification_hold=not keep_verification_hold,
     )
@@ -2802,7 +3046,7 @@ class VerificationRetryPolicy:
             raise ValueError("interval_seconds는 0 이상이어야 합니다")
 
     @classmethod
-    def from_settings(cls) -> "VerificationRetryPolicy":
+    def from_settings(cls) -> VerificationRetryPolicy:
         settings = get_settings()
         return cls(
             max_attempts=settings.VERIFICATION_RETRY_MAX_ATTEMPTS,
@@ -2829,7 +3073,7 @@ class VerificationHold:
     reason_code: PrecheckReasonCode
     attempts: int
     held: bool
-    closure: Optional[ExecutionClosure] = None
+    closure: ExecutionClosure | None = None
 
 
 def _held_outcome(
@@ -2875,9 +3119,9 @@ def record_verification_failure(
     *,
     reason_code: PrecheckReasonCode,
     policy: VerificationRetryPolicy,
-    detail: Optional[str] = None,
-    now: Optional[datetime] = None,
-) -> Optional[VerificationHold]:
+    detail: str | None = None,
+    now: datetime | None = None,
+) -> VerificationHold | None:
     """AWS 조회 실패 1회를 typed로 기록하고, 재시도할지 보류로 확정할지 정한다. (Issue #249)
 
     None은 **다른 주체가 먼저 확정한 실행**이다. 판정은 잠금을 놓고 AWS를 기다리므로
@@ -2889,7 +3133,7 @@ def record_verification_failure(
 
     detail은 사람이 읽는 마지막 사유 한 줄이라 로그에만 싣는다.
     """
-    failed_at = now or datetime.now(timezone.utc)
+    failed_at = now or datetime.now(UTC)
     execution = executions_repo.lock_execution(db, execution_id)
     if execution is None:
         raise ValueError(f"실행 레코드를 찾을 수 없습니다: {execution_id}")
@@ -2952,8 +3196,8 @@ _BACKUP_CONSUMERS: dict[str, RunbookId] = {
 
 
 def _latest_backup_record(
-    db: Session, target_arn: str, backup_type: str, payload_match: Optional[dict]
-) -> Optional[models.BackupRecord]:
+    db: Session, target_arn: str, backup_type: str, payload_match: dict | None
+) -> models.BackupRecord | None:
     """대상 기준 백업 조회의 유일한 규칙 — 가드레일 ④와 실행이 같은 레코드를 고르게 한다.
 
     둘이 조회 조건을 따로 적으면 ④가 통과시킨 레코드와 실행이 지우는 근거가 갈린다.
@@ -2987,7 +3231,7 @@ class _DbBackupRecordLoader:
     def __init__(self, db: Session) -> None:
         self._db = db
 
-    def get(self, backup_record_id: str) -> Optional[executor.BackupRecordView]:
+    def get(self, backup_record_id: str) -> executor.BackupRecordView | None:
         record = executions_repo.get_backup_record(self._db, backup_record_id)
         return None if record is None else _backup_view(record)
 
@@ -2995,8 +3239,8 @@ class _DbBackupRecordLoader:
         self,
         target_arn: str,
         backup_type: str,
-        payload_match: Optional[dict] = None,
-    ) -> Optional[executor.BackupRecordView]:
+        payload_match: dict | None = None,
+    ) -> executor.BackupRecordView | None:
         # backup_record_id를 파라미터로 받지 않는 런북은 NACL_RESTORE 하나다
         # (executor.RUNBOOK_SPECS). 0건이면 None — precheck가 "백업 레코드 없음"으로
         # 거절하며, 이것은 로더 미배선(RuntimeError)과 다른 결과다(ADR-0007 §1).
@@ -3005,7 +3249,7 @@ class _DbBackupRecordLoader:
 
 
 def _backup_lookup_key(
-    target_arn: str, backup_type: str, payload_match: Optional[dict]
+    target_arn: str, backup_type: str, payload_match: dict | None
 ) -> tuple:
     return (target_arn, backup_type, frozenset((payload_match or {}).items()))
 
@@ -3028,28 +3272,32 @@ class _PrefetchedBackupLoader:
 
     def __init__(
         self,
-        records: dict[tuple, Optional[executor.BackupRecordView]],
-        isolation: Optional[dict[str, "IsolationParameters"]] = None,
+        records: dict[tuple, executor.BackupRecordView | None],
+        isolation: dict[str, IsolationParameters] | None = None,
     ) -> None:
         self._records = records
         self._isolation = dict(isolation or {})
 
-    def isolation_parameters(self, target_arn: str) -> "IsolationParameters":
+    def isolation_parameters(self, target_arn: str) -> IsolationParameters:
         """가드레일 전에 뽑아 둔 격리 파라미터. 뽑지 않은 대상이면 배선 누락이라 예외다."""
         if target_arn not in self._isolation:
-            raise RuntimeError(f"가드레일 전에 조회하지 않은 격리 파라미터입니다: {target_arn}")
+            raise RuntimeError(
+                f"가드레일 전에 조회하지 않은 격리 파라미터입니다: {target_arn}"
+            )
         return self._isolation[target_arn]
 
-    def get(self, backup_record_id: str) -> Optional[executor.BackupRecordView]:
+    def get(self, backup_record_id: str) -> executor.BackupRecordView | None:
         # backup_record_id를 받는 런북은 롤백 3종뿐이고 후보가 될 수 없다(ADR-0004 정책 ②)
-        raise RuntimeError("후보 가드레일은 backup_record_id로 백업을 조회하지 않습니다")
+        raise RuntimeError(
+            "후보 가드레일은 backup_record_id로 백업을 조회하지 않습니다"
+        )
 
     def latest_for_target(
         self,
         target_arn: str,
         backup_type: str,
-        payload_match: Optional[dict] = None,
-    ) -> Optional[executor.BackupRecordView]:
+        payload_match: dict | None = None,
+    ) -> executor.BackupRecordView | None:
         key = _backup_lookup_key(target_arn, backup_type, payload_match)
         if key not in self._records:
             raise RuntimeError(
@@ -3068,14 +3316,12 @@ class RollbackInitiation:
     호출부는 그 closure로 발행한다(commit 이후 발행은 호출부 몫, realtime.py 규약).
     """
 
-    execution_id: Optional[str] = None
-    skipped_reason: Optional[str] = None
-    closure: Optional["ExecutionClosure"] = None
+    execution_id: str | None = None
+    skipped_reason: str | None = None
+    closure: ExecutionClosure | None = None
 
 
-def _rollback_evidence_ids(
-    db: Session, origin: models.ActionExecution
-) -> list[str]:
+def _rollback_evidence_ids(db: Session, origin: models.ActionExecution) -> list[str]:
     """원복 명령이 실을 근거 ID. 원본 조치가 선 근거를 그대로 잇는다.
 
     원복은 후보가 아니라 근거를 새로 만들지 않는다(ADR-0004 정책 ②). 그래서 "왜
@@ -3472,8 +3718,6 @@ def judge_revert_size(db: Session, execution_id: str) -> ExecutionJudgement:
     )
 
 
-
-
 # --- SG 원복 (Issue #368) ---------------------------------------------------------
 
 
@@ -3807,7 +4051,10 @@ def run_ec2_unisolate_execution(db: Session, execution_id: str) -> ExecutionRunO
         # 계약을 벗어난 payload로 복원하면 원본과 다른 SG·등록이 선다 — 시작하지 않는다
         logger.critical(
             "sg_tg_backup_payload_invalid",
-            extra={"execution_id": execution_id, "backup_record_id": record.backup_record_id},
+            extra={
+                "execution_id": execution_id,
+                "backup_record_id": record.backup_record_id,
+            },
         )
         return _run_failed(
             PrecheckReasonCode.PRECHECK_PARAM_INVALID,
@@ -3825,7 +4072,9 @@ def run_ec2_unisolate_execution(db: Session, execution_id: str) -> ExecutionRunO
         )
 
     # REVERT_SIZE와 같은 명령 모양이다 — 원복 값 없이 레코드를 가리키는 id만 싣는다
-    payload = _revert_command_payload(execution, record, evidence_ids, target.resource_id)
+    payload = _revert_command_payload(
+        execution, record, evidence_ids, target.resource_id
+    )
     guardrail = _run_rollback_guardrails(db, execution, payload)
     if guardrail.command is None:
         detail = _guardrail_rejection_summary(guardrail.result)
@@ -3857,6 +4106,29 @@ def run_ec2_unisolate_execution(db: Session, execution_id: str) -> ExecutionRunO
         )
     if not outcome.succeeded:
         return _run_failed(outcome.reason_code, outcome.error_summary, outcome.steps)
+    # 보조 ASG 보호 복원 — SG/TG 복원이 끝난 **뒤에** best-effort로만 한다. 캡처한 이전 값으로만
+    # 되돌리고(불확실하면 쓰지 않음), 실패는 별도 잔여 레코드가 되며 위 해제 SUCCESS를 막지 않는다.
+    # 원본 PROTECT 결과를 AWS 호출 전에 읽고 읽기 트랜잭션을 닫는다. 복원은 그 결과가 "쓰기가
+    # 시작됐을 수 있다"는 근거일 때만 쓰고, 쓰기 직전 의도를 먼저 commit한다.
+    target_arn = execution.target_arn
+    origin_id = origin.execution_id
+
+    def restore_protection() -> ScaleInProtectionResult | None:
+        # 조회·commit도 보조 경계 안이다 — 실패하면 보호를 쓰지 않고 해제 SUCCESS는 그대로다
+        parent_result = _parse_protection_result(
+            executions_repo.get_scale_in_protection_result(db, origin_id)
+        )
+        db.commit()
+        return executor.restore_scale_in_protection(
+            target_arn,
+            restored,
+            parent_result=parent_result,
+            record_intent=lambda intent: _store_protection_result(
+                db, execution_id, intent
+            ),
+        )
+
+    _best_effort_protection(db, execution_id, restore_protection)
     return ExecutionRunOutcome(succeeded=True, steps=outcome.steps)
 
 
@@ -3904,14 +4176,19 @@ def judge_ec2_unisolate(db: Session, execution_id: str) -> ExecutionJudgement:
     if expected is None:
         logger.critical(
             "sg_tg_backup_payload_invalid",
-            extra={"execution_id": execution_id, "backup_record_id": record.backup_record_id},
+            extra={
+                "execution_id": execution_id,
+                "backup_record_id": record.backup_record_id,
+            },
         )
         return ExecutionJudgement(
             next_status=ExecutionStatus.FAILED,
             error_summary="해제 판정 불가: 백업 payload가 SG/TG 매핑 계약을 벗어났습니다",
         )
 
-    current, code = executor.current_eni_security_groups(target.resource_id, target.region)
+    current, code = executor.current_eni_security_groups(
+        target.resource_id, target.region
+    )
     if code is PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND:
         return ExecutionJudgement(
             next_status=ExecutionStatus.FAILED,
@@ -3923,7 +4200,10 @@ def judge_ec2_unisolate(db: Session, execution_id: str) -> ExecutionJudgement:
             defer_reason=f"{code.value}: 해제 대상 ENI 조회 실패로 판정 보류",
         )
     state, code = executor.current_target_registration(
-        expected.target_group_arn, target.resource_id, expected.target_port, target.region
+        expected.target_group_arn,
+        target.resource_id,
+        expected.target_port,
+        target.region,
     )
     if code is PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND:
         return ExecutionJudgement(
@@ -3942,10 +4222,15 @@ def judge_ec2_unisolate(db: Session, execution_id: str) -> ExecutionJudgement:
     not_restored = [
         eni.network_interface_id
         for eni in expected.network_interfaces
-        if set(current.get(eni.network_interface_id) or ()) != set(eni.security_group_ids)
+        if set(current.get(eni.network_interface_id) or ())
+        != set(eni.security_group_ids)
     ]
     registered = not _target_deregistered(state)
     if not not_restored and registered:
+        # SG/TG 판정이 SUCCESS의 전부다. 끊긴 해제가 보호 복원에 닿지 못했다면 잔여만 명시한다
+        _interrupted_protection_residual(
+            db, execution, expected.scale_in_protection, phase="RESTORE"
+        )
         return ExecutionJudgement(next_status=ExecutionStatus.SUCCESS)
     detail = (
         f"해제 미완 — SG 미복원 ENI {len(not_restored)}/{len(expected.network_interfaces)},"
@@ -3960,7 +4245,11 @@ def judge_ec2_unisolate(db: Session, execution_id: str) -> ExecutionJudgement:
             "registered": registered,
         },
     )
-    return ExecutionJudgement(next_status=ExecutionStatus.FAILED, error_summary=detail[:1024])
+    return ExecutionJudgement(
+        next_status=ExecutionStatus.FAILED, error_summary=detail[:1024]
+    )
+
+
 # --- AI 분석 결과 저장·전이 (Issue #285) ------------------------------------------
 #
 # agent_dispatcher가 그래프를 부르고 계약 검증까지 마친 출력 1건을 여기서 저장한다.
@@ -4033,7 +4322,7 @@ def _precheck_param_invalid(detail: str) -> PrecheckOutcome:
 
 
 def _candidate_precheck(
-    command, backup_loader: Optional[executor.BackupRecordLoader] = None
+    command, backup_loader: executor.BackupRecordLoader | None = None
 ) -> PrecheckOutcome:
     """④ AWS Dry-Run 경계 — 후보 파라미터를 실행 파라미터로 옮겨 executor에 넘긴다.
 
@@ -4062,7 +4351,9 @@ def _candidate_precheck(
 
     lookups: dict = {}
     if command.runbook_id is RunbookId.RUNBOOK_EC2_RIGHTSIZING:
-        current, code = executor.current_instance_type(target.resource_id, target.region)
+        current, code = executor.current_instance_type(
+            target.resource_id, target.region
+        )
         if code is not None:
             return PrecheckOutcome(
                 passed=False,
@@ -4095,7 +4386,9 @@ def _candidate_precheck(
                 reason_code=isolation.reason_code,
                 verification_summary=build_verification_summary(
                     VerificationMethod.DESCRIBE,
-                    verified=["없음(자산 DB에서 격리 SG·Target Group을 하나로 정하지 못함)"],
+                    verified=[
+                        "없음(자산 DB에서 격리 SG·Target Group을 하나로 정하지 못함)"
+                    ],
                     unverified=["AWS 대상 상태", "IAM 권한"],
                 ),
             )
@@ -4155,7 +4448,7 @@ def _prefetch_candidate_backups(
 
     EC2_ISOLATE 후보의 격리 SG·TG도 여기서 뽑는다(_PrefetchedBackupLoader.isolation_parameters).
     """
-    records: dict[tuple, Optional[executor.BackupRecordView]] = {}
+    records: dict[tuple, executor.BackupRecordView | None] = {}
     for candidate in candidates:
         spec = executor.RUNBOOK_SPECS.get(candidate.runbook_id.value)
         if spec is None or spec.backup_type is None or not spec.backup_match_params:
@@ -4165,7 +4458,9 @@ def _prefetch_candidate_backups(
         key = _backup_lookup_key(candidate.target_arn, spec.backup_type, match)
         if key in records:
             continue
-        record = _latest_backup_record(db, candidate.target_arn, spec.backup_type, match)
+        record = _latest_backup_record(
+            db, candidate.target_arn, spec.backup_type, match
+        )
         records[key] = None if record is None else _backup_view(record)
     # EC2_ISOLATE의 시스템 공급 값 — 실행 폴백과 같은 함수로 뽑는다(resolve_isolation_parameters)
     isolation = {
@@ -4179,7 +4474,7 @@ def _prefetch_candidate_backups(
 def _guard_candidate(
     candidate: RunbookCandidateData,
     managed: set[str],
-    backup_loader: Optional[executor.BackupRecordLoader] = None,
+    backup_loader: executor.BackupRecordLoader | None = None,
 ) -> guardrails.GuardrailOutcome:
     """후보 1건에 가드레일 4단계를 1회 수행한다. **DB를 만지지 않는다.**"""
     return guardrails.run_guardrail_validation(
@@ -4248,8 +4543,12 @@ def _log_dropped_summary(incident_id: str, output: AgentGraphOutput) -> None:
 
 
 def record_agent_analysis(
-    db: Session, incident_id: str, output: AgentGraphOutput, *,
-    savings_estimator: Callable[[RunbookCandidateData], AISavingsEstimate] | None = None,
+    db: Session,
+    incident_id: str,
+    output: AgentGraphOutput,
+    *,
+    savings_estimator: Callable[[RunbookCandidateData], AISavingsEstimate]
+    | None = None,
 ) -> AgentAnalysisOutcome:
     """그래프 출력 1건 → 가드레일 1회 + 후보 저장 + ANALYZING 이탈. 순서는 파일 절 참조.
 
@@ -4263,7 +4562,8 @@ def record_agent_analysis(
     backups = _prefetch_candidate_backups(db, candidates)
     incident_context = incidents_repo.get_incident(db, incident_id)
     estimate_finops = (
-        savings_estimator is not None and incident_context is not None
+        savings_estimator is not None
+        and incident_context is not None
         and incident_context.category is IncidentCategory.FINOPS
     )
     # 가드레일 ④가 AWS를 부르는 동안 트랜잭션을 열어 두지 않는다
@@ -4277,9 +4577,16 @@ def record_agent_analysis(
     # 모든 후보의 가드레일 뒤, 잠금·저장 전이다. 모델 대기 중 DB transaction을 열지 않는다.
     if estimate_finops:
         guarded = [
-            (candidate.model_copy(update={"ai_savings_estimate": savings_estimator(candidate)}), outcome)
-            if (outcome.result.result is GuardrailDecision.PASS
-                and candidate.runbook_id is RunbookId.RUNBOOK_EC2_RIGHTSIZING)
+            (
+                candidate.model_copy(
+                    update={"ai_savings_estimate": savings_estimator(candidate)}
+                ),
+                outcome,
+            )
+            if (
+                outcome.result.result is GuardrailDecision.PASS
+                and candidate.runbook_id is RunbookId.RUNBOOK_EC2_RIGHTSIZING
+            )
             else (candidate, outcome)
             for candidate, outcome in guarded
         ]
@@ -4291,9 +4598,13 @@ def record_agent_analysis(
     is_secops = incident.category is IncidentCategory.SECOPS
     permitted = {IncidentStatus.ANALYZING}
     if is_secops:
-        permitted.update({IncidentStatus.ACTION_IN_PROGRESS, IncidentStatus.AWAITING_CLOSURE})
+        permitted.update(
+            {IncidentStatus.ACTION_IN_PROGRESS, IncidentStatus.AWAITING_CLOSURE}
+        )
     if previous_status not in permitted:
-        raise ValueError(f"분석 결과를 저장할 수 없는 Incident 상태: {previous_status.value}")
+        raise ValueError(
+            f"분석 결과를 저장할 수 없는 Incident 상태: {previous_status.value}"
+        )
 
     executable = sum(
         _store_candidate(db, candidate, outcome) for candidate, outcome in guarded
@@ -4306,13 +4617,15 @@ def record_agent_analysis(
         if any(item.status in EXECUTION_NON_TERMINAL_STATUSES for item in executions):
             target = IncidentStatus.ACTION_IN_PROGRESS
         elif not executable and (
-            (not executions and output.invocation_status is not AgentInvocationStatus.FAILED)
+            (
+                not executions
+                and output.invocation_status is not AgentInvocationStatus.FAILED
+            )
             or any(item.status in EXECUTION_SETTLED_STATUSES for item in executions)
         ):
             target = IncidentStatus.AWAITING_CLOSURE
-    keep_summary = (
-        output.invocation_status is not AgentInvocationStatus.FAILED
-        and (is_secops or target is not IncidentStatus.FAILED)
+    keep_summary = output.invocation_status is not AgentInvocationStatus.FAILED and (
+        is_secops or target is not IncidentStatus.FAILED
     )
     if not keep_summary:
         _log_dropped_summary(incident_id, output)
@@ -4320,11 +4633,7 @@ def record_agent_analysis(
         db,
         incident_id,
         output.invocation_status,
-        summary_lines=(
-            list(output.summary_lines)
-            if keep_summary
-            else None
-        ),
+        summary_lines=(list(output.summary_lines) if keep_summary else None),
         reviewed_risk_level=(
             output.reviewed_risk_level if is_secops and keep_summary else None
         ),
@@ -4338,14 +4647,21 @@ def record_agent_analysis(
         raise ValueError(f"Incident 상태 전이 실패: {incident_id}")
 
     wait_started = None
-    if (is_secops and target is IncidentStatus.AWAITING_APPROVAL
-            and incident.response_mode is ResponseMode.AGENT_WAIT
-            and incident.agent_wait_started_at is None):
-        wait_started = datetime.now(timezone.utc)
-        incidents_repo.set_agent_wait(db, AgentWaitSchedule(
-            incident_id=incident_id, started_at=wait_started,
-            response_deadline_at=wait_started + timedelta(seconds=60),
-        ))
+    if (
+        is_secops
+        and target is IncidentStatus.AWAITING_APPROVAL
+        and incident.response_mode is ResponseMode.AGENT_WAIT
+        and incident.agent_wait_started_at is None
+    ):
+        wait_started = datetime.now(UTC)
+        incidents_repo.set_agent_wait(
+            db,
+            AgentWaitSchedule(
+                incident_id=incident_id,
+                started_at=wait_started,
+                response_deadline_at=wait_started + timedelta(seconds=60),
+            ),
+        )
 
     # 분석이 어떻게 끝났는지를 도메인과 무관하게 남긴다(#424) — SecOps 조회 응답의
     # analysis_result와 같은 판정이다. FinOps는 무제안·전체 거절도 Incident FAILED로 닫혀
@@ -4355,7 +4671,9 @@ def record_agent_analysis(
     db.flush()
     analysis = analysis_result_from(
         output.invocation_status,
-        guardrails_repo.candidate_evaluations_by_incident(db, [incident_id]).get(incident_id, []),
+        guardrails_repo.candidate_evaluations_by_incident(db, [incident_id]).get(
+            incident_id, []
+        ),
     )
     db.commit()
     incident = incidents_repo.get_incident(db, incident_id)
@@ -4434,10 +4752,10 @@ class ReleaseOffer:
     """
 
     incident_id: str
-    candidate_status: Optional[CandidateStatus] = None  # EXECUTABLE | REJECTED
-    skipped_reason: Optional[str] = None
-    incident_status: Optional[IncidentStatus] = None
-    incident_updated_at: Optional[datetime] = None  # WS 봉투의 occurred_at
+    candidate_status: CandidateStatus | None = None  # EXECUTABLE | REJECTED
+    skipped_reason: str | None = None
+    incident_status: IncidentStatus | None = None
+    incident_updated_at: datetime | None = None  # WS 봉투의 occurred_at
 
 
 def _release_skipped(incident_id: str, execution_id: str, reason: str) -> ReleaseOffer:
@@ -4457,7 +4775,7 @@ def _release_skipped(incident_id: str, execution_id: str, reason: str) -> Releas
 
 def _release_candidate(
     db: Session, block: models.ActionExecution
-) -> tuple[Optional[RunbookCandidateData], Optional[str]]:
+) -> tuple[RunbookCandidateData | None, str | None]:
     """차단 실행 1건 → 해제 후보 초안. 만들 수 없으면 (None, 사유).
 
     백업은 **차단 자기 행에 결속된 것**만 쓴다. 대상 기준 조회(_latest_backup_record)로
@@ -4537,7 +4855,9 @@ def _store_release_offer(
     if incident.status not in RELEASE_OFFERABLE_STATUSES:
         db.commit()  # 쓴 것 없이 잠금만 놓는다
         return _release_skipped(
-            incident_id, execution_id, f"인시던트가 {incident.status.value}로 옮겨 갔습니다"
+            incident_id,
+            execution_id,
+            f"인시던트가 {incident.status.value}로 옮겨 갔습니다",
         )
     if _release_already_offered(db, incident_id):
         db.commit()
