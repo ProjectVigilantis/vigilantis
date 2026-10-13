@@ -469,7 +469,7 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 | --- | --- | --- | --- |
 | 1 | 후보 제시 | — | 어떤 판정이 이 런북을 부르는지. `RIGHTSIZING`과 **후보 조건이 갈리는 지점**을 기록한다 |
 | 2 | 가드레일 ④ | **MIXED** — LT `create_launch_template` `DryRun` + `describe_instances` + `describe_auto_scaling_groups` | ①DryRun ②원본 EC2 존재·`running` ③**동명 ASG 부재**(이름만 본다) ④`min_size`/`max_size` 범위 — **단, ④는 precheck 가 막는 자리가 아니라 모델이 이미 보장한 것을 확인 사실로 싣는 자리다**(위 파라미터 계약) |
-| 3 | 실행 | `RUNBOOK_EC2_ENABLE_AUTOSCALING`<br>`trigger_source: USER_APPROVAL`<br>**4단계** — ① `STEP_CREATE_IMAGE` ② `STEP_CREATE_LAUNCH_TEMPLATE` ③ `STEP_CREATE_AUTO_SCALING_GROUP` ④ `STEP_PUT_SCALING_POLICY` | **LT·ASG 둘이 아니라 네 단계다** — AMI 를 먼저 뜨고(원본은 `NoReboot=True` 로 재부팅하지 않는다) 그 AMI 로 시작 템플릿을 만든 뒤 ASG·CPU 정책까지 간다. **성공의 뜻을 좁게 읽는다** — 실행 함수의 성공은 「**요청 4건이 접수됐다**」까지이고, **ASG 인스턴스 기동·2/2·설정 일치는 `inspect_ec2_autoscaling` 이 따로 본다**(`ready`·`incomplete`·`query_failed` 셋으로 가린다). 그래서 **실행 `SUCCESS` 를 「ASG 가 떴다」로 적지 않는다.** 값은 계획에서만 오고 원본을 다시 읽지 않는다. 중복 오류(`InvalidAMIName.Duplicate`·`AlreadyExists`)와 응답 유실(5xx·연결 끊김)은 **effect UNKNOWN 으로 적고 뒤 변경을 멈춘다** — **재개·재사용·보상(삭제)을 하지 않으므로** 그 회차는 사람이 정리한다(4번). **서비스 연결은 이 런북이 하지 않는다** — 별도 운영 표면이다(아래 §서비스 연결·트래픽 전환) |
+| 3 | 실행 | `RUNBOOK_EC2_ENABLE_AUTOSCALING`<br>`trigger_source: USER_APPROVAL`<br>**4단계** — ① `STEP_CREATE_IMAGE` ② `STEP_CREATE_LAUNCH_TEMPLATE` ③ `STEP_CREATE_AUTO_SCALING_GROUP` ④ `STEP_PUT_SCALING_POLICY` | **LT·ASG 둘이 아니라 네 단계다** — AMI 를 먼저 뜨고(원본은 `NoReboot=True` 로 재부팅하지 않는다) 그 AMI 로 시작 템플릿을 만든 뒤 ASG·CPU 정책까지 간다. **「성공」이 두 축이다 — 섞지 않는다.** ① **함수 성공**(`ExecutionOutcome.succeeded`)은 AMI `available` 확인을 포함한 **요청 단계**까지다. ② **DB 실행 상태 `ExecutionStatus.SUCCESS`** 는 그 뒤 `inspect_ec2_autoscaling` 이 `ready` 를 내야 기록된다(`incomplete` → `FAILED` · `query_failed` → **판정 보류** · `judge_ec2_enable_autoscaling`). 그래서 **실행 `SUCCESS` 는 인프라 준비 확인까지**이고, 코드가 그 한계를 못 박는다 — 「`ready` → SUCCESS. 원본 인스턴스 유지, **애플리케이션 서비스 가능 여부는 미검증**」. **`SUCCESS` 를 서비스 가능이나 트래픽 전환으로 읽지 않는다**(전환은 아래 §서비스 연결·트래픽 전환). 부분 구성은 **이름 붙은 잔여물과 함께 `FAILED` 로 사람에게 넘어온다.** 값은 계획에서만 오고 원본을 다시 읽지 않는다. 중복 오류(`InvalidAMIName.Duplicate`·`AlreadyExists`)와 응답 유실(5xx·연결 끊김)은 **effect UNKNOWN 으로 적고 뒤 변경을 멈춘다** — **재개·재사용·보상(삭제)을 하지 않으므로** 그 회차는 사람이 정리한다(4번). **서비스 연결은 이 런북이 하지 않는다** — 별도 운영 표면이다(아래 §서비스 연결·트래픽 전환) |
 | 4 | **정리** | `provision_smoke_aws.py service --operation cleanup-plan` → `cleanup --apply` | **등록 롤백 런북이 없다**(SSOT §Action Whitelist) — 되돌리는 것이 아니라 **검증 직후 지운다.** 다만 **손으로가 아니라 운영 CLI 명령이 있다**(#466). **지울 것은 넷이다** — AMI·스냅숏·시작 템플릿·ASG(실행이 만드는 자원 표지가 그 넷이다). **`down` 으로는 AMI·스냅숏이 안 지워진다** — 스크립트 머리말이 「`down` 은 AMI·스냅숏 전체 정리가 아니다 — `service --operation cleanup-plan` / `cleanup` 을 쓴다」로 적는다. ASG 인스턴스 비용은 예산표 밖(ADR-0009 §3) |
 
 > **4번이 T1·T2와 가장 다른 자리다.** 두 트랙은 롤백 런북이 짝으로 등록돼 있어 "되돌아갔는가"를 보면 되는데, 이 런북은 짝이 없다. 그래서 **정리했는지와 비용이 남지 않았는지**가 검증 대상이고, 그 기록은 `docs/AWS_SMOKE_RESULT.md` §8 · §9로 간다.
@@ -483,12 +483,12 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 | `schema` | 옵션 계약을 답한다. DB·AWS 없이 돈다 | — |
 | `plan` | 조치 시점의 의도와 **원래 경로의 스냅숏**을 불변 계획으로 남긴다 | — |
 | `status` | 저장된 사실과 현물을 읽어 현재를 보여 준다 | — |
-| `prepare` | 전환 준비(운영 리스너·대상 묶음) | ✅ `--apply` |
+| `prepare` | 전환 준비(운영 리스너·대상 묶음). 관문 둘 — `execution_not_ready` · **`runtime_cost_gate`** | ✅ `--apply` |
 | `verify` | 그 시각에 읽고 **실제로 요청해 본** 결과로 판정한다(`PASSED`·`FAILED`·`UNKNOWN`) | — |
-| `cutover` | 트래픽을 ASG 쪽으로 넘긴다 | ✅ `--apply` |
+| `cutover` | 트래픽을 ASG 쪽으로 넘긴다. **관문 셋** — ① `execution_not_ready`(`plan`·`prepare` 와 같은 확인) ② **직전에 스스로 다시 검증**해 `PASSED` 가 아니면 `fresh_verification_failed`(「직전 검증이 통과하지 않아 운영 경로를 바꾸지 않았습니다」) — **앞서 `verify` 를 통과했어도 그렇다** ③ **`runtime_cost_gate`** | ✅ `--apply` |
 | `return` | **원래 경로로 복귀한다.** 이미 원래 경로면 바꾸지 않되, 같은 안전 확인과 실제 응답 확인을 거쳐야 성공이다 | ✅ `--apply` |
 | `cleanup-plan` | 지울 것을 뽑는다(AMI·스냅숏 포함 — `status` 가 세지 않는 자리다) | — |
-| `cleanup` | 뽑은 것을 지운다. **`cleanup-plan` 이 준 매니페스트 해시와 자원 목록을 그대로 넘겨야 한다** — 그 사이 재고가 바뀌면 `manifest_mismatch` 로 거절하고 「`cleanup-plan` 을 다시 봅니다」라고 답한다. 재고에 blocker 가 있으면 `cleanup_blocked` 다 | ✅ `--apply` |
+| `cleanup` | 뽑은 것을 지운다. 넘길 것 **셋** — 매니페스트 해시 · 자원 목록 · **`retention_decision`**(필수). 그 사이 재고가 바뀌면 `manifest_mismatch` 로 거절하고 「`cleanup-plan` 을 다시 봅니다」라고 답한다. 재고에 blocker 가 있으면 `cleanup_blocked` 다. **완료는 삭제 응답이 아니다** — `success: true` 로 판단하지 않고 **정리 뒤 새로 읽은 잔여 재고의 `complete: true`** 로 본다(ADR-0009 §7-4) | ✅ `--apply` |
 
 **대조할 때 섞지 않을 것 셋.** 계약이 그 셋을 따로 저장한다.
 
@@ -500,11 +500,15 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 
 **불확실한 변경은 재전송하지 않는다.** `PENDING`·`UNCERTAIN` 은 읽기 전용 대조로만 좁히고, 결과는 둘이다 — `EFFECT_OBSERVED`(효과 확인 · 관문을 푼다 · 최종)와 `EFFECT_NOT_OBSERVED`(**지금 안 보인다는 것이고, 요청이 거절됐다는 증거가 아니다** · 관문을 풀지도 재전송을 허용하지도 않는다). **대조에서 `EFFECT_NOT_OBSERVED` 를 실패로 적지 않는다.**
 
-**선행**: `plan`·`prepare` 는 **#446 실행이 `SUCCESS`** 가 아니면 `execution_not_ready` 로 거절한다. 즉 **T4-3 이 성공해야 이 표면이 열린다.**
+**선행**: `plan`·`prepare`·**`cutover`** 셋 다 **#446 실행이 `SUCCESS`** 가 아니면 `execution_not_ready` 로 거절한다. 즉 **T4-3 이 성공해야 이 표면이 열린다.**
+
+**전체 순서 한 줄.** `plan`(`--execution-id`) → `prepare --apply` → `verify` → `cutover --apply` → `verify` → `return --apply` → `cleanup-plan` → `cleanup --apply`. **`plan` 이 돌려주는 `transition_id`(전환 시도 하나를 가리키는 ID)를 그 뒤 명령에 `--transition-id` 로 넘긴다.**
+
+**`runtime_cost_gate` 도 설계된 거절이다.** `prepare`·`cutover` 가 **계획에 실린 운영자 제공 실행 사실**(`plan.runtime_facts`)과 **실제 멤버 수**를 대조해 비용 차단 사유가 있으면 막는다. 단가·상한·한도는 **운영자가 공급하는 값이고 실시간 조회 증거가 아니다** — 없으면 0으로 채우지 않고 `prepare`·`cutover` 만 막는다(ADR-0009 §7-6). `cleanup_blocked`·`manifest_mismatch` 와 같은 종류라, **실패로 적지 않는다.**
 
 **증거의 한계**: ALB 경로 증거는 「그 순간 경로가 ASG 전용 TG 로만 갔다는 **전후 스냅숏** + 실제 ALB 응답」이고, 멤버별 증거는 「각 멤버 사설 IP 에 **직접** 보낸 응답」이다. **둘 다 요청 단위 ALB 대상 귀속(접근 로그)이 아니다** — 「이 요청이 ASG 인스턴스로 갔다」로 적지 않는다.
 
-> **T3 가 걸려 있으면 T4 의 변경 명령이 막힌다.** facade 경계가 **「보안 보류(격리 SG · scale-in 보호 · DB 격리 실행)는 풀지 않는다 — 보고하고 막는다」**로 적는다. `return` 은 원래 TG 에 등록이 남은 대상을 **상태(`draining`·`unused` 포함)와 관계없이 전부 격리 사실로 본다.** 그래서 **같은 창에서 T3 격리를 걸어 둔 채 T4 전환을 돌리지 않는다** — 순서를 정해 한 번에 하나만 돌리고, 막혔을 때 그것을 T4 실패로 적지 않는다(설계된 거절이다). 변경 명령은 공유 AWS 좌표의 advisory lock 을 명령 내내 쥐지만, **이 도구 밖의 AWS 조작과는 원자적이지 않다**(전후 대조로만 드러난다).
+> **T3 가 걸려 있으면 T4 의 변경 명령이 막힌다.** facade 경계가 **「보안 보류(격리 SG · scale-in 보호 · DB 격리 실행)는 풀지 않는다 — 보고하고 막는다」**로 적는다. `return` 은 원래 TG 에 등록이 남은 대상 **전부**(`draining`·`unused` 포함)의 **격리 여부를 확인하고**, **보안 보류 대상이 하나라도 등록돼 있으면 복귀하지 않고 막는다**(`no_quarantined_registered` — 「원래 TG에 등록된 보안 보류 대상 … 해제·등록 해제하지 않습니다」). **정상 대상을 격리로 취급하는 것이 아니다.** 그래서 겹치면 막히는 구간이 생긴다 — `EC2_ISOLATE` 는 **TG 등록 해제 → SG 교체** 순서라, 해제 직후 격리 대상이 `draining`(등록 해제가 끝나기를 기다리는 상태)으로 원래 TG 에 남아 있을 수 있고 **그 구간에는 `return` 이 막힌다**(지연 시간은 실측 전이라 모른다). `cleanup` 도 보안 보류 인스턴스를 정리하지 않는다. 그래서 **같은 창에서 T3 격리를 걸어 둔 채 T4 전환을 돌리지 않는다** — 순서를 정해 한 번에 하나만 돌리고, 막혔을 때 그것을 T4 실패로 적지 않는다(설계된 거절이다). 변경 명령은 공유 AWS 좌표의 advisory lock 을 명령 내내 쥐지만, **이 도구 밖의 AWS 조작과는 원자적이지 않다**(전후 대조로만 드러난다).
 
 ### 선행 조건 — 2026-10-13(화)로 하나만 남았다
 
@@ -558,7 +562,26 @@ Launch Template 도 함께 본다. 이름은 `executor._launch_template_name` �
 
 `cutover` 로 트래픽을 ASG 쪽에 넘긴 회차는 `return` 으로 **원래 경로로 복귀**시킨다(§서비스 연결·트래픽 전환). 복귀는 「이미 원래 경로면 바꾸지 않되 **같은 안전 확인과 실제 응답 확인을 거쳐야 성공**」이라, 돌려놨다고 믿고 넘기면 다음 회차가 어디로 가는지 모른 채 시작된다.
 
-→ 순서: `return --apply` → `cleanup-plan` → `cleanup --apply`. `cleanup` 은 재고 blocker 가 있으면 `cleanup_blocked` 로 거절하고, `cleanup-plan` 이 준 매니페스트와 재고가 달라지면 `manifest_mismatch` 로 거절한다. **두 거절은 설계된 관문이니 T4 실패로 적지 않는다** — `cleanup-plan` 을 다시 뽑아 같은 순서로 간다.
+→ 순서: `return --apply` → `cleanup-plan` → `cleanup --apply`.
+
+**보존 결정을 먼저 정한다 — 시간에 따른 자동 만료는 없다.** `retention_decision` 은 셋 중 하나이고, **전체 정리라면 `cleanup-plan` 과 `cleanup` 양쪽에 `delete_execution_resources` 를 지정한다.**
+
+| 결정 | 남는 것 |
+| --- | --- |
+| `delete_execution_resources` | 서비스 자원과 #446 자원 **전부** 정리 |
+| `retain_launch_image` | 시작 템플릿·AMI·스냅숏 **보존**, 나머지 정리 |
+| `retain_execution_infrastructure` | 검증 리스너·TG·부착만 정리 — ASG·인스턴스·볼륨·LT·AMI·스냅숏 **전부 보존**(**과금이 계속된다**) |
+
+**완료는 `success: true` 가 아니다.** 서비스 전환 자원까지 포함한 **새 잔여 조회의 `complete: true`** 로 확인한다 — 「완료는 삭제 응답이 아니라 정리 뒤 새로 읽은 잔여 재고로 판단한다」(ADR-0009 §7-4). 남은 항목은 **새 매니페스트로 다시 승인**해 간다.
+
+**두 거절의 대응이 다르다 — 묶어서 「다시 뽑으면 된다」로 읽지 않는다.**
+
+| 거절 | 해야 하는 일 |
+| --- | --- |
+| `manifest_mismatch` | **새 재고를 확인하고 다시 승인한다** — `cleanup-plan` 을 다시 뽑아 같은 순서로 간다 |
+| `cleanup_blocked` | **보고된 원인을 먼저 해소한다** — 보안 보류 · 사용 중인 경로 · 공유 참조. 「공유 참조·보안 보류는 운영자가 해소해야 하는 차단」이고, 이 실행이 소유한 자원의 종료를 기다리는 **대기와 구분해 보고된다**(ADR-0009 §7-4) |
+
+**둘 다 설계된 거절이라 T4 실패로 적지 않는다. 다만 「거절이 정상」과 「정리가 끝났다」는 별개다** — `return` 이 막혀 운영 경로가 전환 TG 에 남아 있으면 **정리도 계속 차단되고, 미정리 자원의 과금이 남는다.** 그 회차는 **정리 미완**으로 적고 원인과 함께 `docs/AWS_SMOKE_RESULT.md` §8·§9 에 남긴다.
 
 > 환경 운영 쪽 절차(언제 `.env`를 실 AWS로 전환하고 누가 되돌리는지)는 [ADR-0009](adr/0009-real-aws-smoke-environment.md) §6 5단계가 다룬다(1차 개정 · PR #436 머지됨). 그 절과 이 칸은 같은 사실을 가리킨다 — 다만 **이 칸의 근거는 ADR이 아니라 위에 적은 코드다.** ADR이 다시 개정돼도 흔들리지 않는다.
 
