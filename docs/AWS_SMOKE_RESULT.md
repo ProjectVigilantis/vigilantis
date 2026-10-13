@@ -43,7 +43,7 @@
 | 계정 ID | (저장소에 적지 않는다 — `--account` 인자로만) |
 | 리전 | `ap-northeast-2` |
 | 검증 기준 커밋 | 앱: `origin/dev` `fd38c01` · 기동 스크립트: PR #436 head `e7787c2`(Budget $300·크레딧 제외 정의) |
-| A6 실행 기준(배포 이미지) | 배포 이미지 태그 `mvp-7a7209d` — **PR #440(수집 범위 필터)·#441(배포 플랫폼)을 로컬에서 합친 미머지 병합본**이며 위 `fd38c01`과 다르다(§7 10/12 14:41). 두 PR 머지 뒤 `dev`로 재빌드하면 A6 근거 이미지의 커밋은 `dev`에 남지 않는다 — A6을 재현할 기준은 이 줄의 태그다 |
+| A6 실행 기준(배포 이미지) | **재실측(10/13(화)) — 배포 이미지 `mvp-5eb2148`**(= `origin/dev` `5eb2148`, PR #440·#441 머지 뒤 `dev`로 재빌드 · ECS 작업 정의 `vigilantis-platform-api:3`). A6 결과 칸의 값은 이 이미지 기준이다. 10/12(월) 1차 실행은 `mvp-7a7209d`(PR #440·#441을 로컬에서 합친 미머지 병합본 — 그 커밋은 `dev`에 남지 않는다)였고 원본을 보존하지 않아 재실측했다(§7 10/12 14:41 · 10/13 10:41) |
 | `up --yes` 실행 시각 | 10/12(월) 11:19 KST(인스턴스 `LaunchTime`) · 학원 계정(멤버 계정) — vCPU 한도 5 → 64 상향 승인 직후 |
 | `status` TG 대상 `healthy` 확인 시각 | 10/12(월) `up` 직후(ALB 생성 11:20 KST) — `web-1`·`web-2` 2/2 `healthy` |
 | 앱 키 Arn (`sts get-caller-identity`) | `arn:aws:iam::***:user/vigilantis-smoke-app` 확인 ☑ |
@@ -179,7 +179,7 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 
 | # | 시나리오 | 결과 | 시각 | 비고 |
 | --- | --- | --- | --- | --- |
-| A6 | `NACL_ADD_DENY` → `NACL_RESTORE` | **둘 다 `SUCCESS`** — 차단 뒤 NACL에 규칙 100(인바운드 deny · `203.0.113.10/32`)이 실제로 생기고, 해제 뒤 실제로 지워짐(describe 확인 — 응답 원본은 남기지 않았다) | 차단 10/12(월) 15:04 · 해제 15:06 KST | **저장값은 미확인 — 재실측 필요.** 이월 6·7행이 묻는 것은 AWS가 저장해 `describe_network_acls`(NACL 규칙 조회 — `NACL_RESTORE`가 백업과 대조하는 상대)가 돌려주는 `Protocol`·`PortRange`인데, 그 응답 원본을 보존하지 않았다. 참고로 CloudTrail `CreateNetworkAclEntry` 이벤트의 **요청값**은 프로토콜 번호 6 · 포트 범위 0–65535 — 코드가 번호·전체 범위로 바꿔 보냈다는 사실일 뿐 AWS가 저장한 값의 근거가 아니다. A6의 원본 출력(CloudTrail 이벤트·차단 후/해제 후 describe·실행 결과 `SUCCESS` 2건)도 미보존 — 재실측 때 PR #439 본문 `## 원본 출력` ⑥으로 붙인다. **배포된 플랫폼으로 실행**(로컬 앱 아님) — 호출 주체가 `assumed-role/vigilantis-access/vigilantis-platform`(§7) |
+| A6 | `NACL_ADD_DENY` → `NACL_RESTORE` | **둘 다 `SUCCESS`** (재실측 — 배포된 플랫폼 · 사람 승인 `USER_APPROVAL`). **AWS 저장값**: 차단 직후 `describe_network_acls`가 규칙 100(인바운드 deny · `203.0.113.10/32`)을 **`Protocol: "6"`**(번호 문자열) · **`PortRange: {From: 0, To: 65535}`**로 돌려줬다. 백업 레코드(`RECORD_NACL_RULE_INDEX` — `NACL_RESTORE`가 지울 규칙이 우리가 넣은 것인지 대조하는 기록)의 `protocol`도 `"6"`이라 **저장값과 백업이 일치**했고, 해제가 그 대조를 통과해 `SUCCESS`로 끝났다. 해제 직후 조회에서 규칙 100이 사라져 기준선(차단 전 조회)과 같아졌다 | 차단 10/13(화) 10:43:04 승인 → 10:43:08 완료 · 해제 10:43:29 승인 → 10:43:37 완료 KST (1차 10/12(월) 15:04 · 15:06 — 원본 미보존) | **이월 6행**: 실 AWS는 번호로 저장하고, 코드가 번호로 바꿔 보내므로(`NACL_PROTOCOL_NUMBERS`) 백업 대조가 실 AWS에서도 맞는다 — 해소 근거. **이월 7행**: 전체 범위 `0-65535`를 실은 TCP 요청이 거절 없이 들어가 그대로 저장됐다 — 해소 근거(포트 범위 없는 요청의 실 AWS 거절은 재현하지 않았다 — 문서 근거만). **CloudTrail**: 두 호출 모두 주체 `assumed-role/vigilantis-access/vigilantis-platform`, 요청 ID가 실행 단계 기록의 `aws_request_id`와 일치. 원본은 PR #439 본문 `## 원본 출력` ⑥. §5 처분 칸 기입은 집계 담당(판정 기준 ⓓ)이 한다 |
 | A7 | `RIGHTSIZING`(`idle-dev`) → `REVERT_SIZE` | | | §1의 관측치 수·실제 판정과 실행 전제 확인 |
 | A8 | Status Check 2/2 실 대기 → `stopped` 주입 → `FAILED` → 자동 원복 | | | 실 대기와 stopped 실패 분기의 결과. impaired 경로 해소 근거로 쓰지 않음 |
 | A8-impaired | Status Check `impaired` 검사 결과 경로 | | | **이월 2행** — 미검증이면 미해소와 사유 기록; stopped 결과로 대체하지 않음 |
@@ -228,8 +228,10 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 | 10/12 13:24 | A3 회차의 조인 무결성 조사 대상 2건 | 로컬 DB의 골든 데이터셋(다른 계정) 기록 — 스모크 무관(§2-4) |
 | 10/12 14:41 | **배포된 플랫폼의 첫 스캔**(ADR-0010 · PR #441) — 회차 `SUCCESS`, 흡수된 조회 0건(`error_summary`가 빈 값인지 빈 묶음 `{}`인지는 이 회차의 `qa_scan_compare.py` 원본을 남기지 않아 미확인 — 재실측 필요). 수집 수 SG 6·NACL 2로 **스모크 VPC만** 잡힘(로컬 A3 회차의 7·3에서 기본 VPC분이 빠짐 — 수집 범위 필터 PR #440) | 앱은 장기 키 없이 태스크 역할 → `vigilantis-access` 전환으로만 AWS에 닿는다. 배포 이미지는 #440·#441을 로컬에서 합친 `mvp-7a7209d`(두 PR 머지 뒤 `dev` 기준으로 재빌드 예정) |
 | 10/12 15:00 | 배포 환경에는 모의 위협 폴더가 없다 — SSH 무차별 대입 관측(`evt_ssh_bruteforce_001`, 대상 `web-1`, 출발지 `203.0.113.10`)을 **일회성 ECS 태스크**로 운영 DB에 넣었다 | AI 분석 `PROPOSALS_GENERATED` · 위험도 HIGH · 후보 `NACL_ADD_DENY` 가드레일 거절 0건 → 배포 주소로 승인(A6). 대응 방식이 `PRE_MITIGATION_0_5S`로 정해졌지만 발동 경로(B5)가 없어 자동 선차단은 없었다 — 사람 승인 실행이다 |
-| 10/12 15:04 | A6 차단의 CloudTrail 기록 — `CreateNetworkAclEntry` 호출 주체 **`assumed-role/vigilantis-access/vigilantis-platform`** | 배포된 앱이 접근 역할 전환으로 조치했다는 직접 증거(ADR-0010 §3). 이벤트 원본(주체·요청 파라미터)은 보존하지 않았다 — 재실측 때 PR #439 본문 `## 원본 출력` ⑥으로 붙인다 |
+| 10/12 15:04 | A6 차단의 CloudTrail 기록 — `CreateNetworkAclEntry` 호출 주체 **`assumed-role/vigilantis-access/vigilantis-platform`** | 배포된 앱이 접근 역할 전환으로 조치했다는 직접 증거(ADR-0010 §3). 이벤트 원본(주체·요청 파라미터)은 보존하지 않았다 — 10/13(화) 재실측분을 PR #439 본문 `## 원본 출력` ⑥에 붙였다(아래 10/13 행) |
 | 10/12 오후 | **A5 — 없는 대상에 대한 DryRun 응답이 작업마다 다르다.** 볼륨·SG 삭제는 실 AWS가 대상 존재를 검사해 `NotFound`를 준다(LocalStack은 없는 SG에도 `DryRunOperation` — ADR-0007 실측과 다름). 인스턴스 `modify_instance_attribute`는 존재를 검사하지 않고(관리자 키 `DryRunOperation`), **앱 키에서는 태그 조건(`vigilantis:smoke=true`)을 평가할 수 없어 `UnauthorizedOperation`**이 된다 | **ADR-0006 이월 8행의 "실 AWS는 여기서 걸러 줄 것으로 보인다"는 가정이 반증됐다**(관리자 키 `DryRunOperation` 실측 — §3 A5 판정). 앱 키에서 막힌 것은 IAM 태그 조건 덕이라, 울타리가 느슨한 키에서는 가드레일 ④가 통과한다. 앱 키에서도 다운사이징 대상이 사라진 경우 사유 코드가 `PRECHECK_UNAUTHORIZED`(권한 문제)로 찍힌다 — 관제자가 "대상 없음"이 아니라 "권한 누락"으로 읽을 수 있다. 처분(사유 매핑을 고칠지, describe를 앞세울지)은 이월 8행 처분과 함께 PM이 정한다 |
+| 10/13 10:41 | **A6 재실측** — 모의 위협(SSH 무차별 대입 120회/300초, 대상 `web-1`, 출발지 `203.0.113.10`, 관측 ID `evt-ssh-bruteforce-a6r-20261013`)을 일회성 ECS 태스크로 운영 DB에 넣었다(`threat_ingress.receive_threat` 직접 호출 — 배포 환경에 모의 위협 폴더가 없다) | 인시던트 `3f5ed399-56e8-4d8d-a981-b9d8c51ff515` · AI 분석 14초 만에 `PROPOSALS_GENERATED` · 위험도 HIGH · 후보 `NACL_ADD_DENY` 가드레일 거절 0건. 대응 방식이 `PRE_MITIGATION_0_5S`로 정해졌지만 B5(#447)가 아직 없어 자동 선차단은 없었다 — 1차와 같이 사람 승인 실행(배포 주소의 `POST /api/v1/actions/execute`) |
+| 10/13 10:43 | A6 재실측의 CloudTrail — `CreateNetworkAclEntry` 01:43:07Z · `DeleteNetworkAclEntry` 01:43:37Z, 두 건 모두 주체 `assumed-role/vigilantis-access/vigilantis-platform` · 오류 없음 | 요청 파라미터 `aclProtocol: "6"` · `portRange: {from: 0, to: 65535}`. 요청 ID가 실행 단계 기록의 `aws_request_id`와 같다(같은 호출임을 묶는 근거). 원본은 PR #439 ⑥ |
 
 ---
 
