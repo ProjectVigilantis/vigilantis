@@ -17,8 +17,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import Enum, unique
-from typing import Annotated, Any, Literal, Optional
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -37,10 +38,10 @@ from .runbook_parameters import (
 class BackupType(str, Enum):
     """백업 종류 4종 — ADR-0004 롤백 공통 정책 ③의 backup_action 어휘."""
 
-    SAVE_INSTANCE_SPEC_JSON = "SAVE_INSTANCE_SPEC_JSON"        # RIGHTSIZING
-    SAVE_SG_FULL_RULES_JSON = "SAVE_SG_FULL_RULES_JSON"        # SG_DELETE_ISOLATED
+    SAVE_INSTANCE_SPEC_JSON = "SAVE_INSTANCE_SPEC_JSON"  # RIGHTSIZING
+    SAVE_SG_FULL_RULES_JSON = "SAVE_SG_FULL_RULES_JSON"  # SG_DELETE_ISOLATED
     SAVE_CURRENT_SG_AND_TG_MAPPING = "SAVE_CURRENT_SG_AND_TG_MAPPING"  # EC2_ISOLATE
-    RECORD_NACL_RULE_INDEX = "RECORD_NACL_RULE_INDEX"          # NACL_ADD_DENY
+    RECORD_NACL_RULE_INDEX = "RECORD_NACL_RULE_INDEX"  # NACL_ADD_DENY
 
 
 class InstanceSpecBackup(BaseModel):
@@ -78,19 +79,19 @@ class InstanceSpecBackup(BaseModel):
     instance_type: str = Field(min_length=1)
     state: str = Field(min_length=1)
 
-    image_id: Optional[str] = None
-    architecture: Optional[str] = None
+    image_id: str | None = None
+    architecture: str | None = None
     # 타입 호환성의 근거 — ebs / instance-store
-    root_device_type: Optional[str] = None
+    root_device_type: str | None = None
     # 일부 타입이 강제하는 속성이라 원복 시 함께 되돌려야 할 수 있다
-    ebs_optimized: Optional[bool] = None
-    availability_zone: Optional[str] = None
-    vpc_id: Optional[str] = None
-    subnet_id: Optional[str] = None
+    ebs_optimized: bool | None = None
+    availability_zone: str | None = None
+    vpc_id: str | None = None
+    subnet_id: str | None = None
     # 조치 이전 퍼블릭 IPv4. 원복해도 돌아오지 않으므로 복원 값이 아니라 고지 근거다.
-    public_ip_address: Optional[str] = None
+    public_ip_address: str | None = None
     # 값이 있으면 EIP가 붙어 있었다는 뜻이라 주소가 유지된다 — 위 고지의 반대 근거다.
-    elastic_ip_association_id: Optional[str] = None
+    elastic_ip_association_id: str | None = None
 
 
 # CreateSecurityGroup API의 GroupName·Description 상한이 255자다. AWS가 거절할 값을
@@ -138,7 +139,7 @@ class SgFullRulesBackup(BaseModel):
     ingress_permissions: list[SgIpPermission]
     egress_permissions: list[SgIpPermission]
 
-    group_id: Optional[SecurityGroupId] = None
+    group_id: SecurityGroupId | None = None
 
 
 class NaclRuleIndexBackup(BaseModel):
@@ -196,6 +197,122 @@ class EniSecurityGroups(BaseModel):
     security_group_ids: list[SecurityGroupId] = Field(min_length=1)
 
 
+# ASG 이름 상한(CreateAutoScalingGroup 255자)
+_AsgName = Annotated[str, Field(min_length=1, max_length=255)]
+
+
+class ScaleInProtectionBackup(BaseModel):
+    """격리 직전에 **관측한** ASG scale-in 보호 상태 — 보조 정보이며 SG/TG 원복 값이 아니다.
+
+    `SgAndTgMappingBackup.scale_in_protection`에 실린다. 세 상태를 섞지 않는다.
+
+      - `MANAGED` — 이 인스턴스가 #446 `EC2_ENABLE_AUTOSCALING` 실행이 만든 스모크 ASG의
+        **실제 멤버**임을 ASG 소유 태그 ↔ 저장된 실행 계획 대조로 확인했고, 보호 이전 값을
+        읽었다(`previous_protected`). 보호 쓰기·복원 대상은 이 상태뿐이다.
+      - `NOT_MANAGED` — 조회가 성공했고 대상이 ASG 멤버가 아니거나 우리가 만든 스모크 ASG가
+        아니다. 격리는 그대로 두고 ASG에는 손대지 않는다.
+      - `UNKNOWN` — 조회·대조를 끝내지 못했다. **보호되지 않았다는 뜻이 아니다.** 쓰기도
+        복원도 하지 않는다. 이 필드가 없는 옛 백업도 같은 처분이다(`None` = 모름).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["MANAGED", "NOT_MANAGED", "UNKNOWN"]
+    asg_name: _AsgName | None = None
+    previous_protected: bool | None = None
+    # ASG 소유 태그가 가리킨 #446 실행 — 저장된 계획과 대조한 값
+    autoscaling_execution_id: str | None = Field(
+        default=None, min_length=1, max_length=64
+    )
+    reason: str | None = Field(default=None, min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def _shape_by_status(self) -> ScaleInProtectionBackup:
+        managed_fields = (
+            self.asg_name,
+            self.previous_protected,
+            self.autoscaling_execution_id,
+        )
+        if self.status == "MANAGED":
+            if any(value is None for value in managed_fields):
+                raise ValueError(
+                    "MANAGED에는 asg_name·previous_protected·autoscaling_execution_id가 모두 필요합니다"
+                )
+        elif any(value is not None for value in managed_fields):
+            raise ValueError(
+                "MANAGED가 아닌 상태는 ASG 좌표나 이전 보호 값을 갖지 않습니다"
+            )
+        return self
+
+
+ScaleInProtectionReason = Literal[
+    "CORE_STATE_UNVERIFIED",  # 복원 전에 ENI SG·TG 등록이 복원된 현물을 다시 읽어 확인하지 못했다
+    "WRITTEN",  # 쓰기 응답을 받았고 조회로 값을 확인했다
+    "ALREADY_PROTECTED",  # 이미 보호돼 있어 쓰지 않았다
+    "RESTORED",  # 복원 쓰기 후 이전 값을 조회로 확인했다
+    "ALREADY_RESTORED",  # 복원할 필요가 없었다(이미 이전 값)
+    "NO_PROTECTION_WRITE",  # 우리가 보호를 쓴 기록이 없어 복원하지 않았다
+    "PRIOR_STATE_UNKNOWN",  # 이전 값을 모른다 — 쓰지 않았다
+    "MEMBERSHIP_DRIFT",  # 같은 인스턴스·ASG 멤버십이 확인되지 않았다 — 쓰지 않았다
+    "LOOKUP_FAILED",  # 조회를 못 했다
+    "WRITE_REJECTED",  # AWS가 쓰기를 거절했다(4xx)
+    "WRITE_UNCERTAIN",  # 쓰기 응답을 알 수 없고 값도 확인하지 못했다
+    "EXECUTION_INTERRUPTED",  # 격리/해제 실행이 끊겨 이 단계에 도달한 기록이 없다
+]
+
+
+class ScaleInProtectionResult(BaseModel):
+    """ASG scale-in 보호 쓰기(`PROTECT`)·복원(`RESTORE`) 1회의 **별도 관측 결과**.
+
+    격리/해제 실행의 SUCCESS·단계 effect와 섞이지 않는 자리다 — 이 결과가 FAILED·UNKNOWN이어도
+    TG/ENI 격리 성공이나 해제 경로를 바꾸지 않는다. 잔여(`residual`)는 "보호가 의도대로
+    되지 않았거나 확인되지 않았다"를 뜻하며 사람이 확인할 몫이다.
+
+    저장 위치는 `ActionExecution.scale_in_protection_result`(실행당 1개, 갱신 가능)다 — PROTECT는
+    격리 실행에, RESTORE는 해제 실행에 남는다. 원복 근거인 SG/TG 백업은 불변으로 두고 이 값은
+    그 위에 쌓지 않는다.
+
+    `write_may_have_begun`은 이 시도의 AWS 쓰기가 **시작됐을 수 있다**는 표지다. 의미는 한 번의
+    시도 안의 "의도 → 최종 결과"이며, 최종 결과(확정 거절 포함)가 의도를 덮어쓴다 — 단계를 남긴
+    실행은 다시 돌리지 않으므로 시도 사이로 이어 붙이지 않는다. 쓰기 직전에 남기는
+    `UNKNOWN`·`WRITE_UNCERTAIN` 의도 기록에서 참이 되며, **호출이 실제로 나갔다는 증거가
+    아니다**(기록 후 호출 전에 죽었을 수 있다). 복원은 이 값이 참이고 확정 거절
+    (`FAILED`·`WRITE_REJECTED`)이 아닌 PROTECT 기록이 있을 때만 쓴다.
+
+    `observed_at`은 이 결과를 만든(기록 직전) 시각이다 — 의도 기록과 최종 기록은 각자 시각을 갖는다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    phase: Literal["PROTECT", "RESTORE"]
+    outcome: Literal["APPLIED", "NOT_ATTEMPTED", "FAILED", "UNKNOWN"]
+    reason: ScaleInProtectionReason
+    # 격리 직전에 ASG를 확정하지 못한 UNKNOWN 백업의 잔여 기록은 ASG 이름이 없다
+    asg_name: _AsgName | None = None
+    instance_id: str = Field(min_length=1)
+    write_may_have_begun: bool
+    # 마지막으로 **관측한** 보호 값. 관측하지 못했으면 None
+    observed_protected: bool | None = None
+    residual: bool
+    observed_at: datetime
+
+    @property
+    def may_have_changed_protection(self) -> bool:
+        """이 기록이 "우리 쓰기가 값을 바꿨을 수 있다"의 근거인가 — 확정 거절은 근거가 아니다."""
+        rejected = self.outcome == "FAILED" and self.reason == "WRITE_REJECTED"
+        return self.write_may_have_begun and not rejected
+
+    @model_validator(mode="after")
+    def _consistent(self) -> ScaleInProtectionResult:
+        if self.observed_at.tzinfo is None:
+            raise ValueError("observed_at은 시간대가 있어야 합니다")
+        if self.outcome == "APPLIED" and self.residual:
+            raise ValueError("APPLIED는 잔여가 없습니다")
+        if self.outcome in ("FAILED", "UNKNOWN") and not self.residual:
+            raise ValueError("FAILED·UNKNOWN은 잔여를 남깁니다")
+        return self
+
+
 class SgAndTgMappingBackup(BaseModel):
     """`SAVE_CURRENT_SG_AND_TG_MAPPING` payload — `EC2_ISOLATE` 격리 직전 SG·TG 매핑.
 
@@ -223,9 +340,12 @@ class SgAndTgMappingBackup(BaseModel):
     target_group_arn: TargetGroupArn
     target_port: _TargetPort
     network_interfaces: list[EniSecurityGroups] = Field(min_length=1)
+    # 보조 관측(SG/TG 원복 값 아님). None = 이 필드가 없는 옛 백업 — "모름"이며 보호되지
+    # 않았다는 뜻이 아니다. 이 값이 어떻든 SG/TG 격리·해제 계약은 같다.
+    scale_in_protection: ScaleInProtectionBackup | None = None
 
     @model_validator(mode="after")
-    def _primary_matches_and_unique(self) -> "SgAndTgMappingBackup":
+    def _primary_matches_and_unique(self) -> SgAndTgMappingBackup:
         primary = self.network_interfaces[0]
         if list(primary.security_group_ids) != list(self.security_group_ids):
             raise ValueError(

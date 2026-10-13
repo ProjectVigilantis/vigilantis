@@ -12,8 +12,10 @@ from ai.guardrails import (
     ARN_TARGET_NOT_MANAGED,
     SCHEMA_INVALID_PAYLOAD,
     WHITELIST_NOT_AI_RECOMMENDABLE,
+    WHITELIST_NOT_AUTO_ISOLATION_RUNBOOK,
     WHITELIST_NOT_ROLLBACK_RUNBOOK,
     WHITELIST_UNKNOWN_RUNBOOK,
+    AutoIsolationCommand,
     ManagedAssetLookup,
     RollbackExecutionCommand,
     SchemaCheckedCommand,
@@ -42,7 +44,7 @@ from schemas.precheck import (
     VerificationMethod,
     build_verification_summary,
 )
-from schemas.runbook_parameters import Ec2RevertSizeParameters
+from schemas.runbook_parameters import Ec2IsolateParameters, Ec2RevertSizeParameters
 
 TARGET_ARN = "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0123456789abcdef0"
 
@@ -278,22 +280,6 @@ def test_schema_check_leaves_id_judgement_to_whitelist(runbook_id):
     assert outcome.step_result.result is GuardrailStepStatus.PASS
     assert outcome.command is not None
     assert outcome.command.runbook_id == runbook_id
-
-
-def test_schema_check_rejects_unimplemented_contexts():
-    """아직 구현하지 않은 문맥은 payload 모양이 달라 FAIL로 기록하면 거절 사유가 틀린다.
-
-    ROLLBACK_EXECUTION은 #241에서 구현했으므로 여기 없다 — 남은 것은 AUTO_ISOLATION
-    하나이고, 그쪽은 호출 시점 자체가 아직 정해지지 않았다(ADR-0007 §Consequences).
-    """
-    request = GuardrailValidationRequest(
-        validation_context=GuardrailValidationContext.AUTO_ISOLATION,
-        execution_id="exec-1",
-        command_payload=VALID_PAYLOAD,
-    )
-
-    with pytest.raises(NotImplementedError):
-        run_schema_check(request)
 
 
 # ------------------------------------------------------------------------------
@@ -850,3 +836,189 @@ def test_rollback_command_rejects_a_non_rollback_runbook():
             },
             evidence_ids=["ev-1"],
         )
+
+
+# ------------------------------------------------------------------------------
+# AUTO_ISOLATION 문맥 (#447) — 허용 목록은 RUNBOOK_EC2_ISOLATE 하나
+# ------------------------------------------------------------------------------
+
+ISOLATE_PARAMS = {
+    "instance_id": "i-0123456789abcdef0",
+    "target_group_arn": (
+        "arn:aws:elasticloadbalancing:ap-northeast-2:123456789012:targetgroup/vig/abc"
+    ),
+    "isolation_group_id": "sg-0abc123456789def0",
+    "evidence_id": "ev-1",
+}
+
+ISOLATE_PAYLOAD = {
+    "runbook_id": RunbookId.RUNBOOK_EC2_ISOLATE.value,
+    "target_arn": TARGET_ARN,
+    "parameters": ISOLATE_PARAMS,
+    "evidence_ids": ["ev-1"],
+}
+
+
+def _auto_request(payload: dict) -> GuardrailValidationRequest:
+    return GuardrailValidationRequest(
+        validation_context=GuardrailValidationContext.AUTO_ISOLATION,
+        execution_id="exec-1",
+        command_payload=payload,
+    )
+
+
+def _validate_auto(payload: dict | None = None, *, collected=(TARGET_ARN,), precheck=None):
+    return run_guardrail_validation(
+        _auto_request(ISOLATE_PAYLOAD if payload is None else payload),
+        is_managed_arn=_collected(*collected),
+        precheck=_passing_precheck() if precheck is None else precheck,
+    )
+
+
+def test_auto_isolation_passes_all_four_steps_and_keeps_execution_parameters():
+    precheck = _passing_precheck()
+
+    outcome = _validate_auto(precheck=precheck)
+
+    assert outcome.result.result is GuardrailDecision.PASS
+    assert [s.step for s in outcome.result.steps] == list(GUARDRAIL_STEP_ORDER)
+    assert all(s.result is GuardrailStepStatus.PASS for s in outcome.result.steps)
+    assert isinstance(outcome.command, AutoIsolationCommand)
+    assert outcome.command.runbook_id is RunbookId.RUNBOOK_EC2_ISOLATE
+    assert outcome.command.target_arn == TARGET_ARN
+    assert outcome.command.evidence_ids == ["ev-1"]
+    # 후보 계약(빈 모델)이 아니라 실행 파라미터 계약의 값이 ④까지 그대로 간다
+    assert outcome.command.parameters == Ec2IsolateParameters(**ISOLATE_PARAMS)
+    assert precheck.asked == [outcome.command]
+
+
+def test_auto_isolation_schema_check_uses_the_execution_parameter_contract():
+    # 후보 계약이면 빈 parameters가 통과한다 — 실행 계약이라 거절된다
+    for parameters in ({}, {**ISOLATE_PARAMS, "instance_id": "bad"},
+                       {**ISOLATE_PARAMS, "extra": "x"}):
+        outcome = _validate_auto({**ISOLATE_PAYLOAD, "parameters": parameters})
+        assert outcome.result.failed_step is GuardrailStep.SCHEMA_CHECK
+        assert outcome.result.steps[0].reason_code == SCHEMA_INVALID_PAYLOAD
+        assert outcome.command is None
+
+
+@pytest.mark.parametrize(
+    "runbook_id",
+    sorted(
+        {r.value for r in RunbookId if r is not RunbookId.RUNBOOK_EC2_ISOLATE}
+        | set(UNKNOWN_RUNBOOK_IDS)
+    ),
+)
+def test_auto_isolation_whitelist_admits_only_ec2_isolate(runbook_id):
+    precheck = _passing_precheck()
+    # ①은 ID를 판정하지 않으므로 어떤 ID든 ②까지 도달한다
+    payload = {**ISOLATE_PAYLOAD, "runbook_id": runbook_id}
+    if runbook_id in PARAMS_BY_RUNBOOK or runbook_id in ROLLBACK_RUNBOOK_IDS:
+        payload["parameters"] = {}
+    outcome = _validate_auto(payload, precheck=precheck)
+
+    # 파라미터가 맞지 않는 ID는 ①에서, 맞는 모양의 ID는 ②에서 끝나지만 어느 쪽이든
+    # 명령도 AWS 호출도 없다. ②의 사유는 ID 판정이므로 별도 케이스에서 확인한다.
+    assert outcome.command is None
+    assert outcome.result.result is GuardrailDecision.FAIL
+    assert precheck.asked == []
+
+
+@pytest.mark.parametrize(
+    ("runbook_ids", "reason_code"),
+    [
+        (
+            sorted(
+                r.value for r in RunbookId if r is not RunbookId.RUNBOOK_EC2_ISOLATE
+            ),
+            WHITELIST_NOT_AUTO_ISOLATION_RUNBOOK,
+        ),
+        (UNKNOWN_RUNBOOK_IDS, WHITELIST_UNKNOWN_RUNBOOK),
+    ],
+    ids=["known_but_not_automatic", "unknown"],
+)
+def test_auto_isolation_whitelist_rejects_every_other_runbook(runbook_ids, reason_code):
+    for runbook_id in runbook_ids:
+        checked = SchemaCheckedCommand.model_validate(
+            {**ISOLATE_PAYLOAD, "runbook_id": runbook_id, "parameters": {}}
+        )
+
+        outcome = run_action_whitelist(
+            checked, GuardrailValidationContext.AUTO_ISOLATION
+        )
+
+        assert outcome.command is None
+        assert outcome.step_result.step is GuardrailStep.ACTION_WHITELIST
+        assert outcome.step_result.result is GuardrailStepStatus.FAIL
+        assert outcome.step_result.reason_code is reason_code
+
+
+def test_auto_isolation_reason_code_is_distinct_and_existing_values_are_kept():
+    assert WHITELIST_NOT_AUTO_ISOLATION_RUNBOOK is (
+        ActionWhitelistReasonCode.WHITELIST_NOT_AUTO_ISOLATION_RUNBOOK
+    )
+    assert {c.value for c in ActionWhitelistReasonCode} == {
+        "WHITELIST_UNKNOWN_RUNBOOK",
+        "WHITELIST_NOT_AI_RECOMMENDABLE",
+        "WHITELIST_NOT_ROLLBACK_RUNBOOK",
+        "WHITELIST_NOT_AUTO_ISOLATION_RUNBOOK",
+    }
+
+
+def test_auto_isolation_whitelist_records_other_runbook_at_step_two():
+    # 빈 parameters의 SG_DELETE_ISOLATED는 ①이 이 문맥에서 모델을 갖지 않으므로
+    # ②까지 가서 거절된다
+    outcome = _validate_auto({
+        **ISOLATE_PAYLOAD,
+        "runbook_id": RunbookId.RUNBOOK_SG_DELETE_ISOLATED.value,
+        "parameters": {},
+    })
+
+    assert outcome.result.failed_step is GuardrailStep.ACTION_WHITELIST
+    assert outcome.result.steps[1].reason_code == WHITELIST_NOT_AUTO_ISOLATION_RUNBOOK
+
+
+def test_auto_isolation_arn_mismatch_stops_before_aws():
+    precheck = _passing_precheck()
+
+    outcome = _validate_auto(collected=(), precheck=precheck)
+
+    assert outcome.result.failed_step is GuardrailStep.ARN_MATCH
+    assert outcome.result.steps[2].reason_code == ARN_TARGET_NOT_MANAGED
+    assert outcome.result.steps[3].result is GuardrailStepStatus.NOT_RUN
+    assert outcome.command is None
+    assert precheck.asked == []
+
+
+def test_auto_isolation_precheck_rejection_is_copied_and_stops_the_command():
+    outcome = _validate_auto(
+        precheck=_failing_precheck(PrecheckReasonCode.PRECHECK_UNAUTHORIZED)
+    )
+
+    assert outcome.result.failed_step is GuardrailStep.AWS_DRY_RUN
+    assert outcome.result.steps[3].reason_code is PrecheckReasonCode.PRECHECK_UNAUTHORIZED
+    assert outcome.result.steps[3].verification_summary == FAIL_SUMMARY
+    assert outcome.command is None
+
+
+def test_auto_isolation_command_rejects_other_runbook_or_candidate_parameters():
+    with pytest.raises(ValidationError):
+        AutoIsolationCommand(
+            runbook_id=RunbookId.RUNBOOK_SG_DELETE_ISOLATED,
+            target_arn=TARGET_ARN,
+            parameters=ISOLATE_PARAMS,
+            evidence_ids=["ev-1"],
+        )
+    with pytest.raises(ValidationError):
+        AutoIsolationCommand(
+            runbook_id=RunbookId.RUNBOOK_EC2_ISOLATE,
+            target_arn=TARGET_ARN,
+            parameters={},
+            evidence_ids=["ev-1"],
+        )
+
+
+def test_other_contexts_do_not_accept_the_isolation_command_path():
+    # 회귀: AI 후보는 여전히 Draft, 원복은 여전히 Rollback 명령으로 승격한다
+    assert isinstance(_validate().command, RunbookCandidateDraft)
+    assert isinstance(_validate_rollback().command, RollbackExecutionCommand)

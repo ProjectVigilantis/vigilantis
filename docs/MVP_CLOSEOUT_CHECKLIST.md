@@ -3,7 +3,7 @@
 > **담당**: 김승철 (QA & Scenario) — 이슈 [#422](https://github.com/ProjectVigilantis/vigilantis/issues/422)
 > **판정 주체**: 김세혁(PM). 판정 기록은 SSOT [PROJECT_STATUS.md](PROJECT_STATUS.md)에 PM이 남긴다.
 >
-> **이 문서는 판정 기준을 정의하지 않는다.** 10/15(목) 판정 기준은 10주차 전환 갱신(10/12(월))에서 PM이 확정하며, 이 문서는 **그 기준에 답할 때 볼 칸과 근거의 자리**다. 확정 전 초안을 확정 정책으로 취급하지 않는다.
+> **이 문서는 판정 기준을 정의하지 않는다.** 10/15(목) 판정 기준은 **10주차 전환 갱신(실제 2026-10-13(화) · 계획 10/12(월))에서 PM이 확정했으며**, 이 문서는 **그 기준에 답할 때 볼 칸과 근거의 자리**다. 확정 전 초안을 확정 정책으로 취급하지 않는다.
 > 빈칸·밑줄·미선택 체크박스는 **미확인**이다. 채울 때는 결과 또는 미확인 사유를 적는다.
 
 ---
@@ -13,7 +13,7 @@
 | 항목 | 원천 | 상태 |
 | --- | --- | --- |
 | 10/15(목)이 무엇을 묻는 날인가 | SSOT §현재 위치 §발표 일정 표 10/15 행 — "실 AWS 스모크 완료 + P2 3종 실 AWS 첫 검증까지. 발표 자리가 아니라 **내부 완료 판정일**" | 확정 |
-| 판정 기준 ⓐⓑⓒ… | SSOT 10주차 전환 갱신(10/12(월)) — "10주차 판정 기준 = MVP 마감 판정 기준" | **확정 대기** |
+| 판정 기준 ⓐⓑⓒⓓ | SSOT 10주차 전환 갱신(**2026-10-13(화)** · PR #461) — "10주차 판정 기준 = MVP 마감 판정 기준" | **확정됨** |
 | MVP 범위 | SSOT §MVP 확정 범위 · §Action Whitelist 10종 표 | 확정 |
 | 스모크 관측 기록 | [AWS_SMOKE_RESULT.md](AWS_SMOKE_RESULT.md) | 양식 신설 완료 · 값 미기록 |
 | 이월 목록 | [ADR-0006](adr/0006-localstack-team-standard-env.md) §4 (8행) | 처분 미기록 |
@@ -23,7 +23,7 @@
 
 ---
 
-## 1. A군 — 실 AWS 스모크 완료 (9주차)
+## 1. A군 — 실 AWS 스모크 완료 (**10주차**)
 
 근거는 모두 `AWS_SMOKE_RESULT.md`의 칸이다. 이 표에 결과를 복제하지 않고 **어느 칸이 답했는지** 가리킨다.
 
@@ -40,6 +40,7 @@
 | A8-impaired | `impaired` 검사 결과 경로 | §4 A8-impaired | ☐ | `stopped` 결과로 대체하지 않는다 |
 | A9 | `SKIP_PROD_PROTECTED`(`web-1`·`web-2`) | §2-3 | ☐ | **48 관측치 게이트 뒤에만 가능** |
 | A10 | P1 3종 실동작 (선택) | §4 A10 | ☐ | 선택 항목 — 미실행이 미달은 아니다 |
+| A11 | 스모크 결과 기록 — **결과가 채워진** `AWS_SMOKE_RESULT.md` 가 `dev` 에 들어온다(#439 머지) | 그 문서 전체 | ☐ | **양식은 10/6(화) PR #419 로 이미 `dev` 에 있다(`43aeceb`) — 이 행은 양식이 아니라 기록의 머지다.** 이 표의 다른 행이 전부 그 문서의 칸을 가리키므로, 기록이 머지되지 않으면 근거가 없다. SSOT 판정 기준 ⓐ 의 「#439 가 머지된다」가 이 행이다 |
 
 **48 관측치 게이트**: `rule_engine.MIN_DATAPOINTS = 48`이고 `METRIC_PERIOD_SECONDS` 기본값이 3600초다. 그리고 `evaluate_ec2`는 **관측치 검사를 prod 검사보다 먼저** 하므로(`rule_engine.py:64` → `:66`), 관측치가 차기 전에는 A7도 A9도 보이지 않고 **`web-1`·`web-2`·`idle-dev` 셋 다 `SKIP_INSUFFICIENT_DATA`** 다.
 
@@ -47,7 +48,7 @@
 | --- | --- |
 | 실제 기동 시각 · 48개 확보 시각 | ______ · ______ |
 | A7 · A9 실측 가능일과 실제 실측일 | 가능 ______ / 실측 ______ |
-| 9주차 안에 들어왔는가 · 아니면 어디로 갔는가 | ______ |
+| 10주차 안에 들어왔는가 · 아니면 어디로 갔는가 | ______ |
 
 ### 1-1. ADR-0006 §4 이월 목록 — 집계만 본다
 
@@ -59,7 +60,7 @@
 | 미해소 행 번호와 사유 | ______ |
 | 집계 시점 · 근거 | §5 를 읽은 시각 ______ |
 
-**미해소 0행이 판정 요건인지, 사유 기록으로 충분한지는 PM이 정한다.** 이 문서가 정하지 않는다.
+**미해소 0행이 판정 요건인지, 사유 기록으로 충분한지는 PM이 정한다.** 이 문서가 정하지 않는다. → **2026-10-13 주간 SSOT 갱신의 10주차 판정 기준 ⓓ 가 답했다**([`PROJECT_STATUS.md`](PROJECT_STATUS.md) §현재 위치). 기준 문장은 그 자리에만 두므로 여기 옮기지 않는다 — 집계를 적을 때 그 칸을 본다.
 
 ---
 
@@ -67,7 +68,7 @@
 
 ### 2-1. 선행 조건 — 코드가 서 있어야 한다
 
-`executor.py`에 실행 함수가 있는 런북은 **7종**이다(`rightsizing` · `revert_size` · `nacl_add_deny` · `nacl_restore` · `ebs_delete_unattached` · `sg_delete_isolated` · `sg_recreate`). **P2 3종은 `precheck`만 있고 실행 함수가 없다** — `executor.py` 머리말 `[남은 작업]` 1·2번이 그 셋을 적어 둔 자리다. **실행 함수만이 아니다** — `EC2_ISOLATE` 앞단의 백업 캡처와 선차단·자동 격리의 발동 경로도 비어 있다.
+`executor.py`에 실행 함수가 있는 런북은 **9종**이다(2026-10-12 #452·#454 머지 뒤 — `ec2_isolate`·`ec2_unisolate`가 들어왔다). **남은 1종은 `EC2_ENABLE_AUTOSCALING` 뿐이다** — `executor.py` 머리말 `[남은 작업]` 1번이 그 자리다(등록 롤백이 없는 단방향 구조 전환이라 백업 없이 들어간다). **실행 함수만이 아니다** — `EC2_ISOLATE` 앞단의 백업 캡처와 선차단·자동 격리의 발동 경로도 비어 있다.
 
 **담당은 B군 이슈 카드의 assignee가 기준이다.** 카드 7장을 2026-10-12(월) 발행했고(#443–#449) 아래 담당 칸은 **그 카드의 assignee 실측값**이다. B1–B3·B4·B5 는 같은 날 팀장 지정으로 정해졌다(2026-10-12 15:13 Slack `#회의` — B4·B5 를 안성일에게 요청, 15:15 수락). **B6·B7 은 아직 배정 전이다** — assignee 가 팀장으로 남아 있고, 그것이 「팀장이 담당을 정할 자리」라는 뜻이다(SSOT §팀 & 역할 — 「담당 경계가 애매한 작업 — 팀장이 아침에 판단해 분배한다」).
 
@@ -75,13 +76,13 @@
 
 | # | 이슈 | 작업 | 담당(카드 assignee) | PR | 머지 | 비고 |
 | --- | --- | --- | --- | --- | --- | --- |
-| B1 | [#443](https://github.com/ProjectVigilantis/vigilantis/issues/443) | 백업 `SAVE_CURRENT_SG_AND_TG_MAPPING` 캡처 — `EC2_ISOLATE` 전 SG·TG 매핑 저장 | 김세혁 | ______ | ☐ | `backup.py` 머리말이 남은 백업 1종으로 적어 둔 자리. **payload 모델도 없다** — `BackupType` 4종 중 이것만 `packages/schemas/backups.py` 에 모델이 없다(2026-10-12 확인 · 종전 기재 "계약은 정해져 있고 캡처 함수만 없다"를 정정). 소비처가 읽는 키(`security_group_ids`·`target_group_arn`)는 `_precheck_unisolate` 에만 박혀 있다. 이것 없이는 `UNISOLATE` 원복 값의 원천이 없다 |
-| B2 | [#444](https://github.com/ProjectVigilantis/vigilantis/issues/444) | `execute_ec2_isolate` | 김세혁 | ______ | ☐ | 10/12(월) 전 머지 기준은 **지나갔다.** 10/13(화) PR 예정(2026-10-12 팀장 공지). ENI SG 교체와 TG 등록 해제 둘을 하므로 **부분 성공의 처분**을 정해야 한다 |
-| B3 | [#445](https://github.com/ProjectVigilantis/vigilantis/issues/445) | `execute_ec2_unisolate` (롤백) | 김세혁 | ______ | ☐ | 원복 값은 백업 레코드에서만 로드([ADR-0008](adr/0008-backup-record-lifecycle-recovery-integrity.md) · ADR-0004 정책 ③). **TG 재등록의 유일한 자동 경로다** — `provision_smoke_aws.py` 는 초기화 뒤의 `up` 에서 등록을 건너뛰므로(격리 보호) 이 런북이 실패하면 수동 `register_targets` 뿐이고, 다음 `ISOLATE` precheck 가 조건 ③에서 막힌다 |
+| B1 | [#443](https://github.com/ProjectVigilantis/vigilantis/issues/443) | 백업 `SAVE_CURRENT_SG_AND_TG_MAPPING` 캡처 — `EC2_ISOLATE` 전 SG·TG 매핑 저장 | 김세혁 | [#452](https://github.com/ProjectVigilantis/vigilantis/pull/452) | ☑ | `backup.py` 머리말이 남은 백업 1종으로 적어 둔 자리. **payload 모델도 없었다** — `BackupType` 4종 중 이것만 `packages/schemas/backups.py` 에 모델이 없었다(2026-10-12 확인 · 종전 기재 "계약은 정해져 있고 캡처 함수만 없다"를 정정). 소비처가 읽는 키(`security_group_ids`·`target_group_arn`)도 `_precheck_unisolate` 에만 박혀 있었다 — 지금 원천은 `packages/schemas/backups.py` 의 모델이다. 이것 없이는 `UNISOLATE` 원복 값의 원천이 없었다. **#452 가 `SgAndTgMappingBackup` 모델을 신설해 닫혔다** — 카드(#443)에 올린 「TG 단수/복수」는 **단수 유지**로 정해졌고, 대신 `target_port`(비기본 포트 대상이 TG 기본 포트로 재등록되는 것을 막는다)와 `network_interfaces`(격리가 모든 ENI 를 바꾸므로 원복도 ENI 단위다)가 함께 들어갔다 |
+| B2 | [#444](https://github.com/ProjectVigilantis/vigilantis/issues/444) | `execute_ec2_isolate` | 김세혁 | [#452](https://github.com/ProjectVigilantis/vigilantis/pull/452) | ☑ | 10/12(월) 전 머지 기준은 지나갔고 **같은 날 #452 로 들어왔다**(계획은 10/13(화) PR). 순서는 **TG 해제 → ENI SG 교체**다. **부분 격리의 MVP 처분은 (a)로 정해졌다** — `FAILED` + CRITICAL 로그 + 백업 레코드 ID. `FAILED`는 원래 "변경 없는 실패"라 **원클릭 해제가 열리지 않고 복원은 수동이다**(상태 계약 보강은 Post-MVP #435). **판정에 직접 쓰이는 사실이다** — 부분 격리가 나면 P2-1 결과가 `FAILED`로 보여도 자산은 반쯤 바뀐 상태다 |
+| B3 | [#445](https://github.com/ProjectVigilantis/vigilantis/issues/445) | `execute_ec2_unisolate` (롤백) | 김세혁 | [#452](https://github.com/ProjectVigilantis/vigilantis/pull/452) | ☑ | 원복 값은 백업 레코드에서만 로드([ADR-0008](adr/0008-backup-record-lifecycle-recovery-integrity.md) · ADR-0004 정책 ③). **TG 재등록의 유일한 자동 경로다** — `provision_smoke_aws.py` 는 초기화 뒤의 `up` 에서 등록을 건너뛰므로(격리 보호) 이 런북이 실패하면 수동 `register_targets` 뿐이고, 다음 `ISOLATE` precheck 가 조건 ③에서 막힌다 |
 | B4 | [#446](https://github.com/ProjectVigilantis/vigilantis/issues/446) | `execute_ec2_enable_autoscaling` | **안성일**(확정) | ______ | ☐ | ASG 상한 4대. 10/14(수) 머지 목표. 짝 롤백 런북이 없어 **정리가 손으로 간다** — ASG 가 띄우는 인스턴스가 비용 추산 밖이라 검증 직후 정리한다(ADR-0009 §3). `create_auto_scaling_group` 은 DryRun 미지원이라 실행 때 처음 돈다 |
 | B5 | [#447](https://github.com/ProjectVigilantis/vigilantis/issues/447) | `PRE_MITIGATION_0_5S` · `TIMEOUT_ISOLATION_1M` 발동 경로 | **안성일**(확정) | ______ | ☐ | 둘 다 `EC2_ISOLATE`에 걸려 P2와 한 묶음이다. 10/14(수) 머지 목표. `soar.py`에 범위 선언은 있고 **발동 코드가 없다** — `trigger_source=` 를 쓰는 자리는 `USER_APPROVAL`·`AUTO_ON_FAILURE` 둘뿐인데 **소비처는 이미 둘 있다**(`agent_dispatcher`·`incidents` 저장소)라 그 분기가 지금 닿지 않는다 |
 | B6 | [#448](https://github.com/ProjectVigilantis/vigilantis/issues/448) | Medium `실행 예정 시간` 서버 응답 필드 | 배정 대기(assignee 팀장) | ______ | ☐ | API 계약 변경 — 발동 주체(B5)가 서면 함께 연다. 2026-08-27 결정이 함께 확정하라 한 것 셋(필드 null 규칙 · `IncidentListItem` 포함 여부 · 상태 전이 시 갱신·취소 규칙)이 이 카드의 범위다 |
-| B7 | [#449](https://github.com/ProjectVigilantis/vigilantis/issues/449) | 단위 테스트(스텁 또는 moto) | 배정 대기(assignee 팀장) | ______ | ☐ | LocalStack에 `elbv2`·`autoscaling`이 없어 **CI가 실행 경로를 돌지 못한다** — 실 AWS가 첫 실행이다. **`moto` 는 현재 의존성이 아니다**(2026-10-12 확인) — 저장소의 스텁 선례는 둘이다 — `apps/core-api/tests/test_e2e_flow.py`(`aws_client` 를 바꿔 P2 precheck 의 `elbv2`·`autoscaling` 을 스텁한다)와, 같은 이유로 만든 `apps/core-api/services/tests/test_collector_vpc_scope.py`(PR #440 · 10/12(월) 머지 — 수집기의 `elbv2`·`autoscaling` 호출을 `_FakeAws` 한 객체로 스텁한다). 카드에서 스텁을 권했다 |
+| B7 | [#449](https://github.com/ProjectVigilantis/vigilantis/issues/449) | 단위 테스트(스텁 또는 moto) | 배정 대기(assignee 팀장) | [#454](https://github.com/ProjectVigilantis/vigilantis/pull/454)(일부) | ☐ | LocalStack에 `elbv2`·`autoscaling`이 없어 **CI가 실행 경로를 돌지 못한다** — 실 AWS가 첫 실행이다. **`moto` 는 현재 의존성이 아니다**(2026-10-12 확인) — 저장소의 스텁 선례는 둘이다 — `apps/core-api/tests/test_e2e_flow.py`(`aws_client` 를 바꿔 P2 precheck 의 `elbv2`·`autoscaling` 을 스텁한다)와, 같은 이유로 만든 `apps/core-api/services/tests/test_collector_vpc_scope.py`(PR #440 · 10/12(월) 머지 — 수집기의 `elbv2`·`autoscaling` 호출을 `_FakeAws` 한 객체로 스텁한다). 카드에서 스텁을 권했다 |
 
 > B7의 뜻: 이 3종은 **테스트가 초록이어도 실 AWS에서 처음 돈다.** 다른 7종과 확인 강도가 다르며, 그 차이를 §4에 적는다. 머지 기준을 "stub 테스트 통과 + 10주차 실 AWS 실측"으로 미리 합의해 둘 대상이다.
 
@@ -89,8 +90,8 @@
 
 | 항목 | 기록 |
 | --- | --- |
-| P2 선행 코드 실제 머지일(B1–B7) | **계획**(2026-10-12 회의) — B1–B3 10/13(화) PR(김세혁) · B4·B5 10/14(수) 머지(안성일) · B6·B7 배정 대기 / **실제** ______ |
-| 그 기준 P2 실측 가능일 | **계획** — 10/14(수)–10/15(목)(실 AWS 실측은 김세혁) / **실제** ______ |
+| P2 선행 코드 실제 머지일(B1–B7) | **실제** — B1–B3 **2026-10-12(월) 머지**([#452](https://github.com/ProjectVigilantis/vigilantis/pull/452) · 후속 [#454](https://github.com/ProjectVigilantis/vigilantis/pull/454)). 계획은 10/13(화) PR 이었고 **하루 앞섰다**. B4·B5 는 10/14(수) 머지 목표(계획 · 안성일), B6·B7 은 배정 대기 |
+| 그 기준 P2 실측 가능일 | **P2-1(격리→해제)의 실행 함수는 B1–B3 머지로 섰다. 발동 주체는 아직 없다** — `EC2_ISOLATE`는 AI 메뉴 밖이고(`ai/capabilities.py` `build_secops_capabilities`) 실행 레코드는 발동 경로(B5 #447)만 만든다. 그래서 **P2-1 은 B5(10/14(수) 머지 목표) 뒤**다. 환경 전제: 스모크 `up --yes`(ELB 등록 권한) · #452 코드 재배포 · 재스캔(`resolve_isolation_parameters` 가 읽을 `REGISTERED_IN` 관계와 격리 태그 SG). P2-2 는 B4 뒤다. **계획** — 10/14(수)–10/15(목)(실 AWS 실측은 김세혁) / **실제 실측일** ______ |
 | 10/15(목) 안에 들어왔는가 · 아니면 어디로 갔는가 | ______ |
 
 ### 2-2. 실측
@@ -106,7 +107,7 @@
 
 ## 3. C군 — MVP 확정 범위 대조
 
-**여기서 갈라 적을 것은 "되는가"가 아니라 "어디서 확인했는가"다.** 10/1(목) 시연은 LocalStack 기반이었고(SSOT 확정 결정), 실 AWS에서 처음 돈 것은 9–10주차뿐이다. 둘을 한 칸에 적으면 MVP 완료 판정이 실제보다 세게 읽힌다.
+**여기서 갈라 적을 것은 "되는가"가 아니라 "어디서 확인했는가"다.** 10/1(목) 시연은 LocalStack 기반이었고(SSOT 확정 결정), 실 AWS에서 처음 돈 것은 **10주차뿐이다**(9주차에는 환경이 서지 않아 스모크가 돌지 않았다 — SSOT 9주차 각주). 둘을 한 칸에 적으면 MVP 완료 판정이 실제보다 세게 읽힌다.
 
 ### 3-1. 런북 10종 (SSOT §Action Whitelist 확정본)
 
@@ -119,8 +120,8 @@
 | `RUNBOOK_SG_DELETE_ISOLATED` | 있음 | ☐ | ☐ | §4 A10 (선택) |
 | `RUNBOOK_SG_RECREATE` | 있음 | ☐ | ☐ | §4 A10 (선택) |
 | `RUNBOOK_EBS_DELETE_UNATTACHED` | 있음 | ☐ | ☐ | §4 A10 (선택) |
-| `RUNBOOK_EC2_ISOLATE` | **없음(B2)** | 불가 — `elbv2` 없음 | ☐ | §8 P2-1 |
-| `RUNBOOK_EC2_UNISOLATE` | **없음(B3)** | 불가 — `elbv2` 없음 | ☐ | §8 P2-1 |
+| `RUNBOOK_EC2_ISOLATE` | **있음**(#452) | 불가 — `elbv2` 없음 | ☐ | §8 P2-1 |
+| `RUNBOOK_EC2_UNISOLATE` | **있음**(#452) | 불가 — `elbv2` 없음 | ☐ | §8 P2-1 |
 | `RUNBOOK_EC2_ENABLE_AUTOSCALING` | **없음(B4)** | 불가 — `autoscaling` 없음 | ☐ | §8 P2-2 |
 
 ### 3-2. 그 밖의 확정 범위 항목
@@ -174,8 +175,8 @@
 
 | 시점 | 무엇 | 담당 | 상태 |
 | --- | --- | --- | --- |
-| 10/8(목) | 스모크 결과 기록(A11) — `AWS_SMOKE_RESULT.md` 채움 | 김세혁 실행 · 김승철 대조 | ☐ |
-| 10/12(월) | 10주차 전환 갱신 — **MVP 마감 판정 기준 확정** | 김세혁 | ☐ |
+| 10/15(목) 오전 | 스모크 결과 기록(A11) — `AWS_SMOKE_RESULT.md` 채움·머지(#439) | 김세혁 실행 · 김승철 대조 | ☐ |
+| 10/13(화) | 10주차 전환 갱신 — **MVP 마감 판정 기준 확정**(PR #461 · 계획 10/12(월)에서 하루 늦췄다) | 김세혁 | ☑ |
 | 10/12(월) 전 | P2 선행 코드 머지(B1–B7) — 백업·실행 3종·발동 경로·테스트 | §2-1 작업별 담당 확정 후 기록 | ☐ |
 | 10/15(목) | P2 검증 기록 · 이월 4행 최종 처분 | 김세혁 · 김승철 | ☐ |
 | 10/15(목) | MVP 마감 판정 기록 | 김세혁 | ☐ |

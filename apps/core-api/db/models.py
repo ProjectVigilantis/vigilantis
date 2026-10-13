@@ -14,25 +14,8 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
-from typing import Optional
-
-from sqlalchemy import (
-    CheckConstraint,
-    DateTime,
-    Float,
-    ForeignKey,
-    Index,
-    Integer,
-    String,
-    UniqueConstraint,
-    Uuid,
-)
-from sqlalchemy import Enum as SAEnum
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.sql import text
 
 from schemas.api.actions import ExecutionStatus
 from schemas.api.assets import AssetType, RelationType
@@ -56,12 +39,28 @@ from schemas.guardrails import (
 )
 from schemas.incidents import AgentInvocationStatus
 from schemas.runbooks import RunbookId, TriggerSource
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+    Uuid,
+)
+from sqlalchemy import Enum as SAEnum
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.sql import text
 
 from .session import Base
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _new_id() -> str:
@@ -99,7 +98,9 @@ class CollectionRun(Base):
 
     __tablename__ = "collection_runs"
 
-    collection_run_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
+    collection_run_id: Mapped[str] = mapped_column(
+        _ID, primary_key=True, default=_new_id
+    )
     status: Mapped[CollectionRunStatus] = mapped_column(
         _enum(CollectionRunStatus, "collection_run_status"),
         default=CollectionRunStatus.IN_PROGRESS,
@@ -109,9 +110,11 @@ class CollectionRun(Base):
     mode: Mapped[str] = mapped_column(String(16))  # localstack | aws
     lookback_days: Mapped[int] = mapped_column(Integer)
     period_seconds: Mapped[int] = mapped_column(Integer)
-    error_summary: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
-    finished_at: Mapped[Optional[datetime]] = mapped_column(
+    error_summary: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
 
@@ -140,21 +143,23 @@ class Asset(Base):
     arn: Mapped[str] = mapped_column(String(512), unique=True)
     asset_type: Mapped[AssetType] = mapped_column(_enum(AssetType, "asset_type"))
     resource_id: Mapped[str] = mapped_column(String(128))
-    name: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    name: Mapped[str | None] = mapped_column(String(256), nullable=True)
     account_id: Mapped[str] = mapped_column(String(16))
     region: Mapped[str] = mapped_column(String(32))
-    state: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    state: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # 유형별 세부 스펙(api/assets.py AssetSpec 7종과 대응) — 유형별 테이블을 두지 않는다
     spec: Mapped[dict] = mapped_column(JSONB, default=dict)
-    last_collection_run_id: Mapped[Optional[str]] = mapped_column(
+    last_collection_run_id: Mapped[str | None] = mapped_column(
         _ID, ForeignKey("collection_runs.collection_run_id"), nullable=True
     )
-    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    collected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
     # AWS 에서 사라진 자산의 표시. 하드 삭제하지 않는 이유는 MetricSummary·RuleEvaluation·
     # AssetRelationship 이 asset_id 를 참조해 이력이 함께 끊기기 때문이다. 값은 그 유형을
     # 실제로 관측한 수집 회차가 그 리전에서 이 자산을 보지 못한 시각이고, 다시 관측되면
     # upsert_asset 이 None 으로 되돌린다. (Issue #332)
-    absent_since: Mapped[Optional[datetime]] = mapped_column(
+    absent_since: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     updated_at: Mapped[datetime] = mapped_column(
@@ -184,7 +189,9 @@ class AssetInventoryCount(Base):
     collection_run_id: Mapped[str] = mapped_column(
         _ID, ForeignKey("collection_runs.collection_run_id"), primary_key=True
     )
-    asset_type: Mapped[AssetType] = mapped_column(_enum(AssetType, "asset_type"), primary_key=True)
+    asset_type: Mapped[AssetType] = mapped_column(
+        _enum(AssetType, "asset_type"), primary_key=True
+    )
     count: Mapped[int] = mapped_column(Integer)
 
     __table_args__ = (CheckConstraint("count >= 0", name="count_non_negative"),)
@@ -197,9 +204,11 @@ class AssetRelationship(Base):
 
     relationship_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
     source_asset_id: Mapped[str] = mapped_column(_ID, ForeignKey("assets.asset_id"))
-    relation_type: Mapped[RelationType] = mapped_column(_enum(RelationType, "relation_type"))
+    relation_type: Mapped[RelationType] = mapped_column(
+        _enum(RelationType, "relation_type")
+    )
     target_arn: Mapped[str] = mapped_column(String(512))
-    collection_run_id: Mapped[Optional[str]] = mapped_column(
+    collection_run_id: Mapped[str | None] = mapped_column(
         _ID, ForeignKey("collection_runs.collection_run_id"), nullable=True
     )
     updated_at: Mapped[datetime] = mapped_column(
@@ -217,19 +226,23 @@ class MetricSummary(Base):
 
     __tablename__ = "metric_summaries"
 
-    metric_summary_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
+    metric_summary_id: Mapped[str] = mapped_column(
+        _ID, primary_key=True, default=_new_id
+    )
     asset_id: Mapped[str] = mapped_column(_ID, ForeignKey("assets.asset_id"))
     collection_run_id: Mapped[str] = mapped_column(
         _ID, ForeignKey("collection_runs.collection_run_id")
     )
     cpu_datapoints: Mapped[int] = mapped_column(Integer, default=0)
-    cpu_avg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    cpu_max: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    net_in_avg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    net_out_avg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    cpu_avg: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cpu_max: Mapped[float | None] = mapped_column(Float, nullable=True)
+    net_in_avg: Mapped[float | None] = mapped_column(Float, nullable=True)
+    net_out_avg: Mapped[float | None] = mapped_column(Float, nullable=True)
     window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     window_end: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    collected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
 
     __table_args__ = (
         UniqueConstraint("asset_id", "collection_run_id"),
@@ -245,7 +258,9 @@ class RuleEvaluation(Base):
 
     __tablename__ = "rule_evaluations"
 
-    rule_evaluation_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
+    rule_evaluation_id: Mapped[str] = mapped_column(
+        _ID, primary_key=True, default=_new_id
+    )
     asset_id: Mapped[str] = mapped_column(_ID, ForeignKey("assets.asset_id"))
     collection_run_id: Mapped[str] = mapped_column(
         _ID, ForeignKey("collection_runs.collection_run_id")
@@ -253,10 +268,10 @@ class RuleEvaluation(Base):
     # 공개 Enum(EvaluationStatus·Verdict·SkipReasonCode) 값을 담는다 — 교차 불변식
     # (COMPLETED↔verdict, SKIP↔사유)은 Pydantic 계약(rules.py)과 Workflow가 검증한다
     evaluation_status: Mapped[str] = mapped_column(String(32))
-    verdict: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
-    health_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    skip_reason_code: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    reason: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    verdict: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    health_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    skip_reason_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
@@ -291,7 +306,9 @@ class ThreatEvent(Base):
     payload: Mapped[dict] = mapped_column(JSONB)
     deduplication_key: Mapped[str] = mapped_column(String(512), unique=True)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    collected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
 
     __table_args__ = (
         Index("ix_threat_events_source_event_id", "source_event_id"),
@@ -305,7 +322,7 @@ class Incident(Base):
     __tablename__ = "incidents"
 
     incident_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
-    title: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    title: Mapped[str | None] = mapped_column(String(256), nullable=True)
     subject_arn: Mapped[str] = mapped_column(String(512))
     category: Mapped[IncidentCategory] = mapped_column(
         _enum(IncidentCategory, "incident_category")
@@ -313,17 +330,17 @@ class Incident(Base):
     status: Mapped[IncidentStatus] = mapped_column(
         _enum(IncidentStatus, "incident_status"), default=IncidentStatus.ANALYZING
     )
-    threat_event_id: Mapped[Optional[str]] = mapped_column(
+    threat_event_id: Mapped[str | None] = mapped_column(
         _ID, ForeignKey("threat_events.threat_event_id"), nullable=True
     )
     # --- 위험 대응 축(SECOPS 전용, FINOPS는 전부 null — api/incidents.py 불변식) ---
-    initial_risk_level: Mapped[Optional[RiskLevel]] = mapped_column(
+    initial_risk_level: Mapped[RiskLevel | None] = mapped_column(
         _enum(RiskLevel, "risk_level"), nullable=True
     )
-    reviewed_risk_level: Mapped[Optional[RiskLevel]] = mapped_column(
+    reviewed_risk_level: Mapped[RiskLevel | None] = mapped_column(
         _enum(RiskLevel, "risk_level"), nullable=True
     )
-    response_mode: Mapped[Optional[ResponseMode]] = mapped_column(
+    response_mode: Mapped[ResponseMode | None] = mapped_column(
         _enum(ResponseMode, "response_mode"), nullable=True
     )
     initial_risk_reason_codes: Mapped[list] = mapped_column(JSONB, default=list)
@@ -334,25 +351,27 @@ class Incident(Base):
         _enum(AgentInvocationStatus, "agent_invocation_status"),
         default=AgentInvocationStatus.PENDING,
     )
-    agent_invocation_started_at: Mapped[Optional[datetime]] = mapped_column(
+    agent_invocation_started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    agent_wait_started_at: Mapped[Optional[datetime]] = mapped_column(
+    agent_wait_started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    response_deadline_at: Mapped[Optional[datetime]] = mapped_column(
+    response_deadline_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     # --- 관제자 종료 판단(Issue #199) — updated_at은 자식 상태 변경으로도 올라가므로
     #     종료 시각은 따로 남긴다 ---
-    resolution: Mapped[Optional[ResolutionJudgement]] = mapped_column(
+    resolution: Mapped[ResolutionJudgement | None] = mapped_column(
         _enum(ResolutionJudgement, "resolution_judgement"), nullable=True
     )
-    resolved_at: Mapped[Optional[datetime]] = mapped_column(
+    resolved_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    resolution_note: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    resolution_note: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
     )
@@ -423,12 +442,16 @@ class Evidence(Base):
 
     evidence_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
     incident_id: Mapped[str] = mapped_column(_ID, ForeignKey("incidents.incident_id"))
-    evidence_type: Mapped[EvidenceType] = mapped_column(_enum(EvidenceType, "evidence_type"))
+    evidence_type: Mapped[EvidenceType] = mapped_column(
+        _enum(EvidenceType, "evidence_type")
+    )
     source_type: Mapped[str] = mapped_column(String(64))
     source_id: Mapped[str] = mapped_column(String(256))
     content: Mapped[dict] = mapped_column(JSONB)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    collected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
 
     __table_args__ = (Index("ix_evidence_items_incident_id", "incident_id"),)
 
@@ -454,7 +477,9 @@ class RunbookCandidate(Base):
         _enum(CandidateStatus, "candidate_status"),
         default=CandidateStatus.PENDING_VALIDATION,
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
     )
@@ -491,22 +516,22 @@ class GuardrailEvaluation(Base):
     validation_context: Mapped[GuardrailValidationContext] = mapped_column(
         _enum(GuardrailValidationContext, "guardrail_validation_context")
     )
-    candidate_id: Mapped[Optional[str]] = mapped_column(
+    candidate_id: Mapped[str | None] = mapped_column(
         _ID, ForeignKey("runbook_candidates.candidate_id"), nullable=True
     )
-    execution_id: Mapped[Optional[str]] = mapped_column(
+    execution_id: Mapped[str | None] = mapped_column(
         _ID, ForeignKey("action_executions.execution_id"), nullable=True
     )
     result: Mapped[GuardrailDecision] = mapped_column(
         _enum(GuardrailDecision, "guardrail_decision")
     )
-    failed_step: Mapped[Optional[GuardrailStep]] = mapped_column(
+    failed_step: Mapped[GuardrailStep | None] = mapped_column(
         _enum(GuardrailStep, "guardrail_step"), nullable=True
     )
     # 고정 순서 4단계 결과(guardrails.GuardrailStepResult 목록) — 구조 검증은 Pydantic
     steps: Mapped[list] = mapped_column(JSONB)
     # PASS 시 확정되는 불변 실행 명령 — typed RunbookCommand 계약 확정 전까지 JSONB
-    validated_command: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    validated_command: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     validated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
@@ -527,7 +552,7 @@ class ActionExecution(Base):
 
     execution_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
     incident_id: Mapped[str] = mapped_column(_ID, ForeignKey("incidents.incident_id"))
-    candidate_id: Mapped[Optional[str]] = mapped_column(
+    candidate_id: Mapped[str | None] = mapped_column(
         _ID, ForeignKey("runbook_candidates.candidate_id"), nullable=True
     )
     runbook_id: Mapped[RunbookId] = mapped_column(_enum(RunbookId, "runbook_id"))
@@ -539,45 +564,60 @@ class ActionExecution(Base):
         _enum(TriggerSource, "trigger_source")
     )
     # 관제자 승인 실행 중복 방지 키 / 시스템 실행(선차단·타임아웃·자동 원복) 중복 방지 키
-    idempotency_key: Mapped[Optional[str]] = mapped_column(
+    idempotency_key: Mapped[str | None] = mapped_column(
         String(128), unique=True, nullable=True
     )
-    deduplication_key: Mapped[Optional[str]] = mapped_column(
+    deduplication_key: Mapped[str | None] = mapped_column(
         String(512), unique=True, nullable=True
     )
     # 롤백 자식 → 원본 실행. 원복 파라미터는 backup_record에서만 로드(ADR-0004 정책 ③)
-    parent_execution_id: Mapped[Optional[str]] = mapped_column(
+    parent_execution_id: Mapped[str | None] = mapped_column(
         _ID, ForeignKey("action_executions.execution_id"), nullable=True
     )
-    backup_record_id: Mapped[Optional[str]] = mapped_column(
+    backup_record_id: Mapped[str | None] = mapped_column(
         _ID,
         ForeignKey("backup_records.backup_record_id", use_alter=True),
         nullable=True,
     )
     # Guardrail PASS에서 복사되는 불변 실행 명령
-    validated_command: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
-    error_summary: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    validated_command: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # EC2_ENABLE_AUTOSCALING 전용 — 첫 AWS 변경 전에 commit되는 고정 실행 계획
+    # (schemas.autoscaling.AutoscalingExecutionPlan). validated_command의 의미는 바꾸지
+    # 않는다. 한 번 채우면 덮어쓰지 않는다(executions_repo.bind_autoscaling_plan).
+    # none_as_null: 계획 없음은 SQL NULL이어야 한다 — JSON null이면 bind의 IS NULL 조건을 비껴간다.
+    autoscaling_plan: Mapped[dict | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    # EC2_ISOLATE(PROTECT)·EC2_UNISOLATE(RESTORE)의 ASG scale-in 보호 결과
+    # (schemas.backups.ScaleInProtectionResult). 실행 상태·원복 근거 백업과 별개의 보조 관측이다.
+    # none_as_null: 결과 없음은 SQL NULL이다.
+    scale_in_protection_result: Mapped[dict | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    error_summary: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
     )
-    finished_at: Mapped[Optional[datetime]] = mapped_column(
+    finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     # 판정 불가 보류 기록 (Issue #249) — AWS에 물어보지 못해 결과를 확정하지 못한 이력.
     # 재시도 여부와 소진 판단의 입력이라 사유는 typed 코드로만 두고, 사람이 읽는
     # error_summary를 근거로 쓰지 않는다. 판정이 내려지면 지워지고(workflows.close_execution)
     # 소진으로 확정한 기록만 남는다.
-    verification_reason_code: Mapped[Optional[PrecheckReasonCode]] = mapped_column(
+    verification_reason_code: Mapped[PrecheckReasonCode | None] = mapped_column(
         _enum(PrecheckReasonCode, "precheck_reason_code"), nullable=True
     )
     verification_attempts: Mapped[int] = mapped_column(
         Integer, default=0, server_default=text("0")
     )
-    verification_first_failed_at: Mapped[Optional[datetime]] = mapped_column(
+    verification_first_failed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    verification_last_failed_at: Mapped[Optional[datetime]] = mapped_column(
+    verification_last_failed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
 
@@ -622,7 +662,9 @@ class ExecutionStep(Base):
 
     __tablename__ = "execution_steps"
 
-    execution_step_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
+    execution_step_id: Mapped[str] = mapped_column(
+        _ID, primary_key=True, default=_new_id
+    )
     execution_id: Mapped[str] = mapped_column(
         _ID, ForeignKey("action_executions.execution_id")
     )
@@ -634,13 +676,15 @@ class ExecutionStep(Base):
         _enum(ExecutionStepStatus, "execution_step_status"),
         default=ExecutionStepStatus.IN_PROGRESS,
     )
-    effect: Mapped[Optional[ExecutionEffect]] = mapped_column(
+    effect: Mapped[ExecutionEffect | None] = mapped_column(
         _enum(ExecutionEffect, "execution_effect"), nullable=True
     )
-    aws_request_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
-    result_summary: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
-    error_summary: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
-    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    aws_request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    result_summary: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    error_summary: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
 
     __table_args__ = (
         UniqueConstraint("execution_id", "sequence"),
@@ -663,7 +707,9 @@ class BackupRecord(Base):
 
     __tablename__ = "backup_records"
 
-    backup_record_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
+    backup_record_id: Mapped[str] = mapped_column(
+        _ID, primary_key=True, default=_new_id
+    )
     # 백업을 생성한 실행(주 조치·자동 격리)
     execution_id: Mapped[str] = mapped_column(
         _ID, ForeignKey("action_executions.execution_id")
@@ -671,6 +717,171 @@ class BackupRecord(Base):
     target_arn: Mapped[str] = mapped_column(String(512))
     backup_type: Mapped[str] = mapped_column(String(64))  # 예: SAVE_INSTANCE_SPEC_JSON
     payload: Mapped[dict] = mapped_column(JSONB)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
 
     __table_args__ = (Index("ix_backup_records_target_arn", "target_arn"),)
+
+
+# ==============================================================================
+# MVP 서비스 연결·전환 3종 — ActionExecution·ExecutionStep과 의미를 섞지 않는다
+# (계약: schemas.service_transition). 행은 삭제하지 않는다.
+# ==============================================================================
+
+_OPERATION_STATES = "'PENDING', 'APPLIED', 'NOT_APPLIED', 'UNCERTAIN'"
+
+
+class ServiceTransition(Base):
+    """#446 실행 1건의 서비스 시도 — 의도 + 원래 경로 스냅숏. 생성 후 불변(갱신 경로 없음).
+
+    시도는 실행마다 한 줄로 잇는다. 첫 시도(root)는 실행당 하나, 각 시도는 같은 실행의 시도
+    하나만 대체하며(fork 없음·자기 대체 없음), 현재 시도(leaf)는 아무도 대체하지 않은 시도로
+    **유도한다** — 상태·시각을 따로 적지 않는다.
+    """
+
+    __tablename__ = "service_transitions"
+
+    transition_id: Mapped[str] = mapped_column(_ID, primary_key=True)
+    execution_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("action_executions.execution_id")
+    )
+    supersedes_transition_id: Mapped[str | None] = mapped_column(_ID, nullable=True)
+    plan: Mapped[dict] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+
+    __table_args__ = (
+        CheckConstraint("jsonb_typeof(plan) = 'object'", name="plan_is_object"),
+        CheckConstraint(
+            "supersedes_transition_id IS NULL OR supersedes_transition_id <> transition_id",
+            name="not_self",
+        ),
+        # (시도, 실행) 짝 — 대체 대상·일지·관측이 같은 실행의 시도만 가리키게 하는 복합 FK의 대상
+        UniqueConstraint(
+            "transition_id", "execution_id", name="uq_service_transitions_id_execution"
+        ),
+        UniqueConstraint(
+            "supersedes_transition_id", name="uq_service_transitions_supersedes"
+        ),
+        ForeignKeyConstraint(
+            ["supersedes_transition_id", "execution_id"],
+            ["service_transitions.transition_id", "service_transitions.execution_id"],
+            name="fk_service_transitions_supersedes_same_execution",
+        ),
+        Index(
+            "uq_service_transitions_execution_root",
+            "execution_id",
+            unique=True,
+            postgresql_where=text("supersedes_transition_id IS NULL"),
+        ),
+    )
+
+
+class ServiceTransitionOperation(Base):
+    """AWS 변경 1건의 일지 — #446 실행 단위, 시도가 만든 서비스 자원이면 그 시도를 함께 가리킨다.
+
+    호출 **전에** PENDING으로 commit하고 호출 뒤 결과로 닫는다. PENDING(끝나지 않음)·UNCERTAIN
+    (응답 유실·5xx)은 재생하지 않는다 — 의도한 효과가 현물에서 확인될 때(EFFECT_OBSERVED)까지
+    같은 실행의 변경 명령을 막는다. 효과가 안 보인다는 대조(EFFECT_NOT_OBSERVED)는 막음을 풀지 않는다.
+    """
+
+    __tablename__ = "service_transition_operations"
+
+    operation_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
+    execution_id: Mapped[str] = mapped_column(
+        _ID,
+        ForeignKey(
+            "action_executions.execution_id",
+            name="fk_service_transition_operations_execution_id_action_executions",
+        ),
+    )
+    # 시도 소유 서비스 자원 변경이면 그 시도, #446 인프라 정리면 NULL
+    transition_id: Mapped[str | None] = mapped_column(_ID, nullable=True)
+    sequence: Mapped[int] = mapped_column(Integer)
+    command: Mapped[str] = mapped_column(String(32))
+    aws_operation: Mapped[str] = mapped_column(String(128))
+    resource_ref: Mapped[str] = mapped_column(String(512))
+    request: Mapped[dict] = mapped_column(JSONB)
+    state: Mapped[str] = mapped_column(String(16))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    response: Mapped[dict | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    error_summary: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    reconciled_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    reconciled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_id",
+            "sequence",
+            name="uq_service_transition_operations_execution_sequence",
+        ),
+        ForeignKeyConstraint(
+            ["transition_id", "execution_id"],
+            ["service_transitions.transition_id", "service_transitions.execution_id"],
+            name="fk_service_transition_operations_attempt",
+        ),
+        CheckConstraint("sequence >= 1", name="sequence_positive"),
+        CheckConstraint(f"state IN ({_OPERATION_STATES})", name="state_known"),
+        CheckConstraint(
+            "(state = 'PENDING') = (finished_at IS NULL)", name="pending_unfinished"
+        ),
+        CheckConstraint(
+            "(reconciled_state IS NULL AND reconciled_at IS NULL)"
+            " OR (reconciled_state IN ('EFFECT_OBSERVED', 'EFFECT_NOT_OBSERVED')"
+            " AND reconciled_at IS NOT NULL AND state IN ('PENDING', 'UNCERTAIN'))",
+            name="reconciled_shape",
+        ),
+    )
+
+
+class ServiceTransitionObservation(Base):
+    """typed 관측 1건(schemas.service_transition.ServiceObservation). 생성 후 불변.
+
+    #446 실행 단위로 남고, 시도의 관측이면 그 시도를 함께 가리킨다(실행 단위 정리 재고는 NULL).
+    """
+
+    __tablename__ = "service_transition_observations"
+
+    observation_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
+    execution_id: Mapped[str] = mapped_column(
+        _ID,
+        ForeignKey(
+            "action_executions.execution_id",
+            name="fk_service_transition_observations_execution",
+        ),
+    )
+    transition_id: Mapped[str | None] = mapped_column(_ID, nullable=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    verdict: Mapped[str] = mapped_column(String(16))
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    evidence: Mapped[dict] = mapped_column(JSONB)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["transition_id", "execution_id"],
+            ["service_transitions.transition_id", "service_transitions.execution_id"],
+            name="fk_service_transition_observations_attempt",
+        ),
+        CheckConstraint(
+            "kind IN ('PLAN', 'VERIFY', 'CUTOVER', 'RETURN', 'RECONCILE', 'CLEANUP')",
+            name="kind_known",
+        ),
+        CheckConstraint(
+            "verdict IN ('PASSED', 'FAILED', 'UNKNOWN')", name="verdict_known"
+        ),
+        Index(
+            "ix_service_transition_observations_execution_observed",
+            "execution_id",
+            text("observed_at DESC"),
+        ),
+    )
