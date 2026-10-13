@@ -488,7 +488,7 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 
 ### 반복 검증의 사전 조건 — 한 번의 복구 실패가 이후 검증을 막는다
 
-T3·T4는 10/14(수)–10/15(목)에 **여러 번 돌릴 수 있다.** 그때 되돌려 놓아야 하는 것이 둘이고, 둘 다 대본이 먼저 알고 있어야 한다. 아래 근거는 전부 현행 `dev` 코드다.
+T3·T4는 10/14(수)–10/15(목)에 **여러 번 돌릴 수 있다.** 그때 되돌려 놓아야 하는 것이 셋이고(T3 둘 · T4 하나), 셋 다 대본이 먼저 알고 있어야 한다. 아래 근거는 전부 현행 `dev` 코드다.
 
 **① TG 재등록의 자동 경로는 `EC2_UNISOLATE` 하나뿐이다 — `up --yes`가 받쳐 주지 않는다.**
 
@@ -496,7 +496,7 @@ T3·T4는 10/14(수)–10/15(목)에 **여러 번 돌릴 수 있다.** 그때 �
 
 결과로 T3-5(격리)가 대상을 TG에서 뺀 뒤 T3-7(해제)이 실패하면 **되돌릴 자동 경로가 없다.** 그리고 다음 T3 시도는 `_precheck_isolate`의 통과 조건 ③(TG 존재·대상 등록)에서 `PRECHECK_TARGET_NOT_FOUND`로 멈춘다 — **한 번의 복구 실패가 이후 반복 검증 전부를 막는다.**
 
-→ 수동 복구: 관리자 프로필로 `aws elbv2 register-targets --target-group-arn <TG ARN> --targets Id=<인스턴스 ID>` 를 돌리고, `provision_smoke_aws.py status`에서 그 대상이 `healthy`인지 확인한다. 복구했다는 사실과 시각을 `docs/AWS_SMOKE_RESULT.md` §7에 남긴다 — 그 회차의 T3 결과를 읽을 때 필요한 사실이다.
+→ 수동 복구: 관리자 프로필로 `aws elbv2 register-targets --target-group-arn <TG ARN> --targets Id=<인스턴스 ID>` 를 돌리고, `provision_smoke_aws.py status`에서 그 대상이 `healthy`인지 확인한다. 복구했다는 사실과 시각을 `docs/AWS_SMOKE_RESULT.md` §7에 남기고, 그 회차 결과가 들어가는 §8 P2-1 비고에 「수동 복구 — §7 참조」를 적는다 — 그 회차의 T3 결과를 읽을 때 필요한 사실이다.
 
 > B1–B3(백업 캡처·격리·해제)이 서기 전에는 T3-5·T3-7 자체가 돌지 않으므로, 이 조건은 **그 코드가 선 뒤 첫 T3부터** 적용된다. 그리고 그 첫 T3이 곧 `EC2_UNISOLATE`의 첫 실행이라, 실패 확률이 낮지 않은 자리다.
 
@@ -504,11 +504,21 @@ T3·T4는 10/14(수)–10/15(목)에 **여러 번 돌릴 수 있다.** 그때 �
 
 T3은 격리된 **중간 상태**를 읽어 판정하는 경로다(T3-6에서 대상 상태·서비스 응답을 확인한다). 그 사이 다른 앱이 접수된 조치를 실행하면 무엇이 검증 결과인지 가릴 수 없다.
 
-→ 발동 스위치는 `DISPATCH_ENABLED`다(`apps/core-api/config.py`). `apps/core-api/main.py` 머리말이 **회수 스캔(dispatcher)과 AI 분석 대기 스캔(agent_dispatcher)을 그 스위치 하나로** 묶는다고 적는다. 검증 전에 끄고, 끝난 뒤 되돌린다. 되돌리기 전에 그사이 접수된 실행이 없는지 본다.
+→ 발동 스위치는 `DISPATCH_ENABLED`다(`apps/core-api/config.py`). `apps/core-api/main.py` 머리말이 **회수 스캔(dispatcher)과 AI 분석 대기 스캔(agent_dispatcher)을 그 스위치 하나로** 묶는다고 적는다. **검증을 돌리지 않는 다른 앱의** `DISPATCH_ENABLED`를 검증 전에 끄고, 끝난 뒤 되돌린다(검증 앱 자신은 켜 둔다). 되돌리기 전에 그사이 접수된 실행이 없는지 본다.
 
 → **수집(`SCAN_ENABLED`)은 끄지 않는다.** 수집은 describe만 하는 읽기 전용이라 AWS 상태를 바꾸지 않는다. 다른 앱의 회차가 늘어나는 것은 그 앱의 DB 문제이고, T3·T4가 읽는 중간 상태를 바꾸지 않는다.
 
-> 환경 운영 쪽 절차(언제 `.env`를 실 AWS로 전환하고 누가 되돌리는지)는 ADR-0009 1차 개정이 다룬다 — **PR #436, 리뷰 중**이다. 머지되면 그 절과 이 칸이 같은 사실을 가리킨다. 이 칸의 근거는 ADR이 아니라 위에 적은 코드이므로 ADR이 개정돼도 흔들리지 않는다.
+**③ T4 를 다시 돌리기 전에 ASG·Launch Template 을 지운다 — 짝 롤백 런북이 없다.**
+
+T4-3(실행)이 만든 것을 T4-4(정리)가 **손으로** 지운다. `EC2_ENABLE_AUTOSCALING` 에는 짝 롤백 런북이 없다(§T4 4번 행 — "등록 롤백이 없다").
+
+정리하지 않으면 다음 T4 가 **가드레일 ④에서 멈춘다.** `_precheck_enable_autoscaling` 의 통과 조건 ③이 **동명 ASG 부재**이고, 코드 주석이 그 기준을 "같은 이름이 이미 있는가만 본다"로 적는다. 즉 T3 의 TG 와 같은 구조다 — **정리를 빠뜨리면 그 뒤 T4 가 전부 막힌다.**
+
+Launch Template 도 함께 본다. 이름은 `executor._launch_template_name` 이 정하고(`vigilantis-lt-` 접두), `provision_smoke_aws.py` 는 **태그가 없고 VPC 자원도 아니라 이름으로만 가린다**고 적어 둔다. 남으면 다음 회차 수집에 `LAUNCH_TEMPLATE` 자산으로 잡히고, `AWS_SMOKE_RESULT.md` §2-2 가 "Launch Template 0 이 정상 — 있으면 출처(이름·생성 시각)를 §7 에 적는다"로 둔 칸이 그것을 받는다.
+
+→ 지울 것 둘과 확인: ASG(이름) · Launch Template(`vigilantis-lt-` 접두). 지운 뒤 `provision_smoke_aws.py status` 의 잔여가 `up` 직후와 같은지 본다. ASG 가 띄운 인스턴스는 비용 추산 밖이라(ADR-0009 §3) 검증 직후 정리가 전제다.
+
+> 환경 운영 쪽 절차(언제 `.env`를 실 AWS로 전환하고 누가 되돌리는지)는 [ADR-0009](adr/0009-real-aws-smoke-environment.md) §6 5단계가 다룬다(1차 개정 · PR #436 머지됨). 그 절과 이 칸은 같은 사실을 가리킨다 — 다만 **이 칸의 근거는 ADR이 아니라 위에 적은 코드다.** ADR이 다시 개정돼도 흔들리지 않는다.
 
 ### 로컬 실행 가능성 ❌
 

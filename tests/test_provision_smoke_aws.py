@@ -630,6 +630,43 @@ def test_down_removes_the_app_user_and_its_managed_policy():
     assert iam.versions == {}
 
 
+class FakeIamWithRoles(FakeIam):
+    """플랫폼 접근 역할(ADR-0010 §3)이 앱 정책을 빌려 붙인 상태."""
+
+    def __init__(self, roles):
+        super().__init__()
+        self.policy_roles = list(roles)
+
+    def get_paginator(self, name):
+        assert name == "list_entities_for_policy"
+        iam = self
+
+        class _Pages:
+            def paginate(self, PolicyArn, EntityFilter):
+                assert EntityFilter == "Role"
+                yield {"PolicyRoles": [{"RoleName": r} for r in iam.policy_roles]}
+        return _Pages()
+
+
+def test_down_stops_first_when_a_role_still_holds_the_app_policy():
+    """정책 삭제는 down의 맨 끝이다 — 역할이 붙잡고 있으면 VPC까지 지운 뒤 DeleteConflict로 멈춘다.
+    무엇이든 지우기 전에 "플랫폼 down 먼저"로 멈춰야 한다."""
+    iam = FakeIamWithRoles(["vigilantis-access"])
+    smoke._ensure_app_user(iam, ACCOUNT, REGION, VPC_ID)
+    iam.writes.clear()
+    # ec2·elbv2·asg 자리는 비워 둔다 — 건드리면 KeyError로 드러난다
+    with pytest.raises(SystemExit, match="플랫폼 down → 스모크 down"):
+        smoke.down({"iam": iam}, ACCOUNT)
+    assert iam.writes == []
+
+
+def test_down_guard_passes_when_no_role_holds_the_app_policy():
+    iam = FakeIamWithRoles([])
+    smoke._ensure_app_user(iam, ACCOUNT, REGION, VPC_ID)
+    assert smoke._roles_holding_app_policy(iam, ACCOUNT) == []
+    assert smoke._roles_holding_app_policy(FakeIamWithRoles(["x"]), ACCOUNT) == []  # 정책이 없으면 볼 것도 없다
+
+
 def test_up_clears_an_inline_policy_left_from_before_the_managed_switch():
     """앱 권한은 관리형 정책 하나여야 한다 — 전환 전에 붙은 인라인이 남으면 권한이 합집합이 된다."""
     iam = FakeIam()
