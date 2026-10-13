@@ -463,32 +463,68 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 
 **한 줄**: 다운사이징으로 줄일 수 없는 자산을 Launch Template과 ASG로 바꿔 상한 4대까지 늘어나게 하고, **검증 직후 정리한다.**
 
-**파라미터 계약**: `Ec2EnableAutoscalingParameters` = `instance_id` · `min_size` · `max_size` · `evidence_id`. `min_size <= max_size`는 모델 검증기가 막고, `max_size <= 4`는 precheck 통과 조건 ④다.
+**파라미터 계약**: `Ec2EnableAutoscalingParameters` = `instance_id` · `min_size` · `max_size` · `evidence_id`. `min_size <= max_size` 는 모델 검증기(`_size_order`)가 막는다. **상한 4와 하한 1도 모델이 막는다** — `AutoScalingSize = Annotated[StrictInt, Field(ge=1, le=4)]` 이라 범위를 벗어난 값은 **가드레일 ① Schema Check 에서 거절된다**(④까지 가지 않는다). precheck 는 그 범위를 「확인된 사실」로 싣기만 한다.
 
 | # | 단계 | API·호출 | 검증 포인트 |
 | --- | --- | --- | --- |
 | 1 | 후보 제시 | — | 어떤 판정이 이 런북을 부르는지. `RIGHTSIZING`과 **후보 조건이 갈리는 지점**을 기록한다 |
-| 2 | 가드레일 ④ | **MIXED** — LT `create_launch_template` `DryRun` + `describe_instances` + `describe_auto_scaling_groups` | ①DryRun ②원본 EC2 존재·`running` ③**동명 ASG 부재** ④`min_size <= max_size <= 4` |
-| 3 | 실행 | `RUNBOOK_EC2_ENABLE_AUTOSCALING`<br>`trigger_source: USER_APPROVAL` | LT·ASG가 실제로 생기는가. 서비스 연결 역할은 `up`이 선생성한다 |
-| 4 | **정리** | ASG 삭제 | **등록 롤백이 없다**(SSOT §Action Whitelist) — 되돌리는 것이 아니라 **검증 직후 지운다.** ASG 인스턴스 비용은 예산표 밖(ADR-0009 §3) |
+| 2 | 가드레일 ④ | **MIXED** — LT `create_launch_template` `DryRun` + `describe_instances` + `describe_auto_scaling_groups` | ①DryRun ②원본 EC2 존재·`running` ③**동명 ASG 부재**(이름만 본다) ④`min_size`/`max_size` 범위 — **단, ④는 precheck 가 막는 자리가 아니라 모델이 이미 보장한 것을 확인 사실로 싣는 자리다**(위 파라미터 계약) |
+| 3 | 실행 | `RUNBOOK_EC2_ENABLE_AUTOSCALING`<br>`trigger_source: USER_APPROVAL`<br>**4단계** — ① `STEP_CREATE_IMAGE` ② `STEP_CREATE_LAUNCH_TEMPLATE` ③ `STEP_CREATE_AUTO_SCALING_GROUP` ④ `STEP_PUT_SCALING_POLICY` | **LT·ASG 둘이 아니라 네 단계다** — AMI 를 먼저 뜨고(원본은 `NoReboot=True` 로 재부팅하지 않는다) 그 AMI 로 시작 템플릿을 만든 뒤 ASG·CPU 정책까지 간다. **성공의 뜻을 좁게 읽는다** — 실행 함수의 성공은 「**요청 4건이 접수됐다**」까지이고, **ASG 인스턴스 기동·2/2·설정 일치는 `inspect_ec2_autoscaling` 이 따로 본다**(`ready`·`incomplete`·`query_failed` 셋으로 가린다). 그래서 **실행 `SUCCESS` 를 「ASG 가 떴다」로 적지 않는다.** 값은 계획에서만 오고 원본을 다시 읽지 않는다. 중복 오류(`InvalidAMIName.Duplicate`·`AlreadyExists`)와 응답 유실(5xx·연결 끊김)은 **effect UNKNOWN 으로 적고 뒤 변경을 멈춘다** — **재개·재사용·보상(삭제)을 하지 않으므로** 그 회차는 사람이 정리한다(4번). **서비스 연결은 이 런북이 하지 않는다** — 별도 운영 표면이다(아래 §서비스 연결·트래픽 전환) |
+| 4 | **정리** | `provision_smoke_aws.py service --operation cleanup-plan` → `cleanup --apply` | **등록 롤백 런북이 없다**(SSOT §Action Whitelist) — 되돌리는 것이 아니라 **검증 직후 지운다.** 다만 **손으로가 아니라 운영 CLI 명령이 있다**(#466). **지울 것은 넷이다** — AMI·스냅숏·시작 템플릿·ASG(실행이 만드는 자원 표지가 그 넷이다). **`down` 으로는 AMI·스냅숏이 안 지워진다** — 스크립트 머리말이 「`down` 은 AMI·스냅숏 전체 정리가 아니다 — `service --operation cleanup-plan` / `cleanup` 을 쓴다」로 적는다. ASG 인스턴스 비용은 예산표 밖(ADR-0009 §3) |
 
 > **4번이 T1·T2와 가장 다른 자리다.** 두 트랙은 롤백 런북이 짝으로 등록돼 있어 "되돌아갔는가"를 보면 되는데, 이 런북은 짝이 없다. 그래서 **정리했는지와 비용이 남지 않았는지**가 검증 대상이고, 그 기록은 `docs/AWS_SMOKE_RESULT.md` §8 · §9로 간다.
 
-### 선행 조건 — 이것이 서지 않으면 두 트랙은 검증 대상이 없다
+### 서비스 연결·트래픽 전환 — 런북 밖의 운영 표면 (#466)
+
+**T4-3 의 런북은 AMI·LT·ASG·정책만 만든다.** ASG 를 실제로 서비스에 꽂고 트래픽을 넘기고 되돌리는 일은 **관리자 운영 CLI** 가 한다 — `provision_smoke_aws.py service --operation <명령>`, 백엔드는 `apps/core-api/service_transitions.py` 의 단일 진입점 `run_service_command` 다. 대본이 이 표면을 모르면 T4 를 「ASG 가 생겼다」에서 끝내게 된다.
+
+| 명령 | 하는 일 | AWS 변경 |
+| --- | --- | --- |
+| `schema` | 옵션 계약을 답한다. DB·AWS 없이 돈다 | — |
+| `plan` | 조치 시점의 의도와 **원래 경로의 스냅숏**을 불변 계획으로 남긴다 | — |
+| `status` | 저장된 사실과 현물을 읽어 현재를 보여 준다 | — |
+| `prepare` | 전환 준비(운영 리스너·대상 묶음) | ✅ `--apply` |
+| `verify` | 그 시각에 읽고 **실제로 요청해 본** 결과로 판정한다(`PASSED`·`FAILED`·`UNKNOWN`) | — |
+| `cutover` | 트래픽을 ASG 쪽으로 넘긴다 | ✅ `--apply` |
+| `return` | **원래 경로로 복귀한다.** 이미 원래 경로면 바꾸지 않되, 같은 안전 확인과 실제 응답 확인을 거쳐야 성공이다 | ✅ `--apply` |
+| `cleanup-plan` | 지울 것을 뽑는다(AMI·스냅숏 포함 — `status` 가 세지 않는 자리다) | — |
+| `cleanup` | 뽑은 것을 지운다. **`cleanup-plan` 이 준 매니페스트 해시와 자원 목록을 그대로 넘겨야 한다** — 그 사이 재고가 바뀌면 `manifest_mismatch` 로 거절하고 「`cleanup-plan` 을 다시 봅니다」라고 답한다. 재고에 blocker 가 있으면 `cleanup_blocked` 다 | ✅ `--apply` |
+
+**대조할 때 섞지 않을 것 셋.** 계약이 그 셋을 따로 저장한다.
+
+| 축 | 뜻 | 섞으면 생기는 오독 |
+| --- | --- | --- |
+| 계획(`ServiceTransitionPlan`) | 조치 시점의 **의도와 원래 경로 스냅숏** | 계획을 현재 상태로 읽는다 |
+| 작업 일지(`OperationState`) | AWS 가 요청을 **받아들였는가** — `PENDING`·`APPLIED`·`NOT_APPLIED`·`UNCERTAIN` | 「받아들임」을 **서비스 가능**으로 읽는다. 계약이 「받아들임은 서비스 가능을 뜻하지 않는다」로 못 박는다 |
+| 관측(`ServiceObservation`) | 그 시각에 읽고 요청해 본 사실 | 관측 없이 일지만으로 판정한다 |
+
+**불확실한 변경은 재전송하지 않는다.** `PENDING`·`UNCERTAIN` 은 읽기 전용 대조로만 좁히고, 결과는 둘이다 — `EFFECT_OBSERVED`(효과 확인 · 관문을 푼다 · 최종)와 `EFFECT_NOT_OBSERVED`(**지금 안 보인다는 것이고, 요청이 거절됐다는 증거가 아니다** · 관문을 풀지도 재전송을 허용하지도 않는다). **대조에서 `EFFECT_NOT_OBSERVED` 를 실패로 적지 않는다.**
+
+**선행**: `plan`·`prepare` 는 **#446 실행이 `SUCCESS`** 가 아니면 `execution_not_ready` 로 거절한다. 즉 **T4-3 이 성공해야 이 표면이 열린다.**
+
+**증거의 한계**: ALB 경로 증거는 「그 순간 경로가 ASG 전용 TG 로만 갔다는 **전후 스냅숏** + 실제 ALB 응답」이고, 멤버별 증거는 「각 멤버 사설 IP 에 **직접** 보낸 응답」이다. **둘 다 요청 단위 ALB 대상 귀속(접근 로그)이 아니다** — 「이 요청이 ASG 인스턴스로 갔다」로 적지 않는다.
+
+> **T3 가 걸려 있으면 T4 의 변경 명령이 막힌다.** facade 경계가 **「보안 보류(격리 SG · scale-in 보호 · DB 격리 실행)는 풀지 않는다 — 보고하고 막는다」**로 적는다. `return` 은 원래 TG 에 등록이 남은 대상을 **상태(`draining`·`unused` 포함)와 관계없이 전부 격리 사실로 본다.** 그래서 **같은 창에서 T3 격리를 걸어 둔 채 T4 전환을 돌리지 않는다** — 순서를 정해 한 번에 하나만 돌리고, 막혔을 때 그것을 T4 실패로 적지 않는다(설계된 거절이다). 변경 명령은 공유 AWS 좌표의 advisory lock 을 명령 내내 쥐지만, **이 도구 밖의 AWS 조작과는 원자적이지 않다**(전후 대조로만 드러난다).
+
+### 선행 조건 — 2026-10-13(화)로 하나만 남았다
+
+**B1–B5 가 전부 `dev` 에 들어왔다.** 아래 표는 이 문서가 「없음」으로 적어 두었던 다섯 자리의 현재 상태다 — 마지막 한 행만 남았다.
 
 | 항목 | 상태 | 막는 단계 |
 | --- | --- | --- |
-| 백업 `SAVE_CURRENT_SG_AND_TG_MAPPING` 캡처 | **없음** — `services/aws/backup.py` 머리말 `[남은 작업]` | T3-4 → T3-7 전체 |
-| `execute_ec2_isolate` · `execute_ec2_unisolate` | **없음** — `executor.py` 머리말 `[남은 작업]` 1·2번 | T3-5 · T3-7 |
-| `execute_ec2_enable_autoscaling` | **없음** | T4-3 |
-| `PRE_MITIGATION_0_5S` · `TIMEOUT_ISOLATION_1M` 발동 경로 | **없음** — `security/soar.py`에 범위 선언만 있다 | T3-2 · T3 자동 격리 분기 |
-| Medium `실행 예정 시간` 서버 응답 필드 | 없음 | T3 자동 격리 분기의 화면 |
+| 백업 `SAVE_CURRENT_SG_AND_TG_MAPPING` 캡처 | **있음**(#452) — `services/aws/backup.py` 머리말이 「백업 4종의 캡처가 전부 이 파일에 있다 — **남은 작업 없음**」으로 바뀌었다 | — |
+| `execute_ec2_isolate` · `execute_ec2_unisolate` | **있음**(#452) — `executor.py` 의 `[남은 작업]` 목록은 10종이 다 서면서 **파일에서 사라졌다** | — |
+| `execute_ec2_enable_autoscaling` | **있음**(#459·#466) — AMI → 시작 템플릿 → ASG → CPU 정책 4단계다(T4-3) | — |
+| `PRE_MITIGATION_0_5S` · `TIMEOUT_ISOLATION_1M` 발동 경로 | **있음**(#469) — `security/soar.py` 의 `prepare_isolation`·`reserve_auto_isolation` 과 `AGENT_WAIT_POLL_SECONDS` 1초 주기 만료 감시 | — |
+| Medium `실행 예정 시간` 서버 응답 필드 | **아직 없음**(B6 · #448 OPEN) | T3 자동 격리 분기의 **화면만** — 분기 자체는 돈다 |
+
+> **남은 하나가 막는 범위는 화면이다.** B6 가 없어도 자동 격리 분기는 발동하고 실행까지 간다 — 관제자에게 **실행 예정 시간을 숫자로 보여 주는 칸**이 비는 것이다. 그래서 이 행은 T3 분기의 **검증 불가**가 아니라 **화면 확인 항목 보류**로 읽는다.
 
 `precheck()`는 **10종 전부 구현돼 있다**(`RUNBOOK_SPECS`). 다만 구현 존재와 환경 검증 완료는 다르다. **필요한 EC2·ELBv2·Auto Scaling 응답을 가짜로 구성하면 precheck의 분기·실패 처리를 먼저 테스트할 수 있다.** LocalStack Community에서는 `elbv2`·`autoscaling` 조회가 막혀 P2 precheck 전체 통과를 확인할 수 없다. 실제 AWS 권한·조회 응답·통과 조건은 실 AWS에서 확인하고 `docs/AWS_SMOKE_RESULT.md` §8-1에 기록한다. 실행·백업·발동 경로를 잇는 흐름은 별도의 선행 구현이 필요하다.
 
 ### 반복 검증의 사전 조건 — 한 번의 복구 실패가 이후 검증을 막는다
 
-T3·T4는 10/14(수)–10/15(목)에 **여러 번 돌릴 수 있다.** 그때 되돌려 놓아야 하는 것이 셋이고(T3 둘 · T4 하나), 셋 다 대본이 먼저 알고 있어야 한다. 아래 근거는 전부 현행 `dev` 코드다.
+T3·T4는 10/14(수)–10/15(목)에 **여러 번 돌릴 수 있다.** 그때 되돌려 놓아야 하는 것이 **넷이고**(T3 둘 · T4 둘), 넷 다 대본이 먼저 알고 있어야 한다. 아래 근거는 전부 현행 `dev` 코드다.
 
 **① TG 재등록의 자동 경로는 `EC2_UNISOLATE` 하나뿐이다 — `up --yes`가 받쳐 주지 않는다.**
 
@@ -510,13 +546,19 @@ T3은 격리된 **중간 상태**를 읽어 판정하는 경로다(T3-6에서 �
 
 **③ T4 를 다시 돌리기 전에 ASG·Launch Template 을 지운다 — 짝 롤백 런북이 없다.**
 
-T4-3(실행)이 만든 것을 T4-4(정리)가 **손으로** 지운다. `EC2_ENABLE_AUTOSCALING` 에는 짝 롤백 런북이 없다(§T4 4번 행 — "등록 롤백이 없다").
+T4-3(실행)이 만든 것을 T4-4(정리)가 지운다. `EC2_ENABLE_AUTOSCALING` 에는 짝 롤백 런북이 없다(§T4 4번 행). **다만 손으로가 아니다** — `provision_smoke_aws.py service --operation cleanup-plan` 으로 지울 것을 먼저 뽑고 `cleanup --apply` 로 지운다(#466). **`down --yes` 로는 부족하다** — 스크립트 머리말이 「`down` 은 AMI·스냅숏 전체 정리가 아니다 — `service --operation cleanup-plan` / `cleanup` 을 쓴다」로 적는다.
 
 정리하지 않으면 다음 T4 가 **가드레일 ④에서 멈춘다.** `_precheck_enable_autoscaling` 의 통과 조건 ③이 **동명 ASG 부재**이고, 코드 주석이 그 기준을 "같은 이름이 이미 있는가만 본다"로 적는다. 즉 T3 의 TG 와 같은 구조다 — **정리를 빠뜨리면 그 뒤 T4 가 전부 막힌다.**
 
 Launch Template 도 함께 본다. 이름은 `executor._launch_template_name` 이 정하고(`vigilantis-lt-` 접두), `provision_smoke_aws.py` 는 **태그가 없고 VPC 자원도 아니라 이름으로만 가린다**고 적어 둔다. 남으면 다음 회차 수집에 `LAUNCH_TEMPLATE` 자산으로 잡히고, `AWS_SMOKE_RESULT.md` §2-2 가 "Launch Template 0 이 정상 — 있으면 출처(이름·생성 시각)를 §7 에 적는다"로 둔 칸이 그것을 받는다.
 
-→ 지울 것 둘과 확인: ASG(이름) · Launch Template(`vigilantis-lt-` 접두). 지운 뒤 `provision_smoke_aws.py status` 의 잔여가 `up` 직후와 같은지 본다. ASG 가 띄운 인스턴스는 비용 추산 밖이라(ADR-0009 §3) 검증 직후 정리가 전제다.
+→ **지울 것은 넷이다**: AMI · 스냅숏 · Launch Template(`vigilantis-lt-` 접두) · ASG(이름). 실행 경로가 새로 만드는 자원 표지가 그 넷을 가리킨다. 지운 뒤 `provision_smoke_aws.py status` 의 잔여가 `up` 직후와 같은지 보고, **AMI·스냅숏은 `status` 가 세지 않으므로** `cleanup-plan` 출력으로 따로 확인한다. ASG 가 띄운 인스턴스는 비용 추산 밖이라(ADR-0009 §3) 검증 직후 정리가 전제다.
+
+**④ T4 를 다시 돌리기 전에 트래픽을 원래 경로로 돌려놓는다 — `cleanup` 보다 먼저다.**
+
+`cutover` 로 트래픽을 ASG 쪽에 넘긴 회차는 `return` 으로 **원래 경로로 복귀**시킨다(§서비스 연결·트래픽 전환). 복귀는 「이미 원래 경로면 바꾸지 않되 **같은 안전 확인과 실제 응답 확인을 거쳐야 성공**」이라, 돌려놨다고 믿고 넘기면 다음 회차가 어디로 가는지 모른 채 시작된다.
+
+→ 순서: `return --apply` → `cleanup-plan` → `cleanup --apply`. `cleanup` 은 재고 blocker 가 있으면 `cleanup_blocked` 로 거절하고, `cleanup-plan` 이 준 매니페스트와 재고가 달라지면 `manifest_mismatch` 로 거절한다. **두 거절은 설계된 관문이니 T4 실패로 적지 않는다** — `cleanup-plan` 을 다시 뽑아 같은 순서로 간다.
 
 > 환경 운영 쪽 절차(언제 `.env`를 실 AWS로 전환하고 누가 되돌리는지)는 [ADR-0009](adr/0009-real-aws-smoke-environment.md) §6 5단계가 다룬다(1차 개정 · PR #436 머지됨). 그 절과 이 칸은 같은 사실을 가리킨다 — 다만 **이 칸의 근거는 ADR이 아니라 위에 적은 코드다.** ADR이 다시 개정돼도 흔들리지 않는다.
 
@@ -526,7 +568,7 @@ Launch Template 도 함께 본다. 이름은 `executor._launch_template_name` �
 | --- | --- | --- |
 | 가드레일 ④ DryRun 부분 | ⚠️ 부분 | ENI·LT `DryRun`은 LocalStack에서 돈다. 조회 부분(`elbv2`·`autoscaling`)은 안 돈다 |
 | 조회 대체 통과 조건 | ❌ | `elbv2`·`autoscaling`이 Community에 없어 **조회 자체가 실패**한다. 그 3행 통과 조건은 ADR-0007 §4가 아직 잠정으로 남겨 둔 것이고, 기록 자리는 `docs/AWS_SMOKE_RESULT.md` §8-1이다 |
-| 실행·원복 | ❌ | 코드가 없고(위 표) 환경도 없다 |
+| 실행·원복 | ❌ | **코드는 섰다**(B1–B5 머지 · 위 표) — 막는 것은 **환경 하나**다. `elbv2`·`autoscaling` 이 Community 에 없어 실행도 서비스 전환도 로컬에서 돌지 않는다. 그리고 `EC2_ENABLE_AUTOSCALING` 은 **짝 롤백 런북이 없어** 「원복」 자체가 없다 — 정리다(T4-4) |
 | **골든 데이터 재사용** | ⚠️ 일부 가능 | `asset_inventory_005.json`의 EC2·SG·TG 식별자와 TG의 `target_instance_ids`는 재사용할 수 있다. 실제 `describe_target_health` 응답, 격리용 SG의 ingress·egress 규칙, 격리 전후 SG·TG 상태와 백업 응답은 별도로 구성·확인해야 한다. 데이터 재사용은 실 AWS 검증을 대체하지 않는다 |
 
 ---
