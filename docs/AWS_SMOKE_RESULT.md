@@ -232,6 +232,11 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 | 10/12 오후 | **A5 — 없는 대상에 대한 DryRun 응답이 작업마다 다르다.** 볼륨·SG 삭제는 실 AWS가 대상 존재를 검사해 `NotFound`를 준다(LocalStack은 없는 SG에도 `DryRunOperation` — ADR-0007 실측과 다름). 인스턴스 `modify_instance_attribute`는 존재를 검사하지 않고(관리자 키 `DryRunOperation`), **앱 키에서는 태그 조건(`vigilantis:smoke=true`)을 평가할 수 없어 `UnauthorizedOperation`**이 된다 | **ADR-0006 이월 8행의 "실 AWS는 여기서 걸러 줄 것으로 보인다"는 가정이 반증됐다**(관리자 키 `DryRunOperation` 실측 — §3 A5 판정). 앱 키에서 막힌 것은 IAM 태그 조건 덕이라, 울타리가 느슨한 키에서는 가드레일 ④가 통과한다. 앱 키에서도 다운사이징 대상이 사라진 경우 사유 코드가 `PRECHECK_UNAUTHORIZED`(권한 문제)로 찍힌다 — 관제자가 "대상 없음"이 아니라 "권한 누락"으로 읽을 수 있다. 처분(사유 매핑을 고칠지, describe를 앞세울지)은 이월 8행 처분과 함께 PM이 정한다 |
 | 10/13 10:41 | **A6 재실측** — 모의 위협(SSH 무차별 대입 120회/300초, 대상 `web-1`, 출발지 `203.0.113.10`, 관측 ID `evt-ssh-bruteforce-a6r-20261013`)을 일회성 ECS 태스크로 운영 DB에 넣었다(`threat_ingress.receive_threat` 직접 호출 — 배포 환경에 모의 위협 폴더가 없다) | 인시던트 `3f5ed399-56e8-4d8d-a981-b9d8c51ff515` · AI 분석 14초 만에 `PROPOSALS_GENERATED` · 위험도 HIGH · 후보 `NACL_ADD_DENY` 가드레일 거절 0건. 대응 방식이 `PRE_MITIGATION_0_5S`로 정해졌지만 B5(#447)가 아직 없어 자동 선차단은 없었다 — 1차와 같이 사람 승인 실행(배포 주소의 `POST /api/v1/actions/execute`) |
 | 10/13 10:43 | A6 재실측의 CloudTrail — `CreateNetworkAclEntry` 01:43:07Z · `DeleteNetworkAclEntry` 01:43:37Z, 두 건 모두 주체 `assumed-role/vigilantis-access/vigilantis-platform` · 오류 없음 | 요청 파라미터 `aclProtocol: "6"` · `portRange: {from: 0, to: 65535}`. 요청 ID가 실행 단계 기록의 `aws_request_id`와 같다(같은 호출임을 묶는 근거). 원본은 PR #439 ⑥ |
+| 10/13 16:40 | **P2 검증용 재배포** — `origin/dev` `004ed0a`(#469 B5 · #466 B4 포함)를 `mvp-004ed0a`로 빌드·배포(`--enable-dispatch`) · ECS 작업 정의 `vigilantis-platform-api:6` · 16:43:37 기동 로그에 `automatic_isolation_watcher_started`(1초 주기) | 앱 정책은 따로 갱신하지 않았다 — 실 계정 `vigilantis-smoke-app` 기본 버전 v3(10/13 14:44)에 #452·#459·#466 권한(TG 등록·해제, ASG 생성, scale-in 보호 등)이 이미 있었다 |
+| 10/13 17:08 | P2-1 첫 주입 실패 — 일회성 태스크가 `ModuleNotFoundError: schemas` | 운영 진입점 `serve.py`를 거치지 않아 import 경로가 없었다. 덮어쓰기에 `PYTHONPATH=/app/packages:/app/apps/core-api`를 더했다. 아무것도 저장되지 않았다 |
+| 10/13 17:11 | P2-1 두 번째 주입 — 선차단이 발동했지만 **가드레일 ④가 `PRECHECK_UNAUTHORIZED`로 거절**(인시던트 `5db1c4ea-71cd-4052-bf9c-3a675cdeb06e`, `EC2_ISOLATE` 실행 `FAILED`) | **주입 방법의 문제이며 제품 결함이 아니다.** CloudTrail상 거절된 `DescribeInstances`의 주체가 `vigilantis-access`가 아니라 태스크 역할 `vigilantis-platform` 자체였다 — 접근 역할 프로필은 `serve.py`가 기동 때 쓰는데 일회성 태스크는 그 진입점을 거치지 않는다. 이후 주입 코드 첫머리에서 `serve.write_access_profile`을 호출했다. 거절된 시도가 `IN_PROGRESS`로 남지 않고 `FAILED`로 확정된 것은 B5 계약대로다. 이 인시던트는 실측 대상이 아니다 |
+| 10/13 17:17 | Medium 첫 주입(대상 `web-2`)이 승인 대기에 들어가지 않고 **제안 없이 `AWAITING_CLOSURE`**(인시던트 `30ae473e-4461-453e-bb16-827060e214c3`) | AI가 낸 `NACL_ADD_DENY`가 가드레일 ④에서 `PRECHECK_INVALID_STATE`로 거절됐다. **`web-2` 서브넷은 VPC 기본 NACL(`acl-0f90545…`)에 묶여 있고 그 NACL은 규칙 100번(전체 허용)을 이미 쓴다** — 차단 규칙이 넣을 번호가 차 있다. 스모크 NACL(`vigilantis-smoke-nacl`)은 `web-1` 서브넷에만 붙어 있다. 응답 기한이 생기지 않아 자동 격리 대상이 아니므로, Medium 검증은 `web-1`로 다시 했다. 가드레일 동작은 정상이며, 스모크 구성상 `web-2` 대상 NACL 차단은 늘 거절된다는 관찰이다 |
+| 10/13 17:14–17:43 | **P2-1 실측 3회 — 전부 격리 확인 성공 · 해제 성공**(§8 · §8-2) | CloudTrail(08:14–08:43Z): 격리마다 `ModifyNetworkInterfaceAttribute` DryRun(`Client.DryRunOperation`) → `DeregisterTargets` → `ModifyNetworkInterfaceAttribute`(격리 SG), 해제마다 DryRun → `ModifyNetworkInterfaceAttribute`(원래 SG 2개) → `RegisterTargets`. **전 호출 주체 `assumed-role/vigilantis-access/vigilantis-platform`** · 오류 없음 |
 
 ---
 
@@ -239,7 +244,7 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 
 | # | 시나리오 | 결과 | 시각 | 비고 |
 | --- | --- | --- | --- | --- |
-| P2-1 | `EC2_ISOLATE` → `EC2_UNISOLATE` | | | TG 등록 해제 + 격리 SG 교체 → 백업 기준 원복 |
+| P2-1 | `EC2_ISOLATE` → `EC2_UNISOLATE` | **3회 모두 둘 다 `SUCCESS`**(대상 `web-1` · 배포된 플랫폼 `mvp-004ed0a`). 격리 발동은 사람 승인이 아니라 B5 자동 경로다 — High 선차단 `PRE_MITIGATION_0_5S` 2회 · Medium 1분 무응답 `TIMEOUT_ISOLATION_1M` 1회. 매회 AWS 조회로 확인: 격리 뒤 ENI `eni-09bddbb1d27e83b1a`의 SG가 격리 SG 하나(`vigilantis-smoke-isolation`)로 바뀌고 TG에서 `web-1`이 `draining`(`web-2`는 `healthy` 유지). 해제 뒤 SG가 격리 전 기준값(`open-ssh`·`web` 2개)과 같은 집합으로 돌아오고 TG에 `web-1`이 `healthy`로 복귀. 해제 성공 시 원래 격리 실행은 `ROLLED_BACK` | 격리 10/13 17:14:40 · 17:31:50 · 17:40:35 / 해제 17:15:49 · 17:36:59 · 17:42:48 KST | 해제는 관제자 요청(`POST /api/v1/actions/execute` · `RUNBOOK_EC2_UNISOLATE`)이다 — 화면의 [EC2 격리 해제]와 같은 경로. 인시던트·실행 ID는 §8-2. **HTTP 서비스 응답은 관측하지 않았다**(ALB가 internal이라 PC에서 닿지 않는다) — 서비스 유지는 TG 상태로만 본다. 앞선 실패 두 건은 주입 방법의 문제다(§7 10/13 17:08 · 17:11) |
 | P2-2 | `EC2_ENABLE_AUTOSCALING` | | | ASG 상한 4대 · **검증 직후 정리**(비용이 예산표 밖) |
 
 ### 8-1. 가드레일 ④ — DryRun 부분과 조회 대체 통과 조건 확정 (P2-3)
@@ -249,7 +254,7 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 | # | 런북 | DryRun 부분 결과 | describe 통과 조건 실측(①②③④ 각각) | 잠정 조건 확정 / 수정 필요 |
 | --- | --- | --- | --- | --- |
 | P2-3a | `EC2_ISOLATE`<br>ENI `modify_network_interface_attribute` DryRun + `describe_target_health`·`describe_security_groups` | `precheck()` 통과(앱 키 · `web-1`) — ENI 교체 DryRun 통과 | ① DryRun 통과 **통과**<br>② `isolation_group_id` SG 존재 **통과**<br>③ TG 존재·대상 등록됨(`Target.NotRegistered` 설명은 미등록으로 본다) **통과**<br>(근거: PR #439 본문 `## 원본 출력` ④ P2 행 `summary` — "ENI 교체 DryRun 통과·격리용 SG 존재·TG 존재와 대상 등록") | 확정 / 수정 필요 — ______ · 비고: **통과 경로만 실측** — 거절 경로(예: `Target.NotRegistered`만 오는 대상)는 미측정이라 조건 확정을 아직 고르지 않는다 |
-| P2-3b | `EC2_UNISOLATE`<br>ENI DryRun + `describe_target_groups`·`describe_security_groups` | | ① DryRun 통과 ______<br>② 백업 레코드의 복원 대상 SG 전부 현존 ______<br>③ TG 존재·대상이 같은 VPC(`describe_target_groups`의 `VpcId`) ______ | 확정 / 수정 필요 — ______ |
+| P2-3b | `EC2_UNISOLATE`<br>ENI DryRun + `describe_target_groups`·`describe_security_groups` | 해제 3회 모두 ENI DryRun `Client.DryRunOperation`(CloudTrail · 주체 `vigilantis-access`) 뒤 실제 호출 | ① DryRun 통과 **통과**(3/3)<br>② 백업 레코드의 복원 대상 SG 전부 현존 **통과**(3/3 — 실행이 사전 검사를 지나 `SUCCESS`)<br>③ TG 존재·대상이 같은 VPC **통과**(3/3 — 같은 근거)<br>②③의 `verification_summary` 원문은 공개 API에 없어 옮기지 못했다 | 확정 / 수정 필요 — ______ · 비고: **통과 경로만 실측** — 복원 대상 SG가 사라진 경우 등 거절 경로는 미측정 |
 | P2-3c | `EC2_ENABLE_AUTOSCALING`<br>LT `create_launch_template` DryRun + `describe_instances`·`describe_auto_scaling_groups` | `precheck()` 통과(앱 키 · `idle-dev`) — LT DryRun 통과 | ① DryRun 통과 **통과**<br>② 원본 EC2 존재·`running` **통과**<br>③ 동명 ASG 부재 **통과**<br>④ `min_size <= max_size <= 4` **통과**<br>(근거: PR #439 본문 `## 원본 출력` ④ P2 행 `summary` — "인스턴스 running·Launch Template DryRun 통과·동명 ASG 부재·min_size/max_size 범위") | 확정 / 수정 필요 — ______ · 비고: **통과 경로만 실측** — 거절 경로(예: 동명 ASG가 이미 있는 경우)는 미측정이라 조건 확정을 아직 고르지 않는다 |
 
 > 거절이 났으면 사유 코드(`PRECHECK_TARGET_NOT_FOUND` · `PRECHECK_INVALID_STATE` · `PRECHECK_PARAM_INVALID`)와 `verification_summary`를 그대로 적는다. 조건을 고쳐야 하면 ADR-0007 §4 개정 대상으로 §7에 남긴다.
@@ -258,7 +263,7 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 
 ### 8-2. #447 자동 격리 — 팀 실 AWS 검증과 시간 기록
 
-> **상태: 팀 실 AWS 실행 기록 대기.** 이 절은 #447 자동 발동 경로가 팀 실 AWS 환경에서 `EC2_ISOLATE`로 이어진 실행과 걸린 시간을 기록하는 자리다. 실행을 마치면 아래 표를 채운다. 개인 AWS 참고 측정은 PR #469 본문에 두고, 이 절에는 팀 실 AWS 실행 결과를 적는다.
+> **상태: 팀 실 AWS 실행 기록 완료(10/13(화) — High 2회 · Medium 1회 확인된 성공).** 이 절은 #447 자동 발동 경로가 팀 실 AWS 환경에서 `EC2_ISOLATE`로 이어진 실행과 걸린 시간을 기록하는 자리다. 실행을 마치면 아래 표를 채운다. 개인 AWS 참고 측정은 PR #469 본문에 두고, 이 절에는 팀 실 AWS 실행 결과를 적는다.
 
 **판정 기준과의 관계**
 
@@ -295,14 +300,15 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 
 | 항목 | 기록 |
 | --- | --- |
-| 실행 환경(리전·VPC) · 코드 버전(commit) | ______ |
-| 대상 EC2 · TG · 격리 SG | ______ |
-| High 발동 → `EC2_ISOLATE`(UTC · IncidentID · ExecutionID · `outcome` · `confirmed`) | 기록 대기 |
-| High `end_to_end_ms` · phase별 `elapsed_ms`/`delta_ms` | 기록 대기 |
-| Medium 발동 → `EC2_ISOLATE`(UTC · IncidentID · ExecutionID · `outcome` · `confirmed`) | 기록 대기 |
-| Medium `deadline_to_reservation_ms` · `deadline_to_confirmation_ms` · `scan_to_confirmation_ms` · `reservation_to_confirmation_ms` | 기록 대기 |
-| 백업 선행(`backup_committed` → `execution_started`) · AWS 조회로 본 SG 교체·TG 등록 해제 | 기록 대기 |
-| 그 밖의 시도(`failed` · `interrupted` · `unconfirmed` · `prerequisite_blocked`)와 사유 | 기록 대기 |
+| 실행 환경(리전·VPC) · 코드 버전(commit) | `ap-northeast-2` · 스모크 VPC `vpc-06c17394fee2f40e9` · 배포 이미지 `mvp-004ed0a`(= `origin/dev` `004ed0a`) · ECS 작업 정의 `vigilantis-platform-api:6`. **회차 조건: 세 회차 모두 main 레인에 진행 중 실행 없음**(다운사이징·EBS 삭제 등 장시간 대기 실행이 없던 시각) |
+| 대상 EC2 · TG · 격리 SG | `web-1` `i-044998273825e941e`(ENI 1개) · `vigilantis-smoke-tg` · `vigilantis-smoke-isolation` `sg-074fae62f8856a443` |
+| High 발동 → `EC2_ISOLATE`(UTC · IncidentID · ExecutionID · `outcome` · `confirmed`) | ① 08:14:37Z · `7441f799-1271-4703-9677-70278ce83fe8` · `c504b814-74f4-48e5-b6b0-fdd0f55c8b5c` · `SUCCESS`(계측 로그 미수집 — 아래 그 밖의 시도) ② **08:40:32.671Z** · `1b38cb79-ffec-4593-81d1-a687e98f8cb7` · `a8ac617f-9f88-417d-93cb-bac8357e9674` · `success` · `confirmed=true` |
+| High `end_to_end_ms` · phase별 `elapsed_ms`/`delta_ms` | ② **`end_to_end_ms` 2932.7** · `risk_evaluated` 0.3/0.3 · `incident_committed` 137.5/137.2 · `guardrail_passed` 1519.6/1382.1 · `execution_reserved` 1561.0/41.4 · `backup_committed` 1846.6/285.6 · `execution_started` 1846.7/0.1 · `isolation_confirmed` 2932.7/1086.1(ms). `reservation_to_confirmation_ms` 1371.8. **가장 큰 구간은 가드레일 4단계(1.38초 — AWS DryRun·조회 포함)와 격리 실행·확인(1.09초)이다** |
+| Medium 발동 → `EC2_ISOLATE`(UTC · IncidentID · ExecutionID · `outcome` · `confirmed`) | **08:31:48.287Z** · `5febcd36-7c0f-4819-bfcb-03dd44dd6948` · `3ca939e2-2bf4-4064-827e-73d73c14bc69` · `success` · `confirmed=true`. 저장 기한 `response_deadline_at` 08:31:47.416Z. 승인 대기 중 **관제자 무조작**이었고, 전환 뒤 `response_mode`가 `TIMEOUT_ISOLATION_1M`으로 바뀌고 남은 `NACL_ADD_DENY` 제안은 목록에서 빠졌다 |
+| Medium `deadline_to_reservation_ms` · `deadline_to_confirmation_ms` · `scan_to_confirmation_ms` · `reservation_to_confirmation_ms` | 1780.5 · **2991.6** · 2120.1 · 1211.0(ms). phase: `guardrail_passed` 866.2/866.2 · `execution_reserved` 909.1/42.9 · `backup_committed` 1194.4/285.3 · `execution_started` 1194.5/0.1 · `isolation_confirmed` 2120.1/925.6 |
+| 백업 선행(`backup_committed` → `execution_started`) · AWS 조회로 본 SG 교체·TG 등록 해제 | 계측된 두 회차 모두 `backup_committed`가 `execution_started`보다 앞섰다(0.1ms 차 — 같은 흐름에서 연이어 찍힌다). SG 교체·TG 등록 해제는 매 회차 `describe_network_interfaces`·`describe_target_health`로 확인했다(§8 P2-1) |
+| 그 밖의 시도(`failed` · `interrupted` · `unconfirmed` · `prerequisite_blocked`)와 사유 | High ① 회차는 격리·확인 모두 성공했으나 **계측 로그가 남지 않았다** — 주입한 일회성 태스크가 운영 진입점의 로깅 설정을 거치지 않았다. ②는 주입 코드에서 `setup_logging('INFO')`를 불러 같은 조건으로 다시 잰 회차다. 그 밖에 **가드레일 거절 1건**(`failed` — 08:11Z · 인시던트 `5db1c4ea-…` · `PRECHECK_UNAUTHORIZED`, 주입 태스크가 접근 역할 대신 태스크 역할로 호출 — §7 10/13 17:11)과 **발동 조건 미성립 1건**(Medium `web-2` — 승인 대기에 들어가지 못해 기한이 없음, §7 10/13 17:17)이 있다. 둘 다 제품 경로가 아니라 실측 방법·스모크 구성에서 나왔다 |
+| 0.5초 목표 대비(기록만 — 판정 요건 아님) | High 2.93초 · Medium 기한 후 2.99초. 0.5초 목표 개정 여부는 판정 뒤 따로 정한다(SSOT 10주차 리스크 2번) |
 
 ---
 
