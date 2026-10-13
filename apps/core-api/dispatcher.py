@@ -70,6 +70,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import partial
+from threading import RLock
 from typing import Callable, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -88,6 +89,7 @@ from schemas.runbooks import (
     AUTO_ROLLBACK_RUNBOOK_BY_MAIN_ID,
     ROLLBACK_RUNBOOK_BY_MAIN_ID,
     RunbookId,
+    TriggerSource,
 )
 
 import workflows
@@ -102,6 +104,11 @@ logger = logging.getLogger("vigilantis.dispatcher")
 JOB_ID = "execution_dispatch"
 
 Publish = Callable[[WsEvent], None]
+
+# worker 1개 안에서도 접수 직후 실행과 주기 스캔은 서로 다른 스레드다.
+# 백업·단계 commit을 넘어 같은 실행 구간을 직렬화한다. DB 행 잠금만으로는
+# runner 중간 commit 뒤의 재진입을 막을 수 없다. 다중 프로세스 lease는 아니다.
+_DISPATCH_LOCK = RLock()
 
 # 런북별 실행 진입점. 여기 없는 런북의 예약은 넘기지 않는다 — 실행 함수가 없다는
 # 사실을 실패 확정으로 바꾸면, 미구현이 "조치가 실패했다"는 기록으로 둔갑한다.
@@ -537,6 +544,17 @@ def _dispatch_one(
     try:
         outcome = runner(db, execution_id)
         if outcome.succeeded:
+            if (
+                claimed.runbook_id is RunbookId.RUNBOOK_EC2_ISOLATE
+                and claimed.trigger_source in (
+                    TriggerSource.PRE_MITIGATION_0_5S,
+                    TriggerSource.TIMEOUT_ISOLATION_1M,
+                )
+            ):
+                # #447의 완료 경계는 API 요청 반환이 아니라 격리 상태 확인이다.
+                # #444가 제공하는 실제 TG·ENI 판정을 거쳐야 SUCCESS를 확정한다.
+                _judge_one(db, claimed, publish, report, policy)
+                return
             if claimed.runbook_id in _AWAIT_JUDGEMENT_ON_SUCCESS:
                 # 기동 요청 접수는 성공의 경계가 아니다 — 2/2 Status Check가 SUCCESS와
                 # ROLLBACK_INITIATED를 가른다(services/aws/rollback.py). 여기서 SUCCESS를
@@ -675,7 +693,7 @@ def _offer_release_one(
         report.release_skipped += 1
 
 
-def dispatch_pending(
+def _dispatch_pending(
     db: Session,
     publish: Optional[Publish] = None,
     policy: Optional[workflows.VerificationRetryPolicy] = None,
@@ -716,6 +734,44 @@ def dispatch_pending(
             _offer_release_one(db, execution_id, publish, report)
     logger.info("dispatch_cycle_done", extra=vars(report))
     return report
+
+
+def supports_isolation() -> bool:
+    """선행 #444의 실행·확인 쌍이 실제 등록됐는지만 확인한다."""
+    runbook = RunbookId.RUNBOOK_EC2_ISOLATE
+    return runbook in _RUNNERS and runbook in _JUDGES
+
+
+def automatic_isolation_scope():
+    """자동 발동은 준비·예약부터 같은 실행 구간을 소유한다.
+
+    예약 직후 주기 스캔이 먼저 실행을 가져가면 접수 trace와 실행 phase가 서로 다른
+    스레드로 갈린다. 동일 worker에서 구간을 묶고 dispatch_now는 재진입한다.
+    """
+    return _DISPATCH_LOCK
+
+
+def dispatch_now(
+    db: Session, execution_id: str, publish: Publish | None = None,
+) -> DispatchReport:
+    """주기 스캔과 같은 실행 관문으로 한 건을 즉시 처리한다."""
+    with _DISPATCH_LOCK:
+        report = DispatchReport(scanned=1)
+        _dispatch_one(
+            db, execution_id, publish, report,
+            workflows.VerificationRetryPolicy.from_settings(),
+        )
+        return report
+
+
+def dispatch_pending(
+    db: Session,
+    publish: Publish | None = None,
+    policy: workflows.VerificationRetryPolicy | None = None,
+    lane: str = LANE_MAIN,
+) -> DispatchReport:
+    with _DISPATCH_LOCK:
+        return _dispatch_pending(db, publish, policy, lane)
 
 
 def run_dispatch_cycle(

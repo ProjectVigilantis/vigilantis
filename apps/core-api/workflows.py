@@ -32,6 +32,9 @@
 #   - 후보가 생기는 문도 둘이다. AI 분석 결과(record_agent_analysis)와, 차단이 SUCCESS로
 #     끝난 뒤의 해제 제안(offer_nacl_release)이다. 뒤의 것은 값을 모델이 아니라 차단의
 #     백업에서 가져오되 가드레일 4단계는 똑같이 1회 지난다. (Issue #329)
+#   - 사람 승인 없는 자동 격리(High 선차단·Medium 타임아웃)의 접수는
+#     reserve_auto_isolation이다. 호출부가 먼저 돌린 가드레일 판정(PASS·FAIL)을 실행과
+#     함께 저장하며 AWS를 부르지 않는다. (Issue #447)
 # ==============================================================================
 
 from __future__ import annotations
@@ -41,6 +44,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
+from enum import Enum, unique
 from typing import Optional
 
 from pydantic import ValidationError
@@ -53,10 +57,16 @@ from schemas.api.actions import (
     ExecuteActionResponse,
     ExecutionStatus,
 )
-from schemas.api.assets import AssetType, RelationType
 from schemas.api.errors import ErrorCode
+from schemas.api.assets import AssetType, RelationType
 from schemas.asset_roles import ROLE_ISOLATION, ROLE_TAG_KEY
-from schemas.api.incidents import IncidentStatus, ResolutionJudgement, IncidentCategory, ResponseMode
+from schemas.api.incidents import (
+    IncidentCategory,
+    IncidentStatus,
+    ResolutionJudgement,
+    ResponseMode,
+    RiskLevel,
+)
 from schemas.autoscaling import AutoscalingExecutionPlan
 from schemas.incidents import AgentWaitSchedule
 from schemas.backups import InstanceSpecBackup, NaclRuleIndexBackup
@@ -101,6 +111,7 @@ from schemas.savings import AISavingsEstimate
 
 from ai import guardrails
 from config import get_settings
+from isolation_timing import current_trace
 from db import mappers, models
 from db.repositories import assets as assets_repo
 from db.repositories import executions as executions_repo
@@ -403,22 +414,15 @@ def resolve_incident(
         raise ApiError(ErrorCode.INCIDENT_NOT_RESOLVABLE)
     if incident.category is IncidentCategory.SECOPS:
         # 분석이 결과를 더 만들 수 있는 동안에는 사용자 종료를 확정하지 않는다.
-        # 선제 차단 엔진 연결 시 FAILED + PENDING 등이 분석 스캔에서 빠지지 않는지
-        # 이 게이트와 함께 확인해야 한다. 현재 정상 경로에는 해당 조합이 없다.
+        # High 선차단이 실패해 분석 전에 FAILED가 된 건(FAILED + PENDING)은 분석 스캔이
+        # 계속 집고(incidents_repo.list_pending_agent_analysis) 분석 저장도 FAILED에서
+        # 받으므로(record_agent_analysis) 이 게이트는 분석이 끝나면 풀린다. (Issue #447)
         if incident.agent_invocation_status not in AGENT_TERMINAL_STATUSES:
             raise ApiError(ErrorCode.INCIDENT_NOT_RESOLVABLE)
 
     # 남은 제안을 함께 정리한다 — 상세 응답 계약이 RESOLVED에 빈 제안 목록을
     # 요구하므로(api/incidents.py), 두고 가면 종료 직후 조회가 500이 된다
-    for candidate in incidents_repo.list_candidates(
-        db, incident_id, status=CandidateStatus.EXECUTABLE
-    ):
-        incidents_repo.update_candidate_status(
-            db,
-            candidate.candidate_id,
-            expected=CandidateStatus.EXECUTABLE,
-            next_status=CandidateStatus.INVALIDATED,
-        )
+    _invalidate_executable_candidates(db, incident_id)
 
     moved = incidents_repo.resolve_incident(
         db, incident_id, expected=incident.status, resolution=resolution,
@@ -433,6 +437,406 @@ def resolve_incident(
     db.commit()
     db.refresh(incident)  # UPDATE가 바꾼 상태·판단을 응답 조립 전에 되읽는다
     return True
+
+
+def _invalidate_executable_candidates(db: Session, incident_id: str) -> None:
+    """지금 EXECUTABLE인 제안을 INVALIDATED로 옮긴다 — 종료와 자동 격리 타임아웃이 쓴다.
+
+    그 시점의 제안에만 걸린다. 이후 새로 생긴 제안과 복구 접수는 막지 않는다.
+    """
+    for candidate in incidents_repo.list_candidates(
+        db, incident_id, status=CandidateStatus.EXECUTABLE
+    ):
+        incidents_repo.update_candidate_status(
+            db,
+            candidate.candidate_id,
+            expected=CandidateStatus.EXECUTABLE,
+            next_status=CandidateStatus.INVALIDATED,
+        )
+
+
+# --- 자동 격리 접수 (Issue #447) ------------------------------------------------
+#
+# 사람 승인 없이 서버가 시작하는 EC2_ISOLATE — High 즉시 선차단(PRE_MITIGATION_0_5S)과
+# Medium 1분 미응답 만료(TIMEOUT_ISOLATION_1M) — 의 **접수**다. AWS를 부르지 않는다.
+#
+#   - 가드레일 4단계는 호출부가 미리 발급한 execution_id로 트랜잭션 밖에서 먼저 돌린다
+#     (④가 AWS 호출이다). 여기는 그 판정을 받아 같은 ID의 실행과 판정 기록을 함께
+#     남긴다. 판정 행은 실행을 FK로 가리키므로 접수에 이긴 쪽만 저장되고, 진 쪽의
+#     명령·판정은 남지 않는다.
+#   - PASS면 검증된 명령을 실행 행에 싣고 IN_PROGRESS로 접수한다. 이 실행에는 후보가
+#     없으므로 실행 단계는 행의 validated_command만 읽는다.
+#   - FAIL도 남긴다. 실행은 같은 트랜잭션에서 FAILED(종료 시각·거절 요약)로 확정되고
+#     판정도 함께 저장된다 — 거절된 실행이 IN_PROGRESS로 보이는 순간은 없다. 남기지
+#     않으면 High 분석 입력이 "시도해 거절됐다"와 "시도하지 않았다"를 가를 수 없고,
+#     같은 기한이 주기마다 같은 거절을 되풀이한다.
+#   - 관문은 Incident 행 잠금이다. 승인 접수(reserve_execution)·종료(resolve_incident)도
+#     같은 행을 먼저 잠그므로 같은 승인 대기는 먼저 commit한 한쪽만 처리된다. 잠근 뒤
+#     발동 조건을 다시 판정하고 실행·판정·제안 무효화·상태 전이를 한 번에 commit한다.
+#   - 중복 방지는 시스템 실행의 deduplication_key 유니크 제약이다. 거절된 시도도 키를
+#     차지하므로 발동 출처마다 Incident당 한 번만 시도한다 — 거절을 재시도하지 않는다.
+#   - 타임아웃이 이기면 판정과 무관하게 남은 EXECUTABLE 제안을 INVALIDATED로, response_mode를
+#     TIMEOUT_ISOLATION_1M으로 옮긴다. 뒤늦은 승인은 기존 409 PROPOSAL_NOT_EXECUTABLE,
+#     격리 진행 중의 종료는 409 INCIDENT_NOT_RESOLVABLE로 떨어진다. 그 뒤 새로 생긴
+#     제안과 복구 접수는 막지 않는다.
+#   - 승인 대기 시각(agent_wait_started_at·response_deadline_at)은 쓰지도 지우지도 않는다.
+
+
+@unique
+class AutoIsolationSkipReason(str, Enum):
+    """접수하지 않은 이유 — 위에서부터 판정한다."""
+
+    ALREADY_RESERVED = "ALREADY_RESERVED"        # 같은 출처의 다른 시도가 먼저 commit됐다
+    RISK_NOT_ELIGIBLE = "RISK_NOT_ELIGIBLE"      # 초기 위험도·현재 대응 경로가 출처와 다르다
+    STATUS_NOT_ELIGIBLE = "STATUS_NOT_ELIGIBLE"  # 발동할 수 있는 Incident 상태가 아니다
+    WAIT_NOT_STARTED = "WAIT_NOT_STARTED"        # 저장된 응답 기한이 없다
+    WAIT_NOT_DUE = "WAIT_NOT_DUE"                # 응답 기한이 아직 지나지 않았다
+    USER_RESPONDED = "USER_RESPONDED"            # 관제자 승인 실행이 이미 commit돼 있다
+
+
+@dataclass(frozen=True)
+class AutoIsolationReservation:
+    """자동 격리 접수 1회의 결과. AWS 격리의 성공 여부는 담지 않는다.
+
+    - execution_id·execution_status: 이 호출의 execution_id로 저장된 실행과 그 상태.
+      created=True면 이번 호출이 commit했고, False면 같은 execution_id의 시도가 이미
+      commit돼 있었다(재시도). 실행할 접수는 IN_PROGRESS뿐이다 — FAILED는 가드레일 거절
+      기록이다.
+    - skipped_reason: 아무것도 저장하지 않았다. 다른 시도가 이긴 경우(ALREADY_RESERVED)에도
+      그 실행을 이 호출의 것으로 넘기지 않는다.
+    - response_deadline_at: TIMEOUT 발동에서 잠근 행의 응답 기한(없으면 None).
+    - occurred_at: created일 때 commit된 Incident.updated_at — 발행 시각이다.
+    """
+
+    incident_id: str
+    execution_id: str | None = None
+    execution_status: ExecutionStatus | None = None
+    created: bool = False
+    skipped_reason: AutoIsolationSkipReason | None = None
+    response_deadline_at: datetime | None = None
+    occurred_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if (self.execution_id is None) == (self.skipped_reason is None):
+            raise ValueError("자동 격리 결과는 실행 또는 건너뜀 사유 중 정확히 하나를 가집니다")
+        if (self.execution_id is None) != (self.execution_status is None):
+            raise ValueError("execution_status는 execution_id와 함께 옵니다")
+        if self.created and self.execution_id is None:
+            raise ValueError("접수를 만든 결과에는 실행이 있어야 합니다")
+        if self.created != (self.occurred_at is not None):
+            raise ValueError("occurred_at은 이번 호출이 접수를 commit한 경우에만 있습니다")
+
+
+# 발동 출처 → (초기 위험도, 현재 대응 경로, Incident 상태). 잠근 뒤 이 셋을 다시 본다.
+#   - High 선차단은 분석 전(ANALYZING)에만 — 분석이 끝나 제안이 붙은 뒤에는 관제자 판단이
+#     먼저다. 선차단을 접수하면 상태가 바뀌므로 같은 건의 두 번째 발동도 여기서 걸린다.
+#   - Medium 타임아웃은 승인 대기(AWAITING_APPROVAL)에서만. Low는 같은 AGENT_WAIT이고
+#     기한이 저장돼 있어도 발동하지 않는다.
+_AUTO_ISOLATION_ELIGIBILITY: dict[
+    TriggerSource, tuple[RiskLevel, ResponseMode, IncidentStatus]
+] = {
+    TriggerSource.PRE_MITIGATION_0_5S: (
+        RiskLevel.HIGH, ResponseMode.PRE_MITIGATION_0_5S, IncidentStatus.ANALYZING,
+    ),
+    TriggerSource.TIMEOUT_ISOLATION_1M: (
+        RiskLevel.MEDIUM, ResponseMode.AGENT_WAIT, IncidentStatus.AWAITING_APPROVAL,
+    ),
+}
+
+_ISOLATE_TARGET_TYPE = executor.RUNBOOK_SPECS[
+    RunbookId.RUNBOOK_EC2_ISOLATE.value
+].resource_type
+
+
+def auto_isolation_deduplication_key(
+    trigger_source: TriggerSource, incident_id: str
+) -> str:
+    """자동 격리 시도 1건의 중복 방지 키 — 발동 출처마다 Incident당 한 번.
+
+    Incident 단위로 충분한 것은 승인 대기가 Incident당 한 번뿐이기 때문이다
+    (incidents_repo._user_approval_recorded 참조). 기한을 키에 넣지 않으므로 종료가 기한을
+    지운 뒤에도 앞선 시도가 같은 키로 잡힌다. incident_id는 저장 정규형이어야 한다.
+    """
+    return f"{trigger_source.value}:{incident_id}"
+
+
+def _ec2_instance_id(arn: str) -> str | None:
+    """EC2 인스턴스 ARN이면 인스턴스 ID. 다른 자원을 인스턴스로 옮겨 읽지 않는다."""
+    target = parse_arn(arn)
+    if (
+        target is None
+        or target.service != "ec2"
+        or target.resource_type != _ISOLATE_TARGET_TYPE
+    ):
+        return None
+    return target.resource_id
+
+
+def _guarded_isolation_command(
+    execution_id: str,
+    validated_command: dict | None,
+    guardrail_result: GuardrailValidationResult,
+) -> guardrails.AutoIsolationCommand | None:
+    """호출부가 넘긴 판정·명령의 계약 확인. DB를 보지 않는다. 어긋나면 ValueError.
+
+    FAIL은 명령이 없어야 하고(None을 돌려준다), PASS는 AUTO_ISOLATION 명령 계약과
+    자기 일관성(instance_id = target_arn의 인스턴스, evidence_id = 첫 근거)을 지켜야 한다.
+    """
+    if canonical_id(execution_id) != execution_id:
+        raise ValueError("execution_id는 정규형 UUID 문자열이어야 합니다")
+    if guardrail_result.result is GuardrailDecision.FAIL:
+        if validated_command is not None:
+            raise ValueError("가드레일 거절 판정에는 실행 명령을 싣지 않습니다")
+        return None
+    if validated_command is None:
+        raise ValueError("가드레일 PASS 판정에는 검증된 실행 명령이 필요합니다")
+    command = guardrails.AutoIsolationCommand.model_validate(validated_command)
+    if _ec2_instance_id(command.target_arn) != command.parameters.instance_id:
+        raise ValueError("자동 격리 명령의 instance_id가 target_arn의 EC2 인스턴스와 다릅니다")
+    if command.parameters.evidence_id != command.evidence_ids[0]:
+        raise ValueError("자동 격리 명령의 evidence_id가 evidence_ids의 첫 항목과 다릅니다")
+    return command
+
+
+def _check_isolation_target(
+    db: Session,
+    incident: models.Incident,
+    command: guardrails.AutoIsolationCommand | None,
+) -> None:
+    """대상은 Incident의 EC2 인스턴스 자체뿐이다. 근거도 그 Incident의 것이어야 한다."""
+    if _ec2_instance_id(incident.subject_arn) is None:
+        raise ValueError(
+            "자동 격리는 EC2 인스턴스 Incident만 대상입니다 — 다른 자원을 인스턴스로 옮겨 격리하지 않습니다"
+        )
+    if command is None:
+        return
+    if command.target_arn != incident.subject_arn:
+        raise ValueError("자동 격리 명령의 대상이 Incident 대상과 다릅니다")
+    known = {
+        row.evidence_id
+        for row in incidents_repo.list_evidence(db, incident.incident_id)
+    }
+    if not set(command.evidence_ids) <= known:
+        raise ValueError("자동 격리 명령의 근거가 이 Incident의 근거가 아닙니다")
+
+
+def _auto_isolation_skip_reason(
+    db: Session,
+    incident: models.Incident,
+    trigger_source: TriggerSource,
+    now: datetime,
+) -> AutoIsolationSkipReason | None:
+    """잠근 행으로 발동 조건을 다시 본다. 발동할 수 있으면 None."""
+    risk_level, response_mode, status = _AUTO_ISOLATION_ELIGIBILITY[trigger_source]
+    if (
+        incident.initial_risk_level is not risk_level
+        or incident.response_mode is not response_mode
+    ):
+        return AutoIsolationSkipReason.RISK_NOT_ELIGIBLE
+    if incident.status is not status:
+        return AutoIsolationSkipReason.STATUS_NOT_ELIGIBLE
+    if trigger_source is TriggerSource.PRE_MITIGATION_0_5S:
+        return None
+    if incident.response_deadline_at is None:
+        return AutoIsolationSkipReason.WAIT_NOT_STARTED
+    if incident.response_deadline_at > now:
+        return AutoIsolationSkipReason.WAIT_NOT_DUE
+    # 상태만 보면 승인한 실행이 끝나 다른 제안이 남은 건이 다시 승인 대기로 보인다
+    if incidents_repo.user_approval_recorded(db, incident.incident_id):
+        return AutoIsolationSkipReason.USER_RESPONDED
+    return None
+
+
+def _existing_auto_isolation(
+    db: Session,
+    existing: models.ActionExecution,
+    *,
+    execution_id: str,
+    deadline: datetime | None,
+) -> AutoIsolationReservation:
+    """같은 키의 시도가 이미 commit돼 있다. 같은 execution_id면 재시도, 아니면 진 쪽이다."""
+    incident_id = existing.incident_id
+    existing_id = existing.execution_id
+    existing_status = existing.status
+    db.rollback()  # Incident 잠금을 놓는다. 이 호출은 아무것도 쓰지 않았다
+    if existing_id == execution_id:
+        return AutoIsolationReservation(
+            incident_id=incident_id,
+            execution_id=existing_id,
+            execution_status=existing_status,
+            response_deadline_at=deadline,
+        )
+    logger.info(
+        "auto_isolation_already_reserved",
+        extra={
+            "incident_id": incident_id,
+            "execution_id": existing_id,
+            "attempt_execution_id": execution_id,
+        },
+    )
+    return AutoIsolationReservation(
+        incident_id=incident_id,
+        skipped_reason=AutoIsolationSkipReason.ALREADY_RESERVED,
+        response_deadline_at=deadline,
+    )
+
+
+def _settle_rejected_isolation(
+    db: Session,
+    incident: models.Incident,
+    execution_id: str,
+    guardrail_result: GuardrailValidationResult,
+) -> None:
+    """거절된 시도를 같은 트랜잭션에서 FAILED로 확정하고 Incident를 남은 것에 맞춘다.
+
+    Incident 목적 상태는 close_execution과 같은 규칙이다(_incident_status_after) — 진행 중
+    실행·EXECUTABLE 제안이 없으면 FAILED다. 거절은 자산을 바꾸지 않았으므로 종료 대기가
+    아니다.
+    """
+    if not executions_repo.update_execution_status(
+        db,
+        execution_id,
+        expected=ExecutionStatus.IN_PROGRESS,
+        next_status=ExecutionStatus.FAILED,
+        error_summary=_guardrail_rejection_summary(guardrail_result),
+        finished_at=datetime.now(UTC),
+    ):
+        raise ValueError(f"거절된 자동 격리 확정 실패: {execution_id}")
+    target = _incident_status_after(
+        db,
+        incident.incident_id,
+        closed_execution_id=execution_id,
+        closed_status=ExecutionStatus.FAILED,
+    )
+    if target is incident.status:
+        incidents_repo.touch_incident(db, incident.incident_id)
+    elif not incidents_repo.update_incident_status(
+        db, incident.incident_id, expected=incident.status, next_status=target
+    ):
+        raise ValueError(f"Incident 상태 전이 실패: {incident.incident_id}")
+
+
+def reserve_auto_isolation(
+    db: Session,
+    incident_id: str,
+    *,
+    trigger_source: TriggerSource,
+    now: datetime,
+    execution_id: str,
+    validated_command: dict | None,
+    guardrail_result: GuardrailValidationResult,
+) -> AutoIsolationReservation:
+    """자동 격리 시도 1건 — 입력 확인 → Incident 잠금 → 중복·발동 조건 재확인 → 저장·전이.
+
+    호출부는 execution_id를 먼저 발급하고 그 ID로 AUTO_ISOLATION 가드레일 4단계를
+    트랜잭션 밖에서 마친 뒤 부른다. PASS면 validated_command(AutoIsolationCommand 모양),
+    FAIL이면 None을 넘긴다. now는 응답 기한과 비교하는 시각이다.
+
+    입력이 계약과 다르면(판정·명령 불일치, EC2 인스턴스가 아닌 대상, 다른 대상·근거)
+    ValueError다 — 아무것도 저장하지 않는다. 건너뛸 때는 잠금을 놓고 돌아온다.
+    """
+    if trigger_source not in _AUTO_ISOLATION_ELIGIBILITY:
+        raise ValueError(f"자동 격리 발동 출처가 아닙니다: {trigger_source}")
+    command = _guarded_isolation_command(execution_id, validated_command, guardrail_result)
+
+    incident = incidents_repo.lock_incident(db, incident_id)
+    if incident is None:
+        raise ValueError(f"Incident를 찾을 수 없습니다: {incident_id}")
+    _check_isolation_target(db, incident, command)
+    incident_id = incident.incident_id  # 키는 저장 정규형으로 만든다
+    is_timeout = trigger_source is TriggerSource.TIMEOUT_ISOLATION_1M
+    deadline = incident.response_deadline_at if is_timeout else None
+
+    key = auto_isolation_deduplication_key(trigger_source, incident_id)
+    existing = executions_repo.get_by_deduplication_key(db, key)
+    if existing is not None:
+        return _existing_auto_isolation(
+            db, existing, execution_id=execution_id, deadline=deadline
+        )
+
+    reason = _auto_isolation_skip_reason(db, incident, trigger_source, now)
+    if reason is not None:
+        db.rollback()  # Incident 잠금을 놓는다. 이 호출은 아무것도 쓰지 않았다
+        logger.info(
+            "auto_isolation_skipped",
+            extra={
+                "incident_id": incident_id,
+                "trigger_source": trigger_source.value,
+                "reason": reason.value,
+            },
+        )
+        return AutoIsolationReservation(
+            incident_id=incident_id,
+            skipped_reason=reason,
+            response_deadline_at=deadline,
+        )
+
+    stored_command = None if command is None else command.model_dump(mode="json")
+    try:
+        # SAVEPOINT로 감싸는 이유는 reserve_execution과 같다 — 제약 위반 뒤에도 재조회를
+        # 이어 가야 한다. 같은 Incident의 시도는 잠금으로 직렬화되므로 이 제약은 최후 관문이다
+        with db.begin_nested():
+            execution = executions_repo.create_execution(
+                db,
+                execution_id=execution_id,
+                incident_id=incident_id,
+                runbook_id=RunbookId.RUNBOOK_EC2_ISOLATE,
+                target_arn=incident.subject_arn,
+                trigger_source=trigger_source,
+                deduplication_key=key,
+                validated_command=stored_command,
+            )
+    except IntegrityError:
+        raced = executions_repo.get_by_deduplication_key(db, key)
+        if raced is None:
+            raise  # 중복 방지 키가 아닌 제약 위반(execution_id 충돌 등)이다
+        return _existing_auto_isolation(
+            db, raced, execution_id=execution_id, deadline=deadline
+        )
+
+    guardrails_repo.add_evaluation(
+        db,
+        validation_context=GuardrailValidationContext.AUTO_ISOLATION,
+        result=guardrail_result,
+        execution_id=execution_id,
+        validated_command=stored_command,
+    )
+    if is_timeout:
+        # 판정과 무관하게 이 승인 대기는 끝났다 — 거절돼도 같은 기한을 다시 잡지 않는다
+        _invalidate_executable_candidates(db, incident_id)
+        if not incidents_repo.update_response_mode(
+            db,
+            incident_id,
+            expected=ResponseMode.AGENT_WAIT,
+            next_mode=ResponseMode.TIMEOUT_ISOLATION_1M,
+        ):
+            raise ValueError(f"대응 경로 전이 실패: {incident_id}")
+    if command is None:
+        _settle_rejected_isolation(db, incident, execution_id, guardrail_result)
+    else:
+        _move_incident_to_in_progress(db, incident_id)
+
+    db.commit()
+    # Core UPDATE는 세션이 든 객체를 갱신하지 않는다 — 결과·발행 값을 되읽는다
+    db.refresh(execution)
+    db.refresh(incident)
+    logger.info(
+        "auto_isolation_reserved",
+        extra={
+            "incident_id": incident_id,
+            "execution_id": execution_id,
+            "trigger_source": trigger_source.value,
+            "execution_status": execution.status.value,
+        },
+    )
+    return AutoIsolationReservation(
+        incident_id=incident_id,
+        execution_id=execution_id,
+        execution_status=execution.status,
+        created=True,
+        response_deadline_at=deadline,
+        occurred_at=incident.updated_at,
+    )
 
 
 # --- 스펙 JSON 백업 -------------------------------------------------------------
@@ -695,12 +1099,24 @@ def store_sg_and_tg_mapping_backup(
             f"인스턴스 ARN이 아닙니다: {execution.target_arn}",
         )
 
+    # AWS 조회 중에는 실행 행 잠금·읽기 트랜잭션을 유지하지 않는다.
+    # dispatcher의 실행 구간 잠금은 이 rollback/commit과 독립적이다.
+    db.rollback()
     capture = backup.capture_sg_and_tg_mapping(
         target.resource_id, target.region, target_group_arn=params.target_group_arn
     )
     if not capture.captured:
         return _backup_failed(capture.reason_code, capture.detail or "")
 
+    execution = executions_repo.lock_execution(db, execution_id)
+    if execution is None:
+        return _backup_failed(
+            PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND, "실행 레코드를 찾을 수 없습니다"
+        )
+    if execution.backup_record_id is not None:
+        return BackupOutcome(
+            record=executions_repo.get_backup_record(db, execution.backup_record_id)
+        )
     record = executions_repo.create_backup_record(
         db,
         execution_id=execution.execution_id,
@@ -717,6 +1133,9 @@ def store_sg_and_tg_mapping_backup(
         )
 
     db.commit()
+    trace = current_trace()
+    if trace is not None and trace.execution_id == execution_id:
+        trace.mark("backup_committed")
     return BackupOutcome(record=record, created=True)
 
 
@@ -1441,11 +1860,9 @@ def run_ec2_isolate_execution(db: Session, execution_id: str) -> ExecutionRunOut
     (ADR-0008 §1 ①). 격리 대상(ENI 목록·등록 포트)은 그 백업에서 읽는다
     (executor.execute_ec2_isolate).
 
-    **성공의 경계는 실행 반환이다** — 마지막 호출(ENI SG 교체)이 곧 격리 완료이고
-    뒤따르는 판정 축이 없다(dispatcher._AWAIT_JUDGEMENT_ON_SUCCESS에 넣지 않는 이유).
-    판정(judge_ec2_isolate)으로 오는 것은 실행 도중 끊기거나 자산이 바뀐 채 실패한
-    경우다 — 짝 `EC2_UNISOLATE`가 `HUMAN_ONLY`라 자동 원복이 아니라 현물 판정으로 간다
-    (dispatcher._AUTO_ROLLBACK_ON_ASSET_CHANGE 밖).
+    성공 반환은 변경 API 호출 성공이다. #447 자동 발동은 dispatcher가
+    judge_ec2_isolate로 상태를 다시 확인한 뒤 SUCCESS로 확정한다. 실행 중단·부분 실패도
+    현물 판정으로 간다 — 짝 EC2_UNISOLATE가 HUMAN_ONLY라 자동 해제하지 않는다.
 
     발동 경로(`PRE_MITIGATION_0_5S`·`TIMEOUT_ISOLATION_1M`·관제자 승인)는 이 함수가
     가르지 않는다 — 실행 행의 trigger_source가 담고, 실행 절차는 셋 모두 같다.
@@ -1488,8 +1905,13 @@ def run_ec2_isolate_execution(db: Session, execution_id: str) -> ExecutionRunOut
             "결속된 백업이 SG/TG 매핑 계약을 벗어났거나 다른 Target Group을 가리킵니다",
         )
 
+    target_arn = execution.target_arn
+    db.rollback()
+    trace = current_trace()
+    if trace is not None and trace.execution_id == execution_id:
+        trace.mark("execution_started")
     outcome = executor.execute_ec2_isolate(
-        execution.target_arn,
+        target_arn,
         backup=mapping,
         isolation_group_id=params.isolation_group_id,
         record_step=_step_recorder(db, execution_id),
@@ -2253,7 +2675,8 @@ def _target_deregistered(state: Optional[str]) -> bool:
 def judge_ec2_isolate(db: Session, execution_id: str) -> ExecutionJudgement:
     """단계를 남긴 채 IN_PROGRESS인 격리 실행 1건의 종료 판정. (§2-1 B2)
 
-    여기로 오는 것은 **실행 도중 끊긴 격리**와 **자산이 바뀐 채 실패한 격리**다 — 짝
+    #447 자동 발동은 변경 호출 성공 뒤에도 여기서 상태를 확인한다.
+    **실행 도중 끊긴 격리**와 **자산이 바뀐 채 실패한 격리**도 여기로 온다 — 짝
     `EC2_UNISOLATE`가 `HUMAN_ONLY`라 dispatcher가 자동 원복이 아니라 다음 주기의 현물
     판정으로 보낸다. 판정 주체를 runner와 **짝으로** 두는 이유는 judge_nacl_add_deny와
     같다(ADR-0008 §6).
@@ -2312,6 +2735,8 @@ def judge_ec2_isolate(db: Session, execution_id: str) -> ExecutionJudgement:
             error_summary="격리 판정 불가: 백업 payload 또는 실행 파라미터가 계약을 벗어났습니다",
         )
 
+    backup_record_id = record.backup_record_id
+    db.rollback()
     current, code = executor.current_eni_security_groups(target.resource_id, target.region)
     if code is PrecheckReasonCode.PRECHECK_TARGET_NOT_FOUND:
         return ExecutionJudgement(
@@ -2354,7 +2779,7 @@ def judge_ec2_isolate(db: Session, execution_id: str) -> ExecutionJudgement:
     detail = (
         f"격리 미완(부분 적용) — TG 등록 {'해제됨' if deregistered else '유지'},"
         f" 격리 SG가 붙은 ENI {len(isolated)}/{len(enis)}."
-        f" [원클릭 해제] 대상이 아니므로 백업 레코드 {record.backup_record_id}의 값으로"
+        f" [원클릭 해제] 대상이 아니므로 백업 레코드 {backup_record_id}의 값으로"
         " 수동 복원이 필요합니다"
     )
     logger.critical(
@@ -3989,6 +4414,7 @@ def judge_ec2_unisolate(db: Session, execution_id: str) -> ExecutionJudgement:
 #
 # FAILED로 닫는 분석의 요약·재평가는 저장하지 않는다. 요약은 로그로만 남긴다(#285).
 # SecOps의 선행 실행이 진행 중이거나 성공·원복 완료라면 해당 실행 상태를 유지한다.
+# 선행 실행이 실패·거절로 끝나 FAILED가 된 High 건도 분석 결과를 받는다(#447).
 # 저장 직전 Incident 행을 잠그고 선행 실행 상태를 읽어 최종 상태를 정한다.
 # 모델·AWS 호출 동안에는 이 잠금과 DB 트랜잭션을 열어 두지 않는다.
 
@@ -4292,6 +4718,14 @@ def record_agent_analysis(
     permitted = {IncidentStatus.ANALYZING}
     if is_secops:
         permitted.update({IncidentStatus.ACTION_IN_PROGRESS, IncidentStatus.AWAITING_CLOSURE})
+        # High 선차단이 실패·거절로 끝나면 분석 전에 FAILED가 된다. 그 건만 받는다 —
+        # 분석 스캔도 같은 조건으로 집는다(incidents_repo.list_pending_agent_analysis).
+        # 받지 않으면 호출 상태가 Terminal로 가지 못해 종료 게이트가 영원히 닫힌다. (Issue #447)
+        if previous_status is IncidentStatus.FAILED and any(
+            item.trigger_source is TriggerSource.PRE_MITIGATION_0_5S
+            for item in executions_repo.list_by_incident(db, incident_id)
+        ):
+            permitted.add(IncidentStatus.FAILED)
     if previous_status not in permitted:
         raise ValueError(f"분석 결과를 저장할 수 없는 Incident 상태: {previous_status.value}")
 

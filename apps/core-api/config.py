@@ -59,8 +59,8 @@ class Settings(BaseSettings):
     # 0 이하면 모든 연결이 즉시 제거되므로 양수만 허용한다 (Issue #75)
     WS_SEND_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0)
     # 접수된 조치 실행 디스패치·회수 스캔 주기(초) — dispatcher.py 잡 1개가 쓴다.
-    # 승인부터 AWS 호출까지의 지연 상한이자 부분 인덱스
-    # (ix_action_executions_non_terminal) 조회 빈도다 (Issue #232)
+    # 부분 인덱스(ix_action_executions_non_terminal) 조회 빈도다.
+    # 실행·DB 대기로 밀릴 수 있어 승인부터 AWS 호출까지의 지연 상한은 아니다.
     DISPATCH_INTERVAL_SECONDS: int = Field(default=10, gt=0)
     # AI 분석 대기 Incident 스캔 주기(초) — agent_dispatcher.py 잡 1개가 쓴다.
     # Incident 생성부터 그래프 호출까지의 지연 상한이다. 실행 디스패치보다 성긴 것은
@@ -68,6 +68,8 @@ class Settings(BaseSettings):
     # 체감 지연이 그만큼 줄지 않기 때문이다. 한 주기가 대상 전부를 직렬로 돌고 건마다
     # 모델을 부르므로, 밀리면 다음 주기는 max_instances=1이 미룬다 (Issue #285)
     AGENT_DISPATCH_INTERVAL_SECONDS: int = Field(default=30, gt=0)
+    # DB 승인 대기 기한 감시. 주기는 지연 상한이 아니다 — 실행·DB 대기도 계측한다.
+    AGENT_WAIT_POLL_SECONDS: float = Field(default=1.0, gt=0)
     # 스캔 잡 기동 스위치 — 테스트가 앱을 띄울 때 스캔이 따라 돌지 않게 끈다
     # (apps/core-api/tests/conftest.py, PR #236 리뷰). 실행 디스패치와 AI 디스패치가
     # 이 하나를 공유한다 — 끄는 목적이 같다

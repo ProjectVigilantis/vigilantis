@@ -40,7 +40,10 @@ def create_execution(
     parent_execution_id: Optional[str] = None,
     backup_record_id: Optional[str] = None,
     validated_command: Optional[dict] = None,
+    execution_id: str | None = None,
 ) -> models.ActionExecution:
+    """execution_id는 실행 전에 그 ID로 가드레일을 돌린 호출부만 넘긴다(자동 격리, #447).
+    넘기지 않으면 모델 기본값이 새 ID를 발급한다."""
     row = models.ActionExecution(
         incident_id=incident_id,
         runbook_id=runbook_id,
@@ -53,6 +56,8 @@ def create_execution(
         backup_record_id=backup_record_id,
         validated_command=validated_command,
     )
+    if execution_id is not None:
+        row.execution_id = execution_id
     db.add(row)
     db.flush()
     return row
@@ -73,6 +78,20 @@ def get_by_idempotency_key(
         select(models.ActionExecution).where(
             models.ActionExecution.idempotency_key == idempotency_key
         )
+    ).scalar_one_or_none()
+
+
+def get_by_deduplication_key(
+    db: Session, deduplication_key: str
+) -> models.ActionExecution | None:
+    """시스템 실행(자동 격리 등)의 중복 방지 키로 앞선 접수를 찾는다. (Issue #447)
+
+    최신 값으로 다시 읽는다 — 세션이 들고 있던 같은 행은 Core UPDATE(상태 확정)를 반영하지
+    않아, 재시도 응답이 이미 확정된 실행을 옛 상태로 돌려줄 수 있다."""
+    return db.execute(
+        select(models.ActionExecution)
+        .where(models.ActionExecution.deduplication_key == deduplication_key)
+        .execution_options(populate_existing=True)
     ).scalar_one_or_none()
 
 

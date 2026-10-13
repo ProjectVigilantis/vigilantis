@@ -40,8 +40,13 @@
 #       ②는 문맥별 허용 목록을 대조한다 — AI 후보는 추천 가능 7종, 원복은 롤백 3종.
 #       ③④는 문맥을 보지 않는다. 대조 대상이 target_arn과 AWS 판정뿐이라 문맥에
 #         따라 달라질 것이 없다.
-#     AUTO_ISOLATION은 아직 없다. payload 모양이 달라 여기서 판정하면 거절 기록이
-#     틀리므로, FAIL이 아니라 예외로 막는다.
+#     AUTO_ISOLATION(사람 승인 없이 서버가 시작한 격리)도 같은 네 단계를 지난다.
+#       ①은 실행 파라미터 계약(Ec2IsolateParameters) 하나만 쓴다 — 허용 목록이
+#         RUNBOOK_EC2_ISOLATE 하나뿐이라, 다른 ID의 파라미터를 여기서 대조하면 ②가
+#         막아야 할 거절이 ①에 남는다.
+#       ②는 RUNBOOK_EC2_ISOLATE만 통과시킨다. 확정 10종 중 다른 ID는
+#         WHITELIST_NOT_AUTO_ISOLATION_RUNBOOK, 10종 밖은 WHITELIST_UNKNOWN_RUNBOOK이다.
+#       ②를 통과한 명령의 운반 타입은 AutoIsolationCommand다.
 #   - ②를 통과한 명령의 운반 타입은 문맥이 정한다 — AI 후보는 RunbookCandidateDraft,
 #     원복은 RollbackExecutionCommand다. 롤백 3종은 Draft가 될 수 없다(그 모델이 AI
 #     추천 7종만 받는다, ADR-0004 정책 ②).
@@ -84,6 +89,7 @@ from schemas.precheck import PrecheckOutcome
 from schemas.runbook_parameters import (
     CANDIDATE_PARAMETER_MODELS,
     PRECHECK_PARAMETER_MODELS,
+    Ec2IsolateParameters,
     RunbookParameters,
     bind_precheck_parameters,
 )
@@ -105,6 +111,9 @@ WHITELIST_NOT_AI_RECOMMENDABLE: Final = (
 )
 WHITELIST_NOT_ROLLBACK_RUNBOOK: Final = (
     ActionWhitelistReasonCode.WHITELIST_NOT_ROLLBACK_RUNBOOK
+)
+WHITELIST_NOT_AUTO_ISOLATION_RUNBOOK: Final = (
+    ActionWhitelistReasonCode.WHITELIST_NOT_AUTO_ISOLATION_RUNBOOK
 )
 ARN_TARGET_NOT_MANAGED: Final = ArnMatchReasonCode.ARN_TARGET_NOT_MANAGED
 
@@ -223,9 +232,33 @@ class RollbackExecutionCommand(BaseModel):
         return self
 
 
-# ②가 승격한 명령의 운반 타입 — 문맥이 어느 쪽인지 정한다. ③④는 둘을 구분하지 않고
+class AutoIsolationCommand(BaseModel):
+    """②가 AUTO_ISOLATION 문맥에서 승격한 실행 명령 — RUNBOOK_EC2_ISOLATE 전용.
+
+    Draft를 쓰지 않는 이유는 Rollback 명령과 같다: parameters가 후보 계약이 아니라
+    **실행 파라미터 계약**(Ec2IsolateParameters)이어야 ④가 그대로 executor.precheck()에
+    넘길 수 있다. 필드 이름은 다른 운반 타입과 같다(GuardedCommand).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    runbook_id: RunbookId
+    target_arn: str = Field(min_length=1)
+    parameters: Ec2IsolateParameters
+    evidence_ids: list[Annotated[str, Field(min_length=1)]] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _enforce_contract(self):
+        if self.runbook_id is not RunbookId.RUNBOOK_EC2_ISOLATE:
+            raise ValueError("자동 격리 명령에는 RUNBOOK_EC2_ISOLATE만 올 수 있습니다")
+        return self
+
+
+# ②가 승격한 명령의 운반 타입 — 문맥이 어느 쪽인지 정한다. ③④는 셋을 구분하지 않고
 # runbook_id·target_arn·parameters만 읽는다.
-GuardedCommand = Union[RunbookCandidateDraft, RollbackExecutionCommand]
+GuardedCommand = Union[
+    RunbookCandidateDraft, RollbackExecutionCommand, AutoIsolationCommand
+]
 
 
 @dataclass(frozen=True)
@@ -325,6 +358,9 @@ def _schema_check_fail(
 _PARAMETER_MODELS_BY_CONTEXT: Final = {
     GuardrailValidationContext.AI_CANDIDATE: CANDIDATE_PARAMETER_MODELS,
     GuardrailValidationContext.ROLLBACK_EXECUTION: PRECHECK_PARAMETER_MODELS,
+    GuardrailValidationContext.AUTO_ISOLATION: {
+        RunbookId.RUNBOOK_EC2_ISOLATE: Ec2IsolateParameters
+    },
 }
 
 
@@ -405,6 +441,10 @@ def run_action_whitelist(
 ) -> ActionWhitelistOutcome:
     """② Action Whitelist — 확정 10종을 대조하고, **문맥이 허용하는 목록**만 통과시킨다.
 
+    AUTO_ISOLATION은 RUNBOOK_EC2_ISOLATE 하나만 통과시키고 AutoIsolationCommand로
+    승격한다. 확정 10종 중 그 밖의 ID는 WHITELIST_NOT_AUTO_ISOLATION_RUNBOOK이고,
+    10종 밖은 다른 문맥과 같이 WHITELIST_UNKNOWN_RUNBOOK이다.
+
     확정 10종 밖이면 어느 문맥에서도 WHITELIST_UNKNOWN_RUNBOOK이다. 목록 안이어도
     문맥이 가른다 — AI_CANDIDATE는 추천 가능 7종, ROLLBACK_EXECUTION은 롤백 3종이다
     (ADR-0004 정책 ②의 "AI 추천 목록과 실행 Whitelist를 분리한다"). 두 거절은 성격이
@@ -422,6 +462,21 @@ def run_action_whitelist(
     """
     if not is_allowed_runbook(command.runbook_id):
         return _whitelist_fail(command.runbook_id, WHITELIST_UNKNOWN_RUNBOOK)
+
+    if context is GuardrailValidationContext.AUTO_ISOLATION:
+        if command.runbook_id != RunbookId.RUNBOOK_EC2_ISOLATE.value:
+            return _whitelist_fail(
+                command.runbook_id, WHITELIST_NOT_AUTO_ISOLATION_RUNBOOK
+            )
+        return ActionWhitelistOutcome(
+            step_result=_step_pass(GuardrailStep.ACTION_WHITELIST),
+            command=AutoIsolationCommand(
+                runbook_id=RunbookId(command.runbook_id),
+                target_arn=command.target_arn,
+                parameters=command.parameters,
+                evidence_ids=command.evidence_ids,
+            ),
+        )
 
     if context is GuardrailValidationContext.ROLLBACK_EXECUTION:
         if command.runbook_id not in ROLLBACK_RUNBOOK_IDS:
@@ -612,10 +667,10 @@ def run_guardrail_validation(
     조회 경계 둘(is_managed_arn·precheck)은 키워드로만 받는다 — 호출부가 순서를
     바꿔 넘기면 두 경계가 조용히 뒤바뀐다.
 
-    AI_CANDIDATE와 ROLLBACK_EXECUTION 문맥을 받는다. 원복도 같은 네 단계를 같은
-    순서로 지난다(ADR-0004 정책 ①) — 다른 것은 ①의 파라미터 계약과 ②의 허용
-    목록뿐이고, 그 둘은 request.validation_context가 고른다. 아직 없는 문맥은
-    ①이 NotImplementedError로 막는다.
+    AI_CANDIDATE·AUTO_ISOLATION·ROLLBACK_EXECUTION 문맥을 받는다. 원복·자동 격리도
+    같은 네 단계를 같은 순서로 지난다(ADR-0004 정책 ①) — 다른 것은 ①의 파라미터
+    계약과 ②의 허용 목록뿐이고, 그 둘은 request.validation_context가 고른다.
+    문맥 구현이 없으면 ①이 NotImplementedError로 막는다.
     """
     schema_check = run_schema_check(request)
     steps = [schema_check.step_result]
