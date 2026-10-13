@@ -67,15 +67,20 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from functools import partial
-from typing import Callable, Optional
+from threading import RLock
 
+import workflows
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
-from sqlalchemy.orm import Session, sessionmaker
-
+from config import get_settings
+from db import models
+from db.repositories import executions as executions_repo
+from db.session import get_session_factory
+from realtime import execution_event, incident_event
 from schemas.api.actions import ExecutionStatus
 from schemas.api.ws import WsEvent, WsEventType
 from schemas.candidates import CandidateStatus
@@ -88,14 +93,9 @@ from schemas.runbooks import (
     AUTO_ROLLBACK_RUNBOOK_BY_MAIN_ID,
     ROLLBACK_RUNBOOK_BY_MAIN_ID,
     RunbookId,
+    TriggerSource,
 )
-
-import workflows
-from config import get_settings
-from db import models
-from db.repositories import executions as executions_repo
-from db.session import get_session_factory
-from realtime import execution_event, incident_event
+from sqlalchemy.orm import Session, sessionmaker
 
 logger = logging.getLogger("vigilantis.dispatcher")
 
@@ -166,9 +166,15 @@ _AUTOSCALING_LANE_RUNBOOKS: frozenset[RunbookId] = frozenset(
 )
 AUTOSCALING_JOB_ID = "execution_dispatch_autoscaling"
 
+# #447 즉시 격리와 주기 스캔은 같은 main 잠금을 쓴다. ASG의 분 단위 대기는 별도 잠금이다.
+# runner의 중간 commit 이후에도 같은 레인의 재진입을 막는다. 다중 프로세스 lease는 아니다.
+_DISPATCH_LOCK = RLock()
+_AUTOSCALING_DISPATCH_LOCK = RLock()
+
 
 def _in_lane(runbook_id: RunbookId, lane: str) -> bool:
     return (runbook_id in _AUTOSCALING_LANE_RUNBOOKS) == (lane == LANE_AUTOSCALING)
+
 
 # 자산이 바뀐 채 실패했을 때 **ROLLBACK_INITIATED로 보낼** 런북.
 #
@@ -207,36 +213,42 @@ if set(_RUNNERS) != set(_JUDGES):
 
 
 def _changed_the_asset(outcome: workflows.ExecutionRunOutcome) -> bool:
-    return any(
-        step.effect in ASSET_MAY_HAVE_CHANGED_EFFECTS for step in outcome.steps
-    )
+    return any(step.effect in ASSET_MAY_HAVE_CHANGED_EFFECTS for step in outcome.steps)
 
 
 @dataclass
 class DispatchReport:
     """스캔 1회 요약 — 로그와 테스트가 읽는 값이다."""
 
-    lane: str = LANE_MAIN           # 이 스캔이 맡은 레인 — 로그가 레인별로 갈린다
+    lane: str = LANE_MAIN  # 이 스캔이 맡은 레인 — 로그가 레인별로 갈린다
     scanned: int = 0
-    started: int = 0               # executor로 넘긴 실행
-    judged: int = 0                 # 2/2 Status Check 판정을 수행한 실행(deferred 포함)
-    closed: int = 0                 # 종료 상태로 확정한 실행
+    started: int = 0  # executor로 넘긴 실행
+    judged: int = 0  # 2/2 Status Check 판정을 수행한 실행(deferred 포함)
+    closed: int = 0  # 종료 상태로 확정한 실행
     awaiting_status_check: int = 0  # 요청은 접수됐고 다음 주기의 판정을 기다리는 실행
-    awaiting_judgement: int = 0     # 적용 여부가 불명확해 다음 주기의 현물 판정을 기다리는 실행
-    rollback_initiated: int = 0     # 원복이 필요해 ROLLBACK_INITIATED로 남긴 실행
-    rollback_started: int = 0       # 자동 원복 자식을 접수한 원본 (Issue #241)
-    deferred: int = 0               # AWS 조회 실패를 기록하고 재시도로 미룬 실행 (Issue #249)
-    retry_waiting: int = 0          # 판정 불가 보류 중 재시도 간격이 아직 안 된 실행
-    held: int = 0                   # 재시도를 소진해 자동 판정을 멈추고 확정한 실행(closed와 따로 센다)
-    release_offered: int = 0        # 차단 뒤 해제 후보가 가드레일을 통과해 [해제]가 선 건 (Issue #329)
-    release_rejected: int = 0       # 해제 후보가 가드레일에서 거절된 건 — 다시 제안하지 않는다
-    release_skipped: int = 0        # 해제 후보를 저장하지 않은 건(근거 없음·경합) — 사유는 debug 로그
-    skipped: int = 0                # 선점 실패·이미 확정된 실행
-    unsupported: int = 0            # 실행 함수·판정 함수가 아직 없는 런북
+    awaiting_judgement: int = (
+        0  # 적용 여부가 불명확해 다음 주기의 현물 판정을 기다리는 실행
+    )
+    rollback_initiated: int = 0  # 원복이 필요해 ROLLBACK_INITIATED로 남긴 실행
+    rollback_started: int = 0  # 자동 원복 자식을 접수한 원본 (Issue #241)
+    deferred: int = 0  # AWS 조회 실패를 기록하고 재시도로 미룬 실행 (Issue #249)
+    retry_waiting: int = 0  # 판정 불가 보류 중 재시도 간격이 아직 안 된 실행
+    held: int = 0  # 재시도를 소진해 자동 판정을 멈추고 확정한 실행(closed와 따로 센다)
+    release_offered: int = (
+        0  # 차단 뒤 해제 후보가 가드레일을 통과해 [해제]가 선 건 (Issue #329)
+    )
+    release_rejected: int = (
+        0  # 해제 후보가 가드레일에서 거절된 건 — 다시 제안하지 않는다
+    )
+    release_skipped: int = (
+        0  # 해제 후보를 저장하지 않은 건(근거 없음·경합) — 사유는 debug 로그
+    )
+    skipped: int = 0  # 선점 실패·이미 확정된 실행
+    unsupported: int = 0  # 실행 함수·판정 함수가 아직 없는 런북
     errored: int = 0
 
 
-def _claim(db: Session, execution_id: str) -> Optional[models.ActionExecution]:
+def _claim(db: Session, execution_id: str) -> models.ActionExecution | None:
     """회수 대상 선점 — 행을 잠근 뒤 상태를 다시 확인한다.
 
     스캔이 목록을 읽은 시점과 여기 사이에 상태가 바뀌었을 수 있다. 다시 보지 않고
@@ -290,11 +302,11 @@ def _publish_closure(publish: Publish, closure: workflows.ExecutionClosure) -> N
 def _close_and_publish(
     db: Session,
     execution_id: str,
-    publish: Optional[Publish],
+    publish: Publish | None,
     report: DispatchReport,
     *,
     next_status: ExecutionStatus,
-    error_summary: Optional[str] = None,
+    error_summary: str | None = None,
 ) -> None:
     """확정 → 카운트 → 발행. 확정이 None이면 다른 주체가 먼저 옮긴 것이다."""
     closure = workflows.close_execution(
@@ -317,8 +329,8 @@ def _defer_or_hold(
     execution_id: str,
     *,
     reason_code: PrecheckReasonCode,
-    detail: Optional[str],
-    publish: Optional[Publish],
+    detail: str | None,
+    publish: Publish | None,
     report: DispatchReport,
     policy: workflows.VerificationRetryPolicy,
     event: str,
@@ -355,7 +367,7 @@ def _defer_or_hold(
 def _judge_one(
     db: Session,
     claimed: models.ActionExecution,
-    publish: Optional[Publish],
+    publish: Publish | None,
     report: DispatchReport,
     policy: workflows.VerificationRetryPolicy,
 ) -> None:
@@ -412,7 +424,7 @@ def _judge_one(
             next_status=judgement.next_status,
             error_summary=judgement.error_summary,
         )
-    except Exception:  # noqa: BLE001 — 판정 1건의 오류가 스캔 전체를 멈추면 안 된다
+    except Exception:
         logger.exception("dispatch_judge_failed", extra={"execution_id": execution_id})
         db.rollback()
         report.errored += 1
@@ -430,7 +442,7 @@ def _judge_one(
 def _initiate_rollback_one(
     db: Session,
     origin: models.ActionExecution,
-    publish: Optional[Publish],
+    publish: Publish | None,
     report: DispatchReport,
 ) -> None:
     """ROLLBACK_INITIATED 원본 1건에 자동 원복을 발동한다. (Issue #241)
@@ -459,7 +471,7 @@ def _initiate_rollback_one(
 
     try:
         initiation = workflows.initiate_auto_rollback(db, origin.execution_id)
-    except Exception:  # noqa: BLE001 — 1건의 발동 오류가 스캔 전체를 멈추면 안 된다
+    except Exception:
         logger.exception(
             "dispatch_rollback_initiate_failed",
             extra={"execution_id": origin.execution_id},
@@ -485,9 +497,11 @@ def _initiate_rollback_one(
 def _dispatch_one(
     db: Session,
     execution_id: str,
-    publish: Optional[Publish],
+    publish: Publish | None,
     report: DispatchReport,
     policy: workflows.VerificationRetryPolicy,
+    *,
+    lane: str | None = None,
 ) -> None:
     claimed = _claim(db, execution_id)
     if claimed is None:
@@ -497,13 +511,20 @@ def _dispatch_one(
         db.commit()
         return
 
+    if lane is not None and not _in_lane(claimed.runbook_id, lane):
+        # 즉시 실행도 저장된 런북으로 레인을 확인한다. 호출자가 ASG ID를 main으로 보내
+        # ASG 스캔과 같은 실행을 겹쳐 돌리지 못하게 한다.
+        report.skipped += 1
+        db.commit()
+        return
+
     if claimed.status is ExecutionStatus.ROLLBACK_INITIATED:
         # 판정이 끝나 "되돌려야 한다"로 남은 실행이다. 재실행·재판정 대상이 아니라
         # 자동 원복 자식을 낳을 자리다 (Issue #241).
         _initiate_rollback_one(db, claimed, publish, report)
         return
 
-    if not policy.retry_due(claimed, datetime.now(timezone.utc)):
+    if not policy.retry_due(claimed, datetime.now(UTC)):
         # 판정 불가로 보류 중인 실행 — 재시도 간격이 아직 안 됐다. 스캔 주기마다 되물으면
         # 스로틀링 같은 일시 오류를 우리가 키운다. 선점 잠금만 놓는다 (Issue #249)
         report.retry_waiting += 1
@@ -537,6 +558,17 @@ def _dispatch_one(
     try:
         outcome = runner(db, execution_id)
         if outcome.succeeded:
+            if (
+                claimed.runbook_id is RunbookId.RUNBOOK_EC2_ISOLATE
+                and claimed.trigger_source
+                in (
+                    TriggerSource.PRE_MITIGATION_0_5S,
+                    TriggerSource.TIMEOUT_ISOLATION_1M,
+                )
+            ):
+                # #447과 공유하는 완료 경계: 접수/호출 반환이 아니라 실제 TG·ENI 격리 판정.
+                _judge_one(db, claimed, publish, report, policy)
+                return
             if claimed.runbook_id in _AWAIT_JUDGEMENT_ON_SUCCESS:
                 # 기동 요청 접수는 성공의 경계가 아니다 — 2/2 Status Check가 SUCCESS와
                 # ROLLBACK_INITIATED를 가른다(services/aws/rollback.py). 여기서 SUCCESS를
@@ -630,7 +662,7 @@ def _dispatch_one(
             next_status=ExecutionStatus.FAILED,
             error_summary=_failure_summary(outcome),
         )
-    except Exception:  # noqa: BLE001 — 1건의 실행·확정 오류가 스캔 전체를 멈추면 안 된다.
+    except Exception:
         # 확정까지 같은 우산 아래 둔다 — 밖에 두면 깨진 행 하나가 던진 예외가
         # 남은 대상 전부를 건너뛰게 해, 매 주기 그 행 앞에서 멈추는 기아가 된다
         logger.exception("dispatch_run_failed", extra={"execution_id": execution_id})
@@ -642,7 +674,7 @@ def _dispatch_one(
 def _offer_release_one(
     db: Session,
     execution_id: str,
-    publish: Optional[Publish],
+    publish: Publish | None,
     report: DispatchReport,
 ) -> None:
     """SUCCESS로 끝난 차단 1건에 해제 후보를 낸다. (Issue #329)
@@ -652,7 +684,7 @@ def _offer_release_one(
     """
     try:
         offer = workflows.offer_nacl_release(db, execution_id)
-    except Exception:  # noqa: BLE001 — 1건의 제안 오류가 스캔 전체를 멈추면 안 된다
+    except Exception:
         logger.exception(
             "dispatch_release_offer_failed", extra={"execution_id": execution_id}
         )
@@ -675,10 +707,10 @@ def _offer_release_one(
         report.release_skipped += 1
 
 
-def dispatch_pending(
+def _dispatch_pending(
     db: Session,
-    publish: Optional[Publish] = None,
-    policy: Optional[workflows.VerificationRetryPolicy] = None,
+    publish: Publish | None = None,
+    policy: workflows.VerificationRetryPolicy | None = None,
     lane: str = LANE_MAIN,
 ) -> DispatchReport:
     """비종료 실행 스캔 1회. **세션 수명은 호출부가 소유한다.**
@@ -708,7 +740,7 @@ def dispatch_pending(
     ]
     report.scanned = len(pending)
     for execution_id in pending:
-        _dispatch_one(db, execution_id, publish, report, policy)
+        _dispatch_one(db, execution_id, publish, report, policy, lane=lane)
     if lane == LANE_MAIN:
         for execution_id in executions_repo.list_release_offer_pending(
             db, incident_statuses=workflows.RELEASE_OFFERABLE_STATUSES
@@ -716,6 +748,50 @@ def dispatch_pending(
             _offer_release_one(db, execution_id, publish, report)
     logger.info("dispatch_cycle_done", extra=vars(report))
     return report
+
+
+def supports_isolation() -> bool:
+    """#447 진입점이 사용하는 격리 실행·판정 쌍의 등록 여부."""
+    runbook = RunbookId.RUNBOOK_EC2_ISOLATE
+    return runbook in _RUNNERS and runbook in _JUDGES
+
+
+def automatic_isolation_scope():
+    """#447 예약부터 즉시 실행까지 main 레인의 재진입 가능한 실행 구간."""
+    return _DISPATCH_LOCK
+
+
+def dispatch_now(
+    db: Session,
+    execution_id: str,
+    publish: Publish | None = None,
+) -> DispatchReport:
+    """main 레인 한 건을 즉시 처리한다. ASG 실행 ID는 실행하지 않는다."""
+    with _DISPATCH_LOCK:
+        report = DispatchReport(scanned=1, lane=LANE_MAIN)
+        _dispatch_one(
+            db,
+            execution_id,
+            publish,
+            report,
+            workflows.VerificationRetryPolicy.from_settings(),
+            lane=LANE_MAIN,
+        )
+        return report
+
+
+def dispatch_pending(
+    db: Session,
+    publish: Publish | None = None,
+    policy: workflows.VerificationRetryPolicy | None = None,
+    lane: str = LANE_MAIN,
+) -> DispatchReport:
+    """레인별 잠금으로 중간 commit을 포함한 한 스캔을 직렬화한다."""
+    if lane not in _LANES:
+        raise ValueError(f"알 수 없는 디스패치 레인: {lane}")
+    lock = _AUTOSCALING_DISPATCH_LOCK if lane == LANE_AUTOSCALING else _DISPATCH_LOCK
+    with lock:
+        return _dispatch_pending(db, publish, policy, lane)
 
 
 def run_dispatch_cycle(
@@ -733,14 +809,12 @@ def run_dispatch_cycle(
         db.close()
 
 
-def run_dispatch_cycle_in_lane(
-    publish: Publish | None, lane: str
-) -> DispatchReport:
+def run_dispatch_cycle_in_lane(publish: Publish | None, lane: str) -> DispatchReport:
     """스케줄러 잡의 본체 — 실행 시점에 세션 팩토리를 읽는다(lru_cache 재설정 대응)."""
     return run_dispatch_cycle(get_session_factory(), publish, lane)
 
 
-def start_dispatcher(publish: Optional[Publish] = None) -> Optional[AsyncIOScheduler]:
+def start_dispatcher(publish: Publish | None = None) -> AsyncIOScheduler | None:
     """main의 lifespan에서 기동한다 — 레인별 스캔 잡 2개를 등록·기동해 반환한다.
 
     잡을 겹쳐 돌리지 않는다(max_instances=1). 스캔이 둘이면 같은 실행 행을 두
@@ -772,6 +846,8 @@ def start_dispatcher(publish: Optional[Publish] = None) -> Optional[AsyncIOSched
         )
     scheduler.start()
     logger.info(
-        "dispatcher started: jobs=%s interval=%ss", [JOB_ID, AUTOSCALING_JOB_ID], interval
+        "dispatcher started: jobs=%s interval=%ss",
+        [JOB_ID, AUTOSCALING_JOB_ID],
+        interval,
     )
     return scheduler

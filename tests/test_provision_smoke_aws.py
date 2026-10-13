@@ -46,19 +46,24 @@ def _load_script():
 
 smoke = _load_script()  # 스크립트가 apps/core-api·packages를 sys.path에 넣는다
 
-from schemas import autoscaling as autoscaling_schema  # noqa: E402
-from schemas.rightsizing_policy import rightsizing_target_type  # noqa: E402
-from schemas.runbook_parameters import RuleNumber  # noqa: E402
-from services.aws import autoscaling as aws_autoscaling  # noqa: E402
-from services.aws import executor, rollback  # noqa: E402
+from schemas import autoscaling as autoscaling_schema
+from schemas.rightsizing_policy import rightsizing_target_type
+from schemas.runbook_parameters import RuleNumber
+from services.aws import autoscaling as aws_autoscaling
+from services.aws import executor, rollback
 
 ACCOUNT = "123456789012"
 REGION = "ap-northeast-2"
 VPC_ID = "vpc-0123456789abcdef0"  # 실 VPC ID와 같은 길이(17자리 16진) — ⑤의 크기 계측이 이 길이에 기댄다
-SUBNET_IDS = ["subnet-0123456789abcdef0", "subnet-0fedcba9876543210"]  # 실 서브넷 ID와 같은 길이
+SUBNET_IDS = [
+    "subnet-0123456789abcdef0",
+    "subnet-0fedcba9876543210",
+]  # 실 서브넷 ID와 같은 길이
 ROLE_ARN = f"arn:aws:iam::{ACCOUNT}:role/vigilantis-smoke-instance"
 POLICY = smoke.build_app_policy(ACCOUNT, REGION, VPC_ID, SUBNET_IDS)
-POLICY_WITH_ROLE = smoke.build_app_policy(ACCOUNT, REGION, VPC_ID, SUBNET_IDS, [ROLE_ARN])
+POLICY_WITH_ROLE = smoke.build_app_policy(
+    ACCOUNT, REGION, VPC_ID, SUBNET_IDS, [ROLE_ARN]
+)
 
 # boto3 클라이언트 이름 → IAM 서비스 접두
 _IAM_SERVICE = {
@@ -70,17 +75,20 @@ _IAM_SERVICE = {
 
 
 def _iam_action(operation: str) -> str:
-    """"ec2.modify_instance_attribute" → "ec2:ModifyInstanceAttribute"."""
+    """ "ec2.modify_instance_attribute" → "ec2:ModifyInstanceAttribute"."""
     service, name = operation.split(".", 1)
     return f"{_IAM_SERVICE[service]}:{''.join(part.capitalize() for part in name.split('_'))}"
 
 
 def _code_operations() -> set[str]:
     """코드가 부르는 AWS 작업 — precheck 명세(RUNBOOK_SPECS)와 실행·판정의 작업 상수."""
-    operations = {op for spec in executor.RUNBOOK_SPECS.values() for op in spec.operations}
+    operations = {
+        op for spec in executor.RUNBOOK_SPECS.values() for op in spec.operations
+    }
     for module in (executor, rollback, aws_autoscaling):
         operations |= {
-            value for name, value in vars(module).items()
+            value
+            for name, value in vars(module).items()
             if name.startswith("_OP_") and isinstance(value, str)
         }
     return operations
@@ -90,7 +98,11 @@ def _code_operations() -> set[str]:
 # 직접 작업(_code_operations)과 섞지 않는다 — 여기 항목은 트리거 작업이 코드에 있을 때만 허용되고,
 # 트리거가 사라지면 정책에서도 빠져야 한다. RunInstances는 앱이 부르지 않는다(ASG 서비스가 부른다).
 _AUTHORIZATION_DEPENDENCIES = {
-    "ec2:CreateTags": {"ec2:CreateImage", "ec2:CreateLaunchTemplate", "autoscaling:CreateAutoScalingGroup"},
+    "ec2:CreateTags": {
+        "ec2:CreateImage",
+        "ec2:CreateLaunchTemplate",
+        "autoscaling:CreateAutoScalingGroup",
+    },
     "ec2:RunInstances": {"autoscaling:CreateAutoScalingGroup"},
     "autoscaling:CreateOrUpdateTags": {"autoscaling:CreateAutoScalingGroup"},
 }
@@ -98,26 +110,60 @@ _AUTHORIZATION_DEPENDENCIES = {
 _OPTIONAL_DEPENDENCIES = {"iam:PassRole": {"autoscaling:CreateAutoScalingGroup"}}
 # 승인된 실행 경로의 직접 작업 — 상수가 빠지면 아래 거울이 조용히 비지 않게 못 박는다
 _RUNTIME_DIRECT = {
-    "ec2:CreateImage", "ec2:CreateLaunchTemplate",
-    "autoscaling:CreateAutoScalingGroup", "autoscaling:PutScalingPolicy",
+    "ec2:CreateImage",
+    "ec2:CreateLaunchTemplate",
+    "autoscaling:CreateAutoScalingGroup",
+    "autoscaling:PutScalingPolicy",
 }
+# #446 서비스 전환이 새로 부르는 유일한 앱 권한(다른 작업자의 보호 코드가 아직 없어도 정책은 이것만 더한다)
+_SERVICE_446_ACTIONS = {"autoscaling:SetInstanceProtection"}
 # 앱 키가 어떤 정책 변형에서도 가지면 안 되는 작업(삭제·폐기·부착·역할 변경·ELB/DNS)
 _NEVER_GRANTED = (
-    "ec2:DeregisterImage", "ec2:DeleteSnapshot", "ec2:DeleteLaunchTemplate", "ec2:DeleteLaunchTemplateVersions",
-    "ec2:TerminateInstances", "ec2:AttachVolume", "ec2:CopyImage", "ec2:ModifyImageAttribute",
-    "ec2:ModifySnapshotAttribute", "ec2:DeleteTags", "ec2:CreateLaunchTemplateVersion",
-    "autoscaling:DeleteAutoScalingGroup", "autoscaling:UpdateAutoScalingGroup", "autoscaling:AttachInstances",
-    "autoscaling:SetDesiredCapacity", "autoscaling:DeletePolicy", "autoscaling:AttachLoadBalancerTargetGroups",
-    "autoscaling:TerminateInstanceInAutoScalingGroup", "elasticloadbalancing:CreateTargetGroup",
-    "elasticloadbalancing:CreateLoadBalancer", "elasticloadbalancing:DeleteTargetGroup",
+    "autoscaling:DetachLoadBalancerTargetGroups",
+    "autoscaling:DetachInstances",
+    "autoscaling:EnterStandby",
+    "autoscaling:ExitStandby",
+    "elasticloadbalancing:CreateListener",
+    "elasticloadbalancing:ModifyListener",
+    "elasticloadbalancing:CreateRule",
+    "elasticloadbalancing:ModifyRule",
+    "elasticloadbalancing:SetRulePriorities",
+    "ec2:DeregisterImage",
+    "ec2:DeleteSnapshot",
+    "ec2:DeleteLaunchTemplate",
+    "ec2:DeleteLaunchTemplateVersions",
+    "ec2:TerminateInstances",
+    "ec2:AttachVolume",
+    "ec2:CopyImage",
+    "ec2:ModifyImageAttribute",
+    "ec2:ModifySnapshotAttribute",
+    "ec2:DeleteTags",
+    "ec2:CreateLaunchTemplateVersion",
+    "autoscaling:DeleteAutoScalingGroup",
+    "autoscaling:UpdateAutoScalingGroup",
+    "autoscaling:AttachInstances",
+    "autoscaling:SetDesiredCapacity",
+    "autoscaling:DeletePolicy",
+    "autoscaling:AttachLoadBalancerTargetGroups",
+    "autoscaling:TerminateInstanceInAutoScalingGroup",
+    "elasticloadbalancing:CreateTargetGroup",
+    "elasticloadbalancing:CreateLoadBalancer",
+    "elasticloadbalancing:DeleteTargetGroup",
     "elasticloadbalancing:ModifyTargetGroup",
-    "route53:ChangeResourceRecordSets", "iam:CreateRole", "iam:AttachRolePolicy", "iam:PutRolePolicy",
-    "iam:CreateServiceLinkedRole", "iam:CreateInstanceProfile", "iam:AddRoleToInstanceProfile",
+    "route53:ChangeResourceRecordSets",
+    "iam:CreateRole",
+    "iam:AttachRolePolicy",
+    "iam:PutRolePolicy",
+    "iam:CreateServiceLinkedRole",
+    "iam:CreateInstanceProfile",
+    "iam:AddRoleToInstanceProfile",
 )
 
 
 def _granted(policy: dict = POLICY) -> list[str]:
-    return [action for statement in policy["Statement"] for action in statement["Action"]]
+    return [
+        action for statement in policy["Statement"] for action in statement["Action"]
+    ]
 
 
 def _is_granted(action: str, policy: dict = POLICY) -> bool:
@@ -134,7 +180,9 @@ def _resources(statement: dict) -> list[str]:
 
 
 def test_policy_grants_every_aws_operation_the_code_calls():
-    missing = sorted(a for a in {_iam_action(op) for op in _code_operations()} if not _is_granted(a))
+    missing = sorted(
+        a for a in {_iam_action(op) for op in _code_operations()} if not _is_granted(a)
+    )
     assert not missing, f"앱 정책에 없는 작업 — build_app_policy에 더할 것: {missing}"
 
 
@@ -144,24 +192,36 @@ def _direct_actions() -> set[str]:
 
 def _active_dependencies(optional: bool = False) -> set[str]:
     direct = _direct_actions()
-    table = {**_AUTHORIZATION_DEPENDENCIES, **(_OPTIONAL_DEPENDENCIES if optional else {})}
+    table = {
+        **_AUTHORIZATION_DEPENDENCIES,
+        **(_OPTIONAL_DEPENDENCIES if optional else {}),
+    }
     return {action for action, triggers in table.items() if triggers & direct}
 
 
 def test_policy_grants_only_required_mutations_and_dependencies():
     """허용은 직접 작업 + 트리거가 코드에 있는 명시적 의존 권한뿐이다(PassRole 제외 — 아래)."""
-    allowed = _direct_actions() | _active_dependencies()
-    extra = sorted(a for a in _granted() if a not in smoke.READ_ACTIONS and a not in allowed)
+    allowed = _direct_actions() | _active_dependencies() | _SERVICE_446_ACTIONS
+    extra = sorted(
+        a for a in _granted() if a not in smoke.READ_ACTIONS and a not in allowed
+    )
     assert not extra, f"코드가 부르지 않는 조치 권한: {extra}"
 
 
 def test_runtime_operations_are_direct_and_dependencies_are_not():
     direct = _direct_actions()
     assert _RUNTIME_DIRECT <= direct, sorted(_RUNTIME_DIRECT - direct)
-    assert not set(_AUTHORIZATION_DEPENDENCIES) & direct, "의존 권한을 코드가 직접 부르면 직접 작업 쪽으로 옮길 것"
+    assert not set(_AUTHORIZATION_DEPENDENCIES) & direct, (
+        "의존 권한을 코드가 직접 부르면 직접 작업 쪽으로 옮길 것"
+    )
     assert not set(_OPTIONAL_DEPENDENCIES) & direct
-    for dependency, triggers in {**_AUTHORIZATION_DEPENDENCIES, **_OPTIONAL_DEPENDENCIES}.items():
-        assert triggers & direct, f"{dependency}: 트리거 작업이 코드에 없다 — 의존 항목을 걷을 것"
+    for dependency, triggers in {
+        **_AUTHORIZATION_DEPENDENCIES,
+        **_OPTIONAL_DEPENDENCIES,
+    }.items():
+        assert triggers & direct, (
+            f"{dependency}: 트리거 작업이 코드에 없다 — 의존 항목을 걷을 것"
+        )
 
 
 def test_policy_grants_every_authorization_dependency():
@@ -171,7 +231,9 @@ def test_policy_grants_every_authorization_dependency():
 
 def test_policy_never_grants_destructive_or_out_of_scope_actions():
     for policy in (POLICY, POLICY_WITH_ROLE):
-        wildcards = [a for a in _granted(policy) if "*" in a and a not in smoke.READ_ACTIONS]
+        wildcards = [
+            a for a in _granted(policy) if "*" in a and a not in smoke.READ_ACTIONS
+        ]
         assert not wildcards, wildcards
         granted = sorted(a for a in _NEVER_GRANTED if _is_granted(a, policy))
         assert not granted, granted
@@ -190,7 +252,9 @@ def _collector_clients(source: str) -> dict[str, str]:
     """수집기가 만드는 클라이언트 변수 → boto3 서비스. 변수 이름을 여기 박지 않고 소스에서 읽는다
     — 박아 두면 수집기가 이름을 바꿨을 때 찾는 호출이 조용히 줄어든다."""
     clients = dict(re.findall(r'(\w+) = aws_client\("([a-z0-9]+)"', source))
-    unknown = sorted({service for service in clients.values() if service not in _IAM_SERVICE})
+    unknown = sorted(
+        {service for service in clients.values() if service not in _IAM_SERVICE}
+    )
     assert not unknown, f"_IAM_SERVICE에 IAM 접두가 없는 수집기 클라이언트: {unknown}"
     return clients
 
@@ -198,12 +262,14 @@ def _collector_clients(source: str) -> dict[str, str]:
 def test_policy_grants_every_read_the_collector_makes():
     source = _COLLECTOR.read_text(encoding="utf-8")
     clients = _collector_clients(source)
-    assert clients, "수집기의 aws_client 대입을 하나도 못 찾았다 — 패턴이 코드와 어긋났다"
+    assert clients, (
+        "수집기의 aws_client 대입을 하나도 못 찾았다 — 패턴이 코드와 어긋났다"
+    )
     names = "|".join(sorted(clients))
     patterns = (
-        rf"\b({names})\.(?!get_paginator\b)([a-z0-9_]+)\(",   # 직접 호출
-        rf'\b({names})\.get_paginator\("([a-z0-9_]+)"\)',     # 페이지네이터
-        rf'_paginate\(({names}), "([a-z0-9_]+)"',             # 공통 헬퍼
+        rf"\b({names})\.(?!get_paginator\b)([a-z0-9_]+)\(",  # 직접 호출
+        rf'\b({names})\.get_paginator\("([a-z0-9_]+)"\)',  # 페이지네이터
+        rf'_paginate\(({names}), "([a-z0-9_]+)"',  # 공통 헬퍼
     )
     calls = {
         _iam_action(f"{clients[variable]}.{operation}")
@@ -217,15 +283,29 @@ def test_policy_grants_every_read_the_collector_makes():
 
 def test_target_registration_baseline_is_kept_and_smoke_tag_fenced():
     """EC2_ISOLATE·UNISOLATE의 등록 해제·재등록(최신 dev 기준선) — #446이 ALB 생성 권한을 더하지 않는다."""
-    for action in ("elasticloadbalancing:RegisterTargets", "elasticloadbalancing:DeregisterTargets"):
+    for action in (
+        "elasticloadbalancing:RegisterTargets",
+        "elasticloadbalancing:DeregisterTargets",
+    ):
         (statement,) = _statements(action)
         assert sorted(statement["Action"]) == [
-            "elasticloadbalancing:DeregisterTargets", "elasticloadbalancing:RegisterTargets",
+            "elasticloadbalancing:DeregisterTargets",
+            "elasticloadbalancing:RegisterTargets",
         ]
-        assert statement["Resource"] == f"arn:aws:elasticloadbalancing:{REGION}:{ACCOUNT}:targetgroup/*"
-        assert _conditions(statement) == {"StringEquals": {"aws:ResourceTag/vigilantis:smoke": "true"}}
-    assert not [a for a in _granted() if a.startswith("elasticloadbalancing:") and "Targets" not in a
-                and a not in smoke.READ_ACTIONS]
+        assert (
+            statement["Resource"]
+            == f"arn:aws:elasticloadbalancing:{REGION}:{ACCOUNT}:targetgroup/*"
+        )
+        assert _conditions(statement) == {
+            "StringEquals": {"aws:ResourceTag/vigilantis:smoke": "true"}
+        }
+    assert not [
+        a
+        for a in _granted()
+        if a.startswith("elasticloadbalancing:")
+        and "Targets" not in a
+        and a not in smoke.READ_ACTIONS
+    ]
 
 
 def test_every_change_statement_is_fenced():
@@ -235,21 +315,30 @@ def test_every_change_statement_is_fenced():
     for statement in POLICY_WITH_ROLE["Statement"]:
         resources = _resources(statement)
         if set(statement["Action"]) <= set(smoke.READ_ACTIONS):
-            assert statement["Condition"] == {"StringEquals": {"aws:RequestedRegion": REGION}}
+            assert statement["Condition"] == {
+                "StringEquals": {"aws:RequestedRegion": REGION}
+            }
             continue
         assert "*" not in resources, statement["Action"]
         if statement["Action"] == ["iam:PassRole"]:
             # IAM 역할 ARN에는 리전이 없다 — 리전 울타리 예외. 대신 계정·역할 이름이 박히고 서비스가 묶인다.
             assert resources == [ROLE_ARN]
-            assert statement["Condition"] == {"StringEquals": {"iam:PassedToService": "ec2.amazonaws.com"}}
+            assert statement["Condition"] == {
+                "StringEquals": {"iam:PassedToService": "ec2.amazonaws.com"}
+            }
             continue
         assert all(f":{REGION}:" in r for r in resources), statement["Action"]
-        pinned = all(r.endswith(VPC_ID) for r in resources) or set(resources) == subnet_arns
-        # 새 스냅숏·새 SG: 생성 장소 쪽 문장이 가둔다(아래 _CREATE_ACTIONS 테스트)
-        new_resource_only = statement["Action"] in (["ec2:CreateSnapshot"], ["ec2:CreateSecurityGroup"]) and (
-            any("::snapshot/" in r or ":security-group/" in r for r in resources)
+        pinned = (
+            all(r.endswith(VPC_ID) for r in resources) or set(resources) == subnet_arns
         )
-        assert "Condition" in statement or pinned or new_resource_only, statement["Action"]
+        # 새 스냅숏·새 SG: 생성 장소 쪽 문장이 가둔다(아래 _CREATE_ACTIONS 테스트)
+        new_resource_only = statement["Action"] in (
+            ["ec2:CreateSnapshot"],
+            ["ec2:CreateSecurityGroup"],
+        ) and (any("::snapshot/" in r or ":security-group/" in r for r in resources))
+        assert "Condition" in statement or pinned or new_resource_only, statement[
+            "Action"
+        ]
 
 
 # 생성 작업 → (새로 생기는 자원, 생성 장소 자원)의 ARN 조각. AWS 서비스 권한 참조상 새 자원이
@@ -258,7 +347,10 @@ def test_every_change_statement_is_fenced():
 _CREATE_ACTIONS = {
     "ec2:CreateSecurityGroup": (":security-group/", ":vpc/"),
     "ec2:CreateSnapshot": ("::snapshot/", ":volume/"),
-    "ec2:CreateImage": ("::image/", ":instance/"),  # 스냅숏도 새 자원 — 같은 문장이 요청 태그로 가둔다
+    "ec2:CreateImage": (
+        "::image/",
+        ":instance/",
+    ),  # 스냅숏도 새 자원 — 같은 문장이 요청 태그로 가둔다
 }
 _NEW_RESOURCE_KEYS = ("aws:RequestTag/", "aws:TagKeys")
 
@@ -271,12 +363,20 @@ def test_create_actions_are_fenced_at_the_place_not_the_new_resource():
         assert new, f"{action}: 새 자원 쪽 허용 문장이 없다"
         assert place, f"{action}: 생성 장소 쪽 허용 문장이 없다"
         for statement in new:
-            keys = [k for operator in statement.get("Condition", {}).values() for k in operator]
+            keys = [
+                k
+                for operator in statement.get("Condition", {}).values()
+                for k in operator
+            ]
             unsupported = [k for k in keys if not k.startswith(_NEW_RESOURCE_KEYS)]
-            assert not unsupported, f"{statement['Action']}: 새 자원에 없는 조건 키 {unsupported}"
+            assert not unsupported, (
+                f"{statement['Action']}: 새 자원에 없는 조건 키 {unsupported}"
+            )
         for statement in place:
             pinned = all(r.endswith(VPC_ID) for r in _resources(statement))
-            assert "Condition" in statement or pinned, f"{statement['Action']}: 생성 장소가 열려 있다"
+            assert "Condition" in statement or pinned, (
+                f"{statement['Action']}: 생성 장소가 열려 있다"
+            )
 
 
 def _conditions(statement: dict) -> dict:
@@ -294,31 +394,49 @@ _RUN_TAGS_REQUIRED = {
 
 def test_new_runtime_resources_require_execution_and_source_tags():
     ec2 = f"arn:aws:ec2:{REGION}"
-    (new,) = [s for s in _statements("ec2:CreateImage") if "ec2:CreateLaunchTemplate" in s["Action"]]
+    (new,) = [
+        s
+        for s in _statements("ec2:CreateImage")
+        if "ec2:CreateLaunchTemplate" in s["Action"]
+    ]
     assert _statements("ec2:CreateLaunchTemplate") == [new]
     assert new["Action"] == ["ec2:CreateImage", "ec2:CreateLaunchTemplate"]
     # 서비스 권한 참조의 자원 유형(새 자원): CreateImage → image·snapshot, CreateLaunchTemplate → launch-template.
     # 문장의 자원 유형이 이 합집합을 넘으면 한쪽 작업에 적용되지 않는 자원이 끼어든 것이다.
     assert sorted(r.split(":")[-1] for r in _resources(new)) == [
-        "image/*", "launch-template/*", "snapshot/*",
+        "image/*",
+        "launch-template/*",
+        "snapshot/*",
     ]
-    assert f"{ec2}::image/*" in _resources(new) and f"{ec2}::snapshot/*" in _resources(new)  # 계정 없는 ARN
+    assert f"{ec2}::image/*" in _resources(new) and f"{ec2}::snapshot/*" in _resources(
+        new
+    )  # 계정 없는 ARN
     assert _resources(new)[2] == f"{ec2}:{ACCOUNT}:launch-template/*"
     assert _conditions(new) == _RUN_TAGS_REQUIRED
     (source,) = [s for s in _statements("ec2:CreateImage") if s is not new]
-    assert _resources(source) == [f"{ec2}:{ACCOUNT}:instance/*"]  # 원본 인스턴스(instance*: 리소스 태그)
-    assert _conditions(source) == {"StringEquals": {"aws:ResourceTag/vigilantis:smoke": "true"}}
+    assert _resources(source) == [
+        f"{ec2}:{ACCOUNT}:instance/*"
+    ]  # 원본 인스턴스(instance*: 리소스 태그)
+    assert _conditions(source) == {
+        "StringEquals": {"aws:ResourceTag/vigilantis:smoke": "true"}
+    }
 
 
 def test_create_tags_is_limited_to_creation_time_tagging_of_runtime_resources():
     (statement,) = _statements("ec2:CreateTags")
     assert _conditions(statement) == {
-        "StringEquals": {"ec2:CreateAction": ["CreateImage", "CreateLaunchTemplate", "RunInstances"]},
+        "StringEquals": {
+            "ec2:CreateAction": ["CreateImage", "CreateLaunchTemplate", "RunInstances"]
+        },
         "ForAllValues:StringEquals": {"aws:TagKeys": list(smoke.CREATE_TAG_KEYS)},
         "Null": {"aws:TagKeys": "false"},  # ForAllValues는 키가 없으면 참이다
     }
     assert set(smoke.CREATE_TAG_KEYS) == {
-        "vigilantis:smoke", "vigilantis:execution-id", "vigilantis:source-instance", "Environment", "environment",
+        "vigilantis:smoke",
+        "vigilantis:execution-id",
+        "vigilantis:source-instance",
+        "Environment",
+        "environment",
     }
     assert set(smoke.CREATE_TAG_KEYS) == {
         autoscaling_schema.EXECUTION_TAG_KEY,
@@ -332,15 +450,24 @@ def test_create_tags_is_limited_to_creation_time_tagging_of_runtime_resources():
 
 def test_autoscaling_group_actions_are_fenced_by_name_region_account_subnets_and_size():
     asg_arn = f"arn:aws:autoscaling:{REGION}:{ACCOUNT}:autoScalingGroup:*:autoScalingGroupName/vigilantis-asg-*"
-    for action in ("autoscaling:CreateAutoScalingGroup", "autoscaling:CreateOrUpdateTags", "autoscaling:PutScalingPolicy"):
+    for action in (
+        "autoscaling:CreateAutoScalingGroup",
+        "autoscaling:CreateOrUpdateTags",
+        "autoscaling:PutScalingPolicy",
+    ):
         (statement,) = _statements(action)
         assert _resources(statement) == [asg_arn], action
     (create,) = _statements("autoscaling:CreateAutoScalingGroup")
     assert _conditions(create) == {
         "StringEquals": {"aws:RequestTag/vigilantis:smoke": "true"},
-        "NumericLessThanEquals": {"autoscaling:MaxSize": "4", "autoscaling:MinSize": "4"},
+        "NumericLessThanEquals": {
+            "autoscaling:MaxSize": "4",
+            "autoscaling:MinSize": "4",
+        },
         "Bool": {"autoscaling:LaunchTemplateVersionSpecified": "true"},
-        "ForAllValues:StringEquals": {"autoscaling:VPCZoneIdentifiers": sorted(SUBNET_IDS)},
+        "ForAllValues:StringEquals": {
+            "autoscaling:VPCZoneIdentifiers": sorted(SUBNET_IDS)
+        },
         "Null": {  # ForAllValues는 키가 없으면 참이다 + 실행 ID·원본 인스턴스 태그 필수
             "autoscaling:VPCZoneIdentifiers": "false",
             "aws:RequestTag/vigilantis:execution-id": "false",
@@ -350,9 +477,42 @@ def test_autoscaling_group_actions_are_fenced_by_name_region_account_subnets_and
     (tags,) = _statements("autoscaling:CreateOrUpdateTags")
     assert _conditions(tags) == _RUN_TAGS_REQUIRED
     # CPU 목표 추적 경보는 ASG 서비스 연결 역할이 관리한다 — 앱에 경보 권한은 없다
-    assert not [a for a in _granted(POLICY_WITH_ROLE) if a.startswith("cloudwatch:") and a not in smoke.READ_ACTIONS]
+    assert not [
+        a
+        for a in _granted(POLICY_WITH_ROLE)
+        if a.startswith("cloudwatch:") and a not in smoke.READ_ACTIONS
+    ]
     (scaling,) = _statements("autoscaling:PutScalingPolicy")
-    assert _conditions(scaling) == {"StringEquals": {"aws:ResourceTag/vigilantis:smoke": "true"}}
+    assert _conditions(scaling) == {
+        "StringEquals": {"aws:ResourceTag/vigilantis:smoke": "true"}
+    }
+
+
+def test_set_instance_protection_is_limited_to_managed_asgs_with_the_smoke_tag():
+    asg_arn = f"arn:aws:autoscaling:{REGION}:{ACCOUNT}:autoScalingGroup:*:autoScalingGroupName/vigilantis-asg-*"
+    for policy in (POLICY, POLICY_WITH_ROLE):
+        (statement,) = _statements("autoscaling:SetInstanceProtection", policy)
+        assert _resources(statement) == [asg_arn]
+        assert _conditions(statement) == {
+            "StringEquals": {"aws:ResourceTag/vigilantis:smoke": "true"}
+        }
+        assert sorted(statement["Action"]) == [
+            "autoscaling:PutScalingPolicy",
+            "autoscaling:SetInstanceProtection",
+        ]
+    assert not [
+        a
+        for a in _granted()
+        if a.startswith("autoscaling:")
+        and a not in smoke.READ_ACTIONS
+        and a
+        not in {
+            "autoscaling:CreateAutoScalingGroup",
+            "autoscaling:CreateOrUpdateTags",
+            "autoscaling:PutScalingPolicy",
+            "autoscaling:SetInstanceProtection",
+        }
+    ]
 
 
 def test_run_instances_dependency_is_fenced_per_supported_resource_type():
@@ -365,33 +525,54 @@ def test_run_instances_dependency_is_fenced_per_supported_resource_type():
         for resource in _resources(statement):
             assert f":{REGION}:" in resource and "*" not in resource.split("/", 1)[0]
             kind = resource.split(":")[-1].split("/")[0]
-            assert by_resource.setdefault(kind, statement) is statement, f"{kind}: 자원 유형이 두 문장에 걸쳤다"
+            assert by_resource.setdefault(kind, statement) is statement, (
+                f"{kind}: 자원 유형이 두 문장에 걸쳤다"
+            )
     # RunInstances는 어떤 자원 유형 문장에서도 다른 작업과 섞이지 않는다(자원마다 지원 조건 키가 다르다)
-    assert all(s["Action"] == ["ec2:RunInstances"] for s in _statements("ec2:RunInstances"))
+    assert all(
+        s["Action"] == ["ec2:RunInstances"] for s in _statements("ec2:RunInstances")
+    )
     assert sorted(by_resource) == [
-        "image", "instance", "launch-template", "network-interface", "security-group",
-        "snapshot", "subnet", "volume",
+        "image",
+        "instance",
+        "launch-template",
+        "network-interface",
+        "security-group",
+        "snapshot",
+        "subnet",
+        "volume",
     ]
     for kind in ("instance", "volume"):
         assert _conditions(by_resource[kind]) == _RUN_TAGS_REQUIRED
     smoke_tag = {"aws:ResourceTag/vigilantis:smoke": "true"}
     # ec2:Owner는 계정 없는 image·snapshot ARN에만 — launch-template(계정이 ARN에 있다)은 별도 문장
     for kind in ("image", "snapshot"):
-        assert _conditions(by_resource[kind]) == {"StringEquals": {**smoke_tag, "ec2:Owner": ACCOUNT}}
+        assert _conditions(by_resource[kind]) == {
+            "StringEquals": {**smoke_tag, "ec2:Owner": ACCOUNT}
+        }
     assert by_resource["image"] is by_resource["snapshot"]
     assert _conditions(by_resource["launch-template"]) == {"StringEquals": smoke_tag}
     assert by_resource["launch-template"] is not by_resource["image"]
     assert sorted(_resources(by_resource["subnet"])) == subnet_arns
     assert not _conditions(by_resource["subnet"])  # 서브넷은 정확한 ARN
-    assert not any(":key-pair/" in r for s in _statements("ec2:RunInstances") for r in _resources(s))  # LT에 KeyName 없음
+    assert not any(
+        ":key-pair/" in r
+        for s in _statements("ec2:RunInstances")
+        for r in _resources(s)
+    )  # LT에 KeyName 없음
     vpc_arn = f"{ec2}:vpc/{VPC_ID}"
     assert _conditions(by_resource["network-interface"]) == {
         "ArnEquals": {"ec2:Vpc": vpc_arn, "ec2:Subnet": subnet_arns}
     }
-    assert _conditions(by_resource["security-group"]) == {"ArnEquals": {"ec2:Vpc": vpc_arn}}
+    assert _conditions(by_resource["security-group"]) == {
+        "ArnEquals": {"ec2:Vpc": vpc_arn}
+    }
     # 스냅숏·이미지 ARN에는 계정이 없다(서비스 권한 참조의 ARN 형식)
     for kind in ("image", "snapshot"):
-        assert any(r.startswith(f"arn:aws:ec2:{REGION}::{kind}/") for r in _resources(by_resource[kind]))
+        assert any(
+            r.startswith(f"arn:aws:ec2:{REGION}::{kind}/")
+            for r in _resources(by_resource[kind])
+        )
 
 
 def test_pass_role_is_absent_without_an_operator_allowlist():
@@ -403,17 +584,29 @@ def test_pass_role_is_limited_to_the_allowlist_and_ec2():
     assert _is_granted("iam:PassRole", POLICY_WITH_ROLE)
     assert "iam:PassRole" in _active_dependencies(optional=True)
     (statement,) = _statements("iam:PassRole", POLICY_WITH_ROLE)
-    assert statement["Resource"] == [ROLE_ARN]  # 리전 없는 IAM ARN — 리전 울타리의 유일한 예외
+    assert statement["Resource"] == [
+        ROLE_ARN
+    ]  # 리전 없는 IAM ARN — 리전 울타리의 유일한 예외
     assert f":{REGION}:" not in ROLE_ARN
-    assert statement["Condition"] == {"StringEquals": {"iam:PassedToService": "ec2.amazonaws.com"}}
-    assert not any(a.startswith("iam:") and a != "iam:PassRole" for a in _granted(POLICY_WITH_ROLE))
+    assert statement["Condition"] == {
+        "StringEquals": {"iam:PassedToService": "ec2.amazonaws.com"}
+    }
+    assert not any(
+        a.startswith("iam:") and a != "iam:PassRole" for a in _granted(POLICY_WITH_ROLE)
+    )
 
 
-@pytest.mark.parametrize("bad", [
-    "*", f"arn:aws:iam::{ACCOUNT}:role/*", f"arn:aws:iam::{ACCOUNT}:role/app-*",
-    "arn:aws:iam::999999999999:role/other-account", f"arn:aws:iam::{ACCOUNT}:user/not-a-role",
-    f"arn:aws:iam:{REGION}:{ACCOUNT}:role/with-region",
-])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "*",
+        f"arn:aws:iam::{ACCOUNT}:role/*",
+        f"arn:aws:iam::{ACCOUNT}:role/app-*",
+        "arn:aws:iam::999999999999:role/other-account",
+        f"arn:aws:iam::{ACCOUNT}:user/not-a-role",
+        f"arn:aws:iam:{REGION}:{ACCOUNT}:role/with-region",
+    ],
+)
 def test_pass_role_rejects_wildcard_foreign_or_non_role_arns(bad):
     with pytest.raises(ValueError):
         smoke.build_app_policy(ACCOUNT, REGION, VPC_ID, SUBNET_IDS, [bad])
@@ -430,7 +623,10 @@ def test_policy_with_a_role_fits_the_managed_policy_limit():
 
 
 def test_too_many_roles_are_rejected_rather_than_loosening_fences():
-    roles = [f"arn:aws:iam::{ACCOUNT}:role/service-path/vigilantis-smoke-instance-{n}" for n in range(8)]
+    roles = [
+        f"arn:aws:iam::{ACCOUNT}:role/service-path/vigilantis-smoke-instance-{n}"
+        for n in range(8)
+    ]
     with pytest.raises(ValueError, match="한도"):
         smoke.build_app_policy(ACCOUNT, REGION, VPC_ID, SUBNET_IDS, roles)
 
@@ -444,7 +640,9 @@ def test_oversized_policy_is_rejected_not_loosened(monkeypatch):
 def test_nacl_allow_rule_sits_at_the_top_of_what_ai_can_pick():
     """허용 규칙이 AI가 고를 수 있는 번호의 맨 끝이어야 어떤 차단 규칙도 먼저 평가된다."""
     adapter = TypeAdapter(RuleNumber)
-    assert adapter.validate_python(smoke.NACL_ALLOW_ALL_RULE) == smoke.NACL_ALLOW_ALL_RULE
+    assert (
+        adapter.validate_python(smoke.NACL_ALLOW_ALL_RULE) == smoke.NACL_ALLOW_ALL_RULE
+    )
     with pytest.raises(ValidationError):
         adapter.validate_python(smoke.NACL_ALLOW_ALL_RULE + 1)
 
@@ -457,10 +655,19 @@ def test_non_production_instance_is_a_rightsizing_candidate():
 
 
 def test_refuses_localstack_endpoint_before_calling_aws():
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "AWS_ENDPOINT_URL": "http://localhost:4566"}
+    env = {
+        **os.environ,
+        "PYTHONIOENCODING": "utf-8",
+        "AWS_ENDPOINT_URL": "http://localhost:4566",
+    }
     result = subprocess.run(
         [sys.executable, str(SCRIPT), "status", "--account", "000000000000"],
-        env=env, capture_output=True, text=True, encoding="utf-8", timeout=60,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=60,
     )
     assert result.returncode != 0
     assert "실 AWS 전용" in result.stderr
@@ -504,8 +711,13 @@ class FakeEc2(_Fake):
         self.groups: dict[str, dict] = {}
         self.acls: dict[str, dict] = {
             "acl-default": {
-                "NetworkAclId": "acl-default", "IsDefault": True, "Tags": [], "Entries": [],
-                "Associations": [{"NetworkAclAssociationId": "aclassoc-0", "SubnetId": SUBNET}],
+                "NetworkAclId": "acl-default",
+                "IsDefault": True,
+                "Tags": [],
+                "Entries": [],
+                "Associations": [
+                    {"NetworkAclAssociationId": "aclassoc-0", "SubnetId": SUBNET}
+                ],
             }
         }
 
@@ -514,7 +726,9 @@ class FakeEc2(_Fake):
         keys = {t["Key"] for t in Tags}
         for resource_id in Resources:
             resource = self.groups.get(resource_id) or self.acls[resource_id]
-            resource["Tags"] = [t for t in resource["Tags"] if t["Key"] not in keys] + copy.deepcopy(Tags)
+            resource["Tags"] = [
+                t for t in resource["Tags"] if t["Key"] not in keys
+            ] + copy.deepcopy(Tags)
 
     def describe_security_groups(self, Filters):
         return {"SecurityGroups": copy.deepcopy(list(self.groups.values()))}
@@ -523,11 +737,14 @@ class FakeEc2(_Fake):
         self._write("create_security_group")
         group_id = self._new_id("sg")
         self.groups[group_id] = {
-            "GroupId": group_id, "GroupName": GroupName,
+            "GroupId": group_id,
+            "GroupName": GroupName,
             "Tags": copy.deepcopy(TagSpecifications[0]["Tags"]),
             "IpPermissions": [],
             # AWS가 새 VPC SG에 넣는 기본 egress
-            "IpPermissionsEgress": [{"IpProtocol": "-1", "IpRanges": [{"CidrIp": _ALL}]}],
+            "IpPermissionsEgress": [
+                {"IpProtocol": "-1", "IpRanges": [{"CidrIp": _ALL}]}
+            ],
         }
         return {"GroupId": group_id}
 
@@ -535,7 +752,9 @@ class FakeEc2(_Fake):
         self._write("authorize_security_group_ingress")
         rules = self.groups[GroupId]["IpPermissions"]
         if any(p in rules for p in IpPermissions):
-            raise _client_error("InvalidPermission.Duplicate", "AuthorizeSecurityGroupIngress")
+            raise _client_error(
+                "InvalidPermission.Duplicate", "AuthorizeSecurityGroupIngress"
+            )
         rules.extend(copy.deepcopy(IpPermissions))
 
     def revoke_security_group_ingress(self, GroupId, IpPermissions):
@@ -551,8 +770,11 @@ class FakeEc2(_Fake):
     def describe_network_acls(self, Filters):
         names = next((f["Values"] for f in Filters if f["Name"] == "tag:Name"), None)
         acls = [
-            a for a in self.acls.values()
-            if names is None or next((t["Value"] for t in a["Tags"] if t["Key"] == "Name"), None) in names
+            a
+            for a in self.acls.values()
+            if names is None
+            or next((t["Value"] for t in a["Tags"] if t["Key"] == "Name"), None)
+            in names
         ]
         return {"NetworkAcls": copy.deepcopy(acls)}
 
@@ -560,31 +782,51 @@ class FakeEc2(_Fake):
         self._write("create_network_acl")
         acl_id = self._new_id("acl")
         self.acls[acl_id] = {
-            "NetworkAclId": acl_id, "IsDefault": False,
+            "NetworkAclId": acl_id,
+            "IsDefault": False,
             "Tags": copy.deepcopy(TagSpecifications[0]["Tags"]),
             # 실 AWS의 커스텀 NACL은 deny-all(32767)만 갖고 태어난다
             "Entries": [
-                {"RuleNumber": 32767, "Egress": egress, "RuleAction": "deny", "Protocol": "-1", "CidrBlock": _ALL}
+                {
+                    "RuleNumber": 32767,
+                    "Egress": egress,
+                    "RuleAction": "deny",
+                    "Protocol": "-1",
+                    "CidrBlock": _ALL,
+                }
                 for egress in (False, True)
             ],
             "Associations": [],
         }
         return {"NetworkAcl": copy.deepcopy(self.acls[acl_id])}
 
-    def create_network_acl_entry(self, NetworkAclId, RuleNumber, Protocol, RuleAction, Egress, CidrBlock):
+    def create_network_acl_entry(
+        self, NetworkAclId, RuleNumber, Protocol, RuleAction, Egress, CidrBlock
+    ):
         self._write("create_network_acl_entry")
         entries = self.acls[NetworkAclId]["Entries"]
-        if any(e["RuleNumber"] == RuleNumber and e["Egress"] == Egress for e in entries):
+        if any(
+            e["RuleNumber"] == RuleNumber and e["Egress"] == Egress for e in entries
+        ):
             raise _client_error("NetworkAclEntryAlreadyExists", "CreateNetworkAclEntry")
-        entries.append({
-            "RuleNumber": RuleNumber, "Egress": Egress, "RuleAction": RuleAction,
-            "Protocol": Protocol, "CidrBlock": CidrBlock,
-        })
+        entries.append(
+            {
+                "RuleNumber": RuleNumber,
+                "Egress": Egress,
+                "RuleAction": RuleAction,
+                "Protocol": Protocol,
+                "CidrBlock": CidrBlock,
+            }
+        )
 
     def replace_network_acl_association(self, AssociationId, NetworkAclId):
         self._write("replace_network_acl_association")
         for acl in self.acls.values():
-            for assoc in [a for a in acl["Associations"] if a["NetworkAclAssociationId"] == AssociationId]:
+            for assoc in [
+                a
+                for a in acl["Associations"]
+                if a["NetworkAclAssociationId"] == AssociationId
+            ]:
                 acl["Associations"].remove(assoc)
                 self.acls[NetworkAclId]["Associations"].append(
                     {**assoc, "NetworkAclAssociationId": self._new_id("aclassoc")}
@@ -610,12 +852,18 @@ class FakeElbv2(_Fake):
 
     def create_target_group(self, Name, Tags, **_):
         self._write("create_target_group")
-        self.tg = {"TargetGroupArn": f"arn:aws:elasticloadbalancing:{REGION}:123456789012:targetgroup/{Name}/1"}
+        self.tg = {
+            "TargetGroupArn": f"arn:aws:elasticloadbalancing:{REGION}:123456789012:targetgroup/{Name}/1"
+        }
         self.tags = copy.deepcopy(Tags)
         return {"TargetGroups": [dict(self.tg)]}
 
     def describe_tags(self, ResourceArns):
-        return {"TagDescriptions": [{"ResourceArn": ResourceArns[0], "Tags": copy.deepcopy(self.tags)}]}
+        return {
+            "TagDescriptions": [
+                {"ResourceArn": ResourceArns[0], "Tags": copy.deepcopy(self.tags)}
+            ]
+        }
 
     def add_tags(self, ResourceArns, Tags):
         self._write("add_tags")
@@ -623,9 +871,12 @@ class FakeElbv2(_Fake):
         self.tags = [t for t in self.tags if t["Key"] not in keys] + copy.deepcopy(Tags)
 
     def describe_target_health(self, TargetGroupArn):
-        return {"TargetHealthDescriptions": [
-            {"Target": {"Id": target}, "TargetHealth": {"State": "healthy"}} for target in sorted(self.targets)
-        ]}
+        return {
+            "TargetHealthDescriptions": [
+                {"Target": {"Id": target}, "TargetHealth": {"State": "healthy"}}
+                for target in sorted(self.targets)
+            ]
+        }
 
     def register_targets(self, TargetGroupArn, Targets):
         self._write("register_targets")
@@ -644,7 +895,9 @@ def _done(resource: dict) -> bool:
 
 def _ensure_tg(elbv2: FakeElbv2) -> str:
     subnets = {"a": SUBNET, "c": "subnet-smoke-c"}
-    return smoke._ensure_load_balancer(elbv2, VPC, subnets, {smoke.SG_ALB: "sg-alb"}, INSTANCE_IDS)
+    return smoke._ensure_load_balancer(
+        elbv2, VPC, subnets, {smoke.SG_ALB: "sg-alb"}, INSTANCE_IDS
+    )
 
 
 def test_isolation_sg_whose_egress_revoke_failed_is_finished_on_rerun():
@@ -679,7 +932,9 @@ def test_isolation_sg_declares_its_role_for_the_rule_engine():
 def test_sg_left_pending_after_its_rule_landed_gets_no_duplicate_rule():
     """규칙은 들어갔는데 표지를 바꾸기 전에 끊긴 경우 — 다시 넣다 Duplicate로 멈추지 않는다."""
     ec2 = FakeEc2()
-    ec2.faults["create_tags"] = [True]  # 첫 그룹(alb)의 규칙이 들어간 뒤 표지에서 끊긴다
+    ec2.faults["create_tags"] = [
+        True
+    ]  # 첫 그룹(alb)의 규칙이 들어간 뒤 표지에서 끊긴다
     with pytest.raises(ClientError):
         smoke._ensure_security_groups(ec2, VPC)
 
@@ -691,7 +946,10 @@ def test_sg_left_pending_after_its_rule_landed_gets_no_duplicate_rule():
 def test_nacl_missing_an_allow_rule_is_completed_before_it_is_attached():
     """아웃바운드 허용이 빠진 NACL을 서브넷에 붙이면 서브넷 경계 통신이 끊긴다(#348 리뷰 재현)."""
     ec2 = FakeEc2()
-    ec2.faults["create_network_acl_entry"] = [False, True]  # 인바운드는 들어가고 아웃바운드에서 끊긴다
+    ec2.faults["create_network_acl_entry"] = [
+        False,
+        True,
+    ]  # 인바운드는 들어가고 아웃바운드에서 끊긴다
     with pytest.raises(ClientError):
         smoke._ensure_nacl(ec2, VPC, SUBNET)
     assert ec2.smoke_acl()["Associations"] == []  # 미완성 NACL은 서브넷에 붙지 않았다
@@ -711,7 +969,9 @@ def test_target_group_registration_is_finished_on_rerun():
         _ensure_tg(elbv2)
 
     _ensure_tg(elbv2)
-    assert elbv2.targets == {INSTANCE_IDS[s.name] for s in smoke.INSTANCES if s.in_target_group}
+    assert elbv2.targets == {
+        INSTANCE_IDS[s.name] for s in smoke.INSTANCES if s.in_target_group
+    }
     assert _done({"Tags": elbv2.tags})
 
 
@@ -723,7 +983,13 @@ def test_rerun_leaves_initialized_resources_as_the_smoke_left_them():
     _ensure_tg(elbv2)
     # 스모크 도중의 변경 — 차단 규칙 추가(NACL_ADD_DENY) · web-1 등록 해제(EC2_ISOLATE) · 미끼 규칙 제거
     ec2.acls[acl_id]["Entries"].append(
-        {"RuleNumber": 100, "Egress": False, "RuleAction": "deny", "Protocol": "-1", "CidrBlock": "198.51.100.0/24"}
+        {
+            "RuleNumber": 100,
+            "Egress": False,
+            "RuleAction": "deny",
+            "Protocol": "-1",
+            "CidrBlock": "198.51.100.0/24",
+        }
     )
     elbv2.targets.discard(INSTANCE_IDS[f"{smoke.PREFIX}-web-1"])
     ec2.groups[ids[smoke.SG_OPEN_SSH]]["IpPermissions"] = []
@@ -753,9 +1019,9 @@ class FakeIam(_Fake):
 
     def __init__(self):
         super().__init__()
-        self.users: dict[str, set[str]] = {}          # 사용자 → 연결된 정책 ARN
-        self.inline: dict[str, set[str]] = {}         # 사용자 → 인라인 정책 이름(전환 전 잔재)
-        self.versions: dict[str, list[dict]] = {}     # 정책 ARN → 버전(오래된 순)
+        self.users: dict[str, set[str]] = {}  # 사용자 → 연결된 정책 ARN
+        self.inline: dict[str, set[str]] = {}  # 사용자 → 인라인 정책 이름(전환 전 잔재)
+        self.versions: dict[str, list[dict]] = {}  # 정책 ARN → 버전(오래된 순)
 
     def get_user(self, UserName):
         if UserName not in self.users:
@@ -772,10 +1038,16 @@ class FakeIam(_Fake):
         if default:
             for version in self.versions[arn]:
                 version["IsDefaultVersion"] = False
-        self.versions[arn].append({
-            "VersionId": f"v{self._seq}", "IsDefaultVersion": default, "CreateDate": self._seq,
-            "Document": json.loads(document),  # botocore가 URL 인코딩된 문서를 dict로 풀어 준다
-        })
+        self.versions[arn].append(
+            {
+                "VersionId": f"v{self._seq}",
+                "IsDefaultVersion": default,
+                "CreateDate": self._seq,
+                "Document": json.loads(
+                    document
+                ),  # botocore가 URL 인코딩된 문서를 dict로 풀어 준다
+            }
+        )
 
     def create_policy(self, PolicyName, PolicyDocument, Tags):
         self._write("create_policy")
@@ -791,13 +1063,18 @@ class FakeIam(_Fake):
         return {"Policy": {"Arn": PolicyArn, "DefaultVersionId": default["VersionId"]}}
 
     def get_policy_version(self, PolicyArn, VersionId):
-        version = next(v for v in self.versions[PolicyArn] if v["VersionId"] == VersionId)
+        version = next(
+            v for v in self.versions[PolicyArn] if v["VersionId"] == VersionId
+        )
         return {"PolicyVersion": copy.deepcopy(version)}
 
     def list_policy_versions(self, PolicyArn):
-        return {"Versions": [
-            {k: v[k] for k in ("VersionId", "IsDefaultVersion", "CreateDate")} for v in self.versions[PolicyArn]
-        ]}
+        return {
+            "Versions": [
+                {k: v[k] for k in ("VersionId", "IsDefaultVersion", "CreateDate")}
+                for v in self.versions[PolicyArn]
+            ]
+        }
 
     def create_policy_version(self, PolicyArn, PolicyDocument, SetAsDefault):
         self._write("create_policy_version")
@@ -807,19 +1084,27 @@ class FakeIam(_Fake):
 
     def delete_policy_version(self, PolicyArn, VersionId):
         self._write("delete_policy_version")
-        version = next(v for v in self.versions[PolicyArn] if v["VersionId"] == VersionId)
+        version = next(
+            v for v in self.versions[PolicyArn] if v["VersionId"] == VersionId
+        )
         if version["IsDefaultVersion"]:
             raise _client_error("DeleteConflict", "DeletePolicyVersion")
         self.versions[PolicyArn].remove(version)
 
     def delete_policy(self, PolicyArn):
         self._write("delete_policy")
-        if len(self.versions[PolicyArn]) > 1 or any(PolicyArn in arns for arns in self.users.values()):
+        if len(self.versions[PolicyArn]) > 1 or any(
+            PolicyArn in arns for arns in self.users.values()
+        ):
             raise _client_error("DeleteConflict", "DeletePolicy")
         del self.versions[PolicyArn]
 
     def list_attached_user_policies(self, UserName):
-        return {"AttachedPolicies": [{"PolicyArn": arn} for arn in sorted(self.users[UserName])]}
+        return {
+            "AttachedPolicies": [
+                {"PolicyArn": arn} for arn in sorted(self.users[UserName])
+            ]
+        }
 
     def attach_user_policy(self, UserName, PolicyArn):
         self._write("attach_user_policy")
@@ -859,7 +1144,9 @@ def test_app_policy_is_attached_as_a_managed_policy():
     assert iam.default_document(arn) == POLICY
 
     iam.writes.clear()
-    smoke._ensure_app_user(iam, ACCOUNT, REGION, VPC_ID, SUBNET_IDS)  # 같은 VPC로 다시 — 버전을 쌓지 않는다
+    smoke._ensure_app_user(
+        iam, ACCOUNT, REGION, VPC_ID, SUBNET_IDS
+    )  # 같은 VPC로 다시 — 버전을 쌓지 않는다
     assert iam.writes == []
 
 
@@ -877,14 +1164,18 @@ def test_recreated_vpc_moves_the_policy_to_a_new_version_within_the_limit():
         smoke._ensure_app_user(iam, ACCOUNT, REGION, vpc_id, SUBNET_IDS)
     arn = smoke._app_policy_arn(ACCOUNT)
     assert len(iam.versions[arn]) == smoke._POLICY_VERSION_LIMIT
-    assert iam.default_document(arn) == smoke.build_app_policy(ACCOUNT, REGION, vpcs[-1], SUBNET_IDS)
+    assert iam.default_document(arn) == smoke.build_app_policy(
+        ACCOUNT, REGION, vpcs[-1], SUBNET_IDS
+    )
 
 
 def test_down_removes_the_app_user_and_its_managed_policy():
     """사용자를 지워도 관리형 정책은 남는다 — status 잔여 0건이 되려면 따로 걷혀야 한다."""
     iam = FakeIam()
     smoke._ensure_app_user(iam, ACCOUNT, REGION, VPC_ID, SUBNET_IDS)
-    smoke._ensure_app_user(iam, ACCOUNT, REGION, "vpc-0fedcba9876543210", SUBNET_IDS)  # 비기본 버전을 하나 남긴다
+    smoke._ensure_app_user(
+        iam, ACCOUNT, REGION, "vpc-0fedcba9876543210", SUBNET_IDS
+    )  # 비기본 버전을 하나 남긴다
     smoke._delete_app_user(iam)
     smoke._delete_app_policy(iam, ACCOUNT)
     assert iam.users == {}
@@ -906,6 +1197,7 @@ class FakeIamWithRoles(FakeIam):
             def paginate(self, PolicyArn, EntityFilter):
                 assert EntityFilter == "Role"
                 yield {"PolicyRoles": [{"RoleName": r} for r in iam.policy_roles]}
+
         return _Pages()
 
 
@@ -925,7 +1217,9 @@ def test_down_guard_passes_when_no_role_holds_the_app_policy():
     iam = FakeIamWithRoles([])
     smoke._ensure_app_user(iam, ACCOUNT, REGION, VPC_ID, SUBNET_IDS)
     assert smoke._roles_holding_app_policy(iam, ACCOUNT) == []
-    assert smoke._roles_holding_app_policy(FakeIamWithRoles(["x"]), ACCOUNT) == []  # 정책이 없으면 볼 것도 없다
+    assert (
+        smoke._roles_holding_app_policy(FakeIamWithRoles(["x"]), ACCOUNT) == []
+    )  # 정책이 없으면 볼 것도 없다
 
 
 def test_up_clears_an_inline_policy_left_from_before_the_managed_switch():
@@ -973,13 +1267,15 @@ def test_budget_measures_usage_before_credits():
 
 def test_existing_budget_from_before_the_amendment_is_brought_up_to_date():
     """정의가 바뀌기 전(월 $50·크레딧 포함)에 선 Budget은 그대로 두면 바뀐 정의가 계정에 닿지 않는다 — 다시 돌린 up이 맞춘다."""
-    budgets = FakeBudgets({
-        "BudgetName": smoke.BUDGET_NAME,
-        "BudgetLimit": {"Amount": "50.0", "Unit": "USD"},
-        "TimeUnit": "MONTHLY",
-        "BudgetType": "COST",
-        "CostTypes": {"IncludeCredit": True},
-    })
+    budgets = FakeBudgets(
+        {
+            "BudgetName": smoke.BUDGET_NAME,
+            "BudgetLimit": {"Amount": "50.0", "Unit": "USD"},
+            "TimeUnit": "MONTHLY",
+            "BudgetType": "COST",
+            "CostTypes": {"IncludeCredit": True},
+        }
+    )
     smoke._ensure_budget(budgets, ACCOUNT, "pm@example.com")
     assert budgets.updated == 1
     assert budgets.budget["CostTypes"]["IncludeCredit"] is False
