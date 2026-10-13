@@ -8,7 +8,7 @@
 # 닿는다. Post-MVP에서 계정을 가르면(#438 ①②) 접근 역할의 계정 번호만 바뀐다.
 #
 # 구성 (서울 리전 — 관제 대상과 같은 리전, ADR-0010 §2):
-#   브라우저 ─HTTPS─ CloudFront(기본 도메인) + WAF(허용 IP만)
+#   브라우저 ─HTTPS─ CloudFront(기본 도메인 · --domain을 주면 그 도메인도) + WAF(허용 IP만)
 #            └─HTTP + 비밀 헤더─ 공개 ALB(CloudFront IP만 수신)
 #                 ├ /api/* · /health → ECS api (태스크 1개 고정)
 #                 └ 그 밖           → ECS web
@@ -20,8 +20,10 @@
 #
 # 실행 (repo 루트, **관리자 프로필**로 — 앱 키가 아니다):
 #   읽기만     : uv run python scripts/provision_platform_aws.py status --account <계정 ID>
-#   세울 목록  : ... up --account <계정 ID> --allow-cidr <허용 IP>/32
-#   실제 생성  : ... up --account <계정 ID> --allow-cidr <허용 IP>/32 --yes
+#   세울 목록  : ... up --account <계정 ID> --allow-cidr <허용 IP>/32 [--domain <도메인>]
+#   실제 생성  : ... up --account <계정 ID> --allow-cidr <허용 IP>/32 [--domain <도메인>] --yes
+#                --domain: Route53 호스팅 영역과 us-east-1 ACM 인증서(ISSUED)가 먼저 있어야 한다.
+#                CloudFront에 별칭·인증서를 달고 Route53에 A 별칭 레코드를 만든다
 #   이미지     : ... build --account <계정 ID> --tag <태그>        (docker 필요 — ECR에 api·web 푸시)
 #   배포       : ... deploy --account <계정 ID> --tag <태그> [--enable-dispatch] --yes
 #   전부 정리  : ... down --account <계정 ID> --yes
@@ -131,6 +133,7 @@ WEB_HEALTH_PATH = "/favicon.ico"  # 페이지는 서버에서 API를 부르므�
 WAF_IPSET = f"{PREFIX}-allow"
 WAF_ACL = f"{PREFIX}-waf"
 CF_COMMENT = PREFIX  # CloudFront 배포는 태그로 찾기 어렵다 — comment로 식별한다
+CF_HOSTED_ZONE_ID = "Z2FDTNDATAQYW2"  # CloudFront 별칭 레코드의 고정 호스팅 영역 ID(AWS 문서 · 전 계정 공통)
 # AWS 관리형 정책 ID(전 계정 공통)
 CF_CACHING_DISABLED = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
 CF_ALL_VIEWER_EXCEPT_HOST = "b689b0a8-53d0-40ab-baf2-68738e2966ac"
@@ -271,6 +274,33 @@ def service_deployment(service: str) -> dict:
                 "deploymentCircuitBreaker": {"enable": True, "rollback": True}}
     return {"minimumHealthyPercent": 100, "maximumPercent": 200,
             "deploymentCircuitBreaker": {"enable": True, "rollback": True}}
+
+
+def public_origins(dist: dict) -> list[str]:
+    """화면이 열리는 주소 목록 — **별칭(사용자 도메인)이 먼저**, CloudFront 기본 도메인이 마지막이다.
+
+    첫 값이 웹 번들에 박힐 API 주소이고(build), 전부가 api의 CORS 허용 출처다(deploy). 기본 도메인을
+    빼지 않는 이유: 별칭을 단 뒤에도 그 주소로 열 수 있고, 거기서 실시간 연결(WS의 Origin 검사)이
+    끊기면 안 된다. 받는 모양은 list_distributions의 배포 요약이다.
+    """
+    aliases = (dist.get("Aliases") or {}).get("Items") or []
+    return [f"https://{a}" for a in aliases] + [f"https://{dist['DomainName']}"]
+
+
+def custom_domain_config(config: dict, domain: str, cert_arn: str) -> dict:
+    """배포 설정에 별칭과 인증서를 단 사본. 나머지 설정은 그대로 둔다(update_distribution은 전체 교체다)."""
+    updated = dict(config)
+    updated["Aliases"] = {"Quantity": 1, "Items": [domain]}
+    updated["ViewerCertificate"] = {"ACMCertificateArn": cert_arn, "SSLSupportMethod": "sni-only",
+                                    "MinimumProtocolVersion": "TLSv1.2_2021"}
+    return updated
+
+
+def certificate_covers(cert: dict, domain: str) -> bool:
+    """ACM 인증서 요약이 이 도메인을 덮는가 — 정확히 같거나 한 단계 와일드카드(*.상위)."""
+    names = {cert.get("DomainName", "")} | set(cert.get("SubjectAlternativeNameSummaries") or [])
+    parent = domain.split(".", 1)[1] if "." in domain else ""
+    return domain in names or (bool(parent) and f"*.{parent}" in names)
 
 
 def validate_allow_cidrs(cidrs: list[str]) -> list[str]:
@@ -463,6 +493,34 @@ def _find_distribution(cf) -> Optional[dict]:
     return None
 
 
+def _find_certificate(acm, domain: str) -> Optional[str]:
+    for page in acm.get_paginator("list_certificates").paginate(CertificateStatuses=["ISSUED"]):
+        for cert in page.get("CertificateSummaryList", []):
+            if certificate_covers(cert, domain):
+                return cert["CertificateArn"]
+    return None
+
+
+def _find_zone(r53, domain: str) -> Optional[str]:
+    """도메인을 담는 가장 긴 이름의 공개 호스팅 영역 ID."""
+    best: Optional[tuple[int, str]] = None
+    for page in r53.get_paginator("list_hosted_zones").paginate():
+        for zone in page["HostedZones"]:
+            name = zone["Name"].rstrip(".")
+            if zone.get("Config", {}).get("PrivateZone"):
+                continue
+            if (domain == name or domain.endswith(f".{name}")) and (best is None or len(name) > best[0]):
+                best = (len(name), zone["Id"].rsplit("/", 1)[-1])
+    return best[1] if best else None
+
+
+def alias_records_for(records: list[dict], domain: str, cf_domain: str) -> list[dict]:
+    """이 배포를 가리키는 domain의 A·AAAA 별칭 레코드만. 다른 곳을 가리키는 레코드는 대상이 아니다."""
+    return [r for r in records
+            if r["Name"].rstrip(".") == domain and r["Type"] in ("A", "AAAA")
+            and r.get("AliasTarget", {}).get("DNSName", "").rstrip(".") == cf_domain]
+
+
 def _find_cluster(ecs) -> Optional[str]:
     found = ecs.describe_clusters(clusters=[CLUSTER])["clusters"]
     return found[0]["clusterArn"] if found and found[0]["status"] == "ACTIVE" else None
@@ -501,7 +559,7 @@ def inventory(c: dict) -> list[tuple[str, str, Optional[str]]]:
     rows.append(("WafIpSet", WAF_IPSET, (_find_ipset(c["waf"]) or {}).get("Id")))
     rows.append(("WafWebAcl", WAF_ACL, (_find_acl(c["waf"]) or {}).get("Id")))
     dist = _find_distribution(c["cf"])
-    rows.append(("CloudFront", CF_COMMENT, f"https://{dist['DomainName']}" if dist else None))
+    rows.append(("CloudFront", CF_COMMENT, " · ".join(public_origins(dist)) if dist else None))
     for name in (API_SERVICE, WEB_SERVICE):
         svc = _find_service(c["ecs"], name)
         rows.append(("EcsService", name,
@@ -879,7 +937,34 @@ def _ensure_distribution(cf, alb_dns: str, origin_value: str, acl_arn: str) -> s
     return created["DomainName"]
 
 
-def up(c: dict, account: str, region: str, allow_cidrs: list[str]) -> None:
+def _ensure_custom_domain(c: dict, domain: str) -> None:
+    """CloudFront에 별칭·인증서를 달고 Route53 A 별칭을 이 배포로 맞춘다. 인증서·호스팅 영역은 만들지 않는다.
+
+    인증서 발급은 DNS 검증을 기다려야 하고 도메인 구입은 사람이 한다 — 둘 다 이 스크립트 밖이다.
+    """
+    cf = c["cf"]
+    cert_arn = _find_certificate(c["acm"], domain)
+    zone_id = _find_zone(c["r53"], domain)
+    if not (cert_arn and zone_id):
+        sys.exit(f"--domain {domain}: us-east-1 ACM 인증서(ISSUED) {'있음' if cert_arn else '없음'} · "
+                 f"Route53 호스팅 영역 {'있음' if zone_id else '없음'} — 둘 다 먼저 준비할 것")
+    dist = _find_distribution(cf)
+    got = cf.get_distribution_config(Id=dist["Id"])
+    config = got["DistributionConfig"]
+    if ((config.get("Aliases") or {}).get("Items") or []) != [domain] or \
+            (config.get("ViewerCertificate") or {}).get("ACMCertificateArn") != cert_arn:
+        cf.update_distribution(Id=dist["Id"], IfMatch=got["ETag"],
+                               DistributionConfig=custom_domain_config(config, domain, cert_arn))
+        print(f"[platform] CloudFront 별칭 {domain} 연결 — 전파에 수 분 걸린다")
+    c["r53"].change_resource_record_sets(HostedZoneId=zone_id, ChangeBatch={"Changes": [{
+        "Action": "UPSERT",
+        "ResourceRecordSet": {"Name": domain, "Type": "A", "AliasTarget": {
+            "HostedZoneId": CF_HOSTED_ZONE_ID, "DNSName": dist["DomainName"], "EvaluateTargetHealth": False}},
+    }]})
+    print(f"[platform] Route53 {domain} A → {dist['DomainName']}")
+
+
+def up(c: dict, account: str, region: str, allow_cidrs: list[str], domain: Optional[str] = None) -> None:
     ec2 = c["ec2"]
     _require_smoke_env(c["iam"], ec2, account)  # 무엇이든 만들기 전에
     vpc_id = _ensure_vpc(ec2)
@@ -903,9 +988,12 @@ def up(c: dict, account: str, region: str, allow_cidrs: list[str]) -> None:
     alb = _ensure_alb(c["elbv2"], vpc_id, subnets, sgs[SG_ALB], origin_value)
     # 웹 컨테이너의 서버 측 API 호출도 CloudFront를 거친다 — NAT 공인 IP를 허용 목록에 넣는다
     acl_arn = _ensure_waf(c["waf"], sorted(set(allow_cidrs) | {f"{nat_ip}/32"}))
-    domain = _ensure_distribution(c["cf"], alb["dns"], origin_value, acl_arn)
+    _ensure_distribution(c["cf"], alb["dns"], origin_value, acl_arn)
+    if domain:
+        _ensure_custom_domain(c, domain)
     print("[platform] 다음 단계(ADR-0010 §7)")
-    print(f"  배포 주소          : https://{domain}")
+    print(f"  배포 주소          : {' · '.join(public_origins(_find_distribution(c['cf'])))}")
+    print("  (도메인을 새로 달거나 바꿨으면 2·3을 다시 — 웹 번들의 API 주소와 api의 CORS가 그 주소를 따른다)")
     if _secret_value(c["sm"], SECRET_OPENAI) == OPENAI_PLACEHOLDER:
         print(f"  1. OpenAI 키 넣기  : aws secretsmanager put-secret-value --secret-id {SECRET_OPENAI} --secret-string <키>")
     print("  2. 이미지          : ... build --account <계정 ID> --tag <태그>")
@@ -929,7 +1017,7 @@ def build(c: dict, region: str, tag: str) -> None:
     builds = [
         (repos["api"], ["docker", "build", "-f", "apps/core-api/Dockerfile", "-t", f"{repos['api']}:{tag}", root]),
         (repos["web"], ["docker", "build", "-f", "apps/web/Dockerfile",
-                        "--build-arg", f"NEXT_PUBLIC_API_BASE_URL=https://{dist['DomainName']}",
+                        "--build-arg", f"NEXT_PUBLIC_API_BASE_URL={public_origins(dist)[0]}",
                         "-t", f"{repos['web']}:{tag}", root]),
     ]
     for repo, cmd in builds:
@@ -1031,7 +1119,7 @@ def deploy(c: dict, account: str, region: str, tag: str, dispatch_enabled: bool)
         "VIGILANTIS_ACCESS_EXTERNAL_ID": _find_secret(c["sm"], SECRET_EXTERNAL_ID),
     }
     api_def = _register(ecs, API_TASK_FAMILY, api_container(
-        f"{repos['api']}:{tag}", region=region, cors_origin=f"https://{dist['DomainName']}",
+        f"{repos['api']}:{tag}", region=region, cors_origin=",".join(public_origins(dist)),
         access_role_arn=roles["access"], collect_vpc_ids=smoke_vpc, dispatch_enabled=dispatch_enabled,
         secrets_arns=secret_arns), cpu="512", memory="1024", exec_arn=roles["exec"], task_arn=roles["task"])
     web_def = _register(ecs, WEB_TASK_FAMILY, web_container(f"{repos['web']}:{tag}", region=region),
@@ -1050,7 +1138,7 @@ def deploy(c: dict, account: str, region: str, tag: str, dispatch_enabled: bool)
     )
     if problems:
         sys.exit("배포 실패 — " + " · ".join(problems) + f" (로그: {LOG_GROUPS['api']})")
-    print(f"[platform] 배포 완료 — https://{dist['DomainName']} (AI 분석·조치 실행 디스패치 {'켬' if dispatch_enabled else '끔'})")
+    print(f"[platform] 배포 완료 — {public_origins(dist)[0]} (AI 분석·조치 실행 디스패치 {'켬' if dispatch_enabled else '끔'})")
     if not dispatch_enabled:
         print("[platform] 주의: 디스패치가 꺼져 있어 화면에서 승인한 조치도 실행되지 않고 접수 상태로 멈춘다 — "
               "조치 실행을 실측하려면 deploy --enable-dispatch(OpenAI 과금도 함께 켜진다)")
@@ -1139,6 +1227,17 @@ def down(c: dict, account: str) -> None:
 
     dist = _find_distribution(c["cf"])
     if dist:
+        # 배포를 지우면 별칭 레코드가 없는 곳을 가리킨다 — 이 배포를 가리키는 것만 먼저 지운다
+        for alias in (dist.get("Aliases") or {}).get("Items") or []:
+            zone_id = _find_zone(c["r53"], alias)
+            if not zone_id:
+                continue
+            found = c["r53"].list_resource_record_sets(HostedZoneId=zone_id, StartRecordName=alias, MaxItems="10")
+            records = alias_records_for(found["ResourceRecordSets"], alias, dist["DomainName"])
+            if records:
+                c["r53"].change_resource_record_sets(HostedZoneId=zone_id, ChangeBatch={"Changes": [
+                    {"Action": "DELETE", "ResourceRecordSet": r} for r in records]})
+                print(f"[platform] Route53 {alias} 별칭 레코드 {len(records)}건 삭제")
         cfg = c["cf"].get_distribution_config(Id=dist["Id"])
         if cfg["DistributionConfig"]["Enabled"]:
             cfg["DistributionConfig"]["Enabled"] = False
@@ -1226,6 +1325,8 @@ def main() -> None:
     parser.add_argument("--account", required=True, help="대상 AWS 계정 ID — 호출 주체(sts)와 같아야 한다")
     parser.add_argument("--allow-cidr", action="append", default=[],
                         help=f"up: WAF 허용 IPv4 CIDR(/{MIN_ALLOW_PREFIX} 이상 좁게 · 여러 번 줄 수 있다)")
+    parser.add_argument("--domain", help="up: CloudFront에 달 사용자 도메인(Route53 호스팅 영역 · "
+                                         "us-east-1 ACM 인증서가 먼저 있어야 한다)")
     parser.add_argument("--tag", help="build·deploy: 이미지 태그")
     parser.add_argument("--enable-dispatch", action="store_true",
                         help="deploy: AI 분석과 조치 실행 디스패치를 함께 켠다(한 스위치 — 끄면 승인한 조치도 "
@@ -1241,6 +1342,7 @@ def main() -> None:
         "logs": aws_client("logs", region), "sm": aws_client("secretsmanager", region),
         # CloudFront와 그에 붙는 WAF(CLOUDFRONT 범위)는 us-east-1에서만 다룬다
         "cf": aws_client("cloudfront", "us-east-1"), "waf": aws_client("wafv2", "us-east-1"),
+        "acm": aws_client("acm", "us-east-1"), "r53": aws_client("route53", "us-east-1"),
     }
     if args.command == "status":
         status(c)
@@ -1269,7 +1371,7 @@ def main() -> None:
             _print_rows([row for row in inventory(c) if row[2]])
         return
     if args.command == "up":
-        up(c, account, region, allow_cidrs)
+        up(c, account, region, allow_cidrs, args.domain)
     elif args.command == "deploy":
         deploy(c, account, region, args.tag, args.enable_dispatch)
     else:

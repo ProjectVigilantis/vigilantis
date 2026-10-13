@@ -108,6 +108,48 @@ def test_cloudfront_sends_the_origin_header_and_does_not_cache():
     assert cfg["Comment"] == platform.CF_COMMENT
 
 
+# 사용자 도메인 — 웹 번들의 API 주소와 api의 CORS가 별칭을 따른다 ---------------------
+def test_public_origins_put_the_alias_first_and_keep_the_default_domain():
+    dist = {"DomainName": "d1.cloudfront.net", "Aliases": {"Quantity": 1, "Items": ["vigilantis.example"]}}
+    # 첫 값이 빌드 인자 — 별칭이 아니면 별칭 주소로 연 화면이 기본 도메인의 WS로 붙어 Origin 검사에 걸린다
+    assert platform.public_origins(dist) == ["https://vigilantis.example", "https://d1.cloudfront.net"]
+
+
+def test_public_origins_without_alias_is_the_default_domain_only():
+    assert platform.public_origins({"DomainName": "d1.cloudfront.net", "Aliases": {"Quantity": 0}}) == [
+        "https://d1.cloudfront.net"]
+
+
+def test_custom_domain_config_keeps_the_rest_of_the_distribution():
+    base = platform.distribution_config("alb.example", "secret-value", "arn:acl", "ref")
+    updated = platform.custom_domain_config(base, "vigilantis.example", "arn:cert")
+    assert updated["Aliases"] == {"Quantity": 1, "Items": ["vigilantis.example"]}
+    assert updated["ViewerCertificate"]["ACMCertificateArn"] == "arn:cert"
+    assert updated["ViewerCertificate"]["SSLSupportMethod"] == "sni-only"
+    assert {k: v for k, v in updated.items() if k not in ("Aliases", "ViewerCertificate")} == base
+    assert "Aliases" not in base  # 원본을 고치지 않는다
+
+
+@pytest.mark.parametrize("cert, covered", [
+    ({"DomainName": "vigilantis.example"}, True),
+    ({"DomainName": "other.example", "SubjectAlternativeNameSummaries": ["*.vigilantis.example"]}, False),
+    ({"DomainName": "x.example", "SubjectAlternativeNameSummaries": ["*.example"]}, True),
+    ({"DomainName": "other.example"}, False),
+])
+def test_certificate_must_cover_the_domain(cert, covered):
+    assert platform.certificate_covers(cert, "vigilantis.example") is covered
+
+
+def test_down_removes_only_alias_records_that_point_at_this_distribution():
+    records = [
+        {"Name": "vigilantis.example.", "Type": "A", "AliasTarget": {"DNSName": "d1.cloudfront.net."}},
+        {"Name": "vigilantis.example.", "Type": "A", "AliasTarget": {"DNSName": "d2.cloudfront.net."}},
+        {"Name": "vigilantis.example.", "Type": "NS", "ResourceRecords": []},
+        {"Name": "www.vigilantis.example.", "Type": "A", "AliasTarget": {"DNSName": "d1.cloudfront.net."}},
+    ]
+    assert platform.alias_records_for(records, "vigilantis.example", "d1.cloudfront.net") == [records[0]]
+
+
 # ④ ---------------------------------------------------------------------------
 def test_waf_allows_only_the_ip_set():
     (rule,) = platform.waf_rules("arn:ipset")
