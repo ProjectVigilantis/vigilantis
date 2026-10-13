@@ -8,7 +8,7 @@ Next.js 16(App Router) + React 19 + TypeScript + Tailwind CSS v4 + Shadcn UI(rad
 
 **mock 계층은 없다**(2026-09-16 폐기 · PR #351). `apps/web/src/app/api/v1/**`의 mock Route Handler 6파일이 통째로 지워졌고, 화면은 실 `core-api`에만 붙는다. **`npm run dev`만 띄우면 모든 화면이 조회 오류다.**
 
-* 조회 대상 오리진은 `NEXT_PUBLIC_API_BASE_URL`이며, 미설정이면 `http://localhost:8000`(compose의 `core-api`)으로 간다. 설정 예시는 [`.env.example`](.env.example) → `.env.local`로 복사해 쓴다.
+* 조회 대상 오리진은 `NEXT_PUBLIC_API_BASE_URL`이며, 미설정이면 `http://localhost:8000`(compose의 `api` 서비스)으로 간다. 설정 예시는 [`.env.example`](.env.example) → `.env.local`로 복사해 쓴다.
 * 백엔드의 `CORS_ALLOW_ORIGINS`(기본 `http://localhost:3000`)에 이 웹의 오리진이 들어 있어야 브라우저 조회와 WebSocket handshake가 통과한다(`routers/ws.py`의 Origin 검증).
 
 ## 디렉터리
