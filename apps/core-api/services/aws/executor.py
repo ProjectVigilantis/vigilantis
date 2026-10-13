@@ -2946,17 +2946,18 @@ def protect_scale_in(
     *,
     record_intent: Callable[[ScaleInProtectionResult], None],
 ) -> ScaleInProtectionResult | None:
-    """격리 성공 뒤 보조 보호 쓰기. 기록할 결과가 없으면 None(NOT_MANAGED·옛 백업).
+    """격리 성공 뒤 보조 보호 쓰기. 기록할 결과가 없으면 None(NOT_MANAGED·대상 불일치).
 
-    쓰기는 **이전 값이 확정된 managed 멤버**에만 한다. UNKNOWN은 쓰지 않고 잔여를 남긴다.
+    쓰기는 **이전 값이 확정된 managed 멤버**에만 한다. UNKNOWN·옛 백업(None)은 쓰지 않고 잔여를 남긴다.
     이미 보호돼 있었다는 백업 값은 현재를 말하지 않는다 — 현재 멤버십과 값을 읽어 확인한 뒤에만
     APPLIED다(호출 최대 3회: 조회·쓰기·확인).
     """
     target = parse_arn(target_arn)
-    if target is None or target.resource_type != "instance" or protection is None:
+    if target is None or target.resource_type != "instance":
         return None
     instance_id = target.resource_id
-    if protection.status == "UNKNOWN":
+    # 옛 백업(필드 없음)은 UNKNOWN과 같다 — ADR-0008 §8-1. 저장된 백업은 바꾸지 않는다.
+    if protection is None or protection.status == "UNKNOWN":
         return _protection_result(
             "PROTECT",
             "NOT_ATTEMPTED",

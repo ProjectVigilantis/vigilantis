@@ -2,7 +2,7 @@
 
 - **Status**: Accepted (2026-09-02 — 안성일(AI·Architect) 검토 완료, PR #253 승인)
 - **Date**: 2026-09-02
-- **Amended**: 2026-10-13 — §8 신설: ASG scale-in 보호 이전 값·보호 결과의 자리와 서비스 전환 기록(하단 "개정 이력" 참조 — 2026-10-12 1차 개정 포함, 핵심 결정 불변)
+- **Amended**: 2026-10-12(1차 — §5 SG/TG 백업에 ENI별 원래 SG `network_interfaces` 추가) · 2026-10-13(2차 — §8 신설: ASG scale-in 보호 이전 값·보호 결과와 서비스 전환 기록). 하단 "개정 이력" 참조, **핵심 결정 불변**
 - **Deciders**: 김세혁(PM/Infra — `backup.py`·`rollback.py`·실행 경로 소유자) 결정, 안성일(AI·Architect — `ExecutionStep` 계약 소유자) 검토 완료
 - **Refs**: 4주차 P0 카드 `[DOCS] ADR-0008 백업 레코드 수명주기·드리프트·복구 무결성`
 
@@ -227,7 +227,7 @@ ADR-0004 정책 ③을 실행 규칙으로 못 박는다.
 - **2026-10-12 (1차 개정)** — §5 백업 payload 표의 `SAVE_CURRENT_SG_AND_TG_MAPPING`에 `network_interfaces[]`(ENI별 원래 SG, DeviceIndex 순, 첫 원소 = 주 ENI)를 필수 항목으로 더한다.
   격리 실행(`execute_ec2_isolate`)이 인스턴스의 모든 ENI를 격리 SG로 바꾸는데, 종전 표의 `security_group_ids[]`는 ENI 하나의 목록이라 ENI가 둘 이상인 인스턴스를 원상 복구할 수 없었다.
   `security_group_ids[]`는 주 ENI의 목록으로 남겨 가드레일 ④(`_precheck_unisolate`)의 대조 계약을 바꾸지 않는다. 계약 소재는 `packages/schemas/backups.py`의 `SgAndTgMappingBackup`이다. 수명주기·드리프트·재개 단위 등 **핵심 결정은 바뀌지 않는다.**
-- **2026-10-13 (2차 개정)** — §8을 신설한다.
+- **2026-10-13 (2차 개정)** — §8을 신설한다. 김세혁 결정 · [PR #466 승인](https://github.com/ProjectVigilantis/vigilantis/pull/466#pullrequestreview-5498023210).
   - **이유**: #446 서비스 전환에서 격리 대상이 ASG 멤버일 수 있게 되면서, 격리 중 scale-in 보호의 이전 값·결과와 서비스의 원래 경로를 기록할 자리가 필요해졌다.
   - **바뀌는 것**: SG/TG 백업의 부가 항목 `scale_in_protection`(기존 백업의 부재 = `UNKNOWN`), 실행 행의 보호 결과, 보호 쓰기·복원 순서(§8-1–§8-3), 백업과 별개인 불변 서비스 전환 기록과 불확실 변경의 재생 금지(§8-4).
   - **바뀌지 않는 것**: 한 실행에 백업 하나·생성 후 불변·삭제 없음(§1·§2), 나이가 아닌 상태 대조(§3), SG/TG 원복 값과 가드레일 ④의 대조 계약(§5), 재개 단위(§7).

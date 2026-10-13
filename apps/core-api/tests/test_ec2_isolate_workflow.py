@@ -889,7 +889,13 @@ def test_retry_with_a_legacy_bound_backup_never_touches_the_asg(aws, repo):
     execution(repo, backup_record_id=record.backup_record_id)
     assert workflows.run_ec2_isolate_execution(repo.db, "exec-1").succeeded
     assert not [n for n, _ in aws.calls if n.startswith("autoscaling.")]
-    assert repo.results == {}
+    final = stored(repo, "exec-1")
+    assert (final["outcome"], final["reason"], final["residual"]) == (
+        "NOT_ATTEMPTED",
+        "PRIOR_STATE_UNKNOWN",
+        True,
+    )
+    assert final["asg_name"] is None
 
 
 def test_confirmed_rejection_replaces_the_same_attempts_intent(aws, repo):
@@ -1054,6 +1060,26 @@ def test_judged_isolate_success_names_a_residual_when_protection_never_ran(aws, 
         "EXECUTION_INTERRUPTED",
         True,
     )
+
+
+def test_judged_isolate_success_names_a_residual_for_a_legacy_backup(aws, repo):
+    legacy = mapping().model_dump(mode="json", exclude={"scale_in_protection"})
+    record = stored_backup(repo, payload=legacy)
+    execution(repo, backup_record_id=record.backup_record_id)
+    aws.set("ec2.describe_instances", ISOLATED)
+    aws.set("elbv2.describe_target_health", DRAINING)
+
+    judgement = workflows.judge_ec2_isolate(repo.db, "exec-1")
+
+    assert judgement.next_status is ExecutionStatus.SUCCESS
+    assert not [n for n, _ in aws.calls if n.startswith("autoscaling.")]
+    residual = stored(repo, "exec-1")
+    assert (
+        residual["phase"],
+        residual["reason"],
+        residual["residual"],
+        residual["asg_name"],
+    ) == ("PROTECT", "EXECUTION_INTERRUPTED", True, None)
 
 
 def test_judged_unisolate_success_names_a_residual_when_restore_never_ran(aws, repo):

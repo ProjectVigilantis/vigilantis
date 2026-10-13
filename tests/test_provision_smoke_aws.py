@@ -114,9 +114,8 @@ _RUNTIME_DIRECT = {
     "ec2:CreateLaunchTemplate",
     "autoscaling:CreateAutoScalingGroup",
     "autoscaling:PutScalingPolicy",
+    "autoscaling:SetInstanceProtection",
 }
-# #446 서비스 전환이 새로 부르는 유일한 앱 권한(다른 작업자의 보호 코드가 아직 없어도 정책은 이것만 더한다)
-_SERVICE_446_ACTIONS = {"autoscaling:SetInstanceProtection"}
 # 앱 키가 어떤 정책 변형에서도 가지면 안 되는 작업(삭제·폐기·부착·역할 변경·ELB/DNS)
 _NEVER_GRANTED = (
     "autoscaling:DetachLoadBalancerTargetGroups",
@@ -201,7 +200,7 @@ def _active_dependencies(optional: bool = False) -> set[str]:
 
 def test_policy_grants_only_required_mutations_and_dependencies():
     """허용은 직접 작업 + 트리거가 코드에 있는 명시적 의존 권한뿐이다(PassRole 제외 — 아래)."""
-    allowed = _direct_actions() | _active_dependencies() | _SERVICE_446_ACTIONS
+    allowed = _direct_actions() | _active_dependencies()
     extra = sorted(
         a for a in _granted() if a not in smoke.READ_ACTIONS and a not in allowed
     )

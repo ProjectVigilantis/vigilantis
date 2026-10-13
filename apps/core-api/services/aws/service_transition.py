@@ -397,10 +397,21 @@ def _listener(elbv2: Any, listener_arn: str) -> dict | None:
     )
 
 
+def _load_balancer_listeners(elbv2: Any, load_balancer_arn: str) -> list[dict]:
+    """ALB의 리스너 전부(페이지 끝까지). ALB가 없다는 확정 응답(LoadBalancerNotFound)이면 빈 목록 —
+    권한 거부·스로틀링·5xx 같은 다른 조회 실패는 부재가 아니라 그대로 올린다."""
+    try:
+        return _elb_pages(
+            elbv2.describe_listeners, "Listeners", LoadBalancerArn=load_balancer_arn
+        )
+    except ClientError as exc:
+        if _not_found(exc):
+            return []
+        raise
+
+
 def _listener_on_port(elbv2: Any, load_balancer_arn: str, port: int) -> dict | None:
-    listeners = _elb_pages(
-        elbv2.describe_listeners, "Listeners", LoadBalancerArn=load_balancer_arn
-    )
+    listeners = _load_balancer_listeners(elbv2, load_balancer_arn)
     return next((item for item in listeners if item.get("Port") == port), None)
 
 
@@ -410,12 +421,18 @@ def _non_default_rules(elbv2: Any, listener_arn: str) -> list[dict]:
 
 
 def _target_states(elbv2: Any, target_group_arn: str) -> tuple[TargetState, ...]:
-    descriptions = (
-        elbv2.describe_target_health(TargetGroupArn=target_group_arn).get(
-            "TargetHealthDescriptions"
+    """TG의 등록 대상. TG가 없다는 확정 응답(TargetGroupNotFound)이면 빈 튜플 — 다른 조회 실패는 올린다."""
+    try:
+        descriptions = (
+            elbv2.describe_target_health(TargetGroupArn=target_group_arn).get(
+                "TargetHealthDescriptions"
+            )
+            or []
         )
-        or []
-    )
+    except ClientError as exc:
+        if _not_found(exc):
+            return ()
+        raise
     states = []
     for description in descriptions:
         health = description.get("TargetHealth") or {}
@@ -1632,7 +1649,10 @@ def _external_image_instances(
 
 
 def _snapshot_image_users(ec2: Any, snapshot_ids: list[str]) -> list[str]:
-    """지금 등록돼 있는 내 계정 AMI 중 이 스냅숏을 매핑한 것(소유 AMI 포함)."""
+    """지금 등록돼 있는 내 계정 AMI 중 이 스냅숏을 매핑한 것(소유 AMI 포함).
+
+    등록 해제가 확정된 기록(State=deregistered)만 뺀다 — 비활성·상태 없음은 등록된 것으로 센다.
+    """
     users = _pages(
         ec2.describe_images,
         "Images",
@@ -1640,7 +1660,7 @@ def _snapshot_image_users(ec2: Any, snapshot_ids: list[str]) -> list[str]:
         IncludeDisabled=True,
         Filters=[{"Name": "block-device-mapping.snapshot-id", "Values": snapshot_ids}],
     )
-    return sorted(i["ImageId"] for i in users)
+    return sorted(i["ImageId"] for i in users if i.get("State") != "deregistered")
 
 
 def shared_resource_refs(
@@ -1951,8 +1971,23 @@ def observe_resource(
             "LaunchTemplates",
         )
     if kind == "image":
-        images = c.ec2.describe_images(ImageIds=[resource_ref]).get("Images") or []
-        return any(i.get("State") not in ("deregistered", None) for i in images)
+        # 등록 해제는 State=deregistered로 잠시 보이다 빈 결과, 끝내 InvalidAMIID.NotFound가 된다 —
+        # 셋 다 '해제됨'이다. 비활성(disabled) AMI는 기본 응답에서 빠지므로 함께 읽는다(아직 등록돼 있다).
+        try:
+            images = (
+                c.ec2.describe_images(
+                    ImageIds=[resource_ref], IncludeDisabled=True
+                ).get("Images")
+                or []
+            )
+        except ClientError as exc:
+            if _not_found(exc):
+                return False
+            raise
+        states = [i.get("State") for i in images]
+        if None in states:
+            return None  # 상태 없는 기록은 해제의 근거가 아니다 — 모름(관문을 풀지 않는다)
+        return any(state != "deregistered" for state in states)
     if kind == "snapshot":
         return _exists(
             lambda: c.ec2.describe_snapshots(SnapshotIds=[resource_ref]), "Snapshots"
@@ -2145,11 +2180,7 @@ def cleanup_inventory(
             ]
             if foreign_lbs:
                 blockers.append(f"전환 TG를 다른 ALB가 참조합니다: {foreign_lbs}")
-            for other in _elb_pages(
-                c.elbv2.describe_listeners,
-                "Listeners",
-                LoadBalancerArn=plan.load_balancer_arn,
-            ):
+            for other in _load_balancer_listeners(c.elbv2, plan.load_balancer_arn):
                 if other.get("ListenerArn") in (
                     listener_arn,
                     plan.original_route.listener_arn,
@@ -2292,13 +2323,16 @@ def cleanup_inventory(
         if image.get("OwnerId") == account and _owned(
             _tags(image.get("Tags")), as_plan
         ):
-            image_id = image["ImageId"]
-            items.append(("image", image_id, "deregister_image"))
+            # 해제가 확정된 소유 AMI의 매핑도 스냅숏 출처로 읽는다(태그 없는 매핑 스냅숏을 놓치지 않는다)
             mapped |= {
                 str(m["Ebs"]["SnapshotId"])
                 for m in image.get("BlockDeviceMappings") or ()
                 if isinstance(m.get("Ebs"), Mapping) and m["Ebs"].get("SnapshotId")
             }
+            if image.get("State") == "deregistered":
+                continue  # 등록 해제가 확정됐다 — 처분할 것이 없고 다시 보내지 않는다
+            image_id = image["ImageId"]
+            items.append(("image", image_id, "deregister_image"))
         else:
             unknown.append(
                 {
@@ -2332,14 +2366,23 @@ def cleanup_inventory(
             ],
         )
     }
-    missing = sorted(mapped - set(tagged_snapshots))
-    if missing:
-        for s in _pages(
-            c.ec2.describe_snapshots,
-            "Snapshots",
-            OwnerIds=["self"],
-            SnapshotIds=missing,
-        ):
+    # 태그로 못 찾은 매핑 스냅숏은 하나씩 읽는다 — ID 하나라도 없으면 호출 전체가 NotFound다. 지워졌다는
+    # 확정 응답(해제된 AMI 기록에 매핑만 남음)은 처분할 것이 없고, 응답에 없으면 아래에서 모름으로 남긴다.
+    deleted: set[str] = set()
+    for snapshot_id in sorted(mapped - set(tagged_snapshots)):
+        try:
+            found = (
+                c.ec2.describe_snapshots(
+                    OwnerIds=["self"], SnapshotIds=[snapshot_id]
+                ).get("Snapshots")
+                or []
+            )
+        except ClientError as exc:
+            if not _not_found(exc):
+                raise
+            deleted.add(snapshot_id)
+            continue
+        for s in found:
             tagged_snapshots[s["SnapshotId"]] = s
     snapshot_ids = sorted(tagged_snapshots)
     for snapshot_id in snapshot_ids:
@@ -2353,7 +2396,7 @@ def cleanup_inventory(
                     "reason": "소유 태그 불일치(AMI 매핑)",
                 }
             )
-    for snapshot_id in sorted(mapped - set(tagged_snapshots)):
+    for snapshot_id in sorted(mapped - set(tagged_snapshots) - deleted):
         unknown.append(
             {
                 "kind": "snapshot",

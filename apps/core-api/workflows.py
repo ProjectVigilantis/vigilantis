@@ -785,11 +785,12 @@ def _add_interrupted_residual(
     """판정이 SUCCESS로 확정하는 끊긴 실행에서, 보조 조치 기록이 없을 때 잔여를 명시한다.
 
     **AWS를 부르지도 마저 하지도 않는다**(판정이 실행이 되지 않는다 — ADR-0008 §7). 결과만
-    저장하며 commit은 close_execution이 한다. 보호가 필요 없던 경우(NOT_MANAGED·옛 백업)와,
+    저장하며 commit은 close_execution이 한다. 옛 백업(None)은 UNKNOWN과 같다(ADR-0008 §8-1).
+    보호가 필요 없던 경우(NOT_MANAGED)와,
     복원이라면 원본에 "쓰기가 시작됐을 수 있다"는 근거가 없던 경우는 남기지 않는다.
     """
     target = parse_arn(execution.target_arn)
-    if target is None or protection is None:
+    if target is None:
         return
     if (
         executions_repo.get_scale_in_protection_result(db, execution.execution_id)
@@ -797,7 +798,7 @@ def _add_interrupted_residual(
     ):
         return
     if phase == "PROTECT":
-        needed = protection.status in ("UNKNOWN", "MANAGED")
+        needed = protection is None or protection.status in ("UNKNOWN", "MANAGED")
     else:
         parent = (
             _parse_protection_result(
@@ -809,7 +810,8 @@ def _add_interrupted_residual(
             else None
         )
         needed = (
-            protection.status == "MANAGED"
+            protection is not None
+            and protection.status == "MANAGED"
             and parent is not None
             and parent.may_have_changed_protection
         )
@@ -819,7 +821,7 @@ def _add_interrupted_residual(
         phase=phase,
         outcome="NOT_ATTEMPTED",
         reason="EXECUTION_INTERRUPTED",
-        asg_name=protection.asg_name,
+        asg_name=protection.asg_name if protection is not None else None,
         instance_id=target.resource_id,
         write_may_have_begun=False,
         residual=True,
@@ -835,7 +837,7 @@ def _add_interrupted_residual(
             "phase": phase,
             "outcome": result.outcome,
             "reason": result.reason,
-            "asg_name": protection.asg_name,
+            "asg_name": result.asg_name,
         },
     )
 

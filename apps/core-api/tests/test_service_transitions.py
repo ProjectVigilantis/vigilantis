@@ -354,6 +354,22 @@ class World:
         ]
         self.instances[instance_id]["SecurityGroups"] = [{"GroupId": SG_ISO}]
 
+    def smoke_down(self):
+        """scripts/provision_smoke_aws.py down이 남기는 현물. 앱 ASG(부착 TG에서 멤버를 빼고 종료)·
+        공유 ALB(리스너 포함)·원래 TG·VPC 인스턴스·vigilantis-lt-* 시작 템플릿을 지운다. 이름이 다른
+        전환 TG와 AMI·스냅숏은 남는다(_DOWN_IMAGE_WARNING). SG·서브넷은 이 경로가 읽지 않아 둔다."""
+        self.group = None
+        self.load_balancer = None
+        self.listeners.clear()
+        self.rules.clear()
+        self.target_groups.pop(ORIGINAL_TG)
+        self.targets = {arn: {} for arn in self.targets if arn != ORIGINAL_TG}
+        for item in self.instances.values():
+            item["State"]["Name"] = "terminated"
+        self.templates.clear()
+        self.volumes.clear()
+        self._refresh_load_balancer_refs()
+
     # ---------------- sts
     def sts_get_caller_identity(self):
         return {"Account": ACCOUNT}
@@ -454,9 +470,15 @@ class World:
     def ec2_describe_images(
         self, Owners=None, IncludeDisabled=None, Filters=None, ImageIds=None
     ):
+        """실제 EC2처럼 — 없는 ImageIds는 InvalidAMIID.NotFound, 비활성(disabled) AMI는
+        IncludeDisabled 없이는 응답에서 빠진다."""
         images = list(self.images.values())
         if ImageIds is not None:
-            images = [i for i in images if i["ImageId"] in ImageIds]
+            if any(i not in self.images for i in ImageIds):
+                raise client_error("InvalidAMIID.NotFound")
+            images = [self.images[i] for i in ImageIds]
+        if not IncludeDisabled:
+            images = [i for i in images if i.get("State") != "disabled"]
         for item in Filters or ():
             if item["Name"] == "name":
                 images = [i for i in images if i["Name"] in item["Values"]]
@@ -531,16 +553,21 @@ class World:
         self.snapshots.pop(SnapshotId)
 
     # ---------------- elbv2
+    def _require_load_balancer(self, *arns):
+        """없는 ALB를 지목하면 실제 ELBv2처럼 LoadBalancerNotFound다(빈 목록이 아니다)."""
+        if self.load_balancer is None or any(a != LB_ARN for a in arns):
+            raise client_error("LoadBalancerNotFound")
+
     def elbv2_describe_load_balancers(self, LoadBalancerArns):
-        return {
-            "LoadBalancers": [self.load_balancer] if LB_ARN in LoadBalancerArns else []
-        }
+        self._require_load_balancer(*LoadBalancerArns)
+        return {"LoadBalancers": [self.load_balancer]}
 
     def elbv2_describe_listeners(self, ListenerArns=None, LoadBalancerArn=None):
         if ListenerArns is not None:
             if not all(a in self.listeners for a in ListenerArns):
                 raise client_error("ListenerNotFound")
             return {"Listeners": [self.listeners[a] for a in ListenerArns]}
+        self._require_load_balancer(LoadBalancerArn)
         return {
             "Listeners": [
                 l
@@ -568,13 +595,18 @@ class World:
         return {"TargetGroups": found}
 
     def elbv2_describe_target_health(self, TargetGroupArn):
-        """실제 ALB처럼 — 리스너가 쓰지 않는 TG나 ALB에 꺼진 AZ의 대상은 unused(Target.NotInUse),
-        running이 아닌 인스턴스는 unused(Target.InvalidState)다. draining은 그대로 둔다."""
-        group = self.target_groups.get(TargetGroupArn)
-        in_use = bool(group and group["LoadBalancerArns"])
-        zones = {z["ZoneName"] for z in self.load_balancer["AvailabilityZones"]}
+        """실제 ALB처럼 — 없는 TG는 TargetGroupNotFound, 리스너가 쓰지 않는 TG나 ALB에 꺼진 AZ의
+        대상은 unused(Target.NotInUse), running이 아닌 인스턴스는 unused(Target.InvalidState)다.
+        draining은 그대로 둔다."""
+        if TargetGroupArn not in self.target_groups:
+            raise client_error("TargetGroupNotFound")
+        in_use = bool(self.target_groups[TargetGroupArn]["LoadBalancerArns"])
+        zones = {
+            z["ZoneName"]
+            for z in (self.load_balancer or {}).get("AvailabilityZones", ())
+        }
         descriptions = []
-        for instance_id, state in self.targets[TargetGroupArn].items():
+        for instance_id, state in self.targets.get(TargetGroupArn, {}).items():
             health = {"State": state}
             instance = self.instances.get(instance_id)
             if state != "draining" and instance is not None:
@@ -1192,6 +1224,180 @@ def test_inventory_blocks_foreign_refs_and_active_route():
     assert any("부착" in b for b in inventory.blockers)
     ids = {i.resource_id for i in inventory.manifest.items}
     assert not ids & {LB_ARN, LISTENER_ARN, ORIGINAL_TG, SOURCE, WEB1, WEB2}
+
+
+@pytest.mark.parametrize("transition_tg_left", [True, False])
+def test_inventory_after_smoke_down_reads_deleted_shared_resources_as_absent(
+    transition_tg_left,
+):
+    """down이 공유 ALB(리스너 포함)·원래 TG를 지운 뒤에도 재고가 돈다.
+
+    지워진 공유 자원은 '없음'으로 읽어 보존 목록에만 남고, 정리 대상은 남은 실행 자원뿐이다.
+    """
+    from services.aws import service_transition as aws
+
+    world = World(str(uuid.uuid4()))
+    c, plan, tg = prepared(world)
+    world.smoke_down()
+    if not transition_tg_left:
+        world.target_groups.pop(tg)
+        world.targets.pop(tg)
+    inventory = aws.cleanup_inventory(
+        c, world.as_plan, [plan], retention_decision="delete_execution_resources"
+    )
+    remaining = [("target_group", tg)] if transition_tg_left else []
+    assert [(i.kind, i.resource_id) for i in inventory.manifest.items] == [
+        *remaining,
+        ("image", AMI),
+        ("snapshot", SNAP),
+    ]
+    assert inventory.blockers == [] and inventory.unknown == []
+    assert inventory.counts["original_route_members"] == 0
+    shared = {LB_ARN, LISTENER_ARN, ORIGINAL_TG}
+    assert shared <= {r["id"] for r in inventory.retained}
+    assert not shared & set(inventory.manifest.resource_ids())
+    assert (
+        aws.observe_resource(
+            c, plan, "validation_listener", f"{LB_ARN}:8080", {"port": 8080}
+        )
+        is False
+    )
+
+
+def _fail_nth(world, handler_name, nth, error, when=lambda kwargs: True):
+    """대역 작업에서 when에 맞는 n번째 호출만 error로 끊는다 — 앞선 호출은 그대로 답한다."""
+    real, seen = getattr(world, handler_name), []
+
+    def handler(**kwargs):
+        if when(kwargs):
+            seen.append(kwargs)
+            if len(seen) == nth:
+                raise error
+        return real(**kwargs)
+
+    setattr(world, handler_name, handler)
+
+
+def _load_balancer_scoped(kwargs):
+    return kwargs.get("LoadBalancerArn") is not None
+
+
+ABSENCE_READS = [
+    pytest.param(
+        "elbv2_describe_listeners",
+        1,
+        _load_balancer_scoped,
+        "LoadBalancerNotFound",
+        lambda aws, c, plan, world: aws._listener_on_port(
+            c.elbv2, LB_ARN, plan.validation_listener_port
+        ),
+        lambda listener: listener is None,
+        id="validation_listener_on_port",
+    ),
+    pytest.param(
+        "elbv2_describe_listeners",
+        2,  # 재고의 두 번째 ALB 리스너 나열 = 전환 TG를 참조하는 다른 리스너 검사
+        _load_balancer_scoped,
+        "LoadBalancerNotFound",
+        lambda aws, c, plan, world: aws.cleanup_inventory(
+            c, world.as_plan, [plan], retention_decision="delete_execution_resources"
+        ),
+        lambda inventory: inventory.blockers == [],
+        id="inventory_listener_scan",
+    ),
+    pytest.param(
+        "elbv2_describe_target_health",
+        1,
+        lambda kwargs: True,
+        "TargetGroupNotFound",
+        lambda aws, c, plan, world: aws._target_states(c.elbv2, ORIGINAL_TG),
+        lambda targets: targets == (),
+        id="original_target_health",
+    ),
+    pytest.param(
+        "ec2_describe_images",
+        1,
+        lambda kwargs: True,
+        "InvalidAMIID.NotFound",
+        lambda aws, c, plan, world: aws.observe_resource(
+            c, plan, "image", AMI, {"image_id": AMI}
+        ),
+        lambda present: present is False,
+        id="image_reconciliation",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("code", "status"),
+    [(None, 400), ("AccessDenied", 403), ("Throttling", 400), ("InternalFailure", 500)],
+)
+@pytest.mark.parametrize(
+    ("handler", "nth", "when", "not_found", "read", "absent"), ABSENCE_READS
+)
+def test_only_a_confirmed_not_found_reads_as_absent(
+    handler, nth, when, not_found, read, absent, code, status
+):
+    """확정된 NotFound만 '없음'이다. 권한 거부·스로틀링·5xx는 부재가 아니라 판정 불가로 올라간다."""
+    from services.aws import service_transition as aws
+
+    world = World(str(uuid.uuid4()))
+    c, plan, _ = prepared(world)
+    _fail_nth(world, handler, nth, client_error(code or not_found, status), when)
+    if code is None:
+        assert absent(read(aws, c, plan, world))
+        return
+    with pytest.raises(ClientError) as raised:
+        read(aws, c, plan, world)
+    assert raised.value.response["Error"]["Code"] == code
+
+
+UNTAGGED_SNAP = "snap-0aaaaaaaaaaaaaaa3"
+
+
+@pytest.mark.parametrize(
+    ("state", "registered"),
+    [("available", True), ("disabled", True), (None, True), ("deregistered", False)],
+)
+def test_only_a_confirmed_deregistered_image_leaves_inventory_and_snapshot_references(
+    state, registered
+):
+    """State=deregistered로 확정된 AMI만 정리 대상·스냅숏 사용자에서 빠진다(다시 해제하지 않고 스냅숏
+    삭제를 막지 않는다). 비활성·사용 가능·상태 없음은 등록된 AMI로 남아 보호한다. 해제된 소유 AMI의
+    매핑도 스냅숏 출처로 계속 읽는다 — 태그 없는 매핑 스냅숏이 조용히 사라지지 않는다."""
+    from services.aws import service_transition as aws
+
+    world = World(str(uuid.uuid4()))
+    c, plan, _ = prepared(world)
+    world.snapshots[UNTAGGED_SNAP] = {"SnapshotId": UNTAGGED_SNAP, "Tags": []}
+    world.images[AMI]["BlockDeviceMappings"].append(
+        {"Ebs": {"SnapshotId": UNTAGGED_SNAP}}
+    )
+    world.images[FOREIGN_AMI] = {
+        "ImageId": FOREIGN_AMI,
+        "Name": "someone-else",
+        "OwnerId": ACCOUNT,
+        "Tags": [],
+        "BlockDeviceMappings": [{"Ebs": {"SnapshotId": SNAP}}],
+    }
+    for image_id in (AMI, FOREIGN_AMI):
+        world.images[image_id]["State"] = state
+
+    inventory = aws.cleanup_inventory(
+        c, world.as_plan, [plan], retention_decision="delete_execution_resources"
+    )
+    items = {(i.kind, i.resource_id) for i in inventory.manifest.items}
+    assert (("image", AMI) in items) is registered
+    assert ("snapshot", SNAP) in items
+    assert {
+        "kind": "snapshot",
+        "id": UNTAGGED_SNAP,
+        "reason": "소유 태그 불일치(AMI 매핑)",
+    } in inventory.unknown
+    assert any(FOREIGN_AMI in b for b in inventory.blockers) is registered
+    refs = aws.shared_resource_refs(c, _item("delete_snapshot", SNAP), world.as_plan)
+    users = {i for i in (AMI, FOREIGN_AMI) if any(i in r for r in refs)}
+    assert users == ({AMI, FOREIGN_AMI} if registered else set()), refs
 
 
 OTHER_LT = "lt-0bbbbbbbbbbbbbbb1"
@@ -2789,3 +2995,188 @@ def test_status_return_and_cleanup_are_not_gated_by_missing_quota_or_rto(db, sce
     assert back["success"] and back["route_restored"], back
     _, result = _cleanup_round(db, world, DELETE_RETENTION, transition_id=tid)
     assert result["success"], result
+
+
+# ============================================================ down 뒤 정리·불확실 AMI·세션·결속 경합
+@pytest.mark.parametrize("transition_tg_left", [True, False])
+def test_status_and_cleanup_after_smoke_down_reach_the_remaining_image_and_snapshot(
+    db, scene, transition_tg_left
+):
+    """down이 공유 ALB·원래 TG를 지운 뒤 — _DOWN_IMAGE_WARNING이 안내하는 status·cleanup이 돌고
+    남은 전환 TG·AMI·스냅숏만 걷는다. 지워진 공유 자원은 '없음'으로 읽고 건드리지 않는다."""
+    world = scene()
+    tid = _returned(db, world)
+    tg = next(arn for arn in world.target_groups if arn != ORIGINAL_TG)
+    world.smoke_down()
+    if not transition_tg_left:
+        world.target_groups.pop(tg)
+        world.targets.pop(tg)
+
+    status = run(db, world, "status", transition_id=tid)
+    assert status["success"], status
+    live = status["live"]
+    assert live["route_phase"] == "drifted"
+    assert live["production_route"]["unsupported"] == "리스너 없음"
+    assert live["validation_listener"]["arn"] is None
+    assert live["original_route_targets"] == []
+    assert live["target_group"]["arn"] == (tg if transition_tg_left else None)
+    assert status["unresolved_operations"] == 0
+
+    before = len(world.mutations())
+    inventory, result = _cleanup_round(db, world, DELETE_RETENTION, transition_id=tid)
+    remaining = [("target_group", tg)] if transition_tg_left else []
+    assert [(i["kind"], i["resource_id"]) for i in inventory["pending"]] == [
+        *remaining,
+        ("image", AMI),
+        ("snapshot", SNAP),
+    ]
+    assert result["success"] and result["complete"], result
+    assert [op for op, _ in world.mutations()[before:]] == [
+        *(["delete_target_group"] if transition_tg_left else []),
+        "deregister_image",
+        "delete_snapshot",
+    ]
+    assert AMI not in world.images and SNAP not in world.snapshots
+    assert not world.target_groups
+
+
+@pytest.mark.parametrize(
+    ("aftermath", "reconciled"),
+    [
+        ("gone", "EFFECT_OBSERVED"),  # 끝내 InvalidAMIID.NotFound
+        # 해제 직후 잠시 State=deregistered로 보인다
+        ("deregistered_record", "EFFECT_OBSERVED"),
+        ("still_available", "EFFECT_NOT_OBSERVED"),  # 요청이 반영되지 않았다
+        # 반영되지 않았고 그새 비활성화됐다 — 기본 응답에서 빠지는 AMI
+        ("disabled", "EFFECT_NOT_OBSERVED"),
+        ("missing_state", None),  # 기록은 있으나 State가 없다 — 해제로 추정하지 않는다(모름)
+    ],
+)
+def test_uncertain_image_deregistration_reconciles_only_from_what_ec2_returns(
+    db, scene, aftermath, reconciled
+):
+    """응답을 잃은 deregister_image는 다시 보내지 않는다 — status가 읽은 현물로만 관문을 푼다."""
+    observed = reconciled == "EFFECT_OBSERVED"
+    world = scene()
+    tid = _returned(db, world)
+    _until_launch_resources(db, world, tid)
+    record = dict(world.images[AMI])
+    world.failures["deregister_image"] = EndpointConnectionError(
+        endpoint_url="https://ec2"
+    )
+    if observed:
+        world.apply_before_failure.add("deregister_image")
+    uncertain = _cleanup_once(db, world, tid)
+    assert uncertain["success"] is False
+    step = uncertain["steps"][-1]
+    assert (step["aws_operation"], step["state"]) == (
+        "ec2.deregister_image",
+        "UNCERTAIN",
+    )
+    if aftermath == "deregistered_record":
+        world.images[AMI] = {**record, "State": "deregistered"}
+    elif aftermath == "disabled":
+        world.images[AMI]["State"] = "disabled"
+    elif aftermath == "missing_state":
+        del world.images[AMI]["State"]
+
+    status = run(db, world, "status", transition_id=tid)
+    assert status["success"], status
+    (entry,) = status["reconciliation"]
+    assert entry["reconciled_state"] == reconciled
+    assert entry["gate_released"] is observed
+    (journal,) = [
+        op for op in status["journal"] if op["aws_operation"] == "ec2.deregister_image"
+    ]
+    assert journal["reconciled_state"] == reconciled
+    assert status["unresolved_operations"] == (0 if observed else 1)
+    assert SNAP in world.snapshots
+
+    if observed:
+        # 다음 승인 정리는 해제된 AMI를 다시 보내지 않고 남은 스냅숏만 지워 끝난다
+        before = len(world.mutations())
+        result = _cleanup_once(db, world, tid)
+        assert result["success"] and result["complete"], result
+        assert [op for op, _ in world.mutations()[before:]] == ["delete_snapshot"]
+        assert SNAP not in world.snapshots
+    else:
+        blocked = run(
+            db, world, "cleanup-plan", transition_id=tid, options=DELETE_RETENTION
+        )
+        assert blocked["cleanup_allowed"] is False and any(
+            "결과를 모르는 변경" in b for b in blocked["blockers"]
+        )
+        assert SNAP in world.snapshots
+    assert len(world.mutations("deregister_image")) == 1  # 재전송 없음
+
+
+@pytest.mark.parametrize("spoil", ["wrong_account", "wrong_region", "unknown_account"])
+def test_status_does_not_reconcile_under_a_mismatched_or_unknown_session(
+    db, scene, spoil
+):
+    """다른 계정·리전(또는 확인하지 못한 세션)에서 읽은 존재·부재는 계획 자원의 사실이 아니다 —
+    대조하지도 관문을 풀지도 않는다. 맞는 세션으로 다시 보면 그때 대조한다."""
+    world = scene()
+    tid = _planned(db, world)
+    world.failures["create_target_group"] = EndpointConnectionError(
+        endpoint_url="https://elb"
+    )
+    world.apply_before_failure.add("create_target_group")
+    first = run(db, world, "prepare", transition_id=tid)
+    assert first["steps"][0]["state"] == "UNCERTAIN"
+
+    clients = world.clients()
+    if spoil == "wrong_account":
+        world.sts_get_caller_identity = lambda: {"Account": "210987654321"}
+    elif spoil == "unknown_account":
+        world.sts_get_caller_identity = dict
+    else:
+        clients["elbv2"].meta.region_name = "us-east-1"
+    skipped = run(db, world, "status", clients=clients, transition_id=tid)
+    assert skipped["success"], skipped
+    assert not all(check["passed"] for check in skipped["live"]["session"])
+    (entry,) = skipped["reconciliation"]
+    assert "세션" in entry["skipped"]
+    assert skipped["unresolved_operations"] == 1
+    (op,) = skipped["journal"]
+    assert op["reconciled_state"] is None and op["unresolved"]
+
+    world.__dict__.pop("sts_get_caller_identity", None)
+    blocked = run(db, world, "prepare", transition_id=tid)
+    assert blocked["error"] == "unresolved_operation"
+    assert len(world.mutations("create_target_group")) == 1
+    observed = run(db, world, "status", transition_id=tid)
+    assert observed["reconciliation"][0]["reconciled_state"] == "EFFECT_OBSERVED"
+
+
+def test_listener_binding_opened_before_the_plan_lock_stores_no_losing_plan(
+    db, scene, monkeypatch
+):
+    """plan이 읽은 뒤·잠금을 잡기 전에 다른 실행의 시도가 같은 운영 리스너를 연다 — 결속을 잠금
+    아래에서 다시 읽으므로 진 쪽 계획·관측을 저장하지 않는다."""
+    from db import models
+    from db.repositories import service_transitions as repo
+
+    first = scene()
+    first_tid = _planned(db, first)
+    second = scene()
+    real_claim = repo.mutation_claim
+    opened: list[bool] = []
+
+    @contextmanager
+    def claim_after_first_opens(session, identities):
+        if not opened:
+            opened.append(True)  # second의 plan이 읽기를 마치고 잠금을 잡기 직전
+            assert run(db, first, "prepare", transition_id=first_tid)["success"]
+        with real_claim(session, identities) as held:
+            yield held
+
+    monkeypatch.setattr(repo, "mutation_claim", claim_after_first_opens)
+    lost = run(
+        db, second, "plan", execution_id=second.execution_id, options=plan_options()
+    )
+    assert opened
+    assert lost["error"] == "listener_bound" and first_tid in lost["detail"], lost
+    assert second.mutations() == [] and len(first.mutations()) == 3
+    for model in (models.ServiceTransition, models.ServiceTransitionObservation):
+        assert db.query(model).filter_by(execution_id=second.execution_id).count() == 0

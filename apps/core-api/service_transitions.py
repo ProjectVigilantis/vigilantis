@@ -664,12 +664,6 @@ def _plan(
             "replacement_required",
             f"앞선 시도가 있습니다 — replaces_transition_id로 현재 시도 {leaf}를 명시합니다",
         )
-    bound = _listener_bound_elsewhere(db, options.listener_arn, execution_id)
-    if bound:
-        raise _Refusal(
-            "listener_bound",
-            f"같은 운영 리스너에 열린 다른 실행의 시도가 있습니다: {bound}",
-        )
     previous = next((a.plan for a in attempts if a.transition_id == leaf), None)
     claim = _Context(
         execution_id, execution.status, as_plan, attempts, leaf, leaf, previous
@@ -692,6 +686,13 @@ def _plan(
                 "unresolved_operation",
                 "결과를 모르는 변경이 있어 새 시도를 세우지 않습니다",
                 operations=[_op_view(op) for op in unresolved],
+            )
+        # 결속은 잠금 아래에서 읽는다 — 읽은 뒤·잠금 전에 다른 실행이 같은 리스너를 열어도 놓치지 않는다
+        bound = _listener_bound_elsewhere(db, options.listener_arn, execution_id)
+        if bound:
+            raise _Refusal(
+                "listener_bound",
+                f"같은 운영 리스너에 열린 다른 실행의 시도가 있습니다: {bound}",
             )
         _close(db)
         if previous is not None:
@@ -872,7 +873,14 @@ def _status(db, c, *, execution_id, transition_id, options) -> dict:
         ]
 
     reconciliation: list[dict] = []
-    if unresolved:
+    if unresolved and not all(item.passed for item in session):
+        # 다른 계정·리전(또는 확인하지 못한 세션)에서 읽은 존재·부재는 계획 자원의 사실이 아니다
+        reconciliation.append(
+            {
+                "skipped": "세션 계정·리전이 계획과 맞지 않거나 확인되지 않아 대조하지 않았습니다 — 관문을 풀지 않습니다"
+            }
+        )
+    elif unresolved:
         with repo.mutation_claim(db, ctx.identities()) as held:
             if not held:
                 reconciliation.append(

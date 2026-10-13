@@ -1140,7 +1140,20 @@ def test_old_backup_without_the_field_is_still_a_valid_sg_tg_backup(aws):
     restored = ex.sg_tg_mapping_backup(payload)
     assert restored is not None and restored.scale_in_protection is None
     # 옛 백업 = 모름: 보호도 복원도 쓰지 않고 호출도 하지 않는다
-    assert ex.protect_scale_in(INSTANCE_ARN, None, record_intent=lambda _: None) is None
+    legacy = ex.protect_scale_in(INSTANCE_ARN, None, record_intent=lambda _: None)
+    unknown = ex.protect_scale_in(
+        INSTANCE_ARN, UNKNOWN, record_intent=lambda _: None
+    )
+    assert legacy is not None and unknown is not None
+    assert legacy.model_dump(exclude={"observed_at"}) == unknown.model_dump(
+        exclude={"observed_at"}
+    )
+    assert (legacy.outcome, legacy.reason, legacy.residual, legacy.asg_name) == (
+        "NOT_ATTEMPTED",
+        "PRIOR_STATE_UNKNOWN",
+        True,
+        None,
+    )
     assert (
         ex.restore_scale_in_protection(
             INSTANCE_ARN, restored, parent_result=None, record_intent=lambda _: None
