@@ -438,6 +438,70 @@ def test_up_stops_before_creating_anything_when_the_smoke_vpc_is_missing():
     assert ec2.calls == ["describe_vpcs"]
 
 
+_DOMAIN = "vigilantis.example"
+
+
+class _Pages:
+    def __init__(self, pages):
+        self.pages = pages
+
+    def paginate(self, **kwargs):
+        return iter(self.pages)
+
+
+class FakeAcm:
+    def __init__(self, certs=()):
+        self.certs = list(certs)
+
+    def get_paginator(self, name):
+        assert name == "list_certificates"
+        return _Pages([{"CertificateSummaryList": self.certs}])
+
+
+class FakeR53:
+    """조회만 답한다 — 레코드 변경이 불리면 기록해 테스트가 잡게 한다."""
+
+    def __init__(self, zones=()):
+        self.zones = list(zones)
+        self.calls: list[str] = []
+
+    def get_paginator(self, name):
+        assert name == "list_hosted_zones"
+        return _Pages([{"HostedZones": self.zones}])
+
+    def __getattr__(self, name):
+        self.calls.append(name)
+        raise AttributeError(name)
+
+
+_CERT = {"DomainName": _DOMAIN, "CertificateArn": "arn:aws:acm:us-east-1:123456789012:certificate/x"}
+_ZONE = {"Id": "/hostedzone/Z1", "Name": f"{_DOMAIN}.", "Config": {"PrivateZone": False}}
+
+
+@pytest.mark.parametrize("certs, zones, missing", [
+    ([], [_ZONE], r"인증서\(ISSUED\) 없음"),
+    ([_CERT], [], "호스팅 영역 없음"),
+    ([_CERT], [{**_ZONE, "Config": {"PrivateZone": True}}], "호스팅 영역 없음"),  # 비공개 영역은 별칭을 못 단다
+])
+def test_up_stops_before_creating_anything_when_the_domain_is_not_ready(certs, zones, missing):
+    """인증서·공개 호스팅 영역이 없으면 VPC·RDS·WAF 어느 것도 바꾸기 전에 멈춘다."""
+    ec2, r53 = RecordingEc2(smoke_vpc="vpc-smoke"), FakeR53(zones)
+    c = {"iam": FakeIam(policies=[_SMOKE_POLICY]), "ec2": ec2, "acm": FakeAcm(certs), "r53": r53}
+    with pytest.raises(SystemExit, match=missing):
+        platform.up(c, ACCOUNT, "ap-northeast-2", ["203.0.113.7/32"], _DOMAIN)
+    assert ec2.calls == ["describe_vpcs"]  # 스모크 VPC 조회 말고는 아무것도 부르지 않았다
+    assert r53.calls == []  # c에 sm·rds·waf·cf가 없으니 그쪽 호출은 KeyError로 드러난다
+
+
+def test_up_preview_also_checks_the_domain(monkeypatch):
+    """--yes 없는 미리 보기에서 먼저 알려야 --yes 실행이 중간에 멈추지 않는다."""
+    _fake_main(monkeypatch, ["up", "--account", ACCOUNT, "--allow-cidr", "203.0.113.7/32", "--domain", _DOMAIN],
+               {"iam": FakeIam(policies=[_SMOKE_POLICY]), "ec2": RecordingEc2(smoke_vpc="vpc-smoke"),
+                "acm": FakeAcm(), "route53": FakeR53([_ZONE])})
+    with pytest.raises(SystemExit, match=r"인증서\(ISSUED\) 없음"):
+        platform.main()
+
+
 def _fake_main(monkeypatch, argv: list[str], fakes: dict) -> None:
     monkeypatch.setattr(platform, "_require_real_aws", lambda account: {"Account": account})
     monkeypatch.setattr(platform, "default_region", lambda: "ap-northeast-2")

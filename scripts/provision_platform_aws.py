@@ -949,17 +949,23 @@ def _ensure_distribution(cf, alb_dns: str, origin_value: str, acl_arn: str) -> s
     return created["DomainName"]
 
 
-def _ensure_custom_domain(c: dict, domain: str) -> None:
-    """CloudFront에 별칭·인증서를 달고 Route53 A 별칭을 이 배포로 맞춘다. 인증서·호스팅 영역은 만들지 않는다.
+def _require_custom_domain(c: dict, domain: str) -> tuple[str, str]:
+    """--domain의 인증서·공개 호스팅 영역을 찾는다 — 없으면 **무엇이든 바꾸기 전에** 멈춘다.
 
     인증서 발급은 DNS 검증을 기다려야 하고 도메인 구입은 사람이 한다 — 둘 다 이 스크립트 밖이다.
+    up 끝에서야 보면 NAT·RDS(시간 과금)와 WAF 허용 목록 변경이 남은 채 멈추므로 up 맨 앞에서 본다.
     """
-    cf = c["cf"]
     cert_arn = _find_certificate(c["acm"], domain)
     zone_id = _find_zone(c["r53"], domain)
     if not (cert_arn and zone_id):
         sys.exit(f"--domain {domain}: us-east-1 ACM 인증서(ISSUED) {'있음' if cert_arn else '없음'} · "
                  f"Route53 호스팅 영역 {'있음' if zone_id else '없음'} — 둘 다 먼저 준비할 것")
+    return cert_arn, zone_id
+
+
+def _ensure_custom_domain(c: dict, domain: str, cert_arn: str, zone_id: str) -> None:
+    """CloudFront에 별칭·인증서를 달고 Route53 A 별칭을 이 배포로 맞춘다. 인증서·호스팅 영역은 만들지 않는다."""
+    cf = c["cf"]
     dist = _find_distribution(cf)
     got = cf.get_distribution_config(Id=dist["Id"])
     config = got["DistributionConfig"]
@@ -979,6 +985,7 @@ def _ensure_custom_domain(c: dict, domain: str) -> None:
 def up(c: dict, account: str, region: str, allow_cidrs: list[str], domain: Optional[str] = None) -> None:
     ec2 = c["ec2"]
     _require_smoke_env(c["iam"], ec2, account)  # 무엇이든 만들기 전에
+    custom = _require_custom_domain(c, domain) if domain else None
     vpc_id = _ensure_vpc(ec2)
     subnets = _ensure_subnets(ec2, vpc_id, region)
     nat_ip = _ensure_network(ec2, vpc_id, subnets)
@@ -1001,8 +1008,8 @@ def up(c: dict, account: str, region: str, allow_cidrs: list[str], domain: Optio
     # 웹 컨테이너의 서버 측 API 호출도 CloudFront를 거친다 — NAT 공인 IP를 허용 목록에 넣는다
     acl_arn = _ensure_waf(c["waf"], sorted(set(allow_cidrs) | {f"{nat_ip}/32"}))
     _ensure_distribution(c["cf"], alb["dns"], origin_value, acl_arn)
-    if domain:
-        _ensure_custom_domain(c, domain)
+    if custom:
+        _ensure_custom_domain(c, domain, *custom)
     print("[platform] 다음 단계(ADR-0010 §7)")
     print(f"  배포 주소          : {' · '.join(public_origins(_find_distribution(c['cf'])))}")
     print("  (도메인을 새로 달거나 바꿨으면 2·3을 다시 — 웹 번들의 API 주소와 api의 CORS가 그 주소를 따른다)")
@@ -1370,6 +1377,8 @@ def main() -> None:
         allow_cidrs = validate_allow_cidrs(args.allow_cidr)
         # 미리 보기에서도 먼저 본다 — --yes로 돌렸을 때 중간에 멈출 일을 여기서 알린다
         _require_smoke_env(c["iam"], c["ec2"], account)
+        if args.domain:
+            _require_custom_domain(c, args.domain)
     if not args.yes:
         if args.command == "up":
             missing = [row for row in inventory(c) if row[2] is None and row[0] != "EcsService"]
