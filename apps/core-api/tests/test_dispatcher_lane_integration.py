@@ -7,7 +7,9 @@ test_dispatcher_lanes의 스케줄러 대역 테스트는 래퍼가 서로 독�
 
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import delete
@@ -19,17 +21,16 @@ for p in (str(CORE_API), str(REPO_ROOT / "packages")):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-import dispatcher  # noqa: E402
-from db import models  # noqa: E402
-from db.repositories import executions as exec_repo  # noqa: E402
-from schemas.api.actions import ExecutionStatus  # noqa: E402
-from schemas.api.incidents import IncidentCategory, IncidentStatus  # noqa: E402
-from schemas.autoscaling import AutoscalingInspection  # noqa: E402
-from schemas.candidates import CandidateStatus  # noqa: E402
-from schemas.runbooks import RunbookId, TriggerSource  # noqa: E402
-from services.aws import executor as ex  # noqa: E402
-
-from tests.test_ec2_autoscaling_workflow import (  # noqa: E402
+import dispatcher
+from db import models
+from db.repositories import executions as exec_repo
+from schemas.api.actions import ExecutionStatus
+from schemas.api.incidents import IncidentCategory, IncidentStatus
+from schemas.autoscaling import AutoscalingInspection
+from schemas.candidates import CandidateStatus
+from schemas.runbooks import RunbookId, TriggerSource
+from services.aws import executor as ex
+from tests.test_ec2_autoscaling_workflow import (
     INSTANCE_ARN,
     in_progress,
     make_plan,
@@ -106,7 +107,9 @@ def committed(pg_engine, make_incident, make_candidate):
                 )
             )
             session.execute(
-                delete(models.Incident).where(models.Incident.incident_id.in_(ids["incidents"]))
+                delete(models.Incident).where(
+                    models.Incident.incident_id.in_(ids["incidents"])
+                )
             )
             session.commit()
 
@@ -116,8 +119,9 @@ def _status(factory, execution_id):
         return session.get(models.ActionExecution, execution_id).status
 
 
+@pytest.mark.parametrize("immediate", [False, True])
 def test_blocked_autoscaling_runner_does_not_hold_back_the_main_lane(
-    committed, monkeypatch
+    committed, monkeypatch, immediate
 ):
     factory, ids = committed
     entered = threading.Event()
@@ -162,6 +166,29 @@ def test_blocked_autoscaling_runner_does_not_hold_back_the_main_lane(
         raising=False,
     )
     monkeypatch.setattr(ex, "execute_ebs_delete_unattached", delete_volume)
+    if immediate:
+        with factory() as session:
+            execution = session.get(models.ActionExecution, ids["b"])
+            execution.runbook_id = RunbookId.RUNBOOK_EC2_ISOLATE
+            execution.trigger_source = TriggerSource.PRE_MITIGATION_0_5S
+            session.commit()
+
+        def isolate(db, execution_id):
+            main_ran.append(INSTANCE_ARN)
+            db.commit()
+            return SimpleNamespace(succeeded=True)
+
+        monkeypatch.setitem(dispatcher._RUNNERS, RunbookId.RUNBOOK_EC2_ISOLATE, isolate)
+        monkeypatch.setitem(
+            dispatcher._JUDGES,
+            RunbookId.RUNBOOK_EC2_ISOLATE,
+            lambda db, execution_id: SimpleNamespace(
+                deferred=False,
+                next_status=ExecutionStatus.SUCCESS,
+                error_summary=None,
+                verdict=None,
+            ),
+        )
 
     reports = {}
     errors = []
@@ -180,7 +207,14 @@ def test_blocked_autoscaling_runner_does_not_hold_back_the_main_lane(
         assert entered.wait(WAIT), "ASG 러너가 시작되지 않았다"
         # ASG 사이클은 AWS 호출 도중에 멈춰 있다 — 그 사이 main 레인이 자기 실행을 확정한다
         threading.current_thread().name = "main"
-        reports["main"] = dispatcher.run_dispatch_cycle(factory, None, dispatcher.LANE_MAIN)
+        if immediate:
+            with factory() as session, dispatcher.automatic_isolation_scope():
+                reports["main"] = dispatcher.dispatch_now(session, ids["b"])
+            assert reports["main"].judged == 1
+        else:
+            reports["main"] = dispatcher.run_dispatch_cycle(
+                factory, None, dispatcher.LANE_MAIN
+            )
         assert worker.is_alive()
         assert _status(factory, ids["b"]) is ExecutionStatus.SUCCESS
         assert _status(factory, ids["a"]) is ExecutionStatus.IN_PROGRESS
@@ -195,9 +229,13 @@ def test_blocked_autoscaling_runner_does_not_hold_back_the_main_lane(
 
     # 선점은 레인별로 한 번씩, 서로의 행을 건드리지 않는다
     assert sorted(claims) == sorted([("asg", ids["a"]), ("main", ids["b"])])
-    assert main_ran == [VOLUME_ARN]
+    expected_target = INSTANCE_ARN if immediate else VOLUME_ARN
+    assert main_ran == [expected_target]
     assert (reports["main"].lane, reports["main"].closed) == (dispatcher.LANE_MAIN, 1)
-    assert (reports["asg1"].lane, reports["asg1"].started) == (dispatcher.LANE_AUTOSCALING, 1)
+    assert (reports["asg1"].lane, reports["asg1"].started) == (
+        dispatcher.LANE_AUTOSCALING,
+        1,
+    )
     assert reports["asg1"].awaiting_status_check == 1
     assert _status(factory, ids["a"]) is ExecutionStatus.IN_PROGRESS
 
@@ -205,4 +243,79 @@ def test_blocked_autoscaling_runner_does_not_hold_back_the_main_lane(
     second = dispatcher.run_dispatch_cycle(factory, None, dispatcher.LANE_AUTOSCALING)
     assert (second.judged, second.closed, second.started) == (1, 1, 0)
     assert _status(factory, ids["a"]) is ExecutionStatus.SUCCESS
-    assert main_ran == [VOLUME_ARN]
+    assert main_ran == [expected_target]
+
+
+def test_immediate_dispatch_cannot_execute_an_autoscaling_id(committed, monkeypatch):
+    factory, ids = committed
+    monkeypatch.setitem(
+        dispatcher._RUNNERS,
+        RunbookId.RUNBOOK_EC2_ENABLE_AUTOSCALING,
+        lambda db, execution_id: pytest.fail("ASG가 main 즉시 실행으로 진입했다"),
+    )
+    with factory() as session:
+        report = dispatcher.dispatch_now(session, ids["a"])
+    assert (report.started, report.skipped) == (0, 1)
+    assert _status(factory, ids["a"]) is ExecutionStatus.IN_PROGRESS
+
+
+def test_immediate_and_scan_exclude_duplicate_runner_after_commit(
+    committed, monkeypatch
+):
+    """실제 commit 뒤에도 main 스캔은 즉시 실행을 앞질러 같은 러너에 들어가지 않는다."""
+    factory, ids = committed
+    committed_step = threading.Event()
+    release = threading.Event()
+    contending = threading.Event()
+    lock = threading.RLock()
+    calls = []
+
+    class ObservedLock:
+        def __enter__(self):
+            if threading.current_thread().name.startswith("contender"):
+                contending.set()
+            lock.acquire()
+            return self
+
+        def __exit__(self, *args):
+            lock.release()
+
+    monkeypatch.setattr(dispatcher, "_DISPATCH_LOCK", ObservedLock())
+
+    def runner(db, execution_id):
+        calls.append(execution_id)
+        db.commit()
+        committed_step.set()
+        assert release.wait(WAIT), "즉시 실행이 해제되지 않았다"
+        return SimpleNamespace(succeeded=True)
+
+    monkeypatch.setitem(
+        dispatcher._RUNNERS, RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED, runner
+    )
+
+    def immediate():
+        with factory() as session, dispatcher.automatic_isolation_scope():
+            dispatcher.dispatch_now(session, ids["b"])
+
+    def scan():
+        dispatcher.run_dispatch_cycle(factory)
+
+    with (
+        ThreadPoolExecutor(1, thread_name_prefix="immediate") as first_pool,
+        ThreadPoolExecutor(1, thread_name_prefix="contender") as second_pool,
+    ):
+        first = first_pool.submit(immediate)
+        second = None
+        try:
+            assert committed_step.wait(WAIT)
+            second = second_pool.submit(scan)
+            assert contending.wait(WAIT)
+            assert calls == [ids["b"]]
+            assert _status(factory, ids["b"]) is ExecutionStatus.IN_PROGRESS
+        finally:
+            release.set()
+        first.result(timeout=WAIT)
+        assert second is not None
+        second.result(timeout=WAIT)
+    assert calls == [ids["b"]]
+    assert _status(factory, ids["b"]) is ExecutionStatus.SUCCESS

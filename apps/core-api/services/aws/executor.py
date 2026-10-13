@@ -47,13 +47,13 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Callable, Mapping, Optional, Protocol
+from datetime import UTC, datetime
+from typing import Any, Protocol
 
 from botocore.exceptions import BotoCoreError, ClientError, ParamValidationError
 from pydantic import BaseModel, TypeAdapter, ValidationError
-
 from schemas.autoscaling import (
     EXECUTION_TAG_KEY,
     PRECHECK_DRY_RUN_EXECUTION_TAG_VALUE,
@@ -66,6 +66,8 @@ from schemas.autoscaling import (
 from schemas.backups import (
     BackupType,
     NaclRuleIndexBackup,
+    ScaleInProtectionBackup,
+    ScaleInProtectionResult,
     SgAndTgMappingBackup,
     SgFullRulesBackup,
 )
@@ -99,7 +101,12 @@ from schemas.runbook_parameters import (
 )
 from schemas.runbooks import RunbookId
 
-from .backup import device_index, eni_security_groups, registered_ports
+from .backup import (
+    AUTOSCALING_PROTECTION_CLIENT,
+    device_index,
+    eni_security_groups,
+    registered_ports,
+)
 from .client import aws_client
 from .errors import aws_error_code, reason_code_for, run_dry_run
 
@@ -148,15 +155,15 @@ class BackupRecordView:
 
 
 class BackupRecordLoader(Protocol):
-    def get(self, backup_record_id: str) -> Optional[BackupRecordView]:
+    def get(self, backup_record_id: str) -> BackupRecordView | None:
         """ID로 백업 레코드 1건. 없으면 None."""
 
     def latest_for_target(
         self,
         target_arn: str,
         backup_type: str,
-        payload_match: Optional[Mapping[str, Any]] = None,
-    ) -> Optional[BackupRecordView]:
+        payload_match: Mapping[str, Any] | None = None,
+    ) -> BackupRecordView | None:
         """대상 자원의 최신 백업 1건. 없으면 None.
 
         NACL_RESTORE처럼 backup_record_id를 파라미터로 받지 않는 런북이 쓴다
@@ -209,7 +216,7 @@ class ParsedArn:
     resource_id: str
 
 
-def parse_arn(arn: str) -> Optional[ParsedArn]:
+def parse_arn(arn: str) -> ParsedArn | None:
     """arn:aws:ec2:<region>:<account>:<type>/<id> 형태만 받는다.
 
     수집기가 만드는 포맷과 같다(services/collector.py의 _arn) — 가드레일 ③이
@@ -235,14 +242,14 @@ def parse_arn(arn: str) -> Optional[ParsedArn]:
 class _Spec:
     """런북 1종의 precheck 명세. 파라미터 계약과 확인 방식을 한 자리에 모은다."""
 
-    params_model: type[BaseModel]           # 파라미터 계약(packages/schemas, #154)
-    resource_type: str                      # target_arn이 가리켜야 하는 자원 유형
-    primary_param: Optional[str]            # target_arn의 자원 ID와 같아야 하는 키
+    params_model: type[BaseModel]  # 파라미터 계약(packages/schemas, #154)
+    resource_type: str  # target_arn이 가리켜야 하는 자원 유형
+    primary_param: str | None  # target_arn의 자원 ID와 같아야 하는 키
     method: VerificationMethod
     operations: tuple[str, ...]
-    handler: str                            # 아래 핸들러 함수 이름
-    arn_params: tuple[str, ...] = ()        # 계정·파티션·리전을 대조할 ARN 파라미터
-    backup_type: Optional[str] = None       # 백업 레코드가 필요한 런북만
+    handler: str  # 아래 핸들러 함수 이름
+    arn_params: tuple[str, ...] = ()  # 계정·파티션·리전을 대조할 ARN 파라미터
+    backup_type: str | None = None  # 백업 레코드가 필요한 런북만
     # 대상으로 백업을 찾을 때 payload와 값이 같아야 하는 파라미터 키
     backup_match_params: tuple[str, ...] = ()
 
@@ -336,7 +343,7 @@ RUNBOOK_SPECS: Mapping[str, _Spec] = {
     RunbookId.RUNBOOK_SG_RECREATE.value: _Spec(
         params_model=SgRecreateParameters,
         resource_type="security-group",
-        primary_param=None,     # 복원 대상은 백업 레코드가 가리킨다
+        primary_param=None,  # 복원 대상은 백업 레코드가 가리킨다
         method=M.DRY_RUN,
         operations=(
             "ec2.create_security_group",
@@ -375,12 +382,15 @@ class _Ctx:
     target_arn: str
     target: ParsedArn
     params: Mapping[str, Any]
-    backup: Optional[BackupRecordView]
+    backup: BackupRecordView | None
 
 
 def _summary(spec: _Spec, verified, unverified) -> str:
     return build_verification_summary(
-        spec.method, operations=spec.operations, verified=verified, unverified=unverified
+        spec.method,
+        operations=spec.operations,
+        verified=verified,
+        unverified=unverified,
     )
 
 
@@ -390,7 +400,9 @@ def _ok(ctx: _Ctx, *, verified, unverified) -> PrecheckOutcome:
     )
 
 
-def _fail(ctx: _Ctx, code: PrecheckReasonCode, *, verified, unverified) -> PrecheckOutcome:
+def _fail(
+    ctx: _Ctx, code: PrecheckReasonCode, *, verified, unverified
+) -> PrecheckOutcome:
     logger.warning(
         "precheck_rejected",
         extra={"runbook_id": ctx.runbook_id, "reason_code": code.value},
@@ -433,7 +445,7 @@ def _call(operation: Callable[..., Any], **kwargs: Any):
 
 
 # ------------------------------------------------------------------ 파라미터 계약
-def _validate_params(spec: _Spec, params: Mapping[str, Any]) -> Optional[str]:
+def _validate_params(spec: _Spec, params: Mapping[str, Any]) -> str | None:
     """계약 위반 사유 문자열. 문제가 없으면 None.
 
     판정은 packages/schemas의 typed 모델이 한다(#154). 키 집합이 정확히 일치해야
@@ -478,7 +490,9 @@ def _describe_violation(exc: ValidationError) -> str:
     return f"값 형식 위반: {', '.join(sorted(set(invalid)))}"
 
 
-def _validate_scope(spec: _Spec, target: ParsedArn, params: Mapping[str, Any]) -> Optional[str]:
+def _validate_scope(
+    spec: _Spec, target: ParsedArn, params: Mapping[str, Any]
+) -> str | None:
     """파라미터가 target_arn과 같은 자원·같은 계정을 가리키는지 확인한다.
 
     가드레일 ③ ARN Match는 target_arn 하나만 본다. 파라미터에 리소스 ID가 여럿
@@ -496,7 +510,10 @@ def _validate_scope(spec: _Spec, target: ParsedArn, params: Mapping[str, Any]) -
         parsed = parse_arn(params[key])
         if parsed is None:
             return f"{key} ARN 형식 위반"
-        if (parsed.partition, parsed.account_id) != (target.partition, target.account_id):
+        if (parsed.partition, parsed.account_id) != (
+            target.partition,
+            target.account_id,
+        ):
             return f"{key}가 target_arn과 다른 계정을 가리킴"
         if parsed.region != target.region:
             # 클라이언트를 target_arn의 리전으로 만들므로, 다른 리전 ARN이 실리면
@@ -563,7 +580,7 @@ def _instance(instance_id: str, region: str):
     return None, R.PRECHECK_TARGET_NOT_FOUND
 
 
-def _primary_eni(instance: Mapping[str, Any]) -> Optional[str]:
+def _primary_eni(instance: Mapping[str, Any]) -> str | None:
     """주 ENI(DeviceIndex 0) — 응답 순서가 아니라 DeviceIndex로 고른다.
 
     describe_instances는 ENI 순서를 보장하지 않는다. 응답의 첫 ENI를 쓰면 보조 ENI가 앞에
@@ -648,7 +665,7 @@ def _precheck_ebs_delete(ctx: _Ctx) -> PrecheckOutcome:
     )
 
 
-def sg_full_rules_backup(payload: Mapping[str, Any]) -> Optional[SgFullRulesBackup]:
+def sg_full_rules_backup(payload: Mapping[str, Any]) -> SgFullRulesBackup | None:
     """백업 payload를 SG 복원 계약으로 읽는다. 계약을 벗어나면 None.
 
     precheck·실행·종료 판정이 같은 모델로 읽는다 — `dict.get` 문자열로 읽으면 만든 쪽과
@@ -740,7 +757,10 @@ def _network_acl(acl_id: str, region: str):
 
 def _find_entry(acl: Mapping[str, Any], rule_number: int, egress: bool):
     for entry in acl.get("Entries", []):
-        if entry.get("RuleNumber") == rule_number and bool(entry.get("Egress")) == egress:
+        if (
+            entry.get("RuleNumber") == rule_number
+            and bool(entry.get("Egress")) == egress
+        ):
             return entry
     return None
 
@@ -824,7 +844,7 @@ def _precheck_nacl_add_deny(ctx: _Ctx) -> PrecheckOutcome:
     )
 
 
-def nacl_rule_backup(payload: Mapping[str, Any]) -> Optional[NaclRuleIndexBackup]:
+def nacl_rule_backup(payload: Mapping[str, Any]) -> NaclRuleIndexBackup | None:
     """백업 payload를 규칙 fingerprint 계약으로 읽는다. 계약을 벗어나면 None.
 
     precheck·실행·종료 판정이 같은 모델로 읽는다 — `dict.get` 문자열로 읽으면 만든 쪽과
@@ -884,7 +904,11 @@ def _precheck_nacl_restore(ctx: _Ctx) -> PrecheckOutcome:
         return _fail(
             ctx,
             R.PRECHECK_INVALID_STATE,
-            verified=["NACL 존재", "대상 규칙이 deny 상태", "백업 레코드 rule index 일치"],
+            verified=[
+                "NACL 존재",
+                "대상 규칙이 deny 상태",
+                "백업 레코드 rule index 일치",
+            ],
             unverified=[_DESCRIBE_MISSES],
         )
     return _ok(
@@ -902,7 +926,12 @@ def _precheck_nacl_restore(ctx: _Ctx) -> PrecheckOutcome:
 def _precheck_isolate(ctx: _Ctx) -> PrecheckOutcome:
     instance, code = _instance(ctx.params["instance_id"], ctx.target.region)
     if code is not None:
-        return _fail(ctx, code, verified=["없음(인스턴스 조회 실패)"], unverified=[_DESCRIBE_MISSES])
+        return _fail(
+            ctx,
+            code,
+            verified=["없음(인스턴스 조회 실패)"],
+            unverified=[_DESCRIBE_MISSES],
+        )
     eni = _primary_eni(instance)
     if eni is None:
         return _fail(
@@ -924,7 +953,8 @@ def _precheck_isolate(ctx: _Ctx) -> PrecheckOutcome:
         )
 
     _, code = _call(
-        aws_client("ec2", ctx.target.region).describe_security_groups, GroupIds=[isolation_group_id]
+        aws_client("ec2", ctx.target.region).describe_security_groups,
+        GroupIds=[isolation_group_id],
     )
     if code is not None:
         return _fail(
@@ -989,7 +1019,12 @@ def _precheck_unisolate(ctx: _Ctx) -> PrecheckOutcome:
 
     instance, code = _instance(ctx.params["instance_id"], ctx.target.region)
     if code is not None:
-        return _fail(ctx, code, verified=["없음(인스턴스 조회 실패)"], unverified=[_DESCRIBE_MISSES])
+        return _fail(
+            ctx,
+            code,
+            verified=["없음(인스턴스 조회 실패)"],
+            unverified=[_DESCRIBE_MISSES],
+        )
     eni = _primary_eni(instance)
     if eni is None:
         return _fail(
@@ -1011,7 +1046,8 @@ def _precheck_unisolate(ctx: _Ctx) -> PrecheckOutcome:
 
     # GroupIds에 없는 SG가 하나라도 있으면 InvalidGroup.NotFound가 난다
     _, code = _call(
-        aws_client("ec2", ctx.target.region).describe_security_groups, GroupIds=list(restore_groups)
+        aws_client("ec2", ctx.target.region).describe_security_groups,
+        GroupIds=list(restore_groups),
     )
     if code is not None:
         return _fail(
@@ -1022,13 +1058,18 @@ def _precheck_unisolate(ctx: _Ctx) -> PrecheckOutcome:
         )
 
     res, code = _call(
-        aws_client("elbv2", ctx.target.region).describe_target_groups, TargetGroupArns=[target_group_arn]
+        aws_client("elbv2", ctx.target.region).describe_target_groups,
+        TargetGroupArns=[target_group_arn],
     )
     if code is not None:
         return _fail(
             ctx,
             code,
-            verified=["인스턴스와 ENI 존재", "SG 복원 DryRun 통과", "복원 대상 SG 현존"],
+            verified=[
+                "인스턴스와 ENI 존재",
+                "SG 복원 DryRun 통과",
+                "복원 대상 SG 현존",
+            ],
             unverified=[_DESCRIBE_MISSES],
         )
     groups = res.get("TargetGroups", [])
@@ -1036,12 +1077,20 @@ def _precheck_unisolate(ctx: _Ctx) -> PrecheckOutcome:
         return _fail(
             ctx,
             R.PRECHECK_INVALID_STATE,
-            verified=["인스턴스와 ENI 존재", "SG 복원 DryRun 통과", "복원 대상 SG 현존"],
+            verified=[
+                "인스턴스와 ENI 존재",
+                "SG 복원 DryRun 통과",
+                "복원 대상 SG 현존",
+            ],
             unverified=[_DESCRIBE_MISSES],
         )
     return _ok(
         ctx,
-        verified=["SG 복원 DryRun 통과", "복원 대상 SG 전부 현존", "TG가 인스턴스와 같은 VPC"],
+        verified=[
+            "SG 복원 DryRun 통과",
+            "복원 대상 SG 전부 현존",
+            "TG가 인스턴스와 같은 VPC",
+        ],
         unverified=[_DESCRIBE_MISSES, "재등록(register) 자체의 AWS 검증"],
     )
 
@@ -1050,7 +1099,12 @@ def _precheck_enable_autoscaling(ctx: _Ctx) -> PrecheckOutcome:
     instance_id = ctx.params["instance_id"]
     instance, code = _instance(instance_id, ctx.target.region)
     if code is not None:
-        return _fail(ctx, code, verified=["없음(인스턴스 조회 실패)"], unverified=[_DESCRIBE_MISSES])
+        return _fail(
+            ctx,
+            code,
+            verified=["없음(인스턴스 조회 실패)"],
+            unverified=[_DESCRIBE_MISSES],
+        )
     if instance.get("State", {}).get("Name") != "running":
         return _fail(
             ctx,
@@ -1065,7 +1119,10 @@ def _precheck_enable_autoscaling(ctx: _Ctx) -> PrecheckOutcome:
     tags = [
         {"Key": EXECUTION_TAG_KEY, "Value": PRECHECK_DRY_RUN_EXECUTION_TAG_VALUE},
         {"Key": SOURCE_INSTANCE_TAG_KEY, "Value": instance_id},
-        *({"Key": tag.key, "Value": tag.value} for tag in _preserved_source_tags(instance)),
+        *(
+            {"Key": tag.key, "Value": tag.value}
+            for tag in _preserved_source_tags(instance)
+        ),
     ]
     code = run_dry_run(
         aws_client("ec2", ctx.target.region).create_launch_template,
@@ -1130,7 +1187,7 @@ def _load_backup(
     spec: _Spec,
     target_arn: str,
     params: Mapping[str, Any],
-    loader: Optional[BackupRecordLoader],
+    loader: BackupRecordLoader | None,
 ):
     """(백업 레코드, 거절 결과) — 둘 중 하나만 채워진다.
 
@@ -1148,9 +1205,7 @@ def _load_backup(
     else:
         # 대상으로 찾는 런북은 어느 조치의 백업인지까지 좁혀야 한다
         match = {key: params[key] for key in spec.backup_match_params}
-        record = loader.latest_for_target(
-            target_arn, spec.backup_type, match or None
-        )
+        record = loader.latest_for_target(target_arn, spec.backup_type, match or None)
     if record is None:
         return None, _reject(spec, R.PRECHECK_TARGET_NOT_FOUND, "백업 레코드 없음")
     if record.backup_type != spec.backup_type:
@@ -1164,11 +1219,11 @@ def _load_backup(
 
 
 def precheck(
-    runbook_id: "RunbookId | str",
+    runbook_id: RunbookId | str,
     target_arn: str,
-    parameters: "Mapping[str, Any] | BaseModel",
+    parameters: Mapping[str, Any] | BaseModel,
     *,
-    backup_loader: Optional[BackupRecordLoader] = None,
+    backup_loader: BackupRecordLoader | None = None,
 ) -> PrecheckOutcome:
     """가드레일 ④ AWS Dry-Run 판정 (ADR-0007 §1).
 
@@ -1381,8 +1436,8 @@ class ExecutionOutcome:
     """
 
     steps: tuple[ExecutionStepResult, ...] = ()
-    reason_code: Optional[PrecheckReasonCode] = None
-    error_summary: Optional[str] = None
+    reason_code: PrecheckReasonCode | None = None
+    error_summary: str | None = None
     deferred: bool = False
 
     def __post_init__(self) -> None:
@@ -1405,7 +1460,7 @@ StepRecorder = Callable[[ExecutionStepResult], None]
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _summarize(exc: BaseException) -> str:
@@ -1452,7 +1507,7 @@ def _effect_for(exc: BaseException) -> ExecutionEffect:
     return ExecutionEffect.UNKNOWN
 
 
-def _request_id(payload: Any) -> Optional[str]:
+def _request_id(payload: Any) -> str | None:
     """AWS 요청 ID. 정상 응답과 ClientError.response 어느 쪽에서도 같은 자리다."""
     if not isinstance(payload, Mapping):
         return None
@@ -1463,7 +1518,7 @@ def _request_id(payload: Any) -> Optional[str]:
 class _StepLog:
     """단계 기록기 — 호출 직전 IN_PROGRESS, 직후 종료 결과. 순서와 누적을 한자리에 둔다."""
 
-    def __init__(self, affected_arn: str, record: Optional[StepRecorder]) -> None:
+    def __init__(self, affected_arn: str, record: StepRecorder | None) -> None:
         self._arn = affected_arn
         self._record: StepRecorder = record if record is not None else _ignore_step
         self._current: tuple[int, str, str] = (0, "", "")
@@ -1488,7 +1543,7 @@ class _StepLog:
         exc: BaseException,
         *,
         detail: str,
-        effect: Optional[ExecutionEffect] = None,
+        effect: ExecutionEffect | None = None,
     ) -> None:
         """effect를 주면 그것을 쓴다 — 한 단계 안에서 호출이 여럿일 때(ENI SG 교체) 앞선
         호출이 이미 적용됐다면 마지막 예외만으로는 단계의 effect를 정할 수 없다."""
@@ -1525,7 +1580,7 @@ def _abort(
     exc: BaseException,
     *,
     detail: str,
-    effect: Optional[ExecutionEffect] = None,
+    effect: ExecutionEffect | None = None,
 ) -> ExecutionOutcome:
     """실패 단계를 남기고 실행을 끝낸다. 뒤 단계는 시도하지 않는다."""
     log.fail(exc, detail=detail, effect=effect)
@@ -1560,7 +1615,7 @@ def execute_rightsizing(
     target_arn: str,
     *,
     target_instance_type: str,
-    record_step: Optional[StepRecorder] = None,
+    record_step: StepRecorder | None = None,
 ) -> ExecutionOutcome:
     """`RUNBOOK_EC2_RIGHTSIZING` 실행 — 정지 → 타입 변경 → 기동. (Issue #211)
 
@@ -1634,7 +1689,9 @@ def execute_rightsizing(
     # ③ 기동 — 조치 직전에 running이었을 때만
     log.begin(3, STEP_START_INSTANCE, _OP_START)
     if not was_running:
-        log.succeed(ExecutionEffect.NOT_APPLIED, "조치 직전 stopped 상태라 기동하지 않음")
+        log.succeed(
+            ExecutionEffect.NOT_APPLIED, "조치 직전 stopped 상태라 기동하지 않음"
+        )
         return ExecutionOutcome(steps=tuple(log.steps))
     try:
         response = ec2.start_instances(InstanceIds=[instance_id])
@@ -1701,7 +1758,7 @@ def execute_revert_size(
     restore_instance_type: str,
     applied_instance_type: str,
     restore_state: str,
-    record_step: Optional[StepRecorder] = None,
+    record_step: StepRecorder | None = None,
 ) -> ExecutionOutcome:
     """`RUNBOOK_EC2_REVERT_SIZE` 실행 — 상태 대조 → 정지 → 타입 원복 → 기동. (Issue #241)
 
@@ -1883,7 +1940,7 @@ def execute_nacl_add_deny(
     rule_number: int,
     cidr_block: str,
     protocol: str,
-    record_step: Optional[StepRecorder] = None,
+    record_step: StepRecorder | None = None,
 ) -> ExecutionOutcome:
     """`RUNBOOK_NACL_ADD_DENY` 실행 — 서브넷 NACL에 인바운드 deny 규칙 1건 삽입.
 
@@ -1948,7 +2005,7 @@ def execute_nacl_restore(
     target_arn: str,
     *,
     backup: NaclRuleIndexBackup,
-    record_step: Optional[StepRecorder] = None,
+    record_step: StepRecorder | None = None,
 ) -> ExecutionOutcome:
     """`RUNBOOK_NACL_RESTORE` 실행 — 슬롯 대조 → 우리가 넣은 deny 규칙 1건 삭제.
 
@@ -2005,7 +2062,9 @@ def execute_nacl_restore(
 
     if not nacl_entry_fingerprint_matches(entry, backup):
         log.begin(1, STEP_COMPARE_NACL_ENTRY, _OP_DESCRIBE_NACL)
-        detail = f"{slot}에 우리가 넣지 않은 규칙이 있습니다 — 제3자 규칙이라 삭제하지 않음"
+        detail = (
+            f"{slot}에 우리가 넣지 않은 규칙이 있습니다 — 제3자 규칙이라 삭제하지 않음"
+        )
         log.succeed(ExecutionEffect.NOT_APPLIED, f"{detail}. 해제를 중단합니다")
         logger.critical(
             "nacl_restore_slot_taken_by_other_rule",
@@ -2049,9 +2108,7 @@ def _volume(volume_id: str, region: str):
     그 코드는 `NotFound`로 끝나 reason_code_for가 TARGET_NOT_FOUND로 분류한다
     (services/aws/errors.py). **LocalStack도 같게 답한다**(2026-09-21 실측 · Issue #369).
     """
-    res, code = _call(
-        aws_client("ec2", region).describe_volumes, VolumeIds=[volume_id]
-    )
+    res, code = _call(aws_client("ec2", region).describe_volumes, VolumeIds=[volume_id])
     if code is not None:
         return None, code
     for volume in res.get("Volumes", []):
@@ -2077,9 +2134,8 @@ def volume_is_deletable(volume: Mapping[str, Any]) -> bool:
     (rule_engine.evaluate_ebs)이 `UNUSED`로 고른 축과 같으며(#276), 여기서 다시 보는
     이유는 판정과 실행 사이에 누군가 붙였을 수 있기 때문이다.
     """
-    return (
-        volume.get("State") == _VOLUME_DELETABLE_STATE
-        and not volume.get("Attachments")
+    return volume.get("State") == _VOLUME_DELETABLE_STATE and not volume.get(
+        "Attachments"
     )
 
 
@@ -2100,7 +2156,7 @@ def volume_delete_accepted(volume: Mapping[str, Any]) -> bool:
 def execute_ebs_delete_unattached(
     target_arn: str,
     *,
-    record_step: Optional[StepRecorder] = None,
+    record_step: StepRecorder | None = None,
 ) -> ExecutionOutcome:
     """`RUNBOOK_EBS_DELETE_UNATTACHED` 실행 — 상태 재확인 → 최종 스냅숏 → 완료 확인 → 삭제.
     (Issue #369)
@@ -2325,7 +2381,7 @@ def security_group_by_name(group_name: str, vpc_id: str, region: str):
 def execute_sg_delete_isolated(
     target_arn: str,
     *,
-    record_step: Optional[StepRecorder] = None,
+    record_step: StepRecorder | None = None,
 ) -> ExecutionOutcome:
     """`RUNBOOK_SG_DELETE_ISOLATED` 실행 — 미부착 보안 그룹 1개 삭제. (Issue #368)
 
@@ -2374,7 +2430,7 @@ def execute_sg_delete_isolated(
 def rebind_self_reference(
     permissions: list[Mapping[str, Any]],
     *,
-    original_group_id: Optional[str],
+    original_group_id: str | None,
     new_group_id: str,
 ) -> list[dict[str, Any]]:
     """백업 규칙의 **자기 참조**를 새 그룹 ID로 바꾼다. 나머지는 그대로 둔다.
@@ -2411,8 +2467,6 @@ def rebind_self_reference(
     return result
 
 
-
-
 def sg_permission_fingerprint(permission: Mapping[str, Any]) -> tuple:
     """규칙 1건을 **비교 가능한 값**으로 줄인다.
 
@@ -2446,9 +2500,7 @@ def sg_permission_fingerprint(permission: Mapping[str, Any]) -> tuple:
     )
 
 
-def sg_permissions_match(
-    actual: Any, expected: list[Mapping[str, Any]]
-) -> bool:
+def sg_permissions_match(actual: Any, expected: list[Mapping[str, Any]]) -> bool:
     """두 규칙 목록이 같은 허용 범위를 뜻하는가. 순서와 표기 차이는 무시한다.
 
     Counter로 세는 이유는 **같은 규칙이 두 번 있는 것과 한 번 있는 것이 다르기** 때문이
@@ -2460,11 +2512,13 @@ def sg_permissions_match(
         for item in (actual or [])
         if isinstance(item, Mapping)
     ) == Counter(sg_permission_fingerprint(item) for item in expected)
+
+
 def execute_sg_recreate(
     target_arn: str,
     *,
     backup: SgFullRulesBackup,
-    record_step: Optional[StepRecorder] = None,
+    record_step: StepRecorder | None = None,
 ) -> ExecutionOutcome:
     """`RUNBOOK_SG_RECREATE` 실행 — 생성 → 기본 egress 회수 → 규칙 주입. (Issue #368)
 
@@ -2619,7 +2673,7 @@ def execute_sg_recreate(
 
 
 # ------------------------------------------------------------------ 격리 (MVP 체크리스트 §2-1 B2)
-def sg_tg_mapping_backup(payload: Mapping[str, Any]) -> Optional[SgAndTgMappingBackup]:
+def sg_tg_mapping_backup(payload: Mapping[str, Any]) -> SgAndTgMappingBackup | None:
     """백업 payload를 SG/TG 매핑 계약으로 읽는다. 계약을 벗어나면 None.
 
     실행·종료 판정이 같은 모델로 읽는다 — sg_full_rules_backup과 같은 자리다. 가드레일 ④
@@ -2686,7 +2740,7 @@ def _swap_eni_groups(
     assignments: list[tuple[str, list[str]]],
     *,
     label: str,
-) -> Optional[ExecutionOutcome]:
+) -> ExecutionOutcome | None:
     """ENI마다 SG를 바꾼다(단계 1건 안에서). 실패면 그 결과를, 성공이면 None을 돌려준다.
 
     **effect는 앞선 ENI가 이미 바뀌었는지로 정한다.** 첫 ENI에서 실패하면 그 예외의
@@ -2722,7 +2776,7 @@ def execute_ec2_isolate(
     *,
     backup: SgAndTgMappingBackup,
     isolation_group_id: str,
-    record_step: Optional[StepRecorder] = None,
+    record_step: StepRecorder | None = None,
 ) -> ExecutionOutcome:
     """`RUNBOOK_EC2_ISOLATE` 실행 — TG 등록 해제 → 모든 ENI의 SG를 격리 SG로 교체.
 
@@ -2787,7 +2841,10 @@ def execute_ec2_isolate(
     failed = _swap_eni_groups(
         aws_client("ec2", target.region),
         log,
-        [(eni.network_interface_id, [isolation_group_id]) for eni in backup.network_interfaces],
+        [
+            (eni.network_interface_id, [isolation_group_id])
+            for eni in backup.network_interfaces
+        ],
         label="ENI SG 격리",
     )
     if failed is not None:
@@ -2807,12 +2864,269 @@ def execute_ec2_isolate(
     return ExecutionOutcome(steps=tuple(log.steps))
 
 
+# ------------------------------------------------------------------ ASG scale-in 보호 (보조 조치)
+# 격리 SUCCESS 뒤에 best-effort로 붙는 보조 조치다. 결과는 ExecutionOutcome·단계 effect가 아니라
+# 별도 타입(ScaleInProtectionResult)으로 돌려주며, 이 결과가 무엇이든 TG/ENI 격리·해제의 성패에
+# 관여하지 않는다. **보호는 같은 인스턴스의 생존을 보장하지 않는다** — 이미 진행 중인 scale-in,
+# 인스턴스 교체(헬스 실패 등), 수동 삭제·종료는 막지 못하고, 보호가 유지되는 유예 시간도 가정하지
+# 않는다. 호출은 호출당 최대 3회(조회 → 쓰기 → 확인 조회)로 고정이고 반복·대기가 없다.
+_OP_ASG_DESCRIBE_INSTANCES = "autoscaling.describe_auto_scaling_instances"
+_OP_ASG_SET_INSTANCE_PROTECTION = "autoscaling.set_instance_protection"
+
+
+def _observe_asg_protection(client: Any, instance_id: str, asg_name: str):
+    """(상태, 보호 값). 상태: SAME(같은 ASG 멤버) · DRIFT(응답이 멤버 아님/다른 ASG라고 확정) ·
+    FAILED(조회 실패·값을 읽지 못함). **조회 예외는 DRIFT가 아니라 FAILED다.**"""
+    try:
+        response = client.describe_auto_scaling_instances(InstanceIds=[instance_id])
+    except (ClientError, BotoCoreError):
+        return "FAILED", None
+    entry = next(
+        (
+            item
+            for item in response.get("AutoScalingInstances") or ()
+            if isinstance(item, Mapping) and item.get("InstanceId") == instance_id
+        ),
+        None,
+    )
+    if entry is None or entry.get("AutoScalingGroupName") != asg_name:
+        return "DRIFT", None
+    protected = entry.get("ProtectedFromScaleIn")
+    if not isinstance(protected, bool):
+        return "FAILED", None
+    return "SAME", protected
+
+
+def _protection_result(
+    phase: str,
+    outcome: str,
+    reason: str,
+    *,
+    asg_name: str | None,
+    instance_id: str,
+    write_may_have_begun: bool = False,
+    observed: bool | None = None,
+    residual: bool | None = None,
+) -> ScaleInProtectionResult:
+    if residual is None:
+        residual = outcome != "APPLIED"
+    return ScaleInProtectionResult(
+        phase=phase,
+        outcome=outcome,
+        reason=reason,
+        asg_name=asg_name,
+        instance_id=instance_id,
+        write_may_have_begun=write_may_have_begun,
+        observed_protected=observed,
+        residual=residual,
+        observed_at=_utcnow(),
+    )
+
+
+def _set_protection_and_verify(
+    client: Any, instance_id: str, asg_name: str, value: bool
+) -> tuple[str, str, bool | None]:
+    """쓰기 1회 + 확인 조회 1회. (outcome, reason, 관측 값).
+
+    클라이언트가 SDK 재전송을 하지 않으므로(AUTOSCALING_PROTECTION_CLIENT) 쓰기는 많아야 한 번
+    나간다. 4xx 거절은 FAILED(WRITE_REJECTED)다. 그 밖의 실패(응답 유실·5xx)는 쓰기가 닿았는지
+    모르므로 확인 조회로 값을 본다 — 원하는 값이 보이면 APPLIED, 아니면 UNKNOWN이다.
+    """
+    try:
+        client.set_instance_protection(
+            InstanceIds=[instance_id],
+            AutoScalingGroupName=asg_name,
+            ProtectedFromScaleIn=value,
+        )
+    except (ClientError, BotoCoreError) as exc:
+        if _effect_for(exc) is ExecutionEffect.NOT_APPLIED:
+            return "FAILED", "WRITE_REJECTED", None
+    state, observed = _observe_asg_protection(client, instance_id, asg_name)
+    if state == "SAME" and observed is value:
+        return "APPLIED", "WRITTEN", observed
+    if state == "DRIFT":
+        return "UNKNOWN", "MEMBERSHIP_DRIFT", None
+    return "UNKNOWN", "WRITE_UNCERTAIN", observed
+
+
+def _converge_protection(
+    phase: str,
+    client: Any,
+    instance_id: str,
+    asg_name: str,
+    desired: bool,
+    *,
+    record_intent: Callable[[ScaleInProtectionResult], None],
+    written_reason: str,
+) -> ScaleInProtectionResult:
+    """현재 값을 읽고(조회 1) 다르면 쓴다(쓰기 1 + 확인 1). **이전 값 기록만으로 현재 값을 말하지 않는다.**
+
+    조회가 같은 ASG 멤버십과 현재 값을 확인해야만 APPLIED/ALREADY_*를 쓴다. 쓰기 직전에는 시도
+    의도(UNKNOWN·WRITE_UNCERTAIN, write_may_have_begun)를 `record_intent`로 먼저 남기며, 이 호출이
+    실패하면 예외가 올라가 쓰기는 나가지 않는다.
+    """
+    state, observed = _observe_asg_protection(client, instance_id, asg_name)
+    if state != "SAME":
+        reason = "MEMBERSHIP_DRIFT" if state == "DRIFT" else "LOOKUP_FAILED"
+        return _protection_result(
+            phase, "NOT_ATTEMPTED", reason, asg_name=asg_name, instance_id=instance_id
+        )
+    if observed is desired:
+        return _protection_result(
+            phase,
+            "APPLIED",
+            "ALREADY_PROTECTED" if phase == "PROTECT" else "ALREADY_RESTORED",
+            asg_name=asg_name,
+            instance_id=instance_id,
+            observed=observed,
+        )
+    record_intent(
+        _protection_result(
+            phase,
+            "UNKNOWN",
+            "WRITE_UNCERTAIN",
+            asg_name=asg_name,
+            instance_id=instance_id,
+            write_may_have_begun=True,
+            observed=observed,
+        )
+    )
+    outcome, reason, observed = _set_protection_and_verify(
+        client, instance_id, asg_name, desired
+    )
+    if reason == "WRITTEN":
+        reason = written_reason
+    return _protection_result(
+        phase,
+        outcome,
+        reason,
+        asg_name=asg_name,
+        instance_id=instance_id,
+        write_may_have_begun=True,
+        observed=observed,
+    )
+
+
+def protect_scale_in(
+    target_arn: str,
+    protection: ScaleInProtectionBackup | None,
+    *,
+    record_intent: Callable[[ScaleInProtectionResult], None],
+) -> ScaleInProtectionResult | None:
+    """격리 성공 뒤 보조 보호 쓰기. 기록할 결과가 없으면 None(NOT_MANAGED·대상 불일치).
+
+    쓰기는 **이전 값이 확정된 managed 멤버**에만 한다. UNKNOWN·옛 백업(None)은 쓰지 않고 잔여를 남긴다.
+    이미 보호돼 있었다는 백업 값은 현재를 말하지 않는다 — 현재 멤버십과 값을 읽어 확인한 뒤에만
+    APPLIED다(호출 최대 3회: 조회·쓰기·확인).
+    """
+    target = parse_arn(target_arn)
+    if target is None or target.resource_type != "instance":
+        return None
+    instance_id = target.resource_id
+    # 옛 백업(필드 없음)은 UNKNOWN과 같다 — ADR-0008 §8-1. 저장된 백업은 바꾸지 않는다.
+    if protection is None or protection.status == "UNKNOWN":
+        return _protection_result(
+            "PROTECT",
+            "NOT_ATTEMPTED",
+            "PRIOR_STATE_UNKNOWN",
+            asg_name=None,
+            instance_id=instance_id,
+        )
+    if protection.status != "MANAGED":
+        return None
+    client = aws_client("autoscaling", target.region, **AUTOSCALING_PROTECTION_CLIENT)
+    return _converge_protection(
+        "PROTECT",
+        client,
+        instance_id,
+        protection.asg_name,
+        True,
+        record_intent=record_intent,
+        written_reason="WRITTEN",
+    )
+
+
+def restore_scale_in_protection(
+    target_arn: str,
+    backup: SgAndTgMappingBackup,
+    *,
+    parent_result: ScaleInProtectionResult | None,
+    record_intent: Callable[[ScaleInProtectionResult], None],
+) -> ScaleInProtectionResult | None:
+    """해제 뒤 보조 복원. **캡처한 이전 값으로만**, 아래 조건이 모두 맞을 때만 쓴다.
+
+    ① 이전 값이 확정됐다(MANAGED). UNKNOWN·옛 백업·NOT_MANAGED는 None — 쓰지 않는다.
+    ② 원본 PROTECT 결과가 "우리 쓰기가 값을 바꿨을 수 있다"의 근거다
+       (`may_have_changed_protection`). 확정 거절(FAILED·WRITE_REJECTED)이나 기록 없음은
+       근거가 아니므로 무관한 보호를 되돌리지 않는다.
+    ③ ENI SG·TG 등록이 복원된 **현물을 다시 읽어** 확인했다 — register_targets 응답이 아니라.
+       확인하지 못하면 보호를 풀지 않고 잔여를 남긴다(해제 자체는 건드리지 않는다).
+    ④ 같은 인스턴스·같은 ASG 멤버십을 읽어 확인했다.
+    """
+    protection = backup.scale_in_protection
+    target = parse_arn(target_arn)
+    if (
+        target is None
+        or target.resource_type != "instance"
+        or protection is None
+        or protection.status != "MANAGED"
+    ):
+        return None
+    instance_id = target.resource_id
+    asg_name = protection.asg_name
+    if parent_result is None or not parent_result.may_have_changed_protection:
+        return _protection_result(
+            "RESTORE",
+            "NOT_ATTEMPTED",
+            "NO_PROTECTION_WRITE",
+            asg_name=asg_name,
+            instance_id=instance_id,
+            residual=False,
+        )
+    if not _core_release_confirmed(backup, instance_id, target.region):
+        return _protection_result(
+            "RESTORE",
+            "NOT_ATTEMPTED",
+            "CORE_STATE_UNVERIFIED",
+            asg_name=asg_name,
+            instance_id=instance_id,
+        )
+    client = aws_client("autoscaling", target.region, **AUTOSCALING_PROTECTION_CLIENT)
+    return _converge_protection(
+        "RESTORE",
+        client,
+        instance_id,
+        asg_name,
+        protection.previous_protected,
+        record_intent=record_intent,
+        written_reason="RESTORED",
+    )
+
+
+def _core_release_confirmed(
+    backup: SgAndTgMappingBackup, instance_id: str, region: str
+) -> bool:
+    """ENI별 SG가 백업과 같고 백업 포트의 TG 등록이 서 있는가 — 지금 읽은 값으로. 못 읽으면 False."""
+    current, code = current_eni_security_groups(instance_id, region)
+    if code is not None:
+        return False
+    if any(
+        set(current.get(eni.network_interface_id) or ()) != set(eni.security_group_ids)
+        for eni in backup.network_interfaces
+    ):
+        return False
+    state, code = current_target_registration(
+        backup.target_group_arn, instance_id, backup.target_port, region
+    )
+    return code is None and state is not None and state != TARGET_DRAINING_STATE
+
+
 # ------------------------------------------------------------------ 격리 해제 (MVP 체크리스트 §2-1 B3)
 def execute_ec2_unisolate(
     target_arn: str,
     *,
     backup: SgAndTgMappingBackup,
-    record_step: Optional[StepRecorder] = None,
+    record_step: StepRecorder | None = None,
 ) -> ExecutionOutcome:
     """`RUNBOOK_EC2_UNISOLATE` 실행 — ENI 대조 → ENI별 원래 SG 복원 → TG 재등록.
 
@@ -2929,17 +3243,15 @@ def execute_ec2_unisolate(
 # 본체는 services/aws/autoscaling.py다. 그 모듈이 이 모듈의 단계 기록기·ARN 해석·이름 규칙을
 # 쓰므로 여기서는 **호출 시점에** import한다 — 모듈 수준 import는 순환한다. 소비자(workflows)는
 # 다른 런북처럼 executor만 본다. 단계 5(읽기 전용 관측 요약)는 workflows가 남긴다.
-STEP_CREATE_IMAGE = "CREATE_IMAGE"                          # 단계 1 — AMI 생성 + available 대기
-STEP_CREATE_LAUNCH_TEMPLATE = "CREATE_LAUNCH_TEMPLATE"      # 단계 2
+STEP_CREATE_IMAGE = "CREATE_IMAGE"  # 단계 1 — AMI 생성 + available 대기
+STEP_CREATE_LAUNCH_TEMPLATE = "CREATE_LAUNCH_TEMPLATE"  # 단계 2
 STEP_CREATE_AUTO_SCALING_GROUP = "CREATE_AUTO_SCALING_GROUP"  # 단계 3
-STEP_PUT_SCALING_POLICY = "PUT_SCALING_POLICY"              # 단계 4
+STEP_PUT_SCALING_POLICY = "PUT_SCALING_POLICY"  # 단계 4
 
 
 def prepare_ec2_autoscaling_plan(
     target_arn: str, *, execution_id: str, min_size: int, max_size: int
-) -> tuple[
-    AutoscalingExecutionPlan | None, PrecheckReasonCode | None, str | None
-]:
+) -> tuple[AutoscalingExecutionPlan | None, PrecheckReasonCode | None, str | None]:
     """읽기 전용 준비 — (계획, None, None) 또는 (None, 사유 코드, 요약). AWS를 바꾸지 않는다."""
     from . import autoscaling
 

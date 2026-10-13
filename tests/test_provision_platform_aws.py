@@ -108,6 +108,54 @@ def test_cloudfront_sends_the_origin_header_and_does_not_cache():
     assert cfg["Comment"] == platform.CF_COMMENT
 
 
+# 사용자 도메인 — 웹 번들의 API 주소와 api의 CORS가 별칭을 따른다 ---------------------
+def test_public_origins_put_the_alias_first_and_keep_the_default_domain():
+    dist = {"DomainName": "d1.cloudfront.net", "Aliases": {"Quantity": 1, "Items": ["vigilantis.example"]}}
+    # 첫 값이 빌드 인자 — 별칭이 아니면 별칭 주소로 연 화면이 기본 도메인의 WS로 붙어 Origin 검사에 걸린다
+    assert platform.public_origins(dist) == ["https://vigilantis.example", "https://d1.cloudfront.net"]
+
+
+def test_public_origins_without_alias_is_the_default_domain_only():
+    assert platform.public_origins({"DomainName": "d1.cloudfront.net", "Aliases": {"Quantity": 0}}) == [
+        "https://d1.cloudfront.net"]
+
+
+def test_custom_domain_config_keeps_the_rest_of_the_distribution():
+    base = platform.distribution_config("alb.example", "secret-value", "arn:acl", "ref")
+    updated = platform.custom_domain_config(base, "vigilantis.example", "arn:cert")
+    assert updated["Aliases"] == {"Quantity": 1, "Items": ["vigilantis.example"]}
+    assert updated["ViewerCertificate"]["ACMCertificateArn"] == "arn:cert"
+    assert updated["ViewerCertificate"]["SSLSupportMethod"] == "sni-only"
+    assert {k: v for k, v in updated.items() if k not in ("Aliases", "ViewerCertificate")} == base
+    assert "Aliases" not in base  # 원본을 고치지 않는다
+
+
+@pytest.mark.parametrize("cert, covered", [
+    ({"DomainName": "vigilantis.example"}, True),
+    ({"DomainName": "other.example", "SubjectAlternativeNameSummaries": ["*.vigilantis.example"]}, False),
+    ({"DomainName": "x.example", "SubjectAlternativeNameSummaries": ["*.example"]}, True),
+    ({"DomainName": "other.example"}, False),
+])
+def test_certificate_must_cover_the_domain(cert, covered):
+    assert platform.certificate_covers(cert, "vigilantis.example") is covered
+
+
+def test_target_groups_drain_in_30_seconds_not_the_300_second_default():
+    # api는 이전 태스크를 내린 뒤 띄우므로 이 대기가 그대로 중단 시간이 된다
+    assert platform.target_group_attributes() == [
+        {"Key": "deregistration_delay.timeout_seconds", "Value": "30"}]
+
+
+def test_down_removes_only_alias_records_that_point_at_this_distribution():
+    records = [
+        {"Name": "vigilantis.example.", "Type": "A", "AliasTarget": {"DNSName": "d1.cloudfront.net."}},
+        {"Name": "vigilantis.example.", "Type": "A", "AliasTarget": {"DNSName": "d2.cloudfront.net."}},
+        {"Name": "vigilantis.example.", "Type": "NS", "ResourceRecords": []},
+        {"Name": "www.vigilantis.example.", "Type": "A", "AliasTarget": {"DNSName": "d1.cloudfront.net."}},
+    ]
+    assert platform.alias_records_for(records, "vigilantis.example", "d1.cloudfront.net") == [records[0]]
+
+
 # ④ ---------------------------------------------------------------------------
 def test_waf_allows_only_the_ip_set():
     (rule,) = platform.waf_rules("arn:ipset")
@@ -388,6 +436,70 @@ def test_up_stops_before_creating_anything_when_the_smoke_vpc_is_missing():
         platform.up({"iam": FakeIam(policies=[_SMOKE_POLICY]), "ec2": ec2}, ACCOUNT, "ap-northeast-2",
                     ["203.0.113.7/32"])
     assert ec2.calls == ["describe_vpcs"]
+
+
+_DOMAIN = "vigilantis.example"
+
+
+class _Pages:
+    def __init__(self, pages):
+        self.pages = pages
+
+    def paginate(self, **kwargs):
+        return iter(self.pages)
+
+
+class FakeAcm:
+    def __init__(self, certs=()):
+        self.certs = list(certs)
+
+    def get_paginator(self, name):
+        assert name == "list_certificates"
+        return _Pages([{"CertificateSummaryList": self.certs}])
+
+
+class FakeR53:
+    """조회만 답한다 — 레코드 변경이 불리면 기록해 테스트가 잡게 한다."""
+
+    def __init__(self, zones=()):
+        self.zones = list(zones)
+        self.calls: list[str] = []
+
+    def get_paginator(self, name):
+        assert name == "list_hosted_zones"
+        return _Pages([{"HostedZones": self.zones}])
+
+    def __getattr__(self, name):
+        self.calls.append(name)
+        raise AttributeError(name)
+
+
+_CERT = {"DomainName": _DOMAIN, "CertificateArn": "arn:aws:acm:us-east-1:123456789012:certificate/x"}
+_ZONE = {"Id": "/hostedzone/Z1", "Name": f"{_DOMAIN}.", "Config": {"PrivateZone": False}}
+
+
+@pytest.mark.parametrize("certs, zones, missing", [
+    ([], [_ZONE], r"인증서\(ISSUED\) 없음"),
+    ([_CERT], [], "호스팅 영역 없음"),
+    ([_CERT], [{**_ZONE, "Config": {"PrivateZone": True}}], "호스팅 영역 없음"),  # 비공개 영역은 별칭을 못 단다
+])
+def test_up_stops_before_creating_anything_when_the_domain_is_not_ready(certs, zones, missing):
+    """인증서·공개 호스팅 영역이 없으면 VPC·RDS·WAF 어느 것도 바꾸기 전에 멈춘다."""
+    ec2, r53 = RecordingEc2(smoke_vpc="vpc-smoke"), FakeR53(zones)
+    c = {"iam": FakeIam(policies=[_SMOKE_POLICY]), "ec2": ec2, "acm": FakeAcm(certs), "r53": r53}
+    with pytest.raises(SystemExit, match=missing):
+        platform.up(c, ACCOUNT, "ap-northeast-2", ["203.0.113.7/32"], _DOMAIN)
+    assert ec2.calls == ["describe_vpcs"]  # 스모크 VPC 조회 말고는 아무것도 부르지 않았다
+    assert r53.calls == []  # c에 sm·rds·waf·cf가 없으니 그쪽 호출은 KeyError로 드러난다
+
+
+def test_up_preview_also_checks_the_domain(monkeypatch):
+    """--yes 없는 미리 보기에서 먼저 알려야 --yes 실행이 중간에 멈추지 않는다."""
+    _fake_main(monkeypatch, ["up", "--account", ACCOUNT, "--allow-cidr", "203.0.113.7/32", "--domain", _DOMAIN],
+               {"iam": FakeIam(policies=[_SMOKE_POLICY]), "ec2": RecordingEc2(smoke_vpc="vpc-smoke"),
+                "acm": FakeAcm(), "route53": FakeR53([_ZONE])})
+    with pytest.raises(SystemExit, match=r"인증서\(ISSUED\) 없음"):
+        platform.main()
 
 
 def _fake_main(monkeypatch, argv: list[str], fakes: dict) -> None:

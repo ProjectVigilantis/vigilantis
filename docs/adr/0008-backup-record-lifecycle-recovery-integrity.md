@@ -2,7 +2,7 @@
 
 - **Status**: Accepted (2026-09-02 — 안성일(AI·Architect) 검토 완료, PR #253 승인)
 - **Date**: 2026-09-02
-- **Amended**: 2026-10-12 — §5 `SAVE_CURRENT_SG_AND_TG_MAPPING`에 ENI별 원래 SG(`network_interfaces`) 추가(하단 "개정 이력" 참조, 핵심 결정 불변)
+- **Amended**: 2026-10-12(1차 — §5 SG/TG 백업에 ENI별 원래 SG `network_interfaces` 추가) · 2026-10-13(2차 — §8 신설: ASG scale-in 보호 이전 값·보호 결과와 서비스 전환 기록). 하단 "개정 이력" 참조, **핵심 결정 불변**
 - **Deciders**: 김세혁(PM/Infra — `backup.py`·`rollback.py`·실행 경로 소유자) 결정, 안성일(AI·Architect — `ExecutionStep` 계약 소유자) 검토 완료
 - **Refs**: 4주차 P0 카드 `[DOCS] ADR-0008 백업 레코드 수명주기·드리프트·복구 무결성`
 
@@ -169,6 +169,31 @@ ADR-0004 정책 ③을 실행 규칙으로 못 박는다.
 
 **유일한 예외는 백업 캡처다**(§1 ③). 캡처는 멱등이 아니라 **재실행하면 해로운** 작업이라 건너뛰는 것이 옳다 — 두 번째 캡처는 이미 바뀐 값을 "조치 직전"으로 기록한다.
 
+### 8. ASG scale-in 보호와 서비스 전환 원래 경로
+
+§1–§7은 바꾸지 않는다. 서비스 전환의 연결·복귀·정리는 [ADR-0009](0009-real-aws-smoke-environment.md) §7이 다룬다. 필드·상태값·DB 제약의 세부는 [`packages/schemas/backups.py`](../../packages/schemas/backups.py) · [`packages/schemas/service_transition.py`](../../packages/schemas/service_transition.py) · [`apps/core-api/db/models.py`](../../apps/core-api/db/models.py)가 계약이다.
+
+**8-1. 보호 이전 값은 불변 SG/TG 백업에 담는다.** `EC2_ISOLATE`가 만드는 `SAVE_CURRENT_SG_AND_TG_MAPPING` payload의 부가 항목 `scale_in_protection`이 격리 직전에 관측한 ASG scale-in 보호 상태를 담는다. SG/TG 원복 값이 아니므로 부재가 조치를 막지 않는다(§5).
+
+| 상태 | 뜻 | 보호 쓰기·복원 |
+| --- | --- | --- |
+| `MANAGED` | #446 실행이 만든 스모크 ASG의 실제 멤버임을 저장된 실행 계획·ASG 소유 태그·멤버십으로 모두 확인했고 이전 값을 읽었다 | 대상 |
+| `NOT_MANAGED` | 조회는 성공했고, 대상이 ASG 멤버가 아니거나 그 ASG가 #446이 만든 것이 아니다 | 하지 않는다 |
+| `UNKNOWN` | 조회·대조를 끝내지 못했다 — **보호되지 않았다는 뜻이 아니다** | 하지 않는다 |
+
+**이 항목이 없는 기존 백업은 `UNKNOWN`으로 읽는다.** 부재는 "보호 없음"이 아니라 "모름"이다.
+
+**8-2. 보호 결과는 실행 행에 따로 남기며 best effort다.** 보호 쓰기(격리)·복원(해제)의 결과는 `ActionExecution.scale_in_protection_result`(JSONB)에 둔다. `BackupRecord`를 더 만들지 않아 한 실행에 백업 하나·백업 불변(§1)을 지키고, 원복 근거와 관측 결과를 섞지 않는다. 보호가 실패하거나 확인되지 않아도 TG/ENI 격리·해제를 막거나 그 결과를 바꾸지 않으며, 보호가 적용돼도 격리·해제 성공의 근거나 인스턴스 생존의 보장이 되지 않는다.
+
+**8-3. 쓰기는 의도를 먼저 커밋하고, 복원은 SG/TG 확인 뒤에만 한다.** 보호 쓰기 전에 의도를 커밋한다(§1 ②). 응답이 유실되면 다시 쓰지 않고 읽기 전용 조회로 관측한 값만 남긴다. 이전 값 복원은 SG/TG 복원이 현물에서 확인되고 같은 인스턴스가 같은 ASG의 멤버임을 다시 확인했을 때만 한다(§3의 상태 대조). 이전 값을 모르거나 우리 쓰기가 값을 바꾸지 않았음이 확인되면 추측으로 복원하지 않는다.
+
+**8-4. 서비스 전환 기록은 백업 4종·#446 인프라 상태와 별개다.** 서비스 전환은 #446 실행에 연결된 별도 PostgreSQL 기록을 둔다. 새 `BackupType`을 더하지 않고, #446 실행 계획·상태를 복제하거나 덮어쓰지 않는다.
+
+- **시도(`ServiceTransition`)는 생성 후 불변이다.** 의도와 운영 리스너에서 관측한 실제 원래 경로를 담는다. 고친 계획은 같은 실행의 최신 시도를 명시적으로 대체하는 새 시도이며, 변경 명령은 변경 잠금 아래에서 다시 확인한 최신 시도에만 허용한다.
+- **작업 일지(`ServiceTransitionOperation`)와 관측(`ServiceTransitionObservation`)은 #446 실행 단위다.** 시도 없이도 남아 실행 단위 정리를 기록한다. 일지는 AWS 호출 전에 커밋한다. 관측은 생성 후 불변이다.
+- **불확실한 변경은 재생하지 않는다.** 결과를 모르는 변경(응답 유실·5xx·닫히지 않은 일지)은 같은 실행의 다음 변경을 막는다. 읽기 전용 대조에서 효과가 보이지 않는 것(`EFFECT_NOT_OBSERVED`)은 요청이 받아들여지지 않았다는 증거가 아니므로 막음을 풀지 않는다. 의도한 효과가 현물에서 확인돼야(`EFFECT_OBSERVED`) 풀리며, 수동으로 막음을 푸는 경로는 두지 않는다.
+- **정리는 기록을 지우지 않는다**(§2). 명시적 정리의 대상은 AWS 자원뿐이고, 열린 격리의 SG/TG 백업이 복원 대상으로 가리키는 TG·부착은 남기며 그 때문에 백업을 고치지 않는다.
+
 ## Consequences (결과·트레이드오프)
 
 **장점**
@@ -202,3 +227,8 @@ ADR-0004 정책 ③을 실행 규칙으로 못 박는다.
 - **2026-10-12 (1차 개정)** — §5 백업 payload 표의 `SAVE_CURRENT_SG_AND_TG_MAPPING`에 `network_interfaces[]`(ENI별 원래 SG, DeviceIndex 순, 첫 원소 = 주 ENI)를 필수 항목으로 더한다.
   격리 실행(`execute_ec2_isolate`)이 인스턴스의 모든 ENI를 격리 SG로 바꾸는데, 종전 표의 `security_group_ids[]`는 ENI 하나의 목록이라 ENI가 둘 이상인 인스턴스를 원상 복구할 수 없었다.
   `security_group_ids[]`는 주 ENI의 목록으로 남겨 가드레일 ④(`_precheck_unisolate`)의 대조 계약을 바꾸지 않는다. 계약 소재는 `packages/schemas/backups.py`의 `SgAndTgMappingBackup`이다. 수명주기·드리프트·재개 단위 등 **핵심 결정은 바뀌지 않는다.**
+- **2026-10-13 (2차 개정)** — §8을 신설한다. 김세혁 결정 · [PR #466 승인](https://github.com/ProjectVigilantis/vigilantis/pull/466#pullrequestreview-5498023210).
+  - **이유**: #446 서비스 전환에서 격리 대상이 ASG 멤버일 수 있게 되면서, 격리 중 scale-in 보호의 이전 값·결과와 서비스의 원래 경로를 기록할 자리가 필요해졌다.
+  - **바뀌는 것**: SG/TG 백업의 부가 항목 `scale_in_protection`(기존 백업의 부재 = `UNKNOWN`), 실행 행의 보호 결과, 보호 쓰기·복원 순서(§8-1–§8-3), 백업과 별개인 불변 서비스 전환 기록과 불확실 변경의 재생 금지(§8-4).
+  - **바뀌지 않는 것**: 한 실행에 백업 하나·생성 후 불변·삭제 없음(§1·§2), 나이가 아닌 상태 대조(§3), SG/TG 원복 값과 가드레일 ④의 대조 계약(§5), 재개 단위(§7).
+  - **검증 범위**: 근거는 구현과 로컬 테스트이며 실 AWS 실행은 미검증이다.

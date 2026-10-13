@@ -328,6 +328,14 @@ def test_high_full_flow_isolates_and_confirms(committed_sessions, aws, world):
             {"network_interface_id": world.eni1, "security_group_ids": [world.web_sg, world.ssh_sg]},
             {"network_interface_id": world.eni2, "security_group_ids": [world.db_sg]},
         ],
+        # ASG 태그가 없는 대상 — 보호 관측은 ASG를 조회하지 않고 NOT_MANAGED로 남는다(#446)
+        "scale_in_protection": {
+            "status": "NOT_MANAGED",
+            "asg_name": None,
+            "previous_protected": None,
+            "autoscaling_execution_id": None,
+            "reason": "NOT_ASG_MEMBER",
+        },
     }
     (backup,) = snap.backups
     assert execution.backup_record_id == backup.backup_record_id == aws.probe.backup_record_id

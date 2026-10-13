@@ -31,6 +31,7 @@ LocalStack Community에 `elbv2`가 없어(ADR-0006 §4 · ADR-0007 §Context) �
 """
 
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -43,18 +44,23 @@ for p in (str(CORE_API), str(REPO_ROOT / "packages")):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-import dispatcher  # noqa: E402
-import workflows  # noqa: E402
-from schemas.backups import BackupType, SgAndTgMappingBackup  # noqa: E402
-from schemas.executions import ExecutionEffect, ExecutionStepStatus  # noqa: E402
-from schemas.precheck import PrecheckReasonCode  # noqa: E402
-from schemas.runbooks import (  # noqa: E402
+import dispatcher
+import workflows
+from schemas.backups import (
+    BackupType,
+    ScaleInProtectionBackup,
+    ScaleInProtectionResult,
+    SgAndTgMappingBackup,
+)
+from schemas.executions import ExecutionEffect, ExecutionStepStatus
+from schemas.precheck import PrecheckReasonCode
+from schemas.runbooks import (
     APPROVAL_MODE_BY_ROLLBACK_ID,
     ApprovalMode,
     RunbookId,
 )
-from services.aws import backup as bk  # noqa: E402
-from services.aws import executor as ex  # noqa: E402
+from services.aws import backup as bk
+from services.aws import executor as ex
 
 R = PrecheckReasonCode
 S = ExecutionStepStatus
@@ -94,7 +100,15 @@ def eni(eni_id: str, device_index: int, *groups: str) -> dict:
 
 
 def instance_with(*interfaces: dict) -> dict:
-    return {"Reservations": [{"Instances": [{"InstanceId": INSTANCE, "NetworkInterfaces": list(interfaces)}]}]}
+    return {
+        "Reservations": [
+            {
+                "Instances": [
+                    {"InstanceId": INSTANCE, "NetworkInterfaces": list(interfaces)}
+                ]
+            }
+        ]
+    }
 
 
 # 보조 ENI를 앞에 둔다 — 캡처가 응답 순서가 아니라 DeviceIndex로 주 ENI를 고르는지 본다
@@ -109,7 +123,10 @@ def health(*entries: tuple[int, str, str | None]) -> dict:
         "TargetHealthDescriptions": [
             {
                 "Target": {"Id": INSTANCE, "Port": port},
-                "TargetHealth": {"State": state, **({"Reason": reason} if reason else {})},
+                "TargetHealth": {
+                    "State": state,
+                    **({"Reason": reason} if reason else {}),
+                },
             }
             for port, state, reason in entries
         ]
@@ -131,6 +148,9 @@ MODELED = frozenset(
         "elbv2.describe_target_health",
         "elbv2.deregister_targets",
         "elbv2.register_targets",
+        "autoscaling.describe_auto_scaling_groups",
+        "autoscaling.describe_auto_scaling_instances",
+        "autoscaling.set_instance_protection",
     }
 )
 
@@ -185,7 +205,9 @@ def aws(monkeypatch):
     configure.calls = state["calls"]
     configure.set = lambda key, value: state["overrides"].__setitem__(key, value)
     yield configure
-    assert state["unmodeled"] == [], f"모델링하지 않은 AWS 작업 호출: {state['unmodeled']}"
+    assert state["unmodeled"] == [], (
+        f"모델링하지 않은 AWS 작업 호출: {state['unmodeled']}"
+    )
 
 
 def operations(aws) -> list[str]:
@@ -203,7 +225,10 @@ def mapping(**overrides) -> SgAndTgMappingBackup:
         "target_group_arn": TG_ARN,
         "target_port": PORT,
         "network_interfaces": [
-            {"network_interface_id": PRIMARY_ENI, "security_group_ids": [WEB_SG, SSH_SG]},
+            {
+                "network_interface_id": PRIMARY_ENI,
+                "security_group_ids": [WEB_SG, SSH_SG],
+            },
             {"network_interface_id": SECONDARY_ENI, "security_group_ids": [DB_SG]},
         ],
     }
@@ -228,12 +253,23 @@ def test_capture_holds_every_eni_in_device_order_and_the_registered_port(aws):
         "target_group_arn": TG_ARN,
         "target_port": PORT,
         "network_interfaces": [
-            {"network_interface_id": PRIMARY_ENI, "security_group_ids": [WEB_SG, SSH_SG]},
+            {
+                "network_interface_id": PRIMARY_ENI,
+                "security_group_ids": [WEB_SG, SSH_SG],
+            },
             {"network_interface_id": SECONDARY_ENI, "security_group_ids": [DB_SG]},
         ],
+        # ASG 태그가 없는 대상 — 보호 관측은 ASG를 조회하지 않고 NOT_MANAGED로 남는다
+        "scale_in_protection": {
+            "status": "NOT_MANAGED",
+            "asg_name": None,
+            "previous_protected": None,
+            "autoscaling_execution_id": None,
+            "reason": "NOT_ASG_MEMBER",
+        },
     }
     # 등록 조회는 파라미터의 TG로, 이 인스턴스로 한정해서 묻는다
-    (_, kwargs), = [c for c in aws.calls if c[0] == "elbv2.describe_target_health"]
+    ((_, kwargs),) = [c for c in aws.calls if c[0] == "elbv2.describe_target_health"]
     assert kwargs == {"TargetGroupArn": TG_ARN, "Targets": [{"Id": INSTANCE}]}
     # 캡처는 아무것도 바꾸지 않는다
     assert changes(aws) == []
@@ -243,18 +279,36 @@ def test_capture_payload_satisfies_the_unisolate_precheck_keys(aws):
     """가드레일 ④ `_precheck_unisolate`는 `security_group_ids`·`target_group_arn`을 읽는다 —
     캡처가 만든 payload가 그 계약을 그대로 통과해야 원클릭 해제가 막히지 않는다."""
     payload = capture(aws).payload
-    assert all(ex._conforms(ex._SG_ID, group) for group in payload["security_group_ids"])
+    assert all(
+        ex._conforms(ex._SG_ID, group) for group in payload["security_group_ids"]
+    )
     assert ex._conforms(ex._TG_ARN, payload["target_group_arn"])
-    assert ex.sg_tg_mapping_backup(payload) == mapping()
+    assert ex.sg_tg_mapping_backup(payload) == mapping(
+        scale_in_protection=ScaleInProtectionBackup(
+            status="NOT_MANAGED", reason="NOT_ASG_MEMBER"
+        )
+    )
 
 
 @pytest.mark.parametrize(
     "key, outcome, code",
     [
-        ("ec2.describe_instances", client_error("InvalidInstanceID.NotFound"), R.PRECHECK_TARGET_NOT_FOUND),
-        ("ec2.describe_instances", EndpointConnectionError(endpoint_url="x"), R.PRECHECK_AWS_ERROR),
+        (
+            "ec2.describe_instances",
+            client_error("InvalidInstanceID.NotFound"),
+            R.PRECHECK_TARGET_NOT_FOUND,
+        ),
+        (
+            "ec2.describe_instances",
+            EndpointConnectionError(endpoint_url="x"),
+            R.PRECHECK_AWS_ERROR,
+        ),
         ("ec2.describe_instances", instance_with(), R.PRECHECK_INVALID_STATE),
-        ("elbv2.describe_target_health", client_error("TargetGroupNotFound"), R.PRECHECK_TARGET_NOT_FOUND),
+        (
+            "elbv2.describe_target_health",
+            client_error("TargetGroupNotFound"),
+            R.PRECHECK_TARGET_NOT_FOUND,
+        ),
         ("elbv2.describe_target_health", NOT_REGISTERED, R.PRECHECK_TARGET_NOT_FOUND),
         (
             "elbv2.describe_target_health",
@@ -315,7 +369,10 @@ def test_isolate_deregisters_first_then_swaps_every_eni(aws):
     ]
     deregister, primary, secondary = (kwargs for _, kwargs in aws.calls)
     # 해제는 백업의 등록 그대로 — 포트를 빼면 TG 기본 포트 등록을 찾는다
-    assert deregister == {"TargetGroupArn": TG_ARN, "Targets": [{"Id": INSTANCE, "Port": PORT}]}
+    assert deregister == {
+        "TargetGroupArn": TG_ARN,
+        "Targets": [{"Id": INSTANCE, "Port": PORT}],
+    }
     assert primary == {"NetworkInterfaceId": PRIMARY_ENI, "Groups": [ISOLATION_SG]}
     assert secondary == {"NetworkInterfaceId": SECONDARY_ENI, "Groups": [ISOLATION_SG]}
 
@@ -324,7 +381,12 @@ def test_isolate_deregisters_first_then_swaps_every_eni(aws):
         (2, ex.STEP_ISOLATE_ENI_SECURITY_GROUPS, S.SUCCESS, E.APPLIED),
     ]
     # 호출 직전 IN_PROGRESS → 종료 결과 순서로 기록된다(회수 규약 — ADR-0008 §7)
-    assert [s.status for s in recorded] == [S.IN_PROGRESS, S.SUCCESS, S.IN_PROGRESS, S.SUCCESS]
+    assert [s.status for s in recorded] == [
+        S.IN_PROGRESS,
+        S.SUCCESS,
+        S.IN_PROGRESS,
+        S.SUCCESS,
+    ]
     assert all(s.affected_arn == INSTANCE_ARN for s in outcome.steps)
 
 
@@ -336,7 +398,9 @@ def test_isolate_rejected_deregistration_changes_nothing(aws):
     assert operations(aws) == ["elbv2.deregister_targets"]  # SG는 건드리지 않는다
     (step,) = outcome.steps
     assert (step.step_type, step.status, step.effect) == (
-        ex.STEP_DEREGISTER_TARGET, S.FAILED, E.NOT_APPLIED,
+        ex.STEP_DEREGISTER_TARGET,
+        S.FAILED,
+        E.NOT_APPLIED,
     )
 
 
@@ -352,7 +416,9 @@ def test_isolate_failing_after_one_eni_changed_is_partial(aws):
     assert deregister.effect is E.APPLIED
     # 마지막 예외는 4xx지만 주 ENI는 이미 격리 SG로 바뀌었다 — NOT_APPLIED가 아니다
     assert (swap.step_type, swap.status, swap.effect) == (
-        ex.STEP_ISOLATE_ENI_SECURITY_GROUPS, S.FAILED, E.PARTIAL,
+        ex.STEP_ISOLATE_ENI_SECURITY_GROUPS,
+        S.FAILED,
+        E.PARTIAL,
     )
     assert PRIMARY_ENI in swap.error_summary and SECONDARY_ENI in swap.error_summary
 
@@ -360,7 +426,10 @@ def test_isolate_failing_after_one_eni_changed_is_partial(aws):
 def test_isolate_failing_on_the_first_eni_keeps_the_error_classification(aws):
     """한 ENI도 안 바뀌었으면 PARTIAL이 아니다 — 단계 effect는 예외 분류 그대로다.
     (TG 해제는 이미 적용됐으므로 실행 전체로는 자산이 바뀐 채 끝난 것이다.)"""
-    aws.set("ec2.modify_network_interface_attribute", client_error("UnauthorizedOperation", 403))
+    aws.set(
+        "ec2.modify_network_interface_attribute",
+        client_error("UnauthorizedOperation", 403),
+    )
     outcome, _ = isolate(aws)
 
     deregister, swap = outcome.steps
@@ -370,7 +439,9 @@ def test_isolate_failing_on_the_first_eni_keeps_the_error_classification(aws):
 
 
 def test_isolate_server_error_on_the_first_eni_is_unknown(aws):
-    aws.set("ec2.modify_network_interface_attribute", client_error("InternalError", 500))
+    aws.set(
+        "ec2.modify_network_interface_attribute", client_error("InternalError", 500)
+    )
     outcome, _ = isolate(aws)
     assert outcome.steps[-1].effect is E.UNKNOWN
 
@@ -425,7 +496,10 @@ def test_unisolate_restores_each_eni_from_the_backup_then_reregisters_on_its_por
     # ENI마다 **그 ENI의** 원래 SG — 주 ENI 목록을 보조 ENI에 붓지 않는다
     assert primary == {"NetworkInterfaceId": PRIMARY_ENI, "Groups": [WEB_SG, SSH_SG]}
     assert secondary == {"NetworkInterfaceId": SECONDARY_ENI, "Groups": [DB_SG]}
-    assert register == {"TargetGroupArn": TG_ARN, "Targets": [{"Id": INSTANCE, "Port": PORT}]}
+    assert register == {
+        "TargetGroupArn": TG_ARN,
+        "Targets": [{"Id": INSTANCE, "Port": PORT}],
+    }
     assert [(s.sequence, s.step_type, s.effect) for s in outcome.steps] == [
         (1, ex.STEP_RESTORE_ENI_SECURITY_GROUPS, E.APPLIED),
         (2, ex.STEP_REGISTER_TARGET, E.APPLIED),
@@ -447,7 +521,11 @@ def test_unisolate_values_come_only_from_the_backup(aws):
         ],
     )
     unisolate(aws, other)
-    groups = [kw["Groups"] for name, kw in aws.calls if name.endswith("modify_network_interface_attribute")]
+    groups = [
+        kw["Groups"]
+        for name, kw in aws.calls
+        if name.endswith("modify_network_interface_attribute")
+    ]
     assert groups == [[DB_SG], [WEB_SG]]
     (register,) = [kw for name, kw in aws.calls if name == "elbv2.register_targets"]
     assert register["Targets"] == [{"Id": INSTANCE, "Port": 9090}]
@@ -462,7 +540,9 @@ def test_unisolate_refuses_when_a_backup_eni_is_no_longer_on_the_instance(aws):
     assert changes(aws) == []
     (step,) = outcome.steps
     assert (step.step_type, step.status, step.effect) == (
-        ex.STEP_COMPARE_NETWORK_INTERFACES, S.SUCCESS, E.NOT_APPLIED,
+        ex.STEP_COMPARE_NETWORK_INTERFACES,
+        S.SUCCESS,
+        E.NOT_APPLIED,
     )
     assert SECONDARY_ENI in outcome.error_summary
 
@@ -505,7 +585,9 @@ def test_unisolate_reregistration_failure_keeps_the_restored_sg_step(aws):
     restore, register = outcome.steps
     assert (restore.status, restore.effect) == (S.SUCCESS, E.APPLIED)
     assert (register.step_type, register.status, register.effect) == (
-        ex.STEP_REGISTER_TARGET, S.FAILED, E.NOT_APPLIED,
+        ex.STEP_REGISTER_TARGET,
+        S.FAILED,
+        E.NOT_APPLIED,
     )
 
 
@@ -528,7 +610,9 @@ def test_current_eni_security_groups_maps_each_eni(aws):
     ],
     ids=["registered", "draining", "not-registered", "other-port"],
 )
-def test_current_target_registration_reads_only_the_backed_up_port(aws, response, expected):
+def test_current_target_registration_reads_only_the_backed_up_port(
+    aws, response, expected
+):
     aws.set("elbv2.describe_target_health", response)
     state, code = ex.current_target_registration(TG_ARN, INSTANCE, PORT, REGION)
     assert code is None
@@ -538,7 +622,12 @@ def test_current_target_registration_reads_only_the_backed_up_port(aws, response
 def test_sg_tg_mapping_backup_rejects_payload_outside_the_contract():
     assert ex.sg_tg_mapping_backup(mapping().model_dump(mode="json")) == mapping()
     # 롤백 precheck가 읽던 두 키만 있는 옛 모양 — 포트·ENI 목록이 없어 원복 근거가 못 된다
-    assert ex.sg_tg_mapping_backup({"security_group_ids": [WEB_SG], "target_group_arn": TG_ARN}) is None
+    assert (
+        ex.sg_tg_mapping_backup(
+            {"security_group_ids": [WEB_SG], "target_group_arn": TG_ARN}
+        )
+        is None
+    )
 
 
 def test_mapping_contract_ties_the_primary_eni_to_security_group_ids():
@@ -547,7 +636,10 @@ def test_mapping_contract_ties_the_primary_eni_to_security_group_ids():
     with pytest.raises(ValidationError):
         mapping(
             network_interfaces=[
-                {"network_interface_id": PRIMARY_ENI, "security_group_ids": [WEB_SG, SSH_SG]},
+                {
+                    "network_interface_id": PRIMARY_ENI,
+                    "security_group_ids": [WEB_SG, SSH_SG],
+                },
                 {"network_interface_id": PRIMARY_ENI, "security_group_ids": [DB_SG]},
             ]
         )
@@ -562,8 +654,16 @@ def test_isolate_and_unisolate_are_registered_as_runner_and_judge_pairs():
     """runner만 등록하면 실행 도중 끊긴 격리가 재실행도 종료도 되지 않고 IN_PROGRESS에
     남는다(ADR-0008 §6)."""
     for runbook, runner, judge in (
-        (RunbookId.RUNBOOK_EC2_ISOLATE, workflows.run_ec2_isolate_execution, workflows.judge_ec2_isolate),
-        (RunbookId.RUNBOOK_EC2_UNISOLATE, workflows.run_ec2_unisolate_execution, workflows.judge_ec2_unisolate),
+        (
+            RunbookId.RUNBOOK_EC2_ISOLATE,
+            workflows.run_ec2_isolate_execution,
+            workflows.judge_ec2_isolate,
+        ),
+        (
+            RunbookId.RUNBOOK_EC2_UNISOLATE,
+            workflows.run_ec2_unisolate_execution,
+            workflows.judge_ec2_unisolate,
+        ),
     ):
         assert dispatcher._RUNNERS[runbook] is runner
         assert dispatcher._JUDGES[runbook] is judge
@@ -577,7 +677,9 @@ def test_isolate_is_not_an_auto_rollback_trigger():
         APPROVAL_MODE_BY_ROLLBACK_ID[RunbookId.RUNBOOK_EC2_UNISOLATE.value]
         is ApprovalMode.HUMAN_ONLY
     )
-    assert RunbookId.RUNBOOK_EC2_ISOLATE not in dispatcher._AUTO_ROLLBACK_ON_ASSET_CHANGE
+    assert (
+        RunbookId.RUNBOOK_EC2_ISOLATE not in dispatcher._AUTO_ROLLBACK_ON_ASSET_CHANGE
+    )
     # 성공의 경계가 실행 반환이다 — 다음 주기 판정을 기다리지 않는다
     assert RunbookId.RUNBOOK_EC2_ISOLATE not in dispatcher._AWAIT_JUDGEMENT_ON_SUCCESS
     assert RunbookId.RUNBOOK_EC2_UNISOLATE not in dispatcher._AWAIT_JUDGEMENT_ON_SUCCESS
@@ -591,10 +693,13 @@ def test_the_fake_fails_on_an_operation_it_does_not_model():
     새 AWS 작업을 부르기 시작해도 초록이고, 그 작업은 실 AWS에서 처음 돈다."""
     state = {"overrides": {}, "calls": [], "unmodeled": []}
     with pytest.raises(NotImplementedError):
-        FakeAws("ec2", state).terminate_instances
+        _ = FakeAws("ec2", state).terminate_instances
     with pytest.raises(NotImplementedError):
-        FakeAws("autoscaling", state).create_auto_scaling_group
-    assert state["unmodeled"] == ["ec2.terminate_instances", "autoscaling.create_auto_scaling_group"]
+        _ = FakeAws("autoscaling", state).create_auto_scaling_group
+    assert state["unmodeled"] == [
+        "ec2.terminate_instances",
+        "autoscaling.create_auto_scaling_group",
+    ]
     assert state["calls"] == []
 
 
@@ -615,7 +720,9 @@ class OneRecordLoader:
         self._record = record
 
     def get(self, backup_record_id):
-        return self._record if backup_record_id == self._record.backup_record_id else None
+        return (
+            self._record if backup_record_id == self._record.backup_record_id else None
+        )
 
     def latest_for_target(self, *_args, **_kwargs):
         raise AssertionError("UNISOLATE는 대상 기준 최신 백업으로 찾지 않는다")
@@ -639,19 +746,31 @@ def unisolate_precheck_with(captured) -> "ex.PrecheckOutcome":
 def test_captured_payload_passes_the_real_unisolate_precheck(aws):
     """캡처(B1)가 저장한 payload 그대로 가드레일 ④를 통과해야 원클릭 해제가 선다.
     키 이름 대조(위 ①)와 달리 **실제 `_precheck_unisolate`** 가 읽는다."""
-    aws.set("ec2.describe_instances", in_vpc(instance_with(
-        eni(SECONDARY_ENI, 1, DB_SG),
-        eni(PRIMARY_ENI, 0, WEB_SG, SSH_SG),
-    )))
+    aws.set(
+        "ec2.describe_instances",
+        in_vpc(
+            instance_with(
+                eni(SECONDARY_ENI, 1, DB_SG),
+                eni(PRIMARY_ENI, 0, WEB_SG, SSH_SG),
+            )
+        ),
+    )
     captured = capture(aws)
     assert captured.captured
 
     # 해제 직전 — 두 ENI 모두 격리 SG다. 보조 ENI가 응답 앞에 온다
-    aws.set("ec2.describe_instances", in_vpc(instance_with(
-        eni(SECONDARY_ENI, 1, ISOLATION_SG),
-        eni(PRIMARY_ENI, 0, ISOLATION_SG),
-    )))
-    aws.set("ec2.modify_network_interface_attribute", client_error("DryRunOperation", 412))
+    aws.set(
+        "ec2.describe_instances",
+        in_vpc(
+            instance_with(
+                eni(SECONDARY_ENI, 1, ISOLATION_SG),
+                eni(PRIMARY_ENI, 0, ISOLATION_SG),
+            )
+        ),
+    )
+    aws.set(
+        "ec2.modify_network_interface_attribute", client_error("DryRunOperation", 412)
+    )
     aws.set(
         "elbv2.describe_target_groups",
         {"TargetGroups": [{"TargetGroupArn": TG_ARN, "VpcId": VPC}]},
@@ -660,20 +779,34 @@ def test_captured_payload_passes_the_real_unisolate_precheck(aws):
 
     assert outcome.passed, outcome
     # DryRun은 **주 ENI**(DeviceIndex 0)에 **주 ENI의 원래 SG**를 댄다 — 응답 순서가 아니다
-    (dry_run,) = [kw for name, kw in aws.calls if name == "ec2.modify_network_interface_attribute"]
-    assert dry_run == {"DryRun": True, "NetworkInterfaceId": PRIMARY_ENI, "Groups": [WEB_SG, SSH_SG]}
+    (dry_run,) = [
+        kw for name, kw in aws.calls if name == "ec2.modify_network_interface_attribute"
+    ]
+    assert dry_run == {
+        "DryRun": True,
+        "NetworkInterfaceId": PRIMARY_ENI,
+        "Groups": [WEB_SG, SSH_SG],
+    }
     (exists,) = [kw for name, kw in aws.calls if name == "ec2.describe_security_groups"]
     assert exists == {"GroupIds": [WEB_SG, SSH_SG]}
 
 
 def test_unisolate_precheck_refuses_a_target_group_in_another_vpc(aws):
     """왕복의 반대쪽 — 캡처 뒤 TG가 다른 VPC 것으로 보이면 해제를 시작하지 않는다."""
-    aws.set("ec2.describe_instances", in_vpc(instance_with(eni(PRIMARY_ENI, 0, WEB_SG))))
+    aws.set(
+        "ec2.describe_instances", in_vpc(instance_with(eni(PRIMARY_ENI, 0, WEB_SG)))
+    )
     captured = capture(aws)
-    aws.set("ec2.modify_network_interface_attribute", client_error("DryRunOperation", 412))
+    aws.set(
+        "ec2.modify_network_interface_attribute", client_error("DryRunOperation", 412)
+    )
     aws.set(
         "elbv2.describe_target_groups",
-        {"TargetGroups": [{"TargetGroupArn": TG_ARN, "VpcId": "vpc-0fff000011112222f"}]},
+        {
+            "TargetGroups": [
+                {"TargetGroupArn": TG_ARN, "VpcId": "vpc-0fff000011112222f"}
+            ]
+        },
     )
     outcome = unisolate_precheck_with(captured)
     assert (outcome.passed, outcome.reason_code) == (False, R.PRECHECK_INVALID_STATE)
@@ -746,9 +879,687 @@ def test_unisolate_never_raises(aws, operation, failure):
 
 
 @pytest.mark.parametrize("failure", FAILURES)
-@pytest.mark.parametrize("operation", ["ec2.describe_instances", "elbv2.describe_target_health"])
+@pytest.mark.parametrize(
+    "operation", ["ec2.describe_instances", "elbv2.describe_target_health"]
+)
 def test_capture_never_raises(aws, operation, failure):
     aws.set(operation, failure)
     result = capture(aws)
     assert not result.captured
     assert result.reason_code is not None
+
+
+# ============================================================ ⑨ ASG scale-in 보호 (보조 조치)
+#
+# 보호는 TG/ENI 격리 성공을 바꾸지 않는 **별도 결과**다. 같은 인스턴스의 생존은 보장하지 않으며
+# (진행 중인 scale-in·교체·수동 삭제는 못 막는다) 유예 시간도 가정하지 않는다.
+
+from schemas.autoscaling import (
+    EXECUTION_TAG_KEY,
+    SCALING_POLICY_NAME,
+    SOURCE_INSTANCE_TAG_KEY,
+    AutoscalingExecutionPlan,
+    autoscaling_image_name,
+)
+
+ASG_SOURCE = "i-0fed000011112222f"
+ASG_EXECUTION = "3f1c2b8a-0d5e-4c1a-9b7e-2a6f8d4c1e90"
+ASG = f"vigilantis-asg-{ASG_SOURCE}"
+OTHER_ASG = "someone-elses-asg"
+
+
+def build_plan(**overrides) -> AutoscalingExecutionPlan:
+    values = {
+        "target_arn": f"arn:aws:ec2:{REGION}:{ACCOUNT}:instance/{ASG_SOURCE}",
+        "execution_id": ASG_EXECUTION,
+        "min_size": 1,
+        "max_size": 3,
+        "desired_capacity": 1,
+        "image_name": autoscaling_image_name(ASG_SOURCE, ASG_EXECUTION),
+        "launch_template_name": f"vigilantis-lt-{ASG_SOURCE}",
+        "launch_template_version": 1,
+        "asg_name": ASG,
+        "scaling_policy_name": SCALING_POLICY_NAME,
+        "cpu_target_percent": 50,
+        "default_instance_warmup_seconds": 300,
+        "source": {
+            "instance_id": ASG_SOURCE,
+            "instance_type": "t3.micro",
+            "subnet_id": "subnet-0abc123456789def0",
+            "security_group_ids": [WEB_SG],
+            "iam_instance_profile_arn": None,
+            "ebs_optimized": False,
+            "detailed_monitoring": False,
+            "dedicated_tenancy": False,
+            "associate_public_ip_address": True,
+            "metadata_options": {
+                "http_tokens": "required",
+                "http_endpoint": "enabled",
+                "http_put_response_hop_limit": 2,
+                "http_protocol_ipv6": "disabled",
+                "instance_metadata_tags": "disabled",
+            },
+            "preserved_tags": [{"key": "vigilantis:smoke", "value": "true"}],
+        },
+    }
+    values.update(overrides)
+    return AutoscalingExecutionPlan.model_validate(values)
+
+
+ASG_TAGS = [
+    {"Key": EXECUTION_TAG_KEY, "Value": ASG_EXECUTION},
+    {"Key": SOURCE_INSTANCE_TAG_KEY, "Value": ASG_SOURCE},
+    {"Key": "vigilantis:smoke", "Value": "true"},
+]
+
+
+def asg_member_instance(asg: str = ASG) -> dict:
+    response = instance_with(
+        eni(PRIMARY_ENI, 0, WEB_SG, SSH_SG), eni(SECONDARY_ENI, 1, DB_SG)
+    )
+    response["Reservations"][0]["Instances"][0]["Tags"] = [
+        {"Key": "aws:autoscaling:groupName", "Value": asg}
+    ]
+    return response
+
+
+def asg_groups(
+    *, tags=ASG_TAGS, protected=False, members=(INSTANCE,), name=ASG
+) -> dict:
+    instance = {"LifecycleState": "InService"}
+    if protected is not None:
+        instance["ProtectedFromScaleIn"] = protected
+    return {
+        "AutoScalingGroups": [
+            {
+                "AutoScalingGroupName": name,
+                "Tags": tags,
+                "Instances": [{"InstanceId": member, **instance} for member in members],
+            }
+        ]
+    }
+
+
+def asg_instances(
+    asg: str = ASG, *, protected: bool = False, member: bool = True
+) -> dict:
+    if not member:
+        return {"AutoScalingInstances": []}
+    return {
+        "AutoScalingInstances": [
+            {
+                "InstanceId": INSTANCE,
+                "AutoScalingGroupName": asg,
+                "ProtectedFromScaleIn": protected,
+            }
+        ]
+    }
+
+
+MANAGED = ScaleInProtectionBackup(
+    status="MANAGED",
+    asg_name=ASG,
+    previous_protected=False,
+    autoscaling_execution_id=ASG_EXECUTION,
+)
+MANAGED_PROTECTED = MANAGED.model_copy(update={"previous_protected": True})
+UNKNOWN = ScaleInProtectionBackup(status="UNKNOWN", reason="LOOKUP_FAILED")
+
+
+def capture_asg(aws, *, lookup=lambda _: build_plan(), groups=None, **kwargs):
+    aws.set("ec2.describe_instances", asg_member_instance())
+    aws.set(
+        "autoscaling.describe_auto_scaling_groups",
+        groups if groups is not None else asg_groups(),
+    )
+    return bk.capture_sg_and_tg_mapping(
+        INSTANCE, REGION, target_group_arn=TG_ARN, plan_lookup=lookup, **kwargs
+    )
+
+
+def protection_of(result) -> dict:
+    assert result.captured  # 보조 관측은 SG/TG 캡처의 성패를 바꾸지 않는다
+    return result.payload["scale_in_protection"]
+
+
+def test_capture_records_previous_protection_only_for_verified_managed_member(aws):
+    result = capture_asg(aws)
+    assert protection_of(result) == {
+        "status": "MANAGED",
+        "asg_name": ASG,
+        "previous_protected": False,
+        "autoscaling_execution_id": ASG_EXECUTION,
+        "reason": None,
+    }
+    assert changes(aws) == []  # 캡처는 보호를 쓰지 않는다
+
+
+@pytest.mark.parametrize("protected", [True, False])
+def test_capture_keeps_the_observed_previous_value(aws, protected):
+    result = capture_asg(aws, groups=asg_groups(protected=protected))
+    assert protection_of(result)["previous_protected"] is protected
+
+
+@pytest.mark.parametrize(
+    "tags, lookup, reason",
+    [
+        ([], lambda _: build_plan(), "NO_OWNERSHIP_TAGS"),
+        (ASG_TAGS, lambda _: None, "NO_SOURCE_PLAN"),
+        (
+            [t for t in ASG_TAGS if t["Key"] != "vigilantis:smoke"],
+            lambda _: build_plan(),
+            "OWNERSHIP_MISMATCH",
+        ),
+        (
+            [
+                {**t, "Value": "i-0aaa000011112222a"}
+                if t["Key"] == SOURCE_INSTANCE_TAG_KEY
+                else t
+                for t in ASG_TAGS
+            ],
+            lambda _: build_plan(),
+            "OWNERSHIP_MISMATCH",
+        ),
+        (
+            ASG_TAGS,
+            lambda _: build_plan(asg_name="vigilantis-asg-other"),
+            "OWNERSHIP_MISMATCH",
+        ),
+    ],
+    ids=[
+        "no-tags",
+        "no-plan",
+        "no-smoke-tag",
+        "source-mismatch",
+        "plan-asg-name-mismatch",
+    ],
+)
+def test_capture_does_not_treat_an_unproven_asg_as_managed(aws, tags, lookup, reason):
+    """이름이 비슷하거나 태그만 있다고 우리 스모크 ASG가 아니다 — 소유 근거 셋이 모두 맞아야 한다."""
+    result = capture_asg(aws, lookup=lookup, groups=asg_groups(tags=tags))
+    assert protection_of(result)["status"] == "NOT_MANAGED"
+    assert protection_of(result)["reason"] == reason
+
+
+def test_capture_without_a_plan_lookup_is_unknown_not_unprotected(aws):
+    aws.set("ec2.describe_instances", asg_member_instance())
+    aws.set("autoscaling.describe_auto_scaling_groups", asg_groups())
+    result = bk.capture_sg_and_tg_mapping(INSTANCE, REGION, target_group_arn=TG_ARN)
+    assert protection_of(result)["status"] == "UNKNOWN"
+    assert protection_of(result)["previous_protected"] is None
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [client_error("AccessDenied", 403), EndpointConnectionError(endpoint_url="x")],
+    ids=["denied", "unreachable"],
+)
+def test_capture_asg_lookup_failure_is_unknown_never_nonmember(aws, failure):
+    """SDK 조회 예외를 "ASG 멤버가 아님"으로 읽으면 보호가 필요한 대상이 조용히 빠진다."""
+    aws.set("ec2.describe_instances", asg_member_instance())
+    aws.set("autoscaling.describe_auto_scaling_groups", failure)
+    result = bk.capture_sg_and_tg_mapping(
+        INSTANCE, REGION, target_group_arn=TG_ARN, plan_lookup=lambda _: build_plan()
+    )
+    assert protection_of(result) == {
+        "status": "UNKNOWN",
+        "asg_name": None,
+        "previous_protected": None,
+        "autoscaling_execution_id": None,
+        "reason": "LOOKUP_FAILED",
+    }
+
+
+def test_capture_plan_lookup_error_is_unknown(aws):
+    def boom(_):
+        raise RuntimeError("db down")
+
+    assert (
+        protection_of(capture_asg(aws, lookup=boom))["reason"] == "PLAN_LOOKUP_FAILED"
+    )
+
+
+@pytest.mark.parametrize(
+    "groups, reason",
+    [
+        ({"AutoScalingGroups": []}, "ASG_NOT_FOUND"),
+        (asg_groups(members=("i-0eee000011112222e",)), "MEMBERSHIP_UNVERIFIED"),
+        (asg_groups(protected=None), "PRIOR_STATE_UNKNOWN"),
+    ],
+    ids=["asg-gone", "not-in-instances", "protection-value-missing"],
+)
+def test_capture_unconfirmable_membership_or_prior_value_is_unknown(
+    aws, groups, reason
+):
+    assert protection_of(capture_asg(aws, groups=groups))["reason"] == reason
+
+
+def test_old_backup_without_the_field_is_still_a_valid_sg_tg_backup(aws):
+    payload = mapping().model_dump(mode="json", exclude={"scale_in_protection"})
+    assert "scale_in_protection" not in payload
+    restored = ex.sg_tg_mapping_backup(payload)
+    assert restored is not None and restored.scale_in_protection is None
+    # 옛 백업 = 모름: 보호도 복원도 쓰지 않고 호출도 하지 않는다
+    legacy = ex.protect_scale_in(INSTANCE_ARN, None, record_intent=lambda _: None)
+    unknown = ex.protect_scale_in(
+        INSTANCE_ARN, UNKNOWN, record_intent=lambda _: None
+    )
+    assert legacy is not None and unknown is not None
+    assert legacy.model_dump(exclude={"observed_at"}) == unknown.model_dump(
+        exclude={"observed_at"}
+    )
+    assert (legacy.outcome, legacy.reason, legacy.residual, legacy.asg_name) == (
+        "NOT_ATTEMPTED",
+        "PRIOR_STATE_UNKNOWN",
+        True,
+        None,
+    )
+    assert (
+        ex.restore_scale_in_protection(
+            INSTANCE_ARN, restored, parent_result=None, record_intent=lambda _: None
+        )
+        is None
+    )
+    assert aws.calls == []
+
+
+def protect(aws, protection=MANAGED):
+    intents: list = []
+    result = ex.protect_scale_in(
+        INSTANCE_ARN,
+        protection,
+        record_intent=lambda r: intents.append((len(aws.calls), r)),
+    )
+    return result, intents
+
+
+def test_protect_writes_after_checking_membership_and_verifies(aws):
+    aws.set(
+        "autoscaling.describe_auto_scaling_instances",
+        [asg_instances(protected=False), asg_instances(protected=True)],
+    )
+    result, intents = protect(aws)
+
+    assert operations(aws) == [
+        "autoscaling.describe_auto_scaling_instances",
+        "autoscaling.set_instance_protection",
+        "autoscaling.describe_auto_scaling_instances",
+    ]
+    ((_, write),) = [c for c in aws.calls if c[0].endswith("set_instance_protection")]
+    assert write == {
+        "InstanceIds": [INSTANCE],
+        "AutoScalingGroupName": ASG,
+        "ProtectedFromScaleIn": True,
+    }
+    assert (
+        result.outcome,
+        result.reason,
+        result.write_may_have_begun,
+        result.residual,
+    ) == (
+        "APPLIED",
+        "WRITTEN",
+        True,
+        False,
+    )
+    assert result.observed_at.tzinfo is not None
+    # 쓰기 직전(조회 1회 뒤)에 "쓰기가 시작됐을 수 있다" 의도가 먼저 기록된다
+    ((at, intent),) = intents
+    assert at == 1 and intent.write_may_have_begun and intent.outcome == "UNKNOWN"
+
+
+def test_protection_calls_use_a_single_attempt_client(aws, monkeypatch):
+    """SDK가 응답 유실을 재전송하면 우리가 모르는 두 번째 쓰기가 나간다 — 총 시도 1회로 못 박는다."""
+    seen: list = []
+    original = ex.aws_client
+
+    def spy(service, region=None, **config):
+        seen.append((service, config))
+        return original(service, region, **config)
+
+    monkeypatch.setattr(ex, "aws_client", spy)
+    aws.set(
+        "autoscaling.describe_auto_scaling_instances", asg_instances(protected=True)
+    )
+    protect(aws)
+    restore(aws)
+    clients = [config for service, config in seen if service == "autoscaling"]
+    assert clients and all(c["retries"]["total_max_attempts"] == 1 for c in clients)
+
+
+@pytest.mark.parametrize(
+    "current, outcome, reason",
+    [
+        (asg_instances(protected=True), "APPLIED", "ALREADY_PROTECTED"),
+        (asg_instances(OTHER_ASG, protected=True), "NOT_ATTEMPTED", "MEMBERSHIP_DRIFT"),
+        (EndpointConnectionError(endpoint_url="x"), "NOT_ATTEMPTED", "LOOKUP_FAILED"),
+    ],
+    ids=["still-protected", "moved-asg", "lookup-failed"],
+)
+def test_already_protected_backup_is_not_reported_as_current_protection(
+    aws, current, outcome, reason
+):
+    """백업의 previous_protected=True는 과거 값이다 — 현재 멤버십·값을 읽어야만 APPLIED다."""
+    aws.set("autoscaling.describe_auto_scaling_instances", current)
+    result, intents = protect(aws, MANAGED_PROTECTED)
+    assert operations(aws) == ["autoscaling.describe_auto_scaling_instances"]
+    assert (result.outcome, result.reason) == (outcome, reason)
+    assert result.write_may_have_begun is False and intents == []
+
+
+def test_protect_rewrites_when_the_prior_protection_is_gone(aws):
+    aws.set(
+        "autoscaling.describe_auto_scaling_instances",
+        [asg_instances(protected=False), asg_instances(protected=True)],
+    )
+    result, _ = protect(aws, MANAGED_PROTECTED)
+    assert (
+        result.reason == "WRITTEN"
+        and "autoscaling.set_instance_protection" in operations(aws)
+    )
+
+
+def test_protect_with_unknown_prior_state_writes_nothing_and_leaves_a_residual(aws):
+    result, _ = protect(aws, UNKNOWN)
+    assert aws.calls == []
+    assert (result.outcome, result.reason, result.residual) == (
+        "NOT_ATTEMPTED",
+        "PRIOR_STATE_UNKNOWN",
+        True,
+    )
+
+
+def test_protect_skips_not_managed_targets_entirely(aws):
+    result, _ = protect(
+        aws, ScaleInProtectionBackup(status="NOT_MANAGED", reason="NOT_ASG_MEMBER")
+    )
+    assert result is None and aws.calls == []
+
+
+@pytest.mark.parametrize(
+    "lookup, reason",
+    [
+        (asg_instances(OTHER_ASG), "MEMBERSHIP_DRIFT"),
+        (asg_instances(member=False), "MEMBERSHIP_DRIFT"),
+        (EndpointConnectionError(endpoint_url="x"), "LOOKUP_FAILED"),
+    ],
+    ids=["moved-asg", "left-asg", "lookup-failed"],
+)
+def test_protect_does_not_write_when_membership_is_not_confirmed(aws, lookup, reason):
+    aws.set("autoscaling.describe_auto_scaling_instances", lookup)
+    result, intents = protect(aws)
+    assert changes(aws) == [] and intents == []
+    assert (
+        result.outcome,
+        result.reason,
+        result.residual,
+        result.write_may_have_begun,
+    ) == (
+        "NOT_ATTEMPTED",
+        reason,
+        True,
+        False,
+    )
+
+
+def test_protect_rejected_write_is_a_failed_residual_not_an_exception(aws):
+    aws.set(
+        "autoscaling.describe_auto_scaling_instances", asg_instances(protected=False)
+    )
+    aws.set("autoscaling.set_instance_protection", client_error("ValidationError", 400))
+    result, _ = protect(aws)
+    assert (
+        result.outcome,
+        result.reason,
+        result.residual,
+        result.write_may_have_begun,
+    ) == (
+        "FAILED",
+        "WRITE_REJECTED",
+        True,
+        True,
+    )
+    assert not result.may_have_changed_protection  # 확정 거절은 복원 근거가 아니다
+
+
+@pytest.mark.parametrize(
+    "verify, outcome, reason",
+    [
+        (asg_instances(protected=True), "APPLIED", "WRITTEN"),
+        (asg_instances(protected=False), "UNKNOWN", "WRITE_UNCERTAIN"),
+        (EndpointConnectionError(endpoint_url="x"), "UNKNOWN", "WRITE_UNCERTAIN"),
+        (asg_instances(member=False), "UNKNOWN", "MEMBERSHIP_DRIFT"),
+    ],
+    ids=["landed", "not-visible", "verify-failed", "left-asg"],
+)
+def test_protect_lost_write_response_is_decided_by_the_verify_read(
+    aws, verify, outcome, reason
+):
+    """응답이 유실되면 쓰기가 닿았는지 모른다 — 확인 조회가 값을 보여 줄 때만 APPLIED다."""
+    aws.set(
+        "autoscaling.set_instance_protection", EndpointConnectionError(endpoint_url="x")
+    )
+    aws.set(
+        "autoscaling.describe_auto_scaling_instances",
+        [asg_instances(protected=False), verify],
+    )
+    result, _ = protect(aws)
+    assert (result.outcome, result.reason, result.write_may_have_begun) == (
+        outcome,
+        reason,
+        True,
+    )
+    assert result.residual is (outcome != "APPLIED")
+    assert len(operations(aws)) == 3  # 조회 → 쓰기 → 확인: 반복 없이 3회로 끝난다
+    assert result.may_have_changed_protection
+
+
+def test_protection_failure_does_not_change_the_core_isolation_outcome(aws):
+    isolated, _ = isolate(aws)
+    aws.set(
+        "autoscaling.describe_auto_scaling_instances", asg_instances(protected=False)
+    )
+    aws.set("autoscaling.set_instance_protection", client_error("ValidationError", 400))
+    result, _ = protect(aws)
+    assert isolated.succeeded and result.outcome == "FAILED"
+    assert all(
+        s.status is S.SUCCESS for s in isolated.steps
+    )  # 격리 단계에 보조 결과가 섞이지 않는다
+
+
+def parent(**overrides):
+    """원본 PROTECT 결과 — 기본은 "쓰기가 시작됐을 수 있다"(의도 기록)."""
+    values = {
+        "phase": "PROTECT",
+        "outcome": "UNKNOWN",
+        "reason": "WRITE_UNCERTAIN",
+        "asg_name": ASG,
+        "instance_id": INSTANCE,
+        "write_may_have_begun": True,
+        "residual": True,
+        "observed_at": datetime.now(UTC),
+    }
+    values.update(overrides)
+    return ScaleInProtectionResult(**values)
+
+
+def restore(aws, protection=MANAGED, *, parent_result=None):
+    intents: list = []
+    backup = mapping(scale_in_protection=protection)
+    result = ex.restore_scale_in_protection(
+        INSTANCE_ARN,
+        backup,
+        parent_result=parent_result if parent_result is not None else parent(),
+        record_intent=lambda r: intents.append((len(aws.calls), r)),
+    )
+    restore.intents = intents
+    return result
+
+
+def test_restore_rereads_core_state_then_writes_only_the_captured_value(aws):
+    aws.set("ec2.describe_instances", TWO_ENIS)
+    aws.set(
+        "autoscaling.describe_auto_scaling_instances",
+        [asg_instances(protected=True), asg_instances(protected=False)],
+    )
+    result = restore(aws)
+    assert operations(aws) == [
+        "ec2.describe_instances",  # ENI SG를 다시 읽는다
+        "elbv2.describe_target_health",  # TG 등록을 다시 읽는다
+        "autoscaling.describe_auto_scaling_instances",
+        "autoscaling.set_instance_protection",
+        "autoscaling.describe_auto_scaling_instances",
+    ]
+    ((_, write),) = [c for c in aws.calls if c[0].endswith("set_instance_protection")]
+    assert (
+        write["ProtectedFromScaleIn"] is False and write["AutoScalingGroupName"] == ASG
+    )
+    assert (result.phase, result.outcome, result.reason) == (
+        "RESTORE",
+        "APPLIED",
+        "RESTORED",
+    )
+    # 복원도 쓰기 직전에 의도를 남긴다(ASG 조회 1회 뒤 = 호출 3건째)
+    ((at, intent),) = restore.intents
+    assert (
+        at == 3
+        and intent.phase == "RESTORE"
+        and intent.write_may_have_begun
+        and intent.outcome == "UNKNOWN"
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"ec2.describe_instances": ISOLATED},  # SG가 아직 격리 SG
+        {"elbv2.describe_target_health": NOT_REGISTERED},  # 재등록 안 됨
+        {
+            "elbv2.describe_target_health": health((PORT, "draining", None))
+        },  # 드레이닝은 등록이 아니다
+        {"ec2.describe_instances": EndpointConnectionError(endpoint_url="x")},
+        {"elbv2.describe_target_health": EndpointConnectionError(endpoint_url="x")},
+    ],
+    ids=[
+        "sg-not-back",
+        "not-registered",
+        "draining",
+        "eni-read-failed",
+        "tg-read-failed",
+    ],
+)
+def test_restore_does_not_release_protection_unless_core_state_is_reread_and_restored(
+    aws, overrides
+):
+    for key, value in overrides.items():
+        aws.set(key, value)
+    result = restore(aws)
+    assert not [n for n in operations(aws) if n.startswith("autoscaling.")]
+    assert (result.outcome, result.reason, result.residual) == (
+        "NOT_ATTEMPTED",
+        "CORE_STATE_UNVERIFIED",
+        True,
+    )
+    assert restore.intents == []
+
+
+@pytest.mark.parametrize(
+    "parent_result",
+    [
+        parent(
+            outcome="FAILED", reason="WRITE_REJECTED"
+        ),  # 확정 거절: 값을 바꾸지 않았다
+        parent(
+            outcome="NOT_ATTEMPTED",
+            reason="MEMBERSHIP_DRIFT",
+            write_may_have_begun=False,
+        ),
+        parent(
+            outcome="APPLIED",
+            reason="ALREADY_PROTECTED",
+            write_may_have_begun=False,
+            residual=False,
+        ),
+    ],
+    ids=["rejected", "never-wrote", "someone-elses-protection"],
+)
+def test_restore_does_not_undo_protection_we_did_not_change(aws, parent_result):
+    result = restore(aws, parent_result=parent_result)
+    assert aws.calls == []
+    assert (result.outcome, result.reason, result.residual) == (
+        "NOT_ATTEMPTED",
+        "NO_PROTECTION_WRITE",
+        False,
+    )
+
+
+@pytest.mark.parametrize(
+    "parent_result",
+    [
+        parent(),  # 시도 의도만 남은 채 끊김
+        parent(outcome="APPLIED", reason="WRITTEN", residual=False),  # 쓰기 확인
+        parent(outcome="UNKNOWN", reason="WRITE_UNCERTAIN"),  # 응답 유실
+    ],
+    ids=["intent-only", "written", "lost-response"],
+)
+def test_restore_proceeds_when_our_write_may_have_changed_the_value(aws, parent_result):
+    aws.set(
+        "autoscaling.describe_auto_scaling_instances", asg_instances(protected=False)
+    )
+    result = restore(aws, parent_result=parent_result)
+    assert (result.outcome, result.reason) == ("APPLIED", "ALREADY_RESTORED")
+
+
+@pytest.mark.parametrize("protection", [None, UNKNOWN])
+def test_restore_with_uncertain_old_state_does_nothing(aws, protection):
+    assert restore(aws, protection) is None
+    assert aws.calls == []
+
+
+@pytest.mark.parametrize(
+    "lookup, reason",
+    [
+        (asg_instances(OTHER_ASG, protected=True), "MEMBERSHIP_DRIFT"),
+        (EndpointConnectionError(endpoint_url="x"), "LOOKUP_FAILED"),
+    ],
+)
+def test_restore_does_not_write_on_membership_drift_or_lookup_failure(
+    aws, lookup, reason
+):
+    aws.set("autoscaling.describe_auto_scaling_instances", lookup)
+    result = restore(aws)
+    assert changes(aws) == []
+    assert (result.outcome, result.reason, result.residual) == (
+        "NOT_ATTEMPTED",
+        reason,
+        True,
+    )
+
+
+def test_restore_failure_is_a_residual_result(aws):
+    aws.set(
+        "autoscaling.describe_auto_scaling_instances", asg_instances(protected=True)
+    )
+    aws.set("autoscaling.set_instance_protection", client_error("ValidationError", 400))
+    result = restore(aws)
+    assert (result.outcome, result.reason, result.residual) == (
+        "FAILED",
+        "WRITE_REJECTED",
+        True,
+    )
+
+
+def test_restore_lost_response_is_unknown_not_success(aws):
+    aws.set(
+        "autoscaling.set_instance_protection", EndpointConnectionError(endpoint_url="x")
+    )
+    aws.set(
+        "autoscaling.describe_auto_scaling_instances",
+        [asg_instances(protected=True), asg_instances(protected=True)],
+    )
+    result = restore(aws)
+    assert (result.outcome, result.reason, result.residual) == (
+        "UNKNOWN",
+        "WRITE_UNCERTAIN",
+        True,
+    )
