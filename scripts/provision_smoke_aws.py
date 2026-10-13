@@ -42,8 +42,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -146,8 +148,18 @@ BUDGET_USD = "300"
 BUDGET_COST_TYPES = {"IncludeCredit": False}
 BUDGET_ALERTS = (("ACTUAL", 50), ("ACTUAL", 80), ("ACTUAL", 100), ("FORECASTED", 100))
 # 앱이 ENABLE_AUTOSCALING으로 만드는 Launch Template 이름(executor._launch_template_name).
-# 태그가 없고 VPC 자원도 아니라 이름으로만 가린다.
+# 정리(cleanup) 탐색은 이 이름 접두 규칙을 그대로 쓴다. 생성 시에는 이제 실행 ID·원본 인스턴스
+# 태그(아래 EXECUTION_TAG_KEY·SOURCE_TAG_KEY)가 함께 달린다.
 APP_LT_PREFIX = "vigilantis-lt-"
+# 앱이 실행 경로에서 새로 만드는 자원(AMI·스냅숏·LT·ASG)의 표지. 실행 한 번과 원본 인스턴스를 가리키고
+# 새 자원에 요청 태그로 반드시 달린다(정책이 Null 조건으로 강제한다).
+EXECUTION_TAG_KEY = "vigilantis:execution-id"
+SOURCE_TAG_KEY = "vigilantis:source-instance"
+# 새 자원에 CreateTags로 달 수 있는 합의된 키(소스 환경 태그는 유지, 두 새 키는 필수)
+CREATE_TAG_KEYS = (SMOKE_TAG_KEY, EXECUTION_TAG_KEY, SOURCE_TAG_KEY, "Environment", "environment")
+APP_ASG_PREFIX = "vigilantis-asg-"
+APP_ASG_MAX_SIZE = 4
+_IAM_ROLE_ARN = re.compile(r"^arn:aws:iam::(\d{12}):role/[\w+=,.@/-]+$")
 ASG_SERVICE = "autoscaling.amazonaws.com"
 ASG_SERVICE_ROLE = "AWSServiceRoleForAutoScaling"
 
@@ -183,7 +195,13 @@ systemctl enable --now smoke-http
 
 
 # ------------------------------------------------------------------ 앱 IAM 정책
-def build_app_policy(account: str, region: str, vpc_id: str) -> dict:
+def build_app_policy(
+    account: str,
+    region: str,
+    vpc_id: str,
+    subnet_ids: Sequence[str],
+    instance_role_arns: Sequence[str] = (),
+) -> dict:
     """앱 키에 붙일 최소 권한 정책. **코드가 부르는 AWS 작업의 거울이다**(ADR-0009 §2).
 
     tests/test_provision_smoke_aws.py가 두 방향을 지킨다 — 실행 경로를 더한 PR이 여기를
@@ -195,45 +213,69 @@ def build_app_policy(account: str, region: str, vpc_id: str) -> dict:
     태그 대신 VPC로 가둔다. 새 SG 생성은 새 SG가 아니라 생성 장소(VPC ARN)로 가둔다.
     조건 키가 실제로 채워지는지는 적용 직후 DryRun으로 잰다.
 
+    실행 경로(CreateImage → CreateLaunchTemplate → CreateAutoScalingGroup → PutScalingPolicy)의
+    새 자원은 요청 태그(스모크·실행 ID·원본 인스턴스)를 달아야만 만들어지고(Null 조건), ASG는 이름
+    접두·정확한 스모크 서브넷·크기 4 이하·LT 버전 명시로 가둔다. CreateAutoScalingGroup은 호출자에게
+    ec2:RunInstances(와 태그·역할 전달) 권한을 요구하므로 — 앱이 RunInstances를 부르지는 않지만 —
+    그 의존 권한을 지원 자원 유형별로 가둬 둔다. iam:PassRole은 운영자가 instance_role_arns를 준
+    때만, 그 역할 ARN에 한해 ec2.amazonaws.com으로만 허용한다. IAM 역할·서비스 연결 역할은 바꾸지 않는다.
+
     크기는 관리형 정책 한도(MANAGED_POLICY_MAX_CHARS, 공백 제외) 안이어야 한다 — 테스트가 잰다.
     """
+    subnet_ids = sorted(set(subnet_ids))
+    if not subnet_ids:
+        raise ValueError("subnet_ids가 비었다 — ASG·RunInstances 울타리는 정확한 스모크 서브넷이 필요하다")
+    role_arns = sorted(set(instance_role_arns))
+    for role_arn in role_arns:
+        match = _IAM_ROLE_ARN.match(role_arn)
+        if not match or match.group(1) != account:
+            raise ValueError(f"허용할 역할 ARN은 이 계정의 와일드카드 없는 IAM 역할이어야 한다: {role_arn}")
     arn = f"arn:aws:ec2:{region}:{account}"
     vpc_arn = f"{arn}:vpc/{vpc_id}"
+    subnet_arns = [f"{arn}:subnet/{s}" for s in subnet_ids]
+    asg_arn = f"arn:aws:autoscaling:{region}:{account}:autoScalingGroup:*:autoScalingGroupName/{APP_ASG_PREFIX}*"
     smoke_tagged = {"StringEquals": {f"aws:ResourceTag/{SMOKE_TAG_KEY}": SMOKE_TAG_VALUE}}
     in_region = {"StringEquals": {"aws:RequestedRegion": region}}
-    return {
+    smoke_requested = {f"aws:RequestTag/{SMOKE_TAG_KEY}": SMOKE_TAG_VALUE}
+    # 새 자원: 스모크 태그 값 + 실행 ID·원본 인스턴스 태그의 존재를 요청에서 강제한다
+    run_requested = {
+        "StringEquals": smoke_requested,
+        "Null": {f"aws:RequestTag/{EXECUTION_TAG_KEY}": "false", f"aws:RequestTag/{SOURCE_TAG_KEY}": "false"},
+    }
+    policy = {
         "Version": "2012-10-17",
         "Statement": [
             {
-                "Sid": "ReadInventory",
                 "Effect": "Allow",
                 "Action": list(READ_ACTIONS),
                 "Resource": "*",
                 "Condition": in_region,
             },
             {
-                "Sid": "SmokeInstances",  # RIGHTSIZING·REVERT_SIZE(stop → modify → start)
+                # RIGHTSIZING·REVERT_SIZE(stop → modify → start) · CreateImage의 원본 인스턴스(NoReboot)
                 "Effect": "Allow",
-                "Action": ["ec2:ModifyInstanceAttribute", "ec2:StartInstances", "ec2:StopInstances"],
+                "Action": [
+                    "ec2:CreateImage", "ec2:ModifyInstanceAttribute", "ec2:StartInstances", "ec2:StopInstances",
+                ],
                 "Resource": f"{arn}:instance/*",
                 "Condition": smoke_tagged,
             },
             {
-                "Sid": "SmokeNaclEntries",  # NACL_ADD_DENY·NACL_RESTORE
+                # NACL_ADD_DENY·NACL_RESTORE
                 "Effect": "Allow",
                 "Action": ["ec2:CreateNetworkAclEntry", "ec2:DeleteNetworkAclEntry"],
                 "Resource": f"{arn}:network-acl/*",
                 "Condition": smoke_tagged,
             },
             {
-                "Sid": "SmokeVolumes",  # EBS_DELETE_UNATTACHED(스냅숏 → 삭제)
+                # EBS_DELETE_UNATTACHED(스냅숏 → 삭제)
                 "Effect": "Allow",
                 "Action": ["ec2:CreateSnapshot", "ec2:DeleteVolume"],
                 "Resource": f"{arn}:volume/*",
                 "Condition": smoke_tagged,
             },
             {
-                "Sid": "SnapshotsOfSmokeVolumes",  # 새 스냅숏 자원 — 볼륨 쪽 조건이 이미 가둔다
+                # 새 스냅숏 자원 — 볼륨 쪽 조건이 이미 가둔다
                 "Effect": "Allow",
                 "Action": ["ec2:CreateSnapshot"],
                 "Resource": f"arn:aws:ec2:{region}::snapshot/*",
@@ -245,7 +287,6 @@ def build_app_policy(account: str, region: str, vpc_id: str) -> dict:
                 # create_security_group이 전체 허용 egress 1건을 자동으로 붙이므로, 걷어
                 # 내지 않으면 재생성 SG가 원본보다 넓어지거나 같은 규칙 주입이 Duplicate로
                 # 거절된다 — 복원이 아니라 확장이 된다.
-                "Sid": "SecurityGroupsAndEnisInSmokeVpc",
                 "Effect": "Allow",
                 "Action": [
                     "ec2:AuthorizeSecurityGroupEgress",
@@ -261,22 +302,20 @@ def build_app_policy(account: str, region: str, vpc_id: str) -> dict:
                 # SG_RECREATE의 생성. CreateSecurityGroup은 새 SG와 생성 장소 VPC를 **각각** 검사하는데,
                 # 새 SG 쪽 조건 키는 요청 태그·ec2:SecurityGroupID뿐이다(ec2:Vpc 없음 — 붙이면 이
                 # 문장은 영영 성립하지 않는다). 그래서 새 SG 쪽은 열어 두고 울타리는 아래 VPC 문장이 친다.
-                "Sid": "NewSecurityGroups",
                 "Effect": "Allow",
                 "Action": ["ec2:CreateSecurityGroup"],
                 "Resource": f"{arn}:security-group/*",
             },
             {
-                "Sid": "CreateSecurityGroupInSmokeVpc",  # 생성 장소 — 스모크 VPC 밖에는 만들지 못한다
+                # 생성 장소 — 스모크 VPC 밖에는 만들지 못한다
                 "Effect": "Allow",
                 "Action": ["ec2:CreateSecurityGroup"],
                 "Resource": vpc_arn,
             },
             {
                 # EC2_ISOLATE(등록 해제)·EC2_UNISOLATE(백업 포트로 재등록). ENI 쪽 SG 교체는 위
-                # SecurityGroupsAndEnisInSmokeVpc 문장이 맡는다. TG는 VPC 조건 키가 없어 스모크
+                # SgEni 문장이 맡는다. TG는 VPC 조건 키가 없어 스모크
                 # 태그로 가둔다 — 스모크 TG는 생성 때 같은 태그를 단다(_ensure_load_balancer).
-                "Sid": "SmokeTargetGroupTargets",
                 "Effect": "Allow",
                 "Action": [
                     "elasticloadbalancing:DeregisterTargets",
@@ -286,13 +325,125 @@ def build_app_policy(account: str, region: str, vpc_id: str) -> dict:
                 "Condition": smoke_tagged,
             },
             {
-                "Sid": "LaunchTemplatesForAutoscaling",  # ENABLE_AUTOSCALING precheck(DryRun)
+                # 새 자원은 요청 태그로만 가둔다(AWS 서비스 권한 참조: 이 유형들에 리소스 태그·Vpc 키 없음).
+                # CreateImage의 새 자원은 image·snapshot, CreateLaunchTemplate의 새 자원은 launch-template
+                # 하나뿐이고 IAM은 작업이 요구하지 않는 자원 유형 ARN은 그 작업에 적용하지 않는다 — 크기 한도
+                # 때문에 같은 조건을 쓰는 두 생성 작업을 한 문장에 둔다. ENABLE_AUTOSCALING precheck(DryRun)도 이 LT 문장.
                 "Effect": "Allow",
-                "Action": ["ec2:CreateLaunchTemplate"],
-                "Resource": f"{arn}:launch-template/*",
+                "Action": ["ec2:CreateImage", "ec2:CreateLaunchTemplate"],
+                "Resource": [
+                    f"arn:aws:ec2:{region}::image/*", f"arn:aws:ec2:{region}::snapshot/*",
+                    f"{arn}:launch-template/*",
+                ],
+                "Condition": run_requested,
             },
-        ],
+            {
+                # CreateImage·CreateLaunchTemplate·RunInstances(ASG 의존)가 생성 때 다는 태그만
+                "Effect": "Allow",
+                "Action": ["ec2:CreateTags"],
+                "Resource": [
+                    f"{arn}:instance/*", f"{arn}:volume/*", f"{arn}:launch-template/*",
+                    f"arn:aws:ec2:{region}::image/*", f"arn:aws:ec2:{region}::snapshot/*",
+                ],
+                "Condition": {
+                    "StringEquals": {"ec2:CreateAction": ["CreateImage", "CreateLaunchTemplate", "RunInstances"]},
+                    # 합의된 태그 키만(ForAllValues는 키 부재 시 참 — Null로 막는다)
+                    "ForAllValues:StringEquals": {"aws:TagKeys": list(CREATE_TAG_KEYS)},
+                    "Null": {"aws:TagKeys": "false"},
+                },
+            },
+            {
+                # 이름 접두·정확한 스모크 서브넷·크기·LT 버전 명시
+                "Effect": "Allow",
+                "Action": ["autoscaling:CreateAutoScalingGroup"],
+                "Resource": asg_arn,
+                "Condition": {
+                    **run_requested,
+                    "NumericLessThanEquals": {
+                        "autoscaling:MaxSize": str(APP_ASG_MAX_SIZE),
+                        "autoscaling:MinSize": str(APP_ASG_MAX_SIZE),
+                    },
+                    "Bool": {"autoscaling:LaunchTemplateVersionSpecified": "true"},
+                    "ForAllValues:StringEquals": {"autoscaling:VPCZoneIdentifiers": subnet_ids},
+                    # ForAllValues는 키가 없으면 참이 된다 — 서브넷 없는 요청을 Null로 막는다
+                    "Null": {**run_requested["Null"], "autoscaling:VPCZoneIdentifiers": "false"},
+                },
+            },
+            {
+                # CreateAutoScalingGroup의 Tags가 요구하는 별도 권한
+                "Effect": "Allow",
+                "Action": ["autoscaling:CreateOrUpdateTags"],
+                "Resource": asg_arn,
+                "Condition": run_requested,
+            },
+            {
+                # CPU 목표 추적
+                "Effect": "Allow",
+                "Action": ["autoscaling:PutScalingPolicy"],
+                "Resource": asg_arn,
+                "Condition": {"StringEquals": {f"aws:ResourceTag/{SMOKE_TAG_KEY}": SMOKE_TAG_VALUE}},
+            },
+            {
+                # CreateAutoScalingGroup이 호출자에게 요구하는 RunInstances 권한 — 실제 호출은 없다.
+                # 지원 자원 유형마다 울타리를 따로 친다(AWS 서비스 권한 참조의 RunInstances 자원별 조건 키):
+                # instance·volume은 요청 태그만(리소스 태그 키 없음) / image·snapshot·launch-template은
+                # 리소스 태그 / subnet은 정확한 ARN / network-interface는 ec2:Vpc+ec2:Subnet /
+                # security-group은 ec2:Vpc. key-pair 권한은 없다(런타임 LT가 KeyName을 넣지 않는다).
+                "Effect": "Allow",
+                "Action": ["ec2:RunInstances"],
+                "Resource": [f"{arn}:instance/*", f"{arn}:volume/*"],
+                "Condition": run_requested,
+            },
+            {
+                "Effect": "Allow",
+                "Action": ["ec2:RunInstances"],
+                "Resource": f"{arn}:launch-template/*",
+                "Condition": smoke_tagged,
+            },
+            {
+                # image·snapshot ARN에는 계정이 없다 — SAR의 ec2:Owner로 우리 계정 소유만 허용
+                "Effect": "Allow",
+                "Action": ["ec2:RunInstances"],
+                "Resource": [f"arn:aws:ec2:{region}::image/*", f"arn:aws:ec2:{region}::snapshot/*"],
+                "Condition": {**smoke_tagged, "StringEquals": {
+                    f"aws:ResourceTag/{SMOKE_TAG_KEY}": SMOKE_TAG_VALUE, "ec2:Owner": account,
+                }},
+            },
+            {
+                # 서브넷은 정확한 ARN이 울타리. 런타임 LT는 KeyName을 넣지 않으므로 key-pair 권한은 없다.
+                "Effect": "Allow",
+                "Action": ["ec2:RunInstances"],
+                "Resource": subnet_arns,
+            },
+            {
+                "Effect": "Allow",
+                "Action": ["ec2:RunInstances"],
+                "Resource": f"{arn}:network-interface/*",
+                "Condition": {"ArnEquals": {"ec2:Vpc": vpc_arn, "ec2:Subnet": subnet_arns}},
+            },
+            {
+                "Effect": "Allow",
+                "Action": ["ec2:RunInstances"],
+                "Resource": f"{arn}:security-group/*",
+                "Condition": {"ArnEquals": {"ec2:Vpc": vpc_arn}},
+            },
+        ]
+        + (
+            [{
+                # 운영자가 준 역할만, EC2로만
+                "Effect": "Allow",
+                "Action": ["iam:PassRole"],
+                "Resource": role_arns,
+                "Condition": {"StringEquals": {"iam:PassedToService": "ec2.amazonaws.com"}},
+            }]
+            if role_arns
+            else []
+        ),
     }
+    size = len("".join(json.dumps(policy).split()))
+    if size > MANAGED_POLICY_MAX_CHARS:  # 울타리를 덜어 맞추지 않는다 — 입력(역할 목록 등)을 줄이게 거절한다
+        raise ValueError(f"정책이 관리형 정책 한도를 넘는다: {size} > {MANAGED_POLICY_MAX_CHARS}")
+    return policy
 
 
 # ------------------------------------------------------------------ 가드·공통
@@ -810,7 +961,14 @@ def _ensure_volume(ec2, region: str) -> str:
     return vol_id
 
 
-def _ensure_app_user(iam, account: str, region: str, vpc_id: str) -> None:
+def _ensure_app_user(
+    iam,
+    account: str,
+    region: str,
+    vpc_id: str,
+    subnet_ids: Sequence[str],
+    instance_role_arns: Sequence[str] = (),
+) -> None:
     if not _user_exists(iam):
         iam.create_user(UserName=APP_USER, Tags=_tags(APP_USER))
         print(f"[smoke] IAM 사용자 {APP_USER} 생성 — 키는 만들지 않는다(ADR-0009 §2)")
@@ -820,7 +978,7 @@ def _ensure_app_user(iam, account: str, region: str, vpc_id: str) -> None:
     for stale in iam.list_user_policies(UserName=APP_USER)["PolicyNames"]:
         iam.delete_user_policy(UserName=APP_USER, PolicyName=stale)
         print(f"[smoke] 남아 있던 인라인 정책 {stale} 삭제 — 앱 권한은 관리형 정책 하나로 모은다")
-    document = build_app_policy(account, region, vpc_id)
+    document = build_app_policy(account, region, vpc_id, subnet_ids, instance_role_arns)
     arn = _app_policy_arn(account)
     try:
         policy = iam.get_policy(PolicyArn=arn)["Policy"]
@@ -923,7 +1081,9 @@ def _ensure_budget(budgets, account: str, email: str) -> None:
     print(f"[smoke] Budget {BUDGET_NAME} 생성 — 월 ${BUDGET_USD}, 알림 {BUDGET_ALERTS}")
 
 
-def up(clients: dict, account: str, region: str, budget_email: str) -> None:
+def up(
+    clients: dict, account: str, region: str, budget_email: str, instance_role_arns: Sequence[str] = ()
+) -> None:
     ec2, elbv2, iam = clients["ec2"], clients["elbv2"], clients["iam"]
     # 비용 그물이 자원보다 먼저 선다
     _ensure_budget(clients["budgets"], account, budget_email)
@@ -934,7 +1094,7 @@ def up(clients: dict, account: str, region: str, budget_email: str) -> None:
     instances = _ensure_instances(ec2, clients["ssm"], vpc_id, subnets, sgs)
     tg_arn = _ensure_load_balancer(elbv2, vpc_id, subnets, sgs, instances)
     vol_id = _ensure_volume(ec2, region)
-    _ensure_app_user(iam, account, region, vpc_id)
+    _ensure_app_user(iam, account, region, vpc_id, list(subnets.values()), instance_role_arns)
     _ensure_asg_service_role(iam)
 
     print("[smoke] 스모크 파라미터(런북이 겨누는 값 — 대본이 손으로 조립하지 않게 여기서 찍는다)")
@@ -1098,6 +1258,11 @@ def main() -> None:
     parser.add_argument("--account", required=True, help="대상 AWS 계정 ID — 호출 주체(sts)와 같아야 한다")
     parser.add_argument("--budget-email", help="up: AWS Budgets 알림을 받을 주소")
     parser.add_argument("--yes", action="store_true", help="up·down: 실제로 바꾼다(없으면 목록만 보여 준다)")
+    parser.add_argument(
+        "--instance-role-arn", action="append", default=[], metavar="ARN",
+        help="policy·up: 앱이 ec2.amazonaws.com으로 전달해도 되는 IAM 역할 ARN(반복 가능, 와일드카드 불가). "
+        "주지 않으면 iam:PassRole을 허용하지 않는다 — 이 스크립트는 역할을 만들지 않는다",
+    )
     args = parser.parse_args()
 
     if args.command == "up" and rightsizing_target_type(IDLE_DEV_TYPE) is None:
@@ -1118,8 +1283,13 @@ def main() -> None:
     }
 
     if args.command == "policy":
-        vpc_id = _find_vpc(clients["ec2"]) or "<VPC 미생성>"
-        print(json.dumps(build_app_policy(args.account, region, vpc_id), ensure_ascii=False, indent=2))
+        vpc_id = _find_vpc(clients["ec2"])
+        subnet_ids = list(_find_subnets(clients["ec2"], vpc_id).values()) if vpc_id else []
+        policy = build_app_policy(
+            args.account, region, vpc_id or "<VPC 미생성>", subnet_ids or ["<서브넷 미생성>"],
+            args.instance_role_arn,
+        )
+        print(json.dumps(policy, ensure_ascii=False, indent=2))
     elif args.command == "status":
         status(clients, args.account)
     elif args.command == "up":
@@ -1130,7 +1300,7 @@ def main() -> None:
             print(f"[smoke] 생성 예정 {len(missing)}건 — 실제로 만들려면 --yes")
             _print_rows(missing)
             return
-        up(clients, args.account, region, args.budget_email)
+        up(clients, args.account, region, args.budget_email, args.instance_role_arn)
     else:
         if not args.yes:
             print("[smoke] 삭제 대상(스모크 태그 자원 + 스모크 VPC 안 전부) — 실제로 지우려면 --yes")

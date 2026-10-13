@@ -23,16 +23,15 @@
 #            RUNBOOK_SG_RECREATE         = execute_sg_recreate().  (Issue #368, §SG 원복)
 #            RUNBOOK_EC2_ISOLATE         = execute_ec2_isolate().  (MVP 체크리스트 §2-1 B2, §격리)
 #            RUNBOOK_EC2_UNISOLATE       = execute_ec2_unisolate(). (MVP 체크리스트 §2-1 B3, §격리 해제)
+#            RUNBOOK_EC2_ENABLE_AUTOSCALING = execute_ec2_enable_autoscaling(). (Issue #446)
+#              준비·실행·관측 본체는 services/aws/autoscaling.py, 여기는 지연 import 래퍼다
 #   - precheck과 같은 규약으로 예외를 던지지 않는다. 단계별 결과는 ExecutionStepResult로
 #     돌려주고, 저장·커밋 순서는 workflows.py가 소유한다.
 #   - 원복은 되돌릴 값을 인자로만 받는다 — 백업 레코드 조회는 호출부(workflows) 몫이다.
 #     원천이 하나라는 정책(ADR-0004 정책 ③)은 값을 뽑는 자리가 하나일 때만 성립한다.
 #
-# [남은 작업]
-# 1. 나머지 1종 실행 함수(EC2_ENABLE_AUTOSCALING) — 등록 롤백이 없는 단방향 구조 전환이라
-#    백업 없이 들어간다(ADR-0008 §5 표에 없다)
-# 2. 롤백 3종의 트리거 판단·감시는 rollback.py 담당(UNISOLATE는 HUMAN_ONLY라 관제자
-#    [원클릭 해제]로만 발동한다 — dispatcher._AUTO_ROLLBACK_ON_ASSET_CHANGE 밖)
+# 롤백 3종의 트리거 판단·감시는 rollback.py 담당(UNISOLATE는 HUMAN_ONLY라 관제자
+# [원클릭 해제]로만 발동한다 — dispatcher._AUTO_ROLLBACK_ON_ASSET_CHANGE 밖)
 #
 # 파라미터 계약의 원천은 packages/schemas/runbook_parameters.py의 typed 모델이다(#154).
 # 형식 위반은 ① Schema Check에서 먼저 걸리고, 여기 _validate_params는 같은 모델로 한 번
@@ -55,6 +54,15 @@ from typing import Any, Callable, Mapping, Optional, Protocol
 from botocore.exceptions import BotoCoreError, ClientError, ParamValidationError
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
+from schemas.autoscaling import (
+    EXECUTION_TAG_KEY,
+    PRECHECK_DRY_RUN_EXECUTION_TAG_VALUE,
+    PRESERVED_SOURCE_TAG_KEYS,
+    SOURCE_INSTANCE_TAG_KEY,
+    AutoscalingExecutionPlan,
+    AutoscalingInspection,
+    AutoscalingTag,
+)
 from schemas.backups import (
     BackupType,
     NaclRuleIndexBackup,
@@ -495,6 +503,25 @@ def _launch_template_name(instance_id: str) -> str:
 
 def _asg_name(instance_id: str) -> str:
     return f"vigilantis-asg-{instance_id}"
+
+
+def _preserved_source_tags(instance: Mapping[str, Any]) -> tuple[AutoscalingTag, ...]:
+    """원본 인스턴스 태그 중 새 자원에 옮기는 것(PRESERVED_SOURCE_TAG_KEYS), 키 순서.
+
+    precheck DryRun과 실행 계획이 같은 원본 태그를 싣도록 한자리에서 고른다 — 스모크 IAM
+    정책은 시작 템플릿 생성에 vigilantis:smoke 요청 태그를 요구하므로, 둘이 갈리면 precheck만
+    통과하거나 실행만 통과한다.
+    """
+    found = {
+        tag.get("Key"): tag.get("Value")
+        for tag in instance.get("Tags") or ()
+        if isinstance(tag, Mapping)
+    }
+    return tuple(
+        AutoscalingTag(key=key, value=str(found[key]))
+        for key in sorted(PRESERVED_SOURCE_TAG_KEYS)
+        if isinstance(found.get(key), str)
+    )
 
 
 def _dry_run_chain(ctx: _Ctx, calls, *, verified=(), unverified=()) -> PrecheckOutcome:
@@ -965,10 +992,19 @@ def _precheck_enable_autoscaling(ctx: _Ctx) -> PrecheckOutcome:
             unverified=[_DESCRIBE_MISSES],
         )
 
+    # 요청 태그는 실행과 같은 모양이다(소유 표지 2개 + 원본 태그). 실행 ID 자리에는 실행 ID가
+    # 될 수 없는 DryRun 표지를 싣는다 — 실 생성의 태그 울타리를 느슨하게 하지 않고 같은 조건으로
+    # 권한을 확인하기 위해서다. 원본에 vigilantis:smoke가 없으면 스모크 정책 밖이라 거절이 맞다.
+    tags = [
+        {"Key": EXECUTION_TAG_KEY, "Value": PRECHECK_DRY_RUN_EXECUTION_TAG_VALUE},
+        {"Key": SOURCE_INSTANCE_TAG_KEY, "Value": instance_id},
+        *({"Key": tag.key, "Value": tag.value} for tag in _preserved_source_tags(instance)),
+    ]
     code = run_dry_run(
         aws_client("ec2", ctx.target.region).create_launch_template,
         LaunchTemplateName=_launch_template_name(instance_id),
         LaunchTemplateData={"InstanceType": instance.get("InstanceType")},
+        TagSpecifications=[{"ResourceType": "launch-template", "Tags": tags}],
     )
     if code is not None:
         return _fail(
@@ -2820,3 +2856,47 @@ def execute_ec2_unisolate(
         },
     )
     return ExecutionOutcome(steps=tuple(log.steps))
+
+
+# ------------------------------------------------------------------ Auto Scaling (Issue #446)
+# 본체는 services/aws/autoscaling.py다. 그 모듈이 이 모듈의 단계 기록기·ARN 해석·이름 규칙을
+# 쓰므로 여기서는 **호출 시점에** import한다 — 모듈 수준 import는 순환한다. 소비자(workflows)는
+# 다른 런북처럼 executor만 본다. 단계 5(읽기 전용 관측 요약)는 workflows가 남긴다.
+STEP_CREATE_IMAGE = "CREATE_IMAGE"                          # 단계 1 — AMI 생성 + available 대기
+STEP_CREATE_LAUNCH_TEMPLATE = "CREATE_LAUNCH_TEMPLATE"      # 단계 2
+STEP_CREATE_AUTO_SCALING_GROUP = "CREATE_AUTO_SCALING_GROUP"  # 단계 3
+STEP_PUT_SCALING_POLICY = "PUT_SCALING_POLICY"              # 단계 4
+
+
+def prepare_ec2_autoscaling_plan(
+    target_arn: str, *, execution_id: str, min_size: int, max_size: int
+) -> tuple[
+    AutoscalingExecutionPlan | None, PrecheckReasonCode | None, str | None
+]:
+    """읽기 전용 준비 — (계획, None, None) 또는 (None, 사유 코드, 요약). AWS를 바꾸지 않는다."""
+    from . import autoscaling
+
+    return autoscaling.prepare_ec2_autoscaling_plan(
+        target_arn, execution_id=execution_id, min_size=min_size, max_size=max_size
+    )
+
+
+def execute_ec2_enable_autoscaling(
+    target_arn: str,
+    *,
+    plan: AutoscalingExecutionPlan,
+    record_step: StepRecorder | None = None,
+) -> ExecutionOutcome:
+    """단계 1–4 실행. 성공은 "요청이 접수됐다"까지이며 구성 완료는 inspect가 판정한다."""
+    from . import autoscaling
+
+    return autoscaling.execute_ec2_enable_autoscaling(
+        target_arn, plan=plan, record_step=record_step
+    )
+
+
+def inspect_ec2_autoscaling(plan: AutoscalingExecutionPlan) -> AutoscalingInspection:
+    """읽기 전용 관측 — ready·incomplete·query_failed. 자원을 바꾸지 않는다."""
+    from . import autoscaling
+
+    return autoscaling.inspect_ec2_autoscaling(plan)

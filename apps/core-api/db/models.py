@@ -556,6 +556,13 @@ class ActionExecution(Base):
     )
     # Guardrail PASS에서 복사되는 불변 실행 명령
     validated_command: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    # EC2_ENABLE_AUTOSCALING 전용 — 첫 AWS 변경 전에 commit되는 고정 실행 계획
+    # (schemas.autoscaling.AutoscalingExecutionPlan). validated_command의 의미는 바꾸지
+    # 않는다. 한 번 채우면 덮어쓰지 않는다(executions_repo.bind_autoscaling_plan).
+    # none_as_null: 계획 없음은 SQL NULL이어야 한다 — JSON null이면 bind의 IS NULL 조건을 비껴간다.
+    autoscaling_plan: Mapped[dict | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     error_summary: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(

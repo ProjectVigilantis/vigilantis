@@ -53,9 +53,8 @@
 # (원복·해제 전 상태 대조 실패)가 같은 자리(_defer_or_hold)로 오고, 기록·재시도·소진의
 # 규칙은 workflows.record_verification_failure가 소유합니다 (Issue #249).
 #
-# [남은 작업]
-# 1. 나머지 1종 실행(EC2_ENABLE_AUTOSCALING) — 실행 함수가 생기면 _RUNNERS에 등록하고,
-#    _JUDGES에 **짝으로** 함께 등록합니다(ADR-0008 §6, 아래 짝 검사).
+# 실행·판정 함수는 _RUNNERS와 _JUDGES에 **짝으로** 등록합니다
+# (ADR-0008 §6, 아래 짝 검사).
 #
 # 기동 worker 개수는 미정입니다 — ADR-0005가 다중 worker·replica 실행 토폴로지를
 # 별도 결정 대상으로 남겼고, 이 모듈은 worker 1개를 전제합니다. 선점(_claim)의
@@ -70,6 +69,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import partial
 from typing import Callable, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -115,6 +115,7 @@ _RUNNERS: dict[RunbookId, Callable[[Session, str], workflows.ExecutionRunOutcome
     RunbookId.RUNBOOK_SG_RECREATE: workflows.run_sg_recreate_execution,
     RunbookId.RUNBOOK_EC2_ISOLATE: workflows.run_ec2_isolate_execution,
     RunbookId.RUNBOOK_EC2_UNISOLATE: workflows.run_ec2_unisolate_execution,
+    RunbookId.RUNBOOK_EC2_ENABLE_AUTOSCALING: workflows.run_ec2_enable_autoscaling_execution,
 }
 
 # 런북별 종료 판정 진입점 — AWS 변경이 이미 시작된 실행을 어느 종료 상태로 확정할지
@@ -130,6 +131,7 @@ _JUDGES: dict[RunbookId, Callable[[Session, str], workflows.ExecutionJudgement]]
     RunbookId.RUNBOOK_SG_RECREATE: workflows.judge_sg_recreate,
     RunbookId.RUNBOOK_EC2_ISOLATE: workflows.judge_ec2_isolate,
     RunbookId.RUNBOOK_EC2_UNISOLATE: workflows.judge_ec2_unisolate,
+    RunbookId.RUNBOOK_EC2_ENABLE_AUTOSCALING: workflows.judge_ec2_enable_autoscaling,
 }
 
 # 실행이 성공을 반환해도 확정하지 않는 런북 — **성공의 경계가 실행 밖에 있다.**
@@ -144,9 +146,29 @@ _JUDGES: dict[RunbookId, Callable[[Session, str], workflows.ExecutionJudgement]]
 # 성공의 경계가 실행 반환 그 자체다. 여기 잘못 넣으면 끝난 실행이 확정되지 않은 채 다음
 # 주기의 판정으로 넘어가고, 그 판정은 재실행이 아니라 실자산 대조라 조치가 끝난
 # 뒤에도 "미완"으로 읽힐 수 있다.
+#
+# EC2_ENABLE_AUTOSCALING도 여기 있다 — 실행 반환은 "변경 호출이 끝났다"일 뿐이고, 구성이
+# 갖춰졌는지는 judge_ec2_enable_autoscaling이 현물을 읽어 가른다(Issue #446).
 _AWAIT_JUDGEMENT_ON_SUCCESS: frozenset[RunbookId] = frozenset(
-    {RunbookId.RUNBOOK_EC2_RIGHTSIZING}
+    {RunbookId.RUNBOOK_EC2_RIGHTSIZING, RunbookId.RUNBOOK_EC2_ENABLE_AUTOSCALING}
 )
+
+# 스캔 레인 — 실행이 오래 걸리는 런북이 나머지 런북의 실행·판정을 붙잡지 않게 한다.
+# ASG 활성화는 AMI 생성 대기가 분 단위라 main 스캔(max_instances=1)에 두면 그동안 모든
+# 조치가 멈춘다. 레인은 같은 스캔 로직의 **대상 분할**일 뿐이며, 각 레인은 자기 잡
+# (max_instances=1)과 자기 세션을 가져 레인 안에서는 여전히 겹치지 않는다. 분할은
+# 선점(_claim) **이전**에 목록에서 거른다 — 다른 레인의 행을 잠그지 않는다.
+LANE_MAIN = "main"
+LANE_AUTOSCALING = "autoscaling"
+_LANES = (LANE_MAIN, LANE_AUTOSCALING)
+_AUTOSCALING_LANE_RUNBOOKS: frozenset[RunbookId] = frozenset(
+    {RunbookId.RUNBOOK_EC2_ENABLE_AUTOSCALING}
+)
+AUTOSCALING_JOB_ID = "execution_dispatch_autoscaling"
+
+
+def _in_lane(runbook_id: RunbookId, lane: str) -> bool:
+    return (runbook_id in _AUTOSCALING_LANE_RUNBOOKS) == (lane == LANE_AUTOSCALING)
 
 # 자산이 바뀐 채 실패했을 때 **ROLLBACK_INITIATED로 보낼** 런북.
 #
@@ -194,8 +216,9 @@ def _changed_the_asset(outcome: workflows.ExecutionRunOutcome) -> bool:
 class DispatchReport:
     """스캔 1회 요약 — 로그와 테스트가 읽는 값이다."""
 
+    lane: str = LANE_MAIN           # 이 스캔이 맡은 레인 — 로그가 레인별로 갈린다
     scanned: int = 0
-    started: int = 0                # executor로 넘긴 실행
+    started: int = 0               # executor로 넘긴 실행
     judged: int = 0                 # 2/2 Status Check 판정을 수행한 실행(deferred 포함)
     closed: int = 0                 # 종료 상태로 확정한 실행
     awaiting_status_check: int = 0  # 요청은 접수됐고 다음 주기의 판정을 기다리는 실행
@@ -656,8 +679,12 @@ def dispatch_pending(
     db: Session,
     publish: Optional[Publish] = None,
     policy: Optional[workflows.VerificationRetryPolicy] = None,
+    lane: str = LANE_MAIN,
 ) -> DispatchReport:
     """비종료 실행 스캔 1회. **세션 수명은 호출부가 소유한다.**
+
+    lane이 스캔 대상 런북을 가른다. main은 ASG 레인 런북을 뺀 전부, autoscaling은 그
+    런북만 본다. 해제 제안 스캔은 main만 돈다 — 두 레인이 같은 스캔을 겹쳐 돌지 않는다.
 
     목록을 행이 아니라 식별자로만 받아 둔다. 처리 중에 커밋이 일어나므로 들고 있던
     행 상태는 곧 낡고, 그 값을 믿으면 선점 재확인이 무의미해진다.
@@ -671,32 +698,50 @@ def dispatch_pending(
     """
     if policy is None:
         policy = workflows.VerificationRetryPolicy.from_settings()
-    report = DispatchReport()
-    pending = [row.execution_id for row in executions_repo.list_non_terminal(db)]
+    if lane not in _LANES:
+        raise ValueError(f"알 수 없는 디스패치 레인: {lane}")
+    report = DispatchReport(lane=lane)
+    pending = [
+        row.execution_id
+        for row in executions_repo.list_non_terminal(db)
+        if _in_lane(row.runbook_id, lane)
+    ]
     report.scanned = len(pending)
     for execution_id in pending:
         _dispatch_one(db, execution_id, publish, report, policy)
-    for execution_id in executions_repo.list_release_offer_pending(
-        db, incident_statuses=workflows.RELEASE_OFFERABLE_STATUSES
-    ):
-        _offer_release_one(db, execution_id, publish, report)
+    if lane == LANE_MAIN:
+        for execution_id in executions_repo.list_release_offer_pending(
+            db, incident_statuses=workflows.RELEASE_OFFERABLE_STATUSES
+        ):
+            _offer_release_one(db, execution_id, publish, report)
     logger.info("dispatch_cycle_done", extra=vars(report))
     return report
 
 
 def run_dispatch_cycle(
-    session_factory: sessionmaker[Session], publish: Optional[Publish] = None
+    session_factory: sessionmaker[Session],
+    publish: Publish | None = None,
+    lane: str = LANE_MAIN,
 ) -> DispatchReport:
-    """주기 잡의 본체이자 수동 호출 진입점 — 스캔 1회에 세션 1개를 쓰고 닫는다."""
+    """주기 잡의 본체이자 수동 호출 진입점 — 스캔 1회에 세션 1개를 쓰고 닫는다.
+
+    세션은 호출(주기)마다 새로 만든다 — 레인끼리, 주기끼리 세션을 공유하지 않는다."""
     db = session_factory()
     try:
-        return dispatch_pending(db, publish)
+        return dispatch_pending(db, publish, lane=lane)
     finally:
         db.close()
 
 
+def run_dispatch_cycle_in_lane(
+    publish: Publish | None, lane: str
+) -> DispatchReport:
+    """스케줄러 잡의 본체 — 실행 시점에 세션 팩토리를 읽는다(lru_cache 재설정 대응)."""
+    return run_dispatch_cycle(get_session_factory(), publish, lane)
+
+
 def start_dispatcher(publish: Optional[Publish] = None) -> Optional[AsyncIOScheduler]:
-    """main의 lifespan에서 기동한다 — 스캔 잡 1개를 등록·기동해 반환한다.
+    """main의 lifespan에서 기동한다 — 레인별 스캔 잡 2개를 등록·기동해 반환한다.
 
     잡을 겹쳐 돌리지 않는다(max_instances=1). 스캔이 둘이면 같은 실행 행을 두
     주체가 만지고, 그것이 이 모듈이 스캔을 독점하는 이유다(파일 헤더).
@@ -711,15 +756,22 @@ def start_dispatcher(publish: Optional[Publish] = None) -> Optional[AsyncIOSched
         return None
     interval = settings.DISPATCH_INTERVAL_SECONDS
     scheduler = AsyncIOScheduler(timezone="UTC")
-    scheduler.add_job(
-        lambda: run_dispatch_cycle(get_session_factory(), publish),
-        trigger=IntervalTrigger(seconds=interval),
-        id=JOB_ID,
-        name="접수된 조치 실행 디스패치·회수 스캔",
-        max_instances=1,
-        coalesce=True,  # 밀린 실행은 1회로 합친다
-        replace_existing=True,
-    )
+    for job_id, lane, name in (
+        (JOB_ID, LANE_MAIN, "접수된 조치 실행 디스패치·회수 스캔"),
+        (AUTOSCALING_JOB_ID, LANE_AUTOSCALING, "Auto Scaling 활성화 실행 전용 스캔"),
+    ):
+        scheduler.add_job(
+            # 레인을 인자로 묶는다 — 반복 변수를 늦게 읽는 클로저가 되지 않게
+            partial(run_dispatch_cycle_in_lane, publish, lane),
+            trigger=IntervalTrigger(seconds=interval),
+            id=job_id,
+            name=name,
+            max_instances=1,  # 레인 안에서는 겹치지 않는다. 레인끼리는 서로 기다리지 않는다
+            coalesce=True,  # 밀린 실행은 1회로 합친다
+            replace_existing=True,
+        )
     scheduler.start()
-    logger.info("dispatcher started: job=%s interval=%ss", JOB_ID, interval)
+    logger.info(
+        "dispatcher started: jobs=%s interval=%ss", [JOB_ID, AUTOSCALING_JOB_ID], interval
+    )
     return scheduler

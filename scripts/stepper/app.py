@@ -257,8 +257,17 @@ def build_router(*, token: str, inbox: Path) -> APIRouter:
     @router.post("/dispatch")
     def dispatch(request: Request) -> dict:
         def work() -> tuple[bool, dict]:
-            report = dict(vars(dispatcher.run_dispatch_cycle(_session_factory(), _publisher(request))))
-            return report["errored"] == 0, {"report": report}
+            lane_reports = [
+                dict(vars(dispatcher.run_dispatch_cycle(
+                    _session_factory(), _publisher(request), lane=lane
+                )))
+                for lane in (dispatcher.LANE_MAIN, dispatcher.LANE_AUTOSCALING)
+            ]
+            report = {
+                key: sum(item[key] for item in lane_reports)
+                for key in lane_reports[0] if key != "lane"
+            }
+            return report["errored"] == 0, {"report": report, "lane_reports": lane_reports}
 
         return press("dispatch", work)
 

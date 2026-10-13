@@ -231,6 +231,28 @@ def bind_backup_record(db: Session, execution_id: str, backup_record_id: str) ->
     return result.rowcount == 1
 
 
+def get_autoscaling_plan(db: Session, execution_id: str) -> dict | None:
+    """저장된 Auto Scaling 실행 계획 — 컬럼을 직접 읽어 세션이 든 낡은 객체를 거치지 않는다."""
+    return db.execute(
+        select(models.ActionExecution.autoscaling_plan).where(
+            models.ActionExecution.execution_id == execution_id
+        )
+    ).scalar_one_or_none()
+
+
+def bind_autoscaling_plan(db: Session, execution_id: str, plan: dict) -> bool:
+    """실행 계획 결속은 1회만 — 이미 저장된 계획은 덮어쓰지 않는다."""
+    result = db.execute(
+        update(models.ActionExecution)
+        .where(
+            models.ActionExecution.execution_id == execution_id,
+            models.ActionExecution.autoscaling_plan.is_(None),
+        )
+        .values(autoscaling_plan=plan)
+    )
+    return result.rowcount == 1
+
+
 # --- ExecutionStep -------------------------------------------------------------
 
 

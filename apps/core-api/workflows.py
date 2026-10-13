@@ -40,7 +40,7 @@ import logging
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Optional
 
 from pydantic import ValidationError
@@ -57,6 +57,7 @@ from schemas.api.assets import AssetType, RelationType
 from schemas.api.errors import ErrorCode
 from schemas.asset_roles import ROLE_ISOLATION, ROLE_TAG_KEY
 from schemas.api.incidents import IncidentStatus, ResolutionJudgement, IncidentCategory, ResponseMode
+from schemas.autoscaling import AutoscalingExecutionPlan
 from schemas.incidents import AgentWaitSchedule
 from schemas.backups import InstanceSpecBackup, NaclRuleIndexBackup
 from schemas.candidates import CandidateStatus, RunbookCandidateData
@@ -84,6 +85,7 @@ from schemas.precheck import (
     build_verification_summary,
 )
 from schemas.runbook_parameters import (
+    Ec2EnableAutoscalingParameters,
     Ec2IsolateParameters,
     NaclAddDenyParameters,
     NaclRestoreParameters,
@@ -1497,6 +1499,234 @@ def run_ec2_isolate_execution(db: Session, execution_id: str) -> ExecutionRunOut
     return ExecutionRunOutcome(succeeded=True, steps=outcome.steps)
 
 
+# --- EC2 Auto Scaling 활성화 (Issue #446) ----------------------------------------
+#
+# 기존 EC2 → AMI(NoReboot) → 시작 템플릿 → ASG → CPU 50% 정책. 원본 인스턴스는 건드리지
+# 않고, ALB·트래픽 전환·애플리케이션 준비 상태는 이 조치의 범위 밖이다.
+#
+# 보장을 셋으로 나눠 둔다.
+#   - 의도: 불변 명령·후보의 파라미터(min/max). 접수 때 정해지고 바뀌지 않는다.
+#   - 계획: 의도에서 executor가 준비한 AutoscalingExecutionPlan. 첫 AWS 변경 전에
+#     action_executions.autoscaling_plan에 commit하고, 이후 재시도는 저장된 계획만 쓴다.
+#     원본 인스턴스가 나중에 바뀌어도 계획을 다시 쓰지 않는다.
+#   - 관측: judge가 읽은 현물 상태. 단계 5의 요약으로 남기며 의도로 되읽지 않는다.
+# 실행 반환은 성공의 경계가 아니다 — 판정이 관측한 구성이 갖춰져야 SUCCESS다.
+
+
+def _autoscaling_execution_params(
+    db: Session, execution: models.ActionExecution
+) -> Ec2EnableAutoscalingParameters | None:
+    """EC2_ENABLE_AUTOSCALING의 실행 파라미터. 계약 모델과 대상·런북 정체를 거쳐서만 돌려준다.
+
+    _nacl_execution_params와 같은 원천 순서(불변 명령 → 후보)지만 일반화하지 않는다.
+    대상은 인스턴스 ARN이어야 하고 파라미터의 instance_id가 그 ARN의 자원과 같아야 한다.
+    """
+    if execution.runbook_id is not RunbookId.RUNBOOK_EC2_ENABLE_AUTOSCALING:
+        return None
+    target = parse_arn(execution.target_arn)
+    if target is None or target.resource_type != "instance":
+        return None
+
+    params: Ec2EnableAutoscalingParameters | None = None
+    command = execution.validated_command
+    if command is not None:
+        # 저장된 불변 명령은 runbook_id·target_arn·parameters를 모두 가진 계약이다
+        # (_candidate_command_payload). 어느 하나라도 어긋나거나 빠졌으면 다른 원천으로
+        # 대신 읽지 않고 거절한다 — 후보 폴백은 명령이 아예 없을 때만이다.
+        stored = command.get("parameters") if isinstance(command, dict) else None
+        if (
+            not isinstance(command, dict)
+            or command.get("runbook_id") != execution.runbook_id.value
+            or command.get("target_arn") != execution.target_arn
+            or not isinstance(stored, dict)
+        ):
+            return None
+        try:
+            params = Ec2EnableAutoscalingParameters.model_validate(stored)
+        except ValidationError:
+            logger.warning(
+                "execution_command_contract_invalid",
+                extra={
+                    "execution_id": execution.execution_id,
+                    "runbook_id": execution.runbook_id.value,
+                },
+            )
+            return None
+    else:
+        if execution.candidate_id is None:
+            return None
+        candidate = incidents_repo.get_candidate(db, execution.candidate_id)
+        if candidate is None:
+            return None
+        try:
+            data = mappers.to_candidate_data(candidate)
+            built = build_precheck_parameters(
+                data.runbook_id,
+                data.parameters,
+                resource_id=target.resource_id,
+                evidence_ids=data.evidence_ids,
+            )
+        except (ValidationError, ValueError):
+            logger.warning(
+                "candidate_contract_invalid",
+                extra={
+                    "candidate_id": candidate.candidate_id,
+                    "runbook_id": candidate.runbook_id.value,
+                },
+            )
+            return None
+        if (
+            data.runbook_id is not execution.runbook_id
+            or data.target_arn != execution.target_arn
+            or not isinstance(built, Ec2EnableAutoscalingParameters)
+        ):
+            return None
+        params = built
+
+    if params.instance_id != target.resource_id:
+        return None
+    return params
+
+
+def _plan_matches_intent(
+    plan: AutoscalingExecutionPlan,
+    *,
+    execution_id: str,
+    target_arn: str,
+    params: Ec2EnableAutoscalingParameters,
+) -> bool:
+    return (
+        plan.execution_id == execution_id
+        and plan.target_arn == target_arn
+        and plan.min_size == params.min_size
+        and plan.max_size == params.max_size
+    )
+
+
+def _stored_plan(
+    db: Session, execution_id: str, target_arn: str, params: Ec2EnableAutoscalingParameters
+) -> AutoscalingExecutionPlan | None:
+    """저장된 계획 중 현재 불변 의도와 정확히 맞는 것. 없거나 어긋나면 None이 아니라 호출부가 구분한다."""
+    stored = executions_repo.get_autoscaling_plan(db, execution_id)
+    if stored is None:
+        return None
+    try:
+        plan = AutoscalingExecutionPlan.model_validate(stored)
+    except ValidationError:
+        return None
+    if not _plan_matches_intent(
+        plan, execution_id=execution_id, target_arn=target_arn, params=params
+    ):
+        return None
+    return plan
+
+
+def run_ec2_enable_autoscaling_execution(
+    db: Session, execution_id: str
+) -> ExecutionRunOutcome:
+    """`RUNBOOK_EC2_ENABLE_AUTOSCALING` 실행 — 계획 확보·commit → AWS 변경 → 결과 반환. (Issue #446)
+
+    순서가 계약이다. **계획이 commit된 뒤에만 AWS 변경이 시작된다.** 읽기 전용 준비
+    (prepare)도 AWS를 부르므로 그 앞에서 열린 트랜잭션을 commit해, DB 트랜잭션이 AWS 호출을
+    가로지르지 않게 한다. 단계 기록은 호출 직전에 _step_recorder가 commit한다.
+
+    저장된 계획이 있으면(단계 없이 재시도된 경우) **그것만** 쓴다. 현재 의도와 어긋나면
+    덮어쓰지 않고 실패한다 — 의도를 조용히 바꾸지 않는다. 준비 단계의 조회 실패는
+    자산을 만지지 않았으므로 보류(재시도 후 소진 시 기존 보류 처분)다.
+
+    성공의 경계는 여기가 아니라 judge_ec2_enable_autoscaling의 관측이다. 종료 상태도
+    Incident 전이도 여기서 하지 않는다 — 확정은 close_execution 하나가 한다.
+    """
+    execution = executions_repo.get_execution(db, execution_id)
+    if execution is None:
+        raise ValueError(f"실행 레코드를 찾을 수 없습니다: {execution_id}")
+    if execution.runbook_id is not RunbookId.RUNBOOK_EC2_ENABLE_AUTOSCALING:
+        raise ValueError(
+            f"EC2_ENABLE_AUTOSCALING 실행이 아닙니다: {execution.runbook_id.value}"
+        )
+    if execution.status is not ExecutionStatus.IN_PROGRESS:
+        raise ValueError(f"진행 중인 실행이 아닙니다: {execution.status.value}")
+
+    target_arn = execution.target_arn
+    params = _autoscaling_execution_params(db, execution)
+    if params is None:
+        return _run_failed(
+            PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+            "실행 파라미터·대상·런북 정체를 확인하지 못했습니다",
+        )
+    persisted = executions_repo.get_autoscaling_plan(db, execution_id) is not None
+    plan = _stored_plan(db, execution_id, target_arn, params) if persisted else None
+    # 읽기 트랜잭션을 닫는다 — 이후 AWS 호출 동안 DB 트랜잭션·선점 잠금을 쥐지 않는다
+    db.commit()
+
+    if persisted:
+        if plan is None:
+            return _run_failed(
+                PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+                "저장된 Auto Scaling 계획이 실행 의도와 다릅니다 — 덮어쓰지 않고 중단합니다",
+            )
+    else:
+        plan, code, summary = executor.prepare_ec2_autoscaling_plan(
+            target_arn,
+            execution_id=execution_id,
+            min_size=params.min_size,
+            max_size=params.max_size,
+        )
+        if plan is None:
+            code = code or PrecheckReasonCode.PRECHECK_PARAM_INVALID
+            detail = f"Auto Scaling 계획 준비 실패: {summary or code.value}"[:1024]
+            if is_retryable(code):
+                return ExecutionRunOutcome(
+                    succeeded=False,
+                    reason_code=code,
+                    error_summary=detail,
+                    deferred=True,
+                )
+            return _run_failed(code, detail)
+        if not _plan_matches_intent(
+            plan, execution_id=execution_id, target_arn=target_arn, params=params
+        ):
+            return _run_failed(
+                PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+                "준비된 Auto Scaling 계획이 실행 의도와 다릅니다",
+            )
+        if not executions_repo.bind_autoscaling_plan(
+            db, execution_id, plan.model_dump(mode="json")
+        ):
+            # 다른 주체가 먼저 계획을 저장했다 — 내 계획으로 덮지 않고 저장된 것을 쓴다
+            db.rollback()
+            plan = _stored_plan(db, execution_id, target_arn, params)
+            db.commit()
+            if plan is None:
+                return _run_failed(
+                    PrecheckReasonCode.PRECHECK_PARAM_INVALID,
+                    "저장된 Auto Scaling 계획이 실행 의도와 다릅니다 — 덮어쓰지 않고 중단합니다",
+                )
+        else:
+            db.commit()
+
+    outcome = executor.execute_ec2_enable_autoscaling(
+        target_arn,
+        plan=plan,
+        record_step=_step_recorder(db, execution_id),
+    )
+    if outcome.deferred:
+        return ExecutionRunOutcome(
+            succeeded=False,
+            reason_code=outcome.reason_code,
+            error_summary=outcome.error_summary,
+            deferred=True,
+        )
+    if not outcome.succeeded:
+        return _run_failed(outcome.reason_code, outcome.error_summary, outcome.steps)
+    return ExecutionRunOutcome(succeeded=True, steps=outcome.steps)
+
+
+# 단계 5 — 판정이 남기는 읽기 전용 관측 요약. 1~4는 executor가 쓴다.
+_AUTOSCALING_JUDGEMENT_SEQUENCE = 5
+_AUTOSCALING_UNVERIFIED_NOTE = "원본 인스턴스는 유지했고 애플리케이션 서비스 가능 여부는 검증하지 않았습니다"
+
+
 # --- 2/2 Status Check 판정 (Issue #240) -----------------------------------------
 
 
@@ -2138,6 +2368,159 @@ def judge_ec2_isolate(db: Session, execution_id: str) -> ExecutionJudgement:
         },
     )
     return ExecutionJudgement(next_status=ExecutionStatus.FAILED, error_summary=detail[:1024])
+
+
+def _autoscaling_planned_names(plan: AutoscalingExecutionPlan) -> str:
+    """계획이 정한 자원 이름. **존재를 확인한 것이 아니라 계획한 이름**이다 — 호출부가 그렇게 적는다."""
+    return (
+        f"image={plan.image_name}, launch_template={plan.launch_template_name},"
+        f" asg={plan.asg_name}, policy={plan.scaling_policy_name}"
+    )
+
+
+def _stored_autoscaling_plan(
+    db: Session, execution_id: str
+) -> AutoscalingExecutionPlan | None:
+    stored = executions_repo.get_autoscaling_plan(db, execution_id)
+    if stored is None:
+        return None
+    try:
+        return AutoscalingExecutionPlan.model_validate(stored)
+    except ValidationError:
+        return None
+
+
+def _autoscaling_hold_context(db: Session, execution: models.ActionExecution) -> str:
+    """보류로 확정하는 Auto Scaling 실행의 요약에 덧붙일 계획 이름. 다른 런북·계획 없음은 빈 문자열.
+
+    소진 보류의 error_summary에는 사유 코드와 횟수뿐이라, 조회하지 못한 자원이 무엇인지
+    저장된 계획에서 읽어 싣는다(요약 문자열을 해석하지 않는다).
+    """
+    if execution.runbook_id is not RunbookId.RUNBOOK_EC2_ENABLE_AUTOSCALING:
+        return ""
+    plan = _stored_autoscaling_plan(db, execution.execution_id)
+    if plan is None:
+        return ""
+    return f" 계획한 자원(존재 미확인): {_autoscaling_planned_names(plan)}."
+
+
+def _record_autoscaling_observation(
+    db: Session,
+    execution: models.ActionExecution,
+    summary: str,
+    *,
+    query_failed: bool = False,
+) -> None:
+    """단계 5에 읽기 전용 관측 요약을 남기고 commit한다.
+
+    관측 자체는 성공이고 AWS를 바꾸지 않았다(SUCCESS·NOT_APPLIED). 구성이 갖춰졌는지는
+    요약과 실행의 확정 상태가 말한다 — 이 단계를 의도로 되읽는 코드는 없다.
+    조회하지 못한 관측(query_failed)은 SUCCESS가 아니라 FAILED·NOT_APPLIED다 — 관측을
+    못 했다는 사실과 사유를 error_summary로 남기며, 자원 변경은 주장하지 않는다.
+    판정이 확정 전에 끊겨 다시 오면 같은 단계를 갱신한다.
+    """
+    step = ExecutionStepResult(
+        sequence=_AUTOSCALING_JUDGEMENT_SEQUENCE,
+        affected_arn=execution.target_arn,
+        step_type="AUTOSCALING_JUDGEMENT",
+        aws_operation="autoscaling.inspect(read-only)",
+        status=ExecutionStepStatus.FAILED if query_failed else ExecutionStepStatus.SUCCESS,
+        effect=ExecutionEffect.NOT_APPLIED,
+        result_summary=None if query_failed else summary[:1024],
+        error_summary=summary[:1024] if query_failed else None,
+        occurred_at=datetime.now(UTC),
+    )
+    existing = {s.sequence for s in executions_repo.list_steps(db, execution.execution_id)}
+    if _AUTOSCALING_JUDGEMENT_SEQUENCE in existing:
+        executions_repo.update_step_result(db, step, execution_id=execution.execution_id)
+    else:
+        executions_repo.add_step(db, step, execution_id=execution.execution_id)
+    db.commit()
+
+
+def judge_ec2_enable_autoscaling(db: Session, execution_id: str) -> ExecutionJudgement:
+    """단계를 남긴 IN_PROGRESS인 Auto Scaling 활성화 실행 1건의 종료 판정. (Issue #446)
+
+    정상 경로(실행 반환 직후)와 실행 도중 끊긴 경로가 같은 관측을 쓴다 — 저장된 계획이
+    가리키는 자원을 **읽기만** 한다. 끊긴 실행을 이어 쓰지 않고(재개·보상 삭제·재사용
+    없음), 부분 구성은 이름 붙은 잔여물과 함께 FAILED로 사람에게 넘긴다.
+
+    - ready → SUCCESS. 원본 인스턴스 유지, 애플리케이션 서비스 가능 여부는 미검증.
+    - incomplete → FAILED. 아직 만들어지는 중인 정상 대기를 조회 실패로 위장하지 않는다.
+    - query_failed → 보류. 재시도·소진(UNVERIFIED)은 record_verification_failure 몫이다.
+
+    관측 요약은 단계 5에 남겨 현재 API로 보이게 한다. 조회 실패도 FAILED·NOT_APPLIED로
+    단계를 남기며, 조회 실패 사유와 계획한 자원(존재 미확인)을 기록한다.
+    """
+    execution = executions_repo.get_execution(db, execution_id)
+    if execution is None:
+        raise ValueError(f"실행 레코드를 찾을 수 없습니다: {execution_id}")
+    if execution.runbook_id is not RunbookId.RUNBOOK_EC2_ENABLE_AUTOSCALING:
+        raise ValueError(
+            f"EC2_ENABLE_AUTOSCALING 실행이 아닙니다: {execution.runbook_id.value}"
+        )
+    if execution.status is not ExecutionStatus.IN_PROGRESS:
+        raise ValueError(f"진행 중인 실행이 아닙니다: {execution.status.value}")
+
+    stored = executions_repo.get_autoscaling_plan(db, execution_id)
+    plan: AutoscalingExecutionPlan | None = None
+    if stored is not None:
+        try:
+            plan = AutoscalingExecutionPlan.model_validate(stored)
+        except ValidationError:
+            plan = None
+    if (
+        plan is None
+        or plan.execution_id != execution_id
+        or plan.target_arn != execution.target_arn
+    ):
+        # 단계는 계획이 commit된 뒤에만 생긴다 — 계획이 없거나 어긋나면 이 경로가 만든
+        # 실행이 아니다. 무엇을 관측할지 모르므로 사람에게 넘긴다
+        return ExecutionJudgement(
+            next_status=ExecutionStatus.FAILED,
+            error_summary="Auto Scaling 판정 불가: 저장된 실행 계획을 확인할 수 없습니다",
+        )
+    # 읽기 트랜잭션을 닫는다 — 관측 동안 DB 트랜잭션을 쥐지 않는다
+    db.commit()
+
+    inspection = executor.inspect_ec2_autoscaling(plan)
+    if inspection.status == "query_failed":
+        # 관측을 못 했어도 무엇을 못 봤는지는 남긴다 — 계획한 이름(존재 미확인)과
+        # 실제로 관측된 상태(요약)를 구분해 적는다. 보류 횟수·재시도는 그대로다
+        _record_autoscaling_observation(
+            db,
+            execution,
+            f"[query_failed:{inspection.reason_code.value}] 계획한 자원(존재 미확인):"
+            f" {_autoscaling_planned_names(plan)}. 관측: {inspection.summary}"
+            f" — {_AUTOSCALING_UNVERIFIED_NOTE}",
+            query_failed=True,
+        )
+        return ExecutionJudgement(
+            defer_code=inspection.reason_code,
+            defer_reason=(
+                f"{inspection.reason_code.value}: Auto Scaling 구성 조회 실패로 판정 보류"
+                f" — {inspection.summary}"
+            )[:1024],
+        )
+
+    ready = inspection.status == "ready"
+    label = "ready" if ready else "incomplete"
+    _record_autoscaling_observation(
+        db,
+        execution,
+        f"[{label}] {inspection.summary} — {_AUTOSCALING_UNVERIFIED_NOTE}",
+    )
+    if ready:
+        return ExecutionJudgement(next_status=ExecutionStatus.SUCCESS)
+    return ExecutionJudgement(
+        next_status=ExecutionStatus.FAILED,
+        error_summary=(
+            f"Auto Scaling 구성 미완 — {inspection.summary}."
+            " 보상 삭제·재사용 없이 수동 확인으로 전환합니다"
+        )[:1024],
+    )
+
+
 # --- 실행 종료 확정 (Issue #232) -------------------------------------------------
 
 
@@ -2522,6 +2905,7 @@ def record_verification_failure(
         return VerificationHold(reason_code=reason_code, attempts=attempts, held=False)
 
     next_status, summary = _held_outcome(db, execution, reason_code, attempts)
+    summary += _autoscaling_hold_context(db, execution)
     logger.critical(
         "verification_held",
         extra={
