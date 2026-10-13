@@ -117,16 +117,22 @@ def test_lifespan_starts_and_stops_all_schedulers(monkeypatch):
         started.append("agent")
         return FakeScheduler("agent")
 
+    def fake_timeout(_publish):
+        publishers.append(_publish)
+        started.append("timeout")
+        return FakeScheduler("timeout")
+
     monkeypatch.setattr(main_module, "start_scan_scheduler", fake_scan)
     monkeypatch.setattr(main_module.dispatcher, "start_dispatcher", fake_dispatch)
     monkeypatch.setattr(main_module.agent_dispatcher, "start_agent_dispatcher", fake_agent)
+    monkeypatch.setattr(main_module, "start_timeout_watcher", fake_timeout)
 
     with TestClient(main_module.create_app()) as test_client:
-        assert publishers[0] == publishers[1] == publishers[2]
+        assert publishers[0] == publishers[1] == publishers[2] == publishers[3]
         assert callable(publishers[0])
-        assert set(started) == {"scan", "dispatch", "agent"}  # 배선이 셋 다 기동
+        assert set(started) == {"scan", "dispatch", "agent", "timeout"}
         assert test_client.get("/health").status_code == 200
-    assert set(stopped) == {"scan", "dispatch", "agent"}  # 종료 시 셋 다 정리
+    assert set(stopped) == {"scan", "dispatch", "agent", "timeout"}
 
 
 def test_lifespan_shuts_down_already_started_when_a_scheduler_raises(monkeypatch):

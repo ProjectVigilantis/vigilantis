@@ -537,6 +537,124 @@ def test_missing_nacl_is_target_not_found(aws):
     assert (outcome.passed, outcome.reason_code) == (False, R.PRECHECK_TARGET_NOT_FOUND)
 
 
+def test_nacl_precheck_preserves_the_actual_conflict_without_extra_calls(aws, caplog):
+    import copy
+
+    response = copy.deepcopy(DEFAULT_RESPONSES["describe_network_acls"])
+    acl = response["NetworkAcls"][0]
+    acl["Tags"] = [{"Key": "private", "Value": "do-not-log"}]
+    acl["Entries"][0].update(
+        PrivateValue="do-not-log",
+        PortRange={"From": 22, "To": 22, "PrivateValue": "do-not-log"},
+    )
+    aws(describe_network_acls=response)
+    _, params = VALID["RUNBOOK_NACL_ADD_DENY"]
+    result = run("RUNBOOK_NACL_ADD_DENY", params={**params, "rule_number": 100})
+    evidence = next(r.precheck_evidence for r in caplog.records
+                    if r.getMessage() == "nacl_add_deny_precheck")
+    assert result.reason_code is R.PRECHECK_INVALID_STATE
+    assert evidence["detail"] == "inbound_rule_number_occupied"
+    assert evidence["parameters"] == {k: v for k, v in {**params, "rule_number": 100}.items()
+                                       if k != "evidence_id"}
+    assert evidence["acl_observed"] is True
+    assert evidence["conflicting_entry"] == {
+        "RuleNumber": 100, "Egress": False, "RuleAction": "deny",
+        "CidrBlock": NACL_CIDR, "Protocol": "6", "PortRange": {"From": 22, "To": 22},
+    }
+    assert evidence["inbound_rule_numbers"] == [100, 32767]
+    assert evidence["inbound_rule_numbers_truncated"] is False
+    assert "do-not-log" not in str(evidence)
+    assert aws.calls == [("describe_network_acls", {"NetworkAclIds": [ACL]})]
+
+
+@pytest.mark.parametrize("code", ["DependencyViolation", "UnauthorizedOperation"])
+def test_nacl_lookup_failure_is_not_reported_as_a_slot_conflict(aws, caplog, code):
+    aws(describe_network_acls=ClientError(
+        {"Error": {"Code": code, "Message": "SECRET-MESSAGE"}}, "DescribeNetworkAcls"
+    ))
+    result = run("RUNBOOK_NACL_ADD_DENY")
+    evidence = next(r.precheck_evidence for r in caplog.records
+                    if r.getMessage() == "nacl_add_deny_precheck")
+    failure = next(r for r in caplog.records if r.getMessage() == "aws_call_failed")
+    assert evidence["detail"] == "acl_lookup_unavailable"
+    assert evidence["acl_observed"] is False
+    assert evidence["inbound_rule_numbers"] is None
+    assert evidence["conflicting_entry"] is None
+    assert failure.aws_error_code == code
+    assert failure.reason_code == result.reason_code.value
+    assert "SECRET-MESSAGE" not in str([r.__dict__ for r in caplog.records])
+    assert len(aws.calls) == 1
+
+
+def test_nacl_missing_snapshot_is_explicit(aws, caplog):
+    aws(describe_network_acls={"NetworkAcls": []})
+    run("RUNBOOK_NACL_ADD_DENY")
+    evidence = next(r.precheck_evidence for r in caplog.records
+                    if r.getMessage() == "nacl_add_deny_precheck")
+    assert evidence["acl_observed"] is False
+    assert evidence["reason_code"] == R.PRECHECK_TARGET_NOT_FOUND.value
+    assert not any(r.getMessage() == "aws_call_failed" for r in caplog.records)
+
+
+def test_nacl_available_slot_and_snapshot_limit_are_explicit(aws, caplog):
+    caplog.set_level("INFO", logger="vigilantis.aws")
+    aws(describe_network_acls={"NetworkAcls": [{"Entries": [
+        *({"RuleNumber": n, "Egress": False} for n in range(1, 46)),
+        {"RuleNumber": 200, "Egress": True},
+    ]}]})
+    assert run("RUNBOOK_NACL_ADD_DENY").passed
+    evidence = next(r.precheck_evidence for r in caplog.records
+                    if r.getMessage() == "nacl_add_deny_precheck")
+    assert evidence["detail"] == "inbound_rule_number_available"
+    assert evidence["conflicting_entry"] is None
+    assert evidence["inbound_rule_count"] == 45
+    assert evidence["inbound_rule_numbers"] == list(range(1, 41))
+    assert evidence["inbound_rule_numbers_truncated"] is True
+    assert len(aws.calls) == 1
+
+
+@pytest.mark.parametrize("raise_error", [False, True])
+def test_candidate_diagnostic_context_is_exact_and_restored(aws, monkeypatch, raise_error):
+    import io
+    import json
+    import logging
+
+    import workflows
+    from logging_config import JsonLineFormatter, log_context
+    from schemas.candidates import RunbookCandidateData
+
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(JsonLineFormatter())
+    monkeypatch.setattr(ex.logger, "handlers", [handler])
+    candidate = RunbookCandidateData(
+        candidate_id="candidate-this", incident_id="incident-this",
+        runbook_id="RUNBOOK_NACL_ADD_DENY", target_arn=arn("network-acl", ACL),
+        parameters={"rule_number": 100, "cidr_block": NACL_CIDR, "protocol": "-1"},
+        evidence_ids=["evidence-this"], status="PENDING_VALIDATION",
+    )
+    if raise_error:
+        def broken(*args, **kwargs):
+            ex.logger.warning("diagnostic_before_error")
+            raise RuntimeError("test")
+        monkeypatch.setattr(workflows.guardrails, "run_guardrail_validation", broken)
+    with log_context(incident_id="outer"):
+        if raise_error:
+            with pytest.raises(RuntimeError, match="test"):
+                workflows._guard_candidate(candidate, {candidate.target_arn})
+        else:
+            result = workflows._guard_candidate(candidate, {candidate.target_arn})
+            assert result.result.result.value == "FAIL"
+        ex.logger.warning("after_candidate")
+    records = [json.loads(line) for line in stream.getvalue().splitlines()]
+    inside = next(r for r in records if r["event"] == (
+        "diagnostic_before_error" if raise_error else "nacl_add_deny_precheck"))
+    assert inside["incident_id"] == "incident-this"
+    assert inside["candidate_id"] == "candidate-this"
+    assert records[-1]["incident_id"] == "outer"
+    assert "candidate_id" not in records[-1]
+
+
 def test_nacl_restore_requires_the_rule_to_exist(aws):
     aws(describe_network_acls={"NetworkAcls": [{"Entries": []}]})
     outcome = run("RUNBOOK_NACL_RESTORE")

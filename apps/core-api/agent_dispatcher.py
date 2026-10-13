@@ -105,7 +105,7 @@ from schemas.agents import (
     AgentExecutionContext,
 )
 from schemas.api.actions import ExecutionStatus
-from schemas.api.incidents import IncidentCategory
+from schemas.api.incidents import IncidentCategory, ResponseMode, RiskLevel
 from schemas.events import InitialRiskEvaluationResult, expected_mode_for
 from schemas.runbooks import RunbookId, TriggerSource
 from schemas.api.ws import WsEvent, WsEventType
@@ -136,6 +136,7 @@ from db.repositories import executions as executions_repo
 from db.session import get_session_factory
 from logging_config import log_context
 from realtime import incident_event
+from security import soar
 
 logger = logging.getLogger("vigilantis.agent_dispatcher")
 
@@ -516,6 +517,21 @@ def _dispatch_one(
             # 선점 직후 commit — 여기서 끊지 않으면 모델 호출 시간 내내 행이 잠긴다
             db.commit()
             report.claimed += 1
+
+            # 접수와 분석 스캔이 겹쳐도 High 분석 입력은 선차단의 최신 결과를 본다.
+            # 실행은 동일 예약/dispatcher 관문으로 가며 중간 commit 이후도 직렬화한다.
+            incident = incidents_repo.get_incident(db, incident_id)
+            high = (
+                incident.category is IncidentCategory.SECOPS
+                and incident.initial_risk_level is RiskLevel.HIGH
+                and incident.response_mode is ResponseMode.PRE_MITIGATION_0_5S
+            )
+            db.rollback()
+            if high:
+                soar.trigger_isolation(
+                    db, incident_id, trigger_source=TriggerSource.PRE_MITIGATION_0_5S,
+                    publish=publish,
+                )
 
             try:
                 graph_input = build_graph_input(db, incident_id)

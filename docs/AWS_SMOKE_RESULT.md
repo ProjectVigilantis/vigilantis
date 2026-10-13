@@ -248,6 +248,54 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 
 **이월 4행 최종 처분**: ______
 
+### 8-2. #447 자동 격리 — 팀 실 AWS 검증과 시간 기록
+
+> **상태: 팀 실 AWS 실행 기록 대기.** 이 절은 #447 자동 발동 경로가 팀 실 AWS 환경에서 `EC2_ISOLATE`로 이어진 실행과 걸린 시간을 기록하는 자리다. 실행을 마치면 아래 표를 채운다. 개인 AWS 참고 측정은 PR #469 본문에 두고, 이 절에는 팀 실 AWS 실행 결과를 적는다.
+
+**판정 기준과의 관계**
+
+- 10/15(목) MVP 마감 판정의 공식 기준은 [`PROJECT_STATUS.md`](PROJECT_STATUS.md) §현재 위치의 판정 기준 ⓑ다. 그중 #447의 몫은 머지된 자동 발동 경로(High `PRE_MITIGATION_0_5S` · Medium `TIMEOUT_ISOLATION_1M`)가 실 AWS에서 `EC2_ISOLATE`까지 이어지는 것이다(2026-10-13 PM 결정).
+- 발동부터 격리 확인까지 걸린 시간은 이 절에 기록한다. 0.5초 목표의 개정 여부는 판정 뒤에 따로 정한다.
+
+**실행 전제**
+
+- 격리 대상은 EC2다. `resolve_isolation_parameters`가 그 EC2가 `REGISTERED_IN`인 TG 1개와, 같은 계정·리전·VPC에 있는 `vigilantis:role=isolation` 태그 SG 1개를 정확히 하나씩 찾으면 실행으로 이어진다.
+- 해석 거부·TG/SG 부재·대상 복수는 차단 요인으로 따로 기록한다.
+- 예약은 `EC2_ISOLATE` runner와 judge가 모두 등록된 상태(`dispatcher.supports_isolation()`)에서 진행되고, 그 밖의 상태는 `prerequisite_blocked`로 끝난다.
+
+**회차마다 확인할 경계**
+
+- 백업 선행: SG·TG 매핑 백업이 첫 AWS 변경 전에 commit된다. `backup_committed`가 `execution_started`보다 앞서는지 확인한다.
+- 실제 격리: 대상 ENI의 SG가 격리 SG로 교체되고 TG에서 대상이 등록 해제됐는지 AWS 조회로 확인한다.
+- 확인된 성공: `judge_ec2_isolate` 판정을 거쳐 `outcome=success`·`confirmed=True`로 남은 회차다. runner의 API 호출 성공과 AWS 요청 수락은 그 앞 단계의 기록이다.
+- 부분 격리는 `judge_ec2_isolate`가 FAILED로 확정하고, 복원은 수동으로 한다(Post-MVP #435).
+
+**기록 방법**
+
+- 원천은 `vigilantis.isolation_timing` 로거의 `isolation_latency` 로그다. 로그 1건이 시도 1건이다.
+- 실패·중단을 포함해 모든 시도를 순서대로 적는다. 시도 시각은 계측 값(`started_at`·`response_deadline_at`)에 맞춰 §0의 KST 규칙 대신 **UTC**로 적는다.
+- 시도마다 `started_at`, `trigger_source`, IncidentID, ExecutionID, `outcome`, `confirmed`, `elapsed_to_outcome_ms`, phase 7개(`risk_evaluated` · `incident_committed` · `execution_reserved` · `guardrail_passed` · `backup_committed` · `execution_started` · `isolation_confirmed`)의 `elapsed_ms`·`delta_ms`를 남긴다. `isolation_confirmed`는 확인된 성공에서 찍힌다.
+- 결과 구분: `success`(확인된 성공) · `unconfirmed`(확인 전에 끝난 종료) · `failed` · `interrupted`(예외로 중단) · `prerequisite_blocked`(실행 전제 미충족).
+
+**High와 Medium의 구간**
+
+- High(`start_boundary=threat_received`): `end_to_end_ms`가 위협 접수부터 격리 확인까지의 단조 시계 구간이다. 확인된 성공에서 채워지며, 그 밖의 종료는 `elapsed_to_outcome_ms`로 기록한다.
+- Medium(`start_boundary=timeout_scan`): 저장된 `agent_wait_started_at`과 `response_deadline_at`(= 시작 + 60초)을 기준으로 아래 값을 High 총 소요와 별도 칸에 적는다. 1초 감시 주기(`AGENT_WAIT_POLL_SECONDS`)는 스캔 주기다.
+  - `deadline_to_reservation_ms`: 저장된 마감부터 예약까지의 UTC 차이
+  - `deadline_to_confirmation_ms`: 저장된 마감부터 확인까지의 UTC 차이
+  - `scan_to_confirmation_ms`·`reservation_to_confirmation_ms`: 스캔 시작 또는 예약부터 확인까지의 단조 시계 구간
+
+| 항목 | 기록 |
+| --- | --- |
+| 실행 환경(리전·VPC) · 코드 버전(commit) | ______ |
+| 대상 EC2 · TG · 격리 SG | ______ |
+| High 발동 → `EC2_ISOLATE`(UTC · IncidentID · ExecutionID · `outcome` · `confirmed`) | 기록 대기 |
+| High `end_to_end_ms` · phase별 `elapsed_ms`/`delta_ms` | 기록 대기 |
+| Medium 발동 → `EC2_ISOLATE`(UTC · IncidentID · ExecutionID · `outcome` · `confirmed`) | 기록 대기 |
+| Medium `deadline_to_reservation_ms` · `deadline_to_confirmation_ms` · `scan_to_confirmation_ms` · `reservation_to_confirmation_ms` | 기록 대기 |
+| 백업 선행(`backup_committed` → `execution_started`) · AWS 조회로 본 SG 교체·TG 등록 해제 | 기록 대기 |
+| 그 밖의 시도(`failed` · `interrupted` · `unconfirmed` · `prerequisite_blocked`)와 사유 | 기록 대기 |
+
 ---
 
 ## 9. 비용
