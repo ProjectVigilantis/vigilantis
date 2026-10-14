@@ -103,7 +103,7 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 | `collector_failures` 라벨 → 사유 코드 | 없음(`error_summary` 빈 값 — 빈 묶음 `{}`이 아니다. PR #439 본문 `## 원본 출력` ③ `(없음)`) — 흡수된 조회 0건 | 사유 코드가 판별 기준이다. `AccessDenied` 는 **권한 누락** — 빠진 조회 권한을 §7에 적고 `policy` 대조. **`InternalFailure` 는 회차의 `mode` 로 뜻이 갈린다** — `localstack` 이면 라이선스 밖이고, **`aws` 면 AWS 측 내부 오류이므로 재시도 후에도 같으면 §7에 적는다**(실 AWS 에서도 나오는 코드다). 어느 코드든 빈 목록으로 강등되므로 "정상 0건"과 구별되지 않는다 |
 | `elbv2`(ALB Target Group) 조회 | **성공 — TG 1건 수집**(`vigilantis-smoke-tg`). 실 AWS 첫 성공 | **이월 4행 처분 근거.** LocalStack Community 에 없어 로컬에서 성공한 적이 없다 |
 | `autoscaling`(ASG) 조회 | **성공 — 0건**(ASG 없음이 정상). `collector_failures`가 비어 있어 권한 누락으로 인한 강등이 아니다 | **이월 4행 처분 근거.** 같은 이유로 로컬에서 성공한 적이 없다 |
-| CloudWatch 메트릭 | 기동 2시간 뒤 3대 모두 관측치 3개(1시간 해상도) — 지연 없이 시간당 1개씩 쌓임 | **이월 3행 처분 근거.** **시드 회차는 관측치를 즉시 72개로 채우므로 48개 게이트가 걸리지 않는다**(2026-10-06 실측 — 자산 4대 모두 72개). 게이트 자체는 골든 A4(`dp 47`)가 검증한다. 지연·해상도는 실 AWS에서 처음 관측된다 |
+| CloudWatch 메트릭 | 기동 2시간 뒤 3대 모두 관측치 3개(1시간 해상도) — 시간당 1개씩 쌓임. **10/14(수) 실측(`idle-dev` · `get-metric-statistics` 정시 정렬 · 10/12 11:00–10/14 11:00 KST)**: 1시간 칸 49개, **연속 간격 48개 전부 3600초(결손 0)**. 1분 조회의 첫 관측치 10/12 11:20 KST(기동 11:19:59 — **지연 1분 이내**) · 이후 5분 간격(기본 모니터링). 칸별 `SampleCount` 60(첫 칸 40 · 진행 중 칸 57). 관측치 개별 시각은 DB에 없다(수집기가 요약 `MetricSummary`만 적재) — 이 값은 CloudWatch 직접 조회로만 나온다 | **이월 3행 처분 근거.** **시드 회차는 관측치를 즉시 72개로 채우므로 48개 게이트가 걸리지 않는다**(2026-10-06 실측 — 자산 4대 모두 72개). 게이트 자체는 골든 A4(`dp 47`)가 검증한다. 지연·해상도는 실 AWS에서 처음 관측된다 |
 
 ### 2-2. 자산 유형별 수집 수
 
@@ -171,7 +171,7 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 | 쓴 가짜 인스턴스 ID | `i-0f3a9c2b7d1e4a5b6`(및 대조용 `vol-0f3a9c2b7d1e4a5b6` · `sg-0f3a9c2b7d1e4a5b6`) |
 | 실 AWS 응답 | 인스턴스 `modify_instance_attribute` DryRun — **관리자 키 `DryRunOperation` / 앱 키 `UnauthorizedOperation`** · 볼륨 `delete_volume` DryRun — 두 키 모두 `InvalidVolume.NotFound` · SG `delete_security_group` DryRun — 두 키 모두 `InvalidGroup.NotFound`. `precheck()`로는 EBS가 `PRECHECK_TARGET_NOT_FOUND`, 다운사이징이 `PRECHECK_UNAUTHORIZED` |
 | 걸러졌는가 | **작업마다 다르다.** 볼륨·SG 삭제 = **예** — 실 AWS가 `InvalidVolume.NotFound`·`InvalidGroup.NotFound`로 대상 존재를 검사한다(두 키 동일). 다운사이징(`modify_instance_attribute` — 인스턴스 타입 변경 API) = **아니오** — 관리자 키에서 없는 인스턴스에도 `DryRunOperation`(DryRun 통과 응답)이 온다. 앱 키의 `UnauthorizedOperation`은 앱 키 정책의 태그 조건(`aws:ResourceTag/vigilantis:smoke` — 스모크 태그가 붙은 자원에만 변경을 허용하는 IAM 조건 키)을 없는 대상에서 평가할 수 없어 생긴 부수효과이며, 가드레일 ④가 대상 존재를 보증한 것이 아니다 |
-| 판정 | **이월 8행 미해소 — 가정 반증.** 8행이 든 사례(`modify_instance_attribute` DryRun)를 실 AWS도 거르지 않는다 — 8행의 "실 AWS는 여기서 걸러 줄 것으로 보인다"는 관리자 키 `DryRunOperation`으로 반증됐다. 런북별로 갈린다: `EC2_ISOLATE`(격리)는 사전 검사 `_precheck_isolate`가 인스턴스 조회로 시작해 존재를 검사하고, `EC2_RIGHTSIZING`(다운사이징)의 `_precheck_rightsizing`만 DryRun 호출뿐이다(`apps/core-api/services/aws/executor.py`). 처분은 §5 8행에서 PM이 정한다(§7 A5 행) |
+| 판정 | **이월 8행 미해소 — 가정 반증.** 8행이 든 사례(`modify_instance_attribute` DryRun)를 실 AWS도 거르지 않는다 — 8행의 "실 AWS는 여기서 걸러 줄 것으로 보인다"는 관리자 키 `DryRunOperation`으로 반증됐다. 런북별로 갈린다: `EC2_ISOLATE`(격리)는 사전 검사 `_precheck_isolate`가 인스턴스 조회로 시작해 존재를 검사하고, `EC2_RIGHTSIZING`(다운사이징)의 `_precheck_rightsizing`만 DryRun 호출뿐이다(`apps/core-api/services/aws/executor.py`). 처분은 §5 8행에서 PM이 정한다(§7 A5 행). **시험 범위 주의(안성일 의견 · 10/14 #439 코멘트)**: 이 A5는 `executor.precheck()`를 직접 부른 결과다. 앱의 제안 검증은 그 앞에 ③ ARN Match(수집된 관리 대상인가)와, 다운사이징 후보면 `workflows._candidate_precheck`의 `describe_instances` 현재 타입 조회를 거쳐 실패 시 DryRun 전에 거절한다(`dev` `a929975`에서 코드로 확인). **즉 반증된 것은 "DryRun 단독의 존재 검사"이며, 앱 경로에 존재 확인이 빠졌다는 근거는 아니다.** 그 앱 경로를 없는 대상으로 실 AWS에서 시험하지는 않았다 |
 
 ---
 
@@ -193,14 +193,14 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 
 | 행 | 격차 | 처분 | 근거(이 문서의 어느 칸) |
 | --- | --- | --- | --- |
-| 1 | 가드레일 ④ `DryRun=True` — 실제 IAM 권한 검증 | 해소 / 미해소 | §3 A4 |
-| 2 | `get_waiter` Status Check — `impaired`(ⓐ)만 | 해소 / 미해소 | §4 A8-impaired (stopped 실험 제외) |
-| 3 | CloudWatch 메트릭 수집(지연·해상도) | 해소 / 미해소 | §2-1 |
-| 4 | ALB Target Group · ASG 경로(P2 3종) | 해소 / 미해소 | §2-0 · §2-1 · §2-2 · 10주차 §8 · §8-1 |
-| 5 | NACL 생성·삭제의 `DryRun=True` | 해소 / 미해소 | §3 A4-3·A4-4 |
-| 6 | `Protocol` 표기 | 해소 / 미해소 | §4 A6 |
-| 7 | `PortRange` | 해소 / 미해소 | §4 A6 |
-| 8 | `DryRun`의 대상 존재 검사 | 해소 / 미해소 | §3 A5 |
+| 1 | 가드레일 ④ `DryRun=True` — 실제 IAM 권한 검증 | **해소** | §3 A4-1–A4-7 — 앱 키로 런북별 1회, 「권한 누락」 7행 전부 없음 |
+| 2 | `get_waiter` Status Check — `impaired`(ⓐ)만 | **미해소** — 사유: 실 AWS에서 `impaired`를 안전하게 일으킬 수단이 없어 미실행. 이월처: Post-MVP(장애 주입 도구 도입 시) | §4 A8-impaired (`stopped` 실험 A8로 대체하지 않음) |
+| 3 | CloudWatch 메트릭 수집(지연·해상도) | **해소** | §2-1 — 10/14 실측: 1시간 칸 간격 전부 3600초(결손 0) · 첫 관측치 지연 1분 이내 · 기본 모니터링 5분 간격 |
+| 4 | ALB Target Group · ASG 경로(P2 3종) | **조회 해소 · 격리·해제 실행 해소 · 자동 확장 실행 ______** | 조회: §2-1(`elbv2`·`autoscaling` 실 AWS 첫 성공). 격리·해제: §8 P2-1(3회 `SUCCESS`). 자동 확장: §8 P2-2 — 후보 생성 경로 확인 대기(§7 10/14 11:30) |
+| 5 | NACL 생성·삭제의 `DryRun=True` | **해소** | §3 A4-3·A4-4 — 직접 DryRun `DryRunOperation`, DryRun 뒤 규칙이 생기지 않았음을 describe로 확인 |
+| 6 | `Protocol` 표기 | **해소** | §4 A6 — 재실측 describe가 `Protocol: "6"`(번호)을 돌려줬고, 해제 precheck(백업 fingerprint `protocol` 대조)가 통과해 `SUCCESS` |
+| 7 | `PortRange` | **해소** | §4 A6 — 요청값 `0–65535`(`executor._NACL_ALL_PORTS`)로 차단 `SUCCESS`(거절 없음), 저장값도 `{From: 0, To: 65535}` |
+| 8 | `DryRun`의 대상 존재 검사 | **미해소 — 가정 반증.** 사유: `modify_instance_attribute` DryRun은 없는 인스턴스도 거르지 않는다(관리자 키 `DryRunOperation`). **코드는 바꾸지 않는다**(안성일 처분 · 10/14) — 앱 제안 경로는 ③ ARN Match와 `describe_instances` 선조회가 대상 존재를 먼저 확인하므로 사유 매핑(`UnauthorizedOperation → PRECHECK_UNAUTHORIZED`)을 유지하고 조회를 중복 추가하지 않는다. 이월처: 앱 경로의 없는 대상 실 AWS 시험은 Post-MVP | §3 A5 (시험 범위 주의 포함) |
 
 ---
 
