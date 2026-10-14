@@ -268,7 +268,7 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 **판정 기준과의 관계**
 
 - 10/15(목) MVP 마감 판정의 공식 기준은 [`PROJECT_STATUS.md`](PROJECT_STATUS.md) §현재 위치의 판정 기준 ⓑ다. 그중 #447의 몫은 머지된 자동 발동 경로(High `PRE_MITIGATION_0_5S` · Medium `TIMEOUT_ISOLATION_1M`)가 실 AWS에서 `EC2_ISOLATE`까지 이어지는 것이다(2026-10-13 PM 결정).
-- 발동부터 격리 확인까지 걸린 시간은 이 절에 기록한다. 0.5초 목표의 개정 여부는 판정 뒤에 따로 정한다.
+- 발동부터 격리 확인까지 걸린 시간은 이 절에 기록한다. **걸린 시간은 판정 요건이 아니다.** 0.5초 목표를 개정할지는 이 문서가 정하지 않는다 — SSOT 10주차 리스크 2번대로 **10/15(목) 판정 전에 `SEC` 복수 담당(안성일 · 김세혁)이 정하고**, 결과는 SSOT §Action Whitelist와 ADR 개정으로 반영한다. 이 절의 수치는 그 결정의 근거로 쓰인다.
 
 **실행 전제**
 
@@ -308,7 +308,7 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 | Medium `deadline_to_reservation_ms` · `deadline_to_confirmation_ms` · `scan_to_confirmation_ms` · `reservation_to_confirmation_ms` | 1780.5 · **2991.6** · 2120.1 · 1211.0(ms). phase: `guardrail_passed` 866.2/866.2 · `execution_reserved` 909.1/42.9 · `backup_committed` 1194.4/285.3 · `execution_started` 1194.5/0.1 · `isolation_confirmed` 2120.1/925.6 |
 | 백업 선행(`backup_committed` → `execution_started`) · AWS 조회로 본 SG 교체·TG 등록 해제 | 계측된 두 회차 모두 `backup_committed`가 `execution_started`보다 앞섰다(0.1ms 차 — 같은 흐름에서 연이어 찍힌다). SG 교체·TG 등록 해제는 매 회차 `describe_network_interfaces`·`describe_target_health`로 확인했다(§8 P2-1) |
 | 그 밖의 시도(`failed` · `interrupted` · `unconfirmed` · `prerequisite_blocked`)와 사유 | High ① 회차는 격리·확인 모두 성공했으나 **계측 로그가 남지 않았다** — 주입한 일회성 태스크가 운영 진입점의 로깅 설정을 거치지 않았다. ②는 주입 코드에서 `setup_logging('INFO')`를 불러 같은 조건으로 다시 잰 회차다. 그 밖에 **가드레일 거절 1건**(`failed` — 08:11Z · 인시던트 `5db1c4ea-…` · `PRECHECK_UNAUTHORIZED`, 주입 태스크가 접근 역할 대신 태스크 역할로 호출 — §7 10/13 17:11)과 **발동 조건 미성립 1건**(Medium `web-2` — 승인 대기에 들어가지 못해 기한이 없음, §7 10/13 17:17)이 있다. 둘 다 제품 경로가 아니라 실측 방법·스모크 구성에서 나왔다 |
-| 0.5초 목표 대비(기록만 — 판정 요건 아님) | High 2.93초 · Medium 기한 후 2.99초. 0.5초 목표 개정 여부는 판정 뒤 따로 정한다(SSOT 10주차 리스크 2번) |
+| 0.5초 목표 대비(기록만 — 판정 요건 아님) | High 2.93초 · Medium 기한 후 2.99초. 0.5초 목표 개정 여부는 판정 전에 `SEC` 복수 담당이 정한다(SSOT 10주차 리스크 2번 — 위 「판정 기준과의 관계」) |
 
 ---
 
@@ -335,3 +335,22 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 | `.env` LocalStack 복귀(엔드포인트·로컬용 키·리전 설정 확인) | ☐ · 적용/재기동 확인 시각 ______ |
 
 `down`은 EBS 런북이 만든 스냅샷을 자동 삭제하지 않는다. `status`의 스냅샷 목록은 해당 리전의 계정 소유 스냅샷으로, 목록 전체를 스모크 자원으로 간주하지 않는다. 관리 대상 잔여 0건과 스냅샷 잔존 여부를 구분하고, 관련성을 확인한 스냅샷의 처리·보존 결과를 별도로 적는다.
+
+---
+
+## 11. 플랫폼 배포 확인 (SSOT 10주차 판정 기준 ⓒ)
+
+판정 기준 ⓒ(플랫폼이 배포돼 CloudFront 주소에서 화면이 선다 · ADR-0010 `Accepted`)의 관측 근거를 이 절에 모은다. 스모크 A군·P2와 같은 계정·리전에 같은 시기 배포돼 같은 PR로 머지되므로 별도 문서를 두지 않는다. §0의 번호 표에 없는 칸이라 번호를 붙이지 않는다. 판정 자체는 [PROJECT_STATUS.md](PROJECT_STATUS.md) §현재 위치에만 적는다.
+
+| 항목 | 값 | 확인 방법 · 시각 |
+| --- | --- | --- |
+| ADR-0010 Status | `Accepted` — PR #464(10/13(화) 머지) | `docs/adr/0010-platform-deployment-saas-shape.md` |
+| 배포 도구 | `scripts/provision_platform_aws.py`(PR #441 · 사용자 도메인·CORS PR #467) | — |
+| CloudFront · 사용자 도메인 | 배포 `E3TE9Y8VJ9W6CT` · 기본 도메인 `dgezkqp376m8k.cloudfront.net` · 별칭 `vigilantis.dev` · 뷰어 인증서 ACM(us-east-1) `ISSUED` · WAF `vigilantis-platform-waf` 연결 | 읽기 전용 조회 · 10/13(화) 15시대 KST(#468 코멘트) |
+| 오리진 구간 | CloudFront → ALB **`http-only`** — 브라우저→CloudFront만 HTTPS다. 전체 구간 HTTPS로 적지 않는다 | 같은 조회 |
+| 배포 코드 버전 | 이미지 `mvp-004ed0a`(= `origin/dev` `004ed0a` — B4 #466 · B5 #469 포함) · ECS 작업 정의 `vigilantis-platform-api:6` · 디스패치 켬 | `provision_platform_aws.py build`·`deploy` 출력 · 10/13(화) 16:40–16:44 KST |
+| 수집 범위 | 배포 후 첫 스캔이 스모크 VPC만 잡음(`COLLECT_VPC_IDS` — 플랫폼 VPC 미혼입) | §7 10/12 14:41 |
+| 사용자 도메인 응답 | `https://vigilantis.dev/` → 200 · `https://vigilantis.dev/api/v1/assets` → 200, `collection_status: READY` · `last_collected_at` `2026-10-14T00:03:38Z` · 스모크 자산(`vigilantis-smoke-web-1` 등) 반환 | 허용 IP에서 `curl` · 10/14(수) 09:0x KST |
+| 브라우저 화면 — 대시보드가 실 `core-api` 데이터로 렌더 | ______ (캡처 · 확인 시각) | 허용 IP 브라우저 |
+| 실 동작 경로 | 배포된 플랫폼에서 A6 재실측(사람 승인)과 P2-1 3회(B5 자동 발동)가 `SUCCESS` | §4 A6 · §8 P2-1 · §8-2 |
+| 알려진 제약 | 로그인 없음 — WAF 허용 IP 안의 누구나 승인 가능(ADR-0010 Consequences · Post-MVP #438 ④) | — |
