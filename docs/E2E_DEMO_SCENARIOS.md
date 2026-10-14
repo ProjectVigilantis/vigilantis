@@ -440,7 +440,7 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 
 ### T3 · SecOps(P2) — 선제 차단 격리와 원클릭 해제
 
-**한 줄**: High로 판정된 위협에 승인을 기다리지 않고 0.5초 선차단으로 대상을 격리하고, 관제자가 확인한 뒤 한 번 승인으로 백업 기준으로 되돌린다.
+**한 줄**: High로 판정된 위협에 **승인을 기다리지 않고 즉시** 선차단으로 대상을 격리하고, 관제자가 확인한 뒤 한 번 승인으로 백업 기준으로 되돌린다.
 
 **대상**: ALB Target Group에 등록된 EC2 1대 + 규칙 0개인 격리 SG. 스모크 환경에서는 `vigilantis-smoke-web-1`(TG `vigilantis-smoke-tg` 등록)과 `vigilantis-smoke-isolation`이다. 격리 뒤에도 서비스를 잇는 두 번째 대상으로 `web-2`가 있다.
 
