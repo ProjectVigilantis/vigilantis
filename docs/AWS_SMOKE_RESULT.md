@@ -61,8 +61,8 @@ Rule Engine은 경과 시간이 아니라 **실제 CPU 관측치 수(`cpu_datapo
 | 실제 `METRIC_PERIOD_SECONDS` / `METRIC_LOOKBACK_DAYS` | 3600 / 14 |
 | 관측치 확보 예상 시각(확정 시각 아님) | 예상: 10/14(수) 11:19 KST 무렵 · 산정 근거: 기동 + 48 × 3600초(`status` 출력과 같음) |
 | 대상별 실제 CPU 관측치 수 · 스캔 시각 | `web-1`·`web-2`·`idle-dev` · 각 3개 · 10/12(월) 13:24 KST |
-| 최초 실제 판정 · 대상 · 시각 | 판정 ______ · 대상 ______ · 시각 ______ |
-| 일정 내 검증 가능 여부와 제약 | ______ |
+| 최초 실제 판정 · 대상 · 시각 | 판정 `SKIP_PROD_PROTECTED`(`web-1`·`web-2`) · `COST_CANDIDATE`(`idle-dev`) · 회차 10/14(수) 10:58:39 KST(`last_collected_at` `01:58:39Z` — 배포된 플랫폼). 직전 회차 10:53:38은 세 대 모두 `SKIP_INSUFFICIENT_DATA` |
+| 일정 내 검증 가능 여부와 제약 | **가능 — 예상(11:19)보다 21분 이르다.** 앱은 `get_metric_data`를 "지금−14일" 시작으로 부르므로 1시간 칸 경계가 조회 시각의 분에 맞춰진다 — 48번째 칸이 언제 차는지는 조회 시각에 따라 수십 분 흔들린다(10:20 KST 같은 방식 조회는 47개 · `StatusCode` `Complete`) |
 
 > 관측치가 부족하면 부족 수와 다음 확인 예정 시각을 §7에 적는다. 주차 이월은 자동으로 확정하지 않고 PM의 판단과 근거 링크를 §6에 기록한다.
 
@@ -125,7 +125,7 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 | --- | --- | --- | --- |
 | `COST_CANDIDATE` | 0 | — | CPU 관측치 48개 이상 확보 후 태그·사용률 조건도 대조 |
 | `SKIP_INSUFFICIENT_DATA` | 3 | `web-1`·`web-2`·`idle-dev` | 각 관측치 3개(48개 미만) — CPU 관측치 없음 또는 48개 미만인지 대조 |
-| `SKIP_PROD_PROTECTED` | 0 | `web-1`·`web-2` | **A9** — 관측치 게이트가 prod 검사보다 앞이라 아직 보이지 않는다. 10/14(수) 11:19 KST 뒤 재확인 |
+| `SKIP_PROD_PROTECTED` | 0 | `web-1`·`web-2` | **A9** — 관측치 게이트가 prod 검사보다 앞이라 이 회차(10/12)에는 보이지 않는다. **10/14(수) 10:58:39 KST 회차에서 `web-1`·`web-2` 둘 다 `SKIP_PROD_PROTECTED`, `idle-dev`는 `COST_CANDIDATE`로 확인**(배포 플랫폼 `GET /api/v1/assets` — §1 최초 실제 판정). 이 표의 건수는 10/12 A3 회차 그대로 둔다 |
 | `SKIP_WHITELISTED` | 3 | `vigilantis-smoke-isolation` + 이름이 `default` 인 SG 전부 | **경로가 둘이다** — 이름 `default`(삭제·변경 불가)와 `vigilantis:role=isolation` 태그(#359). `default` SG가 이 칸에 함께 뜨는 것이 정상이다 |
 | `UNUSED` | 2 | `vigilantis-smoke-unused`(SG) · `vol-0c4297aea92109f3b`(EBS) | 인시던트 2건 생성 — AI 분석은 끈 회차라 분석 대기로 남음 |
 | `THREAT` | 1 | `vigilantis-smoke-open-ssh` | |
@@ -180,9 +180,9 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 | # | 시나리오 | 결과 | 시각 | 비고 |
 | --- | --- | --- | --- | --- |
 | A6 | `NACL_ADD_DENY` → `NACL_RESTORE` | **둘 다 `SUCCESS`** (재실측 — 배포된 플랫폼 · 사람 승인 `USER_APPROVAL`). **AWS 저장값**: 차단 직후 `describe_network_acls`가 규칙 100(인바운드 deny · `203.0.113.10/32`)을 **`Protocol: "6"`**(번호 문자열) · **`PortRange: {From: 0, To: 65535}`**로 돌려줬다. 백업 레코드(`RECORD_NACL_RULE_INDEX` — `NACL_RESTORE`가 지울 규칙이 우리가 넣은 것인지 대조하는 기록)의 `protocol`도 `"6"`이라 **저장값과 백업이 일치**했고, 해제가 그 대조를 통과해 `SUCCESS`로 끝났다. 해제 직후 조회에서 규칙 100이 사라져 기준선(차단 전 조회)과 같아졌다 | 차단 10/13(화) 10:43:04 승인 → 10:43:08 완료 · 해제 10:43:29 승인 → 10:43:37 완료 KST (1차 10/12(월) 15:04 · 15:06 — 원본 미보존) | **이월 6행**: 실 AWS는 번호로 저장하고, 코드가 번호로 바꿔 보내므로(`NACL_PROTOCOL_NUMBERS`) 백업 대조가 실 AWS에서도 맞는다 — 해소 근거. **이월 7행**: 전체 범위 `0-65535`를 실은 TCP 요청이 거절 없이 들어가 그대로 저장됐다 — 해소 근거(포트 범위 없는 요청의 실 AWS 거절은 재현하지 않았다 — 문서 근거만). **CloudTrail**: 두 호출 모두 주체 `assumed-role/vigilantis-access/vigilantis-platform`, 요청 ID가 실행 단계 기록의 `aws_request_id`와 일치. 원본은 PR #439 본문 `## 원본 출력` ⑥. §5 처분 칸 기입은 집계 담당(판정 기준 ⓓ)이 한다 |
-| A7 | `RIGHTSIZING`(`idle-dev`) → `REVERT_SIZE` | | | §1의 관측치 수·실제 판정과 실행 전제 확인 |
-| A8 | Status Check 2/2 실 대기 → `stopped` 주입 → `FAILED` → 자동 원복 | | | 실 대기와 stopped 실패 분기의 결과. impaired 경로 해소 근거로 쓰지 않음 |
-| A8-impaired | Status Check `impaired` 검사 결과 경로 | | | **이월 2행** — 미검증이면 미해소와 사유 기록; stopped 결과로 대체하지 않음 |
+| A7 | `RIGHTSIZING`(`idle-dev`) → `REVERT_SIZE` | **둘 다 `SUCCESS`** — 인시던트 `4a9fb9ae-776c-40c4-abdc-edb2ebc68951`(AI 추천 `RIGHTSIZING` t3.medium→t3.small 1건 · 절감 추정 월 $17.08). 다운사이징 실행 `cc81419c-6f42-4ba9-a6b8-2cc208f5db5e`: 정지 → t3.small → 기동 → Status Check 2/2 대기 뒤 `SUCCESS`. 원복 실행 `0036cc93-d933-4d45-bf9a-e58ad6366873`(사람 승인): t3.medium 복귀 · `SUCCESS`, 원래 실행은 `ROLLED_BACK`. AWS 조회로 타입·`running` 확인, Status Check 2/2 `ok` | 승인 10:59:58 · 다운사이징 `SUCCESS` 11:03:08 · 원복 승인 11:03:21 · 원복 `SUCCESS` 11:03:50 · 2/2 `ok` 11:06:20 · 종료 11:06:21(`JUSTIFIED`) | **원복 `SUCCESS`가 Status Check 2/2 `ok`보다 2분 30초 앞섰다** — 원복 성공 시점의 검사 상태는 `initializing`이었다(§7 10/14 11:03). #434 1-1(원복 뒤 상태와 성공 기록) 대조 항목 |
+| A8 | Status Check 2/2 실 대기 → `stopped` 주입 → `FAILED` → 자동 원복 | **자동 원복 `SUCCESS`** — 인시던트 `3e68eefb-48f8-4f29-86ae-da4447875c27`. 다운사이징 실행 `0759c5a1-f121-4951-a576-018b382d6211`이 기동한 직후(t3.small · `pending`) 관리자 키로 `stop-instances` 주입 → 판정 대기 끝에 `ROLLBACK_INITIATED` → 원복 `d387e871-b14c-4a17-b019-d82b9d2c51e2`가 **사람 승인 없이** 생겨 `SUCCESS`(공개 API에 `trigger_source`가 없어 `AUTO_ON_FAILURE`는 승인 호출이 없었다는 사실로 판단), 원래 실행 `ROLLED_BACK`. AWS 조회로 t3.medium·`running` 복귀 확인 | 승인 11:24:38 · 주입 11:25:11.792 · `ROLLBACK_INITIATED` 11:28:14 무렵 · 원복 `SUCCESS` 11:28:19 · 종료(`JUSTIFIED`) | 주입부터 실패 확정까지 약 3분 — #434 1-3(3분 대기 제한)과 대조할 값. 첫 시도는 주입 실패로 무효(§7 10/14 11:10). impaired 경로 해소 근거로 쓰지 않음 |
+| A8-impaired | Status Check `impaired` 검사 결과 경로 | **미실행 — 미해소.** 실 AWS에서 `impaired`를 안전하게 일으킬 수단이 없다 — Status Check 실패는 AWS 하드웨어·OS 상태에서 나오며, 사용자가 주입하는 공식 경로(FIS 등)는 스모크 정책·예산 밖이고 커널 손상 같은 OS 내부 유발은 인스턴스를 되살릴 보장이 없다 | 10/14(수) 판단 | **이월 2행** — `stopped` 결과(A8)로 대체하지 않는다. 판정 코드의 `impaired` 분기는 스텁 단위 테스트(`apps/core-api/services/tests/test_status_check.py`의 `test_impaired_check_is_a_failure` — `impaired`를 실패로 판정하는지)로만 덮인다. 이월처: Post-MVP — 장애 주입 도구(FIS) 도입 시 재검토 |
 | A10 | P1 3종(`SG_DELETE_ISOLATED`·`SG_RECREATE`·`EBS_DELETE_UNATTACHED`) | | | 선택 |
 
 ---
@@ -237,6 +237,9 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 | 10/13 17:11 | P2-1 두 번째 주입 — 선차단이 발동했지만 **가드레일 ④가 `PRECHECK_UNAUTHORIZED`로 거절**(인시던트 `5db1c4ea-71cd-4052-bf9c-3a675cdeb06e`, `EC2_ISOLATE` 실행 `FAILED`) | **주입 방법의 문제이며 제품 결함이 아니다.** CloudTrail상 거절된 `DescribeInstances`의 주체가 `vigilantis-access`가 아니라 태스크 역할 `vigilantis-platform` 자체였다 — 접근 역할 프로필은 `serve.py`가 기동 때 쓰는데 일회성 태스크는 그 진입점을 거치지 않는다. 이후 주입 코드 첫머리에서 `serve.write_access_profile`을 호출했다. 거절된 시도가 `IN_PROGRESS`로 남지 않고 `FAILED`로 확정된 것은 B5 계약대로다. 이 인시던트는 실측 대상이 아니다 |
 | 10/13 17:17 | Medium 첫 주입(대상 `web-2`)이 승인 대기에 들어가지 않고 **제안 없이 `AWAITING_CLOSURE`**(인시던트 `30ae473e-4461-453e-bb16-827060e214c3`) | AI가 낸 `NACL_ADD_DENY`가 가드레일 ④에서 `PRECHECK_INVALID_STATE`로 거절됐다. **`web-2` 서브넷은 VPC 기본 NACL(`acl-0f90545…`)에 묶여 있고 그 NACL은 규칙 100번(전체 허용)을 이미 쓴다** — 차단 규칙이 넣을 번호가 차 있다. 스모크 NACL(`vigilantis-smoke-nacl`)은 `web-1` 서브넷에만 붙어 있다. 응답 기한이 생기지 않아 자동 격리 대상이 아니므로, Medium 검증은 `web-1`로 다시 했다. 가드레일 동작은 정상이며, 스모크 구성상 `web-2` 대상 NACL 차단은 늘 거절된다는 관찰이다 |
 | 10/13 17:14–17:43 | **P2-1 실측 3회 — 전부 격리 확인 성공 · 해제 성공**(§8 · §8-2) | CloudTrail(08:14–08:43Z): 격리마다 `ModifyNetworkInterfaceAttribute` DryRun(`Client.DryRunOperation`) → `DeregisterTargets` → `ModifyNetworkInterfaceAttribute`(격리 SG), 해제마다 DryRun → `ModifyNetworkInterfaceAttribute`(원래 SG 2개) → `RegisterTargets`. **전 호출 주체 `assumed-role/vigilantis-access/vigilantis-platform`** · 오류 없음 |
+| 10/14 11:03 | **A7 원복이 Status Check 2/2 `ok` 전에 `SUCCESS`로 끝났다** — `REVERT_SIZE` `SUCCESS` 11:03:50 시점에 `describe-instance-status`는 `initializing`/`initializing`, 2/2 `ok`는 11:06:20 | 다운사이징(`RIGHTSIZING`)은 2/2 대기 뒤 `SUCCESS`였다(약 2분 30초). 원복 쪽이 같은 대기를 거치는지는 이 관측으로 가리지 않는다 — #434 1-1에 대조 사실로 넘긴다. 이번 회차는 이후 2/2 `ok`까지 확인해 실제 자산은 정상 |
+| 10/14 11:10 | **A8 첫 시도 무효 — 정지 주입이 안 들어갔다**(인시던트 `076c2a2c-115b-4bbc-af9b-586795aa58e4`) | 주입기(`40-a8-stop-injector.ps1` — 저장소 밖 개인 도구)가 PowerShell 5.1에서 BOM 없는 UTF-8을 못 읽어 파싱 실패 → bash로 옮긴 주입기는 Windows용 aws CLI 출력 끝의 `\r` 때문에 `running` 비교가 늘 거짓이었다. 실행은 정상 다운사이징 `SUCCESS`로 끝나 사람 승인으로 원복·종료했다. `\r`을 지운 주입기로 다음 회차(A8 본 회차)에 성공 |
+| 10/14 11:30 | **P2-2 후보가 서지 않는다** — 10:58 · 11:08 · 11:23 회차의 `idle-dev` 인시던트 3건 모두 AI 추천이 `RIGHTSIZING` 1건뿐이었다(메뉴에는 `ENABLE_AUTOSCALING`도 오른다 — t3.medium은 다운사이징 목표가 있다) | 저사용 EC2에 AI가 다운사이징을 고르는 것은 의도대로다. P2-2를 앱 경로로 시작할 후보 생성 방법이 필요하다 — §8 P2-2 |
 
 ---
 
@@ -351,6 +354,6 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 | 배포 코드 버전 | 이미지 `mvp-004ed0a`(= `origin/dev` `004ed0a` — B4 #466 · B5 #469 포함) · ECS 작업 정의 `vigilantis-platform-api:6` · 디스패치 켬 | `provision_platform_aws.py build`·`deploy` 출력 · 10/13(화) 16:40–16:44 KST |
 | 수집 범위 | 배포 후 첫 스캔이 스모크 VPC만 잡음(`COLLECT_VPC_IDS` — 플랫폼 VPC 미혼입) | §7 10/12 14:41 |
 | 사용자 도메인 응답 | `https://vigilantis.dev/` → 200 · `https://vigilantis.dev/api/v1/assets` → 200, `collection_status: READY` · `last_collected_at` `2026-10-14T00:03:38Z` · 스모크 자산(`vigilantis-smoke-web-1` 등) 반환 | 허용 IP에서 `curl` · 10/14(수) 09:0x KST |
-| 브라우저 화면 — 대시보드가 실 `core-api` 데이터로 렌더 | ______ (캡처 · 확인 시각) | 허용 IP 브라우저 |
+| 브라우저 화면 — 대시보드가 실 `core-api` 데이터로 렌더 | **렌더됨** — `https://vigilantis.dev/` 대시보드: 마지막 수집 10/14 09:18:38 KST · 자산 16건(EC2 3 · SG 6 · EBS 4 · 판정 비대상 3) · 인시던트 9건 · 상단 상태 `수집 정상` · `실시간 연결됨`(WebSocket) · AI 조치 제안 2건(스모크 `UNUSED` SG·EBS). 수치가 위 `api/v1/assets` 응답과 같은 스모크 자산이다 | 허용 IP Chrome · 10/14(수) 09:23 KST(화면 `마지막 갱신 09:23:37`) · 캡처는 PM 로컬 보관 |
 | 실 동작 경로 | 배포된 플랫폼에서 A6 재실측(사람 승인)과 P2-1 3회(B5 자동 발동)가 `SUCCESS` | §4 A6 · §8 P2-1 · §8-2 |
 | 알려진 제약 | 로그인 없음 — WAF 허용 IP 안의 누구나 승인 가능(ADR-0010 Consequences · Post-MVP #438 ④) | — |
