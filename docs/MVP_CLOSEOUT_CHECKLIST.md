@@ -111,18 +111,24 @@
 
 ### 3-1. 런북 10종 (SSOT §Action Whitelist 확정본)
 
+**실 AWS 열 현황(2026-10-14 13:00 KST · PR #439 `be1c303` 기준): 6종 ☑ · 4종 ☐.** 미실측 넷 중 **셋은 선택 항목**(P1 3종 · A10 — 미실행이 미달은 아니다)이고, **판정에 걸린 것은 `EC2_ENABLE_AUTOSCALING` 하나**다(10/14 오후 예정).
+
+**☑ 의 뜻**: 그 런북이 실 AWS 에서 한 번 이상 `SUCCESS` 로 끝났고 **그 사실이 `AWS_SMOKE_RESULT.md` 의 어느 칸에 적혀 있다**는 것이다. **서비스 가능을 뜻하지 않는다** — 런북마다 `SUCCESS` 가 어디까지 확인한 것인지가 다르므로 근거 칸에 그 경계를 적는다. 이 표는 결과를 복제하지 않고 **어디서 확인했는가**를 가린다(§3 머리말).
+
+> **§1 A군 표의 「충족」 칸은 그대로 ☐ 로 둔다.** 이 열은 「실 AWS 에서 돌았는가」라는 **사실**이고, §1 의 충족은 **판정**이다. 두 칸이 다른 것을 묻는다 — A1–A5 가 10/12 에 끝났는데도 §1 이 비어 있는 것과 같은 이유다. 판정 기록은 10/15(목) PM 몫이다.
+
 | Runbook ID | 실행 함수 | LocalStack 확인 | 실 AWS 확인 | 근거 |
 | --- | --- | --- | --- | --- |
-| `RUNBOOK_EC2_RIGHTSIZING` | 있음 | ☐ | ☐ | §4 A7 |
-| `RUNBOOK_EC2_REVERT_SIZE` | 있음 | ☐ | ☐ | §4 A7 · A8 |
-| `RUNBOOK_NACL_ADD_DENY` | 있음 | ☐ | ☐ | §4 A6 |
-| `RUNBOOK_NACL_RESTORE` | 있음 | ☐ | ☐ | §4 A6 |
-| `RUNBOOK_SG_DELETE_ISOLATED` | 있음 | ☐ | ☐ | §4 A10 (선택) |
-| `RUNBOOK_SG_RECREATE` | 있음 | ☐ | ☐ | §4 A10 (선택) |
-| `RUNBOOK_EBS_DELETE_UNATTACHED` | 있음 | ☐ | ☐ | §4 A10 (선택) |
-| `RUNBOOK_EC2_ISOLATE` | **있음**(#452) | 불가 — `elbv2` 없음 | ☐ | §8 P2-1 |
-| `RUNBOOK_EC2_UNISOLATE` | **있음**(#452) | 불가 — `elbv2` 없음 | ☐ | §8 P2-1 |
-| `RUNBOOK_EC2_ENABLE_AUTOSCALING` | **있음**(#459·#466) | 불가 — `autoscaling` 없음 | ☐ | §8 P2-2 |
+| `RUNBOOK_EC2_RIGHTSIZING` | 있음 | ☐ | **☑** | §4 A7 — `SUCCESS`. **Status Check 2/2 대기 뒤** 성공으로 끝난다 |
+| `RUNBOOK_EC2_REVERT_SIZE` | 있음 | ☐ | **☑ 2경로** | §4 A7(사람 승인 원복) · §4 A8(`AUTO_ON_FAILURE` 자동 원복). **☑ 는 타입 복귀·`running` 까지다** — `SUCCESS` 가 2/2 `ok` 를 기다리지 않는다(§7 10/14 11:03 · 다운사이징과 **비대칭**). 서비스 복귀 확인이 아니다(#434 1-1) |
+| `RUNBOOK_NACL_ADD_DENY` | 있음 | ☐ | **☑** | §4 A6 — `SUCCESS`. **AWS 저장값까지 조회로 확인**(규칙 100 의 `Protocol`·`PortRange`) |
+| `RUNBOOK_NACL_RESTORE` | 있음 | ☐ | **☑** | §4 A6 — `SUCCESS`. 백업 fingerprint 대조를 통과하고 **기준선(차단 전 조회)으로 돌아갔다** |
+| `RUNBOOK_SG_DELETE_ISOLATED` | 있음 | ☐ | ☐ **미실측(선택)** | §4 A10 빈칸 — 실동작 없음. §3 A4-5 는 `precheck()` 통과까지다 |
+| `RUNBOOK_SG_RECREATE` | 있음 | ☐ | ☐ **미실측(선택)** | §4 A10 빈칸. §3 A4-6 은 직접 DryRun 까지다 |
+| `RUNBOOK_EBS_DELETE_UNATTACHED` | 있음 | ☐ | ☐ **미실측(선택)** | §4 A10 빈칸. §3 A4-7 은 `precheck()` 통과까지다 |
+| `RUNBOOK_EC2_ISOLATE` | **있음**(#452) | 불가 — `elbv2` 없음 | **☑ 3회** | §8 P2-1. **발동이 사람 승인이 아니라 B5 자동 경로**다(선차단 · 1분 자동 격리) — 승인 메뉴 경로는 실 AWS 에서 안 돌았다 |
+| `RUNBOOK_EC2_UNISOLATE` | **있음**(#452) | 불가 — `elbv2` 없음 | **☑ 3회** | §8 P2-1. 격리 3회에 해제가 짝으로 돌아 **TG 재등록 경로가 실제로 섰다**(E2E 대본 §반복 조건 ①) |
+| `RUNBOOK_EC2_ENABLE_AUTOSCALING` | **있음**(#459·#466) | 불가 — `autoscaling` 없음 | ☐ **10/14(수) 오후 예정** | §8 P2-2 빈칸. **실측과 정리가 한 묶음**이다 — 오늘 구성에서는 `service cleanup` 이 아니라 관리자 CLI 로 넷(ASG·LT·AMI·스냅숏)을 직접 지운다(E2E 대본 §서비스 연결·트래픽 전환) |
 
 ### 3-2. 그 밖의 확정 범위 항목
 
