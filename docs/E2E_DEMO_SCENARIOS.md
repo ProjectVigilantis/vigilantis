@@ -478,7 +478,7 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 
 > **이 표면을 쓸 수 있는 조건이 하나 있다 — 10/14(수) 스모크 구성에서는 못 쓴다.**
 > `schema` 를 뺀 모든 `service` 명령은 **DB 세션을 요구한다**(없으면 `db_required` 로 거절). 그 세션은 CLI 가 도는 자리의 **로컬 `.env` `DATABASE_URL`** 에서 온다(`_open_db_session` → `db.session.get_engine` → `get_settings().DATABASE_URL`). 그래서 **CLI 의 `DATABASE_URL` 이 #446 실행 레코드를 가진 DB 를 가리킬 때만** 이 표면이 돈다.
-> 10/14(수) 구성은 그렇지 않다 — 앱은 ECS 에서 **플랫폼 RDS** 를 쓰고 CLI 는 로컬 DB 를 읽으므로, **실행 기록을 찾지 못한다**(2026-10-14 11:46 PM 보고). 따라서 그날의 **정리와 전환은 관리자 CLI(`aws`)로 직접** 한다. 아래 표는 **명령의 계약**이고, 이 조건이 서는 환경(앱과 CLI 가 같은 DB)에서의 절차다.
+> 10/14(수) 구성은 그렇지 않다 — 앱은 ECS 에서 **플랫폼 RDS** 를 쓰고 CLI 는 로컬 DB 를 읽으므로, **실행 기록을 찾지 못한다**. 따라서 그날의 **정리와 전환은 관리자 CLI(`aws`)로 직접** 한다. 아래 표는 **명령의 계약**이고, 이 조건이 서는 환경(앱과 CLI 가 같은 DB)에서의 절차다.
 
 **T4-3 의 런북은 AMI·LT·ASG·정책만 만든다.** ASG 를 실제로 서비스에 꽂고 트래픽을 넘기고 되돌리는 일은 **관리자 운영 CLI** 가 한다 — `provision_smoke_aws.py service --operation <명령>`, 백엔드는 `apps/core-api/service_transitions.py` 의 단일 진입점 `run_service_command` 다. 대본이 이 표면을 모르면 T4 를 「ASG 가 생겼다」에서 끝내게 된다.
 
@@ -523,12 +523,12 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 | 백업 `SAVE_CURRENT_SG_AND_TG_MAPPING` 캡처 | **있음**(#452) — `services/aws/backup.py` 머리말이 「백업 4종의 캡처가 전부 이 파일에 있다 — **남은 작업 없음**」으로 바뀌었다 | — |
 | `execute_ec2_isolate` · `execute_ec2_unisolate` | **있음**(#452) — `executor.py` 의 `[남은 작업]` 목록은 10종이 다 서면서 **파일에서 사라졌다** | — |
 | `execute_ec2_enable_autoscaling` | **있음**(#459·#466) — AMI → 시작 템플릿 → ASG → CPU 정책 4단계다(T4-3) | — |
-| `PRE_MITIGATION_0_5S` · `TIMEOUT_ISOLATION_1M` 발동 경로 | **있음**(#469) — `security/soar.py` 의 `prepare_isolation`·`reserve_auto_isolation` 과 `AGENT_WAIT_POLL_SECONDS` 1초 주기 만료 감시 | — |
+| `PRE_MITIGATION_0_5S` · `TIMEOUT_ISOLATION_1M` 발동 경로 | **있음**(#469) — `security/soar.py` 가 `prepare_isolation`(High 선차단)을 두고 `workflows.reserve_auto_isolation`(Medium 1분 만료 예약 — 정의는 `workflows.py`)을 부르며, `AGENT_WAIT_POLL_SECONDS` 1초 주기 만료 감시 잡을 등록한다 | — |
 | Medium `실행 예정 시간` 서버 응답 필드 | **아직 없음**(B6 · #448 OPEN) | T3 자동 격리 분기의 **화면만** — 분기 자체는 돈다 |
 
 > **남은 하나가 막는 범위는 화면이다.** B6 가 없어도 자동 격리 분기는 발동하고 실행까지 간다 — 관제자에게 **실행 예정 시간을 숫자로 보여 주는 칸**이 비는 것이다. 그래서 이 행은 T3 분기의 **검증 불가**가 아니라 **화면 확인 항목 보류**로 읽는다.
 
-`precheck()`는 **10종 전부 구현돼 있다**(`RUNBOOK_SPECS`). 다만 구현 존재와 환경 검증 완료는 다르다. **필요한 EC2·ELBv2·Auto Scaling 응답을 가짜로 구성하면 precheck의 분기·실패 처리를 먼저 테스트할 수 있다.** LocalStack Community에서는 `elbv2`·`autoscaling` 조회가 막혀 P2 precheck 전체 통과를 확인할 수 없다. 실제 AWS 권한·조회 응답·통과 조건은 실 AWS에서 확인하고 `docs/AWS_SMOKE_RESULT.md` §8-1에 기록한다. 실행·백업·발동 경로를 잇는 흐름은 별도의 선행 구현이 필요하다.
+`precheck()`는 **10종 전부 구현돼 있다**(`RUNBOOK_SPECS`). 다만 구현 존재와 환경 검증 완료는 다르다. **필요한 EC2·ELBv2·Auto Scaling 응답을 가짜로 구성하면 precheck의 분기·실패 처리를 먼저 테스트할 수 있다.** LocalStack Community에서는 `elbv2`·`autoscaling` 조회가 막혀 P2 precheck 전체 통과를 확인할 수 없다. 실제 AWS 권한·조회 응답·통과 조건은 실 AWS에서 확인하고 `docs/AWS_SMOKE_RESULT.md` §8-1에 기록한다. **실행·백업·발동 경로는 B1–B5 머지로 전부 섰다**(위 표) — 남은 것은 구현이 아니라 **흐름 테스트용 `elbv2`·`autoscaling` 가짜**다.
 
 ### 반복 검증의 사전 조건 — 한 번의 복구 실패가 이후 검증을 막는다
 
@@ -698,8 +698,8 @@ Launch Template 도 함께 본다. 이름은 `executor._launch_template_name` �
 | --- | --- | --- |
 | 가드레일 ④ **DryRun 부분**(ENI · LT) | ⚠️ 필요한 EC2 응답을 가짜로 구성하면 분기 테스트 가능 | 현재 `FakeEc2`가 P2의 인스턴스·ENI·SG 조회 응답까지 제공하는지 추가 대조 필요. LocalStack의 DryRun 부분 관측은 precheck 전체 통과가 아니다 |
 | 가드레일 ④ **조회 부분**(`describe_target_health` · `describe_target_groups` · `describe_auto_scaling_groups`) | ⚠️ **가짜를 만들면 가능** | 아래 ①. 실환경은 LocalStack Community에 두 서비스가 없다 |
-| 실행·원복(T3-5·T3-7·T4-3) | 입력·기대값 설계 가능 / **관통 검증 가능해졌다** | **실행 함수와 백업 캡처가 섰다**(B1–B5 머지 · §선행 조건). 로컬 관통은 여전히 불가다 — `elbv2`·`autoscaling` 이 LocalStack Community 에 없다 |
-| 선제 차단·자동 격리 발동(T3-2·분기) | 입력·기대값 설계 가능 / **관통 검증 가능해졌다** | **발동 경로가 섰다**(B5 · #469 2026-10-13 머지 — `soar.py` 의 `prepare_isolation` 과 `workflows.reserve_auto_isolation` · 1초 주기 만료 감시). 실 AWS 에서 **High 선차단 2회 · Medium 1분 자동 격리 1회**가 돌았다(§8 P2-1). **화면 확인만 B6(#448) 대기**다 |
+| 실행·원복(T3-5·T3-7·T4-3) | 입력·기대값 설계 가능 / **실 AWS 관통 가능** · 흐름 테스트(②)는 ①의 가짜가 먼저다 | **실행 함수와 백업 캡처가 섰다**(B1–B5 머지 · §선행 조건). **로컬 관통은 여전히 불가** — `elbv2`·`autoscaling` 이 LocalStack Community 에 없다 |
+| 선제 차단·자동 격리 발동(T3-2·분기) | 입력·기대값 설계 가능 / **실 AWS 관통 가능**(10/13 실측) · 흐름 테스트(②)는 ①의 가짜가 먼저다 | **발동 경로가 섰다**(B5 · #469 2026-10-13 머지 — `soar.py` 의 `prepare_isolation` 과 `workflows.reserve_auto_isolation` · 1초 주기 만료 감시). 실 AWS 에서 **High 선차단 2회 · Medium 1분 자동 격리 1회**가 돌았다(§8 P2-1). **화면 확인만 B6(#448) 대기**다 |
 
 **① 가짜 AWS가 `ec2` 하나만 모델링한다 — 2026-10-07 수정.** `apps/core-api/tests/test_e2e_flow.py`의 `aws` 픽스처는 `aws_client`를 가로채 `FakeEc2`를 돌려주는데, **`service` 인자를 무시했다.** P2의 precheck는 `elbv2`를 부르므로(`executor._precheck_isolate`의 `describe_target_health`) 그대로 두면 그 호출이 EC2 가짜에 닿아 **테스트가 틀린 채 통과하거나 엉뚱한 곳에서 터진다.** 모델이 없는 서비스에는 `NotImplementedError`를 던지도록 고쳤다 — T3·T4 테스트를 쓰려면 **`elbv2`·`autoscaling` 가짜를 먼저 만들어야** 하고, 그 사실이 실패 메시지로 드러난다. 기존 T1·T2 2건은 `ec2`만 쓰므로 영향이 없다(통과 확인).
 
