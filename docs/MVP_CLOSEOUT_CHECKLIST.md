@@ -120,7 +120,7 @@
 | Runbook ID | 실행 함수 | LocalStack 확인 | 실 AWS 확인 | 근거 |
 | --- | --- | --- | --- | --- |
 | `RUNBOOK_EC2_RIGHTSIZING` | 있음 | ☐ | **☑** | §4 A7 — `SUCCESS`. **Status Check 2/2 대기 뒤** 성공으로 끝난다 |
-| `RUNBOOK_EC2_REVERT_SIZE` | 있음 | ☐ | **☑ 2경로** | §4 A7(사람 승인 원복) · §4 A8(`AUTO_ON_FAILURE` 자동 원복). **☑ 는 타입 복귀·`running` 까지다** — `SUCCESS` 가 2/2 `ok` 를 기다리지 않는다(§7 10/14 11:03 · 다운사이징과 **비대칭**). 서비스 복귀 확인이 아니다(#434 1-1) |
+| `RUNBOOK_EC2_REVERT_SIZE` | 있음 | ☐ | **☑ 2경로** | §4 A7(사람 승인 원복) · §4 A8(**승인 호출 없이** 생긴 자동 원복 — 다만 **`AUTO_ON_FAILURE` 는 관측값이 아니다**. 공개 API 에 `trigger_source` 가 없어 §4 A8 이 「승인 호출이 없었다」는 사실로 **판단**한 것이라고 적는다). **☑ 는 타입 복귀·`running` 까지다** — `SUCCESS` 가 2/2 `ok` 를 기다리지 않는다(§7 10/14 11:03 · 다운사이징과 **비대칭**). 서비스 복귀 확인이 아니다(#434 1-1) |
 | `RUNBOOK_NACL_ADD_DENY` | 있음 | ☐ | **☑** | §4 A6 — `SUCCESS`. **AWS 저장값까지 조회로 확인**(규칙 100 의 `Protocol`·`PortRange`) |
 | `RUNBOOK_NACL_RESTORE` | 있음 | ☐ | **☑** | §4 A6 — `SUCCESS`. 백업 fingerprint 대조를 통과하고 **기준선(차단 전 조회)으로 돌아갔다** |
 | `RUNBOOK_SG_DELETE_ISOLATED` | 있음 | ☐ | ☐ **미실측(선택)** | §4 A10 빈칸 — 실동작 없음. §3 A4-5 는 `precheck()` 통과까지다 |
