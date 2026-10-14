@@ -56,9 +56,9 @@
 
 | 항목 | 기록 |
 | --- | --- |
-| 해소 / 미해소 | 해소 **5** 행 / 미해소 **2** 행 / **부분 1** 행 (8행 중) — 부분은 4행(조회·격리·해제 실행은 해소 · **자동 확장 실행만 남음**) |
+| 해소 / 미해소 | 해소 **6** 행 / 미해소 **2** 행 (8행 중) — 4행이 2026-10-14 P2-2 실측으로 **해소**됐다(조회 · 격리·해제 실행 · 자동 확장 실행 모두 실 AWS `SUCCESS`). 서비스 연결·트래픽 전환(#466 운영 표면)은 4행의 범위 밖이다 |
 | 미해소 행 번호와 사유 | **2행** — 실 AWS 에서 `impaired` 를 안전하게 일으킬 수단이 없어 미실행(`stopped` 결과로 대체하지 않는다). 이월처 Post-MVP(장애 주입 도구 도입 시). **8행** — **가정 반증**: `modify_instance_attribute` DryRun 은 없는 인스턴스도 거르지 않는다(관리자 키 `DryRunOperation`). 이월처 SSOT 리스크 6번 · 코드는 바꾸지 않는다 |
-| 집계 시점 · 근거 | §5 를 읽은 시각 **2026-10-14(수) 13:30 KST** · 근거 PR [#439](https://github.com/ProjectVigilantis/vigilantis/pull/439) `be1c303`(§5 8행 전부 기재됨) |
+| 집계 시점 · 근거 | §5 를 읽은 시각 **2026-10-14(수) 17:20 KST** · 근거 PR [#439](https://github.com/ProjectVigilantis/vigilantis/pull/439) `77ff46e`(§5 8행 전부 기재 · 4행 「해소」 · 이월 4행 최종 처분 「해소」) |
 
 **미해소 0행이 판정 요건인지, 사유 기록으로 충분한지는 PM이 정한다.** 이 문서가 정하지 않는다. → **2026-10-13 주간 SSOT 갱신의 10주차 판정 기준 ⓓ 가 답했다**([`PROJECT_STATUS.md`](PROJECT_STATUS.md) §현재 위치). 기준 문장은 그 자리에만 두므로 여기 옮기지 않는다 — 집계를 적을 때 그 칸을 본다.
 
@@ -91,7 +91,7 @@
 | 항목 | 기록 |
 | --- | --- |
 | P2 선행 코드 실제 머지일(B1–B7) | **실제** — B1–B3 **2026-10-12(월) 머지**([#452](https://github.com/ProjectVigilantis/vigilantis/pull/452) · 후속 [#454](https://github.com/ProjectVigilantis/vigilantis/pull/454)). 계획은 10/13(화) PR 이었고 **하루 앞섰다**. **B4 도 10/13(화) 머지**([#459](https://github.com/ProjectVigilantis/vigilantis/pull/459) · [#466](https://github.com/ProjectVigilantis/vigilantis/pull/466)) — 목표 10/14(수)보다 하루 앞섰다. **B5 도 10/13(화) 머지**([#469](https://github.com/ProjectVigilantis/vigilantis/pull/469) 15:31 KST) — 목표 10/14(수)보다 하루 앞섰다. **그래서 판정 기준 ⓑ 에 코드로 남은 선행은 없다** — 남은 것은 실 AWS 실측뿐이다. **B7 은 팀장이 직접 처리해 2026-10-13(화) 닫혔다**(#449 CLOSED), B6 은 배정 대기다(공개 API·FE 노출 — PR #469 본문이 #448 로 넘긴다) |
-| 그 기준 P2 실측 가능일 | **P2-1(격리→해제)의 선행 코드가 전부 섰다** — 실행 함수는 B1–B3 머지(10/12)로, **발동 주체는 B5 머지(10/13 · #469)로** 들어왔다. `EC2_ISOLATE` 는 여전히 AI 메뉴 밖이고(`ai/capabilities.py` `build_secops_capabilities`) 실행 레코드는 발동 경로만 만드는데, **그 발동 경로가 이제 있다.** 환경 전제: 스모크 `up --yes`(ELB 등록 권한) · #452 코드 재배포 · 재스캔(`resolve_isolation_parameters` 가 읽을 `REGISTERED_IN` 관계와 격리 태그 SG). **P2-2 의 선행 코드는 B4 머지(10/13 화)로 섰다** — `EC2_ENABLE_AUTOSCALING` 은 `EC2_ISOLATE` 와 달리 **AI 제안 메뉴에 오르므로**(본편 7종 · `ai/tests/test_capabilities.py` 가 EC2 자산에 이 런북만 제시되는 것을 고정한다) 별도 발동 경로가 필요하지 않다. 남은 전제는 실 AWS 환경뿐이다. **계획** — 10/14(수)–10/15(목)(실 AWS 실측은 김세혁) / **실제 실측일** — **P2-1 2026-10-13(화) 17:14–17:43 KST 3회**(계획보다 하루 이르다 · PR #439 §7·§8) / **P2-2 ______**(10/14 오후 예정) |
+| 그 기준 P2 실측 가능일 | **P2-1(격리→해제)의 선행 코드가 전부 섰다** — 실행 함수는 B1–B3 머지(10/12)로, **발동 주체는 B5 머지(10/13 · #469)로** 들어왔다. `EC2_ISOLATE` 는 여전히 AI 메뉴 밖이고(`ai/capabilities.py` `build_secops_capabilities`) 실행 레코드는 발동 경로만 만드는데, **그 발동 경로가 이제 있다.** 환경 전제: 스모크 `up --yes`(ELB 등록 권한) · #452 코드 재배포 · 재스캔(`resolve_isolation_parameters` 가 읽을 `REGISTERED_IN` 관계와 격리 태그 SG). **P2-2 의 선행 코드는 B4 머지(10/13 화)로 섰다** — `EC2_ENABLE_AUTOSCALING` 은 `EC2_ISOLATE` 와 달리 **AI 제안 메뉴에 오르므로**(본편 7종 · `ai/tests/test_capabilities.py` 가 EC2 자산에 이 런북만 제시되는 것을 고정한다) 별도 발동 경로가 필요하지 않다. **10/14 실측에서 후보도 앱 경로로 섰다**(아래 실측일). **계획** — 10/14(수)–10/15(목)(실 AWS 실측은 김세혁) / **실제 실측일** — **P2-1 2026-10-13(화) 17:14–17:43 KST 3회**(계획보다 하루 이르다 · PR #439 §7·§8) / **P2-2 2026-10-14(수) 16:45–16:51 KST 1회**(승인 16:45:19 → `SUCCESS` 16:49:10 → 정리·부재 확인 16:51:04 · PR #439 §7·§8). P2-2 후보는 주입이 아니라 **앱 경로**로 섰다 — `idle-dev` 를 t3.small 로 내리자 다운사이징 목표가 없어(`rightsizing_target_type` → 없음) FinOps 메뉴에 `ENABLE_AUTOSCALING` 만 남았다(§7 10/14 16:38) |
 | 10/15(목) 안에 들어왔는가 · 아니면 어디로 갔는가 | ______ |
 
 ### 2-2. 실측
@@ -99,7 +99,7 @@
 | # | 확인할 것 | 근거 칸 | 충족 | 비고 |
 | --- | --- | --- | --- | --- |
 | P2-1 | `EC2_ISOLATE` → `EC2_UNISOLATE` | `AWS_SMOKE_RESULT.md` §8 | ☐ | |
-| P2-2 | `EC2_ENABLE_AUTOSCALING` | §8 | ☐ | 검증 직후 ASG 정리(비용이 예산표 밖) |
+| P2-2 | `EC2_ENABLE_AUTOSCALING` | §8 | ☐ | 검증 직후 ASG 정리(비용이 예산표 밖) — **2026-10-14 16:49–16:51 정리하고 넷의 부재를 AWS 조회로 확인했다**(§7) |
 | P2-3a/b/c | DryRun 부분 + describe 통과 조건 ①②③④ | §8-1 | ☐ | |
 | — | **ADR-0007 §4의 "잠정" 3행이 닫혔는가** | §8-1 확정/수정 열 | ☐ | 닫히지 않으면 그 사실을 판정에 적는다 |
 
@@ -111,7 +111,7 @@
 
 ### 3-1. 런북 10종 (SSOT §Action Whitelist 확정본)
 
-**실 AWS 열 현황(2026-10-14 13:00 KST · PR #439 `be1c303` 기준): 6종 ☑ · 4종 ☐.** 미실측 넷 중 **셋은 선택 항목**(P1 3종 · A10 — 미실행이 미달은 아니다)이고, **판정에 걸린 것은 `EC2_ENABLE_AUTOSCALING` 하나**다(10/14 오후 예정).
+**실 AWS 열 현황(2026-10-14 17:20 KST · PR #439 `77ff46e` 기준): 7종 ☑ · 3종 ☐.** 미실측 셋은 **전부 선택 항목**(P1 3종 · A10 — 미실행이 미달은 아니다)이라, **판정에 걸린 미실측은 없다.** P2 3종이 모두 실 AWS 에서 돌았다.
 
 **☑ 의 뜻**: 그 런북이 실 AWS 에서 한 번 이상 `SUCCESS` 로 끝났고 **그 사실이 `AWS_SMOKE_RESULT.md` 의 어느 칸에 적혀 있다**는 것이다. **서비스 가능을 뜻하지 않는다** — 런북마다 `SUCCESS` 가 어디까지 확인한 것인지가 다르므로 근거 칸에 그 경계를 적는다. 이 표는 결과를 복제하지 않고 **어디서 확인했는가**를 가린다(§3 머리말).
 
@@ -128,7 +128,7 @@
 | `RUNBOOK_EBS_DELETE_UNATTACHED` | 있음 | ☐ | ☐ **미실측(선택)** | §4 A10 빈칸. §3 A4-7 은 `precheck()` 통과까지다 |
 | `RUNBOOK_EC2_ISOLATE` | **있음**(#452) | 불가 — `elbv2` 없음 | **☑ 3회** | §8 P2-1. **발동이 사람 승인이 아니라 B5 자동 경로**다(선차단 · 1분 자동 격리) — **승인 메뉴 경로는 설계상 없다**(`build_secops_capabilities` 가 「`EC2_ISOLATE` 는 메뉴에 내지 않는다」로 못 박는다) |
 | `RUNBOOK_EC2_UNISOLATE` | **있음**(#452) | 불가 — `elbv2` 없음 | **☑ 3회** | §8 P2-1. 격리 3회에 해제가 짝으로 돌아 **TG 재등록 경로가 실제로 섰다**(E2E 대본 §**반복 검증의 사전 조건** ①) |
-| `RUNBOOK_EC2_ENABLE_AUTOSCALING` | **있음**(#459·#466) | 불가 — `autoscaling` 없음 | ☐ **10/14(수) 오후 예정** | §8 P2-2 빈칸. **실측과 정리가 한 묶음**이다 — 오늘 구성에서는 `service cleanup` 이 아니라 관리자 CLI 로 넷(ASG·LT·AMI·스냅숏)을 직접 지운다 — 그 명령이 CLI 쪽 로컬 `DATABASE_URL` 로 DB 세션을 열어 플랫폼 RDS 의 실행 기록을 못 찾는다 |
+| `RUNBOOK_EC2_ENABLE_AUTOSCALING` | **있음**(#459·#466) | 불가 — `autoscaling` 없음 | **☑ 1회** | §8 P2-2 — `SUCCESS`(사람 승인 `USER_APPROVAL`). 네 생성물(AMI · LT · ASG · CPU 목표 추적 정책)을 AWS 조회로 확인했다. **☑ 는 인프라 준비 확인까지다** — 서비스 연결·트래픽 전환(#466 `service` 표면)은 이 구성에서 돌지 않아 **미실행**이고, **ASG 가 상한까지 늘어나는 동작은 관측하지 않았다**(AI 가 `max 1` 을 골랐다). **정리까지 끝났다** — `service cleanup` 이 아니라 관리자 CLI 로 넷을 지우고 AWS 조회로 부재를 확인했다(§7 10/14 16:49 · 그 명령이 CLI 쪽 로컬 `DATABASE_URL` 로 DB 세션을 열어 플랫폼 RDS 의 실행 기록을 못 찾는다) |
 
 ### 3-2. 그 밖의 확정 범위 항목
 
@@ -155,13 +155,13 @@
 
 | 항목 | 상태 | 사유 | 처분(이월 / 범위 밖 / 후속 이슈) |
 | --- | --- | --- | --- |
-| P2 3종 실행 경로의 확인 강도(B7 · #449) | **스텁 단위 테스트만 있다** — 다른 7종의 LocalStack 왕복 겹이 없다 | LocalStack Community에 `elbv2`·`autoscaling`이 없다([ADR-0006](adr/0006-localstack-team-standard-env.md) §4). 스텁은 호출 순서·부분 성공 분기·백업 → 가드레일 ④ 왕복·예외 미전파까지만 고정하고, AWS 응답 모양·IAM 태그 조건·연결 추적 동작은 보지 못한다. `EC2_ENABLE_AUTOSCALING` 도 #459 머지로 **스텁이 생겼다**(`apps/core-api/services/tests/test_execute_ec2_autoscaling.py` · `apps/core-api/tests/test_ec2_autoscaling_workflow.py` · `apps/core-api/tests/test_dispatcher_lane_integration.py` — 셋 다 커밋 `3951963`) — 3종 모두 스텁까지는 섰고, 그 위가 비어 있다는 사실은 그대로다 | 머지 기준 = **스텁 통과 + 10주차(10/12–10/15) 실 AWS 실측**. 초록만으로 "검증됨"으로 세지 않는다. 실측 결과는 [AWS_SMOKE_RESULT.md](AWS_SMOKE_RESULT.md) §8 |
+| P2 3종 실행 경로의 확인 강도(B7 · #449) | **스텁 단위 테스트만 있다** — 다른 7종의 LocalStack 왕복 겹이 없다 | LocalStack Community에 `elbv2`·`autoscaling`이 없다([ADR-0006](adr/0006-localstack-team-standard-env.md) §4). 스텁은 호출 순서·부분 성공 분기·백업 → 가드레일 ④ 왕복·예외 미전파까지만 고정하고, AWS 응답 모양·IAM 태그 조건·연결 추적 동작은 보지 못한다. `EC2_ENABLE_AUTOSCALING` 도 #459 머지로 **스텁이 생겼다**(`apps/core-api/services/tests/test_execute_ec2_autoscaling.py` · `apps/core-api/tests/test_ec2_autoscaling_workflow.py` · `apps/core-api/tests/test_dispatcher_lane_integration.py` — 셋 다 커밋 `3951963`) — 3종 모두 스텁까지는 섰다. **실 AWS 에서는 3종 모두 돌았다**(P2-1 격리·해제 3회 · P2-2 1회 · `AWS_SMOKE_RESULT.md` §8) — **비어 있는 것은 LocalStack 왕복 겹 하나**이고 그 사실은 그대로다 | 머지 기준 = **스텁 통과 + 10주차(10/12–10/15) 실 AWS 실측**. 초록만으로 "검증됨"으로 세지 않는다. 실측 결과는 [AWS_SMOKE_RESULT.md](AWS_SMOKE_RESULT.md) §8 |
 
 | 항목 | 기록 |
 | --- | --- |
-| 실 AWS에서 한 번도 돌지 않은 경로 | ① **P1 3종 실동작**(§3-1 — A10 선택 · precheck·직접 DryRun 까지만) ② **`EC2_ENABLE_AUTOSCALING` 실행**(10/14 오후 예정) ③ **Status Check `impaired`** — 유도 수단이 없어 미실행 ④ **가드레일 ④의 거절 경로** — `AWS_SMOKE_RESULT.md` §8-1 은 통과 경로만 실측(P2-3) |
+| 실 AWS에서 한 번도 돌지 않은 경로 | ① **P1 3종 실동작**(§3-1 — A10 선택 · precheck·직접 DryRun 까지만) ② **ASG 가 상한까지 늘어나는 동작** — P2-2 에서 AI 가 `max 1` 을 골라 확장 자체를 관측하지 않았다(§8 P2-2) ③ **Status Check `impaired`** — 유도 수단이 없어 미실행 ④ **가드레일 ④의 거절 경로** — `AWS_SMOKE_RESULT.md` §8-1 은 통과 경로만 실측(P2-3) |
 | 테스트만 있고 실행 확인이 없는 경로 | P2 3종은 위 표에 적었다(스텁만). 그 밖에 ① **부분 격리 `PARTIAL`** — `judge_ec2_isolate` 가 `FAILED` 로 확정하고 **복원은 수동**이라, 그 분기는 테스트에만 있다(Post-MVP #435) ② **서비스 연결·트래픽 전환 표면**(#466 의 `prepare`·`cutover`·`return`·`cleanup`) — 스텁 테스트만 있고 실 AWS 미실행이며, **오늘 구성에서는 CLI 자체가 돌지 않는다**(아래 ADR 칸) |
-| ADR 개정이 필요해진 것 | ① **ADR-0007 §4** — 「잠정」 3행(조회 대체 통과 조건)의 확정/수정 판단이 남았다(10/14 안성일) ② **0.5초 목표**(`PRE_MITIGATION_0_5S`) — 실측 분포가 2–3초대라 목표값 개정 논의가 진행 중이고(10/14 오후 합의 예정), **enum 이름은 DB·API 계약이라 유지**한다 ③ **ADR-0006 §4** — 8행이 **가정 반증**으로 닫혀, 「실 AWS 는 여기서 걸러 줄 것으로 보인다」는 그 문장 자체가 개정 대상이다 ④ **ADR-0009 §7-4** — 정리 완료 기준이 `cleanup-plan`/`cleanup` 을 전제하는데, 그 명령은 **CLI 의 `DATABASE_URL` 이 실행 레코드를 가진 DB 를 가리킬 때만** 돈다(`db_required`). 앱이 플랫폼 RDS 를 쓰는 구성에서는 못 쓰므로 **수단을 환경 조건으로 적거나 대체 경로를 명시할 필요가 있다**(2026-10-14 확인) |
+| ADR 개정이 필요해진 것 | ① **ADR-0007 §4** — 「잠정」 3행(조회 대체 통과 조건)의 확정/수정 판단이 남았다(10/14 안성일) ② **0.5초 목표**(`PRE_MITIGATION_0_5S`) — 실측 분포가 2–3초대라 목표값 개정 논의가 진행 중이고(10/14 오후 합의 예정), **enum 이름은 DB·API 계약이라 유지**한다 ③ **ADR-0006 §4** — 8행이 **가정 반증**으로 닫혀, 「실 AWS 는 여기서 걸러 줄 것으로 보인다」는 그 문장 자체가 개정 대상이다 ④ **ADR-0009 §7-4** — 정리 완료 기준이 `cleanup-plan`/`cleanup` 을 전제하는데, 그 명령은 **CLI 의 `DATABASE_URL` 이 실행 레코드를 가진 DB 를 가리킬 때만** 돈다(`db_required`). 앱이 플랫폼 RDS 를 쓰는 구성에서는 못 쓰므로 **수단을 환경 조건으로 적거나 대체 경로를 명시할 필요가 있다**(2026-10-14 확인 — 같은 날 P2-2 정리가 **실제로 관리자 CLI 로 돌았다**, `AWS_SMOKE_RESULT.md` §7 16:49) |
 
 ---
 
