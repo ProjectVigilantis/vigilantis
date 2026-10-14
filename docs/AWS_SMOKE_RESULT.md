@@ -196,7 +196,7 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 | 1 | 가드레일 ④ `DryRun=True` — 실제 IAM 권한 검증 | **해소** | §3 A4-1–A4-7 — 앱 키로 런북별 1회, 「권한 누락」 7행 전부 없음 |
 | 2 | `get_waiter` Status Check — `impaired`(ⓐ)만 | **미해소** — 사유: 실 AWS에서 `impaired`를 안전하게 일으킬 수단이 없어 미실행. 이월처: Post-MVP(장애 주입 도구 도입 시) | §4 A8-impaired (`stopped` 실험 A8로 대체하지 않음) |
 | 3 | CloudWatch 메트릭 수집(지연·해상도) | **해소** | §2-1 — 10/14 실측: 1시간 칸 간격 전부 3600초(결손 0) · 첫 관측치 지연 1분 이내 · 기본 모니터링 5분 간격 |
-| 4 | ALB Target Group · ASG 경로(P2 3종) | **조회 해소 · 격리·해제 실행 해소 · 자동 확장 실행 ______** | 조회: §2-1(`elbv2`·`autoscaling` 실 AWS 첫 성공). 격리·해제: §8 P2-1(3회 `SUCCESS`). 자동 확장: §8 P2-2 — 후보 생성 경로 확인 대기(§7 10/14 11:30) |
+| 4 | ALB Target Group · ASG 경로(P2 3종) | **해소** — 조회 · 격리·해제 실행 · 자동 확장 실행 모두 실 AWS에서 성공. 서비스 연결·트래픽 전환(#466 운영 표면)은 이 행의 범위 밖이며 미실행(§8 P2-2 비고) | 조회: §2-1(`elbv2`·`autoscaling` 실 AWS 첫 성공). 격리·해제: §8 P2-1(3회 `SUCCESS`). 자동 확장: §8 P2-2(1회 `SUCCESS` · 정리 후 부재 확인) |
 | 5 | NACL 생성·삭제의 `DryRun=True` | **해소** | §3 A4-3·A4-4 — 직접 DryRun `DryRunOperation`, DryRun 뒤 규칙이 생기지 않았음을 describe로 확인 |
 | 6 | `Protocol` 표기 | **해소** | §4 A6 — 재실측 describe가 `Protocol: "6"`(번호)을 돌려줬고, 해제 precheck(백업 fingerprint `protocol` 대조)가 통과해 `SUCCESS` |
 | 7 | `PortRange` | **해소** | §4 A6 — 요청값 `0–65535`(`executor._NACL_ALL_PORTS`)로 차단 `SUCCESS`(거절 없음), 저장값도 `{From: 0, To: 65535}` |
@@ -240,6 +240,8 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 | 10/14 11:03 | **A7 원복이 Status Check 2/2 `ok` 전에 `SUCCESS`로 끝났다** — `REVERT_SIZE` `SUCCESS` 11:03:50 시점에 `describe-instance-status`는 `initializing`/`initializing`, 2/2 `ok`는 11:06:20 | 다운사이징(`RIGHTSIZING`)은 2/2 대기 뒤 `SUCCESS`였다(약 2분 30초). 원복 쪽이 같은 대기를 거치는지는 이 관측으로 가리지 않는다 — #434 1-1에 대조 사실로 넘긴다. 이번 회차는 이후 2/2 `ok`까지 확인해 실제 자산은 정상 |
 | 10/14 11:10 | **A8 첫 시도 무효 — 정지 주입이 안 들어갔다**(인시던트 `076c2a2c-115b-4bbc-af9b-586795aa58e4`) | 주입기(`40-a8-stop-injector.ps1` — 저장소 밖 개인 도구)가 PowerShell 5.1에서 BOM 없는 UTF-8을 못 읽어 파싱 실패 → bash로 옮긴 주입기는 Windows용 aws CLI 출력 끝의 `\r` 때문에 `running` 비교가 늘 거짓이었다. 실행은 정상 다운사이징 `SUCCESS`로 끝나 사람 승인으로 원복·종료했다. `\r`을 지운 주입기로 다음 회차(A8 본 회차)에 성공 |
 | 10/14 11:30 | **P2-2 후보가 서지 않는다** — 10:58 · 11:08 · 11:23 회차의 `idle-dev` 인시던트 3건 모두 AI 추천이 `RIGHTSIZING` 1건뿐이었다(메뉴에는 `ENABLE_AUTOSCALING`도 오른다 — t3.medium은 다운사이징 목표가 있다) | 저사용 EC2에 AI가 다운사이징을 고르는 것은 의도대로다. P2-2를 앱 경로로 시작할 후보 생성 방법이 필요하다 — §8 P2-2 |
+| 10/14 16:38 | **P2-2 후보를 앱 경로로 세웠다** — 열려 있던 `idle-dev` 인시던트 `3af11ab8-e4ab-4641-8ef4-961351b37489`(11:28 생성 · `RIGHTSIZING` t3.medium→t3.small)를 승인(16:38:44) → 실행 `ef81239e-cefd-44c6-8c3c-bc7a01a9fc82` `SUCCESS` 16:41:18 → **원복하지 않고** `JUSTIFIED` 종료(16:41:58) | t3.small은 다운사이징 규칙의 목표가 없어(`rightsizing_target_type` → 없음) FinOps 메뉴에 `ENABLE_AUTOSCALING`만 남는다(`ai/capabilities.py` `build_finops_capabilities`). 다음 스캔의 인시던트 `c8c21456-c2bd-4627-a1cf-c6b43559d221`(16:43:39)에서 AI 추천이 `ENABLE_AUTOSCALING` 1건(min 1 · max 1)으로 섰다. 주입이 아니라 앱 경로다. **`idle-dev`는 t3.small로 남아 있다** — A7 재현이 필요하면 t3.medium으로 되돌린다 |
+| 10/14 16:49 | **P2-2 생성물 넷을 관리자 CLI로 정리**(16:49:51–16:50:58) — ASG `--force-delete`(인스턴스 `i-088bf09520edf6e85` 종료) → 시작 템플릿 삭제 → AMI 등록 해제 → 스냅숏 삭제 | `service --operation cleanup` 경로는 이 구성에서 쓰지 못한다(CLI가 로컬 DB를 읽어 플랫폼 RDS의 실행 기록을 못 찾는다 — E2E 대본 T4-4). 16:51:04 AWS 조회로 ASG 0 · 시작 템플릿 0 · AMI 0(계정 자체 AMI 전체 0) · 스냅숏 `InvalidSnapshot.NotFound` · ASG 인스턴스 `terminated` 확인 |
 
 ---
 
@@ -248,7 +250,7 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 | # | 시나리오 | 결과 | 시각 | 비고 |
 | --- | --- | --- | --- | --- |
 | P2-1 | `EC2_ISOLATE` → `EC2_UNISOLATE` | **3회 모두 둘 다 `SUCCESS`**(대상 `web-1` · 배포된 플랫폼 `mvp-004ed0a`). 격리 발동은 사람 승인이 아니라 B5 자동 경로다 — High 선차단 `PRE_MITIGATION_0_5S` 2회 · Medium 1분 무응답 `TIMEOUT_ISOLATION_1M` 1회. 매회 AWS 조회로 확인: 격리 뒤 ENI `eni-09bddbb1d27e83b1a`의 SG가 격리 SG 하나(`vigilantis-smoke-isolation`)로 바뀌고 TG에서 `web-1`이 `draining`(`web-2`는 `healthy` 유지). 해제 뒤 SG가 격리 전 기준값(`open-ssh`·`web` 2개)과 같은 집합으로 돌아오고 TG에 `web-1`이 `healthy`로 복귀. 해제 성공 시 원래 격리 실행은 `ROLLED_BACK` | 격리 10/13 17:14:40 · 17:31:50 · 17:40:35 / 해제 17:15:49 · 17:36:59 · 17:42:48 KST | 해제는 관제자 요청(`POST /api/v1/actions/execute` · `RUNBOOK_EC2_UNISOLATE`)이다 — 화면의 [EC2 격리 해제]와 같은 경로. 인시던트·실행 ID는 §8-2. **HTTP 서비스 응답은 관측하지 않았다**(ALB가 internal이라 PC에서 닿지 않는다) — 서비스 유지는 TG 상태로만 본다. 앞선 실패 두 건은 주입 방법의 문제다(§7 10/13 17:08 · 17:11) |
-| P2-2 | `EC2_ENABLE_AUTOSCALING` | | | ASG 상한 4대 · **검증 직후 정리**(비용이 예산표 밖) |
+| P2-2 | `EC2_ENABLE_AUTOSCALING` | **1회 `SUCCESS`**(대상 `idle-dev` `i-084f4d1953138068b` · 인시던트 `c8c21456-c2bd-4627-a1cf-c6b43559d221` · 실행 `0ce4c6bc-f216-4c93-bcfb-bc198d317094` · 사람 승인 `USER_APPROVAL` · 배포된 플랫폼 `mvp-004ed0a`). 네 단계 생성물을 AWS 조회로 확인: AMI `ami-0b1aa18e823d6401c`(`available` · 스냅숏 `snap-09a905b80924a1254`) · 시작 템플릿 `vigilantis-lt-i-084f4d1953138068b`(`lt-06825fbb2e946187b`) · ASG `vigilantis-asg-i-084f4d1953138068b`(min 1 · max 1 · desired 1 · 인스턴스 `i-088bf09520edf6e85` `InService`/`Healthy`) · 정책 `vigilantis-cpu-target-50`(목표 추적 CPU 50%). 원본 `idle-dev`는 `running` 유지. **정리 완료** — 넷 모두 삭제 뒤 부재 확인(§7 10/14 16:49) | 승인 10/14 16:45:19 · AMI 생성 16:45:29 · LT·ASG·정책 16:47:00–16:47:01 · `SUCCESS` 16:49:10 · 정리 16:49:51–16:50:58 · 부재 확인 16:51:04 KST | 후보는 앱 경로로 세웠다(§7 10/14 16:38 — `idle-dev`를 t3.small로 내림). CloudTrail상 `CreateImage`·`CreateLaunchTemplate`·`CreateAutoScalingGroup`·`PutScalingPolicy` 주체 전부 `assumed-role/vigilantis-access/vigilantis-platform`. **`SUCCESS`는 인프라 준비 확인까지다** — 서비스 연결·트래픽 전환(#466 `service` 표면)은 이 구성에서 돌지 않아 미실행(E2E 대본 T4). ASG가 상한까지 늘어나는 동작은 관측하지 않았다(AI가 max 1을 골랐다) |
 
 ### 8-1. 가드레일 ④ — DryRun 부분과 조회 대체 통과 조건 확정 (P2-3)
 
@@ -262,7 +264,7 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 
 > 거절이 났으면 사유 코드(`PRECHECK_TARGET_NOT_FOUND` · `PRECHECK_INVALID_STATE` · `PRECHECK_PARAM_INVALID`)와 `verification_summary`를 그대로 적는다. 조건을 고쳐야 하면 ADR-0007 §4 개정 대상으로 §7에 남긴다.
 
-**이월 4행 최종 처분**: ______
+**이월 4행 최종 처분**: **해소** — P2 3종의 조회(§2-1)와 실행(§8 P2-1 격리·해제 3회 · P2-2 자동 확장 1회)이 모두 실 AWS에서 `SUCCESS`. P2-3a–c의 조회 통과 조건은 **통과 경로만 실측**이라 「확정 / 수정 필요」 칸은 이 처분과 별개로 남는다(ADR-0007 §4 잠정 조건 — 판정 기준 ⓓ의 #426 항목)
 
 ### 8-2. #447 자동 격리 — 팀 실 AWS 검증과 시간 기록
 
