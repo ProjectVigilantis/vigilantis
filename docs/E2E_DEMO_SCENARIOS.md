@@ -470,11 +470,15 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 | 1 | 후보 제시 | — | 어떤 판정이 이 런북을 부르는지. `RIGHTSIZING`과 **후보 조건이 갈리는 지점**을 기록한다 |
 | 2 | 가드레일 ④ | **MIXED** — LT `create_launch_template` `DryRun` + `describe_instances` + `describe_auto_scaling_groups` | ①DryRun ②원본 EC2 존재·`running` ③**동명 ASG 부재**(이름만 본다) ④`min_size`/`max_size` 범위 — **단, ④는 precheck 가 막는 자리가 아니라 모델이 이미 보장한 것을 확인 사실로 싣는 자리다**(위 파라미터 계약) |
 | 3 | 실행 | `RUNBOOK_EC2_ENABLE_AUTOSCALING`<br>`trigger_source: USER_APPROVAL`<br>**4단계** — ① `STEP_CREATE_IMAGE` ② `STEP_CREATE_LAUNCH_TEMPLATE` ③ `STEP_CREATE_AUTO_SCALING_GROUP` ④ `STEP_PUT_SCALING_POLICY` | **LT·ASG 둘이 아니라 네 단계다** — AMI 를 먼저 뜨고(원본은 `NoReboot=True` 로 재부팅하지 않는다) 그 AMI 로 시작 템플릿을 만든 뒤 ASG·CPU 정책까지 간다. **「성공」이 두 축이다 — 섞지 않는다.** ① **함수 성공**(`ExecutionOutcome.succeeded`)은 AMI `available` 확인을 포함한 **요청 단계**까지다. ② **DB 실행 상태 `ExecutionStatus.SUCCESS`** 는 그 뒤 `inspect_ec2_autoscaling` 이 `ready` 를 내야 기록된다(`incomplete` → `FAILED` · `query_failed` → **판정 보류** · `judge_ec2_enable_autoscaling`). 그래서 **실행 `SUCCESS` 는 인프라 준비 확인까지**이고, 코드가 그 한계를 못 박는다 — 「`ready` → SUCCESS. 원본 인스턴스 유지, **애플리케이션 서비스 가능 여부는 미검증**」. **`SUCCESS` 를 서비스 가능이나 트래픽 전환으로 읽지 않는다**(전환은 아래 §서비스 연결·트래픽 전환). 부분 구성은 **이름 붙은 잔여물과 함께 `FAILED` 로 사람에게 넘어온다.** 값은 계획에서만 오고 원본을 다시 읽지 않는다. 중복 오류(`InvalidAMIName.Duplicate`·`AlreadyExists`)와 응답 유실(5xx·연결 끊김)은 **effect UNKNOWN 으로 적고 뒤 변경을 멈춘다** — **재개·재사용·보상(삭제)을 하지 않으므로** 그 회차는 사람이 정리한다(4번). **서비스 연결은 이 런북이 하지 않는다** — 별도 운영 표면이다(아래 §서비스 연결·트래픽 전환) |
-| 4 | **정리** | `provision_smoke_aws.py service --operation cleanup-plan` → `cleanup --apply` | **등록 롤백 런북이 없다**(SSOT §Action Whitelist) — 되돌리는 것이 아니라 **검증 직후 지운다.** 다만 **손으로가 아니라 운영 CLI 명령이 있다**(#466). **지울 것은 넷이다** — AMI·스냅숏·시작 템플릿·ASG(실행이 만드는 자원 표지가 그 넷이다). **`down` 으로는 AMI·스냅숏이 안 지워진다** — 스크립트 머리말이 「`down` 은 AMI·스냅숏 전체 정리가 아니다 — `service --operation cleanup-plan` / `cleanup` 을 쓴다」로 적는다. ASG 인스턴스 비용은 예산표 밖(ADR-0009 §3) |
+| 4 | **정리** | **10/14(수) 구성: 관리자 CLI(`aws`)로 직접** — ASG·시작 템플릿·AMI·스냅숏.<br>(앱과 CLI 가 같은 DB 인 환경: `service --operation cleanup-plan` → `cleanup --apply`) | **등록 롤백 런북이 없다**(SSOT §Action Whitelist) — 되돌리는 것이 아니라 **검증 직후 지운다.** **지울 것은 넷이다** — AMI·스냅숏·시작 템플릿·ASG(실행이 만드는 자원 표지가 그 넷이다). **`down` 으로는 AMI·스냅숏이 안 지워진다**(스크립트 머리말). 운영 CLI 에 `cleanup` 명령이 있지만(#466) **10/14(수) 구성에서는 그것도 못 쓴다** — 그래서 그날은 관리자 CLI(`aws`)로 넷을 직접 지우고 **AWS 조회로 넷의 부재를 각각 확인한다**(§서비스 연결·트래픽 전환 머리말). ASG 인스턴스 비용은 예산표 밖(ADR-0009 §3) |
 
 > **4번이 T1·T2와 가장 다른 자리다.** 두 트랙은 롤백 런북이 짝으로 등록돼 있어 "되돌아갔는가"를 보면 되는데, 이 런북은 짝이 없다. 그래서 **정리했는지와 비용이 남지 않았는지**가 검증 대상이고, 그 기록은 `docs/AWS_SMOKE_RESULT.md` §8 · §9로 간다.
 
 ### 서비스 연결·트래픽 전환 — 런북 밖의 운영 표면 (#466)
+
+> **이 표면을 쓸 수 있는 조건이 하나 있다 — 10/14(수) 스모크 구성에서는 못 쓴다.**
+> `schema` 를 뺀 모든 `service` 명령은 **DB 세션을 요구한다**(없으면 `db_required` 로 거절). 그 세션은 CLI 가 도는 자리의 **로컬 `.env` `DATABASE_URL`** 에서 온다(`_open_db_session` → `db.session.get_engine` → `get_settings().DATABASE_URL`). 그래서 **CLI 의 `DATABASE_URL` 이 #446 실행 레코드를 가진 DB 를 가리킬 때만** 이 표면이 돈다.
+> 10/14(수) 구성은 그렇지 않다 — 앱은 ECS 에서 **플랫폼 RDS** 를 쓰고 CLI 는 로컬 DB 를 읽으므로, **실행 기록을 찾지 못한다**(2026-10-14 11:46 PM 보고). 따라서 그날의 **정리와 전환은 관리자 CLI(`aws`)로 직접** 한다. 아래 표는 **명령의 계약**이고, 이 조건이 서는 환경(앱과 CLI 가 같은 DB)에서의 절차다.
 
 **T4-3 의 런북은 AMI·LT·ASG·정책만 만든다.** ASG 를 실제로 서비스에 꽂고 트래픽을 넘기고 되돌리는 일은 **관리자 운영 CLI** 가 한다 — `provision_smoke_aws.py service --operation <명령>`, 백엔드는 `apps/core-api/service_transitions.py` 의 단일 진입점 `run_service_command` 다. 대본이 이 표면을 모르면 T4 를 「ASG 가 생겼다」에서 끝내게 된다.
 
@@ -550,7 +554,7 @@ T3은 격리된 **중간 상태**를 읽어 판정하는 경로다(T3-6에서 �
 
 **③ T4 를 다시 돌리기 전에 ASG·Launch Template 을 지운다 — 짝 롤백 런북이 없다.**
 
-T4-3(실행)이 만든 것을 T4-4(정리)가 지운다. `EC2_ENABLE_AUTOSCALING` 에는 짝 롤백 런북이 없다(§T4 4번 행). **다만 손으로가 아니다** — `provision_smoke_aws.py service --operation cleanup-plan` 으로 지울 것을 먼저 뽑고 `cleanup --apply` 로 지운다(#466). **`down --yes` 로는 부족하다** — 스크립트 머리말이 「`down` 은 AMI·스냅숏 전체 정리가 아니다 — `service --operation cleanup-plan` / `cleanup` 을 쓴다」로 적는다.
+T4-3(실행)이 만든 것을 T4-4(정리)가 지운다. `EC2_ENABLE_AUTOSCALING` 에는 짝 롤백 런북이 없다(§T4 4번 행). **`down --yes` 로는 부족하다** — 스크립트 머리말이 「`down` 은 AMI·스냅숏 전체 정리가 아니다 — `service --operation cleanup-plan` / `cleanup` 을 쓴다」로 적는다. **그런데 그 `service` 경로가 10/14(수) 구성에서는 돌지 않는다**(§서비스 연결·트래픽 전환 머리말 — CLI 가 로컬 DB 를 읽어 플랫폼 RDS 의 실행 기록을 못 찾는다). **그날은 관리자 CLI(`aws`)로 직접 지운다** — 즉 `down` 도, `service cleanup` 도 아닌 세 번째 경로다. 앱과 CLI 가 같은 DB 인 환경에서는 `cleanup-plan` → `cleanup --apply` 가 맞다(#466).
 
 정리하지 않으면 다음 T4 가 **가드레일 ④에서 멈춘다.** `_precheck_enable_autoscaling` 의 통과 조건 ③이 **동명 ASG 부재**이고, 코드 주석이 그 기준을 "같은 이름이 이미 있는가만 본다"로 적는다. 즉 T3 의 TG 와 같은 구조다 — **정리를 빠뜨리면 그 뒤 T4 가 전부 막힌다.**
 
@@ -562,7 +566,9 @@ Launch Template 도 함께 본다. 이름은 `executor._launch_template_name` �
 
 `cutover` 로 트래픽을 ASG 쪽에 넘긴 회차는 `return` 으로 **원래 경로로 복귀**시킨다(§서비스 연결·트래픽 전환). 복귀는 「이미 원래 경로면 바꾸지 않되 **같은 안전 확인과 실제 응답 확인을 거쳐야 성공**」이라, 돌려놨다고 믿고 넘기면 다음 회차가 어디로 가는지 모른 채 시작된다.
 
-→ 순서: `return --apply` → `cleanup-plan` → `cleanup --apply`.
+→ **10/14(수) 구성의 순서: 관리자 CLI(`aws`)로 직접 지운다.** `service` 표면은 CLI 의 `DATABASE_URL` 이 #446 실행 레코드를 가진 DB 를 가리킬 때만 돌고, 그날은 앱이 플랫폼 RDS 를 쓰므로 **`cleanup-plan`·`cleanup` 이 그 기록을 찾지 못한다**(§서비스 연결·트래픽 전환 머리말). **`complete: true` 로 완료를 확인하는 경로도 같은 이유로 못 쓴다** — 그날은 **AWS 조회로 넷을 각각 확인**한다(ASG 부재 · 시작 템플릿 부재 · AMI 등록 해제 · 스냅숏 삭제). 트래픽을 넘긴 회차면 **복귀도 관리자 CLI 로 원래 TG·리스너를 되돌린다.**
+
+→ **앱과 CLI 가 같은 DB 인 환경의 순서**: `return --apply` → `cleanup-plan` → `cleanup --apply`.
 
 **보존 결정을 먼저 정한다 — 시간에 따른 자동 만료는 없다.** `retention_decision` 은 셋 중 하나이고, **전체 정리라면 `cleanup-plan` 과 `cleanup` 양쪽에 `delete_execution_resources` 를 지정한다.**
 
@@ -572,7 +578,7 @@ Launch Template 도 함께 본다. 이름은 `executor._launch_template_name` �
 | `retain_launch_image` | 시작 템플릿·AMI·스냅숏 **보존**, 나머지 정리 |
 | `retain_execution_infrastructure` | 검증 리스너·TG·부착만 정리 — ASG·인스턴스·볼륨·LT·AMI·스냅숏 **전부 보존**(**과금이 계속된다**) |
 
-**완료는 `success: true` 가 아니다.** 서비스 전환 자원까지 포함한 **새 잔여 조회의 `complete: true`** 로 확인한다 — 「완료는 삭제 응답이 아니라 정리 뒤 새로 읽은 잔여 재고로 판단한다」(ADR-0009 §7-4). 남은 항목은 **새 매니페스트로 다시 승인**해 간다.
+**완료는 삭제 응답이 아니다.** ADR-0009 §7-4 가 「완료는 삭제 응답이 아니라 **정리 뒤 새로 읽은 잔여 재고**로 판단한다」로 적는다. `service` 가 도는 환경에서는 서비스 전환 자원까지 포함한 **새 잔여 조회의 `complete: true`** 로 보고, 남은 항목은 **새 매니페스트로 다시 승인**해 간다. **10/14(수) 구성에서는 그 조회도 못 쓰므로 AWS 를 직접 읽어 넷을 각각 확인한다** — 원칙(응답이 아니라 다시 읽은 재고)은 같고 읽는 수단만 다르다.
 
 **두 거절의 대응이 다르다 — 묶어서 「다시 뽑으면 된다」로 읽지 않는다.**
 
