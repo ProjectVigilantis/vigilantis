@@ -211,7 +211,7 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 | 항목 | 기록 |
 | --- | --- |
 | 대상 주차 · 참조한 SSOT 커밋/절 링크 | 10주차(10/12(월)–10/15(목)) = 10/15(목) MVP 마감 판정 · 기준은 SSOT §현재 위치 「주차 종료 판정 기준 (10주차)」 ⓐ–ⓓ(PR #461 · `dev` `2b4a7a6` 시점 문구 그대로) |
-| 판단에 사용한 관측 근거 | ⓐ 이 문서 §1–§4 · §2-3(A1–A9) / PR #439 머지 · ⓑ §8 P2-1·P2-2 · §8-1(P2-3 거절 경로 포함) · §8-2(B5 발동) · ⓒ §11 · ⓓ §5 · §8-1 「이월 4행 최종 처분」 |
+| 판단에 사용한 관측 근거 | ⓐ 이 문서 §1–§4(A1–A9 — A9는 §1 「최초 실제 판정」) / PR #439 머지 · ⓑ §8 P2-1·P2-2 · §8-1(P2-3 거절 경로 포함) · §8-2(B5 발동) · ⓒ §11 · ⓓ §5 · §8-1 「이월 4행 최종 처분」 |
 | PM 판단 · 판단자 · 시각 | **4/4 충족 — MVP 마감 판정 통과** · 김세혁 · 2026-10-15(목). 칸별 판정 문장은 SSOT §현재 위치 10주차 판정 결과 각주에만 적는다 |
 | 미측정·미해소 항목과 일정 영향 | 이월 2행(`impaired` 유도 수단 없음)·8행(DryRun 대상 존재 검사 — 가정 반증) 미해소 + 사유·이월처 기재(§5) · A8-impaired 미실행 · A10(선택) 미실행 · P2-2의 서비스 연결·트래픽 전환과 ASG 상한 확장 미관측. **판정 요건이 아니어서 일정 영향 없다** — 전부 Post-MVP로 넘긴다 |
 | 후속 조치·이월 결정 근거 링크 | [ADR-0011](adr/0011-pre-mitigation-latency-target.md)(선차단 목표 3초 · 팀 환경 반복 측정) · [ADR-0007](adr/0007-guardrail-dryrun-executor-precheck-contract.md) 4차 개정(§4 확정) · #434(동작 결함) · #435 · #438(Post-MVP 범위) · #448(B6) |
@@ -243,7 +243,7 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 | 10/14 16:38 | **P2-2 후보를 앱 경로로 세웠다** — 열려 있던 `idle-dev` 인시던트 `3af11ab8-e4ab-4641-8ef4-961351b37489`(11:28 생성 · `RIGHTSIZING` t3.medium→t3.small)를 승인(16:38:44) → 실행 `ef81239e-cefd-44c6-8c3c-bc7a01a9fc82` `SUCCESS` 16:41:18 → **원복하지 않고** `JUSTIFIED` 종료(16:41:58) | t3.small은 다운사이징 규칙의 목표가 없어(`rightsizing_target_type` → 없음) FinOps 메뉴에 `ENABLE_AUTOSCALING`만 남는다(`ai/capabilities.py` `build_finops_capabilities`). 다음 스캔의 인시던트 `c8c21456-c2bd-4627-a1cf-c6b43559d221`(16:43:39)에서 AI 추천이 `ENABLE_AUTOSCALING` 1건(min 1 · max 1)으로 섰다. 주입이 아니라 앱 경로다. **`idle-dev`는 t3.small로 남아 있다** — A7 재현이 필요하면 t3.medium으로 되돌린다 |
 | 10/14 16:49 | **P2-2 생성물 넷을 관리자 CLI로 정리**(16:49:51–16:50:58) — ASG `--force-delete`(인스턴스 `i-088bf09520edf6e85` 종료) → 시작 템플릿 삭제 → AMI 등록 해제 → 스냅숏 삭제 | `service --operation cleanup` 경로는 이 구성에서 쓰지 못한다(CLI가 로컬 DB를 읽어 플랫폼 RDS의 실행 기록을 못 찾는다 — E2E 대본 T4-4). 16:51:04 AWS 조회로 ASG 0 · 시작 템플릿 0 · AMI 0(계정 자체 AMI 전체 0) · 스냅숏 `InvalidSnapshot.NotFound` · ASG 인스턴스 `terminated` 확인 |
 | 10/15 오전(09:08 전) | **스모크 계정 밖에 Vigilantis 자원이 없는지 확인** — 로컬 AWS CLI의 `default` 프로필이 개인 계정을 가리키고 있었다(10/12 오배포 사고의 원인). 그 계정을 전 리전 조회했다(EC2·VPC·AMI·스냅숏·EBS·LT·SG·NAT·EIP·ASG·ELB·TG·RDS·ECS·ECR·Secrets·로그 그룹 + IAM·S3·Budget·CloudFront·WAF·Route 53·ACM) | **Vigilantis 자원 0건.** 남은 4건(기본 VPC의 `launch-wizard-1` SG · IAM 역할 2개 · CloudFormation 템플릿 버킷)은 전부 7월 생성으로 다른 개인 프로젝트 소속이라 손대지 않았다. `default` 프로필을 학원 계정으로 바꿔 같은 사고가 다시 나지 않게 했다(개인 계정은 별도 이름의 프로필로 분리). **Vigilantis 실 AWS 자원은 학원 계정에만 있다** |
-| 10/15 09:08 | **P2-3 거절 경로 실측**(§8-1 「거절 경로 실측」) — 앱 키 10건 · 관리자 키 3건, 전부 `precheck()` 직접 호출(읽기·DryRun) | 사유 코드가 ADR-0007 §4 규약과 달랐던 것은 앱 키의 없는 SG 2건뿐이다(`PRECHECK_UNAUTHORIZED` — 태그 조건이 없는 자원에서 평가 불가). 첫 시도의 없는 ID(`i-0123456789abcdef0` 등)는 `InvalidInstanceID.Malformed`로 다른 길을 타 무효 — 형식이 맞는 실재하지 않는 ID로 다시 쟀다 |
+| 10/15 09:08 | **P2-3 거절 경로 실측**(§8-1 「거절 경로 실측」) — 앱 키 12건(거절 9 · 통과 3) · 관리자 키 3건, 전부 `precheck()` 직접 호출(읽기·DryRun). 원본 출력은 PR #477 본문 `## 원본 출력` | 사유 코드가 ADR-0007 §4 규약과 달랐던 것은 앱 키의 없는 SG 2건뿐이다(`PRECHECK_UNAUTHORIZED` — 태그 조건이 없는 자원에서 평가 불가). 첫 시도의 없는 ID(`i-0123456789abcdef0` 등)는 `InvalidInstanceID.Malformed`로 다른 길을 타 무효 — 형식이 맞는 실재하지 않는 ID로 다시 쟀다 |
 | 10/15 09:10–09:12 | **측정용 임시 자원 2종을 만들고 지웠다** — ① 시작 템플릿 `vigilantis-probe-lt-1015` + ASG `vigilantis-asg-i-084f4d1953138068b`(min·max·desired 0, 인스턴스 없음) — 동명 ASG 거절(c-③) 측정 ② `stopped` 인스턴스 `i-013120968f1d3df6e`(t3.nano · 스모크 서브넷 a) — `running` 아님 거절(c-②) 측정 | 관리자 키로 만들고 측정 직후 삭제·종료했다. AWS 조회로 ASG 0 · 시작 템플릿 0 · 인스턴스 `terminated` 확인. 스모크 자원(`status`의 18종)은 건드리지 않았다 |
 
 ---
@@ -267,7 +267,7 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 
 > 거절이 났으면 사유 코드(`PRECHECK_TARGET_NOT_FOUND` · `PRECHECK_INVALID_STATE` · `PRECHECK_PARAM_INVALID`)와 `verification_summary`를 그대로 적는다. 조건을 고쳐야 하면 ADR-0007 §4 개정 대상으로 §7에 남긴다.
 
-**거절 경로 실측 (P2-3 · 2026-10-15(목) 09:08–09:13 KST · 김세혁)** — 위 3행의 「확정」 근거다. `executor.precheck()`를 `dev` `2b4a7a6` 코드로 **직접 호출**했다(읽기·DryRun만 — 자산 변경 없음). 같은 입력을 **앱 키**(`vigilantis-smoke-app` — 운영 접근 역할과 같은 정책)와, 사유 코드가 갈린 3건은 **관리자 키**로도 불렀다. 없는 자원 ID는 형식이 맞는 실재하지 않는 값을 썼다(`i-084f4d1953138068c` · `sg-074fae62f8856a444` — 형식이 틀린 ID는 `Malformed`로 다른 길을 탄다). 정지 인스턴스와 동명 ASG는 측정용으로 잠깐 만들고 바로 지웠다(§7 10/15).
+**거절 경로 실측 (P2-3 · 2026-10-15(목) 09:08–09:13 KST · 김세혁)** — 위 3행의 「확정」 근거다. `executor.precheck()`를 `dev` `2b4a7a6` 코드로 **직접 호출**했다(읽기·DryRun만 — 자산 변경 없음). 같은 입력을 **앱 키**(`vigilantis-smoke-app` — 운영 접근 역할과 같은 정책)로 12건(거절 9 · 통과 3) 불렀고, 사유 코드가 갈린 2건(a-② · b-②)과 대조용 c-②(없는 인스턴스)는 **관리자 키**로도 불렀다(3건). 없는 자원 ID는 형식이 맞는 실재하지 않는 값을 썼다(`i-084f4d1953138068c` · `sg-074fae62f8856a444` — 형식이 틀린 ID는 `Malformed`로 다른 길을 탄다). 정지 인스턴스와 동명 ASG는 측정용으로 잠깐 만들고 바로 지웠다(§7 10/15).
 
 | # | 조건 | 입력 | 앱 키 결과 | 관리자 키 결과 | 판정 |
 | --- | --- | --- | --- | --- | --- |
