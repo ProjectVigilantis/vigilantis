@@ -210,6 +210,35 @@ def test_the_block_cycle_also_offers_the_release(db, reserved_block, aws):
     ]
 
 
+@pytest.mark.parametrize("resolution", list(ResolutionJudgement))
+def test_close_rejects_release_offer_without_changing_the_block(
+    db, client_pg, reserved_block, aws, resolution,
+):
+    incident_id, execution_id = reserved_block()
+    dispatcher.dispatch_pending(db)
+    [offer] = release_candidates(db, incident_id)
+    url = f"/api/v1/incidents/{incident_id}"
+    before = client_pg.get(url).json()
+    entries_before = list(aws["entries"])
+    calls_before = list(aws["calls"])
+    assert entries_before
+    response = client_pg.post(url + "/resolve", json={
+        "resolution": resolution.value, "resolution_note": "차단 유지, 해제 제안 거절",
+    })
+    assert response.status_code == 200
+    after = client_pg.get(url).json()
+    assert after["status"] == "RESOLVED"
+    assert after["recommendations"] == []
+    assert after["executions"] == before["executions"]
+    assert after["analysis_result"] == before["analysis_result"]
+    assert after["resolution_note"] == "차단 유지, 해제 제안 거절"
+    db.refresh(offer)
+    assert offer.status is CandidateStatus.INVALIDATED
+    assert exec_repo.get_execution(db, execution_id).status is ExecutionStatus.SUCCESS
+    assert aws["entries"] == entries_before
+    assert aws["calls"] == calls_before
+
+
 def test_the_offer_passes_all_four_guardrail_steps_and_leaves_a_record(
     db, reserved_block, aws
 ):

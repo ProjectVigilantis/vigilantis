@@ -7,6 +7,7 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
+from alembic.script import ScriptDirectory
 from sqlalchemy import delete, text
 from sqlalchemy.orm import Session
 
@@ -54,7 +55,10 @@ def test_downgrade_refuses_to_discard_closure_data(pg_engine, migration_config, 
         with Session(pg_engine) as session:
             stored = session.get(models.Incident, incident_id)
             assert (stored.resolution, stored.resolution_note) == (judgement, note)
-            assert session.scalar(text("SELECT version_num FROM alembic_version")) == "e8f4b2c9a631"
+            # 거절된 downgrade 는 통째로 되돌아가 head 에 머문다. 리비전 문자열을 적어 두면
+            # 뒤에 마이그레이션이 붙을 때마다 이 줄을 고쳐야 한다(test_repositories 와 같은 이유).
+            head = ScriptDirectory.from_config(migration_config).get_current_head()
+            assert session.scalar(text("SELECT version_num FROM alembic_version")) == head
     finally:
         with Session(pg_engine) as session:
             session.execute(delete(models.Incident).where(models.Incident.incident_id == incident_id))

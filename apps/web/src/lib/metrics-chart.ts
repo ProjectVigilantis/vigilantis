@@ -2,12 +2,21 @@
 // 렌더와 분리해 `node --test`로 검증한다. 같은 디렉터리 상대 경로만 쓴다 — `node --test`는 `@/`
 // 별칭을 해석하지 못한다(타입 전용 import는 스트리핑돼 사라진다).
 
+import { COMPOSITION_TYPES, type CompositionKey } from './dashboard.ts';
+import { ASSET_TYPE_ORDER } from './enum-labels.ts';
 import type {
+  AssetInventoryAxis,
+  AssetInventoryPoint,
+  AssetStatusAxis,
+  AssetStatusPoint,
+  AssetType,
   CpuAxis,
   CpuSeries,
   NetworkAxis,
   NetworkSeries,
   SgExposureAxis,
+  ThreatEventAxis,
+  ThreatEventKind,
   TimeseriesPoint,
 } from '@/types/api';
 
@@ -119,6 +128,49 @@ export function sgChartState(axis: SgExposureAxis): ChartState<SgRow[]> {
     return { kind: 'UNAVAILABLE', reason: axis.reason_code ?? '알 수 없는 오류' };
   }
   const rows = toSgRows(axis.points);
+  if (rows.length === 0) return { kind: 'EMPTY' };
+  return { kind: 'READY', data: rows };
+}
+
+// ── 자산 현황 축(축 4)
+
+/**
+ * 한 시각의 자산 현황. **대시보드 지표 띠와 같은 셈으로 접는다** — `waste`는 최적화 후보 + 미사용이고
+ * (`lib/dashboard`의 `WASTE_VERDICTS`), 띠의 `낭비 후보` 칸이 세는 것과 같은 집합이다. 선이 띠와 다른
+ * 수를 말하면 같은 화면이 같은 것을 두 숫자로 말하게 된다. 원값 둘도 남긴다 — 툴팁이 풀어 적는다.
+ */
+export interface AssetStatusRow {
+  at: number;
+  judged: number;
+  threat: number;
+  waste: number;
+  costCandidate: number;
+  unused: number;
+  skip: number;
+  undecided: number;
+}
+
+export function toAssetStatusRows(points: readonly AssetStatusPoint[]): AssetStatusRow[] {
+  return points
+    .map((p) => ({
+      at: Date.parse(p.at),
+      judged: p.judged,
+      threat: p.threat,
+      waste: p.cost_candidate + p.unused,
+      costCandidate: p.cost_candidate,
+      unused: p.unused,
+      skip: p.skip,
+      undecided: p.undecided,
+    }))
+    .filter((r) => !Number.isNaN(r.at))
+    .sort((a, b) => a.at - b.at);
+}
+
+export function assetStatusChartState(axis: AssetStatusAxis): ChartState<AssetStatusRow[]> {
+  if (axis.status === 'UNAVAILABLE') {
+    return { kind: 'UNAVAILABLE', reason: axis.reason_code ?? '알 수 없는 오류' };
+  }
+  const rows = toAssetStatusRows(axis.points);
   if (rows.length === 0) return { kind: 'EMPTY' };
   return { kind: 'READY', data: rows };
 }
@@ -237,4 +289,142 @@ export function formatTick(at: number): string {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+
+// ── 자산 수 축(축 5)
+
+/**
+ * 한 시각의 자산 수. **도넛(`자산 분류 비율`)과 같은 조각으로 접는다** — EC2 · 보안 그룹 · EBS는 따로,
+ * 나머지 유형은 `OTHER` 한 조각(`lib/dashboard` `assetComposition`과 같은 규칙). 옆 도넛과 다른 조각으로
+ * 나누면 같은 화면이 같은 자산을 두 가지로 가른다.
+ *
+ * 그 칸에서 관측하지 못한 유형은 **값을 두지 않는다**(undefined) — 0으로 채우면 쌓인 면이 자산이 사라진
+ * 것처럼 꺼진다. 못 본 유형은 `unobserved`에 남겨 툴팁이 밝힌다.
+ */
+export interface InventoryRow {
+  at: number;
+  total: number;
+  EC2?: number;
+  SG?: number;
+  EBS?: number;
+  OTHER?: number;
+  /** 유형별 원값(관측한 것만) — 툴팁이 `OTHER`를 풀어 적는다. */
+  counts: Partial<Record<AssetType, number>>;
+  unobserved: AssetType[];
+}
+
+export const INVENTORY_KEYS: readonly CompositionKey[] = [...COMPOSITION_TYPES, 'OTHER'];
+
+export function toInventoryRows(points: readonly AssetInventoryPoint[]): InventoryRow[] {
+  const split = new Set<AssetType>(COMPOSITION_TYPES);
+  return points
+    .map((p) => {
+      const row: InventoryRow = {
+        at: Date.parse(p.at),
+        total: p.total,
+        counts: p.counts,
+        unobserved: ASSET_TYPE_ORDER.filter((t) => p.counts[t] === undefined),
+      };
+      for (const t of COMPOSITION_TYPES) row[t] = p.counts[t];
+      const others = ASSET_TYPE_ORDER.filter((t) => !split.has(t) && p.counts[t] !== undefined);
+      // 나머지 유형을 하나도 못 봤으면 `OTHER`도 모름이다 — 0으로 적지 않는다.
+      if (others.length > 0) row.OTHER = others.reduce((sum, t) => sum + (p.counts[t] ?? 0), 0);
+      return row;
+    })
+    .filter((r) => !Number.isNaN(r.at))
+    .sort((a, b) => a.at - b.at);
+}
+
+export function inventoryChartState(axis: AssetInventoryAxis): ChartState<InventoryRow[]> {
+  if (axis.status === 'UNAVAILABLE') {
+    return { kind: 'UNAVAILABLE', reason: axis.reason_code ?? '알 수 없는 오류' };
+  }
+  const rows = toInventoryRows(axis.points);
+  if (rows.length === 0) return { kind: 'EMPTY' };
+  return { kind: 'READY', data: rows };
+}
+
+// ── 전체 위협 추이(축 4 `threat` + 축 6)
+
+/** 이벤트 유형 순서 — 막대를 쌓는 순서이자 범례 순서다. */
+export const THREAT_EVENT_KINDS: readonly ThreatEventKind[] = ['SSH_BRUTE_FORCE', 'OPEN_IP'];
+
+/**
+ * 한 시각의 전체 위협. `threat`는 판정 상태량(축 4 — 그 회차에 위협 판정인 자산 수)이고 회차가 없던
+ * 시각은 값을 두지 않는다(0이 아니라 "못 봤다"). 이벤트 유형 열은 발생량(축 6)이고 없으면 0이다 —
+ * 이 축에서는 점이 없는 칸이 곧 0건이다.
+ *
+ * 축이 조회에 실패했으면 그 축의 열은 **값을 두지 않는다** — 0으로 채우면 "조회 실패"가 "0건"으로 읽힌다.
+ * 툴팁은 `ThreatActivityChart`의 `*Unavailable`로 실패를 밝힌다.
+ */
+export interface ThreatActivityRow {
+  at: number;
+  threat?: number;
+  /**
+   * 회차가 없는 칸(이벤트만 있는 칸)에서 직전 회차의 `threat` — 선은 `connectNulls`로 이어지므로 툴팁도
+   * 그 값을 "직전 회차"로 보여 준다. 그 칸에 회차가 있거나 앞선 회차가 없으면 두지 않는다.
+   */
+  carriedThreat?: number;
+  SSH_BRUTE_FORCE?: number;
+  OPEN_IP?: number;
+  events?: number;
+}
+
+export interface ThreatActivityChart {
+  rows: ThreatActivityRow[];
+  /** 한쪽 축만 실패했을 때의 사유 — 살아 있는 쪽은 그대로 그리고 실패는 캡션으로 밝힌다. */
+  verdictUnavailable: string | null;
+  eventsUnavailable: string | null;
+}
+
+export function threatActivityChartState(
+  assetStatus: AssetStatusAxis,
+  threatEvents: ThreatEventAxis,
+): ChartState<ThreatActivityChart> {
+  const verdictUnavailable =
+    assetStatus.status === 'UNAVAILABLE' ? (assetStatus.reason_code ?? '알 수 없는 오류') : null;
+  const eventsUnavailable =
+    threatEvents.status === 'UNAVAILABLE' ? (threatEvents.reason_code ?? '알 수 없는 오류') : null;
+  if (verdictUnavailable !== null && eventsUnavailable !== null) {
+    return { kind: 'UNAVAILABLE', reason: verdictUnavailable };
+  }
+
+  const byAt = new Map<number, ThreatActivityRow>();
+  const rowAt = (at: number): ThreatActivityRow => {
+    let row = byAt.get(at);
+    if (row === undefined) {
+      // 이벤트 축이 살아 있을 때만 0으로 시작한다 — 점이 없는 칸이 곧 0건인 것은 조회에 성공했을 때뿐이다.
+      row = eventsUnavailable === null ? { at, SSH_BRUTE_FORCE: 0, OPEN_IP: 0, events: 0 } : { at };
+      byAt.set(at, row);
+    }
+    return row;
+  };
+  if (verdictUnavailable === null) {
+    for (const p of assetStatus.points) {
+      const at = Date.parse(p.at);
+      if (!Number.isNaN(at)) rowAt(at).threat = p.threat;
+    }
+  }
+  if (eventsUnavailable === null) {
+    for (const p of threatEvents.points) {
+      const at = Date.parse(p.at);
+      if (Number.isNaN(at)) continue;
+      const row = rowAt(at);
+      for (const kind of THREAT_EVENT_KINDS) row[kind] = p.counts[kind] ?? 0;
+      row.events = p.total;
+    }
+  }
+  const rows = [...byAt.values()].sort((a, b) => a.at - b.at);
+  // 한쪽이 실패하고 다른 쪽이 비었으면 "기록 없음"이 아니라 조회 실패다 — 실패를 빈 화면 뒤에 숨기지 않는다.
+  if (rows.length === 0) {
+    const failed = verdictUnavailable ?? eventsUnavailable;
+    return failed !== null ? { kind: 'UNAVAILABLE', reason: failed } : { kind: 'EMPTY' };
+  }
+  let last: number | undefined;
+  for (const row of rows) {
+    if (row.threat !== undefined) last = row.threat;
+    else if (last !== undefined) row.carriedThreat = last;
+  }
+  return { kind: 'READY', data: { rows, verdictUnavailable, eventsUnavailable } };
 }

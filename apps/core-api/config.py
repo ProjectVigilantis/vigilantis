@@ -1,6 +1,6 @@
 # ==============================================================================
 # [파일 설명]
-# pydantic-settings 기반 런타임 환경설정 로더입니다. (Issue #60·#68·#115·#128, ADR-0001)
+# pydantic-settings 기반 런타임 환경설정 로더입니다. (Issue #60·#68·#115·#128·#424, ADR-0001)
 #
 # 설정 단위를 셋으로 나눈다 — 필수 항목이 서로 다르기 때문이다.
 #   Settings          : Core API 프로세스 설정. DATABASE_URL 필수이고
@@ -43,6 +43,14 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str
     LOG_LEVEL: str = "INFO"
+    # 작동 로그 파일 출력(Issue #424) — 기본은 stdout만. 켜면 같은 JSON 줄을 LOG_FILE_PATH의
+    # 회전 파일에도 쓴다. 상대 경로는 apps/core-api 기준(logging_config.resolve_log_file_path)이라
+    # compose가 공유하는 폴더에 남아 컨테이너를 다시 만들어도 사라지지 않는다. 같은 체크아웃에서
+    # 뜨는 다른 스택(stepper 테스트 서버)은 override에서 경로를 따로 준다
+    LOG_FILE_ENABLED: bool = False
+    LOG_FILE_PATH: str = ".logs/api.log"
+    # 회전 백업 파일 수(파일당 10 MiB, 압축 없음) — 양수만 허용. 0이면 회전 없이 계속 커진다
+    LOG_FILE_BACKUP_COUNT: int = Field(default=20, ge=1)
     # 콤마 구분 허용 출처 목록 — 기본값은 FE 개발 서버. CORS와 WebSocket
     # Handshake Origin 검증이 같은 목록을 쓴다
     CORS_ALLOW_ORIGINS: str = "http://localhost:3000"
@@ -51,8 +59,8 @@ class Settings(BaseSettings):
     # 0 이하면 모든 연결이 즉시 제거되므로 양수만 허용한다 (Issue #75)
     WS_SEND_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0)
     # 접수된 조치 실행 디스패치·회수 스캔 주기(초) — dispatcher.py 잡 1개가 쓴다.
-    # 승인부터 AWS 호출까지의 지연 상한이자 부분 인덱스
-    # (ix_action_executions_non_terminal) 조회 빈도다 (Issue #232)
+    # 부분 인덱스(ix_action_executions_non_terminal) 조회 빈도다.
+    # 실행·DB 대기로 밀릴 수 있어 승인부터 AWS 호출까지의 지연 상한은 아니다.
     DISPATCH_INTERVAL_SECONDS: int = Field(default=10, gt=0)
     # AI 분석 대기 Incident 스캔 주기(초) — agent_dispatcher.py 잡 1개가 쓴다.
     # Incident 생성부터 그래프 호출까지의 지연 상한이다. 실행 디스패치보다 성긴 것은
@@ -60,6 +68,8 @@ class Settings(BaseSettings):
     # 체감 지연이 그만큼 줄지 않기 때문이다. 한 주기가 대상 전부를 직렬로 돌고 건마다
     # 모델을 부르므로, 밀리면 다음 주기는 max_instances=1이 미룬다 (Issue #285)
     AGENT_DISPATCH_INTERVAL_SECONDS: int = Field(default=30, gt=0)
+    # DB 승인 대기 기한 감시. 주기는 지연 상한이 아니다 — 실행·DB 대기도 계측한다.
+    AGENT_WAIT_POLL_SECONDS: float = Field(default=1.0, gt=0)
     # 스캔 잡 기동 스위치 — 테스트가 앱을 띄울 때 스캔이 따라 돌지 않게 끈다
     # (apps/core-api/tests/conftest.py, PR #236 리뷰). 실행 디스패치와 AI 디스패치가
     # 이 하나를 공유한다 — 끄는 목적이 같다
@@ -73,6 +83,14 @@ class Settings(BaseSettings):
     # 그만큼 다음 스캔을 미루므로(max_instances=1) 시연에서 조일 수 있어야 한다.
     STATUS_CHECK_WAIT_DELAY_SECONDS: int = Field(default=15, gt=0)
     STATUS_CHECK_WAIT_MAX_ATTEMPTS: int = Field(default=12, ge=1)
+    # EC2_ENABLE_AUTOSCALING 대기 (Issue #446) — **조회 횟수의 상한**이다. 벽시계 상한이 아니다
+    # (조회 호출 시간·SDK 재시도가 그 위에 얹힌다). 둘 다 dispatcher 한 주기를 붙잡는다.
+    #   IMAGE: 실행 단계 1이 AMI available을 기다린다 — 기본 15초 간격 40회 조회.
+    #   READY: 판정이 ASG 인스턴스 InService·2/2를 기다린다 — 기본 15초 간격 20회 조회.
+    AUTOSCALING_IMAGE_WAIT_DELAY_SECONDS: int = Field(default=15, gt=0)
+    AUTOSCALING_IMAGE_WAIT_MAX_ATTEMPTS: int = Field(default=40, ge=1)
+    AUTOSCALING_READY_WAIT_DELAY_SECONDS: int = Field(default=15, gt=0)
+    AUTOSCALING_READY_WAIT_MAX_ATTEMPTS: int = Field(default=20, ge=1)
     # 판정 불가 재시도 — AWS에 물어보지 못해 실행 결과를 확정하지 못했을 때 (Issue #249).
     # MAX_ATTEMPTS는 받아 주는 실패 횟수(첫 실패 포함)이고, 소진하면 자동 원복하지 않고
     # 결과 확인 불가(UNVERIFIED)로 확정해 관제자에게 넘긴다. INTERVAL은 마지막 실패로부터
@@ -177,9 +195,38 @@ class CollectorSettings(BaseSettings):
     METRIC_LOOKBACK_DAYS: int = Field(default=14, gt=0)
     METRIC_PERIOD_SECONDS: int = Field(default=3600, gt=0)
     SCAN_INTERVAL_SECONDS: int = Field(default=300, gt=0)
+    # GET /api/v1/metrics/timeseries 의 기본 조회 창(시간). 화면은 hours 를 넘기지 않으므로 이 값이
+    # 곧 그래프의 가로 폭이다. 줄이면(예: 1) 분 단위 변화가 보인다.
+    METRICS_WINDOW_HOURS: int = Field(default=72, ge=1, le=336)
     # 스캔 파이프라인 잡 기동 여부. false 면 start_scheduler 가 None 을 돌려준다 —
     # 테스트가 앱을 띄울 때 실제 수집·판정이 도는 것을 막는다(DISPATCH_ENABLED 와 같은 결).
     SCAN_ENABLED: bool = True
+    # 수집 범위 VPC(콤마 구분, 포함 목록). 비어 있으면 리전 전체를 수집한다(기존 동작).
+    # 단일 계정에 플랫폼 자신(ECS·RDS·ALB가 든 별도 VPC)을 함께 배포할 때 계정 경계를
+    # 흉내 내는 설정이다 — 플랫폼 ALB SG 의 0.0.0.0/0 이 THREAT 로 판정되는 일을 막는다.
+    # Post-MVP SaaS 는 관제 범위 = 고객 계정이라 이 설정이 필요 없다. 거르는 규칙은
+    # services/collector._apply_vpc_scope 가 단일 원천이다.
+    COLLECT_VPC_IDS: str = ""
+
+    @field_validator("COLLECT_VPC_IDS", mode="after")
+    @classmethod
+    def _check_vpc_ids(cls, value: str) -> str:
+        # 여기서는 형식만 막는다. 형식은 맞는 오타(존재하지 않는 vpc-…)는 매 회차
+        # services/collector._check_vpc_scope 가 존재 확인으로 잡고, 없으면 그 회차의
+        # 소멸 표시·자산 수 스냅샷을 건너뛴다 — 범위 VPC 자산이 전부 소멸 표시되지 않게.
+        bad = [v for v in _split_csv(value) if not v.startswith("vpc-")]
+        if bad:
+            raise ValueError(f"COLLECT_VPC_IDS 는 vpc- 로 시작하는 ID 목록이어야 한다: {bad}")
+        return value
+
+    def collect_vpc_ids(self) -> frozenset[str] | None:
+        """수집 범위 VPC 집합. 비어 있으면 None — 범위 제한 없음(리전 전체)."""
+        ids = frozenset(_split_csv(self.COLLECT_VPC_IDS))
+        return ids or None
+
+
+def _split_csv(raw: str) -> list[str]:
+    return [item.strip() for item in raw.split(",") if item.strip()]
 
 
 @lru_cache

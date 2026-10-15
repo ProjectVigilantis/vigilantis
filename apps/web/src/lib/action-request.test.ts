@@ -26,6 +26,8 @@ function incident(id: string, recommendations: RecommendationItem[]): IncidentRe
     recommendations,
     executions: [],
     resolution: null,
+    resolution_note: null,
+    analysis_result: null,
     resolved_at: null,
   };
 }

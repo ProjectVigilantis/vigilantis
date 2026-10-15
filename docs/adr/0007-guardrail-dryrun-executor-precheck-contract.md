@@ -2,7 +2,7 @@
 
 - **Status**: Accepted (2026-08-24 — 안성일(AI/Guardrail) 확인 완료, PR #117 승인)
 - **Date**: 2026-08-24
-- **Amended**: 2026-08-25(1차 — precheck 구현 실측 반영) · 2026-08-26(2차 — ④ 사유 코드 정의 위치 현행화). 하단 "개정 이력" 참조, **핵심 결정 불변**
+- **Amended**: 2026-08-25(1차 — precheck 구현 실측 반영) · 2026-08-26(2차 — ④ 사유 코드 정의 위치 현행화) · 2026-10-13(3차 — §4 일정 서술 정합). 하단 "개정 이력" 참조, **핵심 결정 불변**
 - **Deciders**: 김세혁(PM/Infra, executor 소유자) 결정, 안성일(AI/Guardrail) 합의 완료
 - **Refs**: #113
 
@@ -178,7 +178,9 @@ authorize_security_group_ingress(GroupId='sg-000...0')  # 부재 -> DryRunOperat
 - **`UNISOLATE`의 조회는 `describe_target_groups`다.** 통과 조건 ③이 요구하는 것은   "대상이 같은 VPC"인데 `describe_target_health`의 응답(`TargetHealthDescriptions`)에는   **`VpcId`가 없다.** Target Group의 VPC를 알 수 있는 조회는 `describe_target_groups`뿐이다.
 - **`ISOLATE`는 등록 여부를 `Target.NotRegistered`로 판별한다.** `Targets`를 명시해   `describe_target_health`를 부르면 **등록되지 않은 대상에도** `unused` /   `Target.NotRegistered` 설명이 채워져 돌아온다. 응답 목록이 비었는지만 보면 수집 이후   이미 이탈한 대상이 "등록됨"으로 통과한다.
 
-**항상 거절되는 런북은 없다** — 5종 모두 통과 경로가 존재한다. 다만 §Context의 Community 제약 때문에 `ISOLATE`·`UNISOLATE`·`ENABLE_AUTOSCALING`의 elbv2·asg 조회는 로컬에서 실행되지 않으며, **이 3행의 통과 조건은 6–7주차 실 AWS 스모크에서 확정한다**(현재는 잠정안).
+**항상 거절되는 런북은 없다** — 5종 모두 통과 경로가 존재한다. 다만 §Context의 Community 제약 때문에 `ISOLATE`·`UNISOLATE`·`ENABLE_AUTOSCALING`의 elbv2·asg 조회는 로컬에서 실행되지 않는다. **이 3행의 통과 조건은 2026-10-15 실 AWS 실측으로 확정됐다**(4차 개정) — 조건마다 통과 경로와 거절 경로를 둘 다 쟀고, 조건 자체는 한 줄도 고치지 않았다. 실측은 [`docs/AWS_SMOKE_RESULT.md`](../AWS_SMOKE_RESULT.md) **§8-1**에 있다.
+
+**앱 자격에서 사유 코드가 달라지는 경우 하나** — 위 ②·③ 실패의 사유 코드는 **IAM 태그 조건이 없는 자격 기준**이다. 운영 자격(스모크 앱 정책 · 플랫폼 접근 역할 `vigilantis-access` — 변경 작업에 `aws:ResourceTag/vigilantis:smoke` 조건을 거는 정책)에서는 **없는 SG**를 가리킨 `ISOLATE`·`UNISOLATE`가 ②의 `describe_security_groups`에 닿기 전에 ①의 ENI `DryRun`에서 `UnauthorizedOperation`으로 먼저 멈춰 `PRECHECK_UNAUTHORIZED`가 된다 — 없는 자원에는 태그가 없어 조건을 평가할 수 없기 때문이다. **거절 자체는 일어나므로 안전 판정은 같고 사유 표기만 다르다.** ADR-0006 §4 이월 8행(DryRun의 대상 존재 검사)과 같은 성격이며 처분도 같이 간다 — 코드는 바꾸지 않는다(2026-10-14 안성일 처분).
 
 `ISOLATE`·`UNISOLATE`가 부분 대체라는 사실 자체는 새로운 결정이 아니다 — 선행 규격이 이미 `dry_run_supported: partial` + "`describe_target_health` 사전 조회로 대체 검증"으로 규정하고 있었고, 본 ADR은 그것을 실측으로 확인해 executor 규약에 편입한 것이다.
 
@@ -283,3 +285,23 @@ authorize_security_group_ingress(GroupId='sg-000...0')  # 부재 -> DryRunOperat
   | --- | --- | --- | --- |
   | ① | §1 | `PrecheckReasonCode`의 정의처를 `packages/schemas/precheck.py` → **`packages/schemas/guardrails.py`**(네 단계 공용 목록)로 정정. `precheck.py`는 재노출이며 `from schemas.precheck import PrecheckReasonCode` 경로는 불변 | 본 ADR 채택 시점에는 ④만 Enum이었고 ①②는 앱 안 문자열, ③은 어휘 자체가 없었다. #125가 넷을 한 파일로 모으면서 정의가 옮겨 갔다 |
   | ② | §1 | `GuardrailStepResult.reason_code`가 네 단계 Enum union으로 좁혀져 **단계↔코드 정합을 계약이 강제**한다는 사실을 매핑 서술에 명시 | 같은 PR. ④ 결과에 다른 단계 코드를 담으면 `ValidationError`이므로, 1:1 매핑만 읽고 임의 문자열을 넣을 수 없다 |
+
+- **2026-10-13 (3차 개정)** — **§4의 일정 서술만 바로잡는다. 잠정 통과 조건 3행의 내용은 한 줄도
+  바꾸지 않는다**(#426 · PM 결정). 1·2차가 실측·코드 이동을 반영한 것과 달리 이번은 **날짜가 지나
+  문서가 가리키는 시점이 사라진 것**을 맞추는 개정이다.
+
+  | # | 절 | 개정 내용 | 근거 |
+  | --- | --- | --- | --- |
+  | ① | §4 | 확정 시점 **`6–7주차` → `10주차(10/12–10/15) P2 실 AWS 첫 검증`**. 6–7주차는 지났고 그 주차에 P2 검증은 없었다 — 스모크 자체가 10주차로 밀렸다(`docs/PROJECT_STATUS.md` 2026-10-13 갱신) | #426 · 2026-10-13 PM 결정 |
+  | ② | §4 | **기록 위치를 명시**했다 — `docs/AWS_SMOKE_RESULT.md` §8-1. 그 칸의 `확정 / 수정 필요` 열이 3행을 닫는 자리다. 종전에는 "확정한다"만 있고 어디에 적는지가 없었다 | 같음 |
+
+  **바뀌지 않은 것**: 잠정 통과 조건 3행의 조건 자체(`ISOLATE` ①②③ · `UNISOLATE` ①②③ · `ENABLE_AUTOSCALING` ①②③④), 판정 규약, 작업↔런북 표, 사유 코드. 조건을 **확정으로 바꾸거나 수정하는 일은 실측 기록 뒤 별도 커밋**이다.
+
+- **2026-10-15 (4차 개정)** — **§4 잠정 3행을 확정한다. 조건의 내용은 바꾸지 않는다**(김세혁 결정). 3차 개정이 남긴 "실측 기록 뒤 별도 커밋"이 이 개정이다.
+
+  | # | 절 | 개정 내용 | 근거 |
+  | --- | --- | --- | --- |
+  | ① | §4 | `ISOLATE` ①②③ · `UNISOLATE` ①②③ · `ENABLE_AUTOSCALING` ①②③④를 **잠정 → 확정**. 통과 경로는 10/12–10/14 실행(P2-1 3회 · P2-2 1회)과 `precheck()` 직접 호출로, **거절 경로는 10/15 `precheck()` 직접 호출로 조건마다 1회 이상** 쟀다 — 없는 격리 SG · TG 미등록 대상 · 없는 복원 SG · 다른 VPC의 TG · 없는 인스턴스 · `stopped` 인스턴스 · 동명 ASG 존재 · `max_size` 5 · `min_size > max_size`. 사유 코드가 전부 §4 규약대로 나왔다 | `docs/AWS_SMOKE_RESULT.md` §8-1 · §7 10/15 |
+  | ② | §4 | **앱 자격의 사유 코드 차이를 명시**했다 — 운영 자격에서는 없는 SG가 ① DryRun의 `UnauthorizedOperation`으로 먼저 걸려 `PRECHECK_UNAUTHORIZED`가 된다(관리자 자격에서는 §4 규약대로 `PRECHECK_TARGET_NOT_FOUND`). 거절은 일어나며 사유 표기만 다르다 | 같은 실측 — 같은 입력을 앱 키와 관리자 키로 각각 호출 |
+
+  **바뀌지 않은 것**: 조건 자체 · 판정 규약 · 사유 코드 정의 · 코드. ②의 사유 표기 차이는 ADR-0006 §4 이월 8행과 함께 **코드를 바꾸지 않는다**(2026-10-14 안성일 처분).

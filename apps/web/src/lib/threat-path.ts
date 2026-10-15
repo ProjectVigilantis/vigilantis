@@ -109,7 +109,7 @@ export function rowThreats(row: TopologyRow, paths: readonly ThreatPath[]): RowT
 }
 
 /**
- * **그리지 않은 경로.** 대시보드는 한 번에 EC2 한 대만 그리므로(`dashboard-topology.tsx`) 고르지
+ * **그리지 않은 경로.** 대시보드는 한 번에 EC2 한 대만 그리므로(종전 대시보드 토폴로지 — 2026-09-30 삭제) 고르지
  * 않은 대의 경로와 트래픽 경로 밖 자원(미사용 SG)의 경로는 화면에 선이 없다. 세어서 밝히지 않으면
  * 지금 그려진 경로가 전부라고 읽힌다.
  */

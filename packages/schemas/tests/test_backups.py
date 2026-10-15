@@ -6,11 +6,11 @@ payload는 만드는 시점과 읽는 시점이 멀다 — 원복이 필요한 �
 
 import pytest
 from pydantic import ValidationError
-
 from schemas.backups import (
     BackupType,
     InstanceSpecBackup,
     NaclRuleIndexBackup,
+    SgAndTgMappingBackup,
     SgFullRulesBackup,
 )
 
@@ -151,7 +151,13 @@ def test_sg_backup_needs_only_the_recreate_inputs():
 
 @pytest.mark.parametrize(
     "field",
-    ["group_name", "description", "vpc_id", "ingress_permissions", "egress_permissions"],
+    [
+        "group_name",
+        "description",
+        "vpc_id",
+        "ingress_permissions",
+        "egress_permissions",
+    ],
 )
 def test_sg_recreate_inputs_are_required(field):
     """이 다섯이 없으면 SG_RECREATE는 그룹을 만들거나 규칙을 되부을 수 없다 —
@@ -194,7 +200,9 @@ def test_sg_backup_keeps_permissions_as_aws_returned_them():
         "FromPort": 22,
         "ToPort": 22,
         "IpRanges": [{"CidrIp": "10.0.0.0/8", "Description": "bastion"}],
-        "UserIdGroupPairs": [{"UserId": "123456789012", "GroupId": "sg-0abc123456789def0"}],
+        "UserIdGroupPairs": [
+            {"UserId": "123456789012", "GroupId": "sg-0abc123456789def0"}
+        ],
         "PrefixListIds": [],
         "Ipv6Ranges": [],
     }
@@ -208,3 +216,90 @@ def test_sg_backup_rejects_unknown_keys():
     """읽는 쪽이 dict.get으로 더듬지 않게 하려는 계약이다(ADR-0008 §5)."""
     with pytest.raises(ValidationError):
         SgFullRulesBackup(**{**SG_FULL_RULES, "tags": []})
+
+
+# ------------------------------------------------------------------ SG/TG 매핑 (EC2_ISOLATE)
+_MAPPING = {
+    "security_group_ids": ["sg-0aaa111122223333a"],
+    "target_group_arn": "arn:aws:elasticloadbalancing:ap-northeast-2:123456789012:targetgroup/tg/0123456789abcdef",
+    "target_port": 8080,
+    "network_interfaces": [
+        {
+            "network_interface_id": "eni-0aaa111122223333a",
+            "security_group_ids": ["sg-0aaa111122223333a"],
+        },
+        {
+            "network_interface_id": "eni-0bbb444455556666b",
+            "security_group_ids": ["sg-0bbb111122223333b"],
+        },
+    ],
+}
+
+
+def test_sg_tg_mapping_round_trips_as_plain_json():
+    record = SgAndTgMappingBackup(**_MAPPING)
+    assert SgAndTgMappingBackup.model_validate(record.model_dump(mode="json")) == record
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["security_group_ids", "target_group_arn", "target_port", "network_interfaces"],
+)
+def test_sg_tg_mapping_restore_inputs_are_required(field):
+    """ADR-0008 §5 필수 3항목 + ENI별 목록 — 하나라도 없으면 해제가 원상 복구가 아니다."""
+    payload = {**_MAPPING}
+    payload.pop(field)
+    with pytest.raises(ValidationError):
+        SgAndTgMappingBackup(**payload)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"security_group_ids": ["sg-0bbb111122223333b"]},  # 주 ENI의 SG가 아니다
+        {"target_port": 0},
+        {"network_interfaces": []},
+        {
+            "network_interfaces": [
+                {
+                    "network_interface_id": "eni-0aaa111122223333a",
+                    "security_group_ids": [],
+                }
+            ]
+        },
+        {"extra": 1},
+    ],
+    ids=[
+        "primary-mismatch",
+        "port-out-of-range",
+        "no-eni",
+        "eni-without-sg",
+        "unknown-key",
+    ],
+)
+def test_sg_tg_mapping_rejects_payloads_that_cannot_restore(overrides):
+    with pytest.raises(ValidationError):
+        SgAndTgMappingBackup(**{**_MAPPING, **overrides})
+
+
+def test_scale_in_protection_shape_follows_status():
+    from pydantic import ValidationError
+    from schemas.backups import ScaleInProtectionBackup, ScaleInProtectionResult
+
+    with pytest.raises(ValidationError):
+        ScaleInProtectionBackup(
+            status="MANAGED", asg_name="a"
+        )  # 이전 값 없이 managed 불가
+    with pytest.raises(ValidationError):
+        ScaleInProtectionBackup(
+            status="UNKNOWN", previous_protected=False
+        )  # 모름에 값 금지
+    with pytest.raises(ValidationError):  # 실패·모름은 잔여를 남긴다
+        ScaleInProtectionResult(
+            phase="PROTECT",
+            outcome="UNKNOWN",
+            reason="WRITE_UNCERTAIN",
+            instance_id="i-1",
+            write_attempted=True,
+            residual=False,
+        )

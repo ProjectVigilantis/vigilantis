@@ -1,0 +1,1403 @@
+# ==============================================================================
+# [파일 설명]  담당: 김세혁 (Infra & DevSecOps)
+# Vigilantis 플랫폼 배포 환경 구성·배포·정리 스크립트입니다. (ADR-0010)
+#
+# MVP 마감 판정(10/15(목)) 기준에 배포가 들어오면서, 플랫폼(api·web·DB)을 실 AWS에 올린다.
+# 단일 계정이지만 **실제 SaaS와 같은 모양**으로 세운다 — 플랫폼과 관제 대상(스모크 환경)을
+# VPC·역할로 가르고, 앱은 장기 키 없이 역할 전환(AssumeRole + ExternalId)으로만 관제 대상에
+# 닿는다. Post-MVP에서 계정을 가르면(#438 ①②) 접근 역할의 계정 번호만 바뀐다.
+#
+# 구성 (서울 리전 — 관제 대상과 같은 리전, ADR-0010 §2):
+#   브라우저 ─HTTPS─ CloudFront(기본 도메인 · --domain을 주면 그 도메인도) + WAF(허용 IP만)
+#            └─HTTP + 비밀 헤더─ 공개 ALB(CloudFront IP만 수신)
+#                 ├ /api/* · /health → ECS api (태스크 1개 고정)
+#                 └ 그 밖           → ECS web
+#   ECS(프라이빗 서브넷) → RDS PostgreSQL(프라이빗) · NAT → OpenAI·AWS API
+#   api 태스크 역할(vigilantis-platform) ─AssumeRole + ExternalId─ vigilantis-access → 스모크 VPC
+#
+# Terraform이 아니라 Boto3인 이유: IaC는 Post-MVP다(ADR-0006 §2 · #438 ⑨). 방식은
+# scripts/provision_smoke_aws.py와 같다 — 태그 식별·멱등·미리 보기·실 AWS 전용 가드.
+#
+# 실행 (repo 루트, **관리자 프로필**로 — 앱 키가 아니다):
+#   읽기만     : uv run python scripts/provision_platform_aws.py status --account <계정 ID>
+#   세울 목록  : ... up --account <계정 ID> --allow-cidr <허용 IP>/32 [--domain <도메인>]
+#   실제 생성  : ... up --account <계정 ID> --allow-cidr <허용 IP>/32 [--domain <도메인>] --yes
+#                --domain: Route53 호스팅 영역과 us-east-1 ACM 인증서(ISSUED)가 먼저 있어야 한다.
+#                CloudFront에 별칭·인증서를 달고 Route53에 A 별칭 레코드를 만든다
+#   이미지     : ... build --account <계정 ID> --tag <태그>        (docker 필요 — ECR에 api·web 푸시)
+#   배포       : ... deploy --account <계정 ID> --tag <태그> [--enable-dispatch] --yes
+#   전부 정리  : ... down --account <계정 ID> --yes
+#
+# 안전 가드 (스모크 스크립트와 같다):
+#   ① AWS_ENDPOINT_URL이 잡혀 있으면 멈춘다 — 전부 실 AWS 과금 자원이다.
+#   ② --account가 호출 주체의 계정과 다르면 멈춘다. 계정 ID와 허용 IP는 저장소에 적지 않는다.
+#   ③ up·deploy·down은 --yes 없이는 아무것도 바꾸지 않는다.
+#   ④ down이 지우는 것은 플랫폼 태그 자원과 **플랫폼 VPC 안의 것**뿐이다. 스모크 환경과
+#      그 앱 정책(vigilantis-smoke-app)은 건드리지 않는다 — 접근 역할은 그 정책을 빌려 쓸 뿐이다.
+#      반대로 스모크 down은 접근 역할이 그 정책을 붙잡고 있으면 멈춘다 — 정리 순서는
+#      **플랫폼 down → 스모크 down**이다(ADR-0010 §7).
+#   ⑤ 이름이 같아도 플랫폼 태그(vigilantis:platform=true)가 없는 IAM 역할은 덮어쓰거나 지우지 않는다.
+#   ⑥ --allow-cidr는 IPv4 CIDR이고 /24보다 넓으면 거부한다 — 로그인 없는 MVP에서 허용 IP가 출입문이다.
+#
+# 비밀값은 출력하지 않는다. OpenAI 키 비밀은 자리만 만들고 값은 PM이 직접 넣는다:
+#   aws secretsmanager put-secret-value --secret-id vigilantis-platform/openai-api-key --secret-string <키>
+# ==============================================================================
+
+from __future__ import annotations
+
+import argparse
+import base64
+import ipaddress
+import json
+import secrets
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any, Callable, Optional
+from urllib.parse import urlsplit
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+for _p in (str(_REPO_ROOT / "apps" / "core-api"), str(_REPO_ROOT / "packages")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from botocore.exceptions import ClientError  # noqa: E402
+
+from services.aws.client import aws_client, default_region, endpoint_url  # noqa: E402
+
+PREFIX = "vigilantis-platform"
+TAG_KEY = "vigilantis:platform"
+TAG_VALUE = "true"
+
+VPC_NAME = f"{PREFIX}-vpc"
+VPC_CIDR = "10.50.0.0/16"  # 기본 VPC(172.31/16)·스모크 VPC(10.42/16)와 겹치지 않게
+PUBLIC_SUBNETS = {"a": "10.50.0.0/24", "c": "10.50.1.0/24"}    # ALB·NAT
+PRIVATE_SUBNETS = {"a": "10.50.10.0/24", "c": "10.50.11.0/24"}  # ECS·RDS
+NAT_AZ = "a"  # NAT 1개 — 비용 우선(AZ 장애 시 c의 아웃바운드도 끊기는 대가, ADR-0010 §5)
+
+SG_ALB = f"{PREFIX}-alb"
+SG_API = f"{PREFIX}-api"
+SG_WEB = f"{PREFIX}-web"
+SG_DB = f"{PREFIX}-db"
+SECURITY_GROUPS = (SG_ALB, SG_API, SG_WEB, SG_DB)
+# ALB는 CloudFront에서만 받는다 — AWS 관리형 prefix list. 우회해 ALB 주소로 직접 들어오는 길은
+# 이 목록과 아래 비밀 헤더 두 겹으로 막는다
+CLOUDFRONT_PREFIX_LIST = "com.amazonaws.global.cloudfront.origin-facing"
+API_PORT = 8000
+WEB_PORT = 3000
+
+DB_INSTANCE = f"{PREFIX}-db"
+DB_SUBNET_GROUP = f"{PREFIX}-db"
+DB_CLASS = "db.t4g.micro"
+# compose의 postgres:16과 맞춘다. 메이저만 넘기면 RDS가 그 메이저의 기본 마이너를 고른다 —
+# 버전 목록을 조회해 고르지 않는다(목록이 페이지로 나뉘면 16.x를 놓친다)
+DB_MAJOR = "16"
+DB_STORAGE_GB = 20
+DB_NAME = "vigilantis"
+DB_USER = "vigilantis"
+# RDS 생성 요청 전에 접속 문자열 비밀을 먼저 저장할 때의 호스트 자리 — 대기 뒤 실제 엔드포인트로 채운다.
+# .invalid는 절대 풀리지 않는 예약 도메인이라 채워지기 전 배포가 엉뚱한 곳에 붙지 않는다
+DB_HOST_PENDING = "pending.invalid"
+
+ECR_REPOS = {"api": f"{PREFIX}-api", "web": f"{PREFIX}-web"}
+
+SECRET_DATABASE_URL = f"{PREFIX}/database-url"
+SECRET_OPENAI = f"{PREFIX}/openai-api-key"
+SECRET_ORIGIN = f"{PREFIX}/origin-verify"        # CloudFront → ALB 비밀 헤더 값
+SECRET_EXTERNAL_ID = f"{PREFIX}/access-external-id"
+OPENAI_PLACEHOLDER = "SET_ME"  # 값은 PM이 직접 넣는다 — 스크립트는 키를 다루지 않는다
+
+ROLE_EXEC = f"{PREFIX}-exec"   # ECS가 이미지를 받고 비밀을 주입하는 역할
+ROLE_TASK = PREFIX              # api 컨테이너의 역할 — 접근 역할 전환 하나만 허용
+ROLE_ACCESS = "vigilantis-access"
+# 접근 역할의 권한은 스모크 스크립트가 만든 Action Whitelist 거울 정책을 그대로 빌린다(ADR-0009 §2).
+# 정책을 두 벌 두면 tests/test_provision_smoke_aws.py의 두 방향 보증이 한쪽에만 걸린다
+SMOKE_POLICY_NAME = "vigilantis-smoke-app"
+SMOKE_VPC_NAME = "vigilantis-smoke-vpc"
+SESSION_SECONDS = 900  # 원격 회수(#438 ②)의 노출 상한과 같은 값
+# WAF 허용 CIDR의 최소 접두 길이 — 이보다 넓은 범위(/0–/23)는 받지 않는다. WAF는 /0만 거절한다
+MIN_ALLOW_PREFIX = 24
+
+CLUSTER = PREFIX
+LOG_GROUPS = {"api": f"/{PREFIX}/api", "web": f"/{PREFIX}/web"}
+LOG_RETENTION_DAYS = 30
+
+ALB_NAME = f"{PREFIX}-alb"
+TG_API = f"{PREFIX}-api"
+TG_WEB = f"{PREFIX}-web"
+ORIGIN_HEADER = "X-Vigilantis-Origin"
+API_PATHS = ("/api/*", "/health")
+WEB_HEALTH_PATH = "/favicon.ico"  # 페이지는 서버에서 API를 부르므로 정적 파일로 생존만 본다
+DEREGISTRATION_DELAY_SECONDS = 30  # TG 연결 비우기 대기 — target_group_attributes
+
+WAF_IPSET = f"{PREFIX}-allow"
+WAF_ACL = f"{PREFIX}-waf"
+CF_COMMENT = PREFIX  # CloudFront 배포는 태그로 찾기 어렵다 — comment로 식별한다
+CF_HOSTED_ZONE_ID = "Z2FDTNDATAQYW2"  # CloudFront 별칭 레코드의 고정 호스팅 영역 ID(AWS 문서 · 전 계정 공통)
+# AWS 관리형 정책 ID(전 계정 공통)
+CF_CACHING_DISABLED = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+CF_ALL_VIEWER_EXCEPT_HOST = "b689b0a8-53d0-40ab-baf2-68738e2966ac"
+
+API_SERVICE = f"{PREFIX}-api"
+WEB_SERVICE = f"{PREFIX}-web"
+API_TASK_FAMILY = f"{PREFIX}-api"
+WEB_TASK_FAMILY = f"{PREFIX}-web"
+
+
+# ------------------------------------------------------------------ 순수 정의 (테스트 대상)
+def task_role_policy(account: str) -> dict:
+    """api 태스크 역할 — **접근 역할 전환 하나뿐**이다. AWS 자원을 직접 만지는 권한은 없다.
+
+    플랫폼이 관제 대상에 닿는 길을 이 한 줄로 좁히는 것이 SaaS 모양의 핵심이다(ADR-0010 §3).
+    원격 회수(#438 ②)는 이 문장에서 고객 역할 ARN을 빼는 것으로 한다.
+    """
+    return {
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Sid": "AssumeAccessRoleOnly",
+            "Effect": "Allow",
+            "Action": "sts:AssumeRole",
+            "Resource": f"arn:aws:iam::{account}:role/{ROLE_ACCESS}",
+        }],
+    }
+
+
+def access_trust_policy(account: str, external_id: str) -> dict:
+    """접근 역할의 신뢰 정책 — 플랫폼 태스크 역할만, ExternalId가 맞을 때만."""
+    return {
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"AWS": f"arn:aws:iam::{account}:role/{ROLE_TASK}"},
+            "Action": "sts:AssumeRole",
+            "Condition": {"StringEquals": {"sts:ExternalId": external_id}},
+        }],
+    }
+
+
+def ecs_tasks_trust_policy() -> dict:
+    return {
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"Service": "ecs-tasks.amazonaws.com"},
+            "Action": "sts:AssumeRole",
+        }],
+    }
+
+
+def exec_secrets_policy(secret_arns: list[str]) -> dict:
+    """실행 역할이 주입할 비밀만 읽는다."""
+    return {
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Action": "secretsmanager:GetSecretValue",
+            "Resource": sorted(secret_arns),
+        }],
+    }
+
+
+def listener_rules(tg_api: str, tg_web: str, origin_value: str) -> list[dict]:
+    """ALB 규칙 — **비밀 헤더가 있어야만** 앱으로 간다. 없으면 기본 동작(403)."""
+    header = {"Field": "http-header", "HttpHeaderConfig": {
+        "HttpHeaderName": ORIGIN_HEADER, "Values": [origin_value]}}
+    return [
+        {"Priority": 10, "Conditions": [header, {"Field": "path-pattern", "Values": list(API_PATHS)}],
+         "Actions": [{"Type": "forward", "TargetGroupArn": tg_api}]},
+        {"Priority": 20, "Conditions": [header],
+         "Actions": [{"Type": "forward", "TargetGroupArn": tg_web}]},
+    ]
+
+
+def waf_rules(ipset_arn: str) -> list[dict]:
+    """기본 차단 + 허용 IP만 통과. 로그인이 없는 MVP라 이것이 출입문이다(#438 ④ 전까지)."""
+    return [{
+        "Name": "allow-listed-ips",
+        "Priority": 0,
+        "Statement": {"IPSetReferenceStatement": {"ARN": ipset_arn}},
+        "Action": {"Allow": {}},
+        "VisibilityConfig": {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True,
+                             "MetricName": f"{PREFIX}-allow"},
+    }]
+
+
+def api_container(image: str, *, region: str, cors_origin: str, access_role_arn: str,
+                  collect_vpc_ids: str, dispatch_enabled: bool, secrets_arns: dict[str, str]) -> dict:
+    env = {
+        "AWS_REGION": region,
+        "CORS_ALLOW_ORIGINS": cors_origin,
+        "COLLECT_VPC_IDS": collect_vpc_ids,
+        "VIGILANTIS_ACCESS_ROLE_ARN": access_role_arn,
+        "VIGILANTIS_ACCESS_SESSION_SECONDS": str(SESSION_SECONDS),
+        # AI 분석과 조치 실행 디스패치를 **한 스위치로** 켜고 끈다(config.py — 둘이 이 값을 공유한다).
+        # 끄면 승인한 조치도 실행되지 않고 접수 상태로 멈춘다. 켜면 인시던트마다 OpenAI가 과금된다.
+        # 기본은 끈다(배포 시 --enable-dispatch)
+        "DISPATCH_ENABLED": "true" if dispatch_enabled else "false",
+        "SCAN_ENABLED": "true",
+        # 파일 로그는 끈다 — 컨테이너 파일은 태스크와 함께 사라진다. stdout이 CloudWatch Logs로 간다
+        "LOG_FILE_ENABLED": "false",
+    }
+    return {
+        "name": "api",
+        "image": image,
+        "essential": True,
+        "portMappings": [{"containerPort": API_PORT, "protocol": "tcp"}],
+        "environment": [{"name": k, "value": v} for k, v in sorted(env.items())],
+        "secrets": [{"name": k, "valueFrom": v} for k, v in sorted(secrets_arns.items())],
+        "logConfiguration": {"logDriver": "awslogs", "options": {
+            "awslogs-group": LOG_GROUPS["api"], "awslogs-region": region, "awslogs-stream-prefix": "api"}},
+    }
+
+
+def web_container(image: str, *, region: str) -> dict:
+    return {
+        "name": "web",
+        "image": image,
+        "essential": True,
+        "portMappings": [{"containerPort": WEB_PORT, "protocol": "tcp"}],
+        "environment": [{"name": "PORT", "value": str(WEB_PORT)}, {"name": "HOSTNAME", "value": "0.0.0.0"}],
+        "logConfiguration": {"logDriver": "awslogs", "options": {
+            "awslogs-group": LOG_GROUPS["web"], "awslogs-region": region, "awslogs-stream-prefix": "web"}},
+    }
+
+
+def target_group_attributes() -> list[dict]:
+    """연결 비우기 대기(deregistration delay)를 기본 300초에서 줄인다.
+
+    api는 겹쳐 뜨지 않게 이전 태스크를 내린 뒤 새 태스크를 띄우므로(service_deployment) 이 대기가
+    그대로 api 중단 시간에 더해진다 — 기본값이면 재배포마다 6–8분 끊겼다(10/13 실측). 요청은 짧은
+    REST라 30초면 비워지고, WS는 끊겨도 화면이 재연결한다.
+    """
+    return [{"Key": "deregistration_delay.timeout_seconds", "Value": str(DEREGISTRATION_DELAY_SECONDS)}]
+
+
+def service_deployment(service: str) -> dict:
+    """api는 **겹쳐 뜨지 않게** 먼저 내리고 띄운다(min 0 · max 100).
+
+    스케줄러·실행 디스패처·AI 디스패처가 프로세스 메모리에서 돌고 디스패처에는 프로세스 간
+    잠금이 없다(#435 4-2). 기본 롤링(새 태스크를 먼저 띄움)이면 그 사이 같은 실행이 두 번
+    디스패치될 수 있다. 대가는 배포 중 수십 초의 중단이다. web은 상태가 없어 기본 롤링이다.
+    """
+    if service == API_SERVICE:
+        return {"minimumHealthyPercent": 0, "maximumPercent": 100,
+                "deploymentCircuitBreaker": {"enable": True, "rollback": True}}
+    return {"minimumHealthyPercent": 100, "maximumPercent": 200,
+            "deploymentCircuitBreaker": {"enable": True, "rollback": True}}
+
+
+def public_origins(dist: dict) -> list[str]:
+    """화면이 열리는 주소 목록 — **별칭(사용자 도메인)이 먼저**, CloudFront 기본 도메인이 마지막이다.
+
+    첫 값이 웹 번들에 박힐 API 주소이고(build), 전부가 api의 CORS 허용 출처다(deploy). 기본 도메인을
+    빼지 않는 이유: 별칭을 단 뒤에도 그 주소로 열 수 있고, 거기서 실시간 연결(WS의 Origin 검사)이
+    끊기면 안 된다. 받는 모양은 list_distributions의 배포 요약이다.
+    """
+    aliases = (dist.get("Aliases") or {}).get("Items") or []
+    return [f"https://{a}" for a in aliases] + [f"https://{dist['DomainName']}"]
+
+
+def custom_domain_config(config: dict, domain: str, cert_arn: str) -> dict:
+    """배포 설정에 별칭과 인증서를 단 사본. 나머지 설정은 그대로 둔다(update_distribution은 전체 교체다)."""
+    updated = dict(config)
+    updated["Aliases"] = {"Quantity": 1, "Items": [domain]}
+    updated["ViewerCertificate"] = {"ACMCertificateArn": cert_arn, "SSLSupportMethod": "sni-only",
+                                    "MinimumProtocolVersion": "TLSv1.2_2021"}
+    return updated
+
+
+def certificate_covers(cert: dict, domain: str) -> bool:
+    """ACM 인증서 요약이 이 도메인을 덮는가 — 정확히 같거나 한 단계 와일드카드(*.상위)."""
+    names = {cert.get("DomainName", "")} | set(cert.get("SubjectAlternativeNameSummaries") or [])
+    parent = domain.split(".", 1)[1] if "." in domain else ""
+    return domain in names or (bool(parent) and f"*.{parent}" in names)
+
+
+def validate_allow_cidrs(cidrs: list[str]) -> list[str]:
+    """WAF 허용 목록 검사 — IPv4 CIDR만, /MIN_ALLOW_PREFIX보다 넓으면 거부한다.
+
+    로그인이 없는 MVP라 허용 IP가 출입문이다(ADR-0010 §4). WAF는 /0만 거절하므로 0.0.0.0/1 같은
+    광역이 그대로 통과한다 — 여기서 막는다. 호스트 비트가 섞인 값(1.2.3.4/24)도 오타로 보고 거부한다.
+    """
+    out = []
+    for raw in cidrs:
+        try:
+            net = ipaddress.ip_network(raw, strict=True)
+        except ValueError as exc:
+            sys.exit(f"--allow-cidr {raw!r}는 올바른 CIDR가 아니다 — {exc}")
+        if net.version != 4:
+            sys.exit(f"--allow-cidr {raw}: IPv4만 받는다(WAF IP 집합이 IPV4다)")
+        if net.prefixlen < MIN_ALLOW_PREFIX:
+            sys.exit(f"--allow-cidr {raw}: /{MIN_ALLOW_PREFIX}보다 넓은 범위는 받지 않는다 — "
+                     "로그인이 없는 MVP라 허용 IP가 출입문이다(ADR-0010 §4)")
+        out.append(str(net))
+    return out
+
+
+def database_url(password: str, host: str) -> str:
+    return f"postgresql+psycopg://{DB_USER}:{password}@{host}:5432/{DB_NAME}"
+
+
+def is_platform_tagged(tags: list[dict]) -> bool:
+    """이름이 같아도 이 태그가 없으면 플랫폼 스크립트가 만든 자원이 아니다."""
+    return any(t.get("Key") == TAG_KEY and t.get("Value") == TAG_VALUE for t in tags or [])
+
+
+# ------------------------------------------------------------------ 공통
+def _require_real_aws(expected_account: str) -> dict:
+    endpoint = endpoint_url()
+    if endpoint:
+        sys.exit(f"AWS_ENDPOINT_URL={endpoint} 설정됨 — 이 스크립트는 실 AWS 전용이다. 셸에서 지우고 다시 실행할 것.")
+    identity = aws_client("sts").get_caller_identity()
+    if identity["Account"] != expected_account:
+        sys.exit(f"--account {expected_account} ≠ 호출 주체의 계정 {identity['Account']} — AWS 프로필을 확인할 것.")
+    print(f"[platform] 계정 {identity['Account']} · 주체 {identity['Arn']} · 리전 {default_region()}")
+    return identity
+
+
+def _code(exc: ClientError) -> str:
+    return exc.response.get("Error", {}).get("Code", "")
+
+
+def _tags(name: str) -> list[dict]:
+    return [{"Key": "Name", "Value": name}, {"Key": TAG_KEY, "Value": TAG_VALUE}]
+
+
+def _tag_spec(resource_type: str, name: str) -> list[dict]:
+    return [{"ResourceType": resource_type, "Tags": _tags(name)}]
+
+
+def _kv_tags(name: str) -> list[dict]:
+    return _tags(name)
+
+
+def _named(ec2_call, key: str, name: str, extra: Optional[list] = None) -> list[dict]:
+    filters = [{"Name": "tag:Name", "Values": [name]}, {"Name": f"tag:{TAG_KEY}", "Values": [TAG_VALUE]}]
+    return ec2_call(Filters=filters + (extra or []))[key]
+
+
+def _retry(fn: Callable[[], Any], what: str, codes: tuple[str, ...], timeout: int = 900) -> Any:
+    deadline = time.time() + timeout
+    while True:
+        try:
+            return fn()
+        except ClientError as exc:
+            if _code(exc) not in codes or time.time() > deadline:
+                raise
+            print(f"[platform] {what} 대기 — {_code(exc)}")
+            time.sleep(15)
+
+
+def _vpc_filter(vpc_id: str) -> dict:
+    return {"Name": "vpc-id", "Values": [vpc_id]}
+
+
+# ------------------------------------------------------------------ 찾기
+def _find_vpc(ec2) -> Optional[str]:
+    vpcs = _named(ec2.describe_vpcs, "Vpcs", VPC_NAME)
+    return vpcs[0]["VpcId"] if vpcs else None
+
+
+def _find_smoke_vpc(ec2) -> Optional[str]:
+    vpcs = ec2.describe_vpcs(Filters=[{"Name": "tag:Name", "Values": [SMOKE_VPC_NAME]}])["Vpcs"]
+    return vpcs[0]["VpcId"] if vpcs else None
+
+
+def _find_subnets(ec2, vpc_id: str) -> dict[str, str]:
+    out = {}
+    for s in ec2.describe_subnets(Filters=[_vpc_filter(vpc_id)])["Subnets"]:
+        name = next((t["Value"] for t in s.get("Tags", []) if t["Key"] == "Name"), "")
+        out[name] = s["SubnetId"]
+    return out
+
+
+def _find_sgs(ec2, vpc_id: str) -> dict[str, str]:
+    groups = ec2.describe_security_groups(Filters=[_vpc_filter(vpc_id)])["SecurityGroups"]
+    return {g["GroupName"]: g["GroupId"] for g in groups if g["GroupName"] in SECURITY_GROUPS}
+
+
+def _find_nat(ec2, vpc_id: str) -> Optional[dict]:
+    nats = ec2.describe_nat_gateways(Filters=[_vpc_filter(vpc_id),
+                                              {"Name": "state", "Values": ["pending", "available"]}])["NatGateways"]
+    return nats[0] if nats else None
+
+
+def _find_db(rds) -> Optional[dict]:
+    try:
+        return rds.describe_db_instances(DBInstanceIdentifier=DB_INSTANCE)["DBInstances"][0]
+    except ClientError as exc:
+        if _code(exc) == "DBInstanceNotFound":
+            return None
+        raise
+
+
+def _find_secret(sm, name: str) -> Optional[str]:
+    try:
+        return sm.describe_secret(SecretId=name)["ARN"]
+    except ClientError as exc:
+        if _code(exc) == "ResourceNotFoundException":
+            return None
+        raise
+
+
+def _get_role(iam, name: str) -> Optional[dict]:
+    try:
+        return iam.get_role(RoleName=name)["Role"]
+    except ClientError as exc:
+        if _code(exc) == "NoSuchEntity":
+            return None
+        raise
+
+
+def _find_role(iam, name: str) -> Optional[str]:
+    role = _get_role(iam, name)
+    return role["Arn"] if role else None
+
+
+def _find_repo(ecr, name: str) -> Optional[str]:
+    try:
+        return ecr.describe_repositories(repositoryNames=[name])["repositories"][0]["repositoryUri"]
+    except ClientError as exc:
+        if _code(exc) == "RepositoryNotFoundException":
+            return None
+        raise
+
+
+def _find_lb(elbv2) -> Optional[dict]:
+    try:
+        return elbv2.describe_load_balancers(Names=[ALB_NAME])["LoadBalancers"][0]
+    except ClientError as exc:
+        if _code(exc) == "LoadBalancerNotFound":
+            return None
+        raise
+
+
+def _find_tg(elbv2, name: str) -> Optional[str]:
+    try:
+        return elbv2.describe_target_groups(Names=[name])["TargetGroups"][0]["TargetGroupArn"]
+    except ClientError as exc:
+        if _code(exc) == "TargetGroupNotFound":
+            return None
+        raise
+
+
+def _find_ipset(waf) -> Optional[dict]:
+    for s in waf.list_ip_sets(Scope="CLOUDFRONT", Limit=100).get("IPSets", []):
+        if s["Name"] == WAF_IPSET:
+            return s
+    return None
+
+
+def _find_acl(waf) -> Optional[dict]:
+    for a in waf.list_web_acls(Scope="CLOUDFRONT", Limit=100).get("WebACLs", []):
+        if a["Name"] == WAF_ACL:
+            return a
+    return None
+
+
+def _find_distribution(cf) -> Optional[dict]:
+    for page in cf.get_paginator("list_distributions").paginate():
+        for d in page.get("DistributionList", {}).get("Items", []) or []:
+            if d.get("Comment") == CF_COMMENT:
+                return d
+    return None
+
+
+def _find_certificate(acm, domain: str) -> Optional[str]:
+    for page in acm.get_paginator("list_certificates").paginate(CertificateStatuses=["ISSUED"]):
+        for cert in page.get("CertificateSummaryList", []):
+            if certificate_covers(cert, domain):
+                return cert["CertificateArn"]
+    return None
+
+
+def _find_zone(r53, domain: str) -> Optional[str]:
+    """도메인을 담는 가장 긴 이름의 공개 호스팅 영역 ID."""
+    best: Optional[tuple[int, str]] = None
+    for page in r53.get_paginator("list_hosted_zones").paginate():
+        for zone in page["HostedZones"]:
+            name = zone["Name"].rstrip(".")
+            if zone.get("Config", {}).get("PrivateZone"):
+                continue
+            if (domain == name or domain.endswith(f".{name}")) and (best is None or len(name) > best[0]):
+                best = (len(name), zone["Id"].rsplit("/", 1)[-1])
+    return best[1] if best else None
+
+
+def alias_records_for(records: list[dict], domain: str, cf_domain: str) -> list[dict]:
+    """이 배포를 가리키는 domain의 A·AAAA 별칭 레코드만. 다른 곳을 가리키는 레코드는 대상이 아니다."""
+    return [r for r in records
+            if r["Name"].rstrip(".") == domain and r["Type"] in ("A", "AAAA")
+            and r.get("AliasTarget", {}).get("DNSName", "").rstrip(".") == cf_domain]
+
+
+def _find_cluster(ecs) -> Optional[str]:
+    found = ecs.describe_clusters(clusters=[CLUSTER])["clusters"]
+    return found[0]["clusterArn"] if found and found[0]["status"] == "ACTIVE" else None
+
+
+def _find_service(ecs, name: str) -> Optional[dict]:
+    if not _find_cluster(ecs):
+        return None
+    found = ecs.describe_services(cluster=CLUSTER, services=[name])["services"]
+    return found[0] if found and found[0]["status"] == "ACTIVE" else None
+
+
+def inventory(c: dict) -> list[tuple[str, str, Optional[str]]]:
+    ec2, elbv2 = c["ec2"], c["elbv2"]
+    vpc_id = _find_vpc(ec2)
+    rows: list[tuple[str, str, Optional[str]]] = [("VPC", VPC_NAME, vpc_id)]
+    subnets = _find_subnets(ec2, vpc_id) if vpc_id else {}
+    for tier, table in (("public", PUBLIC_SUBNETS), ("private", PRIVATE_SUBNETS)):
+        for az in table:
+            name = f"{PREFIX}-{tier}-{az}"
+            rows.append(("Subnet", name, subnets.get(name)))
+    nat = _find_nat(ec2, vpc_id) if vpc_id else None
+    rows.append(("NatGateway", f"{PREFIX}-nat", nat["NatGatewayId"] if nat else None))
+    sgs = _find_sgs(ec2, vpc_id) if vpc_id else {}
+    rows += [("SecurityGroup", n, sgs.get(n)) for n in SECURITY_GROUPS]
+    db = _find_db(c["rds"])
+    rows.append(("RDS", DB_INSTANCE, f"{db['DBInstanceIdentifier']} ({db['DBInstanceStatus']})" if db else None))
+    rows += [("Secret", n, _find_secret(c["sm"], n)) for n in
+             (SECRET_DATABASE_URL, SECRET_OPENAI, SECRET_ORIGIN, SECRET_EXTERNAL_ID)]
+    rows += [("ECR", n, _find_repo(c["ecr"], n)) for n in ECR_REPOS.values()]
+    rows += [("IamRole", n, _find_role(c["iam"], n)) for n in (ROLE_EXEC, ROLE_TASK, ROLE_ACCESS)]
+    rows.append(("EcsCluster", CLUSTER, _find_cluster(c["ecs"])))
+    lb = _find_lb(elbv2)
+    rows.append(("LoadBalancer", ALB_NAME, lb["DNSName"] if lb else None))
+    rows += [("TargetGroup", n, _find_tg(elbv2, n)) for n in (TG_API, TG_WEB)]
+    rows.append(("WafIpSet", WAF_IPSET, (_find_ipset(c["waf"]) or {}).get("Id")))
+    rows.append(("WafWebAcl", WAF_ACL, (_find_acl(c["waf"]) or {}).get("Id")))
+    dist = _find_distribution(c["cf"])
+    rows.append(("CloudFront", CF_COMMENT, " · ".join(public_origins(dist)) if dist else None))
+    for name in (API_SERVICE, WEB_SERVICE):
+        svc = _find_service(c["ecs"], name)
+        rows.append(("EcsService", name,
+                     f"running {svc['runningCount']}/{svc['desiredCount']}" if svc else None))
+    return rows
+
+
+def _print_rows(rows: list[tuple[str, str, Optional[str]]]) -> None:
+    for kind, name, value in rows:
+        mark = "✅" if value else "—"
+        print(f"  {mark}  {kind:<14} {name:<36} {value or '없음'}")
+
+
+def status(c: dict) -> None:
+    print("[platform] 플랫폼 자원")
+    _print_rows(inventory(c))
+    for name in (TG_API, TG_WEB):
+        arn = _find_tg(c["elbv2"], name)
+        if arn:
+            states = [t["TargetHealth"]["State"] for t in
+                      c["elbv2"].describe_target_health(TargetGroupArn=arn)["TargetHealthDescriptions"]]
+            print(f"  TG {name}: {', '.join(states) or '대상 없음'}")
+
+
+# ------------------------------------------------------------------ 구성(up)
+def _ensure_vpc(ec2) -> str:
+    vpc_id = _find_vpc(ec2)
+    if vpc_id:
+        return vpc_id
+    vpc_id = ec2.create_vpc(CidrBlock=VPC_CIDR, TagSpecifications=_tag_spec("vpc", VPC_NAME))["Vpc"]["VpcId"]
+    ec2.get_waiter("vpc_available").wait(VpcIds=[vpc_id])
+    # RDS 엔드포인트 이름을 VPC 안에서 풀어야 한다
+    ec2.modify_vpc_attribute(VpcId=vpc_id, EnableDnsSupport={"Value": True})
+    ec2.modify_vpc_attribute(VpcId=vpc_id, EnableDnsHostnames={"Value": True})
+    print(f"[platform] VPC {vpc_id} 생성")
+    return vpc_id
+
+
+def _ensure_subnets(ec2, vpc_id: str, region: str) -> dict[str, str]:
+    have = _find_subnets(ec2, vpc_id)
+    for tier, table in (("public", PUBLIC_SUBNETS), ("private", PRIVATE_SUBNETS)):
+        for az, cidr in table.items():
+            name = f"{PREFIX}-{tier}-{az}"
+            if name in have:
+                continue
+            sid = ec2.create_subnet(VpcId=vpc_id, CidrBlock=cidr, AvailabilityZone=f"{region}{az}",
+                                    TagSpecifications=_tag_spec("subnet", name))["Subnet"]["SubnetId"]
+            have[name] = sid
+            print(f"[platform] Subnet {name} {sid} 생성")
+    return have
+
+
+def _ensure_route_table(ec2, vpc_id: str, name: str, subnet_ids: list[str], route: dict) -> None:
+    tables = _named(ec2.describe_route_tables, "RouteTables", name, [_vpc_filter(vpc_id)])
+    if tables:
+        rt_id = tables[0]["RouteTableId"]
+    else:
+        rt_id = ec2.create_route_table(VpcId=vpc_id, TagSpecifications=_tag_spec("route-table", name))[
+            "RouteTable"]["RouteTableId"]
+        print(f"[platform] RouteTable {name} {rt_id} 생성")
+        tables = [{"Routes": [], "Associations": []}]
+    if not any(r.get("DestinationCidrBlock") == "0.0.0.0/0" for r in tables[0]["Routes"]):
+        ec2.create_route(RouteTableId=rt_id, DestinationCidrBlock="0.0.0.0/0", **route)
+    associated = {a.get("SubnetId") for a in tables[0]["Associations"]}
+    for sid in subnet_ids:
+        if sid not in associated:
+            ec2.associate_route_table(RouteTableId=rt_id, SubnetId=sid)
+
+
+def _ensure_network(ec2, vpc_id: str, subnets: dict[str, str]) -> str:
+    """IGW·공개 경로·NAT·프라이빗 경로. NAT의 공인 IP를 돌려준다(WAF 허용 목록에 들어간다)."""
+    igws = ec2.describe_internet_gateways(Filters=[{"Name": "attachment.vpc-id", "Values": [vpc_id]}])[
+        "InternetGateways"]
+    if igws:
+        igw_id = igws[0]["InternetGatewayId"]
+    else:
+        igw_id = ec2.create_internet_gateway(TagSpecifications=_tag_spec("internet-gateway", f"{PREFIX}-igw"))[
+            "InternetGateway"]["InternetGatewayId"]
+        ec2.attach_internet_gateway(InternetGatewayId=igw_id, VpcId=vpc_id)
+        print(f"[platform] IGW {igw_id} 생성·연결")
+    public_ids = [subnets[f"{PREFIX}-public-{az}"] for az in PUBLIC_SUBNETS]
+    _ensure_route_table(ec2, vpc_id, f"{PREFIX}-public", public_ids, {"GatewayId": igw_id})
+
+    nat = _find_nat(ec2, vpc_id)
+    if not nat:
+        eips = _named(ec2.describe_addresses, "Addresses", f"{PREFIX}-nat")
+        alloc = eips[0]["AllocationId"] if eips else ec2.allocate_address(
+            Domain="vpc", TagSpecifications=_tag_spec("elastic-ip", f"{PREFIX}-nat"))["AllocationId"]
+        nat_id = ec2.create_nat_gateway(SubnetId=subnets[f"{PREFIX}-public-{NAT_AZ}"], AllocationId=alloc,
+                                        TagSpecifications=_tag_spec("natgateway", f"{PREFIX}-nat"))[
+            "NatGateway"]["NatGatewayId"]
+        print(f"[platform] NAT {nat_id} 생성 — available 대기")
+        ec2.get_waiter("nat_gateway_available").wait(NatGatewayIds=[nat_id])
+        nat = ec2.describe_nat_gateways(NatGatewayIds=[nat_id])["NatGateways"][0]
+    private_ids = [subnets[f"{PREFIX}-private-{az}"] for az in PRIVATE_SUBNETS]
+    _ensure_route_table(ec2, vpc_id, f"{PREFIX}-private", private_ids, {"NatGatewayId": nat["NatGatewayId"]})
+    return nat["NatGatewayAddresses"][0]["PublicIp"]
+
+
+def _cloudfront_prefix_list(ec2) -> str:
+    lists = ec2.describe_managed_prefix_lists(
+        Filters=[{"Name": "prefix-list-name", "Values": [CLOUDFRONT_PREFIX_LIST]}])["PrefixLists"]
+    if not lists:
+        sys.exit(f"관리형 prefix list {CLOUDFRONT_PREFIX_LIST}를 찾지 못했다")
+    return lists[0]["PrefixListId"]
+
+
+def _ensure_sgs(ec2, vpc_id: str) -> dict[str, str]:
+    have = _find_sgs(ec2, vpc_id)
+    for name in SECURITY_GROUPS:
+        if name not in have:
+            have[name] = ec2.create_security_group(
+                GroupName=name, Description=f"{PREFIX} {name.rsplit('-', 1)[-1]}", VpcId=vpc_id,
+                TagSpecifications=_tag_spec("security-group", name))["GroupId"]
+            print(f"[platform] SG {name} {have[name]} 생성")
+    rules = {
+        SG_ALB: [{"IpProtocol": "tcp", "FromPort": 80, "ToPort": 80,
+                  "PrefixListIds": [{"PrefixListId": _cloudfront_prefix_list(ec2),
+                                     "Description": "CloudFront origin-facing only"}]}],
+        SG_API: [{"IpProtocol": "tcp", "FromPort": API_PORT, "ToPort": API_PORT,
+                  "UserIdGroupPairs": [{"GroupId": have[SG_ALB]}]}],
+        SG_WEB: [{"IpProtocol": "tcp", "FromPort": WEB_PORT, "ToPort": WEB_PORT,
+                  "UserIdGroupPairs": [{"GroupId": have[SG_ALB]}]}],
+        SG_DB: [{"IpProtocol": "tcp", "FromPort": 5432, "ToPort": 5432,
+                 "UserIdGroupPairs": [{"GroupId": have[SG_API]}]}],
+    }
+    for name, perms in rules.items():
+        try:
+            ec2.authorize_security_group_ingress(GroupId=have[name], IpPermissions=perms)
+        except ClientError as exc:
+            if _code(exc) != "InvalidPermission.Duplicate":
+                raise
+    return have
+
+
+def _put_secret(sm, name: str, value: str) -> str:
+    arn = _find_secret(sm, name)
+    if arn:
+        return arn
+    arn = sm.create_secret(Name=name, SecretString=value, Tags=[{"Key": TAG_KEY, "Value": TAG_VALUE}])["ARN"]
+    print(f"[platform] Secret {name} 생성")
+    return arn
+
+
+def _secret_value(sm, name: str) -> str:
+    return sm.get_secret_value(SecretId=name)["SecretString"]
+
+
+def _ensure_db(rds, sm, subnets: dict[str, str], sg_db: str) -> None:
+    """비밀번호는 **RDS 생성 요청 전에** 비밀로 저장한다 — 대기(수 분–30분) 중 중단돼도 잃지 않는다.
+
+    순서: 접속 문자열 비밀(호스트 자리 DB_HOST_PENDING) → create_db_instance → available 대기 →
+    호스트를 채워 put_secret_value. 어디서 끊겨도 재실행이 비밀의 비밀번호를 다시 쓰고 호스트만 채운다.
+    RDS 관리 비밀(ManageMasterUserPassword)을 쓰지 않는 이유: 그 비밀은 기본 7일마다 회전되는데
+    앱은 접속 문자열 하나(DATABASE_URL)를 받으므로, 회전 때마다 사본이 낡는다.
+    """
+    db = _find_db(rds)
+    if not db and not _find_secret(sm, SECRET_DATABASE_URL):
+        # 비밀번호는 출력하지 않고 DATABASE_URL 비밀로만 남긴다. URL에 넣을 수 있는 문자만 쓴다
+        password = secrets.token_urlsafe(24).replace("-", "a").replace("_", "b")
+        _put_secret(sm, SECRET_DATABASE_URL, database_url(password, DB_HOST_PENDING))
+    if not _find_secret(sm, SECRET_DATABASE_URL):
+        sys.exit(f"RDS {DB_INSTANCE}는 있는데 {SECRET_DATABASE_URL} 비밀이 없다 — 비밀번호를 알 수 없으므로 "
+                 "RDS 마스터 비밀번호를 재설정하고 비밀을 직접 만들 것.")
+    url = urlsplit(_secret_value(sm, SECRET_DATABASE_URL))
+    if not db:
+        try:
+            rds.create_db_subnet_group(
+                DBSubnetGroupName=DB_SUBNET_GROUP, DBSubnetGroupDescription=f"{PREFIX} private",
+                SubnetIds=[subnets[f"{PREFIX}-private-{az}"] for az in PRIVATE_SUBNETS],
+                Tags=[{"Key": TAG_KEY, "Value": TAG_VALUE}])
+        except ClientError as exc:
+            if _code(exc) != "DBSubnetGroupAlreadyExists":
+                raise
+        rds.create_db_instance(
+            DBInstanceIdentifier=DB_INSTANCE, DBInstanceClass=DB_CLASS, Engine="postgres",
+            EngineVersion=DB_MAJOR, AllocatedStorage=DB_STORAGE_GB, StorageType="gp3",
+            StorageEncrypted=True, DBName=DB_NAME, MasterUsername=DB_USER, MasterUserPassword=url.password,
+            DBSubnetGroupName=DB_SUBNET_GROUP, VpcSecurityGroupIds=[sg_db], PubliclyAccessible=False,
+            MultiAZ=False, BackupRetentionPeriod=1, DeletionProtection=False,
+            Tags=[{"Key": TAG_KEY, "Value": TAG_VALUE}, {"Key": "Name", "Value": DB_INSTANCE}])
+        print(f"[platform] RDS {DB_INSTANCE} 생성 요청 — available 대기(수 분)")
+    # 새로 만들었으면 호스트를 항상 다시 적는다(비밀이 지운 옛 인스턴스의 호스트를 들고 있을 수 있다)
+    if not db or url.hostname == DB_HOST_PENDING:
+        rds.get_waiter("db_instance_available").wait(DBInstanceIdentifier=DB_INSTANCE)
+        host = _find_db(rds)["Endpoint"]["Address"]
+        sm.put_secret_value(SecretId=SECRET_DATABASE_URL, SecretString=database_url(url.password, host))
+        print(f"[platform] Secret {SECRET_DATABASE_URL}에 RDS 호스트 기록")
+
+
+def _ensure_repos(ecr) -> dict[str, str]:
+    out = {}
+    for key, name in ECR_REPOS.items():
+        uri = _find_repo(ecr, name)
+        if not uri:
+            uri = ecr.create_repository(repositoryName=name, imageScanningConfiguration={"scanOnPush": True},
+                                        tags=[{"Key": TAG_KEY, "Value": TAG_VALUE}])["repository"]["repositoryUri"]
+            print(f"[platform] ECR {name} 생성")
+        out[key] = uri
+    return out
+
+
+def _ensure_role(iam, name: str, trust: dict, description: str) -> str:
+    role = _get_role(iam, name)
+    if role:
+        # 이름만 같은 남의 역할이면 신뢰 정책을 덮어쓰지 않는다(안전 가드 ⑤)
+        if not is_platform_tagged(role.get("Tags", [])):
+            sys.exit(f"IAM 역할 {name}이 이미 있는데 플랫폼 태그({TAG_KEY}={TAG_VALUE})가 없다 — "
+                     "다른 용도의 역할일 수 있어 덮어쓰지 않는다. 확인 뒤 이름을 비우거나 태그를 달 것.")
+        iam.update_assume_role_policy(RoleName=name, PolicyDocument=json.dumps(trust))
+        return role["Arn"]
+    arn = iam.create_role(RoleName=name, AssumeRolePolicyDocument=json.dumps(trust), Description=description,
+                          MaxSessionDuration=3600, Tags=[{"Key": TAG_KEY, "Value": TAG_VALUE}])["Role"]["Arn"]
+    print(f"[platform] IAM 역할 {name} 생성")
+    return arn
+
+
+def _smoke_policy_arn(account: str) -> str:
+    return f"arn:aws:iam::{account}:policy/{SMOKE_POLICY_NAME}"
+
+
+def _require_smoke_env(iam, ec2, account: str) -> None:
+    """스모크 환경(앱 정책·VPC)이 먼저 있어야 한다 — **비싼 자원을 만들기 전에** 본다.
+
+    접근 역할은 스모크의 Action Whitelist 거울 정책을 빌려 쓰고, 배포는 스모크 VPC를 관제 범위로
+    넣는다. 둘 중 하나라도 없으면 NAT·RDS(시간 과금)를 세운 뒤에야 멈추게 되므로 up의 맨 앞에 둔다.
+    """
+    try:
+        iam.get_policy(PolicyArn=_smoke_policy_arn(account))
+    except ClientError as exc:
+        if _code(exc) == "NoSuchEntity":
+            sys.exit(f"{SMOKE_POLICY_NAME} 정책이 없다 — scripts/provision_smoke_aws.py up을 먼저 돌릴 것"
+                     "(접근 역할은 그 Action Whitelist 거울 정책을 빌려 쓴다).")
+        raise
+    if not _find_smoke_vpc(ec2):
+        sys.exit(f"스모크 VPC({SMOKE_VPC_NAME})가 없다 — scripts/provision_smoke_aws.py up을 먼저 돌릴 것"
+                 "(배포가 그 VPC를 관제 범위 COLLECT_VPC_IDS로 넣는다).")
+
+
+def _ensure_roles(iam, account: str, secret_arns: list[str], external_id: str) -> dict[str, str]:
+    smoke_policy = _smoke_policy_arn(account)  # 존재는 up 맨 앞(_require_smoke_env)에서 확인했다
+    exec_arn = _ensure_role(iam, ROLE_EXEC, ecs_tasks_trust_policy(), "ECS image pull and secret injection")
+    iam.attach_role_policy(RoleName=ROLE_EXEC,
+                           PolicyArn="arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy")
+    iam.put_role_policy(RoleName=ROLE_EXEC, PolicyName="read-platform-secrets",
+                        PolicyDocument=json.dumps(exec_secrets_policy(secret_arns)))
+    task_arn = _ensure_role(iam, ROLE_TASK, ecs_tasks_trust_policy(), "Vigilantis api - assume access role only")
+    iam.put_role_policy(RoleName=ROLE_TASK, PolicyName="assume-access-role",
+                        PolicyDocument=json.dumps(task_role_policy(account)))
+    # 신뢰 정책의 주체(태스크 역할)는 이미 있어야 IAM이 받아 준다 — 새 역할 직후에는 전파 대기
+    access_arn = _retry(lambda: _ensure_role(iam, ROLE_ACCESS, access_trust_policy(account, external_id),
+                                             "Vigilantis monitored-account access (SaaS customer role shape)"),
+                        "접근 역할 신뢰 정책(주체 전파)", ("MalformedPolicyDocument",), timeout=120)
+    iam.attach_role_policy(RoleName=ROLE_ACCESS, PolicyArn=smoke_policy)
+    return {"exec": exec_arn, "task": task_arn, "access": access_arn}
+
+
+def _ensure_logs(logs) -> None:
+    for name in LOG_GROUPS.values():
+        try:
+            logs.create_log_group(logGroupName=name, tags={TAG_KEY: TAG_VALUE})
+            logs.put_retention_policy(logGroupName=name, retentionInDays=LOG_RETENTION_DAYS)
+        except ClientError as exc:
+            if _code(exc) != "ResourceAlreadyExistsException":
+                raise
+
+
+def _ensure_cluster(ecs) -> None:
+    if not _find_cluster(ecs):
+        ecs.create_cluster(clusterName=CLUSTER, tags=[{"key": TAG_KEY, "value": TAG_VALUE}])
+        print(f"[platform] ECS 클러스터 {CLUSTER} 생성")
+
+
+def _ensure_target_group(elbv2, vpc_id: str, name: str, port: int, health: str) -> str:
+    arn = _find_tg(elbv2, name)
+    if not arn:
+        arn = elbv2.create_target_group(
+            Name=name, Protocol="HTTP", Port=port, VpcId=vpc_id, TargetType="ip",
+            HealthCheckPath=health, Matcher={"HttpCode": "200-399"}, Tags=_kv_tags(name))["TargetGroups"][0][
+            "TargetGroupArn"]
+        print(f"[platform] TG {name} 생성")
+    # 이미 있는 TG에도 매번 맞춘다 — 같은 값이면 바뀌는 것이 없다
+    elbv2.modify_target_group_attributes(TargetGroupArn=arn, Attributes=target_group_attributes())
+    return arn
+
+
+def _ensure_alb(elbv2, vpc_id: str, subnets: dict[str, str], sg_alb: str, origin_value: str) -> dict:
+    tg_api = _ensure_target_group(elbv2, vpc_id, TG_API, API_PORT, "/health")
+    tg_web = _ensure_target_group(elbv2, vpc_id, TG_WEB, WEB_PORT, WEB_HEALTH_PATH)
+    lb = _find_lb(elbv2)
+    if not lb:
+        lb = elbv2.create_load_balancer(
+            Name=ALB_NAME, Scheme="internet-facing", Type="application", IpAddressType="ipv4",
+            Subnets=[subnets[f"{PREFIX}-public-{az}"] for az in PUBLIC_SUBNETS], SecurityGroups=[sg_alb],
+            Tags=_kv_tags(ALB_NAME))["LoadBalancers"][0]
+        print(f"[platform] ALB {ALB_NAME} 생성(internet-facing · CloudFront만 수신)")
+        elbv2.get_waiter("load_balancer_available").wait(LoadBalancerArns=[lb["LoadBalancerArn"]])
+    listeners = elbv2.describe_listeners(LoadBalancerArn=lb["LoadBalancerArn"])["Listeners"]
+    if listeners:
+        listener_arn = listeners[0]["ListenerArn"]
+    else:
+        listener_arn = elbv2.create_listener(
+            LoadBalancerArn=lb["LoadBalancerArn"], Protocol="HTTP", Port=80,
+            DefaultActions=[{"Type": "fixed-response", "FixedResponseConfig": {
+                "StatusCode": "403", "ContentType": "text/plain", "MessageBody": "forbidden"}}])["Listeners"][0][
+            "ListenerArn"]
+    existing = {r["Priority"] for r in elbv2.describe_rules(ListenerArn=listener_arn)["Rules"]}
+    for rule in listener_rules(tg_api, tg_web, origin_value):
+        if str(rule["Priority"]) not in existing:
+            elbv2.create_rule(ListenerArn=listener_arn, **rule)
+    return {"dns": lb["DNSName"], "tg_api": tg_api, "tg_web": tg_web}
+
+
+def _ensure_waf(waf, cidrs: list[str]) -> str:
+    ipset = _find_ipset(waf)
+    if ipset:
+        cur = waf.get_ip_set(Name=WAF_IPSET, Scope="CLOUDFRONT", Id=ipset["Id"])
+        if sorted(cur["IPSet"]["Addresses"]) != sorted(cidrs):
+            waf.update_ip_set(Name=WAF_IPSET, Scope="CLOUDFRONT", Id=ipset["Id"], Addresses=sorted(cidrs),
+                              LockToken=cur["LockToken"])
+            print(f"[platform] WAF 허용 IP 갱신 — {len(cidrs)}건")
+        ipset_arn = cur["IPSet"]["ARN"]
+    else:
+        ipset_arn = waf.create_ip_set(Name=WAF_IPSET, Scope="CLOUDFRONT", IPAddressVersion="IPV4",
+                                      Addresses=sorted(cidrs), Tags=_kv_tags(WAF_IPSET))["Summary"]["ARN"]
+        print(f"[platform] WAF 허용 IP 생성 — {len(cidrs)}건")
+    acl = _find_acl(waf)
+    if acl:
+        return acl["ARN"]
+    acl_arn = waf.create_web_acl(
+        Name=WAF_ACL, Scope="CLOUDFRONT", DefaultAction={"Block": {}}, Rules=waf_rules(ipset_arn),
+        VisibilityConfig={"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True, "MetricName": WAF_ACL},
+        Tags=_kv_tags(WAF_ACL))["Summary"]["ARN"]
+    print(f"[platform] WAF 웹 ACL {WAF_ACL} 생성(기본 차단)")
+    return acl_arn
+
+
+def distribution_config(alb_dns: str, origin_value: str, acl_arn: str, caller_ref: str) -> dict:
+    return {
+        "CallerReference": caller_ref,
+        "Comment": CF_COMMENT,
+        "Enabled": True,
+        "PriceClass": "PriceClass_200",  # 한국 엣지 포함 · 최상위 요금대 제외
+        "HttpVersion": "http2",
+        "WebACLId": acl_arn,
+        "Origins": {"Quantity": 1, "Items": [{
+            "Id": "alb",
+            "DomainName": alb_dns,
+            # 도메인이 없어 ALB에 인증서를 못 단다 — CloudFront→ALB는 평문 HTTP다. 오리진은 공개 ALB의
+            # 공인 주소라 이 구간과 비밀 헤더 값은 인터넷 구간을 평문으로 지날 수 있다(ADR-0010 §4)
+            "CustomOriginConfig": {"HTTPPort": 80, "HTTPSPort": 443, "OriginProtocolPolicy": "http-only",
+                                   "OriginReadTimeout": 60, "OriginKeepaliveTimeout": 5},
+            "CustomHeaders": {"Quantity": 1, "Items": [{"HeaderName": ORIGIN_HEADER, "HeaderValue": origin_value}]},
+        }]},
+        "DefaultCacheBehavior": {
+            "TargetOriginId": "alb",
+            "ViewerProtocolPolicy": "redirect-to-https",
+            "AllowedMethods": {"Quantity": 7, "Items": ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"],
+                               "CachedMethods": {"Quantity": 2, "Items": ["GET", "HEAD"]}},
+            "CachePolicyId": CF_CACHING_DISABLED,               # 관제 화면은 캐시하지 않는다
+            "OriginRequestPolicyId": CF_ALL_VIEWER_EXCEPT_HOST,  # WebSocket 업그레이드 헤더도 넘긴다
+            "Compress": True,
+        },
+    }
+
+
+def _ensure_distribution(cf, alb_dns: str, origin_value: str, acl_arn: str) -> str:
+    dist = _find_distribution(cf)
+    if dist:
+        return dist["DomainName"]
+    created = cf.create_distribution_with_tags(DistributionConfigWithTags={
+        "DistributionConfig": distribution_config(alb_dns, origin_value, acl_arn, f"{PREFIX}-{int(time.time())}"),
+        "Tags": {"Items": [{"Key": TAG_KEY, "Value": TAG_VALUE}]},
+    })["Distribution"]
+    print(f"[platform] CloudFront {created['Id']} 생성 — 전파에 10–15분 걸린다")
+    return created["DomainName"]
+
+
+def _require_custom_domain(c: dict, domain: str) -> tuple[str, str]:
+    """--domain의 인증서·공개 호스팅 영역을 찾는다 — 없으면 **무엇이든 바꾸기 전에** 멈춘다.
+
+    인증서 발급은 DNS 검증을 기다려야 하고 도메인 구입은 사람이 한다 — 둘 다 이 스크립트 밖이다.
+    up 끝에서야 보면 NAT·RDS(시간 과금)와 WAF 허용 목록 변경이 남은 채 멈추므로 up 맨 앞에서 본다.
+    """
+    cert_arn = _find_certificate(c["acm"], domain)
+    zone_id = _find_zone(c["r53"], domain)
+    if not (cert_arn and zone_id):
+        sys.exit(f"--domain {domain}: us-east-1 ACM 인증서(ISSUED) {'있음' if cert_arn else '없음'} · "
+                 f"Route53 호스팅 영역 {'있음' if zone_id else '없음'} — 둘 다 먼저 준비할 것")
+    return cert_arn, zone_id
+
+
+def _ensure_custom_domain(c: dict, domain: str, cert_arn: str, zone_id: str) -> None:
+    """CloudFront에 별칭·인증서를 달고 Route53 A 별칭을 이 배포로 맞춘다. 인증서·호스팅 영역은 만들지 않는다."""
+    cf = c["cf"]
+    dist = _find_distribution(cf)
+    got = cf.get_distribution_config(Id=dist["Id"])
+    config = got["DistributionConfig"]
+    if ((config.get("Aliases") or {}).get("Items") or []) != [domain] or \
+            (config.get("ViewerCertificate") or {}).get("ACMCertificateArn") != cert_arn:
+        cf.update_distribution(Id=dist["Id"], IfMatch=got["ETag"],
+                               DistributionConfig=custom_domain_config(config, domain, cert_arn))
+        print(f"[platform] CloudFront 별칭 {domain} 연결 — 전파에 수 분 걸린다")
+    c["r53"].change_resource_record_sets(HostedZoneId=zone_id, ChangeBatch={"Changes": [{
+        "Action": "UPSERT",
+        "ResourceRecordSet": {"Name": domain, "Type": "A", "AliasTarget": {
+            "HostedZoneId": CF_HOSTED_ZONE_ID, "DNSName": dist["DomainName"], "EvaluateTargetHealth": False}},
+    }]})
+    print(f"[platform] Route53 {domain} A → {dist['DomainName']}")
+
+
+def up(c: dict, account: str, region: str, allow_cidrs: list[str], domain: Optional[str] = None) -> None:
+    ec2 = c["ec2"]
+    _require_smoke_env(c["iam"], ec2, account)  # 무엇이든 만들기 전에
+    custom = _require_custom_domain(c, domain) if domain else None
+    vpc_id = _ensure_vpc(ec2)
+    subnets = _ensure_subnets(ec2, vpc_id, region)
+    nat_ip = _ensure_network(ec2, vpc_id, subnets)
+    sgs = _ensure_sgs(ec2, vpc_id)
+    origin_value = _secret_value(c["sm"], SECRET_ORIGIN) if _find_secret(c["sm"], SECRET_ORIGIN) else None
+    if origin_value is None:
+        _put_secret(c["sm"], SECRET_ORIGIN, secrets.token_urlsafe(32))
+        origin_value = _secret_value(c["sm"], SECRET_ORIGIN)
+    if not _find_secret(c["sm"], SECRET_EXTERNAL_ID):
+        _put_secret(c["sm"], SECRET_EXTERNAL_ID, secrets.token_urlsafe(24))
+    external_id = _secret_value(c["sm"], SECRET_EXTERNAL_ID)
+    _put_secret(c["sm"], SECRET_OPENAI, OPENAI_PLACEHOLDER)
+    _ensure_db(c["rds"], c["sm"], subnets, sgs[SG_DB])
+    _ensure_repos(c["ecr"])
+    secret_arns = [_find_secret(c["sm"], n) for n in (SECRET_DATABASE_URL, SECRET_OPENAI, SECRET_EXTERNAL_ID)]
+    _ensure_roles(c["iam"], account, [a for a in secret_arns if a], external_id)
+    _ensure_logs(c["logs"])
+    _ensure_cluster(c["ecs"])
+    alb = _ensure_alb(c["elbv2"], vpc_id, subnets, sgs[SG_ALB], origin_value)
+    # 웹 컨테이너의 서버 측 API 호출도 CloudFront를 거친다 — NAT 공인 IP를 허용 목록에 넣는다
+    acl_arn = _ensure_waf(c["waf"], sorted(set(allow_cidrs) | {f"{nat_ip}/32"}))
+    _ensure_distribution(c["cf"], alb["dns"], origin_value, acl_arn)
+    if custom:
+        _ensure_custom_domain(c, domain, *custom)
+    print("[platform] 다음 단계(ADR-0010 §7)")
+    print(f"  배포 주소          : {' · '.join(public_origins(_find_distribution(c['cf'])))}")
+    print("  (도메인을 새로 달거나 바꿨으면 2·3을 다시 — 웹 번들의 API 주소와 api의 CORS가 그 주소를 따른다)")
+    if _secret_value(c["sm"], SECRET_OPENAI) == OPENAI_PLACEHOLDER:
+        print(f"  1. OpenAI 키 넣기  : aws secretsmanager put-secret-value --secret-id {SECRET_OPENAI} --secret-string <키>")
+    print("  2. 이미지          : ... build --account <계정 ID> --tag <태그>")
+    print("  3. 배포            : ... deploy --account <계정 ID> --tag <태그> --yes")
+
+
+# ------------------------------------------------------------------ 이미지(build)
+def build(c: dict, region: str, tag: str) -> None:
+    repos = {k: _find_repo(c["ecr"], n) for k, n in ECR_REPOS.items()}
+    if not all(repos.values()):
+        sys.exit("ECR 저장소가 없다 — up을 먼저 돌릴 것")
+    dist = _find_distribution(c["cf"])
+    if not dist:
+        sys.exit("CloudFront 배포가 없다 — 웹 이미지에 박을 API 주소를 정할 수 없다")
+    registry = repos["api"].split("/")[0]
+    token = c["ecr"].get_authorization_token()["authorizationData"][0]["authorizationToken"]
+    user, password = base64.b64decode(token).decode().split(":", 1)
+    subprocess.run(["docker", "login", "--username", user, "--password-stdin", registry],
+                   input=password.encode(), check=True)
+    root = str(_REPO_ROOT)
+    builds = [
+        (repos["api"], ["docker", "build", "-f", "apps/core-api/Dockerfile", "-t", f"{repos['api']}:{tag}", root]),
+        (repos["web"], ["docker", "build", "-f", "apps/web/Dockerfile",
+                        "--build-arg", f"NEXT_PUBLIC_API_BASE_URL={public_origins(dist)[0]}",
+                        "-t", f"{repos['web']}:{tag}", root]),
+    ]
+    for repo, cmd in builds:
+        subprocess.run(cmd, check=True, cwd=root)
+        subprocess.run(["docker", "push", f"{repo}:{tag}"], check=True)
+        print(f"[platform] 푸시 {repo}:{tag}")
+
+
+# ------------------------------------------------------------------ 배포(deploy)
+def _register(ecs, family: str, container: dict, *, cpu: str, memory: str, exec_arn: str,
+              task_arn: Optional[str]) -> str:
+    kwargs = dict(family=family, networkMode="awsvpc", requiresCompatibilities=["FARGATE"], cpu=cpu, memory=memory,
+                  executionRoleArn=exec_arn, containerDefinitions=[container],
+                  runtimePlatform={"cpuArchitecture": "X86_64", "operatingSystemFamily": "LINUX"},
+                  tags=[{"key": TAG_KEY, "value": TAG_VALUE}])
+    if task_arn:
+        kwargs["taskRoleArn"] = task_arn
+    return ecs.register_task_definition(**kwargs)["taskDefinition"]["taskDefinitionArn"]
+
+
+def _network(subnets: dict[str, str], sg: str) -> dict:
+    return {"awsvpcConfiguration": {"subnets": [subnets[f"{PREFIX}-private-{az}"] for az in PRIVATE_SUBNETS],
+                                    "securityGroups": [sg], "assignPublicIp": "DISABLED"}}
+
+
+def _migrate(ecs, task_def: str, network: dict) -> None:
+    task = ecs.run_task(cluster=CLUSTER, taskDefinition=task_def, launchType="FARGATE", networkConfiguration=network,
+                        overrides={"containerOverrides": [{"name": "api", "command": [
+                            "uv", "run", "--no-sync", "alembic", "upgrade", "head"]}]})["tasks"][0]
+    print("[platform] 마이그레이션 태스크 실행 — 종료 대기")
+    ecs.get_waiter("tasks_stopped").wait(cluster=CLUSTER, tasks=[task["taskArn"]],
+                                         WaiterConfig={"Delay": 10, "MaxAttempts": 60})
+    done = ecs.describe_tasks(cluster=CLUSTER, tasks=[task["taskArn"]])["tasks"][0]
+    code = done["containers"][0].get("exitCode")
+    if code != 0:
+        sys.exit(f"마이그레이션 실패 — exitCode {code} · {done.get('stoppedReason')} (로그: {LOG_GROUPS['api']})")
+    print("[platform] 마이그레이션 완료")
+
+
+def _upsert_service(ecs, name: str, task_def: str, network: dict, tg_arn: str, container: str, port: int) -> None:
+    svc = _find_service(ecs, name)
+    if svc:
+        ecs.update_service(cluster=CLUSTER, service=name, taskDefinition=task_def, desiredCount=1,
+                           deploymentConfiguration=service_deployment(name), forceNewDeployment=True)
+        print(f"[platform] 서비스 {name} 갱신")
+        return
+    ecs.create_service(cluster=CLUSTER, serviceName=name, taskDefinition=task_def, desiredCount=1,
+                       launchType="FARGATE", networkConfiguration=network,
+                       loadBalancers=[{"targetGroupArn": tg_arn, "containerName": container, "containerPort": port}],
+                       healthCheckGracePeriodSeconds=90, deploymentConfiguration=service_deployment(name),
+                       tags=[{"key": TAG_KEY, "value": TAG_VALUE}])
+    print(f"[platform] 서비스 {name} 생성")
+
+
+def deployment_problems(services: list[dict], expected: dict[str, str]) -> list[str]:
+    """요청한 task definition으로 배포가 **끝났는지** 본다. 빈 목록이면 성공이다.
+
+    `services_stable` 대기만으로는 모자란다 — 서킷 브레이커가 새 태스크 실패를 보고 이전 버전으로
+    롤백해도 서비스는 다시 안정되므로 대기가 통과한다. 그러면 요청한 버전이 돌지 않는데 "배포
+    완료"가 찍힌다(PR #441 리뷰). 그래서 PRIMARY 배포의 task definition과 rolloutState를 함께 본다.
+    """
+    by_name = {svc.get("serviceName"): svc for svc in services}
+    problems = []
+    for name, task_def in expected.items():
+        svc = by_name.get(name)
+        if svc is None:
+            problems.append(f"{name}: 서비스가 없다")
+            continue
+        primary = next((d for d in svc.get("deployments", []) if d.get("status") == "PRIMARY"), None)
+        if primary is None:
+            problems.append(f"{name}: PRIMARY 배포가 없다")
+        elif primary.get("taskDefinition") != task_def:
+            problems.append(f"{name}: 요청한 {task_def}가 아니라 {primary.get('taskDefinition')}가 돌고 있다"
+                            " — 새 태스크가 실패해 자동 롤백됐다")
+        elif primary.get("rolloutState") != "COMPLETED":
+            problems.append(f"{name}: 배포 상태 {primary.get('rolloutState')}"
+                            f" ({primary.get('rolloutStateReason', '사유 없음')})")
+    return problems
+
+
+def deploy(c: dict, account: str, region: str, tag: str, dispatch_enabled: bool) -> None:
+    ec2, ecs = c["ec2"], c["ecs"]
+    vpc_id = _find_vpc(ec2)
+    smoke_vpc = _find_smoke_vpc(ec2)
+    dist = _find_distribution(c["cf"])
+    if not (vpc_id and dist):
+        sys.exit("플랫폼 VPC 또는 CloudFront가 없다 — up을 먼저 돌릴 것")
+    if not smoke_vpc:
+        sys.exit("스모크 VPC가 없다 — 관제 범위(COLLECT_VPC_IDS)를 정할 수 없다")
+    if _secret_value(c["sm"], SECRET_OPENAI) == OPENAI_PLACEHOLDER and dispatch_enabled:
+        sys.exit(f"{SECRET_OPENAI}가 아직 자리표시값이다 — AI 분석·조치 실행 디스패치를 켜려면 키를 먼저 넣을 것")
+    subnets = _find_subnets(ec2, vpc_id)
+    sgs = _find_sgs(ec2, vpc_id)
+    repos = {k: _find_repo(c["ecr"], n) for k, n in ECR_REPOS.items()}
+    roles = {k: _find_role(c["iam"], n) for k, n in (("exec", ROLE_EXEC), ("task", ROLE_TASK), ("access", ROLE_ACCESS))}
+    secret_arns = {
+        "DATABASE_URL": _find_secret(c["sm"], SECRET_DATABASE_URL),
+        "OPENAI_API_KEY": _find_secret(c["sm"], SECRET_OPENAI),
+        "VIGILANTIS_ACCESS_EXTERNAL_ID": _find_secret(c["sm"], SECRET_EXTERNAL_ID),
+    }
+    api_def = _register(ecs, API_TASK_FAMILY, api_container(
+        f"{repos['api']}:{tag}", region=region, cors_origin=",".join(public_origins(dist)),
+        access_role_arn=roles["access"], collect_vpc_ids=smoke_vpc, dispatch_enabled=dispatch_enabled,
+        secrets_arns=secret_arns), cpu="512", memory="1024", exec_arn=roles["exec"], task_arn=roles["task"])
+    web_def = _register(ecs, WEB_TASK_FAMILY, web_container(f"{repos['web']}:{tag}", region=region),
+                        cpu="256", memory="512", exec_arn=roles["exec"], task_arn=None)
+    _migrate(ecs, api_def, _network(subnets, sgs[SG_API]))
+    _upsert_service(ecs, API_SERVICE, api_def, _network(subnets, sgs[SG_API]), _find_tg(c["elbv2"], TG_API),
+                    "api", API_PORT)
+    _upsert_service(ecs, WEB_SERVICE, web_def, _network(subnets, sgs[SG_WEB]), _find_tg(c["elbv2"], TG_WEB),
+                    "web", WEB_PORT)
+    print("[platform] 서비스 안정화 대기")
+    ecs.get_waiter("services_stable").wait(cluster=CLUSTER, services=[API_SERVICE, WEB_SERVICE],
+                                           WaiterConfig={"Delay": 15, "MaxAttempts": 60})
+    problems = deployment_problems(
+        ecs.describe_services(cluster=CLUSTER, services=[API_SERVICE, WEB_SERVICE])["services"],
+        {API_SERVICE: api_def, WEB_SERVICE: web_def},
+    )
+    if problems:
+        sys.exit("배포 실패 — " + " · ".join(problems) + f" (로그: {LOG_GROUPS['api']})")
+    print(f"[platform] 배포 완료 — {public_origins(dist)[0]} (AI 분석·조치 실행 디스패치 {'켬' if dispatch_enabled else '끔'})")
+    if not dispatch_enabled:
+        print("[platform] 주의: 디스패치가 꺼져 있어 화면에서 승인한 조치도 실행되지 않고 접수 상태로 멈춘다 — "
+              "조치 실행을 실측하려면 deploy --enable-dispatch(OpenAI 과금도 함께 켜진다)")
+
+
+# ------------------------------------------------------------------ 정리(down)
+def _try(fn: Callable[[], Any], *ignore: str) -> None:
+    try:
+        fn()
+    except ClientError as exc:
+        if _code(exc) not in ignore:
+            raise
+
+
+def _delete_roles(iam, account: str) -> None:
+    for role, managed, inline in (
+        (ROLE_ACCESS, [_smoke_policy_arn(account)], []),
+        (ROLE_TASK, [], ["assume-access-role"]),
+        (ROLE_EXEC, ["arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"], ["read-platform-secrets"]),
+    ):
+        found = _get_role(iam, role)
+        if not found:
+            continue
+        if not is_platform_tagged(found.get("Tags", [])):  # 안전 가드 ⑤ — 이름만 같은 남의 역할
+            print(f"[platform] IAM 역할 {role}은 플랫폼 태그가 없어 건드리지 않았다 — 확인 뒤 직접 정리할 것")
+            continue
+        for arn in managed:
+            _try(lambda arn=arn: iam.detach_role_policy(RoleName=role, PolicyArn=arn), "NoSuchEntity")
+        for name in inline:
+            _try(lambda name=name: iam.delete_role_policy(RoleName=role, PolicyName=name), "NoSuchEntity")
+        iam.delete_role(RoleName=role)
+        print(f"[platform] IAM 역할 {role} 삭제")
+
+
+def ecs_remaining(services: list[dict], tasks: list[dict]) -> list[str]:
+    """클러스터를 지우기 전에 끝나 있어야 하는 것 중 아직 남은 것. 빈 목록이면 지워도 된다.
+
+    `services_inactive` 대기는 서비스 **하나만** INACTIVE여도 통과하고, INACTIVE 서비스에도 STOPPING
+    태스크가 남을 수 있다. 그 상태에서 delete_cluster가 실패하면 뒤의 RDS·NAT 정리까지 멈춘다(PR #441
+    리뷰) — 그래서 서비스 전부와 태스크 전부를 함께 본다. describe_services의 failures(MISSING)는
+    이미 지워진 것이라 여기 들어오지 않는다.
+    """
+    left = [f"서비스 {svc.get('serviceName')}({svc.get('status')})"
+            for svc in services if svc.get("status") != "INACTIVE"]
+    left += [f"태스크 {task.get('taskArn', '').rsplit('/', 1)[-1]}({task.get('lastStatus')})"
+             for task in tasks if task.get("lastStatus") != "STOPPED"]
+    return left
+
+
+def _ecs_drained(ecs, services: list[str], *, delay: float = 15, attempts: int = 40,
+                 sleep: Callable[[float], None] = time.sleep) -> bool:
+    """서비스 전부 INACTIVE + 태스크 전부 STOPPED까지 기다린다. 시간 안에 안 되면 False."""
+    left: list[str] = []
+    for _ in range(attempts):
+        described = ecs.describe_services(cluster=CLUSTER, services=services)["services"] if services else []
+        arns = [arn for status in ("RUNNING", "STOPPED")
+                for arn in ecs.list_tasks(cluster=CLUSTER, desiredStatus=status)["taskArns"]]
+        tasks = ecs.describe_tasks(cluster=CLUSTER, tasks=arns)["tasks"] if arns else []
+        left = ecs_remaining(described, tasks)
+        if not left:
+            return True
+        print(f"[platform] ECS 종료 대기 — 남음: {', '.join(left)}")
+        sleep(delay)
+    print(f"[platform] 경고: ECS 종료 대기 시간 초과 — 남음: {', '.join(left)}")
+    return False
+
+
+def down(c: dict, account: str) -> None:
+    ec2, ecs, elbv2 = c["ec2"], c["ecs"], c["elbv2"]
+    if _find_cluster(ecs):
+        deleted = []
+        for name in (API_SERVICE, WEB_SERVICE):
+            if _find_service(ecs, name):
+                ecs.update_service(cluster=CLUSTER, service=name, desiredCount=0)
+                ecs.delete_service(cluster=CLUSTER, service=name, force=True)
+                deleted.append(name)
+                print(f"[platform] 서비스 {name} 삭제")
+        if _ecs_drained(ecs, deleted):
+            ecs.delete_cluster(cluster=CLUSTER)
+        else:
+            # 클러스터만 남기고 나머지(RDS·NAT 등 과금 자원)는 계속 정리한다 — 재실행하면 이어서 지운다
+            print("[platform] 경고: 클러스터를 지우지 않고 넘어간다 — 정리가 끝나면 down을 다시 돌릴 것")
+    for family in (API_TASK_FAMILY, WEB_TASK_FAMILY):
+        for arn in ecs.list_task_definitions(familyPrefix=family, status="ACTIVE")["taskDefinitionArns"]:
+            ecs.deregister_task_definition(taskDefinition=arn)
+
+    dist = _find_distribution(c["cf"])
+    if dist:
+        # 배포를 지우면 별칭 레코드가 없는 곳을 가리킨다 — 이 배포를 가리키는 것만 먼저 지운다
+        for alias in (dist.get("Aliases") or {}).get("Items") or []:
+            zone_id = _find_zone(c["r53"], alias)
+            if not zone_id:
+                continue
+            found = c["r53"].list_resource_record_sets(HostedZoneId=zone_id, StartRecordName=alias, MaxItems="10")
+            records = alias_records_for(found["ResourceRecordSets"], alias, dist["DomainName"])
+            if records:
+                c["r53"].change_resource_record_sets(HostedZoneId=zone_id, ChangeBatch={"Changes": [
+                    {"Action": "DELETE", "ResourceRecordSet": r} for r in records]})
+                print(f"[platform] Route53 {alias} 별칭 레코드 {len(records)}건 삭제")
+        cfg = c["cf"].get_distribution_config(Id=dist["Id"])
+        if cfg["DistributionConfig"]["Enabled"]:
+            cfg["DistributionConfig"]["Enabled"] = False
+            c["cf"].update_distribution(Id=dist["Id"], IfMatch=cfg["ETag"], DistributionConfig=cfg["DistributionConfig"])
+        print("[platform] CloudFront 비활성화 — 전파 대기(10–15분)")
+        c["cf"].get_waiter("distribution_deployed").wait(Id=dist["Id"], WaiterConfig={"Delay": 30, "MaxAttempts": 60})
+        etag = c["cf"].get_distribution_config(Id=dist["Id"])["ETag"]
+        c["cf"].delete_distribution(Id=dist["Id"], IfMatch=etag)
+        print("[platform] CloudFront 삭제")
+    acl = _find_acl(c["waf"])
+    if acl:
+        _retry(lambda: c["waf"].delete_web_acl(Name=WAF_ACL, Scope="CLOUDFRONT", Id=acl["Id"],
+                                               LockToken=c["waf"].get_web_acl(Name=WAF_ACL, Scope="CLOUDFRONT",
+                                                                              Id=acl["Id"])["LockToken"]),
+               "WAF 웹 ACL 삭제", ("WAFAssociatedItemException",), timeout=600)
+    ipset = _find_ipset(c["waf"])
+    if ipset:
+        c["waf"].delete_ip_set(Name=WAF_IPSET, Scope="CLOUDFRONT", Id=ipset["Id"], LockToken=ipset["LockToken"])
+
+    lb = _find_lb(elbv2)
+    if lb:
+        elbv2.delete_load_balancer(LoadBalancerArn=lb["LoadBalancerArn"])
+        elbv2.get_waiter("load_balancers_deleted").wait(LoadBalancerArns=[lb["LoadBalancerArn"]])
+        print("[platform] ALB 삭제")
+    for name in (TG_API, TG_WEB):
+        arn = _find_tg(elbv2, name)
+        if arn:
+            _retry(lambda arn=arn: elbv2.delete_target_group(TargetGroupArn=arn), f"TG {name} 삭제", ("ResourceInUse",))
+
+    if _find_db(c["rds"]):
+        c["rds"].delete_db_instance(DBInstanceIdentifier=DB_INSTANCE, SkipFinalSnapshot=True,
+                                    DeleteAutomatedBackups=True)
+        print("[platform] RDS 삭제 — 완료 대기")
+        c["rds"].get_waiter("db_instance_deleted").wait(DBInstanceIdentifier=DB_INSTANCE)
+    _try(lambda: c["rds"].delete_db_subnet_group(DBSubnetGroupName=DB_SUBNET_GROUP), "DBSubnetGroupNotFoundFault")
+
+    for name in ECR_REPOS.values():
+        _try(lambda name=name: c["ecr"].delete_repository(repositoryName=name, force=True), "RepositoryNotFoundException")
+    for name in (SECRET_DATABASE_URL, SECRET_OPENAI, SECRET_ORIGIN, SECRET_EXTERNAL_ID):
+        _try(lambda name=name: c["sm"].delete_secret(SecretId=name, ForceDeleteWithoutRecovery=True),
+             "ResourceNotFoundException")
+    for name in LOG_GROUPS.values():
+        _try(lambda name=name: c["logs"].delete_log_group(logGroupName=name), "ResourceNotFoundException")
+
+    _delete_roles(c["iam"], account)
+
+    vpc_id = _find_vpc(ec2)
+    if vpc_id:
+        nat = _find_nat(ec2, vpc_id)
+        if nat:
+            ec2.delete_nat_gateway(NatGatewayId=nat["NatGatewayId"])
+            ec2.get_waiter("nat_gateway_deleted").wait(NatGatewayIds=[nat["NatGatewayId"]])
+            print("[platform] NAT 삭제")
+        for addr in _named(ec2.describe_addresses, "Addresses", f"{PREFIX}-nat"):
+            ec2.release_address(AllocationId=addr["AllocationId"])
+        for igw in ec2.describe_internet_gateways(Filters=[{"Name": "attachment.vpc-id", "Values": [vpc_id]}])[
+                "InternetGateways"]:
+            ec2.detach_internet_gateway(InternetGatewayId=igw["InternetGatewayId"], VpcId=vpc_id)
+            ec2.delete_internet_gateway(InternetGatewayId=igw["InternetGatewayId"])
+        for rt in ec2.describe_route_tables(Filters=[_vpc_filter(vpc_id)])["RouteTables"]:
+            if any(a.get("Main") for a in rt["Associations"]):
+                continue
+            for a in rt["Associations"]:
+                ec2.disassociate_route_table(AssociationId=a["RouteTableAssociationId"])
+            ec2.delete_route_table(RouteTableId=rt["RouteTableId"])
+        groups = [g for g in ec2.describe_security_groups(Filters=[_vpc_filter(vpc_id)])["SecurityGroups"]
+                  if g["GroupName"] != "default"]
+        for g in groups:  # 서로 참조하는 규칙부터 걷어야 지워진다
+            if g["IpPermissions"]:
+                ec2.revoke_security_group_ingress(GroupId=g["GroupId"], IpPermissions=g["IpPermissions"])
+        for g in groups:
+            _retry(lambda g=g: ec2.delete_security_group(GroupId=g["GroupId"]), f"SG {g['GroupName']} 삭제",
+                   ("DependencyViolation",))
+        for s in ec2.describe_subnets(Filters=[_vpc_filter(vpc_id)])["Subnets"]:
+            _retry(lambda s=s: ec2.delete_subnet(SubnetId=s["SubnetId"]), "Subnet 삭제", ("DependencyViolation",))
+        _retry(lambda: ec2.delete_vpc(VpcId=vpc_id), "VPC 삭제", ("DependencyViolation",))
+        print(f"[platform] VPC {vpc_id} 삭제")
+
+
+# ------------------------------------------------------------------ 진입점
+def main() -> None:
+    sys.stdout.reconfigure(encoding="utf-8")
+    parser = argparse.ArgumentParser(description="Vigilantis 플랫폼 배포 환경 (ADR-0010)")
+    parser.add_argument("command", choices=("status", "up", "build", "deploy", "down"))
+    parser.add_argument("--account", required=True, help="대상 AWS 계정 ID — 호출 주체(sts)와 같아야 한다")
+    parser.add_argument("--allow-cidr", action="append", default=[],
+                        help=f"up: WAF 허용 IPv4 CIDR(/{MIN_ALLOW_PREFIX} 이상 좁게 · 여러 번 줄 수 있다)")
+    parser.add_argument("--domain", help="up: CloudFront에 달 사용자 도메인(Route53 호스팅 영역 · "
+                                         "us-east-1 ACM 인증서가 먼저 있어야 한다)")
+    parser.add_argument("--tag", help="build·deploy: 이미지 태그")
+    parser.add_argument("--enable-dispatch", action="store_true",
+                        help="deploy: AI 분석과 조치 실행 디스패치를 함께 켠다(한 스위치 — 끄면 승인한 조치도 "
+                             "실행되지 않는다. 켜면 OpenAI 과금 경로)")
+    parser.add_argument("--yes", action="store_true", help="up·deploy·down: 실제로 바꾼다")
+    args = parser.parse_args()
+
+    account = _require_real_aws(args.account)["Account"]
+    region = default_region()
+    c = {
+        "ec2": aws_client("ec2", region), "elbv2": aws_client("elbv2", region), "rds": aws_client("rds", region),
+        "ecs": aws_client("ecs", region), "ecr": aws_client("ecr", region), "iam": aws_client("iam", region),
+        "logs": aws_client("logs", region), "sm": aws_client("secretsmanager", region),
+        # CloudFront와 그에 붙는 WAF(CLOUDFRONT 범위)는 us-east-1에서만 다룬다
+        "cf": aws_client("cloudfront", "us-east-1"), "waf": aws_client("wafv2", "us-east-1"),
+        "acm": aws_client("acm", "us-east-1"), "r53": aws_client("route53", "us-east-1"),
+    }
+    if args.command == "status":
+        status(c)
+        return
+    if args.command in ("build", "deploy") and not args.tag:
+        sys.exit(f"{args.command}에는 --tag가 필요하다")
+    if args.command == "build":
+        build(c, region, args.tag)
+        return
+    if args.command == "up":
+        if not args.allow_cidr:
+            sys.exit("up에는 --allow-cidr가 필요하다 — 허용 IP 없이 공개 진입점을 세우지 않는다")
+        allow_cidrs = validate_allow_cidrs(args.allow_cidr)
+        # 미리 보기에서도 먼저 본다 — --yes로 돌렸을 때 중간에 멈출 일을 여기서 알린다
+        _require_smoke_env(c["iam"], c["ec2"], account)
+        if args.domain:
+            _require_custom_domain(c, args.domain)
+    if not args.yes:
+        if args.command == "up":
+            missing = [row for row in inventory(c) if row[2] is None and row[0] != "EcsService"]
+            print(f"[platform] 생성 예정 {len(missing)}건 — 실제로 만들려면 --yes")
+            _print_rows(missing)
+        elif args.command == "deploy":
+            print(f"[platform] 배포 예정 — 태그 {args.tag} · AI 분석·조치 실행 디스패치 "
+                  f"{'켬' if args.enable_dispatch else '끔'} — 실제로 하려면 --yes")
+        else:
+            print("[platform] 삭제 대상(플랫폼 태그 자원 + 플랫폼 VPC 안 전부) — 실제로 지우려면 --yes")
+            _print_rows([row for row in inventory(c) if row[2]])
+        return
+    if args.command == "up":
+        up(c, account, region, allow_cidrs, args.domain)
+    elif args.command == "deploy":
+        deploy(c, account, region, args.tag, args.enable_dispatch)
+    else:
+        down(c, account)
+
+
+if __name__ == "__main__":
+    main()

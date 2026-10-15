@@ -256,11 +256,67 @@ def test_closure_without_execution_accepts_legacy_and_new_judgements(
     assert after["analysis_result"] == before["analysis_result"]
 
 
-def test_finops_closure_keeps_the_existing_judgement(db, client_pg, make_incident):
-    finops = make_incident(db, category=IncidentCategory.FINOPS, status=IncidentStatus.FAILED)
-    url = f"/api/v1/incidents/{finops.incident_id}/resolve"
-    assert client_pg.post(url, json={"resolution": "NO_FURTHER_ACTION"}).status_code == 409
-    assert client_pg.post(url, json={"resolution": "JUSTIFIED"}).status_code == 200
+@pytest.mark.parametrize("resolution", list(ResolutionJudgement))
+@pytest.mark.parametrize("status", [IncidentStatus.AWAITING_APPROVAL, IncidentStatus.FAILED,
+                                    IncidentStatus.AWAITING_CLOSURE])
+def test_finops_closure_preserves_history_and_first_judgement(
+    db, client_pg, make_incident, make_candidate, make_execution, status, resolution,
+):
+    finops = make_incident(db, category=IncidentCategory.FINOPS, status=status)
+    candidate = None
+    if status is IncidentStatus.AWAITING_APPROVAL:
+        candidate = make_candidate(db, finops, runbook_id=RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED)
+    if status is IncidentStatus.AWAITING_CLOSURE:
+        make_execution(db, finops, runbook_id=RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED,
+                       status=ExecutionStatus.SUCCESS)
+    db.flush()
+    url = f"/api/v1/incidents/{finops.incident_id}"
+    before = client_pg.get(url).json()
+    first = client_pg.post(url + "/resolve", json={
+        "resolution": resolution.value, "resolution_note": "  추가 최적화 불필요  ",
+    })
+    assert first.status_code == 200
+    after = client_pg.get(url).json()
+    assert after == first.json()
+    assert after["status"] == "RESOLVED"
+    assert after["resolution"] == resolution.value
+    assert after["resolution_note"] == "추가 최적화 불필요"
+    assert after["analysis_result"] is None
+    for field in ("executions", "summary_lines", "evidence_ids"):
+        assert after[field] == before[field]
+    assert after["recommendations"] == []
+    again = client_pg.post(url + "/resolve", json={
+        "resolution": "JUSTIFIED", "resolution_note": "덮어쓰지 않음",
+    })
+    assert again.status_code == 200
+    assert again.json() == after
+    if candidate is not None:
+        db.refresh(candidate)
+        assert candidate.status is CandidateStatus.INVALIDATED
+        denied = client_pg.post("/api/v1/actions/execute", json={
+            "incident_id": finops.incident_id, "runbook_id": candidate.runbook_id.value,
+            "idempotency_key": uuid.uuid4().hex,
+        })
+        assert denied.status_code == 409
+        assert db.scalars(select(models.ActionExecution)).all() == []
+
+
+@pytest.mark.parametrize("status", [IncidentStatus.ANALYZING, IncidentStatus.ACTION_IN_PROGRESS,
+                                    IncidentStatus.AWAITING_CLOSURE])
+def test_finops_cannot_close_during_analysis_or_execution(
+    db, client_pg, make_incident, make_execution, status,
+):
+    incident = make_incident(db, category=IncidentCategory.FINOPS, status=status)
+    if status is not IncidentStatus.ANALYZING:
+        make_execution(db, incident, status=ExecutionStatus.IN_PROGRESS)
+    db.flush()
+    response = client_pg.post(f"/api/v1/incidents/{incident.incident_id}/resolve", json={
+        "resolution": "NO_FURTHER_ACTION",
+    })
+    assert response.status_code == 409
+    db.refresh(incident)
+    assert incident.status is status
+    assert incident.resolution is None
 
 
 def test_late_analysis_cannot_reopen_closed_incident(db, client_pg, make_incident):
@@ -281,18 +337,21 @@ def test_late_analysis_cannot_reopen_closed_incident(db, client_pg, make_inciden
     assert data["reviewed_risk_level"] is None
 
 
+@pytest.mark.parametrize("category", list(IncidentCategory))
 @pytest.mark.parametrize("winner", ["close", "approve"])
 def test_close_and_approval_are_serialized_by_postgres(
-    pg_engine, make_incident, make_candidate, winner,
+    pg_engine, make_incident, make_candidate, winner, category,
 ):
     with Session(pg_engine) as setup:
-        incident = make_incident(setup)
+        incident = make_incident(setup, category=category)
         incident.agent_invocation_status = AgentInvocationStatus.SUCCEEDED
-        candidate = make_candidate(setup, incident)
+        runbook_id = (RunbookId.RUNBOOK_NACL_ADD_DENY if category is IncidentCategory.SECOPS
+                      else RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED)
+        candidate = make_candidate(setup, incident, runbook_id=runbook_id)
         incident_id, candidate_id = incident.incident_id, candidate.candidate_id
         setup.commit()
     request = ExecuteActionRequest(
-        incident_id=incident_id, runbook_id=RunbookId.RUNBOOK_NACL_ADD_DENY,
+        incident_id=incident_id, runbook_id=runbook_id,
         idempotency_key=uuid.uuid4().hex,
     )
     def act(session, action):

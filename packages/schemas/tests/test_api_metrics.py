@@ -8,6 +8,10 @@ import pytest
 from pydantic import ValidationError
 
 from schemas.api import (
+    AssetInventoryAxis,
+    AssetInventoryPoint,
+    AssetStatusAxis,
+    AssetStatusPoint,
     AxisStatus,
     CpuAxis,
     CpuSeries,
@@ -15,6 +19,8 @@ from schemas.api import (
     NetworkAxis,
     NetworkSeries,
     SgExposureAxis,
+    ThreatEventAxis,
+    ThreatEventPoint,
 )
 
 ARN = "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0123"
@@ -75,12 +81,75 @@ def make_sg_axis(**over):
     return base
 
 
+def make_asset_status_point(**over):
+    base = {
+        "at": "2026-09-18T00:00:00Z",
+        "judged": 13,
+        "threat": 2,
+        "cost_candidate": 1,
+        "unused": 2,
+        "skip": 7,
+        "undecided": 1,
+    }
+    base.update(over)
+    return base
+
+
+def make_asset_status_axis(**over):
+    base = {
+        "status": "READY",
+        "points": [
+            make_asset_status_point(at="2026-09-17T23:00:00Z"),
+            make_asset_status_point(),
+        ],
+    }
+    base.update(over)
+    return base
+
+
+def make_inventory_point(**over):
+    base = {
+        "at": "2026-09-18T00:00:00Z",
+        "total": 16,
+        "counts": {"EC2": 4, "SG": 4, "EBS": 5, "NACL": 2, "LAUNCH_TEMPLATE": 1},
+    }
+    base.update(over)
+    return base
+
+
+def make_threat_event_point(**over):
+    base = {"at": "2026-09-18T00:00:00Z", "total": 3, "counts": {"SSH_BRUTE_FORCE": 2, "OPEN_IP": 1}}
+    base.update(over)
+    return base
+
+
+def make_threat_event_axis(**over):
+    base = {
+        "status": "READY",
+        "points": [make_threat_event_point(at="2026-09-17T23:00:00Z"), make_threat_event_point()],
+    }
+    base.update(over)
+    return base
+
+
+def make_inventory_axis(**over):
+    base = {
+        "status": "READY",
+        "points": [make_inventory_point(at="2026-09-17T23:00:00Z"), make_inventory_point()],
+    }
+    base.update(over)
+    return base
+
+
 def test_정상_응답이_Z_시각으로_직렬화된다():
     res = MetricsTimeseriesResponse(
         generated_at="2026-09-18T01:00:00Z",
         cpu=make_cpu_axis(),
         network=make_network_axis(),
         sg_exposure=make_sg_axis(),
+        asset_status=make_asset_status_axis(),
+        asset_inventory=make_inventory_axis(),
+        threat_events=make_threat_event_axis(),
     )
     dumped = res.model_dump(mode="json")
 
@@ -88,6 +157,8 @@ def test_정상_응답이_Z_시각으로_직렬화된다():
     assert dumped["cpu"]["window_end"] == "2026-09-18T00:00:00Z"
     assert dumped["cpu"]["series"][0]["points"][0]["at"] == "2026-09-17T23:00:00Z"
     assert dumped["sg_exposure"]["points"][-1]["value"] == 2
+    assert dumped["asset_status"]["points"][-1] == make_asset_status_point()
+    assert dumped["asset_inventory"]["points"][-1] == make_inventory_point()
 
 
 def test_모르는_필드는_거부한다():
@@ -97,8 +168,106 @@ def test_모르는_필드는_거부한다():
             cpu=make_cpu_axis(),
             network=make_network_axis(),
             sg_exposure=make_sg_axis(),
+            asset_status=make_asset_status_axis(),
+            asset_inventory=make_inventory_axis(),
+            threat_events=make_threat_event_axis(),
             extra_axis={},
         )
+
+
+def test_자산_현황_축이_빠지면_거부한다():
+    """축 4는 선택이 아니다 — 빠진 응답을 화면이 '이력 없음'으로 읽지 않게 한다."""
+    with pytest.raises(ValidationError):
+        MetricsTimeseriesResponse(
+            generated_at="2026-09-18T01:00:00Z",
+            cpu=make_cpu_axis(),
+            network=make_network_axis(),
+            sg_exposure=make_sg_axis(),
+            asset_inventory=make_inventory_axis(),
+            threat_events=make_threat_event_axis(),
+        )
+
+
+def test_자산_수_축이_빠지면_거부한다():
+    with pytest.raises(ValidationError):
+        MetricsTimeseriesResponse(
+            generated_at="2026-09-18T01:00:00Z",
+            cpu=make_cpu_axis(),
+            network=make_network_axis(),
+            sg_exposure=make_sg_axis(),
+            asset_status=make_asset_status_axis(),
+            threat_events=make_threat_event_axis(),
+        )
+
+
+# ----- 축 5 자산 수 -----
+
+
+def test_자산_수의_total은_관측한_유형의_합이다():
+    AssetInventoryPoint(**make_inventory_point())
+    with pytest.raises(ValidationError):
+        AssetInventoryPoint(**make_inventory_point(total=17))
+    with pytest.raises(ValidationError):
+        AssetInventoryPoint(**make_inventory_point(total=-1, counts={"EC2": -1}))
+
+
+def test_자산_수는_모르는_유형을_거부한다():
+    with pytest.raises(ValidationError):
+        AssetInventoryPoint(**make_inventory_point(total=1, counts={"RDS": 1}))
+
+
+def test_자산_수_점은_시각_오름차순이고_중복되지_않는다():
+    with pytest.raises(ValidationError):
+        AssetInventoryAxis(**make_inventory_axis(points=[make_inventory_point(), make_inventory_point(at="2026-09-17T23:00:00Z")]))
+    with pytest.raises(ValidationError):
+        AssetInventoryAxis(**make_inventory_axis(points=[make_inventory_point(), make_inventory_point()]))
+
+
+def test_자산_수_축도_상태와_데이터가_어긋나면_거부한다():
+    AssetInventoryAxis(status="UNAVAILABLE", reason_code="OperationalError")
+    AssetInventoryAxis(status="READY", points=[])
+    with pytest.raises(ValidationError):
+        AssetInventoryAxis(**make_inventory_axis(status="UNAVAILABLE", reason_code="OperationalError"))
+    with pytest.raises(ValidationError):
+        AssetInventoryAxis(**make_inventory_axis(reason_code="OperationalError"))
+
+
+# ----- 축 4 자산 현황 -----
+
+
+def test_자산_현황의_합은_판정별_건수와_같아야_한다():
+    AssetStatusPoint(**make_asset_status_point())
+    with pytest.raises(ValidationError):
+        AssetStatusPoint(**make_asset_status_point(judged=12))
+    # 판정 대기·실패도 합에 든다 — 빼면 judged 가 '판정이 끝난 자산 수'로 뜻이 바뀐다
+    with pytest.raises(ValidationError):
+        AssetStatusPoint(**make_asset_status_point(undecided=0))
+
+
+def test_자산_현황_건수는_음수일_수_없다():
+    with pytest.raises(ValidationError):
+        AssetStatusPoint(**make_asset_status_point(threat=-1, judged=10))
+
+
+def test_자산_현황_점은_시각_오름차순이고_중복되지_않는다():
+    late, early = "2026-09-18T00:00:00Z", "2026-09-17T23:00:00Z"
+    with pytest.raises(ValidationError):
+        AssetStatusAxis(**make_asset_status_axis(points=[
+            make_asset_status_point(at=late), make_asset_status_point(at=early),
+        ]))
+    with pytest.raises(ValidationError):
+        AssetStatusAxis(**make_asset_status_axis(points=[
+            make_asset_status_point(at=late), make_asset_status_point(at=late),
+        ]))
+
+
+def test_자산_현황_축도_상태와_데이터가_어긋나면_거부한다():
+    AssetStatusAxis(status="UNAVAILABLE", reason_code="OperationalError")
+    AssetStatusAxis(status="READY", points=[])  # 회차가 아직 없는 계정
+    with pytest.raises(ValidationError):
+        AssetStatusAxis(**make_asset_status_axis(status="UNAVAILABLE", reason_code="OperationalError"))
+    with pytest.raises(ValidationError):
+        AssetStatusAxis(**make_asset_status_axis(reason_code="OperationalError"))
 
 
 # ----- 축 상태 ↔ 데이터·사유 교차 불변식 -----
@@ -244,3 +413,41 @@ def test_빈_축도_READY일_수_있다():
     """수집이 아직 없어 점이 0개인 것은 실패가 아니다 — 화면은 빈 차트를 그린다."""
     axis = SgExposureAxis(status="READY", points=[])
     assert axis.reason_code is None
+
+
+# ----- 축 6 위협 이벤트 -----
+
+
+def test_위협_이벤트_축이_빠지면_거부한다():
+    with pytest.raises(ValidationError):
+        MetricsTimeseriesResponse(
+            generated_at="2026-09-18T01:00:00Z",
+            cpu=make_cpu_axis(),
+            network=make_network_axis(),
+            sg_exposure=make_sg_axis(),
+            asset_status=make_asset_status_axis(),
+            asset_inventory=make_inventory_axis(),
+        )
+
+
+def test_위협_이벤트의_total은_유형별_합이고_0건_유형은_키를_싣지_않는다():
+    ThreatEventPoint(**make_threat_event_point())
+    with pytest.raises(ValidationError):
+        ThreatEventPoint(**make_threat_event_point(total=4))
+    with pytest.raises(ValidationError):
+        ThreatEventPoint(**make_threat_event_point(total=2, counts={"SSH_BRUTE_FORCE": 2, "OPEN_IP": 0}))
+    with pytest.raises(ValidationError):
+        ThreatEventPoint(**make_threat_event_point(total=0, counts={}))
+
+
+def test_위협_이벤트는_모르는_유형을_거부한다():
+    with pytest.raises(ValidationError):
+        ThreatEventPoint(**make_threat_event_point(total=1, counts={"PORT_SCAN": 1}))
+
+
+def test_위협_이벤트_점은_시각_오름차순이고_상태와_데이터가_어긋나면_거부한다():
+    with pytest.raises(ValidationError):
+        ThreatEventAxis(**make_threat_event_axis(points=[make_threat_event_point(), make_threat_event_point(at="2026-09-17T23:00:00Z")]))
+    with pytest.raises(ValidationError):
+        ThreatEventAxis(**make_threat_event_axis(status="UNAVAILABLE", reason_code="Boom"))
+    ThreatEventAxis(status="UNAVAILABLE", reason_code="Boom")

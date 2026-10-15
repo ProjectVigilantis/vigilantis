@@ -44,7 +44,7 @@
 
 **MVP (실사용)**
 
-* **Frontend**: Next.js 16 (App Router), React 19, TypeScript, Shadcn UI(radix-ui), Tailwind CSS v4, WebSocket, `node --test` 유닛 테스트 (차트 라이브러리는 미선정)
+* **Frontend**: Next.js 16 (App Router), React 19, TypeScript, Shadcn UI(radix-ui), Tailwind CSS v4, WebSocket, `node --test` 유닛 테스트, recharts(대시보드 추이·구성 차트)
 * **Backend**: FastAPI (Python 3.11+), Boto3, PostgreSQL 16, SQLAlchemy 2 · Alembic, APScheduler, pydantic-settings, uvicorn
 * **AI & Safety**: OpenAI `gpt-5.6-luna`(`reasoning_effort=low`), LangGraph (FinOps·SecOps 두 그래프), Pydantic v2 (Structured Output), Golden Dataset 기반 pytest 회귀 + 요약 품질 평가 하네스(`ai/evaluation`)
 * **Infra/Dev**: uv workspace 모노레포, Docker Compose (FastAPI + PostgreSQL + LocalStack + Alembic migrate), GitHub Actions CI **3잡** — `test` · `web` · `ai-signature`
@@ -60,7 +60,7 @@
 3. **Capability-Restricted AI & 4단계 Guardrail**: LLM 권한을 사전 등록된 **Action Whitelist 런북 10종** 중 **AI 추천 가능한 본편 7종** 추천으로 제한하고(롤백 3종은 `ai_recommendable: false` — 시스템/관제자만 트리거), `SCHEMA_CHECK ➔ ACTION_WHITELIST ➔ ARN_MATCH ➔ AWS_DRY_RUN` **고정 순서 4단계** 출력 검증으로 RCE를 차단한다. 거절 사유 코드는 단계 접두(`SCHEMA_`·`WHITELIST_`·`ARN_`·`PRECHECK_`)로 어느 단계에서 막혔는지 역산된다.
 4. **One-Click & 양방향 회복 엔진**: Idempotency Key로 중복 실행을 막는다. 다운사이징 전 **스펙 JSON 백업** → `get_waiter` **2/2 Status Check** 감시 → 기동 실패 시 이전 스펙으로 **자동 원복(Auto-Rollback)**. AWS 조회 실패로 결과를 확정하지 못하면 자동 원복 대신 `UNVERIFIED`(결과 확인 불가)로 닫고 관제자 복구를 연다.
 5. **레콘(Reckon) — Incident 상태 축**: 가드레일(*실행해도 되는가*) 다음의 두 물음, *실제로 무엇이 일어났는가* → *그 결과를 어떻게 수습·종료하는가*를 다루는 Incident 상태와 그 관리 과정. 남은 제안이 있으면 종료할 수 없고, 종료 판단은 관제자 모달을 거친다.
-6. **조치별 절감 예상**: 다운사이징 등 자산 조치를 실행하면 얼마를 아낄 수 있는지를 **금액과 산출 근거를 함께 AI가 내고** 구조화 필드로 저장해 재사용한다. **추정값이며 실제 청구액이 아니다** — 서버 파생 사실값과 필드 이름·화면 표기로 구분한다.
+6. **조치별 절감 예상**: 다운사이징 등 자산 조치를 실행하면 얼마를 아낄 수 있는지를 보인다. **AI는 현재·목표 인스턴스 타입의 단가만 추정하고, 월 절감액·적용 조건·설명 문장은 서버가 만든다**(2026-09-17 개정). 구조화 필드로 저장해 재사용한다. **추정값이며 실제 청구액이 아니다** — 서버 파생 사실값과 필드 이름·화면 표기로 구분한다.
 7. **실시간 대시보드**: Next.js + Shadcn 기반 자산/위협 실시간 뷰(WebSocket), 자산 토폴로지 그래프, AI CoT 3줄 요약 카드, 원클릭 조치 UX.
 
 ---
@@ -96,6 +96,7 @@
 | 엔드포인트 | 내용 |
 | :--- | :--- |
 | `GET /api/v1/assets` | EC2/SG 상태·스펙·연결관계·헬스 스코어(0–100 정수)·Skip 사유 코드 |
+| `GET /api/v1/metrics/timeseries` | 대시보드 추이 차트의 원천 — 축 6개(EC2 CPU · 네트워크 In/Out · 인터넷 개방 보안 그룹 · `asset_status` · `asset_inventory` · `threat_events`)를 한 응답에 싣고 축마다 상태를 따로 매긴다 · 쿼리 `hours`(기본 72) |
 | `GET /api/v1/incidents` | 목록(상세의 부분집합) — `status`·`category` 필터, `created_at` 내림차순 |
 | `GET /api/v1/incidents/{id}` | AI CoT 3줄 요약, Evidence ID, 추천 Runbook(본편 7종), 실행 요약(복구 조치는 롤백 3종) |
 | `POST /api/v1/incidents/{id}/resolve` | 관제자 종료 판단 기록 — **Idempotency Key를 받지 않는다**(AWS를 바꾸지 않고 Incident 상태 하나만 옮기므로 재요청도 `200`) |
@@ -117,13 +118,13 @@ vigilantis/
 ├── apps/
 │   ├── web/                     # [김세혁·FE] Next.js 16 + React 19 + Tailwind v4 + Shadcn 대시보드
 │   │   └── src/
-│   │       ├── app/             #   App Router — 대시보드 / 자산 / 보안 인시던트 / 자산 인시던트 / 상세
+│   │       ├── app/             #   App Router — 대시보드(`/`) / 자산 관제(`/assets`) / 보안 관제(`/security`) / 인시던트 상세(`/incidents/[id]`) · 옛 목록 경로 `/incidents`·`/asset-incidents`는 각 화면의 인시던트 탭으로 redirect(2026-09-28)
 │   │       ├── components/      #   assets · dashboard · incidents · ui(shadcn)
 │   │       ├── lib/             #   조회 클라이언트(api/client.ts) · 필터·정렬 · 실시간 이벤트 (+ node --test)
 │   │       └── types/api.ts     #   packages/schemas API DTO의 TypeScript 대응
 │   └── core-api/                # [안성일·BE/AI · 김세혁·Infra] 단일 FastAPI 백엔드
 │       ├── main.py              #   create_app() — 오류 봉투·구조화 로그·스케줄러 3종 lifespan
-│       ├── routers/             #   [안성일] 공개 API (assets · incidents · actions · ws)
+│       ├── routers/             #   [안성일] 공개 API (assets · incidents · actions · metrics · ws)
 │       ├── db/                  #   [안성일] SQLAlchemy 모델 · Repository · Alembic migrations
 │       ├── services/
 │       │   ├── aws/             #     [김세혁] Boto3 실행(executor) · 스펙 JSON 백업(backup) · 원복(rollback)
@@ -131,7 +132,7 @@ vigilantis/
 │       │   ├── rule_engine.py   #     [김승철] Idle EC2·미사용 SG 판정, Skip 사유 코드 산출
 │       │   └── scheduler.py     #     [김승철] APScheduler 수집→판정 스캔
 │       ├── ai/                  #   [안성일] LangGraph 2그래프(agent.py) · 4단계 가드레일 · Whitelist
-│       │   └── evaluation/      #     AI 요약 품질 계측·판정 하네스 (기준선: docs/AI_SUMMARY_BASELINE.md)
+│       │   └── evaluation/      #     AI 요약 품질 계측·판정 하네스 (기준선: evaluation/summary/baseline.md)
 │       ├── security/            #   [디렉터리 오너 김세혁 · 정형화/판정 김승철] 위협 정형화 · Risk Evaluator · SOAR 차단/해제
 │       ├── incident_intake.py   #   판정·위협 → Incident 1건 생성
 │       ├── agent_dispatcher.py  #   AI 분석 대기 Incident → LangGraph 호출
@@ -149,22 +150,26 @@ vigilantis/
 │   ├── golden/                  # [김승철] Golden Dataset — FinOps 자산 32건 + SecOps 이벤트 16건
 │   └── secops-log-corpus/       # [김승철] SSH 모의 로그 9사례 — 근거 저장·전달 검증용
 ├── tests/                       # [김승철] 시연 전제 대조 · 가드레일 · 골든 · 롤백 · 실행 하네스 회귀
-└── docs/                        # PROJECT_STATUS.md (SSOT) · E2E_DEMO_SCENARIOS.md ·
-                                 # AI_SUMMARY_BASELINE.md · adr/ (의사결정 기록 9건)
+└── docs/                        # PROJECT_STATUS.md (SSOT) · E2E_DEMO_SCENARIOS.md · AWS_SMOKE_RESULT.md ·
+                                 # MVP_CLOSEOUT_CHECKLIST.md · adr/ (의사결정 기록 10건)
 ```
 
 ### scripts/
 
 | 스크립트 | 하는 일 |
 | :--- | :--- |
+| `stepper/` | 시연 · FE 관찰용 테스트 서버 — 타이머 없이 명령 한 번에 한 칸씩 진행(기동 · 자산 연결 · 위협 주입 · 초기화, [사용법](scripts/stepper/README.md)) |
 | `seed_localstack.py` | LocalStack 더미 AWS 자산 주입 — **시드 단일 원천**(멱등 · 실 AWS 실행 거부) |
 | `load_golden_assets.py` | Golden FinOps 자산을 DB에 적재하고 판정까지 돌려 `GET /assets`가 골든을 서빙하게 한다 |
 | `inject_mock_threat.py` | 모의 위협 주입 — 골든 SecOps 입력 정형화 + 초기 위험 판정 |
 | `inject_status_check_failure.py` | 시연용 Status Check 실패 주입 — 자동 원복 컷을 LocalStack에서 일으킨다 |
 | `probe_dryrun.py` | 런북이 쓰는 AWS 작업 전수에 DryRun을 걸어 지원 여부를 실측(ADR-0007 §6) |
 | `provision_smoke_aws.py` | 실 AWS 스모크 환경 구성·정리(up / status / down) — ADR-0009 |
+| `provision_platform_aws.py` | 플랫폼 배포 환경 구성·배포·정리 — CloudFront + WAF · 공개 ALB · ECS Fargate(api·web) · RDS, 장기 키 없이 역할 전환으로 관제 대상에 닿는다 — ADR-0010 |
+| `qa_scan_compare.py` | 실 AWS 스모크의 수집·판정 대조(A3·A9) 조회를 `docs/AWS_SMOKE_RESULT.md` §2 순서로 출력 — **읽기 전용** |
 | `secops_log_corpus.py` | SSH 모의 로그 코퍼스 build/check + 모의 위협 inbox 준비 |
 | `finops_eval.py` · `finops_judge.py` | AI 요약 품질 계측·판정 CLI (구현은 `ai/evaluation/summary`) |
+| `secops_eval.py` | SecOps 오프라인 평가 진입점 (구현은 `ai/evaluation/secops`) |
 | `smoke_finops_graph.py` · `smoke_secops_graph.py` | LangGraph 실제 모델 왕복 스모크 (⚠️ 과금 호출) |
 | `extract_golden_schema.py` | 골든 입력 JSON Schema를 `packages/schemas`에서 재추출(`--check`로 드리프트 대조) |
 | `check_ai_signature.py` | 커밋 메시지·PR 본문의 AI 서명 검사 — CI `ai-signature` 잡이 호출 |
@@ -183,6 +188,8 @@ AWS_ENDPOINT_URL=http://localhost:4566 uv run python scripts/seed_localstack.py 
 
 cd apps/web && npm ci && npm run dev  # 대시보드(:3000)
 ```
+
+시연은 위 절차 대신 단계 진행 테스트 서버로 한다 — `uv run python scripts/stepper/cli.py up`이 DB · LocalStack · API · FE를 한 번에 띄운다([scripts/stepper/README.md](scripts/stepper/README.md)).
 
 > * **대시보드는 `api`(:8000)가 떠 있어야 화면이 선다.** FE에 mock 계층이 없어 `apps/web`만 띄우면 모든 화면이 조회 오류다. BE 주소를 바꿨으면 `apps/web/.env.local`의 `NEXT_PUBLIC_API_BASE_URL`을 맞춘다([`apps/web/.env.example`](apps/web/.env.example)).
 > * **LocalStack은 재시작하면 비워진다** — 다시 띄웠으면 시드를 다시 돌린다. 호스트에서 실행할 땐 `AWS_ENDPOINT_URL`이 `http://localhost:4566`이어야 한다(`.env`의 `localstack:4566`은 compose 네트워크 안의 이름이다).
@@ -221,7 +228,9 @@ GitHub Actions CI는 **`dev`·`main` 대상 PR·push에서 3잡**이 돈다.
 * [`docs/adr/`](docs/adr) — 결정 배경(왜 그렇게 했나)
 * [`packages/schemas/`](packages/schemas) — 계약의 코드 소재
 * [`docs/E2E_DEMO_SCENARIOS.md`](docs/E2E_DEMO_SCENARIOS.md) — 시연 대본의 원천이자 E2E 회귀 테스트의 명세
-* [`docs/AI_SUMMARY_BASELINE.md`](docs/AI_SUMMARY_BASELINE.md) — AI 요약 3줄의 기준선과 재통과 절차
+* [`docs/AWS_SMOKE_RESULT.md`](docs/AWS_SMOKE_RESULT.md) — 실 AWS 스모크·P2 검증의 실측 기록 양식(A1–A11 번호의 정의). **값은 기록이지 기준이 아니다**
+* [`docs/MVP_CLOSEOUT_CHECKLIST.md`](docs/MVP_CLOSEOUT_CHECKLIST.md) — 10/15(목) MVP 마감 판정에서 볼 칸과 근거의 자리. 판정 기준 자체는 SSOT에만 있다
+* [`apps/core-api/ai/evaluation/summary/baseline.md`](apps/core-api/ai/evaluation/summary/baseline.md) — AI 요약 3줄의 기준선과 재통과 절차
 * `README.md` (이 문서) — 포트폴리오·소개용. **현황·결정의 기준이 아니다**
 
 ### ADR
@@ -237,6 +246,7 @@ GitHub Actions CI는 **`dev`·`main` 대상 PR·push에서 3잡**이 돈다.
 | [0007](docs/adr/0007-guardrail-dryrun-executor-precheck-contract.md) | 가드레일 4단계 AWS Dry-Run은 executor의 단일 `precheck()` 호출로 판정한다 |
 | [0008](docs/adr/0008-backup-record-lifecycle-recovery-integrity.md) | 백업 레코드는 조치 직전 1회 캡처·불변 보존하고, 원복 재개는 상태 대조로 판단한다 |
 | [0009](docs/adr/0009-real-aws-smoke-environment.md) | 실 AWS 스모크 환경 — 계정·자격증명·비용 통제와 시연 인프라 |
+| [0010](docs/adr/0010-platform-deployment-saas-shape.md) | 플랫폼 배포 — 단일 계정이지만 SaaS 모양으로(CloudFront · 역할 전환 · 수집 범위) |
 
 ---
 

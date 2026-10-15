@@ -204,7 +204,7 @@ def input_fingerprint(cases: Sequence[EvalCase]) -> str:
 
     스냅샷에 적어 두고 계측 도구가 대조한다 — CI가 아니다. 골든이 바뀌는 것은 골든 담당의
     일이라 막지 않고, 세트가 달라진 원자료로 이전 판과 짝 비교를 하려 할 때 도구가 알리고
-    거절한다(docs/AI_SUMMARY_BASELINE.md §기준선).
+    거절한다(ai/evaluation/summary/baseline.md §기준선).
     """
     digest = hashlib.sha256()
     for case in cases:

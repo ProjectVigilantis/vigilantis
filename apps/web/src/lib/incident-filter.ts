@@ -1,5 +1,5 @@
-// INC-001 보안 / INC-004 자산 목록 필터 — 화면설계서 v1.6 §4.4.
-// 프리셋 판정과 필터 잔존 클램프가 여기 있습니다.
+// 인시던트 목록 필터 — 화면설계서 v1.6 §4.4. 자산 관제(AST-001)·보안 관제(SEC-001)의 `인시던트` 탭이
+// 쓴다(2026-09-28 — 구 INC-001 보안 / INC-004 자산 목록 화면). 프리셋 판정과 필터 잔존 클램프가 여기 있습니다.
 
 // 같은 디렉터리 상대 경로를 쓴다 — `node --test`는 `@/` 별칭을 해석하지 못한다(타입 전용
 // import는 스트리핑돼 사라지므로 `@/types/api`는 그대로 둔다).
@@ -106,9 +106,8 @@ export function riskOptionsOf(items: readonly IncidentListItem[]): RiskLevel[] {
 }
 
 /**
- * 프리셋이 거르는 몫. **서버가 이미 거른 프리셋에서도 한 번 더 건다** — 멱등이라 결과가 같고,
- * WS로 들어온 건이 목록에 병합될 때(§4.4 병합 규칙) 서버 필터를 통과하지 않은 항목이 섞이는
- * 것을 여기서 막는다.
+ * 프리셋이 거르는 몫 — **네 프리셋 전부 여기서 건다.** 목록이 사는 화면이 인시던트 전량을 들고 있어
+ * (2026-09-28, incidents-view.tsx 머리말) 서버 `?status=` 필터를 따로 부르지 않는다.
  */
 export function byPreset(
   items: readonly IncidentListItem[],
@@ -159,35 +158,18 @@ export function visibleIncidents(
   return sortByRisk(filtered);
 }
 
-/** URL 프리셋 키 ↔ 내부 값. 소문자 kebab을 쓰는 건 주소창에 그대로 노출되기 때문이다. */
+/** URL 프리셋 키 → 내부 값. 소문자 kebab을 쓰는 건 주소창에 그대로 노출되기 때문이다. */
 const PRESET_BY_SLUG: Record<string, IncidentPreset> = {
   pending: 'PENDING',
   preemptive: 'PREEMPTIVE',
   history: 'HISTORY',
 };
 
-export const PRESET_SLUG: Record<IncidentPreset, string | null> = {
-  ACTIVE: null, // 기본 — `전체` 칸이 없으므로 쿼리도 없다
-  PENDING: 'pending',
-  PREEMPTIVE: 'preemptive',
-  HISTORY: 'history',
-};
-
 /**
- * 모르는 값은 **기본(ACTIVE)으로 접는다.** 구 `?status=` 패스스루와 달리 프리셋은 화면이 정의한
+ * `?preset=` 딥링크의 첫 프리셋. 모르는 값은 **기본(ACTIVE)으로 접는다.** 프리셋은 화면이 정의한
  * 값이라 서버에 그대로 넘길 대상이 아니고, 422를 띄울 계약도 아니다.
  * 배열(`?preset=a&preset=b`)도 같은 이유로 기본으로 떨어진다.
  */
 export function parsePreset(value: string | string[] | undefined): IncidentPreset {
   return (typeof value === 'string' ? PRESET_BY_SLUG[value] : undefined) ?? 'ACTIVE';
-}
-
-/**
- * 프리셋이 **서버 필터로 표현되는지**. 계약의 `?status=`는 값 하나만 받으므로 진행 중 4종은
- * 서버에서 못 거른다 — `ACTIVE`·`PREEMPTIVE`는 전량을 받아 클라이언트가 거른다(§4.4).
- */
-export function presetServerStatus(preset: IncidentPreset): IncidentStatus | undefined {
-  if (preset === 'PENDING') return 'AWAITING_APPROVAL';
-  if (preset === 'HISTORY') return 'RESOLVED';
-  return undefined;
 }

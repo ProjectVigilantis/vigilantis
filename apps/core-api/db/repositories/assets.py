@@ -514,6 +514,37 @@ class SgExposureBucket(NamedTuple):
 _BUCKET_ORIGIN = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
+def _latest_judged_runs(*, regions: Sequence[str], since: datetime, bucket_seconds: int):
+    """리전 × 시간 칸마다 **판정 행을 남긴 마지막 회차** 1건 — 축 2·4 의 공통 원천(2026-09-30).
+
+    칸 안의 회차를 모두 더하면 같은 리전을 스캔 주기보다 짧게 다시 수집했을 때(즉시 스캔 ·
+    재기동 직후 스캔) 건수가 회차 수만큼 부풀어 곡선이 튄다. 축 5(``asset_inventory_history``)와
+    같은 규칙으로 리전마다 마지막 회차만 남기고, 리전끼리는 호출부가 더한다. 판정 행이 없는
+    회차(실패)를 고르면 같은 칸의 앞선 판정까지 사라지므로 판정이 있는 회차 중에서 고른다.
+    """
+    run = models.CollectionRun
+    bucket = func.date_bin(timedelta(seconds=bucket_seconds), run.started_at, _BUCKET_ORIGIN)
+    has_judgement = (
+        select(models.RuleEvaluation.rule_evaluation_id)
+        .where(models.RuleEvaluation.collection_run_id == run.collection_run_id)
+        .exists()
+    )
+    return (
+        select(
+            run.collection_run_id,
+            bucket.label("observed_at"),
+            func.row_number()
+            .over(
+                partition_by=(run.region, bucket),
+                order_by=(run.started_at.desc(), run.collection_run_id.desc()),
+            )
+            .label("rn"),
+        )
+        .where(run.region.in_(regions), run.started_at >= since, has_judgement)
+        .subquery()
+    )
+
+
 def sg_exposure_history(
     db: Session,
     *,
@@ -530,7 +561,8 @@ def sg_exposure_history(
 
     **리전마다 회차가 따로 생기므로 시간 칸(``bucket_seconds``)으로 묶어 합산한다**(#231 의
     리전 격리 이후 한 사이클에 CollectionRun 이 리전 수만큼 생긴다). 묶지 않으면 2리전
-    환경에서 곡선이 리전별 건수 사이를 오가는 톱니가 된다. 칸 크기는 스캔 주기를 쓴다 —
+    환경에서 곡선이 리전별 건수 사이를 오가는 톱니가 된다. 같은 리전의 회차가 한 칸에 둘 들면
+    마지막 것만 센다(``_latest_judged_runs``). 칸 크기는 스캔 주기를 쓴다 —
     한 사이클의 리전 run 들은 수 초 안에 시작하므로 같은 칸에 떨어진다. 사이클이 칸 경계에
     걸치면 그 한 사이클만 두 점으로 갈린다(1리전에서는 일어나지 않는다).
 
@@ -540,9 +572,7 @@ def sg_exposure_history(
     if not regions:
         return []
 
-    bucket = func.date_bin(
-        timedelta(seconds=bucket_seconds), models.CollectionRun.started_at, _BUCKET_ORIGIN
-    ).label("observed_at")
+    runs = _latest_judged_runs(regions=regions, since=since, bucket_seconds=bucket_seconds)
     open_count = (
         func.count(models.RuleEvaluation.rule_evaluation_id)
         .filter(models.RuleEvaluation.verdict == Verdict.THREAT.value)
@@ -550,25 +580,236 @@ def sg_exposure_history(
     )
 
     stmt = (
-        select(bucket, open_count)
-        .select_from(models.CollectionRun)
+        select(runs.c.observed_at, open_count)
+        .select_from(runs)
         .join(
             models.RuleEvaluation,
-            models.RuleEvaluation.collection_run_id == models.CollectionRun.collection_run_id,
+            models.RuleEvaluation.collection_run_id == runs.c.collection_run_id,
         )
         .join(
             models.Asset,
             (models.Asset.asset_id == models.RuleEvaluation.asset_id)
             & (models.Asset.asset_type == AssetType.SG),
         )
-        .where(
-            models.CollectionRun.region.in_(regions),
-            models.CollectionRun.started_at >= since,
-        )
-        .group_by(bucket)
-        .order_by(bucket)
+        .where(runs.c.rn == 1)
+        .group_by(runs.c.observed_at)
+        .order_by(runs.c.observed_at)
     )
     return [SgExposureBucket(row.observed_at, int(row.open_count)) for row in db.execute(stmt)]
+
+
+class AssetStatusBucket(NamedTuple):
+    observed_at: datetime
+    threat: int
+    cost_candidate: int
+    unused: int
+    skip: int
+    undecided: int
+
+
+def asset_status_history(
+    db: Session,
+    *,
+    regions: Sequence[str],
+    since: datetime,
+    bucket_seconds: int,
+) -> list[AssetStatusBucket]:
+    """수집 회차별 자산 현황(판정별 건수) 이력 — 시계열 축 4.
+
+    원천과 시간 칸 규칙은 ``sg_exposure_history`` 와 같다(그쪽 docstring 참조) — 판정은
+    (자산 × 회차)로 보존되고, 리전마다 갈리는 회차를 ``bucket_seconds`` 칸으로 묶어 합산한다.
+    다른 점은 **자산 유형을 가리지 않고, 판정값마다 따로 센다**는 것이다.
+
+    ``undecided`` 는 verdict 가 없는 판정 행(판정 대기·실패)이다. 판정 행 자체가 없는 자산
+    (NACL 등 판정 비대상)은 어느 칸에도 세지 않는다 — 이력이 없는 것을 0으로 지어내지 않는다.
+    판정 행이 하나도 없는 칸은 점이 없다.
+    """
+    if not regions:
+        return []
+
+    runs = _latest_judged_runs(regions=regions, since=since, bucket_seconds=bucket_seconds)
+
+    def counted(verdict: Verdict):
+        return func.count(models.RuleEvaluation.rule_evaluation_id).filter(
+            models.RuleEvaluation.verdict == verdict.value
+        )
+
+    stmt = (
+        select(
+            runs.c.observed_at,
+            counted(Verdict.THREAT).label("threat"),
+            counted(Verdict.COST_CANDIDATE).label("cost_candidate"),
+            counted(Verdict.UNUSED).label("unused"),
+            counted(Verdict.SKIP).label("skip"),
+            func.count(models.RuleEvaluation.rule_evaluation_id)
+            .filter(models.RuleEvaluation.verdict.is_(None))
+            .label("undecided"),
+        )
+        .select_from(runs)
+        .join(
+            models.RuleEvaluation,
+            models.RuleEvaluation.collection_run_id == runs.c.collection_run_id,
+        )
+        .where(runs.c.rn == 1)
+        .group_by(runs.c.observed_at)
+        .order_by(runs.c.observed_at)
+    )
+    return [
+        AssetStatusBucket(
+            row.observed_at,
+            int(row.threat),
+            int(row.cost_candidate),
+            int(row.unused),
+            int(row.skip),
+            int(row.undecided),
+        )
+        for row in db.execute(stmt)
+    ]
+
+
+class ThreatEventBucket(NamedTuple):
+    observed_at: datetime
+    event_type: str
+    count: int
+
+
+def threat_event_history(
+    db: Session,
+    *,
+    regions: Sequence[str],
+    since: datetime,
+    until: datetime,
+    bucket_seconds: int,
+) -> list[ThreatEventBucket]:
+    """시간 칸 × 유형별 위협 이벤트 **발생** 건수 — 시계열 축 6.
+
+    칸은 이벤트의 발생 시각(``occurred_at``)으로 나눈다 — 수집 시각으로 나누면 적체된 이벤트가
+    한 번에 들어온 칸에 몰려 실제로 없던 급증이 선다. 칸 기준점은 다른 축과 같아(``_BUCKET_ORIGIN``)
+    화면이 판정 축과 한 x축에 겹칠 수 있다.
+
+    리전은 대상 ARN 의 넷째 칸(``arn:aws:<svc>:<region>:...``)으로 거른다 — 이벤트 행에 리전 열이
+    없고, 관제 대상이 아닌 리전의 위협까지 세면 ``/assets`` 와 다른 범위를 말하게 된다.
+    **대상이 ARN 형식이 아니면(``i-...`` 같은 리소스 ID) 리전 칸이 비어 세지 않는다** — 입력 계약은
+    길이만 검사하므로, 이벤트를 만드는 경로가 전체 ARN 을 싣는 것이 전제다.
+
+    창의 끝(``until``)도 거른다 — 발생 시각은 이벤트 원천이 적은 값이라 시계가 어긋나거나 수동으로
+    넣은 미래 시각이 오면, 거르지 않을 때 x축이 지금 이후로 늘어난다. 시작(``since``)과 같은 ``now``
+    에서 나온 값을 받는다.
+    이벤트가 없는 (칸, 유형) 행은 없다 — 이 축에서는 그것이 0건이다(축 docstring).
+    """
+    if not regions:
+        return []
+
+    event = models.ThreatEvent
+    bucket = func.date_bin(
+        timedelta(seconds=bucket_seconds), event.occurred_at, _BUCKET_ORIGIN
+    ).label("observed_at")
+    stmt = (
+        select(bucket, event.event_type, func.count(event.threat_event_id).label("count"))
+        .where(
+            func.split_part(event.target_arn, ":", 4).in_(regions),
+            event.occurred_at >= since,
+            event.occurred_at <= until,
+        )
+        .group_by(bucket, event.event_type)
+        .order_by(bucket, event.event_type)
+    )
+    return [
+        ThreatEventBucket(
+            row.observed_at,
+            getattr(row.event_type, "value", row.event_type),
+            int(row.count),
+        )
+        for row in db.execute(stmt)
+    ]
+
+
+def record_inventory_counts(
+    db: Session,
+    *,
+    collection_run_id: str,
+    counts: dict[AssetType, int],
+) -> None:
+    """회차 1회가 관측한 유형별 자산 수를 남긴다 — 축 5의 원천(``models.AssetInventoryCount``).
+
+    ``counts`` 에는 **관측한 유형만** 담아 넘긴다. 못 본 유형을 0으로 넣으면 추이가 자산이
+    사라진 것처럼 떨어진다(호출부 ``persist_inventory`` 가 degrade 유형을 뺀다).
+    ``COLLECT_VPC_IDS`` 가 켜진 회차의 0건은 "범위 안에 없음"이다 — 범위를 좁힌 시점에
+    추이가 계단으로 떨어지는 것은 자산 소멸이 아니다.
+    """
+    for asset_type, count in counts.items():
+        db.add(
+            models.AssetInventoryCount(
+                collection_run_id=collection_run_id, asset_type=asset_type, count=count
+            )
+        )
+    db.flush()
+
+
+class AssetInventoryBucket(NamedTuple):
+    observed_at: datetime
+    asset_type: AssetType
+    count: int
+
+
+def asset_inventory_history(
+    db: Session,
+    *,
+    regions: Sequence[str],
+    since: datetime,
+    bucket_seconds: int,
+) -> list[AssetInventoryBucket]:
+    """시간 칸 × 유형별 자산 수 — 시계열 축 5.
+
+    시간 칸 규칙은 ``sg_exposure_history`` 와 같다 — 리전마다 갈리는 회차를 ``bucket_seconds``
+    칸으로 묶어 합산한다. 한 칸에 **같은 리전의 회차가 둘** 들면(스캔 주기보다 짧게 재수집)
+    합산하면 자산이 두 배로 보이므로, 리전마다 그 칸의 **마지막 회차** 하나만 센다.
+
+    "마지막 회차"는 **스냅샷을 남긴 회차 중에서** 고른다. 실패(``FAILED``)·모르는 실패 라벨로
+    스냅샷을 건너뛴 회차가 칸의 마지막에 오면, 그 회차를 고른 뒤 조인해서는 같은 칸의 앞선
+    관측값까지 사라진다(PR #411 리뷰).
+
+    그 칸에서 한 유형을 본 회차가 없으면 그 (칸, 유형) 행이 없다 — 0건과 구분된다.
+    """
+    if not regions:
+        return []
+
+    run = models.CollectionRun
+    counts = models.AssetInventoryCount
+    bucket = func.date_bin(timedelta(seconds=bucket_seconds), run.started_at, _BUCKET_ORIGIN)
+    # 리전 × 칸마다 스냅샷을 남긴 회차 중 가장 늦게 시작한 1건. 순위를 매긴 뒤 조인하므로
+    # 회차당 행이 유형 수만큼 불어나지 않는다.
+    has_snapshot = (
+        select(counts.collection_run_id)
+        .where(counts.collection_run_id == run.collection_run_id)
+        .exists()
+    )
+    ranked = (
+        select(
+            run.collection_run_id,
+            bucket.label("observed_at"),
+            func.row_number()
+            .over(
+                partition_by=(run.region, bucket),
+                order_by=(run.started_at.desc(), run.collection_run_id.desc()),
+            )
+            .label("rn"),
+        )
+        .where(run.region.in_(regions), run.started_at >= since, has_snapshot)
+        .subquery()
+    )
+    stmt = (
+        select(ranked.c.observed_at, counts.asset_type, func.sum(counts.count).label("count"))
+        .select_from(ranked)
+        .join(counts, counts.collection_run_id == ranked.c.collection_run_id)
+        .where(ranked.c.rn == 1)
+        .group_by(ranked.c.observed_at, counts.asset_type)
+        .order_by(ranked.c.observed_at, counts.asset_type)
+    )
+    return [
+        AssetInventoryBucket(row.observed_at, AssetType(row.asset_type), int(row.count))
+        for row in db.execute(stmt)
+    ]
 
 
 def latest_rule_evaluation_by_asset(db: Session) -> dict[str, models.RuleEvaluation]:

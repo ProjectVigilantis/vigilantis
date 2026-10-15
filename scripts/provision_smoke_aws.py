@@ -12,8 +12,14 @@
 #   읽기만    : uv run python scripts/provision_smoke_aws.py status --account <계정 ID>
 #   세울 목록 : uv run python scripts/provision_smoke_aws.py up --account <계정 ID> --budget-email example@email.com
 #   실제 생성 : ... up --account <계정 ID> --budget-email example@email.com --yes
-#   전부 정리 : ... down --account <계정 ID> --yes
+#   스모크 자원 정리 : ... down --account <계정 ID> --yes   (스모크 VPC·태그 자원만 — AMI·스냅숏 전체 정리는 아님)
 #   앱 정책   : ... policy --account <계정 ID>   (앱 사용자에 붙일 IAM 정책 JSON — 읽기만)
+#   서비스 전환(#446): ... service --operation schema          (오프라인 — 필요한 옵션 보기)
+#                     ... service --operation plan --account <계정 ID> --execution-id <ID> --options-json '{...}'
+#                     ... service --operation cutover --account <계정 ID> --transition-id <ID> --options-file opts.json --apply
+#     prepare·cutover·return·cleanup은 --apply 없이는 실행하지 않는다. 관리자 자격은 --profile 또는 셸의
+#     기본 자격 체인 — 이 호출의 boto3 세션에만 쓰이며 .env·앱 클라이언트 설정은 바뀌지 않는다.
+#     down은 AMI·스냅숏 전체 정리가 아니다 — service --operation cleanup-plan / cleanup을 쓴다.
 #
 # 안전 가드 — 시드 가드의 거울상이다.
 #   ① AWS_ENDPOINT_URL이 잡혀 있으면 AWS를 부르기 전에 멈춘다. LocalStack에는 elbv2가
@@ -41,27 +47,29 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import re
 import sys
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 for _p in (str(_REPO_ROOT / "apps" / "core-api"), str(_REPO_ROOT / "packages")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from botocore.exceptions import ClientError  # noqa: E402
-
-from schemas.asset_roles import ROLE_ISOLATION, ROLE_TAG_KEY  # noqa: E402
-from schemas.rightsizing_policy import rightsizing_target_type  # noqa: E402
+from botocore.exceptions import ClientError
+from schemas.asset_roles import ROLE_ISOLATION, ROLE_TAG_KEY
+from schemas.rightsizing_policy import rightsizing_target_type
 
 # 리전·엔드포인트·자격증명 해석과 클라이언트 생성의 단일 원천(ADR-0006 §3, Issue #128).
-from services.aws.client import aws_client, default_region, endpoint_url  # noqa: E402
-from services.rule_engine import MIN_DATAPOINTS  # noqa: E402
+from services.aws.client import aws_client, default_region, endpoint_url
+from services.rule_engine import MIN_DATAPOINTS
 
 SMOKE_TAG_KEY = "vigilantis:smoke"
 SMOKE_TAG_VALUE = "true"
@@ -90,10 +98,10 @@ WEB_TYPE = "t3.micro"
 # pytest 세션 전체가 INTERNALERROR로 끝나 CI 테스트가 0건 돈다.
 IDLE_DEV_TYPE = "t3.medium"
 
-SG_ALB = f"{PREFIX}-alb"              # internal ALB 수신 80/tcp — VPC 안에서만
-SG_WEB = f"{PREFIX}-web"              # ALB에서 오는 80/tcp만
-SG_OPEN_SSH = f"{PREFIX}-open-ssh"    # OpenIP 위협 미끼 22/tcp 0.0.0.0/0 — 공인 IP 없는 인스턴스에만
-SG_UNUSED = f"{PREFIX}-unused"        # 어디에도 붙지 않는다 — SG_DELETE_ISOLATED 대상
+SG_ALB = f"{PREFIX}-alb"  # internal ALB 수신 80/tcp — VPC 안에서만
+SG_WEB = f"{PREFIX}-web"  # ALB에서 오는 80/tcp만
+SG_OPEN_SSH = f"{PREFIX}-open-ssh"  # OpenIP 위협 미끼 22/tcp 0.0.0.0/0 — 공인 IP 없는 인스턴스에만
+SG_UNUSED = f"{PREFIX}-unused"  # 어디에도 붙지 않는다 — SG_DELETE_ISOLATED 대상
 SG_ISOLATION = f"{PREFIX}-isolation"  # 규칙 0개 — EC2_ISOLATE가 ENI를 이 SG로 바꾼다
 SECURITY_GROUPS = (SG_ALB, SG_WEB, SG_OPEN_SSH, SG_UNUSED, SG_ISOLATION)
 
@@ -102,9 +110,9 @@ SECURITY_GROUPS = (SG_ALB, SG_WEB, SG_OPEN_SSH, SG_UNUSED, SG_ISOLATION)
 class InstanceSpec:
     name: str
     instance_type: str
-    az: str                    # SUBNETS 키
+    az: str  # SUBNETS 키
     groups: tuple[str, ...]
-    environment: str           # _is_prod가 보는 태그(services/rule_engine.py)
+    environment: str  # _is_prod가 보는 태그(services/rule_engine.py)
     in_target_group: bool
 
 
@@ -112,15 +120,21 @@ INSTANCES = (
     # EC2_ISOLATE 대상 · NACL_ADD_DENY가 겨누는 서브넷 · OpenIP 위협 SG.
     # production이라 비용 판정은 관측치가 찬 뒤 SKIP_PROD_PROTECTED — evaluate_ec2는 관측치
     # 검사가 prod 검사보다 앞이라 기동 후 MIN_DATAPOINTS시간은 SKIP_INSUFFICIENT_DATA다.
-    InstanceSpec(f"{PREFIX}-web-1", WEB_TYPE, "a", (SG_WEB, SG_OPEN_SSH), "production", True),
+    InstanceSpec(
+        f"{PREFIX}-web-1", WEB_TYPE, "a", (SG_WEB, SG_OPEN_SSH), "production", True
+    ),
     # 격리 뒤에도 Target Group을 잇는 두 번째 대상 — "다중 EC2"의 자리
     InstanceSpec(f"{PREFIX}-web-2", WEB_TYPE, "c", (SG_WEB,), "production", True),
     # RIGHTSIZING → REVERT_SIZE · Status Check 주입 대상. MIN_DATAPOINTS시간 관측 뒤 COST_CANDIDATE
-    InstanceSpec(f"{PREFIX}-idle-dev", IDLE_DEV_TYPE, "a", (SG_WEB,), "development", False),
+    InstanceSpec(
+        f"{PREFIX}-idle-dev", IDLE_DEV_TYPE, "a", (SG_WEB,), "development", False
+    ),
 )
 
 NACL_NAME = f"{PREFIX}-nacl"
-NACL_AZ = "a"  # web-1의 서브넷 — 위협 대상과 조치가 닿는 자원을 같은 자리로(시드와 같은 이유)
+NACL_AZ = (
+    "a"  # web-1의 서브넷 — 위협 대상과 조치가 닿는 자원을 같은 자리로(시드와 같은 이유)
+)
 # 실 AWS의 커스텀 NACL은 deny-all(32767)만 갖고 태어난다 — 허용 없이 붙이면 서브넷 통신이
 # 끊긴다(LocalStack은 트래픽을 흉내 내지 않아 드러나지 않는다). AI는 rule_number를 1–32766
 # 에서 고르므로(ai/agent.py) 허용을 그 맨 끝에 둔다 — 어떤 차단 규칙도 허용보다 먼저
@@ -138,11 +152,32 @@ APP_POLICY = APP_USER
 MANAGED_POLICY_MAX_CHARS = 6144
 _POLICY_VERSION_LIMIT = 5  # 관리형 정책 하나가 가질 수 있는 버전 수
 BUDGET_NAME = f"{PREFIX}-monthly"
-BUDGET_USD = "50"  # 알림선이지 상한이 아니다(ADR-0009 §3)
+# 알림선이지 상한이 아니다(ADR-0009 §3 — 2026-10-12 개정, 12/11까지 유지). 비용 필터가 없어 계정 전체를
+# 잰다. 학원 사용 한도 100만 원(AWS 크레딧 아님) ÷ 10/12–12/11 61일 ≈ 월 $355 — 그보다 일찍 울리게 $300
+BUDGET_USD = "300"
+# 크레딧을 빼기 전 사용액으로 잰다. 지금 계정에 크레딧은 없지만, 등록되면 IncludeCredit 기본값 True가
+# 비용을 상쇄해 사용액이 0에 가깝게 보이고 알림이 울리지 않는다 — 한도를 얼마나 쓰는지가 잴 대상이다
+BUDGET_COST_TYPES = {"IncludeCredit": False}
 BUDGET_ALERTS = (("ACTUAL", 50), ("ACTUAL", 80), ("ACTUAL", 100), ("FORECASTED", 100))
 # 앱이 ENABLE_AUTOSCALING으로 만드는 Launch Template 이름(executor._launch_template_name).
-# 태그가 없고 VPC 자원도 아니라 이름으로만 가린다.
+# 정리(cleanup) 탐색은 이 이름 접두 규칙을 그대로 쓴다. 생성 시에는 이제 실행 ID·원본 인스턴스
+# 태그(아래 EXECUTION_TAG_KEY·SOURCE_TAG_KEY)가 함께 달린다.
 APP_LT_PREFIX = "vigilantis-lt-"
+# 앱이 실행 경로에서 새로 만드는 자원(AMI·스냅숏·LT·ASG)의 표지. 실행 한 번과 원본 인스턴스를 가리키고
+# 새 자원에 요청 태그로 반드시 달린다(정책이 Null 조건으로 강제한다).
+EXECUTION_TAG_KEY = "vigilantis:execution-id"
+SOURCE_TAG_KEY = "vigilantis:source-instance"
+# 새 자원에 CreateTags로 달 수 있는 합의된 키(소스 환경 태그는 유지, 두 새 키는 필수)
+CREATE_TAG_KEYS = (
+    SMOKE_TAG_KEY,
+    EXECUTION_TAG_KEY,
+    SOURCE_TAG_KEY,
+    "Environment",
+    "environment",
+)
+APP_ASG_PREFIX = "vigilantis-asg-"
+APP_ASG_MAX_SIZE = 4
+_IAM_ROLE_ARN = re.compile(r"^arn:aws:iam::(\d{12}):role/[\w+=,.@/-]+$")
 ASG_SERVICE = "autoscaling.amazonaws.com"
 ASG_SERVICE_ROLE = "AWSServiceRoleForAutoScaling"
 
@@ -178,7 +213,13 @@ systemctl enable --now smoke-http
 
 
 # ------------------------------------------------------------------ 앱 IAM 정책
-def build_app_policy(account: str, region: str, vpc_id: str) -> dict:
+def build_app_policy(
+    account: str,
+    region: str,
+    vpc_id: str,
+    subnet_ids: Sequence[str],
+    instance_role_arns: Sequence[str] = (),
+) -> dict:
     """앱 키에 붙일 최소 권한 정책. **코드가 부르는 AWS 작업의 거울이다**(ADR-0009 §2).
 
     tests/test_provision_smoke_aws.py가 두 방향을 지킨다 — 실행 경로를 더한 PR이 여기를
@@ -190,45 +231,81 @@ def build_app_policy(account: str, region: str, vpc_id: str) -> dict:
     태그 대신 VPC로 가둔다. 새 SG 생성은 새 SG가 아니라 생성 장소(VPC ARN)로 가둔다.
     조건 키가 실제로 채워지는지는 적용 직후 DryRun으로 잰다.
 
+    실행 경로(CreateImage → CreateLaunchTemplate → CreateAutoScalingGroup → PutScalingPolicy)의
+    새 자원은 요청 태그(스모크·실행 ID·원본 인스턴스)를 달아야만 만들어지고(Null 조건), ASG는 이름
+    접두·정확한 스모크 서브넷·크기 4 이하·LT 버전 명시로 가둔다. CreateAutoScalingGroup은 호출자에게
+    ec2:RunInstances(와 태그·역할 전달) 권한을 요구하므로 — 앱이 RunInstances를 부르지는 않지만 —
+    그 의존 권한을 지원 자원 유형별로 가둬 둔다. iam:PassRole은 운영자가 instance_role_arns를 준
+    때만, 그 역할 ARN에 한해 ec2.amazonaws.com으로만 허용한다. IAM 역할·서비스 연결 역할은 바꾸지 않는다.
+
     크기는 관리형 정책 한도(MANAGED_POLICY_MAX_CHARS, 공백 제외) 안이어야 한다 — 테스트가 잰다.
     """
+    subnet_ids = sorted(set(subnet_ids))
+    if not subnet_ids:
+        raise ValueError(
+            "subnet_ids가 비었다 — ASG·RunInstances 울타리는 정확한 스모크 서브넷이 필요하다"
+        )
+    role_arns = sorted(set(instance_role_arns))
+    for role_arn in role_arns:
+        match = _IAM_ROLE_ARN.match(role_arn)
+        if not match or match.group(1) != account:
+            raise ValueError(
+                f"허용할 역할 ARN은 이 계정의 와일드카드 없는 IAM 역할이어야 한다: {role_arn}"
+            )
     arn = f"arn:aws:ec2:{region}:{account}"
     vpc_arn = f"{arn}:vpc/{vpc_id}"
-    smoke_tagged = {"StringEquals": {f"aws:ResourceTag/{SMOKE_TAG_KEY}": SMOKE_TAG_VALUE}}
+    subnet_arns = [f"{arn}:subnet/{s}" for s in subnet_ids]
+    asg_arn = f"arn:aws:autoscaling:{region}:{account}:autoScalingGroup:*:autoScalingGroupName/{APP_ASG_PREFIX}*"
+    smoke_tagged = {
+        "StringEquals": {f"aws:ResourceTag/{SMOKE_TAG_KEY}": SMOKE_TAG_VALUE}
+    }
     in_region = {"StringEquals": {"aws:RequestedRegion": region}}
-    return {
+    smoke_requested = {f"aws:RequestTag/{SMOKE_TAG_KEY}": SMOKE_TAG_VALUE}
+    # 새 자원: 스모크 태그 값 + 실행 ID·원본 인스턴스 태그의 존재를 요청에서 강제한다
+    run_requested = {
+        "StringEquals": smoke_requested,
+        "Null": {
+            f"aws:RequestTag/{EXECUTION_TAG_KEY}": "false",
+            f"aws:RequestTag/{SOURCE_TAG_KEY}": "false",
+        },
+    }
+    policy = {
         "Version": "2012-10-17",
         "Statement": [
             {
-                "Sid": "ReadInventory",
                 "Effect": "Allow",
                 "Action": list(READ_ACTIONS),
                 "Resource": "*",
                 "Condition": in_region,
             },
             {
-                "Sid": "SmokeInstances",  # RIGHTSIZING·REVERT_SIZE(stop → modify → start)
+                # RIGHTSIZING·REVERT_SIZE(stop → modify → start) · CreateImage의 원본 인스턴스(NoReboot)
                 "Effect": "Allow",
-                "Action": ["ec2:ModifyInstanceAttribute", "ec2:StartInstances", "ec2:StopInstances"],
+                "Action": [
+                    "ec2:CreateImage",
+                    "ec2:ModifyInstanceAttribute",
+                    "ec2:StartInstances",
+                    "ec2:StopInstances",
+                ],
                 "Resource": f"{arn}:instance/*",
                 "Condition": smoke_tagged,
             },
             {
-                "Sid": "SmokeNaclEntries",  # NACL_ADD_DENY·NACL_RESTORE
+                # NACL_ADD_DENY·NACL_RESTORE
                 "Effect": "Allow",
                 "Action": ["ec2:CreateNetworkAclEntry", "ec2:DeleteNetworkAclEntry"],
                 "Resource": f"{arn}:network-acl/*",
                 "Condition": smoke_tagged,
             },
             {
-                "Sid": "SmokeVolumes",  # EBS_DELETE_UNATTACHED(스냅숏 → 삭제)
+                # EBS_DELETE_UNATTACHED(스냅숏 → 삭제)
                 "Effect": "Allow",
                 "Action": ["ec2:CreateSnapshot", "ec2:DeleteVolume"],
                 "Resource": f"{arn}:volume/*",
                 "Condition": smoke_tagged,
             },
             {
-                "Sid": "SnapshotsOfSmokeVolumes",  # 새 스냅숏 자원 — 볼륨 쪽 조건이 이미 가둔다
+                # 새 스냅숏 자원 — 볼륨 쪽 조건이 이미 가둔다
                 "Effect": "Allow",
                 "Action": ["ec2:CreateSnapshot"],
                 "Resource": f"arn:aws:ec2:{region}::snapshot/*",
@@ -240,7 +317,6 @@ def build_app_policy(account: str, region: str, vpc_id: str) -> dict:
                 # create_security_group이 전체 허용 egress 1건을 자동으로 붙이므로, 걷어
                 # 내지 않으면 재생성 SG가 원본보다 넓어지거나 같은 규칙 주입이 Duplicate로
                 # 거절된다 — 복원이 아니라 확장이 된다.
-                "Sid": "SecurityGroupsAndEnisInSmokeVpc",
                 "Effect": "Allow",
                 "Action": [
                     "ec2:AuthorizeSecurityGroupEgress",
@@ -256,43 +332,210 @@ def build_app_policy(account: str, region: str, vpc_id: str) -> dict:
                 # SG_RECREATE의 생성. CreateSecurityGroup은 새 SG와 생성 장소 VPC를 **각각** 검사하는데,
                 # 새 SG 쪽 조건 키는 요청 태그·ec2:SecurityGroupID뿐이다(ec2:Vpc 없음 — 붙이면 이
                 # 문장은 영영 성립하지 않는다). 그래서 새 SG 쪽은 열어 두고 울타리는 아래 VPC 문장이 친다.
-                "Sid": "NewSecurityGroups",
                 "Effect": "Allow",
                 "Action": ["ec2:CreateSecurityGroup"],
                 "Resource": f"{arn}:security-group/*",
             },
             {
-                "Sid": "CreateSecurityGroupInSmokeVpc",  # 생성 장소 — 스모크 VPC 밖에는 만들지 못한다
+                # 생성 장소 — 스모크 VPC 밖에는 만들지 못한다
                 "Effect": "Allow",
                 "Action": ["ec2:CreateSecurityGroup"],
                 "Resource": vpc_arn,
             },
             {
-                "Sid": "LaunchTemplatesForAutoscaling",  # ENABLE_AUTOSCALING precheck(DryRun)
+                # EC2_ISOLATE(등록 해제)·EC2_UNISOLATE(백업 포트로 재등록). ENI 쪽 SG 교체는 위
+                # SgEni 문장이 맡는다. TG는 VPC 조건 키가 없어 스모크
+                # 태그로 가둔다 — 스모크 TG는 생성 때 같은 태그를 단다(_ensure_load_balancer).
                 "Effect": "Allow",
-                "Action": ["ec2:CreateLaunchTemplate"],
-                "Resource": f"{arn}:launch-template/*",
+                "Action": [
+                    "elasticloadbalancing:DeregisterTargets",
+                    "elasticloadbalancing:RegisterTargets",
+                ],
+                "Resource": f"arn:aws:elasticloadbalancing:{region}:{account}:targetgroup/*",
+                "Condition": smoke_tagged,
             },
-        ],
+            {
+                # 새 자원은 요청 태그로만 가둔다(AWS 서비스 권한 참조: 이 유형들에 리소스 태그·Vpc 키 없음).
+                # CreateImage의 새 자원은 image·snapshot, CreateLaunchTemplate의 새 자원은 launch-template
+                # 하나뿐이고 IAM은 작업이 요구하지 않는 자원 유형 ARN은 그 작업에 적용하지 않는다 — 크기 한도
+                # 때문에 같은 조건을 쓰는 두 생성 작업을 한 문장에 둔다. ENABLE_AUTOSCALING precheck(DryRun)도 이 LT 문장.
+                "Effect": "Allow",
+                "Action": ["ec2:CreateImage", "ec2:CreateLaunchTemplate"],
+                "Resource": [
+                    f"arn:aws:ec2:{region}::image/*",
+                    f"arn:aws:ec2:{region}::snapshot/*",
+                    f"{arn}:launch-template/*",
+                ],
+                "Condition": run_requested,
+            },
+            {
+                # CreateImage·CreateLaunchTemplate·RunInstances(ASG 의존)가 생성 때 다는 태그만
+                "Effect": "Allow",
+                "Action": ["ec2:CreateTags"],
+                "Resource": [
+                    f"{arn}:instance/*",
+                    f"{arn}:volume/*",
+                    f"{arn}:launch-template/*",
+                    f"arn:aws:ec2:{region}::image/*",
+                    f"arn:aws:ec2:{region}::snapshot/*",
+                ],
+                "Condition": {
+                    "StringEquals": {
+                        "ec2:CreateAction": [
+                            "CreateImage",
+                            "CreateLaunchTemplate",
+                            "RunInstances",
+                        ]
+                    },
+                    # 합의된 태그 키만(ForAllValues는 키 부재 시 참 — Null로 막는다)
+                    "ForAllValues:StringEquals": {"aws:TagKeys": list(CREATE_TAG_KEYS)},
+                    "Null": {"aws:TagKeys": "false"},
+                },
+            },
+            {
+                # 이름 접두·정확한 스모크 서브넷·크기·LT 버전 명시
+                "Effect": "Allow",
+                "Action": ["autoscaling:CreateAutoScalingGroup"],
+                "Resource": asg_arn,
+                "Condition": {
+                    **run_requested,
+                    "NumericLessThanEquals": {
+                        "autoscaling:MaxSize": str(APP_ASG_MAX_SIZE),
+                        "autoscaling:MinSize": str(APP_ASG_MAX_SIZE),
+                    },
+                    "Bool": {"autoscaling:LaunchTemplateVersionSpecified": "true"},
+                    "ForAllValues:StringEquals": {
+                        "autoscaling:VPCZoneIdentifiers": subnet_ids
+                    },
+                    # ForAllValues는 키가 없으면 참이 된다 — 서브넷 없는 요청을 Null로 막는다
+                    "Null": {
+                        **run_requested["Null"],
+                        "autoscaling:VPCZoneIdentifiers": "false",
+                    },
+                },
+            },
+            {
+                # CreateAutoScalingGroup의 Tags가 요구하는 별도 권한
+                "Effect": "Allow",
+                "Action": ["autoscaling:CreateOrUpdateTags"],
+                "Resource": asg_arn,
+                "Condition": run_requested,
+            },
+            {
+                # CPU 목표 추적 + #446 서비스 전환의 ASG 인스턴스 보호(SetInstanceProtection). 같은 ASG ARN·
+                # 스모크 리소스 태그 울타리다(PutScalingPolicy와 같은 조건). 서비스 권한 참조(list_autoscaling)상
+                # SetInstanceProtection은 autoScalingGroup 자원에 aws:ResourceTag·autoscaling:ResourceTag 조건 키를
+                # 지원한다. 실제 계정에서의 인가(SCP 등)는 실 호출 전까지 미검증이다. ALB 연결·라우팅(Attach*/Detach*)과 이미지·스냅숏 삭제는 이 정책에 없다.
+                "Effect": "Allow",
+                "Action": [
+                    "autoscaling:PutScalingPolicy",
+                    "autoscaling:SetInstanceProtection",
+                ],
+                "Resource": asg_arn,
+                "Condition": {
+                    "StringEquals": {
+                        f"aws:ResourceTag/{SMOKE_TAG_KEY}": SMOKE_TAG_VALUE
+                    }
+                },
+            },
+            {
+                # CreateAutoScalingGroup이 호출자에게 요구하는 RunInstances 권한 — 실제 호출은 없다.
+                # 지원 자원 유형마다 울타리를 따로 친다(AWS 서비스 권한 참조의 RunInstances 자원별 조건 키):
+                # instance·volume은 요청 태그만(리소스 태그 키 없음) / image·snapshot·launch-template은
+                # 리소스 태그 / subnet은 정확한 ARN / network-interface는 ec2:Vpc+ec2:Subnet /
+                # security-group은 ec2:Vpc. key-pair 권한은 없다(런타임 LT가 KeyName을 넣지 않는다).
+                "Effect": "Allow",
+                "Action": ["ec2:RunInstances"],
+                "Resource": [f"{arn}:instance/*", f"{arn}:volume/*"],
+                "Condition": run_requested,
+            },
+            {
+                "Effect": "Allow",
+                "Action": ["ec2:RunInstances"],
+                "Resource": f"{arn}:launch-template/*",
+                "Condition": smoke_tagged,
+            },
+            {
+                # image·snapshot ARN에는 계정이 없다 — SAR의 ec2:Owner로 우리 계정 소유만 허용
+                "Effect": "Allow",
+                "Action": ["ec2:RunInstances"],
+                "Resource": [
+                    f"arn:aws:ec2:{region}::image/*",
+                    f"arn:aws:ec2:{region}::snapshot/*",
+                ],
+                "Condition": {
+                    **smoke_tagged,
+                    "StringEquals": {
+                        f"aws:ResourceTag/{SMOKE_TAG_KEY}": SMOKE_TAG_VALUE,
+                        "ec2:Owner": account,
+                    },
+                },
+            },
+            {
+                # 서브넷은 정확한 ARN이 울타리. 런타임 LT는 KeyName을 넣지 않으므로 key-pair 권한은 없다.
+                "Effect": "Allow",
+                "Action": ["ec2:RunInstances"],
+                "Resource": subnet_arns,
+            },
+            {
+                "Effect": "Allow",
+                "Action": ["ec2:RunInstances"],
+                "Resource": f"{arn}:network-interface/*",
+                "Condition": {
+                    "ArnEquals": {"ec2:Vpc": vpc_arn, "ec2:Subnet": subnet_arns}
+                },
+            },
+            {
+                "Effect": "Allow",
+                "Action": ["ec2:RunInstances"],
+                "Resource": f"{arn}:security-group/*",
+                "Condition": {"ArnEquals": {"ec2:Vpc": vpc_arn}},
+            },
+        ]
+        + (
+            [
+                {
+                    # 운영자가 준 역할만, EC2로만
+                    "Effect": "Allow",
+                    "Action": ["iam:PassRole"],
+                    "Resource": role_arns,
+                    "Condition": {
+                        "StringEquals": {"iam:PassedToService": "ec2.amazonaws.com"}
+                    },
+                }
+            ]
+            if role_arns
+            else []
+        ),
     }
+    size = len("".join(json.dumps(policy).split()))
+    if (
+        size > MANAGED_POLICY_MAX_CHARS
+    ):  # 울타리를 덜어 맞추지 않는다 — 입력(역할 목록 등)을 줄이게 거절한다
+        raise ValueError(
+            f"정책이 관리형 정책 한도를 넘는다: {size} > {MANAGED_POLICY_MAX_CHARS}"
+        )
+    return policy
 
 
 # ------------------------------------------------------------------ 가드·공통
-def _require_real_aws(expected_account: str) -> None:
-    """실 AWS 전용(가드 ①) + 대상 계정 대조(가드 ②)."""
+def _require_real_aws(expected_account: str, sts=None) -> None:
+    """실 AWS 전용(가드 ①) + 대상 계정 대조(가드 ②). sts: 이 호출 전용 관리자 세션의 클라이언트."""
     endpoint = endpoint_url()
     if endpoint:
         sys.exit(
             f"AWS_ENDPOINT_URL={endpoint} 설정됨 — 이 스크립트는 실 AWS 전용이다"
             "(LocalStack에는 elbv2가 없다). 셸에서 변수를 지우고 다시 실행할 것."
         )
-    identity = aws_client("sts").get_caller_identity()
+    identity = (sts or aws_client("sts")).get_caller_identity()
     if identity["Account"] != expected_account:
         sys.exit(
             f"--account {expected_account} ≠ 호출 주체의 계정 {identity['Account']} — "
             "AWS 프로필을 확인할 것."
         )
-    print(f"[smoke] 계정 {identity['Account']} · 주체 {identity['Arn']} · 리전 {default_region()}")
+    print(
+        f"[smoke] 계정 {identity['Account']} · 주체 {identity['Arn']} · 리전 {default_region()}"
+    )
 
 
 def _code(exc: ClientError) -> str:
@@ -301,12 +544,15 @@ def _code(exc: ClientError) -> str:
 
 def _tags(
     name: str,
-    environment: Optional[str] = None,
+    environment: str | None = None,
     *,
     pending: bool = False,
-    role: Optional[str] = None,
+    role: str | None = None,
 ) -> list[dict]:
-    tags = [{"Key": "Name", "Value": name}, {"Key": SMOKE_TAG_KEY, "Value": SMOKE_TAG_VALUE}]
+    tags = [
+        {"Key": "Name", "Value": name},
+        {"Key": SMOKE_TAG_KEY, "Value": SMOKE_TAG_VALUE},
+    ]
     if environment:
         tags.append({"Key": "Environment", "Value": environment})
     if pending:
@@ -319,26 +565,30 @@ def _tags(
 def _tag_spec(
     resource_type: str,
     name: str,
-    environment: Optional[str] = None,
+    environment: str | None = None,
     *,
     pending: bool = False,
-    role: Optional[str] = None,
+    role: str | None = None,
 ) -> list[dict]:
-    return [{
-        "ResourceType": resource_type,
-        "Tags": _tags(name, environment, pending=pending, role=role),
-    }]
+    return [
+        {
+            "ResourceType": resource_type,
+            "Tags": _tags(name, environment, pending=pending, role=role),
+        }
+    ]
 
 
 def _vpc_filter(vpc_id: str) -> dict:
     return {"Name": "vpc-id", "Values": [vpc_id]}
 
 
-def _tag_of(resource: dict, key: str) -> Optional[str]:
-    return next((t["Value"] for t in resource.get("Tags") or [] if t["Key"] == key), None)
+def _tag_of(resource: dict, key: str) -> str | None:
+    return next(
+        (t["Value"] for t in resource.get("Tags") or [] if t["Key"] == key), None
+    )
 
 
-def _name_of(resource: dict) -> Optional[str]:
+def _name_of(resource: dict) -> str | None:
     return _tag_of(resource, "Name")
 
 
@@ -348,10 +598,14 @@ def _init_pending(resource: dict) -> bool:
 
 
 def _mark_init_done(ec2, resource_id: str) -> None:
-    ec2.create_tags(Resources=[resource_id], Tags=[{"Key": INIT_TAG_KEY, "Value": INIT_DONE}])
+    ec2.create_tags(
+        Resources=[resource_id], Tags=[{"Key": INIT_TAG_KEY, "Value": INIT_DONE}]
+    )
 
 
-def _retry(fn: Callable[[], Any], what: str, codes: tuple[str, ...], timeout: int = 600) -> Any:
+def _retry(
+    fn: Callable[[], Any], what: str, codes: tuple[str, ...], timeout: int = 600
+) -> Any:
     """의존 자원이 늦게 사라지는 삭제(ALB ENI·종료 중 인스턴스)를 기다렸다 다시 부른다."""
     deadline = time.monotonic() + timeout
     while True:
@@ -365,7 +619,7 @@ def _retry(fn: Callable[[], Any], what: str, codes: tuple[str, ...], timeout: in
 
 
 # ------------------------------------------------------------------ 조회
-def _find_vpc(ec2) -> Optional[str]:
+def _find_vpc(ec2) -> str | None:
     vpcs = ec2.describe_vpcs(
         Filters=[{"Name": "tag:Name", "Values": [VPC_NAME]}, _SMOKE_FILTER]
     )["Vpcs"]
@@ -376,19 +630,26 @@ def _find_subnets(ec2, vpc_id: str) -> dict[str, str]:
     """AZ 접미 → 서브넷 ID."""
     found = ec2.describe_subnets(Filters=[_vpc_filter(vpc_id)])["Subnets"]
     by_name = {_name_of(s): s["SubnetId"] for s in found}
-    return {az: by_name[f"{PREFIX}-{az}"] for az in SUBNETS if f"{PREFIX}-{az}" in by_name}
+    return {
+        az: by_name[f"{PREFIX}-{az}"] for az in SUBNETS if f"{PREFIX}-{az}" in by_name
+    }
 
 
 def _find_security_groups(ec2, vpc_id: str) -> dict[str, dict]:
     """GroupName → 응답(GroupId·Tags·규칙)."""
-    found = ec2.describe_security_groups(Filters=[_vpc_filter(vpc_id)])["SecurityGroups"]
+    found = ec2.describe_security_groups(Filters=[_vpc_filter(vpc_id)])[
+        "SecurityGroups"
+    ]
     return {g["GroupName"]: g for g in found}
 
 
 def _find_instances(ec2, vpc_id: str) -> dict[str, dict]:
     """VPC 안의 살아 있는 인스턴스 전부(Name 태그 → 응답). ASG가 띄운 것은 ID로 들어온다."""
     pages = ec2.get_paginator("describe_instances").paginate(
-        Filters=[_vpc_filter(vpc_id), {"Name": "instance-state-name", "Values": _LIVE_STATES}]
+        Filters=[
+            _vpc_filter(vpc_id),
+            {"Name": "instance-state-name", "Values": _LIVE_STATES},
+        ]
     )
     return {
         _name_of(i) or i["InstanceId"]: i
@@ -398,14 +659,14 @@ def _find_instances(ec2, vpc_id: str) -> dict[str, dict]:
     }
 
 
-def _find_nacl(ec2, vpc_id: str) -> Optional[dict]:
+def _find_nacl(ec2, vpc_id: str) -> dict | None:
     found = ec2.describe_network_acls(
         Filters=[_vpc_filter(vpc_id), {"Name": "tag:Name", "Values": [NACL_NAME]}]
     )["NetworkAcls"]
     return found[0] if found else None
 
 
-def _find_volume(ec2) -> Optional[str]:
+def _find_volume(ec2) -> str | None:
     found = ec2.describe_volumes(
         Filters=[
             {"Name": "tag:Name", "Values": [VOLUME_NAME]},
@@ -416,7 +677,7 @@ def _find_volume(ec2) -> Optional[str]:
     return found[0]["VolumeId"] if found else None
 
 
-def _find_target_group(elbv2) -> Optional[dict]:
+def _find_target_group(elbv2) -> dict | None:
     try:
         return elbv2.describe_target_groups(Names=[TG_NAME])["TargetGroups"][0]
     except ClientError as exc:
@@ -425,7 +686,7 @@ def _find_target_group(elbv2) -> Optional[dict]:
         raise
 
 
-def _find_load_balancer(elbv2) -> Optional[dict]:
+def _find_load_balancer(elbv2) -> dict | None:
     try:
         return elbv2.describe_load_balancers(Names=[ALB_NAME])["LoadBalancers"][0]
     except ClientError as exc:
@@ -468,15 +729,172 @@ def _budget_exists(budgets, account: str) -> bool:
         raise
 
 
-def _app_asgs(asg, subnet_ids: set[str]) -> list[str]:
-    """스모크 서브넷에 걸친 ASG — ENABLE_AUTOSCALING이 만든 것. VPC 울타리로 가린다."""
+def _app_asg_groups(asg, subnet_ids: set[str]) -> list[dict]:
     pages = asg.get_paginator("describe_auto_scaling_groups").paginate()
     return [
-        g["AutoScalingGroupName"]
+        g
         for page in pages
         for g in page["AutoScalingGroups"]
         if subnet_ids & set(filter(None, g.get("VPCZoneIdentifier", "").split(",")))
     ]
+
+
+def _app_asgs(asg, subnet_ids: set[str]) -> list[str]:
+    """스모크 서브넷에 걸친 ASG — ENABLE_AUTOSCALING이 만든 것. VPC 울타리로 가린다."""
+    return [g["AutoScalingGroupName"] for g in _app_asg_groups(asg, subnet_ids)]
+
+
+_DOWN_IMAGE_WARNING = (
+    "down은 AMI·스냅숏의 전체 정리가 아니다 — 스모크 VPC 안의 것과 이름 규칙 자원만 지운다. #446 실행이 남긴 "
+    "AMI·스냅숏은 그대로 남아 과금된다. `service --operation cleanup-plan`으로 목록을 보고 "
+    "`service --operation cleanup --apply`로 정리할 것."
+)
+
+
+def image_snapshot_inventory(ec2) -> dict:
+    """#446이 남긴 AMI·스냅숏 귀속. 근거는 실행 ID·원본 인스턴스 태그와 AMI의 실제 블록 매핑뿐이다.
+
+    - images: 실행 ID·원본 인스턴스 태그 쌍이 모두 있는 자기 소유 AMI (한쪽만 있으면 ambiguous_images)
+    - mapped: 완전한 쌍의 AMI가 일관되게 매핑한 스냅숏(스냅숏 태그가 없어도 매핑이 근거, 있으면 모순이 없어야 함)
+    - orphan: 실행 ID·원본 인스턴스 태그가 모두 있으나 어떤 자기 소유 AMI도 매핑하지 않는 스냅숏
+    - ambiguous: 태그와 매핑이 어긋나거나(다른 실행·태그 없는 AMI와 공유·원본 태그만 있음) 근거가 부족한 것
+    - unattributed_count: 근거가 전혀 없는 스냅숏 수(나열하지 않고 소유를 주장하지 않는다)
+    상태 조회일 뿐이다 — 삭제 대상을 확정하지 않는다.
+    """
+    images = [
+        i
+        for page in ec2.get_paginator("describe_images").paginate(Owners=["self"])
+        for i in page["Images"]
+    ]
+    snapshots = [
+        s
+        for page in ec2.get_paginator("describe_snapshots").paginate(OwnerIds=["self"])
+        for s in page["Snapshots"]
+    ]
+    mappers: dict[str, list[dict]] = {}
+    for image in images:
+        for mapping in image.get("BlockDeviceMappings") or []:
+            snapshot_id = (mapping.get("Ebs") or {}).get("SnapshotId")
+            if snapshot_id:
+                mappers.setdefault(snapshot_id, []).append(image)
+
+    result: dict = {
+        "images": [],
+        "ambiguous_images": [],
+        "mapped": [],
+        "orphan": [],
+        "ambiguous": [],
+        "unattributed_count": 0,
+    }
+    for image in images:
+        execution, source = (
+            _tag_of(image, EXECUTION_TAG_KEY),
+            _tag_of(image, SOURCE_TAG_KEY),
+        )
+        if (
+            execution and not source or source and not execution
+        ):  # 쌍이 불완전 — 소유 증명 아님
+            result["ambiguous_images"].append(
+                {
+                    "image_id": image["ImageId"],
+                    "execution_id": execution,
+                    "source_instance": source,
+                }
+            )
+        elif execution:
+            result["images"].append(
+                {
+                    "image_id": image["ImageId"],
+                    "execution_id": execution,
+                    "source_instance": source,
+                    "snapshot_ids": sorted(
+                        (m.get("Ebs") or {}).get("SnapshotId")
+                        for m in image.get("BlockDeviceMappings") or []
+                        if (m.get("Ebs") or {}).get("SnapshotId")
+                    ),
+                }
+            )
+    for snap in snapshots:
+        snap_id = snap["SnapshotId"]
+        execution, source = (
+            _tag_of(snap, EXECUTION_TAG_KEY),
+            _tag_of(snap, SOURCE_TAG_KEY),
+        )
+        # 매핑한 AMI의 (실행 ID, 원본 인스턴스) 쌍. 실행 ID만 같고 원본이 다르면 같은 소유라 못 박지 않는다
+        pairs = {
+            (_tag_of(m, EXECUTION_TAG_KEY), _tag_of(m, SOURCE_TAG_KEY))
+            for m in mappers.get(snap_id, [])
+        }
+        row = {
+            "snapshot_id": snap_id,
+            "execution_id": execution,
+            "source_instance": source,
+            "image_ids": sorted(m["ImageId"] for m in mappers.get(snap_id, [])),
+        }
+        # 귀속 근거는 실행 ID+원본 인스턴스 쌍이 모두 있는 AMI 하나뿐이다. 한쪽만 있는 태그는 소유 증명이 아니다
+        own = next(iter(pairs)) if len(pairs) == 1 and all(next(iter(pairs))) else None
+        if own:
+            conflict = (execution and execution != own[0]) or (
+                source and source != own[1]
+            )
+            if conflict:
+                result["ambiguous"].append(row)
+            else:  # 태그가 전혀 없는 스냅숏도 완전한 소유 AMI의 실제 매핑으로 귀속된다
+                result["mapped"].append(
+                    {**row, "execution_id": own[0], "source_instance": own[1]}
+                )
+        elif any(e or s for e, s in pairs):  # 불완전·충돌하는 446 태그 AMI가 매핑
+            result["ambiguous"].append(row)
+        elif execution and source and not pairs:
+            result["orphan"].append(row)
+        elif execution or source:  # 한쪽 태그뿐이거나 태그 없는 AMI와 공유
+            result["ambiguous"].append(row)
+        else:
+            result["unattributed_count"] += 1
+    return result
+
+
+def service_cost_exposure(ec2, asg, subnet_ids: set[str]) -> dict:
+    """원본 인스턴스와 같은 ASG의 인스턴스가 함께 떠 있는지(그룹별 원본 쌍). 가격·금액은 주장하지 않는다.
+
+    원본은 Name 태그로 찾지 않는다(복제본이 Name을 물려받는다) — ASG 태그의 원본 인스턴스 ID를 명시 조회한다.
+    """
+    groups = []
+    for g in _app_asg_groups(asg, subnet_ids):
+        groups.append(
+            {
+                "name": g["AutoScalingGroupName"],
+                "execution_id": _tag_of(g, EXECUTION_TAG_KEY),
+                "source_instance": _tag_of(g, SOURCE_TAG_KEY),
+                "desired_capacity": g.get("DesiredCapacity"),
+                "instance_ids": sorted(
+                    i["InstanceId"] for i in g.get("Instances") or []
+                ),
+            }
+        )
+    sources = sorted({g["source_instance"] for g in groups if g["source_instance"]})
+    running_ids: set[str] = set()
+    if sources:
+        pages = ec2.get_paginator("describe_instances").paginate(
+            Filters=[
+                {"Name": "instance-id", "Values": sources},
+                {"Name": "instance-state-name", "Values": ["pending", "running"]},
+            ]
+        )
+        running_ids = {
+            i["InstanceId"]
+            for page in pages
+            for r in page["Reservations"]
+            for i in r["Instances"]
+        }
+    for g in groups:
+        g["original_running"] = g["source_instance"] in running_ids
+        g["double_running"] = g["original_running"] and bool(g["instance_ids"])
+    return {
+        "asgs": groups,
+        "running_originals": sorted(running_ids),
+        "double_running": any(g["double_running"] for g in groups),
+    }
 
 
 def _app_launch_templates(ec2) -> list[dict]:
@@ -486,20 +904,32 @@ def _app_launch_templates(ec2) -> list[dict]:
 
 
 # ------------------------------------------------------------------ 목록(status)
-def inventory(clients: dict, account: str) -> list[tuple[str, str, Optional[str]]]:
+def inventory(clients: dict, account: str) -> list[tuple[str, str, str | None]]:
     """(종류, 이름, ID 또는 None). up이 만들 것과 down이 지울 것의 목록이다."""
-    ec2, elbv2, iam, budgets = clients["ec2"], clients["elbv2"], clients["iam"], clients["budgets"]
+    ec2, elbv2, iam, budgets = (
+        clients["ec2"],
+        clients["elbv2"],
+        clients["iam"],
+        clients["budgets"],
+    )
     vpc_id = _find_vpc(ec2)
-    rows: list[tuple[str, str, Optional[str]]] = [("VPC", VPC_NAME, vpc_id)]
+    rows: list[tuple[str, str, str | None]] = [("VPC", VPC_NAME, vpc_id)]
     subnets = _find_subnets(ec2, vpc_id) if vpc_id else {}
     sgs = _find_security_groups(ec2, vpc_id) if vpc_id else {}
     instances = _find_instances(ec2, vpc_id) if vpc_id else {}
     rows += [("Subnet", f"{PREFIX}-{az}", subnets.get(az)) for az in SUBNETS]
-    rows += [("SecurityGroup", name, sgs[name]["GroupId"] if name in sgs else None) for name in SECURITY_GROUPS]
+    rows += [
+        ("SecurityGroup", name, sgs[name]["GroupId"] if name in sgs else None)
+        for name in SECURITY_GROUPS
+    ]
     acl = _find_nacl(ec2, vpc_id) if vpc_id else None
     rows.append(("NetworkAcl", NACL_NAME, acl["NetworkAclId"] if acl else None))
     rows += [
-        ("Instance", spec.name, instances[spec.name]["InstanceId"] if spec.name in instances else None)
+        (
+            "Instance",
+            spec.name,
+            instances[spec.name]["InstanceId"] if spec.name in instances else None,
+        )
         for spec in INSTANCES
     ]
     tg, lb = _find_target_group(elbv2), _find_load_balancer(elbv2)
@@ -508,18 +938,35 @@ def inventory(clients: dict, account: str) -> list[tuple[str, str, Optional[str]
     rows.append(("Volume", VOLUME_NAME, _find_volume(ec2)))
     rows.append(("IamUser", APP_USER, APP_USER if _user_exists(iam) else None))
     policy_arn = _app_policy_arn(account)
-    rows.append(("IamPolicy", APP_POLICY, policy_arn if _managed_policy_exists(iam, policy_arn) else None))
-    rows.append(("Budget", BUDGET_NAME, BUDGET_NAME if _budget_exists(budgets, account) else None))
+    rows.append(
+        (
+            "IamPolicy",
+            APP_POLICY,
+            policy_arn if _managed_policy_exists(iam, policy_arn) else None,
+        )
+    )
+    rows.append(
+        (
+            "Budget",
+            BUDGET_NAME,
+            BUDGET_NAME if _budget_exists(budgets, account) else None,
+        )
+    )
     return rows
 
 
-def _print_rows(rows: list[tuple[str, str, Optional[str]]]) -> None:
+def _print_rows(rows: list[tuple[str, str, str | None]]) -> None:
     for kind, name, rid in rows:
         print(f"  {'✅' if rid else '— '} {kind:<14} {name:<32} {rid or '없음'}")
 
 
 def status(clients: dict, account: str) -> None:
-    ec2, elbv2, asg, iam = clients["ec2"], clients["elbv2"], clients["asg"], clients["iam"]
+    ec2, elbv2, asg, iam = (
+        clients["ec2"],
+        clients["elbv2"],
+        clients["asg"],
+        clients["iam"],
+    )
     print("[smoke] 스모크 자원")
     _print_rows(inventory(clients, account))
 
@@ -530,7 +977,9 @@ def status(clients: dict, account: str) -> None:
         # 앞이라, 그 전에는 idle-dev의 RIGHTSIZING도 web-1·web-2의 SKIP_PROD_PROTECTED도
         # 보이지 않고 셋 다 SKIP_INSUFFICIENT_DATA다.
         for name, inst in sorted(_find_instances(ec2, vpc_id).items()):
-            print(f"  {name:<28} {inst['InstanceType']:<10} {inst['State']['Name']:<9} 기동 {inst['LaunchTime']:%m/%d %H:%M}")
+            print(
+                f"  {name:<28} {inst['InstanceType']:<10} {inst['State']['Name']:<9} 기동 {inst['LaunchTime']:%m/%d %H:%M}"
+            )
             ready = inst["LaunchTime"] + timedelta(hours=MIN_DATAPOINTS)
             print(
                 f"  └ 첫 판정 가능 ≈ {ready:%m/%d %H:%M} (최초 기동 + MIN_DATAPOINTS {MIN_DATAPOINTS}시간 — "
@@ -543,20 +992,63 @@ def status(clients: dict, account: str) -> None:
                 print(f"  TG 대상 {d['Target']['Id']}: {d['TargetHealth']['State']}")
 
         subnet_ids = set(_find_subnets(ec2, vpc_id).values())
-        leftovers = _app_asgs(asg, subnet_ids)
-        if leftovers:
-            print(f"[smoke] 앱이 만든 ASG(과금 인스턴스를 띄운다): {leftovers}")
+        exposure = service_cost_exposure(ec2, asg, subnet_ids)
+        if exposure["asgs"]:
+            print(
+                f"[smoke] 앱이 만든 ASG(과금 인스턴스를 띄운다): {[g['name'] for g in exposure['asgs']]}"
+            )
+            for g in exposure["asgs"]:
+                print(
+                    f"  ASG {g['name']} 실행 {g['execution_id']} 원본 {g['source_instance']} "
+                    f"희망 {g['desired_capacity']} 인스턴스 {g['instance_ids']}"
+                )
+        if exposure["running_originals"]:
+            print(
+                f"[smoke] ASG 원본으로 보이는 실행 중 인스턴스: {exposure['running_originals']}"
+            )
+        if exposure["double_running"]:
+            print(
+                "[smoke] ⚠ 원본 인스턴스와 ASG 인스턴스가 동시에 떠 있다 — 둘 다 과금 노출이다(금액 미산정). "
+                "전환·반환·정리는 `service --operation status|plan`으로 확인할 것"
+            )
 
     lts = _app_launch_templates(ec2)
     if lts:
-        print(f"[smoke] 앱이 만든 Launch Template: {[lt['LaunchTemplateName'] for lt in lts]}")
-    snapshots = ec2.describe_snapshots(OwnerIds=["self"])["Snapshots"]
-    if snapshots:
-        # EBS_DELETE_UNATTACHED가 남기는 스냅숏에는 태그가 없어 우리 것인지 가릴 수 없다 — 보고만
-        print(f"[smoke] 이 리전의 자기 소유 스냅숏 {len(snapshots)}건: {[s['SnapshotId'] for s in snapshots]}")
+        print(
+            f"[smoke] 앱이 만든 Launch Template: {[lt['LaunchTemplateName'] for lt in lts]}"
+        )
+    inv = image_snapshot_inventory(ec2)
+    print(
+        f"[smoke] #446 AMI {len(inv['images'])}건: {[i['image_id'] for i in inv['images']]}"
+    )
+    print(
+        f"[smoke] #446 AMI 매핑 스냅숏 {len(inv['mapped'])}건: {[s['snapshot_id'] for s in inv['mapped']]}"
+    )
+    if inv["ambiguous_images"]:
+        print(
+            f"[smoke] ⚠ 실행·원본 태그 쌍이 불완전한 AMI {len(inv['ambiguous_images'])}건(소유 증명 아님): "
+            f"{[i['image_id'] for i in inv['ambiguous_images']]}"
+        )
+    if inv["orphan"]:
+        print(
+            f"[smoke] 고아 태그 스냅숏(어떤 AMI도 매핑하지 않음) {len(inv['orphan'])}건: "
+            f"{[s['snapshot_id'] for s in inv['orphan']]}"
+        )
+    if inv["ambiguous"]:
+        print(
+            f"[smoke] ⚠ 귀속이 모호한 스냅숏 {len(inv['ambiguous'])}건(삭제 대상으로 확정하지 않음): "
+            f"{[s['snapshot_id'] for s in inv['ambiguous']]}"
+        )
+    if inv["unattributed_count"]:
+        print(
+            f"[smoke] 근거 없는 자기 소유 스냅숏 {inv['unattributed_count']}건 — 소유를 주장하지 않는다"
+        )
+    print(f"[smoke] {_DOWN_IMAGE_WARNING}")
     if _user_exists(iam):
         for key in iam.list_access_keys(UserName=APP_USER)["AccessKeyMetadata"]:
-            print(f"[smoke] 앱 키 {key['AccessKeyId'][:8]}… {key['Status']} · 발급 {key['CreateDate']:%m/%d}")
+            print(
+                f"[smoke] 앱 키 {key['AccessKeyId'][:8]}… {key['Status']} · 발급 {key['CreateDate']:%m/%d}"
+            )
 
 
 # ------------------------------------------------------------------ 생성(up)
@@ -564,7 +1056,9 @@ def _ensure_vpc(ec2) -> str:
     vpc_id = _find_vpc(ec2)
     if vpc_id:
         return vpc_id
-    vpc_id = ec2.create_vpc(CidrBlock=VPC_CIDR, TagSpecifications=_tag_spec("vpc", VPC_NAME))["Vpc"]["VpcId"]
+    vpc_id = ec2.create_vpc(
+        CidrBlock=VPC_CIDR, TagSpecifications=_tag_spec("vpc", VPC_NAME)
+    )["Vpc"]["VpcId"]
     ec2.get_waiter("vpc_available").wait(VpcIds=[vpc_id])
     print(f"[smoke] VPC {vpc_id} 생성 — 인터넷 게이트웨이 없음")
     return vpc_id
@@ -592,14 +1086,20 @@ _DEFAULT_EGRESS = {"IpProtocol": "-1", "IpRanges": [{"CidrIp": "0.0.0.0/0"}]}
 
 def _revoke_all_rules(ec2, group: dict) -> None:
     if group["IpPermissions"]:
-        ec2.revoke_security_group_ingress(GroupId=group["GroupId"], IpPermissions=group["IpPermissions"])
+        ec2.revoke_security_group_ingress(
+            GroupId=group["GroupId"], IpPermissions=group["IpPermissions"]
+        )
     if group["IpPermissionsEgress"]:
-        ec2.revoke_security_group_egress(GroupId=group["GroupId"], IpPermissions=group["IpPermissionsEgress"])
+        ec2.revoke_security_group_egress(
+            GroupId=group["GroupId"], IpPermissions=group["IpPermissionsEgress"]
+        )
 
 
 def _authorize_ingress(ec2, group_id: str, permissions: list[dict]) -> None:
     try:
-        ec2.authorize_security_group_ingress(GroupId=group_id, IpPermissions=permissions)
+        ec2.authorize_security_group_ingress(
+            GroupId=group_id, IpPermissions=permissions
+        )
     except ClientError as exc:
         # 지난 up이 규칙은 넣고 표지를 바꾸기 전에 끊겼다 — 규칙이 이미 있으면 된 것이다
         if _code(exc) != "InvalidPermission.Duplicate":
@@ -616,7 +1116,9 @@ def _ensure_security_groups(ec2, vpc_id: str) -> dict[str, str]:
             GroupName=name,
             Description=f"vigilantis smoke: {name}",
             VpcId=vpc_id,
-            TagSpecifications=_tag_spec("security-group", name, pending=True, role=role),
+            TagSpecifications=_tag_spec(
+                "security-group", name, pending=True, role=role
+            ),
         )["GroupId"]
         # 갓 만든 그룹의 상태는 AWS 기본값(기본 egress 1개)이다 — 다시 조회하지 않는다
         groups[name] = {
@@ -629,12 +1131,35 @@ def _ensure_security_groups(ec2, vpc_id: str) -> dict[str, str]:
     ids = {name: g["GroupId"] for name, g in groups.items()}
 
     ingress = {
-        SG_ALB: [{"IpProtocol": "tcp", "FromPort": 80, "ToPort": 80, "IpRanges": [{"CidrIp": VPC_CIDR}]}],
-        SG_WEB: [{"IpProtocol": "tcp", "FromPort": 80, "ToPort": 80, "UserIdGroupPairs": [{"GroupId": ids[SG_ALB]}]}],
-        SG_OPEN_SSH: [{
-            "IpProtocol": "tcp", "FromPort": 22, "ToPort": 22,
-            "IpRanges": [{"CidrIp": "0.0.0.0/0", "Description": "vigilantis smoke: OpenIP bait, no public IP"}],
-        }],
+        SG_ALB: [
+            {
+                "IpProtocol": "tcp",
+                "FromPort": 80,
+                "ToPort": 80,
+                "IpRanges": [{"CidrIp": VPC_CIDR}],
+            }
+        ],
+        SG_WEB: [
+            {
+                "IpProtocol": "tcp",
+                "FromPort": 80,
+                "ToPort": 80,
+                "UserIdGroupPairs": [{"GroupId": ids[SG_ALB]}],
+            }
+        ],
+        SG_OPEN_SSH: [
+            {
+                "IpProtocol": "tcp",
+                "FromPort": 22,
+                "ToPort": 22,
+                "IpRanges": [
+                    {
+                        "CidrIp": "0.0.0.0/0",
+                        "Description": "vigilantis smoke: OpenIP bait, no public IP",
+                    }
+                ],
+            }
+        ],
     }
     # 규칙은 초기화가 끝나지 않은(pending) 그룹에만 넣는다. done인 그룹은 스모크가 바꿨어도 손대지
     # 않는다(맨 위 "up은 되돌리지 않는다"). 설정이 실패하면 표지가 pending으로 남은 채 up이 여기서
@@ -665,7 +1190,11 @@ def _associate_nacl(ec2, vpc_id: str, acl_id: str, subnet_id: str) -> None:
 
 
 def _is_allow_all(entry: dict) -> bool:
-    return entry["RuleAction"] == "allow" and entry["Protocol"] == "-1" and entry.get("CidrBlock") == "0.0.0.0/0"
+    return (
+        entry["RuleAction"] == "allow"
+        and entry["Protocol"] == "-1"
+        and entry.get("CidrBlock") == "0.0.0.0/0"
+    )
 
 
 def _ensure_nacl(ec2, vpc_id: str, subnet_id: str) -> str:
@@ -673,7 +1202,8 @@ def _ensure_nacl(ec2, vpc_id: str, subnet_id: str) -> str:
     fresh = acl is None
     if fresh:
         acl = ec2.create_network_acl(
-            VpcId=vpc_id, TagSpecifications=_tag_spec("network-acl", NACL_NAME, pending=True)
+            VpcId=vpc_id,
+            TagSpecifications=_tag_spec("network-acl", NACL_NAME, pending=True),
         )["NetworkAcl"]
         print(f"[smoke] NACL {acl['NetworkAclId']} 생성")
     acl_id = acl["NetworkAclId"]
@@ -682,8 +1212,11 @@ def _ensure_nacl(ec2, vpc_id: str, subnet_id: str) -> str:
         # 빠진 방향만 채운다. 허용이 양방향 다 서기(done) 전에는 서브넷에 붙이지 않는다.
         for egress in (False, True):
             entry = next(
-                (e for e in acl.get("Entries", [])
-                 if e["RuleNumber"] == NACL_ALLOW_ALL_RULE and e["Egress"] == egress),
+                (
+                    e
+                    for e in acl.get("Entries", [])
+                    if e["RuleNumber"] == NACL_ALLOW_ALL_RULE and e["Egress"] == egress
+                ),
                 None,
             )
             if entry is None:
@@ -701,13 +1234,17 @@ def _ensure_nacl(ec2, vpc_id: str, subnet_id: str) -> str:
                     "전체 허용이 아니다 — 서브넷에 붙이지 않고 멈춘다. 콘솔에서 확인할 것."
                 )
         _mark_init_done(ec2, acl_id)
-        print(f"[smoke] NACL {acl_id} 허용 규칙 {NACL_ALLOW_ALL_RULE}(인·아웃바운드) 설정")
+        print(
+            f"[smoke] NACL {acl_id} 허용 규칙 {NACL_ALLOW_ALL_RULE}(인·아웃바운드) 설정"
+        )
     # 연결은 매번 확인한다 — 풀린 채 남으면 화면의 PROTECTED_BY 엣지와 조치 대상이 갈린다
     _associate_nacl(ec2, vpc_id, acl_id, subnet_id)
     return acl_id
 
 
-def _ensure_instances(ec2, ssm, vpc_id: str, subnets: dict[str, str], sgs: dict[str, str]) -> dict[str, str]:
+def _ensure_instances(
+    ec2, ssm, vpc_id: str, subnets: dict[str, str], sgs: dict[str, str]
+) -> dict[str, str]:
     live = _find_instances(ec2, vpc_id)
     ids = {name: live[name]["InstanceId"] for name in live}
     new = []
@@ -741,20 +1278,39 @@ def _ensure_instances(ec2, ssm, vpc_id: str, subnets: dict[str, str], sgs: dict[
     return ids
 
 
-def _ensure_load_balancer(elbv2, vpc_id: str, subnets: dict[str, str], sgs: dict[str, str], instances: dict[str, str]) -> str:
+def _ensure_load_balancer(
+    elbv2,
+    vpc_id: str,
+    subnets: dict[str, str],
+    sgs: dict[str, str],
+    instances: dict[str, str],
+) -> str:
     tg = _find_target_group(elbv2)
     fresh = tg is None
     if fresh:
         tg = elbv2.create_target_group(
-            Name=TG_NAME, Protocol="HTTP", Port=80, VpcId=vpc_id,
-            TargetType="instance", HealthCheckPath="/", Tags=_tags(TG_NAME, pending=True),
+            Name=TG_NAME,
+            Protocol="HTTP",
+            Port=80,
+            VpcId=vpc_id,
+            TargetType="instance",
+            HealthCheckPath="/",
+            Tags=_tags(TG_NAME, pending=True),
         )["TargetGroups"][0]
         print(f"[smoke] TG {TG_NAME} 생성")
     tg_arn = tg["TargetGroupArn"]
-    if fresh or _init_pending({"Tags": elbv2.describe_tags(ResourceArns=[tg_arn])["TagDescriptions"][0]["Tags"]}):
+    if fresh or _init_pending(
+        {
+            "Tags": elbv2.describe_tags(ResourceArns=[tg_arn])["TagDescriptions"][0][
+                "Tags"
+            ]
+        }
+    ):
         # 등록은 초기화 때 한 번만 한다 — 다시 돌린 up이 격리(등록 해제)를 되돌리면 안 된다.
         # 끊긴 초기화를 이을 때는 아직 등록되지 않은 대상만 넣는다.
-        health = elbv2.describe_target_health(TargetGroupArn=tg_arn)["TargetHealthDescriptions"]
+        health = elbv2.describe_target_health(TargetGroupArn=tg_arn)[
+            "TargetHealthDescriptions"
+        ]
         registered = {d["Target"]["Id"] for d in health}
         targets = [
             {"Id": instances[s.name]}
@@ -763,18 +1319,27 @@ def _ensure_load_balancer(elbv2, vpc_id: str, subnets: dict[str, str], sgs: dict
         ]
         if targets:
             elbv2.register_targets(TargetGroupArn=tg_arn, Targets=targets)
-        elbv2.add_tags(ResourceArns=[tg_arn], Tags=[{"Key": INIT_TAG_KEY, "Value": INIT_DONE}])
+        elbv2.add_tags(
+            ResourceArns=[tg_arn], Tags=[{"Key": INIT_TAG_KEY, "Value": INIT_DONE}]
+        )
         print(f"[smoke] TG {TG_NAME} 대상 등록")
     lb = _find_load_balancer(elbv2)
     if lb is None:
         lb = elbv2.create_load_balancer(
-            Name=ALB_NAME, Subnets=list(subnets.values()), SecurityGroups=[sgs[SG_ALB]],
-            Scheme="internal", Type="application", IpAddressType="ipv4", Tags=_tags(ALB_NAME),
+            Name=ALB_NAME,
+            Subnets=list(subnets.values()),
+            SecurityGroups=[sgs[SG_ALB]],
+            Scheme="internal",
+            Type="application",
+            IpAddressType="ipv4",
+            Tags=_tags(ALB_NAME),
         )["LoadBalancers"][0]
         print(f"[smoke] ALB {ALB_NAME} 생성(internal)")
     if not elbv2.describe_listeners(LoadBalancerArn=lb["LoadBalancerArn"])["Listeners"]:
         elbv2.create_listener(
-            LoadBalancerArn=lb["LoadBalancerArn"], Protocol="HTTP", Port=80,
+            LoadBalancerArn=lb["LoadBalancerArn"],
+            Protocol="HTTP",
+            Port=80,
             DefaultActions=[{"Type": "forward", "TargetGroupArn": tg_arn}],
         )
     return tg_arn
@@ -785,14 +1350,23 @@ def _ensure_volume(ec2, region: str) -> str:
     if vol_id:
         return vol_id
     vol_id = ec2.create_volume(
-        AvailabilityZone=f"{region}a", Size=1, VolumeType="gp3",
+        AvailabilityZone=f"{region}a",
+        Size=1,
+        VolumeType="gp3",
         TagSpecifications=_tag_spec("volume", VOLUME_NAME),
     )["VolumeId"]
     print(f"[smoke] EBS {VOLUME_NAME} {vol_id} 생성(1 GiB gp3, 미연결)")
     return vol_id
 
 
-def _ensure_app_user(iam, account: str, region: str, vpc_id: str) -> None:
+def _ensure_app_user(
+    iam,
+    account: str,
+    region: str,
+    vpc_id: str,
+    subnet_ids: Sequence[str],
+    instance_role_arns: Sequence[str] = (),
+) -> None:
     if not _user_exists(iam):
         iam.create_user(UserName=APP_USER, Tags=_tags(APP_USER))
         print(f"[smoke] IAM 사용자 {APP_USER} 생성 — 키는 만들지 않는다(ADR-0009 §2)")
@@ -801,15 +1375,21 @@ def _ensure_app_user(iam, account: str, region: str, vpc_id: str) -> None:
     # 권한이 두 문서의 합집합이 되지 않는다.
     for stale in iam.list_user_policies(UserName=APP_USER)["PolicyNames"]:
         iam.delete_user_policy(UserName=APP_USER, PolicyName=stale)
-        print(f"[smoke] 남아 있던 인라인 정책 {stale} 삭제 — 앱 권한은 관리형 정책 하나로 모은다")
-    document = build_app_policy(account, region, vpc_id)
+        print(
+            f"[smoke] 남아 있던 인라인 정책 {stale} 삭제 — 앱 권한은 관리형 정책 하나로 모은다"
+        )
+    document = build_app_policy(account, region, vpc_id, subnet_ids, instance_role_arns)
     arn = _app_policy_arn(account)
     try:
         policy = iam.get_policy(PolicyArn=arn)["Policy"]
     except ClientError as exc:
         if _code(exc) != "NoSuchEntity":
             raise
-        iam.create_policy(PolicyName=APP_POLICY, PolicyDocument=json.dumps(document), Tags=_tags(APP_POLICY))
+        iam.create_policy(
+            PolicyName=APP_POLICY,
+            PolicyDocument=json.dumps(document),
+            Tags=_tags(APP_POLICY),
+        )
         print(f"[smoke] IAM 관리형 정책 {APP_POLICY} 생성")
     else:
         # VPC를 다시 세웠으면 정책의 VPC ARN도 따라가야 한다 — 문서가 바뀐 때만 새 버전을 올린다.
@@ -819,7 +1399,9 @@ def _ensure_app_user(iam, account: str, region: str, vpc_id: str) -> None:
         )["PolicyVersion"]["Document"]
         if current != document:
             _make_room_for_policy_version(iam, arn)
-            iam.create_policy_version(PolicyArn=arn, PolicyDocument=json.dumps(document), SetAsDefault=True)
+            iam.create_policy_version(
+                PolicyArn=arn, PolicyDocument=json.dumps(document), SetAsDefault=True
+            )
             print(f"[smoke] IAM 관리형 정책 {APP_POLICY} 새 버전을 기본으로")
     # 이미 붙은 정책의 재연결 멱등성에 기대지 않고 확인한 뒤 붙인다
     attached = iam.list_attached_user_policies(UserName=APP_USER)["AttachedPolicies"]
@@ -831,7 +1413,10 @@ def _ensure_app_user(iam, account: str, region: str, vpc_id: str) -> None:
 def _make_room_for_policy_version(iam, arn: str) -> None:
     """관리형 정책은 버전을 5개까지만 가진다 — 새 버전 자리를 가장 오래된 비기본 버전에서 낸다."""
     versions = iam.list_policy_versions(PolicyArn=arn)["Versions"]
-    stale = sorted((v for v in versions if not v["IsDefaultVersion"]), key=lambda v: v["CreateDate"])
+    stale = sorted(
+        (v for v in versions if not v["IsDefaultVersion"]),
+        key=lambda v: v["CreateDate"],
+    )
     for version in stale[: max(0, len(versions) - _POLICY_VERSION_LIMIT + 1)]:
         iam.delete_policy_version(PolicyArn=arn, VersionId=version["VersionId"])
 
@@ -848,17 +1433,49 @@ def _ensure_asg_service_role(iam) -> None:
         print(f"[smoke] 서비스 연결 역할 {ASG_SERVICE_ROLE} 생성")
 
 
+def _budget_definition() -> dict:
+    return {
+        "BudgetName": BUDGET_NAME,
+        "BudgetLimit": {"Amount": BUDGET_USD, "Unit": "USD"},
+        "TimeUnit": "MONTHLY",
+        "BudgetType": "COST",
+        "CostTypes": dict(BUDGET_COST_TYPES),
+    }
+
+
+def _budget_drifted(current: dict) -> bool:
+    """이미 있는 Budget이 지금 정의와 다른가 — update_budget이 정의 전체를 덮어쓰므로 정의의 네 값
+    (금액 · 크레딧 포함 여부 · 기간 단위 · 종류)을 모두 본다. 금액은 문자열 표기 차이("300" · "300.0")를 무시한다."""
+    want = _budget_definition()
+    limit = float(current.get("BudgetLimit", {}).get("Amount", "0"))
+    include_credit = current.get("CostTypes", {}).get("IncludeCredit", True)
+    return (
+        limit != float(BUDGET_USD)
+        or include_credit != BUDGET_COST_TYPES["IncludeCredit"]
+        or current.get("TimeUnit") != want["TimeUnit"]
+        or current.get("BudgetType") != want["BudgetType"]
+    )
+
+
 def _ensure_budget(budgets, account: str, email: str) -> None:
-    if _budget_exists(budgets, account):
+    try:
+        current = budgets.describe_budget(AccountId=account, BudgetName=BUDGET_NAME)[
+            "Budget"
+        ]
+    except ClientError as exc:
+        if _code(exc) != "NotFoundException":
+            raise
+        current = None
+    if current is not None:
+        # 이미 선 Budget은 만들 때의 정의 그대로 남는다 — 정의(금액·크레딧 포함 여부 등)가 바뀐 뒤 다시 돌린
+        # up이 계정에 닿도록, 다르면 갱신한다. 알림 구독은 비율이라 금액이 바뀌어도 그대로 둔다
+        if _budget_drifted(current):
+            budgets.update_budget(AccountId=account, NewBudget=_budget_definition())
+            print(f"[smoke] Budget {BUDGET_NAME} 갱신 — 월 ${BUDGET_USD}, 크레딧 제외")
         return
     budgets.create_budget(
         AccountId=account,
-        Budget={
-            "BudgetName": BUDGET_NAME,
-            "BudgetLimit": {"Amount": BUDGET_USD, "Unit": "USD"},
-            "TimeUnit": "MONTHLY",
-            "BudgetType": "COST",
-        },
+        Budget=_budget_definition(),
         NotificationsWithSubscribers=[
             {
                 "Notification": {
@@ -875,7 +1492,13 @@ def _ensure_budget(budgets, account: str, email: str) -> None:
     print(f"[smoke] Budget {BUDGET_NAME} 생성 — 월 ${BUDGET_USD}, 알림 {BUDGET_ALERTS}")
 
 
-def up(clients: dict, account: str, region: str, budget_email: str) -> None:
+def up(
+    clients: dict,
+    account: str,
+    region: str,
+    budget_email: str,
+    instance_role_arns: Sequence[str] = (),
+) -> None:
     ec2, elbv2, iam = clients["ec2"], clients["elbv2"], clients["iam"]
     # 비용 그물이 자원보다 먼저 선다
     _ensure_budget(clients["budgets"], account, budget_email)
@@ -886,19 +1509,31 @@ def up(clients: dict, account: str, region: str, budget_email: str) -> None:
     instances = _ensure_instances(ec2, clients["ssm"], vpc_id, subnets, sgs)
     tg_arn = _ensure_load_balancer(elbv2, vpc_id, subnets, sgs, instances)
     vol_id = _ensure_volume(ec2, region)
-    _ensure_app_user(iam, account, region, vpc_id)
+    _ensure_app_user(
+        iam, account, region, vpc_id, list(subnets.values()), instance_role_arns
+    )
     _ensure_asg_service_role(iam)
 
-    print("[smoke] 스모크 파라미터(런북이 겨누는 값 — 대본이 손으로 조립하지 않게 여기서 찍는다)")
+    print(
+        "[smoke] 스모크 파라미터(런북이 겨누는 값 — 대본이 손으로 조립하지 않게 여기서 찍는다)"
+    )
     print(f"  EC2_ISOLATE target_group_arn : {tg_arn}")
     print(f"  EC2_ISOLATE isolation_group_id: {sgs[SG_ISOLATION]}")
-    print(f"  NACL_ADD_DENY 대상            : arn:aws:ec2:{region}:{account}:network-acl/{acl_id}")
+    print(
+        f"  NACL_ADD_DENY 대상            : arn:aws:ec2:{region}:{account}:network-acl/{acl_id}"
+    )
     print(f"  SG_DELETE_ISOLATED 대상       : {sgs[SG_UNUSED]}")
     print(f"  EBS_DELETE_UNATTACHED 대상    : {vol_id}")
     print("[smoke] 다음 단계(ADR-0009 §6)")
-    print(f"  1. 앱 키 발급: aws iam create-access-key --user-name {APP_USER}  → .env에만 넣는다")
-    print("  2. .env 전환: 키 교체 + AWS_ENDPOINT_URL 줄 삭제 → sts Arn이 앱 사용자인지 확인")
-    print("  3. 앱 키로 DryRun을 1회씩 불러 정책의 조건 키를 실측한다(UnauthorizedOperation이면 정책 수정)")
+    print(
+        f"  1. 앱 키 발급: aws iam create-access-key --user-name {APP_USER}  → .env에만 넣는다"
+    )
+    print(
+        "  2. .env 전환: 키 교체 + AWS_ENDPOINT_URL 줄 삭제 → sts Arn이 앱 사용자인지 확인"
+    )
+    print(
+        "  3. 앱 키로 DryRun을 1회씩 불러 정책의 조건 키를 실측한다(UnauthorizedOperation이면 정책 수정)"
+    )
 
 
 # ------------------------------------------------------------------ 정리(down)
@@ -915,20 +1550,28 @@ def _delete_app_asgs(asg, subnet_ids: set[str]) -> None:
             print(f"[smoke]   … ASG 삭제 대기 {names}")
             time.sleep(15)
     if names:
-        sys.exit(f"[smoke] ASG가 10분 안에 사라지지 않았다: {names} — 콘솔에서 확인 후 down을 다시 돌릴 것")
+        sys.exit(
+            f"[smoke] ASG가 10분 안에 사라지지 않았다: {names} — 콘솔에서 확인 후 down을 다시 돌릴 것"
+        )
 
 
 def _delete_security_groups(ec2, vpc_id: str) -> None:
     groups = [
-        g for g in ec2.describe_security_groups(Filters=[_vpc_filter(vpc_id)])["SecurityGroups"]
+        g
+        for g in ec2.describe_security_groups(Filters=[_vpc_filter(vpc_id)])[
+            "SecurityGroups"
+        ]
         if g["GroupName"] != "default"
     ]
     # 서로를 참조하는 규칙(web ← alb)이 있으면 어느 쪽도 먼저 지워지지 않는다 — 규칙부터 걷는다
     for g in groups:
         _revoke_all_rules(ec2, g)
     for g in groups:
-        _retry(lambda gid=g["GroupId"]: ec2.delete_security_group(GroupId=gid),
-               f"SG {g['GroupName']}", ("DependencyViolation",))
+        _retry(
+            lambda gid=g["GroupId"]: ec2.delete_security_group(GroupId=gid),
+            f"SG {g['GroupName']}",
+            ("DependencyViolation",),
+        )
         print(f"[smoke] SG {g['GroupName']} {g['GroupId']} 삭제")
 
 
@@ -954,7 +1597,9 @@ def _delete_app_user(iam) -> None:
         print(f"[smoke] 앱 키 {key['AccessKeyId'][:8]}… 삭제")
     for policy in iam.list_user_policies(UserName=APP_USER)["PolicyNames"]:
         iam.delete_user_policy(UserName=APP_USER, PolicyName=policy)
-    for policy in iam.list_attached_user_policies(UserName=APP_USER)["AttachedPolicies"]:
+    for policy in iam.list_attached_user_policies(UserName=APP_USER)[
+        "AttachedPolicies"
+    ]:
         iam.detach_user_policy(UserName=APP_USER, PolicyArn=policy["PolicyArn"])
     iam.delete_user(UserName=APP_USER)
     print(f"[smoke] IAM 사용자 {APP_USER} 삭제")
@@ -973,7 +1618,32 @@ def _delete_app_policy(iam, account: str) -> None:
     print(f"[smoke] IAM 관리형 정책 {APP_POLICY} 삭제")
 
 
+def _roles_holding_app_policy(iam, account: str) -> list[str]:
+    """앱 정책을 붙잡고 있는 IAM 역할 — 플랫폼의 접근 역할(vigilantis-access, ADR-0010 §3)이 빌려 쓴다.
+
+    역할에 붙어 있으면 delete_policy가 DeleteConflict로 실패한다. 남의 역할에서 정책을 떼는 것은
+    이 스크립트의 몫이 아니므로 떼지 않고 알린다.
+    """
+    arn = _app_policy_arn(account)
+    if not _managed_policy_exists(iam, arn):
+        return []
+    roles = []
+    for page in iam.get_paginator("list_entities_for_policy").paginate(
+        PolicyArn=arn, EntityFilter="Role"
+    ):
+        roles += [r["RoleName"] for r in page.get("PolicyRoles", [])]
+    return roles
+
+
 def down(clients: dict, account: str) -> None:
+    # 무엇이든 지우기 전에 — 정책 삭제는 맨 끝이라, 여기서 안 막으면 VPC까지 다 지운 뒤 멈춘다
+    holders = _roles_holding_app_policy(clients["iam"], account)
+    if holders:
+        sys.exit(
+            f"[smoke] {APP_POLICY} 정책이 IAM 역할 {', '.join(holders)}에 붙어 있다 — 플랫폼 배포의 "
+            "접근 역할이 빌려 쓰는 중이다. 정리 순서는 플랫폼 down → 스모크 down이다"
+            "(scripts/provision_platform_aws.py down, ADR-0010 §7)."
+        )
     ec2, elbv2, asg = clients["ec2"], clients["elbv2"], clients["asg"]
     vpc_id = _find_vpc(ec2)
     if vpc_id:
@@ -983,12 +1653,17 @@ def down(clients: dict, account: str) -> None:
         lb = _find_load_balancer(elbv2)
         if lb:
             elbv2.delete_load_balancer(LoadBalancerArn=lb["LoadBalancerArn"])
-            elbv2.get_waiter("load_balancers_deleted").wait(LoadBalancerArns=[lb["LoadBalancerArn"]])
+            elbv2.get_waiter("load_balancers_deleted").wait(
+                LoadBalancerArns=[lb["LoadBalancerArn"]]
+            )
             print(f"[smoke] ALB {ALB_NAME} 삭제")
         tg = _find_target_group(elbv2)
         if tg:
-            _retry(lambda: elbv2.delete_target_group(TargetGroupArn=tg["TargetGroupArn"]),
-                   "TG", ("ResourceInUse",))
+            _retry(
+                lambda: elbv2.delete_target_group(TargetGroupArn=tg["TargetGroupArn"]),
+                "TG",
+                ("ResourceInUse",),
+            )
             print(f"[smoke] TG {TG_NAME} 삭제")
 
         instance_ids = [i["InstanceId"] for i in _find_instances(ec2, vpc_id).values()]
@@ -1000,8 +1675,11 @@ def down(clients: dict, account: str) -> None:
         _delete_security_groups(ec2, vpc_id)
         _delete_network_acls(ec2, vpc_id)
         for subnet_id in subnet_ids:
-            _retry(lambda sid=subnet_id: ec2.delete_subnet(SubnetId=sid),
-                   f"Subnet {subnet_id}", ("DependencyViolation",))
+            _retry(
+                lambda sid=subnet_id: ec2.delete_subnet(SubnetId=sid),
+                f"Subnet {subnet_id}",
+                ("DependencyViolation",),
+            )
             print(f"[smoke] Subnet {subnet_id} 삭제")
         _retry(lambda: ec2.delete_vpc(VpcId=vpc_id), "VPC", ("DependencyViolation",))
         print(f"[smoke] VPC {vpc_id} 삭제")
@@ -1017,19 +1695,255 @@ def down(clients: dict, account: str) -> None:
     _delete_app_policy(clients["iam"], account)
     # Budget은 남긴다 — 정리 뒤 남은 과금을 월말까지 잡는 그물이다. 서비스 연결 역할도 무료라 둔다.
     print(f"[smoke] Budget {BUDGET_NAME}은 남겼다 — 월말 청구 확인 뒤 콘솔에서 지운다")
-    print("[smoke] 정리 끝 — status로 잔여 0건을 확인할 것")
+    print(f"[smoke] ⚠ {_DOWN_IMAGE_WARNING}")
+    print("[smoke] 정리 끝 — status로 잔여를 확인할 것(AMI·스냅숏은 별도)")
+
+
+# ------------------------------------------------------------------ service (#446 전환 운영)
+SERVICE_OPERATIONS = (
+    "schema",
+    "plan",
+    "status",
+    "prepare",
+    "verify",
+    "cutover",
+    "return",
+    "cleanup-plan",
+    "cleanup",
+)
+# AWS를 바꾸는 작업 — --apply 없이는 백엔드를 부르지 않는다(실수로 쓰기 시작하지 않게)
+SERVICE_MUTATING = frozenset({"prepare", "cutover", "return", "cleanup"})
+SERVICE_CONNECT_TIMEOUT = 10
+SERVICE_READ_TIMEOUT = 60
+_SERVICE_ONLY_FLAGS = (
+    "operation",
+    "execution_id",
+    "transition_id",
+    "options_json",
+    "options_file",
+    "profile",
+)
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict:
+    keys = [k for k, _ in pairs]
+    dupes = sorted({k for k in keys if keys.count(k) > 1})
+    if dupes:
+        raise ValueError(f"JSON 객체에 중복 키: {dupes}")
+    return dict(pairs)
+
+
+def _reject_constant(name: str) -> Any:
+    raise ValueError(f"JSON에 허용되지 않는 값: {name}")
+
+
+def parse_options_object(text: str, source: str) -> dict:
+    """옵션은 JSON 객체 리터럴만 받는다. 파일이면 명시 옵션(--options-file)으로만 들어온다."""
+    try:
+        value = json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_constant,
+        )
+    except (ValueError, RecursionError) as exc:
+        raise ValueError(f"{source}: 올바른 JSON이 아니다 — {exc}") from exc
+    if not isinstance(value, dict):
+        # text는 올바른 str이고 JSON 루트 모양만 틀렸다 — 인자 타입이 아니라 값/스키마 오류다.
+        raise ValueError(f"{source}: JSON 객체({{...}})여야 한다")  # noqa: TRY004
+    return value
+
+
+def _service_options(args) -> dict | None:
+    if args.options_json is not None:
+        return parse_options_object(args.options_json, "--options-json")
+    if args.options_file is not None:
+        try:
+            text = Path(args.options_file).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ValueError(f"--options-file를 읽을 수 없다: {exc}") from exc
+        return parse_options_object(text, "--options-file")
+    return None
+
+
+def _import_service_transitions():
+    """백엔드는 service 경로에서만 불러온다 — 기존 up/down/status는 DB·백엔드 없이 돈다."""
+    import service_transitions  # apps/core-api 루트 모듈(facade)
+
+    return service_transitions
+
+
+def _open_db_session():
+    from db.session import get_session_factory
+
+    return get_session_factory()()
+
+
+def _service_clients(region: str, profile: str | None) -> dict:
+    """이 호출 전용 관리자 세션의 클라이언트. 환경 변수·앱 클라이언트 설정·.env를 바꾸지 않는다.
+
+    키: ec2 · elbv2 · asg(= boto3 autoscaling, 기존 이름 유지) · sts.
+    """
+    import boto3
+    from botocore.config import Config
+
+    session = boto3.Session(profile_name=profile, region_name=region)
+    # 변경 호출을 SDK가 불확실한 응답 뒤에 다시 보내지 않게 한다(총 1회 시도). 시간 제한은 유한하게.
+    config = Config(
+        ignore_configured_endpoint_urls=True,
+        retries={"mode": "standard", "total_max_attempts": 1},
+        connect_timeout=SERVICE_CONNECT_TIMEOUT,
+        read_timeout=SERVICE_READ_TIMEOUT,
+    )
+    return {
+        "ec2": session.client("ec2", config=config),
+        "elbv2": session.client("elbv2", config=config),
+        "asg": session.client("autoscaling", config=config),
+        "sts": session.client("sts", config=config),
+    }
+
+
+def run_service(args, options: dict | None) -> int:
+    """service 명령 실행(options는 main이 한 번 파싱한 객체). 종료 코드: 0 성공 · 1 실패/차단/불명."""
+    transitions = _import_service_transitions()
+    db = None
+    try:
+        if args.operation == "schema":
+            clients: dict = {}
+        else:
+            region = default_region()
+            clients = _service_clients(region, args.profile)
+            with contextlib.redirect_stdout(sys.stderr):  # stdout은 백엔드 JSON 결과만
+                _require_real_aws(args.account, clients["sts"])
+            db = _open_db_session()
+        result = transitions.run_service_command(
+            db,
+            command=args.operation,
+            clients=clients,
+            execution_id=args.execution_id,
+            transition_id=args.transition_id,
+            options=options,
+        )
+    except Exception as exc:  # noqa: BLE001 — 백엔드의 검증·차단 예외는 전부 실패 종료다
+        print(
+            f"[smoke] service {args.operation} 실패: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    finally:
+        if db is not None:
+            db.close()
+    if not isinstance(result, dict):
+        print(
+            f"[smoke] service {args.operation}: 백엔드가 dict가 아닌 결과를 돌려줬다 — 실패로 처리",
+            file=sys.stderr,
+        )
+        return 1
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    # 성공은 불리언 True뿐이다(0·""·"false"·[]는 성공이 아니다). schema만 success 키가 없어도 된다
+    if not (
+        result.get("success") is True
+        or (args.operation == "schema" and "success" not in result)
+    ):
+        print(
+            f"[smoke] service {args.operation}: success is not True — 차단·실패·불명이다",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+def _validate_service_args(parser: argparse.ArgumentParser, args) -> None:
+    if not args.operation:
+        parser.error(
+            "service에는 --operation이 필요하다: " + ", ".join(SERVICE_OPERATIONS)
+        )
+    if args.operation == "schema" and (args.account or args.profile):
+        parser.error("schema는 오프라인이다 — --account·--profile을 주지 않는다")
+    if args.operation != "schema" and not args.account:
+        parser.error(f"service --operation {args.operation}에는 --account가 필요하다")
+    if args.apply and args.operation not in SERVICE_MUTATING:
+        parser.error(f"--apply는 {', '.join(sorted(SERVICE_MUTATING))}에만 쓴다")
+    if args.options_json is not None and args.options_file is not None:
+        parser.error("--options-json과 --options-file은 함께 쓸 수 없다")
+    if args.yes or args.budget_email or args.instance_role_arn:
+        parser.error("--yes·--budget-email·--instance-role-arn은 service에 쓰지 않는다")
+    if args.operation in SERVICE_MUTATING and not args.apply:
+        parser.error(
+            f"service --operation {args.operation}은 AWS를 바꾼다 — 먼저 `--operation plan`으로 확인하고 "
+            "실제로 실행하려면 --apply를 준다"
+        )
 
 
 # ------------------------------------------------------------------ main
 def main() -> None:
     # Windows 콘솔(cp949)은 em dash 등 출력 시 UnicodeEncodeError로 죽는다 — UTF-8로 강제
     sys.stdout.reconfigure(encoding="utf-8")
-    parser = argparse.ArgumentParser(description="Vigilantis 실 AWS 스모크 환경 (ADR-0009)")
-    parser.add_argument("command", choices=("status", "up", "down", "policy"))
-    parser.add_argument("--account", required=True, help="대상 AWS 계정 ID — 호출 주체(sts)와 같아야 한다")
+    sys.stderr.reconfigure(encoding="utf-8")
+    parser = argparse.ArgumentParser(
+        description="Vigilantis 실 AWS 스모크 환경 (ADR-0009)"
+    )
+    parser.add_argument(
+        "command", choices=("status", "up", "down", "policy", "service")
+    )
+    parser.add_argument(
+        "--account",
+        help="대상 AWS 계정 ID — 호출 주체(sts)와 같아야 한다(service schema 제외 필수)",
+    )
+    parser.add_argument(
+        "--operation", choices=SERVICE_OPERATIONS, help="service: 수행할 작업"
+    )
+    parser.add_argument("--execution-id", help="service: 대상 #446 실행 ID")
+    parser.add_argument("--transition-id", help="service: 대상 전환 ID")
+    parser.add_argument(
+        "--options-json",
+        help="service: 옵션 JSON 객체 리터럴(예: '{\"k\": 1}'). 필요한 키는 schema 참고",
+    )
+    parser.add_argument(
+        "--options-file",
+        help="service: 옵션 JSON 객체를 담은 파일 경로(--options-json과 택일)",
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="service: AWS를 바꾸는 prepare·cutover·return·cleanup 실행",
+    )
+    parser.add_argument(
+        "--profile",
+        help="service: 이 호출만 쓰는 관리자 AWS 프로필(없으면 기본 자격 체인)",
+    )
     parser.add_argument("--budget-email", help="up: AWS Budgets 알림을 받을 주소")
-    parser.add_argument("--yes", action="store_true", help="up·down: 실제로 바꾼다(없으면 목록만 보여 준다)")
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="up·down: 실제로 바꾼다(없으면 목록만 보여 준다)",
+    )
+    parser.add_argument(
+        "--instance-role-arn",
+        action="append",
+        default=[],
+        metavar="ARN",
+        help="policy·up: 앱이 ec2.amazonaws.com으로 전달해도 되는 IAM 역할 ARN(반복 가능, 와일드카드 불가). "
+        "주지 않으면 iam:PassRole을 허용하지 않는다 — 이 스크립트는 역할을 만들지 않는다",
+    )
     args = parser.parse_args()
+
+    if args.command == "service":
+        _validate_service_args(parser, args)
+        try:
+            options = _service_options(
+                args
+            )  # AWS·DB보다 먼저, 한 번만 파싱해 그대로 넘긴다
+        except ValueError as exc:
+            parser.error(str(exc))
+        sys.exit(run_service(args, options))
+    if not args.account:
+        parser.error(f"{args.command}에는 --account가 필요하다")
+    if args.apply or any(
+        getattr(args, name) is not None for name in _SERVICE_ONLY_FLAGS
+    ):
+        parser.error(
+            "--operation·--execution-id·--transition-id·--options-json·--options-file·--apply·--profile은 service 전용이다"
+        )
 
     if args.command == "up" and rightsizing_target_type(IDLE_DEV_TYPE) is None:
         sys.exit(
@@ -1049,22 +1963,39 @@ def main() -> None:
     }
 
     if args.command == "policy":
-        vpc_id = _find_vpc(clients["ec2"]) or "<VPC 미생성>"
-        print(json.dumps(build_app_policy(args.account, region, vpc_id), ensure_ascii=False, indent=2))
+        vpc_id = _find_vpc(clients["ec2"])
+        subnet_ids = (
+            list(_find_subnets(clients["ec2"], vpc_id).values()) if vpc_id else []
+        )
+        policy = build_app_policy(
+            args.account,
+            region,
+            vpc_id or "<VPC 미생성>",
+            subnet_ids or ["<서브넷 미생성>"],
+            args.instance_role_arn,
+        )
+        print(json.dumps(policy, ensure_ascii=False, indent=2))
     elif args.command == "status":
         status(clients, args.account)
     elif args.command == "up":
         if not args.budget_email:
-            sys.exit("up에는 --budget-email이 필요하다 — 비용 알림 없이 과금 자원을 세우지 않는다.")
+            sys.exit(
+                "up에는 --budget-email이 필요하다 — 비용 알림 없이 과금 자원을 세우지 않는다."
+            )
         if not args.yes:
-            missing = [row for row in inventory(clients, args.account) if row[2] is None]
+            missing = [
+                row for row in inventory(clients, args.account) if row[2] is None
+            ]
             print(f"[smoke] 생성 예정 {len(missing)}건 — 실제로 만들려면 --yes")
             _print_rows(missing)
             return
-        up(clients, args.account, region, args.budget_email)
+        up(clients, args.account, region, args.budget_email, args.instance_role_arn)
     else:
         if not args.yes:
-            print("[smoke] 삭제 대상(스모크 태그 자원 + 스모크 VPC 안 전부) — 실제로 지우려면 --yes")
+            print(
+                "[smoke] 삭제 대상(스모크 태그 자원 + 스모크 VPC 안 전부) — 실제로 지우려면 --yes"
+            )
+            print(f"[smoke] ⚠ {_DOWN_IMAGE_WARNING}")
             _print_rows([row for row in inventory(clients, args.account) if row[2]])
             return
         down(clients, args.account)

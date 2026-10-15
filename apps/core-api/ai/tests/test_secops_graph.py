@@ -1,5 +1,7 @@
 """SecOps 그래프 계약·노드 단락. 실제 모델·DB·AWS 호출은 하지 않는다."""
 
+import logging
+
 import pytest
 
 from ai.agent import (
@@ -91,27 +93,51 @@ def test_secops_no_proposal_keeps_summary_and_reviewed_risk():
     assert client.sent[2]["user_payload"]["reviewed_risk_label"] == "높음"
 
 
-@pytest.mark.parametrize("completed", [0, 1, 2])
-def test_node_failure_stops_later_model_calls(completed):
+def _failure_log(caplog):
+    """FAILED 1건당 실패 로그 1줄(#424) — 그 필드를 돌려준다."""
+    records = [r for r in caplog.records if r.getMessage() == "agent_analysis_failed"]
+    assert len(records) == 1
+    fields = records[0].__dict__
+    assert fields["incident_id"] == "inc-1" and fields["domain"] == "SECOPS"
+    return fields
+
+
+@pytest.mark.parametrize("completed,step", [
+    (0, "reassess_risk"), (1, "propose_candidates"), (2, "summarize_evidence"),
+])
+def test_node_failure_stops_later_model_calls(completed, step, caplog):
     client = FakeAIModelClient([RISK, CandidateProposalOutput(candidates=[])][:completed])
-    output = run_secops_graph(graph_input(), client=client)
+    with caplog.at_level(logging.WARNING, logger="vigilantis.ai.agent"):
+        output = run_secops_graph(graph_input(), client=client)
     assert output.invocation_status is AgentInvocationStatus.FAILED
     assert output.summary_lines == [] and output.candidates == []
     assert output.reviewed_risk_level is None
     assert len(client.sent) == completed + 1
+    fields = _failure_log(caplog)
+    assert fields["failed_step"] == step and fields["reason_code"] == "MODEL_UNAVAILABLE"
 
 
-@pytest.mark.parametrize("over", [
-    {"target_arn": EC2},
-    {"target_arn": NACL.replace("acl-0abc", "acl-0def")},
-    {"runbook_id": RunbookId.RUNBOOK_NACL_RESTORE},
-    {"rule_number": None},
-    {"evidence_ids": []},
+@pytest.mark.parametrize("over,reason", [
+    ({"target_arn": EC2}, "TARGET_NOT_ALLOWED"),
+    ({"target_arn": NACL.replace("acl-0abc", "acl-0def")}, "TARGET_NOT_ALLOWED"),
+    ({"runbook_id": RunbookId.RUNBOOK_NACL_RESTORE}, "RUNBOOK_NOT_OFFERED"),
+    ({"rule_number": None}, "CANDIDATE_CONTRACT_VIOLATION"),
+    ({"evidence_ids": []}, "CANDIDATE_CONTRACT_VIOLATION"),
 ])
-def test_invalid_proposal_fails_whole_graph(over):
+def test_invalid_proposal_fails_whole_graph(over, reason, caplog):
     client = FakeAIModelClient([RISK, CandidateProposalOutput(candidates=[proposal(**over)]), SUMMARY])
-    assert run_secops_graph(graph_input(), client=client).invocation_status is AgentInvocationStatus.FAILED
+    with caplog.at_level(logging.WARNING, logger="vigilantis.ai.agent"):
+        output = run_secops_graph(graph_input(), client=client)
+    assert output.invocation_status is AgentInvocationStatus.FAILED
     assert len(client.sent) == 2  # 잘못된 후보는 요약 생성 전에 그래프를 중단시킨다.
+    # 메뉴 밖·대상 밖(주입 의심)과 형식 위반을 사유로 가른다. 대상 밖이면 그 대상을 남긴다
+    fields = _failure_log(caplog)
+    assert fields["failed_step"] == "validate_candidates"
+    assert fields["reason_code"] == reason
+    if reason == "TARGET_NOT_ALLOWED":
+        assert fields["target_arn"] == over["target_arn"]
+    else:
+        assert "target_arn" not in fields
 
 
 def test_capability_menu_requires_ssh_and_direct_nacl_relation():

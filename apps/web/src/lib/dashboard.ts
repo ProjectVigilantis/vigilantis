@@ -8,6 +8,7 @@ import { sortByRisk } from './incident-sort.ts';
 import type {
   AssetItem,
   AssetType,
+  IncidentCategory,
   IncidentListItem,
   IncidentResponse,
   IncidentStatus,
@@ -47,26 +48,55 @@ export function actionQueue(
   );
 }
 
-/**
- * AI 조치 제안 카드가 그릴 것. **조회 실패와 대기 0건을 가른다** — 목록 조회가 실패했는데
- * `승인을 기다리는 조치 제안이 없습니다`를 띄우면, 같은 화면의 `미조치 인시던트` 지표는 `—`(조회 실패)라고
- * 말하는데 카드만 할 일이 없다고 말한다(PR #351 리뷰 2). 대기 0건 문구는 **조회에 성공한 빈 목록**에만 쓴다.
- */
-export type ProposalView =
-  | { kind: 'LIST_FAILED' }
-  | { kind: 'EMPTY' }
-  | { kind: 'TOP_FAILED' }
-  | { kind: 'READY'; top: IncidentResponse; next: IncidentListItem[] };
+/** AI 조치 제안 카드 한 줄 — 보안 건은 위험도, 자산 건은 추정 절감액이 줄의 정렬·배지 축이다. */
+export interface ProposalRow {
+  incident: IncidentListItem;
+  /**
+   * 이 제안을 채택하면 아낄 수 있는 추정액(USD/월) — 후보 런북 추정 중 **가장 큰 값**. 자산(FINOPS) 건만
+   * 싣는다. null은 "추정 없음"(상세 조회 실패 · 추정 불가 · 분석 중)이지 0달러가 아니다.
+   */
+  savings: number | null;
+}
 
-/** `top`은 큐 1순위의 상세 조회 결과다. 큐가 비지 않았는데 null이면 그 조회가 실패한 것이다. */
-export function proposalView(
-  queue: readonly IncidentListItem[] | null,
-  top: IncidentResponse | null,
-): ProposalView {
-  if (queue === null) return { kind: 'LIST_FAILED' };
-  if (queue.length === 0) return { kind: 'EMPTY' };
-  if (top === null) return { kind: 'TOP_FAILED' };
-  return { kind: 'READY', top, next: queue.slice(1) };
+/**
+ * 인시던트 상세 1건의 추정 절감액. `ESTIMATED`가 아닌 추정(`UNAVAILABLE`·`INVALID`)과 숫자로 읽히지
+ * 않는 금액은 건너뛴다 — `lib/savings.ts` `savingsSummary`와 같은 규칙이다.
+ */
+function bestSavings(detail: IncidentResponse): number | null {
+  let best: number | null = null;
+  for (const rec of detail.recommendations) {
+    const estimate = rec.ai_savings_estimate;
+    if (estimate === null || estimate.status !== 'ESTIMATED' || estimate.amount === null) continue;
+    const amount = Number(estimate.amount);
+    if (Number.isFinite(amount) && (best === null || amount > best)) best = amount;
+  }
+  return best;
+}
+
+/**
+ * 카드의 줄 순서(2026-09-29). **보안 건이 먼저, 위험도순**(`actionQueue`의 `sortByRisk` 그대로) —
+ * 위협은 기다릴수록 피해가 커진다. **자산 건은 그 뒤에 추정 절감액 내림차순**이고, 추정이 없는 건은
+ * 맨 뒤에 오래 기다린 순으로 선다(금액을 모르는 건을 0달러로 세워 앞 건들 사이에 끼우지 않는다).
+ *
+ * `details`는 자산 건의 상세 조회 결과(incident_id → 상세)다. 조회에 실패한 건은 빠져 있고 `savings`가 null이 된다.
+ */
+export function proposalRows(
+  queue: readonly IncidentListItem[],
+  details: ReadonlyMap<string, IncidentResponse>,
+): ProposalRow[] {
+  const secops = queue.filter((i) => i.category === 'SECOPS').map((incident) => ({ incident, savings: null }));
+  const finops = queue
+    .filter((i) => i.category === 'FINOPS')
+    .map((incident) => {
+      const detail = details.get(incident.incident_id);
+      return { incident, savings: detail === undefined ? null : bestSavings(detail) };
+    })
+    .sort((a, b) => {
+      if (a.savings !== null && b.savings !== null && a.savings !== b.savings) return b.savings - a.savings;
+      if ((a.savings === null) !== (b.savings === null)) return a.savings === null ? 1 : -1;
+      return a.incident.created_at.localeCompare(b.incident.created_at);
+    });
+  return [...secops, ...finops];
 }
 
 /**
@@ -85,8 +115,12 @@ export interface DashboardMetrics {
   total: number;
   openSg: number;
   threat: number;
-  /** 인시던트 조회 실패면 null — 0건과 구분한다(0은 "할 일 없음"이라는 관제 정보다). */
-  unhandled: number | null;
+  /**
+   * 미조치 인시던트 — **카테고리별**이다. 대시보드 지표 띠가 `자산`(FINOPS) | `보안`(SECOPS) 두 묶음이라
+   * 한 칸씩 나눠 싣는다(2026-09-28). 둘의 합이 `actionQueue`의 길이와 같다.
+   * 인시던트 조회 실패면 null — 0건과 구분한다(0은 "할 일 없음"이라는 관제 정보다).
+   */
+  unhandled: Record<IncidentCategory, number> | null;
   waste: number;
 }
 
@@ -94,15 +128,18 @@ export function dashboardMetrics(
   items: readonly AssetItem[],
   incidents: readonly IncidentListItem[] | null,
 ): DashboardMetrics {
+  let unhandled: Record<IncidentCategory, number> | null = null;
+  if (incidents !== null) {
+    unhandled = { FINOPS: 0, SECOPS: 0 };
+    for (const i of incidents) {
+      if ((UNHANDLED_STATUSES as readonly IncidentStatus[]).includes(i.status)) unhandled[i.category] += 1;
+    }
+  }
   return {
     total: items.length,
     openSg: items.filter(isOpenSg).length,
     threat: items.filter((a) => a.verdict === 'THREAT').length,
-    unhandled:
-      incidents === null
-        ? null
-        : incidents.filter((i) => (UNHANDLED_STATUSES as readonly IncidentStatus[]).includes(i.status))
-            .length,
+    unhandled,
     waste: items.filter((a) => WASTE_VERDICTS.some((v) => v === a.verdict)).length,
   };
 }
@@ -147,6 +184,57 @@ export function inventoryCounts(
 }
 
 /**
+ * 도넛의 조각. 판정 대상 3종은 유형마다 한 조각이고, 판정 비대상 4종(NACL · Auto Scaling 그룹 ·
+ * 시작 템플릿 · 대상 그룹)은 `OTHER` 한 조각으로 접는다 — 7조각이면 1–2건짜리 조각이 실처럼 가늘어져
+ * 비율이 안 읽히고, 색도 검증된 계열 색 수를 넘는다(trend-charts.tsx `SERIES_COLORS`).
+ */
+export const COMPOSITION_TYPES = ['EC2', 'SG', 'EBS'] as const satisfies readonly AssetType[];
+export type CompositionKey = (typeof COMPOSITION_TYPES)[number] | 'OTHER';
+
+export interface CompositionSlice {
+  key: CompositionKey;
+  count: number;
+  /** 수집 전량 대비 비율(0–1). */
+  ratio: number;
+  /** `OTHER`만 채운다 — 접힌 유형별 건수(0건 유형은 뺀다). 범례가 풀어 적는다. */
+  members: { type: AssetType; count: number }[];
+}
+
+export interface AssetComposition {
+  /** 수집된 자산 전량 — 지표 띠의 `전체 자산`과 같은 수다. */
+  total: number;
+  /** 0건 조각은 뺀다(그릴 호가 없다). 순서는 고정이다 — 건수 순으로 돌리면 색이 자산이 아니라 순위를 따라간다. */
+  slices: CompositionSlice[];
+  /**
+   * 이번 회차에 조회를 못 한 유형. **비율에 들지 못했다는 사실을 따로 싣는다** — 빠진 채 100%를
+   * 그리면 "그 유형은 없다"로 읽힌다(자산 인벤토리가 0건과 수집 실패를 가르는 것과 같은 이유).
+   */
+  uncollected: AssetType[];
+}
+
+export function assetComposition(
+  items: readonly AssetItem[],
+  uncollected: readonly UncollectedAssetType[] = [],
+): AssetComposition {
+  const total = items.length;
+  const isSliceType = (type: AssetType): type is (typeof COMPOSITION_TYPES)[number] =>
+    (COMPOSITION_TYPES as readonly AssetType[]).includes(type);
+
+  const slices: CompositionSlice[] = [];
+  for (const type of COMPOSITION_TYPES) {
+    const count = items.filter((a) => a.asset_type === type).length;
+    if (count > 0) slices.push({ key: type, count, ratio: count / total, members: [] });
+  }
+  const members = ASSET_TYPE_ORDER.filter((type) => !isSliceType(type))
+    .map((type) => ({ type, count: items.filter((a) => a.asset_type === type).length }))
+    .filter((m) => m.count > 0);
+  const others = members.reduce((n, m) => n + m.count, 0);
+  if (others > 0) slices.push({ key: 'OTHER', count: others, ratio: others / total, members });
+
+  return { total, slices, uncollected: uncollected.map((u) => u.asset_type) };
+}
+
+/**
  * 개방 규칙 한 줄. 프로토콜 `-1`(전체 트래픽)은 수집기가 `all`로 정형화하고 `FromPort` 키가 없어
  * 포트가 null로 온다(`apps/core-api/services/collector.py`) — 그대로 끼우면 `all/null`이 찍힌다.
  * 가장 위험한 구성이라 가장 분명하게 적는다(PR #299 리뷰).
@@ -182,6 +270,10 @@ export function exposureRows(items: readonly AssetItem[]): ExposureRow[] {
   }));
 }
 
+/**
+ * 헬스 스코어·판정 현황(아래 두 함수)은 2026-09-28부터 자산 화면(AST-001)의 요약 패널이 그린다
+ * (`components/assets/asset-summary-panels.tsx`). 셈은 그대로고 그리는 자리만 옮겼다.
+ */
 export interface HealthSummary {
   /** 점수가 있는 EC2, 낮은 순 — 조치 대상이 위로 온다. */
   scored: AssetItem[];

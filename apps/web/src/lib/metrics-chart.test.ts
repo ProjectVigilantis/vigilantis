@@ -4,9 +4,11 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  assetStatusChartState,
   cpuChartState,
   cpuPointsFor,
   formatThroughput,
+  inventoryChartState,
   networkChartState,
   networkRowsFor,
   toAggregateNetworkRows,
@@ -15,9 +17,20 @@ import {
   sgChartState,
   toCpuLines,
   toCpuRows,
+  toInventoryRows,
   toSgRows,
+  threatActivityChartState,
 } from './metrics-chart.ts';
-import type { CpuAxis, CpuSeries, NetworkAxis, NetworkSeries, SgExposureAxis } from '@/types/api';
+import type {
+  AssetStatusAxis,
+  AssetStatusPoint,
+  CpuAxis,
+  CpuSeries,
+  NetworkAxis,
+  NetworkSeries,
+  SgExposureAxis,
+  ThreatEventAxis,
+} from '@/types/api';
 
 function series(over: Partial<CpuSeries> = {}): CpuSeries {
   return {
@@ -123,6 +136,50 @@ test('SG 축도 같은 규칙으로 갈린다', () => {
   );
 });
 
+// ── 자산 현황 축(축 4)
+
+test('자산 현황 축은 낭비 후보를 띠와 같은 셈(최적화 후보 + 미사용)으로 접고 시각 순으로 세운다', () => {
+  const point = (at: string, over: Partial<AssetStatusPoint> = {}): AssetStatusPoint => ({
+    at,
+    judged: 13,
+    threat: 2,
+    cost_candidate: 1,
+    unused: 2,
+    skip: 7,
+    undecided: 1,
+    ...over,
+  });
+  const state = assetStatusChartState({
+    status: 'READY',
+    points: [
+      point('2026-09-18T01:00:00Z', { judged: 12, threat: 1 }),
+      point('2026-09-18T00:00:00Z'),
+    ],
+    reason_code: null,
+  });
+  assert.equal(state.kind, 'READY');
+  if (state.kind !== 'READY') return;
+  assert.deepEqual(
+    state.data.map((r) => [r.judged, r.threat, r.waste]),
+    [
+      [13, 2, 3],
+      [12, 1, 3],
+    ],
+  );
+  // 원값도 남는다 — 툴팁이 낭비 후보를 둘로 풀어 적는다
+  assert.deepEqual([state.data[0].costCandidate, state.data[0].unused], [1, 2]);
+});
+
+test('자산 현황 축도 조회 실패와 회차 없음을 가른다', () => {
+  assert.deepEqual(assetStatusChartState({ status: 'READY', points: [], reason_code: null }), {
+    kind: 'EMPTY',
+  });
+  assert.deepEqual(
+    assetStatusChartState({ status: 'UNAVAILABLE', points: [], reason_code: 'OperationalError' }),
+    { kind: 'UNAVAILABLE', reason: 'OperationalError' },
+  );
+});
+
 test('눈금은 KST 월/일 시:분이다', () => {
   // 2026-09-18T00:00Z = KST 09:00 — 서버가 주는 UTC를 그대로 찍으면 관제자가 9시간 어긋난 걸 본다.
   const label = formatTick(Date.parse('2026-09-18T00:00:00Z'));
@@ -225,4 +282,137 @@ test('처리량 표기는 1000 배수를 쓴다 — AWS가 네트워크를 10진
   assert.equal(formatThroughput(999), '999 B/s');
   assert.equal(formatThroughput(1500), '1.5 KB/s');
   assert.equal(formatThroughput(2_500_000), '2.5 MB/s');
+});
+
+
+test('자산 수 축은 도넛과 같은 조각으로 접고, 못 본 유형은 0이 아니라 빈 값으로 남긴다', () => {
+  const state = inventoryChartState({
+    status: 'READY',
+    reason_code: null,
+    points: [
+      { at: '2026-09-29T01:00:00Z', total: 6, counts: { EC2: 3, NACL: 2, LAUNCH_TEMPLATE: 1 } },
+      { at: '2026-09-29T00:00:00Z', total: 9, counts: { EC2: 4, SG: 2, AUTO_SCALING_GROUP: 3 } },
+    ],
+  });
+  assert.equal(state.kind, 'READY');
+  if (state.kind !== 'READY') return;
+  // 시각 순으로 선다
+  assert.deepEqual(state.data.map((r) => r.total), [9, 6]);
+  const [first, second] = state.data;
+  assert.equal(first.OTHER, 3);
+  // 관측한 유형 중 도넛이 따로 세우지 않는 것(NACL·시작 템플릿)이 한 조각이다
+  assert.equal(second.OTHER, 3);
+  // 못 본 유형은 값이 없다 — 0으로 채우면 면이 꺼진 것처럼 그려진다
+  assert.equal(second.SG, undefined);
+  assert.equal(second.EBS, undefined);
+  assert.ok(second.unobserved.includes('SG'));
+  assert.ok(!second.unobserved.includes('NACL'));
+});
+
+test('자산 수 축의 나머지 유형을 하나도 못 봤으면 OTHER도 빈 값이다', () => {
+  const rows = toInventoryRows([{ at: '2026-09-29T00:00:00Z', total: 4, counts: { EC2: 4 } }]);
+  assert.equal(rows[0].OTHER, undefined);
+});
+
+test('자산 수 축도 조회 실패와 회차 없음을 가른다', () => {
+  assert.equal(
+    inventoryChartState({ status: 'UNAVAILABLE', points: [], reason_code: 'OperationalError' }).kind,
+    'UNAVAILABLE',
+  );
+  assert.equal(inventoryChartState({ status: 'READY', points: [], reason_code: null }).kind, 'EMPTY');
+});
+
+// --- 전체 위협 추이(축 4 threat + 축 6) ----------------------------------------------
+
+test('전체 위협 — 판정 칸과 이벤트 칸을 시각으로 합치고, 이벤트 없는 칸은 0 · 회차 없는 칸은 판정값이 없다', () => {
+  const state = threatActivityChartState(
+    {
+      status: 'READY',
+      reason_code: null,
+      points: [
+        { at: '2026-09-18T00:00:00Z', judged: 3, threat: 1, cost_candidate: 0, unused: 0, skip: 2, undecided: 0 },
+      ],
+    },
+    {
+      status: 'READY',
+      reason_code: null,
+      points: [
+        { at: '2026-09-17T23:00:00Z', total: 2, counts: { SSH_BRUTE_FORCE: 2 } },
+        { at: '2026-09-18T00:00:00Z', total: 1, counts: { OPEN_IP: 1 } },
+      ],
+    },
+  );
+  assert.equal(state.kind, 'READY');
+  if (state.kind !== 'READY') return;
+  assert.deepEqual(state.data.rows, [
+    { at: Date.parse('2026-09-17T23:00:00Z'), SSH_BRUTE_FORCE: 2, OPEN_IP: 0, events: 2 },
+    { at: Date.parse('2026-09-18T00:00:00Z'), threat: 1, SSH_BRUTE_FORCE: 0, OPEN_IP: 1, events: 1 },
+  ]);
+});
+
+test('전체 위협 — 한쪽 축만 실패하면 다른 쪽은 그리고 사유를 남긴다, 둘 다 실패면 UNAVAILABLE', () => {
+  const downVerdict: AssetStatusAxis = { status: 'UNAVAILABLE', reason_code: 'Boom', points: [] };
+  const downEvents: ThreatEventAxis = { status: 'UNAVAILABLE', reason_code: 'Boom', points: [] };
+  const verdict: AssetStatusAxis = {
+    status: 'READY',
+    reason_code: null,
+    points: [{ at: '2026-09-18T00:00:00Z', judged: 1, threat: 1, cost_candidate: 0, unused: 0, skip: 0, undecided: 0 }],
+  };
+  const partial = threatActivityChartState(verdict, downEvents);
+  assert.equal(partial.kind, 'READY');
+  if (partial.kind === 'READY') assert.equal(partial.data.eventsUnavailable, 'Boom');
+  assert.equal(threatActivityChartState(downVerdict, downEvents).kind, 'UNAVAILABLE');
+});
+
+test('전체 위협 — 한쪽이 실패하고 다른 쪽이 비었으면 "기록 없음"이 아니라 조회 실패다', () => {
+  const emptyVerdict: AssetStatusAxis = { status: 'READY', reason_code: null, points: [] };
+  const emptyEvents: ThreatEventAxis = { status: 'READY', reason_code: null, points: [] };
+  const downVerdict: AssetStatusAxis = { status: 'UNAVAILABLE', reason_code: 'VerdictDown', points: [] };
+  const downEvents: ThreatEventAxis = { status: 'UNAVAILABLE', reason_code: 'EventsDown', points: [] };
+  assert.deepEqual(threatActivityChartState(downVerdict, emptyEvents), { kind: 'UNAVAILABLE', reason: 'VerdictDown' });
+  assert.deepEqual(threatActivityChartState(emptyVerdict, downEvents), { kind: 'UNAVAILABLE', reason: 'EventsDown' });
+  // 둘 다 조회에 성공했는데 비었으면 그때만 "기록 없음"이다
+  assert.equal(threatActivityChartState(emptyVerdict, emptyEvents).kind, 'EMPTY');
+});
+
+test('전체 위협 — 실패한 이벤트 축의 칸은 0으로 채우지 않는다', () => {
+  const state = threatActivityChartState(
+    {
+      status: 'READY',
+      reason_code: null,
+      points: [{ at: '2026-09-18T00:00:00Z', judged: 1, threat: 1, cost_candidate: 0, unused: 0, skip: 0, undecided: 0 }],
+    },
+    { status: 'UNAVAILABLE', reason_code: 'Boom', points: [] },
+  );
+  assert.equal(state.kind, 'READY');
+  if (state.kind !== 'READY') return;
+  // 0이 있으면 툴팁이 "0건"으로 읽는다 — 값이 없어야 "조회 실패"로 적는다
+  assert.deepEqual(state.data.rows, [{ at: Date.parse('2026-09-18T00:00:00Z'), threat: 1 }]);
+});
+
+test('전체 위협 — 회차 없는 칸에는 직전 회차의 판정값을 따로 남긴다(선이 이어 그린 값)', () => {
+  const state = threatActivityChartState(
+    {
+      status: 'READY',
+      reason_code: null,
+      points: [{ at: '2026-09-18T00:00:00Z', judged: 2, threat: 2, cost_candidate: 0, unused: 0, skip: 0, undecided: 0 }],
+    },
+    {
+      status: 'READY',
+      reason_code: null,
+      points: [
+        { at: '2026-09-17T23:00:00Z', total: 1, counts: { SSH_BRUTE_FORCE: 1 } },
+        { at: '2026-09-18T01:00:00Z', total: 1, counts: { OPEN_IP: 1 } },
+      ],
+    },
+  );
+  assert.equal(state.kind, 'READY');
+  if (state.kind !== 'READY') return;
+  const [before, judged, after] = state.data.rows;
+  // 앞선 회차가 없으면 이어 그릴 값도 없다
+  assert.equal(before.carriedThreat, undefined);
+  assert.equal(judged.threat, 2);
+  assert.equal(judged.carriedThreat, undefined);
+  assert.equal(after.threat, undefined);
+  assert.equal(after.carriedThreat, 2);
 });

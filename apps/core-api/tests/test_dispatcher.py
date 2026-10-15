@@ -47,9 +47,7 @@ INSTANCE_ARN = f"arn:aws:ec2:{REGION}:{ACCOUNT}:instance/{INSTANCE}"
 VOLUME_ARN = f"arn:aws:ec2:{REGION}:{ACCOUNT}:volume/vol-0abc123456789def0"
 CANDIDATE_TYPE = "t3.medium"
 
-# 실행 함수가 아직 없는 런북 — "미구현을 실패로 확정하지 않는다"를 보는 테스트가 쓴다.
-# 종전에는 EBS 삭제였고 그것이 구현되면서(Issue #369) 여기로 옮겼다. 이 런북이 구현되면
-# 그 테스트의 precondition assert가 먼저 걸린다 — 그때 아직 남은 런북으로 바꾼다.
+# 테스트에서 실행 등록을 제거할 런북 — 실제 구현 여부와 무관하게 미지원 경로를 검증한다.
 UNSUPPORTED_RUNBOOK = RunbookId.RUNBOOK_EC2_ENABLE_AUTOSCALING
 UNSUPPORTED_TARGET_ARN = (
     f"arn:aws:autoscaling:{REGION}:{ACCOUNT}:autoScalingGroup:"
@@ -216,10 +214,10 @@ def reserved(db, make_incident, make_candidate):
 RETRY_NOW = workflows.VerificationRetryPolicy(max_attempts=3, interval_seconds=0)
 
 
-def cycle(db, publish=None, policy=RETRY_NOW):
+def cycle(db, publish=None, policy=RETRY_NOW, lane=dispatcher.LANE_MAIN):
     """스캔 1회. 세션을 닫는 바깥 껍질(run_dispatch_cycle)은 부르지 않는다 —
     테스트 세션은 픽스처가 소유하고 종료 시 전부 rollback한다."""
-    return dispatcher.dispatch_pending(db, publish, policy)
+    return dispatcher.dispatch_pending(db, publish, policy, lane)
 
 
 def operations(aws):
@@ -259,13 +257,13 @@ def test_successful_execution_waits_for_the_status_check(db, reserved, aws):
     )
 
 
-def test_unsupported_runbook_is_not_dispatched(db, reserved, aws):
+def test_unsupported_runbook_is_not_dispatched(db, reserved, aws, monkeypatch):
     """실행 함수가 없는 런북을 실패로 확정하면 미구현이 조치 실패로 둔갑한다."""
-    # 이 테스트는 런북이 _RUNNERS에 **없어야** 성립한다 — 구현되면 여기서 먼저 알린다
-    assert UNSUPPORTED_RUNBOOK not in dispatcher._RUNNERS
+    monkeypatch.delitem(dispatcher._RUNNERS, UNSUPPORTED_RUNBOOK, raising=False)
     incident_id, execution_id = reserved(runbook=UNSUPPORTED_RUNBOOK)
 
-    report = cycle(db)
+    # 이 런북은 ASG 레인 소속이다 — 선점 전 분할이므로 맞는 레인으로 스캔해야 닿는다
+    report = cycle(db, lane=dispatcher.LANE_AUTOSCALING)
 
     assert report.unsupported == 1 and report.started == 0
     assert aws.calls == []
@@ -354,11 +352,13 @@ def test_incident_returns_to_awaiting_approval_when_a_proposal_remains(
     )
 
 
-def test_incident_stays_in_progress_while_another_execution_runs(db, reserved, aws):
+def test_incident_stays_in_progress_while_another_execution_runs(
+    db, reserved, aws, monkeypatch
+):
     """진행 중인 실행이 하나라도 남으면 나가지 않는다 — 상세 응답 계약이 그것을 요구한다."""
     # 나란히 두는 실행은 이 주기에 **디스패치되지 않아야** 한다 — 그래야 "진행 중 1건"이
-    # 유지된다. 실행 함수가 없는 런북을 쓰는 이유다(UNSUPPORTED_RUNBOOK 주석).
-    assert UNSUPPORTED_RUNBOOK not in dispatcher._RUNNERS
+    # 유지된다. 테스트에서 해당 런북의 실행 등록을 제거한다.
+    monkeypatch.delitem(dispatcher._RUNNERS, UNSUPPORTED_RUNBOOK, raising=False)
     incident_id, execution_id = reserved()
     other_id = exec_repo.create_execution(
         db,

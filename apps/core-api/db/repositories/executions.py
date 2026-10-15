@@ -10,17 +10,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime
-from typing import Iterable, Optional
-
-from sqlalchemy import exists, select, update
-from sqlalchemy.orm import Session, aliased
 
 from schemas.api.actions import ExecutionStatus
 from schemas.api.incidents import IncidentStatus
 from schemas.executions import EXECUTION_NON_TERMINAL_STATUSES, ExecutionStepResult
 from schemas.guardrails import PrecheckReasonCode
 from schemas.runbooks import RunbookId, TriggerSource
+from sqlalchemy import exists, select, update
+from sqlalchemy.orm import Session, aliased
 
 from .. import mappers, models
 
@@ -34,13 +33,16 @@ def create_execution(
     runbook_id: RunbookId,
     target_arn: str,
     trigger_source: TriggerSource,
-    candidate_id: Optional[str] = None,
-    idempotency_key: Optional[str] = None,
-    deduplication_key: Optional[str] = None,
-    parent_execution_id: Optional[str] = None,
-    backup_record_id: Optional[str] = None,
-    validated_command: Optional[dict] = None,
+    candidate_id: str | None = None,
+    idempotency_key: str | None = None,
+    deduplication_key: str | None = None,
+    parent_execution_id: str | None = None,
+    backup_record_id: str | None = None,
+    validated_command: dict | None = None,
+    execution_id: str | None = None,
 ) -> models.ActionExecution:
+    """execution_id는 실행 전에 그 ID로 가드레일을 돌린 호출부만 넘긴다(자동 격리, #447).
+    넘기지 않으면 모델 기본값이 새 ID를 발급한다."""
     row = models.ActionExecution(
         incident_id=incident_id,
         runbook_id=runbook_id,
@@ -53,12 +55,14 @@ def create_execution(
         backup_record_id=backup_record_id,
         validated_command=validated_command,
     )
+    if execution_id is not None:
+        row.execution_id = execution_id
     db.add(row)
     db.flush()
     return row
 
 
-def get_execution(db: Session, execution_id: str) -> Optional[models.ActionExecution]:
+def get_execution(db: Session, execution_id: str) -> models.ActionExecution | None:
     return db.execute(
         select(models.ActionExecution).where(
             models.ActionExecution.execution_id == execution_id
@@ -68,11 +72,25 @@ def get_execution(db: Session, execution_id: str) -> Optional[models.ActionExecu
 
 def get_by_idempotency_key(
     db: Session, idempotency_key: str
-) -> Optional[models.ActionExecution]:
+) -> models.ActionExecution | None:
     return db.execute(
         select(models.ActionExecution).where(
             models.ActionExecution.idempotency_key == idempotency_key
         )
+    ).scalar_one_or_none()
+
+
+def get_by_deduplication_key(
+    db: Session, deduplication_key: str
+) -> models.ActionExecution | None:
+    """시스템 실행(자동 격리 등)의 중복 방지 키로 앞선 접수를 찾는다. (Issue #447)
+
+    최신 값으로 다시 읽는다 — 세션이 들고 있던 같은 행은 Core UPDATE(상태 확정)를 반영하지
+    않아, 재시도 응답이 이미 확정된 실행을 옛 상태로 돌려줄 수 있다."""
+    return db.execute(
+        select(models.ActionExecution)
+        .where(models.ActionExecution.deduplication_key == deduplication_key)
+        .execution_options(populate_existing=True)
     ).scalar_one_or_none()
 
 
@@ -86,7 +104,7 @@ def list_by_incident(db: Session, incident_id: str) -> list[models.ActionExecuti
     )
 
 
-def lock_execution(db: Session, execution_id: str) -> Optional[models.ActionExecution]:
+def lock_execution(db: Session, execution_id: str) -> models.ActionExecution | None:
     """행 잠금 후 최신 값으로 다시 읽는다 — 잠그기 전에 읽은 값은 이미 낡았을 수 있다.
     관제자 복구 접수가 원본 실행을 선점하는 관문이다 (Issue #126)."""
     return db.execute(
@@ -161,8 +179,8 @@ def update_execution_status(
     *,
     expected: ExecutionStatus,
     next_status: ExecutionStatus,
-    error_summary: Optional[str] = None,
-    finished_at: Optional[datetime] = None,
+    error_summary: str | None = None,
+    finished_at: datetime | None = None,
     clear_verification_hold: bool = False,
 ) -> bool:
     """롤백 자식의 상태 제한(SUCCESS|FAILED)은 DB CheckConstraint가 함께 강제한다.
@@ -229,6 +247,69 @@ def bind_backup_record(db: Session, execution_id: str, backup_record_id: str) ->
         .values(backup_record_id=backup_record_id)
     )
     return result.rowcount == 1
+
+
+def get_autoscaling_plan(db: Session, execution_id: str) -> dict | None:
+    """저장된 Auto Scaling 실행 계획 — 컬럼을 직접 읽어 세션이 든 낡은 객체를 거치지 않는다."""
+    return db.execute(
+        select(models.ActionExecution.autoscaling_plan).where(
+            models.ActionExecution.execution_id == execution_id
+        )
+    ).scalar_one_or_none()
+
+
+def list_autoscaling_plans(db: Session) -> list[tuple[str, dict]]:
+    """저장된 모든 Auto Scaling 실행 계획 (execution_id, 계획 JSON). 나이·개수 상한이 없다.
+
+    소유 대조는 ASG 태그가 가리키는 실행 ID로 계획을 찾는 일이라, 어떤 상한도 오래 살아 있는
+    승인 ASG의 계획을 조용히 빼 버린다. 계획 행은 실행당 하나이고 작다.
+    """
+    rows = db.execute(
+        select(
+            models.ActionExecution.execution_id, models.ActionExecution.autoscaling_plan
+        ).where(models.ActionExecution.autoscaling_plan.is_not(None))
+    ).all()
+    return [(execution_id, plan) for execution_id, plan in rows]
+
+
+def bind_autoscaling_plan(db: Session, execution_id: str, plan: dict) -> bool:
+    """실행 계획 결속은 1회만 — 이미 저장된 계획은 덮어쓰지 않는다."""
+    result = db.execute(
+        update(models.ActionExecution)
+        .where(
+            models.ActionExecution.execution_id == execution_id,
+            models.ActionExecution.autoscaling_plan.is_(None),
+        )
+        .values(autoscaling_plan=plan)
+    )
+    return result.rowcount == 1
+
+
+# --- ASG scale-in 보호 결과 (보조 조치) ----------------------------------------
+
+
+def get_scale_in_protection_result(db: Session, execution_id: str) -> dict | None:
+    """저장된 보호 결과(schemas.backups.ScaleInProtectionResult의 JSON). 컬럼을 직접 읽는다."""
+    return db.execute(
+        select(models.ActionExecution.scale_in_protection_result).where(
+            models.ActionExecution.execution_id == execution_id
+        )
+    ).scalar_one_or_none()
+
+
+def set_scale_in_protection_result(
+    db: Session, execution_id: str, result: dict
+) -> bool:
+    """보호 결과를 덮어쓴다(실행당 1개, 갱신 가능). commit은 호출부가 한다.
+
+    bind_*와 달리 1회성이 아니다 — 쓰기 직전 의도 기록을 최종 결과로 바꾸는 것이 용도다.
+    """
+    outcome = db.execute(
+        update(models.ActionExecution)
+        .where(models.ActionExecution.execution_id == execution_id)
+        .values(scale_in_protection_result=result)
+    )
+    return outcome.rowcount == 1
 
 
 # --- ExecutionStep -------------------------------------------------------------
@@ -299,9 +380,7 @@ def create_backup_record(
     return row
 
 
-def get_backup_record(
-    db: Session, backup_record_id: str
-) -> Optional[models.BackupRecord]:
+def get_backup_record(db: Session, backup_record_id: str) -> models.BackupRecord | None:
     return db.execute(
         select(models.BackupRecord).where(
             models.BackupRecord.backup_record_id == backup_record_id
@@ -314,9 +393,9 @@ def latest_backup_for_target(
     *,
     target_arn: str,
     backup_type: str,
-    payload_match: Optional[dict] = None,
-    consumed_by: Optional[RunbookId] = None,
-) -> Optional[models.BackupRecord]:
+    payload_match: dict | None = None,
+    consumed_by: RunbookId | None = None,
+) -> models.BackupRecord | None:
     """대상 기준 최신 백업 1건 — backup_record_id를 모르는 원복이 레코드를 찾는 자리.
 
     종류·target_arn·payload_match 3중 대조(ADR-0008 §1 ④)에 두 조건을 더 건다.

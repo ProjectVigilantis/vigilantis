@@ -31,11 +31,19 @@ import type { ActionCandidate, ActionRequest } from '@/lib/action-request';
 import { agentWaitTimes, appendTransition, latchAgentWaitAt } from '@/lib/realtime-events';
 import { newIdempotencyKey } from '@/lib/api/client';
 import { isTerminalStatus } from '@/lib/execution-status';
-import { isResolvable } from '@/lib/incident-filter';
+import { closureAction, closureBlockedReason, RESOLUTION_LABELS } from '@/lib/incident-closure';
 import { proposalButtons } from '@/lib/proposal-buttons';
 import { RUNBOOK_LABELS, incidentTitle } from '@/lib/enum-labels';
+import { formatUsd, savingsBreakdown, type SavingsBreakdown } from '@/lib/savings';
 import { formatKst } from '@/lib/utils';
-import type { AssetItem, IncidentResponse, IsoDateTime, RunbookId } from '@/types/api';
+import type {
+  AssetItem,
+  AnalysisResultStatus,
+  IncidentResponse,
+  IsoDateTime,
+  RunbookId,
+  SavingsReason,
+} from '@/types/api';
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -46,24 +54,37 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-/**
- * 판단 근거는 계약상 분석 완료 시 정확히 3줄, 분석 중·실패면 빈 배열이다.
- * 빈 배열을 그냥 비워두면 "근거가 없는 인시던트"로 읽히므로 status 기준 안내로 대체한다(§3.3).
- */
+const ANALYSIS_LABELS: Record<AnalysisResultStatus, string> = {
+  PENDING: '분석 대기',
+  IN_PROGRESS: '분석 중',
+  PROPOSALS_GENERATED: '조치 제안 생성',
+  NO_PROPOSAL: 'AI 조치 제안 없음',
+  GUARDRAIL_REJECTED: '모든 AI 제안이 가드레일에서 거절됨',
+  FAILED: '분석 실패',
+  UNAVAILABLE: '저장된 평가 기록만으로 분석 결과를 확인할 수 없음',
+};
+
+/** 종료 상태로 분석 성공·실패를 추정하지 않는다. 저장된 분석 결과는 종료 후에도 보여 준다. */
 function SummaryLines({ incident }: { incident: IncidentResponse }) {
   if (incident.summary_lines.length === 0) {
     return (
       <p className="text-muted-foreground text-sm">
-        {incident.status === 'ANALYZING' ? '분석 중' : '분석 실패'}
+        {incident.analysis_result != null ? ANALYSIS_LABELS[incident.analysis_result.status]
+          : incident.status === 'ANALYZING' ? '분석 중' : '저장된 판단 근거가 없습니다.'}
       </p>
     );
   }
   return (
-    <ol className="flex list-decimal flex-col gap-1.5 pl-5 text-sm">
-      {incident.summary_lines.map((line, i) => (
-        <li key={i}>{line}</li>
-      ))}
-    </ol>
+    <>
+      {incident.analysis_result != null ? (
+        <p className="text-muted-foreground text-sm">{ANALYSIS_LABELS[incident.analysis_result.status]}</p>
+      ) : null}
+      <ol className="flex list-decimal flex-col gap-1.5 pl-5 text-sm">
+        {incident.summary_lines.map((line, i) => (
+          <li key={i}>{line}</li>
+        ))}
+      </ol>
+    </>
   );
 }
 
@@ -109,8 +130,158 @@ function RiskArea({
   );
 }
 
+/** 미산출 사유 표시 — 모델이 못 낸 것과 서버가 계약 위반으로 버린 것을 같은 말로 덮지 않는다. */
+const SAVINGS_REASON_LABELS: Record<SavingsReason, string> = {
+  MODEL_UNAVAILABLE: 'AI가 추정을 내지 못함',
+  MISSING_ESTIMATE: '추정값 누락',
+  INVALID_ESTIMATE: '추정값 오류',
+  CONTEXT_MISMATCH: '대상 정보 불일치',
+};
+
 /**
- * B-Medium 타임아웃 창 — **고지를 그리는 조건이자 기준 시각을 래치하는 조건**이다.
+ * 절감 예상 영역 — FINOPS(A 변형) 전용이다. SECOPS의 `위험도` 자리에 선다(2026-09-29).
+ * 자산 인시던트에서 관제자가 가장 먼저 알아야 할 수는 "이 제안을 채택하면 월 얼마를 아끼나"다.
+ *
+ * 값은 후보 런북의 `ai_savings_estimate`(RIGHTSIZING에만 실림)이며 **AI 참고 추정**이다 — 실제
+ * 청구액이 아니라 모델 추정 단가 × 730시간(#347). 금액 옆에 그 사실을 함께 적는다(`lib/savings.ts` 머리말).
+ * 추정이 없거나 실패한 후보를 $0으로 그리지 않는다 — 0원은 "절감이 없다"는 단언이다.
+ */
+/**
+ * 절감 막대 — 현재 월 비용 한 줄을 "조정 후 비용 | 절감"으로 쪼갠다. 막대 길이는 **이 영역에서
+ * 가장 비싼 현재 비용** 기준이라 후보가 둘 이상이어도 한 축으로 비교된다(축은 하나).
+ *
+ * 색: 절감은 계열 색 `--chart-series-3`, 남는 비용은 물러서는 무채색이다. 두 색은 dataviz 팔레트
+ * 검사에서 색각 분리·명도 차를 통과했지만 무채색은 표면 대비가 3:1에 못 미쳐(WARN) **금액을
+ * 글자로 함께 적는다** — 색만으로 값을 읽게 두지 않는다.
+ */
+function SavingsBar({ breakdown, scale }: { breakdown: SavingsBreakdown; scale: number }) {
+  const { current, remaining, saving, ratio } = breakdown;
+  const pct = (v: number) => `${scale === 0 ? 0 : (v / scale) * 100}%`;
+  const percent = Math.round(ratio * 100);
+  return (
+    <div className="flex flex-col gap-1">
+      <div
+        role="img"
+        aria-label={`현재 월 ${formatUsd(current)} 중 ${formatUsd(saving)}(${percent}%) 절감, 조정 후 ${formatUsd(remaining)}`}
+        className="flex h-3 gap-0.5 overflow-hidden rounded-sm"
+      >
+        {remaining > 0 ? (
+          <span
+            title={`조정 후 월 비용 ${formatUsd(remaining)}`}
+            className="h-full bg-neutral-300 dark:bg-neutral-600"
+            style={{ width: pct(remaining) }}
+          />
+        ) : null}
+        {saving > 0 ? (
+          <span
+            title={`월 절감 예상 ${formatUsd(saving)} (${percent}%)`}
+            className="h-full"
+            style={{ width: pct(saving), backgroundColor: 'var(--chart-series-3)' }}
+          />
+        ) : null}
+      </div>
+      <div className="text-muted-foreground flex justify-between gap-3 font-mono text-xs tabular-nums">
+        <span>
+          조정 후 {formatUsd(remaining)} / 현재 {formatUsd(current)}
+        </span>
+        <span className="text-foreground">
+          −{formatUsd(saving)} ({percent}%)
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function SavingsLegend() {
+  return (
+    <div className="text-muted-foreground flex gap-3 text-xs">
+      <span className="flex items-center gap-1.5">
+        <span className="size-2.5 rounded-sm bg-neutral-300 dark:bg-neutral-600" />
+        조정 후 월 비용
+      </span>
+      <span className="flex items-center gap-1.5">
+        <span className="size-2.5 rounded-sm" style={{ backgroundColor: 'var(--chart-series-3)' }} />
+        절감
+      </span>
+    </div>
+  );
+}
+
+function SavingsArea({ incident }: { incident: IncidentResponse }) {
+  if (incident.category !== 'FINOPS') return null;
+
+  const estimates = incident.recommendations.flatMap((rec) =>
+    rec.ai_savings_estimate === null ? [] : [{ rec, estimate: rec.ai_savings_estimate }],
+  );
+  const amounts = estimates
+    .filter(({ estimate }) => estimate.status === 'ESTIMATED' && estimate.amount !== null)
+    .map(({ estimate }) => Number(estimate.amount))
+    .filter(Number.isFinite);
+  const best = amounts.length > 0 ? Math.max(...amounts) : null;
+  const breakdowns = new Map(
+    estimates.flatMap(({ rec, estimate }) => {
+      const b = savingsBreakdown(estimate);
+      return b === null ? [] : [[rec.runbook_id, b] as const];
+    }),
+  );
+  const scale = Math.max(0, ...[...breakdowns.values()].map((b) => b.current));
+
+  return (
+    <Section title="절감 예상 (AI 추정)">
+      {estimates.length === 0 ? (
+        <p className="text-muted-foreground text-sm">
+          {incident.status === 'ANALYZING'
+            ? '분석 중 — 분석이 끝나면 이 자리에 월 절감액이 생깁니다.'
+            : '이 제안에는 비용 추정이 없습니다(스펙 조정 조치에만 추정이 붙습니다).'}
+        </p>
+      ) : (
+        <Card className="gap-2 p-4">
+          <div className="flex items-baseline justify-between gap-3">
+            <span className="text-muted-foreground text-xs">채택 시 월 절감 예상</span>
+            <span className="font-mono text-2xl font-semibold tabular-nums">
+              {best === null ? '—' : `${formatUsd(best)}`}
+              {best === null ? null : <span className="text-muted-foreground text-sm font-normal"> /월</span>}
+            </span>
+          </div>
+          <ul className="flex flex-col gap-1.5 border-t pt-2 text-sm">
+            {estimates.map(({ rec, estimate }) => (
+              <li key={rec.runbook_id} className="flex flex-col gap-0.5">
+                <span className="flex items-baseline justify-between gap-3">
+                  <span>
+                    {RUNBOOK_LABELS[rec.runbook_id]}
+                    {estimate.basis !== null ? (
+                      <span className="text-muted-foreground ml-2 font-mono text-xs">
+                        {estimate.basis.current_instance_type} → {estimate.basis.target_instance_type}
+                      </span>
+                    ) : null}
+                  </span>
+                  <span className="font-mono tabular-nums">
+                    {estimate.status === 'ESTIMATED' && estimate.amount !== null
+                      ? `${formatUsd(Number(estimate.amount))}/월`
+                      : `추정 불가 · ${estimate.reason === null ? '사유 없음' : SAVINGS_REASON_LABELS[estimate.reason]}`}
+                  </span>
+                </span>
+                {breakdowns.has(rec.runbook_id) ? (
+                  <SavingsBar breakdown={breakdowns.get(rec.runbook_id)!} scale={scale} />
+                ) : null}
+                {estimate.basis !== null ? (
+                  <span className="text-muted-foreground text-xs">{estimate.basis.explanation}</span>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+          {breakdowns.size > 0 ? <SavingsLegend /> : null}
+          <p className="text-muted-foreground text-xs">
+            모델 추정 단가 × 730시간(온디맨드·Linux 인스턴스 비용) — 실제 청구액이 아닙니다.
+          </p>
+        </Card>
+      )}
+    </Section>
+  );
+}
+
+/**
+ * B-Medium 타임아웃 창 —**고지를 그리는 조건이자 기준 시각을 래치하는 조건**이다.
  * 두 곳이 따로 판정하면 화면에는 시각이 떠 있는데 기준은 안 잡히는 식으로 어긋난다.
  */
 function inAgentWaitWindow(incident: IncidentResponse): boolean {
@@ -192,14 +363,11 @@ function ExecutionsArea({
   incident,
   locked,
   onRecover,
-  onCloseJudgement,
 }: {
   incident: IncidentResponse;
   /** `ACTION_IN_PROGRESS`면 같은 Incident의 실행 버튼을 전부 비활성화한다(§4.5). */
   locked: boolean;
   onRecover: (runbookId: RunbookId, originExecutionId: string) => void;
-  /** v1.6 — 선제 차단의 정당성을 판단하는 ACT-001 C 모달을 연다(§4.5·§4.6). */
-  onCloseJudgement: () => void;
 }) {
   if (incident.executions.length === 0) return null;
 
@@ -217,9 +385,6 @@ function ExecutionsArea({
                 갱신 {formatKst(execution.updated_at)}
               </p>
               <div className="flex flex-wrap items-center gap-2">
-                {/* v1.6 — 구 `차단 유지`는 여기 있었지만 **실행 단위가 아니라 인시던트 단위**의
-                    판단이라(종료는 인시던트 상태다) 아래 영역 푸터의 `종료 판단`으로 올렸다.
-                    비활성 버튼이 실행마다 반복되면 누를 수 없는 버튼만 늘어난다(§4.5). */}
                 {execution.available_recovery_runbook_ids.map((runbookId) => (
                   <Button
                     key={runbookId}
@@ -237,19 +402,6 @@ function ExecutionsArea({
           </li>
         ))}
       </ul>
-
-      {/* v1.6 종료 판단 — 수행된 대응은 이미 일어난 일이고(§7.1) 관제자가 할 일은 "정당했나"다.
-          구 `차단 유지`는 목록으로 돌아갈 뿐 아무 판단도 남기지 않았다(§4.5).
-          노출 조건은 **서버가 종료를 받아 주는 상태**와 같다(RESOLVABLE_STATUSES) — 여기서 넓히면
-          409가 나고, 좁히면 그 상태가 막다른 길이 된다. FINOPS도 RIGHTSIZING 종료 판정으로
-          `AWAITING_CLOSURE`에 들어오므로 카테고리로 가르지 않는다(#240). */}
-      {isResolvable(incident.status) ? (
-        <div className="flex justify-end pt-1">
-          <Button type="button" variant="outline" size="sm" onClick={onCloseJudgement}>
-            종료 판단
-          </Button>
-        </div>
-      ) : null}
     </Section>
   );
 }
@@ -261,8 +413,7 @@ function ExecutionsArea({
  * | 조건 | 버튼 |
  * | --- | --- |
  * | `recommendations ≥ 1` | 후보 런북의 동작 계열로 정한 문구 — `proposalButtons` |
- * | 〃 + 차단 계열 + `response_mode = AGENT_WAIT` | 실행 문구 옆에 `차단 안 함` — 실행 전 상태 |
- * | `recommendations = []` | 없음(조회 전용) |
+ * | `recommendations = []` | 실행 버튼 없음 |
  *
  * **문구의 축은 인시던트 분류가 아니라 후보 런북이다**(#363). 규칙 본문과 계열 표는
  * `@/lib/proposal-buttons`에 있고 DSH-001 「AI 조치 제안」 카드가 같은 함수를 쓴다 — 여기에 복제하지 않는다.
@@ -278,17 +429,18 @@ function ProposalActions({
   assets,
   locked,
   onExecute,
+  onCloseIncident,
 }: {
   incident: IncidentResponse;
   /** 제안의 `target_arn`을 조인해 승인 모달에 자산 사실값을 넘긴다(#183). */
   assets: AssetItem[];
   locked: boolean;
   onExecute: (candidates: ActionCandidate[]) => void;
+  onCloseIncident: () => void;
 }) {
   if (incident.recommendations.length === 0) return null;
 
-  // 반려(`차단 안 함`)는 **차단 후보**가 아직 실행되지 않은 AGENT_WAIT 상태일 때만 의미가 있다(§4.5 B-Medium).
-  const { approveLabel, canReject } = proposalButtons(incident);
+  const { approveLabel } = proposalButtons(incident);
 
   return (
     <div className="flex flex-wrap items-center gap-3">
@@ -308,12 +460,11 @@ function ProposalActions({
       >
         {approveLabel}
       </Button>
-      {/* 반려는 API를 부르지 않는 화면 조작이라 ACT-001 소관이 아니다 — INC-002 B(#155) 자리 그대로. */}
-      {canReject ? (
-        <Button type="button" variant="outline" disabled>
-          차단 안 함
-        </Button>
-      ) : null}
+      <Button type="button" variant="outline" onClick={onCloseIncident}
+        disabled={locked || closureBlockedReason(incident) !== null}
+        title={closureBlockedReason(incident) ?? undefined}>
+        {closureAction(incident).label}
+      </Button>
       {locked ? (
         <span className="text-muted-foreground text-xs">
           진행 중인 실행이 있어 새 실행을 받지 않습니다.
@@ -520,6 +671,7 @@ export function IncidentDetail({
       </header>
 
       <RiskArea incident={incident} agentWaitAt={waitBase} />
+      <SavingsArea incident={incident} />
 
       <Separator />
 
@@ -573,12 +725,12 @@ export function IncidentDetail({
         incident={incident}
         locked={locked}
         onRecover={openRecovery}
-        onCloseJudgement={() => setClosing(true)}
       />
 
       {closing ? (
         <CloseIncidentDialog
           incident={incident}
+          locked={locked}
           onClose={() => setClosing(false)}
           // 종료 처리 성공 — 서버가 상태를 RESOLVED로 옮기고 남은 제안을 정리했다. 다시 읽는다.
           onResolved={() => {
@@ -589,17 +741,6 @@ export function IncidentDetail({
           onStale={() => {
             setClosing(false);
             router.refresh();
-          }}
-          // `과잉이었다` → 종료하지 않고 해제 흐름으로. 되돌릴 실행이 여럿이면 첫 번째를 연다
-          // — 계약이 복구를 **실행 항목별**로 매다는 구조라 인시던트 단위 해제가 없다(§4.5).
-          onChooseRecovery={() => {
-            const target = incident.executions.find(
-              (e) => e.available_recovery_runbook_ids.length > 0,
-            );
-            setClosing(false);
-            if (target !== undefined) {
-              openRecovery(target.available_recovery_runbook_ids[0], target.execution_id);
-            }
           }}
         />
       ) : null}
@@ -634,7 +775,35 @@ export function IncidentDetail({
         )}
       </Section>
 
-      <ProposalActions incident={incident} assets={assets} locked={locked} onExecute={openAction} />
+      <ProposalActions incident={incident} assets={assets} locked={locked} onExecute={openAction}
+        onCloseIncident={() => setClosing(true)} />
+
+      {incident.recommendations.length === 0 ? (
+      <Section title={incident.status === 'RESOLVED' ? '종료 기록' : '인시던트 종료'}>
+        {incident.status === 'RESOLVED' ? (
+          <div className="flex flex-col gap-2 text-sm">
+            <Row label="종료 판단">
+              {incident.resolution === null ? '기록 없음' : RESOLUTION_LABELS[incident.resolution]}
+            </Row>
+            <Row label="종료 시각">{incident.resolved_at === null ? '기록 없음' : formatKst(incident.resolved_at)}</Row>
+            <Row label="종료 사유"><span className="whitespace-pre-wrap break-words">{incident.resolution_note ?? '기록 없음'}</span></Row>
+            <p className="text-muted-foreground text-xs">종료 판단은 위협 해소·차단 해제·최적화 완료를 뜻하지 않습니다. 실제 조치 결과는 실행 이력에서 확인하세요.</p>
+          </div>
+        ) : (
+          <div className="flex flex-col items-start gap-2">
+            <p className="text-muted-foreground text-sm">
+              {closureBlockedReason(incident) ?? (locked
+                ? '진행 중인 실행이 끝난 뒤 종료할 수 있습니다.'
+                : '현재 차단·설정을 변경하지 않고 종료합니다.')}
+            </p>
+            <Button type="button" variant="outline" disabled={locked || closureBlockedReason(incident) !== null}
+              onClick={() => setClosing(true)}>
+              {closureAction(incident).label}
+            </Button>
+          </div>
+        )}
+      </Section>
+      ) : null}
 
       {/* ACT-002 — 실행 흐름은 여기서 끝난다. 위쪽 판단 근거·근거 데이터·제안 조치는 그대로 남는다(§4.7). */}
       {shownOutcome ? (

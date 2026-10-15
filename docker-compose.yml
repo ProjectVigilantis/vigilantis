@@ -83,6 +83,11 @@ services:
       context: .
       dockerfile: apps/core-api/Dockerfile
     env_file: .env
+    # 개발 스택은 코드 마운트 + 자동 재기동. 이미지의 기본 명령(serve.py)은 운영 배포용이다(ADR-0010)
+    command: ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    environment:
+      # compose 스택은 파일 로그를 기본 켠다(Settings 기본값은 False). 끄려면 셸/.env에서 false
+      LOG_FILE_ENABLED: ${LOG_FILE_ENABLED:-true}
     # localstack 은 의존성으로 걸지 않는다 — api 는 기동 시점에 AWS 가 필요 없고(수집은
     # 스케줄 주기 호출), 실 AWS 전환 시에도 compose 편집 없이 env 하나로 끝나야 한다(ADR-0006 §3).
     depends_on:

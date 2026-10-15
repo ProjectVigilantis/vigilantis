@@ -251,6 +251,10 @@ def list_pending_agent_analysis(
     분류를 함께 싣는 것은 **선점하기 전에** 그래프가 있는 분류인지 갈라야 하기 때문이다.
     분류로 걸러 버리면 스캔이 넘기지 못한 건수를 셀 수 없고, 선점한 뒤에 갈라내면 그래프가
     없는 Incident가 주기마다 선점·해제를 반복한다.
+
+    High 선차단이 있었던 SecOps는 분석 전에 상태가 바뀔 수 있다. 선차단이 실패로 끝나
+    FAILED가 된 건도 넣는다 — 빼면 호출 상태가 PENDING에 남고, 분석이 끝나지 않은 SecOps는
+    종료할 수 없어(workflows.resolve_incident) 그 Incident가 닫히지 않는다. (Issue #447)
     """
     return [
         (row.incident_id, row.category)
@@ -264,6 +268,7 @@ def list_pending_agent_analysis(
                         models.Incident.status.in_([
                             IncidentStatus.ACTION_IN_PROGRESS,
                             IncidentStatus.AWAITING_CLOSURE,
+                            IncidentStatus.FAILED,
                         ]),
                         select(models.ActionExecution.execution_id).where(
                             models.ActionExecution.incident_id == models.Incident.incident_id,
@@ -375,6 +380,93 @@ def set_agent_wait(db: Session, schedule: AgentWaitSchedule) -> bool:
             agent_wait_started_at=schedule.started_at,
             response_deadline_at=schedule.response_deadline_at,
         )
+    )
+    return result.rowcount == 1
+
+
+# --- 승인 대기 만료 (Issue #447) -------------------------------------------------
+
+# EC2 인스턴스 ARN의 사전 필터. services/aws/executor.parse_arn이 받는 형식
+# (arn:<partition>:ec2:<region>:<account>:instance/<id>)을 빠짐없이 포함하는 상위집합이다 —
+# 판정은 Workflow가 잠근 뒤 그 파서로 다시 한다.
+_EC2_INSTANCE_ARN_LIKE = "arn:%:ec2:%:%:instance/_%"
+
+
+def _user_approval_recorded():
+    """그 Incident에 관제자 승인으로 접수된 실행이 있다 — 승인 대기에 응답한 기록.
+
+    승인 대기는 Incident당 한 번이다. 기한은 set_agent_wait가 대기 미시작 상태에서만 쓰고,
+    그것을 부르는 분석 저장은 Incident마다 한 번이다(Terminal 호출 상태는 다시 Claim되지
+    않는다). 그래서 Incident의 USER_APPROVAL 실행이 곧 그 대기에 대한 응답이며, 서로 다른
+    경로가 찍은 시각(대기 시작·실행 생성)을 비교하지 않는다.
+    """
+    return (
+        select(models.ActionExecution.execution_id)
+        .where(
+            models.ActionExecution.incident_id == models.Incident.incident_id,
+            models.ActionExecution.trigger_source == TriggerSource.USER_APPROVAL,
+        )
+        .exists()
+    )
+
+
+def user_approval_recorded(db: Session, incident_id: str) -> bool:
+    """commit된 관제자 승인 실행이 있는가. 현재 Incident 상태와 무관한 기록이다."""
+    return db.execute(
+        select(models.Incident.incident_id).where(
+            models.Incident.incident_id == incident_id,
+            _user_approval_recorded(),
+        )
+    ).first() is not None
+
+
+def list_expired_agent_waits(db: Session, *, now: datetime) -> list[str]:
+    """응답 기한이 지난 Medium 승인 대기의 Incident 식별자 — 타임아웃 감시 1회의 대상.
+
+    식별자만 돌려준다 — 감시는 건마다 잠그고 커밋하며 도는데, 들고 있던 행은 그 사이에
+    낡는다(list_pending_agent_analysis와 같은 이유). 발동 여부는 Workflow가 Incident를
+    잠근 뒤 다시 판정한다(workflows.reserve_auto_isolation). 이 조회는 대상을 좁힐 뿐이다.
+
+    기한은 승인 대기 시작 때 저장된 response_deadline_at을 그대로 비교한다. 다시 늘리지
+    않으므로 재시작 뒤에도 지난 기한은 그대로 잡힌다.
+      - 초기 위험도 MEDIUM·AGENT_WAIT·AWAITING_APPROVAL만 — Low는 기한이 저장돼 있어도 뺀다.
+        타임아웃이 접수되면 response_mode가 바뀌어 다음 주기부터 빠진다.
+      - EC2 인스턴스 대상만 — 자동 격리는 EC2_ISOLATE 하나다. 다른 대상(OPEN_IP의 SG)을
+        넣으면 관제자가 처리할 때까지 주기마다 다시 잡혀 잠금·거절만 반복한다.
+      - 관제자 승인 실행이 있었던 건은 뺀다. 승인한 실행이 끝나고 다른 제안이 남으면 상태는
+        다시 AWAITING_APPROVAL이지만 그 대기는 이미 응답됐다.
+    """
+    return list(
+        db.execute(
+            select(models.Incident.incident_id)
+            .where(
+                models.Incident.initial_risk_level == RiskLevel.MEDIUM,
+                models.Incident.response_mode == ResponseMode.AGENT_WAIT,
+                models.Incident.status == IncidentStatus.AWAITING_APPROVAL,
+                models.Incident.response_deadline_at <= now,
+                models.Incident.subject_arn.like(_EC2_INSTANCE_ARN_LIKE),
+                ~_user_approval_recorded(),
+            )
+            .order_by(models.Incident.response_deadline_at, models.Incident.incident_id)
+        ).scalars()
+    )
+
+
+def update_response_mode(
+    db: Session,
+    incident_id: str,
+    *,
+    expected: ResponseMode,
+    next_mode: ResponseMode,
+) -> bool:
+    """현재 대응 경로를 expected일 때만 바꾼다. 승인 대기 시각은 건드리지 않는다."""
+    result = db.execute(
+        update(models.Incident)
+        .where(
+            models.Incident.incident_id == incident_id,
+            models.Incident.response_mode == expected,
+        )
+        .values(response_mode=next_mode)
     )
     return result.rowcount == 1
 

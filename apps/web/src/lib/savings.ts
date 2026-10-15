@@ -9,7 +9,7 @@
 // 없어(실측: `ce` = Pro 전용, `pricing` GetProducts 미지원) 로컬·CI 어디서도 검증할 수 없고,
 // 실 계정에서도 요청당 과금·24시간 지연·일 단위 입자라 시연 창에서는 빈 곡선이 된다.
 
-import type { AssetItem, IncidentResponse } from '@/types/api';
+import type { AiSavingsEstimate, AssetItem, IncidentResponse } from '@/types/api';
 
 export interface SavingsRow {
   /** 조치 대상 자산의 ARN — 자산 목록과 같은 축이라 카드에서 자산으로 넘어갈 수 있다. */
@@ -84,6 +84,47 @@ export function savingsSummary(
   // 계약이 소수 둘째 자리까지만 싣는 값이므로 **센트로 바꿔 정수로 더하고** 되돌린다.
   const cents = rows.reduce((sum, r) => sum + Math.round(r.amount * 100), 0);
   return { rows, total: cents / 100, unestimated };
+}
+
+export interface SavingsBreakdown {
+  /** 현재 스펙의 월 비용(USD) — 현재 단가 × 가정 시간. 막대 전체 길이다. */
+  current: number;
+  /** 조정 후 남는 월 비용(USD) — `current − saving`. */
+  remaining: number;
+  /** 월 절감 예상(USD) — 서버가 계산한 `amount` 그대로. 화면의 다른 금액 표기와 한 값이다. */
+  saving: number;
+  /** `saving / current`(0–1). 현재 비용이 0이면 0. */
+  ratio: number;
+}
+
+/**
+ * INC-002 절감 예상 막대의 분해 — "현재 월 비용 = 조정 후 비용 + 절감"으로 쪼갠다.
+ *
+ * 절감은 서버 `amount`를 그대로 쓰고 조정 후 비용을 **뺄셈으로** 얻는다. 목표 단가 × 시간을
+ * 따로 곱하면 반올림 경로가 서버와 달라 막대 옆 절감액이 금액 표기와 1센트씩 어긋날 수 있다.
+ * 금액이 없거나(`ESTIMATED` 아님) 수치가 깨졌거나 절감이 현재 비용을 넘으면(계약 위반) null —
+ * 그리지 않는다. 틀린 막대보다 막대가 없는 편이 낫다.
+ */
+export function savingsBreakdown(estimate: AiSavingsEstimate): SavingsBreakdown | null {
+  if (estimate.status !== 'ESTIMATED' || estimate.amount === null || estimate.basis === null) {
+    return null;
+  }
+  const rate = Number(estimate.basis.current_hourly_rate);
+  const hours = estimate.basis.assumptions.hours;
+  const saving = Number(estimate.amount);
+  if (![rate, hours, saving].every(Number.isFinite)) return null;
+
+  // 센트 정수로 계산한다 — savingsSummary와 같은 이유(부동소수 오차).
+  const currentCents = Math.round(rate * hours * 100);
+  const savingCents = Math.round(saving * 100);
+  if (savingCents < 0 || savingCents > currentCents) return null;
+
+  return {
+    current: currentCents / 100,
+    remaining: (currentCents - savingCents) / 100,
+    saving: savingCents / 100,
+    ratio: currentCents === 0 ? 0 : savingCents / currentCents,
+  };
 }
 
 /** `$12.34` 꼴. 통화는 계약이 USD 고정이라 기호를 상수로 둔다. */

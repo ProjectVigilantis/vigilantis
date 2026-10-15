@@ -514,13 +514,14 @@ def test_finops_rejects_analysis_result(model):
         model.model_validate(data)
 
 
-def test_finops_rejects_no_further_action_resolution():
+def test_finops_accepts_no_further_action_resolution():
     data = make_finops_incident(
         status="RESOLVED", recommendations=[], resolution="NO_FURTHER_ACTION",
         resolved_at="2026-08-12T09:01:03Z",
     )
-    with pytest.raises(ValidationError, match="SECOPS 전용"):
-        IncidentResponse.model_validate(data)
+    dto = IncidentResponse.model_validate(data)
+    assert dto.resolution.value == "NO_FURTHER_ACTION"
+    assert dto.analysis_result is None
 
 
 def test_resolution_note_requires_resolution():

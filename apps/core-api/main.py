@@ -5,10 +5,10 @@
 #   - 오류는 exceptions의 공통 봉투로, 접근 로그는 request_context 미들웨어가
 #     구조화 로그(logging_config)로 남긴다.
 #   - 실시간 전송(realtime.RealtimeManager)은 앱 수명주기에 묶어 기동·종료한다.
-#   - 스케줄러 셋을 같은 수명주기에 묶는다. 실시간 전송보다 늦게 열고 먼저 닫는다.
+#   - 스케줄러 넷을 같은 수명주기에 묶는다. 실시간 전송보다 늦게 열고 먼저 닫는다.
 #     수집→판정 스캔(services.scheduler)은 SCAN_ENABLED로, 접수된 조치 실행 디스패치·
 #     회수 스캔(dispatcher)과 AI 분석 대기 스캔(agent_dispatcher)은 DISPATCH_ENABLED를
-#     공유해 켜고 끈다 (Issue #232·#277·#285).
+#     Medium 승인 기한 감시와 공유해 켜고 끈다 (Issue #232·#277·#285·#447).
 #   - 모의 위협 파일 소비자는 MOCK_THREAT_INBOX_DIR 지정 시 독립 기동한다(#322).
 # ==============================================================================
 
@@ -49,6 +49,7 @@ from routers import assets as assets_router  # noqa: E402
 from routers import incidents as incidents_router  # noqa: E402
 from routers import metrics as metrics_router  # noqa: E402
 from routers import ws as ws_router  # noqa: E402
+from security.soar import start_timeout_watcher
 from services.scheduler import start_scheduler as start_scan_scheduler  # noqa: E402
 
 _http_logger = logging.getLogger("vigilantis.http")
@@ -60,7 +61,11 @@ _REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 def create_app() -> FastAPI:
     settings = get_settings()
-    setup_logging(settings.LOG_LEVEL)
+    setup_logging(
+        settings.LOG_LEVEL,
+        log_file_path=settings.LOG_FILE_PATH if settings.LOG_FILE_ENABLED else None,
+        backup_count=settings.LOG_FILE_BACKUP_COUNT,
+    )
 
     realtime = RealtimeManager(send_timeout_seconds=settings.WS_SEND_TIMEOUT_SECONDS)
 
@@ -83,6 +88,8 @@ def create_app() -> FastAPI:
             partial(dispatcher.start_dispatcher, realtime.publish),
             # AI 분석 대기 Incident 스캔·회수.
             partial(agent_dispatcher.start_agent_dispatcher, realtime.publish),
+            # AI 처리와 독립적으로 저장된 Medium 승인 기한을 감시한다.
+            partial(start_timeout_watcher, realtime.publish),
         )
         try:
             for start in starts:

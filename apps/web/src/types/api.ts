@@ -428,14 +428,20 @@ export interface IncidentListItem {
 }
 
 /**
- * 종료 처리 시 관제자가 남기는 판단 — **`JUSTIFIED` 1종이다.**
+ * 종료 처리 시 관제자가 남기는 판단. 추가 조치 없는 종료는 조치 성공을 뜻하지 않는다.
  * 모달의 다른 선택지 `과잉이었다`는 종료 값이 아니라 복구 실행으로 넘어가는 트리거라
  * 이 API에 도달하지 않는다(§4.6 · packages/schemas/api/incidents.py `ResolutionJudgement`).
  */
-export const RESOLUTION_JUDGEMENTS = ['JUSTIFIED'] as const;
+export const RESOLUTION_JUDGEMENTS = ['JUSTIFIED', 'NO_FURTHER_ACTION'] as const;
 export type ResolutionJudgement = (typeof RESOLUTION_JUDGEMENTS)[number];
 
+export type AnalysisResultStatus =
+  | 'PENDING' | 'IN_PROGRESS' | 'PROPOSALS_GENERATED' | 'NO_PROPOSAL'
+  | 'GUARDRAIL_REJECTED' | 'FAILED' | 'UNAVAILABLE';
+
 export interface IncidentResponse extends IncidentListItem {
+  /** 저장된 SECOPS 분석 결과. 종료나 제안 소진으로 바뀌지 않는다. */
+  analysis_result: { status: AnalysisResultStatus } | null;
   /** 분석 완료 시 정확히 3개, 분석 중·실패 시 빈 배열. */
   summary_lines: string[];
   evidence_ids: string[];
@@ -447,6 +453,7 @@ export interface IncidentResponse extends IncidentListItem {
    * 관제자 복구 접수로 재개되면 다시 null이 된다(ADR-0004).
    */
   resolution: ResolutionJudgement | null;
+  resolution_note: string | null;
   resolved_at: IsoDateTime | null;
 }
 
@@ -569,9 +576,80 @@ export interface SgExposureAxis {
   reason_code: string | null;
 }
 
+/**
+ * 시간 칸 하나의 자산 현황 — 그 회차에 판정 행이 남은 자산을 판정별로 센 값.
+ * `judged`는 아래 다섯 값의 합이다(서버 불변식) — 화면이 다시 더하지 않는다.
+ */
+export interface AssetStatusPoint {
+  at: IsoDateTime;
+  judged: number;
+  threat: number;
+  cost_candidate: number;
+  unused: number;
+  /** 정상·제외. */
+  skip: number;
+  /** verdict가 없는 판정 행 — 판정 대기·실패다. `skip`과 축이 달라 합치지 않는다. */
+  undecided: number;
+}
+
+/**
+ * 축 4. 판정 대상 자산(EC2·SG·EBS)의 판정별 건수 추이. 원천은 축 2와 같은 회차별 Rule 판정
+ * 이력이다 — 자산 행은 회차마다 덮어써 이력이 없어, NACL 등 판정 비대상은 이 축에 없다.
+ */
+export interface AssetStatusAxis {
+  status: AxisStatus;
+  points: AssetStatusPoint[];
+  reason_code: string | null;
+}
+
+/**
+ * 시간 칸 하나의 자산 수 — 그 칸의 수집 회차가 **관측한** 유형별 건수(리전 합산).
+ * `counts`에 없는 유형은 그 칸에서 관측하지 못한 것이다(0건과 다르다). `total`은 `counts`의 합(서버 불변식).
+ */
+export interface AssetInventoryPoint {
+  at: IsoDateTime;
+  total: number;
+  counts: Partial<Record<AssetType, number>>;
+}
+
+/**
+ * 축 5. 전 유형의 자산이 회차마다 몇 건 있었나 — "내 자산이 늘었나 줄었나"(2026-09-29).
+ * 원천은 수집 회차가 마감 때 남기는 유형별 건수라, 그 기록이 생기기 전 회차는 점이 없다.
+ */
+export interface AssetInventoryAxis {
+  status: AxisStatus;
+  points: AssetInventoryPoint[];
+  reason_code: string | null;
+}
+
+/** 위협 이벤트 유형 — 인시던트 `threat_context.event_type`과 같은 값이다. */
+export type ThreatEventKind = 'OPEN_IP' | 'SSH_BRUTE_FORCE';
+
+/**
+ * 축 6 한 칸에 **발생한** 위협 이벤트 수. 0건 유형은 키가 없다. `total`은 `counts`의 합(서버 불변식).
+ */
+export interface ThreatEventPoint {
+  at: IsoDateTime;
+  total: number;
+  counts: Partial<Record<ThreatEventKind, number>>;
+}
+
+/**
+ * 축 6. 위협 이벤트 발생 추이(2026-09-30). 축 4 `threat`(판정 상태량)와 겹쳐 「전체 위협 추이」로 그린다.
+ * **다른 축과 달리 점이 없는 칸은 0건이다** — 이벤트는 들어올 때 기록되므로 "못 본 칸"이 없다.
+ */
+export interface ThreatEventAxis {
+  status: AxisStatus;
+  points: ThreatEventPoint[];
+  reason_code: string | null;
+}
+
 export interface MetricsTimeseriesResponse {
   generated_at: IsoDateTime;
   cpu: CpuAxis;
   network: NetworkAxis;
   sg_exposure: SgExposureAxis;
+  asset_status: AssetStatusAxis;
+  asset_inventory: AssetInventoryAxis;
+  threat_events: ThreatEventAxis;
 }

@@ -1,6 +1,6 @@
 # E2E 시연 시나리오 설계서 (1차)
 
-> **담당**: 김승철 (QA & Scenario · 2026-09-16 박지현에게서 인수) · **이슈**: #132 · **작성**: 2026-08-25 · **현황 갱신**: 2026-08-31 (김세혁 — §대조 필요 목록 1·2번 상태·원천 재지정 / 박지현 — 본문 🔶 잔여 정리·번호 표기) · 2026-09-01 (박지현 — §대조 1번 ② 해소 반영) · 2026-09-02 (박지현 — T1 1단계 골든 실경로 실측·기재, §대조 8·9번 신설) · 2026-09-04 (박지현 — 골든 EBS 편입 반영, §자산 화면의 분포 숫자를 재현 명령으로 대체) · 2026-09-08 (김세혁 — §T1 7·8·9번 상태 축 정정, §대조 3번 분리·9번 재서술) · 2026-09-09 (박지현 — §대조 8번 해소 반영, 골든 커버리지 표에 관계 축 추가) · 2026-09-15 (김세혁 — §대조 3번 ⓑ 실측 해소, §T1 7번 행·§T2 관통 실측 반영) · 2026-09-17 (김승철 — FE mock 계층 제거(PR #351) 반영·T1 2번 대체 컷 없음 기재(#352), §대조 1·9번 해소 반영, 토폴로지 색 원천 정정, §테스트 대응을 흐름 테스트 이전(PR #358) 기준으로) · 2026-09-17 (김승철 — §10/1 컷 시트 신설(LocalStack 시드 실측), T2 단계표 1·8번 화면 문구·자산 조인을 시연 기준으로) · 2026-09-17 (김승철 — §10/1 컷 시트 T1-3 idle-dev 모델 호출 실측 반영) · 2026-09-23 (김승철 — §결정 기록 ⑩ R10 사전 실측 · ④ 준비 시간 실측 · WS 화면 관찰 반영 · ⑦ 근거를 PR #399 머지 기준으로 정정) · 2026-09-23 (김세혁 — §결정 기록 ⑪ 브라우저 관통 실측 · T1-9 확인점 · §공통 프리셋 칩 행 · ⑥ 화면 머지 반영)
+> **담당**: 김승철 (QA & Scenario · 2026-09-16 박지현에게서 인수) · **이슈**: #132 · **작성**: 2026-08-25 · **현황 갱신**: 2026-08-31 (김세혁 — §대조 필요 목록 1·2번 상태·원천 재지정 / 박지현 — 본문 🔶 잔여 정리·번호 표기) · 2026-09-01 (박지현 — §대조 1번 ② 해소 반영) · 2026-09-02 (박지현 — T1 1단계 골든 실경로 실측·기재, §대조 8·9번 신설) · 2026-09-04 (박지현 — 골든 EBS 편입 반영, §자산 화면의 분포 숫자를 재현 명령으로 대체) · 2026-09-08 (김세혁 — §T1 7·8·9번 상태 축 정정, §대조 3번 분리·9번 재서술) · 2026-09-09 (박지현 — §대조 8번 해소 반영, 골든 커버리지 표에 관계 축 추가) · 2026-09-15 (김세혁 — §대조 3번 ⓑ 실측 해소, §T1 7번 행·§T2 관통 실측 반영) · 2026-09-17 (김승철 — FE mock 계층 제거(PR #351) 반영·T1 2번 대체 컷 없음 기재(#352), §대조 1·9번 해소 반영, 토폴로지 색 원천 정정, §테스트 대응을 흐름 테스트 이전(PR #358) 기준으로) · 2026-09-17 (김승철 — §10/1 컷 시트 신설(LocalStack 시드 실측), T2 단계표 1·8번 화면 문구·자산 조인을 시연 기준으로) · 2026-09-17 (김승철 — §10/1 컷 시트 T1-3 idle-dev 모델 호출 실측 반영) · 2026-09-23 (김승철 — §결정 기록 ⑩ R10 사전 실측 · ④ 준비 시간 실측 · WS 화면 관찰 반영 · ⑦ 근거를 PR #399 머지 기준으로 정정) · 2026-09-23 (김세혁 — §결정 기록 ⑪ 브라우저 관통 실측 · T1-9 확인점 · §공통 프리셋 칩 행 · ⑥ 화면 머지 반영) · 2026-10-07 (김승철 — §T3·T4 P2 트랙 2차 설계 신설, §테스트 대응에 T3·T4 확장 요건 추가, 가짜 AWS 가 `ec2` 만 모델링한다는 사실을 테스트 가드로 고정)
 > **목적**: 중간 발표(10/1) MVP 시연 대본의 원천이자 `tests/test_e2e_scenario.py`·`apps/core-api/tests/test_e2e_flow.py`의 명세.
 > **범위 기준**: `docs/PROJECT_STATUS.md`(SSOT)를 따른다. 충돌하면 SSOT가 이긴다.
 
@@ -24,7 +24,7 @@
 | 축 | 왜 적는가 |
 | --- | --- |
 | 화면(FE) | 구현된 화면 범위와 대조 |
-| API | `POST /actions/execute` 6종 상태 중 무엇이 언제 나오는가 |
+| API | `POST /actions/execute` 7종 상태 중 무엇이 언제 나오는가 |
 | WS 이벤트 | 실시간 갱신 시점 |
 | 입력 출처 | Golden Dataset 케이스 ID — 시연 재현성 |
 | 실패 시 대체 컷 | 그 단계가 안 되면 무엇을 보여줄지 |
@@ -54,16 +54,19 @@
 
 ## 공통 축 — 두 트랙이 함께 쓰는 계약
 
-### 실행 상태 6종 (`ExecutionStatus`)
+### 실행 상태 7종 (`ExecutionStatus`)
 
 ```
 IN_PROGRESS → SUCCESS
             → FAILED
+            → UNVERIFIED
             → ROLLBACK_INITIATED → ROLLED_BACK
                                  → ROLLBACK_FAILED
 ```
 
-뒤 2종은 **복구의 최종 결과**이며 원본 Execution에만 기록된다(SSOT §API 계약).
+`ROLLED_BACK`·`ROLLBACK_FAILED` 2종은 **복구의 최종 결과**이며 원본 Execution에만 기록된다(SSOT §API 계약).
+
+`UNVERIFIED`는 **결과 확인 불가**다 — AWS 조회 실패로 종료 판정을 내리지 못한 채 재시도를 소진한 자리다(FE 합의 확장 · Issue #249). 종료 상태이고 **자동 원복하지 않는다**: 자산이 바뀌었을 수 있으나 성공으로도 실패로도 확정하지 않고 관제자 확인으로 넘긴다. 원본 실행 전용이라 자식(원복) 실행에는 찍히지 않는다. **시연 대본에는 나오지 않는다** — 두 트랙 모두 조회가 되는 경로만 밟기 때문이며, 상태를 6종으로 적으면 이 칸이 화면에 떴을 때 대본에 없는 값이 된다.
 
 ### 실행 사유 4종 (`TriggerSource`) — 시연에서 2종이 나온다
 
@@ -99,24 +102,24 @@ IN_PROGRESS → SUCCESS
 | # | 단계 | 화면(FE) | API | WS 이벤트 | 실패 시 대체 컷 |
 | --- | --- | --- | --- | --- | --- |
 | 1 | 수집·판정 | 자산 목록에 **최적화 후보** 배지 | `GET /api/v1/assets` — **골든 실데이터로 응답한다**(아래 §자산 화면) | — | 시드 스크립트 재실행 후 목록만 |
-| 2 | Incident 생성 | **INC-004 자산 인시던트** 카드 그리드에 신규 카드, `status: ANALYZING` | `GET /api/v1/incidents` | `INCIDENT_CREATED` | **대체 컷 없음**(FE mock 계층 제거, 2026-09-17 · PR #351) |
+| 2 | Incident 생성 | **자산 관제(`/assets`) 「인시던트」 탭**(구 INC-004) 카드 그리드에 신규 카드, `status: ANALYZING` | `GET /api/v1/incidents` | `INCIDENT_CREATED` | **대체 컷 없음**(FE mock 계층 제거, 2026-09-17 · PR #351) |
 | 3 | AI 판단 근거 + 추천 | 상세에 **판단 근거** 3줄 + 추천 `RUNBOOK_EC2_RIGHTSIZING` | `GET /api/v1/incidents/{id}` | `INCIDENT_UPDATED` | 미리 저장한 근거 텍스트 표시 |
 | 4 | 가드레일 4단계 | — (화면 표시 없음) · 통과 신호는 `status: AWAITING_APPROVAL`로 실행 버튼이 열리는 것 | (내부) | `INCIDENT_UPDATED` | 슬라이드 컷으로 분리 |
 | 5 | 관제자 승인 | **INC-004 목록에서 「승인 대기」를 켠 뒤 [조치 실행] → ACT-001 [실행]**(승인 1건 · 실행 클릭 2회) | `POST /api/v1/actions/execute`<br>**`202 Accepted`** → `IN_PROGRESS`<br>*(같은 `idempotency_key` 재요청은 `200 OK` 멱등 재생)* | 별도 발행 없음 — HTTP 접수 응답으로 확인 | — |
 | 6 | 실행 | 진행 표시 | `ec2.modify_instance_attribute` | 시작 이벤트 없음 — 판정 결과 확정 시 발행 | LocalStack 재기동 후 재시도 |
 | 7 | **Status Check 실패** | 실패 표시 | `get_waiter` 2/2 실패 — 6번 실행 주기가 끝난 뒤 대상 인스턴스를 **`stop_instances`로 멈춰** 만든다(§대조 필요 3번 ⓑ) | `EXECUTION_UPDATED` **Execution `ROLLBACK_INITIATED`**<br>`INCIDENT_UPDATED` **Incident `ACTION_IN_PROGRESS`** | **핵심 컷** — 주입 창(실행 주기 뒤·판정 주기 전)을 놓치면 판정이 `OK`로 끝나 원복이 일어나지 않는다 |
-| 8 | **자동 원복 발동** | **복구 중** | `RUNBOOK_EC2_REVERT_SIZE` **자식 실행 접수**<br>`trigger_source: AUTO_ON_FAILURE` · `parent_execution_id` = 원본<br>*(상태 전이가 아니라 새 실행 레코드다)* | **없다** — 접수는 발행하지 않는다(`dispatcher.py:335-337`). 화면의 "복구 중"은 **7번 이벤트로 이미 그려져 있다** | 접수만 화면으로 설명 |
+| 8 | **자동 원복 발동** | **복구 중** | `RUNBOOK_EC2_REVERT_SIZE` **자식 실행 접수**<br>`trigger_source: AUTO_ON_FAILURE` · `parent_execution_id` = 원본<br>*(상태 전이가 아니라 새 실행 레코드다)* | **없다** — 접수는 발행하지 않는다(`dispatcher._initiate_rollback_one()` — `initiation.execution_id`가 있으면 집계만 올리고 돌아간다). 화면의 "복구 중"은 **7번 이벤트로 이미 그려져 있다** | 접수만 화면으로 설명 |
 | 9 | 원복 완료 | **AST-001로 이동해** 인스턴스 유형 복귀 확인 | 자식 `SUCCESS` → 원본 Execution `ROLLED_BACK`(함께 확정) | `EXECUTION_UPDATED` **자식 `SUCCESS`**<br>`INCIDENT_UPDATED` **Incident `AWAITING_CLOSURE`** | 관제자 [종료 판단]이 남는다 |
 
 ### 7·8·9번의 상태값은 어느 축인가
 
 **어느 값이 무엇인지는 위 단계표가 이미 적는다.** 여기서는 그 값이 **왜 그래야 하는지**만 코드 좌표와 함께 남긴다 — 축을 다시 뭉개는 서술이 들어오는 것을 막는 것은 표가 아니라 아래 세 문단이다.
 
-**7번 Incident가 `FAILED`가 아닌 이유**: `_incident_status_after()`는 실행의 성패가 아니라 **그 인시던트에 남은 것**으로 목적 상태를 가른다(`workflows.py:843`). `ROLLBACK_INITIATED`가 비종료 상태라(`packages/schemas/executions.py:28 EXECUTION_NON_TERMINAL_STATUSES`) *"진행 중 실행이 있다"* 가 되어 `ACTION_IN_PROGRESS`다. **되돌릴 것이 남았는데 `FAILED`로 적으면 화면이 복구 중인 조치를 '진행 불가'로 그린다.**
+**7번 Incident가 `FAILED`가 아닌 이유**: `_incident_status_after()`는 실행의 성패가 아니라 **그 인시던트에 남은 것**으로 목적 상태를 가른다(`workflows._incident_status_after()`). `ROLLBACK_INITIATED`가 비종료 상태라(`packages/schemas/executions.py` `EXECUTION_NON_TERMINAL_STATUSES`) *"진행 중 실행이 있다"* 가 되어 `ACTION_IN_PROGRESS`다. **되돌릴 것이 남았는데 `FAILED`로 적으면 화면이 복구 중인 조치를 '진행 불가'로 그린다.**
 
-**8번이 상태 전이가 아닌 이유**: #241은 원본을 옮기지 않고 **`parent_execution_id`로 묶인 자식 행을 새로 만든다**(`workflows.py:1146 initiate_auto_rollback()`). 원본과 자식을 한 축으로 적으면 7번과 8번이 같은 값(`ROLLBACK_INITIATED`)을 두 번 말하게 되어 **무엇이 새로 일어났는지가 사라진다.** **이 시점에 원본과 Incident는 그대로다** — 원본은 `ROLLBACK_INITIATED`, Incident는 `ACTION_IN_PROGRESS`에 머문다(단계표 8번 행은 새로 생기는 자식만 적는다).
+**8번이 상태 전이가 아닌 이유**: #241은 원본을 옮기지 않고 **`parent_execution_id`로 묶인 자식 행을 새로 만든다**(`workflows.initiate_auto_rollback()`). 원본과 자식을 한 축으로 적으면 7번과 8번이 같은 값(`ROLLBACK_INITIATED`)을 두 번 말하게 되어 **무엇이 새로 일어났는지가 사라진다.** **이 시점에 원본과 Incident는 그대로다** — 원본은 `ROLLBACK_INITIATED`, Incident는 `ACTION_IN_PROGRESS`에 머문다(단계표 8번 행은 새로 생기는 자식만 적는다).
 
-**9번이 두 실행을 함께 확정하는 이유**: `_ORIGIN_STATUS_AFTER_ROLLBACK`(`workflows.py:895`)이 자식 `SUCCESS` → 원본 `ROLLED_BACK`으로 잇는다. 원본이 `ROLLBACK_INITIATED`에 남으면 비종료라 인시던트가 영원히 진행 중이 된다.
+**9번이 두 실행을 함께 확정하는 이유**: `workflows._ORIGIN_STATUS_AFTER_ROLLBACK`이 자식 `SUCCESS` → 원본 `ROLLED_BACK`으로 잇는다. 원본이 `ROLLBACK_INITIATED`에 남으면 비종료라 인시던트가 영원히 진행 중이 된다.
 
 ### 이 트랙이 증명하는 것
 
@@ -162,7 +165,7 @@ uv run python scripts/load_golden_assets.py --verify
 
 FE는 `NEXT_PUBLIC_API_BASE_URL`이 가리키는 백엔드만 본다(`apps/web/src/lib/api/client.ts` `apiBaseUrl()` — 미설정 시 `http://localhost:8000` = compose `api` 서비스(core-api 앱)). **FE mock 계층은 없다**(PR #351) — 백엔드가 떠 있지 않으면 화면은 조회 오류다. 기동 순서는 루트 `README.md` §로컬 실행이다.
 
-경계가 깨지지 않는지는 `apps/core-api/tests/test_golden_assets_api.py` **6건**이 CI에서 지킨다(판정 축 3 + 토폴로지 축 3 — 자산 유형·관계 유형·끊긴 엣지).
+경계가 깨지지 않는지는 `apps/core-api/tests/test_golden_assets_api.py` **12건**이 CI에서 지킨다 — 골든 적재·조회 8건(매달린/어긋난 ARN 0건 · 회차 스냅샷 미생성 · API 도달 · 판정 정답 대조 · 판정·Skip 사유 전수 · 자산 유형 전수 · 관계 유형 전수 · 관계가 제공되는 자산을 가리키는지)과 시드 바인딩 4건(식별자만 바뀌는지 · 정답 키 재작성 · 지난 부팅의 낡은 바인딩 검출 · 수집기와 같은 방식의 ARN 조립).
 
 ~~**🔶 아직 mock이 필요한 것**~~ → **없다**(2026-09-17 · PR #351 FE mock 계층 제거)
 - ~~**2단계 이후**(Incident 카드·AI 3줄·추천)는 그대로 mock이다~~ ✅ 실 API다 — Incident를 만드는 판정→Intake 배선이 섰다(#306 / PR #320 · §대조 필요 9번 해소).
@@ -177,6 +180,8 @@ FE는 `NEXT_PUBLIC_API_BASE_URL`이 가리키는 백엔드만 본다(`apps/web/s
 **입력**: Golden `secops/input/evt_ssh_bruteforce_001.json` **S3**
 `SSH_BRUTE_FORCE` · `source_ip 203.0.113.10` · `120회 / 300초` · 대상 `i-0a1b2c3d4e5f00001`
 
+> **이 트랙의 위협은 모의(mock)다 — 실제 공격을 만들지 않는다.** `scripts/inject_mock_threat.py`는 골든 입력을 정형화해 초기 위험 판정까지만 돌리고 **AWS를 부르지 않는다**(그래서 LocalStack·자격증명도 필요 없다). `--prepare-inbox`는 모의 관측 파일만 준비하고, 앱이 그 폴더를 읽어 정형화·판정·Intake를 호출한다(#322). `source_ip 203.0.113.10`도 **RFC 5737 문서용 예약 대역**(`203.0.113.0/24`)이라 실재하는 공격자 주소가 아니다. 막는 쪽(NACL 차단)은 실제로 AWS를 바꾸지만, **주입하는 쪽은 끝까지 모의다.**
+
 **입력 선택 근거**: `RUNBOOK_NACL_ADD_DENY`의 `cidr_block`은 *"차단할 악성 IP 대역"* 이고, 명세서 `[SecOps-02]` 안전장치가 **"특정 IP/32 단일 주소만 핀셋 지정"** 을 요구한다. S3의 `source_ip`는 /32 단일 주소라 그대로 들어간다. `parameters_schema`에 포트 필드가 없어 "22번만 골라 막기"는 불가능하다.
 
 > `evt_open_ip_001.json`(S1)을 쓰면 `cidr_block`이 `0.0.0.0/0`이 되어 **서브넷 인바운드가 전면 차단**된다. 명세서의 트리거 조건도 *"특정 IP의 반복적 브루트포스 공격 감지"* 로 OPEN_IP 설정 오류가 아니다.
@@ -187,7 +192,7 @@ FE는 `NEXT_PUBLIC_API_BASE_URL`이 가리키는 백엔드만 본다(`apps/web/s
 
 | # | 단계 | 화면(FE) | API | WS 이벤트 | 실패 시 대체 컷 |
 | --- | --- | --- | --- | --- | --- |
-| 1 | 위협 주입 | INC-001에 **SecOps 카드** 신규 · 토폴로지에서 대상 옆 전체개방 SG가 **빨강**(주입 전부터 — §10/1 컷 시트) | (mock 주입) | `INCIDENT_CREATED` | 토폴로지 정적 이미지 |
+| 1 | **모의** 위협 주입 | INC-001에 **SecOps 카드** 신규 · 토폴로지에서 대상 옆 전체개방 SG가 **빨강**(주입 전부터 — §10/1 컷 시트) | (mock 주입) | `INCIDENT_CREATED` | 토폴로지 정적 이미지 |
 | 2 | 위험도 판정 | 위험도 배지 | `GET /api/v1/incidents/{id}`<br>*(배지는 실 판정값 — 위협 접수가 `evaluate_threat()`를 부른다 · #322 · 아래 관통 실측 `HIGH`)* | `INCIDENT_UPDATED` | — |
 | 3 | 대응 경로 진입 | "선제 차단" 경로 표시 | `response_mode: PRE_MITIGATION_0_5S`<br>*(Incident 축 — 실행 축 아님)* | `INCIDENT_UPDATED` | 경로 표시 없이 4번으로 |
 | 4 | 가드레일 4단계 | — (화면 표시 없음) | (내부) | — | 슬라이드 컷으로 분리 |
@@ -298,7 +303,7 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 | 2 | Incident 생성 | ✅ 실경로 · **사전 준비(무대 전)** — 스캔 1회로 생성 실측 | 카드 3건 — §사전 준비 | **무대 전에 드러난다** → 사전 준비를 처음부터(대체 컷은 만들지 않는다 — 결정 ①) |
 | 3 | AI 판단 근거 + 추천 | ✅ 실경로 · **사전 준비(무대 전)** — idle-dev 실측(§결정 기록 ④): 추천 `RUNBOOK_EC2_RIGHTSIZING` m5.2xlarge → m5.large · 승인 대기 도달 · 약 16초 | `OPENAI_API_KEY` · `AGENT_DISPATCH_INTERVAL_SECONDS` | 카드가 **진행 불가**(`FAILED`)이거나 **분석 중**에서 멈춰 있으면 키부터 확인 → 사전 준비를 처음부터(§사전 준비 경고) |
 | 4 | 가드레일 4단계 | ✅ 실경로 | — | 슬라이드 컷 |
-| 5 | 관제자 승인 | ✅ 실경로 · **무대 시작** | 순서대로 셋. **① 스캔 시점 확인** — `docker compose logs api \| Select-String -SimpleMatch 'interval[0:05:00]' \| Select-Object -Last 1`의 `next run at:` 시각(**UTC** — 한국 시각 +9시간)이 지금부터 20초 안이면 기다렸다 시작한다. 필터가 필요한 이유: 실행·AI 분석 주기도 `next run at`을 1초에 1줄꼴로 찍어, 필터 없이 마지막 줄을 보면 거의 항상 몇 초 뒤가 보인다. 원복(약 16초) 도중 스캔이 돌면 AST-001이 중간값(`m5.large · stopped`)으로 다음 스캔까지 최대 300초 남는다(#349 실측). **② 헬퍼 띄우기** — 호스트 셸에서 `$env:AWS_ENDPOINT_URL='http://localhost:4566'; uv run python scripts/inject_status_check_failure.py`(PR #373)를 실행하고 `대기 중` 출력을 확인한다. **헬퍼가 `중단`을 출력하면 누르지 않고 출력의 안내를 따른다.** **③ 승인 1건 · 실행 클릭 2회** — **자산 인시던트(INC-004)에서 「승인 대기」 프리셋을 켠 뒤** idle-dev 카드의 **[조치 실행] → ACT-001 [실행]**을 누른다. 기본 목록에는 실행 버튼이 없다(FinOps 카드는 보안 인시던트 INC-001이 아니라 이 화면에 뜬다). **실행 접수 뒤 INC-002 상세로 자동 이동하며 6–8번은 그 상세의 실행 패널에서 본다** | — |
+| 5 | 관제자 승인 | ✅ 실경로 · **무대 시작** | 순서대로 셋. **① 스캔 시점 확인** — `docker compose logs api \| Select-String -SimpleMatch 'interval[0:05:00]' \| Select-Object -Last 1`의 `next run at:` 시각(**UTC** — 한국 시각 +9시간)이 지금부터 20초 안이면 기다렸다 시작한다. 필터가 필요한 이유: 실행·AI 분석 주기도 `next run at`을 1초에 1줄꼴로 찍어, 필터 없이 마지막 줄을 보면 거의 항상 몇 초 뒤가 보인다. 원복(약 16초) 도중 스캔이 돌면 AST-001이 중간값(`m5.large · stopped`)으로 다음 스캔까지 최대 300초 남는다(#349 실측). **② 헬퍼 띄우기** — 호스트 셸에서 `$env:AWS_ENDPOINT_URL='http://localhost:4566'; uv run python scripts/inject_status_check_failure.py`(PR #373)를 실행하고 `대기 중` 출력을 확인한다. **헬퍼가 `중단`을 출력하면 누르지 않고 출력의 안내를 따른다.** **③ 승인 1건 · 실행 클릭 2회** — **자산 관제(`/assets`) 「인시던트」 탭(구 INC-004)에서 「승인 대기」 프리셋을 켠 뒤** idle-dev 카드의 **[조치 실행] → ACT-001 [실행]**을 누른다. 기본 목록에는 실행 버튼이 없다(FinOps 카드는 보안 관제가 아니라 이 탭에 뜬다). **실행 접수 뒤 INC-002 상세로 자동 이동하며 6–8번은 그 상세의 실행 패널에서 본다** | — |
 | 6 | 실행 | ✅ 실경로(PR #346) | `DISPATCH_INTERVAL_SECONDS` | **사전 준비를 처음부터** — LocalStack 재기동은 자원 ID가 새로 생겨 이 Incident의 대상이 사라진다 |
 | 7 | Status Check 실패 | ✅ 실경로 · 헬퍼(PR #373) | **사람 조작 없음** — 5번에서 띄운 헬퍼가 축소된 유형으로 기동되는 순간 멈춘다(`주입: stop_instances` 출력). 헬퍼가 필요한 이유: 판정 대기 동안 실행 상태는 `IN_PROGRESS`이고 이벤트도 나가지 않아 사람이 창을 맞출 수 없다. **7번에서 띄우면 늦다** — 이미 유형이 바뀌었거나 정지 구간이라 헬퍼가 주입 없이 끝나고 실행이 `SUCCESS`로 닫힌다 | 창을 놓치면 실행이 `SUCCESS`로 닫힌다 → 상세 화면 실행 항목의 **[이전 스펙 복원]**(`RUNBOOK_EC2_REVERT_SIZE` · 관제자 승인)으로 되돌린다. 자동 발동 장면은 빠지지만 같은 확인 화면(9번)까지 간다. **시드 재실행은 줄어든 유형을 되돌리지 않는다**(이름으로 찾아 건너뛴다) |
 | 8 | 자동 원복 발동 | ✅ 실경로(PR #346) | 사람 조작 없음 | 7번 "막히면"과 같다 |
@@ -312,7 +317,7 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 | --- | --- | --- | --- | --- |
 | 1 | 위협 주입 | ✅ 실경로(§T2 관통 실측) · **"붉은 노드" 문구를 바꾼다** | `MOCK_THREAT_INBOX_DIR` · 주입 명령에 `--target-arn`(seed-idle). **토폴로지 색은 자산 판정에서 온다** — 빨강은 대상 옆 SG이고 **주입 전부터** 빨갛다. 주입이 새로 만드는 것은 INC-001의 SecOps 카드다 | 토폴로지 정적 이미지 |
 | 2 | 위험도 판정 | ✅ 실경로 — 초기 `HIGH` 실측 | — | — |
-| 3 | 대응 경로 진입 | ✅ 실경로 — `PRE_MITIGATION_0_5S` 실측 · INC-001 카드의 **선제 차단됨** 배지로 표시(`apps/web/src/components/incidents/incident-card.tsx`) | — | 경로 표시 없이 4번으로 |
+| 3 | 대응 경로 진입 | ✅ 실경로 — `PRE_MITIGATION_0_5S` 실측 · 보안 관제(`/security`) 「인시던트」 탭 카드(구 INC-001)의 **선제 차단됨** 배지로 표시(`apps/web/src/components/incidents/incident-card.tsx`) | — | 경로 표시 없이 4번으로 |
 | 4 | 가드레일 4단계 | ✅ 실경로 | 실 모델 호출(SecOps 그래프) | 슬라이드 컷 |
 | 5 | 관제자 승인 → 차단 | ✅ 실경로 | **INC-001 목록 카드에서 INC-002 상세로 이동 → [승인하고 차단] → ACT-001 [실행]**(첫 승인 · 실행 클릭 2회) · 시드 NACL 규칙 100 `203.0.113.10/32` | — |
 | 6 | 관제자 확인 | ✅ 실경로 | **같은 INC-002 상세**에서 판단 근거를 읽는다. #389의 SecOps 프롬프트 변경으로 과거 실측과 문구가 달라질 수 있어 9/29 리허설에서 다시 확인한다 | — |
@@ -324,7 +329,7 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 | 항목 | 10/1 판정 | 막히면 |
 | --- | --- | --- |
 | WS 실시간 갱신(§대조 6번) | 🔶 **실배달 확인은 9/29(화) 리허설 사전 준비**로 확정(김세혁 9/22 리뷰 승인). 코드 경로는 `apps/web/src/components/realtime-provider.tsx` → `/api/v1/ws`. 카드가 새로고침 없이 승인 대기로 바뀌는지 확인·기록은 김승철, FE 수정 담당은 김세혁 **· 2026-09-22 결정 ⑨ 자동 실측에서 서버 이벤트 23건 직접 수신(연결 표식 1건은 별도) 확인 — 화면 확인은 아니어서 9/29 정식 확인은 유지한다.** **2026-09-23 결정 ⑩ 사람 조작 실측에서 새로고침 없이 T1 원복 문구 · T2 카드 생성 · 차단·해제 문구가 화면에 나타났다 — 9/29 정식 확인은 유지한다.** 같은 날 결정 ⑪ 브라우저 관통 실측에서도 T2 카드가 새로고침 없이 **분석 중 → 승인 대기**로 바뀌는 것을 화면에서 봤다. | **리허설에서 실배달이 실패하면 FE를 고치지 않고 새로고침 컷으로 확정한다.** 대본의 동작 하나가 늘 뿐 흐름은 같다 |
-| 목록 프리셋 칩 — T2 카드는 「승인 대기」 칩에 세지 않는다 | ✅ **의도된 집계 규칙이다(결함 아님).** 2026-09-23 결정 ⑪에서 INC-001의 T2 카드 배지가 「승인 대기」인데 「승인 대기」 칩이 `0`으로 보였다. 원인은 갱신이 아니라 집계다 — 프리셋별로 목록을 거르는 `byPreset()`(`apps/web/src/lib/incident-filter.ts`)은 「승인 대기」 칩에 **선제차단이 아닌** 승인 대기 건만 세고, 선제차단 건(`response_mode`(Incident의 위험 대응 경로)가 `PRE_MITIGATION_0_5S`·`TIMEOUT_ISOLATION_1M`)은 「선제차단」 칩으로 보낸다. T2 카드는 `PRE_MITIGATION_0_5S`라 「선제차단」 칩에 세진다. 칩 숫자는 그 화면에 있는 다른 Incident에 따라 달라지므로 대본에 숫자를 적지 않는다. 이 관찰로 WS 갱신 결함을 입증할 수는 없다(카드와 칩은 같은 목록에서 만들어진다 — `incident-list-page.tsx`) | **칩을 가리키지 않고 카드만 짚는다.** 질문이 나오면 "이미 선제 차단된 건은 「선제차단」 큐에서 따로 본다"로 답한다 |
+| 목록 프리셋 칩 — T2 카드는 「승인 대기」 칩에 세지 않는다 | ✅ **의도된 집계 규칙이다(결함 아님).** 2026-09-23 결정 ⑪에서 INC-001의 T2 카드 배지가 「승인 대기」인데 「승인 대기」 칩이 `0`으로 보였다. 원인은 갱신이 아니라 집계다 — 프리셋별로 목록을 거르는 `byPreset()`(`apps/web/src/lib/incident-filter.ts`)은 「승인 대기」 칩에 **선제차단이 아닌** 승인 대기 건만 세고, 선제차단 건(`response_mode`(Incident의 위험 대응 경로)가 `PRE_MITIGATION_0_5S`·`TIMEOUT_ISOLATION_1M`)은 「선제차단」 칩으로 보낸다. T2 카드는 `PRE_MITIGATION_0_5S`라 「선제차단」 칩에 세진다. 칩 숫자는 그 화면에 있는 다른 Incident에 따라 달라지므로 대본에 숫자를 적지 않는다. 이 관찰로 WS 갱신 결함을 입증할 수는 없다(카드와 칩은 같은 목록에서 만들어진다 — `apps/web/src/components/incidents/incidents-view.tsx`. 2026-09-23 결정 ⑪ 당시의 `incident-list-page.tsx`는 그 뒤 삭제됐다) | **칩을 가리키지 않고 카드만 짚는다.** 질문이 나오면 "이미 선제 차단된 건은 「선제차단」 큐에서 따로 본다"로 답한다 |
 | 조치별 절감 예상(#347 · PR #361) | **9/23(수) 확정본의 대본에는 넣지 않는다.** FE 표기는 자산 관제(AST-001)의 「절감 예상(AI 추정)」 카드로 생겼지만(PR #387), T1 무대(INC-004 → INC-002)에는 없다. 서버 값은 붙는다(2026-09-17 실측 idle-dev 월 $258.42 · 단가가 모델 지식 기반 추정이라 호출마다 달라질 수 있다 · §결정 기록 ④). AI 추정값 ↔ 서버 파생 사실값 구분(#347 · 김세혁)이 9/28(월) 컷에 서면 T1-9 뒤 AST-001에서 한 줄로 보여줄지 그때 정한다 | — |
 
 ### 반복 — Connect Day 하루 2세션
@@ -363,7 +368,7 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 | #385 · #384 | 각각 모의 로그 익명화 검사·README 정리. 기존 S3 골든 주입 명령과 컷 동선 변경 없음 |
 | #386 | 분석 결과와 종료 조건 정리. FE 변경 없음. 세션 사이 [종료 판단]은 비종료 실행이 없고 SecOps 분석이 종료된 상태에서 수행(`workflows.resolve_incident`) |
 | #388 | 동작별 버튼 문구는 DSH-001 제안 카드·INC-002 상세에만 적용. T1은 INC-004 「승인 대기」 → `조치 실행` → 모달 `실행`, T2는 상세 → 차단/해제 버튼 → 모달 `실행`으로 반영 |
-| #387 · 시드 #294 | 자산 관제 대시보드 추가. INC-004 `/asset-incidents` · INC-001 `/incidents` · AST-001 `/assets` · INC-002 상세 경로 유지. 네트워크 메트릭 시간당 4표본·분할 적재와 고아 NACL 정리 추가, idle-dev CPU 프로필 유지. 절감 예상은 AST-001에 있어 T1 대본 편입은 9/28 컷에서 판단 |
+| #387 · 시드 #294 | 자산 관제 대시보드 추가. AST-001 `/assets` · INC-002 상세 경로 유지. **INC-004 `/asset-incidents`와 INC-001 `/incidents`는 2026-09-28부터 화면을 그리지 않고 redirect만 한다** — 각각 `/assets?tab=incidents`(AST-001)·`/security?tab=incidents`(SEC-001)의 `인시던트` 탭으로 흡수됐고, 옛 링크와 `?preset=` 딥링크를 그 탭으로 보내려고 경로만 남는다. 상세 `/incidents/[id]`와 ACT-002 딥링크는 그대로다. 네트워크 메트릭 시간당 4표본·분할 적재와 고아 NACL 정리 추가, idle-dev CPU 프로필 유지. 절감 예상은 AST-001에 있어 T1 대본 편입은 9/28 컷에서 판단 |
 | #390 | EBS 삭제 구현 → 결정 ⑦에 구현 상태와 새 ID 재생성 위험 반영 |
 | #389 | SecOps 입력·프롬프트 변경 → T2-6 판단 근거 문구를 9/29 리허설에서 재확인 |
 | #392 | 정확한 `vigilantis:role=isolation` 태그의 SG를 미사용 판정에서 제외. 시드 `vigilantis-seed-unused`에는 그 태그가 없어 기존 카드 전제 유지. 전체개방 SG는 태그보다 위협 판정이 우선이라 T2 옆 SG의 빨강 전제도 유지 |
@@ -427,6 +432,176 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 
 **이 실측이 확인하지 않은 것**: 시연 값 주기의 소요 시간(위 참고) · 2회차 반복(세션 사이 초기화) · 실 AWS. **`elbv2`·`autoscaling`이 필요한 P2 런북 3종은 LocalStack Community에 없어 여기서도 재현하지 못한다.**
 
+## T3 · T4 — P2 트랙 2차 설계 (10주차 검증용)
+
+> **상태**: **실행 코드와 발동 경로가 전부 섰다**(B1–B5 머지 · 아래 §선행 조건) — 남은 것은 B6 화면 필드 하나다. **T3 는 이미 돌았다** — 2026-10-13(화) 실 AWS 에서 격리→해제 3회 성공(`AWS_SMOKE_RESULT.md` §8 P2-1 · 발동은 B5 자동 경로). **T4 는 10/14(수) 오후 예정**이다. 다만 `elbv2`·`autoscaling`이 LocalStack Community에 없어 **로컬에서는 조회 대체조차 안 돈다**(ADR-0007 §Context) — 그래서 10주차(10/12(월)–10/15(목)) 실 AWS 가 이 두 트랙의 첫 실행이고, 그 점은 그대로다.
+> **성격**: T1·T2와 달리 **시연 컷이 아니라 검증 경로**다. 10/15(목) MVP 마감 판정의 근거이고, 12/11(금) 최종 발표에 올릴지는 범위 확정 뒤에 따로 판단한다.
+> **왜 P1 SG 2종과 달리 넣는가**: §1차 시연에서 빼는 것은 P1 SG 쌍을 "양방향 회복 세 번째라 중복"으로 뺐다. T3는 중복이 아니다 — **High 위험도의 선제 차단(`PRE_MITIGATION_0_5S`)과 1분 미응답 자동 격리(`TIMEOUT_ISOLATION_1M`)는 지금 어느 트랙도 보여주지 않는다.** T4는 양방향 회복이 아니라 **등록 롤백이 없는 단방향 구조 전환**이라 축 자체가 다르다.
+
+### T3 · SecOps(P2) — 선제 차단 격리와 원클릭 해제
+
+**한 줄**: High로 판정된 위협에 **승인을 기다리지 않고 즉시** 선차단으로 대상을 격리하고, 관제자가 확인한 뒤 한 번 승인으로 백업 기준으로 되돌린다.
+
+**대상**: ALB Target Group에 등록된 EC2 1대 + 규칙 0개인 격리 SG. 스모크 환경에서는 `vigilantis-smoke-web-1`(TG `vigilantis-smoke-tg` 등록)과 `vigilantis-smoke-isolation`이다. 격리 뒤에도 서비스를 잇는 두 번째 대상으로 `web-2`가 있다.
+
+**파라미터 계약**: `Ec2IsolateParameters` = `instance_id` · `target_group_arn` · `isolation_group_id` · `evidence_id` / `Ec2UnisolateParameters` = `instance_id` · `backup_record_id` · `evidence_id`(복원 값은 백업 레코드에서만 — ADR-0004 정책 ③)
+
+| # | 단계 | 화면(FE) | API·호출 | WS 이벤트 | 검증 포인트 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 위협 주입(High) | SecOps 카드 신규 | (mock 주입) | `INCIDENT_CREATED` | `evaluate_threat()`가 `HIGH`를 내는 입력인지 |
+| 2 | 대응 경로 — **선제 차단** | "선제 차단" 경로 표시 | `response_mode: PRE_MITIGATION_0_5S` | `INCIDENT_UPDATED` | **Incident 축이다.** `trigger_source`와 다른 축(§실행 축과 Incident 축은 다르다) |
+| 3 | 가드레일 4단계 | — | ④는 **MIXED** — ENI `DryRun` + `describe_security_groups` + `describe_target_health` | — | 통과 조건 ①DryRun ②`isolation_group_id` SG 존재 ③TG 존재·대상 등록(`Target.NotRegistered`는 미등록으로 본다). **④의 ENI 범위는 주 ENI 하나다** — `_precheck_isolate` 가 `_primary_eni(instance)` 로 고른 ENI 만 DryRun 하는데 실행은 ENI 전체를 바꾼다(5번). 즉 **보조 ENI 의 SG 교체는 승인 전에 검증되지 않고 실행에 들어간다.** 스모크 인스턴스는 ENI 가 하나라 이 차이가 실측에 드러나지 않는다 — 기록에만 남긴다 |
+| 4 | 백업 캡처 | — | `SAVE_CURRENT_SG_AND_TG_MAPPING` | — | 격리 **전** SG·TG 매핑이 저장되는가. 이것이 7번 원복의 유일한 원천이다. **가드레일 뒤·실행 직전이다** — 백업은 접수된 실행 행을 잠근 뒤 잡는다(`workflows.store_*_backup` 이 `lock_execution` 뒤에 `capture_*` 를 부른다) |
+| 5 | **격리 실행** | 실행 패널 | `RUNBOOK_EC2_ISOLATE`<br>`trigger_source: PRE_MITIGATION_0_5S`<br>TG 등록 해제 + ENI SG 교체 | `EXECUTION_UPDATED` | 승인 없이 발동한다 — **`approval_mode`가 T2와 다르다**. **SG 교체는 ENI 전체다** — `execute_ec2_isolate` 가 `backup.network_interfaces` 를 돌며 `_swap_eni_groups` 로 바꾼다(보조 ENI 를 남기면 그쪽으로 트래픽이 그대로 든다). **부분 실패의 effect 판정**: 첫 ENI 에서 실패하면 그 예외의 분류가 단계 effect 이고, **하나라도 바뀐 뒤 실패하면 마지막 예외가 4xx 여도 `PARTIAL`** 이다 — 바뀐 ENI 가 기록에서 사라지지 않게 한 것이다. 부분 격리의 최종 상태는 `FAILED` + CRITICAL 로그 + 백업 레코드 ID 이고 **원클릭 해제가 열리지 않아 복원이 수동**이다(PR #452 처분 (a)) — 그래서 **결과가 `FAILED` 로 보여도 자산은 반쯤 바뀐 상태일 수 있다** |
+| 6 | 대상 상태·서비스 응답 확인 | 토폴로지는 보조 관측 | `describe_target_health` + ALB 경유 HTTP 요청 | — | 격리 전·중·해제 후 `web-2`의 등록·health 상태와 ALB 경유 응답을 각각 기록한다. 등록 여부만으로 서비스 유지를 판정하지 않는다. 요청 경로·기대 상태 코드·관측 간격·실패 수를 실행 전에 정하고, HTTP 관측이 없으면 서비스 유지는 미확인으로 남긴다 |
+| 7 | **원클릭 해제** | 상세 [승인하고 해제] → [실행] | `RUNBOOK_EC2_UNISOLATE`<br>`trigger_source: USER_APPROVAL` | `EXECUTION_UPDATED` | 4번 백업 레코드로만 원복하는가. TG 재등록과 SG 복원이 **같은 집합**인가. **검증은 백업 payload 4개 필드 전부를 본다** — `security_group_ids`·`target_group_arn`·`target_port`·`network_interfaces`(`SgAndTgMappingBackup`). 「SG 가 복원됐나」만 보면 둘을 놓친다: **포트**(비기본 포트로 등록돼 있던 대상이 TG 기본 포트로 재등록되면 원상 복구가 아니다)와 **ENI별 SG**(주 ENI 목록만 복원하면 보조 ENI 가 주 ENI 의 SG 로 "복원"돼 원본보다 넓거나 좁아진다). 순서는 **SG 복원 → TG 재등록**이다 |
+| 8 | 해제 완료 | Incident 종료 판단 대기 | — | `EXECUTION_UPDATED` `SUCCESS` · `INCIDENT_UPDATED` `AWAITING_CLOSURE` | **종료는 자동이 아니다** — `AWAITING_CLOSURE` 는 종료 **가능** 상태일 뿐이고(`INCIDENT_RESOLVABLE_STATUSES` = `AWAITING_APPROVAL`·`AWAITING_CLOSURE`·`FAILED`), 종료는 관제자의 `resolve` 요청이 확정한다. 그 요청이 409 `INCIDENT_NOT_RESOLVABLE` 로 거부되는 조건을 대조한다(`workflows.resolve_incident`) — ① **진행 중 실행이 하나라도 있으면 거부**(`EXECUTION_NON_TERMINAL_STATUSES` = `IN_PROGRESS`·`ROLLBACK_INITIATED`) ② **SecOps 는 게이트가 하나 더다** — `agent_invocation_status` 가 `SUCCEEDED`·`NO_PROPOSAL`·`FAILED` 중 하나가 아니면 거부다. 즉 **T3 는 후속 분석이 끝나야 종료된다** ③ 상태가 허용 집합 밖. **두 번 눌러도 덮어쓰지 않는다** — 이미 `RESOLVED` 면 409 가 아니라 먼저 저장된 판단을 유지한다(멱등 키 없이 재요청이 안전한 이유). 종료는 남은 `EXECUTABLE` 제안을 `INVALIDATED` 로 함께 정리한다 — **분기의 타임아웃과 같은 전이가 다른 경로에서** 일어난다. **B5 가 서면 선차단이 실패한 건에 `FAILED` + `PENDING`(`agent_invocation_status` — 후속 AI 분석의 진행 상태. 분석 전) 조합이 생길 수 있다** — 위 ② 게이트는 분석이 끝나야 풀리므로, **그 건이 분석 스캔에 계속 잡혀 종료가 영구히 막히지 않는지** 본다 |
+
+**분기 — 1분 미응답 자동 격리**: 2번이 `AGENT_WAIT`(Medium)로 간 뒤 관제자가 1분간 응답하지 않으면 `TIMEOUT_ISOLATION_1M`으로 전환해 같은 5번을 발동한다. **초기 판정 결과가 아니라 응답 기한 만료 시 전환이다**(`packages/schemas/events.py`). Low는 이 전환 대상이 아니다. 이 분기는 **선제 차단·자동 격리 발동 경로가 구현돼야 검증 가능**하다(아래 §선행 조건). **전환이 이기면 그 인시던트의 대기 제안은 `EXECUTABLE` 을 벗어난다** — 후보 상태 갱신은 `expected` 가 일치할 때만 한 행을 바꾸는 CAS 이고(`incidents.update_candidate_status`), 허용 전이에 `EXECUTABLE→INVALIDATED` 가 있다. 그러므로 **전환 뒤에 도착한 승인은 409 `PROPOSAL_NOT_EXECUTABLE` 로 떨어진다**(`exceptions.py` 의 코드→HTTP 상태 매핑 · 회귀는 `apps/core-api/tests/test_actions_api.py`). 대조할 때 **늦은 승인이 거부된 것을 실패로 적지 않는다** — 승인·거절·타임아웃 중 먼저 확정된 하나만 반영하는 계약의 정상 동작이다. 어느 쪽이 이겼는지는 Incident 축의 `response_mode` 값으로 가린다(2번).
+
+### T4 · FinOps(P2) — stateless 한정 구조 전환
+
+**한 줄**: 다운사이징으로 줄일 수 없는 자산을 Launch Template과 ASG로 바꿔 상한 4대까지 늘어나게 하고, **검증 직후 정리한다.**
+
+**파라미터 계약**: `Ec2EnableAutoscalingParameters` = `instance_id` · `min_size` · `max_size` · `evidence_id`. `min_size <= max_size` 는 모델 검증기(`_size_order`)가 막는다. **상한 4와 하한 1도 모델이 막는다** — `AutoScalingSize = Annotated[StrictInt, Field(ge=1, le=4)]` 이라 범위를 벗어난 값은 **가드레일 ① Schema Check 에서 거절된다**(④까지 가지 않는다). precheck 는 그 범위를 「확인된 사실」로 싣기만 한다.
+
+| # | 단계 | API·호출 | 검증 포인트 |
+| --- | --- | --- | --- |
+| 1 | 후보 제시 | — | 어떤 판정이 이 런북을 부르는지. `RIGHTSIZING`과 **후보 조건이 갈리는 지점**을 기록한다 |
+| 2 | 가드레일 ④ | **MIXED** — LT `create_launch_template` `DryRun` + `describe_instances` + `describe_auto_scaling_groups` | ①DryRun ②원본 EC2 존재·`running` ③**동명 ASG 부재**(이름만 본다) ④`min_size`/`max_size` 범위 — **단, ④는 precheck 가 막는 자리가 아니라 모델이 이미 보장한 것을 확인 사실로 싣는 자리다**(위 파라미터 계약) |
+| 3 | 실행 | `RUNBOOK_EC2_ENABLE_AUTOSCALING`<br>`trigger_source: USER_APPROVAL`<br>**4단계** — ① `STEP_CREATE_IMAGE` ② `STEP_CREATE_LAUNCH_TEMPLATE` ③ `STEP_CREATE_AUTO_SCALING_GROUP` ④ `STEP_PUT_SCALING_POLICY` | **LT·ASG 둘이 아니라 네 단계다** — AMI 를 먼저 뜨고(원본은 `NoReboot=True` 로 재부팅하지 않는다) 그 AMI 로 시작 템플릿을 만든 뒤 ASG·CPU 정책까지 간다. **「성공」이 두 축이다 — 섞지 않는다.** ① **함수 성공**(`ExecutionOutcome.succeeded`)은 AMI `available` 확인을 포함한 **요청 단계**까지다. ② **DB 실행 상태 `ExecutionStatus.SUCCESS`** 는 그 뒤 `inspect_ec2_autoscaling` 이 `ready` 를 내야 기록된다(`incomplete` → `FAILED` · `query_failed` → **판정 보류** · `judge_ec2_enable_autoscaling`). 그래서 **실행 `SUCCESS` 는 인프라 준비 확인까지**이고, 코드가 그 한계를 못 박는다 — 「`ready` → SUCCESS. 원본 인스턴스 유지, **애플리케이션 서비스 가능 여부는 미검증**」. **`SUCCESS` 를 서비스 가능이나 트래픽 전환으로 읽지 않는다**(전환은 아래 §서비스 연결·트래픽 전환). 부분 구성은 **이름 붙은 잔여물과 함께 `FAILED` 로 사람에게 넘어온다.** 값은 계획에서만 오고 원본을 다시 읽지 않는다. 중복 오류(`InvalidAMIName.Duplicate`·`AlreadyExists`)와 응답 유실(5xx·연결 끊김)은 **effect UNKNOWN 으로 적고 뒤 변경을 멈춘다** — **재개·재사용·보상(삭제)을 하지 않으므로** 그 회차는 사람이 정리한다(4번). **서비스 연결은 이 런북이 하지 않는다** — 별도 운영 표면이다(아래 §서비스 연결·트래픽 전환) |
+| 4 | **정리** | **10/14(수) 구성: 관리자 CLI(`aws`)로 직접** — ASG·시작 템플릿·AMI·스냅숏.<br>(앱과 CLI 가 같은 DB 인 환경: `service --operation cleanup-plan` → `cleanup --apply`) | **등록 롤백 런북이 없다**(SSOT §Action Whitelist) — 되돌리는 것이 아니라 **검증 직후 지운다.** **지울 것은 넷이다** — AMI·스냅숏·시작 템플릿·ASG(실행이 만드는 자원 표지가 그 넷이다). **`down` 으로는 AMI·스냅숏이 안 지워진다**(스크립트 머리말). 운영 CLI 에 `cleanup` 명령이 있지만(#466) **10/14(수) 구성에서는 그것도 못 쓴다** — 그래서 그날은 관리자 CLI(`aws`)로 넷을 직접 지우고 **AWS 조회로 넷의 부재를 각각 확인한다**(§서비스 연결·트래픽 전환 머리말). ASG 인스턴스 비용은 예산표 밖(ADR-0009 §3) |
+
+> **4번이 T1·T2와 가장 다른 자리다.** 두 트랙은 롤백 런북이 짝으로 등록돼 있어 "되돌아갔는가"를 보면 되는데, 이 런북은 짝이 없다. 그래서 **정리했는지와 비용이 남지 않았는지**가 검증 대상이고, 그 기록은 `docs/AWS_SMOKE_RESULT.md` §8 · §9로 간다.
+
+### 서비스 연결·트래픽 전환 — 런북 밖의 운영 표면 (#466)
+
+> **이 표면을 쓸 수 있는 조건이 하나 있다 — 10/14(수) 스모크 구성에서는 못 쓴다.**
+> `schema` 를 뺀 모든 `service` 명령은 **DB 세션을 요구한다**(없으면 `db_required` 로 거절). 그 세션은 CLI 가 도는 자리의 **로컬 `.env` `DATABASE_URL`** 에서 온다(`_open_db_session` → `db.session.get_engine` → `get_settings().DATABASE_URL`). 그래서 **CLI 의 `DATABASE_URL` 이 #446 실행 레코드를 가진 DB 를 가리킬 때만** 이 표면이 돈다.
+> 10/14(수) 구성은 그렇지 않다 — 앱은 ECS 에서 **플랫폼 RDS** 를 쓰고 CLI 는 로컬 DB 를 읽으므로, **실행 기록을 찾지 못한다**. 따라서 그날의 **정리와 전환은 관리자 CLI(`aws`)로 직접** 한다. 아래 표는 **명령의 계약**이고, 이 조건이 서는 환경(앱과 CLI 가 같은 DB)에서의 절차다.
+
+**T4-3 의 런북은 AMI·LT·ASG·정책만 만든다.** ASG 를 실제로 서비스에 꽂고 트래픽을 넘기고 되돌리는 일은 **관리자 운영 CLI** 가 한다 — `provision_smoke_aws.py service --operation <명령>`, 백엔드는 `apps/core-api/service_transitions.py` 의 단일 진입점 `run_service_command` 다. 대본이 이 표면을 모르면 T4 를 「ASG 가 생겼다」에서 끝내게 된다.
+
+| 명령 | 하는 일 | AWS 변경 |
+| --- | --- | --- |
+| `schema` | 옵션 계약을 답한다. DB·AWS 없이 돈다 | — |
+| `plan` | 조치 시점의 의도와 **원래 경로의 스냅숏**을 불변 계획으로 남긴다 | — |
+| `status` | 저장된 사실과 현물을 읽어 현재를 보여 준다 | — |
+| `prepare` | 전환 준비(운영 리스너·대상 묶음). 관문 둘 — `execution_not_ready` · **`runtime_cost_gate`** | ✅ `--apply` |
+| `verify` | 그 시각에 읽고 **실제로 요청해 본** 결과로 판정한다(`PASSED`·`FAILED`·`UNKNOWN`) | — |
+| `cutover` | 트래픽을 ASG 쪽으로 넘긴다. **관문 셋** — ① `execution_not_ready`(`plan`·`prepare` 와 같은 확인) ② **직전에 스스로 다시 검증**해 `PASSED` 가 아니면 `fresh_verification_failed`(「직전 검증이 통과하지 않아 운영 경로를 바꾸지 않았습니다」) — **앞서 `verify` 를 통과했어도 그렇다** ③ **`runtime_cost_gate`** | ✅ `--apply` |
+| `return` | **원래 경로로 복귀한다.** 이미 원래 경로면 바꾸지 않되, 같은 안전 확인과 실제 응답 확인을 거쳐야 성공이다 | ✅ `--apply` |
+| `cleanup-plan` | 지울 것을 뽑는다(AMI·스냅숏 포함 — `status` 가 세지 않는 자리다) | — |
+| `cleanup` | 뽑은 것을 지운다. 넘길 것 **셋** — 매니페스트 해시 · 자원 목록 · **`retention_decision`**(필수). 그 사이 재고가 바뀌면 `manifest_mismatch` 로 거절하고 「`cleanup-plan` 을 다시 봅니다」라고 답한다. 재고에 blocker 가 있으면 `cleanup_blocked` 다. **완료는 삭제 응답이 아니다** — `success: true` 로 판단하지 않고 **정리 뒤 새로 읽은 잔여 재고의 `complete: true`** 로 본다(ADR-0009 §7-4) | ✅ `--apply` |
+
+**대조할 때 섞지 않을 것 셋.** 계약이 그 셋을 따로 저장한다.
+
+| 축 | 뜻 | 섞으면 생기는 오독 |
+| --- | --- | --- |
+| 계획(`ServiceTransitionPlan`) | 조치 시점의 **의도와 원래 경로 스냅숏** | 계획을 현재 상태로 읽는다 |
+| 작업 일지(`OperationState`) | AWS 가 요청을 **받아들였는가** — `PENDING`·`APPLIED`·`NOT_APPLIED`·`UNCERTAIN` | 「받아들임」을 **서비스 가능**으로 읽는다. 계약이 「받아들임은 서비스 가능을 뜻하지 않는다」로 못 박는다 |
+| 관측(`ServiceObservation`) | 그 시각에 읽고 요청해 본 사실 | 관측 없이 일지만으로 판정한다 |
+
+**불확실한 변경은 재전송하지 않는다.** `PENDING`·`UNCERTAIN` 은 읽기 전용 대조로만 좁히고, 결과는 둘이다 — `EFFECT_OBSERVED`(효과 확인 · 관문을 푼다 · 최종)와 `EFFECT_NOT_OBSERVED`(**지금 안 보인다는 것이고, 요청이 거절됐다는 증거가 아니다** · 관문을 풀지도 재전송을 허용하지도 않는다). **대조에서 `EFFECT_NOT_OBSERVED` 를 실패로 적지 않는다.**
+
+**선행**: `plan`·`prepare`·**`cutover`** 셋 다 **#446 실행이 `SUCCESS`** 가 아니면 `execution_not_ready` 로 거절한다. 즉 **T4-3 이 성공해야 이 표면이 열린다.**
+
+**전체 순서 한 줄.** `plan`(`--execution-id`) → `prepare --apply` → `verify` → `cutover --apply` → `verify` → `return --apply` → `cleanup-plan` → `cleanup --apply`. **`plan` 이 돌려주는 `transition_id`(전환 시도 하나를 가리키는 ID)를 그 뒤 명령에 `--transition-id` 로 넘긴다.**
+
+**`runtime_cost_gate` 도 설계된 거절이다.** `prepare`·`cutover` 가 **계획에 실린 운영자 제공 실행 사실**(`plan.runtime_facts`)과 **실제 멤버 수**를 대조해 비용 차단 사유가 있으면 막는다. 단가·상한·한도는 **운영자가 공급하는 값이고 실시간 조회 증거가 아니다** — 없으면 0으로 채우지 않고 `prepare`·`cutover` 만 막는다(ADR-0009 §7-6). `cleanup_blocked`·`manifest_mismatch` 와 같은 종류라, **실패로 적지 않는다.**
+
+**증거의 한계**: ALB 경로 증거는 「그 순간 경로가 ASG 전용 TG 로만 갔다는 **전후 스냅숏** + 실제 ALB 응답」이고, 멤버별 증거는 「각 멤버 사설 IP 에 **직접** 보낸 응답」이다. **둘 다 요청 단위 ALB 대상 귀속(접근 로그)이 아니다** — 「이 요청이 ASG 인스턴스로 갔다」로 적지 않는다.
+
+> **T3 가 걸려 있으면 T4 의 변경 명령이 막힌다.** facade 경계가 **「보안 보류(격리 SG · scale-in 보호 · DB 격리 실행)는 풀지 않는다 — 보고하고 막는다」**로 적는다. `return` 은 원래 TG 에 등록이 남은 대상 **전부**(`draining`·`unused` 포함)의 **격리 여부를 확인하고**, **보안 보류 대상이 하나라도 등록돼 있으면 복귀하지 않고 막는다**(`no_quarantined_registered` — 「원래 TG에 등록된 보안 보류 대상 … 해제·등록 해제하지 않습니다」). **정상 대상을 격리로 취급하는 것이 아니다.** 그래서 겹치면 막히는 구간이 생긴다 — `EC2_ISOLATE` 는 **TG 등록 해제 → SG 교체** 순서라, 해제 직후 격리 대상이 `draining`(등록 해제가 끝나기를 기다리는 상태)으로 원래 TG 에 남아 있을 수 있고 **그 구간에는 `return` 이 막힌다**(지연 시간은 실측 전이라 모른다). `cleanup` 도 보안 보류 인스턴스를 정리하지 않는다. 그래서 **같은 창에서 T3 격리를 걸어 둔 채 T4 전환을 돌리지 않는다** — 순서를 정해 한 번에 하나만 돌리고, 막혔을 때 그것을 T4 실패로 적지 않는다(설계된 거절이다). 변경 명령은 공유 AWS 좌표의 advisory lock 을 명령 내내 쥐지만, **이 도구 밖의 AWS 조작과는 원자적이지 않다**(전후 대조로만 드러난다).
+
+### 선행 조건 — 2026-10-13(화)로 하나만 남았다
+
+**B1–B5 가 전부 `dev` 에 들어왔다.** 아래 표는 이 문서가 「없음」으로 적어 두었던 다섯 자리의 현재 상태다 — 마지막 한 행만 남았다.
+
+| 항목 | 상태 | 막는 단계 |
+| --- | --- | --- |
+| 백업 `SAVE_CURRENT_SG_AND_TG_MAPPING` 캡처 | **있음**(#452) — `services/aws/backup.py` 머리말이 「백업 4종의 캡처가 전부 이 파일에 있다 — **남은 작업 없음**」으로 바뀌었다 | — |
+| `execute_ec2_isolate` · `execute_ec2_unisolate` | **있음**(#452) — `executor.py` 의 `[남은 작업]` 목록은 10종이 다 서면서 **파일에서 사라졌다** | — |
+| `execute_ec2_enable_autoscaling` | **있음**(#459·#466) — AMI → 시작 템플릿 → ASG → CPU 정책 4단계다(T4-3) | — |
+| `PRE_MITIGATION_0_5S` · `TIMEOUT_ISOLATION_1M` 발동 경로 | **있음**(#469) — `security/soar.py` 가 `prepare_isolation`(High 선차단)을 두고 `workflows.reserve_auto_isolation`(Medium 1분 만료 예약 — 정의는 `workflows.py`)을 부르며, `AGENT_WAIT_POLL_SECONDS` 1초 주기 만료 감시 잡을 등록한다 | — |
+| Medium `실행 예정 시간` 서버 응답 필드 | **아직 없음**(B6 · #448 OPEN) | T3 자동 격리 분기의 **화면만** — 분기 자체는 돈다 |
+
+> **남은 하나가 막는 범위는 화면이다.** B6 가 없어도 자동 격리 분기는 발동하고 실행까지 간다 — 관제자에게 **실행 예정 시간을 숫자로 보여 주는 칸**이 비는 것이다. 그래서 이 행은 T3 분기의 **검증 불가**가 아니라 **화면 확인 항목 보류**로 읽는다.
+
+`precheck()`는 **10종 전부 구현돼 있다**(`RUNBOOK_SPECS`). 다만 구현 존재와 환경 검증 완료는 다르다. **필요한 EC2·ELBv2·Auto Scaling 응답을 가짜로 구성하면 precheck의 분기·실패 처리를 먼저 테스트할 수 있다.** LocalStack Community에서는 `elbv2`·`autoscaling` 조회가 막혀 P2 precheck 전체 통과를 확인할 수 없다. 실제 AWS 권한·조회 응답·통과 조건은 실 AWS에서 확인하고 `docs/AWS_SMOKE_RESULT.md` §8-1에 기록한다. **실행·백업·발동 경로는 B1–B5 머지로 전부 섰다**(위 표) — 남은 것은 구현이 아니라 **흐름 테스트용 `elbv2`·`autoscaling` 가짜**다.
+
+### 반복 검증의 사전 조건 — 한 번의 복구 실패가 이후 검증을 막는다
+
+T3·T4는 10/14(수)–10/15(목)에 **여러 번 돌릴 수 있다.** 그때 되돌려 놓아야 하는 것이 **넷이고**(T3 둘 · T4 둘), 넷 다 대본이 먼저 알고 있어야 한다. 아래 근거는 전부 현행 `dev` 코드다.
+
+**① TG 재등록의 자동 경로는 `EC2_UNISOLATE` 하나뿐이다 — `up --yes`가 받쳐 주지 않는다.**
+
+`scripts/provision_smoke_aws.py`는 초기화 태그가 붙은 뒤의 `up`에서 **대상 등록을 건너뛴다.** 코드 주석이 이유를 적는다 — *"등록은 초기화 때 한 번만 한다 — 다시 돌린 up이 격리(등록 해제)를 되돌리면 안 된다."* 격리 검증 중에 `up`을 돌려도 격리가 풀리지 않아야 하므로 **그 설계가 맞다.**
+
+결과로 T3-5(격리)가 대상을 TG에서 뺀 뒤 T3-7(해제)이 실패하면 **되돌릴 자동 경로가 없다.** 그리고 다음 T3 시도는 `_precheck_isolate`의 통과 조건 ③(TG 존재·대상 등록)에서 `PRECHECK_TARGET_NOT_FOUND`로 멈춘다 — **한 번의 복구 실패가 이후 반복 검증 전부를 막는다.**
+
+→ 수동 복구: 관리자 프로필로 `aws elbv2 register-targets --target-group-arn <TG ARN> --targets Id=<인스턴스 ID>` 를 돌리고, `provision_smoke_aws.py status`에서 그 대상이 `healthy`인지 확인한다. 복구했다는 사실과 시각을 `docs/AWS_SMOKE_RESULT.md` §7에 남기고, 그 회차 결과가 들어가는 §8 P2-1 비고에 「수동 복구 — §7 참조」를 적는다 — 그 회차의 T3 결과를 읽을 때 필요한 사실이다.
+
+> B1–B3(백업 캡처·격리·해제)이 서기 전에는 T3-5·T3-7 자체가 돌지 않았다. **그 코드는 2026-10-12(월) 머지됐고 첫 T3 은 10/13(화)에 돌았다** — 격리→해제 3회 전부 성공(§8 P2-1). 그래서 이 조건은 **지금부터 매 회차에 적용된다.**
+
+**② 검증 창에는 그 검증을 돌리는 앱 하나만 발동을 켠다.**
+
+T3은 격리된 **중간 상태**를 읽어 판정하는 경로다(T3-6에서 대상 상태·서비스 응답을 확인한다). 그 사이 다른 앱이 접수된 조치를 실행하면 무엇이 검증 결과인지 가릴 수 없다.
+
+→ 발동 스위치는 `DISPATCH_ENABLED`다(`apps/core-api/config.py`). `apps/core-api/main.py` 머리말이 **회수 스캔(dispatcher)과 AI 분석 대기 스캔(agent_dispatcher)을 그 스위치 하나로** 묶는다고 적는다. **검증을 돌리지 않는 다른 앱의** `DISPATCH_ENABLED`를 검증 전에 끄고, 끝난 뒤 되돌린다(검증 앱 자신은 켜 둔다). 되돌리기 전에 그사이 접수된 실행이 없는지 본다.
+
+→ **수집(`SCAN_ENABLED`)은 끄지 않는다.** 수집은 describe만 하는 읽기 전용이라 AWS 상태를 바꾸지 않는다. 다른 앱의 회차가 늘어나는 것은 그 앱의 DB 문제이고, T3·T4가 읽는 중간 상태를 바꾸지 않는다.
+
+**③ T4 를 다시 돌리기 전에 ASG·Launch Template 을 지운다 — 짝 롤백 런북이 없다.**
+
+T4-3(실행)이 만든 것을 T4-4(정리)가 지운다. `EC2_ENABLE_AUTOSCALING` 에는 짝 롤백 런북이 없다(§T4 4번 행). **`down --yes` 로는 부족하다** — 스크립트 머리말이 「`down` 은 AMI·스냅숏 전체 정리가 아니다 — `service --operation cleanup-plan` / `cleanup` 을 쓴다」로 적는다. **그런데 그 `service` 경로가 10/14(수) 구성에서는 돌지 않는다**(§서비스 연결·트래픽 전환 머리말 — CLI 가 로컬 DB 를 읽어 플랫폼 RDS 의 실행 기록을 못 찾는다). **그날은 관리자 CLI(`aws`)로 직접 지운다** — 즉 `down` 도, `service cleanup` 도 아닌 세 번째 경로다. 앱과 CLI 가 같은 DB 인 환경에서는 `cleanup-plan` → `cleanup --apply` 가 맞다(#466).
+
+정리하지 않으면 다음 T4 가 **가드레일 ④에서 멈춘다.** `_precheck_enable_autoscaling` 의 통과 조건 ③이 **동명 ASG 부재**이고, 코드 주석이 그 기준을 "같은 이름이 이미 있는가만 본다"로 적는다. 즉 T3 의 TG 와 같은 구조다 — **정리를 빠뜨리면 그 뒤 T4 가 전부 막힌다.**
+
+Launch Template 도 함께 본다. 이름은 `executor._launch_template_name` 이 정하고(`vigilantis-lt-` 접두), `provision_smoke_aws.py` 는 **태그가 없고 VPC 자원도 아니라 이름으로만 가린다**고 적어 둔다. 남으면 다음 회차 수집에 `LAUNCH_TEMPLATE` 자산으로 잡히고, `AWS_SMOKE_RESULT.md` §2-2 가 "Launch Template 0 이 정상 — 있으면 출처(이름·생성 시각)를 §7 에 적는다"로 둔 칸이 그것을 받는다.
+
+→ **지울 것은 넷이다**: AMI · 스냅숏 · Launch Template(`vigilantis-lt-` 접두) · ASG(이름). 실행 경로가 새로 만드는 자원 표지가 그 넷을 가리킨다. 지운 뒤 `provision_smoke_aws.py status` 의 잔여가 `up` 직후와 같은지 보고, **AMI·스냅숏은 `status` 가 세지 않으므로** `cleanup-plan` 출력으로 따로 확인한다. ASG 가 띄운 인스턴스는 비용 추산 밖이라(ADR-0009 §3) 검증 직후 정리가 전제다.
+
+**④ T4 를 다시 돌리기 전에 트래픽을 원래 경로로 돌려놓는다 — `cleanup` 보다 먼저다.**
+
+`cutover` 로 트래픽을 ASG 쪽에 넘긴 회차는 `return` 으로 **원래 경로로 복귀**시킨다(§서비스 연결·트래픽 전환). 복귀는 「이미 원래 경로면 바꾸지 않되 **같은 안전 확인과 실제 응답 확인을 거쳐야 성공**」이라, 돌려놨다고 믿고 넘기면 다음 회차가 어디로 가는지 모른 채 시작된다.
+
+→ **10/14(수) 구성의 순서: 관리자 CLI(`aws`)로 직접 지운다.** `service` 표면은 CLI 의 `DATABASE_URL` 이 #446 실행 레코드를 가진 DB 를 가리킬 때만 돌고, 그날은 앱이 플랫폼 RDS 를 쓰므로 **`cleanup-plan`·`cleanup` 이 그 기록을 찾지 못한다**(§서비스 연결·트래픽 전환 머리말). **`complete: true` 로 완료를 확인하는 경로도 같은 이유로 못 쓴다** — 그날은 **AWS 조회로 넷을 각각 확인**한다(ASG 부재 · 시작 템플릿 부재 · AMI 등록 해제 · 스냅숏 삭제). 트래픽을 넘긴 회차면 **복귀도 관리자 CLI 로 원래 TG·리스너를 되돌린다.**
+
+→ **앱과 CLI 가 같은 DB 인 환경의 순서**: `return --apply` → `cleanup-plan` → `cleanup --apply`.
+
+**보존 결정을 먼저 정한다 — 시간에 따른 자동 만료는 없다.** `retention_decision` 은 셋 중 하나이고, **전체 정리라면 `cleanup-plan` 과 `cleanup` 양쪽에 `delete_execution_resources` 를 지정한다.**
+
+| 결정 | 남는 것 |
+| --- | --- |
+| `delete_execution_resources` | 서비스 자원과 #446 자원 **전부** 정리 |
+| `retain_launch_image` | 시작 템플릿·AMI·스냅숏 **보존**, 나머지 정리 |
+| `retain_execution_infrastructure` | 검증 리스너·TG·부착만 정리 — ASG·인스턴스·볼륨·LT·AMI·스냅숏 **전부 보존**(**과금이 계속된다**) |
+
+**완료는 삭제 응답이 아니다.** ADR-0009 §7-4 가 「완료는 삭제 응답이 아니라 **정리 뒤 새로 읽은 잔여 재고**로 판단한다」로 적는다. `service` 가 도는 환경에서는 서비스 전환 자원까지 포함한 **새 잔여 조회의 `complete: true`** 로 보고, 남은 항목은 **새 매니페스트로 다시 승인**해 간다. **10/14(수) 구성에서는 그 조회도 못 쓰므로 AWS 를 직접 읽어 넷을 각각 확인한다** — 원칙(응답이 아니라 다시 읽은 재고)은 같고 읽는 수단만 다르다.
+
+**두 거절의 대응이 다르다 — 묶어서 「다시 뽑으면 된다」로 읽지 않는다.**
+
+| 거절 | 해야 하는 일 |
+| --- | --- |
+| `manifest_mismatch` | **새 재고를 확인하고 다시 승인한다** — `cleanup-plan` 을 다시 뽑아 같은 순서로 간다 |
+| `cleanup_blocked` | **보고된 원인을 먼저 해소한다** — 보안 보류 · 사용 중인 경로 · 공유 참조. 「공유 참조·보안 보류는 운영자가 해소해야 하는 차단」이고, 이 실행이 소유한 자원의 종료를 기다리는 **대기와 구분해 보고된다**(ADR-0009 §7-4) |
+
+**둘 다 설계된 거절이라 T4 실패로 적지 않는다. 다만 「거절이 정상」과 「정리가 끝났다」는 별개다** — `return` 이 막혀 운영 경로가 전환 TG 에 남아 있으면 **정리도 계속 차단되고, 미정리 자원의 과금이 남는다.** 그 회차는 **정리 미완**으로 적고 원인과 함께 `docs/AWS_SMOKE_RESULT.md` §8·§9 에 남긴다.
+
+> 환경 운영 쪽 절차(언제 `.env`를 실 AWS로 전환하고 누가 되돌리는지)는 [ADR-0009](adr/0009-real-aws-smoke-environment.md) §6 5단계가 다룬다(1차 개정 · PR #436 머지됨). 그 절과 이 칸은 같은 사실을 가리킨다 — 다만 **이 칸의 근거는 ADR이 아니라 위에 적은 코드다.** ADR이 다시 개정돼도 흔들리지 않는다.
+
+### 로컬 실행 가능성 ❌
+
+| 축 | 가능 | 이유 |
+| --- | --- | --- |
+| 가드레일 ④ DryRun 부분 | ⚠️ 부분 | ENI·LT `DryRun`은 LocalStack에서 돈다. 조회 부분(`elbv2`·`autoscaling`)은 안 돈다 |
+| 조회 대체 통과 조건 | ❌ | `elbv2`·`autoscaling`이 Community에 없어 **조회 자체가 실패**한다. 그 3행 통과 조건은 ADR-0007 §4가 아직 잠정으로 남겨 둔 것이고, 기록 자리는 `docs/AWS_SMOKE_RESULT.md` §8-1이다 |
+| 실행·원복 | ❌ | **코드는 섰다**(B1–B5 머지 · 위 표) — 막는 것은 **환경 하나**다. `elbv2`·`autoscaling` 이 Community 에 없어 실행도 서비스 전환도 로컬에서 돌지 않는다. 그리고 `EC2_ENABLE_AUTOSCALING` 은 **짝 롤백 런북이 없어** 「원복」 자체가 없다 — 정리다(T4-4) |
+| **골든 데이터 재사용** | ⚠️ 일부 가능 | `asset_inventory_005.json`의 EC2·SG·TG 식별자와 TG의 `target_instance_ids`는 재사용할 수 있다. 실제 `describe_target_health` 응답, 격리용 SG의 ingress·egress 규칙, 격리 전후 SG·TG 상태와 백업 응답은 별도로 구성·확인해야 한다. 데이터 재사용은 실 AWS 검증을 대체하지 않는다 |
+
+---
+
 ## 1차 시연에서 빼는 것과 그 이유
 
 | 항목 | 빼는 이유 |
@@ -448,7 +623,7 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 | 컷 | 필요한 화면 | 현재 상태 |
 | --- | --- | --- |
 | T1-2 Incident 카드 | **INC-004** 자산 인시던트 카드 그리드(v1.6 · PR #197에서 INC-001과 분리 — FinOps 카드가 뜨는 화면) | ✅ **확보**(2026-08-26, #167 / PR #171 — 카드 그리드·위험도 정렬·승인 대기 프리셋). 목록에서 조치 실행·ACT-002 딥링크까지 연결됨(#179 / PR #180) |
-| T2-1 · T2-8 붉은 노드 | **AST-001 토폴로지 뷰**(#146) 또는 **DSH-001** 통합 위협 토폴로지 | ✅ **화면은 확보**(2026-08-31 · #146 CLOSED) — `AssetGraph`가 `GET /api/v1/assets` 응답을 그대로 그린다(`apps/web/src/components/assets/assets-view.tsx:189`). 노드 테두리 색은 **Incident가 아니라 자산 판정(`verdict`)** 에서 온다 — `THREAT`만 빨강이고(`apps/web/src/components/assets/asset-graph.tsx` `VERDICT_BORDER`), `THREAT`는 SG 전체개방에서만 나온다(`services/rule_engine.py`). DSH-001 토폴로지도 같은 `AssetGraph`를 쓴다(#294 / PR #351) |
+| T2-1 · T2-8 붉은 노드 | **AST-001 토폴로지 뷰**(#146) 또는 **DSH-001** 통합 위협 토폴로지 | ✅ **화면은 확보**(2026-08-31 · #146 CLOSED) — `AssetGraph`가 `GET /api/v1/assets` 응답을 그대로 그린다(`apps/web/src/components/assets/assets-view.tsx`의 `<AssetGraph>`). 노드 테두리 색은 **Incident가 아니라 자산 판정(`verdict`)** 에서 온다 — `THREAT`만 빨강이고(`apps/web/src/components/assets/asset-graph.tsx` `VERDICT_BORDER`), `THREAT`는 SG 전체개방에서만 나온다(`services/rule_engine.py`). DSH-001 토폴로지도 같은 `AssetGraph`를 쓴다(#294 / PR #351) |
 
 **붉은 노드 컷에 mock 기준은 없다**(PR #351). **다만 골든 적재 기준으로 T2-1·T2-8의 "붉은 노드"는 S3 대상 인스턴스에 서지 않는다.** S3 대상 `i-0a1b2c3d4e5f00001`은 골든 A1이라 판정이 `COST_CANDIDATE` — 테두리는 **주황**이다. 빨강은 그 인스턴스와 `SECURED_BY`로 이어진 SG `sg-0a1b2c3d4e5f00005`(`golden-sg-open-ssh` · A5 · 22번 전체개방 `THREAT`)다. 두 색 모두 **적재할 때 정해지고** 위협 주입이나 NACL 해제로 바뀌지 않는다 — 위협 접수가 쓰는 것은 `ThreatEvent`·`Incident`뿐이다. 그래서 T2-1("주입 → 붉은 노드")은 **주입 전부터 옆 SG가 빨강**이고, T2-8("해제 → 정상 복귀")은 **해제 뒤에도 SG가 빨강**이다. LocalStack 시드 경로(`vigilantis-seed-idle`)의 색은 재지 않았다. 대본을 어떻게 바꿀지는 10/1(목) 컷 시트 확정(9/23(수))에서 판단한다.
 
@@ -514,3 +689,22 @@ docker compose exec api uv run python -c "import os; from openai import OpenAI; 
 ~~**테스트 이름과 입력이 어긋난다**~~ ✅ 해소(2026-08-31, #219) — 옛 이름 `test_open_ssh_ip_block_flow`가 `OPEN_IP`를 가리키는데 입력은 `SSH_BRUTE_FORCE`(S3)였다. 1주차에 지은 이름이고 T2 입력이 PR #148 리뷰로 바뀐 결과다. 당시 skip 해제를 기다리지 않고 위 표의 이름으로 함께 고쳤다 — **이 표가 명세인 이상 이름이 어긋난 채로 두면 문서가 없는 테스트를 가리킨다.**
 
 실행 계열 공통 fixture는 **#136**에서 선구축한다. 그 픽스처가 P2 3종의 로컬 FAIL을 `GuardrailValidationContext` 문맥별로 표현해야 한다는 전제도 같은 이슈에 적었다.
+
+### T3 · T4 확장 요건 — 선행 작성과 실행 검증의 경계
+
+§T3·T4 2차 설계가 흐름 테스트 층(②)에 요구하는 것을 정리한다. **구현 전에 테스트 입력·기대값을 설계하는 것과, 실제 실행 경로를 연결해 통과를 확인하는 것을 구분한다.**
+
+| 범위 | 지금 가능 | 막는 것 |
+| --- | --- | --- |
+| 가드레일 ④ **DryRun 부분**(ENI · LT) | ⚠️ 필요한 EC2 응답을 가짜로 구성하면 분기 테스트 가능 | 현재 `FakeEc2`가 P2의 인스턴스·ENI·SG 조회 응답까지 제공하는지 추가 대조 필요. LocalStack의 DryRun 부분 관측은 precheck 전체 통과가 아니다 |
+| 가드레일 ④ **조회 부분**(`describe_target_health` · `describe_target_groups` · `describe_auto_scaling_groups`) | ⚠️ **가짜를 만들면 가능** | 아래 ①. 실환경은 LocalStack Community에 두 서비스가 없다 |
+| 실행·원복(T3-5·T3-7·T4-3) | 입력·기대값 설계 가능 / **실 AWS 관통 가능** · 흐름 테스트(②)는 ①의 가짜가 먼저다 | **실행 함수와 백업 캡처가 섰다**(B1–B5 머지 · §선행 조건). **로컬 관통은 여전히 불가** — `elbv2`·`autoscaling` 이 LocalStack Community 에 없다 |
+| 선제 차단·자동 격리 발동(T3-2·분기) | 입력·기대값 설계 가능 / **실 AWS 관통 가능**(10/13 실측) · 흐름 테스트(②)는 ①의 가짜가 먼저다 | **발동 경로가 섰다**(B5 · #469 2026-10-13 머지 — `soar.py` 의 `prepare_isolation` 과 `workflows.reserve_auto_isolation` · 1초 주기 만료 감시). 실 AWS 에서 **High 선차단 2회 · Medium 1분 자동 격리 1회**가 돌았다(§8 P2-1). **화면 확인만 B6(#448) 대기**다 |
+
+**① 가짜 AWS가 `ec2` 하나만 모델링한다 — 2026-10-07 수정.** `apps/core-api/tests/test_e2e_flow.py`의 `aws` 픽스처는 `aws_client`를 가로채 `FakeEc2`를 돌려주는데, **`service` 인자를 무시했다.** P2의 precheck는 `elbv2`를 부르므로(`executor._precheck_isolate`의 `describe_target_health`) 그대로 두면 그 호출이 EC2 가짜에 닿아 **테스트가 틀린 채 통과하거나 엉뚱한 곳에서 터진다.** 모델이 없는 서비스에는 `NotImplementedError`를 던지도록 고쳤다 — T3·T4 테스트를 쓰려면 **`elbv2`·`autoscaling` 가짜를 먼저 만들어야** 하고, 그 사실이 실패 메시지로 드러난다. 기존 T1·T2 2건은 `ec2`만 쓰므로 영향이 없다(통과 확인).
+
+**② 골든에서 재사용할 데이터와 추가할 응답을 구분한다.** `asset_inventory_005.json`의 `golden-tg-topology`에는 `target_instance_ids`가 있으므로 등록 대상 식별자는 재사용할 수 있다. 다만 이것은 `describe_target_health`의 `TargetHealthDescriptions` 응답이나 실제 health 상태가 아니다. `vigilantis:role=isolation` 태그 부재만으로 precheck 실패나 골든 사용 불가를 단정하지 않는다 — `_precheck_isolate()`는 전달받은 `isolation_group_id`로 SG 존재를 조회하며 태그를 검사하지 않는다. 격리용 SG가 트랙의 규칙 0개 조건을 충족하는지는 별도로 확인해야 한다.
+
+골든 식별자·관계 정보를 읽고, P2에 필요한 EC2·ELBv2·Auto Scaling 응답과 격리 전후 상태·백업을 픽스처로 보충하는 방식부터 검토한다. **픽스처를 보충한다고 골든과의 연결을 포기할 필요는 없다.** 공통 입력에 새 자산을 추가할지는 재사용 범위를 정한 뒤 판단한다. 추가하더라도 입력 자산 수와 판정 정답 수가 함께 증가한다고 가정하지 않고 해당 테스트로 각각 확인한다. SSOT 변경이 필요하면 PM에게 별도로 요청한다. 파라미터 계약은 이미 `runbook_parameters.py`에 있으므로 이를 기준으로 테스트 입력과 기대값을 먼저 설계할 수 있다.
+
+**③ 테스트를 쓰는 시점(제안).** 계약에 따른 입력·기대값과 precheck 분기 테스트는 선행 작성할 수 있다. **구현이 없던 동안에는** 이를 잇는 흐름의 성공을 확인할 수 없었고, **지금은 B1–B5 가 머지돼 그 제약이 풀렸다**(다만 로컬 관통은 `elbv2`·`autoscaling` 부재로 여전히 불가다). **T3·T4 흐름 테스트를 해당 구현 PR에 함께 넣거나 연결 직후 후속 PR에서 검증하는 방안**을 제안한다. 실제 작업 분할·일정은 담당자와 리뷰에서 확정하며, 이 문서만으로 새 일정을 확정하지 않는다.

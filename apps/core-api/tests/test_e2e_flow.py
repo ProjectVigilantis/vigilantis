@@ -227,6 +227,16 @@ def aws(monkeypatch):
              "current_state": "running", "acl_entries": []}
 
     def factory(service, region=None, **_):
+        # **모델링한 서비스만 돌려준다.** P2 3종의 precheck 는 `elbv2`·`autoscaling` 을
+        # 부르는데(`executor._precheck_isolate` 의 `describe_target_health` 등), service 를
+        # 무시하고 FakeEc2 를 주면 그 호출이 엉뚱한 가짜에 닿아 **테스트가 틀린 채 통과**
+        # 하거나 AttributeError 로 엉뚱한 곳에서 터진다. 여기서 크게 실패시켜 그 서비스의
+        # 가짜를 먼저 만들게 한다(T3·T4 선행 — docs/E2E_DEMO_SCENARIOS.md §테스트 대응).
+        if service != "ec2":
+            raise NotImplementedError(
+                f"이 파일의 가짜 AWS 는 'ec2' 만 모델링한다 — '{service}' 경로를 검증하려면"
+                " 그 서비스의 가짜를 먼저 만들 것"
+            )
         return FakeEc2(state)
 
     for module in (bk, ex, rb):

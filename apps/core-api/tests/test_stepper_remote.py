@@ -160,15 +160,62 @@ def test_collect_failed_region_is_not_reported_as_success(stepper_client, monkey
     assert _press(stepper_client, "collect")["ok"] is False
 
 
-def test_dispatch_and_analyze_pass_the_app_publisher_and_report_errors(stepper_client, monkeypatch):
+def test_collect_drops_open_websockets_so_the_web_refetches(stepper_client, monkeypatch):
+    """collect는 이벤트가 없다 — 연결을 끊어 FE가 재연결하며 다시 조회하게 한다."""
+    from services import collector
+    from starlette.websockets import WebSocketDisconnect
+
+    monkeypatch.setattr(collector, "collect_and_store", lambda: [{"region": "ap-northeast-2", "total": 16}])
+    with stepper_client.websocket_connect("/api/v1/ws") as socket:
+        body = _press(stepper_client, "collect")
+        with pytest.raises(WebSocketDisconnect):
+            socket.receive_text()
+    assert body["ok"] is True and body["reconnected"] == 1
+    assert stepper_client.app.state.realtime.connection_count == 0
+
+
+def test_websocket_drop_that_overruns_its_deadline_does_not_fail_collect(monkeypatch):
+    """끊기가 제한시간을 넘겨도 수집은 저장됐다 — 500이 아니라 reconnected=None으로 보고한다."""
+    import asyncio
+
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+
+    class StuckRealtime:
+        _loop = loop
+        _connections = {object()}
+        _send_timeout = 0.05
+
+        def unregister(self, websocket):
+            self._connections = set()
+
+        async def _close_quietly(self, websocket):
+            await asyncio.sleep(30)  # 반쯤 열린 TCP처럼 응답이 없는 연결
+
+    monkeypatch.setattr(stepper, "_DROP_MARGIN_SECONDS", 0.05)
+    try:
+        assert stepper._drop_websockets(StuckRealtime()) is None
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5)
+        loop.close()
+
+
+@pytest.mark.parametrize("failed_lane", ["main", "autoscaling"])
+def test_dispatch_and_analyze_pass_the_app_publisher_and_report_errors(
+    stepper_client, monkeypatch, failed_lane
+):
     import agent_dispatcher
     import dispatcher
 
     calls = []
 
-    def fake_dispatch(sessions, publish):
-        calls.append(("dispatch", publish))
-        return dispatcher.DispatchReport(scanned=2, closed=1, errored=1)
+    def fake_dispatch(sessions, publish, *, lane):
+        calls.append(("dispatch", lane, publish))
+        return dispatcher.DispatchReport(
+            lane=lane, scanned=2, closed=1, errored=int(lane == failed_lane)
+        )
 
     def fake_analyze(sessions, publish):
         calls.append(("analyze", publish))
@@ -179,10 +226,19 @@ def test_dispatch_and_analyze_pass_the_app_publisher_and_report_errors(stepper_c
 
     dispatched = _press(stepper_client, "dispatch")
     analyzed = _press(stepper_client, "analyze")
-    assert dispatched["ok"] is False and dispatched["report"]["closed"] == 1
+    assert dispatched["ok"] is False and dispatched["report"]["closed"] == 2
+    assert dispatched["report"]["scanned"] == 4
+    assert dispatched["report"]["errored"] == 1
+    assert [report["lane"] for report in dispatched["lane_reports"]] == [
+        dispatcher.LANE_MAIN, dispatcher.LANE_AUTOSCALING
+    ]
     assert analyzed["ok"] is False and analyzed["report"]["failed"] == 1
     publish = stepper_client.app.state.realtime.publish
-    assert calls == [("dispatch", publish), ("analyze", publish)]
+    assert calls == [
+        ("dispatch", dispatcher.LANE_MAIN, publish),
+        ("dispatch", dispatcher.LANE_AUTOSCALING, publish),
+        ("analyze", publish),
+    ]
 
 
 # ------------------------------------------------------------------------------

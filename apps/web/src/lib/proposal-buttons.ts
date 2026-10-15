@@ -62,26 +62,12 @@ export function proposalActionKind(
   return recommendations.every((r) => RUNBOOK_ACTION_KINDS[r.runbook_id] === first) ? first : null;
 }
 
-/**
- * §4.5 버튼 노출 규칙 — 실행 버튼 문구와 반려 버튼 노출 여부.
- *
- * | 후보 계열 | 실행 버튼 | 반려 버튼(`response_mode = AGENT_WAIT`일 때) |
- * | --- | --- | --- |
- * | 차단(`EC2_ISOLATE`·`NACL_ADD_DENY`) | `승인하고 차단` | `차단 안 함` |
- * | 해제(`NACL_RESTORE`) | `승인하고 해제` | 없음 |
- * | 삭제(`SG_DELETE_ISOLATED`·`EBS_DELETE_UNATTACHED`) | `승인하고 삭제` | 없음 |
- * | 조정(`EC2_RIGHTSIZING`·`EC2_ENABLE_AUTOSCALING`)·섞임 | `이 조치 실행` | 없음 |
- *
- * **반려는 차단 제안에만 붙는다.** `차단 안 함`은 *막지 않기로 한다*는 판단이라, 해제·삭제 후보
- * 옆에 두면 누르지 않은 차단을 되돌리겠다는 말이 된다. 종전 규칙(SECOPS 전체)은 `AGENT_WAIT`가
- * SECOPS 전용이라 넓어 보이지 않았을 뿐, 해제 후보에서도 켜졌다.
- */
+/** 실행 버튼 문구. 제안 거절은 인시던트 종료 흐름에서 다룬다. */
 export function proposalButtons(
-  incident: Pick<IncidentResponse, 'recommendations' | 'response_mode'>,
-): { approveLabel: string; canReject: boolean } {
+  incident: Pick<IncidentResponse, 'recommendations'>,
+): { approveLabel: string } {
   const kind = proposalActionKind(incident.recommendations);
   return {
     approveLabel: kind === null ? MIXED_APPROVE_LABEL : KIND_LABELS[kind],
-    canReject: kind === 'BLOCK' && incident.response_mode === 'AGENT_WAIT',
   };
 }

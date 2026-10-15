@@ -1,7 +1,7 @@
 // 제안 조치 버튼 규칙 회귀 — `npm test`. 인시던트 분류로 문구를 가르던 자리를 되살리면 여기서 막힌다(#363).
 //
-// 지키는 것은 셋이다. ① T2 7단계 「원클릭 해제」에서 `승인하고 차단`이 나오지 않는다(핵심 컷이
-// 동작과 반대로 말하던 자리) ② 파괴적 2종의 문구가 삭제로 읽힌다 ③ `차단 안 함`은 차단 제안에만 붙는다.
+// 지키는 것은 둘이다. ① T2 7단계 「원클릭 해제」에서 `승인하고 차단`이 나오지 않는다(핵심 컷이
+// 동작과 반대로 말하던 자리) ② 파괴적 2종의 문구가 삭제로 읽힌다
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -18,7 +18,7 @@ import type { AiRecommendableRunbookId, IncidentResponse, ResponseMode } from '.
 
 type Buttons = Pick<IncidentResponse, 'recommendations' | 'response_mode'>;
 
-/** 문구·반려 판정이 보는 필드는 둘뿐이라(`recommendations`·`response_mode`) 나머지는 세우지 않는다. */
+/** 실행 문구가 response_mode에 영향받지 않는지 확인하므로(`recommendations`·`response_mode`) 나머지는 세우지 않는다. */
 const incident = (
   runbookIds: AiRecommendableRunbookId[],
   responseMode: ResponseMode | null = null,
@@ -66,28 +66,10 @@ test('계열이 섞이면 중립 문구 — 버튼 하나가 후보 전부를 �
   const mixed = incident(['RUNBOOK_NACL_ADD_DENY', 'RUNBOOK_NACL_RESTORE']);
   assert.equal(proposalActionKind(mixed.recommendations), null);
   assert.equal(proposalButtons(mixed).approveLabel, MIXED_APPROVE_LABEL);
-  assert.equal(proposalButtons(mixed).canReject, false);
 });
 
 test('후보 0건은 계열을 지어내지 않는다 — 호출부가 버튼을 만들지 않는 자리다', () => {
   assert.equal(proposalActionKind([]), null);
-  assert.equal(proposalButtons(incident([], 'AGENT_WAIT')).canReject, false);
-});
-
-test('`차단 안 함`은 차단 후보 + AGENT_WAIT에서만 붙는다', () => {
-  assert.equal(proposalButtons(incident(['RUNBOOK_NACL_ADD_DENY'], 'AGENT_WAIT')).canReject, true);
-  // 해제·삭제 후보에 붙으면 누르지 않은 차단을 되돌리겠다는 말이 된다.
-  assert.equal(proposalButtons(incident(['RUNBOOK_NACL_RESTORE'], 'AGENT_WAIT')).canReject, false);
-  assert.equal(
-    proposalButtons(incident(['RUNBOOK_SG_DELETE_ISOLATED'], 'AGENT_WAIT')).canReject,
-    false,
-  );
-  // 실행 전 상태가 아니면 반려할 것이 없다.
-  assert.equal(
-    proposalButtons(incident(['RUNBOOK_NACL_ADD_DENY'], 'PRE_MITIGATION_0_5S')).canReject,
-    false,
-  );
-  assert.equal(proposalButtons(incident(['RUNBOOK_EC2_RIGHTSIZING'], null)).canReject, false);
 });
 
 test('DELETE 계열과 파괴적 런북 목록이 같은 집합이다 — ACT-001 경고와 버튼이 갈리지 않게', () => {
