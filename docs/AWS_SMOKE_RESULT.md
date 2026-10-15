@@ -183,7 +183,7 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 | A7 | `RIGHTSIZING`(`idle-dev`) → `REVERT_SIZE` | **둘 다 `SUCCESS`** — 인시던트 `4a9fb9ae-776c-40c4-abdc-edb2ebc68951`(AI 추천 `RIGHTSIZING` t3.medium→t3.small 1건 · 절감 추정 월 $17.08). 다운사이징 실행 `cc81419c-6f42-4ba9-a6b8-2cc208f5db5e`: 정지 → t3.small → 기동 → Status Check 2/2 대기 뒤 `SUCCESS`. 원복 실행 `0036cc93-d933-4d45-bf9a-e58ad6366873`(사람 승인): t3.medium 복귀 · `SUCCESS`, 원래 실행은 `ROLLED_BACK`. AWS 조회로 타입·`running` 확인, Status Check 2/2 `ok` | 승인 10:59:58 · 다운사이징 `SUCCESS` 11:03:08 · 원복 승인 11:03:21 · 원복 `SUCCESS` 11:03:50 · 2/2 `ok` 11:06:20 · 종료 11:06:21(`JUSTIFIED`) | **원복 `SUCCESS`가 Status Check 2/2 `ok`보다 2분 30초 앞섰다** — 원복 성공 시점의 검사 상태는 `initializing`이었다(§7 10/14 11:03). #434 1-1(원복 뒤 상태와 성공 기록) 대조 항목 |
 | A8 | Status Check 2/2 실 대기 → `stopped` 주입 → `FAILED` → 자동 원복 | **자동 원복 `SUCCESS`** — 인시던트 `3e68eefb-48f8-4f29-86ae-da4447875c27`. 다운사이징 실행 `0759c5a1-f121-4951-a576-018b382d6211`이 기동한 직후(t3.small · `pending`) 관리자 키로 `stop-instances` 주입 → 판정 대기 끝에 `ROLLBACK_INITIATED` → 원복 `d387e871-b14c-4a17-b019-d82b9d2c51e2`가 **사람 승인 없이** 생겨 `SUCCESS`(공개 API에 `trigger_source`가 없어 `AUTO_ON_FAILURE`는 승인 호출이 없었다는 사실로 판단), 원래 실행 `ROLLED_BACK`. AWS 조회로 t3.medium·`running` 복귀 확인 | 승인 11:24:38 · 주입 11:25:11.792 · `ROLLBACK_INITIATED` 11:28:14 무렵 · 원복 `SUCCESS` 11:28:19 · 종료(`JUSTIFIED`) | 주입부터 실패 확정까지 약 3분 — #434 1-3(3분 대기 제한)과 대조할 값. 첫 시도는 주입 실패로 무효(§7 10/14 11:10). impaired 경로 해소 근거로 쓰지 않음 |
 | A8-impaired | Status Check `impaired` 검사 결과 경로 | **미실행 — 미해소.** 실 AWS에서 `impaired`를 안전하게 일으킬 수단이 없다 — Status Check 실패는 AWS 하드웨어·OS 상태에서 나오며, 사용자가 주입하는 공식 경로(FIS 등)는 스모크 정책·예산 밖이고 커널 손상 같은 OS 내부 유발은 인스턴스를 되살릴 보장이 없다 | 10/14(수) 판단 | **이월 2행** — `stopped` 결과(A8)로 대체하지 않는다. 판정 코드의 `impaired` 분기는 스텁 단위 테스트(`apps/core-api/services/tests/test_status_check.py`의 `test_impaired_check_is_a_failure` — `impaired`를 실패로 판정하는지)로만 덮인다. 이월처: Post-MVP — 장애 주입 도구(FIS) 도입 시 재검토 |
-| A10 | P1 3종(`SG_DELETE_ISOLATED`·`SG_RECREATE`·`EBS_DELETE_UNATTACHED`) | | | 선택 |
+| A10 | P1 3종(`SG_DELETE_ISOLATED`·`SG_RECREATE`·`EBS_DELETE_UNATTACHED`) | **미실행(선택)** — 대상 인시던트 2건(`unused` SG `90231a55-c83a-4d5c-95ee-a7a681818d00` · 미연결 EBS `7945b784-7ac9-466a-b4a2-c2053916516d`)이 배포 플랫폼에서 `AWAITING_APPROVAL`로 서 있으나 승인하지 않았다. 실 AWS 확인은 §3 A4-5–A4-7(`precheck()`·직접 DryRun 권한 검증)까지다 | 10/15(목) 판단 | 선택 항목이라 미실행이 미달이 아니다(SSOT 판정 기준 ⓐ). 12/11(금)까지 스모크 환경이 유지되므로(ADR-0009 1차 개정) Post-MVP에서 승인해 잴 수 있다 — 지운 SG·EBS는 다음 `up`이 다시 만든다 |
 
 ---
 
@@ -210,11 +210,11 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 
 | 항목 | 기록 |
 | --- | --- |
-| 대상 주차 · 참조한 SSOT 커밋/절 링크 | ______ |
-| 판단에 사용한 관측 근거 | 이 문서 §______ / 결과 링크 ______ |
-| PM 판단 · 판단자 · 시각 | ______ |
-| 미측정·미해소 항목과 일정 영향 | ______ |
-| 후속 조치·이월 결정 근거 링크 | ______ |
+| 대상 주차 · 참조한 SSOT 커밋/절 링크 | 10주차(10/12(월)–10/15(목)) = 10/15(목) MVP 마감 판정 · 기준은 SSOT §현재 위치 「주차 종료 판정 기준 (10주차)」 ⓐ–ⓓ(PR #461 · `dev` `2b4a7a6` 시점 문구 그대로) |
+| 판단에 사용한 관측 근거 | ⓐ 이 문서 §1–§4(A1–A9 — A9는 §1 「최초 실제 판정」) / PR #439 머지 · ⓑ §8 P2-1·P2-2 · §8-1(P2-3 거절 경로 포함) · §8-2(B5 발동) · ⓒ §11 · ⓓ §5 · §8-1 「이월 4행 최종 처분」 |
+| PM 판단 · 판단자 · 시각 | **4/4 충족 — MVP 마감 판정 통과** · 김세혁 · 2026-10-15(목). 칸별 판정 문장은 SSOT §현재 위치 10주차 판정 결과 각주에만 적는다 |
+| 미측정·미해소 항목과 일정 영향 | 이월 2행(`impaired` 유도 수단 없음)·8행(DryRun 대상 존재 검사 — 가정 반증) 미해소 + 사유·이월처 기재(§5) · A8-impaired 미실행 · A10(선택) 미실행 · P2-2의 서비스 연결·트래픽 전환과 ASG 상한 확장 미관측. **판정 요건이 아니어서 일정 영향 없다** — 전부 Post-MVP로 넘긴다 |
+| 후속 조치·이월 결정 근거 링크 | [ADR-0011](adr/0011-pre-mitigation-latency-target.md)(선차단 목표 3초 · 팀 환경 반복 측정) · [ADR-0007](adr/0007-guardrail-dryrun-executor-precheck-contract.md) 4차 개정(§4 확정) · #434(동작 결함) · #435 · #438(Post-MVP 범위) · #448(B6) |
 
 ---
 
@@ -242,6 +242,9 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 | 10/14 11:30 | **P2-2 후보가 서지 않는다** — 10:58 · 11:08 · 11:23 회차의 `idle-dev` 인시던트 3건 모두 AI 추천이 `RIGHTSIZING` 1건뿐이었다(메뉴에는 `ENABLE_AUTOSCALING`도 오른다 — t3.medium은 다운사이징 목표가 있다) | 저사용 EC2에 AI가 다운사이징을 고르는 것은 의도대로다. P2-2를 앱 경로로 시작할 후보 생성 방법이 필요하다 — §8 P2-2 |
 | 10/14 16:38 | **P2-2 후보를 앱 경로로 세웠다** — 열려 있던 `idle-dev` 인시던트 `3af11ab8-e4ab-4641-8ef4-961351b37489`(11:28 생성 · `RIGHTSIZING` t3.medium→t3.small)를 승인(16:38:44) → 실행 `ef81239e-cefd-44c6-8c3c-bc7a01a9fc82` `SUCCESS` 16:41:18 → **원복하지 않고** `JUSTIFIED` 종료(16:41:58) | t3.small은 다운사이징 규칙의 목표가 없어(`rightsizing_target_type` → 없음) FinOps 메뉴에 `ENABLE_AUTOSCALING`만 남는다(`ai/capabilities.py` `build_finops_capabilities`). 다음 스캔의 인시던트 `c8c21456-c2bd-4627-a1cf-c6b43559d221`(16:43:39)에서 AI 추천이 `ENABLE_AUTOSCALING` 1건(min 1 · max 1)으로 섰다. 주입이 아니라 앱 경로다. **`idle-dev`는 t3.small로 남아 있다** — A7 재현이 필요하면 t3.medium으로 되돌린다 |
 | 10/14 16:49 | **P2-2 생성물 넷을 관리자 CLI로 정리**(16:49:51–16:50:58) — ASG `--force-delete`(인스턴스 `i-088bf09520edf6e85` 종료) → 시작 템플릿 삭제 → AMI 등록 해제 → 스냅숏 삭제 | `service --operation cleanup` 경로는 이 구성에서 쓰지 못한다(CLI가 로컬 DB를 읽어 플랫폼 RDS의 실행 기록을 못 찾는다 — E2E 대본 T4-4). 16:51:04 AWS 조회로 ASG 0 · 시작 템플릿 0 · AMI 0(계정 자체 AMI 전체 0) · 스냅숏 `InvalidSnapshot.NotFound` · ASG 인스턴스 `terminated` 확인 |
+| 10/15 오전(09:08 전) | **스모크 계정 밖에 Vigilantis 자원이 없는지 확인** — 로컬 AWS CLI의 `default` 프로필이 개인 계정을 가리키고 있었다(10/12 오배포 사고의 원인). 그 계정을 전 리전 조회했다(EC2·VPC·AMI·스냅숏·EBS·LT·SG·NAT·EIP·ASG·ELB·TG·RDS·ECS·ECR·Secrets·로그 그룹 + IAM·S3·Budget·CloudFront·WAF·Route 53·ACM) | **Vigilantis 자원 0건.** 남은 4건(기본 VPC의 `launch-wizard-1` SG · IAM 역할 2개 · CloudFormation 템플릿 버킷)은 전부 7월 생성으로 다른 개인 프로젝트 소속이라 손대지 않았다. `default` 프로필을 학원 계정으로 바꿔 같은 사고가 다시 나지 않게 했다(개인 계정은 별도 이름의 프로필로 분리). **Vigilantis 실 AWS 자원은 학원 계정에만 있다** |
+| 10/15 09:08 | **P2-3 거절 경로 실측**(§8-1 「거절 경로 실측」) — 앱 키 12건(거절 9 · 통과 3) · 관리자 키 3건, 전부 `precheck()` 직접 호출(읽기·DryRun). 원본 출력은 PR #477 본문 `## 원본 출력` | 사유 코드가 ADR-0007 §4 규약과 달랐던 것은 앱 키의 없는 SG 2건뿐이다(`PRECHECK_UNAUTHORIZED` — 태그 조건이 없는 자원에서 평가 불가). 첫 시도의 없는 ID(`i-0123456789abcdef0` 등)는 `InvalidInstanceID.Malformed`로 다른 길을 타 무효 — 형식이 맞는 실재하지 않는 ID로 다시 쟀다 |
+| 10/15 09:10–09:12 | **측정용 임시 자원 2종을 만들고 지웠다** — ① 시작 템플릿 `vigilantis-probe-lt-1015` + ASG `vigilantis-asg-i-084f4d1953138068b`(min·max·desired 0, 인스턴스 없음) — 동명 ASG 거절(c-③) 측정 ② `stopped` 인스턴스 `i-013120968f1d3df6e`(t3.nano · 스모크 서브넷 a) — `running` 아님 거절(c-②) 측정 | 관리자 키로 만들고 측정 직후 삭제·종료했다. AWS 조회로 ASG 0 · 시작 템플릿 0 · 인스턴스 `terminated` 확인. 스모크 자원(`status`의 18종)은 건드리지 않았다 |
 
 ---
 
@@ -258,13 +261,30 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 
 | # | 런북 | DryRun 부분 결과 | describe 통과 조건 실측(①②③④ 각각) | 잠정 조건 확정 / 수정 필요 |
 | --- | --- | --- | --- | --- |
-| P2-3a | `EC2_ISOLATE`<br>ENI `modify_network_interface_attribute` DryRun + `describe_target_health`·`describe_security_groups` | `precheck()` 통과(앱 키 · `web-1`) — ENI 교체 DryRun 통과 | ① DryRun 통과 **통과**<br>② `isolation_group_id` SG 존재 **통과**<br>③ TG 존재·대상 등록됨(`Target.NotRegistered` 설명은 미등록으로 본다) **통과**<br>(근거: PR #439 본문 `## 원본 출력` ④ P2 행 `summary` — "ENI 교체 DryRun 통과·격리용 SG 존재·TG 존재와 대상 등록") | 확정 / 수정 필요 — ______ · 비고: **통과 경로만 실측** — 거절 경로(예: `Target.NotRegistered`만 오는 대상)는 미측정이라 조건 확정을 아직 고르지 않는다 |
-| P2-3b | `EC2_UNISOLATE`<br>ENI DryRun + `describe_target_groups`·`describe_security_groups` | 해제 3회 모두 ENI DryRun `Client.DryRunOperation`(CloudTrail · 주체 `vigilantis-access`) 뒤 실제 호출 | ① DryRun 통과 **통과**(3/3)<br>② 백업 레코드의 복원 대상 SG 전부 현존 **통과**(3/3 — 실행이 사전 검사를 지나 `SUCCESS`)<br>③ TG 존재·대상이 같은 VPC **통과**(3/3 — 같은 근거)<br>②③의 `verification_summary` 원문은 공개 API에 없어 옮기지 못했다 | 확정 / 수정 필요 — ______ · 비고: **통과 경로만 실측** — 복원 대상 SG가 사라진 경우 등 거절 경로는 미측정 |
-| P2-3c | `EC2_ENABLE_AUTOSCALING`<br>LT `create_launch_template` DryRun + `describe_instances`·`describe_auto_scaling_groups` | `precheck()` 통과(앱 키 · `idle-dev`) — LT DryRun 통과 | ① DryRun 통과 **통과**<br>② 원본 EC2 존재·`running` **통과**<br>③ 동명 ASG 부재 **통과**<br>④ `min_size <= max_size <= 4` **통과**<br>(근거: PR #439 본문 `## 원본 출력` ④ P2 행 `summary` — "인스턴스 running·Launch Template DryRun 통과·동명 ASG 부재·min_size/max_size 범위") | 확정 / 수정 필요 — ______ · 비고: **통과 경로만 실측** — 거절 경로(예: 동명 ASG가 이미 있는 경우)는 미측정이라 조건 확정을 아직 고르지 않는다 |
+| P2-3a | `EC2_ISOLATE`<br>ENI `modify_network_interface_attribute` DryRun + `describe_target_health`·`describe_security_groups` | `precheck()` 통과(앱 키 · `web-1`) — ENI 교체 DryRun 통과 | ① DryRun 통과 **통과**<br>② `isolation_group_id` SG 존재 **통과**<br>③ TG 존재·대상 등록됨(`Target.NotRegistered` 설명은 미등록으로 본다) **통과**<br>(근거: PR #439 본문 `## 원본 출력` ④ P2 행 `summary` — "ENI 교체 DryRun 통과·격리용 SG 존재·TG 존재와 대상 등록") | **확정** — 조건 수정 없음(2026-10-15 · ADR-0007 4차 개정). 거절 경로는 아래 「거절 경로 실측」 표 ②·③ |
+| P2-3b | `EC2_UNISOLATE`<br>ENI DryRun + `describe_target_groups`·`describe_security_groups` | 해제 3회 모두 ENI DryRun `Client.DryRunOperation`(CloudTrail · 주체 `vigilantis-access`) 뒤 실제 호출 | ① DryRun 통과 **통과**(3/3)<br>② 백업 레코드의 복원 대상 SG 전부 현존 **통과**(3/3 — 실행이 사전 검사를 지나 `SUCCESS`)<br>③ TG 존재·대상이 같은 VPC **통과**(3/3 — 같은 근거)<br>②③의 `verification_summary` 원문은 공개 API에 없어 옮기지 못했다 | **확정** — 조건 수정 없음(2026-10-15 · ADR-0007 4차 개정). 거절 경로는 아래 표 ②·③ |
+| P2-3c | `EC2_ENABLE_AUTOSCALING`<br>LT `create_launch_template` DryRun + `describe_instances`·`describe_auto_scaling_groups` | `precheck()` 통과(앱 키 · `idle-dev`) — LT DryRun 통과 | ① DryRun 통과 **통과**<br>② 원본 EC2 존재·`running` **통과**<br>③ 동명 ASG 부재 **통과**<br>④ `min_size <= max_size <= 4` **통과**<br>(근거: PR #439 본문 `## 원본 출력` ④ P2 행 `summary` — "인스턴스 running·Launch Template DryRun 통과·동명 ASG 부재·min_size/max_size 범위") | **확정** — 조건 수정 없음(2026-10-15 · ADR-0007 4차 개정). 거절 경로는 아래 표 ②·③·④ |
 
 > 거절이 났으면 사유 코드(`PRECHECK_TARGET_NOT_FOUND` · `PRECHECK_INVALID_STATE` · `PRECHECK_PARAM_INVALID`)와 `verification_summary`를 그대로 적는다. 조건을 고쳐야 하면 ADR-0007 §4 개정 대상으로 §7에 남긴다.
 
-**이월 4행 최종 처분**: **해소** — P2 3종의 조회(§2-1)와 실행(§8 P2-1 격리·해제 3회 · P2-2 자동 확장 1회)이 모두 실 AWS에서 `SUCCESS`. P2-3a–c의 조회 통과 조건은 **통과 경로만 실측**이라 「확정 / 수정 필요」 칸은 이 처분과 별개로 남는다(ADR-0007 §4 잠정 조건 — 판정 기준 ⓓ의 #426 항목)
+**거절 경로 실측 (P2-3 · 2026-10-15(목) 09:08–09:13 KST · 김세혁)** — 위 3행의 「확정」 근거다. `executor.precheck()`를 `dev` `2b4a7a6` 코드로 **직접 호출**했다(읽기·DryRun만 — 자산 변경 없음). 같은 입력을 **앱 키**(`vigilantis-smoke-app` — 운영 접근 역할과 같은 정책)로 12건(거절 9 · 통과 3) 불렀고, 사유 코드가 갈린 2건(a-② · b-②)과 대조용 c-②(없는 인스턴스)는 **관리자 키**로도 불렀다(3건). 없는 자원 ID는 형식이 맞는 실재하지 않는 값을 썼다(`i-084f4d1953138068c` · `sg-074fae62f8856a444` — 형식이 틀린 ID는 `Malformed`로 다른 길을 탄다). 정지 인스턴스와 동명 ASG는 측정용으로 잠깐 만들고 바로 지웠다(§7 10/15).
+
+| # | 조건 | 입력 | 앱 키 결과 | 관리자 키 결과 | 판정 |
+| --- | --- | --- | --- | --- | --- |
+| a-② | `ISOLATE` 격리 SG 존재 | `web-1` + 없는 격리 SG | `PRECHECK_UNAUTHORIZED` — 확인: 인스턴스와 ENI 존재 | `PRECHECK_TARGET_NOT_FOUND` — 확인: ENI 교체 DryRun 통과 | 거절 ✅ · 사유 표기는 자격마다 다름(아래) |
+| a-③ | `ISOLATE` TG 등록 | `idle-dev`(TG 미등록) + `vigilantis-smoke-tg` | `PRECHECK_TARGET_NOT_FOUND` — 확인: ENI 교체 DryRun 통과·격리용 SG 존재 | — | 거절 ✅ · `Target.NotRegistered` 판별이 실 AWS 응답에서 동작 |
+| b-② | `UNISOLATE` 복원 SG 현존 | 백업의 복원 SG에 없는 SG 1개 | `PRECHECK_UNAUTHORIZED` — 확인: 인스턴스와 ENI 존재 | `PRECHECK_TARGET_NOT_FOUND` — 확인: SG 복원 DryRun 통과 | 거절 ✅ · 사유 표기는 자격마다 다름(아래) |
+| b-③ | `UNISOLATE` TG가 같은 VPC | 백업의 TG = 플랫폼 VPC의 `vigilantis-platform-api` | `PRECHECK_INVALID_STATE` — 확인: SG 복원 DryRun 통과·복원 대상 SG 현존 | — | 거절 ✅ · `describe_target_groups`의 `VpcId` 대조가 실 AWS에서 동작 |
+| c-② | `ENABLE_AUTOSCALING` 원본 존재 | 없는 인스턴스 | `PRECHECK_TARGET_NOT_FOUND` — 확인: 없음(인스턴스 조회 실패) | `PRECHECK_TARGET_NOT_FOUND` | 거절 ✅ |
+| c-② | `ENABLE_AUTOSCALING` 원본 `running` | 측정용 `stopped` 인스턴스(t3.nano) | `PRECHECK_INVALID_STATE` — 확인: 인스턴스 존재 | — | 거절 ✅ |
+| c-③ | `ENABLE_AUTOSCALING` 동명 ASG 부재 | 측정용 ASG `vigilantis-asg-i-084f4d1953138068b`(desired 0)를 먼저 만듦 | `PRECHECK_INVALID_STATE` — 확인: 인스턴스 running·Launch Template DryRun 통과 | — | 거절 ✅ |
+| c-④ | `min_size <= max_size <= 4` | `max_size` 5 / `min_size` 3 > `max_size` 2 | 둘 다 `PRECHECK_PARAM_INVALID`(AWS 호출 전) | — | 거절 ✅ |
+
+같은 회차에서 통과 경로 3건(`ISOLATE` `web-1` · `UNISOLATE` 현재 SG·`vigilantis-smoke-tg` · `ENABLE_AUTOSCALING` `idle-dev` 1–2)도 앱 키로 다시 통과했다.
+
+**사유 표기가 자격마다 다른 이유(a-② · b-②)**: 앱 정책은 ENI 교체에 `aws:ResourceTag/vigilantis:smoke` 조건을 건다. 없는 SG에는 태그가 없어 조건을 평가할 수 없으므로 AWS가 ① DryRun 단계에서 `UnauthorizedOperation`을 돌려주고, 가드레일은 ②의 조회에 닿기 전에 `PRECHECK_UNAUTHORIZED`로 멈춘다. 관리자 키는 DryRun이 통과하고 ②가 `InvalidGroup.NotFound`로 걸러 ADR-0007 §4 규약대로 `PRECHECK_TARGET_NOT_FOUND`가 된다. **어느 쪽이든 거절되므로 안전 판정은 같다** — 관제자에게 "대상 없음"이 "권한 누락"으로 보이는 표기 문제이며, §3 A5 · 이월 8행과 같은 성격이다. 처분도 같다(코드 변경 없음 — 2026-10-14 안성일 처분 · ADR-0007 4차 개정 ②).
+
+**이월 4행 최종 처분**: **해소** — P2 3종의 조회(§2-1)와 실행(§8 P2-1 격리·해제 3회 · P2-2 자동 확장 1회)이 모두 실 AWS에서 `SUCCESS`. P2-3a–c의 조회 통과 조건은 **2026-10-15 거절 경로까지 실측해 확정했다**(위 표 · ADR-0007 4차 개정 — 판정 기준 ⓓ의 #426 항목)
 
 ### 8-2. #447 자동 격리 — 팀 실 AWS 검증과 시간 기록
 
@@ -313,7 +333,7 @@ ADR-0009 §6 1단계는 이 회차를 elbv2·autoscaling 조회의 실 AWS 첫 �
 | Medium `deadline_to_reservation_ms` · `deadline_to_confirmation_ms` · `scan_to_confirmation_ms` · `reservation_to_confirmation_ms` | 1780.5 · **2991.6** · 2120.1 · 1211.0(ms). phase: `guardrail_passed` 866.2/866.2 · `execution_reserved` 909.1/42.9 · `backup_committed` 1194.4/285.3 · `execution_started` 1194.5/0.1 · `isolation_confirmed` 2120.1/925.6 |
 | 백업 선행(`backup_committed` → `execution_started`) · AWS 조회로 본 SG 교체·TG 등록 해제 | 계측된 두 회차 모두 `backup_committed`가 `execution_started`보다 앞섰다(0.1ms 차 — 같은 흐름에서 연이어 찍힌다). SG 교체·TG 등록 해제는 매 회차 `describe_network_interfaces`·`describe_target_health`로 확인했다(§8 P2-1) |
 | 그 밖의 시도(`failed` · `interrupted` · `unconfirmed` · `prerequisite_blocked`)와 사유 | High ① 회차는 격리·확인 모두 성공했으나 **계측 로그가 남지 않았다** — 주입한 일회성 태스크가 운영 진입점의 로깅 설정을 거치지 않았다. ②는 주입 코드에서 `setup_logging('INFO')`를 불러 같은 조건으로 다시 잰 회차다. 그 밖에 **가드레일 거절 1건**(`failed` — 08:11Z · 인시던트 `5db1c4ea-…` · `PRECHECK_UNAUTHORIZED`, 주입 태스크가 접근 역할 대신 태스크 역할로 호출 — §7 10/13 17:11)과 **발동 조건 미성립 1건**(Medium `web-2` — 승인 대기에 들어가지 못해 기한이 없음, §7 10/13 17:17)이 있다. 둘 다 제품 경로가 아니라 실측 방법·스모크 구성에서 나왔다 |
-| 0.5초 목표 대비(기록만 — 판정 요건 아님) | High 2.93초 · Medium 기한 후 2.99초. 0.5초 목표 개정 여부는 판정 전에 `SEC` 복수 담당이 정한다(SSOT 10주차 리스크 2번 — 위 「판정 기준과의 관계」) |
+| 목표 대비(기록만 — 판정 요건 아님) | High 2.93초 · Medium 기한 후 2.99초. **목표는 2026-10-15에 0.5초 → 3초로 개정됐다**([ADR-0011](adr/0011-pre-mitigation-latency-target.md) — 이 절의 수치와 PR #469 개인 계정 30회가 근거). **두 회차 모두 새 목표 안이다.** 다만 팀 환경 표본이 2회라 p95 확인은 Post-MVP 반복 측정 몫이다(ADR-0011 Consequences) |
 
 ---
 
