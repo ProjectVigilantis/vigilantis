@@ -1,9 +1,10 @@
-# ADR-0010: 플랫폼 배포 — 단일 계정이지만 SaaS 모양으로 (CloudFront 기본 도메인 · 역할 전환 · 수집 범위)
+# ADR-0010: 플랫폼 배포 — 단일 계정이지만 SaaS 모양으로 (CloudFront 사용자·기본 도메인 · 역할 전환 · 수집 범위)
 
-- **Status**: Accepted (2026-10-13 — 안성일 검토 PR #441 · 김세혁 확인 PR #464)
+- **Status**: Accepted
 - **Date**: 2026-10-12
-- **Deciders**: 김세혁(PM/Infra — `INFRA` 담당 결정), 안성일(AI·Architect — FastAPI 아키텍처·DB 검토)
-- **Refs**: [ADR-0006](0006-localstack-team-standard-env.md) §2(IaC Post-MVP) · [ADR-0009](0009-real-aws-smoke-environment.md)(스모크 환경 · 앱 정책) · #435 4-2·6-1
+- **Amended**: 2026-10-16 1차 — 사용자 도메인 `vigilantis.dev` 연결과 웹 API 주소·CORS 반영(하단 §개정 이력 · 핵심 결정 불변)
+- **Deciders**: 최초 결정 — 김세혁(PM/Infra · `INFRA` 담당 결정)·안성일(AI·Architect · FastAPI 아키텍처·DB 검토) / 1차 개정 — 안성일 제안·김세혁 승인(PR #480)
+- **Refs**: [ADR-0006](0006-localstack-team-standard-env.md) §2(IaC Post-MVP) · [ADR-0009](0009-real-aws-smoke-environment.md)(스모크 환경 · 앱 정책) · #435 4-2·6-1 · #467(사용자 도메인·CORS) · #468(개정 취합)
 
 ## Context (배경)
 
@@ -20,7 +21,7 @@ MVP는 단일 계정(SSOT §MVP 확정 범위)이므로 계정을 가를 수 없
 
 ## Decision (결정)
 
-**서울 리전 단일 계정에 플랫폼 전용 VPC를 세우고, CloudFront 기본 도메인 + WAF 허용 IP로 공개한다. 앱은 장기 키 없이 태스크 역할 → 접근 역할(AssumeRole + ExternalId)로만 관제 대상에 닿으며, 수집 범위는 관제 대상 VPC로 한정한다. 구성은 Boto3 스크립트 `scripts/provision_platform_aws.py`로 한다.**
+**서울 리전 단일 계정에 플랫폼 전용 VPC를 세우고, CloudFront 기본 도메인 + WAF 허용 IP로 공개한다. 앱은 장기 키 없이 태스크 역할 → 접근 역할(AssumeRole + ExternalId)로만 관제 대상에 닿으며, 수집 범위는 관제 대상 VPC로 한정한다. 구성은 Boto3 스크립트 `scripts/provision_platform_aws.py`로 한다.** (2026-10-16 개정: 같은 CloudFront 배포에 사용자 도메인 `vigilantis.dev`를 별칭으로 더했다 — §4)
 
 ### 1. 리전 — 관제 대상과 같은 서울
 
@@ -48,12 +49,15 @@ MVP는 단일 계정(SSOT §MVP 확정 범위)이므로 계정을 가를 수 없
 - 앱 코드는 바뀌지 않는다. 운영 진입점 `apps/core-api/serve.py`가 기동 때 AWS 설정 파일에 역할 전환 프로필(`credential_source = EcsContainer` · `role_arn` · `external_id`)을 쓰고 기본 프로필로 잡는다. 이후 Boto3가 전환과 갱신을 맡는다.
 - 접근 역할 정책을 따로 두지 않는 이유: 정책이 두 벌이면 `tests/test_provision_smoke_aws.py`의 두 방향 보증(코드가 부르는 작업 = 정책)이 한쪽에만 걸린다.
 
-### 4. 공개 — CloudFront 기본 도메인 + WAF
+### 4. 공개 — CloudFront(사용자 도메인 · 기본 도메인) + WAF
 
-- 주소는 CloudFront 기본 도메인(`d….cloudfront.net`)이다. HTTPS 인증서를 AWS가 준다. 도메인은 학원 확인 뒤 12/11(금) 최종 발표 전에 붙인다 — 배포를 다시 만들 필요 없이 대체 도메인과 ACM 인증서만 더한다.
+- 주소는 **사용자 도메인 `https://vigilantis.dev`** 와 CloudFront 기본 도메인(`https://d….cloudfront.net`) 둘이다(2026-10-16 개정 — 원문은 §개정 이력). 배포를 다시 만들지 않고 기존 배포에 별칭과 뷰어 인증서(us-east-1 ACM · SNI)만 더했으며, Route53 A 별칭 레코드가 그 배포를 가리킨다. 실제 배포 ID·기본 도메인 값과 확인 시각은 [`docs/AWS_SMOKE_RESULT.md`](../AWS_SMOKE_RESULT.md) §11에 있다.
+- 도메인은 `up --domain <도메인>`이 단다. us-east-1 ACM 인증서(`ISSUED`)와 Route53 공개 호스팅 영역은 스크립트 밖에서 먼저 준비해야 하며, 둘 중 하나라도 없으면 `up`은 무엇이든 바꾸기 전에 멈춘다. `down`은 이 배포를 가리키는 별칭 레코드만 지우고, 인증서와 호스팅 영역은 지우지 않는다.
+- **웹 API 주소와 CORS 허용 출처는 공개 주소 목록 하나에서 나온다**(`public_origins` — 별칭이 먼저, 기본 도메인이 마지막). `build`는 첫 값을 웹 번들의 `NEXT_PUBLIC_API_BASE_URL`로 넣으므로 웹은 `https://vigilantis.dev`로 API를 부른다. `deploy`는 목록 전부(`https://vigilantis.dev` · CloudFront 기본 도메인)를 api의 `CORS_ALLOW_ORIGINS`로 넣는다. 같은 목록이 WebSocket `Origin` 검사(`apps/core-api/routers/ws.py`)에도 쓰이므로, 별칭을 단 뒤에도 기본 도메인으로 연 화면의 실시간 연결이 끊기지 않게 기본 도메인을 남긴다.
 - **WAF(CLOUDFRONT 범위) 기본 차단 + 허용 IP만 통과.** 로그인이 없는 MVP라 이것이 출입문이다. 허용 목록에는 PM이 준 IP와 **플랫폼 NAT의 공인 IP**가 들어간다 — 웹의 서버 측 API 호출이 CloudFront를 거치기 때문이다(Context 3). 허용 IP는 저장소에 적지 않고 `--allow-cidr`로 받는다. 스크립트는 IPv4 CIDR만 받고 **/24보다 넓은 범위는 거부한다** — WAF 자체는 `/0`만 거절하므로 `0.0.0.0/1` 같은 광역이 출입문을 무력화하지 않게 한다.
 - **ALB는 공개지만 CloudFront만 받는다.** 두 겹이다 — ① ALB 보안그룹은 CloudFront 관리형 prefix list(`com.amazonaws.global.cloudfront.origin-facing`)만 허용 ② 리스너 규칙은 CloudFront가 붙이는 비밀 헤더(`X-Vigilantis-Origin`)가 있어야 앱으로 보내고, 없으면 기본 403.
-- CloudFront → ALB는 **평문 HTTP**다. ALB에 붙일 인증서는 도메인이 있어야 받는다. 브라우저 → CloudFront는 HTTPS지만, 오리진이 internet-facing ALB의 공인 주소이고 요청을 넘기는 엣지가 서울 밖일 수도 있어 **이 구간과 비밀 헤더 값은 인터넷 구간을 평문으로 지날 수 있다.** 헤더 값이 새면 남의 CloudFront 배포를 거쳐 WAF를 우회할 수 있다(ALB 보안그룹은 **모든** CloudFront 배포의 prefix list를 허용한다). 도메인·인증서 확보 전까지의 대가로 받으며, 도메인을 붙일 때 HTTPS로 바꾼다.
+- CloudFront → ALB는 **평문 HTTP**로 정했다(2026-10-12 결정). ALB에 붙일 인증서는 도메인이 있어야 받는다. 브라우저 → CloudFront는 HTTPS지만, 오리진이 internet-facing ALB의 공인 주소이고 요청을 넘기는 엣지가 서울 밖일 수도 있어 **이 구간과 비밀 헤더 값은 인터넷 구간을 평문으로 지날 수 있다.** 헤더 값이 새면 남의 CloudFront 배포를 거쳐 WAF를 우회할 수 있다(ALB 보안그룹은 **모든** CloudFront 배포의 prefix list를 허용한다). 도메인·인증서 확보 전까지의 대가로 받았고, 원문은 "도메인을 붙일 때 HTTPS로 바꾼다"고 적었다.
+- **이 구간의 기록된 상태**(2026-10-16 개정) — 저장소의 구현(`scripts/provision_platform_aws.py`)은 오리진을 `OriginProtocolPolicy: http-only`로 만든다. [`docs/AWS_SMOKE_RESULT.md`](../AWS_SMOKE_RESULT.md) §11은 사용자 도메인을 단 뒤인 10/13(화) 15시대 KST 읽기 전용 조회에서 오리진이 `http-only`였다고 기록한다. 그 뒤의 AWS 상태는 다시 조회하지 않았다. 따라서 원문의 HTTPS 전환 계획은 그 조회 시점까지 이행되지 않았다는 것만 확인됐고, 이후 이행 여부는 확인하지 않았다. 사용자 도메인 연결로 확인된 변화는 브라우저 → CloudFront 구간의 주소와 인증서다. 이 구간의 HTTPS 전환 여부와 시점은 이 개정이 다루지 않는다.
 - 캐시는 끈다(관리형 `CachingDisabled`). 헤더·쿼리는 Host만 빼고 넘긴다(`AllViewerExceptHostHeader`) — WebSocket(`/api/v1/ws`) 업그레이드가 그대로 간다.
 
 ### 5. 실행 — ECS Fargate · RDS
@@ -78,7 +82,7 @@ MVP는 단일 계정(SSOT §MVP 확정 범위)이므로 계정을 가를 수 없
 ### 7. 구성 도구 · 절차
 
 - **Boto3 스크립트다**(ADR-0006 §2 — IaC는 Post-MVP). 방식은 스모크 스크립트와 같다 — 태그(`vigilantis:platform=true`) 식별 · 멱등 · `--yes` 없으면 미리 보기 · 실 AWS 전용 가드 · `--account` 대조.
-- 순서: `up --allow-cidr <IP>/32 --yes` → OpenAI 키 넣기 → `build --tag <태그>`(ECR 푸시 — 웹은 CloudFront 주소를 박아 빌드) → `deploy --tag <태그> --yes`(마이그레이션 → 서비스) → 판정 기준 실측.
+- 순서: `up --allow-cidr <IP>/32 [--domain <도메인>] --yes` → OpenAI 키 넣기 → `build --tag <태그>`(ECR 푸시 — 웹은 §4의 API 주소를 박아 빌드) → `deploy --tag <태그> --yes`(마이그레이션 → 서비스) → 판정 기준 실측. 도메인을 새로 달거나 바꾸면 `build`와 `deploy`를 다시 돌린다 — 웹 번들의 API 주소와 api의 CORS 허용 출처가 그 주소를 따른다(2026-10-16 개정).
 - `up`은 무엇이든 만들기 전에(미리 보기에서도) 스모크 앱 정책과 스모크 VPC가 있는지 본다 — 없으면 NAT·RDS를 세우기 전에 멈춘다.
 - `down`은 플랫폼 태그 자원과 플랫폼 VPC 안만 지운다. 스모크 환경과 그 앱 정책은 건드리지 않는다. 이름이 같아도 플랫폼 태그(`vigilantis:platform=true`)가 없는 IAM 역할은 `up`이 덮어쓰지 않고 `down`이 지우지 않는다.
 - **정리 순서는 플랫폼 `down` → 스모크 `down`이다.** 접근 역할이 스모크 앱 정책을 붙잡고 있는 동안 스모크 `down`은 정책을 지울 수 없어(IAM `DeleteConflict`) 무엇이든 지우기 전에 멈춘다. 반대로 스모크 VPC를 다시 세우면 앱 정책의 VPC ARN은 따라가지만 플랫폼의 `COLLECT_VPC_IDS`는 다음 `deploy` 전까지 옛 VPC를 가리킨다 — 스모크를 다시 세웠으면 `deploy`를 다시 돌린다.
@@ -97,7 +101,7 @@ MVP는 단일 계정(SSOT §MVP 확정 범위)이므로 계정을 가를 수 없
 - **NAT 1개** — AZ a 장애 시 c의 태스크도 밖으로 못 나간다. 비용을 우선했다.
 - **배포 중 api 중단**(min 0) — 디스패처 선점(lease)이 생기면(#435 4-2) 기본 롤링으로 바꾼다.
 - **웹의 서버 측 API 호출이 CloudFront를 한 바퀴 돈다**(Context 3). NAT IP를 허용 목록에 넣어 통과시키는 대가다. 서버 측은 내부 주소로 부르게 바꾸는 것은 FE 변경이라 Post-MVP다.
-- **CloudFront 주소가 바뀌면 웹 이미지를 다시 빌드한다**(주소가 번들에 박힌다). 도메인을 붙인 뒤에는 바뀌지 않는다.
+- **공개 주소가 바뀌면 웹 이미지를 다시 빌드하고 api를 다시 배포한다**(API 주소는 번들에, CORS 허용 출처는 api 설정에 박힌다). 별칭이나 CloudFront 배포를 바꾸지 않으면 두 값도 바뀌지 않는다(2026-10-16 개정 — 원문은 "CloudFront 주소가 바뀌면 웹 이미지를 다시 빌드한다").
 - **로그인 없음** — 허용 IP 안의 누구나 조치를 승인할 수 있다. 로그인 도입 전까지 허용 목록을 넓히지 않는다.
 - 수집 범위 필터(§6)가 머지되기 전 이미지로 배포하면 플랫폼 VPC가 관제 대상에 섞인다 — 필터 PR을 먼저 머지한다.
 
@@ -106,3 +110,22 @@ MVP는 단일 계정(SSOT §MVP 확정 범위)이므로 계정을 가를 수 없
 - 스모크 환경과 앱 정책: [ADR-0009](0009-real-aws-smoke-environment.md) §2
 - Post-MVP SaaS 전환·IaC: #438 ①②④⑨
 - 구현: `scripts/provision_platform_aws.py` · `tests/test_provision_platform_aws.py` · `scripts/provision_smoke_aws.py`(`down`의 정리 순서 가드) · `apps/core-api/serve.py` · `apps/core-api/tests/test_serve.py` · `apps/core-api/Dockerfile` · `apps/web/Dockerfile` · `apps/web/next.config.ts`
+- 배포 확인 기록: [`docs/AWS_SMOKE_RESULT.md`](../AWS_SMOKE_RESULT.md) §11
+
+## 개정 이력
+
+- **2026-10-13 (채택)** — 2026-10-12 결정에 대한 안성일 검토(PR #441)·김세혁 확인(PR #464)을 거쳐 `Accepted`.
+- **2026-10-16 (1차 개정 — #468)** — **사용자 도메인 `vigilantis.dev` 연결과 그에 따른 웹 API 주소·CORS를 반영한다. 리전·네트워크·권한·WAF 출입문·실행·수집 범위라는 핵심 결정은 바뀌지 않는다.** 최초 결정일은 위 Date에, 채택 경위는 앞 항목에 보존한다.
+
+  | 절 | 원문(2026-10-12) | 개정 |
+  | --- | --- | --- |
+  | 제목 · §4 제목 | "CloudFront 기본 도메인" | 사용자 도메인과 기본 도메인을 함께 적는다 |
+  | §4 주소 | "주소는 CloudFront 기본 도메인(`d….cloudfront.net`)이다. HTTPS 인증서를 AWS가 준다. 도메인은 학원 확인 뒤 12/11(금) 최종 발표 전에 붙인다 — 배포를 다시 만들 필요 없이 대체 도메인과 ACM 인증서만 더한다." | 사용자 도메인과 기본 도메인 두 주소. 도메인 사전 조건과 `up --domain`·`down`의 범위를 더한다 |
+  | §4 API 주소·CORS | 없음(웹은 CloudFront 주소를 박아 빌드) | 별칭 우선 공개 주소 목록 — 첫 값이 웹 API 주소, 전부가 CORS·WebSocket 허용 출처 |
+  | §4 오리진 구간 | "도메인을 붙일 때 HTTPS로 바꾼다" | 원문 결정과 계획은 그대로 둔다. 구현은 `http-only`이고, 도메인을 단 뒤 10/13(화) 15시대 KST 조회 기록도 `http-only`다. 그 뒤 AWS 상태는 다시 조회하지 않았으며, 전환 여부·시점은 이 개정이 다루지 않는다 |
+  | §7 순서 · Consequences | CloudFront 주소 기준 재빌드 | `--domain` 선택 인자, 주소가 바뀌면 `build`·`deploy` 재실행 |
+
+  **근거 — 확정 단계별로 나눈다.**
+  - **머지된 구현**: PR #467(2026-10-13 13:10 KST 머지) — `scripts/provision_platform_aws.py`의 `public_origins`·`_require_custom_domain`·`_ensure_custom_domain`·`down`의 별칭 레코드 정리, `tests/test_provision_platform_aws.py`.
+  - **확인된 배포 사실**: #468 코멘트의 읽기 전용 조회(10/13(화) 15시대 KST) — CloudFront 별칭 `vigilantis.dev` · us-east-1 ACM 인증서 `ISSUED` · Route53 호스팅 영역 · 오리진 `http-only` · WAF 연결. #467을 포함한 이미지 `mvp-004ed0a`로 10/13(화) 16:40–16:44 KST 재배포. 10/14(수) 허용 IP에서 `https://vigilantis.dev/`와 `https://vigilantis.dev/api/v1/assets`가 200을 돌려줬고, 브라우저 화면이 실 데이터로 렌더되며 WebSocket이 연결됐다. 기록의 원천은 `docs/AWS_SMOKE_RESULT.md` §11이다.
+  - **관측 범위의 한계**: CORS 허용 출처의 값은 `deploy` 코드가 정한다. 관측된 것은 사용자 도메인 화면의 API 응답과 실시간 연결이며, 기본 도메인으로 연 화면의 브라우저 동작은 별도 기록이 없다. 오리진 `http-only`는 10/13(화) 15시대 KST 조회 시점의 관측이며, 그 뒤 AWS의 현재 설정은 다시 조회하지 않았다. 원문의 HTTPS 전환 계획이 그 뒤에 이행됐는지는 이 기록으로 판단할 수 없다. 사용자 도메인 연결을 전체 구간 HTTPS 전환으로 보지 않는다.
