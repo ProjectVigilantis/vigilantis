@@ -51,7 +51,7 @@ MVP는 단일 계정(SSOT §MVP 확정 범위)이므로 계정을 가를 수 없
 
 ### 4. 공개 — CloudFront(사용자 도메인 · 기본 도메인) + WAF
 
-- 주소는 **사용자 도메인 `https://vigilantis.dev`** 와 CloudFront 기본 도메인(`https://d….cloudfront.net`) 둘이다(2026-10-16 개정 — 원문은 §개정 이력). 배포를 다시 만들지 않고 기존 배포에 별칭과 뷰어 인증서(us-east-1 ACM · SNI)만 더했으며, Route53 A 별칭 레코드가 그 배포를 가리킨다. 실제 배포 ID·기본 도메인 값과 확인 시��은 [`docs/AWS_SMOKE_RESULT.md`](../AWS_SMOKE_RESULT.md) §11에 있다.
+- 주소는 **사용자 도메인 `https://vigilantis.dev`** 와 CloudFront 기본 도메인(`https://d….cloudfront.net`) 둘이다(2026-10-16 개정 — 원문은 §개정 이력). 배포를 다시 만들지 않고 기존 배포에 별칭과 뷰어 인증서(us-east-1 ACM · SNI)만 더했으며, Route53 A 별칭 레코드가 그 배포를 가리킨다. 실제 배포 ID·기본 도메인 값과 확인 시각은 [`docs/AWS_SMOKE_RESULT.md`](../AWS_SMOKE_RESULT.md) §11에 있다.
 - 도메인은 `up --domain <도메인>`이 단다. us-east-1 ACM 인증서(`ISSUED`)와 Route53 공개 호스팅 영역은 스크립트 밖에서 먼저 준비해야 하며, 둘 중 하나라도 없으면 `up`은 무엇이든 바꾸기 전에 멈춘다. `down`은 이 배포를 가리키는 별칭 레코드만 지우고, 인증서와 호스팅 영역은 지우지 않는다.
 - **웹 API 주소와 CORS 허용 출처는 공개 주소 목록 하나에서 나온다**(`public_origins` — 별칭이 먼저, 기본 도메인이 마지막). `build`는 첫 값을 웹 번들의 `NEXT_PUBLIC_API_BASE_URL`로 넣으므로 웹은 `https://vigilantis.dev`로 API를 부른다. `deploy`는 목록 전부(`https://vigilantis.dev` · CloudFront 기본 도메인)를 api의 `CORS_ALLOW_ORIGINS`로 넣는다. 같은 목록이 WebSocket `Origin` 검사(`apps/core-api/routers/ws.py`)에도 쓰이므로, 별칭을 단 뒤에도 기본 도메인으로 연 화면의 실시간 연결이 끊기지 않게 기본 도메인을 남긴다.
 - **WAF(CLOUDFRONT 범위) 기본 차단 + 허용 IP만 통과.** 로그인이 없는 MVP라 이것이 출입문이다. 허용 목록에는 PM이 준 IP와 **플랫폼 NAT의 공인 IP**가 들어간다 — 웹의 서버 측 API 호출이 CloudFront를 거치기 때문이다(Context 3). 허용 IP는 저장소에 적지 않고 `--allow-cidr`로 받는다. 스크립트는 IPv4 CIDR만 받고 **/24보다 넓은 범위는 거부한다** — WAF 자체는 `/0`만 거절하므로 `0.0.0.0/1` 같은 광역이 출입문을 무력화하지 않게 한다.
