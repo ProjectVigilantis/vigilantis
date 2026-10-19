@@ -40,10 +40,14 @@ class Verdict(str, Enum):
 class SkipReason(str, Enum):
     SKIP_INSUFFICIENT_DATA = "SKIP_INSUFFICIENT_DATA"  # 관측치 부족(신규 등)
     SKIP_PROD_PROTECTED = "SKIP_PROD_PROTECTED"        # 운영 자산 보호
-    SKIP_LOW_UTIL = "SKIP_LOW_UTIL"                    # 스파이크 등으로 다운사이징 부적합
+    SKIP_LOW_UTIL = "SKIP_LOW_UTIL"                    # 다운사이징 부적합 — 스파이크 · 이미 한 번 줄인 인스턴스(#453)
     SKIP_WHITELISTED = "SKIP_WHITELISTED"              # 화이트리스트(예: default SG)
     SKIP_ACTIVE = "SKIP_ACTIVE"                        # 정상 가동(낭비 아님)
-    SKIP_UNSUPPORTED_STATE = "SKIP_UNSUPPORTED_STATE"  # EBS: available/in-use 외 상태 — 판정 보류(오삭제 방지, #276)
+    SKIP_UNSUPPORTED_STATE = "SKIP_UNSUPPORTED_STATE"  # 판정 보류 상태 — EBS: available/in-use 외(#276) · EC2: running 외(#453)
+
+
+# EC2 판정 대상 상태. 나머지(pending·stopping·stopped·shutting-down·terminated·미상)는 보류다(#453).
+EC2_JUDGEABLE_STATES = ("running",)
 
 
 def _is_prod(tags: dict) -> bool:
@@ -56,11 +60,29 @@ def _is_prod(tags: dict) -> bool:
 
 
 def evaluate_ec2(cpu_avg: Optional[float], cpu_max: Optional[float], cpu_datapoints: Optional[int],
-                 tags: dict | None = None) -> tuple[Verdict, Optional[SkipReason], Optional[float]]:
-    """EC2 1대 판정 → (verdict, skip_reason, health_score). 판정 우선순위대로 검사."""
+                 tags: dict | None = None, *, state: Optional[str],
+                 already_rightsized: bool = False) -> tuple[Verdict, Optional[SkipReason], Optional[float]]:
+    """EC2 1대 판정 → (verdict, skip_reason, health_score). 판정 우선순위대로 검사.
+
+    - **상태가 먼저다(#453).** `running` 이 아니면 지표를 보지 않고 SKIP_UNSUPPORTED_STATE 다.
+      종료(`terminated`·`shutting-down`)된 인스턴스는 CloudWatch 가 지난 지표를 보관하므로
+      14일 창에서 관측치 48개·저활성을 그대로 넘겨 후보가 된다 — 그 후보는 승인 화면까지
+      올라간 뒤 실행에서야 깨진다(가드레일 ④가 존재를 검사하지 않는다 · ADR-0006 이월 8행).
+      `stopped`·`stopping` 도 보류한다 — RIGHTSIZING 실행이 정지 → 타입 변경 → **기동**
+      순서라 꺼 둔 인스턴스를 켜 버리고, 정지 구간은 관측치가 비어 정지 자체가 저활성으로
+      읽힌다. 미상(`None`)은 EBS 와 같이 보류한다(fail-safe). `evaluate_ebs` 와 같은 코드다.
+    - **이미 한 번 줄인 인스턴스는 다시 후보가 되지 않는다(#453 · #434 5-2).** 지표가 인스턴스
+      ID 기준이라 타입을 바꿔도 창에 옛 타입의 낮은 CPU 가 남고, 목표 타입 규칙은 매번 현재
+      타입을 기준으로 다시 1/4 를 내리므로 스캔마다 연쇄로 내려간다. 저활성이어도
+      SKIP_LOW_UTIL(다운사이징 부적합)로 보류한다 — 누적 하강이 1회분(1/4)에서 멈춘다.
+      정상 가동(SKIP_ACTIVE)은 그대로 정상 가동이다. 무엇을 「이미 줄였다」로 볼지는
+      호출부(`run_rule_engine`)가 실행 기록으로 정한다.
+    """
     tags = tags or {}
     health = round(cpu_avg, 2) if cpu_avg is not None else None
 
+    if (state or "").lower() not in EC2_JUDGEABLE_STATES:
+        return Verdict.SKIP, SkipReason.SKIP_UNSUPPORTED_STATE, health
     if cpu_datapoints is None or cpu_datapoints < MIN_DATAPOINTS:
         return Verdict.SKIP, SkipReason.SKIP_INSUFFICIENT_DATA, health
     if _is_prod(tags):
@@ -68,6 +90,8 @@ def evaluate_ec2(cpu_avg: Optional[float], cpu_max: Optional[float], cpu_datapoi
     if cpu_avg is not None and cpu_avg < IDLE_CPU_AVG:
         if cpu_max is not None and cpu_max >= SPIKE_CPU_MAX:
             return Verdict.SKIP, SkipReason.SKIP_LOW_UTIL, health   # 스파이크: 최대 CPU 높음
+        if already_rightsized:
+            return Verdict.SKIP, SkipReason.SKIP_LOW_UTIL, health   # 이미 한 번 줄였다: 연쇄 하강 방지
         return Verdict.COST_CANDIDATE, None, health                 # 저활성 → 다운사이징 후보
     return Verdict.SKIP, SkipReason.SKIP_ACTIVE, health             # 정상 가동
 
@@ -115,6 +139,35 @@ def evaluate_sg(name: Optional[str], attached: Optional[bool],
     return Verdict.SKIP, SkipReason.SKIP_ACTIVE
 
 
+def _rightsized_instance_arns(db) -> set[str]:
+    """한 번이라도 크기를 바꾼(또는 바꿨을 수 있는) EC2 의 ARN — `evaluate_ec2` 의 already_rightsized.
+
+    RIGHTSIZING 실행 중 **`FAILED` 만 뺀다.** `FAILED` 는 크기를 바꾸지 못하고 끝난 것이라
+    다시 제안해도 연쇄가 아니다. 나머지는 모두 「이미 줄였다」로 본다.
+    - `SUCCESS` — 줄였다.
+    - `ROLLED_BACK`·`ROLLBACK_INITIATED`·`ROLLBACK_FAILED` — 줄였다가 되돌렸거나 되돌리는 중이다.
+      원복(REVERT_SIZE)이 성공하면 원본이 `ROLLED_BACK` 으로 닫히고(workflows
+      `_ORIGIN_STATUS_AFTER_ROLLBACK`), 자식이 성공했는지가 원본의 성공 여부를 가리지 않는다
+      (성공 뒤 수동 원복 · 실패 뒤 자동 원복 둘 다 이 상태다). 되돌린 인스턴스를 다시 제안하면
+      같은 제안 → 원복이 반복된다.
+    - `UNVERIFIED` — 자산이 바뀌었을 수 있다(Issue #249).
+    - `IN_PROGRESS` — 지금 바꾸는 중이다.
+    """
+    from sqlalchemy import select
+
+    from db import models
+    from schemas.api.actions import ExecutionStatus
+    from schemas.runbooks import RunbookId
+
+    rows = db.execute(
+        select(models.ActionExecution.target_arn).where(
+            models.ActionExecution.runbook_id == RunbookId.RUNBOOK_EC2_RIGHTSIZING,
+            models.ActionExecution.status != ExecutionStatus.FAILED,
+        )
+    ).scalars()
+    return set(rows)
+
+
 def run_rule_engine(db, collection_run_id: str | None = None) -> dict:
     """assets 및 metric_summaries 테이블을 읽어 RuleEvaluation 결과(RuleEvaluationResult 계약)를 기록한다.
     반환: verdict 별 집계 + 표시 요약 + 이번 호출의 typed 판정 목록(Intake 조립용).
@@ -138,7 +191,10 @@ def run_rule_engine(db, collection_run_id: str | None = None) -> dict:
     # 소멸 자산은 list_assets 가 기본으로 제외한다(#332) — 실물이 없는 자산을 여기서
     # 판정하면 마지막 관측 회차의 낡은 메트릭으로 후보가 서고, 그 후보가 승인 화면까지
     # 올라간 뒤 실행에서야 깨진다.
+    # 종료·정지 인스턴스도 여기서는 빼지 않는다 — 목록에는 남기고 판정만 보류한다(#453 ⓒ).
+    # 거른 것과 AWS 응답에서 사라진 것(absent_since)을 같은 칸에 섞지 않기 위해서다.
     assets = assets_repo.list_assets(db)
+    rightsized_arns = _rightsized_instance_arns(db)
     results = []
     evaluations: list[RuleEvaluationResult] = []
     counts: dict[str, int] = {}
@@ -162,7 +218,10 @@ def run_rule_engine(db, collection_run_id: str | None = None) -> dict:
             cpu_dp = metric_row.cpu_datapoints if metric_row else None
 
             tags = (a.spec or {}).get("tags", {})
-            verdict, skip, health = evaluate_ec2(cpu_avg, cpu_max, cpu_dp, tags)
+            verdict, skip, health = evaluate_ec2(
+                cpu_avg, cpu_max, cpu_dp, tags,
+                state=a.state, already_rightsized=a.arn in rightsized_arns,
+            )
             health_int = int(round(health)) if health is not None else None
         elif a.asset_type == AssetType.SG:
             attached = (a.spec or {}).get("attached")
