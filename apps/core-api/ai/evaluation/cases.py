@@ -102,7 +102,7 @@ def finops_cases(inventory: AssetInventory, expected: Mapping[str, Any]) -> list
 
         summary = ec2.metric_summary
         engine_verdict, _, health = evaluate_ec2(
-            summary.cpu_avg, summary.cpu_max, summary.cpu_datapoints, ec2.tags
+            summary.cpu_avg, summary.cpu_max, summary.cpu_datapoints, ec2.tags, state=ec2.state
         )
         # 정답지와 현재 판정 코드가 갈리면 세운다. 어긋난 채로 두면 "COST_CANDIDATE라서
         # 골랐다"는 고정 세트의 전제가 사실이 아니게 된다.

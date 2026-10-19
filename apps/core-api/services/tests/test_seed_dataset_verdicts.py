@@ -47,7 +47,8 @@ def _evaluate(name, profile, environment):
     tags = {"Name": name}
     if environment:
         tags["Environment"] = environment
-    return evaluate_ec2(sum(series) / len(series), max(series), len(series), tags)
+    # 시드는 run_instances 로 띄우기만 하고 멈추지 않는다 — 전부 running 이다
+    return evaluate_ec2(sum(series) / len(series), max(series), len(series), tags, state="running")
 
 
 def test_expected_covers_every_seed_instance():

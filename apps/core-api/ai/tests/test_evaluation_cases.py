@@ -99,6 +99,7 @@ def test_health_score_matches_the_rule_engine_calculation():
         ec2.metric_summary.cpu_max,
         ec2.metric_summary.cpu_datapoints,
         ec2.tags,
+        state=ec2.state,
     )
 
     assert case.graph_input.asset_context.health_score == int(round(health))

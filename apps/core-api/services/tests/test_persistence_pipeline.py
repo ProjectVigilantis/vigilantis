@@ -909,3 +909,79 @@ def test_reuse_does_not_extend_freshness_across_cycles(db, mock_inventory):
     t3 = t0 + timedelta(seconds=period + 60)
     persist_inventory(mock_inventory.model_copy(update={"collected_at": t3}), db)
     assert reusable_at(t3 + timedelta(minutes=5)) == {"i-idle001"}
+
+
+# ----- #453 — 인스턴스 상태와 이미 줄인 인스턴스 (DB 경로) -----
+
+def _ec2_eval(db, rule_res, arn):
+    asset = db.execute(select(models.Asset).where(models.Asset.arn == arn)).scalar_one()
+    return next(e for e in rule_res["evaluations"] if e.asset_arn == arn), asset
+
+
+@pytest.mark.parametrize("state", ["terminated", "shutting-down", "stopped"])
+def test_non_running_ec2_stays_listed_but_is_not_a_candidate(db, mock_inventory, state):
+    """종료·정지 인스턴스는 목록에 남고 판정만 보류된다(#453 ⓒ — 수집이 아니라 판정에서 거른다).
+
+    관측치 336 · 평균 1.5 는 running 이면 후보가 되는 값이다(test_persist_inventory_and_run_rule_engine).
+    """
+    from db.repositories import assets as assets_repo
+
+    ec2 = mock_inventory.ec2_instances[0].model_copy(update={"state": state})
+    inventory = mock_inventory.model_copy(update={"ec2_instances": [ec2]})
+    run_id = persist_inventory(inventory, db)["collection_run_id"]
+
+    rule_res = run_rule_engine(db, collection_run_id=run_id)
+    evaluation, asset = _ec2_eval(db, rule_res, ec2.arn)
+
+    assert evaluation.verdict.value == "SKIP"
+    assert evaluation.skip_reason_code == SkipReasonCode.SKIP_UNSUPPORTED_STATE
+    assert "COST_CANDIDATE" not in rule_res["counts"]
+    # 목록(list_assets)에서는 그대로 보인다 — 「거른 것」이 「사라진 것」(absent_since)이 되지 않는다
+    assert ec2.arn in {a.arn for a in assets_repo.list_assets(db)}
+    assert asset.absent_since is None
+    assert asset.state == state
+
+
+def _rightsizing_execution(db, arn, status):
+    from schemas.api.actions import ExecutionStatus
+    from schemas.api.incidents import IncidentCategory
+    from schemas.runbooks import RunbookId, TriggerSource
+
+    incident = models.Incident(subject_arn=arn, category=IncidentCategory.FINOPS)
+    db.add(incident)
+    db.flush()
+    db.add(models.ActionExecution(
+        incident_id=incident.incident_id, runbook_id=RunbookId.RUNBOOK_EC2_RIGHTSIZING,
+        target_arn=arn, trigger_source=TriggerSource.USER_APPROVAL,
+        status=ExecutionStatus(status),
+    ))
+    db.flush()
+
+
+@pytest.mark.parametrize(
+    "status,expected_verdict,expected_skip",
+    [
+        # 줄였다 — 다음 스캔에 다시 후보가 되지 않는다(#434 5-2 연쇄)
+        ("SUCCESS", "SKIP", SkipReasonCode.SKIP_LOW_UTIL),
+        # 줄였다가 되돌렸다 — 다시 제안하면 같은 제안 → 원복이 반복된다
+        ("ROLLED_BACK", "SKIP", SkipReasonCode.SKIP_LOW_UTIL),
+        # 크기를 바꾸지 못하고 끝났다 — 여전히 저활성이면 다시 후보다
+        ("FAILED", "COST_CANDIDATE", None),
+    ],
+)
+def test_rightsized_instance_is_not_a_candidate_on_next_scan(
+    db, mock_inventory, status, expected_verdict, expected_skip
+):
+    arn = mock_inventory.ec2_instances[0].arn
+    first = persist_inventory(mock_inventory, db)["collection_run_id"]
+    assert _ec2_eval(db, run_rule_engine(db, collection_run_id=first), arn)[0].verdict.value == "COST_CANDIDATE"
+
+    _rightsizing_execution(db, arn, status)
+
+    # 다음 스캔 — 14일 창에 옛 타입의 낮은 CPU 가 그대로 남은 상태(같은 지표)
+    later = mock_inventory.model_copy(update={"collected_at": mock_inventory.collected_at + timedelta(hours=1)})
+    second = persist_inventory(later, db)["collection_run_id"]
+    evaluation, _ = _ec2_eval(db, run_rule_engine(db, collection_run_id=second), arn)
+
+    assert evaluation.verdict.value == expected_verdict
+    assert evaluation.skip_reason_code == expected_skip
