@@ -19,6 +19,7 @@ from enum import Enum
 
 from schemas.api.actions import ExecutionStatus
 from schemas.api.assets import AssetType, RelationType
+from schemas.api.auth import UserRole
 from schemas.api.incidents import (
     IncidentCategory,
     IncidentStatus,
@@ -40,6 +41,7 @@ from schemas.guardrails import (
 from schemas.incidents import AgentInvocationStatus
 from schemas.runbooks import RunbookId, TriggerSource
 from sqlalchemy import (
+    CHAR,
     CheckConstraint,
     DateTime,
     Float,
@@ -883,5 +885,93 @@ class ServiceTransitionObservation(Base):
             "ix_service_transition_observations_execution_observed",
             "execution_id",
             text("observed_at DESC"),
+        ),
+    )
+
+
+# ==============================================================================
+# 인증 계열 2종 — Cognito 로그인 + 서버 세션 (#492 PR 1)
+# ==============================================================================
+
+
+class AppUserStatus(str, Enum):
+    ACTIVE = "ACTIVE"
+    DISABLED = "DISABLED"
+
+
+class AuthSessionMfaStep(str, Enum):
+    """이번 로그인에서 TOTP를 증명한 Cognito 챌린지 단계."""
+
+    SOFTWARE_TOKEN_MFA = "SOFTWARE_TOKEN_MFA"
+    MFA_SETUP = "MFA_SETUP"
+
+
+class AuthSessionRevokeReason(str, Enum):
+    LOGOUT = "LOGOUT"
+    #: 같은 브라우저가 다시 로그인해 이전 세션 쿠키를 새 세션으로 교체했다.
+    SUPERSEDED = "SUPERSEDED"
+
+
+class AppUser(Base):
+    """앱 사용자. 신원은 (issuer, cognito_sub)이다 — email은 표시·연락용이며 계정 연결에 쓰지 않는다."""
+
+    __tablename__ = "app_users"
+
+    user_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
+    issuer: Mapped[str] = mapped_column(String)
+    cognito_sub: Mapped[str] = mapped_column(String)
+    email: Mapped[str] = mapped_column(String)
+    email_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    role: Mapped[UserRole] = mapped_column(_enum(UserRole, "app_user_role"))
+    status: Mapped[AppUserStatus] = mapped_column(
+        _enum(AppUserStatus, "app_user_status"), default=AppUserStatus.ACTIVE
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    __table_args__ = (UniqueConstraint("issuer", "cognito_sub"),)
+
+
+class AuthSession(Base):
+    """서버 세션 1건. 원본 토큰은 저장하지 않고 SHA-256 hex만 둔다."""
+
+    __tablename__ = "auth_sessions"
+
+    session_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
+    token_hash: Mapped[str] = mapped_column(CHAR(64), unique=True)
+    user_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("app_users.user_id", ondelete="RESTRICT"), index=True
+    )
+    mfa_step: Mapped[AuthSessionMfaStep] = mapped_column(
+        _enum(AuthSessionMfaStep, "auth_session_mfa_step")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+    last_activity_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+    absolute_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revoke_reason: Mapped[AuthSessionRevokeReason | None] = mapped_column(
+        _enum(AuthSessionRevokeReason, "auth_session_revoke_reason"), nullable=True
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "(revoked_at IS NULL) = (revoke_reason IS NULL)", name="revoke_shape"
+        ),
+        CheckConstraint("absolute_expires_at > created_at", name="absolute_after_created"),
+        CheckConstraint(
+            "last_activity_at >= created_at AND last_activity_at <= absolute_expires_at",
+            name="activity_window",
         ),
     )

@@ -103,7 +103,7 @@ def test_alembic_head_applied_with_17_tables(db):
             " WHERE table_schema='public' AND table_name != 'alembic_version'"
         )
     ).scalar_one()
-    assert count == 17  # 14종 + 서비스 전환 3종
+    assert count == 19  # 14종 + 서비스 전환 3종 + 인증 2종
 
 
 # --- 자산 계열 -----------------------------------------------------------------
