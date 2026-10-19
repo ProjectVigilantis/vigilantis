@@ -28,6 +28,9 @@ _STATUS_BY_CODE: dict[ErrorCode, int] = {
     ErrorCode.IDEMPOTENCY_KEY_CONFLICT: 409,
     ErrorCode.PROPOSAL_NOT_EXECUTABLE: 409,
     ErrorCode.INCIDENT_NOT_RESOLVABLE: 409,
+    ErrorCode.TENANT_NOT_FOUND: 404,
+    ErrorCode.TENANT_STATE_CONFLICT: 409,
+    ErrorCode.TENANT_SUSPENDED: 409,
     ErrorCode.REQUEST_VALIDATION_FAILED: 422,
     ErrorCode.INTERNAL_ERROR: 500,
 }
@@ -36,6 +39,9 @@ _MESSAGE_BY_CODE: dict[ErrorCode, str] = {
     ErrorCode.IDEMPOTENCY_KEY_CONFLICT: "같은 멱등성 키의 실행이 이미 있습니다.",
     ErrorCode.PROPOSAL_NOT_EXECUTABLE: "실행 가능한 상태의 제안이 아닙니다.",
     ErrorCode.INCIDENT_NOT_RESOLVABLE: "종료 처리할 수 있는 상태의 인시던트가 아닙니다.",
+    ErrorCode.TENANT_NOT_FOUND: "고객(테넌트)을 찾을 수 없습니다.",
+    ErrorCode.TENANT_STATE_CONFLICT: "지금 고객 상태에서는 할 수 없는 요청입니다.",
+    ErrorCode.TENANT_SUSPENDED: "정지된 고객의 자산에는 조치를 실행하지 않습니다.",
     ErrorCode.REQUEST_VALIDATION_FAILED: "요청 값이 계약과 다릅니다.",
     ErrorCode.INTERNAL_ERROR: "서버 내부 오류입니다.",
 }

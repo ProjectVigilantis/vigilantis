@@ -8,6 +8,7 @@
 #   - actions:   POST /api/v1/actions/execute 요청·응답 (이슈 #32)
 #   - ws:        WebSocket(/api/v1/ws) 공통 이벤트 봉투 (이슈 #32)
 #   - errors:    REST 공통 오류 봉투 (이슈 #32)
+#   - tenants:   /api/v1/tenants 관리자 API — 고객 계정 연결 · 원격 회수 (Post-MVP T-4)
 # ==============================================================================
 
 from .actions import (
@@ -78,6 +79,20 @@ from .assets import (
     Verdict,
 )
 
+from .tenants import (
+    TenantCreateRequest,
+    TenantCreateResponse,
+    TenantDetail,
+    TenantListItem,
+    TenantStatus,
+    TenantSubscription,
+    TenantSuspendRequest,
+    TenantsResponse,
+    TenantUpdateRequest,
+    TenantVerification,
+    TenantVerificationResult,
+    TenantVerifyResponse,
+)
 __all__ = [
     "ErrorCode",
     "ErrorDetail",
@@ -134,4 +149,16 @@ __all__ = [
     "ThreatEventKind",
     "ThreatEventPoint",
     "TimeseriesPoint",
+    "TenantCreateRequest",
+    "TenantCreateResponse",
+    "TenantDetail",
+    "TenantListItem",
+    "TenantStatus",
+    "TenantSubscription",
+    "TenantSuspendRequest",
+    "TenantsResponse",
+    "TenantUpdateRequest",
+    "TenantVerification",
+    "TenantVerificationResult",
+    "TenantVerifyResponse",
 ]
