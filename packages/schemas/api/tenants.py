@@ -15,10 +15,22 @@
 #   - 상태(`status`)는 수집 · AI 분석 · 실행의 관문이다. 화면 표시가 아니라 동작을 바꾼다.
 #     `SUSPENDED` 가 「원격 회수」다 — 플랫폼이 그 계정에 **더 들어가지 않는다**는 뜻이고,
 #     고객 계정의 역할을 지우는 것이 아니다(고객 계정 소유라 플랫폼이 지울 수 없다).
-#   - `external_id` 는 플랫폼이 테넌트를 만들 때 한 번 정하고 바꾸지 않는다. 생성 응답과
-#     연결 전(`PENDING_CONNECTION`)의 온보딩 링크에서만 내보낸다.
+#   - `external_id` 는 플랫폼이 테넌트를 만들 때 한 번 정하고 바꾸지 않는다. 상세 응답에는
+#     칸이 없고, 생성 응답 · 연결 전 상세의 온보딩 링크 · **재발급 경로**에서만 내보낸다.
 #   - T-6(고객별 자동 조치 끄기) · T-16(구독 현황 모의)의 칸은 자리만 둔다 — 값의 뜻은
 #     각 카드가 정한다.
+#
+# 경로 (전부 /api/v1)
+#   GET    /tenants                  → TenantsResponse
+#   POST   /tenants                  TenantCreateRequest → TenantCreateResponse(PENDING_CONNECTION)
+#   GET    /tenants/{id}             → TenantDetail
+#   PATCH  /tenants/{id}             TenantUpdateRequest → TenantDetail
+#   DELETE /tenants/{id}             → 204. DELETABLE_STATUSES 밖이면 TENANT_STATE_CONFLICT
+#   GET    /tenants/{id}/onboarding  → TenantOnboardingResponse. 모든 상태(역할을 지운 고객의 재연결)
+#   POST   /tenants/{id}/verify      → TenantVerifyResponse. VERIFIABLE_STATUSES 밖이면 TENANT_STATE_CONFLICT
+#   POST   /tenants/{id}/suspend     TenantSuspendRequest → TenantDetail
+#   POST   /tenants/{id}/resume      → TenantVerifyResponse(연결 확인 성공 시 ACTIVE)
+#   **고객 계정에 들어가는 경로는 verify · resume 둘뿐이고, 정지(SUSPENDED) 중에는 resume 하나다.**
 # ==============================================================================
 
 from __future__ import annotations
@@ -35,7 +47,8 @@ from .assets import UtcDateTime
 AwsAccountId = Annotated[str, Field(pattern=r"^\d{12}$")]
 AwsRegion = Annotated[str, Field(pattern=r"^[a-z]{2}(-[a-z]+)+-\d+$")]
 VpcId = Annotated[str, Field(pattern=r"^vpc-[0-9a-f]+$")]
-RoleArn = Annotated[str, Field(pattern=r"^arn:aws:iam::\d{12}:role/[\w+=,.@/-]+$")]
+# IAM 역할 이름은 ASCII 만 받는다 — `\w` 는 유니코드 글자까지 받아 `role/역할` 이 통과한다
+RoleArn = Annotated[str, Field(pattern=r"^arn:aws:iam::\d{12}:role/[A-Za-z0-9_+=,.@/-]+$")]
 TenantName = Annotated[str, Field(min_length=1, max_length=100)]
 
 #: 고객 역할 이름의 기본값. 온보딩 템플릿이 이 이름으로 만든다(#438 §C-1).
@@ -64,6 +77,20 @@ class TenantStatus(str, Enum):
     ACTIVE = "ACTIVE"
     #: 원격 회수. 새 수집 · 새 분석 · 새 실행을 하지 않는다. 기존 기록은 읽을 수 있다.
     SUSPENDED = "SUSPENDED"
+
+
+#: DELETE /tenants/{id} 를 받는 상태 — 연결된 적 없는 테넌트만 지운다. 계정 ID 오입력
+#: (`ACCOUNT_MISMATCH`)을 고치는 길이 「지우고 새로 만든다」이기 때문이다. 연결된 적이 없으니
+#: 수집 · 인시던트 기록도 없어 지워서 잃는 것이 없다. 다른 계정이면 다른 테넌트라는 원칙
+#: (PATCH 가 계정 · 역할을 받지 않음)은 그대로다. 밖이면 TENANT_STATE_CONFLICT.
+DELETABLE_STATUSES: frozenset[TenantStatus] = frozenset({TenantStatus.PENDING_CONNECTION})
+
+#: POST /tenants/{id}/verify 를 받는 상태. 확인은 고객 계정에 들어가는 일이라 정지(SUSPENDED)
+#: 중에는 받지 않는다 — 원격 회수가 「더 들어가지 않는다」이고, 재개 경로(resume)가 이미 확인을
+#: 거친다. 정지 테넌트에 들어가는 길은 resume 하나다. 밖이면 TENANT_STATE_CONFLICT.
+VERIFIABLE_STATUSES: frozenset[TenantStatus] = frozenset(
+    {TenantStatus.PENDING_CONNECTION, TenantStatus.ACTIVE}
+)
 
 
 class TenantVerificationResult(str, Enum):
@@ -222,11 +249,28 @@ class TenantCreateResponse(BaseModel):
         return self
 
 
-class TenantVerifyResponse(BaseModel):
-    """POST /api/v1/tenants/{tenant_id}/verify 응답 — 이번 확인 결과와 바뀐 테넌트.
+class TenantOnboardingResponse(BaseModel):
+    """GET /api/v1/tenants/{tenant_id}/onboarding 응답 — 온보딩 링크와 ExternalId 재발급.
 
-    PENDING_CONNECTION 에서 OK 면 ACTIVE 가 된다. 그 밖에는 상태를 바꾸지 않는다 —
-    ACTIVE 의 확인 실패로 자동 정지하지 않는다(정지는 사람의 판단이다).
+    **모든 상태에서 받는다.** 고객이 역할을 지우면(관제 중이든 정지 중이든) 다시 연결하려면 같은
+    `external_id` 로 역할을 다시 만들어야 하는데, 상세 응답은 연결 뒤 그 값을 싣지 않는다.
+    노출이 관리자가 일부러 부르는 이 한 곳으로 모이므로 「상세에는 내보내지 않는다」는 그대로다.
+    `external_id` 는 재발급이지 재생성이 아니다 — 생성 때 정한 값을 그대로 돌려준다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    onboarding_url: str = Field(pattern=r"^https://")
+    external_id: str = Field(min_length=16, max_length=128)
+
+
+class TenantVerifyResponse(BaseModel):
+    """POST /api/v1/tenants/{tenant_id}/verify · /resume 응답 — 이번 확인 결과와 바뀐 테넌트.
+
+    verify: PENDING_CONNECTION 에서 OK 면 ACTIVE 가 된다. 그 밖에는 상태를 바꾸지 않는다 —
+    ACTIVE 의 확인 실패로 자동 정지하지 않는다(정지는 사람의 판단이다). **SUSPENDED 에서는
+    받지 않는다**(VERIFIABLE_STATUSES) — 정지 중 계정에 들어가는 길은 resume 하나다.
+    resume: SUSPENDED 에서 확인을 먼저 하고, OK 면 ACTIVE · 실패면 SUSPENDED 그대로다.
     """
 
     model_config = ConfigDict(extra="forbid")

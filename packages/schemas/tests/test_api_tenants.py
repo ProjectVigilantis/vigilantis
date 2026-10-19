@@ -12,6 +12,7 @@ from schemas.api import (
     TenantCreateResponse,
     TenantDetail,
     TenantListItem,
+    TenantOnboardingResponse,
     TenantStatus,
     TenantSubscription,
     TenantSuspendRequest,
@@ -21,7 +22,7 @@ from schemas.api import (
     TenantVerificationResult,
     TenantVerifyResponse,
 )
-from schemas.api.tenants import default_access_role_arn
+from schemas.api.tenants import DELETABLE_STATUSES, VERIFIABLE_STATUSES, default_access_role_arn
 
 ACCOUNT = "475763379672"
 ROLE = f"arn:aws:iam::{ACCOUNT}:role/vigilantis-access"
@@ -126,6 +127,7 @@ def test_role_arn_account_must_match():
     ("regions", ["Seoul"]),
     ("collect_vpc_ids", ["subnet-0123"]),
     ("access_role_arn", "arn:aws:iam::475763379672:user/x"),  # 역할이 아니라 사용자
+    ("access_role_arn", "arn:aws:iam::475763379672:role/역할"),  # IAM 역할 이름은 ASCII 만
     ("asset_count", -1),
 ])
 def test_field_shapes_are_enforced(field, value):
@@ -236,3 +238,40 @@ def test_subscription_period_order():
     TenantSubscription.model_validate({"plan": "basic", "period_start": "2026-10-01", "period_end": "2026-12-31"})
     with pytest.raises(ValidationError):
         TenantSubscription.model_validate({"period_start": "2026-12-31", "period_end": "2026-10-01"})
+
+
+# ----- 복구 경로와 정지 중 확인 (PR #489 리뷰 A · B · C) -----
+
+def test_only_never_connected_tenants_can_be_deleted():
+    # 계정 ID 오입력(ACCOUNT_MISMATCH)을 고치는 길 = 지우고 다시 만든다. 연결된 적 있으면 기록이 있다
+    assert DELETABLE_STATUSES == frozenset({TenantStatus.PENDING_CONNECTION})
+
+
+def test_suspended_tenant_is_not_verified_directly():
+    # 정지 중 계정에 들어가는 길은 resume 하나다 — T-5 가 「정지 테넌트에는 AssumeRole 0회」를 단정할 근거
+    assert VERIFIABLE_STATUSES == frozenset({TenantStatus.PENDING_CONNECTION, TenantStatus.ACTIVE})
+    assert TenantStatus.SUSPENDED not in VERIFIABLE_STATUSES
+
+
+def test_onboarding_reissue_carries_the_link_and_external_id():
+    reissued = TenantOnboardingResponse.model_validate({"onboarding_url": ONBOARDING, "external_id": "e" * 32})
+    assert reissued.external_id == "e" * 32
+    with pytest.raises(ValidationError):
+        TenantOnboardingResponse.model_validate({"onboarding_url": "http://x", "external_id": "e" * 32})
+    with pytest.raises(ValidationError):
+        TenantOnboardingResponse.model_validate({"onboarding_url": ONBOARDING, "external_id": "short"})
+
+
+def test_detail_still_does_not_carry_the_external_id():
+    # 재발급이 따로 생겨도 상세 응답의 노출 범위는 그대로다(리뷰 포인트 3)
+    assert "external_id" not in TenantDetail.model_fields
+    with pytest.raises(ValidationError):
+        TenantDetail.model_validate(make_detail(external_id="e" * 32))
+
+
+def test_resume_failure_keeps_the_tenant_suspended():
+    # resume 의 확인이 실패하면 SUSPENDED 그대로 — 응답 모양이 그 상태를 표현할 수 있어야 한다
+    failed = {"result": "ASSUME_DENIED", "verified_at": "2026-10-19T06:00:00Z", "reason_code": "AccessDenied"}
+    tenant = make_detail(status="SUSPENDED", last_verification=failed,
+                         suspended_at="2026-10-19T04:00:00Z", suspended_reason="계약 만료")
+    TenantVerifyResponse.model_validate({"tenant": tenant, "verification": failed})

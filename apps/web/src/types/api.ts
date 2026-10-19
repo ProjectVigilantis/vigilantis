@@ -658,11 +658,18 @@ export interface MetricsTimeseriesResponse {
 }
 
 /* ───────────────────────────── tenants.py ───────────────────────────── */
-/* /api/v1/tenants — 고객 계정 연결 · 원격 회수(Post-MVP T-4) 관리자 API. 구현은 T-17 ADR `Accepted` 뒤에 붙는다. */
+/* /api/v1/tenants — 고객 계정 연결 · 원격 회수(Post-MVP T-4) 관리자 API. 구현은 T-17 ADR `Accepted` 뒤에 붙는다.
+   경로: GET·POST /tenants · GET·PATCH·DELETE /tenants/{id} · GET /tenants/{id}/onboarding · POST /tenants/{id}/verify·suspend·resume.
+   고객 계정에 들어가는 경로는 verify · resume 둘뿐이고, 정지 중에는 resume 하나다. */
 
 /** 수집 · AI 분석 · 실행의 관문. SUSPENDED = 원격 회수(플랫폼이 그 계정에 더 들어가지 않는다). */
 export const TENANT_STATUSES = ['PENDING_CONNECTION', 'ACTIVE', 'SUSPENDED'] as const;
 export type TenantStatus = (typeof TENANT_STATUSES)[number];
+
+/** DELETE /tenants/{id} 를 받는 상태 — 연결된 적 없는 테넌트만(계정 ID 오입력을 지우고 다시 만든다). 밖이면 TENANT_STATE_CONFLICT. */
+export const TENANT_DELETABLE_STATUSES: readonly TenantStatus[] = ['PENDING_CONNECTION'];
+/** POST /tenants/{id}/verify 를 받는 상태 — 정지 중에는 고객 계정에 들어가지 않는다(재개는 resume). 밖이면 TENANT_STATE_CONFLICT. */
+export const TENANT_VERIFIABLE_STATUSES: readonly TenantStatus[] = ['PENDING_CONNECTION', 'ACTIVE'];
 
 /** 연결 확인 1회의 결과 — AssumeRole → GetCallerIdentity → 계정 대조 → 최소 읽기 순으로 처음 실패한 자리. */
 export const TENANT_VERIFICATION_RESULTS = [
@@ -731,9 +738,15 @@ export interface TenantCreateRequest {
   collect_vpc_ids?: string[];
 }
 
-/** external_id 는 여기와 onboarding_url 에서만 나간다. */
+/** external_id 는 상세에 없고 여기 · 연결 전 onboarding_url · 재발급(TenantOnboardingResponse)에서만 나간다. */
 export interface TenantCreateResponse {
   tenant: TenantDetail;
+  external_id: string;
+}
+
+/** GET /tenants/{id}/onboarding — 모든 상태. 역할을 지운 고객이 같은 external_id 로 다시 만들 때 쓴다. */
+export interface TenantOnboardingResponse {
+  onboarding_url: string;
   external_id: string;
 }
 
