@@ -43,6 +43,7 @@ from db.session import get_session_factory  # noqa: E402
 from exceptions import register_error_handlers, unexpected_error_response  # noqa: E402
 from logging_config import request_id_var, setup_logging  # noqa: E402
 from mock_threat_source import MockThreatConsumer  # noqa: E402
+from notifications.runtime import build_notification_runtime  # noqa: E402
 from realtime import RealtimeManager  # noqa: E402
 from routers import actions as actions_router  # noqa: E402
 from routers import assets as assets_router  # noqa: E402
@@ -81,6 +82,7 @@ def create_app() -> FastAPI:
         # 유실돼 이미 기동한 스케줄러를 아무도 못 내린다.
         schedulers = []
         threat_consumer = None
+        notification_runtime = None
         starts = (
             # 수집→판정→FinOps Incident 생성. 실데이터 시연의 최상류.
             partial(start_scan_scheduler, realtime.publish),
@@ -104,16 +106,23 @@ def create_app() -> FastAPI:
                     interval_seconds=settings.MOCK_THREAT_POLL_SECONDS,
                 )
                 threat_consumer.start()
+            if settings.NOTIFICATION_ENABLED:
+                notification_runtime = build_notification_runtime(settings)
+                await notification_runtime.start()
             yield
         finally:
             try:
-                if threat_consumer is not None:
-                    # 처리 중인 접수의 commit·발행을 마친 뒤 실시간 전송을 닫는다.
-                    await threat_consumer.stop()
+                if notification_runtime is not None:
+                    await notification_runtime.stop()
             finally:
-                for scheduler in reversed(schedulers):
-                    scheduler.shutdown(wait=False)
-                await realtime.stop()
+                try:
+                    if threat_consumer is not None:
+                        # 처리 중인 접수의 commit·발행을 마친 뒤 실시간 전송을 닫는다.
+                        await threat_consumer.stop()
+                finally:
+                    for scheduler in reversed(schedulers):
+                        scheduler.shutdown(wait=False)
+                    await realtime.stop()
 
     app = FastAPI(title="Vigilantis Core API", lifespan=lifespan)
     app.state.realtime = realtime

@@ -78,6 +78,19 @@ class Settings(BaseSettings):
     # 독립이다. 폴더 안 JSON을 소비하며 DB 결과는 앱의 조회 API에서 확인한다.
     MOCK_THREAT_INBOX_DIR: str = ""
     MOCK_THREAT_POLL_SECONDS: float = Field(default=1.0, gt=0)
+    # #493: 명시적 opt-in. 수신처 파일에는 webhook 자체가 아닌 비밀 환경변수 이름만 둔다.
+    # 설정은 기동 시 고정되며 변경 적용에는 재기동이 필요하다.
+    NOTIFICATION_ENABLED: bool = False
+    NOTIFICATION_ROUTES_FILE: str = ""
+    NOTIFICATION_PUBLIC_BASE_URL: str = ""
+    NOTIFICATION_POLL_SECONDS: float = Field(default=1.0, ge=0.1, le=60)
+    NOTIFICATION_BATCH_SIZE: int = Field(default=20, ge=1, le=100)
+    NOTIFICATION_MAX_ATTEMPTS: int = Field(default=5, ge=1, le=10)
+    NOTIFICATION_BACKOFF_SECONDS: float = Field(default=2.0, ge=1, le=300)
+    NOTIFICATION_MAX_BACKOFF_SECONDS: float = Field(default=300.0, ge=1, le=3600)
+    NOTIFICATION_CONNECT_TIMEOUT_SECONDS: float = Field(default=3.0, gt=0, le=10)
+    NOTIFICATION_READ_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0, le=30)
+    NOTIFICATION_LEASE_SECONDS: float = Field(default=120.0, ge=30, le=600)
     # 2/2 Status Check 대기 — services/aws/rollback.py의 waiter 설정 (Issue #240).
     # 기본 15초×12회=3분으로 boto3 기본값(15초×40회=10분)보다 짧다. 판정 1건이
     # 그만큼 다음 스캔을 미루므로(max_instances=1) 시연에서 조일 수 있어야 한다.
