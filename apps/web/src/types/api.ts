@@ -5,12 +5,15 @@ export type IsoDateTime = string;
 
 /* ────────────────────────────── errors.py ────────────────────────────── */
 
-/** REST 공통 오류 코드 5종. 괄호는 계약상 HTTP 상태. */
+/** REST 공통 오류 코드 9종. 괄호는 계약상 HTTP 상태. */
 export type ErrorCode =
   | 'INCIDENT_NOT_FOUND' // 404
   | 'IDEMPOTENCY_KEY_CONFLICT' // 409
   | 'PROPOSAL_NOT_EXECUTABLE' // 409
   | 'INCIDENT_NOT_RESOLVABLE' // 409
+  | 'TENANT_NOT_FOUND' // 404
+  | 'TENANT_STATE_CONFLICT' // 409
+  | 'TENANT_SUSPENDED' // 409
   | 'REQUEST_VALIDATION_FAILED' // 422
   | 'INTERNAL_ERROR'; // 500
 
@@ -652,4 +655,115 @@ export interface MetricsTimeseriesResponse {
   asset_status: AssetStatusAxis;
   asset_inventory: AssetInventoryAxis;
   threat_events: ThreatEventAxis;
+}
+
+/* ───────────────────────────── tenants.py ───────────────────────────── */
+/* /api/v1/tenants — 고객 계정 연결 · 원격 회수(Post-MVP T-4) 관리자 API. 구현은 T-17 ADR `Accepted` 뒤에 붙는다.
+   경로: GET·POST /tenants · GET·PATCH·DELETE /tenants/{id} · GET /tenants/{id}/onboarding · POST /tenants/{id}/verify·suspend·resume.
+   고객 계정에 들어가는 경로는 verify · resume 둘뿐이고, 정지 중에는 resume 하나다. */
+
+/** 수집 · AI 분석 · 실행의 관문. SUSPENDED = 원격 회수(플랫폼이 그 계정에 더 들어가지 않는다). */
+export const TENANT_STATUSES = ['PENDING_CONNECTION', 'ACTIVE', 'SUSPENDED'] as const;
+export type TenantStatus = (typeof TENANT_STATUSES)[number];
+
+/** DELETE /tenants/{id} 를 받는 상태 — 연결된 적 없는 테넌트만(계정 ID 오입력을 지우고 다시 만든다). 밖이면 TENANT_STATE_CONFLICT. */
+export const TENANT_DELETABLE_STATUSES: readonly TenantStatus[] = ['PENDING_CONNECTION'];
+/** POST /tenants/{id}/verify 를 받는 상태 — 정지 중에는 고객 계정에 들어가지 않는다(재개는 resume). 밖이면 TENANT_STATE_CONFLICT. */
+export const TENANT_VERIFIABLE_STATUSES: readonly TenantStatus[] = ['PENDING_CONNECTION', 'ACTIVE'];
+
+/** 연결 확인 1회의 결과 — AssumeRole → GetCallerIdentity → 계정 대조 → 최소 읽기 순으로 처음 실패한 자리. */
+export const TENANT_VERIFICATION_RESULTS = [
+  'OK',
+  'ASSUME_DENIED',
+  'ACCOUNT_MISMATCH',
+  'READ_DENIED',
+  'UNREACHABLE',
+] as const;
+export type TenantVerificationResult = (typeof TENANT_VERIFICATION_RESULTS)[number];
+
+/** 마지막 연결 확인 — 그 시각의 관측값이다. 「지금 연결된다」로 읽지 않는다. */
+export interface TenantVerification {
+  result: TenantVerificationResult;
+  verified_at: IsoDateTime;
+  /** 실패일 때만 있다(AWS 오류 코드 · 예외 클래스명). */
+  reason_code: string | null;
+}
+
+/** 구독 현황(T-16 · 모의) — 원천은 운영자 입력. */
+export interface TenantSubscription {
+  plan: string | null;
+  /** YYYY-MM-DD */
+  period_start: string | null;
+  /** YYYY-MM-DD */
+  period_end: string | null;
+}
+
+export interface TenantListItem {
+  tenant_id: string;
+  name: string;
+  status: TenantStatus;
+  aws_account_id: string;
+  last_verification: TenantVerification | null;
+  asset_count: number;
+  open_incident_count: number;
+}
+
+export interface TenantsResponse {
+  tenants: TenantListItem[];
+}
+
+export interface TenantDetail extends TenantListItem {
+  access_role_arn: string;
+  regions: string[];
+  /** 빈 목록 = 계정 안 VPC 전체. */
+  collect_vpc_ids: string[];
+  /** T-6 — false 면 자동 발동(선차단 · 1분 자동 격리)만 하지 않는다. */
+  auto_action_enabled: boolean;
+  /** PENDING_CONNECTION 일 때만 있다 — CloudFormation 빠른 생성 링크. */
+  onboarding_url: string | null;
+  /** SUSPENDED 일 때만 있다. */
+  suspended_at: IsoDateTime | null;
+  suspended_reason: string | null;
+  subscription: TenantSubscription | null;
+  created_at: IsoDateTime;
+  updated_at: IsoDateTime;
+}
+
+export interface TenantCreateRequest {
+  name: string;
+  aws_account_id: string;
+  /** 생략하면 arn:aws:iam::<계정>:role/vigilantis-access */
+  access_role_arn?: string;
+  regions: string[];
+  collect_vpc_ids?: string[];
+}
+
+/** external_id 는 상세에 없고 여기 · 연결 전 onboarding_url · 재발급(TenantOnboardingResponse)에서만 나간다. */
+export interface TenantCreateResponse {
+  tenant: TenantDetail;
+  external_id: string;
+}
+
+/** GET /tenants/{id}/onboarding — 모든 상태. 역할을 지운 고객이 같은 external_id 로 다시 만들 때 쓴다. */
+export interface TenantOnboardingResponse {
+  onboarding_url: string;
+  external_id: string;
+}
+
+export interface TenantVerifyResponse {
+  tenant: TenantDetail;
+  verification: TenantVerification;
+}
+
+export interface TenantSuspendRequest {
+  reason: string;
+}
+
+/** 보낸 칸만 바꾼다. aws_account_id · access_role_arn 은 바꾸지 않는다. */
+export interface TenantUpdateRequest {
+  name?: string;
+  regions?: string[];
+  collect_vpc_ids?: string[];
+  auto_action_enabled?: boolean;
+  subscription?: TenantSubscription | null;
 }

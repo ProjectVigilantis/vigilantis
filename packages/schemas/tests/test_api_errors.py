@@ -5,12 +5,15 @@ from pydantic import ValidationError
 
 from schemas.api.errors import ErrorCode, ErrorResponse
 
-# 계약 원문 6종. 코드가 아니라 이 리터럴 집합이 기대값이다.
+# 계약 원문 9종. 코드가 아니라 이 리터럴 집합이 기대값이다.
 CONTRACT_ERROR_CODES = {
     "INCIDENT_NOT_FOUND",         # 404
     "IDEMPOTENCY_KEY_CONFLICT",   # 409
     "PROPOSAL_NOT_EXECUTABLE",    # 409
     "INCIDENT_NOT_RESOLVABLE",    # 409 — 종료 처리 거절 (Issue #199)
+    "TENANT_NOT_FOUND",           # 404 — Post-MVP T-4
+    "TENANT_STATE_CONFLICT",      # 409 — 테넌트 상태 전이 거절
+    "TENANT_SUSPENDED",           # 409 — 정지된 테넌트 자산에 새 실행
     "REQUEST_VALIDATION_FAILED",  # 422
     "INTERNAL_ERROR",             # 500
 }

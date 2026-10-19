@@ -1,4 +1,4 @@
-// CMN-002 오류 상태 — 오류 봉투의 code 6종으로 분기하고 message를 그대로 보여줍니다(화면설계서 v1.4 §4.9).
+// CMN-002 오류 상태 — 오류 봉투의 code 9종으로 분기하고 message를 그대로 보여줍니다(화면설계서 v1.4 §4.9).
 // 주의: 이 파일에 "use client"를 붙이지 말 것 — RSC 직렬화가 ApiError의 code·requestId·httpStatus를
 // 오류 없이 조용히 버려서(prod에선 message까지) 5종 분기가 전부 무너진다. 클라이언트 로직은 copy-button처럼 분리한다.
 
@@ -39,6 +39,14 @@ const PRESENTATION: Record<ErrorCode, Presentation> = {
     note: '계약 불일치 오류입니다. 다시 시도해도 해결되지 않습니다.',
   },
   INTERNAL_ERROR: { variant: 'page' },
+  // 고객(테넌트) 관리 API(Post-MVP T-4). 화면 문구는 관리자 대시보드를 붙일 때 FE 담당이 다시 정한다.
+  TENANT_NOT_FOUND: { variant: 'page', backToList: true },
+  // 그 사이 다른 관리자가 상태를 바꿨다는 뜻 — PROPOSAL_NOT_EXECUTABLE 처럼 재조회가 원칙이다.
+  TENANT_STATE_CONFLICT: {
+    variant: 'inline',
+    note: '그 사이 고객 상태가 바뀌었습니다. 화면을 새로고침한 뒤 다시 시도해 주세요.',
+  },
+  TENANT_SUSPENDED: { variant: 'inline', note: '정지된 고객입니다. 고객을 재개한 뒤 실행할 수 있습니다.' },
 };
 
 /** ApiError가 아닌 실패(네트워크 등)도 오류 화면을 그려야 하므로 INTERNAL_ERROR로 접는다. */

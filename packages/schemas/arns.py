@@ -29,6 +29,15 @@ def build_arn(resource_type: str, resource_id: str, region: str, account_id: str
     return f"arn:aws:ec2:{region}:{account_id}:{resource_type}/{resource_id}"
 
 
+def build_iam_role_arn(account_id: str, role_name: str) -> str:
+    """IAM 역할 ARN 을 만든다 — arn:aws:iam::<account>:role/<name>.
+
+    IAM 은 전역 서비스라 리전 칸이 비어 있다. 자산 ARN 이 아니라 고객 계정에 들어갈
+    역할(테넌트의 `access_role_arn` · Post-MVP T-4)의 기본값을 만드는 데 쓴다.
+    """
+    return f"arn:aws:iam::{account_id}:role/{role_name}"
+
+
 def arn_region(arn: str) -> Optional[str]:
     """ARN 의 리전 칸(4번째 필드)을 돌려준다. 형식이 아니면 None.
 

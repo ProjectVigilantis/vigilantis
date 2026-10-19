@@ -19,12 +19,18 @@ from pydantic import BaseModel, ConfigDict, Field
 
 @unique
 class ErrorCode(str, Enum):
-    """REST 공통 오류 코드 6종. 괄호는 계약상 HTTP 상태."""
+    """REST 공통 오류 코드 9종. 괄호는 계약상 HTTP 상태.
+
+    TENANT_* 3종은 /api/v1/tenants(Post-MVP T-4)와 테넌트 정지(원격 회수)의 거절이다.
+    """
 
     INCIDENT_NOT_FOUND = "INCIDENT_NOT_FOUND"                # 404
     IDEMPOTENCY_KEY_CONFLICT = "IDEMPOTENCY_KEY_CONFLICT"    # 409
     PROPOSAL_NOT_EXECUTABLE = "PROPOSAL_NOT_EXECUTABLE"      # 409
     INCIDENT_NOT_RESOLVABLE = "INCIDENT_NOT_RESOLVABLE"      # 409
+    TENANT_NOT_FOUND = "TENANT_NOT_FOUND"                    # 404
+    TENANT_STATE_CONFLICT = "TENANT_STATE_CONFLICT"          # 409 — 지금 상태에서 할 수 없는 전이(이미 정지된 테넌트 정지 등)
+    TENANT_SUSPENDED = "TENANT_SUSPENDED"                    # 409 — 정지된 테넌트의 자산에 대한 새 실행 요청
     REQUEST_VALIDATION_FAILED = "REQUEST_VALIDATION_FAILED"  # 422
     INTERNAL_ERROR = "INTERNAL_ERROR"                        # 500
 
