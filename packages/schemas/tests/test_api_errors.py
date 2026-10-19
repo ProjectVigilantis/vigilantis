@@ -5,7 +5,7 @@ from pydantic import ValidationError
 
 from schemas.api.errors import ErrorCode, ErrorResponse
 
-# 계약 원문 9종. 코드가 아니라 이 리터럴 집합이 기대값이다.
+# 계약 원문 21종. 코드가 아니라 이 리터럴 집합이 기대값이다.
 CONTRACT_ERROR_CODES = {
     "INCIDENT_NOT_FOUND",         # 404
     "IDEMPOTENCY_KEY_CONFLICT",   # 409
@@ -14,6 +14,18 @@ CONTRACT_ERROR_CODES = {
     "TENANT_NOT_FOUND",           # 404 — Post-MVP T-4
     "TENANT_STATE_CONFLICT",      # 409 — 테넌트 상태 전이 거절
     "TENANT_SUSPENDED",           # 409 — 정지된 테넌트 자산에 새 실행
+    "AUTH_REQUIRED",              # 401 — Post-MVP T-1 (#492)
+    "AUTH_FAILED",                # 401
+    "AUTH_CODE_INVALID",          # 401
+    "AUTH_FLOW_EXPIRED",          # 401
+    "AUTH_STEP_CONFLICT",         # 409
+    "AUTH_PASSWORD_POLICY",       # 422
+    "AUTH_ORIGIN_REJECTED",       # 403
+    "ACCOUNT_NOT_PROVISIONED",    # 403
+    "ACCOUNT_DISABLED",           # 403
+    "AUTH_EMAIL_DELIVERY_FAILED", # 503
+    "AUTH_RATE_LIMITED",          # 429
+    "AUTH_PROVIDER_UNAVAILABLE",  # 503
     "REQUEST_VALIDATION_FAILED",  # 422
     "INTERNAL_ERROR",             # 500
 }
