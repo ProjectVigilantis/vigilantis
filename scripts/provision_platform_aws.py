@@ -8,7 +8,7 @@
 # 닿는다. Post-MVP에서 계정을 가르면(#438 ①②) 접근 역할의 계정 번호만 바뀐다.
 #
 # 구성 (서울 리전 — 관제 대상과 같은 리전, ADR-0010 §2):
-#   브라우저 ─HTTPS─ CloudFront(기본 도메인 · --domain을 주면 그 도메인도) + WAF(허용 IP만)
+#   브라우저 ─HTTPS─ CloudFront(기본 도메인 · --domain을 주면 그 도메인도) + WAF(IP당 속도 제한 → 허용 IP만)
 #            └─HTTP + 비밀 헤더─ 공개 ALB(CloudFront IP만 수신)
 #                 ├ /api/* · /health → ECS api (태스크 1개 고정)
 #                 └ 그 밖           → ECS web
@@ -38,6 +38,13 @@
 #      **플랫폼 down → 스모크 down**이다(ADR-0010 §7).
 #   ⑤ 이름이 같아도 플랫폼 태그(vigilantis:platform=true)가 없는 IAM 역할은 덮어쓰거나 지우지 않는다.
 #   ⑥ --allow-cidr는 IPv4 CIDR이고 /24보다 넓으면 거부한다 — 로그인 없는 MVP에서 허용 IP가 출입문이다.
+#   ⑦ WAF 속도 제한(#484 · Post-MVP T-3) — IP당 RATE_LIMIT_PER_WINDOW 건 / RATE_WINDOW_SECONDS 초를
+#      허용 규칙보다 **앞**(우선순위 0)에서 센다. 허용이 먼저 맞으면 WAF가 거기서 평가를 끝내기 때문이다.
+#      NAT 공인 IP는 세지 않는다 — 웹의 서버 측 API 호출이 전부 그 IP 하나로 CloudFront를 지나므로
+#      세면 모든 사용자의 화면 요청이 한 IP에 쌓여 플랫폼이 스스로를 막는다(ADR-0010 §4).
+#      동작은 Count(세기만)로 시작한다 — 정상 사용량을 재지 않았고, 캐시가 꺼져 있어 정적 파일까지
+#      전부 센다. 관측(CloudWatch 지표 vigilantis-platform-rate) 뒤 RATE_ACTION을 Block으로 바꾼다.
+#      up을 다시 돌리면 기존 웹 ACL의 규칙도 이 정의로 맞춘다 — 규칙을 고친 뒤 재실행이 곧 적용이다.
 #
 # 비밀값은 출력하지 않는다. OpenAI 키 비밀은 자리만 만들고 값은 PM이 직접 넣는다:
 #   aws secretsmanager put-secret-value --secret-id vigilantis-platform/openai-api-key --secret-string <키>
@@ -132,7 +139,12 @@ WEB_HEALTH_PATH = "/favicon.ico"  # 페이지는 서버에서 API를 부르므�
 DEREGISTRATION_DELAY_SECONDS = 30  # TG 연결 비우기 대기 — target_group_attributes
 
 WAF_IPSET = f"{PREFIX}-allow"
+WAF_NAT_IPSET = f"{PREFIX}-nat"  # 속도 제한에서 빼는 NAT 공인 IP(안전 가드 ⑦)
 WAF_ACL = f"{PREFIX}-waf"
+# 속도 제한(안전 가드 ⑦) — 잠정값. Count 기간의 관측으로 다시 정한다(#484)
+RATE_LIMIT_PER_WINDOW = 1000
+RATE_WINDOW_SECONDS = 300
+RATE_ACTION = "Count"  # 관측 뒤 "Block"
 CF_COMMENT = PREFIX  # CloudFront 배포는 태그로 찾기 어렵다 — comment로 식별한다
 CF_HOSTED_ZONE_ID = "Z2FDTNDATAQYW2"  # CloudFront 별칭 레코드의 고정 호스팅 영역 ID(AWS 문서 · 전 계정 공통)
 # AWS 관리형 정책 ID(전 계정 공통)
@@ -211,11 +223,28 @@ def listener_rules(tg_api: str, tg_web: str, origin_value: str) -> list[dict]:
     ]
 
 
-def waf_rules(ipset_arn: str) -> list[dict]:
-    """기본 차단 + 허용 IP만 통과. 로그인이 없는 MVP라 이것이 출입문이다(#438 ④ 전까지)."""
+def waf_rules(ipset_arn: str, nat_ipset_arn: str) -> list[dict]:
+    """IP당 속도 제한(NAT 제외) → 허용 IP만 통과 → 기본 차단(안전 가드 ⑦).
+
+    로그인이 없는 MVP라 허용 IP가 출입문이다(#438 ④ 전까지). 속도 규칙은 허용 규칙보다 앞이어야
+    평가된다 — 허용이 맞으면 WAF가 거기서 끝낸다.
+    """
     return [{
-        "Name": "allow-listed-ips",
+        "Name": "rate-per-ip",
         "Priority": 0,
+        "Statement": {"RateBasedStatement": {
+            "Limit": RATE_LIMIT_PER_WINDOW,
+            "EvaluationWindowSec": RATE_WINDOW_SECONDS,
+            "AggregateKeyType": "IP",
+            "ScopeDownStatement": {"NotStatement": {"Statement": {
+                "IPSetReferenceStatement": {"ARN": nat_ipset_arn}}}},
+        }},
+        "Action": {RATE_ACTION: {}},
+        "VisibilityConfig": {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True,
+                             "MetricName": f"{PREFIX}-rate"},
+    }, {
+        "Name": "allow-listed-ips",
+        "Priority": 1,
         "Statement": {"IPSetReferenceStatement": {"ARN": ipset_arn}},
         "Action": {"Allow": {}},
         "VisibilityConfig": {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True,
@@ -482,9 +511,9 @@ def _find_tg(elbv2, name: str) -> Optional[str]:
         raise
 
 
-def _find_ipset(waf) -> Optional[dict]:
+def _find_ipset(waf, name: str = WAF_IPSET) -> Optional[dict]:
     for s in waf.list_ip_sets(Scope="CLOUDFRONT", Limit=100).get("IPSets", []):
-        if s["Name"] == WAF_IPSET:
+        if s["Name"] == name:
             return s
     return None
 
@@ -568,6 +597,7 @@ def inventory(c: dict) -> list[tuple[str, str, Optional[str]]]:
     rows.append(("LoadBalancer", ALB_NAME, lb["DNSName"] if lb else None))
     rows += [("TargetGroup", n, _find_tg(elbv2, n)) for n in (TG_API, TG_WEB)]
     rows.append(("WafIpSet", WAF_IPSET, (_find_ipset(c["waf"]) or {}).get("Id")))
+    rows.append(("WafIpSet", WAF_NAT_IPSET, (_find_ipset(c["waf"], WAF_NAT_IPSET) or {}).get("Id")))
     rows.append(("WafWebAcl", WAF_ACL, (_find_acl(c["waf"]) or {}).get("Id")))
     dist = _find_distribution(c["cf"])
     rows.append(("CloudFront", CF_COMMENT, " · ".join(public_origins(dist)) if dist else None))
@@ -884,28 +914,82 @@ def _ensure_alb(elbv2, vpc_id: str, subnets: dict[str, str], sg_alb: str, origin
     return {"dns": lb["DNSName"], "tg_api": tg_api, "tg_web": tg_web}
 
 
-def _ensure_waf(waf, cidrs: list[str]) -> str:
-    ipset = _find_ipset(waf)
+def _ensure_ipset(waf, name: str, cidrs: list[str], label: str) -> str:
+    """이름으로 IP 집합을 찾아 주소를 맞추고 ARN을 돌려준다. 없으면 만든다."""
+    ipset = _find_ipset(waf, name)
     if ipset:
-        cur = waf.get_ip_set(Name=WAF_IPSET, Scope="CLOUDFRONT", Id=ipset["Id"])
+        cur = waf.get_ip_set(Name=name, Scope="CLOUDFRONT", Id=ipset["Id"])
         if sorted(cur["IPSet"]["Addresses"]) != sorted(cidrs):
-            waf.update_ip_set(Name=WAF_IPSET, Scope="CLOUDFRONT", Id=ipset["Id"], Addresses=sorted(cidrs),
+            waf.update_ip_set(Name=name, Scope="CLOUDFRONT", Id=ipset["Id"], Addresses=sorted(cidrs),
                               LockToken=cur["LockToken"])
-            print(f"[platform] WAF 허용 IP 갱신 — {len(cidrs)}건")
-        ipset_arn = cur["IPSet"]["ARN"]
-    else:
-        ipset_arn = waf.create_ip_set(Name=WAF_IPSET, Scope="CLOUDFRONT", IPAddressVersion="IPV4",
-                                      Addresses=sorted(cidrs), Tags=_kv_tags(WAF_IPSET))["Summary"]["ARN"]
-        print(f"[platform] WAF 허용 IP 생성 — {len(cidrs)}건")
+            print(f"[platform] WAF {label} 갱신 — {len(cidrs)}건")
+        return cur["IPSet"]["ARN"]
+    arn = waf.create_ip_set(Name=name, Scope="CLOUDFRONT", IPAddressVersion="IPV4",
+                            Addresses=sorted(cidrs), Tags=_kv_tags(name))["Summary"]["ARN"]
+    print(f"[platform] WAF {label} 생성 — {len(cidrs)}건")
+    return arn
+
+
+def _covers(current, desired) -> bool:
+    """current가 desired의 키·값을 전부 같은 값으로 갖는가. AWS가 응답에 덧붙이는 기본 키는 보지 않는다.
+
+    get_web_acl 응답은 요청에 없던 기본값을 실을 수 있다 — 통째로 비교하면 매 실행이 「다름」이 되어
+    멱등이 깨진다. 목록은 길이와 순서까지 같아야 한다.
+    """
+    if isinstance(desired, dict):
+        return isinstance(current, dict) and all(k in current and _covers(current[k], v) for k, v in desired.items())
+    if isinstance(desired, list):
+        return (isinstance(current, list) and len(current) == len(desired)
+                and all(_covers(c, d) for c, d in zip(current, desired)))
+    return current == desired
+
+
+def _same_rules(current: list[dict], desired: list[dict]) -> bool:
+    by_priority = sorted(current, key=lambda r: r.get("Priority", 0))
+    return _covers(by_priority, desired)
+
+
+_ACL_DEFAULT_ACTION = {"Block": {}}
+_ACL_VISIBILITY = {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True, "MetricName": WAF_ACL}
+
+
+def _ensure_waf(waf, cidrs: list[str], nat_cidr: str) -> str:
+    """허용 IP 집합 · NAT IP 집합 · 웹 ACL을 맞춘다. 웹 ACL이 이미 있으면 규칙을 waf_rules()로 맞춘다.
+
+    규칙을 생성 때만 넣으면 waf_rules()를 고쳐도 이미 배포된 플랫폼에는 들어가지 않는다(#484).
+    규칙이 이미 같으면 바꾸지 않는다 — 두 번째 실행은 변경 0이다.
+    """
+    ipset_arn = _ensure_ipset(waf, WAF_IPSET, cidrs, "허용 IP")
+    nat_ipset_arn = _ensure_ipset(waf, WAF_NAT_IPSET, [nat_cidr], "NAT IP(속도 제한 제외)")
+    rules = waf_rules(ipset_arn, nat_ipset_arn)
     acl = _find_acl(waf)
     if acl:
+        cur = waf.get_web_acl(Name=WAF_ACL, Scope="CLOUDFRONT", Id=acl["Id"])
+        if not _same_rules(cur["WebACL"].get("Rules", []), rules):
+            waf.update_web_acl(Name=WAF_ACL, Scope="CLOUDFRONT", Id=acl["Id"], DefaultAction=_ACL_DEFAULT_ACTION,
+                               Rules=rules, VisibilityConfig=_ACL_VISIBILITY, LockToken=cur["LockToken"])
+            print(f"[platform] WAF 웹 ACL {WAF_ACL} 규칙 갱신 — 속도 제한 {RATE_LIMIT_PER_WINDOW}건/"
+                  f"{RATE_WINDOW_SECONDS}초({RATE_ACTION}) → 허용 IP")
         return acl["ARN"]
     acl_arn = waf.create_web_acl(
-        Name=WAF_ACL, Scope="CLOUDFRONT", DefaultAction={"Block": {}}, Rules=waf_rules(ipset_arn),
-        VisibilityConfig={"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True, "MetricName": WAF_ACL},
-        Tags=_kv_tags(WAF_ACL))["Summary"]["ARN"]
-    print(f"[platform] WAF 웹 ACL {WAF_ACL} 생성(기본 차단)")
+        Name=WAF_ACL, Scope="CLOUDFRONT", DefaultAction=_ACL_DEFAULT_ACTION, Rules=rules,
+        VisibilityConfig=_ACL_VISIBILITY, Tags=_kv_tags(WAF_ACL))["Summary"]["ARN"]
+    print(f"[platform] WAF 웹 ACL {WAF_ACL} 생성(기본 차단 · 속도 제한 {RATE_ACTION})")
     return acl_arn
+
+
+def _delete_waf(waf) -> None:
+    """웹 ACL → IP 집합 둘 순서로 지운다. 웹 ACL이 두 집합을 참조하므로 ACL이 먼저다."""
+    acl = _find_acl(waf)
+    if acl:
+        _retry(lambda: waf.delete_web_acl(Name=WAF_ACL, Scope="CLOUDFRONT", Id=acl["Id"],
+                                          LockToken=waf.get_web_acl(Name=WAF_ACL, Scope="CLOUDFRONT",
+                                                                    Id=acl["Id"])["LockToken"]),
+               "WAF 웹 ACL 삭제", ("WAFAssociatedItemException",), timeout=600)
+    for name in (WAF_IPSET, WAF_NAT_IPSET):
+        ipset = _find_ipset(waf, name)
+        if ipset:
+            waf.delete_ip_set(Name=name, Scope="CLOUDFRONT", Id=ipset["Id"], LockToken=ipset["LockToken"])
 
 
 def distribution_config(alb_dns: str, origin_value: str, acl_arn: str, caller_ref: str) -> dict:
@@ -1006,7 +1090,8 @@ def up(c: dict, account: str, region: str, allow_cidrs: list[str], domain: Optio
     _ensure_cluster(c["ecs"])
     alb = _ensure_alb(c["elbv2"], vpc_id, subnets, sgs[SG_ALB], origin_value)
     # 웹 컨테이너의 서버 측 API 호출도 CloudFront를 거친다 — NAT 공인 IP를 허용 목록에 넣는다
-    acl_arn = _ensure_waf(c["waf"], sorted(set(allow_cidrs) | {f"{nat_ip}/32"}))
+    # 속도 제한에서는 NAT IP를 뺀다(안전 가드 ⑦) — 같은 이유로 그 IP가 모든 사용자의 서버 측 호출을 싣는다
+    acl_arn = _ensure_waf(c["waf"], sorted(set(allow_cidrs) | {f"{nat_ip}/32"}), f"{nat_ip}/32")
     _ensure_distribution(c["cf"], alb["dns"], origin_value, acl_arn)
     if custom:
         _ensure_custom_domain(c, domain, *custom)
@@ -1266,15 +1351,7 @@ def down(c: dict, account: str) -> None:
         etag = c["cf"].get_distribution_config(Id=dist["Id"])["ETag"]
         c["cf"].delete_distribution(Id=dist["Id"], IfMatch=etag)
         print("[platform] CloudFront 삭제")
-    acl = _find_acl(c["waf"])
-    if acl:
-        _retry(lambda: c["waf"].delete_web_acl(Name=WAF_ACL, Scope="CLOUDFRONT", Id=acl["Id"],
-                                               LockToken=c["waf"].get_web_acl(Name=WAF_ACL, Scope="CLOUDFRONT",
-                                                                              Id=acl["Id"])["LockToken"]),
-               "WAF 웹 ACL 삭제", ("WAFAssociatedItemException",), timeout=600)
-    ipset = _find_ipset(c["waf"])
-    if ipset:
-        c["waf"].delete_ip_set(Name=WAF_IPSET, Scope="CLOUDFRONT", Id=ipset["Id"], LockToken=ipset["LockToken"])
+    _delete_waf(c["waf"])
 
     lb = _find_lb(elbv2)
     if lb:

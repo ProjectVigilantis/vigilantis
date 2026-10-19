@@ -158,9 +158,134 @@ def test_down_removes_only_alias_records_that_point_at_this_distribution():
 
 # ④ ---------------------------------------------------------------------------
 def test_waf_allows_only_the_ip_set():
-    (rule,) = platform.waf_rules("arn:ipset")
-    assert rule["Statement"] == {"IPSetReferenceStatement": {"ARN": "arn:ipset"}}
-    assert rule["Action"] == {"Allow": {}}
+    _, allow = platform.waf_rules("arn:ipset", "arn:nat")
+    assert allow["Statement"] == {"IPSetReferenceStatement": {"ARN": "arn:ipset"}}
+    assert allow["Action"] == {"Allow": {}}
+
+
+# ⑦ 속도 제한 (#484) ------------------------------------------------------------
+def test_rate_limit_is_evaluated_before_the_allow_rule():
+    # 허용이 먼저 맞으면 WAF가 거기서 끝낸다 — 속도 규칙은 우선순위가 더 앞이어야 평가된다
+    rate, allow = platform.waf_rules("arn:ipset", "arn:nat")
+    assert rate["Name"] == "rate-per-ip"
+    assert rate["Priority"] < allow["Priority"]
+
+
+def test_rate_limit_counts_per_ip_but_never_the_nat_ip():
+    (rate, _) = platform.waf_rules("arn:ipset", "arn:nat")
+    stmt = rate["Statement"]["RateBasedStatement"]
+    assert stmt["AggregateKeyType"] == "IP"
+    assert stmt["Limit"] == platform.RATE_LIMIT_PER_WINDOW
+    assert stmt["EvaluationWindowSec"] == platform.RATE_WINDOW_SECONDS
+    # NAT 공인 IP가 모든 사용자의 서버 측 호출을 싣는다 — 세면 플랫폼이 스스로를 막는다
+    assert stmt["ScopeDownStatement"] == {
+        "NotStatement": {"Statement": {"IPSetReferenceStatement": {"ARN": "arn:nat"}}}}
+
+
+def test_rate_limit_starts_in_count_mode():
+    # 정상 사용량을 재지 않았다 — 관측 전에는 막지 않는다(#484 ⓔ)
+    (rate, _) = platform.waf_rules("arn:ipset", "arn:nat")
+    assert rate["Action"] == {"Count": {}}
+    assert platform.RATE_WINDOW_SECONDS in (60, 120, 300, 600)  # WAF가 받는 창 길이
+
+
+class FakeWaf:
+    """IP 집합 · 웹 ACL 을 들고 있는 WAFv2 대역 — 생성 · 갱신 · 삭제가 상태를 바꾼다."""
+
+    def __init__(self, ipsets=None, acl_rules=None):
+        self.ipsets = {name: list(addrs) for name, addrs in (ipsets or {}).items()}
+        self.acl_rules = acl_rules  # None = 웹 ACL 없음
+        self.calls: list[str] = []
+
+    def list_ip_sets(self, **_):
+        return {"IPSets": [{"Name": n, "Id": f"id-{n}", "LockToken": "t"} for n in self.ipsets]}
+
+    def get_ip_set(self, Name, **_):
+        return {"IPSet": {"Addresses": self.ipsets[Name], "ARN": f"arn:{Name}"}, "LockToken": "t"}
+
+    def create_ip_set(self, Name, Addresses, **_):
+        self.calls.append(f"create_ip_set:{Name}")
+        self.ipsets[Name] = list(Addresses)
+        return {"Summary": {"ARN": f"arn:{Name}"}}
+
+    def update_ip_set(self, Name, Addresses, **_):
+        self.calls.append(f"update_ip_set:{Name}")
+        self.ipsets[Name] = list(Addresses)
+
+    def delete_ip_set(self, Name, **_):
+        self.calls.append(f"delete_ip_set:{Name}")
+        del self.ipsets[Name]
+
+    def list_web_acls(self, **_):
+        if self.acl_rules is None:
+            return {"WebACLs": []}
+        return {"WebACLs": [{"Name": platform.WAF_ACL, "Id": "acl-1", "ARN": "arn:acl"}]}
+
+    def get_web_acl(self, **_):
+        # 실제 응답처럼 요청에 없던 기본 키를 덧붙인다 — 통째 비교면 매번 「다름」이 된다
+        rules = [{**r, "RuleLabels": []} for r in self.acl_rules]
+        return {"WebACL": {"Rules": rules}, "LockToken": "t"}
+
+    def create_web_acl(self, Rules, **_):
+        self.calls.append("create_web_acl")
+        self.acl_rules = Rules
+        return {"Summary": {"ARN": "arn:acl"}}
+
+    def update_web_acl(self, Rules, **_):
+        self.calls.append("update_web_acl")
+        self.acl_rules = Rules
+
+    def delete_web_acl(self, **_):
+        self.calls.append("delete_web_acl")
+        self.acl_rules = None
+
+
+ALLOW = ["203.0.113.7/32", "198.51.100.9/32"]
+NAT = "198.51.100.9/32"
+
+
+def test_new_acl_gets_the_rate_rule_and_a_separate_nat_set():
+    waf = FakeWaf()
+    platform._ensure_waf(waf, ALLOW, NAT)
+    assert waf.ipsets[platform.WAF_NAT_IPSET] == [NAT]
+    assert [r["Name"] for r in waf.acl_rules] == ["rate-per-ip", "allow-listed-ips"]
+
+
+def test_existing_acl_without_the_rate_rule_is_updated():
+    # 지금 배포된 플랫폼의 모양 — 허용 규칙 하나뿐인 웹 ACL(#484 「지금 상태」 ②)
+    old = [{"Name": "allow-listed-ips", "Priority": 0, "Action": {"Allow": {}},
+            "Statement": {"IPSetReferenceStatement": {"ARN": f"arn:{platform.WAF_IPSET}"}}}]
+    waf = FakeWaf(ipsets={platform.WAF_IPSET: ALLOW}, acl_rules=old)
+    platform._ensure_waf(waf, ALLOW, NAT)
+    assert "update_web_acl" in waf.calls
+    assert [r["Name"] for r in waf.acl_rules] == ["rate-per-ip", "allow-listed-ips"]
+
+
+def test_second_run_changes_nothing():
+    waf = FakeWaf()
+    platform._ensure_waf(waf, ALLOW, NAT)
+    waf.calls.clear()
+    platform._ensure_waf(waf, ALLOW, NAT)
+    assert waf.calls == []  # 응답에 기본 키가 덧붙어도 같은 규칙으로 본다
+
+
+def test_switching_to_block_is_applied_on_rerun(monkeypatch):
+    waf = FakeWaf()
+    platform._ensure_waf(waf, ALLOW, NAT)
+    monkeypatch.setattr(platform, "RATE_ACTION", "Block")
+    waf.calls.clear()
+    platform._ensure_waf(waf, ALLOW, NAT)
+    assert waf.calls == ["update_web_acl"]
+    assert waf.acl_rules[0]["Action"] == {"Block": {}}
+
+
+def test_down_removes_the_acl_then_both_ip_sets():
+    waf = FakeWaf(ipsets={platform.WAF_IPSET: ALLOW, platform.WAF_NAT_IPSET: [NAT]}, acl_rules=[])
+    platform._delete_waf(waf)
+    assert waf.ipsets == {} and waf.acl_rules is None
+    # 웹 ACL 이 두 집합을 참조한다 — 집합을 먼저 지우면 WAF 가 거절한다
+    assert waf.calls == ["delete_web_acl", f"delete_ip_set:{platform.WAF_IPSET}",
+                         f"delete_ip_set:{platform.WAF_NAT_IPSET}"]
 
 
 def test_allow_cidr_accepts_narrow_ipv4_ranges():
