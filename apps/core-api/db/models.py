@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import Enum
 
 from schemas.api.actions import ExecutionStatus
@@ -27,6 +27,7 @@ from schemas.api.incidents import (
     ResponseMode,
     RiskLevel,
 )
+from schemas.api.tenants import TenantStatus, TenantVerificationResult
 from schemas.candidates import CandidateStatus
 from schemas.collections import CollectionRunStatus
 from schemas.events import ThreatEventType
@@ -42,7 +43,9 @@ from schemas.incidents import AgentInvocationStatus
 from schemas.runbooks import RunbookId, TriggerSource
 from sqlalchemy import (
     CHAR,
+    Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -91,6 +94,103 @@ _ID = Uuid(as_uuid=False)  # PG native UUID, 파이썬 값은 str — 내부 계
 
 
 # ==============================================================================
+# 테넌트 — 고객 계정 1개 (Post-MVP T-4)
+# ==============================================================================
+
+
+class Tenant(Base):
+    """고객 계정 1개. 플랫폼이 이 계정의 역할에 AssumeRole + ExternalId 로 들어간다(#438 §C-1).
+
+    공개 계약은 `schemas.api.tenants`(#485)이고 아래 CHECK 는 그 불변식의 DB 거울이다 —
+    API 를 거치지 않는 쓰기(마이그레이션 · 운영 스크립트)도 같은 모양을 지키게 한다.
+    연결 확인 결과는 관측값이라 「그 시각에 확인한 결과」로 저장한다(상태를 자동으로 바꾸지 않는다).
+    온보딩 링크는 저장하지 않는다 — `external_id` 와 플랫폼 주체에서 만드는 파생값이다.
+    """
+
+    __tablename__ = "tenants"
+
+    tenant_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
+    name: Mapped[str] = mapped_column(String(100))
+    status: Mapped[TenantStatus] = mapped_column(
+        _enum(TenantStatus, "tenant_status"), default=TenantStatus.PENDING_CONNECTION
+    )
+    # 한 계정은 한 테넌트다 — 같은 계정을 두 테넌트로 두면 같은 자산을 두 번 수집 · 조치한다
+    aws_account_id: Mapped[str] = mapped_column(String(12), unique=True)
+    access_role_arn: Mapped[str] = mapped_column(String(2048))
+    external_id: Mapped[str] = mapped_column(String(128), unique=True)
+    regions: Mapped[list] = mapped_column(JSONB)
+    collect_vpc_ids: Mapped[list] = mapped_column(JSONB, default=list)
+    # T-6 — 끄면 자동 발동(선차단 · 1분 자동 격리)만 하지 않는다
+    auto_action_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_verification_result: Mapped[TenantVerificationResult | None] = mapped_column(
+        _enum(TenantVerificationResult, "tenant_verification_result"), nullable=True
+    )
+    last_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_verification_reason_code: Mapped[str | None] = mapped_column(
+        String(200), nullable=True
+    )
+    # T-16 구독 현황(모의) — 원천은 운영자 입력
+    plan: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    period_start: Mapped[date | None] = mapped_column(Date, nullable=True)
+    period_end: Mapped[date | None] = mapped_column(Date, nullable=True)
+    suspended_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    suspended_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    __table_args__ = (
+        CheckConstraint("aws_account_id ~ '^[0-9]{12}$'", name="account_id_format"),
+        # 역할은 그 테넌트의 계정에 있다 — arn:aws:iam::<계정>:role/<이름> 의 5번째 칸
+        CheckConstraint(
+            "split_part(access_role_arn, ':', 5) = aws_account_id", name="role_in_tenant_account"
+        ),
+        CheckConstraint("length(external_id) >= 16", name="external_id_min_length"),
+        CheckConstraint(
+            "jsonb_typeof(regions) = 'array' AND jsonb_array_length(regions) > 0",
+            name="regions_non_empty_array",
+        ),
+        CheckConstraint("jsonb_typeof(collect_vpc_ids) = 'array'", name="collect_vpc_ids_is_array"),
+        # 확인 결과와 시각은 함께 있고, 사유는 실패일 때만 있다
+        CheckConstraint(
+            "((last_verification_result IS NULL) = (last_verified_at IS NULL))"
+            " AND ((last_verification_result IS NULL OR last_verification_result = 'OK')"
+            " = (last_verification_reason_code IS NULL))",
+            name="verification_shape",
+        ),
+        # ACTIVE 는 연결 확인을 거쳐서만 된다 — 그 뒤의 실패는 상태를 내리지 않는다
+        CheckConstraint(
+            "status <> 'ACTIVE' OR last_verified_at IS NOT NULL", name="active_was_verified"
+        ),
+        CheckConstraint(
+            "((status = 'SUSPENDED') = (suspended_at IS NOT NULL))"
+            " AND ((status = 'SUSPENDED') = (suspended_reason IS NOT NULL))",
+            name="suspension_with_status",
+        ),
+        CheckConstraint(
+            "period_start IS NULL OR period_end IS NULL OR period_end >= period_start",
+            name="period_ordered",
+        ),
+    )
+
+
+# 뿌리 테이블 5개(collection_runs · assets · threat_events · incidents · action_executions)의
+# 테넌트 칸. 나머지 테이블은 FK 로 따라온다(#485 설계 초안 Q1).
+# **NULL = MVP 단일 계정 기록이다** — 테넌트가 생기기 전의 행이고, 그 계정의 테넌트가 실제로
+# 연결된 뒤에 채운다. 마이그레이션이 계정 ID · 역할 · ExternalId 를 지어내 「기본 테넌트」를
+# 만들지 않는다 — 연결 확인 없는 ACTIVE 가 되어 계약(active_was_verified)과 어긋난다.
+def _tenant_fk():
+    return mapped_column(_ID, ForeignKey("tenants.tenant_id"), nullable=True, index=True)
+
+
+# ==============================================================================
 # 자산·인시던트 계열 9종
 # ==============================================================================
 
@@ -103,6 +203,7 @@ class CollectionRun(Base):
     collection_run_id: Mapped[str] = mapped_column(
         _ID, primary_key=True, default=_new_id
     )
+    tenant_id: Mapped[str | None] = _tenant_fk()
     status: Mapped[CollectionRunStatus] = mapped_column(
         _enum(CollectionRunStatus, "collection_run_status"),
         default=CollectionRunStatus.IN_PROGRESS,
@@ -143,6 +244,7 @@ class Asset(Base):
 
     asset_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
     arn: Mapped[str] = mapped_column(String(512), unique=True)
+    tenant_id: Mapped[str | None] = _tenant_fk()
     asset_type: Mapped[AssetType] = mapped_column(_enum(AssetType, "asset_type"))
     resource_id: Mapped[str] = mapped_column(String(128))
     name: Mapped[str | None] = mapped_column(String(256), nullable=True)
@@ -300,6 +402,7 @@ class ThreatEvent(Base):
     __tablename__ = "threat_events"
 
     threat_event_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
+    tenant_id: Mapped[str | None] = _tenant_fk()
     source_event_id: Mapped[str] = mapped_column(String(256))
     event_type: Mapped[ThreatEventType] = mapped_column(
         _enum(ThreatEventType, "threat_event_type")
@@ -324,6 +427,7 @@ class Incident(Base):
     __tablename__ = "incidents"
 
     incident_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
+    tenant_id: Mapped[str | None] = _tenant_fk()
     title: Mapped[str | None] = mapped_column(String(256), nullable=True)
     subject_arn: Mapped[str] = mapped_column(String(512))
     category: Mapped[IncidentCategory] = mapped_column(
@@ -554,6 +658,9 @@ class ActionExecution(Base):
 
     execution_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
     incident_id: Mapped[str] = mapped_column(_ID, ForeignKey("incidents.incident_id"))
+    # 인시던트로도 따라오지만 디스패처가 정지(SUSPENDED) 테넌트를 실행 행에서 바로 거르도록 둔다.
+    # 인시던트의 테넌트와 같아야 한다 — 트리거 없이 CHECK 로 못 걸어 쓰는 자리에서 맞춘다
+    tenant_id: Mapped[str | None] = _tenant_fk()
     candidate_id: Mapped[str | None] = mapped_column(
         _ID, ForeignKey("runbook_candidates.candidate_id"), nullable=True
     )

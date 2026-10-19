@@ -17,7 +17,7 @@ from config import get_settings
 from db import models
 from db.repositories import notification_events as events_repo
 from schemas.api.incidents import RiskLevel
-from sqlalchemy import inspect
+from sqlalchemy import insert, inspect
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -55,7 +55,9 @@ def test_upgrade_from_previous_head_preserves_business_rows(pg_engine, monkeypat
     try:
         with Session(pg_engine) as db:
             assert "notification_events" not in inspect(pg_engine).get_table_names()
-            db.add(models.Incident(
+            # ORM 객체 INSERT 는 모델의 모든 칸을 싣는다 — 뒤 리비전이 incidents 에 칸을 더하면
+            # (tenant_id · #495) 옛 리비전에서 그 칸을 찾다 깨진다. 넣는 칸만 싣는 insert 로 넣는다
+            db.execute(insert(models.Incident).values(
                 incident_id=incident_id,
                 subject_arn="arn:aws:ec2:ap-northeast-2:123456789012:instance/i-migration",
                 category="FINOPS",
