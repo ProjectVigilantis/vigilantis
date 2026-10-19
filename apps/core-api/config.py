@@ -2,7 +2,8 @@
 # [파일 설명]
 # pydantic-settings 기반 런타임 환경설정 로더입니다. (Issue #60·#68·#115·#128·#424, ADR-0001)
 #
-# 설정 단위를 셋으로 나눈다 — 필수 항목이 서로 다르기 때문이다.
+# 설정 단위를 넷으로 나눈다 — 필수 항목이 서로 다르기 때문이다.
+#   AuthSettings      : 로그인(Cognito)·세션 설정(#492). 전부 선택 — 비면 auth API만 503.
 #   Settings          : Core API 프로세스 설정. DATABASE_URL 필수이고
 #                       로깅·CORS·WebSocket·OpenAI는 기본값이 있다.
 #   AwsSettings       : AWS 접근 설정(리전·엔드포인트). DB와 무관.
@@ -21,7 +22,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal, Optional
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # .env에는 POSTGRES_USER 등 다른 서비스용 변수도 있으므로 extra는 무시한다.
@@ -142,6 +143,15 @@ class Settings(BaseSettings):
     # backoff로 간다 — 요청 경로에서 부르는 호출이라 무한정 붙잡지 않는다
     OPENAI_MAX_RETRY_AFTER_SECONDS: float = Field(default=60.0, ge=0)
 
+    @field_validator("CORS_ALLOW_ORIGINS", mode="after")
+    @classmethod
+    def _no_wildcard_cors_origin(cls, value: str) -> str:
+        # CORS 가 자격증명(로그인 쿠키)을 허용하므로(#492) `*` 는 받지 않는다 — Starlette 는
+        # `*` + allow_credentials 에서 요청 Origin 을 그대로 되돌려 모든 출처에 쿠키 요청을 연다
+        if "*" in value:
+            raise ValueError("CORS_ALLOW_ORIGINS 는 명시 Origin 목록이어야 한다(* 금지)")
+        return value
+
     @field_validator("OPENAI_REASONING_EFFORT", mode="after")
     @classmethod
     def _fold_unset_reasoning_effort(cls, value: Optional[str]) -> Optional[str]:
@@ -180,6 +190,56 @@ class AwsSettings(BaseSettings):
     def endpoint_url(self) -> str | None:
         """LocalStack 엔드포인트. 실 AWS면 None."""
         return self.AWS_ENDPOINT_URL.strip() or None
+
+
+class AuthSettings(BaseSettings):
+    """로그인(Cognito) · 세션 설정 (#492).
+
+    Cognito 4종은 Optional이다 — 비어 있어도 앱은 뜨고, /api/v1/auth/* 만 503
+    AUTH_PROVIDER_UNAVAILABLE 로 답한다. 누락은 키 이름으로만 알린다(값은 로그에 싣지 않는다).
+    AwsSettings 와 달리 .env 를 읽는다 — 호스트 직접 실행 편의(Settings 와 같다).
+    """
+
+    model_config = _ENV_FILE
+
+    COGNITO_REGION: str | None = None
+    COGNITO_USER_POOL_ID: str | None = None
+    COGNITO_CLIENT_ID: str | None = None
+    COGNITO_CLIENT_SECRET: SecretStr | None = None
+    # 로컬 개발에서 이름 있는 프로파일로 Cognito 에 붙을 때만 — .env 에 LocalStack 더미 AWS 키가
+    # 있어도 그것이 쓰이지 않게 한다. 비우면 기본 자격증명 체인(배포: 태스크 역할).
+    COGNITO_AWS_PROFILE: str | None = None
+    AUTH_SESSION_MAX_SECONDS: int = Field(default=28800, gt=0)
+    AUTH_SESSION_IDLE_SECONDS: int = Field(default=1800, gt=0)
+    AUTH_TOTP_MAX_ATTEMPTS: int = Field(default=3, ge=1)
+    # 흐름을 가로지르는 코드 실패 한도 — 윈도 안에서 한도를 넘으면 새 코드 제출을 막는다
+    AUTH_CODE_FAILURE_LIMIT: int = Field(default=10, ge=1)
+    AUTH_CODE_FAILURE_WINDOW_SECONDS: int = Field(default=900, gt=0)
+    # 콤마 구분 허용 Origin(정확히 일치) — 비우면 CORS_ALLOW_ORIGINS 와 같은 목록을 쓴다
+    AUTH_ALLOWED_ORIGINS: str = ""
+
+    @field_validator("AUTH_ALLOWED_ORIGINS", mode="after")
+    @classmethod
+    def _no_wildcard_origin(cls, value: str) -> str:
+        if "*" in value:
+            raise ValueError("AUTH_ALLOWED_ORIGINS 는 명시 Origin 목록이어야 한다(* 금지)")
+        return value
+
+    def missing_cognito_keys(self) -> list[str]:
+        values = {
+            "COGNITO_REGION": self.COGNITO_REGION,
+            "COGNITO_USER_POOL_ID": self.COGNITO_USER_POOL_ID,
+            "COGNITO_CLIENT_ID": self.COGNITO_CLIENT_ID,
+            "COGNITO_CLIENT_SECRET": (
+                self.COGNITO_CLIENT_SECRET.get_secret_value()
+                if self.COGNITO_CLIENT_SECRET
+                else None
+            ),
+        }
+        return [key for key, value in values.items() if not (value or "").strip()]
+
+    def allowed_origins(self, fallback: list[str]) -> list[str]:
+        return _split_csv(self.AUTH_ALLOWED_ORIGINS) or list(fallback)
 
 
 class CollectorSettings(BaseSettings):
@@ -239,6 +299,12 @@ def get_settings() -> Settings:
 def get_aws_settings() -> AwsSettings:
     """검증된 AwsSettings 싱글턴. 테스트는 cache_clear() 후 환경변수로 주입한다."""
     return AwsSettings()
+
+
+@lru_cache
+def get_auth_settings() -> AuthSettings:
+    """검증된 AuthSettings 싱글턴. 테스트는 cache_clear() 후 주입한다."""
+    return AuthSettings()
 
 
 @lru_cache

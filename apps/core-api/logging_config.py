@@ -163,6 +163,9 @@ def setup_logging(
         root.addHandler(file_handler)
 
     root.setLevel(level.upper())
+    # DEBUG 에서 botocore 가 요청 파라미터(비밀번호·코드·ClientSecret)와 응답 본문(토큰)을 찍는다 — LOG_LEVEL 과 무관하게 WARNING 고정
+    for noisy in ("botocore", "boto3", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     # uvicorn 기동 시 dictConfig(LOGGING_CONFIG)가 "uvicorn" 로거에 자체 핸들러를 달고
     # propagate=False로 막는다 — 그대로면 uvicorn.error 줄이 JSON 밖의 평문으로 나가고 파일에도
     # 남지 않는다. 그 핸들러를 떼고 루트로 흘려 같은 JSON 핸들러가 한 번씩만 쓰게 한다
