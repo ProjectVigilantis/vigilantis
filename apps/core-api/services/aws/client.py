@@ -26,11 +26,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
 import boto3
+import botocore.session
 from botocore.config import Config
+from botocore.credentials import ContainerProvider, CredentialResolver
 
 from config import get_aws_settings
 
@@ -86,17 +89,71 @@ def aws_client(service: str, region: str | None = None, **config_overrides: Any)
     """
     endpoint = endpoint_url()
     _ensure_dummy_credentials(endpoint)
+    return boto3.client(
+        service,
+        **_client_kwargs(_BOTO_CONFIG, endpoint, region or default_region(), config_overrides),
+    )
 
-    config = _BOTO_CONFIG if endpoint else _BOTO_CONFIG.merge(_IGNORE_CONFIGURED_ENDPOINTS)
+
+def _client_kwargs(
+    base: Config, endpoint: str | None, region: str, config_overrides: dict[str, Any]
+) -> dict[str, Any]:
+    """region·endpoint·Config 조립의 단일 지점 — 일반/플랫폼 클라이언트가 공유한다."""
+    config = base if endpoint else base.merge(_IGNORE_CONFIGURED_ENDPOINTS)
     if config_overrides:
         config = config.merge(Config(**config_overrides))
-    kwargs: dict[str, Any] = {
-        "region_name": region or default_region(),
-        "config": config,
-    }
+    kwargs: dict[str, Any] = {"region_name": region, "config": config}
     if endpoint:
         kwargs["endpoint_url"] = endpoint
-    return boto3.client(service, **kwargs)
+    return kwargs
+
+
+def _ecs_only_session(provider: ContainerProvider | None = None) -> botocore.session.Session:
+    """고객 프로파일·정적 키·공유 자격증명 파일을 보지 않는 비공개 botocore 세션.
+
+    자격증명 해석기는 ContainerProvider 하나뿐이다(ECS 태스크 역할, 실패 시 닫힘).
+    provider 주입은 테스트용(가짜 메타데이터 fetcher). 전역 환경은 수정하지 않는다."""
+    session = botocore.session.Session()
+    # AWS_PROFILE을 이기려면 인스턴스 프로파일을 명시해야 하고, 그 프로파일은 맵에 있어야
+    # 한다 — 빈 default 프로파일만 가진 맵을 직접 심는다(botocore 비공개 속성, 테스트가 고정).
+    session.set_config_variable("profile", "default")
+    session._profile_map = {"default": {}}
+    session.set_config_variable("config_file", os.devnull)
+    session.set_config_variable("credentials_file", os.devnull)
+    session.register_component(
+        "credential_provider",
+        CredentialResolver([provider or ContainerProvider()]),
+    )
+    return session
+
+
+_SDK_LOGGERS = ("botocore", "urllib3")
+_SDK_LOG_OFF = logging.CRITICAL + 1  # CRITICAL 포함 전부 차단
+
+
+def platform_sns_client(
+    region: str,
+    *,
+    connect_timeout: float = 3.0,
+    read_timeout: float = 5.0,
+    _provider: ContainerProvider | None = None,
+):
+    """플랫폼(ECS 태스크 역할) 자격증명으로 만든 SNS 클라이언트. SDK 재시도 없음(총 시도 1번)."""
+    # 앱 LOG_LEVEL=DEBUG여도 botocore/urllib3가 Publish 본문·보안 토큰·자격증명 갱신 오류를
+    # 로그로 남기지 않게, SDK/자격증명 해석 전에 프로세스 전역으로 한 번 막는다(요청별 복원 없음).
+    for name in _SDK_LOGGERS:
+        logging.getLogger(name).setLevel(_SDK_LOG_OFF)
+    config = Config(
+        retries={"total_max_attempts": 1, "mode": "standard"},
+        user_agent_extra="vigilantis/0.1",
+    )
+    kwargs = _client_kwargs(
+        config,
+        endpoint_url(),
+        region,
+        {"connect_timeout": connect_timeout, "read_timeout": read_timeout},
+    )
+    return _ecs_only_session(_provider).create_client("sns", **kwargs)
 
 
 def account_id(region: str | None = None) -> str:
