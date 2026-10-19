@@ -19,9 +19,10 @@ for p in (str(CORE_API), str(REPO_ROOT / "packages")):
 import incident_intake  # noqa: E402
 from db.repositories import assets as assets_repo  # noqa: E402
 from db.repositories import incidents as incidents_repo  # noqa: E402
+from db.repositories import notification_events as events_repo
 from schemas.api.assets import AssetType  # noqa: E402
-from schemas.assets import MetricSummary as MetricSummaryContract  # noqa: E402
 from schemas.api.incidents import IncidentCategory, IncidentStatus  # noqa: E402
+from schemas.assets import MetricSummary as MetricSummaryContract  # noqa: E402
 from schemas.evidence import EvidenceType  # noqa: E402
 from schemas.intake import FinOpsIncidentIntake, SecOpsIncidentIntake  # noqa: E402
 
@@ -339,6 +340,83 @@ def test_created_incident_passes_public_response_contract(client_pg, db, make_in
     assert [item["incident_id"] for item in listed] == [outcome.incident_id]
 
 
+@pytest.mark.parametrize("risk", ["HIGH", "MEDIUM", "LOW"])
+def test_only_high_intake_records_notification(db, risk):
+    initial = secops_intake().initial_risk.model_dump(mode="json")
+    initial.update(
+        initial_risk_level=risk,
+        response_mode="PRE_MITIGATION_0_5S" if risk == "HIGH" else "AGENT_WAIT",
+    )
+    result = incident_intake.create_incident_from_intake(
+        db, secops_intake(initial_risk=initial),
+    )
+    facts = events_repo.list_by_incident(db, result.incident_id)
+    assert len(facts) == (1 if risk == "HIGH" else 0)
+
+
+def test_finops_intake_does_not_record_high_notification(db):
+    result = incident_intake.create_incident_from_intake(db, finops_intake())
+    assert events_repo.list_by_incident(db, result.incident_id) == []
+
+
+def test_high_fact_preserves_collected_account_not_current_asset(db):
+    _seed_asset_row(db, instance_type="t3.medium")
+    result = incident_intake.create_incident_from_intake(db, secops_intake())
+    [fact] = events_repo.list_by_incident(db, result.incident_id)
+    assert fact.aws_account_id == ACCOUNT
+    assert fact.region == REGION
+    asset = assets_repo.get_asset_by_arn(db, EC2_ARN)
+    asset.account_id = "999999999999"
+    db.commit()
+    db.expire_all()
+    assert events_repo.get(db, fact.event_id).aws_account_id == ACCOUNT
+
+
+def test_high_outbox_insert_failure_cannot_commit_business_change(db):
+    from db import models
+    from sqlalchemy import event, select
+    from sqlalchemy.exc import IntegrityError, PendingRollbackError
+
+    before = set(db.scalars(select(models.NotificationEvent.event_id)))
+
+    def corrupt_outbox(_mapper, _connection, target):
+        target.target_arn = None  # 실제 PostgreSQL NOT NULL 위반
+
+    event.listen(models.NotificationEvent, "before_insert", corrupt_outbox)
+    try:
+        with pytest.raises(IntegrityError):
+            incident_intake.create_incident_from_intake(db, secops_intake())
+        with pytest.raises(PendingRollbackError):
+            db.commit()
+    finally:
+        event.remove(models.NotificationEvent, "before_insert", corrupt_outbox)
+        db.rollback()
+    assert incidents_repo.list_incidents(db) == []
+    assert db.scalars(select(models.ThreatEvent)).all() == []
+    assert set(db.scalars(select(models.NotificationEvent.event_id))) == before
+
+
+def test_business_commit_failure_rolls_back_high_fact_together(db):
+    from db import models
+    from sqlalchemy import event, select
+
+    before = set(db.scalars(select(models.NotificationEvent.event_id)))
+
+    def fail_commit(session):
+        if not session.in_nested_transaction():
+            raise RuntimeError("injected business commit failure")
+
+    event.listen(db, "before_commit", fail_commit)
+    try:
+        with pytest.raises(RuntimeError, match="injected business commit failure"):
+            incident_intake.create_incident_from_intake(db, secops_intake())
+    finally:
+        event.remove(db, "before_commit", fail_commit)
+        db.rollback()
+    assert incidents_repo.list_incidents(db) == []
+    assert set(db.scalars(select(models.NotificationEvent.event_id))) == before
+
+
 def test_secops_orphan_threat_event_is_continued_from_stored_event(db):
     """이벤트만 남고 Incident가 없는 상태 — 저장된 이벤트를 기준으로 이어 만든다.
 
@@ -381,6 +459,10 @@ def test_secops_duplicate_key_returns_existing(db):
     assert second.created is False
     assert second.incident_id == first.incident_id
     assert len(incidents_repo.list_incidents(db, category=IncidentCategory.SECOPS)) == 1
+    [fact] = events_repo.list_by_incident(db, first.incident_id)
+    assert (fact.kind, fact.phase, fact.outcome) == ("HIGH_INCIDENT_CREATED", "CREATED", None)
+    assert fact.aws_account_id is None  # ARN만으로 계정을 채우지 않는다
+    assert fact.occurred_at == incidents_repo.get_incident(db, first.incident_id).created_at
 
 
 def test_secops_insert_race_returns_existing_without_discarding_caller_work(db, monkeypatch):

@@ -13,7 +13,7 @@ Incident를 어디로 옮기는가, 거절이 자동 재시도로 이어지지 �
 import logging
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -31,6 +31,7 @@ from db.repositories import assets as assets_repo  # noqa: E402
 from db.repositories import executions as exec_repo  # noqa: E402
 from db.repositories import guardrails as guardrails_repo  # noqa: E402
 from db.repositories import incidents as incidents_repo  # noqa: E402
+from db.repositories import notification_events as events_repo
 from schemas.api.actions import ExecuteActionRequest, ExecutionStatus  # noqa: E402
 from schemas.api.assets import AssetType  # noqa: E402
 from schemas.api.incidents import IncidentCategory, IncidentStatus  # noqa: E402
@@ -368,7 +369,8 @@ def test_missing_backup_is_logged_as_critical(db, rolled_back_origin, aws, caplo
 
 def test_successful_revert_settles_both_child_and_origin(db, rolled_back_origin, aws):
     """자식 SUCCESS면 원본은 ROLLED_BACK이고 인시던트는 종료 판단 대기로 간다."""
-    incident_id, origin_id = rolled_back_origin()
+    incident_id, origin_id = rolled_back_origin(origin_status=ExecutionStatus.IN_PROGRESS)
+    workflows.close_execution(db, origin_id, next_status=ExecutionStatus.ROLLBACK_INITIATED)
 
     cycle(db)
     cycle(db)
@@ -378,6 +380,14 @@ def test_successful_revert_settles_both_child_and_origin(db, rolled_back_origin,
         IncidentStatus.AWAITING_CLOSURE,
         ExecutionStatus.ROLLED_BACK,
     )
+    [request, fact] = events_repo.list_by_incident(db, incident_id)
+    assert (request.phase, request.outcome) == ("REQUESTED", None)
+    assert request.execution_id == origin_id
+    assert request.execution_status is ExecutionStatus.ROLLBACK_INITIATED
+    assert (fact.kind, fact.phase, fact.outcome) == ("AUTO_ROLLBACK", "RESULT", "SUCCESS")
+    assert fact.execution_id == origin_id
+    assert fact.execution_status is ExecutionStatus.ROLLED_BACK
+    assert fact.related_execution_id == only_child(db, origin_id).execution_id
 
 
 def test_revert_restores_the_backup_type_not_the_applied_type(db, rolled_back_origin, aws):
@@ -411,6 +421,10 @@ def test_failed_revert_settles_the_origin_as_rollback_failed(db, rolled_back_ori
         IncidentStatus.FAILED,
         ExecutionStatus.ROLLBACK_FAILED,
     )
+    [fact] = events_repo.list_by_incident(db, incident_id)
+    assert fact.outcome == "FAILED"
+    assert fact.execution_id == origin_id
+    assert fact.execution_status is ExecutionStatus.ROLLBACK_FAILED
 
 
 def test_third_party_drift_stops_the_revert(db, rolled_back_origin, aws):
@@ -441,6 +455,7 @@ def test_probe_failure_defers_without_settling(db, rolled_back_origin, aws):
     assert child.verification_reason_code is PrecheckReasonCode.PRECHECK_AWS_ERROR
     assert child.verification_attempts == 1
     assert statuses(db, incident_id, origin_id)[1] is ExecutionStatus.ROLLBACK_INITIATED
+    assert events_repo.list_by_incident(db, incident_id) == []
 
 
 def test_revert_that_cannot_compare_is_handed_to_a_person(db, rolled_back_origin, aws):
@@ -462,6 +477,12 @@ def test_revert_that_cannot_compare_is_handed_to_a_person(db, rolled_back_origin
     assert child.status is ExecutionStatus.FAILED
     assert child.verification_reason_code is PrecheckReasonCode.PRECHECK_AWS_ERROR
     assert child.verification_attempts == RETRY_NOW.max_attempts
+    assert exec_repo.list_steps(db, child.execution_id) == []
+    [fact] = events_repo.list_by_incident(db, incident_id)
+    assert fact.outcome == "FAILED"
+    assert fact.execution_id == origin_id
+    assert fact.execution_status is ExecutionStatus.ROLLBACK_FAILED
+    assert fact.reason_code == "PRECHECK_AWS_ERROR"
     assert statuses(db, incident_id, origin_id) == (
         IncidentStatus.FAILED,
         ExecutionStatus.ROLLBACK_FAILED,
@@ -593,6 +614,49 @@ def test_interrupted_revert_is_judged_not_rerun(db, rolled_back_origin, aws):
     assert statuses(db, incident_id, origin_id)[1] is ExecutionStatus.ROLLED_BACK
 
 
+def test_started_rollback_with_unverifiable_result_records_unknown(
+    db, rolled_back_origin, aws,
+):
+    """실행 단계가 남은 원복은 결과 대조가 소진돼도 시작 전 실패로 기록하지 않는다."""
+    incident_id, origin_id = rolled_back_origin(origin_status=ExecutionStatus.IN_PROGRESS)
+    workflows.close_execution(db, origin_id, next_status=ExecutionStatus.ROLLBACK_INITIATED)
+    cycle(db)
+    child = only_child(db, origin_id)
+    workflows._step_recorder(db, child.execution_id)(
+        ExecutionStepResult(
+            sequence=1,
+            affected_arn=INSTANCE_ARN,
+            step_type=ex.STEP_STOP_INSTANCE,
+            aws_operation="ec2.stop_instances",
+            status=ExecutionStepStatus.IN_PROGRESS,
+            occurred_at=datetime.now(UTC),
+        )
+    )
+    aws(describe_instances=EndpointConnectionError(endpoint_url="https://ec2"))
+
+    for attempt in range(RETRY_NOW.max_attempts):
+        report = cycle(db)
+        assert report.judged == 1 and report.started == 0
+        facts = events_repo.list_by_incident(db, incident_id)
+        if attempt < RETRY_NOW.max_attempts - 1:
+            assert report.deferred == 1
+            assert [row.phase for row in facts] == ["REQUESTED"]
+
+    assert report.held == 1
+    request, result = facts
+    assert request.execution_status is ExecutionStatus.ROLLBACK_INITIATED
+    assert (result.kind, result.phase, result.outcome) == ("AUTO_ROLLBACK", "RESULT", "UNVERIFIED")
+    assert result.execution_id == origin_id
+    assert result.execution_status is ExecutionStatus.ROLLBACK_FAILED
+    assert result.related_execution_id == child.execution_id
+    assert result.reason_code == "PRECHECK_AWS_ERROR"
+    assert only_child(db, origin_id).status is ExecutionStatus.FAILED
+    assert statuses(db, incident_id, origin_id)[1] is ExecutionStatus.ROLLBACK_FAILED
+    assert "stop_instances" not in operations(aws)  # 이미 시작한 실행을 재실행하지 않는다
+    cycle(db)
+    assert len(events_repo.list_by_incident(db, incident_id)) == 2
+
+
 # ---------------------------------------------------- 관제자 접수 원복 (PR #256 리뷰 ②)
 
 
@@ -630,6 +694,50 @@ def test_manual_revert_runs_and_settles_both(db, rolled_back_origin, aws):
         IncidentStatus.AWAITING_CLOSURE,
         ExecutionStatus.ROLLED_BACK,
     )
+    assert events_repo.list_by_incident(db, incident_id) == []
+
+
+def test_missing_backup_records_request_before_failure(
+    db, client_pg, make_incident, make_execution,
+):
+    incident = make_incident(
+        db, category=IncidentCategory.FINOPS, status=IncidentStatus.ACTION_IN_PROGRESS,
+    )
+    origin = make_execution(db, incident)
+    db.commit()
+    workflows.close_execution(
+        db, origin.execution_id, next_status=ExecutionStatus.ROLLBACK_INITIATED,
+    )
+    [request] = events_repo.list_by_incident(db, incident.incident_id)
+    assert (request.kind, request.phase, request.outcome) == ("AUTO_ROLLBACK", "REQUESTED", None)
+    assert request.trigger_source is TriggerSource.AUTO_ON_FAILURE
+    assert children(db, origin.execution_id) == []
+    # 같은 비종료 상태를 재확정해도 새 요청은 만들지 않는다.
+    workflows.close_execution(
+        db, origin.execution_id, next_status=ExecutionStatus.ROLLBACK_INITIATED,
+    )
+    workflows.initiate_auto_rollback(db, origin.execution_id)
+    workflows.initiate_auto_rollback(db, origin.execution_id)
+    facts = events_repo.list_by_incident(db, incident.incident_id)
+    assert [(row.phase, row.outcome) for row in facts] == [
+        ("REQUESTED", None), ("RESULT", "FAILED"),
+    ]
+    assert all(row.execution_id == origin.execution_id for row in facts)
+    assert all(row.related_execution_id is None for row in facts)
+    assert children(db, origin.execution_id) == []
+    response = client_pg.get(f"/api/v1/incidents/{incident.incident_id}")
+    assert response.status_code == 200
+    assert response.json()["executions"][0]["status"] == "ROLLBACK_FAILED"
+
+
+def test_manual_child_after_auto_request_is_not_auto_result(db, rolled_back_origin, aws):
+    incident_id, origin_id = rolled_back_origin(origin_status=ExecutionStatus.IN_PROGRESS)
+    workflows.close_execution(db, origin_id, next_status=ExecutionStatus.ROLLBACK_INITIATED)
+    reserve_manual_revert(db, incident_id)
+    cycle(db)
+    [request] = events_repo.list_by_incident(db, incident_id)
+    assert (request.kind, request.phase) == ("AUTO_ROLLBACK", "REQUESTED")
+    assert only_child(db, origin_id).trigger_source is TriggerSource.USER_APPROVAL
 
 
 def test_manual_revert_restores_the_backup_type(db, rolled_back_origin, aws):
