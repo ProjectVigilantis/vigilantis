@@ -2,6 +2,7 @@
 
 import type {
   AssetsResponse,
+  CurrentUserResponse,
   ErrorCode,
   ErrorResponse,
   ExecuteActionRequest,
@@ -10,8 +11,10 @@ import type {
   IncidentResponse,
   IncidentStatus,
   IncidentsResponse,
+  LoginStepResponse,
   MetricsTimeseriesResponse,
   ResolutionJudgement,
+  TotpSetupResponse,
 } from '@/types/api';
 
 /**
@@ -72,7 +75,13 @@ async function requestWithStatus<T>(
 ): Promise<{ httpStatus: number; body: T }> {
   let response: Response;
   try {
-    response = await fetch(`${apiBaseUrl()}/api/v1${path}`, { cache: 'no-store', ...init });
+    // `credentials: 'include'` — 세션은 core-api가 심는 HttpOnly 쿠키다(#492). 웹(:3000)과 API(:8000)는
+    // 오리진이 달라 기본값(same-origin)으로는 쿠키가 실리지 않는다. 서버(Node) 쪽 조회에는 영향이 없다.
+    response = await fetch(`${apiBaseUrl()}/api/v1${path}`, {
+      cache: 'no-store',
+      credentials: 'include',
+      ...init,
+    });
   } catch (error) {
     throw networkFailure(error);
   }
@@ -155,6 +164,61 @@ export async function executeAction(
     },
   );
   return { replayed: httpStatus === 200, execution };
+}
+
+/* ──────────────────────────── /auth (#492 PR 1) ──────────────────────────── */
+/* 진행 · 세션 쿠키는 서버가 심고 읽는다. 여기서는 단계 결과만 받는다. 비밀번호 · 코드는 로그하지 않는다. */
+
+function postJson<T>(path: string, body?: unknown): Promise<T> {
+  return request<T>(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body ?? {}),
+  });
+}
+
+export function login(email: string, password: string): Promise<LoginStepResponse> {
+  return postJson<LoginStepResponse>('/auth/login', { email, password });
+}
+
+export function submitNewPassword(newPassword: string): Promise<LoginStepResponse> {
+  return postJson<LoginStepResponse>('/auth/login/new-password', { new_password: newPassword });
+}
+
+/** 등록 비밀키를 받는다. 호출할 때마다 서버가 새 키를 만들 수 있어 단계 진입 시 1회만 부른다. */
+export function startTotpSetup(): Promise<TotpSetupResponse> {
+  return postJson<TotpSetupResponse>('/auth/login/totp-setup');
+}
+
+export function verifyTotpSetup(code: string): Promise<LoginStepResponse> {
+  return postJson<LoginStepResponse>('/auth/login/totp-setup/verify', { code });
+}
+
+export function submitTotp(code: string): Promise<LoginStepResponse> {
+  return postJson<LoginStepResponse>('/auth/login/totp', { code });
+}
+
+export function submitEmailVerification(code: string): Promise<LoginStepResponse> {
+  return postJson<LoginStepResponse>('/auth/login/email-verification', { code });
+}
+
+export async function logout(): Promise<void> {
+  await postJson<null>('/auth/logout');
+}
+
+/** 유휴 연장 — **사용자 입력이 있을 때만** 부른다(components/auth/user-menu.tsx). */
+export async function recordActivity(): Promise<void> {
+  await postJson<null>('/auth/activity');
+}
+
+/** 현재 사용자. 미로그인(401)은 오류가 아니라 null이다. 유휴를 연장하지 않는다. */
+export async function getMe(): Promise<CurrentUserResponse | null> {
+  try {
+    return await request<CurrentUserResponse>('/auth/me');
+  } catch (error) {
+    if (error instanceof ApiError && error.httpStatus === 401) return null;
+    throw error;
+  }
 }
 
 /**

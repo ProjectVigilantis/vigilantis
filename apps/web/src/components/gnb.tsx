@@ -4,6 +4,7 @@
 
 import Link from 'next/link';
 
+import { UserMenu } from '@/components/auth/user-menu';
 import { CollectionIndicator, useAssetsEnvelope } from '@/components/collection-indicator';
 import { ConnectionIndicator, type AssetPresence } from '@/components/connection-indicator';
 import { usePathname } from 'next/navigation';
@@ -39,7 +40,7 @@ export function Gnb() {
         : 'none';
 
   return (
-    <header className="flex h-14 shrink-0 items-center gap-6 border-b px-4">
+    <header className="flex h-14 shrink-0 items-center gap-3 border-b px-4 sm:gap-6">
       <Link
         href="/"
         className="shrink-0 font-heading text-sm font-semibold tracking-widest whitespace-nowrap"
@@ -47,7 +48,12 @@ export function Gnb() {
         VIGILANTIS
       </Link>
 
-      <nav className="flex items-center gap-1" aria-label="주요 화면">
+      {/* 360px급(< sm)에서만 내비가 줄고 가로로 넘긴다 — 우측 사용자 영역이 화면 밖으로 밀리지 않게.
+          sm 이상에서는 내비를 줄이지 않고 우측 이메일이 말줄임으로 폭을 내준다(user-menu.tsx). */}
+      <nav
+        className="flex min-w-0 items-center gap-1 overflow-x-auto [scrollbar-width:none] sm:shrink-0"
+        aria-label="주요 화면"
+      >
         {NAV.map(({ href, label }) => {
           // 경계(`/` 또는 문자열 끝)까지 본다 — 접두만 보면 다른 경로가 같이 활성이 된다.
           // 인시던트 상세(`/incidents/[id]`)는 카테고리를 모르는 자리라 어느 항목도 켜지 않는다.
@@ -74,9 +80,13 @@ export function Gnb() {
       {/* 두 인디케이터는 축이 다르다 — 왼쪽은 서버↔클라우드 수집 상태(`GET /assets` 봉투), 오른쪽은
           관제 자산↔화면 실시간 연결(소켓이 열렸고 수집된 자산이 있을 때만 초록 — connection-indicator.tsx). 자리를 다투지 않고, WS 쪽을
           빼면 끊겼을 때 [재연결] 버튼(§4.8 4)이 사라져 둘 다 둔다(PR #299 리뷰). */}
-      <div className="ml-auto flex shrink-0 items-center gap-4">
-        <CollectionIndicator env={assets.env} failed={assets.failed} />
-        <ConnectionIndicator assets={presence} />
+      {/* 좁은 화면(< lg)에서는 두 인디케이터가 들어갈 폭이 없다(수집 칩만 288px) — 사용자 · 로그아웃만 남긴다. */}
+      <div className="ml-auto flex shrink-0 items-center gap-4 sm:min-w-0 sm:shrink">
+        <div className="hidden shrink-0 items-center gap-4 lg:flex">
+          <CollectionIndicator env={assets.env} failed={assets.failed} />
+          <ConnectionIndicator assets={presence} />
+        </div>
+        <UserMenu />
       </div>
     </header>
   );
