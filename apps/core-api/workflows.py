@@ -46,6 +46,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum, unique
 
+import notification_events
 from ai import guardrails
 from config import get_settings
 from db import mappers, models
@@ -831,6 +832,35 @@ def reserve_auto_isolation(
     else:
         _move_incident_to_in_progress(db, incident_id)
 
+    notification_events.record(
+        db,
+        incident=incident,
+        execution=execution,
+        kind=notification_events.EventKind.AUTO_ISOLATION,
+        phase=notification_events.EventPhase.REQUESTED,
+        trigger_source=trigger_source,
+        execution_status=ExecutionStatus.IN_PROGRESS,
+        occurred_at=execution.created_at,
+    )
+    if command is None:
+        # 일반 close_execution을 거치지 않는 거절도 예약 트랜잭션 안에서 기록한다.
+        db.refresh(execution)
+        notification_events.record(
+            db,
+            incident=incident,
+            execution=execution,
+            kind=notification_events.EventKind.AUTO_ISOLATION,
+            phase=notification_events.EventPhase.RESULT,
+            outcome=notification_events.EventOutcome.REJECTED,
+            trigger_source=trigger_source,
+            execution_status=ExecutionStatus.FAILED,
+            reason_code=next(
+                (step.reason_code.value for step in guardrail_result.steps
+                 if step.reason_code is not None),
+                None,
+            ),
+            occurred_at=execution.finished_at,
+        )
     db.commit()
     # Core UPDATE는 세션이 든 객체를 갱신하지 않는다 — 결과·발행 값을 되읽는다
     db.refresh(execution)
@@ -3368,6 +3398,8 @@ def close_execution(
         return None
 
     origin = _lock_rollback_origin(db, execution)
+    previous_status = execution.status
+    verification_reason = execution.verification_reason_code
     incident_id = execution.incident_id
     incident = incidents_repo.lock_incident(db, incident_id)
     if incident is None:
@@ -3412,6 +3444,59 @@ def close_execution(
         # 상태는 그대로여도 상세 응답의 자식 목록이 바뀌었으므로 updated_at은 올린다
         incidents_repo.touch_incident(db, incident_id)
 
+    auto_rollback_failed = (
+        execution.parent_execution_id is not None
+        and execution.trigger_source is TriggerSource.AUTO_ON_FAILURE
+        and bool(settled_origin)
+        and next_status is ExecutionStatus.FAILED
+    )
+    has_execution_steps = (
+        (keep_verification_hold or auto_rollback_failed)
+        and bool(executions_repo.list_steps(db, execution_id))
+    )
+    guardrail_rejected = False
+    rejection_reason = None
+    if auto_rollback_failed and not has_execution_steps and not keep_verification_hold:
+        evaluation = guardrails_repo.latest_for_execution(db, execution_id)
+        if evaluation is not None and evaluation.result is GuardrailDecision.FAIL:
+            guardrail_rejected = True
+            rejection_reason = next(
+                (step["reason_code"] for step in evaluation.steps
+                 if step["step"] == evaluation.failed_step and step["reason_code"] is not None),
+                None,
+            )
+    fact = notification_events.classify_execution_transition(
+        runbook_id=execution.runbook_id,
+        trigger_source=execution.trigger_source,
+        parent_execution_id=execution.parent_execution_id,
+        previous_status=previous_status,
+        next_status=next_status,
+        verification_held=keep_verification_hold,
+        has_execution_steps=has_execution_steps,
+        origin_settled=bool(settled_origin),
+        guardrail_rejected=guardrail_rejected,
+    )
+    if fact is not None:
+        # Core UPDATE의 확정 시각을 같은 트랜잭션에서 읽는다. 아직 commit하지 않는다.
+        db.refresh(execution)
+        notification_events.record(
+            db,
+            incident=incident,
+            execution=origin if fact.use_origin else execution,
+            related_execution_id=execution.execution_id if fact.use_origin else None,
+            kind=fact.kind,
+            phase=fact.phase,
+            outcome=fact.outcome,
+            trigger_source=fact.trigger_source,
+            execution_status=(
+                _ORIGIN_STATUS_AFTER_ROLLBACK[next_status] if fact.use_origin else next_status
+            ),
+            reason_code=(
+                rejection_reason if guardrail_rejected else verification_reason.value
+                if keep_verification_hold and verification_reason is not None else None
+            ),
+            occurred_at=execution.updated_at,
+        )
     db.commit()
     # Core UPDATE는 세션이 든 객체를 갱신하지 않는다 — 발행에 실을 상태·시각을
     # 되읽는다(resolve_incident와 같은 자리)

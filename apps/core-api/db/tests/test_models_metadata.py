@@ -1,6 +1,6 @@
 """ORM 메타데이터 계약 테스트 — DB 없이 항상 실행된다. (Issue #60)
 
-17종 등록·제약 존재·Enum 타입 단일화처럼 모델 정의 자체가 지켜야 하는 형태를
+테이블 등록·제약 존재·Enum 타입 단일화처럼 모델 정의 자체가 지켜야 하는 형태를
 검증한다. 실제 거절 동작(제약 위반)은 test_repositories.py(통합)가 확인한다.
 """
 
@@ -36,10 +36,11 @@ EXPECTED_TABLES = {
     "service_transitions",
     "service_transition_operations",
     "service_transition_observations",
+    "notification_events",
 }
 
 
-def test_seventeen_tables_registered():
+def test_tables_registered():
     assert set(Base.metadata.tables) == EXPECTED_TABLES
 
 

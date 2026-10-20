@@ -40,7 +40,7 @@ def migration_config(pg_engine, monkeypatch):
 def test_revision_follows_autoscaling_plan_on_a_single_chain(migration_config):
     script = ScriptDirectory.from_config(migration_config)
     assert script.get_revision(REVISION).down_revision == PARENT
-    assert script.get_heads() == [REVISION]
+    assert len(script.get_heads()) == 1
 
 
 def test_roundtrip_matches_orm(pg_engine, migration_config):

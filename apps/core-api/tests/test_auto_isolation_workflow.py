@@ -26,6 +26,7 @@ import workflows
 from db import models
 from db.repositories import executions as executions_repo
 from db.repositories import incidents as incidents_repo
+from db.repositories import notification_events as events_repo
 from exceptions import ApiError
 from schemas.agents import AgentGraphOutput
 from schemas.api.actions import ExecuteActionRequest, ExecutionStatus
@@ -324,6 +325,9 @@ def test_high_pass_reserves_validated_in_progress_execution(
     assert [(item["execution_id"], item["status"]) for item in body["executions"]] == [
         (execution_id, "IN_PROGRESS")
     ]
+    [fact] = events_repo.list_by_incident(db, seeded.incident_id)
+    assert (fact.kind, fact.phase, fact.outcome) == ("AUTO_ISOLATION", "REQUESTED", None)
+    assert fact.execution_id == execution_id and fact.trigger_source is PRE
 
 
 def test_timeout_pass_invalidates_wait_and_preserves_timing(
@@ -358,6 +362,8 @@ def test_timeout_pass_invalidates_wait_and_preserves_timing(
     assert body["status"] == "ACTION_IN_PROGRESS"
     assert body["response_mode"] == "TIMEOUT_ISOLATION_1M"
     assert body["recommendations"] == []
+    [fact] = events_repo.list_by_incident(db, seeded.incident_id)
+    assert (fact.phase, fact.outcome, fact.trigger_source) == ("REQUESTED", None, TIMEOUT)
 
 
 def test_rejected_high_guardrail_is_durable_and_never_retried(
@@ -403,6 +409,11 @@ def test_rejected_high_guardrail_is_durable_and_never_retried(
     body = client_pg.get(f"/api/v1/incidents/{seeded.incident_id}").json()
     assert body["status"] == "FAILED"
     assert [item["status"] for item in body["executions"]] == ["FAILED"]
+    facts = events_repo.list_by_incident(db, seeded.incident_id)
+    assert [(row.phase, row.outcome) for row in facts] == [
+        ("REQUESTED", None), ("RESULT", "REJECTED"),
+    ]
+    assert facts[1].reason_code == "PRECHECK_INVALID_STATE"
 
 
 def test_rejected_timeout_closes_the_wait_without_retry(
@@ -1096,6 +1107,9 @@ def test_rolled_back_lock_holder_releases_the_loser(
             incident = incidents_repo.get_incident(verify, seeded.incident_id)
             evaluations = _auto_evaluations(verify, seeded.incident_id)
             assert holder_id not in {row.execution_id for row in executions}
+            facts = events_repo.list_by_incident(verify, seeded.incident_id)
+            assert holder_id not in {row.execution_id for row in facts}
+            assert len(facts) == (0 if winner == "timeout" else 1)
             if winner == "timeout":
                 assert _approved(second)
                 assert [row.trigger_source for row in executions] == [
@@ -1152,3 +1166,141 @@ def test_concurrent_duplicate_attempts_keep_one_record(
             assert [row.execution_id for row in _auto_evaluations(
                 verify, seeded.incident_id
             )] == [first_id]
+            facts = events_repo.list_by_incident(verify, seeded.incident_id)
+            assert [(row.execution_id, row.phase, row.outcome) for row in facts] == (
+                [(first_id, "REQUESTED", None), (first_id, "RESULT", "REJECTED")]
+                if first_rejected else [(first_id, "REQUESTED", None)]
+            )
+
+
+@pytest.mark.parametrize("rejected", [False, True])
+def test_outbox_failure_rolls_back_isolation_reservation(
+    db, make_incident, make_candidate, rejected,
+):
+    from sqlalchemy.exc import IntegrityError, PendingRollbackError
+
+    seeded = _seed(db, make_incident, make_candidate, "medium")
+    db.commit()
+
+    def corrupt(_mapper, _connection, target):
+        if target.phase == ("RESULT" if rejected else "REQUESTED"):
+            target.target_arn = None
+
+    event.listen(models.NotificationEvent, "before_insert", corrupt)
+    try:
+        with pytest.raises(IntegrityError):
+            _attempt(db, seeded, TIMEOUT, rejected=rejected)
+        with pytest.raises(PendingRollbackError):
+            db.commit()
+    finally:
+        event.remove(models.NotificationEvent, "before_insert", corrupt)
+        db.rollback()
+    assert _executions(db, seeded.incident_id) == []
+    assert _auto_evaluations(db, seeded.incident_id) == []
+    assert events_repo.list_by_incident(db, seeded.incident_id) == []
+    assert _incident(db, seeded.incident_id).status is IncidentStatus.AWAITING_APPROVAL
+    assert _incident(db, seeded.incident_id).response_mode is ResponseMode.AGENT_WAIT
+    assert _candidate_statuses(db, seeded.incident_id) == [CandidateStatus.EXECUTABLE]
+
+
+def test_guardrail_rejection_without_optional_reason_still_records(
+    db, make_incident, make_candidate,
+):
+    seeded = _seed(db, make_incident, make_candidate, "high")
+    result = _fail_result().model_dump(mode="json")
+    result["steps"][-1]["reason_code"] = None
+    workflows.reserve_auto_isolation(
+        db, seeded.incident_id, trigger_source=PRE, now=_utcnow(),
+        execution_id=str(uuid.uuid4()), validated_command=None,
+        guardrail_result=GuardrailValidationResult.model_validate(result),
+    )
+    [request, rejected] = events_repo.list_by_incident(db, seeded.incident_id)
+    assert request.phase == "REQUESTED"
+    assert (rejected.outcome, rejected.reason_code) == ("REJECTED", None)
+
+
+def test_result_outbox_failure_leaves_execution_unsettled(db, make_incident, make_candidate):
+    from sqlalchemy.exc import IntegrityError
+
+    seeded = _seed(db, make_incident, make_candidate, "high")
+    reserved = _attempt(db, seeded, PRE)
+
+    def corrupt(_mapper, _connection, target):
+        target.target_arn = None
+
+    event.listen(models.NotificationEvent, "before_insert", corrupt)
+    try:
+        with pytest.raises(IntegrityError):
+            workflows.close_execution(
+                db, reserved.execution_id, next_status=ExecutionStatus.SUCCESS,
+            )
+    finally:
+        event.remove(models.NotificationEvent, "before_insert", corrupt)
+        db.rollback()
+    execution = executions_repo.get_execution(db, reserved.execution_id)
+    assert execution.status is ExecutionStatus.IN_PROGRESS
+    assert _incident(db, seeded.incident_id).status is IncidentStatus.ACTION_IN_PROGRESS
+    assert [row.phase for row in events_repo.list_by_incident(db, seeded.incident_id)] == [
+        "REQUESTED",
+    ]
+
+
+def test_concurrent_closure_records_one_result(pg_engine, make_incident, make_candidate):
+    with _committed(pg_engine) as cleanup_ids:
+        with Session(pg_engine) as setup:
+            seeded = _seed(setup, make_incident, make_candidate, "high")
+            cleanup_ids.append(seeded.incident_id)
+            reserved = _attempt(setup, seeded, PRE)
+            execution_id = reserved.execution_id
+
+        def close(session):
+            return workflows.close_execution(
+                session, execution_id, next_status=ExecutionStatus.SUCCESS,
+            )
+
+        first, second = _race(pg_engine, close, close)
+        assert first.execution_status is ExecutionStatus.SUCCESS and second is None
+        with Session(pg_engine) as reopened:
+            facts = events_repo.list_by_incident(reopened, seeded.incident_id)
+            assert [(row.phase, row.outcome) for row in facts] == [
+                ("REQUESTED", None), ("RESULT", "SUCCESS"),
+            ]
+            # 재조회는 커밋 영속성 검증이다. 발송 worker 복구 검증이 아니다.
+            assert all(row.execution_id == execution_id for row in facts)
+
+
+def test_isolation_deferral_then_unverified_is_not_success(
+    db, make_incident, make_candidate,
+):
+    from schemas.executions import (
+        ExecutionEffect,
+        ExecutionStepResult,
+        ExecutionStepStatus,
+    )
+
+    seeded = _seed(db, make_incident, make_candidate, "high")
+    reserved = _attempt(db, seeded, PRE)
+    executions_repo.add_step(db, ExecutionStepResult(
+        sequence=1, step_type="ISOLATE", status=ExecutionStepStatus.SUCCESS,
+        effect=ExecutionEffect.APPLIED, affected_arn=SUBJECT,
+        aws_operation="modify_network_interface_attribute", occurred_at=_utcnow(),
+    ), execution_id=reserved.execution_id)
+    db.commit()
+    policy = workflows.VerificationRetryPolicy(max_attempts=2, interval_seconds=0)
+    first = workflows.record_verification_failure(
+        db, reserved.execution_id, reason_code=PrecheckReasonCode.PRECHECK_AWS_ERROR,
+        policy=policy,
+    )
+    assert not first.held
+    assert [row.phase for row in events_repo.list_by_incident(db, seeded.incident_id)] == [
+        "REQUESTED",
+    ]
+    second = workflows.record_verification_failure(
+        db, reserved.execution_id, reason_code=PrecheckReasonCode.PRECHECK_AWS_ERROR,
+        policy=policy,
+    )
+    assert second.held
+    [request, result] = events_repo.list_by_incident(db, seeded.incident_id)
+    assert request.outcome is None
+    assert result.outcome == "UNVERIFIED"
+    assert result.execution_status is ExecutionStatus.UNVERIFIED
