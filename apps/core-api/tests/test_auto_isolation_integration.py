@@ -26,6 +26,7 @@ from botocore.exceptions import ClientError, EndpointConnectionError
 from db import models
 from db.repositories import executions as executions_repo
 from db.repositories import incidents as incidents_repo
+from db.repositories import notification_events as events_repo
 from isolation_timing import begin_trace
 from mock_threat_source import parse_observation
 from schemas.api.actions import ExecutionStatus
@@ -367,6 +368,14 @@ def test_high_full_flow_isolates_and_confirms(committed_sessions, aws, world):
     assert [c.in_transaction for c in aws.calls] == [False] * len(aws.calls)
     _assert_full_trace(record, incident_id=outcome.incident_id,
                        execution_id=execution.execution_id, phases=FLOW_PHASES)
+    with committed_sessions() as reopened:
+        facts = events_repo.list_by_incident(reopened, outcome.incident_id)
+        assert [(row.kind, row.phase, row.outcome) for row in facts] == [
+            ("HIGH_INCIDENT_CREATED", "CREATED", None),
+            ("AUTO_ISOLATION", "REQUESTED", None),
+            ("AUTO_ISOLATION", "RESULT", "SUCCESS"),
+        ]
+        assert all(row.aws_account_id == ACCOUNT for row in facts)
 
 
 def test_guardrail_denial_persists_failed_attempt_and_never_touches_aws(
@@ -512,6 +521,13 @@ def test_medium_expired_wait_is_isolated_by_first_cycle_after_restart(
     assert snap.execution.trigger_source is TIMEOUT
     assert snap.execution.status is ExecutionStatus.SUCCESS
     assert snap.incident.response_mode is ResponseMode.TIMEOUT_ISOLATION_1M
+    with committed_sessions() as reopened:
+        facts = events_repo.list_by_incident(reopened, outcome.incident_id)
+        assert [(row.kind, row.phase, row.outcome) for row in facts] == [
+            ("AUTO_ISOLATION", "REQUESTED", None),
+            ("AUTO_ISOLATION", "RESULT", "SUCCESS"),
+        ]
+        assert all(row.trigger_source is TIMEOUT for row in facts)
     assert snap.execution.validated_command == _expected_command(world, snap.evidence_ids)
     assert aws.probe.backup_record_id == snap.execution.backup_record_id is not None
     assert len(aws.mutations) == 3

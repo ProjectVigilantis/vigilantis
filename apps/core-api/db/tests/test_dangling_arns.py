@@ -385,18 +385,24 @@ def test_arn_columns_cover_every_arn_column_in_models():
     원형은 #342 초기 시도 `ec1454d` 의 `test_arn_columns_cover_every_arn_column_in_models`
     이며 PR #353 으로 옮기면서 빠졌다.
 
-    예외는 **`assets.arn` 한 칸**이다 — 점검이 대조하는 기준 자체라 조인 키가 아니다.
+    `assets.arn`은 점검이 대조하는 기준 자체라 조인 키가 아니다.
+    `notification_events.target_arn`은 과거 사건의 불변 스냅숏이다. 현재 자산 행의
+    존재를 요구하는 조인 키가 아니므로 제외한다(#493).
     `Asset` 모델 전체를 빼면 거기 새로 생긴 ARN 컬럼이 가드를 그냥 지나간다
     (PR #383 리뷰: 안성일).
     """
     from sqlalchemy import inspect as sa_inspect
 
+    non_join_keys = {
+        (models.Asset, "arn"),
+        (models.NotificationEvent, "target_arn"),
+    }
     in_models = set()
     for mapper in models.Base.registry.mappers:
         model = mapper.class_
         for column in sa_inspect(model).columns:
             name = column.key
-            if (name == "arn" or name.endswith("_arn")) and (model, name) != (models.Asset, "arn"):
+            if (name == "arn" or name.endswith("_arn")) and (model, name) not in non_join_keys:
                 in_models.add((model.__tablename__, name))
     checked = {(model.__tablename__, column) for model, column in assets_repo._ARN_COLUMNS}
     assert checked == in_models

@@ -846,6 +846,77 @@ class ServiceTransitionOperation(Base):
     )
 
 
+class NotificationEvent(Base):
+    """#493: 사건 사실 자체가 outbox다. 발송 상태는 PR2의 별도 채널별 행에 둔다.
+
+    업무 식별자는 스냅숏이다. 업무 행의 삭제가 미발송 의도까지 지우지 않도록
+    FK cascade와 연결하지 않는다. 생성은 해당 업무 트랜잭션 안에서만 한다.
+    """
+
+    __tablename__ = "notification_events"
+
+    event_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
+    incident_id: Mapped[str] = mapped_column(_ID)
+    execution_id: Mapped[str | None] = mapped_column(_ID, nullable=True)
+    related_execution_id: Mapped[str | None] = mapped_column(_ID, nullable=True)
+    kind: Mapped[str] = mapped_column(String(32))
+    phase: Mapped[str] = mapped_column(String(16))
+    outcome: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    target_arn: Mapped[str] = mapped_column(String(512))
+    aws_account_id: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    region: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    risk_level: Mapped[RiskLevel | None] = mapped_column(
+        _enum(RiskLevel, "risk_level"), nullable=True
+    )
+    trigger_source: Mapped[TriggerSource | None] = mapped_column(
+        _enum(TriggerSource, "trigger_source"), nullable=True
+    )
+    runbook_id: Mapped[RunbookId | None] = mapped_column(
+        _enum(RunbookId, "runbook_id"), nullable=True
+    )
+    execution_status: Mapped[ExecutionStatus | None] = mapped_column(
+        _enum(ExecutionStatus, "execution_status"), nullable=True
+    )
+    reason_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "kind", "incident_id", "execution_id", "phase",
+            name="uq_notification_events_transition",
+            postgresql_nulls_not_distinct=True,
+        ),
+        CheckConstraint(
+            "(kind = 'HIGH_INCIDENT_CREATED' AND phase = 'CREATED'"
+            " AND execution_id IS NULL AND related_execution_id IS NULL"
+            " AND risk_level IS NOT NULL AND risk_level = 'HIGH'"
+            " AND trigger_source IS NULL AND execution_status IS NULL AND runbook_id IS NULL)"
+            " OR (kind IN ('AUTO_ISOLATION', 'AUTO_ROLLBACK')"
+            " AND phase IN ('REQUESTED', 'RESULT') AND execution_id IS NOT NULL"
+            " AND trigger_source IS NOT NULL AND execution_status IS NOT NULL"
+            " AND runbook_id IS NOT NULL"
+            " AND ((kind = 'AUTO_ISOLATION'"
+            " AND trigger_source IN ('PRE_MITIGATION_0_5S', 'TIMEOUT_ISOLATION_1M')"
+            " AND related_execution_id IS NULL)"
+            " OR (kind = 'AUTO_ROLLBACK' AND trigger_source = 'AUTO_ON_FAILURE')))",
+            name="event_shape",
+        ),
+        CheckConstraint(
+            "(phase IN ('CREATED', 'REQUESTED') AND outcome IS NULL)"
+            " OR (phase = 'RESULT' AND outcome IS NOT NULL"
+            " AND outcome IN ('SUCCESS', 'FAILED', 'REJECTED', 'UNVERIFIED'))",
+            name="outcome_shape",
+        ),
+        CheckConstraint(
+            "aws_account_id IS NULL OR aws_account_id ~ '^[0-9]{12}$'",
+            name="account_shape",
+        ),
+        Index("ix_notification_events_created_at", "created_at", "event_id"),
+        Index("ix_notification_events_incident_id", "incident_id"),
+    )
+
+
 class ServiceTransitionObservation(Base):
     """typed 관측 1건(schemas.service_transition.ServiceObservation). 생성 후 불변.
 

@@ -75,10 +75,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
-
-from schemas.api.incidents import IncidentCategory
+import notification_events
+from db import mappers, models
+from db.repositories import assets as assets_repo
+from db.repositories import incidents as incidents_repo
+from schemas.api.incidents import IncidentCategory, RiskLevel
 from schemas.assets import MetricName
 from schemas.assets import MetricSummary as MetricSummaryContract
 from schemas.evidence import (
@@ -90,10 +91,8 @@ from schemas.evidence import (
 )
 from schemas.intake import FinOpsIncidentIntake, IncidentIntake, SecOpsIncidentIntake
 from secops_context import capture_secops_context
-
-from db import mappers, models
-from db.repositories import assets as assets_repo
-from db.repositories import incidents as incidents_repo
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger("vigilantis.incident_intake")
 
@@ -289,6 +288,14 @@ def _create_secops(db: Session, intake: SecOpsIncidentIntake) -> IntakeOutcome:
         ),
         occurred_at=event.occurred_at,
     )
+    if incident.initial_risk_level is RiskLevel.HIGH:
+        notification_events.record(
+            db,
+            incident=incident,
+            kind=notification_events.EventKind.HIGH_INCIDENT_CREATED,
+            phase=notification_events.EventPhase.CREATED,
+            occurred_at=incident.created_at,
+        )
     db.commit()
     return IntakeOutcome(
         incident_id=incident.incident_id, created=True, occurred_at=incident.updated_at,
