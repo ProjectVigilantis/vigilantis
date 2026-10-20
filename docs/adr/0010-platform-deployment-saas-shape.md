@@ -2,9 +2,9 @@
 
 - **Status**: Accepted
 - **Date**: 2026-10-12
-- **Amended**: 2026-10-16 1차 — 사용자 도메인 `vigilantis.dev` 연결과 웹 API 주소·CORS 반영(하단 §개정 이력 · 핵심 결정 불변)
-- **Deciders**: 최초 결정 — 김세혁(PM/Infra · `INFRA` 담당 결정)·안성일(AI·Architect · FastAPI 아키텍처·DB 검토) / 1차 개정 — 안성일 제안·김세혁 승인(PR #480)
-- **Refs**: [ADR-0006](0006-localstack-team-standard-env.md) §2(IaC Post-MVP) · [ADR-0009](0009-real-aws-smoke-environment.md)(스모크 환경 · 앱 정책) · #435 4-2·6-1 · #467(사용자 도메인·CORS) · #468(개정 취합)
+- **Amended**: 2026-10-16(1차 — 사용자 도메인 `vigilantis.dev` 연결과 웹 API 주소·CORS 반영 · 핵심 결정 불변) · 2026-10-20(2차 — 알림 발송 권한 확장) — 하단 §개정 이력
+- **Deciders**: 최초 결정 — 김세혁(PM/Infra · `INFRA` 담당 결정)·안성일(AI·Architect · FastAPI 아키텍처·DB 검토) / 1차 개정 — 안성일 제안·김세혁 승인(PR #480) / 2차 개정 — 안성일 제안·승인권자 김세혁
+- **Refs**: [ADR-0006](0006-localstack-team-standard-env.md) §2(IaC Post-MVP) · [ADR-0009](0009-real-aws-smoke-environment.md)(스모크 환경 · 앱 정책) · #435 4-2·6-1 · #467(사용자 도메인·CORS) · #468(개정 취합) · #493(알림 발송 연결 · 2차 개정)
 
 ## Context (배경)
 
@@ -21,7 +21,7 @@ MVP는 단일 계정(SSOT §MVP 확정 범위)이므로 계정을 가를 수 없
 
 ## Decision (결정)
 
-**서울 리전 단일 계정에 플랫폼 전용 VPC를 세우고, CloudFront 기본 도메인 + WAF 허용 IP로 공개한다. 앱은 장기 키 없이 태스크 역할 → 접근 역할(AssumeRole + ExternalId)로만 관제 대상에 닿으며, 수집 범위는 관제 대상 VPC로 한정한다. 구성은 Boto3 스크립트 `scripts/provision_platform_aws.py`로 한다.** (2026-10-16 개정: 같은 CloudFront 배포에 사용자 도메인 `vigilantis.dev`를 별칭으로 더했다 — §4)
+**서울 리전 단일 계정에 플랫폼 전용 VPC를 세우고, CloudFront 기본 도메인 + WAF 허용 IP로 공개한다. 앱은 장기 키 없이 태스크 역할 → 접근 역할(AssumeRole + ExternalId)로만 관제 대상에 닿으며, 수집 범위는 관제 대상 VPC로 한정한다. 구성은 Boto3 스크립트 `scripts/provision_platform_aws.py`로 한다.** (2026-10-16 개정: 같은 CloudFront 배포에 사용자 도메인 `vigilantis.dev`를 별칭으로 더했다 — §4) (2026-10-20 2차 개정: 알림 발송을 준비할 때 태스크 역할에 승인된 SNS 주제 발행을, 실행 역할에 승인된 기존 Slack 비밀 주입을 더한다. 발송 자체는 설정으로 따로 켠다 — §3·§5)
 
 ### 1. 리전 — 관제 대상과 같은 서울
 
@@ -40,14 +40,15 @@ MVP는 단일 계정(SSOT §MVP 확정 범위)이므로 계정을 가를 수 없
 
 | 역할 | 권한 | 후속 SaaS 설계 후보 |
 | --- | --- | --- |
-| `vigilantis-platform-exec` | 이미지 받기 · 플랫폼 비밀 3개 읽기 | 그대로 쓰는 안 |
-| `vigilantis-platform`(api 태스크 역할) | **`vigilantis-access`에 대한 `sts:AssumeRole` 하나뿐** | 고객별 역할 ARN을 대상으로 두는 안. 원격 회수 방식은 후속 SaaS 설계에서 정한다 |
+| `vigilantis-platform-exec` | 이미지 받기 · 플랫폼 비밀 3개 읽기. 2차 개정: 알림 발송을 준비할 때 명시 승인된 기존 Slack 비밀(Secrets Manager)도 읽어 ECS `secrets`로 주입한다 | 그대로 쓰는 안 |
+| `vigilantis-platform`(api 태스크 역할) | **`vigilantis-access`에 대한 `sts:AssumeRole`**. 2차 개정: 알림 발송을 준비할 때 명시 승인된 SNS 주제 ARN에 대한 `sns:Publish`만 더한다 | 고객별 역할 ARN을 대상으로 두는 안. 원격 회수 방식은 후속 SaaS 설계에서 정한다 |
 | `vigilantis-access` | 스모크 스크립트의 Action Whitelist 거울 정책(`vigilantis-smoke-app`)을 **빌려 붙인다** | 고객 계정에 고객이 CloudFormation으로 만드는 역할 안 |
 | 배포용 | 관리자 프로필(MVP) | GitHub OIDC 역할 안 |
 
 - 신뢰 정책은 `vigilantis-platform`만, `sts:ExternalId`가 맞을 때만 받는다. 앱이 요청하는 세션 길이의 기본값은 900초다(`apps/core-api/serve.py`의 `VIGILANTIS_ACCESS_SESSION_SECONDS` 기본값). 원격 회수의 방식과 노출 상한은 후속 SaaS 설계에서 정한다.
 - 앱 코드는 바뀌지 않는다. 운영 진입점 `apps/core-api/serve.py`가 기동 때 AWS 설정 파일에 역할 전환 프로필(`credential_source = EcsContainer` · `role_arn` · `external_id`)을 쓰고 기본 프로필로 잡는다. 이후 Boto3가 전환과 갱신을 맡는다.
 - 접근 역할 정책을 따로 두지 않는 이유: 정책이 두 벌이면 `tests/test_provision_smoke_aws.py`의 두 방향 보증(코드가 부르는 작업 = 정책)이 한쪽에만 걸린다.
+- **알림 발송 권한 경계**(2026-10-20 2차 개정) — 알림은 플랫폼의 일이므로 태스크 역할이 보낸다. SNS 클라이언트는 ECS 컨테이너 자격증명(`ContainerProvider`)만 쓰며, 자격증명 조회 실패 시 발송을 중단한다. Slack 값은 실행 역할이 ECS `secrets`로 주입한다. 권한 준비와 발송 활성화는 따로 하며, 발송은 §5의 설정으로 켠다.
 
 ### 4. 공개 — CloudFront(사용자 도메인 · 기본 도메인) + WAF
 
@@ -71,6 +72,7 @@ MVP는 단일 계정(SSOT §MVP 확정 범위)이므로 계정을 가를 수 없
 | 비밀 | Secrets Manager — DB 접속 문자열 · OpenAI 키 · ExternalId · CloudFront 비밀 헤더 값. OpenAI 키는 **PM이 직접 넣는다**(스크립트는 자리만 만든다). DB 비밀번호는 **RDS 생성 요청 전에** 접속 문자열 비밀(호스트 자리표시)로 먼저 저장하고, 인스턴스가 뜬 뒤 호스트를 채운다 — 대기 중에 끊겨도 비밀번호를 잃지 않는다. RDS 관리 비밀(`ManageMasterUserPassword`)은 기본 7일마다 회전돼 접속 문자열 사본이 낡으므로 쓰지 않는다 |
 | 로그 | stdout → CloudWatch Logs(30일). 파일 로그는 끈다 — 컨테이너 파일은 태스크와 함께 사라진다 |
 | AI 분석 · 조치 실행 | **기본 끔**(`DISPATCH_ENABLED=false`). 이 값 하나가 AI 디스패처와 **조치 실행 디스패처를 함께** 켜고 끈다(`apps/core-api/config.py`) — 끈 채로는 화면에서 조치를 승인해도 실행되지 않고 접수 상태로 멈춘다. 켜면 인시던트마다 OpenAI가 과금되므로 `deploy --enable-dispatch`로 명시한다. 조치 실행을 실측하려면 켜야 하며, 과금 경로와 떼어 켤 수 없다(스위치 분리는 앱 코드 변경이라 이 결정 밖) |
+| 알림 발송 | **기본 끔**(`NOTIFICATION_ENABLED=false`). 발송은 알림 설정에서 따로 켠다(2026-10-20 2차 개정) |
 
 ### 6. 수집 범위 — 계정 경계를 흉내 낸다
 
@@ -92,7 +94,7 @@ MVP는 단일 계정(SSOT §MVP 확정 범위)이므로 계정을 가를 수 없
 **장점**
 
 - 역할 전환·장기 키 없음·공개 경로를 Post-MVP SaaS에서 다시 쓸 방향으로 세운다. SaaS 전환에서 바뀔 범위는 후속 SaaS의 테넌트·인증·원격 회수·VPC 설계에서 정한다.
-- 플랫폼은 관제 대상 자원을 직접 바꿀 권한이 없다 — 태스크 역할이 가진 것은 역할 전환 하나다.
+- 플랫폼의 관제 대상 접근 권한은 `vigilantis-access`에 대한 역할 전환(`sts:AssumeRole`)으로 한정한다.
 - 공개 진입점이 CloudFront 하나이고, ALB 우회를 두 겹으로 막는다.
 
 **비용/유의**
@@ -129,3 +131,4 @@ MVP는 단일 계정(SSOT §MVP 확정 범위)이므로 계정을 가를 수 없
   - **머지된 구현**: PR #467(2026-10-13 13:10 KST 머지) — `scripts/provision_platform_aws.py`의 `public_origins`·`_require_custom_domain`·`_ensure_custom_domain`·`down`의 별칭 레코드 정리, `tests/test_provision_platform_aws.py`.
   - **확인된 배포 사실**: #468 코멘트의 읽기 전용 조회(10/13(화) 15시대 KST) — CloudFront 별칭 `vigilantis.dev` · us-east-1 ACM 인증서 `ISSUED` · Route53 호스팅 영역 · 오리진 `http-only` · WAF 연결. #467을 포함한 이미지 `mvp-004ed0a`로 10/13(화) 16:40–16:44 KST 재배포. 10/14(수) 허용 IP에서 `https://vigilantis.dev/`와 `https://vigilantis.dev/api/v1/assets`가 200을 돌려줬고, 브라우저 화면이 실 데이터로 렌더되며 WebSocket이 연결됐다. 기록의 원천은 `docs/AWS_SMOKE_RESULT.md` §11이다.
   - **관측 범위의 한계**: CORS 허용 출처의 값은 `deploy` 코드가 정한다. 관측된 것은 사용자 도메인 화면의 API 응답과 실시간 연결이며, 기본 도메인으로 연 화면의 브라우저 동작은 별도 기록이 없다. 오리진 `http-only`는 10/13(화) 15시대 KST 조회 시점의 관측이며, 그 뒤 AWS의 현재 설정은 다시 조회하지 않았다. 원문의 HTTPS 전환 계획이 그 뒤에 이행됐는지는 이 기록으로 판단할 수 없다. 사용자 도메인 연결을 전체 구간 HTTPS 전환으로 보지 않는다.
+- **2026-10-20 (2차 개정 — #493)** — 태스크 역할에 승인된 SNS 주제 발행을, 실행 역할에 승인된 기존 Slack 비밀 주입을 더하고 알림은 기본 끔으로 두었다(§3·§5). 검증 범위는 개인 AWS 계정의 일회용 ECS 시험 태스크에서 확인한 알림 발송 경로와 채널별 대표 수신 화면이다. 운영 절차와 시험 근거는 [`README.md`](../../README.md)의 외부 알림 운영 (#493) 절에 있다.

@@ -46,12 +46,8 @@ def warn_blocked_routes(registry) -> None:
         })
 
 
-def build_notification_runtime(settings) -> NotificationRuntime:
-    """실제 연결은 명시적 활성화 후에만 만든다. 자동 migration은 하지 않는다."""
-    if not settings.NOTIFICATION_ENABLED:
-        raise ValueError("NOTIFICATION_DISABLED")
-    if not settings.NOTIFICATION_ROUTES_FILE:
-        raise ValueError("NOTIFICATION_ROUTES_REQUIRED")
+def validate_notification_timing(settings) -> None:
+    """backoff·lease 교차 규칙. 런타임 기동과 배포 스크립트가 같은 규칙을 쓴다."""
     if settings.NOTIFICATION_MAX_BACKOFF_SECONDS < settings.NOTIFICATION_BACKOFF_SECONDS:
         raise ValueError("NOTIFICATION_BACKOFF_INVALID")
     # 연결·응답 제한에 자격증명 갱신과 결과 저장 여유를 더한다.
@@ -61,6 +57,15 @@ def build_notification_runtime(settings) -> NotificationRuntime:
     ) + 10
     if settings.NOTIFICATION_LEASE_SECONDS < minimum_lease:
         raise ValueError("NOTIFICATION_LEASE_TOO_SHORT")
+
+
+def build_notification_runtime(settings) -> NotificationRuntime:
+    """실제 연결은 명시적 활성화 후에만 만든다. 자동 migration은 하지 않는다."""
+    if not settings.NOTIFICATION_ENABLED:
+        raise ValueError("NOTIFICATION_DISABLED")
+    if not settings.NOTIFICATION_ROUTES_FILE:
+        raise ValueError("NOTIFICATION_ROUTES_REQUIRED")
+    validate_notification_timing(settings)
 
     from db.session import get_session_factory
     from notifications.channels import SlackSender, SnsSender

@@ -27,6 +27,18 @@
 #   이미지     : ... build --account <계정 ID> --tag <태그>        (docker 필요 — ECR에 api·web 푸시)
 #   배포       : ... deploy --account <계정 ID> --tag <태그> [--enable-dispatch] --yes
 #   전부 정리  : ... down --account <계정 ID> --yes
+#   알림(#493) : 기본 배포는 NOTIFICATION_ENABLED=false다. 켜려면 비밀 아닌 입력 JSON을 명시한다:
+#                {"enabled": true, "public_base_url": "https://…", "routes": [{tenant_id, aws_account_id,
+#                 slack_webhook_env?, sns_topic_arn?}], "slack_secret_arns": {"<env>": "<기존 비밀 ARN>"},
+#                 "settings": {"NOTIFICATION_READ_TIMEOUT_SECONDS": 5}}
+#                ... deploy --account <ID> --tag <태그> --notification-config <파일> [--yes]
+#                ... notification-iam --account <ID> --notification-config <파일> [--yes]   (IAM만 먼저)
+#                ... notification-revoke --account <ID> [--yes]   (알림 전용 인라인 정책 둘만 회수)
+#                비밀·토픽·구독·KMS·교차 계정 정책은 만들지 않는다 — 비밀은 이미 있어야 하고 값은 PM이 넣는다.
+#                태스크 역할은 지정 토픽 sns:Publish만, 실행 역할은 지정 비밀 GetSecretValue만 받는다.
+#                deploy는 IAM을 쓰지 않고 정책이 계획과 같은지 읽기만 한다. 정책은 notification-iam/revoke만 쓰며
+#                api가 알림 꺼짐·안정·이전 태스크 종료 상태일 때만 쓴다. 처음 켜기: notification-iam → (실효 확인) →
+#                deploy --notification-config. 바꾸기/끄기: 설정 없이 deploy → 태스크 종료 확인 → iam/revoke.
 #
 # 안전 가드 (스모크 스크립트와 같다):
 #   ① AWS_ENDPOINT_URL이 잡혀 있으면 멈춘다 — 전부 실 AWS 과금 자원이다.
@@ -56,13 +68,17 @@ import argparse
 import base64
 import ipaddress
 import json
+import re
 import secrets
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, Optional
+from types import SimpleNamespace
+from typing import Annotated, Any, Callable, Optional
 from urllib.parse import urlsplit
+
+from pydantic import TypeAdapter
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 for _p in (str(_REPO_ROOT / "apps" / "core-api"), str(_REPO_ROOT / "packages")):
@@ -71,6 +87,11 @@ for _p in (str(_REPO_ROOT / "apps" / "core-api"), str(_REPO_ROOT / "packages")):
 
 from botocore.exceptions import ClientError  # noqa: E402
 
+import config as app_config  # noqa: E402
+from notifications.runtime import validate_notification_timing  # noqa: E402
+from notifications.routing import (  # noqa: E402
+    MAX_CONFIG_BYTES, RouteConfigError, RouteRegistry, _no_duplicate_keys, parse_sns_topic_arn, validate_public_base_url,
+)
 from services.aws.client import aws_client, default_region, endpoint_url  # noqa: E402
 
 PREFIX = "vigilantis-platform"
@@ -252,8 +273,300 @@ def waf_rules(ipset_arn: str, nat_ipset_arn: str) -> list[dict]:
     }]
 
 
+# ---- 외부 알림 배포(#493 PR3) — 기본은 꺼짐. --notification-config로 명시해야 켜진다
+# 알림 전용 인라인 정책 이름 — 기본 정책(assume-access-role · read-platform-secrets)과 겹치지 않는다
+NOTIFY_POLICY_TASK = "publish-notification-topics"   # ROLE_TASK: 지정 SNS 토픽 Publish만
+NOTIFY_POLICY_EXEC = "read-notification-secrets"     # ROLE_EXEC: 지정 Slack 비밀 GetSecretValue만(앱은 읽지 않는다)
+NOTIFY_POLICIES = ((ROLE_TASK, NOTIFY_POLICY_TASK), (ROLE_EXEC, NOTIFY_POLICY_EXEC))
+BASE_SECRET_ENV = ("DATABASE_URL", "OPENAI_API_KEY", "VIGILANTIS_ACCESS_EXTERNAL_ID")
+# config.Settings에서 그대로 전달할 수 있는 알림 조정값(기본값은 config.py가 소유한다)
+NOTIFY_SETTING_KEYS = (
+    "NOTIFICATION_POLL_SECONDS", "NOTIFICATION_BATCH_SIZE", "NOTIFICATION_MAX_ATTEMPTS",
+    "NOTIFICATION_BACKOFF_SECONDS", "NOTIFICATION_MAX_BACKOFF_SECONDS",
+    "NOTIFICATION_CONNECT_TIMEOUT_SECONDS", "NOTIFICATION_READ_TIMEOUT_SECONDS", "NOTIFICATION_LEASE_SECONDS",
+)
+_NOTIFY_CONFIG_KEYS = {"enabled", "public_base_url", "routes", "slack_secret_arns", "settings"}
+_RESERVED_ENV = {"HOME", "PATH", "PORT", "NOTIFICATION_ROUTES_JSON", "NOTIFICATION_ROUTES_FILE"}
+_MAX_NOTIFY_CONFIG_BYTES = 80 * 1024
+
+
+def _reserved_env_names() -> set[str]:
+    """대소문자 무시 비교용(pydantic Settings는 env 이름을 대소문자 구분하지 않는다) — 전부 대문자로 돌려준다."""
+    names = set(_RESERVED_ENV) | set(BASE_SECRET_ENV)
+    for cls in (app_config.Settings, app_config.AwsSettings, app_config.AuthSettings, app_config.CollectorSettings):
+        names |= set(cls.model_fields)
+    return {n.upper() for n in names}
+
+
+def notification_task_policy(topic_arns: list[str]) -> dict:
+    """api 태스크 역할 — 정확히 지정한 SNS 토픽 ARN에 Publish만. 와일드카드·고객 계정 권한 없음."""
+    return {"Version": "2012-10-17", "Statement": [{
+        "Sid": "PublishNotificationTopicsOnly", "Effect": "Allow", "Action": "sns:Publish",
+        "Resource": sorted(topic_arns)}]}
+
+
+def notification_exec_policy(secret_arns: list[str]) -> dict:
+    """실행 역할 — 정확히 지정한 Slack 비밀 ARN의 GetSecretValue만. 앱 태스크 역할에는 주지 않는다."""
+    return {"Version": "2012-10-17", "Statement": [{
+        "Sid": "InjectNotificationSecretsOnly", "Effect": "Allow", "Action": "secretsmanager:GetSecretValue",
+        "Resource": sorted(secret_arns)}]}
+
+
+def load_notification_config(path: str, account: str, region: str) -> Optional[dict]:
+    """비밀 아닌 알림 배포 입력을 검증한다. AWS를 부르지 않는다. 꺼진 입력이면 None.
+
+    형식: {"enabled": true, "public_base_url": "https://…", "routes": [<라우트 스키마 그대로>],
+           "slack_secret_arns": {"<slack_webhook_env>": "<Secrets Manager 비밀 ARN>"},
+           "settings": {"NOTIFICATION_READ_TIMEOUT_SECONDS": 5, …}}
+    enabled가 true일 때만 켠다(routes가 있다는 이유로 켜지 않는다). 실패 문구는 고정이며 입력 내용을 싣지 않는다.
+    """
+    def bad(why: str):
+        return SystemExit(f"--notification-config 거부: {why}")
+
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(_MAX_NOTIFY_CONFIG_BYTES + 1)
+        if len(raw) > _MAX_NOTIFY_CONFIG_BYTES:
+            raise bad("파일이 너무 크다")
+        data = json.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicate_keys)
+    except SystemExit:
+        raise
+    except (OSError, ValueError, RecursionError):
+        raise bad("읽을 수 없거나 JSON이 아니다") from None
+    if not isinstance(data, dict) or not set(data) <= _NOTIFY_CONFIG_KEYS:
+        raise bad("알 수 없는 최상위 키")
+    if not isinstance(data.get("enabled"), bool):
+        raise bad("enabled는 true/false를 명시해야 한다")
+    if not data["enabled"]:
+        return None
+    if not isinstance(data.get("public_base_url"), str) or "routes" not in data:
+        raise bad("public_base_url과 routes가 필요하다")
+    try:
+        base_url = validate_public_base_url(data["public_base_url"])
+    except RouteConfigError:
+        raise bad("public_base_url이 origin 형식이 아니다") from None
+    routes = data["routes"]
+    if not isinstance(routes, list):
+        raise bad("routes 형식 오류")
+    envs = sorted({r["slack_webhook_env"] for r in routes if isinstance(r, dict)
+                   and isinstance(r.get("slack_webhook_env"), str)})
+    # 합성 webhook으로 런타임과 같은 스키마·충돌 판정을 돌린다 — 막힌 항목이 있으면 배포하지 않는다
+    probe = {name: f"https://hooks.slack.com/services/T0/B0/X{i}" for i, name in enumerate(envs)}
+    try:
+        registry = RouteRegistry.from_mapping({"routes": routes}, probe)
+    except RouteConfigError:
+        raise bad("routes가 라우트 스키마에 맞지 않는다") from None
+    if registry.blocked:
+        raise bad("routes에 소유권·목적지 충돌이 있다")
+    topics = sorted({r["sns_topic_arn"] for r in routes if r.get("sns_topic_arn") is not None})
+    for arn in topics:
+        if parse_sns_topic_arn(arn)[1] != account:
+            raise bad("SNS 토픽은 플랫폼 계정 소유여야 한다(교차 계정 정책은 다루지 않는다)")
+    refs = data.get("slack_secret_arns", {})
+    if not isinstance(refs, dict) or set(refs) != set(envs):
+        raise bad("slack_secret_arns 키는 routes의 slack_webhook_env와 정확히 같아야 한다")
+    reserved = _reserved_env_names()
+    secret_re = re.compile(rf"arn:aws:secretsmanager:{re.escape(region)}:{account}:secret:[A-Za-z0-9/_+=.@-]{{1,512}}")
+    for name, arn in refs.items():
+        if name.upper() in reserved or name.upper().startswith(("AWS_", "VIGILANTIS_")):
+            raise bad(f"환경변수 이름 {name}이 기본 설정과 충돌한다")
+        if not isinstance(arn, str) or secret_re.fullmatch(arn) is None or "*" in arn:
+            raise bad(f"{name}의 비밀 ARN 형식 오류(이 계정·리전의 정확한 ARN만)")
+    if len(set(refs.values())) != len(refs):
+        raise bad("서로 다른 환경변수가 같은 비밀 ARN을 가리킨다")
+    raw_settings = data.get("settings", {})
+    if not isinstance(raw_settings, dict) or not set(raw_settings) <= set(NOTIFY_SETTING_KEYS):
+        raise bad("settings에 허용되지 않은 키")
+    # 호스트 환경·.env와 무관하게 config.Settings의 기본값 + 제공값만으로 런타임과 같은 규칙을 적용한다
+    effective = {}
+    for key in NOTIFY_SETTING_KEYS:
+        field = app_config.Settings.model_fields[key]
+        value = raw_settings.get(key, field.default)
+        try:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError
+            effective[key] = TypeAdapter(Annotated[field.annotation, *field.metadata]).validate_python(value)
+        except ValueError:  # pydantic ValidationError는 ValueError다
+            raise bad(f"settings.{key} 값이 config 제약에 맞지 않는다") from None
+    try:
+        validate_notification_timing(SimpleNamespace(**effective))
+    except ValueError:
+        raise bad("settings의 backoff·lease 조합이 런타임 규칙에 맞지 않는다") from None
+    routes_json = json.dumps({"routes": routes}, ensure_ascii=False, separators=(",", ":"))
+    if len(routes_json.encode("utf-8")) > MAX_CONFIG_BYTES:
+        raise bad("routes JSON이 런타임 상한을 넘는다")
+    return {
+        "public_base_url": base_url,
+        "routes_json": routes_json,
+        "secret_arns": dict(sorted(refs.items())),
+        "topic_arns": topics,
+        "settings": {k: str(v) for k, v in sorted(raw_settings.items())},
+    }
+
+
+def notification_plan(c: dict, account: str, region: str, path: str) -> Optional[dict]:
+    """설정 검증 + 읽기 전용 점검(비밀 존재 · 역할 태그). 무엇이든 바꾸기 전에 부른다."""
+    plan = load_notification_config(path, account, region)
+    if plan is None:
+        return None
+    for name, arn in plan["secret_arns"].items():
+        try:
+            found = c["sm"].describe_secret(SecretId=arn)["ARN"]
+        except ClientError as exc:
+            if _code(exc) == "ResourceNotFoundException":
+                sys.exit(f"--notification-config 거부: {name}의 비밀이 없다 — 이 스크립트는 비밀을 만들지 않는다")
+            raise
+        if found != arn:
+            sys.exit(f"--notification-config 거부: {name}의 비밀 ARN이 실제와 다르다")
+    _require_notification_roles(c["iam"])
+    return plan
+
+
+def _require_notification_roles(iam) -> None:
+    for role, _ in NOTIFY_POLICIES:
+        found = _get_role(iam, role)
+        if not found or not is_platform_tagged(found.get("Tags", [])):
+            sys.exit(f"IAM 역할 {role}이 없거나 플랫폼 태그({TAG_KEY}={TAG_VALUE})가 없다 — 알림 정책을 붙이지 않는다")
+
+
+_ENABLED_TRUE = {"1", "true", "t", "yes", "y", "on"}
+_ENABLED_FALSE = {"0", "false", "f", "no", "n", "off"}
+
+
+def _enabled_flag(env: list[dict]) -> bool:
+    """컨테이너 environment의 NOTIFICATION_ENABLED. 없으면 꺼진 레거시, 알 수 없는 값은 켜진 것으로 본다(닫힘)."""
+    values = [str(e.get("value", "")).strip().lower() for e in env or []
+              if str(e.get("name", "")).strip().upper() == "NOTIFICATION_ENABLED"]  # Settings는 이름의 대소문자를 구분하지 않는다
+    return any(v not in _ENABLED_FALSE for v in values)
+
+
+def _live_api_tasks(ecs) -> list[dict]:
+    """api 패밀리의 아직 STOPPED가 아닌 태스크 전부(STOPPING 포함). 페이지·100건 제한을 넘겨 본다."""
+    listed: set[str] = set()
+    for status in ("RUNNING", "STOPPED"):  # desiredStatus=STOPPED에 아직 내려가는 중인 태스크가 있다
+        for page in ecs.get_paginator("list_tasks").paginate(cluster=CLUSTER, family=API_TASK_FAMILY,
+                                                              desiredStatus=status):
+            listed.update(page.get("taskArns", []))
+    arns = sorted(listed)
+    tasks: list[dict] = []
+    for i in range(0, len(arns), 100):
+        got = ecs.describe_tasks(cluster=CLUSTER, tasks=arns[i:i + 100])
+        if got.get("failures"):
+            sys.exit("api 태스크 조회에 실패 항목이 있다 — 상태를 확정할 수 없어 정책은 바꾸지 않았다")
+        tasks += got["tasks"]
+    if {t.get("taskArn") for t in tasks} != listed:
+        sys.exit("나열된 api 태스크를 전부 확인하지 못했다 — 상태를 확정할 수 없어 정책은 바꾸지 않았다")
+    return [t for t in tasks if t.get("lastStatus") != "STOPPED"]
+
+
+def require_notifications_quiescent(ecs) -> None:
+    """정책을 쓰기 전에 api가 알림을 쓰지 않는 안정 상태인지 본다. 아니면 아무것도 바꾸지 않고 멈춘다.
+
+    서비스가 없으면 살아 있는 api 태스크가 없을 때만 통과한다. 서비스가 있으면 PRIMARY 배포가 COMPLETED이고
+    다른 배포가 없어야 한다. 살아 있는 태스크(내려가는 중 포함)의 태스크 정의와 오버라이드에서 알림이
+    켜졌거나 알 수 없으면 거부한다.
+    """
+    why = None
+    if _find_cluster(ecs):
+        svc = _find_service(ecs, API_SERVICE)
+        if svc:
+            primary = next((d for d in svc.get("deployments", []) if d.get("status") == "PRIMARY"), None)
+            if primary is None or deployment_problems([svc], {API_SERVICE: primary.get("taskDefinition")}) \
+                    or len(svc.get("deployments", [])) != 1:
+                why = "api 서비스가 안정 상태가 아니다(진행 중·실패·롤백 중 배포)"
+        if why is None:
+            defs: dict[str, bool] = {}
+
+            def td_enabled(td: str) -> bool:
+                if td not in defs:
+                    cdefs = ecs.describe_task_definition(taskDefinition=td)["taskDefinition"]["containerDefinitions"]
+                    defs[td] = any(_enabled_flag(cd.get("environment")) for cd in cdefs if cd.get("name") == "api")
+                return defs[td]
+
+            if svc and td_enabled(primary["taskDefinition"]):  # 태스크가 잠시 없어도 서비스가 켜진 채 다시 띄울 수 있다
+                why = "api 서비스의 PRIMARY 태스크 정의에서 알림이 켜져 있다"
+            for task in _live_api_tasks(ecs) if why is None else ():
+                td = task.get("taskDefinitionArn", "")
+                td_enabled(td)
+                overrides = [o for o in (task.get("overrides") or {}).get("containerOverrides", [])
+                             if o.get("name") == "api"]
+                if defs[td] or any(_enabled_flag(o.get("environment")) for o in overrides):
+                    why = "알림이 켜진 api 태스크가 아직 살아 있다"
+                    break
+    if why:
+        sys.exit(f"{why} — 알림 없이 deploy해 끄고 이전 태스크가 내려간 뒤에 정책을 바꿀 것(정책은 바꾸지 않았다)")
+
+
+def _policy_shape(doc: object) -> Optional[tuple]:
+    """우리 정책 문서의 정규형(Allow 한 문장 · Action·Resource 집합). 모양이 다르면 None."""
+    if not isinstance(doc, dict) or set(doc) != {"Version", "Statement"} or doc["Version"] != "2012-10-17":
+        return None
+    stmts = doc["Statement"]
+    stmts = [stmts] if isinstance(stmts, dict) else stmts
+    if not isinstance(stmts, list) or len(stmts) != 1 or not isinstance(stmts[0], dict):
+        return None
+    s = stmts[0]
+    if set(s) - {"Sid"} != {"Effect", "Action", "Resource"} or s["Effect"] != "Allow":
+        return None
+    sets = []
+    for key in ("Action", "Resource"):
+        v = [s[key]] if isinstance(s[key], str) else s[key]
+        if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+            return None
+        sets.append(frozenset(v))
+    return tuple(sets)
+
+
+def _notification_wanted(plan: dict) -> dict:
+    return {
+        NOTIFY_POLICY_TASK: (ROLE_TASK, plan["topic_arns"], notification_task_policy),
+        NOTIFY_POLICY_EXEC: (ROLE_EXEC, sorted(plan["secret_arns"].values()), notification_exec_policy),
+    }
+
+
+def verify_notification_policies(iam, plan: dict) -> None:
+    """읽기 전용: 전용 정책 둘이 계획과 정확히 같은지(없어야 하는 쪽은 없는지) 본다. 실효(SCP·KMS·전파)는 증명하지 않는다."""
+    _require_notification_roles(iam)
+    for policy_name, (role, resources, build_policy) in _notification_wanted(plan).items():
+        try:
+            actual = iam.get_role_policy(RoleName=role, PolicyName=policy_name)["PolicyDocument"]
+        except ClientError as exc:
+            if _code(exc) != "NoSuchEntity":
+                raise
+            actual = None
+        want = _policy_shape(build_policy(resources)) if resources else None
+        if (None if actual is None else _policy_shape(actual)) != want or (actual is not None and want is None):
+            sys.exit(f"IAM {role}/{policy_name}이 계획과 다르다 — deploy는 IAM을 쓰지 않는다. "
+                     "알림이 꺼진 상태에서 notification-iam을 먼저 실행할 것")
+
+
+def apply_notification_policies(iam, ecs, plan: dict) -> None:
+    """알림 전용 인라인 정책 둘만 맞춘다(없어야 하는 쪽은 지운다). 알림이 꺼진 안정 상태에서만 쓴다."""
+    _require_notification_roles(iam)
+    require_notifications_quiescent(ecs)
+    for policy_name, (role, resources, build_policy) in _notification_wanted(plan).items():
+        if resources:
+            iam.put_role_policy(RoleName=role, PolicyName=policy_name, PolicyDocument=json.dumps(build_policy(resources)))
+            print(f"[platform] IAM {role}/{policy_name} 적용 — {len(resources)}건")
+        else:
+            _try(lambda r=role, p=policy_name: iam.delete_role_policy(RoleName=r, PolicyName=p), "NoSuchEntity")
+
+
+def revoke_notification_policies(iam, ecs) -> None:
+    """알림 전용 인라인 정책 둘만 지운다. 알림이 꺼진 안정 상태에서만, 태그 없는 역할·없는 역할은 건드리지 않는다."""
+    require_notifications_quiescent(ecs)
+    for role, policy_name in NOTIFY_POLICIES:
+        found = _get_role(iam, role)
+        if not found or not is_platform_tagged(found.get("Tags", [])):
+            print(f"[platform] IAM 역할 {role}이 없거나 플랫폼 태그가 없어 건드리지 않았다")
+            continue
+        _try(lambda r=role, p=policy_name: iam.delete_role_policy(RoleName=r, PolicyName=p), "NoSuchEntity")
+        print(f"[platform] IAM {role}/{policy_name} 회수")
+
+
 def api_container(image: str, *, region: str, cors_origin: str, access_role_arn: str,
-                  collect_vpc_ids: str, dispatch_enabled: bool, secrets_arns: dict[str, str]) -> dict:
+                  collect_vpc_ids: str, dispatch_enabled: bool, secrets_arns: dict[str, str],
+                  notification: Optional[dict] = None) -> dict:
     env = {
         "AWS_REGION": region,
         "CORS_ALLOW_ORIGINS": cors_origin,
@@ -267,7 +580,18 @@ def api_container(image: str, *, region: str, cors_origin: str, access_role_arn:
         "SCAN_ENABLED": "true",
         # 파일 로그는 끈다 — 컨테이너 파일은 태스크와 함께 사라진다. stdout이 CloudWatch Logs로 간다
         "LOG_FILE_ENABLED": "false",
+        "NOTIFICATION_ENABLED": "true" if notification else "false",
     }
+    secrets_arns = dict(secrets_arns)
+    if notification:
+        # routes JSON은 비밀이 아니다 — serve.py가 파일로 쓴다. webhook은 비밀 참조로만 주입한다
+        env.update(notification["settings"])
+        env["NOTIFICATION_PUBLIC_BASE_URL"] = notification["public_base_url"]
+        env["NOTIFICATION_ROUTES_JSON"] = notification["routes_json"]
+        taken = {n.upper() for n in (*env, *secrets_arns)} | _reserved_env_names()
+        if any(n.upper() in taken for n in notification["secret_arns"]):
+            raise ValueError("notification secret env name collides with base settings")
+        secrets_arns.update(notification["secret_arns"])
     return {
         "name": "api",
         "image": image,
@@ -1202,7 +1526,8 @@ def deployment_problems(services: list[dict], expected: dict[str, str]) -> list[
     return problems
 
 
-def deploy(c: dict, account: str, region: str, tag: str, dispatch_enabled: bool) -> None:
+def deploy(c: dict, account: str, region: str, tag: str, dispatch_enabled: bool,
+           notification: Optional[dict] = None) -> None:
     ec2, ecs = c["ec2"], c["ecs"]
     vpc_id = _find_vpc(ec2)
     smoke_vpc = _find_smoke_vpc(ec2)
@@ -1222,10 +1547,13 @@ def deploy(c: dict, account: str, region: str, tag: str, dispatch_enabled: bool)
         "OPENAI_API_KEY": _find_secret(c["sm"], SECRET_OPENAI),
         "VIGILANTIS_ACCESS_EXTERNAL_ID": _find_secret(c["sm"], SECRET_EXTERNAL_ID),
     }
-    api_def = _register(ecs, API_TASK_FAMILY, api_container(
+    container = api_container(
         f"{repos['api']}:{tag}", region=region, cors_origin=",".join(public_origins(dist)),
         access_role_arn=roles["access"], collect_vpc_ids=smoke_vpc, dispatch_enabled=dispatch_enabled,
-        secrets_arns=secret_arns), cpu="512", memory="1024", exec_arn=roles["exec"], task_arn=roles["task"])
+        secrets_arns=secret_arns, notification=notification)
+    if notification:  # deploy는 IAM을 쓰지 않는다 — 정책이 계획과 다르면 등록·마이그레이션 전에 멈춘다
+        verify_notification_policies(c["iam"], notification)
+    api_def = _register(ecs, API_TASK_FAMILY, container, cpu="512", memory="1024", exec_arn=roles["exec"], task_arn=roles["task"])
     web_def = _register(ecs, WEB_TASK_FAMILY, web_container(f"{repos['web']}:{tag}", region=region),
                         cpu="256", memory="512", exec_arn=roles["exec"], task_arn=None)
     _migrate(ecs, api_def, _network(subnets, sgs[SG_API]))
@@ -1260,8 +1588,9 @@ def _try(fn: Callable[[], Any], *ignore: str) -> None:
 def _delete_roles(iam, account: str) -> None:
     for role, managed, inline in (
         (ROLE_ACCESS, [_smoke_policy_arn(account)], []),
-        (ROLE_TASK, [], ["assume-access-role"]),
-        (ROLE_EXEC, ["arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"], ["read-platform-secrets"]),
+        (ROLE_TASK, [], ["assume-access-role", NOTIFY_POLICY_TASK]),
+        (ROLE_EXEC, ["arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"],
+         ["read-platform-secrets", NOTIFY_POLICY_EXEC]),
     ):
         found = _get_role(iam, role)
         if not found:
@@ -1417,7 +1746,8 @@ def down(c: dict, account: str) -> None:
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="Vigilantis 플랫폼 배포 환경 (ADR-0010)")
-    parser.add_argument("command", choices=("status", "up", "build", "deploy", "down"))
+    parser.add_argument("command", choices=("status", "up", "build", "deploy", "down",
+                                            "notification-iam", "notification-revoke"))
     parser.add_argument("--account", required=True, help="대상 AWS 계정 ID — 호출 주체(sts)와 같아야 한다")
     parser.add_argument("--allow-cidr", action="append", default=[],
                         help=f"up: WAF 허용 IPv4 CIDR(/{MIN_ALLOW_PREFIX} 이상 좁게 · 여러 번 줄 수 있다)")
@@ -1427,8 +1757,14 @@ def main() -> None:
     parser.add_argument("--enable-dispatch", action="store_true",
                         help="deploy: AI 분석과 조치 실행 디스패치를 함께 켠다(한 스위치 — 끄면 승인한 조치도 "
                              "실행되지 않는다. 켜면 OpenAI 과금 경로)")
-    parser.add_argument("--yes", action="store_true", help="up·deploy·down: 실제로 바꾼다")
+    parser.add_argument("--notification-config", help="deploy·notification-iam: 비밀 아닌 알림 배포 입력 JSON "
+                        "(enabled:true를 명시해야 켜진다 — 없으면 알림은 꺼진 채 배포된다)")
+    parser.add_argument("--yes", action="store_true", help="up·deploy·down·notification-*: 실제로 바꾼다")
     args = parser.parse_args()
+    if args.notification_config and args.command not in ("deploy", "notification-iam"):
+        sys.exit("--notification-config는 deploy·notification-iam에서만 쓴다")
+    if args.command == "notification-iam" and not args.notification_config:
+        sys.exit("notification-iam에는 --notification-config가 필요하다")
 
     account = _require_real_aws(args.account)["Account"]
     region = default_region()
@@ -1448,6 +1784,21 @@ def main() -> None:
     if args.command == "build":
         build(c, region, args.tag)
         return
+    if args.command == "notification-revoke":
+        if not args.yes:
+            print(f"[platform] 회수 예정(다른 정책은 그대로) — {', '.join(f'{r}/{p}' for r, p in NOTIFY_POLICIES)}"
+                  " — 실제로 하려면 --yes. 먼저 --notification-config 없이 deploy해 알림을 끈 뒤 회수할 것")
+            return
+        revoke_notification_policies(c["iam"], c["ecs"])
+        return
+    notification = None
+    if args.notification_config:  # 무엇이든 바꾸기 전에 — 입력·비밀 존재·역할 태그를 읽기만 하며 본다
+        notification = notification_plan(c, account, region, args.notification_config)
+        if args.command == "notification-iam" and notification is None:
+            sys.exit("enabled가 false라 적용할 정책이 없다")
+        print(f"[platform] 알림 {'켬' if notification else '끔'}"
+              + (f" — 토픽 {len(notification['topic_arns'])}건 · Slack 비밀 {len(notification['secret_arns'])}건"
+                 if notification else ""))
     if args.command == "up":
         if not args.allow_cidr:
             sys.exit("up에는 --allow-cidr가 필요하다 — 허용 IP 없이 공개 진입점을 세우지 않는다")
@@ -1461,7 +1812,12 @@ def main() -> None:
             missing = [row for row in inventory(c) if row[2] is None and row[0] != "EcsService"]
             print(f"[platform] 생성 예정 {len(missing)}건 — 실제로 만들려면 --yes")
             _print_rows(missing)
+        elif args.command == "notification-iam":
+            print(f"[platform] 적용 예정 — 인라인 정책 {NOTIFY_POLICY_TASK}(토픽 {notification['topic_arns']}) · "
+                  f"{NOTIFY_POLICY_EXEC}(비밀 {len(notification['secret_arns'])}건) — 실제로 하려면 --yes")
         elif args.command == "deploy":
+            if notification:
+                verify_notification_policies(c["iam"], notification)
             print(f"[platform] 배포 예정 — 태그 {args.tag} · AI 분석·조치 실행 디스패치 "
                   f"{'켬' if args.enable_dispatch else '끔'} — 실제로 하려면 --yes")
         else:
@@ -1470,8 +1826,10 @@ def main() -> None:
         return
     if args.command == "up":
         up(c, account, region, allow_cidrs, args.domain)
+    elif args.command == "notification-iam":
+        apply_notification_policies(c["iam"], c["ecs"], notification)
     elif args.command == "deploy":
-        deploy(c, account, region, args.tag, args.enable_dispatch)
+        deploy(c, account, region, args.tag, args.enable_dispatch, notification)
     else:
         down(c, account)
 
