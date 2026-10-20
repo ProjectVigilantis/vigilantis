@@ -133,6 +133,8 @@ export interface Ec2Spec {
   vpc_id: string | null;
   subnet_id: string | null;
   private_ip: string | null;
+  /** 자산 태그. 태그가 없으면 빈 객체다(null 아님). */
+  tags: Record<string, string>;
 }
 
 export interface SgSpec {
@@ -140,6 +142,8 @@ export interface SgSpec {
   vpc_id: string | null;
   attached: boolean;
   open_to_world: OpenPortRule[];
+  /** #359 이전에 적재된 행은 재수집 전까지 빈 객체로 온다. */
+  tags: Record<string, string>;
 }
 
 export interface NaclSpec {
@@ -438,6 +442,8 @@ export interface IncidentListItem {
    * 위협 연결 누락·대상 불일치·값 오류로 조회할 문맥이 없으면 null이다.
    */
   threat_context: ThreatContext | null;
+  /** 저장된 SECOPS 분석 결과(PR #386). FINOPS는 언제나 null. */
+  analysis_result: AnalysisResult | null;
   created_at: IsoDateTime;
   updated_at: IsoDateTime;
 }
@@ -450,13 +456,54 @@ export interface IncidentListItem {
 export const RESOLUTION_JUDGEMENTS = ['JUSTIFIED', 'NO_FURTHER_ACTION'] as const;
 export type ResolutionJudgement = (typeof RESOLUTION_JUDGEMENTS)[number];
 
+/* ──────────────────────── analysis.py · guardrails.py ──────────────────────── */
+
 export type AnalysisResultStatus =
   | 'PENDING' | 'IN_PROGRESS' | 'PROPOSALS_GENERATED' | 'NO_PROPOSAL'
   | 'GUARDRAIL_REJECTED' | 'FAILED' | 'UNAVAILABLE';
 
+/** 4단계 가드레일. 실행 순서도 이 순서다. */
+export type GuardrailStep =
+  | 'SCHEMA_CHECK'
+  | 'ACTION_WHITELIST'
+  | 'ARN_MATCH'
+  | 'AWS_DRY_RUN';
+
+/** 단계별 거절 사유 코드. 앞의 접두어가 걸린 단계를 가리킨다. */
+export type GuardrailReasonCode =
+  // ① Schema Check
+  | 'SCHEMA_INVALID_PAYLOAD'
+  // ② Action Whitelist
+  | 'WHITELIST_UNKNOWN_RUNBOOK'
+  | 'WHITELIST_NOT_AI_RECOMMENDABLE'
+  | 'WHITELIST_NOT_ROLLBACK_RUNBOOK'
+  | 'WHITELIST_NOT_AUTO_ISOLATION_RUNBOOK'
+  // ③ ARN Match
+  | 'ARN_TARGET_NOT_MANAGED'
+  // ④ AWS Dry-Run
+  | 'PRECHECK_UNAUTHORIZED'
+  | 'PRECHECK_TARGET_NOT_FOUND'
+  | 'PRECHECK_INVALID_STATE'
+  | 'PRECHECK_NOT_IMPLEMENTED'
+  | 'PRECHECK_PARAM_INVALID'
+  | 'PRECHECK_AWS_ERROR';
+
+/** 가드레일에서 거절된 런북 하나. 어느 단계에서 왜 막혔는지를 싣는다. */
+export interface GuardrailRejection {
+  runbook_id: RunbookId;
+  failed_step: GuardrailStep;
+  reason_code: GuardrailReasonCode | null;
+}
+
+/** 모델 원문·내부 예외·AWS 응답은 싣지 않는다. */
+export interface AnalysisResult {
+  status: AnalysisResultStatus;
+  guardrail_rejections: GuardrailRejection[];
+}
+
 export interface IncidentResponse extends IncidentListItem {
   /** 저장된 SECOPS 분석 결과. 종료나 제안 소진으로 바뀌지 않는다. */
-  analysis_result: { status: AnalysisResultStatus } | null;
+  analysis_result: AnalysisResult | null;
   /** 분석 완료 시 정확히 3개, 분석 중·실패 시 빈 배열. */
   summary_lines: string[];
   evidence_ids: string[];
@@ -524,8 +571,9 @@ export type WsEvent =
     };
 
 /* ───────────────────────────── metrics.py ───────────────────────────── */
-/* GET /api/v1/metrics/timeseries — 대시보드 시계열 2축(DSH). 축마다 상태를 따로 받는다:
-   CPU는 CloudWatch를 그 자리에서 부르고, SG 개방 건수는 적재된 판정 이력을 읽는다. */
+/* GET /api/v1/metrics/timeseries — 대시보드 시계열 6축(CPU · SG 개방 · 네트워크 · 자산 현황 ·
+   자산 수 · 위협 이벤트). 축마다 상태를 따로 받는다: CPU·네트워크는 CloudWatch를 그 자리에서
+   부르고, 나머지는 적재된 판정·수집·이벤트 이력을 읽는다. */
 
 /** 축 하나의 조회 결과. `UNAVAILABLE`이면 데이터는 비고 `reason_code`가 원인을 싣는다. */
 export type AxisStatus = 'READY' | 'UNAVAILABLE';

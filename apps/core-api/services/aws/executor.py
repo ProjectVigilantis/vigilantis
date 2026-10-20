@@ -284,7 +284,8 @@ RUNBOOK_SPECS: Mapping[str, _Spec] = {
         operations=("ec2.describe_network_acls",),
         handler="_precheck_nacl_restore",
         backup_type=BACKUP_NACL_RULE_INDEX,
-        # backup_record_id를 받지 않는 유일한 롤백 런북이라 rule index로 특정한다
+        # 백업을 되짚는 런북 중 backup_record_id를 받지 않는 것은 이것뿐이라(롤백 3종은
+        # 받는다) rule index로 특정한다. 롤백 런북이 아니라 SecOps 본편이다(SSOT §Action Whitelist)
         backup_match_params=("rule_number", "egress"),
     ),
     RunbookId.RUNBOOK_SG_DELETE_ISOLATED.value: _Spec(

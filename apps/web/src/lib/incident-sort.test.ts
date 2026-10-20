@@ -24,6 +24,7 @@ function item(
     response_mode: null,
     // 이 파일이 보는 축이 아니다 — 공격 경로 파생은 `threat-path.test.ts`가 맡는다.
     threat_context: null,
+    analysis_result: null,
     created_at: createdAt,
     updated_at: createdAt,
   };

@@ -34,7 +34,7 @@ function ec2(id: string, securedBy: string[], over: Partial<Common> = {}): Asset
       ...over,
     }),
     asset_type: 'EC2',
-    spec: { instance_type: 't3.small', availability_zone: null, vpc_id: null, subnet_id: null, private_ip: null },
+    spec: { instance_type: 't3.small', availability_zone: null, vpc_id: null, subnet_id: null, private_ip: null, tags: {} },
   };
 }
 
@@ -42,7 +42,7 @@ function sg(id: string, open: OpenPortRule[], over: Partial<Common> = {}): Asset
   return {
     ...common(id, over),
     asset_type: 'SG',
-    spec: { description: null, vpc_id: null, attached: true, open_to_world: open },
+    spec: { description: null, vpc_id: null, attached: true, open_to_world: open, tags: {} },
   };
 }
 
@@ -70,6 +70,7 @@ function incident(
     reviewed_risk_level: null,
     response_mode: null,
     threat_context: null,
+    analysis_result: null,
     created_at: '2026-09-01T00:00:00Z',
     updated_at: '2026-09-01T00:00:00Z',
   };

@@ -33,6 +33,7 @@ const ec2 = (instance_type: string | null): AssetItem => ({
     vpc_id: null,
     subnet_id: null,
     private_ip: null,
+    tags: {},
   },
 });
 
@@ -77,7 +78,7 @@ test('판정에 쓸 값을 정하지 않은 유형은 빈 배열이다 — 누�
   const sg: AssetItem = {
     ...BASE,
     asset_type: 'SG',
-    spec: { description: null, vpc_id: null, attached: true, open_to_world: [] },
+    spec: { description: null, vpc_id: null, attached: true, open_to_world: [], tags: {} },
   };
   assert.deepEqual(approvalAssetFacts(sg), []);
 });
