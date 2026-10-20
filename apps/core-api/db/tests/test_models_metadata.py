@@ -37,6 +37,10 @@ EXPECTED_TABLES = {
     "service_transition_operations",
     "service_transition_observations",
     "notification_events",
+    # #493 PR2 채널별 발송 상태·현재 수신 바인딩·호출 관문
+    "notification_deliveries",
+    "notification_routes",
+    "notification_lanes",
     # 로그인 기반 2종 (#492)
     "app_users",
     "auth_sessions",

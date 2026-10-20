@@ -917,6 +917,156 @@ class NotificationEvent(Base):
     )
 
 
+# ==============================================================================
+# #493 PR2 채널별 발송 상태 3종 — notification_events(사건 사실)는 고치지 않는다.
+# 시각 비교(활성화·임대·재시도·관문)는 모두 DB 시각이다. 수신처 비밀값은 두지 않는다.
+# ==============================================================================
+
+_DELIVERY_CHANNELS = "'SLACK', 'SNS'"
+
+
+class NotificationRoute(Base):
+    """현재 활성 수신 바인딩(계정·채널당 1행). 수신처는 fingerprint로만 남긴다.
+
+    같은 fingerprint 재등록은 epoch·activated_at을 유지한다. 바인딩 변경과 제거 후
+    재등록은 새 epoch와 DB 시각 activated_at을 받는다 — 대기 행은 자기 epoch가 여기
+    현재 값과 같을 때만 보낸다.
+    """
+
+    __tablename__ = "notification_routes"
+
+    aws_account_id: Mapped[str] = mapped_column(String(12), primary_key=True)
+    channel: Mapped[str] = mapped_column(String(8), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(128))
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    route_epoch: Mapped[str] = mapped_column(_ID)
+    activated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(f"channel IN ({_DELIVERY_CHANNELS})", name="channel_known"),
+        CheckConstraint("aws_account_id ~ '^[0-9]{12}$'", name="account_shape"),
+    )
+
+
+class NotificationLane(Base):
+    """채널 공통 호출 관문. Slack은 모든 처리 프로세스가 이 1행으로 간격·429 대기를 공유한다.
+
+    available_at은 보유자가 여닫는 간격 관문(호출 중 임대 길이, 결과 뒤 1초)이고, cooldown_until은
+    공급자가 요구한 대기(Retry-After)다. 대기는 누가 해제하든 최댓값으로만 늘고 보유자 해제로
+    줄지 않는다. claim은 두 시각이 모두 지나야 관문을 잡는다.
+    """
+
+    __tablename__ = "notification_lanes"
+
+    channel: Mapped[str] = mapped_column(String(8), primary_key=True)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    holder_token: Mapped[str | None] = mapped_column(_ID, nullable=True)
+    cooldown_until: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(f"channel IN ({_DELIVERY_CHANNELS})", name="channel_known"),
+    )
+
+
+class NotificationDelivery(Base):
+    """(사건, 채널)당 발송 상태 1행. 종결(SUCCEEDED·FAILED·BLOCKED)은 되돌리지 않는다.
+
+    PENDING → IN_FLIGHT(claim, 시도 수 증가) → SUCCEEDED | PENDING(재시도) | FAILED.
+    BLOCKED는 라우트 없음·충돌·바인딩 변경·활성화 전 사건이다. last_category는
+    마지막 실패 범주이고 final_reason은 FAILED의 종결 사유(PERMANENT·EXHAUSTED)다.
+    """
+
+    __tablename__ = "notification_deliveries"
+
+    delivery_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
+    event_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("notification_events.event_id")
+    )
+    channel: Mapped[str] = mapped_column(String(8))
+    state: Mapped[str] = mapped_column(String(16))
+    # 생성 때 묶은 바인딩 스냅숏 — 보내기 전 DB 현재 바인딩·설정과 대조한다
+    tenant_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    aws_account_id: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    route_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    route_epoch: Mapped[str | None] = mapped_column(_ID, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    claim_token: Mapped[str | None] = mapped_column(_ID, nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_category: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    blocked_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    final_reason: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    receipt_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    receipt_ref: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "event_id", "channel", name="uq_notification_deliveries_event_channel"
+        ),
+        CheckConstraint(f"channel IN ({_DELIVERY_CHANNELS})", name="channel_known"),
+        CheckConstraint("attempts >= 0", name="attempts_non_negative"),
+        CheckConstraint(
+            "last_category IS NULL"
+            " OR last_category IN ('TRANSIENT', 'PERMANENT', 'UNKNOWN')",
+            name="category_known",
+        ),
+        # IN 비교는 NULL이면 NULL이 되어 CHECK를 통과하므로 IS NOT NULL을 함께 쓴다
+        CheckConstraint(
+            "(state IN ('PENDING', 'IN_FLIGHT', 'SUCCEEDED', 'FAILED')"
+            " AND tenant_id IS NOT NULL AND aws_account_id IS NOT NULL"
+            " AND route_fingerprint IS NOT NULL AND route_epoch IS NOT NULL"
+            " AND blocked_reason IS NULL"
+            " AND ((state = 'PENDING' AND next_attempt_at IS NOT NULL"
+            " AND claim_token IS NULL AND lease_expires_at IS NULL"
+            " AND finished_at IS NULL AND final_reason IS NULL AND receipt_kind IS NULL)"
+            " OR (state = 'IN_FLIGHT' AND attempts >= 1 AND next_attempt_at IS NULL"
+            " AND claim_token IS NOT NULL AND lease_expires_at IS NOT NULL"
+            " AND finished_at IS NULL AND final_reason IS NULL AND receipt_kind IS NULL)"
+            " OR (state = 'SUCCEEDED' AND attempts >= 1 AND next_attempt_at IS NULL"
+            " AND claim_token IS NULL AND lease_expires_at IS NULL"
+            " AND finished_at IS NOT NULL AND final_reason IS NULL"
+            " AND receipt_kind IS NOT NULL"
+            " AND receipt_kind IN ('SLACK_POSTED', 'SNS_ACCEPTED'))"
+            " OR (state = 'FAILED' AND attempts >= 1 AND next_attempt_at IS NULL"
+            " AND claim_token IS NULL AND lease_expires_at IS NULL"
+            " AND finished_at IS NOT NULL AND receipt_kind IS NULL"
+            " AND last_category IS NOT NULL AND final_reason IS NOT NULL"
+            " AND final_reason IN ('PERMANENT', 'EXHAUSTED'))))"
+            " OR (state = 'BLOCKED' AND blocked_reason IS NOT NULL"
+            " AND next_attempt_at IS NULL AND claim_token IS NULL"
+            " AND lease_expires_at IS NULL AND finished_at IS NOT NULL"
+            " AND final_reason IS NULL AND receipt_kind IS NULL)",
+            name="state_shape",
+        ),
+        Index(
+            "ix_notification_deliveries_pending_due",
+            "channel",
+            "next_attempt_at",
+            postgresql_where=text("state = 'PENDING'"),
+        ),
+        Index(
+            "ix_notification_deliveries_in_flight_lease",
+            "channel",
+            "lease_expires_at",
+            postgresql_where=text("state = 'IN_FLIGHT'"),
+        ),
+    )
+
+
 class ServiceTransitionObservation(Base):
     """typed 관측 1건(schemas.service_transition.ServiceObservation). 생성 후 불변.
 

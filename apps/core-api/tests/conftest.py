@@ -70,6 +70,9 @@ os.environ.setdefault("SCAN_ENABLED", "false")
 # 외부 환경·.env의 실제 inbox를 테스트 앱이 소비하지 않게 강제로 끈다.
 # 소비자 검증은 해당 테스트가 임시 경로와 테스트 세션을 명시해 켠다.
 os.environ["MOCK_THREAT_INBOX_DIR"] = ""
+# 외부 환경·.env의 opt-in으로 테스트 앱이 실제 알림을 보내지 않게 강제로 끈다.
+# 알림 검증만 대역과 격리 DB를 갖춘 뒤 명시적으로 활성화한다.
+os.environ["NOTIFICATION_ENABLED"] = "false"
 # .env가 파일 로그를 켜 두었어도 테스트 앱은 쓰지 않는다 — 켜면 개발 스택 api와 같은 파일을
 # 두 프로세스가 회전시킨다. 파일 출력 검증은 해당 테스트가 임시 경로로 setup_logging을 직접 부른다.
 os.environ["LOG_FILE_ENABLED"] = "false"
