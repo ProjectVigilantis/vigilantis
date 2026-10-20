@@ -11,39 +11,38 @@ import { ActionProposalCard } from '@/components/dashboard/action-proposal-card'
 import { DashboardView } from '@/components/dashboard/dashboard-view';
 import { AutoRefresh } from '@/components/auto-refresh';
 import { ErrorState } from '@/components/error-state';
-import { getAssets, getIncident, getIncidents, getMetricsTimeseries } from '@/lib/api/client';
+import { orError, orNull, serverApi } from '@/lib/api/server';
 import { actionQueue, proposalRows } from '@/lib/dashboard';
 import type { IncidentResponse } from '@/types/api';
+import { unstable_rethrow } from 'next/navigation';
 
 export default async function DashboardPage() {
   // 제목 옆 `마지막 갱신` — 다시 그려질 때마다 새로 찍힌다(auto-refresh.tsx).
   const renderedAt = new Date().toISOString();
+  // 세션 쿠키만 실어 부르고, 401이면 로그인으로 redirect한다(lib/api/server.ts).
+  const { getAssets, getIncident, getIncidents, getMetricsTimeseries } = await serverApi();
 
   // 인시던트 실패는 대시보드를 죽이지 않는다 — 자산 화면과 같은 규칙(null = 조회 실패)이다.
   // 오류를 버리지 않고 들고 간다: AI 카드가 그것을 **대기 0건이 아니라 오류로** 그려야 한다(PR #351 리뷰 2).
-  const incidentsPromise = getIncidents().then(
-    (res) => ({ items: res.items, error: null }),
-    (error: unknown) => ({ items: null, error }),
-  );
+  // 401(로그인 redirect)만은 접지 않는다 — orError가 그대로 던진다.
+  const incidentsPromise = orError(getIncidents());
 
   // 시계열에서 대시보드가 쓰는 축은 `asset_inventory`(축 5, 자산 수)와 `asset_status`(축 4, 위협 판정)다 — CPU·네트워크는 자산 관제, 개방 SG는
   // 보안 관제가 그린다(dashboard-view.tsx 머리말). 실패는 화면을 죽이지 않는다: 추이는 현재 상태를 읽는
   // 데 필요한 것이 아니라 그 옆에 붙는 맥락이다. 자산 조회와 나란히 시작해 첫 화면을 늦추지 않게 한다.
-  const metricsPromise = getMetricsTimeseries().then(
-    (res) => res,
-    () => null,
-  );
+  const metricsPromise = orNull(getMetricsTimeseries());
 
   let assets;
   try {
     assets = await getAssets();
   } catch (error) {
+    unstable_rethrow(error); // 401 → 로그인 redirect는 삼키지 않는다
     // 자산 실패는 화면 전체 CMN-002다 — 계약에 부분 성공 개념이 없다(§4.1 예외).
     return <ErrorState error={error} />;
   }
 
   const listed = await incidentsPromise;
-  const incidents = listed.items;
+  const incidents = listed.value === null ? null : listed.value.items;
   const metrics = await metricsPromise;
 
   // AI 조치 제안 카드는 요약 목록이다. 목록 계약에 없는 것은 **자산 건의 추정 절감액** 하나라
@@ -55,7 +54,7 @@ export default async function DashboardPage() {
     const settled = await Promise.all(
       queue
         .filter((i) => i.category === 'FINOPS')
-        .map((i) => getIncident(i.incident_id).then((res) => res, () => null)),
+        .map((i) => orNull(getIncident(i.incident_id))),
     );
     for (const detail of settled) if (detail !== null) details.set(detail.incident_id, detail);
   }

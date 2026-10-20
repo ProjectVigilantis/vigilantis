@@ -6,6 +6,8 @@
 
 import { usePathname } from 'next/navigation';
 
+import { SessionExpiryNotice } from '@/components/auth/session-expiry-notice';
+import { SessionProvider } from '@/components/auth/session-provider';
 import { Gnb } from '@/components/gnb';
 import { RealtimeProvider } from '@/components/realtime-provider';
 import { ToastStack } from '@/components/toast-stack';
@@ -21,12 +23,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    // CMN-001이 소켓 수명주기를 소유한다 — layout 아래에 두어야 라우트가 바뀌어도 연결이 유지된다(4.8 1).
-    <RealtimeProvider>
-      <Gnb />
-      <main className="flex flex-1 flex-col p-6">{children}</main>
-      {/* CMN-001 Toast 스택 — 우하단 고정·8초·최대 3개(4.8). */}
-      <ToastStack />
-    </RealtimeProvider>
+    // 세션(`/me`)은 사용자 메뉴 · 조치 버튼 역할 판정 · 만료 안내가 같이 읽는다(#492 PR 2).
+    <SessionProvider>
+      {/* CMN-001이 소켓 수명주기를 소유한다 — layout 아래에 두어야 라우트가 바뀌어도 연결이 유지된다(4.8 1). */}
+      <RealtimeProvider>
+        <Gnb />
+        <SessionExpiryNotice />
+        <main className="flex flex-1 flex-col p-6">{children}</main>
+        {/* CMN-001 Toast 스택 — 우하단 고정·8초·최대 3개(4.8). */}
+        <ToastStack />
+      </RealtimeProvider>
+    </SessionProvider>
   );
 }

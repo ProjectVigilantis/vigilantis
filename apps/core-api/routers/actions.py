@@ -10,6 +10,8 @@
 #     1회 수행되고, 통과한 제안이 EXECUTABLE이 된다 (Issue #113 §2).
 #   - 라우터는 예약(IN_PROGRESS)까지만 한다. AWS 실행은 dispatcher.py가 예약된
 #     실행을 집어 services/aws/executor.py로 넘긴다(Issue #232).
+#   - 접근 보호(#492 PR 2): Origin · 세션은 포함 시점(main)에, 역할(ADMIN · OPERATOR)은
+#     여기서 검사한다. 거절되면 reserve_execution 에 닿지 않는다 — 실행 행 · 후보 전이가 없다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -20,6 +22,8 @@ from sqlalchemy.orm import Session
 from schemas.api.actions import ExecuteActionRequest, ExecuteActionResponse
 
 import workflows
+from auth.access import require_action_role
+from auth.service import CurrentUser
 from db.session import get_db
 
 router = APIRouter(prefix="/api/v1", tags=["actions"])
@@ -34,6 +38,7 @@ def execute_action(
     payload: ExecuteActionRequest,
     response: Response,
     db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_action_role),  # 요청자 신원 — 감사 기록(T-2)이 쓴다
 ) -> ExecuteActionResponse:
     """신규 예약은 202, 같은 Key 재요청은 200 — 응답 본문은 두 경우가 같다."""
     reservation = workflows.reserve_execution(db, payload)

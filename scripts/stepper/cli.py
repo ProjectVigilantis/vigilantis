@@ -271,10 +271,11 @@ def _touched(recorder: WsRecorder, body: dict) -> list[str]:
 
 
 class WsRecorder:
-    """버튼을 누르는 동안 /api/v1/ws를 구독해 받은 이벤트를 모은다. 연결 실패는 기록만 한다."""
+    """버튼을 누르는 동안 /_stepper/ws를 구독해 받은 이벤트를 모은다. 연결 실패는 기록만 한다."""
 
-    def __init__(self, url: str, *, settle: float = 0.5) -> None:
+    def __init__(self, url: str, headers: dict[str, str], *, settle: float = 0.5) -> None:
         self.url = url
+        self._headers = headers  # 토큰 헤더 — 출력·기록에 쓰지 않는다
         self.settle = settle
         self.events: list[dict] = []
         self.error: str | None = None
@@ -286,7 +287,9 @@ class WsRecorder:
             from websockets.sync.client import connect
 
             # 셸의 프록시 설정이 loopback 연결을 가로채지 않게 한다
-            self._connection = connect(self.url, open_timeout=3, proxy=None)
+            self._connection = connect(
+                self.url, additional_headers=self._headers, open_timeout=3, proxy=None
+            )
         except Exception as exc:  # noqa: BLE001 — 구독 실패가 버튼을 막지 않는다
             self.error = type(exc).__name__
             return self
@@ -315,11 +318,13 @@ class WsRecorder:
 
 def snapshot(remote) -> dict:
     """버튼 뒤의 REST 상태 — 상태의 원천은 DB다. WS 수신과 별개로 남긴다."""
-    listing = remote.get("/api/v1/incidents")["items"]
-    incidents = [remote.get(f"/api/v1/incidents/{item['incident_id']}") for item in listing]
+    listing = remote.get("/_stepper/incidents", auth=True)["items"]
+    incidents = [
+        remote.get(f"/_stepper/incidents/{item['incident_id']}", auth=True) for item in listing
+    ]
     incidents.sort(key=lambda incident: incident["created_at"])
     pending = remote.get("/_stepper/pending-analysis", auth=True)["incidents"]
-    assets = remote.get("/api/v1/assets").get("items") or []
+    assets = remote.get("/_stepper/assets", auth=True).get("items") or []
     names = {asset["arn"]: asset.get("name") or asset.get("resource_id") for asset in assets}
     return {"incidents": incidents, "pending_analysis": pending, "asset_names": names}
 
@@ -339,7 +344,7 @@ def record(ctx, live, entry: dict) -> Path:
 
 
 def press(live, button: str) -> tuple[dict, WsRecorder]:
-    with WsRecorder(server.ws_url(live.ports)) as recorder:
+    with WsRecorder(server.ws_url(live.ports), live.remote.ws_headers()) as recorder:
         body = live.remote.press(button, timeout=TIMEOUTS[button])
     return body, recorder
 
@@ -520,7 +525,7 @@ def cmd_scan(ctx, args) -> None:
 
 def cmd_inject(ctx, args) -> None:
     live = server.connect(ctx)
-    arn = resolve_target(live.remote.get("/api/v1/assets").get("items") or [], args.target)
+    arn = resolve_target(live.remote.get("/_stepper/assets", auth=True).get("items") or [], args.target)
     occurred_at = args.occurred_at or utc_seconds(ctx.now())
     inbox = server.host_inbox(ctx.repo_root)
     inbox.mkdir(parents=True, exist_ok=True)

@@ -10,6 +10,9 @@
 #     회수 스캔(dispatcher)과 AI 분석 대기 스캔(agent_dispatcher)은 DISPATCH_ENABLED를
 #     Medium 승인 기한 감시와 공유해 켜고 끈다 (Issue #232·#277·#285·#447).
 #   - 모의 위협 파일 소비자는 MOCK_THREAT_INBOX_DIR 지정 시 독립 기동한다(#322).
+#   - 접근 보호(#492 PR 2): 조치 · 자산 · 인시던트 · 메트릭 라우터는 포함 시점에
+#     Origin(상태 변경만) → 세션 검사를 건다. 공개 경로는 /health 와 로그인 단계뿐이다.
+#     API 문서는 API_DOCS_ENABLED 일 때만 열린다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -33,12 +36,13 @@ for _p in (str(_CORE_API), str(_PACKAGES)):
 
 from contextlib import asynccontextmanager  # noqa: E402
 
-from fastapi import FastAPI, Request  # noqa: E402
+from fastapi import Depends, FastAPI, Request  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
 import agent_dispatcher  # noqa: E402
 import dispatcher  # noqa: E402
-from auth.http import log_provider_status, register_auth_http  # noqa: E402
+from auth.access import require_user  # noqa: E402
+from auth.http import log_provider_status, register_auth_http, require_origin  # noqa: E402
 from config import get_auth_settings, get_settings  # noqa: E402
 from db.session import get_session_factory  # noqa: E402
 from exceptions import register_error_handlers, unexpected_error_response  # noqa: E402
@@ -52,7 +56,7 @@ from routers import auth as auth_router  # noqa: E402
 from routers import incidents as incidents_router  # noqa: E402
 from routers import metrics as metrics_router  # noqa: E402
 from routers import ws as ws_router  # noqa: E402
-from security.soar import start_timeout_watcher
+from security.soar import start_timeout_watcher  # noqa: E402
 from services.scheduler import start_scheduler as start_scan_scheduler  # noqa: E402
 
 _http_logger = logging.getLogger("vigilantis.http")
@@ -126,7 +130,9 @@ def create_app() -> FastAPI:
                         scheduler.shutdown(wait=False)
                     await realtime.stop()
 
-    app = FastAPI(title="Vigilantis Core API", lifespan=lifespan)
+    # 문서 3종(/docs · /redoc · /openapi.json)은 켤 때만 둔다 — 끄면 경로 자체가 없어 404다
+    docs = {} if settings.API_DOCS_ENABLED else {"docs_url": None, "redoc_url": None, "openapi_url": None}
+    app = FastAPI(title="Vigilantis Core API", lifespan=lifespan, **docs)
     app.state.realtime = realtime
 
     @app.middleware("http")
@@ -148,18 +154,23 @@ def create_app() -> FastAPI:
             return response
         finally:
             # 접근 로그는 request_id ContextVar가 살아 있는 동안(reset 전) 남긴다
-            _http_logger.info(
-                "http_request",
-                extra={
-                    "method": request.method,
-                    "path": request.url.path,
-                    "status_code": status_code,
-                    "duration_ms": round((time.perf_counter() - started) * 1000, 1),
-                },
-            )
+            fields = {
+                "method": request.method,
+                "path": request.url.path,
+                "status_code": status_code,
+                "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+            }
+            # 세션 검사(auth.access.require_user)를 통과한 요청만 신원이 있다 — 식별자와 역할만
+            # 싣는다(이메일 · 쿠키 · 토큰은 싣지 않는다)
+            user = getattr(request.state, "current_user", None)
+            if user is not None:
+                fields["user_id"] = user.user_id
+                fields["role"] = user.role.value
+            _http_logger.info("http_request", extra=fields)
             request_id_var.reset(token)
 
-    # /api/v1/auth/* 보안 헤더 미들웨어와 AuthError 매핑 (#492) — CORS 보다 안쪽
+    # /api/v1/* 보안 헤더 미들웨어와 AuthError 매핑 (#492) — CORS 보다 안쪽, request_context 보다
+    # 바깥이라 미처리 예외의 500 봉투에도 헤더가 붙는다
     register_auth_http(app)
     log_provider_status(get_auth_settings())
 
@@ -176,11 +187,15 @@ def create_app() -> FastAPI:
     )
 
     register_error_handlers(app)
-    app.include_router(actions_router.router)
-    app.include_router(assets_router.router)
+    # 접근 보호(#492 PR 2) — 순서가 계약이다: Origin(상태 변경만, DB 전) → 세션 → 라우트의 역할 검사.
+    # 셋 다 라우터 본문 · Workflow · AWS 보다 먼저 돈다. auth 라우터는 자기 의존성(Origin → Cognito
+    # 설정)을 갖고, WebSocket 은 연결 수립 때 직접 검사한다(routers/ws.py)
+    protected = [Depends(require_origin), Depends(require_user)]
+    app.include_router(actions_router.router, dependencies=protected)
+    app.include_router(assets_router.router, dependencies=protected)
     app.include_router(auth_router.router)
-    app.include_router(incidents_router.router)
-    app.include_router(metrics_router.router)
+    app.include_router(incidents_router.router, dependencies=protected)
+    app.include_router(metrics_router.router, dependencies=protected)
     app.include_router(ws_router.router)
 
     @app.get("/health")

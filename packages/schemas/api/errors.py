@@ -19,11 +19,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 @unique
 class ErrorCode(str, Enum):
-    """REST 공통 오류 코드 21종. 괄호는 계약상 HTTP 상태.
+    """REST 공통 오류 코드 22종. 괄호는 계약상 HTTP 상태.
 
     TENANT_* 3종은 /api/v1/tenants(Post-MVP T-4)와 테넌트 정지(원격 회수)의 거절이다.
-    AUTH_* · ACCOUNT_* 12종은 /api/v1/auth(Post-MVP T-1)의 거절이다. 미인증은 401,
-    인증은 됐지만 허용되지 않은 요청은 403 이다.
+    AUTH_* · ACCOUNT_* 13종은 로그인(/api/v1/auth)과 API 접근 보호(Post-MVP T-1)의 거절이다.
+    미인증은 401, 인증은 됐지만 허용되지 않은 요청은 403 이다.
     """
 
     INCIDENT_NOT_FOUND = "INCIDENT_NOT_FOUND"                # 404
@@ -40,6 +40,7 @@ class ErrorCode(str, Enum):
     AUTH_STEP_CONFLICT = "AUTH_STEP_CONFLICT"                # 409 — 지금 단계가 아닌 단계 API 호출
     AUTH_PASSWORD_POLICY = "AUTH_PASSWORD_POLICY"            # 422 — 새 비밀번호가 User Pool 정책 위반
     AUTH_ORIGIN_REJECTED = "AUTH_ORIGIN_REJECTED"            # 403 — 허용 Origin 이 아닌 상태 변경 요청
+    AUTH_FORBIDDEN = "AUTH_FORBIDDEN"                        # 403 — 인증됐지만 역할이 허용하지 않음
     ACCOUNT_NOT_PROVISIONED = "ACCOUNT_NOT_PROVISIONED"      # 403 — Cognito 인증은 됐지만 앱 사용자가 없다
     ACCOUNT_DISABLED = "ACCOUNT_DISABLED"                    # 403 — 앱 사용자 비활성
     AUTH_EMAIL_DELIVERY_FAILED = "AUTH_EMAIL_DELIVERY_FAILED"  # 503 — 이메일 검증 코드 발송 실패

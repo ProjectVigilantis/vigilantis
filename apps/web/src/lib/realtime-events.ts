@@ -2,7 +2,16 @@
 
 // 최종 상태 정의는 한 곳이다 — `node --test`가 별칭을 못 풀어 상대 경로를 쓴다(incident-filter와 같은 이유).
 import { isTerminalStatus } from './execution-status.ts';
+import { WS_CLOSE_AUTH_REQUIRED } from '../types/api.ts';
 import type { ExecutionStatus, IncidentCategory, IsoDateTime, WsEvent } from '@/types/api';
+
+/**
+ * 소켓이 닫힌 뒤 할 일. 서버가 세션 만료 · 회수로 닫은 것(4401)만 로그인으로 보내고, 그 밖의 코드는
+ * 기존 백오프 재연결을 탄다 — 핸드셰이크 거부(1006)는 네트워크 끊김과 구분되지 않아 재시도 쪽이다.
+ */
+export function closeAction(code: number): 'login' | 'retry' {
+  return code === WS_CLOSE_AUTH_REQUIRED ? 'login' : 'retry';
+}
 
 /**
  * 이벤트 하나가 화면에 시키는 일. **판단은 여기서 끝나고 소켓은 배달만 한다.**

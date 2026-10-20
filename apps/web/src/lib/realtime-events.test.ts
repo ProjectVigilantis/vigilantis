@@ -9,6 +9,7 @@ import {
   agentWaitTimes,
   appendTransition,
   backoffMs,
+  closeAction,
   latchAgentWaitAt,
   websocketUrl,
 } from './realtime-events.ts';
@@ -190,6 +191,13 @@ test('접수 행은 덮이지 않고 남는다', () => {
     rows.map((r) => r.to),
     ['IN_PROGRESS', 'ROLLBACK_INITIATED', 'ROLLED_BACK'],
   );
+});
+
+test('서버가 세션 만료로 닫은 4401만 로그인으로 보내고, 나머지는 재연결한다', () => {
+  assert.equal(closeAction(4401), 'login');
+  for (const code of [1000, 1001, 1006, 1011, 4400, 4403]) {
+    assert.equal(closeAction(code), 'retry', String(code));
+  }
 });
 
 test('websocketUrl은 스킴 없는 값을 거른다', () => {

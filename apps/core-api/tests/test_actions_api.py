@@ -47,7 +47,8 @@ def _body(incident: models.Incident, runbook_id: RunbookId, key: str = KEY) -> d
     }
 
 
-# --- 요청 검증(DB 비의존) -------------------------------------------------------
+# --- 요청 검증 -------------------------------------------------------------------
+# 세션 확인(#492 PR 2)이 본문 검증보다 먼저라 세션이 있는 통합 클라이언트로 본다.
 
 
 @pytest.mark.parametrize("over", [
@@ -55,7 +56,7 @@ def _body(incident: models.Incident, runbook_id: RunbookId, key: str = KEY) -> d
     {"idempotency_key": "k" * 129},       # 저장 컬럼 폭 초과
     {"runbook_id": "RUNBOOK_IP_BLOCK"},   # 폐기 ID
 ])
-def test_contract_violation_returns_422_envelope(client, over):
+def test_contract_violation_returns_422_envelope(client_pg, over):
     payload = {
         "incident_id": str(uuid.uuid4()),
         "runbook_id": DEFAULT_RUNBOOK.value,
@@ -63,7 +64,7 @@ def test_contract_violation_returns_422_envelope(client, over):
     }
     payload.update(over)
 
-    response = client.post(URL, json=payload)
+    response = client_pg.post(URL, json=payload)
     assert response.status_code == 422
     body = response.json()
     assert set(body) == {"error"}

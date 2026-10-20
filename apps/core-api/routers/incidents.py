@@ -16,6 +16,9 @@
 #   - 종료의 상태 전이·트랜잭션은 workflows.resolve_incident가 소유한다. 라우터는
 #     commit 이후 INCIDENT_UPDATED를 발행하는 데까지만 한다 — 발행을 Workflow에
 #     두면 그 계층이 앱 상태(app.state.realtime)를 알아야 한다.
+#   - 접근 보호(#492 PR 2): Origin · 세션은 포함 시점(main)에 건다. 종료만 역할(ADMIN ·
+#     OPERATOR)을 여기서 검사하며, 거절되면 resolve_incident 에 닿지 않는다. 조회 2종의
+#     시그니처는 그대로 둔다 — 테스트 서버(scripts/stepper)가 db= 로 직접 부른다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -48,6 +51,8 @@ from schemas.executions import EXECUTION_RECOVERABLE_STATUSES
 from schemas.runbooks import ROLLBACK_RUNBOOK_BY_MAIN_ID
 
 import workflows
+from auth.access import require_action_role
+from auth.service import CurrentUser
 from db import mappers, models
 from db.repositories import executions as executions_repo
 from db.repositories import incidents as incidents_repo
@@ -261,6 +266,7 @@ def resolve_incident(
     payload: ResolveIncidentRequest,
     request: Request,
     db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_action_role),  # 요청자 신원 — 감사 기록(T-2)이 쓴다
 ) -> IncidentResponse:
     """이미 종료된 건의 재요청도 200이며, 처음 저장된 판단을 그대로 돌려준다."""
     row = _load_incident(db, incident_id)

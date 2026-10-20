@@ -8,6 +8,7 @@ import Link from 'next/link';
 import { CopyButton } from '@/components/copy-button';
 import { Button } from '@/components/ui/button';
 import { ApiError } from '@/lib/api/client';
+import { VIEWER_ACTION_BLOCKED } from '@/lib/roles';
 import { cn } from '@/lib/utils';
 import type { ErrorCode } from '@/types/api';
 
@@ -48,8 +49,10 @@ const PRESENTATION: Record<ErrorCode, Presentation> = {
   },
   TENANT_SUSPENDED: { variant: 'inline', note: '정지된 고객입니다. 고객을 재개한 뒤 실행할 수 있습니다.' },
   // 인증(#492). 로그인 화면은 자기 문구(lib/auth-errors.ts)를 쓰고, 여기는 일반 화면에 섞여 오는 경우다.
-  // 미인증 리다이렉트는 PR 2(접근 보호)에서 붙는다 — 그 전까지는 안내만 한다.
+  // 미인증은 보통 여기까지 오지 않는다 — 서버 조회는 redirect, 브라우저 조회는 로그인 이동이 먼저 걸린다(PR 2).
   AUTH_REQUIRED: { variant: 'page', note: '로그인한 뒤 다시 시도해 주세요.' },
+  // 역할이 막은 조치(VIEWER의 실행 · 종료). 다시 눌러도 같은 결과다.
+  AUTH_FORBIDDEN: { variant: 'inline', note: VIEWER_ACTION_BLOCKED },
   AUTH_FAILED: { variant: 'inline' },
   AUTH_CODE_INVALID: { variant: 'inline' },
   AUTH_FLOW_EXPIRED: { variant: 'inline' },

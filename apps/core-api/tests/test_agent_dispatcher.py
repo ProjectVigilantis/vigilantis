@@ -356,7 +356,7 @@ def test_detail_and_list_stay_readable_after_success(db, client_pg, precheck_pas
     (None, "UNAVAILABLE"),
 ])
 def test_savings_survive_db_and_fresh_app_reads_without_new_model_calls(
-    db, client_pg, monkeypatch, rate, expected_status,
+    db, client_pg, operator_session, monkeypatch, rate, expected_status,
 ):
     from db.session import get_db
     from fastapi.testclient import TestClient
@@ -442,7 +442,8 @@ def test_savings_survive_db_and_fresh_app_reads_without_new_model_calls(
 
     app = create_app()
     app.dependency_overrides[get_db] = fresh_db
-    with TestClient(app) as restarted:
+    # 같은 외부 트랜잭션의 세션 시드로 조회한다 — /api/v1/* 는 세션이 필요하다(#492 PR 2)
+    with TestClient(app, headers=operator_session.headers) as restarted:
         for _ in range(2):
             restored = restarted.get(url)
             assert restored.status_code == 200

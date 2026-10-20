@@ -282,7 +282,7 @@ def committed_sessions(pg_engine):
 
 
 def test_app_consumes_s3_and_publishes_websocket_after_commit(
-    committed_sessions, tmp_path, monkeypatch,
+    committed_sessions, committed_auth, tmp_path, monkeypatch,
 ):
     from fastapi.testclient import TestClient
 
@@ -317,8 +317,13 @@ def test_app_consumes_s3_and_publishes_websocket_after_commit(
             yield db
 
     app.dependency_overrides[get_db] = get_test_db
+    # /api/v1/* · WebSocket 은 세션이 필요하다(#492 PR 2) — commit된 세션을 쿠키로 싣는다
+    from auth.access import get_auth_session_factory
+
+    app.dependency_overrides[get_auth_session_factory] = lambda: committed_auth.sessions
+    seed = committed_auth.make()
     try:
-        with TestClient(app) as client:
+        with TestClient(app, headers={"Cookie": seed.cookie}) as client:
             with client.websocket_connect("/api/v1/ws") as ws:
                 prepare_observation(tmp_path, parse_observation(_raw()))
                 assert published.wait(5), "앱 소비·commit·발행이 실행되지 않았다"

@@ -2,11 +2,12 @@
 
 import { AssetsView } from '@/components/assets/assets-view';
 import { ErrorState } from '@/components/error-state';
-import { getAssets, getIncident, getIncidents, getMetricsTimeseries } from '@/lib/api/client';
+import { orError, orNull, serverApi } from '@/lib/api/server';
 import { WASTE_VERDICTS } from '@/lib/dashboard';
 import { parsePreset } from '@/lib/incident-filter';
 import { savingsSummary } from '@/lib/savings';
 import type { AssetItem, IncidentListItem, IncidentResponse } from '@/types/api';
+import { unstable_rethrow } from 'next/navigation';
 
 /**
  * 절감 예상을 위해 더 부를 인시던트 상세의 상한. 목록 계약에 `recommendations`가 없어
@@ -45,30 +46,28 @@ function savingsTargets(
 export default async function AssetsPage({ searchParams }: PageProps<'/assets'>) {
   // 제목 옆 `마지막 갱신` — 다시 그려질 때마다 새로 찍힌다(auto-refresh.tsx).
   const renderedAt = new Date().toISOString();
+  // 세션 쿠키만 실어 부르고, 401이면 로그인으로 redirect한다(lib/api/server.ts).
+  const { getAssets, getIncident, getIncidents, getMetricsTimeseries } = await serverApi();
   const { asset, tab, preset } = await searchParams;
   // 오류를 버리지 않고 들고 간다 — 인시던트 탭이 그것을 **대기 0건이 아니라 오류로** 그려야 한다.
-  const incidentsPromise = getIncidents().then(
-    (res) => ({ items: res.items, error: null as unknown }),
-    (error: unknown) => ({ items: null, error }),
-  );
+  // 401(로그인 redirect)만은 접지 않는다 — orError · orNull이 그대로 던진다.
+  const incidentsPromise = orError(getIncidents());
   // 시계열 실패는 화면을 죽이지 않는다 — 추이는 현재 상태를 읽는 데 필요한 것이 아니라 그
   // 옆에 붙는 맥락이다(대시보드와 같은 규칙). 자산 조회와 나란히 시작해 CloudWatch 왕복이
   // 첫 화면을 늦추지 않게 한다.
-  const metricsPromise = getMetricsTimeseries().then(
-    (res) => res,
-    () => null,
-  );
+  const metricsPromise = orNull(getMetricsTimeseries());
 
   let assets;
   try {
     assets = await getAssets();
   } catch (error) {
+    unstable_rethrow(error); // 401 → 로그인 redirect는 삼키지 않는다
     // 자산 실패는 화면 전체 CMN-002다 — 대시보드(app/page.tsx)와 같은 규칙.
     // 잡지 않고 던지면 레이아웃(GNB)째 전역 오류 셸로 넘어가 다른 화면으로 빠져나갈 길이 없어진다.
     return <ErrorState error={error} />;
   }
   const listed = await incidentsPromise;
-  const incidents = listed.items;
+  const incidents = listed.value === null ? null : listed.value.items;
 
   let incidentsByArn: Record<string, IncidentListItem[]> | null = null;
   if (incidents !== null) {
@@ -85,12 +84,7 @@ export default async function AssetsPage({ searchParams }: PageProps<'/assets'>)
   let savingsFailed = 0;
   if (incidents !== null) {
     const settled = await Promise.all(
-      savingsTargets(incidents, assets.items).map((i) =>
-        getIncident(i.incident_id).then(
-          (res) => res,
-          () => null,
-        ),
-      ),
+      savingsTargets(incidents, assets.items).map((i) => orNull(getIncident(i.incident_id))),
     );
     for (const one of settled) {
       if (one === null) savingsFailed += 1;

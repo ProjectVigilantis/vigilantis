@@ -134,19 +134,23 @@ class FakeRemote:
     def healthy(self) -> bool:
         return True
 
+    def ws_headers(self) -> dict:
+        return {server.TOKEN_HEADER: self.token}
+
     def ping(self) -> dict:
         self.calls.append("ping")
         return {"server": server.SERVER_ID}
 
     def get(self, path: str, *, auth: bool = False):
         self.calls.append(path)
-        if path == "/api/v1/incidents":
+        assert auth, f"{path}는 토큰 없이 읽을 수 없다"
+        if path == "/_stepper/incidents":
             return {"items": self.snap["incidents"]}
-        if path.startswith("/api/v1/incidents/"):
+        if path.startswith("/_stepper/incidents/"):
             return next(i for i in self.snap["incidents"] if path.endswith(i["incident_id"]))
         if path == "/_stepper/pending-analysis":
             return {"incidents": self.snap["pending_analysis"]}
-        if path == "/api/v1/assets":
+        if path == "/_stepper/assets":
             return {"items": self.snap["assets"]}
         raise AssertionError(path)
 
@@ -693,3 +697,32 @@ def test_status_output_and_record_keep_the_token_out(tmp_path, repo):
 
 def test_data_root_defaults_to_the_home_folder_on_any_os():
     assert server.DEFAULT_DATA_ROOT == Path.home() / ".vigilantis" / "stepper"
+
+
+def test_ws_recorder_sends_the_token_header_to_the_stepper_ws_and_never_prints_it(monkeypatch):
+    import websockets.sync.client as ws_client
+
+    seen = {}
+
+    class Refusing:
+        def __init__(self, *args, **kwargs):
+            seen["url"], seen["kwargs"] = args[0], kwargs
+            raise OSError("거부")
+
+    monkeypatch.setattr(ws_client, "connect", Refusing)
+    remote = server.Remote("http://127.0.0.1:8000", TOKEN)
+    url = server.ws_url({"api": 8000})
+    with cli.WsRecorder(url, remote.ws_headers()) as recorder:
+        pass
+    assert url == "ws://127.0.0.1:8000/_stepper/ws"
+    assert seen["url"] == url
+    assert seen["kwargs"]["additional_headers"] == {server.TOKEN_HEADER: TOKEN}
+    assert recorder.error == "OSError" and TOKEN not in repr(recorder.error)
+
+
+def test_remote_reads_never_use_the_product_api_prefix():
+    import re
+
+    for name in ("cli.py", "server.py"):
+        source = (STEPPER / name).read_text(encoding="utf-8")
+        assert not re.search(r"""["']/api/v1/(incidents|assets|ws)""", source), name

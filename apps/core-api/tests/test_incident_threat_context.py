@@ -54,7 +54,11 @@ def capture_selects(db):
     connection = db.connection()
 
     def capture(conn, cursor, statement, parameters, context, executemany):
-        if statement.lstrip().upper().startswith("SELECT"):
+        # 요청마다 도는 세션 확인(#492 PR 2)의 auth_sessions · app_users 조회는 세지 않는다 —
+        # 이 검증은 인시던트 · 위협 조회 횟수가 건수와 무관한지를 본다
+        if statement.lstrip().upper().startswith("SELECT") and not any(
+            f"FROM {table}" in statement for table in ("auth_sessions", "app_users")
+        ):
             statements.append(statement)
 
     sa_event.listen(connection, "before_cursor_execute", capture)
