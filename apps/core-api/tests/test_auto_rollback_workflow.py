@@ -555,7 +555,7 @@ def test_guardrail_rejection_is_not_retried(db, rolled_back_origin, aws):
 
 def test_guardrail_rejection_is_recorded_for_the_console(db, rolled_back_origin, aws):
     """거절이 로그로만 남으면 "왜 원복이 멈췄는가"를 화면에서 답할 자리가 없다."""
-    _, origin_id = rolled_back_origin(collected=False)
+    incident_id, origin_id = rolled_back_origin(collected=False)
 
     cycle(db)
     cycle(db)
@@ -567,6 +567,14 @@ def test_guardrail_rejection_is_recorded_for_the_console(db, rolled_back_origin,
     assert evaluation.failed_step is GuardrailStep.ARN_MATCH
     # 통과하지 못한 명령은 불변 실행 명령으로 남기지 않는다
     assert evaluation.validated_command is None
+    [fact] = events_repo.list_by_incident(db, incident_id)
+    assert (fact.kind, fact.phase, fact.outcome) == ("AUTO_ROLLBACK", "RESULT", "REJECTED")
+    assert fact.reason_code == "ARN_TARGET_NOT_MANAGED"
+    assert fact.execution_id == origin_id
+    assert fact.related_execution_id == child.execution_id
+    assert fact.execution_status is ExecutionStatus.ROLLBACK_FAILED
+    assert child.status is ExecutionStatus.FAILED
+    assert exec_repo.list_steps(db, child.execution_id) == []
 
 
 def test_passing_guardrail_records_the_validated_command(db, rolled_back_origin, aws):

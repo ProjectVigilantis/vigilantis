@@ -3444,6 +3444,27 @@ def close_execution(
         # 상태는 그대로여도 상세 응답의 자식 목록이 바뀌었으므로 updated_at은 올린다
         incidents_repo.touch_incident(db, incident_id)
 
+    auto_rollback_failed = (
+        execution.parent_execution_id is not None
+        and execution.trigger_source is TriggerSource.AUTO_ON_FAILURE
+        and bool(settled_origin)
+        and next_status is ExecutionStatus.FAILED
+    )
+    has_execution_steps = (
+        (keep_verification_hold or auto_rollback_failed)
+        and bool(executions_repo.list_steps(db, execution_id))
+    )
+    guardrail_rejected = False
+    rejection_reason = None
+    if auto_rollback_failed and not has_execution_steps and not keep_verification_hold:
+        evaluation = guardrails_repo.latest_for_execution(db, execution_id)
+        if evaluation is not None and evaluation.result is GuardrailDecision.FAIL:
+            guardrail_rejected = True
+            rejection_reason = next(
+                (step["reason_code"] for step in evaluation.steps
+                 if step["step"] == evaluation.failed_step and step["reason_code"] is not None),
+                None,
+            )
     fact = notification_events.classify_execution_transition(
         runbook_id=execution.runbook_id,
         trigger_source=execution.trigger_source,
@@ -3451,11 +3472,9 @@ def close_execution(
         previous_status=previous_status,
         next_status=next_status,
         verification_held=keep_verification_hold,
-        has_execution_steps=(
-            keep_verification_hold
-            and bool(executions_repo.list_steps(db, execution_id))
-        ),
+        has_execution_steps=has_execution_steps,
         origin_settled=bool(settled_origin),
+        guardrail_rejected=guardrail_rejected,
     )
     if fact is not None:
         # Core UPDATE의 확정 시각을 같은 트랜잭션에서 읽는다. 아직 commit하지 않는다.
@@ -3473,7 +3492,7 @@ def close_execution(
                 _ORIGIN_STATUS_AFTER_ROLLBACK[next_status] if fact.use_origin else next_status
             ),
             reason_code=(
-                verification_reason.value
+                rejection_reason if guardrail_rejected else verification_reason.value
                 if keep_verification_hold and verification_reason is not None else None
             ),
             occurred_at=execution.updated_at,

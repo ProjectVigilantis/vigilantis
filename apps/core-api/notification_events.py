@@ -55,6 +55,7 @@ def classify_execution_transition(
     verification_held: bool,
     has_execution_steps: bool,
     origin_settled: bool,
+    guardrail_rejected: bool = False,
 ) -> ExecutionEvent | None:
     """상태 문자열만으로 자동 출처나 확인 성공을 추론하지 않는 기록 규칙."""
     if previous_status is next_status:
@@ -67,6 +68,9 @@ def classify_execution_transition(
             return None
         outcome = (
             EventOutcome.UNVERIFIED if result_unverified
+            else EventOutcome.REJECTED
+            if guardrail_rejected and not has_execution_steps
+            and next_status is ExecutionStatus.FAILED and not verification_held
             else EventOutcome.SUCCESS if next_status is ExecutionStatus.SUCCESS
             else EventOutcome.FAILED
         )

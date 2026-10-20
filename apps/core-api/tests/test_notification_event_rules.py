@@ -53,3 +53,32 @@ def test_transition_classification(
         fact.outcome.value if fact.outcome is not None else None, fact.use_origin,
     )
     assert observed == expected
+
+
+@pytest.mark.parametrize(
+    "rejected,has_steps,held,next_status,trigger,expected",
+    [
+        (True, False, False, "FAILED", "AUTO_ON_FAILURE", "REJECTED"),
+        (False, False, False, "FAILED", "AUTO_ON_FAILURE", "FAILED"),
+        (True, True, False, "FAILED", "AUTO_ON_FAILURE", "FAILED"),
+        (True, True, True, "FAILED", "AUTO_ON_FAILURE", "UNVERIFIED"),
+        (True, False, True, "FAILED", "AUTO_ON_FAILURE", "FAILED"),
+        (True, False, False, "SUCCESS", "AUTO_ON_FAILURE", "SUCCESS"),
+        (True, False, False, "FAILED", "USER_APPROVAL", None),
+    ],
+)
+def test_rollback_rejection_requires_pre_execution_guardrail_failure(
+    rejected, has_steps, held, next_status, trigger, expected,
+):
+    fact = classify_execution_transition(
+        runbook_id=RunbookId.RUNBOOK_EC2_REVERT_SIZE,
+        trigger_source=TriggerSource(trigger),
+        parent_execution_id="origin",
+        previous_status=Status.IN_PROGRESS,
+        next_status=Status(next_status),
+        verification_held=held,
+        has_execution_steps=has_steps,
+        origin_settled=True,
+        guardrail_rejected=rejected,
+    )
+    assert (fact.outcome.value if fact is not None else None) == expected
