@@ -5,7 +5,7 @@
    revoked_at·revoke_reason은 함께 NULL이거나 함께 값이 있다. 시각 CHECK 3개로 수명 창을 강제한다.
 
 Revision ID: d3a7c5e91f08
-Revises: c8e2f5a1d704
+Revises: d493a1b2c301
 Create Date: 2026-10-19 10:00:00.000000
 """
 from __future__ import annotations
@@ -15,7 +15,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision = "d3a7c5e91f08"
-down_revision = "c8e2f5a1d704"
+down_revision = "d493a1b2c301"
 branch_labels = None
 depends_on = None
 

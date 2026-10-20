@@ -13,7 +13,7 @@ from db import models
 from sqlalchemy import inspect, text
 
 REVISION = "d3a7c5e91f08"
-PARENT = "c8e2f5a1d704"
+PARENT = "d493a1b2c301"
 TABLES = {"app_users", "auth_sessions"}
 ENUM_TYPES = {
     "app_user_role",
@@ -41,9 +41,10 @@ def _enum_types(connection) -> set[str]:
     )
 
 
-def test_revision_follows_service_transitions(migration_config):
+def test_revision_follows_notification_events_on_a_single_chain(migration_config):
     script = ScriptDirectory.from_config(migration_config)
     assert script.get_revision(REVISION).down_revision == PARENT
+    assert len(script.get_heads()) == 1
 
 
 def test_roundtrip_matches_orm(pg_engine, migration_config):
