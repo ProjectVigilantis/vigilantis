@@ -47,7 +47,7 @@ function ec2(id: string, health: number | null, over: Partial<Common> = {}): Ass
   return {
     ...common(id, { health_score: health, ...over }),
     asset_type: 'EC2',
-    spec: { instance_type: 't3.small', availability_zone: null, vpc_id: null, subnet_id: null, private_ip: null },
+    spec: { instance_type: 't3.small', availability_zone: null, vpc_id: null, subnet_id: null, private_ip: null, tags: {} },
   };
 }
 
@@ -55,7 +55,7 @@ function sg(id: string, open: OpenPortRule[], over: Partial<Common> = {}): Asset
   return {
     ...common(id, over),
     asset_type: 'SG',
-    spec: { description: null, vpc_id: null, attached: true, open_to_world: open },
+    spec: { description: null, vpc_id: null, attached: true, open_to_world: open, tags: {} },
   };
 }
 
@@ -79,6 +79,7 @@ function incident(id: string, status: IncidentStatus): IncidentListItem {
     response_mode: null,
     // 이 파일이 보는 축이 아니다 — 공격 경로 파생은 `threat-path.test.ts`가 맡는다.
     threat_context: null,
+    analysis_result: null,
     created_at: '2026-09-01T00:00:00Z',
     updated_at: '2026-09-01T00:00:00Z',
   };

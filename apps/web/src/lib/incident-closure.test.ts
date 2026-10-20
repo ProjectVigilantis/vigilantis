@@ -9,7 +9,7 @@ function incident(over: Partial<IncidentResponse> = {}): IncidentResponse {
     status: 'AWAITING_APPROVAL', initial_risk_level: 'HIGH', reviewed_risk_level: null,
     response_mode: 'PRE_MITIGATION_0_5S', threat_context: null,
     summary_lines: [], evidence_ids: [], executions: [],
-    analysis_result: { status: 'PROPOSALS_GENERATED' },
+    analysis_result: { status: 'PROPOSALS_GENERATED', guardrail_rejections: [] },
     recommendations: [{ runbook_id: 'RUNBOOK_NACL_ADD_DENY', target_arn: 'arn:test',
       display_parameters: {}, ai_savings_estimate: null }],
     resolution: null, resolution_note: null, resolved_at: null,
@@ -24,7 +24,7 @@ function execution(status: ExecutionStatus): IncidentResponse['executions'][numb
 
 test('SecOps·FinOps는 실행 전 남은 제안을 거절하고 종료할 수 있다', () => {
   for (const category of ['SECOPS', 'FINOPS'] as const) {
-    const row = incident({ category, analysis_result: category === 'FINOPS' ? null : { status: 'PROPOSALS_GENERATED' } });
+    const row = incident({ category, analysis_result: category === 'FINOPS' ? null : { status: 'PROPOSALS_GENERATED', guardrail_rejections: [] } });
     assert.equal(closureBlockedReason(row), null);
     assert.equal(closureAction(row).label, '제안 거절하고 종료');
   }
@@ -33,7 +33,7 @@ test('SecOps·FinOps는 실행 전 남은 제안을 거절하고 종료할 수 �
 test('무제안·전체 거절·기록 부족·분석 실패는 실행 없이 종료할 수 있다', () => {
   for (const status of ['NO_PROPOSAL', 'GUARDRAIL_REJECTED', 'UNAVAILABLE', 'FAILED'] as AnalysisResultStatus[]) {
     assert.equal(closureBlockedReason(incident({ status: status === 'FAILED' ? 'FAILED' : 'AWAITING_CLOSURE',
-      recommendations: [], analysis_result: { status } })), null);
+      recommendations: [], analysis_result: { status, guardrail_rejections: [] } })), null);
   }
 });
 
@@ -48,7 +48,7 @@ test('차단 후 해제 제안을 실행하지 않고 종료할 수 있다', () 
 test('성공한 선행 조치가 있어도 분석 중에는 종료할 수 없다', () => {
   for (const status of ['PENDING', 'IN_PROGRESS'] as const) {
     assert.match(closureBlockedReason(incident({ executions: [execution('SUCCESS')],
-      status: 'AWAITING_CLOSURE', analysis_result: { status } }))!, /분석/);
+      status: 'AWAITING_CLOSURE', analysis_result: { status, guardrail_rejections: [] } }))!, /분석/);
   }
   assert.match(closureBlockedReason(incident({ category: 'FINOPS', status: 'ANALYZING', analysis_result: null }))!, /분석/);
   assert.notEqual(closureBlockedReason(incident({ analysis_result: null })), null);

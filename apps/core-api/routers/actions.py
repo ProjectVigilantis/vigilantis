@@ -8,7 +8,8 @@
 #     라우터는 DTO 전달과 상태 코드 선택만 한다.
 #   - 4단계 가드레일을 여기서 다시 부르지 않는다. 가드레일은 AI 제안 생성 직후
 #     1회 수행되고, 통과한 제안이 EXECUTABLE이 된다 (Issue #113 §2).
-#   - AWS 실행은 아직 스텁이다 — 예약 레코드만 IN_PROGRESS로 남는다.
+#   - 라우터는 예약(IN_PROGRESS)까지만 한다. AWS 실행은 dispatcher.py가 예약된
+#     실행을 집어 services/aws/executor.py로 넘긴다(Issue #232).
 # ==============================================================================
 
 from __future__ import annotations
