@@ -82,9 +82,7 @@ class _SlackConnection:
         response = self.wire.next_response()
         if response is CRASH_BEFORE_SEND:
             raise _Crash
-        self.wire.posts.append({
-            "url": f"https://{self.host}{path}", "body": body.decode(), "at": time.monotonic(),
-        })
+        self.wire.posts.append({"url": f"https://{self.host}{path}", "body": body.decode()})
         if self.wire.on_request is not None:
             self.wire.on_request()
         if response is CRASH_AFTER_ACCEPT:
@@ -252,6 +250,12 @@ def lane_wait_seconds(engine):
     return max(lane_waits(engine))
 
 
+def db_clock(engine):
+    """관문이 비교하는 PostgreSQL 서버 시계의 지금 시각(호스트 시계와 섞지 않는다)."""
+    with engine.connect() as connection:
+        return connection.execute(text("SELECT clock_timestamp()")).scalar_one()
+
+
 def retry_delay(row):
     return row.next_attempt_at - row.updated_at
 
@@ -358,15 +362,21 @@ def test_no_session_or_transaction_is_open_during_external_calls(sessions, pg_en
     seen = []
 
     def observe():
+        # 클라이언트 접속만 센다 — autovacuum 등 서버 내부 작업은 앱 세션·트랜잭션이 아니다
         with observer.connect() as connection:
             busy = connection.execute(text(
                 "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
-                " AND pid <> pg_backend_pid() AND state <> 'idle'"
+                " AND pid <> pg_backend_pid() AND backend_type = 'client backend'"
+                " AND state <> 'idle'"
             )).scalar_one()
-        seen.append((pg_engine.pool.checkedout(), busy))
+        return pg_engine.pool.checkedout(), busy
+
+    with sessions() as held:  # 대조군: 앱 세션이 트랜잭션을 연 채면 관찰기가 잡는다
+        held.execute(text("SELECT 1"))
+        assert observe() == (1, 1)
 
     slack, sns = SlackWire(), SnsWire()
-    slack.on_request = sns.on_publish = observe
+    slack.on_request = sns.on_publish = lambda: seen.append(observe())
     dispatcher = make_dispatcher(
         sessions, registry(entry("customer-a", ACCOUNT_A, slack="SLACK_A", sns=TOPIC_A)),
         slack=slack, sns=sns,
@@ -614,6 +624,8 @@ def test_competing_processes_keep_slack_calls_at_least_one_second_apart(sessions
         entry("customer-b", ACCOUNT_B, slack="SLACK_B"),
     )
     wire = SlackWire()
+    sent_at = []  # 전송 계층 경계에서 관문과 같은 DB 시계로 잰다
+    wire.on_request = lambda: sent_at.append(db_clock(pg_engine))
     workers = [make_dispatcher(sessions, routes, slack=wire) for _ in range(2)]
     activate(workers[0], pg_engine)
     events = [commit_event(sessions, account) for account in (ACCOUNT_A, ACCOUNT_B, ACCOUNT_A)]
@@ -630,9 +642,9 @@ def test_competing_processes_keep_slack_calls_at_least_one_second_apart(sessions
         thread.start()
     for thread in threads:
         thread.join(20)
-    times = sorted(p["at"] for p in wire.posts)
+    times = sorted(sent_at)
     assert len(times) == 3
-    assert all(later - earlier >= 1.0 for earlier, later in zip(times, times[1:]))
+    assert all(later - earlier >= timedelta(seconds=1) for earlier, later in zip(times, times[1:]))
     assert {rows(pg_engine, e)["SLACK"].state for e in events} == {"SUCCEEDED"}
 
 
@@ -764,18 +776,132 @@ def test_stale_result_after_lease_reclaim_is_fenced(sessions, pg_engine):
     worker = threading.Thread(target=lambda: outcome.append(first.process_one("SNS")))
     worker.start()
     assert entered.wait(10)
+    old_token = rows(pg_engine, event_id)["SNS"].claim_token
 
+    second_entered, second_release = threading.Event(), threading.Event()
     second_wire = SnsWire({"MessageId": "reclaimed-result"})
+    second_wire.on_publish = lambda: (second_entered.set(), second_release.wait(10))
     second = make_dispatcher(sessions, routes, sns=second_wire)
     expire_leases(pg_engine)
     second.process_one("SNS")
     make_due(pg_engine)
-    assert second.process_one("SNS") is True
+    second_outcome = []
+    replacement = threading.Thread(target=lambda: second_outcome.append(second.process_one("SNS")))
+    replacement.start()
+    assert second_entered.wait(10)
+    in_flight = rows(pg_engine, event_id)["SNS"]
+    assert (in_flight.state, in_flight.attempts) == ("IN_FLIGHT", 2)
+    assert in_flight.claim_token not in (None, old_token)
+
+    # 교체 시도가 아직 전송 중일 때 이전 작업자의 늦은 결과는 이전 토큰이라 막힌다
     release.set()
     worker.join(10)
     assert outcome == [True]
     row = rows(pg_engine, event_id)["SNS"]
+    assert (row.state, row.claim_token, row.attempts, row.receipt_ref, row.updated_at) == (
+        "IN_FLIGHT", in_flight.claim_token, 2, None, in_flight.updated_at,
+    )
+
+    second_release.set()
+    replacement.join(10)
+    assert second_outcome == [True]
+    row = rows(pg_engine, event_id)["SNS"]
     assert (row.state, row.receipt_ref, row.attempts) == ("SUCCEEDED", "reclaimed-result", 2)
+
+
+@pytest.mark.parametrize(("response", "state", "error_code", "cooldown"), [
+    ((200, {}, b"ok"), "SUCCEEDED", None, 0),
+    ((429, {"Retry-After": "120"}, b""), "PENDING", "slack_http_429", 120),
+], ids=["success", "429"])
+def test_result_after_lease_expiry_is_kept_when_nobody_reclaimed_first(
+    sessions, pg_engine, response, state, error_code, cooldown,
+):
+    """임대가 지났어도 회수 전에 돌아온 결과는 반영한다 — 회수·재전송으로 바꾸지 않는다."""
+    routes = registry(entry("customer-a", ACCOUNT_A, slack="SLACK_A"))
+    entered, release = threading.Event(), threading.Event()
+    wire = SlackWire(response)
+    wire.on_request = lambda: (entered.set(), release.wait(10))
+    dispatcher = make_dispatcher(sessions, routes, slack=wire)
+    activate(dispatcher, pg_engine)
+    event_id = commit_event(sessions)
+    dispatcher.discover()
+    worker = threading.Thread(target=dispatcher.process_one, args=("SLACK",))
+    worker.start()
+    assert entered.wait(10)
+    expire_leases(pg_engine)
+    release.set()
+    worker.join(10)
+    row = rows(pg_engine, event_id)["SLACK"]
+    assert (row.state, row.last_error_code, row.attempts, row.claim_token) == (
+        state, error_code, 1, None,
+    )
+    spacing, waited = lane_waits(pg_engine)
+    assert 0 < spacing <= 1  # 관문 보유자로서 결과 확정 뒤 1초 간격으로 연다
+    assert cooldown - 1 < waited <= cooldown  # 429 대기는 남고 성공은 대기를 만들지 않는다
+    assert len(wire.posts) == 1
+
+
+def test_reclaim_and_late_result_race_is_decided_by_the_row_lock(sessions, pg_engine):
+    """임대 만료 뒤 회수와 늦은 결과가 겹치면 행 잠금을 먼저 잡은 쪽 하나만 반영된다."""
+    routes = registry(entry("customer-a", ACCOUNT_A, sns=TOPIC_A))
+    entered, release = threading.Event(), threading.Event()
+    wire = SnsWire({"MessageId": "late-result"})
+    wire.on_publish = lambda: (entered.set(), release.wait(10))
+    first = make_dispatcher(sessions, routes, sns=wire)
+    activate(first, pg_engine)
+    reclaimed = commit_event(sessions)
+    first.discover()
+    worker = threading.Thread(target=first.process_one, args=("SNS",))
+    worker.start()
+    assert entered.wait(10)
+    expire_leases(pg_engine)
+    observer = create_engine(pg_engine.url)
+
+    def lock_waiters():
+        with observer.connect() as connection:
+            return connection.execute(text(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
+                " AND wait_event_type = 'Lock'"
+            )).scalar_one()
+
+    # 회수가 먼저 잠근다(_recover와 같은 저장소 호출을 commit 전에 멈춤). 늦은 결과는 잠금을
+    # 기다렸다가 회수 commit 뒤 IN_FLIGHT·토큰 조건을 다시 평가해 막힌다.
+    with sessions() as reclaimer:
+        [expired] = deliveries_repo.lock_expired(reclaimer, "SNS", 10)
+        release.set()
+        assert _wait_for(lambda: lock_waiters() == 1)
+        assert deliveries_repo.recover_expired(
+            reclaimer, expired.delivery_id, deliveries_repo.retry("UNKNOWN", "lease_expired", 60),
+        )
+        reclaimer.commit()
+    worker.join(10)
+    observer.dispose()
+    row = rows(pg_engine, reclaimed)["SNS"]
+    assert (row.state, row.last_error_code, row.receipt_ref, row.claim_token, row.attempts) == (
+        "PENDING", "lease_expired", None, None, 1,
+    )
+
+    # 결과가 먼저 잠근다. 회수는 SKIP LOCKED로 건너뛰고, 그 뒤에는 닫을 IN_FLIGHT가 없다.
+    settled_first = commit_event(sessions)
+    first.discover()
+    delivery_id, token = rows(pg_engine, settled_first)["SNS"].delivery_id, str(uuid.uuid4())
+    with sessions() as db:
+        deliveries_repo.start_attempt(db, delivery_id, token, 30)
+        db.commit()
+    expire_leases(pg_engine)
+    with sessions() as settler, sessions() as reclaimer:
+        assert deliveries_repo.settle(
+            settler, delivery_id, token, deliveries_repo.succeeded("SNS_ACCEPTED", "late-result"),
+        )
+        assert deliveries_repo.lock_expired(reclaimer, "SNS", 10) == []
+        settler.commit()
+        assert not deliveries_repo.recover_expired(
+            reclaimer, delivery_id, deliveries_repo.retry("UNKNOWN", "lease_expired", 60),
+        )
+        reclaimer.commit()
+    row = rows(pg_engine, settled_first)["SNS"]
+    assert (row.state, row.receipt_ref, row.attempts) == ("SUCCEEDED", "late-result", 1)
+    assert len(wire.publishes) == 1
 
 
 def test_terminal_rows_are_never_reset_or_resent(sessions, pg_engine):

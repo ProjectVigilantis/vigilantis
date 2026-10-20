@@ -35,6 +35,17 @@ class NotificationRuntime:
                     _logger.warning("notification_sender_close_failed")
 
 
+def warn_blocked_routes(registry) -> None:
+    """선언됐지만 막힌 (계정, 채널)을 시작 시 한 번씩 경고한다. 라우팅이 이미 계산한 결과만 쓴다.
+
+    계정·채널·사유 코드만 남긴다. 채널을 일부러 뺀 계정(CHANNEL_NOT_CONFIGURED)은 막힌 항목이 아니라 경고하지 않는다.
+    """
+    for (account, channel), reason in sorted(registry.blocked.items()):
+        _logger.warning("notification_route_blocked", extra={
+            "aws_account_id": account, "channel": channel or None, "reason": reason,
+        })
+
+
 def build_notification_runtime(settings) -> NotificationRuntime:
     """실제 연결은 명시적 활성화 후에만 만든다. 자동 migration은 하지 않는다."""
     if not settings.NOTIFICATION_ENABLED:
@@ -58,6 +69,7 @@ def build_notification_runtime(settings) -> NotificationRuntime:
 
     public_base_url = validate_public_base_url(settings.NOTIFICATION_PUBLIC_BASE_URL)
     registry = RouteRegistry.from_file(settings.NOTIFICATION_ROUTES_FILE)
+    warn_blocked_routes(registry)
     senders = {}
     try:
         channels = {route.channel for route in registry.routes}

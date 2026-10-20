@@ -26,7 +26,6 @@
 
 from __future__ import annotations
 
-import logging
 import os
 from typing import Any
 
@@ -127,10 +126,6 @@ def _ecs_only_session(provider: ContainerProvider | None = None) -> botocore.ses
     return session
 
 
-_SDK_LOGGERS = ("botocore", "urllib3")
-_SDK_LOG_OFF = logging.CRITICAL + 1  # CRITICAL 포함 전부 차단
-
-
 def platform_sns_client(
     region: str,
     *,
@@ -139,10 +134,8 @@ def platform_sns_client(
     _provider: ContainerProvider | None = None,
 ):
     """플랫폼(ECS 태스크 역할) 자격증명으로 만든 SNS 클라이언트. SDK 재시도 없음(총 시도 1번)."""
-    # 앱 LOG_LEVEL=DEBUG여도 botocore/urllib3가 Publish 본문·보안 토큰·자격증명 갱신 오류를
-    # 로그로 남기지 않게, SDK/자격증명 해석 전에 프로세스 전역으로 한 번 막는다(요청별 복원 없음).
-    for name in _SDK_LOGGERS:
-        logging.getLogger(name).setLevel(_SDK_LOG_OFF)
+    # SDK 로그 보호는 앱 setup_logging의 WARNING 설정이 소유한다.
+    # 이 팩토리는 다른 AWS 호출의 경고·오류를 끄거나 로거 수준을 바꾸지 않는다.
     config = Config(
         retries={"total_max_attempts": 1, "mode": "standard"},
         user_agent_extra="vigilantis/0.1",

@@ -2,7 +2,8 @@
 
 - 시각(활성화·재시도·임대·관문)은 전부 DB now()로 쓰고 비교한다.
 - 상태 전이는 조건부 UPDATE다. 종결 상태(SUCCEEDED·FAILED·BLOCKED)를 고르는 전이는 없다.
-- 결과 확정(settle)은 claim_token·IN_FLIGHT·미만료 임대가 모두 맞을 때만 반영한다.
+- 결과 확정(settle)은 claim_token·IN_FLIGHT가 맞을 때만 반영한다. 회수가 토큰을 지우므로 회수 뒤의
+  늦은 결과는 막히고, 임대가 지났어도 회수 전에 돌아온 결과는 반영한다.
 - notification_events(사건 사실)는 읽기만 한다.
 """
 
@@ -292,12 +293,14 @@ def _close_attempt(db: Session, conditions: tuple, outcome: dict) -> bool:
 
 
 def settle(db: Session, delivery_id: str, token: str, outcome: dict) -> bool:
-    """전송 결과 반영. 토큰·상태·미만료 임대가 하나라도 다르면 반영하지 않는다(False)."""
-    return _close_attempt(
-        db,
-        (_D.delivery_id == delivery_id, _D.claim_token == token, _D.lease_expires_at > func.now()),
-        outcome,
-    )
+    """전송 결과 반영. 토큰·IN_FLIGHT가 하나라도 다르면 반영하지 않는다(False).
+
+    임대 만료는 조건이 아니다. 회수(recover_expired)·재claim이 토큰을 지우거나 바꾸므로 회수된
+    시도의 결과는 토큰에서 막힌다. 회수와 겹치면 행 잠금을 먼저 잡은 쪽 하나만 반영된다 — 회수가
+    먼저면 기다린 이 UPDATE가 회수 commit 뒤 조건을 다시 평가해 막히고(그 사건은 다시 보낼 수
+    있다 — 최소 1회 전송), 결과가 먼저면 회수가 SKIP LOCKED로 건너뛴다.
+    """
+    return _close_attempt(db, (_D.delivery_id == delivery_id, _D.claim_token == token), outcome)
 
 
 def recover_expired(db: Session, delivery_id: str, outcome: dict) -> bool:
