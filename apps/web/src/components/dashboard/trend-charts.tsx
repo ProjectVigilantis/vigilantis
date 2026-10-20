@@ -95,7 +95,7 @@ function Fallback({ state, empty }: { state: ChartState<unknown>; empty: string 
       <p className="text-muted-foreground flex h-56 items-center justify-center text-center text-sm">
         추이를 불러오지 못했습니다
         {/* 사유는 AWS 오류 코드 원문 그대로 — 인벤토리 패널의 수집 실패 표기와 같은 규칙이다. */}
-        <span className="text-amber-400" title={`조회 실패: ${state.reason}`}>
+        <span className="text-badge-warning-fg" title={`조회 실패: ${state.reason}`}>
           &nbsp;({state.reason})
         </span>
       </p>
@@ -577,7 +577,7 @@ export function ThreatActivityChart({
         </ComposedChart>
       </ChartFrame>
       {verdictUnavailable !== null || eventsUnavailable !== null ? (
-        <p className="text-xs text-amber-400">
+        <p className="text-xs text-badge-warning-fg">
           {verdictUnavailable !== null ? `위협 판정 조회 실패(${verdictUnavailable})` : `위협 이벤트 조회 실패(${eventsUnavailable})`}
           — 나머지만 그렸습니다
         </p>

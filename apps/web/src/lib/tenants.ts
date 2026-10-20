@@ -6,6 +6,7 @@ import type { EnumLabel } from './enum-labels.ts';
 import {
   TENANT_DELETABLE_STATUSES,
   TENANT_VERIFIABLE_STATUSES,
+  type ErrorCode,
   type TenantCreateRequest,
   type TenantListItem,
   type TenantStatus,
@@ -63,6 +64,17 @@ export function tenantActions(status: TenantStatus): TenantActions {
     resume: status === 'SUSPENDED',
     remove: TENANT_DELETABLE_STATUSES.includes(status),
   };
+}
+
+/**
+ * 요청이 실패한 이유가 "그 사이 고객 상태가 바뀌어 이 요청이 더 이상 맞지 않는다"인지. 상태 충돌 · 이미 정지 ·
+ * 없는 고객이 그렇다. 이때는 확인창을 닫고 화면을 다시 읽어 지금 가능한 동작을 보인다(#503 리뷰). 그 밖의 실패
+ * (네트워크 · 일시 오류)는 입력한 정지 사유를 잃지 않게 확인창을 남기고 그 안에 오류를 보인다.
+ */
+const STALE_REQUEST_CODES: readonly ErrorCode[] = ['TENANT_STATE_CONFLICT', 'TENANT_SUSPENDED', 'TENANT_NOT_FOUND'];
+
+export function isStaleTenantRequest(code: ErrorCode | null): boolean {
+  return code !== null && STALE_REQUEST_CODES.includes(code);
 }
 
 /* ─────────────────────────── 목록 요약(그래프) ─────────────────────────── */

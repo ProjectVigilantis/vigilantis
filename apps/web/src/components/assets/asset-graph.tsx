@@ -85,7 +85,7 @@ function Head({ label, failed }: { label: string; failed: UncollectedAssetType[]
       {label}
       {failed.length > 0 ? (
         <span
-          className="ml-1.5 text-amber-400"
+          className="ml-1.5 text-badge-warning-fg"
           title={failed
             .map((u) => `${ASSET_TYPE_LABELS[u.asset_type]?.label ?? u.asset_type}: ${u.reason_code}`)
             .join(' · ')}
@@ -561,7 +561,7 @@ export function AssetGraph({
           않고 자산 상세(`/assets?asset=…`)로 이동하며, 그 화면은 인시던트를 조회하지 않아 공격
           경로를 그리지 않는다. 한 문장으로 둘을 함께 안내하면 절반이 거짓이 된다. */}
       {undrawn.selectable.length > 0 ? (
-        <p className="text-xs text-amber-400">
+        <p className="text-xs text-badge-warning-fg">
           이 그래프에 그리지 않은 외부 출발지 경로{' '}
           <span className="tabular-nums">{undrawn.selectable.length}</span>건 —{' '}
           {undrawn.selectable.map((p) => `${p.source} → ${arnShort(p.targetArn)}`).join(' · ')}. 대상
@@ -569,7 +569,7 @@ export function AssetGraph({
         </p>
       ) : null}
       {undrawn.offPath.length > 0 ? (
-        <p className="text-xs text-amber-400">
+        <p className="text-xs text-badge-warning-fg">
           그릴 행이 없는 외부 출발지 경로{' '}
           <span className="tabular-nums">{undrawn.offPath.length}</span>건 —{' '}
           {undrawn.offPath.map((p) => `${p.source} → ${arnShort(p.targetArn)}`).join(' · ')}. 어떤
@@ -581,7 +581,7 @@ export function AssetGraph({
       {/* 열 정렬이 접히면 위 머리글이 통째로 감춰지므로, 같은 사실을 폭과 무관하게 한 번 더 남긴다.
           빈 열을 "그런 자원이 없다"로 읽고 넘어가면 조치가 필요한 상태가 조용히 지나간다. */}
       {uncollected.length > 0 ? (
-        <p className="text-xs text-amber-400">
+        <p className="text-xs text-badge-warning-fg">
           이번 수집에서 조회하지 못한 유형이 있습니다 —{' '}
           {uncollected
             .map(
