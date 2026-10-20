@@ -1,6 +1,8 @@
 # ==============================================================================
 # [파일 설명]
 # WebSocket /api/v1/ws 연결 수립·Origin 검증. (Issue #73)
+# 연결에는 세션 쿠키가 필요하다(#492 PR 2) — ws_client 가 유효한 세션을 싣는다.
+# 세션 거절·연결 중 재확인은 test_ws_access.py.
 # ==============================================================================
 
 from __future__ import annotations
@@ -21,32 +23,30 @@ except ImportError:  # pragma: no cover
     WebSocketDenialResponse = WebSocketDisconnect
 
 
-def test_connect_without_origin_is_accepted(client):
-    with client.websocket_connect("/api/v1/ws"):
+def test_connect_without_origin_is_accepted(ws_client):
+    with ws_client.websocket_connect("/api/v1/ws"):
         pass  # 비브라우저 클라이언트 — Origin 없음 허용
 
 
-def test_connect_with_allowed_origin_is_accepted(client):
-    with client.websocket_connect(
-        "/api/v1/ws", headers={"Origin": "http://localhost:3000"}
-    ):
+def test_connect_with_allowed_origin_is_accepted(ws_client, allowed_origin):
+    with ws_client.websocket_connect("/api/v1/ws", headers={"Origin": allowed_origin}):
         pass
 
 
-def test_connect_with_disallowed_origin_is_rejected(client):
+def test_connect_with_disallowed_origin_is_rejected(ws_client):
     with pytest.raises((WebSocketDenialResponse, WebSocketDisconnect)):
-        with client.websocket_connect(
+        with ws_client.websocket_connect(
             "/api/v1/ws", headers={"Origin": "http://evil.example"}
         ):
             pass
 
 
-def test_any_client_frame_is_ignored_and_connection_stays(client):
+def test_any_client_frame_is_ignored_and_connection_stays(ws_client):
     """프레임 전송 뒤 같은 연결로 이벤트를 수신해야 살아 있음이 증명된다 —
     연결 수만 보면 서버가 프레임을 처리하기 전에 참이 될 수 있다."""
-    manager = client.app.state.realtime
+    manager = ws_client.app.state.realtime
     occurred_at = datetime(2026, 8, 19, 10, 30, 0, tzinfo=timezone.utc)
-    with client.websocket_connect("/api/v1/ws") as ws:
+    with ws_client.websocket_connect("/api/v1/ws") as ws:
         ws.send_text("ignored")
         ws.send_bytes(b"\x00binary-ignored")
         manager.publish(
@@ -61,9 +61,9 @@ def test_any_client_frame_is_ignored_and_connection_stays(client):
     assert received["data"] == {"incident_id": "inc-alive"}
 
 
-def test_disconnect_unregisters_connection(client):
-    manager = client.app.state.realtime
-    with client.websocket_connect("/api/v1/ws"):
+def test_disconnect_unregisters_connection(ws_client):
+    manager = ws_client.app.state.realtime
+    with ws_client.websocket_connect("/api/v1/ws"):
         assert manager.connection_count == 1
     _wait_until(lambda: manager.connection_count == 0)
 

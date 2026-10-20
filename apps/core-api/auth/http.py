@@ -6,7 +6,8 @@
 #     SameSite=Lax · Path=/ 이고 Domain 이 없다(__Host- 접두 요건).
 #   - 상태 변경(GET/HEAD/OPTIONS 이외) 요청은 Origin 헤더가 AUTH_ALLOWED_ORIGINS 와 정확히 같아야
 #     하며, Cognito · 흐름 저장소 · DB 에 닿기 전에 거절한다.
-#   - /api/v1/auth/* 의 모든 응답(성공 · 오류)에 no-store 등 보안 헤더를 붙인다.
+#   - /api/v1/* 의 모든 응답(성공 · 오류)에 no-store 등 보안 헤더를 붙인다. 로그인 응답뿐 아니라
+#     보호 API 의 관제 데이터도 브라우저 · 중간 캐시에 남지 않게 한다(#492 PR 2 에서 /api/v1/auth/* 에서 넓힘).
 # ==============================================================================
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from .provider import build_login_flow
 
 logger = logging.getLogger("vigilantis.auth")
 
-AUTH_PREFIX = "/api/v1/auth"
+API_PREFIX = "/api/v1"
 SESSION_COOKIE = "__Host-vg_session"
 FLOW_COOKIE = "__Host-vg_login"
 FLOW_COOKIE_MAX_AGE = 300
@@ -132,7 +133,7 @@ def log_provider_status(settings: AuthSettings) -> None:
 
 
 def register_auth_http(app: FastAPI) -> None:
-    """보안 헤더 미들웨어 + AuthError → 봉투 매핑. CORS 보다 안쪽에 두려면 그 앞에서 부른다."""
+    """/api/v1/* 보안 헤더 미들웨어 + AuthError → 봉투 매핑. CORS 보다 안쪽에 두려면 그 앞에서 부른다."""
 
     @app.exception_handler(AuthError)
     async def handle_auth_error(request: Request, exc: AuthError):
@@ -142,10 +143,10 @@ def register_auth_http(app: FastAPI) -> None:
         return response
 
     @app.middleware("http")
-    async def auth_security_headers(request: Request, call_next):
+    async def api_security_headers(request: Request, call_next):
         response = await call_next(request)
         path = request.url.path
-        if path == AUTH_PREFIX or path.startswith(AUTH_PREFIX + "/"):
+        if path == API_PREFIX or path.startswith(API_PREFIX + "/"):
             for name, value in _SECURITY_HEADERS.items():
                 response.headers[name] = value
         return response

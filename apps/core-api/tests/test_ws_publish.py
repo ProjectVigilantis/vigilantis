@@ -2,6 +2,7 @@
 # [파일 설명]
 # 발행 경로 검증 — WsEvent 봉투 수신, 끊긴 연결 제거, 발행 로그. (Issue #73)
 # publish()는 실제 호출부(Workflow)처럼 이벤트 루프 밖 스레드에서 부른다.
+# 연결에는 세션이 필요하다(#492 PR 2) — 수신 검증은 ws_client(유효 세션)로 연다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -21,9 +22,9 @@ from realtime import execution_event, incident_event
 T0 = datetime(2026, 8, 19, 9, 30, 0, tzinfo=timezone.utc)
 
 
-def test_incident_event_reaches_connected_client(client):
-    manager = client.app.state.realtime
-    with client.websocket_connect("/api/v1/ws") as ws:
+def test_incident_event_reaches_connected_client(ws_client):
+    manager = ws_client.app.state.realtime
+    with ws_client.websocket_connect("/api/v1/ws") as ws:
         event = incident_event(
             WsEventType.INCIDENT_CREATED, incident_id="inc-1", occurred_at=T0,
             category=IncidentCategory.FINOPS,
@@ -48,9 +49,9 @@ def test_incident_event_rejects_category_mismatch(event_type, category):
         incident_event(event_type, incident_id="inc-4", occurred_at=T0, category=category)
 
 
-def test_execution_event_carries_status_and_updated_at(client):
-    manager = client.app.state.realtime
-    with client.websocket_connect("/api/v1/ws") as ws:
+def test_execution_event_carries_status_and_updated_at(ws_client):
+    manager = ws_client.app.state.realtime
+    with ws_client.websocket_connect("/api/v1/ws") as ws:
         manager.publish(
             execution_event(
                 incident_id="inc-1",
@@ -71,10 +72,10 @@ def test_execution_event_carries_status_and_updated_at(client):
     assert received["occurred_at"] == received["data"]["updated_at"]
 
 
-def test_all_connections_receive_same_event(client):
-    manager = client.app.state.realtime
-    with client.websocket_connect("/api/v1/ws") as ws1:
-        with client.websocket_connect("/api/v1/ws") as ws2:
+def test_all_connections_receive_same_event(ws_client):
+    manager = ws_client.app.state.realtime
+    with ws_client.websocket_connect("/api/v1/ws") as ws1:
+        with ws_client.websocket_connect("/api/v1/ws") as ws2:
             event = incident_event(
                 WsEventType.INCIDENT_UPDATED, incident_id="inc-2", occurred_at=T0
             )
@@ -95,9 +96,9 @@ def test_publish_with_no_connections_is_noop(client):
     )  # 수신자 0 — 예외 없이 지나가야 한다
 
 
-def test_publish_log_reads_identifiers_from_event(client, capsys):
-    manager = client.app.state.realtime
-    with client.websocket_connect("/api/v1/ws") as ws:
+def test_publish_log_reads_identifiers_from_event(ws_client, capsys):
+    manager = ws_client.app.state.realtime
+    with ws_client.websocket_connect("/api/v1/ws") as ws:
         manager.publish(
             incident_event(
                 WsEventType.INCIDENT_CREATED, incident_id="inc-log", occurred_at=T0,

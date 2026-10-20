@@ -11,6 +11,9 @@
 #     라우터에는 get_db 의존성 재정의로 테스트 세션을 주입한다. 테스트 종료 시
 #     외부 트랜잭션을 rollback해 전부 되돌린다 — 세션이 create_savepoint 모드라
 #     테스트 중의 commit·rollback이 외부 트랜잭션을 건드리지 않는다 (Issue #232).
+#   - /api/v1/* 접근 보호(#492 PR 2): client_pg는 OPERATOR 세션 쿠키·허용 Origin을 기본으로
+#     싣는다. 세션 없는 클라이언트는 client_pg_anon, 다른 역할은 login_as(role).
+#     WebSocket은 ws_client(commit된 세션 + 세션 확인 팩토리 재정의).
 #   - 앱 기동 시 실행 스캔 잡은 끈다(DISPATCH_ENABLED=false) — 테스트마다 스캔이
 #     돌면 lru_cache된 세션 팩토리가 개발 DB로 굳은 채 그쪽을 스캔할 수 있다.
 # ==============================================================================
@@ -20,6 +23,7 @@ from __future__ import annotations
 import os
 import sys
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -76,6 +80,9 @@ os.environ["NOTIFICATION_ENABLED"] = "false"
 # .env가 파일 로그를 켜 두었어도 테스트 앱은 쓰지 않는다 — 켜면 개발 스택 api와 같은 파일을
 # 두 프로세스가 회전시킨다. 파일 출력 검증은 해당 테스트가 임시 경로로 setup_logging을 직접 부른다.
 os.environ["LOG_FILE_ENABLED"] = "false"
+# .env가 API 문서를 켜 두었어도 테스트 앱은 운영 기본값(문서 꺼짐)으로 뜬다 — 공개 경로 목록
+# 검증(test_api_access)이 개발자 .env에 따라 갈리지 않게. 문서 검증은 해당 테스트가 켠다.
+os.environ["API_DOCS_ENABLED"] = "false"
 
 TEST_DB_NAME = f"vigilantis_test_{uuid.uuid4().hex[:8]}"
 TEST_URL = ADMIN_URL.rsplit("/", 1)[0] + "/" + TEST_DB_NAME
@@ -169,20 +176,206 @@ def db(pg_engine):
         conn.close()
 
 
-@pytest.fixture()
-def client_pg(pg_engine, db):
-    """통합 클라이언트 — 라우터의 get_db를 테스트 세션으로 재정의한다."""
-    from fastapi.testclient import TestClient
+# ==============================================================================
+# 인증 시드 · 통합 클라이언트 (#492 PR 2)
+#
+#   /api/v1/* 는 세션이 있어야 열린다. client_pg 는 기본으로 OPERATOR 실세션(테스트 DB의
+#   app_users · auth_sessions 행)과 허용 Origin 을 싣는다 — 기존 API 테스트의 뜻이 그대로다.
+#   쿠키는 Cookie 헤더로 직접 싣는다. 세션 쿠키가 Secure 라 httpx 쿠키 저장소는 http 로 보내지 않는다.
+#   세션 토큰은 헤더로만 쓴다 — assert 메시지 · 출력에 싣지 않는다(AuthSeed repr 에서도 뺀다).
+# ==============================================================================
 
+TEST_AUTH_ISSUER = "https://cognito-idp.ap-northeast-2.amazonaws.com/ap-northeast-2_test"
+
+
+@dataclass(frozen=True)
+class AuthSeed:
+    """시드한 사용자 1명 + 세션 1개."""
+
+    user_id: str
+    session_id: str
+    role: object
+    token: str = field(repr=False)
+    cookie: str = field(repr=False)  # "__Host-vg_session=<token>"
+    headers: dict = field(repr=False)  # Cookie + 허용 Origin
+
+
+def _seed_auth_session(session, *, role, origin, status=None, now=None) -> AuthSeed:
+    """사용자 + 세션을 만들고 commit한다. 만료는 auth 설정의 한도를 그대로 쓴다."""
+    from datetime import UTC, datetime
+
+    from auth import sessions as auth_sessions
+    from auth.http import SESSION_COOKIE
+    from config import get_auth_settings
+    from db import models
+    from db.repositories import auth as auth_repo
+
+    settings = get_auth_settings()
+    now = now or datetime.now(UTC)
+    suffix = uuid.uuid4().hex
+    user = auth_repo.create_user(
+        session,
+        issuer=TEST_AUTH_ISSUER,
+        cognito_sub=f"test-{suffix}",
+        email=f"{role.value.lower()}-{suffix[:8]}@example.com",
+        role=role,
+        now=now,
+        status=status or models.AppUserStatus.ACTIVE,
+        email_verified_at=now,
+    )
+    issued = auth_sessions.issue_session(
+        session,
+        user_id=user.user_id,
+        mfa_step=models.AuthSessionMfaStep.SOFTWARE_TOKEN_MFA,
+        now=now,
+        max_seconds=settings.AUTH_SESSION_MAX_SECONDS,
+        idle_seconds=settings.AUTH_SESSION_IDLE_SECONDS,
+    )
+    session.commit()
+    cookie = f"{SESSION_COOKIE}={issued.token}"
+    return AuthSeed(
+        user_id=user.user_id,
+        session_id=issued.view.session_id,
+        role=role,
+        token=issued.token,
+        cookie=cookie,
+        headers={"Cookie": cookie, "Origin": origin},
+    )
+
+
+@pytest.fixture()
+def allowed_origin() -> str:
+    """상태 변경 요청에 실을 허용 Origin — 실제 설정(AUTH_ALLOWED_ORIGINS → CORS_ALLOW_ORIGINS)의 첫 값."""
+    from auth.http import allowed_origins
+    from config import get_auth_settings
+
+    return allowed_origins(get_auth_settings())[0]
+
+
+@pytest.fixture()
+def make_auth_session(db, allowed_origin):
+    """테스트 트랜잭션(db) 안의 인증 시드 → AuthSeed. role · status · now 를 고를 수 있다."""
+    from schemas.api.auth import UserRole
+
+    def _make(role=UserRole.OPERATOR, **kwargs) -> AuthSeed:
+        return _seed_auth_session(db, role=role, origin=allowed_origin, **kwargs)
+
+    return _make
+
+
+@pytest.fixture()
+def operator_session(make_auth_session) -> AuthSeed:
+    """client_pg 가 기본으로 싣는 OPERATOR 세션."""
+    return make_auth_session()
+
+
+def _pg_app(test_db):
+    """get_db 를 테스트 세션으로 재정의한 앱."""
     import db.session as db_session_module
 
     app = _build_app()
 
     def _override_get_db():
-        yield db
+        yield test_db
 
     app.dependency_overrides[db_session_module.get_db] = _override_get_db
-    with TestClient(app) as test_client:
+    return app
+
+
+@pytest.fixture()
+def client_pg_anon(pg_engine, db):
+    """세션 없는 통합 클라이언트 — 기본 헤더가 없다. 미인증 거절 · 로그인 흐름 검증용."""
+    from fastapi.testclient import TestClient
+
+    with TestClient(_pg_app(db)) as test_client:
+        yield test_client
+
+
+@pytest.fixture()
+def client_pg(pg_engine, db, operator_session):
+    """통합 클라이언트 — get_db 재정의 + OPERATOR 세션 쿠키 · 허용 Origin 기본 헤더."""
+    from fastapi.testclient import TestClient
+
+    with TestClient(_pg_app(db), headers=operator_session.headers) as test_client:
+        yield test_client
+
+
+@pytest.fixture()
+def login_as(client_pg, make_auth_session):
+    """client_pg 의 세션을 주어진 역할의 새 세션으로 바꾼다 → AuthSeed."""
+
+    def _login(role, **kwargs) -> AuthSeed:
+        seed = make_auth_session(role, **kwargs)
+        client_pg.headers.update(seed.headers)
+        return seed
+
+    return _login
+
+
+class CommittedAuth:
+    """독립 commit 인증 시드 — 다른 스레드가 자기 DB 세션으로 읽는 경로(WebSocket 세션 확인)용.
+
+    db 픽스처의 외부 트랜잭션은 그 연결 밖에서 보이지 않고, 연결 하나를 스레드끼리 나눠 쓸 수도
+    없다. 그래서 여기 시드는 실제로 commit하고 픽스처 종료 때 지운다.
+    """
+
+    def __init__(self, sessions, origin: str) -> None:
+        self.sessions = sessions
+        self._origin = origin
+        self._user_ids: list[str] = []
+
+    def make(self, role=None, **kwargs) -> AuthSeed:
+        from schemas.api.auth import UserRole
+
+        with self.sessions() as session:
+            seed = _seed_auth_session(
+                session, role=role or UserRole.OPERATOR, origin=self._origin, **kwargs
+            )
+        self._user_ids.append(seed.user_id)
+        return seed
+
+    def cleanup(self) -> None:
+        from db import models
+        from sqlalchemy import delete
+
+        if not self._user_ids:
+            return
+        with self.sessions() as session:
+            session.execute(
+                delete(models.AuthSession).where(models.AuthSession.user_id.in_(self._user_ids))
+            )
+            session.execute(
+                delete(models.AppUser).where(models.AppUser.user_id.in_(self._user_ids))
+            )
+            session.commit()
+
+
+@pytest.fixture()
+def committed_auth(pg_engine, allowed_origin):
+    from sqlalchemy.orm import sessionmaker
+
+    auth = CommittedAuth(
+        sessionmaker(bind=pg_engine, autoflush=False, expire_on_commit=False), allowed_origin
+    )
+    yield auth
+    auth.cleanup()
+
+
+@pytest.fixture()
+def ws_session(committed_auth) -> AuthSeed:
+    """ws_client 가 싣는 OPERATOR 세션(commit됨)."""
+    return committed_auth.make()
+
+
+@pytest.fixture()
+def ws_client(committed_auth, ws_session):
+    """WebSocket 클라이언트 — 세션 확인 팩토리를 commit 세션으로 바꾸고 세션 쿠키만 싣는다(Origin 없음)."""
+    from auth.access import get_auth_session_factory
+    from fastapi.testclient import TestClient
+
+    app = _build_app()
+    app.dependency_overrides[get_auth_session_factory] = lambda: committed_auth.sessions
+    with TestClient(app, headers={"Cookie": ws_session.cookie}) as test_client:
         yield test_client
 
 

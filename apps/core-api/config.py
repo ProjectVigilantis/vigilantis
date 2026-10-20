@@ -52,13 +52,21 @@ class Settings(BaseSettings):
     LOG_FILE_PATH: str = ".logs/api.log"
     # 회전 백업 파일 수(파일당 10 MiB, 압축 없음) — 양수만 허용. 0이면 회전 없이 계속 커진다
     LOG_FILE_BACKUP_COUNT: int = Field(default=20, ge=1)
-    # 콤마 구분 허용 출처 목록 — 기본값은 FE 개발 서버. CORS와 WebSocket
-    # Handshake Origin 검증이 같은 목록을 쓴다
+    # 콤마 구분 허용 출처 목록 — 기본값은 FE 개발 서버. CORS가 쓰고, AUTH_ALLOWED_ORIGINS가
+    # 비면 상태 변경 · WebSocket Handshake Origin 검증도 이 목록을 쓴다(#492 PR 2)
     CORS_ALLOW_ORIGINS: str = "http://localhost:3000"
     # WebSocket 연결별 전송 제한시간(초) — 초과한 연결은 발행에서 제거.
     # 제거·종료 시 연결 close() 정리도 같은 값을 상한으로 쓴다.
     # 0 이하면 모든 연결이 즉시 제거되므로 양수만 허용한다 (Issue #75)
     WS_SEND_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0)
+    # 열린 WebSocket 의 세션 재확인 주기(초, #492 PR 2). 로그아웃 · 재로그인 회수 · 사용자 비활성이
+    # 열린 연결에 반영되는 지연의 상한(+ 확인 조회 시간)이다. 유휴 · 최대 수명 만료 시각에는 주기와
+    # 관계없이 그 시각에 다시 확인한다. 확인은 유휴 시간을 늘리지 않는다(routers/ws.py)
+    WS_SESSION_CHECK_SECONDS: float = Field(default=30, gt=0)
+    # API 문서(/docs · /redoc · /openapi.json, #492 PR 2) — 기본 꺼짐(셋 다 404). 로컬 개발만
+    # .env 로 켠다. 배포는 태스크 환경변수를 명시 목록으로 넘기므로(scripts/provision_platform_aws.py)
+    # 이 값이 따라가지 않는다
+    API_DOCS_ENABLED: bool = False
     # 접수된 조치 실행 디스패치·회수 스캔 주기(초) — dispatcher.py 잡 1개가 쓴다.
     # 부분 인덱스(ix_action_executions_non_terminal) 조회 빈도다.
     # 실행·DB 대기로 밀릴 수 있어 승인부터 AWS 호출까지의 지연 상한은 아니다.

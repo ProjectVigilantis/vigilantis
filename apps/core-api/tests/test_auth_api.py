@@ -113,8 +113,9 @@ def clock():
 
 
 @pytest.fixture()
-def app(client_pg, flow, clock):
-    application = client_pg.app
+def app(client_pg_anon, flow, clock):
+    # 세션 없는 앱 — 이 파일은 세션 행 수를 직접 센다(client_pg 는 OPERATOR 세션을 미리 만든다)
+    application = client_pg_anon.app
     application.dependency_overrides[get_auth_settings] = lambda: settings()
     application.dependency_overrides[get_login_flow] = lambda: flow
     application.dependency_overrides[get_clock] = lambda: (lambda: clock.now)
@@ -542,11 +543,13 @@ def test_logs_never_contain_secrets(http, flow, user):
 # --- Cognito 미설정 / 클라이언트 조립 / CORS -----------------------------------------
 
 
-def test_unconfigured_cognito_is_503_but_rest_of_app_works(client_pg, db):
-    app = client_pg.app
+def test_unconfigured_cognito_is_503_but_rest_of_app_works(client_pg_anon, db, make_auth_session):
+    app = client_pg_anon.app
     app.dependency_overrides[get_auth_settings] = lambda: AuthSettings(
         _env_file=None, AUTH_ALLOWED_ORIGINS=ORIGIN
     )
+    # 보호 API 는 Cognito 설정과 무관하게 세션만으로 열린다(#492 PR 2)
+    seed = make_auth_session()
     with TestClient(app, base_url="https://testserver") as c:
         for method, path in [
             ("POST", "/login"),
@@ -560,8 +563,9 @@ def test_unconfigured_cognito_is_503_but_rest_of_app_works(client_pg, db):
             assert resp.json()["error"]["code"] == "AUTH_PROVIDER_UNAVAILABLE"
             assert resp.headers["cache-control"] == "no-store"
         assert c.get("/health").json() == {"status": "ok"}
-        assert c.get("/api/v1/incidents").status_code == 200
-    assert session_count(db) == 0
+        assert c.get("/api/v1/incidents", headers={"Cookie": seed.cookie}).status_code == 200
+        assert c.get("/api/v1/incidents").status_code == 401
+    assert session_count(db) == 1  # 시드한 세션뿐 — 503 경로는 세션을 만들지 않았다
 
 
 def test_missing_keys_are_named_without_values():

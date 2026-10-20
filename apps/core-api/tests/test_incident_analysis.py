@@ -151,7 +151,9 @@ def test_unknown_evaluation_is_not_reported_as_no_proposal(
 def test_analysis_listing_has_constant_query_count(db, client_pg, make_incident, make_candidate):
     statements = []
     def capture(conn, cursor, statement, parameters, context, executemany):
-        statements.append(statement)
+        # 요청마다 도는 세션 확인(#492 PR 2)의 auth_sessions · app_users 조회는 세지 않는다
+        if not any(f"FROM {table}" in statement for table in ("auth_sessions", "app_users")):
+            statements.append(statement)
 
     counts = []
     for _ in range(2):
