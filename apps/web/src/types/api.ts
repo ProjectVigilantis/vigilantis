@@ -5,7 +5,7 @@ export type IsoDateTime = string;
 
 /* ────────────────────────────── errors.py ────────────────────────────── */
 
-/** REST 공통 오류 코드 9종. 괄호는 계약상 HTTP 상태. */
+/** REST 공통 오류 코드 21종. 괄호는 계약상 HTTP 상태. */
 export type ErrorCode =
   | 'INCIDENT_NOT_FOUND' // 404
   | 'IDEMPOTENCY_KEY_CONFLICT' // 409
@@ -14,6 +14,18 @@ export type ErrorCode =
   | 'TENANT_NOT_FOUND' // 404
   | 'TENANT_STATE_CONFLICT' // 409
   | 'TENANT_SUSPENDED' // 409
+  | 'AUTH_REQUIRED' // 401 — 세션 없음 · 만료 · 회수
+  | 'AUTH_FAILED' // 401 — 이메일 · 비밀번호 불일치
+  | 'AUTH_CODE_INVALID' // 401 — 같은 단계에서 다시 낼 수 있다
+  | 'AUTH_FLOW_EXPIRED' // 401 — 처음부터 다시 로그인
+  | 'AUTH_STEP_CONFLICT' // 409
+  | 'AUTH_PASSWORD_POLICY' // 422
+  | 'AUTH_ORIGIN_REJECTED' // 403
+  | 'ACCOUNT_NOT_PROVISIONED' // 403
+  | 'ACCOUNT_DISABLED' // 403
+  | 'AUTH_EMAIL_DELIVERY_FAILED' // 503
+  | 'AUTH_RATE_LIMITED' // 429
+  | 'AUTH_PROVIDER_UNAVAILABLE' // 503
   | 'REQUEST_VALIDATION_FAILED' // 422
   | 'INTERNAL_ERROR'; // 500
 
@@ -766,4 +778,43 @@ export interface TenantUpdateRequest {
   collect_vpc_ids?: string[];
   auto_action_enabled?: boolean;
   subscription?: TenantSubscription | null;
+}
+
+/* ─────────────────────────────── auth.py ─────────────────────────────── */
+/* /api/v1/auth — 로그인 · 로그아웃 · 현재 사용자(Post-MVP T-1, #492 PR 1). 세션 · 로그인 진행은
+   서버가 HttpOnly 쿠키로만 다룬다 — 브라우저 코드는 토큰을 보지 않고 `next_step`만 받는다. */
+
+/** 로그인의 다음 단계. COMPLETED = 세션 쿠키가 발급됐다. */
+export type LoginStep =
+  | 'NEW_PASSWORD_REQUIRED'
+  | 'TOTP_SETUP_REQUIRED'
+  | 'TOTP_REQUIRED'
+  | 'EMAIL_VERIFICATION_REQUIRED'
+  | 'COMPLETED';
+
+export type UserRole = 'ADMIN' | 'OPERATOR' | 'VIEWER';
+
+/** 새 비밀번호 최소 길이 — User Pool 정책과 같은 값(auth.py `NEW_PASSWORD_MIN_LENGTH`). */
+export const NEW_PASSWORD_MIN_LENGTH = 12;
+
+export interface LoginStepResponse {
+  next_step: LoginStep;
+}
+
+/** TOTP 등록 비밀키 — **비밀값이다.** 메모리에만 두고 저장 · 로그하지 않는다. */
+export interface TotpSetupResponse {
+  secret: string;
+  otpauth_uri: string;
+}
+
+export interface SessionInfo {
+  absolute_expires_at: IsoDateTime;
+  idle_expires_at: IsoDateTime;
+}
+
+export interface CurrentUserResponse {
+  user_id: string;
+  email: string;
+  role: UserRole;
+  session: SessionInfo;
 }

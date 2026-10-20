@@ -47,6 +47,20 @@ const PRESENTATION: Record<ErrorCode, Presentation> = {
     note: '그 사이 고객 상태가 바뀌었습니다. 화면을 새로고침한 뒤 다시 시도해 주세요.',
   },
   TENANT_SUSPENDED: { variant: 'inline', note: '정지된 고객입니다. 고객을 재개한 뒤 실행할 수 있습니다.' },
+  // 인증(#492). 로그인 화면은 자기 문구(lib/auth-errors.ts)를 쓰고, 여기는 일반 화면에 섞여 오는 경우다.
+  // 미인증 리다이렉트는 PR 2(접근 보호)에서 붙는다 — 그 전까지는 안내만 한다.
+  AUTH_REQUIRED: { variant: 'page', note: '로그인한 뒤 다시 시도해 주세요.' },
+  AUTH_FAILED: { variant: 'inline' },
+  AUTH_CODE_INVALID: { variant: 'inline' },
+  AUTH_FLOW_EXPIRED: { variant: 'inline' },
+  AUTH_STEP_CONFLICT: { variant: 'inline' },
+  AUTH_PASSWORD_POLICY: { variant: 'inline' },
+  AUTH_ORIGIN_REJECTED: { variant: 'inline' },
+  ACCOUNT_NOT_PROVISIONED: { variant: 'inline' },
+  ACCOUNT_DISABLED: { variant: 'inline' },
+  AUTH_EMAIL_DELIVERY_FAILED: { variant: 'inline' },
+  AUTH_RATE_LIMITED: { variant: 'inline' },
+  AUTH_PROVIDER_UNAVAILABLE: { variant: 'inline' },
 };
 
 /** ApiError가 아닌 실패(네트워크 등)도 오류 화면을 그려야 하므로 INTERNAL_ERROR로 접는다. */

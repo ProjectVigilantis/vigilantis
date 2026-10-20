@@ -9,12 +9,24 @@
 #   - ws:        WebSocket(/api/v1/ws) 공통 이벤트 봉투 (이슈 #32)
 #   - errors:    REST 공통 오류 봉투 (이슈 #32)
 #   - tenants:   /api/v1/tenants 관리자 API — 고객 계정 연결 · 원격 회수 (Post-MVP T-4)
+#   - auth:      /api/v1/auth 로그인 · 로그아웃 · 현재 사용자 (Post-MVP T-1)
 # ==============================================================================
 
 from .actions import (
     ExecuteActionRequest,
     ExecuteActionResponse,
     ExecutionStatus,
+)
+from .auth import (
+    CodeRequest,
+    CurrentUserResponse,
+    LoginRequest,
+    LoginStep,
+    LoginStepResponse,
+    NewPasswordRequest,
+    SessionInfo,
+    TotpSetupResponse,
+    UserRole,
 )
 from .errors import ErrorCode, ErrorDetail, ErrorResponse
 from .incidents import (
@@ -163,4 +175,13 @@ __all__ = [
     "TenantVerification",
     "TenantVerificationResult",
     "TenantVerifyResponse",
+    "CodeRequest",
+    "CurrentUserResponse",
+    "LoginRequest",
+    "LoginStep",
+    "LoginStepResponse",
+    "NewPasswordRequest",
+    "SessionInfo",
+    "TotpSetupResponse",
+    "UserRole",
 ]

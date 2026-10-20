@@ -38,7 +38,8 @@ from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
 import agent_dispatcher  # noqa: E402
 import dispatcher  # noqa: E402
-from config import get_settings  # noqa: E402
+from auth.http import log_provider_status, register_auth_http  # noqa: E402
+from config import get_auth_settings, get_settings  # noqa: E402
 from db.session import get_session_factory  # noqa: E402
 from exceptions import register_error_handlers, unexpected_error_response  # noqa: E402
 from logging_config import request_id_var, setup_logging  # noqa: E402
@@ -47,6 +48,7 @@ from notifications.runtime import build_notification_runtime  # noqa: E402
 from realtime import RealtimeManager  # noqa: E402
 from routers import actions as actions_router  # noqa: E402
 from routers import assets as assets_router  # noqa: E402
+from routers import auth as auth_router  # noqa: E402
 from routers import incidents as incidents_router  # noqa: E402
 from routers import metrics as metrics_router  # noqa: E402
 from routers import ws as ws_router  # noqa: E402
@@ -157,11 +159,17 @@ def create_app() -> FastAPI:
             )
             request_id_var.reset(token)
 
+    # /api/v1/auth/* 보안 헤더 미들웨어와 AuthError 매핑 (#492) — CORS 보다 안쪽
+    register_auth_http(app)
+    log_provider_status(get_auth_settings())
+
     # CORS는 request_context보다 나중에 추가한다 — 나중 추가가 바깥층이라
-    # 미들웨어가 만든 오류 봉투 응답에도 CORS 헤더가 붙는다
+    # 미들웨어가 만든 오류 봉투 응답에도 CORS 헤더가 붙는다.
+    # allow_credentials: 로그인 쿠키가 교차 출처(FE 3000 → API)로 오가야 한다 — 출처는 명시 목록만(* 금지)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_allow_origins_list(),
+        allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
         expose_headers=["X-Request-ID"],
@@ -170,6 +178,7 @@ def create_app() -> FastAPI:
     register_error_handlers(app)
     app.include_router(actions_router.router)
     app.include_router(assets_router.router)
+    app.include_router(auth_router.router)
     app.include_router(incidents_router.router)
     app.include_router(metrics_router.router)
     app.include_router(ws_router.router)

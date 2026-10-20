@@ -31,6 +31,18 @@ _STATUS_BY_CODE: dict[ErrorCode, int] = {
     ErrorCode.TENANT_NOT_FOUND: 404,
     ErrorCode.TENANT_STATE_CONFLICT: 409,
     ErrorCode.TENANT_SUSPENDED: 409,
+    ErrorCode.AUTH_REQUIRED: 401,
+    ErrorCode.AUTH_FAILED: 401,
+    ErrorCode.AUTH_CODE_INVALID: 401,
+    ErrorCode.AUTH_FLOW_EXPIRED: 401,
+    ErrorCode.AUTH_STEP_CONFLICT: 409,
+    ErrorCode.AUTH_PASSWORD_POLICY: 422,
+    ErrorCode.AUTH_ORIGIN_REJECTED: 403,
+    ErrorCode.ACCOUNT_NOT_PROVISIONED: 403,
+    ErrorCode.ACCOUNT_DISABLED: 403,
+    ErrorCode.AUTH_EMAIL_DELIVERY_FAILED: 503,
+    ErrorCode.AUTH_RATE_LIMITED: 429,
+    ErrorCode.AUTH_PROVIDER_UNAVAILABLE: 503,
     ErrorCode.REQUEST_VALIDATION_FAILED: 422,
     ErrorCode.INTERNAL_ERROR: 500,
 }
@@ -42,6 +54,18 @@ _MESSAGE_BY_CODE: dict[ErrorCode, str] = {
     ErrorCode.TENANT_NOT_FOUND: "고객(테넌트)을 찾을 수 없습니다.",
     ErrorCode.TENANT_STATE_CONFLICT: "지금 고객 상태에서는 할 수 없는 요청입니다.",
     ErrorCode.TENANT_SUSPENDED: "정지된 고객의 자산에는 조치를 실행하지 않습니다.",
+    ErrorCode.AUTH_REQUIRED: "로그인이 필요합니다.",
+    ErrorCode.AUTH_FAILED: "이메일 또는 비밀번호가 올바르지 않습니다.",
+    ErrorCode.AUTH_CODE_INVALID: "인증 코드가 올바르지 않습니다.",
+    ErrorCode.AUTH_FLOW_EXPIRED: "로그인 진행이 만료되었습니다. 처음부터 다시 로그인하세요.",
+    ErrorCode.AUTH_STEP_CONFLICT: "지금 단계에서 할 수 없는 요청입니다.",
+    ErrorCode.AUTH_PASSWORD_POLICY: "새 비밀번호가 비밀번호 정책을 만족하지 않습니다.",
+    ErrorCode.AUTH_ORIGIN_REJECTED: "허용되지 않은 출처의 요청입니다.",
+    ErrorCode.ACCOUNT_NOT_PROVISIONED: "등록되지 않은 계정입니다. 관리자에게 문의하세요.",
+    ErrorCode.ACCOUNT_DISABLED: "비활성화된 계정입니다.",
+    ErrorCode.AUTH_EMAIL_DELIVERY_FAILED: "인증 이메일을 보내지 못했습니다.",
+    ErrorCode.AUTH_RATE_LIMITED: "요청이 너무 많습니다. 잠시 후 다시 시도하세요.",
+    ErrorCode.AUTH_PROVIDER_UNAVAILABLE: "인증 서비스를 사용할 수 없습니다.",
     ErrorCode.REQUEST_VALIDATION_FAILED: "요청 값이 계약과 다릅니다.",
     ErrorCode.INTERNAL_ERROR: "서버 내부 오류입니다.",
 }
@@ -69,6 +93,11 @@ def _envelope(
     return JSONResponse(status_code=status_code, content=body.model_dump(mode="json"))
 
 
+def api_error_response(request: Request, code: ErrorCode) -> JSONResponse:
+    """계약 오류 코드 → 상태·문구가 매핑된 봉투 응답."""
+    return _envelope(request, _STATUS_BY_CODE[code], code, _MESSAGE_BY_CODE[code])
+
+
 def unexpected_error_response(request: Request) -> JSONResponse:
     """처리되지 않은 예외 → 500 봉투. except 블록 안에서 불러야 스택이 로그에 남는다."""
     logger.exception("unhandled_exception")
@@ -80,9 +109,7 @@ def unexpected_error_response(request: Request) -> JSONResponse:
 def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(ApiError)
     async def handle_api_error(request: Request, exc: ApiError) -> JSONResponse:
-        return _envelope(
-            request, _STATUS_BY_CODE[exc.code], exc.code, _MESSAGE_BY_CODE[exc.code]
-        )
+        return api_error_response(request, exc.code)
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(

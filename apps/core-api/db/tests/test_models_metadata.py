@@ -41,6 +41,9 @@ EXPECTED_TABLES = {
     "notification_deliveries",
     "notification_routes",
     "notification_lanes",
+    # 로그인 기반 2종 (#492)
+    "app_users",
+    "auth_sessions",
 }
 
 

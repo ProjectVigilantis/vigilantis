@@ -1,4 +1,4 @@
-"""#493 PR2 migration: 빈 DB·기존 head(d493a1b2c301) 업그레이드, ORM 일치, 행 모양 제약.
+"""#493 PR2 migration: 빈 DB·outbox·auth head 업그레이드, ORM 일치, 행 모양 제약.
 
 pg_engine은 빈 일회용 DB에 Alembic head를 적용한다. create_all을 쓰지 않는다.
 """
@@ -22,7 +22,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 REVISION = "d493a1b2c302"
-PARENT = "d493a1b2c301"
+PARENT = "d3a7c5e91f08"
 TABLES = {"notification_deliveries", "notification_routes", "notification_lanes"}
 
 
@@ -46,7 +46,7 @@ def _event(db: Session):
     )
 
 
-def test_revision_follows_outbox_on_a_single_chain(migration_config):
+def test_revision_follows_auth_on_a_single_chain(migration_config):
     script = ScriptDirectory.from_config(migration_config)
     assert script.get_heads() == [REVISION]
     assert script.get_revision(REVISION).down_revision == PARENT
@@ -71,8 +71,9 @@ def test_lane_requires_a_cooldown_deadline(db):
     assert failure.value.orig.sqlstate == "23502"  # NOT NULL 위반
 
 
-def test_upgrade_from_outbox_head_preserves_events_without_backfill(pg_engine, migration_config):
-    command.downgrade(migration_config, PARENT)
+@pytest.mark.parametrize("start_revision", ["d493a1b2c301", PARENT])
+def test_upgrade_preserves_events_without_backfill(pg_engine, migration_config, start_revision):
+    command.downgrade(migration_config, start_revision)
     try:
         assert not TABLES & set(inspect(pg_engine).get_table_names())
         with Session(pg_engine) as db:

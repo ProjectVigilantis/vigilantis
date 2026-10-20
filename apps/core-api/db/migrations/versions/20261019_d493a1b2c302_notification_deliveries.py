@@ -4,14 +4,14 @@
 발송 행은 dispatcher가 라우트 활성화 시각과 대조해 만든다(과거 이력 소급 발송 없음).
 
 Revision ID: d493a1b2c302
-Revises: d493a1b2c301
+Revises: d3a7c5e91f08
 """
 
 import sqlalchemy as sa
 from alembic import op
 
 revision = "d493a1b2c302"
-down_revision = "d493a1b2c301"
+down_revision = "d3a7c5e91f08"
 branch_labels = None
 depends_on = None
 
