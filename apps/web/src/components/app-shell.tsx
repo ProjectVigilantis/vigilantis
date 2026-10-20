@@ -32,8 +32,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <SessionExpiryNotice />
         <div className="flex flex-1 flex-col md:flex-row">
           <ShellNav />
-          {/* 작업 영역은 최대 1400px에 좌우 32px 여백이다(DESIGN.md §레이아웃과 간격). */}
-          <main className="flex min-w-0 flex-1 flex-col p-4 sm:p-6 lg:p-8">
+          {/* 작업 영역은 최대 1400px에 좌우 32px 여백이다(DESIGN.md §레이아웃과 간격). 여백은 --page-pad 하나로 두어,
+              화면 끝까지 붙는 고정 띠(assets-view · security-view)가 같은 값을 되돌려 쓴다. */}
+          <main className="flex min-w-0 flex-1 flex-col p-(--page-pad) [--page-pad:1rem] sm:[--page-pad:1.5rem] lg:[--page-pad:2rem]">
             <div className="mx-auto flex w-full max-w-[1400px] flex-1 flex-col">{children}</div>
           </main>
         </div>

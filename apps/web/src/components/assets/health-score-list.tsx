@@ -124,7 +124,7 @@ function HoverCard({
       </span>
 
       {/* 숫자만으로는 "높으면 좋은가"를 알 수 없다 — 임계선 어느 쪽인지와 그 뜻을 함께 적는다. */}
-      <span className={cn('text-[11px]', idle ? 'text-amber-400' : 'text-muted-foreground')}>
+      <span className={cn('text-[11px]', idle ? 'text-badge-warning-fg' : 'text-muted-foreground')}>
         {score === null
           ? '점수 없음 — 관측치가 없습니다'
           : idle

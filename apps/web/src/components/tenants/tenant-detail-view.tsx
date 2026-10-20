@@ -30,11 +30,12 @@ import {
   verifyTenant,
 } from '@/lib/api/client';
 import type { LabelTone } from '@/lib/enum-labels';
-import { SUSPEND_REASON_MAX, tenantActions, VERIFICATION_LABELS } from '@/lib/tenants';
+import { isStaleTenantRequest, SUSPEND_REASON_MAX, tenantActions, VERIFICATION_LABELS } from '@/lib/tenants';
 import { formatKst } from '@/lib/utils';
-import type { TenantDetail, TenantOnboardingResponse, TenantVerification } from '@/types/api';
+import type { ErrorCode, TenantDetail, TenantOnboardingResponse, TenantVerification } from '@/types/api';
 
 type Busy = 'verify' | 'resume' | 'suspend' | 'remove' | 'auto' | 'onboarding' | null;
+type RunResult = { ok: true } | { ok: false; code: ErrorCode | null };
 
 export function TenantDetailView({ tenant }: { tenant: TenantDetail }) {
   const router = useRouter();
@@ -47,20 +48,24 @@ export function TenantDetailView({ tenant }: { tenant: TenantDetail }) {
   const verification = tenant.last_verification;
   const hint = verification ? VERIFICATION_LABELS[verification.result].hint : null;
 
-  /** 동작 하나를 실행한다. 성공하면 서버 값으로 다시 그린다. */
-  async function run(kind: Exclude<Busy, null>, call: () => Promise<unknown>): Promise<boolean> {
-    if (inFlight.current) return false;
+  /**
+   * 동작 하나를 실행한다. 성공하면 서버 값으로 다시 그린다. 그 사이 상태가 바뀐 실패(isStaleTenantRequest)도
+   * 다시 그려 지금 가능한 동작을 보인다. 다른 동작이 진행 중이면 건너뛰고 null을 돌려준다.
+   */
+  async function run(kind: Exclude<Busy, null>, call: () => Promise<unknown>): Promise<RunResult | null> {
+    if (inFlight.current) return null;
     inFlight.current = true;
     setBusy(kind);
     setFailure(null);
     try {
       await call();
       router.refresh();
-      return true;
+      return { ok: true };
     } catch (error) {
       setFailure(error);
-      if (error instanceof ApiError && error.code === 'TENANT_STATE_CONFLICT') router.refresh();
-      return false;
+      const code = error instanceof ApiError ? error.code : null;
+      if (isStaleTenantRequest(code)) router.refresh();
+      return { ok: false, code };
     } finally {
       inFlight.current = false;
       setBusy(null);
@@ -224,7 +229,7 @@ export function TenantDetailView({ tenant }: { tenant: TenantDetail }) {
             {actions.suspend ? (
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <p className="text-muted-foreground text-xs">정지하면 플랫폼이 이 계정에 더 들어가지 않습니다(구독 정지 · 원격 회수).</p>
-                <Button type="button" size="sm" variant="destructive" disabled={disabled} onClick={() => setDialog('suspend')}>
+                <Button type="button" size="sm" variant="destructive" disabled={disabled} onClick={() => { setFailure(null); setDialog('suspend'); }}>
                   고객 정지
                 </Button>
               </div>
@@ -232,7 +237,7 @@ export function TenantDetailView({ tenant }: { tenant: TenantDetail }) {
             {actions.remove ? (
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <p className="text-muted-foreground text-xs">연결된 적 없는 고객만 지울 수 있습니다. 계정 ID를 잘못 넣었을 때 씁니다.</p>
-                <Button type="button" size="sm" variant="destructive" disabled={disabled} onClick={() => setDialog('remove')}>
+                <Button type="button" size="sm" variant="destructive" disabled={disabled} onClick={() => { setFailure(null); setDialog('remove'); }}>
                   고객 삭제
                 </Button>
               </div>
@@ -245,9 +250,13 @@ export function TenantDetailView({ tenant }: { tenant: TenantDetail }) {
         <SuspendDialog
           name={tenant.name}
           pending={busy === 'suspend'}
+          error={failure}
           onClose={() => setDialog(null)}
           onSubmit={async (reason) => {
-            if (await run('suspend', () => suspendTenant(tenant.tenant_id, reason))) setDialog(null);
+            const result = await run('suspend', () => suspendTenant(tenant.tenant_id, reason));
+            // 성공했거나 그 사이 상태가 바뀌어 요청이 무효가 됐으면 닫는다. 오류는 화면 위쪽에 남고, 다시 읽은
+            // 화면이 지금 가능한 동작(정지됐다면 재개)을 보인다. 일시 오류면 확인창 안에 오류를 보이고 남긴다.
+            if (result !== null && (result.ok || isStaleTenantRequest(result.code))) setDialog(null);
           }}
         />
       ) : null}
@@ -267,7 +276,7 @@ export function TenantDetailView({ tenant }: { tenant: TenantDetail }) {
             } catch (error) {
               setFailure(error);
               setDialog(null);
-              if (error instanceof ApiError && error.code === 'TENANT_STATE_CONFLICT') router.refresh();
+              if (isStaleTenantRequest(error instanceof ApiError ? error.code : null)) router.refresh();
               inFlight.current = false;
               setBusy(null);
             }
@@ -314,10 +323,12 @@ function Stacked({ label, children }: { label: string; children: React.ReactNode
 }
 
 function SuspendDialog({
-  name, pending, onClose, onSubmit,
+  name, pending, error, onClose, onSubmit,
 }: {
   name: string;
   pending: boolean;
+  /** 확인창이 열린 채 남는 실패(일시 오류)를 확인창 안에 보인다. 확인창이 페이지의 오류 표시를 가리기 때문이다. */
+  error: unknown;
   onClose: () => void;
   onSubmit: (reason: string) => void;
 }) {
@@ -338,6 +349,7 @@ function SuspendDialog({
             value={reason} onChange={(event) => setReason(event.target.value)}
             maxLength={SUSPEND_REASON_MAX} disabled={pending} placeholder="예: 구독 만료" />
         </label>
+        {error !== null ? <ErrorState error={error} variant="inline" /> : null}
         <DialogFooter>
           <Button type="button" variant="outline" onClick={onClose} disabled={pending}>취소</Button>
           <Button type="button" variant="destructive" disabled={pending || trimmed === ''} onClick={() => onSubmit(trimmed)}>

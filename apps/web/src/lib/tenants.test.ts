@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import type { TenantListItem } from '../types/api.ts';
 import {
   hoursSince,
+  isStaleTenantRequest,
   parseTenantForm,
   parseVpcIds,
   splitList,
@@ -136,4 +137,22 @@ test('리전 · VPC 중복은 서버가 422로 거절하므로 미리 막는다'
 test('VPC 칸을 비우면 오류가 아니라 계정 안 VPC 전체다', () => {
   assert.deepEqual(parseVpcIds(''), { values: [], error: null });
   assert.match(parseVpcIds('vpc-XYZ').error ?? '', /형식/);
+});
+
+test('정지 요청이 409(상태 충돌)이면 확인창을 닫고, 다시 읽은 정지 상태에서는 재개만 열린다(#503 리뷰)', () => {
+  // 다른 관리자가 먼저 정지했다: 서버는 409 TENANT_STATE_CONFLICT, 화면은 다시 읽어 SUSPENDED를 받는다.
+  assert.equal(isStaleTenantRequest('TENANT_STATE_CONFLICT'), true);
+  const after = tenantActions('SUSPENDED');
+  assert.equal(after.suspend, false);
+  assert.equal(after.resume, true);
+});
+
+test('이미 정지 · 없는 고객도 요청이 무효라 확인창을 닫는다', () => {
+  assert.equal(isStaleTenantRequest('TENANT_SUSPENDED'), true);
+  assert.equal(isStaleTenantRequest('TENANT_NOT_FOUND'), true);
+});
+
+test('일시 오류는 확인창을 남긴다(입력한 정지 사유를 잃지 않게)', () => {
+  assert.equal(isStaleTenantRequest('INTERNAL_ERROR'), false);
+  assert.equal(isStaleTenantRequest(null), false);
 });
