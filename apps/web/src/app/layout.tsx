@@ -1,9 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 
-import { Gnb } from "@/components/gnb";
-import { RealtimeProvider } from "@/components/realtime-provider";
-import { ToastStack } from "@/components/toast-stack";
+import { AppShell } from "@/components/app-shell";
 
 import "./globals.css";
 
@@ -36,13 +34,8 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       className={`dark ${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">
-        {/* CMN-001이 소켓 수명주기를 소유한다 — layout에 두어야 라우트가 바뀌어도 연결이 유지된다(4.8 1). */}
-        <RealtimeProvider>
-          <Gnb />
-          <main className="flex flex-1 flex-col p-6">{children}</main>
-          {/* CMN-001 Toast 스택 — 우하단 고정·8초·최대 3개(4.8). */}
-          <ToastStack />
-        </RealtimeProvider>
+        {/* GNB · 실시간 연결 · Toast는 AppShell이 두른다 — `/login`만 빼고(app-shell.tsx). */}
+        <AppShell>{children}</AppShell>
       </body>
     </html>
   );

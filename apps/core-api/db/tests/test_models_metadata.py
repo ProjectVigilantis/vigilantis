@@ -37,6 +37,9 @@ EXPECTED_TABLES = {
     "service_transition_operations",
     "service_transition_observations",
     "notification_events",
+    # 로그인 기반 2종 (#492)
+    "app_users",
+    "auth_sessions",
 }
 
 

@@ -48,7 +48,7 @@ def test_upgrade_from_previous_head_preserves_business_rows(pg_engine, monkeypat
     get_settings.cache_clear()
     config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == [REVISION]
+    assert len(script.get_heads()) == 1
     assert script.get_revision(REVISION).down_revision == PARENT
     command.downgrade(config, PARENT)
     incident_id = str(uuid.uuid4())

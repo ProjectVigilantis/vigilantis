@@ -126,6 +126,17 @@ def test_file_output_rotates_within_the_size_cap(tmp_path, restore_logging):
     assert all(path.stat().st_size <= 2_000 for path in tmp_path.iterdir())
 
 
+def test_sdk_loggers_stay_at_warning_even_with_debug(restore_logging):
+    # botocore DEBUG 는 요청 파라미터(비밀번호·코드)와 응답 토큰을 찍는다
+    for name in ("botocore", "boto3", "urllib3"):
+        logging.getLogger(name).setLevel(logging.NOTSET)
+    setup_logging("DEBUG")
+    assert logging.getLogger().level == logging.DEBUG
+    for name in ("botocore", "boto3", "urllib3", "botocore.hooks", "botocore.endpoint"):
+        assert logging.getLogger(name).getEffectiveLevel() == logging.WARNING
+        assert not logging.getLogger(name).isEnabledFor(logging.DEBUG)
+
+
 def test_backup_count_default_is_20_and_must_be_positive():
     assert Settings(DATABASE_URL="postgresql://x").LOG_FILE_BACKUP_COUNT == 20
     assert Settings(DATABASE_URL="postgresql://x", LOG_FILE_BACKUP_COUNT=3).LOG_FILE_BACKUP_COUNT == 3
