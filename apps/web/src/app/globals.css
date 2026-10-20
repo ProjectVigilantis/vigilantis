@@ -207,6 +207,105 @@
   --chart-series-4: #8b5cf6;
 }
 
+/* 랜딩 · 로그인 소개 띠의 움직임. 모두 `prefers-reduced-motion: reduce`에서 멈춘다. 스크롤 등장은
+   JS가 화면 아래 요소에만 data-state="hidden"을 붙였다가 보일 때 푸는 방식이라, JS가 없으면 처음부터 보인다
+   (components/landing/reveal-root.tsx). */
+@layer components {
+  .landing-grid {
+    background-image:
+      linear-gradient(to right, rgb(255 255 255 / 0.05) 1px, transparent 1px),
+      linear-gradient(to bottom, rgb(255 255 255 / 0.05) 1px, transparent 1px);
+    background-size: 48px 48px;
+    mask-image: radial-gradient(ellipse at 30% 20%, black 20%, transparent 75%);
+  }
+  /* 빛 번짐은 그라데이션만으로 낸다. `filter: blur`를 큰 요소에 걸면 화면 밖으로 일부 나갈 때 그리기가
+     멈추는 일이 있었다(Chrome 캡처 실측). */
+  .landing-glow {
+    background: radial-gradient(closest-side, rgb(29 91 216 / 0.38), rgb(29 91 216 / 0.12) 55%, transparent);
+  }
+  [data-reveal] {
+    transition:
+      opacity 700ms cubic-bezier(0.2, 0.7, 0.2, 1),
+      transform 700ms cubic-bezier(0.2, 0.7, 0.2, 1);
+    transition-delay: var(--reveal-delay, 0ms);
+  }
+  [data-reveal][data-state="hidden"] {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  .landing-rise {
+    animation: landing-rise 800ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+    animation-delay: var(--rise-delay, 0ms);
+  }
+  .landing-pulse {
+    animation: landing-pulse 2s ease-out infinite;
+  }
+  .landing-draw {
+    stroke-dasharray: 1200;
+    stroke-dashoffset: 1200;
+    animation: landing-draw 2.4s 400ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  }
+  .landing-ticker {
+    animation: landing-ticker 14s linear infinite;
+  }
+  .landing-float {
+    animation: landing-float 6s ease-in-out infinite;
+  }
+  .landing-marquee {
+    animation: landing-marquee 32s linear infinite;
+  }
+
+  @keyframes landing-rise {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: none; }
+  }
+  @keyframes landing-pulse {
+    0% { box-shadow: 0 0 0 0 rgb(34 197 94 / 0.55); }
+    70% { box-shadow: 0 0 0 10px rgb(34 197 94 / 0); }
+    100% { box-shadow: 0 0 0 0 rgb(34 197 94 / 0); }
+  }
+  @keyframes landing-draw {
+    to { stroke-dashoffset: 0; }
+  }
+  @keyframes landing-ticker {
+    from { transform: translateY(0); }
+    to { transform: translateY(-50%); }
+  }
+  @keyframes landing-float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-8px); }
+  }
+  @keyframes landing-marquee {
+    from { transform: translateX(0); }
+    to { transform: translateX(-50%); }
+  }
+
+  /* 랜딩의 [움직임 멈춤](components/landing/motion-toggle.tsx). */
+  [data-motion="paused"] :is(.landing-pulse, .landing-ticker, .landing-float, .landing-marquee) {
+    animation-play-state: paused;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    [data-reveal],
+    [data-reveal][data-state="hidden"] {
+      opacity: 1;
+      transform: none;
+      transition: none;
+    }
+    .landing-rise,
+    .landing-pulse,
+    .landing-ticker,
+    .landing-float,
+    .landing-marquee {
+      animation: none;
+    }
+    .landing-draw {
+      animation: none;
+      stroke-dashoffset: 0;
+    }
+  }
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

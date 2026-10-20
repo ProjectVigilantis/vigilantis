@@ -14,6 +14,7 @@ import { useState, type FormEvent } from 'react';
 import { Button } from '@/components/ui/button';
 import {
   ApiError,
+  getMe,
   login,
   startTotpSetup,
   submitEmailVerification,
@@ -22,6 +23,7 @@ import {
   verifyTotpSetup,
 } from '@/lib/api/client';
 import { authErrorView } from '@/lib/auth-errors';
+import { CUSTOMER_HOME, homePathFor } from '@/lib/home-path';
 import { safeReturnTo } from '@/lib/return-to';
 import { NEW_PASSWORD_MIN_LENGTH, type LoginStep, type LoginStepResponse } from '@/types/api';
 
@@ -106,8 +108,14 @@ export function LoginFlow() {
     }
     if (next === 'COMPLETED') {
       // 세션 쿠키가 발급됐다. 이동하는 동안 폼을 다시 열지 않는다.
-      // 로그인 전에 보던 화면(`?next=`, proxy · 401 처리가 붙인다)으로 돌아간다 — 같은 사이트 경로만(lib/return-to.ts).
-      router.replace(safeReturnTo(new URLSearchParams(window.location.search).get('next')));
+      // 로그인 전에 보던 화면(`?next=`, proxy · 401 처리가 붙인다)이 있으면 그리로 돌아간다. 같은 사이트 경로만(lib/return-to.ts).
+      // 없으면 역할별 첫 화면이다(lib/home-path.ts). 역할을 못 읽으면 메인 대시보드로 간다. 고객 관리 API 차단은 서버가 한다.
+      const returnTo = new URLSearchParams(window.location.search).get('next');
+      router.replace(
+        returnTo !== null
+          ? safeReturnTo(returnTo)
+          : await getMe().then((me) => (me ? homePathFor(me) : CUSTOMER_HOME), () => CUSTOMER_HOME),
+      );
       return;
     }
     setTotpSetup(null);
