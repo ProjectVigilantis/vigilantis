@@ -2,13 +2,15 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
+/* 색 · 글꼴 · 간격의 원천은 apps/web/DESIGN.md다. 값을 바꿀 때는 그 파일을 먼저 고친다. */
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   --font-heading: var(--font-sans);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
@@ -40,6 +42,31 @@
   --color-popover: var(--popover);
   --color-card-foreground: var(--card-foreground);
   --color-card: var(--card);
+  /* DESIGN.md 확장 토큰 */
+  --color-foreground-secondary: var(--foreground-secondary);
+  --color-shell: var(--shell);
+  --color-shell-nav: var(--shell-nav);
+  --color-gridline: var(--gridline);
+  --color-axis: var(--axis);
+  --color-data: var(--data);
+  --color-data-track: var(--data-track);
+  --color-heat-ok: var(--heat-ok);
+  --color-heat-none: var(--heat-none);
+  --color-status-good: var(--status-good);
+  --color-status-warning: var(--status-warning);
+  --color-status-serious: var(--status-serious);
+  --color-status-critical: var(--status-critical);
+  --color-status-idle: var(--status-idle);
+  --color-badge-good-bg: var(--badge-good-bg);
+  --color-badge-good-fg: var(--badge-good-fg);
+  --color-badge-warning-bg: var(--badge-warning-bg);
+  --color-badge-warning-fg: var(--badge-warning-fg);
+  --color-badge-serious-bg: var(--badge-serious-bg);
+  --color-badge-serious-fg: var(--badge-serious-fg);
+  --color-badge-critical-bg: var(--badge-critical-bg);
+  --color-badge-critical-fg: var(--badge-critical-fg);
+  --color-badge-idle-bg: var(--badge-idle-bg);
+  --color-badge-idle-fg: var(--badge-idle-fg);
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);
@@ -49,90 +76,135 @@
   --radius-4xl: calc(var(--radius) * 2.6);
 }
 
+/* 주간(기본) */
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  /* 위협·실패 의미색 전용(설계서 §0.3). UI 크롬(버튼·탭·링크·포커스 링)에는 쓰지 않는다. */
-  --danger: oklch(0.55 0.22 25);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  /* 시계열 계열 색 4종 — UI 토큰이 무채색이라 차트만 유채색을 쓴다. 고정 순서이며 돌려 쓰지
-     않는다(components/dashboard/trend-charts.tsx). 라이트·다크 각각 따로 고른 단계이고
-     명도대·채도 하한·색각 분리(ΔE)·표면 대비 검사를 통과한 값이다 — 임의로 바꾸지 말 것. */
+  color-scheme: light;
+  --background: #f5f7fa;
+  --foreground: #0f1b2d;
+  --foreground-secondary: #3d4a5c;
+  --card: #ffffff;
+  --card-foreground: #0f1b2d;
+  --popover: #ffffff;
+  --popover-foreground: #0f1b2d;
+  --primary: #1d5bd8;
+  --primary-foreground: #ffffff;
+  --secondary: #eef1f5;
+  --secondary-foreground: #0f1b2d;
+  --muted: #eef1f5;
+  --muted-foreground: #5b6878;
+  --accent: #e7effd;
+  --accent-foreground: #1747a6;
+  /* 되돌릴 수 없는 동작 버튼(ui/button destructive) */
+  --destructive: #b42323;
+  /* 위험 · 실패 상태. 토폴로지 THREAT 노드와 위협 수치도 이 값을 쓴다 */
+  --danger: #d03b3b;
+  --border: #dde3ea;
+  --input: #c5cdd8;
+  --ring: #3b82f6;
+  --gridline: #e8ecf1;
+  --axis: #c5cdd8;
+  --data: #2a78d6;
+  --data-track: #eef1f5;
+  --heat-ok: #9fdcaa;
+  --heat-none: #e8ecf1;
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+  --status-idle: #94a3b8;
+  --badge-good-bg: #e3f6e5;
+  --badge-good-fg: #0b6b1f;
+  --badge-warning-bg: #fff4d6;
+  --badge-warning-fg: #7a4d00;
+  --badge-serious-bg: #ffe8dc;
+  --badge-serious-fg: #9a3a12;
+  --badge-critical-bg: #fde4e4;
+  --badge-critical-fg: #b42323;
+  --badge-idle-bg: #eef1f5;
+  --badge-idle-fg: #3d4a5c;
+  --chart-1: #9ec5f4;
+  --chart-2: #6da7ec;
+  --chart-3: #2a78d6;
+  --chart-4: #1c5cab;
+  --chart-5: #104281;
+  /* 대시보드 시계열 계열 4종(trend-charts.tsx). 고정 순서이며 돌려 쓰지 않는다. 라이트 · 다크를
+     따로 검증한 단계라 임의로 바꾸지 않는다. 새 그래프는 DESIGN.md대로 --data 한 계열을 쓴다. */
   --chart-series-1: #2563eb;
   --chart-series-2: #d97706;
   --chart-series-3: #0d9488;
   --chart-series-4: #7c3aed;
-  --radius: 0.625rem;
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --radius: 0.5rem;
+  --sidebar: #0f1d33;
+  --sidebar-foreground: #ffffff;
+  --sidebar-primary: #1d5bd8;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: rgba(255, 255, 255, 0.08);
+  --sidebar-accent-foreground: #ffffff;
+  --sidebar-border: rgba(255, 255, 255, 0.08);
+  --sidebar-ring: #3b82f6;
 }
 
+/* 셸(상단바 · 사이드바) 색은 html에만 건다. 셸 요소는 안쪽 부품을 야간 토큰으로 그리려고 .dark를
+   달고 있어서, 셸 색을 .dark에 두면 주간에도 야간 셸 색이 칠해진다. */
+:root {
+  --shell: #0b1526;
+  --shell-nav: #0f1d33;
+}
+:root.dark {
+  --shell: #060c17;
+  --shell-nav: #0b1424;
+}
+
+/* 야간(관제실 · 야간 근무). 주간을 뒤집은 값이 아니라 같은 역할에 따로 고른 값이다 */
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  /* shadcn 기본 크롬 빨강. 앱 코드는 쓰지 않는다 — 의미색은 --danger 하나뿐(§0.3).
-     ui/button·ui/badge의 destructive variant가 참조하므로 지우지는 않는다. */
-  --destructive: oklch(0.704 0.191 22.216);
-  --danger: oklch(0.7 0.2 25);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  /* 다크 표면(#1a1a19 급)에서 다시 검증한 단계 — 라이트 값을 그대로 쓰면 명도대를 벗어난다. */
+  color-scheme: dark;
+  --background: #0a1220;
+  --foreground: #e6ebf2;
+  --foreground-secondary: #c3cddb;
+  --card: #111b2c;
+  --card-foreground: #e6ebf2;
+  --popover: #111b2c;
+  --popover-foreground: #e6ebf2;
+  --primary: #2563eb;
+  --primary-foreground: #ffffff;
+  --secondary: #17233a;
+  --secondary-foreground: #e6ebf2;
+  --muted: #17233a;
+  --muted-foreground: #9aa8bb;
+  --accent: #15274a;
+  --accent-foreground: #7cb0ff;
+  --destructive: #b42323;
+  --danger: #f06a6a;
+  --border: #22304a;
+  --input: #33415a;
+  --ring: #5b9bf8;
+  --gridline: #1d2a40;
+  --axis: #33415a;
+  --data: #3987e5;
+  --data-track: #17233a;
+  --heat-ok: #1f6b3a;
+  --heat-none: #1a263b;
+  --status-idle: #5b6b85;
+  --badge-good-bg: #0f2e1a;
+  --badge-good-fg: #6fdc8c;
+  --badge-warning-bg: #33270a;
+  --badge-warning-fg: #f5c451;
+  --badge-serious-bg: #3a1f12;
+  --badge-serious-fg: #f4a37f;
+  --badge-critical-bg: #3a1414;
+  --badge-critical-fg: #f48a8a;
+  --badge-idle-bg: #1d2a40;
+  --badge-idle-fg: #c3cddb;
+  --chart-1: #184f95;
+  --chart-2: #256abf;
+  --chart-3: #3987e5;
+  --chart-4: #6da7ec;
+  --chart-5: #9ec5f4;
+  /* 다크 표면에서 다시 검증한 단계. 라이트 값을 그대로 쓰면 명도대를 벗어난다. */
   --chart-series-1: #4b8df8;
   --chart-series-2: #d97706;
   --chart-series-3: #10a89a;
   --chart-series-4: #8b5cf6;
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
 }
 
 @layer base {
@@ -146,10 +218,10 @@
     @apply font-sans;
   }
 
-  /* 스크롤바 — 브라우저 기본(굵은 회색 막대·화살표)이 무채색 UI 위에서 도드라져, 얇고 물러서는
-     막대로 통일한다. 색은 테마 토큰에서 파생해 라이트·다크가 따로 맞춰진다.
-     Chromium·Safari는 WebKit 의사 요소로, Firefox만 표준 속성으로 그린다. Chromium에 표준 속성
-     (`scrollbar-width`·`scrollbar-color`)을 주면 의사 요소가 무시되고 위아래 화살표 버튼이 남는다. */
+  /* 스크롤바. 브라우저 기본(굵은 회색 막대 · 화살표) 대신 얇고 물러서는 막대로 통일한다. 색은 테마
+     토큰에서 파생해 주간 · 야간이 따로 맞춰진다. Chromium · Safari는 WebKit 의사 요소로, Firefox만
+     표준 속성으로 그린다. Chromium에 표준 속성(`scrollbar-width` · `scrollbar-color`)을 주면 의사
+     요소가 무시되고 위아래 화살표 버튼이 남는다. */
   html {
     --scrollbar-thumb: color-mix(in oklch, var(--muted-foreground) 35%, transparent);
     --scrollbar-thumb-hover: color-mix(in oklch, var(--muted-foreground) 60%, transparent);
