@@ -1,4 +1,4 @@
-// 전역 셸 — 상단바(로고 · 수집 · 실시간 · 주간/야간 · 사용자)와 사이드바(주요 화면)다(DESIGN.md §셸).
+// 전역 셸: 상단바(로고 · 수집 · 실시간 · 주간/야간 · 사용자)와 사이드바(주요 화면)다(DESIGN.md §셸).
 //
 // 셸은 두 모드 모두 남색이고, 안쪽 부품(상태 칩 · 사용자 메뉴)은 어두운 바탕용 색으로 그려야 읽힌다.
 // 그래서 셸 요소에 `dark` 클래스를 달아 그 아래만 야간 토큰으로 푼다. 셸 배경색은 html에 걸린
@@ -28,7 +28,7 @@ import { cn } from '@/lib/utils';
  * `자산`(AST-001)과 `보안`(SEC-001)은 짝이다 — 앞이 자원 인벤토리와 최적화, 뒤가 그 자원의 노출·위협이다.
  *
  * `고객`은 Post-MVP T-4 관리자 화면이다(고객 계정 연결 · 원격 회수). 관제 화면이 아니라 맨 뒤에 둔다.
- * 누구에게 보일지(역할 제한)는 T-1 역할과 함께 정한다 — 그 전까지 권한 판정은 서버 몫이다.
+ * 누구에게 보일지(역할 제한)는 T-1 역할과 함께 정한다. 그 전까지 권한 판정은 서버 몫이다.
  */
 const NAV: readonly { href: string; label: string; icon: LucideIcon }[] = [
   { href: '/', label: '대시보드', icon: LayoutDashboard },
@@ -59,7 +59,7 @@ export function ShellHeader() {
       {/* 두 인디케이터는 축이 다르다 — 왼쪽은 서버↔클라우드 수집 상태(`GET /assets` 봉투), 오른쪽은
           관제 자산↔화면 실시간 연결(소켓이 열렸고 수집된 자산이 있을 때만 초록 — connection-indicator.tsx). 자리를 다투지 않고, WS 쪽을
           빼면 끊겼을 때 [재연결] 버튼(§4.8 4)이 사라져 둘 다 둔다(PR #299 리뷰). */}
-      {/* 좁은 화면(< lg)에서는 두 인디케이터가 들어갈 폭이 없다(수집 칩만 288px) — 전환 · 사용자만 남긴다. */}
+      {/* 좁은 화면(< lg)에서는 두 인디케이터가 들어갈 폭이 없다(수집 칩만 288px): 전환 · 사용자만 남긴다. */}
       <div className="ml-auto flex min-w-0 shrink items-center gap-3 sm:gap-4">
         <div className="hidden shrink-0 items-center gap-4 lg:flex">
           <CollectionIndicator env={assets.env} failed={assets.failed} />
@@ -82,7 +82,7 @@ export function ShellNav() {
       className="dark bg-shell-nav flex shrink-0 gap-1 overflow-x-auto p-2 [scrollbar-width:none] md:w-58 md:flex-col md:overflow-visible md:border-r md:p-4"
     >
       {NAV.map(({ href, label, icon: Icon }) => {
-        // 경계(`/` 또는 문자열 끝)까지 본다 — 접두만 보면 다른 경로가 같이 활성이 된다.
+        // 경계(`/` 또는 문자열 끝)까지 본다. 접두만 보면 다른 경로가 같이 활성이 된다.
         // 인시던트 상세(`/incidents/[id]`)는 카테고리를 모르는 자리라 어느 항목도 켜지 않는다.
         const active =
           href === '/' ? pathname === '/' : pathname === href || pathname.startsWith(`${href}/`);

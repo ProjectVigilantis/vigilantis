@@ -50,7 +50,7 @@ test('정지는 실패가 아니라 의도한 상태라 중립 회색이다', ()
   assert.equal(TENANT_STATUS_LABELS.SUSPENDED.tone, 'gray');
 });
 
-test('목록 요약 — 자산은 관제 중 고객만 더하고, 확인 문제는 실패와 확인 불가를 가른다', () => {
+test('목록 요약: 자산은 관제 중 고객만 더하고, 확인 문제는 실패와 확인 불가를 가른다', () => {
   assert.deepEqual(summarizeTenants(LIST), {
     total: 5,
     byStatus: { PENDING_CONNECTION: 1, ACTIVE: 3, SUSPENDED: 1 },
@@ -86,7 +86,7 @@ const FORM: TenantForm = {
   collectVpcIds: '',
 };
 
-test('상태별 동작 — 정지 중에는 확인 대신 재개만 열린다', () => {
+test('상태별 동작: 정지 중에는 확인 대신 재개만 열린다', () => {
   assert.deepEqual(tenantActions('PENDING_CONNECTION'), { verify: true, suspend: false, resume: false, remove: true });
   assert.deepEqual(tenantActions('ACTIVE'), { verify: true, suspend: true, resume: false, remove: false });
   assert.deepEqual(tenantActions('SUSPENDED'), { verify: false, suspend: false, resume: true, remove: false });
@@ -96,7 +96,7 @@ test('목록은 쉼표 · 공백 · 줄바꿈으로 나누고 빈 칸을 버린�
   assert.deepEqual(splitList('ap-northeast-2, us-east-1\n\n us-west-2 ,'), ['ap-northeast-2', 'us-east-1', 'us-west-2']);
 });
 
-test('정상 입력은 요청으로 바뀐다 — 이름은 다듬고, 역할 ARN을 비우면 보내지 않는다', () => {
+test('정상 입력은 요청으로 바뀐다. 이름은 다듬고, 역할 ARN을 비우면 보내지 않는다', () => {
   const result = parseTenantForm(FORM);
   assert.ok(result.ok);
   assert.deepEqual(result.request, {

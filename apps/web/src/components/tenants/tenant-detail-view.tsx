@@ -1,9 +1,9 @@
 'use client';
 
-// 고객 상세 — 연결(온보딩 → 연결 확인) · 원격 회수(정지 · 재개) · 자동 조치 스위치(T-6) · 삭제.
+// 고객 상세: 연결(온보딩 → 연결 확인) · 원격 회수(정지 · 재개) · 자동 조치 스위치(T-6) · 삭제.
 //
 // 상태 관문은 서버가 최종 판정한다. 그 사이 다른 관리자가 상태를 바꿨으면(TENANT_STATE_CONFLICT)
-// 화면을 다시 읽는다 — 낡은 화면의 버튼으로 다시 시도하지 않게 한다(PROPOSAL_NOT_EXECUTABLE과 같은 원칙).
+// 화면을 다시 읽는다. 낡은 화면의 버튼으로 다시 시도하지 않게 한다(PROPOSAL_NOT_EXECUTABLE과 같은 원칙).
 
 import { ArrowLeft, ExternalLink, TriangleAlert } from 'lucide-react';
 import Link from 'next/link';

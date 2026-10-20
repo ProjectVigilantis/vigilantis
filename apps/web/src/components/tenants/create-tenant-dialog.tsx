@@ -1,6 +1,6 @@
 'use client';
 
-// 고객 추가 — 만들면 PENDING_CONNECTION이다. 연결(역할 생성 · 확인)은 상세 화면에서 이어 간다.
+// 고객 추가: 만들면 PENDING_CONNECTION이다. 연결(역할 생성 · 확인)은 상세 화면에서 이어 간다.
 
 import { useRouter } from 'next/navigation';
 import { useRef, useState } from 'react';

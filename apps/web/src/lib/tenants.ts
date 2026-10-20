@@ -20,7 +20,7 @@ export const TENANT_STATUS_LABELS: Record<TenantStatus, EnumLabel> = {
   SUSPENDED: { label: '정지', tone: 'gray' },
 };
 
-/** 연결 확인 결과 — 확인한 시각의 관측값이다. `hint`는 관리자가 다음에 할 일이다. */
+/** 연결 확인 결과: 확인한 시각의 관측값이다. `hint`는 관리자가 다음에 할 일이다. */
 export const VERIFICATION_LABELS: Record<TenantVerificationResult, EnumLabel & { hint: string | null }> = {
   OK: { label: '연결 확인됨', tone: 'green', hint: null },
   ASSUME_DENIED: {
@@ -54,7 +54,7 @@ export interface TenantActions {
 
 /**
  * 상태별로 열리는 동작. 정지 중 고객 계정에 들어가는 길은 resume 하나다(verify 불가).
- * 정지는 관제 중(ACTIVE)에서만 연다 — 연결 대기는 들어간 적이 없어 회수할 것이 없다.
+ * 정지는 관제 중(ACTIVE)에서만 연다. 연결 대기는 들어간 적이 없어 회수할 것이 없다.
  */
 export function tenantActions(status: TenantStatus): TenantActions {
   return {

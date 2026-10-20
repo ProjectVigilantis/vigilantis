@@ -18,7 +18,7 @@ import type { TenantListItem, TenantStatus } from '@/types/api';
 
 const STATUS_ORDER: readonly TenantStatus[] = ['ACTIVE', 'PENDING_CONNECTION', 'SUSPENDED'];
 
-/** 고객 상태 구성 — 한 줄 누적 막대와 건수 범례. */
+/** 고객 상태 구성: 한 줄 누적 막대와 건수 범례. */
 export function StatusComposition({ summary }: { summary: TenantSummary }) {
   const parts = STATUS_ORDER.map((status) => ({
     status,
@@ -67,7 +67,7 @@ function formatHours(hours: number): string {
   return hours < 1 ? `${Math.round(hours * 60)}분` : `${hours.toFixed(1)}시간`;
 }
 
-/** 마지막 연결 확인 후 지난 시간 — 고객마다 점 하나, 기준선보다 오른쪽이면 낡은 확인이다. */
+/** 마지막 연결 확인 후 지난 시간: 고객마다 점 하나, 기준선보다 오른쪽이면 낡은 확인이다. */
 export function VerificationAgeChart({
   ages,
   unchecked,
@@ -136,7 +136,7 @@ export function VerificationAgeChart({
   );
 }
 
-/** 고객별 열린 인시던트 — 관제 중인 고객만, 많은 순. */
+/** 고객별 열린 인시던트: 관제 중인 고객만, 많은 순. */
 export function OpenIncidentBars({ tenants }: { tenants: readonly TenantListItem[] }) {
   const rows = tenants
     .filter((t) => t.status === 'ACTIVE')
