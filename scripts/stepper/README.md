@@ -17,6 +17,15 @@
    cd apps/web; npm ci; cd ../..
    ```
 
+## 시연 준비 때 할 일 — 웹 로그인
+
+제품 API가 로그인 세션을 요구하므로(이슈 #492), 이 도구가 띄우는 웹 화면도 **실제 Cognito 로그인**이 필요하다. CLI 명령(`collect` · `inject` 등)은 로그인과 무관하게 토큰으로 돈다.
+
+1. 저장소 루트 `.env`에 `COGNITO_*` 값을 채운다(`.env.example` 참고).
+2. 테스트 서버 DB에 앱 사용자를 등록한다. `stepper up` 뒤 stepper api 컨테이너 안에서 `python -m auth.bootstrap_admin`을 실행한다. DB는 `reset`마다 지워지므로 `reset`할 때마다 다시 등록한다.
+
+> 이 문서는 절차만 적는다. 이 도구는 로그인 · 사용자 등록을 대신하지 않는다.
+
 ## 시연 — 다섯 걸음
 
 모든 명령은 **저장소 루트**에서 친다. 명령이 길어서 PowerShell 창마다 아래 한 줄을 먼저 치면 편하다(창을 닫으면 사라진다).
@@ -145,6 +154,7 @@ FE에서 볼 곳: 자산 — 서버가 WebSocket을 끊어 FE가 재연결하며
 ### 어떻게 돌아가나
 
 - **테스트 서버**: `docker-compose.yml` 위에 `compose.override.yml`을 얹어 compose 프로젝트 `vigilantis-test`로 띄운다. 타이머와 모의 위협 파일 소비 루프를 끄고, 포트는 이 노트북(`127.0.0.1`)에만 연다.
+- **조회 경로**: 제품 `/api/v1/*`는 로그인 세션이 필요해서 도구는 거기서 읽지 않는다. 인시던트 · 자산 조회와 실시간 연결은 토큰(`X-Stepper-Token`)으로 막힌 `/_stepper/incidents` · `/_stepper/incidents/{id}` · `/_stepper/assets` · `WS /_stepper/ws`로 한다. 앞의 셋은 제품 핸들러를 그대로 불러 같은 응답을 돌려주고, WebSocket은 제품과 같은 실시간 연결에 붙는다. 토큰이 없거나 틀리면 HTTP는 401, WebSocket은 연결을 받기 전에 닫는다(1008). 제품 앱(`main:app`)에는 이 경로가 없다. 인증을 끄는 개발용 스위치는 두지 않는다.
 - **단계 진행 라우터**(`app.py`): 제품 앱에 `/_stepper/*`를 붙인다. 명령 하나가 앱의 주기 함수를 1회 부르고, 그 결과가 같은 프로세스의 WebSocket으로 FE까지 간다. `collect`는 WebSocket 이벤트가 없어서, 끝나면 연결을 한 번 끊어 FE가 재연결하며 다시 조회하게 한다.
 - **CLI**(`cli.py` · `server.py`): 서버와 FE를 띄우고 내리며, 명령마다 안내를 출력한다.
 - **FE**: `npm run dev -- -H localhost -p <FE 포트>`로 띄운다(`-H localhost` — 같은 망의 다른 기기에서 테스트 화면이 보이지 않게). Windows는 새 창이고, 그 밖의 OS는 백그라운드로 떠 출력이 `~/.vigilantis/stepper/web.log`에 쌓인다.

@@ -52,6 +52,7 @@ from fastapi import (  # noqa: E402
     Header,
     HTTPException,
     Request,
+    WebSocket,
 )
 
 logger = logging.getLogger("vigilantis.stepper")
@@ -99,6 +100,7 @@ def build_app() -> FastAPI:
 
 def attach(application: FastAPI, *, token: str, inbox: Path) -> FastAPI:
     application.include_router(build_router(token=token, inbox=inbox))
+    application.include_router(build_ws_router(token=token))
     # 기동 로그로 활성 설정을 진단할 수 있게 남긴다. 토큰은 남기지 않는다
     settings = get_settings()
     logger.info("stepper_router_attached", extra={
@@ -144,6 +146,10 @@ def build_router(*, token: str, inbox: Path) -> APIRouter:
     import dispatcher
     from db.repositories import incidents as incidents_repo
     from mock_threat_source import MockThreatConsumer
+    from routers import assets as assets_router
+    from routers import incidents as incidents_router
+    from schemas.api.assets import AssetsResponse
+    from schemas.api.incidents import IncidentResponse, IncidentsResponse
     from services import collector
     from services import scheduler as scan_scheduler
 
@@ -197,6 +203,23 @@ def build_router(*, token: str, inbox: Path) -> APIRouter:
                     "subject_arn": None if incident is None else incident.subject_arn,
                 })
         return {"incidents": items}
+
+    # 제품 /api/v1 조회는 로그인 세션이 필요하다 — 도구는 같은 핸들러를 이 토큰 라우트로 읽는다.
+    # 응답 조립을 새로 만들지 않고 제품 핸들러를 짧은 세션과 함께 직접 부른다
+    @router.get("/incidents", response_model=IncidentsResponse)
+    def incidents():
+        with _session_factory()() as db:
+            return incidents_router.list_incidents(status=None, category=None, db=db)
+
+    @router.get("/incidents/{incident_id}", response_model=IncidentResponse)
+    def incident(incident_id: str):
+        with _session_factory()() as db:
+            return incidents_router.get_incident(incident_id, db=db)
+
+    @router.get("/assets", response_model=AssetsResponse)
+    def assets():
+        with _session_factory()() as db:
+            return assets_router.get_assets(db=db)
 
     @router.post("/collect")
     def collect(request: Request) -> dict:
@@ -270,6 +293,31 @@ def build_router(*, token: str, inbox: Path) -> APIRouter:
             return report["errored"] == 0, {"report": report, "lane_reports": lane_reports}
 
         return press("dispatch", work)
+
+    return router
+
+
+def build_ws_router(*, token: str) -> APIRouter:
+    """WS /_stepper/ws — 제품 /api/v1/ws와 같은 실시간 연결. 토큰이 맞아야 accept한다."""
+    expected = token.encode("utf-8")
+    router = APIRouter(prefix="/_stepper", include_in_schema=False)
+
+    @router.websocket("/ws")
+    async def stepper_ws(websocket: WebSocket) -> None:
+        given = websocket.headers.get("x-stepper-token")
+        if given is None or not hmac.compare_digest(given.encode("utf-8"), expected):
+            await websocket.close(code=1008)  # accept 전에 거부
+            return
+        manager = websocket.app.state.realtime
+        await manager.register(websocket)
+        try:
+            # 클라이언트 프레임은 내용 무시 — 끊김 감지만 한다(routers/ws.py와 같은 루프)
+            while True:
+                message = await websocket.receive()
+                if message["type"] == "websocket.disconnect":
+                    break
+        finally:
+            manager.unregister(websocket)
 
     return router
 

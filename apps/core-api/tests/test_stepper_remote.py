@@ -13,10 +13,12 @@ import os
 import subprocess
 import sys
 import threading
+import uuid
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 STEPPER_APP = REPO_ROOT / "scripts" / "stepper" / "app.py"
@@ -66,8 +68,13 @@ def _press(client, button: str):
 
 
 def test_product_app_has_no_stepper_routes():
-    with TestClient(_product_app()) as client:
-        assert client.get("/_stepper/ping", headers=AUTH).status_code == 404
+    app = _product_app()
+    assert "/_stepper/ws" not in {getattr(route, "path", None) for route in app.routes}
+    with TestClient(app) as client:
+        for path in ("/_stepper/ping", "/_stepper/incidents", "/_stepper/incidents/x", "/_stepper/assets"):
+            assert client.get(path, headers=AUTH).status_code == 404, path
+        with pytest.raises(WebSocketDisconnect), client.websocket_connect("/_stepper/ws", headers=AUTH):
+            pass
 
 
 def test_stepper_routes_refuse_missing_or_wrong_token(stepper_client, monkeypatch):
@@ -80,6 +87,90 @@ def test_stepper_routes_refuse_missing_or_wrong_token(stepper_client, monkeypatc
     ping = stepper_client.get("/_stepper/ping", headers=AUTH)
     assert ping.status_code == 200
     assert ping.json()["server"] == stepper.SERVER_ID and ping.json()["busy"] is None
+
+
+READ_PATHS = ("/_stepper/incidents", "/_stepper/incidents/x", "/_stepper/assets")
+
+
+def test_read_routes_and_ws_refuse_missing_or_wrong_token(stepper_client, monkeypatch):
+    monkeypatch.setattr(stepper, "_session_factory", lambda: pytest.fail("토큰 없이 DB를 열었다"))
+    for headers in ({}, {"X-Stepper-Token": "x" * 32}):
+        for path in READ_PATHS:
+            assert stepper_client.get(path, headers=headers).status_code == 401, path
+        with pytest.raises(WebSocketDisconnect) as refused, stepper_client.websocket_connect(
+            "/_stepper/ws", headers=headers
+        ):
+            pass
+        assert refused.value.code == 1008
+    assert stepper_client.app.state.realtime.connection_count == 0
+
+
+# ------------------------------------------------------------------------------
+# 읽기 라우트 — 제품 핸들러와 같은 응답 (실제 PostgreSQL)
+# ------------------------------------------------------------------------------
+
+
+def test_read_routes_return_what_the_product_handlers_return(
+    stepper_client, monkeypatch, db, make_incident
+):
+    from contextlib import nullcontext
+    from datetime import UTC, datetime
+
+    from db.repositories import assets as assets_repo
+    from routers import assets as assets_router
+    from routers import incidents as incidents_router
+    from schemas.api.assets import AssetType
+    from schemas.api.incidents import IncidentCategory, IncidentStatus
+    from schemas.collections import CollectionRunStatus
+
+    monkeypatch.setattr(stepper, "_session_factory", lambda: lambda: nullcontext(db))
+    monkeypatch.setattr("routers.assets._configured_regions", lambda: ["ap-northeast-2"])
+    arn = "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0aaa"
+    run = assets_repo.start_collection_run(
+        db, account_id="123456789012", region="ap-northeast-2",
+        mode="localstack", lookback_days=3, period_seconds=3600,
+    )
+    now = datetime(2026, 8, 19, 6, tzinfo=UTC)
+    assets_repo.upsert_asset(
+        db, arn=arn, asset_type=AssetType.EC2, resource_id="i-0aaa", account_id="123456789012",
+        region="ap-northeast-2", spec={"instance_type": "t3.xlarge"},
+        collection_run_id=run.collection_run_id, collected_at=now, name="seed-idle", state="running",
+    )
+    assets_repo.finish_collection_run(
+        db, collection_run_id=run.collection_run_id,
+        status=CollectionRunStatus.SUCCESS, finished_at=now,
+    )
+    incident = make_incident(
+        db, category=IncidentCategory.SECOPS, status=IncidentStatus.ANALYZING,
+    )
+    db.flush()
+
+    listing = stepper_client.get("/_stepper/incidents", headers=AUTH)
+    detail = stepper_client.get(f"/_stepper/incidents/{incident.incident_id}", headers=AUTH)
+    assets = stepper_client.get("/_stepper/assets", headers=AUTH)
+    assert (listing.status_code, detail.status_code, assets.status_code) == (200, 200, 200)
+
+    expected_listing = incidents_router.list_incidents(status=None, category=None, db=db)
+    expected_detail = incidents_router.get_incident(incident.incident_id, db=db)
+    expected_assets = assets_router.get_assets(db=db)
+    assert listing.json() == expected_listing.model_dump(mode="json")
+    assert detail.json() == expected_detail.model_dump(mode="json")
+    assert assets.json() == expected_assets.model_dump(mode="json")
+    assert [item["incident_id"] for item in listing.json()["items"]] == [incident.incident_id]
+    assert [item["arn"] for item in assets.json()["items"]] == [arn]
+
+    missing = stepper_client.get(f"/_stepper/incidents/{uuid.uuid4()}", headers=AUTH)
+    assert missing.status_code == 404
+    assert "INCIDENT_NOT_FOUND" in missing.text
+
+
+def test_stepper_ws_accepts_valid_token_and_unregisters_on_close(stepper_client):
+    realtime = stepper_client.app.state.realtime
+    with stepper_client.websocket_connect("/_stepper/ws", headers=AUTH) as socket:
+        socket.send_text("ignored")
+        socket.send_bytes(b"ignored")
+        assert realtime.connection_count == 1
+    assert realtime.connection_count == 0
 
 
 # ------------------------------------------------------------------------------
@@ -166,7 +257,7 @@ def test_collect_drops_open_websockets_so_the_web_refetches(stepper_client, monk
     from starlette.websockets import WebSocketDisconnect
 
     monkeypatch.setattr(collector, "collect_and_store", lambda: [{"region": "ap-northeast-2", "total": 16}])
-    with stepper_client.websocket_connect("/api/v1/ws") as socket:
+    with stepper_client.websocket_connect("/_stepper/ws", headers=AUTH) as socket:
         body = _press(stepper_client, "collect")
         with pytest.raises(WebSocketDisconnect):
             socket.receive_text()

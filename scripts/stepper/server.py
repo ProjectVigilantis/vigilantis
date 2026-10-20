@@ -83,7 +83,7 @@ def web_url(ports: dict) -> str:
 
 
 def ws_url(ports: dict) -> str:
-    return f"ws://{LOOPBACK}:{ports['api']}/api/v1/ws"
+    return f"ws://{LOOPBACK}:{ports['api']}/_stepper/ws"
 
 
 def aws_env(ports: dict) -> dict[str, str]:
@@ -335,6 +335,10 @@ class Remote:
                 return response.status, _decode(response.read())
         except urllib.error.HTTPError as exc:
             return exc.code, _decode(exc.read())
+
+    def ws_headers(self) -> dict[str, str]:
+        """WebSocket 핸드셰이크에 실을 토큰 헤더 — 연결 쪽이 출력·기록에 남기지 않는다."""
+        return {TOKEN_HEADER: self._token}
 
     def healthy(self) -> bool:
         try:
@@ -844,7 +848,7 @@ def wait_ready(ctx: Context, remote: Remote, *, expect_empty: bool, timeout: flo
             )
         ctx.sleep(1.0)
         waited += 1.0
-    incidents = remote.get("/api/v1/incidents")["items"]  # DB·migrate까지 거치는 조회
+    incidents = remote.get("/_stepper/incidents", auth=True)["items"]  # DB·migrate까지 거치는 조회
     if expect_empty and incidents:
         raise Refused(f"초기화했는데 사건 {len(incidents)}건이 남아 있다 — 볼륨이 지워지지 않았다")
     if remote.ping() is None:
