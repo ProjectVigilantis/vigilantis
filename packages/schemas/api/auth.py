@@ -71,13 +71,14 @@ class LoginStep(str, Enum):
 
 
 class UserRole(str, Enum):
-    """앱 역할 3종. 역할 검사는 PR 2(접근 보호)에서 붙는다."""
+    """앱 역할 3종. 조치 실행(POST /api/v1/actions/execute) · 인시던트 종료
+    (POST /api/v1/incidents/{id}/resolve)는 ADMIN · OPERATOR 만 한다(PR 2)."""
 
-    #: 사용자 관리 · 조치 승인 · 조회.
+    #: 사용자 관리 · 조치 승인 · 조회. 사용자 관리 API 는 PR 3.
     ADMIN = "ADMIN"
     #: 조치 승인 · 조회.
     OPERATOR = "OPERATOR"
-    #: 조회 전용 — 조치 승인 요청은 서버가 403 으로 거절한다(PR 2).
+    #: 조회 전용 — 조치 실행 · 종료 요청은 서버가 403 AUTH_FORBIDDEN 으로 거절한다.
     VIEWER = "VIEWER"
 
 

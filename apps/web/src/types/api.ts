@@ -5,7 +5,7 @@ export type IsoDateTime = string;
 
 /* ────────────────────────────── errors.py ────────────────────────────── */
 
-/** REST 공통 오류 코드 21종. 괄호는 계약상 HTTP 상태. */
+/** REST 공통 오류 코드 22종. 괄호는 계약상 HTTP 상태. */
 export type ErrorCode =
   | 'INCIDENT_NOT_FOUND' // 404
   | 'IDEMPOTENCY_KEY_CONFLICT' // 409
@@ -21,6 +21,7 @@ export type ErrorCode =
   | 'AUTH_STEP_CONFLICT' // 409
   | 'AUTH_PASSWORD_POLICY' // 422
   | 'AUTH_ORIGIN_REJECTED' // 403
+  | 'AUTH_FORBIDDEN' // 403 — 역할이 이 조치를 허용하지 않는다(VIEWER의 실행 · 종료, #492 PR 2)
   | 'ACCOUNT_NOT_PROVISIONED' // 403
   | 'ACCOUNT_DISABLED' // 403
   | 'AUTH_EMAIL_DELIVERY_FAILED' // 503
@@ -526,6 +527,12 @@ export interface IncidentsResponse {
 
 /* ─────────────────────────────── ws.py ─────────────────────────────── */
 /* WS 이벤트 봉투. 계약 경로는 `/api/v1/ws`이고 REST와 같은 오리진에 붙는다(#168 · `routers/ws.py`). */
+
+/**
+ * 열린 소켓의 세션이 만료 · 회수되면 서버가 이 코드로 닫는다(reason `AUTH_REQUIRED`, #492 PR 2).
+ * 재연결해도 붙지 않으므로 재시도하지 않고 로그인으로 보낸다. 세션 없이 연 핸드셰이크 거부는 브라우저에 1006으로 보인다.
+ */
+export const WS_CLOSE_AUTH_REQUIRED = 4401;
 
 export type WsEventType =
   | 'INCIDENT_CREATED'

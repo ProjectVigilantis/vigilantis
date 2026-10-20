@@ -5,7 +5,7 @@ from pydantic import ValidationError
 
 from schemas.api.errors import ErrorCode, ErrorResponse
 
-# 계약 원문 21종. 코드가 아니라 이 리터럴 집합이 기대값이다.
+# 계약 원문 22종. 코드가 아니라 이 리터럴 집합이 기대값이다.
 CONTRACT_ERROR_CODES = {
     "INCIDENT_NOT_FOUND",         # 404
     "IDEMPOTENCY_KEY_CONFLICT",   # 409
@@ -21,6 +21,7 @@ CONTRACT_ERROR_CODES = {
     "AUTH_STEP_CONFLICT",         # 409
     "AUTH_PASSWORD_POLICY",       # 422
     "AUTH_ORIGIN_REJECTED",       # 403
+    "AUTH_FORBIDDEN",             # 403 — 역할 불허 (#492 PR 2)
     "ACCOUNT_NOT_PROVISIONED",    # 403
     "ACCOUNT_DISABLED",           # 403
     "AUTH_EMAIL_DELIVERY_FAILED", # 503
