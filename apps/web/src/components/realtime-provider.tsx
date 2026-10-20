@@ -7,10 +7,12 @@ import { useRouter } from 'next/navigation';
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 
 import { apiBaseUrl } from '@/lib/api/client';
+import { navigateToLogin } from '@/lib/auth-redirect';
 import {
   SeenEvents,
   actionFor,
   backoffMs,
+  closeAction,
   websocketUrl,
   type RealtimeAction,
 } from '@/lib/realtime-events';
@@ -149,12 +151,17 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
     // 연결·구독 오류 이벤트는 계약에 없다 — 상태는 수명주기(onclose·onerror)로만 표시한다(§4.8).
     socket.onerror = () => socket.close();
 
-    socket.onclose = () => {
+    socket.onclose = (event) => {
       // 옛 소켓의 지연 close가 새 소켓 참조를 지우고 재시도를 한 번 더 예약하는 것을 막는다.
       // `reconnect()`가 close 직후 동기로 connect()를 부르므로 이 창이 실제로 열린다(PR #181 리뷰).
       if (socketRef.current !== socket) return;
       socketRef.current = null;
       if (!aliveRef.current) return;
+      // 세션이 끝나 서버가 닫았다(4401) — 다시 붙어도 거부되므로 재시도하지 않고 로그인으로 보낸다.
+      if (closeAction(event.code) === 'login') {
+        navigateToLogin();
+        return;
+      }
       scheduleRetry();
     };
   }, [router, scheduleRetry]);

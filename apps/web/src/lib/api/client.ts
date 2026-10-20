@@ -17,6 +17,31 @@ import type {
   TotpSetupResponse,
 } from '@/types/api';
 
+// `node --test`가 별칭을 못 풀어 상대 경로를 쓴다(realtime-events와 같은 이유).
+import { navigateToLogin } from '../auth-redirect.ts';
+
+/**
+ * 요청을 실어 보내는 쪽마다 다른 두 가지 — 덧붙일 헤더와 401 처리(#492 PR 2).
+ *
+ * - 브라우저(기본): 쿠키는 브라우저가 싣는다. 401이면 로그인 화면으로 보낸다(`navigateToLogin`).
+ * - 서버 컴포넌트(`lib/api/server.ts`): Node fetch에는 브라우저 쿠키가 없어 세션 쿠키 **하나만** 헤더로 싣고,
+ *   401이면 `redirect('/login?next=…')`한다.
+ *
+ * 경로 · 응답 타입은 이 파일 하나에만 둔다 — 전송만 바꿔 끼운다(`createReadApi`).
+ */
+export interface ApiTransport {
+  headers?: Record<string, string>;
+  /** 401을 받았을 때 오류를 던지기 전에 부른다. 반환하면 원래 `ApiError`가 그대로 올라간다. */
+  onAuthRequired?: () => void;
+}
+
+const BROWSER: ApiTransport = { onAuthRequired: navigateToLogin };
+/**
+ * 로그인 단계 · 로그아웃. 여기서 오는 401은 세션 만료가 아니라 단계 결과다(`AUTH_FAILED`·`AUTH_CODE_INVALID` 등) —
+ * 로그인 화면이 문구로 처리하고(lib/auth-errors.ts), 로그아웃의 401은 이미 로그아웃된 것이다(user-menu.tsx).
+ */
+const AUTH_FLOW: ApiTransport = {};
+
 /**
  * 계약 엔드포인트의 오리진 — **언제나 실 백엔드(core-api)를 가리킨다.**
  *
@@ -71,16 +96,20 @@ function networkFailure(error: unknown): Error {
 
 async function requestWithStatus<T>(
   path: string,
-  init?: RequestInit,
+  init: RequestInit = {},
+  transport: ApiTransport = BROWSER,
 ): Promise<{ httpStatus: number; body: T }> {
   let response: Response;
   try {
     // `credentials: 'include'` — 세션은 core-api가 심는 HttpOnly 쿠키다(#492). 웹(:3000)과 API(:8000)는
-    // 오리진이 달라 기본값(same-origin)으로는 쿠키가 실리지 않는다. 서버(Node) 쪽 조회에는 영향이 없다.
+    // 오리진이 달라 기본값(same-origin)으로는 쿠키가 실리지 않는다. 서버(Node) 쪽 조회에는 영향이 없다 —
+    // 서버는 `transport.headers`로 세션 쿠키를 직접 싣는다(lib/api/server.ts).
     response = await fetch(`${apiBaseUrl()}/api/v1${path}`, {
       cache: 'no-store',
       credentials: 'include',
       ...init,
+      // 이 파일의 호출부는 헤더를 전부 객체 리터럴로 넘긴다.
+      headers: { ...transport.headers, ...(init.headers as Record<string, string> | undefined) },
     });
   } catch (error) {
     throw networkFailure(error);
@@ -89,47 +118,60 @@ async function requestWithStatus<T>(
 
   if (!response.ok) {
     const detail = (body as ErrorResponse | null)?.error;
-    throw new ApiError(
+    const error = new ApiError(
       response.status,
       detail?.code ?? 'INTERNAL_ERROR',
       detail?.message ?? `요청이 실패했습니다 (HTTP ${response.status})`,
       detail?.request_id ?? '',
     );
+    // 401 = 세션 없음 · 만료 · 회수(`AUTH_REQUIRED`). 처리는 전송이 정한다 — 브라우저는 로그인 이동, 서버는 redirect.
+    if (response.status === 401) transport.onAuthRequired?.();
+    throw error;
   }
   return { httpStatus: response.status, body: body as T };
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  return (await requestWithStatus<T>(path, init)).body;
-}
-
-export function getAssets(): Promise<AssetsResponse> {
-  return request<AssetsResponse>('/assets');
+async function request<T>(path: string, init?: RequestInit, transport?: ApiTransport): Promise<T> {
+  return (await requestWithStatus<T>(path, init, transport)).body;
 }
 
 /**
- * 대시보드 시계열 6축(DSH). `hours`는 조회 창이며 서버가 1–336으로 막는다 —
- * 계약 밖 값은 422다. 기본 72는 시드가 넣는 CPU 관측 구간과 같다.
+ * 서버 컴포넌트도 부르는 조회 4종. 전송을 주입받아 같은 경로 · 타입을 브라우저와 서버가 함께 쓴다 —
+ * 서버 쪽은 `serverApi()`(lib/api/server.ts), 브라우저 쪽은 아래 모듈 export다.
  */
-export function getMetricsTimeseries(hours?: number): Promise<MetricsTimeseriesResponse> {
-  const suffix = hours === undefined ? '' : `?hours=${hours}`;
-  return request<MetricsTimeseriesResponse>(`/metrics/timeseries${suffix}`);
+export function createReadApi(transport: ApiTransport) {
+  return {
+    getAssets(): Promise<AssetsResponse> {
+      return request<AssetsResponse>('/assets', undefined, transport);
+    },
+
+    /**
+     * 대시보드 시계열 6축(DSH). `hours`는 조회 창이며 서버가 1–336으로 막는다 —
+     * 계약 밖 값은 422다. 기본 72는 시드가 넣는 CPU 관측 구간과 같다.
+     */
+    getMetricsTimeseries(hours?: number): Promise<MetricsTimeseriesResponse> {
+      const suffix = hours === undefined ? '' : `?hours=${hours}`;
+      return request<MetricsTimeseriesResponse>(`/metrics/timeseries${suffix}`, undefined, transport);
+    },
+
+    getIncidents(filter?: {
+      status?: IncidentStatus;
+      category?: IncidentCategory;
+    }): Promise<IncidentsResponse> {
+      const query = new URLSearchParams();
+      if (filter?.status) query.set('status', filter.status);
+      if (filter?.category) query.set('category', filter.category);
+      const suffix = query.size > 0 ? `?${query}` : '';
+      return request<IncidentsResponse>(`/incidents${suffix}`, undefined, transport);
+    },
+
+    getIncident(incidentId: string): Promise<IncidentResponse> {
+      return request<IncidentResponse>(`/incidents/${encodeURIComponent(incidentId)}`, undefined, transport);
+    },
+  };
 }
 
-export function getIncidents(filter?: {
-  status?: IncidentStatus;
-  category?: IncidentCategory;
-}): Promise<IncidentsResponse> {
-  const query = new URLSearchParams();
-  if (filter?.status) query.set('status', filter.status);
-  if (filter?.category) query.set('category', filter.category);
-  const suffix = query.size > 0 ? `?${query}` : '';
-  return request<IncidentsResponse>(`/incidents${suffix}`);
-}
-
-export function getIncident(incidentId: string): Promise<IncidentResponse> {
-  return request<IncidentResponse>(`/incidents/${encodeURIComponent(incidentId)}`);
-}
+export const { getAssets, getMetricsTimeseries, getIncidents, getIncident } = createReadApi(BROWSER);
 
 /**
  * 관제자 종료 처리(#199). **Idempotency Key를 받지 않는다** — 종료는 AWS를 바꾸지 않고
@@ -169,41 +211,45 @@ export async function executeAction(
 /* ──────────────────────────── /auth (#492 PR 1) ──────────────────────────── */
 /* 진행 · 세션 쿠키는 서버가 심고 읽는다. 여기서는 단계 결과만 받는다. 비밀번호 · 코드는 로그하지 않는다. */
 
-function postJson<T>(path: string, body?: unknown): Promise<T> {
-  return request<T>(path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body ?? {}),
-  });
+function postJson<T>(path: string, body?: unknown, transport?: ApiTransport): Promise<T> {
+  return request<T>(
+    path,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body ?? {}),
+    },
+    transport,
+  );
 }
 
 export function login(email: string, password: string): Promise<LoginStepResponse> {
-  return postJson<LoginStepResponse>('/auth/login', { email, password });
+  return postJson<LoginStepResponse>('/auth/login', { email, password }, AUTH_FLOW);
 }
 
 export function submitNewPassword(newPassword: string): Promise<LoginStepResponse> {
-  return postJson<LoginStepResponse>('/auth/login/new-password', { new_password: newPassword });
+  return postJson<LoginStepResponse>('/auth/login/new-password', { new_password: newPassword }, AUTH_FLOW);
 }
 
 /** 등록 비밀키를 받는다. 호출할 때마다 서버가 새 키를 만들 수 있어 단계 진입 시 1회만 부른다. */
 export function startTotpSetup(): Promise<TotpSetupResponse> {
-  return postJson<TotpSetupResponse>('/auth/login/totp-setup');
+  return postJson<TotpSetupResponse>('/auth/login/totp-setup', undefined, AUTH_FLOW);
 }
 
 export function verifyTotpSetup(code: string): Promise<LoginStepResponse> {
-  return postJson<LoginStepResponse>('/auth/login/totp-setup/verify', { code });
+  return postJson<LoginStepResponse>('/auth/login/totp-setup/verify', { code }, AUTH_FLOW);
 }
 
 export function submitTotp(code: string): Promise<LoginStepResponse> {
-  return postJson<LoginStepResponse>('/auth/login/totp', { code });
+  return postJson<LoginStepResponse>('/auth/login/totp', { code }, AUTH_FLOW);
 }
 
 export function submitEmailVerification(code: string): Promise<LoginStepResponse> {
-  return postJson<LoginStepResponse>('/auth/login/email-verification', { code });
+  return postJson<LoginStepResponse>('/auth/login/email-verification', { code }, AUTH_FLOW);
 }
 
 export async function logout(): Promise<void> {
-  await postJson<null>('/auth/logout');
+  await postJson<null>('/auth/logout', undefined, AUTH_FLOW);
 }
 
 /** 유휴 연장 — **사용자 입력이 있을 때만** 부른다(components/auth/user-menu.tsx). */
@@ -211,7 +257,10 @@ export async function recordActivity(): Promise<void> {
   await postJson<null>('/auth/activity');
 }
 
-/** 현재 사용자. 미로그인(401)은 오류가 아니라 null이다. 유휴를 연장하지 않는다. */
+/**
+ * 현재 사용자. 미로그인(401)은 오류가 아니라 null이다. 유휴를 연장하지 않는다.
+ * 브라우저 전송이라 401이면 로그인 이동도 함께 걸린다 — 보호된 화면에서 `/me`가 401이면 세션이 끝난 것이다.
+ */
 export async function getMe(): Promise<CurrentUserResponse | null> {
   try {
     return await request<CurrentUserResponse>('/auth/me');

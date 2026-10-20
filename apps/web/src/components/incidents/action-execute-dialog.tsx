@@ -22,6 +22,7 @@ import {
   approvalAssetFacts,
   isDestructiveRunbook,
 } from '@/lib/enum-labels';
+import { VIEWER_ACTION_BLOCKED } from '@/lib/roles';
 import type { ExecuteActionResponse, RunbookId } from '@/types/api';
 
 /**
@@ -48,8 +49,11 @@ export interface ExecuteOutcome {
 }
 
 /** §4.6 응답 처리 표의 오류 4종 — 모달을 유지할지, 닫고 상세를 재조회할지 가른다. */
-function messageFor(error: ApiError): { text: string; keepOpen: boolean } {
+function messageFor(error: ApiError): { text: string; keepOpen: boolean; retryable?: false } {
   switch (error.code) {
+    case 'AUTH_FORBIDDEN':
+      // 역할이 막았다(#492 PR 2) — 다시 눌러도 같은 403이므로 실행 버튼을 잠근 채 둔다.
+      return { text: VIEWER_ACTION_BLOCKED, keepOpen: true, retryable: false };
     case 'IDEMPOTENCY_KEY_CONFLICT':
       return { text: '요청이 변경되었습니다. 화면을 새로고침한 뒤 다시 시도해 주세요.', keepOpen: true };
     case 'PROPOSAL_NOT_EXECUTABLE':
@@ -88,6 +92,8 @@ export function ActionExecuteDialog({
   const [selected, setSelected] = useState<RunbookId | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string>('');
+  /** 재시도로 풀리지 않는 거부(403 `AUTH_FORBIDDEN`)를 받았다 — 실행 버튼을 잠근다. */
+  const [blocked, setBlocked] = useState(false);
   /**
    * 중복 클릭의 **동기 잠금**. `pending`은 state라 `setPending(true)` 뒤 리렌더가 오기 전까지
    * 버튼이 그대로 열려 있어, 같은 tick에 연달아 눌리면 요청이 그 횟수만큼 나간다(#217 실측:
@@ -110,6 +116,7 @@ export function ActionExecuteDialog({
     setSelected(null);
     setPending(false);
     setError('');
+    setBlocked(false);
     onClose();
   }
 
@@ -128,15 +135,19 @@ export function ActionExecuteDialog({
         caught instanceof ApiError
           ? caught
           : new ApiError(0, 'INTERNAL_ERROR', '요청을 보내지 못했습니다', '');
-      const { text, keepOpen } = messageFor(apiError);
+      const { text, keepOpen, retryable } = messageFor(apiError);
       if (!keepOpen) {
         close();
         onProposalStale();
         return;
       }
-      // 모달을 열어 둔 채 다시 누를 수 있는 오류다 — 잠금도 같이 푼다.
       setError(text);
       setPending(false);
+      if (retryable === false) {
+        setBlocked(true); // 잠금은 모달을 닫을 때(close) 풀린다
+        return;
+      }
+      // 모달을 열어 둔 채 다시 누를 수 있는 오류다 — 잠금도 같이 푼다.
       inFlight.current = false;
     }
   }
@@ -252,7 +263,7 @@ export function ActionExecuteDialog({
             취소
           </Button>
           {/* 첫 클릭 즉시 비활성 + 진행 표시로 전환한다(§4.6). */}
-          <Button type="button" onClick={submit} disabled={pending || runbookId === null}>
+          <Button type="button" onClick={submit} disabled={pending || blocked || runbookId === null}>
             {pending ? '요청 중…' : isRecovery ? '해제 실행' : '실행'}
           </Button>
         </DialogFooter>

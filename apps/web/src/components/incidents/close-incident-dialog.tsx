@@ -9,6 +9,7 @@ import {
 import { ApiError, resolveIncident } from '@/lib/api/client';
 import { arnShort, incidentTitle } from '@/lib/enum-labels';
 import { closureAction, closureBlockedReason } from '@/lib/incident-closure';
+import { VIEWER_ACTION_BLOCKED } from '@/lib/roles';
 import type { IncidentResponse } from '@/types/api';
 
 export function CloseIncidentDialog({
@@ -24,6 +25,7 @@ export function CloseIncidentDialog({
   const [note, setNote] = useState('');
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
+  const [forbidden, setForbidden] = useState(false);
   const inFlight = useRef(false);
   const shownRisk = incident.reviewed_risk_level ?? incident.initial_risk_level;
   const action = closureAction(incident);
@@ -36,7 +38,7 @@ export function CloseIncidentDialog({
   }
 
   async function submit() {
-    if (inFlight.current || blockedReason) return;
+    if (inFlight.current || blockedReason || forbidden) return;
     inFlight.current = true;
     setPending(true);
     setError('');
@@ -49,6 +51,10 @@ export function CloseIncidentDialog({
       // 서버 잠금 아래에서 승인·분석·종료 경합을 최종 판정한다. 낡은 화면은 다시 읽는다.
       if (apiError.code === 'INCIDENT_NOT_RESOLVABLE' || apiError.code === 'INCIDENT_NOT_FOUND') {
         onStale();
+      } else if (apiError.code === 'AUTH_FORBIDDEN') {
+        // 역할이 막았다(#492 PR 2) — 다시 눌러도 같은 403이라 버튼을 잠근다.
+        setError(VIEWER_ACTION_BLOCKED);
+        setForbidden(true);
       } else {
         setError(apiError.message);
       }
@@ -94,7 +100,7 @@ export function CloseIncidentDialog({
         {error ? <p role="alert" className="text-destructive text-sm">{error}</p> : null}
         <DialogFooter>
           <Button type="button" variant="outline" onClick={close} disabled={pending}>취소</Button>
-          <Button type="button" onClick={submit} disabled={pending || !!blockedReason}>
+          <Button type="button" onClick={submit} disabled={pending || forbidden || !!blockedReason}>
             {pending ? '종료 처리 중…' : action.label}
           </Button>
         </DialogFooter>

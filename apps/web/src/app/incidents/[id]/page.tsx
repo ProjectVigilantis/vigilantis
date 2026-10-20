@@ -2,7 +2,8 @@
 
 import { ErrorState } from '@/components/error-state';
 import { IncidentDetail } from '@/components/incidents/incident-detail';
-import { getAssets, getIncident } from '@/lib/api/client';
+import { orNull, serverApi } from '@/lib/api/server';
+import { unstable_rethrow } from 'next/navigation';
 
 /**
  * 404 INCIDENT_NOT_FOUND는 정상 경로다(삭제·오타 링크) — 오류 경계로 던지지 않고 §4.9 전체 오류
@@ -18,15 +19,18 @@ export default async function IncidentDetailPage({
   const { id } = await params;
   // `?execution=`은 INC-001 목록에서 실행하고 넘어온 경우다(§4.4 → §4.7). ACT-002를 연 채로 연다.
   const { execution } = await searchParams;
+  // 세션 쿠키만 실어 부르고, 401이면 로그인으로 redirect한다(lib/api/server.ts).
+  const { getAssets, getIncident } = await serverApi();
 
   let incident;
   try {
     incident = await getIncident(id);
   } catch (error) {
+    unstable_rethrow(error); // 401 → 로그인 redirect는 삼키지 않는다
     return <ErrorState error={error} variant="page" />;
   }
 
-  const assets = await getAssets().catch(() => null);
+  const assets = await orNull(getAssets());
 
   return (
     <IncidentDetail

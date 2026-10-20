@@ -6,34 +6,33 @@
 
 import { ErrorState } from '@/components/error-state';
 import { SecurityView } from '@/components/security/security-view';
-import { getAssets, getIncidents, getMetricsTimeseries } from '@/lib/api/client';
+import { orError, orNull, serverApi } from '@/lib/api/server';
 import { parsePreset } from '@/lib/incident-filter';
 import type { IncidentListItem } from '@/types/api';
+import { unstable_rethrow } from 'next/navigation';
 
 export default async function SecurityPage({ searchParams }: PageProps<'/security'>) {
   // 제목 옆 `마지막 갱신` — 다시 그려질 때마다 새로 찍힌다(auto-refresh.tsx).
   const renderedAt = new Date().toISOString();
+  // 세션 쿠키만 실어 부르고, 401이면 로그인으로 redirect한다(lib/api/server.ts).
+  const { getAssets, getIncidents, getMetricsTimeseries } = await serverApi();
   // `?tab=incidents`·`?preset=`은 구 보안 인시던트 목록(`/incidents`)에서 redirect돼 오는 딥링크다.
   const { asset, tab, preset } = await searchParams;
   // 오류를 버리지 않고 들고 간다 — 인시던트 탭이 그것을 **대기 0건이 아니라 오류로** 그려야 한다.
-  const incidentsPromise = getIncidents().then(
-    (res) => ({ items: res.items, error: null as unknown }),
-    (error: unknown) => ({ items: null, error }),
-  );
+  // 401(로그인 redirect)만은 접지 않는다 — orError · orNull이 그대로 던진다.
+  const incidentsPromise = orError(getIncidents());
   // 시계열은 개방 SG 추이와 상세 Drawer의 스파크라인이 쓴다 — 실패해도 화면은 뜬다.
-  const metricsPromise = getMetricsTimeseries().then(
-    (res) => res,
-    () => null,
-  );
+  const metricsPromise = orNull(getMetricsTimeseries());
 
   let assets;
   try {
     assets = await getAssets();
   } catch (error) {
+    unstable_rethrow(error); // 401 → 로그인 redirect는 삼키지 않는다
     return <ErrorState error={error} />;
   }
   const listed = await incidentsPromise;
-  const incidents = listed.items;
+  const incidents = listed.value === null ? null : listed.value.items;
   const metrics = await metricsPromise;
 
   // 자산 관제와 같은 역조인 — Drawer와 카드의 인시던트 건수가 쓴다.

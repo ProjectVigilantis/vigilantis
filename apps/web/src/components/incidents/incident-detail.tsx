@@ -10,6 +10,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 
+import { useOperateBlockedReason } from '@/components/auth/session-provider';
 import { CloseIncidentDialog } from '@/components/incidents/close-incident-dialog';
 import { CopyButton } from '@/components/copy-button';
 import { Row } from '@/components/detail-row';
@@ -362,11 +363,14 @@ function AgentWaitNotice({
 function ExecutionsArea({
   incident,
   locked,
+  roleBlocked,
   onRecover,
 }: {
   incident: IncidentResponse;
   /** `ACTION_IN_PROGRESS`면 같은 Incident의 실행 버튼을 전부 비활성화한다(§4.5). */
   locked: boolean;
+  /** 역할이 조치를 막는 이유(조회 전용 · 역할 미확인). null이면 누를 수 있다(#492 PR 2). */
+  roleBlocked: string | null;
   onRecover: (runbookId: RunbookId, originExecutionId: string) => void;
 }) {
   if (incident.executions.length === 0) return null;
@@ -391,12 +395,15 @@ function ExecutionsArea({
                     type="button"
                     variant="outline"
                     size="sm"
-                    disabled={locked}
+                    disabled={locked || roleBlocked !== null}
                     onClick={() => onRecover(runbookId, execution.execution_id)}
                   >
                     {RUNBOOK_LABELS[runbookId]}
                   </Button>
                 ))}
+                {roleBlocked !== null && execution.available_recovery_runbook_ids.length > 0 ? (
+                  <span className="text-muted-foreground text-xs">{roleBlocked}</span>
+                ) : null}
               </div>
             </Card>
           </li>
@@ -428,6 +435,7 @@ function ProposalActions({
   incident,
   assets,
   locked,
+  roleBlocked,
   onExecute,
   onCloseIncident,
 }: {
@@ -435,6 +443,8 @@ function ProposalActions({
   /** 제안의 `target_arn`을 조인해 승인 모달에 자산 사실값을 넘긴다(#183). */
   assets: AssetItem[];
   locked: boolean;
+  /** 역할이 조치를 막는 이유(조회 전용 · 역할 미확인). null이면 누를 수 있다(#492 PR 2). */
+  roleBlocked: string | null;
   onExecute: (candidates: ActionCandidate[]) => void;
   onCloseIncident: () => void;
 }) {
@@ -446,7 +456,7 @@ function ProposalActions({
     <div className="flex flex-wrap items-center gap-3">
       <Button
         type="button"
-        disabled={locked}
+        disabled={locked || roleBlocked !== null}
         onClick={() =>
           onExecute(
             incident.recommendations.map((r) => ({
@@ -461,11 +471,13 @@ function ProposalActions({
         {approveLabel}
       </Button>
       <Button type="button" variant="outline" onClick={onCloseIncident}
-        disabled={locked || closureBlockedReason(incident) !== null}
+        disabled={locked || roleBlocked !== null || closureBlockedReason(incident) !== null}
         title={closureBlockedReason(incident) ?? undefined}>
         {closureAction(incident).label}
       </Button>
-      {locked ? (
+      {roleBlocked !== null ? (
+        <span className="text-muted-foreground text-xs">{roleBlocked}</span>
+      ) : locked ? (
         <span className="text-muted-foreground text-xs">
           진행 중인 실행이 있어 새 실행을 받지 않습니다.
         </span>
@@ -494,6 +506,8 @@ export function IncidentDetail({
   openExecutionId?: string | null;
 }) {
   const router = useRouter();
+  /** 조회 전용(VIEWER) · 역할 미확인이면 실행 · 복구 · 종료 버튼을 막는다. 화면 편의이고 실제 차단은 서버 403이다. */
+  const roleBlocked = useOperateBlockedReason();
   // 조인은 목록에서 찾는 것뿐이라 props에서만 파생한다(하이드레이션 안전). 시연 규모(자산 약 22건)에서
   // Map을 세울 이유가 없다 — 후보는 많아야 몇 건이다.
   const subject = assets.find((a) => a.arn === incident.subject_arn) ?? null;
@@ -724,6 +738,7 @@ export function IncidentDetail({
       <ExecutionsArea
         incident={incident}
         locked={locked}
+        roleBlocked={roleBlocked}
         onRecover={openRecovery}
       />
 
@@ -775,8 +790,8 @@ export function IncidentDetail({
         )}
       </Section>
 
-      <ProposalActions incident={incident} assets={assets} locked={locked} onExecute={openAction}
-        onCloseIncident={() => setClosing(true)} />
+      <ProposalActions incident={incident} assets={assets} locked={locked} roleBlocked={roleBlocked}
+        onExecute={openAction} onCloseIncident={() => setClosing(true)} />
 
       {incident.recommendations.length === 0 ? (
       <Section title={incident.status === 'RESOLVED' ? '종료 기록' : '인시던트 종료'}>
@@ -792,11 +807,12 @@ export function IncidentDetail({
         ) : (
           <div className="flex flex-col items-start gap-2">
             <p className="text-muted-foreground text-sm">
-              {closureBlockedReason(incident) ?? (locked
+              {roleBlocked ?? closureBlockedReason(incident) ?? (locked
                 ? '진행 중인 실행이 끝난 뒤 종료할 수 있습니다.'
                 : '현재 차단·설정을 변경하지 않고 종료합니다.')}
             </p>
-            <Button type="button" variant="outline" disabled={locked || closureBlockedReason(incident) !== null}
+            <Button type="button" variant="outline"
+              disabled={locked || roleBlocked !== null || closureBlockedReason(incident) !== null}
               onClick={() => setClosing(true)}>
               {closureAction(incident).label}
             </Button>

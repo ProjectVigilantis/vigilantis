@@ -20,6 +20,7 @@ import { useRouter } from 'next/navigation';
 import { useMemo, useRef, useState } from 'react';
 
 import { ActionExecuteDialog } from '@/components/incidents/action-execute-dialog';
+import { useCanOperate } from '@/components/auth/session-provider';
 import { EmptyState } from '@/components/empty-state';
 import { ErrorState } from '@/components/error-state';
 import { FilterSelect } from '@/components/filter-select';
@@ -84,6 +85,7 @@ export function IncidentsView({
   subjectArns?: ReadonlySet<string> | null;
 }) {
   const router = useRouter();
+  const operable = useCanOperate();
   const [preset, setPreset] = useState<IncidentPreset>(initialPreset);
   const [status, setStatus] = useState<string>(ALL);
   const [risk, setRisk] = useState<string>(ALL);
@@ -271,7 +273,8 @@ export function IncidentsView({
             <IncidentCard
               key={incident.incident_id}
               incident={incident}
-              showExecute={pendingOnly}
+              // 조회 전용 계정(VIEWER) · 역할 미확인이면 [조치 실행]을 숨긴다 — 실제 차단은 서버 403이다(#492 PR 2).
+              showExecute={pendingOnly && operable}
               executePending={openingId === incident.incident_id}
               onExecute={openExecute}
             />
