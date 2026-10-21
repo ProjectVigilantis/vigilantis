@@ -42,9 +42,12 @@ def make_event(**overrides) -> EventSnapshot:
     return EventSnapshot(**values)
 
 
+TENANT = "11111111-1111-4111-8111-111111111111"
+
+
 def make_route(channel="SLACK", destination=WEBHOOK, region=None) -> Route:
     return Route(
-        tenant_id="tenant-1", aws_account_id="123456789012", channel=channel,
+        tenant_id=TENANT, aws_account_id="123456789012", channel=channel,
         fingerprint="fp", destination=destination, region=region,
     )
 
@@ -95,7 +98,7 @@ def test_pr1_events_render_both_channels(kind, phase, outcome, title, fields):
     assert payload["text"] == SLACK_FALLBACK_TEXT
     assert payload["mrkdwn"] is False
     assert f"{BASE}/incidents/inc-1" in joined
-    assert "tenant-1" in joined and "123456789012" in joined and "evt-1" in joined
+    assert TENANT in joined and "123456789012" in joined and "evt-1" in joined
     assert kind in joined and phase in joined
     body = sns_body(event, make_route("SNS", TOPIC, "ap-northeast-2"), BASE)
     assert f"{BASE}/incidents/inc-1" in body and kind in body
