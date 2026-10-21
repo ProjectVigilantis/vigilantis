@@ -3,39 +3,55 @@
 // 로그인 단계 화면(#492 PR 1). 서버가 `next_step`으로 다음 단계를 정하고, 여기서는 그 값으로 패널만 고른다.
 // 진행 · 세션은 서버의 HttpOnly 쿠키가 들고 있다 — 브라우저는 토큰을 보지 않는다.
 //
-// 비밀값 취급: 비밀번호는 React 상태에 두지 않고 제출 순간 FormData에서만 읽는다. 코드 · TOTP 등록 키는
-// 해당 패널의 메모리 상태로만 있고 패널을 떠나면 사라진다. 어떤 값도 저장소(localStorage 등)나 콘솔에 남기지 않는다.
+// 비밀번호 재설정(#492 PR 3)은 서버 단계가 아니라 이 화면의 단계(FORGOT_*)다 — 코드 요청 → 코드 + 새 비밀번호 확인 →
+// 비밀번호 단계로 돌아와 새 비밀번호로 로그인한다(재설정 API는 세션을 만들지 않는다).
+//
+// 비밀값 취급: 비밀번호는 React 상태에 두지 않고 제출 순간 FormData에서만 읽는다(새 비밀번호 칸은 조건 충족 여부
+// boolean만 상태에 둔다). 코드 · TOTP 등록 키는 해당 패널의 메모리 상태로만 있고 패널을 떠나면 사라진다.
+// 어떤 값도 저장소(localStorage 등)나 콘솔에 남기지 않는다. 이메일 · 비밀번호는 다듬지 않고(trim 없음) 입력 그대로 보낸다.
 
 import QRCode from 'qrcode';
 import Image from 'next/image';
 import { useRouter } from 'next/navigation';
-import { useState, type FormEvent } from 'react';
+import { useRef, useState, type FormEvent } from 'react';
 
+import { HangulWarnedInput } from '@/components/auth/hangul-warned-input';
+import { NewPasswordFields } from '@/components/auth/new-password-fields';
+import { INPUT_CLASS as INPUT, LABEL_CLASS as LABEL } from '@/components/form-classes';
 import { Button } from '@/components/ui/button';
 import {
   ApiError,
+  confirmPasswordReset,
   login,
+  requestPasswordReset,
   startTotpSetup,
   submitEmailVerification,
   submitNewPassword,
   submitTotp,
   verifyTotpSetup,
 } from '@/lib/api/client';
-import { authErrorView } from '@/lib/auth-errors';
+import { authErrorView, resetConfirmErrorMessage, resetRequestErrorMessage } from '@/lib/auth-errors';
+import { newPasswordError } from '@/lib/password-policy';
 import { safeReturnTo } from '@/lib/return-to';
-import { NEW_PASSWORD_MIN_LENGTH, type LoginStep, type LoginStepResponse } from '@/types/api';
+import type { LoginStep, LoginStepResponse } from '@/types/api';
 
-type Step = 'PASSWORD' | Exclude<LoginStep, 'COMPLETED'>;
+type Step = 'PASSWORD' | 'FORGOT_REQUEST' | 'FORGOT_CONFIRM' | Exclude<LoginStep, 'COMPLETED'>;
 
 interface TotpSetup {
   secret: string;
   qrDataUrl: string;
 }
 
-const INPUT =
-  'h-10 w-full rounded-md border border-input bg-transparent px-3 text-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50';
-const LABEL = 'text-sm font-medium';
 const QR_SIZE = 192;
+
+/** 쓰던 세션이 끝나 로그인으로 왔다(`?ended=1`). 이유(만료 · 로그아웃 · 다른 곳 로그인 · 회수)는 알 수 없어 말하지 않는다. */
+const SESSION_ENDED_NOTICE = '로그인 세션이 종료되었습니다. 다시 로그인해 주세요.';
+/** 사용자 존재 여부 · 발송 대상을 드러내지 않는다 — 서버도 항상 같은 204다. */
+const RESET_CODE_REQUESTED =
+  '등록된 계정이면 재설정 코드가 발송됩니다. 받은 코드와 새 비밀번호를 입력해 주세요.';
+const RESET_DONE = '비밀번호를 바꿨습니다. 이 계정의 기존 로그인은 모두 종료되었습니다. 새 비밀번호로 로그인해 주세요.';
+
+const codeOf = (cause: unknown) => (cause instanceof ApiError ? cause.code : null);
 
 const HEADINGS: Record<Step, { title: string; description: string }> = {
   PASSWORD: { title: '로그인', description: 'Vigilantis 계정으로 로그인하세요.' },
@@ -52,21 +68,39 @@ const HEADINGS: Record<Step, { title: string; description: string }> = {
     title: '이메일 확인',
     description: '이메일로 받은 6자리 코드를 입력하세요.',
   },
+  FORGOT_REQUEST: {
+    title: '비밀번호 재설정',
+    description: '계정 이메일을 입력하면 재설정 코드를 보내 드립니다.',
+  },
+  FORGOT_CONFIRM: {
+    title: '새 비밀번호 설정',
+    description: '받은 6자리 코드와 새 비밀번호를 입력하세요.',
+  },
 };
 
-export function LoginFlow() {
+export function LoginFlow({ sessionEnded = false }: { sessionEnded?: boolean }) {
   const router = useRouter();
   const [step, setStep] = useState<Step>('PASSWORD');
   /** 비밀이 아닌 값이라 상태에 둔다 — 처음부터 다시 할 때 이메일을 다시 치지 않게. */
   const [email, setEmail] = useState('');
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** 오류가 아닌 안내(세션 종료 · 재설정 진행). 다음 제출 때 지운다. */
+  const [notice, setNotice] = useState<string | null>(sessionEnded ? SESSION_ENDED_NOTICE : null);
   const [totpSetup, setTotpSetup] = useState<TotpSetup | null>(null);
+  const loginEmailRef = useRef<HTMLInputElement>(null);
 
   function fail(cause: unknown) {
-    const view = authErrorView(cause instanceof ApiError ? cause.code : null);
+    const view = authErrorView(codeOf(cause));
     setError(view.message);
     if (view.restart) restart();
+  }
+
+  /** 단계 전환과 함께 안내 · 오류를 지운다. */
+  function goTo(next: Step, nextNotice: string | null = null) {
+    setError(null);
+    setNotice(nextNotice);
+    setStep(next);
   }
 
   function restart() {
@@ -96,6 +130,7 @@ export function LoginFlow() {
   async function advance(call: () => Promise<LoginStepResponse>) {
     setPending(true);
     setError(null);
+    setNotice(null);
     let next: LoginStep;
     try {
       next = (await call()).next_step;
@@ -119,7 +154,7 @@ export function LoginFlow() {
   function onPassword(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    const nextEmail = String(form.get('email') ?? '').trim();
+    const nextEmail = String(form.get('email') ?? '');
     setEmail(nextEmail);
     void advance(() => login(nextEmail, String(form.get('password') ?? '')));
   }
@@ -128,15 +163,51 @@ export function LoginFlow() {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const password = String(form.get('new_password') ?? '');
-    if (password.length < NEW_PASSWORD_MIN_LENGTH) {
-      setError(`비밀번호는 ${NEW_PASSWORD_MIN_LENGTH}자 이상이어야 합니다.`);
-      return;
-    }
-    if (password !== String(form.get('confirm_password') ?? '')) {
-      setError('두 비밀번호가 서로 다릅니다.');
+    // 조건을 못 채우면 API를 부르지 않는다 — 자동 입력으로 실시간 표시를 놓쳤어도 여기서 다시 판정한다.
+    const problem = newPasswordError(password, String(form.get('confirm_password') ?? ''));
+    if (problem !== null) {
+      setError(problem);
       return;
     }
     void advance(() => submitNewPassword(password));
+  }
+
+  async function onResetRequest(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const nextEmail = String(new FormData(event.currentTarget).get('email') ?? '');
+    setEmail(nextEmail);
+    setPending(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await requestPasswordReset(nextEmail);
+    } catch (cause) {
+      setError(resetRequestErrorMessage(codeOf(cause)));
+      setPending(false);
+      return;
+    }
+    setPending(false);
+    goTo('FORGOT_CONFIRM', RESET_CODE_REQUESTED);
+  }
+
+  async function onResetConfirm(code: string, password: string, confirm: string) {
+    const problem = newPasswordError(password, confirm);
+    if (problem !== null) {
+      setError(problem);
+      return;
+    }
+    setPending(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await confirmPasswordReset(email, code, password);
+    } catch (cause) {
+      setError(resetConfirmErrorMessage(codeOf(cause)));
+      setPending(false);
+      return;
+    }
+    setPending(false);
+    goTo('PASSWORD', RESET_DONE);
   }
 
   const heading = HEADINGS[step];
@@ -152,9 +223,17 @@ export function LoginFlow() {
         <p className="text-sm text-muted-foreground wrap-anywhere">
           {step === 'EMAIL_VERIFICATION_REQUIRED' && email
             ? `${email}(으)로 보낸 6자리 코드를 입력하세요.`
-            : heading.description}
+            : step === 'FORGOT_CONFIRM' && email
+              ? `${email} 계정의 재설정 코드와 새 비밀번호를 입력하세요.`
+              : heading.description}
         </p>
       </header>
+
+      {notice ? (
+        <p role="status" className="rounded-md bg-muted px-3 py-2 text-sm">
+          {notice}
+        </p>
+      ) : null}
 
       {error ? (
         <p role="alert" className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -168,7 +247,8 @@ export function LoginFlow() {
             <label htmlFor="login-email" className={LABEL}>
               이메일
             </label>
-            <input
+            <HangulWarnedInput
+              ref={loginEmailRef}
               id="login-email"
               name="email"
               type="email"
@@ -183,7 +263,7 @@ export function LoginFlow() {
             <label htmlFor="login-password" className={LABEL}>
               비밀번호
             </label>
-            <input
+            <HangulWarnedInput
               id="login-password"
               name="password"
               type="password"
@@ -196,49 +276,70 @@ export function LoginFlow() {
           <Button type="submit" size="lg" className="w-full" disabled={pending}>
             {pending ? '확인 중…' : '로그인'}
           </Button>
+          <Button
+            type="button"
+            variant="link"
+            size="sm"
+            className="self-center"
+            disabled={pending}
+            onClick={() => {
+              // 적어 둔 이메일을 재설정 칸으로 넘긴다(비밀이 아닌 값).
+              setEmail(loginEmailRef.current?.value ?? email);
+              goTo('FORGOT_REQUEST');
+            }}
+          >
+            비밀번호를 잊으셨나요?
+          </Button>
         </form>
       ) : null}
 
       {step === 'NEW_PASSWORD_REQUIRED' ? (
         <form className="flex flex-col gap-4" onSubmit={onNewPassword}>
+          <NewPasswordFields idPrefix="login" disabled={pending} autoFocus />
+          <Button type="submit" size="lg" className="w-full" disabled={pending}>
+            {pending ? '변경 중…' : '비밀번호 변경'}
+          </Button>
+        </form>
+      ) : null}
+
+      {step === 'FORGOT_REQUEST' ? (
+        <form className="flex flex-col gap-4" onSubmit={onResetRequest}>
           <div className="flex flex-col gap-1.5">
-            <label htmlFor="login-new-password" className={LABEL}>
-              새 비밀번호
+            <label htmlFor="reset-email" className={LABEL}>
+              이메일
             </label>
-            <input
-              id="login-new-password"
-              name="new_password"
-              type="password"
-              autoComplete="new-password"
+            <HangulWarnedInput
+              id="reset-email"
+              name="email"
+              type="email"
+              autoComplete="username"
               required
-              minLength={NEW_PASSWORD_MIN_LENGTH}
-              aria-describedby="login-new-password-hint"
               autoFocus
-              disabled={pending}
-              className={INPUT}
-            />
-            <p id="login-new-password-hint" className="text-xs text-muted-foreground">
-              {NEW_PASSWORD_MIN_LENGTH}자 이상, 대문자·소문자·숫자·기호를 모두 포함하세요.
-            </p>
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <label htmlFor="login-confirm-password" className={LABEL}>
-              새 비밀번호 확인
-            </label>
-            <input
-              id="login-confirm-password"
-              name="confirm_password"
-              type="password"
-              autoComplete="new-password"
-              required
+              defaultValue={email}
               disabled={pending}
               className={INPUT}
             />
           </div>
           <Button type="submit" size="lg" className="w-full" disabled={pending}>
-            {pending ? '변경 중…' : '비밀번호 변경'}
+            {pending ? '요청 중…' : '재설정 코드 받기'}
           </Button>
         </form>
+      ) : null}
+
+      {step === 'FORGOT_CONFIRM' ? (
+        <>
+          <ResetConfirmForm pending={pending} onSubmit={onResetConfirm} />
+          <Button
+            type="button"
+            variant="link"
+            size="sm"
+            className="self-center"
+            disabled={pending}
+            onClick={() => goTo('FORGOT_REQUEST')}
+          >
+            코드 다시 받기
+          </Button>
+        </>
       ) : null}
 
       {step === 'TOTP_SETUP_REQUIRED' ? (
@@ -310,17 +411,86 @@ export function LoginFlow() {
           disabled={pending}
           onClick={() => {
             setError(null);
+            setNotice(null);
             restart();
           }}
         >
-          처음부터 다시 로그인
+          {step === 'FORGOT_REQUEST' || step === 'FORGOT_CONFIRM' ? '로그인으로 돌아가기' : '처음부터 다시 로그인'}
         </Button>
       ) : null}
     </section>
   );
 }
 
-/** 6자리 숫자 코드 입력. 붙여넣은 값의 공백 · 하이픈은 지우고 숫자 6개만 남긴다. */
+/** 6자리 숫자 코드 칸. 붙여넣은 값의 공백 · 하이픈은 지우고 숫자 6개만 남긴다. */
+function CodeField({
+  id,
+  label,
+  value,
+  pending,
+  autoFocus = true,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  pending: boolean;
+  autoFocus?: boolean;
+  onChange: (code: string) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <label htmlFor={id} className={LABEL}>
+        {label}
+      </label>
+      <input
+        id={id}
+        name="code"
+        type="text"
+        inputMode="numeric"
+        autoComplete="one-time-code"
+        pattern="[0-9]{6}"
+        required
+        autoFocus={autoFocus}
+        value={value}
+        onChange={(event) => onChange(event.target.value.replace(/\D/g, '').slice(0, 6))}
+        disabled={pending}
+        className={`${INPUT} font-mono tracking-[0.3em]`}
+      />
+    </div>
+  );
+}
+
+/** 재설정 확인 — 코드 + 새 비밀번호를 한 번에 낸다. 판정 · 호출은 부모(`onResetConfirm`)가 한다. */
+function ResetConfirmForm({
+  pending,
+  onSubmit,
+}: {
+  pending: boolean;
+  onSubmit: (code: string, password: string, confirm: string) => void;
+}) {
+  const [code, setCode] = useState('');
+
+  return (
+    <form
+      className="flex flex-col gap-4"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (code.length !== 6) return;
+        const form = new FormData(event.currentTarget);
+        onSubmit(code, String(form.get('new_password') ?? ''), String(form.get('confirm_password') ?? ''));
+      }}
+    >
+      <CodeField id="reset-code" label="재설정 코드" value={code} pending={pending} onChange={setCode} />
+      <NewPasswordFields idPrefix="reset" disabled={pending} />
+      <Button type="submit" size="lg" className="w-full" disabled={pending || code.length !== 6}>
+        {pending ? '변경 중…' : '비밀번호 재설정'}
+      </Button>
+    </form>
+  );
+}
+
+/** 6자리 숫자 코드 하나만 내는 단계(TOTP · 이메일 확인). */
 function CodeForm({
   id,
   label,
@@ -344,25 +514,7 @@ function CodeForm({
         if (code.length === 6) onSubmit(code);
       }}
     >
-      <div className="flex flex-col gap-1.5">
-        <label htmlFor={id} className={LABEL}>
-          {label}
-        </label>
-        <input
-          id={id}
-          name="code"
-          type="text"
-          inputMode="numeric"
-          autoComplete="one-time-code"
-          pattern="[0-9]{6}"
-          required
-          autoFocus
-          value={code}
-          onChange={(event) => setCode(event.target.value.replace(/\D/g, '').slice(0, 6))}
-          disabled={pending}
-          className={`${INPUT} font-mono tracking-[0.3em]`}
-        />
-      </div>
+      <CodeField id={id} label={label} value={code} pending={pending} onChange={setCode} />
       <Button type="submit" size="lg" className="w-full" disabled={pending || code.length !== 6}>
         {pending ? '확인 중…' : submitLabel}
       </Button>

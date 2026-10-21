@@ -12,10 +12,23 @@ export const SESSION_COOKIE = '__Host-vg_session';
  */
 export const REQUEST_PATH_HEADER = 'x-vg-request-path';
 
-/** `next`를 붙인 로그인 주소. 돌아갈 곳이 `/`이거나 안전하지 않으면 `next` 없이 `/login`이다. */
-export function loginUrl(returnTo: string | null | undefined): string {
+/**
+ * 쓰던 세션이 끝나 로그인으로 보냈다는 화면 표시(#492 PR 3). 값은 `1` 하나뿐이다 — **끝난 이유는 싣지 않는다.**
+ * 서버도 이유를 알려 주지 않으므로(401 `AUTH_REQUIRED` · WebSocket 4401) 로그인 화면은 일반 안내만 띄운다.
+ */
+export const SESSION_ENDED_PARAM = 'ended';
+
+/**
+ * `next`를 붙인 로그인 주소. 돌아갈 곳이 `/`이거나 안전하지 않으면 `next` 없이 `/login`이다.
+ * `sessionEnded`면 세션 종료 안내 표시를 함께 붙인다 — 세션 쿠키가 없어 처음 들어오는 경우(proxy)는 붙이지 않는다.
+ */
+export function loginUrl(returnTo: string | null | undefined, sessionEnded = false): string {
   const next = safeReturnTo(returnTo);
-  return next === '/' ? LOGIN_PATH : `${LOGIN_PATH}?next=${encodeURIComponent(next)}`;
+  const query = [
+    ...(next === '/' ? [] : [`next=${encodeURIComponent(next)}`]),
+    ...(sessionEnded ? [`${SESSION_ENDED_PARAM}=1`] : []),
+  ];
+  return query.length === 0 ? LOGIN_PATH : `${LOGIN_PATH}?${query.join('&')}`;
 }
 
 interface CookieReader {
@@ -33,11 +46,12 @@ export function sessionCookieHeader(cookies: CookieReader): string | null {
 
 /**
  * 브라우저에서 로그인 화면으로 보낸다(전체 이동 — 세션이 끝난 화면의 상태를 남기지 않는다).
+ * 부르는 자리는 전부 쓰던 세션이 끝난 경우다(API 401 · WebSocket 4401 �� 만료 시각 도달) — 세션 종료 안내를 붙인다.
  * 서버 렌더 중(window 없음)이거나 이미 로그인 화면이면 아무것도 하지 않는다 — 로그인 진행 중의 상태를 날리지 않게.
  */
 export function navigateToLogin(): void {
   if (typeof window === 'undefined') return;
   const { pathname, search } = window.location;
   if (pathname === LOGIN_PATH) return;
-  window.location.assign(loginUrl(`${pathname}${search}`));
+  window.location.assign(loginUrl(`${pathname}${search}`, true));
 }
