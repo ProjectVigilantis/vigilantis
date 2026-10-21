@@ -36,6 +36,7 @@ from .cognito import (
     Tokens,
 )
 from .flow_store import FailureLimiter, FlowStore
+from .password_policy import check_password
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +126,9 @@ class LoginFlow:
         return token, flow.step
 
     def submit_new_password(self, flow_token: str, new_password: str) -> StepResult:
+        if not check_password(new_password):  # Cognito(흐름 정리 포함) 호출 전에 거절한다
+            raise AuthPasswordPolicyError() from None
+
         def op(flow: _Flow) -> StepResult:
             assert flow.session is not None
             resp = self._cognito.respond_to_challenge(

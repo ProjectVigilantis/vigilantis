@@ -551,17 +551,23 @@ def test_unconfigured_cognito_is_503_but_rest_of_app_works(client_pg_anon, db, m
     # 보호 API 는 Cognito 설정과 무관하게 세션만으로 열린다(#492 PR 2)
     seed = make_auth_session()
     with TestClient(app, base_url="https://testserver") as c:
-        for method, path in [
-            ("POST", "/login"),
-            ("POST", "/login/totp"),
-            ("POST", "/logout"),
-            ("POST", "/activity"),
-            ("GET", "/me"),
+        reset = {"email": "u@example.com"}
+        confirm = {"email": "u@example.com", "code": CODE, "new_password": NEW_PASSWORD}
+        for path, body in [
+            ("/login", None),
+            ("/login/totp", None),
+            ("/password-reset", reset),
+            ("/password-reset/confirm", confirm),
         ]:
-            resp = c.request(method, "/api/v1/auth" + path, headers={"Origin": ORIGIN}, json=None)
+            resp = c.post("/api/v1/auth" + path, headers={"Origin": ORIGIN}, json=body)
             assert resp.status_code == 503, path
             assert resp.json()["error"]["code"] == "AUTH_PROVIDER_UNAVAILABLE"
             assert resp.headers["cache-control"] == "no-store"
+        # Cognito 를 쓰지 않는 라우트는 미설정이어도 자기 계약대로 동작한다
+        assert c.post("/api/v1/auth/logout", headers={"Origin": ORIGIN}).status_code == 204
+        assert c.post("/api/v1/auth/activity", headers={"Origin": ORIGIN}).status_code == 401
+        assert c.get("/api/v1/auth/me").status_code == 401
+        assert c.get("/api/v1/auth/me", headers={"Cookie": seed.cookie}).status_code == 200
         assert c.get("/health").json() == {"status": "ok"}
         assert c.get("/api/v1/incidents", headers={"Cookie": seed.cookie}).status_code == 200
         assert c.get("/api/v1/incidents").status_code == 401

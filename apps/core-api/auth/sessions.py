@@ -110,3 +110,14 @@ def revoke_session(
     return auth_repo.revoke_session(
         db, token_hash=hash_token(token), reason=reason, now=now
     )
+
+
+def revoke_user_sessions(
+    db: Session,
+    *,
+    user_id: str,
+    now: datetime,
+    reason: models.AuthSessionRevokeReason,
+) -> int:
+    """사용자의 살아 있는(미폐기) 세션 전부 폐기. 폐기한 개수."""
+    return auth_repo.revoke_user_sessions(db, user_id=user_id, reason=reason, now=now)
