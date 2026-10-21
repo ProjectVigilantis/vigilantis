@@ -36,20 +36,18 @@ import type {
 /**
  * 사전의 tone(의미) → 실제 색. 색 정의는 여기 한 곳뿐이다.
  *
- * red만 `--danger` 토큰을 쓴다 — 설계서 §0.3이 "빨강 토큰은 하나"로 못박았고, 토폴로지
- * THREAT 노드·공격 경로 엣지가 같은 값을 참조해야 하기 때문이다. 나머지 tone은 그런
- * 제약이 없어 팔레트 클래스를 그대로 둔다(토큰을 늘리면 정의처만 흩어진다).
+ * 상태 tone은 DESIGN.md §상태 색 다섯 단계의 배지 토큰을 쓴다. gray = 중립 · 정지, yellow = 대기 ·
+ * 확인 불가, orange = 경고(사람이 손봐야 하지만 멈추지 않음 · 낭비 후보도 여기), red = 위험 · 실패,
+ * green = 정상. blue · purple은 상태가 아닌 분류 표시라 팔레트 클래스를 그대로 둔다.
  */
 const TONE_CLASS: Record<LabelTone, string> = {
   neutral: 'bg-muted text-foreground',
-  gray: 'bg-muted text-muted-foreground',
-  yellow: 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300',
-  // 낭비 후보 계열. **위협 빨강과 겹치지 않게 노랑 쪽으로 둔다** — 주황(orange-300)은 다크에서
-  // `--danger`와 ΔE 19였고 배지처럼 작은 면적에서는 같은 색으로 읽혔다. amber-400은 ΔE 23이다.
-  orange: 'bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-400',
-  red: 'bg-danger/15 text-danger',
+  gray: 'bg-badge-idle-bg text-badge-idle-fg',
+  yellow: 'bg-badge-warning-bg text-badge-warning-fg',
+  orange: 'bg-badge-serious-bg text-badge-serious-fg',
+  red: 'bg-badge-critical-bg text-badge-critical-fg',
   blue: 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300',
-  green: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300',
+  green: 'bg-badge-good-bg text-badge-good-fg',
   purple: 'bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300',
 };
 

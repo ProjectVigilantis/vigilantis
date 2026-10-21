@@ -266,9 +266,9 @@ export function AssetsView({
     <Tabs value={tab} onValueChange={setTab} className="gap-4">
       {/* 화면 이름 + 지표 띠 — 한 덩이로 **스크롤을 따라온다**(파일 머리말). 이름은 페이지가 아니라
           여기 있다: 띠만 따라오면 어느 화면의 띠인지가 스크롤과 함께 사라진다. 음수 상단 여백은 본문
-          여백(`p-6`)을 되돌려 안 붙었을 때의 자리가 종전과 같게 한다. 띠는 전체 + 유형 7종이라 8칸이고,
+          여백(셸의 `--page-pad`)을 되돌려 안 붙었을 때의 자리가 종전과 같게 한다. 띠는 전체 + 유형 7종이라 8칸이고,
           2 → 4 → 8열로 접힌다(빈 칸이 없다). z-index는 상세 Drawer(z-50)보다 낮게 둔다. */}
-      <div className="bg-background sticky top-0 z-20 -mx-6 -mt-6 px-6 pt-6 pb-3">
+      <div className="bg-background sticky top-0 z-20 -mx-(--page-pad) -mt-(--page-pad) px-(--page-pad) pt-(--page-pad) pb-3">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-lg font-semibold">자산 관제</h1>
         <AutoRefresh renderedAt={renderedAt} />

@@ -10,11 +10,11 @@
 import { NO_VALUE } from '@/lib/enum-labels';
 import { cn } from '@/lib/utils';
 
-/** 빨강은 `--danger` 하나뿐이다(§0.3). 값이 0이면 색을 입히지 않는다 — 0건 위협을 빨강으로 그리지 않는다. */
+/** 상태 배지 글자색과 같은 토큰이다(DESIGN.md §상태 색). 값이 0이면 색을 입히지 않는다. 0건 위협을 빨강으로 그리지 않는다. */
 export const METRIC_TONE = {
-  danger: 'text-danger',
-  warn: 'text-amber-400',
-  ok: 'text-emerald-400',
+  danger: 'text-badge-critical-fg',
+  warn: 'text-badge-warning-fg',
+  ok: 'text-badge-good-fg',
 } as const;
 
 export type MetricTone = keyof typeof METRIC_TONE;

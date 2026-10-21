@@ -14,6 +14,13 @@ import type {
   LoginStepResponse,
   MetricsTimeseriesResponse,
   ResolutionJudgement,
+  TenantCreateRequest,
+  TenantCreateResponse,
+  TenantDetail,
+  TenantOnboardingResponse,
+  TenantsResponse,
+  TenantUpdateRequest,
+  TenantVerifyResponse,
   TotpSetupResponse,
 } from '@/types/api';
 
@@ -136,7 +143,7 @@ async function request<T>(path: string, init?: RequestInit, transport?: ApiTrans
 }
 
 /**
- * 서버 컴포넌트도 부르는 조회 4종. 전송을 주입받아 같은 경로 · 타입을 브라우저와 서버가 함께 쓴다 —
+ * 서버 컴포넌트도 부르는 조회 6종(고객 관리 2종 포함). 전송을 주입받아 같은 경로 · 타입을 브라우저와 서버가 함께 쓴다 —
  * 서버 쪽은 `serverApi()`(lib/api/server.ts), 브라우저 쪽은 아래 모듈 export다.
  */
 export function createReadApi(transport: ApiTransport) {
@@ -168,10 +175,20 @@ export function createReadApi(transport: ApiTransport) {
     getIncident(incidentId: string): Promise<IncidentResponse> {
       return request<IncidentResponse>(`/incidents/${encodeURIComponent(incidentId)}`, undefined, transport);
     },
+
+    /** 고객(테넌트) 목록 · 상세(Post-MVP T-4). 서버 컴포넌트가 세션 쿠키를 실어 부른다(app/tenants). */
+    getTenants(): Promise<TenantsResponse> {
+      return request<TenantsResponse>('/tenants', undefined, transport);
+    },
+
+    getTenant(tenantId: string): Promise<TenantDetail> {
+      return request<TenantDetail>(`/tenants/${encodeURIComponent(tenantId)}`, undefined, transport);
+    },
   };
 }
 
-export const { getAssets, getMetricsTimeseries, getIncidents, getIncident } = createReadApi(BROWSER);
+export const { getAssets, getMetricsTimeseries, getIncidents, getIncident, getTenants, getTenant } =
+  createReadApi(BROWSER);
 
 /**
  * 관제자 종료 처리(#199). **Idempotency Key를 받지 않는다** — 종료는 AWS를 바꾸지 않고
@@ -206,6 +223,47 @@ export async function executeAction(
     },
   );
   return { replayed: httpStatus === 200, execution };
+}
+
+/* ─────────────────────────── /tenants (Post-MVP T-4) ─────────────────────────── */
+/* 고객 계정 연결 · 원격 회수 관리자 API(packages/schemas/api/tenants.py). 고객 계정에 실제로 들어가는
+   호출은 verify · resume 둘뿐이다. `external_id`는 생성 응답과 onboarding 재발급에서만 받는다. */
+
+const tenantPath = (tenantId: string, suffix = '') => `/tenants/${encodeURIComponent(tenantId)}${suffix}`;
+
+export function createTenant(body: TenantCreateRequest): Promise<TenantCreateResponse> {
+  return postJson<TenantCreateResponse>('/tenants', body);
+}
+
+export function updateTenant(tenantId: string, body: TenantUpdateRequest): Promise<TenantDetail> {
+  return request<TenantDetail>(tenantPath(tenantId), {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+/** 204. 연결된 적 없는(PENDING_CONNECTION) 고객만 지운다. 밖이면 TENANT_STATE_CONFLICT. */
+export async function deleteTenant(tenantId: string): Promise<void> {
+  await request<null>(tenantPath(tenantId), { method: 'DELETE' });
+}
+
+/** 같은 external_id를 다시 받는다(재생성 아님). 역할을 지운 고객의 재연결에 쓴다. */
+export function getTenantOnboarding(tenantId: string): Promise<TenantOnboardingResponse> {
+  return request<TenantOnboardingResponse>(tenantPath(tenantId, '/onboarding'));
+}
+
+export function verifyTenant(tenantId: string): Promise<TenantVerifyResponse> {
+  return postJson<TenantVerifyResponse>(tenantPath(tenantId, '/verify'));
+}
+
+export function suspendTenant(tenantId: string, reason: string): Promise<TenantDetail> {
+  return postJson<TenantDetail>(tenantPath(tenantId, '/suspend'), { reason });
+}
+
+/** 연결 확인을 먼저 하고, OK일 때만 ACTIVE가 된다. 실패하면 SUSPENDED 그대로다. */
+export function resumeTenant(tenantId: string): Promise<TenantVerifyResponse> {
+  return postJson<TenantVerifyResponse>(tenantPath(tenantId, '/resume'));
 }
 
 /* ──────────────────────────── /auth (#492 PR 1) ──────────────────────────── */

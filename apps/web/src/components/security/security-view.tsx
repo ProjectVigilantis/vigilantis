@@ -180,7 +180,7 @@ export function SecurityView({
     <Tabs value={tab} onValueChange={setTab} className="gap-4">
       {/* 화면 이름 + 지표 띠 — 한 덩이로 스크롤을 따라온다(자산 관제와 같은 틀 · 그쪽 주석 참조).
           띠는 6칸이라 3 → 6열로 접힌다(빈 칸이 없다). 칸은 전부 필터다(파일 머리말). */}
-      <div className="bg-background sticky top-0 z-20 -mx-6 -mt-6 px-6 pt-6 pb-3">
+      <div className="bg-background sticky top-0 z-20 -mx-(--page-pad) -mt-(--page-pad) px-(--page-pad) pt-(--page-pad) pb-3">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-lg font-semibold">보안 관제</h1>
         <AutoRefresh renderedAt={renderedAt} />

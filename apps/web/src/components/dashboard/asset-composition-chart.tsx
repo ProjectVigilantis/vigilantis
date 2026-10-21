@@ -157,7 +157,7 @@ export function AssetCompositionChart({ composition }: { composition: AssetCompo
         ))}
         {/* 조회를 못 한 유형은 0으로 적지 않는다 — 비율에 없다는 사실을 말한다(자산 인벤토리와 같은 규칙). */}
         {uncollected.length > 0 ? (
-          <li className="border-t pt-2 text-amber-400">
+          <li className="border-t pt-2 text-badge-warning-fg">
             수집 실패 {uncollected.length}종은 비율에 없습니다
             <span className="text-muted-foreground block">
               {uncollected.map(typeLabel).join(' · ')}
