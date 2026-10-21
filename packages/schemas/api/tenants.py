@@ -28,8 +28,8 @@
 #   DELETE /tenants/{id}             → 204. DELETABLE_STATUSES 밖이면 TENANT_STATE_CONFLICT
 #   GET    /tenants/{id}/onboarding  → TenantOnboardingResponse. 모든 상태(역할을 지운 고객의 재연결)
 #   POST   /tenants/{id}/verify      → TenantVerifyResponse. VERIFIABLE_STATUSES 밖이면 TENANT_STATE_CONFLICT
-#   POST   /tenants/{id}/suspend     TenantSuspendRequest → TenantDetail
-#   POST   /tenants/{id}/resume      → TenantVerifyResponse(연결 확인 성공 시 ACTIVE)
+#   POST   /tenants/{id}/suspend     TenantSuspendRequest → TenantDetail. SUSPENDABLE_STATUSES 밖이면 TENANT_STATE_CONFLICT
+#   POST   /tenants/{id}/resume      → TenantVerifyResponse(연결 확인 성공 시 ACTIVE). RESUMABLE_STATUSES 밖이면 TENANT_STATE_CONFLICT
 #   **고객 계정에 들어가는 경로는 verify · resume 둘뿐이고, 정지(SUSPENDED) 중에는 resume 하나다.**
 # ==============================================================================
 
@@ -80,7 +80,7 @@ class TenantStatus(str, Enum):
 
 
 #: DELETE /tenants/{id} 를 받는 상태 — 연결된 적 없는 테넌트만 지운다. 계정 ID 오입력
-#: (`ACCOUNT_MISMATCH`)을 고치는 길이 「지우고 새로 만든다」이기 때문이다. 연결된 적이 없으니
+#: (연결 확인에서 `ASSUME_DENIED` 로 나타난다)을 고치는 길이 「지우고 새로 만든다」이기 때문이다. 연결된 적이 없으니
 #: 수집 · 인시던트 기록도 없어 지워서 잃는 것이 없다. 다른 계정이면 다른 테넌트라는 원칙
 #: (PATCH 가 계정 · 역할을 받지 않음)은 그대로다. 밖이면 TENANT_STATE_CONFLICT.
 DELETABLE_STATUSES: frozenset[TenantStatus] = frozenset({TenantStatus.PENDING_CONNECTION})
@@ -92,6 +92,14 @@ VERIFIABLE_STATUSES: frozenset[TenantStatus] = frozenset(
     {TenantStatus.PENDING_CONNECTION, TenantStatus.ACTIVE}
 )
 
+#: POST /tenants/{id}/suspend 를 받는 상태 — 관제 중(ACTIVE)일 때만 정지한다. 연결 전(PENDING_CONNECTION)은
+#: 들어간 적이 없어 회수할 것이 없고(지우면 된다), 이미 정지면 할 일이 없다. 밖이면 TENANT_STATE_CONFLICT.
+SUSPENDABLE_STATUSES: frozenset[TenantStatus] = frozenset({TenantStatus.ACTIVE})
+
+#: POST /tenants/{id}/resume 을 받는 상태 — 정지(SUSPENDED)일 때만 재개한다. 연결 전 테넌트를 ACTIVE 로
+#: 올리는 길은 verify 다(같은 연결 확인이지만 「재개」가 아니다). 밖이면 TENANT_STATE_CONFLICT.
+RESUMABLE_STATUSES: frozenset[TenantStatus] = frozenset({TenantStatus.SUSPENDED})
+
 
 class TenantVerificationResult(str, Enum):
     """연결 확인 1회의 결과. 확인 순서대로 처음 실패한 자리를 싣는다.
@@ -101,8 +109,13 @@ class TenantVerificationResult(str, Enum):
 
     OK = "OK"
     #: AssumeRole 거절 — 역할이 없거나, 신뢰 정책이 플랫폼 주체·ExternalId 를 허용하지 않는다.
+    #: **계정 ID 오입력도 여기로 나온다** — 역할 ARN 이 그 틀린 계정을 가리켜, 그 계정에 역할이 없거나
+    #: 우리를 신뢰하지 않기 때문이다. 연결 전이면 지우고 새로 만드는 것(DELETABLE_STATUSES)이 고치는 길이다.
     ASSUME_DENIED = "ASSUME_DENIED"
-    #: assume 은 됐는데 받은 자격의 계정이 테넌트의 `aws_account_id` 와 다르다(오입력).
+    #: assume 은 됐는데 받은 자격의 계정이 테넌트의 `aws_account_id` 와 다르다. **정상 경로에서는 나오지
+    #: 않는 방어 확인이다** — 계약이 역할 ARN 의 계정 = `aws_account_id` 를 강제하므로(TenantDetail ·
+    #: TenantCreateRequest), assume 해서 받은 자격의 계정도 같다. 이 값이 나오면 오입력이 아니라
+    #: 저장값 손상이나 확인 구현 결함을 의심한다. 값은 FE · DB 와 묶여 있어 지우지 않는다.
     ACCOUNT_MISMATCH = "ACCOUNT_MISMATCH"
     #: 계정은 맞는데 최소 읽기 권한이 없다 — 권한 정책이 붙지 않았다.
     READ_DENIED = "READ_DENIED"
