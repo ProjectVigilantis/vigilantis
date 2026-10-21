@@ -48,7 +48,8 @@ def _event(db: Session):
 
 def test_revision_follows_auth_on_a_single_chain(migration_config):
     script = ScriptDirectory.from_config(migration_config)
-    assert script.get_heads() == [REVISION]
+    # head 를 이 리비전으로 박아 두면 뒤에 마이그레이션이 붙을 때마다 고쳐야 한다 — 단일 체인만 본다
+    assert len(script.get_heads()) == 1
     assert script.get_revision(REVISION).down_revision == PARENT
 
 

@@ -87,9 +87,13 @@ def test_roundtrip_matches_orm_and_column_is_nullable_jsonb(pg_engine, migration
 
 
 def test_existing_rows_stay_without_a_plan_after_upgrade(pg_engine, migration_config):
-    command.downgrade(migration_config, PARENT)
+    # 인시던트는 head 에서 ORM 으로 먼저 넣는다 — 뒤 리비전이 incidents 에 칸을 더하면
+    # (tenant_id · #485) 옛 리비전에서의 ORM INSERT 가 그 칸을 찾다 깨진다
     with Session(pg_engine) as session:
         incident_id = _incident(session)
+        session.commit()
+    command.downgrade(migration_config, PARENT)
+    with Session(pg_engine) as session:
         execution_id = str(session.execute(text(
             "INSERT INTO action_executions (execution_id, incident_id, runbook_id, target_arn,"
             " status, trigger_source, verification_attempts, created_at, updated_at)"
