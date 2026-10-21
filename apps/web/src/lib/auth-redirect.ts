@@ -46,7 +46,7 @@ export function sessionCookieHeader(cookies: CookieReader): string | null {
 
 /**
  * 브라우저에서 로그인 화면으로 보낸다(전체 이동 — 세션이 끝난 화면의 상태를 남기지 않는다).
- * 부르는 자리는 전부 쓰던 세션이 끝난 경우다(API 401 · WebSocket 4401 �� 만료 시각 도달) — 세션 종료 안내를 붙인다.
+ * 부르는 자리는 전부 쓰던 세션이 끝난 경우다(API 401 · WebSocket 4401 · 만료 시각 도달) — 세션 종료 안내를 붙인다.
  * 서버 렌더 중(window 없음)이거나 이미 로그인 화면이면 아무것도 하지 않는다 — 로그인 진행 중의 상태를 날리지 않게.
  */
 export function navigateToLogin(): void {

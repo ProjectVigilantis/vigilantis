@@ -28,7 +28,7 @@ export type ErrorCode =
   | 'AUTH_RATE_LIMITED' // 429
   | 'AUTH_PROVIDER_UNAVAILABLE' // 503
   | 'USER_NOT_FOUND' // 404 — ADMIN 사용자 관리 대상 없음(#492 PR 3)
-  | 'USER_STATE_CONFLICT' // 409 — 마지막 ADMIN · 중복 초대 · 상태 ���돌(#492 PR 3)
+  | 'USER_STATE_CONFLICT' // 409 — 마지막 ADMIN · 중복 초대 · 상태 충돌(#492 PR 3)
   | 'REQUEST_VALIDATION_FAILED' // 422
   | 'INTERNAL_ERROR'; // 500
 

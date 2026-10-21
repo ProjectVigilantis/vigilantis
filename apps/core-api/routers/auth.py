@@ -52,7 +52,7 @@ _FLOW = Depends(get_login_flow)
 _ADAPTER = Depends(get_cognito_adapter)
 
 # Origin 검사는 라우터 전체에 먼저 걸린다. Cognito 설정 확인(LoginFlow · CognitoAdapter 조립)은 그것이 필요한
-# 라우트(로그인 6�� · 재설정 2종)만 의존성으로 받는다 — /me · /activity · /logout 은 미설정이어도 동작한다
+# 라우트(로그인 6종 · 재설정 2종)만 의존성으로 받는다 — /me · /activity · /logout 은 미설정이어도 동작한다
 router = APIRouter(
     prefix="/api/v1/auth",
     tags=["auth"],
