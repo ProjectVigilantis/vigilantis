@@ -249,7 +249,7 @@ def test_subscription_period_order():
 # ----- 복구 경로와 정지 중 확인 (PR #489 리뷰 A · B · C) -----
 
 def test_only_never_connected_tenants_can_be_deleted():
-    # 계정 ID 오입력(ACCOUNT_MISMATCH)을 고치는 길 = 지우고 다시 만든다. 연결된 적 있으면 기록이 있다
+    # 계정 ID 오입력(연결 확인에서 ASSUME_DENIED 로 나타난다)을 고치는 길 = 지우고 다시 만든다. 연결된 적 있으면 기록이 있다
     assert DELETABLE_STATUSES == frozenset({TenantStatus.PENDING_CONNECTION})
 
 
