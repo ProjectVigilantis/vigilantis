@@ -1253,6 +1253,10 @@ class AppUser(Base):
         DateTime(timezone=True), nullable=True
     )
     role: Mapped[UserRole] = mapped_column(_enum(UserRole, "app_user_role"))
+    # 소속 고객사(Post-MVP T-4 · #495). 한 사용자는 테넌트 하나에 속한다. **NULL = 소속 없음이고, 권한이
+    # 아니다** — 플랫폼 운영자 여부 같은 권한 해석은 T-1(#492)이 따로 구분한다. NULL 을 곧바로 「모든 고객을
+    # 보는 사람」으로 읽지 않는다(PR #506 리뷰). 소속을 API 로 옮기지 않는다 — 옮기면 그 사람이 남의 기록을 본다.
+    tenant_id: Mapped[str | None] = _tenant_fk()
     status: Mapped[AppUserStatus] = mapped_column(
         _enum(AppUserStatus, "app_user_status"), default=AppUserStatus.ACTIVE
     )

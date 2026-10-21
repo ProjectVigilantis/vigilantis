@@ -25,12 +25,15 @@ from sqlalchemy.orm import Session
 
 from config import get_settings
 from db import models
+from schemas.api.auth import UserRole
 from schemas.api.incidents import IncidentCategory
 from schemas.api.tenants import TenantStatus, TenantVerificationResult
 
 REVISION = "d4a7c2e9f150"
 PARENT = "d493a1b2c302"
 ROOTS = ("collection_runs", "assets", "threat_events", "incidents", "action_executions")
+# 뿌리 5개(데이터의 소속) + 사용자의 소속(app_users)
+TENANT_COLUMN_TABLES = (*ROOTS, "app_users")
 ACCOUNT = "475763379672"
 ROLE = f"arn:aws:iam::{ACCOUNT}:role/vigilantis-access"
 
@@ -66,13 +69,13 @@ def test_roundtrip_matches_orm(pg_engine, migration_config):
         with pg_engine.connect() as connection:
             inspector = inspect(connection)
             assert "tenants" not in inspector.get_table_names()
-            for table in ROOTS:
+            for table in TENANT_COLUMN_TABLES:
                 assert "tenant_id" not in {c["name"] for c in inspector.get_columns(table)}
     finally:
         command.upgrade(migration_config, "head")
     with pg_engine.connect() as connection:
         inspector = inspect(connection)
-        for table in ROOTS:
+        for table in TENANT_COLUMN_TABLES:
             column = next(c for c in inspector.get_columns(table) if c["name"] == "tenant_id")
             assert column["nullable"] is True
         assert compare_metadata(MigrationContext.configure(connection), models.Base.metadata) == []
@@ -191,3 +194,61 @@ def test_account_and_external_id_are_unique(db, column, value):
     db.add(_tenant(**other))
     with pytest.raises(IntegrityError):
         db.flush()
+
+
+# ----- 사용자의 소속 (PR #506 리뷰 · PR #504 「맡기는 일 3」) -----
+
+def _user(**over) -> models.AppUser:
+    values = dict(issuer="https://cognito-idp.ap-northeast-2.amazonaws.com/pool",
+                  cognito_sub="sub-1", email="a@example.com", role=UserRole.VIEWER)
+    values.update(over)
+    return models.AppUser(**values)
+
+
+def test_user_belongs_to_at_most_one_tenant(db):
+    tenant = _tenant()
+    db.add(tenant)
+    db.flush()
+    member = _user(tenant_id=tenant.tenant_id)
+    unassigned = _user(cognito_sub="sub-2")  # 소속 없음 — 권한 해석은 T-1 몫이다
+    db.add_all([member, unassigned])
+    db.flush()
+    assert member.tenant_id == tenant.tenant_id and unassigned.tenant_id is None
+
+
+def test_user_pointing_at_an_unknown_tenant_is_rejected(db):
+    db.add(_user(tenant_id="00000000-0000-0000-0000-000000000000"))
+    with pytest.raises(IntegrityError):
+        db.flush()
+
+
+def test_tenant_with_users_cannot_be_deleted(db):
+    # 연결 전 테넌트는 지울 수 있지만(DELETABLE_STATUSES), 사용자가 있으면 FK 가 막는다 —
+    # 그래서 고객사 사용자는 연결(ACTIVE) 뒤에 초대한다(PR #504 「맡기는 일 3」 추천)
+    tenant = _tenant()
+    db.add(tenant)
+    db.flush()
+    db.add(_user(tenant_id=tenant.tenant_id))
+    db.flush()
+    db.delete(tenant)
+    with pytest.raises(IntegrityError):
+        db.flush()
+
+
+def test_existing_users_stay_unassigned_after_upgrade(pg_engine, migration_config):
+    with Session(pg_engine) as session:
+        user = _user(cognito_sub="sub-migration")
+        session.add(user)
+        session.commit()
+        user_id = user.user_id
+    try:
+        command.downgrade(migration_config, PARENT)
+        command.upgrade(migration_config, "head")
+        with Session(pg_engine) as session:
+            stored = session.get(models.AppUser, user_id)
+            assert stored is not None and stored.tenant_id is None
+    finally:
+        command.upgrade(migration_config, "head")
+        with Session(pg_engine) as session:
+            session.execute(delete(models.AppUser).where(models.AppUser.user_id == user_id))
+            session.commit()

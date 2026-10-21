@@ -6,6 +6,9 @@
    구독 기간 순서. 계정 ID 와 ExternalId 는 각각 유일하다.
 2. collection_runs · assets · threat_events · incidents · action_executions 에 nullable tenant_id
    (FK · 인덱스). 나머지 테이블은 FK 로 따라온다.
+3. app_users 에 nullable tenant_id(FK · 인덱스) — 사용자의 소속 고객사. 한 사용자는 테넌트 하나에 속한다.
+   **NULL = 소속 없음이고 권한이 아니다** — 플랫폼 운영자 여부 같은 권한 해석은 T-1(#492)이 따로 한다
+   (PR #506 리뷰 · PR #504 「맡기는 일 3」).
 
 **기존 행은 NULL 로 둔다 — NULL = MVP 단일 계정 기록이다.** 마이그레이션이 계정 ID · 역할 ·
 ExternalId 를 지어내 기본 테넌트를 만들지 않는다(연결 확인 없는 ACTIVE 가 된다). 채우기와
@@ -31,6 +34,8 @@ _JSONB = postgresql.JSONB(astext_type=sa.Text())
 _STATUS = ("PENDING_CONNECTION", "ACTIVE", "SUSPENDED")
 _RESULT = ("OK", "ASSUME_DENIED", "ACCOUNT_MISMATCH", "READ_DENIED", "UNREACHABLE")
 ROOT_TABLES = ("collection_runs", "assets", "threat_events", "incidents", "action_executions")
+# 뿌리 5개(데이터의 소속) + 사용자의 소속. 칸 모양(nullable UUID FK · 인덱스)은 같고 뜻이 다르다
+TENANT_COLUMN_TABLES = (*ROOT_TABLES, "app_users")
 
 
 def upgrade() -> None:
@@ -99,7 +104,7 @@ def upgrade() -> None:
         sa.UniqueConstraint("external_id", name=op.f("uq_tenants_external_id")),
     )
 
-    for table in ROOT_TABLES:
+    for table in TENANT_COLUMN_TABLES:
         op.add_column(table, sa.Column("tenant_id", _UUID, nullable=True))
         op.create_foreign_key(
             op.f(f"fk_{table}_tenant_id_tenants"), table, "tenants", ["tenant_id"], ["tenant_id"]
@@ -108,7 +113,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    for table in reversed(ROOT_TABLES):
+    for table in reversed(TENANT_COLUMN_TABLES):
         op.drop_index(op.f(f"ix_{table}_tenant_id"), table_name=table)
         op.drop_constraint(op.f(f"fk_{table}_tenant_id_tenants"), table, type_="foreignkey")
         op.drop_column(table, "tenant_id")
