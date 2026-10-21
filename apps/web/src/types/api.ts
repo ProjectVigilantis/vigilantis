@@ -737,12 +737,16 @@ export type TenantStatus = (typeof TENANT_STATUSES)[number];
 export const TENANT_DELETABLE_STATUSES: readonly TenantStatus[] = ['PENDING_CONNECTION'];
 /** POST /tenants/{id}/verify 를 받는 상태 — 정지 중에는 고객 계정에 들어가지 않는다(재개는 resume). 밖이면 TENANT_STATE_CONFLICT. */
 export const TENANT_VERIFIABLE_STATUSES: readonly TenantStatus[] = ['PENDING_CONNECTION', 'ACTIVE'];
+/** POST /tenants/{id}/suspend 를 받는 상태 — 관제 중일 때만(연결 전은 회수할 것이 없다). 밖이면 TENANT_STATE_CONFLICT. */
+export const TENANT_SUSPENDABLE_STATUSES: readonly TenantStatus[] = ['ACTIVE'];
+/** POST /tenants/{id}/resume 을 받는 상태 — 정지일 때만(연결 전을 올리는 길은 verify). 밖이면 TENANT_STATE_CONFLICT. */
+export const TENANT_RESUMABLE_STATUSES: readonly TenantStatus[] = ['SUSPENDED'];
 
 /** 연결 확인 1회의 결과 — AssumeRole → GetCallerIdentity → 계정 대조 → 최소 읽기 순으로 처음 실패한 자리. */
 export const TENANT_VERIFICATION_RESULTS = [
   'OK',
-  'ASSUME_DENIED',
-  'ACCOUNT_MISMATCH',
+  'ASSUME_DENIED', // 계정 ID 오입력도 여기로 나온다 — 연결 전이면 지우고 새로 만든다
+  'ACCOUNT_MISMATCH', // 정상 경로에서는 나오지 않는 방어 확인(역할 ARN 의 계정 = 테넌트 계정이 계약)
   'READ_DENIED',
   'UNREACHABLE',
 ] as const;
