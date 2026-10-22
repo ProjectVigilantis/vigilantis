@@ -123,6 +123,12 @@ class Tenant(Base):
     collect_vpc_ids: Mapped[list] = mapped_column(JSONB, default=list)
     # T-6 — 끄면 자동 발동(선차단 · 1분 자동 격리)만 하지 않는다
     auto_action_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # T-6 — 마지막으로 다시 켠 시각(내부 칸 · 계약에 내보내지 않는다). 이 시각 이전에 지난 Medium 응답
+    # 기한은 다시 켜도 발동하지 않는다 — 꺼진 동안의 오래된 판단으로 사람 없이 격리하지 않게(#514 Q2).
+    # 한 번도 끈 적이 없으면 NULL 이다
+    auto_action_resumed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     last_verification_result: Mapped[TenantVerificationResult | None] = mapped_column(
         _enum(TenantVerificationResult, "tenant_verification_result"), nullable=True
     )

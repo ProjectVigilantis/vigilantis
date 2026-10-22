@@ -118,6 +118,20 @@ def get_tenant(db: Session, tenant_id: str) -> Optional[TenantWithCounts]:
     return None if row is None else TenantWithCounts(*row)
 
 
+def read_tenant_for_share(db: Session, tenant_id: str) -> Optional[models.Tenant]:
+    """테넌트 행을 FOR SHARE 로 읽는다 — 트랜잭션이 끝날 때까지 그 행의 UPDATE(끄기 · 정지)를 막는다.
+
+    자동 발동 접수 관문(T-6)이 쓴다. 끄기가 접수와 겹치면 끄기가 접수 commit 을 기다리므로, 끄기가
+    commit 된 뒤에 접수되는 자동 격리는 없다. 읽기끼리는 막지 않는다.
+    """
+    return db.execute(
+        select(_T)
+        .where(_T.tenant_id == tenant_id)
+        .with_for_update(read=True)
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+
+
 def list_tenants(db: Session) -> list[TenantWithCounts]:
     """생성 순(created_at 오름차순 · 같으면 tenant_id) — 계약 TenantsResponse 의 정렬."""
     rows = db.execute(_with_counts().order_by(_T.created_at, _T.tenant_id))
@@ -158,6 +172,13 @@ def update_tenant(
             "period_start": sub.period_start if sub else None,
             "period_end": sub.period_end if sub else None,
         }
+    if changes.auto_action_enabled is True:
+        # 꺼져 있던 것을 켤 때만 그 시각을 남긴다(T-6 · #514 Q2) — 이미 켜져 있으면 그대로 둔다.
+        # SET 의 오른쪽은 바뀌기 전 값을 읽으므로 같은 UPDATE 안에서 판정이 맞다
+        values["auto_action_resumed_at"] = case(
+            (_T.auto_action_enabled.is_(False), literal(now, _T.auto_action_resumed_at.type)),
+            else_=_T.auto_action_resumed_at,
+        )
     return _changed_one(
         db, update(_T).where(_T.tenant_id == tenant_id).values(**values, updated_at=now)
     )
