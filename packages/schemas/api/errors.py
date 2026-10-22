@@ -26,13 +26,13 @@ class ErrorCode(str, Enum):
     미인증은 401, 인증은 됐지만 허용되지 않은 요청은 403 이다.
     """
 
-    INCIDENT_NOT_FOUND = "INCIDENT_NOT_FOUND"                # 404
+    INCIDENT_NOT_FOUND = "INCIDENT_NOT_FOUND"                # 404 — 없음 · 요청의 테넌트 범위 밖(존재를 알리지 않는다 · api/tenants.py 머리말)
     IDEMPOTENCY_KEY_CONFLICT = "IDEMPOTENCY_KEY_CONFLICT"    # 409
     PROPOSAL_NOT_EXECUTABLE = "PROPOSAL_NOT_EXECUTABLE"      # 409
     INCIDENT_NOT_RESOLVABLE = "INCIDENT_NOT_RESOLVABLE"      # 409
     TENANT_NOT_FOUND = "TENANT_NOT_FOUND"                    # 404
     TENANT_STATE_CONFLICT = "TENANT_STATE_CONFLICT"          # 409 — 지금 상태에서 할 수 없는 전이(이미 정지된 테넌트 정지 등)
-    TENANT_SUSPENDED = "TENANT_SUSPENDED"                    # 409 — 정지된 테넌트의 자산에 대한 새 실행 요청
+    TENANT_SUSPENDED = "TENANT_SUSPENDED"                    # 409 — 정지된 테넌트에 대한 새 실행 · 종료 요청(플랫폼 운영자의 종료는 받는다 · api/tenants.py 머리말)
     AUTH_REQUIRED = "AUTH_REQUIRED"                          # 401 — 세션 없음 · 만료 · 회수
     AUTH_FAILED = "AUTH_FAILED"                              # 401 — 이메일 · 비밀번호 불일치(사용자 존재 여부를 가리지 않는다)
     AUTH_CODE_INVALID = "AUTH_CODE_INVALID"                  # 401 — TOTP · 이메일 · 재설정 코드 불일치
