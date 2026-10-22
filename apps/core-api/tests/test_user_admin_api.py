@@ -19,6 +19,7 @@ from config import get_auth_settings
 from db import models
 from db.repositories import auth as auth_repo
 from exceptions import ApiError
+from fastapi.routing import iter_route_contexts
 from schemas.api.auth import UserRole
 from schemas.api.errors import ErrorCode
 from schemas.api.users import UserStatus
@@ -110,6 +111,18 @@ REQUESTS = [
     ("PUT", "/{id}/status", {}),
     ("POST", "/{id}/sessions/revoke", None),
 ]
+
+
+def test_forbidden_requests_cover_every_registered_users_route(client):
+    """REQUESTS 가 실제 등록된 /api/v1/users (메서드, 경로) 전부를 덮는다 — 새 경로·메서드가 빠지면 실패."""
+    registered = {
+        (method, route.path)
+        for route in iter_route_contexts(client.app.routes)
+        if route.path == BASE or route.path.startswith(BASE + "/")
+        for method in route.methods or ()
+    }
+    covered = {(method, BASE + path.replace("{id}", "{user_id}")) for method, path, _ in REQUESTS}
+    assert covered == registered
 
 
 @pytest.mark.parametrize("role", [UserRole.OPERATOR, UserRole.VIEWER])

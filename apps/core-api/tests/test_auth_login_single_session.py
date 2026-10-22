@@ -197,23 +197,24 @@ def test_login_waiting_on_lock_sees_a_disable_committed_by_the_lock_holder(
     pg_engine, committed_user
 ):
     sub, user_id = committed_user
-    with Session(pg_engine) as admin:
+    # executor가 바깥, admin 세션이 안쪽: 어서션 실패 시에도 executor가 스레드를
+    # 기다리기 전에 admin 세션이 닫혀(롤백) 락이 풀려야 교착 없이 unwind 된다.
+    with ThreadPoolExecutor(1) as pool, Session(pg_engine) as admin:
         auth_repo.lock_users_table(admin)  # 관리자 동작이 락을 쥔 상태
-        with ThreadPoolExecutor(1) as pool:
-            login = pool.submit(
-                lambda: _login_in_own_session(pg_engine, sub, T0 + timedelta(seconds=1))
-            )
-            _wait_until_blocked_on_users_lock(pg_engine)
-            assert not login.done()
-            auth_repo.set_status(
-                admin,
-                user_id=user_id,
-                status=models.AppUserStatus.DISABLED,
-                now=T0 + timedelta(seconds=2),
-            )
-            admin.commit()
-            with pytest.raises(service.AccountDisabledError):
-                login.result(timeout=10)
+        login = pool.submit(
+            lambda: _login_in_own_session(pg_engine, sub, T0 + timedelta(seconds=1))
+        )
+        _wait_until_blocked_on_users_lock(pg_engine)
+        assert not login.done()
+        auth_repo.set_status(
+            admin,
+            user_id=user_id,
+            status=models.AppUserStatus.DISABLED,
+            now=T0 + timedelta(seconds=2),
+        )
+        admin.commit()
+        with pytest.raises(service.AccountDisabledError):
+            login.result(timeout=10)
     with Session(pg_engine) as check:
         assert (
             check.execute(

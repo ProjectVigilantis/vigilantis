@@ -4,7 +4,7 @@ Cognito Admin 인증 API로 로그인을 진행하고, **이번 로그인에서 
 
 이 문서는 PR 1(로그인 기반), PR 2(API · WebSocket 접근 보호 · 역할 검사), PR 3(ADMIN 사용자 관리 · 사용자당 세션 1개 · 비밀번호 재설정 · 새 비밀번호 정책 · 사용자 관리 이력)의 백엔드 상태다. 웹 화면(SSR) 쪽 처리는 `apps/web` 범위다 — PR 3 화면(사용자 관리 · 비밀번호 재설정 · 새 비밀번호 조건 · 한글 입력 경고 · 세션 종료 안내)은 최소 구현이고 시각 다듬기는 김세혁 담당 후속이며, `apps/web/src/lib/session-expiry.ts`의 시계 보정은 PR 3 범위 밖이다. 분실한 TOTP의 재설정은 PR 3에서 제외했다(§운영 주의점). HTTPS · 환경별 설정 · 배포 권한은 PR 4 범위다.
 
-근거 표시: **[표준]** 외부 표준 · 공식 문서, **[팀 결정]** 이슈 #492 확정 정책, **[실측]** 2026-10-19 실제 User Pool 확인(PR 2 항목은 2026-10-20 로컬 실측), **[설정 조회]** 2026-10-21 실제 User Pool · 앱 클라이언트 설정의 읽기 전용 조회(동작 확인이 아니다), **[판단]** 이 구현의 선택. PR 3 동작의 근거는 현재 코드와 자동 테스트(대역 · 실제 PostgreSQL)이고, 앱을 통해 실제 Cognito로 확인한 범위와 그 한계는 §PR 3 검증 범위에 따로 적었다.
+근거 표시: **[표준]** 외부 표준 · 공식 문서, **[팀 결정]** 이슈 #492 확정 정책, **[판단]** 이 구현의 선택. 동작의 근거는 현재 코드와 자동 테스트(대역 · 실제 PostgreSQL)이며, 자동 테스트가 보장하지 않는 범위(실제 Cognito · HTTPS 배포 환경)는 §테스트에 적었다.
 
 ## 구조
 
@@ -49,7 +49,7 @@ POST /password-reset/confirm (PR 3) 이메일 · 재설정 코드 · 새 비밀�
 1. 이번 로그인에서 `AdminRespondToAuthChallenge(SOFTWARE_TOKEN_MFA)`가 `AuthenticationResult`를 돌려줌
 2. 이번 로그인에서 `VerifySoftwareToken`이 `Status=SUCCESS`를 돌려주고 이어서 `AdminRespondToAuthChallenge(MFA_SETUP)`가 `AuthenticationResult`를 돌려줌
 
-비밀번호 단계나 최초 비밀번호 변경 직후에 토큰이 나오거나, 그 밖의 challenge(`SELECT_MFA_TYPE` · `EMAIL_OTP` · `SMS_MFA` 등)가 나오면 세션 없이 거절한다(`AUTH_FAILED`, 받은 refresh token 즉시 회수). `acr` · `auth_time` · 사용자 MFA 설정 상태는 근거로 쓰지 않는다 — 관리형 로그인 PoC에서 `acr`가 없었고 기존 로그인 상태 재사용에도 새 `auth_time`이 발급됐으며 [실측], API 방식에서도 TOTP 등록 뒤 `PreferredMfaSetting` · `UserMFASettingList`가 비어 있었다 [실측].
+비밀번호 단계나 최초 비밀번호 변경 직후에 토큰이 나오거나, 그 밖의 challenge(`SELECT_MFA_TYPE` · `EMAIL_OTP` · `SMS_MFA` 등)가 나오면 세션 없이 거절한다(`AUTH_FAILED`, 받은 refresh token 즉시 회수). `acr` · `auth_time` · 사용자 MFA 설정 상태(`PreferredMfaSetting` · `UserMFASettingList`)는 근거로 쓰지 않는다 — 앱은 이 값들이 채워지거나 이번 로그인의 TOTP 통과를 반영한다고 전제하지 않고, 위 두 응답만 본다 [판단].
 
 최초 TOTP 등록(`MFA_SETUP`)으로 토큰을 받으면 먼저 `SetUserMFAPreference`로 TOTP를 선호 MFA로 지정한다. 이어서 `GetUser`로 `sub` · `email_verified`를 확인하고, 아래 중 하나라도 해당하면 이메일 검증 코드를 보내 확인한 뒤에야 완료한다.
 
@@ -79,10 +79,10 @@ POST /password-reset/confirm (PR 3) 이메일 · 재설정 코드 · 새 비밀�
 | 세션 고정 방지 | 로그인 완료 때 요청에 실린 이전 세션은 `SUPERSEDED`로 회수. PR 3부터는 그 사용자의 다른 살아 있는 세션도 함께 회수한다(§사용자당 세션 1개) | [판단] |
 | CSRF | 모든 상태 변경(POST) 요청은 `Origin`이 `AUTH_ALLOWED_ORIGINS`와 정확히 같아야 한다. 없거나 다르면 403 `AUTH_ORIGIN_REJECTED` — Cognito · 흐름 저장소 · DB에 닿기 전에 거절. 쿠키는 `SameSite=Lax` | [표준] [OWASP CSRF: Verifying Origin](https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html) |
 | CORS | 자격증명 허용(`allow_credentials=True`). 그래서 `CORS_ALLOW_ORIGINS` · `AUTH_ALLOWED_ORIGINS`에 `*`를 받지 않는다(Starlette는 `*` + 자격증명에서 요청 Origin을 되돌린다) | [판단] |
-| 보안 헤더 | `/api/v1/*`의 모든 응답(성공 · 401 · 403 · 404 · 422 · 500 봉투)에 `Cache-Control: no-store`, `Referrer-Policy: strict-origin`, `X-Content-Type-Options: nosniff`. PR 1은 `/api/v1/auth/*`에만 붙였고, PR 2에서 보호 API의 관제 데이터도 브라우저 · 중간 캐시에 남지 않게 넓혔다. `/health`와 CORS 사전 요청(CORS 미들웨어가 바깥에서 답한다)은 대상이 아니다 | [판단, PoC 차용] |
-| 코드 시도 상한(흐름별) | 한 로그인에서 TOTP · 이메일 코드 제출은 3번까지(`AUTH_TOTP_MAX_ATTEMPTS=3`). 3번째 실패에서 로그인을 폐기한다. Cognito는 TOTP를 틀려도 challenge 세션을 무효화하지 않았다 | [실측] [판단] |
+| 보안 헤더 | `/api/v1/*`의 모든 응답(성공 · 401 · 403 · 404 · 422 · 500 봉투)에 `Cache-Control: no-store`, `Referrer-Policy: strict-origin`, `X-Content-Type-Options: nosniff`. PR 1은 `/api/v1/auth/*`에만 붙였고, PR 2에서 보호 API의 관제 데이터도 브라우저 · 중간 캐시에 남지 않게 넓혔다. `/health`와 CORS 사전 요청(CORS 미들웨어가 바깥에서 답한다)은 대상이 아니다 | [판단] |
+| 코드 시도 상한(흐름별) | 한 로그인에서 TOTP · 이메일 코드 제출은 3번까지(`AUTH_TOTP_MAX_ATTEMPTS=3`). 3번째 실패에서 로그인을 폐기한다. 틀린 TOTP 뒤에 Cognito가 같은 challenge 세션을 무효화한다고 전제하지 않고, 서버가 횟수를 세어 막는다 | [판단] |
 | 코드 시도 상한(사용자별) | 로그인을 다시 시작해 흐름별 상한을 초기화하지 못하도록, Cognito 사용자 단위로 15분 동안 코드 실패 10회(`AUTH_CODE_FAILURE_LIMIT` · `AUTH_CODE_FAILURE_WINDOW_SECONDS`)에 이르면 429 `AUTH_RATE_LIMITED`. 코드 단계는 Cognito를 부르지 않고 거절하고, 비밀번호 단계는 사용자를 식별한 뒤 흐름을 만들지 않고 거절한다. 코드 실패는 비밀번호를 통과해야만 쌓이므로 비밀번호를 모르는 사람이 계정을 잠글 수 없다. 이 때문에 한도에 이른 사용자의 올바른 비밀번호에는 429, 틀린 비밀번호에는 401이 간다 — 비밀번호를 이미 아는 사람에게만 보이는 차이라 열거 수단이 아니며, 401로 바꾸면 정상 사용자가 잠금 사실을 알 수 없다. IP 단위 제한(비밀번호 대입 방어)은 PR 4(WAF · 클라이언트 IP 신뢰 설정) | [판단] |
-| 이메일 검증 | 첫 세션 전 필수. 초대 사용자는 비밀번호 변경 · TOTP 등록 뒤에도 `email_verified`가 없었고, 계정 복구는 검증된 이메일만 쓴다. 최초 TOTP 등록 경로와 앱 DB에 확인 기록이 없는 사용자는 Cognito 값과 관계없이 이메일 코드를 요구한다 | [실측] [팀 결정] [판단] |
+| 이메일 검증 | 첫 세션 전 필수. 계정 복구는 검증된 이메일만 쓰며, 초대 사용자의 `email_verified`가 비밀번호 변경 · TOTP 등록만으로 채워진다고 전제하지 않는다. 최초 TOTP 등록 경로와 앱 DB에 확인 기록이 없는 사용자는 Cognito 값과 관계없이 이메일 코드를 요구한다 | [팀 결정] [판단] |
 | 비밀번호 정책 | User Pool 정책(12자 이상, 대소문자 · 숫자 · 기호)을 유지한다. OWASP ASVS 2.1.7(유출 비밀번호 확인) · 2.1.9(문자 종류 규칙 금지)는 적용하지 않는다. 유출 비밀번호 확인은 Cognito Essentials 요금제에 없고 Plus 요금제에 있으며, 그 확인 없이 문자 종류 규칙을 없애지 않는다. TOTP 필수와 코드 시도 제한으로 비밀번호만으로 계정이 열리는 위험은 제한된다. PR 3부터 앱 API로 설정하는 새 비밀번호에는 Pool보다 좁은 앱 정책을 Cognito 호출 전에 더 적용한다(§새 비밀번호 정책) | [팀 결정(#492)] [표준: 미적용 항목 명시] |
 | MFA 선호 | 최초 등록 직후 TOTP를 선호 MFA로 지정한다. User Pool이 실수로 `OPTIONAL`이 되면 비밀번호 단계에서 토큰이 나오는데, 이 경우 앱은 세션 없이 거절한다(fail closed) | [판단] |
 | 401 · 403 | 미인증(세션 없음 · 만료 · 회수 · 비활성 사용자의 세션)은 401 `AUTH_REQUIRED`, 인증 후 역할이 허용하지 않으면 403 `AUTH_FORBIDDEN`(PR 2) | [팀 결정] |
@@ -99,7 +99,7 @@ POST /password-reset/confirm (PR 3) 이메일 · 재설정 코드 · 새 비밀�
 | 역할 | 아래 표. 역할 · Origin 거절은 `workflows.reserve_execution` · `workflows.resolve_incident` 전이다 — 실행 행(디스패처가 보는 비종결 `action_executions`) · 후보 전이 · AWS 호출이 생기지 않는다 | [팀 결정] |
 | 401 · 403 | 세션 없음 · 만료(유휴 · 최대 수명) · 회수(`LOGOUT` · `SUPERSEDED`, PR 3의 `ADMIN_REVOKED` · `ACCOUNT_DISABLED` · `PASSWORD_RESET`) · 비활성 사용자 → 401 `AUTH_REQUIRED`(사유를 구분하지 않는다). 역할 불허 → 403 `AUTH_FORBIDDEN`. 허용 밖 Origin → 403 `AUTH_ORIGIN_REJECTED` | [팀 결정] |
 | Origin 범위 | 쿠키로 승인되는 모든 상태 변경 요청(GET · HEAD · OPTIONS 외). `AUTH_ALLOWED_ORIGINS`와 정확히 일치(비면 `CORS_ALLOW_ORIGINS`), 세션 조회 전에 거절. 조회(GET)는 Origin을 보지 않는다. WebSocket Handshake도 같은 목록(`auth.http.allowed_origins`)을 쓴다 | [표준] [OWASP CSRF: Verifying Origin](https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html) |
-| 깨진 JSON 본문 | FastAPI 0.141.1은 JSON 본문을 의존성보다 먼저 파싱한다(`fastapi/routing.py` 요청 처리기). 그래서 파싱할 수 없는 본문의 POST는 세션 · Origin과 관계없이 422 `REQUEST_VALIDATION_FAILED`다. 이때 Origin · 세션 · DB · Workflow는 하나도 돌지 않는다. 파싱되는 본문의 필드 오류는 세션 · 역할 뒤(미인증이면 401)다. 이대로 둔다 — 상태 변경 · DB 접근 · 입력 반향이 없고, 바꾸려면 본문 파싱 앞에 같은 관문을 한 번 더 두어야 한다(중복) | [실측] [팀 결정: 유지] |
+| 깨진 JSON 본문 | 잠금된 FastAPI 0.141.1은 JSON 본문을 의존성보다 먼저 파싱한다(`fastapi/routing.py` 요청 처리기). 그래서 파싱할 수 없는 본문의 POST는 세션 · Origin과 관계없이 422 `REQUEST_VALIDATION_FAILED`다. 이때 Origin · 세션 · DB · Workflow는 하나도 돌지 않는다. 파싱되는 본문의 필드 오류는 세션 · 역할 뒤(미인증이면 401)다. 이대로 둔다 — 상태 변경 · DB 접근 · 입력 반향이 없고, 바꾸려면 본문 파싱 앞에 같은 관문을 한 번 더 두어야 한다(중복) | [팀 결정: 유지] |
 | WebSocket 연결 | Handshake Origin은 HTTP 상태 변경 검사와 같은 목록(`AUTH_ALLOWED_ORIGINS`, 비면 `CORS_ALLOW_ORIGINS`)과 정확히 일치해야 한다 — `AUTH_ALLOWED_ORIGINS`가 더 좁으면 CORS에만 있는 Origin은 WebSocket도 1008. Origin 없는 비브라우저 연결은 #73처럼 통과하지만 세션 쿠키는 필요하다. 세션 쿠키가 없거나 무효면 accept 전에 close 1008 — 브라우저에는 HTTP 403으로 보인다. 사유는 구분하지 않는다 | [팀 결정] |
 | WebSocket 재확인 | 연결마다 감시 task가 `min(지금 + WS_SESSION_CHECK_SECONDS, 유휴 만료, 최대 수명)`에 다시 판정하고, 무효면 close 4401(`WS_CLOSE_AUTH_REQUIRED`) reason `"AUTH_REQUIRED"`. 반영 지연 상한: 로그아웃 · 재로그인 회수 · 사용자 비활성은 주기 1회(기본 30초) + 확인 조회 시간, 유휴 · 최대 수명 만료는 그 시각. 확인 자체가 실패하면(DB 오류) 1011로 닫고 오류 종류만 로그에 남긴다(세션 무효가 아니므로 FE는 재연결). 판정마다 짧은 DB 세션을 스레드풀에서 연다 — 연결 수명 동안 DB 세션을 쥐지 않는다. close reason에 세션 · 사용자 정보를 싣지 않는다 | [팀 결정] [판단: 주기 30초] |
 | 신원 전달 | 통과한 `CurrentUser`(user_id · role)를 `request.state.current_user`에 둔다. 접근 로그 `http_request`에 `user_id` · `role`을 싣는다(세션을 통과한 요청만). 이메일 · 쿠키 · 토큰은 싣지 않는다. 조치 실행 · 종료 라우터는 역할 검사 결과로 같은 신원을 받는다 — 감사 기록은 T-2 | [판단] |
@@ -177,7 +177,7 @@ Cognito 호출은 DB 트랜잭션 밖에서 DB 쓰기보다 먼저 한다(짧은
 | `POST /api/v1/auth/password-reset/confirm` `{email, code, new_password}` | ① 스키마: 새 비밀번호 12–256자 · 6자리 코드, 위반 422 `REQUEST_VALIDATION_FAILED` → ② 앱 정책: 위반 422 `AUTH_PASSWORD_POLICY`(Cognito 미호출) → ③ DB 사용 가능 확인: 불가 500 `INTERNAL_ERROR`(Cognito 미호출) → ④ `AdminGetUser`로 `sub` 확인: 실패 429 · 503(비밀번호 변경 전에 중단) → ⑤ `ConfirmForgotPassword` → ⑥ 성공 뒤에만 `app_users` 잠금 안에서 그 사용자의 세션 전부를 `PASSWORD_RESET`으로 회수 → 204(쿠키 없음). Cognito 호출 중에는 DB 트랜잭션을 열어 두지 않는다 |
 
 - 확정 오류: 코드 불일치 · 만료 · 사용자 없음 · `NotAuthorizedException` → 401 `AUTH_CODE_INVALID`(구분하지 않는다), Cognito 정책 거절(`InvalidPasswordException`) → 422 `AUTH_PASSWORD_POLICY`, 요청 제한 → 429, 그 밖 → 503. 실패하면 세션은 그대로다.
-- 재설정이 회수하는 것은 이미 발급된 앱 세션뿐이다. 앱은 재설정 때 진행 중인 로그인 흐름을 따로 무효로 만들지 않는다. 실제 Cognito 시험 한 번에서는 재설정 전에 비밀번호 단계를 통과해 TOTP 단계에 있던 흐름이 재설정 뒤 올바른 TOTP로 완료되어 새 세션을 받았다(§PR 3 검증 범위). TOTP 단계를 건너뛴 것이 아니며, 이 한 번의 결과가 진행 중인 모든 흐름의 동작을 보장하지는 않는다. 재설정 뒤 이전 비밀번호로 새 로그인을 시작할 수 있는지는 확인하지 않았다.
+- 재설정이 회수하는 것은 이미 발급된 앱 세션뿐이다. 앱은 재설정 때 진행 중인 로그인 흐름을 따로 무효로 만들지 않으며, 재설정 전에 비밀번호 단계를 통과한 흐름을 Cognito가 거절한다고 전제하지 않는다. 그런 흐름은 재설정 뒤에도 TOTP 단계를 마치면 새 세션을 받을 수 있다(TOTP 단계를 건너뛰지는 않는다). 새 로그인에서 비밀번호의 유효성은 Cognito가 판정한다.
 - 앱 사용자 행이 없는 `sub`는 회수할 세션이 없으므로 204다.
 - **부분 실패**: 비밀번호 변경이 성공한 뒤 세션 회수가 실패하거나, `AdminGetUser`가 "없음"이었는데 확정이 성공하면(회수할 `sub`를 모른다) 500 `INTERNAL_ERROR`다. 비밀번호는 이미 바뀌었고 이전 세션이 남을 수 있다(승인된 한계). 남은 세션은 그 사용자의 다음 로그인 완료(세션 전부 교체) · ADMIN 세션 회수 · 새 재설정 · 만료로 정리된다.
 - 로그에는 예외 종류 · AWS 오류 코드만 남긴다. 이메일 · 코드 · 비밀번호 · SQL은 싣지 않는다.
@@ -192,8 +192,8 @@ Cognito 호출은 DB 트랜잭션 밖에서 DB 쓰기보다 먼저 한다(짧은
 | 내용 | 영문 대문자 · 소문자 · 숫자 · 기호를 각 1자 이상. 허용 문자는 기본 라틴 대소문자 · 숫자와 AWS가 기호로 인정하는 ASCII 문장부호 32자(`PASSWORD_SYMBOLS`, 공백 제외)뿐이다. 공백 · 한글 · 그 밖의 비 ASCII · 제어 문자는 거절한다. 위반은 422 `AUTH_PASSWORD_POLICY` | [판단] [AWS: User pool password requirements](https://docs.aws.amazon.com/cognito/latest/developerguide/managing-users-passwords.html) |
 | 입력 처리 | trim · 유니코드 정규화 · 대소문자 변환을 하지 않는다. 받은 문자열 그대로 판정하고 그대로 Cognito에 보낸다 | [판단] |
 | 적용하지 않는 곳 | 로그인 비밀번호(기존 비밀번호 · 초대 임시 비밀번호)는 이 정책을 보지 않는다(`LoginRequest`는 1–256자만) | [판단] |
-| User Pool 정책과의 관계 | 앱 정책은 Pool 정책(12자 이상, 4종 필수 [설정 조회])보다 **좁다**. Pool은 앞뒤가 아닌 공백도 기호로 인정하고 최소 문자 충족 뒤에는 다른 문자도 받지만, 앱은 거절한다. Pool 설정은 바꾸지 않았다. 앱 API를 거치지 않는 비밀번호 설정(Cognito API · 콘솔 직접 호출)에는 Pool 정책만 적용된다. 앱 정책 통과가 Cognito 수락을 보장하지 않으며, Cognito가 거절하면(`InvalidPasswordException`) 같은 422 `AUTH_PASSWORD_POLICY`다 | [표준] [판단] |
-| 화면(`apps/web`) | 조건 6개(길이 · 대문자 · 소문자 · 숫자 · 기호 · 허용 문자만)와 확인 칸 일치를 입력 중에 표시하고, 제출 직전에 같은 판정으로 호출을 막는다(`apps/web/src/lib/password-policy.ts`). 붙여넣기와 비밀번호 관리자(`autocomplete="new-password"`)를 막지 않는다. 한글 입력 경고는 로그인 비밀번호와 이메일 칸(로그인 · 재설정 · 초대)에만 표시하며 값을 바꾸거나 제출을 막지 않는다(`apps/web/src/lib/korean-input.ts`). 이메일 칸은 브라우저 기본 `type="email"` 검증을 쓰고, 서버는 기존 `Email` 계약 외의 규칙을 더하지 않는다. 실제 브라우저 · OS IME · 자동 완성 동작은 확인하지 않았다 | [판단] |
+| User Pool 정책과의 관계 | 앱 정책은 전제한 Pool 정책(12자 이상, 4종 필수 — §User Pool · 앱 클라이언트 전제)보다 **좁다**. Pool은 앞뒤가 아닌 공백도 기호로 인정하고 최소 문자 충족 뒤에는 다른 문자도 받지만, 앱은 거절한다. 앱은 Pool 정책을 바꾸지 않는다. 앱 API를 거치지 않는 비밀번호 설정(Cognito API · 콘솔 직접 호출)에는 Pool 정책만 적용된다. 앱 정책 통과가 Cognito 수락을 보장하지 않으며, Cognito가 거절하면(`InvalidPasswordException`) 같은 422 `AUTH_PASSWORD_POLICY`다 | [표준] [판단] |
+| 화면(`apps/web`) | 조건 6개(길이 · 대문자 · 소문자 · 숫자 · 기호 · 허용 문자만)와 확인 칸 일치를 입력 중에 표시하고, 제출 직전에 같은 판정으로 호출을 막는다(`apps/web/src/lib/password-policy.ts`). 붙여넣기와 비밀번호 관리자(`autocomplete="new-password"`)를 막지 않는다. 한글 입력 경고는 로그인 비밀번호와 이메일 칸(로그인 · 재설정 · 초대)에만 표시하며 값을 바꾸거나 제출을 막지 않는다(`apps/web/src/lib/korean-input.ts`). 이메일 칸은 브라우저 기본 `type="email"` 검증을 쓰고, 서버는 기존 `Email` 계약 외의 규칙을 더하지 않는다 | [판단] |
 
 **KISA 권고와의 관계.** KISA 안내서(2019, KISA-GD-2018-0033)는 5장(5쪽)에서 새 비밀번호를 설정할 때 안전하지 않은 비밀번호를 사용자에게 알리고 거부하도록 권고한다. 이 구현의 조건 표시 · 거절은 그 방향과 같지만 KISA 기준 준수를 주장하지 않는다. ASCII 한정 · 한글 금지 · 기호 허용 목록 · 12자 하한은 KISA 요구가 아니라 Vigilantis 서비스 정책이다.
 
@@ -231,8 +231,10 @@ Cognito 클라이언트는 `https://cognito-idp.{region}.amazonaws.com`으로 �
 
 ### User Pool · 앱 클라이언트 전제
 
+배포 환경에서 이 구현의 동작과 맞는지 확인하고 맞출 User Pool · 앱 클라이언트 설정이다. 특정 환경의 현재 값은 이 문서가 보증하지 않는다(환경별 설정은 PR 4).
+
 - Essentials, `MfaConfiguration=ON`, Software token MFA만 활성, 관리자만 사용자 생성, 사용자 이름은 email(대소문자 구분 없음), 복구는 `verified_email`
-- 비밀번호 정책은 최소 12자 · 대문자 · 소문자 · 숫자 · 기호 필수, 관리자가 만든 임시 비밀번호 유효 기간(`TemporaryPasswordValidityDays`)은 7일 [설정 조회]. 기간이 지난 초대는 재발송으로 새 임시 비밀번호를 보낸다
+- 비밀번호 정책은 최소 12자 · 대문자 · 소문자 · 숫자 · 기호 필수. 관리자가 만든 임시 비밀번호는 Pool의 `TemporaryPasswordValidityDays` 기간이 지나면 만료되며, 기간이 지난 초대는 재발송으로 새 임시 비밀번호를 보낸다
 - 앱 클라이언트: client secret 있음, `ExplicitAuthFlows`에 `ALLOW_ADMIN_USER_PASSWORD_AUTH`, 토큰 회수 켜짐, `AuthSessionValidity=3`(분), 존재 노출 방지 켜짐
 - 기기 추적(`DeviceConfiguration`) 꺼짐
 - 실행 주체에 `cognito-idp:AdminInitiateAuth` · `cognito-idp:AdminRespondToAuthChallenge`, PR 3부터 `cognito-idp:AdminCreateUser`(초대 · 재발송) · `cognito-idp:AdminGetUser`(기존 계정 연결 · 재발송 · 재설정 확정)(모두 해당 User Pool 한정). 그 밖의 호출(`AssociateSoftwareToken` · `VerifySoftwareToken` · `GetUser` · `GetUserAttributeVerificationCode` · `VerifyUserAttribute` · `RevokeToken`)은 세션 · 토큰으로 승인돼 IAM 권한이 필요 없다. `ForgotPassword` · `ConfirmForgotPassword`는 IAM이 아니라 client secret으로 계산한 `SECRET_HASH`로 호출한다. 배포 역할 반영은 PR 4(플랫폼 배포 스크립트)이며, PR 3의 두 권한도 PR 4에 넘긴다
@@ -269,73 +271,11 @@ uv run python -m auth.bootstrap_admin --existing-cognito-user --email <이메일
 | 실제 PostgreSQL(PR 3) | `apps/core-api/tests/test_auth_login_single_session.py` | 다른 브라우저의 두 번째 로그인이 첫 세션 교체, 다른 사용자의 이전 쿠키도 교체, 비활성 · 미등록 거절 시 변경 없음, 사용자 단위 일괄 회수, 동시 로그인 뒤 살아 있는 세션 정확히 1개 |
 | 실제 PostgreSQL(PR 3) | `apps/core-api/db/tests/test_user_admin.py` · `test_user_admin_migration.py` | 회수 사유 enum, 마지막 로그인 = 회수 세션 포함 최신 세션, 활성 ADMIN 집계, 외부 변경 뒤 최신 값 읽기, 만료 포함 일괄 회수, 이력 최신순 · 대상별, 허용 목록 밖 상태 거절, UPDATE · DELETE 거절 · INSERT 허용, 이력이 참조하는 사용자 삭제 불가, 단일 head · 왕복 마이그레이션 |
 | 실제 PostgreSQL(PR 3 갱신) | `apps/core-api/tests/test_api_access.py` · `test_auth_api.py` | 공개 목록에 재설정 2종 추가, 사용자 관리 경로도 경로 전수 검사 대상(미인증 401). Cognito 미설정 시 로그인 · 재설정만 503이고 `/logout` · `/activity` · `/me` · 보호 API는 동작 |
-| 실제 Cognito | 자동 테스트 없음 | 아래 확인 결과. CI는 실제 Cognito를 호출하지 않는다 |
+| 실제 Cognito | 자동 테스트 없음 | 없음. CI는 실제 Cognito를 호출하지 않는다(아래 주의) |
 
 통합 픽스처(`apps/core-api/tests/conftest.py`): `client_pg`는 테스트 DB에 만든 OPERATOR 실세션 쿠키와 허용 Origin을 기본 헤더로 싣는다(세션 쿠키는 `Secure`라 httpx 쿠키 저장소가 http로 보내지 않아 `Cookie` 헤더로 직접 싣는다). 세션 없는 클라이언트는 `client_pg_anon`, 다른 역할은 `login_as(role)`, 임의 시드는 `make_auth_session(role, status=, now=)`. WebSocket은 다른 스레드가 자기 DB 세션으로 판정하므로 `ws_client` · `committed_auth`가 실제로 commit하고 끝나면 지운다.
 
-**대역 테스트 통과는 실제 Cognito의 MFA 동작 보장이 아니다.** Cognito 쪽 동작의 근거는 아래 실측이다. PR 3의 실제 Cognito 근거는 §PR 3 검증 범위의 앱 시험(초대 · 재발송 · 최초 로그인 · 비밀번호 재설정 · 재설정 뒤 로그인 · 재설정 전에 시작한 로그인의 완료)뿐이며, 그 밖의 PR 3 경로는 대역 테스트만 있다.
-
-### 실제 Cognito 확인 (2026-10-19, 개인 개발 계정 · 테스트 사용자)
-
-- 비밀번호 단계는 토큰 없이 `SOFTWARE_TOKEN_MFA`만 반환했다. 올바른 TOTP 뒤에만 토큰이 나왔다.
-- 틀린 TOTP는 `CodeMismatchException`. 같은 challenge 세션은 그 뒤에도 올바른 코드를 받았다(→ 서버 시도 상한).
-- 성공에 쓴 challenge 세션 재사용은 `NotAuthorizedException`(1회만 사용), 3분이 지난 challenge는 만료로 거절됐다.
-- 기기 추적은 꺼져 있고 `NewDeviceMetadata`가 오지 않았다.
-- 초대 사용자는 `NEW_PASSWORD_REQUIRED` → `MFA_SETUP` → (`VerifySoftwareToken` SUCCESS) → 토큰. 다음 로그인부터 `SOFTWARE_TOKEN_MFA`.
-- 앱을 통한 확인(로컬 core-api + 웹, Chrome): 등록 사용자 로그인 → 틀린 TOTP 401 → 올바른 TOTP → 이메일 인증 코드 메일 수신 · 입력 → 세션 발급(`SOFTWARE_TOKEN_MFA`, 최대 수명 28800초, DB에 64자 해시) → `/me` → 로그아웃(`LOGOUT` 회수). Cognito `email_verified`가 비어 있다가 `true`가 됐다. 서버 로그에 토큰 · 쿠키 · 비밀번호 · client secret이 없었다. 최초 관리자 CLI의 기존 사용자 연결(`--existing-cognito-user`)도 실제 Cognito로 확인했다.
-- 앱 DB에 이메일 확인 기록이 없는 사용자는 Cognito `email_verified=true`여도 코드 메일이 다시 발송되고(이미 검증된 속성에 대한 `GetUserAttributeVerificationCode` 동작 확인), 코드 입력 뒤 완료됐다. 기록이 생긴 뒤의 로그인은 이메일 단계 없이 완료됐고, 로그인 상태에서 다시 로그인하면 이전 세션이 `SUPERSEDED`로 회수됐다.
-- 미검증: 최초 TOTP 등록 중 틀린 코드의 동작, 초대 메일 임시 비밀번호로 시작하는 전체 경로(기본 초대 메일에서 복사한 값이 반복 거절됨 — 끝 문장부호 혼입 추정, 미확인), 최초 등록 직후 `SetUserMFAPreference`(앱 경로로 새 사용자 등록을 하지 않았다), HTTPS 배포 환경의 쿠키 동작.
-
-### 실제 Cognito 설정 조회 (2026-10-21, 읽기 전용)
-
-개인 개발 계정의 User Pool · 앱 클라이언트 설정을 읽기 전용 API로 조회했다. 설정 변경 · 사용자 생성 · 메일 발송은 하지 않았다.
-
-- User Pool: `MfaConfiguration=ON`, 비밀번호 정책 최소 12자 + 대문자 · 소문자 · 숫자 · 기호 필수, `TemporaryPasswordValidityDays=7`, 계정 복구 `verified_email`, 사용자 이름 대소문자 구분 안 함(`UsernameConfiguration.CaseSensitive=false`).
-- 앱 클라이언트: `ExplicitAuthFlows`는 `ALLOW_ADMIN_USER_PASSWORD_AUTH` · `ALLOW_REFRESH_TOKEN_AUTH`, `PreventUserExistenceErrors=ENABLED`, 토큰 회수 켜짐(`EnableTokenRevocation=true`), `AuthSessionValidity=3`.
-- 이 조회는 설정만 읽었다. 앱을 통한 동작 확인은 §PR 3 검증 범위에 있다. PR 3의 IAM 권한은 배포 역할에 반영하지 않았다(PR 4).
-
-### PR 3 검증 범위 (2026-10-21 작성 시점)
-
-PR 3은 `origin/dev`(#503 화면 셸 · #506 테넌트 포함)를 통합했다. #506의 `AppUser.tenant_id`(nullable)는 바꾸지 않았고, PR 3 사용자 관리 마이그레이션은 dev의 마지막 리비전 뒤로 다시 이어 head가 하나다. 아래는 통합 뒤 확인한 것과 통합 전 코드로만 확인한 것을 나눠 적는다.
-
-통합 뒤 확인한 것:
-
-- 마이그레이션 · 모델 메타데이터 관련 DB 테스트가 실제 PostgreSQL로 통과했다.
-- 전용 PostgreSQL · LocalStack 환경에서 CI와 같은 경로의 전체 Python 테스트가 통과했다(4,686 passed, 실패 · skip 0건).
-- FE(`apps/web`)의 단위 테스트, build(타입 검사 포함), ESLint가 통과했다.
-
-통합 전 코드에서 확보한 근거(통합 뒤 검사 결과와 구분):
-
-- 리뷰 반영 뒤 CI와 같은 경로의 전체 Python 테스트가 실제 PostgreSQL · LocalStack으로 통과했다(실제 AWS 미호출).
-- 로컬 브라우저에서 새로고침했을 때 사용자 시각 표시(`formatUserTime`)가 KST로 렌더링됐고, 콘솔에 hydration 오류가 없었다. 개발 모드 경고(글꼴 preload · WebSocket 닫힘)는 남아 있어 콘솔에 경고가 없다고 보지 않는다.
-- 앱을 통한 실제 Cognito 시험(아래 시험 범위).
-
-#### 실제 Cognito 앱 시험 (2026-10-21, dev 통합 전 코드)
-
-dev 통합 뒤에는 다시 시험하지 않았다. 통합으로 로그인 · 재설정 흐름의 동작은 바뀌지 않았지만, 아래 결과는 통합 전 코드의 근거다.
-
-로컬 core-api와 웹을 브라우저로 사용했고, 기존 User Pool · 앱 클라이언트와 이 시험용으로 새로 만든 격리 PostgreSQL DB를 썼다. Cognito 호출은 실제 어댑터(`CognitoAdapter`)로 했다(SDK 대역 없음). 테스트 사용자는 새 별칭 이메일로 만들었다. 메일 수신 · 임시 비밀번호 · 새 비밀번호 · TOTP · 이메일 코드 입력은 사용자가 직접 했다. 첫 시험(1–4단계)에서는 비밀번호 · 일회용 코드 · 메일 본문을 읽거나 기록하지 않았고, 앱 서버 로그에는 비밀번호 · 코드가 없었다.
-
-1. 초대: `POST /api/v1/users` 201, 목록에 새 VIEWER가 나타났다. 이어서 `POST /api/v1/users/{user_id}/invite/resend` 204. 초대한 ADMIN 행위자는 로컬 DB에 만든 픽스처였다 — 실제 Cognito로 로그인한 ADMIN이 아니다.
-2. 최초 로그인(초대 임시 비밀번호로 시작): `/login` → `/login/new-password`(앱 정책을 통과한 새 비밀번호) → `/login/totp-setup` → `/login/totp-setup/verify` → `/login/email-verification`이 모두 200, `GET /me` 200. DB: 사용자는 VIEWER · ACTIVE, `email_verified_at` 기록됨, 살아 있는 세션 1개(MFA 단계 `MFA_SETUP`). 2026-10-19 확인에서 미검증으로 남았던 초대 임시 비밀번호 경로를 이 시험에서 거쳤다.
-3. 비밀번호 재설정: `POST /api/v1/auth/password-reset` 204 → `POST /api/v1/auth/password-reset/confirm` 204. 직후 DB의 살아 있는 세션은 0개였고, 이전 세션의 회수 사유는 `PASSWORD_RESET`이었다. 열려 있던 대시보드는 `/login?ended=1`로 이동했다.
-4. 재설정한 비밀번호로 새 로그인: `/login` 200 → TOTP 200, `GET /me` 200. DB: 이메일 확인 기록 유지, 살아 있는 새 세션 1개(MFA 단계 `SOFTWARE_TOKEN_MFA`), `PASSWORD_RESET`으로 회수된 이전 세션 1개.
-5. 재설정 전에 시작한 로그인(2026-10-21): `POST /api/v1/auth/login` 200(재설정 전 비밀번호, TOTP 단계로 진행) → 약 22초 뒤 `POST /api/v1/auth/password-reset/confirm` 204 → 같은 흐름에서(새 `/login` 호출 없이) `POST /api/v1/auth/login/totp` 401(Cognito `CodeMismatchException`) → 다시 `POST /api/v1/auth/login/totp` 200, 루트 화면(`/`)이 열리고 `GET /me` 200. 시작부터 완료까지 약 69초로 `AuthSessionValidity`(3분) 안이었다. 직후 DB: 살아 있는 세션 1개(이 TOTP 성공 시각에 생성), `PASSWORD_RESET`으로 회수된 이전 세션 2개.
-
-결과: 재설정은 이미 발급된 앱 세션을 회수했고(3단계), 재설정 전에 비밀번호 단계를 통과한 이 로그인 흐름은 재설정 뒤에도 올바른 TOTP로 완료되어 새 앱 세션을 받았다(5단계). TOTP 단계를 건너뛴 것이 아니며, 한 번의 시험이라 3분 안의 모든 진행 중 흐름이 같게 동작한다고 보장하지 않는다. 재설정 뒤 이전 비밀번호로 새 로그인을 시작할 수 있는지는 시험하지 않았다. 재설정 때 진행 중인 로그인 흐름을 무효로 만드는 처리는 추가하지 않았다(승인되지 않았다).
-
-한계:
-
-- 한 번에 오류 없이 끝난 시험이 아니다. 4단계와 5단계 모두 중간에 TOTP 제출이 401이었고, 다시 시도해 200이었다.
-- 5단계 전 두 번의 시도는 이 항목을 판정하지 못했다. 첫 시도는 재설정 확정 뒤 TOTP 제출이 401 `AUTH_FLOW_EXPIRED`였지만 시작부터 제출까지 약 4분 19초가 걸려 `AuthSessionValidity`(3분)를 이미 넘겼다. 두 번째 시도는 로그인 흐름을 준비하기 전에 재설정이 먼저 확정됐다(확정 204, 화면에 비밀번호 변경 안내). 남아 있던 미확인은 5단계로 해소됐다.
-- 이 계정의 비밀번호는 마지막 재설정 값이고, 그 비밀번호로 새 로그인을 시작한 것은 확인하지 않았다(5단계는 재설정 전에 시작한 흐름이다).
-- 테스트 사용자는 Cognito에 남아 있다(삭제는 승인되지 않았다). User Pool · 앱 클라이언트 · IAM · SDK는 바꾸지 않았다.
-
-확인하지 않았거나 보류 중인 것:
-
-- 실제 Cognito로 로그인한 ADMIN의 초대, `recover_existing` 연결, 실패 · 오류 경로(Cognito 정책 거절, 재설정 코드 불일치, 발송 실패 등)는 실제 Cognito로 확인하지 않았다. 대역 테스트만 있다.
-- Python lint(Ruff)는 실행했지만 도구 오류(BOM 경계에서 진단 출력 중 중단)로 원본 전체 검사를 끝내지 못했다. 부분 결과에도 지적이 있어 통과로 보지 않는다.
-- 실제 OS IME · 브라우저 자동 완성 · 비밀번호 관리자 동작을 확인하지 않았고, HTTPS 배포 환경도 확인하지 않았다(PR 4).
+**대역 테스트 통과는 실제 Cognito 동작의 보장이 아니다.** 대역 테스트는 정해 둔 Cognito 응답을 앱이 어떻게 처리하는지만 고정한다. 실제 User Pool의 challenge 순서 · 오류 · 메일 발송과 §User Pool · 앱 클라이언트 전제는 자동 테스트가 확인하지 않는다. HTTPS 배포 환경의 쿠키 동작과 실제 브라우저 · OS IME · 자동 완성 · 비밀번호 관리자 동작도 자동 테스트 범위가 아니다(통합 픽스처는 `Cookie` 헤더를 직접 싣는다).
 
 ## 운영 주의점
 
@@ -343,11 +283,11 @@ dev 통합 뒤에는 다시 시험하지 않았다. 통합으로 로그인 · �
 - **세션 만료는 관제를 멈추지 않는다.** 수집 · 탐지 · 자동 대응은 사용자 세션과 독립적으로 돈다.
 - **SDK 로그는 WARNING으로 고정된다.** Admin 인증 요청 본문에 비밀번호가, 응답에 토큰이 실리므로 `setup_logging`이 `LOG_LEVEL`과 관계없이 `botocore` · `boto3` · `urllib3`를 WARNING으로 둔다. 이 고정을 풀지 않는다.
 - **Cognito 자격증명.** `COGNITO_AWS_PROFILE`이 비면 `AWS_PROFILE`(운영 이미지의 관제 대상 접근 역할 프로필)을 무시하고 기본 체인(태스크 역할)을 쓴다. Cognito 권한을 관제 대상 접근 역할에 주지 않는다.
-- **로컬 개발.** 웹(`http://localhost:3000`) → API(`http://localhost:8000`)는 같은 사이트라 `SameSite=Lax` 쿠키가 실린다. FE 요청은 `credentials: "include"`다. Chrome · Firefox는 `http://localhost`를 보안 컨텍스트로 보아 `Secure` · `__Host-` 쿠키를 받는다(Safari는 확인하지 않았다). `.env`에 LocalStack 더미 AWS 키가 있으면 `COGNITO_AWS_PROFILE`로 실제 자격증명을 지정한다.
+- **로컬 개발.** 웹(`http://localhost:3000`) → API(`http://localhost:8000`)는 같은 사이트라 `SameSite=Lax` 쿠키가 실린다. FE 요청은 `credentials: "include"`다. Chrome · Firefox는 `http://localhost`를 보안 컨텍스트로 보아 `Secure` · `__Host-` 쿠키를 받는다. `.env`에 LocalStack 더미 AWS 키가 있으면 `COGNITO_AWS_PROFILE`로 실제 자격증명을 지정한다.
 - **배포 도메인.** 세션 쿠키는 host-only라 기본 도메인(`https://vigilantis.dev`)과 `/api/*` 경로 라우팅을 전제한다. CloudFront 기본 도메인으로 접속하면 API 호스트와 달라 쿠키가 실리지 않는다(PR 4 환경 정리).
 - **초대 메일.** 기본 초대 메일 문구는 임시 비밀번호 뒤에 문장부호가 붙는다. 복사 때 함께 들어가지 않게 안내하거나 문구를 바꾼다(PR 4).
 - **비활성 사용자.** `DISABLED` 사용자의 세션은 401로 막히고, 열린 WebSocket은 재확인 주기 안에 4401로 닫힌다. PR 3의 비활성화는 그 사용자의 세션 행도 `ACCOUNT_DISABLED`로 회수하고, 재활성화해도 되살리지 않는다. 앱 DB만 바꾸며 Cognito 사용자는 그대로다(§사용자 관리).
-- **TOTP 분실(PR 3 제외).** 비밀번호 재설정은 비밀번호만 바꾸고 로그인에는 여전히 TOTP가 필요하므로, 인증 앱을 잃은 사용자는 재설정으로 복구할 수 없다. 관리자용 TOTP 재설정 UI · API · CLI는 PR 3 게시 뒤의 후속 작업이다(이슈 번호 미정). 필요한 `AdminDeleteSoftwareToken`은 botocore 1.43.82부터 있어(현재 잠금 1.43.70에는 없다) 후속에서 의존성 갱신이 필요하다. 마지막 ADMIN이 TOTP를 잃으면 다시 로그인하지 못할 수 있다. 다만 이미 열린 세션은 만료 · 회수 전까지 유효하므로 즉시 운영이 멈추지는 않는다.
+- **TOTP 분실(PR 3 제외).** 비밀번호 재설정은 비밀번호만 바꾸고 로그인에는 여전히 TOTP가 필요하므로, 인증 앱을 잃은 사용자는 재설정으로 복구할 수 없다. 관리자용 TOTP 재설정 UI · API · CLI는 PR 3 게시 뒤의 후속 작업이다([#515](https://github.com/ProjectVigilantis/vigilantis/issues/515)). 필요한 `AdminDeleteSoftwareToken`은 botocore 1.43.82부터 있어(현재 잠금 1.43.70에는 없다) 후속에서 의존성 갱신이 필요하다. 마지막 ADMIN이 TOTP를 잃으면 다시 로그인하지 못할 수 있다. 다만 이미 열린 세션은 만료 · 회수 전까지 유효하므로 즉시 운영이 멈추지는 않는다.
 - **세션 확인 부하.** 보호 API 요청마다 `auth_sessions` · `app_users` 조회가 2번 붙는다(요청 세션 안). 열린 WebSocket은 연결마다 `WS_SESSION_CHECK_SECONDS`에 한 번 같은 조회를 한다.
 - **요청 본문 크기.** 본문 크기 제한은 인증 전에 강제되지 않는다(FastAPI 기존 동작 — 본문을 의존성보다 먼저 읽는다). 본문을 받는 경로는 미인증 요청도 본문 전체를 읽은 뒤에 거절한다. 크기 제약은 PR 4 WAF에서 둔다.
 - **SSOT.** `docs/PROJECT_STATUS.md` §API 계약의 오류 코드 목록(`AUTH_FORBIDDEN` 추가)과 WebSocket 닫기 코드(1008 · 4401 · 1011)는 PM 갱신 때 반영한다. PR 3의 `/api/v1/users` · `/api/v1/auth/password-reset*` 경로와 `USER_NOT_FOUND` · `USER_STATE_CONFLICT` 오류 코드도 같은 반영 대상이다.
