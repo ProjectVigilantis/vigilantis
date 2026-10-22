@@ -48,6 +48,7 @@ colors:
   badge-critical-fg: "#b42323"
   badge-idle-bg: "#eef1f5"
   badge-idle-fg: "#3d4a5c"
+  danger-text: "#b42323"
   danger-action: "#b42323"
   dark-background: "#0a1220"
   dark-surface: "#17233a"
@@ -78,6 +79,7 @@ colors:
   dark-badge-critical-fg: "#f48a8a"
   dark-badge-idle-bg: "#1d2a40"
   dark-badge-idle-fg: "#c3cddb"
+  dark-danger-text: "#f48a8a"
 typography:
   headline-lg:
     fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif"
@@ -307,12 +309,17 @@ Vigilantis는 고객 AWS 계정을 하루 24시간 지켜보는 관제 화면이
 | 배지 글자 / 배지 바탕(주간 다섯 쌍) | 5.43:1 이상 |
 | `dark-on-surface-muted` / `dark-surface-elevated` | 7.14:1 |
 | 배지 글자 / 배지 바탕(야간 다섯 쌍) | 6.86:1 이상 |
+| `danger-text` `#b42323` / `surface-elevated` | 6.55:1 |
+| `dark-danger-text` `#f48a8a` / `dark-surface-elevated` | 7.27:1 |
+| 흰 글자 / `danger-action` `#b42323`(두 모드 같음) | 6.55:1 |
+
+위험 경고 · 오류 글자(`danger-text`)와 위험 버튼 칠(`danger-action`)은 따로 둔다. 버튼 칠은 흰 글자가 읽히도록 어두워야 하고, 야간 글자는 어두운 카드 위에서 읽히도록 밝아야 한다. 야간에 버튼 칠 값을 글자에 쓰면 `dark-surface-elevated`와 2.63:1이다.
 
 색을 새로 고를 때도 대비를 측정한 뒤 넣는다. 눈으로 판단하지 않는다.
 
 ## 야간 모드
 
-야간 모드는 주간 색을 뒤집은 것이 아니라, 같은 역할에 어두운 바탕용 값을 따로 고른 것이다(`dark-*` 토큰). 상태 원색 네 가지(`status-good`, `status-warning`, `status-serious`, `status-critical`)는 두 모드에서 같고, 배지 바탕과 글자, 중립 회색, 히트맵 칸, 데이터 파랑은 모드마다 다르다.
+야간 모드는 주간 색을 뒤집은 것이 아니라, 같은 역할에 어두운 바탕용 값을 따로 고른 것이다(`dark-*` 토큰). 상태 원색 네 가지(`status-good`, `status-warning`, `status-serious`, `status-critical`)는 두 모드에서 같고, 배지 바탕과 글자, 위험 글자, 중립 회색, 히트맵 칸, 데이터 파랑은 모드마다 다르다.
 
 모드 전환은 상단바의 버튼으로 한다. 관제실 벽면 화면처럼 오래 켜 두는 화면은 야간 모드를 기본으로 띄울 수 있다.
 

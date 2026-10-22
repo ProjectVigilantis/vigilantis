@@ -29,6 +29,7 @@
   --color-input: var(--input);
   --color-border: var(--border);
   --color-destructive: var(--destructive);
+  --color-destructive-action: var(--destructive-action);
   --color-danger: var(--danger);
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
@@ -94,8 +95,11 @@
   --muted-foreground: #5b6878;
   --accent: #e7effd;
   --accent-foreground: #1747a6;
-  /* 되돌릴 수 없는 동작 버튼(ui/button destructive) */
+  /* 위험 경고 · 오류 글자와 테두리(text-destructive). DESIGN.md danger-text */
   --destructive: #b42323;
+  /* 되돌릴 수 없는 동작 버튼의 칠(ui/button destructive, 흰 글자). DESIGN.md danger-action.
+     글자색과 나눠 둔다. 야간 글자는 밝은 빨강이어야 읽히고, 버튼 칠은 흰 글자가 읽히게 어두워야 한다 */
+  --destructive-action: #b42323;
   /* 위험 · 실패 상태. 토폴로지 THREAT 노드와 위협 수치도 이 값을 쓴다 */
   --danger: #d03b3b;
   --border: #dde3ea;
@@ -173,7 +177,7 @@
   --muted-foreground: #9aa8bb;
   --accent: #15274a;
   --accent-foreground: #7cb0ff;
-  --destructive: #b42323;
+  --destructive: #f48a8a;
   --danger: #f06a6a;
   --border: #22304a;
   --input: #33415a;

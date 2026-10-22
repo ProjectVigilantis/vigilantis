@@ -2,7 +2,15 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import type { IncidentListItem, ThreatEventAxis } from '../types/api.ts';
-import { postureOf, recentDone, savingsTotal, threatHours, timeAgo } from './customer-dashboard.ts';
+import {
+  coverageCounts,
+  doneNote,
+  postureOf,
+  recentDone,
+  savingsTotal,
+  threatHours,
+  timeAgo,
+} from './customer-dashboard.ts';
 
 const NOW = Date.parse('2026-10-20T05:30:00Z');
 
@@ -49,6 +57,21 @@ test('수집 일부 실패는 주의다', () => {
   assert.equal(postureOf({ queue: [], threatAssets: 0, collection: 'PARTIAL' }).level, 'warning');
 });
 
+test('수집 전 · 수집 중에는 처리할 건과 위협 자산이 0이어도 정상이라 하지 않는다', () => {
+  for (const collection of ['NOT_COLLECTED', 'COLLECTING'] as const) {
+    const p = postureOf({ queue: [], threatAssets: 0, collection });
+    assert.equal(p.level, 'unknown', collection);
+    assert.doesNotMatch(p.headline, /정상/, collection);
+  }
+  assert.match(postureOf({ queue: [], threatAssets: 0, collection: 'NOT_COLLECTED' }).headline, /수집하지 않았습니다/);
+  assert.match(postureOf({ queue: [], threatAssets: 0, collection: 'COLLECTING' }).headline, /수집하는 중/);
+});
+
+test('수집 중이어도 보안 건은 그대로 알린다', () => {
+  const p = postureOf({ queue: [incident({ incident_id: 'h', initial_risk_level: 'HIGH' })], threatAssets: 0, collection: 'COLLECTING' });
+  assert.equal(p.level, 'critical');
+});
+
 test('절감액은 추정 있는 비용 제안만 더하고 추정 없음은 따로 센다', () => {
   const rows = [
     { incident: incident({ incident_id: 'f1', category: 'FINOPS' }), savings: 62.05 },
@@ -89,6 +112,35 @@ test('최근 끝난 건은 7일 안의 종료 · 종료 대기만 최신순으�
     incident({ incident_id: 'open', status: 'AWAITING_APPROVAL', updated_at: '2026-10-20T04:00:00Z' }),
   ];
   assert.deepEqual(recentDone(list, NOW)?.map((i) => i.incident_id), ['c1', 'r1']);
+});
+
+test('자동 격리가 거절된 뒤 「추가 조치 없음」으로 닫힌 건을 격리 성공처럼 적지 않는다', () => {
+  // core-api test_rejected_timeout_closes_the_wait_without_retry: 시간 초과 자동 격리가 가드레일에 거절돼
+  // FAILED가 되고, 관제자가 NO_FURTHER_ACTION으로 닫는다. 목록에는 RESOLVED · TIMEOUT_ISOLATION_1M만 남는다.
+  const closed = incident({ incident_id: 'rej', status: 'RESOLVED', response_mode: 'TIMEOUT_ISOLATION_1M' });
+  assert.equal(doneNote(closed), '종료 · 자동 격리 시도');
+  assert.equal(doneNote({ status: 'RESOLVED', response_mode: 'PRE_MITIGATION_0_5S' }), '종료 · 선제 차단 시도');
+});
+
+test('사람이 승인한 경로는 상태만 적는다', () => {
+  assert.equal(doneNote({ status: 'AWAITING_CLOSURE', response_mode: 'AGENT_WAIT' }), '종료 판단 대기');
+  assert.equal(doneNote({ status: 'RESOLVED', response_mode: null }), '종료');
+});
+
+test('판정 대기 · 실패는 정상 · 제외에 넣지 않고 합계는 판정 대상 수와 같다', () => {
+  const items = [
+    { evaluation_status: 'COMPLETED', verdict: 'THREAT' },
+    { evaluation_status: 'COMPLETED', verdict: 'COST_CANDIDATE' },
+    { evaluation_status: 'COMPLETED', verdict: 'UNUSED' },
+    { evaluation_status: 'COMPLETED', verdict: 'SKIP' },
+    { evaluation_status: 'PENDING', verdict: null },
+    { evaluation_status: 'PENDING', verdict: null },
+    { evaluation_status: 'FAILED', verdict: null },
+    { evaluation_status: 'NOT_APPLICABLE', verdict: null },
+  ] as const;
+  const c = coverageCounts(items);
+  assert.deepEqual(c, { judged: 7, threat: 1, waste: 2, ok: 1, pending: 2, failed: 1 });
+  assert.equal(c.threat + c.waste + c.ok + c.pending + c.failed, c.judged);
 });
 
 test('상대 시각', () => {

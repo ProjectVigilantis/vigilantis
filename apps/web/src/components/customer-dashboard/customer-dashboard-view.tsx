@@ -1,5 +1,5 @@
 // 고객사 대시보드(미리보기) 본문. 첫 화면은 가독성이 먼저다. "지금 괜찮은가 → 무엇을 해야 하나 →
-// 무엇을 대신 해 줬나 → 흐름은 어떤가 → 어디까지 보고 있나" 순서로 다섯 덩어리만 둔다. 목록은 5건에서 끊고
+// 무엇이 끝났나 → 흐름은 어떤가 → 어디까지 보고 있나" 순서로 다섯 덩어리만 둔다. 목록은 5건에서 끊고
 // 나머지와 자세한 근거(AI 요약 · 가드레일 · 토폴로지 · CPU)는 다음 화면(자산 · 보안 · 인시던트 상세)으로 넘긴다.
 //
 // 근거: 유사 서비스(Datadog Security Inbox · AWS Security Hub 요약 · Prisma Cloud Command Center)가 모두
@@ -11,6 +11,7 @@
 import {
   ArrowRight,
   CircleCheck,
+  CircleDot,
   CircleHelp,
   ShieldAlert,
   ShieldCheck,
@@ -23,6 +24,8 @@ import { ChartCard } from '@/components/chart-card';
 import { StatGrid, StatTile } from '@/components/stat-tile';
 import { EnumBadge } from '@/components/status-badge';
 import {
+  coverageCounts,
+  doneNote,
   postureOf,
   recentDone,
   savingsTotal,
@@ -71,9 +74,6 @@ const COLLECTION_TEXT: Record<CollectionStatus, string> = {
   PARTIAL: '일부 수집 실패',
   FAILED: '수집 실패',
 };
-
-/** 자동으로 끝난 대응 경로. 사람이 승인한 건과 문구를 가른다. */
-const AUTO_MODES = new Set(['PRE_MITIGATION_0_5S', 'TIMEOUT_ISOLATION_1M']);
 
 export function CustomerDashboardView({
   assets,
@@ -210,25 +210,27 @@ export function CustomerDashboardView({
           </div>
         </ChartCard>
 
-        <ChartCard className="flex-[2_1_340px]" title="나 대신 처리한 일" description="최근 7일 동안 끝난 건입니다.">
+        {/* 끝났다는 것만 말하고 성공 여부는 말하지 않는다. 목록 응답에 실행 결과가 없다(lib/customer-dashboard.ts doneNote). */}
+        <ChartCard
+          className="flex-[2_1_340px]"
+          title="최근 끝난 일"
+          description="최근 7일 동안 끝난 건입니다. 조치 결과는 상세에서 확인합니다."
+        >
           {done === null ? (
             <p className="text-muted-foreground text-sm">인시던트를 불러오지 못했습니다.</p>
           ) : done.length === 0 ? (
-            <EmptyLine text="최근 7일 동안 끝난 건이 없습니다." />
+            <p className="text-foreground-secondary py-2 text-[15px]">최근 7일 동안 끝난 건이 없습니다.</p>
           ) : (
             <ul className="flex flex-col gap-3.5">
               {done.map((i) => (
                 <li key={i.incident_id} className="flex gap-3">
-                  <CircleCheck aria-hidden className="text-badge-good-fg mt-0.5 size-5 shrink-0" />
+                  <CircleDot aria-hidden className="text-muted-foreground mt-0.5 size-5 shrink-0" />
                   <div className="flex min-w-0 flex-col gap-0.5">
                     <Link href={`/incidents/${encodeURIComponent(i.incident_id)}`} className="truncate text-sm font-semibold hover:underline">
                       {incidentTitle(i)}
                     </Link>
                     <span className="text-muted-foreground text-[13px]" title={formatKst(i.updated_at)}>
-                      {i.response_mode !== null && AUTO_MODES.has(i.response_mode)
-                        ? '자동 격리'
-                        : (INCIDENT_STATUS_LABELS[i.status]?.label ?? i.status)}{' '}
-                      · {timeAgo(i.updated_at, nowMs)}
+                      {doneNote(i)} · {timeAgo(i.updated_at, nowMs)}
                     </span>
                   </div>
                 </li>
@@ -346,20 +348,19 @@ function ThreatHoursCard({ hours, className }: { hours: ReturnType<typeof threat
 }
 
 function CoverageCard({ assets, className }: { assets: AssetsResponse; className?: string }) {
-  const judged = assets.items.filter((a) => a.evaluation_status !== 'NOT_APPLICABLE');
+  const counts = coverageCounts(assets.items);
+  // 판정 대기 · 실패는 한 칸(대기 · 확인 불가의 노랑, DESIGN.md §상태 색)으로 그리고 범례에서 둘을 나눠 적는다.
+  // 실패를 빨강으로 따로 그리면 같은 막대에 위협과 같은 색이 두 번 선다.
   const parts = [
-    { key: 'threat', label: '위협', count: judged.filter((a) => a.verdict === 'THREAT').length, fill: statusFill('red').fill },
+    { key: 'threat', label: '위협', count: counts.threat, fill: statusFill('red').fill },
+    { key: 'waste', label: '비용 후보', count: counts.waste, fill: statusFill('orange').fill },
+    { key: 'ok', label: '정상 · 제외', count: counts.ok, fill: statusFill('gray').fill },
     {
-      key: 'waste',
-      label: '비용 후보',
-      count: judged.filter((a) => a.verdict === 'COST_CANDIDATE' || a.verdict === 'UNUSED').length,
-      fill: statusFill('orange').fill,
-    },
-    {
-      key: 'ok',
-      label: '정상 · 제외',
-      count: judged.filter((a) => a.verdict === 'SKIP' || a.verdict === null).length,
-      fill: statusFill('gray').fill,
+      key: 'unjudged',
+      label: '판정 대기 · 실패',
+      count: counts.pending + counts.failed,
+      detail: `대기 ${counts.pending} · 실패 ${counts.failed}`,
+      fill: statusFill('yellow').fill,
     },
   ];
   const shown = parts.filter((p) => p.count > 0);
@@ -370,16 +371,20 @@ function CoverageCard({ assets, className }: { assets: AssetsResponse; className
   const maxType = Math.max(1, ...types.map(([, n]) => n));
 
   return (
-    <ChartCard className={className} title="관제 범위" description={`판정 대상 ${judged.length}개의 결과와 유형별 자산 수`}>
-      {judged.length > 0 ? (
+    <ChartCard className={className} title="관제 범위" description={`판정 대상 ${counts.judged}개의 결과와 유형별 자산 수`}>
+      {counts.judged > 0 ? (
         <div className="flex flex-col gap-2.5">
-          <div role="img" aria-label={parts.map((p) => `${p.label} ${p.count}개`).join(', ')} className="flex h-6 gap-0.5">
+          <div
+            role="img"
+            aria-label={parts.map((p) => `${p.label} ${p.count}개${p.detail ? `(${p.detail})` : ''}`).join(', ')}
+            className="flex h-6 gap-0.5"
+          >
             {shown.map((p, i) => (
               <div
                 key={p.key}
-                title={`${p.label} ${p.count}개`}
+                title={`${p.label} ${p.count}개${p.detail ? ` (${p.detail})` : ''}`}
                 className={cn(p.fill, i === 0 && 'rounded-l-[4px]', i === shown.length - 1 && 'rounded-r-[4px]')}
-                style={{ width: `${(p.count / judged.length) * 100}%` }}
+                style={{ width: `${(p.count / counts.judged) * 100}%` }}
               />
             ))}
           </div>
@@ -388,6 +393,7 @@ function CoverageCard({ assets, className }: { assets: AssetsResponse; className
               <li key={p.key} className="inline-flex items-center gap-1.5">
                 <span aria-hidden className={cn('size-2.5 rounded-[3px]', p.fill)} />
                 {p.label} <strong>{p.count}</strong>
+                {p.detail && p.count > 0 ? <span className="text-muted-foreground">({p.detail})</span> : null}
               </li>
             ))}
           </ul>

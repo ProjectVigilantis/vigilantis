@@ -2,7 +2,15 @@
 // 첫 화면은 "지금 괜찮은가 → 무엇을 해야 하나 → 흐름은 어떤가" 순서로 읽히게 만든다(DESIGN.md §레이아웃).
 
 import type { ProposalRow } from './dashboard.ts';
-import type { CollectionStatus, IncidentListItem, IncidentStatus, ThreatEventAxis } from '../types/api.ts';
+import { INCIDENT_STATUS_LABELS } from './enum-labels.ts';
+import type {
+  AssetItem,
+  CollectionStatus,
+  IncidentListItem,
+  IncidentStatus,
+  ResponseMode,
+  ThreatEventAxis,
+} from '../types/api.ts';
 
 export type Posture = 'critical' | 'warning' | 'good' | 'unknown';
 
@@ -15,7 +23,8 @@ export interface PostureSummary {
 
 /**
  * 맨 위 상태 한 줄. 보안 건이 기준이다. 비용 건은 급하지 않아 상태를 올리지 않고 할 일 목록에만 선다.
- * 인시던트를 못 읽었으면 "정상"이라 말하지 않는다(모름과 0건을 가른다).
+ * 인시던트를 못 읽었으면 "정상"이라 말하지 않는다(모름과 0건을 가른다). 수집 전 · 수집 중도 같다.
+ * 위협 0건은 아직 수집하지 못한 결과일 수 있다.
  */
 export function postureOf(input: {
   queue: readonly IncidentListItem[] | null;
@@ -45,6 +54,12 @@ export function postureOf(input: {
   }
   if (collection === 'PARTIAL' || collection === 'FAILED') {
     return { level: 'warning', headline: '자산 수집이 일부 실패했습니다', detail: '보이지 않는 자산이 있을 수 있습니다.' };
+  }
+  if (collection === 'NOT_COLLECTED') {
+    return { level: 'unknown', headline: '아직 자산을 수집하지 않았습니다', detail: '첫 수집이 끝나면 상태를 알려 드립니다.' };
+  }
+  if (collection === 'COLLECTING') {
+    return { level: 'unknown', headline: '자산을 수집하는 중입니다', detail: '수집이 끝나면 상태를 다시 판단합니다.' };
   }
   return {
     level: 'good',
@@ -119,6 +134,54 @@ export function recentDone(
     .filter((i) => DONE_STATUSES.includes(i.status) && Date.parse(i.updated_at) >= since)
     .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
     .slice(0, limit);
+}
+
+const AUTO_ATTEMPT: Partial<Record<ResponseMode, string>> = {
+  PRE_MITIGATION_0_5S: '선제 차단 시도',
+  TIMEOUT_ISOLATION_1M: '자동 격리 시도',
+};
+
+/**
+ * 끝난 건 한 줄. **조치가 성공했다고 말하지 않는다.** 목록 응답에는 실행 결과가 없고 `response_mode`는
+ * 대응 경로일 뿐이다. 시간 초과 자동 격리가 가드레일에 거절된 뒤 관제자가 「추가 조치 없음」으로 닫은 건도
+ * 같은 값을 갖는다(core-api tests/test_auto_isolation_workflow.py). 결과는 인시던트 상세의 실행 이력이 말한다.
+ */
+export function doneNote(incident: Pick<IncidentListItem, 'status' | 'response_mode'>): string {
+  const status = INCIDENT_STATUS_LABELS[incident.status]?.label ?? incident.status;
+  const attempt = incident.response_mode === null ? undefined : AUTO_ATTEMPT[incident.response_mode];
+  return attempt === undefined ? status : `${status} · ${attempt}`;
+}
+
+export interface CoverageCounts {
+  /** 판정 대상(`evaluation_status`가 NOT_APPLICABLE이 아닌 자산) 수. 아래 다섯 칸의 합이다. */
+  judged: number;
+  threat: number;
+  /** 비용 후보(COST_CANDIDATE · UNUSED). */
+  waste: number;
+  /** 판정이 끝났고 위협 · 비용 후보가 아닌 것(SKIP). */
+  ok: number;
+  /** 아직 판정하지 않음(PENDING). */
+  pending: number;
+  /** 판정 실패(FAILED). */
+  failed: number;
+}
+
+/**
+ * 관제 범위 카드의 판정 결과. 판정 대기 · 실패는 `verdict`가 null이지만 정상이 아니다. `evaluation_status`로
+ * 먼저 갈라 정상 · 제외에 섞지 않는다. 판정 완료(COMPLETED)는 `verdict`가 반드시 있다(packages/schemas/api/assets.py).
+ */
+export function coverageCounts(items: readonly Pick<AssetItem, 'evaluation_status' | 'verdict'>[]): CoverageCounts {
+  const counts: CoverageCounts = { judged: 0, threat: 0, waste: 0, ok: 0, pending: 0, failed: 0 };
+  for (const a of items) {
+    if (a.evaluation_status === 'NOT_APPLICABLE') continue;
+    counts.judged += 1;
+    if (a.evaluation_status === 'PENDING') counts.pending += 1;
+    else if (a.evaluation_status === 'FAILED') counts.failed += 1;
+    else if (a.verdict === 'THREAT') counts.threat += 1;
+    else if (a.verdict === 'COST_CANDIDATE' || a.verdict === 'UNUSED') counts.waste += 1;
+    else counts.ok += 1;
+  }
+  return counts;
 }
 
 /** "18분 전" 같은 상대 시각. 화면은 절대 시각을 title로 함께 단다. */
