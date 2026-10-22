@@ -18,11 +18,17 @@ ARN_A = "arn:aws:sns:ap-northeast-2:999999999999:customer-a"
 ARN_B = "arn:aws:sns:ap-northeast-2:999999999999:customer-b"
 ENV = {"NOTIFICATION_SLACK_A": HOOK_A, "NOTIFICATION_SLACK_B": HOOK_B}
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
+TENANT_A = "11111111-1111-4111-8111-111111111111"
+TENANT_B = "22222222-2222-4222-8222-222222222222"
+TENANT_C = "33333333-3333-4333-8333-333333333333"
+TENANT_X = "44444444-4444-4444-8444-444444444444"
+TENANT_MIXED = "AbCdEf01-2345-4789-8abc-DEF012345678"
+TENANT_MIXED_CANONICAL = "abcdef01-2345-4789-8abc-def012345678"
 
 
 def route_a(**over):
     return {
-        "tenant_id": "customer-a",
+        "tenant_id": TENANT_A,
         "aws_account_id": "111111111111",
         "slack_webhook_env": "NOTIFICATION_SLACK_A",
         "sns_topic_arn": ARN_A,
@@ -31,7 +37,7 @@ def route_a(**over):
 
 def route_b(**over):
     return {
-        "tenant_id": "customer-b",
+        "tenant_id": TENANT_B,
         "aws_account_id": "222222222222",
         "slack_webhook_env": "NOTIFICATION_SLACK_B",
         "sns_topic_arn": ARN_B,
@@ -56,8 +62,8 @@ def test_two_tenants_route_to_own_destinations():
     reg = registry([route_a(), route_b()])
     a = reg.resolve(event("111111111111"), "SLACK").route
     b = reg.resolve(event("222222222222"), "SNS").route
-    assert (a.tenant_id, a.destination) == ("customer-a", HOOK_A)
-    assert (b.tenant_id, b.destination, b.region) == ("customer-b", ARN_B, "ap-northeast-2")
+    assert (a.tenant_id, a.destination) == (TENANT_A, HOOK_A)
+    assert (b.tenant_id, b.destination, b.region) == (TENANT_B, ARN_B, "ap-northeast-2")
     assert len(reg.routes) == 4
     assert HOOK_A not in repr(a) and HOOK_A not in a.fingerprint
 
@@ -94,7 +100,7 @@ def test_missing_channel_and_secret_block_only_that_channel():
 
 def test_owned_account_without_channels_blocks_per_event():
     reg = registry([route_a(slack_webhook_env=None, sns_topic_arn=None), route_b()])
-    assert reg.routes[0].tenant_id == "customer-b" and len(reg.routes) == 2
+    assert reg.routes[0].tenant_id == TENANT_B and len(reg.routes) == 2
     for channel in ("SLACK", "SNS"):
         assert reg.resolve(event(), channel).blocked_reason == "CHANNEL_NOT_CONFIGURED"
         assert reg.resolve(event("222222222222"), channel).route is not None
@@ -121,7 +127,7 @@ def test_blocked_owner_declared_destination_blocks_healthy_sharer():
     # account111 소유 충돌(a+x 가 같은 웹훅/토픽), account222 의 b 는 같은 목적지로 해석 → b 도 차단
     env = {**ENV, "NOTIFICATION_SLACK_B": HOOK_A}
     reg = registry(
-        [route_a(), route_a(tenant_id="customer-x"), route_b(sns_topic_arn=ARN_A)],
+        [route_a(), route_a(tenant_id=TENANT_X), route_b(sns_topic_arn=ARN_A)],
         env,
     )
     assert reg.routes == ()
@@ -167,7 +173,7 @@ def test_blank_and_malicious_secret_values_block():
 
 
 def test_ownership_conflict_blocks_both_channels():
-    reg = registry([route_a(), route_a(tenant_id="customer-x")])
+    reg = registry([route_a(), route_a(tenant_id=TENANT_X)])
     for channel in ("SLACK", "SNS"):
         assert reg.resolve(event(), channel).blocked_reason == "OWNERSHIP_CONFLICT"
     assert reg.routes == ()
@@ -276,6 +282,9 @@ def test_from_file_ok(tmp_path):
         json.dumps({"routes": [route_a(tenant_id="")]}),
         json.dumps({"routes": [route_a(tenant_id="t" * 129)]}),
         json.dumps({"routes": [route_a(aws_account_id="1")]}),
+        json.dumps({"routes": [route_a(tenant_id="customer-a")]}),
+        json.dumps({"routes": [route_a(tenant_id=None)]}),
+        json.dumps({"routes": [{k: v for k, v in route_a().items() if k != "tenant_id"}]}),
         '{"routes": [], "routes": []}',
     ],
 )
@@ -306,21 +315,20 @@ def test_fingerprint_binds_route_not_global_config():
     base = registry([route_a(), route_b()])
     fp = {(r.tenant_id, r.channel): r.fingerprint for r in base.routes}
     assert len(set(fp.values())) == 4
+    a_slack = (TENANT_A, "SLACK")
 
     # 한 고객의 웹훅만 회전 → 그 라우트만 변경, 전역 설정이 달라져도(순서/추가 필드 없는 라우트 추가) 나머지 동일
     rotated = registry([route_a(), route_b()], ENV | {"NOTIFICATION_SLACK_A": "https://hooks.slack.com/services/T999/B999/CCCC3333"})
     new = {(r.tenant_id, r.channel): r.fingerprint for r in rotated.routes}
-    assert new[("customer-a", "SLACK")] != fp[("customer-a", "SLACK")]
-    assert {k: v for k, v in new.items() if k != ("customer-a", "SLACK")} == {
-        k: v for k, v in fp.items() if k != ("customer-a", "SLACK")
-    }
+    assert new[a_slack] != fp[a_slack]
+    assert {k: v for k, v in new.items() if k != a_slack} == {k: v for k, v in fp.items() if k != a_slack}
 
     third = registry(
         [
             route_b(),
             route_a(),
             route_a(
-                tenant_id="customer-c",
+                tenant_id=TENANT_C,
                 aws_account_id="333333333333",
                 slack_webhook_env="NOTIFICATION_SLACK_C",
                 sns_topic_arn="arn:aws:sns:ap-northeast-2:999999999999:customer-c",
@@ -328,11 +336,61 @@ def test_fingerprint_binds_route_not_global_config():
         ],
         ENV | {"NOTIFICATION_SLACK_C": "https://hooks.slack.com/services/T888/B888/DDDD4444"},
     )
-    assert {(r.tenant_id, r.channel): r.fingerprint for r in third.routes if r.tenant_id != "customer-c"} == fp
+    assert {(r.tenant_id, r.channel): r.fingerprint for r in third.routes if r.tenant_id != TENANT_C} == fp
 
     # 계정 변경도 fingerprint 변경
     moved = registry([route_a(aws_account_id="444444444444"), route_b()])
-    assert {r.fingerprint for r in moved.routes if r.tenant_id == "customer-a"}.isdisjoint(fp.values())
+    assert {r.fingerprint for r in moved.routes if r.tenant_id == TENANT_A}.isdisjoint(fp.values())
+
+
+def _encodings(canonical):
+    plain = canonical.replace("-", "")
+    return [canonical.upper(), plain, plain.upper(), "{" + canonical + "}", "urn:uuid:" + canonical]
+
+
+def test_tenant_uuid_is_normalized_to_canonical_string():
+    for raw in [TENANT_MIXED, *_encodings(TENANT_MIXED_CANONICAL)]:
+        reg = registry([route_a(tenant_id=raw)])
+        assert {r.tenant_id for r in reg.routes} == {TENANT_MIXED_CANONICAL}
+        assert all(type(r.tenant_id) is str for r in reg.routes)
+
+
+def test_equivalent_uuid_encodings_share_owner_and_fingerprint():
+    base = registry([route_a()])
+    fp = {r.channel: r.fingerprint for r in base.routes}
+    for raw in _encodings(TENANT_A):
+        reg = registry([route_a(), route_a(tenant_id=raw)])
+        assert reg.blocked == {}  # 같은 계정의 동치 표기는 소유권 충돌이 아니다
+        assert {r.channel: r.fingerprint for r in reg.routes} == fp
+        assert len(reg.routes) == 2
+        assert reg.resolve(event(), "SLACK").route.tenant_id == TENANT_A
+    # 다른 계정이어도 동치 표기는 같은 tenant 라 목적지 공유로 차단되지 않는다
+    reg = registry([route_a(), route_a(tenant_id=TENANT_A.upper(), aws_account_id="333333333333")])
+    assert reg.blocked == {} and len(reg.routes) == 4
+
+
+def test_distinct_uuids_still_conflict_on_same_account():
+    reg = registry([route_a(), route_a(tenant_id=TENANT_B)])
+    assert reg.blocked[("111111111111", "")] == "OWNERSHIP_CONFLICT"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "", " ", "customer-a", TENANT_A[:-1], TENANT_A + "0", " " + TENANT_A, TENANT_A + " ", TENANT_A + "\n",
+        "\t" + TENANT_A, TENANT_A.replace("-", "_"), TENANT_A[:-1] + "g", TENANT_A.replace("1", "１", 1),
+        "{" + TENANT_A, TENANT_A + "}", "urn:uuid:", "uuid:" + TENANT_A, TENANT_A.replace("-", " "),
+        TENANT_A.replace("-", "", 1), "1_" + TENANT_A[2:], "0x" + TENANT_A.replace("-", "")[2:],
+        None, 1, 1.5, True, [], {}, TENANT_A.encode(),
+    ],
+)  # fmt: skip
+def test_invalid_tenant_id_rejected_without_echo(bad):
+    with pytest.raises(RouteConfigError) as exc:
+        registry([route_a(tenant_id=bad)])
+    assert str(exc.value) == "invalid route settings"
+    assert exc.value.__cause__ is None
+    if isinstance(bad, str) and bad.strip():
+        assert bad not in str(exc.value)
 
 
 def test_event_replace_roundtrip_unused():

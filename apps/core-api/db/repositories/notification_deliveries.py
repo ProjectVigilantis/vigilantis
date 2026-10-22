@@ -13,7 +13,7 @@ import uuid
 from collections.abc import Iterable
 from datetime import timedelta
 
-from sqlalchemy import case, delete, exists, func, or_, select, update
+from sqlalchemy import String, case, cast, delete, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -23,6 +23,7 @@ _D = models.NotificationDelivery
 _R = models.NotificationRoute
 _L = models.NotificationLane
 _E = models.NotificationEvent
+_T = models.Tenant
 _NO_SYNC = {"synchronize_session": False}
 
 
@@ -31,6 +32,29 @@ def _after(seconds: float):
 
 
 # --- 현재 바인딩·관문 ---------------------------------------------------------
+
+
+def tenant_accounts(db: Session, tenant_ids: Iterable[str]) -> dict[str, str]:
+    """설정에서 정규화한 UUID의 현재 계정을 읽는다. DB 장애는 호출자에게 전달한다."""
+    return dict(db.execute(
+        select(_T.tenant_id, _T.aws_account_id).where(_T.tenant_id.in_(list(tenant_ids))),
+    ).all())
+
+
+def has_unbound_deliveries(db: Session) -> bool:
+    """UUID 전환으로 처분이 달라질 미완료 기록이 있으면 기동 전에 멈춘다.
+
+    legacy 문자열을 UUID로 cast하지 않는다. 종결·NULL 이력은 고치거나 다시 보내지 않는다.
+    """
+    return db.scalar(
+        select(_D.delivery_id)
+        .outerjoin(_T, cast(_T.tenant_id, String) == _D.tenant_id)
+        .where(
+            _D.state.in_(("PENDING", "IN_FLIGHT")),
+            or_(_T.tenant_id.is_(None), _T.aws_account_id != _D.aws_account_id),
+        )
+        .limit(1)
+    ) is not None
 
 
 def ensure_lane(db: Session, channel: str) -> None:

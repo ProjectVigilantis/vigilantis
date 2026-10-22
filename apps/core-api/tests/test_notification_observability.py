@@ -20,6 +20,10 @@ WEBHOOK = "https://hooks.slack.com/services/T0AAA/B0BBB/secretToken123"
 ACCOUNT_A = "111111111111"
 ACCOUNT_B = "222222222222"
 ACCOUNT_UNDECLARED = "333333333333"
+TENANT_A = "11111111-1111-4111-8111-111111111111"
+TENANT_B = "22222222-2222-4222-8222-222222222222"
+TENANT_C = "33333333-3333-4333-8333-333333333333"
+TENANT_D = "44444444-4444-4444-8444-444444444444"
 ROUTE_LOGGER = "vigilantis.notifications"
 DISPATCH_LOGGER = "vigilantis.notifications.dispatcher"
 
@@ -49,32 +53,32 @@ def _event(account):
 
 def test_secret_missing_warns_once_with_safe_fields(caplog):
     registry = _registry([
-        {"tenant_id": "t-a", "aws_account_id": ACCOUNT_A, "slack_webhook_env": "HOOK_A"},
+        {"tenant_id": TENANT_A, "aws_account_id": ACCOUNT_A, "slack_webhook_env": "HOOK_A"},
     ])
     with caplog.at_level(logging.WARNING, logger=ROUTE_LOGGER):
         warn_blocked_routes(registry)
     (record,) = _records(caplog, "notification_route_blocked", ROUTE_LOGGER)
     assert (record.aws_account_id, record.channel, record.reason) == (ACCOUNT_A, "SLACK", SECRET_MISSING)
-    assert "HOOK_A" not in caplog.text and "t-a" not in caplog.text
+    assert "HOOK_A" not in caplog.text and TENANT_A not in caplog.text
 
 
 def test_ownership_conflict_warns_for_account_only(caplog):
     registry = _registry([
-        {"tenant_id": "t-a", "aws_account_id": ACCOUNT_A},
-        {"tenant_id": "t-b", "aws_account_id": ACCOUNT_A},
+        {"tenant_id": TENANT_A, "aws_account_id": ACCOUNT_A},
+        {"tenant_id": TENANT_B, "aws_account_id": ACCOUNT_A},
     ])
     with caplog.at_level(logging.WARNING, logger=ROUTE_LOGGER):
         warn_blocked_routes(registry)
     (record,) = _records(caplog, "notification_route_blocked", ROUTE_LOGGER)
     assert (record.aws_account_id, record.channel, record.reason) == (ACCOUNT_A, None, OWNERSHIP_CONFLICT)
-    assert "t-a" not in caplog.text and "t-b" not in caplog.text
+    assert TENANT_A not in caplog.text and TENANT_B not in caplog.text
 
 
 def test_healthy_single_channel_config_is_silent(caplog):
     registry = _registry(
         [
-            {"tenant_id": "t-a", "aws_account_id": ACCOUNT_A, "slack_webhook_env": "HOOK_A"},
-            {"tenant_id": "t-b", "aws_account_id": ACCOUNT_B},  # 채널을 일부러 비운 계정
+            {"tenant_id": TENANT_A, "aws_account_id": ACCOUNT_A, "slack_webhook_env": "HOOK_A"},
+            {"tenant_id": TENANT_B, "aws_account_id": ACCOUNT_B},  # 채널을 일부러 비운 계정
         ],
         {"HOOK_A": WEBHOOK},
     )
@@ -87,8 +91,8 @@ def test_healthy_single_channel_config_is_silent(caplog):
 def test_blocked_routes_warn_once_per_account_channel_and_never_leak_webhook(caplog):
     registry = _registry(
         [
-            {"tenant_id": "t-a", "aws_account_id": ACCOUNT_A, "slack_webhook_env": "HOOK_A"},
-            {"tenant_id": "t-b", "aws_account_id": ACCOUNT_B, "slack_webhook_env": "HOOK_B"},
+            {"tenant_id": TENANT_A, "aws_account_id": ACCOUNT_A, "slack_webhook_env": "HOOK_A"},
+            {"tenant_id": TENANT_B, "aws_account_id": ACCOUNT_B, "slack_webhook_env": "HOOK_B"},
         ],
         {"HOOK_A": WEBHOOK},  # B 만 비밀 누락
     )
@@ -100,11 +104,11 @@ def test_blocked_routes_warn_once_per_account_channel_and_never_leak_webhook(cap
 
 
 def test_undeclared_account_warns_once_across_events_and_channels(caplog):
-    registry = _registry([{"tenant_id": "t-a", "aws_account_id": ACCOUNT_A}])
+    registry = _registry([{"tenant_id": TENANT_A, "aws_account_id": ACCOUNT_A}])
     dispatcher = _dispatcher(registry)
     with caplog.at_level(logging.WARNING, logger=DISPATCH_LOGGER):
         rows = [
-            dispatcher._materialize(_event(ACCOUNT_UNDECLARED), channel, {})
+            dispatcher._materialize(_event(ACCOUNT_UNDECLARED), channel, {}, {})
             for channel in ("SLACK", "SNS", "SLACK", "SNS")
         ]
     assert {row["state"] for row in rows} == {"BLOCKED"}
@@ -120,10 +124,10 @@ def test_startup_wiring_warns_through_build_notification_runtime(caplog, monkeyp
 
     routes = tmp_path / "routes.json"
     routes.write_text(json.dumps({"routes": [
-        {"tenant_id": "t-a", "aws_account_id": ACCOUNT_A, "slack_webhook_env": "HOOK_A"},
-        {"tenant_id": "t-b", "aws_account_id": ACCOUNT_B},
-        {"tenant_id": "t-c", "aws_account_id": "444444444444"},
-        {"tenant_id": "t-d", "aws_account_id": "444444444444"},
+        {"tenant_id": TENANT_A, "aws_account_id": ACCOUNT_A, "slack_webhook_env": "HOOK_A"},
+        {"tenant_id": TENANT_B, "aws_account_id": ACCOUNT_B},
+        {"tenant_id": TENANT_C, "aws_account_id": "444444444444"},
+        {"tenant_id": TENANT_D, "aws_account_id": "444444444444"},
     ]}), encoding="utf-8")
     monkeypatch.delenv("HOOK_A", raising=False)
     monkeypatch.setattr(db_session, "get_session_factory", lambda: (lambda: None))
@@ -149,7 +153,7 @@ def test_each_undeclared_account_warns_separately(caplog):
     dispatcher = _dispatcher(_registry([]))
     with caplog.at_level(logging.WARNING, logger=DISPATCH_LOGGER):
         for account in (ACCOUNT_A, ACCOUNT_B, ACCOUNT_A):
-            dispatcher._materialize(_event(account), "SLACK", {})
+            dispatcher._materialize(_event(account), "SLACK", {}, {})
     records = _records(caplog, "notification_account_ownership_missing", DISPATCH_LOGGER)
     assert [r.aws_account_id for r in records] == [ACCOUNT_A, ACCOUNT_B]
 
@@ -159,17 +163,21 @@ def test_many_undeclared_accounts_are_all_observed(caplog):
     accounts = [f"{n:012d}" for n in range(1, 1201)]
     with caplog.at_level(logging.WARNING, logger=DISPATCH_LOGGER):
         for account in accounts:
-            dispatcher._materialize(_event(account), "SLACK", {})
+            dispatcher._materialize(_event(account), "SLACK", {}, {})
     records = _records(caplog, "notification_account_ownership_missing", DISPATCH_LOGGER)
     assert [r.aws_account_id for r in records] == accounts
 
 
 @pytest.mark.parametrize("missing_channel", ["SLACK", "SNS"])
 def test_intentionally_absent_channel_logs_nothing_per_event(caplog, missing_channel):
-    registry = _registry([{"tenant_id": "t-a", "aws_account_id": ACCOUNT_A}])
+    registry = _registry([{"tenant_id": TENANT_A, "aws_account_id": ACCOUNT_A}])
     dispatcher = _dispatcher(registry)
+    tenant_accounts = {TENANT_A: ACCOUNT_A}
     with caplog.at_level(logging.DEBUG):
-        rows = [dispatcher._materialize(_event(ACCOUNT_A), missing_channel, {}) for _ in range(3)]
+        rows = [
+            dispatcher._materialize(_event(ACCOUNT_A), missing_channel, {}, tenant_accounts)
+            for _ in range(3)
+        ]
     assert {row["blocked_reason"] for row in rows} == {CHANNEL_NOT_CONFIGURED}
     assert {row["state"] for row in rows} == {"BLOCKED"}
     assert [r for r in caplog.records if r.name.startswith(ROUTE_LOGGER)] == []

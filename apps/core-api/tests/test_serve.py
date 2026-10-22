@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -69,7 +70,10 @@ def test_uvicorn_runs_one_worker_without_reload():
 
 
 # ---- 알림 routes 파일화 (#493 PR3) -------------------------------------------
-ROUTES = '{"routes":[{"tenant_id":"한글","aws_account_id":"111111111111","slack_webhook_env":"NOTIFICATION_SLACK_A"}]}'
+TENANT = "11111111-1111-4111-8111-111111111111"
+ROUTES = json.dumps({"routes": [{"tenant_id": TENANT, "aws_account_id": "111111111111",
+                                  "slack_webhook_env": "NOTIFICATION_SLACK_A"}]},
+                    separators=(",", ":"))
 
 
 def _env(**kw):
@@ -84,7 +88,7 @@ def test_routes_json_becomes_a_file_the_runtime_registry_reads(tmp_path):
     path = Path(environ["NOTIFICATION_ROUTES_FILE"])
     assert path == tmp_path / ".vigilantis" / "notification-routes.json" and path.is_file()
     reg = RouteRegistry.from_file(str(path), {"NOTIFICATION_SLACK_A": "https://hooks.slack.com/services/T1/B1/X1"})
-    assert [r.tenant_id for r in reg.routes] == ["한글"]
+    assert [r.tenant_id for r in reg.routes] == [TENANT]
     assert "NOTIFICATION_ROUTES_JSON" not in environ
 
 
@@ -105,7 +109,10 @@ def test_json_and_explicit_file_together_stop_startup(tmp_path):
 
 @pytest.mark.parametrize("raw", [
     "{not json SECRETVALUE",
-    '{"routes":[{"tenant_id":"a","aws_account_id":"111111111111","slack_webhook":"https://hooks.slack.com/services/T/B/X"}]}',
+    f'{{"routes":[{{"tenant_id":"{TENANT}","aws_account_id":"111111111111","slack_webhook":"https://hooks.slack.com/services/T/B/X"}}]}}',
+    '{"routes":[{"tenant_id":"customer-a","aws_account_id":"111111111111"}]}',
+    f'{{"routes":[{{"tenant_id":" {TENANT}","aws_account_id":"111111111111"}}]}}',
+    '{"routes":[{"tenant_id":null,"aws_account_id":"111111111111"}]}',
     '{"routes":[],"routes":[]}',
     '{"routes":"x"}',
 ])

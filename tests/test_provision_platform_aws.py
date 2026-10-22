@@ -22,6 +22,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -753,9 +754,12 @@ TOPIC = f"arn:aws:sns:{REGION}:{ACCOUNT}:vigilantis-alerts"
 SECRET = f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:vigilantis-platform/slack-a-AbCdEf"
 
 
+NOTIFY_TENANT = "11111111-1111-4111-8111-111111111111"
+
+
 def _cfg(tmp_path, **over):
     body = {"enabled": True, "public_base_url": "https://dash.example.com",
-            "routes": [{"tenant_id": "a", "aws_account_id": "999900001111",
+            "routes": [{"tenant_id": NOTIFY_TENANT, "aws_account_id": "999900001111",
                         "slack_webhook_env": "NOTIFICATION_SLACK_A", "sns_topic_arn": TOPIC}],
             "slack_secret_arns": {"NOTIFICATION_SLACK_A": SECRET},
             "settings": {"NOTIFICATION_READ_TIMEOUT_SECONDS": 7, "NOTIFICATION_MAX_ATTEMPTS": 3}}
@@ -1050,6 +1054,9 @@ def test_policies_are_exact_and_dedicated(tmp_path):
     lambda b: b["routes"][0].update(sns_topic_arn=f"arn:aws:sns:{REGION}:{ACCOUNT}:*"),
     lambda b: b["routes"][0].update(sns_topic_arn=f"arn:aws:sns:{REGION}:999900001111:cust"),
     lambda b: b["routes"][0].update(slack_webhook="https://hooks.slack.com/services/T/B/X"),
+    lambda b: b["routes"][0].update(tenant_id="a"),
+    lambda b: b["routes"][0].update(tenant_id=f" {NOTIFY_TENANT}"),
+    lambda b: b["routes"][0].update(tenant_id=None),
     lambda b: b.update(public_base_url="http://dash.example.com"),
     lambda b: b.update(settings={"NOTIFICATION_READ_TIMEOUT_SECONDS": 999}),
     lambda b: b.update(settings={"NOTIFICATION_ENABLED": 1}),
@@ -1115,12 +1122,13 @@ def test_effective_settings_ignore_host_env(tmp_path, monkeypatch):
 
 def test_routes_json_size_boundary(tmp_path):
     from notifications.routing import MAX_CONFIG_BYTES
-    base = {"tenant_id": "", "aws_account_id": "999900001111"}
+    base = {"tenant_id": NOTIFY_TENANT, "aws_account_id": "999900001111"}
     base_len = len(json.dumps({"routes": [base]}, ensure_ascii=False, separators=(",", ":")).encode())
-    ok = {"routes": [dict(base, tenant_id="가" * 40)]}
-    pad = MAX_CONFIG_BYTES  # 많은 라우트로 상한을 넘긴다
-    big = [{"tenant_id": f"t{i:04d}" + "x" * 100, "aws_account_id": f"{i:012d}"} for i in range(500)]
-    assert base_len < MAX_CONFIG_BYTES and pad
+    ok = {"routes": [base]}
+    # 서로 다른 UUID 테넌트·계정 라우트를 많이 두어 런타임 상한(파일 상한 80KiB 미만)을 넘긴다
+    big = [{"tenant_id": str(uuid.UUID(int=i + 1)), "aws_account_id": f"{i:012d}"} for i in range(800)]
+    big_len = len(json.dumps({"routes": big}, ensure_ascii=False, separators=(",", ":")).encode())
+    assert base_len < MAX_CONFIG_BYTES < big_len
     assert platform.load_notification_config(
         _cfg(tmp_path, routes=ok["routes"], slack_secret_arns={}), ACCOUNT, REGION)
     with pytest.raises(SystemExit, match="상한"):

@@ -218,11 +218,26 @@ cd apps/web && npm ci && npm run dev  # 대시보드(:3000)
 
 ```json
 {"enabled": true, "public_base_url": "https://<승인된 대시보드 origin>",
- "routes": [{"tenant_id": "<고객>", "aws_account_id": "<관제 계정>", "slack_webhook_env": "NOTIFICATION_SLACK_A",
+ "routes": [{"tenant_id": "11111111-1111-4111-8111-111111111111", "aws_account_id": "<그 테넌트의 관제 계정>",
+             "slack_webhook_env": "NOTIFICATION_SLACK_A",
              "sns_topic_arn": "arn:aws:sns:<리전>:<플랫폼 계정>:<토픽>"}],
  "slack_secret_arns": {"NOTIFICATION_SLACK_A": "arn:aws:secretsmanager:<리전>:<플랫폼 계정>:secret:<기존 비밀>"},
  "settings": {"NOTIFICATION_READ_TIMEOUT_SECONDS": 5}}
 ```
+
+* **테넌트 연결** — route의 `tenant_id`는 대상 DB `tenants` 테이블에 실제로 등록된 행의 UUID다. `aws_account_id`는 그 행의 `aws_account_id`와 같아야 한다. 위 `11111111-1111-4111-8111-111111111111`은 형식 예시일 뿐이므로, 아래 조회로 확인한 실제 값으로 바꾼다. UUID를 추측해 넣거나, 알림을 켜려고 기본 테넌트를 만들지 않는다. 대문자·하이픈 없는 표기·중괄호·`urn:uuid:` 표기도 받지만 소문자 하이픈 형식으로 정규화된다. UUID가 아닌 이름(예: `customer-a`)은 거부된다. 아래 2026-10-20 시험 기록의 테넌트 `trial`은 이 규칙 이전의 기록이므로 입력 예시로 쓰지 않는다.
+
+  ```sql
+  BEGIN TRANSACTION READ ONLY;
+  SELECT tenant_id, aws_account_id, name, status FROM tenants WHERE aws_account_id = '<관제 계정>';
+  ROLLBACK;
+  ```
+
+  * **기동 검사(설정)** — 알림을 켠 기동은 라우트를 DB에 반영하기 전에 모든 route를 확인한다. `tenant_id`가 `tenants`에 없으면 `TENANT_NOT_FOUND`, 그 행의 `aws_account_id`와 다르면 `TENANT_ACCOUNT_MISMATCH`로 기동이 멈춘다. 하나라도 걸리면 라우트 반영은 하나도 일어나지 않는다.
+  * **기동 검사(대기 행)** — 설정 검사를 통과해도 DB의 `PENDING`·`IN_FLIGHT` 행을 **전부** 확인한다. 행의 `tenant_id`와 같은 `tenants` 행이 없거나, 있어도 행의 `aws_account_id`가 그 테넌트의 계정과 다르면 `NOTIFICATION_TENANT_TRANSITION_REQUIRED`로 기동이 멈춘다. 그 행의 계정·테넌트가 지금 설정에 남아 있는지와는 관계없다. 비교는 `tenants`의 UUID를 문자열로 바꿔 행의 값과 맞춰 보는 방식이다. 이전 형식의 문자열(예: `trial`)은 UUID로 해석하지 않으므로 일치하는 테넌트가 없는 행으로 걸린다. 이 검사는 행을 고치거나 종료하거나 보내지 않는다.
+  * **발송 행 생성·claim 때 재확인** — 사건을 발송 행으로 만들 때와 보내기 직전 claim 때 현재 DB의 테넌트·계정을 다시 읽는다. 테넌트가 없으면 `BLOCKED(TENANT_NOT_FOUND)`, 계정이 다르면 `BLOCKED(TENANT_ACCOUNT_MISMATCH)`로 종결하고 외부로 보내지 않는다. 이 조회 자체가 DB 오류로 실패하면 트랜잭션을 되돌리고, 행은 종결 상태가 되지 않은 채 다음 주기에 다시 처리된다.
+  * 이미 종료된 발송 행의 테넌트 기록과 테넌트 값이 없는(NULL) 기존 행은 고치지 않는다.
+  * `sns_topic_arn`의 계정은 토픽을 소유한 플랫폼 계정이다. 고객 소유는 `tenant_id`·`aws_account_id`로만 정하며, 토픽 계정을 고객 계정으로 보지 않는다.
 
 * **권한 범위** — `vigilantis-platform`(태스크 역할)은 지정한 토픽 ARN의 `sns:Publish`(`publish-notification-topics`)만 받는다. `vigilantis-platform-exec`(실행 역할)는 지정한 비밀 ARN의 `GetSecretValue`(`read-notification-secrets`)만 받는다. api 앱(태스크 역할)은 비밀을 읽지 못한다. 관제 대상 접근 역할 `vigilantis-access`는 알림 권한을 하나도 받지 않는다. SNS는 프로필·정적 키로 넘어가지 않고 실패하면 닫힌다.
 * **배포 명령 주의** — `deploy`는 IAM을 바꾸지 않는다. 알림을 켠 `deploy`는 미리보기를 포함해 알림 전용 정책 문서가 입력과 맞는지만 읽어서 확인하고, 다르면 멈춘다. 이 확인은 실제로 적용된 권한을 증명하지 않는다. `deploy`는 api만이 아니라 migrate·api·web을 함께 재배포한다. `--enable-dispatch`를 지금 값과 같게 주지 않으면 AI 분석·조치 실행 디스패치(`DISPATCH_ENABLED`)도 바뀐다. api는 이전 태스크를 먼저 내리므로 배포 중 끊김이 생긴다. `배포 실패`이면 서킷 브레이커가 이전 태스크 정의로 되돌렸을 수 있고, 그 정의의 알림 설정이 그대로 돈다.
@@ -234,7 +249,7 @@ cd apps/web && npm ci && npm run dev  # 대시보드(:3000)
   * `BLOCKED`·`FAILED`(`PERMANENT`·`EXHAUSTED`)·`SUCCEEDED`는 되돌리지 않는다. 재전송·취소·비우기(drain) 기능은 없다. DB를 고쳐 되살리거나 지우지 않는다.
 * **중복 가능** — 종료되는 태스크는 새 claim을 멈추고 진행 중인 결과 저장을 기다린다. 그 전에 강제 종료되면 해당 행이 `IN_FLIGHT`로 남는다. 결과를 저장하기 전에 멈춘 시도는 임대(`NOTIFICATION_LEASE_SECONDS`)가 지난 뒤 회수되어 다시 보낸다. 그래서 같은 사건이 최대 `NOTIFICATION_MAX_ATTEMPTS`번 갈 수 있다(정확히 1회 보장 없음). 임대가 `2×(connect+read timeout)+10`초보다 짧으면 기동하지 않는다.
 * **수신의 의미** — `receipt_kind`의 `SLACK_POSTED`는 Slack이 게시 요청을 받았다는 뜻이고, `SNS_ACCEPTED`는 SNS가 Publish를 접수했다는 뜻이다. 어느 쪽도 메일함 도착이나 사람이 읽었음을 뜻하지 않는다.
-* **기동 경고·실패**(계정·채널·사유 코드만 남는다) — `notification_route_blocked`는 선언됐지만 막힌 라우트로, 예를 들어 `SECRET_MISSING`·`DESTINATION_*`·`OWNERSHIP_CONFLICT`가 있다. `notification_account_ownership_missing`은 선언되지 않은 계정의 사건이며 계정마다 1회 남는다. `notification_delivery_blocked`는 행 단위로 남는다(일부러 뺀 채널은 제외). 설정 오류로 기동이 멈추면 `NOTIFICATION_ROUTES_REQUIRED`·`NOTIFICATION_LEASE_TOO_SHORT`·`NOTIFICATION_CONFIGURATION_FAILED` 같은 고정 코드만 남는다.
+* **기동 경고·실패**(계정·채널·사유 코드만 남는다) — `notification_route_blocked`는 선언됐지만 막힌 라우트로, 예를 들어 `SECRET_MISSING`·`DESTINATION_*`·`OWNERSHIP_CONFLICT`가 있다. `notification_account_ownership_missing`은 선언되지 않은 계정의 사건이며 계정마다 1회 남는다. `notification_delivery_blocked`는 보내기 직전 claim 단계에서 막힌 행마다 남는다(일부러 뺀 채널은 제외). 사건을 발송 행으로 만들 때 막힌 행은 이 로그를 남기지 않고 `blocked_reason`에만 기록된다. 설정 오류로 기동이 멈추면 `NOTIFICATION_ROUTES_REQUIRED`·`NOTIFICATION_LEASE_TOO_SHORT`·`NOTIFICATION_CONFIGURATION_FAILED` 같은 고정 코드만 남는다. 위 '테넌트 연결'의 기동 검사(`TENANT_NOT_FOUND`·`TENANT_ACCOUNT_MISMATCH`·`NOTIFICATION_TENANT_TRANSITION_REQUIRED`)에 걸리면 `notification_tenant_binding_invalid`가 그 코드를 `reason`으로 남긴다. 테넌트 ID·수신처·원래 오류 문구는 남기지 않는다. 그 뒤 `notification_dispatcher_initialize_failed`(예외 형식만)가 남고, 기동 실패는 고정 코드 `NOTIFICATION_START_FAILED`로 올라간다. 어느 route·행이 걸렸는지는 위 조회와 아래 '대기·실패 조회'로 확인한다. 발송 행 생성·claim 때의 테넌트 차단은 `blocked_reason`에 `TENANT_NOT_FOUND`·`TENANT_ACCOUNT_MISMATCH`로 남는다. 그중 claim 때 막힌 행만 `notification_delivery_blocked`에도 그 사유로 남는다.
 * **로그인 링크 차단 사유** — 알림 본문의 `상세:` 링크는 `<public_base_url>/incidents/<id>`이다. API·SSR은 서버 세션으로 보호되며, 로그인 전에 링크를 열면 `/login?next=…`로 이동했다가 로그인 뒤 같은 사이트 경로인 `/incidents/<id>`로 돌아온다(#502). 세션 보호는 로그인 여부를 확인하고, 사건의 테넌트·계정 소유 검사는 T-4에서 붙는다. CloudFront→오리진 구간은 10/13 관측 기준 `http-only`다([ADR-0010](docs/adr/0010-platform-deployment-saas-shape.md) 1차 개정). 실제 오리진 HTTPS를 확인하기 전에는 이 링크로 비밀번호를 입력하거나 세션을 쓰지 않는다.
 
 **켜기·변경·끄기 절차** — IAM 정책을 쓰는 명령은 `notification-iam`과 `notification-revoke` 둘뿐이다. 둘 다 알림이 꺼진 정의로 서비스가 안정돼 있고, 알림이 켜진 api 태스크가 하나도 남아 있지 않을 때만 실행한다. 내려가는 중인 태스크도 남은 것으로 본다. `--yes`이면 스크립트도 이 상태를 확인하고, 맞지 않으면 정책을 바꾸지 않고 멈춘다. 미리보기는 이 상태를 확인하지 않는다. 정책을 준비해도 발송은 켜지지 않는다. 모든 `--yes`는 그 단계의 미리보기를 확인한 뒤 따로 승인받는다.
@@ -242,7 +257,7 @@ cd apps/web && npm ci && npm run dev  # 대시보드(:3000)
 처음 켤 때:
 
 1. 알림이 꺼진 정의로 서비스가 안정돼 있는지 확인한다.
-2. `notification-iam --account <ID> --notification-config <파일>`로 미리보기 → 승인 → `--yes`.
+2. `notification-iam --account <ID> --notification-config <파일>`로 미리보기 → 승인 → `--yes`. 입력 파일의 route에는 '테넌트 연결'의 조회로 확인한 실제 `tenant_id`·`aws_account_id`를 넣는다.
 3. 권한을 확인한다. 실제 접근 확인 방법은 대상 환경이 정해지지 않아 아직 고르지 않았다. 이 단계는 켜기 전 미해결 선행 조건이다.
    * 승인된 IAM 정책 시뮬레이션으로 의도한 토픽·비밀은 허용되고, 범위 밖 합성 ARN은 거부되는지 실제 Publish 없이 볼 수 있다. 다만 이것은 정책 근거일 뿐 실제 IAM 실행 결과가 아니다.
    * 비밀 주입과 SNS 실제 동작은 따로 승인된 환경·발송 확인에서만 검증한다. 시간을 기다렸다고 전파가 증명되지 않고, 시뮬레이션 통과가 런타임 동작을 증명하지도 않는다.
