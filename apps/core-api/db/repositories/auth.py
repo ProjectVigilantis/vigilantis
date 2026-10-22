@@ -13,6 +13,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from schemas.api.auth import UserRole
+from schemas.api.users import UserEventAction, UserEventState
 from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import Session
 
@@ -24,16 +25,50 @@ from .. import models
 def get_user_by_identity(
     db: Session, *, issuer: str, cognito_sub: str
 ) -> models.AppUser | None:
+    # populate_existing — 락을 잡은 뒤 identity map의 낡은 값을 읽지 않게 항상 DB 값으로 덮는다.
     return db.scalars(
-        select(models.AppUser).where(
+        select(models.AppUser)
+        .where(
             models.AppUser.issuer == issuer,
             models.AppUser.cognito_sub == cognito_sub,
         )
+        .execution_options(populate_existing=True)
     ).one_or_none()
 
 
 def get_user(db: Session, user_id: str) -> models.AppUser | None:
-    return db.get(models.AppUser, user_id)
+    return db.get(models.AppUser, user_id, populate_existing=True)
+
+
+def list_users_with_last_login(
+    db: Session,
+) -> list[tuple[models.AppUser, datetime | None]]:
+    """전체 사용자 + 마지막 로그인 = 세션 created_at 최댓값(폐기·만료 세션 포함)."""
+    last_login = func.max(models.AuthSession.created_at)
+    rows = db.execute(
+        select(models.AppUser, last_login)
+        .outerjoin(
+            models.AuthSession, models.AuthSession.user_id == models.AppUser.user_id
+        )
+        .group_by(models.AppUser.user_id)
+        .order_by(models.AppUser.created_at, models.AppUser.user_id)
+        .execution_options(populate_existing=True)
+    ).all()
+    return [(user, login) for user, login in rows]
+
+
+def count_active_admins(db: Session) -> int:
+    return (
+        db.scalar(
+            select(func.count())
+            .select_from(models.AppUser)
+            .where(
+                models.AppUser.role == UserRole.ADMIN,
+                models.AppUser.status == models.AppUserStatus.ACTIVE,
+            )
+        )
+        or 0
+    )
 
 
 def count_users(db: Session) -> int:
@@ -94,6 +129,63 @@ def set_status(
         .values(status=status, updated_at=now)
     )
     return result.rowcount == 1
+
+
+def set_role(db: Session, *, user_id: str, role: UserRole, now: datetime) -> bool:
+    result = db.execute(
+        update(models.AppUser)
+        .where(models.AppUser.user_id == user_id)
+        .values(role=role, updated_at=now)
+    )
+    return result.rowcount == 1
+
+
+# --- 사용자 관리 이력 ------------------------------------------------------------
+
+
+def add_user_event(
+    db: Session,
+    *,
+    actor_user_id: str,
+    target_user_id: str,
+    action: UserEventAction,
+    before_state: dict,
+    after_state: dict,
+    now: datetime,
+) -> models.UserAdminEvent:
+    """이력 1건 append. 상태는 UserEventState(닫힌 목록)로 검증한 값만 저장한다 — 모르는 키는 거절."""
+    row = models.UserAdminEvent(
+        actor_user_id=actor_user_id,
+        target_user_id=target_user_id,
+        action=action,
+        before_state=UserEventState.model_validate(before_state).model_dump(
+            mode="json", exclude_none=True
+        ),
+        after_state=UserEventState.model_validate(after_state).model_dump(
+            mode="json", exclude_none=True
+        ),
+        occurred_at=now,
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
+def list_user_events(
+    db: Session, *, user_id: str, limit: int
+) -> list[models.UserAdminEvent]:
+    """대상 사용자의 이력, 최신순."""
+    return list(
+        db.scalars(
+            select(models.UserAdminEvent)
+            .where(models.UserAdminEvent.target_user_id == user_id)
+            .order_by(
+                models.UserAdminEvent.occurred_at.desc(),
+                models.UserAdminEvent.event_id.desc(),
+            )
+            .limit(limit)
+        )
+    )
 
 
 # --- 세션 -----------------------------------------------------------------------
@@ -163,3 +255,23 @@ def revoke_session(
         .execution_options(synchronize_session=False)
     )
     return result.rowcount == 1
+
+
+def revoke_user_sessions(
+    db: Session,
+    *,
+    user_id: str,
+    reason: models.AuthSessionRevokeReason,
+    now: datetime,
+) -> int:
+    """사용자의 아직 폐기되지 않은 세션 전부(만료된 것 포함)를 폐기한다. 폐기한 개수."""
+    result = db.execute(
+        update(models.AuthSession)
+        .where(
+            models.AuthSession.user_id == user_id,
+            models.AuthSession.revoked_at.is_(None),
+        )
+        .values(revoked_at=now, revoke_reason=reason)
+        .execution_options(synchronize_session=False)
+    )
+    return result.rowcount

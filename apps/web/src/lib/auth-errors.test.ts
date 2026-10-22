@@ -3,7 +3,36 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { authErrorView } from './auth-errors.ts';
+import {
+  RESET_CONFIRM_UNCERTAIN,
+  authErrorView,
+  resetConfirmErrorMessage,
+  resetRequestErrorMessage,
+} from './auth-errors.ts';
+
+test('재설정 실패 문구는 로그인 재시작을 말하지 않는다', () => {
+  for (const code of ['AUTH_RATE_LIMITED', 'AUTH_PROVIDER_UNAVAILABLE', 'AUTH_EMAIL_DELIVERY_FAILED', null] as const) {
+    assert.doesNotMatch(resetRequestErrorMessage(code), /처음부터/, String(code));
+  }
+  for (const code of ['AUTH_CODE_INVALID', 'AUTH_PASSWORD_POLICY', 'AUTH_RATE_LIMITED', 'INTERNAL_ERROR', null] as const) {
+    assert.doesNotMatch(resetConfirmErrorMessage(code), /처음부터/, String(code));
+  }
+});
+
+test('재설정 확인의 결과 불명 실패는 "바뀌지 않았다"고 말하지 않고 다음 행동을 안내한다', () => {
+  for (const code of ['INTERNAL_ERROR', 'AUTH_PROVIDER_UNAVAILABLE', null] as const) {
+    assert.equal(resetConfirmErrorMessage(code), RESET_CONFIRM_UNCERTAIN, String(code));
+  }
+  assert.doesNotMatch(RESET_CONFIRM_UNCERTAIN, /바뀌지 않았|변경되지 않았|실패했습니다/);
+  assert.match(RESET_CONFIRM_UNCERTAIN, /새 비밀번호로 로그인/);
+  assert.match(RESET_CONFIRM_UNCERTAIN, /재설정을 다시 요청/);
+  assert.match(RESET_CONFIRM_UNCERTAIN, /관리자에게 문의/);
+});
+
+test('재설정 확인의 코드 · 정책 오류는 같은 화면에서 고칠 수 있게 안내한다', () => {
+  assert.match(resetConfirmErrorMessage('AUTH_CODE_INVALID'), /코드/);
+  assert.match(resetConfirmErrorMessage('AUTH_PASSWORD_POLICY'), /허용된 기호/);
+});
 
 test('로그인 진행이 무효가 된 코드만 비밀번호 단계로 되돌린다', () => {
   for (const code of ['AUTH_FLOW_EXPIRED', 'AUTH_STEP_CONFLICT', 'AUTH_REQUIRED'] as const) {

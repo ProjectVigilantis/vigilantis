@@ -11,6 +11,11 @@ export function canOperate(role: UserRole | null | undefined): boolean {
   return role === 'ADMIN' || role === 'OPERATOR';
 }
 
+/** 사용자 관리 메뉴를 보일 역할(#492 PR 3). 메뉴 노출만 정한다 — 실제 차단은 서버 403이다. */
+export function canManageUsers(role: UserRole | null | undefined): boolean {
+  return role === 'ADMIN';
+}
+
 /** 조치 버튼을 막는 이유. 누를 수 있으면 null. */
 export function operateBlockedReason(role: UserRole | null | undefined): string | null {
   if (canOperate(role)) return null;

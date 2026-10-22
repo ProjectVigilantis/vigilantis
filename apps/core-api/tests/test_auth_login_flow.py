@@ -473,11 +473,23 @@ def test_verify_setup_before_begin_is_conflict(env):
 
 def test_password_policy_keeps_flow(env):
     env.initiate("NEW_PASSWORD_REQUIRED")
-    env.respond_error("NEW_PASSWORD_REQUIRED", "SESS-0-0123456789abcdef", {"NEW_PASSWORD": "weak"}, code="InvalidPasswordException")
+    cognito_rejected = "Weak-but-valid-1"  # 서버 정책은 통과하고 User Pool 정책이 거절하는 값
+    env.respond_error("NEW_PASSWORD_REQUIRED", "SESS-0-0123456789abcdef", {"NEW_PASSWORD": cognito_rejected}, code="InvalidPasswordException")
     env.respond("NEW_PASSWORD_REQUIRED", "SESS-0-0123456789abcdef", {"NEW_PASSWORD": NEW_PASSWORD}, next_challenge="MFA_SETUP", next_session="SESS-1-0123456789abcdef")
     token, _ = env.flow.start(EMAIL, PASSWORD)
     with pytest.raises(cognito.AuthPasswordPolicyError):
-        env.flow.submit_new_password(token, "weak")
+        env.flow.submit_new_password(token, cognito_rejected)
+    assert env.flow.submit_new_password(token, NEW_PASSWORD).step is LoginStep.TOTP_SETUP_REQUIRED
+
+
+@pytest.mark.parametrize("bad", ["weak", "Short-1aA", "no-upper-case-1", "NO-LOWER-CASE-1", "No-digits-here-x", "NoSymbolsHere123", "Has space-Pass-1"])
+def test_local_password_policy_rejects_before_any_cognito_call_and_keeps_flow(env, bad):
+    env.initiate("NEW_PASSWORD_REQUIRED")
+    env.respond("NEW_PASSWORD_REQUIRED", "SESS-0-0123456789abcdef", {"NEW_PASSWORD": NEW_PASSWORD}, next_challenge="MFA_SETUP", next_session="SESS-1-0123456789abcdef")
+    token, _ = env.flow.start(EMAIL, PASSWORD)
+    with pytest.raises(cognito.AuthPasswordPolicyError):
+        env.flow.submit_new_password(token, bad)
+    # 위반 입력은 응답을 소비하지 않았다 — 같은 흐름이 정상 값으로 이어진다
     assert env.flow.submit_new_password(token, NEW_PASSWORD).step is LoginStep.TOTP_SETUP_REQUIRED
 
 

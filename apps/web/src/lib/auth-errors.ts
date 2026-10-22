@@ -13,6 +13,8 @@ const LATER = '잠시 후 다시 시도해 주세요.';
 /** 서버가 로그인 진행을 끝내고 flow 쿠키를 지운 일시 장애 — 같은 단계 재시도가 아니라 처음부터다. */
 const LATER_RESTART = '잠시 후 처음부터 다시 로그인해 주세요.';
 const ADMIN = '관리자에게 문의해 주세요.';
+const PASSWORD_POLICY =
+  '비밀번호가 정책에 맞지 않습니다. 12자 이상 256자 이하로, 영문 대문자·소문자·숫자·허용된 기호를 모두 포함하고 허용된 문자만 사용해 주세요.';
 
 const VIEWS: Partial<Record<ErrorCode, AuthErrorView>> = {
   AUTH_FAILED: { message: '이메일 또는 비밀번호가 올바르지 않습니다.', restart: false },
@@ -20,10 +22,7 @@ const VIEWS: Partial<Record<ErrorCode, AuthErrorView>> = {
   AUTH_FLOW_EXPIRED: { message: `로그인 시간이 지났습니다. ${RESTART}`, restart: true },
   AUTH_STEP_CONFLICT: { message: `로그인 단계가 맞지 않습니다. ${RESTART}`, restart: true },
   AUTH_REQUIRED: { message: `로그인이 필요합니다. ${RESTART}`, restart: true },
-  AUTH_PASSWORD_POLICY: {
-    message: '비밀번호는 12자 이상이며 대문자·소문자·숫자·기호를 모두 포함해야 합니다.',
-    restart: false,
-  },
+  AUTH_PASSWORD_POLICY: { message: PASSWORD_POLICY, restart: false },
   AUTH_RATE_LIMITED: { message: `시도가 너무 많습니다. ${LATER_RESTART}`, restart: true },
   AUTH_PROVIDER_UNAVAILABLE: {
     message: `인증 서비스에 연결할 수 없습니다. ${LATER_RESTART}`,
@@ -43,4 +42,42 @@ const VIEWS: Partial<Record<ErrorCode, AuthErrorView>> = {
 export function authErrorView(code: ErrorCode | null): AuthErrorView {
   if (code === null) return { message: `서버에 연결할 수 없습니다. ${LATER}`, restart: false };
   return VIEWS[code] ?? { message: `로그인 중 오류가 발생했습니다. ${LATER}`, restart: false };
+}
+
+/* ───────────────────── 비밀번호 재설정(#492 PR 3) ───────────────────── */
+/* 로그인 진행과 별개라 "처음부터 다시 로그인" 문구를 쓰지 않는다. 화면 단계는 바꾸지 않는다. */
+
+const RESET_REQUEST: Partial<Record<ErrorCode, string>> = {
+  AUTH_RATE_LIMITED: `요청이 너무 많습니다. ${LATER}`,
+  AUTH_PROVIDER_UNAVAILABLE: `인증 서비스에 연결할 수 없습니다. ${LATER}`,
+  AUTH_EMAIL_DELIVERY_FAILED: `재설정 메일을 보내지 못했습니다. ${LATER}`,
+  AUTH_ORIGIN_REJECTED: `허용되지 않은 주소에서 보낸 요청입니다. ${ADMIN}`,
+  REQUEST_VALIDATION_FAILED: '이메일 주소를 다시 확인해 주세요.',
+};
+
+/** 재설정 코드 요청 실패 문구. `null`은 응답을 받지 못한 실패(네트워크)다. */
+export function resetRequestErrorMessage(code: ErrorCode | null): string {
+  if (code === null) return `서버에 연결할 수 없습니다. ${LATER}`;
+  return RESET_REQUEST[code] ?? `재설정을 요청하지 못했습니다. ${LATER}`;
+}
+
+/**
+ * 결과를 알 수 없는 확인 실패 — 서버가 비밀번호를 바꾼 뒤 기록 · 세션 정리에서 실패했을 수 있다(500).
+ * 그래서 "바뀌지 않았다"고 말하지 않고, 새 비밀번호 로그인 → 재요청 → 관리자 순으로 안내한다.
+ */
+export const RESET_CONFIRM_UNCERTAIN =
+  '처리가 완료되었는지 확인하지 못했습니다. 비밀번호가 이미 바뀌었을 수 있고, 다른 곳의 로그인이 남아 있을 수 있습니다. ' +
+  '새 비밀번호로 로그인해 보고, 되지 않으면 재설정을 다시 요청하거나 관리자에게 문의해 주세요.';
+
+const RESET_CONFIRM: Partial<Record<ErrorCode, string>> = {
+  AUTH_CODE_INVALID: '코드가 맞지 않거나 만료되었습니다. 코드를 확인하거나 코드를 다시 받아 주세요.',
+  AUTH_PASSWORD_POLICY: PASSWORD_POLICY,
+  AUTH_RATE_LIMITED: `시도가 너무 많습니다. ${LATER}`,
+  AUTH_ORIGIN_REJECTED: `허용되지 않은 주소에서 보낸 요청입니다. ${ADMIN}`,
+  REQUEST_VALIDATION_FAILED: '입력값을 다시 확인해 주세요.',
+};
+
+/** 재설정 확인 실패 문구. 위 목록 밖(500 · 네트워크 · 계약 밖 코드)은 결과를 알 수 없는 실패로 안내한다. */
+export function resetConfirmErrorMessage(code: ErrorCode | null): string {
+  return (code === null ? undefined : RESET_CONFIRM[code]) ?? RESET_CONFIRM_UNCERTAIN;
 }

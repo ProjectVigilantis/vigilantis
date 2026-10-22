@@ -21,7 +21,6 @@ import pytest
 import workflows
 from auth import service as auth_service
 from auth import sessions as auth_sessions
-from auth.http import get_login_flow
 from config import AuthSettings, Settings, get_auth_settings, get_settings
 from db import models
 from db.repositories import auth as auth_repo
@@ -45,6 +44,8 @@ PUBLIC_ROUTES = {
     ("POST", "/api/v1/auth/login/totp-setup/verify"),
     ("POST", "/api/v1/auth/login/totp"),
     ("POST", "/api/v1/auth/login/email-verification"),
+    ("POST", "/api/v1/auth/password-reset"),
+    ("POST", "/api/v1/auth/password-reset/confirm"),
     # 멱등 로그아웃(PR 1) — 세션이 없으면 지울 것이 없어 204다. 상태를 바꾸지 않는다
     ("POST", "/api/v1/auth/logout"),
 }
@@ -104,8 +105,6 @@ def _spy(monkeypatch, module, name: str) -> list:
 def test_every_route_outside_public_allowlist_requires_a_session(client_pg_anon, allowed_origin):
     app = client_pg_anon.app
     app.dependency_overrides[get_auth_settings] = lambda: _configured_auth(allowed_origin)
-    # /me · /activity 도 라우터 의존성으로 흐름을 조립한다 — 세션 판정까지 가도록 대역만 둔다
-    app.dependency_overrides[get_login_flow] = lambda: object()
     http, ws = _routes(app)
 
     assert PUBLIC_ROUTES <= http, "공개 목록에 없는 경로가 남았다 — 목록을 실제 경로와 맞춘다"
@@ -115,7 +114,7 @@ def test_every_route_outside_public_allowlist_requires_a_session(client_pg_anon,
 
     leaks = []
     for method, path in protected:
-        url = path.replace("{incident_id}", str(uuid.uuid4()))
+        url = path.replace("{incident_id}", str(uuid.uuid4())).replace("{user_id}", str(uuid.uuid4()))
         response = client_pg_anon.request(
             method, url, headers={"Origin": allowed_origin}, json={} if method == "POST" else None
         )

@@ -44,6 +44,8 @@ _STATUS_BY_CODE: dict[ErrorCode, int] = {
     ErrorCode.AUTH_EMAIL_DELIVERY_FAILED: 503,
     ErrorCode.AUTH_RATE_LIMITED: 429,
     ErrorCode.AUTH_PROVIDER_UNAVAILABLE: 503,
+    ErrorCode.USER_NOT_FOUND: 404,
+    ErrorCode.USER_STATE_CONFLICT: 409,
     ErrorCode.REQUEST_VALIDATION_FAILED: 422,
     ErrorCode.INTERNAL_ERROR: 500,
 }
@@ -68,6 +70,8 @@ _MESSAGE_BY_CODE: dict[ErrorCode, str] = {
     ErrorCode.AUTH_EMAIL_DELIVERY_FAILED: "인증 이메일을 보내지 못했습니다.",
     ErrorCode.AUTH_RATE_LIMITED: "요청이 너무 많습니다. 잠시 후 다시 시도하세요.",
     ErrorCode.AUTH_PROVIDER_UNAVAILABLE: "인증 서비스를 사용할 수 없습니다.",
+    ErrorCode.USER_NOT_FOUND: "사용자를 찾을 수 없습니다.",
+    ErrorCode.USER_STATE_CONFLICT: "현재 사용자 상태에서는 처리할 수 없습니다. 마지막 활성 관리자와 중복 초대를 확인하세요.",
     ErrorCode.REQUEST_VALIDATION_FAILED: "요청 값이 계약과 다릅니다.",
     ErrorCode.INTERNAL_ERROR: "서버 내부 오류입니다.",
 }

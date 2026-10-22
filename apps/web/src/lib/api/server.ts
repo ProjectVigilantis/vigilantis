@@ -23,6 +23,7 @@ export async function serverApi(): Promise<ReturnType<typeof createReadApi>> {
   const returnTo = headerList.get(REQUEST_PATH_HEADER);
   return createReadApi({
     headers: cookie === null ? {} : { Cookie: cookie },
-    onAuthRequired: () => redirect(loginUrl(returnTo)),
+    // 세션 쿠키가 있는데(없으면 proxy가 먼저 보낸다) API가 401이다 — 쓰던 세션이 끝났다.
+    onAuthRequired: () => redirect(loginUrl(returnTo, true)),
   });
 }

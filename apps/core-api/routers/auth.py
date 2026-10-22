@@ -5,7 +5,7 @@
 #   - 얇게 둔다: 로그인 상태 머신은 LoginFlow, 세션·트랜잭션은 auth.service 가 맡는다.
 #   - 세션 쿠키는 StepResult 가 COMPLETED + identity 일 때, service 가 세션을 발급한 뒤에만 건다.
 #   - 비밀값(SecretStr)은 LoginFlow 호출 지점에서만 벗긴다. 토큰은 어떤 본문에도 싣지 않는다.
-#   - 모든 경로에 Origin 검사(상태 변경만)와 Cognito 설정 확인이 먼저 걸린다.
+#   - 모든 경로에 Origin 검사(상태 변경만)가 먼저 걸리고, Cognito 라우트(로그인 · 재설정)만 설정 확인이 뒤따른다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -13,14 +13,16 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime
 
+from auth import password_reset as password_reset_service
 from auth import service
-from auth.cognito import AuthFailedError, AuthFlowExpiredError
+from auth.cognito import AuthFailedError, AuthFlowExpiredError, CognitoAdapter
 from auth.http import (
     FLOW_COOKIE,
     SESSION_COOKIE,
     delete_flow_cookie,
     delete_session_cookie,
     get_clock,
+    get_cognito_adapter,
     get_login_flow,
     require_origin,
     set_flow_cookie,
@@ -37,6 +39,8 @@ from schemas.api.auth import (
     LoginStep,
     LoginStepResponse,
     NewPasswordRequest,
+    PasswordResetConfirmRequest,
+    PasswordResetRequest,
     TotpSetupResponse,
 )
 from sqlalchemy.orm import Session
@@ -45,12 +49,14 @@ _DB = Depends(get_db)
 _SETTINGS = Depends(get_auth_settings)
 _CLOCK = Depends(get_clock)
 _FLOW = Depends(get_login_flow)
+_ADAPTER = Depends(get_cognito_adapter)
 
-# 순서가 계약이다: Origin 거절이 Cognito 설정 확인(=흐름 조립)보다 먼저다
+# Origin 검사는 라우터 전체에 먼저 걸린다. Cognito 설정 확인(LoginFlow · CognitoAdapter 조립)은 그것이 필요한
+# 라우트(로그인 6종 · 재설정 2종)만 의존성으로 받는다 — /me · /activity · /logout 은 미설정이어도 동작한다
 router = APIRouter(
     prefix="/api/v1/auth",
     tags=["auth"],
-    dependencies=[Depends(require_origin), _FLOW],
+    dependencies=[Depends(require_origin)],
 )
 
 
@@ -174,6 +180,33 @@ def login_email_verification(
     return _step_response(
         result, flow_token=token, request=request, response=response, db=db, settings=settings, clock=clock
     )
+
+
+@router.post("/password-reset", status_code=204)
+def password_reset(
+    body: PasswordResetRequest,
+    adapter: CognitoAdapter = _ADAPTER,
+) -> Response:
+    password_reset_service.request_reset(adapter, body.email)
+    return Response(status_code=204)
+
+
+@router.post("/password-reset/confirm", status_code=204)
+def password_reset_confirm(
+    body: PasswordResetConfirmRequest,
+    adapter: CognitoAdapter = _ADAPTER,
+    db: Session = _DB,
+    clock: Callable[[], datetime] = _CLOCK,
+) -> Response:
+    password_reset_service.confirm_reset(
+        adapter,
+        db,
+        email=body.email,
+        code=body.code.get_secret_value(),
+        new_password=body.new_password.get_secret_value(),
+        now=clock(),
+    )
+    return Response(status_code=204)
 
 
 @router.post("/logout", status_code=204)

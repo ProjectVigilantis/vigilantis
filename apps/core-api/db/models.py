@@ -28,6 +28,7 @@ from schemas.api.incidents import (
     RiskLevel,
 )
 from schemas.api.tenants import TenantStatus, TenantVerificationResult
+from schemas.api.users import UserEventAction
 from schemas.candidates import CandidateStatus
 from schemas.collections import CollectionRunStatus
 from schemas.events import ThreatEventType
@@ -1236,8 +1237,11 @@ class AuthSessionMfaStep(str, Enum):
 
 class AuthSessionRevokeReason(str, Enum):
     LOGOUT = "LOGOUT"
-    #: 같은 브라우저가 다시 로그인해 이전 세션 쿠키를 새 세션으로 교체했다.
+    #: 같은 사용자가 새로 로그인해 이전 세션 전부(이전 쿠키 세션 포함)를 새 세션으로 교체했다.
     SUPERSEDED = "SUPERSEDED"
+    ADMIN_REVOKED = "ADMIN_REVOKED"
+    ACCOUNT_DISABLED = "ACCOUNT_DISABLED"
+    PASSWORD_RESET = "PASSWORD_RESET"
 
 
 class AppUser(Base):
@@ -1306,4 +1310,29 @@ class AuthSession(Base):
             "last_activity_at >= created_at AND last_activity_at <= absolute_expires_at",
             name="activity_window",
         ),
+    )
+
+
+class UserAdminEvent(Base):
+    """사용자 관리 이력 — append-only(DB 트리거가 UPDATE·DELETE를 거절한다).
+
+    상태 JSON은 저장소가 schemas.api.users.UserEventState로 검증한 값만 들어간다.
+    """
+
+    __tablename__ = "user_admin_events"
+
+    event_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
+    actor_user_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("app_users.user_id", ondelete="RESTRICT"), index=True
+    )
+    target_user_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("app_users.user_id", ondelete="RESTRICT"), index=True
+    )
+    action: Mapped[UserEventAction] = mapped_column(
+        _enum(UserEventAction, "user_event_action")
+    )
+    before_state: Mapped[dict] = mapped_column(JSONB)
+    after_state: Mapped[dict] = mapped_column(JSONB)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
     )

@@ -94,8 +94,8 @@ class LoginRequest(BaseModel):
 class NewPasswordRequest(BaseModel):
     """POST /api/v1/auth/login/new-password — 최초 비밀번호 변경.
 
-    길이만 여기서 막는다. 문자 종류 규칙은 User Pool 정책이 판정하고, 위반은
-    AUTH_PASSWORD_POLICY 로 돌아온다.
+    길이는 여기서 막는다. 서버가 공통 순수 함수로 문자 규칙을 먼저 확인하고,
+    통과한 입력만 Cognito로 보낸다. 내용 위반은 AUTH_PASSWORD_POLICY다.
     """
 
     model_config = _SECRET_INPUT_CONFIG
@@ -117,6 +117,20 @@ class CodeRequest(BaseModel):
         if len(raw) != 6 or not raw.isascii() or not raw.isdigit():
             raise ValueError("코드는 6자리 숫자입니다")
         return value
+
+
+class PasswordResetRequest(BaseModel):
+    """POST /password-reset — 발송 대상·사용자 존재 여부는 응답하지 않는다."""
+
+    model_config = _SECRET_INPUT_CONFIG
+
+    email: Email
+
+
+class PasswordResetConfirmRequest(NewPasswordRequest, CodeRequest):
+    """POST /password-reset/confirm — 기존 새 비밀번호 길이·코드 계약을 공유한다."""
+
+    email: Email
 
 
 class LoginStepResponse(BaseModel):

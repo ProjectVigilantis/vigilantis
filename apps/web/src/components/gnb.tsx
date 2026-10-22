@@ -6,14 +6,16 @@
 
 'use client';
 
-import { Building2, LayoutDashboard, Server, Shield, type LucideIcon } from 'lucide-react';
+import { Building2, LayoutDashboard, Server, Shield, Users, type LucideIcon } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 
+import { useSession } from '@/components/auth/session-provider';
 import { UserMenu } from '@/components/auth/user-menu';
 import { CollectionIndicator, useAssetsEnvelope } from '@/components/collection-indicator';
 import { ConnectionIndicator, type AssetPresence } from '@/components/connection-indicator';
 import { ThemeToggle } from '@/components/theme-toggle';
+import { canManageUsers } from '@/lib/roles';
 import { cn } from '@/lib/utils';
 
 /**
@@ -35,6 +37,11 @@ const NAV: readonly { href: string; label: string; icon: LucideIcon }[] = [
   { href: '/assets', label: '자산', icon: Server },
   { href: '/security', label: '보안', icon: Shield },
   { href: '/tenants', label: '고객', icon: Building2 },
+];
+
+/** ADMIN에게만 보이는 메뉴(#492 PR 3). 숨김은 화면 편의이고 실제 차단은 서버 403이다. */
+const ADMIN_NAV: readonly { href: string; label: string; icon: LucideIcon }[] = [
+  { href: '/users', label: '사용자', icon: Users },
 ];
 
 export function ShellHeader() {
@@ -75,13 +82,15 @@ export function ShellHeader() {
 /** 넓은 화면에서는 왼쪽 세로 메뉴, 좁은 화면(< md)에서는 상단바 아래 가로 줄이다. */
 export function ShellNav() {
   const pathname = usePathname();
+  const { session } = useSession();
+  const nav = canManageUsers(session.kind === 'user' ? session.user.role : null) ? [...NAV, ...ADMIN_NAV] : NAV;
 
   return (
     <nav
       aria-label="주요 화면"
       className="dark bg-shell-nav flex shrink-0 gap-1 overflow-x-auto p-2 [scrollbar-width:none] md:w-58 md:flex-col md:overflow-visible md:border-r md:p-4"
     >
-      {NAV.map(({ href, label, icon: Icon }) => {
+      {nav.map(({ href, label, icon: Icon }) => {
         // 경계(`/` 또는 문자열 끝)까지 본다. 접두만 보면 다른 경로가 같이 활성이 된다.
         // 인시던트 상세(`/incidents/[id]`)는 카테고리를 모르는 자리라 어느 항목도 켜지 않는다.
         const active =

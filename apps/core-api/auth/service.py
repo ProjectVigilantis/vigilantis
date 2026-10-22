@@ -52,26 +52,39 @@ def complete_login(
     max_seconds: int,
     idle_seconds: int,
 ) -> sessions.IssuedSession:
-    user = auth_repo.get_user_by_identity(
-        db, issuer=identity.issuer, cognito_sub=identity.sub
-    )
-    if user is None:
-        raise AccountNotProvisionedError()
-    if user.status is models.AppUserStatus.DISABLED:
-        raise AccountDisabledError()
-    # 이메일 증명은 앱이 로그인 흐름에서 이메일 코드 검증 성공을 받았을 때만 기록된다.
-    if user.email_verified_at is None and not identity.email_proven:
-        raise AuthFailedError()
+    """로그인 완료 — 짧은 DB 변경 전체를 users 테이블 락 하나로 직렬화한다.
+
+    같은 락을 관리자 서비스도 잡으므로 동시 로그인 · 비활성화 · 관리자 동작이 서로 끼어들지 않는다.
+    락을 잡은 뒤에야 신원 · 상태 · 이메일 증명을 새로 읽는다. 한 사용자의 세션은 1개만 남는다.
+    """
     try:
+        auth_repo.lock_users_table(db)
+        user = auth_repo.get_user_by_identity(
+            db, issuer=identity.issuer, cognito_sub=identity.sub
+        )
+        if user is None:
+            raise AccountNotProvisionedError()
+        if user.status is models.AppUserStatus.DISABLED:
+            raise AccountDisabledError()
+        # 이메일 증명은 앱이 로그인 흐름에서 이메일 코드 검증 성공을 받았을 때만 기록된다.
+        if user.email_verified_at is None and not identity.email_proven:
+            raise AuthFailedError()
         if identity.email_proven and user.email_verified_at is None:
             auth_repo.mark_email_verified(db, user_id=user.user_id, now=now)
         if previous_token:
+            # 이전 쿠키 세션은 다른 사용자의 것이어도 교체한다.
             sessions.revoke_session(
                 db,
                 previous_token,
                 now=now,
                 reason=models.AuthSessionRevokeReason.SUPERSEDED,
             )
+        sessions.revoke_user_sessions(
+            db,
+            user_id=user.user_id,
+            now=now,
+            reason=models.AuthSessionRevokeReason.SUPERSEDED,
+        )
         issued = sessions.issue_session(
             db,
             user_id=user.user_id,

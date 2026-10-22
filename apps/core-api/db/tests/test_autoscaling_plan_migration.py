@@ -64,6 +64,30 @@ def _cleanup(pg_engine, incident_id, execution_id):
         session.commit()
 
 
+def _restore_and_cleanup(pg_engine, migration_config, incident_id, execution_id):
+    try:
+        command.upgrade(migration_config, "head")
+    finally:
+        _cleanup(pg_engine, incident_id, execution_id)
+
+
+def test_failed_schema_restore_does_not_leave_committed_rows(
+    pg_engine, migration_config, monkeypatch,
+):
+    incident_id, execution_id = _seed_execution(pg_engine, PLAN)
+
+    def fail_restore(*args, **kwargs):
+        raise RuntimeError("schema restore failed")
+
+    monkeypatch.setattr(command, "upgrade", fail_restore)
+    with pytest.raises(RuntimeError, match="schema restore failed"):
+        _restore_and_cleanup(pg_engine, migration_config, incident_id, execution_id)
+
+    with Session(pg_engine) as session:
+        assert session.get(models.ActionExecution, execution_id) is None
+        assert session.get(models.Incident, incident_id) is None
+
+
 def test_revision_follows_a3d8_on_a_single_chain(migration_config):
     script = ScriptDirectory.from_config(migration_config)
     assert script.get_revision(REVISION).down_revision == PARENT
@@ -106,8 +130,7 @@ def test_existing_rows_stay_without_a_plan_after_upgrade(pg_engine, migration_co
         with Session(pg_engine) as session:
             assert session.get(models.ActionExecution, execution_id).autoscaling_plan is None
     finally:
-        command.upgrade(migration_config, "head")
-        _cleanup(pg_engine, incident_id, execution_id)
+        _restore_and_cleanup(pg_engine, migration_config, incident_id, execution_id)
 
 
 def test_downgrade_drops_only_the_column_and_upgrade_restores_it_empty(pg_engine, migration_config):
@@ -126,5 +149,4 @@ def test_downgrade_drops_only_the_column_and_upgrade_restores_it_empty(pg_engine
         with Session(pg_engine) as session:
             assert session.get(models.ActionExecution, execution_id).autoscaling_plan is None
     finally:
-        command.upgrade(migration_config, "head")
-        _cleanup(pg_engine, incident_id, execution_id)
+        _restore_and_cleanup(pg_engine, migration_config, incident_id, execution_id)
