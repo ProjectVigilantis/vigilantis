@@ -82,19 +82,27 @@ def _row(enabled: bool, resumed_at: datetime | None) -> models.Tenant:
     return models.Tenant(auto_action_enabled=enabled, auto_action_resumed_at=resumed_at)
 
 
-@pytest.mark.parametrize("tenant, trigger, deadline, blocked", [
-    pytest.param(None, TIMEOUT, NOW, False, id="no-tenant-is-mvp-record"),
-    pytest.param(_row(True, None), TIMEOUT, NOW, False, id="enabled-never-turned-off"),
-    pytest.param(_row(False, None), PRE, None, True, id="disabled-high"),
-    pytest.param(_row(False, None), TIMEOUT, NOW, True, id="disabled-medium"),
-    pytest.param(_row(True, NOW), TIMEOUT, NOW, True, id="deadline-passed-at-resume"),
-    pytest.param(_row(True, NOW), TIMEOUT, NOW - timedelta(hours=1), True, id="deadline-passed-while-off"),
-    pytest.param(_row(True, NOW), TIMEOUT, NOW + timedelta(seconds=1), False, id="deadline-after-resume"),
-    pytest.param(_row(True, NOW), PRE, None, False, id="high-has-no-deadline"),
+BEFORE, AFTER = NOW - timedelta(hours=1), NOW + timedelta(seconds=1)
+
+
+# 비교하는 시각은 「그 발동을 정한 시각」이다 — High 는 접수 시각, Medium 은 응답 기한(#520 리뷰)
+@pytest.mark.parametrize("tenant, trigger, received, deadline, blocked", [
+    pytest.param(None, TIMEOUT, BEFORE, NOW, False, id="no-tenant-is-mvp-record"),
+    pytest.param(_row(True, None), TIMEOUT, BEFORE, NOW, False, id="enabled-never-turned-off"),
+    pytest.param(_row(True, None), PRE, BEFORE, None, False, id="high-enabled-never-turned-off"),
+    pytest.param(_row(False, None), PRE, AFTER, None, True, id="disabled-high"),
+    pytest.param(_row(False, None), TIMEOUT, BEFORE, AFTER, True, id="disabled-medium"),
+    pytest.param(_row(True, NOW), TIMEOUT, BEFORE, NOW, True, id="deadline-passed-at-resume"),
+    pytest.param(_row(True, NOW), TIMEOUT, BEFORE, BEFORE, True, id="deadline-passed-while-off"),
+    # Medium 은 접수가 켜기 전이어도 기한이 켠 뒤면 발동한다 — 기한이 그 발동을 정한 시각이다
+    pytest.param(_row(True, NOW), TIMEOUT, BEFORE, AFTER, False, id="deadline-after-resume"),
+    pytest.param(_row(True, NOW), PRE, BEFORE, None, True, id="high-received-while-off"),
+    pytest.param(_row(True, NOW), PRE, NOW, None, True, id="high-received-at-resume"),
+    pytest.param(_row(True, NOW), PRE, AFTER, None, False, id="high-received-after-resume"),
 ])
-def test_gate(tenant, trigger, deadline, blocked):
+def test_gate(tenant, trigger, received, deadline, blocked):
     reason = workflows.automatic_trigger_block(
-        tenant, trigger_source=trigger, response_deadline_at=deadline)
+        tenant, trigger_source=trigger, received_at=received, response_deadline_at=deadline)
     assert reason is (SKIP.AUTO_ACTION_DISABLED if blocked else None)
 
 
@@ -160,6 +168,30 @@ def test_deadline_after_re_enabling_fires(db, make_incident, make_candidate):
 
     assert seeded.incident_id in incidents_repo.list_expired_agent_waits(db, now=_utcnow())
     result = _attempt(db, seeded, TIMEOUT)
+    assert result.created and result.execution_status is ExecutionStatus.IN_PROGRESS
+
+
+def test_high_received_while_disabled_is_not_pre_mitigated_after_re_enabling(
+    db, make_incident, make_candidate
+):
+    # 분석 스캔이 선점할 때마다 ANALYZING 인 High 에 선차단을 다시 건다(agent_dispatcher._dispatch_one).
+    # 꺼진 동안 들어온 High 가 다시 켠 뒤 선점되어도 사람 없이 선차단하지 않는다(#520 리뷰)
+    tenant = _tenant(db, enabled=False)
+    seeded = _seeded(db, make_incident, make_candidate, "high", tenant)
+    assert _attempt(db, seeded, PRE).skipped_reason is SKIP.AUTO_ACTION_DISABLED
+    _toggle(db, tenant, True)  # 켠 시각 = 지금 > 접수 시각
+    db.commit()
+
+    result = _attempt(db, seeded, PRE)
+    assert (result.skipped_reason, result.execution_id) == (SKIP.AUTO_ACTION_DISABLED, None)
+    assert _executions(db, seeded.incident_id) == []
+
+
+def test_high_received_after_re_enabling_is_pre_mitigated(db, make_incident, make_candidate):
+    tenant = _tenant(db, enabled=False)
+    _toggle(db, tenant, True, now=_utcnow() - timedelta(minutes=10))  # 접수보다 먼저 켰다
+    seeded = _seeded(db, make_incident, make_candidate, "high", tenant)
+    result = _attempt(db, seeded, PRE)
     assert result.created and result.execution_status is ExecutionStatus.IN_PROGRESS
 
 

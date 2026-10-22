@@ -80,7 +80,8 @@ def prepare_isolation(db: Session, incident_id: str, trigger_source: TriggerSour
     # 사이에 꺼지는 경우는 접수 관문(reserve_auto_isolation)이 잠근 뒤 같은 함수로 다시 본다
     tenant = None if incident.tenant_id is None else db.get(models.Tenant, incident.tenant_id)
     blocked = workflows.automatic_trigger_block(
-        tenant, trigger_source=trigger_source, response_deadline_at=incident.response_deadline_at,
+        tenant, trigger_source=trigger_source, received_at=incident.created_at,
+        response_deadline_at=incident.response_deadline_at,
     )
     if blocked is not None:
         logger.info("automatic_isolation_disabled_for_tenant", extra={

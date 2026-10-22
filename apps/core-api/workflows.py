@@ -643,6 +643,7 @@ def automatic_trigger_block(
     tenant: models.Tenant | None,
     *,
     trigger_source: TriggerSource,
+    received_at: datetime,
     response_deadline_at: datetime | None,
 ) -> AutoIsolationSkipReason | None:
     """테넌트가 이 자동 발동을 막는가 — 막으면 사유, 아니면 None. (T-6 · #514)
@@ -652,8 +653,11 @@ def automatic_trigger_block(
     승인 실행 · 자동 원복은 이 함수를 지나지 않는다.
       - 테넌트 없음(tenant_id NULL · MVP 단일 계정 기록)은 막지 않는다 — 지금 동작 그대로다.
       - 꺼져 있으면 막는다.
-      - 1분 무응답 격리는 그 기한이 마지막으로 다시 켠 시각 이전이면 막는다 — 꺼진 동안 지난 기한을
-        다시 켠 순간 한꺼번에, 오래된 판단으로 발동하지 않게.
+      - **그 발동을 정한 시각**이 마지막으로 다시 켠 시각 이전이면 막는다 — 꺼진 동안의 판단을 다시 켠
+        순간 사람 없이 실행하지 않게. 정한 시각은 High 선차단이 접수 시각(received_at = Incident
+        created_at), Medium 1분 격리가 응답 기한이다. High 도 접수 때 한 번만 시도되지 않는다 — 분석
+        스캔이 선점할 때마다 ANALYZING 인 High 에 선차단을 다시 건다(agent_dispatcher._dispatch_one ·
+        선점 회수로 되풀이될 수 있다).
     정지(SUSPENDED) 관문은 T-4 2단계가 이 함수에 더한다.
     """
     if tenant is None:
@@ -661,12 +665,12 @@ def automatic_trigger_block(
     if not tenant.auto_action_enabled:
         return AutoIsolationSkipReason.AUTO_ACTION_DISABLED
     resumed_at = tenant.auto_action_resumed_at
-    if (
-        trigger_source is TriggerSource.TIMEOUT_ISOLATION_1M
-        and resumed_at is not None
-        and response_deadline_at is not None
-        and response_deadline_at <= resumed_at
-    ):
+    if resumed_at is None:
+        return None
+    decided_at = (
+        received_at if trigger_source is TriggerSource.PRE_MITIGATION_0_5S else response_deadline_at
+    )
+    if decided_at is not None and decided_at <= resumed_at:
         return AutoIsolationSkipReason.AUTO_ACTION_DISABLED
     return None
 
@@ -812,7 +816,8 @@ def reserve_auto_isolation(
         else tenants_repo.read_tenant_for_share(db, incident.tenant_id)
     )
     reason = automatic_trigger_block(
-        tenant, trigger_source=trigger_source, response_deadline_at=incident.response_deadline_at,
+        tenant, trigger_source=trigger_source, received_at=incident.created_at,
+        response_deadline_at=incident.response_deadline_at,
     ) or _auto_isolation_skip_reason(db, incident, trigger_source, now)
     if reason is not None:
         db.rollback()  # Incident 잠금을 놓는다. 이 호출은 아무것도 쓰지 않았다
