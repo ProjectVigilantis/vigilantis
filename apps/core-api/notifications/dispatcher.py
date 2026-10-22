@@ -4,6 +4,8 @@
 
 initialize  설정 바인딩을 notification_routes에 맞춘다. 같은 fingerprint는 epoch·activated_at을
             유지하고, 바인딩 변경이나 제거 후 재등록은 새 epoch와 DB 시각 activated_at을 받는다.
+            먼저 tenants의 UUID·계정 정합성을 확인한다. 등록된 tenant와 연결되지 않은 미완료
+            발송이 있으면 어떤 바인딩도 바꾸지 않고 기동을 거부한다(자동 전환·재전송 없음).
 discover    채널 행이 없는 사건을 created_at 순으로 batch_size만큼 찾아 행을 만든다(anti-join,
             cursor 없음, ON CONFLICT DO NOTHING). 라우트 없음·충돌·발신기 없음·바인딩 불일치,
             created_at 또는 occurred_at이 activated_at보다 이른 사건은 BLOCKED로 끝난다.
@@ -13,13 +15,16 @@ process_one 만료 임대 회수 → PENDING 1건 정리 또는 claim → 전송
             없으면 UNKNOWN), 발신기가 없는 채널의 행은 기한과 무관하게 BLOCKED(CHANNEL_NOT_CONFIGURED)로
             닫는다. 보내기 직전에 행의 바인딩 스냅숏, DB 현재 바인딩(epoch), 설정 해석, 사건 계정이
             모두 같아야 한다. 하나라도 다르면 BLOCKED(ROUTE_CHANGED)이며 다른 수신처로 옮겨 보내지 않는다.
+            발견·claim 시 tenants의 현재 계정도 대조한다. DB 조회 오류는 종결하지 않고 회차를 재시도한다.
             채널 스레드는 발신기가 없어도 돈다 — 채널을 뺀 뒤 재기동해도 남은 PENDING·IN_FLIGHT를
             외부 호출·새 시도 없이 정리한다.
 
 복구: 시도 수는 claim 때 센다. claim 뒤나 공급자 수락 뒤 결과 저장 전에 멈춘 시도는 임대 만료 후
 UNKNOWN으로 회수해 재시도하고, max_attempts에 이르면 FAILED(EXHAUSTED)로 닫는다. 따라서 같은 사건이
-최대 max_attempts번 전송될 수 있다(정확히 1회 보장 없음). 결과는 claim_token·IN_FLIGHT·미만료 임대가
-모두 맞을 때만 반영하고, 종결(SUCCEEDED·FAILED·BLOCKED)은 되돌리지 않는다. 재전송 기능은 없다.
+최대 max_attempts번 전송될 수 있다(정확히 1회 보장 없음). 결과는 claim_token·IN_FLIGHT가 맞을 때만
+반영한다 — 임대가 지났어도 회수 전이면 반영하고, 회수·재claim이 토큰을 지우거나 바꾸므로 회수된 시도의
+늦은 결과는 막힌다(그 사건은 다시 보낼 수 있다). 종결(SUCCEEDED·FAILED·BLOCKED)은 되돌리지 않는다.
+재전송 기능은 없다.
 
 Slack: 모든 처리 프로세스가 notification_lanes의 Slack 관문 1행을 공유한다. 간격 관문(available_at)은
 호출 중 임대 길이만큼 닫히고 보유자가 결과 확정 뒤 1초 간격으로 연다. 429 Retry-After는 cooldown_until에
@@ -38,12 +43,14 @@ from dataclasses import dataclass
 from db.repositories import notification_deliveries as deliveries_repo
 from db.repositories import notification_events as events_repo
 from notifications.contracts import CHANNELS, Channel, EventSnapshot, Route, SendResult
-from notifications.routing import CHANNEL_NOT_CONFIGURED
+from notifications.routing import CHANNEL_NOT_CONFIGURED, OWNERSHIP_MISSING
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger("vigilantis.notifications.dispatcher")
 
 ROUTE_CHANGED = "ROUTE_CHANGED"
+TENANT_NOT_FOUND = "TENANT_NOT_FOUND"
+TENANT_ACCOUNT_MISMATCH = "TENANT_ACCOUNT_MISMATCH"
 NOT_ACTIVATED = "NOT_ACTIVATED"
 LEASE_EXPIRED = "lease_expired"
 SENDER_RAISED = "sender_raised"
@@ -115,6 +122,8 @@ class DeliveryDispatcher:
         self._lease_seconds = lease_seconds
         self._stopping = threading.Event()
         self._threads: list[threading.Thread] = []
+        self._warned_accounts: set[str | None] = set()
+        self._warned_lock = threading.Lock()
 
     # --- 수명주기 ---------------------------------------------------------------
 
@@ -175,6 +184,19 @@ class DeliveryDispatcher:
 
     def initialize(self) -> None:
         with self._sessions() as db:
+            accounts = deliveries_repo.tenant_accounts(
+                db, {route.tenant_id for route in self._registry.routes},
+            )
+            for route in self._registry.routes:
+                problem = _tenant_problem(route, accounts)
+                if problem is not None:
+                    logger.error("notification_tenant_binding_invalid", extra={"reason": problem})
+                    raise ValueError(problem)
+            if deliveries_repo.has_unbound_deliveries(db):
+                logger.error("notification_tenant_binding_invalid", extra={
+                    "reason": "NOTIFICATION_TENANT_TRANSITION_REQUIRED",
+                })
+                raise ValueError("NOTIFICATION_TENANT_TRANSITION_REQUIRED")
             for channel in PACED_CHANNELS:
                 deliveries_repo.ensure_lane(db, channel)
             deliveries_repo.sync_routes(db, self._registry.routes)
@@ -194,17 +216,22 @@ class DeliveryDispatcher:
                 bindings = deliveries_repo.current_routes(
                     db, current, {e.aws_account_id for e in events if e.aws_account_id},
                 )
-                rows = [self._materialize(event, current, bindings) for event in events]
+                accounts = deliveries_repo.tenant_accounts(
+                    db, {route.tenant_id for route in self._registry.routes},
+                )
+                rows = [self._materialize(event, current, bindings, accounts) for event in events]
                 created += deliveries_repo.insert_deliveries(db, rows)
                 db.commit()
         return created
 
-    def _materialize(self, event: EventSnapshot, channel: Channel, bindings) -> dict:
+    def _materialize(self, event: EventSnapshot, channel: Channel, bindings, tenant_accounts) -> dict:
         decision = self._registry.resolve(event, channel)
         route = decision.route
         binding = bindings.get(event.aws_account_id) if route is not None else None
         if route is None:
             reason = decision.blocked_reason
+        elif (problem := _tenant_problem(route, tenant_accounts)) is not None:
+            reason = problem
         elif channel not in self._senders:
             reason = CHANNEL_NOT_CONFIGURED
         elif (
@@ -217,6 +244,8 @@ class DeliveryDispatcher:
             reason = NOT_ACTIVATED
         else:
             reason = None
+        if reason == OWNERSHIP_MISSING:
+            self._warn_unowned_account(event.aws_account_id, channel)
         bound = reason is None or reason == NOT_ACTIVATED
         return deliveries_repo.new_delivery(
             event_id=event.event_id,
@@ -227,6 +256,16 @@ class DeliveryDispatcher:
             route_fingerprint=route.fingerprint if bound else None,
             route_epoch=binding.route_epoch if bound else None,
         )
+
+    def _warn_unowned_account(self, account: str | None, channel: Channel) -> None:
+        """선언되지 않은 계정의 사건은 프로세스 수명 동안 계정당 한 번만 경고한다(계정 ID 문자열 집합이라 작다). BLOCKED 기록은 그대로다."""
+        with self._warned_lock:
+            if account in self._warned_accounts:
+                return
+            self._warned_accounts.add(account)
+        logger.warning("notification_account_ownership_missing", extra={
+            "aws_account_id": account, "channel": channel, "reason": OWNERSHIP_MISSING,
+        })
 
     def process_one(self, channel: Channel) -> bool:
         """만료 임대를 회수하고 PENDING 1건을 처리한다. 할 일이 없거나 관문이 닫혀 있으면 False.
@@ -286,12 +325,16 @@ class DeliveryDispatcher:
                 decision = self._registry.resolve(event, channel)
                 current = deliveries_repo.get_route(db, row.aws_account_id, channel)
                 reason = _binding_problem(row, event, decision, current)
+                if reason is None:
+                    accounts = deliveries_repo.tenant_accounts(db, (decision.route.tenant_id,))
+                    reason = _tenant_problem(decision.route, accounts)
             if reason is not None:
                 deliveries_repo.block_pending(db, delivery_id, reason)
                 db.commit()
-                logger.warning("notification_delivery_blocked", extra={
-                    "delivery_id": delivery_id, "channel": channel, "reason": reason,
-                })
+                if reason != CHANNEL_NOT_CONFIGURED:  # 의도적으로 뺀 채널은 건별로 경고하지 않는다
+                    logger.warning("notification_delivery_blocked", extra={
+                        "delivery_id": delivery_id, "channel": channel, "reason": reason,
+                    })
                 return _CLOSED
             token = str(uuid.uuid4())
             if channel in PACED_CHANNELS and not deliveries_repo.acquire_lane(
@@ -343,6 +386,13 @@ class DeliveryDispatcher:
         delay = min(self._backoff_seconds * 2 ** (attempts - 1), self._max_backoff_seconds)
         # 공급자가 요구한 대기(Retry-After)는 상한으로 자르지 않는다 — 일찍 다시 보내지 않는다.
         return deliveries_repo.retry(category, code, max(delay, retry_after))
+
+
+def _tenant_problem(route: Route, accounts: Mapping[str, str]) -> str | None:
+    account = accounts.get(route.tenant_id)
+    if account is None:
+        return TENANT_NOT_FOUND
+    return None if account == route.aws_account_id else TENANT_ACCOUNT_MISMATCH
 
 
 def _binding_problem(row, event: EventSnapshot, decision, current) -> str | None:

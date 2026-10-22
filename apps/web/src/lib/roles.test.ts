@@ -3,7 +3,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { VIEWER_ACTION_BLOCKED, canOperate, operateBlockedReason } from './roles.ts';
+import { VIEWER_ACTION_BLOCKED, canManageUsers, canOperate, operateBlockedReason } from './roles.ts';
+
+test('사용자 관리 메뉴는 ADMIN에게만 보인다 — 역할을 모르면 숨긴다', () => {
+  assert.equal(canManageUsers('ADMIN'), true);
+  for (const role of ['OPERATOR', 'VIEWER', null, undefined] as const) {
+    assert.equal(canManageUsers(role), false, String(role));
+  }
+});
 
 test('ADMIN · OPERATOR만 조치할 수 있다', () => {
   assert.equal(canOperate('ADMIN'), true);

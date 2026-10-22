@@ -8,9 +8,11 @@
 
 import asyncio
 import json
+import re
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -28,11 +30,16 @@ from notifications.routing import RouteRegistry
 from schemas.api.assets import AssetType
 from schemas.api.incidents import RiskLevel
 from schemas.intake import SecOpsIncidentIntake
-from sqlalchemy import create_engine, delete, func, select, text, update
+from sqlalchemy import create_engine, delete, event, func, insert, select, text, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
+TENANT_A = "11111111-1111-4111-8111-111111111111"
+TENANT_B = "22222222-2222-4222-8222-222222222222"
+TENANT_MISSING = "33333333-3333-4333-8333-333333333333"  # 형식은 유효하지만 Tenant 행이 없다
 ACCOUNT_A = "111111111111"
 ACCOUNT_B = "222222222222"
+ACCOUNT_OTHER = "333333333333"  # 어느 테넌트 설정에도 없는 계정 — 불일치 흉내용
 REGION = "ap-northeast-2"
 WEBHOOK_A = "https://hooks.slack.com/services/TFAKEA/BFAKEA/fakeTokenA"
 WEBHOOK_A2 = "https://hooks.slack.com/services/TFAKEA/BFAKEA2/fakeTokenA2"
@@ -82,9 +89,7 @@ class _SlackConnection:
         response = self.wire.next_response()
         if response is CRASH_BEFORE_SEND:
             raise _Crash
-        self.wire.posts.append({
-            "url": f"https://{self.host}{path}", "body": body.decode(), "at": time.monotonic(),
-        })
+        self.wire.posts.append({"url": f"https://{self.host}{path}", "body": body.decode()})
         if self.wire.on_request is not None:
             self.wire.on_request()
         if response is CRASH_AFTER_ACCEPT:
@@ -144,12 +149,130 @@ def _wipe(engine):
             connection.execute(delete(model))
 
 
+TENANT_ACCOUNTS = {TENANT_A: ACCOUNT_A, TENANT_B: ACCOUNT_B}
+
+
+def _tenant_role(account):
+    return f"arn:aws:iam::{account}:role/vigilantis-test"
+
+
+def _drop_owned_tenants(engine):
+    """이 파일이 심은 테넌트 행만 지운다."""
+    with engine.begin() as connection:
+        connection.execute(
+            delete(models.Tenant).where(models.Tenant.tenant_id.in_(list(TENANT_ACCOUNTS)))
+        )
+
+
+def _seed_owned_tenants(engine):
+    _drop_owned_tenants(engine)
+    with Session(engine) as db:
+        for tenant, account in TENANT_ACCOUNTS.items():
+            db.add(models.Tenant(
+                tenant_id=tenant, name=f"테스트 {account}", aws_account_id=account,
+                access_role_arn=_tenant_role(account), external_id=f"external-{tenant}",
+                regions=[REGION],
+            ))
+        db.commit()
+
+
 @pytest.fixture()
 def sessions(pg_engine):
-    """발송 표는 전역 anti-join 대상이라 테스트마다 비운다. 세션은 각 단계가 따로 연다."""
+    """발송 표는 전역 anti-join 대상이라 테스트마다 비운다. 세션은 각 단계가 따로 연다.
+
+    권위 있는 Tenant(ACCOUNT_A/B)를 실제 모델·제약으로 심고, 정리는 발송 표를 비운 뒤 이 행만 지운다.
+    """
     _wipe(pg_engine)
+    _seed_owned_tenants(pg_engine)
     yield sessionmaker(bind=pg_engine, autoflush=False, expire_on_commit=False)
     _wipe(pg_engine)
+    _drop_owned_tenants(pg_engine)
+
+
+def delete_tenant(engine, tenant):
+    with engine.begin() as connection:
+        connection.execute(delete(models.Tenant).where(models.Tenant.tenant_id == tenant))
+
+
+def move_tenant_account(engine, tenant, account):
+    """권위 계정을 바꾼다(역할 ARN은 CHECK 때문에 함께 옮긴다)."""
+    with engine.begin() as connection:
+        connection.execute(
+            update(models.Tenant).where(models.Tenant.tenant_id == tenant)
+            .values(aws_account_id=account, access_role_arn=_tenant_role(account))
+        )
+
+
+BROKEN_TENANT = {"missing": "TENANT_NOT_FOUND", "mismatch": "TENANT_ACCOUNT_MISMATCH"}
+
+
+def break_tenant(engine, kind, tenant):
+    if kind == "missing":
+        delete_tenant(engine, tenant)
+    else:
+        move_tenant_account(engine, tenant, ACCOUNT_OTHER)
+
+
+TRANSITION_REQUIRED = "NOTIFICATION_TENANT_TRANSITION_REQUIRED"
+
+
+def refuse(dispatcher, code):
+    with pytest.raises(ValueError) as failure:
+        dispatcher.initialize()
+    assert str(failure.value) == code
+
+
+def snapshot(engine):
+    """발송 관련 표 전체의 행 값(시각 포함) — 거부·실패가 아무것도 바꾸지 않았음을 전체 동등으로 본다."""
+    with engine.connect() as connection:
+        return {
+            model.__tablename__: sorted(
+                (tuple(row) for row in connection.execute(select(model.__table__))), key=repr,
+            )
+            for model in (
+                models.NotificationRoute, models.NotificationLane, models.NotificationDelivery,
+            )
+        }
+
+
+def put_delivery(engine, event_id, channel, state, **over):
+    """저장소를 거치지 않고 (사건, 채널) 발송 행 1개를 CHECK를 지키는 모양으로 직접 심는다."""
+    values = {
+        "delivery_id": str(uuid.uuid4()), "event_id": event_id, "channel": channel,
+        "state": state, "tenant_id": TENANT_A, "aws_account_id": ACCOUNT_A,
+        "route_fingerprint": "f" * 64, "route_epoch": str(uuid.uuid4()),
+    }
+    receipt = {"SLACK": "SLACK_POSTED", "SNS": "SNS_ACCEPTED"}[channel]
+    values |= {
+        "PENDING": {"attempts": 0, "next_attempt_at": func.now()},
+        "IN_FLIGHT": {
+            "attempts": 1, "claim_token": str(uuid.uuid4()),
+            "lease_expires_at": func.now() + timedelta(seconds=300),
+        },
+        "SUCCEEDED": {"attempts": 1, "finished_at": func.now(), "receipt_kind": receipt},
+        "FAILED": {
+            "attempts": 1, "finished_at": func.now(), "last_category": "PERMANENT",
+            "final_reason": "PERMANENT", "last_error_code": "legacy",
+        },
+        "BLOCKED": {"blocked_reason": "ROUTE_CHANGED", "finished_at": func.now()},
+    }[state] | over
+    with engine.begin() as connection:
+        connection.execute(insert(models.NotificationDelivery).values(**values))
+    return values["delivery_id"]
+
+
+@contextmanager
+def tenant_lookup_failing(engine):
+    """권위 Tenant 표를 읽는 모든 문장을 DB 오류로 만든다(다른 표 문장은 그대로)."""
+    def fail(_connection, _cursor, statement, parameters, _context, _executemany):
+        if re.search(r"\btenants\b", statement):
+            raise OperationalError(statement, parameters, Exception("injected db failure"))
+
+    event.listen(engine, "before_cursor_execute", fail)
+    try:
+        yield
+    finally:
+        event.remove(engine, "before_cursor_execute", fail)
 
 
 def entry(tenant, account, slack=None, sns=None):
@@ -252,6 +375,12 @@ def lane_wait_seconds(engine):
     return max(lane_waits(engine))
 
 
+def db_clock(engine):
+    """관문이 비교하는 PostgreSQL 서버 시계의 지금 시각(호스트 시계와 섞지 않는다)."""
+    with engine.connect() as connection:
+        return connection.execute(text("SELECT clock_timestamp()")).scalar_one()
+
+
 def retry_delay(row):
     return row.next_attempt_at - row.updated_at
 
@@ -315,7 +444,7 @@ def test_committed_high_intake_is_sent_once_per_configured_channel(sessions, pg_
     dispatcher = make_dispatcher(
         sessions,
         registry(entry(
-            "customer-a", ACCOUNT_A,
+            TENANT_A, ACCOUNT_A,
             slack="SLACK_A" if "SLACK" in channels else None,
             sns=TOPIC_A if "SNS" in channels else None,
         )),
@@ -339,7 +468,7 @@ def test_committed_high_intake_is_sent_once_per_configured_channel(sessions, pg_
         for channel in ("SLACK", "SNS"):
             row = stored[channel]
             if channel in channels:
-                assert (row.state, row.attempts, row.tenant_id) == ("SUCCEEDED", 1, "customer-a")
+                assert (row.state, row.attempts, row.tenant_id) == ("SUCCEEDED", 1, TENANT_A)
                 assert row.receipt_kind == {"SLACK": "SLACK_POSTED", "SNS": "SNS_ACCEPTED"}[channel]
             else:
                 assert (row.state, row.blocked_reason) == ("BLOCKED", "CHANNEL_NOT_CONFIGURED")
@@ -358,17 +487,23 @@ def test_no_session_or_transaction_is_open_during_external_calls(sessions, pg_en
     seen = []
 
     def observe():
+        # 클라이언트 접속만 센다 — autovacuum 등 서버 내부 작업은 앱 세션·트랜잭션이 아니다
         with observer.connect() as connection:
             busy = connection.execute(text(
                 "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
-                " AND pid <> pg_backend_pid() AND state <> 'idle'"
+                " AND pid <> pg_backend_pid() AND backend_type = 'client backend'"
+                " AND state <> 'idle'"
             )).scalar_one()
-        seen.append((pg_engine.pool.checkedout(), busy))
+        return pg_engine.pool.checkedout(), busy
+
+    with sessions() as held:  # 대조군: 앱 세션이 트랜잭션을 연 채면 관찰기가 잡는다
+        held.execute(text("SELECT 1"))
+        assert observe() == (1, 1)
 
     slack, sns = SlackWire(), SnsWire()
-    slack.on_request = sns.on_publish = observe
+    slack.on_request = sns.on_publish = lambda: seen.append(observe())
     dispatcher = make_dispatcher(
-        sessions, registry(entry("customer-a", ACCOUNT_A, slack="SLACK_A", sns=TOPIC_A)),
+        sessions, registry(entry(TENANT_A, ACCOUNT_A, slack="SLACK_A", sns=TOPIC_A)),
         slack=slack, sns=sns,
     )
     activate(dispatcher, pg_engine)
@@ -386,8 +521,8 @@ def test_routes_never_cross_customers_and_changed_destination_gets_no_old_events
     sessions, pg_engine,
 ):
     original = registry(
-        entry("customer-a", ACCOUNT_A, slack="SLACK_A"),
-        entry("customer-b", ACCOUNT_B, slack="SLACK_B"),
+        entry(TENANT_A, ACCOUNT_A, slack="SLACK_A"),
+        entry(TENANT_B, ACCOUNT_B, slack="SLACK_B"),
     )
     first_wire = SlackWire()
     first = make_dispatcher(sessions, original, slack=first_wire)
@@ -411,8 +546,8 @@ def test_routes_never_cross_customers_and_changed_destination_gets_no_old_events
         sessions, ACCOUNT_A, created_shift=timedelta(hours=-1), occurred_shift=timedelta(hours=-1),
     )
     changed = registry(
-        entry("customer-a", ACCOUNT_A, slack="SLACK_A2"),
-        entry("customer-b", ACCOUNT_B, slack="SLACK_B"),
+        entry(TENANT_A, ACCOUNT_A, slack="SLACK_A2"),
+        entry(TENANT_B, ACCOUNT_B, slack="SLACK_B"),
     )
     second_wire = SlackWire()
     second = make_dispatcher(sessions, changed, slack=second_wire)
@@ -454,7 +589,7 @@ def test_routes_never_cross_customers_and_changed_destination_gets_no_old_events
 def test_removed_then_readded_binding_gets_new_epoch_and_old_pending_stays_blocked(
     sessions, pg_engine,
 ):
-    configured = registry(entry("customer-a", ACCOUNT_A, sns=TOPIC_A))
+    configured = registry(entry(TENANT_A, ACCOUNT_A, sns=TOPIC_A))
     wire = SnsWire()
     dispatcher = make_dispatcher(sessions, configured, sns=wire)
     activate(dispatcher, pg_engine)
@@ -463,7 +598,7 @@ def test_removed_then_readded_binding_gets_new_epoch_and_old_pending_stays_block
     pending = commit_event(sessions)
     dispatcher.discover()
 
-    removed = registry(entry("customer-a", ACCOUNT_A))
+    removed = registry(entry(TENANT_A, ACCOUNT_A))
     make_dispatcher(sessions, removed).initialize()
     assert route_row(pg_engine, ACCOUNT_A, "SNS") is None
 
@@ -490,7 +625,7 @@ def test_adding_settings_later_never_sends_history_and_blocked_rows_stay_blocked
 
     slack, sns = SlackWire(), SnsWire()
     dispatcher = make_dispatcher(
-        sessions, registry(entry("customer-a", ACCOUNT_A, slack="SLACK_A", sns=TOPIC_A)),
+        sessions, registry(entry(TENANT_A, ACCOUNT_A, slack="SLACK_A", sns=TOPIC_A)),
         slack=slack, sns=sns,
     )
     dispatcher.initialize()  # 실제 DB 활성화 시각 — 앞당기지 않는다
@@ -508,8 +643,8 @@ def test_adding_settings_later_never_sends_history_and_blocked_rows_stay_blocked
     fixed = make_dispatcher(
         sessions,
         registry(
-            entry("customer-a", ACCOUNT_A, slack="SLACK_A", sns=TOPIC_A),
-            entry("customer-b", ACCOUNT_B, slack="SLACK_B", sns=TOPIC_B),
+            entry(TENANT_A, ACCOUNT_A, slack="SLACK_A", sns=TOPIC_A),
+            entry(TENANT_B, ACCOUNT_B, slack="SLACK_B", sns=TOPIC_B),
         ),
         slack=slack, sns=sns,
     )
@@ -526,7 +661,7 @@ def test_adding_settings_later_never_sends_history_and_blocked_rows_stay_blocked
 
 def test_discovery_is_bounded_per_channel(sessions, pg_engine):
     dispatcher = make_dispatcher(
-        sessions, registry(entry("customer-a", ACCOUNT_A, sns=TOPIC_A)), sns=SnsWire(),
+        sessions, registry(entry(TENANT_A, ACCOUNT_A, sns=TOPIC_A)), sns=SnsWire(),
         batch_size=2,
     )
     activate(dispatcher, pg_engine)
@@ -537,7 +672,7 @@ def test_discovery_is_bounded_per_channel(sessions, pg_engine):
 
 def test_late_committed_older_event_is_still_discovered(sessions, pg_engine):
     dispatcher = make_dispatcher(
-        sessions, registry(entry("customer-a", ACCOUNT_A, sns=TOPIC_A)), sns=SnsWire(),
+        sessions, registry(entry(TENANT_A, ACCOUNT_A, sns=TOPIC_A)), sns=SnsWire(),
     )
     activate(dispatcher, pg_engine)
     with sessions() as late:
@@ -558,7 +693,7 @@ def test_late_committed_older_event_is_still_discovered(sessions, pg_engine):
 
 
 def test_concurrent_discovery_creates_exactly_one_row_per_event_channel(sessions, pg_engine):
-    routes = registry(entry("customer-a", ACCOUNT_A, slack="SLACK_A", sns=TOPIC_A))
+    routes = registry(entry(TENANT_A, ACCOUNT_A, slack="SLACK_A", sns=TOPIC_A))
     workers = [
         make_dispatcher(sessions, routes, slack=SlackWire(), sns=SnsWire(), batch_size=100)
         for _ in range(4)
@@ -584,7 +719,7 @@ def test_concurrent_discovery_creates_exactly_one_row_per_event_channel(sessions
 
 
 def test_concurrent_claims_send_each_delivery_once(sessions, pg_engine):
-    routes = registry(entry("customer-a", ACCOUNT_A, sns=TOPIC_A))
+    routes = registry(entry(TENANT_A, ACCOUNT_A, sns=TOPIC_A))
     wire = SnsWire()
     workers = [make_dispatcher(sessions, routes, sns=wire) for _ in range(4)]
     activate(workers[0], pg_engine)
@@ -610,10 +745,12 @@ def test_concurrent_claims_send_each_delivery_once(sessions, pg_engine):
 
 def test_competing_processes_keep_slack_calls_at_least_one_second_apart(sessions, pg_engine):
     routes = registry(
-        entry("customer-a", ACCOUNT_A, slack="SLACK_A"),
-        entry("customer-b", ACCOUNT_B, slack="SLACK_B"),
+        entry(TENANT_A, ACCOUNT_A, slack="SLACK_A"),
+        entry(TENANT_B, ACCOUNT_B, slack="SLACK_B"),
     )
     wire = SlackWire()
+    sent_at = []  # 전송 계층 경계에서 관문과 같은 DB 시계로 잰다
+    wire.on_request = lambda: sent_at.append(db_clock(pg_engine))
     workers = [make_dispatcher(sessions, routes, slack=wire) for _ in range(2)]
     activate(workers[0], pg_engine)
     events = [commit_event(sessions, account) for account in (ACCOUNT_A, ACCOUNT_B, ACCOUNT_A)]
@@ -630,9 +767,9 @@ def test_competing_processes_keep_slack_calls_at_least_one_second_apart(sessions
         thread.start()
     for thread in threads:
         thread.join(20)
-    times = sorted(p["at"] for p in wire.posts)
+    times = sorted(sent_at)
     assert len(times) == 3
-    assert all(later - earlier >= 1.0 for earlier, later in zip(times, times[1:]))
+    assert all(later - earlier >= timedelta(seconds=1) for earlier, later in zip(times, times[1:]))
     assert {rows(pg_engine, e)["SLACK"].state for e in events} == {"SUCCEEDED"}
 
 
@@ -640,7 +777,7 @@ def test_competing_processes_keep_slack_calls_at_least_one_second_apart(sessions
 
 
 def test_crash_during_discovery_leaves_nothing_and_next_process_sends_once(sessions, pg_engine):
-    routes = registry(entry("customer-a", ACCOUNT_A, sns=TOPIC_A))
+    routes = registry(entry(TENANT_A, ACCOUNT_A, sns=TOPIC_A))
 
     class CrashingRegistry:
         @property
@@ -665,7 +802,7 @@ def test_crash_during_discovery_leaves_nothing_and_next_process_sends_once(sessi
 
 
 def test_crash_after_claim_is_recovered_as_unknown_and_retried(sessions, pg_engine):
-    routes = registry(entry("customer-a", ACCOUNT_A, sns=TOPIC_A))
+    routes = registry(entry(TENANT_A, ACCOUNT_A, sns=TOPIC_A))
     crashed = make_dispatcher(sessions, routes, sns=SnsWire(CRASH_BEFORE_SEND))
     activate(crashed, pg_engine)
     event_id = commit_event(sessions)
@@ -692,7 +829,7 @@ def test_crash_after_claim_is_recovered_as_unknown_and_retried(sessions, pg_engi
 
 
 def test_crash_after_acceptance_resends_but_never_beyond_max_attempts(sessions, pg_engine):
-    routes = registry(entry("customer-a", ACCOUNT_A, sns=TOPIC_A))
+    routes = registry(entry(TENANT_A, ACCOUNT_A, sns=TOPIC_A))
     wire = SnsWire(CRASH_AFTER_ACCEPT, CRASH_AFTER_ACCEPT)
     dispatcher = make_dispatcher(sessions, routes, sns=wire, max_attempts=2)
     activate(dispatcher, pg_engine)
@@ -713,7 +850,7 @@ def test_crash_after_acceptance_resends_but_never_beyond_max_attempts(sessions, 
 
 
 def test_recovered_crash_counts_toward_exhaustion(sessions, pg_engine):
-    routes = registry(entry("customer-a", ACCOUNT_A, sns=TOPIC_A))
+    routes = registry(entry(TENANT_A, ACCOUNT_A, sns=TOPIC_A))
     wire = SnsWire(CRASH_BEFORE_SEND, _throttled())
     dispatcher = make_dispatcher(sessions, routes, sns=wire, max_attempts=2)
     activate(dispatcher, pg_engine)
@@ -732,7 +869,7 @@ def test_recovered_crash_counts_toward_exhaustion(sessions, pg_engine):
 
 
 def test_slack_crash_keeps_the_lane_closed_until_its_hold_expires(sessions, pg_engine):
-    routes = registry(entry("customer-a", ACCOUNT_A, slack="SLACK_A"))
+    routes = registry(entry(TENANT_A, ACCOUNT_A, slack="SLACK_A"))
     crashed = make_dispatcher(sessions, routes, slack=SlackWire(CRASH_AFTER_ACCEPT), lease_seconds=30)
     activate(crashed, pg_engine)
     event_id = commit_event(sessions)
@@ -752,7 +889,7 @@ def test_slack_crash_keeps_the_lane_closed_until_its_hold_expires(sessions, pg_e
 
 
 def test_stale_result_after_lease_reclaim_is_fenced(sessions, pg_engine):
-    routes = registry(entry("customer-a", ACCOUNT_A, sns=TOPIC_A))
+    routes = registry(entry(TENANT_A, ACCOUNT_A, sns=TOPIC_A))
     entered, release = threading.Event(), threading.Event()
     slow = SnsWire({"MessageId": "late-result"})
     slow.on_publish = lambda: (entered.set(), release.wait(10))
@@ -764,22 +901,136 @@ def test_stale_result_after_lease_reclaim_is_fenced(sessions, pg_engine):
     worker = threading.Thread(target=lambda: outcome.append(first.process_one("SNS")))
     worker.start()
     assert entered.wait(10)
+    old_token = rows(pg_engine, event_id)["SNS"].claim_token
 
+    second_entered, second_release = threading.Event(), threading.Event()
     second_wire = SnsWire({"MessageId": "reclaimed-result"})
+    second_wire.on_publish = lambda: (second_entered.set(), second_release.wait(10))
     second = make_dispatcher(sessions, routes, sns=second_wire)
     expire_leases(pg_engine)
     second.process_one("SNS")
     make_due(pg_engine)
-    assert second.process_one("SNS") is True
+    second_outcome = []
+    replacement = threading.Thread(target=lambda: second_outcome.append(second.process_one("SNS")))
+    replacement.start()
+    assert second_entered.wait(10)
+    in_flight = rows(pg_engine, event_id)["SNS"]
+    assert (in_flight.state, in_flight.attempts) == ("IN_FLIGHT", 2)
+    assert in_flight.claim_token not in (None, old_token)
+
+    # 교체 시도가 아직 전송 중일 때 이전 작업자의 늦은 결과는 이전 토큰이라 막힌다
     release.set()
     worker.join(10)
     assert outcome == [True]
     row = rows(pg_engine, event_id)["SNS"]
+    assert (row.state, row.claim_token, row.attempts, row.receipt_ref, row.updated_at) == (
+        "IN_FLIGHT", in_flight.claim_token, 2, None, in_flight.updated_at,
+    )
+
+    second_release.set()
+    replacement.join(10)
+    assert second_outcome == [True]
+    row = rows(pg_engine, event_id)["SNS"]
     assert (row.state, row.receipt_ref, row.attempts) == ("SUCCEEDED", "reclaimed-result", 2)
 
 
+@pytest.mark.parametrize(("response", "state", "error_code", "cooldown"), [
+    ((200, {}, b"ok"), "SUCCEEDED", None, 0),
+    ((429, {"Retry-After": "120"}, b""), "PENDING", "slack_http_429", 120),
+], ids=["success", "429"])
+def test_result_after_lease_expiry_is_kept_when_nobody_reclaimed_first(
+    sessions, pg_engine, response, state, error_code, cooldown,
+):
+    """임대가 지났어도 회수 전에 돌아온 결과는 반영한다 — 회수·재전송으로 바꾸지 않는다."""
+    routes = registry(entry(TENANT_A, ACCOUNT_A, slack="SLACK_A"))
+    entered, release = threading.Event(), threading.Event()
+    wire = SlackWire(response)
+    wire.on_request = lambda: (entered.set(), release.wait(10))
+    dispatcher = make_dispatcher(sessions, routes, slack=wire)
+    activate(dispatcher, pg_engine)
+    event_id = commit_event(sessions)
+    dispatcher.discover()
+    worker = threading.Thread(target=dispatcher.process_one, args=("SLACK",))
+    worker.start()
+    assert entered.wait(10)
+    expire_leases(pg_engine)
+    release.set()
+    worker.join(10)
+    row = rows(pg_engine, event_id)["SLACK"]
+    assert (row.state, row.last_error_code, row.attempts, row.claim_token) == (
+        state, error_code, 1, None,
+    )
+    spacing, waited = lane_waits(pg_engine)
+    assert 0 < spacing <= 1  # 관문 보유자로서 결과 확정 뒤 1초 간격으로 연다
+    assert cooldown - 1 < waited <= cooldown  # 429 대기는 남고 성공은 대기를 만들지 않는다
+    assert len(wire.posts) == 1
+
+
+def test_reclaim_and_late_result_race_is_decided_by_the_row_lock(sessions, pg_engine):
+    """임대 만료 뒤 회수와 늦은 결과가 겹치면 행 잠금을 먼저 잡은 쪽 하나만 반영된다."""
+    routes = registry(entry(TENANT_A, ACCOUNT_A, sns=TOPIC_A))
+    entered, release = threading.Event(), threading.Event()
+    wire = SnsWire({"MessageId": "late-result"})
+    wire.on_publish = lambda: (entered.set(), release.wait(10))
+    first = make_dispatcher(sessions, routes, sns=wire)
+    activate(first, pg_engine)
+    reclaimed = commit_event(sessions)
+    first.discover()
+    worker = threading.Thread(target=first.process_one, args=("SNS",))
+    worker.start()
+    assert entered.wait(10)
+    expire_leases(pg_engine)
+    observer = create_engine(pg_engine.url)
+
+    def lock_waiters():
+        with observer.connect() as connection:
+            return connection.execute(text(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
+                " AND wait_event_type = 'Lock'"
+            )).scalar_one()
+
+    # 회수가 먼저 잠근다(_recover와 같은 저장소 호출을 commit 전에 멈춤). 늦은 결과는 잠금을
+    # 기다렸다가 회수 commit 뒤 IN_FLIGHT·토큰 조건을 다시 평가해 막힌다.
+    with sessions() as reclaimer:
+        [expired] = deliveries_repo.lock_expired(reclaimer, "SNS", 10)
+        release.set()
+        assert _wait_for(lambda: lock_waiters() == 1)
+        assert deliveries_repo.recover_expired(
+            reclaimer, expired.delivery_id, deliveries_repo.retry("UNKNOWN", "lease_expired", 60),
+        )
+        reclaimer.commit()
+    worker.join(10)
+    observer.dispose()
+    row = rows(pg_engine, reclaimed)["SNS"]
+    assert (row.state, row.last_error_code, row.receipt_ref, row.claim_token, row.attempts) == (
+        "PENDING", "lease_expired", None, None, 1,
+    )
+
+    # 결과가 먼저 잠근다. 회수는 SKIP LOCKED로 건너뛰고, 그 뒤에는 닫을 IN_FLIGHT가 없다.
+    settled_first = commit_event(sessions)
+    first.discover()
+    delivery_id, token = rows(pg_engine, settled_first)["SNS"].delivery_id, str(uuid.uuid4())
+    with sessions() as db:
+        deliveries_repo.start_attempt(db, delivery_id, token, 30)
+        db.commit()
+    expire_leases(pg_engine)
+    with sessions() as settler, sessions() as reclaimer:
+        assert deliveries_repo.settle(
+            settler, delivery_id, token, deliveries_repo.succeeded("SNS_ACCEPTED", "late-result"),
+        )
+        assert deliveries_repo.lock_expired(reclaimer, "SNS", 10) == []
+        settler.commit()
+        assert not deliveries_repo.recover_expired(
+            reclaimer, delivery_id, deliveries_repo.retry("UNKNOWN", "lease_expired", 60),
+        )
+        reclaimer.commit()
+    row = rows(pg_engine, settled_first)["SNS"]
+    assert (row.state, row.receipt_ref, row.attempts) == ("SUCCEEDED", "late-result", 1)
+    assert len(wire.publishes) == 1
+
+
 def test_terminal_rows_are_never_reset_or_resent(sessions, pg_engine):
-    routes = registry(entry("customer-a", ACCOUNT_A, slack="SLACK_A"))
+    routes = registry(entry(TENANT_A, ACCOUNT_A, slack="SLACK_A"))
     wire = SlackWire((200, {}, b"ok"), (404, {}, b"no_service"))
     dispatcher = make_dispatcher(sessions, routes, slack=wire)
     activate(dispatcher, pg_engine)
@@ -808,7 +1059,7 @@ def test_terminal_rows_are_never_reset_or_resent(sessions, pg_engine):
             deliveries_repo.start_attempt(db, row.delivery_id, any_token, 30)
             deliveries_repo.block_pending(db, row.delivery_id, "ROUTE_CHANGED")
         db.commit()
-    make_dispatcher(sessions, registry(entry("customer-a", ACCOUNT_A, slack="SLACK_A2")),
+    make_dispatcher(sessions, registry(entry(TENANT_A, ACCOUNT_A, slack="SLACK_A2")),
                     slack=wire).initialize()
     for _ in range(2):
         expire_leases(pg_engine)
@@ -828,7 +1079,7 @@ TERMINAL = {"SUCCEEDED", "FAILED", "BLOCKED"}
 
 
 def test_removed_channel_closes_pending_and_crashed_rows_without_sending(sessions, pg_engine):
-    both = registry(entry("customer-a", ACCOUNT_A, slack="SLACK_A", sns=TOPIC_A))
+    both = registry(entry(TENANT_A, ACCOUNT_A, slack="SLACK_A", sns=TOPIC_A))
     sns = SnsWire(CRASH_BEFORE_SEND)
     first = make_dispatcher(sessions, both, slack=SlackWire(), sns=sns)
     activate(first, pg_engine)
@@ -849,7 +1100,7 @@ def test_removed_channel_closes_pending_and_crashed_rows_without_sending(session
     # 재기동: SNS를 설정에서 뺐고 Slack 발신기만 있다. 실제 채널 스레드로 돈다.
     wire = SlackWire()
     restarted = make_dispatcher(
-        sessions, registry(entry("customer-a", ACCOUNT_A, slack="SLACK_A")), slack=wire,
+        sessions, registry(entry(TENANT_A, ACCOUNT_A, slack="SLACK_A")), slack=wire,
     )
 
     def settled():
@@ -882,7 +1133,7 @@ def test_removed_channel_closes_pending_and_crashed_rows_without_sending(session
 
 
 def test_route_without_sender_blocks_pending_row_instead_of_claiming(sessions, pg_engine):
-    routes = registry(entry("customer-a", ACCOUNT_A, sns=TOPIC_A))
+    routes = registry(entry(TENANT_A, ACCOUNT_A, sns=TOPIC_A))
     sns = SnsWire()
     first = make_dispatcher(sessions, routes, sns=sns)
     activate(first, pg_engine)
@@ -900,7 +1151,7 @@ def test_route_without_sender_blocks_pending_row_instead_of_claiming(sessions, p
 
 
 def test_lower_attempt_limit_after_restart_closes_rows_without_sending(sessions, pg_engine):
-    routes = registry(entry("customer-a", ACCOUNT_A, sns=TOPIC_A))
+    routes = registry(entry(TENANT_A, ACCOUNT_A, sns=TOPIC_A))
     not_found = ClientError({"Error": {"Code": "NotFound", "Message": "raw"}}, "Publish")
     first = make_dispatcher(  # 긴 백오프 — 재시도 행이 다음 사건보다 먼저 기한이 되지 않게
         sessions, routes, max_attempts=5, backoff_seconds=60,
@@ -970,7 +1221,7 @@ def test_lower_attempt_limit_after_restart_closes_rows_without_sending(sessions,
 
 
 def test_transient_failures_back_off_then_exhaust(sessions, pg_engine):
-    routes = registry(entry("customer-a", ACCOUNT_A, sns=TOPIC_A))
+    routes = registry(entry(TENANT_A, ACCOUNT_A, sns=TOPIC_A))
     wire = SnsWire(_throttled(), _throttled(), _throttled())
     dispatcher = make_dispatcher(sessions, routes, sns=wire, max_attempts=3, backoff_seconds=2,
                                  max_backoff_seconds=3)
@@ -996,8 +1247,8 @@ def test_transient_failures_back_off_then_exhaust(sessions, pg_engine):
 
 def test_slack_429_cooldown_covers_the_whole_lane_and_survives_restart(sessions, pg_engine):
     routes = registry(
-        entry("customer-a", ACCOUNT_A, slack="SLACK_A", sns=TOPIC_A),
-        entry("customer-b", ACCOUNT_B, slack="SLACK_B"),
+        entry(TENANT_A, ACCOUNT_A, slack="SLACK_A", sns=TOPIC_A),
+        entry(TENANT_B, ACCOUNT_B, slack="SLACK_B"),
     )
     first = make_dispatcher(sessions, routes, slack=SlackWire((429, {"Retry-After": "120"}, b"")),
                             sns=SnsWire(), max_backoff_seconds=60)
@@ -1033,8 +1284,8 @@ def test_stale_429_cooldown_survives_the_current_holders_release(
 ):
     """A 임대 만료 → B가 관문 보유 → A의 늦은 429(120초) → B 해제. 120초 대기가 남아야 한다."""
     routes = registry(
-        entry("customer-a", ACCOUNT_A, slack="SLACK_A"),
-        entry("customer-b", ACCOUNT_B, slack="SLACK_B"),
+        entry(TENANT_A, ACCOUNT_A, slack="SLACK_A"),
+        entry(TENANT_B, ACCOUNT_B, slack="SLACK_B"),
     )
     a_entered, a_release, b_entered, b_release = (threading.Event() for _ in range(4))
     a_wire = SlackWire((429, {"Retry-After": "120"}, b""))
@@ -1099,7 +1350,7 @@ def test_unknown_results_and_sender_exceptions_retry_within_bounds(sessions, pg_
         def close(self):
             return None
 
-    routes = registry(entry("customer-a", ACCOUNT_A, slack="SLACK_A", sns=TOPIC_A))
+    routes = registry(entry(TENANT_A, ACCOUNT_A, slack="SLACK_A", sns=TOPIC_A))
     slack = SlackWire((503, {}, b"down"))
     dispatcher = DeliveryDispatcher(
         sessions, routes,
@@ -1139,7 +1390,7 @@ def _wait_for(predicate, timeout=10):
 def test_running_channel_threads_are_isolated_from_each_others_failures(
     sessions, pg_engine, caplog,
 ):
-    routes = registry(entry("customer-a", ACCOUNT_A, slack="SLACK_A", sns=TOPIC_A))
+    routes = registry(entry(TENANT_A, ACCOUNT_A, slack="SLACK_A", sns=TOPIC_A))
 
     class SnsBrokenRegistry:
         @property
@@ -1185,7 +1436,7 @@ def test_stop_waits_for_in_flight_result_even_when_the_caller_is_cancelled(sessi
     wire = SlackWire()
     wire.on_request = lambda: (entered.set(), release.wait(10))
     dispatcher = make_dispatcher(
-        sessions, registry(entry("customer-a", ACCOUNT_A, slack="SLACK_A")), slack=wire,
+        sessions, registry(entry(TENANT_A, ACCOUNT_A, slack="SLACK_A")), slack=wire,
     )
     activate(dispatcher, pg_engine)
     event_id = commit_event(sessions)
@@ -1216,7 +1467,7 @@ def test_initialize_failure_is_sanitized_and_starts_no_threads(sessions, pg_engi
     def broken_sessions():
         raise RuntimeError(secret)
 
-    routes = registry(entry("customer-a", ACCOUNT_A, slack="SLACK_A"))
+    routes = registry(entry(TENANT_A, ACCOUNT_A, slack="SLACK_A"))
     dispatcher = make_dispatcher(broken_sessions, routes, slack=SlackWire())
     caplog.set_level("INFO")
 
@@ -1246,7 +1497,7 @@ def test_partial_worker_start_stops_started_workers(sessions, pg_engine, monkeyp
 
     monkeypatch.setattr(dispatcher_module.threading, "Thread", FailingSnsThread)
     dispatcher = make_dispatcher(
-        sessions, registry(entry("customer-a", ACCOUNT_A, slack="SLACK_A")), slack=SlackWire(),
+        sessions, registry(entry(TENANT_A, ACCOUNT_A, slack="SLACK_A")), slack=SlackWire(),
     )
 
     async def run():
@@ -1292,7 +1543,7 @@ def test_real_app_lifespan_runs_the_dispatcher_against_postgres(
     monkeypatch.setattr(db_session, "get_session_factory", lambda: sessions)
     routes_file = tmp_path / "routes.json"
     routes_file.write_text(json.dumps({"routes": [{
-        "tenant_id": "customer-a", "aws_account_id": ACCOUNT_A,
+        "tenant_id": TENANT_A, "aws_account_id": ACCOUNT_A,
         "slack_webhook_env": "NOTIFICATION_TEST_SLACK_A", "sns_topic_arn": TOPIC_A,
     }]}), encoding="utf-8")
     monkeypatch.setenv("NOTIFICATION_TEST_SLACK_A", WEBHOOK_A)
@@ -1323,3 +1574,278 @@ def test_real_app_lifespan_runs_the_dispatcher_against_postgres(
         get_settings.cache_clear()
         if intake_rows is not None:
             _remove_intake_rows(pg_engine, *intake_rows)
+
+
+# --- 권위 Tenant 바인딩(#506): 기동 검증·발견·claim·최초 활성화 전환 -----------------------------
+
+
+@pytest.mark.parametrize("kind", list(BROKEN_TENANT))
+def test_startup_rejects_missing_or_mismatched_tenant_before_any_write(
+    sessions, pg_engine, kind, caplog,
+):
+    caplog.set_level("ERROR")
+    break_tenant(pg_engine, kind, TENANT_B)  # 첫 항목(A)은 유효해도 하나라도 틀리면 전부 거부한다
+    dispatcher = make_dispatcher(
+        sessions,
+        registry(
+            entry(TENANT_A, ACCOUNT_A, slack="SLACK_A"),
+            entry(TENANT_B, ACCOUNT_B, slack="SLACK_B"),
+        ),
+        slack=SlackWire(),
+    )
+    before = snapshot(pg_engine)
+    assert before == {"notification_routes": [], "notification_lanes": [], "notification_deliveries": []}
+    refuse(dispatcher, BROKEN_TENANT[kind])
+    assert snapshot(pg_engine) == before  # 라우트·관문 어느 쪽도 쓰지 않는다
+    logged = [r for r in caplog.records if r.getMessage() == "notification_tenant_binding_invalid"]
+    assert [r.reason for r in logged] == [BROKEN_TENANT[kind]]
+    for secret in (TENANT_A, TENANT_B, ACCOUNT_A, ACCOUNT_B, WEBHOOK_A, WEBHOOK_B):
+        assert secret not in caplog.text
+
+
+def test_startup_route_check_runs_before_the_legacy_transition_check(sessions, pg_engine):
+    delete_tenant(pg_engine, TENANT_A)
+    put_delivery(
+        pg_engine, commit_event(sessions), "SNS", "PENDING", tenant_id="customer-a",
+    )
+    dispatcher = make_dispatcher(
+        sessions, registry(entry(TENANT_A, ACCOUNT_A, sns=TOPIC_A)), sns=SnsWire(),
+    )
+    before = snapshot(pg_engine)
+    refuse(dispatcher, "TENANT_NOT_FOUND")
+    assert snapshot(pg_engine) == before
+
+
+LEGACY_TENANTS = {
+    "slug": "customer-a",
+    "uuid-without-tenant": TENANT_MISSING,
+    "uuid-of-other-account": TENANT_B,  # Tenant B는 있지만 계정이 ACCOUNT_B라 ACCOUNT_A 행과 어긋난다
+}
+
+
+@pytest.mark.parametrize("state", ["PENDING", "IN_FLIGHT"])
+@pytest.mark.parametrize("legacy", list(LEGACY_TENANTS))
+def test_legacy_unfinished_delivery_refuses_startup_and_changes_nothing(
+    sessions, pg_engine, state, legacy,
+):
+    first = make_dispatcher(
+        sessions, registry(entry(TENANT_A, ACCOUNT_A, slack="SLACK_A", sns=TOPIC_A)),
+        slack=SlackWire(), sns=SnsWire(),
+    )
+    activate(first, pg_engine)
+    event_id = commit_event(sessions)
+    put_delivery(pg_engine, event_id, "SNS", state, tenant_id=LEGACY_TENANTS[legacy])
+    before = snapshot(pg_engine)
+    old_route = route_row(pg_engine, ACCOUNT_A, "SLACK")
+
+    # 설정이 바뀌어 있어도(수신처 변경·채널 제거) 동기화 전에 거부한다
+    changed = make_dispatcher(
+        sessions, registry(entry(TENANT_A, ACCOUNT_A, slack="SLACK_A2")), slack=SlackWire(),
+    )
+    refuse(changed, TRANSITION_REQUIRED)
+    assert snapshot(pg_engine) == before
+    kept = route_row(pg_engine, ACCOUNT_A, "SLACK")
+    assert (kept.route_epoch, kept.activated_at) == (old_route.route_epoch, old_route.activated_at)
+    assert route_row(pg_engine, ACCOUNT_A, "SNS") is not None
+
+
+def test_first_enable_with_legacy_unfinished_delivery_writes_no_routes_or_lanes(
+    sessions, pg_engine,
+):
+    put_delivery(pg_engine, commit_event(sessions), "SNS", "PENDING", tenant_id="customer-a")
+    before = snapshot(pg_engine)
+    assert before["notification_routes"] == [] and before["notification_lanes"] == []
+    dispatcher = make_dispatcher(
+        sessions, registry(entry(TENANT_A, ACCOUNT_A, slack="SLACK_A", sns=TOPIC_A)),
+        slack=SlackWire(), sns=SnsWire(),
+    )
+    refuse(dispatcher, TRANSITION_REQUIRED)
+    assert snapshot(pg_engine) == before
+
+
+def test_legacy_in_flight_can_late_settle_after_refusal_but_is_fenced_after_reclaim(
+    sessions, pg_engine,
+):
+    wire = SnsWire()
+    dispatcher = make_dispatcher(
+        sessions, registry(entry(TENANT_A, ACCOUNT_A, sns=TOPIC_A)), sns=wire,
+    )
+    settled_event = commit_event(sessions)
+    put_delivery(pg_engine, settled_event, "SNS", "IN_FLIGHT", tenant_id="customer-a")
+    refuse(dispatcher, TRANSITION_REQUIRED)
+    live = rows(pg_engine, settled_event)["SNS"]
+    assert live.state == "IN_FLIGHT"
+    with sessions() as db:
+        assert deliveries_repo.settle(
+            db, live.delivery_id, live.claim_token,
+            deliveries_repo.succeeded("SNS_ACCEPTED", "late-legacy"),
+        ) is True
+        db.commit()
+    done = rows(pg_engine, settled_event)["SNS"]
+    assert (done.state, done.receipt_ref, done.claim_token) == ("SUCCEEDED", "late-legacy", None)
+
+    reclaimed_event = commit_event(sessions)
+    put_delivery(pg_engine, reclaimed_event, "SNS", "IN_FLIGHT", tenant_id="customer-a")
+    stale = rows(pg_engine, reclaimed_event)["SNS"]
+    refuse(dispatcher, TRANSITION_REQUIRED)
+    expire_leases(pg_engine)
+    with sessions() as db:  # 이전 시도의 회수를 저장소로 직접 나타낸다(거부된 dispatcher는 돌리지 않는다)
+        assert deliveries_repo.recover_expired(
+            db, stale.delivery_id, deliveries_repo.retry("UNKNOWN", "lease_expired", 0),
+        ) is True
+        db.commit()
+    after_reclaim = rows(pg_engine, reclaimed_event)["SNS"]
+    assert (after_reclaim.state, after_reclaim.claim_token) == ("PENDING", None)
+    with sessions() as db:
+        assert deliveries_repo.settle(
+            db, stale.delivery_id, stale.claim_token,
+            deliveries_repo.succeeded("SNS_ACCEPTED", "stale"),
+        ) is False
+        db.commit()
+    row = rows(pg_engine, reclaimed_event)["SNS"]
+    assert (row.state, row.receipt_ref, row.claim_token) == ("PENDING", None, None)
+    assert wire.publishes == []
+
+
+def test_terminal_legacy_and_null_snapshot_history_is_untouched_and_not_replayed(
+    sessions, pg_engine,
+):
+    legacy = {"tenant_id": "customer-a"}
+    null_snapshot = {
+        "tenant_id": None, "aws_account_id": None, "route_fingerprint": None, "route_epoch": None,
+    }
+    history = [
+        ("SUCCEEDED", legacy), ("FAILED", legacy), ("BLOCKED", legacy), ("BLOCKED", null_snapshot),
+    ]
+    events = []
+    for state, over in history:
+        event_id = commit_event(sessions)
+        events.append(event_id)
+        for channel in ("SLACK", "SNS"):
+            put_delivery(pg_engine, event_id, channel, state, **over)
+    before = snapshot(pg_engine)["notification_deliveries"]
+    slack, sns = SlackWire(), SnsWire()
+    dispatcher = make_dispatcher(
+        sessions, registry(entry(TENANT_A, ACCOUNT_A, slack="SLACK_A", sns=TOPIC_A)),
+        slack=slack, sns=sns,
+    )
+    dispatcher.initialize()  # 종결 이력은 전환을 막지 않는다
+    assert route_row(pg_engine, ACCOUNT_A, "SLACK") is not None
+    assert dispatcher.discover() == 0
+    assert dispatcher.process_one("SLACK") is False and dispatcher.process_one("SNS") is False
+    assert snapshot(pg_engine)["notification_deliveries"] == before
+    assert slack.posts == [] and sns.publishes == []
+
+
+def test_canonical_unfinished_deliveries_with_matching_tenant_keep_initialize_idempotent(
+    sessions, pg_engine,
+):
+    config = registry(entry(TENANT_A, ACCOUNT_A, slack="SLACK_A", sns=TOPIC_A))
+    first = make_dispatcher(sessions, config, slack=SlackWire(), sns=SnsWire())
+    activate(first, pg_engine)
+    pending = commit_event(sessions)
+    first.discover()
+    route = route_row(pg_engine, ACCOUNT_A, "SNS")
+    in_flight = commit_event(sessions)
+    put_delivery(
+        pg_engine, in_flight, "SNS", "IN_FLIGHT",
+        route_fingerprint=route.fingerprint, route_epoch=route.route_epoch,
+    )
+    assert {r.state for r in rows(pg_engine, pending).values()} == {"PENDING"}
+    before = snapshot(pg_engine)
+
+    second = make_dispatcher(sessions, config, slack=SlackWire(), sns=SnsWire())
+    second.initialize()
+    second.initialize()
+    assert snapshot(pg_engine) == before
+
+
+@pytest.mark.parametrize("kind", list(BROKEN_TENANT))
+def test_discovery_blocks_events_whose_tenant_changed_after_startup(sessions, pg_engine, kind):
+    wire = SnsWire()
+    dispatcher = make_dispatcher(
+        sessions,
+        registry(entry(TENANT_A, ACCOUNT_A, sns=TOPIC_A), entry(TENANT_B, ACCOUNT_B, sns=TOPIC_B)),
+        sns=wire,
+    )
+    activate(dispatcher, pg_engine)
+    break_tenant(pg_engine, kind, TENANT_A)  # 기동 뒤 권위 매핑이 바뀐다
+    event_a, event_b = commit_event(sessions, ACCOUNT_A), commit_event(sessions, ACCOUNT_B)
+    dispatcher.discover("SNS")
+    blocked = rows(pg_engine, event_a)["SNS"]
+    assert (blocked.state, blocked.blocked_reason, blocked.tenant_id) == (
+        "BLOCKED", BROKEN_TENANT[kind], None,
+    )
+    assert rows(pg_engine, event_b)["SNS"].tenant_id == TENANT_B
+    while dispatcher.process_one("SNS"):
+        pass
+    assert [p["topic"] for p in wire.publishes] == [TOPIC_B]  # A 사건은 어느 수신처로도 가지 않는다
+    assert event_a not in wire.publishes[0]["body"]
+
+
+@pytest.mark.parametrize("kind", list(BROKEN_TENANT))
+def test_claim_rechecks_tenant_after_discovery_and_never_calls_the_provider(
+    sessions, pg_engine, kind,
+):
+    wire = SnsWire()
+    dispatcher = make_dispatcher(
+        sessions,
+        registry(entry(TENANT_A, ACCOUNT_A, sns=TOPIC_A), entry(TENANT_B, ACCOUNT_B, sns=TOPIC_B)),
+        sns=wire,
+    )
+    activate(dispatcher, pg_engine)
+    event_a, event_b = commit_event(sessions, ACCOUNT_A), commit_event(sessions, ACCOUNT_B)
+    dispatcher.discover("SNS")
+    assert rows(pg_engine, event_a)["SNS"].state == "PENDING"
+    break_tenant(pg_engine, kind, TENANT_A)  # discovery와 claim 사이에 바뀐다
+    while dispatcher.process_one("SNS"):
+        pass
+    blocked = rows(pg_engine, event_a)["SNS"]
+    assert (blocked.state, blocked.blocked_reason, blocked.attempts, blocked.claim_token) == (
+        "BLOCKED", BROKEN_TENANT[kind], 0, None,
+    )
+    assert [p["topic"] for p in wire.publishes] == [TOPIC_B]
+    assert rows(pg_engine, event_b)["SNS"].state == "SUCCEEDED"
+
+
+def test_database_error_during_discovery_leaves_events_undiscovered_then_recovers(
+    sessions, pg_engine,
+):
+    wire = SnsWire()
+    dispatcher = make_dispatcher(
+        sessions, registry(entry(TENANT_A, ACCOUNT_A, sns=TOPIC_A)), sns=wire,
+    )
+    activate(dispatcher, pg_engine)
+    event_id = commit_event(sessions)
+    with tenant_lookup_failing(pg_engine), pytest.raises(OperationalError):
+        dispatcher.discover("SNS")
+    assert rows(pg_engine, event_id) == {}  # 부분 행 없이 다음 poll이 다시 찾는다
+    assert dispatcher.discover("SNS") == 1
+    assert dispatcher.process_one("SNS") is True
+    assert rows(pg_engine, event_id)["SNS"].state == "SUCCEEDED" and len(wire.publishes) == 1
+
+
+def test_database_error_during_claim_keeps_state_and_attempts_then_recovers(sessions, pg_engine):
+    wire = SnsWire(_throttled())
+    dispatcher = make_dispatcher(
+        sessions, registry(entry(TENANT_A, ACCOUNT_A, sns=TOPIC_A)), sns=wire,
+    )
+    activate(dispatcher, pg_engine)
+    event_id = commit_event(sessions)
+    dispatcher.discover("SNS")
+    assert dispatcher.process_one("SNS") is True  # 일시 실패로 시도 1회가 쌓인 PENDING
+    make_due(pg_engine)
+    before = rows(pg_engine, event_id)["SNS"]
+    assert (before.state, before.attempts) == ("PENDING", 1)
+
+    with tenant_lookup_failing(pg_engine), pytest.raises(OperationalError):
+        dispatcher.process_one("SNS")
+    after = rows(pg_engine, event_id)["SNS"]
+    assert (after.state, after.attempts, after.claim_token, after.lease_expires_at) == (
+        "PENDING", 1, None, None,
+    )
+    assert len(wire.publishes) == 1  # 실패한 claim은 공급자를 부르지 않았다
+
+    assert dispatcher.process_one("SNS") is True
+    final = rows(pg_engine, event_id)["SNS"]
+    assert (final.state, final.attempts) == ("SUCCEEDED", 2) and len(wire.publishes) == 2

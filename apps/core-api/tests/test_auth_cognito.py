@@ -213,3 +213,198 @@ def test_connection_error_is_provider_unavailable(caplog):
         adapter.initiate_auth("a@b.com", "pw")
     assert "secret-host" not in caplog.text and "secret-host" not in str(info.value)
     assert info.value.__cause__ is None and info.value.__suppress_context__
+
+
+# --- #492 PR 3: 관리 조회 · 초대 · 비밀번호 재설정 -------------------------------------------
+
+EMAIL = "a@b.com"
+NEWPW_OK = "Br4nd-new-Pass-phrase"
+USER_ATTRS = [{"Name": "sub", "Value": "sub-1"}, {"Name": "email", "Value": EMAIL}]
+
+
+def add_error(stubber, op, code, status=400):
+    stubber.add_client_error(op, service_error_code=code, service_message="echo PRIVATE-TEXT", http_status_code=status)
+
+
+def test_admin_get_user_params_and_parsing(env):
+    adapter, stubber = env
+    stubber.add_response(
+        "admin_get_user",
+        {"Username": UID, "UserAttributes": USER_ATTRS, "UserStatus": "CONFIRMED"},
+        {"UserPoolId": POOL, "Username": EMAIL},
+    )
+    assert adapter.admin_get_user(EMAIL) == cognito.CognitoUser(UID, "sub-1", EMAIL, "CONFIRMED")
+
+
+def test_admin_get_user_returns_none_only_for_user_not_found(env):
+    adapter, stubber = env
+    add_error(stubber, "admin_get_user", "UserNotFoundException")
+    assert adapter.admin_get_user(EMAIL) is None
+
+
+@pytest.mark.parametrize(
+    "code,status,expected",
+    [
+        ("NotAuthorizedException", 400, cognito.AuthProviderUnavailableError),
+        ("AccessDeniedException", 400, cognito.AuthProviderUnavailableError),
+        ("InternalErrorException", 500, cognito.AuthProviderUnavailableError),
+        ("UserNotFoundException", 503, cognito.AuthProviderUnavailableError),
+        ("TooManyRequestsException", 400, cognito.AuthRateLimitedError),
+    ],
+)
+def test_admin_get_user_failures_are_never_absence(env, code, status, expected):
+    adapter, stubber = env
+    add_error(stubber, "admin_get_user", code, status)
+    with pytest.raises(expected):
+        adapter.admin_get_user(EMAIL)
+
+
+def test_admin_get_user_network_failure_is_unavailable():
+    class Down:
+        def admin_get_user(self, **_):
+            raise EndpointConnectionError(endpoint_url="https://x")
+
+    adapter = cognito.CognitoAdapter(
+        Down(), user_pool_id=POOL, client_id=CLIENT_ID, client_secret=CLIENT_SECRET, region="ap-northeast-2"
+    )
+    with pytest.raises(cognito.AuthProviderUnavailableError):
+        adapter.admin_get_user(EMAIL)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"Username": UID, "UserAttributes": [{"Name": "email", "Value": EMAIL}], "UserStatus": "CONFIRMED"},
+        {"Username": UID, "UserAttributes": [{"Name": "sub", "Value": "s"}], "UserStatus": "CONFIRMED"},
+        {"Username": UID, "UserAttributes": USER_ATTRS},
+    ],
+)
+def test_admin_get_user_malformed_identity_is_unavailable(env, response):
+    adapter, stubber = env
+    stubber.add_response("admin_get_user", response, {"UserPoolId": POOL, "Username": EMAIL})
+    with pytest.raises(cognito.AuthProviderUnavailableError):
+        adapter.admin_get_user(EMAIL)
+
+
+def test_admin_create_user_params_for_create_and_resend(env):
+    adapter, stubber = env
+    created = {"User": {"Username": UID, "Attributes": USER_ATTRS, "UserStatus": "FORCE_CHANGE_PASSWORD"}}
+    stubber.add_response(
+        "admin_create_user",
+        created,
+        {
+            "UserPoolId": POOL,
+            "Username": EMAIL,
+            "DesiredDeliveryMediums": ["EMAIL"],
+            "UserAttributes": [{"Name": "email", "Value": EMAIL}],
+        },
+    )
+    stubber.add_response(
+        "admin_create_user",
+        created,
+        {"UserPoolId": POOL, "Username": EMAIL, "DesiredDeliveryMediums": ["EMAIL"], "MessageAction": "RESEND"},
+    )
+    expected = cognito.CognitoUser(UID, "sub-1", EMAIL, "FORCE_CHANGE_PASSWORD")
+    assert adapter.admin_create_user(EMAIL) == expected
+    assert adapter.admin_create_user(EMAIL, resend=True) == expected
+
+
+@pytest.mark.parametrize(
+    "code,expected",
+    [
+        ("UsernameExistsException", cognito.UserStateConflictError),
+        ("UnsupportedUserStateException", cognito.UserStateConflictError),
+        ("CodeDeliveryFailureException", cognito.AuthEmailDeliveryFailedError),
+        ("TooManyRequestsException", cognito.AuthRateLimitedError),
+        ("InvalidParameterException", cognito.AuthProviderUnavailableError),
+        ("AccessDeniedException", cognito.AuthProviderUnavailableError),
+    ],
+)
+def test_admin_create_user_error_mapping(env, code, expected):
+    adapter, stubber = env
+    add_error(stubber, "admin_create_user", code)
+    with pytest.raises(expected):
+        adapter.admin_create_user(EMAIL)
+
+
+def test_password_reset_request_params_and_discarded_delivery_details(env):
+    adapter, stubber = env
+    stubber.add_response(
+        "forgot_password",
+        {"CodeDeliveryDetails": {"Destination": "a***@b***", "DeliveryMedium": "EMAIL", "AttributeName": "email"}},
+        {"ClientId": CLIENT_ID, "Username": EMAIL, "SecretHash": expected_hash(EMAIL)},
+    )
+    assert adapter.request_password_reset(EMAIL) is None
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["UserNotFoundException", "NotAuthorizedException", "InvalidParameterException", "UserNotConfirmedException"],
+)
+def test_password_reset_request_normalizes_existence_and_eligibility(env, code):
+    adapter, stubber = env
+    add_error(stubber, "forgot_password", code)
+    assert adapter.request_password_reset(EMAIL) is None
+
+
+@pytest.mark.parametrize(
+    "code,status,expected",
+    [
+        ("TooManyRequestsException", 400, cognito.AuthRateLimitedError),
+        ("TooManyFailedAttemptsException", 400, cognito.AuthRateLimitedError),
+        ("LimitExceededException", 400, cognito.AuthRateLimitedError),
+        ("CodeDeliveryFailureException", 400, cognito.AuthEmailDeliveryFailedError),
+        ("InvalidEmailRoleAccessPolicyException", 400, cognito.AuthEmailDeliveryFailedError),
+        ("InvalidSmsRoleAccessPolicyException", 400, cognito.AuthProviderUnavailableError),
+        ("ResourceNotFoundException", 400, cognito.AuthProviderUnavailableError),
+        ("UserNotFoundException", 500, cognito.AuthProviderUnavailableError),
+        ("InternalErrorException", 500, cognito.AuthProviderUnavailableError),
+    ],
+)
+def test_password_reset_request_surfaces_non_normalized_failures(env, code, status, expected):
+    adapter, stubber = env
+    add_error(stubber, "forgot_password", code, status)
+    with pytest.raises(expected):
+        adapter.request_password_reset(EMAIL)
+
+
+def test_password_reset_confirm_params(env):
+    adapter, stubber = env
+    stubber.add_response(
+        "confirm_forgot_password",
+        {},
+        {
+            "ClientId": CLIENT_ID,
+            "Username": EMAIL,
+            "ConfirmationCode": "123456",
+            "Password": NEWPW_OK,
+            "SecretHash": expected_hash(EMAIL),
+        },
+    )
+    assert adapter.confirm_password_reset(EMAIL, "123456", NEWPW_OK) is None
+
+
+@pytest.mark.parametrize(
+    "code,status,expected",
+    [
+        ("CodeMismatchException", 400, cognito.AuthCodeInvalidError),
+        ("ExpiredCodeException", 400, cognito.AuthCodeInvalidError),
+        ("UserNotFoundException", 400, cognito.AuthCodeInvalidError),
+        ("NotAuthorizedException", 400, cognito.AuthCodeInvalidError),
+        ("InvalidPasswordException", 400, cognito.AuthPasswordPolicyError),
+        ("TooManyRequestsException", 400, cognito.AuthRateLimitedError),
+        ("TooManyFailedAttemptsException", 400, cognito.AuthRateLimitedError),
+        ("LimitExceededException", 400, cognito.AuthRateLimitedError),
+        ("InternalErrorException", 500, cognito.AuthProviderUnavailableError),
+        ("CodeMismatchException", 503, cognito.AuthProviderUnavailableError),
+        ("ResourceNotFoundException", 400, cognito.AuthProviderUnavailableError),
+    ],
+)
+def test_password_reset_confirm_error_mapping(env, caplog, code, status, expected):
+    adapter, stubber = env
+    add_error(stubber, "confirm_forgot_password", code, status)
+    with caplog.at_level(logging.DEBUG), pytest.raises(expected):
+        adapter.confirm_password_reset(EMAIL, "123456", NEWPW_OK)
+    logged = caplog.text
+    for secret in ("PRIVATE-TEXT", NEWPW_OK, "123456", EMAIL, CLIENT_SECRET):
+        assert secret not in logged

@@ -12,6 +12,8 @@ from schemas.api.auth import (
     LoginStep,
     LoginStepResponse,
     NewPasswordRequest,
+    PasswordResetConfirmRequest,
+    PasswordResetRequest,
     SessionInfo,
     TotpSetupResponse,
     UserRole,
@@ -94,6 +96,34 @@ def test_login_request_violations(data):
 def test_new_password_length_bounds(password):
     with pytest.raises(ValidationError):
         NewPasswordRequest.model_validate({"new_password": password})
+
+
+@pytest.mark.parametrize("length", [11, 257])
+def test_reset_uses_new_password_length_bounds(length):
+    with pytest.raises(ValidationError):
+        PasswordResetConfirmRequest.model_validate({
+            "email": "user@example.com", "code": CODE, "new_password": "x" * length,
+        })
+
+
+def test_reset_preserves_values_and_hides_both_secrets():
+    request = PasswordResetConfirmRequest.model_validate({
+        "email": "user@example.com", "code": CODE, "new_password": PASSWORD,
+    })
+    assert request.new_password.get_secret_value() == PASSWORD
+    assert request.code.get_secret_value() == CODE
+    for serialized in (repr(request), request.model_dump_json()):
+        assert PASSWORD not in serialized
+        assert CODE not in serialized
+    assert PasswordResetRequest(email="user@example.com").email == "user@example.com"
+
+
+@pytest.mark.parametrize("code", ["12345", "1234567", "12345a", "１２３４５６"])
+def test_reset_uses_existing_code_shape(code):
+    with pytest.raises(ValidationError):
+        PasswordResetConfirmRequest.model_validate({
+            "email": "user@example.com", "code": code, "new_password": PASSWORD,
+        })
 
 
 def test_step_response_roundtrip_and_extra_forbidden():

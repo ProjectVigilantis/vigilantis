@@ -26,6 +26,14 @@ test('돌아갈 곳이 / 이거나 안전하지 않으면 next 없이 /login', (
   }
 });
 
+test('세션 종료 표시는 이유 없이 ended=1 하나만 붙인다', () => {
+  assert.equal(loginUrl('/assets?x=1', true), '/login?next=%2Fassets%3Fx%3D1&ended=1');
+  assert.equal(loginUrl('/', true), '/login?ended=1');
+  assert.equal(loginUrl('//evil.com', true), '/login?ended=1');
+  // 기본값은 표시 없음 — 세션 쿠키 없이 처음 들어온 경우(proxy).
+  assert.equal(loginUrl('/assets'), '/login?next=%2Fassets');
+});
+
 test('세션 쿠키 하나만 Cookie 헤더로 싣는다 — 다른 쿠키가 있어도', () => {
   const cookies = store({
     vg_login_flow: 'flow-secret',

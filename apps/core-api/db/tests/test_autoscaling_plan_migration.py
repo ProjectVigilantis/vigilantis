@@ -64,6 +64,30 @@ def _cleanup(pg_engine, incident_id, execution_id):
         session.commit()
 
 
+def _restore_and_cleanup(pg_engine, migration_config, incident_id, execution_id):
+    try:
+        command.upgrade(migration_config, "head")
+    finally:
+        _cleanup(pg_engine, incident_id, execution_id)
+
+
+def test_failed_schema_restore_does_not_leave_committed_rows(
+    pg_engine, migration_config, monkeypatch,
+):
+    incident_id, execution_id = _seed_execution(pg_engine, PLAN)
+
+    def fail_restore(*args, **kwargs):
+        raise RuntimeError("schema restore failed")
+
+    monkeypatch.setattr(command, "upgrade", fail_restore)
+    with pytest.raises(RuntimeError, match="schema restore failed"):
+        _restore_and_cleanup(pg_engine, migration_config, incident_id, execution_id)
+
+    with Session(pg_engine) as session:
+        assert session.get(models.ActionExecution, execution_id) is None
+        assert session.get(models.Incident, incident_id) is None
+
+
 def test_revision_follows_a3d8_on_a_single_chain(migration_config):
     script = ScriptDirectory.from_config(migration_config)
     assert script.get_revision(REVISION).down_revision == PARENT
@@ -87,9 +111,13 @@ def test_roundtrip_matches_orm_and_column_is_nullable_jsonb(pg_engine, migration
 
 
 def test_existing_rows_stay_without_a_plan_after_upgrade(pg_engine, migration_config):
-    command.downgrade(migration_config, PARENT)
+    # 인시던트는 head 에서 ORM 으로 먼저 넣는다 — 뒤 리비전이 incidents 에 칸을 더하면
+    # (tenant_id · #485) 옛 리비전에서의 ORM INSERT 가 그 칸을 찾다 깨진다
     with Session(pg_engine) as session:
         incident_id = _incident(session)
+        session.commit()
+    command.downgrade(migration_config, PARENT)
+    with Session(pg_engine) as session:
         execution_id = str(session.execute(text(
             "INSERT INTO action_executions (execution_id, incident_id, runbook_id, target_arn,"
             " status, trigger_source, verification_attempts, created_at, updated_at)"
@@ -102,8 +130,7 @@ def test_existing_rows_stay_without_a_plan_after_upgrade(pg_engine, migration_co
         with Session(pg_engine) as session:
             assert session.get(models.ActionExecution, execution_id).autoscaling_plan is None
     finally:
-        command.upgrade(migration_config, "head")
-        _cleanup(pg_engine, incident_id, execution_id)
+        _restore_and_cleanup(pg_engine, migration_config, incident_id, execution_id)
 
 
 def test_downgrade_drops_only_the_column_and_upgrade_restores_it_empty(pg_engine, migration_config):
@@ -122,5 +149,4 @@ def test_downgrade_drops_only_the_column_and_upgrade_restores_it_empty(pg_engine
         with Session(pg_engine) as session:
             assert session.get(models.ActionExecution, execution_id).autoscaling_plan is None
     finally:
-        command.upgrade(migration_config, "head")
-        _cleanup(pg_engine, incident_id, execution_id)
+        _restore_and_cleanup(pg_engine, migration_config, incident_id, execution_id)

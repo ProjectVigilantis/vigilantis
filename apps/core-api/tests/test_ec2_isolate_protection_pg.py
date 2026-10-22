@@ -570,7 +570,6 @@ def test_residual_sql_failure_still_lets_the_dispatcher_close_isolation_and_run_
         .values(scale_in_protection_result=None)
     )
     db.commit()
-    child_id = release_child(db, seeded, make_execution)
     aws.calls.clear()
     aws.set(
         "ec2.describe_instances",
@@ -601,14 +600,21 @@ def test_residual_sql_failure_still_lets_the_dispatcher_close_isolation_and_run_
         workflows.executions_repo, "set_scale_in_protection_result", broken_set
     )
 
-    report = dispatcher.dispatch_pending(
-        db, None, workflows.VerificationRetryPolicy(max_attempts=3, interval_seconds=0)
-    )
+    policy = workflows.VerificationRetryPolicy(max_attempts=3, interval_seconds=0)
+    report = dispatcher.dispatch_pending(db, None, policy)
+    assert exec_repo.get_execution(db, seeded.isolate_id).status.value == "SUCCESS"
+    assert stored_result(db, seeded.isolate_id) is None
+    assert report.judged == 1
+
+    # 실제 접수 조건대로 격리가 끝난 뒤 해제를 만든다. SQL 실패 뒤에도 같은 세션을 쓴다.
+    child_id = release_child(db, seeded, make_execution)
+    aws.calls.clear()
+    report = dispatcher.dispatch_pending(db, None, policy)
 
     db.expire_all()
-    # 격리는 SUCCESS로 확정됐고 같은 주기에 해제가 끝나 원본이 ROLLED_BACK이 됐다
+    # 다음 주기에 해제가 끝나 원본이 ROLLED_BACK이 됐다.
     assert exec_repo.get_execution(db, seeded.isolate_id).status.value == "ROLLED_BACK"
     assert exec_repo.get_execution(db, child_id).status.value == "SUCCESS"
-    assert "elbv2.register_targets" in aws.names()  # 해제도 같은 주기에 실행됐다
+    assert "elbv2.register_targets" in aws.names()  # 해제의 AWS 호출도 실행됐다.
     assert exec_repo.list_steps(db, child_id)
     assert report.started >= 1

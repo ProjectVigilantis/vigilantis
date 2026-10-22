@@ -1,7 +1,7 @@
 """운영자 알림 라우트 설정 해석. 설정만 해석하고 발송·DB 활성화(epoch/backfill)는 하지 않는다.
 
 설정 파일(비밀 아님, 최대 64 KiB):
-    {"routes": [{"tenant_id": "customer-a", "aws_account_id": "111111111111",
+    {"routes": [{"tenant_id": "11111111-1111-4111-8111-111111111111", "aws_account_id": "111111111111",
                  "slack_webhook_env": "NOTIFICATION_SLACK_A",
                  "sns_topic_arn": "arn:aws:sns:ap-northeast-2:999999999999:customer-a"}]}
 `slack_webhook_env`/`sns_topic_arn` 은 둘 다 생략 가능(소유만 선언 → 이벤트별 CHANNEL_NOT_CONFIGURED 차단).
@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 import re
+import uuid
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
@@ -33,7 +34,6 @@ from .contracts import CHANNELS, Channel, EventSnapshot, Route, RouteDecision
 
 MAX_CONFIG_BYTES = 64 * 1024
 MAX_ROUTES = 1000
-MAX_TENANT_ID_LENGTH = 128
 
 ACCOUNT_MISSING = "ACCOUNT_MISSING"
 ACCOUNT_INVALID = "ACCOUNT_INVALID"
@@ -48,6 +48,8 @@ DESTINATION_CONFLICT = "DESTINATION_CONFLICT"
 DESTINATION_SHARED = "DESTINATION_SHARED"
 
 _ACCOUNT_RE = re.compile(r"[0-9]{12}")
+_UUID_BODY = r"(?:[0-9A-Fa-f]{32}|[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12})"
+_TENANT_UUID_RE = re.compile(rf"(?:urn:uuid:)?(?:{_UUID_BODY}|\{{{_UUID_BODY}\}})")
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 _WEBHOOK_RE = re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9]+/[A-Za-z0-9]+/[A-Za-z0-9]+")
 _SNS_ARN_RE = re.compile(
@@ -110,6 +112,13 @@ def validate_public_base_url(raw: object) -> str:
     return f"https://{host}" if port is None else f"https://{host}:{port}"
 
 
+def _canonical_tenant_id(value: object) -> str:
+    """UUID 문자열(하이픈/무하이픈/대소문자/중괄호/urn 표기)을 소문자 하이픈 정규형으로. 아니면 입력을 담지 않은 오류."""
+    if not isinstance(value, str) or _TENANT_UUID_RE.fullmatch(value) is None:
+        raise _fail("invalid route settings")
+    return str(uuid.UUID(value))
+
+
 def _fingerprint(tenant_id: str, account: str, channel: str, destination: str) -> str:
     payload = json.dumps(["v1", tenant_id, account, channel, destination], separators=(",", ":"))
     return hashlib.sha256(payload.encode()).hexdigest()
@@ -130,6 +139,11 @@ class RouteRegistry:
         self._blocked = dict(blocked)  # (account, channel) -> reason; "" channel = whole account
         self._owned = owned
         self.routes = tuple(sorted(routes, key=lambda r: (r.aws_account_id, r.channel, r.tenant_id)))
+
+    @property
+    def blocked(self) -> Mapping[tuple[str, str], str]:
+        """선언됐지만 막힌 (계정, 채널) → 사유. 채널 ""는 계정 전체. 읽기 전용 복사본이다."""
+        return dict(self._blocked)
 
     @classmethod
     def from_file(cls, path: str, environ: Mapping[str, str] | None = None) -> RouteRegistry:
@@ -230,15 +244,9 @@ class RouteRegistry:
         account = entry.get("aws_account_id")
         slack_env = entry.get("slack_webhook_env")
         arn = entry.get("sns_topic_arn")
-        if (
-            not isinstance(tenant, str)
-            or not 1 <= len(tenant) <= MAX_TENANT_ID_LENGTH
-            or not tenant.strip()
-            or not tenant.isprintable()
-            or not isinstance(account, str)
-            or _ACCOUNT_RE.fullmatch(account) is None
-        ):
+        if not isinstance(account, str) or _ACCOUNT_RE.fullmatch(account) is None:
             raise _fail("invalid route settings")
+        tenant = _canonical_tenant_id(tenant)
         if slack_env is not None and (not isinstance(slack_env, str) or _ENV_NAME_RE.fullmatch(slack_env) is None):
             raise _fail("invalid route settings")
         if arn is not None:

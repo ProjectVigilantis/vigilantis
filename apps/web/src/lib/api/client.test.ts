@@ -4,7 +4,107 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
 import { test } from 'node:test';
 
-import { getAssets } from './client.ts';
+import {
+  ApiError,
+  changeUserRole,
+  changeUserStatus,
+  confirmPasswordReset,
+  createReadApi,
+  getAssets,
+  getUserEvents,
+  inviteUser,
+  requestPasswordReset,
+  resendInvite,
+  revokeUserSessions,
+} from './client.ts';
+
+interface Sent {
+  url: string;
+  method: string;
+  body: unknown;
+}
+
+/** fetch를 바꿔 끼워 보낸 요청을 기록하고 정해 둔 응답을 돌려준다. 테스트가 끝나면 되돌린다. */
+function stubFetch(t: { after: (fn: () => void) => void }, respond: () => Response): Sent[] {
+  const realFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = realFetch;
+  });
+  const sent: Sent[] = [];
+  globalThis.fetch = async (input, init) => {
+    sent.push({
+      url: String(input),
+      method: init?.method ?? 'GET',
+      body: typeof init?.body === 'string' ? JSON.parse(init.body) : null,
+    });
+    return respond();
+  };
+  return sent;
+}
+
+const noContent = () => new Response(null, { status: 204 });
+const errorResponse = (status: number, code: string) => () =>
+  new Response(JSON.stringify({ error: { code, message: 'm', request_id: 'r' } }), { status });
+
+test('비밀번호 재설정 요청 · 확인은 입력값을 다듬지 않고 그대로 보낸다', async (t) => {
+  const sent = stubFetch(t, noContent);
+  await requestPasswordReset(' User@Example.com ');
+  await confirmPasswordReset('User@Example.com', '012345', ' Aa1!aaaaaaaa ');
+  assert.match(sent[0].url, /\/api\/v1\/auth\/password-reset$/);
+  assert.equal(sent[0].method, 'POST');
+  assert.deepEqual(sent[0].body, { email: ' User@Example.com ' });
+  assert.match(sent[1].url, /\/api\/v1\/auth\/password-reset\/confirm$/);
+  assert.deepEqual(sent[1].body, { email: 'User@Example.com', code: '012345', new_password: ' Aa1!aaaaaaaa ' });
+});
+
+test('사용자 관리 조치의 경로 · 메서드 · 본문', async (t) => {
+  const sent = stubFetch(t, noContent);
+  await resendInvite('u/1');
+  await changeUserRole('u/1', 'OPERATOR');
+  await changeUserStatus('u/1', 'DISABLED');
+  await revokeUserSessions('u/1');
+  const path = (s: Sent) => new URL(s.url).pathname + new URL(s.url).search;
+  assert.deepEqual(
+    sent.map((s) => [s.method, path(s), s.body]),
+    [
+      ['POST', '/api/v1/users/u%2F1/invite/resend', {}],
+      ['PUT', '/api/v1/users/u%2F1/role', { role: 'OPERATOR' }],
+      ['PUT', '/api/v1/users/u%2F1/status', { status: 'DISABLED' }],
+      ['POST', '/api/v1/users/u%2F1/sessions/revoke', {}],
+    ],
+  );
+});
+
+test('초대는 복구 선택을 그대로 싣고 만든 사용자를 돌려준다', async (t) => {
+  const created = { user_id: 'u1', email: 'a@b.c', role: 'VIEWER', status: 'ACTIVE', last_login_at: null };
+  const sent = stubFetch(t, () => new Response(JSON.stringify(created), { status: 201 }));
+  const result = await inviteUser({ email: 'a@b.c', role: 'VIEWER', recover_existing: false });
+  assert.deepEqual(result, created);
+  assert.equal(sent[0].method, 'POST');
+  assert.match(sent[0].url, /\/api\/v1\/users$/);
+  assert.deepEqual(sent[0].body, { email: 'a@b.c', role: 'VIEWER', recover_existing: false });
+});
+
+test('이력 조회는 상한 50을 싣는다', async (t) => {
+  const sent = stubFetch(t, () => new Response(JSON.stringify({ items: [] }), { status: 200 }));
+  assert.deepEqual(await getUserEvents('u1'), { items: [] });
+  assert.equal(sent[0].method, 'GET');
+  assert.match(sent[0].url, /\/api\/v1\/users\/u1\/events\?limit=50$/);
+});
+
+test('사용자 목록 — 401만 로그인 처리를 부르고, 403은 오류로만 올린다', async (t) => {
+  let respond = errorResponse(401, 'AUTH_REQUIRED');
+  stubFetch(t, () => respond());
+  let authRequired = 0;
+  const api = createReadApi({ onAuthRequired: () => (authRequired += 1) });
+
+  await assert.rejects(api.getUsers(), (error: unknown) => error instanceof ApiError && error.code === 'AUTH_REQUIRED');
+  assert.equal(authRequired, 1);
+
+  respond = errorResponse(403, 'AUTH_FORBIDDEN');
+  await assert.rejects(api.getUsers(), (error: unknown) => error instanceof ApiError && error.code === 'AUTH_FORBIDDEN');
+  assert.equal(authRequired, 1);
+});
 
 /** 방금 비운 포트 — 연결하면 실제 Node 연결 거부 오류(`cause.code = ECONNREFUSED`)가 난다. */
 async function closedPort(): Promise<number> {

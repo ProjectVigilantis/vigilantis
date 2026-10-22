@@ -16,6 +16,8 @@ for p in (str(CORE_API), str(REPO_ROOT / "packages")):
 from db.models import Base
 
 EXPECTED_TABLES = {
+    # 테넌트 — 고객 계정 (Post-MVP T-4 · #485)
+    "tenants",
     # 자산·인시던트 계열 10종
     "collection_runs",
     "asset_inventory_counts",  # 회차별 유형별 자산 수 — 시계열 축 5 (2026-09-29)
@@ -41,9 +43,10 @@ EXPECTED_TABLES = {
     "notification_deliveries",
     "notification_routes",
     "notification_lanes",
-    # 로그인 기반 2종 (#492)
+    # 로그인 기반·사용자 관리 이력 3종 (#492)
     "app_users",
     "auth_sessions",
+    "user_admin_events",
 }
 
 

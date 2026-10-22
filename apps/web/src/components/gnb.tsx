@@ -6,7 +6,7 @@
 
 'use client';
 
-import { Building2, LayoutDashboard, Server, Shield, type LucideIcon } from 'lucide-react';
+import { Building2, LayoutDashboard, Server, Shield, Users, type LucideIcon } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 
@@ -15,6 +15,7 @@ import { UserMenu } from '@/components/auth/user-menu';
 import { CollectionIndicator, useAssetsEnvelope } from '@/components/collection-indicator';
 import { ConnectionIndicator, type AssetPresence } from '@/components/connection-indicator';
 import { ThemeToggle } from '@/components/theme-toggle';
+import { canManageUsers } from '@/lib/roles';
 import { cn } from '@/lib/utils';
 import type { UserRole } from '@/types/api';
 
@@ -38,6 +39,11 @@ const NAV: readonly { href: string; label: string; icon: LucideIcon; adminOnly?:
   { href: '/security', label: '보안', icon: Shield },
   // 플랫폼 관리자 화면. 숨기는 것은 편의이고 고객 관리 API의 차단은 서버가 한다(lib/home-path.ts).
   { href: '/tenants', label: '고객', icon: Building2, adminOnly: true },
+];
+
+/** ADMIN에게만 보이는 메뉴(#492 PR 3). 숨김은 화면 편의이고 실제 차단은 서버 403이다. */
+const ADMIN_NAV: readonly { href: string; label: string; icon: LucideIcon }[] = [
+  { href: '/users', label: '사용자', icon: Users },
 ];
 
 /** 현재 사용자의 역할(세션 Provider · #492). 확인 전 · 미로그인 · 조회 실패는 null이다(관리자 메뉴를 열지 않는다). */
@@ -85,7 +91,10 @@ export function ShellHeader() {
 export function ShellNav() {
   const pathname = usePathname();
   const role = useRole();
-  const items = NAV.filter((item) => !item.adminOnly || role === 'ADMIN');
+  const items = [
+    ...NAV.filter((item) => !item.adminOnly || role === 'ADMIN'),
+    ...(canManageUsers(role) ? ADMIN_NAV : []),
+  ];
 
   return (
     <nav

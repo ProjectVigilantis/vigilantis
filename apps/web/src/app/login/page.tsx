@@ -6,6 +6,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 
 import { LoginFlow } from '@/components/auth/login-flow';
+import { SESSION_ENDED_PARAM } from '@/lib/auth-redirect';
 
 export const metadata: Metadata = { title: '로그인 · Vigilantis' };
 
@@ -15,7 +16,9 @@ const POINTS = [
   '실패하면 직전 상태로 자동 원복합니다',
 ];
 
-export default function LoginPage() {
+/** `?ended=1` — 쓰던 세션이 끝나 여기로 왔다(lib/auth-redirect.ts). 일반 안내만 띄우고 이유는 말하지 않는다. */
+export default async function LoginPage({ searchParams }: PageProps<'/login'>) {
+  const ended = (await searchParams)[SESSION_ENDED_PARAM] === '1';
   return (
     <div className="flex flex-1">
       <aside className="dark bg-shell text-foreground relative hidden w-[44%] max-w-xl flex-col justify-between overflow-hidden p-12 lg:flex">
@@ -52,7 +55,7 @@ export default function LoginPage() {
           <ArrowLeft aria-hidden className="size-3.5" />
           서비스 소개
         </Link>
-        <LoginFlow />
+        <LoginFlow sessionEnded={ended} />
       </div>
     </div>
   );

@@ -385,17 +385,20 @@ def test_arn_columns_cover_every_arn_column_in_models():
     원형은 #342 초기 시도 `ec1454d` 의 `test_arn_columns_cover_every_arn_column_in_models`
     이며 PR #353 으로 옮기면서 빠졌다.
 
-    `assets.arn`은 점검이 대조하는 기준 자체라 조인 키가 아니다.
-    `notification_events.target_arn`은 과거 사건의 불변 스냅숏이다. 현재 자산 행의
-    존재를 요구하는 조인 키가 아니므로 제외한다(#493).
-    `Asset` 모델 전체를 빼면 거기 새로 생긴 ARN 컬럼이 가드를 그냥 지나간다
-    (PR #383 리뷰: 안성일).
+    예외는 칸 단위로 뺀다 — `Asset` 모델 전체를 빼면 거기 새로 생긴 ARN 컬럼이 가드를 그냥
+    지나간다(PR #383 리뷰: 안성일).
+    - `assets.arn` — 점검이 대조하는 기준 자체라 조인 키가 아니다.
+    - `notification_events.target_arn` — 과거 사건의 불변 스냅숏이다. 현재 자산 행의
+      존재를 요구하는 조인 키가 아니다(#493).
+    - `tenants.access_role_arn` — 고객 계정의 IAM 역할이다. 수집하는 자산이 아니라
+      `assets.arn` 에 나타날 일이 없고, 대조하면 매 회차 「매달림」이 된다(#485).
     """
     from sqlalchemy import inspect as sa_inspect
 
     non_join_keys = {
         (models.Asset, "arn"),
         (models.NotificationEvent, "target_arn"),
+        (models.Tenant, "access_role_arn"),
     }
     in_models = set()
     for mapper in models.Base.registry.mappers:

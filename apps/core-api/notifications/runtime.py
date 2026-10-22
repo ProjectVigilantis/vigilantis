@@ -35,12 +35,19 @@ class NotificationRuntime:
                     _logger.warning("notification_sender_close_failed")
 
 
-def build_notification_runtime(settings) -> NotificationRuntime:
-    """실제 연결은 명시적 활성화 후에만 만든다. 자동 migration은 하지 않는다."""
-    if not settings.NOTIFICATION_ENABLED:
-        raise ValueError("NOTIFICATION_DISABLED")
-    if not settings.NOTIFICATION_ROUTES_FILE:
-        raise ValueError("NOTIFICATION_ROUTES_REQUIRED")
+def warn_blocked_routes(registry) -> None:
+    """선언됐지만 막힌 (계정, 채널)을 시작 시 한 번씩 경고한다. 라우팅이 이미 계산한 결과만 쓴다.
+
+    계정·채널·사유 코드만 남긴다. 채널을 일부러 뺀 계정(CHANNEL_NOT_CONFIGURED)은 막힌 항목이 아니라 경고하지 않는다.
+    """
+    for (account, channel), reason in sorted(registry.blocked.items()):
+        _logger.warning("notification_route_blocked", extra={
+            "aws_account_id": account, "channel": channel or None, "reason": reason,
+        })
+
+
+def validate_notification_timing(settings) -> None:
+    """backoff·lease 교차 규칙. 런타임 기동과 배포 스크립트가 같은 규칙을 쓴다."""
     if settings.NOTIFICATION_MAX_BACKOFF_SECONDS < settings.NOTIFICATION_BACKOFF_SECONDS:
         raise ValueError("NOTIFICATION_BACKOFF_INVALID")
     # 연결·응답 제한에 자격증명 갱신과 결과 저장 여유를 더한다.
@@ -51,6 +58,15 @@ def build_notification_runtime(settings) -> NotificationRuntime:
     if settings.NOTIFICATION_LEASE_SECONDS < minimum_lease:
         raise ValueError("NOTIFICATION_LEASE_TOO_SHORT")
 
+
+def build_notification_runtime(settings) -> NotificationRuntime:
+    """실제 연결은 명시적 활성화 후에만 만든다. 자동 migration은 하지 않는다."""
+    if not settings.NOTIFICATION_ENABLED:
+        raise ValueError("NOTIFICATION_DISABLED")
+    if not settings.NOTIFICATION_ROUTES_FILE:
+        raise ValueError("NOTIFICATION_ROUTES_REQUIRED")
+    validate_notification_timing(settings)
+
     from db.session import get_session_factory
     from notifications.channels import SlackSender, SnsSender
     from notifications.dispatcher import DeliveryDispatcher
@@ -58,6 +74,7 @@ def build_notification_runtime(settings) -> NotificationRuntime:
 
     public_base_url = validate_public_base_url(settings.NOTIFICATION_PUBLIC_BASE_URL)
     registry = RouteRegistry.from_file(settings.NOTIFICATION_ROUTES_FILE)
+    warn_blocked_routes(registry)
     senders = {}
     try:
         channels = {route.channel for route in registry.routes}

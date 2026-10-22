@@ -22,6 +22,12 @@ import type {
   TenantUpdateRequest,
   TenantVerifyResponse,
   TotpSetupResponse,
+  UserEventsResponse,
+  UserInviteRequest,
+  UserListItem,
+  UserRole,
+  UsersResponse,
+  UserStatus,
 } from '@/types/api';
 
 // `node --test`가 별칭을 못 풀어 상대 경로를 쓴다(realtime-events와 같은 이유).
@@ -143,7 +149,7 @@ async function request<T>(path: string, init?: RequestInit, transport?: ApiTrans
 }
 
 /**
- * 서버 컴포넌트도 부르는 조회 6종(고객 관리 2종 포함). 전송을 주입받아 같은 경로 · 타입을 브라우저와 서버가 함께 쓴다 —
+ * 서버 컴포넌트도 부르는 조회 7종(고객 관리 2종 · 사용자 관리 1종 포함). 전송을 주입받아 같은 경로 · 타입을 브라우저와 서버가 함께 쓴다 —
  * 서버 쪽은 `serverApi()`(lib/api/server.ts), 브라우저 쪽은 아래 모듈 export다.
  */
 export function createReadApi(transport: ApiTransport) {
@@ -183,6 +189,11 @@ export function createReadApi(transport: ApiTransport) {
 
     getTenant(tenantId: string): Promise<TenantDetail> {
       return request<TenantDetail>(`/tenants/${encodeURIComponent(tenantId)}`, undefined, transport);
+    },
+
+    /** ADMIN 전용(#492 PR 3) — 다른 역할은 403 `AUTH_FORBIDDEN`. 사용자 관리 화면(app/users/page.tsx)이 부른다. */
+    getUsers(): Promise<UsersResponse> {
+      return request<UsersResponse>('/users', undefined, transport);
     },
   };
 }
@@ -269,16 +280,20 @@ export function resumeTenant(tenantId: string): Promise<TenantVerifyResponse> {
 /* ──────────────────────────── /auth (#492 PR 1) ──────────────────────────── */
 /* 진행 · 세션 쿠키는 서버가 심고 읽는다. 여기서는 단계 결과만 받는다. 비밀번호 · 코드는 로그하지 않는다. */
 
-function postJson<T>(path: string, body?: unknown, transport?: ApiTransport): Promise<T> {
+function sendJson<T>(method: 'POST' | 'PUT', path: string, body?: unknown, transport?: ApiTransport): Promise<T> {
   return request<T>(
     path,
     {
-      method: 'POST',
+      method,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body ?? {}),
     },
     transport,
   );
+}
+
+function postJson<T>(path: string, body?: unknown, transport?: ApiTransport): Promise<T> {
+  return sendJson<T>('POST', path, body, transport);
 }
 
 export function login(email: string, password: string): Promise<LoginStepResponse> {
@@ -310,9 +325,53 @@ export async function logout(): Promise<void> {
   await postJson<null>('/auth/logout', undefined, AUTH_FLOW);
 }
 
-/** 유휴 연장 — **사용자 입력이 있을 때만** 부른다(components/auth/user-menu.tsx). */
+/** 유휴 연장 — **사용자 입력이 있을 때만** 부른다(components/auth/session-provider.tsx). */
 export async function recordActivity(): Promise<void> {
   await postJson<null>('/auth/activity');
+}
+
+/**
+ * 비밀번호 재설정 코드 요청(#492 PR 3) — 204. 사용자 존재 여부 · 발송 대상은 응답하지 않는다.
+ * 로그인 전 화면이라 401을 세션 만료로 다루지 않는다(AUTH_FLOW 전송).
+ */
+export async function requestPasswordReset(email: string): Promise<void> {
+  await postJson<null>('/auth/password-reset', { email }, AUTH_FLOW);
+}
+
+/** 재설정 확인 — 204. 로그인 · 세션 발급은 하지 않는다(새 비밀번호로 다시 로그인한다). */
+export async function confirmPasswordReset(email: string, code: string, newPassword: string): Promise<void> {
+  await postJson<null>('/auth/password-reset/confirm', { email, code, new_password: newPassword }, AUTH_FLOW);
+}
+
+/* ──────────────────────────── /users (#492 PR 3) ──────────────────────────── */
+/* 전부 ADMIN 전용이다. 메뉴를 숨기는 것은 화면 편의이고 실제 차단은 서버 403 `AUTH_FORBIDDEN`이다. */
+
+const userPath = (userId: string, suffix: string) => `/users/${encodeURIComponent(userId)}${suffix}`;
+
+/** 201 — 만든 사용자. `recover_existing`은 ADMIN이 명시적으로 고른 경우에만 true다. */
+export function inviteUser(body: UserInviteRequest): Promise<UserListItem> {
+  return postJson<UserListItem>('/users', body);
+}
+
+export async function resendInvite(userId: string): Promise<void> {
+  await postJson<null>(userPath(userId, '/invite/resend'));
+}
+
+export async function changeUserRole(userId: string, role: UserRole): Promise<void> {
+  await sendJson<null>('PUT', userPath(userId, '/role'), { role });
+}
+
+export async function changeUserStatus(userId: string, status: UserStatus): Promise<void> {
+  await sendJson<null>('PUT', userPath(userId, '/status'), { status });
+}
+
+export async function revokeUserSessions(userId: string): Promise<void> {
+  await postJson<null>(userPath(userId, '/sessions/revoke'));
+}
+
+/** 사용자 1명의 관리 이력(최근 순으로 서버가 정한다). 상한 기본 50. */
+export function getUserEvents(userId: string, limit = 50): Promise<UserEventsResponse> {
+  return request<UserEventsResponse>(userPath(userId, `/events?limit=${limit}`));
 }
 
 /**

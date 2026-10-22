@@ -22,7 +22,13 @@ from schemas.api import (
     TenantVerificationResult,
     TenantVerifyResponse,
 )
-from schemas.api.tenants import DELETABLE_STATUSES, VERIFIABLE_STATUSES, default_access_role_arn
+from schemas.api.tenants import (
+    DELETABLE_STATUSES,
+    RESUMABLE_STATUSES,
+    SUSPENDABLE_STATUSES,
+    VERIFIABLE_STATUSES,
+    default_access_role_arn,
+)
 
 ACCOUNT = "475763379672"
 ROLE = f"arn:aws:iam::{ACCOUNT}:role/vigilantis-access"
@@ -243,7 +249,7 @@ def test_subscription_period_order():
 # ----- 복구 경로와 정지 중 확인 (PR #489 리뷰 A · B · C) -----
 
 def test_only_never_connected_tenants_can_be_deleted():
-    # 계정 ID 오입력(ACCOUNT_MISMATCH)을 고치는 길 = 지우고 다시 만든다. 연결된 적 있으면 기록이 있다
+    # 계정 ID 오입력(연결 확인에서 ASSUME_DENIED 로 나타난다)을 고치는 길 = 지우고 다시 만든다. 연결된 적 있으면 기록이 있다
     assert DELETABLE_STATUSES == frozenset({TenantStatus.PENDING_CONNECTION})
 
 
@@ -275,3 +281,27 @@ def test_resume_failure_keeps_the_tenant_suspended():
     tenant = make_detail(status="SUSPENDED", last_verification=failed,
                          suspended_at="2026-10-19T04:00:00Z", suspended_reason="계약 만료")
     TenantVerifyResponse.model_validate({"tenant": tenant, "verification": failed})
+
+
+# ----- suspend · resume 기준 (PR #503 리뷰 확인 부탁 ①) -----
+
+def test_only_active_tenants_can_be_suspended():
+    # 연결 전은 들어간 적이 없어 회수할 것이 없고(지우면 된다), 이미 정지면 할 일이 없다
+    assert SUSPENDABLE_STATUSES == frozenset({TenantStatus.ACTIVE})
+
+
+def test_only_suspended_tenants_can_be_resumed():
+    # 연결 전 테넌트를 ACTIVE 로 올리는 길은 verify 다 — resume 이 아니다
+    assert RESUMABLE_STATUSES == frozenset({TenantStatus.SUSPENDED})
+
+
+def test_every_status_has_a_way_forward_and_no_action_is_shared_ambiguously():
+    # 상태마다 열리는 동작이 하나 이상 있고, 고객 계정에 들어가는 동작(verify · resume)은
+    # 같은 상태에서 함께 열리지 않는다 — 정지 중 들어가는 길은 resume 하나
+    for status in TenantStatus:
+        opened = {name for name, allowed in (
+            ("delete", DELETABLE_STATUSES), ("verify", VERIFIABLE_STATUSES),
+            ("suspend", SUSPENDABLE_STATUSES), ("resume", RESUMABLE_STATUSES),
+        ) if status in allowed}
+        assert opened, status
+        assert not {"verify", "resume"} <= opened, status

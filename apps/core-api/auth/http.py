@@ -22,9 +22,9 @@ from exceptions import ApiError, api_error_response
 from fastapi import Depends, FastAPI, Request, Response
 from schemas.api.errors import ErrorCode
 
-from .cognito import AuthError
+from .cognito import AuthError, CognitoAdapter
 from .login_flow import LoginFlow
-from .provider import build_login_flow
+from .provider import build_adapter, build_login_flow
 
 logger = logging.getLogger("vigilantis.auth")
 
@@ -41,6 +41,7 @@ _SECURITY_HEADERS = {
 }
 # 로그인 진행이 끝난 오류 — 진행 쿠키를 지운다(LoginFlow 가 흐름을 지우는 오류 + 이미 소비된 완료 시점 거절).
 # FE 는 비밀번호 단계부터 다시 시작한다
+_LOGIN_PATH = "/api/v1/auth/login"
 _FLOW_ENDED_CODES = frozenset(
     {
         ErrorCode.AUTH_FLOW_EXPIRED,
@@ -121,6 +122,24 @@ def get_login_flow(request: Request, settings: AuthSettings = _SETTINGS) -> Logi
     return flow
 
 
+_adapter_lock = threading.Lock()
+
+
+def get_cognito_adapter(request: Request, settings: AuthSettings = _SETTINGS) -> CognitoAdapter:
+    """앱당 하나의 CognitoAdapter(관리 · 재설정 라우트용). 설정이 비면 503 — 첫 사용 때 조립한다."""
+    adapter = getattr(request.app.state, "cognito_adapter", None)
+    if adapter is not None:
+        return adapter
+    if settings.missing_cognito_keys():
+        raise ApiError(ErrorCode.AUTH_PROVIDER_UNAVAILABLE)
+    with _adapter_lock:
+        adapter = getattr(request.app.state, "cognito_adapter", None)
+        if adapter is None:
+            adapter = build_adapter(settings)
+            request.app.state.cognito_adapter = adapter
+    return adapter
+
+
 # --- 앱 등록 -------------------------------------------------------------------
 
 
@@ -128,7 +147,9 @@ def log_provider_status(settings: AuthSettings) -> None:
     missing = settings.missing_cognito_keys()
     if missing:
         logger.warning(
-            "auth_provider_unconfigured: /api/v1/auth/* 는 503 — 누락 키: %s", ", ".join(missing)
+            "auth_provider_unconfigured: Cognito 가 필요한 로그인 · 비밀번호 재설정 · 사용자 초대/재발송 라우트는 503"
+            " (/me · activity · logout 은 영향 없음) — 누락 키: %s",
+            ", ".join(missing),
         )
 
 
@@ -138,7 +159,10 @@ def register_auth_http(app: FastAPI) -> None:
     @app.exception_handler(AuthError)
     async def handle_auth_error(request: Request, exc: AuthError):
         response = api_error_response(request, exc.code)
-        if exc.code in _FLOW_ENDED_CODES:
+        # 진행 쿠키는 로그인 경로의 오류에서만 지운다 — 재설정 · 관리자 경로 오류가 다른 탭의 로그인 진행을 끊지 않는다
+        path = request.url.path
+        is_login = path == _LOGIN_PATH or path.startswith(_LOGIN_PATH + "/")
+        if is_login and exc.code in _FLOW_ENDED_CODES:
             delete_flow_cookie(response)
         return response
 

@@ -22,6 +22,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -745,3 +746,426 @@ def test_existing_db_without_its_secret_stops_instead_of_guessing():
     with pytest.raises(SystemExit, match="비밀번호를 알 수 없"):
         platform._ensure_db(FakeRds(events, exists=True), FakeSm(events), _SUBNETS, "sg-db")
     assert events == []
+
+
+# ⑥ 알림 배포(#493 PR3) -----------------------------------------------------------
+REGION = "ap-northeast-2"
+TOPIC = f"arn:aws:sns:{REGION}:{ACCOUNT}:vigilantis-alerts"
+SECRET = f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:vigilantis-platform/slack-a-AbCdEf"
+
+
+NOTIFY_TENANT = "11111111-1111-4111-8111-111111111111"
+
+
+def _cfg(tmp_path, **over):
+    body = {"enabled": True, "public_base_url": "https://dash.example.com",
+            "routes": [{"tenant_id": NOTIFY_TENANT, "aws_account_id": "999900001111",
+                        "slack_webhook_env": "NOTIFICATION_SLACK_A", "sns_topic_arn": TOPIC}],
+            "slack_secret_arns": {"NOTIFICATION_SLACK_A": SECRET},
+            "settings": {"NOTIFICATION_READ_TIMEOUT_SECONDS": 7, "NOTIFICATION_MAX_ATTEMPTS": 3}}
+    body.update(over)
+    path = tmp_path / "n.json"
+    path.write_text(json.dumps(body), encoding="utf-8")
+    return str(path)
+
+
+def _body(path):
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+class NotifIam(FakeIam):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.puts: list[tuple[str, str, dict]] = []
+
+    def put_role_policy(self, RoleName, PolicyName, PolicyDocument):
+        self.puts.append((RoleName, PolicyName, json.loads(PolicyDocument)))
+
+
+class NotifSm:
+    def __init__(self, existing=(SECRET,)):
+        self.existing = set(existing)
+
+    def describe_secret(self, SecretId):
+        if SecretId not in self.existing:
+            raise _client_error("ResourceNotFoundException", "DescribeSecret")
+        return {"ARN": SecretId}
+
+
+TD = "arn:aws:ecs:r:1:task-definition/vigilantis-platform-api:1"
+
+
+class FakeEcs:
+    """클러스터·서비스·태스크·태스크 정의를 흉내 낸다. 쓰기 호출은 기록만 한다."""
+
+    def __init__(self, *, cluster=True, service=None, tasks=(), env=None, writes=None):
+        self.cluster, self.service, self.tasks = cluster, service, list(tasks)
+        self.env = env or {}
+        self.writes = writes if writes is not None else []
+
+    def describe_clusters(self, clusters):
+        return {"clusters": [{"clusterArn": "c", "status": "ACTIVE"}] if self.cluster else []}
+
+    def describe_services(self, cluster, services):
+        return {"services": [self.service] if self.service else []}
+
+    def get_paginator(self, name):
+        tasks = self.tasks
+        class P:
+            def paginate(self, cluster, family, desiredStatus):
+                return [{"taskArns": [t["taskArn"] for t in tasks if t["desiredStatus"] == desiredStatus]}]
+        return P()
+
+    def describe_tasks(self, cluster, tasks):
+        return {"tasks": [t for t in self.tasks if t["taskArn"] in tasks]}
+
+    def describe_task_definition(self, taskDefinition):
+        env = self.env.get(taskDefinition, [])
+        return {"taskDefinition": {"containerDefinitions": [{"name": "api", "environment": env}]}}
+
+    def register_task_definition(self, **kw):
+        self.writes.append("register_task_definition")
+        raise RuntimeError("stop")
+
+    def run_task(self, **kw):
+        self.writes.append("run_task")
+        raise RuntimeError("stop")
+
+
+def QuietEcs():
+    return FakeEcs(cluster=False)
+
+
+def _nsvc(rollout="COMPLETED", extra=()):
+    return {"serviceName": platform.API_SERVICE, "status": "ACTIVE", "deployments": [
+        {"status": "PRIMARY", "taskDefinition": TD, "rolloutState": rollout}, *extra]}
+
+
+def _task(arn="t1", last="RUNNING", desired="RUNNING", overrides=None):
+    return {"taskArn": arn, "lastStatus": last, "desiredStatus": desired, "taskDefinitionArn": TD,
+            "overrides": overrides or {}}
+
+
+def _on(v="true"):
+    return {TD: [{"name": "NOTIFICATION_ENABLED", "value": v}]}
+
+
+def test_quiescent_allows_no_service_and_legacy_or_disabled_tasks():
+    platform.require_notifications_quiescent(FakeEcs(cluster=False))
+    platform.require_notifications_quiescent(FakeEcs())  # 서비스·태스크 없음
+    platform.require_notifications_quiescent(FakeEcs(service=_nsvc(), tasks=[_task()]))  # 플래그 없음 = 꺼진 레거시
+    platform.require_notifications_quiescent(FakeEcs(service=_nsvc(), tasks=[_task()], env=_on("FALSE")))
+    old = dict(_task(last="STOPPED", desired="STOPPED"), taskDefinitionArn=TD + "0")
+    platform.require_notifications_quiescent(FakeEcs(service=_nsvc(), tasks=[old],
+                                                     env={TD + "0": _on()[TD]}))  # 이미 STOPPED인 옛 태스크는 무시
+
+
+@pytest.mark.parametrize("ecs", [
+    FakeEcs(service=_nsvc("IN_PROGRESS"), tasks=[_task()]),
+    FakeEcs(service=_nsvc("FAILED"), tasks=[_task()]),
+    FakeEcs(service=_nsvc(extra=[{"status": "ACTIVE", "taskDefinition": "old", "rolloutState": "COMPLETED"}])),
+    FakeEcs(service=_nsvc(), tasks=[_task()], env=_on()),
+    FakeEcs(service=_nsvc(), tasks=[], env=_on()),   # COMPLETED 켜진 PRIMARY, 태스크 일시 없음
+    FakeEcs(service=_nsvc(), tasks=[], env=_on("maybe")),
+    FakeEcs(service=_nsvc(), tasks=[_task()], env=_on("maybe")),   # 알 수 없는 값은 닫힘
+    FakeEcs(service=_nsvc(), tasks=[_task("old", "RUNNING", "STOPPED")], env=_on()),  # 내려가는 중인 켜진 태스크
+    FakeEcs(service=_nsvc(), tasks=[_task(overrides={"containerOverrides": [
+        {"name": "api", "environment": [{"name": "NOTIFICATION_ENABLED", "value": "1"}]}]})]),
+    FakeEcs(cluster=True, service=None, tasks=[_task()], env=_on()),   # 서비스 없이 켜진 태스크
+])
+def test_apply_and_revoke_refuse_active_or_transitioning_api_before_any_write(tmp_path, ecs):
+    _assert_refused(tmp_path, ecs, "정책은 바꾸지 않았다")
+
+
+class FailingDescribeEcs(FakeEcs):
+    def __init__(self, mode, **kw):
+        super().__init__(**kw)
+        self.mode = mode
+
+    def describe_tasks(self, cluster, tasks):
+        got = super().describe_tasks(cluster, tasks)
+        if self.mode == "failures":
+            got["failures"] = [{"arn": tasks[0], "reason": "MISSING"}]
+        else:  # 하나를 조용히 빠뜨린다
+            got["tasks"] = got["tasks"][1:]
+        return got
+
+
+@pytest.mark.parametrize("ecs", [
+    FakeEcs(service=_nsvc(), tasks=[_task(overrides={"containerOverrides": [
+        {"name": "api", "environment": [{"name": "notification_enabled", "value": "true"}]}]})]),
+    FakeEcs(service=_nsvc(), tasks=[_task(overrides={"containerOverrides": [
+        {"name": "api", "environment": [{"name": "Notification_Enabled", "value": "maybe"}]}]})]),
+    FakeEcs(service=_nsvc(), tasks=[], env={TD: [{"name": "notification_enabled", "value": "true"}]}),
+    FailingDescribeEcs("failures", service=_nsvc(), tasks=[_task()]),
+    FailingDescribeEcs("omit", service=_nsvc(), tasks=[_task("a"), _task("b")]),
+])
+def test_guard_blocks_case_variant_flags_and_unverified_task_reads(tmp_path, ecs):
+    _assert_refused(tmp_path, ecs, "정책은 바꾸지 않았다")
+
+
+def _assert_refused(tmp_path, ecs, match):
+    iam = NotifIam(roles=_both_roles())
+    plan = platform.load_notification_config(_cfg(tmp_path), ACCOUNT, REGION)
+    with pytest.raises(SystemExit, match="정책은 바꾸지 않았다"):
+        platform.apply_notification_policies(iam, ecs, plan)
+    with pytest.raises(SystemExit, match="정책은 바꾸지 않았다"):
+        platform.revoke_notification_policies(iam, ecs)
+    assert iam.puts == [] and iam.calls == []
+
+
+class PolicyIam(NotifIam):
+    def __init__(self, docs, **kw):
+        super().__init__(**kw)
+        self.docs = docs
+
+    def get_role_policy(self, RoleName, PolicyName):
+        if (RoleName, PolicyName) not in self.docs:
+            raise _client_error("NoSuchEntity", "GetRolePolicy")
+        return {"PolicyDocument": self.docs[(RoleName, PolicyName)]}
+
+
+def _exact_docs(plan):
+    return {(platform.ROLE_TASK, platform.NOTIFY_POLICY_TASK): platform.notification_task_policy(plan["topic_arns"]),
+            (platform.ROLE_EXEC, platform.NOTIFY_POLICY_EXEC):
+                platform.notification_exec_policy(list(plan["secret_arns"].values()))}
+
+
+def test_verify_accepts_equivalent_shapes_and_rejects_mismatches(tmp_path):
+    plan = platform.load_notification_config(_cfg(tmp_path), ACCOUNT, REGION)
+    docs = _exact_docs(plan)
+    platform.verify_notification_policies(PolicyIam(docs, roles=_both_roles()), plan)
+    # 문자열/리스트·문장 형태가 달라도 같은 내용이면 통과
+    (stmt,) = docs[(platform.ROLE_TASK, platform.NOTIFY_POLICY_TASK)]["Statement"]
+    stmt["Resource"] = stmt["Resource"][0]
+    platform.verify_notification_policies(PolicyIam(docs, roles=_both_roles()), plan)
+    bad = [
+        lambda d: d.pop((platform.ROLE_TASK, platform.NOTIFY_POLICY_TASK)),
+        lambda d: d[(platform.ROLE_TASK, platform.NOTIFY_POLICY_TASK)]["Statement"][0].update(
+            Resource=["*"]),
+        lambda d: d[(platform.ROLE_TASK, platform.NOTIFY_POLICY_TASK)]["Statement"][0].update(
+            Action=["sns:Publish", "sns:Subscribe"]),
+        lambda d: d[(platform.ROLE_EXEC, platform.NOTIFY_POLICY_EXEC)]["Statement"][0].update(Effect="Deny"),
+        lambda d: d[(platform.ROLE_EXEC, platform.NOTIFY_POLICY_EXEC)]["Statement"][0].update(
+            Condition={"Bool": {"x": "y"}}),
+    ]
+    for mutate in bad:
+        d = _exact_docs(plan)
+        mutate(d)
+        with pytest.raises(SystemExit, match="notification-iam"):
+            platform.verify_notification_policies(PolicyIam(d, roles=_both_roles()), plan)
+
+
+def _patch_deploy(monkeypatch):
+    monkeypatch.setattr(platform, "_find_vpc", lambda ec2: "vpc")
+    monkeypatch.setattr(platform, "_find_smoke_vpc", lambda ec2: "vpc-s")
+    monkeypatch.setattr(platform, "_find_distribution", lambda cf: {"DomainName": "d.net"})
+    monkeypatch.setattr(platform, "_secret_value", lambda sm, n: "x")
+    monkeypatch.setattr(platform, "_find_subnets", lambda ec2, v: {})
+    monkeypatch.setattr(platform, "_find_sgs", lambda ec2, v: {})
+    monkeypatch.setattr(platform, "_find_repo", lambda ecr, n: "repo")
+    monkeypatch.setattr(platform, "_find_role", lambda iam, n: f"arn:{n}")
+    monkeypatch.setattr(platform, "_find_secret", lambda sm, n: f"arn:{n}")
+
+
+def test_deploy_with_mismatched_policy_stops_before_registration_and_never_writes_iam(tmp_path, monkeypatch):
+    _patch_deploy(monkeypatch)
+    plan = platform.load_notification_config(_cfg(tmp_path), ACCOUNT, REGION)
+    iam = PolicyIam({}, roles=_both_roles())
+    ecs = FakeEcs()
+    c = {"ec2": None, "cf": None, "sm": None, "ecr": None, "iam": iam, "ecs": ecs}
+    with pytest.raises(SystemExit, match="notification-iam"):
+        platform.deploy(c, ACCOUNT, REGION, "t", False, plan)
+    assert ecs.writes == [] and iam.puts == [] and iam.calls == []
+
+
+def test_deploy_registration_failure_leaves_iam_unchanged(tmp_path, monkeypatch):
+    _patch_deploy(monkeypatch)
+    plan = platform.load_notification_config(_cfg(tmp_path), ACCOUNT, REGION)
+    iam = PolicyIam(_exact_docs(plan), roles=_both_roles())
+    ecs = FakeEcs()
+    c = {"ec2": None, "cf": None, "sm": None, "ecr": None, "iam": iam, "ecs": ecs}
+    with pytest.raises(RuntimeError):
+        platform.deploy(c, ACCOUNT, REGION, "t", False, plan)
+    assert ecs.writes == ["register_task_definition"] and iam.puts == [] and iam.calls == []
+
+
+def test_apply_on_disabled_stable_api_writes_exactly_our_policies(tmp_path):
+    iam = NotifIam(roles=_both_roles())
+    plan = platform.load_notification_config(_cfg(tmp_path), ACCOUNT, REGION)
+    platform.apply_notification_policies(iam, FakeEcs(service=_nsvc(), tasks=[_task()], env=_on("false")), plan)
+    assert {(r, p) for r, p, _ in iam.puts} == set(platform.NOTIFY_POLICIES)
+
+
+def _both_roles():
+    return {platform.ROLE_TASK: _PLATFORM_TAGS, platform.ROLE_EXEC: _PLATFORM_TAGS}
+
+
+def test_notifications_default_off_without_config():
+    env = {e["name"]: e["value"] for e in _api()["environment"]}
+    assert env["NOTIFICATION_ENABLED"] == "false"
+    assert not any(k.startswith("NOTIFICATION_") and k != "NOTIFICATION_ENABLED" for k in env)
+
+
+def test_config_needs_explicit_enabled_true(tmp_path):
+    assert platform.load_notification_config(_cfg(tmp_path, enabled=False), ACCOUNT, REGION) is None
+    body = _body(_cfg(tmp_path))
+    del body["enabled"]
+    p = tmp_path / "x.json"
+    p.write_text(json.dumps(body))
+    with pytest.raises(SystemExit):
+        platform.load_notification_config(str(p), ACCOUNT, REGION)
+
+
+def test_enabled_container_carries_refs_routes_and_settings(tmp_path):
+    from notifications.routing import RouteRegistry
+    plan = platform.load_notification_config(_cfg(tmp_path), ACCOUNT, REGION)
+    c = platform.api_container("i", region=REGION, cors_origin="https://x", access_role_arn="r", collect_vpc_ids="v",
+                               dispatch_enabled=False, secrets_arns={"DATABASE_URL": "a"}, notification=plan)
+    env = {e["name"]: e["value"] for e in c["environment"]}
+    assert env["NOTIFICATION_ENABLED"] == "true"
+    assert env["NOTIFICATION_PUBLIC_BASE_URL"] == "https://dash.example.com"
+    assert env["NOTIFICATION_READ_TIMEOUT_SECONDS"] == "7" and env["NOTIFICATION_MAX_ATTEMPTS"] == "3"
+    assert "NOTIFICATION_SLACK_A" not in env and "hooks.slack.com" not in json.dumps(c)
+    assert {s["name"]: s["valueFrom"] for s in c["secrets"]}["NOTIFICATION_SLACK_A"] == SECRET
+    # 생성되는 routes JSON은 런타임 파서가 그대로 읽는다 — serve.py가 만드는 파일과 같은 내용
+    path = tmp_path / "routes.json"
+    path.write_text(env["NOTIFICATION_ROUTES_JSON"], encoding="utf-8")
+    reg = RouteRegistry.from_file(str(path), {"NOTIFICATION_SLACK_A": "https://hooks.slack.com/services/T1/B1/X1"})
+    assert {r.channel for r in reg.routes} == {"SLACK", "SNS"}
+
+
+def test_policies_are_exact_and_dedicated(tmp_path):
+    plan = platform.load_notification_config(_cfg(tmp_path), ACCOUNT, REGION)
+    task = platform.notification_task_policy(plan["topic_arns"])
+    execp = platform.notification_exec_policy(list(plan["secret_arns"].values()))
+    assert task["Statement"][0]["Resource"] == [TOPIC] and task["Statement"][0]["Action"] == "sns:Publish"
+    assert execp["Statement"][0]["Resource"] == [SECRET]
+    assert "*" not in json.dumps(task) + json.dumps(execp)
+    assert platform.NOTIFY_POLICY_TASK != "assume-access-role"
+    assert platform.NOTIFY_POLICY_EXEC != "read-platform-secrets"
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda b: b.update(slack_secret_arns={}),
+    lambda b: b.update(slack_secret_arns={"NOTIFICATION_SLACK_A": SECRET, "EXTRA": SECRET.replace("a-", "b-")}),
+    lambda b: b.update(slack_secret_arns={"NOTIFICATION_SLACK_A": SECRET.replace("slack-a-AbCdEf", "*")}),
+    lambda b: b.update(slack_secret_arns={"NOTIFICATION_SLACK_A": SECRET.replace(ACCOUNT, "123456789012")}),
+    lambda b: b["routes"][0].update(sns_topic_arn=f"arn:aws:sns:{REGION}:{ACCOUNT}:*"),
+    lambda b: b["routes"][0].update(sns_topic_arn=f"arn:aws:sns:{REGION}:999900001111:cust"),
+    lambda b: b["routes"][0].update(slack_webhook="https://hooks.slack.com/services/T/B/X"),
+    lambda b: b["routes"][0].update(tenant_id="a"),
+    lambda b: b["routes"][0].update(tenant_id=f" {NOTIFY_TENANT}"),
+    lambda b: b["routes"][0].update(tenant_id=None),
+    lambda b: b.update(public_base_url="http://dash.example.com"),
+    lambda b: b.update(settings={"NOTIFICATION_READ_TIMEOUT_SECONDS": 999}),
+    lambda b: b.update(settings={"NOTIFICATION_ENABLED": 1}),
+    lambda b: b.update(settings={"NOTIFICATION_BATCH_SIZE": True}),
+])
+def test_invalid_config_is_rejected(tmp_path, mutate):
+    body = _body(_cfg(tmp_path))
+    mutate(body)
+    p = tmp_path / "bad.json"
+    p.write_text(json.dumps(body))
+    with pytest.raises(SystemExit) as exc:
+        platform.load_notification_config(str(p), ACCOUNT, REGION)
+    assert "hooks.slack.com" not in str(exc.value)
+
+
+@pytest.mark.parametrize("name", ["DATABASE_URL", "OPENAI_API_KEY", "CORS_ALLOW_ORIGINS", "AWS_REGION",
+                                  "NOTIFICATION_ROUTES_JSON", "DISPATCH_ENABLED"])
+def test_secret_env_name_collisions_are_rejected(tmp_path, name):
+    p = _cfg(tmp_path, slack_secret_arns={name: SECRET})
+    body = _body(p)
+    body["routes"][0]["slack_webhook_env"] = name
+    Path(p).write_text(json.dumps(body), encoding="utf-8")
+    with pytest.raises(SystemExit, match="충돌"):
+        platform.load_notification_config(p, ACCOUNT, REGION)
+
+
+@pytest.mark.parametrize("name", ["database_url", "Database_Url", "openai_api_key", "aws_region",
+                                  "Notification_Routes_Json", "dispatch_enabled"])
+def test_secret_env_name_collisions_are_case_insensitive(tmp_path, name):
+    p = _cfg(tmp_path, slack_secret_arns={name: SECRET})
+    body = _body(p)
+    body["routes"][0]["slack_webhook_env"] = name
+    Path(p).write_text(json.dumps(body), encoding="utf-8")
+    with pytest.raises(SystemExit, match="충돌"):
+        platform.load_notification_config(p, ACCOUNT, REGION)
+
+
+def test_api_container_rejects_case_variant_secret_names(tmp_path):
+    plan = platform.load_notification_config(_cfg(tmp_path), ACCOUNT, REGION)
+    plan["secret_arns"] = {"database_url": SECRET}
+    with pytest.raises(ValueError):
+        platform.api_container("i", region=REGION, cors_origin="https://x", access_role_arn="r",
+                               collect_vpc_ids="v", dispatch_enabled=False,
+                               secrets_arns={"DATABASE_URL": "a"}, notification=plan)
+
+
+@pytest.mark.parametrize("settings", [
+    {"NOTIFICATION_BACKOFF_SECONDS": 10, "NOTIFICATION_MAX_BACKOFF_SECONDS": 5},
+    {"NOTIFICATION_LEASE_SECONDS": 30, "NOTIFICATION_READ_TIMEOUT_SECONDS": 10},
+    {"NOTIFICATION_BACKOFF_SECONDS": 400},   # 기본 max_backoff(300)보다 큼 — 기본값과의 조합
+    {"notification_read_timeout_seconds": 5},
+])
+def test_effective_settings_cross_rules_match_runtime(tmp_path, settings):
+    with pytest.raises(SystemExit):
+        platform.load_notification_config(_cfg(tmp_path, settings=settings), ACCOUNT, REGION)
+
+
+def test_effective_settings_ignore_host_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("NOTIFICATION_LEASE_SECONDS", "31")
+    monkeypatch.setenv("NOTIFICATION_READ_TIMEOUT_SECONDS", "30")
+    assert platform.load_notification_config(_cfg(tmp_path, settings={}), ACCOUNT, REGION)["settings"] == {}
+
+
+def test_routes_json_size_boundary(tmp_path):
+    from notifications.routing import MAX_CONFIG_BYTES
+    base = {"tenant_id": NOTIFY_TENANT, "aws_account_id": "999900001111"}
+    base_len = len(json.dumps({"routes": [base]}, ensure_ascii=False, separators=(",", ":")).encode())
+    ok = {"routes": [base]}
+    # 서로 다른 UUID 테넌트·계정 라우트를 많이 두어 런타임 상한(파일 상한 80KiB 미만)을 넘긴다
+    big = [{"tenant_id": str(uuid.UUID(int=i + 1)), "aws_account_id": f"{i:012d}"} for i in range(800)]
+    big_len = len(json.dumps({"routes": big}, ensure_ascii=False, separators=(",", ":")).encode())
+    assert base_len < MAX_CONFIG_BYTES < big_len
+    assert platform.load_notification_config(
+        _cfg(tmp_path, routes=ok["routes"], slack_secret_arns={}), ACCOUNT, REGION)
+    with pytest.raises(SystemExit, match="상한"):
+        platform.load_notification_config(_cfg(tmp_path, routes=big, slack_secret_arns={}), ACCOUNT, REGION)
+
+
+def test_missing_secret_or_untagged_role_rejects_before_any_write(tmp_path):
+    iam = NotifIam(roles=_both_roles())
+    with pytest.raises(SystemExit, match="비밀이 없다"):
+        platform.notification_plan({"sm": NotifSm(()), "iam": iam}, ACCOUNT, REGION, _cfg(tmp_path))
+    iam = NotifIam(roles={platform.ROLE_TASK: _PLATFORM_TAGS, platform.ROLE_EXEC: []})
+    with pytest.raises(SystemExit, match="플랫폼 태그"):
+        platform.notification_plan({"sm": NotifSm(), "iam": iam}, ACCOUNT, REGION, _cfg(tmp_path))
+    assert iam.puts == [] and iam.calls == []
+
+
+def test_plan_is_read_only_and_apply_writes_only_dedicated_policies(tmp_path):
+    iam = NotifIam(roles=_both_roles())
+    plan = platform.notification_plan({"sm": NotifSm(), "iam": iam}, ACCOUNT, REGION, _cfg(tmp_path))
+    assert iam.puts == [] and iam.calls == []  # 미리 보기는 변경 없음
+    platform.apply_notification_policies(iam, QuietEcs(), plan)
+    assert {(r, p) for r, p, _ in iam.puts} == set(platform.NOTIFY_POLICIES)
+
+
+def test_slack_only_config_removes_stale_task_topic_policy(tmp_path):
+    body = _body(_cfg(tmp_path))
+    del body["routes"][0]["sns_topic_arn"]
+    p = tmp_path / "s.json"
+    p.write_text(json.dumps(body))
+    iam = NotifIam(roles=_both_roles())
+    platform.apply_notification_policies(iam, QuietEcs(), platform.load_notification_config(str(p), ACCOUNT, REGION))
+    assert [(r, n) for r, n, _ in iam.puts] == [(platform.ROLE_EXEC, platform.NOTIFY_POLICY_EXEC)]
+    assert iam.calls == [("delete_role_policy", platform.ROLE_TASK)]
+
+
+def test_revoke_deletes_only_our_two_policies_on_tagged_roles():
+    iam = NotifIam(roles={platform.ROLE_TASK: _PLATFORM_TAGS, platform.ROLE_EXEC: []})
+    platform.revoke_notification_policies(iam, QuietEcs())
+    assert iam.calls == [("delete_role_policy", platform.ROLE_TASK)]
+    assert iam.puts == []

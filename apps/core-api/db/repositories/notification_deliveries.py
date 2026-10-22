@@ -2,7 +2,8 @@
 
 - 시각(활성화·재시도·임대·관문)은 전부 DB now()로 쓰고 비교한다.
 - 상태 전이는 조건부 UPDATE다. 종결 상태(SUCCEEDED·FAILED·BLOCKED)를 고르는 전이는 없다.
-- 결과 확정(settle)은 claim_token·IN_FLIGHT·미만료 임대가 모두 맞을 때만 반영한다.
+- 결과 확정(settle)은 claim_token·IN_FLIGHT가 맞을 때만 반영한다. 회수가 토큰을 지우므로 회수 뒤의
+  늦은 결과는 막히고, 임대가 지났어도 회수 전에 돌아온 결과는 반영한다.
 - notification_events(사건 사실)는 읽기만 한다.
 """
 
@@ -12,7 +13,7 @@ import uuid
 from collections.abc import Iterable
 from datetime import timedelta
 
-from sqlalchemy import case, delete, exists, func, or_, select, update
+from sqlalchemy import String, case, cast, delete, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -22,6 +23,7 @@ _D = models.NotificationDelivery
 _R = models.NotificationRoute
 _L = models.NotificationLane
 _E = models.NotificationEvent
+_T = models.Tenant
 _NO_SYNC = {"synchronize_session": False}
 
 
@@ -30,6 +32,29 @@ def _after(seconds: float):
 
 
 # --- 현재 바인딩·관문 ---------------------------------------------------------
+
+
+def tenant_accounts(db: Session, tenant_ids: Iterable[str]) -> dict[str, str]:
+    """설정에서 정규화한 UUID의 현재 계정을 읽는다. DB 장애는 호출자에게 전달한다."""
+    return dict(db.execute(
+        select(_T.tenant_id, _T.aws_account_id).where(_T.tenant_id.in_(list(tenant_ids))),
+    ).all())
+
+
+def has_unbound_deliveries(db: Session) -> bool:
+    """UUID 전환으로 처분이 달라질 미완료 기록이 있으면 기동 전에 멈춘다.
+
+    legacy 문자열을 UUID로 cast하지 않는다. 종결·NULL 이력은 고치거나 다시 보내지 않는다.
+    """
+    return db.scalar(
+        select(_D.delivery_id)
+        .outerjoin(_T, cast(_T.tenant_id, String) == _D.tenant_id)
+        .where(
+            _D.state.in_(("PENDING", "IN_FLIGHT")),
+            or_(_T.tenant_id.is_(None), _T.aws_account_id != _D.aws_account_id),
+        )
+        .limit(1)
+    ) is not None
 
 
 def ensure_lane(db: Session, channel: str) -> None:
@@ -292,12 +317,14 @@ def _close_attempt(db: Session, conditions: tuple, outcome: dict) -> bool:
 
 
 def settle(db: Session, delivery_id: str, token: str, outcome: dict) -> bool:
-    """전송 결과 반영. 토큰·상태·미만료 임대가 하나라도 다르면 반영하지 않는다(False)."""
-    return _close_attempt(
-        db,
-        (_D.delivery_id == delivery_id, _D.claim_token == token, _D.lease_expires_at > func.now()),
-        outcome,
-    )
+    """전송 결과 반영. 토큰·IN_FLIGHT가 하나라도 다르면 반영하지 않는다(False).
+
+    임대 만료는 조건이 아니다. 회수(recover_expired)·재claim이 토큰을 지우거나 바꾸므로 회수된
+    시도의 결과는 토큰에서 막힌다. 회수와 겹치면 행 잠금을 먼저 잡은 쪽 하나만 반영된다 — 회수가
+    먼저면 기다린 이 UPDATE가 회수 commit 뒤 조건을 다시 평가해 막히고(그 사건은 다시 보낼 수
+    있다 — 최소 1회 전송), 결과가 먼저면 회수가 SKIP LOCKED로 건너뛴다.
+    """
+    return _close_attempt(db, (_D.delivery_id == delivery_id, _D.claim_token == token), outcome)
 
 
 def recover_expired(db: Session, delivery_id: str, outcome: dict) -> bool:

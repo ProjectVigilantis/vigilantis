@@ -5,7 +5,7 @@ export type IsoDateTime = string;
 
 /* ────────────────────────────── errors.py ────────────────────────────── */
 
-/** REST 공통 오류 코드 22종. 괄호는 계약상 HTTP 상태. */
+/** REST 공통 오류 코드 24종. 괄호는 계약상 HTTP 상태. */
 export type ErrorCode =
   | 'INCIDENT_NOT_FOUND' // 404
   | 'IDEMPOTENCY_KEY_CONFLICT' // 409
@@ -16,17 +16,19 @@ export type ErrorCode =
   | 'TENANT_SUSPENDED' // 409
   | 'AUTH_REQUIRED' // 401 — 세션 없음 · 만료 · 회수
   | 'AUTH_FAILED' // 401 — 이메일 · 비밀번호 불일치
-  | 'AUTH_CODE_INVALID' // 401 — 같은 단계에서 다시 낼 수 있다
+  | 'AUTH_CODE_INVALID' // 401 — TOTP · 이메일 · 재설정 코드 불일치(같은 단계에서 다시 낼 수 있다)
   | 'AUTH_FLOW_EXPIRED' // 401 — 처음부터 다시 로그인
   | 'AUTH_STEP_CONFLICT' // 409
-  | 'AUTH_PASSWORD_POLICY' // 422
+  | 'AUTH_PASSWORD_POLICY' // 422 — 새 비밀번호가 앱 또는 User Pool 정책 위반
   | 'AUTH_ORIGIN_REJECTED' // 403
-  | 'AUTH_FORBIDDEN' // 403 — 역할이 이 조치를 허용하지 않는다(VIEWER의 실행 · 종료, #492 PR 2)
+  | 'AUTH_FORBIDDEN' // 403 — 역할이 이 요청을 허용하지 않는다(VIEWER의 실행 · 종료 PR 2, ADMIN 외 사용자 관리 PR 3)
   | 'ACCOUNT_NOT_PROVISIONED' // 403
   | 'ACCOUNT_DISABLED' // 403
   | 'AUTH_EMAIL_DELIVERY_FAILED' // 503
   | 'AUTH_RATE_LIMITED' // 429
   | 'AUTH_PROVIDER_UNAVAILABLE' // 503
+  | 'USER_NOT_FOUND' // 404 — ADMIN 사용자 관리 대상 없음(#492 PR 3)
+  | 'USER_STATE_CONFLICT' // 409 — 마지막 ADMIN · 중복 초대 · 상태 충돌(#492 PR 3)
   | 'REQUEST_VALIDATION_FAILED' // 422
   | 'INTERNAL_ERROR'; // 500
 
@@ -737,12 +739,16 @@ export type TenantStatus = (typeof TENANT_STATUSES)[number];
 export const TENANT_DELETABLE_STATUSES: readonly TenantStatus[] = ['PENDING_CONNECTION'];
 /** POST /tenants/{id}/verify 를 받는 상태 — 정지 중에는 고객 계정에 들어가지 않는다(재개는 resume). 밖이면 TENANT_STATE_CONFLICT. */
 export const TENANT_VERIFIABLE_STATUSES: readonly TenantStatus[] = ['PENDING_CONNECTION', 'ACTIVE'];
+/** POST /tenants/{id}/suspend 를 받는 상태 — 관제 중일 때만(연결 전은 회수할 것이 없다). 밖이면 TENANT_STATE_CONFLICT. */
+export const TENANT_SUSPENDABLE_STATUSES: readonly TenantStatus[] = ['ACTIVE'];
+/** POST /tenants/{id}/resume 을 받는 상태 — 정지일 때만(연결 전을 올리는 길은 verify). 밖이면 TENANT_STATE_CONFLICT. */
+export const TENANT_RESUMABLE_STATUSES: readonly TenantStatus[] = ['SUSPENDED'];
 
 /** 연결 확인 1회의 결과 — AssumeRole → GetCallerIdentity → 계정 대조 → 최소 읽기 순으로 처음 실패한 자리. */
 export const TENANT_VERIFICATION_RESULTS = [
   'OK',
-  'ASSUME_DENIED',
-  'ACCOUNT_MISMATCH',
+  'ASSUME_DENIED', // 계정 ID 오입력도 여기로 나온다 — 연결 전이면 지우고 새로 만든다
+  'ACCOUNT_MISMATCH', // 정상 경로에서는 나오지 않는 방어 확인(역할 ARN 의 계정 = 테넌트 계정이 계약)
   'READ_DENIED',
   'UNREACHABLE',
 ] as const;
@@ -851,6 +857,8 @@ export type UserRole = 'ADMIN' | 'OPERATOR' | 'VIEWER';
 
 /** 새 비밀번호 최소 길이 — User Pool 정책과 같은 값(auth.py `NEW_PASSWORD_MIN_LENGTH`). */
 export const NEW_PASSWORD_MIN_LENGTH = 12;
+/** 비밀번호 최대 길이 — Cognito 상한(auth.py `PASSWORD_MAX_LENGTH`). */
+export const PASSWORD_MAX_LENGTH = 256;
 
 export interface LoginStepResponse {
   next_step: LoginStep;
@@ -872,4 +880,59 @@ export interface CurrentUserResponse {
   email: string;
   role: UserRole;
   session: SessionInfo;
+}
+
+/* ────────────────────────────── users.py ────────────────────────────── */
+/* /api/v1/users — ADMIN 사용자 관리(#492 PR 3). 전부 ADMIN 전용이고, 다른 역할은 서버가 403 `AUTH_FORBIDDEN`으로 막는다.
+   비밀번호 재설정(/api/v1/auth/password-reset · /confirm)은 응답 본문이 없는 204라 타입이 없다. */
+
+export type UserStatus = 'ACTIVE' | 'DISABLED';
+
+export interface UserListItem {
+  user_id: string;
+  email: string;
+  role: UserRole;
+  status: UserStatus;
+  /** 로그인한 적이 없으면 null. */
+  last_login_at: IsoDateTime | null;
+}
+
+export interface UsersResponse {
+  items: UserListItem[];
+}
+
+export interface UserInviteRequest {
+  email: string;
+  role: UserRole;
+  /** 같은 이메일의 기존 Cognito 계정을 이 앱 사용자로 연결한다. ADMIN의 명시적 선택일 때만 true다. */
+  recover_existing: boolean;
+}
+
+export type UserEventAction =
+  | 'USER_INVITED'
+  | 'INVITE_RESENT'
+  | 'ROLE_CHANGED'
+  | 'STATUS_CHANGED'
+  | 'SESSIONS_REVOKED';
+
+/** 이력에 실리는 값의 닫힌 목록 — 없는 항목은 null(또는 생략)이다. */
+export interface UserEventState {
+  role?: UserRole | null;
+  status?: UserStatus | null;
+  revoked_session_count?: number | null;
+  recover_existing?: boolean | null;
+}
+
+export interface UserEventItem {
+  event_id: string;
+  actor_user_id: string;
+  target_user_id: string;
+  action: UserEventAction;
+  before_state: UserEventState;
+  after_state: UserEventState;
+  occurred_at: IsoDateTime;
+}
+
+export interface UserEventsResponse {
+  items: UserEventItem[];
 }

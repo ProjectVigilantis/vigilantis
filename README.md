@@ -196,6 +196,149 @@ cd apps/web && npm ci && npm run dev  # 대시보드(:3000)
 > * **개발 표준 환경은 LocalStack이다**([ADR-0006](docs/adr/0006-localstack-team-standard-env.md)). 실 AWS 전환은 `AWS_ENDPOINT_URL` 줄을 지우고 자격증명을 교체하는 것 하나로 끝난다 — 코드에 환경 감지 분기를 두지 않는다.
 > * **`elbv2`·`autoscaling`은 LocalStack Community에 없다** — `EC2_ISOLATE`·`UNISOLATE`·`ENABLE_AUTOSCALING` 3종은 로컬 검증 경로가 없고 실 AWS 스모크가 유일한 검증 자리다.
 
+### 🔔 외부 알림 운영 (#493)
+
+기본값은 꺼짐(`NOTIFICATION_ENABLED=false`)이다. 켜면 업무 트랜잭션이 남긴 사건(`notification_events`)을 앱 안의 워커가 (사건, 채널)마다 `notification_deliveries` 행으로 만들고, Slack webhook이나 SNS Publish로 보낸 뒤 결과를 기록한다. 설정 키·기본값·허용 범위는 [`.env.example`](.env.example) §외부 알림과 `apps/core-api/config.py`에 있다.
+
+> **실 AWS 변경과 실제 발송 전 확인** — 대상 환경은 확정되지 않았다. 계정·리전·역할·비밀 ARN·토픽·수신처·발송 건수·비용·롤백 방법을 사용자가 승인하기 전에는 `--yes`를 붙이지 않고 실제로 보내지도 않는다. `--yes`가 없는 미리보기도 실 AWS를 읽는다. 실제 발송 확인(사건 → outbox → 워커 → receipt)은 AWS 변경 승인과 따로 승인받는다. 이때 사건을 만드는 방법·수신처·건수·정리 방법을 함께 정한다. 확인에는 승인된 활성화 **뒤에 새로 만든** 사건을 쓴다. 활성화 전 사건은 `NOT_ACTIVATED`로 막힌다.
+
+**설정 주입** — webhook 원문은 Compose에서는 커밋하지 않는 로컬 `.env`에만, ECS에서는 Secrets Manager 비밀에만 둔다. routes 파일·`--notification-config` 입력·`NOTIFICATION_ROUTES_JSON`·소스·이미지·로그·명령줄 인자에는 평문으로 두지 않는다. 값을 출력하거나 이슈·채팅에 붙여 넣지 않는다.
+
+| | Compose 개발 스택 | ECS 플랫폼 배포 |
+| :--- | :--- | :--- |
+| routes | 기존 `apps/core-api` 바인드 마운트 아래에 파일을 두고 `NOTIFICATION_ROUTES_FILE=/app/apps/core-api/<파일>`로 지정한다(`serve.py`를 거치지 않는다) | `--notification-config`의 `routes`가 `NOTIFICATION_ROUTES_JSON`으로 들어간다. `serve.py`가 검증한 뒤 `$HOME/.vigilantis/notification-routes.json`에 쓴다. JSON과 `NOTIFICATION_ROUTES_FILE`을 함께 주면 기동이 멈춘다 |
+| Slack | route의 `slack_webhook_env` 이름의 변수를 `.env`(커밋 금지)에 둔다 | 이미 있는 Secrets Manager 비밀을 쓴다. 이 계정·리전의 정확한 전체 ARN이어야 하고, SecretString은 webhook URL 원문이다. 실행 역할이 ECS `secrets`로 주입하며, 스크립트는 비밀을 만들거나 값을 쓰지 않는다 |
+| SNS | 검증 경로가 없다. ECS 컨테이너 자격증명만 쓰므로 `sns_credentials_unavailable`(PERMANENT)로 실패한다 | 플랫폼 계정이 소유한 토픽만 지정할 수 있다. 토픽·구독·KMS·교차 계정 정책은 만들지 않는다 |
+
+`--notification-config` 입력 형식(비밀 아님)은 아래와 같다. `enabled: true`를 명시해야 켜지고, `settings`에는 `.env.example`의 `NOTIFICATION_*` 조정값 8개만 넣을 수 있다. 다음 입력은 AWS를 바꾸기 전에 거부된다. 입력 검증 자체는 AWS를 부르지 않지만, CLI는 그 전에 STS로 계정을 확인한다.
+
+* 입력 파일이 80 KiB를 넘거나, 직렬화한 routes가 런타임 상한인 64 KiB를 넘는 경우
+* `settings` 조합이 런타임 규칙에 맞지 않는 경우: max backoff가 backoff보다 작거나, lease가 `2×(connect+read timeout)+10`초보다 짧으면 거부된다
+* `slack_secret_arns`의 변수 이름이 기존 설정 이름과 겹치거나 `AWS_`·`VIGILANTIS_`로 시작하는 경우(대소문자 구분 없음)
+
+```json
+{"enabled": true, "public_base_url": "https://<승인된 대시보드 origin>",
+ "routes": [{"tenant_id": "11111111-1111-4111-8111-111111111111", "aws_account_id": "<그 테넌트의 관제 계정>",
+             "slack_webhook_env": "NOTIFICATION_SLACK_A",
+             "sns_topic_arn": "arn:aws:sns:<리전>:<플랫폼 계정>:<토픽>"}],
+ "slack_secret_arns": {"NOTIFICATION_SLACK_A": "arn:aws:secretsmanager:<리전>:<플랫폼 계정>:secret:<기존 비밀>"},
+ "settings": {"NOTIFICATION_READ_TIMEOUT_SECONDS": 5}}
+```
+
+* **테넌트 연결** — route의 `tenant_id`는 대상 DB `tenants` 테이블에 실제로 등록된 행의 UUID다. `aws_account_id`는 그 행의 `aws_account_id`와 같아야 한다. 위 `11111111-1111-4111-8111-111111111111`은 형식 예시일 뿐이므로, 아래 조회로 확인한 실제 값으로 바꾼다. UUID를 추측해 넣거나, 알림을 켜려고 기본 테넌트를 만들지 않는다. 대문자·하이픈 없는 표기·중괄호·`urn:uuid:` 표기도 받지만 소문자 하이픈 형식으로 정규화된다. UUID가 아닌 이름(예: `customer-a`)은 거부된다. 아래 2026-10-20 시험 기록의 테넌트 `trial`은 이 규칙 이전의 기록이므로 입력 예시로 쓰지 않는다.
+
+  ```sql
+  BEGIN TRANSACTION READ ONLY;
+  SELECT tenant_id, aws_account_id, name, status FROM tenants WHERE aws_account_id = '<관제 계정>';
+  ROLLBACK;
+  ```
+
+  * **기동 검사(설정)** — 알림을 켠 기동은 라우트를 DB에 반영하기 전에 모든 route를 확인한다. `tenant_id`가 `tenants`에 없으면 `TENANT_NOT_FOUND`, 그 행의 `aws_account_id`와 다르면 `TENANT_ACCOUNT_MISMATCH`로 기동이 멈춘다. 하나라도 걸리면 라우트 반영은 하나도 일어나지 않는다.
+  * **기동 검사(대기 행)** — 설정 검사를 통과해도 DB의 `PENDING`·`IN_FLIGHT` 행을 **전부** 확인한다. 행의 `tenant_id`와 같은 `tenants` 행이 없거나, 있어도 행의 `aws_account_id`가 그 테넌트의 계정과 다르면 `NOTIFICATION_TENANT_TRANSITION_REQUIRED`로 기동이 멈춘다. 그 행의 계정·테넌트가 지금 설정에 남아 있는지와는 관계없다. 비교는 `tenants`의 UUID를 문자열로 바꿔 행의 값과 맞춰 보는 방식이다. 이전 형식의 문자열(예: `trial`)은 UUID로 해석하지 않으므로 일치하는 테넌트가 없는 행으로 걸린다. 이 검사는 행을 고치거나 종료하거나 보내지 않는다.
+  * **발송 행 생성·claim 때 재확인** — 사건을 발송 행으로 만들 때와 보내기 직전 claim 때 현재 DB의 테넌트·계정을 다시 읽는다. 테넌트가 없으면 `BLOCKED(TENANT_NOT_FOUND)`, 계정이 다르면 `BLOCKED(TENANT_ACCOUNT_MISMATCH)`로 종결하고 외부로 보내지 않는다. 이 조회 자체가 DB 오류로 실패하면 트랜잭션을 되돌리고, 행은 종결 상태가 되지 않은 채 다음 주기에 다시 처리된다.
+  * 이미 종료된 발송 행의 테넌트 기록과 테넌트 값이 없는(NULL) 기존 행은 고치지 않는다.
+  * `sns_topic_arn`의 계정은 토픽을 소유한 플랫폼 계정이다. 고객 소유는 `tenant_id`·`aws_account_id`로만 정하며, 토픽 계정을 고객 계정으로 보지 않는다.
+
+* **권한 범위** — `vigilantis-platform`(태스크 역할)은 지정한 토픽 ARN의 `sns:Publish`(`publish-notification-topics`)만 받는다. `vigilantis-platform-exec`(실행 역할)는 지정한 비밀 ARN의 `GetSecretValue`(`read-notification-secrets`)만 받는다. api 앱(태스크 역할)은 비밀을 읽지 못한다. 관제 대상 접근 역할 `vigilantis-access`는 알림 권한을 하나도 받지 않는다. SNS는 프로필·정적 키로 넘어가지 않고 실패하면 닫힌다.
+* **배포 명령 주의** — `deploy`는 IAM을 바꾸지 않는다. 알림을 켠 `deploy`는 미리보기를 포함해 알림 전용 정책 문서가 입력과 맞는지만 읽어서 확인하고, 다르면 멈춘다. 이 확인은 실제로 적용된 권한을 증명하지 않는다. `deploy`는 api만이 아니라 migrate·api·web을 함께 재배포한다. `--enable-dispatch`를 지금 값과 같게 주지 않으면 AI 분석·조치 실행 디스패치(`DISPATCH_ENABLED`)도 바뀐다. api는 이전 태스크를 먼저 내리므로 배포 중 끊김이 생긴다. `배포 실패`이면 서킷 브레이커가 이전 태스크 정의로 되돌렸을 수 있고, 그 정의의 알림 설정이 그대로 돈다.
+* **다시 켜기 전 경고** — 같은 수신처로 다시 켜면 `activated_at`과 epoch가 유지된다. 그래서 꺼져 있던 동안 생긴 미발송 사건과 남아 있던 `PENDING` 행이 재기동 뒤 발송된다(`BLOCKED`·`FAILED`·`SUCCEEDED`는 되살아나지 않는다). 켜기 전에 아래 조회로 미발송 건수를 확인하고, 그 건수를 보내도 되는지 승인받는다.
+* **발송 규칙**
+  * 라우트를 처음 등록하거나 수신처·테넌트를 바꾸면, 다음 기동 때 DB 시각으로 새 `activated_at`을 받는다. `created_at`이나 `occurred_at` 중 하나라도 그보다 이른 사건은 `BLOCKED(NOT_ACTIVATED)`로 끝난다. 받을 사건이 생기기 전에 활성화한다. 과거 사건을 보내려고 이벤트·라우트 행의 시각을 고치지 않는다.
+  * 수신처가 바뀐 계정의 기존 대기 행은 보내기 직전 `BLOCKED(ROUTE_CHANGED)`가 된다. 새 수신처로 옮겨 보내지 않는다.
+  * 설정 변경은 재기동(ECS는 재배포)해야 적용된다. 실행 중에 바로 적용되는 경로는 없다.
+  * `BLOCKED`·`FAILED`(`PERMANENT`·`EXHAUSTED`)·`SUCCEEDED`는 되돌리지 않는다. 재전송·취소·비우기(drain) 기능은 없다. DB를 고쳐 되살리거나 지우지 않는다.
+* **중복 가능** — 종료되는 태스크는 새 claim을 멈추고 진행 중인 결과 저장을 기다린다. 그 전에 강제 종료되면 해당 행이 `IN_FLIGHT`로 남는다. 결과를 저장하기 전에 멈춘 시도는 임대(`NOTIFICATION_LEASE_SECONDS`)가 지난 뒤 회수되어 다시 보낸다. 그래서 같은 사건이 최대 `NOTIFICATION_MAX_ATTEMPTS`번 갈 수 있다(정확히 1회 보장 없음). 임대가 `2×(connect+read timeout)+10`초보다 짧으면 기동하지 않는다.
+* **수신의 의미** — `receipt_kind`의 `SLACK_POSTED`는 Slack이 게시 요청을 받았다는 뜻이고, `SNS_ACCEPTED`는 SNS가 Publish를 접수했다는 뜻이다. 어느 쪽도 메일함 도착이나 사람이 읽었음을 뜻하지 않는다.
+* **기동 경고·실패**(계정·채널·사유 코드만 남는다) — `notification_route_blocked`는 선언됐지만 막힌 라우트로, 예를 들어 `SECRET_MISSING`·`DESTINATION_*`·`OWNERSHIP_CONFLICT`가 있다. `notification_account_ownership_missing`은 선언되지 않은 계정의 사건이며 계정마다 1회 남는다. `notification_delivery_blocked`는 보내기 직전 claim 단계에서 막힌 행마다 남는다(일부러 뺀 채널은 제외). 사건을 발송 행으로 만들 때 막힌 행은 이 로그를 남기지 않고 `blocked_reason`에만 기록된다. 설정 오류로 기동이 멈추면 `NOTIFICATION_ROUTES_REQUIRED`·`NOTIFICATION_LEASE_TOO_SHORT`·`NOTIFICATION_CONFIGURATION_FAILED` 같은 고정 코드만 남는다. 위 '테넌트 연결'의 기동 검사(`TENANT_NOT_FOUND`·`TENANT_ACCOUNT_MISMATCH`·`NOTIFICATION_TENANT_TRANSITION_REQUIRED`)에 걸리면 `notification_tenant_binding_invalid`가 그 코드를 `reason`으로 남긴다. 테넌트 ID·수신처·원래 오류 문구는 남기지 않는다. 그 뒤 `notification_dispatcher_initialize_failed`(예외 형식만)가 남고, 기동 실패는 고정 코드 `NOTIFICATION_START_FAILED`로 올라간다. 어느 route·행이 걸렸는지는 위 조회와 아래 '대기·실패 조회'로 확인한다. 발송 행 생성·claim 때의 테넌트 차단은 `blocked_reason`에 `TENANT_NOT_FOUND`·`TENANT_ACCOUNT_MISMATCH`로 남는다. 그중 claim 때 막힌 행만 `notification_delivery_blocked`에도 그 사유로 남는다.
+* **로그인 링크 차단 사유** — 알림 본문의 `상세:` 링크는 `<public_base_url>/incidents/<id>`이다. API·SSR은 서버 세션으로 보호되며, 로그인 전에 링크를 열면 `/login?next=…`로 이동했다가 로그인 뒤 같은 사이트 경로인 `/incidents/<id>`로 돌아온다(#502). 세션 보호는 로그인 여부를 확인하고, 사건의 테넌트·계정 소유 검사는 T-4에서 붙는다. CloudFront→오리진 구간은 10/13 관측 기준 `http-only`다([ADR-0010](docs/adr/0010-platform-deployment-saas-shape.md) 1차 개정). 실제 오리진 HTTPS를 확인하기 전에는 이 링크로 비밀번호를 입력하거나 세션을 쓰지 않는다.
+
+**켜기·변경·끄기 절차** — IAM 정책을 쓰는 명령은 `notification-iam`과 `notification-revoke` 둘뿐이다. 둘 다 알림이 꺼진 정의로 서비스가 안정돼 있고, 알림이 켜진 api 태스크가 하나도 남아 있지 않을 때만 실행한다. 내려가는 중인 태스크도 남은 것으로 본다. `--yes`이면 스크립트도 이 상태를 확인하고, 맞지 않으면 정책을 바꾸지 않고 멈춘다. 미리보기는 이 상태를 확인하지 않는다. 정책을 준비해도 발송은 켜지지 않는다. 모든 `--yes`는 그 단계의 미리보기를 확인한 뒤 따로 승인받는다.
+
+처음 켤 때:
+
+1. 알림이 꺼진 정의로 서비스가 안정돼 있는지 확인한다.
+2. `notification-iam --account <ID> --notification-config <파일>`로 미리보기 → 승인 → `--yes`. 입력 파일의 route에는 '테넌트 연결'의 조회로 확인한 실제 `tenant_id`·`aws_account_id`를 넣는다.
+3. 권한을 확인한다. 실제 접근 확인 방법은 대상 환경이 정해지지 않아 아직 고르지 않았다. 이 단계는 켜기 전 미해결 선행 조건이다.
+   * 승인된 IAM 정책 시뮬레이션으로 의도한 토픽·비밀은 허용되고, 범위 밖 합성 ARN은 거부되는지 실제 Publish 없이 볼 수 있다. 다만 이것은 정책 근거일 뿐 실제 IAM 실행 결과가 아니다.
+   * 비밀 주입과 SNS 실제 동작은 따로 승인된 환경·발송 확인에서만 검증한다. 시간을 기다렸다고 전파가 증명되지 않고, 시뮬레이션 통과가 런타임 동작을 증명하지도 않는다.
+   * 권한이 실제로 적용되기 전에 나간 SNS 발송은 `AccessDenied`가 PERMANENT로 분류되어 재시도 없이 `FAILED`로 끝난다.
+   * 권한을 확인하려고 승인되지 않은 실제 Publish를 보내지 않는다.
+4. 아래 '다시 켜기 전 경고'를 확인한다. 그다음 `deploy --account <ID> --tag <태그> --notification-config <파일>`로 미리보기 → 승인 → `--yes`.
+
+수신처·권한을 바꾸거나 끌 때:
+
+1. `--notification-config` 없이 `deploy --account <ID> --tag <태그>`를 실행한다. `--enable-dispatch`는 지금 값을 유지한다. `배포 완료`가 나왔는지 확인한다.
+2. 알림이 꺼진 정의로 안정됐고 이전 태스크가 모두 멈췄는지 확인한다. `배포 실패`이면 여기서 멈추고 원인부터 본다.
+3. 바꿀 때는 새 입력으로 `notification-iam`을 실행한다. 없앨 때는 `notification-revoke --account <ID>`로 알림 전용 인라인 정책 둘만 지운다. 이때 다른 정책·비밀·토픽·구독과 태그 없는 역할은 건드리지 않는다.
+4. 다시 켤 때만 처음 켤 때의 3–4단계를 밟는다.
+
+이전 정책을 자동으로 되돌리거나 실패한 건을 다시 보내는 기능은 없다.
+
+**대기·실패 조회** — 읽기 전용이다. Compose는 `docker compose exec db psql -U vigilantis -d vigilantis`로 접속한다. 배포 DB 접속 경로는 따로 승인받는다.
+
+```sql
+BEGIN TRANSACTION READ ONLY;
+-- 상태별 건수: BLOCKED 사유 · FAILED의 PERMANENT(영구 실패)/EXHAUSTED(재시도 소진)
+SELECT channel, state, COALESCE(blocked_reason, final_reason) AS reason, count(*)
+FROM notification_deliveries GROUP BY 1, 2, 3 ORDER BY 1, 2, 3;
+-- 최근 종결 실패·차단 50건(수신처·비밀값 컬럼은 없다)
+SELECT delivery_id, event_id, channel, state, blocked_reason, final_reason, last_category, last_error_code, attempts, finished_at
+FROM notification_deliveries WHERE state IN ('BLOCKED', 'FAILED') ORDER BY finished_at DESC LIMIT 50;
+-- 대기 건수 · 가장 오래된 대기
+SELECT channel, state, count(*), min(created_at) AS oldest, min(next_attempt_at) AS next_due
+FROM notification_deliveries WHERE state IN ('PENDING', 'IN_FLIGHT') GROUP BY 1, 2;
+-- 아직 행이 없는 사건(워커가 읽지 않은 outbox) — 채널마다
+SELECT c.channel, count(*), min(e.created_at) AS oldest
+FROM notification_events e CROSS JOIN (VALUES ('SLACK'), ('SNS')) AS c(channel)
+WHERE NOT EXISTS (SELECT 1 FROM notification_deliveries d WHERE d.event_id = e.event_id AND d.channel = c.channel)
+GROUP BY 1;
+ROLLBACK;
+```
+
+**실제 발송 시험 기록(2026-10-20)** — 개인 AWS 계정의 일회용 ECS 시험으로 실제 Slack·SNS 발송 경로를 한 번 확인한 기록이다. 팀 환경 배포나 `provision_platform_aws.py`의 `deploy`를 검증한 것이 아니며, 로그인·`상세:` 링크, 실 AWS 격리·원복, 실제 권한 격리·롤백도 확인하지 않았다.
+
+* **방법** — 기준 커밋 `aaf14d3`의 core 이미지에 사건 주입 단계를 더한 일회용 시험 이미지로 Fargate 태스크 하나를 띄웠다. 태스크 안에서 `db`(`postgres:16-alpine`, 일회용 시험 DB) → `migrate`(`alembic upgrade head`) → `api` → `inject` 순으로 기동했다. `api`는 실제 `serve.py`·routes·앱 내 알림 워커를 그대로 썼고 `DISPATCH_ENABLED`·`SCAN_ENABLED`는 껐다. 라우트는 합성 고객(테넌트 `trial`, 계정 `111111111111`) 하나였고, `NOTIFICATION_MAX_ATTEMPTS=1`, `public_base_url`은 일부러 동작하지 않는 `.invalid`였다.
+* **사건 주입** — `inject`는 빈 시험 DB에서 trial 테넌트의 SLACK·SNS가 활성화된 뒤에만 돌았다. 자산과 원복 원본·백업을 시드하고 격리·원복 AWS 조치는 테스트 대역으로 보낸 채, 실제 경로(`receive_threat` → `close_execution` → dispatcher 2주기)로 사건 5건을 만들고 공급자 receipt를 최대 120초 기다렸다. 기대값은 사건 5건 × 2채널 = 발송 행 10건이었다.
+* **판정 기준** — `STOPPED`만으로 통과로 보지 않았다. `inject` 종료 코드 0, CloudWatch 로그의 `RECEIPTS_CONFIRMED` 보고, 사람의 Slack·메일 수신 확인을 모두 보았다.
+* **AWS 시험 전 확인** — `aaf14d3` 기준 core·시험 이미지 빌드에 성공했다. `--network none`에서 알림을 끈 채 운영 `serve.py` health, migration head `d493a1b2c302`, 사건 5건 생성과 발송 0건을 확인했다. 실 AWS 생성·배포·발송 전의 기동 확인이며, receipt 확인은 아래 ECS 실행 결과에 있다.
+
+AWS 준비 단계(2026-10-20, 태스크 실행 전 기록):
+
+* 생성: 시험 클러스터, 로그 그룹(보존 7일), 보안 그룹(인바운드 없음, 아웃바운드 443만), IAM 역할 2개(태스크: 지정 토픽 `sns:Publish`만 / 실행: 비밀 2개 읽기와 이미지 pull·로그만), Slack·DB 비밀. 비밀 값은 출력하지 않았다. Slack 값은 정규화해 넣었고, DB 값은 새로 생성했다. DB URL은 생성 시 loopback·`notification_trial` 조건을 확인했다.
+* 이미지: 변경 불가(immutable) ECR 저장소에 올렸다. 원격 digest가 로컬에서 검증한 이미지와 일치한다. 다만 ECR 로그인의 자격증명 저장 단계가 `Access is denied`로 실패했고, 그 뒤 push는 성공했다. 그래서 확인된 것은 원격 digest와 상태뿐이다. 인증 경로가 정상인지, 사용자 Docker 설정이 바뀌지 않았는지는 확인하지 못했다.
+* 구독: Gmail 확인 요청 1회. SNS 구독 목록 메타데이터상 Gmail·Naver 모두 확인(confirmed) 상태다.
+* IAM 정책 시뮬레이션(리소스별): 태스크 역할은 지정 토픽만 허용되고, 범위 밖 합성 토픽, `GetSecretValue`, EC2는 거부됐다. 실행 역할은 지정 비밀 2개만 허용되고 다른 비밀은 거부됐다. 처음에는 결과 파서가 집계 `EvalDecision`을 읽어 실패했다. 원본 `ResourceSpecificResults`로 범위 결과를 다시 확인했고, 정책은 바꾸지 않았다. 시뮬레이션은 실제 실행 결과가 아니다.
+* 이 단계 종료 시점에는 태스크 시작·사건 Publish·Slack 발송이 0건이었다. 실행 결과는 아래에 이어진다.
+
+ECS 실행 결과(2026-10-20, 기준 커밋 `aaf14d3`, 이미지 `sha256:ceeed413b7170ef90870abb72c1a11d6fd88198820de340ed95d1176d3bf6169`):
+
+* **1차 — `inject` 없는 개정 1**(run `567cbf60-d606-4f34-8830-7909d5281a65`, task `10d8d38c05e24636bb71fb78d17a0d16`): ECR에서 실제로 pull했고 ECS 비밀 주입이 이뤄졌다. 운영 `serve.py`로 기동해 DB·API가 HEALTHY였고 Alembic head는 `d493a1b2c302`였다. `notification_dispatcher_started` 1건, 라우트 차단 0건, 발송 로그 0건이었다. 운영자가 멈췄다(`UserInitiated`). 종료 코드는 migrate·db 0, API 143(SIGTERM)이라 전부 0은 아니다.
+* **2차 — 별도 승인된 발송 태스크 1회, 개정 2**(run `3717aaa7-0423-4d2e-8926-25264cce53cb`, task `b51e24cfbcff478f989d9755e2135456`): `inject` 종료 코드 0. CloudWatch `/vigilantis-notify-trial`의 `inject/inject/b51e24cfbcff478f989d9755e2135456` 스트림에 `RECEIPTS_CONFIRMED` 보고가 남았다. API 로그에는 워커 시작 1건, 발송 종결 10건, 차단 0건이 찍혔다. 태스크는 `EssentialContainerExited`로 `STOPPED`됐고, 종료 코드는 inject·migrate·db 0, API 143이다. 자동 재주입은 없었다. 실 AWS 조치도 없었다(자산·원복 원본은 시드다).
+
+| 사건 | event_id | SLACK | SNS |
+| :--- | :--- | :--- | :--- |
+| HIGH_INCIDENT_CREATED / CREATED | `5099358e-7819-4360-96d8-ff15b53686bf` | SUCCEEDED / `SLACK_POSTED` | SUCCEEDED / `SNS_ACCEPTED` |
+| AUTO_ISOLATION / REQUESTED | `e026c8a2-3c37-4068-9d9f-d411de3c96a3` | SUCCEEDED / `SLACK_POSTED` | SUCCEEDED / `SNS_ACCEPTED` |
+| AUTO_ISOLATION / RESULT SUCCESS | `c236301d-96be-4ac3-8816-cedc262fdf47` | SUCCEEDED / `SLACK_POSTED` | SUCCEEDED / `SNS_ACCEPTED` |
+| AUTO_ROLLBACK / REQUESTED | `afcc6240-1590-4ef6-826f-abac385ce145` | SUCCEEDED / `SLACK_POSTED` | SUCCEEDED / `SNS_ACCEPTED` |
+| AUTO_ROLLBACK / RESULT SUCCESS | `03d1ce96-da59-4bd9-9237-28dc7012ca02` | SUCCEEDED / `SLACK_POSTED` | SUCCEEDED / `SNS_ACCEPTED` |
+
+모든 행의 사유·오류 코드는 null이다.
+
+* **입증된 범위**
+  * 실제 SNS 허용 경로가 이번 실행으로 확인됐다. 범위 밖 토픽 거부는 앞의 시뮬레이션 근거뿐이며, 실제 범위 밖 Publish 시험은 하지 않았다.
+  * 이미지 pull과 비밀 주입은 실행 역할로 이뤄진 것이 관측됐다. 로컬 정적 프로필로 넘어간 것이 아니다.
+* **사람의 수신 확인** — 위 10건은 공급자 receipt이며 사람의 수신이 아니다. 사람 쪽 확인은 따로 했다. 사용자가 Slack·Naver·Gmail 세 채널 모두 정상 수신을 알리고, 채널마다 대표 화면 1장을 보냈다. 화면 속 사건은 위 표의 event_id와 일치한다(Slack·Naver: HIGH_INCIDENT_CREATED `5099358e-…`, Gmail: AUTO_ROLLBACK REQUESTED `afcc6240-…`). 세 화면 모두 한글·줄바꿈이 제대로 보이고, `상세:` 링크도 표시되어 읽을 수 있다. 다만 각 화면은 메시지 한 건이다. 채널별 5건 도착을 따로 세어 확인하지는 않았다(근거는 사용자 보고뿐이다). 화면 원본·수신 주소·구독 해지 URL은 저장하지 않는다.
+* **검증하지 않은 것** — 링크를 눌렀을 때 어디로 가는지와 로그인·테넌트 접근은 확인하지 않았다(`.invalid` 링크는 일부러 동작하지 않게 했다). 실 AWS 조치도 없었다.
+* **정리 결과(2026-10-20, 사용자 승인)** — 일회용 DB는 태스크가 멈출 때 예상대로 사라졌다. 시험 자원은 아래처럼 정리했고, 각 항목은 조회 결과로 확인했다.
+  * ECR 시험 저장소를 삭제했다(`DescribeRepositories` → `RepositoryNotFoundException`). 복구용 로컬 이미지(위 digest)는 남겨 두었다.
+  * ECS 클러스터를 삭제했다(`INACTIVE`, 클러스터 목록에 없음). 시험 태스크 정의 `:1`·`:2`는 등록 해제되어 `INACTIVE`다. 영구 삭제는 아니지만, 반복 실행되는 compute는 없다.
+  * 시험 보안 그룹을 삭제했다(`InvalidGroup.NotFound`).
+  * 시험 실행·태스크 역할을 삭제했다(`NoSuchEntity`). 역할에 딸린 인라인 정책은 지웠다. AWS 관리형 실행 정책은 분리(detach)만 했고 정책 자체는 지우지 않았다.
+  * Slack·DB 비밀은 복구 기간 7일로 삭제 예약했다. 예정일은 2026-10-27 14:23:53(Slack)·14:23:54(DB) KST다. 강제 삭제는 하지 않았고, 비밀 값도 읽지 않았다. 예정일 전에는 복구할 수 있다. 실제 영구 삭제는 예정일 뒤 비동기로 일어날 수 있어 정확한 시각은 보장하지 않는다.
+  * 남긴 것: CloudWatch 로그 그룹 `/vigilantis-notify-trial`(보존 7일 — 로그만 만료되고 그룹 자체는 자동 삭제되지 않는다), 기존 SNS 토픽과 확인된 Naver·Gmail 구독, 사이트, VPC·서브넷·라우팅, 원본 webhook 파일, 로컬 이미지.
+  * 위 준비 단계의 ECR 인증 경로 단서는 여전히 유효하다.
+
 ---
 
 ## 🧪 테스트 & CI

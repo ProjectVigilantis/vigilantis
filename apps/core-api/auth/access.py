@@ -6,6 +6,7 @@
 #     WebSocket 은 유휴 시간을 늘리지 않는다 — 연장은 POST /api/v1/auth/activity 뿐이다.
 #   - Cognito 설정을 읽지 않는다. Cognito 가 비어도 보호 API 는 세션만으로 동작한다.
 #   - 거절: 미인증 401 AUTH_REQUIRED, 역할 불허 403 AUTH_FORBIDDEN — 라우터 본문 · Workflow 전이다.
+#     require_admin 은 사용자 관리(#492 PR 3)용 ADMIN 전용 검사다.
 #   - 통과한 신원(CurrentUser)은 request.state.current_user 에 둔다. 접근 로그(main)가 읽고,
 #     조치 실행 · 종료 라우터는 역할 검사 결과로 같은 신원을 받는다(감사 기록은 T-2).
 # ==============================================================================
@@ -58,6 +59,13 @@ _USER = Depends(require_user)
 def require_action_role(user: service.CurrentUser = _USER) -> service.CurrentUser:
     """조치 실행 · 인시던트 종료 권한. require_user 다음에 돈다(같은 요청에서 한 번만 판정)."""
     if user.role not in ACTION_ROLES:
+        raise ApiError(ErrorCode.AUTH_FORBIDDEN)
+    return user
+
+
+def require_admin(user: service.CurrentUser = _USER) -> service.CurrentUser:
+    """사용자 관리 권한(ADMIN 만). require_user 다음에 돈다 — 본문 검증 · Cognito 의존성보다 앞선다."""
+    if user.role is not UserRole.ADMIN:
         raise ApiError(ErrorCode.AUTH_FORBIDDEN)
     return user
 
