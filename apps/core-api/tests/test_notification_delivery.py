@@ -1618,7 +1618,8 @@ def test_startup_route_check_runs_before_the_legacy_transition_check(sessions, p
 
 LEGACY_TENANTS = {
     "slug": "customer-a",
-    "uuid-without-tenant": TENANT_MISSING,
+    "uuid-without-hyphens": TENANT_MISSING.replace("-", ""),
+    "uppercase-uuid": "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
     "uuid-of-other-account": TENANT_B,  # Tenant B는 있지만 계정이 ACCOUNT_B라 ACCOUNT_A 행과 어긋난다
 }
 
@@ -1757,6 +1758,171 @@ def test_canonical_unfinished_deliveries_with_matching_tenant_keep_initialize_id
     second = make_dispatcher(sessions, config, slack=SlackWire(), sns=SnsWire())
     second.initialize()
     second.initialize()
+    assert snapshot(pg_engine) == before
+
+
+def test_deleted_tenant_does_not_block_api_or_other_tenants(
+    sessions, pg_engine, monkeypatch, capsys,
+):
+    import main
+    from config import get_settings
+    from fastapi.testclient import TestClient
+    from notifications.runtime import NotificationRuntime
+
+    config = registry(
+        entry(TENANT_A, ACCOUNT_A, sns=TOPIC_A),
+        entry(TENANT_B, ACCOUNT_B, sns=TOPIC_B),
+    )
+    activate(make_dispatcher(sessions, config, sns=SnsWire()), pg_engine)
+    before = snapshot(pg_engine)["notification_routes"]
+    delete_tenant(pg_engine, TENANT_A)
+    wire = SnsWire()
+    worker = make_dispatcher(sessions, config, sns=wire)
+    runtime = NotificationRuntime(worker, worker._senders)
+    monkeypatch.setattr(main, "build_notification_runtime", lambda _: runtime)
+    monkeypatch.setenv("NOTIFICATION_ENABLED", "true")
+    get_settings.cache_clear()
+    try:
+        with TestClient(main.create_app()) as client:
+            assert client.get("/health").status_code == 200
+            assert snapshot(pg_engine)["notification_routes"] == before
+            deleted = commit_event(sessions, ACCOUNT_A)
+            active = commit_event(sessions, ACCOUNT_B)
+            assert _wait_for(lambda: rows(pg_engine, active).get("SNS") is not None
+                             and rows(pg_engine, active)["SNS"].state == "SUCCEEDED")
+            assert rows(pg_engine, deleted)["SNS"].state == "BLOCKED"
+            assert rows(pg_engine, deleted)["SNS"].blocked_reason == "TENANT_NOT_FOUND"
+        assert [p["topic"] for p in wire.publishes] == [TOPIC_B]
+        assert not [t for t in threading.enumerate() if t.name.startswith("notification-")]
+        # create_app의 setup_logging은 루트 핸들러를 교체한다. 실제 JSON 출력을 검증한다.
+        output = capsys.readouterr().out
+        logged = [
+            record for line in output.splitlines()
+            if (record := json.loads(line)).get("event") == "notification_tenant_binding_degraded"
+        ]
+        assert [(r["aws_account_id"], r["channel"], r["reason"]) for r in logged] == [
+            (ACCOUNT_A, "SNS", "TENANT_NOT_FOUND"),
+        ]
+        for secret in (TENANT_A, TENANT_B, WEBHOOK_A, WEBHOOK_B):
+            assert secret not in output
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.parametrize("changed", ["destination", "account"])
+def test_existing_binding_does_not_allow_changed_invalid_configuration(
+    sessions, pg_engine, changed,
+):
+    original = registry(entry(TENANT_A, ACCOUNT_A, slack="SLACK_A"))
+    activate(make_dispatcher(sessions, original, slack=SlackWire()), pg_engine)
+    if changed == "destination":
+        delete_tenant(pg_engine, TENANT_A)
+        config = registry(entry(TENANT_A, ACCOUNT_A, slack="SLACK_A2"))
+        code = "TENANT_NOT_FOUND"
+    else:
+        move_tenant_account(pg_engine, TENANT_A, ACCOUNT_OTHER)
+        config, code = original, "TENANT_ACCOUNT_MISMATCH"
+    before = snapshot(pg_engine)
+    refuse(make_dispatcher(sessions, config, slack=SlackWire()), code)
+    assert snapshot(pg_engine) == before
+
+
+@pytest.mark.parametrize("remove_route", [False, True])
+def test_deleted_tenant_unfinished_rows_survive_restarts_without_resending(
+    sessions, pg_engine, remove_route,
+):
+    config = registry(
+        entry(TENANT_A, ACCOUNT_A, sns=TOPIC_A),
+        entry(TENANT_B, ACCOUNT_B, sns=TOPIC_B),
+    )
+    first = make_dispatcher(sessions, config, sns=SnsWire())
+    activate(first, pg_engine)
+    pending = commit_event(sessions)
+    first.discover("SNS")
+    binding = route_row(pg_engine, ACCOUNT_A, "SNS")
+    in_flight = commit_event(sessions)
+    put_delivery(
+        pg_engine, in_flight, "SNS", "IN_FLIGHT",
+        route_fingerprint=binding.fingerprint, route_epoch=binding.route_epoch,
+    )
+    delete_tenant(pg_engine, TENANT_A)
+    if remove_route:
+        config = registry(entry(TENANT_B, ACCOUNT_B, sns=TOPIC_B))
+    wire = SnsWire()
+    before = snapshot(pg_engine)["notification_deliveries"]
+    for _ in range(2):
+        restarted = make_dispatcher(sessions, config, sns=wire)
+        restarted.initialize()
+        assert snapshot(pg_engine)["notification_deliveries"] == before
+    if remove_route:
+        assert route_row(pg_engine, ACCOUNT_A, "SNS") is None
+    expire_leases(pg_engine)
+    make_due(pg_engine)
+    assert restarted.process_one("SNS") is True
+    make_due(pg_engine)  # 회수된 시도의 backoff를 기다리지 않는다
+    assert restarted.process_one("SNS") is True
+    for event_id, attempts in ((pending, 0), (in_flight, 1)):
+        row = rows(pg_engine, event_id)["SNS"]
+        assert (row.state, row.attempts, row.claim_token) == ("BLOCKED", attempts, None)
+        assert row.blocked_reason == ("OWNERSHIP_MISSING" if remove_route else "TENANT_NOT_FOUND")
+    assert wire.publishes == []
+
+
+@pytest.mark.parametrize("reclaim", [False, True])
+def test_deleted_tenant_late_result_keeps_the_claim_token_fence(
+    sessions, pg_engine, reclaim,
+):
+    config = registry(entry(TENANT_A, ACCOUNT_A, sns=TOPIC_A))
+    first = make_dispatcher(sessions, config, sns=SnsWire())
+    activate(first, pg_engine)
+    event_id = commit_event(sessions)
+    first.discover("SNS")
+    claim = first._claim("SNS")
+    assert claim is not None
+    delete_tenant(pg_engine, TENANT_A)
+    wire = SnsWire()
+    restarted = make_dispatcher(sessions, config, sns=wire)
+    restarted.initialize()
+    if reclaim:
+        expire_leases(pg_engine)
+        restarted._recover("SNS")
+    with sessions() as db:
+        applied = deliveries_repo.settle(
+            db, claim.delivery_id, claim.token,
+            deliveries_repo.succeeded("SNS_ACCEPTED", "late-deleted"),
+        )
+        db.commit()
+    assert applied is not reclaim
+    if reclaim:
+        make_due(pg_engine)
+        assert restarted.process_one("SNS") is True
+        assert rows(pg_engine, event_id)["SNS"].state == "BLOCKED"
+    else:
+        assert rows(pg_engine, event_id)["SNS"].state == "SUCCEEDED"
+    assert wire.publishes == []
+
+
+def test_missing_canonical_snapshot_does_not_prove_delivery_ownership(sessions, pg_engine):
+    config = registry(entry(TENANT_A, ACCOUNT_A, sns=TOPIC_A))
+    wire = SnsWire()
+    event_id = commit_event(sessions)
+    put_delivery(pg_engine, event_id, "SNS", "PENDING", tenant_id=TENANT_MISSING)
+    restarted = make_dispatcher(sessions, config, sns=wire)
+    restarted.initialize()  # UUID 형식만으로 발송 권한을 인정하는 것은 아니다
+    make_due(pg_engine)
+    assert restarted.process_one("SNS") is True
+    row = rows(pg_engine, event_id)["SNS"]
+    assert (row.state, row.blocked_reason, row.attempts) == ("BLOCKED", "ROUTE_CHANGED", 0)
+    assert wire.publishes == []
+
+
+def test_database_error_on_degraded_candidate_keeps_startup_fail_closed(sessions, pg_engine):
+    config = registry(entry(TENANT_A, ACCOUNT_A, sns=TOPIC_A))
+    activate(make_dispatcher(sessions, config, sns=SnsWire()), pg_engine)
+    delete_tenant(pg_engine, TENANT_A)
+    before = snapshot(pg_engine)
+    with tenant_lookup_failing(pg_engine), pytest.raises(OperationalError):
+        make_dispatcher(sessions, config, sns=SnsWire()).initialize()
     assert snapshot(pg_engine) == before
 
 
