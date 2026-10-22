@@ -41,7 +41,8 @@ def _reason_labels(connection) -> set[str]:
 def test_revision_is_the_single_head_after_tenants(migration_config):
     script = ScriptDirectory.from_config(migration_config)
     assert script.get_revision(REVISION).down_revision == PARENT
-    assert script.get_heads() == [REVISION]
+    # head 를 이 리비전으로 고정하지 않는다 — 뒤에 리비전이 붙으면 깨진다. 한 줄 사슬인지만 본다
+    assert len(script.get_heads()) == 1
 
 
 def test_roundtrip_matches_orm_and_restores_enum(pg_engine, migration_config):
