@@ -1,8 +1,8 @@
 # ==============================================================================
 # [파일 설명]  담당: 김승철 (Data & Rule Engine · API 계약)
 # /api/v1/tenants — 고객 계정 연결 · 원격 회수(Post-MVP T-4)의 관리자 API 외부 DTO입니다.
-# 관리자 대시보드(FE)와의 공개 계약이며, **구현은 이 계약 뒤에 붙는다**(T-17 SaaS 전환
-# ADR `Accepted` 뒤 — #479).
+# 관리자 대시보드(FE)와의 공개 계약이며, **구현은 이 계약 뒤에 붙는다**. 큰 틀의 원천은
+# ADR-0012(T-17 SaaS 전환 · #491)이고, 이 계약이 ADR 과 어긋나면 계약을 고친다.
 #
 # 연결 방식(#438 범위 확정 코멘트 §C-1): 플랫폼 ECS 태스크 역할이 고객 계정의 역할
 # (기본 `vigilantis-access`)에 `sts:AssumeRole` + `ExternalId` 로 들어간다. 장기 키는 받지 않는다.
@@ -13,8 +13,9 @@
 #     만든 값(`tenant_id` · `external_id`), 관측한 값(연결 확인 결과)을 칸으로 가른다.
 #     연결 확인 결과는 「지금 연결된다」가 아니라 **그 시각에 확인한 결과**다.
 #   - 상태(`status`)는 수집 · AI 분석 · 실행의 관문이다. 화면 표시가 아니라 동작을 바꾼다.
-#     `SUSPENDED` 가 「원격 회수」다 — 플랫폼이 그 계정에 **더 들어가지 않는다**는 뜻이고,
-#     고객 계정의 역할을 지우는 것이 아니다(고객 계정 소유라 플랫폼이 지울 수 없다).
+#     `SUSPENDED` 가 「원격 회수」다 — 플랫폼이 그 계정에 **새로 들어가지 않는다**는 뜻이고(정지 전에
+#     시작된 실행의 마무리는 예외 · 아래 경로 표), 고객 계정의 역할을 지우는 것이 아니다(고객 계정
+#     소유라 플랫폼이 지울 수 없다).
 #   - `external_id` 는 플랫폼이 테넌트를 만들 때 한 번 정하고 바꾸지 않는다. 상세 응답에는
 #     칸이 없고, 생성 응답 · 연결 전 상세의 온보딩 링크 · **재발급 경로**에서만 내보낸다.
 #   - T-6(고객별 자동 조치 끄기) · T-16(구독 현황 모의)의 칸은 자리만 둔다 — 값의 뜻은
@@ -30,7 +31,26 @@
 #   POST   /tenants/{id}/verify      → TenantVerifyResponse. VERIFIABLE_STATUSES 밖이면 TENANT_STATE_CONFLICT
 #   POST   /tenants/{id}/suspend     TenantSuspendRequest → TenantDetail. SUSPENDABLE_STATUSES 밖이면 TENANT_STATE_CONFLICT
 #   POST   /tenants/{id}/resume      → TenantVerifyResponse(연결 확인 성공 시 ACTIVE). RESUMABLE_STATUSES 밖이면 TENANT_STATE_CONFLICT
-#   **고객 계정에 들어가는 경로는 verify · resume 둘뿐이고, 정지(SUSPENDED) 중에는 resume 하나다.**
+#   **이 라우터에서 고객 계정에 들어가는 경로는 verify · resume 둘뿐이고, 정지(SUSPENDED) 중에는 resume
+#   하나다.** 라우터 밖의 예외는 하나 — 정지 전에 시작된 실행의 마무리(종료 판정 · 자동 원복)는 정지
+#   뒤에도 끝까지 돈다(ADR-0012 §3). 멈추면 고객 자산이 반쯤 바뀐 채 남는다.
+#
+# 기존 경로의 테넌트 범위 (ADR-0012 §3 · §4) — 응답 모양은 그대로 두고 거절만 정한다
+#   - **범위 밖은 없는 것이다.** 요청의 테넌트 범위 밖 인시던트는 목록에서 빠지고, 상세 · 실행 · 종료는
+#     404 INCIDENT_NOT_FOUND 다. 403 은 그 ID 가 있다는 것을 알려 주고, AUTH_FORBIDDEN 은 「역할이 허용하지
+#     않음」이라 뜻도 다르다. 플랫폼 운영자는 전부 본다. 범위를 요청에 싣는 방법은 T-1(#492)이 정한다.
+#   - **정지된 테넌트** — 새 실행(POST /actions/execute)은 플랫폼 운영자를 포함해 409 TENANT_SUSPENDED 다
+#     (새 실행은 고객 계정에 들어가는 일이다). 종료(POST /incidents/{id}/resolve)는 고객사 사용자에게
+#     409 TENANT_SUSPENDED 이고, 플랫폼 운영자에게는 받는다(해지한 고객의 열린 인시던트 정리). 조회는 그대로다.
+#   - **판정 순서** — 역할(403 AUTH_FORBIDDEN · 대상을 읽기 전) → 범위(404) → 같은 Key 재요청(실행만 ·
+#     200 재생 · 다른 조치면 409 IDEMPOTENCY_KEY_CONFLICT) → 정지(409 TENANT_SUSPENDED)
+#     → 인시던트 · 제안 상태(409). 범위를 정지보다 먼저 봐야 범위 밖 테넌트의 정지 여부가 새지 않고,
+#     재요청을 정지보다 먼저 봐야 정지 전에 접수된 실행의 재요청이 거절로 읽히지 않는다(재요청은 새 예약을
+#     만들지 않는다). 재요청을 범위보다 뒤에 두는 것은 다른 테넌트의 Key 로 남의 실행 응답이 재생되지 않게
+#     하려는 것이다. 종료의 재요청(이미 종료면 200)은 Key 가 아니라 인시던트 상태로 판정하므로 정지 뒤 자리다.
+#   - 자산 목록(GET /assets) · 메트릭 시계열(GET /metrics/timeseries)도 범위 밖은 빠진다 — ID 로 여는
+#     경로가 없어 404 자리는 없다.
+#   - 실시간 이벤트(WebSocket)도 범위 밖은 보내지 않는다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -75,7 +95,8 @@ class TenantStatus(str, Enum):
     PENDING_CONNECTION = "PENDING_CONNECTION"
     #: 관제 중.
     ACTIVE = "ACTIVE"
-    #: 원격 회수. 새 수집 · 새 분석 · 새 실행을 하지 않는다. 기존 기록은 읽을 수 있다.
+    #: 원격 회수. 새 수집 · 새 분석 · 새 실행을 하지 않는다. 정지 전에 시작된 실행의 마무리(종료 판정 ·
+    #: 자동 원복)는 끝까지 돈다. 기존 기록은 읽을 수 있다(고객사 사용자는 조회 전용 · 모듈 머리말).
     SUSPENDED = "SUSPENDED"
 
 
@@ -87,7 +108,7 @@ DELETABLE_STATUSES: frozenset[TenantStatus] = frozenset({TenantStatus.PENDING_CO
 
 #: POST /tenants/{id}/verify 를 받는 상태. 확인은 고객 계정에 들어가는 일이라 정지(SUSPENDED)
 #: 중에는 받지 않는다 — 원격 회수가 「더 들어가지 않는다」이고, 재개 경로(resume)가 이미 확인을
-#: 거친다. 정지 테넌트에 들어가는 길은 resume 하나다. 밖이면 TENANT_STATE_CONFLICT.
+#: 거친다. 정지 테넌트에 새로 들어가는 길은 resume 하나다. 밖이면 TENANT_STATE_CONFLICT.
 VERIFIABLE_STATUSES: frozenset[TenantStatus] = frozenset(
     {TenantStatus.PENDING_CONNECTION, TenantStatus.ACTIVE}
 )
@@ -282,7 +303,7 @@ class TenantVerifyResponse(BaseModel):
 
     verify: PENDING_CONNECTION 에서 OK 면 ACTIVE 가 된다. 그 밖에는 상태를 바꾸지 않는다 —
     ACTIVE 의 확인 실패로 자동 정지하지 않는다(정지는 사람의 판단이다). **SUSPENDED 에서는
-    받지 않는다**(VERIFIABLE_STATUSES) — 정지 중 계정에 들어가는 길은 resume 하나다.
+    받지 않는다**(VERIFIABLE_STATUSES) — 정지 중 계정에 새로 들어가는 길은 resume 하나다.
     resume: SUSPENDED 에서 확인을 먼저 하고, OK 면 ACTIVE · 실패면 SUSPENDED 그대로다.
     """
 
