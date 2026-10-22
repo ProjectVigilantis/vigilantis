@@ -118,6 +118,18 @@ def test_non_admin_is_forbidden_everywhere(client_pg, db, login_as, onboarding, 
     assert tenants_repo.get_tenant(db, tenant.tenant_id).tenant.name == "학원"
 
 
+@pytest.mark.parametrize("method,path,body", [r for r in REQUESTS if r[0] != "GET"])
+def test_state_changing_requests_from_another_origin_are_403(client_pg, db, admin, method, path, body):
+    # 라우터의 Origin 관문(main.py protected)은 require_admin 이 세션을 따로 보기 때문에 401 · 403 테스트로는
+    # 빠져도 드러나지 않는다 — 허용 밖 Origin 의 상태 변경이 본문 전에 막히는지 따로 본다(#519 리뷰)
+    tenant = _seed(db)
+    resp = client_pg.request(method, BASE + path.replace("{id}", tenant.tenant_id), json=body,
+                             headers={"Origin": "https://evil.example"})
+    assert resp.status_code == 403 and _code(resp) == "AUTH_ORIGIN_REJECTED"
+    assert _tenant_count(db) == 1
+    assert tenants_repo.get_tenant(db, tenant.tenant_id).tenant.name == "학원"
+
+
 def test_unauthenticated_is_401(client_pg):
     assert client_pg.get(BASE, headers={"Cookie": ""}).status_code == 401
 

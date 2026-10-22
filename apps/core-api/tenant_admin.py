@@ -39,13 +39,13 @@ from sqlalchemy.orm import Session
 # 같은 계정의 두 번째 테넌트를 DB 유일성이 거절할 때의 제약 이름(db.session NAMING_CONVENTION)
 _ACCOUNT_UNIQUE = "uq_tenants_aws_account_id"
 
-# CloudFormation 빠른 생성 링크. 템플릿(INFRA)이 아래 이름의 파라미터를 받는다 — 이름을 바꾸면 함께 바꾼다.
+# CloudFormation 빠른 생성 링크. 템플릿(INFRA)이 onboarding_url 의 param_* 이름 그대로 파라미터를 받는다
+# — 이름을 바꾸면 템플릿과 test_tenants_api 의 링크 파라미터 단언을 함께 바꾼다.
 _QUICK_CREATE = (
     "https://{region}.console.aws.amazon.com/cloudformation/home?region={region}"
     "#/stacks/quickcreate?{query}"
 )
 ONBOARDING_STACK_NAME = "vigilantis-access"
-ONBOARDING_PARAMETERS = ("ExternalId", "PlatformPrincipalArn", "RoleName")
 
 
 # --- 응답 조립 ------------------------------------------------------------------

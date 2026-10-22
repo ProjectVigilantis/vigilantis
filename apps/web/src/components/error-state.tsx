@@ -42,10 +42,14 @@ const PRESENTATION: Record<ErrorCode, Presentation> = {
   INTERNAL_ERROR: { variant: 'page' },
   // 고객(테넌트) 관리 API(Post-MVP T-4). 화면 문구는 관리자 대시보드를 붙일 때 FE 담당이 다시 정한다.
   TENANT_NOT_FOUND: { variant: 'page', backToList: true },
-  TENANT_ACCOUNT_CONFLICT: { variant: 'inline', note: '이 AWS 계정은 이미 다른 고객으로 등록돼 있습니다.' },
+  // note 는 서버 message 아래에 붙는다 — message 가 말하지 않은 다음 행동만 적는다
+  TENANT_ACCOUNT_CONFLICT: {
+    variant: 'inline',
+    note: '고객 목록에서 같은 계정 ID의 고객을 여세요. 계정 ID를 잘못 넣었다면 고쳐서 다시 추가합니다.',
+  },
   TENANT_ONBOARDING_UNAVAILABLE: {
     variant: 'inline',
-    note: '온보딩 링크를 만들 서버 설정이 없습니다. 플랫폼 운영자에게 알려 주세요.',
+    note: '온보딩 템플릿 주소와 플랫폼 역할이 배포 설정에 들어가기 전에는 다시 시도해도 같은 결과입니다.',
   },
   // 그 사이 다른 관리자가 상태를 바꿨다는 뜻 — PROPOSAL_NOT_EXECUTABLE 처럼 재조회가 원칙이다.
   TENANT_STATE_CONFLICT: {
