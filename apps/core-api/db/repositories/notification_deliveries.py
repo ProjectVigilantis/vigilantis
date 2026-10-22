@@ -13,7 +13,7 @@ import uuid
 from collections.abc import Iterable
 from datetime import timedelta
 
-from sqlalchemy import String, case, cast, delete, exists, func, or_, select, update
+from sqlalchemy import String, and_, case, cast, delete, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -41,17 +41,27 @@ def tenant_accounts(db: Session, tenant_ids: Iterable[str]) -> dict[str, str]:
     ).all())
 
 
-def has_unbound_deliveries(db: Session) -> bool:
-    """UUID 전환으로 처분이 달라질 미완료 기록이 있으면 기동 전에 멈춘다.
+def requires_tenant_transition(db: Session) -> bool:
+    """비정규 tenant 값·계정 불일치가 남은 미완료 기록은 전환 판단을 기다린다.
 
-    legacy 문자열을 UUID로 cast하지 않는다. 종결·NULL 이력은 고치거나 다시 보내지 않는다.
+    정규 UUID의 tenant가 없으면 기존 claim·임대 회수 경로에서 전송을 차단한다.
+    UUID 모양은 과거 등록 증거가 아니다. 실제 발송에는 현재 tenant·바인딩 대조가 필요하다.
+    이 조회는 행을 고치지 않으며, legacy 문자열을 UUID로 cast하지 않는다.
     """
     return db.scalar(
         select(_D.delivery_id)
         .outerjoin(_T, cast(_T.tenant_id, String) == _D.tenant_id)
         .where(
             _D.state.in_(("PENDING", "IN_FLIGHT")),
-            or_(_T.tenant_id.is_(None), _T.aws_account_id != _D.aws_account_id),
+            or_(
+                and_(
+                    _T.tenant_id.is_(None),
+                    ~_D.tenant_id.regexp_match(
+                        r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                    ),
+                ),
+                _T.aws_account_id != _D.aws_account_id,
+            ),
         )
         .limit(1)
     ) is not None

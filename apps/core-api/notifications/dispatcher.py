@@ -4,8 +4,9 @@
 
 initialize  설정 바인딩을 notification_routes에 맞춘다. 같은 fingerprint는 epoch·activated_at을
             유지하고, 바인딩 변경이나 제거 후 재등록은 새 epoch와 DB 시각 activated_at을 받는다.
-            먼저 tenants의 UUID·계정 정합성을 확인한다. 등록된 tenant와 연결되지 않은 미완료
-            발송이 있으면 어떤 바인딩도 바꾸지 않고 기동을 거부한다(자동 전환·재전송 없음).
+            먼저 tenants의 UUID·계정 정합성을 확인한다. 같은 기존 바인딩의 tenant가 사라졌으면
+            경고 후 기동하고 해당 발송은 발견·claim에서 차단한다. 신규 설정 오류·계정 불일치와
+            비정규 tenant 값의 미완료 발송은 쓰기 전에 거부한다(자동 전환·재전송 없음).
 discover    채널 행이 없는 사건을 created_at 순으로 batch_size만큼 찾아 행을 만든다(anti-join,
             cursor 없음, ON CONFLICT DO NOTHING). 라우트 없음·충돌·발신기 없음·바인딩 불일치,
             created_at 또는 occurred_at이 activated_at보다 이른 사건은 BLOCKED로 끝난다.
@@ -183,6 +184,7 @@ class DeliveryDispatcher:
     # --- 결정적 단계(테스트·스레드 공용) -------------------------------------------
 
     def initialize(self) -> None:
+        degraded = []
         with self._sessions() as db:
             accounts = deliveries_repo.tenant_accounts(
                 db, {route.tenant_id for route in self._registry.routes},
@@ -190,9 +192,18 @@ class DeliveryDispatcher:
             for route in self._registry.routes:
                 problem = _tenant_problem(route, accounts)
                 if problem is not None:
+                    prior = deliveries_repo.get_route(db, route.aws_account_id, route.channel)
+                    if (
+                        problem == TENANT_NOT_FOUND
+                        and prior is not None
+                        and prior.tenant_id == route.tenant_id
+                        and prior.fingerprint == route.fingerprint
+                    ):
+                        degraded.append(route)
+                        continue
                     logger.error("notification_tenant_binding_invalid", extra={"reason": problem})
                     raise ValueError(problem)
-            if deliveries_repo.has_unbound_deliveries(db):
+            if deliveries_repo.requires_tenant_transition(db):
                 logger.error("notification_tenant_binding_invalid", extra={
                     "reason": "NOTIFICATION_TENANT_TRANSITION_REQUIRED",
                 })
@@ -201,6 +212,11 @@ class DeliveryDispatcher:
                 deliveries_repo.ensure_lane(db, channel)
             deliveries_repo.sync_routes(db, self._registry.routes)
             db.commit()
+        for route in degraded:
+            logger.warning("notification_tenant_binding_degraded", extra={
+                "aws_account_id": route.aws_account_id, "channel": route.channel,
+                "reason": TENANT_NOT_FOUND,
+            })
 
     def discover(self, channel: Channel | None = None) -> int:
         """채널마다 최대 batch_size개 사건의 행을 만든다. 만든 행 수를 돌려준다."""
