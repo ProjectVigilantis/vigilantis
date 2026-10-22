@@ -197,14 +197,21 @@ def test_real_aws_ignores_configured_endpoints(ecs_env, settings, real_provider,
 
 @pytest.fixture
 def sdk_logger_state():
-    names = client_module._SDK_LOGGERS
+    from logging_config import setup_logging
+
+    names = ("botocore", "boto3", "urllib3")
     saved = {n: logging.getLogger(n).level for n in names}
     root = logging.getLogger()
     saved_root = root.level
-    root.setLevel(logging.DEBUG)  # 앱 LOG_LEVEL=DEBUG 재현
-    for n in names:
-        logging.getLogger(n).setLevel(logging.DEBUG)  # SDK 로거가 열려 있던 상태에서 시작
+    saved_handlers = root.handlers[:]
+    setup_logging("DEBUG")  # 실제 앱 기동 경계의 LOG_LEVEL=DEBUG 보호
+    for handler in saved_handlers:
+        root.addHandler(handler)
     yield
+    for handler in list(root.handlers):
+        if handler not in saved_handlers:
+            root.removeHandler(handler)
+            handler.close()
     root.setLevel(saved_root)
     for n, level in saved.items():
         logging.getLogger(n).setLevel(level)
@@ -252,6 +259,55 @@ def test_debug_logging_does_not_leak_body_token_or_provider_error(
         assert sentinel not in text
     assert "sns_publish_failed reason=transport_error" in text
     assert not [r for r in caplog.records if r.name.split(".")[0] in ("botocore", "urllib3")]
+
+
+def test_sns_client_keeps_other_aws_warnings_and_errors(
+    ecs_env, settings, real_provider, sdk_logger_state, caplog
+):
+    settings()
+    real_provider(FakeFetcher([_resp("ECSKEY", "s", 60)]))
+    names = ("botocore", "boto3", "urllib3")
+    before = {name: logging.getLogger(name).level for name in names}
+    client = client_module.platform_sns_client("us-east-1")
+    try:
+        assert {name: logging.getLogger(name).level for name in names} == before
+        assert all(level == logging.WARNING for level in before.values())
+        for name in names:
+            logging.getLogger(f"{name}.other_service").warning("other_aws_warning")
+            logging.getLogger(f"{name}.other_service").error("other_aws_error")
+        assert sum(r.message == "other_aws_warning" for r in caplog.records) == 3
+        assert sum(r.message == "other_aws_error" for r in caplog.records) == 3
+    finally:
+        client.close()
+
+
+def test_credential_refresh_warning_survives_without_provider_secret(
+    ecs_env, settings, real_provider, sdk_logger_state, caplog
+):
+    from botocore.exceptions import CredentialRetrievalError, MetadataRetrievalError
+
+    class FailedRefresh(FakeFetcher):
+        def retrieve_full_uri(self, full_uri, headers=None):
+            if self.calls:
+                raise MetadataRetrievalError(error_msg="REFRESH-SECRET-SENTINEL")
+            return super().retrieve_full_uri(full_uri, headers)
+
+    settings()
+    real_provider(FailedRefresh([_resp("ECSKEY", "s", 1)]))
+    client = client_module.platform_sns_client("us-east-1")
+    try:
+        with pytest.raises(CredentialRetrievalError):
+            client.publish(TopicArn="arn:aws:sns:us-east-1:123456789012:t", Message="m")
+        warnings = [
+            record for record in caplog.records
+            if record.name == "botocore.credentials" and record.levelno == logging.WARNING
+        ]
+        assert len(warnings) == 1
+        assert "mandatory refresh period" in warnings[0].getMessage()
+        assert warnings[0].exc_info is None
+        assert "REFRESH-SECRET-SENTINEL" not in caplog.text
+    finally:
+        client.close()
 
 
 def test_normal_aws_client_keeps_default_path(settings, monkeypatch):

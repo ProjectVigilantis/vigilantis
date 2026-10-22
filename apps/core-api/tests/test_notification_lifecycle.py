@@ -167,6 +167,7 @@ def test_test_bootstrap_overrides_external_opt_in_and_dotenv(tmp_path):
         "DISPATCH_ENABLED": "false",
         "SCAN_ENABLED": "false",
         "DATABASE_URL": "postgresql+psycopg://unused:unused@localhost:1/unused",
+        "PYTHONIOENCODING": "utf-8",  # 자식 stderr를 부모가 읽는 인코딩과 맞춘다
     }
     code = (
         "import runpy; "
@@ -182,5 +183,5 @@ def test_test_bootstrap_overrides_external_opt_in_and_dotenv(tmp_path):
         "client.__exit__(None,None,None)"
     )
     result = subprocess.run([sys.executable, "-c", code], cwd=tmp_path, env=env,
-                            capture_output=True, text=True, timeout=30)
+                            capture_output=True, encoding="utf-8", timeout=30)
     assert result.returncode == 0, result.stderr

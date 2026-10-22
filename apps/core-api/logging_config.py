@@ -115,6 +115,18 @@ class _JsonFileHandler(RotatingFileHandler):
     """setup_logging이 만든 파일 핸들러 — 재구성 시 닫을 대상을 가려내는 표지다."""
 
 
+class _CredentialErrorFilter(logging.Filter):
+    """SDK 자격증명 갱신 경고는 유지하되 공급자 예외 원문은 기록하지 않는다."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.exc_info = None
+        record.exc_text = None
+        return True
+
+
+_credential_error_filter = _CredentialErrorFilter()
+
+
 def resolve_log_file_path(raw: str) -> Path:
     """상대 경로는 실행 위치가 아니라 apps/core-api 기준으로 푼다.
 
@@ -166,6 +178,10 @@ def setup_logging(
     # DEBUG 에서 botocore 가 요청 파라미터(비밀번호·코드·ClientSecret)와 응답 본문(토큰)을 찍는다 — LOG_LEVEL 과 무관하게 WARNING 고정
     for noisy in ("botocore", "boto3", "urllib3"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+    # botocore는 갱신 실패 시 WARNING에 exc_info=True를 붙인다.
+    # WARNING 고정만으로는 공급자 오류에 섞인 토큰·본문을 보호할 수 없다.
+    # 다른 AWS 로거와 경고 메시지·수준은 그대로 두고 이 로거의 예외만 제외한다.
+    logging.getLogger("botocore.credentials").addFilter(_credential_error_filter)
     # uvicorn 기동 시 dictConfig(LOGGING_CONFIG)가 "uvicorn" 로거에 자체 핸들러를 달고
     # propagate=False로 막는다 — 그대로면 uvicorn.error 줄이 JSON 밖의 평문으로 나가고 파일에도
     # 남지 않는다. 그 핸들러를 떼고 루트로 흘려 같은 JSON 핸들러가 한 번씩만 쓰게 한다

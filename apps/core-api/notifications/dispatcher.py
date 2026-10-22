@@ -18,8 +18,10 @@ process_one 만료 임대 회수 → PENDING 1건 정리 또는 claim → 전송
 
 복구: 시도 수는 claim 때 센다. claim 뒤나 공급자 수락 뒤 결과 저장 전에 멈춘 시도는 임대 만료 후
 UNKNOWN으로 회수해 재시도하고, max_attempts에 이르면 FAILED(EXHAUSTED)로 닫는다. 따라서 같은 사건이
-최대 max_attempts번 전송될 수 있다(정확히 1회 보장 없음). 결과는 claim_token·IN_FLIGHT·미만료 임대가
-모두 맞을 때만 반영하고, 종결(SUCCEEDED·FAILED·BLOCKED)은 되돌리지 않는다. 재전송 기능은 없다.
+최대 max_attempts번 전송될 수 있다(정확히 1회 보장 없음). 결과는 claim_token·IN_FLIGHT가 맞을 때만
+반영한다 — 임대가 지났어도 회수 전이면 반영하고, 회수·재claim이 토큰을 지우거나 바꾸므로 회수된 시도의
+늦은 결과는 막힌다(그 사건은 다시 보낼 수 있다). 종결(SUCCEEDED·FAILED·BLOCKED)은 되돌리지 않는다.
+재전송 기능은 없다.
 
 Slack: 모든 처리 프로세스가 notification_lanes의 Slack 관문 1행을 공유한다. 간격 관문(available_at)은
 호출 중 임대 길이만큼 닫히고 보유자가 결과 확정 뒤 1초 간격으로 연다. 429 Retry-After는 cooldown_until에
@@ -38,7 +40,7 @@ from dataclasses import dataclass
 from db.repositories import notification_deliveries as deliveries_repo
 from db.repositories import notification_events as events_repo
 from notifications.contracts import CHANNELS, Channel, EventSnapshot, Route, SendResult
-from notifications.routing import CHANNEL_NOT_CONFIGURED
+from notifications.routing import CHANNEL_NOT_CONFIGURED, OWNERSHIP_MISSING
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger("vigilantis.notifications.dispatcher")
@@ -115,6 +117,8 @@ class DeliveryDispatcher:
         self._lease_seconds = lease_seconds
         self._stopping = threading.Event()
         self._threads: list[threading.Thread] = []
+        self._warned_accounts: set[str | None] = set()
+        self._warned_lock = threading.Lock()
 
     # --- 수명주기 ---------------------------------------------------------------
 
@@ -217,6 +221,8 @@ class DeliveryDispatcher:
             reason = NOT_ACTIVATED
         else:
             reason = None
+        if reason == OWNERSHIP_MISSING:
+            self._warn_unowned_account(event.aws_account_id, channel)
         bound = reason is None or reason == NOT_ACTIVATED
         return deliveries_repo.new_delivery(
             event_id=event.event_id,
@@ -227,6 +233,16 @@ class DeliveryDispatcher:
             route_fingerprint=route.fingerprint if bound else None,
             route_epoch=binding.route_epoch if bound else None,
         )
+
+    def _warn_unowned_account(self, account: str | None, channel: Channel) -> None:
+        """선언되지 않은 계정의 사건은 프로세스 수명 동안 계정당 한 번만 경고한다(계정 ID 문자열 집합이라 작다). BLOCKED 기록은 그대로다."""
+        with self._warned_lock:
+            if account in self._warned_accounts:
+                return
+            self._warned_accounts.add(account)
+        logger.warning("notification_account_ownership_missing", extra={
+            "aws_account_id": account, "channel": channel, "reason": OWNERSHIP_MISSING,
+        })
 
     def process_one(self, channel: Channel) -> bool:
         """만료 임대를 회수하고 PENDING 1건을 처리한다. 할 일이 없거나 관문이 닫혀 있으면 False.
@@ -289,9 +305,10 @@ class DeliveryDispatcher:
             if reason is not None:
                 deliveries_repo.block_pending(db, delivery_id, reason)
                 db.commit()
-                logger.warning("notification_delivery_blocked", extra={
-                    "delivery_id": delivery_id, "channel": channel, "reason": reason,
-                })
+                if reason != CHANNEL_NOT_CONFIGURED:  # 의도적으로 뺀 채널은 건별로 경고하지 않는다
+                    logger.warning("notification_delivery_blocked", extra={
+                        "delivery_id": delivery_id, "channel": channel, "reason": reason,
+                    })
                 return _CLOSED
             token = str(uuid.uuid4())
             if channel in PACED_CHANNELS and not deliveries_repo.acquire_lane(

@@ -131,6 +131,11 @@ class RouteRegistry:
         self._owned = owned
         self.routes = tuple(sorted(routes, key=lambda r: (r.aws_account_id, r.channel, r.tenant_id)))
 
+    @property
+    def blocked(self) -> Mapping[tuple[str, str], str]:
+        """선언됐지만 막힌 (계정, 채널) → 사유. 채널 ""는 계정 전체. 읽기 전용 복사본이다."""
+        return dict(self._blocked)
+
     @classmethod
     def from_file(cls, path: str, environ: Mapping[str, str] | None = None) -> RouteRegistry:
         try:
