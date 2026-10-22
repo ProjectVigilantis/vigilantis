@@ -19,9 +19,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 @unique
 class ErrorCode(str, Enum):
-    """REST 공통 오류 코드 24종. 괄호는 계약상 HTTP 상태.
+    """REST 공통 오류 코드 26종. 괄호는 계약상 HTTP 상태.
 
-    TENANT_* 3종은 /api/v1/tenants(Post-MVP T-4)와 테넌트 정지(원격 회수)의 거절이다.
+    TENANT_* 5종은 /api/v1/tenants(Post-MVP T-4)와 테넌트 정지(원격 회수)의 거절이다.
     AUTH_* · ACCOUNT_* 13종은 로그인(/api/v1/auth)과 API 접근 보호(Post-MVP T-1)의 거절이다.
     미인증은 401, 인증은 됐지만 허용되지 않은 요청은 403 이다.
     """
@@ -31,6 +31,8 @@ class ErrorCode(str, Enum):
     PROPOSAL_NOT_EXECUTABLE = "PROPOSAL_NOT_EXECUTABLE"      # 409
     INCIDENT_NOT_RESOLVABLE = "INCIDENT_NOT_RESOLVABLE"      # 409
     TENANT_NOT_FOUND = "TENANT_NOT_FOUND"                    # 404
+    TENANT_ACCOUNT_CONFLICT = "TENANT_ACCOUNT_CONFLICT"      # 409 — 같은 AWS 계정의 테넌트가 이미 있다(한 계정 = 한 테넌트)
+    TENANT_ONBOARDING_UNAVAILABLE = "TENANT_ONBOARDING_UNAVAILABLE"  # 503 — 온보딩 링크를 만들 설정(템플릿 URL · 플랫폼 주체)이 없다
     TENANT_STATE_CONFLICT = "TENANT_STATE_CONFLICT"          # 409 — 지금 상태에서 할 수 없는 전이(이미 정지된 테넌트 정지 등)
     TENANT_SUSPENDED = "TENANT_SUSPENDED"                    # 409 — 정지된 테넌트의 자산에 대한 새 실행 요청
     AUTH_REQUIRED = "AUTH_REQUIRED"                          # 401 — 세션 없음 · 만료 · 회수
