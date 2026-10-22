@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from typing import Literal, Optional
 
@@ -306,6 +307,39 @@ class CollectorSettings(BaseSettings):
         return ids or None
 
 
+class TenantSettings(BaseSettings):
+    """고객(테넌트) 온보딩 링크 설정 (Post-MVP T-4).
+
+    둘 다 Optional 이다 — 비어 있어도 앱은 뜨고, 온보딩 링크를 싣는 /api/v1/tenants 응답(생성 · 연결 전
+    상세 · PATCH · 재발급)만 503 TENANT_ONBOARDING_UNAVAILABLE 로 답한다(AuthSettings 의 Cognito 와 같은 결).
+    템플릿을 어디에 올릴지는 INFRA 몫이다. 값은 로그에 싣지 않는다.
+    """
+
+    model_config = _ENV_FILE
+
+    # 고객 역할 · 권한 정책을 만드는 CloudFormation 템플릿의 공개 URL(https)
+    TENANT_ONBOARDING_TEMPLATE_URL: str | None = None
+    # 고객 역할의 신뢰 정책이 허용할 플랫폼 주체 — 플랫폼 계정의 ECS 태스크 역할(ADR-0012 §1)
+    PLATFORM_PRINCIPAL_ARN: str | None = None
+
+    @field_validator("TENANT_ONBOARDING_TEMPLATE_URL", mode="after")
+    @classmethod
+    def _https_template(cls, value: str | None) -> str | None:
+        if value and not value.startswith("https://"):
+            raise ValueError("TENANT_ONBOARDING_TEMPLATE_URL 은 https:// 로 시작해야 한다")
+        return value or None
+
+    @field_validator("PLATFORM_PRINCIPAL_ARN", mode="after")
+    @classmethod
+    def _role_principal(cls, value: str | None) -> str | None:
+        if value and not re.fullmatch(r"arn:aws:iam::\d{12}:role/[A-Za-z0-9_+=,.@/-]+", value):
+            raise ValueError("PLATFORM_PRINCIPAL_ARN 은 IAM 역할 ARN 이어야 한다")
+        return value or None
+
+    def onboarding_ready(self) -> bool:
+        return bool(self.TENANT_ONBOARDING_TEMPLATE_URL and self.PLATFORM_PRINCIPAL_ARN)
+
+
 def _split_csv(raw: str) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
@@ -332,3 +366,9 @@ def get_auth_settings() -> AuthSettings:
 def get_collector_settings() -> CollectorSettings:
     """검증된 CollectorSettings 싱글턴. 테스트는 cache_clear() 후 주입한다."""
     return CollectorSettings()
+
+
+@lru_cache
+def get_tenant_settings() -> TenantSettings:
+    """검증된 TenantSettings 싱글턴. 테스트는 의존성 재정의 또는 cache_clear() 후 주입한다."""
+    return TenantSettings()

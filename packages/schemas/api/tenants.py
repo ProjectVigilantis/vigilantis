@@ -23,11 +23,13 @@
 #
 # 경로 (전부 /api/v1)
 #   GET    /tenants                  → TenantsResponse
-#   POST   /tenants                  TenantCreateRequest → TenantCreateResponse(PENDING_CONNECTION)
+#   POST   /tenants                  TenantCreateRequest → 201 TenantCreateResponse(PENDING_CONNECTION). 같은 계정이 있으면 TENANT_ACCOUNT_CONFLICT
 #   GET    /tenants/{id}             → TenantDetail
 #   PATCH  /tenants/{id}             TenantUpdateRequest → TenantDetail
-#   DELETE /tenants/{id}             → 204. DELETABLE_STATUSES 밖이면 TENANT_STATE_CONFLICT
+#   DELETE /tenants/{id}             → 204. DELETABLE_STATUSES 밖이거나 그 테넌트를 가리키는 사용자 · 기록이 있으면 TENANT_STATE_CONFLICT
 #   GET    /tenants/{id}/onboarding  → TenantOnboardingResponse. 모든 상태(역할을 지운 고객의 재연결)
+#   온보딩 링크를 싣는 응답(생성 · 연결 전 상세 · PATCH · 재발급)은 서버에 링크 설정이 없으면 503 TENANT_ONBOARDING_UNAVAILABLE —
+#   쓰기는 응답을 만든 뒤에 확정하므로 503 이면 아무것도 바뀌지 않는다. 경로 전부 ADMIN 전용이다(T-1).
 #   POST   /tenants/{id}/verify      → TenantVerifyResponse. VERIFIABLE_STATUSES 밖이면 TENANT_STATE_CONFLICT
 #   POST   /tenants/{id}/suspend     TenantSuspendRequest → TenantDetail. SUSPENDABLE_STATUSES 밖이면 TENANT_STATE_CONFLICT
 #   POST   /tenants/{id}/resume      → TenantVerifyResponse(연결 확인 성공 시 ACTIVE). RESUMABLE_STATUSES 밖이면 TENANT_STATE_CONFLICT

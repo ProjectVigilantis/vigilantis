@@ -12,6 +12,8 @@ CONTRACT_ERROR_CODES = {
     "PROPOSAL_NOT_EXECUTABLE",    # 409
     "INCIDENT_NOT_RESOLVABLE",    # 409 — 종료 처리 거절 (Issue #199)
     "TENANT_NOT_FOUND",           # 404 — Post-MVP T-4
+    "TENANT_ACCOUNT_CONFLICT",    # 409 — 같은 계정의 테넌트가 이미 있다
+    "TENANT_ONBOARDING_UNAVAILABLE",  # 503 — 온보딩 링크 설정 없음
     "TENANT_STATE_CONFLICT",      # 409 — 테넌트 상태 전이 거절
     "TENANT_SUSPENDED",           # 409 — 정지된 테넌트 자산에 새 실행
     "AUTH_REQUIRED",              # 401 — Post-MVP T-1 (#492)

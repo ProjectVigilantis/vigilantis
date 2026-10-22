@@ -5,13 +5,15 @@ export type IsoDateTime = string;
 
 /* ────────────────────────────── errors.py ────────────────────────────── */
 
-/** REST 공통 오류 코드 24종. 괄호는 계약상 HTTP 상태. */
+/** REST 공통 오류 코드 26종. 괄호는 계약상 HTTP 상태. */
 export type ErrorCode =
   | 'INCIDENT_NOT_FOUND' // 404 — 요청의 테넌트 범위 밖도 404(존재를 알리지 않는다)
   | 'IDEMPOTENCY_KEY_CONFLICT' // 409
   | 'PROPOSAL_NOT_EXECUTABLE' // 409
   | 'INCIDENT_NOT_RESOLVABLE' // 409
   | 'TENANT_NOT_FOUND' // 404
+  | 'TENANT_ACCOUNT_CONFLICT' // 409 — 같은 AWS 계정의 테넌트가 이미 있다
+  | 'TENANT_ONBOARDING_UNAVAILABLE' // 503 — 온보딩 링크 설정(템플릿 URL · 플랫폼 주체)이 없다
   | 'TENANT_STATE_CONFLICT' // 409
   | 'TENANT_SUSPENDED' // 409 — 정지된 테넌트의 새 실행 · 종료(플랫폼 운영자의 종료는 받는다)
   | 'AUTH_REQUIRED' // 401 — 세션 없음 · 만료 · 회수
