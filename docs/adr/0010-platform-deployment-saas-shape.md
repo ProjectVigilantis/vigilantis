@@ -3,7 +3,7 @@
 - **Status**: Accepted
 - **Date**: 2026-10-12
 - **Amended**: 2026-10-16(1차 — 사용자 도메인 `vigilantis.dev` 연결과 웹 API 주소·CORS 반영 · 핵심 결정 불변) · 2026-10-20(2차 — 알림 발송 권한 확장) — 하단 §개정 이력
-- **Deciders**: 최초 결정 — 김세혁(PM/Infra · `INFRA` 담당 결정)·안성일(AI·Architect · FastAPI 아키텍처·DB 검토) / 1차 개정 — 안성일 제안·김세혁 승인(PR #480) / 2차 개정 — 안성일 제안·승인권자 김세혁
+- **Deciders**: 최초 결정 — 김세혁(PM/Infra · `INFRA` 담당 결정)·안성일(AI·Architect · FastAPI 아키텍처·DB 검토) / 1차 개정 — 안성일 제안·김세혁 승인(PR #480) / 2차 개정 — 안성일 제안·김세혁 승인(PR #505)
 - **Refs**: [ADR-0006](0006-localstack-team-standard-env.md) §2(IaC Post-MVP) · [ADR-0009](0009-real-aws-smoke-environment.md)(스모크 환경 · 앱 정책) · #435 4-2·6-1 · #467(사용자 도메인·CORS) · #468(개정 취합) · #493(알림 발송 연결 · 2차 개정)
 
 ## Context (배경)
@@ -131,4 +131,4 @@ MVP는 단일 계정(SSOT §MVP 확정 범위)이므로 계정을 가를 수 없
   - **머지된 구현**: PR #467(2026-10-13 13:10 KST 머지) — `scripts/provision_platform_aws.py`의 `public_origins`·`_require_custom_domain`·`_ensure_custom_domain`·`down`의 별칭 레코드 정리, `tests/test_provision_platform_aws.py`.
   - **확인된 배포 사실**: #468 코멘트의 읽기 전용 조회(10/13(화) 15시대 KST) — CloudFront 별칭 `vigilantis.dev` · us-east-1 ACM 인증서 `ISSUED` · Route53 호스팅 영역 · 오리진 `http-only` · WAF 연결. #467을 포함한 이미지 `mvp-004ed0a`로 10/13(화) 16:40–16:44 KST 재배포. 10/14(수) 허용 IP에서 `https://vigilantis.dev/`와 `https://vigilantis.dev/api/v1/assets`가 200을 돌려줬고, 브라우저 화면이 실 데이터로 렌더되며 WebSocket이 연결됐다. 기록의 원천은 `docs/AWS_SMOKE_RESULT.md` §11이다.
   - **관측 범위의 한계**: CORS 허용 출처의 값은 `deploy` 코드가 정한다. 관측된 것은 사용자 도메인 화면의 API 응답과 실시간 연결이며, 기본 도메인으로 연 화면의 브라우저 동작은 별도 기록이 없다. 오리진 `http-only`는 10/13(화) 15시대 KST 조회 시점의 관측이며, 그 뒤 AWS의 현재 설정은 다시 조회하지 않았다. 원문의 HTTPS 전환 계획이 그 뒤에 이행됐는지는 이 기록으로 판단할 수 없다. 사용자 도메인 연결을 전체 구간 HTTPS 전환으로 보지 않는다.
-- **2026-10-20 (2차 개정 — #493)** — 태스크 역할에 승인된 SNS 주제 발행을, 실행 역할에 승인된 기존 Slack 비밀 주입을 더하고 알림은 기본 끔으로 두었다(§3·§5). 검증 범위는 개인 AWS 계정의 일회용 ECS 시험 태스크에서 확인한 알림 발송 경로와 채널별 대표 수신 화면이다. 운영 절차와 시험 근거는 [`README.md`](../../README.md)의 외부 알림 운영 (#493) 절에 있다.
+- **2026-10-20 (2차 개정 — #493)** — 태스크 역할에 승인된 SNS 주제 발행을, 실행 역할에 승인된 기존 Slack 비밀 주입을 더하고 알림은 기본 끔으로 두었다(§3·§5). 검증 범위는 개인 AWS 계정의 일회용 ECS 시험 태스크에서 확인한 알림 발송 경로와 채널별 대표 수신 화면이다. 운영 절차는 [`README.md`](../../README.md)의 외부 알림 운영 (#493) 절에, 시험 근거는 [#493 시험 기록 코멘트](https://github.com/ProjectVigilantis/vigilantis/issues/493#issuecomment-6330758930)에서 관리한다.
