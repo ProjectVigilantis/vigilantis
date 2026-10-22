@@ -54,6 +54,7 @@ from db.repositories import assets as assets_repo
 from db.repositories import executions as executions_repo
 from db.repositories import guardrails as guardrails_repo
 from db.repositories import incidents as incidents_repo
+from db.repositories import tenants as tenants_repo
 from exceptions import ApiError
 from identifiers import canonical_id
 from incident_analysis import analysis_result_from
@@ -508,6 +509,8 @@ class AutoIsolationSkipReason(str, Enum):
     WAIT_NOT_STARTED = "WAIT_NOT_STARTED"        # 저장된 응답 기한이 없다
     WAIT_NOT_DUE = "WAIT_NOT_DUE"                # 응답 기한이 아직 지나지 않았다
     USER_RESPONDED = "USER_RESPONDED"            # 관제자 승인 실행이 이미 commit돼 있다
+    # 테넌트가 자동 조치를 껐다 — 또는 그 기한이 꺼진 동안 지났다(T-6 · #514). 사람 승인은 그대로 받는다
+    AUTO_ACTION_DISABLED = "AUTO_ACTION_DISABLED"
 
 
 @dataclass(frozen=True)
@@ -634,6 +637,38 @@ def _check_isolation_target(
     }
     if not set(command.evidence_ids) <= known:
         raise ValueError("자동 격리 명령의 근거가 이 Incident의 근거가 아닙니다")
+
+
+def automatic_trigger_block(
+    tenant: models.Tenant | None,
+    *,
+    trigger_source: TriggerSource,
+    response_deadline_at: datetime | None,
+) -> AutoIsolationSkipReason | None:
+    """테넌트가 이 자동 발동을 막는가 — 막으면 사유, 아니면 None. (T-6 · #514)
+
+    사전 판정(security/soar.prepare_isolation · AWS 를 부르기 전)과 접수 관문(reserve_auto_isolation ·
+    잠근 뒤)이 같은 함수를 쓴다. 막는 것은 서버가 사람 없이 시작하는 발동뿐이다 — 수집 · 분석 · 관제자
+    승인 실행 · 자동 원복은 이 함수를 지나지 않는다.
+      - 테넌트 없음(tenant_id NULL · MVP 단일 계정 기록)은 막지 않는다 — 지금 동작 그대로다.
+      - 꺼져 있으면 막는다.
+      - 1분 무응답 격리는 그 기한이 마지막으로 다시 켠 시각 이전이면 막는다 — 꺼진 동안 지난 기한을
+        다시 켠 순간 한꺼번에, 오래된 판단으로 발동하지 않게.
+    정지(SUSPENDED) 관문은 T-4 2단계가 이 함수에 더한다.
+    """
+    if tenant is None:
+        return None
+    if not tenant.auto_action_enabled:
+        return AutoIsolationSkipReason.AUTO_ACTION_DISABLED
+    resumed_at = tenant.auto_action_resumed_at
+    if (
+        trigger_source is TriggerSource.TIMEOUT_ISOLATION_1M
+        and resumed_at is not None
+        and response_deadline_at is not None
+        and response_deadline_at <= resumed_at
+    ):
+        return AutoIsolationSkipReason.AUTO_ACTION_DISABLED
+    return None
 
 
 def _auto_isolation_skip_reason(
@@ -770,7 +805,15 @@ def reserve_auto_isolation(
             db, existing, execution_id=execution_id, deadline=deadline
         )
 
-    reason = _auto_isolation_skip_reason(db, incident, trigger_source, now)
+    # 테넌트 관문이 맨 앞이다 — 「왜 안 했나」의 답이 가장 위에 있어야 한다. 행은 FOR SHARE 로 읽어
+    # 끄기(PATCH)가 이 접수 commit 을 기다리게 한다. 잠금 순서는 Incident → 테넌트 하나뿐이다
+    tenant = (
+        None if incident.tenant_id is None
+        else tenants_repo.read_tenant_for_share(db, incident.tenant_id)
+    )
+    reason = automatic_trigger_block(
+        tenant, trigger_source=trigger_source, response_deadline_at=incident.response_deadline_at,
+    ) or _auto_isolation_skip_reason(db, incident, trigger_source, now)
     if reason is not None:
         db.rollback()  # Incident 잠금을 놓는다. 이 호출은 아무것도 쓰지 않았다
         logger.info(

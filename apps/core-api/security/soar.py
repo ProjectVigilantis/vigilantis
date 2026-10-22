@@ -18,6 +18,7 @@ from ai import guardrails
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from config import get_settings
+from db import models
 from db.repositories import assets as assets_repo
 from db.repositories import executions as executions_repo
 from db.repositories import incidents as incidents_repo
@@ -73,6 +74,19 @@ def prepare_isolation(db: Session, incident_id: str, trigger_source: TriggerSour
     else:
         raise ValueError("자동 격리 출처가 아닙니다")
     if not eligible:
+        db.rollback()
+        return None
+    # 테넌트가 자동 조치를 껐으면 가드레일(④ = AWS Dry-Run)을 부르기 전에 멈춘다(T-6 · #514).
+    # 사이에 꺼지는 경우는 접수 관문(reserve_auto_isolation)이 잠근 뒤 같은 함수로 다시 본다
+    tenant = None if incident.tenant_id is None else db.get(models.Tenant, incident.tenant_id)
+    blocked = workflows.automatic_trigger_block(
+        tenant, trigger_source=trigger_source, response_deadline_at=incident.response_deadline_at,
+    )
+    if blocked is not None:
+        logger.info("automatic_isolation_disabled_for_tenant", extra={
+            "incident_id": incident_id, "tenant_id": incident.tenant_id,
+            "trigger_source": trigger_source.value, "reason": blocked.value,
+        })
         db.rollback()
         return None
     target_arn = incident.subject_arn
