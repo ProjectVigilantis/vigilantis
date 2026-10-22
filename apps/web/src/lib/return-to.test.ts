@@ -88,3 +88,8 @@ test('비어 있거나 값이 없으면 /', () => {
   assert.equal(safeReturnTo(null), '/');
   assert.equal(safeReturnTo(undefined), '/');
 });
+
+test('랜딩으로는 돌아가지 않는다. 로그인한 사람을 소개 화면으로 돌려보내지 않는다', () => {
+  assert.equal(safeReturnTo('/landing'), '/');
+  assert.equal(safeReturnTo('/landing?ref=mail'), '/');
+});

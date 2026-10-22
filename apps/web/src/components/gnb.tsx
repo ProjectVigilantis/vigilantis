@@ -17,6 +17,7 @@ import { ConnectionIndicator, type AssetPresence } from '@/components/connection
 import { ThemeToggle } from '@/components/theme-toggle';
 import { canManageUsers } from '@/lib/roles';
 import { cn } from '@/lib/utils';
+import type { UserRole } from '@/types/api';
 
 /**
  * 2.3 진입점 정리 — 모든 화면에서 이 **3개**로 이동한다(2026-09-28 개편 — v1.6 팀 회의의 4개에서).
@@ -32,17 +33,24 @@ import { cn } from '@/lib/utils';
  * `고객`은 Post-MVP T-4 관리자 화면이다(고객 계정 연결 · 원격 회수). 관제 화면이 아니라 맨 뒤에 둔다.
  * 누구에게 보일지(역할 제한)는 T-1 역할과 함께 정한다. 그 전까지 권한 판정은 서버 몫이다.
  */
-const NAV: readonly { href: string; label: string; icon: LucideIcon }[] = [
+const NAV: readonly { href: string; label: string; icon: LucideIcon; adminOnly?: boolean }[] = [
   { href: '/', label: '대시보드', icon: LayoutDashboard },
   { href: '/assets', label: '자산', icon: Server },
   { href: '/security', label: '보안', icon: Shield },
-  { href: '/tenants', label: '고객', icon: Building2 },
+  // 플랫폼 관리자 화면. 숨기는 것은 편의이고 고객 관리 API의 차단은 서버가 한다(lib/home-path.ts).
+  { href: '/tenants', label: '고객', icon: Building2, adminOnly: true },
 ];
 
 /** ADMIN에게만 보이는 메뉴(#492 PR 3). 숨김은 화면 편의이고 실제 차단은 서버 403이다. */
 const ADMIN_NAV: readonly { href: string; label: string; icon: LucideIcon }[] = [
   { href: '/users', label: '사용자', icon: Users },
 ];
+
+/** 현재 사용자의 역할(세션 Provider · #492). 확인 전 · 미로그인 · 조회 실패는 null이다(관리자 메뉴를 열지 않는다). */
+function useRole(): UserRole | null {
+  const { session } = useSession();
+  return session.kind === 'user' ? session.user.role : null;
+}
 
 export function ShellHeader() {
   const assets = useAssetsEnvelope();
@@ -82,15 +90,18 @@ export function ShellHeader() {
 /** 넓은 화면에서는 왼쪽 세로 메뉴, 좁은 화면(< md)에서는 상단바 아래 가로 줄이다. */
 export function ShellNav() {
   const pathname = usePathname();
-  const { session } = useSession();
-  const nav = canManageUsers(session.kind === 'user' ? session.user.role : null) ? [...NAV, ...ADMIN_NAV] : NAV;
+  const role = useRole();
+  const items = [
+    ...NAV.filter((item) => !item.adminOnly || role === 'ADMIN'),
+    ...(canManageUsers(role) ? ADMIN_NAV : []),
+  ];
 
   return (
     <nav
       aria-label="주요 화면"
       className="dark bg-shell-nav flex shrink-0 gap-1 overflow-x-auto p-2 [scrollbar-width:none] md:w-58 md:flex-col md:overflow-visible md:border-r md:p-4"
     >
-      {nav.map(({ href, label, icon: Icon }) => {
+      {items.map(({ href, label, icon: Icon }) => {
         // 경계(`/` 또는 문자열 끝)까지 본다. 접두만 보면 다른 경로가 같이 활성이 된다.
         // 인시던트 상세(`/incidents/[id]`)는 카테고리를 모르는 자리라 어느 항목도 켜지 않는다.
         const active =

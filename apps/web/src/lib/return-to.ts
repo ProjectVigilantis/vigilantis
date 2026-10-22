@@ -4,6 +4,8 @@
 // 마친 사용자를 공격자의 사이트로 보내는 열린 리다이렉트가 된다.
 
 export const LOGIN_PATH = '/login';
+/** 로그인 전 서비스 소개(T-15). 로그인 없이 열린다(src/proxy.ts). */
+export const LANDING_PATH = '/landing';
 const FALLBACK = '/';
 /** 해석 기준 오리진. 실제 주소와 무관하게 "다른 오리진으로 빠지는가"만 본다. */
 const BASE = 'http://return-to.invalid';
@@ -33,7 +35,8 @@ const serialize = (url: URL) => `${url.pathname}${url.search}${url.hash}`;
  *
  * 거부: 비어 있음 · `/`로 시작하지 않음(스킴 `https:`·`javascript:` 포함) · `//`(프로토콜 상대) ·
  * 역슬래시(`/\evil.com`은 브라우저가 `//evil.com`으로 읽는다) · 제어·공백 문자 · 해석 결과가 다른 오리진 ·
- * 로그인 화면 자신(되돌아가면 로그인을 다시 띄운다). `/%2F%2Fevil.com`처럼 인코딩된 슬래시는 경로 글자일 뿐이라 통과한다.
+ * 로그인 화면 자신(되돌아가면 로그인을 다시 띄운다) · 랜딩(로그인한 사람을 소개 화면으로 돌려보내지 않는다).
+ * `/%2F%2Fevil.com`처럼 인코딩된 슬래시는 경로 글자일 뿐이라 통과한다.
  *
  * **돌려줄 최종 문자열을 다시 검사한다** — 점 세그먼트 제거가 `//`를 새로 만들 수 있다
  * (`/a/..//evil.example` · `/%2e%2e//evil.example` → `//evil.example`). 결과가 같은 규칙을 통과하고,
@@ -44,6 +47,7 @@ export function safeReturnTo(raw: string | null | undefined): string {
   const url = parseRelativePath(raw);
   if (url === null) return FALLBACK;
   if (url.pathname === LOGIN_PATH || url.pathname.startsWith(`${LOGIN_PATH}/`)) return FALLBACK;
+  if (url.pathname === LANDING_PATH) return FALLBACK;
 
   const result = serialize(url);
   const reparsed = parseRelativePath(result);
