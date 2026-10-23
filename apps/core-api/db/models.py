@@ -1356,3 +1356,68 @@ class UserAdminEvent(Base):
     occurred_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow
     )
+
+
+# ==============================================================================
+# 플랫폼 계정 등록 링크 — 운영 CLI 발급 1회용 초대 (#492)
+# ==============================================================================
+
+
+class PlatformEnrollmentStatus(str, Enum):
+    """등록 링크 상태. 만료는 상태가 아니라 expires_at 으로 판정한다."""
+
+    #: CLI 가 발급했고 아직 쓰이지 않았다.
+    ISSUED = "ISSUED"
+    #: 사용 요청이 링크를 잡았다 — Cognito 사용자 생성이 시작됐을 수 있고 앱 계정은 아직 없다(결과 불명).
+    #: 자동으로 ISSUED 로 돌아가지 않는다. 운영자가 Cognito 상태를 확인하고 회수 · 재발급한다.
+    RESERVED = "RESERVED"
+    #: 앱 사용자(PLATFORM ADMIN)가 만들어졌다.
+    REDEEMED = "REDEEMED"
+    #: 운영자가 회수했다(ISSUED · RESERVED 에서만). 계정 · 세션과 무관하다.
+    REVOKED = "REVOKED"
+
+
+class PlatformEnrollment(Base):
+    """등록 링크 1개 = PLATFORM ADMIN 계정 1개. 원본 토큰은 저장하지 않고 SHA-256 hex만 둔다.
+
+    email 은 예약 때 받는 사람이 고른 값이다(허용 목록이 아니다). 예약이 남은 행의 Cognito 상태를 맞춰 볼 때 쓴다.
+    """
+
+    __tablename__ = "platform_enrollments"
+
+    enrollment_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
+    token_hash: Mapped[str] = mapped_column(CHAR(64), unique=True)
+    status: Mapped[PlatformEnrollmentStatus] = mapped_column(
+        _enum(PlatformEnrollmentStatus, "platform_enrollment_status")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    reserved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    email: Mapped[str | None] = mapped_column(String, nullable=True)
+    redeemed_user_id: Mapped[str | None] = mapped_column(
+        _ID, ForeignKey("app_users.user_id", ondelete="RESTRICT"), nullable=True, unique=True
+    )
+    redeemed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        CheckConstraint("expires_at > created_at", name="expires_after_created"),
+        CheckConstraint("(reserved_at IS NULL) = (email IS NULL)", name="reservation_shape"),
+        # ISSUED 는 예약 흔적이 없고 RESERVED · REDEEMED 는 있다. REVOKED 는 어느 쪽에서든 왔다
+        CheckConstraint(
+            "status = 'REVOKED' OR ((status = 'ISSUED') = (reserved_at IS NULL))",
+            name="reserved_unless_issued",
+        ),
+        CheckConstraint(
+            "((status = 'REDEEMED') = (redeemed_user_id IS NOT NULL))"
+            " AND ((redeemed_user_id IS NULL) = (redeemed_at IS NULL))",
+            name="redemption_shape",
+        ),
+        CheckConstraint("(status = 'REVOKED') = (revoked_at IS NOT NULL)", name="revocation_shape"),
+    )

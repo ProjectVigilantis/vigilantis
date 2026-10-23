@@ -47,6 +47,8 @@ EXPECTED_TABLES = {
     "app_users",
     "auth_sessions",
     "user_admin_events",
+    # 플랫폼 계정 등록 링크 (#492)
+    "platform_enrollments",
 }
 
 
@@ -81,6 +83,13 @@ def test_row_invariant_constraints_registered():
         "guardrail_evaluations": {"ck_guardrail_evaluations_exactly_one_reference"},
         "metric_summaries": {"ck_metric_summaries_window_ordered"},
         "rule_evaluations": {"ck_rule_evaluations_health_score_range"},
+        "platform_enrollments": {
+            "ck_platform_enrollments_expires_after_created",
+            "ck_platform_enrollments_reservation_shape",
+            "ck_platform_enrollments_reserved_unless_issued",
+            "ck_platform_enrollments_redemption_shape",
+            "ck_platform_enrollments_revocation_shape",
+        },
     }
     for table, names in expected.items():
         assert names <= _constraint_names(table), table

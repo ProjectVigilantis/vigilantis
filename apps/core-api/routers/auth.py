@@ -6,6 +6,9 @@
 #   - 세션 쿠키는 StepResult 가 COMPLETED + identity 일 때, service 가 세션을 발급한 뒤에만 건다.
 #   - 비밀값(SecretStr)은 LoginFlow 호출 지점에서만 벗긴다. 토큰은 어떤 본문에도 싣지 않는다.
 #   - 모든 경로에 Origin 검사(상태 변경만)가 먼저 걸리고, Cognito 라우트(로그인 · 재설정)만 설정 확인이 뒤따른다.
+#   - (#492) /platform-enrollment: Origin → 기능 스위치(꺼지면 본문 스키마 검증 · 링크 · DB · Cognito 전에 404.
+#     JSON 구문 오류는 프레임워크가 먼저 422) → 본문 스키마 검증 → 서비스(링크 판정 뒤에
+#     Cognito 어댑터를 지연 조립). 세션 쿠키를 읽지도 쓰지도 않는다 — 응답은 본문 없는 204 다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime
 
+from auth import enrollment as enrollment_service
 from auth import password_reset as password_reset_service
 from auth import service
 from auth.cognito import AuthFailedError, AuthFlowExpiredError, CognitoAdapter
@@ -31,7 +35,9 @@ from auth.http import (
 from auth.login_flow import LoginFlow, StepResult
 from config import AuthSettings, get_auth_settings
 from db.session import get_db
+from exceptions import ApiError
 from fastapi import APIRouter, Depends, Request, Response
+from routers.users import get_cognito_adapter_factory
 from schemas.api.auth import (
     CodeRequest,
     CurrentUserResponse,
@@ -41,8 +47,10 @@ from schemas.api.auth import (
     NewPasswordRequest,
     PasswordResetConfirmRequest,
     PasswordResetRequest,
+    PlatformEnrollmentRequest,
     TotpSetupResponse,
 )
+from schemas.api.errors import ErrorCode
 from sqlalchemy.orm import Session
 
 _DB = Depends(get_db)
@@ -205,6 +213,34 @@ def password_reset_confirm(
         code=body.code.get_secret_value(),
         new_password=body.new_password.get_secret_value(),
         now=clock(),
+    )
+    return Response(status_code=204)
+
+
+def require_platform_enrollment_enabled(settings: AuthSettings = _SETTINGS) -> None:
+    """기능 스위치(기본 꺼짐). 꺼져 있으면 본문 스키마 검증 · 링크 · DB · Cognito 전에 404 다.
+    JSON 구문 오류는 이 의존성보다 프레임워크가 먼저 422 로 거절한다."""
+    if not settings.AUTH_PLATFORM_ENROLLMENT_ENABLED:
+        raise ApiError(ErrorCode.ENROLLMENT_UNAVAILABLE)
+
+
+@router.post(
+    "/platform-enrollment",
+    status_code=204,
+    dependencies=[Depends(require_platform_enrollment_enabled)],
+)
+def platform_enrollment(
+    body: PlatformEnrollmentRequest,
+    db: Session = _DB,
+    clock: Callable[[], datetime] = _CLOCK,
+    get_adapter: Callable[[], CognitoAdapter] = Depends(get_cognito_adapter_factory),
+) -> Response:
+    enrollment_service.redeem(
+        db,
+        get_adapter,
+        token=body.token.get_secret_value(),
+        email=body.email,
+        clock=clock,
     )
     return Response(status_code=204)
 

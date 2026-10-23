@@ -239,6 +239,11 @@ class AuthSettings(BaseSettings):
     AUTH_CODE_FAILURE_WINDOW_SECONDS: int = Field(default=900, gt=0)
     # 콤마 구분 허용 Origin(정확히 일치) — 비우면 CORS_ALLOW_ORIGINS 와 같은 목록을 쓴다
     AUTH_ALLOWED_ORIGINS: str = ""
+    # 플랫폼 계정 등록 링크 사용 경로(POST /api/v1/auth/platform-enrollment, #492) — 기본 꺼짐.
+    # 꺼지면 본문 스키마 검증 · 링크 · DB · Cognito 전에 404 ENROLLMENT_UNAVAILABLE 이다(Origin 검사는
+    # 그대로 먼저, JSON 구문 오류는 프레임워크가 먼저 422).
+    # 링크 발급은 운영 CLI(auth.bootstrap_enrollment)뿐이며 이 값과 무관하다. 등록 기간에만 켠다
+    AUTH_PLATFORM_ENROLLMENT_ENABLED: bool = False
 
     @field_validator("AUTH_ALLOWED_ORIGINS", mode="after")
     @classmethod

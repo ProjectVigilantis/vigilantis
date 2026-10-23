@@ -1,11 +1,11 @@
-"""REST 공통 오류 봉투 계약 테스트 (확정 설계 4.6) — 코드 6종, 봉투 형태 고정."""
+"""REST 공통 오류 봉투 계약 테스트 (확정 설계 4.6) — 코드 27종, 봉투 형태 고정."""
 
 import pytest
 from pydantic import ValidationError
 
 from schemas.api.errors import ErrorCode, ErrorResponse
 
-# 계약 원문 24종. 코드가 아니라 이 리터럴 집합이 기대값이다.
+# 계약 원문 27종. 코드가 아니라 이 리터럴 집합이 기대값이다.
 CONTRACT_ERROR_CODES = {
     "INCIDENT_NOT_FOUND",         # 404
     "IDEMPOTENCY_KEY_CONFLICT",   # 409
@@ -31,6 +31,7 @@ CONTRACT_ERROR_CODES = {
     "AUTH_PROVIDER_UNAVAILABLE",  # 503
     "USER_NOT_FOUND",             # 404 — ADMIN 사용자 관리
     "USER_STATE_CONFLICT",        # 409 — 마지막 ADMIN · 중복 · 상태 충돌
+    "ENROLLMENT_UNAVAILABLE",     # 404 — 플랫폼 계정 등록 링크 (#492)
     "REQUEST_VALIDATION_FAILED",  # 422
     "INTERNAL_ERROR",             # 500
 }

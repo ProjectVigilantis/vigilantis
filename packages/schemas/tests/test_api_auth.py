@@ -13,8 +13,10 @@ from schemas.api.auth import (
     LoginStep,
     LoginStepResponse,
     NewPasswordRequest,
+    ENROLLMENT_TOKEN_MAX_LENGTH,
     PasswordResetConfirmRequest,
     PasswordResetRequest,
+    PlatformEnrollmentRequest,
     SessionInfo,
     TotpSetupResponse,
     UserRole,
@@ -188,6 +190,49 @@ def test_current_user_serializes_assigned_scope(account_type, tenant_id):
     payload = response.model_dump(mode="json")
     assert payload["account_type"] == account_type
     assert payload["tenant_id"] == tenant_id
+
+
+ENROLLMENT_TOKEN = "Enr0llment-Token_literal.for~test-0123456789"
+
+
+def test_platform_enrollment_request_keeps_token_secret():
+    request = PlatformEnrollmentRequest.model_validate(
+        {"token": ENROLLMENT_TOKEN, "email": "owner@example.com"}
+    )
+    assert request.token.get_secret_value() == ENROLLMENT_TOKEN
+    assert request.email == "owner@example.com"
+    for serialized in (repr(request), str(request), request.model_dump_json()):
+        assert ENROLLMENT_TOKEN not in serialized
+
+
+@pytest.mark.parametrize("extra", [
+    {"role": "ADMIN"}, {"account_type": "PLATFORM"}, {"tenant_id": None}, {"password": PASSWORD},
+])
+def test_platform_enrollment_request_accepts_no_authority_fields(extra):
+    # 계정 종류 · 역할 · 소속은 서버가 고정한다 — 요청으로 고를 길이 없다
+    with pytest.raises(ValidationError):
+        PlatformEnrollmentRequest.model_validate(
+            {"token": ENROLLMENT_TOKEN, "email": "owner@example.com", **extra}
+        )
+
+
+@pytest.mark.parametrize("data", [
+    {"email": "owner@example.com"},
+    {"token": ENROLLMENT_TOKEN},
+    {"token": "", "email": "owner@example.com"},
+    {"token": "x" * (ENROLLMENT_TOKEN_MAX_LENGTH + 1), "email": "owner@example.com"},
+    {"token": ENROLLMENT_TOKEN, "email": "not-an-email"},
+])
+def test_platform_enrollment_request_bounds(data):
+    with pytest.raises(ValidationError) as exc:
+        PlatformEnrollmentRequest.model_validate(data)
+    assert ENROLLMENT_TOKEN not in str(exc.value)
+
+
+def test_platform_enrollment_token_bound_admits_frontend_fragment_range():
+    # FE 의 링크 조각 검증 상한(512)까지는 422 가 아니라 서버의 링크 판정(404)으로 간다
+    assert ENROLLMENT_TOKEN_MAX_LENGTH == 512
+    PlatformEnrollmentRequest.model_validate({"token": "a" * 512, "email": "owner@example.com"})
 
 
 @pytest.mark.parametrize("scope", [
