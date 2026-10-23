@@ -323,8 +323,8 @@ function RoleSelect({ id, value, onChange }: { id: string; value: UserRole; onCh
 }
 
 /**
- * 초대 칸은 계정 종류로 갈린다. 플랫폼 운영자는 초대할 고객의 ID(UUID)를 직접 넣는다 — 고객 목록을 고르는 API가
- * 아직 없어 선택 목록을 꾸며 두지 않는다. 고객사 ADMIN은 자기 소속을 읽기 전용으로만 보고 다른 고객을 고를 수 없다.
+ * 초대 칸은 계정 종류로 갈린다. 플랫폼 운영자는 초대할 고객의 ID(UUID)를 직접 넣는다 — 테넌트 목록 API는 있지만
+ * 이 화면에는 선택 목록을 연결하지 않았다. 고객사 ADMIN은 자기 소속을 읽기 전용으로만 보고 다른 고객을 고를 수 없다.
  */
 function InviteDialog({
   inviter,

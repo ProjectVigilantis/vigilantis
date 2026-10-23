@@ -8,7 +8,7 @@
 #   - 거절: 미인증 401 AUTH_REQUIRED, 역할 불허 403 AUTH_FORBIDDEN — 라우터 본문 · Workflow 전이다.
 #     require_admin 은 사용자 관리(#492 PR 3)용 ADMIN 전용 검사다.
 #   - 계정 종류(#492): 플랫폼 권한은 account_type == PLATFORM 에서만 나온다(role · tenant_id NULL 로
-#     추론하지 않는다). require_platform_account 가 그 검사다(앞으로의 플랫폼 전용 라우트용).
+#     추론하지 않는다). require_platform_account 가 테넌트 관리 라우터의 플랫폼 전용 관문이다.
 #   - 정지 테넌트(SUSPENDED)의 TENANT 계정에 지금 열린 것은 인증 경로(/api/v1/auth — 로그인 · 로그아웃 · 활동 ·
 #     /me · 비밀번호 재설정)와 자기 테넌트 범위의 사용자 조회(/api/v1/users 의 GET)뿐이다. 조치 실행 · 종료와
 #     사용자 관리 변경은 409 TENANT_SUSPENDED. 업무 기록 조회(자산 · 인시던트 · 메트릭)는 아래 임시 관문 때문에
