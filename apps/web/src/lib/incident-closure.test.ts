@@ -12,7 +12,7 @@ function incident(over: Partial<IncidentResponse> = {}): IncidentResponse {
     analysis_result: { status: 'PROPOSALS_GENERATED', guardrail_rejections: [] },
     recommendations: [{ runbook_id: 'RUNBOOK_NACL_ADD_DENY', target_arn: 'arn:test',
       display_parameters: {}, ai_savings_estimate: null }],
-    resolution: null, resolution_note: null, resolved_at: null,
+    resolution: null, resolution_note: null, resolved_at: null, auto_isolation_block: null,
     created_at: '2026-09-30T00:00:00Z', updated_at: '2026-09-30T00:00:00Z', ...over,
   };
 }

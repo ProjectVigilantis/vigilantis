@@ -29,6 +29,7 @@ function incident(id: string, recommendations: RecommendationItem[]): IncidentRe
     resolution_note: null,
     analysis_result: null,
     resolved_at: null,
+    auto_isolation_block: null,
   };
 }
 

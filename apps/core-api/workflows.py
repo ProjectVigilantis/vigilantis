@@ -675,6 +675,38 @@ def automatic_trigger_block(
     return None
 
 
+def pending_automatic_block(
+    db: Session, incident: models.Incident
+) -> AutoIsolationSkipReason | None:
+    """이 건에 지금 걸릴 자동 발동이 테넌트 관문에 막혀 있으면 그 사유. 읽기 전용이다. (#521)
+
+    인시던트 상세의 auto_isolation_block 원천이다 — 화면 안내가 서버의 실제 접수 판정과 어긋나지
+    않게 접수 관문과 같은 함수(automatic_trigger_block)를 부른다. 「지금 걸릴 발동」은 접수 관문이
+    잠근 뒤 보는 발동 조건(_AUTO_ISOLATION_ELIGIBILITY · 위험도 · 대응 경로 · 상태)으로 고른다 —
+    그 밖의 건(Low · 분석 뒤 High · 이미 발동한 건 · FINOPS)과 테넌트 없음은 None 이다. 잠그지 않는다.
+    """
+    if incident.tenant_id is None:
+        return None
+    trigger_source = next(
+        (
+            source
+            for source, (risk_level, response_mode, status) in _AUTO_ISOLATION_ELIGIBILITY.items()
+            if incident.initial_risk_level is risk_level
+            and incident.response_mode is response_mode
+            and incident.status is status
+        ),
+        None,
+    )
+    if trigger_source is None:
+        return None
+    return automatic_trigger_block(
+        db.get(models.Tenant, incident.tenant_id),
+        trigger_source=trigger_source,
+        received_at=incident.created_at,
+        response_deadline_at=incident.response_deadline_at,
+    )
+
+
 def _auto_isolation_skip_reason(
     db: Session,
     incident: models.Incident,
