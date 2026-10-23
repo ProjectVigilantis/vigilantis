@@ -34,6 +34,7 @@ from sqlalchemy.orm import Session
 from schemas.api.errors import ErrorCode
 from schemas.api.analysis import AnalysisResult
 from schemas.api.incidents import (
+    AutoIsolationBlock,
     IncidentCategory,
     IncidentListItem,
     IncidentResponse,
@@ -249,10 +250,18 @@ def _to_detail(db: Session, row: models.Incident) -> IncidentResponse:
             "resolution": row.resolution,
             "resolution_note": row.resolution_note,
             "resolved_at": row.resolved_at,
+            "auto_isolation_block": _auto_isolation_block(db, row),
             "created_at": row.created_at,
             "updated_at": row.updated_at,
         }
     )
+
+
+def _auto_isolation_block(db: Session, row: models.Incident) -> Optional[AutoIsolationBlock]:
+    """서버 접수 관문과 같은 판정으로 계산한다 — 화면의 「실행 예정」 안내가 실제 동작과 어긋나지
+    않게(#521). 관문의 사유와 계약 값은 같은 철자다 — 관문에 사유가 늘면 계약에도 같이 더한다."""
+    reason = workflows.pending_automatic_block(db, row)
+    return None if reason is None else AutoIsolationBlock(reason.value)
 
 
 @router.get("/incidents/{incident_id}", response_model=IncidentResponse)
