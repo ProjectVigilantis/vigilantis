@@ -13,6 +13,7 @@ import type {
   IncidentsResponse,
   LoginStepResponse,
   MetricsTimeseriesResponse,
+  PlatformEnrollmentRequest,
   ResolutionJudgement,
   TenantCreateRequest,
   TenantCreateResponse,
@@ -344,6 +345,15 @@ export async function requestPasswordReset(email: string): Promise<void> {
 /** 재설정 확인 — 204. 로그인 · 세션 발급은 하지 않는다(새 비밀번호로 다시 로그인한다). */
 export async function confirmPasswordReset(email: string, code: string, newPassword: string): Promise<void> {
   await postJson<null>('/auth/password-reset/confirm', { email, code, new_password: newPassword }, AUTH_FLOW);
+}
+
+/**
+ * 플랫폼 운영자 초대 링크 등록(#492) — 204. 계정 생성 · 초대 메일 발송 요청까지이고 로그인 · 세션 발급은 하지 않는다
+ * (받은 초대 메일로 로그인 단계를 거친다). 로그인 전 화면이라 401을 세션 만료로 다루지 않는다(AUTH_FLOW 전송).
+ * 본문은 `token` · `email` 둘뿐이다. 자동 재시도하지 않는다 — 결과 불명 실패 뒤의 재요청은 사용자가 고른다.
+ */
+export async function requestPlatformEnrollment(body: PlatformEnrollmentRequest): Promise<void> {
+  await postJson<null>('/auth/platform-enrollment', { token: body.token, email: body.email }, AUTH_FLOW);
 }
 
 /* ──────────────────────────── /users (#492 PR 3) ──────────────────────────── */

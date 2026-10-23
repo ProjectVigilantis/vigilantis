@@ -11,15 +11,14 @@ import { SessionProvider } from '@/components/auth/session-provider';
 import { ShellHeader, ShellNav } from '@/components/gnb';
 import { RealtimeProvider } from '@/components/realtime-provider';
 import { ToastStack } from '@/components/toast-stack';
-import { LANDING_PATH, LOGIN_PATH } from '@/lib/return-to';
-
-/** 골격 없이 본문만 그리는 경로. 랜딩(T-15)은 로그인 전 화면이라 셸 · 소켓을 열지 않는다. */
-const BARE_PATHS: ReadonlySet<string> = new Set([LOGIN_PATH, LANDING_PATH]);
+import { isPublicPath } from '@/lib/public-paths';
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
 
-  if (BARE_PATHS.has(pathname)) {
+  // 공개 경로(로그인 · 랜딩 · 초대 링크 등록)는 로그인 전 화면이라 골격 없이 본문만 그린다 — 세션 조회 · 소켓 ·
+  // GNB 폴링을 열지 않는다. proxy와 같은 목록이다(lib/public-paths.ts).
+  if (isPublicPath(pathname)) {
     return <main className="flex flex-1 flex-col">{children}</main>;
   }
 
