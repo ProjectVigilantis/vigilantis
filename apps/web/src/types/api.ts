@@ -14,8 +14,8 @@ export type ErrorCode =
   | 'TENANT_NOT_FOUND' // 404
   | 'TENANT_ACCOUNT_CONFLICT' // 409 — 같은 AWS 계정의 테넌트가 이미 있다
   | 'TENANT_ONBOARDING_UNAVAILABLE' // 503 — 온보딩 링크 설정(템플릿 URL · 플랫폼 주체)이 없다
-  | 'TENANT_STATE_CONFLICT' // 409
-  | 'TENANT_SUSPENDED' // 409 — 정지된 테넌트의 새 실행 · 종료(플랫폼 운영자의 종료는 받는다)
+  | 'TENANT_STATE_CONFLICT' // 409 — 허용되지 않은 전이 · ACTIVE가 아닌 고객으로 초대 · 재발송
+  | 'TENANT_SUSPENDED' // 409 — 정지 고객 사용자의 관리 쓰기 · 정지 자산의 새 실행·종료(플랫폼 종료는 허용)
   | 'AUTH_REQUIRED' // 401 — 세션 없음 · 만료 · 회수
   | 'AUTH_FAILED' // 401 — 이메일 · 비밀번호 불일치
   | 'AUTH_CODE_INVALID' // 401 — TOTP · 이메일 · 재설정 코드 불일치(같은 단계에서 다시 낼 수 있다)
@@ -23,14 +23,14 @@ export type ErrorCode =
   | 'AUTH_STEP_CONFLICT' // 409
   | 'AUTH_PASSWORD_POLICY' // 422 — 새 비밀번호가 앱 또는 User Pool 정책 위반
   | 'AUTH_ORIGIN_REJECTED' // 403
-  | 'AUTH_FORBIDDEN' // 403 — 역할이 이 요청을 허용하지 않는다(VIEWER의 실행 · 종료 PR 2, ADMIN 외 사용자 관리 PR 3)
-  | 'ACCOUNT_NOT_PROVISIONED' // 403
+  | 'AUTH_FORBIDDEN' // 403 — 계정 종류 · 역할이 이 요청을 허용하지 않는다(VIEWER의 실행 · 종료, 관리자 외 사용자 관리, 격리 전 고객사 계정의 업무 API)
+  | 'ACCOUNT_NOT_PROVISIONED' // 403 — 앱 사용자 없음 또는 소속 · 플랫폼 권한 미지정
   | 'ACCOUNT_DISABLED' // 403
   | 'AUTH_EMAIL_DELIVERY_FAILED' // 503
   | 'AUTH_RATE_LIMITED' // 429
   | 'AUTH_PROVIDER_UNAVAILABLE' // 503
-  | 'USER_NOT_FOUND' // 404 — ADMIN 사용자 관리 대상 없음(#492 PR 3)
-  | 'USER_STATE_CONFLICT' // 409 — 마지막 ADMIN · 중복 초대 · 상태 충돌(#492 PR 3)
+  | 'USER_NOT_FOUND' // 404 — 관리 범위 안의 고객사 사용자 없음(#492)
+  | 'USER_STATE_CONFLICT' // 409 — 고객사별 마지막 활성 ADMIN · 중복 초대 · 상태 충돌(#492)
   | 'REQUEST_VALIDATION_FAILED' // 422
   | 'INTERNAL_ERROR'; // 500
 
@@ -877,27 +877,43 @@ export interface SessionInfo {
   idle_expires_at: IsoDateTime;
 }
 
-export interface CurrentUserResponse {
+/**
+ * 권한 범위(auth.py `AccountScope`, #492). PLATFORM = 플랫폼 운영자(소속 없음), TENANT = 고객사 사용자(소속 필수).
+ * 소속 없는 내부 상태(UNASSIGNED)는 성공 응답에 오지 않는다 — 로그인 완료 단계는 403 `ACCOUNT_NOT_PROVISIONED`,
+ * 이미 발급된 세션의 `/me`는 401 `AUTH_REQUIRED`다.
+ * 플랫폼 여부는 `account_type`으로만 가른다. 역할(ADMIN)이나 `tenant_id`가 NULL인 것으로 추론하지 않는다.
+ */
+export type AccountType = 'PLATFORM' | 'TENANT';
+
+/** 소속 쌍의 불변식(PLATFORM ↔ tenant_id null, TENANT ↔ tenant_id 있음)을 타입으로 둔다. */
+export type AccountScope =
+  | { account_type: 'PLATFORM'; tenant_id: null }
+  | { account_type: 'TENANT'; tenant_id: string };
+
+export type CurrentUserResponse = AccountScope & {
   user_id: string;
   email: string;
+  /** PLATFORM은 호환을 위해 ADMIN이다. TENANT는 ADMIN · OPERATOR · VIEWER. */
   role: UserRole;
   session: SessionInfo;
-}
+};
 
 /* ────────────────────────────── users.py ────────────────────────────── */
-/* /api/v1/users — ADMIN 사용자 관리(#492 PR 3). 전부 ADMIN 전용이고, 다른 역할은 서버가 403 `AUTH_FORBIDDEN`으로 막는다.
+/* /api/v1/users — 고객사 사용자 관리(#492). 플랫폼 운영자는 모든 고객사 사용자를, 고객사 ADMIN은 자기 고객사
+   사용자만 관리한다. 그 밖은 서버가 403 `AUTH_FORBIDDEN`, 관리 범위 밖 대상은 404 `USER_NOT_FOUND`다.
    비밀번호 재설정(/api/v1/auth/password-reset · /confirm)은 응답 본문이 없는 204라 타입이 없다. */
 
 export type UserStatus = 'ACTIVE' | 'DISABLED';
 
-export interface UserListItem {
+/** 목록은 고객사 사용자만 싣는다(플랫폼 계정 제외) — 실제로는 TENANT 쪽만 온다. */
+export type UserListItem = AccountScope & {
   user_id: string;
   email: string;
   role: UserRole;
   status: UserStatus;
   /** 로그인한 적이 없으면 null. */
   last_login_at: IsoDateTime | null;
-}
+};
 
 export interface UsersResponse {
   items: UserListItem[];
@@ -906,6 +922,11 @@ export interface UsersResponse {
 export interface UserInviteRequest {
   email: string;
   role: UserRole;
+  /**
+   * 초대할 고객(UUID). 스키마상 선택이지만 **플랫폼 운영자는 반드시 보낸다**(빠지면 서버가 거절).
+   * 고객사 ADMIN은 생략한다(서버가 자기 소속으로 한정한다). 계정 종류(account_type)는 입력이 아니다.
+   */
+  tenant_id?: string | null;
   /** 같은 이메일의 기존 Cognito 계정을 이 앱 사용자로 연결한다. ADMIN의 명시적 선택일 때만 true다. */
   recover_existing: boolean;
 }
@@ -923,6 +944,7 @@ export interface UserEventState {
   status?: UserStatus | null;
   revoked_session_count?: number | null;
   recover_existing?: boolean | null;
+  tenant_id?: string | null;
 }
 
 export interface UserEventItem {

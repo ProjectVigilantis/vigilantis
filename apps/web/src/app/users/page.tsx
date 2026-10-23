@@ -1,5 +1,5 @@
-// 사용자 관리(#492 PR 3) — ADMIN 전용. GNB 메뉴는 ADMIN에게만 보이지만, 실제 차단은 서버 403 `AUTH_FORBIDDEN`이다
-// (주소를 직접 쳐서 들어온 다른 역할도 여기서 403 안내를 본다).
+// 사용자 관리(#492) — 플랫폼 운영자 · 고객사 ADMIN 전용. GNB 메뉴는 그 계정에게만 보이지만, 실제 차단은 서버 403
+// `AUTH_FORBIDDEN`이다(주소를 직접 쳐서 들어온 고객사 OPERATOR · VIEWER도 여기서 403 안내를 본다).
 
 import type { Metadata } from 'next';
 import { unstable_rethrow } from 'next/navigation';

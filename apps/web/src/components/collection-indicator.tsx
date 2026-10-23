@@ -77,8 +77,9 @@ export interface AssetsEnvelopeState {
 /**
  * GNB 두 칩이 함께 쓰는 `GET /assets` 봉투 — 한 번만 부른다(gnb.tsx가 쥐고 두 칩에 내린다).
  * 수집 칩은 수집 상태를, 실시간 칩은 "자산이 붙었나"(수집된 자산이 있나)를 읽는다.
+ * `enabled`가 false면 부르지 않는다 — 자산 조회가 막힌 계정(격리 전 고객사 계정, lib/home-path.ts)이다.
  */
-export function useAssetsEnvelope(): AssetsEnvelopeState {
+export function useAssetsEnvelope(enabled: boolean): AssetsEnvelopeState {
   const { connection } = useRealtime();
   const [env, setEnv] = useState<AssetsResponse | null>(null);
   const [failed, setFailed] = useState(false);
@@ -86,6 +87,7 @@ export function useAssetsEnvelope(): AssetsEnvelopeState {
 
   // 클라이언트에서만 부른다 — 서버에서 그리면 수집 상태가 하이드레이션 시점과 어긋난다.
   useEffect(() => {
+    if (!enabled) return;
     let alive = true;
     const load = () =>
       getAssets()
@@ -102,7 +104,7 @@ export function useAssetsEnvelope(): AssetsEnvelopeState {
       alive = false;
       clearInterval(timer);
     };
-  }, []);
+  }, [enabled]);
 
   // WS 재연결 = 서버가 돌아왔다는 신호다. 본문은 RealtimeProvider의 `router.refresh()`로 바로 복구되지만
   // 이 자리는 layout 소유라 refresh로 다시 부르지 않아, 주기를 기다리면 최대 REFRESH_MS 동안

@@ -3,6 +3,7 @@
 // 사용자 관리(#492 PR 3) — 목록 · 초대 · 초대 재발송 · 역할 · 활성 상태 · 로그인 세션 종료 · 이력.
 // 최소 동작 화면이다(시각 정리는 FE 담당이 이어서 한다). 조치가 끝나면 낙관적으로 고치지 않고 서버 목록을 다시 읽는다.
 // 실패 문구는 lib/user-admin.ts가 정한다 — 403은 "관리자만", 초대 · 재발송의 결과 불명 실패는 "메일이 나갔을 수 있다".
+// 관리 범위(#492): 플랫폼 운영자는 모든 고객사 사용자를, 고객사 ADMIN은 자기 고객사 사용자만 본다 — 범위는 서버가 정한다.
 
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
@@ -36,10 +37,12 @@ import {
   STATUS_LABELS,
   eventSummary,
   formatUserTime,
+  inviteRequestFor,
+  canChangeRow,
   userAdminErrorMessage,
   type UserAdminAction,
 } from '@/lib/user-admin';
-import type { UserEventItem, UserListItem, UserRole } from '@/types/api';
+import type { AccountScope, UserEventItem, UserListItem, UserRole } from '@/types/api';
 
 const ROLES: readonly UserRole[] = ['ADMIN', 'OPERATOR', 'VIEWER'];
 
@@ -50,7 +53,8 @@ type Panel =
 export function UsersView({ users }: { users: UserListItem[] }) {
   const router = useRouter();
   const { session } = useSession();
-  const myId = session.kind === 'user' ? session.user.user_id : null;
+  const me = session.kind === 'user' ? session.user : null;
+  const myId = me?.user_id ?? null;
   const [panel, setPanel] = useState<Panel | null>(null);
   const [done, setDone] = useState<string | null>(null);
 
@@ -72,7 +76,8 @@ export function UsersView({ users }: { users: UserListItem[] }) {
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-lg font-semibold">사용자 관리</h1>
-        <Button type="button" onClick={() => open({ kind: 'invite' })}>
+        {/* 초대 칸(고객 ID 입력 여부)이 계정 종류로 갈리므로 계정을 확인한 뒤에 연다. */}
+        <Button type="button" disabled={me === null} onClick={() => open({ kind: 'invite' })}>
           사용자 초대
         </Button>
       </div>
@@ -90,6 +95,7 @@ export function UsersView({ users }: { users: UserListItem[] }) {
           <TableHeader>
             <TableRow>
               <TableHead>이메일</TableHead>
+              <TableHead>고객 ID</TableHead>
               <TableHead>역할</TableHead>
               <TableHead>상태</TableHead>
               <TableHead>마지막 로그인</TableHead>
@@ -105,6 +111,7 @@ export function UsersView({ users }: { users: UserListItem[] }) {
                   {user.email}
                   {user.user_id === myId ? <span className="ml-1 text-xs text-muted-foreground">(나)</span> : null}
                 </TableCell>
+                <TableCell className="font-mono text-xs">{user.tenant_id ?? '—'}</TableCell>
                 <TableCell>{ROLE_LABELS[user.role]}</TableCell>
                 <TableCell>{STATUS_LABELS[user.status]}</TableCell>
                 <TableCell>
@@ -112,10 +119,22 @@ export function UsersView({ users }: { users: UserListItem[] }) {
                 </TableCell>
                 <TableCell>
                   <div className="flex gap-1">
-                    <Button type="button" size="sm" variant="outline" onClick={() => open({ kind: 'role', user })}>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={!canChangeRow(user.user_id, myId)}
+                      onClick={() => open({ kind: 'role', user })}
+                    >
                       역할 변경
                     </Button>
-                    <Button type="button" size="sm" variant="outline" onClick={() => open({ kind: 'status', user })}>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={!canChangeRow(user.user_id, myId)}
+                      onClick={() => open({ kind: 'status', user })}
+                    >
                       {user.status === 'ACTIVE' ? '비활성화' : '활성화'}
                     </Button>
                     <Button type="button" size="sm" variant="outline" onClick={() => open({ kind: 'revoke', user })}>
@@ -138,7 +157,7 @@ export function UsersView({ users }: { users: UserListItem[] }) {
         </Table>
       )}
 
-      {panel?.kind === 'invite' ? <InviteDialog onClose={close} onDone={finished} /> : null}
+      {panel?.kind === 'invite' && me !== null ? <InviteDialog inviter={me} onClose={close} onDone={finished} /> : null}
 
       {panel?.kind === 'resend' ? (
         <ActionDialog
@@ -153,7 +172,7 @@ export function UsersView({ users }: { users: UserListItem[] }) {
       ) : null}
 
       {panel?.kind === 'role' ? (
-        <RoleDialog user={panel.user} self={panel.user.user_id === myId} onClose={close} onDone={finished} />
+        <RoleDialog user={panel.user} onClose={close} onDone={finished} />
       ) : null}
 
       {panel?.kind === 'status' ? (
@@ -207,6 +226,7 @@ function ActionDialog({
   destructive = false,
   disabled = false,
   children,
+  validate,
   run,
   onClose,
   onDone,
@@ -218,6 +238,8 @@ function ActionDialog({
   destructive?: boolean;
   disabled?: boolean;
   children?: ReactNode;
+  /** 보내기 전 입력 검사. 문구를 돌려주면 요청하지 않고 그 문구를 보인다(결과 불명 문구와 섞이지 않게). */
+  validate?: (form: FormData) => string | null;
   run: (form: FormData) => Promise<unknown>;
   onClose: () => void;
   onDone: () => void;
@@ -230,11 +252,17 @@ function ActionDialog({
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (inFlight.current) return;
+    const form = new FormData(event.currentTarget);
+    const invalid = validate?.(form) ?? null;
+    if (invalid !== null) {
+      setError(invalid);
+      return;
+    }
     inFlight.current = true;
     setPending(true);
     setError(null);
     try {
-      await run(new FormData(event.currentTarget));
+      await run(form);
     } catch (caught) {
       const code = caught instanceof ApiError ? caught.code : null;
       setError(userAdminErrorMessage(action, code));
@@ -294,9 +322,28 @@ function RoleSelect({ id, value, onChange }: { id: string; value: UserRole; onCh
   );
 }
 
-function InviteDialog({ onClose, onDone }: { onClose: () => void; onDone: (message: string) => void }) {
+/**
+ * 초대 칸은 계정 종류로 갈린다. 플랫폼 운영자는 초대할 고객의 ID(UUID)를 직접 넣는다 — 고객 목록을 고르는 API가
+ * 아직 없어 선택 목록을 꾸며 두지 않는다. 고객사 ADMIN은 자기 소속을 읽기 전용으로만 보고 다른 고객을 고를 수 없다.
+ */
+function InviteDialog({
+  inviter,
+  onClose,
+  onDone,
+}: {
+  inviter: AccountScope;
+  onClose: () => void;
+  onDone: (message: string) => void;
+}) {
   const [role, setRole] = useState<UserRole>('VIEWER');
   const [recover, setRecover] = useState(false);
+  const build = (form: FormData) =>
+    inviteRequestFor(inviter, {
+      email: String(form.get('email') ?? ''),
+      role,
+      recoverExisting: recover,
+      tenantId: String(form.get('tenant_id') ?? ''),
+    });
 
   return (
     <ActionDialog
@@ -308,13 +355,45 @@ function InviteDialog({ onClose, onDone }: { onClose: () => void; onDone: (messa
           : '입력한 이메일로 임시 비밀번호가 담긴 초대 메일을 보냅니다.'
       }
       confirmLabel={recover ? '기존 계정 연결' : '초대'}
-      run={(form) =>
-        // 이메일은 다듬지 않고 입력 그대로 보낸다(서버가 형식을 판정한다).
-        inviteUser({ email: String(form.get('email') ?? ''), role, recover_existing: recover })
-      }
+      validate={(form) => {
+        const built = build(form);
+        return built.ok ? null : built.error;
+      }}
+      run={(form) => {
+        // validate가 먼저 통과시킨 입력이다. 이메일은 다듬지 않고 입력 그대로 보낸다(서버가 형식을 판정한다).
+        const built = build(form);
+        return built.ok ? inviteUser(built.request) : Promise.reject(new Error(built.error));
+      }}
       onClose={onClose}
       onDone={() => onDone(recover ? '기존 계정을 연결했습니다.' : '사용자를 초대했습니다.')}
     >
+      {inviter.account_type === 'PLATFORM' ? (
+        <div className="flex flex-col gap-1.5">
+          <label htmlFor="invite-tenant" className={LABEL_CLASS}>
+            고객 ID
+          </label>
+          <input
+            id="invite-tenant"
+            name="tenant_id"
+            type="text"
+            required
+            autoComplete="off"
+            spellCheck={false}
+            placeholder="123e4567-e89b-12d3-a456-426614174000"
+            aria-describedby="invite-tenant-hint"
+            className={`${INPUT_CLASS} font-mono`}
+          />
+          <p id="invite-tenant-hint" className="text-xs text-muted-foreground">
+            활성(ACTIVE) 상태인 고객의 ID(UUID)를 기존 운영 절차로 확인해 입력하세요.
+          </p>
+        </div>
+      ) : (
+        <p className="text-sm">
+          <span className={LABEL_CLASS}>소속 고객</span>{' '}
+          <span className="font-mono text-xs wrap-anywhere">{inviter.tenant_id}</span>
+          <span className="block text-xs text-muted-foreground">내 고객사에만 초대할 수 있습니다.</span>
+        </p>
+      )}
       <div className="flex flex-col gap-1.5">
         <label htmlFor="invite-email" className={LABEL_CLASS}>
           이메일
@@ -354,12 +433,10 @@ function InviteDialog({ onClose, onDone }: { onClose: () => void; onDone: (messa
 
 function RoleDialog({
   user,
-  self,
   onClose,
   onDone,
 }: {
   user: UserListItem;
-  self: boolean;
   onClose: () => void;
   onDone: (message: string) => void;
 }) {
@@ -369,11 +446,7 @@ function RoleDialog({
     <ActionDialog
       action="role"
       title="역할 변경"
-      description={
-        self
-          ? '내 역할을 바꿉니다. 관리자가 아니게 되면 이 화면을 더 쓸 수 없습니다.'
-          : `${user.email} 사용자의 역할을 바꿉니다.`
-      }
+      description={`${user.email} 사용자의 역할을 바꿉니다.`}
       confirmLabel="변경"
       disabled={role === user.role}
       run={() => changeUserRole(user.user_id, role)}

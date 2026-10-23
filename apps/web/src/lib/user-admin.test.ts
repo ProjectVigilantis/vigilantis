@@ -5,12 +5,20 @@ import { test } from 'node:test';
 
 import { VIEWER_ACTION_BLOCKED } from './roles.ts';
 import {
+  canChangeRow,
   INVITE_RECOVER_NOT_FOUND,
+  INVITE_TENANT_NOT_FOUND,
   INVITE_UNCERTAIN,
+  TENANT_ID_INVALID,
+  TENANT_ID_REQUIRED,
+  TENANT_NOT_ACTIVE,
+  TENANT_SUSPENDED_BLOCKED,
   USER_ADMIN_FORBIDDEN,
   eventSummary,
   formatUserTime,
+  inviteRequestFor,
   userAdminErrorMessage,
+  type InviteForm,
   type UserAdminAction,
 } from './user-admin.ts';
 import type { UserEventItem } from '../types/api.ts';
@@ -44,12 +52,73 @@ test('그 밖의 조치의 결과 불명 실패는 메일을 말하지 않고 �
   }
 });
 
+test('고객 상태 거절은 고객 사유를 말하고 결과 불명 문구로 접지 않는다', () => {
+  assert.equal(userAdminErrorMessage('invite', 'TENANT_NOT_FOUND'), INVITE_TENANT_NOT_FOUND);
+  for (const action of ['invite', 'resend'] as const) {
+    assert.equal(userAdminErrorMessage(action, 'TENANT_STATE_CONFLICT'), TENANT_NOT_ACTIVE, action);
+  }
+  for (const action of ACTIONS) {
+    assert.equal(userAdminErrorMessage(action, 'TENANT_SUSPENDED'), TENANT_SUSPENDED_BLOCKED, action);
+    for (const code of ['TENANT_NOT_FOUND', 'TENANT_STATE_CONFLICT', 'TENANT_SUSPENDED'] as const) {
+      assert.doesNotMatch(userAdminErrorMessage(action, code), /발송되었을 수 있습니다/, `${action} ${code}`);
+    }
+  }
+});
+
+test('범위 밖 사용자는 대상 없음과 같은 문구다', () => {
+  for (const action of ['resend', 'role', 'status', 'revoke'] as const) {
+    assert.match(userAdminErrorMessage(action, 'USER_NOT_FOUND'), /찾을 수 없습니다/, action);
+  }
+});
+
+const TENANT_UUID = '123e4567-e89b-12d3-a456-426614174000';
+const form = (over: Partial<InviteForm> = {}): InviteForm => ({
+  email: ' a@b.c ',
+  role: 'OPERATOR',
+  recoverExisting: false,
+  tenantId: '',
+  ...over,
+});
+
+test('초대 본문 — 플랫폼은 고객 ID를 반드시 싣는다', () => {
+  const platform = { account_type: 'PLATFORM' } as const;
+  assert.deepEqual(inviteRequestFor(platform, form({ tenantId: ` ${TENANT_UUID.toUpperCase()} ` })), {
+    ok: true,
+    // 이메일은 다듬지 않는다. 고객 ID는 앞뒤 공백만 지우고 대소문자는 서버에 맡긴다.
+    request: { email: ' a@b.c ', role: 'OPERATOR', recover_existing: false, tenant_id: TENANT_UUID.toUpperCase() },
+  });
+  assert.deepEqual(inviteRequestFor(platform, form({ tenantId: '  ' })), { ok: false, error: TENANT_ID_REQUIRED });
+  for (const bad of ['tenant-a', TENANT_UUID.replaceAll('-', ''), `${TENANT_UUID}0`, `{${TENANT_UUID}}`]) {
+    assert.deepEqual(inviteRequestFor(platform, form({ tenantId: bad })), { ok: false, error: TENANT_ID_INVALID }, bad);
+  }
+});
+
+test('초대 본문 — 고객사 ADMIN은 tenant_id를 싣지 않는다(입력이 있어도 무시)', () => {
+  const result = inviteRequestFor({ account_type: 'TENANT' }, form({ tenantId: TENANT_UUID, recoverExisting: true }));
+  assert.ok(result.ok);
+  assert.deepEqual(result.request, { email: ' a@b.c ', role: 'OPERATOR', recover_existing: true });
+  assert.equal('tenant_id' in result.request, false);
+  assert.equal('account_type' in result.request, false);
+});
+
 test('대상 없음 · 상태 충돌', () => {
   assert.match(userAdminErrorMessage('role', 'USER_NOT_FOUND'), /찾을 수 없습니다/);
   // 초대의 404는 복구 연결 대상(기존 인증 계정)이 없다는 뜻이다.
   assert.equal(userAdminErrorMessage('invite', 'USER_NOT_FOUND'), INVITE_RECOVER_NOT_FOUND);
   assert.match(userAdminErrorMessage('status', 'USER_STATE_CONFLICT'), /마지막 활성 관리자/);
   assert.match(userAdminErrorMessage('invite', 'USER_STATE_CONFLICT'), /이미 초대된 이메일/);
+  // 기존 계정 연결 안내는 초대의 409에만 붙는다.
+  assert.match(userAdminErrorMessage('invite', 'USER_STATE_CONFLICT'), /기존 인증 계정을 연결 \(복구\)/);
+  for (const action of ['resend', 'role', 'status', 'revoke'] as const) {
+    assert.doesNotMatch(userAdminErrorMessage(action, 'USER_STATE_CONFLICT'), /복구/);
+  }
+});
+
+test('역할 · 상태 변경은 세션 확인 후 다른 사용자 행에서만 가능하다', () => {
+  assert.equal(canChangeRow('u2', 'u1'), true);
+  assert.equal(canChangeRow('u1', 'u1'), false);
+  assert.equal(canChangeRow('u1', null), false);
+  assert.equal(canChangeRow('u2', null), false);
 });
 
 test('사용자 관리 시각은 KST 24시간제 고정 문자열이다 — 오전/AM 표기가 없다', () => {

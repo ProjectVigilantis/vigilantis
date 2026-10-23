@@ -144,7 +144,7 @@ export function LoginFlow({ sessionEnded = false }: { sessionEnded?: boolean }) 
     if (next === 'COMPLETED') {
       // 세션 쿠키가 발급됐다. 이동하는 동안 폼을 다시 열지 않는다.
       // 로그인 전에 보던 화면(`?next=`, proxy · 401 처리가 붙인다)이 있으면 그리로 돌아간다. 같은 사이트 경로만(lib/return-to.ts).
-      // 없으면 역할별 첫 화면이다(lib/home-path.ts). 역할을 못 읽으면 메인 대시보드로 간다. 고객 관리 API 차단은 서버가 한다.
+      // 없으면 계정 종류 · 역할별 첫 화면이다(lib/home-path.ts). 계정을 못 읽으면 메인 대시보드로 간다. 차단은 서버가 한다.
       const returnTo = new URLSearchParams(window.location.search).get('next');
       router.replace(
         returnTo !== null

@@ -17,6 +17,7 @@ import {
   resendInvite,
   revokeUserSessions,
 } from './client.ts';
+import type { UserListItem } from '../../types/api.ts';
 
 interface Sent {
   url: string;
@@ -75,14 +76,29 @@ test('사용자 관리 조치의 경로 · 메서드 · 본문', async (t) => {
   );
 });
 
-test('초대는 복구 선택을 그대로 싣고 만든 사용자를 돌려준다', async (t) => {
-  const created = { user_id: 'u1', email: 'a@b.c', role: 'VIEWER', status: 'ACTIVE', last_login_at: null };
+test('초대는 고객 ID · 복구 선택을 그대로 싣고 만든 고객사 사용자를 돌려준다', async (t) => {
+  const tenantId = '123e4567-e89b-12d3-a456-426614174000';
+  const created: UserListItem = {
+    account_type: 'TENANT',
+    tenant_id: tenantId,
+    user_id: 'u1',
+    email: 'a@b.c',
+    role: 'VIEWER',
+    status: 'ACTIVE',
+    last_login_at: null,
+  };
   const sent = stubFetch(t, () => new Response(JSON.stringify(created), { status: 201 }));
-  const result = await inviteUser({ email: 'a@b.c', role: 'VIEWER', recover_existing: false });
+  const result = await inviteUser({ email: 'a@b.c', role: 'VIEWER', tenant_id: tenantId, recover_existing: false });
   assert.deepEqual(result, created);
   assert.equal(sent[0].method, 'POST');
   assert.match(sent[0].url, /\/api\/v1\/users$/);
-  assert.deepEqual(sent[0].body, { email: 'a@b.c', role: 'VIEWER', recover_existing: false });
+  assert.deepEqual(sent[0].body, { email: 'a@b.c', role: 'VIEWER', tenant_id: tenantId, recover_existing: false });
+});
+
+test('고객사 ADMIN의 초대는 tenant_id 없이 나간다', async (t) => {
+  const sent = stubFetch(t, () => new Response('{}', { status: 201 }));
+  await inviteUser({ email: 'a@b.c', role: 'OPERATOR', recover_existing: false });
+  assert.deepEqual(sent[0].body, { email: 'a@b.c', role: 'OPERATOR', recover_existing: false });
 });
 
 test('이력 조회는 상한 50을 싣는다', async (t) => {

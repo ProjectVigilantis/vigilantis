@@ -3,13 +3,22 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { VIEWER_ACTION_BLOCKED, canManageUsers, canOperate, operateBlockedReason } from './roles.ts';
+import { VIEWER_ACTION_BLOCKED, canManageUsers, canOperate, isPlatform, operateBlockedReason } from './roles.ts';
 
-test('사용자 관리 메뉴는 ADMIN에게만 보인다 — 역할을 모르면 숨긴다', () => {
-  assert.equal(canManageUsers('ADMIN'), true);
-  for (const role of ['OPERATOR', 'VIEWER', null, undefined] as const) {
-    assert.equal(canManageUsers(role), false, String(role));
+test('사용자 관리는 플랫폼 운영자와 고객사 ADMIN — 계정을 모르면 숨긴다', () => {
+  assert.equal(canManageUsers({ account_type: 'PLATFORM', role: 'ADMIN' }), true);
+  assert.equal(canManageUsers({ account_type: 'TENANT', role: 'ADMIN' }), true);
+  for (const role of ['OPERATOR', 'VIEWER'] as const) {
+    assert.equal(canManageUsers({ account_type: 'TENANT', role }), false, role);
   }
+  assert.equal(canManageUsers(null), false);
+  assert.equal(canManageUsers(undefined), false);
+});
+
+test('플랫폼 여부는 account_type으로만 가른다 — 고객사 ADMIN은 플랫폼이 아니다', () => {
+  assert.equal(isPlatform({ account_type: 'PLATFORM' }), true);
+  assert.equal(isPlatform({ account_type: 'TENANT' }), false);
+  assert.equal(isPlatform(null), false);
 });
 
 test('ADMIN · OPERATOR만 조치할 수 있다', () => {
