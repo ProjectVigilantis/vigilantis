@@ -4,6 +4,7 @@
 #
 #   - 연결 수립: 세션 없음 · 무효 세션 · 허용 밖 Origin 은 accept 전에 1008. Origin 목록은 HTTP
 #     상태 변경 검사와 같다(AUTH_ALLOWED_ORIGINS, 비면 CORS_ALLOW_ORIGINS).
+#   - 임시 출시 관문(#492): PLATFORM 계정만 연결한다 — 고객사 · UNASSIGNED 계정은 유효 세션이어도 1008.
 #   - 연결 중: 감시가 짧은 주기로 다시 판정해 로그아웃 · 재로그인 회수 · 사용자 비활성 · 유휴 만료를
 #     4401 "AUTH_REQUIRED" 로 닫는다. 주기가 길어도 유휴 만료 시각에는 그 시각에 닫는다.
 #   - 연결 · 재확인은 last_activity_at 을 바꾸지 않는다.
@@ -28,6 +29,8 @@ from db import models
 from db.repositories import auth as auth_repo
 from fastapi.testclient import TestClient
 from realtime import incident_event
+from schemas.api.auth import AccountType, UserRole
+from schemas.api.tenants import TenantStatus
 from schemas.api.ws import WS_CLOSE_AUTH_REQUIRED, WsEventType
 from sqlalchemy import text
 from starlette.websockets import WebSocketDisconnect
@@ -129,6 +132,30 @@ def test_handshake_without_valid_session_is_rejected(committed_auth, cookie):
             pass
         assert closed.value.code == 1008
         assert client.app.state.realtime.connection_count == 0
+
+
+@pytest.mark.parametrize(("account", "role"), [
+    ("tenant-active", UserRole.ADMIN),
+    ("tenant-active", UserRole.VIEWER),
+    ("tenant-suspended", UserRole.OPERATOR),
+    ("unassigned", UserRole.ADMIN),
+])
+def test_handshake_of_non_platform_account_is_rejected_before_accept(committed_auth, allowed_origin, account, role):
+    """임시 출시 관문 — 전역 큐는 테넌트 범위가 없어 PLATFORM 계정만 받는다. 고객사 계정은 유효한 세션이어도 1008."""
+    if account == "unassigned":
+        seed = committed_auth.make(role, account_type=AccountType.UNASSIGNED)
+    else:
+        status = TenantStatus.ACTIVE if account == "tenant-active" else TenantStatus.SUSPENDED
+        seed = committed_auth.make(role, tenant_id=committed_auth.make_tenant(status))
+    with TestClient(_app(committed_auth)) as client:
+        manager = client.app.state.realtime
+        with (
+            pytest.raises(WebSocketDisconnect) as closed,
+            client.websocket_connect(WS, headers={"Cookie": seed.cookie, "Origin": allowed_origin}),
+        ):
+            pass
+        assert closed.value.code == 1008
+        assert manager.connection_count == 0
 
 
 def test_handshake_with_foreign_origin_is_rejected_even_with_a_session(committed_auth):

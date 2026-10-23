@@ -17,7 +17,8 @@ from config import AuthSettings, get_auth_settings
 from db import models
 from db.repositories import auth as auth_repo
 from fastapi.testclient import TestClient
-from schemas.api.auth import UserRole
+from schemas.api.auth import AccountType, UserRole
+from schemas.api.tenants import TenantStatus
 from sqlalchemy import text
 
 ORIGIN = "https://app.example.com"
@@ -114,10 +115,16 @@ def http(client_pg_anon, cog):
         yield c
 
 
-def seed_session(db, *, sub=SUB):
+def seed_session(db, *, sub=SUB, tenant_id=None):
+    """tenant_id 를 주면 그 테넌트의 TENANT OPERATOR, 아니면 PLATFORM ADMIN."""
+    scope = (
+        {"role": UserRole.OPERATOR, "account_type": AccountType.TENANT, "tenant_id": tenant_id}
+        if tenant_id is not None
+        else {"role": UserRole.ADMIN, "account_type": AccountType.PLATFORM, "tenant_id": None}
+    )
     user = auth_repo.create_user(
-        db, issuer=ISSUER, cognito_sub=sub, email=f"{sub}@example.com", role=UserRole.OPERATOR, now=NOW,
-        email_verified_at=NOW,
+        db, issuer=ISSUER, cognito_sub=sub, email=f"{sub}@example.com", now=NOW,
+        email_verified_at=NOW, **scope,
     )
     issued = sessions.issue_session(
         db, user_id=user.user_id, mfa_step=models.AuthSessionMfaStep.SOFTWARE_TOKEN_MFA,
@@ -236,6 +243,20 @@ def test_success_revokes_only_that_users_sessions_and_sets_no_cookie(http, db, c
     assert reasons == ["PASSWORD_RESET"]
 
 
+def test_suspended_tenant_user_can_still_reset_password(http, db, cog, make_tenant):
+    """테넌트 정지는 고객사 사용자의 계정 자체 관리(재설정)를 막지 않는다 — 세션 회수까지 그대로다."""
+    target = seed_session(db, tenant_id=make_tenant(TenantStatus.SUSPENDED))
+    assert alive(http, target)
+    cog.forgot()
+    assert_plain_204(request(http))
+    cog.get_user()
+    cog.confirm()
+    assert_plain_204(confirm(http))
+    assert not alive(http, target)
+    reasons = db.execute(text("SELECT revoke_reason FROM auth_sessions WHERE revoked_at IS NOT NULL")).scalars().all()
+    assert reasons == ["PASSWORD_RESET"]
+
+
 def test_proven_absent_user_still_confirms_and_is_valid_204(http, db, cog):
     other = seed_session(db, sub="sub-other")
     cog.get_user_absent()
@@ -260,6 +281,25 @@ def test_confirmed_without_known_sub_is_500_not_a_revoke_claim(http, db, cog):
     resp = confirm(http)
     assert resp.status_code == 500 and resp.json()["error"]["code"] == "INTERNAL_ERROR"
     assert alive(http, other)
+
+
+def test_confirm_calls_provider_with_no_open_transaction(http, db, cog, monkeypatch):
+    """AdminGetUser · ConfirmForgotPassword 호출 순간 요청 세션(db 픽스처 하나가 라우터에 주입된다)에 열린 트랜잭션이 없다."""
+    seed_session(db)
+    open_at_call: list[tuple[str, bool]] = []
+    for name in ("admin_get_user", "confirm_password_reset"):
+        real = getattr(cog.adapter, name)
+
+        def spy(*args, _name=name, _real=real, **kwargs):
+            open_at_call.append((_name, db.in_transaction()))
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(cog.adapter, name, spy)
+    cog.get_user()
+    cog.confirm()
+    assert not db.in_transaction()  # 시드 commit 뒤 — 이후의 열림은 요청이 연 것이다
+    assert_plain_204(confirm(http))
+    assert open_at_call == [("admin_get_user", False), ("confirm_password_reset", False)]
 
 
 # --- 확정: 실패 매핑 (공급자 상태는 바꾸지 않는다) ----------------------------------------

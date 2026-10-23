@@ -5,8 +5,10 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from db import models
 from db.repositories import auth as auth_repo
+from db.repositories import tenants as tenants_repo
 from pydantic import ValidationError
-from schemas.api.auth import UserRole
+from schemas.api.auth import AccountType, UserRole
+from schemas.api.tenants import TenantVerificationResult
 from schemas.api.users import UserEventAction
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
@@ -16,15 +18,45 @@ NOW = datetime(2026, 10, 20, 9, 0, tzinfo=UTC)
 REASONS = models.AuthSessionRevokeReason
 
 
-def _user(db, sub, role=UserRole.VIEWER, status=models.AppUserStatus.ACTIVE):
+def _tenant(db, account):
+    """실제 ACTIVE 테넌트 — 연결 확인 기록을 거쳐야 ACTIVE 가 된다."""
+    tenant = tenants_repo.create_tenant(
+        db, name=f"t-{account}", aws_account_id=account, regions=["ap-northeast-2"], now=NOW
+    )
+    assert tenants_repo.record_verification(
+        db,
+        tenant.tenant_id,
+        result=TenantVerificationResult.OK,
+        reason_code=None,
+        now=NOW,
+    )
+    return tenant
+
+
+def _user(
+    db,
+    sub,
+    role=UserRole.VIEWER,
+    status=models.AppUserStatus.ACTIVE,
+    account_type=AccountType.UNASSIGNED,
+    tenant_id=None,
+):
     return auth_repo.create_user(
         db,
         issuer=ISSUER,
         cognito_sub=sub,
         email=f"{sub}@example.com",
         role=role,
+        account_type=account_type,
+        tenant_id=tenant_id,
         status=status,
         now=NOW,
+    )
+
+
+def _member(db, sub, tenant, **kw):
+    return _user(
+        db, sub, account_type=AccountType.TENANT, tenant_id=tenant.tenant_id, **kw
     )
 
 
@@ -76,23 +108,69 @@ def test_enum_labels_include_new_revoke_reasons(db):
 
 
 def test_list_users_with_last_login_uses_newest_session_even_if_revoked(db):
-    never = _user(db, "never")
-    user = _user(db, "someone")
+    tenant = _tenant(db, "111111111111")
+    never = _member(db, "never", tenant)
+    user = _member(db, "someone", tenant)
     _session(db, user, "1" * 64, NOW + timedelta(hours=1))
     _session(db, user, "2" * 64, NOW + timedelta(hours=3), revoked=True)
     rows = dict(
-        (u.user_id, login) for u, login in auth_repo.list_users_with_last_login(db)
+        (u.user_id, login)
+        for u, login in auth_repo.list_users_with_last_login(
+            db, tenant_id=tenant.tenant_id
+        )
     )
     assert rows[never.user_id] is None
     assert rows[user.user_id] == NOW + timedelta(hours=3)
 
 
-def test_count_active_admins_ignores_disabled_and_other_roles(db):
-    before = auth_repo.count_active_admins(db)
-    _user(db, "a1", role=UserRole.ADMIN)
-    _user(db, "a2", role=UserRole.ADMIN, status=models.AppUserStatus.DISABLED)
-    _user(db, "o1", role=UserRole.OPERATOR)
-    assert auth_repo.count_active_admins(db) == before + 1
+def test_list_users_returns_only_tenant_accounts_scoped_by_tenant(db):
+    first = _tenant(db, "111111111111")
+    second = _tenant(db, "222222222222")
+    a = _member(db, "a", first)
+    b = _member(db, "b", second)
+    _user(db, "unassigned")
+    _user(
+        db, "platform", role=UserRole.ADMIN, account_type=AccountType.PLATFORM
+    )
+
+    def ids(tenant_id):
+        return {
+            u.user_id
+            for u, _ in auth_repo.list_users_with_last_login(db, tenant_id=tenant_id)
+        }
+
+    assert ids(first.tenant_id) == {a.user_id}
+    assert ids(second.tenant_id) == {b.user_id}
+    # None = 모든 고객 테넌트 — PLATFORM·UNASSIGNED 는 포함하지 않는다
+    assert ids(None) == {a.user_id, b.user_id}
+
+
+def test_count_active_admins_counts_only_active_tenant_admins_in_that_tenant(db):
+    tenant = _tenant(db, "111111111111")
+    other = _tenant(db, "222222222222")
+    assert auth_repo.count_active_admins(db, tenant_id=tenant.tenant_id) == 0
+    _member(db, "a1", tenant, role=UserRole.ADMIN)
+    _member(db, "a2", tenant, role=UserRole.ADMIN, status=models.AppUserStatus.DISABLED)
+    _member(db, "o1", tenant, role=UserRole.OPERATOR)
+    _member(db, "x1", other, role=UserRole.ADMIN)
+    _user(db, "p1", role=UserRole.ADMIN, account_type=AccountType.PLATFORM)
+    assert auth_repo.count_active_admins(db, tenant_id=tenant.tenant_id) == 1
+    assert auth_repo.count_active_admins(db, tenant_id=other.tenant_id) == 1
+
+
+def test_primitives_see_every_account_type(db):
+    tenant = _tenant(db, "111111111111")
+    before = auth_repo.count_users(db)
+    p = _user(db, "p", role=UserRole.ADMIN, account_type=AccountType.PLATFORM)
+    u = _user(db, "u")
+    t = _member(db, "t", tenant)
+    assert auth_repo.count_users(db) == before + 3
+    for row in (p, u, t):
+        assert auth_repo.get_user(db, row.user_id).user_id == row.user_id
+        assert (
+            auth_repo.get_user_by_identity(db, issuer=ISSUER, cognito_sub=row.cognito_sub).user_id
+            == row.user_id
+        )
 
 
 def test_set_role_updates_and_reports_missing(db):

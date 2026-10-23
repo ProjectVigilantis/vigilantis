@@ -14,7 +14,8 @@ from config import AuthSettings, get_auth_settings
 from db import models
 from db.repositories import auth as auth_repo
 from fastapi.testclient import TestClient
-from schemas.api.auth import LoginStep, UserRole
+from db.repositories import tenants as tenants_repo
+from schemas.api.auth import AccountType, LoginStep, UserRole
 from sqlalchemy import text
 
 ORIGIN = "https://app.example.com"
@@ -129,12 +130,23 @@ def http(app):
 
 
 @pytest.fixture()
-def user(db):
+def tenant_id(make_tenant):
+    return make_tenant()
+
+
+def _create_user(db, *, account_type=AccountType.TENANT, tenant_id=None, role=UserRole.OPERATOR):
     row = auth_repo.create_user(
-        db, issuer=ISSUER, cognito_sub=SUB, email="u@example.com", role=UserRole.OPERATOR, now=T0
+        db, issuer=ISSUER, cognito_sub=SUB, email="u@example.com", role=role,
+        account_type=account_type, tenant_id=tenant_id, now=T0,
     )
     db.commit()
     return row
+
+
+@pytest.fixture()
+def user(db, tenant_id):
+    """고객사(TENANT) OPERATOR — 실제 ACTIVE 테넌트에 속한다."""
+    return _create_user(db, tenant_id=tenant_id)
 
 
 def post(c, path, body=None, origin=ORIGIN):
@@ -401,13 +413,81 @@ def me(c, clock, at, token=None):
     return replay(c, "/api/v1/auth/me", token) if token else c.get("/api/v1/auth/me")
 
 
-def test_me_returns_user_and_session_info(http, flow, user):
+def test_me_returns_user_and_session_info(http, flow, user, tenant_id):
     login(http, flow)
     body = http.get("/api/v1/auth/me").json()
+    assert set(body) == {"user_id", "email", "role", "account_type", "tenant_id", "session"}
     assert body["user_id"] == user.user_id
     assert (body["email"], body["role"]) == ("u@example.com", "OPERATOR")
+    assert (body["account_type"], body["tenant_id"]) == ("TENANT", tenant_id)
     assert body["session"]["idle_expires_at"].startswith("2026-10-19T09:30:00")
     assert body["session"]["absolute_expires_at"].startswith("2026-10-19T17:00:00")
+
+
+def test_me_for_platform_account_has_no_tenant(http, db, flow):
+    _create_user(db, account_type=AccountType.PLATFORM, role=UserRole.ADMIN)
+    login(http, flow)
+    body = http.get("/api/v1/auth/me").json()
+    assert (body["role"], body["account_type"], body["tenant_id"]) == ("ADMIN", "PLATFORM", None)
+
+
+def test_suspended_tenant_user_can_log_in_read_me_extend_and_log_out(http, db, flow, clock, user, tenant_id):
+    """정지(원격 회수)는 고객사 사용자의 로그인 · 세션 유지 · 로그아웃을 막지 않는다 — 변경 거절은 업무 쪽 몫이다."""
+    assert tenants_repo.suspend_tenant(db, tenant_id, reason="해지", now=T0)
+    db.commit()
+    token = login(http, flow)
+    body = http.get("/api/v1/auth/me").json()
+    assert (body["account_type"], body["tenant_id"]) == ("TENANT", tenant_id)
+    assert "tenant_status" not in body
+    clock.now = T0 + timedelta(minutes=20)
+    assert post(http, "/activity").status_code == 204
+    assert post(http, "/logout").status_code == 204
+    assert replay(http, "/api/v1/auth/me", token).status_code == 401
+
+
+def test_me_reflects_tenant_suspension_without_relogin(http, db, flow, user, tenant_id):
+    """/me 는 판정마다 같은 사용자 · 소속을 돌려준다 — 테넌트 정지 뒤에도 세션은 그대로이고 소속도 같다."""
+    login(http, flow)
+    before = http.get("/api/v1/auth/me").json()
+    assert tenants_repo.suspend_tenant(db, tenant_id, reason="해지", now=T0)
+    db.commit()
+    after = http.get("/api/v1/auth/me")
+    assert after.status_code == 200
+    assert after.json() == before
+
+
+def test_completed_for_unassigned_account_is_not_provisioned_and_issues_nothing(http, db, flow):
+    _create_user(db, account_type=AccountType.UNASSIGNED)
+    post(http, "/login", {"email": "u@example.com", "password": PASSWORD})
+    flow.result = COMPLETED
+    resp = post(http, "/login/totp", {"code": CODE})
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "ACCOUNT_NOT_PROVISIONED"
+    assert SESSION_COOKIE not in set_cookies(resp)
+    assert session_count(db) == 0
+
+
+@pytest.mark.parametrize(("account_type", "role", "allowed"), [
+    (AccountType.UNASSIGNED, UserRole.VIEWER, False),
+    (AccountType.PLATFORM, UserRole.ADMIN, True),  # 같은 시드 · 시각의 대조군
+])
+def test_existing_session_of_unassigned_account_is_unauthenticated(
+    http, db, clock, make_auth_session, account_type, role, allowed
+):
+    seed = make_auth_session(role, account_type=account_type, now=T0)
+    clock.now = T0 + timedelta(minutes=5)
+    me_resp = replay(http, "/api/v1/auth/me", seed.token)
+    activity = replay(http, "/api/v1/auth/activity", seed.token, method="POST")
+    db.expire_all()
+    last = db.execute(
+        text("SELECT last_activity_at FROM auth_sessions WHERE session_id = :s"), {"s": seed.session_id}
+    ).scalar_one()
+    if allowed:
+        assert (me_resp.status_code, activity.status_code, last) == (200, 204, clock.now)
+    else:
+        for resp in (me_resp, activity):
+            assert (resp.status_code, resp.json()["error"]["code"]) == (401, "AUTH_REQUIRED")
+        assert last == T0  # 활동 기록은 되돌려졌다
 
 
 def test_idle_expiry_and_get_me_never_extends(http, clock, flow, user):

@@ -8,7 +8,7 @@ import pytest
 from auth import sessions
 from db import models
 from db.repositories import auth as auth_repo
-from schemas.api.auth import UserRole
+from schemas.api.auth import AccountType, UserRole
 from sqlalchemy import text
 
 T0 = datetime(2026, 10, 19, 9, 0, tzinfo=UTC)
@@ -23,7 +23,9 @@ def user(db):
         issuer="https://issuer.example/pool",
         cognito_sub="sub-1",
         email="u@example.com",
-        role=UserRole.OPERATOR,
+        role=UserRole.ADMIN,
+        account_type=AccountType.PLATFORM,
+        tenant_id=None,
         now=T0,
     )
 

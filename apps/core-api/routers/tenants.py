@@ -3,8 +3,8 @@
 # /api/v1/tenants — 고객(테넌트) 관리 라우터 (Post-MVP T-4 · 계약: schemas.api.tenants)
 #
 #   - 얇게 둔다: 판정 · 트랜잭션 · 응답 조립은 tenant_admin 이 맡는다.
-#   - require_admin 이 라우터 의존성이라 본문 검증보다 먼저 돈다 — 비ADMIN 은 403 이다. 플랫폼 운영자
-#     표시(T-1)가 생기면 이 관문을 그것으로 좁힌다.
+#   - require_platform_account 가 라우터 의존성이라 본문 검증보다 먼저 돈다 — 고객사(TENANT) 계정은
+#     역할과 관계없이 403 이고, 플랫폼 계정만 통과한다(#492). 이 라우터에 업무 관문을 따로 두지 않는다.
 #   - 계약 경로 9개 중 7개다. 연결 확인(POST /{id}/verify · /{id}/resume)은 테넌트별 AssumeRole 과
 #     함께 다음 카드에서 붙인다 — 그 전에는 경로가 없다(404).
 # ==============================================================================
@@ -15,7 +15,7 @@ from collections.abc import Callable
 from datetime import datetime
 
 import tenant_admin
-from auth.access import require_admin
+from auth.access import require_platform_account
 from auth.http import get_clock
 from config import TenantSettings, get_tenant_settings
 from db.session import get_db
@@ -36,7 +36,9 @@ _SETTINGS = Depends(get_tenant_settings)
 _CLOCK = Depends(get_clock)
 
 router = APIRouter(
-    prefix="/api/v1/tenants", tags=["tenants"], dependencies=[Depends(require_admin)]
+    prefix="/api/v1/tenants",
+    tags=["tenants"],
+    dependencies=[Depends(require_platform_account)],
 )
 
 

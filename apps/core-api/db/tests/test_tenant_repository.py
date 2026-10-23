@@ -18,7 +18,7 @@ import pytest
 from db import models
 from db.repositories import tenants as tenants_repo
 from schemas.api.assets import AssetType
-from schemas.api.auth import UserRole
+from schemas.api.auth import AccountType, UserRole
 from schemas.api.incidents import IncidentCategory, IncidentStatus
 from schemas.api.tenants import (
     DELETABLE_STATUSES,
@@ -293,7 +293,7 @@ def test_delete_with_a_member_is_refused_by_the_foreign_key(db):
     tenant = _create(db)
     db.add(models.AppUser(issuer="https://cognito-idp.ap-northeast-2.amazonaws.com/pool",
                           cognito_sub="sub-1", email="a@example.com", role=UserRole.VIEWER,
-                          tenant_id=tenant.tenant_id))
+                          account_type=AccountType.TENANT, tenant_id=tenant.tenant_id))
     db.flush()
     with pytest.raises(IntegrityError), db.begin_nested():
         tenants_repo.delete_tenant(db, tenant.tenant_id)

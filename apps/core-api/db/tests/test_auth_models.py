@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from db import models
 from db.repositories import auth as auth_repo
-from schemas.api.auth import UserRole
+from schemas.api.auth import AccountType, UserRole
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
@@ -21,6 +21,8 @@ def _user(db, sub="sub-1", email="a@example.com", issuer=ISSUER):
         cognito_sub=sub,
         email=email,
         role=UserRole.VIEWER,
+        account_type=AccountType.UNASSIGNED,
+        tenant_id=None,
         now=NOW,
     )
 
@@ -78,10 +80,9 @@ def test_mark_email_verified_once_and_set_status(db):
 
 def test_enums_store_values(db):
     user = _user(db)
-    assert db.execute(text("SELECT role::text, status::text FROM app_users")).one() == (
-        "VIEWER",
-        "ACTIVE",
-    )
+    assert db.execute(
+        text("SELECT role::text, status::text, account_type::text FROM app_users")
+    ).one() == ("VIEWER", "ACTIVE", "UNASSIGNED")
     db.add(models.AuthSession(**_session_kwargs(user)))
     db.flush()
     assert db.execute(text("SELECT mfa_step::text FROM auth_sessions")).scalar_one() == (

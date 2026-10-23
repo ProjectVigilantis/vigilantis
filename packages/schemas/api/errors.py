@@ -33,8 +33,8 @@ class ErrorCode(str, Enum):
     TENANT_NOT_FOUND = "TENANT_NOT_FOUND"                    # 404
     TENANT_ACCOUNT_CONFLICT = "TENANT_ACCOUNT_CONFLICT"      # 409 — 같은 AWS 계정의 테넌트가 이미 있다(한 계정 = 한 테넌트)
     TENANT_ONBOARDING_UNAVAILABLE = "TENANT_ONBOARDING_UNAVAILABLE"  # 503 — 온보딩 링크를 만들 설정(템플릿 URL · 플랫폼 주체)이 없다
-    TENANT_STATE_CONFLICT = "TENANT_STATE_CONFLICT"          # 409 — 지금 상태에서 할 수 없는 전이(이미 정지된 테넌트 정지 등)
-    TENANT_SUSPENDED = "TENANT_SUSPENDED"                    # 409 — 정지된 테넌트에 대한 새 실행 · 종료 요청(플랫폼 운영자의 종료는 받는다 · api/tenants.py 머리말)
+    TENANT_STATE_CONFLICT = "TENANT_STATE_CONFLICT"          # 409 — 허용되지 않은 전이 또는 ACTIVE가 아닌 테넌트로 초대·재발송
+    TENANT_SUSPENDED = "TENANT_SUSPENDED"                    # 409 — 정지 테넌트 사용자의 관리 쓰기 또는 정지 자산의 새 실행·종료(플랫폼 종료는 허용 · api/tenants.py)
     AUTH_REQUIRED = "AUTH_REQUIRED"                          # 401 — 세션 없음 · 만료 · 회수
     AUTH_FAILED = "AUTH_FAILED"                              # 401 — 이메일 · 비밀번호 불일치(사용자 존재 여부를 가리지 않는다)
     AUTH_CODE_INVALID = "AUTH_CODE_INVALID"                  # 401 — TOTP · 이메일 · 재설정 코드 불일치
@@ -42,14 +42,14 @@ class ErrorCode(str, Enum):
     AUTH_STEP_CONFLICT = "AUTH_STEP_CONFLICT"                # 409 — 지금 단계가 아닌 단계 API 호출
     AUTH_PASSWORD_POLICY = "AUTH_PASSWORD_POLICY"            # 422 — 새 비밀번호가 앱 또는 User Pool 정책 위반
     AUTH_ORIGIN_REJECTED = "AUTH_ORIGIN_REJECTED"            # 403 — 허용 Origin 이 아닌 상태 변경 요청
-    AUTH_FORBIDDEN = "AUTH_FORBIDDEN"                        # 403 — 인증됐지만 역할이 허용하지 않음
-    ACCOUNT_NOT_PROVISIONED = "ACCOUNT_NOT_PROVISIONED"      # 403 — Cognito 인증은 됐지만 앱 사용자가 없다
+    AUTH_FORBIDDEN = "AUTH_FORBIDDEN"                        # 403 — 인증됐지만 계정 종류·역할이 허용하지 않음
+    ACCOUNT_NOT_PROVISIONED = "ACCOUNT_NOT_PROVISIONED"      # 403 — 앱 사용자 없음 또는 소속·플랫폼 권한 미지정
     ACCOUNT_DISABLED = "ACCOUNT_DISABLED"                    # 403 — 앱 사용자 비활성
     AUTH_EMAIL_DELIVERY_FAILED = "AUTH_EMAIL_DELIVERY_FAILED"  # 503 — 이메일 검증 코드 발송 실패
     AUTH_RATE_LIMITED = "AUTH_RATE_LIMITED"                  # 429 — Cognito 요청 · 실패 횟수 제한
     AUTH_PROVIDER_UNAVAILABLE = "AUTH_PROVIDER_UNAVAILABLE"  # 503 — Cognito 호출 실패(네트워크 · 5xx)
-    USER_NOT_FOUND = "USER_NOT_FOUND"                        # 404 — ADMIN 사용자 관리 대상 없음
-    USER_STATE_CONFLICT = "USER_STATE_CONFLICT"              # 409 — 마지막 ADMIN · 중복 초대 · 상태 충돌
+    USER_NOT_FOUND = "USER_NOT_FOUND"                        # 404 — 관리 범위 안의 고객사 사용자 없음
+    USER_STATE_CONFLICT = "USER_STATE_CONFLICT"              # 409 — 테넌트별 마지막 활성 ADMIN · 중복 초대 · 상태 충돌
     REQUEST_VALIDATION_FAILED = "REQUEST_VALIDATION_FAILED"  # 422
     INTERNAL_ERROR = "INTERNAL_ERROR"                        # 500
 
