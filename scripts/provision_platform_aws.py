@@ -1295,9 +1295,14 @@ def _ensure_waf(waf, cidrs: list[str], nat_cidr: str) -> str:
             print(f"[platform] WAF 웹 ACL {WAF_ACL} 규칙 갱신 — 속도 제한 {RATE_LIMIT_PER_WINDOW}건/"
                   f"{RATE_WINDOW_SECONDS}초({RATE_ACTION}) → 허용 IP")
         return acl["ARN"]
-    acl_arn = waf.create_web_acl(
-        Name=WAF_ACL, Scope="CLOUDFRONT", DefaultAction=_ACL_DEFAULT_ACTION, Rules=rules,
-        VisibilityConfig=_ACL_VISIBILITY, Tags=_kv_tags(WAF_ACL))["Summary"]["ARN"]
+    # 바로 위에서 만든 IP 집합을 WAF 가 아직 찾지 못하면 WAFUnavailableEntityException 이다 — 새 계정의
+    # 첫 up 에서 실제로 났고 재실행으로 풀렸다(#522). 기다렸다 다시 만든다. 다른 오류는 그대로 올린다
+    acl_arn = _retry(
+        lambda: waf.create_web_acl(
+            Name=WAF_ACL, Scope="CLOUDFRONT", DefaultAction=_ACL_DEFAULT_ACTION, Rules=rules,
+            VisibilityConfig=_ACL_VISIBILITY, Tags=_kv_tags(WAF_ACL))["Summary"]["ARN"],
+        f"WAF 웹 ACL {WAF_ACL} 생성(IP 집합 전파)", ("WAFUnavailableEntityException",), timeout=300,
+    )
     print(f"[platform] WAF 웹 ACL {WAF_ACL} 생성(기본 차단 · 속도 제한 {RATE_ACTION})")
     return acl_arn
 
