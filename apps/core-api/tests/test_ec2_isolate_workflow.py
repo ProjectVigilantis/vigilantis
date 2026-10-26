@@ -449,6 +449,7 @@ def guardrail(monkeypatch):
         return SimpleNamespace(
             command=object() if run.passes else None,
             result=SimpleNamespace(steps=[], failed_step=None),
+            dry_run_not_applied=False,
         )
 
     run.passes = True

@@ -361,7 +361,9 @@ def test_name_alone_without_a_stored_plan_is_not_managed(db, seeded, aws, monkey
 def guardrail(monkeypatch):
     def run(db, execution_row, payload):
         return SimpleNamespace(
-            command=object(), result=SimpleNamespace(steps=[], failed_step=None)
+            command=object(),
+            result=SimpleNamespace(steps=[], failed_step=None),
+            dry_run_not_applied=False,
         )
 
     monkeypatch.setattr(workflows, "_run_rollback_guardrails", run)
