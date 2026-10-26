@@ -490,6 +490,138 @@ def test_close_failure_is_also_contained(db, reserved, aws, monkeypatch):
     )
 
 
+# ------------------------------------------- 반복 예외의 상한 (Issue #434 4-2)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_failure_ledger():
+    """예외 장부는 프로세스 메모리다 — 테스트끼리 횟수가 새지 않게 매번 비운다."""
+    dispatcher.reset_failure_ledger()
+    yield
+    dispatcher.reset_failure_ledger()
+
+
+def _always_raising_runner(monkeypatch, poisoned_id, calls):
+    real_runner = workflows.run_rightsizing_execution
+
+    def runner(session, execution_id):
+        if execution_id == poisoned_id:
+            calls.append(execution_id)
+            raise RuntimeError("늘 실패하는 결함 재현")
+        return real_runner(session, execution_id)
+
+    monkeypatch.setitem(dispatcher._RUNNERS, RunbookId.RUNBOOK_EC2_RIGHTSIZING, runner)
+
+
+def test_repeated_exceptions_are_capped_and_quarantined(db, reserved, aws, monkeypatch, caplog):
+    """같은 건이 상한만큼 연속으로 예외를 내면 더 집지 않는다 — 10초마다 영원히 반복하지 않는다.
+
+    판정 불가 보류의 카운터(verification_attempts)는 이 경로를 세지 않는다 — 분류된 AWS
+    조회 실패에만 쓰이기 때문이다. 상한에 닿은 건은 비종료로 남아 관제자 확인 대상이 된다.
+    """
+    _incident, poisoned_id = reserved()
+    calls: list[str] = []
+    _always_raising_runner(monkeypatch, poisoned_id, calls)
+    cap = dispatcher.DISPATCH_EXCEPTION_MAX_ATTEMPTS
+
+    with caplog.at_level("CRITICAL", logger="vigilantis.dispatcher"):
+        reports = [cycle(db) for _ in range(cap)]
+    after = cycle(db)
+
+    assert [r.errored for r in reports] == [1] * cap
+    assert [r.quarantined for r in reports] == [0] * (cap - 1) + [1]
+    assert len(calls) == cap
+    assert "dispatch_execution_quarantined" in caplog.text
+    # 격리된 뒤에는 runner를 부르지 않고 건너뛴다 — 비종료 상태는 그대로다
+    assert after.scanned == 1 and after.errored == 0 and after.quarantined == 1
+    assert len(calls) == cap
+    assert exec_repo.get_execution(db, poisoned_id).status is ExecutionStatus.IN_PROGRESS
+    assert exec_repo.get_execution(db, poisoned_id).verification_attempts == 0
+
+
+def test_quarantine_is_per_execution(db, reserved, aws, monkeypatch):
+    """격리는 건 단위다 — 같은 스캔의 다른 예약은 계속 디스패치된다."""
+    _p, poisoned_id = reserved()
+    _always_raising_runner(monkeypatch, poisoned_id, [])
+    for _ in range(dispatcher.DISPATCH_EXCEPTION_MAX_ATTEMPTS):
+        cycle(db)
+    _h, healthy_id = reserved()
+
+    report = cycle(db)
+
+    assert report.quarantined == 1 and report.started == 1
+    assert exec_repo.get_execution(db, healthy_id).status is ExecutionStatus.IN_PROGRESS
+    assert report.awaiting_status_check == 1
+
+
+def test_a_clean_cycle_resets_the_consecutive_count(db, reserved, aws, monkeypatch):
+    """상한은 **연속** 예외다 — 한 번 예외 없이 지나가면 처음부터 다시 센다."""
+    _incident, execution_id = reserved()
+    cap = dispatcher.DISPATCH_EXCEPTION_MAX_ATTEMPTS
+    failing = {"on": True}
+    real_runner = workflows.run_rightsizing_execution
+
+    def runner(session, eid):
+        if failing["on"]:
+            raise RuntimeError("간헐 결함 재현")
+        return real_runner(session, eid)
+
+    monkeypatch.setitem(dispatcher._RUNNERS, RunbookId.RUNBOOK_EC2_RIGHTSIZING, runner)
+    for _ in range(cap - 1):
+        assert cycle(db).errored == 1
+    failing["on"] = False
+    assert cycle(db).awaiting_status_check == 1  # 예외 없이 한 주기를 마쳤다
+
+    # 이제 판정 단계에서 다시 실패시킨다 — 앞의 cap-1회는 잊혔어야 한다
+    monkeypatch.setitem(
+        dispatcher._JUDGES,
+        RunbookId.RUNBOOK_EC2_RIGHTSIZING,
+        lambda session, eid: (_ for _ in ()).throw(RuntimeError("판정 결함 재현")),
+    )
+    reports = [cycle(db) for _ in range(cap - 1)]
+
+    assert [r.quarantined for r in reports] == [0] * (cap - 1)
+    assert exec_repo.get_execution(db, execution_id).status is ExecutionStatus.IN_PROGRESS
+
+
+def test_judge_exceptions_share_the_same_cap(db, ran_and_awaiting, aws, monkeypatch):
+    """판정 경로의 예외도 같은 장부에 센다 — 실행·판정·원복 개시가 한 건의 같은 축이다."""
+    _incident, execution_id = ran_and_awaiting()
+    cap = dispatcher.DISPATCH_EXCEPTION_MAX_ATTEMPTS
+    monkeypatch.setitem(
+        dispatcher._JUDGES,
+        RunbookId.RUNBOOK_EC2_RIGHTSIZING,
+        lambda session, eid: (_ for _ in ()).throw(RuntimeError("판정 결함 재현")),
+    )
+
+    reports = [cycle(db) for _ in range(cap + 1)]
+
+    assert [r.errored for r in reports] == [1] * cap + [0]
+    assert reports[-1].quarantined == 1
+    assert exec_repo.get_execution(db, execution_id).status is ExecutionStatus.IN_PROGRESS
+
+
+def test_restart_gives_a_quarantined_execution_another_round(db, reserved, aws, monkeypatch):
+    """장부는 메모리다 — 재시작(reset)은 격리를 풀고 상한만큼 다시 시도하게 한다.
+
+    영구 기록이 아니라는 한계를 테스트로 고정한다. 재시작 뒤에도 같은 결함이면 같은
+    상한에서 다시 격리된다.
+    """
+    _incident, poisoned_id = reserved()
+    calls: list[str] = []
+    _always_raising_runner(monkeypatch, poisoned_id, calls)
+    cap = dispatcher.DISPATCH_EXCEPTION_MAX_ATTEMPTS
+    for _ in range(cap):
+        cycle(db)
+    assert cycle(db).quarantined == 1 and len(calls) == cap
+
+    dispatcher.reset_failure_ledger()  # 프로세스 재시작과 같은 상태
+    report = cycle(db)
+
+    assert report.errored == 1 and report.quarantined == 0
+    assert len(calls) == cap + 1
+
+
 def test_partially_applied_failure_initiates_rollback(db, reserved, aws):
     """자산이 바뀐 채 실패한 실행은 FAILED가 아니라 ROLLBACK_INITIATED다.
 
