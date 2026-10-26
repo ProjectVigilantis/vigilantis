@@ -1495,10 +1495,20 @@ def _effect_for(exc: BaseException) -> ExecutionEffect:
     - 상태 코드를 읽지 못한 응답·AWS에 닿지 못한 실패 → UNKNOWN
     - ParamValidationError는 botocore가 네트워크 호출 이전에 낸다 → NOT_APPLIED
       (errors.reason_code_for가 같은 이유로 PARAM_INVALID로 분류한다)
+    - **SDK가 재전송한 끝의 오류는 4xx여도 UNKNOWN이다**(Issue #434 2-1). botocore는 연결
+      오류·읽기 제한 시간·5xx에 같은 요청을 다시 보내며, 첫 요청이 적용된 뒤 응답만
+      유실됐으면 재전송이 받는 NotFound(삭제)·AlreadyExists(삽입)·스로틀링이 마지막
+      오류가 된다. 마지막 응답 하나로 "앞선 요청이 적용됐을 가능성"을 지울 수 없으므로,
+      `ResponseMetadata.RetryAttempts`가 1 이상이면 실자산을 보는 종료 판정으로 보낸다.
+      첫 시도가 스로틀링이고 재시도가 거절된 경우도 같이 UNKNOWN이 되지만, 그 비용은
+      조회 1회이고 반대 방향(실제로 지워진 SG를 "변경 없음"으로 적어 재생성 경로가
+      닫히는 것)은 되돌릴 수 없다.
     """
     if isinstance(exc, ParamValidationError):
         return ExecutionEffect.NOT_APPLIED
     if not isinstance(exc, ClientError):
+        return ExecutionEffect.UNKNOWN
+    if retry_attempts(exc.response) > 0:
         return ExecutionEffect.UNKNOWN
     if aws_error_code(exc) in _THROTTLED_CODES:
         return ExecutionEffect.NOT_APPLIED
@@ -1506,6 +1516,18 @@ def _effect_for(exc: BaseException) -> ExecutionEffect:
     if isinstance(status, int) and 400 <= status < 500:
         return ExecutionEffect.NOT_APPLIED
     return ExecutionEffect.UNKNOWN
+
+
+def retry_attempts(payload: Any) -> int:
+    """이 응답을 받기까지 SDK가 요청을 다시 보낸 횟수. 읽지 못하면 0.
+
+    botocore가 정상 응답과 ClientError.response 양쪽의 ResponseMetadata에 싣는 값이다
+    (첫 요청은 세지 않는다 — 1이면 요청이 두 번 나갔다).
+    """
+    if not isinstance(payload, Mapping):
+        return 0
+    attempts = (payload.get("ResponseMetadata") or {}).get("RetryAttempts")
+    return attempts if isinstance(attempts, int) and attempts > 0 else 0
 
 
 def _request_id(payload: Any) -> str | None:

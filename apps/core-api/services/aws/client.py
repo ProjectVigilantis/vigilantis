@@ -22,11 +22,28 @@
 #
 # 이 모듈은 DB 설정에 의존하지 않는다(config.AwsSettings). 시드·실측 스크립트가
 # DATABASE_URL 없이 도는 것이 그 이유다.
+#
+# 세션은 **스레드마다 하나**다(Issue #434 2-1). 수집·실행 디스패처·AI 디스패처는 각자의
+# 스케줄러가 동기 잡을 이벤트 루프의 기본 스레드 풀에서 돌려 동시에 클라이언트를 만들고,
+# boto3 문서는 기본 세션(boto3.client)을 여러 스레드에서 함께 쓰지 말라고 한다 — 세션은
+# 스레드 안전하지 않고 클라이언트만 안전하다. 그래서 클라이언트는 호출마다 만들되 그
+# 재료인 세션은 스레드별로 한 번만 만든다.
+#
+# 재시도 정책(같은 2-1). 조회와 변경을 한 정책으로 둔다 — standard 모드, 최대 5회 시도.
+#   - adaptive가 아닌 이유: adaptive의 속도 조절 상태는 **클라이언트 인스턴스** 안에 산다.
+#     클라이언트를 호출마다 만드는 이 구조에서는 함수 하나 안에서만 유효해 사실상 standard와
+#     같고, AWS SDK 문서도 여러 자원을 다루는 클라이언트에 adaptive를 권하지 않는다.
+#   - 변경 호출의 재전송을 끄지 않는 이유: botocore는 연결 오류·읽기 제한 시간·5xx에 요청을
+#     다시 보내며 멱등성을 보지 않는다. 첫 요청이 적용된 뒤 응답이 유실되면 재전송이 받는
+#     4xx(NotFound·AlreadyExists)가 마지막 오류가 된다. 그 가능성은 전송을 막는 대신 **결과
+#     분류**가 흡수한다 — 재시도가 있었던 오류는 "변경 없음"으로 적지 않고(executor._effect_for)
+#     실자산을 보는 종료 판정으로 보낸다. 재전송을 끄면 스로틀링 한 번이 조치 실패가 된다.
 # ==============================================================================
 
 from __future__ import annotations
 
 import os
+import threading
 from typing import Any
 
 import boto3
@@ -36,11 +53,23 @@ from botocore.credentials import ContainerProvider, CredentialResolver
 
 from config import get_aws_settings
 
-# 스로틀링(RequestLimitExceeded) 대비. adaptive 모드가 자동으로 속도를 낮춘다.
+# 스로틀링(RequestLimitExceeded)·일시 오류 대비 — 첫 요청 포함 최대 5회 시도(파일 헤더).
 _BOTO_CONFIG = Config(
-    retries={"max_attempts": 5, "mode": "adaptive"},
+    retries={"total_max_attempts": 5, "mode": "standard"},
     user_agent_extra="vigilantis/0.1",
 )
+
+# 스레드별 boto3 세션(파일 헤더). 기본 세션을 쓰지 않는다.
+_thread_local = threading.local()
+
+
+def _session() -> boto3.session.Session:
+    """이 스레드의 boto3 세션 — 없으면 만든다. 세션은 스레드 간에 공유하지 않는다."""
+    session = getattr(_thread_local, "session", None)
+    if session is None:
+        session = boto3.session.Session()
+        _thread_local.session = session
+    return session
 
 # 실 AWS 모드 전용. 스위치가 꺼졌는데도 남아 있는 다른 엔드포인트 설정(서비스별
 # 환경변수·~/.aws/config)을 botocore가 집지 못하게 한다. LocalStack 모드에서는
@@ -88,7 +117,7 @@ def aws_client(service: str, region: str | None = None, **config_overrides: Any)
     """
     endpoint = endpoint_url()
     _ensure_dummy_credentials(endpoint)
-    return boto3.client(
+    return _session().client(
         service,
         **_client_kwargs(_BOTO_CONFIG, endpoint, region or default_region(), config_overrides),
     )

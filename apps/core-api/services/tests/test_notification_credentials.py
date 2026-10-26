@@ -317,5 +317,7 @@ def test_normal_aws_client_keeps_default_path(settings, monkeypatch):
         monkeypatch.delenv(name)
     client = client_module.aws_client("sns", "us-east-1")
     assert client.meta.endpoint_url == LOCALSTACK
-    assert client.meta.config.retries["mode"] == "adaptive"
+    # 일반 클라이언트의 공통 재시도 정책(standard·5회, client.py 헤더)이 그대로다 —
+    # 플랫폼 SNS 클라이언트의 "재시도 없음"이 여기로 번지지 않는다
+    assert client.meta.config.retries["mode"] == "standard"
     assert os.environ["AWS_ACCESS_KEY_ID"] == "test"  # 기존 동작 유지

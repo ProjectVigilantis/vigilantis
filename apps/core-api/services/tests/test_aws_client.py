@@ -99,18 +99,19 @@ def test_real_aws_mode_passes_ignore_configured_endpoints_to_boto3(settings, mon
     """
     captured: dict = {}
 
-    def _capture(service, **kwargs):
-        captured.clear()
-        captured.update(kwargs, service=service)
-        return object()
+    class CapturingSession:
+        def client(self, service, **kwargs):
+            captured.clear()
+            captured.update(kwargs, service=service)
+            return object()
 
-    monkeypatch.setattr(aws_client_module.boto3, "client", _capture)
+    monkeypatch.setattr(aws_client_module, "_session", lambda: CapturingSession())
 
     settings(AWS_ENDPOINT_URL="", AWS_REGION="ap-northeast-2")
     aws_client_module.aws_client("ec2")
     assert captured["config"].ignore_configured_endpoint_urls is True
     # 차단 인자를 붙이면서 공통 재시도 설정이 떨어지지 않아야 한다
-    assert captured["config"].retries["mode"] == "adaptive"
+    assert captured["config"].retries["mode"] == "standard"
     assert "endpoint_url" not in captured
 
     settings(AWS_ENDPOINT_URL=LOCALSTACK)
@@ -152,11 +153,11 @@ def test_no_module_reads_the_switch_from_the_environment():
 
 
 def test_common_retry_config_is_applied(settings):
+    """standard 모드, 첫 요청 포함 5회 — adaptive가 아니다(파일 헤더 §재시도 정책)."""
     settings(AWS_ENDPOINT_URL=LOCALSTACK)
     config = aws_client_module.aws_client("ec2").meta.config
-    assert config.retries["mode"] == "adaptive"
-    # botocore가 max_attempts(재시도 횟수)를 총 시도 횟수로 정규화한다 — 5 + 최초 1회
-    assert config.retries["total_max_attempts"] == 6
+    assert config.retries["mode"] == "standard"
+    assert config.retries["total_max_attempts"] == 5
 
 
 def test_overrides_merge_without_dropping_retry_config(settings):
@@ -166,7 +167,77 @@ def test_overrides_merge_without_dropping_retry_config(settings):
         "cloudwatch", disable_request_compression=True
     ).meta.config
     assert config.disable_request_compression is True
-    assert config.retries["mode"] == "adaptive"
+    assert config.retries["mode"] == "standard"
+
+
+# --- 세션 (Issue #434 2-1) -------------------------------------------------------
+
+
+def test_clients_do_not_come_from_the_shared_default_session(settings, monkeypatch):
+    """boto3 기본 세션(boto3.client)은 스레드 간 공유라 동시 생성이 안전하지 않다 — 쓰지 않는다."""
+    settings(AWS_ENDPOINT_URL=LOCALSTACK)
+
+    def _forbidden(*_args, **_kwargs):
+        raise AssertionError("boto3.client(기본 세션)을 불렀습니다")
+
+    monkeypatch.setattr(aws_client_module.boto3, "client", _forbidden)
+    monkeypatch.setattr(aws_client_module.boto3, "DEFAULT_SESSION", None, raising=False)
+
+    client = aws_client_module.aws_client("ec2")
+
+    assert client.meta.endpoint_url == LOCALSTACK
+    assert aws_client_module.boto3.DEFAULT_SESSION is None  # 기본 세션이 만들어지지 않았다
+
+
+def test_each_thread_gets_its_own_session_and_reuses_it(settings):
+    """세션은 스레드마다 하나이고, 같은 스레드의 두 번째 호출은 같은 세션을 쓴다."""
+    import threading
+
+    settings(AWS_ENDPOINT_URL=LOCALSTACK)
+    sessions: dict[str, list] = {"main": [], "worker": []}
+
+    sessions["main"].append(aws_client_module._session())
+    sessions["main"].append(aws_client_module._session())
+
+    def worker():
+        sessions["worker"].append(aws_client_module._session())
+        sessions["worker"].append(aws_client_module._session())
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join()
+
+    assert sessions["main"][0] is sessions["main"][1]
+    assert sessions["worker"][0] is sessions["worker"][1]
+    assert sessions["main"][0] is not sessions["worker"][0]
+
+
+def test_concurrent_client_creation_across_threads(settings):
+    """스레드 여럿이 동시에 클라이언트를 만들어도 각자 제 리전·엔드포인트를 받는다."""
+    import threading
+
+    settings(AWS_REGIONS="ap-northeast-2,us-east-1", AWS_ENDPOINT_URL=LOCALSTACK)
+    regions = ["ap-northeast-2", "us-east-1"] * 8
+    results: list[tuple[str, str]] = []
+    errors: list[BaseException] = []
+    barrier = threading.Barrier(len(regions))
+
+    def build(region: str):
+        try:
+            barrier.wait(timeout=10)
+            client = aws_client_module.aws_client("ec2", region)
+            results.append((region, client.meta.region_name))
+        except BaseException as exc:  # noqa: BLE001 — 스레드 안의 실패를 본 스레드로 올린다
+            errors.append(exc)
+
+    threads = [threading.Thread(target=build, args=(r,)) for r in regions]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    assert all(wanted == got for wanted, got in results) and len(results) == len(regions)
 
 
 def test_region_argument_overrides_default(settings):
