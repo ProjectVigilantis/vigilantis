@@ -2191,6 +2191,22 @@ def _volume(volume_id: str, region: str):
     return None, R.PRECHECK_TARGET_NOT_FOUND
 
 
+# 스냅숏이 삭제의 안전장치로 성립하는 상태 — 이것만 삭제로 이어진다(Issue #434 BE-1).
+# pending은 아직 끝나지 않은 것이고 error는 AWS가 실패로 확정한 것이라 둘 다 지우지 않는다.
+_SNAPSHOT_COMPLETED_STATE = "completed"
+
+
+def _snapshot_state(ec2: Any, snapshot_id: str) -> tuple[str | None, PrecheckReasonCode | None]:
+    """스냅숏 1건의 현재 State. (상태, 사유 코드) 짝 — 조회를 못 하면 상태가 None이다."""
+    res, code = _call(ec2.describe_snapshots, SnapshotIds=[snapshot_id])
+    if code is not None:
+        return None, code
+    for snapshot in res.get("Snapshots", []):
+        state = snapshot.get("State")
+        return (str(state) if _non_empty_str(state) else None), None
+    return None, R.PRECHECK_TARGET_NOT_FOUND
+
+
 def current_volume(volume_id: str, region: str):
     """(볼륨, 사유 코드) 짝. 실행과 종료 판정이 같은 축을 같은 방법으로 읽도록 공개한다
     (workflows.judge_ebs_delete_unattached) — current_nacl_entry를 공개한 이유와 같다.
@@ -2347,13 +2363,40 @@ def execute_ebs_delete_unattached(
             },
         )
     except (ClientError, BotoCoreError) as exc:
-        # WaiterError는 BotoCoreError라 _effect_for가 UNKNOWN을 준다 — 스냅숏이 끝났는지
-        # 모르는 상태다. 볼륨은 그대로이므로 종료 판정이 현물을 보고 실패로 닫는다
-        return _abort(log, exc, detail=f"최종 스냅숏 완료 확인 실패({snapshot_id})")
-    log.succeed(
-        ExecutionEffect.APPLIED,
-        f"최종 스냅숏 완료 확인: {snapshot_id}",
-    )
+        # waiter만으로는 "대기를 다 썼다(pending)"와 "스냅숏이 error로 끝났다"와 "조회가
+        # 끊겼다"가 갈리지 않는다(Issue #434 BE-1). 한 번 더 물어 관측한 상태를 사유에
+        # 남긴다 — 마지막 시도 뒤에 completed가 됐으면 삭제로 간다(관측이 결론이다).
+        # 어느 경우에도 볼륨은 그대로이고, 완료를 보지 못했으면 지우지 않는다.
+        snapshot_state, probe_code = _snapshot_state(ec2, snapshot_id)
+        if snapshot_state == _SNAPSHOT_COMPLETED_STATE:
+            log.succeed(
+                ExecutionEffect.APPLIED,
+                f"최종 스냅숏 완료 확인(대기 뒤 재조회): {snapshot_id}",
+            )
+        elif snapshot_state is None:
+            # 스냅숏 상태를 보지 못했다 — WaiterError·조회 실패 모두 UNKNOWN(_effect_for)
+            return _abort(
+                log,
+                exc,
+                detail=(
+                    f"최종 스냅숏 완료 확인 실패({snapshot_id}"
+                    f"{' · 재조회 ' + probe_code.value if probe_code else ''})"
+                ),
+            )
+        else:
+            # pending(대기 상한 초과)·error(AWS가 실패로 확정) — 관측했으므로 이 단계가
+            # 자산을 바꾸지 않았음은 확실하다(NOT_APPLIED). 삭제로 가지 않는다
+            return _abort(
+                log,
+                exc,
+                detail=f"최종 스냅숏 미완료({snapshot_id} · 상태 {snapshot_state})",
+                effect=ExecutionEffect.NOT_APPLIED,
+            )
+    else:
+        log.succeed(
+            ExecutionEffect.APPLIED,
+            f"최종 스냅숏 완료 확인: {snapshot_id}",
+        )
 
     # ④ 삭제 — 여기부터 되돌릴 수 없다
     log.begin(4, STEP_DELETE_VOLUME, _OP_DELETE_VOLUME)
