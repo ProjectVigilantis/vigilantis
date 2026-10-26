@@ -7,6 +7,7 @@ from pathlib import Path
 import httpx
 from ai import agent, rate_estimator
 from ai.evaluation.summary import finops_cases
+from ai.model_retry import RetryPolicy
 from ai.openai_client import OpenAIModelClient
 from openai import OpenAI
 from schemas.assets import AssetInventory
@@ -101,7 +102,7 @@ def capture(case):
                 http_client=httpx.Client(transport=httpx.MockTransport(respond))) as sdk:
         client = OpenAIModelClient(
             client=sdk, model="gpt-5.6-luna", reasoning_effort="low", temperature=None,
-            max_attempts=1, timeout_seconds=30, retry_backoff_seconds=0,
+            policy=RetryPolicy(timeout_seconds=30, max_attempts=1, retry_backoff_seconds=0),
         )
         output = agent.run_finops_graph(case.graph_input, client=client)
         draft = output.candidates[0]

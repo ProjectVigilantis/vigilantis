@@ -31,6 +31,7 @@ from ai.agent import (
     run_finops_graph,
 )
 from ai.model_client import AIModelRejectedError, FakeAIModelClient
+from ai.model_retry import RetryPolicy
 from ai.openai_client import OpenAIModelClient
 from logging_config import JsonLineFormatter
 from openai import APITimeoutError
@@ -746,9 +747,7 @@ def test_model_call_logs_of_one_analysis_share_the_incident_and_name_the_step(js
     client = OpenAIModelClient(
         client=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(parse=parse))),
         model="m",
-        timeout_seconds=1.0,
-        max_attempts=2,
-        retry_backoff_seconds=0.0,
+        policy=RetryPolicy(timeout_seconds=1.0, max_attempts=2, retry_backoff_seconds=0.0),
     )
     output = run_finops_graph(make_input(), client=client)
     assert output.invocation_status == AgentInvocationStatus.SUCCEEDED

@@ -553,6 +553,13 @@ def test_reset_agent_invocation_recovers_claim(db):
     assert incidents_repo.claim_agent_invocation(
         db, incident.incident_id, started_at=NOW
     )
+    db.expire_all()
+    # 회수 횟수는 같은 UPDATE에서 오르고, 되돌린 뒤의 Claim은 지금까지의 횟수와 함께 보인다
+    assert incidents_repo.get_incident(db, incident.incident_id).agent_reclaim_count == 1
+    stale = incidents_repo.list_stale_agent_claims(
+        db, started_before=NOW + timedelta(seconds=1)
+    )
+    assert stale == [(incident.incident_id, 1)]
 
 
 def test_set_agent_wait_once_and_deadline_constraint(db):

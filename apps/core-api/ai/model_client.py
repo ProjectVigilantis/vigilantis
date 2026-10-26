@@ -1,8 +1,10 @@
 # ==============================================================================
 # [파일 설명]  담당: 안성일 (AI/Guardrail · Architect)
-# OpenAI 모델 호출 경계입니다. (Issue #115)
-# LangGraph 노드와 도메인 코드는 이 경계만 보고, OpenAI SDK 타입·자격증명·SDK 예외는
-# 경계 밖으로 나가지 않습니다 (ADR-0005 설계 원칙 3).
+# 모델 호출 경계입니다. (Issue #115 · #434)
+# LangGraph 노드와 도메인 코드는 이 경계만 보고, 제공자 SDK 타입·자격증명·SDK 예외는
+# 경계 밖으로 나가지 않습니다 (ADR-0005 설계 원칙 3). 구현체는 ai/openai_client.py
+# (운영)와 ai/claude_client.py(비교 실험 후보)이며, 재시도·시도 기록은 두 구현이
+# ai/model_retry.py의 엔진을 공유합니다.
 #
 # 계약 원칙
 #   - 동기 호출. 저장소의 다른 외부 호출 경계(Repository·services/aws)와 같은 방식이다.
@@ -10,7 +12,14 @@
 #   - 모델로 나가는 값은 build_outbound_payload()를 반드시 거친다. 구현체가 이 함수를
 #     우회하면 마스킹이 적용되지 않으므로, 전송 페이로드는 여기서만 만든다.
 #   - Prompt 전문과 모델 원문 응답은 저장·로그 어디에도 남기지 않는다(ADR-0005
-#     미보존 대상). 남기는 것은 토큰 사용량 같은 호출 메타뿐이며 단가·비용은 아니다.
+#     미보존 대상). 남기는 것은 토큰 사용량·시도 횟수·소요 시간 같은 호출 메타뿐이며
+#     단가·비용은 아니다.
+#   - 실패는 세 축으로 적는다 — 예외 클래스(호출부가 분기하는 단위), phase(왕복의
+#     어느 자리인지), kind(제공자 응답을 근거로 한 세부 종류). 계측은 kind로 전송·
+#     요청·스키마·모델·어댑터 실패를 따로 센다(#434 §4-2).
+#   - 제공자가 돌려주지 않은 값은 0으로 채우지 않고 미확인으로 남긴다(TokenUsage.
+#     unreported · CallTrace의 Optional 필드). 비교표에서 "0"과 "모름"이 같은 칸에
+#     들어가면 캐시·tier 차이를 말할 수 없다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -19,6 +28,8 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
 from typing import Any, Generic, Optional, Protocol, TypeVar
 
 from pydantic import BaseModel
@@ -27,7 +38,138 @@ StructuredOutputT = TypeVar("StructuredOutputT", bound=BaseModel)
 
 
 # ------------------------------------------------------------------------------
-# 경계 예외 — 호출부는 SDK 예외가 아니라 이 4종만 다룬다
+# 실패 종류 — 제공자 응답을 근거로 가른 세부 축 (#434 §4-2)
+# ------------------------------------------------------------------------------
+
+
+class FailureKind(str, Enum):
+    """호출 실패의 세부 종류. 예외 클래스·phase 위에 더하는 세 번째 축이다.
+
+    값은 계측 원자료(JSON)에 그대로 적히므로 바꾸면 과거 기록과 집계가 어긋난다.
+    """
+
+    # --- 전송: 왕복이 서지 못했거나 서버가 일시적으로 거절 — 전송 예산으로 재시도 ---
+    TRANSPORT_TIMEOUT = "transport_timeout"  # 제한시간 초과(연결·읽기)
+    TRANSPORT_CONNECTION = "transport_connection"  # 연결 실패·응답 없음
+    RATE_LIMITED = "rate_limited"  # 429(한도 소진 제외) · 408 · 409
+    SERVER_ERROR = "server_error"  # 5xx · 529 overloaded · 503
+
+    # --- 요청: 다시 보내도 같다 — 재시도하지 않는다 ---
+    QUOTA_EXHAUSTED = "quota_exhausted"  # 결제·크레딧·지출 한도 소진(OpenAI insufficient_quota · 402)
+    REQUEST_REJECTED = "request_rejected"  # 인증·권한·요청 형식·크기(400·401·403·404·413·422)
+    SCHEMA_REJECTED = "schema_rejected"  # 제공자가 구조화 출력 스키마를 거절(400) — 어댑터·스키마 몫
+    REQUEST_SERIALIZATION = "request_serialization"  # user_payload가 JSON으로 직렬화되지 않음(호출부 몫)
+
+    # --- 응답: 왕복은 섰고 토큰도 발생했지만 출력을 쓸 수 없다 ---
+    REFUSAL = "refusal"  # 모델이 응답을 거절(OpenAI refusal · Claude stop_reason=refusal)
+    TRUNCATED = "truncated"  # 출력 길이 상한에서 잘림(finish_reason=length · stop_reason=max_tokens)
+    OUTPUT_INVALID = "output_invalid"  # 응답이 요구한 구조로 검증되지 않음(출력 예산으로만 재시도)
+
+    # --- 어댑터: SDK 응답 모양이 기대와 다르거나 분류하지 못한 예외 — 모델 실패로 세지 않는다 ---
+    RESPONSE_SHAPE = "response_shape"  # choices·content 블록 없음 등 응답 구조 불일치
+    ADAPTER_ERROR = "adapter_error"  # 어댑터가 분류하지 못한 예외(SDK 계열 아님)
+
+
+# 전송 예산(RetryPolicy.max_attempts)으로 재시도하는 종류. 서버 지시 대기(Retry-After)를 따른다.
+TRANSPORT_RETRYABLE: frozenset[FailureKind] = frozenset(
+    {
+        FailureKind.TRANSPORT_TIMEOUT,
+        FailureKind.TRANSPORT_CONNECTION,
+        FailureKind.RATE_LIMITED,
+        FailureKind.SERVER_ERROR,
+    }
+)
+# 출력 예산(RetryPolicy.output_retries)으로만 재시도하는 종류. 다시 부르면 통과할 수
+# 있지만 토큰이 또 나가므로 기본 예산은 0이다(운영 동작 유지) — 늘리는 것은 정책 결정이다.
+# REFUSAL은 넣지 않는다. 거절을 재질문으로 뚫는 것은 가드레일 취지와 어긋난다.
+OUTPUT_RETRYABLE: frozenset[FailureKind] = frozenset(
+    {FailureKind.TRUNCATED, FailureKind.OUTPUT_INVALID}
+)
+
+# 집계 책임 — 비교 실험이 "모델 품질 실패"와 "어댑터·전송 실패"를 섞지 않기 위한 분류.
+#   transport: 네트워크·제공자 가용성  request: 호출 설정·계정  schema: 우리 스키마와 제공자 제약
+#   model: 모델 출력 품질  adapter: 어댑터 구현
+FAILURE_OWNER: dict[FailureKind, str] = {
+    FailureKind.TRANSPORT_TIMEOUT: "transport",
+    FailureKind.TRANSPORT_CONNECTION: "transport",
+    FailureKind.RATE_LIMITED: "transport",
+    FailureKind.SERVER_ERROR: "transport",
+    FailureKind.QUOTA_EXHAUSTED: "request",
+    FailureKind.REQUEST_REJECTED: "request",
+    FailureKind.SCHEMA_REJECTED: "schema",
+    FailureKind.REQUEST_SERIALIZATION: "adapter",
+    FailureKind.REFUSAL: "model",
+    FailureKind.TRUNCATED: "model",
+    FailureKind.OUTPUT_INVALID: "model",
+    FailureKind.RESPONSE_SHAPE: "adapter",
+    FailureKind.ADAPTER_ERROR: "adapter",
+}
+
+# kind → phase. 예외 클래스보다 kind가 더 세밀하므로 phase는 kind에서 파생한다.
+FAILURE_PHASE: dict[FailureKind, str] = {
+    **{kind: "transport" for kind in TRANSPORT_RETRYABLE},
+    FailureKind.QUOTA_EXHAUSTED: "request",
+    FailureKind.REQUEST_REJECTED: "request",
+    FailureKind.SCHEMA_REJECTED: "request",
+    FailureKind.REQUEST_SERIALIZATION: "request",
+    FailureKind.REFUSAL: "response",
+    FailureKind.TRUNCATED: "response",
+    FailureKind.OUTPUT_INVALID: "response",
+    FailureKind.RESPONSE_SHAPE: "response",
+    # 분류하지 못한 예외는 왕복 여부를 알 수 없다 — 어댑터가 phase를 지정하지 않으면 request
+    FailureKind.ADAPTER_ERROR: "request",
+}
+
+
+def failure_owner(kind: Optional[FailureKind]) -> Optional[str]:
+    """kind가 없는(구버전·주입 구현) 실패는 None — 집계가 "미분류"로 따로 센다."""
+    return None if kind is None else FAILURE_OWNER[kind]
+
+
+# ------------------------------------------------------------------------------
+# 시도 기록 — 시도별 시간·결과·대기. 비교 실험이 지연·재시도를 호출 단위로 귀속한다
+# ------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AttemptRecord:
+    """SDK 호출 1회의 기록. 한 complete()는 재시도 수만큼 이 기록을 남긴다."""
+
+    attempt: int  # 1부터. 전송·출력 재시도를 합친 순번
+    started_at: datetime  # UTC
+    elapsed_seconds: float  # 이 시도의 SDK 왕복 시간(대기 제외)
+    outcome: str  # "ok" 또는 FailureKind 값
+    error_class: Optional[str] = None  # SDK 예외 타입 이름만(객체·메시지는 보존하지 않는다)
+    status_code: Optional[int] = None  # HTTP 상태(응답이 있을 때만)
+    retry_delay_seconds: Optional[float] = None  # 이 시도 뒤 실제로 기다린 시간(재시도했을 때만)
+    server_directed: Optional[bool] = None  # 대기가 Retry-After를 따른 것인지(재시도했을 때만)
+    # 이 시도가 쓴 토큰. 응답이 없는 실패(전송)는 None = 미확인. 출력 재시도는 시도마다
+    # 토큰을 쓰므로 호출 단위 usage(AIModelResponse.usage · AIModelError.usage)는 이 값의 합이다
+    usage: Optional["TokenUsage"] = None
+
+
+@dataclass(frozen=True)
+class CallTrace:
+    """complete() 1회의 전체 기록. Optional 필드의 None은 "제공자가 돌려주지 않음"이다."""
+
+    provider: str  # "openai" · "anthropic" …
+    requested_model: str
+    returned_model: Optional[str]  # 응답이 밝힌 실제 모델(스냅샷). None = 미확인
+    requested_service_tier: Optional[str]  # 요청에 실은 처리 tier(OpenAI service_tier · Claude speed)
+    returned_service_tier: Optional[str]  # 응답이 밝힌 처리 tier. None = 미확인
+    attempts: tuple[AttemptRecord, ...]
+    max_attempts: int  # 전송 예산
+    output_retries: int  # 출력 예산
+    timeout_seconds: float  # 시도당 제한시간
+    elapsed_seconds: float  # 첫 시도 시작 → 종료(재시도 대기 포함)
+
+    @property
+    def attempt_count(self) -> int:
+        return len(self.attempts)
+
+
+# ------------------------------------------------------------------------------
+# 경계 예외 — 호출부는 SDK 예외가 아니라 이 5종만 다룬다
 # ------------------------------------------------------------------------------
 
 
@@ -38,6 +180,10 @@ class AIModelError(Exception):
     "request"(호출 준비·수락 단계의 거절), "response"(응답은 받았지만 쓸 수 없음).
     예외 클래스만으로는 이 축이 갈리지 않아서(예: 계약 위반은 요청 직렬화 실패와
     응답 파싱 실패 양쪽에 쓰인다) 따로 든다 — 계측이 response만 모델 품질로 센다(#237).
+
+    kind는 제공자 응답을 근거로 한 세부 종류(FailureKind)다. 구현체가 분류하면 싣고,
+    주입 구현·구버전 경로는 None일 수 있다 — 집계는 None을 "미분류"로 따로 센다.
+    trace는 시도별 기록이다. 없으면 호출 단위 지연·재시도 귀속이 불가능하므로 미확인이다.
 
     usage는 응답을 받은 실패에서 이미 발생한 토큰이다. 예외에 실어 보내지 않으면
     그 호출의 토큰이 어느 집계에도 남지 않아 비용이 실제 청구보다 적게 잡힌다.
@@ -51,11 +197,28 @@ class AIModelError(Exception):
         *,
         usage: Optional["TokenUsage"] = None,
         phase: Optional[str] = None,
+        kind: Optional[FailureKind] = None,
+        trace: Optional[CallTrace] = None,
     ) -> None:
         super().__init__(message)
         self.usage = usage
+        self.kind = kind
+        self.trace = trace
         if phase is not None:
             self.phase = phase
+        elif kind is not None:
+            self.phase = FAILURE_PHASE[kind]
+
+    @property
+    def retryable(self) -> bool:
+        """전송 예산으로 재시도할 종류였는지. kind가 없으면 클래스로 판정한다."""
+        if self.kind is not None:
+            return self.kind in TRANSPORT_RETRYABLE
+        return isinstance(self, (AIModelTimeoutError, AIModelUnavailableError))
+
+    @property
+    def owner(self) -> Optional[str]:
+        return failure_owner(self.kind)
 
 
 class AIModelTimeoutError(AIModelError):
@@ -71,15 +234,43 @@ class AIModelUnavailableError(AIModelError):
 
 
 class AIModelRejectedError(AIModelError):
-    """호출이 거절됨(인증·요청 오류·모델 refusal). 재시도하지 않는다."""
+    """호출이 거절됨(인증·요청 오류·한도 소진·모델 refusal). 재시도하지 않는다."""
 
 
 class AIModelContractError(AIModelError):
-    """계약 위반. 재시도하지 않는다.
+    """계약 위반. 전송 예산으로는 재시도하지 않는다.
 
-    양방향이다 — 요청 페이로드가 JSON으로 직렬화되지 않는 경우와, 응답이 요구한
-    구조화 출력으로 파싱되지 않는 경우.
+    양방향이다 — 요청 페이로드가 JSON으로 직렬화되지 않는 경우, 제공자가 스키마를
+    거절한 경우, 응답이 요구한 구조화 출력으로 파싱되지 않거나 잘린 경우.
     """
+
+
+class AIModelAdapterError(AIModelError):
+    """어댑터 구현 실패. SDK 응답 모양이 기대와 다르거나 분류하지 못한 예외가 났다.
+
+    경계 밖으로 날 예외(AttributeError 등)를 이 타입으로 접는 이유는, 그래프가
+    AIModelError만 FAILED로 접고 나머지는 디스패처까지 올라가 선점이 IN_PROGRESS로
+    남기 때문이다(#434 §4-2 — 회수 뒤 같은 건에 과금 호출이 반복된다). 계측은 이
+    타입을 모델 품질 실패에 섞지 않는다.
+    """
+
+
+# kind → 호출부가 분기하는 예외 클래스. 구현체는 이 표로만 예외를 만든다(model_retry.py).
+FAILURE_EXCEPTION: dict[FailureKind, type[AIModelError]] = {
+    FailureKind.TRANSPORT_TIMEOUT: AIModelTimeoutError,
+    FailureKind.TRANSPORT_CONNECTION: AIModelUnavailableError,
+    FailureKind.RATE_LIMITED: AIModelUnavailableError,
+    FailureKind.SERVER_ERROR: AIModelUnavailableError,
+    FailureKind.QUOTA_EXHAUSTED: AIModelRejectedError,
+    FailureKind.REQUEST_REJECTED: AIModelRejectedError,
+    FailureKind.SCHEMA_REJECTED: AIModelContractError,
+    FailureKind.REQUEST_SERIALIZATION: AIModelContractError,
+    FailureKind.REFUSAL: AIModelRejectedError,
+    FailureKind.TRUNCATED: AIModelContractError,
+    FailureKind.OUTPUT_INVALID: AIModelContractError,
+    FailureKind.RESPONSE_SHAPE: AIModelAdapterError,
+    FailureKind.ADAPTER_ERROR: AIModelAdapterError,
+}
 
 
 # ------------------------------------------------------------------------------
@@ -105,8 +296,13 @@ class TokenUsage:
     # prompt_tokens 중 제공자 캐시에서 온 몫. 청구 단가가 달라 이 값을 빼고는 실제
     # 비용을 계산할 수 없다. 같은 프롬프트를 반복하는 계측에서는 크게 걸리고, 인시던트
     # 마다 입력이 다른 실경로에서는 대개 0이다 — 그 차이를 구분해 말하려면 기록해야
-    # 한다(#237). 제공자가 이 정보를 주지 않으면 0이다.
+    # 한다(#237). 제공자가 이 정보를 주지 않으면 0으로 두고 unreported에 이름을 적는다.
     cached_prompt_tokens: int = 0
+    # 캐시 쓰기 토큰(Claude cache_creation_input_tokens). 쓰기 단가가 따로 있어 비용에
+    # 필요하다. 제공자가 주지 않으면(OpenAI) None = 미확인.
+    cache_creation_prompt_tokens: Optional[int] = None
+    # 제공자 응답에 없어 0으로 채운 필드 이름. 비교표는 이 필드를 "미확인"으로 적는다.
+    unreported: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -116,6 +312,8 @@ class AIModelResponse(Generic[StructuredOutputT]):
     output: StructuredOutputT
     usage: TokenUsage
     model: str
+    # 시도별 기록. 주입 구현(FakeAIModelClient)은 None — 실제 왕복이 없다
+    trace: Optional[CallTrace] = None
 
 
 class AIModelClient(Protocol):
@@ -235,7 +433,8 @@ def build_outbound_payload(request: AIModelRequest) -> dict[str, Any]:
     if serialize_error is not None:
         raise AIModelContractError(
             f"user_payload를 JSON으로 직렬화하지 못했습니다 ({serialize_error}) — "
-            'model_dump(mode="json")으로 넘기세요'
+            'model_dump(mode="json")으로 넘기세요',
+            kind=FailureKind.REQUEST_SERIALIZATION,
         )
     return {
         "system_prompt": _mask_text(request.system_prompt),
@@ -255,7 +454,12 @@ class FakeAIModelClient:
 
     마스킹을 실제 구현과 같은 지점에서 적용한다 — 주입 구현이 마스킹을 우회하면
     주입 테스트가 검증하는 경로가 실제 경로와 달라진다.
+
+    provider="fake"는 계측이 "실제 모델 측정이 아니다"를 가르는 표식이다. 실제 구현은
+    제공자 이름("openai"·"anthropic")을 둔다.
     """
+
+    provider = "fake"
 
     def __init__(
         self,

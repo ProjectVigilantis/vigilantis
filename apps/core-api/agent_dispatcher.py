@@ -44,6 +44,8 @@
 #                Terminal 기록·ANALYZING 이탈이 그 안에서 한 트랜잭션으로 끝납니다.
 #                IN_PROGRESS로 남은 채 프로세스가 죽으면 reset_agent_invocation으로
 #                회수하며, 회수 대상 판단은 이 계층 몫입니다(Repository docstring).
+#                회수는 건당 STALE_CLAIM_RECLAIM_LIMIT회까지이고 그 뒤는 FAILED로 닫습니다 —
+#                회수마다 과금되는 재분석이 한 번 더 나가기 때문입니다(#434 §3).
 #
 # **FinOps 입력 빌드의 불변식 둘. 최신 값을 다시 읽는 것으로 대신할 수 없다.**
 # ⓐ 최상위 rule_evaluation은 RULE 근거 행에서 읽는다(#243). 근거와 다른 원천이면
@@ -127,6 +129,7 @@ from ai.capabilities import (
     secops_action_targets,
 )
 from ai.model_client import AIModelClient
+from ai.model_retry import RetryPolicy
 from ai.rate_estimator import SAVINGS_MODEL_CALLS, estimate_candidate_savings, savings_context
 from ai.openai_client import build_openai_model_client
 from config import Settings, get_settings
@@ -183,6 +186,7 @@ class AgentDispatchReport:
     skipped: int = 0       # 선점 실패(다른 주체가 이미 가져감)
     unsupported: int = 0   # 지원하지 않는 분류
     reclaimed: int = 0     # 상한을 넘겨 PENDING으로 되돌린 IN_PROGRESS Claim
+    exhausted: int = 0     # 회수 횟수가 상한에 닿아 FAILED로 닫은 IN_PROGRESS Claim
     errored: int = 0
 
 
@@ -190,44 +194,91 @@ class AgentDispatchReport:
 # 회수 — IN_PROGRESS로 남은 Claim
 # ------------------------------------------------------------------------------
 
+# 한 Incident를 상한 초과로 되돌리는 최대 횟수. 되돌릴 때마다 과금되는 그래프 호출이
+# 한 번 더 나가므로(요약·후보·단가 최대 3회) 분석 시도는 원래 1회 + 회수 2회 = 3회에서
+# 끝난다. 첫 회수는 배포 재기동 같은 일회성 중단을, 둘째는 그 재시도의 중단까지 받아 주되
+# 셋째부터는 같은 입력으로 같은 자리에서 멈추는 구조적 원인으로 본다(#434 §3·4-2).
+# 설정 키로 올리는 것은 config.py 조율 항목이라 지금은 상수다.
+STALE_CLAIM_RECLAIM_LIMIT = 2
+
 
 def stale_claim_ceiling_seconds(settings: Optional[Settings] = None) -> float:
     """IN_PROGRESS Claim을 고아로 볼 시간 상한. 새 설정 키를 만들지 않고 파생한다.
 
     **모델 호출 1회의 최악값 × 분석 전체의 최대 호출 수**다. 그래프 뒤 단가 호출도 센다.
-    최악값은 매 시도가
-    제한시간을 다 쓰고(OPENAI_TIMEOUT_SECONDS × OPENAI_MAX_ATTEMPTS) 시도 사이마다
-    서버가 지시한 최대 대기를 따르는 경우다(OPENAI_MAX_RETRY_AFTER_SECONDS ×
-    (시도 수 − 1) — ai/openai_client.py _retry_delay는 상한 이내의 Retry-After를
-    backoff보다 우선한다). 기본값으로 (30×3 + 60×2) × 3 = 630초다.
+    호출 1회의 최악값은 재시도 엔진의 정책(ai/model_retry.py RetryPolicy.worst_case_seconds)
+    에서 읽는다 — 매 시도가 제한시간을 다 쓰고 시도 사이마다 서버가 지시한 최대 대기를
+    따르는 경우로, 운영 설정 기본값(30초 × 3시도 + 60초 × 2대기)으로 210초 × 3 = 630초다.
+    엔진이 출력 재시도 예산을 갖게 되면 그 호출 수까지 이 값에 함께 들어온다.
 
     **짧게 잡으면 안 된다.** 상한이 실제 최악값보다 짧으면 아직 살아 있는 호출이
     PENDING으로 되돌아가 같은 Incident에 과금되는 그래프 호출이 한 번 더 나가고,
-    원래 호출의 finish_agent_invocation은 조건 불일치로 실패한다. 반대로 길게 잡을 때의
+    원래 호출의 finish_agent_invocation은 조건 불일치로 실패한다. 회수 상한에 닿아
+    FAILED로 닫힌 뒤에 늦게 도착한 원래 결과도 같은 조건 불일치로 거절되어 errored로
+    남는다 — 닫힌 건을 되살리지 않는 것이 상한의 뜻이다. 반대로 길게 잡을 때의
     대가는 죽은 건의 재시도가 그만큼 늦어지는 것뿐이라 비대칭이다.
     """
     settings = settings or get_settings()
-    attempts = settings.OPENAI_MAX_ATTEMPTS
-    per_call = (
-        settings.OPENAI_TIMEOUT_SECONDS * attempts
-        + settings.OPENAI_MAX_RETRY_AFTER_SECONDS * (attempts - 1)
-    )
+    per_call = RetryPolicy.from_settings(settings).worst_case_seconds()
     # 그래프 종료 뒤의 단가 대기도 Claim 수명에 포함한다. SecOps 호출 수에 기대지 않는다.
     model_calls = max(FINOPS_MODEL_CALLS + SAVINGS_MODEL_CALLS, SECOPS_MODEL_CALLS)
     return per_call * model_calls
 
 
-def _reclaim_stale_claims(db: Session, report: AgentDispatchReport) -> None:
-    """상한을 넘긴 IN_PROGRESS를 PENDING으로 되돌린다. 다음 주기가 다시 집어 간다."""
+def _reclaim_stale_claims(
+    db: Session, report: AgentDispatchReport, publish: Optional[Publish]
+) -> None:
+    """상한을 넘긴 IN_PROGRESS를 PENDING으로 되돌린다. 다음 주기가 다시 집어 간다.
+
+    이미 STALE_CLAIM_RECLAIM_LIMIT만큼 되돌린 건은 되돌리지 않고 FAILED로 닫는다 — 되돌릴
+    때마다 같은 Incident에 과금되는 그래프 호출이 또 나가고, 매번 상한까지 멈추는 건은
+    다시 불러도 같은 자리에서 멈춘다. 닫는 길은 입력 불가와 같다(_dispatch_one의
+    GraphInputUnavailable): 빈 FAILED 출력을 Workflow에 넘겨 Terminal 전이·상태 이탈·
+    발행을 한 자리에서 처리한다. 모델 호출은 없다.
+    """
     cutoff = datetime.now(timezone.utc) - timedelta(
         seconds=stale_claim_ceiling_seconds()
     )
-    for incident_id in incidents_repo.list_stale_agent_claims(
+    for incident_id, reclaim_count in incidents_repo.list_stale_agent_claims(
         db, started_before=cutoff
     ):
-        if incidents_repo.reset_agent_invocation(db, incident_id):
-            report.reclaimed += 1
-            logger.warning("agent_claim_reclaimed", extra={"incident_id": incident_id})
+        if reclaim_count < STALE_CLAIM_RECLAIM_LIMIT:
+            if incidents_repo.reset_agent_invocation(db, incident_id):
+                report.reclaimed += 1
+                logger.warning(
+                    "agent_claim_reclaimed",
+                    extra={"incident_id": incident_id, "reclaim_count": reclaim_count + 1},
+                )
+            # 건마다 commit — 뒤에 올 닫기(record_agent_analysis)가 진입하며 rollback하므로
+            # 여기서 끊지 않으면 이 되돌림이 그 rollback에 함께 사라진다
+            db.commit()
+            continue
+        try:
+            logger.warning(
+                "agent_claim_exhausted",
+                extra={
+                    "incident_id": incident_id,
+                    "reason_code": AnalysisFailureReason.ANALYSIS_RETRY_EXHAUSTED.value,
+                    "reclaim_count": reclaim_count,
+                    "reclaim_limit": STALE_CLAIM_RECLAIM_LIMIT,
+                },
+            )
+            outcome = workflows.record_agent_analysis(
+                db, incident_id, AgentGraphOutput(invocation_status=AgentInvocationStatus.FAILED),
+            )
+            report.exhausted += 1
+            if publish is not None:
+                publish(
+                    incident_event(
+                        WsEventType.INCIDENT_UPDATED,
+                        incident_id=incident_id,
+                        occurred_at=outcome.occurred_at,
+                    )
+                )
+        except Exception:  # noqa: BLE001 — 한 건이 닫히지 않아도 나머지 회수는 계속한다
+            logger.exception("agent_claim_close_failed", extra={"incident_id": incident_id})
+            db.rollback()
+            report.errored += 1
     db.commit()
 
 
@@ -645,7 +696,7 @@ def dispatch_pending_analysis(
     스캔이 매번 예외로 끝난다.
     """
     report = AgentDispatchReport()
-    _reclaim_stale_claims(db, report)
+    _reclaim_stale_claims(db, report, publish)
 
     scanned = incidents_repo.list_pending_agent_analysis(db)
     report.scanned = len(scanned)

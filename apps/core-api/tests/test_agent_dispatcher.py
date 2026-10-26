@@ -46,6 +46,7 @@ from schemas.agents import AgentGraphOutput, RunbookCandidateDraft  # noqa: E402
 from schemas.api.assets import AssetType  # noqa: E402
 from schemas.assets import MetricSummary as MetricSummaryContract  # noqa: E402
 from schemas.api.incidents import IncidentStatus, RiskLevel  # noqa: E402
+from schemas.api.ws import WsEventType  # noqa: E402
 from schemas.candidates import CandidateStatus  # noqa: E402
 from schemas.evidence import EvidenceType  # noqa: E402
 from schemas.guardrails import GuardrailStep  # noqa: E402
@@ -574,6 +575,19 @@ def test_finops_claim_ceiling_explicitly_includes_followup_calls(monkeypatch):
     assert agent_dispatcher.stale_claim_ceiling_seconds(settings) == 630
 
 
+def test_claim_ceiling_follows_the_retry_engine_policy(monkeypatch):
+    """상한은 재시도 엔진의 호출 1회 최악값에서 파생한다 — 두 식이 따로 살면 갈린다."""
+    from ai.model_retry import RetryPolicy
+    from config import Settings
+
+    settings = Settings(OPENAI_TIMEOUT_SECONDS=20, OPENAI_MAX_ATTEMPTS=2,
+                        OPENAI_MAX_RETRY_AFTER_SECONDS=45)
+    per_call = RetryPolicy.from_settings(settings).worst_case_seconds()
+    assert per_call == 20 * 2 + 45
+    monkeypatch.setattr(agent_dispatcher, "SECOPS_MODEL_CALLS", 1)
+    assert agent_dispatcher.stale_claim_ceiling_seconds(settings) == per_call * 3
+
+
 def test_graph_input_reads_the_rule_and_asset_evidence_rows(db):
     """최상위 rule_evaluation은 RULE 근거에서, 자산 문맥은 ASSET 근거에서 (불변식 ⓐⓑ)."""
     incident_id = _pending_incident(db)
@@ -997,6 +1011,104 @@ def test_stale_in_progress_claim_is_returned_to_pending(db):
     assert report.reclaimed == 1
     # 같은 주기에서 곧바로 다시 집어 간다 — 회수가 스캔보다 앞선다
     assert report.scanned == 1
+    incident = incidents_repo.get_incident(db, incident_id)
+    db.refresh(incident)
+    # 회수 횟수가 남는다 — 다음 회수가 상한을 볼 근거다
+    assert incident.agent_reclaim_count == 1
+
+
+def _stale_claim(db, incident_id: str, *, reclaimed_so_far: int) -> None:
+    """상한을 넘긴 IN_PROGRESS를 심는다. 이미 reclaimed_so_far회 되돌린 건으로 만든다."""
+    ceiling = agent_dispatcher.stale_claim_ceiling_seconds()
+    incidents_repo.claim_agent_invocation(
+        db,
+        incident_id,
+        started_at=datetime.now(timezone.utc) - timedelta(seconds=ceiling + 60),
+    )
+    incident = incidents_repo.get_incident(db, incident_id)
+    incident.agent_reclaim_count = reclaimed_so_far
+    db.commit()
+
+
+def test_a_claim_reclaimed_up_to_the_limit_is_closed_as_failed_without_a_model_call(
+    db, client_pg
+):
+    """회수마다 과금되는 재분석이 한 번 더 나간다 — 상한에 닿은 건은 되돌리지 않고 닫는다.
+
+    닫힌 뒤에는 스캔에도 회수에도 잡히지 않아야 한다(Terminal). 모델은 부르지 않는다.
+    """
+    incident_id = _pending_incident(db)
+    _stale_claim(db, incident_id, reclaimed_so_far=agent_dispatcher.STALE_CLAIM_RECLAIM_LIMIT)
+    client = _client()
+    published = []
+
+    report = _cycle(db, client, publish=published.append)
+
+    assert (report.exhausted, report.reclaimed, report.scanned, report.errored) == (1, 0, 0, 0)
+    assert client.sent == []
+    incident = incidents_repo.get_incident(db, incident_id)
+    db.refresh(incident)
+    assert incident.status is IncidentStatus.FAILED
+    assert incident.agent_invocation_status is AgentInvocationStatus.FAILED
+    assert incident.summary_lines == []
+    assert [event.event_type for event in published] == [WsEventType.INCIDENT_UPDATED]
+    assert published[0].data.incident_id == incident_id
+    assert client_pg.get(f"/api/v1/incidents/{incident_id}").status_code == 200
+
+    # 닫힌 건은 다음 주기에 다시 나타나지 않는다
+    again = _cycle(db, _client())
+    assert (again.exhausted, again.reclaimed, again.scanned) == (0, 0, 0)
+
+
+@pytest.mark.parametrize("close_fails", [False, True])
+def test_a_reclaim_survives_a_later_exhausted_close_in_the_same_cycle(
+    db, monkeypatch, close_fails
+):
+    """닫기(record_agent_analysis)는 진입하며 rollback한다 — 같은 주기에서 먼저 되돌린 건이
+    그 rollback에 쓸려 가면 되돌린 건은 IN_PROGRESS로 남아 다시는 집히지 않는다(리뷰 지적).
+    닫기가 성공하든 예외로 끝나든 앞의 되돌림은 남아야 한다.
+    """
+    # 같은 대상 ARN은 한 Incident로 접수되므로 둘째는 다른 자산(SG)으로 만든다
+    first = _pending_incident(db)
+    _stale_claim(db, first, reclaimed_so_far=0)
+    second = _pending_incident(db, sg=True)
+    assert second != first
+    _stale_claim(db, second, reclaimed_so_far=agent_dispatcher.STALE_CLAIM_RECLAIM_LIMIT)
+    if close_fails:
+        original = workflows.record_agent_analysis
+
+        def failing_record(session, incident_id, output, **kwargs):
+            if incident_id == second:
+                session.rollback()  # Workflow 진입 rollback과 같은 자리에서 터진다
+                raise RuntimeError("닫기 실패")
+            return original(session, incident_id, output, **kwargs)
+        monkeypatch.setattr(workflows, "record_agent_analysis", failing_record)
+
+    report = _cycle(db, _client(SUMMARY, CandidateProposalOutput(candidates=[])))
+
+    assert report.reclaimed == 1
+    assert (report.exhausted, report.errored) == ((0, 1) if close_fails else (1, 0))
+    db.expire_all()
+    reclaimed = incidents_repo.get_incident(db, first)
+    # 되돌린 건은 같은 주기에서 다시 집혀 분석까지 끝난다
+    assert reclaimed.agent_reclaim_count == 1
+    assert reclaimed.agent_invocation_status in AGENT_TERMINAL_STATUSES
+    assert report.scanned == 1
+
+
+def test_a_claim_below_the_limit_is_still_returned_to_pending(db):
+    """상한 바로 아래(LIMIT−1회 되돌린 건)는 한 번 더 받아 준다."""
+    incident_id = _pending_incident(db)
+    _stale_claim(
+        db, incident_id, reclaimed_so_far=agent_dispatcher.STALE_CLAIM_RECLAIM_LIMIT - 1
+    )
+
+    report = _cycle(db, _client(SUMMARY, CandidateProposalOutput(candidates=[])))
+
+    assert (report.reclaimed, report.exhausted, report.scanned) == (1, 0, 1)
+    incident = incidents_repo.get_incident(db, incident_id)
+    db.refresh(incident)
+    assert incident.agent_reclaim_count == agent_dispatcher.STALE_CLAIM_RECLAIM_LIMIT
 
 
 def test_a_claim_within_the_ceiling_is_left_alone(db):

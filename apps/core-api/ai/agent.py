@@ -286,6 +286,8 @@ class AnalysisFailureReason(StrEnum):
     SSH_DENY_PARAMETER_MISMATCH = "SSH_DENY_PARAMETER_MISMATCH"
     UNSTORABLE_VALUE = "UNSTORABLE_VALUE"
     GRAPH_INPUT_UNAVAILABLE = "GRAPH_INPUT_UNAVAILABLE"
+    # 회수 — IN_PROGRESS가 상한을 넘겨 되돌린 횟수가 재분석 상한에 닿음(agent_dispatcher)
+    ANALYSIS_RETRY_EXHAUSTED = "ANALYSIS_RETRY_EXHAUSTED"
 
 
 @dataclass(frozen=True)
