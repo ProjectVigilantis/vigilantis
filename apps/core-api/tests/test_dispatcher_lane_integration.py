@@ -183,6 +183,7 @@ def test_blocked_autoscaling_runner_does_not_hold_back_the_main_lane(
             dispatcher._JUDGES,
             RunbookId.RUNBOOK_EC2_ISOLATE,
             lambda db, execution_id: SimpleNamespace(
+                pending=False,
                 deferred=False,
                 next_status=ExecutionStatus.SUCCESS,
                 error_summary=None,

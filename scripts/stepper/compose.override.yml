@@ -47,7 +47,8 @@ services:
       # CLI가 띄우는 FE 주소 — CORS·WebSocket 허용 출처(콤마 구분). FE 포트가 비켜 가면 따라간다.
       # 브라우저를 127.0.0.1로 열어도 막히지 않게 두 이름을 함께 둔다
       CORS_ALLOW_ORIGINS: http://localhost:${STEPPER_WEB_PORT:-3000},http://127.0.0.1:${STEPPER_WEB_PORT:-3000}
-      # dispatch 한 번이 판정 대기로 붙잡히는 시간(2×3초) — 시연 실측값(docs/E2E_DEMO_SCENARIOS.md)
+      # 기동 요청 뒤 2/2 Status Check를 기다리는 예산(2×3초 — 곱이 벽시계 상한, 판정은 주기마다
+      # 조회 1회라 dispatch를 붙잡지 않는다, Issue #434 1-3) — 시연 실측값(docs/E2E_DEMO_SCENARIOS.md)
       STATUS_CHECK_WAIT_DELAY_SECONDS: "2"
       STATUS_CHECK_WAIT_MAX_ATTEMPTS: "3"
       # 간격이 남아 있으면 다음 dispatch가 판정 불가 실행을 다시 묻지 않는다 — 시간이 흐르지 않는 서버다

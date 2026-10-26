@@ -394,13 +394,19 @@ def _judge_one(
         return
 
     report.judged += 1
-    # 선점 잠금을 먼저 놓는다. 판정은 최대 STATUS_CHECK_WAIT_DELAY × MAX_ATTEMPTS만큼
-    # AWS를 기다리는데, 그동안 행을 잠근 트랜잭션이 열려 있으면 커넥션과 잠금을 분
-    # 단위로 붙잡는다. 놓아도 안전한 것은 확정이 close_execution 몫이고 그쪽이 다시
+    # 선점 잠금을 먼저 놓는다. 판정은 AWS를 조회하므로(2/2는 조회 1회, 다른 런북은 현물
+    # 대조) 그동안 행을 잠근 트랜잭션이 열려 있으면 커넥션과 잠금을 AWS 응답 시간만큼
+    # 붙잡는다. 놓아도 안전한 것은 확정이 close_execution 몫이고 그쪽이 다시
     # 잠근 뒤 상태를 재확인하기 때문이다 — 그 사이 누가 먼저 확정했으면 None이 온다.
     db.commit()
     try:
         judgement = judge(db, execution_id)
+        if judgement.pending:
+            # 관측은 했는데 아직 2/2 전이고 예산도 남았다 — 기록할 것이 없다. 다음 주기가
+            # 다시 묻는다. 기다리지 않았으므로 이 스캔은 곧바로 다음 건으로 간다 (Issue #434 1-3)
+            report.awaiting_status_check += 1
+            db.commit()
+            return
         if judgement.deferred:
             # AWS에 물어보지 못해 결론이 없다 — ROLLBACK_INITIATED로 닫으면 검증기의
             # 실패가 자산의 실패로 저장되어 #241의 자동 원복 입력과 구분되지 않는다.
@@ -574,8 +580,8 @@ def _dispatch_one(
                 # ROLLBACK_INITIATED를 가른다(services/aws/rollback.py). 여기서 SUCCESS를
                 # 앞질러 쓰면 관제자 복구 경로가 판정 전에 열리고(EXECUTION_RECOVERABLE_
                 # STATUSES), 뒤이은 자동 원복 개시가 종료 상태를 되살리는 전이가 된다.
-                # 판정은 **다음 주기**가 한다 — 방금 기동을 요청한 인스턴스에 곧바로
-                # 2/2를 물으면 부팅 시간만큼 이 스캔이 붙잡힌다(max_instances=1).
+                # 판정은 **다음 주기**가 한다 — 방금 기동을 요청한 인스턴스는 아직 pending이라
+                # 지금 물어도 결론이 없고, 판정이 자산을 같은 주기에 되묻지 않는 규약도 같다.
                 report.awaiting_status_check += 1
                 logger.info(
                     "dispatch_awaiting_status_check",

@@ -2476,6 +2476,11 @@ class ExecutionJudgement:
     다시 물을지가 그 코드로 갈리고, 재시도를 소진한 뒤 관제자가 보는 사유도 그것이다.
     defer_reason은 사람이 읽는 한 줄이라 로그 몫이며 판정 근거로 읽지 않는다. 보류
     판정이 error_summary를 싣지 않는 것도 같은 이유다 (Issue #249).
+
+    pending은 세 번째 모양이다 — **관측은 했는데 아직 결론이 없다**(Issue #434 1-3).
+    기동 요청 뒤 2/2가 initializing인 구간이며, 보류와 달리 검증기가 실패한 것이 아니라
+    기록을 남기지 않고 다음 주기가 다시 묻는다. 예산을 넘기면 판정 주체가 TIMED_OUT으로
+    확정한다(rollback.timed_out).
     """
 
     next_status: ExecutionStatus | None = None
@@ -2483,12 +2488,19 @@ class ExecutionJudgement:
     verdict: rollback.StatusCheckVerdict | None = None
     defer_code: PrecheckReasonCode | None = None
     defer_reason: str | None = None
+    pending: bool = False
 
     @property
     def deferred(self) -> bool:
-        return self.next_status is None
+        return self.next_status is None and not self.pending
 
     def __post_init__(self) -> None:
+        if self.pending:
+            if self.next_status is not None or self.error_summary is not None:
+                raise ValueError("아직 결론이 없는 판정은 상태·사유를 싣지 않습니다")
+            if self.defer_code is not None or self.defer_reason is not None:
+                raise ValueError("아직 결론이 없는 판정은 보류가 아닙니다")
+            return
         if self.deferred:
             if self.error_summary is not None:
                 raise ValueError("보류 판정은 error_summary를 저장하지 않습니다")
@@ -2540,10 +2552,14 @@ def judge_rightsizing_boot(db: Session, execution_id: str) -> ExecutionJudgement
       ② 조치 직전 stopped였던 인스턴스는 기동하지 않는다(executor.execute_rightsizing
          ③단계 NOT_APPLIED). 켜지 않은 인스턴스에 2/2를 물으면 영원히 오지 않으므로
          타임아웃 뒤 멀쩡한 자산을 되돌리게 된다 — 그 전에 성공으로 확정한다.
-      ③ 그 밖에는 waiter에 묻는다 — 2/2면 성공이고, 관측된 실패·타임아웃이면 원복이
-         남는다. **AWS에 물어보지 못했으면 어느 쪽도 아니라 보류다**(next_status가
-         없는 판정) — 검증기의 실패를 자산의 실패로 저장하면 자동 원복이 멀쩡한
-         인스턴스를 되돌린다 (Issue #249).
+      ③ 그 밖에는 지금 상태를 **한 번** 관측한다(rollback.probe_status_check) — 2/2면
+         성공이고, 관측된 실패(정지·impaired)면 원복이 남는다. **아직 결론 전이면 예산으로
+         가른다**(Issue #434 1-3): 기동 단계 시각부터 rollback.status_check_budget 안이면
+         기록 없이 다음 주기가 다시 묻고(pending), 넘었으면 관측된 타임아웃이라 원복이
+         남는다. 기다리지 않으므로 판정 1건이 디스패처 한 주기를 분 단위로 붙잡지 않는다.
+         **AWS에 물어보지 못했으면 어느 쪽도 아니라 보류다**(next_status가 없는 판정) —
+         검증기의 실패를 자산의 실패로 저장하면 자동 원복이 멀쩡한 인스턴스를 되돌린다
+         (Issue #249). 보류 소진 뒤 처분은 record_verification_failure가 정한다.
 
     **종료 상태도 Incident 전이도 여기서 하지 않는다** — run_rightsizing_execution과
     같은 이유다(확정은 close_execution 한 트랜잭션).
@@ -2597,7 +2613,7 @@ def judge_rightsizing_boot(db: Session, execution_id: str) -> ExecutionJudgement
     if started.effect is ExecutionEffect.NOT_APPLIED:
         return ExecutionJudgement(next_status=ExecutionStatus.SUCCESS)
 
-    outcome = rollback.wait_for_status_check(execution.target_arn)
+    outcome = rollback.probe_status_check(execution.target_arn)
     if outcome.booted:
         return ExecutionJudgement(
             next_status=ExecutionStatus.SUCCESS, verdict=outcome.verdict
@@ -2611,6 +2627,21 @@ def judge_rightsizing_boot(db: Session, execution_id: str) -> ExecutionJudgement
             defer_reason=_boot_failure_summary(outcome),
             verdict=outcome.verdict,
         )
+    if outcome.undecided:
+        # 관측은 했는데 아직 2/2 전이다. 예산의 기준점은 기동 **요청** 시각(기동 단계
+        # 기록)이다 — DB에 남아 있어 프로세스가 재시작돼도 예산이 처음부터 다시 돌지 않는다
+        waited = datetime.now(UTC) - started.occurred_at
+        if waited < rollback.status_check_budget():
+            logger.info(
+                "status_check_pending",
+                extra={
+                    "execution_id": execution_id,
+                    "waited_seconds": int(waited.total_seconds()),
+                    "summary": outcome.summary,
+                },
+            )
+            return ExecutionJudgement(pending=True, verdict=outcome.verdict)
+        outcome = rollback.timed_out(outcome, waited)
     return ExecutionJudgement(
         next_status=ExecutionStatus.ROLLBACK_INITIATED,
         error_summary=_boot_failure_summary(outcome),
