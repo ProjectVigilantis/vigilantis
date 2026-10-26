@@ -17,7 +17,7 @@ import {
   websocketUrl,
   type RealtimeAction,
 } from '@/lib/realtime-events';
-import { isPlatform } from '@/lib/roles';
+import { businessOpen, confirmedAccount } from '@/lib/home-path';
 import type { WsEvent } from '@/types/api';
 
 export type ConnectionState = 'connecting' | 'open' | 'reconnecting' | 'closed' | 'disabled';
@@ -65,8 +65,8 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
   const seenRef = useRef(new SeenEvents());
   const listenersRef = useRef(new Set<(a: Extract<RealtimeAction, { kind: 'execution' }>) => void>());
   const incidentListenersRef = useRef(new Set<(a: Extract<RealtimeAction, { kind: 'refresh' }>) => void>());
-  /** 언마운트 후 재연결이 붙지 않게 하는 표식. */
-  const aliveRef = useRef(true);
+  /** 연결해도 되는 동안만 참이다 — 연결 effect가 켜고 정리 함수가 끈다. 확인 전 · 언마운트 후에는 [재연결]도 붙지 않는다. */
+  const aliveRef = useRef(false);
   /** `connect`가 자기 자신을 예약해야 해서 참조로 끊는다(useCallback 자기 참조 금지). */
   const connectRef = useRef<() => void>(() => {});
 
@@ -186,16 +186,16 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
     connect();
   }, [connect]);
 
-  // 테넌트 격리(T-4 · T-5) 전에는 실시간 연결이 플랫폼 운영자 전용이다(lib/home-path.ts). 고객사 계정으로
-  // 확인되면 연결을 닫고 다시 붙지 않는다 — 거절될 핸드셰이크를 백오프로 계속 반복하지 않게. 계정을 아직
-  // 모를 때(확인 전 · `/me` 실패)는 지금까지처럼 붙는다.
+  // 테넌트 격리(T-4 · T-5) 전에는 전역 실시간 연결이 플랫폼 운영자 전용이다(lib/home-path.ts `businessOpen`).
+  // `/me`가 플랫폼 계정으로 확인된 뒤에만 핸드셰이크한다 — 확인 전 · `/me` 실패 · 미로그인 · 고객사 계정은
+  // 붙지 않는다. 확인된 플랫폼 계정이 아니게 되면 정리 함수가 연결을 닫고 다시 붙지 않는다.
   const { session } = useSession();
-  const blocked = session.kind === 'user' && !isPlatform(session.user);
+  const enabled = businessOpen(confirmedAccount(session));
 
   // 앱 진입 시 1회 연결하고 페이지 이동 중 유지한다(§4.8 1) — layout에 두어 라우트가 바뀌어도
   // 이 컴포넌트가 언마운트되지 않는다.
   useEffect(() => {
-    if (blocked) return;
+    if (!enabled) return;
     aliveRef.current = true;
     connect();
     return () => {
@@ -203,11 +203,11 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
       if (timerRef.current !== null) clearTimeout(timerRef.current);
       socketRef.current?.close();
     };
-  }, [connect, blocked]);
+  }, [connect, enabled]);
 
   return (
     <RealtimeContext.Provider
-      value={{ connection: blocked ? 'disabled' : connection, reconnect, subscribeExecution, subscribeIncident }}
+      value={{ connection: enabled ? connection : 'disabled', reconnect, subscribeExecution, subscribeIncident }}
     >
       {children}
     </RealtimeContext.Provider>

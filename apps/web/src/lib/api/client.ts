@@ -150,11 +150,16 @@ async function request<T>(path: string, init?: RequestInit, transport?: ApiTrans
 }
 
 /**
- * 서버 컴포넌트도 부르는 조회 7종(고객 관리 2종 · 사용자 관리 1종 포함). 전송을 주입받아 같은 경로 · 타입을 브라우저와 서버가 함께 쓴다 —
+ * 서버 컴포넌트도 부르는 조회(현재 계정 · 고객 관리 · 사용자 관리 포함). 전송을 주입받아 같은 경로 · 타입을 브라우저와 서버가 함께 쓴다 —
  * 서버 쪽은 `serverApi()`(lib/api/server.ts), 브라우저 쪽은 아래 모듈 export다.
  */
 export function createReadApi(transport: ApiTransport) {
   return {
+    /** 업무 조회 전에 계정 종류를 확인한다. 401 처리는 주입된 전송(SSR redirect 등)이 맡는다. */
+    getMe(): Promise<CurrentUserResponse> {
+      return request<CurrentUserResponse>('/auth/me', undefined, transport);
+    },
+
     getAssets(): Promise<AssetsResponse> {
       return request<AssetsResponse>('/assets', undefined, transport);
     },
@@ -397,7 +402,7 @@ export function getUserEvents(userId: string, limit = 50): Promise<UserEventsRes
  */
 export async function getMe(): Promise<CurrentUserResponse | null> {
   try {
-    return await request<CurrentUserResponse>('/auth/me');
+    return await createReadApi(BROWSER).getMe();
   } catch (error) {
     if (error instanceof ApiError && error.httpStatus === 401) return null;
     throw error;

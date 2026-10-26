@@ -288,15 +288,21 @@ SDK 호출 뒤 잠금 안의 재확인(행위자 · 대상 신원 · 대상 테�
 
 ## 화면 (`apps/web`, #492)
 
-화면은 `/me`의 `account_type` · `role`만으로 가른다(`apps/web/src/lib/roles.ts` · `home-path.ts`). 분기와 숨김은 편의이고 차단은 서버다.
+화면은 `/me`의 `account_type` · `role`만으로 가른다(`apps/web/src/lib/roles.ts` · `home-path.ts`). 역할이 주는 권한(`roles.ts`)과 테넌트 격리 전 지금 열린 기능(`home-path.ts`의 `businessOpen`)은 따로 판정한다. 분기와 숨김은 편의이고 차단은 서버다.
 
 | 계정 | 첫 화면 | 메뉴 | 업무 조회 · 실시간 |
 | --- | --- | --- | --- |
 | PLATFORM | `/tenants`(고객) | 대시보드 · 자산 · 보안 · 고객 · 사용자 | 사용 |
-| TENANT ADMIN | `/users` | 사용자 | 계정 확인 뒤 자산 주기 조회와 WebSocket 연결을 멈춘다 |
-| TENANT OPERATOR · VIEWER | `/`(서버 403 안내) | 없음 | 위와 같음 |
-| 계정 확인 전 · `/me` 실패 | — | 업무 화면만(관리 메뉴 닫힘) | 기존대로 시도 |
+| TENANT ADMIN | `/users`(사용자) | 사용자 | 시작하지 않는다 — 자산 주기 조회와 WebSocket 연결을 열지 않는다 |
+| TENANT OPERATOR · VIEWER | `/`(업무 화면 이용 제한) | 없음(사이드바를 그리지 않는다) | 위와 같음 |
+| 계정 확인 중 · 미로그인 · `/me` 실패 | — | 없음(사이드바를 그리지 않는다) | 위와 같음 |
 
+- 첫 화면은 로그인 뒤 돌아갈 곳(`?next=`)이 없을 때의 이동처다(`home-path.ts`의 `homePathFor`). 로그인 직후 `/me`를 읽지 못하면 `/`로 보내 거기서 다시 확인한다.
+- `/`(`apps/web/src/app/page.tsx`)는 업무 조회 전에 `/me`로 계정을 확인한다. PLATFORM에게는 기존 대시보드를, TENANT 계정에게는 업무 API를 부르지 않고 짧은 `업무 화면 이용 제한` 안내를 보인다. 이 안내는 서버 403 오류 화면이 아니며, 고객용 업무 대시보드를 여는 것도 아니다. `/me` 실패는 오류 화면으로 알리며(401은 로그인 이동) 이용 제한 안내나 빈 대시보드로 바꾸지 않는다.
+- 셸의 자산 주기 조회(수집 · 연결 인디케이터)와 전역 WebSocket(`components/gnb.tsx` · `realtime-provider.tsx`)은 `/me`가 PLATFORM으로 확인된 뒤에만 시작한다. 확인 중 · 미로그인 · 확인 실패 · TENANT 계정에서는 업무 요청을 보내지 않는다.
+- 상단바 오른쪽 이메일(`components/auth/user-menu.tsx`)을 누르면 `계정 정보` 대화상자가 열린다(별도 화면은 없다). SessionProvider가 이미 가진 `/me` 값으로 이메일 · 역할(사용자 관리와 같은 이름) · 계정 종류를 보이고, TENANT 계정이면 자기 고객 ID를 더한다. PLATFORM 계정에는 고객 ID 항목이 없다(`apps/web/src/lib/account-summary.ts`). 고객 이름은 `/me` 계약에 없어 보이지 않으며, 이를 위해 새 조회 API · PLATFORM 전용 테넌트 API를 부르거나 공개 계약을 넓히지 않는다.
+- 지금 쓸 수 있는 것은 TENANT ADMIN의 자기 테넌트 사용자 관리다. 자산 · 보안 조회와 조치 실행 · 인시던트 종료는 역할상 권한이 있어도 테넌트 격리(T-4 · T-5) 전에는 열리지 않는다 — 전역 업무 API · WebSocket은 PLATFORM 전용이다(§접근 보호 임시 업무 관문).
+- 사용자 변경 이력은 기존 ADMIN 관리 범위의 `user_admin_events` 조회(§이력)이며, 로그인 기록이나 조치 실행 감사 기록(T-2)을 포함한 전체 감사가 아니다.
 - 사용자 관리 화면은 고객 ID(`tenant_id`) 열을 보인다. PLATFORM은 초대할 고객 ID(UUID)를 직접 입력하고, TENANT ADMIN은 자기 소속을 읽기 전용으로 보며 다른 고객을 고를 수 없다.
 - 오류는 서버 판정대로 알린다 — 범위 밖 사용자는 대상 없음과 같은 문구, 고객 상태 거절은 고객 사유, 초대 · 재발송의 500 · 네트워크 실패는 메일이 나갔을 수 있다는 안내다(`apps/web/src/lib/user-admin.ts`).
 - 백엔드에는 테넌트 목록 · 상세 API(`GET /api/v1/tenants` · `/api/v1/tenants/{id}`, PLATFORM 전용)가 있지만, 사용자 관리 화면은 이를 쓰지 않아 고객 선택 목록이 없다. 초대할 고객 ID는 위처럼 직접 입력한다. `/tenants` 화면과 테넌트 API 자체는 이 모듈의 범위가 아니다.
@@ -474,7 +480,7 @@ uv run python -m auth.bootstrap_enrollment revoke --enrollment-id <enrollment_id
 | 실제 PostgreSQL(#492) | `apps/core-api/tests/test_auth_api.py` · `test_auth_login_single_session.py` · `test_auth_password_reset.py` | PLATFORM `/me`의 `tenant_id` null, UNASSIGNED 로그인 완료 403 · 발급 없음과 기존 세션 401, 정지 테넌트 사용자의 로그인 · `/me` · 활동 · 로그아웃 · 재설정, 테넌트 정지의 재로그인 없는 반영, 정지 테넌트의 DISABLED 사용자 |
 | 실제 PostgreSQL + 대역(#492) | `apps/core-api/tests/test_auth_bootstrap_admin.py` | `--platform` · `--email` 없는 생성 거절(SDK 호출 0회), 사용자가 있어도 추가 플랫폼 계정, 기존 신원 이전 없음, 지정 미리보기 무변경, 지정의 변경 · 세션 회수(SDK 호출 0회), 부적격 대상 거절, 생성 플래그 혼용 거절, 잠금 안 재확인, 같은 신원 동시 생성에서 1건만 |
 | 계약(#492) | `packages/schemas/tests/test_api_auth.py` · `test_api_users.py` | `AccountScope` 짝 규칙, 초대의 `tenant_id`는 플랫폼 권한 부여가 아님, 관리 요청으로 소속을 바꿀 수 없음 |
-| 웹 유닛(#492) | `apps/web/src/lib/home-path.test.ts` · `user-admin.test.ts` | 계정 종류별 첫 화면 · 메뉴, 초대 본문(PLATFORM은 고객 ID 필수 · TENANT ADMIN은 생략), 범위 밖 · 고객 상태 · 결과 불명 오류 문구 |
+| 웹 유닛(#492) | `apps/web/src/lib/home-path.test.ts` · `account-summary.test.ts` · `user-admin.test.ts` | 계정 종류별 첫 화면 · 메뉴, 상단바 계정 정보 항목(TENANT만 고객 ID), 초대 본문(PLATFORM은 고객 ID 필수 · TENANT ADMIN은 생략), 범위 밖 · 고객 상태 · 결과 불명 오류 문구 |
 | 실제 PostgreSQL + 어댑터 대역(#492) | `apps/core-api/tests/test_platform_enrollment.py` | 등록 API. 스위치 기본값 false, 꺼지면 유효 링크와 스키마 밖 JSON 본문이 같은 404 · 어댑터 조립 0회(문법이 깨진 JSON은 다루지 않는다), Origin(없음 · 외부 · `null`)이 스위치 켜짐 · 꺼짐 모두에서 먼저 403, 권한 필드(`role` · `account_type` · `tenant_id` · `user_id`)와 잘못된 본문 422 · 링크 무변화, 쓸 수 없는 링크 5종(모름 · 만료 · 회수 · 예약 · 사용됨)이 같은 404 · 같은 문구이고 Cognito 미설정(실제 지연 조립)보다 먼저, 기존 PLATFORM 세션 쿠키가 근거가 되지 않음, 유효 링크 + Cognito 미설정 503 · ISSUED 유지. 성공 204(본문 · 쿠키 없음 · `no-store`) · PLATFORM ADMIN 1명(`email_verified_at` 없음) · 기존 세션 무변화 · 재사용 404, 그 계정이 이메일 코드 확인 없이는 로그인을 완료하지 못함. 예약 commit 실패 시 SDK 0회, 예약 뒤 실패 5종(409 · 429 · 503 발송 · 503 장애 · 분류 밖 500)의 예약 유지와 회복 뒤 재요청 404 · SDK 1회, 제공자 성공 뒤 DB 실패 · 호출 중 만료에서 앱 계정 없음 · 예약 유지. 독립 commit 세션: 같은 링크 동시 4요청에서 계정 1개 · SDK 1회, 호출 중 회수 commit에서 앱 계정 없음. 로그에 토큰 · 해시 · 이메일 없음, 기동 경고는 켜졌을 때만 |
 | 실제 PostgreSQL(#492) | `apps/core-api/tests/test_auth_bootstrap_enrollment.py` | 발급 CLI(Cognito 없음). `--base-url`의 https · loopback http 허용과 위험한 형태 거절, 미리보기 무변경, 범위 밖 `--count` · `--valid-hours` · 위험한 base · 기존 출력 경로가 쓰기 전 거절(2), 링크는 파일에만 · DB에는 해시만 · 표준 출력에 토큰 없음, 기본 4개, 파일 생성 · 쓰기 실패면 DB 무기록, commit 전 DB 실패면 파일 삭제, commit 불명이면 파일 보존 · 성공 미표시, `list`의 메타데이터 · 파생 `EXPIRED` · 예약 `email` · 해시 없음, `revoke`가 링크만 바꾸고 REDEEMED · REVOKED · 없는 · 잘못된 ID 거절, CLI가 만든 링크를 API가 한 번만 받음(어댑터 대역). **OS별 조건**: 0600 소유자 전용 · 심볼릭 링크 거절 · 실제 출력 경로 발급 3개 테스트는 POSIX에서만, 비 POSIX 거절 1개 테스트는 POSIX가 아닐 때만 실행되고 반대 환경에서는 skip이다. 그 밖의 발급 테스트는 플랫폼과 무관한 새 파일 전용 opener 대역을 쓰므로 0600 보장을 확인하지 않는다 |
 | 실제 PostgreSQL(#492) | `apps/core-api/db/tests/test_platform_enrollment_migration.py` · `test_models_metadata.py` | 부모 revision(`f492c4a8d2e1` → `b492e5d7c3a1`)과 그래프의 head 1개, 왕복에서 이 테이블 · enum만 사라지고 이전 revision의 `account_type`과 PLATFORM 사용자 행이 남음 · 다시 upgrade한 스키마와 ORM 일치, CHECK 5개의 거절 · 허용 형태, `token_hash` · `redeemed_user_id` 유일과 링크가 가리키는 사용자 삭제 거절, 예약은 ISSUED · 만료 전 링크를 한 번만, 회수는 ISSUED · RESERVED만이고 예약 이메일 보존, 독립 연결의 동시 예약이 행 잠금을 기다려 하나만 성공 |

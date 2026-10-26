@@ -15,8 +15,15 @@ import { UserMenu } from '@/components/auth/user-menu';
 import { CollectionIndicator, useAssetsEnvelope } from '@/components/collection-indicator';
 import { ConnectionIndicator, type AssetPresence } from '@/components/connection-indicator';
 import { ThemeToggle } from '@/components/theme-toggle';
-import { PLATFORM_HOME, USERS_PATH, homePathFor, navPathsFor } from '@/lib/home-path';
-import { isPlatform, type AccessSubject } from '@/lib/roles';
+import {
+  PLATFORM_HOME,
+  USERS_PATH,
+  businessOpen,
+  confirmedAccount,
+  homePathFor,
+  navPathsFor,
+} from '@/lib/home-path';
+import type { AccessSubject } from '@/lib/roles';
 import { cn } from '@/lib/utils';
 
 /**
@@ -41,18 +48,18 @@ const NAV: Readonly<Record<string, { label: string; icon: LucideIcon }>> = {
   [USERS_PATH]: { label: '사용자', icon: Users },
 };
 
-/** 현재 계정(세션 Provider · #492). 확인 전 · 미로그인 · 조회 실패는 null이다(관리 메뉴를 열지 않는다). */
+/** 현재 계정(세션 Provider · #492). 확인 전 · 미로그인 · 조회 실패는 null이다(메뉴 · 업무 기능을 열지 않는다). */
 function useAccount(): AccessSubject | null {
   const { session } = useSession();
-  return session.kind === 'user' ? session.user : null;
+  return confirmedAccount(session);
 }
 
 export function ShellHeader() {
   const account = useAccount();
-  // 격리 전 고객사 계정은 자산 조회 · 실시간 연결이 막혀 있다(lib/home-path.ts) — 거절될 요청을 반복하지 않고
-  // 두 인디케이터도 그리지 않는다. 계정을 아직 모를 때는 지금까지처럼 부른다.
-  const businessBlocked = account !== null && !isPlatform(account);
-  const assets = useAssetsEnvelope(!businessBlocked);
+  // 자산 조회와 두 인디케이터는 업무 기능이다 — 확인된 플랫폼 계정에게만 연다(lib/home-path.ts `businessOpen`).
+  // 확인 전 · 조회 실패 · 고객사 계정은 부르지도 그리지도 않는다. 주간/야간 전환과 사용자 메뉴는 그대로 둔다.
+  const open = businessOpen(account);
+  const assets = useAssetsEnvelope(open);
   const presence: AssetPresence = assets.failed
     ? 'failed'
     : assets.env === null
@@ -63,8 +70,8 @@ export function ShellHeader() {
 
   return (
     <header className="dark bg-shell text-foreground flex h-16 shrink-0 items-center gap-3 border-b px-4 sm:gap-6">
-      {/* 업무 화면이 막힌 고객사 계정은 대시보드 대신 자기 첫 화면으로 간다. */}
-      <Link href={businessBlocked ? homePathFor(account) : '/'} className="flex shrink-0 items-center gap-2.5">
+      {/* 고객 계정은 기존 역할별 진입점으로 간다. 플랫폼 대시보드 링크는 유지한다. */}
+      <Link href={account !== null && !open ? homePathFor(account) : '/'} className="flex shrink-0 items-center gap-2.5">
         <span className="bg-primary flex size-7 items-center justify-center rounded-md">
           <Shield aria-hidden className="size-4 text-white" />
         </span>
@@ -76,12 +83,12 @@ export function ShellHeader() {
           빼면 끊겼을 때 [재연결] 버튼(§4.8 4)이 사라져 둘 다 둔다(PR #299 리뷰). */}
       {/* 좁은 화면(< lg)에서는 두 인디케이터가 들어갈 폭이 없다(수집 칩만 288px): 전환 · 사용자만 남긴다. */}
       <div className="ml-auto flex min-w-0 shrink items-center gap-3 sm:gap-4">
-        {businessBlocked ? null : (
+        {open ? (
           <div className="hidden shrink-0 items-center gap-4 lg:flex">
             <CollectionIndicator env={assets.env} failed={assets.failed} />
             <ConnectionIndicator assets={presence} />
           </div>
-        )}
+        ) : null}
         <ThemeToggle />
         <UserMenu />
       </div>
@@ -92,7 +99,9 @@ export function ShellHeader() {
 /** 넓은 화면에서는 왼쪽 세로 메뉴, 좁은 화면(< md)에서는 상단바 아래 가로 줄이다. */
 export function ShellNav() {
   const pathname = usePathname();
-  const items = navPathsFor(useAccount()).map((href) => ({ href, ...NAV[href] }));
+  const account = useAccount();
+  const items = navPathsFor(account).map((href) => ({ href, ...NAV[href] }));
+  if (items.length === 0) return null;
 
   return (
     <nav

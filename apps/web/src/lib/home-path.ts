@@ -2,10 +2,13 @@
 // ADMIN 역할이나 `tenant_id` NULL로 추론하지 않는다(#506, PR #504 리뷰). 화면을 가르는 것은 편의이고
 // 실제 차단은 서버(403)다.
 //
-// 테넌트 격리(T-4 · T-5) 전 임시 정책: 고객사 계정은 로그인 · `/me` · 자기 고객사 사용자 관리만 쓸 수 있고,
-// 업무 화면(대시보드 · 자산 · 보안)과 실시간 연결은 플랫폼 운영자 전용이다. 그래서 고객사 ADMIN의 첫 화면은
-// 사용자 관리이고, 고객사 OPERATOR · VIEWER는 고객 첫 화면(`/`)에서 서버 403 안내를 본다. 격리가 열리면
-// `BUSINESS_PATHS`를 고객사에게도 열고 고객사 ADMIN의 첫 화면을 `CUSTOMER_HOME`으로 되돌린다.
+// 첫 화면: 플랫폼 운영자는 고객 관리(`/tenants`), 고객사 ADMIN은 사용자 관리(`/users`)다.
+// 고객사 OPERATOR · VIEWER는 기존 `/`에서 이용 제한을 본다. 업무 데이터를 조회하거나 새 홈을 만들지 않는다.
+//
+// 역할 권한과 지금 열린 기능은 따로 판정한다. 권한(사용자 관리 · 플랫폼 여부)은 roles.ts가 정하고,
+// 테넌트 격리(T-4 · T-5) 전에 업무 기능(자산 · 보안 화면, GNB 자산 조회, 전역 실시간 연결)을 누구에게 열지는
+// `businessOpen`이 정한다 — 지금은 확인된 플랫폼 계정뿐이다. 이 판정은 셸(메뉴 · GNB 조회 · 실시간 연결)만 가른다 —
+// 격리가 열릴 때는 서버 권한 검사와 페이지의 서버 측 판정도 함께 바꿔야 한다.
 
 import { canManageUsers, isPlatform, type AccessSubject } from './roles.ts';
 
@@ -13,8 +16,28 @@ export const PLATFORM_HOME = '/tenants';
 export const CUSTOMER_HOME = '/';
 export const USERS_PATH = '/users';
 
-/** 업무 화면 — 대시보드 · 자산 · 보안. 격리 전에는 플랫폼 전용이다. */
+/** 업무 화면 — 대시보드 · 자산 · 보안. */
 export const BUSINESS_PATHS: readonly string[] = ['/', '/assets', '/security'];
+
+/** 세션 Provider의 상태에서 계정 판정에 쓰는 모양(components/auth/session-provider.tsx `SessionState`). */
+export type SessionView =
+  | { kind: 'loading' }
+  | { kind: 'unknown' }
+  | { kind: 'anonymous' }
+  | { kind: 'user'; user: AccessSubject };
+
+/** `/me`로 확인된 계정. 확인 전 · 조회 실패 · 미로그인은 null이다 — 어떤 기능도 열지 않는다. */
+export function confirmedAccount(session: SessionView): AccessSubject | null {
+  return session.kind === 'user' ? session.user : null;
+}
+
+/**
+ * 업무 기능(자산 · 보안 화면, GNB 자산 조회, 전역 실시간 연결)이 지금 열려 있나. 역할 권한이 아니라 현재 제공 범위다 —
+ * 격리 전에는 확인된 플랫폼 계정에게만 연다. 계정을 모르면(null) 닫는다. 실제 차단은 서버(403)다.
+ */
+export function businessOpen(user: AccessSubject | null): boolean {
+  return isPlatform(user);
+}
 
 export function homePathFor(user: AccessSubject): string {
   if (isPlatform(user)) return PLATFORM_HOME;
@@ -22,14 +45,14 @@ export function homePathFor(user: AccessSubject): string {
 }
 
 /**
- * 사이드바에 보일 경로(순서대로). 계정을 아직 모르면(null — 확인 전 · 조회 실패) 지금까지처럼 업무 화면만 보이고
- * 관리 메뉴는 열지 않는다. 고객 관리(/tenants)는 플랫폼 운영자에게만 보인다.
+ * 사이드바에 보일 경로(순서대로). 계정을 아직 모르면(null — 확인 전 · 조회 실패 · 미로그인) 아무 메뉴도 열지 않는다.
+ * 업무 화면은 `businessOpen`, 고객 관리는 플랫폼, 사용자 관리는 `canManageUsers`가 연다.
  */
 export function navPathsFor(user: AccessSubject | null): string[] {
-  const platform = isPlatform(user);
+  if (user === null) return [];
   return [
-    ...(user === null || platform ? BUSINESS_PATHS : []),
-    ...(platform ? [PLATFORM_HOME] : []),
+    ...(businessOpen(user) ? BUSINESS_PATHS : []),
+    ...(isPlatform(user) ? [PLATFORM_HOME] : []),
     ...(canManageUsers(user) ? [USERS_PATH] : []),
   ];
 }
