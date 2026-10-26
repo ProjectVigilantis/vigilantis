@@ -37,7 +37,11 @@ from schemas.api.assets import AssetType  # noqa: E402
 from schemas.api.incidents import IncidentCategory, IncidentStatus  # noqa: E402
 from schemas.backups import BackupType  # noqa: E402
 from schemas.candidates import CandidateStatus  # noqa: E402
-from schemas.executions import ExecutionStepResult, ExecutionStepStatus  # noqa: E402
+from schemas.executions import (  # noqa: E402
+    ExecutionEffect,
+    ExecutionStepResult,
+    ExecutionStepStatus,
+)
 from schemas.guardrails import GuardrailDecision, GuardrailStep  # noqa: E402
 from schemas.precheck import PrecheckReasonCode  # noqa: E402
 from schemas.runbooks import RunbookId, TriggerSource  # noqa: E402
@@ -425,6 +429,61 @@ def test_failed_revert_settles_the_origin_as_rollback_failed(db, rolled_back_ori
     assert fact.outcome == "FAILED"
     assert fact.execution_id == origin_id
     assert fact.execution_status is ExecutionStatus.ROLLBACK_FAILED
+
+
+# ---------------------------- 타입은 같은데 멈춰 있다 (Issue #434 1-1, 정상 경로)
+
+
+def test_same_type_but_stopped_revert_is_handed_to_a_person(db, rolled_back_origin, aws):
+    """원본이 정지 뒤 타입 변경에서 실패한 경우 — 타입은 백업 값, 인스턴스는 stopped.
+
+    전에는 타입만 보고 자식 SUCCESS·원본 ROLLED_BACK으로 닫혀 인시던트가 종료 대기로
+    내려가고 멈춘 자산을 다시 볼 자리가 없었다. 이제 변경 호출 없이 자식 FAILED·원본
+    ROLLBACK_FAILED로 닫아 수동 개입으로 넘긴다 — 끊긴 실행의 판정과 같은 답이다.
+    """
+    incident_id, origin_id = rolled_back_origin()
+    aws(current_type=BACKUP_TYPE, current_state="stopped")
+
+    cycle(db)
+    cycle(db)
+
+    child = only_child(db, origin_id)
+    assert child.status is ExecutionStatus.FAILED
+    assert "stopped" in child.error_summary
+    assert statuses(db, incident_id, origin_id) == (
+        IncidentStatus.FAILED,
+        ExecutionStatus.ROLLBACK_FAILED,
+    )
+    assert "stop_instances" not in operations(aws)
+    assert "start_instances" not in operations(aws)  # 자동 기동은 별도 정책이다
+    [step] = exec_repo.list_steps(db, child.execution_id)
+    assert step.step_type == ex.STEP_COMPARE_INSTANCE_TYPE
+    assert step.effect is ExecutionEffect.NOT_APPLIED
+
+
+def test_same_type_but_stopped_revert_is_critical(db, rolled_back_origin, aws, caplog):
+    _, _origin_id = rolled_back_origin()
+    aws(current_type=BACKUP_TYPE, current_state="stopped")
+    cycle(db)
+
+    with caplog.at_level(logging.CRITICAL):
+        cycle(db)
+
+    assert "revert_size_not_restarted" in [
+        r.message for r in caplog.records if r.levelno == logging.CRITICAL
+    ]
+
+
+def test_same_type_and_originally_stopped_revert_succeeds(db, rolled_back_origin, aws):
+    """조치 이전에 멈춰 있던 인스턴스는 멈춘 채 타입만 백업 값이면 원복 완료다(ADR-0008 §4)."""
+    incident_id, origin_id = rolled_back_origin(backup_state="stopped")
+    aws(current_type=BACKUP_TYPE, current_state="stopped")
+
+    cycle(db)
+    cycle(db)
+
+    assert only_child(db, origin_id).status is ExecutionStatus.SUCCESS
+    assert statuses(db, incident_id, origin_id)[1] is ExecutionStatus.ROLLED_BACK
 
 
 def test_third_party_drift_stops_the_revert(db, rolled_back_origin, aws):

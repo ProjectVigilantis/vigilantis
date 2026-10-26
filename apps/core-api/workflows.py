@@ -4166,13 +4166,6 @@ def run_revert_size_execution(db: Session, execution_id: str) -> ExecutionRunOut
     return ExecutionRunOutcome(succeeded=True, steps=outcome.steps)
 
 
-# 기동 요청이 접수된 뒤의 EC2 state. **원복 성공의 경계는 기동 "요청"이지 2/2 Status
-# Check가 아니다**(ADR-0008 §6) — 되돌린 인스턴스가 또 부팅에 실패해도 원복의 원복은
-# 없어 판정이 바뀌지 않는다. 그래서 pending도 성공에 넣는다: 빼면 방금 켠 인스턴스가
-# 다음 주기에 "미완"으로 확정된다.
-_REVERT_STARTED_STATES: frozenset[str] = frozenset({"running", "pending"})
-
-
 def judge_revert_size(db: Session, execution_id: str) -> ExecutionJudgement:
     """단계를 남긴 채 IN_PROGRESS인 원복 실행 1건의 종료 판정. (Issue #241, ADR-0008 §6)
 
@@ -4233,8 +4226,10 @@ def judge_revert_size(db: Session, execution_id: str) -> ExecutionJudgement:
         # 인시던트가 내려가고, 멈춘 자산을 다시 볼 자리가 사라진다.
         #
         # 되돌려야 할 상태는 백업 레코드의 state다(ADR-0008 §4) — 조치 이전에 멈춰
-        # 있던 인스턴스는 멈춰 있는 것이 원복의 완료다.
-        if spec.state != "running" or state in _REVERT_STARTED_STATES:
+        # 있던 인스턴스는 멈춰 있는 것이 원복의 완료다. 판정 함수는 실행의 ①분기와
+        # 같은 것이다(executor.revert_restart_outstanding, Issue #434 1-1) — 정상 경로와
+        # 끊긴 경로가 같은 관찰에서 다른 답을 내지 않게 한다.
+        if not executor.revert_restart_outstanding(spec.state, state):
             return ExecutionJudgement(next_status=ExecutionStatus.SUCCESS)
         detail = (
             f"원복 미완 — 타입은 {restored}로 되돌렸으나 조치 이전 running이던"

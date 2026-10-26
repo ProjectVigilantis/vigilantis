@@ -1761,6 +1761,26 @@ def current_instance_type(instance_id: str, region: str):
     return found, code
 
 
+# 기동 요청이 접수된 뒤의 EC2 state. **원복 성공의 경계는 기동 "요청"이지 2/2 Status
+# Check가 아니다**(ADR-0008 §6) — 되돌린 인스턴스가 또 부팅에 실패해도 원복의 원복은
+# 없어 판정이 바뀌지 않는다. 그래서 pending도 성공에 넣는다: 빼면 방금 켠 인스턴스가
+# 다음 주기에 "미완"으로 확정된다.
+REVERT_STARTED_STATES: frozenset[str] = frozenset({"running", "pending"})
+
+
+def revert_restart_outstanding(restore_state: str, current_state: str | None) -> bool:
+    """타입이 백업 값인 인스턴스에 **기동이 아직 남아 있는가** — 원복 완료 판정의 state 축.
+
+    실행(execute_revert_size ①분기)과 끊긴 실행의 종료 판정(workflows.judge_revert_size)이
+    같은 관찰 사실(백업 state, 현재 state)에서 같은 답을 내도록 한 곳에 둔다
+    (Issue #434 1-1). 되돌려야 할 상태의 원천은 백업 레코드의 state다(ADR-0008 §4) —
+    조치 이전에 멈춰 있던 인스턴스는 멈춰 있는 것이 원복의 완료이고, 조치 이전에
+    running이던 인스턴스는 기동 요청까지 접수돼야 완료다. state를 읽지 못한 경우(None)는
+    기동을 확인하지 못한 것이라 남아 있는 쪽으로 센다.
+    """
+    return restore_state == "running" and current_state not in REVERT_STARTED_STATES
+
+
 def _deferred(
     code: PrecheckReasonCode,
     detail: str,
@@ -1802,6 +1822,14 @@ def execute_revert_size(
          **AWS 변경 호출을 하지 않는다.** 되돌릴 것이 없음을 NOT_APPLIED 단계로 남긴다.
          원본 조치가 타입을 실제로 바꾸지 않은 경우 ①과 ②가 동시에 참인데 ①이 이긴다 —
          할 일이 없는 실행을 거절로 올려 사람을 부르지 않기 위해서다.
+         **다만 성공은 타입과 기동 상태를 함께 봐야 한다**(Issue #434 1-1). 원본 조치가
+         정지 뒤 타입 변경에서 실패하면 타입은 백업 값 그대로인데 인스턴스는 멈춰 있다 —
+         여기서 타입만 보고 성공으로 닫으면 원본은 "원복 완료", 자산은 정지 상태로
+         남는다. 조치 이전에 running이던 인스턴스가 기동되지 않았으면(revert_restart_
+         outstanding) 변경 호출 없이 **실패로 닫아 수동 개입으로 넘긴다.** 켜 주지
+         않는 이유는 ①의 "변경 호출을 하지 않는다"가 아직 계약이기 때문이다 — 자동 기동은
+         별도 정책 결정이다. 끊긴 실행의 종료 판정(workflows.judge_revert_size)도 같은
+         함수로 같은 답을 낸다.
       ② 현재 타입 == 원본이 적용한 값: 우리가 바꾼 그대로다 → 원복을 진행한다.
       ③ 둘 다 아님: 제3자가 그사이 타입을 바꿨다 → **중단하고 CRITICAL.** 자동
          재시도는 없다(ADR-0008 §6). 백업을 무조건 진실로 삼으면 원복이 남의 변경을
@@ -1819,7 +1847,7 @@ def execute_revert_size(
         return _rejected("원본 조치가 적용한 instance_type을 알 수 없습니다")
 
     instance_id = target.resource_id
-    current, code = current_instance_type(instance_id, target.region)
+    current, state, code = current_instance_type_and_state(instance_id, target.region)
     if code is not None:
         if code is R.PRECHECK_TARGET_NOT_FOUND:
             # 인스턴스가 없으면 되돌릴 대상이 없다 — 다시 물어도 답은 같으므로 확정한다
@@ -1833,6 +1861,30 @@ def execute_revert_size(
 
     if current == restore_instance_type:
         log.begin(1, STEP_COMPARE_INSTANCE_TYPE, _OP_DESCRIBE)
+        if revert_restart_outstanding(restore_state, state):
+            # 타입은 백업 값인데 조치 이전에 running이던 인스턴스가 켜져 있지 않다 —
+            # 변경 호출 없이 닫되 성공이 아니다(docstring ①). 기록은 NOT_APPLIED가 맞다
+            # (자산을 만지지 않았다), 처분은 수동 개입이다.
+            detail = (
+                f"원복 미완 — 타입은 백업 값({current})이지만 조치 이전 running이던"
+                f" 인스턴스가 {state or '알 수 없음'} 상태입니다."
+                " 자동 기동 없이 수동 개입으로 전환합니다"
+            )
+            log.succeed(ExecutionEffect.NOT_APPLIED, detail)
+            logger.critical(
+                "revert_size_not_restarted",
+                extra={
+                    "instance_id": instance_id,
+                    "instance_state": state,
+                    "restore_state": restore_state,
+                    "restore_instance_type": restore_instance_type,
+                },
+            )
+            return ExecutionOutcome(
+                steps=tuple(log.steps),
+                reason_code=R.PRECHECK_INVALID_STATE,
+                error_summary=detail[:_SUMMARY_LIMIT],
+            )
         log.succeed(
             ExecutionEffect.NOT_APPLIED,
             f"이미 백업 스펙 상태입니다({current}) — 되돌릴 것이 없어 변경하지 않음",
