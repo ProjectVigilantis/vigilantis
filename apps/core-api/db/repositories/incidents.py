@@ -35,6 +35,7 @@ from schemas.incidents import (
     AgentWaitSchedule,
 )
 from schemas.runbooks import TriggerSource
+from tenancy import ALL_TENANTS, TenantScope
 
 from .. import mappers, models
 
@@ -155,9 +156,14 @@ def list_incidents(
     *,
     status: Optional[IncidentStatus] = None,
     category: Optional[IncidentCategory] = None,
+    scope: TenantScope = ALL_TENANTS,
 ) -> list[models.Incident]:
-    """공개 목록 계약과 동일하게 created_at 내림차순 전체 반환(페이지네이션 Post-MVP)."""
+    """공개 목록 계약과 동일하게 created_at 내림차순 전체 반환(페이지네이션 Post-MVP).
+
+    고객사 범위는 그 테넌트의 기록만 — 테넌트 없는 MVP 기록은 빠진다(#533 C)."""
     stmt = select(models.Incident).order_by(models.Incident.created_at.desc())
+    if not scope.is_platform:
+        stmt = stmt.where(models.Incident.tenant_id == scope.tenant_id)
     if status is not None:
         stmt = stmt.where(models.Incident.status == status)
     if category is not None:

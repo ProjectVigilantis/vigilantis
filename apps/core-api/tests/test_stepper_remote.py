@@ -122,6 +122,7 @@ def test_read_routes_return_what_the_product_handlers_return(
     from schemas.api.assets import AssetType
     from schemas.api.incidents import IncidentCategory, IncidentStatus
     from schemas.collections import CollectionRunStatus
+    from tenancy import ALL_TENANTS
 
     monkeypatch.setattr(stepper, "_session_factory", lambda: lambda: nullcontext(db))
     monkeypatch.setattr("routers.assets._configured_regions", lambda: ["ap-northeast-2"])
@@ -150,8 +151,8 @@ def test_read_routes_return_what_the_product_handlers_return(
     assets = stepper_client.get("/_stepper/assets", headers=AUTH)
     assert (listing.status_code, detail.status_code, assets.status_code) == (200, 200, 200)
 
-    expected_listing = incidents_router.list_incidents(status=None, category=None, db=db)
-    expected_detail = incidents_router.get_incident(incident.incident_id, db=db)
+    expected_listing = incidents_router.list_incidents(status=None, category=None, db=db, scope=ALL_TENANTS)
+    expected_detail = incidents_router.get_incident(incident.incident_id, db=db, scope=ALL_TENANTS)
     expected_assets = assets_router.get_assets(db=db)
     assert listing.json() == expected_listing.model_dump(mode="json")
     assert detail.json() == expected_detail.model_dump(mode="json")

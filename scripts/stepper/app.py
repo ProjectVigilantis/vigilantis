@@ -152,6 +152,7 @@ def build_router(*, token: str, inbox: Path) -> APIRouter:
     from schemas.api.incidents import IncidentResponse, IncidentsResponse
     from services import collector
     from services import scheduler as scan_scheduler
+    from tenancy import ALL_TENANTS
 
     gate = _Gate()
     expected = token.encode("utf-8")
@@ -209,12 +210,12 @@ def build_router(*, token: str, inbox: Path) -> APIRouter:
     @router.get("/incidents", response_model=IncidentsResponse)
     def incidents():
         with _session_factory()() as db:
-            return incidents_router.list_incidents(status=None, category=None, db=db)
+            return incidents_router.list_incidents(status=None, category=None, db=db, scope=ALL_TENANTS)
 
     @router.get("/incidents/{incident_id}", response_model=IncidentResponse)
     def incident(incident_id: str):
         with _session_factory()() as db:
-            return incidents_router.get_incident(incident_id, db=db)
+            return incidents_router.get_incident(incident_id, db=db, scope=ALL_TENANTS)
 
     @router.get("/assets", response_model=AssetsResponse)
     def assets():
