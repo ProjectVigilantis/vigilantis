@@ -318,6 +318,7 @@ function withSavings(item: IncidentListItem, amounts: (string | null)[]): Incide
     resolution_note: null,
     analysis_result: null,
     resolved_at: null,
+    auto_isolation_block: null,
   } as IncidentResponse;
 }
 

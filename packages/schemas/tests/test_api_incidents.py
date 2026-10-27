@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from schemas.api.analysis import AnalysisResult, AnalysisResultStatus
 from schemas.api.incidents import (
+    AutoIsolationBlock,
     ExecutionSummaryItem,
     IncidentCategory,
     IncidentListItem,
@@ -111,6 +112,29 @@ def test_secops_roundtrip_and_z_serialization():
 def test_finops_valid_without_risk_axis():
     inc = IncidentResponse.model_validate(make_finops_incident())
     assert inc.initial_risk_level is None and inc.response_mode is None
+
+
+def test_auto_isolation_block_defaults_to_null_and_round_trips():
+    # 상세 전용 칸 — 막혀 있지 않으면 null, 막혀 있으면 이유를 싣는다(#521)
+    assert IncidentResponse.model_validate(make_secops_incident()).auto_isolation_block is None
+    blocked = IncidentResponse.model_validate(
+        make_secops_incident(auto_isolation_block="AUTO_ACTION_DISABLED"))
+    assert blocked.auto_isolation_block is AutoIsolationBlock.AUTO_ACTION_DISABLED
+    assert IncidentResponse.model_validate_json(blocked.model_dump_json()) == blocked
+    with pytest.raises(ValidationError):
+        IncidentResponse.model_validate(make_secops_incident(auto_isolation_block="SUSPENDED"))
+
+
+def test_finops_rejects_auto_isolation_block():
+    # FINOPS 에는 위험 대응 축이 없어 자동 발동도 없다
+    with pytest.raises(ValidationError, match="auto_isolation_block"):
+        IncidentResponse.model_validate(make_finops_incident(auto_isolation_block="AUTO_ACTION_DISABLED"))
+
+
+def test_list_item_has_no_auto_isolation_block():
+    # 목록은 기한 안내를 그리지 않아 싣지 않는다(#521 Q2) — 목록에 넣으면 extra 금지로 거절된다
+    with pytest.raises(ValidationError):
+        IncidentListItem.model_validate(make_list_item(auto_isolation_block=None))
 
 
 def test_analyzing_with_empty_lists_valid():
