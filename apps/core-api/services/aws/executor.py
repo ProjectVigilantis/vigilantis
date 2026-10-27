@@ -108,7 +108,7 @@ from .backup import (
     registered_ports,
 )
 from .client import aws_client
-from .errors import aws_error_code, reason_code_for, run_dry_run
+from .errors import aws_error_code, reason_code_for, run_dry_run, watch_dry_run_protocol
 
 logger = logging.getLogger("vigilantis.aws")
 
@@ -126,7 +126,7 @@ _DESCRIBE_MISSES = "IAM 권한(조회 대체 경로)"
 
 # create_security_group이 VPC 보안 그룹에 **자동으로** 붙이는 전체 허용 아웃바운드 1건.
 # 우리가 요청하지 않아도 붙으므로, 백업과 같은 규칙 집합으로 맞추려면 생성 직후 걷어
-# 내야 한다(execute_sg_recreate ②). 그러지 않으면 두 갈래로 틀린다 — 백업에 같은 규칙이
+# 내야 한다(execute_sg_recreate ③). 그러지 않으면 두 갈래로 틀린다 — 백업에 같은 규칙이
 # 있으면 주입이 InvalidPermission.Duplicate로 실패하고, 없으면 원본보다 **넓은** SG가 된다.
 #
 # 실측(2026-09-22 LocalStack Community): 생성 직후 IpPermissionsEgress가 정확히 이 모양
@@ -346,15 +346,11 @@ RUNBOOK_SPECS: Mapping[str, _Spec] = {
         resource_type="security-group",
         primary_param=None,  # 복원 대상은 백업 레코드가 가리킨다
         method=M.DRY_RUN,
-        operations=(
-            "ec2.create_security_group",
-            # 생성 직후 AWS가 자동으로 붙이는 전체 허용 egress를 걷어 내는 호출이다
-            # (execute_sg_recreate ②). 백업과 같은 규칙 집합으로 맞추려면 반드시
-            # 부르므로 ④도 함께 본다 — 여기 없으면 권한이 없을 때 실행 중에 드러난다.
-            "ec2.revoke_security_group_egress",
-            "ec2.authorize_security_group_ingress",
-            "ec2.authorize_security_group_egress",
-        ),
+        # 규칙 회수·주입(revoke·authorize 2종)의 DryRun은 사전 검사가 아니라 실행이 새
+        # 그룹을 만든 직후 새 GroupId로 건다(_sg_rules_dry_run, Issue #434) — 원본 ID로는
+        # 운영 자격에서 항상 거절된다(_precheck_sg_recreate). 그 세 작업의 정책 거울은
+        # _OP_* 상수가 잇는다(tests/test_provision_smoke_aws.py).
+        operations=("ec2.create_security_group",),
         handler="_precheck_sg_recreate",
         backup_type=BACKUP_SG_FULL_RULES,
     ),
@@ -692,52 +688,32 @@ def _precheck_sg_recreate(ctx: _Ctx) -> PrecheckOutcome:
         )
 
     ec2 = aws_client("ec2", ctx.target.region)
-    # ADR-0007 §Context 표는 authorize 2종과 revoke도 DryRun 대상으로 둔다. create만
-    # 보고 통과시키면 빈 SG만 만들어지고 규칙 복원이 권한 부족으로 실패하는 경로를
-    # precheck가 그대로 통과시킨다 — ④가 막아야 할 실패가 실행 중에 난다.
-    # 그룹이 아직 없는 시점에도 성립한다: 존재하지 않는 GroupId로도
-    # DryRunOperation이 돌아온다(#133 ① 실측 · revoke도 2026-09-22 실측).
-    calls = [
-        (
-            ec2.create_security_group,
-            {
-                "GroupName": backup.group_name,
-                "Description": backup.description,
-                "VpcId": backup.vpc_id,
-            },
-        ),
-        # 회수는 백업 내용과 무관하게 **항상** 부른다(execute_sg_recreate ②) — 실행이
-        # 회수할 규칙은 AWS가 붙일 기본 egress이지 백업에 실린 규칙이 아니다. 그래서
-        # DryRun도 그 기본 규칙의 모양으로 건다.
-        (
-            ec2.revoke_security_group_egress,
-            {
-                "GroupId": ctx.target.resource_id,
-                "IpPermissions": [dict(DEFAULT_EGRESS_PERMISSION)],
-            },
-        ),
-    ]
-    for operation, permissions in (
-        (ec2.authorize_security_group_ingress, backup.ingress_permissions),
-        (ec2.authorize_security_group_egress, backup.egress_permissions),
-    ):
-        # 빈 목록으로 authorize를 부르면 DryRun 이전에 파라미터 오류가 난다.
-        # 복원할 규칙이 없는 방향은 실행도 하지 않으므로 검증 대상이 아니다.
-        if permissions:
-            calls.append(
-                (
-                    operation,
-                    {
-                        "GroupId": ctx.target.resource_id,
-                        "IpPermissions": permissions,
-                    },
-                )
-            )
+    # ADR-0007 §Context 표의 SG_RECREATE DryRun 4종 가운데 **여기서는 create만** 건다.
+    # 규칙 회수·주입(revoke·authorize 2종)의 DryRun은 실행이 새 그룹을 만든 직후 **새
+    # GroupId**로 건다(_sg_rules_dry_run). 원본 GroupId로 걸면 운영 자격에서는 항상
+    # 거절된다 — 원본 SG는 이미 지워졌고, 앱 정책은 이 세 작업에 자원 속성 조건
+    # (ec2:Vpc — scripts/provision_smoke_aws.py)을 거는데 없는 자원에서는 그 조건을
+    # 평가할 수 없어 UnauthorizedOperation이 된다(2026-10-27 실 AWS 실측, Issue #434 ·
+    # docs/AWS_SMOKE_RESULT.md §3 A5와 같은 기전). "존재하지 않는 GroupId로도
+    # DryRunOperation이 돌아온다"(#133 ①)는 조건 없는 관리자 키에서만 성립한다.
+    # create는 VPC 조건으로 평가되므로 그룹이 없는 지금도 판정이 선다.
     return _dry_run_chain(
         ctx,
-        calls,
+        [
+            (
+                ec2.create_security_group,
+                {
+                    "GroupName": backup.group_name,
+                    "Description": backup.description,
+                    "VpcId": backup.vpc_id,
+                },
+            )
+        ],
         verified=["백업 레코드의 그룹 정의와 규칙 목록 구조"],
-        unverified=["재생성된 그룹에 규칙이 실제로 주입된 결과"],
+        unverified=[
+            "규칙 회수·주입 권한(재생성 직후 새 GroupId로 DryRun)",
+            "재생성된 그룹에 규칙이 실제로 주입된 결과",
+        ],
     )
 
 
@@ -1334,6 +1310,9 @@ STEP_CREATE_SECURITY_GROUP = "CREATE_SECURITY_GROUP"
 # 생성 직후 AWS가 붙인 기본 egress 회수(Issue #368). 자산을 바꾸는 단계라 STEP_COMPARE_*
 # 계열이 아니다 — 회수하지 않으면 재생성 SG가 백업보다 넓어진 채로 남는다.
 STEP_REVOKE_DEFAULT_EGRESS = "REVOKE_DEFAULT_EGRESS"
+# 생성 직후 새 GroupId로 거는 규칙 회수·주입 DryRun(Issue #434). STEP_COMPARE_* 계열과
+# 같은 규칙이다 — 통과해 **진행하는** 경우에는 기록하지 않고, 거절이 결론인 경우만 남긴다.
+STEP_DRY_RUN_SG_RULES = "DRY_RUN_SG_RULES"
 STEP_AUTHORIZE_SG_INGRESS = "AUTHORIZE_SG_INGRESS"
 STEP_AUTHORIZE_SG_EGRESS = "AUTHORIZE_SG_EGRESS"
 
@@ -2632,13 +2611,74 @@ def sg_permissions_match(actual: Any, expected: list[Mapping[str, Any]]) -> bool
     ) == Counter(sg_permission_fingerprint(item) for item in expected)
 
 
+def _sg_rules_dry_run(
+    ec2: Any, group_id: str, backup: SgFullRulesBackup
+) -> tuple[str, PrecheckReasonCode, ExecutionEffect] | None:
+    """재생성 SG에 회수·주입이 허용되는지 **새 GroupId**로 DryRun한다. (Issue #434)
+
+    가드레일 ④가 사전 검사에서 걸지 못하는 절반이다 — 원본 GroupId는 이미 없어 운영
+    자격의 자원 속성 조건을 평가할 수 없다(_precheck_sg_recreate). 새 그룹은 실재하고
+    VPC 조건이 성립하므로, 실행이 자산을 더 바꾸기 전에 같은 요청 모양으로 권한을 본다.
+
+    전부 통과하면 None. 거절되면 (aws_operation, 사유 코드, effect) — DryRun 거절은
+    요청이 반려된 것이라 NOT_APPLIED이고, 플래그가 무시돼 정상 반환된 경우(ADR-0007 §2)는
+    그 호출이 실제로 적용됐을 수 있어 UNKNOWN이다.
+
+    회수는 백업 내용과 무관하게 항상 건다(execute_sg_recreate ③) — 걷어 낼 대상은 AWS가
+    붙일 기본 egress라 그 모양으로 건다. 주입은 실행과 같은 치환을 거친 규칙으로 건다
+    (rebind_self_reference) — 원본 ID가 남은 규칙은 DryRun도 NotFound로 거절되므로
+    치환 없이 걸면 정상 복원이 거절로 읽힌다. 빈 방향은 실행도 하지 않으므로 걸지 않는다.
+    """
+    calls: list[tuple[str, Callable[..., Any], list[dict[str, Any]]]] = [
+        (
+            _OP_REVOKE_SG_EGRESS,
+            ec2.revoke_security_group_egress,
+            [dict(DEFAULT_EGRESS_PERMISSION)],
+        )
+    ]
+    for aws_operation, operation, permissions in (
+        (
+            _OP_AUTHORIZE_SG_INGRESS,
+            ec2.authorize_security_group_ingress,
+            backup.ingress_permissions,
+        ),
+        (
+            _OP_AUTHORIZE_SG_EGRESS,
+            ec2.authorize_security_group_egress,
+            backup.egress_permissions,
+        ),
+    ):
+        if permissions:
+            calls.append(
+                (
+                    aws_operation,
+                    operation,
+                    rebind_self_reference(
+                        permissions,
+                        original_group_id=backup.group_id,
+                        new_group_id=group_id,
+                    ),
+                )
+            )
+    for aws_operation, operation, permissions in calls:
+        with watch_dry_run_protocol() as watch:
+            code = run_dry_run(operation, GroupId=group_id, IpPermissions=permissions)
+        if code is not None:
+            effect = (
+                ExecutionEffect.UNKNOWN if watch.violated else ExecutionEffect.NOT_APPLIED
+            )
+            return aws_operation, code, effect
+    return None
+
+
 def execute_sg_recreate(
     target_arn: str,
     *,
     backup: SgFullRulesBackup,
     record_step: StepRecorder | None = None,
 ) -> ExecutionOutcome:
-    """`RUNBOOK_SG_RECREATE` 실행 — 생성 → 기본 egress 회수 → 규칙 주입. (Issue #368)
+    """`RUNBOOK_SG_RECREATE` 실행 — 생성 → 규칙 DryRun → 기본 egress 회수 → 규칙 주입.
+    (Issue #368 · #434)
 
     **복원 값은 백업 레코드에서만 온다.** 이 함수는 DB를 읽지 않고 호출부가 넘긴 계약
     모델을 받는다 — execute_revert_size가 되돌릴 타입을 인자로만 받는 것과 같은 이유다
@@ -2705,7 +2745,36 @@ def execute_sg_recreate(
         response=created,
     )
 
-    # ② 기본 egress 회수 — 실제로 붙은 것을 조회해 그것만 걷어 낸다
+    # ② 규칙 회수·주입 DryRun — 사전 검사가 걸지 못한 가드레일 ④의 절반을 새 GroupId로
+    # 건다(Issue #434). 거절되면 더 바꾸지 않고 여기서 멈춘다 — 규칙 없이 기본 egress만
+    # 달린 SG가 남고, 그 사실은 단계 기록으로 사람에게 간다(원복의 원복은 없다)
+    rejected = _sg_rules_dry_run(ec2, new_group_id, backup)
+    if rejected is not None:
+        aws_operation, code, effect = rejected
+        log.begin(2, STEP_DRY_RUN_SG_RULES, aws_operation)
+        log.fail(
+            RuntimeError(f"DryRun 거절: {code.value}"),
+            detail="규칙 복원 권한 확인 실패",
+            effect=effect,
+        )
+        logger.warning(
+            "sg_recreate_rules_dry_run_rejected",
+            extra={
+                "new_group_id": new_group_id,
+                "aws_operation": aws_operation,
+                "reason_code": code.value,
+            },
+        )
+        return ExecutionOutcome(
+            steps=tuple(log.steps),
+            reason_code=code,
+            error_summary=(
+                f"재생성 SG({new_group_id})의 규칙 복원 DryRun이 거절돼"
+                f" 회수·주입 전에 중단했습니다: {aws_operation} {code.value}"
+            ),
+        )
+
+    # ③ 기본 egress 회수 — 실제로 붙은 것을 조회해 그것만 걷어 낸다
     log.begin(2, STEP_REVOKE_DEFAULT_EGRESS, _OP_REVOKE_SG_EGRESS)
     group, code = _security_group(new_group_id, target.region)
     if code is not None:
@@ -2742,7 +2811,7 @@ def execute_sg_recreate(
             response=revoked,
         )
 
-    # ③ 규칙 주입 — 복원할 규칙이 없는 방향은 호출하지 않는다(빈 목록은 파라미터 오류다)
+    # ④ 규칙 주입 — 복원할 규칙이 없는 방향은 호출하지 않는다(빈 목록은 파라미터 오류다)
     sequence = 3
     for step_type, aws_operation, operation, permissions, label in (
         (
