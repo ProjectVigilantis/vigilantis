@@ -6,7 +6,8 @@
 # 구성 절차의 가드다.
 #   ① api 태스크 역할은 접근 역할 전환 하나만 — AWS 자원을 직접 만지지 않는다
 #   ② 접근 역할은 플랫폼 태스크 역할만, ExternalId가 맞을 때만 받는다
-#   ③ ALB는 비밀 헤더가 있는 요청만 앱으로 보낸다(CloudFront 우회 차단)
+#   ③ ALB는 비밀 헤더가 있는 요청만 앱으로 보낸다(CloudFront 우회 차단) · 도메인이 있으면 CloudFront→ALB는
+#      origin.<도메인> HTTPS만(평문 80 리스너·SG 규칙을 걷어 낸다)
 #   ④ WAF는 기본 차단 · 허용 IP만 통과 · 허용 CIDR은 /24보다 넓으면 거부
 #   ⑤ api는 겹쳐 뜨지 않는다(min 0 · max 100) · AI 분석·조치 실행 디스패치는 명시해야 켜진다
 #      · 비밀은 값이 아니라 참조로만
@@ -133,6 +134,113 @@ def test_custom_domain_config_keeps_the_rest_of_the_distribution():
     assert updated["ViewerCertificate"]["SSLSupportMethod"] == "sni-only"
     assert {k: v for k, v in updated.items() if k not in ("Aliases", "ViewerCertificate")} == base
     assert "Aliases" not in base  # 원본을 고치지 않는다
+
+
+# CloudFront→ALB HTTPS(#494) -----------------------------------------------------
+def test_with_a_domain_cloudfront_reaches_the_alb_over_https_only():
+    cfg = platform.distribution_config("origin.vigilantis.example", "secret-value", "arn:acl", "ref", https=True)
+    (origin,) = cfg["Origins"]["Items"]
+    assert origin["DomainName"] == "origin.vigilantis.example"  # ALB 기본 주소에는 인증서를 받을 수 없다
+    assert origin["CustomOriginConfig"]["OriginProtocolPolicy"] == "https-only"
+    assert origin["CustomOriginConfig"]["OriginSslProtocols"] == {"Quantity": 1, "Items": ["TLSv1.2"]}
+
+
+def test_without_a_domain_the_alb_leg_stays_plain_http():
+    (origin,) = platform.distribution_config("alb.example", "secret-value", "arn:acl", "ref")["Origins"]["Items"]
+    assert origin["CustomOriginConfig"]["OriginProtocolPolicy"] == "http-only"
+
+
+def test_attaching_the_domain_moves_an_existing_http_distribution_to_https():
+    """도메인 없이 먼저 만든 배포도 재실행이 오리진을 origin.<도메인> HTTPS로 옮긴다. 비밀 헤더는 그대로다."""
+    base = platform.distribution_config("alb.example", "secret-value", "arn:acl", "ref")
+    updated = platform.custom_domain_config(base, "vigilantis.example", "arn:cert", "origin.vigilantis.example")
+    (origin,) = updated["Origins"]["Items"]
+    assert origin["DomainName"] == "origin.vigilantis.example"
+    assert origin["CustomOriginConfig"]["OriginProtocolPolicy"] == "https-only"
+    assert origin["CustomHeaders"] == base["Origins"]["Items"][0]["CustomHeaders"]
+    assert base["Origins"]["Items"][0]["DomainName"] == "alb.example"  # 원본을 고치지 않는다
+
+
+def test_down_removes_only_the_origin_record_that_points_at_this_alb():
+    host, alb = "origin.vigilantis.example", "vigilantis-platform-alb-1.ap-northeast-2.elb.amazonaws.com"
+    ours = {"Name": f"{host}.", "Type": "A", "AliasTarget": {"DNSName": f"dualstack.{alb.upper()}."}}
+    records = [
+        ours,
+        {"Name": f"{host}.", "Type": "A", "AliasTarget": {"DNSName": "dualstack.other-alb.elb.amazonaws.com."}},
+        {"Name": "api.vigilantis.example.", "Type": "A", "AliasTarget": {"DNSName": f"dualstack.{alb}."}},
+    ]
+    assert platform.origin_records_for(records, host, alb) == [ours]
+
+
+class FakeElbv2:
+    def __init__(self, listeners=()):
+        self.listeners = {li["Port"]: dict(li) for li in listeners}
+        self.calls: list[tuple[str, object]] = []
+
+    def describe_listeners(self, LoadBalancerArn):
+        return {"Listeners": list(self.listeners.values())}
+
+    def create_listener(self, **kwargs):
+        self.calls.append(("create_listener", kwargs["Port"]))
+        self.listeners[kwargs["Port"]] = {**kwargs, "ListenerArn": f"listener-{kwargs['Port']}"}
+        return {"Listeners": [self.listeners[kwargs["Port"]]]}
+
+    def delete_listener(self, ListenerArn):
+        self.calls.append(("delete_listener", ListenerArn))
+
+    def modify_listener(self, ListenerArn, Certificates, SslPolicy):
+        self.calls.append(("modify_listener", Certificates[0]["CertificateArn"]))
+
+
+def test_https_listener_replaces_the_plain_listener():
+    """80 리스너에 비밀 헤더 규칙이 남아 있으면 평문 경로가 그대로 열린다 — 지운다."""
+    elbv2 = FakeElbv2([{"Port": 80, "ListenerArn": "listener-80"}])
+    arn = platform._ensure_listener(elbv2, "lb", "arn:origin-cert")
+    assert arn == "listener-443"
+    assert elbv2.calls == [("delete_listener", "listener-80"), ("create_listener", 443)]
+    created = elbv2.listeners[443]
+    assert (created["Protocol"], created["Certificates"]) == ("HTTPS", [{"CertificateArn": "arn:origin-cert"}])
+    assert created["SslPolicy"] == platform.ALB_TLS_POLICY
+    assert created["DefaultActions"][0]["FixedResponseConfig"]["StatusCode"] == "403"  # 규칙 밖은 거절
+
+
+def test_https_listener_follows_a_renewed_certificate_on_rerun():
+    elbv2 = FakeElbv2([{"Port": 443, "ListenerArn": "listener-443", "Certificates": [{"CertificateArn": "old"}]}])
+    assert platform._ensure_listener(elbv2, "lb", "new") == "listener-443"
+    assert elbv2.calls == [("modify_listener", "new")]
+
+
+def test_without_a_certificate_the_listener_stays_plain_http():
+    elbv2 = FakeElbv2()
+    assert platform._ensure_listener(elbv2, "lb", None) == "listener-80"
+    assert elbv2.listeners[80]["Protocol"] == "HTTP"
+
+
+class SgEc2:
+    def __init__(self):
+        self.calls: list[tuple[str, str, int]] = []
+
+    def describe_security_groups(self, Filters):
+        return {"SecurityGroups": [{"GroupName": n, "GroupId": f"sg-{n}"} for n in platform.SECURITY_GROUPS]}
+
+    def describe_managed_prefix_lists(self, Filters):
+        return {"PrefixLists": [{"PrefixListId": "pl-cf"}]}
+
+    def authorize_security_group_ingress(self, GroupId, IpPermissions):
+        self.calls.append(("authorize", GroupId, IpPermissions[0]["FromPort"]))
+
+    def revoke_security_group_ingress(self, GroupId, IpPermissions):
+        self.calls.append(("revoke", GroupId, IpPermissions[0]["FromPort"]))
+
+
+@pytest.mark.parametrize("https, opened, closed", [(True, 443, [80]), (False, 80, [])])
+def test_alb_accepts_cloudfront_on_one_port_only(https, opened, closed):
+    """CloudFront prefix list는 SG 규칙 한도를 항목 수만큼 써서 80·443을 함께 열면 한도를 넘을 수 있다."""
+    ec2 = SgEc2()
+    platform._ensure_sgs(ec2, "vpc-1", https=https)
+    alb_sg = f"sg-{platform.SG_ALB}"
+    assert [port for op, sg, port in ec2.calls if op == "revoke" and sg == alb_sg] == closed
+    assert [port for op, sg, port in ec2.calls if op == "authorize" and sg == alb_sg] == [opened]
 
 
 @pytest.mark.parametrize("cert, covered", [
@@ -633,17 +741,22 @@ class FakeR53:
 
 _CERT = {"DomainName": _DOMAIN, "CertificateArn": "arn:aws:acm:us-east-1:123456789012:certificate/x"}
 _ZONE = {"Id": "/hostedzone/Z1", "Name": f"{_DOMAIN}.", "Config": {"PrivateZone": False}}
+_ORIGIN_CERT = {"DomainName": f"origin.{_DOMAIN}",
+                "CertificateArn": "arn:aws:acm:ap-northeast-2:123456789012:certificate/o"}
 
 
-@pytest.mark.parametrize("certs, zones, missing", [
-    ([], [_ZONE], r"인증서\(ISSUED\) 없음"),
-    ([_CERT], [], "호스팅 영역 없음"),
-    ([_CERT], [{**_ZONE, "Config": {"PrivateZone": True}}], "호스팅 영역 없음"),  # 비공개 영역은 별칭을 못 단다
+@pytest.mark.parametrize("certs, zones, origin_certs, missing", [
+    ([], [_ZONE], [_ORIGIN_CERT], r"us-east-1 ACM 인증서\(ISSUED\) 없음"),
+    ([_CERT], [], [_ORIGIN_CERT], "호스팅 영역 없음"),
+    ([_CERT], [{**_ZONE, "Config": {"PrivateZone": True}}], [_ORIGIN_CERT], "호스팅 영역 없음"),  # 비공개 영역은 별칭을 못 단다
+    # CloudFront 인증서(us-east-1)만으로는 ALB에 HTTPS를 걸 수 없다 — 서울 리전 인증서가 따로 있어야 한다
+    ([_CERT], [_ZONE], [], r"ALB용 ACM 인증서\(origin\.vigilantis\.example · 이 리전 · ISSUED\) 없음"),
 ])
-def test_up_stops_before_creating_anything_when_the_domain_is_not_ready(certs, zones, missing):
-    """인증서·공개 호스팅 영역이 없으면 VPC·RDS·WAF 어느 것도 바꾸기 전에 멈춘다."""
+def test_up_stops_before_creating_anything_when_the_domain_is_not_ready(certs, zones, origin_certs, missing):
+    """인증서 둘·공개 호스팅 영역이 없으면 VPC·RDS·WAF 어느 것도 바꾸기 전에 멈춘다."""
     ec2, r53 = RecordingEc2(smoke_vpc="vpc-smoke"), FakeR53(zones)
-    c = {"iam": FakeIam(policies=[_SMOKE_POLICY]), "ec2": ec2, "acm": FakeAcm(certs), "r53": r53}
+    c = {"iam": FakeIam(policies=[_SMOKE_POLICY]), "ec2": ec2, "acm": FakeAcm(certs), "r53": r53,
+         "acm_origin": FakeAcm(origin_certs)}
     with pytest.raises(SystemExit, match=missing):
         platform.up(c, ACCOUNT, "ap-northeast-2", ["203.0.113.7/32"], _DOMAIN)
     assert ec2.calls == ["describe_vpcs"]  # 스모크 VPC 조회 말고는 아무것도 부르지 않았다
