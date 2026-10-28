@@ -30,12 +30,19 @@ import {
   verifyTenant,
 } from '@/lib/api/client';
 import type { LabelTone } from '@/lib/enum-labels';
-import { isStaleTenantRequest, SUSPEND_REASON_MAX, tenantActions, VERIFICATION_LABELS } from '@/lib/tenants';
+import {
+  isStaleTenantRequest,
+  SUSPEND_REASON_MAX,
+  tenantActions,
+  tenantRunFollowUp,
+  VERIFICATION_LABELS,
+  verificationHint,
+  type TenantRunResult,
+} from '@/lib/tenants';
 import { formatKst } from '@/lib/utils';
-import type { ErrorCode, TenantDetail, TenantOnboardingResponse, TenantVerification } from '@/types/api';
+import type { TenantDetail, TenantOnboardingResponse, TenantStatus, TenantVerification } from '@/types/api';
 
 type Busy = 'verify' | 'resume' | 'suspend' | 'remove' | 'auto' | 'onboarding' | null;
-type RunResult = { ok: true } | { ok: false; code: ErrorCode | null };
 
 export function TenantDetailView({ tenant }: { tenant: TenantDetail }) {
   const router = useRouter();
@@ -46,30 +53,30 @@ export function TenantDetailView({ tenant }: { tenant: TenantDetail }) {
   const inFlight = useRef(false);
   const actions = tenantActions(tenant.status);
   const verification = tenant.last_verification;
-  const hint = verification ? VERIFICATION_LABELS[verification.result].hint : null;
+  const hint = verification ? verificationHint(verification.result, tenant.status) : null;
 
   /**
    * 동작 하나를 실행한다. 성공하면 서버 값으로 다시 그린다. 그 사이 상태가 바뀐 실패(isStaleTenantRequest)도
-   * 다시 그려 지금 가능한 동작을 보인다. 다른 동작이 진행 중이면 건너뛰고 null을 돌려준다.
+   * 다시 그려 지금 가능한 동작을 보인다(tenantRunFollowUp). 다른 동작이 진행 중이면 건너뛰고 null을 돌려준다.
    */
-  async function run(kind: Exclude<Busy, null>, call: () => Promise<unknown>): Promise<RunResult | null> {
+  async function run(kind: Exclude<Busy, null>, call: () => Promise<unknown>): Promise<TenantRunResult | null> {
     if (inFlight.current) return null;
     inFlight.current = true;
     setBusy(kind);
     setFailure(null);
+    let result: TenantRunResult;
     try {
       await call();
-      router.refresh();
-      return { ok: true };
+      result = { ok: true };
     } catch (error) {
       setFailure(error);
-      const code = error instanceof ApiError ? error.code : null;
-      if (isStaleTenantRequest(code)) router.refresh();
-      return { ok: false, code };
+      result = { ok: false, code: error instanceof ApiError ? error.code : null };
     } finally {
       inFlight.current = false;
       setBusy(null);
     }
+    if (tenantRunFollowUp(result).refresh) router.refresh();
+    return result;
   }
 
   async function showOnboarding() {
@@ -103,7 +110,7 @@ export function TenantDetailView({ tenant }: { tenant: TenantDetail }) {
           </p>
         </div>
       ) : verification !== null && verification.result !== 'OK' ? (
-        <VerificationBanner verification={verification} />
+        <VerificationBanner verification={verification} status={tenant.status} />
       ) : null}
 
       {failure !== null ? <ErrorState error={failure} variant="inline" /> : null}
@@ -256,7 +263,7 @@ export function TenantDetailView({ tenant }: { tenant: TenantDetail }) {
             const result = await run('suspend', () => suspendTenant(tenant.tenant_id, reason));
             // 성공했거나 그 사이 상태가 바뀌어 요청이 무효가 됐으면 닫는다. 오류는 화면 위쪽에 남고, 다시 읽은
             // 화면이 지금 가능한 동작(정지됐다면 재개)을 보인다. 일시 오류면 확인창 안에 오류를 보이고 남긴다.
-            if (result !== null && (result.ok || isStaleTenantRequest(result.code))) setDialog(null);
+            if (tenantRunFollowUp(result).closeDialog) setDialog(null);
           }}
         />
       ) : null}
@@ -297,8 +304,9 @@ const BANNER_TONE: Partial<Record<LabelTone, string>> = {
   gray: 'border-status-idle/50 bg-badge-idle-bg text-badge-idle-fg',
 };
 
-function VerificationBanner({ verification }: { verification: TenantVerification }) {
+function VerificationBanner({ verification, status }: { verification: TenantVerification; status: TenantStatus }) {
   const entry = VERIFICATION_LABELS[verification.result];
+  const hint = verificationHint(verification.result, status);
   return (
     <div role="status" className={`flex gap-3 rounded-xl border p-4 ${BANNER_TONE[entry.tone] ?? BANNER_TONE.gray}`}>
       <TriangleAlert aria-hidden className="mt-0.5 size-5 shrink-0" />
@@ -306,7 +314,7 @@ function VerificationBanner({ verification }: { verification: TenantVerification
         <p className="font-bold">
           마지막 연결 확인: {entry.label} ({formatKst(verification.verified_at)})
         </p>
-        {entry.hint ? <p className="text-foreground-secondary text-[13px]">{entry.hint}</p> : null}
+        {hint ? <p className="text-foreground-secondary text-[13px]">{hint}</p> : null}
       </div>
     </div>
   );
