@@ -56,7 +56,8 @@
 #      그 앱 정책(vigilantis-smoke-app)은 건드리지 않는다 — 접근 역할은 그 정책을 빌려 쓸 뿐이다.
 #      반대로 스모크 down은 접근 역할이 그 정책을 붙잡고 있으면 멈춘다 — 정리 순서는
 #      **플랫폼 down → 스모크 down**이다(ADR-0010 §7).
-#   ⑤ 이름이 같아도 플랫폼 태그(vigilantis:platform=true)가 없는 IAM 역할은 덮어쓰거나 지우지 않는다.
+#   ⑤ 이름이 같아도 플랫폼 태그(vigilantis:platform=true)가 없는 IAM 역할·오류 알람·알림 주제는 덮어쓰거나
+#      지우지 않는다.
 #   ⑥ --allow-cidr는 IPv4 CIDR이고 /24보다 넓으면 거부한다 — 로그인 없는 MVP에서 허용 IP가 출입문이다.
 #   ⑦ WAF 속도 제한(#484 · Post-MVP T-3) — IP당 RATE_LIMIT_PER_WINDOW 건 / RATE_WINDOW_SECONDS 초를
 #      허용 규칙보다 **앞**(우선순위 0)에서 센다. 허용이 먼저 맞으면 WAF가 거기서 평가를 끝내기 때문이다.
@@ -752,8 +753,10 @@ def alarm_definitions(lb_arn: str, tg_api_arn: str, tg_web_arn: str, topic_arn: 
          "AlarmDescription": f"api 정상 대상이 {DOWN_MINUTES}분 연속 0 — 화면이 데이터를 못 받는다"},
         {**down(ALARM_NAMES[1], tg_web_arn),
          "AlarmDescription": f"web 정상 대상이 {DOWN_MINUTES}분 연속 0 — 화면이 열리지 않는다"},
+        # ALB는 api·web이 함께 쓴다 — LoadBalancer만 주면 web의 5xx까지 api 장애로 센다(PR #523 리뷰)
         {"AlarmName": ALARM_NAMES[2], "AlarmDescription": f"api 5xx가 5분에 {API_5XX_PER_5MIN}건 이상",
-         "Namespace": "AWS/ApplicationELB", "MetricName": "HTTPCode_Target_5XX_Count", "Dimensions": [lb_dim],
+         "Namespace": "AWS/ApplicationELB", "MetricName": "HTTPCode_Target_5XX_Count",
+         "Dimensions": [{"Name": "TargetGroup", "Value": tg_api_arn.rsplit(":", 1)[1]}, lb_dim],
          "Statistic": "Sum", "Period": 300, "EvaluationPeriods": 1, "Threshold": API_5XX_PER_5MIN,
          "ComparisonOperator": "GreaterThanOrEqualToThreshold", "TreatMissingData": "notBreaching"},
         {"AlarmName": ALARM_NAMES[3], "AlarmDescription": "DB 남은 저장 공간이 2 GiB 미만",
@@ -977,6 +980,32 @@ def _find_topic(sns) -> Optional[str]:
             if topic["TopicArn"].rsplit(":", 1)[-1] == ALARM_TOPIC:
                 return topic["TopicArn"]
     return None
+
+
+def _alarm_resources(cw, sns) -> tuple[list[str], Optional[str], list[str]]:
+    """(플랫폼 태그가 달린 알람 이름, 플랫폼 태그가 달린 알림 주제 ARN, 이름만 같은 남의 자원 이름).
+
+    안전 가드 ⑤를 알람·알림 주제에도 건다 — put_metric_alarm은 같은 이름이면 덮어쓰고, 알림 주제를
+    지우면 구독도 함께 사라진다. 이름만 보고 고치거나 지우지 않는다(PR #523 리뷰).
+    """
+    ours, foreign = [], []
+    for alarm in cw.describe_alarms(AlarmNames=list(ALARM_NAMES))["MetricAlarms"]:
+        tags = cw.list_tags_for_resource(ResourceARN=alarm["AlarmArn"]).get("Tags", [])
+        (ours if is_platform_tagged(tags) else foreign).append(alarm["AlarmName"])
+    topic_arn = _find_topic(sns)
+    if topic_arn and not is_platform_tagged(sns.list_tags_for_resource(ResourceArn=topic_arn).get("Tags", [])):
+        foreign.append(ALARM_TOPIC)
+        topic_arn = None
+    return ours, topic_arn, foreign
+
+
+def _require_own_alarm_resources(cw, sns) -> Optional[str]:
+    """이름만 같은 남의 알람·알림 주제가 있으면 멈춘다. 없으면 플랫폼 알림 주제 ARN(없으면 None)."""
+    _, topic_arn, foreign = _alarm_resources(cw, sns)
+    if foreign:
+        sys.exit(f"플랫폼 태그({TAG_KEY}={TAG_VALUE})가 없는 같은 이름의 알람·알림 주제가 있다: {', '.join(foreign)} "
+                 "— 덮어쓰지 않는다. 확인 뒤 직접 정리할 것")
+    return topic_arn
 
 
 def _find_cluster(ecs) -> Optional[str]:
@@ -1209,9 +1238,10 @@ def _ensure_db(rds, sm, subnets: dict[str, str], sg_db: str) -> None:
             Tags=[{"Key": TAG_KEY, "Value": TAG_VALUE}, {"Key": "Name", "Value": DB_INSTANCE}])
         print(f"[platform] RDS {DB_INSTANCE} 생성 요청 — available 대기(수 분)")
     elif db["DBInstanceStatus"] == "available" and db.get("BackupRetentionPeriod", 0) < DB_BACKUP_DAYS:
-        # MVP 때 1일로 만든 인스턴스. 생성·수정 중에는 바꿀 수 없어 available일 때만 맞춘다
-        rds.modify_db_instance(DBInstanceIdentifier=DB_INSTANCE, BackupRetentionPeriod=DB_BACKUP_DAYS,
-                               ApplyImmediately=True)
+        # MVP 때 1일로 만든 인스턴스. 생성·수정 중에는 바꿀 수 없어 available일 때만 맞춘다.
+        # 1일 이상끼리의 보존 기간 변경은 ApplyImmediately 없이도 바로 적용된다. 그 옵션을 주면
+        # 대기 중인 다른 DB 변경까지 함께 즉시 적용되므로 넣지 않는다(PR #523 리뷰)
+        rds.modify_db_instance(DBInstanceIdentifier=DB_INSTANCE, BackupRetentionPeriod=DB_BACKUP_DAYS)
         print(f"[platform] RDS {DB_INSTANCE} 자동 백업 보존 {db.get('BackupRetentionPeriod')}일 → {DB_BACKUP_DAYS}일")
     # 새로 만들었으면 호스트를 항상 다시 적는다(비밀이 지운 옛 인스턴스의 호스트를 들고 있을 수 있다)
     if not db or url.hostname == DB_HOST_PENDING:
@@ -1386,8 +1416,11 @@ def _ensure_alb(elbv2, vpc_id: str, subnets: dict[str, str], sg_alb: str, origin
 
 
 def _ensure_alarms(cw, sns, alb: dict, email: Optional[str]) -> None:
-    """오류 알람과 그 알림 주제(SNS)를 맞춘다. put_metric_alarm은 같은 이름이면 덮어쓰므로 재실행이 곧 갱신이다."""
-    topic_arn = _find_topic(sns) or sns.create_topic(
+    """오류 알람과 그 알림 주제(SNS)를 맞춘다. put_metric_alarm은 같은 이름이면 덮어쓰므로 재실행이 곧 갱신이다.
+
+    덮어쓰는 것은 플랫폼 태그가 달린 것뿐이다 — 이름만 같은 남의 알람·주제가 있으면 아무것도 쓰기 전에 멈춘다.
+    """
+    topic_arn = _require_own_alarm_resources(cw, sns) or sns.create_topic(
         Name=ALARM_TOPIC, Tags=[{"Key": TAG_KEY, "Value": TAG_VALUE}])["TopicArn"]
     subs = sns.list_subscriptions_by_topic(TopicArn=topic_arn)["Subscriptions"]
     if email and not any(s["Protocol"] == "email" and s["Endpoint"] == email for s in subs):
@@ -1558,6 +1591,7 @@ def up(c: dict, account: str, region: str, allow_cidrs: list[str], domain: Optio
     customer = _customer(c, account)
     _require_smoke_env(customer["iam"], customer["ec2"], customer["account"])  # 무엇이든 만들기 전에
     custom = _require_custom_domain(c, domain) if domain else None
+    _require_own_alarm_resources(c["cw"], c["sns"])  # _ensure_alarms에서야 멈추면 그 앞의 VPC·RDS가 이미 선다
     vpc_id = _ensure_vpc(ec2)
     subnets = _ensure_subnets(ec2, vpc_id, region)
     nat_ip = _ensure_network(ec2, vpc_id, subnets)
@@ -1766,12 +1800,15 @@ def _delete_roles(iam, account: str) -> None:
         found = _get_role(iam, role)
         if not found:
             continue
-        if not is_platform_tagged(found.get("Tags", [])):  # 안전 가드 ⑤ — 이름만 같은 남의 역할
-            owner = customer_access_owner(found.get("Tags", []))
-            if owner:  # 안전 가드 ⑧ — 다른 계정의 플랫폼이 넘겨받은 고객 접근 역할
-                print(f"[platform] IAM 역할 {role}은 플랫폼 계정 {owner}이 쓰는 고객 접근 역할이라 건드리지 않았다")
-            else:
-                print(f"[platform] IAM 역할 {role}은 플랫폼 태그가 없어 건드리지 않았다 — 확인 뒤 직접 정리할 것")
+        tags = found.get("Tags", [])
+        # 안전 가드 ⑧ — 고객 태그가 먼저다. 넘겨받기가 플랫폼 태그를 떼기 전에 끊기면 두 태그가 함께
+        # 남는데, 그 역할은 이미 새 플랫폼이 쓰는 고객 접근 역할이다(PR #523 리뷰)
+        owner = customer_access_owner(tags)
+        if owner:
+            print(f"[platform] IAM 역할 {role}은 플랫폼 계정 {owner}이 쓰는 고객 접근 역할이라 건드리지 않았다")
+            continue
+        if not is_platform_tagged(tags):  # 안전 가드 ⑤ — 이름만 같은 남의 역할
+            print(f"[platform] IAM 역할 {role}은 플랫폼 태그가 없어 건드리지 않았다 — 확인 뒤 직접 정리할 것")
             continue
         for arn in managed:
             _try(lambda arn=arn: iam.detach_role_policy(RoleName=role, PolicyArn=arn), "NoSuchEntity")
@@ -1814,17 +1851,23 @@ def _ecs_drained(ecs, services: list[str], *, delay: float = 15, attempts: int =
     return False
 
 
+def _delete_alarms(cw, sns) -> None:
+    """플랫폼 태그가 달린 오류 알람과 알림 주제만 지운다. 이름만 같은 남의 것은 남기고 알린다(안전 가드 ⑤)."""
+    ours, topic_arn, foreign = _alarm_resources(cw, sns)
+    if ours:  # 없는 이름을 넘기면 ResourceNotFound다
+        cw.delete_alarms(AlarmNames=ours)
+        print(f"[platform] 오류 알람 {len(ours)}건 삭제")
+    if topic_arn:
+        sns.delete_topic(TopicArn=topic_arn)
+        print("[platform] 알림 주제 삭제")
+    for name in foreign:
+        print(f"[platform] {name}은 플랫폼 태그가 없어 건드리지 않았다 — 확인 뒤 직접 정리할 것")
+
+
 def down(c: dict, account: str) -> None:
     ec2, ecs, elbv2 = c["ec2"], c["ecs"], c["elbv2"]
     # 알람이 먼저다 — 서비스를 내리는 동안 down 알람이 울리지 않게 한다
-    alarms = [a["AlarmName"] for a in c["cw"].describe_alarms(AlarmNames=list(ALARM_NAMES))["MetricAlarms"]]
-    if alarms:  # 없는 이름을 넘기면 ResourceNotFound다
-        c["cw"].delete_alarms(AlarmNames=alarms)
-        print(f"[platform] 오류 알람 {len(alarms)}건 삭제")
-    topic_arn = _find_topic(c["sns"])
-    if topic_arn:
-        c["sns"].delete_topic(TopicArn=topic_arn)
-        print("[platform] 알림 주제 삭제")
+    _delete_alarms(c["cw"], c["sns"])
     if _find_cluster(ecs):
         deleted = []
         for name in (API_SERVICE, WEB_SERVICE):
@@ -2007,6 +2050,7 @@ def main() -> None:
         _require_smoke_env(customer["iam"], customer["ec2"], customer["account"])
         if args.domain:
             _require_custom_domain(c, args.domain)
+        _require_own_alarm_resources(c["cw"], c["sns"])
     if not args.yes:
         if args.command == "up":
             missing = [row for row in inventory(c) if row[2] is None and row[0] != "EcsService"]
