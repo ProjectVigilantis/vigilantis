@@ -204,6 +204,9 @@ class AwsSettings(BaseSettings):
     # 복수 리전은 콤마 구분. 비어 있으면 AWS_REGION 단일 값으로 해석한다.
     AWS_REGIONS: str = ""
     AWS_ENDPOINT_URL: str = ""
+    # 테넌트 문맥 이행 스위치(#533 A · ADR-0012 §2). 켜면 문맥 없는 aws_client 호출이 예외다.
+    # 해석은 services/aws/client.py 하나에서 한다.
+    TENANT_CONTEXT_REQUIRED: bool = False
 
     def regions_list(self) -> list[str]:
         raw = self.AWS_REGIONS.strip() or self.AWS_REGION
