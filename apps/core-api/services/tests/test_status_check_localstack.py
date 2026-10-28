@@ -1,4 +1,4 @@
-"""rollback.wait_for_status_check() LocalStack 통합 테스트 — 부팅 실패 주입 (ADR-0006 §4 2행 ⓑ).
+"""rollback.probe_status_check() LocalStack 통합 테스트 — 부팅 실패 주입 (ADR-0006 §4 2행 ⓑ).
 
 LocalStack에는 실제 부팅·헬스체크가 없어 `impaired` 검사 결과는 만들 수 없다. 대신 **대상
 인스턴스를 stop 시키면** 판정이 `_NOT_BOOTING_STATES` 분기로 떨어진다. 가짜 AWS의 상태만 바꾸는
@@ -7,10 +7,9 @@ LocalStack에는 실제 부팅·헬스체크가 없어 `impaired` 검사 결과�
 
 분기 전수는 test_status_check.py(단위)가 맡고, 여기서는 **에뮬레이터가 그 분기의 입력을 실제로
 만들어 주는가**만 본다. 2026-09-15 실측(LocalStack 4.14.0):
-  - DescribeInstanceStatus 기본 호출은 stopped 인스턴스를 빈 목록으로 돌려준다 — waiter는
-    MaxAttempts를 다 쓰고 WaiterError로 끝난다
-  - IncludeAllInstances=True 재조회는 `stopped`와 검사 결과 `not-applicable`을 돌려준다 — FAILED
-  - running 인스턴스는 첫 시도에 2/2 `ok`다. 대기 도중에는 끼어들 틈이 없으므로 주입은 실행
+  - DescribeInstanceStatus 기본 호출은 stopped 인스턴스를 빈 목록으로 돌려준다
+  - IncludeAllInstances=True 조회는 `stopped`와 검사 결과 `not-applicable`을 돌려준다 — FAILED
+  - running 인스턴스는 곧바로 2/2 `ok`다. 판정은 조회 1회라(Issue #434 1-3) 주입은 실행
     주기와 판정 주기 사이에 한다(dispatcher._AWAIT_JUDGEMENT_ON_SUCCESS)
 
 로컬 실행 전제: LocalStack 기동 + scripts/seed_localstack.py 완료. 미기동 시 전체 skip.
@@ -86,7 +85,7 @@ def test_running_instance_passes_two_of_two(running_instance):
     """주입이 없으면 OK다 — 실패는 주입이 만든 것이지 에뮬레이터가 원래 내는 값이 아니다."""
     fx = running_instance
 
-    outcome = rb.wait_for_status_check(fx["arn"], delay_seconds=1, max_attempts=3)
+    outcome = rb.probe_status_check(fx["arn"])
 
     assert outcome.verdict is rb.StatusCheckVerdict.OK, outcome.summary
 
@@ -94,8 +93,8 @@ def test_running_instance_passes_two_of_two(running_instance):
 def test_stopped_instance_is_visible_only_with_include_all(running_instance):
     """ADR-0006 §4 2행이 미측정으로 남겨 둔 전제 그 자체.
 
-    기본 호출이 빈 목록이라 waiter만으로는 "없음"과 "멈춤"이 갈리지 않는다. 재조회가
-    stopped를 돌려주지 않으면 판정 사유가 PRECHECK_TARGET_NOT_FOUND가 되어 시연 서사가
+    기본 호출이 빈 목록이라 그것만으로는 "없음"과 "멈춤"이 갈리지 않는다. IncludeAllInstances
+    조회가 stopped를 돌려주지 않으면 판정 사유가 PRECHECK_TARGET_NOT_FOUND가 되어 시연 서사가
     "기동 실패"가 아니라 "대상 없음"이 된다.
     """
     fx = running_instance
@@ -119,7 +118,7 @@ def test_stopped_instance_is_judged_a_boot_failure_not_a_missing_target(running_
     fx = running_instance
     fx["ec2"].stop_instances(InstanceIds=[fx["id"]])
 
-    outcome = rb.wait_for_status_check(fx["arn"], delay_seconds=1, max_attempts=2)
+    outcome = rb.probe_status_check(fx["arn"])
 
     assert outcome.verdict is rb.StatusCheckVerdict.FAILED
     assert outcome.instance_state == "stopped"

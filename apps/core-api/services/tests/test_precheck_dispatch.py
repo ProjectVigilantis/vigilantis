@@ -890,44 +890,45 @@ SG_RULES = {
 }
 
 
-def test_sg_recreate_dry_runs_the_rule_reinjection(aws):
-    """create만 확인하면 빈 SG를 만들고 규칙 복원에서 실패하는 경로가 통과한다.
+def test_sg_recreate_dry_runs_only_the_creation(aws):
+    """규칙 회수·주입 DryRun은 사전 검사가 아니라 실행이 새 GroupId로 건다(Issue #434).
 
-    회수(revoke)도 같은 이유로 본다 — 권한이 없으면 재생성 SG에 AWS가 자동으로 붙인
-    전체 허용 egress가 그대로 남아 **원본보다 넓은 SG**가 된다(Issue #368).
+    원본 GroupId로 걸면 운영 자격에서 **항상** 거절된다 — 원본 SG는 이미 지워졌고 앱
+    정책은 revoke·authorize에 자원 속성 조건(ec2:Vpc)을 거는데, 없는 자원에서는 그
+    조건을 평가할 수 없어 UnauthorizedOperation이 된다(2026-10-27 실 AWS 실측 — 복구
+    런북이 사전 검사를 절대 통과하지 못했다). create는 VPC 조건으로 평가되므로 지금
+    걸 수 있다.
     """
-    assert run("RUNBOOK_SG_RECREATE", payload=SG_RULES).passed
-    operations = [operation for operation, _ in aws.calls]
-    assert operations == [
-        "create_security_group",
-        "revoke_security_group_egress",
-        "authorize_security_group_ingress",
-        "authorize_security_group_egress",
-    ]
-    assert all(
-        kwargs.get("GroupId") == GROUP
-        for op, kwargs in aws.calls
-        if op.startswith("authorize") or op.startswith("revoke")
+    outcome = run("RUNBOOK_SG_RECREATE", payload=SG_RULES)
+
+    assert outcome.passed
+    assert [operation for operation, _ in aws.calls] == ["create_security_group"]
+    assert aws.calls[0][1] == {
+        "DryRun": True,
+        "GroupName": SG_RULES["group_name"],
+        "Description": SG_RULES["description"],
+        "VpcId": SG_RULES["vpc_id"],
+    }
+    # 걸지 않은 확인은 요약에 남는다 — 통과가 규칙 권한의 증명으로 읽히지 않게
+    assert "규칙 회수·주입 권한" in outcome.verification_summary
+
+
+def test_sg_recreate_passes_in_an_operating_policy_after_the_origin_is_gone(aws):
+    """실측 재현: 원본 SG에 대한 revoke·authorize는 거절되지만 create는 허용된다.
+
+    사전 검사가 원본 ID로 규칙 DryRun을 걸던 때는 이 자격에서 복구가 닫혔다.
+    """
+    aws(
+        revoke_security_group_egress=client_error("UnauthorizedOperation"),
+        authorize_security_group_ingress=client_error("UnauthorizedOperation"),
+        authorize_security_group_egress=client_error("UnauthorizedOperation"),
     )
 
-
-def test_sg_recreate_dry_runs_the_default_egress_revocation(aws):
-    """회수는 백업 내용과 무관하게 **항상** 건다 — 걷어 낼 대상은 AWS가 붙일 기본 egress다.
-
-    백업에 아웃바운드 규칙이 하나도 없어도 자동 부착은 일어나므로, 이 확인을 백업에
-    맡기면 규칙 0건 SG를 복원할 때 전체 허용 egress만 달린 SG가 남는다. (Issue #368)
-    """
-    rules = dict(SG_RULES, ingress_permissions=[], egress_permissions=[])
-
-    assert run("RUNBOOK_SG_RECREATE", payload=rules).passed
-
-    revokes = [kwargs for op, kwargs in aws.calls if op == "revoke_security_group_egress"]
-    assert len(revokes) == 1
-    assert revokes[0]["IpPermissions"] == [dict(ex.DEFAULT_EGRESS_PERMISSION)]
+    assert run("RUNBOOK_SG_RECREATE", payload=SG_RULES).passed
 
 
-def test_sg_recreate_fails_when_the_default_egress_revocation_is_unauthorized(aws):
-    aws(revoke_security_group_egress=client_error("UnauthorizedOperation"))
+def test_sg_recreate_fails_when_the_creation_is_unauthorized(aws):
+    aws(create_security_group=client_error("UnauthorizedOperation"))
     outcome = run("RUNBOOK_SG_RECREATE", payload=SG_RULES)
     assert (outcome.passed, outcome.reason_code) == (False, R.PRECHECK_UNAUTHORIZED)
 
@@ -945,16 +946,3 @@ def test_sg_recreate_rejects_a_backup_that_breaks_the_contract(aws):
 
     assert (outcome.passed, outcome.reason_code) == (False, R.PRECHECK_PARAM_INVALID)
     assert aws.calls == []
-
-
-def test_sg_recreate_fails_when_rule_reinjection_is_unauthorized(aws):
-    aws(authorize_security_group_ingress=client_error("UnauthorizedOperation"))
-    outcome = run("RUNBOOK_SG_RECREATE", payload=SG_RULES)
-    assert (outcome.passed, outcome.reason_code) == (False, R.PRECHECK_UNAUTHORIZED)
-
-
-def test_sg_recreate_skips_authorize_for_an_empty_direction(aws):
-    """빈 목록으로 authorize를 부르면 DryRun 이전에 파라미터 오류가 난다."""
-    rules = dict(SG_RULES, egress_permissions=[])
-    assert run("RUNBOOK_SG_RECREATE", payload=rules).passed
-    assert "authorize_security_group_egress" not in [operation for operation, _ in aws.calls]

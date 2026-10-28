@@ -56,6 +56,25 @@
 # 실행·판정 함수는 _RUNNERS와 _JUDGES에 **짝으로** 등록합니다
 # (ADR-0008 §6, 아래 짝 검사).
 #
+# 2/2 판정은 기다리지 않습니다(Issue #434 1-3). 판정 주체가 주기마다 상태를 한 번
+# 관측하고, 아직 결론 전이면 기록 없이 **pending**으로 돌려줘 다음 주기가 다시 묻습니다
+# — 예산(기동 요청 시각부터 rollback.status_check_budget)을 넘기면 관측된 타임아웃으로
+# 확정합니다. 전에는 waiter가 최대 3분 동안 이 스캔을 붙잡아 그동안 다른 조치가 밀렸습니다.
+#
+# 일반 예외의 반복에는 **상한**이 있습니다(Issue #434 4-2). 실행·판정·원복 개시·해제
+# 제안에서 잡힌 예외는 그 건을 비종료로 남겨 다음 주기가 다시 집는데, 판정 불가 보류의
+# 재시도 카운터(verification_attempts, #249)는 이 경로를 세지 않습니다 — 그 카운터는
+# AWS 조회 실패라는 **분류된** 사유에만 쓰입니다. 그래서 같은 건이 늘 실패하면 10초마다
+# 조회·traceback이 영원히 반복됐습니다. 이제 건별 연속 예외 횟수를 프로세스 메모리에
+# 세고(_FailureLedger), 상한(DISPATCH_EXCEPTION_MAX_ATTEMPTS)에 닿으면 CRITICAL 한 번과
+# 함께 **격리**합니다 — 그 건은 이 프로세스가 사는 동안 다시 집지 않으며 비종료 상태로
+# 남아 관제자 확인 대상이 됩니다. 정상 처리(예외 없이 한 주기를 마침)는 횟수를 지웁니다.
+# 기록이 메모리인 이유는 영구 기록이 DB 모델·마이그레이션 변경을 요구해서이고, 그래서
+# **재시작은 한도를 되돌립니다** — 재시작 뒤 같은 건이 다시 상한만큼 시도됩니다. 예외의
+# 종류는 분류하지 않습니다 — 분류할 수 있는 실패는 이미 ExecutionRunOutcome·
+# ExecutionJudgement로 돌아오고, 여기까지 오는 것은 분류되지 않은 결함이라 "다시 하면
+# 되는가"를 코드가 답할 수 없습니다.
+#
 # 기동 worker 개수는 미정입니다 — ADR-0005가 다중 worker·replica 실행 토폴로지를
 # 별도 결정 대상으로 남겼고, 이 모듈은 worker 1개를 전제합니다. 선점(_claim)의
 # 행 잠금은 실행 내부 commit(백업 확보 시점)에서 풀리므로, "runner 진입은 한
@@ -71,7 +90,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
-from threading import RLock
+from threading import Lock, RLock
 
 import workflows
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -176,6 +195,82 @@ def _in_lane(runbook_id: RunbookId, lane: str) -> bool:
     return (runbook_id in _AUTOSCALING_LANE_RUNBOOKS) == (lane == LANE_AUTOSCALING)
 
 
+# 한 건이 연속으로 일으킬 수 있는 분류되지 않은 예외의 상한(파일 헤더). 닿으면 격리한다.
+# 운영에서 조여야 할 값으로 드러나면 그때 설정으로 올린다.
+DISPATCH_EXCEPTION_MAX_ATTEMPTS = 5
+
+
+class _FailureLedger:
+    """실행별 연속 예외 횟수와 격리 목록 — 프로세스 메모리, 레인 간 공유(잠금)."""
+
+    def __init__(self, max_attempts: int) -> None:
+        self._max_attempts = max_attempts
+        self._attempts: dict[str, int] = {}
+        self._quarantined: set[str] = set()
+        self._lock = Lock()
+
+    def quarantined(self, execution_id: str) -> bool:
+        with self._lock:
+            return execution_id in self._quarantined
+
+    def record_failure(self, execution_id: str) -> tuple[int, bool]:
+        """예외 1회를 세고 (횟수, 이번에 격리됐는가)를 돌려준다."""
+        with self._lock:
+            attempts = self._attempts.get(execution_id, 0) + 1
+            self._attempts[execution_id] = attempts
+            if attempts < self._max_attempts or execution_id in self._quarantined:
+                return attempts, False
+            self._quarantined.add(execution_id)
+            return attempts, True
+
+    def clear(self, execution_id: str) -> None:
+        """예외 없이 한 주기를 마쳤다 — 연속 횟수를 지운다. 격리된 건은 여기 오지 않는다."""
+        with self._lock:
+            self._attempts.pop(execution_id, None)
+
+    def reset(self) -> None:
+        """전부 비운다 — 프로세스 재시작과 같은 상태(테스트·재시작 재현용)."""
+        with self._lock:
+            self._attempts.clear()
+            self._quarantined.clear()
+
+
+_FAILURES = _FailureLedger(DISPATCH_EXCEPTION_MAX_ATTEMPTS)
+
+
+def reset_failure_ledger() -> None:
+    """예외 장부를 비운다 — 재시작 뒤의 상태를 재현하는 테스트용 진입점."""
+    _FAILURES.reset()
+
+
+def _guard_failures(execution_id: str, report: DispatchReport, body: Callable[[], None]) -> None:
+    """본문을 돌리되, 격리된 건은 건너뛰고 예외로 끝난 주기는 장부에 센다.
+
+    본문이 예외를 삼켜 report.errored를 올리는 것이 "이 건이 이번 주기에 실패했다"의
+    신호다 — 세 경로(_judge_one·runner·_initiate_rollback_one)와 해제 제안이 전부 그
+    모양이라 반환값을 바꾸지 않고 여기서 묶는다.
+    """
+    if _FAILURES.quarantined(execution_id):
+        report.quarantined += 1
+        return
+    errored_before = report.errored
+    body()
+    if report.errored == errored_before:
+        _FAILURES.clear(execution_id)
+        return
+    attempts, quarantined_now = _FAILURES.record_failure(execution_id)
+    if quarantined_now:
+        report.quarantined += 1
+        logger.critical(
+            "dispatch_execution_quarantined",
+            extra={
+                "execution_id": execution_id,
+                "attempts": attempts,
+                "max_attempts": DISPATCH_EXCEPTION_MAX_ATTEMPTS,
+            },
+        )
+
+
 # 자산이 바뀐 채 실패했을 때 **ROLLBACK_INITIATED로 보낼** 런북.
 #
 # 기준은 "등록 롤백 짝이 있는가"가 아니라 **"ADR-0004가 그 짝의 자동 발동을 허용하는가"**
@@ -246,6 +341,7 @@ class DispatchReport:
     skipped: int = 0  # 선점 실패·이미 확정된 실행
     unsupported: int = 0  # 실행 함수·판정 함수가 아직 없는 런북
     errored: int = 0
+    quarantined: int = 0  # 연속 예외 상한에 닿아 이 프로세스가 더 집지 않는 실행 (Issue #434 4-2)
 
 
 def _claim(db: Session, execution_id: str) -> models.ActionExecution | None:
@@ -394,13 +490,19 @@ def _judge_one(
         return
 
     report.judged += 1
-    # 선점 잠금을 먼저 놓는다. 판정은 최대 STATUS_CHECK_WAIT_DELAY × MAX_ATTEMPTS만큼
-    # AWS를 기다리는데, 그동안 행을 잠근 트랜잭션이 열려 있으면 커넥션과 잠금을 분
-    # 단위로 붙잡는다. 놓아도 안전한 것은 확정이 close_execution 몫이고 그쪽이 다시
+    # 선점 잠금을 먼저 놓는다. 판정은 AWS를 조회하므로(2/2는 조회 1회, 다른 런북은 현물
+    # 대조) 그동안 행을 잠근 트랜잭션이 열려 있으면 커넥션과 잠금을 AWS 응답 시간만큼
+    # 붙잡는다. 놓아도 안전한 것은 확정이 close_execution 몫이고 그쪽이 다시
     # 잠근 뒤 상태를 재확인하기 때문이다 — 그 사이 누가 먼저 확정했으면 None이 온다.
     db.commit()
     try:
         judgement = judge(db, execution_id)
+        if judgement.pending:
+            # 관측은 했는데 아직 2/2 전이고 예산도 남았다 — 기록할 것이 없다. 다음 주기가
+            # 다시 묻는다. 기다리지 않았으므로 이 스캔은 곧바로 다음 건으로 간다 (Issue #434 1-3)
+            report.awaiting_status_check += 1
+            db.commit()
+            return
         if judgement.deferred:
             # AWS에 물어보지 못해 결론이 없다 — ROLLBACK_INITIATED로 닫으면 검증기의
             # 실패가 자산의 실패로 저장되어 #241의 자동 원복 입력과 구분되지 않는다.
@@ -574,8 +676,8 @@ def _dispatch_one(
                 # ROLLBACK_INITIATED를 가른다(services/aws/rollback.py). 여기서 SUCCESS를
                 # 앞질러 쓰면 관제자 복구 경로가 판정 전에 열리고(EXECUTION_RECOVERABLE_
                 # STATUSES), 뒤이은 자동 원복 개시가 종료 상태를 되살리는 전이가 된다.
-                # 판정은 **다음 주기**가 한다 — 방금 기동을 요청한 인스턴스에 곧바로
-                # 2/2를 물으면 부팅 시간만큼 이 스캔이 붙잡힌다(max_instances=1).
+                # 판정은 **다음 주기**가 한다 — 방금 기동을 요청한 인스턴스는 아직 pending이라
+                # 지금 물어도 결론이 없고, 판정이 자산을 같은 주기에 되묻지 않는 규약도 같다.
                 report.awaiting_status_check += 1
                 logger.info(
                     "dispatch_awaiting_status_check",
@@ -740,12 +842,20 @@ def _dispatch_pending(
     ]
     report.scanned = len(pending)
     for execution_id in pending:
-        _dispatch_one(db, execution_id, publish, report, policy, lane=lane)
+        _guard_failures(
+            execution_id,
+            report,
+            partial(_dispatch_one, db, execution_id, publish, report, policy, lane=lane),
+        )
     if lane == LANE_MAIN:
         for execution_id in executions_repo.list_release_offer_pending(
             db, incident_statuses=workflows.RELEASE_OFFERABLE_STATUSES
         ):
-            _offer_release_one(db, execution_id, publish, report)
+            _guard_failures(
+                execution_id,
+                report,
+                partial(_offer_release_one, db, execution_id, publish, report),
+            )
     logger.info("dispatch_cycle_done", extra=vars(report))
     return report
 
@@ -769,13 +879,18 @@ def dispatch_now(
     """main 레인 한 건을 즉시 처리한다. ASG 실행 ID는 실행하지 않는다."""
     with _DISPATCH_LOCK:
         report = DispatchReport(scanned=1, lane=LANE_MAIN)
-        _dispatch_one(
-            db,
+        _guard_failures(
             execution_id,
-            publish,
             report,
-            workflows.VerificationRetryPolicy.from_settings(),
-            lane=LANE_MAIN,
+            partial(
+                _dispatch_one,
+                db,
+                execution_id,
+                publish,
+                report,
+                workflows.VerificationRetryPolicy.from_settings(),
+                lane=LANE_MAIN,
+            ),
         )
         return report
 

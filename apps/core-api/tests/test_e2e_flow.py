@@ -33,7 +33,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from botocore.exceptions import ClientError, WaiterError
+from botocore.exceptions import ClientError
 from pydantic import TypeAdapter
 
 CORE_API = Path(__file__).resolve().parents[1]
@@ -118,10 +118,6 @@ RETRY_NOW = workflows.VerificationRetryPolicy(max_attempts=3, interval_seconds=0
 def dry_run_ok() -> ClientError:
     """DryRun 통과 신호 — 가드레일 ④는 이 예외만 통과로 인정한다."""
     return ClientError({"Error": {"Code": "DryRunOperation"}}, "Op")
-
-
-def waiter_timeout() -> WaiterError:
-    return WaiterError(name=rb.WAITER_NAME, reason="Max attempts exceeded", last_response={})
 
 
 class FakeWaiter:
@@ -402,9 +398,8 @@ def test_t1_idle_ec2_downsize_and_auto_rollback_flow(db, client_pg, aws):
     # 6번 — 실행 주기. 여기서부터 사람 입력이 없다.
     assert cycle(db).awaiting_status_check == 1
 
-    # 7번 — 2/2 Status Check 실패. 기동하지 못한 인스턴스를 판정이 읽는다.
+    # 7번 — 2/2 Status Check 실패. 기동하지 못한 인스턴스를 판정이 관측 1회로 읽는다.
     aws(
-        **{f"waiter:{rb.WAITER_NAME}": waiter_timeout()},
         describe_instance_status={
             "InstanceStatuses": [
                 {

@@ -90,6 +90,14 @@ class FakeEc2:
     def __getattr__(self, operation):
         def call(**kwargs):
             self._state["calls"].append((operation, kwargs))
+            if kwargs.get("DryRun"):
+                # DryRun 호출은 실 호출과 따로 꾸민다 — 기본은 통과(DryRunOperation)
+                outcome = self._state["dry_run"].get(operation)
+                if isinstance(outcome, BaseException):
+                    raise outcome
+                if outcome is not None:
+                    return outcome  # 플래그가 무시된 정상 반환
+                raise client_error("DryRunOperation", 412)
             outcome = self._state["overrides"].get(operation)
             if isinstance(outcome, BaseException):
                 raise outcome
@@ -117,7 +125,7 @@ class FakeEc2:
 
 @pytest.fixture
 def aws(monkeypatch):
-    state = {"overrides": {}, "calls": [], "clients": []}
+    state = {"overrides": {}, "dry_run": {}, "calls": [], "clients": []}
 
     def factory(service, region=None, **_):
         state["clients"].append((service, region))
@@ -128,17 +136,30 @@ def aws(monkeypatch):
     def configure(**overrides):
         state["overrides"].update(overrides)
 
+    def configure_dry_run(**overrides):
+        state["dry_run"].update(overrides)
+
+    configure.dry_run = configure_dry_run
     configure.calls = state["calls"]
     configure.clients = state["clients"]
     return configure
 
 
 def operations(aws):
-    return [name for name, _ in aws.calls]
+    """실 호출 순서 — DryRun 호출은 dry_runs()가 따로 본다."""
+    return [name for name, kwargs in aws.calls if not kwargs.get("DryRun")]
+
+
+def dry_runs(aws):
+    return [(name, kwargs) for name, kwargs in aws.calls if kwargs.get("DryRun")]
 
 
 def kwargs_of(aws, operation: str) -> list[dict]:
-    return [payload for name, payload in aws.calls if name == operation]
+    return [
+        payload
+        for name, payload in aws.calls
+        if name == operation and not payload.get("DryRun")
+    ]
 
 
 # ==============================================================================
@@ -394,6 +415,106 @@ def test_recreate_that_fails_midway_leaves_the_created_group_recorded(aws):
     assert outcome.reason_code is R.PRECHECK_UNAUTHORIZED
     assert outcome.steps[0].effect is E.APPLIED  # 생성은 적용됐다
     assert outcome.steps[-1].step_type == ex.STEP_AUTHORIZE_SG_INGRESS
+
+
+# ------------------------------------------------------------------ 규칙 DryRun (Issue #434)
+def test_recreate_dry_runs_the_rules_on_the_new_group_before_touching_it(aws):
+    """회수·주입 권한은 **새 GroupId**로, 자산을 더 바꾸기 전에 확인한다.
+
+    사전 검사가 원본 ID로 걸던 DryRun은 운영 자격에서 항상 거절됐다(원본은 이미 없어
+    자원 속성 조건을 평가할 수 없다 — 2026-10-27 실 AWS 실측). 새 그룹은 실재하고 VPC
+    조건이 성립하므로 여기서 같은 요청 모양으로 본다. 통과하면 단계를 남기지 않는다.
+    """
+    restored = backup(
+        ingress_permissions=[SSH_FROM_BASTION], egress_permissions=[dict(DEFAULT_EGRESS)]
+    )
+
+    outcome = recreate(restored=restored)
+
+    assert outcome.succeeded
+    assert [name for name, _ in dry_runs(aws)] == [
+        "revoke_security_group_egress",
+        "authorize_security_group_ingress",
+        "authorize_security_group_egress",
+    ]
+    assert all(kwargs["GroupId"] == NEW_GROUP for _, kwargs in dry_runs(aws))
+    # DryRun 세 건은 생성 직후, 조회·회수보다 앞이다
+    assert [name for name, _ in aws.calls][:4] == [
+        "create_security_group",
+        "revoke_security_group_egress",
+        "authorize_security_group_ingress",
+        "authorize_security_group_egress",
+    ]
+    assert [step.step_type for step in outcome.steps] == [
+        ex.STEP_CREATE_SECURITY_GROUP,
+        ex.STEP_REVOKE_DEFAULT_EGRESS,
+        ex.STEP_AUTHORIZE_SG_INGRESS,
+        ex.STEP_AUTHORIZE_SG_EGRESS,
+    ]
+
+
+def test_recreate_dry_runs_the_revocation_even_with_an_empty_backup(aws):
+    """회수 DryRun은 백업 내용과 무관하게 항상, AWS가 붙일 기본 egress 모양으로 건다."""
+    recreate()
+
+    assert dry_runs(aws) == [
+        (
+            "revoke_security_group_egress",
+            {"DryRun": True, "GroupId": NEW_GROUP, "IpPermissions": [dict(DEFAULT_EGRESS)]},
+        )
+    ]
+
+
+def test_recreate_dry_run_carries_the_rebound_self_reference(aws):
+    """DryRun도 실행과 같은 치환을 거친 규칙으로 건다 — 원본 ID가 남은 규칙은
+    DryRun부터 NotFound로 거절돼 정상 복원이 거절로 읽힌다."""
+    restored = backup(
+        ingress_permissions=[
+            {"IpProtocol": "-1", "UserIdGroupPairs": [{"UserId": ACCOUNT, "GroupId": GROUP}]}
+        ]
+    )
+
+    recreate(restored=restored)
+
+    (_, kwargs), = [item for item in dry_runs(aws) if item[0] == "authorize_security_group_ingress"]
+    assert kwargs["IpPermissions"][0]["UserIdGroupPairs"][0]["GroupId"] == NEW_GROUP
+
+
+def test_recreate_stops_before_revoking_when_a_rule_dry_run_is_rejected(aws):
+    """거절되면 회수·주입 없이 멈춘다 — 생성된 SG는 남고, 거절이 단계로 기록된다.
+
+    기본 egress만 달린 빈 SG가 남는 것은 사실이고 그 사실이 사람에게 가야 한다(원복의
+    원복은 없다, ADR-0008 §6). 규칙 일부만 주입된 채 끊기는 것보다 되돌리기 쉽다.
+    """
+    aws.dry_run(authorize_security_group_ingress=client_error("UnauthorizedOperation", 403))
+
+    outcome = recreate(restored=backup(ingress_permissions=[SSH_FROM_BASTION]))
+
+    assert not outcome.succeeded
+    assert outcome.reason_code is R.PRECHECK_UNAUTHORIZED
+    assert operations(aws) == ["create_security_group"]
+    assert [(step.step_type, step.status, step.effect) for step in outcome.steps] == [
+        (ex.STEP_CREATE_SECURITY_GROUP, S.SUCCESS, E.APPLIED),
+        (ex.STEP_DRY_RUN_SG_RULES, S.FAILED, E.NOT_APPLIED),
+    ]
+    assert outcome.steps[-1].aws_operation == ex._OP_AUTHORIZE_SG_INGRESS
+    assert NEW_GROUP in outcome.error_summary
+    # 이미 SG를 만들었으므로 보류가 아니라 **단계가 남은 실패**다
+    assert not outcome.deferred
+
+
+def test_recreate_treats_an_ignored_dry_run_flag_as_unknown(aws):
+    """DryRun이 예외 없이 돌아오면 플래그가 무시된 것이다(ADR-0007 §2) — 그 호출이
+    실제로 적용됐을 수 있으므로 NOT_APPLIED가 아니라 UNKNOWN으로 멈춘다."""
+    aws.dry_run(revoke_security_group_egress=OK_RESPONSE)
+
+    outcome = recreate(restored=backup(ingress_permissions=[SSH_FROM_BASTION]))
+
+    assert not outcome.succeeded
+    assert outcome.reason_code is R.PRECHECK_AWS_ERROR
+    assert operations(aws) == ["create_security_group"]
+    assert outcome.steps[-1].step_type == ex.STEP_DRY_RUN_SG_RULES
+    assert outcome.steps[-1].effect is E.UNKNOWN
 
 
 def test_recreate_rejects_a_non_security_group_arn(aws):

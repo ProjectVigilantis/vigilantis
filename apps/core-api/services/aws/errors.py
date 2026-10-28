@@ -13,7 +13,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Final, Optional
+import threading
+from contextlib import contextmanager
+from typing import Any, Callable, Final, Iterator, Optional
 
 from botocore.exceptions import BotoCoreError, ClientError, ParamValidationError
 
@@ -72,8 +74,7 @@ def reason_code_for(exc: BaseException) -> PrecheckReasonCode:
 def reason_code_for_error_code(code: str) -> PrecheckReasonCode:
     """AWS 오류 코드 문자열을 같은 표로 분류한다.
 
-    예외가 아니라 응답 dict로만 오류를 받는 자리(끊긴 waiter의 last_response —
-    rollback._interruption_code)가 쓴다.
+    예외가 아니라 오류 코드 문자열만 있는 자리(run_dry_run의 DryRun 응답 판정)가 쓴다.
     """
     if code in _UNAUTHORIZED_CODES or code.startswith("AccessDenied"):
         return PrecheckReasonCode.PRECHECK_UNAUTHORIZED
@@ -83,6 +84,46 @@ def reason_code_for_error_code(code: str) -> PrecheckReasonCode:
     if code in _INVALID_STATE_CODES or "InUse" in code:
         return PrecheckReasonCode.PRECHECK_INVALID_STATE
     return PrecheckReasonCode.PRECHECK_AWS_ERROR
+
+
+# DryRun 미적용(정상 반환) 감시 — 사유 코드가 PRECHECK_AWS_ERROR 하나로 겹치는 두 사건을 가른다.
+#
+# ADR-0007 §2는 DryRun이 예외 없이 돌아온 경우(플래그가 무시돼 자원이 실제로 바뀌었을 수 있다)와
+# AWS에 닿지 못한 경우를 같은 코드 PRECHECK_AWS_ERROR로 적는다. 앞은 다시 물어도 되는 사유가
+# 아니다 — 자산이 이미 만져졌을 수 있는데 "아직 만지지 않았다"는 전제로 재평가하면
+# 재평가가 두 번째 실제 실행이 된다(Issue #434 1-2). 코드는 공유 계약(packages/schemas)
+# 이라 늘리지 않고, 같은 스레드의 호출부가 블록 안에서 그 사건이 있었는지를 읽게 한다.
+_watches = threading.local()
+
+
+class DryRunProtocolWatch:
+    """watch_dry_run_protocol 블록 하나의 관측 — DryRun 미적용이 몇 번 있었는가."""
+
+    def __init__(self) -> None:
+        self.not_applied = 0
+
+    @property
+    def violated(self) -> bool:
+        return self.not_applied > 0
+
+
+@contextmanager
+def watch_dry_run_protocol() -> Iterator[DryRunProtocolWatch]:
+    """블록 안의 run_dry_run 호출 중 DryRun이 적용되지 않은 것이 있었는지 알려 준다."""
+    stack = getattr(_watches, "stack", None)
+    if stack is None:
+        stack = _watches.stack = []
+    watch = DryRunProtocolWatch()
+    stack.append(watch)
+    try:
+        yield watch
+    finally:
+        stack.pop()
+
+
+def _note_dry_run_not_applied() -> None:
+    for watch in getattr(_watches, "stack", ()):
+        watch.not_applied += 1
 
 
 def run_dry_run(operation: Callable[..., Any], **params: Any) -> Optional[PrecheckReasonCode]:
@@ -110,4 +151,5 @@ def run_dry_run(operation: Callable[..., Any], **params: Any) -> Optional[Preche
         "precheck_dry_run_not_applied",
         extra={"aws_operation": operation_name},
     )
+    _note_dry_run_not_applied()
     return PrecheckReasonCode.PRECHECK_AWS_ERROR

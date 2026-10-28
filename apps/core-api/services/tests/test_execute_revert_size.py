@@ -51,10 +51,18 @@ def client_error(code: str, status: int | None = 400) -> ClientError:
     )
 
 
-def describe(instance_type: str) -> dict:
+def describe(instance_type: str, state: str = "running") -> dict:
     return {
         "Reservations": [
-            {"Instances": [{"InstanceId": INSTANCE, "InstanceType": instance_type}]}
+            {
+                "Instances": [
+                    {
+                        "InstanceId": INSTANCE,
+                        "InstanceType": instance_type,
+                        "State": {"Name": state},
+                    }
+                ]
+            }
         ]
     }
 
@@ -87,7 +95,7 @@ class FakeEc2:
             if outcome is not None:
                 return outcome
             if operation == "describe_instances":
-                return describe(self._state["current_type"])
+                return describe(self._state["current_type"], self._state["current_state"])
             if operation == "stop_instances":
                 return STOP_RESPONSE
             return {}
@@ -97,17 +105,24 @@ class FakeEc2:
 
 @pytest.fixture
 def aws(monkeypatch):
-    """기본은 §3-2 ② 경로(현재 타입 = 원본이 적용한 값)다."""
-    state = {"overrides": {}, "calls": [], "current_type": APPLIED_TYPE}
+    """기본은 §3-2 ② 경로(현재 타입 = 원본이 적용한 값, running)다."""
+    state = {
+        "overrides": {},
+        "calls": [],
+        "current_type": APPLIED_TYPE,
+        "current_state": "running",
+    }
 
     def factory(service, region=None, **_):
         return FakeEc2(state)
 
     monkeypatch.setattr(ex, "aws_client", factory)
 
-    def configure(current_type=None, **overrides):
+    def configure(current_type=None, current_state=None, **overrides):
         if current_type is not None:
             state["current_type"] = current_type
+        if current_state is not None:
+            state["current_state"] = current_state
         state["overrides"].update(overrides)
 
     configure.calls = state["calls"]
@@ -190,6 +205,83 @@ def test_as_applied_proceeds_and_does_not_record_the_comparison(aws):
         (3, ex.STEP_START_INSTANCE, S.SUCCESS, E.APPLIED),
     ]
     assert ex.STEP_COMPARE_INSTANCE_TYPE not in [s.step_type for s in recorded]
+
+
+# ---------------------------------------- ① 타입은 같은데 기동 상태가 다르다 (Issue #434 1-1)
+
+
+def test_same_type_but_stopped_is_not_a_success(aws):
+    """원본이 정지 뒤 타입 변경에서 실패하면 타입은 백업 값인데 인스턴스는 멈춰 있다.
+
+    타입만 보고 성공으로 닫으면 원본은 "원복 완료", 자산은 정지 상태로 남는다. 변경
+    호출 없이(§3-2 ①) 실패로 닫아 수동 개입으로 넘긴다 — 자동 기동은 별도 정책이다.
+    """
+    aws(current_type=BACKUP_TYPE, current_state="stopped")
+    recorded = []
+
+    outcome = run(recorded, restore_state="running")
+
+    assert not outcome.succeeded and not outcome.deferred
+    assert outcome.reason_code is R.PRECHECK_INVALID_STATE
+    assert "stopped" in outcome.error_summary
+    assert operations(aws) == ["describe_instances"]  # 기동도 정지도 하지 않는다
+    assert settled(recorded) == [
+        (1, ex.STEP_COMPARE_INSTANCE_TYPE, S.SUCCESS, E.NOT_APPLIED)
+    ]
+
+
+def test_same_type_but_stopped_is_logged_as_critical(aws, caplog):
+    aws(current_type=BACKUP_TYPE, current_state="stopped")
+
+    with caplog.at_level("CRITICAL", logger="vigilantis.aws"):
+        run(restore_state="running")
+
+    assert "revert_size_not_restarted" in caplog.text
+
+
+def test_same_type_and_originally_stopped_is_a_success(aws):
+    """조치 이전에 멈춰 있었으면 멈춰 있는 것이 원복의 완료다(ADR-0008 §4)."""
+    aws(current_type=BACKUP_TYPE, current_state="stopped")
+
+    outcome = run(restore_state="stopped")
+
+    assert outcome.succeeded
+    assert operations(aws) == ["describe_instances"]
+
+
+@pytest.mark.parametrize("state", ["running", "pending"])
+def test_same_type_and_started_is_a_success(aws, state):
+    """기동 요청이 접수된 상태(pending 포함)면 되돌릴 것이 없다 — 2/2는 원복의 축이 아니다."""
+    aws(current_type=BACKUP_TYPE, current_state=state)
+
+    outcome = run(restore_state="running")
+
+    assert outcome.succeeded
+
+
+def test_same_type_with_unknown_state_is_handed_to_a_person(aws):
+    """state를 읽지 못했으면 기동을 확인하지 못한 것이다 — 성공으로 추정하지 않는다."""
+    aws(
+        current_type=BACKUP_TYPE,
+        describe_instances={
+            "Reservations": [
+                {"Instances": [{"InstanceId": INSTANCE, "InstanceType": BACKUP_TYPE}]}
+            ]
+        },
+    )
+
+    outcome = run(restore_state="running")
+
+    assert not outcome.succeeded and outcome.reason_code is R.PRECHECK_INVALID_STATE
+
+
+def test_restart_outstanding_is_one_function_for_both_paths():
+    """실행 ①분기와 끊긴 실행의 종료 판정이 같은 표를 본다 — 같은 관찰, 같은 답."""
+    assert ex.revert_restart_outstanding("running", "stopped")
+    assert ex.revert_restart_outstanding("running", None)
+    assert not ex.revert_restart_outstanding("running", "pending")
+    assert not ex.revert_restart_outstanding("running", "running")
+    assert not ex.revert_restart_outstanding("stopped", "stopped")
 
 
 def test_third_party_drift_stops_before_any_change(aws):

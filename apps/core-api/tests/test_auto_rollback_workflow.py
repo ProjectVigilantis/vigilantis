@@ -37,7 +37,11 @@ from schemas.api.assets import AssetType  # noqa: E402
 from schemas.api.incidents import IncidentCategory, IncidentStatus  # noqa: E402
 from schemas.backups import BackupType  # noqa: E402
 from schemas.candidates import CandidateStatus  # noqa: E402
-from schemas.executions import ExecutionStepResult, ExecutionStepStatus  # noqa: E402
+from schemas.executions import (  # noqa: E402
+    ExecutionEffect,
+    ExecutionStepResult,
+    ExecutionStepStatus,
+)
 from schemas.guardrails import GuardrailDecision, GuardrailStep  # noqa: E402
 from schemas.precheck import PrecheckReasonCode  # noqa: E402
 from schemas.runbooks import RunbookId, TriggerSource  # noqa: E402
@@ -86,8 +90,12 @@ class FakeEc2:
         def call(**kwargs):
             self._state["calls"].append((operation, kwargs))
             if kwargs.get("DryRun"):
-                # 가드레일 ④는 DryRunOperation 예외만 통과로 인정한다
-                raise self._state["overrides"].get("dry_run", dry_run_ok())
+                # 가드레일 ④는 DryRunOperation 예외만 통과로 인정한다. dry_run=None은
+                # "플래그가 무시돼 예외 없이 돌아왔다"(ADR-0007 §2의 DryRun 미적용) 재현이다
+                dry_run = self._state["overrides"].get("dry_run", dry_run_ok())
+                if dry_run is not None:
+                    raise dry_run
+                return {}
             outcome = self._state["overrides"].get(operation)
             if isinstance(outcome, BaseException):
                 raise outcome
@@ -427,6 +435,61 @@ def test_failed_revert_settles_the_origin_as_rollback_failed(db, rolled_back_ori
     assert fact.execution_status is ExecutionStatus.ROLLBACK_FAILED
 
 
+# ---------------------------- 타입은 같은데 멈춰 있다 (Issue #434 1-1, 정상 경로)
+
+
+def test_same_type_but_stopped_revert_is_handed_to_a_person(db, rolled_back_origin, aws):
+    """원본이 정지 뒤 타입 변경에서 실패한 경우 — 타입은 백업 값, 인스턴스는 stopped.
+
+    전에는 타입만 보고 자식 SUCCESS·원본 ROLLED_BACK으로 닫혀 인시던트가 종료 대기로
+    내려가고 멈춘 자산을 다시 볼 자리가 없었다. 이제 변경 호출 없이 자식 FAILED·원본
+    ROLLBACK_FAILED로 닫아 수동 개입으로 넘긴다 — 끊긴 실행의 판정과 같은 답이다.
+    """
+    incident_id, origin_id = rolled_back_origin()
+    aws(current_type=BACKUP_TYPE, current_state="stopped")
+
+    cycle(db)
+    cycle(db)
+
+    child = only_child(db, origin_id)
+    assert child.status is ExecutionStatus.FAILED
+    assert "stopped" in child.error_summary
+    assert statuses(db, incident_id, origin_id) == (
+        IncidentStatus.FAILED,
+        ExecutionStatus.ROLLBACK_FAILED,
+    )
+    assert "stop_instances" not in operations(aws)
+    assert "start_instances" not in operations(aws)  # 자동 기동은 별도 정책이다
+    [step] = exec_repo.list_steps(db, child.execution_id)
+    assert step.step_type == ex.STEP_COMPARE_INSTANCE_TYPE
+    assert step.effect is ExecutionEffect.NOT_APPLIED
+
+
+def test_same_type_but_stopped_revert_is_critical(db, rolled_back_origin, aws, caplog):
+    _, _origin_id = rolled_back_origin()
+    aws(current_type=BACKUP_TYPE, current_state="stopped")
+    cycle(db)
+
+    with caplog.at_level(logging.CRITICAL):
+        cycle(db)
+
+    assert "revert_size_not_restarted" in [
+        r.message for r in caplog.records if r.levelno == logging.CRITICAL
+    ]
+
+
+def test_same_type_and_originally_stopped_revert_succeeds(db, rolled_back_origin, aws):
+    """조치 이전에 멈춰 있던 인스턴스는 멈춘 채 타입만 백업 값이면 원복 완료다(ADR-0008 §4)."""
+    incident_id, origin_id = rolled_back_origin(backup_state="stopped")
+    aws(current_type=BACKUP_TYPE, current_state="stopped")
+
+    cycle(db)
+    cycle(db)
+
+    assert only_child(db, origin_id).status is ExecutionStatus.SUCCESS
+    assert statuses(db, incident_id, origin_id)[1] is ExecutionStatus.ROLLED_BACK
+
+
 def test_third_party_drift_stops_the_revert(db, rolled_back_origin, aws):
     """제3자가 그사이 타입을 바꿨으면 덮어쓰지 않는다(ADR-0008 §3-2 ③)."""
     incident_id, origin_id = rolled_back_origin()
@@ -575,6 +638,133 @@ def test_guardrail_rejection_is_recorded_for_the_console(db, rolled_back_origin,
     assert fact.execution_status is ExecutionStatus.ROLLBACK_FAILED
     assert child.status is ExecutionStatus.FAILED
     assert exec_repo.list_steps(db, child.execution_id) == []
+
+
+# ------------------------- ④의 확정 거절 ≠ 일시적 판정 불가 (Issue #434 1-2)
+
+
+def dry_run_error(code: str, status: int) -> ClientError:
+    return ClientError(
+        {"Error": {"Code": code, "Message": code}, "ResponseMetadata": {"HTTPStatusCode": status}},
+        "ModifyInstanceAttribute",
+    )
+
+
+def test_transient_dry_run_failure_defers_the_revert(db, rolled_back_origin, aws):
+    """④ DryRun이 스로틀링으로 끝난 것은 거절이 아니라 판정 불가다 — 보류하고 다시 평가한다.
+
+    전에는 사유와 무관하게 PRECHECK_INVALID_STATE로 확정돼, 스로틀링 한 번에 자동·관제자
+    원복이 모두 닫힌 채 자산이 바뀐 상태로 남았다. 자산은 만져지지 않았고 단계도 없다 —
+    상태 대조 조회 실패와 같은 사건이라 같은 보류 경로(#249)로 간다.
+    """
+    incident_id, origin_id = rolled_back_origin()
+    aws(dry_run=dry_run_error("RequestLimitExceeded", 503))
+
+    cycle(db)  # 접수
+    report = cycle(db)
+
+    assert report.deferred == 1 and report.closed == 0
+    child = only_child(db, origin_id)
+    assert child.status is ExecutionStatus.IN_PROGRESS
+    assert child.verification_reason_code is PrecheckReasonCode.PRECHECK_AWS_ERROR
+    assert child.verification_attempts == 1
+    assert exec_repo.list_steps(db, child.execution_id) == []
+    assert "stop_instances" not in operations(aws)
+    assert statuses(db, incident_id, origin_id)[1] is ExecutionStatus.ROLLBACK_INITIATED
+    # 거절이 아니므로 REJECTED 사실도 아직 없다
+    assert events_repo.list_by_incident(db, incident_id) == []
+
+
+def test_deferred_revert_is_re_evaluated_from_the_start(db, rolled_back_origin, aws):
+    """보류된 원복은 다음 주기에 가드레일부터 다시 지나 진행한다 — 실패한 원복의 재실행이 아니다.
+
+    단계가 0건이라 ADR-0008 §7의 "처음부터 실행"에 해당한다. 가드레일 평가는 매번 저장된다.
+    """
+    incident_id, origin_id = rolled_back_origin()
+    aws(dry_run=dry_run_error("RequestLimitExceeded", 503))
+    cycle(db)
+    assert cycle(db).deferred == 1
+
+    aws(dry_run=dry_run_ok())  # AWS가 다시 답한다
+    report = cycle(db)
+
+    assert report.closed == 1 and report.deferred == 0
+    child = only_child(db, origin_id)
+    assert child.status is ExecutionStatus.SUCCESS
+    assert child.verification_attempts == 0  # 판정이 내려졌으므로 보류 기록은 지워진다
+    assert statuses(db, incident_id, origin_id)[1] is ExecutionStatus.ROLLED_BACK
+    assert "modify_instance_attribute" in operations(aws)
+    evaluation = guardrails_repo.latest_for_execution(db, child.execution_id)
+    assert evaluation.result is GuardrailDecision.PASS
+
+
+def test_exhausted_transient_dry_run_failures_hand_the_revert_to_a_person(
+    db, rolled_back_origin, aws
+):
+    """재평가도 상한이 있다 — 소진하면 ADR-0004 정책 ④의 처분(수동 개입) 그대로다."""
+    incident_id, origin_id = rolled_back_origin()
+    aws(dry_run=dry_run_error("RequestLimitExceeded", 503))
+    cycle(db)
+
+    reports = [cycle(db) for _ in range(RETRY_NOW.max_attempts)]
+
+    assert [r.deferred for r in reports] == [1] * (RETRY_NOW.max_attempts - 1) + [0]
+    assert reports[-1].held == 1
+    child = only_child(db, origin_id)
+    assert child.status is ExecutionStatus.FAILED
+    assert child.verification_attempts == RETRY_NOW.max_attempts
+    assert statuses(db, incident_id, origin_id) == (
+        IncidentStatus.FAILED,
+        ExecutionStatus.ROLLBACK_FAILED,
+    )
+    assert "stop_instances" not in operations(aws)
+    cycle(db)
+    assert len(children(db, origin_id)) == 1  # 자식 행이 멱등 관문 — 두 번째 발동은 없다
+
+
+def test_dry_run_not_applied_is_never_re_evaluated(db, rolled_back_origin, aws):
+    """DryRun이 예외 없이 돌아왔다 — 플래그가 무시돼 자원이 실제로 바뀌었을 수 있다(ADR-0007 §2).
+
+    사유 코드는 조회 실패와 같은 PRECHECK_AWS_ERROR지만 "아직 만지지 않았다"는 전제가 서지
+    않으므로 재평가하지 않는다 — 재평가가 두 번째 실제 실행이 된다. 거절과 같이 즉시 수동 개입이다.
+    """
+    incident_id, origin_id = rolled_back_origin()
+    aws(dry_run=None)  # 가짜 EC2가 DryRun=True 호출에 예외 대신 정상 반환한다
+
+    cycle(db)
+    report = cycle(db)
+
+    assert report.closed == 1 and report.deferred == 0
+    child = only_child(db, origin_id)
+    assert child.status is ExecutionStatus.FAILED
+    assert child.verification_attempts == 0
+    assert "PRECHECK_AWS_ERROR" in child.error_summary
+    assert statuses(db, incident_id, origin_id)[1] is ExecutionStatus.ROLLBACK_FAILED
+    assert "stop_instances" not in operations(aws)
+    cycle(db)
+    assert len(children(db, origin_id)) == 1
+
+
+@pytest.mark.parametrize(
+    "code, status",
+    [("UnauthorizedOperation", 403), ("IncorrectInstanceState", 400)],
+)
+def test_definitive_dry_run_rejection_is_still_final(db, rolled_back_origin, aws, code, status):
+    """④의 권한 거부·상태 이상은 AWS가 답한 거절이다 — 재평가하지 않고 즉시 수동 개입(정책 ④)."""
+    incident_id, origin_id = rolled_back_origin()
+    aws(dry_run=dry_run_error(code, status))
+
+    cycle(db)
+    report = cycle(db)
+
+    assert report.closed == 1 and report.deferred == 0
+    child = only_child(db, origin_id)
+    assert child.status is ExecutionStatus.FAILED
+    assert child.verification_attempts == 0
+    assert "AWS_DRY_RUN" in child.error_summary
+    assert statuses(db, incident_id, origin_id)[1] is ExecutionStatus.ROLLBACK_FAILED
+    [fact] = events_repo.list_by_incident(db, incident_id)
+    assert fact.outcome == "REJECTED"
 
 
 def test_passing_guardrail_records_the_validated_command(db, rolled_back_origin, aws):

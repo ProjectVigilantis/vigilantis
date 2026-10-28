@@ -28,9 +28,45 @@ from services.aws.errors import (  # noqa: E402
     is_retryable,
     reason_code_for,
     run_dry_run,
+    watch_dry_run_protocol,
 )
 
 R = PrecheckReasonCode
+
+
+# --- DryRun 미적용 감시 (Issue #434 1-2) ------------------------------------------
+
+
+def test_watch_counts_dry_run_not_applied_but_not_aws_errors():
+    """같은 PRECHECK_AWS_ERROR라도 '플래그 무시'와 '접속 실패'를 가른다 — 재평가 여부의 입력이다."""
+    from botocore.exceptions import EndpointConnectionError
+
+    def returns_normally(**_):
+        return {}
+
+    def unreachable(**_):
+        raise EndpointConnectionError(endpoint_url="https://ec2")
+
+    with watch_dry_run_protocol() as watch:
+        assert run_dry_run(unreachable) is R.PRECHECK_AWS_ERROR
+        assert not watch.violated
+        assert run_dry_run(returns_normally) is R.PRECHECK_AWS_ERROR
+        assert watch.violated and watch.not_applied == 1
+
+
+def test_watch_is_scoped_to_its_block():
+    """블록 밖의 호출은 세지 않고, 중첩 블록은 각자 센다."""
+
+    def returns_normally(**_):
+        return {}
+
+    run_dry_run(returns_normally)  # 감시 밖 — 아무 데도 세지 않는다
+    with watch_dry_run_protocol() as outer:
+        with watch_dry_run_protocol() as inner:
+            run_dry_run(returns_normally)
+        assert inner.not_applied == 1
+        run_dry_run(returns_normally)
+    assert outer.not_applied == 2
 
 
 def _client_error(code: str) -> ClientError:

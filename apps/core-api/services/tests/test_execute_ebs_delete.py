@@ -284,9 +284,20 @@ def test_does_not_delete_when_the_snapshot_call_is_rejected(aws):
     assert outcome.steps[-1].effect is E.NOT_APPLIED
 
 
+def snapshots(state: str) -> dict:
+    return {"Snapshots": [{"SnapshotId": SNAPSHOT, "State": state}]}
+
+
 def test_does_not_delete_when_the_snapshot_never_completes(aws):
-    """대기 상한을 넘겼다 — 진행 중 스냅숏으로 지우지 않는다(DoD 3)."""
-    aws(**{"waiter:snapshot_completed": waiter_error()})
+    """대기 상한을 넘겼고 재조회도 pending이다 — 진행 중 스냅숏으로 지우지 않는다(DoD 3).
+
+    관측한 상태(pending)가 사유에 남고, 이 단계가 자산을 바꾸지 않았음은 확실하므로
+    NOT_APPLIED다(Issue #434 BE-1). 앞선 스냅숏 단계는 APPLIED라 종료 판정으로 간다.
+    """
+    aws(
+        **{"waiter:snapshot_completed": waiter_error()},
+        describe_snapshots=snapshots("pending"),
+    )
 
     outcome = run()
 
@@ -295,15 +306,70 @@ def test_does_not_delete_when_the_snapshot_never_completes(aws):
         "describe_volumes",
         "create_snapshot",
         "waiter:snapshot_completed",
+        "describe_snapshots",
     ]
     assert "delete_volume" not in operations(aws)
     wait_step = outcome.steps[-1]
     assert wait_step.step_type == ex.STEP_WAIT_SNAPSHOT
     assert wait_step.status is S.FAILED
-    # 스냅숏이 끝났는지 모르는 상태다 — 볼륨은 그대로라 판정이 현물을 본다
-    assert wait_step.effect is E.UNKNOWN
-    # 스냅숏 ID는 남는다 — 완료를 사람이 확인하고 이어 갈 수 있어야 한다
+    assert wait_step.effect is E.NOT_APPLIED
+    # 스냅숏 ID와 관측 상태는 남는다 — 완료를 사람이 확인하고 이어 갈 수 있어야 한다
     assert SNAPSHOT in (wait_step.error_summary or "")
+    assert "pending" in wait_step.error_summary
+
+
+def test_does_not_delete_when_the_snapshot_errors(aws):
+    """AWS가 스냅숏을 error로 확정했다 — 안전장치가 없으므로 지우지 않는다."""
+    aws(
+        **{
+            "waiter:snapshot_completed": WaiterError(
+                name="snapshot_completed",
+                reason="Waiter encountered a terminal failure state",
+                last_response=snapshots("error"),
+            )
+        },
+        describe_snapshots=snapshots("error"),
+    )
+
+    outcome = run()
+
+    assert not outcome.succeeded
+    assert "delete_volume" not in operations(aws)
+    wait_step = outcome.steps[-1]
+    assert (wait_step.status, wait_step.effect) == (S.FAILED, E.NOT_APPLIED)
+    assert "error" in wait_step.error_summary
+
+
+def test_deletes_when_the_snapshot_completed_right_after_the_wait(aws):
+    """마지막 시도 뒤에 completed가 됐다 — 재조회가 완료를 보면 안전장치가 섰으므로 지운다."""
+    aws(
+        **{"waiter:snapshot_completed": waiter_error()},
+        describe_snapshots=snapshots("completed"),
+    )
+
+    outcome = run()
+
+    assert outcome.succeeded
+    assert operations(aws)[-2:] == ["describe_snapshots", "delete_volume"]
+    wait_step = next(s for s in outcome.steps if s.step_type == ex.STEP_WAIT_SNAPSHOT)
+    assert (wait_step.status, wait_step.effect) == (S.SUCCESS, E.APPLIED)
+    assert "재조회" in wait_step.result_summary
+
+
+def test_does_not_delete_when_the_snapshot_state_cannot_be_read(aws):
+    """대기도 재조회도 실패했다 — 스냅숏이 끝났는지 모르는 상태(UNKNOWN)라 지우지 않는다."""
+    aws(
+        **{"waiter:snapshot_completed": waiter_error()},
+        describe_snapshots=client_error("RequestLimitExceeded", 503),
+    )
+
+    outcome = run()
+
+    assert not outcome.succeeded
+    assert "delete_volume" not in operations(aws)
+    wait_step = outcome.steps[-1]
+    assert (wait_step.status, wait_step.effect) == (S.FAILED, E.UNKNOWN)
+    assert "PRECHECK_AWS_ERROR" in wait_step.error_summary
 
 
 def test_does_not_delete_when_the_snapshot_response_has_no_id(aws):
