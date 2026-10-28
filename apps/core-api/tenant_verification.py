@@ -6,9 +6,9 @@
 #   - 계약: packages/schemas/api/tenants.py TenantVerificationResult · TenantVerification.
 #     순서대로 처음 실패한 자리를 싣는다 — AssumeRole(ASSUME_DENIED) → GetCallerIdentity · 계정 대조
 #     (ACCOUNT_MISMATCH) → 최소 읽기 1건(READ_DENIED). 묻지 못했으면 UNREACHABLE(연결 여부를 판정하지 않는다).
-#   - 이 모듈은 AWS 를 직접 부르지 않는다. 세 단계를 호출부가 함수로 넘긴다 — 플랫폼 자격 · 고객 역할 세션을
-#     만드는 일은 services/aws/client.py 의 테넌트 층(#533 A) 몫이고, 판정은 그와 따로 고정한다
-#     (LocalStack 은 신뢰 정책 · ExternalId 를 검사하지 않아 판정을 실측으로 고정할 수 없다).
+#   - 판정(judge_connection)은 AWS 를 직접 부르지 않는다. 세 단계를 호출부가 함수로 넘긴다 — 판정을 AWS 와
+#     따로 고정하기 위해서다(LocalStack 은 신뢰 정책 · ExternalId 를 검사하지 않아 실측으로 고정할 수 없다).
+#     실 AWS 어댑터(verify_connection)가 services/aws/client.py 테넌트 층(#533 A)의 세션을 그 자리에 넣는다.
 #   - 「묻지 못함」과 「거절됨」을 가른다. 스로틀링 · 5xx · 접속 실패 · 플랫폼 자신의 자격 문제는 고객 계정이
 #     답한 것이 아니라 UNREACHABLE 이다. 그 밖의 AWS 오류는 그 단계의 거절로 본다 — 사람이 고치기 전에는
 #     다시 물어도 같은 답이다.
@@ -24,6 +24,12 @@ from typing import Final, TypeVar
 
 from botocore.exceptions import BotoCoreError, ClientError
 from schemas.api.tenants import TenantVerificationResult
+from services.aws.client import (
+    TenantAccess,
+    forget_tenant,
+    session_client,
+    verification_session,
+)
 from services.aws.errors import aws_error_code
 
 _Session = TypeVar("_Session")
@@ -134,3 +140,25 @@ def judge_connection(
     except (ClientError, BotoCoreError) as exc:
         return _failed_at(TenantVerificationResult.READ_DENIED, exc)
     return OK
+
+
+def verify_connection(
+    access: TenantAccess, *, expected_account_id: str, region: str
+) -> VerificationOutcome:
+    """실 AWS 로 연결을 확인한다 — 플랫폼 자격 → 고객 역할 → 계정 대조 → 최소 읽기(regions[0]).
+
+    세션 캐시를 거치지 않고, 통과하면 그 테넌트의 캐시를 버린다(services/aws/client.py 헤더).
+    트랜잭션 밖에서 부른다 — AWS 응답을 기다리는 동안 테넌트 행을 잡고 있지 않는다."""
+    outcome = judge_connection(
+        expected_account_id=expected_account_id,
+        assume=lambda: verification_session(access),
+        caller_account=lambda session: session_client(session, "sts", region)
+        .get_caller_identity()["Account"],
+        # EC2 의 MaxResults 하한이 5 다. 응답은 보지 않는다 — 읽기 권한만 확인한다.
+        read=lambda session: session_client(session, "ec2", region).describe_instances(
+            MaxResults=5
+        ),
+    )
+    if outcome.result is TenantVerificationResult.OK:
+        forget_tenant(access.tenant_id)
+    return outcome
