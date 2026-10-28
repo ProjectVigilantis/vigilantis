@@ -5,6 +5,8 @@
 import type { EnumLabel } from './enum-labels.ts';
 import {
   TENANT_DELETABLE_STATUSES,
+  TENANT_RESUMABLE_STATUSES,
+  TENANT_SUSPENDABLE_STATUSES,
   TENANT_VERIFIABLE_STATUSES,
   type ErrorCode,
   type TenantCreateRequest,
@@ -32,7 +34,9 @@ export const VERIFICATION_LABELS: Record<TenantVerificationResult, EnumLabel & {
   ACCOUNT_MISMATCH: {
     label: '계정 불일치',
     tone: 'red',
-    hint: '역할은 열렸지만 다른 계정입니다. 계정 ID를 잘못 넣었다면 이 고객을 지우고 새로 만드세요.',
+    // 계약이 역할 ARN의 계정 = 계정 ID를 강제해 정상 경로에서는 나오지 않는 방어 확인이다(#507). 오입력은
+    // ASSUME_DENIED로 나오므로 여기서는 삭제 · 재등록을 안내하지 않는다.
+    hint: '역할은 열렸지만 받은 자격의 계정이 등록한 계정 ID와 다릅니다. 정상 경로에서는 나오지 않는 결과입니다. 저장된 계정 ID · 역할 ARN과 연결 확인 구현이 어긋났는지 점검하세요.',
   },
   READ_DENIED: {
     label: '읽기 권한 없음',
@@ -45,6 +49,19 @@ export const VERIFICATION_LABELS: Record<TenantVerificationResult, EnumLabel & {
     hint: 'AWS에 묻지 못했습니다(네트워크 · 요청 제한). 연결 여부와 무관하니 잠시 뒤 다시 확인하세요.',
   },
 };
+
+/**
+ * 연결 확인 결과의 다음 할 일. 계정 ID 오입력은 ASSUME_DENIED로 나오고 고치는 길이 지우고 새로 추가하는 것이라,
+ * 지울 수 있는 연결 대기(TENANT_DELETABLE_STATUSES)에서만 계정 ID 확인과 삭제 · 재등록을 덧붙인다. 관제 중 ·
+ * 정지 고객은 기록이 있어 지우지 않는다(#508).
+ */
+export function verificationHint(result: TenantVerificationResult, status: TenantStatus): string | null {
+  const hint = VERIFICATION_LABELS[result].hint;
+  if (result === 'ASSUME_DENIED' && TENANT_DELETABLE_STATUSES.includes(status)) {
+    return `${hint} 등록한 계정 ID도 확인하세요. 잘못 넣은 것이 확인되면 이 고객을 지우고 새로 추가하세요.`;
+  }
+  return hint;
+}
 
 export interface TenantActions {
   verify: boolean;
@@ -60,8 +77,8 @@ export interface TenantActions {
 export function tenantActions(status: TenantStatus): TenantActions {
   return {
     verify: TENANT_VERIFIABLE_STATUSES.includes(status),
-    suspend: status === 'ACTIVE',
-    resume: status === 'SUSPENDED',
+    suspend: TENANT_SUSPENDABLE_STATUSES.includes(status),
+    resume: TENANT_RESUMABLE_STATUSES.includes(status),
     remove: TENANT_DELETABLE_STATUSES.includes(status),
   };
 }
@@ -75,6 +92,26 @@ const STALE_REQUEST_CODES: readonly ErrorCode[] = ['TENANT_STATE_CONFLICT', 'TEN
 
 export function isStaleTenantRequest(code: ErrorCode | null): boolean {
   return code !== null && STALE_REQUEST_CODES.includes(code);
+}
+
+/** 상세 화면 동작 하나의 결과. */
+export type TenantRunResult = { ok: true } | { ok: false; code: ErrorCode | null };
+
+export interface TenantRunFollowUp {
+  /** 서버 값으로 화면을 다시 읽는다. */
+  refresh: boolean;
+  /** 열린 확인창을 닫는다. 남기면 입력한 정지 사유와 창 안의 오류가 그대로 보이고 다시 시도할 수 있다. */
+  closeDialog: boolean;
+}
+
+/**
+ * 동작 뒤 화면이 할 일. 성공했거나 그 사이 상태가 바뀌어 요청이 무효가 됐으면(isStaleTenantRequest) 다시 읽고
+ * 확인창을 닫는다. 일시 오류면 둘 다 하지 않는다. `null`은 다른 동작이 진행 중이라 건너뛴 경우다.
+ */
+export function tenantRunFollowUp(result: TenantRunResult | null): TenantRunFollowUp {
+  if (result === null) return { refresh: false, closeDialog: false };
+  const settled = result.ok || isStaleTenantRequest(result.code);
+  return { refresh: settled, closeDialog: settled };
 }
 
 /* ─────────────────────────── 목록 요약(그래프) ─────────────────────────── */
