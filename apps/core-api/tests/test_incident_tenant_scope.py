@@ -107,10 +107,11 @@ def test_own_detail_is_200(client_pg, login_as, two_tenants):
     assert client_pg.get(f"/api/v1/incidents/{two_tenants['mine'].incident_id}").status_code == 200
 
 
+@pytest.mark.parametrize("target", ["theirs", "mvp"])
 @pytest.mark.parametrize("call", [_execute, _resolve], ids=["execute", "resolve"])
-def test_out_of_scope_change_is_404_and_writes_nothing(db, client_pg, login_as, two_tenants, call):
+def test_out_of_scope_change_is_404_and_writes_nothing(db, client_pg, login_as, two_tenants, call, target):
     login_as(UserRole.OPERATOR, tenant_id=two_tenants["a"])
-    theirs = two_tenants["theirs"]
+    theirs = two_tenants[target]
     resp = call(client_pg, theirs)
     assert resp.status_code == 404 and _code(resp) == "INCIDENT_NOT_FOUND"
     db.expire_all()
