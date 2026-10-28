@@ -26,7 +26,7 @@ Cognito Admin 인증 API로 로그인을 진행하고, **이번 로그인에서 
 | `bootstrap_enrollment.py` | (#492) 등록 링크 발급 · 목록 · 회수 운영 CLI(§플랫폼 등록 링크) |
 | `routers/auth.py` | `/api/v1/auth` 라우터(얇게). (PR 3) `/password-reset` · `/password-reset/confirm`. (#492) `/me`에 `account_type` · `tenant_id`. `/platform-enrollment`는 기능 스위치 의존성(`require_platform_enrollment_enabled`) 뒤에 서비스를 부르고, Cognito 어댑터는 링크 판정 뒤에 지연 조립한다(`get_cognito_adapter_factory`) |
 | `routers/users.py` | (PR 3) `/api/v1/users` 라우터(얇게). 라우터 의존성 `require_admin`. (#492) 관리 범위는 서비스가 판정한다. 초대 · 재발송의 Cognito 어댑터는 사전 판정 뒤에 조립한다(`get_cognito_adapter_factory`) |
-| `main.py` | (PR 2) 포함 시점 보호 배선(Origin → 세션), 접근 로그의 `user_id` · `role`, API 문서 토글. (PR 3) 사용자 관리 라우터도 같은 배선으로 포함. (#492) 테넌트 범위가 아직 없는 업무 라우터(자산 · 메트릭)에는 `require_platform_account`를 더한다(#533 C 부터 인시던트 · 조치는 범위로 거른다). 테넌트 라우터(`routers/tenants.py`)는 Origin → 세션 배선으로만 포함하고, 플랫폼 판정은 그 라우터의 의존성이다 |
+| `main.py` | (PR 2) 포함 시점 보호 배선(Origin → 세션), 접근 로그의 `user_id` · `role`, API 문서 토글. (PR 3) 사용자 관리 라우터도 같은 배선으로 포함. (#492) 테넌트 범위가 아직 없는 업무 라우터(메트릭)에는 `require_platform_account`를 더한다(#533 C 부터 인시던트 · 조치 · 자산은 범위로 거른다). 테넌트 라우터(`routers/tenants.py`)는 Origin → 세션 배선으로만 포함하고, 플랫폼 판정은 그 라우터의 의존성이다 |
 | `routers/ws.py` | (PR 2) WebSocket 연결 시 세션 확인 · 연결 중 재확인(4401). 닫기 코드 계약은 `packages/schemas/api/ws.py`. (#492) PLATFORM 계정만 받는다 |
 | `routers/actions.py` · `routers/incidents.py` | (PR 2) 조치 실행 · 종료가 역할 검사 결과(`CurrentUser`)를 받는다 |
 | `db/models.py` · `db/repositories/auth.py` | `app_users` · `auth_sessions`. (PR 3) `user_admin_events`(`UserAdminEvent`), 세션 회수 사유 추가, 마지막 로그인 · 활성 ADMIN 집계. (#492) `AppUser.account_type`과 CHECK 2개, 목록 · 활성 ADMIN 집계의 테넌트 범위 |
@@ -140,9 +140,9 @@ e492a3b5c701 ─┬─ f492c4a8d2e1 ── b492e5d7c3a1 ─┬─ c492d6e8f4a2 (
 | --- | --- | --- |
 | 공개 경로 | `GET /health`, `POST /api/v1/auth/login*`(6단계), (PR 3) `POST /api/v1/auth/password-reset` · `/password-reset/confirm`, (#492) `POST /api/v1/auth/platform-enrollment`(기본 꺼짐 — 꺼져 있으면 JSON으로 파싱되는 본문은 404이고, 문법이 깨진 JSON은 아래 깨진 JSON 본문 행대로 422, §플랫폼 등록 링크), `POST /api/v1/auth/logout`(멱등 — 세션이 없으면 지울 것이 없어 204). `GET /me` · `POST /activity`는 세션이 없으면 401이다. PR 1 · 2에서는 Cognito 미구성이면 503이었고, PR 3부터 Cognito 설정과 무관하게 동작한다(§설정). 그 밖의 `/api/v1/*`와 WebSocket은 전부 세션이 필요하다. 공개 목록은 `test_api_access.py`의 `PUBLIC_ROUTES`가 실제 앱 경로와 대조한다 — 새 경로는 목록에 넣지 않는 한 401이어야 통과한다 | [팀 결정] |
 | 세션 판정 | `auth.service.resolve_current_user(touch=False)` 하나. 보호 API · WebSocket은 유휴 시간을 늘리지 않는다. Cognito 설정을 읽지 않는다 — Cognito가 비어도 보호 API는 세션만으로 열린다 | [팀 결정] [판단] |
-| 배선 | `main.py`가 조치 · 자산 · 인시던트 · 메트릭 라우터를 `include_router(..., dependencies=[Origin, 세션])`로 포함한다. 역할은 조치 실행 · 종료 라우트의 의존성이다. 검사 순서: Origin(상태 변경만, DB 전) → 세션 → 역할 → 본문 검증 → 라우터. (#492) 자산 · 메트릭 라우터는 세션 다음에 `require_platform_account`(아래 임시 업무 관문)를 거친다 | [판단] |
-| 임시 업무 관문(#492) | 테넌트 범위가 들어오기 전까지 자산 · 메트릭 HTTP 라우터와 전역 WebSocket은 PLATFORM 계정만 받는다. 켜고 끄는 설정이 없다. 인시던트 · 조치 라우터는 #533 C 에서 관문을 걷고 요청자의 테넌트 범위로 거른다(아래 §테넌트 범위) | [판단: 격리 전 임시 제한] |
-| 테넌트 범위(#533 C) | 인시던트 목록 · 상세 · 종료와 조치 실행은 요청자의 범위로 거른다 — PLATFORM은 전부, TENANT는 자기 테넌트(테넌트 없는 MVP 기록은 빠진다). 범위 밖은 목록에서 빠지고 상세 · 실행 · 종료는 404 `INCIDENT_NOT_FOUND`. 판정 순서는 역할(403) → 범위(404) → 같은 Key 재요청(200) → **대상 인시던트 테넌트의** 정지(409 `TENANT_SUSPENDED` — 새 실행은 PLATFORM 포함, 종료는 TENANT 사용자만) → 상태(409). 계약은 `packages/schemas/api/tenants.py` 머리말 | [팀 결정: 계약 PR #516] |
+| 배선 | `main.py`가 조치 · 자산 · 인시던트 · 메트릭 라우터를 `include_router(..., dependencies=[Origin, 세션])`로 포함한다. 역할은 조치 실행 · 종료 라우트의 의존성이다. 검사 순서: Origin(상태 변경만, DB 전) → 세션 → 역할 → 본문 검증 → 라우터. (#492) 메트릭 라우터는 세션 다음에 `require_platform_account`(아래 임시 업무 관문)를 거친다 | [판단] |
+| 임시 업무 관문(#492) | 테넌트 범위가 들어오기 전까지 메트릭 HTTP 라우터와 전역 WebSocket(#535)은 PLATFORM 계정만 받는다. 켜고 끄는 설정이 없다. 인시던트 · 조치 · 자산 라우터는 #533 C 에서 관문을 걷고 요청자의 테넌트 범위로 거른다(아래 §테넌트 범위) | [판단: 격리 전 임시 제한] |
+| 테넌트 범위(#533 C) | 인시던트 목록 · 상세 · 종료, 조치 실행, 자산 목록(자산 · 수집 회차)은 요청자의 범위로 거른다 — PLATFORM은 전부, TENANT는 자기 테넌트(테넌트 없는 MVP 기록은 빠진다). 범위 밖은 목록에서 빠지고 상세 · 실행 · 종료는 404 `INCIDENT_NOT_FOUND`. 판정 순서는 역할(403) → 범위(404) → 같은 Key 재요청(200) → **대상 인시던트 테넌트의** 정지(409 `TENANT_SUSPENDED` — 새 실행은 PLATFORM 포함, 종료는 TENANT 사용자만) → 상태(409). 계약은 `packages/schemas/api/tenants.py` 머리말 | [팀 결정: 계약 PR #516] |
 | 역할 | 아래 표. 역할 · Origin 거절은 `workflows.reserve_execution` · `workflows.resolve_incident` 전이다 — 실행 행(디스패처가 보는 비종결 `action_executions`) · 후보 전이 · AWS 호출이 생기지 않는다 | [팀 결정] |
 | 401 · 403 | 세션 없음 · 만료(유휴 · 최대 수명) · 회수(`LOGOUT` · `SUPERSEDED`, PR 3의 `ADMIN_REVOKED` · `ACCOUNT_DISABLED` · `PASSWORD_RESET`) · 비활성 사용자 · (#492) UNASSIGNED 계정 → 401 `AUTH_REQUIRED`(사유를 구분하지 않는다). 역할 · 계정 종류 불허 → 403 `AUTH_FORBIDDEN`. (#492) 정지 테넌트 TENANT 계정의 사용자 관리 변경 · (#533 C) 정지 테넌트 기록의 실행 · 종료 → 409 `TENANT_SUSPENDED`. 허용 밖 Origin → 403 `AUTH_ORIGIN_REJECTED` | [팀 결정] [판단: #492 UNASSIGNED · 임시 관문 · 정지 409] |
 | Origin 범위 | 쿠키로 승인되는 모든 상태 변경 요청(GET · HEAD · OPTIONS 외). `AUTH_ALLOWED_ORIGINS`와 정확히 일치(비면 `CORS_ALLOW_ORIGINS`), 세션 조회 전에 거절. 조회(GET)는 Origin을 보지 않는다. WebSocket Handshake도 같은 목록(`auth.http.allowed_origins`)을 쓴다 | [표준] [OWASP CSRF: Verifying Origin](https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html) |
@@ -156,13 +156,13 @@ e492a3b5c701 ─┬─ f492c4a8d2e1 ── b492e5d7c3a1 ─┬─ c492d6e8f4a2 (
 | --- | --- | --- | --- | --- |
 | 로그인 · `/me` · `/activity` · `/logout` · 비밀번호 재설정 | 허용 | 허용(테넌트 정지와 무관) | 허용(테넌트 정지와 무관) | 허용(테넌트 정지와 무관) |
 | 인시던트 조회(`GET /api/v1/incidents` · `/incidents/{id}`) | 전부 | 자기 테넌트(정지여도 조회) · 범위 밖 404 | 자기 테넌트(정지여도 조회) · 범위 밖 404 | 자기 테넌트(정지여도 조회) · 범위 밖 404 |
-| 자산 · 메트릭 조회(`GET /api/v1/assets` · `/metrics/timeseries`) | 허용 | 403 `AUTH_FORBIDDEN`(임시 관문) | 403 `AUTH_FORBIDDEN`(임시 관문) | 403 `AUTH_FORBIDDEN`(임시 관문) |
+| 자산 조회(`GET /api/v1/assets`) | 전부 | 자기 테넌트 자산 · 수집 회차만(정지여도 조회) | 자기 테넌트 자산 · 수집 회차만(정지여도 조회) | 자기 테넌트 자산 · 수집 회차만(정지여도 조회) |
 | WebSocket | 허용 | 1008 · 4401 | 1008 · 4401 | 1008 · 4401 |
 | 조치 실행 `POST /api/v1/actions/execute` · 인시던트 종료 `POST /api/v1/incidents/{id}/resolve` | 전부 — 정지 테넌트 기록의 새 실행은 409 `TENANT_SUSPENDED`(종료는 받는다) | 자기 테넌트 · 범위 밖 404 · 정지면 409 `TENANT_SUSPENDED` | 자기 테넌트 · 범위 밖 404 · 정지면 409 `TENANT_SUSPENDED` | 403 `AUTH_FORBIDDEN`(역할) |
 | 사용자 관리 `/api/v1/users*` | 모든 TENANT 계정 | 자기 테넌트의 TENANT 계정(소속 정지면 조회만) | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
 | 테넌트 관리 `/api/v1/tenants*` | 허용 | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
 
-정지 테넌트 사용자의 자기 기록 조회 요구([ADR-0012](../../../docs/adr/0012-saas-transition-account-structure-and-tenant-model.md))는 인시던트에서 열렸고(#533 C), 자산 · 메트릭 · WebSocket은 그 범위 필터가 들어올 때 연다. 이 모듈은 테넌트 데이터 격리가 완성됐다고 주장하지 않는다. 정지 테넌트 기록의 실행 · 종료 거절은 대상 인시던트의 테넌트로 Workflow(`workflows.reserve_execution` · `resolve_incident`)가 판정하며 이 모듈이 판정하지 않는다. 수집기 · Workflow 같은 백그라운드 처리의 테넌트 격리도 이 범위(T-1)가 아니다.
+정지 테넌트 사용자의 자기 기록 조회 요구([ADR-0012](../../../docs/adr/0012-saas-transition-account-structure-and-tenant-model.md))는 인시던트 · 자산에서 열렸고(#533 C), 메트릭 · WebSocket은 그 범위 필터가 들어올 때 연다. 이 모듈은 테넌트 데이터 격리가 완성됐다고 주장하지 않는다. 정지 테넌트 기록의 실행 · 종료 거절은 대상 인시던트의 테넌트로 Workflow(`workflows.reserve_execution` · `resolve_incident`)가 판정하며 이 모듈이 판정하지 않는다. 수집기 · Workflow 같은 백그라운드 처리의 테넌트 격리도 이 범위(T-1)가 아니다.
 
 ## 사용자당 세션 1개 (PR 3)
 
@@ -303,7 +303,7 @@ SDK 호출 뒤 잠금 안의 재확인(행위자 · 대상 신원 · 대상 테�
 - `/`(`apps/web/src/app/page.tsx`)는 업무 조회 전에 `/me`로 계정을 확인한다. PLATFORM에게는 기존 대시보드를, TENANT 계정에게는 업무 API를 부르지 않고 짧은 `업무 화면 이용 제한` 안내를 보인다. 이 안내는 서버 403 오류 화면이 아니며, 고객용 업무 대시보드를 여는 것도 아니다. `/me` 실패는 오류 화면으로 알리며(401은 로그인 이동) 이용 제한 안내나 빈 대시보드로 바꾸지 않는다.
 - 셸의 자산 주기 조회(수집 · 연결 인디케이터)와 전역 WebSocket(`components/gnb.tsx` · `realtime-provider.tsx`)은 `/me`가 PLATFORM으로 확인된 뒤에만 시작한다. 확인 중 · 미로그인 · 확인 실패 · TENANT 계정에서는 업무 요청을 보내지 않는다.
 - 상단바 오른쪽 이메일(`components/auth/user-menu.tsx`)을 누르면 `계정 정보` 대화상자가 열린다(별도 화면은 없다). SessionProvider가 이미 가진 `/me` 값으로 이메일 · 역할(사용자 관리와 같은 이름) · 계정 종류를 보이고, TENANT 계정이면 자기 고객 ID를 더한다. PLATFORM 계정에는 고객 ID 항목이 없다(`apps/web/src/lib/account-summary.ts`). 고객 이름은 `/me` 계약에 없어 보이지 않으며, 이를 위해 새 조회 API · PLATFORM 전용 테넌트 API를 부르거나 공개 계약을 넓히지 않는다.
-- 지금 화면에서 쓸 수 있는 것은 TENANT ADMIN의 자기 테넌트 사용자 관리다. 서버는 인시던트 API를 자기 테넌트 범위로 열었지만(#533 C) 화면의 업무 관문은 그대로다 — 자산 · 메트릭 API와 WebSocket은 아직 PLATFORM 전용이다(§접근 보호 임시 업무 관문).
+- 지금 화면에서 쓸 수 있는 것은 TENANT ADMIN의 자기 테넌트 사용자 관리다. 서버는 인시던트 · 자산 API를 자기 테넌트 범위로 열었지만(#533 C) 화면의 업무 관문은 그대로다 — 메트릭 API와 WebSocket은 아직 PLATFORM 전용이다(§접근 보호 임시 업무 관문).
 - 사용자 변경 이력은 기존 ADMIN 관리 범위의 `user_admin_events` 조회(§이력)이며, 로그인 기록이나 조치 실행 감사 기록(T-2)을 포함한 전체 감사가 아니다.
 - 사용자 관리 화면은 고객 ID(`tenant_id`) 열을 보인다. PLATFORM은 초대할 고객 ID(UUID)를 직접 입력하고, TENANT ADMIN은 자기 소속을 읽기 전용으로 보며 다른 고객을 고를 수 없다.
 - 오류는 서버 판정대로 알린다 — 범위 밖 사용자는 대상 없음과 같은 문구, 고객 상태 거절은 고객 사유, 초대 · 재발송의 500 · 네트워크 실패는 메일이 나갔을 수 있다는 안내다(`apps/web/src/lib/user-admin.ts`).
@@ -517,7 +517,7 @@ cd apps/web && npm run lint && npm run build && npm run test --if-present
 - **TOTP 분실(PR 3 제외).** 비밀번호 재설정은 비밀번호만 바꾸고 로그인에는 여전히 TOTP가 필요하므로, 인증 앱을 잃은 사용자는 재설정으로 복구할 수 없다. 관리자용 TOTP 재설정 UI · API · CLI는 PR 3 게시 뒤의 후속 작업이다([#515](https://github.com/ProjectVigilantis/vigilantis/issues/515)). 필요한 `AdminDeleteSoftwareToken`은 botocore 1.43.82부터 있어(현재 잠금 1.43.70에는 없다) 후속에서 의존성 갱신이 필요하다. 마지막 ADMIN이 TOTP를 잃으면 다시 로그인하지 못할 수 있다. 다만 이미 열린 세션은 만료 · 회수 전까지 유효하므로 즉시 운영이 멈추지는 않는다.
 - **세션 확인 부하.** 보호 API 요청마다 `auth_sessions` · `app_users` 조회가 2번 붙는다(요청 세션 안). 열린 WebSocket은 연결마다 `WS_SESSION_CHECK_SECONDS`에 한 번 같은 조회를 한다.
 - **요청 본문 크기.** 본문 크기 제한은 인증 전에 강제되지 않는다(FastAPI 기존 동작 — 본문을 의존성보다 먼저 읽는다). 본문을 받는 경로는 미인증 요청도 본문 전체를 읽은 뒤에 거절한다. 인증 전 크기 제약은 배포 계층(WAF 등)에 두는 전제이며, 특정 환경의 적용 여부는 이 문서가 보증하지 않는다.
-- **임시 업무 관문(#492).** 고객사(TENANT) 계정은 자산 · 메트릭 API와 실시간 연결을 쓰지 못한다(인시던트 · 조치 API는 #533 C 부터 자기 테넌트 범위로 열렸다). 끄는 설정이 없으며, 각 범위 필터가 들어올 때 관문을 걷는다. 이 상태를 테넌트 데이터 격리 완료로 안내하지 않는다.
+- **임시 업무 관문(#492).** 고객사(TENANT) 계정은 메트릭 API와 실시간 연결을 쓰지 못한다(인시던트 · 조치 · 자산 API는 #533 C 부터 자기 테넌트 범위로 열렸다). 끄는 설정이 없으며, 각 범위 필터가 들어올 때 관문을 걷는다. 이 상태를 테넌트 데이터 격리 완료로 안내하지 않는다.
 - **고객 ID 입력(#492).** 사용자 관리 화면에 고객 선택 목록이 없어(백엔드의 테넌트 목록 API를 이 화면은 쓰지 않는다) PLATFORM 운영자는 초대할 고객의 UUID를 직접 확인해 입력해야 한다. 틀린 값은 404 `TENANT_NOT_FOUND`다.
 - **마이그레이션 적용(#492).** head는 병합 revision `c492d6e8f4a2`이며, dev 가지 끝과 #492 가지 끝 어느 쪽의 DB도 `alembic upgrade head`로 앞으로만 올린다(§마이그레이션 그래프 · 병합 `c492d6e8f4a2`). `f492c4a8d2e1`은 이전 앱 · CLI의 사용자 생성과 함께 쓸 수 없으므로 마이그레이션 · 새 앱 · 새 CLI를 함께 올린다. downgrade는 PLATFORM · UNASSIGNED 구분을 잃는다(§마이그레이션 `f492c4a8d2e1`). 소속 없는 기존 계정은 UNASSIGNED로 남아 로그인할 수 없으므로, 필요하면 CLI로 지정한다.
 - **초대 · 재발송의 결과 불명(#492).** SDK 호출 뒤 재확인이 거절하면 메일은 나갔을 수 있다. 오류 코드만으로 미발송을 판단하지 말고 목록 · Cognito 상태를 확인한 뒤 다시 수행한다(§부분 실패).

@@ -6,6 +6,10 @@
 #     계약 불변식(판정 상태 ↔ verdict/skip, spec ↔ asset_type)은 DTO가 검증한다.
 #   - SQL은 db.repositories 경유 — 라우터는 응답 조립만 한다.
 #   - 필터·페이지네이션 없음(전체 반환) — SSOT §API 계약.
+#   - 테넌트 범위(#533 C): 요청자의 범위(auth.access.require_tenant_scope)로 자산 · 수집 회차를 함께
+#     좁힌다 — 세 필드(collection_status · items · last_collected_at)가 같은 범위여야 응답 안에서 갈리지
+#     않는다(#261 의 리전 범위와 같은 이유). 범위 밖 자산은 없는 것이다(ID 로 여는 경로가 없어 404 자리는 없다).
+#     관제 리전은 아직 플랫폼 설정 하나다 — 테넌트별 리전은 테넌트별 수집(#533 E)과 함께 바뀐다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ from schemas.api.assets import (
 from schemas.collections import CollectionRunStatus
 
 from asset_mapping import to_asset_item
+from auth.access import require_tenant_scope
 from config import get_aws_settings
 from db import models
 from db.repositories import assets as assets_repo
@@ -35,6 +40,7 @@ from services.collector import (
     UNOBSERVED_TYPES_BY_FAILURE,
     VPC_SCOPE_FAILURE_LABEL,
 )
+from tenancy import TenantScope
 
 _log = logging.getLogger(__name__)
 
@@ -143,13 +149,16 @@ def _uncollected(runs: list[models.CollectionRun]) -> list[UncollectedAssetType]
 
 
 @router.get("/assets", response_model=AssetsResponse)
-def get_assets(db: Session = Depends(get_db)) -> AssetsResponse:
+def get_assets(
+    db: Session = Depends(get_db),
+    scope: TenantScope = Depends(require_tenant_scope),
+) -> AssetsResponse:
     # 관제 대상 = 설정된 리전(AWS_REGIONS). 세 필드를 모두 이 범위로 좁혀 응답 안에서
     # 리전 범위가 갈리지 않게 한다 — 수집 대상서 빠진 리전의 옛 run 이 화면을 붙잡던
     # 문제를 막는다. (Issue #261, 안성일 확정) 리전별 최신 run 을 최악 상태로 접는
     # 것은 #231 그대로 — 리전 격리(C4) 이후 실패가 실행 순서에 가려지지 않게 한다.
     regions = _configured_regions()
-    runs = assets_repo.latest_collection_run_per_region(db, regions=regions)
+    runs = assets_repo.latest_collection_run_per_region(db, regions=regions, scope=scope)
     if not runs:
         # 설정 리전 전체에 수집 이력이 없음 — 계약상 목록·last_collected_at도 비어야 한다
         return AssetsResponse(collection_status=CollectionStatus.NOT_COLLECTED)
@@ -161,11 +170,11 @@ def get_assets(db: Session = Depends(get_db)) -> AssetsResponse:
 
     items = [
         to_asset_item(asset, relationships.get(asset.asset_id, []), evaluations.get(asset.asset_id))
-        for asset in assets_repo.list_assets(db, regions=regions)
+        for asset in assets_repo.list_assets(db, regions=regions, scope=scope)
     ]
     return AssetsResponse(
         collection_status=_collection_status(runs, regions),
-        last_collected_at=assets_repo.last_finished_collection_at(db, regions=regions),
+        last_collected_at=assets_repo.last_finished_collection_at(db, regions=regions, scope=scope),
         items=items,
         uncollected=_uncollected(runs),
     )

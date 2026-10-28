@@ -5,8 +5,8 @@
 #   - 경로 전수: 실제 앱의 경로를 열거해 공개 목록 밖은 전부 미인증 401임을 본다. 공개 목록은
 #     실제 경로와 정확히 대조한다 — 새 경로가 조용히 공개되거나 목록이 낡지 않게.
 #   - 역할: VIEWER 의 조치 실행 · 종료는 403 AUTH_FORBIDDEN 이고 Workflow 에 닿지 않는다(DB 무변화).
-#   - 계정 종류(#492): 테넌트 범위가 아직 없는 업무 라우터(자산 · 메트릭)는 임시로 PLATFORM 계정만 받는다 —
-#     고객사(TENANT) 계정은 역할과 관계없이 403(경로 전수). 인시던트 · 조치는 범위로 거른다(#533 C) — 범위 밖은
+#   - 계정 종류(#492): 테넌트 범위가 아직 없는 업무 라우터(메트릭)는 임시로 PLATFORM 계정만 받는다 —
+#     고객사(TENANT) 계정은 역할과 관계없이 403(경로 전수). 인시던트 · 조치 · 자산은 범위로 거른다(#533 C) — 범위 밖은
 #     404 이고 역할(403)이 그보다 먼저다. 범위 · 정지의 판정 순서는 test_incident_tenant_scope.py 가 본다.
 #     고객사 계정의 /api/v1/auth · /api/v1/users 는 그대로 열린다.
 #   - 세션: 유휴 · 최대 수명 만료, 회수(LOGOUT · SUPERSEDED), 비활성 · UNASSIGNED 사용자는 401.
@@ -251,15 +251,17 @@ def test_tenant_accounts_cannot_change_records_outside_their_scope_and_nothing_c
 def test_tenant_accounts_cannot_read_unscoped_business_data_yet(
     client_pg, login_as, make_tenant, tenant_status, role
 ):
-    """자산 · 메트릭은 아직 테넌트 범위로 걸러지지 않아 고객사 계정에 열지 않는다(임시 관문)."""
+    """메트릭은 아직 테넌트 범위로 걸러지지 않아 고객사 계정에 열지 않는다(임시 관문)."""
     login_as(role, tenant_id=make_tenant(tenant_status))
-    for url in ("/api/v1/assets", "/api/v1/metrics/timeseries"):
+    for url in ("/api/v1/metrics/timeseries",):
         response = client_pg.get(url)
         assert (response.status_code, response.json()["error"]["code"]) == (403, "AUTH_FORBIDDEN"), url
 
 
 # 고객사 계정에 열린 세션 경로의 앞머리 — 인증 · 사용자 관리(서비스가 범위를 건다) · 인시던트 · 조치(#533 C).
-CUSTOMER_SCOPED_PREFIXES = ("/api/v1/auth/", "/api/v1/users", "/api/v1/incidents", "/api/v1/actions/")
+CUSTOMER_SCOPED_PREFIXES = (
+    "/api/v1/auth/", "/api/v1/users", "/api/v1/incidents", "/api/v1/actions/", "/api/v1/assets",
+)
 
 
 def test_every_unscoped_route_is_platform_only_while_customer_scoped_routes_stay_open(
@@ -276,7 +278,7 @@ def test_every_unscoped_route_is_platform_only_while_customer_scoped_routes_stay
         for method, path in http - PUBLIC_ROUTES
         if not path.startswith(CUSTOMER_SCOPED_PREFIXES)
     )
-    assert {("GET", "/api/v1/assets"), ("GET", "/api/v1/metrics/timeseries")} <= set(business)
+    assert ("GET", "/api/v1/metrics/timeseries") in business
 
     leaks = []
     for method, path in business:
@@ -618,7 +620,7 @@ def test_protected_api_responses_carry_security_headers(
         "idempotency_key": str(uuid.uuid4()),
     })
     login_as(UserRole.OPERATOR, tenant_id=make_tenant())
-    responses["403 platform only"] = client_pg.get("/api/v1/assets")
+    responses["403 platform only"] = client_pg.get("/api/v1/metrics/timeseries")
 
     assert {label: response.status_code for label, response in responses.items()} == {
         "200": 200, "401": 401, "403 origin": 403, "404": 404, "422": 422, "500": 500, "403 role": 403,

@@ -153,7 +153,7 @@ def test_read_routes_return_what_the_product_handlers_return(
 
     expected_listing = incidents_router.list_incidents(status=None, category=None, db=db, scope=ALL_TENANTS)
     expected_detail = incidents_router.get_incident(incident.incident_id, db=db, scope=ALL_TENANTS)
-    expected_assets = assets_router.get_assets(db=db)
+    expected_assets = assets_router.get_assets(db=db, scope=ALL_TENANTS)
     assert listing.json() == expected_listing.model_dump(mode="json")
     assert detail.json() == expected_detail.model_dump(mode="json")
     assert assets.json() == expected_assets.model_dump(mode="json")

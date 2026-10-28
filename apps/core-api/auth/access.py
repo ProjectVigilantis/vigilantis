@@ -9,13 +9,14 @@
 #     require_admin 은 사용자 관리(#492 PR 3)용 ADMIN 전용 검사다.
 #   - 계정 종류(#492): 플랫폼 권한은 account_type == PLATFORM 에서만 나온다(role · tenant_id NULL 로
 #     추론하지 않는다). require_platform_account 가 테넌트 관리 라우터의 플랫폼 전용 관문이다.
-#   - 테넌트 범위(#533 C): 인시던트 · 조치 라우터는 요청자의 범위(tenant_scope_of — 플랫폼은 전부, 고객사는
-#     자기 테넌트)로 거른다. 범위 밖은 404 이고 정지는 **대상 인시던트의 테넌트**로 Workflow 가 본다 — 판정 순서는
+#   - 테넌트 범위(#533 C): 인시던트 · 조치 · 자산 라우터는 요청자의 범위(tenant_scope_of — 플랫폼은 전부,
+#     고객사는 자기 테넌트)로 거른다. 범위 밖은 404 이고 정지는 **대상 인시던트의 테넌트**로 Workflow 가 본다 — 판정 순서는
 #     역할(여기 · 403) → 범위(404) → 같은 Key 재요청 → 정지(409) → 상태(packages/schemas/api/tenants.py).
 #     그래서 require_action_role 은 역할만 본다. 정지 테넌트의 고객사 사용자는 조회 · 로그인만 한다 — 조치 실행 ·
 #     종료와 사용자 관리 변경은 409 TENANT_SUSPENDED(사용자 관리는 auth.admin_service 가 본다).
-#   - 임시 출시 관문(#492): 자산 · 메트릭 라우터와 WebSocket 은 아직 테넌트 범위로 걸러지지 않는다(전 고객
-#     데이터). 그래서 그 둘은 포함 시점(main)에 require_platform_account 를 건다 — 범위 필터가 들어오면 걷는다.
+#   - 임시 출시 관문(#492): 메트릭 라우터와 WebSocket 은 아직 테넌트 범위로 걸러지지 않는다(전 고객 데이터).
+#     그래서 메트릭은 포함 시점(main)에 require_platform_account 를 걸고, WebSocket 은 연결 때 플랫폼 계정만
+#     받는다 — 범위 필터가 들어오면 걷는다(WebSocket 은 #535).
 #   - 통과한 신원(CurrentUser)은 request.state.current_user 에 둔다. 접근 로그(main)가 읽고,
 #     조치 실행 · 종료 라우터는 역할 검사 결과로 같은 신원을 받는다(감사 기록은 T-2).
 # ==============================================================================

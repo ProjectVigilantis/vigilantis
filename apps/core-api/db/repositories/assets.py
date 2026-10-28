@@ -19,6 +19,7 @@ from schemas.guardrails import GUARDRAIL_STEP_ORDER, GuardrailStep
 from schemas.assets import MetricSummary as MetricSummaryContract
 from schemas.collections import CollectionRunStatus, unobserved_asset_types
 from schemas.rules import RuleEvaluationResult
+from tenancy import ALL_TENANTS, TenantScope
 
 from .. import mappers, models
 
@@ -67,7 +68,7 @@ def finish_collection_run(
 
 
 def latest_collection_run_per_region(
-    db: Session, regions: Optional[Sequence[str]] = None
+    db: Session, regions: Optional[Sequence[str]] = None, *, scope: TenantScope = ALL_TENANTS
 ) -> list[models.CollectionRun]:
     """리전별로 가장 최근에 시작된 수집 실행을 1건씩. (Issue #231)
 
@@ -86,6 +87,8 @@ def latest_collection_run_per_region(
     ``ix_collection_runs_region_started_at`` 의 첫 항목이 답이라 run 이 5분마다 쌓여도
     비용이 리전 수에만 비례한다. DISTINCT ON 은 인덱스가 있어도 전 행을 걸어야 했다
     (30일치 17,280행에서 24ms → 0.05ms, Issue #343).
+
+    고객사 범위(scope)는 그 테넌트의 run 만 본다(#533 C) — 테넌트 없는 MVP run 은 플랫폼 범위에만 든다.
     """
     if regions is None:
         stmt = (
@@ -97,23 +100,31 @@ def latest_collection_run_per_region(
                 models.CollectionRun.collection_run_id.desc(),
             )
         )
+        if not scope.is_platform:
+            stmt = stmt.where(models.CollectionRun.tenant_id == scope.tenant_id)
         return list(db.execute(stmt).scalars().all())
     if not regions:
         return []
-    return list(db.execute(latest_run_per_region_stmt(regions)).scalars().all())
+    return list(db.execute(latest_run_per_region_stmt(regions, scope=scope)).scalars().all())
 
 
-def latest_run_per_region_stmt(regions: Sequence[str]):
-    """리전 목록 → 리전별 최신 run 1건. 실행 계획 회귀(db/tests)가 이 문장을 그대로 본다."""
+def latest_run_per_region_stmt(regions: Sequence[str], *, scope: TenantScope = ALL_TENANTS):
+    """리전 목록 → 리전별 최신 run 1건. 실행 계획 회귀(db/tests)가 이 문장을 그대로 본다.
+
+    플랫폼 범위의 문장은 범위가 생기기 전과 같다. 고객사 범위는 같은 인덱스를 최신순으로 훑으며 테넌트를
+    거른다 — 테넌트별 수집(#533 E)이 들어와 run 이 쌓이면 (tenant_id, region, started_at) 인덱스를 그때 더한다.
+    """
     wanted = values(column("region", String), name="wanted").data(
         [(r,) for r in dict.fromkeys(regions)]  # 중복 제거, 순서 유지
     )
     # 정렬 키 (started_at DESC, id DESC) 는 ix_collection_runs_region_started_at 의 순서
     # 그대로다. started_at 단독 인덱스는 #343 에서 지웠다 — 남아 있으면 플래너가 그쪽을
     # 최신순으로 훑다가 리전 필터로 수천 행을 버리는 경로를 고를 수 있었다(PR #344 리뷰).
+    latest = select(models.CollectionRun).where(models.CollectionRun.region == wanted.c.region)
+    if not scope.is_platform:
+        latest = latest.where(models.CollectionRun.tenant_id == scope.tenant_id)
     latest = (
-        select(models.CollectionRun)
-        .where(models.CollectionRun.region == wanted.c.region)
+        latest
         .order_by(
             models.CollectionRun.started_at.desc(),
             models.CollectionRun.collection_run_id.desc(),
@@ -129,16 +140,18 @@ def latest_run_per_region_stmt(regions: Sequence[str]):
 
 
 def last_finished_collection_at(
-    db: Session, regions: Optional[Sequence[str]] = None
+    db: Session, regions: Optional[Sequence[str]] = None, *, scope: TenantScope = ALL_TENANTS
 ) -> Optional[datetime]:
     """마지막으로 종료된 수집 시각 — 목록 응답의 last_collected_at 원천. (Issue #68)
 
     ``regions`` 를 주면 그 리전들로 좁힌다 — collection_status·items 와 같은 스코프를
-    유지하기 위함이다(#261). ``None`` 이면 전 리전.
+    유지하기 위함이다(#261). ``None`` 이면 전 리전. scope 도 같은 이유로 함께 좁힌다(#533 C).
     """
     stmt = select(func.max(models.CollectionRun.finished_at))
     if regions is not None:
         stmt = stmt.where(models.CollectionRun.region.in_(regions))
+    if not scope.is_platform:
+        stmt = stmt.where(models.CollectionRun.tenant_id == scope.tenant_id)
     return db.execute(stmt).scalar_one()
 
 
@@ -178,10 +191,11 @@ def list_assets(
     asset_type: Optional[AssetType] = None,
     regions: Optional[Sequence[str]] = None,
     include_absent: bool = False,
+    scope: TenantScope = ALL_TENANTS,
 ) -> list[models.Asset]:
     """자산 목록. ``regions`` 를 주면 그 리전들로 좁힌다 — collection_status·
     last_collected_at 과 같은 스코프를 유지하기 위함이다(#261, ix_assets_region 활용).
-    ``None`` 이면 전 리전.
+    ``None`` 이면 전 리전. 고객사 범위는 그 테넌트의 자산만 — MVP 자산은 빠진다(#533 C).
 
     **소멸 자산(``absent_since`` 가 찍힌 행)은 기본으로 제외한다**(#332). 실물이 없는
     자산을 돌려주면 화면에 유령이 섞이는 데서 끝나지 않고, 판정이 낡은 메트릭으로 다시
@@ -192,6 +206,8 @@ def list_assets(
         stmt = stmt.where(models.Asset.asset_type == asset_type)
     if regions is not None:
         stmt = stmt.where(models.Asset.region.in_(regions))
+    if not scope.is_platform:
+        stmt = stmt.where(models.Asset.tenant_id == scope.tenant_id)
     if not include_absent:
         stmt = stmt.where(models.Asset.absent_since.is_(None))
     return list(db.execute(stmt).scalars())

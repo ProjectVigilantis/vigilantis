@@ -220,7 +220,7 @@ def build_router(*, token: str, inbox: Path) -> APIRouter:
     @router.get("/assets", response_model=AssetsResponse)
     def assets():
         with _session_factory()() as db:
-            return assets_router.get_assets(db=db)
+            return assets_router.get_assets(db=db, scope=ALL_TENANTS)
 
     @router.post("/collect")
     def collect(request: Request) -> dict:

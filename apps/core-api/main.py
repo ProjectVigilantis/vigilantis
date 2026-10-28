@@ -195,11 +195,11 @@ def create_app() -> FastAPI:
     # 셋 다 라우터 본문 · Workflow · AWS 보다 먼저 돈다. auth 라우터는 Origin을 검사하고,
     # 실제 Cognito 경로만 공급자 설정을 요구한다. WebSocket은 연결 수립 때 직접 검사한다.
     protected = [Depends(require_origin), Depends(require_user)]
-    # 인시던트 · 조치는 라우트가 요청자의 테넌트 범위로 거른다(#533 C). 임시 출시 관문(#492) — 테넌트 범위가
-    # 아직 없는 자산 · 메트릭은 플랫폼 계정만 받는다(auth.access 머리말). 사용자 관리는 서비스가 범위를 건다
+    # 인시던트 · 조치 · 자산은 라우트가 요청자의 테넌트 범위로 거른다(#533 C). 임시 출시 관문(#492) — 테넌트
+    # 범위가 아직 없는 메트릭은 플랫폼 계정만 받는다(auth.access 머리말). 사용자 관리는 서비스가 범위를 건다
     unscoped = [*protected, Depends(require_platform_account)]
     app.include_router(actions_router.router, dependencies=protected)
-    app.include_router(assets_router.router, dependencies=unscoped)
+    app.include_router(assets_router.router, dependencies=protected)
     app.include_router(auth_router.router)
     app.include_router(incidents_router.router, dependencies=protected)
     app.include_router(metrics_router.router, dependencies=unscoped)
