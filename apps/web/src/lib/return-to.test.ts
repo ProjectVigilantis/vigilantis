@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { safeReturnTo } from './return-to.ts';
+import { PUBLIC_PATHS, safeReturnTo } from './return-to.ts';
 
 test('같은 사이트의 상대 경로는 query · hash까지 그대로 돌려준다', () => {
   assert.equal(safeReturnTo('/incidents/abc?x=1#y'), '/incidents/abc?x=1#y');
@@ -92,4 +92,10 @@ test('비어 있거나 값이 없으면 /', () => {
 test('랜딩으로는 돌아가지 않는다. 로그인한 사람을 소개 화면으로 돌려보내지 않는다', () => {
   assert.equal(safeReturnTo('/landing'), '/');
   assert.equal(safeReturnTo('/landing?ref=mail'), '/');
+});
+
+test('처리방침 · 약관은 로그인 없이 열린다. 로그인 화면에서 이메일을 넣기 전에 읽을 수 있어야 한다', () => {
+  for (const path of ['/login', '/landing', '/privacy', '/terms']) assert.ok(PUBLIC_PATHS.has(path), path);
+  assert.equal(PUBLIC_PATHS.has('/'), false);
+  assert.equal(PUBLIC_PATHS.has('/tenants'), false);
 });

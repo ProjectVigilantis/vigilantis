@@ -25,6 +25,7 @@ import Link from 'next/link';
 import { CountUp } from '@/components/landing/count-up';
 import { HeroPreview } from '@/components/landing/hero-preview';
 import { RevealRoot } from '@/components/landing/reveal-root';
+import { LegalLinks } from '@/components/legal/legal-document';
 
 export const metadata: Metadata = {
   title: 'Vigilantis · 24시간 AWS 클라우드 관제',
@@ -317,11 +318,7 @@ export default function LandingPage() {
       <footer className="border-t">
         <div className="text-muted-foreground mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-4 px-4 py-8 text-sm sm:px-6">
           <span>© Vigilantis · 딸깍 인프라</span>
-          {/* 처리방침 · 약관은 T-15 몫으로 아직 문서가 없다. 링크처럼 보이지 않게 둔다. */}
-          <span className="flex gap-5">
-            <span>개인정보처리방침 (준비 중)</span>
-            <span>이용약관 (준비 중)</span>
-          </span>
+          <LegalLinks />
         </div>
       </footer>
     </RevealRoot>
