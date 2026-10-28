@@ -193,10 +193,12 @@ def test_rate_limit_starts_in_count_mode():
 class FakeWaf:
     """IP 집합 · 웹 ACL 을 들고 있는 WAFv2 대역 — 생성 · 갱신 · 삭제가 상태를 바꾼다."""
 
-    def __init__(self, ipsets=None, acl_rules=None):
+    def __init__(self, ipsets=None, acl_rules=None, create_acl_errors=()):
         self.ipsets = {name: list(addrs) for name, addrs in (ipsets or {}).items()}
         self.acl_rules = acl_rules  # None = 웹 ACL 없음
         self.calls: list[str] = []
+        # create_web_acl 이 차례로 던질 오류 코드 — 실제 WAF 의 IP 집합 전파 지연(#522)을 흉내 낸다
+        self.create_acl_errors = list(create_acl_errors)
 
     def list_ip_sets(self, **_):
         return {"IPSets": [{"Name": n, "Id": f"id-{n}", "LockToken": "t"} for n in self.ipsets]}
@@ -229,6 +231,8 @@ class FakeWaf:
 
     def create_web_acl(self, Rules, **_):
         self.calls.append("create_web_acl")
+        if self.create_acl_errors:
+            raise _client_error(self.create_acl_errors.pop(0), "CreateWebACL")
         self.acl_rules = Rules
         return {"Summary": {"ARN": "arn:acl"}}
 
@@ -250,6 +254,24 @@ def test_new_acl_gets_the_rate_rule_and_a_separate_nat_set():
     platform._ensure_waf(waf, ALLOW, NAT)
     assert waf.ipsets[platform.WAF_NAT_IPSET] == [NAT]
     assert [r["Name"] for r in waf.acl_rules] == ["rate-per-ip", "allow-listed-ips"]
+
+
+def test_new_acl_waits_while_the_new_ip_sets_propagate(monkeypatch):
+    # 새 계정 첫 up 에서 실제로 났다 — 방금 만든 IP 집합을 WAF 가 아직 못 찾는다(#522)
+    slept: list[float] = []
+    monkeypatch.setattr(platform.time, "sleep", slept.append)
+    waf = FakeWaf(create_acl_errors=["WAFUnavailableEntityException", "WAFUnavailableEntityException"])
+    assert platform._ensure_waf(waf, ALLOW, NAT) == "arn:acl"
+    assert waf.calls.count("create_web_acl") == 3 and len(slept) == 2
+    assert [r["Name"] for r in waf.acl_rules] == ["rate-per-ip", "allow-listed-ips"]
+
+
+def test_new_acl_does_not_retry_other_errors(monkeypatch):
+    monkeypatch.setattr(platform.time, "sleep", lambda _: pytest.fail("다른 오류는 기다리지 않는다"))
+    waf = FakeWaf(create_acl_errors=["WAFInvalidParameterException"])
+    with pytest.raises(ClientError, match="WAFInvalidParameterException"):
+        platform._ensure_waf(waf, ALLOW, NAT)
+    assert waf.calls.count("create_web_acl") == 1
 
 
 def test_existing_acl_without_the_rate_rule_is_updated():
