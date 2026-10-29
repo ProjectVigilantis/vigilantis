@@ -900,22 +900,42 @@ export interface SessionInfo {
  */
 export type AccountType = 'PLATFORM' | 'TENANT';
 
-/** 소속 쌍의 불변식(PLATFORM ↔ tenant_id null, TENANT ↔ tenant_id 있음)을 타입으로 둔다. */
+/**
+ * 플랫폼 계정의 권한 단계(auth.py `PlatformRole`, #492 PR 5). 플랫폼 권한은 이 값과 담당 배정에서만 나온다.
+ * CENTRAL_ADMIN = 중앙 관리자(전체 고객 · 고객 생성 · 직원 관리 · 담당 배정),
+ * TENANT_MANAGER = 고객 담당자(배정된 고객만 조회 · 조치 · 고객사 사용자 관리 — 배정이 없으면 고객 데이터 없음).
+ */
+export type PlatformRole = 'CENTRAL_ADMIN' | 'TENANT_MANAGER';
+
+/**
+ * 소속 쌍의 불변식(PLATFORM ↔ tenant_id null · platform_role 있음, TENANT ↔ tenant_id 있음 · platform_role null)을
+ * 타입으로 둔다.
+ */
 export type AccountScope =
-  | { account_type: 'PLATFORM'; tenant_id: null }
-  | { account_type: 'TENANT'; tenant_id: string };
+  | { account_type: 'PLATFORM'; tenant_id: null; platform_role: PlatformRole }
+  | { account_type: 'TENANT'; tenant_id: string; platform_role: null };
 
 export type CurrentUserResponse = AccountScope & {
   user_id: string;
   email: string;
-  /** PLATFORM은 호환을 위해 ADMIN이다. TENANT는 ADMIN · OPERATOR · VIEWER. */
+  /**
+   * TENANT는 ADMIN · OPERATOR · VIEWER. PLATFORM은 호환 값 ADMIN이며 플랫폼 관리 권한을 뜻하지 않는다 —
+   * 플랫폼 계정의 권한은 `platform_role`로 판정한다.
+   */
   role: UserRole;
+  /**
+   * 담당 고객 ID(UUID) — TENANT_MANAGER만 실제 배정 목록이고, CENTRAL_ADMIN · TENANT 계정은 언제나 빈 목록이다.
+   * 빈 목록은 "전체"가 아니다: 중앙 관리자의 전체 범위는 `platform_role`로만 판정한다. 화면 편의용 스냅샷이라
+   * 낡을 수 있다 — 실제 범위는 서버가 요청마다 다시 판정한다(403 · 404).
+   */
+  assigned_tenant_ids: string[];
   session: SessionInfo;
 };
 
 /* ────────────────────────────── users.py ────────────────────────────── */
-/* /api/v1/users — 고객사 사용자 관리(#492). 플랫폼 운영자는 모든 고객사 사용자를, 고객사 ADMIN은 자기 고객사
-   사용자만 관리한다. 그 밖은 서버가 403 `AUTH_FORBIDDEN`, 관리 범위 밖 대상은 404 `USER_NOT_FOUND`다.
+/* /api/v1/users — 고객사 사용자 관리(#492). 중앙 관리자(CENTRAL_ADMIN)는 모든 고객사 사용자를, 고객 담당자
+   (TENANT_MANAGER)는 배정된 고객의 사용자만, 고객사 ADMIN은 자기 고객사 사용자만 관리한다. 그 밖은 서버가 403
+   `AUTH_FORBIDDEN`, 관리 범위 밖 대상은 404 `USER_NOT_FOUND`다.
    비밀번호 재설정(/api/v1/auth/password-reset · /confirm)은 응답 본문이 없는 204라 타입이 없다. */
 
 export type UserStatus = 'ACTIVE' | 'DISABLED';
@@ -939,12 +959,14 @@ export interface UserInviteRequest {
   role: UserRole;
   /**
    * 초대할 고객(UUID). 스키마상 선택이지만 **플랫폼 운영자는 반드시 보낸다**(빠지면 서버가 거절).
+   * 고객 담당자는 배정된 고객만 고를 수 있다(서버가 다시 판정한다).
    * 고객사 ADMIN은 생략한다(서버가 자기 소속으로 한정한다). 계정 종류(account_type)는 입력이 아니다.
    */
   tenant_id?: string | null;
   /**
-   * 같은 이메일의 기존 Cognito 계정을 이 앱 사용자로 연결한다. 플랫폼 운영자의 명시적 선택일 때만 true다 —
-   * 고객사 ADMIN의 true는 서버가 403 `AUTH_FORBIDDEN`으로 거절한다(고객사 ADMIN은 언제나 false).
+   * 같은 이메일의 기존 Cognito 계정을 이 앱 사용자로 연결한다. 고객 범위가 있는 플랫폼 계정(중앙 관리자 · 배정된
+   * 고객 담당자)의 명시적 선택일 때만 true다 — 그 밖의 true는 서버가 403 `AUTH_FORBIDDEN`으로 거절한다(고객사 ADMIN은
+   * 언제나 false).
    */
   recover_existing: boolean;
 }
@@ -954,15 +976,22 @@ export type UserEventAction =
   | 'INVITE_RESENT'
   | 'ROLE_CHANGED'
   | 'STATUS_CHANGED'
-  | 'SESSIONS_REVOKED';
+  | 'SESSIONS_REVOKED'
+  /** 플랫폼 직원 권한(`platform_role`) 변경 — 직원 관리 API(#492 PR 5)가 남긴다. */
+  | 'PLATFORM_ROLE_CHANGED'
+  /** 고객 담당자의 담당 고객 배정 변경 — `PUT /staff/{user_id}/tenants`(#492 PR 5)가 남긴다. */
+  | 'TENANT_ASSIGNMENTS_CHANGED';
 
 /** 이력에 실리는 값의 닫힌 목록 — 없는 항목은 null(또는 생략)이다. */
 export interface UserEventState {
   role?: UserRole | null;
+  platform_role?: PlatformRole | null;
   status?: UserStatus | null;
   revoked_session_count?: number | null;
   recover_existing?: boolean | null;
   tenant_id?: string | null;
+  /** 담당 고객 배정(TENANT_ASSIGNMENTS_CHANGED)의 전후 고객 ID 목록. */
+  tenant_ids?: string[] | null;
 }
 
 export interface UserEventItem {

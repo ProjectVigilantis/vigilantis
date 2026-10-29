@@ -1,5 +1,7 @@
-// 사용자 관리(#492) — 플랫폼 운영자 · 고객사 ADMIN 전용. GNB 메뉴는 그 계정에게만 보이지만, 실제 차단은 서버 403
-// `AUTH_FORBIDDEN`이다(주소를 직접 쳐서 들어온 고객사 OPERATOR · VIEWER도 여기서 403 안내를 본다).
+// 사용자 관리(#492) — 중앙 관리자 · 담당 고객이 배정된 고객 담당자 · 고객사 ADMIN 전용. GNB 메뉴는 그 계정에게만
+// 보이지만, 실제 차단과 범위는 서버(403 `AUTH_FORBIDDEN` · 목록 필터)다. 주소를 직접 쳐서 들어온 고객사 OPERATOR ·
+// VIEWER는 여기서 403 안내를 보고, 담당 고객이 없는 고객 담당자는 서버 응답(403 또는 빈 목록)에 따라 403 안내나
+// 배정 없음 안내를 본다(components/users/users-view.tsx).
 
 import type { Metadata } from 'next';
 import { unstable_rethrow } from 'next/navigation';
