@@ -11,9 +11,20 @@ import type {
   IncidentResponse,
   IncidentStatus,
   IncidentsResponse,
+  InquiriesResponse,
+  InquiryCreate,
+  InquiryEventItem,
+  InquiryEventsResponse,
+  InquiryItem,
+  InquiryStatus,
   LoginStepResponse,
   MetricsTimeseriesResponse,
+  NotificationsResponse,
   ResolutionJudgement,
+  SignupRequestCreate,
+  SignupRequestItem,
+  SignupRequestsResponse,
+  SignupRequestStatus,
   TenantCreateRequest,
   TenantCreateResponse,
   TenantDetail,
@@ -203,6 +214,16 @@ export function createReadApi(transport: ApiTransport) {
     getUsers(): Promise<UsersResponse> {
       return request<UsersResponse>('/users', undefined, transport);
     },
+
+    /** 도입 신청 목록: 플랫폼 계정만(계약 초안, types/api.ts 끝). 도입 신청 화면(app/signup-requests)이 부른다. */
+    getSignupRequests(): Promise<SignupRequestsResponse> {
+      return request<SignupRequestsResponse>('/signup-requests', undefined, transport);
+    },
+
+    /** 고객 문의 목록: 플랫폼 계정은 전부, 고객사 계정은 자기 고객사 것(계약 초안). 고객 문의 화면(app/inquiries)이 부른다. */
+    getInquiries(): Promise<InquiriesResponse> {
+      return request<InquiriesResponse>('/inquiries', undefined, transport);
+    },
   };
 }
 
@@ -379,6 +400,49 @@ export async function changeUserStatus(userId: string, status: UserStatus): Prom
 
 export async function revokeUserSessions(userId: string): Promise<void> {
   await postJson<null>(userPath(userId, '/sessions/revoke'));
+}
+
+/* ── 도입 신청 · 고객 문의 · 관리자 알림(계약 초안 2026-10-29, types/api.ts 끝). 서버에는 아직 없다. ── */
+
+/** 로그인 없이 보내는 도입 신청(랜딩 로그인 창 회원가입). 세션과 무관하므로 401이 와도 로그인으로 보내지 않는다. */
+export function submitSignupRequest(body: SignupRequestCreate): Promise<{ request_id: string }> {
+  return postJson<{ request_id: string }>('/signup-requests', body, AUTH_FLOW);
+}
+
+export function changeSignupRequestStatus(requestId: string, status: SignupRequestStatus): Promise<SignupRequestItem> {
+  return sendJson<SignupRequestItem>('PUT', `/signup-requests/${encodeURIComponent(requestId)}/status`, { status });
+}
+
+/** 고객사 계정이 보내는 장애 · 버그 문의. 소속 고객사 · 작성자는 서버가 세션에서 채운다. */
+export function submitInquiry(body: InquiryCreate): Promise<InquiryItem> {
+  return postJson<InquiryItem>('/inquiries', body);
+}
+
+const inquiryPath = (inquiryId: string, suffix: string) => `/inquiries/${encodeURIComponent(inquiryId)}${suffix}`;
+
+/** 상태를 옮긴다. `note`가 있으면 같은 처리 기록 한 줄에 메모로 남는다. */
+export function changeInquiryStatus(inquiryId: string, status: InquiryStatus, note: string | null = null): Promise<InquiryItem> {
+  return sendJson<InquiryItem>('PUT', inquiryPath(inquiryId, '/status'), { status, note });
+}
+
+/** 상태는 그대로 두고 운영자 메모만 처리 기록에 남긴다. 201, 쌓인 기록 한 줄을 돌려준다. */
+export function addInquiryNote(inquiryId: string, note: string): Promise<InquiryEventItem> {
+  return postJson<InquiryEventItem>(inquiryPath(inquiryId, '/notes'), { note });
+}
+
+/** 문의 한 건의 처리 기록(오래된 것부터). 플랫폼 계정만. */
+export function getInquiryEvents(inquiryId: string): Promise<InquiryEventsResponse> {
+  return request<InquiryEventsResponse>(inquiryPath(inquiryId, '/events'));
+}
+
+/** 관리자 알림 최근 50건과 읽지 않은 수(플랫폼 계정만). */
+export function getNotifications(): Promise<NotificationsResponse> {
+  return request<NotificationsResponse>('/notifications');
+}
+
+/** 알림을 읽음으로. `ids`가 null이면 전부. */
+export async function markNotificationsRead(ids: string[] | null): Promise<void> {
+  await postJson<null>('/notifications/read', { notification_ids: ids });
 }
 
 /** 사용자 1명의 관리 이력(최근 순으로 서버가 정한다). 상한 기본 50. */

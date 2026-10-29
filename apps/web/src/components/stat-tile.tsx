@@ -3,6 +3,9 @@
 //
 // 훅이 없어 `'use client'`를 붙이지 않는다. 서버 · 클라이언트 컴포넌트 어디서나 쓴다.
 
+import { ChevronRight } from 'lucide-react';
+import Link from 'next/link';
+
 import { cn } from '@/lib/utils';
 
 /** 문제가 있는 값만 상태 글자색으로 칠한다. 평소 값은 기본 글자색이다. */
@@ -28,17 +31,34 @@ export function StatTile({
   value,
   note,
   tone,
+  href,
 }: {
   label: string;
   value: React.ReactNode;
   note?: string;
   tone?: StatTone;
+  /** 있으면 카드 전체가 그 숫자의 상세 화면으로 가는 링크다. */
+  href?: string;
 }) {
-  return (
-    <div className="bg-card ring-foreground/10 flex flex-col gap-1.5 rounded-xl px-5 py-4 ring-1">
-      <span className="text-muted-foreground text-xs font-semibold tracking-wide">{label}</span>
+  const body = (
+    <>
+      <span className="text-muted-foreground flex items-center justify-between gap-2 text-xs font-semibold tracking-wide">
+        {label}
+        {href ? <ChevronRight aria-hidden className="size-4" /> : null}
+      </span>
       <span className={cn('text-[30px] leading-[38px] font-bold', tone && TONE[tone])}>{value}</span>
       {note ? <span className="text-muted-foreground text-xs">{note}</span> : null}
-    </div>
+    </>
+  );
+  const box = 'bg-card ring-foreground/10 flex flex-col gap-1.5 rounded-xl px-5 py-4 ring-1';
+  return href ? (
+    <Link
+      href={href}
+      className={cn(box, 'hover:ring-primary/50 focus-visible:ring-ring transition-shadow focus-visible:ring-2 focus-visible:outline-none')}
+    >
+      {body}
+    </Link>
+  ) : (
+    <div className={box}>{body}</div>
   );
 }

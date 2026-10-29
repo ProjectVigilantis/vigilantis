@@ -1,11 +1,11 @@
 'use client';
 
-// 고객 상세: 연결(온보딩 → 연결 확인) · 원격 회수(정지 · 재개) · 자동 조치 스위치(T-6) · 삭제.
+// 고객 상세: 연결(연결 대기면 연결 패널 · 그 뒤로는 연결 확인과 재연결) · 원격 회수(정지 · 재개) · 자동 조치 스위치(T-6) · 삭제.
 //
 // 상태 관문은 서버가 최종 판정한다. 그 사이 다른 관리자가 상태를 바꿨으면(TENANT_STATE_CONFLICT)
 // 화면을 다시 읽는다. 낡은 화면의 버튼으로 다시 시도하지 않게 한다(PROPOSAL_NOT_EXECUTABLE과 같은 원칙).
 
-import { ArrowLeft, ExternalLink, TriangleAlert } from 'lucide-react';
+import { ArrowLeft, CircleCheck, ExternalLink, Hourglass, Radar, TriangleAlert, Users } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useRef, useState } from 'react';
@@ -16,6 +16,8 @@ import { ErrorState } from '@/components/error-state';
 import { Panel } from '@/components/panel';
 import { StatGrid, StatTile } from '@/components/stat-tile';
 import { TenantStatusBadge, VerificationSummary } from '@/components/tenants/tenant-badges';
+import { TenantConnectPanel } from '@/components/tenants/tenant-connect-panel';
+import { TenantUsersPanel } from '@/components/tenants/tenant-users-panel';
 import { Button } from '@/components/ui/button';
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
@@ -30,6 +32,7 @@ import {
   verifyTenant,
 } from '@/lib/api/client';
 import type { LabelTone } from '@/lib/enum-labels';
+import { MONITORING_PATH, USERS_PATH } from '@/lib/home-path';
 import {
   isStaleTenantRequest,
   SUSPEND_REASON_MAX,
@@ -40,16 +43,23 @@ import {
   type TenantRunResult,
 } from '@/lib/tenants';
 import { formatKst } from '@/lib/utils';
-import type { TenantDetail, TenantOnboardingResponse, TenantStatus, TenantVerification } from '@/types/api';
+import type {
+  TenantDetail,
+  TenantOnboardingResponse,
+  TenantStatus,
+  TenantVerification,
+  UserListItem,
+} from '@/types/api';
 
 type Busy = 'verify' | 'resume' | 'suspend' | 'remove' | 'auto' | 'onboarding' | null;
 
-export function TenantDetailView({ tenant }: { tenant: TenantDetail }) {
+export function TenantDetailView({ tenant, users }: { tenant: TenantDetail; users: UserListItem[] | null }) {
   const router = useRouter();
   const [busy, setBusy] = useState<Busy>(null);
   const [failure, setFailure] = useState<unknown>(null);
   const [onboarding, setOnboarding] = useState<TenantOnboardingResponse | null>(null);
   const [dialog, setDialog] = useState<'suspend' | 'remove' | null>(null);
+  const [connected, setConnected] = useState(false);
   const inFlight = useRef(false);
   const actions = tenantActions(tenant.status);
   const verification = tenant.last_verification;
@@ -83,39 +93,92 @@ export function TenantDetailView({ tenant }: { tenant: TenantDetail }) {
     await run('onboarding', async () => setOnboarding(await getTenantOnboarding(tenant.tenant_id)));
   }
 
+  /** 연결 대기에서 확인이 성공하면 관제 중으로 바뀐다. 다시 읽은 화면에는 연결 패널이 없어 성공을 따로 알린다. */
+  async function verify() {
+    const wasPending = tenant.status === 'PENDING_CONNECTION';
+    setConnected(false);
+    await run('verify', async () => {
+      const response = await verifyTenant(tenant.tenant_id);
+      if (wasPending && response.tenant.status === 'ACTIVE') setConnected(true);
+    });
+  }
+
   const disabled = busy !== null;
+  const pending = tenant.status === 'PENDING_CONNECTION';
 
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-2">
         <Link href="/tenants" className="text-muted-foreground inline-flex w-fit items-center gap-1 text-sm hover:underline">
           <ArrowLeft aria-hidden className="size-3.5" />
-          고객 목록
+          고객사 목록
         </Link>
         <div className="flex flex-wrap items-center gap-2.5">
           <h1 className="text-2xl font-bold tracking-tight break-all">{tenant.name}</h1>
           <TenantStatusBadge status={tenant.status} />
           <span className="text-muted-foreground font-mono text-[13px]">{tenant.aws_account_id}</span>
         </div>
+        {/* 관리자는 메뉴가 아니라 고객사에서 관제 · 계정으로 들어간다(gnb.tsx). 연결 전에는 관제할 것이 없어 관제를 감춘다. */}
+        <div className="flex flex-wrap items-center gap-2">
+          {pending ? null : (
+            <Button asChild variant="outline" size="sm">
+              <Link href={MONITORING_PATH}>
+                <Radar aria-hidden />
+                관제
+              </Link>
+            </Button>
+          )}
+          <Button asChild variant="outline" size="sm">
+            <Link href={`${USERS_PATH}?tenant=${encodeURIComponent(tenant.tenant_id)}`}>
+              <Users aria-hidden />
+              계정
+            </Link>
+          </Button>
+          {pending ? null : (
+            <span className="text-muted-foreground text-xs">관제는 고객사별 조회 범위(T-1)가 열리기 전까지 전체 고객사를 함께 보여 줍니다.</span>
+          )}
+        </div>
       </div>
 
       {tenant.status === 'SUSPENDED' ? (
         <div role="status" className="border-status-idle/50 bg-badge-idle-bg rounded-xl border p-4 text-sm">
-          <p className="font-bold">원격 회수 중입니다. 이 고객 계정에서 새 수집 · 분석 · 실행을 하지 않습니다.</p>
+          <p className="font-bold">원격 회수 중입니다. 이 고객사 AWS 계정에서 새 수집 · 분석 · 실행을 하지 않습니다.</p>
           <p className="text-foreground-secondary mt-1">
             {formatKst(tenant.suspended_at)} 정지 · 사유: {tenant.suspended_reason}
           </p>
           <p className="text-muted-foreground mt-1 text-xs">
-            지난 기록은 계속 볼 수 있습니다. 고객 계정의 역할은 고객 소유라 플랫폼이 지우지 않습니다.
+            지난 기록은 계속 볼 수 있습니다. 고객사 AWS 계정의 역할은 고객사 소유라 플랫폼이 지우지 않습니다.
           </p>
+        </div>
+      ) : connected && tenant.status === 'ACTIVE' ? (
+        <div role="status" className="border-status-good/50 bg-badge-good-bg flex gap-3 rounded-xl border p-4 text-sm">
+          <CircleCheck aria-hidden className="text-badge-good-fg mt-0.5 size-5 shrink-0" />
+          <div className="flex flex-col gap-1">
+            <p className="font-bold">연결됐습니다. 관제 중으로 바뀌었습니다.</p>
+            <p className="text-foreground-secondary text-[13px]">
+              {verification ? `${formatKst(verification.verified_at)}에 연결을 확인했습니다. ` : null}
+              고객사가 스택을 지우면 연결이 끊기니 남겨 두도록 안내하세요.
+            </p>
+          </div>
         </div>
       ) : verification !== null && verification.result !== 'OK' ? (
         <VerificationBanner verification={verification} status={tenant.status} />
+      ) : pending ? (
+        <div role="status" className="border-status-warning/60 bg-badge-warning-bg flex gap-3 rounded-xl border p-4 text-sm">
+          <Hourglass aria-hidden className="text-badge-warning-fg mt-0.5 size-5 shrink-0" />
+          <div className="flex flex-col gap-1">
+            <p className="font-bold">아직 연결되지 않았습니다.</p>
+            <p className="text-foreground-secondary text-[13px]">
+              고객사에 안내문을 보내고, 고객사가 스택을 다 만들었다고 회신하면 [연결 확인]을 누르세요. 연결 전에는 수집 · 분석 · 실행을 하지 않습니다.
+            </p>
+          </div>
+        </div>
       ) : null}
 
       {failure !== null ? <ErrorState error={failure} variant="inline" /> : null}
 
-      <StatGrid>
+      {/* 연결 전에는 수집한 것이 없어 숫자가 전부 0이다. 관제를 시작한 뒤에 보인다. */}
+      {pending ? null : <StatGrid>
         <StatTile label="자산" value={tenant.asset_count} note={`리전 ${tenant.regions.length}곳`} />
         <StatTile label="열린 인시던트" value={tenant.open_incident_count} />
         <StatTile
@@ -128,10 +191,21 @@ export function TenantDetailView({ tenant }: { tenant: TenantDetail }) {
           value={tenant.auto_action_enabled ? '켜짐' : '꺼짐'}
           note={tenant.auto_action_enabled ? 'High 선차단 · Medium 자동 격리' : '사람이 승인한 조치만 실행'}
         />
-      </StatGrid>
+      </StatGrid>}
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <Panel title="연결" description="플랫폼이 고객 계정의 역할을 ExternalId와 함께 맡아 들어갑니다. 장기 키는 받지 않습니다.">
+        {pending && tenant.onboarding_url ? (
+          <TenantConnectPanel
+            className="lg:col-span-2"
+            tenant={tenant}
+            onboardingUrl={tenant.onboarding_url}
+            verifying={busy === 'verify'}
+            disabled={disabled}
+            onVerify={verify}
+          />
+        ) : null}
+        {pending ? null : <>
+        <Panel title="연결" description="플랫폼이 고객사 AWS 계정의 역할을 ExternalId와 함께 맡아 들어갑니다. 장기 키는 받지 않습니다.">
           <div className="flex flex-col gap-3">
             <Stacked label="역할 ARN">
               <span className="font-mono text-xs">{tenant.access_role_arn}</span>
@@ -148,8 +222,7 @@ export function TenantDetailView({ tenant }: { tenant: TenantDetail }) {
 
             <div className="flex flex-wrap gap-2 pt-1">
               {actions.verify ? (
-                <Button type="button" size="sm" disabled={disabled}
-                  onClick={() => run('verify', () => verifyTenant(tenant.tenant_id))}>
+                <Button type="button" size="sm" disabled={disabled} onClick={verify}>
                   {busy === 'verify' ? '확인 중…' : '연결 확인'}
                 </Button>
               ) : null}
@@ -166,19 +239,8 @@ export function TenantDetailView({ tenant }: { tenant: TenantDetail }) {
           </div>
         </Panel>
 
-        <Panel title="온보딩" description="고객이 링크를 열면 고객 계정에 CloudFormation 스택으로 접근 역할이 만들어집니다.">
+        <Panel title="재연결" description="고객사가 스택이나 역할을 지웠다면 같은 ExternalId로 역할을 다시 만들어야 다시 연결됩니다.">
           <div className="flex flex-col gap-3 text-sm">
-            {tenant.status === 'PENDING_CONNECTION' && tenant.onboarding_url ? (
-              <ol className="text-muted-foreground list-decimal space-y-1 pl-5 text-xs">
-                <li>아래 링크를 고객에게 보냅니다.</li>
-                <li>고객이 자기 계정에서 스택을 만듭니다.</li>
-                <li>[연결 확인]이 성공하면 관제를 시작합니다.</li>
-              </ol>
-            ) : (
-              <p className="text-muted-foreground text-xs">
-                고객이 역할을 지웠다면 같은 ExternalId로 역할을 다시 만들어야 다시 연결됩니다.
-              </p>
-            )}
             {onboarding === null ? (
               <Button type="button" size="sm" variant="outline" className="w-fit" disabled={disabled} onClick={showOnboarding}>
                 {busy === 'onboarding' ? '불러오는 중…' : '온보딩 링크 · ExternalId 보기'}
@@ -200,11 +262,14 @@ export function TenantDetailView({ tenant }: { tenant: TenantDetail }) {
                     <CopyButton value={onboarding.external_id} />
                   </span>
                 </Stacked>
-                <p className="text-muted-foreground text-xs">ExternalId는 이 고객 전용 비밀 값입니다. 고객 외에는 공유하지 마세요.</p>
+                <p className="text-muted-foreground text-xs">ExternalId는 이 고객사 전용 비밀 값입니다. 고객사 외에는 공유하지 마세요.</p>
               </div>
             )}
           </div>
         </Panel>
+        </>}
+
+        <TenantUsersPanel tenantId={tenant.tenant_id} status={tenant.status} users={users} />
 
         <Panel title="관제 범위">
           <div className="flex flex-col gap-3">
@@ -237,15 +302,15 @@ export function TenantDetailView({ tenant }: { tenant: TenantDetail }) {
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <p className="text-muted-foreground text-xs">정지하면 플랫폼이 이 계정에 더 들어가지 않습니다(구독 정지 · 원격 회수).</p>
                 <Button type="button" size="sm" variant="destructive" disabled={disabled} onClick={() => { setFailure(null); setDialog('suspend'); }}>
-                  고객 정지
+                  고객사 정지
                 </Button>
               </div>
             ) : null}
             {actions.remove ? (
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <p className="text-muted-foreground text-xs">연결된 적 없는 고객만 지울 수 있습니다. 계정 ID를 잘못 넣었을 때 씁니다.</p>
+                <p className="text-muted-foreground text-xs">연결된 적 없는 고객사만 지울 수 있습니다. 계정 ID를 잘못 넣었을 때 씁니다.</p>
                 <Button type="button" size="sm" variant="destructive" disabled={disabled} onClick={() => { setFailure(null); setDialog('remove'); }}>
-                  고객 삭제
+                  고객사 삭제
                 </Button>
               </div>
             ) : null}
@@ -383,7 +448,7 @@ function ConfirmRemoveDialog({
         <DialogHeader>
           <DialogTitle>{name} 삭제</DialogTitle>
           <DialogDescription>
-            연결된 적이 없어 수집 · 인시던트 기록이 없습니다. 삭제하면 되돌릴 수 없고, 같은 계정은 새 고객으로 다시 추가합니다.
+            연결된 적이 없어 수집 · 인시던트 기록이 없습니다. 삭제하면 되돌릴 수 없고, 같은 계정은 새 고객사로 다시 추가합니다.
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>

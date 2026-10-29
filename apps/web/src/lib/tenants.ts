@@ -10,6 +10,7 @@ import {
   TENANT_VERIFIABLE_STATUSES,
   type ErrorCode,
   type TenantCreateRequest,
+  type TenantDetail,
   type TenantListItem,
   type TenantStatus,
   type TenantVerificationResult,
@@ -29,7 +30,7 @@ export const VERIFICATION_LABELS: Record<TenantVerificationResult, EnumLabel & {
   ASSUME_DENIED: {
     label: '역할 접근 거절',
     tone: 'red',
-    hint: '고객 계정에 역할이 없거나, 신뢰 정책이 플랫폼 또는 ExternalId를 허용하지 않습니다. 온보딩 링크로 스택을 다시 만들게 안내하세요.',
+    hint: '고객사 AWS 계정에 역할이 없거나, 신뢰 정책이 플랫폼 또는 ExternalId를 허용하지 않습니다. 온보딩 링크로 스택을 다시 만들게 안내하세요.',
   },
   ACCOUNT_MISMATCH: {
     label: '계정 불일치',
@@ -41,7 +42,7 @@ export const VERIFICATION_LABELS: Record<TenantVerificationResult, EnumLabel & {
   READ_DENIED: {
     label: '읽기 권한 없음',
     tone: 'orange',
-    hint: '역할에 권한 정책이 붙지 않았습니다. 고객에게 스택의 권한 정책을 확인하게 하세요.',
+    hint: '역할에 권한 정책이 붙지 않았습니다. 고객사에 스택의 권한 정책을 확인하게 하세요.',
   },
   UNREACHABLE: {
     label: '확인 불가',
@@ -58,7 +59,7 @@ export const VERIFICATION_LABELS: Record<TenantVerificationResult, EnumLabel & {
 export function verificationHint(result: TenantVerificationResult, status: TenantStatus): string | null {
   const hint = VERIFICATION_LABELS[result].hint;
   if (result === 'ASSUME_DENIED' && TENANT_DELETABLE_STATUSES.includes(status)) {
-    return `${hint} 등록한 계정 ID도 확인하세요. 잘못 넣은 것이 확인되면 이 고객을 지우고 새로 추가하세요.`;
+    return `${hint} 등록한 계정 ID도 확인하세요. 잘못 넣은 것이 확인되면 이 고객사를 지우고 새로 추가하세요.`;
   }
   return hint;
 }
@@ -112,6 +113,39 @@ export function tenantRunFollowUp(result: TenantRunResult | null): TenantRunFoll
   if (result === null) return { refresh: false, closeDialog: false };
   const settled = result.ok || isStaleTenantRequest(result.code);
   return { refresh: settled, closeDialog: settled };
+}
+
+/* ─────────────────────────── 연결 대기 고객의 온보딩 ─────────────────────────── */
+
+/** 역할 ARN의 역할 이름. 서버가 온보딩 링크의 `param_RoleName`에 싣는 값과 같다(tenant_admin.py). */
+export function roleNameOf(accessRoleArn: string): string {
+  return accessRoleArn.split(':role/', 2)[1] ?? accessRoleArn;
+}
+
+/** 온보딩 링크로 만들어지는 스택 이름(tenant_admin.py `ONBOARDING_STACK_NAME`). 역할 기본 이름과 같은 값이지만 뜻이 달라 따로 둔다. */
+export const ONBOARDING_STACK_NAME = 'vigilantis-access';
+
+/**
+ * 관리자가 고객에게 보낼 안내문. 링크에 ExternalId가 들어 있어 고객이 따로 넣을 값은 없다. 스택은 링크가 가리키는
+ * 첫 리전(`regions[0]`)에 만들어진다(tenant_admin.py `onboarding_url`). 역할 이름은 계약이 정한 값이다
+ * (tenants.py `DEFAULT_ACCESS_ROLE_NAME`). 역할의 권한 범위 같은 템플릿 내용은 템플릿이 저장소에 들어오기
+ * 전까지 적지 않는다.
+ */
+export function onboardingMessage(
+  tenant: Pick<TenantDetail, 'aws_account_id' | 'access_role_arn' | 'regions'>,
+  onboardingUrl: string,
+): string {
+  return [
+    'Vigilantis 관제 연결을 위해 AWS 계정에 역할 하나를 만들어 주세요.',
+    '',
+    `1. AWS 계정 ${tenant.aws_account_id}에 로그인한 브라우저에서 맨 아래 링크를 엽니다.`,
+    '2. CloudFormation 화면이 열리면 IAM 역할 생성에 동의하는 칸에 체크하고 스택을 만듭니다.',
+    `3. ${tenant.regions[0]} 리전의 스택 ${ONBOARDING_STACK_NAME}이 CREATE_COMPLETE가 되면 회신 부탁드립니다.`,
+    '',
+    `만들어지는 역할: ${roleNameOf(tenant.access_role_arn)}`,
+    '',
+    onboardingUrl,
+  ].join('\n');
 }
 
 /* ─────────────────────────── 목록 요약(그래프) ─────────────────────────── */
@@ -186,8 +220,10 @@ export function verificationAges(tenants: readonly TenantListItem[], nowMs: numb
 const ACCOUNT_ID = /^\d{12}$/;
 const REGION = /^[a-z]{2}(-[a-z]+)+-\d+$/;
 const VPC_ID = /^vpc-[0-9a-f]+$/;
-// IAM 역할 이름은 ASCII만 받는다(tenants.py RoleArn).
-const ROLE_ARN = /^arn:aws:iam::(\d{12}):role\/[A-Za-z0-9_+=,.@/-]+$/;
+// 역할 ARN의 `role/` 뒤에 오는 이름. ASCII만 받는다(tenants.py RoleArn). 경로(`ops/이름`)는 받되 빈 마디는 막는다.
+const ROLE_NAME = /^[A-Za-z0-9_+=,.@-]+(\/[A-Za-z0-9_+=,.@-]+)*$/;
+/** 역할 이름을 비우면 서버가 이 이름으로 채운다(tenants.py `DEFAULT_ACCESS_ROLE_NAME`). */
+export const DEFAULT_ACCESS_ROLE_NAME = 'vigilantis-access';
 export const TENANT_NAME_MAX = 100;
 export const SUSPEND_REASON_MAX = 500;
 
@@ -199,8 +235,11 @@ export function splitList(raw: string): string[] {
 export interface TenantForm {
   name: string;
   awsAccountId: string;
-  /** 비우면 서버가 `vigilantis-access` 기본 역할로 채운다. */
-  accessRoleArn: string;
+  /**
+   * 역할 이름만 받는다. ARN은 위 계정 ID로 화면이 만든다. ARN 전체를 받으면 계정 ID를 두 번 쳐야 하고 둘이 어긋날
+   * 수 있어서다. 비우면 서버가 기본 역할로 채운다.
+   */
+  roleName: string;
   regions: string;
   collectVpcIds: string;
 }
@@ -246,16 +285,14 @@ export function parseTenantForm(form: TenantForm): TenantFormResult {
   if (name === '') errors.name = '이름을 넣으세요.';
   else if (name.length > TENANT_NAME_MAX) errors.name = `이름은 ${TENANT_NAME_MAX}자 이하입니다.`;
 
-  const awsAccountId = form.awsAccountId.trim();
+  // 콘솔은 계정 ID를 1234-5678-9012처럼 보여 준다. 붙여 넣은 하이픈과 공백은 뺀다.
+  const awsAccountId = form.awsAccountId.replace(/[\s-]/g, '');
   if (!ACCOUNT_ID.test(awsAccountId)) errors.awsAccountId = '계정 ID는 숫자 12자리입니다.';
 
-  const roleArn = form.accessRoleArn.trim();
-  if (roleArn !== '') {
-    const match = ROLE_ARN.exec(roleArn);
-    if (match === null) errors.accessRoleArn = '역할 ARN 형식이 아닙니다(arn:aws:iam::<계정>:role/<이름>).';
-    else if (ACCOUNT_ID.test(awsAccountId) && match[1] !== awsAccountId)
-      errors.accessRoleArn = '역할 ARN의 계정이 위 계정 ID와 다릅니다.';
-  }
+  const roleName = form.roleName.trim();
+  if (roleName.startsWith('arn:')) errors.roleName = 'ARN 전체가 아니라 role/ 뒤의 이름만 넣으세요.';
+  else if (roleName !== '' && !ROLE_NAME.test(roleName))
+    errors.roleName = '역할 이름은 영문, 숫자와 _+=,.@- 기호만 씁니다.';
 
   const regions = parseRegions(form.regions);
   if (regions.error !== null) errors.regions = regions.error;
@@ -269,6 +306,21 @@ export function parseTenantForm(form: TenantForm): TenantFormResult {
     regions: regions.values,
     collect_vpc_ids: vpcs.values,
   };
-  if (roleArn !== '') request.access_role_arn = roleArn;
+  if (roleName !== '' && roleName !== DEFAULT_ACCESS_ROLE_NAME)
+    request.access_role_arn = `arn:aws:iam::${awsAccountId}:role/${roleName}`;
   return { ok: true, request };
+}
+
+/** 추가 창에서 접어 두는 칸. 이 칸에 오류가 있으면 접힌 영역을 펼쳐 오류를 보인다. */
+export const TENANT_FORM_ADVANCED: readonly (keyof TenantForm)[] = ['regions', 'collectVpcIds', 'roleName'];
+
+/**
+ * 고객사 목록 키워드 검색. 검색어를 공백으로 나눈 낱말이 모두 이름 · 고객사 ID · AWS 계정 ID 중 어딘가에 들어 있으면 맞는다
+ * (부분 일치, 대소문자 무시). 빈 검색어는 전부 맞는다.
+ */
+export function matchesTenantQuery(tenant: Pick<TenantListItem, 'name' | 'tenant_id' | 'aws_account_id'>, query: string): boolean {
+  const keywords = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (keywords.length === 0) return true;
+  const haystack = [tenant.name, tenant.tenant_id, tenant.aws_account_id].map((s) => s.toLowerCase());
+  return keywords.every((k) => haystack.some((h) => h.includes(k)));
 }

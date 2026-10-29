@@ -17,8 +17,9 @@ const tenant = (role: 'ADMIN' | 'OPERATOR' | 'VIEWER') => ({ account_type: 'TENA
 const TENANT_ROLES = ['ADMIN', 'OPERATOR', 'VIEWER'] as const;
 const UNCONFIRMED: SessionView[] = [{ kind: 'loading' }, { kind: 'unknown' }, { kind: 'anonymous' }];
 
-test('첫 화면 — 플랫폼은 고객 관리, 고객 ADMIN은 사용자 관리, 그 밖은 기존 루트', () => {
+test('첫 화면 — 플랫폼은 대시보드, 고객 ADMIN은 사용자 관리, 그 밖은 기존 루트', () => {
   assert.equal(homePathFor(platform), PLATFORM_HOME);
+  assert.equal(PLATFORM_HOME, '/');
   // 고객사 ADMIN은 ADMIN 역할이어도 고객 관리로 가지 않는다(역할만으로 플랫폼을 가르지 않는다).
   assert.equal(homePathFor(tenant('ADMIN')), USERS_PATH);
   assert.equal(homePathFor(tenant('OPERATOR')), CUSTOMER_HOME);
@@ -26,7 +27,9 @@ test('첫 화면 — 플랫폼은 고객 관리, 고객 ADMIN은 사용자 관�
 });
 
 test('메뉴 — 고객 ADMIN만 사용자 관리를 받고, 고객은 업무 화면 · 고객 관리를 받지 않는다', () => {
-  assert.deepEqual(navPathsFor(platform), ['/', '/assets', '/security', '/tenants', '/users']);
+  // 관제는 메뉴에 없다 — 고객사 상세에서 들어간다.
+  // 도입 신청함 · 고객 문의함은 플랫폼 계정만 받는다.
+  assert.deepEqual(navPathsFor(platform), ['/', '/tenants', '/users', '/signup-requests', '/inquiries']);
   assert.deepEqual(navPathsFor(tenant('ADMIN')), ['/users']);
   assert.deepEqual(navPathsFor(tenant('OPERATOR')), []);
   assert.deepEqual(navPathsFor(tenant('VIEWER')), []);

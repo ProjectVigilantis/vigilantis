@@ -1036,3 +1036,114 @@ export interface AuditEventsResponse {
   /** 다음 쪽 질의에 그대로 돌려준다(해석하지 않는다). null 이면 마지막 쪽. */
   next_cursor: string | null;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 도입 신청 · 고객 문의 · 관리자 알림: FE 계약 초안(2026-10-29). 서버에는 아직 없다.
+// BE 담당(안성일)이 이슈에서 확정하면 그 계약에 맞춰 고친다. 화면: 로그인 창 회원가입(도입 신청),
+// 고객사 계정 상단바 [문의하기](고객 문의), 관리자 상단바 종 · /signup-requests · /inquiries.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 도입 신청의 처리 상태. 운영자가 바꾼다. */
+export type SignupRequestStatus = 'NEW' | 'IN_REVIEW' | 'APPROVED' | 'REJECTED';
+
+/** `POST /signup-requests`: 로그인 없이 받는다. 202 { request_id }. */
+export interface SignupRequestCreate {
+  company_name: string;
+  contact_name: string;
+  /** 승인되면 이 이메일로 회사 관리자 계정을 초대한다. */
+  email: string;
+  phone: string | null;
+  /** 관제할 AWS 환경(자유 입력). */
+  note: string | null;
+}
+
+export interface SignupRequestItem extends SignupRequestCreate {
+  request_id: string;
+  status: SignupRequestStatus;
+  created_at: IsoDateTime;
+  updated_at: IsoDateTime;
+}
+
+/** `GET /signup-requests`: 플랫폼 계정만. 최근 것부터. */
+export interface SignupRequestsResponse {
+  items: SignupRequestItem[];
+}
+
+/** 문의 종류: 장애(서비스가 멈추거나 못 씀) · 버그(동작이 틀림) · 기타. */
+export type InquiryCategory = 'OUTAGE' | 'BUG' | 'OTHER';
+export type InquiryStatus = 'OPEN' | 'IN_PROGRESS' | 'RESOLVED';
+
+/** `POST /inquiries`: 고객사 계정(역할 무관)만. 소속 고객사 · 작성자는 서버가 세션에서 채운다. 201 InquiryItem. */
+export interface InquiryCreate {
+  category: InquiryCategory;
+  title: string;
+  body: string;
+  /** 문제가 생긴 시각(모르면 null). */
+  occurred_at: IsoDateTime | null;
+  /** 문의를 보낸 화면의 경로(예: `/monitoring?axis=security`). */
+  page_path: string | null;
+}
+
+export interface InquiryItem extends InquiryCreate {
+  inquiry_id: string;
+  tenant_id: string;
+  tenant_name: string;
+  author_email: string;
+  author_role: UserRole;
+  status: InquiryStatus;
+  created_at: IsoDateTime;
+  updated_at: IsoDateTime;
+}
+
+/** `GET /inquiries`: 플랫폼 계정은 전부, 고객사 계정은 자기 고객사 것만. 최근 것부터. */
+export interface InquiriesResponse {
+  items: InquiryItem[];
+}
+
+/** 관리자 알림 종류. 도입 신청 접수 · 고객 문의 접수. */
+export type NotificationKind = 'SIGNUP_REQUEST' | 'INQUIRY';
+
+export interface NotificationItem {
+  notification_id: string;
+  kind: NotificationKind;
+  /** 알림이 가리키는 신청 · 문의의 ID. */
+  target_id: string;
+  /** 누가: 신청 회사명 · 문의 고객사명. */
+  subject: string;
+  /** 무엇을: 신청 담당자 이름 · 문의 제목. */
+  summary: string;
+  /** 문의 알림일 때만 있다. */
+  inquiry_category: InquiryCategory | null;
+  created_at: IsoDateTime;
+  read_at: IsoDateTime | null;
+}
+
+/** `GET /notifications`: 플랫폼 계정만. 최근 50건과 읽지 않은 수. */
+export interface NotificationsResponse {
+  items: NotificationItem[];
+  unread_count: number;
+}
+
+/** 문의 처리 기록의 종류: 접수 · 상태 변경 · 운영자 메모. */
+export type InquiryEventAction = 'INQUIRY_CREATED' | 'STATUS_CHANGED' | 'NOTE_ADDED';
+
+/**
+ * 문의 처리 기록 한 줄(계약 초안). 고치거나 지우지 않고 쌓기만 한다(사용자 관리 이력 `user_admin_events`와 같은 방식).
+ * 상태 변경이면 before · after가, 메모면 note가 있다. 상태를 바꾸면서 메모를 남기면 한 줄에 둘 다 있다.
+ */
+export interface InquiryEventItem {
+  event_id: string;
+  inquiry_id: string;
+  actor_user_id: string;
+  actor_email: string;
+  action: InquiryEventAction;
+  before_status: InquiryStatus | null;
+  after_status: InquiryStatus | null;
+  note: string | null;
+  occurred_at: IsoDateTime;
+}
+
+/** `GET /inquiries/{id}/events`: 플랫폼 계정만. 오래된 것부터. */
+export interface InquiryEventsResponse {
+  items: InquiryEventItem[];
+}

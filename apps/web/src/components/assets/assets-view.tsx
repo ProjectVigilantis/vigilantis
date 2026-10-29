@@ -34,7 +34,7 @@
 // 둘을 같이 좁힐 수 있다** — 인시던트는 `subject_arn`으로 자산에 걸리므로 유형·리전·낭비 후보 필터가
 // 고른 자산 집합(`focusedArns`)이 그 탭에도 그대로 걸린다. 옛 경로는 이 탭으로 redirect한다.
 
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 
 import { AssetGraph } from '@/components/assets/asset-graph';
 import { AssetDetail, AssetDetailPane } from '@/components/assets/asset-detail';
@@ -122,6 +122,7 @@ export function AssetsView({
   initialTab,
   initialPreset,
   renderedAt,
+  heading,
 }: {
   data: AssetsResponse;
   /** 인시던트 목록 전량 — `인시던트` 탭이 FINOPS만 골라 쓴다. `null`은 조회 실패. */
@@ -150,6 +151,8 @@ export function AssetsView({
   initialPreset?: IncidentPreset;
   /** 페이지가 데이터를 읽은 시각(ISO) — 제목 옆 `마지막 갱신`이 쓴다(`auto-refresh.tsx`). */
   renderedAt: string;
+  /** 띠 위 제목 자리. 통합 관제(`monitoring-view.tsx`)가 제목 · 축 전환 · 고객 선택을 넣는다. 없으면 화면 이름이다. */
+  heading?: ReactNode;
 }) {
   const [assetType, setAssetType] = useState<string>(ALL);
   // AST-002는 이 목록이 이미 받은 단건을 그대로 넘겨 연다 — 신규 페치 없음(§4.3).
@@ -325,7 +328,7 @@ export function AssetsView({
           2 → 4 → 8열로 접힌다(빈 칸이 없다). z-index는 상세 Drawer(z-50)보다 낮게 둔다. */}
       <div ref={stripRef} className="bg-background sticky top-0 z-20 -mx-(--page-pad) -mt-(--page-pad) px-(--page-pad) pt-(--page-pad) pb-3">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-lg font-semibold">자산 관제</h1>
+        {heading ?? <h1 className="text-lg font-semibold">자산 관제</h1>}
         <AutoRefresh renderedAt={renderedAt} />
       </div>
       <MetricStrip className="sm:grid-cols-4 xl:grid-cols-8">

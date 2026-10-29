@@ -5,6 +5,30 @@ import type { CurrentUserResponse, UserRole } from '../types/api.ts';
 /** 계정 종류 · 역할 — 화면 판정에 쓰는 `/me`의 두 값. */
 export type AccessSubject = Pick<CurrentUserResponse, 'account_type' | 'role'>;
 
+/**
+ * 화면 용어(2026-10-29 PM 확정). 역할은 넷이다.
+ *   관리자        우리 회사 쪽 총 관리자 계정. 모든 고객사 · 고객사 직원 계정 연결과 서버 상태를 본다
+ *   관리자 직원   관리자 아래의 우리 회사 직원 계정
+ *   고객사        플랫폼에 등록된 회사(테넌트). 로그인 계정이 아니라 회사 자체다
+ *   고객사 직원   고객사에 실제로 근무하는 직원의 로그인 계정
+ * 로그인 계정은 관리자 · 관리자 직원 · 고객사 직원 셋이고, 고객사는 그 직원들이 속하는 단위다.
+ *
+ * 서버 계약과의 대응: 관리자 = `PLATFORM` + `ADMIN`, 관리자 직원 = `PLATFORM` + 그 밖의 역할, 고객사 직원 = `TENANT`.
+ * 지금 서버는 `PLATFORM`을 운영 CLI로만 만들고 언제나 `ADMIN`이라(auth/README.md §플랫폼 계정 CLI) 관리자 직원이 실제로 생기지는 않는다.
+ */
+export type AccountKind = 'PLATFORM_ADMIN' | 'PLATFORM_STAFF' | 'TENANT_STAFF';
+
+export const ACCOUNT_KIND_LABELS: Record<AccountKind, string> = {
+  PLATFORM_ADMIN: '관리자',
+  PLATFORM_STAFF: '관리자 직원',
+  TENANT_STAFF: '고객사 직원',
+};
+
+export function accountKind(user: AccessSubject): AccountKind {
+  if (user.account_type === 'TENANT') return 'TENANT_STAFF';
+  return user.role === 'ADMIN' ? 'PLATFORM_ADMIN' : 'PLATFORM_STAFF';
+}
+
 /** 서버 403 `AUTH_FORBIDDEN`과 조회 전용 계정의 비활성 버튼이 함께 쓰는 문구. */
 export const VIEWER_ACTION_BLOCKED = '조회 전용 계정은 조치할 수 없습니다.';
 const ROLE_PENDING = '권한을 확인한 뒤 조치할 수 있습니다.';

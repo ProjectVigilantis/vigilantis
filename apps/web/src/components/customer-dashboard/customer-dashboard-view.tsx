@@ -201,10 +201,10 @@ export function CustomerDashboardView({
             </ul>
           )}
           <div className="flex flex-wrap gap-x-6 gap-y-2 border-t pt-4 text-sm font-semibold">
-            <Link href="/security?tab=incidents" className="text-primary inline-flex items-center gap-1 hover:underline">
+            <Link href="/monitoring?axis=security&tab=incidents" className="text-primary inline-flex items-center gap-1 hover:underline">
               보안 인시던트 전체 <ArrowRight aria-hidden className="size-3.5" />
             </Link>
-            <Link href="/assets?tab=incidents" className="text-primary inline-flex items-center gap-1 hover:underline">
+            <Link href="/monitoring?tab=incidents" className="text-primary inline-flex items-center gap-1 hover:underline">
               자산 인시던트 전체 <ArrowRight aria-hidden className="size-3.5" />
             </Link>
           </div>

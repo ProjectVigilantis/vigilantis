@@ -133,7 +133,7 @@ export function DashboardView({
         {/* 왼쪽 — 보는 것. 띠 두 묶음. 캡션 링크가 각 축의 상세 화면(AST-001 · SEC-001)이다. */}
         <div className="flex flex-col gap-4 xl:col-span-9">
           <div className="grid gap-4 md:grid-cols-2">
-            <MetricGroup label="자산" href="/assets" hrefLabel="자산 관제">
+            <MetricGroup label="자산" href="/monitoring" hrefLabel="관제 · 자산">
               <MetricTile label="전체 자산" value={metrics.total} note="수집된 자산 전량" />
               <MetricTile label="낭비 후보" value={metrics.waste} note="최적화 후보 + 미사용" tone="ok" />
               <MetricTile
@@ -144,7 +144,7 @@ export function DashboardView({
               />
             </MetricGroup>
 
-            <MetricGroup label="보안" href="/security" hrefLabel="보안 관제">
+            <MetricGroup label="보안" href="/monitoring?axis=security" hrefLabel="관제 · 보안">
               <MetricTile
                 label="인터넷 개방 보안 그룹"
                 value={metrics.openSg}

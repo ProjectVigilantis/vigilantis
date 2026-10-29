@@ -33,7 +33,7 @@
 // 구 보안 인시던트 목록(INC-001 `/incidents`)은 세 번째 탭 `인시던트`다(`incidents/incidents-view.tsx`).
 // SSH 무차별 대입은 EC2에, 전체 개방은 SG에 걸리므로 `영향 EC2`·`인터넷 개방` 칸이 둘을 가른다.
 
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 
 import { AssetCard } from '@/components/assets/asset-card';
 import { AssetDetail } from '@/components/assets/asset-detail';
@@ -95,6 +95,7 @@ export function SecurityView({
   initialTab,
   initialPreset,
   renderedAt,
+  heading,
 }: {
   data: AssetsResponse;
   /** 인시던트 목록 전량. `null`은 조회 실패 — 0건과 구분해 패널마다 그 사실을 적는다. */
@@ -113,6 +114,8 @@ export function SecurityView({
   initialPreset?: IncidentPreset;
   /** 페이지가 데이터를 읽은 시각(ISO) — 제목 옆 `마지막 갱신`이 쓴다(`auto-refresh.tsx`). */
   renderedAt: string;
+  /** 띠 위 제목 자리 — 자산 관제와 같다(`assets-view.tsx`). */
+  heading?: ReactNode;
 }) {
   const [focus, setFocus] = useState<Focus>('SG');
   const [region, setRegion] = useState<string>(ALL);
@@ -182,7 +185,7 @@ export function SecurityView({
           띠는 6칸이라 3 → 6열로 접힌다(빈 칸이 없다). 칸은 전부 필터다(파일 머리말). */}
       <div className="bg-background sticky top-0 z-20 -mx-(--page-pad) -mt-(--page-pad) px-(--page-pad) pt-(--page-pad) pb-3">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-lg font-semibold">보안 관제</h1>
+        {heading ?? <h1 className="text-lg font-semibold">보안 관제</h1>}
         <AutoRefresh renderedAt={renderedAt} />
       </div>
       <MetricStrip className="sm:grid-cols-3 xl:grid-cols-6">
@@ -271,7 +274,7 @@ export function SecurityView({
                 ? `보안 그룹 ${visible.length}건`
                 : `${FOCUS_LABEL[focus].label} ${visible.length}건`}
             </span>
-            {focus === 'SG' ? <span>EC2 · EBS 카드는 자산 관제에 있습니다</span> : null}
+            {focus === 'SG' ? <span>EC2 · EBS는 자산 축에 있습니다</span> : null}
           </>
         ) : tab === 'topology' ? (
           <span aria-live="polite">

@@ -1,20 +1,20 @@
 'use client';
 
-// 고객 목록: 고객을 고르는 화면이다. 위에서부터 숫자 카드 → 상태 그래프 → 목록 표(DESIGN.md §레이아웃).
-// 자산 수 · 열린 인시던트 수 · 마지막 연결 확인이 고르는 근거라 목록과 그래프에 둔다(tenants.py).
+// 고객 목록: 고객을 고르고 등록하는 화면이다. 자산 수 · 열린 인시던트 수 · 마지막 연결 확인이 고르는 근거라 목록에 둔다(tenants.py).
+// 숫자 카드와 상태 그래프 3종은 2026-10-29에 관리자 대시보드로 옮겼다(admin-dashboard-view.tsx) — 같은 숫자를 두 화면에
+// 두지 않는다. 그래서 이 화면은 목록 표 하나다.
 
 import { Plus } from 'lucide-react';
 import Link from 'next/link';
 import { useMemo, useState } from 'react';
 
 import { EmptyState } from '@/components/empty-state';
-import { StatGrid, StatTile } from '@/components/stat-tile';
 import { CreateTenantDialog } from '@/components/tenants/create-tenant-dialog';
 import { TenantStatusBadge, VerificationSummary } from '@/components/tenants/tenant-badges';
-import { OpenIncidentBars, StatusComposition, VerificationAgeChart } from '@/components/tenants/tenant-charts';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { summarizeTenants, TENANT_STATUS_LABELS, verificationAges } from '@/lib/tenants';
+import { INPUT_CLASS } from '@/components/form-classes';
+import { matchesTenantQuery, summarizeTenants, TENANT_STATUS_LABELS } from '@/lib/tenants';
 import { cn } from '@/lib/utils';
 import type { TenantListItem, TenantStatus } from '@/types/api';
 
@@ -22,74 +22,53 @@ type Filter = 'ALL' | TenantStatus;
 
 const FILTERS: readonly Filter[] = ['ALL', 'ACTIVE', 'PENDING_CONNECTION', 'SUSPENDED'];
 
-export function TenantsView({
-  tenants,
-  renderedAt,
-}: {
-  tenants: TenantListItem[];
-  /** 서버가 그린 시각(ISO). 경과 시간을 서버와 브라우저가 같은 기준으로 그리게 넘겨받는다. */
-  renderedAt: string;
-}) {
+export function TenantsView({ tenants }: { tenants: TenantListItem[] }) {
   const [creating, setCreating] = useState(false);
   const [filter, setFilter] = useState<Filter>('ALL');
+  const [query, setQuery] = useState('');
   const summary = useMemo(() => summarizeTenants(tenants), [tenants]);
-  const ages = useMemo(() => verificationAges(tenants, Date.parse(renderedAt)), [tenants, renderedAt]);
-  const rows = filter === 'ALL' ? tenants : tenants.filter((t) => t.status === filter);
-  const problems = summary.verificationProblems.failed + summary.verificationProblems.unreachable;
+  const rows = tenants.filter((t) => (filter === 'ALL' || t.status === filter) && matchesTenantQuery(t, query));
 
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div className="flex flex-col gap-1">
-          <h1 className="text-2xl font-bold tracking-tight">고객 관리</h1>
+          <h1 className="text-2xl font-bold tracking-tight">고객사 관리</h1>
           <p className="text-muted-foreground text-sm">
-            고객 AWS 계정의 연결 상태와 원격 회수(정지)를 관리합니다. 시각은 모두 KST입니다.
+            고객사 AWS 계정의 연결 상태와 원격 회수(정지)를 관리합니다. 시각은 모두 KST입니다.
           </p>
         </div>
         <Button type="button" className="h-10 px-4" onClick={() => setCreating(true)}>
           <Plus aria-hidden />
-          고객 추가
+          고객사 추가
         </Button>
       </div>
 
       {tenants.length === 0 ? (
         <EmptyState
-          message="등록된 고객이 없습니다."
-          description="고객을 추가하면 온보딩 링크로 고객 계정에 접근 역할을 만들게 됩니다."
+          message="등록된 고객사가 없습니다."
+          description="고객사를 추가하면 온보딩 링크로 고객사 AWS 계정에 접근 역할을 만들게 됩니다."
         />
       ) : (
         <>
-          <StatGrid>
-            <StatTile
-              label="전체 고객"
-              value={summary.total}
-              note={`관제 중 ${summary.byStatus.ACTIVE} · 대기 ${summary.byStatus.PENDING_CONNECTION} · 정지 ${summary.byStatus.SUSPENDED}`}
-            />
-            <StatTile label="관제 중 자산" value={summary.activeAssets} note="관제 중 고객 합계" />
-            <StatTile label="열린 인시던트" value={summary.openIncidents} note="전체 고객 합계" />
-            <StatTile
-              label="연결 확인 문제"
-              value={problems}
-              tone={summary.verificationProblems.failed > 0 ? 'critical' : problems > 0 ? 'warning' : undefined}
-              note={`실패 ${summary.verificationProblems.failed} · 확인 불가 ${summary.verificationProblems.unreachable}`}
-            />
-          </StatGrid>
-
-          <div className="flex flex-wrap gap-4">
-            <VerificationAgeChart
-              className="flex-[3_1_480px]"
-              ages={ages}
-              unchecked={tenants.length - ages.length}
-            />
-            <div className="flex min-w-0 flex-[2_1_320px] flex-col gap-4">
-              <StatusComposition summary={summary} />
-              <OpenIncidentBars tenants={tenants} />
-            </div>
-          </div>
-
           <section className="bg-card ring-foreground/10 overflow-hidden rounded-xl ring-1">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b px-6 py-4">
-              <h2 className="text-base font-bold">고객 목록</h2>
+              <div className="flex flex-wrap items-center gap-3">
+                <h2 className="text-base font-bold">고객사 목록</h2>
+                <input
+                  type="search"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  aria-label="고객사 검색"
+                  placeholder="이름 · 고객사 ID · AWS 계정 검색"
+                  className={cn(INPUT_CLASS, 'h-8 w-64')}
+                />
+                {query.trim() !== '' ? (
+                  <span className="text-muted-foreground text-xs" aria-live="polite">
+                    {rows.length}곳
+                  </span>
+                ) : null}
+              </div>
               <div role="group" aria-label="상태 필터" className="flex flex-wrap gap-1.5">
                 {FILTERS.map((f) => {
                   const count = f === 'ALL' ? summary.total : summary.byStatus[f];
@@ -146,7 +125,7 @@ export function TenantsView({
                   {rows.length === 0 ? (
                     <TableRow>
                       <TableCell colSpan={6} className="text-muted-foreground py-8 text-center">
-                        이 상태의 고객이 없습니다.
+                        {query.trim() === '' ? '이 상태의 고객사가 없습니다.' : '검색어와 맞는 고객사가 없습니다.'}
                       </TableCell>
                     </TableRow>
                   ) : null}

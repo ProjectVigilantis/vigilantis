@@ -4,12 +4,14 @@ import { unstable_rethrow } from 'next/navigation';
 
 import { ErrorState } from '@/components/error-state';
 import { TenantDetailView } from '@/components/tenants/tenant-detail-view';
-import { serverApi } from '@/lib/api/server';
+import { orNull, serverApi } from '@/lib/api/server';
 
 export default async function TenantPage({ params }: PageProps<'/tenants/[id]'>) {
   const { id } = await params;
   // 세션 쿠키만 실어 부르고, 401이면 로그인으로 redirect한다(lib/api/server.ts).
-  const { getTenant } = await serverApi();
+  const { getTenant, getUsers } = await serverApi();
+  // 사용자 패널의 원천. 목록 API에 고객 필터가 없어 전량을 받아 이 고객 것만 고른다. 실패해도 상세는 뜬다(null = 조회 실패).
+  const usersPromise = orNull(getUsers());
   let tenant;
   try {
     tenant = await getTenant(id);
@@ -17,5 +19,11 @@ export default async function TenantPage({ params }: PageProps<'/tenants/[id]'>)
     unstable_rethrow(error); // 401 → 로그인 redirect는 삼키지 않는다
     return <ErrorState error={error} />;
   }
-  return <TenantDetailView tenant={tenant} />;
+  const users = await usersPromise;
+  return (
+    <TenantDetailView
+      tenant={tenant}
+      users={users === null ? null : users.items.filter((u) => u.tenant_id === tenant.tenant_id)}
+    />
+  );
 }

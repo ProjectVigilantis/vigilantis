@@ -12,8 +12,8 @@ import type {
 } from '../types/api.ts';
 
 export const ROLE_LABELS: Record<UserRole, string> = {
-  ADMIN: '관리자',
-  OPERATOR: '운영자',
+  ADMIN: '직원 관리',
+  OPERATOR: '조치',
   VIEWER: '조회 전용',
 };
 
@@ -25,7 +25,7 @@ export const STATUS_LABELS: Record<UserStatus, string> = {
 export const EVENT_LABELS: Record<UserEventAction, string> = {
   USER_INVITED: '초대',
   INVITE_RESENT: '초대 메일 재발송',
-  ROLE_CHANGED: '역할 변경',
+  ROLE_CHANGED: '권한 변경',
   STATUS_CHANGED: '상태 변경',
   SESSIONS_REVOKED: '로그인 세션 종료',
 };
@@ -73,7 +73,7 @@ export type UserAdminAction = 'invite' | 'resend' | 'role' | 'status' | 'revoke'
 /**
  * 사용자 관리 403 — 조치 화면의 "조회 전용 계정" 문구와 다르다. 플랫폼 운영자 · 고객사 ADMIN이 아니면 같은 거절이다.
  */
-export const USER_ADMIN_FORBIDDEN = '플랫폼 운영자 또는 고객사 관리자만 사용자를 관리할 수 있습니다.';
+export const USER_ADMIN_FORBIDDEN = '관리자 또는 직원 관리 권한이 있는 고객사 직원만 계정을 관리할 수 있습니다.';
 
 /** 초대 메일은 DB 기록보다 먼저 나갈 수 있다 — 결과를 모르는 실패에서 "보내지 않았다"고 말하지 않는다. */
 export const INVITE_UNCERTAIN =
@@ -85,7 +85,7 @@ export const INVITE_RECOVER_NOT_FOUND =
 const INVITE_STATE_CONFLICT_REASON =
   '지금 상태에서는 초대할 수 없습니다. 이미 초대된 이메일이거나 그 사이 상태가 바뀌었을 수 있습니다.';
 /** 고객사 ADMIN의 초대 409 — 기존 계정 연결(복구)은 플랫폼 운영자만 고를 수 있어 안내하지 않는다. */
-export const INVITE_STATE_CONFLICT = `${INVITE_STATE_CONFLICT_REASON} 목록에서 같은 이메일의 사용자를 확인해 주세요.`;
+export const INVITE_STATE_CONFLICT = `${INVITE_STATE_CONFLICT_REASON} 목록에서 같은 이메일의 계정을 확인해 주세요.`;
 /** 플랫폼 운영자의 초대 409 — 같은 이메일의 기존 인증 계정이면 기존 계정 연결(복구)로 다시 시도할 수 있다. */
 export const INVITE_STATE_CONFLICT_PLATFORM = `${INVITE_STATE_CONFLICT_REASON} 같은 이메일의 기존 인증 계정이 있고 계정 주인을 확인했다면 "기존 인증 계정을 연결 (복구)"를 선택해 다시 시도할 수 있습니다.`;
 
@@ -100,17 +100,17 @@ export const canChangeRow = (rowUserId: string, actorUserId: string | null) =>
  * 고객 상태 거절 3종은 고객 쪽 사유(없음 · 비활성 · 정지)를 말한다. 서버는 인증 서비스 호출 뒤에도 고객 · 요청자를
  * 다시 확인하므로, 이 코드만으로 메일이 나가지 않았다고 단정할 수 없다 — 문구는 발송 여부를 말하지 않는다.
  */
-export const INVITE_TENANT_NOT_FOUND = '입력한 고객 ID의 고객을 찾을 수 없습니다. 고객 ID를 확인해 주세요.';
-export const TENANT_NOT_ACTIVE = '활성 상태인 고객의 사용자만 초대하거나 초대 메일을 다시 보낼 수 있습니다.';
-export const TENANT_SUSPENDED_BLOCKED = '정지된 고객의 계정이라 지금은 사용자를 변경할 수 없습니다.';
+export const INVITE_TENANT_NOT_FOUND = '입력한 고객사 ID의 고객사를 찾을 수 없습니다. 고객사 ID를 확인해 주세요.';
+export const TENANT_NOT_ACTIVE = '활성 상태인 고객사의 직원만 초대하거나 초대 메일을 다시 보낼 수 있습니다.';
+export const TENANT_SUSPENDED_BLOCKED = '정지된 고객사의 계정이라 지금은 계정을 변경할 수 없습니다.';
 
 const MESSAGES: Partial<Record<ErrorCode, string>> = {
   AUTH_FORBIDDEN: USER_ADMIN_FORBIDDEN,
   // 관리 범위 밖(다른 고객사) 사용자도 서버는 같은 404로 답한다 — 있는지 여부를 말하지 않는다.
-  USER_NOT_FOUND: '사용자를 찾을 수 없습니다. 목록을 새로고침해 주세요.',
+  USER_NOT_FOUND: '계정을 찾을 수 없습니다. 목록을 새로고침해 주세요.',
   USER_STATE_CONFLICT:
-    '지금 상태에서는 처리할 수 없습니다. 고객사의 마지막 활성 관리자이거나, 이미 초대된 이메일이거나, 그 사이 상태가 바뀌었을 수 있습니다.',
-  TENANT_NOT_FOUND: '고객을 찾을 수 없습니다. 목록을 새로고침해 주세요.',
+    '지금 상태에서는 처리할 수 없습니다. 고객사의 마지막 직원 관리 권한자이거나, 이미 초대된 이메일이거나, 그 사이 상태가 바뀌었을 수 있습니다.',
+  TENANT_NOT_FOUND: '고객사를 찾을 수 없습니다. 목록을 새로고침해 주세요.',
   TENANT_STATE_CONFLICT: TENANT_NOT_ACTIVE,
   TENANT_SUSPENDED: TENANT_SUSPENDED_BLOCKED,
   AUTH_RATE_LIMITED: '요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.',
@@ -148,8 +148,8 @@ export function userAdminErrorMessage(
 
 /** 고객 ID(UUID) — 하이픈을 넣은 표준 표기 36자. 대소문자는 가리지 않는다. 최종 판정은 서버다. */
 const TENANT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-export const TENANT_ID_REQUIRED = '초대할 고객의 고객 ID를 입력해 주세요.';
-export const TENANT_ID_INVALID = '고객 ID는 UUID 형식입니다(예: 123e4567-e89b-12d3-a456-426614174000).';
+export const TENANT_ID_REQUIRED = '초대할 고객사의 고객사 ID를 입력해 주세요.';
+export const TENANT_ID_INVALID = '고객사 ID는 UUID 형식입니다(예: 123e4567-e89b-12d3-a456-426614174000).';
 
 export interface InviteForm {
   email: string;

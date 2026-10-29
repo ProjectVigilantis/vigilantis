@@ -646,7 +646,7 @@ export function IncidentDetail({
   const locked =
     incident.status === 'ACTION_IN_PROGRESS' ||
     (shownOutcome !== null && !isTerminalStatus(shownOutcome.execution.status));
-  const subjectHref = subject ? `/assets?asset=${encodeURIComponent(subject.arn)}` : null;
+  const subjectHref = subject ? `/monitoring?asset=${encodeURIComponent(subject.arn)}` : null;
 
   function openAction(candidates: ActionCandidate[]) {
     setRequest({
@@ -707,7 +707,7 @@ export function IncidentDetail({
                 수집 목록에 없는 자산이면 열 상세가 없으므로 링크를 걸지 않는다. */}
             {subject ? (
               <Link
-                href={`/assets?asset=${encodeURIComponent(subject.arn)}`}
+                href={`/monitoring?asset=${encodeURIComponent(subject.arn)}`}
                 className="hover:text-primary font-medium underline-offset-4 hover:underline"
               >
                 {subject.name ?? subject.resource_id}

@@ -112,7 +112,7 @@ test('초대 본문 — 고객사 ADMIN은 일반 초대만 보낸다(tenant_id 
 
 test('대상 없음 · 상태 충돌', () => {
   assert.match(userAdminErrorMessage('role', 'USER_NOT_FOUND'), /찾을 수 없습니다/);
-  assert.match(userAdminErrorMessage('status', 'USER_STATE_CONFLICT'), /마지막 활성 관리자/);
+  assert.match(userAdminErrorMessage('status', 'USER_STATE_CONFLICT'), /마지막 직원 관리 권한자/);
   for (const action of ['resend', 'role', 'status', 'revoke'] as const) {
     for (const accountType of ['PLATFORM', 'TENANT', null] as const) {
       assert.doesNotMatch(userAdminErrorMessage(action, 'USER_STATE_CONFLICT', accountType), /복구/, action);
@@ -171,7 +171,7 @@ const event = (overrides: Partial<UserEventItem>): UserEventItem => ({
 test('이력 한 줄 요약', () => {
   assert.equal(
     eventSummary(event({ action: 'ROLE_CHANGED', before_state: { role: 'VIEWER' }, after_state: { role: 'ADMIN' } })),
-    '조회 전용 → 관리자',
+    '조회 전용 → 직원 관리',
   );
   assert.equal(
     eventSummary(
@@ -181,10 +181,10 @@ test('이력 한 줄 요약', () => {
   );
   assert.equal(eventSummary(event({ action: 'SESSIONS_REVOKED', after_state: { revoked_session_count: 2 } })), '2개 종료');
   assert.equal(eventSummary(event({ action: 'SESSIONS_REVOKED', after_state: {} })), '');
-  assert.equal(eventSummary(event({ action: 'USER_INVITED', after_state: { role: 'OPERATOR' } })), '운영자');
+  assert.equal(eventSummary(event({ action: 'USER_INVITED', after_state: { role: 'OPERATOR' } })), '조치');
   assert.equal(
     eventSummary(event({ action: 'USER_INVITED', after_state: { role: 'OPERATOR', recover_existing: true } })),
-    '운영자 · 기존 계정 연결',
+    '조치 · 기존 계정 연결',
   );
   assert.equal(eventSummary(event({ action: 'INVITE_RESENT' })), '');
   assert.equal(eventSummary(event({ action: 'ROLE_CHANGED', before_state: { role: null }, after_state: {} })), '— → —');

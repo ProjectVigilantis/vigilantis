@@ -6,24 +6,27 @@
 
 'use client';
 
-import { Building2, LayoutDashboard, Server, Shield, Users, type LucideIcon } from 'lucide-react';
+import { Building2, ClipboardList, LayoutDashboard, LifeBuoy, Shield, Users, type LucideIcon } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 
 import { useSession } from '@/components/auth/session-provider';
 import { UserMenu } from '@/components/auth/user-menu';
-import { CollectionIndicator, useAssetsEnvelope } from '@/components/collection-indicator';
-import { ConnectionIndicator, type AssetPresence } from '@/components/connection-indicator';
+import { ConnectionIndicator } from '@/components/connection-indicator';
+import { InquiryButton } from '@/components/support/inquiry-button';
+import { NotificationBell } from '@/components/support/notification-bell';
 import { ThemeToggle } from '@/components/theme-toggle';
 import {
-  PLATFORM_HOME,
+  MONITORING_PATH,
+  TENANTS_PATH,
   USERS_PATH,
   businessOpen,
   confirmedAccount,
   homePathFor,
   navPathsFor,
 } from '@/lib/home-path';
-import type { AccessSubject } from '@/lib/roles';
+import { isPlatform, type AccessSubject } from '@/lib/roles';
+import { INQUIRIES_PATH, SIGNUP_REQUESTS_PATH } from '@/lib/support';
 import { cn } from '@/lib/utils';
 
 /**
@@ -35,17 +38,19 @@ import { cn } from '@/lib/utils';
  * app/asset-incidents/page.tsx). **상세(`/incidents/[id]`)와 ACT-002 딥링크는 그대로다** — 옮기면 기존
  * 링크가 전부 깨진다(PR #180).
  *
- * `자산`(AST-001)과 `보안`(SEC-001)은 짝이다 — 앞이 자원 인벤토리와 최적화, 뒤가 그 자원의 노출·위협이다.
+ * `자산`(AST-001)과 `보안`(SEC-001)은 짝이라 2026-10-29에 `관제`(MON-001) 한 화면의 두 축으로 합쳤다 —
+ * 앞이 자원 인벤토리와 최적화, 뒤가 그 자원의 노출·위협이다(components/monitoring/monitoring-view.tsx).
  *
  * `고객`은 Post-MVP T-4 플랫폼 운영자 화면이다(고객 계정 연결 · 원격 회수). 관제 화면이 아니라 뒤에 둔다.
+ * 2026-10-29부터 `관제`는 메뉴에서 뺐다. 관리자 화면은 고객사 · 직원의 권한과 오류를 보는 자리라 고객사 상세에서 들어간다.
  * 어떤 계정에게 어떤 항목을 보일지는 `navPathsFor`(lib/home-path.ts)가 정한다 — 숨김은 편의이고 차단은 서버 403이다.
  */
 const NAV: Readonly<Record<string, { label: string; icon: LucideIcon }>> = {
   '/': { label: '대시보드', icon: LayoutDashboard },
-  '/assets': { label: '자산', icon: Server },
-  '/security': { label: '보안', icon: Shield },
-  [PLATFORM_HOME]: { label: '고객', icon: Building2 },
-  [USERS_PATH]: { label: '사용자', icon: Users },
+  [TENANTS_PATH]: { label: '고객사', icon: Building2 },
+  [USERS_PATH]: { label: '계정', icon: Users },
+  [SIGNUP_REQUESTS_PATH]: { label: '도입 신청', icon: ClipboardList },
+  [INQUIRIES_PATH]: { label: '고객 문의', icon: LifeBuoy },
 };
 
 /** 현재 계정(세션 Provider · #492). 확인 전 · 미로그인 · 조회 실패는 null이다(메뉴 · 업무 기능을 열지 않는다). */
@@ -59,14 +64,6 @@ export function ShellHeader() {
   // 자산 조회와 두 인디케이터는 업무 기능이다 — 확인된 플랫폼 계정에게만 연다(lib/home-path.ts `businessOpen`).
   // 확인 전 · 조회 실패 · 고객사 계정은 부르지도 그리지도 않는다. 주간/야간 전환과 사용자 메뉴는 그대로 둔다.
   const open = businessOpen(account);
-  const assets = useAssetsEnvelope(open);
-  const presence: AssetPresence = assets.failed
-    ? 'failed'
-    : assets.env === null
-      ? 'pending'
-      : assets.env.items.length > 0
-        ? 'present'
-        : 'none';
 
   return (
     <header className="dark bg-shell text-foreground flex h-16 shrink-0 items-center gap-3 border-b px-4 sm:gap-6">
@@ -78,17 +75,19 @@ export function ShellHeader() {
         <span className="text-base font-bold tracking-tight">Vigilantis</span>
       </Link>
 
-      {/* 두 인디케이터는 축이 다르다 — 왼쪽은 서버↔클라우드 수집 상태(`GET /assets` 봉투), 오른쪽은
-          관제 자산↔화면 실시간 연결(소켓이 열렸고 수집된 자산이 있을 때만 초록 — connection-indicator.tsx). 자리를 다투지 않고, WS 쪽을
-          빼면 끊겼을 때 [재연결] 버튼(§4.8 4)이 사라져 둘 다 둔다(PR #299 리뷰). */}
-      {/* 좁은 화면(< lg)에서는 두 인디케이터가 들어갈 폭이 없다(수집 칩만 288px): 전환 · 사용자만 남긴다. */}
+      {/* 서버 칩은 이 화면과 서버의 실시간 연결이다(connection-indicator.tsx). 끊겼을 때 [재연결] 버튼(§4.8 4)이 여기 있다.
+          수집 칩(collection-indicator.tsx)은 2026-10-29에 뺐다 — 고객사 한 곳의 수집 상태라 모든 고객사를 보는 관리자
+          상단바에는 맞지 않고, 고객사 웹에 붙일 정보다. */}
+      {/* 좁은 화면(< lg)에서는 인디케이터를 접고 전환 · 사용자만 남긴다. */}
       <div className="ml-auto flex min-w-0 shrink items-center gap-3 sm:gap-4">
         {open ? (
           <div className="hidden shrink-0 items-center gap-4 lg:flex">
-            <CollectionIndicator env={assets.env} failed={assets.failed} />
-            <ConnectionIndicator assets={presence} />
+            <ConnectionIndicator />
           </div>
         ) : null}
+        {/* 도입 신청 · 고객 문의 알림은 관리자(플랫폼) 계정에게, 문의하기는 고객사 계정(관리자 · 직원)에게 둔다(2026-10-29). */}
+        {isPlatform(account) ? <NotificationBell /> : null}
+        {account?.account_type === 'TENANT' ? <InquiryButton /> : null}
         <ThemeToggle />
         <UserMenu />
       </div>
@@ -111,8 +110,10 @@ export function ShellNav() {
       {items.map(({ href, label, icon: Icon }) => {
         // 경계(`/` 또는 문자열 끝)까지 본다. 접두만 보면 다른 경로가 같이 활성이 된다.
         // 인시던트 상세(`/incidents/[id]`)는 카테고리를 모르는 자리라 어느 항목도 켜지 않는다.
+        // 관제는 메뉴에 없고 고객사 상세에서 들어가므로 관제 화면에서는 `고객사`를 켠다.
+        const under = (base: string) => pathname === base || pathname.startsWith(`${base}/`);
         const active =
-          href === '/' ? pathname === '/' : pathname === href || pathname.startsWith(`${href}/`);
+          href === '/' ? pathname === '/' : under(href) || (href === TENANTS_PATH && under(MONITORING_PATH));
         return (
           <Link
             key={href}

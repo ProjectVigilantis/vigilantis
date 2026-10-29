@@ -7,9 +7,15 @@ import {
   type TenantListItem,
 } from '../types/api.ts';
 import {
+  DEFAULT_ACCESS_ROLE_NAME,
+  TENANT_FORM_ADVANCED,
   hoursSince,
   isStaleTenantRequest,
+  matchesTenantQuery,
+  ONBOARDING_STACK_NAME,
+  onboardingMessage,
   parseTenantForm,
+  roleNameOf,
   parseVpcIds,
   splitList,
   summarizeTenants,
@@ -89,7 +95,7 @@ test('연결 확인 경과는 기록 있는 고객만 최근 순으로', () => {
 const FORM: TenantForm = {
   name: ' 학원 계정 ',
   awsAccountId: '123456789012',
-  accessRoleArn: '',
+  roleName: '',
   regions: 'ap-northeast-2',
   collectVpcIds: '',
 };
@@ -104,7 +110,7 @@ test('목록은 쉼표 · 공백 · 줄바꿈으로 나누고 빈 칸을 버린�
   assert.deepEqual(splitList('ap-northeast-2, us-east-1\n\n us-west-2 ,'), ['ap-northeast-2', 'us-east-1', 'us-west-2']);
 });
 
-test('정상 입력은 요청으로 바뀐다. 이름은 다듬고, 역할 ARN을 비우면 보내지 않는다', () => {
+test('정상 입력은 요청으로 바뀐다. 이름은 다듬고, 역할 이름을 비우면 ARN을 보내지 않는다', () => {
   const result = parseTenantForm(FORM);
   assert.ok(result.ok);
   assert.deepEqual(result.request, {
@@ -116,15 +122,42 @@ test('정상 입력은 요청으로 바뀐다. 이름은 다듬고, 역할 ARN�
   assert.equal('access_role_arn' in result.request, false);
 });
 
-test('역할 ARN의 계정이 계정 ID와 다르면 거절한다(서버 계약과 같은 조건)', () => {
-  const result = parseTenantForm({ ...FORM, accessRoleArn: 'arn:aws:iam::999999999999:role/vigilantis-access' });
-  assert.equal(result.ok, false);
-  assert.match(!result.ok ? result.errors.accessRoleArn ?? '' : '', /계정/);
+test('콘솔에서 하이픈째 붙여 넣은 계정 ID도 받는다', () => {
+  const result = parseTenantForm({ ...FORM, awsAccountId: ' 1234-5678-9012 ' });
+  assert.ok(result.ok);
+  assert.equal(result.request.aws_account_id, '123456789012');
 });
 
-test('역할 이름에 ASCII 밖 글자가 있으면 거절한다', () => {
-  const result = parseTenantForm({ ...FORM, accessRoleArn: 'arn:aws:iam::123456789012:role/역할' });
+test('역할 이름은 계정 ID로 ARN을 만들어 보낸다. 기본 이름이면 보내지 않는다', () => {
+  const custom = parseTenantForm({ ...FORM, roleName: 'ops/vigilantis-read' });
+  assert.ok(custom.ok);
+  assert.equal(custom.request.access_role_arn, 'arn:aws:iam::123456789012:role/ops/vigilantis-read');
+  const fallback = parseTenantForm({ ...FORM, roleName: DEFAULT_ACCESS_ROLE_NAME });
+  assert.ok(fallback.ok);
+  assert.equal('access_role_arn' in fallback.request, false);
+});
+
+test('역할 칸에 ARN 전체를 넣으면 이름만 넣으라고 알린다', () => {
+  const result = parseTenantForm({ ...FORM, roleName: 'arn:aws:iam::123456789012:role/vigilantis-access' });
   assert.equal(result.ok, false);
+  assert.match(!result.ok ? result.errors.roleName ?? '' : '', /이름만/);
+});
+
+test('역할 이름에 ASCII 밖 글자나 빈 경로 마디가 있으면 거절한다', () => {
+  for (const roleName of ['역할', 'ops//x', '/x', 'x/']) {
+    const result = parseTenantForm({ ...FORM, roleName });
+    assert.equal(result.ok, false, roleName);
+  }
+});
+
+test('접어 둔 칸(리전 · VPC · 역할 이름)의 오류는 펼쳐서 보일 대상이다', () => {
+  const result = parseTenantForm({ ...FORM, regions: 'seoul', roleName: '역할' });
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    for (const key of Object.keys(result.errors)) {
+      assert.ok(TENANT_FORM_ADVANCED.includes(key as keyof TenantForm), key);
+    }
+  }
 });
 
 test('계정 ID · 리전 · 이름 오류는 칸마다 따로 알린다', () => {
@@ -203,4 +236,39 @@ test('계정 불일치는 저장값 · 구현 불일치 점검을 안내하고 �
     assert.match(hint, /점검/);
     assert.doesNotMatch(hint, /지우|삭제|잘못 넣/);
   }
+});
+
+test('역할 이름은 서버의 param_RoleName과 같게 ":role/" 뒤 전부다(경로 포함)', () => {
+  assert.equal(roleNameOf('arn:aws:iam::123456789012:role/vigilantis-access'), 'vigilantis-access');
+  assert.equal(roleNameOf('arn:aws:iam::123456789012:role/ops/vigilantis-access'), 'ops/vigilantis-access');
+});
+
+test('고객 안내문은 계정 · 첫 리전 스택 · 역할 이름 · 링크를 싣고 ExternalId를 따로 싣지 않는다', () => {
+  const url = 'https://ap-northeast-2.console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?param_ExternalId=secret-value-123456';
+  const message = onboardingMessage(
+    {
+      aws_account_id: '123456789012',
+      access_role_arn: 'arn:aws:iam::123456789012:role/vigilantis-access',
+      regions: ['ap-northeast-2', 'us-east-1'],
+    },
+    url,
+  );
+  assert.match(message, /123456789012/);
+  assert.match(message, new RegExp(`ap-northeast-2 리전의 스택 ${ONBOARDING_STACK_NAME}`));
+  assert.doesNotMatch(message, /us-east-1/);
+  assert.match(message, /만들어지는 역할: vigilantis-access/);
+  assert.equal(message.split('\n').at(-1), url);
+  // 값은 링크 안에만 있다. 안내문 본문에 ExternalId를 따로 적어 퍼뜨리지 않는다.
+  assert.equal(message.split('secret-value-123456').length - 1, 1);
+});
+
+test('고객사 검색: 낱말마다 이름 · 고객사 ID · AWS 계정 ID 중 한 곳에 들어 있으면 맞는다', () => {
+  const t = { name: 'Nuri Soft 43', tenant_id: 'tnt-0043', aws_account_id: '111122223333' };
+  assert.equal(matchesTenantQuery(t, ''), true);
+  assert.equal(matchesTenantQuery(t, '  '), true);
+  assert.equal(matchesTenantQuery(t, 'nuri'), true);
+  assert.equal(matchesTenantQuery(t, 'TNT-00'), true);
+  assert.equal(matchesTenantQuery(t, '2222'), true);
+  assert.equal(matchesTenantQuery(t, 'soft 0043'), true);
+  assert.equal(matchesTenantQuery(t, 'soft 9999'), false);
 });
