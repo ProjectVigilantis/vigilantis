@@ -51,6 +51,7 @@ from ai import guardrails
 from config import get_settings
 from db import mappers, models
 from db.repositories import assets as assets_repo
+from db.repositories import audit as audit_repo
 from db.repositories import executions as executions_repo
 from db.repositories import guardrails as guardrails_repo
 from db.repositories import incidents as incidents_repo
@@ -314,9 +315,12 @@ def _move_incident_to_in_progress(db: Session, incident_id: str) -> None:
 
 
 def reserve_execution(
-    db: Session, request: ExecuteActionRequest
+    db: Session, request: ExecuteActionRequest, *, actor: audit_repo.Actor
 ) -> ExecutionReservation:
     """조치 실행 예약 — 멱등 확인 → Incident 확인 → 접수 근거 확인 → 예약 → 상태 전이.
+
+    actor 는 요청자다. 새 실행 행을 남길 때만 같은 트랜잭션에 감사 기록을 남긴다(T-2 · #544) —
+    같은 Key 재요청(200 재생)과 거절은 기록이 없다.
 
     멱등 확인이 맨 앞이어야 한다. 재요청 시점에는 후보가 이미 CLAIMED라, 제안
     확인을 먼저 하면 정상 재요청이 200이 아니라 409로 떨어진다.
@@ -379,6 +383,7 @@ def reserve_execution(
         if raced is None:
             raise  # 멱등 키가 아닌 다른 제약 위반이다 — 500으로 보고한다
         return _replay_or_conflict(raced, request)
+    audit_repo.record_execution_started(db, execution, actor)
 
     if not is_rollback:
         claimed = incidents_repo.update_candidate_status(
@@ -403,6 +408,7 @@ def resolve_incident(
     incident_id: str,
     resolution: ResolutionJudgement,
     *,
+    actor: audit_repo.Actor,
     resolution_note: str | None = None,
 ) -> bool:
     """관제자 종료 처리 — 상태 확인 → 잔여 제안 무효화 → RESOLVED 전이.
@@ -413,6 +419,8 @@ def resolve_incident(
 
     출발 상태를 AWAITING_APPROVAL로 전제하지 않고 잠근 뒤 실제 상태를 본다 —
     허용 집합은 INCIDENT_RESOLVABLE_STATUSES(schemas/incidents.py)다.
+
+    actor 는 요청자다. 종료를 확정한 요청만 같은 트랜잭션에 감사 기록을 남긴다(T-2 · #544).
     """
     incident = incidents_repo.lock_incident(db, incident_id)
     if incident is None:
@@ -451,6 +459,7 @@ def resolve_incident(
         # 통과시키지 않는다 — 제안만 무효화된 채 상태가 남는다. commit 없이 예외를
         # 던지므로 세션 정리에서 되돌아간다(여기서 rollback하지 않는 이유다)
         raise ApiError(ErrorCode.INCIDENT_NOT_RESOLVABLE)
+    audit_repo.record_incident_resolved(db, incident_id, resolution, actor)
 
     db.commit()
     db.refresh(incident)  # UPDATE가 바꾼 상태·판단을 응답 조립 전에 되읽는다
@@ -890,6 +899,8 @@ def reserve_auto_isolation(
         return _existing_auto_isolation(
             db, raced, execution_id=execution_id, deadline=deadline
         )
+    # 가드레일이 거절한 시도도 실행 행이 남으므로 기록한다 — 결과는 실행 상태가 말한다
+    audit_repo.record_execution_started(db, execution, audit_repo.SYSTEM)
 
     guardrails_repo.add_evaluation(
         db,
@@ -4015,6 +4026,7 @@ def initiate_auto_rollback(db: Session, origin_execution_id: str) -> RollbackIni
         # 정책은 어느 레코드에서 왔는지가 기록에 남을 때만 사후에 검증된다
         backup_record_id=record.backup_record_id,
     )
+    audit_repo.record_execution_started(db, child, audit_repo.SYSTEM)
     db.commit()
     logger.info(
         "auto_rollback_initiated",

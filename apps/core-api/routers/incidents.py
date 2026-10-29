@@ -55,6 +55,7 @@ import workflows
 from auth.access import require_action_role
 from auth.service import CurrentUser
 from db import mappers, models
+from db.repositories import audit as audit_repo
 from db.repositories import executions as executions_repo
 from db.repositories import incidents as incidents_repo
 from db.session import get_db
@@ -275,12 +276,14 @@ def resolve_incident(
     payload: ResolveIncidentRequest,
     request: Request,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_action_role),  # 요청자 신원 — 감사 기록(T-2)이 쓴다
+    user: CurrentUser = Depends(require_action_role),  # 요청자 신원 — 감사 기록(T-2 · #544)의 행위자
 ) -> IncidentResponse:
     """이미 종료된 건의 재요청도 200이며, 처음 저장된 판단을 그대로 돌려준다."""
     row = _load_incident(db, incident_id)
     changed = workflows.resolve_incident(
-        db, row.incident_id, payload.resolution, resolution_note=payload.resolution_note,
+        db, row.incident_id, payload.resolution,
+        actor=audit_repo.person(user.user_id, user.account_type),
+        resolution_note=payload.resolution_note,
     )
     response = _to_detail(db, row)
     if changed:

@@ -28,12 +28,14 @@ for p in (str(CORE_API), str(REPO_ROOT / "packages")):
 import dispatcher  # noqa: E402
 import workflows  # noqa: E402
 from db.repositories import assets as assets_repo  # noqa: E402
+from db.repositories import audit as audit_repo  # noqa: E402
 from db.repositories import executions as exec_repo  # noqa: E402
 from db.repositories import guardrails as guardrails_repo  # noqa: E402
 from db.repositories import incidents as incidents_repo  # noqa: E402
 from db.repositories import notification_events as events_repo
 from schemas.api.actions import ExecuteActionRequest, ExecutionStatus  # noqa: E402
 from schemas.api.assets import AssetType  # noqa: E402
+from schemas.api.audit import AuditActorKind  # noqa: E402
 from schemas.api.incidents import IncidentCategory, IncidentStatus  # noqa: E402
 from schemas.backups import BackupType  # noqa: E402
 from schemas.candidates import CandidateStatus  # noqa: E402
@@ -268,7 +270,7 @@ def rolled_back_origin(db, make_incident, make_candidate, make_execution):
     return _make
 
 
-def reserve_manual_revert(db, incident_id):
+def reserve_manual_revert(db, incident_id, actor):
     """관제자 [원클릭 원복] 접수 — 자동 발동과 갈라진 진입점(HTTP가 쓰는 것과 같다)."""
     reservation = workflows.reserve_execution(
         db,
@@ -277,6 +279,7 @@ def reserve_manual_revert(db, incident_id):
             runbook_id=RunbookId.RUNBOOK_EC2_REVERT_SIZE,
             idempotency_key=str(uuid.uuid4()),
         ),
+        actor=actor,
     )
     db.commit()
     return reservation.response.execution_id
@@ -326,6 +329,11 @@ def test_rollback_initiated_origin_grows_a_revert_child(db, rolled_back_origin, 
     assert child.status is ExecutionStatus.IN_PROGRESS
     # 접수는 실행 행까지다 — AWS는 다음 주기의 실행이 부른다
     assert aws.calls == []
+    # 사람 개입이 없으므로 감사 기록의 행위자는 SYSTEM 이다(T-2 · #544)
+    [event] = audit_repo.list_by_incident(db, child.incident_id)
+    assert (event.execution_id, event.trigger_source, event.actor_kind) == (
+        child.execution_id, TriggerSource.AUTO_ON_FAILURE, AuditActorKind.SYSTEM,
+    )
 
 
 def test_auto_rollback_happens_at_most_once_per_origin(db, rolled_back_origin, aws):
@@ -566,14 +574,14 @@ def test_unverified_origin_is_not_rolled_back_automatically(db, rolled_back_orig
     assert children(db, origin_id) == []
 
 
-def test_operator_can_revert_an_unverified_origin(db, rolled_back_origin, aws):
+def test_operator_can_revert_an_unverified_origin(db, rolled_back_origin, aws, audit_actor):
     """자동 원복을 하지 않은 대신 관제자 원복은 열려 있다 (Issue #249).
 
     닫으면 결과를 모르는 변경이 되돌릴 수 없는 변경이 된다. 확정의 근거는 자식의 결과라
     원본은 ROLLED_BACK으로 옮겨 가고 인시던트는 종료 판단 대기로 간다.
     """
     incident_id, origin_id = rolled_back_origin(origin_status=ExecutionStatus.UNVERIFIED)
-    reserve_manual_revert(db, incident_id)
+    reserve_manual_revert(db, incident_id, audit_actor)
 
     cycle(db)
 
@@ -858,7 +866,7 @@ def test_started_rollback_with_unverifiable_result_records_unknown(
 # ---------------------------------------------------- 관제자 접수 원복 (PR #256 리뷰 ②)
 
 
-def test_manual_revert_child_is_bound_to_the_origin_backup(db, rolled_back_origin, aws):
+def test_manual_revert_child_is_bound_to_the_origin_backup(db, rolled_back_origin, aws, audit_actor):
     """관제자 접수 자식도 되돌릴 값의 출처를 자기 행에 결속한다.
 
     실행(run_revert_size_execution)은 요청도 후보도 보지 않고 **자기 행의
@@ -868,7 +876,7 @@ def test_manual_revert_child_is_bound_to_the_origin_backup(db, rolled_back_origi
     """
     incident_id, origin_id = rolled_back_origin()
 
-    child_id = reserve_manual_revert(db, incident_id)
+    child_id = reserve_manual_revert(db, incident_id, audit_actor)
 
     child = exec_repo.get_execution(db, child_id)
     origin = exec_repo.get_execution(db, origin_id)
@@ -876,12 +884,17 @@ def test_manual_revert_child_is_bound_to_the_origin_backup(db, rolled_back_origi
     assert child.parent_execution_id == origin_id
     assert origin.backup_record_id is not None
     assert child.backup_record_id == origin.backup_record_id
+    # 원복도 관제자 승인이다 — 행위자는 요청자(T-2 · #544)
+    [event] = audit_repo.list_by_incident(db, incident_id)
+    assert (event.execution_id, event.actor_kind, event.actor_user_id) == (
+        child_id, AuditActorKind.PLATFORM_USER, audit_actor.user_id,
+    )
 
 
-def test_manual_revert_runs_and_settles_both(db, rolled_back_origin, aws):
+def test_manual_revert_runs_and_settles_both(db, rolled_back_origin, aws, audit_actor):
     """접수 → 실행 → 확정. 확정의 근거는 발동 주체가 아니라 자식의 결과다."""
     incident_id, origin_id = rolled_back_origin()
-    reserve_manual_revert(db, incident_id)
+    reserve_manual_revert(db, incident_id, audit_actor)
 
     cycle(db)
 
@@ -928,20 +941,20 @@ def test_missing_backup_records_request_before_failure(
     assert response.json()["executions"][0]["status"] == "ROLLBACK_FAILED"
 
 
-def test_manual_child_after_auto_request_is_not_auto_result(db, rolled_back_origin, aws):
+def test_manual_child_after_auto_request_is_not_auto_result(db, rolled_back_origin, aws, audit_actor):
     incident_id, origin_id = rolled_back_origin(origin_status=ExecutionStatus.IN_PROGRESS)
     workflows.close_execution(db, origin_id, next_status=ExecutionStatus.ROLLBACK_INITIATED)
-    reserve_manual_revert(db, incident_id)
+    reserve_manual_revert(db, incident_id, audit_actor)
     cycle(db)
     [request] = events_repo.list_by_incident(db, incident_id)
     assert (request.kind, request.phase) == ("AUTO_ROLLBACK", "REQUESTED")
     assert only_child(db, origin_id).trigger_source is TriggerSource.USER_APPROVAL
 
 
-def test_manual_revert_restores_the_backup_type(db, rolled_back_origin, aws):
+def test_manual_revert_restores_the_backup_type(db, rolled_back_origin, aws, audit_actor):
     """관제자 경로도 백업 값으로 되돌린다 — 원본이 적용한 값이 아니다."""
     incident_id, _ = rolled_back_origin()
-    reserve_manual_revert(db, incident_id)
+    reserve_manual_revert(db, incident_id, audit_actor)
 
     cycle(db)
 
@@ -953,10 +966,10 @@ def test_manual_revert_restores_the_backup_type(db, rolled_back_origin, aws):
     assert modify == [{"InstanceId": INSTANCE, "InstanceType": {"Value": BACKUP_TYPE}}]
 
 
-def test_manual_revert_does_not_double_with_auto(db, rolled_back_origin, aws):
+def test_manual_revert_does_not_double_with_auto(db, rolled_back_origin, aws, audit_actor):
     """접수된 원복이 있으면 자동 발동은 걸리지 않는다 — 관문이 자식의 존재라서다."""
     incident_id, origin_id = rolled_back_origin()
-    reserve_manual_revert(db, incident_id)
+    reserve_manual_revert(db, incident_id, audit_actor)
 
     cycle(db)
     cycle(db)

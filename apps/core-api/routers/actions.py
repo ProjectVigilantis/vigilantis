@@ -24,6 +24,7 @@ from schemas.api.actions import ExecuteActionRequest, ExecuteActionResponse
 import workflows
 from auth.access import require_action_role
 from auth.service import CurrentUser
+from db.repositories import audit as audit_repo
 from db.session import get_db
 
 router = APIRouter(prefix="/api/v1", tags=["actions"])
@@ -38,10 +39,12 @@ def execute_action(
     payload: ExecuteActionRequest,
     response: Response,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_action_role),  # 요청자 신원 — 감사 기록(T-2)이 쓴다
+    user: CurrentUser = Depends(require_action_role),  # 요청자 신원 — 감사 기록(T-2 · #544)의 행위자
 ) -> ExecuteActionResponse:
     """신규 예약은 202, 같은 Key 재요청은 200 — 응답 본문은 두 경우가 같다."""
-    reservation = workflows.reserve_execution(db, payload)
+    reservation = workflows.reserve_execution(
+        db, payload, actor=audit_repo.person(user.user_id, user.account_type)
+    )
     if not reservation.created:
         response.status_code = status.HTTP_200_OK
     return reservation.response

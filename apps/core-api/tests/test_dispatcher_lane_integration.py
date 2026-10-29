@@ -36,6 +36,7 @@ from tests.test_ec2_autoscaling_workflow import (
     make_plan,
     step,
 )
+from tests.audit_cleanup import purge_audit_events
 
 VOLUME_ARN = "arn:aws:ec2:ap-northeast-2:123456789012:volume/vol-0abc123456789def0"
 WAIT = 10
@@ -91,6 +92,7 @@ def committed(pg_engine, make_incident, make_candidate):
     finally:
         with factory() as session:
             exec_ids = [ids["a"], ids["b"]]
+            purge_audit_events(session, execution_ids=exec_ids, incident_ids=ids["incidents"])
             session.execute(
                 delete(models.ExecutionStep).where(
                     models.ExecutionStep.execution_id.in_(exec_ids)

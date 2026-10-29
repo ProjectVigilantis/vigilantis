@@ -37,6 +37,7 @@ from schemas.api.incidents import IncidentCategory, IncidentResponse, IncidentSt
 from schemas.api.ws import WsEventType
 from schemas.events import ThreatEventType
 from schemas.incidents import AgentInvocationStatus
+from tests.audit_cleanup import purge_audit_events
 
 ROOT = Path(__file__).resolve().parents[3]
 GOLDEN = ROOT / "datasets/golden/secops"
@@ -275,6 +276,7 @@ def committed_sessions(pg_engine):
             models.ThreatEvent.source_event_id.like("test322-%"),
         )))
         ids = select(models.Incident.incident_id).where(models.Incident.threat_event_id.in_(threats))
+        purge_audit_events(db, incident_ids=db.scalars(ids))
         db.execute(delete(models.Evidence).where(models.Evidence.incident_id.in_(ids)))
         db.execute(delete(models.Incident).where(models.Incident.threat_event_id.in_(threats)))
         db.execute(delete(models.ThreatEvent).where(models.ThreatEvent.threat_event_id.in_(threats)))

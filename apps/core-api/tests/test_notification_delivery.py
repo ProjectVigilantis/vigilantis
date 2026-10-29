@@ -33,6 +33,7 @@ from schemas.intake import SecOpsIncidentIntake
 from sqlalchemy import create_engine, delete, event, func, insert, select, text, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
+from tests.audit_cleanup import purge_audit_events
 
 TENANT_A = "11111111-1111-4111-8111-111111111111"
 TENANT_B = "22222222-2222-4222-8222-222222222222"
@@ -424,6 +425,7 @@ def _seeded_high_intake(sessions, account):
 
 def _remove_intake_rows(engine, incident_id, arn, threat_id, run_id):
     with engine.begin() as connection:
+        purge_audit_events(connection, incident_ids=[incident_id])
         connection.execute(delete(models.Evidence).where(models.Evidence.incident_id == incident_id))
         connection.execute(delete(models.Incident).where(models.Incident.incident_id == incident_id))
         connection.execute(
