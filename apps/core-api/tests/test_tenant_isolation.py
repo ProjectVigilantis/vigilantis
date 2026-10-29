@@ -8,15 +8,19 @@ ADR-0012 §3 ②(IAM 회수 = 앱 밖 운영자 권한)도 이 파일 밖이다 
 판정 순서(계약 원문 `packages/schemas/api/tenants.py` 머리말 「기존 경로의 테넌트 범위」):
     역할(403) → 범위(404) → 같은 Key 재요청 → 정지(409) → 상태(409)
 
-전제(아직 `dev`에 없음 — 들어오면 모듈 skip을 떼고 본문을 채운다):
-    ① `CurrentUser.tenant_id` + 플랫폼 운영자 표시(T-1 PR 4 · `auth/service.py`)
-    ② 인시던트 목록·상세·실행·종료 경로의 테넌트 범위(T-4 2단계 · `routers/incidents.py`)
-    ③ `make_auth_session(role, tenant_id=...)` 픽스처 인자(①과 함께 오지 않으면 여기서 conftest에 추가)
+전제(아직 `dev`에 없음 — ①②④-C가 들어오면 모듈 skip을 떼고 1~15·16a 본문을 채운다):
+    ① `CurrentUser.account_type`·`tenant_id`(T-1 PR 4 = PR #527 · `auth/service.py`)
+    ② 인시던트 목록·상세·실행·종료 경로의 테넌트 범위(T-4 2단계 = #533 C · `routers/incidents.py`)
+    ③ 픽스처 `make_tenant(status=None)` · `make_auth_session(role, tenant_id=...)` · `login_as(role, tenant_id=...)`
+      (PR #527 conftest — 기본은 플랫폼 ADMIN, 고객사 세션은 `login_as(role, tenant_id=make_tenant())`)
+    ④ PR #527의 임시 업무 관문(`require_business_access`) 해제 — 걷는 자리는 경로별로
+      인시던트·조치·자산 목록 = #533 C / 메트릭 시계열 = #536 / WebSocket = #535(#529 전제 표)
 
 이슈: #529(T-5) — 기대값 17행·전제·열린 질문의 원천.
 
-시드 골격: 테넌트 A·B(`test_tenants_api._seed` 재사용) · 세션 A-OPERATOR·A-VIEWER·B-OPERATOR·
-플랫폼 운영자 · 인시던트 A 1건(대조군)·B 1건(EXECUTABLE 후보 1) · 실행 경로의 디스패처는
+시드 골격: 테넌트 A·B(`make_tenant()` · 정지는 `make_tenant(status=TenantStatus.SUSPENDED)`) ·
+세션 A-OPERATOR·A-VIEWER·B-OPERATOR(`login_as(role, tenant_id=...)`)·플랫폼 운영자(`client_pg` 기본
+세션 = 플랫폼 ADMIN) · 인시던트 A 1건(대조군)·B 1건(EXECUTABLE 후보 1) · 실행 경로의 디스패처는
 `test_actions_api.py`의 monkeypatch 패턴으로 끊고 `executions` 행 수를 직접 센다.
 """
 
@@ -24,12 +28,12 @@ import pytest
 
 pytestmark = pytest.mark.skip(
     reason=(
-        "무조건 보류 — T-5 전제 ①(CurrentUser.tenant_id · T-1 PR 4) "
-        "②(인시던트 경로 테넌트 범위 · T-4 2단계)가 dev에 들어오면 켠다(#529)"
+        "무조건 보류 — T-5 전제 ①(CurrentUser.tenant_id · PR #527) "
+        "②·④-C(인시던트 경로 테넌트 범위 · #533 C)가 dev에 들어오면 켠다(#529)"
     )
 )
 
-_PENDING = "T-5 2차 PR(전제 ①② 머지 뒤)에서 채운다"
+_PENDING = "T-5 2차 PR(전제 ①②④-C 머지 뒤)에서 채운다"
 
 
 # --- 범위: A 세션 → B 인시던트 -------------------------------------------------
@@ -110,7 +114,7 @@ def test_suspended_tenant_resolve_is_200_for_platform_operator(client_pg, db, lo
 
 
 def test_other_tenants_suspension_is_404_not_409(client_pg, db, login_as, make_executable):
-    """14. B 정지 · A-OPERATOR `POST /actions/execute`(B) → **404**(범위 → 정지 순서 · 정지 사실이 새지 않는다)."""
+    """14. B 정지 · A-OPERATOR `POST /actions/execute`(B) → 404(409 아님 — 범위 → 정지 순서 · 정지 사실이 새지 않는다)."""
     raise NotImplementedError(_PENDING)
 
 
@@ -122,11 +126,19 @@ def test_unauthenticated_list_is_401(client_pg_anon):
     raise NotImplementedError(_PENDING)
 
 
-def test_assets_and_metrics_hide_other_tenant(client_pg, db, login_as):
-    """16. A-OPERATOR `GET /assets` · `GET /metrics/timeseries` → B 자산 없음(필터 · 404 자리 없음)."""
+def test_assets_hide_other_tenant(client_pg, db, login_as, make_tenant):
+    """16a. A-OPERATOR `GET /assets` → B 자산·MVP(테넌트 없음) 자산 없음 · 수집 상태·마지막 수집 시각도
+    자기 테넌트 회차만(필터 · 404 자리 없음) — #533 C."""
     raise NotImplementedError(_PENDING)
 
 
-def test_ws_does_not_deliver_other_tenants_events(ws_client, db):
-    """17. A WS 연결 중 B 인시던트 갱신 → 이벤트 미수신."""
+@pytest.mark.skip(reason="보류 — #536(메트릭 시계열 테넌트 범위) 머지 뒤 켠다(#529 16b)")
+def test_metrics_timeseries_hide_other_tenant(client_pg, db, login_as, make_tenant):
+    """16b. A-OPERATOR `GET /metrics/timeseries`(B 자산) → B 시계열 없음(필터 · 404 자리 없음) — #536."""
+    raise NotImplementedError(_PENDING)
+
+
+@pytest.mark.skip(reason="보류 — #535(WebSocket 테넌트 범위) 머지 뒤 켠다(#529 17 · 전제 ③ WS)")
+def test_ws_does_not_deliver_other_tenants_events(ws_client, db, make_tenant):
+    """17. A WS 연결 중 B 인시던트 갱신 → 이벤트 미수신 — #535(`ws_client`는 플랫폼 세션이라 고객사 WS 세션 픽스처도 그 카드 뒤)."""
     raise NotImplementedError(_PENDING)
