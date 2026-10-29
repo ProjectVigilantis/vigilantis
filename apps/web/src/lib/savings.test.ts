@@ -69,6 +69,7 @@ function incident(id: string, recs: RecommendationItem[]): IncidentResponse {
     resolution_note: null,
     analysis_result: null,
     resolved_at: null,
+    auto_isolation_block: null,
   };
 }
 

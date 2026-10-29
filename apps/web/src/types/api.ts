@@ -316,6 +316,14 @@ export const RESPONSE_MODES = [
 export type ResponseMode = (typeof RESPONSE_MODES)[number];
 
 /**
+ * 자동 발동(High 선차단·Medium 1분 격리)이 막힌 이유 — 사람이 승인해야만 조치된다(#521).
+ * `AUTO_ACTION_DISABLED`: 테넌트가 자동 조치를 껐거나, 그 발동을 정한 시각이 다시 켠 시각 이전이다.
+ * 정지(`TENANT_SUSPENDED`)는 T-4가 더한다.
+ */
+export const AUTO_ISOLATION_BLOCKS = ['AUTO_ACTION_DISABLED'] as const;
+export type AutoIsolationBlock = (typeof AUTO_ISOLATION_BLOCKS)[number];
+
+/**
  * 절감 예상의 결과 상태. **`ESTIMATED`만 금액이 있다** — `UNAVAILABLE`·`INVALID`는
  * `amount`가 null이고, 화면은 그 둘을 0원으로 그리지 않는다(0원은 "절감이 없다"는 단언이다).
  */
@@ -523,6 +531,13 @@ export interface IncidentResponse extends IncidentListItem {
   resolution: ResolutionJudgement | null;
   resolution_note: string | null;
   resolved_at: IsoDateTime | null;
+  /**
+   * 자동 발동이 지금 막혀 있으면 그 이유, 아니면 null(**상세 전용** · #521). 값이 있으면 「실행 예정」·
+   * 「1분 안에… 자동으로 격리」 안내는 틀린 말이다. 자동 발동 대상이 아닌 건도 null이고(대상인지는
+   * `response_mode`·`status`로 가른다), FINOPS는 늘 null이다. 테넌트 설정이 바뀌어도 이벤트가 없어
+   * 다시 읽을 때까지 낡을 수 있다.
+   */
+  auto_isolation_block: AutoIsolationBlock | null;
 }
 
 /** 목록 봉투 — 페이지네이션 필드는 Post-MVP. */

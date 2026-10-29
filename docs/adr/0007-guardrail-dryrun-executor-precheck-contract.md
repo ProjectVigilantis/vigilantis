@@ -2,7 +2,7 @@
 
 - **Status**: Accepted (2026-08-24 — 안성일(AI/Guardrail) 확인 완료, PR #117 승인)
 - **Date**: 2026-08-24
-- **Amended**: 2026-08-25(1차 — precheck 구현 실측 반영) · 2026-08-26(2차 — ④ 사유 코드 정의 위치 현행화) · 2026-10-13(3차 — §4 일정 서술 정합). 하단 "개정 이력" 참조, **핵심 결정 불변**
+- **Amended**: 2026-08-25(1차 — precheck 구현 실측 반영) · 2026-08-26(2차 — ④ 사유 코드 정의 위치 현행화) · 2026-10-13(3차 — §4 일정 서술 정합) · 2026-10-15(4차 — §4 잠정 3행 확정) · 2026-10-27(5차 — `SG_RECREATE` 규칙 DryRun 시점을 실행으로 이동). 하단 "개정 이력" 참조, **핵심 결정 불변**
 - **Deciders**: 김세혁(PM/Infra, executor 소유자) 결정, 안성일(AI/Guardrail) 합의 완료
 - **Refs**: #113
 
@@ -15,6 +15,8 @@
 문제는 `DryRun`이 모든 작업에서 쓸 수 있는 수단이 아니라는 점이다. 확정 10종(ADR-0002 본편 7 + ADR-0004 롤백 3)이 사용하는 AWS 작업 전수를 LocalStack 4.14.0에서 실측했다.
 
 > **1차 보강(2026-09-22 · Issue #368)** — `ec2.revoke_security_group_egress` 1행을 더했다. `SG_RECREATE` 실행을 세우면서 `create_security_group`이 VPC 보안 그룹에 **전체 허용 아웃바운드 1건을 자동으로 붙인다**는 것이 드러났고, 걷어 내지 않으면 복원된 SG가 원본보다 넓어지거나 같은 규칙 주입이 `InvalidPermission.Duplicate`로 거절된다. 그래서 회수가 이 런북의 고정 단계가 됐고, 허용 작업도 한 종 늘었다. 판정은 나머지 SG 작업과 같은 `DryRun`이다(2026-09-22 LocalStack 실측 — `DryRunOperation` 예외, 자원 변경 없음). 표 밖의 결정은 바뀌지 않았다.
+
+> **2차 보강(2026-10-27 · Issue #434)** — `SG_RECREATE`의 표 4행 가운데 **규칙 3종(`revoke_security_group_egress` · `authorize_security_group_ingress` · `authorize_security_group_egress`)의 `DryRun`은 `precheck()`가 아니라 실행이 새 그룹을 만든 직후 새 `GroupId`로 건다**(`executor._sg_rules_dry_run`). `precheck()`는 `create_security_group`만 건다. 원본 `GroupId`로 걸면 운영 자격에서 **항상** 거절되기 때문이다 — 원본 SG는 이미 지워졌고, 앱 정책(`scripts/provision_smoke_aws.py`)은 이 세 작업에 `ec2:Vpc` 조건을 거는데 없는 자원에서는 조건을 평가할 수 없어 `UnauthorizedOperation`이 된다(2026-10-27 실 AWS 실측 — 복구 런북이 사전 검사를 통과하지 못했다. §4 끝의 "앱 자격에서 사유 코드가 달라지는 경우"와 같은 기전). 판정 규약(§2)은 그대로다 — 거절되면 실행은 회수·주입 없이 `DRY_RUN_SG_RULES` 단계를 `FAILED`로 남기고 멈춘다. 표의 판정 열(`DryRun`)은 바뀌지 않았다.
 
 ### 실측 — 확정 10종 `target_api` 전수 (LocalStack 4.14.0)
 
@@ -305,3 +307,11 @@ authorize_security_group_ingress(GroupId='sg-000...0')  # 부재 -> DryRunOperat
   | ② | §4 | **앱 자격의 사유 코드 차이를 명시**했다 — 운영 자격에서는 없는 SG가 ① DryRun의 `UnauthorizedOperation`으로 먼저 걸려 `PRECHECK_UNAUTHORIZED`가 된다(관리자 자격에서는 §4 규약대로 `PRECHECK_TARGET_NOT_FOUND`). 거절은 일어나며 사유 표기만 다르다 | 같은 실측 — 같은 입력을 앱 키와 관리자 키로 각각 호출 |
 
   **바뀌지 않은 것**: 조건 자체 · 판정 규약 · 사유 코드 정의 · 코드. ②의 사유 표기 차이는 ADR-0006 §4 이월 8행과 함께 **코드를 바꾸지 않는다**(2026-10-14 안성일 처분).
+
+- **2026-10-27 (5차 개정)** — **`SG_RECREATE`의 규칙 3종 `DryRun`을 `precheck()`에서 실행 직후로 옮긴다**(Issue #434). 4차 개정 ②가 "사유 표기만 다르다"로 둔 기전이 이 런북에서는 **거절 자체**가 됐다 — 운영 자격에서 복구 런북이 사전 검사를 한 번도 통과하지 못했다.
+
+  | # | 절 | 개정 내용 | 근거 |
+  | --- | --- | --- | --- |
+  | ① | §Context | `precheck()`는 `create_security_group`만 `DryRun`하고, `revoke_security_group_egress` · `authorize_security_group_ingress` · `authorize_security_group_egress`의 `DryRun`은 실행이 새 그룹을 만든 직후 **새 `GroupId`**로 건다. 거절되면 회수·주입 없이 멈춘다(`DRY_RUN_SG_RULES` 단계 `FAILED`) | 2026-10-27 실 AWS(고객 계정 모드 플랫폼) — `SG_DELETE_ISOLATED` 성공 뒤 `SG_RECREATE`가 ④에서 `PRECHECK_UNAUTHORIZED`. 원본 SG가 없어 `ec2:Vpc` 조건을 평가할 수 없었다 |
+
+  **바뀌지 않은 것**: 작업↔런북 표와 판정 열 · 판정 규약(§2) · 사유 코드 · `precheck()` 호출 규약(§1). 대안이던 앱 정책의 조건 변경은 권한 설계라 이 개정 밖이다.

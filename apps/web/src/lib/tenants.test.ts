@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { TenantListItem } from '../types/api.ts';
+import {
+  TENANT_RESUMABLE_STATUSES,
+  TENANT_STATUSES,
+  TENANT_SUSPENDABLE_STATUSES,
+  type TenantListItem,
+} from '../types/api.ts';
 import {
   hoursSince,
   isStaleTenantRequest,
@@ -10,7 +15,9 @@ import {
   summarizeTenants,
   TENANT_STATUS_LABELS,
   tenantActions,
+  tenantRunFollowUp,
   verificationAges,
+  verificationHint,
   type TenantForm,
 } from './tenants.ts';
 
@@ -139,20 +146,61 @@ test('VPC 칸을 비우면 오류가 아니라 계정 안 VPC 전체다', () => 
   assert.match(parseVpcIds('vpc-XYZ').error ?? '', /형식/);
 });
 
-test('정지 요청이 409(상태 충돌)이면 확인창을 닫고, 다시 읽은 정지 상태에서는 재개만 열린다(#503 리뷰)', () => {
+test('정지 · 재개 버튼은 계약 상수를 따른다(#507)', () => {
+  for (const status of TENANT_STATUSES) {
+    const actions = tenantActions(status);
+    assert.equal(actions.suspend, TENANT_SUSPENDABLE_STATUSES.includes(status), status);
+    assert.equal(actions.resume, TENANT_RESUMABLE_STATUSES.includes(status), status);
+  }
+});
+
+// 아래 넷은 상세 화면 정지 확인창이 요청 결과마다 하는 일(tenantRunFollowUp)을 고정한다(#508).
+// 확인창은 결과가 closeDialog면 닫히고, 아니면 열린 채 입력한 사유와 창 안의 오류를 유지한다.
+
+test('정지 요청이 409(상태 충돌)이면 확인창을 닫고 다시 읽어, 정지 상태에서는 재개만 열린다(#503 리뷰)', () => {
   // 다른 관리자가 먼저 정지했다: 서버는 409 TENANT_STATE_CONFLICT, 화면은 다시 읽어 SUSPENDED를 받는다.
-  assert.equal(isStaleTenantRequest('TENANT_STATE_CONFLICT'), true);
+  assert.deepEqual(tenantRunFollowUp({ ok: false, code: 'TENANT_STATE_CONFLICT' }), { refresh: true, closeDialog: true });
   const after = tenantActions('SUSPENDED');
   assert.equal(after.suspend, false);
   assert.equal(after.resume, true);
 });
 
-test('이미 정지 · 없는 고객도 요청이 무효라 확인창을 닫는다', () => {
-  assert.equal(isStaleTenantRequest('TENANT_SUSPENDED'), true);
-  assert.equal(isStaleTenantRequest('TENANT_NOT_FOUND'), true);
+test('이미 정지 · 없는 고객도 요청이 무효라 확인창을 닫고 다시 읽는다', () => {
+  for (const code of ['TENANT_SUSPENDED', 'TENANT_NOT_FOUND'] as const) {
+    assert.equal(isStaleTenantRequest(code), true);
+    assert.deepEqual(tenantRunFollowUp({ ok: false, code }), { refresh: true, closeDialog: true });
+  }
 });
 
-test('일시 오류는 확인창을 남긴다(입력한 정지 사유를 잃지 않게)', () => {
-  assert.equal(isStaleTenantRequest('INTERNAL_ERROR'), false);
-  assert.equal(isStaleTenantRequest(null), false);
+test('503 같은 일시 오류는 확인창을 남기고 다시 읽지 않는다(입력한 정지 사유를 잃지 않고 재시도한다)', () => {
+  // 응답 본문이 없는 503(code 없음)과 서버 내부 오류 코드 둘 다 같다.
+  for (const code of [null, 'INTERNAL_ERROR'] as const) {
+    assert.equal(isStaleTenantRequest(code), false);
+    assert.deepEqual(tenantRunFollowUp({ ok: false, code }), { refresh: false, closeDialog: false });
+  }
+});
+
+test('성공하면 닫고 다시 읽는다. 다른 동작이 진행 중이라 건너뛴 요청은 아무것도 바꾸지 않는다', () => {
+  assert.deepEqual(tenantRunFollowUp({ ok: true }), { refresh: true, closeDialog: true });
+  assert.deepEqual(tenantRunFollowUp(null), { refresh: false, closeDialog: false });
+});
+
+test('역할 접근 거절: 연결 대기에서만 계정 ID 확인과 삭제 · 재등록을 덧붙인다', () => {
+  const pending = verificationHint('ASSUME_DENIED', 'PENDING_CONNECTION') ?? '';
+  assert.match(pending, /신뢰 정책/);
+  assert.match(pending, /계정 ID/);
+  assert.match(pending, /지우고 새로 추가/);
+  for (const status of ['ACTIVE', 'SUSPENDED'] as const) {
+    const hint = verificationHint('ASSUME_DENIED', status) ?? '';
+    assert.match(hint, /신뢰 정책/);
+    assert.doesNotMatch(hint, /지우|삭제/);
+  }
+});
+
+test('계정 불일치는 저장값 · 구현 불일치 점검을 안내하고 삭제는 안내하지 않는다(#507)', () => {
+  for (const status of TENANT_STATUSES) {
+    const hint = verificationHint('ACCOUNT_MISMATCH', status) ?? '';
+    assert.match(hint, /점검/);
+    assert.doesNotMatch(hint, /지우|삭제|잘못 넣/);
+  }
 });

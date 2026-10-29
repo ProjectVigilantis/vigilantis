@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from botocore.exceptions import ClientError, WaiterError
+from botocore.exceptions import ClientError
 from sqlalchemy.exc import IntegrityError
 
 CORE_API = Path(__file__).resolve().parents[1]
@@ -82,6 +82,23 @@ STOP_RESPONSE = {
 }
 
 
+def instance_status(state: str, system: str, instance: str) -> dict:
+    return {
+        "InstanceStatuses": [
+            {
+                "InstanceId": INSTANCE,
+                "InstanceState": {"Name": state},
+                "SystemStatus": {"Status": system},
+                "InstanceStatus": {"Status": instance},
+            }
+        ]
+    }
+
+
+# 가짜 EC2의 기본 상태 조회 응답 — 2/2 통과. 판정은 기다리지 않고 이 응답을 1회 관측한다
+HEALTHY_STATUS = instance_status("running", "ok", "ok")
+
+
 def client_error(code: str, status: int = 400) -> ClientError:
     return ClientError(
         {
@@ -125,6 +142,8 @@ class FakeEc2:
                 return STOP_RESPONSE
             if operation == "describe_network_acls":
                 return EMPTY_ACL
+            if operation == "describe_instance_status":
+                return HEALTHY_STATUS
             return {}
 
         return call
@@ -132,7 +151,11 @@ class FakeEc2:
 
 @pytest.fixture
 def aws(monkeypatch):
-    """캡처(backup)·실행(executor)·판정(rollback)이 같은 가짜 EC2를 본다."""
+    """캡처(backup)·실행(executor)·판정(rollback)이 같은 가짜 EC2를 본다.
+
+    2/2 예산은 1초다(설정 패치) — 판정은 기다리지 않고 1회 관측하므로 테스트는
+    기동 단계 시각을 뒤로 돌려(backdate_start) 예산 초과를 만든다.
+    """
     state = {"overrides": {}, "calls": []}
 
     def factory(service, region=None, **_):
@@ -467,6 +490,138 @@ def test_close_failure_is_also_contained(db, reserved, aws, monkeypatch):
     )
 
 
+# ------------------------------------------- 반복 예외의 상한 (Issue #434 4-2)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_failure_ledger():
+    """예외 장부는 프로세스 메모리다 — 테스트끼리 횟수가 새지 않게 매번 비운다."""
+    dispatcher.reset_failure_ledger()
+    yield
+    dispatcher.reset_failure_ledger()
+
+
+def _always_raising_runner(monkeypatch, poisoned_id, calls):
+    real_runner = workflows.run_rightsizing_execution
+
+    def runner(session, execution_id):
+        if execution_id == poisoned_id:
+            calls.append(execution_id)
+            raise RuntimeError("늘 실패하는 결함 재현")
+        return real_runner(session, execution_id)
+
+    monkeypatch.setitem(dispatcher._RUNNERS, RunbookId.RUNBOOK_EC2_RIGHTSIZING, runner)
+
+
+def test_repeated_exceptions_are_capped_and_quarantined(db, reserved, aws, monkeypatch, caplog):
+    """같은 건이 상한만큼 연속으로 예외를 내면 더 집지 않는다 — 10초마다 영원히 반복하지 않는다.
+
+    판정 불가 보류의 카운터(verification_attempts)는 이 경로를 세지 않는다 — 분류된 AWS
+    조회 실패에만 쓰이기 때문이다. 상한에 닿은 건은 비종료로 남아 관제자 확인 대상이 된다.
+    """
+    _incident, poisoned_id = reserved()
+    calls: list[str] = []
+    _always_raising_runner(monkeypatch, poisoned_id, calls)
+    cap = dispatcher.DISPATCH_EXCEPTION_MAX_ATTEMPTS
+
+    with caplog.at_level("CRITICAL", logger="vigilantis.dispatcher"):
+        reports = [cycle(db) for _ in range(cap)]
+    after = cycle(db)
+
+    assert [r.errored for r in reports] == [1] * cap
+    assert [r.quarantined for r in reports] == [0] * (cap - 1) + [1]
+    assert len(calls) == cap
+    assert "dispatch_execution_quarantined" in caplog.text
+    # 격리된 뒤에는 runner를 부르지 않고 건너뛴다 — 비종료 상태는 그대로다
+    assert after.scanned == 1 and after.errored == 0 and after.quarantined == 1
+    assert len(calls) == cap
+    assert exec_repo.get_execution(db, poisoned_id).status is ExecutionStatus.IN_PROGRESS
+    assert exec_repo.get_execution(db, poisoned_id).verification_attempts == 0
+
+
+def test_quarantine_is_per_execution(db, reserved, aws, monkeypatch):
+    """격리는 건 단위다 — 같은 스캔의 다른 예약은 계속 디스패치된다."""
+    _p, poisoned_id = reserved()
+    _always_raising_runner(monkeypatch, poisoned_id, [])
+    for _ in range(dispatcher.DISPATCH_EXCEPTION_MAX_ATTEMPTS):
+        cycle(db)
+    _h, healthy_id = reserved()
+
+    report = cycle(db)
+
+    assert report.quarantined == 1 and report.started == 1
+    assert exec_repo.get_execution(db, healthy_id).status is ExecutionStatus.IN_PROGRESS
+    assert report.awaiting_status_check == 1
+
+
+def test_a_clean_cycle_resets_the_consecutive_count(db, reserved, aws, monkeypatch):
+    """상한은 **연속** 예외다 — 한 번 예외 없이 지나가면 처음부터 다시 센다."""
+    _incident, execution_id = reserved()
+    cap = dispatcher.DISPATCH_EXCEPTION_MAX_ATTEMPTS
+    failing = {"on": True}
+    real_runner = workflows.run_rightsizing_execution
+
+    def runner(session, eid):
+        if failing["on"]:
+            raise RuntimeError("간헐 결함 재현")
+        return real_runner(session, eid)
+
+    monkeypatch.setitem(dispatcher._RUNNERS, RunbookId.RUNBOOK_EC2_RIGHTSIZING, runner)
+    for _ in range(cap - 1):
+        assert cycle(db).errored == 1
+    failing["on"] = False
+    assert cycle(db).awaiting_status_check == 1  # 예외 없이 한 주기를 마쳤다
+
+    # 이제 판정 단계에서 다시 실패시킨다 — 앞의 cap-1회는 잊혔어야 한다
+    monkeypatch.setitem(
+        dispatcher._JUDGES,
+        RunbookId.RUNBOOK_EC2_RIGHTSIZING,
+        lambda session, eid: (_ for _ in ()).throw(RuntimeError("판정 결함 재현")),
+    )
+    reports = [cycle(db) for _ in range(cap - 1)]
+
+    assert [r.quarantined for r in reports] == [0] * (cap - 1)
+    assert exec_repo.get_execution(db, execution_id).status is ExecutionStatus.IN_PROGRESS
+
+
+def test_judge_exceptions_share_the_same_cap(db, ran_and_awaiting, aws, monkeypatch):
+    """판정 경로의 예외도 같은 장부에 센다 — 실행·판정·원복 개시가 한 건의 같은 축이다."""
+    _incident, execution_id = ran_and_awaiting()
+    cap = dispatcher.DISPATCH_EXCEPTION_MAX_ATTEMPTS
+    monkeypatch.setitem(
+        dispatcher._JUDGES,
+        RunbookId.RUNBOOK_EC2_RIGHTSIZING,
+        lambda session, eid: (_ for _ in ()).throw(RuntimeError("판정 결함 재현")),
+    )
+
+    reports = [cycle(db) for _ in range(cap + 1)]
+
+    assert [r.errored for r in reports] == [1] * cap + [0]
+    assert reports[-1].quarantined == 1
+    assert exec_repo.get_execution(db, execution_id).status is ExecutionStatus.IN_PROGRESS
+
+
+def test_restart_gives_a_quarantined_execution_another_round(db, reserved, aws, monkeypatch):
+    """장부는 메모리다 — 재시작(reset)은 격리를 풀고 상한만큼 다시 시도하게 한다.
+
+    영구 기록이 아니라는 한계를 테스트로 고정한다. 재시작 뒤에도 같은 결함이면 같은
+    상한에서 다시 격리된다.
+    """
+    _incident, poisoned_id = reserved()
+    calls: list[str] = []
+    _always_raising_runner(monkeypatch, poisoned_id, calls)
+    cap = dispatcher.DISPATCH_EXCEPTION_MAX_ATTEMPTS
+    for _ in range(cap):
+        cycle(db)
+    assert cycle(db).quarantined == 1 and len(calls) == cap
+
+    dispatcher.reset_failure_ledger()  # 프로세스 재시작과 같은 상태
+    report = cycle(db)
+
+    assert report.errored == 1 and report.quarantined == 0
+    assert len(calls) == cap + 1
+
+
 def test_partially_applied_failure_initiates_rollback(db, reserved, aws):
     """자산이 바뀐 채 실패한 실행은 FAILED가 아니라 ROLLBACK_INITIATED다.
 
@@ -655,35 +810,22 @@ def test_a_rejected_block_is_a_plain_failure(db, nacl_reserved, aws):
 # ------------------------------------------------- 2/2 Status Check 판정 (#240)
 
 
-def waiter_timeout() -> WaiterError:
-    return WaiterError(
-        name=rb.WAITER_NAME, reason="Max attempts exceeded", last_response={}
+BOOTING_STATUS = instance_status("pending", "initializing", "initializing")
+
+
+def backdate_start(db, execution_id, seconds: float) -> None:
+    """기동 단계 기록 시각을 뒤로 돌린다 — 2/2 예산(기본 1초, aws 픽스처)의 초과를 만든다.
+
+    판정은 기다리지 않으므로 예산 초과는 시간이 흘러서가 아니라 기록된 기동 시각으로
+    재현한다. 프로세스가 재시작돼도 예산이 처음부터 돌지 않는 것과 같은 축이다.
+    """
+    started = next(
+        s
+        for s in exec_repo.list_steps(db, execution_id)
+        if s.step_type == ex.STEP_START_INSTANCE
     )
-
-
-def waiter_interrupted(code: str = "RequestLimitExceeded", status: int = 503) -> WaiterError:
-    """AWS 오류 응답이 waiter를 끊었다 — 대기 시간을 다 쓴 것이 아니다(PR #341 리뷰)."""
-    return WaiterError(
-        name=rb.WAITER_NAME,
-        reason=f"An error occurred ({code}): {code}",
-        last_response={
-            "Error": {"Code": code, "Message": code},
-            "ResponseMetadata": {"HTTPStatusCode": status},
-        },
-    )
-
-
-def instance_status(state: str, system: str, instance: str) -> dict:
-    return {
-        "InstanceStatuses": [
-            {
-                "InstanceId": INSTANCE,
-                "InstanceState": {"Name": state},
-                "SystemStatus": {"Status": system},
-                "InstanceStatus": {"Status": instance},
-            }
-        ]
-    }
+    started.occurred_at = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    db.commit()
 
 
 @pytest.fixture()
@@ -710,7 +852,7 @@ def test_status_check_ok_closes_the_execution_as_success(db, ran_and_awaiting, a
     report = cycle(db)
 
     assert report.judged == 1 and report.closed == 1
-    assert f"wait:{rb.WAITER_NAME}" in operations(aws)
+    assert "describe_instance_status" in operations(aws)
     assert status_of(db, incident_id, execution_id) == (
         IncidentStatus.AWAITING_CLOSURE,
         ExecutionStatus.SUCCESS,
@@ -718,11 +860,111 @@ def test_status_check_ok_closes_the_execution_as_success(db, ran_and_awaiting, a
     assert exec_repo.get_execution(db, execution_id).finished_at is not None
 
 
+def test_status_check_probes_once_and_never_waits(db, ran_and_awaiting, aws):
+    """판정은 조회 1회다 — waiter로 스캔을 붙잡지 않는다(Issue #434 1-3, 구조 개선).
+
+    부팅 중인 인스턴스를 만나도 이 주기는 곧바로 끝나야 다른 조치(NACL 차단 등)가
+    같은 스캔에서 밀리지 않는다. 호출 목록에 waiter가 없고 상태 조회가 한 번뿐인 것이
+    그 증거다 — 예산(1초)을 늘려도 이 사실은 달라지지 않는다.
+    """
+    _incident_id, execution_id = ran_and_awaiting()
+    aws(describe_instance_status=BOOTING_STATUS)
+    started_at = datetime.now(timezone.utc)
+
+    report = cycle(db)
+
+    assert (datetime.now(timezone.utc) - started_at) < timedelta(seconds=1)
+    assert report.judged == 1 and report.awaiting_status_check == 1
+    assert operations(aws) == ["describe_instance_status"]
+    assert exec_repo.get_execution(db, execution_id).status is ExecutionStatus.IN_PROGRESS
+
+
+def test_still_booting_within_budget_is_pending_without_a_hold(db, ran_and_awaiting, aws):
+    """예산 안의 initializing은 보류도 실패도 아니다 — 기록 없이 다음 주기가 다시 묻는다.
+
+    보류(verification_*)로 세면 부팅 중이라는 정상 관측이 재시도 상한을 깎아 먹고,
+    실패로 닫으면 정상 부팅 중인 인스턴스를 되돌린다.
+    """
+    incident_id, execution_id = ran_and_awaiting()
+    aws(describe_instance_status=BOOTING_STATUS)
+
+    first = cycle(db)
+    second = cycle(db)
+
+    assert (first.awaiting_status_check, second.awaiting_status_check) == (1, 1)
+    assert first.deferred == 0 and first.rollback_initiated == 0
+    assert status_of(db, incident_id, execution_id) == (
+        IncidentStatus.ACTION_IN_PROGRESS,
+        ExecutionStatus.IN_PROGRESS,
+    )
+    row = exec_repo.get_execution(db, execution_id)
+    assert row.verification_attempts == 0 and row.verification_reason_code is None
+
+
+def test_booting_instance_passes_once_two_of_two_arrives(db, ran_and_awaiting, aws):
+    """pending으로 남긴 실행은 2/2가 오면 그 주기에 성공으로 확정된다."""
+    incident_id, execution_id = ran_and_awaiting()
+    aws(describe_instance_status=BOOTING_STATUS)
+    assert cycle(db).awaiting_status_check == 1
+
+    aws(describe_instance_status=HEALTHY_STATUS)
+    report = cycle(db)
+
+    assert report.closed == 1
+    assert status_of(db, incident_id, execution_id) == (
+        IncidentStatus.AWAITING_CLOSURE,
+        ExecutionStatus.SUCCESS,
+    )
+
+
+def test_half_passed_checks_are_pending_then_timed_out(db, ran_and_awaiting, aws):
+    """System·Instance 중 한쪽만 ok면 2/2가 아니다 — 예산 안이면 pending, 넘으면 타임아웃.
+
+    전에는 waiter가 InstanceStatus 하나만 보고 통과시켰다(Issue #434 1-3). 이제 두 검사를
+    다 보되, 한쪽만 ok인 관측을 곧바로 실패로 읽지도 않는다.
+    """
+    _incident_id, execution_id = ran_and_awaiting()
+    aws(describe_instance_status=instance_status("running", "initializing", "ok"))
+
+    assert cycle(db).awaiting_status_check == 1
+    backdate_start(db, execution_id, seconds=2)
+    report = cycle(db)
+
+    assert report.rollback_initiated == 1
+    row = exec_repo.get_execution(db, execution_id)
+    assert row.status is ExecutionStatus.ROLLBACK_INITIATED
+    assert "initializing/ok" in row.error_summary
+
+
+def test_budget_follows_the_settings(db, ran_and_awaiting, aws, monkeypatch):
+    """예산은 설정값의 곱이다(설정 조정 효과) — 늘리면 같은 관측이 타임아웃에서 pending으로 바뀐다.
+
+    구조 개선(기다리지 않음)과 별개의 축이다: 예산을 늘려도 스캔은 붙잡히지 않고,
+    예산을 줄여도 조회 횟수는 그대로다.
+    """
+    _incident_id, execution_id = ran_and_awaiting()
+    aws(describe_instance_status=BOOTING_STATUS)
+    backdate_start(db, execution_id, seconds=2)
+    monkeypatch.setattr(
+        rb,
+        "get_settings",
+        lambda: type(
+            "S",
+            (),
+            {"STATUS_CHECK_WAIT_DELAY_SECONDS": 15, "STATUS_CHECK_WAIT_MAX_ATTEMPTS": 12},
+        )(),
+    )
+
+    report = cycle(db)
+
+    assert report.awaiting_status_check == 1 and report.rollback_initiated == 0
+    assert operations(aws) == ["describe_instance_status"]
+
+
 def test_status_check_failure_initiates_rollback(db, ran_and_awaiting, aws):
     """부팅 실패는 원복 개시다 — 원본이 비종료로 남아 복구 경로가 열린다."""
     incident_id, execution_id = ran_and_awaiting()
     aws(
-        **{f"waiter:{rb.WAITER_NAME}": waiter_timeout()},
         describe_instance_status={
             "InstanceStatuses": [
                 {
@@ -748,26 +990,19 @@ def test_status_check_failure_initiates_rollback(db, ran_and_awaiting, aws):
 
 
 def test_status_check_timeout_initiates_rollback(db, ran_and_awaiting, aws):
-    """제한 시간 안에 2/2가 오지 않아도 성공으로 확정할 근거는 없다."""
+    """예산 안에 2/2가 오지 않아도 성공으로 확정할 근거는 없다 — 관측된 타임아웃이다.
+
+    예산의 기준점은 기동 단계의 기록 시각이라 재시작돼도 처음부터 다시 돌지 않는다.
+    """
     _incident_id, execution_id = ran_and_awaiting()
-    aws(
-        **{f"waiter:{rb.WAITER_NAME}": waiter_timeout()},
-        describe_instance_status={
-            "InstanceStatuses": [
-                {
-                    "InstanceId": INSTANCE,
-                    "InstanceState": {"Name": "pending"},
-                    "SystemStatus": {"Status": "initializing"},
-                    "InstanceStatus": {"Status": "initializing"},
-                }
-            ]
-        },
-    )
+    aws(describe_instance_status=BOOTING_STATUS)
+    backdate_start(db, execution_id, seconds=2)
 
     assert cycle(db).rollback_initiated == 1
     row = exec_repo.get_execution(db, execution_id)
     assert row.status is ExecutionStatus.ROLLBACK_INITIATED
     assert rb.StatusCheckVerdict.TIMED_OUT.value in row.error_summary
+    assert row.verification_attempts == 0  # 관측이지 보류가 아니다
 
 
 def test_probe_failure_defers_instead_of_initiating_rollback(db, ran_and_awaiting, aws):
@@ -778,10 +1013,7 @@ def test_probe_failure_defers_instead_of_initiating_rollback(db, ran_and_awaitin
     인스턴스를 되돌린다 (PR #244 리뷰 / Issue #249).
     """
     incident_id, execution_id = ran_and_awaiting()
-    aws(
-        **{f"waiter:{rb.WAITER_NAME}": waiter_timeout()},
-        describe_instance_status=client_error("RequestLimitExceeded", 503),
-    )
+    aws(describe_instance_status=client_error("RequestLimitExceeded", 503))
 
     report = cycle(db)
 
@@ -802,13 +1034,10 @@ def test_probe_failure_defers_instead_of_initiating_rollback(db, ran_and_awaitin
 def test_deferred_judgement_is_asked_again_next_cycle(db, ran_and_awaiting, aws):
     """보류는 막다른 길이 아니다 — 조회가 회복되면 다음 주기가 확정한다."""
     incident_id, execution_id = ran_and_awaiting()
-    aws(
-        **{f"waiter:{rb.WAITER_NAME}": waiter_timeout()},
-        describe_instance_status=client_error("RequestLimitExceeded", 503),
-    )
+    aws(describe_instance_status=client_error("RequestLimitExceeded", 503))
     assert cycle(db).deferred == 1
 
-    aws(**{f"waiter:{rb.WAITER_NAME}": None})  # 조회 회복 — 2/2가 통과한다
+    aws(describe_instance_status=HEALTHY_STATUS)  # 조회 회복 — 2/2가 통과한다
 
     report = cycle(db)
 
@@ -822,38 +1051,15 @@ def test_deferred_judgement_is_asked_again_next_cycle(db, ran_and_awaiting, aws)
     assert row.verification_attempts == 0 and row.verification_reason_code is None
 
 
-def test_throttled_wait_with_a_healthy_instance_is_success(db, ran_and_awaiting, aws):
-    """스로틀링이 waiter를 끊어도 재조회가 2/2 정상이면 성공이다 — 자동 원복에 들어가지 않는다.
+def test_probe_failure_past_the_budget_is_still_a_deferral(db, ran_and_awaiting, aws):
+    """예산이 지났어도 조회 실패는 타임아웃이 아니다 — 자산을 본 적이 없다.
 
-    PR #341 리뷰 1번 회귀. 전에는 끊긴 waiter가 '제한 시간 소진'으로 읽혀 첫 조회 오류에서
-    ROLLBACK_INITIATED로 확정됐다 — 재시도·보류 정책(Issue #249)을 거치지 않은 채 멀쩡한
-    인스턴스의 자동 원복이 시작됐다.
+    조회가 막힌 동안 부팅을 마친 인스턴스를 예산 초과라는 이유로 되돌리면 안 된다.
+    보류 소진 뒤의 처분(UNVERIFIED)은 record_verification_failure가 정한다.
     """
     incident_id, execution_id = ran_and_awaiting()
-    aws(
-        **{f"waiter:{rb.WAITER_NAME}": waiter_interrupted()},
-        describe_instance_status=instance_status("running", "ok", "ok"),
-    )
-
-    report = cycle(db)
-    follow_up = cycle(db)
-
-    assert report.closed == 1 and report.rollback_initiated == 0
-    assert follow_up.rollback_started == 0
-    assert status_of(db, incident_id, execution_id) == (
-        IncidentStatus.AWAITING_CLOSURE,
-        ExecutionStatus.SUCCESS,
-    )
-    assert exec_repo.list_rollback_children(db, execution_id) == []
-
-
-def test_throttled_wait_with_a_booting_instance_is_retried(db, ran_and_awaiting, aws):
-    """끊긴 waiter의 '아직'은 관측된 타임아웃이 아니다 — 원복하지 않고 재시도 정책으로 보낸다."""
-    incident_id, execution_id = ran_and_awaiting()
-    aws(
-        **{f"waiter:{rb.WAITER_NAME}": waiter_interrupted()},
-        describe_instance_status=instance_status("pending", "initializing", "initializing"),
-    )
+    aws(describe_instance_status=client_error("RequestLimitExceeded", 503))
+    backdate_start(db, execution_id, seconds=2)
 
     report = cycle(db)
 
@@ -893,7 +1099,7 @@ def test_instance_that_was_never_started_skips_the_status_check(db, reserved, aw
     report = cycle(db)
 
     assert report.closed == 1
-    assert f"wait:{rb.WAITER_NAME}" not in operations(aws)
+    assert "describe_instance_status" not in operations(aws)
     assert status_of(db, incident_id, execution_id) == (
         IncidentStatus.AWAITING_CLOSURE,
         ExecutionStatus.SUCCESS,
@@ -994,11 +1200,8 @@ STOPPED_STATUS = {
 
 
 def probe_throttled(aws):
-    """waiter가 끝나지 않고 뒤이은 상태 조회가 스로틀링으로 거절된다 — 다시 물을 가치가 있는 실패."""
-    aws(
-        **{f"waiter:{rb.WAITER_NAME}": waiter_timeout()},
-        describe_instance_status=client_error("RequestLimitExceeded", 503),
-    )
+    """상태 조회가 스로틀링으로 거절된다 — 다시 물을 가치가 있는 실패."""
+    aws(describe_instance_status=client_error("RequestLimitExceeded", 503))
 
 
 def exhaust(db, publish=None):
@@ -1064,10 +1267,7 @@ def test_held_execution_is_not_asked_again(db, ran_and_awaiting, aws):
 def test_non_retryable_failure_is_held_at_once(db, ran_and_awaiting, aws):
     """권한 거부는 몇 번을 물어도 같다 — 재시도로 붙잡지 않고 첫 실패에서 넘긴다."""
     _incident_id, execution_id = ran_and_awaiting()
-    aws(
-        **{f"waiter:{rb.WAITER_NAME}": waiter_timeout()},
-        describe_instance_status=client_error("UnauthorizedOperation", 403),
-    )
+    aws(describe_instance_status=client_error("UnauthorizedOperation", 403))
 
     report = cycle(db)
 
@@ -1301,7 +1501,7 @@ def test_detail_drops_the_hold_once_judged(client_pg, db, ran_and_awaiting, aws)
     incident_id, _execution_id = ran_and_awaiting()
     probe_throttled(aws)
     cycle(db)
-    aws(**{f"waiter:{rb.WAITER_NAME}": None})
+    aws(describe_instance_status=HEALTHY_STATUS)
     cycle(db)
 
     item = client_pg.get(f"/api/v1/incidents/{incident_id}").json()["executions"][0]

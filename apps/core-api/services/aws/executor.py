@@ -108,7 +108,7 @@ from .backup import (
     registered_ports,
 )
 from .client import aws_client
-from .errors import aws_error_code, reason_code_for, run_dry_run
+from .errors import aws_error_code, reason_code_for, run_dry_run, watch_dry_run_protocol
 
 logger = logging.getLogger("vigilantis.aws")
 
@@ -126,7 +126,7 @@ _DESCRIBE_MISSES = "IAM 권한(조회 대체 경로)"
 
 # create_security_group이 VPC 보안 그룹에 **자동으로** 붙이는 전체 허용 아웃바운드 1건.
 # 우리가 요청하지 않아도 붙으므로, 백업과 같은 규칙 집합으로 맞추려면 생성 직후 걷어
-# 내야 한다(execute_sg_recreate ②). 그러지 않으면 두 갈래로 틀린다 — 백업에 같은 규칙이
+# 내야 한다(execute_sg_recreate ③). 그러지 않으면 두 갈래로 틀린다 — 백업에 같은 규칙이
 # 있으면 주입이 InvalidPermission.Duplicate로 실패하고, 없으면 원본보다 **넓은** SG가 된다.
 #
 # 실측(2026-09-22 LocalStack Community): 생성 직후 IpPermissionsEgress가 정확히 이 모양
@@ -346,15 +346,11 @@ RUNBOOK_SPECS: Mapping[str, _Spec] = {
         resource_type="security-group",
         primary_param=None,  # 복원 대상은 백업 레코드가 가리킨다
         method=M.DRY_RUN,
-        operations=(
-            "ec2.create_security_group",
-            # 생성 직후 AWS가 자동으로 붙이는 전체 허용 egress를 걷어 내는 호출이다
-            # (execute_sg_recreate ②). 백업과 같은 규칙 집합으로 맞추려면 반드시
-            # 부르므로 ④도 함께 본다 — 여기 없으면 권한이 없을 때 실행 중에 드러난다.
-            "ec2.revoke_security_group_egress",
-            "ec2.authorize_security_group_ingress",
-            "ec2.authorize_security_group_egress",
-        ),
+        # 규칙 회수·주입(revoke·authorize 2종)의 DryRun은 사전 검사가 아니라 실행이 새
+        # 그룹을 만든 직후 새 GroupId로 건다(_sg_rules_dry_run, Issue #434) — 원본 ID로는
+        # 운영 자격에서 항상 거절된다(_precheck_sg_recreate). 그 세 작업의 정책 거울은
+        # _OP_* 상수가 잇는다(tests/test_provision_smoke_aws.py).
+        operations=("ec2.create_security_group",),
         handler="_precheck_sg_recreate",
         backup_type=BACKUP_SG_FULL_RULES,
     ),
@@ -692,52 +688,32 @@ def _precheck_sg_recreate(ctx: _Ctx) -> PrecheckOutcome:
         )
 
     ec2 = aws_client("ec2", ctx.target.region)
-    # ADR-0007 §Context 표는 authorize 2종과 revoke도 DryRun 대상으로 둔다. create만
-    # 보고 통과시키면 빈 SG만 만들어지고 규칙 복원이 권한 부족으로 실패하는 경로를
-    # precheck가 그대로 통과시킨다 — ④가 막아야 할 실패가 실행 중에 난다.
-    # 그룹이 아직 없는 시점에도 성립한다: 존재하지 않는 GroupId로도
-    # DryRunOperation이 돌아온다(#133 ① 실측 · revoke도 2026-09-22 실측).
-    calls = [
-        (
-            ec2.create_security_group,
-            {
-                "GroupName": backup.group_name,
-                "Description": backup.description,
-                "VpcId": backup.vpc_id,
-            },
-        ),
-        # 회수는 백업 내용과 무관하게 **항상** 부른다(execute_sg_recreate ②) — 실행이
-        # 회수할 규칙은 AWS가 붙일 기본 egress이지 백업에 실린 규칙이 아니다. 그래서
-        # DryRun도 그 기본 규칙의 모양으로 건다.
-        (
-            ec2.revoke_security_group_egress,
-            {
-                "GroupId": ctx.target.resource_id,
-                "IpPermissions": [dict(DEFAULT_EGRESS_PERMISSION)],
-            },
-        ),
-    ]
-    for operation, permissions in (
-        (ec2.authorize_security_group_ingress, backup.ingress_permissions),
-        (ec2.authorize_security_group_egress, backup.egress_permissions),
-    ):
-        # 빈 목록으로 authorize를 부르면 DryRun 이전에 파라미터 오류가 난다.
-        # 복원할 규칙이 없는 방향은 실행도 하지 않으므로 검증 대상이 아니다.
-        if permissions:
-            calls.append(
-                (
-                    operation,
-                    {
-                        "GroupId": ctx.target.resource_id,
-                        "IpPermissions": permissions,
-                    },
-                )
-            )
+    # ADR-0007 §Context 표의 SG_RECREATE DryRun 4종 가운데 **여기서는 create만** 건다.
+    # 규칙 회수·주입(revoke·authorize 2종)의 DryRun은 실행이 새 그룹을 만든 직후 **새
+    # GroupId**로 건다(_sg_rules_dry_run). 원본 GroupId로 걸면 운영 자격에서는 항상
+    # 거절된다 — 원본 SG는 이미 지워졌고, 앱 정책은 이 세 작업에 자원 속성 조건
+    # (ec2:Vpc — scripts/provision_smoke_aws.py)을 거는데 없는 자원에서는 그 조건을
+    # 평가할 수 없어 UnauthorizedOperation이 된다(2026-10-27 실 AWS 실측, Issue #434 ·
+    # docs/AWS_SMOKE_RESULT.md §3 A5와 같은 기전). "존재하지 않는 GroupId로도
+    # DryRunOperation이 돌아온다"(#133 ①)는 조건 없는 관리자 키에서만 성립한다.
+    # create는 VPC 조건으로 평가되므로 그룹이 없는 지금도 판정이 선다.
     return _dry_run_chain(
         ctx,
-        calls,
+        [
+            (
+                ec2.create_security_group,
+                {
+                    "GroupName": backup.group_name,
+                    "Description": backup.description,
+                    "VpcId": backup.vpc_id,
+                },
+            )
+        ],
         verified=["백업 레코드의 그룹 정의와 규칙 목록 구조"],
-        unverified=["재생성된 그룹에 규칙이 실제로 주입된 결과"],
+        unverified=[
+            "규칙 회수·주입 권한(재생성 직후 새 GroupId로 DryRun)",
+            "재생성된 그룹에 규칙이 실제로 주입된 결과",
+        ],
     )
 
 
@@ -1334,6 +1310,9 @@ STEP_CREATE_SECURITY_GROUP = "CREATE_SECURITY_GROUP"
 # 생성 직후 AWS가 붙인 기본 egress 회수(Issue #368). 자산을 바꾸는 단계라 STEP_COMPARE_*
 # 계열이 아니다 — 회수하지 않으면 재생성 SG가 백업보다 넓어진 채로 남는다.
 STEP_REVOKE_DEFAULT_EGRESS = "REVOKE_DEFAULT_EGRESS"
+# 생성 직후 새 GroupId로 거는 규칙 회수·주입 DryRun(Issue #434). STEP_COMPARE_* 계열과
+# 같은 규칙이다 — 통과해 **진행하는** 경우에는 기록하지 않고, 거절이 결론인 경우만 남긴다.
+STEP_DRY_RUN_SG_RULES = "DRY_RUN_SG_RULES"
 STEP_AUTHORIZE_SG_INGRESS = "AUTHORIZE_SG_INGRESS"
 STEP_AUTHORIZE_SG_EGRESS = "AUTHORIZE_SG_EGRESS"
 
@@ -1495,10 +1474,20 @@ def _effect_for(exc: BaseException) -> ExecutionEffect:
     - 상태 코드를 읽지 못한 응답·AWS에 닿지 못한 실패 → UNKNOWN
     - ParamValidationError는 botocore가 네트워크 호출 이전에 낸다 → NOT_APPLIED
       (errors.reason_code_for가 같은 이유로 PARAM_INVALID로 분류한다)
+    - **SDK가 재전송한 끝의 오류는 4xx여도 UNKNOWN이다**(Issue #434 2-1). botocore는 연결
+      오류·읽기 제한 시간·5xx에 같은 요청을 다시 보내며, 첫 요청이 적용된 뒤 응답만
+      유실됐으면 재전송이 받는 NotFound(삭제)·AlreadyExists(삽입)·스로틀링이 마지막
+      오류가 된다. 마지막 응답 하나로 "앞선 요청이 적용됐을 가능성"을 지울 수 없으므로,
+      `ResponseMetadata.RetryAttempts`가 1 이상이면 실자산을 보는 종료 판정으로 보낸다.
+      첫 시도가 스로틀링이고 재시도가 거절된 경우도 같이 UNKNOWN이 되지만, 그 비용은
+      조회 1회이고 반대 방향(실제로 지워진 SG를 "변경 없음"으로 적어 재생성 경로가
+      닫히는 것)은 되돌릴 수 없다.
     """
     if isinstance(exc, ParamValidationError):
         return ExecutionEffect.NOT_APPLIED
     if not isinstance(exc, ClientError):
+        return ExecutionEffect.UNKNOWN
+    if retry_attempts(exc.response) > 0:
         return ExecutionEffect.UNKNOWN
     if aws_error_code(exc) in _THROTTLED_CODES:
         return ExecutionEffect.NOT_APPLIED
@@ -1506,6 +1495,18 @@ def _effect_for(exc: BaseException) -> ExecutionEffect:
     if isinstance(status, int) and 400 <= status < 500:
         return ExecutionEffect.NOT_APPLIED
     return ExecutionEffect.UNKNOWN
+
+
+def retry_attempts(payload: Any) -> int:
+    """이 응답을 받기까지 SDK가 요청을 다시 보낸 횟수. 읽지 못하면 0.
+
+    botocore가 정상 응답과 ClientError.response 양쪽의 ResponseMetadata에 싣는 값이다
+    (첫 요청은 세지 않는다 — 1이면 요청이 두 번 나갔다).
+    """
+    if not isinstance(payload, Mapping):
+        return 0
+    attempts = (payload.get("ResponseMetadata") or {}).get("RetryAttempts")
+    return attempts if isinstance(attempts, int) and attempts > 0 else 0
 
 
 def _request_id(payload: Any) -> str | None:
@@ -1739,6 +1740,26 @@ def current_instance_type(instance_id: str, region: str):
     return found, code
 
 
+# 기동 요청이 접수된 뒤의 EC2 state. **원복 성공의 경계는 기동 "요청"이지 2/2 Status
+# Check가 아니다**(ADR-0008 §6) — 되돌린 인스턴스가 또 부팅에 실패해도 원복의 원복은
+# 없어 판정이 바뀌지 않는다. 그래서 pending도 성공에 넣는다: 빼면 방금 켠 인스턴스가
+# 다음 주기에 "미완"으로 확정된다.
+REVERT_STARTED_STATES: frozenset[str] = frozenset({"running", "pending"})
+
+
+def revert_restart_outstanding(restore_state: str, current_state: str | None) -> bool:
+    """타입이 백업 값인 인스턴스에 **기동이 아직 남아 있는가** — 원복 완료 판정의 state 축.
+
+    실행(execute_revert_size ①분기)과 끊긴 실행의 종료 판정(workflows.judge_revert_size)이
+    같은 관찰 사실(백업 state, 현재 state)에서 같은 답을 내도록 한 곳에 둔다
+    (Issue #434 1-1). 되돌려야 할 상태의 원천은 백업 레코드의 state다(ADR-0008 §4) —
+    조치 이전에 멈춰 있던 인스턴스는 멈춰 있는 것이 원복의 완료이고, 조치 이전에
+    running이던 인스턴스는 기동 요청까지 접수돼야 완료다. state를 읽지 못한 경우(None)는
+    기동을 확인하지 못한 것이라 남아 있는 쪽으로 센다.
+    """
+    return restore_state == "running" and current_state not in REVERT_STARTED_STATES
+
+
 def _deferred(
     code: PrecheckReasonCode,
     detail: str,
@@ -1780,6 +1801,14 @@ def execute_revert_size(
          **AWS 변경 호출을 하지 않는다.** 되돌릴 것이 없음을 NOT_APPLIED 단계로 남긴다.
          원본 조치가 타입을 실제로 바꾸지 않은 경우 ①과 ②가 동시에 참인데 ①이 이긴다 —
          할 일이 없는 실행을 거절로 올려 사람을 부르지 않기 위해서다.
+         **다만 성공은 타입과 기동 상태를 함께 봐야 한다**(Issue #434 1-1). 원본 조치가
+         정지 뒤 타입 변경에서 실패하면 타입은 백업 값 그대로인데 인스턴스는 멈춰 있다 —
+         여기서 타입만 보고 성공으로 닫으면 원본은 "원복 완료", 자산은 정지 상태로
+         남는다. 조치 이전에 running이던 인스턴스가 기동되지 않았으면(revert_restart_
+         outstanding) 변경 호출 없이 **실패로 닫아 수동 개입으로 넘긴다.** 켜 주지
+         않는 이유는 ①의 "변경 호출을 하지 않는다"가 아직 계약이기 때문이다 — 자동 기동은
+         별도 정책 결정이다. 끊긴 실행의 종료 판정(workflows.judge_revert_size)도 같은
+         함수로 같은 답을 낸다.
       ② 현재 타입 == 원본이 적용한 값: 우리가 바꾼 그대로다 → 원복을 진행한다.
       ③ 둘 다 아님: 제3자가 그사이 타입을 바꿨다 → **중단하고 CRITICAL.** 자동
          재시도는 없다(ADR-0008 §6). 백업을 무조건 진실로 삼으면 원복이 남의 변경을
@@ -1797,7 +1826,7 @@ def execute_revert_size(
         return _rejected("원본 조치가 적용한 instance_type을 알 수 없습니다")
 
     instance_id = target.resource_id
-    current, code = current_instance_type(instance_id, target.region)
+    current, state, code = current_instance_type_and_state(instance_id, target.region)
     if code is not None:
         if code is R.PRECHECK_TARGET_NOT_FOUND:
             # 인스턴스가 없으면 되돌릴 대상이 없다 — 다시 물어도 답은 같으므로 확정한다
@@ -1811,6 +1840,30 @@ def execute_revert_size(
 
     if current == restore_instance_type:
         log.begin(1, STEP_COMPARE_INSTANCE_TYPE, _OP_DESCRIBE)
+        if revert_restart_outstanding(restore_state, state):
+            # 타입은 백업 값인데 조치 이전에 running이던 인스턴스가 켜져 있지 않다 —
+            # 변경 호출 없이 닫되 성공이 아니다(docstring ①). 기록은 NOT_APPLIED가 맞다
+            # (자산을 만지지 않았다), 처분은 수동 개입이다.
+            detail = (
+                f"원복 미완 — 타입은 백업 값({current})이지만 조치 이전 running이던"
+                f" 인스턴스가 {state or '알 수 없음'} 상태입니다."
+                " 자동 기동 없이 수동 개입으로 전환합니다"
+            )
+            log.succeed(ExecutionEffect.NOT_APPLIED, detail)
+            logger.critical(
+                "revert_size_not_restarted",
+                extra={
+                    "instance_id": instance_id,
+                    "instance_state": state,
+                    "restore_state": restore_state,
+                    "restore_instance_type": restore_instance_type,
+                },
+            )
+            return ExecutionOutcome(
+                steps=tuple(log.steps),
+                reason_code=R.PRECHECK_INVALID_STATE,
+                error_summary=detail[:_SUMMARY_LIMIT],
+            )
         log.succeed(
             ExecutionEffect.NOT_APPLIED,
             f"이미 백업 스펙 상태입니다({current}) — 되돌릴 것이 없어 변경하지 않음",
@@ -2117,6 +2170,22 @@ def _volume(volume_id: str, region: str):
     return None, R.PRECHECK_TARGET_NOT_FOUND
 
 
+# 스냅숏이 삭제의 안전장치로 성립하는 상태 — 이것만 삭제로 이어진다(Issue #434 BE-1).
+# pending은 아직 끝나지 않은 것이고 error는 AWS가 실패로 확정한 것이라 둘 다 지우지 않는다.
+_SNAPSHOT_COMPLETED_STATE = "completed"
+
+
+def _snapshot_state(ec2: Any, snapshot_id: str) -> tuple[str | None, PrecheckReasonCode | None]:
+    """스냅숏 1건의 현재 State. (상태, 사유 코드) 짝 — 조회를 못 하면 상태가 None이다."""
+    res, code = _call(ec2.describe_snapshots, SnapshotIds=[snapshot_id])
+    if code is not None:
+        return None, code
+    for snapshot in res.get("Snapshots", []):
+        state = snapshot.get("State")
+        return (str(state) if _non_empty_str(state) else None), None
+    return None, R.PRECHECK_TARGET_NOT_FOUND
+
+
 def current_volume(volume_id: str, region: str):
     """(볼륨, 사유 코드) 짝. 실행과 종료 판정이 같은 축을 같은 방법으로 읽도록 공개한다
     (workflows.judge_ebs_delete_unattached) — current_nacl_entry를 공개한 이유와 같다.
@@ -2273,13 +2342,40 @@ def execute_ebs_delete_unattached(
             },
         )
     except (ClientError, BotoCoreError) as exc:
-        # WaiterError는 BotoCoreError라 _effect_for가 UNKNOWN을 준다 — 스냅숏이 끝났는지
-        # 모르는 상태다. 볼륨은 그대로이므로 종료 판정이 현물을 보고 실패로 닫는다
-        return _abort(log, exc, detail=f"최종 스냅숏 완료 확인 실패({snapshot_id})")
-    log.succeed(
-        ExecutionEffect.APPLIED,
-        f"최종 스냅숏 완료 확인: {snapshot_id}",
-    )
+        # waiter만으로는 "대기를 다 썼다(pending)"와 "스냅숏이 error로 끝났다"와 "조회가
+        # 끊겼다"가 갈리지 않는다(Issue #434 BE-1). 한 번 더 물어 관측한 상태를 사유에
+        # 남긴다 — 마지막 시도 뒤에 completed가 됐으면 삭제로 간다(관측이 결론이다).
+        # 어느 경우에도 볼륨은 그대로이고, 완료를 보지 못했으면 지우지 않는다.
+        snapshot_state, probe_code = _snapshot_state(ec2, snapshot_id)
+        if snapshot_state == _SNAPSHOT_COMPLETED_STATE:
+            log.succeed(
+                ExecutionEffect.APPLIED,
+                f"최종 스냅숏 완료 확인(대기 뒤 재조회): {snapshot_id}",
+            )
+        elif snapshot_state is None:
+            # 스냅숏 상태를 보지 못했다 — WaiterError·조회 실패 모두 UNKNOWN(_effect_for)
+            return _abort(
+                log,
+                exc,
+                detail=(
+                    f"최종 스냅숏 완료 확인 실패({snapshot_id}"
+                    f"{' · 재조회 ' + probe_code.value if probe_code else ''})"
+                ),
+            )
+        else:
+            # pending(대기 상한 초과)·error(AWS가 실패로 확정) — 관측했으므로 이 단계가
+            # 자산을 바꾸지 않았음은 확실하다(NOT_APPLIED). 삭제로 가지 않는다
+            return _abort(
+                log,
+                exc,
+                detail=f"최종 스냅숏 미완료({snapshot_id} · 상태 {snapshot_state})",
+                effect=ExecutionEffect.NOT_APPLIED,
+            )
+    else:
+        log.succeed(
+            ExecutionEffect.APPLIED,
+            f"최종 스냅숏 완료 확인: {snapshot_id}",
+        )
 
     # ④ 삭제 — 여기부터 되돌릴 수 없다
     log.begin(4, STEP_DELETE_VOLUME, _OP_DELETE_VOLUME)
@@ -2515,13 +2611,74 @@ def sg_permissions_match(actual: Any, expected: list[Mapping[str, Any]]) -> bool
     ) == Counter(sg_permission_fingerprint(item) for item in expected)
 
 
+def _sg_rules_dry_run(
+    ec2: Any, group_id: str, backup: SgFullRulesBackup
+) -> tuple[str, PrecheckReasonCode, ExecutionEffect] | None:
+    """재생성 SG에 회수·주입이 허용되는지 **새 GroupId**로 DryRun한다. (Issue #434)
+
+    가드레일 ④가 사전 검사에서 걸지 못하는 절반이다 — 원본 GroupId는 이미 없어 운영
+    자격의 자원 속성 조건을 평가할 수 없다(_precheck_sg_recreate). 새 그룹은 실재하고
+    VPC 조건이 성립하므로, 실행이 자산을 더 바꾸기 전에 같은 요청 모양으로 권한을 본다.
+
+    전부 통과하면 None. 거절되면 (aws_operation, 사유 코드, effect) — DryRun 거절은
+    요청이 반려된 것이라 NOT_APPLIED이고, 플래그가 무시돼 정상 반환된 경우(ADR-0007 §2)는
+    그 호출이 실제로 적용됐을 수 있어 UNKNOWN이다.
+
+    회수는 백업 내용과 무관하게 항상 건다(execute_sg_recreate ③) — 걷어 낼 대상은 AWS가
+    붙일 기본 egress라 그 모양으로 건다. 주입은 실행과 같은 치환을 거친 규칙으로 건다
+    (rebind_self_reference) — 원본 ID가 남은 규칙은 DryRun도 NotFound로 거절되므로
+    치환 없이 걸면 정상 복원이 거절로 읽힌다. 빈 방향은 실행도 하지 않으므로 걸지 않는다.
+    """
+    calls: list[tuple[str, Callable[..., Any], list[dict[str, Any]]]] = [
+        (
+            _OP_REVOKE_SG_EGRESS,
+            ec2.revoke_security_group_egress,
+            [dict(DEFAULT_EGRESS_PERMISSION)],
+        )
+    ]
+    for aws_operation, operation, permissions in (
+        (
+            _OP_AUTHORIZE_SG_INGRESS,
+            ec2.authorize_security_group_ingress,
+            backup.ingress_permissions,
+        ),
+        (
+            _OP_AUTHORIZE_SG_EGRESS,
+            ec2.authorize_security_group_egress,
+            backup.egress_permissions,
+        ),
+    ):
+        if permissions:
+            calls.append(
+                (
+                    aws_operation,
+                    operation,
+                    rebind_self_reference(
+                        permissions,
+                        original_group_id=backup.group_id,
+                        new_group_id=group_id,
+                    ),
+                )
+            )
+    for aws_operation, operation, permissions in calls:
+        with watch_dry_run_protocol() as watch:
+            code = run_dry_run(operation, GroupId=group_id, IpPermissions=permissions)
+        if code is not None:
+            effect = (
+                ExecutionEffect.UNKNOWN if watch.violated else ExecutionEffect.NOT_APPLIED
+            )
+            return aws_operation, code, effect
+    return None
+
+
 def execute_sg_recreate(
     target_arn: str,
     *,
     backup: SgFullRulesBackup,
     record_step: StepRecorder | None = None,
 ) -> ExecutionOutcome:
-    """`RUNBOOK_SG_RECREATE` 실행 — 생성 → 기본 egress 회수 → 규칙 주입. (Issue #368)
+    """`RUNBOOK_SG_RECREATE` 실행 — 생성 → 규칙 DryRun → 기본 egress 회수 → 규칙 주입.
+    (Issue #368 · #434)
 
     **복원 값은 백업 레코드에서만 온다.** 이 함수는 DB를 읽지 않고 호출부가 넘긴 계약
     모델을 받는다 — execute_revert_size가 되돌릴 타입을 인자로만 받는 것과 같은 이유다
@@ -2588,7 +2745,36 @@ def execute_sg_recreate(
         response=created,
     )
 
-    # ② 기본 egress 회수 — 실제로 붙은 것을 조회해 그것만 걷어 낸다
+    # ② 규칙 회수·주입 DryRun — 사전 검사가 걸지 못한 가드레일 ④의 절반을 새 GroupId로
+    # 건다(Issue #434). 거절되면 더 바꾸지 않고 여기서 멈춘다 — 규칙 없이 기본 egress만
+    # 달린 SG가 남고, 그 사실은 단계 기록으로 사람에게 간다(원복의 원복은 없다)
+    rejected = _sg_rules_dry_run(ec2, new_group_id, backup)
+    if rejected is not None:
+        aws_operation, code, effect = rejected
+        log.begin(2, STEP_DRY_RUN_SG_RULES, aws_operation)
+        log.fail(
+            RuntimeError(f"DryRun 거절: {code.value}"),
+            detail="규칙 복원 권한 확인 실패",
+            effect=effect,
+        )
+        logger.warning(
+            "sg_recreate_rules_dry_run_rejected",
+            extra={
+                "new_group_id": new_group_id,
+                "aws_operation": aws_operation,
+                "reason_code": code.value,
+            },
+        )
+        return ExecutionOutcome(
+            steps=tuple(log.steps),
+            reason_code=code,
+            error_summary=(
+                f"재생성 SG({new_group_id})의 규칙 복원 DryRun이 거절돼"
+                f" 회수·주입 전에 중단했습니다: {aws_operation} {code.value}"
+            ),
+        )
+
+    # ③ 기본 egress 회수 — 실제로 붙은 것을 조회해 그것만 걷어 낸다
     log.begin(2, STEP_REVOKE_DEFAULT_EGRESS, _OP_REVOKE_SG_EGRESS)
     group, code = _security_group(new_group_id, target.region)
     if code is not None:
@@ -2625,7 +2811,7 @@ def execute_sg_recreate(
             response=revoked,
         )
 
-    # ③ 규칙 주입 — 복원할 규칙이 없는 방향은 호출하지 않는다(빈 목록은 파라미터 오류다)
+    # ④ 규칙 주입 — 복원할 규칙이 없는 방향은 호출하지 않는다(빈 목록은 파라미터 오류다)
     sequence = 3
     for step_type, aws_operation, operation, permissions, label in (
         (

@@ -35,6 +35,11 @@
 #   - executions의 verification_hold는 판정 불가 보류 기록이다 — AWS에 물어보지 못해
 #     실행 결과를 확정하지 못했을 때의 사유 코드·횟수·시각. status가 UNVERIFIED면
 #     반드시 있고, 판정이 내려진 SUCCESS·ROLLBACK_INITIATED에는 오지 않는다. (Issue #249)
+#   - auto_isolation_block(상세만)은 서버가 사람 없이 걸 자동 발동(High 선차단·Medium 1분
+#     격리)이 지금 막혀 있으면 그 이유, 아니면 null이다. 읽을 때 서버의 실제 접수 관문과 같은
+#     판정으로 계산한다 — 화면이 「실행 예정」 안내를 끌지 정하는 근거다. 자동 발동 대상이 아닌
+#     건(Low·분석 뒤 High·이미 발동한 건·테넌트 없음)도 null이고, FINOPS는 늘 null이다.
+#     테넌트 설정이 바뀌어도 이벤트가 나가지 않으므로 다시 읽을 때까지 낡을 수 있다. (Issue #521)
 # ==============================================================================
 
 from __future__ import annotations
@@ -86,6 +91,18 @@ class ResponseMode(str, Enum):
     PRE_MITIGATION_0_5S = "PRE_MITIGATION_0_5S"
     AGENT_WAIT = "AGENT_WAIT"
     TIMEOUT_ISOLATION_1M = "TIMEOUT_ISOLATION_1M"
+
+
+@unique
+class AutoIsolationBlock(str, Enum):
+    """자동 발동(High 선차단·Medium 1분 격리)이 막힌 이유 — 사람이 승인해야만 조치된다. (Issue #521)
+
+    값은 서버 접수 관문의 건너뜀 사유와 같은 철자다. 정지(TENANT_SUSPENDED)는 T-4가 더한다.
+    """
+
+    #: 테넌트가 자동 조치를 껐다. 또는 그 발동을 정한 시각(High 접수 시각·Medium 응답 기한)이
+    #: 마지막으로 다시 켠 시각 이전이다 — 꺼진 동안의 판단은 다시 켜도 사람 없이 실행하지 않는다.
+    AUTO_ACTION_DISABLED = "AUTO_ACTION_DISABLED"
 
 
 @unique
@@ -310,19 +327,22 @@ class IncidentResponse(BaseModel):
     resolution: Optional[ResolutionJudgement] = None
     resolution_note: ResolutionNote | None = None
     resolved_at: Optional[UtcDateTime] = None
+    auto_isolation_block: Optional[AutoIsolationBlock] = None
     created_at: UtcDateTime
     updated_at: UtcDateTime
 
     @model_validator(mode="after")
     def _enforce_contract(self):
-        # FINOPS에는 위험 대응 축이 없다
+        # FINOPS에는 위험 대응 축이 없다 — 자동 발동도 없다
         if self.category == IncidentCategory.FINOPS and (
             self.initial_risk_level is not None
             or self.reviewed_risk_level is not None
             or self.response_mode is not None
+            or self.auto_isolation_block is not None
         ):
             raise ValueError(
-                "FINOPS는 initial_risk_level·reviewed_risk_level·response_mode가 null이어야 합니다"
+                "FINOPS는 initial_risk_level·reviewed_risk_level·response_mode·"
+                "auto_isolation_block이 null이어야 합니다"
             )
 
         if self.category == IncidentCategory.FINOPS and self.threat_context is not None:

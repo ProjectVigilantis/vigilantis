@@ -97,6 +97,7 @@ from schemas.executions import (
 )
 from schemas.guardrails import (
     GuardrailDecision,
+    GuardrailStep,
     GuardrailValidationContext,
     GuardrailValidationRequest,
     GuardrailValidationResult,
@@ -128,7 +129,7 @@ from schemas.runbooks import (
 )
 from schemas.savings import AISavingsEstimate
 from services.aws import backup, executor, rollback
-from services.aws.errors import is_retryable
+from services.aws.errors import is_retryable, watch_dry_run_protocol
 from services.aws.executor import parse_arn
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -673,6 +674,38 @@ def automatic_trigger_block(
     if decided_at is not None and decided_at <= resumed_at:
         return AutoIsolationSkipReason.AUTO_ACTION_DISABLED
     return None
+
+
+def pending_automatic_block(
+    db: Session, incident: models.Incident
+) -> AutoIsolationSkipReason | None:
+    """이 건에 지금 걸릴 자동 발동이 테넌트 관문에 막혀 있으면 그 사유. 읽기 전용이다. (#521)
+
+    인시던트 상세의 auto_isolation_block 원천이다 — 화면 안내가 서버의 실제 접수 판정과 어긋나지
+    않게 접수 관문과 같은 함수(automatic_trigger_block)를 부른다. 「지금 걸릴 발동」은 접수 관문이
+    잠근 뒤 보는 발동 조건(_AUTO_ISOLATION_ELIGIBILITY · 위험도 · 대응 경로 · 상태)으로 고른다 —
+    그 밖의 건(Low · 분석 뒤 High · 이미 발동한 건 · FINOPS)과 테넌트 없음은 None 이다. 잠그지 않는다.
+    """
+    if incident.tenant_id is None:
+        return None
+    trigger_source = next(
+        (
+            source
+            for source, (risk_level, response_mode, status) in _AUTO_ISOLATION_ELIGIBILITY.items()
+            if incident.initial_risk_level is risk_level
+            and incident.response_mode is response_mode
+            and incident.status is status
+        ),
+        None,
+    )
+    if trigger_source is None:
+        return None
+    return automatic_trigger_block(
+        db.get(models.Tenant, incident.tenant_id),
+        trigger_source=trigger_source,
+        received_at=incident.created_at,
+        response_deadline_at=incident.response_deadline_at,
+    )
 
 
 def _auto_isolation_skip_reason(
@@ -2475,6 +2508,11 @@ class ExecutionJudgement:
     다시 물을지가 그 코드로 갈리고, 재시도를 소진한 뒤 관제자가 보는 사유도 그것이다.
     defer_reason은 사람이 읽는 한 줄이라 로그 몫이며 판정 근거로 읽지 않는다. 보류
     판정이 error_summary를 싣지 않는 것도 같은 이유다 (Issue #249).
+
+    pending은 세 번째 모양이다 — **관측은 했는데 아직 결론이 없다**(Issue #434 1-3).
+    기동 요청 뒤 2/2가 initializing인 구간이며, 보류와 달리 검증기가 실패한 것이 아니라
+    기록을 남기지 않고 다음 주기가 다시 묻는다. 예산을 넘기면 판정 주체가 TIMED_OUT으로
+    확정한다(rollback.timed_out).
     """
 
     next_status: ExecutionStatus | None = None
@@ -2482,12 +2520,19 @@ class ExecutionJudgement:
     verdict: rollback.StatusCheckVerdict | None = None
     defer_code: PrecheckReasonCode | None = None
     defer_reason: str | None = None
+    pending: bool = False
 
     @property
     def deferred(self) -> bool:
-        return self.next_status is None
+        return self.next_status is None and not self.pending
 
     def __post_init__(self) -> None:
+        if self.pending:
+            if self.next_status is not None or self.error_summary is not None:
+                raise ValueError("아직 결론이 없는 판정은 상태·사유를 싣지 않습니다")
+            if self.defer_code is not None or self.defer_reason is not None:
+                raise ValueError("아직 결론이 없는 판정은 보류가 아닙니다")
+            return
         if self.deferred:
             if self.error_summary is not None:
                 raise ValueError("보류 판정은 error_summary를 저장하지 않습니다")
@@ -2539,10 +2584,14 @@ def judge_rightsizing_boot(db: Session, execution_id: str) -> ExecutionJudgement
       ② 조치 직전 stopped였던 인스턴스는 기동하지 않는다(executor.execute_rightsizing
          ③단계 NOT_APPLIED). 켜지 않은 인스턴스에 2/2를 물으면 영원히 오지 않으므로
          타임아웃 뒤 멀쩡한 자산을 되돌리게 된다 — 그 전에 성공으로 확정한다.
-      ③ 그 밖에는 waiter에 묻는다 — 2/2면 성공이고, 관측된 실패·타임아웃이면 원복이
-         남는다. **AWS에 물어보지 못했으면 어느 쪽도 아니라 보류다**(next_status가
-         없는 판정) — 검증기의 실패를 자산의 실패로 저장하면 자동 원복이 멀쩡한
-         인스턴스를 되돌린다 (Issue #249).
+      ③ 그 밖에는 지금 상태를 **한 번** 관측한다(rollback.probe_status_check) — 2/2면
+         성공이고, 관측된 실패(정지·impaired)면 원복이 남는다. **아직 결론 전이면 예산으로
+         가른다**(Issue #434 1-3): 기동 단계 시각부터 rollback.status_check_budget 안이면
+         기록 없이 다음 주기가 다시 묻고(pending), 넘었으면 관측된 타임아웃이라 원복이
+         남는다. 기다리지 않으므로 판정 1건이 디스패처 한 주기를 분 단위로 붙잡지 않는다.
+         **AWS에 물어보지 못했으면 어느 쪽도 아니라 보류다**(next_status가 없는 판정) —
+         검증기의 실패를 자산의 실패로 저장하면 자동 원복이 멀쩡한 인스턴스를 되돌린다
+         (Issue #249). 보류 소진 뒤 처분은 record_verification_failure가 정한다.
 
     **종료 상태도 Incident 전이도 여기서 하지 않는다** — run_rightsizing_execution과
     같은 이유다(확정은 close_execution 한 트랜잭션).
@@ -2596,7 +2645,7 @@ def judge_rightsizing_boot(db: Session, execution_id: str) -> ExecutionJudgement
     if started.effect is ExecutionEffect.NOT_APPLIED:
         return ExecutionJudgement(next_status=ExecutionStatus.SUCCESS)
 
-    outcome = rollback.wait_for_status_check(execution.target_arn)
+    outcome = rollback.probe_status_check(execution.target_arn)
     if outcome.booted:
         return ExecutionJudgement(
             next_status=ExecutionStatus.SUCCESS, verdict=outcome.verdict
@@ -2610,6 +2659,21 @@ def judge_rightsizing_boot(db: Session, execution_id: str) -> ExecutionJudgement
             defer_reason=_boot_failure_summary(outcome),
             verdict=outcome.verdict,
         )
+    if outcome.undecided:
+        # 관측은 했는데 아직 2/2 전이다. 예산의 기준점은 기동 **요청** 시각(기동 단계
+        # 기록)이다 — DB에 남아 있어 프로세스가 재시작돼도 예산이 처음부터 다시 돌지 않는다
+        waited = datetime.now(UTC) - started.occurred_at
+        if waited < rollback.status_check_budget():
+            logger.info(
+                "status_check_pending",
+                extra={
+                    "execution_id": execution_id,
+                    "waited_seconds": int(waited.total_seconds()),
+                    "summary": outcome.summary,
+                },
+            )
+            return ExecutionJudgement(pending=True, verdict=outcome.verdict)
+        outcome = rollback.timed_out(outcome, waited)
     return ExecutionJudgement(
         next_status=ExecutionStatus.ROLLBACK_INITIATED,
         error_summary=_boot_failure_summary(outcome),
@@ -4011,7 +4075,7 @@ def _revert_command_payload(
 
 def _run_rollback_guardrails(
     db: Session, execution: models.ActionExecution, command_payload: dict
-) -> guardrails.GuardrailOutcome:
+) -> _RollbackGuardrail:
     """원복 실행 명령을 4단계 가드레일에 통과시키고 그 판정을 저장한다.
 
     롤백도 본편과 동일하게 네 단계를 전부 지난다(ADR-0004 정책 ①). 시스템이 시작한
@@ -4027,17 +4091,20 @@ def _run_rollback_guardrails(
         command_payload=command_payload,
     )
     loader = _DbBackupRecordLoader(db)
-    outcome = guardrails.run_guardrail_validation(
-        request,
-        is_managed_arn=lambda arn: assets_repo.get_asset_by_arn(db, arn) is not None,
-        # 롤백 3종은 전부 백업 레코드를 읽는다 — 미배선이면 FAIL이 아니라 RuntimeError다
-        precheck=lambda command: executor.precheck(
-            command.runbook_id,
-            command.target_arn,
-            command.parameters,
-            backup_loader=loader,
-        ),
-    )
+    # ④의 DryRun 미적용(정상 반환)은 사유 코드가 조회 실패와 같다 — 같은 스레드에서 그 사건을
+    # 따로 센다. 재평가 여부를 가르는 입력이다(_guardrail_transient_code)
+    with watch_dry_run_protocol() as dry_run_watch:
+        outcome = guardrails.run_guardrail_validation(
+            request,
+            is_managed_arn=lambda arn: assets_repo.get_asset_by_arn(db, arn) is not None,
+            # 롤백 3종은 전부 백업 레코드를 읽는다 — 미배선이면 FAIL이 아니라 RuntimeError다
+            precheck=lambda command: executor.precheck(
+                command.runbook_id,
+                command.target_arn,
+                command.parameters,
+                backup_loader=loader,
+            ),
+        )
     guardrails_repo.add_evaluation(
         db,
         validation_context=GuardrailValidationContext.ROLLBACK_EXECUTION,
@@ -4046,12 +4113,32 @@ def _run_rollback_guardrails(
         validated_command=command_payload if outcome.command is not None else None,
     )
     db.commit()
-    return outcome
+    return _RollbackGuardrail(outcome=outcome, dry_run_not_applied=dry_run_watch.violated)
+
+
+@dataclass(frozen=True)
+class _RollbackGuardrail:
+    """원복 가드레일 1회의 결과와, ④에서 DryRun이 적용되지 않은 사건이 있었는지."""
+
+    outcome: guardrails.GuardrailOutcome
+    dry_run_not_applied: bool
+
+    @property
+    def command(self):
+        return self.outcome.command
+
+    @property
+    def result(self) -> GuardrailValidationResult:
+        return self.outcome.result
+
+
+def _guardrail_failed_step(result: GuardrailValidationResult):
+    return next((s for s in result.steps if s.step == result.failed_step), None)
 
 
 def _guardrail_rejection_summary(result: GuardrailValidationResult) -> str:
     """거절 한 줄 — 어느 단계에서 어떤 사유로 막혔는지를 앞에 세운다."""
-    failed = next((s for s in result.steps if s.step == result.failed_step), None)
+    failed = _guardrail_failed_step(result)
     code = (
         failed.reason_code.value
         if failed is not None and failed.reason_code is not None
@@ -4061,13 +4148,92 @@ def _guardrail_rejection_summary(result: GuardrailValidationResult) -> str:
     return f"가드레일 거절({step}/{code})"
 
 
+def _guardrail_transient_code(
+    guardrail: _RollbackGuardrail,
+) -> PrecheckReasonCode | None:
+    """④ DryRun이 **판정하지 못한** 것인가 — 그렇다면 다시 물을 사유 코드, 아니면 None.
+
+    가드레일 FAIL에는 두 종류가 있다(Issue #434 1-2). ①~③과 ④의 권한 거부·파라미터
+    오류·대상 없음·상태 이상은 AWS 또는 계약이 **답한** 거절이라 다시 물어도 같다 —
+    ADR-0004 정책 ④대로 자동 재시도 없이 CRITICAL·수동 개입이다. 반면 ④가 스로틀링·5xx·
+    엔드포인트 접속 실패로 끝난 것은 거절이 아니라 **답을 듣지 못한 것**이다
+    (errors.RETRYABLE_REASON_CODES — PRECHECK_AWS_ERROR 하나). 원복은 원본당 한 번이고
+    원복 실패는 복구 가능 상태가 아니므로, 이것을 거절과 같이 확정하면 스로틀링 한 번에
+    자동·관제자 원복이 모두 닫힌 채 자산이 바뀐 상태로 남는다.
+
+    판정하지 못한 원복은 아직 자산을 만지지 않았고 단계도 없다 — 같은 함수 안의 상태
+    대조 조회 실패와 같은 사건이라 같은 처분을 받는다: 보류(deferred)로 돌려
+    record_verification_failure의 상한·간격(#249) 안에서 처음부터 다시 평가하고, 소진하면
+    자식 FAILED·원본 ROLLBACK_FAILED로 사람에게 넘긴다(ADR-0004 정책 ④의 처분 그대로).
+    **실패한 원복의 재실행이 아니다** — 단계가 남은 원복은 재평가 대상이 아니라 종료
+    판정 대상이다(ADR-0008 §7).
+
+    **같은 코드라도 DryRun 미적용(정상 반환)은 재평가하지 않는다.** ADR-0007 §2는 플래그가
+    무시된 경우도 PRECHECK_AWS_ERROR로 적는데, 그때는 자원이 실제로 바뀌었을 수 있어
+    "아직 만지지 않았다"는 전제가 서지 않는다 — 재평가가 두 번째 실제 실행이 된다. 그
+    사건은 errors.watch_dry_run_protocol이 따로 세고, 있었으면 거절과 같이 CRITICAL·수동
+    개입으로 간다.
+    """
+    if guardrail.dry_run_not_applied:
+        return None
+    result = guardrail.result
+    if result.failed_step is not GuardrailStep.AWS_DRY_RUN:
+        return None
+    failed = _guardrail_failed_step(result)
+    if failed is None or not isinstance(failed.reason_code, PrecheckReasonCode):
+        return None
+    return failed.reason_code if is_retryable(failed.reason_code) else None
+
+
+def _rollback_guardrail_outcome(
+    execution_id: str,
+    origin_execution_id: str,
+    guardrail: _RollbackGuardrail,
+    *,
+    event: str,
+) -> ExecutionRunOutcome:
+    """가드레일 FAIL 1건의 실행 결과 — 판정 불가면 보류, 거절이면 실패(CRITICAL)."""
+    result = guardrail.result
+    failed_step = result.failed_step.value if result.failed_step is not None else None
+    transient = _guardrail_transient_code(guardrail)
+    if transient is not None:
+        detail = f"가드레일 ④ 판정 불가로 원복 보류({transient.value})"
+        logger.warning(
+            f"{event}_deferred",
+            extra={
+                "execution_id": execution_id,
+                "parent_execution_id": origin_execution_id,
+                "failed_step": failed_step,
+                "reason_code": transient.value,
+            },
+        )
+        return ExecutionRunOutcome(
+            succeeded=False,
+            reason_code=transient,
+            error_summary=detail,
+            deferred=True,
+        )
+    detail = _guardrail_rejection_summary(result)
+    logger.critical(
+        event,
+        extra={
+            "execution_id": execution_id,
+            "parent_execution_id": origin_execution_id,
+            "failed_step": failed_step,
+        },
+    )
+    return _run_failed(PrecheckReasonCode.PRECHECK_INVALID_STATE, detail)
+
+
 def run_revert_size_execution(db: Session, execution_id: str) -> ExecutionRunOutcome:
     """`RUNBOOK_EC2_REVERT_SIZE` 실행 — 백업 로드 → 가드레일 4단계 → 원복. (Issue #241)
 
     순서가 계약이다. **가드레일 4단계가 AWS 변경보다 먼저 끝난다**(ADR-0004 정책 ①).
     거절이면 자산을 만지지 않고 실패로 돌아가며 **자동 재시도는 없다**(정책 ④) —
     자식 실행 행이 이미 있어 다음 주기의 발동이 멱등 관문에 걸리기 때문이다
-    (initiate_auto_rollback). 남는 처분은 CRITICAL 알림과 수동 개입이다.
+    (initiate_auto_rollback). 남는 처분은 CRITICAL 알림과 수동 개입이다. 거절이 아니라
+    ④가 **판정하지 못한** 경우(스로틀링·5xx)는 보류다 — 상태 대조 조회 실패와 같은
+    처분으로 재평가하고 소진하면 같은 수동 개입으로 간다(_guardrail_transient_code).
 
     **원복 값은 백업 레코드에서만 온다**(ADR-0004 정책 ③). 이 함수가 읽는 것은 자기
     행에 결속된 backup_record_id 하나이고 요청 페이로드도 후보도 보지 않는다. 원본
@@ -4131,20 +4297,12 @@ def run_revert_size_execution(db: Session, execution_id: str) -> ExecutionRunOut
     )
     guardrail = _run_rollback_guardrails(db, execution, payload)
     if guardrail.command is None:
-        detail = _guardrail_rejection_summary(guardrail.result)
-        logger.critical(
-            "auto_rollback_guardrail_rejected",
-            extra={
-                "execution_id": execution_id,
-                "parent_execution_id": origin.execution_id,
-                "failed_step": (
-                    guardrail.result.failed_step.value
-                    if guardrail.result.failed_step is not None
-                    else None
-                ),
-            },
+        return _rollback_guardrail_outcome(
+            execution_id,
+            origin.execution_id,
+            guardrail,
+            event="auto_rollback_guardrail_rejected",
         )
-        return _run_failed(PrecheckReasonCode.PRECHECK_INVALID_STATE, detail)
 
     spec = InstanceSpecBackup.model_validate(record.payload or {})
     outcome = executor.execute_revert_size(
@@ -4164,13 +4322,6 @@ def run_revert_size_execution(db: Session, execution_id: str) -> ExecutionRunOut
     if not outcome.succeeded:
         return _run_failed(outcome.reason_code, outcome.error_summary, outcome.steps)
     return ExecutionRunOutcome(succeeded=True, steps=outcome.steps)
-
-
-# 기동 요청이 접수된 뒤의 EC2 state. **원복 성공의 경계는 기동 "요청"이지 2/2 Status
-# Check가 아니다**(ADR-0008 §6) — 되돌린 인스턴스가 또 부팅에 실패해도 원복의 원복은
-# 없어 판정이 바뀌지 않는다. 그래서 pending도 성공에 넣는다: 빼면 방금 켠 인스턴스가
-# 다음 주기에 "미완"으로 확정된다.
-_REVERT_STARTED_STATES: frozenset[str] = frozenset({"running", "pending"})
 
 
 def judge_revert_size(db: Session, execution_id: str) -> ExecutionJudgement:
@@ -4233,8 +4384,10 @@ def judge_revert_size(db: Session, execution_id: str) -> ExecutionJudgement:
         # 인시던트가 내려가고, 멈춘 자산을 다시 볼 자리가 사라진다.
         #
         # 되돌려야 할 상태는 백업 레코드의 state다(ADR-0008 §4) — 조치 이전에 멈춰
-        # 있던 인스턴스는 멈춰 있는 것이 원복의 완료다.
-        if spec.state != "running" or state in _REVERT_STARTED_STATES:
+        # 있던 인스턴스는 멈춰 있는 것이 원복의 완료다. 판정 함수는 실행의 ①분기와
+        # 같은 것이다(executor.revert_restart_outstanding, Issue #434 1-1) — 정상 경로와
+        # 끊긴 경로가 같은 관찰에서 다른 답을 내지 않게 한다.
+        if not executor.revert_restart_outstanding(spec.state, state):
             return ExecutionJudgement(next_status=ExecutionStatus.SUCCESS)
         detail = (
             f"원복 미완 — 타입은 {restored}로 되돌렸으나 조치 이전 running이던"
@@ -4384,20 +4537,12 @@ def run_sg_recreate_execution(db: Session, execution_id: str) -> ExecutionRunOut
     payload = _sg_recreate_command_payload(execution, record, evidence_ids)
     guardrail = _run_rollback_guardrails(db, execution, payload)
     if guardrail.command is None:
-        detail = _guardrail_rejection_summary(guardrail.result)
-        logger.critical(
-            "sg_recreate_guardrail_rejected",
-            extra={
-                "execution_id": execution_id,
-                "parent_execution_id": origin.execution_id,
-                "failed_step": (
-                    guardrail.result.failed_step.value
-                    if guardrail.result.failed_step is not None
-                    else None
-                ),
-            },
+        return _rollback_guardrail_outcome(
+            execution_id,
+            origin.execution_id,
+            guardrail,
+            event="sg_recreate_guardrail_rejected",
         )
-        return _run_failed(PrecheckReasonCode.PRECHECK_INVALID_STATE, detail)
 
     outcome = executor.execute_sg_recreate(
         execution.target_arn,
@@ -4630,20 +4775,12 @@ def run_ec2_unisolate_execution(db: Session, execution_id: str) -> ExecutionRunO
     )
     guardrail = _run_rollback_guardrails(db, execution, payload)
     if guardrail.command is None:
-        detail = _guardrail_rejection_summary(guardrail.result)
-        logger.critical(
-            "unisolate_guardrail_rejected",
-            extra={
-                "execution_id": execution_id,
-                "parent_execution_id": origin.execution_id,
-                "failed_step": (
-                    guardrail.result.failed_step.value
-                    if guardrail.result.failed_step is not None
-                    else None
-                ),
-            },
+        return _rollback_guardrail_outcome(
+            execution_id,
+            origin.execution_id,
+            guardrail,
+            event="unisolate_guardrail_rejected",
         )
-        return _run_failed(PrecheckReasonCode.PRECHECK_INVALID_STATE, detail)
 
     outcome = executor.execute_ec2_unisolate(
         execution.target_arn,
