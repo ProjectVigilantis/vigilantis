@@ -7,26 +7,33 @@
 # VPC·역할로 가르고, 앱은 장기 키 없이 역할 전환(AssumeRole + ExternalId)으로만 관제 대상에
 # 닿는다. Post-MVP에서 계정을 가르면(#438 ①②) 접근 역할의 계정 번호만 바뀐다.
 #
+# Post-MVP T-8(#494)부터 계정을 가른다. 플랫폼 자원은 플랫폼 멤버 계정(--account)에 두고, 접근 역할
+# vigilantis-access만 고객 계정(--customer-account · 학원 계정)에 둔다. 스모크 정책·VPC도 고객 계정에서
+# 찾는다. 고객 인자를 빼면 MVP처럼 한 계정에 전부 둔다 — 학원 계정의 옛 플랫폼을 정리할 때 쓴다.
+#
 # 구성 (서울 리전 — 관제 대상과 같은 리전, ADR-0010 §2):
 #   브라우저 ─HTTPS─ CloudFront(기본 도메인 · --domain을 주면 그 도메인도) + WAF(IP당 속도 제한 → 허용 IP만)
 #            └─HTTP + 비밀 헤더─ 공개 ALB(CloudFront IP만 수신)
 #                 ├ /api/* · /health → ECS api (태스크 1개 고정)
 #                 └ 그 밖           → ECS web
 #   ECS(프라이빗 서브넷) → RDS PostgreSQL(프라이빗) · NAT → OpenAI·AWS API
-#   api 태스크 역할(vigilantis-platform) ─AssumeRole + ExternalId─ vigilantis-access → 스모크 VPC
+#   api 태스크 역할(vigilantis-platform) ─AssumeRole + ExternalId─ vigilantis-access(고객 계정) → 스모크 VPC
+#   오류 알람(CloudWatch → SNS 메일): api·web 정상 대상 10분 연속 0 · api 5xx · DB 남은 저장 공간
 #
 # Terraform이 아니라 Boto3인 이유: IaC는 Post-MVP다(ADR-0006 §2 · #438 ⑨). 방식은
 # scripts/provision_smoke_aws.py와 같다 — 태그 식별·멱등·미리 보기·실 AWS 전용 가드.
 #
-# 실행 (repo 루트, **관리자 프로필**로 — 앱 키가 아니다):
-#   읽기만     : uv run python scripts/provision_platform_aws.py status --account <계정 ID>
-#   세울 목록  : ... up --account <계정 ID> --allow-cidr <허용 IP>/32 [--domain <도메인>]
-#   실제 생성  : ... up --account <계정 ID> --allow-cidr <허용 IP>/32 [--domain <도메인>] --yes
+# 실행 (repo 루트, **플랫폼 계정의 관리자 프로필**로 — 앱 키가 아니다. [고객]은 아래 고객 인자):
+#   읽기만     : uv run python scripts/provision_platform_aws.py status --account <계정 ID> [고객]
+#   세울 목록  : ... up --account <계정 ID> --allow-cidr <허용 IP>/32 [--domain <도메인>] [--alarm-email <주소>] [고객]
+#   실제 생성  : ... up --account <계정 ID> --allow-cidr <허용 IP>/32 [--domain <도메인>] [--alarm-email <주소>] [고객] --yes
 #                --domain: Route53 호스팅 영역과 us-east-1 ACM 인증서(ISSUED)가 먼저 있어야 한다.
 #                CloudFront에 별칭·인증서를 달고 Route53에 A 별칭 레코드를 만든다
+#                --alarm-email: 오류 알람을 받을 주소. SNS가 보낸 확인 메일의 링크를 눌러야 알람이 온다
 #   이미지     : ... build --account <계정 ID> --tag <태그>        (docker 필요 — ECR에 api·web 푸시)
-#   배포       : ... deploy --account <계정 ID> --tag <태그> [--enable-dispatch] --yes
-#   전부 정리  : ... down --account <계정 ID> --yes
+#   배포       : ... deploy --account <계정 ID> --tag <태그> [--enable-dispatch] [고객] --yes
+#   전부 정리  : ... down --account <계정 ID> [고객] --yes
+#   고객 인자  : --customer-account <고객 계정 ID> --customer-profile <고객 계정의 관리자 프로필>
 #   알림(#493) : 기본 배포는 NOTIFICATION_ENABLED=false다. 켜려면 비밀 아닌 입력 JSON을 명시한다:
 #                {"enabled": true, "public_base_url": "https://…", "routes": [{tenant_id, aws_account_id,
 #                 slack_webhook_env?, sns_topic_arn?}], "slack_secret_arns": {"<env>": "<기존 비밀 ARN>"},
@@ -42,13 +49,15 @@
 #
 # 안전 가드 (스모크 스크립트와 같다):
 #   ① AWS_ENDPOINT_URL이 잡혀 있으면 멈춘다 — 전부 실 AWS 과금 자원이다.
-#   ② --account가 호출 주체의 계정과 다르면 멈춘다. 계정 ID와 허용 IP는 저장소에 적지 않는다.
+#   ② --account가 호출 주체의 계정과 다르면 멈춘다. --customer-account도 --customer-profile의 계정과
+#      대조한다. 계정 ID와 허용 IP는 저장소에 적지 않는다.
 #   ③ up·deploy·down은 --yes 없이는 아무것도 바꾸지 않는다.
 #   ④ down이 지우는 것은 플랫폼 태그 자원과 **플랫폼 VPC 안의 것**뿐이다. 스모크 환경과
 #      그 앱 정책(vigilantis-smoke-app)은 건드리지 않는다 — 접근 역할은 그 정책을 빌려 쓸 뿐이다.
 #      반대로 스모크 down은 접근 역할이 그 정책을 붙잡고 있으면 멈춘다 — 정리 순서는
 #      **플랫폼 down → 스모크 down**이다(ADR-0010 §7).
-#   ⑤ 이름이 같아도 플랫폼 태그(vigilantis:platform=true)가 없는 IAM 역할은 덮어쓰거나 지우지 않는다.
+#   ⑤ 이름이 같아도 플랫폼 태그(vigilantis:platform=true)가 없는 IAM 역할·오류 알람·알림 주제는 덮어쓰거나
+#      지우지 않는다.
 #   ⑥ --allow-cidr는 IPv4 CIDR이고 /24보다 넓으면 거부한다 — 로그인 없는 MVP에서 허용 IP가 출입문이다.
 #   ⑦ WAF 속도 제한(#484 · Post-MVP T-3) — IP당 RATE_LIMIT_PER_WINDOW 건 / RATE_WINDOW_SECONDS 초를
 #      허용 규칙보다 **앞**(우선순위 0)에서 센다. 허용이 먼저 맞으면 WAF가 거기서 평가를 끝내기 때문이다.
@@ -57,6 +66,11 @@
 #      동작은 Count(세기만)로 시작한다 — 정상 사용량을 재지 않았고, 캐시가 꺼져 있어 정적 파일까지
 #      전부 센다. 관측(CloudWatch 지표 vigilantis-platform-rate) 뒤 RATE_ACTION을 Block으로 바꾼다.
 #      up을 다시 돌리면 기존 웹 ACL의 규칙도 이 정의로 맞춘다 — 규칙을 고친 뒤 재실행이 곧 적용이다.
+#   ⑧ 고객 계정의 접근 역할은 고객 태그(vigilantis:customer-access=<플랫폼 계정 ID>)로 식별한다. 다른 플랫폼
+#      계정의 태그가 달려 있거나 어느 태그도 없으면 덮어쓰지 않는다. 플랫폼 태그만 달린 역할(같은 계정의 옛
+#      플랫폼이 만든 것)은 넘겨받는다 — 고객 태그를 달고 플랫폼 태그를 떼어 옛 플랫폼의 down이 지우지 않게
+#      한다. 넘겨받는 순간 신뢰 정책이 바뀌어 옛 플랫폼은 그 역할로 들어가지 못한다. 플랫폼 down은 고객
+#      계정의 역할을 지우지 않는다 — 고객 계정의 자원이다.
 #
 # 비밀값은 출력하지 않는다. OpenAI 키 비밀은 자리만 만들고 값은 PM이 직접 넣는다:
 #   aws secretsmanager put-secret-value --secret-id vigilantis-platform/openai-api-key --secret-string <키>
@@ -85,6 +99,8 @@ for _p in (str(_REPO_ROOT / "apps" / "core-api"), str(_REPO_ROOT / "packages")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+import boto3  # noqa: E402
+from botocore.config import Config  # noqa: E402
 from botocore.exceptions import ClientError  # noqa: E402
 
 import config as app_config  # noqa: E402
@@ -122,6 +138,8 @@ DB_CLASS = "db.t4g.micro"
 # 버전 목록을 조회해 고르지 않는다(목록이 페이지로 나뉘면 16.x를 놓친다)
 DB_MAJOR = "16"
 DB_STORAGE_GB = 20
+# 자동 백업 보존 일수(T-8 운영 장치). MVP의 1일은 주말을 넘긴 사고를 되돌리지 못한다
+DB_BACKUP_DAYS = 7
 DB_NAME = "vigilantis"
 DB_USER = "vigilantis"
 # RDS 생성 요청 전에 접속 문자열 비밀을 먼저 저장할 때의 호스트 자리 — 대기 뒤 실제 엔드포인트로 채운다.
@@ -139,6 +157,8 @@ OPENAI_PLACEHOLDER = "SET_ME"  # 값은 PM이 직접 넣는다 — 스크립트�
 ROLE_EXEC = f"{PREFIX}-exec"   # ECS가 이미지를 받고 비밀을 주입하는 역할
 ROLE_TASK = PREFIX              # api 컨테이너의 역할 — 접근 역할 전환 하나만 허용
 ROLE_ACCESS = "vigilantis-access"
+# 고객 계정에 둔 접근 역할의 식별 태그(안전 가드 ⑧) — 값은 그 역할을 쓰는 플랫폼 계정 ID다
+CUSTOMER_TAG_KEY = "vigilantis:customer-access"
 # 접근 역할의 권한은 스모크 스크립트가 만든 Action Whitelist 거울 정책을 그대로 빌린다(ADR-0009 §2).
 # 정책을 두 벌 두면 tests/test_provision_smoke_aws.py의 두 방향 보증이 한쪽에만 걸린다
 SMOKE_POLICY_NAME = "vigilantis-smoke-app"
@@ -177,13 +197,23 @@ WEB_SERVICE = f"{PREFIX}-web"
 API_TASK_FAMILY = f"{PREFIX}-api"
 WEB_TASK_FAMILY = f"{PREFIX}-web"
 
+# 플랫폼 오류 알람(T-8 운영 장치) — 이름은 alarm_definitions()가 정한다
+ALARM_TOPIC = f"{PREFIX}-alarms"
+ALARM_NAMES = (f"{PREFIX}-api-down", f"{PREFIX}-web-down", f"{PREFIX}-api-5xx", f"{PREFIX}-db-storage")
+# api는 겹쳐 뜨지 않게 내린 뒤 띄우므로(service_deployment) 배포마다 정상 대상이 0인 시간이 생긴다.
+# 그 시간보다 길게 잡아 배포로는 울리지 않게 한다
+DOWN_MINUTES = 10
+API_5XX_PER_5MIN = 10
+DB_FREE_BYTES_MIN = 2 * 1024 ** 3
+
 
 # ------------------------------------------------------------------ 순수 정의 (테스트 대상)
-def task_role_policy(account: str) -> dict:
+def task_role_policy(customer_account: str) -> dict:
     """api 태스크 역할 — **접근 역할 전환 하나뿐**이다. AWS 자원을 직접 만지는 권한은 없다.
 
     플랫폼이 관제 대상에 닿는 길을 이 한 줄로 좁히는 것이 SaaS 모양의 핵심이다(ADR-0010 §3).
-    원격 회수(#438 ②)는 이 문장에서 고객 역할 ARN을 빼는 것으로 한다.
+    원격 회수(#438 ②)는 이 문장에서 고객 역할 ARN을 빼는 것으로 한다. 계정을 가르지 않았으면
+    customer_account는 플랫폼 계정 자신이다.
     """
     return {
         "Version": "2012-10-17",
@@ -191,18 +221,18 @@ def task_role_policy(account: str) -> dict:
             "Sid": "AssumeAccessRoleOnly",
             "Effect": "Allow",
             "Action": "sts:AssumeRole",
-            "Resource": f"arn:aws:iam::{account}:role/{ROLE_ACCESS}",
+            "Resource": f"arn:aws:iam::{customer_account}:role/{ROLE_ACCESS}",
         }],
     }
 
 
-def access_trust_policy(account: str, external_id: str) -> dict:
-    """접근 역할의 신뢰 정책 — 플랫폼 태스크 역할만, ExternalId가 맞을 때만."""
+def access_trust_policy(platform_account: str, external_id: str) -> dict:
+    """접근 역할의 신뢰 정책 — 플랫폼 계정의 태스크 역할만, ExternalId가 맞을 때만."""
     return {
         "Version": "2012-10-17",
         "Statement": [{
             "Effect": "Allow",
-            "Principal": {"AWS": f"arn:aws:iam::{account}:role/{ROLE_TASK}"},
+            "Principal": {"AWS": f"arn:aws:iam::{platform_account}:role/{ROLE_TASK}"},
             "Action": "sts:AssumeRole",
             "Condition": {"StringEquals": {"sts:ExternalId": external_id}},
         }],
@@ -697,6 +727,47 @@ def is_platform_tagged(tags: list[dict]) -> bool:
     return any(t.get("Key") == TAG_KEY and t.get("Value") == TAG_VALUE for t in tags or [])
 
 
+def customer_access_owner(tags: list[dict]) -> Optional[str]:
+    """고객 계정 접근 역할의 고객 태그 값 — 그 역할을 쓰는 플랫폼 계정 ID. 태그가 없으면 None."""
+    return next((t.get("Value") for t in tags or [] if t.get("Key") == CUSTOMER_TAG_KEY), None)
+
+
+def alarm_definitions(lb_arn: str, tg_api_arn: str, tg_web_arn: str, topic_arn: str) -> list[dict]:
+    """플랫폼 오류 알람의 put_metric_alarm 인자(T-8 운영 장치). ALARM과 OK 둘 다 메일로 알린다.
+
+    정상 대상 알람은 `Maximum`으로 1분마다 보고 DOWN_MINUTES분 연속 0일 때만 울린다 — 배포 중 api가
+    잠시 0이 되는 것(service_deployment)으로는 울리지 않는다. 지표가 끊겨도 울린다(breaching).
+    대상이 없으면 ALB가 정상 대상 수를 싣지 않을 수 있어서다.
+    """
+    lb_dim = {"Name": "LoadBalancer", "Value": lb_arn.split(":loadbalancer/", 1)[1]}
+
+    def down(name: str, tg_arn: str) -> dict:
+        return {"AlarmName": name, "Namespace": "AWS/ApplicationELB", "MetricName": "HealthyHostCount",
+                "Dimensions": [{"Name": "TargetGroup", "Value": tg_arn.rsplit(":", 1)[1]}, lb_dim],
+                "Statistic": "Maximum", "Period": 60, "EvaluationPeriods": DOWN_MINUTES,
+                "DatapointsToAlarm": DOWN_MINUTES, "Threshold": 1, "ComparisonOperator": "LessThanThreshold",
+                "TreatMissingData": "breaching"}
+
+    alarms = [
+        {**down(ALARM_NAMES[0], tg_api_arn),
+         "AlarmDescription": f"api 정상 대상이 {DOWN_MINUTES}분 연속 0 — 화면이 데이터를 못 받는다"},
+        {**down(ALARM_NAMES[1], tg_web_arn),
+         "AlarmDescription": f"web 정상 대상이 {DOWN_MINUTES}분 연속 0 — 화면이 열리지 않는다"},
+        # ALB는 api·web이 함께 쓴다 — LoadBalancer만 주면 web의 5xx까지 api 장애로 센다(PR #523 리뷰)
+        {"AlarmName": ALARM_NAMES[2], "AlarmDescription": f"api 5xx가 5분에 {API_5XX_PER_5MIN}건 이상",
+         "Namespace": "AWS/ApplicationELB", "MetricName": "HTTPCode_Target_5XX_Count",
+         "Dimensions": [{"Name": "TargetGroup", "Value": tg_api_arn.rsplit(":", 1)[1]}, lb_dim],
+         "Statistic": "Sum", "Period": 300, "EvaluationPeriods": 1, "Threshold": API_5XX_PER_5MIN,
+         "ComparisonOperator": "GreaterThanOrEqualToThreshold", "TreatMissingData": "notBreaching"},
+        {"AlarmName": ALARM_NAMES[3], "AlarmDescription": "DB 남은 저장 공간이 2 GiB 미만",
+         "Namespace": "AWS/RDS", "MetricName": "FreeStorageSpace",
+         "Dimensions": [{"Name": "DBInstanceIdentifier", "Value": DB_INSTANCE}],
+         "Statistic": "Minimum", "Period": 300, "EvaluationPeriods": 1, "Threshold": DB_FREE_BYTES_MIN,
+         "ComparisonOperator": "LessThanThreshold", "TreatMissingData": "missing"},
+    ]
+    return [{**a, "ActionsEnabled": True, "AlarmActions": [topic_arn], "OKActions": [topic_arn]} for a in alarms]
+
+
 # ------------------------------------------------------------------ 공통
 def _require_real_aws(expected_account: str) -> dict:
     endpoint = endpoint_url()
@@ -707,6 +778,24 @@ def _require_real_aws(expected_account: str) -> dict:
         sys.exit(f"--account {expected_account} ≠ 호출 주체의 계정 {identity['Account']} — AWS 프로필을 확인할 것.")
     print(f"[platform] 계정 {identity['Account']} · 주체 {identity['Arn']} · 리전 {default_region()}")
     return identity
+
+
+def _customer_clients(profile: str, expected_account: str, region: str) -> dict:
+    """고객 계정 관리자 세션 — 접근 역할과 스모크 정책·VPC에만 쓴다. 환경 변수·앱 클라이언트 설정을 바꾸지 않는다."""
+    session = boto3.Session(profile_name=profile, region_name=region)
+    config = Config(ignore_configured_endpoint_urls=True)
+    identity = session.client("sts", config=config).get_caller_identity()
+    if identity["Account"] != expected_account:
+        sys.exit(f"--customer-account {expected_account} ≠ --customer-profile {profile}의 계정 {identity['Account']}"
+                 " — AWS 프로필을 확인할 것.")
+    print(f"[platform] 고객 계정 {identity['Account']} · 주체 {identity['Arn']}")
+    return {"iam": session.client("iam", config=config), "ec2": session.client("ec2", config=config),
+            "account": expected_account}
+
+
+def _customer(c: dict, account: str) -> dict:
+    """접근 역할을 둘 계정(iam · ec2 · account). 고객 인자가 없으면 플랫폼 계정 자신이다(MVP 단일 계정)."""
+    return c.get("customer") or {"iam": c["iam"], "ec2": c["ec2"], "account": account}
 
 
 def _code(exc: ClientError) -> str:
@@ -885,6 +974,40 @@ def alias_records_for(records: list[dict], domain: str, cf_domain: str) -> list[
             and r.get("AliasTarget", {}).get("DNSName", "").rstrip(".") == cf_domain]
 
 
+def _find_topic(sns) -> Optional[str]:
+    for page in sns.get_paginator("list_topics").paginate():
+        for topic in page.get("Topics", []):
+            if topic["TopicArn"].rsplit(":", 1)[-1] == ALARM_TOPIC:
+                return topic["TopicArn"]
+    return None
+
+
+def _alarm_resources(cw, sns) -> tuple[list[str], Optional[str], list[str]]:
+    """(플랫폼 태그가 달린 알람 이름, 플랫폼 태그가 달린 알림 주제 ARN, 이름만 같은 남의 자원 이름).
+
+    안전 가드 ⑤를 알람·알림 주제에도 건다 — put_metric_alarm은 같은 이름이면 덮어쓰고, 알림 주제를
+    지우면 구독도 함께 사라진다. 이름만 보고 고치거나 지우지 않는다(PR #523 리뷰).
+    """
+    ours, foreign = [], []
+    for alarm in cw.describe_alarms(AlarmNames=list(ALARM_NAMES))["MetricAlarms"]:
+        tags = cw.list_tags_for_resource(ResourceARN=alarm["AlarmArn"]).get("Tags", [])
+        (ours if is_platform_tagged(tags) else foreign).append(alarm["AlarmName"])
+    topic_arn = _find_topic(sns)
+    if topic_arn and not is_platform_tagged(sns.list_tags_for_resource(ResourceArn=topic_arn).get("Tags", [])):
+        foreign.append(ALARM_TOPIC)
+        topic_arn = None
+    return ours, topic_arn, foreign
+
+
+def _require_own_alarm_resources(cw, sns) -> Optional[str]:
+    """이름만 같은 남의 알람·알림 주제가 있으면 멈춘다. 없으면 플랫폼 알림 주제 ARN(없으면 None)."""
+    _, topic_arn, foreign = _alarm_resources(cw, sns)
+    if foreign:
+        sys.exit(f"플랫폼 태그({TAG_KEY}={TAG_VALUE})가 없는 같은 이름의 알람·알림 주제가 있다: {', '.join(foreign)} "
+                 "— 덮어쓰지 않는다. 확인 뒤 직접 정리할 것")
+    return topic_arn
+
+
 def _find_cluster(ecs) -> Optional[str]:
     found = ecs.describe_clusters(clusters=[CLUSTER])["clusters"]
     return found[0]["clusterArn"] if found and found[0]["status"] == "ACTIVE" else None
@@ -915,7 +1038,10 @@ def inventory(c: dict) -> list[tuple[str, str, Optional[str]]]:
     rows += [("Secret", n, _find_secret(c["sm"], n)) for n in
              (SECRET_DATABASE_URL, SECRET_OPENAI, SECRET_ORIGIN, SECRET_EXTERNAL_ID)]
     rows += [("ECR", n, _find_repo(c["ecr"], n)) for n in ECR_REPOS.values()]
-    rows += [("IamRole", n, _find_role(c["iam"], n)) for n in (ROLE_EXEC, ROLE_TASK, ROLE_ACCESS)]
+    rows += [("IamRole", n, _find_role(c["iam"], n)) for n in (ROLE_EXEC, ROLE_TASK)]
+    customer = c.get("customer")
+    rows.append(("IamRole(고객)" if customer else "IamRole", ROLE_ACCESS,
+                 _find_role((customer or c)["iam"], ROLE_ACCESS)))
     rows.append(("EcsCluster", CLUSTER, _find_cluster(c["ecs"])))
     lb = _find_lb(elbv2)
     rows.append(("LoadBalancer", ALB_NAME, lb["DNSName"] if lb else None))
@@ -925,6 +1051,10 @@ def inventory(c: dict) -> list[tuple[str, str, Optional[str]]]:
     rows.append(("WafWebAcl", WAF_ACL, (_find_acl(c["waf"]) or {}).get("Id")))
     dist = _find_distribution(c["cf"])
     rows.append(("CloudFront", CF_COMMENT, " · ".join(public_origins(dist)) if dist else None))
+    rows.append(("SnsTopic", ALARM_TOPIC, _find_topic(c["sns"])))
+    alarms = c["cw"].describe_alarms(AlarmNames=list(ALARM_NAMES))["MetricAlarms"]
+    rows.append(("Alarm", f"{PREFIX}-* {len(ALARM_NAMES)}종",
+                 ", ".join(f"{a['AlarmName'].removeprefix(PREFIX + '-')} {a['StateValue']}" for a in alarms) or None))
     for name in (API_SERVICE, WEB_SERVICE):
         svc = _find_service(c["ecs"], name)
         rows.append(("EcsService", name,
@@ -1104,9 +1234,15 @@ def _ensure_db(rds, sm, subnets: dict[str, str], sg_db: str) -> None:
             EngineVersion=DB_MAJOR, AllocatedStorage=DB_STORAGE_GB, StorageType="gp3",
             StorageEncrypted=True, DBName=DB_NAME, MasterUsername=DB_USER, MasterUserPassword=url.password,
             DBSubnetGroupName=DB_SUBNET_GROUP, VpcSecurityGroupIds=[sg_db], PubliclyAccessible=False,
-            MultiAZ=False, BackupRetentionPeriod=1, DeletionProtection=False,
+            MultiAZ=False, BackupRetentionPeriod=DB_BACKUP_DAYS, CopyTagsToSnapshot=True, DeletionProtection=False,
             Tags=[{"Key": TAG_KEY, "Value": TAG_VALUE}, {"Key": "Name", "Value": DB_INSTANCE}])
         print(f"[platform] RDS {DB_INSTANCE} 생성 요청 — available 대기(수 분)")
+    elif db["DBInstanceStatus"] == "available" and db.get("BackupRetentionPeriod", 0) < DB_BACKUP_DAYS:
+        # MVP 때 1일로 만든 인스턴스. 생성·수정 중에는 바꿀 수 없어 available일 때만 맞춘다.
+        # 1일 이상끼리의 보존 기간 변경은 ApplyImmediately 없이도 바로 적용된다. 그 옵션을 주면
+        # 대기 중인 다른 DB 변경까지 함께 즉시 적용되므로 넣지 않는다(PR #523 리뷰)
+        rds.modify_db_instance(DBInstanceIdentifier=DB_INSTANCE, BackupRetentionPeriod=DB_BACKUP_DAYS)
+        print(f"[platform] RDS {DB_INSTANCE} 자동 백업 보존 {db.get('BackupRetentionPeriod')}일 → {DB_BACKUP_DAYS}일")
     # 새로 만들었으면 호스트를 항상 다시 적는다(비밀이 지운 옛 인스턴스의 호스트를 들고 있을 수 있다)
     if not db or url.hostname == DB_HOST_PENDING:
         rds.get_waiter("db_instance_available").wait(DBInstanceIdentifier=DB_INSTANCE)
@@ -1151,21 +1287,57 @@ def _require_smoke_env(iam, ec2, account: str) -> None:
 
     접근 역할은 스모크의 Action Whitelist 거울 정책을 빌려 쓰고, 배포는 스모크 VPC를 관제 범위로
     넣는다. 둘 중 하나라도 없으면 NAT·RDS(시간 과금)를 세운 뒤에야 멈추게 되므로 up의 맨 앞에 둔다.
+    계정을 갈랐으면 iam·ec2·account는 고객 계정의 것이다(_customer).
     """
+    hint = " 계정을 갈랐으면 --customer-account·--customer-profile로 고객 계정을 줄 것."
     try:
         iam.get_policy(PolicyArn=_smoke_policy_arn(account))
     except ClientError as exc:
         if _code(exc) == "NoSuchEntity":
             sys.exit(f"{SMOKE_POLICY_NAME} 정책이 없다 — scripts/provision_smoke_aws.py up을 먼저 돌릴 것"
-                     "(접근 역할은 그 Action Whitelist 거울 정책을 빌려 쓴다).")
+                     "(접근 역할은 그 Action Whitelist 거울 정책을 빌려 쓴다)." + hint)
         raise
     if not _find_smoke_vpc(ec2):
         sys.exit(f"스모크 VPC({SMOKE_VPC_NAME})가 없다 — scripts/provision_smoke_aws.py up을 먼저 돌릴 것"
-                 "(배포가 그 VPC를 관제 범위 COLLECT_VPC_IDS로 넣는다).")
+                 "(배포가 그 VPC를 관제 범위 COLLECT_VPC_IDS로 넣는다)." + hint)
 
 
-def _ensure_roles(iam, account: str, secret_arns: list[str], external_id: str) -> dict[str, str]:
-    smoke_policy = _smoke_policy_arn(account)  # 존재는 up 맨 앞(_require_smoke_env)에서 확인했다
+def _ensure_customer_access_role(iam, platform_account: str, trust: dict) -> str:
+    """고객 계정의 접근 역할(안전 가드 ⑧). 고객 태그로 식별하고 신뢰 정책을 이 플랫폼 계정으로 맞춘다.
+
+    플랫폼 태그만 달린 역할은 같은 계정의 옛 플랫폼이 만든 것이라 넘겨받는다. 고객 태그를 먼저 달고
+    신뢰 정책을 바꾼 뒤 플랫폼 태그를 뗀다 — 어디서 끊겨도 재실행이 마저 맞춘다.
+    """
+    description = "Vigilantis monitored-account access (SaaS customer role)"
+    role = _get_role(iam, ROLE_ACCESS)
+    if role is None:
+        arn = iam.create_role(RoleName=ROLE_ACCESS, AssumeRolePolicyDocument=json.dumps(trust),
+                              Description=description, MaxSessionDuration=3600,
+                              Tags=[{"Key": CUSTOMER_TAG_KEY, "Value": platform_account}])["Role"]["Arn"]
+        print(f"[platform] 고객 계정 IAM 역할 {ROLE_ACCESS} 생성")
+        return arn
+    tags = role.get("Tags", [])
+    owner = customer_access_owner(tags)
+    if owner is None and not is_platform_tagged(tags):
+        sys.exit(f"고객 계정의 IAM 역할 {ROLE_ACCESS}에 고객 태그({CUSTOMER_TAG_KEY})도 플랫폼 태그도 없다 — "
+                 "다른 용도의 역할일 수 있어 덮어쓰지 않는다.")
+    if owner not in (None, platform_account):
+        sys.exit(f"고객 계정의 IAM 역할 {ROLE_ACCESS}는 플랫폼 계정 {owner}의 것이다 — 덮어쓰지 않는다.")
+    if owner is None:
+        iam.tag_role(RoleName=ROLE_ACCESS, Tags=[{"Key": CUSTOMER_TAG_KEY, "Value": platform_account}])
+        print(f"[platform] 고객 계정의 옛 플랫폼 접근 역할 {ROLE_ACCESS}를 넘겨받는다 — 옛 플랫폼은 이제 이 역할로 "
+              "들어가지 못하고, 옛 플랫폼 down은 이 역할을 지우지 않는다")
+    iam.update_assume_role_policy(RoleName=ROLE_ACCESS, PolicyDocument=json.dumps(trust))
+    if is_platform_tagged(tags):
+        iam.untag_role(RoleName=ROLE_ACCESS, TagKeys=[TAG_KEY])
+    return role["Arn"]
+
+
+def _ensure_roles(iam, account: str, secret_arns: list[str], external_id: str,
+                  customer: Optional[dict] = None) -> dict[str, str]:
+    """실행·태스크 역할은 플랫폼 계정에, 접근 역할은 고객 계정에 둔다(customer — 없으면 플랫폼 계정 자신)."""
+    customer = customer or {"iam": iam, "account": account}
+    smoke_policy = _smoke_policy_arn(customer["account"])  # 존재는 up 맨 앞(_require_smoke_env)에서 확인했다
     exec_arn = _ensure_role(iam, ROLE_EXEC, ecs_tasks_trust_policy(), "ECS image pull and secret injection")
     iam.attach_role_policy(RoleName=ROLE_EXEC,
                            PolicyArn="arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy")
@@ -1173,12 +1345,17 @@ def _ensure_roles(iam, account: str, secret_arns: list[str], external_id: str) -
                         PolicyDocument=json.dumps(exec_secrets_policy(secret_arns)))
     task_arn = _ensure_role(iam, ROLE_TASK, ecs_tasks_trust_policy(), "Vigilantis api - assume access role only")
     iam.put_role_policy(RoleName=ROLE_TASK, PolicyName="assume-access-role",
-                        PolicyDocument=json.dumps(task_role_policy(account)))
+                        PolicyDocument=json.dumps(task_role_policy(customer["account"])))
+    trust = access_trust_policy(account, external_id)
+
+    def ensure_access() -> str:
+        if customer["account"] == account:
+            return _ensure_role(iam, ROLE_ACCESS, trust, "Vigilantis monitored-account access (SaaS customer role shape)")
+        return _ensure_customer_access_role(customer["iam"], account, trust)
+
     # 신뢰 정책의 주체(태스크 역할)는 이미 있어야 IAM이 받아 준다 — 새 역할 직후에는 전파 대기
-    access_arn = _retry(lambda: _ensure_role(iam, ROLE_ACCESS, access_trust_policy(account, external_id),
-                                             "Vigilantis monitored-account access (SaaS customer role shape)"),
-                        "접근 역할 신뢰 정책(주체 전파)", ("MalformedPolicyDocument",), timeout=120)
-    iam.attach_role_policy(RoleName=ROLE_ACCESS, PolicyArn=smoke_policy)
+    access_arn = _retry(ensure_access, "접근 역할 신뢰 정책(주체 전파)", ("MalformedPolicyDocument",), timeout=120)
+    customer["iam"].attach_role_policy(RoleName=ROLE_ACCESS, PolicyArn=smoke_policy)
     return {"exec": exec_arn, "task": task_arn, "access": access_arn}
 
 
@@ -1235,7 +1412,25 @@ def _ensure_alb(elbv2, vpc_id: str, subnets: dict[str, str], sg_alb: str, origin
     for rule in listener_rules(tg_api, tg_web, origin_value):
         if str(rule["Priority"]) not in existing:
             elbv2.create_rule(ListenerArn=listener_arn, **rule)
-    return {"dns": lb["DNSName"], "tg_api": tg_api, "tg_web": tg_web}
+    return {"arn": lb["LoadBalancerArn"], "dns": lb["DNSName"], "tg_api": tg_api, "tg_web": tg_web}
+
+
+def _ensure_alarms(cw, sns, alb: dict, email: Optional[str]) -> None:
+    """오류 알람과 그 알림 주제(SNS)를 맞춘다. put_metric_alarm은 같은 이름이면 덮어쓰므로 재실행이 곧 갱신이다.
+
+    덮어쓰는 것은 플랫폼 태그가 달린 것뿐이다 — 이름만 같은 남의 알람·주제가 있으면 아무것도 쓰기 전에 멈춘다.
+    """
+    topic_arn = _require_own_alarm_resources(cw, sns) or sns.create_topic(
+        Name=ALARM_TOPIC, Tags=[{"Key": TAG_KEY, "Value": TAG_VALUE}])["TopicArn"]
+    subs = sns.list_subscriptions_by_topic(TopicArn=topic_arn)["Subscriptions"]
+    if email and not any(s["Protocol"] == "email" and s["Endpoint"] == email for s in subs):
+        sns.subscribe(TopicArn=topic_arn, Protocol="email", Endpoint=email)
+        print("[platform] 알람 메일 구독 요청 — 받은 확인 메일의 링크를 눌러야 알람이 온다")
+    elif not email and not subs:
+        print("[platform] 주의: 알람 주제에 구독이 없다 — up --alarm-email <주소>로 받을 곳을 달 것")
+    for alarm in alarm_definitions(alb["arn"], alb["tg_api"], alb["tg_web"], topic_arn):
+        cw.put_metric_alarm(**alarm, Tags=_kv_tags(alarm["AlarmName"]))
+    print(f"[platform] 오류 알람 {len(ALARM_NAMES)}종 — 첫 배포 전에는 정상 대상이 없어 down 알람이 울린다")
 
 
 def _ensure_ipset(waf, name: str, cidrs: list[str], label: str) -> str:
@@ -1395,10 +1590,13 @@ def _ensure_custom_domain(c: dict, domain: str, cert_arn: str, zone_id: str) -> 
     print(f"[platform] Route53 {domain} A → {dist['DomainName']}")
 
 
-def up(c: dict, account: str, region: str, allow_cidrs: list[str], domain: Optional[str] = None) -> None:
+def up(c: dict, account: str, region: str, allow_cidrs: list[str], domain: Optional[str] = None,
+       alarm_email: Optional[str] = None) -> None:
     ec2 = c["ec2"]
-    _require_smoke_env(c["iam"], ec2, account)  # 무엇이든 만들기 전에
+    customer = _customer(c, account)
+    _require_smoke_env(customer["iam"], customer["ec2"], customer["account"])  # 무엇이든 만들기 전에
     custom = _require_custom_domain(c, domain) if domain else None
+    _require_own_alarm_resources(c["cw"], c["sns"])  # _ensure_alarms에서야 멈추면 그 앞의 VPC·RDS가 이미 선다
     vpc_id = _ensure_vpc(ec2)
     subnets = _ensure_subnets(ec2, vpc_id, region)
     nat_ip = _ensure_network(ec2, vpc_id, subnets)
@@ -1414,10 +1612,11 @@ def up(c: dict, account: str, region: str, allow_cidrs: list[str], domain: Optio
     _ensure_db(c["rds"], c["sm"], subnets, sgs[SG_DB])
     _ensure_repos(c["ecr"])
     secret_arns = [_find_secret(c["sm"], n) for n in (SECRET_DATABASE_URL, SECRET_OPENAI, SECRET_EXTERNAL_ID)]
-    _ensure_roles(c["iam"], account, [a for a in secret_arns if a], external_id)
+    _ensure_roles(c["iam"], account, [a for a in secret_arns if a], external_id, customer)
     _ensure_logs(c["logs"])
     _ensure_cluster(c["ecs"])
     alb = _ensure_alb(c["elbv2"], vpc_id, subnets, sgs[SG_ALB], origin_value)
+    _ensure_alarms(c["cw"], c["sns"], alb, alarm_email)
     # 웹 컨테이너의 서버 측 API 호출도 CloudFront를 거친다 — NAT 공인 IP를 허용 목록에 넣는다
     # 속도 제한에서는 NAT IP를 뺀다(안전 가드 ⑦) — 같은 이유로 그 IP가 모든 사용자의 서버 측 호출을 싣는다
     acl_arn = _ensure_waf(c["waf"], sorted(set(allow_cidrs) | {f"{nat_ip}/32"}), f"{nat_ip}/32")
@@ -1430,7 +1629,8 @@ def up(c: dict, account: str, region: str, allow_cidrs: list[str], domain: Optio
     if _secret_value(c["sm"], SECRET_OPENAI) == OPENAI_PLACEHOLDER:
         print(f"  1. OpenAI 키 넣기  : aws secretsmanager put-secret-value --secret-id {SECRET_OPENAI} --secret-string <키>")
     print("  2. 이미지          : ... build --account <계정 ID> --tag <태그>")
-    print("  3. 배포            : ... deploy --account <계정 ID> --tag <태그> --yes")
+    customer_args = " --customer-account <고객 계정 ID> --customer-profile <프로필>" if c.get("customer") else ""
+    print(f"  3. 배포            : ... deploy --account <계정 ID> --tag <태그>{customer_args} --yes")
 
 
 # ------------------------------------------------------------------ 이미지(build)
@@ -1534,19 +1734,24 @@ def deployment_problems(services: list[dict], expected: dict[str, str]) -> list[
 def deploy(c: dict, account: str, region: str, tag: str, dispatch_enabled: bool,
            notification: Optional[dict] = None) -> None:
     ec2, ecs = c["ec2"], c["ecs"]
+    customer = _customer(c, account)
     vpc_id = _find_vpc(ec2)
-    smoke_vpc = _find_smoke_vpc(ec2)
+    smoke_vpc = _find_smoke_vpc(customer["ec2"])
     dist = _find_distribution(c["cf"])
     if not (vpc_id and dist):
         sys.exit("플랫폼 VPC 또는 CloudFront가 없다 — up을 먼저 돌릴 것")
     if not smoke_vpc:
-        sys.exit("스모크 VPC가 없다 — 관제 범위(COLLECT_VPC_IDS)를 정할 수 없다")
+        sys.exit("스모크 VPC가 없다 — 관제 범위(COLLECT_VPC_IDS)를 정할 수 없다"
+                 "(계정을 갈랐으면 --customer-account·--customer-profile로 고객 계정을 줄 것)")
     if _secret_value(c["sm"], SECRET_OPENAI) == OPENAI_PLACEHOLDER and dispatch_enabled:
         sys.exit(f"{SECRET_OPENAI}가 아직 자리표시값이다 — AI 분석·조치 실행 디스패치를 켜려면 키를 먼저 넣을 것")
     subnets = _find_subnets(ec2, vpc_id)
     sgs = _find_sgs(ec2, vpc_id)
     repos = {k: _find_repo(c["ecr"], n) for k, n in ECR_REPOS.items()}
-    roles = {k: _find_role(c["iam"], n) for k, n in (("exec", ROLE_EXEC), ("task", ROLE_TASK), ("access", ROLE_ACCESS))}
+    roles = {k: _find_role(c["iam"], n) for k, n in (("exec", ROLE_EXEC), ("task", ROLE_TASK))}
+    roles["access"] = _find_role(customer["iam"], ROLE_ACCESS)
+    if not all(roles.values()):
+        sys.exit(f"IAM 역할이 없다({', '.join(k for k, v in roles.items() if not v)}) — up을 먼저 돌릴 것")
     secret_arns = {
         "DATABASE_URL": _find_secret(c["sm"], SECRET_DATABASE_URL),
         "OPENAI_API_KEY": _find_secret(c["sm"], SECRET_OPENAI),
@@ -1600,7 +1805,14 @@ def _delete_roles(iam, account: str) -> None:
         found = _get_role(iam, role)
         if not found:
             continue
-        if not is_platform_tagged(found.get("Tags", [])):  # 안전 가드 ⑤ — 이름만 같은 남의 역할
+        tags = found.get("Tags", [])
+        # 안전 가드 ⑧ — 고객 태그가 먼저다. 넘겨받기가 플랫폼 태그를 떼기 전에 끊기면 두 태그가 함께
+        # 남는데, 그 역할은 이미 새 플랫폼이 쓰는 고객 접근 역할이다(PR #523 리뷰)
+        owner = customer_access_owner(tags)
+        if owner:
+            print(f"[platform] IAM 역할 {role}은 플랫폼 계정 {owner}이 쓰는 고객 접근 역할이라 건드리지 않았다")
+            continue
+        if not is_platform_tagged(tags):  # 안전 가드 ⑤ — 이름만 같은 남의 역할
             print(f"[platform] IAM 역할 {role}은 플랫폼 태그가 없어 건드리지 않았다 — 확인 뒤 직접 정리할 것")
             continue
         for arn in managed:
@@ -1644,8 +1856,23 @@ def _ecs_drained(ecs, services: list[str], *, delay: float = 15, attempts: int =
     return False
 
 
+def _delete_alarms(cw, sns) -> None:
+    """플랫폼 태그가 달린 오류 알람과 알림 주제만 지운다. 이름만 같은 남의 것은 남기고 알린다(안전 가드 ⑤)."""
+    ours, topic_arn, foreign = _alarm_resources(cw, sns)
+    if ours:  # 없는 이름을 넘기면 ResourceNotFound다
+        cw.delete_alarms(AlarmNames=ours)
+        print(f"[platform] 오류 알람 {len(ours)}건 삭제")
+    if topic_arn:
+        sns.delete_topic(TopicArn=topic_arn)
+        print("[platform] 알림 주제 삭제")
+    for name in foreign:
+        print(f"[platform] {name}은 플랫폼 태그가 없어 건드리지 않았다 — 확인 뒤 직접 정리할 것")
+
+
 def down(c: dict, account: str) -> None:
     ec2, ecs, elbv2 = c["ec2"], c["ecs"], c["elbv2"]
+    # 알람이 먼저다 — 서비스를 내리는 동안 down 알람이 울리지 않게 한다
+    _delete_alarms(c["cw"], c["sns"])
     if _find_cluster(ecs):
         deleted = []
         for name in (API_SERVICE, WEB_SERVICE):
@@ -1713,6 +1940,9 @@ def down(c: dict, account: str) -> None:
         _try(lambda name=name: c["logs"].delete_log_group(logGroupName=name), "ResourceNotFoundException")
 
     _delete_roles(c["iam"], account)
+    if c.get("customer"):
+        print(f"[platform] 고객 계정 {c['customer']['account']}의 {ROLE_ACCESS}는 지우지 않았다 — 고객 계정의 자원이다"
+              "(안전 가드 ⑧). 신뢰 대상인 태스크 역할이 지워져 이 플랫폼은 더 들어가지 못한다")
 
     vpc_id = _find_vpc(ec2)
     if vpc_id:
@@ -1758,6 +1988,11 @@ def main() -> None:
                         help=f"up: WAF 허용 IPv4 CIDR(/{MIN_ALLOW_PREFIX} 이상 좁게 · 여러 번 줄 수 있다)")
     parser.add_argument("--domain", help="up: CloudFront에 달 사용자 도메인(Route53 호스팅 영역 · "
                                          "us-east-1 ACM 인증서가 먼저 있어야 한다)")
+    parser.add_argument("--alarm-email", help="up: 플랫폼 오류 알람을 받을 주소(SNS 메일 구독 — 확인 메일의 링크를 "
+                                              "눌러야 알람이 온다)")
+    parser.add_argument("--customer-account", help="고객(관제 대상) 계정 ID — 주면 접근 역할을 그 계정에 두고 스모크 "
+                                                   "정책·VPC도 거기서 찾는다(T-8). 생략하면 --account 한 계정에 둔다")
+    parser.add_argument("--customer-profile", help="--customer-account의 관리자 AWS 프로필")
     parser.add_argument("--tag", help="build·deploy: 이미지 태그")
     parser.add_argument("--enable-dispatch", action="store_true",
                         help="deploy: AI 분석과 조치 실행 디스패치를 함께 켠다(한 스위치 — 끄면 승인한 조치도 "
@@ -1770,6 +2005,10 @@ def main() -> None:
         sys.exit("--notification-config는 deploy·notification-iam에서만 쓴다")
     if args.command == "notification-iam" and not args.notification_config:
         sys.exit("notification-iam에는 --notification-config가 필요하다")
+    if bool(args.customer_account) != bool(args.customer_profile):
+        sys.exit("--customer-account와 --customer-profile은 함께 준다")
+    if args.customer_account and args.customer_account == args.account:
+        sys.exit("--customer-account가 --account와 같다 — 한 계정에 둘 거면 고객 인자를 빼고 돌릴 것")
 
     account = _require_real_aws(args.account)["Account"]
     region = default_region()
@@ -1777,10 +2016,13 @@ def main() -> None:
         "ec2": aws_client("ec2", region), "elbv2": aws_client("elbv2", region), "rds": aws_client("rds", region),
         "ecs": aws_client("ecs", region), "ecr": aws_client("ecr", region), "iam": aws_client("iam", region),
         "logs": aws_client("logs", region), "sm": aws_client("secretsmanager", region),
+        "cw": aws_client("cloudwatch", region), "sns": aws_client("sns", region),
         # CloudFront와 그에 붙는 WAF(CLOUDFRONT 범위)는 us-east-1에서만 다룬다
         "cf": aws_client("cloudfront", "us-east-1"), "waf": aws_client("wafv2", "us-east-1"),
         "acm": aws_client("acm", "us-east-1"), "r53": aws_client("route53", "us-east-1"),
     }
+    if args.customer_account:
+        c["customer"] = _customer_clients(args.customer_profile, args.customer_account, region)
     if args.command == "status":
         status(c)
         return
@@ -1809,9 +2051,11 @@ def main() -> None:
             sys.exit("up에는 --allow-cidr가 필요하다 — 허용 IP 없이 공개 진입점을 세우지 않는다")
         allow_cidrs = validate_allow_cidrs(args.allow_cidr)
         # 미리 보기에서도 먼저 본다 — --yes로 돌렸을 때 중간에 멈출 일을 여기서 알린다
-        _require_smoke_env(c["iam"], c["ec2"], account)
+        customer = _customer(c, account)
+        _require_smoke_env(customer["iam"], customer["ec2"], customer["account"])
         if args.domain:
             _require_custom_domain(c, args.domain)
+        _require_own_alarm_resources(c["cw"], c["sns"])
     if not args.yes:
         if args.command == "up":
             missing = [row for row in inventory(c) if row[2] is None and row[0] != "EcsService"]
@@ -1830,7 +2074,7 @@ def main() -> None:
             _print_rows([row for row in inventory(c) if row[2]])
         return
     if args.command == "up":
-        up(c, account, region, allow_cidrs, args.domain)
+        up(c, account, region, allow_cidrs, args.domain, args.alarm_email)
     elif args.command == "notification-iam":
         apply_notification_policies(c["iam"], c["ecs"], notification)
     elif args.command == "deploy":

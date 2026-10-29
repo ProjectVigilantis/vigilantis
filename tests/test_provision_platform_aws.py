@@ -10,8 +10,12 @@
 #   ④ WAF는 기본 차단 · 허용 IP만 통과 · 허용 CIDR은 /24보다 넓으면 거부
 #   ⑤ api는 겹쳐 뜨지 않는다(min 0 · max 100) · AI 분석·조치 실행 디스패치는 명시해야 켜진다
 #      · 비밀은 값이 아니라 참조로만
+#   ⑥ 계정을 가르면(T-8) 접근 역할만 고객 계정에 · 남의 고객 역할은 덮어쓰지 않음 · 옛 플랫폼의 down이
+#      넘겨받은 역할을 지우지 않음
+#   ⑦ 운영 장치(T-8): 오류 알람은 배포 중 잠깐의 중단으로 울리지 않음 · api 5xx는 api 대상 그룹만 셈
+#      · DB 자동 백업 7일
 #   가드: 실 AWS·계정 대조 · 스모크 환경을 비싼 자원보다 먼저 확인 · DB 비밀번호는 RDS 생성 전에 저장
-#         · 플랫폼 태그 없는 IAM 역할은 덮어쓰거나 지우지 않음
+#         · 플랫폼 태그 없는 IAM 역할·오류 알람·알림 주제는 덮어쓰거나 지우지 않음
 #         · 자동 롤백된 배포를 성공으로 보고하지 않음 · ECS가 전부 내려간 뒤에만 클러스터 삭제
 #
 # scripts/ 는 CI pytest 경로에 없어 여기(루트 tests/)에 둔다.
@@ -504,11 +508,15 @@ _SMOKE_POLICY = f"arn:aws:iam::{ACCOUNT}:policy/{platform.SMOKE_POLICY_NAME}"
 
 
 class FakeIam:
-    def __init__(self, roles=None, policies=()):
-        self.roles = {name: {"RoleName": name, "Arn": f"arn:aws:iam::{ACCOUNT}:role/{name}", "Tags": tags}
+    def __init__(self, roles=None, policies=(), account=ACCOUNT):
+        self.account = account
+        self.roles = {name: {"RoleName": name, "Arn": f"arn:aws:iam::{account}:role/{name}", "Tags": list(tags)}
                       for name, tags in (roles or {}).items()}
         self.policies = set(policies)
         self.calls: list[tuple[str, str]] = []
+        self.trust: dict[str, dict] = {}
+        self.inline: dict[tuple[str, str], dict] = {}
+        self.attached: list[tuple[str, str]] = []
 
     def get_role(self, RoleName):
         if RoleName not in self.roles:
@@ -520,8 +528,31 @@ class FakeIam:
             raise _client_error("NoSuchEntity", "GetPolicy")
         return {"Policy": {"Arn": PolicyArn}}
 
+    def create_role(self, RoleName, AssumeRolePolicyDocument, Tags, **_):
+        self.calls.append(("create_role", RoleName))
+        self.roles[RoleName] = {"RoleName": RoleName, "Arn": f"arn:aws:iam::{self.account}:role/{RoleName}",
+                                "Tags": list(Tags)}
+        self.trust[RoleName] = json.loads(AssumeRolePolicyDocument)
+        return {"Role": self.roles[RoleName]}
+
     def update_assume_role_policy(self, RoleName, PolicyDocument):
         self.calls.append(("update_assume_role_policy", RoleName))
+        self.trust[RoleName] = json.loads(PolicyDocument)
+
+    def tag_role(self, RoleName, Tags):
+        self.calls.append(("tag_role", RoleName))
+        keys = {t["Key"] for t in Tags}
+        self.roles[RoleName]["Tags"] = [t for t in self.roles[RoleName]["Tags"] if t["Key"] not in keys] + Tags
+
+    def untag_role(self, RoleName, TagKeys):
+        self.calls.append(("untag_role", RoleName))
+        self.roles[RoleName]["Tags"] = [t for t in self.roles[RoleName]["Tags"] if t["Key"] not in TagKeys]
+
+    def put_role_policy(self, RoleName, PolicyName, PolicyDocument):
+        self.inline[(RoleName, PolicyName)] = json.loads(PolicyDocument)
+
+    def attach_role_policy(self, RoleName, PolicyArn):
+        self.attached.append((RoleName, PolicyArn))
 
     def detach_role_policy(self, RoleName, PolicyArn):
         self.calls.append(("detach_role_policy", RoleName))
@@ -719,6 +750,10 @@ class FakeRds:
 
     def describe_db_engine_versions(self, **kwargs):
         raise AssertionError("엔진 버전 목록을 조회하지 않는다 — 메이저만 넘긴다")
+
+    def modify_db_instance(self, **kwargs):
+        self.events.append(("modify_db_instance", kwargs.get("BackupRetentionPeriod")))
+        self.modified = kwargs
 
     def get_waiter(self, name):
         rds = self
@@ -1191,3 +1226,262 @@ def test_revoke_deletes_only_our_two_policies_on_tagged_roles():
     platform.revoke_notification_policies(iam, QuietEcs())
     assert iam.calls == [("delete_role_policy", platform.ROLE_TASK)]
     assert iam.puts == []
+
+
+# ⑨ 운영 장치 — DB 자동 백업 -------------------------------------------------------
+def test_new_db_keeps_a_week_of_automated_backups():
+    events: list = []
+    rds = FakeRds(events)
+    platform._ensure_db(rds, FakeSm(events), _SUBNETS, "sg-db")
+    assert rds.created["BackupRetentionPeriod"] == platform.DB_BACKUP_DAYS >= 7
+
+
+def test_existing_db_with_one_day_of_backups_is_raised_to_a_week():
+    """MVP 때 1일로 만든 인스턴스도 up 재실행으로 맞춘다."""
+    events: list = []
+    rds = FakeRds(events, exists=True)
+    rds.db.update(DBInstanceStatus="available", BackupRetentionPeriod=1, Endpoint={"Address": FakeRds.HOST})
+    sm = FakeSm(events, {platform.SECRET_DATABASE_URL: platform.database_url("pw", FakeRds.HOST)})
+    platform._ensure_db(rds, sm, _SUBNETS, "sg-db")
+    assert events == [("modify_db_instance", platform.DB_BACKUP_DAYS)]
+    # 보존 기간 변경은 옵션 없이도 바로 적용된다 — ApplyImmediately는 대기 중인 다른 변경까지 끌고 온다
+    assert "ApplyImmediately" not in rds.modified
+
+
+# ⑨ 운영 장치 — 오류 알람 ----------------------------------------------------------
+_LB_ARN = "arn:aws:elasticloadbalancing:ap-northeast-2:111122223333:loadbalancer/app/vigilantis-platform-alb/abc"
+_TG_API_ARN = "arn:aws:elasticloadbalancing:ap-northeast-2:111122223333:targetgroup/vigilantis-platform-api/111"
+_TG_WEB_ARN = "arn:aws:elasticloadbalancing:ap-northeast-2:111122223333:targetgroup/vigilantis-platform-web/222"
+_TOPIC = "arn:aws:sns:ap-northeast-2:111122223333:vigilantis-platform-alarms"
+
+
+def _alarms() -> dict[str, dict]:
+    return {a["AlarmName"]: a for a in platform.alarm_definitions(_LB_ARN, _TG_API_ARN, _TG_WEB_ARN, _TOPIC)}
+
+
+def test_every_alarm_notifies_on_trouble_and_on_recovery():
+    alarms = _alarms()
+    assert list(alarms) == list(platform.ALARM_NAMES)
+    for alarm in alarms.values():
+        assert alarm["AlarmActions"] == [_TOPIC] and alarm["OKActions"] == [_TOPIC]
+
+
+def test_down_alarms_outlast_the_gap_every_api_deploy_makes():
+    """api는 겹쳐 뜨지 않게 내린 뒤 띄운다(min 0) — 정상 대상이 DOWN_MINUTES분 내내 0이어야 울린다."""
+    alarms = _alarms()
+    api, web = alarms[f"{platform.PREFIX}-api-down"], alarms[f"{platform.PREFIX}-web-down"]
+    assert api["Dimensions"] == [{"Name": "TargetGroup", "Value": "targetgroup/vigilantis-platform-api/111"},
+                                 {"Name": "LoadBalancer", "Value": "app/vigilantis-platform-alb/abc"}]
+    assert web["Dimensions"][0] == {"Name": "TargetGroup", "Value": "targetgroup/vigilantis-platform-web/222"}
+    for alarm in (api, web):
+        assert (alarm["Statistic"], alarm["Period"], alarm["Threshold"]) == ("Maximum", 60, 1)
+        assert alarm["EvaluationPeriods"] == alarm["DatapointsToAlarm"] == platform.DOWN_MINUTES >= 10
+        assert alarm["TreatMissingData"] == "breaching"  # 지표가 끊긴 것도 내려간 것으로 본다
+
+
+def test_5xx_alarm_stays_quiet_without_traffic():
+    alarm = _alarms()[f"{platform.PREFIX}-api-5xx"]
+    assert alarm["TreatMissingData"] == "notBreaching"
+
+
+def test_5xx_alarm_counts_only_the_api_target_group():
+    """ALB는 api·web이 함께 쓴다 — LoadBalancer만 주면 web의 5xx도 api 장애로 센다."""
+    alarm = _alarms()[f"{platform.PREFIX}-api-5xx"]
+    assert alarm["Dimensions"] == [{"Name": "TargetGroup", "Value": "targetgroup/vigilantis-platform-api/111"},
+                                   {"Name": "LoadBalancer", "Value": "app/vigilantis-platform-alb/abc"}]
+
+
+class FakeCw:
+    def __init__(self, alarms: dict[str, list[dict]]):
+        self.alarms = alarms  # 이름 → 태그
+        self.calls: list[tuple[str, object]] = []
+
+    def describe_alarms(self, AlarmNames):
+        return {"MetricAlarms": [{"AlarmName": n, "AlarmArn": f"arn:aws:cloudwatch:::alarm:{n}", "StateValue": "OK"}
+                                 for n in AlarmNames if n in self.alarms]}
+
+    def list_tags_for_resource(self, ResourceARN):
+        return {"Tags": self.alarms[ResourceARN.rsplit(":", 1)[1]]}
+
+    def put_metric_alarm(self, **kwargs):
+        self.calls.append(("put_metric_alarm", kwargs["AlarmName"]))
+
+    def delete_alarms(self, AlarmNames):
+        self.calls.append(("delete_alarms", tuple(AlarmNames)))
+
+
+class FakeSns:
+    def __init__(self, topic_tags: list[dict] | None = None):
+        self.topic_tags = topic_tags  # None이면 주제가 없다
+        self.calls: list[str] = []
+
+    def get_paginator(self, name):
+        topics = [{"TopicArn": _TOPIC}] if self.topic_tags is not None else []
+        return type("P", (), {"paginate": lambda _self: [{"Topics": topics}]})()
+
+    def list_tags_for_resource(self, ResourceArn):
+        return {"Tags": self.topic_tags}
+
+    def create_topic(self, **kwargs):
+        self.calls.append("create_topic")
+        return {"TopicArn": _TOPIC}
+
+    def list_subscriptions_by_topic(self, TopicArn):
+        return {"Subscriptions": [{"Protocol": "email", "Endpoint": "ops@example.com"}]}
+
+    def subscribe(self, **kwargs):
+        self.calls.append("subscribe")
+
+    def delete_topic(self, TopicArn):
+        self.calls.append("delete_topic")
+
+
+_ALB = {"arn": _LB_ARN, "tg_api": _TG_API_ARN, "tg_web": _TG_WEB_ARN}
+_API_DOWN = f"{platform.PREFIX}-api-down"
+
+
+def test_alarms_of_ours_are_refreshed_on_rerun():
+    cw = FakeCw({n: _PLATFORM_TAGS for n in platform.ALARM_NAMES})
+    sns = FakeSns(_PLATFORM_TAGS)
+    platform._ensure_alarms(cw, sns, _ALB, "ops@example.com")
+    assert [name for _, name in cw.calls] == list(platform.ALARM_NAMES)
+    assert sns.calls == []  # 기존 주제를 그대로 쓴다
+
+
+@pytest.mark.parametrize("alarm_tags, topic_tags, foreign", [
+    ([], _PLATFORM_TAGS, _API_DOWN),  # 같은 이름의 남의 알람
+    (_PLATFORM_TAGS, [], platform.ALARM_TOPIC),  # 같은 이름의 남의 알림 주제
+])
+def test_same_named_alarm_or_topic_of_someone_else_stops_before_any_write(alarm_tags, topic_tags, foreign):
+    cw, sns = FakeCw({_API_DOWN: alarm_tags}), FakeSns(topic_tags)
+    with pytest.raises(SystemExit, match=foreign):
+        platform._ensure_alarms(cw, sns, _ALB, "ops@example.com")
+    assert cw.calls == [] and sns.calls == []  # 덮어쓰지도, 주제를 새로 만들지도 않았다
+
+
+def test_down_deletes_only_platform_tagged_alarms_and_topic():
+    other = f"{platform.PREFIX}-web-down"
+    cw = FakeCw({_API_DOWN: _PLATFORM_TAGS, other: [{"Key": "owner", "Value": "someone-else"}]})
+    sns = FakeSns([])  # 이름만 같은 남의 주제 — 지우면 구독까지 함께 사라진다
+    platform._delete_alarms(cw, sns)
+    assert cw.calls == [("delete_alarms", (_API_DOWN,))]
+    assert sns.calls == []
+
+
+def test_up_stops_before_creating_anything_when_a_same_named_alarm_is_not_ours():
+    ec2 = RecordingEc2(smoke_vpc="vpc-smoke")
+    c = {"iam": FakeIam(policies=[_SMOKE_POLICY]), "ec2": ec2, "cw": FakeCw({_API_DOWN: []}), "sns": FakeSns()}
+    with pytest.raises(SystemExit, match=_API_DOWN):
+        platform.up(c, ACCOUNT, "ap-northeast-2", ["203.0.113.7/32"])
+    assert ec2.calls == ["describe_vpcs"]  # VPC·NAT·RDS 어느 것도 만들지 않았다
+
+
+# ⑧ 계정 분리(T-8) ----------------------------------------------------------------
+CUSTOMER = "444455556666"
+_CUSTOMER_SMOKE_POLICY = f"arn:aws:iam::{CUSTOMER}:policy/{platform.SMOKE_POLICY_NAME}"
+_CUSTOMER_TAG = [{"Key": platform.CUSTOMER_TAG_KEY, "Value": ACCOUNT}]
+
+
+def test_split_accounts_put_only_the_access_role_in_the_customer_account():
+    plat, cust = FakeIam(), FakeIam(account=CUSTOMER)
+    roles = platform._ensure_roles(plat, ACCOUNT, ["arn:secret"], "ext-1", {"iam": cust, "account": CUSTOMER})
+
+    assert set(plat.roles) == {platform.ROLE_EXEC, platform.ROLE_TASK}
+    assert set(cust.roles) == {platform.ROLE_ACCESS}
+    assert roles["access"] == f"arn:aws:iam::{CUSTOMER}:role/{platform.ROLE_ACCESS}"
+    # 태스크 역할은 고객 계정의 접근 역할 하나로만 갈아탄다
+    (allowed,) = plat.inline[(platform.ROLE_TASK, "assume-access-role")]["Statement"]
+    assert allowed["Resource"] == f"arn:aws:iam::{CUSTOMER}:role/{platform.ROLE_ACCESS}"
+    # 접근 역할은 플랫폼 계정의 태스크 역할만, ExternalId가 맞을 때만 받는다
+    (trusted,) = cust.trust[platform.ROLE_ACCESS]["Statement"]
+    assert trusted["Principal"] == {"AWS": f"arn:aws:iam::{ACCOUNT}:role/{platform.ROLE_TASK}"}
+    assert trusted["Condition"] == {"StringEquals": {"sts:ExternalId": "ext-1"}}
+    # 권한은 고객 계정의 스모크 거울 정책이고, 고객 태그가 이 플랫폼 계정을 가리킨다
+    assert cust.attached == [(platform.ROLE_ACCESS, _CUSTOMER_SMOKE_POLICY)]
+    assert cust.roles[platform.ROLE_ACCESS]["Tags"] == _CUSTOMER_TAG
+
+
+def test_old_platform_access_role_is_taken_over_and_survives_the_old_platform_down():
+    cust = FakeIam(account=CUSTOMER, roles={platform.ROLE_ACCESS: _PLATFORM_TAGS})
+    trust = platform.access_trust_policy(ACCOUNT, "ext-1")
+    platform._ensure_customer_access_role(cust, ACCOUNT, trust)
+
+    # 고객 태그를 먼저 단다 — 신뢰 정책을 바꾼 뒤 끊겨도 다음 실행이 이 역할을 알아본다
+    assert [name for name, _ in cust.calls] == ["tag_role", "update_assume_role_policy", "untag_role"]
+    assert cust.trust[platform.ROLE_ACCESS] == trust
+    assert cust.roles[platform.ROLE_ACCESS]["Tags"] == _CUSTOMER_TAG
+    # 학원 계정에서 옛 플랫폼을 단일 계정 모드로 down해도 넘겨받은 역할은 남는다
+    platform._delete_roles(cust, CUSTOMER)
+    assert platform.ROLE_ACCESS in cust.roles
+
+
+def test_interrupted_takeover_is_finished_on_rerun():
+    cust = FakeIam(account=CUSTOMER, roles={platform.ROLE_ACCESS: _PLATFORM_TAGS + _CUSTOMER_TAG})
+    platform._ensure_customer_access_role(cust, ACCOUNT, {"Statement": []})
+    assert [name for name, _ in cust.calls] == ["update_assume_role_policy", "untag_role"]
+    assert cust.roles[platform.ROLE_ACCESS]["Tags"] == _CUSTOMER_TAG
+
+
+def test_old_platform_down_spares_a_half_taken_over_access_role():
+    """넘겨받기가 플랫폼 태그를 떼기 전에 끊기면 두 태그가 함께 남는다 — 이미 새 플랫폼이 쓰는 역할이다."""
+    cust = FakeIam(account=CUSTOMER, roles={platform.ROLE_ACCESS: _PLATFORM_TAGS + _CUSTOMER_TAG})
+    platform._delete_roles(cust, CUSTOMER)
+    assert platform.ROLE_ACCESS in cust.roles
+    assert cust.calls == []  # 정책 분리도 하지 않았다
+
+
+@pytest.mark.parametrize("tags, reason", [
+    ([{"Key": "owner", "Value": "someone-else"}], "고객 태그"),
+    ([{"Key": platform.CUSTOMER_TAG_KEY, "Value": "999999999999"}], "999999999999"),
+])
+def test_customer_role_of_someone_else_is_not_overwritten(tags, reason):
+    cust = FakeIam(account=CUSTOMER, roles={platform.ROLE_ACCESS: tags})
+    with pytest.raises(SystemExit, match=reason):
+        platform._ensure_customer_access_role(cust, ACCOUNT, {"Statement": []})
+    assert cust.calls == []
+
+
+@pytest.mark.parametrize("customer_policies, customer_vpc, missing", [
+    ([], "vpc-smoke", platform.SMOKE_POLICY_NAME),
+    ([_CUSTOMER_SMOKE_POLICY], None, "스모크 VPC"),
+])
+def test_split_up_looks_for_the_smoke_environment_in_the_customer_account(customer_policies, customer_vpc, missing):
+    """플랫폼 계정에 같은 이름의 정책·VPC가 있어도 그것으로 통과하지 않는다."""
+    plat_ec2, cust_ec2 = RecordingEc2(smoke_vpc="vpc-in-platform"), RecordingEc2(smoke_vpc=customer_vpc)
+    c = {"iam": FakeIam(policies=[_SMOKE_POLICY]), "ec2": plat_ec2,
+         "customer": {"iam": FakeIam(account=CUSTOMER, policies=customer_policies), "ec2": cust_ec2,
+                      "account": CUSTOMER}}
+    with pytest.raises(SystemExit, match=missing):
+        platform.up(c, ACCOUNT, "ap-northeast-2", ["203.0.113.7/32"])
+    assert plat_ec2.calls == []  # 플랫폼 계정에는 아무것도 묻거나 만들지 않았다
+
+
+def test_customer_account_needs_its_profile(monkeypatch):
+    _fake_main(monkeypatch, ["status", "--account", ACCOUNT, "--customer-account", CUSTOMER], {})
+    with pytest.raises(SystemExit, match="함께 준다"):
+        platform.main()
+
+
+def test_customer_account_must_differ_from_the_platform_account(monkeypatch):
+    _fake_main(monkeypatch, ["status", "--account", ACCOUNT, "--customer-account", ACCOUNT,
+                             "--customer-profile", "p"], {})
+    with pytest.raises(SystemExit, match="같다"):
+        platform.main()
+
+
+def test_customer_profile_must_belong_to_the_customer_account(monkeypatch):
+    class _Sts:
+        def get_caller_identity(self):
+            return {"Account": "999999999999", "Arn": "arn:aws:iam::999999999999:user/x"}
+
+    class _Session:
+        def __init__(self, profile_name, region_name):
+            pass
+
+        def client(self, name, config=None):
+            assert name == "sts"  # 계정을 대조하기 전에는 다른 클라이언트를 만들지 않는다
+            return _Sts()
+
+    monkeypatch.setattr(platform.boto3, "Session", _Session)
+    with pytest.raises(SystemExit, match="--customer-profile"):
+        platform._customer_clients("customer-admin", CUSTOMER, "ap-northeast-2")
