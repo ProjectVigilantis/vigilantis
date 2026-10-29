@@ -19,7 +19,7 @@ from enum import Enum
 
 from schemas.api.actions import ExecutionStatus
 from schemas.api.assets import AssetType, RelationType
-from schemas.api.auth import UserRole
+from schemas.api.auth import AccountType, UserRole
 from schemas.api.incidents import (
     IncidentCategory,
     IncidentStatus,
@@ -1263,9 +1263,13 @@ class AppUser(Base):
         DateTime(timezone=True), nullable=True
     )
     role: Mapped[UserRole] = mapped_column(_enum(UserRole, "app_user_role"))
-    # 소속 고객사(Post-MVP T-4 · #495). 한 사용자는 테넌트 하나에 속한다. **NULL = 소속 없음이고, 권한이
-    # 아니다** — 플랫폼 운영자 여부 같은 권한 해석은 T-1(#492)이 따로 구분한다. NULL 을 곧바로 「모든 고객을
-    # 보는 사람」으로 읽지 않는다(PR #506 리뷰). 소속을 API 로 옮기지 않는다 — 옮기면 그 사람이 남의 기록을 본다.
+    # 계정 종류 — 플랫폼 권한의 유일한 원천이다(role 은 계정 안의 역할일 뿐). ORM·서버 기본값이 없다:
+    # 호출부가 반드시 정해야 하고, 빠뜨린 쓰기는 NOT NULL 이 거절한다. PLATFORM 의 role=ADMIN 은 호환 값이다.
+    account_type: Mapped[AccountType] = mapped_column(
+        _enum(AccountType, "app_user_account_type")
+    )
+    # 소속 고객사(Post-MVP T-4 · #495). TENANT 계정만 값을 갖고(CHECK), PLATFORM·UNASSIGNED 는 NULL 이다.
+    # NULL 자체는 권한이 아니다 — 권한은 account_type 이 정한다. 소속을 API 로 옮기지 않는다.
     tenant_id: Mapped[str | None] = _tenant_fk()
     status: Mapped[AppUserStatus] = mapped_column(
         _enum(AppUserStatus, "app_user_status"), default=AppUserStatus.ACTIVE
@@ -1277,7 +1281,17 @@ class AppUser(Base):
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
     )
 
-    __table_args__ = (UniqueConstraint("issuer", "cognito_sub"),)
+    __table_args__ = (
+        UniqueConstraint("issuer", "cognito_sub"),
+        CheckConstraint(
+            "(account_type = 'TENANT') = (tenant_id IS NOT NULL)",
+            name="tenant_binding_by_account_type",
+        ),
+        CheckConstraint(
+            "account_type <> 'PLATFORM' OR role = 'ADMIN'",
+            name="platform_role_is_admin",
+        ),
+    )
 
 
 class AuthSession(Base):

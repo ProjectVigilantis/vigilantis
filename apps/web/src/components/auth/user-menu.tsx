@@ -1,16 +1,19 @@
 'use client';
 
 // GNB 우측 현재 사용자 · 로그아웃(#492 PR 1). 세션 값과 유휴 연장은 SessionProvider가 들고 있다(PR 2) —
-// 로그인돼 있으면 이메일과 [로그아웃], 세션이 없으면 [로그인] 링크(미인증 이동은 API 계층이 이미 건다).
+// 로그인돼 있으면 이메일(누르면 계정 정보)과 [로그아웃], 세션이 없으면 [로그인] 링크(미인증 이동은 API 계층이 이미 건다).
 
 import { LogOut } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 
 import { useSession } from '@/components/auth/session-provider';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
+import { accountFields } from '@/lib/account-summary';
 import { ApiError, logout } from '@/lib/api/client';
+import { cn } from '@/lib/utils';
 
 const isUnauthorized = (error: unknown) => error instanceof ApiError && error.httpStatus === 401;
 
@@ -44,13 +47,35 @@ export function UserMenu() {
 
   return (
     <div className="flex min-w-0 items-center gap-2">
-      {/* 좁은 화면(< sm)에서는 이메일 폭을 고정하고 줄인다 — 줄어드는 몫은 내비가 가로 스크롤로 받는다. */}
-      <span
-        className="text-muted-foreground max-w-20 shrink-0 truncate text-xs sm:max-w-64 sm:min-w-0 sm:shrink"
-        title={me.user.email}
-      >
-        {me.user.email}
-      </span>
+      {/* 이메일을 누르면 현재 계정 정보(`/me` 값만)를 연다. 좁은 화면(< sm)에서는 이메일 폭을 고정하고 줄인다 —
+          줄어드는 몫은 내비가 가로 스크롤로 받는다. */}
+      <Dialog>
+        <DialogTrigger asChild>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="text-muted-foreground max-w-20 px-1.5 text-xs font-normal sm:max-w-64 sm:min-w-0 sm:shrink"
+            title={me.user.email}
+            aria-label={`계정 정보: ${me.user.email}`}
+          >
+            <span className="min-w-0 truncate">{me.user.email}</span>
+          </Button>
+        </DialogTrigger>
+        <DialogContent aria-describedby={undefined}>
+          <DialogHeader>
+            <DialogTitle>계정 정보</DialogTitle>
+          </DialogHeader>
+          <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-sm">
+            {accountFields(me.user).map(({ label, value, mono }) => (
+              <Fragment key={label}>
+                <dt className="text-muted-foreground">{label}</dt>
+                <dd className={cn('font-medium wrap-anywhere', mono && 'font-mono text-xs')}>{value}</dd>
+              </Fragment>
+            ))}
+          </dl>
+        </DialogContent>
+      </Dialog>
       <Button
         type="button"
         size="sm"

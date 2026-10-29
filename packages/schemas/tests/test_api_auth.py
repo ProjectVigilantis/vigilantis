@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 from schemas.api.auth import (
+    AccountType,
     CodeRequest,
     CurrentUserResponse,
     LoginRequest,
@@ -162,6 +163,45 @@ def test_current_user_response_roundtrip():
         "user_id": "1f0c2c1e-0000-4000-8000-000000000001",
         "email": "user@example.com",
         "role": "VIEWER",
+        "account_type": "TENANT",
+        "tenant_id": "1f0c2c1e-0000-4000-8000-000000000002",
         "session": _session(-470),
     })
     assert CurrentUserResponse.model_validate_json(resp.model_dump_json()) == resp
+
+
+def test_account_types_match_explicit_access_contract():
+    assert {kind.value for kind in AccountType} == {"PLATFORM", "TENANT", "UNASSIGNED"}
+
+
+@pytest.mark.parametrize("account_type,tenant_id", [
+    ("PLATFORM", None),
+    ("TENANT", "1f0c2c1e-0000-4000-8000-000000000002"),
+])
+def test_current_user_serializes_assigned_scope(account_type, tenant_id):
+    response = CurrentUserResponse.model_validate({
+        "user_id": "1f0c2c1e-0000-4000-8000-000000000001",
+        "email": "user@example.com", "role": "ADMIN",
+        "account_type": account_type, "tenant_id": tenant_id,
+        "session": _session(-470),
+    })
+    payload = response.model_dump(mode="json")
+    assert payload["account_type"] == account_type
+    assert payload["tenant_id"] == tenant_id
+
+
+@pytest.mark.parametrize("scope", [
+    {},
+    {"account_type": "PLATFORM"},
+    {"account_type": "PLATFORM", "tenant_id": "1f0c2c1e-0000-4000-8000-000000000002"},
+    {"account_type": "TENANT", "tenant_id": None},
+    {"account_type": "TENANT", "tenant_id": "not-a-uuid"},
+    {"account_type": "UNASSIGNED", "tenant_id": None},
+])
+def test_current_user_rejects_missing_or_inconsistent_scope(scope):
+    with pytest.raises(ValidationError):
+        CurrentUserResponse.model_validate({
+            "user_id": "1f0c2c1e-0000-4000-8000-000000000001",
+            "email": "user@example.com", "role": "ADMIN",
+            "session": _session(-470), **scope,
+        })

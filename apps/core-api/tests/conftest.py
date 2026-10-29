@@ -11,9 +11,10 @@
 #     라우터에는 get_db 의존성 재정의로 테스트 세션을 주입한다. 테스트 종료 시
 #     외부 트랜잭션을 rollback해 전부 되돌린다 — 세션이 create_savepoint 모드라
 #     테스트 중의 commit·rollback이 외부 트랜잭션을 건드리지 않는다 (Issue #232).
-#   - /api/v1/* 접근 보호(#492 PR 2): client_pg는 OPERATOR 세션 쿠키·허용 Origin을 기본으로
-#     싣는다. 세션 없는 클라이언트는 client_pg_anon, 다른 역할은 login_as(role).
-#     WebSocket은 ws_client(commit된 세션 + 세션 확인 팩토리 재정의).
+#   - /api/v1/* 접근 보호(#492 PR 2): client_pg는 PLATFORM ADMIN 세션 쿠키·허용 Origin을 기본으로
+#     싣는다(업무 라우터는 임시로 플랫폼 계정만 받는다 — #492). 세션 없는 클라이언트는 client_pg_anon,
+#     다른 계정은 login_as(role, tenant_id=...). 고객사(TENANT) 계정은 make_tenant 로 만든 실제
+#     테넌트 행에 묶는다. WebSocket은 ws_client(commit된 세션 + 세션 확인 팩토리 재정의).
 #   - 앱 기동 시 실행 스캔 잡은 끈다(DISPATCH_ENABLED=false) — 테스트마다 스캔이
 #     돌면 lru_cache된 세션 팩토리가 개발 DB로 굳은 채 그쪽을 스캔할 수 있다.
 # ==============================================================================
@@ -179,8 +180,11 @@ def db(pg_engine):
 # ==============================================================================
 # 인증 시드 · 통합 클라이언트 (#492 PR 2)
 #
-#   /api/v1/* 는 세션이 있어야 열린다. client_pg 는 기본으로 OPERATOR 실세션(테스트 DB의
-#   app_users · auth_sessions 행)과 허용 Origin 을 싣는다 — 기존 API 테스트의 뜻이 그대로다.
+#   /api/v1/* 는 세션이 있어야 열린다. client_pg 는 기본으로 PLATFORM ADMIN 실세션(테스트 DB의
+#   app_users · auth_sessions 행)과 허용 Origin 을 싣는다 — 업무 라우터의 양성 테스트가 임시 관문
+#   (플랫폼 계정만)을 지난다. PLATFORM 의 역할은 ADMIN 고정이라(DB CHECK) OPERATOR · VIEWER 는
+#   고객사(TENANT) 계정으로만 만든다 — make_auth_session(role, tenant_id=make_tenant()).
+#   tenant_id 없이 ADMIN 밖의 역할을 주면 DB CHECK 가 시드 자체를 거절한다(계정 종류를 추론하지 않는다).
 #   쿠키는 Cookie 헤더로 직접 싣는다. 세션 쿠키가 Secure 라 httpx 쿠키 저장소는 http 로 보내지 않는다.
 #   세션 토큰은 헤더로만 쓴다 — assert 메시지 · 출력에 싣지 않는다(AuthSeed repr 에서도 뺀다).
 # ==============================================================================
@@ -195,13 +199,46 @@ class AuthSeed:
     user_id: str
     session_id: str
     role: object
+    account_type: object
+    tenant_id: str | None
     token: str = field(repr=False)
     cookie: str = field(repr=False)  # "__Host-vg_session=<token>"
     headers: dict = field(repr=False)  # Cookie + 허용 Origin
 
 
-def _seed_auth_session(session, *, role, origin, status=None, now=None) -> AuthSeed:
-    """사용자 + 세션을 만들고 commit한다. 만료는 auth 설정의 한도를 그대로 쓴다."""
+def _seed_tenant(session, status=None, *, now=None) -> str:
+    """실제 테넌트 행 1개를 저장소 전이로 만들고 commit한다 → tenant_id.
+
+    PENDING_CONNECTION → (연결 확인 OK) ACTIVE → (정지) SUSPENDED 를 계약 그대로 밟는다.
+    """
+    from datetime import UTC, datetime
+
+    from db.repositories import tenants as tenants_repo
+    from schemas.api.tenants import TenantStatus, TenantVerificationResult
+
+    status = status or TenantStatus.ACTIVE
+    now = now or datetime.now(UTC)
+    account = f"{uuid.uuid4().int % 10**12:012d}"
+    tenant = tenants_repo.create_tenant(
+        session, name=f"tenant-{account}", aws_account_id=account, regions=["ap-northeast-2"], now=now
+    )
+    if status is not TenantStatus.PENDING_CONNECTION:
+        assert tenants_repo.record_verification(
+            session, tenant.tenant_id, result=TenantVerificationResult.OK, reason_code=None, now=now
+        )
+    if status is TenantStatus.SUSPENDED:
+        assert tenants_repo.suspend_tenant(session, tenant.tenant_id, reason="테스트 정지", now=now)
+    session.commit()
+    return tenant.tenant_id
+
+
+def _seed_auth_session(
+    session, *, role, origin, tenant_id=None, account_type=None, status=None, now=None
+) -> AuthSeed:
+    """사용자 + 세션을 만들고 commit한다. 만료는 auth 설정의 한도를 그대로 쓴다.
+
+    계정 종류: tenant_id 를 주면 TENANT, 아니면 account_type(기본 PLATFORM — UNASSIGNED 도 고를 수 있다).
+    """
     from datetime import UTC, datetime
 
     from auth import sessions as auth_sessions
@@ -209,7 +246,12 @@ def _seed_auth_session(session, *, role, origin, status=None, now=None) -> AuthS
     from config import get_auth_settings
     from db import models
     from db.repositories import auth as auth_repo
+    from schemas.api.auth import AccountType
 
+    if tenant_id is not None:
+        assert account_type in (None, AccountType.TENANT), account_type
+        account_type = AccountType.TENANT
+    account_type = account_type or AccountType.PLATFORM
     settings = get_auth_settings()
     now = now or datetime.now(UTC)
     suffix = uuid.uuid4().hex
@@ -219,6 +261,8 @@ def _seed_auth_session(session, *, role, origin, status=None, now=None) -> AuthS
         cognito_sub=f"test-{suffix}",
         email=f"{role.value.lower()}-{suffix[:8]}@example.com",
         role=role,
+        account_type=account_type,
+        tenant_id=tenant_id,
         now=now,
         status=status or models.AppUserStatus.ACTIVE,
         email_verified_at=now,
@@ -237,6 +281,8 @@ def _seed_auth_session(session, *, role, origin, status=None, now=None) -> AuthS
         user_id=user.user_id,
         session_id=issued.view.session_id,
         role=role,
+        account_type=account_type,
+        tenant_id=tenant_id,
         token=issued.token,
         cookie=cookie,
         headers={"Cookie": cookie, "Origin": origin},
@@ -253,19 +299,39 @@ def allowed_origin() -> str:
 
 
 @pytest.fixture()
+def make_tenant(db):
+    """테스트 트랜잭션(db) 안의 실제 테넌트 → tenant_id. 상태 기본은 ACTIVE."""
+
+    def _make(status=None, **kwargs) -> str:
+        return _seed_tenant(db, status, **kwargs)
+
+    return _make
+
+
+@pytest.fixture()
+def seed_tenant():
+    """임의 세션(격리 DB 등)에 실제 테넌트를 만드는 함수 — _seed_tenant(session, status) 그대로."""
+    return _seed_tenant
+
+
+@pytest.fixture()
 def make_auth_session(db, allowed_origin):
-    """테스트 트랜잭션(db) 안의 인증 시드 → AuthSeed. role · status · now 를 고를 수 있다."""
+    """테스트 트랜잭션(db) 안의 인증 시드 → AuthSeed.
+
+    기본은 PLATFORM ADMIN. 고객사 계정은 tenant_id=make_tenant(...) 로, 미지정 계정은
+    account_type=AccountType.UNASSIGNED 로 만든다. status · now 도 고를 수 있다.
+    """
     from schemas.api.auth import UserRole
 
-    def _make(role=UserRole.OPERATOR, **kwargs) -> AuthSeed:
+    def _make(role=UserRole.ADMIN, **kwargs) -> AuthSeed:
         return _seed_auth_session(db, role=role, origin=allowed_origin, **kwargs)
 
     return _make
 
 
 @pytest.fixture()
-def operator_session(make_auth_session) -> AuthSeed:
-    """client_pg 가 기본으로 싣는 OPERATOR 세션."""
+def platform_session(make_auth_session) -> AuthSeed:
+    """client_pg 가 기본으로 싣는 PLATFORM ADMIN 세션."""
     return make_auth_session()
 
 
@@ -292,17 +358,17 @@ def client_pg_anon(pg_engine, db):
 
 
 @pytest.fixture()
-def client_pg(pg_engine, db, operator_session):
-    """통합 클라이언트 — get_db 재정의 + OPERATOR 세션 쿠키 · 허용 Origin 기본 헤더."""
+def client_pg(pg_engine, db, platform_session):
+    """통합 클라이언트 — get_db 재정의 + PLATFORM ADMIN 세션 쿠키 · 허용 Origin 기본 헤더."""
     from fastapi.testclient import TestClient
 
-    with TestClient(_pg_app(db), headers=operator_session.headers) as test_client:
+    with TestClient(_pg_app(db), headers=platform_session.headers) as test_client:
         yield test_client
 
 
 @pytest.fixture()
 def login_as(client_pg, make_auth_session):
-    """client_pg 의 세션을 주어진 역할의 새 세션으로 바꾼다 → AuthSeed."""
+    """client_pg 의 세션을 주어진 계정의 새 세션으로 바꾼다(인자는 make_auth_session 과 같다) → AuthSeed."""
 
     def _login(role, **kwargs) -> AuthSeed:
         seed = make_auth_session(role, **kwargs)
@@ -323,30 +389,41 @@ class CommittedAuth:
         self.sessions = sessions
         self._origin = origin
         self._user_ids: list[str] = []
+        self._tenant_ids: list[str] = []
 
     def make(self, role=None, **kwargs) -> AuthSeed:
+        """기본은 PLATFORM ADMIN — 인자는 make_auth_session 과 같다."""
         from schemas.api.auth import UserRole
 
         with self.sessions() as session:
             seed = _seed_auth_session(
-                session, role=role or UserRole.OPERATOR, origin=self._origin, **kwargs
+                session, role=role or UserRole.ADMIN, origin=self._origin, **kwargs
             )
         self._user_ids.append(seed.user_id)
         return seed
+
+    def make_tenant(self, status=None, **kwargs) -> str:
+        with self.sessions() as session:
+            tenant_id = _seed_tenant(session, status, **kwargs)
+        self._tenant_ids.append(tenant_id)
+        return tenant_id
 
     def cleanup(self) -> None:
         from db import models
         from sqlalchemy import delete
 
-        if not self._user_ids:
-            return
         with self.sessions() as session:
-            session.execute(
-                delete(models.AuthSession).where(models.AuthSession.user_id.in_(self._user_ids))
-            )
-            session.execute(
-                delete(models.AppUser).where(models.AppUser.user_id.in_(self._user_ids))
-            )
+            if self._user_ids:
+                session.execute(
+                    delete(models.AuthSession).where(models.AuthSession.user_id.in_(self._user_ids))
+                )
+                session.execute(
+                    delete(models.AppUser).where(models.AppUser.user_id.in_(self._user_ids))
+                )
+            if self._tenant_ids:
+                session.execute(
+                    delete(models.Tenant).where(models.Tenant.tenant_id.in_(self._tenant_ids))
+                )
             session.commit()
 
 
@@ -363,7 +440,7 @@ def committed_auth(pg_engine, allowed_origin):
 
 @pytest.fixture()
 def ws_session(committed_auth) -> AuthSeed:
-    """ws_client 가 싣는 OPERATOR 세션(commit됨)."""
+    """ws_client 가 싣는 PLATFORM ADMIN 세션(commit됨) — 전역 WebSocket 은 임시로 플랫폼 계정만 받는다."""
     return committed_auth.make()
 
 

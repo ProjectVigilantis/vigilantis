@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 
 from config import get_settings
 from db import models
-from schemas.api.auth import UserRole
+from schemas.api.auth import AccountType, UserRole
 from schemas.api.incidents import IncidentCategory
 from schemas.api.tenants import TenantStatus, TenantVerificationResult
 
@@ -200,7 +200,8 @@ def test_account_and_external_id_are_unique(db, column, value):
 
 def _user(**over) -> models.AppUser:
     values = dict(issuer="https://cognito-idp.ap-northeast-2.amazonaws.com/pool",
-                  cognito_sub="sub-1", email="a@example.com", role=UserRole.VIEWER)
+                  cognito_sub="sub-1", email="a@example.com", role=UserRole.VIEWER,
+                  account_type=AccountType.UNASSIGNED)
     values.update(over)
     return models.AppUser(**values)
 
@@ -209,15 +210,16 @@ def test_user_belongs_to_at_most_one_tenant(db):
     tenant = _tenant()
     db.add(tenant)
     db.flush()
-    member = _user(tenant_id=tenant.tenant_id)
-    unassigned = _user(cognito_sub="sub-2")  # 소속 없음 — 권한 해석은 T-1 몫이다
+    member = _user(tenant_id=tenant.tenant_id, account_type=AccountType.TENANT)
+    unassigned = _user(cognito_sub="sub-2")  # 소속 없음 — 권한 해석은 account_type 몫이다
     db.add_all([member, unassigned])
     db.flush()
     assert member.tenant_id == tenant.tenant_id and unassigned.tenant_id is None
 
 
 def test_user_pointing_at_an_unknown_tenant_is_rejected(db):
-    db.add(_user(tenant_id="00000000-0000-0000-0000-000000000000"))
+    db.add(_user(tenant_id="00000000-0000-0000-0000-000000000000",
+                 account_type=AccountType.TENANT))
     with pytest.raises(IntegrityError):
         db.flush()
 
@@ -228,7 +230,7 @@ def test_tenant_with_users_cannot_be_deleted(db):
     tenant = _tenant()
     db.add(tenant)
     db.flush()
-    db.add(_user(tenant_id=tenant.tenant_id))
+    db.add(_user(tenant_id=tenant.tenant_id, account_type=AccountType.TENANT))
     db.flush()
     db.delete(tenant)
     with pytest.raises(IntegrityError):
@@ -247,6 +249,7 @@ def test_existing_users_stay_unassigned_after_upgrade(pg_engine, migration_confi
         with Session(pg_engine) as session:
             stored = session.get(models.AppUser, user_id)
             assert stored is not None and stored.tenant_id is None
+            assert stored.account_type is AccountType.UNASSIGNED
     finally:
         command.upgrade(migration_config, "head")
         with Session(pg_engine) as session:

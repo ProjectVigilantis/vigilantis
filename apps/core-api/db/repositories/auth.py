@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from schemas.api.auth import UserRole
+from schemas.api.auth import AccountType, UserRole
 from schemas.api.users import UserEventAction, UserEventState
 from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import Session
@@ -41,28 +41,39 @@ def get_user(db: Session, user_id: str) -> models.AppUser | None:
 
 
 def list_users_with_last_login(
-    db: Session,
+    db: Session, *, tenant_id: str | None
 ) -> list[tuple[models.AppUser, datetime | None]]:
-    """전체 사용자 + 마지막 로그인 = 세션 created_at 최댓값(폐기·만료 세션 포함)."""
+    """고객(TENANT) 계정 + 마지막 로그인 = 세션 created_at 최댓값(폐기·만료 세션 포함).
+
+    tenant_id 가 있으면 그 테넌트만, None 이면 모든 고객 테넌트. PLATFORM·UNASSIGNED 는 나오지 않는다.
+    """
     last_login = func.max(models.AuthSession.created_at)
-    rows = db.execute(
+    query = (
         select(models.AppUser, last_login)
         .outerjoin(
             models.AuthSession, models.AuthSession.user_id == models.AppUser.user_id
         )
-        .group_by(models.AppUser.user_id)
+        .where(models.AppUser.account_type == AccountType.TENANT)
+    )
+    if tenant_id is not None:
+        query = query.where(models.AppUser.tenant_id == tenant_id)
+    rows = db.execute(
+        query.group_by(models.AppUser.user_id)
         .order_by(models.AppUser.created_at, models.AppUser.user_id)
         .execution_options(populate_existing=True)
     ).all()
     return [(user, login) for user, login in rows]
 
 
-def count_active_admins(db: Session) -> int:
+def count_active_admins(db: Session, *, tenant_id: str) -> int:
+    """그 테넌트 안의 ACTIVE TENANT ADMIN 수."""
     return (
         db.scalar(
             select(func.count())
             .select_from(models.AppUser)
             .where(
+                models.AppUser.account_type == AccountType.TENANT,
+                models.AppUser.tenant_id == tenant_id,
                 models.AppUser.role == UserRole.ADMIN,
                 models.AppUser.status == models.AppUserStatus.ACTIVE,
             )
@@ -87,16 +98,20 @@ def create_user(
     cognito_sub: str,
     email: str,
     role: UserRole,
+    account_type: AccountType,
+    tenant_id: str | None,
     now: datetime,
     status: models.AppUserStatus = models.AppUserStatus.ACTIVE,
     email_verified_at: datetime | None = None,
 ) -> models.AppUser:
-    """새 사용자 1건. (issuer, sub) 중복은 DB 유니크가 flush에서 거절한다."""
+    """새 사용자 1건. (issuer, sub) 중복·account_type↔tenant_id 불일치는 DB가 flush에서 거절한다."""
     row = models.AppUser(
         issuer=issuer,
         cognito_sub=cognito_sub,
         email=email,
         role=role,
+        account_type=account_type,
+        tenant_id=tenant_id,
         status=status,
         email_verified_at=email_verified_at,
         created_at=now,

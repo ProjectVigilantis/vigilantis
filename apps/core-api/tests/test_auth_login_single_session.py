@@ -13,7 +13,8 @@ from auth import service, sessions
 from auth.login_flow import MfaStep, VerifiedIdentity
 from db import models
 from db.repositories import auth as auth_repo
-from schemas.api.auth import UserRole
+from schemas.api.auth import AccountType, UserRole
+from schemas.api.tenants import TenantStatus
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -61,17 +62,28 @@ def _reasons(db, user_id):
     ).scalars().all()
 
 
-@pytest.fixture()
-def user(db):
+def _tenant_viewer(db, sub, tenant_id):
     return auth_repo.create_user(
         db,
         issuer=ISSUER,
-        cognito_sub="s1",
-        email="s1@example.com",
+        cognito_sub=sub,
+        email=f"{sub}@example.com",
         role=UserRole.VIEWER,
+        account_type=AccountType.TENANT,
+        tenant_id=tenant_id,
         now=T0,
         email_verified_at=T0,
     )
+
+
+@pytest.fixture()
+def tenant_id(make_tenant):
+    return make_tenant()
+
+
+@pytest.fixture()
+def user(db, tenant_id):
+    return _tenant_viewer(db, "s1", tenant_id)
 
 
 def test_second_login_from_another_browser_supersedes_the_first(db, user):
@@ -82,16 +94,8 @@ def test_second_login_from_another_browser_supersedes_the_first(db, user):
     assert sorted(r or "" for r in _reasons(db, user.user_id)) == ["", "SUPERSEDED"]
 
 
-def test_previous_cookie_of_a_different_user_is_still_rotated(db, user):
-    other = auth_repo.create_user(
-        db,
-        issuer=ISSUER,
-        cognito_sub="s2",
-        email="s2@example.com",
-        role=UserRole.VIEWER,
-        now=T0,
-        email_verified_at=T0,
-    )
+def test_previous_cookie_of_a_different_user_is_still_rotated(db, user, tenant_id):
+    other = _tenant_viewer(db, "s2", tenant_id)
     other_session = _login(db, "s2")
     mine = _login(db, "s1", previous=other_session.token)
     assert not _alive(db, other_session.token)
@@ -113,6 +117,41 @@ def test_disabled_user_is_rejected_and_nothing_is_changed(db, user):
 def test_unprovisioned_identity_is_rejected(db):
     with pytest.raises(service.AccountNotProvisionedError):
         _login(db, "nobody")
+
+
+def test_unassigned_account_is_not_provisioned_and_nothing_is_changed(db, user):
+    """UNASSIGNED 는 플랫폼 권한도 소속도 없다 — 로그인 완료가 거절되고 기존 세션 · 이메일 기록을 건드리지 않는다."""
+    existing = _login(db, "s1")
+    unassigned = auth_repo.create_user(
+        db, issuer=ISSUER, cognito_sub="u1", email="u1@example.com", role=UserRole.ADMIN,
+        account_type=AccountType.UNASSIGNED, tenant_id=None, now=T0, email_verified_at=None,
+    )
+    db.commit()
+    with pytest.raises(service.AccountNotProvisionedError):
+        _login(db, "u1", previous=existing.token)
+    assert _alive(db, existing.token)
+    assert _reasons(db, unassigned.user_id) == []
+    db.refresh(unassigned)
+    assert unassigned.email_verified_at is None
+
+
+@pytest.mark.parametrize("tenant_status", [TenantStatus.ACTIVE, TenantStatus.SUSPENDED])
+def test_tenant_user_logs_in_regardless_of_tenant_suspension(db, make_tenant, tenant_status):
+    member = _tenant_viewer(db, "t1", make_tenant(tenant_status))
+    issued = _login(db, "t1")
+    current = service.resolve_current_user(
+        db, issued.token, now=T0 + timedelta(minutes=1), idle_seconds=IDLE, touch=False
+    )
+    assert (current.user_id, current.account_type, current.tenant_id, current.tenant_status) == (
+        member.user_id, AccountType.TENANT, member.tenant_id, tenant_status,
+    )
+
+
+def test_disabled_user_of_suspended_tenant_is_still_disabled(db, make_tenant):
+    member = _tenant_viewer(db, "t2", make_tenant(TenantStatus.SUSPENDED))
+    auth_repo.set_status(db, user_id=member.user_id, status=models.AppUserStatus.DISABLED, now=T0)
+    with pytest.raises(service.AccountDisabledError):
+        _login(db, "t2")
 
 
 def test_revoke_user_sessions_facade_revokes_all_for_user_only(db, user):
@@ -140,7 +179,9 @@ def committed_user(pg_engine):
             issuer=ISSUER,
             cognito_sub=sub,
             email=f"{sub}@example.com",
-            role=UserRole.VIEWER,
+            role=UserRole.ADMIN,
+            account_type=AccountType.PLATFORM,
+            tenant_id=None,
             now=T0,
             email_verified_at=T0,
         )

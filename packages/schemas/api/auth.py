@@ -30,7 +30,8 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Annotated
+from typing import Annotated, Literal
+from uuid import UUID
 
 from pydantic import (
     BaseModel,
@@ -68,6 +69,29 @@ class LoginStep(str, Enum):
     EMAIL_VERIFICATION_REQUIRED = "EMAIL_VERIFICATION_REQUIRED"
     #: 세션 쿠키가 발급됐다. 로그인 진행 쿠키는 지워졌다.
     COMPLETED = "COMPLETED"
+
+
+class AccountType(str, Enum):
+    """권한 범위의 명시적 구분. UNASSIGNED는 기존 미소속 행이며 접근 권한이 없다."""
+
+    PLATFORM = "PLATFORM"
+    TENANT = "TENANT"
+    UNASSIGNED = "UNASSIGNED"
+
+
+class AccountScope(BaseModel):
+    """접근 가능한 계정의 소속. NULL 소속만으로 플랫폼 권한을 추론하지 않는다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    account_type: Literal[AccountType.PLATFORM, AccountType.TENANT]
+    tenant_id: UUID | None
+
+    @model_validator(mode="after")
+    def _validate_membership(self):
+        if (self.account_type == AccountType.TENANT) != (self.tenant_id is not None):
+            raise ValueError("TENANT 계정만 tenant_id를 가지며 소속은 필수입니다")
+        return self
 
 
 class UserRole(str, Enum):
@@ -177,7 +201,7 @@ class SessionInfo(BaseModel):
         return self
 
 
-class CurrentUserResponse(BaseModel):
+class CurrentUserResponse(AccountScope):
     """GET /api/v1/auth/me — 로그인한 사용자와 세션 만료 시각."""
 
     model_config = ConfigDict(extra="forbid")

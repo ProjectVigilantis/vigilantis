@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from enum import Enum
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from .assets import UtcDateTime
-from .auth import Email, UserRole
+from .auth import AccountScope, Email, UserRole
 
 
 class UserStatus(str, Enum):
@@ -23,7 +24,7 @@ class UserEventAction(str, Enum):
     SESSIONS_REVOKED = "SESSIONS_REVOKED"
 
 
-class UserListItem(BaseModel):
+class UserListItem(AccountScope):
     model_config = ConfigDict(extra="forbid")
 
     user_id: str = Field(min_length=1)
@@ -44,7 +45,9 @@ class UserInviteRequest(BaseModel):
 
     email: Email
     role: UserRole
-    # 기본 초대에서 중복 계정을 자동 연결하지 않는다. ADMIN의 명시적 복구 선택만 허용한다.
+    # 플랫폼은 명시 필수, 고객사 ADMIN은 서버가 자기 소속으로 한정한다.
+    tenant_id: UUID | None = None
+    # 기본 초대에서 중복 계정을 자동 연결하지 않는다. PLATFORM ADMIN의 명시적 복구 선택만 허용한다(고객사 ADMIN은 403).
     recover_existing: bool = False
 
 
@@ -69,6 +72,7 @@ class UserEventState(BaseModel):
     status: UserStatus | None = None
     revoked_session_count: int | None = Field(default=None, ge=0)
     recover_existing: bool | None = None
+    tenant_id: UUID | None = None
 
 
 class UserEventItem(BaseModel):

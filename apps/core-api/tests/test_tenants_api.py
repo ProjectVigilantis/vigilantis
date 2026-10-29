@@ -1,7 +1,7 @@
 """/api/v1/tenants — 고객(테넌트) 관리 라우터 (Post-MVP T-4). 실제 PostgreSQL + ADMIN 세션.
 
 지키는 것.
-  ① ADMIN 전용 · 미인증 401 — 등록된 경로 전부. 연결 확인(verify · resume)은 아직 없다.
+  ① PLATFORM 계정 전용(고객사 ADMIN · OPERATOR · VIEWER 는 403) · 미인증 401 — 등록된 경로 전부. 연결 확인(verify · resume)은 아직 없다.
   ② 받는 상태 밖은 409, 없거나 형식이 어긋난 식별자는 404 — 거절하면 DB 가 그대로다.
   ③ 온보딩 링크 설정이 없으면 링크를 싣는 응답만 503 이고, 그때 쓰기도 남지 않는다.
   ④ external_id 는 생성 응답과 재발급에서만 나간다.
@@ -107,20 +107,24 @@ def test_requests_cover_every_registered_tenants_route(client):
     assert not any(path.endswith(("/verify", "/resume")) for _, path in registered)
 
 
-@pytest.mark.parametrize("role", [UserRole.OPERATOR, UserRole.VIEWER])
+@pytest.mark.parametrize("role", [UserRole.ADMIN, UserRole.OPERATOR, UserRole.VIEWER])
 @pytest.mark.parametrize("method,path,body", REQUESTS)
-def test_non_admin_is_forbidden_everywhere(client_pg, db, login_as, onboarding, role, method, path, body):
+def test_tenant_account_is_forbidden_everywhere(
+    client_pg, db, login_as, make_tenant, onboarding, role, method, path, body
+):
+    # 고객사 계정은 역할(ADMIN 포함)과 관계없이 막힌다 — PLATFORM 은 ADMIN 만 존재한다(DB CHECK)
     tenant = _seed(db)
-    login_as(role)
+    login_as(role, tenant_id=make_tenant())
+    before = _tenant_count(db)
     resp = client_pg.request(method, BASE + path.replace("{id}", tenant.tenant_id), json=body)
     assert resp.status_code == 403 and _code(resp) == "AUTH_FORBIDDEN"
-    assert _tenant_count(db) == 1
+    assert _tenant_count(db) == before
     assert tenants_repo.get_tenant(db, tenant.tenant_id).tenant.name == "학원"
 
 
 @pytest.mark.parametrize("method,path,body", [r for r in REQUESTS if r[0] != "GET"])
 def test_state_changing_requests_from_another_origin_are_403(client_pg, db, admin, method, path, body):
-    # 라우터의 Origin 관문(main.py protected)은 require_admin 이 세션을 따로 보기 때문에 401 · 403 테스트로는
+    # 라우터의 Origin 관문(main.py protected)은 require_platform_account 가 세션을 따로 보기 때문에 401 · 403 테스트로는
     # 빠져도 드러나지 않는다 — 허용 밖 Origin 의 상태 변경이 본문 전에 막히는지 따로 본다(#519 리뷰)
     tenant = _seed(db)
     resp = client_pg.request(method, BASE + path.replace("{id}", tenant.tenant_id), json=body,
@@ -259,9 +263,7 @@ def test_delete_after_connection_is_409(client_pg, db, admin, status):
 
 def test_delete_with_a_member_is_409_and_keeps_both(client_pg, db, admin, make_auth_session):
     tenant = _seed(db)
-    member = make_auth_session(UserRole.VIEWER)
-    db.get(models.AppUser, member.user_id).tenant_id = tenant.tenant_id
-    db.flush()
+    member = make_auth_session(UserRole.VIEWER, tenant_id=tenant.tenant_id)
     resp = client_pg.delete(f"{BASE}/{tenant.tenant_id}")
     assert resp.status_code == 409 and _code(resp) == "TENANT_STATE_CONFLICT"
     assert _tenant_count(db) == 1

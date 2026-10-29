@@ -8,6 +8,8 @@
 #     교차 출처 보호 장치다. 세션 쿠키는 그와 별개로 필요하다.
 #   - 세션 쿠키(__Host-vg_session)가 유효해야 연결을 받는다. 없거나 무효면 accept 전에
 #     1008로 닫는다(Handshake HTTP 403). 판정은 auth.access.resolve_session_user 하나다.
+#   - 임시 출시 관문(#492): 이벤트가 테넌트 범위로 걸러지지 않아 PLATFORM 계정만 받는다. 고객사(TENANT)
+#     계정의 연결은 무효 세션과 같이 다룬다 — accept 전 1008, 연결 중이면 4401(사유를 구분하지 않는다).
 #   - 연결 중에는 감시 task가 min(지금 + WS_SESSION_CHECK_SECONDS, 유휴 만료, 최대 수명)마다
 #     다시 판정하고, 무효면 4401 "AUTH_REQUIRED"로 닫는다(닫기 코드: schemas/api/ws.py).
 #     판정은 touch=False라 연결·확인 모두 유휴 시간을 늘리지 않는다.
@@ -36,7 +38,7 @@ from schemas.api.auth import SessionInfo
 from schemas.api.errors import ErrorCode
 from schemas.api.ws import WS_CLOSE_AUTH_REQUIRED
 
-from auth.access import get_auth_session_factory, resolve_session_user
+from auth.access import get_auth_session_factory, is_platform_account, resolve_session_user
 from auth.http import SESSION_COOKIE, allowed_origins, get_clock
 from auth.service import CurrentUser
 from config import AuthSettings, Settings, get_auth_settings, get_settings
@@ -71,13 +73,15 @@ async def websocket_endpoint(
     token = websocket.cookies.get(SESSION_COOKIE)
 
     async def check() -> CurrentUser | None:
-        return await run_in_threadpool(
+        user = await run_in_threadpool(
             resolve_session_user,
             session_factory,
             token,
             now=clock(),
             idle_seconds=auth_settings.AUTH_SESSION_IDLE_SECONDS,
         )
+        # 임시 출시 관문(#492) — 큐 하나가 전 고객의 이벤트를 모든 연결에 보낸다. 플랫폼 계정만 받는다
+        return user if user is not None and is_platform_account(user) else None
 
     user = await check()
     if user is None:

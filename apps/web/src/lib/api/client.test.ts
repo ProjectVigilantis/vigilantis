@@ -11,12 +11,14 @@ import {
   confirmPasswordReset,
   createReadApi,
   getAssets,
+  getMe,
   getUserEvents,
   inviteUser,
   requestPasswordReset,
   resendInvite,
   revokeUserSessions,
 } from './client.ts';
+import type { UserListItem } from '../../types/api.ts';
 
 interface Sent {
   url: string;
@@ -75,14 +77,29 @@ test('사용자 관리 조치의 경로 · 메서드 · 본문', async (t) => {
   );
 });
 
-test('초대는 복구 선택을 그대로 싣고 만든 사용자를 돌려준다', async (t) => {
-  const created = { user_id: 'u1', email: 'a@b.c', role: 'VIEWER', status: 'ACTIVE', last_login_at: null };
+test('초대는 고객 ID · 복구 선택을 그대로 싣고 만든 고객사 사용자를 돌려준다', async (t) => {
+  const tenantId = '123e4567-e89b-12d3-a456-426614174000';
+  const created: UserListItem = {
+    account_type: 'TENANT',
+    tenant_id: tenantId,
+    user_id: 'u1',
+    email: 'a@b.c',
+    role: 'VIEWER',
+    status: 'ACTIVE',
+    last_login_at: null,
+  };
   const sent = stubFetch(t, () => new Response(JSON.stringify(created), { status: 201 }));
-  const result = await inviteUser({ email: 'a@b.c', role: 'VIEWER', recover_existing: false });
+  const result = await inviteUser({ email: 'a@b.c', role: 'VIEWER', tenant_id: tenantId, recover_existing: false });
   assert.deepEqual(result, created);
   assert.equal(sent[0].method, 'POST');
   assert.match(sent[0].url, /\/api\/v1\/users$/);
-  assert.deepEqual(sent[0].body, { email: 'a@b.c', role: 'VIEWER', recover_existing: false });
+  assert.deepEqual(sent[0].body, { email: 'a@b.c', role: 'VIEWER', tenant_id: tenantId, recover_existing: false });
+});
+
+test('고객사 ADMIN의 초대는 tenant_id 없이 나간다', async (t) => {
+  const sent = stubFetch(t, () => new Response('{}', { status: 201 }));
+  await inviteUser({ email: 'a@b.c', role: 'OPERATOR', recover_existing: false });
+  assert.deepEqual(sent[0].body, { email: 'a@b.c', role: 'OPERATOR', recover_existing: false });
 });
 
 test('이력 조회는 상한 50을 싣는다', async (t) => {
@@ -104,6 +121,45 @@ test('사용자 목록 — 401만 로그인 처리를 부르고, 403은 오류�
   respond = errorResponse(403, 'AUTH_FORBIDDEN');
   await assert.rejects(api.getUsers(), (error: unknown) => error instanceof ApiError && error.code === 'AUTH_FORBIDDEN');
   assert.equal(authRequired, 1);
+});
+
+test('서버 계정 조회는 세션 헤더를 전달하고 캐시하지 않는다', async (t) => {
+  const realFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = realFetch; });
+  const user = {
+    account_type: 'TENANT', tenant_id: 'tenant-1', role: 'VIEWER',
+    user_id: 'user-1', email: 'viewer@example.invalid',
+    session: { absolute_expires_at: '2026-10-27T00:00:00Z', idle_expires_at: '2026-10-26T17:00:00Z' },
+  };
+  let calls = 0;
+  globalThis.fetch = async (url, init) => {
+    calls += 1;
+    assert.equal(new URL(String(url)).pathname, '/api/v1/auth/me');
+    assert.equal(new Headers(init?.headers).get('Cookie'), '__Host-vg_session=test-session');
+    assert.equal(init?.cache, 'no-store');
+    return new Response(JSON.stringify(user), { status: 200 });
+  };
+  const api = createReadApi({ headers: { Cookie: '__Host-vg_session=test-session' } });
+  assert.deepEqual(await api.getMe(), user);
+  assert.equal(calls, 1);
+});
+
+test('계정 조회 실패 — SSR 401은 redirect를 전파하고 503은 계정 없음으로 바꾸지 않는다', async (t) => {
+  let respond = errorResponse(401, 'AUTH_REQUIRED');
+  stubFetch(t, () => respond());
+  const redirect = new Error('server redirect');
+  let redirects = 0;
+  const api = createReadApi({ onAuthRequired: () => { redirects += 1; throw redirect; } });
+  await assert.rejects(api.getMe(), (error) => error === redirect);
+  assert.equal(redirects, 1);
+  respond = errorResponse(503, 'INTERNAL_ERROR');
+  await assert.rejects(api.getMe(), (error: unknown) => error instanceof ApiError && error.httpStatus === 503);
+  assert.equal(redirects, 1);
+});
+
+test('브라우저 계정 조회는 기존 401 null 계약을 유지한다', async (t) => {
+  stubFetch(t, errorResponse(401, 'AUTH_REQUIRED'));
+  assert.equal(await getMe(), null);
 });
 
 /** 방금 비운 포트 — 연결하면 실제 Node 연결 거부 오류(`cause.code = ECONNREFUSED`)가 난다. */

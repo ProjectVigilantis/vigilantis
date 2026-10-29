@@ -60,7 +60,7 @@ _MESSAGE_BY_CODE: dict[ErrorCode, str] = {
     ErrorCode.TENANT_ACCOUNT_CONFLICT: "이 AWS 계정의 고객(테넌트)이 이미 있습니다.",
     ErrorCode.TENANT_ONBOARDING_UNAVAILABLE: "온보딩 링크를 만들 서버 설정이 없습니다.",
     ErrorCode.TENANT_STATE_CONFLICT: "지금 고객 상태에서는 할 수 없는 요청입니다.",
-    ErrorCode.TENANT_SUSPENDED: "정지된 고객의 자산에는 조치를 실행하지 않습니다.",
+    ErrorCode.TENANT_SUSPENDED: "정지된 고객에는 새 조치 실행 · 변경 요청을 받지 않습니다.",
     ErrorCode.AUTH_REQUIRED: "로그인이 필요합니다.",
     ErrorCode.AUTH_FAILED: "이메일 또는 비밀번호가 올바르지 않습니다.",
     ErrorCode.AUTH_CODE_INVALID: "인증 코드가 올바르지 않습니다.",

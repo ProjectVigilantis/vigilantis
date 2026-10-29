@@ -149,11 +149,16 @@ async function request<T>(path: string, init?: RequestInit, transport?: ApiTrans
 }
 
 /**
- * 서버 컴포넌트도 부르는 조회 7종(고객 관리 2종 · 사용자 관리 1종 포함). 전송을 주입받아 같은 경로 · 타입을 브라우저와 서버가 함께 쓴다 —
+ * 서버 컴포넌트도 부르는 조회(현재 계정 · 고객 관리 · 사용자 관리 포함). 전송을 주입받아 같은 경로 · 타입을 브라우저와 서버가 함께 쓴다 —
  * 서버 쪽은 `serverApi()`(lib/api/server.ts), 브라우저 쪽은 아래 모듈 export다.
  */
 export function createReadApi(transport: ApiTransport) {
   return {
+    /** 업무 조회 전에 계정 종류를 확인한다. 401 처리는 주입된 전송(SSR redirect 등)이 맡는다. */
+    getMe(): Promise<CurrentUserResponse> {
+      return request<CurrentUserResponse>('/auth/me', undefined, transport);
+    },
+
     getAssets(): Promise<AssetsResponse> {
       return request<AssetsResponse>('/assets', undefined, transport);
     },
@@ -191,7 +196,10 @@ export function createReadApi(transport: ApiTransport) {
       return request<TenantDetail>(`/tenants/${encodeURIComponent(tenantId)}`, undefined, transport);
     },
 
-    /** ADMIN 전용(#492 PR 3) — 다른 역할은 403 `AUTH_FORBIDDEN`. 사용자 관리 화면(app/users/page.tsx)이 부른다. */
+    /**
+     * 플랫폼 운영자(전체 고객사 사용자) · 고객사 ADMIN(자기 고객사) 전용(#492) — 그 밖은 403 `AUTH_FORBIDDEN`.
+     * 플랫폼 계정은 목록에 오지 않는다. 사용자 관리 화면(app/users/page.tsx)이 부른다.
+     */
     getUsers(): Promise<UsersResponse> {
       return request<UsersResponse>('/users', undefined, transport);
     },
@@ -344,11 +352,15 @@ export async function confirmPasswordReset(email: string, code: string, newPassw
 }
 
 /* ──────────────────────────── /users (#492 PR 3) ──────────────────────────── */
-/* 전부 ADMIN 전용이다. 메뉴를 숨기는 것은 화면 편의이고 실제 차단은 서버 403 `AUTH_FORBIDDEN`이다. */
+/* 플랫폼 운영자 · 고객사 ADMIN 전용이다. 메뉴를 숨기는 것은 화면 편의이고 실제 차단은 서버 403 `AUTH_FORBIDDEN`,
+   관리 범위 밖 대상은 404 `USER_NOT_FOUND`다. */
 
 const userPath = (userId: string, suffix: string) => `/users/${encodeURIComponent(userId)}${suffix}`;
 
-/** 201 — 만든 사용자. `recover_existing`은 ADMIN이 명시적으로 고른 경우에만 true다. */
+/**
+ * 201 — 만든 사용자. `recover_existing`은 플랫폼 운영자가 명시적으로 고른 경우에만 true다(고객사 ADMIN은 언제나 false).
+ * `tenant_id`는 플랫폼 운영자가 반드시 싣고 고객사 ADMIN은 생략한다(본문은 lib/user-admin.ts `inviteRequestFor`).
+ */
 export function inviteUser(body: UserInviteRequest): Promise<UserListItem> {
   return postJson<UserListItem>('/users', body);
 }
@@ -380,7 +392,7 @@ export function getUserEvents(userId: string, limit = 50): Promise<UserEventsRes
  */
 export async function getMe(): Promise<CurrentUserResponse | null> {
   try {
-    return await request<CurrentUserResponse>('/auth/me');
+    return await createReadApi(BROWSER).getMe();
   } catch (error) {
     if (error instanceof ApiError && error.httpStatus === 401) return null;
     throw error;
