@@ -49,6 +49,7 @@ from schemas.incidents import AgentInvocationStatus, AgentWaitSchedule
 from schemas.runbooks import RunbookId, TriggerSource
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
+from tenancy import ALL_TENANTS, TenantScope
 
 NOW = datetime(2026, 8, 18, 12, 0, 0, tzinfo=UTC)
 
@@ -775,6 +776,21 @@ def test_execution_tenant_is_copied_from_its_incident(db, owned):
 
     db.expire_all()
     assert exec_repo.get_execution(db, execution.execution_id).tenant_id == tenant_id
+
+
+def test_list_incidents_narrows_to_the_tenant_scope(db):
+    a, b = _tenant(db), _tenant(db)
+    mine = _secops_incident(db, tenant_id=a.tenant_id)
+    theirs = _secops_incident(db, tenant_id=b.tenant_id)
+    unowned = _finops_incident(db)
+
+    scoped = incidents_repo.list_incidents(db, scope=TenantScope(tenant_id=a.tenant_id))
+    every = incidents_repo.list_incidents(db, scope=ALL_TENANTS)
+
+    assert [row.incident_id for row in scoped] == [mine.incident_id]
+    assert {mine.incident_id, theirs.incident_id, unowned.incident_id} <= {
+        row.incident_id for row in every
+    }
 
 
 # --- Guardrail 저장 -------------------------------------------------------------
