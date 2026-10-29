@@ -52,6 +52,7 @@ from notifications.runtime import build_notification_runtime  # noqa: E402
 from realtime import RealtimeManager  # noqa: E402
 from routers import actions as actions_router  # noqa: E402
 from routers import assets as assets_router  # noqa: E402
+from routers import audit as audit_router  # noqa: E402
 from routers import auth as auth_router  # noqa: E402
 from routers import incidents as incidents_router  # noqa: E402
 from routers import metrics as metrics_router  # noqa: E402
@@ -194,10 +195,11 @@ def create_app() -> FastAPI:
     # 실제 Cognito 경로만 공급자 설정을 요구한다. WebSocket은 연결 수립 때 직접 검사한다.
     protected = [Depends(require_origin), Depends(require_user)]
     # 임시 출시 관문(#492) — 테넌트 범위 없는 업무 라우터는 플랫폼 계정만 받는다(auth.access 머리말).
-    # 사용자 관리는 서비스가 테넌트 범위를 걸므로 고객사 ADMIN 도 쓴다
+    # 사용자 관리는 서비스가, 감사 기록 조회(T-2)는 라우터가 테넌트 범위를 걸므로 고객사 계정도 쓴다
     business = [*protected, Depends(require_business_access)]
     app.include_router(actions_router.router, dependencies=business)
     app.include_router(assets_router.router, dependencies=business)
+    app.include_router(audit_router.router, dependencies=protected)
     app.include_router(auth_router.router)
     app.include_router(incidents_router.router, dependencies=business)
     app.include_router(metrics_router.router, dependencies=business)
