@@ -5,7 +5,7 @@ import { Shield } from 'lucide-react';
 import Link from 'next/link';
 
 import { formatLegalDate, LEGAL_EFFECTIVE_DATE, OPERATOR_NAME, SERVICE_NAME } from '@/lib/legal';
-import { LANDING_PATH, PRIVACY_PATH, TERMS_PATH } from '@/lib/return-to';
+import { LANDING_PATH, LOGIN_PATH, PRIVACY_PATH, TERMS_PATH } from '@/lib/return-to';
 
 export type LegalSection = { id: string; title: string; body: React.ReactNode };
 
@@ -29,7 +29,7 @@ export function LegalDocument({
             <span className="text-lg font-bold tracking-tight">{SERVICE_NAME}</span>
           </Link>
           <Link
-            href="/login"
+            href={LOGIN_PATH}
             className="bg-primary inline-flex h-10 items-center rounded-md px-4 text-sm font-semibold text-white hover:bg-primary/90"
           >
             로그인

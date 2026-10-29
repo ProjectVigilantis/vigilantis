@@ -7,7 +7,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 
 import { LegalDocument, LegalList, type LegalSection } from '@/components/legal/legal-document';
-import { formatLegalDate, LEGAL_EFFECTIVE_DATE, OPERATOR_NAME, SERVICE_NAME } from '@/lib/legal';
+import { formatLegalDate, LEGAL_EFFECTIVE_DATE, OPERATOR_NAME, ROLE_NAMES, SERVICE_NAME } from '@/lib/legal';
 import { PRIVACY_PATH } from '@/lib/return-to';
 
 export const metadata: Metadata = {
@@ -64,7 +64,7 @@ const SECTIONS: LegalSection[] = [
         numbered
         items={[
           '이용계약은 고객사가 이용을 신청하고 회사가 승낙하면 성립합니다. 요금제와 이용 기간은 이용계약에서 정합니다.',
-          '이용자 계정은 회사 또는 고객사 관리자가 발급하며, 계정마다 역할(관리자 · 관제자 · 조회 전용)이 정해집니다.',
+          `이용자 계정은 회사 또는 고객사 관리자가 발급하며, 계정마다 역할(${ROLE_NAMES})이 정해집니다.`,
           '회사는 신청 내용이 사실과 다르거나 서비스 제공이 기술적으로 어려운 경우 승낙하지 않을 수 있습니다.',
         ]}
       />

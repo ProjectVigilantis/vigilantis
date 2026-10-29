@@ -9,7 +9,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 
 import { LegalDocument, LegalList, LegalTable, type LegalSection } from '@/components/legal/legal-document';
-import { OPERATOR_NAME, PRIVACY_OFFICER, SERVICE_NAME } from '@/lib/legal';
+import { OPERATOR_NAME, PRIVACY_OFFICER, ROLE_NAMES, SERVICE_NAME } from '@/lib/legal';
 import { TERMS_PATH } from '@/lib/return-to';
 
 export const metadata: Metadata = {
@@ -34,7 +34,7 @@ const SECTIONS: LegalSection[] = [
         <LegalList
           items={[
             '이용자 계정 발급, 로그인과 2단계 인증을 통한 본인 확인',
-            '역할(관리자 · 관제자 · 조회 전용)과 소속 고객사에 따른 접근 권한 부여',
+            `역할(${ROLE_NAMES})과 소속 고객사에 따른 접근 권한 부여`,
             '계정 관리와 조치 승인 기록의 보관(보안 사고 조사와 분쟁 대응)',
             '서비스 장애 대응과 비정상 접속 차단',
             '고객사가 지정한 곳으로 보안 위협 · 조치 결과 알림 발송',
@@ -220,7 +220,10 @@ const SECTIONS: LegalSection[] = [
     title: '11. 개인정보 보호책임자',
     body: (
       <>
-        <p>개인정보 처리에 관한 문의, 불만, 피해 구제는 아래로 연락해 주세요. 지체 없이 답변하고 처리합니다.</p>
+        <p>
+          개인정보 처리에 관한 문의, 불만, 피해 구제와 8항의 열람 · 정정 · 삭제 · 처리 정지 요구는 아래로 연락해
+          주세요. 지체 없이 답변하고 처리합니다.
+        </p>
         <LegalTable
           head={['구분', '내용']}
           rows={[
