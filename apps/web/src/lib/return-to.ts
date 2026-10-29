@@ -6,6 +6,11 @@
 export const LOGIN_PATH = '/login';
 /** 로그인 전 서비스 소개(T-15). 로그인 없이 열린다(src/proxy.ts). */
 export const LANDING_PATH = '/landing';
+/** 개인정보 처리방침 · 이용약관(T-15). 로그인 화면에서 이메일을 받기 전에 읽을 수 있어야 하므로 로그인 없이 연다. */
+export const PRIVACY_PATH = '/privacy';
+export const TERMS_PATH = '/terms';
+/** 로그인 없이 열리고 셸 · 실시간 연결 없이 그리는 경로. 접근 관문(src/proxy.ts)과 화면 골격(app-shell.tsx)이 같이 쓴다. */
+export const PUBLIC_PATHS: ReadonlySet<string> = new Set([LOGIN_PATH, LANDING_PATH, PRIVACY_PATH, TERMS_PATH]);
 const FALLBACK = '/';
 /** 해석 기준 오리진. 실제 주소와 무관하게 "다른 오리진으로 빠지는가"만 본다. */
 const BASE = 'http://return-to.invalid';

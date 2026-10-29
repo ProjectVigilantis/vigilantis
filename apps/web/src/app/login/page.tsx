@@ -6,6 +6,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 
 import { LoginFlow } from '@/components/auth/login-flow';
+import { LegalLinks } from '@/components/legal/legal-document';
 import { SESSION_ENDED_PARAM } from '@/lib/auth-redirect';
 
 export const metadata: Metadata = { title: '로그인 · Vigilantis' };
@@ -56,6 +57,8 @@ export default async function LoginPage({ searchParams }: PageProps<'/login'>) {
           서비스 소개
         </Link>
         <LoginFlow sessionEnded={ended} />
+        {/* 로그인하면 이메일을 저장하므로 처리방침을 입력 전에 열어 볼 수 있게 둔다(T-15). */}
+        <LegalLinks className="text-muted-foreground flex gap-5 text-xs" />
       </div>
     </div>
   );

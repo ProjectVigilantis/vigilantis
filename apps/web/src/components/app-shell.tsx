@@ -16,8 +16,8 @@ import { isPublicPath } from '@/lib/public-paths';
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
 
-  // 공개 경로(로그인 · 랜딩)는 로그인 전 화면이라 골격 없이 본문만 그린다 — 세션 조회 · 소켓 ·
-  // GNB 폴링을 열지 않는다. proxy와 같은 목록이다(lib/public-paths.ts).
+  // 공개 경로(로그인 · 랜딩 · 처리방침 · 약관)는 로그인 전 화면이라 골격 없이 본문만 그린다 —
+  // 세션 조회 · 소켓 · GNB 폴링을 열지 않는다. proxy와 같은 판정이다(lib/public-paths.ts).
   if (isPublicPath(pathname)) {
     return <main className="flex flex-1 flex-col">{children}</main>;
   }
