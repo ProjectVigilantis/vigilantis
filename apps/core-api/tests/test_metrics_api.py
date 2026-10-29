@@ -6,23 +6,30 @@
 #   가짜로 대신하면 "판정이 회차마다 남는가"라는 정작 중요한 것을 안 보게 된다.
 #   축 1(CPU)은 CloudWatch 호출이라 services.metrics.cpu_timeseries 를 대체한다 —
 #   AWS 연동 자체는 LocalStack 테스트의 몫이다.
+#   기존 축 검증은 전체 범위(CENTRAL_ADMIN)로 본다. 담당 고객사 범위는 맨 아래 「고객사 범위」 절이 검증한다.
 # ==============================================================================
 
 from __future__ import annotations
 
 import threading
+import uuid
 from datetime import datetime, timedelta, timezone
+from typing import NamedTuple
 
 import pytest
 from sqlalchemy import text
 
 from schemas.api.assets import AssetType
+from schemas.api.auth import PlatformRole, UserRole
 from schemas.api.metrics import CpuSeries, NetworkSeries
+from schemas.api.tenants import TenantStatus
 from schemas.rules import RuleEvaluationResult
 
 from db import models
 from db.repositories import assets as assets_repo
+from db.repositories import auth as auth_repo
 from routers import metrics as metrics_router
+from services.aws.client import TenantAccess, current_tenant
 
 ACCOUNT = "123456789012"
 SEOUL = "ap-northeast-2"
@@ -31,6 +38,13 @@ TOKYO = "ap-northeast-1"
 
 def _arn(region: str, suffix: str) -> str:
     return f"arn:aws:ec2:{region}:{ACCOUNT}:security-group/sg-{suffix}"
+
+
+@pytest.fixture
+def platform_session(make_auth_session):
+    """client_pg 의 기본 세션을 전체 범위(CENTRAL_ADMIN)로 바꾼다 — conftest 기본(TENANT_MANAGER · 담당 없음)은
+    고객 기록을 하나도 보지 않으므로, 축의 집계 규칙을 보는 테스트가 범위에 가려지지 않게 한다."""
+    return make_auth_session(platform_role=PlatformRole.CENTRAL_ADMIN)
 
 
 @pytest.fixture
@@ -64,7 +78,7 @@ def _fresh_cloudwatch_cache():
     metrics_router._cloudwatch_inflight.clear()
 
 
-def _seed_run(db, *, region: str, started_at: datetime):
+def _seed_run(db, *, region: str, started_at: datetime, tenant_id: str | None = None):
     run = assets_repo.start_collection_run(
         db,
         account_id=ACCOUNT,
@@ -74,14 +88,15 @@ def _seed_run(db, *, region: str, started_at: datetime):
         period_seconds=3600,
     )
     run.started_at = started_at  # 기본값은 현재 시각 — 회차 시각을 테스트가 정한다
+    run.tenant_id = tenant_id  # 소유 — NULL 은 소속 없는 MVP 기록(전체 범위만 본다)
     db.flush()
     return run
 
 
 def _seed_sg(db, run, *, region: str, suffix: str, verdict: str, evaluated_at: datetime):
-    """SG 1건 + 그 회차의 판정 1건. verdict=THREAT 가 '인터넷 개방'이다."""
+    """SG 1건 + 그 회차의 판정 1건. verdict=THREAT 가 '인터넷 개방'이다. 자산의 소유는 그 회차의 소유다."""
     arn = _arn(region, suffix)
-    assets_repo.upsert_asset(
+    asset = assets_repo.upsert_asset(
         db,
         arn=arn,
         asset_type=AssetType.SG,
@@ -92,6 +107,7 @@ def _seed_sg(db, run, *, region: str, suffix: str, verdict: str, evaluated_at: d
         collection_run_id=run.collection_run_id,
         collected_at=evaluated_at,
     )
+    asset.tenant_id = run.tenant_id
     assets_repo.add_rule_evaluation(
         db,
         RuleEvaluationResult(
@@ -514,7 +530,9 @@ def test_스냅샷이_없으면_자산_수_축은_빈_READY다(client_pg, db, se
     assert axis == {"status": "READY", "points": [], "reason_code": None}
 
 
-def _seed_threat_event(db, *, region: str, event_type: str, occurred_at: datetime, key: str):
+def _seed_threat_event(
+    db, *, region: str, event_type: str, occurred_at: datetime, key: str, tenant_id: str | None = None
+):
     db.add(
         models.ThreatEvent(
             source_event_id=key,
@@ -523,6 +541,7 @@ def _seed_threat_event(db, *, region: str, event_type: str, occurred_at: datetim
             payload={},
             deduplication_key=key,
             occurred_at=occurred_at,
+            tenant_id=tenant_id,
         )
     )
     db.flush()
@@ -991,3 +1010,428 @@ def test_한_키의_조회가_붙잡혀_있어도_다른_키는_기다리지_않
     finally:
         slow.release.set()
     held.join(WAIT)
+
+
+# ── 고객사 범위 (#492 PR 5 · #533) ─────────────────────────────────────────────
+# 담당자(TENANT_MANAGER)는 배정 고객사만, 중앙(CENTRAL_ADMIN)은 소속 없는 MVP 기록까지 전부, 담당이 없으면
+# 아무것도 보지 않는다. 세 소유(A · B · 소속 없음)가 같은 리전 · 같은 칸에 회차를 하나씩 남기고 건수를 1 · 2 · 4 로
+# 갈라 둔다 — 합 하나로 어느 소유가 섞였는지 드러난다. 같은 칸이라 범위를 집계 뒤에 걸거나 칸의 「마지막 회차」를
+# 고객사 구분 없이 고르면 숫자가 어긋난다. 세 소유의 EC2 는 같은 리전 · 같은 인스턴스 ID 다(계정만 다르다).
+
+URL = "/api/v1/metrics/timeseries"
+_OWNED_COUNTS = {"A": 1, "B": 2, None: 4}
+_SHARED_INSTANCE = "i-0001"
+_DB_AXES = ("sg_exposure", "asset_status", "asset_inventory", "threat_events")
+
+
+class _Owned(NamedTuple):
+    tenant_id: str | None
+    ec2_arn: str
+
+
+def _seed_owned_ec2(db, run, *, resource_id: str = _SHARED_INSTANCE) -> str:
+    """그 회차 소유의 EC2 1대 → ARN. ARN 의 계정은 소유 고객사의 계정이다(소속 없으면 MVP 계정)."""
+    account = ACCOUNT if run.tenant_id is None else db.get(models.Tenant, run.tenant_id).aws_account_id
+    arn = f"arn:aws:ec2:{run.region}:{account}:instance/{resource_id}"
+    asset = assets_repo.upsert_asset(
+        db,
+        arn=arn,
+        asset_type=AssetType.EC2,
+        resource_id=resource_id,
+        account_id=account,
+        region=run.region,
+        spec={},
+        collection_run_id=run.collection_run_id,
+        collected_at=run.started_at,
+    )
+    asset.tenant_id = run.tenant_id
+    db.flush()
+    return arn
+
+
+def _seed_cell(db, *, tenant_id: str | None, region: str, count: int, at: datetime, tag: str) -> str:
+    """한 소유 · 한 리전의 회차 1개 — 개방 SG · 위협 이벤트 · EC2 자산 수가 모두 count 건, EC2 1대 → 그 ARN."""
+    run = _seed_run(db, region=region, started_at=at, tenant_id=tenant_id)
+    for i in range(count):
+        _seed_sg(db, run, region=region, suffix=f"{tag}{i:03d}", verdict="THREAT", evaluated_at=at)
+        _seed_threat_event(db, region=region, event_type="OPEN_IP", occurred_at=at,
+                           key=f"{tag}{i:03d}", tenant_id=tenant_id)
+    assets_repo.record_inventory_counts(
+        db, collection_run_id=run.collection_run_id, counts={AssetType.EC2: count}
+    )
+    return _seed_owned_ec2(db, run)
+
+
+def _seed_owned_world(db, make_tenant) -> dict[str | None, _Owned]:
+    """A · B 고객사(ACTIVE · 관제 리전 서울)와 소속 없는 기록을 같은 칸에 시드한다 → {라벨: 소유}."""
+    tenants = {"A": make_tenant(), "B": make_tenant(), None: None}
+    at = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(minute=1, second=0, microsecond=0)
+    world: dict[str | None, _Owned] = {}
+    for offset, (label, tenant_id) in enumerate(tenants.items()):
+        arn = _seed_cell(db, tenant_id=tenant_id, region=SEOUL, count=_OWNED_COUNTS[label],
+                         at=at + timedelta(seconds=5 * offset), tag=(label or "n").lower())
+        world[label] = _Owned(tenant_id, arn)
+    db.commit()
+    return world
+
+
+def _assign(db, user_id: str, tenant_ids) -> None:
+    auth_repo.replace_assigned_tenants(
+        db, user_id=user_id, tenant_ids=tuple(tenant_ids), now=datetime.now(timezone.utc)
+    )
+    db.commit()
+
+
+def _login_manager(login_as, db, tenant_ids):
+    """client_pg 를 담당자(TENANT_MANAGER) 세션으로 바꾸고 tenant_ids 를 배정한다."""
+    seed = login_as(UserRole.ADMIN, platform_role=PlatformRole.TENANT_MANAGER)
+    _assign(db, seed.user_id, tenant_ids)
+    return seed
+
+
+class _OwnerCloudWatch:
+    """services.metrics.aws_client 대역. 클라이언트를 만든 순간의 테넌트 문맥(= 그 호출이 나간 자격)과
+    물은 인스턴스 ID 를 남긴다. 값은 소유마다 달라(`values`, None = 프로세스 자격) 곡선이 다른 소유의
+    ARN 에 실리면 드러난다. `failing` 의 소유는 지표 단위 Forbidden 으로 답한다."""
+
+    def __init__(self, values: dict[str | None, float], failing: frozenset):
+        self.values = values
+        self.failing = failing
+        self.calls: list[tuple[TenantAccess | None, str, tuple[str, ...]]] = []
+
+    def __call__(self, service: str, region: str):
+        access = current_tenant()
+        owner = access.tenant_id if access is not None else None
+        factory = self
+
+        class _Client:
+            def get_metric_data(self, **kwargs):
+                queries = kwargs["MetricDataQueries"]
+                ids = tuple(sorted({q["MetricStat"]["Metric"]["Dimensions"][0]["Value"] for q in queries}))
+                factory.calls.append((access, region, ids))
+                ok = owner not in factory.failing
+                return {
+                    "MetricDataResults": [
+                        {
+                            "Id": q["Id"],
+                            "StatusCode": "Complete" if ok else "Forbidden",
+                            "Timestamps": [kwargs["StartTime"]] if ok else [],
+                            "Values": [factory.values.get(owner, 1.0)] if ok else [],
+                        }
+                        for q in queries
+                    ]
+                }
+
+        return _Client()
+
+
+@pytest.fixture
+def owner_cloudwatch(monkeypatch):
+    def _install(values=None, failing=()) -> _OwnerCloudWatch:
+        fake = _OwnerCloudWatch(dict(values or {}), frozenset(failing))
+        monkeypatch.setattr("services.metrics.aws_client", fake)
+        return fake
+
+    return _install
+
+
+def _callers(cw: _OwnerCloudWatch) -> list[str | None]:
+    """호출마다 나간 자격의 고객사(None = 프로세스 자격)."""
+    return [access.tenant_id if access is not None else None for access, _, _ in cw.calls]
+
+
+def _db_totals(body: dict) -> dict[str, list[int]]:
+    """DB 네 축의 점별 합 — 시드가 한 칸이라 점이 있으면 하나다."""
+    return {
+        "sg_exposure": [p["value"] for p in body["sg_exposure"]["points"]],
+        "asset_status": [p["threat"] for p in body["asset_status"]["points"]],
+        "asset_inventory": [p["total"] for p in body["asset_inventory"]["points"]],
+        "threat_events": [p["total"] for p in body["threat_events"]["points"]],
+    }
+
+
+def _series_values(body: dict, axis: str, points: str) -> dict[str, list[float]]:
+    return {s["arn"]: [p["value"] for p in s[points]] for s in body[axis]["series"]}
+
+
+@pytest.mark.parametrize(
+    ("assigned", "visible"),
+    [
+        (None, ("A", "B", None)),
+        (("A",), ("A",)),
+        (("B",), ("B",)),
+        (("A", "B"), ("A", "B")),
+        ((), ()),
+    ],
+    ids=["central", "manager-A", "manager-B", "manager-AB", "manager-unassigned"],
+)
+def test_여섯_축은_범위_안_소유만_집계하고_그_소유의_자격으로만_부른다(
+    client_pg, db, set_regions, make_tenant, login_as, owner_cloudwatch, assigned, visible
+):
+    set_regions(SEOUL)
+    world = _seed_owned_world(db, make_tenant)
+    if assigned is not None:  # None 은 client_pg 기본(중앙) 그대로
+        _login_manager(login_as, db, [world[label].tenant_id for label in assigned])
+    cw = owner_cloudwatch()
+
+    body = client_pg.get(URL).json()
+
+    for axis in ("cpu", "network", *_DB_AXES):
+        assert (body[axis]["status"], body[axis]["reason_code"]) == ("READY", None), axis
+    total = sum(_OWNED_COUNTS[label] for label in visible)
+    assert _db_totals(body) == {axis: [total] if visible else [] for axis in _DB_AXES}
+    arns = {world[label].ec2_arn for label in visible}
+    assert set(_series_values(body, "cpu", "points")) == arns
+    assert set(_series_values(body, "network", "in_points")) == arns
+    # 소유마다 CPU · 네트워크 한 번씩, 자기 인스턴스만 그 자격으로. 소속 없는 기록(None)은 중앙만 프로세스
+    # 자격으로 부르고, 담당이 없으면 AWS 를 부르지 않는다.
+    owners = [world[label].tenant_id for label in visible]
+    assert sorted(_callers(cw), key=str) == sorted(owners * 2, key=str)
+    assert {ids for _, _, ids in cw.calls} <= {(_SHARED_INSTANCE,)}
+
+
+def test_담당이_바뀌면_다음_요청부터_바뀐_범위로_본다(
+    client_pg, db, set_regions, make_tenant, login_as, owner_cloudwatch
+):
+    set_regions(SEOUL)
+    world = _seed_owned_world(db, make_tenant)
+    a, b = world["A"], world["B"]
+    manager = _login_manager(login_as, db, [a.tenant_id])
+    cw = owner_cloudwatch()
+
+    first = client_pg.get(URL).json()
+    _assign(db, manager.user_id, [b.tenant_id])
+    second = client_pg.get(URL).json()
+    _assign(db, manager.user_id, [])
+    third = client_pg.get(URL).json()
+
+    assert _db_totals(first) == {axis: [1] for axis in _DB_AXES}
+    assert set(_series_values(first, "cpu", "points")) == {a.ec2_arn}
+    assert _db_totals(second) == {axis: [2] for axis in _DB_AXES}
+    assert set(_series_values(second, "cpu", "points")) == {b.ec2_arn}
+    assert _db_totals(third) == {axis: [] for axis in _DB_AXES}
+    assert third["cpu"]["series"] == third["network"]["series"] == []
+    # 같은 창이어도 A 의 결과를 B 에 다시 쓰지 않는다 — B 는 B 자격으로 새로 불렀다. 회수 뒤에는 부르지 않는다
+    assert _callers(cw) == [a.tenant_id, a.tenant_id, b.tenant_id, b.tenant_id]
+
+
+def test_같은_리전_같은_인스턴스_ID라도_소유마다_따로_부르고_결과를_섞어_쓰지_않는다(
+    client_pg, db, set_regions, make_tenant, login_as, owner_cloudwatch
+):
+    """중앙은 소유마다 곡선을 그 ARN 에 싣는다. 담당자의 같은 창 조회는 중앙이 담은 결과(대상이 다르다)를 쓰지
+    않고 자기 고객사 자격으로 부르며, 그 결과는 같은 담당 범위의 다음 조회가 다시 쓴다."""
+    set_regions(SEOUL)
+    world = _seed_owned_world(db, make_tenant)
+    values = {world["A"].tenant_id: 11.0, world["B"].tenant_id: 22.0, None: 44.0}
+    cw = owner_cloudwatch(values)
+
+    central = client_pg.get(URL).json()
+
+    expected = {owned.ec2_arn: [values[owned.tenant_id]] for owned in world.values()}
+    assert _series_values(central, "cpu", "points") == expected
+    assert _series_values(central, "network", "in_points") == expected
+    assert _series_values(central, "network", "out_points") == expected
+    assert len(cw.calls) == 6
+
+    _login_manager(login_as, db, [world["A"].tenant_id])
+    mine = client_pg.get(URL).json()
+    again = client_pg.get(URL).json()
+
+    assert _series_values(mine, "cpu", "points") == {world["A"].ec2_arn: [11.0]}
+    assert _callers(cw)[6:] == [world["A"].tenant_id] * 2
+    assert again["cpu"] == mine["cpu"] and again["network"] == mine["network"]
+
+
+@pytest.mark.parametrize("status", [TenantStatus.SUSPENDED, TenantStatus.PENDING_CONNECTION])
+def test_쓸_수_없는_고객사_자격은_빈_성공이_아니라_UNAVAILABLE이고_AWS를_부르지_않는다(
+    client_pg, db, set_regions, make_tenant, login_as, owner_cloudwatch, status
+):
+    set_regions(SEOUL)
+    tenant_id = make_tenant(status)
+    at = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(minute=1, second=0, microsecond=0)
+    run = _seed_run(db, region=SEOUL, started_at=at, tenant_id=tenant_id)
+    _seed_sg(db, run, region=SEOUL, suffix="0001", verdict="THREAT", evaluated_at=at)
+    _seed_owned_ec2(db, run)
+    db.commit()
+    _login_manager(login_as, db, [tenant_id])
+    cw = owner_cloudwatch()
+
+    body = client_pg.get(URL).json()
+
+    for axis in ("cpu", "network"):
+        assert (body[axis]["status"], body[axis]["reason_code"]) == (
+            "UNAVAILABLE", f"TENANT_{status.value}"
+        ), axis
+        assert body[axis]["series"] == [], axis
+    assert cw.calls == []
+    # 기록 조회는 자격과 무관하다 — DB 축은 그대로 그려진다
+    assert [p["value"] for p in body["sg_exposure"]["points"]] == [1]
+
+
+def test_한_고객사의_조회_실패는_전체_범위의_축을_내리고_다른_담당_범위로_번지지_않는다(
+    client_pg, db, set_regions, make_tenant, login_as, owner_cloudwatch
+):
+    set_regions(SEOUL)
+    world = _seed_owned_world(db, make_tenant)
+    cw = owner_cloudwatch(failing={world["B"].tenant_id})
+
+    central = client_pg.get(URL).json()
+
+    # A · 소속 없음 곡선만 성공으로 남기지 않는다 — 한 고객사가 빠졌다고 적을 자리가 없다
+    for axis in ("cpu", "network"):
+        assert (central[axis]["status"], central[axis]["reason_code"]) == ("UNAVAILABLE", "Forbidden")
+        assert central[axis]["series"] == []
+
+    _login_manager(login_as, db, [world["A"].tenant_id])
+    mark = len(cw.calls)
+    mine = client_pg.get(URL).json()
+
+    assert mine["cpu"]["status"] == mine["network"]["status"] == "READY"
+    assert set(_series_values(mine, "cpu", "points")) == {world["A"].ec2_arn}
+    assert _callers(cw)[mark:] == [world["A"].tenant_id] * 2
+
+
+def test_역할_ARN이나_ExternalId가_바뀌면_같은_창에서도_새_자격으로_다시_부르고_밖에_싣지_않는다(
+    client_pg, db, set_regions, make_tenant, login_as, owner_cloudwatch
+):
+    set_regions(SEOUL)
+    tenant_id = make_tenant()
+    at = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(minute=1, second=0, microsecond=0)
+    _seed_owned_ec2(db, _seed_run(db, region=SEOUL, started_at=at, tenant_id=tenant_id))
+    db.commit()
+    _login_manager(login_as, db, [tenant_id])
+    cw = owner_cloudwatch()
+
+    client_pg.get(URL)
+    tenant = db.get(models.Tenant, tenant_id)
+    rotated_role = f"arn:aws:iam::{tenant.aws_account_id}:role/vigilantis-rotated"
+    rotated_external_id = uuid.uuid4().hex
+    tenant.access_role_arn = rotated_role
+    tenant.external_id = rotated_external_id
+    db.commit()
+    response = client_pg.get(URL)
+
+    used = [access for access, _, _ in cw.calls]
+    assert len(used) == 4  # CPU · 네트워크 × 두 요청 — 바뀐 자격은 앞 결과를 다시 쓰지 않는다
+    assert used[0] == used[1] != used[2] == used[3]
+    assert (used[2].access_role_arn, used[2].external_id) == (rotated_role, rotated_external_id)
+    assert response.json()["cpu"]["status"] == "READY"
+    assert rotated_external_id not in response.text
+    assert rotated_external_id not in repr(list(metrics_router._cloudwatch_cache))
+
+
+def test_고객사_관제_리전은_설정_리전_밖이어도_담당자와_중앙이_함께_본다(
+    client_pg, db, set_regions, make_tenant, login_as, owner_cloudwatch
+):
+    """설정 리전(AWS_REGIONS)은 소속 없는 MVP 기록의 관제 범위다 — 고객사 기록은 그 고객사의 관제 리전을 따른다."""
+    set_regions(SEOUL)
+    tenant_id = make_tenant()
+    db.get(models.Tenant, tenant_id).regions = [TOKYO]
+    at = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(minute=1, second=0, microsecond=0)
+    run = _seed_run(db, region=TOKYO, started_at=at, tenant_id=tenant_id)
+    _seed_sg(db, run, region=TOKYO, suffix="0001", verdict="THREAT", evaluated_at=at)
+    db.commit()
+    owner_cloudwatch()
+
+    central = client_pg.get(URL).json()
+    _login_manager(login_as, db, [tenant_id])
+    mine = client_pg.get(URL).json()
+
+    assert [p["value"] for p in central["sg_exposure"]["points"]] == [1]
+    assert [p["value"] for p in mine["sg_exposure"]["points"]] == [1]
+
+
+# ── 소유별 관제 리전 (리뷰 반례) ───────────────────────────────────────────────
+# A 는 서울만 관제하지만(도쿄를 끊었다) 도쿄에 옛 자산 · 회차 · 이벤트가 남아 있고, B 는 도쿄만 관제하며 서울에
+# 관제 밖 기록이 있다. 설정 리전(소속 없는 기록의 관제 범위)은 서울이고 도쿄에 소속 없는 기록이 있다. 리전을
+# 합집합(서울 · 도쿄)으로 거르면 관제 밖 셋이 모두 들어오고 CloudWatch 는 A 자격으로 도쿄를 부른다.
+# 관제 안 기록은 1 · 2 · 4 건, 관제 밖 기록은 각 8 건이다 — 관제 밖이 하나라도 섞이면 합이 7 을 넘고, 합 하나로
+# 어느 관제 안 칸이 빠졌는지도 드러난다. 모두 같은 시간 칸이다.
+
+_INSIDE = {("A", SEOUL): 1, ("B", TOKYO): 2, (None, SEOUL): 4}
+_OUTSIDE = {("A", TOKYO): 8, ("B", SEOUL): 8, (None, TOKYO): 8}
+_Cell = tuple[str | None, str]  # (라벨, 리전)
+
+
+def _seed_region_world(db, make_tenant) -> tuple[dict[str | None, str | None], dict[_Cell, str]]:
+    """반례의 기록을 시드한다 → ({라벨: tenant_id}, {(라벨, 리전): EC2 ARN})."""
+    tenants = {"A": make_tenant(), "B": make_tenant(), None: None}  # 기본 관제 리전은 서울
+    db.get(models.Tenant, tenants["B"]).regions = [TOKYO]
+    at = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(minute=1, second=0, microsecond=0)
+    arns: dict[_Cell, str] = {}
+    for offset, ((label, region), count) in enumerate({**_INSIDE, **_OUTSIDE}.items()):
+        arns[(label, region)] = _seed_cell(
+            db, tenant_id=tenants[label], region=region, count=count,
+            at=at + timedelta(seconds=5 * offset), tag=f"{(label or 'n').lower()}{region[-1]}",
+        )
+    db.commit()
+    return tenants, arns
+
+
+def _called_cells(calls, tenants: dict[str | None, str | None]) -> list[_Cell]:
+    """CloudWatch 호출마다 (나간 자격의 라벨, 리전). 소속 없는 기록의 프로세스 자격은 None 이다."""
+    label_of = {tenant_id: label for label, tenant_id in tenants.items()}
+    cells = [(label_of[access.tenant_id if access is not None else None], region)
+             for access, region, _ in calls]
+    return sorted(cells, key=str)
+
+
+@pytest.mark.parametrize(
+    ("assigned", "visible"),
+    [
+        (None, (("A", SEOUL), ("B", TOKYO), (None, SEOUL))),
+        (("A", "B"), (("A", SEOUL), ("B", TOKYO))),
+        (("A",), (("A", SEOUL),)),
+        (("B",), (("B", TOKYO),)),
+    ],
+    ids=["central", "manager-AB", "manager-A", "manager-B"],
+)
+def test_소유마다_그_관제_리전의_기록만_여섯_축에_싣고_CloudWatch도_그_리전만_그_자격으로_부른다(
+    client_pg, db, set_regions, make_tenant, login_as, owner_cloudwatch, assigned, visible
+):
+    set_regions(SEOUL)
+    tenants, arns = _seed_region_world(db, make_tenant)
+    if assigned is not None:  # None 은 client_pg 기본(중앙) 그대로
+        _login_manager(login_as, db, [tenants[label] for label in assigned])
+    cw = owner_cloudwatch()
+
+    body = client_pg.get(URL).json()
+
+    for axis in ("cpu", "network", *_DB_AXES):
+        assert (body[axis]["status"], body[axis]["reason_code"]) == ("READY", None), axis
+    total = sum(_INSIDE[cell] for cell in visible)
+    assert _db_totals(body) == {axis: [total] for axis in _DB_AXES}
+    expected_arns = {arns[cell] for cell in visible}
+    assert set(_series_values(body, "cpu", "points")) == expected_arns
+    assert set(_series_values(body, "network", "in_points")) == expected_arns
+    # 관제 밖 칸의 인스턴스는 대상에 오르지 않는다 — A 자격으로 도쿄를, 프로세스 자격으로 도쿄를 부르지 않는다
+    assert _called_cells(cw.calls, tenants) == sorted([*visible] * 2, key=str)
+
+
+def test_관제를_끊은_리전의_기록은_남아_있고_다시_관제하면_다음_요청부터_센다(
+    client_pg, db, set_regions, make_tenant, login_as, owner_cloudwatch
+):
+    """제외는 리전 설정에 따른 조회 조건일 뿐이다 — 기록을 지우거나 숨겨 두지 않으므로, A 가 도쿄를 다시 관제하면
+    남아 있던 도쿄 기록이 다음 요청에 돌아오고 그때부터 A 자격으로 도쿄를 부른다. B 의 서울 기록은 A 가 서울을
+    관제해도 여전히 빠진다."""
+    set_regions(SEOUL)
+    tenants, arns = _seed_region_world(db, make_tenant)
+    _login_manager(login_as, db, [tenants["A"], tenants["B"]])
+    cw = owner_cloudwatch()
+
+    before = client_pg.get(URL).json()
+    mark = len(cw.calls)
+    db.get(models.Tenant, tenants["A"]).regions = [SEOUL, TOKYO]
+    db.commit()
+    after = client_pg.get(URL).json()
+
+    assert _db_totals(before) == {axis: [1 + 2] for axis in _DB_AXES}
+    assert _db_totals(after) == {axis: [1 + 2 + 8] for axis in _DB_AXES}
+    assert set(_series_values(before, "cpu", "points")) == {arns[("A", SEOUL)], arns[("B", TOKYO)]}
+    assert set(_series_values(after, "cpu", "points")) == {
+        arns[("A", SEOUL)], arns[("A", TOKYO)], arns[("B", TOKYO)]
+    }
+    assert _called_cells(cw.calls[:mark], tenants) == sorted([("A", SEOUL), ("B", TOKYO)] * 2, key=str)
+    assert _called_cells(cw.calls[mark:], tenants) == sorted(
+        [("A", SEOUL), ("A", TOKYO), ("B", TOKYO)] * 2, key=str
+    )

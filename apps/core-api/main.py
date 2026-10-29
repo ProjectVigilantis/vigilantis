@@ -12,7 +12,8 @@
 #   - 모의 위협 파일 소비자는 MOCK_THREAT_INBOX_DIR 지정 시 독립 기동한다(#322).
 #   - 접근 보호(#492 PR 2): 조치 · 자산 · 인시던트 · 메트릭 라우터는 포함 시점에
 #     Origin(상태 변경만) → 세션 검사를 건다. 공개 경로는 /health 와 로그인 단계뿐이다.
-#     API 문서는 API_DOCS_ENABLED 일 때만 열린다. 메트릭은 임시로 플랫폼 계정만 받는다(#492).
+#     API 문서는 API_DOCS_ENABLED 일 때만 열린다. 조치 · 자산 · 인시던트는 각 라우트가 요청자의 고객사
+#     범위로 제한하고(#533), 메트릭은 플랫폼 관리 등급(CENTRAL_ADMIN · TENANT_MANAGER)만 받는다(#492).
 # ==============================================================================
 
 from __future__ import annotations
@@ -55,6 +56,7 @@ from routers import assets as assets_router  # noqa: E402
 from routers import auth as auth_router  # noqa: E402
 from routers import incidents as incidents_router  # noqa: E402
 from routers import metrics as metrics_router  # noqa: E402
+from routers import staff as staff_router  # noqa: E402
 from routers import tenants as tenants_router  # noqa: E402
 from routers import users as users_router  # noqa: E402
 from routers import ws as ws_router  # noqa: E402
@@ -193,14 +195,16 @@ def create_app() -> FastAPI:
     # 셋 다 라우터 본문 · Workflow · AWS 보다 먼저 돈다. auth 라우터는 Origin을 검사하고,
     # 실제 Cognito 경로만 공급자 설정을 요구한다. WebSocket은 연결 수립 때 직접 검사한다.
     protected = [Depends(require_origin), Depends(require_user)]
-    # 임시 출시 관문(#492) — 테넌트 범위 없는 메트릭은 플랫폼 계정만 받는다.
-    # 사용자 관리는 서비스가 테넌트 범위를 걸므로 고객사 ADMIN 도 쓴다
+    # 조치 · 자산 · 인시던트(#533)는 세션 배선만 쓰고, 고객사 범위는 각 라우트가 auth.access.tenant_scope_of 로
+    # 받는다(auth.access 머리말). 메트릭(#492)은 세션 다음에 플랫폼 관리 등급 관문을 더하고 범위는 라우트가 건다.
+    # 사용자 · 직원 · 테넌트 관리는 각 라우터 · 서비스가 등급과 범위를 건다(고객사 ADMIN 은 사용자 관리만)
     business = [*protected, Depends(require_business_access)]
     app.include_router(actions_router.router, dependencies=protected)
     app.include_router(assets_router.router, dependencies=protected)
     app.include_router(auth_router.router)
     app.include_router(incidents_router.router, dependencies=protected)
     app.include_router(metrics_router.router, dependencies=business)
+    app.include_router(staff_router.router, dependencies=protected)
     app.include_router(tenants_router.router, dependencies=protected)
     app.include_router(users_router.router, dependencies=protected)
     app.include_router(ws_router.router)

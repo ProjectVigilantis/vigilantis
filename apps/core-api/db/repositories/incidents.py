@@ -164,10 +164,11 @@ def list_incidents(
 ) -> list[models.Incident]:
     """공개 목록 계약과 동일하게 created_at 내림차순 전체 반환(페이지네이션 Post-MVP).
 
-    고객사 범위는 그 테넌트의 기록만이다 — 소속 없는 MVP 기록(NULL)은 등호 비교에 걸리지 않아 빠진다."""
+    전체 범위(명시 CENTRAL_ADMIN · 서버 내부)만 소속 없는 MVP 기록(NULL)을 본다. 그 밖의 범위는 그 테넌트들의
+    기록뿐이다 — NULL 은 IN 비교에 걸리지 않아 빠지고, 빈 범위(배정 없는 담당자)는 아무것도 보지 않는다."""
     stmt = select(models.Incident).order_by(models.Incident.created_at.desc())
     if not scope.is_platform:
-        stmt = stmt.where(models.Incident.tenant_id == scope.tenant_id)
+        stmt = stmt.where(models.Incident.tenant_id.in_(scope.tenant_ids))
     if status is not None:
         stmt = stmt.where(models.Incident.status == status)
     if category is not None:

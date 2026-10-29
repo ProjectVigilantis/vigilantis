@@ -19,9 +19,10 @@
 #   - 접근 보호(#492 PR 2): Origin · 세션은 포함 시점(main)에 건다. 종료만 역할(ADMIN ·
 #     OPERATOR)을 여기서 검사하며, 거절되면 대상을 읽지 않고 resolve_incident 에 닿지 않는다.
 #     조회 2종은 테스트 서버(scripts/stepper)가 db= · scope= 로 직접 부른다.
-#   - 테넌트 범위: 세 경로 모두 요청자의 범위(auth.access.tenant_scope_of)로 거른다 — 목록은 범위 밖을
-#     빼고, 상세 · 종료는 범위 밖이면 404 INCIDENT_NOT_FOUND 다. 종료의 정지 판정은 resolve_incident 가
-#     인시던트를 잠근 뒤 한다.
+#   - 테넌트 범위: 세 경로 모두 요청자의 범위(auth.access)로 거른다 — 목록은 범위 밖을 빼고, 상세 · 종료는
+#     범위 밖이면 404 INCIDENT_NOT_FOUND 다. 종료는 요청자(actor)를 resolve_incident 에 넘겨, Workflow 가
+#     인시던트를 잠그기 전에 users 잠금 안에서 세션 · 조치 권한 · 담당 고객을 다시 판정한 범위로 한 번 더
+#     거르고 정지를 판정한다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -56,6 +57,7 @@ from schemas.runbooks import ROLLBACK_RUNBOOK_BY_MAIN_ID
 
 import workflows
 from auth.access import require_action_role, require_tenant_scope, tenant_scope_of
+from auth.admin_service import Actor
 from auth.service import CurrentUser
 from db import mappers, models
 from db.repositories import executions as executions_repo
@@ -65,6 +67,7 @@ from exceptions import ApiError
 from identifiers import canonical_id
 from incident_analysis import load_analysis_results
 from realtime import incident_event
+from routers.users import get_actor
 from tenancy import TenantScope
 
 router = APIRouter(prefix="/api/v1", tags=["incidents"])
@@ -286,13 +289,13 @@ def resolve_incident(
     request: Request,
     db: Session = Depends(get_db),
     user: CurrentUser = Depends(require_action_role),  # 요청자 신원 — 감사 기록(T-2)이 쓴다
+    actor: Actor = Depends(get_actor),
 ) -> IncidentResponse:
     """이미 종료된 건의 재요청도 200이며, 처음 저장된 판단을 그대로 돌려준다."""
-    scope = tenant_scope_of(user)
-    row = _load_incident(db, incident_id, scope)
+    row = _load_incident(db, incident_id, tenant_scope_of(user))
     changed = workflows.resolve_incident(
         db, row.incident_id, payload.resolution, resolution_note=payload.resolution_note,
-        scope=scope,
+        actor=actor,
     )
     response = _to_detail(db, row)
     if changed:

@@ -17,6 +17,13 @@
 #   - CloudWatch 축(1·3)의 창은 메트릭 입자 경계에 맞추고, 같은 창의 결과는 다시 부르지 않고
 #     재사용한다(_cloudwatch_window · _cached_cloudwatch). DB 축은 고정 원점으로 칸을 나누므로
 #     지금 시각 기준 창을 그대로 쓴다.
+#   - 고객사 범위(#492 · #533): 요청마다 신원에서 TenantScope 를 새로 만든다(담당 변경은 다음 요청부터).
+#     중앙(전체)은 소속 없는 MVP 기록까지, 담당자는 배정 고객사만, 담당이 없으면 아무것도 보지 않는다.
+#     범위는 저장소 조회에 걸어 집계 · CloudWatch 대상 선택 **전에** 거른다 — 결과를 뒤에서 거르지 않는다.
+#     리전도 소유마다 건다(MonitoredRegions) — 고객사 기록은 그 고객사의 관제 리전에서만, 소속 없는 기록은
+#     전체 범위에서 설정 리전에서만 센다. 리전 합집합으로 거르면 한 고객사가 관제를 끊은 리전의 옛 기록이
+#     다른 고객사가 그 리전을 관제한다는 이유로 들어온다.
+#     CloudWatch 는 자산 행의 소유 고객사 자격으로만 부르고, 쓸 수 없는 자격은 축을 UNAVAILABLE 로 내린다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -45,14 +52,20 @@ from schemas.api.metrics import (
     ThreatEventPoint,
     TimeseriesPoint,
 )
+from schemas.api.tenants import TenantStatus
 
+from auth.access import require_user, tenant_scope_ids
+from auth.service import CurrentUser
 from config import get_collector_settings
 from db.repositories import assets as assets_repo
+from db.repositories import tenants as tenants_repo
 from db.session import get_db
 from routers import assets as assets_router
+from services.aws.client import TenantAccess
 from services.collector import _failure_reason
 from services.metrics import Ec2Ref, cpu_timeseries, network_timeseries
 from services.rule_engine import IDLE_CPU_AVG
+from tenancy import MonitoredRegions, TenantScope
 
 _log = logging.getLogger(__name__)
 
@@ -78,6 +91,10 @@ class _CloudWatchKey(NamedTuple):
     곡선 목록에서 빠진다 — services.metrics.cpu_timeseries 가 관측이 없는 인스턴스도 빈 줄로
     남겨 범례에서 사라지지 않게 한 것과 어긋난다. 대가는 인스턴스 구성이 바뀐 회차에 한 번 더
     부르는 것이다.
+
+    대상마다 소유 고객사의 접근 재료(Ec2Ref.access — 고객사 · 역할 ARN · ExternalId)가 실려 있어,
+    같은 리전 · 같은 인스턴스 ID 라도 소유가 다르거나 자격 설정이 바뀌면 다른 키다. 요청자의 범위는
+    넣지 않는다 — 결과는 대상만의 함수이고 대상은 범위로 고른 것이다. ExternalId 는 repr 에 실리지 않는다.
     """
 
     axis: str
@@ -115,11 +132,12 @@ def get_metrics_timeseries(
         None, ge=1, le=_MAX_HOURS, description="조회 창(시간). 생략하면 METRICS_WINDOW_HOURS(기본 72)."
     ),
     db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_user),
 ) -> MetricsTimeseriesResponse:
-    # 관제 대상 리전은 /assets 와 같은 근거를 쓴다(#261) — 두 화면이 서로 다른 범위를
-    # 보면 같은 순간에 자산 수와 곡선 수가 어긋난다. 모듈 경유로 부르는 것은 의도적이다:
-    # 테스트가 routers.assets._configured_regions 를 monkeypatch 하면 이쪽도 함께 따른다.
-    regions = assets_router._configured_regions()
+    # 범위는 요청마다 신원에서 만든다 — require_user 가 판정 시점의 담당을 새로 읽는다.
+    scope = TenantScope(tenant_scope_ids(user))
+    owners = _scope_owners(db, scope)
+    regions = _scope_regions(scope, owners)
     settings = get_collector_settings()
     if hours is None:
         hours = settings.METRICS_WINDOW_HOURS
@@ -131,19 +149,64 @@ def get_metrics_timeseries(
 
     return MetricsTimeseriesResponse(
         generated_at=now,
-        cpu=_cpu_axis(db, regions=regions, window_start=cw_start, window_end=cw_end,
-                      period_seconds=settings.METRIC_PERIOD_SECONDS),
-        network=_network_axis(db, regions=regions, window_start=cw_start, window_end=cw_end,
-                              period_seconds=settings.METRIC_PERIOD_SECONDS),
-        sg_exposure=_sg_axis(db, regions=regions, since=window_start,
+        cpu=_cpu_axis(db, regions=regions, scope=scope, owners=owners, window_start=cw_start,
+                      window_end=cw_end, period_seconds=settings.METRIC_PERIOD_SECONDS),
+        network=_network_axis(db, regions=regions, scope=scope, owners=owners, window_start=cw_start,
+                              window_end=cw_end, period_seconds=settings.METRIC_PERIOD_SECONDS),
+        sg_exposure=_sg_axis(db, regions=regions, scope=scope, since=window_start,
                              bucket_seconds=settings.SCAN_INTERVAL_SECONDS),
-        asset_status=_asset_status_axis(db, regions=regions, since=window_start,
+        asset_status=_asset_status_axis(db, regions=regions, scope=scope, since=window_start,
                                         bucket_seconds=settings.SCAN_INTERVAL_SECONDS),
-        asset_inventory=_asset_inventory_axis(db, regions=regions, since=window_start,
+        asset_inventory=_asset_inventory_axis(db, regions=regions, scope=scope, since=window_start,
                                               bucket_seconds=settings.SCAN_INTERVAL_SECONDS),
-        threat_events=_threat_event_axis(db, regions=regions, since=window_start, until=now,
-                                         bucket_seconds=settings.SCAN_INTERVAL_SECONDS),
+        threat_events=_threat_event_axis(db, regions=regions, scope=scope, since=window_start,
+                                         until=now, bucket_seconds=settings.SCAN_INTERVAL_SECONDS),
     )
+
+
+class _Owner(NamedTuple):
+    """범위 안 고객사 1곳. 값으로 옮겨 담는다 — ORM 행은 되돌리기에 만료되어, CloudWatch 를 기다리는 동안
+    읽으면 트랜잭션을 다시 연다."""
+
+    status: TenantStatus
+    regions: tuple[str, ...]
+    access: TenantAccess
+
+
+def _scope_owners(db: Session, scope: TenantScope) -> dict[str, _Owner]:
+    """범위 안 고객사의 상태 · 관제 리전 · 접근 재료. 범위 밖 고객사는 읽지 않는다(빈 범위는 빈 결과)."""
+    return {
+        row.tenant.tenant_id: _Owner(
+            status=row.tenant.status,
+            regions=tuple(row.tenant.regions),
+            access=TenantAccess(
+                tenant_id=row.tenant.tenant_id,
+                access_role_arn=row.tenant.access_role_arn,
+                external_id=row.tenant.external_id,
+            ),
+        )
+        for row in tenants_repo.list_tenants(db, scope_ids=scope.tenant_ids)
+    }
+
+
+def _scope_regions(scope: TenantScope, owners: dict[str, _Owner]) -> MonitoredRegions:
+    """관제 대상 — 범위 안 고객사마다 (고객사, 그 고객사의 관제 리전) 쌍. 전체 범위만 설정 리전(legacy)을 더한다.
+
+    쌍으로 넘기는 것이 요점이다. 리전 합집합으로 넘기면 담당 A(서울) · B(도쿄)에서 A 가 관제를 끊은 도쿄의
+    옛 자산 · 회차 · 이벤트가 B 의 도쿄 때문에 들어오고, CloudWatch 는 A 자격으로 도쿄를 부른다. 소속 없는
+    기록도 같다 — 설정 리전이 서울이면 도쿄의 소속 없는 기록은 고객사가 도쿄를 관제해도 세지 않는다.
+
+    설정 리전은 소속 없는 MVP 기록의 관제 범위이고 /assets 와 같은 근거다(#261). 모듈 경유로 부르는 것은
+    의도적이다: 테스트가 routers.assets._configured_regions 를 monkeypatch 하면 이쪽도 함께 따른다.
+    배정 범위는 소속 없는 기록을 보지 않으므로 설정 리전을 읽지 않는다. 빈 범위는 빈 값(거짓)이다.
+    """
+    pairs = tuple(
+        (tenant_id, region) for tenant_id, owner in owners.items() for region in owner.regions
+    )
+    if scope.is_platform:
+        legacy = tuple(dict.fromkeys(assets_router._configured_regions()))
+        return MonitoredRegions(pairs=pairs, legacy=legacy)
+    return MonitoredRegions(pairs=pairs)
 
 
 def _cloudwatch_window(
@@ -225,16 +288,55 @@ def _axis_failed(db: Session, label: str, exc: Exception) -> str:
     return reason
 
 
-def _ec2_refs(db: Session, regions: list[str]) -> list[Ec2Ref]:
+class _TenantUnavailable(RuntimeError):
+    """소유 고객사의 자격을 쓸 수 없다. 그 고객사의 곡선을 빈 성공으로 그리지 않고 축을 UNAVAILABLE 로 내린다.
+
+    ``reason_code`` 는 축의 사유로 그대로 나간다(collector._failure_reason) — 고객사 ID 는 싣지 않는다.
+    """
+
+    def __init__(self, tenant_id: str, status: TenantStatus | None) -> None:
+        self.reason_code = f"TENANT_{status.value}" if status is not None else "TENANT_NOT_FOUND"
+        super().__init__(f"고객사 {tenant_id} 자격 사용 불가 — {self.reason_code}")
+
+
+def _tenant_access(tenant_id: str | None, owners: dict[str, _Owner]) -> TenantAccess | None:
+    """자산 행의 소유(tenant_id)로 자격을 고른다 — ARN · 리소스 ID 에서 추론하지 않는다.
+
+    None(소속 없는 MVP 기록)은 프로세스 자격이다. 그런 행은 전체 범위의 조회에서만 온다(저장소 범위 계약).
+    ACTIVE 가 아닌 고객사는 부르지 않는다 — 정지는 원격 회수이고, 연결 전에는 자격이 확인된 적이 없다.
+    """
+    if tenant_id is None:
+        return None
+    owner = owners.get(tenant_id)
+    if owner is None or owner.status is not TenantStatus.ACTIVE:
+        raise _TenantUnavailable(tenant_id, owner.status if owner is not None else None)
+    return owner.access
+
+
+def _ec2_refs(
+    db: Session, *, regions: MonitoredRegions, scope: TenantScope, owners: dict[str, _Owner]
+) -> list[Ec2Ref]:
     """곡선을 그릴 EC2 목록. CloudWatch 를 부르는 두 축이 같은 근거를 쓰게 한 자리에 둔다.
+
+    범위와 (소유, 리전) 쌍은 목록을 읽을 때 건다 — 범위 밖 인스턴스나 소유 고객사가 관제하지 않는 리전의
+    인스턴스는 CloudWatch 대상에 오르지 않는다(그 고객사 자격으로 그 리전을 부르지 않는다). 대상마다 소유
+    고객사의 자격을 싣고, 쓸 수 없는 자격이 하나라도 있으면 부르기 전에 실패한다(_TenantUnavailable).
 
     읽은 뒤 트랜잭션을 끝낸다 — 호출자는 이어서 CloudWatch 를 부르거나 기다리는데, 그동안 풀 연결을
     쥐고 있으면 CloudWatch 가 느릴 때 다른 API 까지 연결을 못 얻는다. 목록은 값으로 복사했고
     읽기만 하는 세션이라 잃을 것이 없다.
     """
     refs = [
-        Ec2Ref(arn=a.arn, resource_id=a.resource_id, name=a.name, region=a.region)
-        for a in assets_repo.list_assets(db, asset_type=AssetType.EC2, regions=regions)
+        Ec2Ref(
+            arn=a.arn,
+            resource_id=a.resource_id,
+            name=a.name,
+            region=a.region,
+            access=_tenant_access(a.tenant_id, owners),
+        )
+        for a in assets_repo.list_assets(
+            db, asset_type=AssetType.EC2, regions=regions, scope=scope
+        )
     ]
     db.rollback()
     return refs
@@ -243,14 +345,16 @@ def _ec2_refs(db: Session, regions: list[str]) -> list[Ec2Ref]:
 def _cpu_axis(
     db: Session,
     *,
-    regions: list[str],
+    regions: MonitoredRegions,
+    scope: TenantScope,
+    owners: dict[str, _Owner],
     window_start: datetime,
     window_end: datetime,
     period_seconds: int,
 ) -> CpuAxis:
     """축 1. CloudWatch 호출이므로 여기만 외부 의존이 있다 — 실패를 이 축에 가둔다."""
     try:
-        refs = _ec2_refs(db, regions)
+        refs = _ec2_refs(db, regions=regions, scope=scope, owners=owners)
         series = _cached_cloudwatch(
             _CloudWatchKey("cpu", window_start, window_end, period_seconds, tuple(refs)),
             lambda: cpu_timeseries(
@@ -279,7 +383,9 @@ def _cpu_axis(
 def _network_axis(
     db: Session,
     *,
-    regions: list[str],
+    regions: MonitoredRegions,
+    scope: TenantScope,
+    owners: dict[str, _Owner],
     window_start: datetime,
     window_end: datetime,
     period_seconds: int,
@@ -287,7 +393,7 @@ def _network_axis(
     """축 3. CPU 와 원천은 같지만 **호출을 나눈다** — 쿼리가 인스턴스당 2개 더 붙는 쪽이라
     한도·권한 문제로 이 축만 떨어지는 경우가 있고, 그때 CPU 곡선까지 비우지 않기 위해서다."""
     try:
-        refs = _ec2_refs(db, regions)
+        refs = _ec2_refs(db, regions=regions, scope=scope, owners=owners)
         series = _cached_cloudwatch(
             _CloudWatchKey("network", window_start, window_end, period_seconds, tuple(refs)),
             lambda: network_timeseries(
@@ -312,12 +418,17 @@ def _network_axis(
 
 
 def _sg_axis(
-    db: Session, *, regions: list[str], since: datetime, bucket_seconds: int
+    db: Session,
+    *,
+    regions: MonitoredRegions,
+    scope: TenantScope,
+    since: datetime,
+    bucket_seconds: int,
 ) -> SgExposureAxis:
     """축 2. DB 만 본다 — CloudWatch 가 죽어도 이 축은 그려진다."""
     try:
         buckets = assets_repo.sg_exposure_history(
-            db, regions=regions, since=since, bucket_seconds=bucket_seconds
+            db, regions=regions, since=since, bucket_seconds=bucket_seconds, scope=scope
         )
     except Exception as exc:
         return SgExposureAxis(
@@ -331,12 +442,17 @@ def _sg_axis(
 
 
 def _asset_status_axis(
-    db: Session, *, regions: list[str], since: datetime, bucket_seconds: int
+    db: Session,
+    *,
+    regions: MonitoredRegions,
+    scope: TenantScope,
+    since: datetime,
+    bucket_seconds: int,
 ) -> AssetStatusAxis:
     """축 4. 축 2와 같이 DB 만 본다 — 대시보드가 쓰는 축이라 CloudWatch 가 죽어도 그려져야 한다."""
     try:
         buckets = assets_repo.asset_status_history(
-            db, regions=regions, since=since, bucket_seconds=bucket_seconds
+            db, regions=regions, since=since, bucket_seconds=bucket_seconds, scope=scope
         )
     except Exception as exc:
         return AssetStatusAxis(
@@ -362,12 +478,17 @@ def _asset_status_axis(
 
 
 def _asset_inventory_axis(
-    db: Session, *, regions: list[str], since: datetime, bucket_seconds: int
+    db: Session,
+    *,
+    regions: MonitoredRegions,
+    scope: TenantScope,
+    since: datetime,
+    bucket_seconds: int,
 ) -> AssetInventoryAxis:
     """축 5. DB 만 본다 — 축 4와 같은 이유로 CloudWatch 와 따로 살아야 한다."""
     try:
         buckets = assets_repo.asset_inventory_history(
-            db, regions=regions, since=since, bucket_seconds=bucket_seconds
+            db, regions=regions, since=since, bucket_seconds=bucket_seconds, scope=scope
         )
     except Exception as exc:
         return AssetInventoryAxis(
@@ -389,12 +510,19 @@ def _asset_inventory_axis(
 
 
 def _threat_event_axis(
-    db: Session, *, regions: list[str], since: datetime, until: datetime, bucket_seconds: int
+    db: Session,
+    *,
+    regions: MonitoredRegions,
+    scope: TenantScope,
+    since: datetime,
+    until: datetime,
+    bucket_seconds: int,
 ) -> ThreatEventAxis:
     """축 6. DB 만 본다 — 판정 축(4)과 한 차트에 겹치므로 같은 칸 크기를 쓴다."""
     try:
         buckets = assets_repo.threat_event_history(
-            db, regions=regions, since=since, until=until, bucket_seconds=bucket_seconds
+            db, regions=regions, since=since, until=until, bucket_seconds=bucket_seconds,
+            scope=scope,
         )
     except Exception as exc:
         return ThreatEventAxis(

@@ -1,4 +1,4 @@
-# ==============================================================================
+﻿# ==============================================================================
 # [파일 설명]
 # 연결 관리자 격리·종료 견고화 검증 — 발행 중 실패·타임아웃 연결을 제거하면서
 # 정상 연결은 계속 수신하는지, 종료 경합·전송 예외·느린 close·설정 오류가
@@ -26,6 +26,11 @@ def _ev(incident_id: str, event_type: WsEventType = WsEventType.INCIDENT_CREATED
     # 생성 이벤트만 트랙을 싣는다(schemas/api/ws.py)
     category = IncidentCategory.SECOPS if event_type is WsEventType.INCIDENT_CREATED else None
     return incident_event(event_type, incident_id=incident_id, occurred_at=T0, category=category)
+
+
+async def _allow(event) -> bool:
+    """격리 배관 테스트용 명시적 허용 판정 — 런타임 라우터는 DB 판정을 묶는다."""
+    return True
 
 
 def _logs(caplog, message: str) -> list:
@@ -85,8 +90,8 @@ def test_failing_connection_is_removed_and_others_still_receive():
         await manager.start()
         try:
             good, bad = FakeWebSocket(), FakeWebSocket(fail=True)
-            await manager.register(good)
-            await manager.register(bad)
+            await manager.register(good, _allow)
+            await manager.register(bad, _allow)
             await _publish_and_wait(manager, good)
             # 연결 제거와 close 완료는 별도 단계이므로 완료 신호까지 기다린다.
             await asyncio.wait_for(bad.close_completed.wait(), timeout=2.0)
@@ -103,8 +108,8 @@ def test_slow_connection_hits_timeout_and_is_removed():
         manager = RealtimeManager(send_timeout_seconds=0.05)
         await manager.start()
         good, slow = FakeWebSocket(), FakeWebSocket(slow_seconds=0.5)
-        await manager.register(good)
-        await manager.register(slow)
+        await manager.register(good, _allow)
+        await manager.register(slow, _allow)
         await _publish_and_wait(manager, good)
         assert manager.connection_count == 1
         assert slow.sent == []  # 제한시간 안에 전송을 못 끝냈다
@@ -153,7 +158,7 @@ def test_publish_during_stop_close_wait_warns_and_drops(caplog):
         manager = RealtimeManager(send_timeout_seconds=5.0)
         await manager.start()
         blocking = BlockingCloseWebSocket()
-        await manager.register(blocking)
+        await manager.register(blocking, _allow)
         queue_before = manager._queue
 
         stop_task = asyncio.create_task(manager.stop())
@@ -229,7 +234,7 @@ def test_inflight_event_cancelled_at_stop_leaves_drop_log(caplog):
         manager = RealtimeManager(send_timeout_seconds=5.0)
         await manager.start()
         blocking = BlockingSendWebSocket()
-        await manager.register(blocking)
+        await manager.register(blocking, _allow)
         manager.publish(_ev("inc-inflight"))
         await asyncio.wait_for(blocking.send_entered.wait(), timeout=2.0)
         # 이 시점: 이벤트는 큐에서 빠져 전송 중 — stop()의 취소가 여기를 끊는다
@@ -251,7 +256,7 @@ def test_consumer_survives_broadcast_failure(monkeypatch, caplog):
         manager = RealtimeManager(send_timeout_seconds=1.0)
         await manager.start()
         good = FakeWebSocket()
-        await manager.register(good)
+        await manager.register(good, _allow)
 
         original_broadcast = manager._broadcast
         failed_once = False
@@ -289,8 +294,8 @@ def test_slow_close_does_not_block_broadcast_removal():
         await manager.start()
         good = FakeWebSocket()
         bad = FakeWebSocket(fail=True, close_seconds=30.0)
-        await manager.register(good)
-        await manager.register(bad)
+        await manager.register(good, _allow)
+        await manager.register(bad, _allow)
         await _publish_and_wait(manager, good)
         # close 30초를 기다린다면 아래 두 번째 이벤트가 대기(최대 2초) 안에 못 온다
         manager.publish(_ev("inc-next", WsEventType.INCIDENT_UPDATED))
@@ -312,8 +317,8 @@ def test_slow_close_does_not_block_stop():
     async def scenario():
         manager = RealtimeManager(send_timeout_seconds=0.25)
         await manager.start()
-        await manager.register(FakeWebSocket(close_seconds=30.0))
-        await manager.register(FakeWebSocket(close_seconds=30.0))
+        await manager.register(FakeWebSocket(close_seconds=30.0), _allow)
+        await manager.register(FakeWebSocket(close_seconds=30.0), _allow)
         await asyncio.wait_for(manager.stop(), timeout=2.0)
         assert manager.connection_count == 0
 

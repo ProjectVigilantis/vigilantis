@@ -12,8 +12,9 @@
 #     실행을 집어 services/aws/executor.py로 넘긴다(Issue #232).
 #   - 접근 보호(#492 PR 2): Origin · 세션은 포함 시점(main)에, 역할(ADMIN · OPERATOR)은
 #     여기서 검사한다. 거절되면 reserve_execution 에 닿지 않는다 — 실행 행 · 후보 전이가 없다.
-#   - 테넌트 범위: 요청자의 범위(auth.access.tenant_scope_of)를 reserve_execution 에 넘긴다. 범위 밖
-#     404 · 대상 테넌트 정지 409 와 그 판정 순서는 Workflow 가 정한다.
+#   - 테넌트 범위: 요청자(actor)를 reserve_execution 에 넘긴다. Workflow 가 쓰기 직전 users 잠금 안에서
+#     세션 · 조치 권한 · 담당 고객을 다시 판정하고, 범위 밖 404 · 대상 테넌트 정지 409 와 그 판정 순서를
+#     정한다. 역할 의존성의 신원은 대상을 읽기 전 403 판정용 스냅샷이다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -24,9 +25,11 @@ from sqlalchemy.orm import Session
 from schemas.api.actions import ExecuteActionRequest, ExecuteActionResponse
 
 import workflows
-from auth.access import require_action_role, tenant_scope_of
+from auth.access import require_action_role
+from auth.admin_service import Actor
 from auth.service import CurrentUser
 from db.session import get_db
+from routers.users import get_actor
 
 router = APIRouter(prefix="/api/v1", tags=["actions"])
 
@@ -41,9 +44,10 @@ def execute_action(
     response: Response,
     db: Session = Depends(get_db),
     user: CurrentUser = Depends(require_action_role),  # 요청자 신원 — 감사 기록(T-2)이 쓴다
+    actor: Actor = Depends(get_actor),
 ) -> ExecuteActionResponse:
     """신규 예약은 202, 같은 Key 재요청은 200 — 응답 본문은 두 경우가 같다."""
-    reservation = workflows.reserve_execution(db, payload, scope=tenant_scope_of(user))
+    reservation = workflows.reserve_execution(db, payload, actor=actor)
     if not reservation.created:
         response.status_code = status.HTTP_200_OK
     return reservation.response

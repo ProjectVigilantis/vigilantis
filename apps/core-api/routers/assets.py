@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 from collections import defaultdict
+from collections.abc import Sequence
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
@@ -30,13 +31,14 @@ from auth.access import require_tenant_scope
 from config import get_aws_settings
 from db import models
 from db.repositories import assets as assets_repo
+from db.repositories import tenants as tenants_repo
 from db.session import get_db
 from services.collector import (
     REGION_FAILURE_LABEL,
     UNOBSERVED_TYPES_BY_FAILURE,
     VPC_SCOPE_FAILURE_LABEL,
 )
-from tenancy import TenantScope
+from tenancy import MonitoredRegions, TenantScope
 
 _log = logging.getLogger(__name__)
 
@@ -66,10 +68,10 @@ def _worst_status(runs: list[models.CollectionRun]) -> CollectionRunStatus:
 
 
 def _configured_regions() -> list[str]:
-    """관제 대상 리전 = 설정된 리전(AWS_REGIONS, 없으면 AWS_REGION). (#261)
+    """설정된 리전(AWS_REGIONS, 없으면 AWS_REGION) — 소속 없는 MVP 기록의 관제 범위. (#261)
 
-    collection_status·items·last_collected_at 을 이 범위로 함께 좁혀 응답 안에서
-    리전 범위가 갈리지 않게 한다. (테스트는 이 함수를 monkeypatch 로 대체한다)
+    전체 범위의 관제 리전에 들어간다(_monitored_regions). collection_status·items·last_collected_at 을
+    관제 리전으로 함께 좁혀 응답 안에서 리전 범위가 갈리지 않게 한다. (테스트는 이 함수를 monkeypatch 로 대체한다)
     """
     regions = get_aws_settings().regions_list()
     if not regions:
@@ -80,12 +82,36 @@ def _configured_regions() -> list[str]:
     return regions
 
 
-def _collection_status(
-    runs: list[models.CollectionRun], regions: list[str]
-) -> CollectionStatus:
-    """설정 리전 스코프 안에서 collection_status 산출. (#261)
+def _monitored_regions(db: Session, scope: TenantScope) -> MonitoredRegions:
+    """범위의 관제 대상 — 범위 안 고객사마다 (고객사, 그 테넌트 행의 관제 리전) 쌍. 전체 범위만 설정 리전(legacy)을 더한다.
 
-    설정 리전 중 아직 run 이 없는 리전이 있으면(최초 수집 대기·수집 중 모두 해당)
+    쌍으로 넘기는 것이 요점이다 — 리전 합집합으로 넘기면 A(서울) · B(도쿄)를 함께 볼 때 A 가 관제하지 않는 도쿄의
+    옛 A 기록이 B 의 도쿄 때문에 들어온다. 설정 리전(_configured_regions)은 소속 없는 MVP 기록의 관제 범위다(#261) —
+    배정 범위는 소속 없는 기록을 보지 않으므로 설정 리전을 읽지 않는다. 메트릭(routers.metrics)과 같은 규칙이다 —
+    두 화면이 다른 범위를 보면 같은 순간에 자산 수와 곡선 수가 어긋난다. 빈 범위는 빈 값(거짓)이다. ARN 에서 리전 ·
+    소유를 추론하지 않는다.
+    """
+    pairs = tuple(
+        dict.fromkeys(
+            (row.tenant.tenant_id, region)
+            for row in tenants_repo.list_tenants(db, scope_ids=scope.tenant_ids)
+            for region in row.tenant.regions
+        )
+    )
+    if scope.is_platform:
+        return MonitoredRegions(pairs=pairs, legacy=tuple(dict.fromkeys(_configured_regions())))
+    return MonitoredRegions(pairs=pairs)
+
+
+def _collection_status(
+    runs: list[models.CollectionRun], regions: Sequence[str]
+) -> CollectionStatus:
+    """관제 리전 스코프 안에서 collection_status 산출. (#261) ``runs`` 는 범위 안 (소유 × 리전)별 최신 run 이다.
+
+    ``regions`` 는 관제 리전의 합집합(MonitoredRegions.regions)이고 덮음은 종전대로 **리전 단위**다 — 한 리전에 범위 안
+    run 이 하나라도 있으면 그 리전은 덮인 것으로 본다(쌍마다 따지지 않는다 — 알려진 한계).
+
+    관제 리전 중 범위 안 run 이 하나도 없는 리전이 있으면(최초 수집 대기·수집 중 모두 해당)
     '전체 관제 범위 수집 미완료'로 보아 COLLECTING 을 하한으로 깐다 — 기존 리전의
     SUCCESS 만으로 READY 를 주지 않는다. 단 IN_PROGRESS 는 심각도상 PARTIAL·FAILED
     아래라, 다른 리전의 실제 실패는 그대로 드러난다(안성일 확정).
@@ -149,17 +175,18 @@ def get_assets(
     db: Session = Depends(get_db),
     scope: TenantScope = Depends(require_tenant_scope),
 ) -> AssetsResponse:
-    # 고객사 계정은 자기 테넌트의 자산·수집 회차·연결·판정만 본다. 수집 상태·마지막 수집
-    # 시각·uncollected 도 같은 범위의 run 에서만 산출해 남의 회차가 내 상태를 바꾸지 않는다.
-    # 플랫폼 계정은 소속 없는 기록 포함 전체다.
-    # 관제 대상 = 설정된 리전(AWS_REGIONS). 세 필드를 모두 이 범위로 좁혀 응답 안에서
-    # 리전 범위가 갈리지 않게 한다 — 수집 대상서 빠진 리전의 옛 run 이 화면을 붙잡던
-    # 문제를 막는다. (Issue #261, 안성일 확정) 리전별 최신 run 을 최악 상태로 접는
-    # 것은 #231 그대로 — 리전 격리(C4) 이후 실패가 실행 순서에 가려지지 않게 한다.
-    regions = _configured_regions()
+    # 고객사 범위(#533 · #492): 범위는 신원에서 만든 것만 쓴다(기본값 없음). 중앙(전체)은 소속 없는 MVP
+    # 기록까지, 담당자는 배정 고객사들만(배정 없음 = 아무것도), 고객사 계정은 자기 고객사만 본다. 자산 ·
+    # 수집 회차 · 연결 · 판정을 모두 같은 범위로 읽고, 수집 상태 · 마지막 수집 시각 · uncollected 도 범위 안
+    # 회차에서만 산출해 남의 회차가 내 상태를 바꾸지 않는다.
+    # 관제 대상은 범위의 (고객사, 리전) 쌍과 전체 범위의 설정 리전(_monitored_regions)이다. 세 필드를 모두 이 범위로
+    # 좁혀 응답 안에서 범위가 갈리지 않게 한다 — 수집 대상서 빠진 리전 · 고객사가 관제하지 않는 리전의 옛 run 이 화면을
+    # 붙잡던 문제를 막는다(Issue #261, 안성일 확정). (소유 × 리전)별 최신 run 을 최악 상태로 접는 것은 #231 그대로 —
+    # 리전 격리(C4) 이후 실패가 실행 순서에, 한 고객사의 실패가 같은 리전 다른 고객사의 더 새 run 에 가려지지 않게 한다.
+    regions = _monitored_regions(db, scope)
     runs = assets_repo.latest_collection_run_per_region(db, regions=regions, scope=scope)
     if not runs:
-        # 설정 리전 전체에 수집 이력이 없음 — 계약상 목록·last_collected_at도 비어야 한다
+        # 범위의 관제 리전 전체에 수집 이력이 없음 — 계약상 목록·last_collected_at도 비어야 한다
         return AssetsResponse(collection_status=CollectionStatus.NOT_COLLECTED)
 
     relationships: dict[str, list[models.AssetRelationship]] = defaultdict(list)
@@ -172,7 +199,7 @@ def get_assets(
         for asset in assets_repo.list_assets(db, regions=regions, scope=scope)
     ]
     return AssetsResponse(
-        collection_status=_collection_status(runs, regions),
+        collection_status=_collection_status(runs, regions.regions),
         last_collected_at=assets_repo.last_finished_collection_at(db, regions=regions, scope=scope),
         items=items,
         uncollected=_uncollected(runs),
