@@ -22,6 +22,7 @@ from db.repositories import assets as assets_repo
 from db.repositories import executions as exec_repo
 from db.repositories import guardrails as guard_repo
 from db.repositories import incidents as incidents_repo
+from db.repositories import tenants as tenants_repo
 from schemas.api.actions import ExecutionStatus
 from schemas.api.assets import AssetType, RelationType
 from schemas.api.incidents import (
@@ -30,6 +31,7 @@ from schemas.api.incidents import (
     ResponseMode,
     RiskLevel,
 )
+from schemas.api.tenants import TenantStatus, TenantVerificationResult
 from schemas.assets import MetricSummary as MetricSummaryContract
 from schemas.candidates import CandidateStatus, RunbookCandidateData
 from schemas.collections import CollectionRunStatus
@@ -47,6 +49,7 @@ from schemas.incidents import AgentInvocationStatus, AgentWaitSchedule
 from schemas.runbooks import RunbookId, TriggerSource
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
+from tenancy import ALL_TENANTS, TenantScope
 
 NOW = datetime(2026, 8, 18, 12, 0, 0, tzinfo=UTC)
 
@@ -734,6 +737,60 @@ def test_backup_record_binds_once(db):
     assert not exec_repo.bind_backup_record(
         db, execution.execution_id, backup.backup_record_id
     )
+
+
+# --- 테넌트 소속 ----------------------------------------------------------------
+
+
+def _account() -> str:
+    return f"{uuid.uuid4().int % 10**12:012d}"
+
+
+def _tenant(db, account: str | None = None) -> models.Tenant:
+    account = account or _account()
+    return tenants_repo.create_tenant(
+        db, name=f"t-{account}", aws_account_id=account, regions=["ap-northeast-2"], now=NOW
+    )
+
+
+def test_tenant_lookup_by_account_does_not_depend_on_status(db):
+    account = _account()
+    tenant = _tenant(db, account)
+    assert tenant.status is TenantStatus.PENDING_CONNECTION
+    assert tenants_repo.tenant_id_for_account(db, account) == tenant.tenant_id
+
+    assert tenants_repo.record_verification(
+        db, tenant.tenant_id, result=TenantVerificationResult.OK, reason_code=None, now=NOW
+    )
+    assert tenants_repo.suspend_tenant(db, tenant.tenant_id, reason="해지", now=NOW)
+    assert tenants_repo.tenant_id_for_account(db, account) == tenant.tenant_id
+    assert tenants_repo.tenant_id_for_account(db, _account()) is None
+
+
+@pytest.mark.parametrize("owned", [True, False], ids=["tenant", "mvp-record"])
+def test_execution_tenant_is_copied_from_its_incident(db, owned):
+    tenant_id = _tenant(db).tenant_id if owned else None
+    incident = _secops_incident(db, tenant_id=tenant_id)
+
+    execution = _execution(db, incident)
+
+    db.expire_all()
+    assert exec_repo.get_execution(db, execution.execution_id).tenant_id == tenant_id
+
+
+def test_list_incidents_narrows_to_the_tenant_scope(db):
+    a, b = _tenant(db), _tenant(db)
+    mine = _secops_incident(db, tenant_id=a.tenant_id)
+    theirs = _secops_incident(db, tenant_id=b.tenant_id)
+    unowned = _finops_incident(db)
+
+    scoped = incidents_repo.list_incidents(db, scope=TenantScope(tenant_id=a.tenant_id))
+    every = incidents_repo.list_incidents(db, scope=ALL_TENANTS)
+
+    assert [row.incident_id for row in scoped] == [mine.incident_id]
+    assert {mine.incident_id, theirs.incident_id, unowned.incident_id} <= {
+        row.incident_id for row in every
+    }
 
 
 # --- Guardrail 저장 -------------------------------------------------------------
