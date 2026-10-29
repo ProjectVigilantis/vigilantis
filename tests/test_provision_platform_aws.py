@@ -29,7 +29,7 @@ import json
 import sys
 import uuid
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote_to_bytes, urlsplit
 
 import pytest
 from botocore.exceptions import ClientError
@@ -303,23 +303,53 @@ def test_rate_limit_counts_per_ip_but_never_the_nat_ip():
         "NotStatement": {"Statement": {"IPSetReferenceStatement": {"ARN": "arn:nat"}}}}
 
 
-def test_login_rate_limit_counts_only_the_auth_path_per_ip_without_the_nat_ip():
+def _login_path_matches(path: bytes) -> bool:
+    """로그인 규칙의 경로 조건(OR · URL 디코딩 뒤 STARTS_WITH)을 그대로 흉내 낸다."""
+    rule = _rules()["rate-login-per-ip"]
+    paths, _ = rule["Statement"]["RateBasedStatement"]["ScopeDownStatement"]["AndStatement"]["Statements"]
+    def seen(match):
+        decode = {"Priority": 0, "Type": "URL_DECODE"} in match["TextTransformations"]
+        return unquote_to_bytes(path) if decode else path
+    return any(seen(m).startswith(m["SearchString"])
+               for m in (s["ByteMatchStatement"] for s in paths["OrStatement"]["Statements"]))
+
+
+def test_login_rate_limit_counts_only_the_login_and_reset_paths_per_ip_without_the_nat_ip():
     rule = _rules()["rate-login-per-ip"]
     stmt = rule["Statement"]["RateBasedStatement"]
     assert (stmt["AggregateKeyType"], stmt["Limit"], stmt["EvaluationWindowSec"]) == (
         "IP", platform.LOGIN_RATE_LIMIT_PER_WINDOW, platform.RATE_WINDOW_SECONDS)
     assert platform.LOGIN_RATE_LIMIT_PER_WINDOW < platform.RATE_LIMIT_PER_WINDOW
-    path, not_nat = stmt["ScopeDownStatement"]["AndStatement"]["Statements"]
-    assert path == {"ByteMatchStatement": {
+    paths, not_nat = stmt["ScopeDownStatement"]["AndStatement"]["Statements"]
+    # 대입 대상인 경로만 — /me · /activity 가 섞이면 관측 지표로 대입과 정상 사용을 가를 수 없다
+    assert paths == {"OrStatement": {"Statements": [{"ByteMatchStatement": {
         # get_web_acl 이 bytes 로 돌려준다 — str 이면 두 번째 실행부터 매번 「다름」이 된다
-        "SearchString": b"/api/v1/auth/",
+        "SearchString": prefix,
         "FieldToMatch": {"UriPath": {}},
-        # 앱은 %인코딩을 풀어 라우팅한다 — 풀지 않고 맞추면 /api/v1/%61uth/ 가 비켜 간다
+        # 앱은 %인코딩을 풀어 라우팅한다 — 풀지 않고 맞추면 /api/v1/auth/%6Cogin 이 비켜 간다
         "TextTransformations": [{"Priority": 0, "Type": "URL_DECODE"}],
         "PositionalConstraint": "STARTS_WITH",
-    }}
+    }} for prefix in (b"/api/v1/auth/login", b"/api/v1/auth/password-reset")]}}
     assert not_nat == {"NotStatement": {"Statement": {"IPSetReferenceStatement": {"ARN": "arn:nat"}}}}
     assert rule["VisibilityConfig"]["MetricName"] == f"{platform.PREFIX}-rate-login"
+
+
+@pytest.mark.parametrize("path", [
+    b"/api/v1/auth/login", b"/api/v1/auth/login/new-password", b"/api/v1/auth/login/totp-setup",
+    b"/api/v1/auth/login/totp-setup/verify", b"/api/v1/auth/login/totp", b"/api/v1/auth/login/email-verification",
+    b"/api/v1/auth/password-reset", b"/api/v1/auth/password-reset/confirm",
+    b"/api/v1/auth/%6Cogin", b"/api/v1/%61uth/password-reset",
+])
+def test_login_rate_limit_counts_every_login_and_reset_step(path):
+    assert _login_path_matches(path)
+
+
+@pytest.mark.parametrize("path", [
+    b"/api/v1/auth/me", b"/api/v1/auth/activity", b"/api/v1/auth/logout", b"/api/v1/incidents",
+])
+def test_login_rate_limit_skips_the_signed_in_session_calls(path):
+    # 로그인한 화면이 화면을 열 때 · 입력이 있을 때 부른다 — 대입 대상이 아니다
+    assert not _login_path_matches(path)
 
 
 def test_login_rate_limit_starts_in_count_mode():

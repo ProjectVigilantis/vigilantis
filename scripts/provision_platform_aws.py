@@ -68,10 +68,12 @@
 #      동작은 Count(세기만)로 시작한다 — 정상 사용량을 재지 않았고, 캐시가 꺼져 있어 정적 파일까지
 #      전부 센다. 관측(CloudWatch 지표 vigilantis-platform-rate) 뒤 RATE_ACTION을 Block으로 바꾼다.
 #      up을 다시 돌리면 기존 웹 ACL의 규칙도 이 정의로 맞춘다 — 규칙을 고친 뒤 재실행이 곧 적용이다.
-#      로그인 경로(/api/v1/auth/)에는 더 낮은 한도(LOGIN_RATE_LIMIT_PER_WINDOW)를 맨 앞(우선순위 0)에 따로
-#      건다(#522 C) — 비밀번호 대입에는 전 경로 한도가 넉넉하다. 로그인 화면은 브라우저가 직접 부르므로 사용자
+#      로그인 단계(/api/v1/auth/login*)와 비밀번호 재설정(/api/v1/auth/password-reset*)에는 더 낮은
+#      한도(LOGIN_RATE_LIMIT_PER_WINDOW)를 맨 앞(우선순위 0)에 따로 건다(#522 C) — 비밀번호 대입에는 전 경로
+#      한도가 넉넉하다. 로그인한 화면이 부르는 /auth/me · /auth/activity · /auth/logout 은 세지 않는다 —
+#      섞이면 관측 지표로 대입과 정상 사용을 가를 수 없다. 로그인 화면은 브라우저가 직접 부르므로 사용자
 #      IP로 세지고, NAT 제외도 같다. 경로는 URL 디코딩 뒤 맞춘다 — 앱은 %인코딩을 풀어 라우팅하므로 풀지
-#      않으면 /api/v1/%61uth/ 로 비켜 간다. 이 규칙도 Count로 시작해 같은 방식으로 관측 뒤 Block으로 바꾼다.
+#      않으면 /api/v1/auth/%6Cogin 으로 비켜 간다. 이 규칙도 Count로 시작해 같은 방식으로 관측 뒤 Block으로 바꾼다.
 #      앱 쪽 한도(AUTH_RATE_LIMITED · AUTH_CODE_FAILURE_LIMIT)는 그대로 남는다 — WAF는 그 앞의 IP 단위 거름이다.
 #   ⑧ 고객 계정의 접근 역할은 고객 태그(vigilantis:customer-access=<플랫폼 계정 ID>)로 식별한다. 다른 플랫폼
 #      계정의 태그가 달려 있거나 어느 태그도 없으면 덮어쓰지 않는다. 플랫폼 태그만 달린 역할(같은 계정의 옛
@@ -198,7 +200,9 @@ RATE_LIMIT_PER_WINDOW = 1000
 RATE_WINDOW_SECONDS = 300
 RATE_ACTION = "Count"  # 관측 뒤 "Block"
 # 로그인 경로 속도 제한(#522 C) — 잠정값. 사람이 5분에 로그인 단계를 100번 밟을 일은 없다. Count 관측으로 다시 정한다
-LOGIN_PATH_PREFIX = b"/api/v1/auth/"  # bytes — get_web_acl 이 SearchString 을 bytes 로 돌려준다(멱등 비교)
+# 대입 대상인 경로만 — 로그인 6단계 · 비밀번호 재설정 2개(routers/auth.py). /me · /activity · /logout 은 뺀다
+# bytes — get_web_acl 이 SearchString 을 bytes 로 돌려준다(멱등 비교)
+LOGIN_PATH_PREFIXES = (b"/api/v1/auth/login", b"/api/v1/auth/password-reset")
 LOGIN_RATE_LIMIT_PER_WINDOW = 100
 LOGIN_RATE_ACTION = "Count"  # 관측 뒤 "Block"
 CF_COMMENT = PREFIX  # CloudFront 배포는 태그로 찾기 어렵다 — comment로 식별한다
@@ -305,12 +309,14 @@ def waf_rules(ipset_arn: str, nat_ipset_arn: str) -> list[dict]:
             "EvaluationWindowSec": RATE_WINDOW_SECONDS,
             "AggregateKeyType": "IP",
             "ScopeDownStatement": {"AndStatement": {"Statements": [
-                {"ByteMatchStatement": {
-                    "SearchString": LOGIN_PATH_PREFIX,
-                    "FieldToMatch": {"UriPath": {}},
-                    "TextTransformations": [{"Priority": 0, "Type": "URL_DECODE"}],
-                    "PositionalConstraint": "STARTS_WITH",
-                }},
+                {"OrStatement": {"Statements": [
+                    {"ByteMatchStatement": {
+                        "SearchString": prefix,
+                        "FieldToMatch": {"UriPath": {}},
+                        "TextTransformations": [{"Priority": 0, "Type": "URL_DECODE"}],
+                        "PositionalConstraint": "STARTS_WITH",
+                    }} for prefix in LOGIN_PATH_PREFIXES
+                ]}},
                 not_nat,
             ]}},
         }},
