@@ -330,6 +330,15 @@ def make_auth_session(db, allowed_origin):
 
 
 @pytest.fixture()
+def audit_actor(make_auth_session):
+    """워크플로를 직접 부르는 테스트의 요청자 — 실제 PLATFORM ADMIN 행을 가리키는 감사 기록 행위자(T-2)."""
+    from db.repositories import audit as audit_repo
+    from schemas.api.auth import AccountType
+
+    return audit_repo.person(make_auth_session().user_id, AccountType.PLATFORM)
+
+
+@pytest.fixture()
 def platform_session(make_auth_session) -> AuthSeed:
     """client_pg 가 기본으로 싣는 PLATFORM ADMIN 세션."""
     return make_auth_session()
@@ -412,8 +421,12 @@ class CommittedAuth:
         from db import models
         from sqlalchemy import delete
 
+        from tests.audit_cleanup import purge_audit_events
+
         with self.sessions() as session:
             if self._user_ids:
+                # 이 사용자가 승인 · 종료한 감사 기록이 사용자 행을 가리킨다(FK RESTRICT)
+                purge_audit_events(session, actor_user_ids=self._user_ids)
                 session.execute(
                     delete(models.AuthSession).where(models.AuthSession.user_id.in_(self._user_ids))
                 )
@@ -436,6 +449,15 @@ def committed_auth(pg_engine, allowed_origin):
     )
     yield auth
     auth.cleanup()
+
+
+@pytest.fixture()
+def committed_actor(committed_auth):
+    """커밋된 PLATFORM ADMIN 을 가리키는 감사 기록 행위자 — 다른 연결에서 워크플로를 부르는 테스트용(T-2)."""
+    from db.repositories import audit as audit_repo
+    from schemas.api.auth import AccountType
+
+    return audit_repo.person(committed_auth.make().user_id, AccountType.PLATFORM)
 
 
 @pytest.fixture()

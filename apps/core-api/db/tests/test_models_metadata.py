@@ -47,6 +47,8 @@ EXPECTED_TABLES = {
     "app_users",
     "auth_sessions",
     "user_admin_events",
+    # 조치 승인 · 종료 판단 감사 기록 (T-2 · #544)
+    "audit_events",
 }
 
 

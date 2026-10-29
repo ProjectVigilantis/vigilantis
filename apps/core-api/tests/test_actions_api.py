@@ -31,6 +31,7 @@ import workflows
 from db import models
 from db.repositories import executions as executions_repo
 from db.repositories import incidents as incidents_repo
+from tests.audit_cleanup import purge_audit_events
 from exceptions import ApiError
 
 URL = "/api/v1/actions/execute"
@@ -379,7 +380,7 @@ def test_duplicate_key_race_recovers_to_existing_execution(
 
 @pytest.mark.parametrize("same_incident", [True, False], ids=["same-incident", "different-incidents"])
 def test_concurrent_same_key_requests_reserve_exactly_once(
-    pg_engine, make_incident, make_candidate, same_incident,
+    pg_engine, make_incident, make_candidate, committed_actor, same_incident,
 ):
     """실제 PG 대기를 관찰한다. 같은 사건이면 재생, 다른 사건이면 키 충돌이다."""
     from sqlalchemy import delete, event, text
@@ -407,7 +408,7 @@ def test_concurrent_same_key_requests_reserve_exactly_once(
     def reserve(session, request):
         session.execute(text("SET LOCAL lock_timeout = '30s'"))
         try:
-            return workflows.reserve_execution(session, request)
+            return workflows.reserve_execution(session, request, actor=committed_actor)
         except ApiError as exc:
             return exc.code
 
@@ -467,6 +468,7 @@ def test_concurrent_same_key_requests_reserve_exactly_once(
     finally:
         with Session(pg_engine) as cleanup:
             incident_ids = [row[0] for row in seeded]
+            purge_audit_events(cleanup, incident_ids=incident_ids)
             cleanup.execute(
                 delete(models.ActionExecution).where(
                     models.ActionExecution.incident_id.in_(incident_ids)

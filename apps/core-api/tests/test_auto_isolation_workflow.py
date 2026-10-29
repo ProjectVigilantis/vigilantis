@@ -23,6 +23,7 @@ from time import monotonic, sleep
 
 import pytest
 import workflows
+from tests.audit_cleanup import purge_audit_events
 from db import models
 from db.repositories import executions as executions_repo
 from db.repositories import incidents as incidents_repo
@@ -417,7 +418,7 @@ def test_rejected_high_guardrail_is_durable_and_never_retried(
 
 
 def test_rejected_timeout_closes_the_wait_without_retry(
-    db, make_incident, make_candidate
+    db, make_incident, make_candidate, audit_actor
 ):
     seeded = _seed(db, make_incident, make_candidate, "medium")
     db.commit()
@@ -441,19 +442,21 @@ def test_rejected_timeout_closes_the_wait_without_retry(
 
     # 이전 대기에 대한 뒤늦은 승인은 기존 충돌 코드다
     with pytest.raises(ApiError) as stale:
-        workflows.reserve_execution(db, _approve_request(seeded.incident_id))
+        workflows.reserve_execution(
+            db, _approve_request(seeded.incident_id), actor=audit_actor
+        )
     assert stale.value.code is ErrorCode.PROPOSAL_NOT_EXECUTABLE
     db.rollback()
     # 진행 중 실행이 없으므로 관제자 종료는 막지 않는다
     assert workflows.resolve_incident(
-        db, seeded.incident_id, ResolutionJudgement.NO_FURTHER_ACTION
+        db, seeded.incident_id, ResolutionJudgement.NO_FURTHER_ACTION, actor=audit_actor
     ) is True
     assert len(_executions(db, seeded.incident_id)) == 1
 
 
 @pytest.mark.parametrize("outcome", ["guardrail_rejected", "run_failed"])
 def test_failed_high_pre_mitigation_keeps_agent_analysis_reachable(
-    db, client_pg, make_incident, make_candidate, outcome
+    db, client_pg, make_incident, make_candidate, audit_actor, outcome
 ):
     """선차단이 거절·실패로 끝나 FAILED가 된 High도 분석이 끝나야 종료할 수 있다."""
     seeded = _seed(db, make_incident, make_candidate, "high")
@@ -482,7 +485,7 @@ def test_failed_high_pre_mitigation_keeps_agent_analysis_reachable(
     # 분석이 끝나기 전에는 기존 종료 게이트가 그대로다
     with pytest.raises(ApiError) as gated:
         workflows.resolve_incident(
-            db, seeded.incident_id, ResolutionJudgement.NO_FURTHER_ACTION
+            db, seeded.incident_id, ResolutionJudgement.NO_FURTHER_ACTION, actor=audit_actor
         )
     assert gated.value.code is ErrorCode.INCIDENT_NOT_RESOLVABLE
     db.rollback()
@@ -504,7 +507,7 @@ def test_failed_high_pre_mitigation_keeps_agent_analysis_reachable(
     assert body["status"] == "FAILED"
     assert body["analysis_result"]["status"] == "NO_PROPOSAL"
     assert workflows.resolve_incident(
-        db, seeded.incident_id, ResolutionJudgement.NO_FURTHER_ACTION
+        db, seeded.incident_id, ResolutionJudgement.NO_FURTHER_ACTION, actor=audit_actor
     ) is True
 
 
@@ -606,14 +609,18 @@ def test_ineligible_incidents_are_skipped_without_writes(
     assert _auto_evaluations(db, seeded.incident_id) == []
 
 
-def test_prior_user_approval_blocks_the_old_deadline(db, make_incident, make_candidate):
+def test_prior_user_approval_blocks_the_old_deadline(
+    db, make_incident, make_candidate, audit_actor
+):
     """승인한 실행이 끝나 다른 제안이 남아도 지난 기한으로 자동 격리하지 않는다."""
     seeded = _seed(
         db, make_incident, make_candidate, "medium", wait="future",
         candidates=(RunbookId.RUNBOOK_NACL_ADD_DENY, RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED),
     )
     db.commit()
-    approved = workflows.reserve_execution(db, _approve_request(seeded.incident_id))
+    approved = workflows.reserve_execution(
+        db, _approve_request(seeded.incident_id), actor=audit_actor
+    )
     closure = workflows.close_execution(
         db, approved.response.execution_id, next_status=ExecutionStatus.SUCCESS
     )
@@ -636,7 +643,7 @@ def test_prior_user_approval_blocks_the_old_deadline(db, make_incident, make_can
 
 
 def test_post_isolation_new_action_is_distinct_from_stale_candidate(
-    db, make_incident, make_candidate
+    db, make_incident, make_candidate, audit_actor
 ):
     seeded = _seed(db, make_incident, make_candidate, "medium")
     db.commit()
@@ -644,7 +651,9 @@ def test_post_isolation_new_action_is_distinct_from_stale_candidate(
 
     # 이전 대기의 승인은 충돌이다
     with pytest.raises(ApiError) as stale:
-        workflows.reserve_execution(db, _approve_request(seeded.incident_id))
+        workflows.reserve_execution(
+            db, _approve_request(seeded.incident_id), actor=audit_actor
+        )
     assert stale.value.code is ErrorCode.PROPOSAL_NOT_EXECUTABLE
     db.rollback()
 
@@ -658,7 +667,9 @@ def test_post_isolation_new_action_is_distinct_from_stale_candidate(
         expected=IncidentStatus.AWAITING_CLOSURE, next_status=IncidentStatus.AWAITING_APPROVAL,
     )
     db.commit()
-    approved = workflows.reserve_execution(db, _approve_request(seeded.incident_id))
+    approved = workflows.reserve_execution(
+        db, _approve_request(seeded.incident_id), actor=audit_actor
+    )
     assert approved.created is True
     db.expire_all()
     assert incidents_repo.get_candidate(db, fresh.candidate_id).status is CandidateStatus.CLAIMED
@@ -670,7 +681,7 @@ def test_post_isolation_new_action_is_distinct_from_stale_candidate(
         incident_id=seeded.incident_id,
         runbook_id=RunbookId.RUNBOOK_EC2_UNISOLATE,
         idempotency_key="auto-iso-" + uuid.uuid4().hex,
-    ))
+    ), actor=audit_actor)
     assert recovery.created is True
     # 같은 대기의 타임아웃은 다시 발동하지 않는다
     assert _attempt(db, seeded, TIMEOUT).skipped_reason is SKIP.ALREADY_RESERVED
@@ -794,6 +805,7 @@ def _committed(pg_engine):
     finally:
         if incident_ids:
             with Session(pg_engine) as cleanup:
+                purge_audit_events(cleanup, incident_ids=incident_ids)
                 executions = select(models.ActionExecution.execution_id).where(
                     models.ActionExecution.incident_id.in_(incident_ids)
                 )
@@ -938,14 +950,14 @@ def _race(pg_engine, first_call, second_call, *, fail_first_commit: bool = False
             return first_future.result(timeout=30), second_future.result(timeout=30)
 
 
-def _approve(incident_id: str):
+def _approve(incident_id: str, actor):
     request = _approve_request(incident_id)
-    return lambda session: workflows.reserve_execution(session, request)
+    return lambda session: workflows.reserve_execution(session, request, actor=actor)
 
 
-def _reject(incident_id: str):
+def _reject(incident_id: str, actor):
     return lambda session: workflows.resolve_incident(
-        session, incident_id, ResolutionJudgement.NO_FURTHER_ACTION
+        session, incident_id, ResolutionJudgement.NO_FURTHER_ACTION, actor=actor
     )
 
 
@@ -1049,10 +1061,10 @@ _ORDERS = {
 }
 
 
-def _call(name: str, seeded: Seeded):
+def _call(name: str, seeded: Seeded, actor):
     return {
-        "approve": lambda: _approve(seeded.incident_id),
-        "reject": lambda: _reject(seeded.incident_id),
+        "approve": lambda: _approve(seeded.incident_id, actor),
+        "reject": lambda: _reject(seeded.incident_id, actor),
         "timeout": lambda: _isolate(seeded, TIMEOUT, str(uuid.uuid4())),
         "rejected_timeout": lambda: _isolate(seeded, TIMEOUT, str(uuid.uuid4()), rejected=True),
     }[name]()
@@ -1060,7 +1072,7 @@ def _call(name: str, seeded: Seeded):
 
 @pytest.mark.parametrize("order", sorted(_ORDERS))
 def test_first_committed_response_wins_the_wait(
-    pg_engine, make_incident, make_candidate, order
+    pg_engine, make_incident, make_candidate, committed_actor, order
 ):
     first_name, second_name, first_ok, second_ok, expected = _ORDERS[order]
     with _committed(pg_engine) as cleanup_ids:
@@ -1070,7 +1082,9 @@ def test_first_committed_response_wins_the_wait(
             setup.commit()
 
         first, second = _race(
-            pg_engine, _call(first_name, seeded), _call(second_name, seeded)
+            pg_engine,
+            _call(first_name, seeded, committed_actor),
+            _call(second_name, seeded, committed_actor),
         )
 
         assert first_ok(first), first
@@ -1080,7 +1094,7 @@ def test_first_committed_response_wins_the_wait(
 
 @pytest.mark.parametrize("winner", ["timeout", "approval", "high"])
 def test_rolled_back_lock_holder_releases_the_loser(
-    pg_engine, make_incident, make_candidate, winner
+    pg_engine, make_incident, make_candidate, committed_actor, winner
 ):
     """잠금을 쥔 쪽이 commit에 실패하면 기다리던 쪽이 처음부터 다시 판정해 이긴다."""
     with _committed(pg_engine) as cleanup_ids:
@@ -1092,10 +1106,11 @@ def test_rolled_back_lock_holder_releases_the_loser(
             cleanup_ids.append(seeded.incident_id)
             setup.commit()
         holder_id, loser_id = str(uuid.uuid4()), str(uuid.uuid4())
+        approve = _approve(seeded.incident_id, committed_actor)
         if winner == "timeout":
-            calls = (_isolate(seeded, TIMEOUT, holder_id), _approve(seeded.incident_id))
+            calls = (_isolate(seeded, TIMEOUT, holder_id), approve)
         elif winner == "approval":
-            calls = (_approve(seeded.incident_id), _isolate(seeded, TIMEOUT, loser_id))
+            calls = (approve, _isolate(seeded, TIMEOUT, loser_id))
         else:
             calls = (_isolate(seeded, PRE, holder_id), _isolate(seeded, PRE, loser_id))
 
