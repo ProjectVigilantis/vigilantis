@@ -131,8 +131,9 @@ export const RISK_LEVEL_LABELS: LabelMap<RiskLevel> = {
   LOW: { label: '낮음', tone: 'yellow' },
 };
 
+/** 대응 정책 이름이다. 결과로 읽히는 말을 쓰지 않는다. 실행 결과는 상세의 「수행된 조치」가 말한다(#532). */
 export const RESPONSE_MODE_LABELS: LabelMap<ResponseMode> = {
-  PRE_MITIGATION_0_5S: { label: '선제 차단됨', tone: 'red' },
+  PRE_MITIGATION_0_5S: { label: '선차단 대응', tone: 'red' },
   AGENT_WAIT: { label: '승인 대기', tone: 'yellow' },
   TIMEOUT_ISOLATION_1M: { label: '시간 초과 자동 격리', tone: 'red' },
 };

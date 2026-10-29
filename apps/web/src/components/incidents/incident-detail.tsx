@@ -29,7 +29,13 @@ import { Card } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { useRealtime } from '@/components/realtime-provider';
 import type { ActionCandidate, ActionRequest } from '@/lib/action-request';
-import { agentWaitTimes, appendTransition, latchAgentWaitAt } from '@/lib/realtime-events';
+import {
+  AUTO_ISOLATION_BLOCKED_NOTICE,
+  agentWaitNotice,
+  inAgentWaitWindow,
+  preMitigationRecordNote,
+} from '@/lib/auto-isolation-notice';
+import { appendTransition, latchAgentWaitAt } from '@/lib/realtime-events';
 import { newIdempotencyKey } from '@/lib/api/client';
 import { isTerminalStatus } from '@/lib/execution-status';
 import { closureAction, closureBlockedReason, RESOLUTION_LABELS } from '@/lib/incident-closure';
@@ -102,6 +108,7 @@ function RiskArea({
   agentWaitAt: IsoDateTime | null;
 }) {
   if (incident.initial_risk_level === null) return null;
+  const recordNote = preMitigationRecordNote(incident);
 
   return (
     <Section title="위험도">
@@ -123,6 +130,11 @@ function RiskArea({
         {incident.response_mode !== null ? (
           <Row label="대응">
             <StatusBadge field="response_mode" value={incident.response_mode} />
+          </Row>
+        ) : null}
+        {recordNote !== null ? (
+          <Row label="조치 기록">
+            <span className="text-muted-foreground">{recordNote}</span>
           </Row>
         ) : null}
       </div>
@@ -282,18 +294,6 @@ function SavingsArea({ incident }: { incident: IncidentResponse }) {
 }
 
 /**
- * B-Medium 타임아웃 창 —**고지를 그리는 조건이자 기준 시각을 래치하는 조건**이다.
- * 두 곳이 따로 판정하면 화면에는 시각이 떠 있는데 기준은 안 잡히는 식으로 어긋난다.
- */
-function inAgentWaitWindow(incident: IncidentResponse): boolean {
-  return (
-    incident.response_mode === 'AGENT_WAIT' &&
-    incident.initial_risk_level !== 'LOW' &&
-    incident.status === 'AWAITING_APPROVAL'
-  );
-}
-
-/**
  * B-Medium 타임아웃 고지(§4.5) — 승인 전까지 조치는 수행되지 않지만, 1분 미응답이면 서버가
  * `TIMEOUT_ISOLATION_1M`으로 자동 격리한다는 사실을 **대기 중에 미리** 알린다.
  *
@@ -313,6 +313,9 @@ function inAgentWaitWindow(incident: IncidentResponse): boolean {
  * 가르지 않는다 — `response_mode`도 초기 판정에서만 파생된다(`packages/schemas/events.py`
  * `_EXPECTED_MODE_BY_RISK`). 정밀 평가가 자동 행동을 바꾸려면 상태 전이 계약이 먼저 필요하다
  * (Risk Evaluator, SSOT §미해결 6번).
+ *
+ * 서버가 `auto_isolation_block`을 주면 자동 격리 예고를 승인 필요 안내로 바꾼다(#532). 판정 규칙은
+ * `@/lib/auto-isolation-notice`에 있다.
  */
 function AgentWaitNotice({
   incident,
@@ -321,24 +324,31 @@ function AgentWaitNotice({
   incident: IncidentResponse;
   agentWaitAt: IsoDateTime | null;
 }) {
-  if (!inAgentWaitWindow(incident)) return null;
-
   // 기준은 `AGENT_WAIT` 전환을 알린 INCIDENT_UPDATED의 occurred_at이다 — **수신 시각을 쓰지
   // 않는다**(합의 2026-08-14). 수신 기준이면 재접속마다 시간이 늘어난다. 파싱 불가한 값은
   // null로 떨어져 아래 고정 안내문이 받는다(PR #187 리뷰).
-  const times = agentWaitTimes(agentWaitAt);
+  const notice = agentWaitNotice(incident, agentWaitAt);
+  if (notice === null) return null;
+
+  if (notice.kind === 'BLOCKED') {
+    return (
+      <div className="border-border bg-muted/50 flex flex-col gap-1.5 rounded-md border p-3 text-sm">
+        <p className="font-medium">{AUTO_ISOLATION_BLOCKED_NOTICE}</p>
+      </div>
+    );
+  }
 
   return (
     <div className="border-danger/30 bg-danger/5 flex flex-col gap-1.5 rounded-md border p-3 text-sm">
       <p>승인 전까지 조치는 수행되지 않습니다.</p>
-      {times !== null ? (
+      {notice.kind === 'SCHEDULED' ? (
         // formatKst는 timeZone을 고정하므로 서버·클라이언트가 같은 문자열을 만든다.
         <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
           <dt className="text-muted-foreground text-xs">제안 생성</dt>
-          <dd className="font-mono text-xs tabular-nums">{formatKst(times.startedAt)}</dd>
+          <dd className="font-mono text-xs tabular-nums">{formatKst(notice.startedAt)}</dd>
           <dt className="text-muted-foreground text-xs">실행 예정</dt>
           <dd className="text-danger font-mono text-xs font-medium tabular-nums">
-            {formatKst(times.deadlineAt)}
+            {formatKst(notice.deadlineAt)}
           </dd>
         </dl>
       ) : (
