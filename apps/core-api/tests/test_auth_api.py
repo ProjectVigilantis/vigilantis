@@ -15,7 +15,7 @@ from db import models
 from db.repositories import auth as auth_repo
 from fastapi.testclient import TestClient
 from db.repositories import tenants as tenants_repo
-from schemas.api.auth import AccountType, LoginStep, UserRole
+from schemas.api.auth import AccountType, LoginStep, PlatformRole, UserRole
 from sqlalchemy import text
 
 ORIGIN = "https://app.example.com"
@@ -416,19 +416,61 @@ def me(c, clock, at, token=None):
 def test_me_returns_user_and_session_info(http, flow, user, tenant_id):
     login(http, flow)
     body = http.get("/api/v1/auth/me").json()
-    assert set(body) == {"user_id", "email", "role", "account_type", "tenant_id", "session"}
+    assert set(body) == {
+        "user_id", "email", "role", "account_type", "tenant_id", "platform_role", "session",
+        "assigned_tenant_ids",
+    }
     assert body["user_id"] == user.user_id
     assert (body["email"], body["role"]) == ("u@example.com", "OPERATOR")
-    assert (body["account_type"], body["tenant_id"]) == ("TENANT", tenant_id)
+    # 소속(tenant_id)은 배정이 아니다 — 고객사 계정의 배정 목록은 비어 있다
+    assert (
+        body["account_type"], body["tenant_id"], body["platform_role"], body["assigned_tenant_ids"]
+    ) == ("TENANT", tenant_id, None, [])
     assert body["session"]["idle_expires_at"].startswith("2026-10-19T09:30:00")
     assert body["session"]["absolute_expires_at"].startswith("2026-10-19T17:00:00")
 
 
-def test_me_for_platform_account_has_no_tenant(http, db, flow):
-    _create_user(db, account_type=AccountType.PLATFORM, role=UserRole.ADMIN)
+def test_me_for_platform_account_has_no_tenant_and_reports_current_platform_role(http, db, flow):
+    """등급을 정하지 않은 플랫폼 계정은 배정 없는 TENANT_MANAGER 다. 등급은 판정마다 DB 의 현재 값이다 —
+    재로그인 없이 바뀐다."""
+    row = _create_user(db, account_type=AccountType.PLATFORM, role=UserRole.ADMIN)
     login(http, flow)
     body = http.get("/api/v1/auth/me").json()
-    assert (body["role"], body["account_type"], body["tenant_id"]) == ("ADMIN", "PLATFORM", None)
+    assert (
+        body["role"], body["account_type"], body["tenant_id"], body["platform_role"],
+        body["assigned_tenant_ids"],
+    ) == ("ADMIN", "PLATFORM", None, "TENANT_MANAGER", [])
+    for platform_role in (PlatformRole.CENTRAL_ADMIN, PlatformRole.TENANT_MANAGER):
+        assert auth_repo.set_platform_role(
+            db, user_id=row.user_id, platform_role=platform_role, now=T0
+        )
+        db.commit()
+        assert http.get("/api/v1/auth/me").json()["platform_role"] == platform_role.value
+
+
+def test_me_reads_manager_assignments_fresh_on_every_request(http, db, flow, make_tenant):
+    """배정 · 회수는 재로그인 없이 다음 판정부터 보인다. 중앙 관리자는 남은 배정 행이 있어도 빈 목록(전체 범위)이다."""
+    first, second = sorted((make_tenant(), make_tenant()))
+    row = _create_user(db, account_type=AccountType.PLATFORM, role=UserRole.ADMIN)
+    login(http, flow)
+
+    def assigned():
+        response = http.get("/api/v1/auth/me")
+        assert response.status_code == 200
+        return response.json()["assigned_tenant_ids"]
+
+    assert assigned() == []
+    auth_repo.replace_assigned_tenants(db, user_id=row.user_id, tenant_ids=(second, first), now=T0)
+    db.commit()
+    assert assigned() == [first, second]
+    auth_repo.replace_assigned_tenants(db, user_id=row.user_id, tenant_ids=(second,), now=T0)
+    db.commit()
+    assert assigned() == [second]
+    assert auth_repo.set_platform_role(
+        db, user_id=row.user_id, platform_role=PlatformRole.CENTRAL_ADMIN, now=T0
+    )
+    db.commit()
+    assert assigned() == []
 
 
 def test_suspended_tenant_user_can_log_in_read_me_extend_and_log_out(http, db, flow, clock, user, tenant_id):

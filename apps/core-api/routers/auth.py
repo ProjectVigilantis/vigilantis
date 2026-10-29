@@ -252,12 +252,15 @@ def me(
         idle_seconds=settings.AUTH_SESSION_IDLE_SECONDS,
         touch=False,
     )
-    # 테넌트 상태(tenant_status)는 내부 판정용이라 싣지 않는다
+    # 테넌트 상태(tenant_status)는 내부 판정용이라 싣지 않는다. platform_role · assigned_tenant_ids 는
+    # 이번 판정이 읽은 현재 값이다
     return CurrentUserResponse(
         user_id=user.user_id,
         email=user.email,
         role=user.role,
         account_type=user.account_type,
         tenant_id=user.tenant_id,
+        platform_role=user.platform_role,
         session=user.session,
+        assigned_tenant_ids=list(user.assigned_tenant_ids),
     )

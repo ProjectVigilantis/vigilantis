@@ -8,6 +8,10 @@
 #   - 계정 종류(#492): 접근 권한의 원천은 account_type 하나다(role · tenant_id NULL 로 추론하지 않는다).
 #     UNASSIGNED 는 로그인 완료가 403 ACCOUNT_NOT_PROVISIONED, 이미 있던 세션은 401 AUTH_REQUIRED 다.
 #     TENANT 의 테넌트 상태는 로그인을 막지 않는다(정지 테넌트도 로그인 · 조회) — 변경 거절은 호출부 몫이다.
+#   - 플랫폼 등급(#492): 플랫폼 관리 권한은 platform_role 에서만 나온다(PLATFORM 의 role=ADMIN 은 호환 값).
+#     세션 판정마다 DB 의 현재 값을 읽는다 — 등급 변경은 다음 요청부터 바로 반영된다(세션 재발급 불필요).
+#     TENANT_MANAGER 의 담당 고객사(assigned_tenant_ids)도 판정마다 새로 읽는다 — 배정 회수가 바로 반영된다.
+#     다른 등급 · 계정 종류는 배정을 읽지 않고 빈 튜플이다(소속 tenant_id 는 배정이 아니다).
 # ==============================================================================
 
 from __future__ import annotations
@@ -17,7 +21,7 @@ from datetime import datetime
 
 from db import models
 from db.repositories import auth as auth_repo
-from schemas.api.auth import AccountType, SessionInfo, UserRole
+from schemas.api.auth import AccountType, PlatformRole, SessionInfo, UserRole
 from schemas.api.errors import ErrorCode
 from schemas.api.tenants import TenantStatus
 from sqlalchemy.orm import Session
@@ -48,9 +52,14 @@ class CurrentUser:
     account_type: AccountType
     #: TENANT 만 값이 있다(정규 UUID 문자열).
     tenant_id: str | None
+    #: PLATFORM 만 값이 있다 — 판정 시점에 읽은 플랫폼 등급(관리 권한의 유일한 원천). TENANT 는 None.
+    platform_role: PlatformRole | None
     #: 판정 시점에 읽은 소속 테넌트 상태(내부 전용 — 공개 응답에 싣지 않는다). PLATFORM 은 None.
     tenant_status: TenantStatus | None
     session: SessionInfo
+    #: 판정 시점에 읽은 담당 고객사(정규 UUID 문자열, 오름차순). TENANT_MANAGER 만 값이 있을 수 있다 —
+    #: 빈 튜플은 담당 고객사가 없다는 뜻이다. 범위 판정은 auth.access.tenant_scope_ids 가 한다.
+    assigned_tenant_ids: tuple[str, ...] = ()
 
     @property
     def tenant_suspended(self) -> bool:
@@ -140,6 +149,12 @@ def resolve_current_user(
     if user.account_type is AccountType.TENANT:
         # FK + CHECK(TENANT ⇔ tenant_id NOT NULL)가 행의 존재를 보장한다
         tenant_status = db.get(models.Tenant, user.tenant_id, populate_existing=True).status
+    assigned_tenant_ids: tuple[str, ...] = ()
+    if (
+        user.account_type is AccountType.PLATFORM
+        and user.platform_role is PlatformRole.TENANT_MANAGER
+    ):
+        assigned_tenant_ids = auth_repo.list_assigned_tenant_ids(db, user_id=user.user_id)
     if touch:
         db.commit()
     return CurrentUser(
@@ -148,8 +163,10 @@ def resolve_current_user(
         role=user.role,
         account_type=user.account_type,
         tenant_id=user.tenant_id,
+        platform_role=user.platform_role,
         tenant_status=tenant_status,
         session=view.info,
+        assigned_tenant_ids=assigned_tenant_ids,
     )
 
 

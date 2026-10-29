@@ -43,8 +43,9 @@ EXPECTED_TABLES = {
     "notification_deliveries",
     "notification_routes",
     "notification_lanes",
-    # 로그인 기반·사용자 관리 이력 3종 (#492)
+    # 로그인 기반·사용자 관리 이력·담당 고객사 배정 (#492)
     "app_users",
+    "app_user_tenant_assignments",
     "auth_sessions",
     "user_admin_events",
 }
@@ -81,9 +82,25 @@ def test_row_invariant_constraints_registered():
         "guardrail_evaluations": {"ck_guardrail_evaluations_exactly_one_reference"},
         "metric_summaries": {"ck_metric_summaries_window_ordered"},
         "rule_evaluations": {"ck_rule_evaluations_health_score_range"},
+        # 계정 종류 ↔ 소속 · 플랫폼 등급(#492). PLATFORM role=ADMIN 은 호환 제약이다
+        "app_users": {
+            "ck_app_users_tenant_binding_by_account_type",
+            "ck_app_users_platform_role_is_admin",
+            "ck_app_users_platform_role_by_account_type",
+        },
     }
     for table, names in expected.items():
         assert names <= _constraint_names(table), table
+
+
+def test_tenant_assignment_is_composite_key_with_cascading_foreign_keys():
+    """배정은 (user_id, tenant_id) 하나씩이고, 사용자 · 고객사가 지워지면 함께 지워진다(남는 배정 없음)."""
+    table = Base.metadata.tables["app_user_tenant_assignments"]
+    assert [c.name for c in table.primary_key.columns] == ["user_id", "tenant_id"]
+    assert {
+        (fk.column.table.name, fk.column.name, fk.ondelete) for fk in table.foreign_keys
+    } == {("app_users", "user_id", "CASCADE"), ("tenants", "tenant_id", "CASCADE")}
+    assert set(table.columns.keys()) == {"user_id", "tenant_id"}
 
 
 def test_candidate_active_partial_unique_exists():
