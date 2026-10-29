@@ -11,7 +11,9 @@
 #     부작용은 이미 있었을 수 있다 — 성공으로 취급하지 않는다. DB 실패 시 제공자 사용자를 지우지 않는다.
 #   - 이력(user_admin_events)은 상태 변경과 같은 commit 에 들어간다. 값은 UserEventState 화이트리스트뿐이다.
 #   - 관리 범위(#492): 행위자의 account_type 이 정한다(role · tenant_id NULL 로 추론하지 않는다).
-#     PLATFORM 은 모든 TENANT 계정, TENANT ADMIN 은 자기 테넌트의 TENANT 계정만. 범위 밖 대상과
+#     범위는 access.tenant_scope_ids / can_access_tenant 하나다: CENTRAL_ADMIN 은 모든 TENANT 계정,
+#     TENANT_MANAGER 는 배정된 고객사만(배정 없음 = 데이터 없음), TENANT ADMIN 은 자기 테넌트만.
+#     recover_existing 은 플랫폼 관리 권한자(매니저는 배정 테넌트)만. 범위 밖(미배정 포함) 대상과
 #     PLATFORM · UNASSIGNED 대상은 없는 대상과 같은 404 USER_NOT_FOUND 이고 Cognito 를 부르지 않는다.
 #     API 로 만드는 계정은 항상 TENANT 이며 소속을 옮기는 길은 없다.
 #   - 정지 테넌트의 TENANT 행위자는 조회만 한다 — 쓰기는 409 TENANT_SUSPENDED(잠금 안에서 재판정).
@@ -50,7 +52,7 @@ from schemas.api.users import (
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from . import service, sessions
+from . import access, service, sessions
 
 logger = logging.getLogger("vigilantis.auth")
 
@@ -83,45 +85,37 @@ def _item(user: models.AppUser, last_login_at: datetime | None) -> UserListItem:
     )
 
 
-def _authorize(db: Session, actor: Actor) -> service.CurrentUser:
-    """행위자 세션 판정. 무효면 401(AuthRequiredError), ADMIN 이 아니면 403 — 둘 다 rollback 한다."""
+def _authorize(db: Session, actor: Actor, *, central: bool = False) -> service.CurrentUser:
+    """행위자 세션 판정. 무효면 401(AuthRequiredError), 관리 권한이 없으면 403 — 둘 다 rollback 한다.
+
+    권한 정책은 HTTP 의존성과 같은 auth.access 의 것 하나다(central=True 는 직원 관리용 중앙 관리자 검사).
+    """
     try:
         admin = service.resolve_current_user(
             db, actor.token, now=actor.clock(), idle_seconds=actor.idle_seconds, touch=False
         )
-        if admin.role is not UserRole.ADMIN:
-            raise ApiError(ErrorCode.AUTH_FORBIDDEN)
+        if central:
+            access.require_central_admin(admin)
+        else:
+            access.require_admin(admin)
     except BaseException:
         db.rollback()
         raise
     return admin
 
 
-def _authorize_write(db: Session, actor: Actor) -> service.CurrentUser:
+def _authorize_write(db: Session, actor: Actor, *, central: bool = False) -> service.CurrentUser:
     """쓰기 행위자 판정 — _authorize 다음, 정지 테넌트의 TENANT 행위자는 409 TENANT_SUSPENDED."""
-    admin = _authorize(db, actor)
+    admin = _authorize(db, actor, central=central)
     if admin.tenant_suspended:
         db.rollback()
         raise ApiError(ErrorCode.TENANT_SUSPENDED)
     return admin
 
 
-def _managed_tenant(admin: service.CurrentUser) -> str | None:
-    """행위자의 관리 범위 — PLATFORM 은 None(모든 고객 테넌트), TENANT 는 자기 테넌트.
-
-    account_type 으로만 가른다. 소속 NULL 이 「전체」로 읽히지 않게 그 밖의 종류는 거절한다.
-    """
-    if admin.account_type is AccountType.PLATFORM:
-        return None
-    if admin.account_type is AccountType.TENANT:
-        return admin.tenant_id
-    raise ApiError(ErrorCode.AUTH_FORBIDDEN)
-
-
 def _target(db: Session, user_id: str, admin: service.CurrentUser) -> models.AppUser:
     """관리 범위 안의 대상 행. 경로 값은 정규 UUID 로 바꿔 조회한다 — 호출자는 이후 반드시 반환 행의
-    user_id(정규형)를 쓴다. 없음 · 범위 밖 · PLATFORM · UNASSIGNED 는 같은 404 다."""
-    scope = _managed_tenant(admin)
+    user_id(정규형)를 쓴다. 없음 · 범위 밖(배정 안 된 고객사 포함) · PLATFORM · UNASSIGNED 는 같은 404 다."""
     try:
         canonical = str(UUID(user_id))
     except ValueError:  # PG UUID 컬럼에 넣으면 DataError(500) — 없는 대상과 같다
@@ -130,22 +124,27 @@ def _target(db: Session, user_id: str, admin: service.CurrentUser) -> models.App
     if (
         user is None
         or user.account_type is not AccountType.TENANT
-        or (scope is not None and user.tenant_id != scope)
+        or user.tenant_id is None
+        or not access.can_access_tenant(admin, user.tenant_id)
     ):
         raise ApiError(ErrorCode.USER_NOT_FOUND)
     return user
 
 
 def _invite_tenant(admin: service.CurrentUser, requested: UUID | None) -> str:
-    """초대 대상 테넌트. PLATFORM 은 명시 필수(없으면 422), TENANT ADMIN 은 자기 테넌트뿐(다르면 404)."""
-    scope = _managed_tenant(admin)
-    if scope is None:
+    """초대 대상 테넌트. 플랫폼 관리 권한자는 명시 필수(없으면 422)이고 접근 가능한 테넌트여야 한다
+    (TENANT_MANAGER 의 미배정 · 없는 테넌트는 404). TENANT ADMIN 은 생략하면 자기 테넌트, 다르면 404."""
+    if access.is_tenant_manager(admin):
         if requested is None:
             raise ApiError(ErrorCode.REQUEST_VALIDATION_FAILED)
-        return str(requested)
-    if requested is not None and str(requested) != scope:
+        tenant = str(requested)
+    elif admin.account_type is AccountType.TENANT and admin.tenant_id is not None:
+        tenant = admin.tenant_id if requested is None else str(requested)
+    else:
+        raise ApiError(ErrorCode.AUTH_FORBIDDEN)
+    if not access.can_access_tenant(admin, tenant):
         raise ApiError(ErrorCode.TENANT_NOT_FOUND)
-    return scope
+    return tenant
 
 
 def _require_active_tenant(db: Session, tenant_id: str, *, hold: bool = False) -> None:
@@ -166,12 +165,14 @@ def _require_active_tenant(db: Session, tenant_id: str, *, hold: bool = False) -
 
 
 @contextmanager
-def _transaction(db: Session, actor: Actor) -> Iterator[service.CurrentUser]:
+def _transaction(
+    db: Session, actor: Actor, *, central: bool = False
+) -> Iterator[service.CurrentUser]:
     """users 잠금 → 캐시 비움 → 행위자 재판정(정지 포함) → (본문) → commit. 예외는 전부 rollback 이다."""
     try:
         auth_repo.lock_users_table(db)
         db.expire_all()
-        admin = _authorize_write(db, actor)
+        admin = _authorize_write(db, actor, central=central)
         yield admin
         db.commit()
     except SQLAlchemyError as exc:
@@ -218,14 +219,21 @@ def _audit(
 
 def list_users(db: Session, actor: Actor) -> UsersResponse:
     """관리 범위의 TENANT 계정만 — 정지 테넌트의 ADMIN 도 조회한다."""
-    scope = _managed_tenant(_authorize(db, actor))
-    rows = auth_repo.list_users_with_last_login(db, tenant_id=scope)
+    scope = access.tenant_scope_ids(_authorize(db, actor))
+    if scope is not None and not scope:  # 배정 없음 = 고객 데이터 없음(전체가 아니다)
+        return UsersResponse(items=[])
+    rows = auth_repo.list_users_with_last_login(db, tenant_ids=scope)
     return UsersResponse(items=[_item(user, last) for user, last in rows])
 
 
 def list_events(db: Session, actor: Actor, user_id: str, *, limit: int) -> UserEventsResponse:
     target = _target(db, user_id, _authorize(db, actor))
-    rows = auth_repo.list_user_events(db, user_id=target.user_id, limit=limit)
+    return events_response(db, target.user_id, limit=limit)
+
+
+def events_response(db: Session, target_id: str, *, limit: int) -> UserEventsResponse:
+    """대상 이력 응답 — 범위 판정은 호출자가 이미 마쳤다."""
+    rows = auth_repo.list_user_events(db, user_id=target_id, limit=limit)
     return UserEventsResponse(
         items=[
             UserEventItem(
@@ -328,8 +336,8 @@ def invite_user(
     """
     try:
         admin = _authorize_write(db, actor)
-        if recover_existing and admin.account_type is not AccountType.PLATFORM:
-            raise ApiError(ErrorCode.AUTH_FORBIDDEN)  # 기존 계정 연결은 PLATFORM 만 — SDK 전에 거절
+        if recover_existing and not access.is_tenant_manager(admin):
+            raise ApiError(ErrorCode.AUTH_FORBIDDEN)  # 기존 계정 연결은 플랫폼 관리 권한자만 — SDK 전에 거절
         target_tenant = _invite_tenant(admin, tenant_id)
         _require_active_tenant(db, target_tenant)
     finally:
@@ -342,7 +350,12 @@ def invite_user(
     else:
         provider_user = adapter.admin_create_user(email)
     with _transaction(db, actor) as admin:
-        # 행위자의 소속은 옮겨지지 않는다(계약) — 잠금 안에서는 대상 테넌트 상태만 다시 본다
+        # 잠금 안에서 행위자 · 대상 테넌트 범위(그 사이 배정 회수 포함)와 recover 권한을 다시 판정한다 —
+        # 실패하면 DB 는 쓰지 않는다(제공자 부작용은 이미 있었을 수 있다)
+        if recover_existing and not access.is_tenant_manager(admin):
+            raise ApiError(ErrorCode.AUTH_FORBIDDEN)
+        if _invite_tenant(admin, tenant_id) != target_tenant:
+            raise ApiError(ErrorCode.TENANT_NOT_FOUND)
         _require_active_tenant(db, target_tenant, hold=True)
         if (
             auth_repo.get_user_by_identity(

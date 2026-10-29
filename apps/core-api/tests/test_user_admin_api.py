@@ -4,9 +4,10 @@ user_admin_events 는 append-only(DELETE 거절 · FK RESTRICT)라 commit 시드
 그래서 독립 commit 이 필요한 동시성 테스트는 이력을 남기지 않는 경로(거절 · 잠금 보유자의 직접 쓰기)만 쓰거나,
 이 파일 전용 격리 DB(throwaway_engine)를 쓴다.
 
-관리 범위(#492): 행위자는 PLATFORM ADMIN(모든 고객 테넌트)과 고객사 ADMIN(자기 테넌트) 두 종류이고,
-같은 동작을 두 행위자로 돌린다(admin 픽스처). 대상은 실제 테넌트 행에 묶인 TENANT 계정이다.
-범위 밖 · PLATFORM · UNASSIGNED 대상은 없는 대상과 같은 404 이고 Cognito 를 부르지 않는다.
+관리 범위(#492): 행위자는 CENTRAL_ADMIN(모든 고객 테넌트) · 배정된 TENANT_MANAGER(배정 고객사만) ·
+고객사 ADMIN(자기 테넌트) 세 종류이고, 같은 동작을 세 행위자로 돌린다(admin 픽스처). 대상은 실제 테넌트 행에
+묶인 TENANT 계정이다. 범위 밖(미배정 포함) · PLATFORM · UNASSIGNED 대상은 없는 대상과 같은 404 이고
+Cognito 를 부르지 않는다. 배정이 없는 TENANT_MANAGER 는 고객 데이터가 없다(전체가 아니다).
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ from db.repositories import tenants as tenants_repo
 from exceptions import ApiError
 from fastapi.routing import iter_route_contexts
 from routers.users import get_cognito_adapter_factory
-from schemas.api.auth import AccountType, UserRole
+from schemas.api.auth import AccountType, PlatformRole, UserRole
 from schemas.api.errors import ErrorCode
 from schemas.api.tenants import TenantStatus
 from schemas.api.users import UserStatus
@@ -41,7 +42,7 @@ from sqlalchemy.exc import OperationalError, SQLAlchemyError
 ISSUER = "https://cognito-idp.ap-northeast-2.amazonaws.com/ap-northeast-2_test"  # conftest TEST_AUTH_ISSUER
 BASE = "/api/v1/users"
 FORCE = "FORCE_CHANGE_PASSWORD"
-ITEM_KEYS = {"user_id", "email", "role", "account_type", "tenant_id", "status", "last_login_at"}
+ITEM_KEYS = {"user_id", "email", "role", "account_type", "platform_role", "tenant_id", "status", "last_login_at"}
 
 
 class FakeAdapter:
@@ -82,18 +83,36 @@ def tenant(make_tenant) -> str:
     return make_tenant()
 
 
-@pytest.fixture(params=["platform", "tenant"])
-def admin(request, login_as, tenant):
-    """같은 관리 권한의 두 행위자 — PLATFORM ADMIN 과 대상 테넌트의 고객사 ADMIN."""
+def assign(db, manager, *tenant_ids: str) -> None:
+    """TENANT_MANAGER 의 배정 고객사를 통째로 바꾸고 commit 한다(요청 세션이 보게)."""
+    auth_repo.replace_assigned_tenants(
+        db, user_id=manager.user_id, tenant_ids=tuple(tenant_ids), now=datetime.now(UTC)
+    )
+    db.commit()
+
+
+@pytest.fixture()
+def manager(login_as):
+    """배정이 없는 TENANT_MANAGER — 테스트가 assign 으로 배정한다."""
+    return login_as(UserRole.ADMIN, platform_role=PlatformRole.TENANT_MANAGER)
+
+
+@pytest.fixture(params=["platform", "manager", "tenant"])
+def admin(request, login_as, db, tenant):
+    """같은 관리 권한의 세 행위자 — CENTRAL_ADMIN · 대상 테넌트가 배정된 TENANT_MANAGER · 대상 테넌트의 고객사 ADMIN."""
     if request.param == "platform":
-        return login_as(UserRole.ADMIN)
+        return login_as(UserRole.ADMIN, platform_role=PlatformRole.CENTRAL_ADMIN)
+    if request.param == "manager":
+        seed = login_as(UserRole.ADMIN, platform_role=PlatformRole.TENANT_MANAGER)
+        assign(db, seed, tenant)
+        return seed
     return login_as(UserRole.ADMIN, tenant_id=tenant)
 
 
 @pytest.fixture()
 def platform_admin(login_as):
-    """기존 계정 연결(recover_existing)은 PLATFORM ADMIN 만 쓸 수 있다."""
-    return login_as(UserRole.ADMIN)
+    """기존 계정 연결(recover_existing)은 플랫폼 관리 권한자만 쓸 수 있다(전역 범위의 CENTRAL_ADMIN)."""
+    return login_as(UserRole.ADMIN, platform_role=PlatformRole.CENTRAL_ADMIN)
 
 
 @pytest.fixture()
@@ -805,8 +824,10 @@ def test_suspended_tenant_admin_reads_safe_history_but_cannot_change_anything(
     )
     # 이력 상태는 닫힌 목록뿐이다(이메일 · 토큰 · Cognito 원본 없음)
     assert set(event["before_state"]) | set(event["after_state"]) <= {
-        "role", "status", "revoked_session_count", "recover_existing", "tenant_id",
+        "role", "platform_role", "status", "revoked_session_count", "recover_existing", "tenant_id", "tenant_ids",
     }
+    # 고객 사용자 이벤트에는 배정 ID 가 없다(직렬화된 null 만 허용)
+    assert event["before_state"].get("tenant_ids") is None and event["after_state"].get("tenant_ids") is None
 
     adapter.get_result = _provider_for(db, member)
     before = snapshot(db)
@@ -1075,12 +1096,17 @@ def throwaway_engine(pg_engine):
         admin.dispose()
 
 
-def _seed_user(db, n, *, account_type, tenant_id=None, role=UserRole.ADMIN):
+def _seed_user(db, n, *, account_type, tenant_id=None, role=UserRole.ADMIN, platform_role=None):
+    """PLATFORM 계정의 platform_role 은 명시한다(기본 CENTRAL_ADMIN — 전역 범위의 고객 사용자 관리 행위자)."""
     now = datetime.now(UTC)
     user = auth_repo.create_user(
         db, issuer=ISSUER, cognito_sub=f"race-{n}", email=f"race{n}@example.com",
         role=role, account_type=account_type, tenant_id=tenant_id, now=now, email_verified_at=now,
     )
+    if account_type is AccountType.PLATFORM:
+        assert auth_repo.set_platform_role(
+            db, user_id=user.user_id, platform_role=platform_role or PlatformRole.CENTRAL_ADMIN, now=now
+        )
     issued = sessions.issue_session(
         db, user_id=user.user_id, mfa_step=models.AuthSessionMfaStep.SOFTWARE_TOKEN_MFA,
         now=now, max_seconds=3600, idle_seconds=1800,
@@ -1176,6 +1202,88 @@ def test_two_platform_actors_cannot_remove_a_tenants_last_two_admins_concurrentl
     with factory() as db:
         assert auth_repo.count_active_admins(db, tenant_id=tenant_id) == 1
         assert db.execute(text("SELECT count(*) FROM user_admin_events")).scalar_one() == 1
+
+
+def _staff_removal(kind, victim_id):
+    from auth import staff_service
+
+    if kind == "role":
+        return lambda db, actor: staff_service.change_platform_role(
+            db, actor, victim_id, PlatformRole.TENANT_MANAGER
+        )
+    return lambda db, actor: staff_service.change_status(db, actor, victim_id, UserStatus.DISABLED)
+
+
+@pytest.mark.parametrize("first,second", PAIRS)
+def test_two_central_admins_cannot_remove_each_other_concurrently(throwaway_engine, monkeypatch, first, second):
+    """결정적 경합 — A 가 users 잠금 안에서 commit 직전에 멈춰 있는 동안 B 가 A 를 내리려다 그 잠금에서 대기한다
+    (B 의 backend pid 가 Lock 대기인 것을 확인한 뒤 A 를 commit). 대기하던 B 는 재판정에서 권한을 잃고 쓰지 못한다."""
+    from sqlalchemy.orm import sessionmaker
+
+    central = PlatformRole.CENTRAL_ADMIN
+    factory = sessionmaker(bind=throwaway_engine, autoflush=False, expire_on_commit=False)
+    with factory() as db:
+        (a_id, a_token), (b_id, b_token) = [
+            _seed_user(db, n, account_type=AccountType.PLATFORM, platform_role=central) for n in range(2)
+        ]
+        db.commit()
+    with factory() as db:
+        assert auth_repo.count_active_central_admins(db) == 2
+
+    def actor(token):
+        return admin_service.Actor(token=token, idle_seconds=1800, clock=lambda: datetime.now(UTC))
+
+    outcome: dict = {}
+
+    def run_b():
+        with factory() as db:
+            # 같은 트랜잭션·연결에서 서비스가 users 잠금을 잡는다 — 이 pid 만이 대기 판정 대상이다
+            outcome["pid"] = db.execute(text("SELECT pg_backend_pid()")).scalar_one()
+            try:
+                _staff_removal(second, a_id)(db, actor(b_token))
+                outcome["b"] = None
+            except BaseException as exc:  # noqa: BLE001
+                outcome["b"] = exc
+
+    thread = threading.Thread(target=run_b)
+    real_add_event = auth_repo.add_user_event
+    state = {"started": False}
+
+    def add_event_with_waiting_peer(db, **kwargs):
+        if not state["started"]:  # A 의 이력 쓰기 — 잠금을 쥔 채 commit 전
+            state["started"] = True
+            thread.start()
+            deadline = time.monotonic() + 10
+            while True:
+                pid = outcome.get("pid")
+                if pid is not None:
+                    with factory() as probe:
+                        waiting = probe.execute(
+                            text("SELECT count(*) FROM pg_stat_activity "
+                                 "WHERE pid = :pid AND wait_event_type = 'Lock'"),
+                            {"pid": pid},
+                        ).scalar_one()
+                    if waiting == 1:
+                        break
+                assert time.monotonic() < deadline, "B 가 잠금에서 대기하지 않았다"
+                time.sleep(0.05)
+        return real_add_event(db, **kwargs)
+
+    monkeypatch.setattr(auth_repo, "add_user_event", add_event_with_waiting_peer)
+    with factory() as db:
+        _staff_removal(first, b_id)(db, actor(a_token))  # A 성공
+    thread.join(20)
+    assert not thread.is_alive()
+
+    loser = outcome["b"]
+    assert isinstance(loser, AuthRequiredError) or (
+        isinstance(loser, ApiError) and loser.code is ErrorCode.AUTH_FORBIDDEN
+    ), loser
+    with factory() as db:
+        assert auth_repo.count_active_central_admins(db) == 1
+        assert db.execute(text("SELECT count(*) FROM user_admin_events")).scalar_one() == 1
+        row = db.get(models.AppUser, a_id)
+        assert row.platform_role is central and row.status is models.AppUserStatus.ACTIVE
 
 
 @pytest.mark.parametrize("operation", ["invite", "resend"])
@@ -1281,3 +1389,168 @@ def test_noncanonical_hidden_target_is_still_404(client_pg, db, make_auth_sessio
     assert client_pg.put(f"{BASE}/{ref}/role", json={"role": "VIEWER"}).status_code == 404
     assert client_pg.post(f"{BASE}/{ref}/invite/resend").status_code == 404
     assert adapter.calls == []
+
+
+# --- 배정 고객사 범위(#492): CENTRAL_ADMIN 전역, TENANT_MANAGER 는 배정된 고객사만 -----------------
+
+ID_ROUTES = [
+    ("GET", "/{id}/events", None),
+    ("POST", "/{id}/invite/resend", None),
+    ("PUT", "/{id}/role", {"role": "OPERATOR"}),
+    ("PUT", "/{id}/status", {"status": "DISABLED"}),
+    ("POST", "/{id}/sessions/revoke", None),
+]
+
+
+@pytest.mark.parametrize("assigned_elsewhere", [False, True])
+def test_unassigned_manager_has_no_customer_data(
+    client_pg, db, manager, make_tenant, target, tenant, adapter, assigned_elsewhere
+):
+    """배정이 없거나 다른 고객사만 배정된 매니저 — 목록은 비고(전체가 아니다), 대상 · 초대는 Cognito 전에 거절된다."""
+    if assigned_elsewhere:
+        assign(db, manager, make_tenant())
+    before = snapshot(db)
+    listed = client_pg.get(BASE)
+    assert (listed.status_code, listed.json()["items"]) == (200, [])
+    for method, path, body in ID_ROUTES:
+        resp = client_pg.request(method, BASE + path.replace("{id}", target.user_id), json=body)
+        assert (resp.status_code, resp.json()["error"]["code"]) == (404, "USER_NOT_FOUND"), (method, path)
+    for recover in (False, True):
+        resp = client_pg.post(BASE, json={
+            "email": "x@example.com", "role": "VIEWER", "tenant_id": tenant, "recover_existing": recover,
+        })
+        assert (resp.status_code, resp.json()["error"]["code"]) == (404, "TENANT_NOT_FOUND")
+    omitted = client_pg.post(BASE, json={"email": "x@example.com", "role": "VIEWER"})
+    assert (omitted.status_code, omitted.json()["error"]["code"]) == (422, "REQUEST_VALIDATION_FAILED")
+    assert adapter.calls == []
+    assert snapshot(db) == before
+
+
+def test_manager_is_limited_to_assigned_customers(
+    client_pg, db, manager, make_tenant, make_auth_session, tenant, target, adapter
+):
+    other_tenant = make_tenant()
+    other = make_auth_session(UserRole.VIEWER, tenant_id=other_tenant)
+    assign(db, manager, tenant)
+
+    seen = {i["user_id"]: i["tenant_id"] for i in client_pg.get(BASE).json()["items"]}
+    assert seen == {target.user_id: tenant}
+
+    # 배정 대상은 동작한다
+    assert client_pg.get(f"{BASE}/{target.user_id}/events").status_code == 200
+    assert client_pg.put(f"{BASE}/{target.user_id}/role", json={"role": "OPERATOR"}).status_code == 204
+    assert client_pg.put(f"{BASE}/{target.user_id}/status", json={"status": "DISABLED"}).status_code == 204
+    assert client_pg.post(f"{BASE}/{target.user_id}/sessions/revoke").status_code == 204
+    invited = client_pg.post(BASE, json={"email": "new@example.com", "role": "VIEWER", "tenant_id": tenant})
+    assert invited.status_code == 201
+
+    # 미배정 고객사 · 없는 고객사는 거절, 대상은 없는 대상과 같다
+    before = snapshot(db)
+    adapter.calls.clear()
+    for method, path, body in ID_ROUTES:
+        resp = client_pg.request(method, BASE + path.replace("{id}", other.user_id), json=body)
+        assert (resp.status_code, resp.json()["error"]["code"]) == (404, "USER_NOT_FOUND"), (method, path)
+    for foreign in (other_tenant, str(uuid.uuid4())):
+        for recover in (False, True):
+            resp = client_pg.post(BASE, json={
+                "email": "x@example.com", "role": "ADMIN", "tenant_id": foreign, "recover_existing": recover,
+            })
+            assert (resp.status_code, resp.json()["error"]["code"]) == (404, "TENANT_NOT_FOUND")
+    assert adapter.calls == []
+    assert snapshot(db) == before
+
+
+def test_manager_scope_follows_assignment_replacement(client_pg, db, manager, make_tenant, make_auth_session, tenant, target):
+    other_tenant = make_tenant()
+    other = make_auth_session(UserRole.VIEWER, tenant_id=other_tenant)
+    assign(db, manager, tenant, other_tenant)
+    assert {i["user_id"] for i in client_pg.get(BASE).json()["items"]} == {target.user_id, other.user_id}
+    assign(db, manager, other_tenant)
+    assert {i["user_id"] for i in client_pg.get(BASE).json()["items"]} == {other.user_id}
+    assert client_pg.get(f"{BASE}/{target.user_id}/events").status_code == 404
+
+
+def test_central_admin_reaches_every_customer_without_assignment(client_pg, db, login_as, make_tenant, make_auth_session):
+    login_as(UserRole.ADMIN, platform_role=PlatformRole.CENTRAL_ADMIN)
+    first, second = (make_auth_session(UserRole.VIEWER, tenant_id=make_tenant()) for _ in range(2))
+    assert {first.user_id, second.user_id} <= {i["user_id"] for i in client_pg.get(BASE).json()["items"]}
+    assert client_pg.get(f"{BASE}/{second.user_id}/events").status_code == 200
+
+
+def test_manager_may_recover_existing_in_assigned_tenant(client_pg, db, manager, tenant, adapter):
+    assign(db, manager, tenant)
+    adapter.get_result = CognitoUser("old@example.com", "sub-old", "old@example.com", "CONFIRMED")
+    resp = client_pg.post(BASE, json={
+        "email": "old@example.com", "role": "VIEWER", "tenant_id": tenant, "recover_existing": True,
+    })
+    assert resp.status_code == 201
+    assert adapter.calls == [("get", "old@example.com")]
+
+
+class RevokingAdapter(FakeAdapter):
+    """제공자 호출이 끝난 직후 같은 테스트 DB 에서 매니저의 배정을 모두 회수한다."""
+
+    def __init__(self, db, manager) -> None:
+        super().__init__()
+        self._db = db
+        self._manager = manager
+
+    def _revoke(self) -> None:
+        assign(self._db, self._manager)
+
+    def admin_create_user(self, email, *, resend=False):
+        result = super().admin_create_user(email, resend=resend)
+        self._revoke()
+        return result
+
+    def admin_get_user(self, username):
+        result = super().admin_get_user(username)
+        self._revoke()
+        return result
+
+
+@pytest.mark.parametrize("recover", [False, True])
+def test_invite_rechecks_assignment_after_sdk_and_writes_nothing(
+    client_pg, db, manager, tenant, recover
+):
+    assign(db, manager, tenant)
+    fake = RevokingAdapter(db, manager)
+    fake.get_result = CognitoUser("old@example.com", "sub-old", "old@example.com", "CONFIRMED")
+    use_adapter(client_pg, fake)
+    count = db.execute(text("SELECT count(*) FROM app_users")).scalar_one()
+    resp = client_pg.post(BASE, json={
+        "email": "old@example.com", "role": "VIEWER", "tenant_id": tenant, "recover_existing": recover,
+    })
+    assert (resp.status_code, resp.json()["error"]["code"]) == (404, "TENANT_NOT_FOUND")
+    assert len(fake.calls) == 1  # 제공자 결과는 이미 있었다 — DB 만 쓰지 않는다
+    assert db.execute(text("SELECT count(*) FROM app_users")).scalar_one() == count
+    assert db.execute(text("SELECT count(*) FROM user_admin_events")).scalar_one() == 0
+
+
+def test_resend_rechecks_assignment_after_sdk_and_writes_nothing(client_pg, db, manager, tenant, target):
+    assign(db, manager, tenant)
+    fake = RevokingAdapter(db, manager)
+    fake.get_result = _provider_for(db, target)
+    use_adapter(client_pg, fake)
+    email = user_row(db, target.user_id).email
+    resp = client_pg.post(f"{BASE}/{target.user_id}/invite/resend")
+    assert (resp.status_code, resp.json()["error"]["code"]) == (404, "USER_NOT_FOUND")
+    assert fake.calls == [("get", email), ("create", email, True)]  # 재발송 메일은 나갔다
+    assert events(db, target.user_id) == []
+
+
+def test_tenant_admin_recover_existing_stays_forbidden(client_pg, db, tenant_admin, tenant, adapter):
+    resp = client_pg.post(BASE, json={
+        "email": "old@example.com", "role": "VIEWER", "tenant_id": tenant, "recover_existing": True,
+    })
+    assert (resp.status_code, resp.json()["error"]["code"]) == (403, "AUTH_FORBIDDEN")
+    assert adapter.calls == []
+
+
+def test_central_admin_may_recover_existing(client_pg, login_as, tenant, adapter):
+    login_as(UserRole.ADMIN, platform_role=PlatformRole.CENTRAL_ADMIN)
+    adapter.get_result = CognitoUser("old@example.com", "sub-old", "old@example.com", "CONFIRMED")
+    resp = client_pg.post(BASE, json={
+        "email": "old@example.com", "role": "VIEWER", "tenant_id": tenant, "recover_existing": True,
+    })
+    assert resp.status_code == 201
