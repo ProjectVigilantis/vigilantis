@@ -2,7 +2,10 @@
 
 지키는 것: 두 종류의 응답 모양 · 최신순 · 범위(고객사 = 자기 테넌트, 플랫폼 = 전부) · 행위자 이메일
 (PLATFORM_USER 는 플랫폼 계정에게만 · 고객사 계정에는 늘 null · SYSTEM 은 늘 null) · incident_id ·
-since/until 반열린 구간 · 커서 쪽 넘김(빠짐 · 겹침 없음) · 깨진 입력 422 · 미인증 401 · 고객사 모든 역할 조회.
+since/until 반열린 구간 · 커서 쪽 넘김(빠짐 · 겹침 없음) · 깨진 입력 422 · 미인증 401.
+
+고객사 계정은 지금 임시 출시 관문(require_business_access)에 막혀 403 이다. 범위 · 이메일 규칙은 그
+관문만 걷어 낸 앱(gate_lifted)에서 본다 — 관문이 걷히는 날 고칠 것 없이 열리는지가 요점이다.
 
 같은 DB 를 다른 테스트도 쓰므로, 플랫폼 계정이 보는 「전부」는 이 테스트만의 시각 구간으로 좁혀 본다.
 """
@@ -13,6 +16,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from auth.access import require_business_access
 from db import models
 from schemas.api.audit import AuditActorKind, AuditEventAction
 from schemas.api.auth import UserRole
@@ -62,6 +66,13 @@ def seed(db, make_incident, make_execution):
         return row
 
     return _seed
+
+
+@pytest.fixture()
+def gate_lifted(client_pg):
+    """임시 출시 관문만 걷어 낸 client_pg — 세션 확인(require_user)은 그대로 돈다."""
+    client_pg.app.dependency_overrides[require_business_access] = lambda: None
+    return client_pg
 
 
 def _incident(db, make_incident, tenant_id=None):
@@ -126,7 +137,7 @@ def test_platform_viewer_sees_both_kinds_newest_first(
 
 @pytest.mark.parametrize("role", list(UserRole))
 def test_tenant_viewer_sees_only_its_tenant_and_never_an_operator_email(
-    client_pg, db, make_incident, make_tenant, make_auth_session, login_as, seed, window, role
+    gate_lifted, db, make_incident, make_tenant, make_auth_session, login_as, seed, window, role
 ):
     """고객사 계정에는 PLATFORM_USER 이메일이 늘 null 이다(#546 리뷰 포인트 2) — 모든 역할에서."""
     mine, other = make_tenant(), make_tenant()
@@ -147,7 +158,7 @@ def test_tenant_viewer_sees_only_its_tenant_and_never_an_operator_email(
     seed(unassigned, window + timedelta(seconds=4))
     login_as(role, tenant_id=mine)
 
-    body = _get(client_pg)
+    body = _get(gate_lifted)
 
     assert [item["event_id"] for item in body["items"]] == [
         by_colleague.event_id, closed_by_operator.event_id, by_operator.event_id,
@@ -161,16 +172,29 @@ def test_tenant_viewer_sees_only_its_tenant_and_never_an_operator_email(
     assert _email(db, operator.user_id) not in str(body)
     # 범위 밖 인시던트를 짚어도 404 가 아니라 빈 목록이다
     for incident in (foreign, unassigned):
-        assert _get(client_pg, incident_id=incident.incident_id)["items"] == []
+        assert _get(gate_lifted, incident_id=incident.incident_id)["items"] == []
 
 
-def test_suspended_tenant_can_still_read(client_pg, db, make_incident, make_tenant, login_as, seed,
-                                         window):
+def test_suspended_tenant_can_still_read(
+    gate_lifted, db, make_incident, make_tenant, login_as, seed, window
+):
     tenant_id = make_tenant(TenantStatus.SUSPENDED)
     event = seed(_incident(db, make_incident, tenant_id), window)
     login_as(UserRole.VIEWER, tenant_id=tenant_id)
 
-    assert [item["event_id"] for item in _get(client_pg)["items"]] == [event.event_id]
+    assert [item["event_id"] for item in _get(gate_lifted)["items"]] == [event.event_id]
+
+
+@pytest.mark.parametrize("tenant_status", [TenantStatus.ACTIVE, TenantStatus.SUSPENDED])
+def test_tenant_accounts_are_held_by_the_release_gate_for_now(
+    client_pg, make_tenant, login_as, tenant_status
+):
+    """다른 업무 조회와 같다 — 관문이 걷히기 전에는 고객사 계정이 403 이다(test_api_access 전수와 같은 근거)."""
+    login_as(UserRole.ADMIN, tenant_id=make_tenant(tenant_status))
+
+    response = client_pg.get(URL)
+
+    assert (response.status_code, response.json()["error"]["code"]) == (403, "AUTH_FORBIDDEN")
 
 
 def test_unauthenticated_request_is_rejected(client_pg_anon):
