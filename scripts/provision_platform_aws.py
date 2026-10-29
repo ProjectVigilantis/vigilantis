@@ -13,7 +13,8 @@
 #
 # 구성 (서울 리전 — 관제 대상과 같은 리전, ADR-0010 §2):
 #   브라우저 ─HTTPS─ CloudFront(기본 도메인 · --domain을 주면 그 도메인도) + WAF(IP당 속도 제한 → 허용 IP만)
-#            └─HTTP + 비밀 헤더─ 공개 ALB(CloudFront IP만 수신)
+#            └─HTTPS + 비밀 헤더─ 공개 ALB(CloudFront IP만 수신 · origin.<도메인> 인증서)
+#              (--domain이 없으면 ALB에 인증서를 달 이름이 없어 이 구간이 HTTP다)
 #                 ├ /api/* · /health → ECS api (태스크 1개 고정)
 #                 └ 그 밖           → ECS web
 #   ECS(프라이빗 서브넷) → RDS PostgreSQL(프라이빗) · NAT → OpenAI·AWS API
@@ -28,6 +29,7 @@
 #   세울 목록  : ... up --account <계정 ID> --allow-cidr <허용 IP>/32 [--domain <도메인>] [--alarm-email <주소>] [고객]
 #   실제 생성  : ... up --account <계정 ID> --allow-cidr <허용 IP>/32 [--domain <도메인>] [--alarm-email <주소>] [고객] --yes
 #                --domain: Route53 호스팅 영역과 us-east-1 ACM 인증서(ISSUED)가 먼저 있어야 한다.
+#                          CloudFront→ALB HTTPS용으로 서울 리전 ACM 인증서(origin.<도메인>을 덮는 것, ISSUED)도 필요하다.
 #                CloudFront에 별칭·인증서를 달고 Route53에 A 별칭 레코드를 만든다
 #                --alarm-email: 오류 알람을 받을 주소. SNS가 보낸 확인 메일의 링크를 눌러야 알람이 온다
 #   이미지     : ... build --account <계정 ID> --tag <태그>        (docker 필요 — ECR에 api·web 푸시)
@@ -175,6 +177,10 @@ ALB_NAME = f"{PREFIX}-alb"
 TG_API = f"{PREFIX}-api"
 TG_WEB = f"{PREFIX}-web"
 ORIGIN_HEADER = "X-Vigilantis-Origin"
+# CloudFront→ALB HTTPS의 이름. ALB 기본 주소(*.elb.amazonaws.com)에는 인증서를 받을 수 없어서
+# 사용자 도메인 아래 이름을 ALB에 붙이고, 서울 리전 ACM 인증서를 ALB 443 리스너에 단다(#494)
+ORIGIN_SUBDOMAIN = "origin"
+ALB_TLS_POLICY = "ELBSecurityPolicy-TLS13-1-2-2021-06"  # TLS 1.2 이상
 API_PATHS = ("/api/*", "/health")
 WEB_HEALTH_PATH = "/favicon.ico"  # 페이지는 서버에서 API를 부르므로 정적 파일로 생존만 본다
 DEREGISTRATION_DELAY_SECONDS = 30  # TG 연결 비우기 대기 — target_group_attributes
@@ -681,13 +687,34 @@ def public_origins(dist: dict) -> list[str]:
     return [f"https://{a}" for a in aliases] + [f"https://{dist['DomainName']}"]
 
 
-def custom_domain_config(config: dict, domain: str, cert_arn: str) -> dict:
-    """배포 설정에 별칭과 인증서를 단 사본. 나머지 설정은 그대로 둔다(update_distribution은 전체 교체다)."""
+def custom_domain_config(config: dict, domain: str, cert_arn: str, origin: Optional[str] = None) -> dict:
+    """배포 설정에 별칭과 인증서를 단 사본. 나머지 설정은 그대로 둔다(update_distribution은 전체 교체다).
+
+    origin(origin.<도메인>)을 주면 오리진도 그 이름 · HTTPS 전용으로 바꾼다 — 도메인 없이 먼저 만든 배포를
+    재실행이 HTTPS로 옮기는 자리다.
+    """
     updated = dict(config)
     updated["Aliases"] = {"Quantity": 1, "Items": [domain]}
     updated["ViewerCertificate"] = {"ACMCertificateArn": cert_arn, "SSLSupportMethod": "sni-only",
                                     "MinimumProtocolVersion": "TLSv1.2_2021"}
+    if origin:
+        items = [{**item, "DomainName": origin, "CustomOriginConfig": origin_protocol(https=True)}
+                 for item in config["Origins"]["Items"]]
+        updated["Origins"] = {**config["Origins"], "Items": items}
     return updated
+
+
+def origin_host(domain: str) -> str:
+    return f"{ORIGIN_SUBDOMAIN}.{domain}"
+
+
+def origin_protocol(https: bool) -> dict:
+    """CloudFront→ALB 구간 설정. HTTPS면 TLS 1.2 이상으로 ALB 인증서(origin.<도메인>)를 검증한다."""
+    config = {"HTTPPort": 80, "HTTPSPort": 443, "OriginProtocolPolicy": "https-only" if https else "http-only",
+              "OriginReadTimeout": 60, "OriginKeepaliveTimeout": 5}
+    if https:
+        config["OriginSslProtocols"] = {"Quantity": 1, "Items": ["TLSv1.2"]}
+    return config
 
 
 def certificate_covers(cert: dict, domain: str) -> bool:
@@ -974,6 +1001,14 @@ def alias_records_for(records: list[dict], domain: str, cf_domain: str) -> list[
             and r.get("AliasTarget", {}).get("DNSName", "").rstrip(".") == cf_domain]
 
 
+def origin_records_for(records: list[dict], host: str, alb_dns: str) -> list[dict]:
+    """이 ALB를 가리키는 origin.<도메인> A 별칭만. Route53은 ALB 별칭을 dualstack. 접두로 돌려준다."""
+    def target(r: dict) -> str:
+        return r.get("AliasTarget", {}).get("DNSName", "").rstrip(".").lower().removeprefix("dualstack.")
+    return [r for r in records
+            if r["Name"].rstrip(".") == host and r["Type"] == "A" and target(r) == alb_dns.lower()]
+
+
 def _find_topic(sns) -> Optional[str]:
     for page in sns.get_paginator("list_topics").paginate():
         for topic in page.get("Topics", []):
@@ -1162,7 +1197,17 @@ def _cloudfront_prefix_list(ec2) -> str:
     return lists[0]["PrefixListId"]
 
 
-def _ensure_sgs(ec2, vpc_id: str) -> dict[str, str]:
+def alb_ingress(prefix_list_id: str, port: int) -> dict:
+    return {"IpProtocol": "tcp", "FromPort": port, "ToPort": port,
+            "PrefixListIds": [{"PrefixListId": prefix_list_id, "Description": "CloudFront origin-facing only"}]}
+
+
+def _ensure_sgs(ec2, vpc_id: str, https: bool = False) -> dict[str, str]:
+    """https면 ALB SG는 CloudFront의 443만 받는다. 80 규칙은 걷어 낸다.
+
+    CloudFront 관리형 prefix list는 보안 그룹 규칙 한도에서 항목 수만큼 세어져, 80·443을 둘 다 열면
+    기본 한도(규칙 60개)를 넘을 수 있다. 평문 구간을 닫는 목적과도 맞는다.
+    """
     have = _find_sgs(ec2, vpc_id)
     for name in SECURITY_GROUPS:
         if name not in have:
@@ -1170,10 +1215,16 @@ def _ensure_sgs(ec2, vpc_id: str) -> dict[str, str]:
                 GroupName=name, Description=f"{PREFIX} {name.rsplit('-', 1)[-1]}", VpcId=vpc_id,
                 TagSpecifications=_tag_spec("security-group", name))["GroupId"]
             print(f"[platform] SG {name} {have[name]} 생성")
+    prefix_list = _cloudfront_prefix_list(ec2)
+    if https:
+        try:
+            ec2.revoke_security_group_ingress(GroupId=have[SG_ALB], IpPermissions=[alb_ingress(prefix_list, 80)])
+            print(f"[platform] SG {SG_ALB}: CloudFront 80 수신 규칙 제거(HTTPS 전용)")
+        except ClientError as exc:
+            if _code(exc) != "InvalidPermission.NotFound":
+                raise
     rules = {
-        SG_ALB: [{"IpProtocol": "tcp", "FromPort": 80, "ToPort": 80,
-                  "PrefixListIds": [{"PrefixListId": _cloudfront_prefix_list(ec2),
-                                     "Description": "CloudFront origin-facing only"}]}],
+        SG_ALB: [alb_ingress(prefix_list, 443 if https else 80)],
         SG_API: [{"IpProtocol": "tcp", "FromPort": API_PORT, "ToPort": API_PORT,
                   "UserIdGroupPairs": [{"GroupId": have[SG_ALB]}]}],
         SG_WEB: [{"IpProtocol": "tcp", "FromPort": WEB_PORT, "ToPort": WEB_PORT,
@@ -1388,7 +1439,38 @@ def _ensure_target_group(elbv2, vpc_id: str, name: str, port: int, health: str) 
     return arn
 
 
-def _ensure_alb(elbv2, vpc_id: str, subnets: dict[str, str], sg_alb: str, origin_value: str) -> dict:
+_FORBIDDEN = [{"Type": "fixed-response", "FixedResponseConfig": {
+    "StatusCode": "403", "ContentType": "text/plain", "MessageBody": "forbidden"}}]
+
+
+def _ensure_listener(elbv2, lb_arn: str, origin_cert_arn: Optional[str]) -> str:
+    """앱으로 보내는 리스너 하나를 맞춘다 — 인증서가 있으면 HTTPS 443, 없으면 HTTP 80. 기본 동작은 403.
+
+    HTTPS로 바꾸면 남은 80 리스너를 지운다. 비밀 헤더 규칙이 80에 남아 있으면 평문 경로가 그대로 열린다.
+    """
+    port = 443 if origin_cert_arn else 80
+    by_port = {li["Port"]: li for li in elbv2.describe_listeners(LoadBalancerArn=lb_arn)["Listeners"]}
+    if origin_cert_arn and 80 in by_port:
+        elbv2.delete_listener(ListenerArn=by_port.pop(80)["ListenerArn"])
+        print("[platform] ALB 80 리스너 삭제(CloudFront→ALB HTTPS 전용)")
+    if port in by_port:
+        listener = by_port[port]
+        if origin_cert_arn and [x["CertificateArn"] for x in listener.get("Certificates", [])] != [origin_cert_arn]:
+            elbv2.modify_listener(ListenerArn=listener["ListenerArn"],
+                                  Certificates=[{"CertificateArn": origin_cert_arn}], SslPolicy=ALB_TLS_POLICY)
+        return listener["ListenerArn"]
+    if origin_cert_arn:
+        created = elbv2.create_listener(LoadBalancerArn=lb_arn, Protocol="HTTPS", Port=443,
+                                        Certificates=[{"CertificateArn": origin_cert_arn}],
+                                        SslPolicy=ALB_TLS_POLICY, DefaultActions=_FORBIDDEN)
+        print("[platform] ALB 443 리스너 생성(origin 인증서)")
+    else:
+        created = elbv2.create_listener(LoadBalancerArn=lb_arn, Protocol="HTTP", Port=80, DefaultActions=_FORBIDDEN)
+    return created["Listeners"][0]["ListenerArn"]
+
+
+def _ensure_alb(elbv2, vpc_id: str, subnets: dict[str, str], sg_alb: str, origin_value: str,
+                origin_cert_arn: Optional[str] = None) -> dict:
     tg_api = _ensure_target_group(elbv2, vpc_id, TG_API, API_PORT, "/health")
     tg_web = _ensure_target_group(elbv2, vpc_id, TG_WEB, WEB_PORT, WEB_HEALTH_PATH)
     lb = _find_lb(elbv2)
@@ -1399,20 +1481,13 @@ def _ensure_alb(elbv2, vpc_id: str, subnets: dict[str, str], sg_alb: str, origin
             Tags=_kv_tags(ALB_NAME))["LoadBalancers"][0]
         print(f"[platform] ALB {ALB_NAME} 생성(internet-facing · CloudFront만 수신)")
         elbv2.get_waiter("load_balancer_available").wait(LoadBalancerArns=[lb["LoadBalancerArn"]])
-    listeners = elbv2.describe_listeners(LoadBalancerArn=lb["LoadBalancerArn"])["Listeners"]
-    if listeners:
-        listener_arn = listeners[0]["ListenerArn"]
-    else:
-        listener_arn = elbv2.create_listener(
-            LoadBalancerArn=lb["LoadBalancerArn"], Protocol="HTTP", Port=80,
-            DefaultActions=[{"Type": "fixed-response", "FixedResponseConfig": {
-                "StatusCode": "403", "ContentType": "text/plain", "MessageBody": "forbidden"}}])["Listeners"][0][
-            "ListenerArn"]
+    listener_arn = _ensure_listener(elbv2, lb["LoadBalancerArn"], origin_cert_arn)
     existing = {r["Priority"] for r in elbv2.describe_rules(ListenerArn=listener_arn)["Rules"]}
     for rule in listener_rules(tg_api, tg_web, origin_value):
         if str(rule["Priority"]) not in existing:
             elbv2.create_rule(ListenerArn=listener_arn, **rule)
-    return {"arn": lb["LoadBalancerArn"], "dns": lb["DNSName"], "tg_api": tg_api, "tg_web": tg_web}
+    return {"arn": lb["LoadBalancerArn"], "dns": lb["DNSName"], "zone": lb["CanonicalHostedZoneId"],
+            "tg_api": tg_api, "tg_web": tg_web}
 
 
 def _ensure_alarms(cw, sns, alb: dict, email: Optional[str]) -> None:
@@ -1516,7 +1591,9 @@ def _delete_waf(waf) -> None:
             waf.delete_ip_set(Name=name, Scope="CLOUDFRONT", Id=ipset["Id"], LockToken=ipset["LockToken"])
 
 
-def distribution_config(alb_dns: str, origin_value: str, acl_arn: str, caller_ref: str) -> dict:
+def distribution_config(origin_domain: str, origin_value: str, acl_arn: str, caller_ref: str,
+                        https: bool = False) -> dict:
+    """origin_domain은 HTTPS면 origin.<도메인>, 아니면 ALB 기본 주소다."""
     return {
         "CallerReference": caller_ref,
         "Comment": CF_COMMENT,
@@ -1526,11 +1603,10 @@ def distribution_config(alb_dns: str, origin_value: str, acl_arn: str, caller_re
         "WebACLId": acl_arn,
         "Origins": {"Quantity": 1, "Items": [{
             "Id": "alb",
-            "DomainName": alb_dns,
-            # 도메인이 없어 ALB에 인증서를 못 단다 — CloudFront→ALB는 평문 HTTP다. 오리진은 공개 ALB의
-            # 공인 주소라 이 구간과 비밀 헤더 값은 인터넷 구간을 평문으로 지날 수 있다(ADR-0010 §4)
-            "CustomOriginConfig": {"HTTPPort": 80, "HTTPSPort": 443, "OriginProtocolPolicy": "http-only",
-                                   "OriginReadTimeout": 60, "OriginKeepaliveTimeout": 5},
+            "DomainName": origin_domain,
+            # 도메인이 없으면 ALB에 인증서를 못 단다 — 그때만 CloudFront→ALB가 평문 HTTP다. 오리진은 공개
+            # ALB의 공인 주소라 이 구간과 비밀 헤더 값은 인터넷 구간을 평문으로 지날 수 있다(ADR-0010 §4)
+            "CustomOriginConfig": origin_protocol(https),
             "CustomHeaders": {"Quantity": 1, "Items": [{"HeaderName": ORIGIN_HEADER, "HeaderValue": origin_value}]},
         }]},
         "DefaultCacheBehavior": {
@@ -1545,43 +1621,66 @@ def distribution_config(alb_dns: str, origin_value: str, acl_arn: str, caller_re
     }
 
 
-def _ensure_distribution(cf, alb_dns: str, origin_value: str, acl_arn: str) -> str:
+def _ensure_distribution(cf, origin_domain: str, origin_value: str, acl_arn: str, https: bool = False) -> str:
     dist = _find_distribution(cf)
     if dist:
         return dist["DomainName"]
     created = cf.create_distribution_with_tags(DistributionConfigWithTags={
-        "DistributionConfig": distribution_config(alb_dns, origin_value, acl_arn, f"{PREFIX}-{int(time.time())}"),
+        "DistributionConfig": distribution_config(origin_domain, origin_value, acl_arn,
+                                                  f"{PREFIX}-{int(time.time())}", https),
         "Tags": {"Items": [{"Key": TAG_KEY, "Value": TAG_VALUE}]},
     })["Distribution"]
     print(f"[platform] CloudFront {created['Id']} 생성 — 전파에 10–15분 걸린다")
     return created["DomainName"]
 
 
-def _require_custom_domain(c: dict, domain: str) -> tuple[str, str]:
-    """--domain의 인증서·공개 호스팅 영역을 찾는다 — 없으면 **무엇이든 바꾸기 전에** 멈춘다.
+def _require_custom_domain(c: dict, domain: str) -> tuple[str, str, str]:
+    """--domain의 인증서 둘·공개 호스팅 영역을 찾는다 — 없으면 **무엇이든 바꾸기 전에** 멈춘다.
 
     인증서 발급은 DNS 검증을 기다려야 하고 도메인 구입은 사람이 한다 — 둘 다 이 스크립트 밖이다.
     up 끝에서야 보면 NAT·RDS(시간 과금)와 WAF 허용 목록 변경이 남은 채 멈추므로 up 맨 앞에서 본다.
+    → (CloudFront용 us-east-1 인증서, 호스팅 영역 ID, ALB용 서울 리전 인증서)
     """
     cert_arn = _find_certificate(c["acm"], domain)
     zone_id = _find_zone(c["r53"], domain)
-    if not (cert_arn and zone_id):
+    origin_cert_arn = _find_certificate(c["acm_origin"], origin_host(domain))
+    if not (cert_arn and zone_id and origin_cert_arn):
         sys.exit(f"--domain {domain}: us-east-1 ACM 인증서(ISSUED) {'있음' if cert_arn else '없음'} · "
-                 f"Route53 호스팅 영역 {'있음' if zone_id else '없음'} — 둘 다 먼저 준비할 것")
-    return cert_arn, zone_id
+                 f"Route53 호스팅 영역 {'있음' if zone_id else '없음'} · "
+                 f"ALB용 ACM 인증서({origin_host(domain)} · 이 리전 · ISSUED) {'있음' if origin_cert_arn else '없음'}"
+                 " — 셋 다 먼저 준비할 것")
+    return cert_arn, zone_id, origin_cert_arn
 
 
-def _ensure_custom_domain(c: dict, domain: str, cert_arn: str, zone_id: str) -> None:
-    """CloudFront에 별칭·인증서를 달고 Route53 A 별칭을 이 배포로 맞춘다. 인증서·호스팅 영역은 만들지 않는다."""
+def _ensure_origin_record(r53, zone_id: str, domain: str, alb: dict) -> str:
+    """origin.<도메인> A 별칭을 ALB로 맞추고 그 이름을 돌려준다 — CloudFront가 HTTPS로 부를 오리진 이름이다."""
+    host = origin_host(domain)
+    r53.change_resource_record_sets(HostedZoneId=zone_id, ChangeBatch={"Changes": [{
+        "Action": "UPSERT",
+        "ResourceRecordSet": {"Name": host, "Type": "A", "AliasTarget": {
+            "HostedZoneId": alb["zone"], "DNSName": alb["dns"], "EvaluateTargetHealth": False}},
+    }]})
+    print(f"[platform] Route53 {host} A → {alb['dns']}")
+    return host
+
+
+def _ensure_custom_domain(c: dict, domain: str, cert_arn: str, zone_id: str, origin: str) -> None:
+    """CloudFront에 별칭·인증서를 달고 오리진을 origin.<도메인> HTTPS로 맞춘 뒤 Route53 A 별칭을 이 배포로 맞춘다.
+
+    인증서·호스팅 영역은 만들지 않는다.
+    """
     cf = c["cf"]
     dist = _find_distribution(cf)
     got = cf.get_distribution_config(Id=dist["Id"])
     config = got["DistributionConfig"]
+    (current,) = config["Origins"]["Items"]
     if ((config.get("Aliases") or {}).get("Items") or []) != [domain] or \
-            (config.get("ViewerCertificate") or {}).get("ACMCertificateArn") != cert_arn:
+            (config.get("ViewerCertificate") or {}).get("ACMCertificateArn") != cert_arn or \
+            current["DomainName"] != origin or \
+            current["CustomOriginConfig"]["OriginProtocolPolicy"] != "https-only":
         cf.update_distribution(Id=dist["Id"], IfMatch=got["ETag"],
-                               DistributionConfig=custom_domain_config(config, domain, cert_arn))
-        print(f"[platform] CloudFront 별칭 {domain} 연결 — 전파에 수 분 걸린다")
+                               DistributionConfig=custom_domain_config(config, domain, cert_arn, origin))
+        print(f"[platform] CloudFront 별칭 {domain} · 오리진 {origin}(HTTPS) 연결 — 전파에 수 분 걸린다")
     c["r53"].change_resource_record_sets(HostedZoneId=zone_id, ChangeBatch={"Changes": [{
         "Action": "UPSERT",
         "ResourceRecordSet": {"Name": domain, "Type": "A", "AliasTarget": {
@@ -1600,7 +1699,7 @@ def up(c: dict, account: str, region: str, allow_cidrs: list[str], domain: Optio
     vpc_id = _ensure_vpc(ec2)
     subnets = _ensure_subnets(ec2, vpc_id, region)
     nat_ip = _ensure_network(ec2, vpc_id, subnets)
-    sgs = _ensure_sgs(ec2, vpc_id)
+    sgs = _ensure_sgs(ec2, vpc_id, https=bool(custom))
     origin_value = _secret_value(c["sm"], SECRET_ORIGIN) if _find_secret(c["sm"], SECRET_ORIGIN) else None
     if origin_value is None:
         _put_secret(c["sm"], SECRET_ORIGIN, secrets.token_urlsafe(32))
@@ -1615,14 +1714,17 @@ def up(c: dict, account: str, region: str, allow_cidrs: list[str], domain: Optio
     _ensure_roles(c["iam"], account, [a for a in secret_arns if a], external_id, customer)
     _ensure_logs(c["logs"])
     _ensure_cluster(c["ecs"])
-    alb = _ensure_alb(c["elbv2"], vpc_id, subnets, sgs[SG_ALB], origin_value)
+    alb = _ensure_alb(c["elbv2"], vpc_id, subnets, sgs[SG_ALB], origin_value,
+                      origin_cert_arn=custom[2] if custom else None)
     _ensure_alarms(c["cw"], c["sns"], alb, alarm_email)
+    # CloudFront가 HTTPS로 부를 이름을 배포보다 먼저 세운다 — 배포가 없는 이름을 가리키는 시간이 없게
+    origin = _ensure_origin_record(c["r53"], custom[1], domain, alb) if custom else None
     # 웹 컨테이너의 서버 측 API 호출도 CloudFront를 거친다 — NAT 공인 IP를 허용 목록에 넣는다
     # 속도 제한에서는 NAT IP를 뺀다(안전 가드 ⑦) — 같은 이유로 그 IP가 모든 사용자의 서버 측 호출을 싣는다
     acl_arn = _ensure_waf(c["waf"], sorted(set(allow_cidrs) | {f"{nat_ip}/32"}), f"{nat_ip}/32")
-    _ensure_distribution(c["cf"], alb["dns"], origin_value, acl_arn)
+    _ensure_distribution(c["cf"], origin or alb["dns"], origin_value, acl_arn, https=bool(origin))
     if custom:
-        _ensure_custom_domain(c, domain, *custom)
+        _ensure_custom_domain(c, domain, custom[0], custom[1], origin)
     print("[platform] 다음 단계(ADR-0010 §7)")
     print(f"  배포 주소          : {' · '.join(public_origins(_find_distribution(c['cf'])))}")
     print("  (도메인을 새로 달거나 바꿨으면 2·3을 다시 — 웹 번들의 API 주소와 api의 CORS가 그 주소를 따른다)")
@@ -1903,6 +2005,15 @@ def down(c: dict, account: str) -> None:
                 c["r53"].change_resource_record_sets(HostedZoneId=zone_id, ChangeBatch={"Changes": [
                     {"Action": "DELETE", "ResourceRecordSet": r} for r in records]})
                 print(f"[platform] Route53 {alias} 별칭 레코드 {len(records)}건 삭제")
+            # ALB를 지우면 origin.<도메인>도 없는 곳을 가리킨다 — 이 ALB를 가리키는 것만 지운다
+            lb = _find_lb(elbv2)
+            host = origin_host(alias)
+            found = c["r53"].list_resource_record_sets(HostedZoneId=zone_id, StartRecordName=host, MaxItems="10")
+            records = origin_records_for(found["ResourceRecordSets"], host, lb["DNSName"]) if lb else []
+            if records:
+                c["r53"].change_resource_record_sets(HostedZoneId=zone_id, ChangeBatch={"Changes": [
+                    {"Action": "DELETE", "ResourceRecordSet": r} for r in records]})
+                print(f"[platform] Route53 {host} 별칭 레코드 {len(records)}건 삭제")
         cfg = c["cf"].get_distribution_config(Id=dist["Id"])
         if cfg["DistributionConfig"]["Enabled"]:
             cfg["DistributionConfig"]["Enabled"] = False
@@ -2020,6 +2131,8 @@ def main() -> None:
         # CloudFront와 그에 붙는 WAF(CLOUDFRONT 범위)는 us-east-1에서만 다룬다
         "cf": aws_client("cloudfront", "us-east-1"), "waf": aws_client("wafv2", "us-east-1"),
         "acm": aws_client("acm", "us-east-1"), "r53": aws_client("route53", "us-east-1"),
+        # ALB 인증서는 ALB와 같은 리전에 있어야 한다(CloudFront 인증서와 다르다)
+        "acm_origin": aws_client("acm", region),
     }
     if args.customer_account:
         c["customer"] = _customer_clients(args.customer_profile, args.customer_account, region)
