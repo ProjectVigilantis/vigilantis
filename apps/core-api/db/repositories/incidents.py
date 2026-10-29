@@ -88,9 +88,13 @@ def create_incident(
     initial_risk_level: Optional[RiskLevel] = None,
     response_mode: Optional[ResponseMode] = None,
     initial_risk_reason_codes: Sequence[str] = (),
+    tenant_id: Optional[str] = None,
 ) -> models.Incident:
-    """SECOPS/FINOPS 형태 불변식은 DB CheckConstraint가 flush 시점에 거절한다."""
+    """SECOPS/FINOPS 형태 불변식은 DB CheckConstraint가 flush 시점에 거절한다.
+
+    tenant_id 를 주지 않으면 소속 없는 MVP 기록(NULL)이다. 소속은 만들 때 정하고 옮기지 않는다."""
     incident = models.Incident(
+        tenant_id=tenant_id,
         subject_arn=subject_arn,
         category=category,
         title=title,

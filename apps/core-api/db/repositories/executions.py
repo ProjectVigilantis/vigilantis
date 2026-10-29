@@ -6,6 +6,9 @@
 #     — 호출부(Workflow)가 IntegrityError를 중복 요청 응답으로 해석한다.
 #   - 실행 상태 6종·Non-terminal 집합은 공개 계약(api/actions.py)과 #55 파생
 #     집합(schemas.executions)이 원천이다.
+#   - 실행의 테넌트는 대상 인시던트의 테넌트다. create_execution 이 인시던트에서 옮기며 호출부는
+#     값을 고르지 않는다 — 관제자 승인 · 자동 격리 · 복구 · 자동 원복이 한 자리를 지나므로 경로마다
+#     소속이 갈리지 않는다. 소속 없는 인시던트(MVP 기록)의 실행도 NULL 이다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -42,9 +45,12 @@ def create_execution(
     execution_id: str | None = None,
 ) -> models.ActionExecution:
     """execution_id는 실행 전에 그 ID로 가드레일을 돌린 호출부만 넘긴다(자동 격리, #447).
-    넘기지 않으면 모델 기본값이 새 ID를 발급한다."""
+    넘기지 않으면 모델 기본값이 새 ID를 발급한다. tenant_id 는 인자로 받지 않는다(파일 머리말)."""
     row = models.ActionExecution(
         incident_id=incident_id,
+        tenant_id=db.scalar(
+            select(models.Incident.tenant_id).where(models.Incident.incident_id == incident_id)
+        ),
         runbook_id=runbook_id,
         target_arn=target_arn,
         trigger_source=trigger_source,
