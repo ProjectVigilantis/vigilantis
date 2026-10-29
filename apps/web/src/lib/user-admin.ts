@@ -2,6 +2,7 @@
 
 import type {
   AccountScope,
+  AccountType,
   ErrorCode,
   UserEventAction,
   UserEventItem,
@@ -81,8 +82,12 @@ const UNCERTAIN = '처리 결과를 확인하지 못했습니다. 목록을 새�
 export const INVITE_RECOVER_NOT_FOUND =
   '연결할 기존 인증 계정을 찾지 못했습니다. 이메일을 확인하거나, 기존 계정 연결을 해제하고 초대해 주세요.';
 
-export const INVITE_STATE_CONFLICT =
-  '지금 상태에서는 초대할 수 없습니다. 이미 초대된 이메일이거나 그 사이 상태가 바뀌었을 수 있습니다. 같은 이메일의 기존 인증 계정이 있고 계정 주인을 확인했다면 "기존 인증 계정을 연결 (복구)"를 선택해 다시 시도할 수 있습니다.';
+const INVITE_STATE_CONFLICT_REASON =
+  '지금 상태에서는 초대할 수 없습니다. 이미 초대된 이메일이거나 그 사이 상태가 바뀌었을 수 있습니다.';
+/** 고객사 ADMIN의 초대 409 — 기존 계정 연결(복구)은 플랫폼 운영자만 고를 수 있어 안내하지 않는다. */
+export const INVITE_STATE_CONFLICT = `${INVITE_STATE_CONFLICT_REASON} 목록에서 같은 이메일의 사용자를 확인해 주세요.`;
+/** 플랫폼 운영자의 초대 409 — 같은 이메일의 기존 인증 계정이면 기존 계정 연결(복구)로 다시 시도할 수 있다. */
+export const INVITE_STATE_CONFLICT_PLATFORM = `${INVITE_STATE_CONFLICT_REASON} 같은 이메일의 기존 인증 계정이 있고 계정 주인을 확인했다면 "기존 인증 계정을 연결 (복구)"를 선택해 다시 시도할 수 있습니다.`;
 
 /**
  * 역할 · 활성 상태 변경 가능 여부. 본인 행은 서버가 거절하고, 세션 확인 전(actor 미상)에는 본인인지 알 수 없어 막는다.
@@ -117,13 +122,22 @@ const MESSAGES: Partial<Record<ErrorCode, string>> = {
 /**
  * 조치 실패 문구. `code`가 null이면 응답을 받지 못한 실패(네트워크)다.
  * 초대 · 재발송의 500 · 네트워크 실패는 메일이 이미 나갔을 수 있어 별도 문구다.
+ * `accountType`은 조치한 계정의 종류다. 기존 계정 연결(복구)은 플랫폼 운영자만 고를 수 있어, 복구 안내는
+ * `PLATFORM`일 때만 붙는다(모르면 붙이지 않는다).
  */
-export function userAdminErrorMessage(action: UserAdminAction, code: ErrorCode | null): string {
-  // 초대의 404는 "기존 계정 연결(복구)"을 골랐는데 연결할 인증 계정이 없다는 뜻이다(목록의 대상 없음과 다르다).
-  if (action === 'invite' && code === 'USER_NOT_FOUND') return INVITE_RECOVER_NOT_FOUND;
+export function userAdminErrorMessage(
+  action: UserAdminAction,
+  code: ErrorCode | null,
+  accountType: AccountType | null = null,
+): string {
+  if (action === 'invite' && accountType === 'PLATFORM') {
+    // 초대의 404는 "기존 계정 연결(복구)"을 골랐는데 연결할 인증 계정이 없다는 뜻이다(목록의 대상 없음과 다르다).
+    if (code === 'USER_NOT_FOUND') return INVITE_RECOVER_NOT_FOUND;
+    // 초대의 409는 이미 인증 서비스에 계정이 있는 이메일일 수 있다 — 계정 주인을 확인했다면 기존 계정 연결(복구)을 고를 수 있다.
+    if (code === 'USER_STATE_CONFLICT') return INVITE_STATE_CONFLICT_PLATFORM;
+  }
   // 초대의 고객 404는 플랫폼 운영자가 입력한 고객 ID가 없다는 뜻이다.
   if (action === 'invite' && code === 'TENANT_NOT_FOUND') return INVITE_TENANT_NOT_FOUND;
-  // 초대의 409는 이미 인증 서비스에 계정이 있는 이메일일 수 있다 — 계정 주인을 확인했다면 기존 계정 연결(복구)을 고를 수 있다.
   if (action === 'invite' && code === 'USER_STATE_CONFLICT') return INVITE_STATE_CONFLICT;
   const known = code === null ? undefined : MESSAGES[code];
   if (known) return known;
@@ -140,6 +154,7 @@ export const TENANT_ID_INVALID = '고객 ID는 UUID 형식입니다(예: 123e456
 export interface InviteForm {
   email: string;
   role: UserRole;
+  /** 기존 계정 연결(복구) 선택. 플랫폼 운영자만 고를 수 있다 — 고객사 ADMIN은 무시하고 false로 보낸다. */
   recoverExisting: boolean;
   /** 플랫폼 운영자가 입력한 고객 ID. 고객사 ADMIN은 입력하지 않는다(무시한다). */
   tenantId: string;
@@ -149,14 +164,15 @@ export type InviteRequestResult = { ok: true; request: UserInviteRequest } | { o
 
 /**
  * 초대 본문. 플랫폼 운영자는 고객 ID를 **반드시** 싣는다 — 스키마상 선택이어도 빠지면 서버가 거절한다.
- * 고객사 ADMIN은 `tenant_id`를 싣지 않는다(서버가 자기 소속으로 정한다 · 다른 고객을 고를 수 없다).
+ * 고객사 ADMIN은 `tenant_id`를 싣지 않고(서버가 자기 소속으로 정한다 · 다른 고객을 고를 수 없다) 기존 계정 연결도
+ * 언제나 false다(복구는 플랫폼 운영자만 — 서버가 고객사 ADMIN의 true를 403으로 거절한다).
  * 계정 종류는 입력이 아니다. 이메일은 다듬지 않고 그대로 보내고(서버가 형식을 판정), 고객 ID만 앞뒤 공백을 지운다.
  */
 export function inviteRequestFor(inviter: Pick<AccountScope, 'account_type'>, form: InviteForm): InviteRequestResult {
-  const request: UserInviteRequest = { email: form.email, role: form.role, recover_existing: form.recoverExisting };
+  const request: UserInviteRequest = { email: form.email, role: form.role, recover_existing: false };
   if (inviter.account_type === 'TENANT') return { ok: true, request };
   const tenantId = form.tenantId.trim();
   if (tenantId === '') return { ok: false, error: TENANT_ID_REQUIRED };
   if (!TENANT_ID.test(tenantId)) return { ok: false, error: TENANT_ID_INVALID };
-  return { ok: true, request: { ...request, tenant_id: tenantId } };
+  return { ok: true, request: { ...request, tenant_id: tenantId, recover_existing: form.recoverExisting } };
 }

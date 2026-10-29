@@ -13,7 +13,6 @@ import type {
   IncidentsResponse,
   LoginStepResponse,
   MetricsTimeseriesResponse,
-  PlatformEnrollmentRequest,
   ResolutionJudgement,
   TenantCreateRequest,
   TenantCreateResponse,
@@ -352,15 +351,6 @@ export async function confirmPasswordReset(email: string, code: string, newPassw
   await postJson<null>('/auth/password-reset/confirm', { email, code, new_password: newPassword }, AUTH_FLOW);
 }
 
-/**
- * 플랫폼 운영자 초대 링크 등록(#492) — 204. 계정 생성 · 초대 메일 발송 요청까지이고 로그인 · 세션 발급은 하지 않는다
- * (받은 초대 메일로 로그인 단계를 거친다). 로그인 전 화면이라 401을 세션 만료로 다루지 않는다(AUTH_FLOW 전송).
- * 본문은 `token` · `email` 둘뿐이다. 자동 재시도하지 않는다 — 결과 불명 실패 뒤의 재요청은 사용자가 고른다.
- */
-export async function requestPlatformEnrollment(body: PlatformEnrollmentRequest): Promise<void> {
-  await postJson<null>('/auth/platform-enrollment', { token: body.token, email: body.email }, AUTH_FLOW);
-}
-
 /* ──────────────────────────── /users (#492 PR 3) ──────────────────────────── */
 /* 플랫폼 운영자 · 고객사 ADMIN 전용이다. 메뉴를 숨기는 것은 화면 편의이고 실제 차단은 서버 403 `AUTH_FORBIDDEN`,
    관리 범위 밖 대상은 404 `USER_NOT_FOUND`다. */
@@ -368,7 +358,7 @@ export async function requestPlatformEnrollment(body: PlatformEnrollmentRequest)
 const userPath = (userId: string, suffix: string) => `/users/${encodeURIComponent(userId)}${suffix}`;
 
 /**
- * 201 — 만든 사용자. `recover_existing`은 ADMIN이 명시적으로 고른 경우에만 true다.
+ * 201 — 만든 사용자. `recover_existing`은 플랫폼 운영자가 명시적으로 고른 경우에만 true다(고객사 ADMIN은 언제나 false).
  * `tenant_id`는 플랫폼 운영자가 반드시 싣고 고객사 ADMIN은 생략한다(본문은 lib/user-admin.ts `inviteRequestFor`).
  */
 export function inviteUser(body: UserInviteRequest): Promise<UserListItem> {

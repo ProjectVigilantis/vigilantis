@@ -47,7 +47,7 @@ class UserInviteRequest(BaseModel):
     role: UserRole
     # 플랫폼은 명시 필수, 고객사 ADMIN은 서버가 자기 소속으로 한정한다.
     tenant_id: UUID | None = None
-    # 기본 초대에서 중복 계정을 자동 연결하지 않는다. ADMIN의 명시적 복구 선택만 허용한다.
+    # 기본 초대에서 중복 계정을 자동 연결하지 않는다. PLATFORM ADMIN의 명시적 복구 선택만 허용한다(고객사 ADMIN은 403).
     recover_existing: bool = False
 
 

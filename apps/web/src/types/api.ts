@@ -5,7 +5,7 @@ export type IsoDateTime = string;
 
 /* ────────────────────────────── errors.py ────────────────────────────── */
 
-/** REST 공통 오류 코드 27종. 괄호는 계약상 HTTP 상태. */
+/** REST 공통 오류 코드 26종. 괄호는 계약상 HTTP 상태. */
 export type ErrorCode =
   | 'INCIDENT_NOT_FOUND' // 404 — 요청의 테넌트 범위 밖도 404(존재를 알리지 않는다)
   | 'IDEMPOTENCY_KEY_CONFLICT' // 409
@@ -30,8 +30,7 @@ export type ErrorCode =
   | 'AUTH_RATE_LIMITED' // 429
   | 'AUTH_PROVIDER_UNAVAILABLE' // 503
   | 'USER_NOT_FOUND' // 404 — 관리 범위 안의 고객사 사용자 없음(#492)
-  | 'USER_STATE_CONFLICT' // 409 — 고객사별 마지막 활성 ADMIN · 중복 초대 · 상태 충돌 · 등록 이메일 중복(#492)
-  | 'ENROLLMENT_UNAVAILABLE' // 404 — 플랫폼 초대 링크를 쓸 수 없다(꺼짐 · 무효 · 만료 · 회수 · 사용됨 · 예약됨을 가르지 않는다, #492)
+  | 'USER_STATE_CONFLICT' // 409 — 고객사별 마지막 활성 ADMIN · 중복 초대 · 상태 충돌(#492)
   | 'REQUEST_VALIDATION_FAILED' // 422
   | 'INTERNAL_ERROR'; // 500
 
@@ -914,15 +913,6 @@ export type CurrentUserResponse = AccountScope & {
   session: SessionInfo;
 };
 
-/**
- * 플랫폼 운영자 초대 링크 등록(`POST /api/v1/auth/platform-enrollment`, #492) — 204, 본문 · 세션 쿠키 없음.
- * 권한 · 계정 종류 · 고객은 입력이 아니다(링크가 정한다). `token`은 링크 조각에서 읽은 비밀값이라 저장 · 로그하지 않는다.
- */
-export interface PlatformEnrollmentRequest {
-  token: string;
-  email: string;
-}
-
 /* ────────────────────────────── users.py ────────────────────────────── */
 /* /api/v1/users — 고객사 사용자 관리(#492). 플랫폼 운영자는 모든 고객사 사용자를, 고객사 ADMIN은 자기 고객사
    사용자만 관리한다. 그 밖은 서버가 403 `AUTH_FORBIDDEN`, 관리 범위 밖 대상은 404 `USER_NOT_FOUND`다.
@@ -952,7 +942,10 @@ export interface UserInviteRequest {
    * 고객사 ADMIN은 생략한다(서버가 자기 소속으로 한정한다). 계정 종류(account_type)는 입력이 아니다.
    */
   tenant_id?: string | null;
-  /** 같은 이메일의 기존 Cognito 계정을 이 앱 사용자로 연결한다. ADMIN의 명시적 선택일 때만 true다. */
+  /**
+   * 같은 이메일의 기존 Cognito 계정을 이 앱 사용자로 연결한다. 플랫폼 운영자의 명시적 선택일 때만 true다 —
+   * 고객사 ADMIN의 true는 서버가 403 `AUTH_FORBIDDEN`으로 거절한다(고객사 ADMIN은 언제나 false).
+   */
   recover_existing: boolean;
 }
 

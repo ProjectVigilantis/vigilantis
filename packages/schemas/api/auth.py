@@ -22,7 +22,6 @@
 #   POST /login/totp-setup/verify     CodeRequest         → LoginStepResponse
 #   POST /login/totp                  CodeRequest         → LoginStepResponse
 #   POST /login/email-verification    CodeRequest         → LoginStepResponse
-#   POST /platform-enrollment         PlatformEnrollmentRequest → 204 (CLI 발급 1회용 링크로 PLATFORM ADMIN 생성 · 세션 없음, #492)
 #   POST /logout                                          → 204 (세션 회수 · 쿠키 삭제)
 #   POST /activity                                        → 204 (사용자 입력이 있을 때만 — 유휴 연장)
 #   GET  /me                                              → CurrentUserResponse (유휴를 연장하지 않는다)
@@ -49,9 +48,6 @@ from .assets import UtcDateTime
 PASSWORD_MAX_LENGTH = 256
 #: 새 비밀번호 최소 길이 — User Pool 비밀번호 정책(최소 12자)과 같은 값이다.
 NEW_PASSWORD_MIN_LENGTH = 12
-#: 플랫폼 계정 등록 링크 토큰의 입력 상한 — 발급 토큰(43자)보다 넉넉하고 FE 의 링크 조각 검증 상한(512)과 같다.
-#: 그 안의 값은 형식과 관계없이 서버가 DB 조회로만 판정한다(쓸 수 없으면 404 ENROLLMENT_UNAVAILABLE).
-ENROLLMENT_TOKEN_MAX_LENGTH = 512
 
 Email = Annotated[str, Field(min_length=3, max_length=254, pattern=r"^[^@\s]+@[^@\s]+$")]
 
@@ -158,21 +154,6 @@ class PasswordResetRequest(BaseModel):
 class PasswordResetConfirmRequest(NewPasswordRequest, CodeRequest):
     """POST /password-reset/confirm — 기존 새 비밀번호 길이·코드 계약을 공유한다."""
 
-    email: Email
-
-
-class PlatformEnrollmentRequest(BaseModel):
-    """POST /api/v1/auth/platform-enrollment — 운영 CLI 가 발급한 1회용 링크로 플랫폼 계정을 만든다(#492).
-
-    `token` 은 링크 조각(`#token=…`)의 불투명 값이다. 계정 종류(PLATFORM) · 역할(ADMIN) · 소속(없음)은
-    서버가 고정하며 요청으로 받지 않는다(모르는 필드는 422). 성공은 본문 · 쿠키 없는 204 이고 로그인이 아니다 —
-    Cognito 초대 메일의 임시 비밀번호로 기존 /login 단계를 밟는다. 쓸 수 없는 링크는 사유와 관계없이
-    404 ENROLLMENT_UNAVAILABLE 이다.
-    """
-
-    model_config = _SECRET_INPUT_CONFIG
-
-    token: SecretStr = Field(min_length=1, max_length=ENROLLMENT_TOKEN_MAX_LENGTH)
     email: Email
 
 

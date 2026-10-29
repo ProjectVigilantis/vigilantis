@@ -2,7 +2,7 @@
 
 Cognito Admin 인증 API로 로그인을 진행하고, **이번 로그인에서 TOTP 단계 성공 응답을 서버가 직접 받은 뒤에만** 앱 서버 세션을 발급한다. 공개 계약은 `packages/schemas/api/auth.py`, 오류 코드는 `packages/schemas/api/errors.py`다.
 
-이 문서는 PR 1(로그인 기반), PR 2(API · WebSocket 접근 보호 · 역할 검사), PR 3(ADMIN 사용자 관리 · 사용자당 세션 1개 · 비밀번호 재설정 · 새 비밀번호 정책 · 사용자 관리 이력)과 계정 종류(`account_type`)에 따른 테넌트 · 플랫폼 권한(§계정 종류와 테넌트 소속), CLI가 발급하는 1회용 플랫폼 계정 등록 링크(§플랫폼 등록 링크)의 백엔드 기준이다. 웹 화면(SSR) 쪽 처리는 `apps/web` 범위다 — PR 3 화면(사용자 관리 · 비밀번호 재설정 · 새 비밀번호 조건 · 한글 입력 경고 · 세션 종료 안내)은 최소 구현이고 시각 다듬기는 포함하지 않으며, `apps/web/src/lib/session-expiry.ts`의 시계 보정은 PR 3 범위 밖이다. 계정 종류에 따른 화면 기능(`apps/web/src/lib/home-path.ts` · `components/gnb.tsx` 포함)은 §화면이 다룬다. 분실한 TOTP의 재설정은 PR 3에서 제외했다(§운영 주의점). 실제 Cognito · HTTPS 배포 환경 · 환경 이전에서의 검증과 환경별 설정 · 배포 권한 반영은 이 문서가 보증하지 않는 배포 전제다(§User Pool · 앱 클라이언트 전제 · §테스트).
+이 문서는 PR 1(로그인 기반), PR 2(API · WebSocket 접근 보호 · 역할 검사), PR 3(ADMIN 사용자 관리 · 사용자당 세션 1개 · 비밀번호 재설정 · 새 비밀번호 정책 · 사용자 관리 이력)과 계정 종류(`account_type`)에 따른 테넌트 · 플랫폼 권한(§계정 종류와 테넌트 소속)의 백엔드 기준이다. 웹 화면(SSR) 쪽 처리는 `apps/web` 범위다 — PR 3 화면(사용자 관리 · 비밀번호 재설정 · 새 비밀번호 조건 · 한글 입력 경고 · 세션 종료 안내)은 최소 구현이고 시각 다듬기는 포함하지 않으며, `apps/web/src/lib/session-expiry.ts`의 시계 보정은 PR 3 범위 밖이다. 계정 종류에 따른 화면 기능(`apps/web/src/lib/home-path.ts` · `components/gnb.tsx` 포함)은 §화면이 다룬다. 분실한 TOTP의 재설정은 PR 3에서 제외했다(§운영 주의점). 실제 Cognito · HTTPS 배포 환경 · 환경 이전에서의 검증과 환경별 설정 · 배포 권한 반영은 이 문서가 보증하지 않는 배포 전제다(§User Pool · 앱 클라이언트 전제 · §테스트).
 
 근거 표시: **[표준]** 외부 표준 · 공식 문서, **[팀 결정]** 이슈 #492 확정 정책, **[판단]** 이 구현의 선택. 동작의 근거는 현재 코드와 자동 테스트(대역 · 실제 PostgreSQL)이며, 자동 테스트가 보장하지 않는 범위(실제 Cognito · HTTPS 배포 환경)는 §테스트에 적었다.
 
@@ -17,23 +17,19 @@ Cognito Admin 인증 API로 로그인을 진행하고, **이번 로그인에서 
 | `service.py` | 트랜잭션 소유자. 로그인 완료(사용자 조회 · 세션 발급), 현재 사용자, 활동, 로그아웃. (PR 3) 로그인 완료를 `app_users` 잠금으로 직렬화하고 그 사용자의 이전 세션을 전부 회수. (#492) `CurrentUser`에 `account_type` · `tenant_id`와 내부 전용 `tenant_status`. UNASSIGNED는 로그인 완료 403 · 세션 판정 401 |
 | `password_policy.py` | (PR 3) 새 비밀번호 정책 순수 함수 `check_password` — 최초 비밀번호 변경 · 재설정 확정 공용 |
 | `password_reset.py` | (PR 3) 비밀번호 재설정 요청 · 확정, 확정 성공 뒤 앱 세션 회수 |
-| `admin_service.py` | (PR 3) ADMIN 사용자 관리 트랜잭션 소유자 — 초대 · 재발송 · 역할 · 상태 · 세션 회수 · 이력 조회. 잠금 · 행위자 재판정 · 마지막 활성 ADMIN 보호. (#492) 계정 종류에 따른 관리 범위, 초대 대상 테넌트 결정 · ACTIVE 확인, 정지 테넌트 행위자의 쓰기 거절, 테넌트별 마지막 활성 ADMIN |
+| `admin_service.py` | (PR 3) ADMIN 사용자 관리 트랜잭션 소유자 — 초대 · 재발송 · 역할 · 상태 · 세션 회수 · 이력 조회. 잠금 · 행위자 재판정 · 마지막 활성 ADMIN 보호. (#492) 계정 종류에 따른 관리 범위, 초대 대상 테넌트 결정 · ACTIVE 확인, 정지 테넌트 행위자의 쓰기 거절, 테넌트별 마지막 활성 ADMIN, 기존 계정 연결(`recover_existing`)의 PLATFORM 한정 |
 | `http.py` | 쿠키 · Origin 검사(HTTP 상태 변경 · WebSocket 공용 목록 `allowed_origins`) · 보안 헤더(`/api/v1/*`) · `AuthError` → 오류 봉투 매핑. (PR 3) 관리 · 재설정 경로용 Cognito 어댑터 조립(`get_cognito_adapter`, 설정이 비면 503) |
 | `access.py` | (PR 2) 보호 API 의존성 — 세션(`require_user`) → 역할(`require_action_role`), 신원을 `request.state.current_user`에 둔다. WebSocket 세션 판정(`resolve_session_user`, 판정마다 짧은 DB 세션). (PR 3) 사용자 관리용 `require_admin`. (#492) 플랫폼 판정 `is_platform_account` · `require_platform_account`(`/api/v1/tenants` 라우터 의존성), 임시 업무 관문 `require_business_access` |
 | `provider.py` | Cognito 클라이언트 · `LoginFlow` · (PR 3) 단독 어댑터(`build_adapter`) 조립(엔드포인트 고정) |
 | `bootstrap_admin.py` | (#492) 플랫폼 계정 생성 · UNASSIGNED 계정의 플랫폼 지정 운영 CLI(§플랫폼 계정 CLI) |
-| `enrollment.py` | (#492) 등록 링크 사용(`POST /platform-enrollment`)의 트랜잭션 소유자 — 링크 사전 확인 → 어댑터 조립 → 예약 commit → `AdminCreateUser`(트랜잭션 밖) → 잠금 안 재확인 · PLATFORM ADMIN 생성 · `REDEEMED`(한 commit). 기동 진단 `log_enrollment_status`(§플랫폼 등록 링크) |
-| `bootstrap_enrollment.py` | (#492) 등록 링크 발급 · 목록 · 회수 운영 CLI(§플랫폼 등록 링크) |
-| `routers/auth.py` | `/api/v1/auth` 라우터(얇게). (PR 3) `/password-reset` · `/password-reset/confirm`. (#492) `/me`에 `account_type` · `tenant_id`. `/platform-enrollment`는 기능 스위치 의존성(`require_platform_enrollment_enabled`) 뒤에 서비스를 부르고, Cognito 어댑터는 링크 판정 뒤에 지연 조립한다(`get_cognito_adapter_factory`) |
+| `routers/auth.py` | `/api/v1/auth` 라우터(얇게). (PR 3) `/password-reset` · `/password-reset/confirm`. (#492) `/me`에 `account_type` · `tenant_id` |
 | `routers/users.py` | (PR 3) `/api/v1/users` 라우터(얇게). 라우터 의존성 `require_admin`. (#492) 관리 범위는 서비스가 판정한다. 초대 · 재발송의 Cognito 어댑터는 사전 판정 뒤에 조립한다(`get_cognito_adapter_factory`) |
 | `main.py` | (PR 2) 포함 시점 보호 배선(Origin → 세션), 접근 로그의 `user_id` · `role`, API 문서 토글. (PR 3) 사용자 관리 라우터도 같은 배선으로 포함. (#492) 업무 라우터(조치 · 자산 · 인시던트 · 메트릭)에는 `require_business_access`를 더한다. 테넌트 라우터(`routers/tenants.py`)는 Origin → 세션 배선으로만 포함하고, 플랫폼 판정은 그 라우터의 의존성이다 |
 | `routers/ws.py` | (PR 2) WebSocket 연결 시 세션 확인 · 연결 중 재확인(4401). 닫기 코드 계약은 `packages/schemas/api/ws.py`. (#492) PLATFORM 계정만 받는다 |
 | `routers/actions.py` · `routers/incidents.py` | (PR 2) 조치 실행 · 종료가 역할 검사 결과(`CurrentUser`)를 받는다 |
 | `db/models.py` · `db/repositories/auth.py` | `app_users` · `auth_sessions`. (PR 3) `user_admin_events`(`UserAdminEvent`), 세션 회수 사유 추가, 마지막 로그인 · 활성 ADMIN 집계. (#492) `AppUser.account_type`과 CHECK 2개, 목록 · 활성 ADMIN 집계의 테넌트 범위 |
-| `db/models.py`(`PlatformEnrollment`) · `db/repositories/enrollment.py` | (#492) `platform_enrollments`. 토큰은 SHA-256 hex로만 찾는다. 상태 전이는 받는 상태일 때만 한 행을 바꾸는 조건부 UPDATE(`reserve` · `revoke`)이고, `REDEEMED`는 호출부가 `lock`(FOR UPDATE)으로 잡은 행에서 바꾼다. commit하지 않는다 |
 | `db/migrations/versions/20261020_e492a3b5c701_user_admin_events.py` | (PR 3) 회수 사유 `ADMIN_REVOKED` · `ACCOUNT_DISABLED` · `PASSWORD_RESET` 추가, `user_admin_events` 생성과 append-only 트리거 |
 | `db/migrations/versions/20261022_f492c4a8d2e1_user_account_type.py` | (#492) `app_users.account_type` 추가 · 기존 행 분류 · CHECK 2개(§마이그레이션 `f492c4a8d2e1`) |
-| `db/migrations/versions/20261023_b492e5d7c3a1_platform_enrollments.py` | (#492) `platform_enrollments`와 상태 enum, CHECK 5개(§마이그레이션 `b492e5d7c3a1`) |
 | `db/migrations/versions/20261026_c492d6e8f4a2_merge_account_type_auto_action.py` | (#492) 빈 병합 revision — #492 가지와 dev 가지를 head 하나로 잇는다(§마이그레이션 그래프 · 병합 `c492d6e8f4a2`) |
 
 ## 로그인 흐름
@@ -48,7 +44,6 @@ POST /login/email-verification  이메일 코드 → COMPLETED
 POST /logout · POST /activity · GET /me
 POST /password-reset         (PR 3) 이메일 → 204(계정 · 발송 정보 없음)
 POST /password-reset/confirm (PR 3) 이메일 · 재설정 코드 · 새 비밀번호 → 204(세션 발급 없음)
-POST /platform-enrollment    (#492) 등록 링크 토큰 · 이메일 → 204(세션 발급 없음, 기본 꺼짐 — §플랫폼 등록 링크)
 ```
 
 **세션을 발급하는 경우는 둘뿐이다** [팀 결정]:
@@ -94,7 +89,7 @@ POST /platform-enrollment    (#492) 등록 링크 토큰 · 이메일 → 204(�
 | MFA 선호 | 최초 등록 직후 TOTP를 선호 MFA로 지정한다. User Pool이 실수로 `OPTIONAL`이 되면 비밀번호 단계에서 토큰이 나오는데, 이 경우 앱은 세션 없이 거절한다(fail closed) | [판단] |
 | 401 · 403 | 미인증(세션 없음 · 만료 · 회수 · 비활성 사용자의 세션 · (#492) UNASSIGNED 계정의 세션)은 401 `AUTH_REQUIRED`, 인증 후 계정 종류 · 역할이 허용하지 않으면 403 `AUTH_FORBIDDEN`(PR 2 · #492) | [팀 결정] [판단: #492 UNASSIGNED 처리] |
 | 비밀값 | 비밀번호 · 코드는 `SecretStr`, 검증 오류에 입력값을 싣지 않는다(`hide_input_in_errors`). 로그에는 AWS 오류 코드와 호출 이름만 | [팀 결정] |
-| 플랫폼 계정 | 두 경로로만 생긴다 — 운영자가 CLI로 명시 생성 · 지정하거나(§플랫폼 계정 CLI), 운영자가 CLI로 발급해 비공개로 전달한 1회용 등록 링크를 받은 사람이 사용한다(링크 1개 = 계정 1개, §플랫폼 등록 링크). 등록 링크 경로는 「CLI 직접 생성 · 지정만」이던 정책을 확장한다. 첫 계정과 추가 계정이 같다. 첫 방문자를 승격하지 않고, ADMIN 역할이나 `tenant_id` NULL에서 플랫폼 권한을 추론하지 않는다 | [팀 결정: CLI 명시 생성 · 지정, 첫 방문자 승격 · 권한 추론 없음] [판단: 등록 링크 경로 — 정책 확장] |
+| 플랫폼 계정 | 운영자가 CLI로 명시 생성 · 지정할 때만 생긴다(§플랫폼 계정 CLI). 공개 API · 화면의 등록 경로는 없다. 첫 계정과 추가 계정이 같다. 첫 방문자를 승격하지 않고, ADMIN 역할이나 `tenant_id` NULL에서 플랫폼 권한을 추론하지 않는다 | [팀 결정: CLI 명시 생성 · 지정, 첫 방문자 승격 · 권한 추론 없음] |
 
 ## 계정 종류와 테넌트 소속 (#492)
 
@@ -123,22 +118,23 @@ POST /platform-enrollment    (#492) 등록 링크 토큰 · 이메일 → 204(�
 `e492a3b5c701`에서 가지 둘로 갈렸다가 빈 병합 revision에서 다시 합쳐진다. 최종 head는 `c492d6e8f4a2` 하나다.
 
 ```
-e492a3b5c701 ─┬─ f492c4a8d2e1 ── b492e5d7c3a1 ─┬─ c492d6e8f4a2 (head)
-              └─ f514a6c3d201 ─────────────────┘
+e492a3b5c701 ─┬─ f492c4a8d2e1 ─┬─ c492d6e8f4a2 (head)
+              └─ f514a6c3d201 ─┘
 ```
 
-- **가지**: #492 가지는 `f492c4a8d2e1`(`app_users.account_type`) → `b492e5d7c3a1`(`platform_enrollments`, §마이그레이션 `b492e5d7c3a1`)이고, dev 가지는 `f514a6c3d201`(`tenants.auto_action_resumed_at`, 이 모듈 밖)이다. 두 가지의 revision ID와 부모는 바꾸지 않았다 — 이미 어느 한 가지 끝까지 올린 DB의 기록 revision이 그래프 위에 그대로 남게 하기 위해서다.
-- **병합**: `c492d6e8f4a2`(`db/migrations/versions/20261026_c492d6e8f4a2_merge_account_type_auto_action.py`)의 부모는 `b492e5d7c3a1` · `f514a6c3d201` 둘이고, upgrade · downgrade가 모두 비어 있다. 두 가지가 서로 다른 객체를 바꾸므로 스키마 · 데이터 변경이 필요 없다.
-- **기존 DB**: dev 가지 끝(`f514a6c3d201`)의 DB와 #492 가지 끝(`b492e5d7c3a1`)의 DB 모두 `alembic upgrade head`가 아직 적용하지 않은 쪽 가지와 병합 revision만 적용해 head에 이른다. downgrade나 `stamp` 없이 앞으로만 올린다. dev 가지 DB에는 이때 `f492c4a8d2e1`이 처음 적용되므로, 그 upgrade 규칙(소속 NULL → `UNASSIGNED`, 값 있음 → `TENANT`, 승격 없음)과 호환성 주의(`account_type`을 모르는 이전 앱 · CLI의 `app_users` INSERT 거절)가 그대로 적용된다(§마이그레이션 `f492c4a8d2e1`). UNASSIGNED 계정의 동작도 위 표 그대로다.
+- **가지**: #492 가지는 `f492c4a8d2e1`(`app_users.account_type`) 하나이고, dev 가지는 `f514a6c3d201`(`tenants.auto_action_resumed_at`, 이 모듈 밖)이다. 두 revision 모두 부모가 `e492a3b5c701`이다.
+- **병합**: `c492d6e8f4a2`(`db/migrations/versions/20261026_c492d6e8f4a2_merge_account_type_auto_action.py`)의 부모는 `f492c4a8d2e1` · `f514a6c3d201` 둘이고, upgrade · downgrade가 모두 비어 있다. 두 가지가 서로 다른 객체를 바꾸므로 스키마 · 데이터 변경이 필요 없다.
+- **기존 DB**: dev 가지 끝(`f514a6c3d201`)의 DB와 #492 가지 끝(`f492c4a8d2e1`)의 DB 모두 `alembic upgrade head`가 아직 적용하지 않은 쪽 가지와 병합 revision만 적용해 head에 이른다. downgrade나 `stamp` 없이 앞으로만 올린다. dev 가지 DB에는 이때 `f492c4a8d2e1`이 처음 적용되므로, 그 upgrade 규칙(소속 NULL → `UNASSIGNED`, 값 있음 → `TENANT`, 승격 없음)과 호환성 주의(`account_type`을 모르는 이전 앱 · CLI의 `app_users` INSERT 거절)가 그대로 적용된다(§마이그레이션 `f492c4a8d2e1`). UNASSIGNED 계정의 동작도 위 표 그대로다.
 - **새 DB**: base → head가 같은 그래프의 두 가지와 병합 revision을 모두 거친다.
-- **downgrade**: 병합 revision의 downgrade는 아무것도 바꾸지 않는다. 그 아래 revision의 downgrade 주의점은 §마이그레이션 `f492c4a8d2e1` · `b492e5d7c3a1`에 적힌 그대로다.
+- **downgrade**: 병합 revision의 downgrade는 아무것도 바꾸지 않는다. 그 아래 revision의 downgrade 주의점은 §마이그레이션 `f492c4a8d2e1`에 적힌 그대로다.
+- **등록 링크 스키마가 있는 DB**: 이 그래프에는 `platform_enrollments`(enum `platform_enrollment_status` 포함)가 없다. 등록 링크를 제거하기 전의 #527 그래프로 올린 DB — 기록 revision이 `b492e5d7c3a1`인 DB, 또는 기록 revision은 같은 `c492d6e8f4a2`이지만 `platform_enrollments`가 있는 DB — 는 이 그래프의 자동 upgrade 경로가 지원하지 않는다. revision ID만 보고 head라고 판단하지 않는다. 이런 DB에는 이 그래프로 upgrade · downgrade · `stamp`를 실행하지 않고 이 코드를 연결하지 않는다. 그 스키마를 만든 이전 코드와 짝지어 보존하거나, 따로 승인된 전환 절차로만 다룬다.
 - 실제 배포 환경 DB의 현재 revision과 그 환경에서의 적용 결과는 이 문서가 보증하지 않는다(§테스트).
 
 ## 접근 보호 (PR 2)
 
 | 항목 | 내용 | 근거 |
 | --- | --- | --- |
-| 공개 경로 | `GET /health`, `POST /api/v1/auth/login*`(6단계), (PR 3) `POST /api/v1/auth/password-reset` · `/password-reset/confirm`, (#492) `POST /api/v1/auth/platform-enrollment`(기본 꺼짐 — 꺼져 있으면 JSON으로 파싱되는 본문은 404이고, 문법이 깨진 JSON은 아래 깨진 JSON 본문 행대로 422, §플랫폼 등록 링크), `POST /api/v1/auth/logout`(멱등 — 세션이 없으면 지울 것이 없어 204). `GET /me` · `POST /activity`는 세션이 없으면 401이다. PR 1 · 2에서는 Cognito 미구성이면 503이었고, PR 3부터 Cognito 설정과 무관하게 동작한다(§설정). 그 밖의 `/api/v1/*`와 WebSocket은 전부 세션이 필요하다. 공개 목록은 `test_api_access.py`의 `PUBLIC_ROUTES`가 실제 앱 경로와 대조한다 — 새 경로는 목록에 넣지 않는 한 401이어야 통과한다 | [팀 결정] |
+| 공개 경로 | `GET /health`, `POST /api/v1/auth/login*`(6단계), (PR 3) `POST /api/v1/auth/password-reset` · `/password-reset/confirm`, `POST /api/v1/auth/logout`(멱등 — 세션이 없으면 지울 것이 없어 204). `GET /me` · `POST /activity`는 세션이 없으면 401이다. PR 1 · 2에서는 Cognito 미구성이면 503이었고, PR 3부터 Cognito 설정과 무관하게 동작한다(§설정). 그 밖의 `/api/v1/*`와 WebSocket은 전부 세션이 필요하다. 공개 목록은 `test_api_access.py`의 `PUBLIC_ROUTES`가 실제 앱 경로와 대조한다 — 새 경로는 목록에 넣지 않는 한 401이어야 통과한다 | [팀 결정] |
 | 세션 판정 | `auth.service.resolve_current_user(touch=False)` 하나. 보호 API · WebSocket은 유휴 시간을 늘리지 않는다. Cognito 설정을 읽지 않는다 — Cognito가 비어도 보호 API는 세션만으로 열린다 | [팀 결정] [판단] |
 | 배선 | `main.py`가 조치 · 자산 · 인시던트 · 메트릭 라우터를 `include_router(..., dependencies=[Origin, 세션])`로 포함한다. 역할은 조치 실행 · 종료 라우트의 의존성이다. 검사 순서: Origin(상태 변경만, DB 전) → 세션 → 역할 → 본문 검증 → 라우터. (#492) 업무 라우터는 세션 다음에 `require_business_access`(아래 임시 업무 관문)를 거친다 | [판단] |
 | 임시 업무 관문(#492) | 테넌트 격리(T-4 · T-5, WebSocket 포함) 전까지 업무 HTTP 라우터(조치 · 자산 · 인시던트 · 메트릭)의 모든 메서드와 전역 WebSocket은 PLATFORM 계정만 받는다. 켜고 끄는 설정이 없다. TENANT 계정은 로그인 · `/me` · `/activity` · `/logout` · 비밀번호 재설정과 자기 범위의 사용자 관리(§사용자 관리)만 쓴다. 상태 변경 요청은 역할(403 `AUTH_FORBIDDEN`) → 소속 테넌트 정지(409 `TENANT_SUSPENDED`) → 계정 종류(403 `AUTH_FORBIDDEN`) 순으로 판정한다 | [판단: 격리 전 임시 제한] |
@@ -160,7 +156,7 @@ e492a3b5c701 ─┬─ f492c4a8d2e1 ── b492e5d7c3a1 ─┬─ c492d6e8f4a2 (
 | 사용자 관리 `/api/v1/users*` | 모든 TENANT 계정 | 자기 테넌트의 TENANT 계정(소속 정지면 조회만) | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
 | 테넌트 관리 `/api/v1/tenants*` | 허용 | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
 
-임시 관문 때문에 정지 테넌트 사용자의 자기 기록 조회 요구([ADR-0012](../../../docs/adr/0012-saas-transition-account-structure-and-tenant-model.md), 현재 Proposed)는 WebSocket을 포함한 테넌트 격리(T-4 · T-5) 때로 미룬다. 이 모듈은 테넌트 데이터 격리가 완성됐다고 주장하지 않는다. PLATFORM이 정지 테넌트의 자원에 AWS 실행을 거는 것을 막는 일은 자원의 테넌트 연결 · Workflow 범위이며 이 모듈이 판정하지 않는다. 수집기 · Workflow 같은 백그라운드 처리의 테넌트 격리도 이 범위(T-1)가 아니다.
+임시 관문 때문에 정지 테넌트 사용자의 자기 기록 조회 요구([ADR-0012](../../../docs/adr/0012-saas-transition-account-structure-and-tenant-model.md))는 WebSocket을 포함한 테넌트 격리(T-4 · T-5) 때로 미룬다. 이 모듈은 테넌트 데이터 격리가 완성됐다고 주장하지 않는다. PLATFORM이 정지 테넌트의 자원에 AWS 실행을 거는 것을 막는 일은 자원의 테넌트 연결 · Workflow 범위이며 이 모듈이 판정하지 않는다. 수집기 · Workflow 같은 백그라운드 처리의 테넌트 격리도 이 범위(T-1)가 아니다.
 
 ## 사용자당 세션 1개 (PR 3)
 
@@ -200,11 +196,11 @@ e492a3b5c701 ─┬─ f492c4a8d2e1 ── b492e5d7c3a1 ─┬─ c492d6e8f4a2 (
 | 비활성화 | 앱 DB의 `status`만 바꾸고 그 사용자의 세션 전부를 `ACCOUNT_DISABLED`로 회수한다. 재활성화는 회수된 세션을 되살리지 않는다(다시 로그인). Cognito 사용자는 비활성화 · 삭제하지 않는다 — Cognito 인증은 계속 통과하지만 로그인 완료가 403 `ACCOUNT_DISABLED`다 | [판단] |
 | 세션 회수 | 대상의 미회수 세션 전부(만료된 행 포함)를 `ADMIN_REVOKED`로 회수하고, 회수한 개수를 이력에 남긴다 | [판단] |
 | 초대 | 기본은 새 Cognito 사용자 생성(`AdminCreateUser`)이다. 초대 메일은 Cognito가 이메일로 보내며, 앱은 임시 비밀번호를 요청하지도 읽지도 않는다. Cognito에 이미 있으면 409 `USER_STATE_CONFLICT`이고 자동 연결하지 않는다. Cognito 생성이 성공한 뒤에 앱 사용자(`ACTIVE`, `email_verified_at` 비어 있음)와 `USER_INVITED` 이력을 한 commit으로 만든다. 첫 로그인은 최초 비밀번호 변경 · TOTP 등록 · 이메일 코드를 거친다 | [판단] |
-| 기존 계정 연결 | `recover_existing=true`는 ADMIN의 명시적 선택이다. `AdminGetUser`로 기존 Cognito 사용자를 찾아(없으면 404 `USER_NOT_FOUND`) 앱에 아직 없는 신원이면 연결한다(이미 있으면 409). 직전 초대가 실패했는지는 확인하지 않고 Cognito 사용자 상태와 관계없이 연결한다. 이메일 소유 증명이 아니므로 첫 로그인에서 이메일 코드를 요구한다 | [판단] |
+| 기존 계정 연결 | `recover_existing=true`는 PLATFORM 행위자만 고를 수 있는 명시적 선택이다. (#492) PLATFORM이 아닌 행위자(TENANT ADMIN)가 보내면 403 `AUTH_FORBIDDEN`이고, 어댑터 조립 · SDK 호출 · DB 변경이 없다. 이 판정은 쓰기 행위자 판정(401 · 403 · 소속 정지 409 `TENANT_SUSPENDED`) 다음, 초대 대상 테넌트 판정 전이다 — 소속 테넌트가 정지된 TENANT ADMIN은 409 `TENANT_SUSPENDED`가 먼저다. `recover_existing=false`인 일반 초대는 TENANT ADMIN도 자기 테넌트에 그대로 할 수 있다. PLATFORM의 요청이면 `AdminGetUser`로 기존 Cognito 사용자를 찾아(없으면 404 `USER_NOT_FOUND`) 앱에 아직 없는 신원이면 연결한다(이미 있으면 409). 직전 초대가 실패했는지는 확인하지 않고 Cognito 사용자 상태와 관계없이 연결한다. 이메일 소유 증명이 아니므로 첫 로그인에서 이메일 코드를 요구한다 | [판단] |
 | 재발송 | 앱 사용자의 issuer가 설정된 User Pool issuer와 같아야 한다. 앱 사용자의 이메일로 `AdminGetUser`를 호출해, 돌아온 Cognito 사용자의 `sub`가 앱 사용자의 `sub`와 같고 Cognito 상태가 `FORCE_CHANGE_PASSWORD`일 때만 `AdminCreateUser(MessageAction=RESEND)`를 보낸다. Cognito 쪽 이메일 값은 비교하지 않는다. AWS 문서상 RESEND는 새 임시 비밀번호를 보내고 임시 비밀번호 유효 기간을 다시 시작한다. 조건이 다르면 409(재발송 없음), 대상이 없으면 404(Cognito 미호출). SDK 호출 뒤 앱 DB의 대상 신원(issuer · `sub` · 이메일)을 다시 읽어 처음 읽은 값과 다르면 409다(재발송은 이미 나갔고 이력은 남지 않는다) | [표준] [AWS: AdminCreateUser `MessageAction`](https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_AdminCreateUser.html) |
 | Cognito 오류 | 초대 · 재발송: `UsernameExistsException` · `UnsupportedUserStateException` → 409 `USER_STATE_CONFLICT`, 발송 실패(`CodeDeliveryFailureException` · `InvalidEmailRoleAccessPolicyException`) → 503 `AUTH_EMAIL_DELIVERY_FAILED`, 요청 제한 → 429 `AUTH_RATE_LIMITED`, 그 밖 → 503 `AUTH_PROVIDER_UNAVAILABLE`. `AdminGetUser`는 `UserNotFoundException`일 때만 "없음"이고, 그 밖의 실패 · 비정상 응답은 429 · 503이다 | [판단] |
 | Cognito 미설정 | 초대 · 재발송만 503 `AUTH_PROVIDER_UNAVAILABLE`. 목록 · 역할 · 상태 · 세션 회수 · 이력은 동작한다. (#492) 어댑터는 지연 조립(`routers.users.get_cognito_adapter_factory`)이라, 서비스가 행위자 · 대상 · 테넌트 사전 판정(422 · 404 · 409)을 마친 요청만 503에 이른다 — 설정 누락이 그 거절을 가리지 않는다 | [판단] |
-| 계정 종류 부여(#492) | 사용자 관리 API로 만드는 계정은 항상 TENANT다. 이 API로 PLATFORM을 주거나 UNASSIGNED를 만들거나 소속(`tenant_id`)을 옮기는 경로가 없다(역할 · 상태 변경 요청에는 소속 칸이 없다). PLATFORM은 운영 CLI(§플랫폼 계정 CLI)와 CLI가 발급한 등록 링크(§플랫폼 등록 링크)로만 생긴다 | [팀 결정: 명시적 플랫폼 권한 · 고객사 범위] [판단: UNASSIGNED] |
+| 계정 종류 부여(#492) | 사용자 관리 API로 만드는 계정은 항상 TENANT다. 이 API로 PLATFORM을 주거나 UNASSIGNED를 만들거나 소속(`tenant_id`)을 옮기는 경로가 없다(역할 · 상태 변경 요청에는 소속 칸이 없다). PLATFORM은 운영 CLI(§플랫폼 계정 CLI)로만 생긴다 | [팀 결정: 명시적 플랫폼 권한 · 고객사 범위] [판단: UNASSIGNED] |
 | 초대 대상 테넌트(#492) | `tenant_id`는 스키마상 선택이고 최종 값은 서버가 정한다. PLATFORM은 반드시 보낸다(없으면 422 `REQUEST_VALIDATION_FAILED`, 없는 테넌트면 404 `TENANT_NOT_FOUND`). TENANT ADMIN은 생략하거나 자기 테넌트만 보낼 수 있고, 다른 값은 404 `TENANT_NOT_FOUND`다 | [팀 결정: 고객사 범위] [판단: 요청 형태 · 오류 코드] |
 | 테넌트 상태(#492) | 초대 · 재발송은 대상 테넌트가 ACTIVE일 때만 받는다(그 밖은 409 `TENANT_STATE_CONFLICT`). Cognito 호출 전에 확인하고, DB 쓰기 직전에 잠금 안에서 다시 확인한다(테넌트 행 `FOR SHARE` — commit까지 상태 전이를 막는다). 역할 · 상태 · 세션 회수 · 조회는 대상 테넌트 상태를 보지 않는다 | [판단] |
 | 정지 테넌트의 행위자(#492) | 소속 테넌트가 SUSPENDED인 TENANT 행위자의 쓰기(초대 · 재발송 · 역할 · 상태 · 세션 회수)는 409 `TENANT_SUSPENDED`이고, 잠금 안에서 다시 판정한다. 조회는 허용한다. 로그인 · 로그아웃 · 활동 · 비밀번호 재설정은 테넌트 정지와 관계없이 동작한다. 사용자 `DISABLED`는 이와 별개 상태다(로그인 403 `ACCOUNT_DISABLED` · 세션 401) | [판단] |
@@ -217,10 +213,10 @@ SDK 호출 뒤 잠금 안의 재확인(행위자 · 대상 신원 · 대상 테�
 
 | 경우 | 남는 상태 | 복구 |
 | --- | --- | --- |
-| 초대: Cognito 생성(초대 메일 발송) 뒤 DB 실패 | Cognito 사용자가 남는다. 앱 사용자 · 이력은 없다 | `recover_existing=true`로 다시 초대해 연결 |
+| 초대: Cognito 생성(초대 메일 발송) 뒤 DB 실패 | Cognito 사용자가 남는다. 앱 사용자 · 이력은 없다 | PLATFORM이 `recover_existing=true`로 다시 초대해 연결 |
 | 재발송: RESEND 뒤 DB 실패 | 새 임시 비밀번호 메일은 나갔고 `INVITE_RESENT` 이력은 없다 | 다시 재발송하면 이력이 남는다(새 임시 비밀번호가 다시 나간다) |
-| 초대 · 재발송: SDK 호출 중 행위자 세션이 회수 · 비활성 · 강등됨 | 401 · 403. 제공자 결과는 남고 DB는 쓰지 않는다 | 유효한 ADMIN이 다시 수행(초대는 `recover_existing=true`) |
-| (#492) 초대 · 재발송: SDK 호출 뒤 대상 테넌트가 ACTIVE가 아니게 됨 · 행위자 소속 테넌트가 정지됨 | 409(`TENANT_STATE_CONFLICT` · `TENANT_SUSPENDED`). 메일은 나갔을 수 있고 DB는 쓰지 않는다 | 테넌트가 ACTIVE로 돌아온 뒤 유효한 행위자가 다시 수행(초대는 `recover_existing=true`) |
+| 초대 · 재발송: SDK 호출 중 행위자 세션이 회수 · 비활성 · 강등됨 | 401 · 403. 제공자 결과는 남고 DB는 쓰지 않는다 | 유효한 ADMIN이 다시 수행(초대의 기존 계정 연결은 PLATFORM이 `recover_existing=true`로) |
+| (#492) 초대 · 재발송: SDK 호출 뒤 대상 테넌트가 ACTIVE가 아니게 됨 · 행위자 소속 테넌트가 정지됨 | 409(`TENANT_STATE_CONFLICT` · `TENANT_SUSPENDED`). 메일은 나갔을 수 있고 DB는 쓰지 않는다 | 테넌트가 ACTIVE로 돌아온 뒤 유효한 행위자가 다시 수행(초대의 기존 계정 연결은 PLATFORM이 `recover_existing=true`로) |
 | 재설정 확정: 비밀번호 변경 뒤 세션 회수 실패 | 비밀번호는 바뀌었고 이전 세션이 남을 수 있다 | §비밀번호 재설정 |
 
 ### 이력 (`user_admin_events`)
@@ -229,16 +225,16 @@ SDK 호출 뒤 잠금 안의 재확인(행위자 · 대상 신원 · 대상 테�
 - 전후 상태는 `UserEventState`의 닫힌 목록(`role` · `status` · `revoked_session_count` · `recover_existing` · (#492) 초대 대상 `tenant_id`)만 저장하고 모르는 키는 거절한다. 이메일 · 비밀번호 · 코드 · 토큰 · Cognito 원본 응답은 싣지 않는다.
 - append-only: `BEFORE UPDATE OR DELETE` 트리거가 수정 · 삭제를 거절한다(INSERT만 허용). 이력이 참조하는 사용자는 FK `RESTRICT`로 지울 수 없다. 테이블 소유자(DB owner)는 트리거를 끄고 우회할 수 있으므로 소유자에 대한 방어는 아니다.
 - 비밀번호 재설정 · 로그인 교체 · 로그아웃은 이력 대상이 아니다(세션 행의 `revoke_reason`으로만 남는다). 조치 실행 감사 기록(T-2)과는 별개다.
-- (#492) CLI의 플랫폼 계정 생성 · 지정도 이 이력에 남지 않는다(지정의 세션 회수는 `ADMIN_REVOKED`로만 남는다). 등록 링크 사용도 이 이력에 남지 않고, 링크 행(`platform_enrollments`의 상태 · 예약 `email` · `redeemed_user_id` · 시각)에만 남는다.
+- (#492) CLI의 플랫폼 계정 생성 · 지정도 이 이력에 남지 않는다(지정의 세션 회수는 `ADMIN_REVOKED`로만 남는다).
 
 ### OWASP ASVS 4.0.3 V4와의 관계 (#492)
 
-원문: [V4 Access Control](https://raw.githubusercontent.com/OWASP/ASVS/v4.0.3/4.0/en/0x12-V4-Access-Control.md). 아래는 사용자 관리 API와 계정 종류 권한(임시 업무 관문 · 플랫폼 등록 링크 포함) 범위에서 정책이 따르는 항목이다. 이 README는 모듈 범위의 정책만 적고 앱 전체의 ASVS 준수를 주장하지 않는다. 표에 없는 V4 항목은 이 문서가 다루지 않는다.
+원문: [V4 Access Control](https://raw.githubusercontent.com/OWASP/ASVS/v4.0.3/4.0/en/0x12-V4-Access-Control.md). 아래는 사용자 관리 API와 계정 종류 권한(임시 업무 관문 포함) 범위에서 정책이 따르는 항목이다. 이 README는 모듈 범위의 정책만 적고 앱 전체의 ASVS 준수를 주장하지 않는다. 표에 없는 V4 항목은 이 문서가 다루지 않는다.
 
 | 항목 | 이 범위의 정책 |
 | --- | --- |
 | 4.1.1 신뢰할 수 있는 서버 계층에서 접근 제어 강제 | 계정 종류 · 역할 · 관리 범위 판정은 서버(`auth.access` · `admin_service`)가 한다. 화면의 메뉴 숨김 · 첫 화면 분기는 편의이며 차단 근거가 아니다 |
-| 4.1.2 접근 제어 속성을 최종 사용자가 조작할 수 없음 | `account_type` · `tenant_id`는 API 입력으로 바꿀 수 없다. 초대의 `tenant_id`는 PLATFORM만 고르고, TENANT ADMIN은 서버가 행위자 소속으로 정한다. PLATFORM 생성 · 지정은 운영 CLI 직접 실행과 CLI가 발급한 1회용 등록 링크의 사용뿐이다. 등록 요청은 계정 종류 · 역할 · 소속을 받지 않고(그런 필드는 422) 서버가 PLATFORM · `role=ADMIN` · 소속 없음으로 고정하며, 요청의 세션 쿠키를 권한 근거로 쓰지 않는다. 권한 근거는 링크뿐이라 링크를 가진 사람은 누구나 그 링크로 계정 1개를 만들 수 있다 — 링크의 비공개 전달은 운영 절차 몫이다 |
+| 4.1.2 접근 제어 속성을 최종 사용자가 조작할 수 없음 | `account_type` · `tenant_id`는 API 입력으로 바꿀 수 없다. 초대의 `tenant_id`는 PLATFORM만 고르고, TENANT ADMIN은 서버가 행위자 소속으로 정한다. 기존 Cognito 계정 연결(`recover_existing`)도 PLATFORM만 고른다. PLATFORM 생성 · 지정은 운영 CLI 직접 실행뿐이다 |
 | 4.1.3 최소 권한 | TENANT ADMIN은 자기 테넌트만, OPERATOR · VIEWER는 사용자 관리 없음. 격리 전 업무 데이터 · WebSocket은 PLATFORM만 |
 | 4.1.5 안전한 실패 | UNASSIGNED와 그 밖의 종류는 권한 없음으로 처리한다(세션 판정 401, 관리 범위 403). 소속 NULL을 「전체」로 읽지 않는다 |
 | 4.2.1 IDOR | `user_id` 경로 대상은 관리 범위 안의 TENANT 계정만이다. 범위 밖 · PLATFORM · UNASSIGNED · 없는 대상은 같은 404 `USER_NOT_FOUND`이고 Cognito를 부르지 않는다 |
@@ -303,18 +299,17 @@ SDK 호출 뒤 잠금 안의 재확인(행위자 · 대상 신원 · 대상 테�
 - 상단바 오른쪽 이메일(`components/auth/user-menu.tsx`)을 누르면 `계정 정보` 대화상자가 열린다(별도 화면은 없다). SessionProvider가 이미 가진 `/me` 값으로 이메일 · 역할(사용자 관리와 같은 이름) · 계정 종류를 보이고, TENANT 계정이면 자기 고객 ID를 더한다. PLATFORM 계정에는 고객 ID 항목이 없다(`apps/web/src/lib/account-summary.ts`). 고객 이름은 `/me` 계약에 없어 보이지 않으며, 이를 위해 새 조회 API · PLATFORM 전용 테넌트 API를 부르거나 공개 계약을 넓히지 않는다.
 - 지금 쓸 수 있는 것은 TENANT ADMIN의 자기 테넌트 사용자 관리다. 자산 · 보안 조회와 조치 실행 · 인시던트 종료는 역할상 권한이 있어도 테넌트 격리(T-4 · T-5) 전에는 열리지 않는다 — 전역 업무 API · WebSocket은 PLATFORM 전용이다(§접근 보호 임시 업무 관문).
 - 사용자 변경 이력은 기존 ADMIN 관리 범위의 `user_admin_events` 조회(§이력)이며, 로그인 기록이나 조치 실행 감사 기록(T-2)을 포함한 전체 감사가 아니다.
-- 사용자 관리 화면은 고객 ID(`tenant_id`) 열을 보인다. PLATFORM은 초대할 고객 ID(UUID)를 직접 입력하고, TENANT ADMIN은 자기 소속을 읽기 전용으로 보며 다른 고객을 고를 수 없다.
+- 사용자 관리 화면은 고객 ID(`tenant_id`) 열을 보인다. PLATFORM은 초대할 고객 ID(UUID)를 직접 입력하고, TENANT ADMIN은 자기 소속을 읽기 전용으로 보며 다른 고객을 고를 수 없다. 초대의 기존 계정 연결(복구) 선택은 PLATFORM에게만 보이고, TENANT ADMIN의 초대 본문은 언제나 `recover_existing=false`다(`apps/web/src/lib/user-admin.ts`의 `inviteRequestFor`).
 - 오류는 서버 판정대로 알린다 — 범위 밖 사용자는 대상 없음과 같은 문구, 고객 상태 거절은 고객 사유, 초대 · 재발송의 500 · 네트워크 실패는 메일이 나갔을 수 있다는 안내다(`apps/web/src/lib/user-admin.ts`).
 - 백엔드에는 테넌트 목록 · 상세 API(`GET /api/v1/tenants` · `/api/v1/tenants/{id}`, PLATFORM 전용)가 있지만, 사용자 관리 화면은 이를 쓰지 않아 고객 선택 목록이 없다. 초대할 고객 ID는 위처럼 직접 입력한다. `/tenants` 화면과 테넌트 API 자체는 이 모듈의 범위가 아니다.
-- 등록 링크 화면 `/team/enroll`은 로그인 없이 여는 공개 경로다(정확히 일치할 때만, `apps/web/src/lib/public-paths.ts`). 셸 · 세션 조회 · 실시간 연결을 두르지 않고, 일반 내비게이션 · 랜딩에서 이 화면으로 잇지 않는다 — 운영자가 비공개로 전달한 링크로만 연다. 토큰은 URL 조각(`#token=`)에서만 읽고, 읽는 즉시 주소에서 조각을 지운다. 화면은 형식(`[A-Za-z0-9._~-]` 16–512자)만 보고 유효 판정은 서버가 한다. 404 · 409 · 429와 결과 불명(인증 서비스 장애 · 메일 발송 실패 · 500 · 네트워크)은 그 링크로 다시 요청하지 않고, 422 · 403(Origin)만 다시 낼 수 있다. 성공 문구는 메일 도착 · 이메일 확인 · 로그인 완료를 말하지 않고 로그인 단계를 안내한다(`apps/web/src/lib/enrollment.ts`).
 
 ## 설정
 
-`apps/core-api/config.py`의 `AuthSettings`(PR 2의 두 키는 `Settings`). 환경변수와 루트 `.env`를 읽는다. 키 목록과 설명은 루트 `.env.example`에 있다. #492가 추가한 설정 키는 등록 링크 스위치 `AUTH_PLATFORM_ENROLLMENT_ENABLED` 하나이며, 임시 업무 관문에는 켜고 끄는 설정이 없다.
+`apps/core-api/config.py`의 `AuthSettings`(PR 2의 두 키는 `Settings`). 환경변수와 루트 `.env`를 읽는다. 키 목록과 설명은 루트 `.env.example`에 있다. #492는 설정 키를 추가하지 않으며, 임시 업무 관문에도 켜고 끄는 설정이 없다.
 
 | 키 | 기본값 | 비고 |
 | --- | --- | --- |
-| `COGNITO_REGION` · `COGNITO_USER_POOL_ID` · `COGNITO_CLIENT_ID` · `COGNITO_CLIENT_SECRET` | 없음 | 하나라도 비면 앱은 뜨고, Cognito를 부르는 경로 — 로그인 6단계 · 비밀번호 재설정 2종 · 초대(`POST /api/v1/users`) · 재발송 · (#492) 등록 링크 사용(`POST /api/v1/auth/platform-enrollment`) — 만 503 `AUTH_PROVIDER_UNAVAILABLE`이다. `/me` · `/activity` · `/logout`, 그 밖의 사용자 관리 경로와 보호 API는 미설정이어도 동작한다(PR 2까지는 `/api/v1/auth/*` 전체가 503). 비ADMIN의 초대 · 재발송은 설정과 관계없이 403이 먼저이고, (#492) 범위 · 테넌트 사전 판정(422 · 404 · 409)도 503보다 먼저다(§사용자 관리). 등록 링크 사용도 Origin(403) · 기능 스위치(404) · 본문(422) · 링크 사전 판정(404)이 503보다 먼저이고, 이 503에서는 링크가 ISSUED로 남는다(§플랫폼 등록 링크). 기동 로그에 누락 키 이름만 남긴다 |
+| `COGNITO_REGION` · `COGNITO_USER_POOL_ID` · `COGNITO_CLIENT_ID` · `COGNITO_CLIENT_SECRET` | 없음 | 하나라도 비면 앱은 뜨고, Cognito를 부르는 경로 — 로그인 6단계 · 비밀번호 재설정 2종 · 초대(`POST /api/v1/users`) · 재발송 — 만 503 `AUTH_PROVIDER_UNAVAILABLE`이다. `/me` · `/activity` · `/logout`, 그 밖의 사용자 관리 경로와 보호 API는 미설정이어도 동작한다(PR 2까지는 `/api/v1/auth/*` 전체가 503). 비ADMIN의 초대 · 재발송은 설정과 관계없이 403이 먼저이고, (#492) 범위 · 테넌트 사전 판정(422 · 404 · 409)과 TENANT ADMIN의 기존 계정 연결 거절(403)도 503보다 먼저다(§사용자 관리). 기동 로그에 누락 키 이름만 남긴다 |
 | `COGNITO_AWS_PROFILE` | 없음 | 로컬 개발에서 이름 있는 AWS 프로파일을 쓸 때만. 배포는 비운다(태스크 역할) |
 | `AUTH_SESSION_MAX_SECONDS` | 28800 | |
 | `AUTH_SESSION_IDLE_SECONDS` | 1800 | |
@@ -322,7 +317,6 @@ SDK 호출 뒤 잠금 안의 재확인(행위자 · 대상 신원 · 대상 테�
 | `AUTH_CODE_FAILURE_LIMIT` | 10 | 사용자별 코드 실패 한도 |
 | `AUTH_CODE_FAILURE_WINDOW_SECONDS` | 900 | 사용자별 한도의 슬라이딩 윈도(초) |
 | `AUTH_ALLOWED_ORIGINS` | `CORS_ALLOW_ORIGINS`와 같음 | 콤마 구분, 정확히 일치, `*` 금지 |
-| `AUTH_PLATFORM_ENROLLMENT_ENABLED` | false | (#492) `POST /api/v1/auth/platform-enrollment`을 연다. 꺼져 있으면 JSON으로 파싱되는 본문(스키마에 맞지 않아도)은 Origin 검사 뒤 본문 필드 검증 · 링크 · DB · Cognito에 닿기 전에 404 `ENROLLMENT_UNAVAILABLE`이다. 문법이 깨진 JSON은 예외로 스위치와 관계없이 422다(§접근 보호의 깨진 JSON 본문). 값은 프로세스 안에 캐시되므로(`get_auth_settings`, `lru_cache`) 바꾸면 API 프로세스를 재시작 · 재배포해야 반영된다. 켜져 있으면 기동 로그에 WARNING `platform_enrollment_enabled`가 남는다. 링크 발급 CLI는 이 값과 무관하다. 등록 기간에만 켠다 |
 | `WS_SESSION_CHECK_SECONDS` | 30 | `Settings`. 열린 WebSocket의 세션 재확인 주기(초, 양수) — 회수 · 비활성 반영 지연의 상한 |
 | `API_DOCS_ENABLED` | false | `Settings`. API 문서 3종을 연다. 로컬 개발만 켠다 |
 
@@ -336,7 +330,7 @@ Cognito 클라이언트는 `https://cognito-idp.{region}.amazonaws.com`으로 �
 - 비밀번호 정책은 최소 12자 · 대문자 · 소문자 · 숫자 · 기호 필수. 관리자가 만든 임시 비밀번호는 Pool의 `TemporaryPasswordValidityDays` 기간이 지나면 만료되며, 기간이 지난 초대는 재발송으로 새 임시 비밀번호를 보낸다
 - 앱 클라이언트: client secret 있음, `ExplicitAuthFlows`에 `ALLOW_ADMIN_USER_PASSWORD_AUTH`, 토큰 회수 켜짐, `AuthSessionValidity=3`(분), 존재 노출 방지 켜짐
 - 기기 추적(`DeviceConfiguration`) 꺼짐
-- 실행 주체에 `cognito-idp:AdminInitiateAuth` · `cognito-idp:AdminRespondToAuthChallenge`, PR 3부터 `cognito-idp:AdminCreateUser`(초대 · 재발송, (#492) 등록 링크 사용) · `cognito-idp:AdminGetUser`(기존 계정 연결 · 재발송 · 재설정 확정)(모두 해당 User Pool 한정). 그 밖의 호출(`AssociateSoftwareToken` · `VerifySoftwareToken` · `GetUser` · `GetUserAttributeVerificationCode` · `VerifyUserAttribute` · `RevokeToken`)은 세션 · 토큰으로 승인돼 IAM 권한이 필요 없다. `ForgotPassword` · `ConfirmForgotPassword`는 IAM이 아니라 client secret으로 계산한 `SECRET_HASH`로 호출한다. 배포 역할에 이 권한을 주는 것은 이 모듈 밖의 배포 설정 몫이며, 특정 환경의 반영 여부는 이 문서가 보증하지 않는다
+- 실행 주체에 `cognito-idp:AdminInitiateAuth` · `cognito-idp:AdminRespondToAuthChallenge`, PR 3부터 `cognito-idp:AdminCreateUser`(초대 · 재발송) · `cognito-idp:AdminGetUser`(기존 계정 연결 · 재발송 · 재설정 확정)(모두 해당 User Pool 한정). 그 밖의 호출(`AssociateSoftwareToken` · `VerifySoftwareToken` · `GetUser` · `GetUserAttributeVerificationCode` · `VerifyUserAttribute` · `RevokeToken`)은 세션 · 토큰으로 승인돼 IAM 권한이 필요 없다. `ForgotPassword` · `ConfirmForgotPassword`는 IAM이 아니라 client secret으로 계산한 `SECRET_HASH`로 호출한다. 배포 역할에 이 권한을 주는 것은 이 모듈 밖의 배포 설정 몫이며, 특정 환경의 반영 여부는 이 문서가 보증하지 않는다
 - SDK: 잠금된 boto3 · botocore 1.43.70에 PR 3이 쓰는 호출이 모두 있어 의존성을 바꾸지 않았다
 
 ## 플랫폼 계정 CLI (#492)
@@ -360,102 +354,7 @@ uv run python -m auth.bootstrap_admin --designate-unassigned-user-id <user_id> -
 - 고객사 사용자(TENANT)는 PLATFORM 또는 그 테넌트의 ADMIN이 `POST /api/v1/users`로 초대한다(§사용자 관리).
 - 임시 비밀번호는 Cognito가 초대 메일로만 보낸다. CLI는 비밀값을 출력하지 않고 `user_id` · Cognito 사용자 상태 · 회수한 세션 수만 출력한다.
 - Cognito 사용자 생성 뒤 DB 등록이 실패하면 Cognito 사용자는 남는다. 이때는 `--existing-cognito-user`로 다시 연결한다.
-- PLATFORM 계정을 만드는 다른 경로는 CLI가 발급한 1회용 등록 링크다. 받는 사람의 이메일을 운영자가 미리 알 필요가 없다(§플랫폼 등록 링크).
-
-## 플랫폼 등록 링크 (#492)
-
-운영자가 받는 사람의 이메일을 미리 모르는 채로 PLATFORM ADMIN 계정을 만들게 하는 경로다. 운영자가 CLI로 1회용 링크를 발급해 한 사람에게 하나씩 비공개로 전달하고, 받는 사람이 링크 화면에서 자기 이메일을 넣는다. 서버는 그 이메일로 Cognito 초대(임시 비밀번호 메일)를 요청하고 PLATFORM ADMIN(`tenant_id` NULL)을 만든다.
-
-- 세션을 발급하지 않는다. 첫 로그인은 초대 메일의 임시 비밀번호로 기존 로그인 단계 — 새 비밀번호 · TOTP 등록 · 이메일 코드 — 를 모두 거친다(§로그인 흐름). 링크 사용은 이메일 소유 증명이 아니므로 만든 계정의 `email_verified_at`은 비어 있다.
-- 링크로 만든 계정도 CLI로 만든 계정과 같은 PLATFORM 계정이다(`role=ADMIN` 고정, 역할 전환 없음). 고객사 역할(ADMIN · OPERATOR · VIEWER)로 볼 계정은 각 PLATFORM 사용자가 §사용자 관리의 초대(`POST /api/v1/users`, 테넌트 지정)로 TENANT 계정을 따로 만든다.
-
-### 발급 CLI
-
-```bash
-cd apps/core-api
-uv run python -m auth.bootstrap_enrollment issue --base-url https://<웹 origin> --output <새 파일 경로>        # 발급 미리보기(변경 없음)
-uv run python -m auth.bootstrap_enrollment issue --base-url https://<웹 origin> --output <새 파일 경로> --yes  # 발급(기본 4개 · 72시간)
-uv run python -m auth.bootstrap_enrollment issue --base-url https://<웹 origin> --output <새 파일 경로> --count <1–20> --valid-hours <1–720> --yes
-uv run python -m auth.bootstrap_enrollment list                                         # 발급 기록(토큰 · 해시 없음)
-uv run python -m auth.bootstrap_enrollment revoke --enrollment-id <enrollment_id>       # 회수 미리보기
-uv run python -m auth.bootstrap_enrollment revoke --enrollment-id <enrollment_id> --yes # ISSUED · RESERVED → REVOKED
-```
-
-- `issue` · `revoke`는 `--yes`일 때만 바꾼다. 종료 코드는 §플랫폼 계정 CLI와 같다(0 성공 · 1 실패 · 2 거절).
-- **실행 환경**: 실행한 환경의 DB 설정(`DATABASE_URL`)으로 접속하고, 그 DB와 출력 파일만 쓴다. Cognito를 부르지 않아 Cognito 설정이 없어도 된다. 특정 배포 대상(서버 · 도메인 · AWS 계정)을 전제하지 않는다.
-- **`--base-url`**: 링크를 열 웹 화면의 origin. https만 받고, 경로 · 쿼리 · 조각 · 자격증명(`user@`) · 공백 · 제어 문자 · 역슬래시가 있으면 거절한다(2). http는 loopback(`localhost` · `127.0.0.0/8` · `::1`) 개발 주소만 받는다. 호스트는 소문자로 맞춘다. CLI는 이 origin이 API의 `AUTH_ALLOWED_ORIGINS`에 있는지 확인하지 않는다 — 없으면 링크 화면의 요청이 403 `AUTH_ORIGIN_REJECTED`다. 실제로 쓸 origin이 정해진 뒤 그 값을 준다.
-- **링크**: `<origin>/team/enroll#token=<토큰>`. 토큰은 `secrets.token_urlsafe(32)`(43자, URL-safe 문자)이고, 조각(`#…`)이라 브라우저가 서버 요청 · Referer에 싣지 않는다.
-- **개수 · 유효 시간**: `--count` 기본 4(1–20), `--valid-hours` 기본 72(1–720). 한 번에 발급한 링크는 만료 시각이 같다. 범위 밖 값과 이미 있는 `--output` 경로(심볼릭 링크 포함)는 미리보기에서도 거절하고(2) 아무것도 쓰지 않는다.
-- **출력**: 링크 원문은 `--output`의 새 파일에만 쓴다. 파일은 주석 3줄 뒤에 한 줄에 하나씩 `enrollment_id` · `expires_at`(UTC) · 링크를 탭으로 구분해 담는다. 표준 출력에는 `enrollment_id` · 만료 시각 · 파일 경로와 `#token=<비공개>` 자리표시만 나온다. DB에는 토큰의 SHA-256 hex만 남는다.
-- **운영자 전용 파일(POSIX만)**: 파일을 `O_CREAT|O_EXCL|O_NOFOLLOW`, 모드 0600으로 새로 만든 뒤 소유자 전용 일반 파일인지 다시 확인한다. 권한을 지키지 않는 파일 시스템이면 파일을 지우고 실패(1)로 끝낸다. POSIX가 아닌 환경(Windows 등)에서는 0600이 ACL을 보장하지 않으므로 `--yes` 발급을 실패(1)로 끝내고 DB에 쓰지 않는다. 미리보기는 이 검사 전에 끝나므로 그런 환경에서도 0이다. 발급은 배포된 API 컨테이너(Linux) 같은 POSIX 환경에서 실행한다. 이 문서는 Windows에서의 파일 보호를 주장하지 않는다.
-- **순서와 실패**: 출력 파일 쓰기 · fsync → DB 기록 → commit. 파일 단계가 실패하면 DB에 쓰지 않는다(불완전한 파일은 지우고, 지우지 못하면 직접 지우라고 알린다). commit 전에 DB 기록이 실패하면 그 링크는 쓸 수 없으므로 파일을 지운다. commit 결과가 불명이면 파일을 남기고 `enrollment_id`를 출력한 뒤 실패(1)로 끝낸다 — `list`로 확인해, 기록이 있으면 쓸 수 있는 링크이고(쓰지 않을 것은 `revoke`) 없으면 파일을 지우고 다시 발급한다.
-- **전달**: 받는 사람마다 링크 하나를 따로 비공개로 전달하고, 전달이 끝나면 파일을 지운다. 링크 · 토큰 · 임시 비밀번호 같은 자격증명을 로그 · 이슈 · PR · 채팅에 붙이지 않는다. 링크를 가진 사람은 누구나 그 링크로 계정 1개를 만들 수 있다.
-- **`list`**: 링크마다 `enrollment_id` · 상태 · `created_at` · `expires_at`, 예약된 적이 있으면 `reserved_at` · `email`, 사용됐으면 `user_id` · `redeemed_at`, 회수됐으면 `revoked_at`을 보이고 상태별 합계를 붙인다. 토큰 · 해시는 출력하지 않는다. 만료된 ISSUED는 `EXPIRED`로 보인다(저장 상태는 ISSUED 그대로다). `email`은 운영자가 Cognito 쪽 상태를 맞춰 볼 근거라 출력에 나오므로, 출력을 그대로 공유하지 않는다. RESERVED가 있으면 정리 안내를 덧붙인다.
-- **`revoke`**: ISSUED(만료 포함) · RESERVED 링크만 REVOKED로 바꾼다. REDEEMED · REVOKED · 없는 ID · 형식이 틀린 ID는 거절한다(2). 앱 계정 · 세션과 Cognito 사용자는 바꾸지 않는다. RESERVED의 회수 미리보기는 예약 `email`과, Cognito 사용자가 생겼을 수 있다는 주의를 보인다. 미리보기 뒤 적용 전에 상태가 바뀌었으면 거절한다(2).
-
-### 등록 API
-
-`POST /api/v1/auth/platform-enrollment` `{token, email}` → 204 빈 본문. 계약은 `PlatformEnrollmentRequest`(`packages/schemas/api/auth.py`)다. 판정 순서:
-
-1. **Origin**(라우터 공통): 없거나 허용 목록과 다르면 403 `AUTH_ORIGIN_REJECTED`. 기능 스위치가 꺼져 있어도 이것이 먼저다(문법이 깨진 JSON만 예외 — 아래 2).
-2. **기능 스위치**: `AUTH_PLATFORM_ENROLLMENT_ENABLED`가 false(기본)면, JSON으로 파싱되는 본문은 스키마에 맞지 않아도 404 `ENROLLMENT_UNAVAILABLE`이고 본문 필드 검증 · 링크 · DB · Cognito에 닿지 않는다. 예외로, JSON 문법이 깨진 본문은 프레임워크가 의존성보다 먼저 파싱하므로 스위치 · Origin과 관계없이 422 `REQUEST_VALIDATION_FAILED`다(§접근 보호의 깨진 JSON 본문. 이 경로의 자동 회귀 테스트에는 구문 오류 사례가 없다).
-3. **본문**: `token` 1–512자(`SecretStr`), `email`은 기존 `Email` 계약이다. 그 밖의 필드(`role` · `account_type` · `tenant_id` 등)는 422 `REQUEST_VALIDATION_FAILED`이고, 검증 오류에 입력값을 싣지 않는다.
-4. **링크 사전 확인**(읽기만, 트랜잭션은 어댑터 조립 전에 끝낸다): 토큰의 SHA-256이 ISSUED이고 만료 전인 링크가 아니면 404 `ENROLLMENT_UNAVAILABLE`이다. 없음 · 만료 · 회수 · 예약 · 사용됨을 같은 코드 · 같은 문구로 다루며, Cognito 설정 · SDK에 닿지 않는다. 요청의 세션 쿠키는 읽지 않는다(권한 근거가 아니다).
-5. **Cognito 어댑터 조립**: Cognito 설정이 비면 503 `AUTH_PROVIDER_UNAVAILABLE`. 링크는 ISSUED로 남아 설정을 고친 뒤 쓸 수 있다.
-6. **예약**: ISSUED · 만료 전일 때만 RESERVED로 바꾸고 이메일 · `reserved_at`을 기록하는 조건부 UPDATE → commit. 같은 링크의 동시 요청은 행 잠금 뒤 조건을 다시 보므로 하나만 잡고, 나머지는 404다. 이 commit이 실패하면 500 `INTERNAL_ERROR`이고 Cognito를 부르지 않는다.
-7. **`AdminCreateUser`**(DB 트랜잭션 밖, 한 번): Cognito가 그 이메일로 초대 메일(임시 비밀번호)을 보낸다.
-8. **확정**: `app_users` 테이블 잠금과 링크 행 `FOR UPDATE` 안에서 RESERVED · 만료 전인지 다시 확인한 뒤, PLATFORM · `role=ADMIN` · `tenant_id` NULL · ACTIVE · `email_verified_at` 빈 앱 사용자를 만들고 링크를 REDEEMED(`redeemed_user_id` · `redeemed_at`)로 바꾼다(한 commit). 그 사이 회수 · 만료됐으면 404이고 앱 계정을 만들지 않는다.
-9. **204**: 본문 · `Set-Cookie` 없음, `Cache-Control: no-store`. 요청에 실린 기존 세션은 쓰지도 바꾸지도 않는다. 제공자 성공은 앱 계정 성공이 아니며(204는 확정 commit 뒤에만 나간다), 204도 초대 메일 도착의 증명이 아니다.
-
-### 실패와 결과 불명
-
-| 시점 | 응답 | 남는 상태 |
-| --- | --- | --- |
-| 예약 전 — Origin · 스위치 · 본문 · 링크 판정 | 403 · 404 · 422 · 404 | 링크 변화 없음, Cognito 미호출 |
-| 예약 전 — Cognito 미설정 | 503 `AUTH_PROVIDER_UNAVAILABLE` | ISSUED 그대로 |
-| 예약 전 — 사전 확인의 DB 오류 | 500 `INTERNAL_ERROR` | 링크 변화 없음, Cognito 미호출 |
-| 예약 commit 실패 | 500 `INTERNAL_ERROR` | Cognito 미호출. 링크 상태는 `list`로 확인 |
-| 예약 뒤 Cognito 실패 — 이미 있는 이메일 · 요청 제한 · 메일 발송 실패 · 시간 초과 · 장애 · 분류 밖 오류 | 409 `USER_STATE_CONFLICT` · 429 `AUTH_RATE_LIMITED` · 503 `AUTH_EMAIL_DELIVERY_FAILED` · 503 `AUTH_PROVIDER_UNAVAILABLE` · 500 `INTERNAL_ERROR` | RESERVED 유지, 앱 계정 없음. Cognito 사용자가 생겼는지 앱은 모른다 |
-| Cognito 성공 뒤 확정 DB 실패 | 500 `INTERNAL_ERROR` | 앱 계정 · 링크 상태는 응답만으로 확정할 수 없다 — commit 응답이 끊겨도 commit이 반영됐을 수 있어, 반영됐다면 REDEEMED와 앱 계정이 있고 반영되지 않았다면 RESERVED에 앱 계정이 없다. `list`로 확인한다. Cognito 사용자(초대 메일 발송 포함)는 남는다. 앱은 다시 만들지 않는다 |
-| Cognito 호출 중 운영자 회수 · 링크 만료 | 404 `ENROLLMENT_UNAVAILABLE` | REVOKED 또는 RESERVED(만료), 앱 계정 없음, Cognito 사용자는 남았을 수 있다 |
-
-- **예약 뒤에는 어떤 실패도 예약을 되돌리지 않는다.** 앱은 링크를 ISSUED로 되돌리거나 다시 시도하지 않는다. Cognito 사용자를 지우거나 기존 Cognito 사용자를 연결하지 않고, 비밀번호 · TOTP 같은 기존 자격증명을 재설정하지 않는다. 같은 링크의 재요청은 Cognito가 회복된 뒤에도 404다.
-- **응답 코드만으로 링크 상태나 메일 발송을 판단하지 않는다.** 같은 503 `AUTH_PROVIDER_UNAVAILABLE`이 예약 전 설정 누락(ISSUED)과 예약 뒤 Cognito 장애(RESERVED)를 모두 뜻하고, 404 · 500도 Cognito 사용자 생성 뒤에 나올 수 있고, 확정 단계의 500은 링크가 이미 REDEEMED로 반영된 뒤에도 나올 수 있다. 어떤 오류 응답도 초대 메일이 나가지 않았다는 증거가 아니다. 상태는 `list`로 확인한다.
-- **RESERVED에는 자동 복구가 없다.** 운영자가 `list`의 `email`로 Cognito 쪽 사용자 유무 · 상태를 먼저 확인한다(아래 §RESERVED 수동 확인). 그 뒤에 고를 수 있는 것은 기존 명시 CLI 동작(`revoke` · 새 링크 `issue`, 또는 §플랫폼 계정 CLI의 `--existing-cognito-user` 연결)뿐이다. 이것은 확인 뒤의 선택지를 가리킬 뿐 자동 복구가 아니며, Cognito 쪽 결과가 정리되거나 성공했다는 것을 보장하지 않는다. Cognito 사용자 정리 방법은 이 문서가 정하지 않으며, RESERVED 행을 이 CLI로 처리하는 절차는 자동 테스트하지 않았다. Cognito에 그 이메일 사용자가 남아 있으면 새 링크로 같은 이메일을 넣어도 409다. 409 · 429 같은 예약 뒤 실패는 새 링크도 RESERVED로 남겨 소모한다.
-- **시도 제한**: 앱이 거는 제한은 링크당 예약 1회 — 곧 Cognito 생성 시도 1회 — 뿐이다. 이 경로에 IP · 요청 단위 제한은 앱에 없다. 스위치는 등록 기간에만 켜고, 링크 개수 · 유효 시간은 필요한 만큼만 준다.
-- **로그**: `enrollment_id` · `user_id` · 오류 코드 · 예외 종류만 남긴다(`platform_enrollment_reserved` · `platform_enrollment_provider_failed` · `platform_enrollment_finalize_rejected` · `platform_enrollment_finalize_failed` · `platform_enrollment_redeemed`). 토큰 · 해시 · 이메일 · SQL은 싣지 않는다.
-
-#### RESERVED 수동 확인
-
-위 RESERVED 항목의 Cognito 쪽 확인을 사람이 하는 절차다. 조회만 하며 앱 계정 · 링크와 Cognito 사용자 설정을 바꾸지 않는다(과금 집계는 3). 실제 환경의 대상 · 권한은 이 문서가 보증하지 않으며 실행 전에 2로 확인한다.
-
-1. **담당**: 착수 전에 대상 환경의 AWS 조작 담당자를 확인한다. 정해지지 않았으면 진행하지 않고 팀장에게 배정을 요청한다(`docs/PROJECT_STATUS.md` §팀 & 역할의 미배정 업무 규칙).
-2. **대상 · 권한**: 리전 · User Pool은 그 배포가 실제로 쓰는 `COGNITO_REGION` · `COGNITO_USER_POOL_ID` 값이다. 기본값이나 짐작한 풀을 쓰지 않는다. 조회는 그 환경에서 허가된 운영자 자격증명으로 하며 대상 풀 ARN에 `cognito-idp:AdminGetUser` 권한이 필요하다(앱 클라이언트 비밀값은 필요 없다). 앱의 `COGNITO_AWS_PROFILE`이 운영자 CLI 자격증명을 가리킨다고 보지 않는다(§운영 주의점). 그 자격증명이 이름 있는 프로파일이면 `--profile`로 명시한다.
-3. **비용**: `AdminGetUser`는 사용자 설정을 바꾸지 않지만 그 사용자를 과금 MAU로 집계한다. 확인이 필요한 RESERVED 이메일만 조회한다.
-4. **조회**(자리표시만 바꿔 1회):
-
-   ```bash
-   AWS_RETRY_MODE=standard AWS_MAX_ATTEMPTS=1 aws cognito-idp admin-get-user \
-     --user-pool-id "<configured-pool-id>" \
-     --username "<email-from-RESERVED-list>" \
-     --region "<configured-region>" \
-     --endpoint-url "https://cognito-idp.<configured-region>.amazonaws.com" \
-     --query '{UserStatus:UserStatus,Enabled:Enabled,Sub:UserAttributes[?Name==`sub`].Value | [0]}' \
-     --output json --no-cli-pager
-   ```
-
-   `AWS_RETRY_MODE=standard AWS_MAX_ATTEMPTS=1`은 재시도 없는 총 1회 시도다. `--endpoint-url`은 환경의 엔드포인트 재정의를 피한다. `--query`는 화면에 보일 필드만 줄이며 API 응답을 줄이지 않는다.
-5. **판독**: 성공은 관찰한 `UserStatus` · `Enabled` · `sub`일 뿐 연결 허가나 계정 준비 완료가 아니다. `UserNotFoundException`은 2의 대상을 확인한 뒤에만 "그 풀에 없음"이다. `AccessDeniedException` · `NotAuthorizedException` · `TooManyRequestsException` · `InternalErrorException` · 시간 초과 등 그 밖의 결과는 확인 불가다 — 없다고 보거나 다시 시도하지 않고 멈춘다.
-6. **선택 · 인계**: 다음 동작은 조회와 별개로, 위 RESERVED 항목의 기존 명시 동작 중에서 담당자가 고른다. `bootstrap_admin --existing-cognito-user --yes`는 조회가 아니라 앱 계정을 만드는 변경이므로 어떤 `UserStatus` · `Enabled` 값에도 자동으로 정하지 않는다. 확인 불가면 앱 계정 · 링크를 더 바꾸지 않고 멈춘다. 조회한 사람이 1의 담당자가 아니면 그 담당자에게만 넘기고, 넘길 때는 `enrollment_id` · 링크 상태 · 관찰 결과나 오류 코드만 넘긴다. 이메일 원문 · 자격증명 · 환경 변수 · 전체 속성 · CLI 원출력은 PR · 이슈 · 채팅에 붙이지 않는다.
-
-근거: [AdminGetUser](https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_AdminGetUser.html) · [CLI `admin-get-user`](https://docs.aws.amazon.com/cli/latest/reference/cognito-idp/admin-get-user.html) · [Common Errors](https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/CommonErrors.html) · [CLI 재시도](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-retries.html) · [CLI 환경 변수](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-envvars.html)
-
-### 마이그레이션 `b492e5d7c3a1`
-
-`f492c4a8d2e1` 다음 revision이다(`db/migrations/versions/20261023_b492e5d7c3a1_platform_enrollments.py`).
-
-- **upgrade**: enum `platform_enrollment_status`(`ISSUED` · `RESERVED` · `REDEEMED` · `REVOKED`)와 `platform_enrollments`를 만든다. `token_hash`(SHA-256 hex) 유일, `redeemed_user_id` 유일 · `app_users` FK `RESTRICT`(링크 1개 = 사용자 1명, 링크가 가리키는 사용자는 지울 수 없다). CHECK 5개가 행 모양을 강제한다 — 만료 시각이 생성 시각 뒤, 예약 시각과 이메일이 함께, ISSUED만 예약 흔적 없음(REVOKED는 어느 쪽에서든 올 수 있다), REDEEMED와 사용자 · 사용 시각이 함께, REVOKED와 회수 시각이 함께. 만료는 상태가 아니라 `expires_at`으로 판정한다. 기존 테이블 · 행은 건드리지 않는다.
-- **downgrade**: 이 테이블과 enum만 지운다. 발급 · 예약 · 사용 · 회수 기록이 사라지며, RESERVED 행의 이메일(Cognito 쪽 상태를 맞춰 볼 근거)도 함께 사라진다. 링크로 만든 `app_users` 행은 PLATFORM 그대로 남고, `f492c4a8d2e1`의 `account_type` 열 · CHECK는 바뀌지 않는다.
+- PLATFORM 계정을 만드는 다른 경로(공개 등록 API · 화면)는 없다.
 
 ## 테스트
 
@@ -471,7 +370,7 @@ uv run python -m auth.bootstrap_enrollment revoke --enrollment-id <enrollment_id
 | 대역(PR 3) | `apps/core-api/tests/test_auth_cognito.py` · `test_auth_login_flow.py` | `AdminGetUser`는 `UserNotFoundException`만 "없음"(그 밖의 실패 · 네트워크 오류 · 비정상 응답은 장애), `AdminCreateUser` 생성 · RESEND 파라미터와 오류 매핑, `ForgotPassword` 파라미터 · 발송 정보 폐기 · 존재/자격 오류 정규화 · 그 밖의 오류 노출, `ConfirmForgotPassword` 파라미터와 오류 매핑, 최초 비밀번호 변경의 앱 정책 위반이 Cognito 호출 전에 거절되고 흐름 유지 |
 | 실제 PostgreSQL + 대역(PR 3) | `apps/core-api/tests/test_auth_password_reset.py` | 요청: 정확한 파라미터 · 빈 204, 없음 · 부적격 · 미인증이 같은 응답, 제한 · 발송 · 장애 오류 노출. 두 경로 모두 Origin 거절 시 Cognito 미호출. 확정: 스키마 422 · 앱 정책 422가 Cognito 전, 성공 시 그 사용자 세션만 `PASSWORD_RESET` 회수 · 쿠키 없음, 앱 행 없는 `sub`는 204, `sub`를 모르는 성공은 500, 실패 매핑과 세션 유지, 조회 실패는 변경 전 중단, 변경 뒤 회수 실패 500(이전 세션 남음), 변경 전 DB 불가 500(Cognito 미호출), 로그 · 응답에 코드 · 비밀번호 없음 |
 | 실제 PostgreSQL(PR 3) | `apps/core-api/tests/test_user_admin_api.py` | 비ADMIN은 모든 경로(잘못된 본문 포함) 403 · DB 불변 · Cognito 미호출, 미인증 401, 목록의 `last_login_at`, 이력 `limit` 경계 · 없는 대상, 초대 · 중복 409(자동 연결 없음) · 제공자 실패 · DB 실패 500(앱 행 없음, 제공자 사용자 유지), `recover_existing` 연결 · 404 · 409, 재발송과 상태 불일치 409, 역할 · 상태 변경과 본인 403 · 같은 값 409 · 마지막 활성 ADMIN 409, 비활성화의 세션 회수와 재활성화 뒤 미복구, 세션 회수 개수 · 본인 회수, Cognito 미설정 시 403 → 503 순서와 그 밖의 경로 동작, 행위자 토큰 repr 비노출. 독립 commit 세션: 잠금 대기 중 회수 · 비활성 · 강등된 행위자는 아무것도 쓰지 않음, SDK 호출 중 회수된 행위자(제공자 결과만 남음), 두 ADMIN의 동시 상호 강등 · 비활성화에서 한쪽만 성공 |
-| 실제 PostgreSQL + 대역(#492) | `apps/core-api/tests/test_user_admin_api.py` | 관리 범위: 대상 경로 목록이 사용자 단위 경로 전부와 일치(`test_target_ops_cover_every_user_scoped_route`), 범위 밖 대상(PLATFORM 계정 — PLATFORM 행위자 본인 포함 · UNASSIGNED, TENANT ADMIN에게는 다른 테넌트 · 정지된 다른 테넌트의 사용자)이 없는 대상과 같은 404 `USER_NOT_FOUND` · 같은 메시지이고 Cognito 미호출 · DB 무변화, 목록은 PLATFORM이 모든 테넌트 · TENANT ADMIN이 자기 테넌트만, PLATFORM이 어느 테넌트의 사용자든 관리(정지 테넌트 사용자는 재발송 밖 전부), TENANT OPERATOR · VIEWER는 테넌트 상태와 관계없이 모든 경로 403. 초대 · 재발송: PLATFORM 초대는 테넌트 명시 필수, 계정 종류 지정 불가, 없는 테넌트 404 `TENANT_NOT_FOUND` · ACTIVE 아닌 테넌트 409 `TENANT_STATE_CONFLICT`가 SDK 호출 전, TENANT ADMIN 초대는 자기 테넌트에 묶임, `recover_existing` 409에서 기존 소속 불변, SDK 호출 뒤 테넌트 재확인 거절 시 아무것도 쓰지 않음. Cognito 미설정이어도 사전 판정(422 · 404 · 409)이 503보다 먼저. 정지 테넌트 ADMIN: `/me` · 목록 · 닫힌 필드만 담긴 이력 조회 · 활동은 되고 모든 변경은 409 `TENANT_SUSPENDED` · Cognito 미호출 · DB 무변화. 테넌트별 마지막 활성 ADMIN. 독립 commit 세션: 같은 테넌트의 두 TENANT ADMIN, 또는 두 PLATFORM 행위자가 마지막 두 ADMIN을 동시에 제거하면 한쪽만 성공, 재확인이 테넌트 행을 commit까지 잡아 그 사이 정지를 막음(`test_tenant_recheck_holds_the_tenant_row_until_commit`) |
+| 실제 PostgreSQL + 대역(#492) | `apps/core-api/tests/test_user_admin_api.py` | 관리 범위: 대상 경로 목록이 사용자 단위 경로 전부와 일치(`test_target_ops_cover_every_user_scoped_route`), 범위 밖 대상(PLATFORM 계정 — PLATFORM 행위자 본인 포함 · UNASSIGNED, TENANT ADMIN에게는 다른 테넌트 · 정지된 다른 테넌트의 사용자)이 없는 대상과 같은 404 `USER_NOT_FOUND` · 같은 메시지이고 Cognito 미호출 · DB 무변화, 목록은 PLATFORM이 모든 테넌트 · TENANT ADMIN이 자기 테넌트만, PLATFORM이 어느 테넌트의 사용자든 관리(정지 테넌트 사용자는 재발송 밖 전부), TENANT OPERATOR · VIEWER는 테넌트 상태와 관계없이 모든 경로 403. 초대 · 재발송: PLATFORM 초대는 테넌트 명시 필수, 계정 종류 지정 불가, 없는 테넌트 404 `TENANT_NOT_FOUND` · ACTIVE 아닌 테넌트 409 `TENANT_STATE_CONFLICT`가 SDK 호출 전, TENANT ADMIN 초대는 자기 테넌트에 묶임, TENANT ADMIN의 `recover_existing`은 403 `AUTH_FORBIDDEN` · SDK 0회 · DB 무변화(소속 정지면 409 `TENANT_SUSPENDED`가 먼저)이고 일반 초대는 허용, `recover_existing` 409에서 기존 소속 불변, SDK 호출 뒤 테넌트 재확인 거절 시 아무것도 쓰지 않음. Cognito 미설정이어도 사전 판정(422 · 404 · 409)이 503보다 먼저. 정지 테넌트 ADMIN: `/me` · 목록 · 닫힌 필드만 담긴 이력 조회 · 활동은 되고 모든 변경은 409 `TENANT_SUSPENDED` · Cognito 미호출 · DB 무변화. 테넌트별 마지막 활성 ADMIN. 독립 commit 세션: 같은 테넌트의 두 TENANT ADMIN, 또는 두 PLATFORM 행위자가 마지막 두 ADMIN을 동시에 제거하면 한쪽만 성공, 재확인이 테넌트 행을 commit까지 잡아 그 사이 정지를 막음(`test_tenant_recheck_holds_the_tenant_row_until_commit`) |
 | 실제 PostgreSQL(PR 3) | `apps/core-api/tests/test_auth_login_single_session.py` | 다른 브라우저의 두 번째 로그인이 첫 세션 교체, 다른 사용자의 이전 쿠키도 교체, 비활성 · 미등록 거절 시 변경 없음, 사용자 단위 일괄 회수, 동시 로그인 뒤 살아 있는 세션 정확히 1개 |
 | 실제 PostgreSQL(PR 3) | `apps/core-api/db/tests/test_user_admin.py` · `test_user_admin_migration.py` | 회수 사유 enum, 마지막 로그인 = 회수 세션 포함 최신 세션, 활성 ADMIN 집계, 외부 변경 뒤 최신 값 읽기, 만료 포함 일괄 회수, 이력 최신순 · 대상별, 허용 목록 밖 상태 거절, UPDATE · DELETE 거절 · INSERT 허용, 이력이 참조하는 사용자 삭제 불가, 단일 head · 왕복 마이그레이션 |
 | 실제 PostgreSQL(PR 3 갱신) | `apps/core-api/tests/test_api_access.py` · `test_auth_api.py` | 공개 목록에 재설정 2종 추가, 사용자 관리 경로도 경로 전수 검사 대상(미인증 401). Cognito 미설정 시 로그인 · 재설정만 503이고 `/logout` · `/activity` · `/me` · 보호 API는 동작 |
@@ -480,18 +379,13 @@ uv run python -m auth.bootstrap_enrollment revoke --enrollment-id <enrollment_id
 | 실제 PostgreSQL(#492) | `apps/core-api/tests/test_auth_api.py` · `test_auth_login_single_session.py` · `test_auth_password_reset.py` | PLATFORM `/me`의 `tenant_id` null, UNASSIGNED 로그인 완료 403 · 발급 없음과 기존 세션 401, 정지 테넌트 사용자의 로그인 · `/me` · 활동 · 로그아웃 · 재설정, 테넌트 정지의 재로그인 없는 반영, 정지 테넌트의 DISABLED 사용자 |
 | 실제 PostgreSQL + 대역(#492) | `apps/core-api/tests/test_auth_bootstrap_admin.py` | `--platform` · `--email` 없는 생성 거절(SDK 호출 0회), 사용자가 있어도 추가 플랫폼 계정, 기존 신원 이전 없음, 지정 미리보기 무변경, 지정의 변경 · 세션 회수(SDK 호출 0회), 부적격 대상 거절, 생성 플래그 혼용 거절, 잠금 안 재확인, 같은 신원 동시 생성에서 1건만 |
 | 계약(#492) | `packages/schemas/tests/test_api_auth.py` · `test_api_users.py` | `AccountScope` 짝 규칙, 초대의 `tenant_id`는 플랫폼 권한 부여가 아님, 관리 요청으로 소속을 바꿀 수 없음 |
-| 웹 유닛(#492) | `apps/web/src/lib/home-path.test.ts` · `account-summary.test.ts` · `user-admin.test.ts` | 계정 종류별 첫 화면 · 메뉴, 상단바 계정 정보 항목(TENANT만 고객 ID), 초대 본문(PLATFORM은 고객 ID 필수 · TENANT ADMIN은 생략), 범위 밖 · 고객 상태 · 결과 불명 오류 문구 |
-| 실제 PostgreSQL + 어댑터 대역(#492) | `apps/core-api/tests/test_platform_enrollment.py` | 등록 API. 스위치 기본값 false, 꺼지면 유효 링크와 스키마 밖 JSON 본문이 같은 404 · 어댑터 조립 0회(문법이 깨진 JSON은 다루지 않는다), Origin(없음 · 외부 · `null`)이 스위치 켜짐 · 꺼짐 모두에서 먼저 403, 권한 필드(`role` · `account_type` · `tenant_id` · `user_id`)와 잘못된 본문 422 · 링크 무변화, 쓸 수 없는 링크 5종(모름 · 만료 · 회수 · 예약 · 사용됨)이 같은 404 · 같은 문구이고 Cognito 미설정(실제 지연 조립)보다 먼저, 기존 PLATFORM 세션 쿠키가 근거가 되지 않음, 유효 링크 + Cognito 미설정 503 · ISSUED 유지. 성공 204(본문 · 쿠키 없음 · `no-store`) · PLATFORM ADMIN 1명(`email_verified_at` 없음) · 기존 세션 무변화 · 재사용 404, 그 계정이 이메일 코드 확인 없이는 로그인을 완료하지 못함. 예약 commit 실패 시 SDK 0회, 예약 뒤 실패 5종(409 · 429 · 503 발송 · 503 장애 · 분류 밖 500)의 예약 유지와 회복 뒤 재요청 404 · SDK 1회, 제공자 성공 뒤 DB 실패 · 호출 중 만료에서 앱 계정 없음 · 예약 유지. 독립 commit 세션: 같은 링크 동시 4요청에서 계정 1개 · SDK 1회, 호출 중 회수 commit에서 앱 계정 없음. 로그에 토큰 · 해시 · 이메일 없음, 기동 경고는 켜졌을 때만 |
-| 실제 PostgreSQL(#492) | `apps/core-api/tests/test_auth_bootstrap_enrollment.py` | 발급 CLI(Cognito 없음). `--base-url`의 https · loopback http 허용과 위험한 형태 거절, 미리보기 무변경, 범위 밖 `--count` · `--valid-hours` · 위험한 base · 기존 출력 경로가 쓰기 전 거절(2), 링크는 파일에만 · DB에는 해시만 · 표준 출력에 토큰 없음, 기본 4개, 파일 생성 · 쓰기 실패면 DB 무기록, commit 전 DB 실패면 파일 삭제, commit 불명이면 파일 보존 · 성공 미표시, `list`의 메타데이터 · 파생 `EXPIRED` · 예약 `email` · 해시 없음, `revoke`가 링크만 바꾸고 REDEEMED · REVOKED · 없는 · 잘못된 ID 거절, CLI가 만든 링크를 API가 한 번만 받음(어댑터 대역). **OS별 조건**: 0600 소유자 전용 · 심볼릭 링크 거절 · 실제 출력 경로 발급 3개 테스트는 POSIX에서만, 비 POSIX 거절 1개 테스트는 POSIX가 아닐 때만 실행되고 반대 환경에서는 skip이다. 그 밖의 발급 테스트는 플랫폼과 무관한 새 파일 전용 opener 대역을 쓰므로 0600 보장을 확인하지 않는다 |
-| 실제 PostgreSQL(#492) | `apps/core-api/db/tests/test_platform_enrollment_migration.py` · `test_models_metadata.py` | 부모 revision(`f492c4a8d2e1` → `b492e5d7c3a1`)과 그래프의 head 1개, 왕복에서 이 테이블 · enum만 사라지고 이전 revision의 `account_type`과 PLATFORM 사용자 행이 남음 · 다시 upgrade한 스키마와 ORM 일치, CHECK 5개의 거절 · 허용 형태, `token_hash` · `redeemed_user_id` 유일과 링크가 가리키는 사용자 삭제 거절, 예약은 ISSUED · 만료 전 링크를 한 번만, 회수는 ISSUED · RESERVED만이고 예약 이메일 보존, 독립 연결의 동시 예약이 행 잠금을 기다려 하나만 성공 |
-| 실제 PostgreSQL(#492) | `apps/core-api/db/tests/test_account_scope_merge_migration.py` | 병합 revision `c492d6e8f4a2`의 부모 2개(`b492e5d7c3a1` · `f514a6c3d201`) · head 1개와 두 가지가 `e492a3b5c701`에서 갈라지는 부모 관계, 새 DB의 base → head, #492 가지 끝 · dev 가지 끝에서 head로 앞으로만 올린 DB가 두 열(`app_users.account_type` · `tenants.auto_action_resumed_at`)을 모두 갖고 그 revision 모양으로 넣은 테넌트 · 사용자 행(#492 가지는 등록 링크 행 포함)을 보존하며 기록 revision이 병합 revision 하나가 되고 ORM과 일치, dev 가지의 소속 사용자는 `TENANT`로 분류(승격 없음). 테스트마다 일회용 DB를 만들고 지운다 |
-| 계약 · 경로 전수(#492) | `packages/schemas/tests/test_api_auth.py` · `test_api_errors.py` · `apps/core-api/tests/test_api_access.py` | `PlatformEnrollmentRequest`의 토큰 비노출 · 권한 필드 거절 · 입력 경계(토큰 상한 512), 오류 코드 집합의 `ENROLLMENT_UNAVAILABLE`, 공개 목록 `PUBLIC_ROUTES`의 등록 경로 |
-| 웹 유닛(#492) | `apps/web/src/lib/enrollment.test.ts` · `public-paths.test.ts` · `lib/api/client.test.ts` | 조각 `#token=` 판독 · 형식과 판독 뒤 조각 제거, 링크 저장소의 1회 판독 · 화면 이탈 시 폐기, 늦은 응답이 다른 초대를 버리지 않음, 오류 코드별 최종 · 결과 불명 처분과 문구(메일 도착 · 이메일 확인 · 로그인 완료를 말하지 않음), `/team/enroll`만 정확히 일치로 공개 · 로그인 뒤 돌아갈 곳이 아님, 등록 요청이 `token` · `email`만 보내고 204 뒤 추가 요청이 없으며 401에도 로그인 이동이 없음 |
+| 웹 유닛(#492) | `apps/web/src/lib/home-path.test.ts` · `account-summary.test.ts` · `user-admin.test.ts` | 계정 종류별 첫 화면 · 메뉴, 상단바 계정 정보 항목(TENANT만 고객 ID), 초대 본문(PLATFORM은 고객 ID 필수 · TENANT ADMIN은 생략하고 기존 계정 연결은 언제나 false), 범위 밖 · 고객 상태 · 결과 불명 오류 문구 |
+| 실제 PostgreSQL(#492) | `apps/core-api/db/tests/test_account_scope_merge_migration.py` | 병합 revision `c492d6e8f4a2`의 부모 2개(`f492c4a8d2e1` · `f514a6c3d201`) · head 1개와 두 가지가 `e492a3b5c701`에서 갈라지는 부모 관계, 새 DB의 base → head, #492 가지 끝(`f492c4a8d2e1`) · dev 가지 끝(`f514a6c3d201`)에서 head로 앞으로만 올린 DB가 두 열(`app_users.account_type` · `tenants.auto_action_resumed_at`)을 모두 갖고 그 revision 모양으로 넣은 테넌트 · 사용자 행을 보존하며 기록 revision이 병합 revision 하나가 되고 ORM과 일치, dev 가지의 소속 사용자는 `TENANT`로 분류(승격 없음). 테스트마다 일회용 DB를 만들고 지운다 |
 | 실제 Cognito | 자동 테스트 없음 | 없음. CI는 실제 Cognito를 호출하지 않는다(아래 주의) |
 
 통합 픽스처(`apps/core-api/tests/conftest.py`): `client_pg`는 테스트 DB에 만든 PLATFORM ADMIN 실세션(`platform_session`) 쿠키와 허용 Origin을 기본 헤더로 싣는다(세션 쿠키는 `Secure`라 httpx 쿠키 저장소가 http로 보내지 않아 `Cookie` 헤더로 직접 싣는다). 격리 전 업무 API는 PLATFORM 전용이므로 업무 허용 테스트는 이 기본 세션을 쓴다. 세션 없는 클라이언트는 `client_pg_anon`, 다른 계정은 `login_as(role, tenant_id=..., account_type=...)`, 임의 시드는 `make_auth_session(role, tenant_id=, account_type=, status=, now=)`다. `tenant_id`를 주면 TENANT, 아니면 `account_type`(기본 PLATFORM, `UNASSIGNED`도 고를 수 있다)이며 계정 종류를 추론하지 않는다 — `tenant_id` 없이 ADMIN 밖의 역할을 주면 DB CHECK가 시드를 거절한다. TENANT 계정은 실제 테넌트 행에 묶는다: 테스트 트랜잭션은 `make_tenant(status)`, 임의 세션 · 격리 DB는 `seed_tenant`, commit 세션은 `committed_auth.make_tenant`. WebSocket은 다른 스레드가 자기 DB 세션으로 판정하므로 `ws_client` · `committed_auth`가 실제로 commit하고 끝나면 지운다.
 
-#492 테스트 원칙: 제약 · 마이그레이션 · 잠금과 동시성은 실제 PostgreSQL로 확인하고, Cognito는 대역만 쓴다(등록 링크는 `AdminCreateUser`만 기록하는 어댑터 대역).
+#492 테스트 원칙: 제약 · 마이그레이션 · 잠금과 동시성은 실제 PostgreSQL로 확인하고, Cognito는 대역만 쓴다.
 
 전체 실행은 CI(`.github/workflows/ci.yml`)와 같은 명령이다. PostgreSQL · LocalStack이 필요하다(준비 순서는 루트 `CLAUDE.md` §푸시 전 로컬 통합 테스트).
 
@@ -500,7 +394,7 @@ uv run pytest tests apps/core-api/services/tests apps/core-api/ai/tests packages
 cd apps/web && npm run lint && npm run build && npm run test --if-present
 ```
 
-**대역 테스트 통과는 실제 Cognito 동작의 보장이 아니다.** 대역 테스트는 정해 둔 Cognito 응답을 앱이 어떻게 처리하는지만 고정한다. 실제 User Pool의 challenge 순서 · 오류 · 메일 발송과 §User Pool · 앱 클라이언트 전제는 자동 테스트가 확인하지 않는다. HTTPS 배포 환경의 쿠키 동작과 실제 브라우저 · OS IME · 자동 완성 · 비밀번호 관리자 동작도 자동 테스트 범위가 아니다(통합 픽스처는 `Cookie` 헤더를 직접 싣는다). 실제 Cognito · HTTPS · 이전한 배포 환경에서의 동작은 그 환경에서 따로 검증해야 하며, 이 문서의 어떤 내용도 그 검증을 대신하지 않는다. 등록 링크도 같다 — 어댑터 대역은 실제 `AdminCreateUser`의 초대 메일 발송, 이미 있는 이메일 판정, 시간 초과 뒤 실제 생성 여부를 확인하지 않는다. 실제 브라우저의 조각 처리와 실제 환경에서의 링크 발급 · 계정 생성도 자동 테스트 범위가 아니며, 이 문서는 그 결과를 보증하지 않는다.
+**대역 테스트 통과는 실제 Cognito 동작의 보장이 아니다.** 대역 테스트는 정해 둔 Cognito 응답을 앱이 어떻게 처리하는지만 고정한다. 실제 User Pool의 challenge 순서 · 오류 · 메일 발송과 §User Pool · 앱 클라이언트 전제는 자동 테스트가 확인하지 않는다. HTTPS 배포 환경의 쿠키 동작과 실제 브라우저 · OS IME · 자동 완성 · 비밀번호 관리자 동작도 자동 테스트 범위가 아니다(통합 픽스처는 `Cookie` 헤더를 직접 싣는다). 실제 Cognito · HTTPS · 이전한 배포 환경에서의 동작은 그 환경에서 따로 검증해야 하며, 이 문서의 어떤 내용도 그 검증을 대신하지 않는다.
 
 ## 운영 주의점
 
@@ -510,16 +404,13 @@ cd apps/web && npm run lint && npm run build && npm run test --if-present
 - **Cognito 자격증명.** `COGNITO_AWS_PROFILE`이 비면 `AWS_PROFILE`(운영 이미지의 관제 대상 접근 역할 프로필)을 무시하고 기본 체인(태스크 역할)을 쓴다. Cognito 권한을 관제 대상 접근 역할에 주지 않는다.
 - **로컬 개발.** 웹(`http://localhost:3000`) → API(`http://localhost:8000`)는 같은 사이트라 `SameSite=Lax` 쿠키가 실린다. FE 요청은 `credentials: "include"`다. Chrome · Firefox는 `http://localhost`를 보안 컨텍스트로 보아 `Secure` · `__Host-` 쿠키를 받는다. `.env`에 LocalStack 더미 AWS 키가 있으면 `COGNITO_AWS_PROFILE`로 실제 자격증명을 지정한다.
 - **배포 도메인.** 세션 쿠키는 host-only라 기본 도메인(`https://vigilantis.dev`)과 `/api/*` 경로 라우팅을 전제한다. CloudFront 기본 도메인으로 접속하면 API 호스트와 달라 쿠키가 실리지 않는다.
-- **초대 메일.** 기본 초대 메일 문구는 임시 비밀번호 뒤에 문장부호가 붙는다(등록 링크의 초대 메일도 같은 호출이다). 복사 때 함께 들어가지 않게 안내하거나 문구를 바꾼다.
+- **초대 메일.** 기본 초대 메일 문구는 임시 비밀번호 뒤에 문장부호가 붙는다. 복사 때 함께 들어가지 않게 안내하거나 문구를 바꾼다.
 - **비활성 사용자.** `DISABLED` 사용자의 세션은 401로 막히고, 열린 WebSocket은 재확인 주기 안에 4401로 닫힌다. PR 3의 비활성화는 그 사용자의 세션 행도 `ACCOUNT_DISABLED`로 회수하고, 재활성화해도 되살리지 않는다. 앱 DB만 바꾸며 Cognito 사용자는 그대로다(§사용자 관리).
 - **TOTP 분실(PR 3 제외).** 비밀번호 재설정은 비밀번호만 바꾸고 로그인에는 여전히 TOTP가 필요하므로, 인증 앱을 잃은 사용자는 재설정으로 복구할 수 없다. 관리자용 TOTP 재설정 UI · API · CLI는 PR 3 게시 뒤의 후속 작업이다([#515](https://github.com/ProjectVigilantis/vigilantis/issues/515)). 필요한 `AdminDeleteSoftwareToken`은 botocore 1.43.82부터 있어(현재 잠금 1.43.70에는 없다) 후속에서 의존성 갱신이 필요하다. 마지막 ADMIN이 TOTP를 잃으면 다시 로그인하지 못할 수 있다. 다만 이미 열린 세션은 만료 · 회수 전까지 유효하므로 즉시 운영이 멈추지는 않는다.
 - **세션 확인 부하.** 보호 API 요청마다 `auth_sessions` · `app_users` 조회가 2번 붙는다(요청 세션 안). 열린 WebSocket은 연결마다 `WS_SESSION_CHECK_SECONDS`에 한 번 같은 조회를 한다.
 - **요청 본문 크기.** 본문 크기 제한은 인증 전에 강제되지 않는다(FastAPI 기존 동작 — 본문을 의존성보다 먼저 읽는다). 본문을 받는 경로는 미인증 요청도 본문 전체를 읽은 뒤에 거절한다. 인증 전 크기 제약은 배포 계층(WAF 등)에 두는 전제이며, 특정 환경의 적용 여부는 이 문서가 보증하지 않는다.
 - **임시 업무 관문(#492).** 테넌트 격리(T-4 · T-5) 전까지 고객사(TENANT) 계정은 업무 화면 · API · 실시간 연결을 쓰지 못한다. 끄는 설정이 없으며, 격리가 들어올 때 관문을 걷는다. 이 상태를 테넌트 데이터 격리 완료로 안내하지 않는다.
 - **고객 ID 입력(#492).** 사용자 관리 화면에 고객 선택 목록이 없어(백엔드의 테넌트 목록 API를 이 화면은 쓰지 않는다) PLATFORM 운영자는 초대할 고객의 UUID를 직접 확인해 입력해야 한다. 틀린 값은 404 `TENANT_NOT_FOUND`다.
-- **마이그레이션 적용(#492).** head는 병합 revision `c492d6e8f4a2`이며, dev 가지 끝과 #492 가지 끝 어느 쪽의 DB도 `alembic upgrade head`로 앞으로만 올린다(§마이그레이션 그래프 · 병합 `c492d6e8f4a2`). `f492c4a8d2e1`은 이전 앱 · CLI의 사용자 생성과 함께 쓸 수 없으므로 마이그레이션 · 새 앱 · 새 CLI를 함께 올린다. downgrade는 PLATFORM · UNASSIGNED 구분을 잃는다(§마이그레이션 `f492c4a8d2e1`). 소속 없는 기존 계정은 UNASSIGNED로 남아 로그인할 수 없으므로, 필요하면 CLI로 지정한다.
+- **마이그레이션 적용(#492).** head는 병합 revision `c492d6e8f4a2`이며, dev 가지 끝과 #492 가지 끝 어느 쪽의 DB도 `alembic upgrade head`로 앞으로만 올린다. 등록 링크 스키마(`platform_enrollments`)가 있는 DB는 revision과 관계없이 이 경로의 대상이 아니다(§마이그레이션 그래프 · 병합 `c492d6e8f4a2`). `f492c4a8d2e1`은 이전 앱 · CLI의 사용자 생성과 함께 쓸 수 없으므로 마이그레이션 · 새 앱 · 새 CLI를 함께 올린다. downgrade는 PLATFORM · UNASSIGNED 구분을 잃는다(§마이그레이션 `f492c4a8d2e1`). 소속 없는 기존 계정은 UNASSIGNED로 남아 로그인할 수 없으므로, 필요하면 CLI로 지정한다.
 - **초대 · 재발송의 결과 불명(#492).** SDK 호출 뒤 재확인이 거절하면 메일은 나갔을 수 있다. 오류 코드만으로 미발송을 판단하지 말고 목록 · Cognito 상태를 확인한 뒤 다시 수행한다(§부분 실패).
-- **등록 링크 스위치(#492).** `AUTH_PLATFORM_ENROLLMENT_ENABLED`는 기본 꺼짐이며 등록 기간에만 켠다. 값은 프로세스 안에 캐시된다(`get_auth_settings`, `lru_cache`). 환경변수를 바꾸면 API 프로세스를 모두 재시작 · 재배포해야 하고, 반영 여부는 재시작 뒤 새 프로세스에서 확인한다. 기동 WARNING `platform_enrollment_enabled`는 켜짐을 알리지만, 그것이 없다는 것만으로 꺼짐이 증명되지는 않는다. 응답으로 가를 때는 허용된 Origin과 함께 JSON 문법은 맞고 스키마에는 맞지 않는 본문(예: `{}`)을 보낸다 — 꺼져 있으면 404 `ENROLLMENT_UNAVAILABLE`, 켜져 있으면 422 `REQUEST_VALIDATION_FAILED`이고, 어느 쪽도 링크 · Cognito에 닿지 않는다. 스키마에 맞는 본문에 틀리거나 없는 토큰을 넣으면 켜짐 · 꺼짐 모두 404라 구분되지 않고, 문법이 깨진 JSON은 언제나 422라 역시 구분에 쓰지 않는다. 끄면 새 등록 요청만 막히고(파싱되는 JSON 본문은 404, 문법이 깨진 JSON은 422), 기존 로그인 · MFA · 비밀번호 재설정 · 사용자 관리의 초대는 영향을 받지 않는다. 끄는 것은 이미 관문을 통과해 진행 중인 요청을 취소한다고 전제하지 않으며, 링크를 회수하지도 않는다 — 다시 켜면 아직 ISSUED이고 만료 전인 링크는 다시 받아들여진다. 링크 회수는 별개의 CLI `revoke`(ISSUED · RESERVED)로 한다.
-- **등록 링크 발급 환경(#492).** 발급(`issue --yes`)은 POSIX 환경에서만 된다(POSIX가 아니면 실패로 끝나고 DB 무기록). 배포된 API 컨테이너(Linux)에서 실행하고, 링크 파일은 전달 뒤 지운다(§플랫폼 등록 링크).
-- **등록 링크의 결과 불명(#492).** RESERVED는 자동으로 복구되지 않는다. 응답 코드만으로 미사용 · 미발송을 판단하지 말고, `list`의 `email`로 Cognito 쪽 상태를 확인한 뒤 명시 CLI 동작을 고른다(§플랫폼 등록 링크 §실패와 결과 불명).
 - **SSOT.** 팀 공통 현황 · API 계약의 기준은 `docs/PROJECT_STATUS.md`다. 이 모듈의 세부 계약은 이 문서와 `packages/schemas/`에 있으며, 여기 적힌 경로 · 오류 코드 · 응답 칸이 SSOT에 반영됐는지는 SSOT에서 확인한다.

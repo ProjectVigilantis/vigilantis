@@ -3,9 +3,9 @@
 // 세션 조회(`/auth/me`) · 유휴 연장 · 실시간 연결 · GNB 자산 폴링 · Toast를 두르지 않는다).
 // 경로는 정확히 일치할 때만 공개다(하위 경로는 아니다).
 
-import { ENROLL_PATH, LANDING_PATH, LOGIN_PATH } from './return-to.ts';
+import { LANDING_PATH, LOGIN_PATH } from './return-to.ts';
 
-const PUBLIC_PATHS: ReadonlySet<string> = new Set([LOGIN_PATH, LANDING_PATH, ENROLL_PATH]);
+const PUBLIC_PATHS: ReadonlySet<string> = new Set([LOGIN_PATH, LANDING_PATH]);
 
 export function isPublicPath(pathname: string): boolean {
   return PUBLIC_PATHS.has(pathname);

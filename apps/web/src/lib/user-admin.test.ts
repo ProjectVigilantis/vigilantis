@@ -7,6 +7,8 @@ import { VIEWER_ACTION_BLOCKED } from './roles.ts';
 import {
   canChangeRow,
   INVITE_RECOVER_NOT_FOUND,
+  INVITE_STATE_CONFLICT,
+  INVITE_STATE_CONFLICT_PLATFORM,
   INVITE_TENANT_NOT_FOUND,
   INVITE_UNCERTAIN,
   TENANT_ID_INVALID,
@@ -93,25 +95,49 @@ test('초대 본문 — 플랫폼은 고객 ID를 반드시 싣는다', () => {
   }
 });
 
-test('초대 본문 — 고객사 ADMIN은 tenant_id를 싣지 않는다(입력이 있어도 무시)', () => {
-  const result = inviteRequestFor({ account_type: 'TENANT' }, form({ tenantId: TENANT_UUID, recoverExisting: true }));
-  assert.ok(result.ok);
-  assert.deepEqual(result.request, { email: ' a@b.c ', role: 'OPERATOR', recover_existing: true });
-  assert.equal('tenant_id' in result.request, false);
-  assert.equal('account_type' in result.request, false);
+test('초대 본문 — 플랫폼 운영자의 기존 계정 연결 선택은 그대로 싣는다', () => {
+  const result = inviteRequestFor({ account_type: 'PLATFORM' }, form({ tenantId: TENANT_UUID, recoverExisting: true }));
+  assert.deepEqual(result, {
+    ok: true,
+    request: { email: ' a@b.c ', role: 'OPERATOR', recover_existing: true, tenant_id: TENANT_UUID },
+  });
+});
+
+test('초대 본문 — 고객사 ADMIN은 일반 초대만 보낸다(tenant_id 없음 · 복구 선택이 와도 false)', () => {
+  for (const recoverExisting of [false, true]) {
+    const result = inviteRequestFor({ account_type: 'TENANT' }, form({ tenantId: TENANT_UUID, recoverExisting }));
+    assert.deepEqual(result, { ok: true, request: { email: ' a@b.c ', role: 'OPERATOR', recover_existing: false } });
+  }
 });
 
 test('대상 없음 · 상태 충돌', () => {
   assert.match(userAdminErrorMessage('role', 'USER_NOT_FOUND'), /찾을 수 없습니다/);
-  // 초대의 404는 복구 연결 대상(기존 인증 계정)이 없다는 뜻이다.
-  assert.equal(userAdminErrorMessage('invite', 'USER_NOT_FOUND'), INVITE_RECOVER_NOT_FOUND);
   assert.match(userAdminErrorMessage('status', 'USER_STATE_CONFLICT'), /마지막 활성 관리자/);
-  assert.match(userAdminErrorMessage('invite', 'USER_STATE_CONFLICT'), /이미 초대된 이메일/);
-  // 기존 계정 연결 안내는 초대의 409에만 붙는다.
-  assert.match(userAdminErrorMessage('invite', 'USER_STATE_CONFLICT'), /기존 인증 계정을 연결 \(복구\)/);
   for (const action of ['resend', 'role', 'status', 'revoke'] as const) {
-    assert.doesNotMatch(userAdminErrorMessage(action, 'USER_STATE_CONFLICT'), /복구/);
+    for (const accountType of ['PLATFORM', 'TENANT', null] as const) {
+      assert.doesNotMatch(userAdminErrorMessage(action, 'USER_STATE_CONFLICT', accountType), /복구/, action);
+    }
   }
+});
+
+test('기존 계정 연결(복구) 안내는 플랫폼 운영자의 초대에만 붙는다', () => {
+  // 플랫폼: 초대 404는 복구 연결 대상(기존 인증 계정)이 없다는 뜻이고, 409는 복구로 다시 시도할 수 있다고 안내한다.
+  assert.equal(userAdminErrorMessage('invite', 'USER_NOT_FOUND', 'PLATFORM'), INVITE_RECOVER_NOT_FOUND);
+  assert.equal(userAdminErrorMessage('invite', 'USER_STATE_CONFLICT', 'PLATFORM'), INVITE_STATE_CONFLICT_PLATFORM);
+  assert.match(INVITE_STATE_CONFLICT_PLATFORM, /이미 초대된 이메일/);
+  assert.match(INVITE_STATE_CONFLICT_PLATFORM, /기존 인증 계정을 연결 \(복구\)/);
+
+  // 고객사 ADMIN(또는 계정 종류 미상): 같은 거절 사유만 말하고 복구를 권하지 않는다.
+  for (const accountType of ['TENANT', null] as const) {
+    const conflict = userAdminErrorMessage('invite', 'USER_STATE_CONFLICT', accountType);
+    assert.equal(conflict, INVITE_STATE_CONFLICT, String(accountType));
+    assert.match(conflict, /이미 초대된 이메일/);
+    const notFound = userAdminErrorMessage('invite', 'USER_NOT_FOUND', accountType);
+    assert.notEqual(notFound, INVITE_RECOVER_NOT_FOUND, String(accountType));
+    for (const message of [conflict, notFound]) assert.doesNotMatch(message, /복구|기존 (인증 )?계정/, String(accountType));
+  }
+  // 고객사 ADMIN이 복구를 보내 서버가 막은 경우(403)도 일반 관리자 거절 문구다.
+  assert.equal(userAdminErrorMessage('invite', 'AUTH_FORBIDDEN', 'TENANT'), USER_ADMIN_FORBIDDEN);
 });
 
 test('역할 · 상태 변경은 세션 확인 후 다른 사용자 행에서만 가능하다', () => {

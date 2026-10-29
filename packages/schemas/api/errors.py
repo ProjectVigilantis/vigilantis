@@ -24,8 +24,6 @@ class ErrorCode(str, Enum):
     TENANT_* 5종은 /api/v1/tenants(Post-MVP T-4)와 테넌트 정지(원격 회수)의 거절이다.
     AUTH_* · ACCOUNT_* 13종은 로그인(/api/v1/auth)과 API 접근 보호(Post-MVP T-1)의 거절이다.
     미인증은 401, 인증은 됐지만 허용되지 않은 요청은 403 이다.
-    ENROLLMENT_UNAVAILABLE 은 플랫폼 계정 등록 링크(/api/v1/auth/platform-enrollment, #492)의 거절이다 —
-    기능 꺼짐 · 없는 · 만료 · 회수 · 이미 쓴 · 예약된 링크를 구분하지 않는다.
     """
 
     INCIDENT_NOT_FOUND = "INCIDENT_NOT_FOUND"                # 404 — 없음 · 요청의 테넌트 범위 밖(존재를 알리지 않는다 · api/tenants.py 머리말)
@@ -52,7 +50,6 @@ class ErrorCode(str, Enum):
     AUTH_PROVIDER_UNAVAILABLE = "AUTH_PROVIDER_UNAVAILABLE"  # 503 — Cognito 호출 실패(네트워크 · 5xx)
     USER_NOT_FOUND = "USER_NOT_FOUND"                        # 404 — 관리 범위 안의 고객사 사용자 없음
     USER_STATE_CONFLICT = "USER_STATE_CONFLICT"              # 409 — 테넌트별 마지막 활성 ADMIN · 중복 초대 · 상태 충돌
-    ENROLLMENT_UNAVAILABLE = "ENROLLMENT_UNAVAILABLE"        # 404 — 플랫폼 계정 등록 링크를 쓸 수 없음(사유 구분 없음)
     REQUEST_VALIDATION_FAILED = "REQUEST_VALIDATION_FAILED"  # 422
     INTERNAL_ERROR = "INTERNAL_ERROR"                        # 500
 

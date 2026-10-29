@@ -4,21 +4,19 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { isPublicPath } from './public-paths.ts';
-import { ENROLL_PATH, safeReturnTo } from './return-to.ts';
+import { safeReturnTo } from './return-to.ts';
 
-test('로그인 · 랜딩 · 초대 링크 등록만 공개다', () => {
-  assert.equal(ENROLL_PATH, '/team/enroll');
-  for (const path of ['/login', '/landing', '/team/enroll']) assert.equal(isPublicPath(path), true, path);
+test('로그인 · 랜딩만 공개다', () => {
+  for (const path of ['/login', '/landing']) assert.equal(isPublicPath(path), true, path);
 });
 
-test('정확히 일치할 때만 공개다 — 상위 · 하위 · 비슷한 경로는 보호된다', () => {
-  for (const path of ['/', '/team', '/team/', '/team/enroll/', '/team/enroll/x', '/team/enrollx', '/TEAM/ENROLL', '/users', '/tenants']) {
+test('정확히 일치할 때만 공개다 — 하위 · 비슷한 경로와 제거된 초대 링크 등록 경로는 보호된다', () => {
+  for (const path of ['/', '/login/', '/login/x', '/landing/', '/LOGIN', '/team', '/team/enroll', '/users', '/tenants']) {
     assert.equal(isPublicPath(path), false, path);
   }
 });
 
-test('초대 링크 등록은 로그인 뒤 돌아갈 곳이 아니다', () => {
-  assert.equal(safeReturnTo('/team/enroll'), '/');
-  assert.equal(safeReturnTo('/team/enroll?x=1'), '/');
-  assert.equal(safeReturnTo('/team/enroll#token=abc'), '/');
+test('제거된 초대 링크 등록 경로는 더 이상 돌아갈 곳 예외가 아니다 — 보호 경로처럼 그대로 돌아간다', () => {
+  assert.equal(safeReturnTo('/team/enroll'), '/team/enroll');
+  assert.equal(safeReturnTo('/users?x=1'), '/users?x=1');
 });

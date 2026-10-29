@@ -15,7 +15,6 @@ import {
   getUserEvents,
   inviteUser,
   requestPasswordReset,
-  requestPlatformEnrollment,
   resendInvite,
   revokeUserSessions,
 } from './client.ts';
@@ -58,44 +57,6 @@ test('비밀번호 재설정 요청 · 확인은 입력값을 다듬지 않고 �
   assert.deepEqual(sent[0].body, { email: ' User@Example.com ' });
   assert.match(sent[1].url, /\/api\/v1\/auth\/password-reset\/confirm$/);
   assert.deepEqual(sent[1].body, { email: 'User@Example.com', code: '012345', new_password: ' Aa1!aaaaaaaa ' });
-});
-
-test('플랫폼 초대 등록은 token · email 둘만 보내고, 204 뒤에 다른 요청(세션 확인 등)을 하지 않는다', async (t) => {
-  const sent = stubFetch(t, noContent);
-  // 호출부가 다른 필드를 섞어 넘겨도 본문은 두 필드뿐이다(권한 · 계정 종류 · 고객은 입력이 아니다).
-  const extra = { token: 'tok_0123456789abcdef', email: ' Op@Example.com ', role: 'ADMIN', account_type: 'PLATFORM' };
-  assert.equal(await requestPlatformEnrollment(extra), undefined);
-  assert.equal(sent.length, 1);
-  assert.equal(sent[0].method, 'POST');
-  assert.equal(new URL(sent[0].url).pathname, '/api/v1/auth/platform-enrollment');
-  assert.equal(new URL(sent[0].url).search, '');
-  assert.deepEqual(sent[0].body, { token: 'tok_0123456789abcdef', email: ' Op@Example.com ' });
-});
-
-test('플랫폼 초대 등록의 오류는 코드로 올리고, 401이어도 로그인 이동을 걸지 않는다', async (t) => {
-  const assigned: string[] = [];
-  const g = globalThis as { window?: unknown };
-  const savedWindow = g.window;
-  t.after(() => {
-    if (savedWindow === undefined) delete g.window;
-    else g.window = savedWindow;
-  });
-  g.window = { location: { pathname: '/team/enroll', search: '', assign: (url: string) => assigned.push(url) } };
-
-  let respond = errorResponse(404, 'ENROLLMENT_UNAVAILABLE');
-  const sent = stubFetch(t, () => respond());
-  const body = { token: 'tok_0123456789abcdef', email: 'a@b.c' };
-  await assert.rejects(requestPlatformEnrollment(body), (error: unknown) => {
-    assert.ok(error instanceof ApiError);
-    assert.equal(error.code, 'ENROLLMENT_UNAVAILABLE');
-    assert.equal(error.httpStatus, 404);
-    return true;
-  });
-  respond = errorResponse(401, 'AUTH_REQUIRED');
-  await assert.rejects(requestPlatformEnrollment(body), ApiError);
-  assert.deepEqual(assigned, []);
-  // 실패 뒤 자동 재시도는 없다.
-  assert.equal(sent.length, 2);
 });
 
 test('사용자 관리 조치의 경로 · 메서드 · 본문', async (t) => {

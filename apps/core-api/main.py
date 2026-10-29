@@ -42,7 +42,6 @@ from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 import agent_dispatcher  # noqa: E402
 import dispatcher  # noqa: E402
 from auth.access import require_business_access, require_user  # noqa: E402
-from auth.enrollment import log_enrollment_status  # noqa: E402
 from auth.http import log_provider_status, register_auth_http, require_origin  # noqa: E402
 from config import get_auth_settings, get_settings  # noqa: E402
 from db.session import get_session_factory  # noqa: E402
@@ -176,7 +175,6 @@ def create_app() -> FastAPI:
     # 바깥이라 미처리 예외의 500 봉투에도 헤더가 붙는다
     register_auth_http(app)
     log_provider_status(get_auth_settings())
-    log_enrollment_status(get_auth_settings())
 
     # CORS는 request_context보다 나중에 추가한다 — 나중 추가가 바깥층이라
     # 미들웨어가 만든 오류 봉투 응답에도 CORS 헤더가 붙는다.

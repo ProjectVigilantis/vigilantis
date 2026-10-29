@@ -21,10 +21,7 @@ from db import models
 from sqlalchemy import create_engine, inspect, text
 
 MERGE = "c492d6e8f4a2"
-ACCOUNT_TYPE_REVISION = "f492c4a8d2e1"  # app_users.account_type
-FEATURE_REVISION = "b492e5d7c3a1"  # platform_enrollments — 가지의 끝
-ENROLLMENT_ID = "22222222-2222-4222-8222-222222222222"
-ENROLLMENT_HASH = "a" * 64
+FEATURE_REVISION = "f492c4a8d2e1"  # app_users.account_type — 가지의 끝
 DEV_REVISION = "f514a6c3d201"  # tenants.auto_action_resumed_at 가지
 FORK = "e492a3b5c701"
 ISSUER = "https://cognito-idp.ap-northeast-2.amazonaws.com/pool-merge"
@@ -66,7 +63,7 @@ def _versions(engine):
         return set(conn.execute(text("SELECT version_num FROM alembic_version")).scalars())
 
 
-def _seed_tenant_and_user(engine, *, with_account_type, with_enrollment=False):
+def _seed_tenant_and_user(engine, *, with_account_type):
     """그 리비전의 모양 그대로 raw INSERT — ORM 이 아닌 당시 칸으로 넣는다."""
     user_cols = (
         "user_id, issuer, cognito_sub, email, role, tenant_id, status, created_at, updated_at"
@@ -93,28 +90,10 @@ def _seed_tenant_and_user(engine, *, with_account_type, with_enrollment=False):
             text(f"INSERT INTO app_users ({user_cols}) VALUES ({user_vals})"),
             {"issuer": ISSUER, "tenant": TENANT_ID},
         )
-        if with_enrollment:
-            conn.execute(
-                text(
-                    "INSERT INTO platform_enrollments (enrollment_id, token_hash, status, "
-                    "created_at, expires_at) VALUES (:id, :hash, "
-                    "CAST('ISSUED' AS platform_enrollment_status), now(), now() + interval '1 day')"
-                ),
-                {"id": ENROLLMENT_ID, "hash": ENROLLMENT_HASH},
-            )
 
 
-def _assert_merged_head(engine, *, expected_account_type, expect_enrollment=False):
+def _assert_merged_head(engine, *, expected_account_type):
     assert _versions(engine) == {MERGE}
-    if expect_enrollment:
-        with engine.connect() as conn:
-            enrollment = conn.execute(
-                text(
-                    "SELECT enrollment_id::text, token_hash, status::text "
-                    "FROM platform_enrollments"
-                )
-            ).all()
-        assert [tuple(r) for r in enrollment] == [(ENROLLMENT_ID, ENROLLMENT_HASH, "ISSUED")]
     assert FEATURE_COLUMN[1] in _columns(engine, FEATURE_COLUMN[0])
     assert DEV_COLUMN[1] in _columns(engine, DEV_COLUMN[0])
     with engine.connect() as conn:
@@ -147,8 +126,7 @@ def test_merge_revision_joins_both_branches_into_a_single_head(merge_db):
         DEV_REVISION,
     }
     assert script.get_heads() == [MERGE]
-    assert script.get_revision(FEATURE_REVISION).down_revision == ACCOUNT_TYPE_REVISION
-    assert script.get_revision(ACCOUNT_TYPE_REVISION).down_revision == FORK
+    assert script.get_revision(FEATURE_REVISION).down_revision == FORK
     assert script.get_revision(DEV_REVISION).down_revision == FORK
 
 
@@ -168,9 +146,9 @@ def test_old_feature_only_database_upgrades_to_merge_head_keeping_data(merge_db)
     assert _versions(engine) == {FEATURE_REVISION}
     assert FEATURE_COLUMN[1] in _columns(engine, FEATURE_COLUMN[0])
     assert DEV_COLUMN[1] not in _columns(engine, DEV_COLUMN[0])
-    _seed_tenant_and_user(engine, with_account_type=True, with_enrollment=True)
+    _seed_tenant_and_user(engine, with_account_type=True)
     command.upgrade(config, "head")
-    _assert_merged_head(engine, expected_account_type="TENANT", expect_enrollment=True)
+    _assert_merged_head(engine, expected_account_type="TENANT")
 
 
 def test_old_dev_only_database_upgrades_to_merge_head_keeping_data(merge_db):

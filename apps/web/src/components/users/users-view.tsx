@@ -42,7 +42,7 @@ import {
   userAdminErrorMessage,
   type UserAdminAction,
 } from '@/lib/user-admin';
-import type { AccountScope, UserEventItem, UserListItem, UserRole } from '@/types/api';
+import type { AccountScope, AccountType, UserEventItem, UserListItem, UserRole } from '@/types/api';
 
 const ROLES: readonly UserRole[] = ['ADMIN', 'OPERATOR', 'VIEWER'];
 
@@ -220,6 +220,7 @@ export function UsersView({ users }: { users: UserListItem[] }) {
  */
 function ActionDialog({
   action,
+  accountType = null,
   title,
   description,
   confirmLabel,
@@ -232,6 +233,8 @@ function ActionDialog({
   onDone,
 }: {
   action: UserAdminAction;
+  /** 조치하는 계정의 종류. 기존 계정 연결(복구) 안내는 플랫폼 운영자에게만 붙는다(lib/user-admin.ts). */
+  accountType?: AccountType | null;
   title: string;
   description: ReactNode;
   confirmLabel: string;
@@ -265,7 +268,7 @@ function ActionDialog({
       await run(form);
     } catch (caught) {
       const code = caught instanceof ApiError ? caught.code : null;
-      setError(userAdminErrorMessage(action, code));
+      setError(userAdminErrorMessage(action, code, accountType));
       if (code === 'USER_NOT_FOUND' || code === 'USER_STATE_CONFLICT') router.refresh();
       inFlight.current = false;
       setPending(false);
@@ -348,6 +351,7 @@ function InviteDialog({
   return (
     <ActionDialog
       action="invite"
+      accountType={inviter.account_type}
       title="사용자 초대"
       description={
         recover
@@ -406,27 +410,30 @@ function InviteDialog({
         </label>
         <RoleSelect id="invite-role" value={role} onChange={setRole} />
       </div>
-      <div className="flex flex-col gap-1.5 rounded-md border p-3">
-        <label className="flex items-start gap-2 text-sm">
-          <input
-            type="checkbox"
-            checked={recover}
-            onChange={(event) => setRecover(event.target.checked)}
-            className="mt-0.5"
-          />
-          <span>같은 이메일의 기존 인증 계정을 연결 (복구)</span>
-        </label>
-        <p className="text-xs text-muted-foreground">
-          인증 서비스(Cognito)에 이 이메일의 계정이 이미 있을 때만 선택하세요. 선택하면 그 기존 계정을 이 앱 사용자로
-          연결합니다. 이전 초대가 실패했다는 증거는 아니므로, 계정 주인이 맞는지 먼저 확인하세요.
-        </p>
-        {recover ? (
-          <p role="status" className="text-xs font-medium text-destructive">
-            기존 계정의 비밀번호 · 인증 앱 설정을 쓰는 사람이 이 역할로 로그인하게 됩니다. 계정 주인을 확인했을 때만
-            진행하세요.
+      {/* 기존 계정 연결(복구)은 플랫폼 운영자만 고를 수 있다 — 고객사 ADMIN에게는 보이지 않는다(서버도 403으로 막는다). */}
+      {inviter.account_type === 'PLATFORM' ? (
+        <div className="flex flex-col gap-1.5 rounded-md border p-3">
+          <label className="flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={recover}
+              onChange={(event) => setRecover(event.target.checked)}
+              className="mt-0.5"
+            />
+            <span>같은 이메일의 기존 인증 계정을 연결 (복구)</span>
+          </label>
+          <p className="text-xs text-muted-foreground">
+            인증 서비스(Cognito)에 이 이메일의 계정이 이미 있을 때만 선택하세요. 선택하면 그 기존 계정을 이 앱 사용자로
+            연결합니다. 이전 초대가 실패했다는 증거는 아니므로, 계정 주인이 맞는지 먼저 확인하세요.
           </p>
-        ) : null}
-      </div>
+          {recover ? (
+            <p role="status" className="text-xs font-medium text-destructive">
+              기존 계정의 비밀번호 · 인증 앱 설정을 쓰는 사람이 이 역할로 로그인하게 됩니다. 계정 주인을 확인했을 때만
+              진행하세요.
+            </p>
+          ) : null}
+        </div>
+      ) : null}
     </ActionDialog>
   );
 }

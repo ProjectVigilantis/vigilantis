@@ -1,5 +1,4 @@
-"""플랫폼 계정 수명주기 운영 CLI (#492) — 플랫폼 계정은 이 CLI 로 직접 만들고 지정하거나,
-운영 CLI auth.bootstrap_enrollment 가 발급한 1회용 등록 링크의 사용(POST /api/v1/auth/platform-enrollment)으로만 생긴다.
+"""플랫폼 계정 수명주기 운영 CLI (#492) — 플랫폼 계정은 이 CLI 로 직접 만들고 지정해서만 생긴다.
 
     cd apps/core-api
     # 플랫폼 계정 만들기(첫 계정이든 추가 계정이든 권한 동일). --platform 필수.

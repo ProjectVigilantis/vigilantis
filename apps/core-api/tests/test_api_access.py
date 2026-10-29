@@ -54,8 +54,6 @@ PUBLIC_ROUTES = {
     ("POST", "/api/v1/auth/login/email-verification"),
     ("POST", "/api/v1/auth/password-reset"),
     ("POST", "/api/v1/auth/password-reset/confirm"),
-    # (#492) CLI 발급 1회용 링크로 PLATFORM ADMIN 생성 — 권한 근거는 링크뿐, 기본 꺼짐(404)
-    ("POST", "/api/v1/auth/platform-enrollment"),
     # 멱등 로그아웃(PR 1) — 세션이 없으면 지울 것이 없어 204다. 상태를 바꾸지 않는다
     ("POST", "/api/v1/auth/logout"),
 }

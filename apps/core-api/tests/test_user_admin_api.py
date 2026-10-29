@@ -91,6 +91,12 @@ def admin(request, login_as, tenant):
 
 
 @pytest.fixture()
+def platform_admin(login_as):
+    """기존 계정 연결(recover_existing)은 PLATFORM ADMIN 만 쓸 수 있다."""
+    return login_as(UserRole.ADMIN)
+
+
+@pytest.fixture()
 def tenant_admin(login_as, tenant):
     """본인 변경 · 본인 세션 회수처럼 대상이 될 수 있는 행위자(고객사 ADMIN)가 필요한 경우."""
     return login_as(UserRole.ADMIN, tenant_id=tenant)
@@ -355,7 +361,34 @@ def test_invite_db_failure_is_sanitized_500_and_no_orphan_row(client_pg, db, adm
     assert adapter.calls == [("create", "a@example.com", False)]  # 제공자 사용자는 지우지 않는다
 
 
-def test_recover_existing_links_provider_user(client_pg, db, admin, tenant, adapter):
+def test_tenant_admin_recover_existing_is_403_without_sdk_or_db_change(client_pg, db, tenant_admin, tenant, adapter):
+    adapter.get_result = CognitoUser("old@example.com", "sub-old", "old@example.com", "CONFIRMED")
+    before = snapshot(db)
+    resp = client_pg.post(BASE, json={
+        "email": "old@example.com", "role": "VIEWER", "tenant_id": tenant, "recover_existing": True,
+    })
+    assert (resp.status_code, resp.json()["error"]["code"]) == (403, "AUTH_FORBIDDEN")
+    assert adapter.calls == []
+    assert snapshot(db) == before
+
+
+def test_suspended_tenant_admin_recover_existing_keeps_409_precedence(client_pg, db, make_tenant, login_as, adapter):
+    parked = make_tenant(TenantStatus.SUSPENDED)
+    login_as(UserRole.ADMIN, tenant_id=parked)
+    resp = client_pg.post(BASE, json={
+        "email": "old@example.com", "role": "VIEWER", "tenant_id": parked, "recover_existing": True,
+    })
+    assert (resp.status_code, resp.json()["error"]["code"]) == (409, "TENANT_SUSPENDED")
+    assert adapter.calls == []
+
+
+def test_tenant_admin_ordinary_invite_is_still_allowed(client_pg, db, tenant_admin, tenant, adapter):
+    resp = client_pg.post(BASE, json={"email": "new@example.com", "role": "VIEWER", "tenant_id": tenant})
+    assert resp.status_code == 201
+    assert adapter.calls == [("create", "new@example.com", False)]
+
+
+def test_recover_existing_links_provider_user(client_pg, db, platform_admin, tenant, adapter):
     adapter.get_result = CognitoUser("old@example.com", "sub-old", "old@example.com", "CONFIRMED")
     resp = client_pg.post(BASE, json={
         "email": "old@example.com", "role": "VIEWER", "tenant_id": tenant, "recover_existing": True,
@@ -369,7 +402,7 @@ def test_recover_existing_links_provider_user(client_pg, db, admin, tenant, adap
     }
 
 
-def test_recover_existing_missing_provider_user_is_404(client_pg, db, admin, tenant, adapter):
+def test_recover_existing_missing_provider_user_is_404(client_pg, db, platform_admin, tenant, adapter):
     before = snapshot(db)
     resp = client_pg.post(BASE, json={
         "email": "none@example.com", "role": "VIEWER", "tenant_id": tenant, "recover_existing": True,
@@ -381,7 +414,7 @@ def test_recover_existing_missing_provider_user_is_404(client_pg, db, admin, ten
 
 @pytest.mark.parametrize("existing", ["tenant_member", "platform", "unassigned"])
 def test_recover_existing_already_provisioned_is_409_and_membership_never_moves(
-    client_pg, db, admin, tenant, adapter, target, make_auth_session, existing
+    client_pg, db, platform_admin, tenant, adapter, target, make_auth_session, existing
 ):
     """이미 앱에 있는 신원은 어떤 계정이든 다시 연결하지 않는다 — 소속 · 계정 종류를 옮기는 길이 없다."""
     seed = {
@@ -486,7 +519,7 @@ def test_invite_calls_provider_with_no_open_transaction(client_pg, db, admin, te
     assert boundary_adapter.open_at_call == [("create", False)]
 
 
-def test_recover_existing_calls_provider_with_no_open_transaction(client_pg, db, admin, tenant, boundary_adapter):
+def test_recover_existing_calls_provider_with_no_open_transaction(client_pg, db, platform_admin, tenant, boundary_adapter):
     boundary_adapter.get_result = CognitoUser("old@example.com", "sub-old", "old@example.com", "CONFIRMED")
     resp = client_pg.post(BASE, json={
         "email": "old@example.com", "role": "VIEWER", "tenant_id": tenant, "recover_existing": True,

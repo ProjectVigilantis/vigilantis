@@ -321,13 +321,16 @@ def invite_user(
     """초대 — 제공자 사용자를 먼저 확보한 뒤 앱 사용자(TENANT) + 이력을 한 commit 으로 만든다.
 
     기본은 새 Cognito 사용자 생성(중복이면 AuthError USER_STATE_CONFLICT 409)이다. 자동 연결은 없다.
-    recover_existing=True 는 ADMIN 의 명시적 선택이다: 이미 있는 Cognito 사용자를 조회해(없으면 404)
-    앱에 아직 없는 신원이면 연결한다 — 이메일 소유 증명이 아니다.
+    recover_existing=True 는 PLATFORM ADMIN 의 명시적 선택이다(TENANT ADMIN 은 403 AUTH_FORBIDDEN, SDK 0회):
+    이미 있는 Cognito 사용자를 조회해(없으면 404) 앱에 아직 없는 신원이면 연결한다 — 이메일 소유 증명이 아니다.
     대상 테넌트(_invite_tenant)는 SDK 전에 ACTIVE 를 확인하고, 쓰기 직전 잠금 안에서 다시 확인한다.
     get_adapter 는 사전 판정을 모두 통과한 뒤에만 부른다 — Cognito 미설정(503)보다 401 · 403 · 409 · 422 · 404 가 먼저다.
     """
     try:
-        target_tenant = _invite_tenant(_authorize_write(db, actor), tenant_id)
+        admin = _authorize_write(db, actor)
+        if recover_existing and admin.account_type is not AccountType.PLATFORM:
+            raise ApiError(ErrorCode.AUTH_FORBIDDEN)  # 기존 계정 연결은 PLATFORM 만 — SDK 전에 거절
+        target_tenant = _invite_tenant(admin, tenant_id)
         _require_active_tenant(db, target_tenant)
     finally:
         db.rollback()  # 읽기 트랜잭션을 SDK 호출 전에 끝낸다
