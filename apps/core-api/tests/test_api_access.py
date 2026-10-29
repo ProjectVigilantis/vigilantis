@@ -5,9 +5,9 @@
 #   - 경로 전수: 실제 앱의 경로를 열거해 공개 목록 밖은 전부 미인증 401임을 본다. 공개 목록은
 #     실제 경로와 정확히 대조한다 — 새 경로가 조용히 공개되거나 목록이 낡지 않게.
 #   - 역할: VIEWER 의 조치 실행 · 종료는 403 AUTH_FORBIDDEN 이고 Workflow 에 닿지 않는다(DB 무변화).
-#   - 계정 종류(#492): 업무 라우터는 임시로 PLATFORM 계정만 받는다 — 고객사(TENANT) 계정은 역할과
-#     관계없이 403(경로 전수). 상태 변경은 역할(403) → 소속 테넌트 정지(409 TENANT_SUSPENDED) → 임시 관문(403)
-#     순이라, 정지 테넌트의 OPERATOR 는 409 · VIEWER 는 403 으로 역할 판정이 관문에 가려지지 않는다.
+#   - 계정 종류(#492): 인시던트 · 조치 · 자산은 요청자의 테넌트 범위로 열리고, 그 밖의 업무 경로(메트릭 등)는
+#     PLATFORM 계정만 받는다(경로 전수). 고객사 계정에게 소속 없는 MVP 기록은 범위 밖이라 상세 · 실행 · 종료가
+#     404 다. 상태 변경의 역할 검사(403)는 대상을 읽기 전이다(판정 순서: packages/schemas/api/tenants.py 머리말).
 #     고객사 계정의 /api/v1/auth · /api/v1/users 는 그대로 열린다.
 #   - 세션: 유휴 · 최대 수명 만료, 회수(LOGOUT · SUPERSEDED), 비활성 · UNASSIGNED 사용자는 401.
 #   - Origin: 상태 변경 요청은 세션 조회 전에 403 AUTH_ORIGIN_REJECTED.
@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -39,6 +40,7 @@ from schemas.candidates import CandidateStatus
 from schemas.incidents import AgentInvocationStatus
 from sqlalchemy import text
 from starlette.websockets import WebSocketDisconnect
+from tenancy import ALL_TENANTS, TenantScope
 
 EXECUTE = "/api/v1/actions/execute"
 FOREIGN_ORIGIN = "https://evil.example.com"
@@ -211,18 +213,18 @@ def _business_state(db, incident, candidate):
     )
 
 
-# 상태 변경의 판정 순서 — 역할(VIEWER 403) → 소속 테넌트 정지(409) → 임시 플랫폼 관문(403).
-# 정지 테넌트의 OPERATOR · ADMIN 이 409 를 받는 것이 역할 검사를 통과했다는 관측이고, 같은 정지 테넌트의
-# VIEWER 가 403 인 것이 역할 검사가 관문에 가려지지 않았다는 관측이다.
+# 상태 변경의 판정 순서 — 역할(VIEWER 403 · 대상을 읽기 전) → 범위(404). 대상은 소속 없는 MVP 기록이라
+# 고객사 계정의 범위 밖이다. 요청자 소속 테넌트가 정지돼 있어도 409 가 아니다 — 정지는 요청자가 아니라
+# 대상 인시던트의 테넌트로 보고, 범위 밖 대상에는 그 판정까지 가지 않는다.
 @pytest.mark.parametrize(("tenant_status", "role", "expected"), [
-    (TenantStatus.ACTIVE, UserRole.ADMIN, (403, "AUTH_FORBIDDEN")),
-    (TenantStatus.ACTIVE, UserRole.OPERATOR, (403, "AUTH_FORBIDDEN")),
+    (TenantStatus.ACTIVE, UserRole.ADMIN, (404, "INCIDENT_NOT_FOUND")),
+    (TenantStatus.ACTIVE, UserRole.OPERATOR, (404, "INCIDENT_NOT_FOUND")),
     (TenantStatus.ACTIVE, UserRole.VIEWER, (403, "AUTH_FORBIDDEN")),
-    (TenantStatus.SUSPENDED, UserRole.ADMIN, (409, "TENANT_SUSPENDED")),
-    (TenantStatus.SUSPENDED, UserRole.OPERATOR, (409, "TENANT_SUSPENDED")),
+    (TenantStatus.SUSPENDED, UserRole.ADMIN, (404, "INCIDENT_NOT_FOUND")),
+    (TenantStatus.SUSPENDED, UserRole.OPERATOR, (404, "INCIDENT_NOT_FOUND")),
     (TenantStatus.SUSPENDED, UserRole.VIEWER, (403, "AUTH_FORBIDDEN")),
 ])
-def test_tenant_accounts_cannot_change_business_state_and_nothing_changes(
+def test_tenant_accounts_cannot_change_unowned_records_and_nothing_changes(
     client_pg, login_as, make_tenant, db, make_executable, seed_summary_lines, monkeypatch,
     tenant_status, role, expected,
 ):
@@ -239,51 +241,78 @@ def test_tenant_accounts_cannot_change_business_state_and_nothing_changes(
         response = client_pg.post(url, json=body)
         assert (response.status_code, response.json()["error"]["code"]) == expected, url
 
-    assert (reserves, resolves) == ([], [])
+    if expected[0] == 403:
+        assert (reserves, resolves) == ([], [])
     assert _business_state(db, incident, candidate) == before
 
 
 @pytest.mark.parametrize("tenant_status", [TenantStatus.ACTIVE, TenantStatus.SUSPENDED])
 @pytest.mark.parametrize("role", list(UserRole))
-def test_tenant_accounts_cannot_read_unisolated_business_data_yet(
+def test_tenant_accounts_read_only_their_scope_while_metrics_stay_platform_only(
     client_pg, login_as, make_tenant, resolvable, tenant_status, role
 ):
-    """정지 테넌트의 「기존 기록 조회」도 아직 열지 않는다 — 업무 조회가 테넌트 범위로 걸러지지 않는다."""
+    """정지 테넌트를 포함한 고객사 계정은 자기 범위의 인시던트를 읽는다. 소속 없는 MVP 기록은 목록에서
+    빠지고 상세는 404 다. 메트릭은 테넌트 범위로 걸러지지 않아 플랫폼 전용(403)이다."""
     login_as(role, tenant_id=make_tenant(tenant_status))
-    for url in (
-        "/api/v1/incidents",
-        f"/api/v1/incidents/{resolvable.incident_id}",
-        "/api/v1/assets",
-        "/api/v1/metrics/timeseries",
-    ):
-        response = client_pg.get(url)
-        assert (response.status_code, response.json()["error"]["code"]) == (403, "AUTH_FORBIDDEN"), url
+
+    listed = client_pg.get("/api/v1/incidents")
+    assert listed.status_code == 200
+    assert resolvable.incident_id not in {item["incident_id"] for item in listed.json()["items"]}
+    detail = client_pg.get(f"/api/v1/incidents/{resolvable.incident_id}")
+    assert (detail.status_code, detail.json()["error"]["code"]) == (404, "INCIDENT_NOT_FOUND")
+    metrics = client_pg.get("/api/v1/metrics/timeseries")
+    assert (metrics.status_code, metrics.json()["error"]["code"]) == (403, "AUTH_FORBIDDEN")
 
 
-def test_every_business_route_is_platform_only_while_customer_scoped_routes_stay_open(
-    client_pg, login_as, make_tenant
-):
-    """임시 관문의 경로 전수 — 인증 · 사용자 관리 밖의 모든 세션 경로는 고객사 ADMIN 에게 403 이다.
+# 고객사 계정에 열린 업무 경로 — 요청자의 테넌트 범위로 걸러진다. 그 밖의 업무 경로는 플랫폼 전용이다.
+TENANT_SCOPED_ROUTES = {
+    ("GET", "/api/v1/incidents"),
+    ("GET", "/api/v1/incidents/{incident_id}"),
+    ("POST", "/api/v1/incidents/{incident_id}/resolve"),
+    ("POST", EXECUTE),
+    ("GET", "/api/v1/assets"),
+}
 
-    새 업무 경로가 관문 없이 붙으면 여기서 걸린다(포함 시점 의존성이 빠진 경우 포함).
+
+def test_business_routes_outside_tenant_scope_stay_platform_only(client_pg, login_as, make_tenant):
+    """경로 전수 — 인증 · 사용자 관리와 범위로 걸러지는 업무 경로 밖은 고객사 ADMIN 에게 403 이다.
+
+    새 업무 경로가 범위 판정이나 플랫폼 관문 없이 붙으면 여기서 걸린다(포함 시점 의존성이 빠진 경우 포함).
+    범위로 걸러지는 경로는 고객사 계정에게 열리고, 범위 밖(여기서는 없는) 인시던트는 404 다.
     """
     seed = login_as(UserRole.ADMIN, tenant_id=make_tenant())
     http, _ = _routes(client_pg.app)
-    business = sorted(
+    business = {
         (method, path)
         for method, path in http - PUBLIC_ROUTES
         if not path.startswith(("/api/v1/auth/", "/api/v1/users"))
-    )
-    assert {("POST", EXECUTE), ("GET", "/api/v1/assets"), ("GET", "/api/v1/metrics/timeseries")} <= set(business)
+    }
+    assert TENANT_SCOPED_ROUTES <= business
+    assert ("GET", "/api/v1/metrics/timeseries") in business
 
     leaks = []
-    for method, path in business:
+    for method, path in sorted(business - TENANT_SCOPED_ROUTES):
         url = path.replace("{incident_id}", str(uuid.uuid4()))
         response = client_pg.request(method, url, json={} if method == "POST" else None)
-        code = response.json().get("error", {}).get("code") if response.content else None
-        if (response.status_code, code) != (403, "AUTH_FORBIDDEN"):
+        if (response.status_code, _error_code(response)) != (403, "AUTH_FORBIDDEN"):
             leaks.append((method, path, response.status_code))
     assert leaks == []
+
+    unknown = str(uuid.uuid4())
+    bodies = _valid_bodies(unknown)
+    answers = {}
+    for method, path in sorted(TENANT_SCOPED_ROUTES):
+        response = client_pg.request(
+            method, path.replace("{incident_id}", unknown), json=bodies.get((method, path))
+        )
+        answers[(method, path)] = (response.status_code, _error_code(response))
+    assert answers == {
+        ("GET", "/api/v1/incidents"): (200, None),
+        ("GET", "/api/v1/assets"): (200, None),
+        ("GET", "/api/v1/incidents/{incident_id}"): (404, "INCIDENT_NOT_FOUND"),
+        ("POST", "/api/v1/incidents/{incident_id}/resolve"): (404, "INCIDENT_NOT_FOUND"),
+        ("POST", EXECUTE): (404, "INCIDENT_NOT_FOUND"),
+    }
 
     me = client_pg.get("/api/v1/auth/me")
     assert me.status_code == 200
@@ -291,7 +320,7 @@ def test_every_business_route_is_platform_only_while_customer_scoped_routes_stay
     assert client_pg.get("/api/v1/users").status_code == 200
 
 
-# --- 판정 함수(임시 관문과 무관한 역할 · 정지 규칙) -----------------------------------------
+# --- 판정 함수(역할 · 테넌트 범위 규칙) -----------------------------------------------------
 
 
 def _user(account_type, role, tenant_status=None) -> auth_service.CurrentUser:
@@ -307,21 +336,34 @@ def _user(account_type, role, tenant_status=None) -> auth_service.CurrentUser:
     )
 
 
+# 역할만 본다 — 정지는 요청자 소속이 아니라 대상 인시던트의 테넌트로 Workflow 가 판정한다
 @pytest.mark.parametrize(("user", "expected"), [
     (_user(AccountType.PLATFORM, UserRole.ADMIN), None),
     (_user(AccountType.TENANT, UserRole.ADMIN, TenantStatus.ACTIVE), None),
     (_user(AccountType.TENANT, UserRole.OPERATOR, TenantStatus.ACTIVE), None),
     (_user(AccountType.TENANT, UserRole.VIEWER, TenantStatus.ACTIVE), ErrorCode.AUTH_FORBIDDEN),
-    (_user(AccountType.TENANT, UserRole.OPERATOR, TenantStatus.SUSPENDED), ErrorCode.TENANT_SUSPENDED),
+    (_user(AccountType.TENANT, UserRole.OPERATOR, TenantStatus.SUSPENDED), None),
     (_user(AccountType.TENANT, UserRole.VIEWER, TenantStatus.SUSPENDED), ErrorCode.AUTH_FORBIDDEN),
 ], ids=["platform", "tenant-admin", "tenant-operator", "tenant-viewer", "suspended-operator", "suspended-viewer"])
-def test_action_role_rule_is_role_then_suspension(user, expected):
+def test_action_role_rule_reads_role_only(user, expected):
     if expected is None:
         assert access.require_action_role(user) is user
     else:
         with pytest.raises(ApiError) as rejected:
             access.require_action_role(user)
         assert rejected.value.code is expected
+
+
+def test_tenant_scope_follows_account_type():
+    platform = _user(AccountType.PLATFORM, UserRole.ADMIN)
+    customer = _user(AccountType.TENANT, UserRole.OPERATOR, TenantStatus.SUSPENDED)
+
+    assert access.tenant_scope_of(platform) == ALL_TENANTS
+    assert access.tenant_scope_of(customer) == TenantScope(tenant_id=customer.tenant_id)
+    # 소속이 비어 있는 고객사 계정은 플랫폼 범위로 넘어가지 않는다
+    with pytest.raises(ApiError) as rejected:
+        access.tenant_scope_of(dataclasses.replace(customer, tenant_id=None))
+    assert rejected.value.code is ErrorCode.AUTH_FORBIDDEN
 
 
 @pytest.mark.parametrize(("user", "allowed"), [
@@ -571,15 +613,24 @@ SECURITY_HEADERS = {
 
 
 def test_protected_api_responses_carry_security_headers(
-    client_pg, login_as, make_tenant, resolvable, monkeypatch
+    client_pg, db, login_as, make_tenant, make_executable, resolvable, monkeypatch
 ):
     resolve = f"/api/v1/incidents/{resolvable.incident_id}/resolve"
     body = {"resolution": "NO_FURTHER_ACTION"}
+    # 정지된 테넌트의 인시던트 — 새 실행은 플랫폼 계정도 409 다
+    suspended, candidate = make_executable(db)
+    suspended.tenant_id = make_tenant(TenantStatus.SUSPENDED)
+    db.commit()
     responses = {
         "200": client_pg.get("/api/v1/incidents"),
         "401": client_pg.get("/api/v1/incidents", headers={"Cookie": "__Host-vg_session=not-a-session"}),
         "403 origin": client_pg.post(resolve, headers={"Origin": FOREIGN_ORIGIN}, json=body),
         "404": client_pg.get(f"/api/v1/incidents/{uuid.uuid4()}"),
+        "409 suspended": client_pg.post(EXECUTE, json={
+            "incident_id": suspended.incident_id,
+            "runbook_id": candidate.runbook_id.value,
+            "idempotency_key": str(uuid.uuid4()),
+        }),
         "422": client_pg.post(EXECUTE, json={}),
     }
 
@@ -590,10 +641,8 @@ def test_protected_api_responses_carry_security_headers(
     responses["500"] = client_pg.post(resolve, json=body)
     login_as(UserRole.VIEWER, tenant_id=make_tenant(TenantStatus.SUSPENDED))
     responses["403 role"] = client_pg.post(resolve, json=body)
-    login_as(UserRole.OPERATOR, tenant_id=make_tenant(TenantStatus.SUSPENDED))
-    responses["409 suspended"] = client_pg.post(resolve, json=body)
     login_as(UserRole.OPERATOR, tenant_id=make_tenant())
-    responses["403 platform only"] = client_pg.get("/api/v1/incidents")
+    responses["403 platform only"] = client_pg.get("/api/v1/metrics/timeseries")
 
     assert {label: response.status_code for label, response in responses.items()} == {
         "200": 200, "401": 401, "403 origin": 403, "404": 404, "422": 422, "500": 500, "403 role": 403,

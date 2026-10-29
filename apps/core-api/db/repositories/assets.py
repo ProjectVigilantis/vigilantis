@@ -20,7 +20,17 @@ from schemas.assets import MetricSummary as MetricSummaryContract
 from schemas.collections import CollectionRunStatus, unobserved_asset_types
 from schemas.rules import RuleEvaluationResult
 
+from tenancy import ALL_TENANTS, TenantScope
+
 from .. import mappers, models
+
+
+def _within_scope(stmt, tenant_column, scope: TenantScope):
+    """고객사 범위면 그 테넌트 행만 남긴다. 플랫폼 범위는 문장을 바꾸지 않는다(NULL 소속 포함 전체)."""
+    if scope.is_platform:
+        return stmt
+    return stmt.where(tenant_column == scope.tenant_id)
+
 
 # --- CollectionRun -------------------------------------------------------------
 
@@ -67,7 +77,10 @@ def finish_collection_run(
 
 
 def latest_collection_run_per_region(
-    db: Session, regions: Optional[Sequence[str]] = None
+    db: Session,
+    regions: Optional[Sequence[str]] = None,
+    *,
+    scope: TenantScope = ALL_TENANTS,
 ) -> list[models.CollectionRun]:
     """리전별로 가장 최근에 시작된 수집 실행을 1건씩. (Issue #231)
 
@@ -86,6 +99,10 @@ def latest_collection_run_per_region(
     ``ix_collection_runs_region_started_at`` 의 첫 항목이 답이라 run 이 5분마다 쌓여도
     비용이 리전 수에만 비례한다. DISTINCT ON 은 인덱스가 있어도 전 행을 걸어야 했다
     (30일치 17,280행에서 24ms → 0.05ms, Issue #343).
+
+    ``scope`` 가 고객사 범위면 두 경로 모두 **최신 선택 전에** 그 테넌트의 run 으로 좁힌다.
+    선택 뒤에 거르면 다른 테넌트의 더 새 run 이 리전의 최신 자리를 차지해 자기 run 이 가려진다.
+    플랫폼 범위(기본)는 소속 없는 run 을 포함한 전체이며 문장이 달라지지 않는다.
     """
     if regions is None:
         stmt = (
@@ -97,24 +114,30 @@ def latest_collection_run_per_region(
                 models.CollectionRun.collection_run_id.desc(),
             )
         )
+        stmt = _within_scope(stmt, models.CollectionRun.tenant_id, scope)
         return list(db.execute(stmt).scalars().all())
     if not regions:
         return []
-    return list(db.execute(latest_run_per_region_stmt(regions)).scalars().all())
+    return list(db.execute(latest_run_per_region_stmt(regions, scope)).scalars().all())
 
 
-def latest_run_per_region_stmt(regions: Sequence[str]):
-    """리전 목록 → 리전별 최신 run 1건. 실행 계획 회귀(db/tests)가 이 문장을 그대로 본다."""
+def latest_run_per_region_stmt(regions: Sequence[str], scope: TenantScope = ALL_TENANTS):
+    """리전 목록 → 리전별 최신 run 1건. 실행 계획 회귀(db/tests)가 이 문장을 그대로 본다.
+
+    고객사 범위의 테넌트 조건은 LATERAL 안쪽, ``LIMIT 1`` 앞에 둔다."""
     wanted = values(column("region", String), name="wanted").data(
         [(r,) for r in dict.fromkeys(regions)]  # 중복 제거, 순서 유지
     )
     # 정렬 키 (started_at DESC, id DESC) 는 ix_collection_runs_region_started_at 의 순서
     # 그대로다. started_at 단독 인덱스는 #343 에서 지웠다 — 남아 있으면 플래너가 그쪽을
     # 최신순으로 훑다가 리전 필터로 수천 행을 버리는 경로를 고를 수 있었다(PR #344 리뷰).
+    candidates = _within_scope(
+        select(models.CollectionRun).where(models.CollectionRun.region == wanted.c.region),
+        models.CollectionRun.tenant_id,
+        scope,
+    )
     latest = (
-        select(models.CollectionRun)
-        .where(models.CollectionRun.region == wanted.c.region)
-        .order_by(
+        candidates.order_by(
             models.CollectionRun.started_at.desc(),
             models.CollectionRun.collection_run_id.desc(),
         )
@@ -129,14 +152,19 @@ def latest_run_per_region_stmt(regions: Sequence[str]):
 
 
 def last_finished_collection_at(
-    db: Session, regions: Optional[Sequence[str]] = None
+    db: Session,
+    regions: Optional[Sequence[str]] = None,
+    *,
+    scope: TenantScope = ALL_TENANTS,
 ) -> Optional[datetime]:
     """마지막으로 종료된 수집 시각 — 목록 응답의 last_collected_at 원천. (Issue #68)
 
     ``regions`` 를 주면 그 리전들로 좁힌다 — collection_status·items 와 같은 스코프를
-    유지하기 위함이다(#261). ``None`` 이면 전 리전.
+    유지하기 위함이다(#261). ``None`` 이면 전 리전. 고객사 ``scope`` 는 그 테넌트의
+    run 만 센다.
     """
     stmt = select(func.max(models.CollectionRun.finished_at))
+    stmt = _within_scope(stmt, models.CollectionRun.tenant_id, scope)
     if regions is not None:
         stmt = stmt.where(models.CollectionRun.region.in_(regions))
     return db.execute(stmt).scalar_one()
@@ -178,6 +206,7 @@ def list_assets(
     asset_type: Optional[AssetType] = None,
     regions: Optional[Sequence[str]] = None,
     include_absent: bool = False,
+    scope: TenantScope = ALL_TENANTS,
 ) -> list[models.Asset]:
     """자산 목록. ``regions`` 를 주면 그 리전들로 좁힌다 — collection_status·
     last_collected_at 과 같은 스코프를 유지하기 위함이다(#261, ix_assets_region 활용).
@@ -186,8 +215,12 @@ def list_assets(
     **소멸 자산(``absent_since`` 가 찍힌 행)은 기본으로 제외한다**(#332). 실물이 없는
     자산을 돌려주면 화면에 유령이 섞이는 데서 끝나지 않고, 판정이 낡은 메트릭으로 다시
     돌아 조치 후보까지 올라간다(rule_engine 은 이 함수의 결과를 판정 대상으로 읽는다).
-    이력·감사 목적으로 소멸분까지 봐야 하면 ``include_absent=True`` 로 부른다."""
-    stmt = select(models.Asset).order_by(models.Asset.arn)
+    이력·감사 목적으로 소멸분까지 봐야 하면 ``include_absent=True`` 로 부른다.
+
+    고객사 ``scope`` 는 그 테넌트의 자산만 돌려준다. 플랫폼 범위(기본)는 소속 없는 자산 포함 전체다."""
+    stmt = _within_scope(
+        select(models.Asset).order_by(models.Asset.arn), models.Asset.tenant_id, scope
+    )
     if asset_type is not None:
         stmt = stmt.where(models.Asset.asset_type == asset_type)
     if regions is not None:
@@ -353,18 +386,35 @@ def list_relationships_by_source(
     )
 
 
-def list_all_relationships(db: Session) -> list[models.AssetRelationship]:
+def list_all_relationships(
+    db: Session, *, scope: TenantScope = ALL_TENANTS
+) -> list[models.AssetRelationship]:
     """전 자산의 정방향 연결 일괄 조회 — 목록 응답 조립용. 자산별 반복 질의를
-    피하고 호출부가 source_asset_id로 묶는다. (Issue #68)"""
-    return list(
-        db.execute(
-            select(models.AssetRelationship).order_by(
-                models.AssetRelationship.source_asset_id,
-                models.AssetRelationship.relation_type,
-                models.AssetRelationship.target_arn,
-            )
-        ).scalars()
+    피하고 호출부가 source_asset_id로 묶는다. (Issue #68)
+
+    고객사 ``scope`` 는 출발 자산이 그 테넌트 소속이고 ``target_arn`` 이 **같은 테넌트의
+    자산으로 해석되는** 연결만 돌려준다. ``target_arn`` 은 자산 FK 가 아닌 자유 문자열이라
+    출발 자산만으로는 대상의 소속을 알 수 없다 — 다른 테넌트·소속 없는 자산·해석 안 되는
+    ARN 은 모두 뺀다. 플랫폼 범위(기본)는 필터가 없다."""
+    stmt = select(models.AssetRelationship).order_by(
+        models.AssetRelationship.source_asset_id,
+        models.AssetRelationship.relation_type,
+        models.AssetRelationship.target_arn,
     )
+    if not scope.is_platform:
+        source, target = aliased(models.Asset), aliased(models.Asset)
+        stmt = stmt.join(
+            source, source.asset_id == models.AssetRelationship.source_asset_id
+        ).where(
+            source.tenant_id == scope.tenant_id,
+            select(target.asset_id)
+            .where(
+                target.arn == models.AssetRelationship.target_arn,
+                target.tenant_id == scope.tenant_id,
+            )
+            .exists(),
+        )
+    return list(db.execute(stmt).scalars())
 
 
 # --- MetricSummary -------------------------------------------------------------
@@ -812,7 +862,9 @@ def asset_inventory_history(
     ]
 
 
-def latest_rule_evaluation_by_asset(db: Session) -> dict[str, models.RuleEvaluation]:
+def latest_rule_evaluation_by_asset(
+    db: Session, *, scope: TenantScope = ALL_TENANTS
+) -> dict[str, models.RuleEvaluation]:
     """자산별 최신 판정 1건 일괄 조회 — 자산마다 latest_rule_evaluation()을 반복
     호출하는 N+1을 피한다. (Issue #68)
 
@@ -821,12 +873,14 @@ def latest_rule_evaluation_by_asset(db: Session) -> dict[str, models.RuleEvaluat
     1회로 끝난다. 종전 DISTINCT ON 은 판정 행 전체(30일치 138,240행)를 정렬해야 해서
     150ms 가 걸렸다 → 0.08ms (Issue #343). 판정이 한 번도 없는 자산은 빠진다.
     """
-    rows = db.execute(latest_rule_evaluation_by_asset_stmt()).scalars()
+    rows = db.execute(latest_rule_evaluation_by_asset_stmt(scope)).scalars()
     return {row.asset_id: row for row in rows}
 
 
-def latest_rule_evaluation_by_asset_stmt():
-    """자산별 최신 판정 1건 문장. 실행 계획 회귀(db/tests)가 이 문장을 그대로 본다."""
+def latest_rule_evaluation_by_asset_stmt(scope: TenantScope = ALL_TENANTS):
+    """자산별 최신 판정 1건 문장. 실행 계획 회귀(db/tests)가 이 문장을 그대로 본다.
+
+    고객사 ``scope`` 는 축인 자산을 그 테넌트로 좁혀 남의 자산 판정을 읽지 않는다."""
     latest = (
         select(models.RuleEvaluation)
         .where(models.RuleEvaluation.asset_id == models.Asset.asset_id)
@@ -837,9 +891,10 @@ def latest_rule_evaluation_by_asset_stmt():
         .limit(1)
         .lateral("latest")
     )
-    return select(aliased(models.RuleEvaluation, latest)).select_from(
+    stmt = select(aliased(models.RuleEvaluation, latest)).select_from(
         models.Asset.__table__.join(latest, true())
     )
+    return _within_scope(stmt, models.Asset.tenant_id, scope)
 
 
 # --- ARN 조인 무결성 점검 (#342) ----------------------------------------------
