@@ -953,3 +953,61 @@ export interface UserEventItem {
 export interface UserEventsResponse {
   items: UserEventItem[];
 }
+
+/* ────────────────────────────── audit.py ────────────────────────────── */
+/* GET /api/v1/audit-events — 조치 승인 · 종료 판단의 감사 기록(Post-MVP T-2 · #544). 모든 역할이 본다.
+   질의: incident_id · since · until(occurred_at ∈ [since, until)) · cursor · limit(기본 50 · 1–100).
+   최신순이고 next_cursor 가 null 이면 마지막 쪽이다. 고객사 계정은 자기 테넌트의 기록만 받는다. */
+
+export const AUDIT_EVENTS_DEFAULT_LIMIT = 50;
+export const AUDIT_EVENTS_MAX_LIMIT = 100;
+
+/** 실행을 시작한 사유(packages/schemas/runbooks.py `TriggerSource`). USER_APPROVAL 만 사람이 시작한다. */
+export type TriggerSource =
+  | 'USER_APPROVAL' // 관제자 승인 실행
+  | 'PRE_MITIGATION_0_5S' // High 위협 즉시 선차단
+  | 'TIMEOUT_ISOLATION_1M' // 1분 미응답 만료 자동 격리
+  | 'AUTO_ON_FAILURE'; // 주 조치 실패 시 자동 복구
+
+export type AuditEventAction = 'ACTION_EXECUTION_STARTED' | 'INCIDENT_RESOLVED';
+
+/**
+ * 누가 · 무엇이 시작했나. 이메일을 보일지는 보는 사람이 정한다.
+ * PLATFORM_USER 의 이메일은 플랫폼 계정이 볼 때만 오고, 고객사 계정에는 null 이다(「플랫폼 운영자」로 표시).
+ */
+export type AuditActor =
+  | { kind: 'TENANT_USER'; email: string }
+  | { kind: 'PLATFORM_USER'; email: string | null }
+  | { kind: 'SYSTEM'; email: null };
+
+interface AuditEventBase {
+  event_id: string;
+  occurred_at: IsoDateTime;
+  actor: AuditActor;
+  incident_id: string;
+  /** 테넌트가 없는 기존 인시던트는 null. */
+  tenant_id: string | null;
+}
+
+/** 실행이 새로 예약됐다 — 사람 승인 · 자동 발동 · 수동 복구 3종. 같은 Key 재요청은 기록되지 않는다. */
+export interface ExecutionStartedEvent extends AuditEventBase {
+  action: 'ACTION_EXECUTION_STARTED';
+  trigger_source: TriggerSource;
+  execution_id: string;
+  runbook_id: RunbookId;
+  target_arn: string;
+}
+
+/** 종료 판단이 새로 저장됐다. 종료 사유(resolution_note)는 인시던트 상세에만 있다. */
+export interface IncidentResolvedEvent extends AuditEventBase {
+  action: 'INCIDENT_RESOLVED';
+  resolution: ResolutionJudgement;
+}
+
+export type AuditEventItem = ExecutionStartedEvent | IncidentResolvedEvent;
+
+export interface AuditEventsResponse {
+  items: AuditEventItem[];
+  /** 다음 쪽 질의에 그대로 돌려준다(해석하지 않는다). null 이면 마지막 쪽. */
+  next_cursor: string | null;
+}
