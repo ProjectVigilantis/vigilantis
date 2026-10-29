@@ -270,22 +270,30 @@ def test_down_removes_only_alias_records_that_point_at_this_distribution():
 
 
 # ④ ---------------------------------------------------------------------------
+RULE_NAMES = ["rate-login-per-ip", "rate-per-ip", "allow-listed-ips"]
+
+
+def _rules():
+    return {rule["Name"]: rule for rule in platform.waf_rules("arn:ipset", "arn:nat")}
+
+
 def test_waf_allows_only_the_ip_set():
-    _, allow = platform.waf_rules("arn:ipset", "arn:nat")
+    allow = _rules()["allow-listed-ips"]
     assert allow["Statement"] == {"IPSetReferenceStatement": {"ARN": "arn:ipset"}}
     assert allow["Action"] == {"Allow": {}}
 
 
 # ⑦ 속도 제한 (#484) ------------------------------------------------------------
-def test_rate_limit_is_evaluated_before_the_allow_rule():
-    # 허용이 먼저 맞으면 WAF가 거기서 끝낸다 — 속도 규칙은 우선순위가 더 앞이어야 평가된다
-    rate, allow = platform.waf_rules("arn:ipset", "arn:nat")
-    assert rate["Name"] == "rate-per-ip"
-    assert rate["Priority"] < allow["Priority"]
+def test_rate_limits_are_evaluated_before_the_allow_rule():
+    # 허용이 먼저 맞으면 WAF가 거기서 끝낸다 — 속도 규칙은 우선순위가 더 앞이어야 평가된다.
+    # 로그인 규칙이 맨 앞 — Block 이 되면 더 낮은 한도가 먼저 끊는다(#522 Q5)
+    rules = platform.waf_rules("arn:ipset", "arn:nat")
+    assert [rule["Name"] for rule in rules] == RULE_NAMES
+    assert [rule["Priority"] for rule in rules] == [0, 1, 2]
 
 
 def test_rate_limit_counts_per_ip_but_never_the_nat_ip():
-    (rate, _) = platform.waf_rules("arn:ipset", "arn:nat")
+    rate = _rules()["rate-per-ip"]
     stmt = rate["Statement"]["RateBasedStatement"]
     assert stmt["AggregateKeyType"] == "IP"
     assert stmt["Limit"] == platform.RATE_LIMIT_PER_WINDOW
@@ -295,9 +303,33 @@ def test_rate_limit_counts_per_ip_but_never_the_nat_ip():
         "NotStatement": {"Statement": {"IPSetReferenceStatement": {"ARN": "arn:nat"}}}}
 
 
+def test_login_rate_limit_counts_only_the_auth_path_per_ip_without_the_nat_ip():
+    rule = _rules()["rate-login-per-ip"]
+    stmt = rule["Statement"]["RateBasedStatement"]
+    assert (stmt["AggregateKeyType"], stmt["Limit"], stmt["EvaluationWindowSec"]) == (
+        "IP", platform.LOGIN_RATE_LIMIT_PER_WINDOW, platform.RATE_WINDOW_SECONDS)
+    assert platform.LOGIN_RATE_LIMIT_PER_WINDOW < platform.RATE_LIMIT_PER_WINDOW
+    path, not_nat = stmt["ScopeDownStatement"]["AndStatement"]["Statements"]
+    assert path == {"ByteMatchStatement": {
+        # get_web_acl 이 bytes 로 돌려준다 — str 이면 두 번째 실행부터 매번 「다름」이 된다
+        "SearchString": b"/api/v1/auth/",
+        "FieldToMatch": {"UriPath": {}},
+        # 앱은 %인코딩을 풀어 라우팅한다 — 풀지 않고 맞추면 /api/v1/%61uth/ 가 비켜 간다
+        "TextTransformations": [{"Priority": 0, "Type": "URL_DECODE"}],
+        "PositionalConstraint": "STARTS_WITH",
+    }}
+    assert not_nat == {"NotStatement": {"Statement": {"IPSetReferenceStatement": {"ARN": "arn:nat"}}}}
+    assert rule["VisibilityConfig"]["MetricName"] == f"{platform.PREFIX}-rate-login"
+
+
+def test_login_rate_limit_starts_in_count_mode():
+    # 정상 사용량을 재지 않았다 — 관측 전에는 막지 않는다(#522 C · B 와 같은 방식)
+    assert _rules()["rate-login-per-ip"]["Action"] == {"Count": {}}
+
+
 def test_rate_limit_starts_in_count_mode():
     # 정상 사용량을 재지 않았다 — 관측 전에는 막지 않는다(#484 ⓔ)
-    (rate, _) = platform.waf_rules("arn:ipset", "arn:nat")
+    rate = _rules()["rate-per-ip"]
     assert rate["Action"] == {"Count": {}}
     assert platform.RATE_WINDOW_SECONDS in (60, 120, 300, 600)  # WAF가 받는 창 길이
 
@@ -365,7 +397,7 @@ def test_new_acl_gets_the_rate_rule_and_a_separate_nat_set():
     waf = FakeWaf()
     platform._ensure_waf(waf, ALLOW, NAT)
     assert waf.ipsets[platform.WAF_NAT_IPSET] == [NAT]
-    assert [r["Name"] for r in waf.acl_rules] == ["rate-per-ip", "allow-listed-ips"]
+    assert [r["Name"] for r in waf.acl_rules] == RULE_NAMES
 
 
 def test_new_acl_waits_while_the_new_ip_sets_propagate(monkeypatch):
@@ -375,7 +407,7 @@ def test_new_acl_waits_while_the_new_ip_sets_propagate(monkeypatch):
     waf = FakeWaf(create_acl_errors=["WAFUnavailableEntityException", "WAFUnavailableEntityException"])
     assert platform._ensure_waf(waf, ALLOW, NAT) == "arn:acl"
     assert waf.calls.count("create_web_acl") == 3 and len(slept) == 2
-    assert [r["Name"] for r in waf.acl_rules] == ["rate-per-ip", "allow-listed-ips"]
+    assert [r["Name"] for r in waf.acl_rules] == RULE_NAMES
 
 
 def test_new_acl_does_not_retry_other_errors(monkeypatch):
@@ -393,7 +425,21 @@ def test_existing_acl_without_the_rate_rule_is_updated():
     waf = FakeWaf(ipsets={platform.WAF_IPSET: ALLOW}, acl_rules=old)
     platform._ensure_waf(waf, ALLOW, NAT)
     assert "update_web_acl" in waf.calls
-    assert [r["Name"] for r in waf.acl_rules] == ["rate-per-ip", "allow-listed-ips"]
+    assert [r["Name"] for r in waf.acl_rules] == RULE_NAMES
+
+
+def test_existing_acl_without_the_login_rule_gets_it_in_front():
+    # 지금 배포된 플랫폼의 모양 — 전 경로 속도 규칙(0) · 허용(1)뿐인 웹 ACL(#484 적용 뒤)
+    old = [rule for rule in platform.waf_rules(f"arn:{platform.WAF_IPSET}", f"arn:{platform.WAF_NAT_IPSET}")
+           if rule["Name"] != "rate-login-per-ip"]
+    waf = FakeWaf(ipsets={platform.WAF_IPSET: ALLOW, platform.WAF_NAT_IPSET: [NAT]},
+                  acl_rules=[{**rule, "Priority": n} for n, rule in enumerate(old)])
+    platform._ensure_waf(waf, ALLOW, NAT)
+    assert waf.calls == ["update_web_acl"]
+    assert [(r["Name"], r["Priority"]) for r in waf.acl_rules] == list(zip(RULE_NAMES, [0, 1, 2]))
+    waf.calls.clear()
+    platform._ensure_waf(waf, ALLOW, NAT)
+    assert waf.calls == []
 
 
 def test_second_run_changes_nothing():
@@ -411,7 +457,9 @@ def test_switching_to_block_is_applied_on_rerun(monkeypatch):
     waf.calls.clear()
     platform._ensure_waf(waf, ALLOW, NAT)
     assert waf.calls == ["update_web_acl"]
-    assert waf.acl_rules[0]["Action"] == {"Block": {}}
+    actions = {rule["Name"]: rule["Action"] for rule in waf.acl_rules}
+    assert actions["rate-per-ip"] == {"Block": {}}
+    assert actions["rate-login-per-ip"] == {"Count": {}}  # 두 규칙의 전환은 따로다
 
 
 def test_down_removes_the_acl_then_both_ip_sets():
