@@ -1,6 +1,7 @@
 'use client';
 
 // AST-002 자산 상세 패널 — 화면설계서 v1.5 §4.3. 별도 API가 없어 AST-001이 받은 items[] 단건만 씁니다.
+// 넓은 화면의 자산 목록에서는 목록 옆 고정 창(AssetDetailPane)으로, 그 밖에서는 서랍(AssetDetail)으로 엽니다.
 
 import Link from 'next/link';
 
@@ -27,7 +28,7 @@ import {
 import { IDLE_CPU_AVG } from '@/lib/dashboard';
 import { cpuPointsFor, networkRowsFor } from '@/lib/metrics-chart';
 import { specValueView } from '@/lib/spec-value';
-import { formatKst } from '@/lib/utils';
+import { cn, formatKst } from '@/lib/utils';
 import type {
   AssetItem,
   IncidentListItem,
@@ -103,16 +104,10 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-export function AssetDetail({
-  asset,
-  incidents,
-  metrics,
-  open,
-  onOpenChange,
-}: {
+interface AssetDetailData {
   /**
-   * 카드에서 고른 항목을 그대로 받는다 — 신규 페치 없음(§4.3).
-   * 열림 여부는 `open`이 따로 쥔다. 닫을 때 이 값을 비우면 닫는 애니메이션 동안 패널이
+   * 목록에서 고른 항목을 그대로 받는다 — 신규 페치 없음(§4.3).
+   * 서랍은 열림 여부를 `open`이 따로 쥔다. 닫을 때 이 값을 비우면 닫는 애니메이션 동안 패널이
    * 빈 채로 미끄러져 나가므로, 호출부는 다음 선택 전까지 마지막 자산을 그대로 둔다.
    */
   asset: AssetItem | null;
@@ -124,15 +119,19 @@ export function AssetDetail({
    * `null`이면 조회 실패이고, 그때는 스파크라인 자리에 그 사실을 적는다.
    */
   metrics: MetricsTimeseriesResponse | null;
+}
+
+/** 서랍(좁은 화면 · 토폴로지 · 보안 화면)으로 여는 상세. */
+export function AssetDetail({
+  asset,
+  incidents,
+  metrics,
+  open,
+  onOpenChange,
+}: AssetDetailData & {
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const state = asset ? assetStateEntry(asset) : null;
-  // 메트릭은 EC2 전용이다 — 계약상 SG·EBS 에는 이 곡선이 없다(있는 척하면 빈 차트가 결측처럼 읽힌다).
-  const showCharts = asset !== null && asset.asset_type === 'EC2';
-  const cpuPoints = showCharts && metrics ? cpuPointsFor(metrics.cpu, asset.arn) : null;
-  const networkRows = showCharts && metrics ? networkRowsFor(metrics.network, asset.arn) : null;
-
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent className="w-full gap-0 overflow-y-auto sm:max-w-md">
@@ -140,12 +139,60 @@ export function AssetDetail({
           <>
             <SheetHeader className="gap-1">
               <SheetTitle className="pr-8 break-all">{asset.name ?? asset.resource_id}</SheetTitle>
-              <SheetDescription>
-                {ASSET_TYPE_LABELS[asset.asset_type]?.label ?? asset.asset_type} · {asset.region} ·{' '}
-                {asset.account_id}
-              </SheetDescription>
+              <SheetDescription>{assetSubtitle(asset)}</SheetDescription>
             </SheetHeader>
+            <AssetDetailBody asset={asset} incidents={incidents} metrics={metrics} />
+          </>
+        ) : null}
+      </SheetContent>
+    </Sheet>
+  );
+}
 
+/**
+ * 목록 옆에 붙어 있는 상세 창(넓은 화면의 자산 목록). 서랍과 같은 본문을 쓴다. 두 자리가 따로 그리면
+ * 같은 자산의 상세가 화면마다 달라진다.
+ */
+export function AssetDetailPane({ asset, incidents, metrics, className }: AssetDetailData & { className?: string }) {
+  return (
+    <section
+      aria-label="자산 상세"
+      className={cn('bg-card ring-foreground/10 overflow-y-auto rounded-xl ring-1', className)}
+    >
+      {asset ? (
+        <>
+          <div className="flex flex-col gap-1 border-b px-4 py-4">
+            <h2 className="text-base font-bold break-all">{asset.name ?? asset.resource_id}</h2>
+            <p className="text-muted-foreground text-[13px]">{assetSubtitle(asset)}</p>
+          </div>
+          <div className="pt-4">
+            <AssetDetailBody asset={asset} incidents={incidents} metrics={metrics} />
+          </div>
+        </>
+      ) : (
+        <p className="text-muted-foreground p-6 text-sm">목록에서 자산을 고르면 상세가 여기에 보입니다.</p>
+      )}
+    </section>
+  );
+}
+
+function assetSubtitle(asset: AssetItem): string {
+  return `${ASSET_TYPE_LABELS[asset.asset_type]?.label ?? asset.asset_type} · ${asset.region} · ${asset.account_id}`;
+}
+
+function AssetDetailBody({
+  asset,
+  incidents,
+  metrics,
+}: Omit<AssetDetailData, 'asset'> & { asset: AssetItem }) {
+  const state = assetStateEntry(asset);
+  // 메트릭은 EC2 전용이다 — 계약상 SG·EBS 에는 이 곡선이 없다(있는 척하면 빈 차트가 결측처럼 읽힌다).
+  const showCharts = asset.asset_type === 'EC2';
+  const cpuPoints = showCharts && metrics ? cpuPointsFor(metrics.cpu, asset.arn) : null;
+  const networkRows = showCharts && metrics ? networkRowsFor(metrics.network, asset.arn) : null;
+
+  return (
+          <>
             <div className="flex flex-col gap-1.5 px-4 pb-4">
               {/* state가 null이면 행 자체를 숨긴다(§4.3) — 빈 값을 남기면 상태를 못 받은 것처럼 읽힌다. */}
               {state ? (
@@ -249,8 +296,5 @@ export function AssetDetail({
 
             {/* 실행 버튼은 두지 않는다 — 실행은 항상 인시던트 문맥에서 시작한다(계약이 incident_id를 요구, §4.3). */}
           </>
-        ) : null}
-      </SheetContent>
-    </Sheet>
   );
 }

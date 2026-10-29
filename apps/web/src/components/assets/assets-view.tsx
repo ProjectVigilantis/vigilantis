@@ -34,11 +34,11 @@
 // 둘을 같이 좁힐 수 있다** — 인시던트는 `subject_arn`으로 자산에 걸리므로 유형·리전·낭비 후보 필터가
 // 고른 자산 집합(`focusedArns`)이 그 탭에도 그대로 걸린다. 옛 경로는 이 탭으로 redirect한다.
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 
-import { AssetCard } from '@/components/assets/asset-card';
 import { AssetGraph } from '@/components/assets/asset-graph';
-import { AssetDetail } from '@/components/assets/asset-detail';
+import { AssetDetail, AssetDetailPane } from '@/components/assets/asset-detail';
+import { AssetTable } from '@/components/assets/asset-table';
 import { HealthScorePanel, VerdictPanel } from '@/components/assets/asset-summary-panels';
 import { SavingsCard } from '@/components/assets/savings-card';
 import { AutoRefresh } from '@/components/auto-refresh';
@@ -71,6 +71,44 @@ import type {
 const WASTE_VERDICTS = ['COST_CANDIDATE', 'UNUSED'] as const;
 
 const ALL = '전체';
+
+/** 목록 옆에 상세 창을 둘 수 있는 폭. Tailwind `lg`와 같은 값이라 표 · 창 격자와 같이 바뀐다. */
+const WIDE_QUERY = '(min-width: 1024px)';
+
+/** 넓은 화면인지. 서버에서는 좁은 화면으로 보고 그린다(창은 CSS로 감춰져 있어 어긋나 보이지 않는다). */
+function useWideScreen(): boolean {
+  return useSyncExternalStore(
+    (onChange) => {
+      const query = window.matchMedia(WIDE_QUERY);
+      query.addEventListener('change', onChange);
+      return () => query.removeEventListener('change', onChange);
+    },
+    () => window.matchMedia(WIDE_QUERY).matches,
+    () => false,
+  );
+}
+
+/**
+ * 상세 창은 좁은 화면에서 감추고(서랍이 대신한다), 넓은 화면에서는 위에 붙는 지표 띠 바로 아래에 붙어 따라온다.
+ * 띠 높이는 화면 폭과 칸 글자 줄바꿈에 따라 달라서(실측 192 · 224 · 301px) 고정값을 쓰지 않고,
+ * `useStickyHeight`가 잰 값(`--strip-h`)을 쓴다.
+ */
+const PANE_STICKY =
+  'hidden lg:sticky lg:block lg:top-[calc(var(--strip-h,0px)+8px)] lg:max-h-[calc(100dvh-var(--strip-h,0px)-16px)]';
+
+/** 붙어 따라오는 띠의 높이를 재서 감싼 요소의 `--strip-h`에 적는다. 다시 그리지 않고 CSS 값만 바꾼다. */
+function useStickyHeight() {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const strip = ref.current;
+    const host = strip?.parentElement;
+    if (!strip || !host) return;
+    const observer = new ResizeObserver(() => host.style.setProperty('--strip-h', `${strip.offsetHeight}px`));
+    observer.observe(strip);
+    return () => observer.disconnect();
+  }, []);
+  return ref;
+}
 
 export function AssetsView({
   data,
@@ -125,8 +163,10 @@ export function AssetsView({
   // 탭을 상태로 쥔다 — 토폴로지 전용 유형(NACL 등)을 띠에서 눌렀을 때 빈 목록에 세워 두지 않고
   // 그 자산이 실제로 있는 토폴로지로 넘겨야 한다. 첫 탭만 URL에서 받는다(딥링크).
   const [tab, setTab] = useState(
-    initialTab === 'topology' || initialTab === 'incidents' ? initialTab : 'list',
+    initialTab === 'summary' || initialTab === 'topology' || initialTab === 'incidents' ? initialTab : 'list',
   );
+  const wide = useWideScreen();
+  const stripRef = useStickyHeight();
 
   // 인시던트 탭의 몫 — 이 화면은 자산 인시던트(FINOPS)만 담는다. 보안(SECOPS)은 보안 관제의 탭이다.
   const finopsIncidents = useMemo(
@@ -262,13 +302,28 @@ export function AssetsView({
     setDetailOpen(true);
   };
 
+  /**
+   * 목록 옆 상세 창이 보일 자산. 고른 자산이 지금 필터에 남아 있으면 그것, 아니면 목록 맨 위다. 빈 창보다
+   * 맨 위 자산이라도 보이는 편이 낫고, 필터로 사라진 자산을 창에 남기면 목록과 창이 서로 다른 집합을 말한다.
+   */
+  const paneAsset = selected !== null && visible.some((a) => a.arn === selected.arn) ? selected : (visible[0] ?? null);
+  // 넓은 화면의 목록 탭에서는 상세가 이미 창에 보인다. 그때 서랍까지 열면 같은 내용이 두 번 뜬다.
+  const sheetOpen = detailOpen && !(wide && tab === 'list' && paneAsset !== null && paneAsset.arn === selected?.arn);
+
+  const selectFromList = (asset: AssetItem) => {
+    setSelected(asset);
+    if (!wide) setDetailOpen(true);
+  };
+
   return (
-    <Tabs value={tab} onValueChange={setTab} className="gap-4">
+    // 서랍은 모달이라 열린 채로 탭을 바꿀 수 없다. 넓은 목록 탭에서 가려 둔 서랍이 다른 탭에서 뒤늦게 뜨지 않게
+    // 탭을 바꿀 때 닫는다.
+    <Tabs value={tab} onValueChange={(next) => { setTab(next); setDetailOpen(false); }} className="gap-4">
       {/* 화면 이름 + 지표 띠 — 한 덩이로 **스크롤을 따라온다**(파일 머리말). 이름은 페이지가 아니라
           여기 있다: 띠만 따라오면 어느 화면의 띠인지가 스크롤과 함께 사라진다. 음수 상단 여백은 본문
           여백(셸의 `--page-pad`)을 되돌려 안 붙었을 때의 자리가 종전과 같게 한다. 띠는 전체 + 유형 7종이라 8칸이고,
           2 → 4 → 8열로 접힌다(빈 칸이 없다). z-index는 상세 Drawer(z-50)보다 낮게 둔다. */}
-      <div className="bg-background sticky top-0 z-20 -mx-(--page-pad) -mt-(--page-pad) px-(--page-pad) pt-(--page-pad) pb-3">
+      <div ref={stripRef} className="bg-background sticky top-0 z-20 -mx-(--page-pad) -mt-(--page-pad) px-(--page-pad) pt-(--page-pad) pb-3">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-lg font-semibold">자산 관제</h1>
         <AutoRefresh renderedAt={renderedAt} />
@@ -304,10 +359,109 @@ export function AssetsView({
       </MetricStrip>
       </div>
 
-      {/* 추이 2열 — 띠 바로 아래, 박스 중 맨 위다(2026-09-30 · 보안 관제와 같은 순서: 추이 → 상태).
-          아래 상태 3열이 **어디서 왔나**를 시간 축으로 먼저 보여 준다 — 헬스 스코어가 CPU 14일 평균이라
-          그 원계열이 앞선다. CPU·네트워크는 같은 CloudWatch 원계열이지만 단위가 %와 B/s라 한 격자에
-          겹치지 않는다. */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <TabsList>
+          <TabsTrigger value="list">목록</TabsTrigger>
+          <TabsTrigger value="summary">요약</TabsTrigger>
+          <TabsTrigger value="topology">토폴로지</TabsTrigger>
+          <TabsTrigger value="incidents">인시던트</TabsTrigger>
+        </TabsList>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <FilterSelect label="유형" value={assetType} options={typeOptions} onChange={setAssetType} />
+          <FilterSelect
+            label="리전"
+            value={region}
+            options={[{ value: ALL, label: ALL }, ...regions.map((r) => ({ value: r, label: r }))]}
+            onChange={setRegion}
+          />
+          <FilterToggle checked={wasteOnly} onChange={setWasteOnly} label="낭비 후보만" />
+        </div>
+      </div>
+
+      {/* collection_status가 READY면 배지를 그리지 않는다(§3.2). PARTIAL·FAILED여도
+          확보된 items는 그대로 렌더한다(§4.2 예외). */}
+      <div className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs">
+        <StatusBadge field="collection_status" value={data.collection_status} />
+        <span>갱신 {formatKst(data.last_collected_at)}</span>
+        {/* 셈은 **탭마다 분모가 다르다.** 목록은 판정 대상만 담고(13건), 토폴로지는 전량을 그린다
+            (16건). 목록 기준을 그대로 두면 지표 띠에서 `NACL`을 누르고 토폴로지로 넘어간 화면이
+            노드 2개를 밝혀 놓고 `0 / 13건`이라고 적는다 — 보이는 것과 적힌 것이 어긋난다. */}
+        {tab === 'list' ? (
+          <>
+            <span aria-live="polite">
+              {visible.length === judgedItems.length
+                ? `${judgedItems.length}건`
+                : `${visible.length} / ${judgedItems.length}건`}
+            </span>
+            {/* 응답에 있었는데 화면에 없는 것이 있으면 그 사실을 말한다 — 숨긴 줄 모르면
+                "수집이 안 된 것"으로 읽힌다(§4.2). */}
+            {supportCount > 0 ? (
+              <span>판정 비대상 {supportCount}건 제외 (NACL·ASG·시작 템플릿·대상 그룹 · 토폴로지에는 남는다)</span>
+            ) : null}
+          </>
+        ) : tab === 'summary' ? (
+          <span>추이는 리전 · 낭비 후보 필터를 따르고, 헬스 · 판정 · 절감 집계는 전체 기준입니다</span>
+        ) : tab === 'topology' ? (
+          <span aria-live="polite">
+            {focusedArns === null
+              ? `${data.items.length}건`
+              : `초점 ${focusedArns.size} / ${data.items.length}건`}
+          </span>
+        ) : (
+          // 건수는 탭 안의 목록이 프리셋 기준으로 센다 — 여기서는 필터가 걸린다는 사실만 말한다.
+          <span>자산 인시던트(FinOps) — 위 유형·리전·낭비 후보 필터가 이 탭에도 걸립니다</span>
+        )}
+      </div>
+
+      {/* 목록 탭 = 자산 목록 창 + 상세 창. 넓은 화면(lg 이상)에서는 둘을 나란히 두고, 좁은 화면에서는 상세를
+          서랍으로 연다. 상세 창은 스크롤을 따라와 긴 목록을 내려가도 고른 자산이 보인다. top 값은 위에 붙는
+          지표 띠의 높이다(lg는 띠가 두 줄, xl은 한 줄). */}
+      <TabsContent value="list">
+        {visible.length === 0 ? (
+          topologyOnlyRow !== null ? (
+            // 띠에서 누른 유형이 목록에 설 수 없는 경우다. "없습니다"로 끝내면 수집 누락으로
+            // 읽히므로, 왜 없는지와 어디서 볼 수 있는지를 함께 준다(§4.9 빈 상태는 오류가 아니다).
+            <EmptyState
+              message={`${ASSET_TYPE_LABELS[topologyOnlyRow.type]?.label ?? topologyOnlyRow.type} 자산 ${topologyOnlyRow.count}건은 목록에 서지 않습니다.`}
+              description="NACL · Auto Scaling 그룹 · 시작 템플릿 · 대상 그룹은 Rule 판정 대상이 아니라 목록에 없습니다. 토폴로지에서 관계로 봅니다."
+              action={
+                <Button size="sm" variant="outline" onClick={() => setTab('topology')}>
+                  토폴로지에서 보기
+                </Button>
+              }
+            />
+          ) : (
+            <EmptyState
+              message="조건에 맞는 자산이 없습니다."
+              description="필터를 바꾸면 다른 자산을 볼 수 있습니다."
+            />
+          )
+        ) : (
+          // 페이지네이션은 MVP 계약에 없다 — 전량 렌더한다(§4.2).
+          <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,26rem)]">
+            <AssetTable
+              items={visible}
+              selectedArn={wide ? (paneAsset?.arn ?? null) : null}
+              incidentsByArn={incidentsByArn}
+              onSelect={selectFromList}
+            />
+            <AssetDetailPane
+              className={PANE_STICKY}
+              asset={paneAsset}
+              incidents={
+                incidentsByArn === null ? null : paneAsset ? (incidentsByArn[paneAsset.arn] ?? []) : []
+              }
+              metrics={metrics}
+            />
+          </div>
+        )}
+      </TabsContent>
+
+      {/* 요약 탭: 목록 탭 위에 있던 추이 2열과 상태 3열을 옮겨 왔다. 순서는 그대로 추이 → 상태다(2026-09-30 ·
+          보안 관제와 같은 순서). 헬스 스코어가 CPU 14일 평균이라 그 원계열이 앞선다. CPU·네트워크는 같은
+          CloudWatch 원계열이지만 단위가 %와 B/s라 한 격자에 겹치지 않는다. */}
+      <TabsContent value="summary" className="flex flex-col gap-4">
       <div className="grid gap-4 lg:grid-cols-2">
         <Panel
           title="EC2 CPU 추이"
@@ -346,95 +500,6 @@ export function AssetsView({
           <SavingsCard summary={savings} failed={savingsFailed} onSelect={openAsset} />
         </Panel>
       </div>
-
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <TabsList>
-          <TabsTrigger value="list">목록</TabsTrigger>
-          <TabsTrigger value="topology">토폴로지</TabsTrigger>
-          <TabsTrigger value="incidents">인시던트</TabsTrigger>
-        </TabsList>
-
-        <div className="flex flex-wrap items-center gap-3">
-          <FilterSelect label="유형" value={assetType} options={typeOptions} onChange={setAssetType} />
-          <FilterSelect
-            label="리전"
-            value={region}
-            options={[{ value: ALL, label: ALL }, ...regions.map((r) => ({ value: r, label: r }))]}
-            onChange={setRegion}
-          />
-          <FilterToggle checked={wasteOnly} onChange={setWasteOnly} label="낭비 후보만" />
-        </div>
-      </div>
-
-      {/* collection_status가 READY면 배지를 그리지 않는다(§3.2). PARTIAL·FAILED여도
-          확보된 items는 그대로 렌더한다(§4.2 예외). */}
-      <div className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs">
-        <StatusBadge field="collection_status" value={data.collection_status} />
-        <span>갱신 {formatKst(data.last_collected_at)}</span>
-        {/* 셈은 **탭마다 분모가 다르다.** 목록은 판정 대상만 담고(13건), 토폴로지는 전량을 그린다
-            (16건). 목록 기준을 그대로 두면 지표 띠에서 `NACL`을 누르고 토폴로지로 넘어간 화면이
-            노드 2개를 밝혀 놓고 `0 / 13건`이라고 적는다 — 보이는 것과 적힌 것이 어긋난다. */}
-        {tab === 'list' ? (
-          <>
-            <span aria-live="polite">
-              {visible.length === judgedItems.length
-                ? `${judgedItems.length}건`
-                : `${visible.length} / ${judgedItems.length}건`}
-            </span>
-            {/* 응답에 있었는데 화면에 없는 것이 있으면 그 사실을 말한다 — 숨긴 줄 모르면
-                "수집이 안 된 것"으로 읽힌다(§4.2). */}
-            {supportCount > 0 ? (
-              <span>판정 비대상 {supportCount}건 제외 (NACL·ASG·시작 템플릿·대상 그룹 · 토폴로지에는 남는다)</span>
-            ) : null}
-          </>
-        ) : tab === 'topology' ? (
-          <span aria-live="polite">
-            {focusedArns === null
-              ? `${data.items.length}건`
-              : `초점 ${focusedArns.size} / ${data.items.length}건`}
-          </span>
-        ) : (
-          // 건수는 탭 안의 목록이 프리셋 기준으로 센다 — 여기서는 필터가 걸린다는 사실만 말한다.
-          <span>자산 인시던트(FinOps) — 위 유형·리전·낭비 후보 필터가 이 탭에도 걸립니다</span>
-        )}
-      </div>
-
-      <TabsContent value="list">
-        {visible.length === 0 ? (
-          topologyOnlyRow !== null ? (
-            // 띠에서 누른 유형이 목록에 설 수 없는 경우다. "없습니다"로 끝내면 수집 누락으로
-            // 읽히므로, 왜 없는지와 어디서 볼 수 있는지를 함께 준다(§4.9 빈 상태는 오류가 아니다).
-            <EmptyState
-              message={`${ASSET_TYPE_LABELS[topologyOnlyRow.type]?.label ?? topologyOnlyRow.type} 자산 ${topologyOnlyRow.count}건은 목록에 서지 않습니다.`}
-              description="NACL · Auto Scaling 그룹 · 시작 템플릿 · 대상 그룹은 Rule 판정 대상이 아니라 명함 카드가 없습니다 — 토폴로지에서 관계로 봅니다."
-              action={
-                <Button size="sm" variant="outline" onClick={() => setTab('topology')}>
-                  토폴로지에서 보기
-                </Button>
-              }
-            />
-          ) : (
-            <EmptyState
-              message="조건에 맞는 자산이 없습니다."
-              description="필터를 바꾸면 다른 자산을 볼 수 있습니다."
-            />
-          )
-        ) : (
-          // 페이지네이션은 MVP 계약에 없다 — 전량 렌더한다(§4.2).
-          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-            {visible.map((asset) => (
-              <AssetCard
-                key={asset.arn}
-                asset={asset}
-                incidentCount={incidentsByArn === null ? null : (incidentsByArn[asset.arn] ?? []).length}
-                onSelect={(a) => {
-                  setSelected(a);
-                  setDetailOpen(true);
-                }}
-              />
-            ))}
-          </div>
-        )}
       </TabsContent>
 
       <TabsContent value="topology">
@@ -473,7 +538,7 @@ export function AssetsView({
           incidentsByArn === null ? null : selected ? (incidentsByArn[selected.arn] ?? []) : []
         }
         metrics={metrics}
-        open={detailOpen}
+        open={sheetOpen}
         onOpenChange={setDetailOpen}
       />
     </Tabs>
