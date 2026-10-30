@@ -57,6 +57,7 @@ from routers import audit as audit_router  # noqa: E402
 from routers import auth as auth_router  # noqa: E402
 from routers import incidents as incidents_router  # noqa: E402
 from routers import metrics as metrics_router  # noqa: E402
+from routers import notifications as notifications_router
 from routers import staff as staff_router  # noqa: E402
 from routers import tenants as tenants_router  # noqa: E402
 from routers import users as users_router  # noqa: E402
@@ -206,6 +207,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router.router)
     app.include_router(incidents_router.router, dependencies=protected)
     app.include_router(metrics_router.router, dependencies=business)
+    app.include_router(notifications_router.router, dependencies=protected)
     app.include_router(staff_router.router, dependencies=protected)
     app.include_router(tenants_router.router, dependencies=protected)
     app.include_router(users_router.router, dependencies=protected)

@@ -4,7 +4,7 @@ Cognito Admin 인증 API로 로그인을 진행하고, **이번 로그인에서 
 
 이 문서는 PR 1(로그인 기반), PR 2(API · WebSocket 접근 보호 · 역할 검사), PR 3(ADMIN 사용자 관리 · 사용자당 세션 1개 · 비밀번호 재설정 · 새 비밀번호 정책 · 사용자 관리 이력), 계정 종류(`account_type`)에 따른 테넌트 · 플랫폼 권한(§계정 종류와 테넌트 소속), PR 5(플랫폼 계정의 권한 등급 `platform_role`과 담당 고객 배정 · 업무 API의 고객 범위 · 직원 관리 API · 운영 CLI의 직원 생성과 첫 중앙 관리자 지정 — §계정 종류와 테넌트 소속 · §접근 보호 · §직원 관리 · §플랫폼 계정 CLI)의 백엔드 기준이다. 웹 화면(SSR) 쪽 처리는 `apps/web` 범위다 — PR 3 화면(사용자 관리 · 비밀번호 재설정 · 새 비밀번호 조건 · 한글 입력 경고 · 세션 종료 안내)은 최소 구현이고 시각 다듬기는 포함하지 않으며, `apps/web/src/lib/session-expiry.ts`의 시계 보정은 PR 3 범위 밖이다. 계정 종류에 따른 화면 기능(`apps/web/src/lib/home-path.ts` · `components/gnb.tsx` 포함)은 §화면이 다룬다. 분실한 TOTP의 재설정은 PR 3에서 제외했고, 플랫폼 등급과 직원 관리도 TOTP 정책 · 복구를 바꾸지 않는다(TOTP 분실 복구는 [#515](https://github.com/ProjectVigilantis/vigilantis/issues/515) 범위, §운영 주의점). 실제 Cognito · HTTPS 배포 환경 · 환경 이전에서의 검증과 환경별 설정 · 배포 권한 반영은 이 문서가 보증하지 않는 배포 전제다(§User Pool · 앱 클라이언트 전제 · §테스트).
 
-근거 표시: **[표준]** 외부 표준 · 공식 문서, **[팀 결정]** 이슈 #492 확정 정책, **[판단]** 이 구현의 선택. 동작의 근거는 현재 코드와 자동 테스트(대역 · 실제 PostgreSQL)이며, 자동 테스트가 보장하지 않는 범위(실제 Cognito · HTTPS 배포 환경)는 §테스트에 적었다.
+근거 표시: **[표준]** 외부 표준 · 공식 문서, **[팀 결정]** 이슈 #492 확정 정책, **[#552 구현 계약]** 이슈 #552 구현에 승인된 정책(팀 SSOT 등재 전), **[판단]** 이 구현의 선택. 동작의 근거는 현재 코드와 자동 테스트(대역 · 실제 PostgreSQL)이며, 자동 테스트가 보장하지 않는 범위(실제 Cognito · HTTPS 배포 환경)는 §테스트에 적었다.
 
 ## 구조
 
@@ -185,6 +185,7 @@ PLATFORM 계정은 모두 `role=ADMIN`(호환 값)이고, 아래 PLATFORM 열은
 | 고객 생성 `POST /api/v1/tenants` | 허용 | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
 | 고객 수정 · 삭제 · 정지 · 온보딩 조회 `GET /api/v1/tenants/{id}/onboarding` | 허용 | 배정 고객 | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
 | 직원 관리 · 담당 고객 배정 `/api/v1/staff*` | 허용(자기 등급 · 상태 변경은 403) | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
+| (#552) 운영 알림 `/api/v1/notifications*` | 현재 권한 범위(읽음은 사용자별) | 현재 권한 범위(읽음은 사용자별) | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
 
 TENANT 계정의 메트릭 · 실시간 연결과 고객용 업무 화면은 아직 열리지 않았다(T-4 · T-5). 정지 고객 사용자의 자기 기록 조회 요구([ADR-0012](../../../docs/adr/0012-saas-transition-account-structure-and-tenant-model.md))도 업무 API 조회 범위에서만 충족되고, 화면 · 메트릭 · 실시간 연결은 그 범위다. 이 모듈은 테넌트 데이터 격리가 완성됐다고 주장하지 않는다.
 
@@ -196,6 +197,16 @@ TENANT 계정의 메트릭 · 실시간 연결과 고객용 업무 화면은 아
 - 회수 시점은 다음 로그인의 **완료**다. 비밀번호 · TOTP 단계에서 멈춘 로그인은 기존 세션을 건드리지 않는다. 이 변경 전에 이미 있던 사용자당 여러 세션은 일괄 회수하지 않는다(마이그레이션은 세션 행을 바꾸지 않는다). 그 세션들은 그 사용자의 다음 로그인 완료 · ADMIN 회수 · 만료 때 정리된다.
 - 교체된 브라우저는 다음 요청에서 일반 401 `AUTH_REQUIRED`를 받는다. 열린 WebSocket은 재확인 주기(기본 30초) 안에 4401로 닫힌다. 응답 · close reason에 회수 사유나 새 로그인의 기기 정보를 싣지 않는다.
 - 관제 화면을 상황판(wallboard)으로 상시 띄우려면 그 화면 전용 VIEWER 계정을 따로 둔다. 같은 계정으로 다른 곳에서 로그인하면 상황판 세션이 교체된다.
+
+## 도입 신청 · 고객 문의 · 운영 알림 (#552)
+
+계약은 `packages/schemas/api/signup_requests.py` · `inquiries.py` · `notifications.py`(공통 열거형 `support.py`), 오류 코드는 `packages/schemas/api/errors.py`다. 이 절은 접근 판정만 다룬다. 등급 · 담당 범위 판정은 `auth.access`를 그대로 쓰고, 지원 경로의 신원 재판정은 `support_access.py`가 맡는다.
+
+| 항목 | 내용 | 근거 |
+| --- | --- | --- |
+| 운영 알림 | `GET /api/v1/notifications` · `POST /api/v1/notifications/read`는 플랫폼 관리 등급만 쓴다(라우터 의존성 `require_tenant_management`). 요청 시점에 권한이 있는 범위의 알림만 보이고, 읽음은 사용자별로 남는다. TENANT 계정은 역할과 관계없이 403 `AUTH_FORBIDDEN`이다 | [#552 구현 계약] |
+
+실제 배포 환경에서의 공개 동작과 그 검증은 이 문서가 보증하지 않는다(§테스트).
 
 ## 사용자 관리 (PR 3)
 
