@@ -22,7 +22,7 @@ CONFIG_PATH = Path(__file__).resolve().parents[2] / "alembic.ini"
 def test_intake_revision_is_a_direct_child_of_review_fixed_baseline():
     script = ScriptDirectory.from_config(Config(str(CONFIG_PATH)))
     assert script.get_revision(REVISION).down_revision == BASE
-    assert script.get_current_head() == REVISION
+    assert script.get_heads() == ["f515a552e001"]
 
 
 @pytest.fixture()
@@ -63,10 +63,12 @@ def test_upgrade_downgrade_reupgrade_preserves_existing_customer(intake_migratio
     command.upgrade(config, REVISION)
     assert TABLES <= set(inspect(engine).get_table_names())
     with engine.connect() as conn:
-        assert compare_metadata(MigrationContext.configure(conn), models.Base.metadata) == []
         assert conn.scalar(
             text("SELECT count(*) FROM pg_trigger WHERE tgname='inquiry_events_append_only'")
         ) == 1
+    command.upgrade(config, "head")
+    with engine.connect() as conn:
+        assert compare_metadata(MigrationContext.configure(conn), models.Base.metadata) == []
 
     command.downgrade(config, BASE)
     assert not TABLES.intersection(inspect(engine).get_table_names())
@@ -74,7 +76,7 @@ def test_upgrade_downgrade_reupgrade_preserves_existing_customer(intake_migratio
         assert conn.scalar(
             text("SELECT name FROM tenants WHERE tenant_id=:id"), {"id": customer_id}
         ) == "existing customer"
-    command.upgrade(config, REVISION)
+    command.upgrade(config, "head")
     with engine.connect() as conn:
         assert compare_metadata(MigrationContext.configure(conn), models.Base.metadata) == []
         assert conn.scalar(

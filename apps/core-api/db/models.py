@@ -1256,6 +1256,52 @@ class AuthSessionRevokeReason(str, Enum):
     ADMIN_REVOKED = "ADMIN_REVOKED"
     ACCOUNT_DISABLED = "ACCOUNT_DISABLED"
     PASSWORD_RESET = "PASSWORD_RESET"
+    #: TOTP 분실 복구(#515)의 제공자 호출 전 차단 — 대상의 살아 있는 세션 전부.
+    TOTP_RESET = "TOTP_RESET"
+
+
+class MfaRecoveryState(str, Enum):
+    """TOTP 분실 복구(#515)가 사용자 로그인에 거는 차단. 전이는 그 신원의 변경 울타리를 쥔 쪽의 조건부 갱신이다."""
+
+    #: 차단 없음 — 현재 세대의 TOTP 등록으로 로그인한다(이메일 증명은 별도 요건).
+    NONE = "NONE"
+    #: 차단 기록 뒤 제공자 삭제가 확인되지 않았다(진행 · 결과 불명 · 거절 · 중단). 앱 인증 전부 거절.
+    RESET_PENDING = "RESET_PENDING"
+    #: 제공자에 등록이 없다고 확인됐다 — 이 세대의 새 MFA_SETUP 성공만 NONE 으로 되돌린다.
+    ENROLLMENT_REQUIRED = "ENROLLMENT_REQUIRED"
+
+
+class TotpRecoveryStatus(str, Enum):
+    """복구 작업 1건의 확정 상태. 성공은 COMPLETED 하나뿐이다."""
+
+    #: 차단은 확정됐고 제공자 호출이 일어났을 수 있다 — 결과를 기록하지 못했다(진행 중 · 중단 · 기록 실패).
+    PROVIDER_PENDING = "PROVIDER_PENDING"
+    #: AdminDeleteSoftwareToken 성공 응답을 받아 기록했다.
+    COMPLETED = "COMPLETED"
+    #: ResourceNotFoundException — 등록 없음 또는 리소스 없음. 이 작업이 삭제했다는 증명이 아니다.
+    PROVIDER_NOT_FOUND = "PROVIDER_NOT_FOUND"
+    #: 그 밖의 4xx — 제공자가 거절했다(삭제되지 않았다). 차단은 남는다.
+    PROVIDER_REJECTED = "PROVIDER_REJECTED"
+    #: 5xx · 전송 실패 · 시간 초과 — 삭제 여부를 모른다. 차단 · 신원 변경 울타리가 남는다.
+    PROVIDER_UNKNOWN = "PROVIDER_UNKNOWN"
+
+
+class TotpProviderMutationKind(str, Enum):
+    """신원 변경 울타리(#515)를 연 Cognito TOTP 변경 구간의 종류."""
+
+    #: 복구 작업의 AdminDeleteSoftwareToken
+    RESET = "RESET"
+    #: 로그인 흐름의 TOTP 등록 변경(AssociateSoftwareToken · VerifySoftwareToken · MFA_SETUP 응답 · 선호 설정)
+    ENROLLMENT = "ENROLLMENT"
+
+
+class TotpProviderMutationResolution(str, Enum):
+    """울타리가 풀린 근거. 풀리지 않은(NULL) 울타리는 그 신원의 다른 TOTP 변경 · 복구를 모두 막는다."""
+
+    #: 그 구간의 제공자 호출이 확정 응답(성공 · 4xx)으로 끝났다고 작업자가 기록했다.
+    PROVIDER_RETURNED = "PROVIDER_RETURNED"
+    #: 운영자가 그 호출이 더는 적용될 수 없음을 외부에서 확인했다고 진술했다 — 앱의 증명이 아니다.
+    OPERATOR_RECONCILED = "OPERATOR_RECONCILED"
 
 
 class AppUser(Base):
@@ -1294,6 +1340,17 @@ class AppUser(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+    # TOTP 분실 복구(#515) — 인증 세대는 복구 차단마다 1 오른다. 로그인 흐름은 TOTP 증명 전에 세대를
+    # 포착하고, 완료 시 users 잠금 안에서 같은 세대 · 차단 없음(NONE)이어야 세션을 받는다.
+    # 서버 기본값은 이 칸을 모르는 쓰기(raw INSERT)용이다 — 기존 사용자는 세대 0 · NONE.
+    auth_generation: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0")
+    )
+    mfa_recovery_state: Mapped[MfaRecoveryState] = mapped_column(
+        _enum(MfaRecoveryState, "app_user_mfa_recovery_state"),
+        default=MfaRecoveryState.NONE,
+        server_default=MfaRecoveryState.NONE.value,
     )
 
     __table_args__ = (
@@ -1590,3 +1647,96 @@ class OperatorNotificationRead(Base):
         _ID, ForeignKey("app_users.user_id", ondelete="CASCADE"), primary_key=True
     )
     read_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class TotpRecoveryOperation(Base):
+    """TOTP 분실 복구 작업 1건 (#515). operation_id 는 호출자가 고르고, 같은 값의 재요청은 이 행을 돌려준다
+    (제공자를 다시 부르지 않는다). 행은 차단(세대 증가 · 이메일 증명 제거 · 세션 폐기)과 같은 commit 에 생긴다.
+
+    시각은 기록용이다 — 판정(잠금 · 재개)에 쓰지 않는다.
+    """
+
+    __tablename__ = "totp_recovery_operations"
+
+    operation_id: Mapped[str] = mapped_column(_ID, primary_key=True)
+    target_user_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("app_users.user_id", ondelete="RESTRICT")
+    )
+    # 앱 계정 없는 운영 CLI 행위자는 NULL 이다
+    actor_user_id: Mapped[str | None] = mapped_column(
+        _ID, ForeignKey("app_users.user_id", ondelete="RESTRICT"), nullable=True
+    )
+    # 행위자가 외부 절차로 사람의 신원을 확인했다는 진술 — 증명이 아니다. 진술 없는 작업은 DB 가 거절한다.
+    identity_verified: Mapped[bool] = mapped_column(Boolean)
+    # 이 작업의 차단이 만든 대상의 인증 세대
+    generation: Mapped[int] = mapped_column(Integer)
+    status: Mapped[TotpRecoveryStatus] = mapped_column(
+        _enum(TotpRecoveryStatus, "totp_recovery_status")
+    )
+    # 차단 commit 이 폐기한 대상 세션 수 — 재요청에도 처음 값을 돌려준다
+    revoked_session_count: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    finalized_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint("target_user_id", "generation"),
+        CheckConstraint("identity_verified", name="identity_verified"),
+        CheckConstraint("generation > 0", name="generation_positive"),
+        CheckConstraint("revoked_session_count >= 0", name="revoked_count_nonnegative"),
+        CheckConstraint(
+            "(status = 'PROVIDER_PENDING') = (finalized_at IS NULL)", name="finalized_shape"
+        ),
+    )
+
+
+class TotpProviderMutation(Base):
+    """신원(issuer, sub)별 Cognito TOTP 변경 울타리 (#515). 제공자 변경 호출 전에 commit 하고, 풀리지 않은 행은
+    신원당 1개뿐이다(부분 유일 인덱스) — 연결 · 작업자가 사라져도 남는다.
+
+    풀림은 두 가지뿐이다: 작업자가 확정 응답을 기록(PROVIDER_RETURNED)하거나, 운영자가 외부 확인을
+    진술(OPERATOR_RECONCILED)한다. 시간 임대 · 자동 만료가 없다. 시각은 기록용이다.
+    """
+
+    __tablename__ = "totp_provider_mutations"
+
+    mutation_id: Mapped[str] = mapped_column(_ID, primary_key=True)
+    issuer: Mapped[str] = mapped_column(String)
+    cognito_sub: Mapped[str] = mapped_column(String)
+    kind: Mapped[TotpProviderMutationKind] = mapped_column(
+        _enum(TotpProviderMutationKind, "totp_provider_mutation_kind")
+    )
+    # RESET 이면 그 복구 작업 — 같은 commit 에 생긴다
+    operation_id: Mapped[str | None] = mapped_column(
+        _ID,
+        ForeignKey("totp_recovery_operations.operation_id", ondelete="RESTRICT"),
+        nullable=True,
+        unique=True,
+    )
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    resolution: Mapped[TotpProviderMutationResolution | None] = mapped_column(
+        _enum(TotpProviderMutationResolution, "totp_provider_mutation_resolution"), nullable=True
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 정리를 진술한 행위자 — 앱 계정 없는 운영 CLI 행위자는 NULL 이다
+    reconciled_by: Mapped[str | None] = mapped_column(
+        _ID, ForeignKey("app_users.user_id", ondelete="RESTRICT"), nullable=True
+    )
+
+    __table_args__ = (
+        Index(
+            "uq_totp_provider_mutations_unresolved_identity",
+            "issuer",
+            "cognito_sub",
+            unique=True,
+            postgresql_where=text("resolution IS NULL"),
+        ),
+        CheckConstraint("(kind = 'RESET') = (operation_id IS NOT NULL)", name="operation_by_kind"),
+        CheckConstraint("(resolution IS NULL) = (resolved_at IS NULL)", name="resolution_shape"),
+        # NULL 안전 비교 — 풀리지 않은(NULL) 울타리에 정리 행위자가 붙지 않게 한다
+        CheckConstraint(
+            "reconciled_by IS NULL OR resolution IS NOT DISTINCT FROM 'OPERATOR_RECONCILED'",
+            name="reconciler_shape",
+        ),
+    )

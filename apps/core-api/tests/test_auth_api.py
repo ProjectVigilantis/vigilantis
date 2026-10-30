@@ -26,8 +26,9 @@ NEW_PASSWORD = "NewPw-secret-123-xyz"
 CODE = "123456"
 CLIENT_SECRET = "client-secret-zzz-9"
 T0 = datetime(2026, 10, 19, 9, 0, tzinfo=UTC)
+# 세대 0 — 새로 만든 사용자의 인증 세대(#515). 완료는 포착한 세대가 현재 세대와 같을 때만 세션을 준다
 IDENTITY = VerifiedIdentity(
-    issuer=ISSUER, sub=SUB, email="u@example.com", mfa_step=MfaStep.SOFTWARE_TOKEN_MFA
+    issuer=ISSUER, sub=SUB, email="u@example.com", mfa_step=MfaStep.SOFTWARE_TOKEN_MFA, generation=0
 )
 PROVEN_IDENTITY = VerifiedIdentity(
     issuer=ISSUER,
@@ -35,6 +36,7 @@ PROVEN_IDENTITY = VerifiedIdentity(
     email="u@example.com",
     mfa_step=MfaStep.SOFTWARE_TOKEN_MFA,
     email_proven=True,
+    generation=0,
 )
 COMPLETED = StepResult(LoginStep.COMPLETED, PROVEN_IDENTITY)
 COMPLETED_UNPROVEN = StepResult(LoginStep.COMPLETED, IDENTITY)

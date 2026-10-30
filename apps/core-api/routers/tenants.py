@@ -8,8 +8,7 @@
 #     중앙 관리자는 전체 고객, 담당자는 배정된 고객만 다룬다(배정 없으면 목록 빈 값 · 상세 404). 범위 밖 ID 는 404.
 #     생성은 중앙 관리자만 한다(새 고객은 담당자의 기존 범위에 없다 · 자동 배정 없음).
 #     쓰기는 서비스가 users 잠금 안에서 세션 · 권한 · 배정을 다시 판정한다(tenant_admin._management).
-#   - 계약 경로 9개 중 7개다. 연결 확인(POST /{id}/verify · /{id}/resume)은 이 라우터에 없다(404) —
-#     테넌트별 AssumeRole 이 있어야 하는 경로다.
+#   - verify · resume 만 고객 AWS 연결을 확인한다. 정지 중에는 resume 만 받는다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -36,6 +35,7 @@ from schemas.api.tenants import (
     TenantsResponse,
     TenantSuspendRequest,
     TenantUpdateRequest,
+    TenantVerifyResponse,
 )
 from sqlalchemy.orm import Session
 
@@ -132,3 +132,23 @@ def suspend_tenant(
     return tenant_admin.suspend_tenant(
         db, actor, tenant_id, reason=body.reason, settings=settings, now=clock()
     )
+
+
+@router.post("/{tenant_id}/verify", response_model=TenantVerifyResponse, dependencies=_MANAGER)
+def verify_tenant(
+    tenant_id: str,
+    db: Session = _DB,
+    actor: admin_service.Actor = _ACTOR,
+    settings: TenantSettings = _SETTINGS,
+) -> TenantVerifyResponse:
+    return tenant_admin.verify_tenant(db, actor, tenant_id, settings)
+
+
+@router.post("/{tenant_id}/resume", response_model=TenantVerifyResponse, dependencies=_MANAGER)
+def resume_tenant(
+    tenant_id: str,
+    db: Session = _DB,
+    actor: admin_service.Actor = _ACTOR,
+    settings: TenantSettings = _SETTINGS,
+) -> TenantVerifyResponse:
+    return tenant_admin.resume_tenant(db, actor, tenant_id, settings)

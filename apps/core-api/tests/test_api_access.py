@@ -733,6 +733,7 @@ def _valid_bodies(incident_id: str) -> dict[tuple[str, str], dict | None]:
         ("PUT", f"{user}/role"): {"role": "VIEWER"},
         ("PUT", f"{user}/status"): {"status": "DISABLED"},
         ("POST", f"{user}/sessions/revoke"): None,
+        ("POST", f"{user}/totp/reset"): {"operation_id": str(uuid.uuid4()), "identity_verified": True},
         ("PUT", "/api/v1/staff/{user_id}/role"): {"platform_role": "TENANT_MANAGER"},
         ("PUT", "/api/v1/staff/{user_id}/status"): {"status": "DISABLED"},
         ("PUT", "/api/v1/staff/{user_id}/tenants"): {"tenant_ids": []},
@@ -747,6 +748,8 @@ def _valid_bodies(incident_id: str) -> dict[tuple[str, str], dict | None]:
         ("PUT", "/api/v1/inquiries/{inquiry_id}/status"): {"status": "IN_PROGRESS"},
         ("POST", "/api/v1/inquiries/{inquiry_id}/notes"): {"note": "확인 중"},
         ("POST", "/api/v1/notifications/read"): {"notification_ids": []},
+        ("POST", "/api/v1/tenants/{tenant_id}/verify"): None,
+        ("POST", "/api/v1/tenants/{tenant_id}/resume"): None,
     }
 
 

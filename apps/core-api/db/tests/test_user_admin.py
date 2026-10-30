@@ -113,6 +113,7 @@ def test_enum_labels_include_new_revoke_reasons(db):
         "ADMIN_REVOKED",
         "ACCOUNT_DISABLED",
         "PASSWORD_RESET",
+        "TOTP_RESET",  # #515
     }
 
 
