@@ -121,6 +121,14 @@ def lock_users_table(db: Session) -> None:
     db.execute(text("LOCK TABLE app_users IN EXCLUSIVE MODE"))
 
 
+def lock_users_for_reference(db: Session) -> None:
+    """사용자 행을 FK 로 참조할 쓰기가 다른 행 잠금보다 먼저 잡는다 — 트랜잭션 끝까지 유지된다.
+
+    ROW SHARE 는 lock_users_table(EXCLUSIVE)과 충돌한다: 관리 쓰기가 끝나기를 기다리되, 다른 트랜잭션의 FK
+    참조(같은 ROW SHARE)는 막지 않는다."""
+    db.execute(text("LOCK TABLE app_users IN ROW SHARE MODE"))
+
+
 def create_user(
     db: Session,
     *,
