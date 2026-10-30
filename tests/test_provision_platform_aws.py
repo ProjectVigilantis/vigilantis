@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -1025,9 +1026,14 @@ class NotifIam(FakeIam):
     def __init__(self, **kw):
         super().__init__(**kw)
         self.puts: list[tuple[str, str, dict]] = []
+        self.deletes: list[tuple[str, str]] = []
 
     def put_role_policy(self, RoleName, PolicyName, PolicyDocument):
         self.puts.append((RoleName, PolicyName, json.loads(PolicyDocument)))
+
+    def delete_role_policy(self, RoleName, PolicyName):
+        super().delete_role_policy(RoleName, PolicyName)
+        self.deletes.append((RoleName, PolicyName))
 
 
 class NotifSm:
@@ -1409,14 +1415,248 @@ def test_slack_only_config_removes_stale_task_topic_policy(tmp_path):
     iam = NotifIam(roles=_both_roles())
     platform.apply_notification_policies(iam, QuietEcs(), platform.load_notification_config(str(p), ACCOUNT, REGION))
     assert [(r, n) for r, n, _ in iam.puts] == [(platform.ROLE_EXEC, platform.NOTIFY_POLICY_EXEC)]
-    assert iam.calls == [("delete_role_policy", platform.ROLE_TASK)]
+    # 토픽 정책과 함께, 입력이 켜지 않은 고객 설정 정책(T-7)도 남아 있으면 지운다
+    assert iam.deletes == [(platform.ROLE_TASK, platform.NOTIFY_POLICY_TASK),
+                           (platform.ROLE_TASK, platform.SETTINGS_POLICY_TASK)]
 
 
-def test_revoke_deletes_only_our_two_policies_on_tagged_roles():
+def test_revoke_deletes_only_our_policies_on_tagged_roles():
     iam = NotifIam(roles={platform.ROLE_TASK: _PLATFORM_TAGS, platform.ROLE_EXEC: []})
     platform.revoke_notification_policies(iam, QuietEcs())
-    assert iam.calls == [("delete_role_policy", platform.ROLE_TASK)]
+    assert iam.deletes == [(platform.ROLE_TASK, platform.NOTIFY_POLICY_TASK),
+                           (platform.ROLE_TASK, platform.SETTINGS_POLICY_TASK)]
+    assert all(role == platform.ROLE_TASK for _, role in iam.calls)
     assert iam.puts == []
+
+
+# ⑩ 고객 설정 자원 관리(T-7) — 접두 아래 토픽·비밀만, 켜야 받고, 끄면 거둔다 ----------------------
+_T7_TENANT = "22222222-2222-4222-8222-222222222222"
+_T7_GEN = "33333333-3333-4333-8333-333333333333"
+_T7_ARNS = platform.settings_resource_arns(ACCOUNT, REGION)
+_SNS_PREFIX = platform.SETTINGS_SNS_TOPIC_PREFIX
+_SECRET_PREFIX = platform.SETTINGS_SECRET_PREFIX
+
+
+def _iam_match(pattern: str, arn: str) -> bool:
+    """IAM Resource 와일드카드 — `*`는 `:`·`/`를 포함한 모든 문자에 맞는다."""
+    return re.fullmatch(".*".join(re.escape(part) for part in pattern.split("*")), arn) is not None
+
+
+def _t7_cfg(tmp_path, **over):
+    # T-7 전용 입력 — 라우트·Slack 비밀 ARN은 없고(런타임이 DB·관리 자원에서 읽는다) 관리 권한만 켠다
+    return _cfg(tmp_path, routes=[], slack_secret_arns={}, tenant_settings=True, **over)
+
+
+def _statements(doc: dict) -> dict[str, dict]:
+    return {s["Sid"]: s for s in doc["Statement"]}
+
+
+def test_settings_policy_uses_the_shared_prefixes_of_this_account_and_region():
+    assert _T7_ARNS == {"topics": f"arn:aws:sns:{REGION}:{ACCOUNT}:{_SNS_PREFIX}*",
+                        "secrets": f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:{_SECRET_PREFIX}*"}
+    stmts = _statements(platform.settings_task_policy(_T7_ARNS))
+    assert set(stmts) == {"ManageTenantSettingsTopicsOnly", "SubscribeTenantSettingsTopicsByEmailOnly",
+                          "ManageTenantSettingsSecretsOnly"}
+    assert all(s["Effect"] == "Allow" for s in stmts.values())
+    topics, subscribe, secrets = (stmts["ManageTenantSettingsTopicsOnly"],
+                                  stmts["SubscribeTenantSettingsTopicsByEmailOnly"],
+                                  stmts["ManageTenantSettingsSecretsOnly"])
+    assert topics["Resource"] == subscribe["Resource"] == _T7_ARNS["topics"]
+    assert secrets["Resource"] == _T7_ARNS["secrets"]
+    # 런타임(services/aws/settings_notifications.py · notifications/channels.py)이 부르는 호출과 1:1
+    assert sorted(topics["Action"]) == sorted(platform.SETTINGS_SNS_ACTIONS) == [
+        "sns:CreateTopic", "sns:DeleteTopic", "sns:GetSubscriptionAttributes", "sns:ListSubscriptionsByTopic",
+        "sns:Publish"]
+    assert subscribe["Action"] == "sns:Subscribe"
+    assert subscribe["Condition"] == {"StringEquals": {"sns:Protocol": "email"}}
+    assert sorted(secrets["Action"]) == sorted(platform.SETTINGS_SECRET_ACTIONS) == [
+        "secretsmanager:CreateSecret", "secretsmanager:DeleteSecret", "secretsmanager:GetSecretValue"]
+    assert "Condition" not in topics and "Condition" not in secrets
+
+
+def test_settings_policy_grants_no_wildcard_action_or_account_wide_listing():
+    doc = platform.settings_task_policy(_T7_ARNS)
+    actions = {a for s in doc["Statement"] for a in ([s["Action"]] if isinstance(s["Action"], str) else s["Action"])}
+    assert not any("*" in a for a in actions)
+    # 자원 ARN으로 좁힐 수 없거나(계정 전체 나열) 권한·정책·암호화를 넓히는 호출, 런타임이 부르지 않는 호출은 없다
+    assert not actions & {"sns:ListTopics", "sns:ListSubscriptions", "sns:Unsubscribe", "sns:SetTopicAttributes", "sns:AddPermission", "sns:RemovePermission", "sns:TagResource",
+                          "sns:ConfirmSubscription", "secretsmanager:ListSecrets", "secretsmanager:DescribeSecret",
+                          "secretsmanager:PutSecretValue", "secretsmanager:UpdateSecret",
+                          "secretsmanager:PutResourcePolicy", "secretsmanager:RestoreSecret", "kms:Decrypt"}
+    assert all(s["Resource"] != "*" for s in doc["Statement"])
+    assert "sts:AssumeRole" not in actions  # 접근 역할 전환은 기존 정책(assume-access-role) 그대로
+
+
+@pytest.mark.parametrize("arn", [
+    f"arn:aws:sns:{REGION}:{ACCOUNT}:{_SNS_PREFIX}{_T7_TENANT}-{_T7_GEN}",
+    f"arn:aws:sns:{REGION}:{ACCOUNT}:{_SNS_PREFIX}{_T7_TENANT}-{_T7_GEN}:9f1c2d3e-sub",  # 구독 ARN
+])
+def test_topic_pattern_covers_managed_topics_and_their_subscriptions(arn):
+    assert _iam_match(_T7_ARNS["topics"], arn)
+
+
+@pytest.mark.parametrize("arn", [
+    TOPIC,                                                            # 레거시 입력의 알림 토픽
+    f"arn:aws:sns:{REGION}:{ACCOUNT}:{platform.ALARM_TOPIC}",         # 플랫폼 오류 알람 토픽
+    f"arn:aws:sns:{REGION}:{ACCOUNT}:vigilantis-t7",                  # 접두에서 하이픈이 빠진 이름
+    f"arn:aws:sns:{REGION}:{ACCOUNT}:xvigilantis-t7-{_T7_TENANT}",    # 접두가 맨 앞이 아님
+    f"arn:aws:sns:{REGION}:999900001111:{_SNS_PREFIX}{_T7_TENANT}",   # 고객 계정
+    f"arn:aws:sns:us-east-1:{ACCOUNT}:{_SNS_PREFIX}{_T7_TENANT}",     # 다른 리전
+])
+def test_topic_pattern_excludes_other_topics_accounts_and_regions(arn):
+    assert not _iam_match(_T7_ARNS["topics"], arn)
+
+
+@pytest.mark.parametrize("arn", [
+    f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:{_SECRET_PREFIX}{_T7_TENANT}/{_T7_GEN}-AbCdEf",
+    f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:{_SECRET_PREFIX}{_T7_TENANT}-AbCdEf",
+])
+def test_secret_pattern_covers_managed_secrets_with_their_random_suffix(arn):
+    assert _iam_match(_T7_ARNS["secrets"], arn)
+
+
+@pytest.mark.parametrize("arn", [
+    SECRET,                                                                            # 레거시 Slack 비밀
+    f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:{platform.SECRET_OPENAI}-AbCdEf",
+    f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:{platform.SECRET_DATABASE_URL}-AbCdEf",
+    f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:{platform.SECRET_EXTERNAL_ID}-AbCdEf",
+    f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:vigilantis/t7-AbCdEf",           # 접두 끝 슬래시 없음
+    f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:x/{_SECRET_PREFIX}{_T7_TENANT}-AbCdEf",
+    f"arn:aws:secretsmanager:{REGION}:999900001111:secret:{_SECRET_PREFIX}{_T7_TENANT}-AbCdEf",
+    f"arn:aws:secretsmanager:us-east-1:{ACCOUNT}:secret:{_SECRET_PREFIX}{_T7_TENANT}-AbCdEf",
+])
+def test_secret_pattern_excludes_platform_secrets_other_accounts_and_regions(arn):
+    assert not _iam_match(_T7_ARNS["secrets"], arn)
+
+
+def test_tenant_settings_is_off_unless_the_config_says_true(tmp_path):
+    assert platform.load_notification_config(_cfg(tmp_path), ACCOUNT, REGION)["settings_arns"] == {}
+    assert platform.load_notification_config(_cfg(tmp_path, tenant_settings=False), ACCOUNT, REGION)["settings_arns"] == {}
+    assert platform.load_notification_config(_t7_cfg(tmp_path), ACCOUNT, REGION)["settings_arns"] == _T7_ARNS
+    assert platform.load_notification_config(_t7_cfg(tmp_path, enabled=False), ACCOUNT, REGION) is None
+    for value in ("true", 1, None):
+        with pytest.raises(SystemExit, match="tenant_settings"):
+            platform.load_notification_config(_cfg(tmp_path, tenant_settings=value), ACCOUNT, REGION)
+
+
+def test_tenant_settings_plan_can_coexist_with_legacy_routes(tmp_path):
+    plan = platform.load_notification_config(_cfg(tmp_path, tenant_settings=True), ACCOUNT, REGION)
+    assert plan["topic_arns"] == [TOPIC] and list(plan["secret_arns"].values()) == [SECRET]
+    assert plan["settings_arns"] == _T7_ARNS
+
+
+def test_tenant_settings_adds_no_env_and_no_secret_reference_to_the_container(tmp_path):
+    plan = platform.load_notification_config(_t7_cfg(tmp_path), ACCOUNT, REGION)
+    c = platform.api_container("i", region=REGION, cors_origin="https://x", access_role_arn="r", collect_vpc_ids="v",
+                               dispatch_enabled=False, secrets_arns={"DATABASE_URL": "a"}, notification=plan)
+    env = {e["name"]: e["value"] for e in c["environment"]}
+    assert env["NOTIFICATION_ENABLED"] == "true" and env["NOTIFICATION_ROUTES_JSON"] == '{"routes":[]}'
+    assert [s["name"] for s in c["secrets"]] == ["DATABASE_URL"]
+    assert _SNS_PREFIX not in json.dumps(c) and _SECRET_PREFIX not in json.dumps(c)
+
+
+def test_apply_with_tenant_settings_writes_the_settings_policy_on_the_task_role_only(tmp_path):
+    iam = NotifIam(roles=_both_roles())
+    plan = platform.load_notification_config(_t7_cfg(tmp_path), ACCOUNT, REGION)
+    platform.apply_notification_policies(iam, QuietEcs(), plan)
+    assert [(r, p) for r, p, _ in iam.puts] == [(platform.ROLE_TASK, platform.SETTINGS_POLICY_TASK)]
+    assert iam.puts[0][2] == platform.settings_task_policy(_T7_ARNS)
+    # 라우트·Slack 비밀이 없는 입력이라 알림 정책 둘은 지운다 — 실행 역할에는 T-7 권한을 주지 않는다
+    assert iam.deletes == [(platform.ROLE_TASK, platform.NOTIFY_POLICY_TASK),
+                           (platform.ROLE_EXEC, platform.NOTIFY_POLICY_EXEC)]
+
+
+def test_apply_with_tenant_settings_still_refuses_an_active_api(tmp_path):
+    iam = NotifIam(roles=_both_roles())
+    plan = platform.load_notification_config(_t7_cfg(tmp_path), ACCOUNT, REGION)
+    with pytest.raises(SystemExit, match="정책은 바꾸지 않았다"):
+        platform.apply_notification_policies(iam, FakeEcs(service=_nsvc(), tasks=[_task()], env=_on()), plan)
+    assert iam.puts == [] and iam.deletes == []
+
+
+_T7_KEY = (platform.ROLE_TASK, platform.SETTINGS_POLICY_TASK)
+
+
+def _t7_docs(plan):
+    return {_T7_KEY: platform.settings_task_policy(plan["settings_arns"])}
+
+
+def test_verify_requires_the_settings_policy_to_match_the_plan_exactly(tmp_path):
+    plan = platform.load_notification_config(_t7_cfg(tmp_path), ACCOUNT, REGION)
+    platform.verify_notification_policies(PolicyIam(_t7_docs(plan), roles=_both_roles()), plan)
+    # 문장 순서·Sid가 달라도 같은 내용이면 통과
+    docs = _t7_docs(plan)
+    docs[_T7_KEY]["Statement"] = [dict(s, Sid=f"x{i}") for i, s in enumerate(reversed(docs[_T7_KEY]["Statement"]))]
+    platform.verify_notification_policies(PolicyIam(docs, roles=_both_roles()), plan)
+    bad = [
+        lambda d: d.clear(),                                                       # 켰는데 정책이 없다
+        lambda d: _statements(d[_T7_KEY])["ManageTenantSettingsTopicsOnly"].update(Resource="*"),
+        lambda d: _statements(d[_T7_KEY])["ManageTenantSettingsSecretsOnly"].update(
+            Resource=f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:*"),
+        lambda d: _statements(d[_T7_KEY])["ManageTenantSettingsTopicsOnly"]["Action"].append("sns:SetTopicAttributes"),
+        lambda d: _statements(d[_T7_KEY])["SubscribeTenantSettingsTopicsByEmailOnly"].pop("Condition"),  # 프로토콜 제한 빠짐
+        lambda d: _statements(d[_T7_KEY])["SubscribeTenantSettingsTopicsByEmailOnly"].update(
+            Condition={"StringEquals": {"sns:Protocol": "https"}}),
+        lambda d: d[_T7_KEY]["Statement"].append({"Effect": "Allow", "Action": "sns:Publish", "Resource": TOPIC}),
+        lambda d: d[_T7_KEY]["Statement"].pop(),                                   # 비밀 문장이 빠짐
+    ]
+    for mutate in bad:
+        d = _t7_docs(plan)
+        mutate(d)
+        with pytest.raises(SystemExit, match="notification-iam"):
+            platform.verify_notification_policies(PolicyIam(d, roles=_both_roles()), plan)
+
+
+def test_verify_rejects_a_leftover_settings_policy_when_the_config_does_not_ask_for_it(tmp_path):
+    legacy = platform.load_notification_config(_cfg(tmp_path), ACCOUNT, REGION)
+    docs = _exact_docs(legacy)
+    platform.verify_notification_policies(PolicyIam(docs, roles=_both_roles()), legacy)
+    docs[_T7_KEY] = platform.settings_task_policy(_T7_ARNS)
+    with pytest.raises(SystemExit, match="notification-iam"):
+        platform.verify_notification_policies(PolicyIam(docs, roles=_both_roles()), legacy)
+
+
+def test_deploy_with_tenant_settings_reads_iam_only_and_stops_on_mismatch(tmp_path, monkeypatch):
+    _patch_deploy(monkeypatch)
+    plan = platform.load_notification_config(_t7_cfg(tmp_path), ACCOUNT, REGION)
+    iam, ecs = PolicyIam({}, roles=_both_roles()), FakeEcs()
+    c = {"ec2": None, "cf": None, "sm": None, "ecr": None, "iam": iam, "ecs": ecs}
+    with pytest.raises(SystemExit, match="notification-iam"):
+        platform.deploy(c, ACCOUNT, REGION, "t", False, plan)
+    assert ecs.writes == [] and iam.puts == [] and iam.deletes == []
+    iam = PolicyIam(_t7_docs(plan), roles=_both_roles())
+    c["iam"] = iam
+    with pytest.raises(RuntimeError):  # 정책이 맞으면 등록까지 간다 — 그래도 IAM은 쓰지 않는다
+        platform.deploy(c, ACCOUNT, REGION, "t", False, plan)
+    assert ecs.writes == ["register_task_definition"] and iam.puts == [] and iam.deletes == []
+
+
+def test_iam_preview_and_deploy_preview_with_tenant_settings_write_nothing(tmp_path, monkeypatch, capsys):
+    iam = NotifIam(roles=_both_roles())
+    _fake_main(monkeypatch, ["notification-iam", "--account", ACCOUNT, "--notification-config", _t7_cfg(tmp_path)],
+               {"iam": iam, "secretsmanager": NotifSm(), "ecs": QuietEcs()})
+    platform.main()
+    assert iam.puts == [] and iam.deletes == [] and iam.calls == []
+    out = capsys.readouterr().out
+    assert platform.SETTINGS_POLICY_TASK in out and _T7_ARNS["topics"] in out and "--yes" in out
+
+
+def test_iam_with_yes_and_tenant_settings_applies_only_the_dedicated_policies(tmp_path, monkeypatch):
+    iam = NotifIam(roles=_both_roles())
+    _fake_main(monkeypatch, ["notification-iam", "--account", ACCOUNT, "--notification-config", _t7_cfg(tmp_path),
+                             "--yes"], {"iam": iam, "secretsmanager": NotifSm(), "ecs": QuietEcs()})
+    platform.main()
+    assert [(r, p) for r, p, _ in iam.puts] == [(platform.ROLE_TASK, platform.SETTINGS_POLICY_TASK)]
+    assert iam.puts[0][2] == platform.settings_task_policy(_T7_ARNS)
+    assert ("assume-access-role" not in {p for _, p, _ in iam.puts}
+            and "read-platform-secrets" not in {p for _, p, _ in iam.puts})
+
+
+def test_down_removes_the_settings_policy_before_deleting_the_task_role():
+    iam = NotifIam(roles={platform.ROLE_TASK: _PLATFORM_TAGS})
+    platform._delete_roles(iam, ACCOUNT)
+    assert (platform.ROLE_TASK, platform.SETTINGS_POLICY_TASK) in iam.deletes
+    assert platform.ROLE_TASK not in iam.roles
 
 
 # ⑨ 운영 장치 — DB 자동 백업 -------------------------------------------------------

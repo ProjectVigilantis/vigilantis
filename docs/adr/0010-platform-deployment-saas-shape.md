@@ -4,6 +4,7 @@
 - **Date**: 2026-10-12
 - **Amended**: 2026-10-16(1차 — 사용자 도메인 `vigilantis.dev` 연결과 웹 API 주소·CORS 반영 · 핵심 결정 불변) · 2026-10-20(2차 — 알림 발송 권한 확장) — 하단 §개정 이력
 - **Deciders**: 최초 결정 — 김세혁(PM/Infra · `INFRA` 담당 결정)·안성일(AI·Architect · FastAPI 아키텍처·DB 검토) / 1차 개정 — 안성일 제안·김세혁 승인(PR #480) / 2차 개정 — 안성일 제안·김세혁 승인(PR #505)
+- **Proposal(미채택)**: T-7 고객 알림 설정 권한 확장 — 하단 §T-7 확장 제안
 - **Refs**: [ADR-0006](0006-localstack-team-standard-env.md) §2(IaC Post-MVP) · [ADR-0009](0009-real-aws-smoke-environment.md)(스모크 환경 · 앱 정책) · #435 4-2·6-1 · #467(사용자 도메인·CORS) · #468(개정 취합) · #493(알림 발송 연결 · 2차 개정)
 
 ## Context (배경)
@@ -48,7 +49,7 @@ MVP는 단일 계정(SSOT §MVP 확정 범위)이므로 계정을 가를 수 없
 - 신뢰 정책은 `vigilantis-platform`만, `sts:ExternalId`가 맞을 때만 받는다. 앱이 요청하는 세션 길이의 기본값은 900초다(`apps/core-api/serve.py`의 `VIGILANTIS_ACCESS_SESSION_SECONDS` 기본값). 원격 회수의 방식과 노출 상한은 후속 SaaS 설계에서 정한다.
 - 앱 코드는 바뀌지 않는다. 운영 진입점 `apps/core-api/serve.py`가 기동 때 AWS 설정 파일에 역할 전환 프로필(`credential_source = EcsContainer` · `role_arn` · `external_id`)을 쓰고 기본 프로필로 잡는다. 이후 Boto3가 전환과 갱신을 맡는다.
 - 접근 역할 정책을 따로 두지 않는 이유: 정책이 두 벌이면 `tests/test_provision_smoke_aws.py`의 두 방향 보증(코드가 부르는 작업 = 정책)이 한쪽에만 걸린다.
-- **알림 발송 권한 경계**(2026-10-20 2차 개정) — 알림은 플랫폼의 일이므로 태스크 역할이 보낸다. SNS 클라이언트는 ECS 컨테이너 자격증명(`ContainerProvider`)만 쓰며, 자격증명 조회 실패 시 발송을 중단한다. Slack 값은 실행 역할이 ECS `secrets`로 주입한다. 권한 준비와 발송 활성화는 따로 하며, 발송은 §5의 설정으로 켠다.
+- **알림 발송 권한 경계**(2026-10-20 2차 개정) — 알림은 플랫폼의 일이므로 태스크 역할이 보낸다. SNS 클라이언트는 ECS 컨테이너 자격증명(`ContainerProvider`)만 쓰며, 자격증명 조회 실패 시 발송을 중단한다. Slack 값은 실행 역할이 ECS `secrets`로 주입한다. 권한 준비와 발송 활성화는 따로 하며, 발송은 §5의 설정으로 켠다. 고객이 직접 넣는 T-7 알림 설정은 이 경계로 표현되지 않아 확장을 제안 중이다(미채택 — 하단 §T-7 확장 제안).
 
 ### 4. 공개 — CloudFront(사용자 도메인 · 기본 도메인) + WAF
 
@@ -113,6 +114,26 @@ MVP는 단일 계정(SSOT §MVP 확정 범위)이므로 계정을 가를 수 없
 - Post-MVP SaaS 전환·IaC: #438 ①②④⑨
 - 구현: `scripts/provision_platform_aws.py` · `tests/test_provision_platform_aws.py` · `scripts/provision_smoke_aws.py`(`down`의 정리 순서 가드) · `apps/core-api/serve.py` · `apps/core-api/tests/test_serve.py` · `apps/core-api/Dockerfile` · `apps/web/Dockerfile` · `apps/web/next.config.ts`
 - 배포 확인 기록: [`docs/AWS_SMOKE_RESULT.md`](../AWS_SMOKE_RESULT.md) §11
+
+## T-7 확장 제안 (미채택)
+
+> **상태: 미채택 제안.** 기존 Accepted 결정과 1·2차 개정은 그대로 유지한다.
+
+**왜 2차 개정의 경계로는 설명할 수 없나** — 2차 개정은 배포 때 승인된 SNS 주제 ARN과 기존 Slack 비밀을 고정해 두는 구조다. 태스크 역할은 그 주제에 `sns:Publish`만 하고, Slack 값은 실행 역할이 태스크 기동 때 주입한다. T-7에서는 고객이 화면에서 Slack webhook URL과 이메일 주소를 원할 때 넣고 바꾸고 지운다(opt-in). 이 목적지는 배포 시점에 알 수 없으므로 고정 ARN 목록과 기동 때 주입으로는 담을 수 없고, 실행 중인 api가 목적지에 맞춰 자원을 만들고 지워야 한다.
+
+**제안하는 경계**
+
+- 고객은 목적지(Slack webhook URL · 이메일 주소)만 넣는다. SNS 주제 ARN이나 비밀 이름은 받지 않는다.
+- api 태스크 역할(`vigilantis-platform`)이 T-7 전용 이름 접두(`packages/schemas/settings_resources.py`) 아래의 SNS 주제와 Secrets Manager 비밀을 직접 관리한다. 범위는 플랫폼 계정·리전의 그 접두 자원뿐이다.
+- SNS 구독은 이메일 프로토콜만 허용한다. 수신자가 구독을 확인하기 전에는 메일이 전달되지 않는다.
+- Slack webhook URL은 DB에 평문으로 두지 않고 Secrets Manager 비밀 참조만 저장하며, API 응답으로도 돌려주지 않는다.
+- 2차 개정의 정적 라우트 방식과 실행 역할의 Slack 비밀 주입은 그대로 지원한다. 접근 역할(`vigilantis-access`)과 고객 계정 쪽 권한은 늘리지 않는다.
+- 권한 준비와 발송 활성화는 2차 개정처럼 별개 단계로 둔다.
+- 허용 작업·입력 형식·적용과 회수 절차는 `scripts/provision_platform_aws.py`가 정하며 여기에 옮기지 않는다.
+
+**대가** — 2차 개정은 정확히 지정한 ARN만 허용하지만, 이 제안은 이름 접두로 범위를 정한다. 접두 아래라면 api가 고객 설정과 무관한 주제·비밀도 만들 수 있으므로, 플랫폼 계정 안에서는 접두가 경계 역할을 한다.
+
+**검증 범위** — 근거는 권한 준비 스크립트의 정책 정의까지다. 실제 AWS에서의 권한 허용과 메일·Slack 전달은 확인하지 않았다. api의 설정 관리·발송 구현과 배포 상태도 이 제안의 검증 범위에 들지 않는다.
 
 ## 개정 이력
 
