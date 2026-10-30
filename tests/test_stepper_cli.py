@@ -362,7 +362,7 @@ def test_start_steps_around_ports_held_by_others_without_touching_them(tmp_path,
     assert seed_env["AWS_ENDPOINT_URL"] == "http://127.0.0.1:4567"
     assert FakeRemote.created[0].base_url == "http://127.0.0.1:8001"
     (_, _, web_env), = ctx.web_calls
-    assert web_env["NEXT_PUBLIC_API_BASE_URL"] == "http://127.0.0.1:8001"
+    assert web_env["NEXT_PUBLIC_API_BASE_URL"] == "http://localhost:8001"
     assert ctx.opened == ["http://localhost:3001"]
     # 남의 스택은 멈추거나 내리지 않는다 — compose 명령은 전부 이 프로젝트 것이다
     assert not any("vigilantis-db-1" in command or "docker stop" in command for command in runner.commands())
@@ -447,7 +447,7 @@ def test_reset_starts_the_web_for_this_server_and_keeps_it_across_resets(tmp_pat
     (command, cwd, env), = ctx.web_calls
     assert command[1:] == ["run", "dev", "--", "-H", "localhost", "-p", "3000"]
     assert cwd == repo / "apps" / "web"
-    assert env["NEXT_PUBLIC_API_BASE_URL"] == "http://127.0.0.1:8000"
+    assert env["NEXT_PUBLIC_API_BASE_URL"] == "http://localhost:8000"
     assert ctx.opened == ["http://localhost:3000"]
     assert server.State(ctx.data_root).load()["web_pid"] == 4242
 
@@ -517,15 +517,15 @@ def test_web_is_restarted_when_the_api_it_points_at_moves(tmp_path, repo):
     runner = FakeRunner()
     ctx, output, _ = _ctx(tmp_path, repo, runner)
     assert cli.main(["reset"], ctx) == 0
-    assert server.State(ctx.data_root).load()["web_api"] == "http://127.0.0.1:8000"
+    assert server.State(ctx.data_root).load()["web_api"] == "http://localhost:8000"
 
     # 기록된 8000번을 남이 차지했다 — api가 8001로 옮기면 옛 주소를 보는 FE를 닫고 다시 띄운다
     runner.ps = _ps_line("proxy", None, "", "127.0.0.1:8000->80/tcp")
     assert cli.main(["reset"], ctx) == 0
     assert ctx.killed == [4242]
     assert len(ctx.web_calls) == 2
-    assert ctx.web_calls[-1][2]["NEXT_PUBLIC_API_BASE_URL"] == "http://127.0.0.1:8001"
-    assert server.State(ctx.data_root).load()["web_api"] == "http://127.0.0.1:8001"
+    assert ctx.web_calls[-1][2]["NEXT_PUBLIC_API_BASE_URL"] == "http://localhost:8001"
+    assert server.State(ctx.data_root).load()["web_api"] == "http://localhost:8001"
     assert "FE: 주소가 바뀌어 다시 띄운다" in "\n".join(output)
 
 
@@ -726,3 +726,13 @@ def test_remote_reads_never_use_the_product_api_prefix():
     for name in ("cli.py", "server.py"):
         source = (STEPPER / name).read_text(encoding="utf-8")
         assert not re.search(r"""["']/api/v1/(incidents|assets|ws)""", source), name
+
+
+def test_web_api_url_shares_the_web_host_so_the_login_cookie_travels():
+    # 브라우저에게 localhost와 127.0.0.1은 다른 사이트다 — FE와 api의 호스트 이름이 다르면 api가 심는
+    # SameSite=Lax 로그인 쿠키가 다음 요청에 실리지 않아 웹 로그인이 되지 않는다(포트는 사이트와 무관하다).
+    # CLI 자신의 호출은 127.0.0.1 그대로다 — localhost는 ::1을 먼저 시도해 연결마다 수 초씩 헛돈다
+    ports = {"db": 5433, "localstack": 4567, "api": 8001, "web": 3001}
+    assert server.web_url(ports) == "http://localhost:3001"
+    assert server.web_api_url(ports) == "http://localhost:8001"
+    assert server.api_url(ports) == "http://127.0.0.1:8001"
