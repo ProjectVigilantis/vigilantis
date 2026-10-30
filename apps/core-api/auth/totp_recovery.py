@@ -4,7 +4,8 @@ HTTP · CLI 어댑터는 reset_totp 를 부른다. 누가 누구를 복구하는
 이 모듈은 두 번째 권한 체계를 두지 않고, 상태와 순서만 정한다.
 
 신원 변경 울타리(totp_provider_mutations): 같은 Cognito 신원(issuer, sub)의 TOTP 변경 — 복구의 삭제와 로그인 흐름의
-등록 변경(DbLoginGate.enrollment) — 은 제공자 호출 전에 울타리 행을 commit 하고, 풀리지 않은 울타리가 있으면 다른
+등록 확정(DbLoginGate.enrollment: VerifySoftwareToken · MFA_SETUP 응답 · 선호 설정) — 은 제공자 호출 전에
+울타리 행을 commit 하고, 풀리지 않은 울타리가 있으면 다른
 변경 · 복구를 시작하지 않는다. 울타리는 DB 행이라 연결 · 작업자가 사라져도 남는다. 풀림은 두 가지뿐이다:
   - 작업자가 그 구간 제공자 호출의 확정 응답(성공 · 4xx)을 기록한다(PROVIDER_RETURNED).
   - 운영자가 그 호출이 더는 적용될 수 없음을 앱 밖에서 확인했다고 진술한다(reconcile_provider_mutation,
@@ -14,6 +15,8 @@ HTTP · CLI 어댑터는 reset_totp 를 부른다. 누가 누구를 복구하는
 확정 응답이 그 호출의 유일한 시도라는 전제는 어댑터가 보장한다 — TOTP 등록 변경 호출은 SDK 재시도 없이 한 번만 보낸다
 (cognito.CognitoAdapter 의 mutation_client · provider.build_adapter). 재시도가 있으면 마지막 4xx 가 앞선 시도의 시간
 초과를 가린다.
+등록 준비(AssociateSoftwareToken)는 아직 인증 앱을 확정하지 않으므로 세대 · 미해결 울타리만 조회하고 새 울타리는
+만들지 않는다. 준비 중 복구가 끼어들어도 등록 확정의 _claim 이 세대 · 상태를 다시 검사한다.
 잠금 순서: 울타리 행과 app_users 를 함께 다루는 트랜잭션은 모두 users 잠금(auth_repo.lock_users_table)을 먼저 잡는다
 (차단 · 등록 울타리 생성 · 새 등록 기록 · 복구 결과 기록 · 운영자 정리) — 순서가 엇갈려 교착하지 않게 한다.
 
@@ -196,14 +199,18 @@ class ProviderMutation:
 
 
 def _provider_returned(exc: BaseException) -> bool:
-    """등록 변경 구간을 끝낸 예외가 제공자의 확정 응답(4xx 분류 · 응답 검증 거절)인지. 결과 불명이면 False.
+    """등록 변경 구간을 끝낸 예외가 제공자의 확정 응답(4xx · 응답 검증 거절)인지. 결과 불명이면 False.
 
-    AuthProviderUnavailableError 는 5xx · 전송 실패 · 시간 초과 · 분류되지 않은 4xx · DB 실패를 함께 덮으므로
-    적용 여부를 모른다고 본다. AuthError 가 아닌 예외(버그 · 작업자 중단)도 같다.
+    SDK 호출 실패는 오류 코드 분류와 관계없이 실제 HTTP 상태가 4xx 일 때만 확정이다. 5xx · 상태 없음 · 전송 실패 ·
+    시간 초과 · DB 실패는 적용 여부를 모른다고 본다. AuthError 가 아닌 예외(버그 · 작업자 중단)도 같다.
     확정 응답이 구간의 모든 등록 변경 시도를 끝냈다는 판단은 그 호출들이 재시도 없이 한 번만 나갔기 때문에만
     성립한다(CognitoAdapter.mutation_client) — 이 함수는 마지막 예외만 본다.
     """
-    return isinstance(exc, AuthError) and not isinstance(exc, AuthProviderUnavailableError)
+    if not isinstance(exc, AuthError):
+        return False
+    if exc.from_provider_call:
+        return exc.provider_status is not None and 400 <= exc.provider_status < 500
+    return not isinstance(exc, AuthProviderUnavailableError)
 
 
 @dataclass
@@ -215,7 +222,7 @@ class _Claim:
 
 
 def _ticket_current(user: models.AppUser | None, ticket: LoginTicket) -> bool:
-    """등록 변경 울타리를 열 때(_claim) — 앱 계정이 포착 때의 세대 · 복구 상태 그대로인지.
+    """등록 준비 조회 · 등록 변경 울타리 생성 때 — 앱 계정이 포착 때의 세대 · 복구 상태 그대로인지.
 
     새 등록 대기 중 포착한 흐름(setup_only)은 ENROLLMENT_REQUIRED 일 때만 통과한다 — 같은 세대의 다른 흐름이 새 등록을
     기록해 NONE 이 되면, 늦은 흐름은 제공자 변경 전에 거절된다(그 등록의 이메일 증명을 빌려 둘째 TOTP 를 붙이지 못한다).
@@ -261,6 +268,21 @@ class DbLoginGate:
                 and user.mfa_recovery_state is MfaRecoveryState.NONE
                 and user.email_verified_at is not None
             )
+
+    def check_setup(self, ticket: LoginTicket) -> None:
+        """준비 호출 전 조회만 한다. 이 조회 뒤의 복구 · 등록 경합은 Verify 직전 _claim 에서 다시 판정한다."""
+        try:
+            with Session(self._engine()) as db:
+                user = auth_repo.get_user_by_identity(db, issuer=ticket.issuer, cognito_sub=ticket.sub)
+                if not _ticket_current(user, ticket):
+                    logger.warning("totp setup rejected: login generation changed")
+                    raise AuthFailedError()
+                if recovery_repo.get_unresolved_mutation(db, issuer=ticket.issuer, cognito_sub=ticket.sub):
+                    logger.warning("totp setup rejected: identity fence unresolved")
+                    raise AuthProviderUnavailableError()
+        except SQLAlchemyError as exc:
+            logger.error("totp setup check failed error_type=%s", type(exc).__name__)
+            raise AuthProviderUnavailableError() from None
 
     @contextmanager
     def enrollment(self, ticket: LoginTicket) -> Iterator[Callable[[], None]]:

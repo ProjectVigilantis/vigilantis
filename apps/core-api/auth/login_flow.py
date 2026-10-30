@@ -12,8 +12,9 @@ TOTP 분실 복구(#515) — 비밀번호 단계 뒤 · TOTP 증명 전에 Admin
 세대를 포착한다(LoginTicket). TOTP 증명 뒤 GetUser 의 sub 가 포착한 sub 와 같아야 하고, VerifiedIdentity 는
 포착한 세대를 싣는다 — 완료(auth.service.complete_login)가 users 잠금 안에서 현재 세대와 대조한다.
 복구 차단 중(RESET_PENDING)이면 흐름을 시작하지 않는다. 새 등록 대기 중에 포착한 흐름은 새 MFA_SETUP 만
-진행한다. TOTP 등록 변경(AssociateSoftwareToken · VerifySoftwareToken · MFA_SETUP 응답 · 선호 설정)은 관문의
-신원 변경 울타리 안에서, 포착한 세대가 아직 현재일 때만 Cognito 에 보낸다. 새 등록은 MFA_SETUP 응답의
+진행한다. 등록 준비(AssociateSoftwareToken)는 세대 · 미해결 울타리만 조회하고 새 울타리는 만들지 않는다.
+등록 확정(VerifySoftwareToken · MFA_SETUP 응답 · 선호 설정)은 관문의 신원 변경 울타리 안에서, 포착한 세대가
+아직 현재일 때만 Cognito 에 보낸다. 새 등록은 MFA_SETUP 응답의
 AuthenticationResult 와 GetUser 신원 대조가 끝난 뒤에만 기록한다(토큰은 흐름이 쥐어 기록 실패 때 폐기된다).
 """
 
@@ -94,11 +95,15 @@ class LoginGate(Protocol):
         """포착한 세대가 아직 현재이고 그 세대의 이메일 증명이 기록돼 있는지."""
         ...
 
+    def check_setup(self, ticket: LoginTicket) -> None:
+        """등록 준비 전 세대 · 미해결 울타리를 조회한다. 쓰지 않으며, 등록 확정은 enrollment 에서 다시 검사한다."""
+        ...
+
     def enrollment(self, ticket: LoginTicket) -> AbstractContextManager[Callable[[], None]]:
         """신원별 TOTP 등록 변경 구간 — 들어갈 때 포착한 세대가 현재여야 한다(아니면 AuthFailedError).
 
         같은 신원의 다른 변경 · 복구가 풀리지 않았으면 AuthProviderUnavailableError. 구간이 결과 불명으로 끝나면
-        (AuthProviderUnavailableError · 그 밖의 예외) 신원은 운영자 정리 전까지 막힌다. 내놓는 함수는 새 등록
+        (5xx · 전송 실패 · 확정 응답 정보 없는 장애) 신원은 운영자 정리 전까지 막힌다. 내놓는 함수는 새 등록
         성공을 기록한다(새 등록 대기 → 차단 없음) — 실패하면 AuthError 를 낸다.
         """
         ...
@@ -188,8 +193,8 @@ class LoginFlow:
     def begin_totp_setup(self, flow_token: str) -> TotpSetup:
         def op(flow: _Flow) -> TotpSetup:
             assert flow.session is not None and flow.ticket is not None
-            with self._gate.enrollment(flow.ticket):
-                secret, session = self._cognito.associate_software_token(flow.session)
+            self._gate.check_setup(flow.ticket)
+            secret, session = self._cognito.associate_software_token(flow.session)
             if not session:
                 self._reject("ASSOCIATE_WITHOUT_SESSION")
             flow.session = session

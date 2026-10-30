@@ -65,9 +65,11 @@ class FakeGate:
         self.setup_only = setup_only
         self.binds: list[tuple[str, str]] = []
         self.proofs: list[login_flow.LoginTicket] = []
+        self.setup_checks: list[login_flow.LoginTicket] = []
         self.enrollments: list[login_flow.LoginTicket] = []
         self.records: list[login_flow.LoginTicket] = []
         self.reject_bind: Exception | None = None
+        self.reject_setup: Exception | None = None
         self.reject_enrollment: Exception | None = None
         self.reject_record: Exception | None = None
 
@@ -80,6 +82,11 @@ class FakeGate:
     def proof_recorded(self, ticket):
         self.proofs.append(ticket)
         return self.proof
+
+    def check_setup(self, ticket):
+        self.setup_checks.append(ticket)
+        if self.reject_setup is not None:
+            raise self.reject_setup
 
     @contextmanager
     def enrollment(self, ticket):
@@ -866,11 +873,29 @@ def test_enrollment_gate_refusal_makes_no_provider_registration_call():
         queue_invited_until_setup(env)
         token, _ = env.flow.start(EMAIL, PASSWORD)
         env.flow.submit_new_password(token, NEW_PASSWORD)
-        env.flow.begin_totp_setup(token)  # 등록 구간 안에서 AssociateSoftwareToken
+        env.flow.begin_totp_setup(token)  # 준비 조회 뒤 AssociateSoftwareToken — 등록 울타리는 만들지 않는다
         env.gate.reject_enrollment = cognito.AuthFailedError()
         with pytest.raises(cognito.AuthFailedError):  # VerifySoftwareToken 을 보내지 않는다(대기 응답 없음)
             env.flow.verify_totp_setup(token, TOTP_CODE)
-        assert len(env.gate.enrollments) == 2 and env.gate.records == []
+        assert len(env.gate.setup_checks) == 1
+        assert len(env.gate.enrollments) == 1 and env.gate.records == []
+        assert len(env.store) == 0
+        env.done()
+    finally:
+        env.stubber.deactivate()
+
+
+@pytest.mark.parametrize("error", [cognito.AuthFailedError, cognito.AuthProviderUnavailableError])
+def test_setup_check_refusal_makes_no_provider_association_call(error):
+    env = Env(FakeGate())
+    try:
+        env.initiate("MFA_SETUP")
+        token, _ = env.flow.start(EMAIL, PASSWORD)
+        env.gate.reject_setup = error()
+        with pytest.raises(error):  # Associate 응답을 넣지 않는다 — 호출되면 Stubber 가 실패시킨다
+            env.flow.begin_totp_setup(token)
+        assert len(env.gate.setup_checks) == 1
+        assert env.gate.enrollments == [] and env.gate.records == []
         assert len(env.store) == 0
         env.done()
     finally:

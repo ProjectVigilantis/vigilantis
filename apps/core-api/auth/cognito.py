@@ -32,6 +32,10 @@ class AuthError(Exception):
     """AUTH_* 오류 코드와 1:1 인 도메인 예외의 기반. 메시지는 코드 문자열 고정이다(입력 · 응답을 싣지 않는다)."""
 
     code: ErrorCode
+    #: 실제 제공자 HTTP 응답 상태만 보존한다. 공개 오류 매핑 · 메시지에는 싣지 않는다.
+    provider_status: int | None = None
+    #: SDK 호출 실패인지. HTTP 상태 없는 SDK 실패와 로컬 응답 검증 거절을 구분한다.
+    from_provider_call: bool = False
 
     def __init__(self) -> None:
         super().__init__(self.code.value)
@@ -220,18 +224,23 @@ class CognitoAdapter:
         client: Any = None,
     ) -> dict[str, Any] | None:
         """`absorb` 의 AWS 오류 코드(5xx 제외)는 예외 대신 None 으로 돌려준다 — 그 밖의 오류는 분류해 던진다."""
+        provider_status = None
         try:
             return getattr(self._client if client is None else client, operation)(**params)
         except ClientError as exc:
             error = exc.response.get("Error", {})
             aws_code = str(error.get("Code", "Unknown"))
             status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            provider_status = status
         except BotoCoreError as exc:
             aws_code, status = type(exc).__name__, 503
         if aws_code in absorb and not (status is not None and status >= 500):
             return None
         logger.warning("cognito call failed operation=%s error_code=%s", operation, aws_code)
-        raise classify_error(aws_code, status, kind) from None
+        failure = classify_error(aws_code, status, kind)
+        failure.provider_status = provider_status
+        failure.from_provider_call = True
+        raise failure from None
 
     @staticmethod
     def _user(raw: dict[str, Any], attributes_key: str) -> CognitoUser:

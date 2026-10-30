@@ -11,7 +11,7 @@ Cognito Admin 인증 API로 로그인을 진행하고, **이번 로그인에서 
 | 파일 | 책임 |
 | --- | --- |
 | `cognito.py` | boto3 `cognito-idp` 어댑터. `SECRET_HASH` 계산, Cognito 오류를 `AUTH_*` 코드와 1:1인 도메인 예외로 분류. (PR 3) 관리 조회 · 초대(`AdminGetUser` · `AdminCreateUser`)와 재설정(`ForgotPassword` · `ConfirmForgotPassword`), 호출 종류별 오류 분류. (#515) TOTP 등록 변경(`AssociateSoftwareToken` · `VerifySoftwareToken` · `MFA_SETUP` 응답 · `SetUserMFAPreference` · `AdminDeleteSoftwareToken`)은 재시도 없는 클라이언트로 한 번만 보내고 오류 분류는 일반 호출과 같다. 비밀번호 · `SOFTWARE_TOKEN_MFA` · 조회 · 회수 · 이메일 호출은 일반 재시도 그대로다. `admin_delete_software_token`은 응답을 `SoftwareTokenDeletion`(`DELETED` · `NOT_FOUND` · `REJECTED` · `UNKNOWN`)으로 분류해 돌려준다(예외로 바꾸지 않는다) |
-| `login_flow.py` | 로그인 상태 머신. 세션 발급 조건 판정, 코드 시도 상한(흐름별 · 사용자별), refresh token 회수. (PR 3) 최초 비밀번호 변경은 Cognito 호출 전에 `password_policy`로 확인. (#515) 비밀번호 단계 뒤 인증 세대 포착(`LoginTicket`), TOTP 등록 변경은 관문(`LoginGate`)의 신원 울타리 안에서 |
+| `login_flow.py` | 로그인 상태 머신. 세션 발급 조건 판정, 코드 시도 상한(흐름별 · 사용자별), refresh token 회수. (PR 3) 최초 비밀번호 변경은 Cognito 호출 전에 `password_policy`로 확인. (#515) 비밀번호 단계 뒤 인증 세대 포착(`LoginTicket`), 등록 준비는 관문(`LoginGate`)의 조회만 거치고 등록 확정은 신원 울타리 안에서 |
 | `flow_store.py` | 진행 중인 로그인과 사용자별 코드 실패 횟수의 프로세스 메모리 보관(TTL · 슬라이딩 윈도). DB · 로그에 남기지 않는다 |
 | `sessions.py` | 서버 세션 발급 · 조회 · 활동 갱신 · 회수. 설정을 읽지 않고 commit하지 않는다. (PR 3) 사용자 단위 일괄 회수(`revoke_user_sessions`) |
 | `service.py` | 트랜잭션 소유자. 로그인 완료(사용자 조회 · 세션 발급), 현재 사용자, 활동, 로그아웃. (PR 3) 로그인 완료를 `app_users` 잠금으로 직렬화하고 그 사용자의 이전 세션을 전부 회수. (#492) `CurrentUser`에 `account_type` · `tenant_id`와 내부 전용 `tenant_status`. UNASSIGNED는 로그인 완료 403 · 세션 판정 401. `CurrentUser.platform_role`과 `assigned_tenant_ids`(TENANT_MANAGER의 담당 고객, 정규 UUID 튜플) — 판정마다 DB의 현재 값을 읽는다(`/me`에도 싣는다). (#515) 로그인 완료가 잠금 안에서 포착한 인증 세대 · 복구 차단 상태를 대조 |
@@ -422,12 +422,13 @@ SDK 호출 뒤 잠금 안의 재확인(행위자 · 대상 신원 · 대상 테�
 - `RESET_PENDING`: 올바른 비밀번호로도 로그인 흐름을 시작하지 않는다(401 `AUTH_FAILED`). 등록이 없다는 결과(`COMPLETED` · `PROVIDER_NOT_FOUND`)가 기록될 때까지 이어진다.
 - `ENROLLMENT_REQUIRED`: 새 TOTP 등록(`MFA_SETUP`)만 진행한다. 기존 TOTP 챌린지(`SOFTWARE_TOKEN_MFA`)가 오면 제공자에 등록이 남아 있다는 뜻이므로 거절한다(401 `AUTH_FAILED`).
 - 새 등록은 `VerifySoftwareToken` SUCCESS → `MFA_SETUP` 응답의 `AuthenticationResult` → TOTP 선호 지정 → `GetUser`의 `sub` · issuer가 포착한 신원과 일치한 뒤에만 기록한다(`ENROLLMENT_REQUIRED` → `NONE`). 기록은 이메일 코드 발송 전이다.
-- 새 등록 대기 중에 같은 세대로 포착한 흐름이 둘 이상이면 먼저 기록한 흐름만 등록을 마친다. 등록 변경 울타리를 열 때(`_claim`) 계정이 포착 때의 세대와 차단 상태(`ENROLLMENT_REQUIRED`) 그대로여야 하므로, 다른 흐름이 기록해 `NONE`이 된 뒤의 등록 시작 · 확인은 제공자 변경 전에 401 `AUTH_FAILED`로 거절된다. 먼저 기록한 흐름은 이 판정을 다시 거치지 않고 이메일 코드 확인으로 완료할 수 있다. 다른 흐름의 등록 변경이 진행 중이면(울타리 있음) 등록 변경은 503 `AUTH_PROVIDER_UNAVAILABLE`이다.
+- 새 등록 대기 중에 같은 세대로 포착한 흐름이 둘 이상이면 먼저 기록한 흐름만 등록을 마친다. 등록 준비 조회(`check_setup`)와 등록 변경 울타리를 열 때(`_claim`) 계정이 포착 때의 세대와 차단 상태(`ENROLLMENT_REQUIRED`) 그대로여야 하므로, 다른 흐름이 기록해 `NONE`이 된 뒤의 등록 시작 · 확인은 제공자 변경 전에 401 `AUTH_FAILED`로 거절된다. 먼저 기록한 흐름은 이 판정을 다시 거치지 않고 이메일 코드 확인으로 완료할 수 있다. 다른 흐름의 등록 변경이 진행 중이면(울타리 있음) 등록 준비 · 확정은 503 `AUTH_PROVIDER_UNAVAILABLE`이다.
 - 거절된 쪽이 다시 로그인하면 먼저 등록된 TOTP의 챌린지를 받는다. 그 인증 앱이 없으면 관리자 · 운영자의 새 초기화가 필요하다 — 로그인을 다시 시작해도 등록 기회는 돌아오지 않는다.
 - 초기화가 `email_verified_at`을 지웠으므로 새 등록 뒤에는 이메일 코드를 확인해야 세션을 받는다. 이메일 단계를 버리고 새 TOTP로 다시 로그인해도(`SOFTWARE_TOKEN_MFA`) 확인 기록이 없어 이메일 코드를 다시 요구한다. 이전 세대의 이메일 확인은 쓰지 않는다.
 - 등록 기록 전에 실패하면 상태는 `ENROLLMENT_REQUIRED`로 남고 흐름의 토큰은 회수된다. Cognito가 `VerifySoftwareToken` 성공 때 이미 새 인증 앱을 묶었다면 다음 로그인에 기존 TOTP 챌린지가 와서 거절된다. 로그인을 반복해도 풀리지 않으며, 관리자 · 운영자의 새 초기화(새 `operation_id`)가 필요하다.
-- 로그인 흐름의 등록 변경(`AssociateSoftwareToken` · `VerifySoftwareToken` · `MFA_SETUP` 응답 · 선호 지정)도 같은 신원 울타리(`ENROLLMENT`) 안에서 한다. 이 호출들은 SDK 재시도 없이 한 번만 보낸다(`mutation_client`). 확정 응답(성공 · 분류된 거절)으로 끝나면 풀고, 결과 불명(503 `AUTH_PROVIDER_UNAVAILABLE`로 끝난 호출 · 그 밖의 예외)으로 끝나면 남긴다. 울타리가 남은 동안 그 신원의 등록 단계는 503 `AUTH_PROVIDER_UNAVAILABLE`이고 초기화는 409다.
-- 세대 포착 · 울타리 기록의 DB 실패는 503 `AUTH_PROVIDER_UNAVAILABLE`로 거절한다(fail closed).
+- 로그인 흐름의 등록 확정(`VerifySoftwareToken` · `MFA_SETUP` 응답 · 선호 지정)은 같은 신원 울타리(`ENROLLMENT`) 안에서 한다. 이 호출들은 SDK 재시도 없이 한 번만 보낸다(`mutation_client`). 확정 응답(성공 · 4xx)으로 끝나면 풀고, 결과 불명(5xx · 시간 초과 · 전송 실패 · 확정 응답 정보 없는 장애)으로 끝나면 남긴다. 분류되지 않은 4xx도 제공자의 실제 HTTP 상태로 판정해 울타리를 풀지만, 공개 오류는 기존대로 503 `AUTH_PROVIDER_UNAVAILABLE`이다. 울타리가 남은 동안 그 신원의 등록 단계는 503 `AUTH_PROVIDER_UNAVAILABLE`이고 초기화는 409다.
+- 등록 준비(`AssociateSoftwareToken`)는 인증 앱을 확정하지 않는다. 호출 전에 세대 · 미해결 울타리를 조회하되 새 울타리는 만들지 않으므로, 이 호출의 4xx · 5xx · 시간 초과 뒤에도 운영자 정리 없이 로그인을 다시 시작할 수 있다. SDK 호출은 기존대로 한 번만 보낸다. 준비 조회 뒤 복구가 끼어들어도 `VerifySoftwareToken` 직전의 `_claim`이 세대 · 상태를 다시 검사해 옛 흐름의 등록을 거절한다.
+- 세대 포착 · 등록 준비 조회 · 울타리 기록의 DB 실패는 503 `AUTH_PROVIDER_UNAVAILABLE`로 거절한다(fail closed).
 
 ### 신원 울타리 (`totp_provider_mutations`)
 

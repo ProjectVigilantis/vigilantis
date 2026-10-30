@@ -610,6 +610,78 @@ def _started_setup(flow, *, begin=True):
     return token
 
 
+@pytest.mark.parametrize(
+    "hook,error",
+    [
+        pytest.param(raising(client_error("InvalidParameterException", 400)), AuthProviderUnavailableError,
+                     id="unclassified-4xx"),
+        pytest.param(raising(client_error("NotAuthorizedException", 400)), AuthFlowExpiredError,
+                     id="expired-session"),
+        pytest.param(raising(client_error("InternalErrorException", 500)), AuthProviderUnavailableError,
+                     id="5xx"),
+        pytest.param(raising(ReadTimeoutError(endpoint_url="https://x.invalid")), AuthProviderUnavailableError,
+                     id="timeout"),
+    ],
+)
+def test_associate_failure_leaves_no_fence_and_new_login_can_enroll(world, hook, error):
+    fake = FakeCognito(world.sub, challenge="MFA_SETUP")
+    flow = login_flow(world, fake)
+    token = _started_setup(flow, begin=False)
+    fake.hooks["associate_software_token"] = hook
+    with pytest.raises(error):
+        flow.begin_totp_setup(token)
+    assert fences(world) == []
+    assert unresolved(world) is None
+    unchanged(world, fake)
+    fake.hooks.clear()
+    # 운영자의 초기화 · 표식 정리 없이 로그인부터 다시 시작해 등록과 이메일 확인을 마친다.
+    token = _enroll_fresh(flow)
+    assert len(fake.ops("associate_software_token")) == 2
+    done = flow.submit_email_code(token, CODE)
+    assert alive(world.engine, complete(world, done.identity).token)
+    assert fences(world) == [("ENROLLMENT", "PROVIDER_RETURNED")]
+    assert unresolved(world) is None
+
+
+def test_setup_check_database_failure_prevents_associate(monkeypatch, world):
+    fake = FakeCognito(world.sub, challenge="MFA_SETUP")
+    flow = login_flow(world, fake)
+    token = _started_setup(flow, begin=False)
+
+    def unavailable(*args, **kwargs):
+        raise OperationalError("SELECT", {}, Exception("database unavailable"))
+
+    with monkeypatch.context() as patch:
+        patch.setattr(recovery_repo, "get_unresolved_mutation", unavailable)
+        with pytest.raises(AuthProviderUnavailableError):
+            flow.begin_totp_setup(token)
+    assert fake.ops("associate_software_token") == []
+    assert fences(world) == []
+
+
+def test_reset_during_associate_prevents_the_late_setup_from_registering(world):
+    fake = FakeCognito(world.sub, challenge="MFA_SETUP")
+    flow = login_flow(world, fake)
+    token = _started_setup(flow, begin=False)
+    pause = Pause()
+    fake.hooks["associate_software_token"] = pause
+    with ThreadPoolExecutor(1) as pool:
+        preparing = pool.submit(flow.begin_totp_setup, token)
+        try:
+            assert pause.entered.wait(10)
+            assert world.engine.pool.checkedout() == 0
+            assert fences(world) == []  # 준비 호출은 등록된 인증 앱을 바꾸지 않는다
+            assert reset(world, adapter_for(fake)).completed
+        finally:
+            pause.release.set()
+        preparing.result(timeout=10)
+    with pytest.raises(AuthFailedError):
+        flow.verify_totp_setup(token, CODE)
+    assert fake.ops("verify_software_token") == []
+    assert fences(world) == [("RESET", "PROVIDER_RETURNED")]
+    assert user_state(world.engine, world.target) == (1, "ENROLLMENT_REQUIRED", None)
+
+
 def test_enrollment_fence_outlives_connection_loss_and_keeps_resets_out_until_the_call_returns(world):
     # 리뷰 일정: 세대 0 등록이 VerifySoftwareToken 에서 멈춘 채 작업자 연결이 끊긴다 — 복구가 끼어들어 삭제한 뒤
     # 옛 검증이 등록되면 안 된다
@@ -632,7 +704,7 @@ def test_enrollment_fence_outlives_connection_loss_and_keeps_resets_out_until_th
         finally:
             pause.release.set()
         assert verifying.result(timeout=10).step is LoginStep.EMAIL_VERIFICATION_REQUIRED
-    assert fences(world) == [("ENROLLMENT", "PROVIDER_RETURNED")] * 2  # 연결 · 검증 구간 모두 확정 응답으로 풀렸다
+    assert fences(world) == [("ENROLLMENT", "PROVIDER_RETURNED")]  # 등록 확정 구간만 울타리를 만든다
     # 등록이 끝난 뒤의 새 요청은 정상 진행한다(그 등록을 지우는 새 초기화) — 등록 변경은 모두 삭제보다 먼저다
     assert reset(world, adapter_for(fake)).completed
     names = [name for name, _ in fake.calls]
@@ -681,8 +753,8 @@ def test_reset_fence_outlives_connection_loss_and_blocks_old_enrollment_and_othe
     assert fake.ops("set_user_mfa_preference") == []
     assert user_state(world.engine, world.target) == (1, "ENROLLMENT_REQUIRED", None)
     assert len(fake.ops("admin_delete_software_token")) == 1
-    # 원래 삭제가 확정 · 기록된 뒤에야 새 등록이 열린다(차단 전 연결 2건 · 복구 1건 모두 확정 응답으로 풀렸다)
-    assert fences(world) == [("ENROLLMENT", "PROVIDER_RETURNED")] * 2 + [("RESET", "PROVIDER_RETURNED")]
+    # 원래 삭제가 확정 · 기록된 뒤에야 새 등록이 열린다(차단 전 준비 호출은 울타리를 만들지 않는다)
+    assert fences(world) == [("RESET", "PROVIDER_RETURNED")]
     _enroll_fresh(flow)
     assert user_state(world.engine, world.target) == (1, "NONE", None)
 
@@ -762,9 +834,9 @@ def test_second_setup_flow_of_the_same_reset_generation_cannot_add_a_factor_afte
             with pytest.raises(AuthProviderUnavailableError):
                 flow.begin_totp_setup(contender)
             assert len(fake.ops("associate_software_token")) == 2
-            assert fences(world) == sorted([("ENROLLMENT", "PROVIDER_RETURNED")] * 2 + [
+            assert fences(world) == [
                 ("ENROLLMENT", "UNRESOLVED"), ("RESET", "PROVIDER_RETURNED"),
-            ])
+            ]
         finally:
             pause.release.set()
         won = verifying.result(timeout=10)
@@ -843,32 +915,48 @@ def test_enrollment_whose_fence_was_reconciled_mid_flight_records_nothing_and_re
     assert user_state(world.engine, world.target) == (1, "ENROLLMENT_REQUIRED", None)
     assert fences(world) == [
         ("ENROLLMENT", "OPERATOR_RECONCILED"),
-        ("ENROLLMENT", "PROVIDER_RETURNED"),
         ("RESET", "PROVIDER_RETURNED"),
     ]
 
 
 @pytest.mark.parametrize(
+    "op", ["verify_software_token", "admin_respond_to_auth_challenge", "set_user_mfa_preference"]
+)
+@pytest.mark.parametrize(
     "hook,error,kept",
     [
         pytest.param(raising(client_error("CodeMismatchException", 400)), AuthCodeInvalidError, False,
                      id="code-mismatch"),
+        pytest.param(raising(client_error("InvalidParameterException", 400)), AuthProviderUnavailableError, False,
+                     id="unclassified-4xx"),
+        pytest.param(
+            raising(ClientError({"Error": {"Code": "InvalidParameterException"}}, "VerifySoftwareToken")),
+            AuthProviderUnavailableError, True, id="missing-http-status",
+        ),
+        pytest.param(
+            raising(ClientError({"Error": {"Code": "CodeMismatchException"}}, "VerifySoftwareToken")),
+            AuthCodeInvalidError, True, id="classified-code-mismatch-without-http-status",
+        ),
+        pytest.param(
+            raising(ClientError({"Error": {"Code": "NotAuthorizedException"}}, "VerifySoftwareToken")),
+            AuthFlowExpiredError, True, id="classified-expired-session-without-http-status",
+        ),
         pytest.param(raising(client_error("InternalErrorException", 500)), AuthProviderUnavailableError, True,
                      id="5xx"),
         pytest.param(raising(ReadTimeoutError(endpoint_url="https://x.invalid")), AuthProviderUnavailableError,
                      True, id="timeout"),
     ],
 )
-def test_enrollment_outcome_decides_whether_the_fence_survives(world, hook, error, kept):
+def test_enrollment_outcome_decides_whether_the_fence_survives(world, op, hook, error, kept):
     fake = FakeCognito(world.sub, challenge="MFA_SETUP")
     flow = login_flow(world, fake)
     token = _started_setup(flow)
-    fake.hooks["verify_software_token"] = hook
+    fake.hooks[op] = hook
     with pytest.raises(error):
         flow.verify_totp_setup(token, CODE)
     fake.hooks.clear()
     if not kept:  # 확정 응답 — 울타리가 풀리고 복구가 바로 진행한다
-        assert fences(world) == [("ENROLLMENT", "PROVIDER_RETURNED")] * 2
+        assert fences(world) == [("ENROLLMENT", "PROVIDER_RETURNED")]
         assert reset(world, adapter_for(fake)).completed
         return
     fence = unresolved(world)
@@ -889,6 +977,19 @@ def test_enrollment_outcome_decides_whether_the_fence_survives(world, hook, erro
         fence.mutation_id, K.ENROLLMENT, Res.OPERATOR_RECONCILED, T1, world.admin,
     )
     unchanged(world, fake)
+    assert unresolved(world) is None
+    assert reset(world, adapter_for(fake)).completed
+
+
+def test_non_success_verify_response_releases_the_enrollment_fence(world):
+    fake = FakeCognito(world.sub, challenge="MFA_SETUP")
+    flow = login_flow(world, fake)
+    token = _started_setup(flow)
+    fake.hooks["verify_software_token"] = lambda params: {"Status": "ERROR", "Session": "S2"}
+    with pytest.raises(AuthFailedError) as error:
+        flow.verify_totp_setup(token, CODE)
+    assert not error.value.from_provider_call  # SDK가 반환한 응답을 앱이 검증해 거절했다.
+    assert fences(world) == [("ENROLLMENT", "PROVIDER_RETURNED")]
     assert unresolved(world) is None
     assert reset(world, adapter_for(fake)).completed
 
@@ -1180,21 +1281,21 @@ def test_enrollment_record_and_a_concurrent_enrollment_claim_do_not_deadlock(mon
     fake = FakeCognito(world.sub, challenge="MFA_SETUP")
     flow = login_flow(world, fake)
     first = _started_setup(flow)
-    second = _started_setup(flow, begin=False)
+    second = _started_setup(flow)
     pause = pause_after(monkeypatch, "resolve_mutation")
     with ThreadPoolExecutor(2) as pool:
         recording = pool.submit(flow.verify_totp_setup, first, CODE)
         try:
             assert pause.entered.wait(10)
-            claiming = pool.submit(flow.begin_totp_setup, second)
+            claiming = pool.submit(flow.verify_totp_setup, second, CODE)
             wait_until_blocked_on_users_lock(world.admin_engine, query="%")
         finally:
             pause.release.set()
         assert recording.result(timeout=10).step is LoginStep.EMAIL_VERIFICATION_REQUIRED
-        claiming.result(timeout=10)
+        assert claiming.result(timeout=10).step is LoginStep.EMAIL_VERIFICATION_REQUIRED
     assert len(fake.ops("associate_software_token")) == 2
-    assert len(fake.ops("verify_software_token")) == 1
-    assert fences(world) == [("ENROLLMENT", "PROVIDER_RETURNED")] * 3
+    assert len(fake.ops("verify_software_token")) == 2
+    assert fences(world) == [("ENROLLMENT", "PROVIDER_RETURNED")] * 2
     assert user_state(world.engine, world.target) == (0, "NONE", T0)
 
 
@@ -1326,7 +1427,7 @@ def test_every_built_adapter_sends_totp_delete_once_while_ordinary_calls_keep_th
 
 @pytest.mark.parametrize(
     "op",
-    ["AssociateSoftwareToken", "VerifySoftwareToken", "AdminRespondToAuthChallenge", "SetUserMFAPreference"],
+    ["VerifySoftwareToken", "AdminRespondToAuthChallenge", "SetUserMFAPreference"],
 )
 def test_production_login_flow_sends_each_enrollment_mutation_once_and_keeps_the_fence_on_timeout(
     monkeypatch, world, op
@@ -1342,13 +1443,9 @@ def test_production_login_flow_sends_each_enrollment_mutation_once_and_keeps_the
     token, step = flow.start(EMAIL, PASSWORD)
     assert step is LoginStep.TOTP_SETUP_REQUIRED
     assert (http.count("AdminInitiateAuth"), http.count("AdminGetUser")) == (2, 2)
-    if op == "AssociateSoftwareToken":
-        with pytest.raises(AuthProviderUnavailableError):
-            flow.begin_totp_setup(token)
-    else:
-        flow.begin_totp_setup(token)
-        with pytest.raises(AuthProviderUnavailableError):
-            flow.verify_totp_setup(token, CODE)
+    flow.begin_totp_setup(token)
+    with pytest.raises(AuthProviderUnavailableError):
+        flow.verify_totp_setup(token, CODE)
     assert http.count(op) == 1  # 재시도 없음 — 첫 시도의 적용 여부를 모른다
     fence = unresolved(world)
     assert (fence.kind, fence.resolution) == (K.ENROLLMENT, None)
@@ -1356,6 +1453,42 @@ def test_production_login_flow_sends_each_enrollment_mutation_once_and_keeps_the
         reset(world, adapter_for(FakeCognito(world.sub)))
     assert busy.value.reason is RecoveryRejection.BUSY
     assert user_state(world.engine, world.target) == (0, "NONE", T0)
+
+
+def test_production_associate_timeout_is_single_attempt_and_does_not_fence_retry(monkeypatch, world):
+    http = cognito_http(monkeypatch, world.sub)
+    flow = production_flow(monkeypatch, world)
+    http.script["AssociateSoftwareToken"] = [
+        "timeout", (400, {"__type": "InvalidParameterException", "message": "PRIVATE"}),
+    ]
+    token = _started_setup(flow, begin=False)
+    with pytest.raises(AuthProviderUnavailableError):
+        flow.begin_totp_setup(token)
+    assert http.count("AssociateSoftwareToken") == 1
+    assert fences(world) == []
+    assert unresolved(world) is None
+    http.script.clear()
+    _enroll_fresh(flow)  # SDK 재시도가 아니라 사용자의 새 로그인이다.
+    assert http.count("AssociateSoftwareToken") == 2
+    assert fences(world) == [("ENROLLMENT", "PROVIDER_RETURNED")]
+    assert reset(world, adapter_for(FakeCognito(world.sub))).completed
+
+
+@pytest.mark.parametrize(
+    "op", ["VerifySoftwareToken", "AdminRespondToAuthChallenge", "SetUserMFAPreference"]
+)
+def test_production_unclassified_4xx_releases_the_enrollment_fence(monkeypatch, world, op):
+    http = cognito_http(monkeypatch, world.sub)
+    flow = production_flow(monkeypatch, world)
+    token = _started_setup(flow)
+    http.script[op] = [(400, {"__type": "InvalidParameterException", "message": "PRIVATE"})]
+    with pytest.raises(AuthProviderUnavailableError) as error:
+        flow.verify_totp_setup(token, CODE)
+    assert error.value.provider_status == 400
+    assert http.count(op) == 1
+    assert fences(world) == [("ENROLLMENT", "PROVIDER_RETURNED")]
+    assert unresolved(world) is None
+    assert reset(world, adapter_for(FakeCognito(world.sub))).completed
 
 
 def test_production_login_flow_keeps_sdk_retries_for_ordinary_calls(monkeypatch, world):

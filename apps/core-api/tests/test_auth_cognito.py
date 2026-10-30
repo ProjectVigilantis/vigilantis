@@ -139,6 +139,7 @@ def test_software_token_get_user_email_and_revoke_params(env):
 INIT = ("admin_initiate_auth", lambda a: a.initiate_auth("a@b.com", "pw"))
 RESPOND = ("admin_respond_to_auth_challenge", lambda a: a.respond_to_challenge("MFA_SETUP", "SESSION-0123456789abcdef", UID, {}))
 VERIFY = ("verify_software_token", lambda a: a.verify_software_token("SESSION-0123456789abcdef", "123456", "V"))
+PREFERENCE = ("set_user_mfa_preference", lambda a: a.prefer_software_token_mfa("AT"))
 EMAIL_SEND = ("get_user_attribute_verification_code", lambda a: a.send_email_code("AT"))
 EMAIL_VERIFY = ("verify_user_attribute", lambda a: a.verify_email_code("AT", "654321"))
 NEWPW = ("admin_respond_to_auth_challenge", lambda a: a.respond_to_challenge("NEW_PASSWORD_REQUIRED", "SESSION-0123456789abcdef", UID, {}))
@@ -165,6 +166,9 @@ NEWPW = ("admin_respond_to_auth_challenge", lambda a: a.respond_to_challenge("NE
         (INIT, "InternalErrorException", 500, cognito.AuthProviderUnavailableError),
         (INIT, "NotAuthorizedException", 503, cognito.AuthProviderUnavailableError),
         (INIT, "SomethingNewException", 400, cognito.AuthProviderUnavailableError),
+        (VERIFY, "InvalidParameterException", 400, cognito.AuthProviderUnavailableError),
+        (RESPOND, "InvalidParameterException", 400, cognito.AuthProviderUnavailableError),
+        (PREFERENCE, "InvalidParameterException", 400, cognito.AuthProviderUnavailableError),
     ],
 )
 def test_error_classification(env, caplog, call, aws_code, status, expected):
@@ -174,6 +178,8 @@ def test_error_classification(env, caplog, call, aws_code, status, expected):
     with caplog.at_level(logging.DEBUG), pytest.raises(cognito.AuthError) as info:
         invoke(adapter)
     assert type(info.value) is expected
+    assert info.value.provider_status == status
+    assert info.value.from_provider_call
     assert str(info.value) == expected.code.value
     assert "PRIVATE-TEXT" not in caplog.text
     assert aws_code in caplog.text and op in caplog.text
@@ -201,10 +207,11 @@ def test_codes_map_one_to_one():
     }
 
 
-def test_connection_error_is_provider_unavailable(caplog):
+@pytest.mark.parametrize("error_type", [EndpointConnectionError, ReadTimeoutError])
+def test_connection_error_is_provider_unavailable(caplog, error_type):
     class Broken:
         def admin_initiate_auth(self, **_):
-            raise EndpointConnectionError(endpoint_url="https://secret-host.example")
+            raise error_type(endpoint_url="https://secret-host.example")
 
     adapter = cognito.CognitoAdapter(
         Broken(), user_pool_id=POOL, client_id=CLIENT_ID, client_secret=CLIENT_SECRET, region="ap-northeast-2"
@@ -212,6 +219,8 @@ def test_connection_error_is_provider_unavailable(caplog):
     with caplog.at_level(logging.DEBUG), pytest.raises(cognito.AuthProviderUnavailableError) as info:
         adapter.initiate_auth("a@b.com", "pw")
     assert "secret-host" not in caplog.text and "secret-host" not in str(info.value)
+    assert info.value.provider_status is None  # 분류에 쓰는 합성 503 은 제공자의 응답이 아니다
+    assert info.value.from_provider_call
     assert info.value.__cause__ is None and info.value.__suppress_context__
 
 
@@ -282,8 +291,10 @@ def test_admin_get_user_network_failure_is_unavailable():
 def test_admin_get_user_malformed_identity_is_unavailable(env, response):
     adapter, stubber = env
     stubber.add_response("admin_get_user", response, {"UserPoolId": POOL, "Username": EMAIL})
-    with pytest.raises(cognito.AuthProviderUnavailableError):
+    with pytest.raises(cognito.AuthProviderUnavailableError) as info:
         adapter.admin_get_user(EMAIL)
+    assert info.value.provider_status is None
+    assert not info.value.from_provider_call
 
 
 def test_admin_create_user_params_for_create_and_resend(env):
