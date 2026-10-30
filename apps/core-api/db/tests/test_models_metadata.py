@@ -50,6 +50,9 @@ EXPECTED_TABLES = {
     "user_admin_events",
     # 조치 승인 · 종료 판단 감사 기록 (T-2 · #544)
     "audit_events",
+    # TOTP 분실 복구 작업 · 신원 변경 울타리 (#515)
+    "totp_recovery_operations",
+    "totp_provider_mutations",
 }
 
 
@@ -89,6 +92,19 @@ def test_row_invariant_constraints_registered():
             "ck_app_users_tenant_binding_by_account_type",
             "ck_app_users_platform_role_is_admin",
             "ck_app_users_platform_role_by_account_type",
+        },
+        # TOTP 분실 복구 작업 — 신원 확인 진술 필수 · 확정 모양 (#515)
+        "totp_recovery_operations": {
+            "ck_totp_recovery_operations_identity_verified",
+            "ck_totp_recovery_operations_generation_positive",
+            "ck_totp_recovery_operations_revoked_count_nonnegative",
+            "ck_totp_recovery_operations_finalized_shape",
+        },
+        # 신원 변경 울타리 — 종류별 작업 · 풀림 모양 · 정리 행위자 (#515)
+        "totp_provider_mutations": {
+            "ck_totp_provider_mutations_operation_by_kind",
+            "ck_totp_provider_mutations_resolution_shape",
+            "ck_totp_provider_mutations_reconciler_shape",
         },
     }
     for table, names in expected.items():
