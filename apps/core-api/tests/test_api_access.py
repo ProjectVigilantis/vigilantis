@@ -737,6 +737,8 @@ def _valid_bodies(incident_id: str) -> dict[tuple[str, str], dict | None]:
         ("PATCH", "/api/v1/tenants/{tenant_id}"): {"name": "x"},
         ("DELETE", "/api/v1/tenants/{tenant_id}"): None,
         ("POST", "/api/v1/tenants/{tenant_id}/suspend"): {"reason": "해지"},
+        ("POST", "/api/v1/tenants/{tenant_id}/verify"): None,
+        ("POST", "/api/v1/tenants/{tenant_id}/resume"): None,
     }
 
 

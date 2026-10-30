@@ -6,7 +6,7 @@
 #     없어 응답을 못 만들면(503) 쓰기도 남지 않는다.
 #   - 상태 전이의 받는 상태는 저장소(db.repositories.tenants)가 계약 상수로 판정한다. 0행이면 다시 읽어
 #     없으면 404 TENANT_NOT_FOUND, 있으면 409 TENANT_STATE_CONFLICT 다.
-#   - 연결 확인(verify · resume)은 여기 없다 — 테넌트별 AssumeRole 이 있어야 하는 동작이다.
+#   - 연결 확인은 읽기 트랜잭션을 끝낸 뒤 AWS 에 묻고, 쓰기 직전 권한 · 대상 설정 · 상태를 다시 확인한다.
 #   - external_id 는 생성 응답과 재발급(onboarding)에서만 내보낸다. 상세 응답에는 칸이 없다(계약).
 # ==============================================================================
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from urllib.parse import urlencode
 
@@ -27,6 +28,8 @@ from exceptions import ApiError
 from identifiers import canonical_id
 from schemas.api.errors import ErrorCode
 from schemas.api.tenants import (
+    RESUMABLE_STATUSES,
+    VERIFIABLE_STATUSES,
     TenantCreateRequest,
     TenantCreateResponse,
     TenantDetail,
@@ -37,9 +40,12 @@ from schemas.api.tenants import (
     TenantSubscription,
     TenantUpdateRequest,
     TenantVerification,
+    TenantVerifyResponse,
 )
+from services.aws.client import TenantAccess
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from tenant_verification import verify_connection
 
 # 같은 계정의 두 번째 테넌트를 DB 유일성이 거절할 때의 제약 이름(db.session NAMING_CONVENTION)
 _ACCOUNT_UNIQUE = "uq_tenants_aws_account_id"
@@ -198,6 +204,88 @@ def _commit_after(db: Session, build):
         raise
     db.commit()
     return response
+
+
+@dataclass(frozen=True)
+class _ConnectionTarget:
+    status: TenantStatus
+    access: TenantAccess
+    account_id: str
+    region: str
+    suspended_at: datetime | None
+    suspended_reason: str | None
+
+
+def _connection_target(tenant: models.Tenant) -> _ConnectionTarget:
+    # rollback 뒤 ORM 속성을 읽으면 SELECT 와 트랜잭션이 다시 열리므로 값만 옮긴다.
+    return _ConnectionTarget(
+        status=tenant.status,
+        access=TenantAccess(tenant.tenant_id, tenant.access_role_arn, tenant.external_id),
+        account_id=tenant.aws_account_id,
+        region=tenant.regions[0],
+        # 재개 뒤 다시 정지되면 상태명은 같아도 처음 확인을 시작한 정지가 아니다.
+        suspended_at=tenant.suspended_at,
+        suspended_reason=tenant.suspended_reason,
+    )
+
+
+def _verification_response(
+    row: tenants_repo.TenantWithCounts, settings: TenantSettings
+) -> TenantVerifyResponse:
+    detail = _detail(row, settings)
+    return TenantVerifyResponse(tenant=detail, verification=detail.last_verification)
+
+
+def _verify_tenant(
+    db: Session,
+    actor: admin_service.Actor,
+    tenant_id: str,
+    settings: TenantSettings,
+    *,
+    resume: bool,
+) -> TenantVerifyResponse:
+    accepted = RESUMABLE_STATUSES if resume else VERIFIABLE_STATUSES
+    write = tenants_repo.resume_tenant if resume else tenants_repo.record_verification
+    try:
+        with _management(db, actor) as user:
+            target = _connection_target(_load(db, tenant_id, user).tenant)
+            if target.status not in accepted:
+                raise ApiError(ErrorCode.TENANT_STATE_CONFLICT)
+    finally:
+        db.rollback()
+
+    outcome = verify_connection(
+        target.access, expected_account_id=target.account_id, region=target.region
+    )
+    observed_at = actor.clock()
+    stored_id = target.access.tenant_id
+    with _management(db, actor) as user:
+        _load(db, stored_id, user)
+        # 설정 대조와 조건부 갱신 사이에도 다른 쓰기가 끼어들지 못하게 한다.
+        current = tenants_repo.read_tenant_for_share(db, stored_id)
+        if current is None:
+            raise _rejected(db, stored_id, user)
+        if _connection_target(current) != target:
+            raise ApiError(ErrorCode.TENANT_STATE_CONFLICT)
+        if not write(
+            db, stored_id, result=outcome.result, reason_code=outcome.reason_code, now=observed_at
+        ):
+            raise _rejected(db, stored_id, user)
+        return _commit_after(
+            db, lambda: _verification_response(_load(db, stored_id, user), settings)
+        )
+
+
+def verify_tenant(
+    db: Session, actor: admin_service.Actor, tenant_id: str, settings: TenantSettings
+) -> TenantVerifyResponse:
+    return _verify_tenant(db, actor, tenant_id, settings, resume=False)
+
+
+def resume_tenant(
+    db: Session, actor: admin_service.Actor, tenant_id: str, settings: TenantSettings
+) -> TenantVerifyResponse:
+    return _verify_tenant(db, actor, tenant_id, settings, resume=True)
 
 
 def create_tenant(
