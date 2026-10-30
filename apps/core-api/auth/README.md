@@ -2,7 +2,7 @@
 
 Cognito Admin 인증 API로 로그인을 진행하고, **이번 로그인에서 TOTP 단계 성공 응답을 서버가 직접 받은 뒤에만** 앱 서버 세션을 발급한다. 공개 계약은 `packages/schemas/api/auth.py`, 오류 코드는 `packages/schemas/api/errors.py`다.
 
-이 문서는 PR 1(로그인 기반), PR 2(API · WebSocket 접근 보호 · 역할 검사), PR 3(ADMIN 사용자 관리 · 사용자당 세션 1개 · 비밀번호 재설정 · 새 비밀번호 정책 · 사용자 관리 이력), 계정 종류(`account_type`)에 따른 테넌트 · 플랫폼 권한(§계정 종류와 테넌트 소속), PR 5(플랫폼 계정의 권한 등급 `platform_role`과 담당 고객 배정 · 업무 API의 고객 범위 · 직원 관리 API · 운영 CLI의 직원 생성과 첫 중앙 관리자 지정 — §계정 종류와 테넌트 소속 · §접근 보호 · §직원 관리 · §플랫폼 계정 CLI)의 백엔드 기준이다. 웹 화면(SSR) 쪽 처리는 `apps/web` 범위다 — PR 3 화면(사용자 관리 · 비밀번호 재설정 · 새 비밀번호 조건 · 한글 입력 경고 · 세션 종료 안내)은 최소 구현이고 시각 다듬기는 포함하지 않으며, `apps/web/src/lib/session-expiry.ts`의 시계 보정은 PR 3 범위 밖이다. 계정 종류에 따른 화면 기능(`apps/web/src/lib/home-path.ts` · `components/gnb.tsx` 포함)은 §화면이 다룬다. 분실한 TOTP의 재설정은 PR 3에서 제외했고, 플랫폼 등급과 직원 관리도 TOTP 정책 · 복구를 바꾸지 않는다(TOTP 분실 복구는 [#515](https://github.com/ProjectVigilantis/vigilantis/issues/515) 범위, §운영 주의점). 실제 Cognito · HTTPS 배포 환경 · 환경 이전에서의 검증과 환경별 설정 · 배포 권한 반영은 이 문서가 보증하지 않는 배포 전제다(§User Pool · 앱 클라이언트 전제 · §테스트).
+이 문서는 PR 1(로그인 기반), PR 2(API · WebSocket 접근 보호 · 역할 검사), PR 3(ADMIN 사용자 관리 · 사용자당 세션 1개 · 비밀번호 재설정 · 새 비밀번호 정책 · 사용자 관리 이력), 계정 종류(`account_type`)에 따른 테넌트 · 플랫폼 권한(§계정 종류와 테넌트 소속), PR 5(플랫폼 계정의 권한 등급 `platform_role`과 담당 고객 배정 · 업무 API의 고객 범위 · 직원 관리 API · 운영 CLI의 직원 생성과 첫 중앙 관리자 지정 — §계정 종류와 테넌트 소속 · §접근 보호 · §직원 관리 · §플랫폼 계정 CLI), #552(공개 도입 신청 접수와 고객 문의 · 운영 알림의 접근 판정 — §도입 신청 · 고객 문의 · 운영 알림)의 백엔드 기준이다. 웹 화면(SSR) 쪽 처리는 `apps/web` 범위다 — PR 3 화면(사용자 관리 · 비밀번호 재설정 · 새 비밀번호 조건 · 한글 입력 경고 · 세션 종료 안내)은 최소 구현이고 시각 다듬기는 포함하지 않으며, `apps/web/src/lib/session-expiry.ts`의 시계 보정은 PR 3 범위 밖이다. 계정 종류에 따른 화면 기능(`apps/web/src/lib/home-path.ts` · `components/gnb.tsx` 포함)은 §화면이 다룬다. 분실한 TOTP의 재설정은 PR 3에서 제외했고, 플랫폼 등급과 직원 관리도 TOTP 정책 · 복구를 바꾸지 않는다(TOTP 분실 복구는 [#515](https://github.com/ProjectVigilantis/vigilantis/issues/515) 범위, §운영 주의점). 실제 Cognito · HTTPS 배포 환경 · 환경 이전에서의 검증과 환경별 설정 · 배포 권한 반영은 이 문서가 보증하지 않는 배포 전제다(§User Pool · 앱 클라이언트 전제 · §테스트).
 
 근거 표시: **[표준]** 외부 표준 · 공식 문서, **[팀 결정]** 이슈 #492 확정 정책, **[#552 구현 계약]** 이슈 #552 구현에 승인된 정책(팀 SSOT 등재 전), **[판단]** 이 구현의 선택. 동작의 근거는 현재 코드와 자동 테스트(대역 · 실제 PostgreSQL)이며, 자동 테스트가 보장하지 않는 범위(실제 Cognito · HTTPS 배포 환경)는 §테스트에 적었다.
 
@@ -186,9 +186,12 @@ PLATFORM 계정은 모두 `role=ADMIN`(호환 값)이고, 아래 PLATFORM 열은
 | 고객 수정 · 삭제 · 정지 · 온보딩 조회 `GET /api/v1/tenants/{id}/onboarding` | 허용 | 배정 고객 | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
 | 직원 관리 · 담당 고객 배정 `/api/v1/staff*` | 허용(자기 등급 · 상태 변경은 403) | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
 | (#552) 도입 신청 관리 `GET /api/v1/signup-requests` · `PUT /api/v1/signup-requests/{request_id}/status` | 허용 | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
+| (#552) 문의 등록 `POST /api/v1/inquiries` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 자기 고객(정지 포함) | 자기 고객(정지 포함) | 자기 고객(정지 포함) |
+| (#552) 문의 목록 `GET /api/v1/inquiries` | 전체 | 배정 고객의 문의 | 자기 고객의 문의(정지 포함) | 자기 고객의 문의(정지 포함) | 자기 고객의 문의(정지 포함) |
+| (#552) 문의 상태 · 메모 · 이력 `/api/v1/inquiries/{inquiry_id}/*` | 전체 | 배정 고객의 문의 | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
 | (#552) 운영 알림 `/api/v1/notifications*` | 현재 권한 범위(읽음은 사용자별) | 현재 권한 범위(읽음은 사용자별) | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
 
-TENANT 계정의 메트릭 · 실시간 연결과 고객용 업무 화면은 아직 열리지 않았다(T-4 · T-5). 정지 고객 사용자의 자기 기록 조회 요구([ADR-0012](../../../docs/adr/0012-saas-transition-account-structure-and-tenant-model.md))도 업무 API 조회 범위에서만 충족되고, 화면 · 메트릭 · 실시간 연결은 그 범위다. 이 모듈은 테넌트 데이터 격리가 완성됐다고 주장하지 않는다.
+TENANT 계정의 메트릭 · 실시간 연결과 고객용 업무 화면은 아직 열리지 않았다(T-4 · T-5). 정지 고객 사용자의 자기 기록 조회 요구([ADR-0012](../../../docs/adr/0012-saas-transition-account-structure-and-tenant-model.md))도 업무 API 조회 범위에서만 충족되고, 화면 · 메트릭 · 실시간 연결은 그 범위다. (#552) 정지 고객 사용자는 지원 문의를 등록하고 자기 고객의 문의를 조회할 수 있다 — 지원 경로만의 예외다(§도입 신청 · 고객 문의 · 운영 알림). 이 모듈은 테넌트 데이터 격리가 완성됐다고 주장하지 않는다.
 
 **기록의 고객 소속에는 한계가 있다.** 새 인시던트는 그 AWS 계정에 등록된 고객을 소속으로 받고, 그 인시던트의 실행은 인시던트의 소속을 따른다. 등록된 고객이 없는 계정의 인시던트는 소속 없이 남는다. 수집기(`start_collection_run` · `upsert_asset`)는 아직 수집 회차 · 자산 행에 고객 소속을 채우지 않는다. 그래서 실제로 수집된 자산과 그 판정 기록은 소속 없는 기록으로 남아 CENTRAL_ADMIN에게만 보이고, 배정된 TENANT_MANAGER와 TENANT 계정의 결과에는 나오지 않는다. 소속을 모르는 이전 · 미등록 기록을 고객 범위로 추정하거나 백필하지 않는다. 자산 목록과 메트릭 여섯 축은 기록을 (소속 고객, 그 고객의 관제 리전) 짝으로 고른다 — 한 고객이 관제에서 뺀 리전의 기록은 범위 안의 다른 고객(예: 같은 TENANT_MANAGER의 다른 담당 고객)이 그 리전을 관제하더라도 다시 들어오지 않는다. 소속 없는 이전 기록은 서버 설정의 관제 리전에 있는 것만 CENTRAL_ADMIN에게 보인다. 담당 범위(어느 고객을 보는가)는 이 리전 선택과 따로 판정한다. 자산 목록의 수집 상태는 범위 안의 고객별 · 리전별 최신 회차(CENTRAL_ADMIN은 소속 없는 회차 포함)를 함께 접은 값이고, 커버리지는 고객별이 아니라 리전별로 본다 — 관제 리전마다 어떤 고객이든 회차가 있는지만 볼 뿐 고객마다 수집기가 연결됐다는 근거가 아니다. 범위 필터의 자동 테스트는 소속을 명시한 기록으로 돌기 때문에, 실제 수집 데이터의 고객 소속을 보증하지 않는다. 수집기 · Workflow 같은 백그라운드 처리의 테넌트 격리도 이 범위(T-1)가 아니다.
 
@@ -208,6 +211,8 @@ TENANT 계정의 메트릭 · 실시간 연결과 고객용 업무 화면은 아
 | 공개 접수 | `POST /api/v1/signup-requests`만 세션 없이 받는다. 이 경로에는 Origin 검사(`AUTH_ALLOWED_ORIGINS`), UUIDv4 `Idempotency-Key` 헤더 필수, 본문 크기 제한만 건다. 본문 크기는 JSON 파싱 전에 실제로 받은 바이트로 제한하고(초과 413), 한도는 기존 신청 양식의 칸 제한(이름 100 · 이메일 254 · 메모 1000자)에서 정했다. 같은 Key로 다시 보내면 같은 신청 ID로 202, 같은 Key에 다른 본문이면 409다. Key와 신청의 연결은 신청과 함께 보관하며 별도 만료 시간(TTL)을 두지 않는다 | [#552 구현 계약] |
 | 공개 접수의 한계 | 봇 방어나 이메일 소유 확인이 아니다. 요청 빈도 제한(WAF 임계값)은 정하지 않았고, 이 변경은 네트워크상 공개 허용 · 배포를 포함하지 않는다. 운영 환경의 개인정보 보존 기간과 빈도 제한 정책은 공개 출시 전에 정할 조건이다 | [#552 구현 계약] |
 | 도입 신청 관리 | 목록 · 상태 변경은 CENTRAL_ADMIN만 한다(`require_central_admin`). TENANT_MANAGER와 TENANT 계정은 403 `AUTH_FORBIDDEN`이다 | [#552 구현 계약] |
+| 고객 문의 | 등록 · 목록은 TENANT 계정이면 역할(ADMIN · OPERATOR · VIEWER)과 소속 테넌트 정지에 관계없이 자기 고객 범위에서 쓴다. PLATFORM 계정은 등록하지 않고(403), 목록은 CENTRAL_ADMIN 전체 · TENANT_MANAGER 배정 고객이다. 상태 변경 · 메모 · 이력은 플랫폼 관리 등급(`require_tenant_management`)만, 대상 문의가 행위자의 고객 범위 안일 때만 한다. 범위 밖 문의는 없는 문의와 같은 404다 | [#552 구현 계약] |
+| 정지 고객 예외 | 지원 문의 등록 · 조회에만 적용한다. 정지 테넌트 행위자의 사용자 관리 쓰기 409(§사용자 관리), 정지 고객 대상의 새 실행과 TENANT 계정의 인시던트 종료 409(§접근 보호)는 그대로이고, 문의가 AWS 조치나 관리 권한을 다시 열지 않는다 | [#552 구현 계약] |
 | 운영 알림 | `GET /api/v1/notifications` · `POST /api/v1/notifications/read`는 플랫폼 관리 등급만 쓴다(라우터 의존성 `require_tenant_management`). 요청 시점에 권한이 있는 범위의 알림만 보이고, 읽음은 사용자별로 남는다. TENANT 계정은 역할과 관계없이 403 `AUTH_FORBIDDEN`이다 | [#552 구현 계약] |
 
 실제 배포 환경에서의 공개 동작과 그 검증은 이 문서가 보증하지 않는다(§테스트).
@@ -251,7 +256,7 @@ TENANT 계정의 메트릭 · 실시간 연결과 고객용 업무 화면은 아
 | 계정 종류 부여(#492) | 사용자 관리 API로 만드는 계정은 항상 TENANT다. 이 API로 PLATFORM을 주거나 UNASSIGNED를 만들거나 소속(`tenant_id`)을 옮기는 경로가 없다(역할 · 상태 변경 요청에는 소속 칸이 없다). PLATFORM은 운영 CLI(§플랫폼 계정 CLI)로만 생긴다. `platform_role`도 이 API로 주거나 바꾸지 않는다 | [팀 결정: 명시적 플랫폼 권한 · 고객사 범위] [판단: UNASSIGNED] |
 | 초대 대상 테넌트(#492) | `tenant_id`는 스키마상 선택이고 최종 값은 서버가 정한다. 플랫폼 관리 권한자는 반드시 보낸다(없으면 422 `REQUEST_VALIDATION_FAILED`, 없는 테넌트와 TENANT_MANAGER에게 배정되지 않은 테넌트는 404 `TENANT_NOT_FOUND`). TENANT ADMIN은 생략하거나 자기 테넌트만 보낼 수 있고, 다른 값은 404 `TENANT_NOT_FOUND`다 | [팀 결정: 고객사 범위] [판단: 요청 형태 · 오류 코드] |
 | 테넌트 상태(#492) | 초대 · 재발송은 대상 테넌트가 ACTIVE일 때만 받는다(그 밖은 409 `TENANT_STATE_CONFLICT`). Cognito 호출 전에 확인하고, DB 쓰기 직전에 잠금 안에서 다시 확인한다(테넌트 행 `FOR SHARE` — commit까지 상태 전이를 막는다). 역할 · 상태 · 세션 회수 · 조회는 대상 테넌트 상태를 보지 않는다 | [판단] |
-| 정지 테넌트의 행위자(#492) | 소속 테넌트가 SUSPENDED인 TENANT 행위자의 쓰기(초대 · 재발송 · 역할 · 상태 · 세션 회수)는 409 `TENANT_SUSPENDED`이고, 잠금 안에서 다시 판정한다. 조회는 허용한다. 로그인 · 로그아웃 · 활동 · 비밀번호 재설정은 테넌트 정지와 관계없이 동작한다. 사용자 `DISABLED`는 이와 별개 상태다(로그인 403 `ACCOUNT_DISABLED` · 세션 401) | [판단] |
+| 정지 테넌트의 행위자(#492) | 소속 테넌트가 SUSPENDED인 TENANT 행위자의 쓰기(초대 · 재발송 · 역할 · 상태 · 세션 회수)는 409 `TENANT_SUSPENDED`이고, 잠금 안에서 다시 판정한다. 조회는 허용한다. 로그인 · 로그아웃 · 활동 · 비밀번호 재설정과 (#552) 지원 문의 등록 · 조회는 테넌트 정지와 관계없이 동작한다(§도입 신청 · 고객 문의 · 운영 알림). 사용자 `DISABLED`는 이와 별개 상태다(로그인 403 `ACCOUNT_DISABLED` · 세션 401) | [판단] |
 
 ### 부분 실패
 
