@@ -7,6 +7,14 @@ VerifiedIdentity 를 돌려준다.
 그 밖의 토큰 발급 · 챌린지는 거절한다. acr · auth_time · 사용자 MFA 설정은 근거로 쓰지 않는다.
 토큰은 호출자에게 반환하지 않고 로그 · 저장하지 않는다. refresh token 은 완료 · 실패 · 요청 중 만료 확인 때
 그 자리에서 폐기하고, 사용자가 떠난 흐름은 다음 요청의 정리(sweep) 때 폐기한다(재시작하면 메모리와 함께 사라진다).
+
+TOTP 분실 복구(#515) — 비밀번호 단계 뒤 · TOTP 증명 전에 AdminGetUser 가 돌려준 sub 로 앱 계정의 인증
+세대를 포착한다(LoginTicket). TOTP 증명 뒤 GetUser 의 sub 가 포착한 sub 와 같아야 하고, VerifiedIdentity 는
+포착한 세대를 싣는다 — 완료(auth.service.complete_login)가 users 잠금 안에서 현재 세대와 대조한다.
+복구 차단 중(RESET_PENDING)이면 흐름을 시작하지 않는다. 새 등록 대기 중에 포착한 흐름은 새 MFA_SETUP 만
+진행한다. TOTP 등록 변경(AssociateSoftwareToken · VerifySoftwareToken · MFA_SETUP 응답 · 선호 설정)은 관문의
+신원 변경 울타리 안에서, 포착한 세대가 아직 현재일 때만 Cognito 에 보낸다. 새 등록은 MFA_SETUP 응답의
+AuthenticationResult 와 GetUser 신원 대조가 끝난 뒤에만 기록한다(토큰은 흐름이 쥐어 기록 실패 때 폐기된다).
 """
 
 from __future__ import annotations
@@ -16,9 +24,10 @@ import logging
 import re
 import time
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import NamedTuple
+from typing import NamedTuple, Protocol
 from urllib.parse import quote
 
 from schemas.api.auth import LoginStep
@@ -58,6 +67,41 @@ class VerifiedIdentity:
     email: str
     mfa_step: MfaStep
     email_proven: bool = False  # 이 흐름에서 이메일 코드(VerifyUserAttribute)가 성공했을 때만 True
+    #: TOTP 증명 전에 포착한 앱 계정의 인증 세대(#515). None 은 포착 때 앱 계정이 없었다는 뜻이다.
+    generation: int | None = field(kw_only=True)
+
+
+@dataclass(frozen=True)
+class LoginTicket:
+    """비밀번호 단계 뒤 · TOTP 증명 전에 포착한 안정 신원(issuer, sub)과 그때의 인증 세대 (#515)."""
+
+    issuer: str
+    sub: str
+    #: None — 포착 때 그 신원의 앱 계정이 없었다(완료가 ACCOUNT_NOT_PROVISIONED 로 끝난다).
+    generation: int | None
+    #: 복구 뒤 새 등록을 기다리는 중에 포착했다 — 새 MFA_SETUP 만 진행할 수 있다.
+    setup_only: bool = False
+
+
+class LoginGate(Protocol):
+    """LoginFlow 가 앱 상태를 읽고 TOTP 등록 변경을 직렬화하는 경계 (#515). AuthError 만 던진다."""
+
+    def bind(self, issuer: str, sub: str) -> LoginTicket:
+        """현재 세대를 포착한다. 복구 차단 중이면 AuthFailedError."""
+        ...
+
+    def proof_recorded(self, ticket: LoginTicket) -> bool:
+        """포착한 세대가 아직 현재이고 그 세대의 이메일 증명이 기록돼 있는지."""
+        ...
+
+    def enrollment(self, ticket: LoginTicket) -> AbstractContextManager[Callable[[], None]]:
+        """신원별 TOTP 등록 변경 구간 — 들어갈 때 포착한 세대가 현재여야 한다(아니면 AuthFailedError).
+
+        같은 신원의 다른 변경 · 복구가 풀리지 않았으면 AuthProviderUnavailableError. 구간이 결과 불명으로 끝나면
+        (AuthProviderUnavailableError · 그 밖의 예외) 신원은 운영자 정리 전까지 막힌다. 내놓는 함수는 새 등록
+        성공을 기록한다(새 등록 대기 → 차단 없음) — 실패하면 AuthError 를 낸다.
+        """
+        ...
 
 
 class StepResult(NamedTuple):
@@ -83,6 +127,7 @@ class _Flow:
     tokens: Tokens | None = field(default=None, repr=False)
     mfa_step: MfaStep | None = None
     identity: VerifiedIdentity | None = None
+    ticket: LoginTicket | None = None
 
 
 _CHALLENGE_STEPS = {
@@ -102,9 +147,9 @@ class LoginFlow:
         max_failures: int = 3,
         code_failure_limit: int = 10,
         code_failure_window_seconds: int = 900,
-        email_proof_recorded: Callable[[str, str], bool] = lambda issuer, sub: False,
+        gate: LoginGate,
     ) -> None:
-        self._email_proof_recorded = email_proof_recorded
+        self._gate = gate
         self._cognito = cognito
         self._store: FlowStore[_Flow] = store if store is not None else FlowStore()
         self._clock = clock
@@ -121,6 +166,7 @@ class LoginFlow:
         if self._limiter.blocked(flow.username, self._clock()):
             self._log_rate_limited(flow.username)
             raise AuthRateLimitedError() from None
+        self._bind(flow)
         token = self._store.new_token()
         self._store.put(token, flow, flow.expires_at)
         return token, flow.step
@@ -141,8 +187,9 @@ class LoginFlow:
 
     def begin_totp_setup(self, flow_token: str) -> TotpSetup:
         def op(flow: _Flow) -> TotpSetup:
-            assert flow.session is not None
-            secret, session = self._cognito.associate_software_token(flow.session)
+            assert flow.session is not None and flow.ticket is not None
+            with self._gate.enrollment(flow.ticket):
+                secret, session = self._cognito.associate_software_token(flow.session)
             if not session:
                 self._reject("ASSOCIATE_WITHOUT_SESSION")
             flow.session = session
@@ -156,17 +203,23 @@ class LoginFlow:
 
     def verify_totp_setup(self, flow_token: str, code: str) -> StepResult:
         def op(flow: _Flow) -> StepResult:
-            assert flow.session is not None
-            status, session = self._cognito.verify_software_token(
-                flow.session, code, _FRIENDLY_DEVICE_NAME
-            )
-            if status != "SUCCESS" or not session:
-                self._reject("VERIFY_SOFTWARE_TOKEN_" + (status if _NAME.fullmatch(status) else "UNKNOWN"))
-            flow.session = session
-            resp = self._cognito.respond_to_challenge("MFA_SETUP", session, flow.username, {})
-            if resp.tokens is None:
-                self._reject_challenge(resp, after="MFA_SETUP")
-            return self._after_totp(flow, resp.tokens, MfaStep.MFA_SETUP)
+            assert flow.session is not None and flow.ticket is not None
+            # 등록 확정 · MFA_SETUP 응답 · 선호 설정까지 같은 울타리 안에서 한다 — 복구 차단과 겹치지 않는다
+            with self._gate.enrollment(flow.ticket) as record_enrollment:
+                status, session = self._cognito.verify_software_token(
+                    flow.session, code, _FRIENDLY_DEVICE_NAME
+                )
+                if status != "SUCCESS" or not session:
+                    self._reject("VERIFY_SOFTWARE_TOKEN_" + (status if _NAME.fullmatch(status) else "UNKNOWN"))
+                flow.session = session
+                resp = self._cognito.respond_to_challenge("MFA_SETUP", session, flow.username, {})
+                if resp.tokens is None:
+                    self._reject_challenge(resp, after="MFA_SETUP")
+                # 새 등록 기록(이 세대의 새 등록 대기를 끝낸다 · 이메일 증명은 별도)은 AuthenticationResult ·
+                # 신원 대조 뒤에만 — 실패하면 흐름이 쥔 토큰이 폐기된다
+                return self._after_totp(
+                    flow, resp.tokens, MfaStep.MFA_SETUP, on_verified=record_enrollment
+                )
 
         return self._run(
             flow_token,
@@ -295,15 +348,37 @@ class LoginFlow:
         flow.step = step
         flow.setup_started = False
         flow.expires_at = self._clock() + SESSION_TTL_SECONDS
+        self._require_setup_while_reenrolling(flow)
 
-    def _proof_recorded(self, issuer: str, sub: str) -> bool:
+    def _bind(self, flow: _Flow) -> None:
+        """TOTP 증명 전에 안정 신원과 인증 세대를 포착한다 — 이메일 · 사용자 이름으로 앱 계정을 고르지 않는다."""
+        user = self._cognito.admin_get_user(flow.username)
+        if user is None:
+            self._reject("AdminGetUser found no user after password step")
+        flow.ticket = self._gate.bind(self._cognito.issuer, user.sub)
+        self._require_setup_while_reenrolling(flow)
+
+    def _require_setup_while_reenrolling(self, flow: _Flow) -> None:
+        # 새 등록 대기 중 포착한 흐름에 기존 TOTP 챌린지가 오면 삭제 확인 뒤에도 남은 등록이다 — 진행하지 않는다
+        if flow.ticket is not None and flow.ticket.setup_only and flow.step is LoginStep.TOTP_REQUIRED:
+            self._reject("totp reset requires fresh enrollment")
+
+    def _proof_recorded(self, ticket: LoginTicket) -> bool:
         try:
-            return bool(self._email_proof_recorded(issuer, sub))
+            return bool(self._gate.proof_recorded(ticket))
         except Exception:  # noqa: BLE001 - fail closed on any lookup error
             logger.error("email proof lookup failed")
             return False  # 조회 실패는 증명 없음으로 본다(이메일 코드 요구)
 
-    def _after_totp(self, flow: _Flow, tokens: Tokens, mfa_step: MfaStep) -> StepResult:
+    def _after_totp(
+        self,
+        flow: _Flow,
+        tokens: Tokens,
+        mfa_step: MfaStep,
+        *,
+        on_verified: Callable[[], None] | None = None,
+    ) -> StepResult:
+        """on_verified 는 토큰을 흐름에 맡기고 GetUser 신원이 포착한 신원과 같다고 확인한 뒤에 부른다."""
         now = self._clock()
         flow.tokens = tokens
         flow.session = None
@@ -316,16 +391,23 @@ class LoginFlow:
         sub = attrs.get("sub")
         if not sub:
             self._reject("GetUser without sub")
+        ticket = flow.ticket
+        assert ticket is not None
+        if sub != ticket.sub or self._cognito.issuer != ticket.issuer:
+            self._reject("GetUser identity differs from bound identity")
         flow.identity = VerifiedIdentity(
             issuer=self._cognito.issuer,
             sub=sub,
             email=attrs.get("email") or flow.email,
             mfa_step=mfa_step,
+            generation=ticket.generation,
         )
+        if on_verified is not None:
+            on_verified()
         if (
             not first_enrollment
             and attrs.get("email_verified") == "true"
-            and self._proof_recorded(flow.identity.issuer, sub)
+            and self._proof_recorded(ticket)
         ):
             return StepResult(LoginStep.COMPLETED, flow.identity)
         self._cognito.send_email_code(tokens.access_token)

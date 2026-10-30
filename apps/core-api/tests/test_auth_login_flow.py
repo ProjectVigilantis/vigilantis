@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import logging
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import boto3
@@ -49,8 +50,52 @@ class Clock:
         return self.now
 
 
+ISSUER = f"https://cognito-idp.ap-northeast-2.amazonaws.com/{POOL}"
+SUB = "sub-123"
+#: 시작이 받아들이는 챌린지 — 이 챌린지 뒤에만 AdminGetUser 로 신원을 묶는다(#515)
+BOUND_CHALLENGES = {"SOFTWARE_TOKEN_MFA", "MFA_SETUP", "NEW_PASSWORD_REQUIRED"}
+
+
+class FakeGate:
+    """LoginGate 대역 — 포착 · 증명 조회 · 등록 구간을 기록한다(DB 동작은 test_auth_totp_recovery 가 검증한다)."""
+
+    def __init__(self, *, proof=True, generation=0, setup_only=False) -> None:
+        self.proof = proof
+        self.generation = generation
+        self.setup_only = setup_only
+        self.binds: list[tuple[str, str]] = []
+        self.proofs: list[login_flow.LoginTicket] = []
+        self.enrollments: list[login_flow.LoginTicket] = []
+        self.records: list[login_flow.LoginTicket] = []
+        self.reject_bind: Exception | None = None
+        self.reject_enrollment: Exception | None = None
+        self.reject_record: Exception | None = None
+
+    def bind(self, issuer, sub):
+        self.binds.append((issuer, sub))
+        if self.reject_bind is not None:
+            raise self.reject_bind
+        return login_flow.LoginTicket(issuer, sub, self.generation, self.setup_only)
+
+    def proof_recorded(self, ticket):
+        self.proofs.append(ticket)
+        return self.proof
+
+    @contextmanager
+    def enrollment(self, ticket):
+        self.enrollments.append(ticket)
+        if self.reject_enrollment is not None:
+            raise self.reject_enrollment
+        yield lambda: self._record(ticket)
+
+    def _record(self, ticket):
+        if self.reject_record is not None:
+            raise self.reject_record
+        self.records.append(ticket)
+
+
 class Env:
-    def __init__(self, **flow_kwargs) -> None:
+    def __init__(self, gate: FakeGate | None = None, **flow_kwargs) -> None:
         client = boto3.client(
             "cognito-idp", region_name="ap-northeast-2", aws_access_key_id="dummy", aws_secret_access_key="dummy"
         )
@@ -61,19 +106,16 @@ class Env:
         adapter = cognito.CognitoAdapter(
             client, user_pool_id=POOL, client_id=CLIENT_ID, client_secret=CLIENT_SECRET, region="ap-northeast-2"
         )
-        flow_kwargs.setdefault("email_proof_recorded", lambda issuer, sub: True)
-        self.flow = login_flow.LoginFlow(adapter, self.store, clock=self.clock, **flow_kwargs)
+        self.gate = gate if gate is not None else FakeGate()
+        self.flow = login_flow.LoginFlow(adapter, self.store, clock=self.clock, gate=self.gate, **flow_kwargs)
 
     # --- Stubber 응답 등록 도우미 --------------------------------------------
-    def initiate(self, name=None, session="SESS-0-0123456789abcdef", params=None, tokens=False):
+    def initiate(self, name=None, session="SESS-0-0123456789abcdef", params=None, tokens=False, bind=None):
+        params = params if params is not None else {"USER_ID_FOR_SRP": UID}
         if tokens:
             resp = {"AuthenticationResult": self.tokens_payload()}
         else:
-            resp = {
-                "ChallengeName": name,
-                "Session": session,
-                "ChallengeParameters": params if params is not None else {"USER_ID_FOR_SRP": UID},
-            }
+            resp = {"ChallengeName": name, "Session": session, "ChallengeParameters": params}
         self.stubber.add_response(
             "admin_initiate_auth",
             resp,
@@ -83,6 +125,20 @@ class Env:
                 "AuthFlow": "ADMIN_USER_PASSWORD_AUTH",
                 "AuthParameters": {"USERNAME": EMAIL, "PASSWORD": PASSWORD, "SECRET_HASH": sh(EMAIL)},
             },
+        )
+        # 시작은 받아들인 챌린지 뒤(한도 확인 다음)에 AdminGetUser 로 sub 를 얻는다 — 거절 · 한도 경로는 bind=False
+        if bind if bind is not None else (not tokens and name in BOUND_CHALLENGES):
+            self.admin_get_user(params["USER_ID_FOR_SRP"])
+
+    def admin_get_user(self, username, sub=SUB):
+        self.stubber.add_response(
+            "admin_get_user",
+            {
+                "Username": username,
+                "UserAttributes": [{"Name": "sub", "Value": sub}, {"Name": "email", "Value": EMAIL}],
+                "UserStatus": "CONFIRMED",
+            },
+            {"UserPoolId": POOL, "Username": username},
         )
 
     @staticmethod
@@ -189,7 +245,9 @@ def test_enrolled_user_completes_and_revokes(env):
         sub="sub-123",
         email=EMAIL,
         mfa_step=login_flow.MfaStep.SOFTWARE_TOKEN_MFA,
+        generation=0,
     )
+    assert env.gate.binds == [(ISSUER, SUB)]
     env.done()
     assert len(env.store) == 0
 
@@ -617,8 +675,8 @@ def test_user_wide_code_failure_limit_across_flows(caplog):
             with pytest.raises(cognito.AuthRateLimitedError):
                 env.flow.submit_totp(token, TOTP_CODE)
             assert len(env.store) == 0
-            # start 는 AdminInitiateAuth 로 사용자를 식별한 뒤 흐름 저장 전에 거절
-            env.initiate("SOFTWARE_TOKEN_MFA")
+            # start 는 AdminInitiateAuth 로 사용자를 식별한 뒤 흐름 저장 전에 거절(AdminGetUser 전)
+            env.initiate("SOFTWARE_TOKEN_MFA", bind=False)
             with pytest.raises(cognito.AuthRateLimitedError):
                 env.flow.start(EMAIL, PASSWORD)
         assert len(env.store) == 0
@@ -669,13 +727,7 @@ def test_setup_verify_failures_count_toward_user_limit():
 
 
 def test_enrollment_email_proof_not_bypassed_by_restart_with_verified_cognito_email():
-    proofs: list[tuple[str, str]] = []
-
-    def recorded(issuer, sub):
-        proofs.append((issuer, sub))
-        return False
-
-    env = Env(email_proof_recorded=recorded)
+    env = Env(FakeGate(proof=False))
     try:
         # 1) 최초 등록 → 이메일 코드 단계에서 방치 (Cognito 는 이미 email_verified=true)
         queue_invited_until_setup(env)
@@ -698,7 +750,7 @@ def test_enrollment_email_proof_not_bypassed_by_restart_with_verified_cognito_em
         result = env.flow.submit_totp(token2, TOTP_CODE)
         assert result.step is LoginStep.EMAIL_VERIFICATION_REQUIRED
         assert result.identity is None
-        assert proofs == [(f"https://cognito-idp.ap-northeast-2.amazonaws.com/{POOL}", "sub-123")]
+        assert env.gate.proofs == [login_flow.LoginTicket(ISSUER, SUB, 0)]
         env.done()
     finally:
         env.stubber.deactivate()
@@ -733,9 +785,203 @@ def test_email_code_failures_count_toward_user_limit():
                 env.flow.submit_email_code(token, EMAIL_CODE)
         with pytest.raises(cognito.AuthRateLimitedError):  # Cognito 호출 없이 거절, 흐름 종료 + refresh 폐기
             env.flow.submit_email_code(token, EMAIL_CODE)
-        env.initiate("SOFTWARE_TOKEN_MFA")
+        env.initiate("SOFTWARE_TOKEN_MFA", bind=False)
         with pytest.raises(cognito.AuthRateLimitedError):
             env.flow.start(EMAIL, PASSWORD)
+        env.done()
+    finally:
+        env.stubber.deactivate()
+
+
+# ---------------------------------------------------------------------------- #515 신원 결합 · 세대 · 등록 구간
+def test_recovery_block_at_bind_stores_no_flow_and_reaches_no_totp_step():
+    env = Env(FakeGate())
+    try:
+        env.gate.reject_bind = cognito.AuthFailedError()
+        env.initiate("SOFTWARE_TOKEN_MFA")
+        with pytest.raises(cognito.AuthFailedError):
+            env.flow.start(EMAIL, PASSWORD)
+        assert env.gate.binds == [(ISSUER, SUB)]  # AdminGetUser 의 sub 로 묶는다 — 이메일 · Username 이 아니다
+        assert len(env.store) == 0
+        env.done()
+    finally:
+        env.stubber.deactivate()
+
+
+def test_admin_get_user_not_found_after_password_step_is_rejected(env):
+    env.initiate("SOFTWARE_TOKEN_MFA", bind=False)
+    env.stubber.add_client_error(
+        "admin_get_user",
+        service_error_code="UserNotFoundException",
+        service_message="m",
+        http_status_code=400,
+        expected_params={"UserPoolId": POOL, "Username": UID},
+    )
+    with pytest.raises(cognito.AuthFailedError):
+        env.flow.start(EMAIL, PASSWORD)
+    assert env.gate.binds == [] and len(env.store) == 0
+    env.done()
+
+
+def test_totp_proof_for_another_sub_than_the_bound_one_is_rejected_and_revoked(env):
+    env.initiate("SOFTWARE_TOKEN_MFA")
+    env.respond("SOFTWARE_TOKEN_MFA", "SESS-0-0123456789abcdef", totp_extra(), tokens=True)
+    env.stubber.add_response(
+        "get_user",
+        {"Username": UID, "UserAttributes": [{"Name": "sub", "Value": "sub-other"}, {"Name": "email", "Value": EMAIL}]},
+        {"AccessToken": ACCESS},
+    )
+    env.revoke()
+    token, _ = env.flow.start(EMAIL, PASSWORD)
+    with pytest.raises(cognito.AuthFailedError):
+        env.flow.submit_totp(token, TOTP_CODE)
+    assert len(env.store) == 0
+    env.done()
+
+
+def test_reenrollment_ticket_refuses_an_existing_totp_challenge():
+    env = Env(FakeGate(generation=1, setup_only=True))
+    try:
+        env.initiate("SOFTWARE_TOKEN_MFA")  # 시작에서 바로
+        with pytest.raises(cognito.AuthFailedError):
+            env.flow.start(EMAIL, PASSWORD)
+        env.initiate("NEW_PASSWORD_REQUIRED")  # 새 비밀번호 단계 뒤에 와도
+        env.respond(
+            "NEW_PASSWORD_REQUIRED", "SESS-0-0123456789abcdef", {"NEW_PASSWORD": NEW_PASSWORD},
+            next_challenge="SOFTWARE_TOKEN_MFA", next_session="SESS-1-0123456789abcdef",
+        )
+        token, step = env.flow.start(EMAIL, PASSWORD)
+        assert step is LoginStep.NEW_PASSWORD_REQUIRED
+        with pytest.raises(cognito.AuthFailedError):
+            env.flow.submit_new_password(token, NEW_PASSWORD)
+        assert len(env.store) == 0
+        env.done()
+    finally:
+        env.stubber.deactivate()
+
+
+def test_enrollment_gate_refusal_makes_no_provider_registration_call():
+    env = Env(FakeGate())
+    try:
+        queue_invited_until_setup(env)
+        token, _ = env.flow.start(EMAIL, PASSWORD)
+        env.flow.submit_new_password(token, NEW_PASSWORD)
+        env.flow.begin_totp_setup(token)  # 등록 구간 안에서 AssociateSoftwareToken
+        env.gate.reject_enrollment = cognito.AuthFailedError()
+        with pytest.raises(cognito.AuthFailedError):  # VerifySoftwareToken 을 보내지 않는다(대기 응답 없음)
+            env.flow.verify_totp_setup(token, TOTP_CODE)
+        assert len(env.gate.enrollments) == 2 and env.gate.records == []
+        assert len(env.store) == 0
+        env.done()
+    finally:
+        env.stubber.deactivate()
+
+
+def test_setup_records_enrollment_once_after_verify_success_and_carries_the_generation():
+    env = Env(FakeGate(generation=4, setup_only=True))
+    try:
+        queue_invited_until_setup(env)
+        queue_setup_success(env)
+        env.mfa_pref()
+        env.get_user(True)
+        env.send_email()
+        env.verify_email()
+        env.revoke()
+        token, _ = env.flow.start(EMAIL, PASSWORD)
+        env.flow.submit_new_password(token, NEW_PASSWORD)
+        env.flow.begin_totp_setup(token)
+        assert env.gate.records == []
+        assert env.flow.verify_totp_setup(token, TOTP_CODE).step is LoginStep.EMAIL_VERIFICATION_REQUIRED
+        ticket = login_flow.LoginTicket(ISSUER, SUB, 4, True)
+        assert env.gate.records == [ticket]
+        result = env.flow.submit_email_code(token, EMAIL_CODE)
+        assert (result.identity.generation, result.identity.mfa_step) == (4, login_flow.MfaStep.MFA_SETUP)
+        env.done()
+    finally:
+        env.stubber.deactivate()
+
+
+def test_setup_verify_non_success_records_nothing(env):
+    queue_invited_until_setup(env)
+    env.stubber.add_response(
+        "verify_software_token",
+        {"Status": "ERROR", "Session": "SESS-3-0123456789abcdef"},
+        {"Session": "SESS-2-0123456789abcdef", "UserCode": TOTP_CODE, "FriendlyDeviceName": "Vigilantis"},
+    )
+    token, _ = env.flow.start(EMAIL, PASSWORD)
+    env.flow.submit_new_password(token, NEW_PASSWORD)
+    env.flow.begin_totp_setup(token)
+    with pytest.raises(cognito.AuthFailedError):
+        env.flow.verify_totp_setup(token, TOTP_CODE)
+    assert env.gate.records == []
+    env.done()
+
+
+def _setup_until_verify(env):
+    token, _ = env.flow.start(EMAIL, PASSWORD)
+    env.flow.submit_new_password(token, NEW_PASSWORD)
+    env.flow.begin_totp_setup(token)
+    return token
+
+
+def test_setup_is_not_recorded_when_mfa_setup_fails_after_verify_success():
+    # VerifySoftwareToken SUCCESS 만으로는 새 등록이 아니다 — MFA_SETUP 의 AuthenticationResult 가 있어야 한다
+    env = Env(FakeGate(generation=4, setup_only=True))
+    try:
+        queue_invited_until_setup(env)
+        env.stubber.add_response(
+            "verify_software_token",
+            {"Status": "SUCCESS", "Session": "SESS-3-0123456789abcdef"},
+            {"Session": "SESS-2-0123456789abcdef", "UserCode": TOTP_CODE, "FriendlyDeviceName": "Vigilantis"},
+        )
+        env.respond_error("MFA_SETUP", "SESS-3-0123456789abcdef", {}, code="NotAuthorizedException")
+        token = _setup_until_verify(env)
+        with pytest.raises(cognito.AuthFlowExpiredError):
+            env.flow.verify_totp_setup(token, TOTP_CODE)
+        assert env.gate.records == []
+        assert len(env.store) == 0
+        env.done()
+    finally:
+        env.stubber.deactivate()
+
+
+def test_setup_is_not_recorded_when_get_user_identity_differs():
+    env = Env(FakeGate(generation=4, setup_only=True))
+    try:
+        queue_invited_until_setup(env)
+        queue_setup_success(env)
+        env.mfa_pref()
+        env.stubber.add_response(
+            "get_user",
+            {"Username": UID, "UserAttributes": [{"Name": "sub", "Value": "sub-other"}]},
+            {"AccessToken": ACCESS},
+        )
+        env.revoke()
+        token = _setup_until_verify(env)
+        with pytest.raises(cognito.AuthFailedError):
+            env.flow.verify_totp_setup(token, TOTP_CODE)
+        assert env.gate.records == []
+        assert len(env.store) == 0
+        env.done()
+    finally:
+        env.stubber.deactivate()
+
+
+@pytest.mark.parametrize("error", [cognito.AuthFailedError, cognito.AuthProviderUnavailableError])
+def test_setup_record_failure_revokes_the_issued_tokens_and_sends_no_email_code(error):
+    env = Env(FakeGate(generation=4, setup_only=True))
+    env.gate.reject_record = error()
+    try:
+        queue_invited_until_setup(env)
+        queue_setup_success(env)
+        env.mfa_pref()
+        env.get_user(True)
+        env.revoke()  # 이메일 코드 발송 응답은 없다 — 보내면 Stubber 가 실패시킨다
+        token = _setup_until_verify(env)
+        with pytest.raises(error):
+            env.flow.verify_totp_setup(token, TOTP_CODE)
+        assert env.gate.records == []
+        assert len(env.store) == 0
         env.done()
     finally:
         env.stubber.deactivate()

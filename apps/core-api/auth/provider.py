@@ -13,15 +13,17 @@ TOTP 등록 변경(#515 — 로그인 흐름의 AssociateSoftwareToken · Verify
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import boto3
 import botocore.session
 from botocore.config import Config
 from config import AuthSettings
-from db.repositories import auth as auth_repo
-from db.session import get_session_factory
+from db.session import get_engine
 
 from .cognito import CognitoAdapter
 from .login_flow import LoginFlow
+from .totp_recovery import DbLoginGate
 
 #: 일반 인증 호출 — 표준 모드, 재시도 최대 2회
 _AUTH_RETRIES = {"max_attempts": 2, "mode": "standard"}
@@ -76,18 +78,11 @@ def build_recovery_adapter(settings: AuthSettings) -> CognitoAdapter:
     return build_adapter(settings, _client(settings, _NO_RETRIES))
 
 
-def email_proof_recorded(issuer: str, sub: str) -> bool:
-    """앱 DB 에 이메일 코드 검증 기록이 있는지. 짧은 세션 하나만 열고 닫는다(Cognito 호출 중 트랜잭션 없음)."""
-    with get_session_factory()() as db:
-        user = auth_repo.get_user_by_identity(db, issuer=issuer, cognito_sub=sub)
-        return user is not None and user.email_verified_at is not None
-
-
 def build_login_flow(settings: AuthSettings) -> LoginFlow:
     return LoginFlow(
         build_adapter(settings),
         max_failures=settings.AUTH_TOTP_MAX_ATTEMPTS,
         code_failure_limit=settings.AUTH_CODE_FAILURE_LIMIT,
         code_failure_window_seconds=settings.AUTH_CODE_FAILURE_WINDOW_SECONDS,
-        email_proof_recorded=email_proof_recorded,
+        gate=DbLoginGate(get_engine, clock=lambda: datetime.now(UTC)),
     )
