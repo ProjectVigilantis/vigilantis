@@ -11,6 +11,7 @@
 #     Medium 승인 기한 감시와 공유해 켜고 끈다 (Issue #232·#277·#285·#447).
 #   - 고객 구독 계약 처리(subscription_scheduler)는 SUBSCRIPTION_SCHEDULER_ENABLED 로 독립 기동한다 —
 #     스캔 · 디스패치를 꺼도 모의 Marketplace 계약의 활성화 · 갱신 · 만료와 투영은 돈다(T-16 · #528).
+#   - 고객 자기 구독(/api/v1/me/subscription)은 같은 Origin → 세션 관문 뒤 고객사(TENANT) 계정만 받는다.
 #   - 모의 위협 파일 소비자는 MOCK_THREAT_INBOX_DIR 지정 시 독립 기동한다(#322).
 #   - 접근 보호(#492 PR 2): 조치 · 자산 · 인시던트 · 감사 기록 · 메트릭 라우터는 포함 시점에
 #     Origin(상태 변경만) → 세션 검사를 건다. 도입 신청 POST는 별도 공개 입력 경계(#552)다.
@@ -65,6 +66,7 @@ from routers import metrics as metrics_router  # noqa: E402
 from routers import notifications as notifications_router
 from routers import signup_requests as signup_requests_router
 from routers import staff as staff_router  # noqa: E402
+from routers import subscriptions as subscriptions_router
 from routers import tenant_settings as tenant_settings_router  # noqa: E402
 from routers import tenants as tenants_router  # noqa: E402
 from routers import users as users_router  # noqa: E402
@@ -224,6 +226,7 @@ def create_app() -> FastAPI:
     # 같은 prefix의 GET/PUT은 라우터가 CENTRAL_ADMIN 관문을 건다. 공개는 POST 한 경로뿐이다.
     app.include_router(signup_requests_router.router)
     app.include_router(staff_router.router, dependencies=protected)
+    app.include_router(subscriptions_router.router, dependencies=protected)
     app.include_router(tenants_router.router, dependencies=protected)
     # 고객 설정(T-7) — 고객사 계정도 들어오는 별도 라우터. 등급 · 범위는 Workflow 가 auth.access 로 건다
     app.include_router(tenant_settings_router.router, dependencies=protected)

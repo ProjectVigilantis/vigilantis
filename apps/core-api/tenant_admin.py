@@ -8,6 +8,7 @@
 #     없으면 404 TENANT_NOT_FOUND, 있으면 409 TENANT_STATE_CONFLICT 다. PATCH 의 `subscription` 이 진행 중인
 #     모의 Marketplace 계약 · 그 투영을 덮으려 하면 저장소가 0행으로 거절해 같은 409 다(T-16 · #528).
 #   - 연결 확인은 읽기 트랜잭션을 끝낸 뒤 AWS 에 묻고, 쓰기 직전 권한 · 대상 설정 · 상태를 다시 확인한다.
+#     재개가 성공하면 같은 트랜잭션에서 구독 투영을 모의 계약의 현재 권리로 맞춘다(DB 만 · 서비스 상태 무관 · #528).
 #   - external_id 는 생성 응답과 재발급(onboarding)에서만 내보낸다. 상세 응답에는 칸이 없다(계약).
 # ==============================================================================
 
@@ -42,6 +43,7 @@ from schemas.api.tenants import (
     TenantSubscription,
     TenantUpdateRequest,
     TenantVerification,
+    TenantVerificationResult,
     TenantVerifyResponse,
 )
 from services.aws.client import TenantAccess
@@ -276,6 +278,12 @@ def _verify_tenant(
             db, stored_id, result=outcome.result, reason_code=outcome.reason_code, now=observed_at
         ):
             raise _rejected(db, stored_id, user)
+        if resume and outcome.result is TenantVerificationResult.OK:
+            # 재개는 구독을 바꾸지 않는다 — 처리 주기가 늦어 남은 투영만 계약의 현재 권리로 맞춘다(T-16 · #528).
+            # subscription_workflow 가 이 모듈을 가져오므로 여기서 가져온다(순환 import 회피).
+            import subscription_workflow
+
+            subscription_workflow.reconcile_tenant_subscription(db, stored_id, now=observed_at)
         return _commit_after(
             db, lambda: _verification_response(_load(db, stored_id, user), settings)
         )
