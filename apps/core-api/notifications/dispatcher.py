@@ -5,7 +5,8 @@
 initialize  설정 바인딩을 notification_routes에 맞춘다. 같은 fingerprint는 epoch·activated_at을
             유지하고, 바인딩 변경이나 제거 후 재등록은 새 epoch와 DB 시각 activated_at을 받는다.
             먼저 tenants의 UUID·계정 정합성을 확인한다. 같은 기존 바인딩의 tenant가 사라졌으면
-            경고 후 기동하고 해당 발송은 발견·claim에서 차단한다. 신규 설정 오류·계정 불일치와
+            경고 후 기동하고 해당 발송은 발견·claim에서 차단한다(T-7 설정 원천은 바인딩 대신
+            notification_legacy_routes 증거로 재기동해도 같은 판정을 한다). 신규 설정 오류·계정 불일치와
             비정규 tenant 값의 미완료 발송은 쓰기 전에 거부한다(자동 전환·재전송 없음).
 discover    채널 행이 없는 사건을 created_at 순으로 batch_size만큼 찾아 행을 만든다(anti-join,
             cursor 없음, ON CONFLICT DO NOTHING). 라우트 없음·충돌·발신기 없음·바인딩 불일치,
@@ -19,6 +20,10 @@ process_one 만료 임대 회수 → PENDING 1건 정리 또는 claim → 전송
             발견·claim 시 tenants의 현재 계정도 대조한다. DB 조회 오류는 종결하지 않고 회차를 재시도한다.
             채널 스레드는 발신기가 없어도 돈다 — 채널을 뺀 뒤 재기동해도 남은 PENDING·IN_FLIGHT를
             외부 호출·새 시도 없이 정리한다.
+
+라우트 원천: 고정 RouteRegistry(파일 설정)이거나 T-7 SettingsRouteSource(DB 설정)다. 후자는 발견 · claim
+트랜잭션마다 현재 설정으로 다시 해석하고(snapshot), initialize 는 파일 라우트를 검사한 뒤 아직 정하지 않은
+채널에만 가져와 전체 바인딩을 맞춘다(prepare). 설정 변경의 바인딩은 그 변경 트랜잭션이 바꾼다.
 
 복구: 시도 수는 claim 때 센다. claim 뒤나 공급자 수락 뒤 결과 저장 전에 멈춘 시도는 임대 만료 후
 UNKNOWN으로 회수해 재시도하고, max_attempts에 이르면 FAILED(EXHAUSTED)로 닫는다. 따라서 같은 사건이
@@ -183,21 +188,31 @@ class DeliveryDispatcher:
 
     # --- 결정적 단계(테스트·스레드 공용) -------------------------------------------
 
+    def _snapshot(self, db: Session):
+        """이 트랜잭션의 라우트 해석. T-7 설정 원천은 매번 현재 DB 설정으로, 고정 registry 는 그대로."""
+        snapshot = getattr(self._registry, "snapshot", None)
+        return self._registry if snapshot is None else snapshot(db)
+
     def initialize(self) -> None:
         degraded = []
+        prepare = getattr(self._registry, "prepare", None)
+        declared = self._registry.routes if prepare is None else self._registry.legacy_routes
         with self._sessions() as db:
             accounts = deliveries_repo.tenant_accounts(
-                db, {route.tenant_id for route in self._registry.routes},
+                db, {route.tenant_id for route in declared},
             )
-            for route in self._registry.routes:
+            for route in declared:
                 problem = _tenant_problem(route, accounts)
                 if problem is not None:
                     prior = deliveries_repo.get_route(db, route.aws_account_id, route.channel)
-                    if (
-                        problem == TENANT_NOT_FOUND
-                        and prior is not None
-                        and prior.tenant_id == route.tenant_id
-                        and prior.fingerprint == route.fingerprint
+                    if problem == TENANT_NOT_FOUND and (
+                        (
+                            prior is not None
+                            and prior.tenant_id == route.tenant_id
+                            and prior.fingerprint == route.fingerprint
+                        )
+                        # T-7 설정 원천은 지워진 고객의 바인딩을 남기지 않는다 — 앞선 기동의 증거로 판정한다
+                        or deliveries_repo.legacy_route_recorded(db, route)
                     ):
                         degraded.append(route)
                         continue
@@ -210,7 +225,8 @@ class DeliveryDispatcher:
                 raise ValueError("NOTIFICATION_TENANT_TRANSITION_REQUIRED")
             for channel in PACED_CHANNELS:
                 deliveries_repo.ensure_lane(db, channel)
-            deliveries_repo.sync_routes(db, self._registry.routes)
+            routes = self._registry.routes if prepare is None else prepare(db, skip=degraded)
+            deliveries_repo.sync_routes(db, routes)
             db.commit()
         for route in degraded:
             logger.warning("notification_tenant_binding_degraded", extra={
@@ -229,19 +245,25 @@ class DeliveryDispatcher:
                 ]
                 if not events:
                     continue
+                registry = self._snapshot(db)
                 bindings = deliveries_repo.current_routes(
                     db, current, {e.aws_account_id for e in events if e.aws_account_id},
                 )
                 accounts = deliveries_repo.tenant_accounts(
-                    db, {route.tenant_id for route in self._registry.routes},
+                    db, {route.tenant_id for route in registry.routes},
                 )
-                rows = [self._materialize(event, current, bindings, accounts) for event in events]
+                rows = [
+                    self._materialize(event, current, bindings, accounts, registry)
+                    for event in events
+                ]
                 created += deliveries_repo.insert_deliveries(db, rows)
                 db.commit()
         return created
 
-    def _materialize(self, event: EventSnapshot, channel: Channel, bindings, tenant_accounts) -> dict:
-        decision = self._registry.resolve(event, channel)
+    def _materialize(
+        self, event: EventSnapshot, channel: Channel, bindings, tenant_accounts, registry=None,
+    ) -> dict:
+        decision = (self._registry if registry is None else registry).resolve(event, channel)
         route = decision.route
         binding = bindings.get(event.aws_account_id) if route is not None else None
         if route is None:
@@ -338,7 +360,7 @@ class DeliveryDispatcher:
                 reason = CHANNEL_NOT_CONFIGURED
             else:
                 event = EventSnapshot.from_row(events_repo.get(db, row.event_id))
-                decision = self._registry.resolve(event, channel)
+                decision = self._snapshot(db).resolve(event, channel)
                 current = deliveries_repo.get_route(db, row.aws_account_id, channel)
                 reason = _binding_problem(row, event, decision, current)
                 if reason is None:

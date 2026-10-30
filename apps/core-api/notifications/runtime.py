@@ -1,4 +1,9 @@
-"""앱 수명주기와 발송 자원의 연결. 비활성 앱은 수신처·비밀값을 읽지 않는다."""
+"""앱 수명주기와 발송 자원의 연결. 비활성 앱은 수신처·비밀값을 읽지 않는다.
+
+비활성(NOTIFICATION_ENABLED=false)이면 런타임을 만들지 않는다 — 발송 · T-7 이메일 연결 관측 · 설정 자원
+정리 · 관리 Slack 비밀 읽기가 모두 없다. 활성이면 고객 설정(DB)이 수신처 원천이고 두 채널 발신기를 항상
+두므로, 새로 켠 채널도 재기동 없이 쓴다. 발신기 · 공급자 클라이언트는 첫 사용 때 AWS 에 붙는다.
+"""
 
 from __future__ import annotations
 
@@ -8,14 +13,17 @@ _logger = logging.getLogger("vigilantis.notifications")
 
 
 class NotificationRuntime:
-    def __init__(self, dispatcher, senders) -> None:
+    def __init__(self, dispatcher, senders, reconciler=None) -> None:
         self.dispatcher = dispatcher
         self.senders = senders
+        self.reconciler = reconciler
         self._closed = False
 
     async def start(self) -> None:
         try:
             await self.dispatcher.start()
+            if self.reconciler is not None:
+                await self.reconciler.start()
         except Exception:
             await self.stop()
             raise RuntimeError("NOTIFICATION_START_FAILED") from None
@@ -24,7 +32,11 @@ class NotificationRuntime:
         if self._closed:
             return
         try:
-            await self.dispatcher.stop()
+            try:
+                if self.reconciler is not None:
+                    await self.reconciler.stop()
+            finally:
+                await self.dispatcher.stop()
         finally:
             self._closed = True
             for sender in self.senders.values():
@@ -32,6 +44,11 @@ class NotificationRuntime:
                     sender.close()
                 except Exception:
                     # 예외에는 비밀 목적지나 SDK 원문이 들어갈 수 있다.
+                    _logger.warning("notification_sender_close_failed")
+            if self.reconciler is not None:
+                try:
+                    self.reconciler.close()
+                except Exception:
                     _logger.warning("notification_sender_close_failed")
 
 
@@ -60,35 +77,44 @@ def validate_notification_timing(settings) -> None:
 
 
 def build_notification_runtime(settings) -> NotificationRuntime:
-    """실제 연결은 명시적 활성화 후에만 만든다. 자동 migration은 하지 않는다."""
+    """실제 연결은 명시적 활성화 후에만 만든다. 자동 migration은 하지 않는다.
+
+    NOTIFICATION_ROUTES_FILE 은 선택이다 — 있으면 기동 때 아직 정하지 않은 고객 채널로만 가져온다
+    (notifications.settings_source). 만드는 동안 DB · AWS 에 붙지 않는다.
+    """
     if not settings.NOTIFICATION_ENABLED:
         raise ValueError("NOTIFICATION_DISABLED")
-    if not settings.NOTIFICATION_ROUTES_FILE:
-        raise ValueError("NOTIFICATION_ROUTES_REQUIRED")
     validate_notification_timing(settings)
 
     from db.session import get_session_factory
-    from notifications.channels import SlackSender, SnsSender
+    from notifications.channels import ManagedSlackSender, SlackSender, SnsSender
     from notifications.dispatcher import DeliveryDispatcher
     from notifications.routing import RouteRegistry, validate_public_base_url
+    from notifications.settings_reconciler import SettingsReconciler
+    from notifications.settings_source import SettingsRouteSource
+    from services.aws.settings_notifications import SettingsResources
 
     public_base_url = validate_public_base_url(settings.NOTIFICATION_PUBLIC_BASE_URL)
-    registry = RouteRegistry.from_file(settings.NOTIFICATION_ROUTES_FILE)
-    warn_blocked_routes(registry)
+    legacy = None
+    if settings.NOTIFICATION_ROUTES_FILE:
+        legacy = RouteRegistry.from_file(settings.NOTIFICATION_ROUTES_FILE)
+        warn_blocked_routes(legacy)
     senders = {}
+    resources = None
     try:
-        channels = {route.channel for route in registry.routes}
         timeout_options = {
             "connect_timeout": settings.NOTIFICATION_CONNECT_TIMEOUT_SECONDS,
             "read_timeout": settings.NOTIFICATION_READ_TIMEOUT_SECONDS,
         }
-        if "SLACK" in channels:
-            senders["SLACK"] = SlackSender(**timeout_options)
-        if "SNS" in channels:
-            senders["SNS"] = SnsSender(**timeout_options)
+        resources = SettingsResources(**timeout_options)
+        senders["SLACK"] = ManagedSlackSender(
+            SlackSender(**timeout_options), resources.read_slack_secret,
+        )
+        senders["SNS"] = SnsSender(**timeout_options)
+        sessions = get_session_factory()
         dispatcher = DeliveryDispatcher(
-            get_session_factory(),
-            registry,
+            sessions,
+            SettingsRouteSource(legacy),
             senders,
             public_base_url=public_base_url,
             poll_seconds=settings.NOTIFICATION_POLL_SECONDS,
@@ -98,11 +124,21 @@ def build_notification_runtime(settings) -> NotificationRuntime:
             max_backoff_seconds=settings.NOTIFICATION_MAX_BACKOFF_SECONDS,
             lease_seconds=settings.NOTIFICATION_LEASE_SECONDS,
         )
+        reconciler = SettingsReconciler(
+            sessions,
+            resources,
+            poll_seconds=max(settings.NOTIFICATION_POLL_SECONDS, 5.0),
+            lease_seconds=settings.NOTIFICATION_LEASE_SECONDS,
+            backoff_seconds=settings.NOTIFICATION_BACKOFF_SECONDS,
+            max_backoff_seconds=settings.NOTIFICATION_MAX_BACKOFF_SECONDS,
+        )
     except Exception:
         for sender in senders.values():
             try:
                 sender.close()
             except Exception:
                 _logger.warning("notification_sender_close_failed")
+        if resources is not None:
+            resources.close()
         raise RuntimeError("NOTIFICATION_CONFIGURATION_FAILED") from None
-    return NotificationRuntime(dispatcher, senders)
+    return NotificationRuntime(dispatcher, senders, reconciler)

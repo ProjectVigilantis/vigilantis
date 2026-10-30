@@ -198,11 +198,11 @@ cd apps/web && npm ci && npm run dev  # 대시보드(:3000)
 
 ### 🔔 외부 알림 운영 (#493)
 
-기본값은 꺼짐(`NOTIFICATION_ENABLED=false`)이다. 켜면 업무 트랜잭션이 남긴 사건(`notification_events`)을 앱 안의 워커가 (사건, 채널)마다 `notification_deliveries` 행으로 만들고, Slack webhook이나 SNS Publish로 보낸 뒤 결과를 기록한다. 설정 키·기본값·허용 범위는 [`.env.example`](.env.example) §외부 알림과 `apps/core-api/config.py`에 있다.
+기본값은 꺼짐(`NOTIFICATION_ENABLED=false`)이다. 켜면 업무 트랜잭션이 남긴 사건(`notification_events`)을 앱 안의 워커가 (사건, 채널)마다 `notification_deliveries` 행으로 만들고, Slack webhook이나 SNS Publish로 보낸 뒤 결과를 기록한다. 설정 키·기본값·허용 범위는 [`.env.example`](.env.example) §외부 알림과 `apps/core-api/config.py`에 있다. T-7부터 수신처의 원천은 고객 설정(DB `tenant_settings`, `/api/v1/tenants/{id}/settings`)이고 routes 파일은 선택이다. 저장한 고객 설정은 재기동 없이 다음 발송 판단부터 읽힌다.
 
 > **실 AWS 변경과 실제 발송 전 확인** — 대상 환경은 확정되지 않았다. 계정·리전·역할·비밀 ARN·토픽·수신처·발송 건수·비용·롤백 방법을 사용자가 승인하기 전에는 `--yes`를 붙이지 않고 실제로 보내지도 않는다. `--yes`가 없는 미리보기도 실 AWS를 읽는다. 실제 발송 확인(사건 → outbox → 워커 → receipt)은 AWS 변경 승인과 따로 승인받는다. 이때 사건을 만드는 방법·수신처·건수·정리 방법을 함께 정한다. 확인에는 승인된 활성화 **뒤에 새로 만든** 사건을 쓴다. 활성화 전 사건은 `NOT_ACTIVATED`로 막힌다.
 
-**설정 주입** — webhook 원문은 Compose에서는 커밋하지 않는 로컬 `.env`에만, ECS에서는 Secrets Manager 비밀에만 둔다. routes 파일·`--notification-config` 입력·`NOTIFICATION_ROUTES_JSON`·소스·이미지·로그·명령줄 인자에는 평문으로 두지 않는다. 값을 출력하거나 이슈·채팅에 붙여 넣지 않는다.
+**설정 주입(기존 routes 파일 방식)** — 아래 표는 routes 파일로 수신처를 주는 기존 방식이다. 이 방식의 webhook 원문은 Compose에서는 커밋하지 않는 로컬 `.env`에만, ECS에서는 Secrets Manager 비밀에만 둔다. routes 파일·`--notification-config` 입력·`NOTIFICATION_ROUTES_JSON`·소스·이미지·로그·명령줄 인자에는 평문으로 두지 않는다. 값을 출력하거나 이슈·채팅에 붙여 넣지 않는다.
 
 | | Compose 개발 스택 | ECS 플랫폼 배포 |
 | :--- | :--- | :--- |
@@ -210,11 +210,23 @@ cd apps/web && npm ci && npm run dev  # 대시보드(:3000)
 | Slack | route의 `slack_webhook_env` 이름의 변수를 `.env`(커밋 금지)에 둔다 | 이미 있는 Secrets Manager 비밀을 쓴다. 이 계정·리전의 정확한 전체 ARN이어야 하고, SecretString은 webhook URL 원문이다. 실행 역할이 ECS `secrets`로 주입하며, 스크립트는 비밀을 만들거나 값을 쓰지 않는다 |
 | SNS | 검증 경로가 없다. ECS 컨테이너 자격증명만 쓰므로 `sns_credentials_unavailable`(PERMANENT)로 실패한다 | 플랫폼 계정이 소유한 토픽만 지정할 수 있다. 토픽·구독·KMS·교차 계정 정책은 만들지 않는다 |
 
+**routes 파일과 고객 설정** — routes 파일은 기존 배포를 옮기기 위한 선택 입력이다. 기동 때 DB에서 아직 정하지 않은 채널에만 가져오며(Slack은 `LEGACY_ENV`, 이메일은 `LEGACY_TOPIC`, 로그 `notification_route_imported`), 가져온 뒤에는 DB가 원천이다. 파일에서 route를 빼도 가져온 설정은 남는다. 채널을 바꾸거나 없애려면 고객 설정 API(`PATCH /api/v1/tenants/{id}/settings`)로 바꾸거나 해제한다. 명시적으로 해제한 채널은 파일에 남아 있어도 다시 가져오지 않는다. T-7 Slack URL은 위 표의 주입을 거치지 않는다. 고객 설정 API로 받아 api가 Secrets Manager 비밀(`vigilantis/t7/*`)로 저장하며, 응답·로그에는 싣지 않는다. 가져온 기존 SNS 토픽은 응답의 `legacy_sns_configured: true`로 구분되고, 해제는 이메일과 같은 `email_address: null`이며 외부 토픽은 지우지 않는다.
+
+**고객 설정의 저장과 실제 발송** — 저장됐다고 발송이 확인된 것은 아니다.
+
+* T-7의 AWS 동작(Slack 비밀 생성·읽기, 이메일 토픽·구독 생성과 관측, 은퇴 자원 정리)은 프로세스의 `NOTIFICATION_ENABLED=true`에서만 일어난다. 따로 켜는 런타임 변수는 없다.
+* 꺼져 있으면 새 Slack URL 저장(PATCH)은 500 `INTERNAL_ERROR`로 거절되고 아무것도 저장되지 않는다. 이메일·보호 태그·해제는 DB 값만 바뀌며, 이메일 연결 관측과 자원 정리는 켠 뒤에야 돈다.
+* 켜져 있어도 태스크 역할 권한이 없으면 닫힌 채 실패한다. Slack 저장은 500(저장 안 함), 이메일은 `SETUP_FAILED`가 된다. 자격은 ECS 태스크 역할뿐이고 프로필·정적 키로 넘어가지 않으므로, 로컬 개발 환경에서는 Slack 저장과 이메일 연결을 실제로 마칠 수 없다.
+* `slack_configured: true`는 Slack 설정이 저장돼 있다는 뜻이다. 가져온 `LEGACY_ENV`는 참조한 env가 없으면 `SECRET_MISSING`으로, 다른 테넌트와 같은 목적지면 `DESTINATION_SHARED`로 막힐 수 있다. 새로 저장한 이메일은 `SETUP_PENDING` → `CONFIRMATION_PENDING` → 수신자의 구독 확인 → `READY`이고, `READY`일 때만 라우트가 생긴다(routes 파일에서 가져온 기존 토픽 `LEGACY_TOPIC`은 이 단계 없이 그대로 쓴다). 그 전 사건은 `NOT_ACTIVATED`이며 소급 발송하지 않는다. `READY` 뒤 구독 해지·소실이 관측되면 `SETUP_FAILED`로 내려가고 라우트가 빠진다.
+* 실제 발송은 발송 행의 `SUCCEEDED`와 아래 '수신의 의미'로 따로 확인한다.
+
 `--notification-config` 입력 형식(비밀 아님)은 아래와 같다. `enabled: true`를 명시해야 켜지고, `settings`에는 `.env.example`의 `NOTIFICATION_*` 조정값 8개만 넣을 수 있다. 다음 입력은 AWS를 바꾸기 전에 거부된다. 입력 검증 자체는 AWS를 부르지 않지만, CLI는 그 전에 STS로 계정을 확인한다.
 
 * 입력 파일이 80 KiB를 넘거나, 직렬화한 routes가 런타임 상한인 64 KiB를 넘는 경우
 * `settings` 조합이 런타임 규칙에 맞지 않는 경우: max backoff가 backoff보다 작거나, lease가 `2×(connect+read timeout)+10`초보다 짧으면 거부된다
 * `slack_secret_arns`의 변수 이름이 기존 설정 이름과 겹치거나 `AWS_`·`VIGILANTIS_`로 시작하는 경우(대소문자 구분 없음)
+
+`"tenant_settings": true`를 더하면 `notification-iam`이 태스크 역할에 고객 설정 전용 인라인 정책 `manage-tenant-settings-resources`를 붙인다(이 계정·리전의 `vigilantis-t7-*` 토픽과 `vigilantis/t7/*` 비밀만, 구독은 email만). IAM만 바꾸며 런타임 환경변수는 따로 없다. `enabled: false`이면 무시된다. 고객 설정만 쓸 때도 입력에 `routes` 키는 필요하며 `[]`로 둘 수 있다.
 
 ```json
 {"enabled": true, "public_base_url": "https://<승인된 대시보드 origin>",
@@ -233,27 +245,27 @@ cd apps/web && npm ci && npm run dev  # 대시보드(:3000)
   ROLLBACK;
   ```
 
-  * **기동 검사(설정)** — 알림을 켠 기동은 라우트를 DB에 반영하기 전에 모든 route를 확인한다. `tenant_id`가 `tenants`에 없으면 `TENANT_NOT_FOUND`, 그 행의 `aws_account_id`와 다르면 `TENANT_ACCOUNT_MISMATCH`로 기동이 멈춘다. 하나라도 걸리면 라우트 반영은 하나도 일어나지 않는다. 예외는 하나다. DB에 이미 반영된 같은 계정·채널의 바인딩과 `tenant_id`·수신처가 그대로인데 그 테넌트만 지워진 경우다. 이때는 경고를 남기고 기동하며, 바인딩은 그대로 두고 그 발송은 아래 재확인에서 차단된다.
+  * **기동 검사(설정)** — 알림을 켠 기동은 라우트를 DB에 반영하기 전에 모든 route를 확인한다. `tenant_id`가 `tenants`에 없으면 `TENANT_NOT_FOUND`, 그 행의 `aws_account_id`와 다르면 `TENANT_ACCOUNT_MISMATCH`로 기동이 멈춘다. 하나라도 걸리면 라우트 반영은 하나도 일어나지 않는다. 예외는 하나다. 앞선 기동에서 반영된 같은 계정·채널의 route가 `tenant_id`·수신처 그대로인데 그 테넌트만 지워진 경우다. 이때는 경고를 남기고 기동한다. 그 route는 가져오지도 바인딩하지도 않으며, 같은 선언을 다음 기동에서도 같은 경고로 넘기도록 판정 증거(`notification_legacy_routes`, 발송에는 쓰지 않음)만 남긴다.
   * **기동 검사(대기 행)** — 설정 검사를 통과해도 DB의 `PENDING`·`IN_FLIGHT` 행을 **전부** 확인한다. 행의 `tenant_id`가 이전 형식의 문자열(예: `trial`)이라 일치하는 테넌트가 없거나, 일치하는 테넌트가 있어도 행의 `aws_account_id`가 그 테넌트의 계정과 다르면 `NOTIFICATION_TENANT_TRANSITION_REQUIRED`로 기동이 멈춘다. 그 행의 계정·테넌트가 지금 설정에 남아 있는지와는 관계없다. 비교는 `tenants`의 UUID를 문자열로 바꿔 행의 값과 맞춰 보는 방식이며, 이전 형식의 문자열은 UUID로 해석하지 않는다. 소문자 하이픈 UUID 형식인데 테넌트가 지워진 행은 기동을 막지 않고 아래 재확인으로 넘긴다. UUID 형식이라고 해서 그 테넌트가 등록돼 있었다는 증거는 아니므로, 보낼지는 claim 때 현재 테넌트·바인딩으로 다시 판단한다. 이 검사는 행을 고치거나 종료하거나 보내지 않는다. 두 기동 검사의 DB 조회가 실패하면 기동이 실패한다.
-  * **테넌트를 지울 때** — 테넌트 삭제는 알림 route를 확인하지 않는다. 지운 뒤 설정의 route를 바꾸지 않았다면 위 예외에 따라 기동은 계속되고, 그 테넌트의 발송은 차단된다. 같은 설정으로 다시 기동해도 같다.
+  * **테넌트를 지울 때** — 테넌트 삭제는 알림 route를 확인하지 않는다. 지운 뒤 routes 파일의 route를 바꾸지 않았다면 위 예외에 따라 기동은 계속되고, 그 테넌트의 발송은 차단된다. 같은 설정으로 몇 번 다시 기동해도 같은 경고로 기동하고, 발송 권한은 돌아오지 않는다. 다른 테넌트의 발송은 영향을 받지 않는다.
     * 지운 테넌트의 route를 새로 넣거나 수신처를 바꾸면 `TENANT_NOT_FOUND`로 `NOTIFICATION_START_FAILED`가 되어 알림만이 아니라 API 전체가 뜨지 않는다. 이때는 그 route를 설정에서 빼고 다시 배포한다.
-    * 경고가 남은 route는 설정에서 빼서 정리한다. 마지막 route라면 알림을 켠 채로는 route가 필요하므로 아래 '수신처·권한을 바꾸거나 끌 때'의 끄는 절차를 따른다.
-    * 그 테넌트의 남은 행은 아래 '대기·실패 조회'의 '테넌트별 대기 건수'로 본다. `PENDING` 행은 외부로 보내지지 않고 종결된다. 사유는 그때의 route·채널·바인딩 상태를 따른다. route를 그대로 두었다면 `BLOCKED(TENANT_NOT_FOUND)`이고, 시도 한도가 다 찼으면 기존대로 `FAILED(EXHAUSTED)`다. 이미 보내던 `IN_FLIGHT` 행은 임대가 회수되기 전까지 그 결과가 기록될 수 있고, 임대가 만료되면 기존 회수 경로를 거쳐 차단되거나 재시도 소진으로 끝난다. 행을 DB에서 고치거나 지우지 않는다.
+    * 경고가 남은 route는 설정에서 빼서 정리한다. routes 파일은 선택이므로 마지막 route를 빼도 알림을 켠 채로 기동한다.
+    * 그 테넌트의 남은 행은 아래 '대기·실패 조회'의 '테넌트별 대기 건수'로 본다. `PENDING` 행은 외부로 보내지지 않고 종결된다. 사유는 그때의 route·채널·바인딩 상태를 따른다. 그 계정을 소유한 테넌트가 없으면 남은 행과 새 사건 모두 `BLOCKED(OWNERSHIP_MISSING)`이다. 다른 테넌트가 그 계정을 이어받으면 그 테넌트의 고객 설정만 쓰인다. 그 채널을 설정하지 않았으면 `BLOCKED(CHANNEL_NOT_CONFIGURED)`이고, 지운 테넌트의 증거가 새 소유자의 라우트를 덮거나 대신하지 않는다. 시도 한도가 다 찼으면 기존대로 `FAILED(EXHAUSTED)`다. 이미 보내던 `IN_FLIGHT` 행은 임대가 회수되기 전까지 그 결과가 기록될 수 있고, 임대가 만료되면 기존 회수 경로를 거쳐 차단되거나 재시도 소진으로 끝난다. 행을 DB에서 고치거나 지우지 않는다.
   * **발송 행 생성·claim 때 재확인** — 사건을 발송 행으로 만들 때와 보내기 직전 claim 때 현재 DB의 테넌트·계정을 다시 읽는다. 테넌트가 없으면 `BLOCKED(TENANT_NOT_FOUND)`, 계정이 다르면 `BLOCKED(TENANT_ACCOUNT_MISMATCH)`로 종결하고 외부로 보내지 않는다. 이 조회 자체가 DB 오류로 실패하면 트랜잭션을 되돌리고, 행은 종결 상태가 되지 않은 채 다음 주기에 다시 처리된다.
   * 이미 종료된 발송 행의 테넌트 기록과 테넌트 값이 없는(NULL) 기존 행은 고치지 않는다.
   * `sns_topic_arn`의 계정은 토픽을 소유한 플랫폼 계정이다. 고객 소유는 `tenant_id`·`aws_account_id`로만 정하며, 토픽 계정을 고객 계정으로 보지 않는다.
 
-* **권한 범위** — `vigilantis-platform`(태스크 역할)은 지정한 토픽 ARN의 `sns:Publish`(`publish-notification-topics`)만 받는다. `vigilantis-platform-exec`(실행 역할)는 지정한 비밀 ARN의 `GetSecretValue`(`read-notification-secrets`)만 받는다. api 앱(태스크 역할)은 비밀을 읽지 못한다. 관제 대상 접근 역할 `vigilantis-access`는 알림 권한을 하나도 받지 않는다. SNS는 프로필·정적 키로 넘어가지 않고 실패하면 닫힌다.
+* **권한 범위** — `vigilantis-platform`(태스크 역할)은 지정한 토픽 ARN의 `sns:Publish`(`publish-notification-topics`)만 받는다. `vigilantis-platform-exec`(실행 역할)는 지정한 비밀 ARN의 `GetSecretValue`(`read-notification-secrets`)만 받는다. api 앱(태스크 역할)은 이 비밀을 읽지 못한다. `tenant_settings: true`이면 태스크 역할이 `manage-tenant-settings-resources`로 T-7 접두 아래 토픽·비밀을 만들고 읽고 지운다. 관리 Slack 비밀은 api가 발송 직전에 직접 읽는다. 관제 대상 접근 역할 `vigilantis-access`는 알림 권한을 하나도 받지 않는다. SNS는 프로필·정적 키로 넘어가지 않고 실패하면 닫힌다.
 * **배포 명령 주의** — `deploy`는 IAM을 바꾸지 않는다. 알림을 켠 `deploy`는 미리보기를 포함해 알림 전용 정책 문서가 입력과 맞는지만 읽어서 확인하고, 다르면 멈춘다. 이 확인은 실제로 적용된 권한을 증명하지 않는다. `deploy`는 api만이 아니라 migrate·api·web을 함께 재배포한다. `--enable-dispatch`를 지금 값과 같게 주지 않으면 AI 분석·조치 실행 디스패치(`DISPATCH_ENABLED`)도 바뀐다. api는 이전 태스크를 먼저 내리므로 배포 중 끊김이 생긴다. `배포 실패`이면 서킷 브레이커가 이전 태스크 정의로 되돌렸을 수 있고, 그 정의의 알림 설정이 그대로 돈다.
 * **다시 켜기 전 경고** — 같은 수신처로 다시 켜면 `activated_at`과 epoch가 유지된다. 그래서 꺼져 있던 동안 생긴 미발송 사건과 남아 있던 `PENDING` 행이 재기동 뒤 발송된다(`BLOCKED`·`FAILED`·`SUCCEEDED`는 되살아나지 않는다). 켜기 전에 아래 조회로 미발송 건수를 확인하고, 그 건수를 보내도 되는지 승인받는다.
 * **발송 규칙**
-  * 라우트를 처음 등록하거나 수신처·테넌트를 바꾸면, 다음 기동 때 DB 시각으로 새 `activated_at`을 받는다. `created_at`이나 `occurred_at` 중 하나라도 그보다 이른 사건은 `BLOCKED(NOT_ACTIVATED)`로 끝난다. 받을 사건이 생기기 전에 활성화한다. 과거 사건을 보내려고 이벤트·라우트 행의 시각을 고치지 않는다.
+  * 라우트를 처음 등록하거나 수신처·테넌트를 바꾸면 DB 시각으로 새 `activated_at`을 받는다. 고객 설정은 저장할 때(이메일은 `READY`가 될 때), routes 파일은 다음 기동 때다. `created_at`이나 `occurred_at` 중 하나라도 그보다 이른 사건은 `BLOCKED(NOT_ACTIVATED)`로 끝난다. 받을 사건이 생기기 전에 활성화한다. 과거 사건을 보내려고 이벤트·라우트 행의 시각을 고치지 않는다.
   * 수신처가 바뀐 계정의 기존 대기 행은 보내기 직전 `BLOCKED(ROUTE_CHANGED)`가 된다. 새 수신처로 옮겨 보내지 않는다.
-  * 설정 변경은 재기동(ECS는 재배포)해야 적용된다. 실행 중에 바로 적용되는 경로는 없다.
+  * 고객 설정(DB) 변경은 재기동 없이 적용된다. 배포 설정(`NOTIFICATION_*` 값·public URL·routes 파일·비밀 주입)은 재기동(ECS는 재배포)해야 적용된다.
   * `BLOCKED`·`FAILED`(`PERMANENT`·`EXHAUSTED`)·`SUCCEEDED`는 되돌리지 않는다. 재전송·취소·비우기(drain) 기능은 없다. DB를 고쳐 되살리거나 지우지 않는다.
 * **중복 가능** — 종료되는 태스크는 새 claim을 멈추고 진행 중인 결과 저장을 기다린다. 그 전에 강제 종료되면 해당 행이 `IN_FLIGHT`로 남는다. 결과를 저장하기 전에 멈춘 시도는 임대(`NOTIFICATION_LEASE_SECONDS`)가 지난 뒤 회수되어 다시 보낸다. 그래서 같은 사건이 최대 `NOTIFICATION_MAX_ATTEMPTS`번 갈 수 있다(정확히 1회 보장 없음). 임대가 `2×(connect+read timeout)+10`초보다 짧으면 기동하지 않는다.
 * **수신의 의미** — `receipt_kind`의 `SLACK_POSTED`는 Slack이 게시 요청을 받았다는 뜻이고, `SNS_ACCEPTED`는 SNS가 Publish를 접수했다는 뜻이다. 어느 쪽도 메일함 도착이나 사람이 읽었음을 뜻하지 않는다.
-* **기동 경고·실패**(계정·채널·사유 코드만 남는다) — `notification_route_blocked`는 선언됐지만 막힌 라우트로, 예를 들어 `SECRET_MISSING`·`DESTINATION_*`·`OWNERSHIP_CONFLICT`가 있다. `notification_account_ownership_missing`은 선언되지 않은 계정의 사건이며 계정마다 1회 남는다. `notification_delivery_blocked`는 보내기 직전 claim 단계에서 막힌 행마다 남는다(일부러 뺀 채널은 제외). 사건을 발송 행으로 만들 때 막힌 행은 이 로그를 남기지 않고 `blocked_reason`에만 기록된다. 설정 오류로 기동이 멈추면 `NOTIFICATION_ROUTES_REQUIRED`·`NOTIFICATION_LEASE_TOO_SHORT`·`NOTIFICATION_CONFIGURATION_FAILED` 같은 고정 코드만 남는다. 위 '테넌트 연결'의 기동 검사(`TENANT_NOT_FOUND`·`TENANT_ACCOUNT_MISMATCH`·`NOTIFICATION_TENANT_TRANSITION_REQUIRED`)에 걸리면 `notification_tenant_binding_invalid`가 그 코드를 `reason`으로 남긴다. 테넌트 ID·수신처·원래 오류 문구는 남기지 않는다. 테넌트만 지워진 기존 바인딩으로 기동을 계속할 때는 경고 `notification_tenant_binding_degraded`가 계정·채널과 `reason`(`TENANT_NOT_FOUND`)만 남긴다. 기동이 멈출 때는 `notification_dispatcher_initialize_failed`(예외 형식만)가 남고, 기동 실패는 고정 코드 `NOTIFICATION_START_FAILED`로 올라간다. 어느 route·행이 걸렸는지는 위 조회와 아래 '대기·실패 조회'로 확인한다. 발송 행 생성·claim 때의 테넌트 차단은 `blocked_reason`에 `TENANT_NOT_FOUND`·`TENANT_ACCOUNT_MISMATCH`로 남는다. 그중 claim 때 막힌 행만 `notification_delivery_blocked`에도 그 사유로 남는다.
+* **기동 경고·실패**(계정·채널·사유 코드만 남는다) — `notification_route_blocked`는 선언됐지만 막힌 라우트로, 예를 들어 `SECRET_MISSING`·`DESTINATION_*`·`OWNERSHIP_CONFLICT`가 있다. `notification_account_ownership_missing`은 선언되지 않은 계정의 사건이며 계정마다 1회 남는다. `notification_delivery_blocked`는 보내기 직전 claim 단계에서 막힌 행마다 남는다(일부러 뺀 채널은 제외). 사건을 발송 행으로 만들 때 막힌 행은 이 로그를 남기지 않고 `blocked_reason`에만 기록된다. 설정 오류로 기동이 멈추면 `NOTIFICATION_LEASE_TOO_SHORT`·`NOTIFICATION_CONFIGURATION_FAILED` 같은 고정 코드만 남는다. 위 '테넌트 연결'의 기동 검사(`TENANT_NOT_FOUND`·`TENANT_ACCOUNT_MISMATCH`·`NOTIFICATION_TENANT_TRANSITION_REQUIRED`)에 걸리면 `notification_tenant_binding_invalid`가 그 코드를 `reason`으로 남긴다. 테넌트 ID·수신처·원래 오류 문구는 남기지 않는다. 테넌트만 지워진 기존 route로 기동을 계속할 때는 기동마다 경고 `notification_tenant_binding_degraded`가 계정·채널과 `reason`(`TENANT_NOT_FOUND`)만 남긴다. 기동이 멈출 때는 `notification_dispatcher_initialize_failed`(예외 형식만)가 남고, 기동 실패는 고정 코드 `NOTIFICATION_START_FAILED`로 올라간다. 어느 route·행이 걸렸는지는 위 조회와 아래 '대기·실패 조회'로 확인한다. 발송 행 생성·claim 때의 테넌트 차단은 `blocked_reason`에 `TENANT_NOT_FOUND`·`TENANT_ACCOUNT_MISMATCH`로 남는다. 그중 claim 때 막힌 행만 `notification_delivery_blocked`에도 그 사유로 남는다.
 * **로그인 링크 차단 사유** — 알림 본문의 `상세:` 링크는 `<public_base_url>/incidents/<id>`이다. API·SSR은 서버 세션으로 보호되며, 로그인 전에 링크를 열면 `/login?next=…`로 이동했다가 로그인 뒤 같은 사이트 경로인 `/incidents/<id>`로 돌아온다(#502). 세션 보호는 로그인 여부를 확인하고, 사건의 테넌트·계정 소유 검사는 T-4에서 붙는다. CloudFront→오리진 구간은 10/13 관측 기준 `http-only`다([ADR-0010](docs/adr/0010-platform-deployment-saas-shape.md) 1차 개정). 실제 오리진 HTTPS를 확인하기 전에는 이 링크로 비밀번호를 입력하거나 세션을 쓰지 않는다.
 
 **켜기·변경·끄기 절차** — IAM 정책을 쓰는 명령은 `notification-iam`과 `notification-revoke` 둘뿐이다. 둘 다 알림이 꺼진 정의로 서비스가 안정돼 있고, 알림이 켜진 api 태스크가 하나도 남아 있지 않을 때만 실행한다. 내려가는 중인 태스크도 남은 것으로 본다. `--yes`이면 스크립트도 이 상태를 확인하고, 맞지 않으면 정책을 바꾸지 않고 멈춘다. 미리보기는 이 상태를 확인하지 않는다. 정책을 준비해도 발송은 켜지지 않는다. 모든 `--yes`는 그 단계의 미리보기를 확인한 뒤 따로 승인받는다.
@@ -269,11 +281,11 @@ cd apps/web && npm ci && npm run dev  # 대시보드(:3000)
    * 권한을 확인하려고 승인되지 않은 실제 Publish를 보내지 않는다.
 4. 아래 '다시 켜기 전 경고'를 확인한다. 그다음 `deploy --account <ID> --tag <태그> --notification-config <파일>`로 미리보기 → 승인 → `--yes`.
 
-수신처·권한을 바꾸거나 끌 때:
+배포 입력(routes·비밀 ARN·토픽·IAM)을 바꾸거나 끌 때 — 고객 설정의 수신처는 이 절차 없이 고객 설정 API로 바꾼다:
 
 1. `--notification-config` 없이 `deploy --account <ID> --tag <태그>`를 실행한다. `--enable-dispatch`는 지금 값을 유지한다. `배포 완료`가 나왔는지 확인한다.
 2. 알림이 꺼진 정의로 안정됐고 이전 태스크가 모두 멈췄는지 확인한다. `배포 실패`이면 여기서 멈추고 원인부터 본다.
-3. 바꿀 때는 새 입력으로 `notification-iam`을 실행한다. 없앨 때는 `notification-revoke --account <ID>`로 알림 전용 인라인 정책 둘만 지운다. 이때 다른 정책·비밀·토픽·구독과 태그 없는 역할은 건드리지 않는다.
+3. 바꿀 때는 새 입력으로 `notification-iam`을 실행한다. 없앨 때는 `notification-revoke --account <ID>`로 알림 전용 인라인 정책 둘과 고객 설정 정책 `manage-tenant-settings-resources`만 지운다. 이때 다른 정책·비밀·토픽·구독과 태그 없는 역할은 건드리지 않는다.
 4. 다시 켤 때만 처음 켤 때의 3–4단계를 밟는다.
 
 이전 정책을 자동으로 되돌리거나 실패한 건을 다시 보내는 기능은 없다.
