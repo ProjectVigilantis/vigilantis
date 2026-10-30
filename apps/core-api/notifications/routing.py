@@ -14,6 +14,8 @@
   개별 누락·충돌은 예외가 아니라 ``blocked_reason`` 코드로 차단(대체 라우트 없음).
 - ``validate_webhook_url(url) -> str`` (검증된 URL 그대로; 아니면 ``RouteConfigError``), ``validate_public_base_url(raw) -> str`` (origin).
 - ``parse_sns_topic_arn(arn) -> (region, account_id)``.
+- ``registry.declarations``: 파일의 검증된 원래 선언. T-7 에서는 이 파일이 DB 고객 설정으로 가져올 원천이고,
+  실행 중 라우트 원천은 ``notifications.settings_source`` 다(같은 차단 규칙).
 
 소유권은 설정의 (tenant_id, aws_account_id) 로만 정해진다. ARN 의 계정은 일관성 검사에만 쓰며 소유권/계정을
 추정하지 않는다. SNS 플랫폼 토픽 계정은 고객 계정과 달라도 된다.
@@ -136,11 +138,19 @@ def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 class RouteRegistry:
-    def __init__(self, routes: tuple[Route, ...], blocked: Mapping[tuple[str, str], str], owned: frozenset[str]):
+    def __init__(
+        self,
+        routes: tuple[Route, ...],
+        blocked: Mapping[tuple[str, str], str],
+        owned: frozenset[str],
+        declarations: tuple[tuple[str, str, str | None, str | None], ...] = (),
+    ):
         self._by_key = {(r.aws_account_id, r.channel): r for r in routes}
         self._blocked = dict(blocked)  # (account, channel) -> reason; "" channel = whole account
         self._owned = owned
         self.routes = tuple(sorted(routes, key=lambda r: (r.aws_account_id, r.channel, r.tenant_id)))
+        # 파일 설정의 검증된 원래 선언(tenant, account, slack_env, sns_arn) — T-7 DB 가져오기가 읽는다
+        self.declarations = declarations
 
     @property
     def blocked(self) -> Mapping[tuple[str, str], str]:
@@ -178,8 +188,8 @@ class RouteRegistry:
         # 선언 도메인 전체: 소유/목적지 충돌·시크릿 누락 등으로 막힌 항목이 선언한 유효 목적지도 포함한다.
         # (유효 라우트만으로 공유를 판정하면, 막힌 항목의 목적지로 건강한 다른 tenant 가 보내게 된다.)
         declared: dict[tuple[str, str], set[str]] = {}
-        for entry in entries:
-            tenant, account, slack_env, arn = cls._entry(entry)
+        declarations = tuple(cls._entry(entry) for entry in entries)
+        for tenant, account, slack_env, arn in declarations:
             owners.setdefault(account, set()).add(tenant)
             if slack_env is not None:
                 slack.setdefault((tenant, account), set()).add(slack_env)
@@ -236,7 +246,7 @@ class RouteRegistry:
                 if (r.channel, r.destination) in shared:
                     blocked[(r.aws_account_id, r.channel)] = DESTINATION_SHARED
             routes = [r for r in routes if (r.channel, r.destination) not in shared]
-        return cls(tuple(routes), blocked, frozenset(owners))
+        return cls(tuple(routes), blocked, frozenset(owners), declarations)
 
     @staticmethod
     def _entry(entry: object) -> tuple[str, str, str | None, str | None]:

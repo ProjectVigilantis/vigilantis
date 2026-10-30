@@ -14,6 +14,8 @@
 #     Origin(상태 변경만) → 세션 검사를 건다. 공개 경로는 /health 와 로그인 단계뿐이다.
 #     API 문서는 API_DOCS_ENABLED 일 때만 열린다. 조치 · 자산 · 인시던트는 각 라우트가 요청자의 고객사
 #     범위로 제한하고(#533), 메트릭은 플랫폼 관리 등급(CENTRAL_ADMIN · TENANT_MANAGER)만 받는다(#492).
+#   - 고객 설정(T-7)은 같은 Origin · 세션 배선을 쓰고 범위는 tenant_settings Workflow 가 건다. 알림
+#     런타임(NOTIFICATION_ENABLED)이 그 설정을 재기동 없이 읽고, 꺼져 있으면 기동 중 AWS 를 부르지 않는다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -58,6 +60,7 @@ from routers import auth as auth_router  # noqa: E402
 from routers import incidents as incidents_router  # noqa: E402
 from routers import metrics as metrics_router  # noqa: E402
 from routers import staff as staff_router  # noqa: E402
+from routers import tenant_settings as tenant_settings_router  # noqa: E402
 from routers import tenants as tenants_router  # noqa: E402
 from routers import users as users_router  # noqa: E402
 from routers import ws as ws_router  # noqa: E402
@@ -208,6 +211,8 @@ def create_app() -> FastAPI:
     app.include_router(metrics_router.router, dependencies=business)
     app.include_router(staff_router.router, dependencies=protected)
     app.include_router(tenants_router.router, dependencies=protected)
+    # 고객 설정(T-7) — 고객사 계정도 들어오는 별도 라우터. 등급 · 범위는 Workflow 가 auth.access 로 건다
+    app.include_router(tenant_settings_router.router, dependencies=protected)
     app.include_router(users_router.router, dependencies=protected)
     app.include_router(ws_router.router)
 

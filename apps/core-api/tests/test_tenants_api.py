@@ -117,6 +117,8 @@ def test_requests_cover_every_registered_tenants_route(client):
         (method, route.path)
         for route in iter_route_contexts(client.app.routes)
         if route.path == BASE or route.path.startswith(BASE + "/")
+        # 고객 설정(T-7)은 고객사 계정도 받는 별도 라우터다(test_tenant_settings_api)
+        if route.path != BASE + "/{tenant_id}/settings"
         for method in route.methods or ()
     }
     covered = {(method, BASE + path.replace("{id}", "{tenant_id}")) for method, path, _ in REQUESTS}
