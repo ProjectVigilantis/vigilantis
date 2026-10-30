@@ -130,7 +130,7 @@ def _seed_resolved_audit_event(conn):
 def _assert_merged_head(config, engine, *, platform_role, assignments):
     assert _versions(engine) == {_head(config)}
     tables = _tables(engine)
-    assert len(tables) == 27
+    assert len(tables) == 29  # 기존 27종 + #515 복구 작업 · 신원 변경 울타리
     assert {ASSIGNMENTS, "audit_events"} <= tables
     with engine.connect() as conn:
         assert (
@@ -168,7 +168,7 @@ def test_fresh_database_upgrades_to_merge_head(merge_db):
     config, engine = merge_db
     command.upgrade(config, "head")
     assert _versions(engine) == {_head(config)}
-    assert len(_tables(engine)) == 27
+    assert len(_tables(engine)) == 29  # 기존 27종 + #515 복구 작업 · 신원 변경 울타리
     with engine.connect() as conn:
         assert compare_metadata(MigrationContext.configure(conn), models.Base.metadata) == []
 

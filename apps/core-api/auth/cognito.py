@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import logging
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Literal
 
 from botocore.exceptions import BotoCoreError, ClientError
@@ -31,6 +32,10 @@ class AuthError(Exception):
     """AUTH_* 오류 코드와 1:1 인 도메인 예외의 기반. 메시지는 코드 문자열 고정이다(입력 · 응답을 싣지 않는다)."""
 
     code: ErrorCode
+    #: 실제 제공자 HTTP 응답 상태만 보존한다. 공개 오류 매핑 · 메시지에는 싣지 않는다.
+    provider_status: int | None = None
+    #: SDK 호출 실패인지. HTTP 상태 없는 SDK 실패와 로컬 응답 검증 거절을 구분한다.
+    from_provider_call: bool = False
 
     def __init__(self) -> None:
         super().__init__(self.code.value)
@@ -92,6 +97,19 @@ _RECOVERY_NORMALIZED = frozenset(
     }
 )
 _USER_NOT_FOUND = frozenset({"UserNotFoundException"})
+
+
+class SoftwareTokenDeletion(str, Enum):
+    """AdminDeleteSoftwareToken 한 번의 결과. 제공자 응답만 분류한다 — 복구 완료 판정이 아니다."""
+
+    #: 2xx — 제공자가 삭제를 확인했다.
+    DELETED = "DELETED"
+    #: 4xx ResourceNotFoundException — 등록 없음 또는 리소스 없음. 이 호출이 삭제했다는 증명이 아니다.
+    NOT_FOUND = "NOT_FOUND"
+    #: 그 밖의 4xx(권한 · 제한 · 사용자 없음 · 파라미터) — 제공자가 거절했다. 삭제되지 않았다.
+    REJECTED = "REJECTED"
+    #: 5xx · 상태 코드 없음 · 전송 실패 · 시간 초과 — 적용 여부를 모른다.
+    UNKNOWN = "UNKNOWN"
 
 
 @dataclass(frozen=True)
@@ -167,8 +185,14 @@ class CognitoAdapter:
         client_id: str,
         client_secret: str,
         region: str,
+        mutation_client: Any = None,
     ) -> None:
         self._client = client
+        #: TOTP 등록을 바꾸는 호출(AssociateSoftwareToken · VerifySoftwareToken · MFA_SETUP 응답 · MFA 선호 ·
+        #: AdminDeleteSoftwareToken) 전용 — SDK 재시도가 없어야 한다(#515). 재시도하면 마지막 응답이 앞선 시도의
+        #: 적용 여부를 가린다(첫 시도 시간 초과 · 재시도 4xx). None 이면 client 를 쓴다(테스트 대역 · 재시도 없는
+        #: 복구 전용 클라이언트) — 운영 조립은 provider.build_adapter 가 재시도 없는 클라이언트를 넘긴다.
+        self._mutation_client = client if mutation_client is None else mutation_client
         self._pool_id = user_pool_id
         self._client_id = client_id
         self._client_secret = client_secret
@@ -185,22 +209,38 @@ class CognitoAdapter:
         assert resp is not None
         return resp
 
+    def _mutate(self, operation: str, kind: CallKind, **params: Any) -> dict[str, Any]:
+        """TOTP 등록 변경 — 재시도 없는 클라이언트로 한 번만 보낸다. 오류 분류는 _call 과 같다."""
+        resp = self._send(operation, kind, frozenset(), params, self._mutation_client)
+        assert resp is not None
+        return resp
+
     def _send(
-        self, operation: str, kind: CallKind, absorb: frozenset[str], params: dict[str, Any]
+        self,
+        operation: str,
+        kind: CallKind,
+        absorb: frozenset[str],
+        params: dict[str, Any],
+        client: Any = None,
     ) -> dict[str, Any] | None:
         """`absorb` 의 AWS 오류 코드(5xx 제외)는 예외 대신 None 으로 돌려준다 — 그 밖의 오류는 분류해 던진다."""
+        provider_status = None
         try:
-            return getattr(self._client, operation)(**params)
+            return getattr(self._client if client is None else client, operation)(**params)
         except ClientError as exc:
             error = exc.response.get("Error", {})
             aws_code = str(error.get("Code", "Unknown"))
             status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            provider_status = status
         except BotoCoreError as exc:
             aws_code, status = type(exc).__name__, 503
         if aws_code in absorb and not (status is not None and status >= 500):
             return None
         logger.warning("cognito call failed operation=%s error_code=%s", operation, aws_code)
-        raise classify_error(aws_code, status, kind) from None
+        failure = classify_error(aws_code, status, kind)
+        failure.provider_status = provider_status
+        failure.from_provider_call = True
+        raise failure from None
 
     @staticmethod
     def _user(raw: dict[str, Any], attributes_key: str) -> CognitoUser:
@@ -238,6 +278,34 @@ class CognitoAdapter:
             params["UserAttributes"] = [{"Name": "email", "Value": email}]
         resp = self._call("admin_create_user", "invite", **params)
         return self._user(resp.get("User") or {}, "Attributes")
+
+    def admin_delete_software_token(self, username: str) -> SoftwareTokenDeletion:
+        """확인된 Cognito 신원의 TOTP를 삭제하고 결과를 분류해 돌려준다(예외로 바꾸지 않는다).
+
+        앱 세션 회수 · 복구 완료 판정은 호출자(복구 상태를 가진 서비스) 책임이다. 삭제 성공은 DELETED
+        하나뿐이고, ResourceNotFoundException 은 NOT_FOUND 로 따로 둔다(등록 없음 · 리소스 없음 — 삭제
+        증명이 아니다). TOTP 등록 변경이라 재시도 없는 클라이언트(mutation_client)로 한 번만 보낸다.
+        """
+        operation = "admin_delete_software_token"
+        try:
+            self._mutation_client.admin_delete_software_token(
+                UserPoolId=self._pool_id, Username=username
+            )
+        except ClientError as exc:
+            aws_code = str(exc.response.get("Error", {}).get("Code", "Unknown"))
+            status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            logger.warning("cognito call failed operation=%s error_code=%s", operation, aws_code)
+            if status is None or status >= 500:
+                return SoftwareTokenDeletion.UNKNOWN
+            if aws_code == "ResourceNotFoundException":
+                return SoftwareTokenDeletion.NOT_FOUND
+            return SoftwareTokenDeletion.REJECTED
+        except BotoCoreError as exc:
+            logger.warning(
+                "cognito call failed operation=%s error_code=%s", operation, type(exc).__name__
+            )
+            return SoftwareTokenDeletion.UNKNOWN
+        return SoftwareTokenDeletion.DELETED
 
     def request_password_reset(self, email: str) -> None:
         """ForgotPassword. 존재 · 자격 · 이메일 미인증은 같은 결과(정상 반환)로 삼키고, CodeDeliveryDetails 는 버린다."""
@@ -294,8 +362,12 @@ class CognitoAdapter:
     def respond_to_challenge(
         self, challenge: str, session: str, username: str, responses: dict[str, str]
     ) -> CognitoResponse:
-        """`username` 은 ChallengeParameters 의 USER_ID_FOR_SRP 여야 한다(SECRET_HASH 도 같은 값으로 계산)."""
-        resp = self._call(
+        """`username` 은 ChallengeParameters 의 USER_ID_FOR_SRP 여야 한다(SECRET_HASH 도 같은 값으로 계산).
+
+        MFA_SETUP 응답은 TOTP 등록 변경이라 재시도 없이 보낸다. 그 밖의 챌린지(SOFTWARE_TOKEN_MFA 등)는 일반 재시도.
+        """
+        send = self._mutate if challenge == "MFA_SETUP" else self._call
+        resp = send(
             "admin_respond_to_auth_challenge",
             "session",
             UserPoolId=self._pool_id,
@@ -311,13 +383,13 @@ class CognitoAdapter:
         return self._parse(resp)
 
     def associate_software_token(self, session: str) -> tuple[str, str | None]:
-        resp = self._call("associate_software_token", "session", Session=session)
+        resp = self._mutate("associate_software_token", "session", Session=session)
         return resp["SecretCode"], resp.get("Session")
 
     def verify_software_token(
         self, session: str, code: str, friendly_name: str
     ) -> tuple[str, str | None]:
-        resp = self._call(
+        resp = self._mutate(
             "verify_software_token",
             "session",
             Session=session,
@@ -331,7 +403,7 @@ class CognitoAdapter:
         return {a["Name"]: a["Value"] for a in resp.get("UserAttributes", [])}
 
     def prefer_software_token_mfa(self, access_token: str) -> None:
-        self._call(
+        self._mutate(
             "set_user_mfa_preference",
             "session",
             AccessToken=access_token,

@@ -23,9 +23,14 @@ from auth import admin_service
 from auth.access import require_admin
 from auth.cognito import CognitoAdapter
 from auth.http import SESSION_COOKIE, get_clock, get_cognito_adapter
+from auth.provider import build_recovery_adapter
+from auth.totp_recovery_http import recover_totp, require_recovery_actor
 from config import AuthSettings, get_auth_settings
-from db.session import get_db
+from db.session import get_db, get_engine
+from exceptions import ApiError
 from fastapi import APIRouter, Depends, Query, Request, Response
+from schemas.api.errors import ErrorCode
+from schemas.api.totp_recovery import TotpRecoveryRequest
 from schemas.api.users import (
     UserEventsResponse,
     UserInviteRequest,
@@ -34,6 +39,7 @@ from schemas.api.users import (
     UsersResponse,
     UserStatusRequest,
 )
+from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
 _DB = Depends(get_db)
@@ -133,6 +139,51 @@ def revoke_sessions(
     actor: admin_service.Actor = _ACTOR,
 ) -> Response:
     admin_service.revoke_sessions(db, actor, user_id)
+    return Response(status_code=204)
+
+
+def get_recovery_engine() -> Engine:
+    """복구 코어가 전용 연결 · 짧은 트랜잭션을 직접 여는 엔진. 테스트가 재정의한다."""
+    return get_engine()
+
+
+def get_recovery_adapter_factory(
+    settings: AuthSettings = _SETTINGS,
+) -> Callable[[], CognitoAdapter]:
+    """지연 조립 — 코어가 권한 · 대상 판정을 모두 통과한 뒤에만 부른다(재시도 없는 복구 전용 클라이언트). 테스트가 재정의한다."""
+
+    def build() -> CognitoAdapter:
+        if settings.missing_cognito_keys():
+            raise ApiError(ErrorCode.AUTH_PROVIDER_UNAVAILABLE)
+        return build_recovery_adapter(settings)
+
+    return build
+
+
+_RECOVERY_ENGINE = Depends(get_recovery_engine)
+_RECOVERY_ADAPTER = Depends(get_recovery_adapter_factory)
+
+
+@router.post(
+    "/{user_id}/totp/reset",
+    status_code=204,
+    dependencies=[Depends(require_recovery_actor)],
+)
+def reset_user_totp(
+    user_id: str,
+    body: TotpRecoveryRequest,
+    engine: Engine = _RECOVERY_ENGINE,
+    actor: admin_service.Actor = _ACTOR,
+    get_adapter: Callable[[], CognitoAdapter] = _RECOVERY_ADAPTER,
+) -> Response:
+    recover_totp(
+        engine,
+        actor,
+        get_adapter,
+        user_id=user_id,
+        operation_id=body.operation_id,
+        identity_verified=body.identity_verified,
+    )
     return Response(status_code=204)
 
 

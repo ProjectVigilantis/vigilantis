@@ -11,7 +11,7 @@ from pathlib import Path
 
 import boto3
 import pytest
-from botocore.exceptions import EndpointConnectionError
+from botocore.exceptions import EndpointConnectionError, ReadTimeoutError
 from botocore.stub import Stubber
 
 CORE_API = Path(__file__).resolve().parents[1]
@@ -139,6 +139,7 @@ def test_software_token_get_user_email_and_revoke_params(env):
 INIT = ("admin_initiate_auth", lambda a: a.initiate_auth("a@b.com", "pw"))
 RESPOND = ("admin_respond_to_auth_challenge", lambda a: a.respond_to_challenge("MFA_SETUP", "SESSION-0123456789abcdef", UID, {}))
 VERIFY = ("verify_software_token", lambda a: a.verify_software_token("SESSION-0123456789abcdef", "123456", "V"))
+PREFERENCE = ("set_user_mfa_preference", lambda a: a.prefer_software_token_mfa("AT"))
 EMAIL_SEND = ("get_user_attribute_verification_code", lambda a: a.send_email_code("AT"))
 EMAIL_VERIFY = ("verify_user_attribute", lambda a: a.verify_email_code("AT", "654321"))
 NEWPW = ("admin_respond_to_auth_challenge", lambda a: a.respond_to_challenge("NEW_PASSWORD_REQUIRED", "SESSION-0123456789abcdef", UID, {}))
@@ -165,6 +166,9 @@ NEWPW = ("admin_respond_to_auth_challenge", lambda a: a.respond_to_challenge("NE
         (INIT, "InternalErrorException", 500, cognito.AuthProviderUnavailableError),
         (INIT, "NotAuthorizedException", 503, cognito.AuthProviderUnavailableError),
         (INIT, "SomethingNewException", 400, cognito.AuthProviderUnavailableError),
+        (VERIFY, "InvalidParameterException", 400, cognito.AuthProviderUnavailableError),
+        (RESPOND, "InvalidParameterException", 400, cognito.AuthProviderUnavailableError),
+        (PREFERENCE, "InvalidParameterException", 400, cognito.AuthProviderUnavailableError),
     ],
 )
 def test_error_classification(env, caplog, call, aws_code, status, expected):
@@ -174,6 +178,8 @@ def test_error_classification(env, caplog, call, aws_code, status, expected):
     with caplog.at_level(logging.DEBUG), pytest.raises(cognito.AuthError) as info:
         invoke(adapter)
     assert type(info.value) is expected
+    assert info.value.provider_status == status
+    assert info.value.from_provider_call
     assert str(info.value) == expected.code.value
     assert "PRIVATE-TEXT" not in caplog.text
     assert aws_code in caplog.text and op in caplog.text
@@ -201,10 +207,11 @@ def test_codes_map_one_to_one():
     }
 
 
-def test_connection_error_is_provider_unavailable(caplog):
+@pytest.mark.parametrize("error_type", [EndpointConnectionError, ReadTimeoutError])
+def test_connection_error_is_provider_unavailable(caplog, error_type):
     class Broken:
         def admin_initiate_auth(self, **_):
-            raise EndpointConnectionError(endpoint_url="https://secret-host.example")
+            raise error_type(endpoint_url="https://secret-host.example")
 
     adapter = cognito.CognitoAdapter(
         Broken(), user_pool_id=POOL, client_id=CLIENT_ID, client_secret=CLIENT_SECRET, region="ap-northeast-2"
@@ -212,6 +219,8 @@ def test_connection_error_is_provider_unavailable(caplog):
     with caplog.at_level(logging.DEBUG), pytest.raises(cognito.AuthProviderUnavailableError) as info:
         adapter.initiate_auth("a@b.com", "pw")
     assert "secret-host" not in caplog.text and "secret-host" not in str(info.value)
+    assert info.value.provider_status is None  # 분류에 쓰는 합성 503 은 제공자의 응답이 아니다
+    assert info.value.from_provider_call
     assert info.value.__cause__ is None and info.value.__suppress_context__
 
 
@@ -282,8 +291,10 @@ def test_admin_get_user_network_failure_is_unavailable():
 def test_admin_get_user_malformed_identity_is_unavailable(env, response):
     adapter, stubber = env
     stubber.add_response("admin_get_user", response, {"UserPoolId": POOL, "Username": EMAIL})
-    with pytest.raises(cognito.AuthProviderUnavailableError):
+    with pytest.raises(cognito.AuthProviderUnavailableError) as info:
         adapter.admin_get_user(EMAIL)
+    assert info.value.provider_status is None
+    assert not info.value.from_provider_call
 
 
 def test_admin_create_user_params_for_create_and_resend(env):
@@ -307,6 +318,68 @@ def test_admin_create_user_params_for_create_and_resend(env):
     expected = cognito.CognitoUser(UID, "sub-1", EMAIL, "FORCE_CHANGE_PASSWORD")
     assert adapter.admin_create_user(EMAIL) == expected
     assert adapter.admin_create_user(EMAIL, resend=True) == expected
+
+
+def test_admin_delete_software_token_params(env):
+    adapter, stubber = env
+    stubber.add_response(
+        "admin_delete_software_token",
+        {},
+        {"UserPoolId": POOL, "Username": UID},
+    )
+    assert adapter.admin_delete_software_token(UID) is cognito.SoftwareTokenDeletion.DELETED
+
+
+D = cognito.SoftwareTokenDeletion
+
+
+@pytest.mark.parametrize(
+    "code,status,expected",
+    [
+        # 등록 없음 · 리소스 없음 — 삭제 증명이 아니라 따로 둔다(#515)
+        ("ResourceNotFoundException", 400, D.NOT_FOUND),
+        # 그 밖의 4xx 는 제공자의 거절 — 삭제되지 않았다
+        ("UserNotFoundException", 400, D.REJECTED),
+        ("NotAuthorizedException", 400, D.REJECTED),
+        ("OperationNotEnabledException", 400, D.REJECTED),
+        ("InvalidParameterException", 400, D.REJECTED),
+        ("UserNotConfirmedException", 400, D.REJECTED),
+        ("TooManyRequestsException", 400, D.REJECTED),
+        # 5xx 는 코드와 무관하게 적용 여부를 모른다
+        ("InternalErrorException", 500, D.UNKNOWN),
+        ("TooManyRequestsException", 503, D.UNKNOWN),
+        ("ResourceNotFoundException", 500, D.UNKNOWN),
+    ],
+)
+def test_admin_delete_software_token_errors_are_classified_never_deleted(
+    env, caplog, code, status, expected
+):
+    adapter, stubber = env
+    add_error(stubber, "admin_delete_software_token", code, status)
+    with caplog.at_level(logging.DEBUG):
+        outcome = adapter.admin_delete_software_token(UID)
+    assert outcome is expected
+    assert "PRIVATE-TEXT" not in caplog.text
+    assert CLIENT_SECRET not in caplog.text
+    assert code in caplog.text and "admin_delete_software_token" in caplog.text
+
+
+@pytest.mark.parametrize("error_type", [EndpointConnectionError, ReadTimeoutError])
+def test_admin_delete_software_token_transport_failure_is_unknown(caplog, error_type):
+    class Down:
+        def admin_delete_software_token(self, **_):
+            raise error_type(endpoint_url="https://secret-host.invalid")
+
+    adapter = cognito.CognitoAdapter(
+        Down(),
+        user_pool_id=POOL,
+        client_id=CLIENT_ID,
+        client_secret=CLIENT_SECRET,
+        region="ap-northeast-2",
+    )
+    with caplog.at_level(logging.DEBUG):
+        assert adapter.admin_delete_software_token(UID) is D.UNKNOWN
+    assert "secret-host" not in caplog.text
 
 
 @pytest.mark.parametrize(

@@ -78,7 +78,9 @@ def complete_login(
     """로그인 완료 — 짧은 DB 변경 전체를 users 테이블 락 하나로 직렬화한다.
 
     같은 락을 관리자 서비스도 잡으므로 동시 로그인 · 비활성화 · 관리자 동작이 서로 끼어들지 않는다.
-    락을 잡은 뒤에야 신원 · 상태 · 이메일 증명을 새로 읽는다. 한 사용자의 세션은 1개만 남는다.
+    락을 잡은 뒤에야 신원 · 상태 · 인증 세대 · 이메일 증명을 새로 읽는다. 한 사용자의 세션은 1개만 남는다.
+    TOTP 복구 차단(auth.totp_recovery)도 같은 락 안에서 세대를 올리고 세션을 폐기한다 — 차단보다 먼저 commit 한
+    세션은 차단이 폐기하고, 차단 뒤의 완료는 세대 불일치로 거절된다.
     """
     try:
         auth_repo.lock_users_table(db)
@@ -90,6 +92,13 @@ def complete_login(
             raise AccountNotProvisionedError()
         if user.status is models.AppUserStatus.DISABLED:
             raise AccountDisabledError()
+        # TOTP 분실 복구(#515): TOTP 증명 전에 포착한 세대가 지금도 현재이고 차단이 없어야 한다 — 복구 차단
+        # (세대 증가) 전에 시작한 흐름은 이메일 증명까지 마쳤어도, 차단 · 새 등록 대기 중인 계정은 세션을 받지 못한다
+        if (
+            identity.generation != user.auth_generation
+            or user.mfa_recovery_state is not models.MfaRecoveryState.NONE
+        ):
+            raise AuthFailedError()
         # 이메일 증명은 앱이 로그인 흐름에서 이메일 코드 검증 성공을 받았을 때만 기록된다.
         if user.email_verified_at is None and not identity.email_proven:
             raise AuthFailedError()
