@@ -18,6 +18,8 @@ import type {
   TenantCreateResponse,
   TenantDetail,
   TenantOnboardingResponse,
+  TenantSettings,
+  TenantSettingsUpdateRequest,
   TenantsResponse,
   TenantUpdateRequest,
   TenantVerifyResponse,
@@ -197,6 +199,14 @@ export function createReadApi(transport: ApiTransport) {
     },
 
     /**
+     * 고객 설정(T-7). 고객사 계정은 자기 고객, 플랫폼 계정은 범위 안 고객만 — 범위 밖은 404 `TENANT_NOT_FOUND`.
+     * Slack은 연결 여부만 오고 URL은 오지 않는다. 화면(app/settings · app/tenants/[id]/settings)이 부른다.
+     */
+    getTenantSettings(tenantId: string): Promise<TenantSettings> {
+      return request<TenantSettings>(`/tenants/${encodeURIComponent(tenantId)}/settings`, undefined, transport);
+    },
+
+    /**
      * 중앙 관리자(전체 고객사 사용자) · 고객 담당자(배정된 고객의 사용자) · 고객사 ADMIN(자기 고객사) 전용(#492)
      * — 그 밖은 403 `AUTH_FORBIDDEN`. 범위는 서버가 정한다.
      * 플랫폼 계정은 목록에 오지 않는다. 사용자 관리 화면(app/users/page.tsx)이 부른다.
@@ -207,7 +217,7 @@ export function createReadApi(transport: ApiTransport) {
   };
 }
 
-export const { getAssets, getMetricsTimeseries, getIncidents, getIncident, getTenants, getTenant } =
+export const { getAssets, getMetricsTimeseries, getIncidents, getIncident, getTenants, getTenant, getTenantSettings } =
   createReadApi(BROWSER);
 
 /**
@@ -284,6 +294,18 @@ export function suspendTenant(tenantId: string, reason: string): Promise<TenantD
 /** 연결 확인을 먼저 하고, OK일 때만 ACTIVE가 된다. 실패하면 SUSPENDED 그대로다. */
 export function resumeTenant(tenantId: string): Promise<TenantVerifyResponse> {
   return postJson<TenantVerifyResponse>(tenantPath(tenantId, '/resume'));
+}
+
+/**
+ * 고객 설정 부분 수정(T-7) — 200 저장된 설정. 본문은 바뀐 것만 싣는다(lib/tenant-settings.ts `settingsUpdate`).
+ * Webhook URL이 실리므로 본문을 로그하지 않는다. 정지 고객은 409 `TENANT_SUSPENDED`다.
+ */
+export function updateTenantSettings(tenantId: string, body: TenantSettingsUpdateRequest): Promise<TenantSettings> {
+  return request<TenantSettings>(tenantPath(tenantId, '/settings'), {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
 }
 
 /* ──────────────────────────── /auth (#492 PR 1) ──────────────────────────── */

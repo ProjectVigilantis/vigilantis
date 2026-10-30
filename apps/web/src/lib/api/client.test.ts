@@ -12,13 +12,15 @@ import {
   createReadApi,
   getAssets,
   getMe,
+  getTenantSettings,
   getUserEvents,
   inviteUser,
   requestPasswordReset,
   resendInvite,
   revokeUserSessions,
+  updateTenantSettings,
 } from './client.ts';
-import type { UserListItem } from '../../types/api.ts';
+import type { TenantSettings, UserListItem } from '../../types/api.ts';
 
 interface Sent {
   url: string;
@@ -101,6 +103,54 @@ test('고객사 ADMIN의 초대는 tenant_id 없이 나간다', async (t) => {
   const sent = stubFetch(t, () => new Response('{}', { status: 201 }));
   await inviteUser({ email: 'a@b.c', role: 'OPERATOR', recover_existing: false });
   assert.deepEqual(sent[0].body, { email: 'a@b.c', role: 'OPERATOR', recover_existing: false });
+});
+
+test('고객 설정 조회 · 수정 — 경로 · 메서드 · 본문 · 쿠키 동봉 · 캐시 안 함', async (t) => {
+  const realFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = realFetch; });
+  const settings: TenantSettings = {
+    tenant_id: 't/1',
+    protected_tags: [],
+    notifications: { slack_configured: true, email_address: null, email_status: 'UNSET', legacy_sns_configured: false },
+    updated_at: '2026-10-30T00:00:00Z',
+  };
+  const sent: { path: string; init: RequestInit | undefined }[] = [];
+  globalThis.fetch = async (url, init) => {
+    sent.push({ path: new URL(String(url)).pathname, init });
+    return new Response(JSON.stringify(settings), { status: 200 });
+  };
+  const body = {
+    protected_tags: [{ key: 'Env', values: ['prod', ''] }],
+    notifications: { slack_webhook_url: null },
+  };
+  assert.deepEqual(await getTenantSettings('t/1'), settings);
+  assert.deepEqual(await updateTenantSettings('t/1', body), settings);
+
+  assert.deepEqual(sent.map((s) => [s.init?.method ?? 'GET', s.path]), [
+    ['GET', '/api/v1/tenants/t%2F1/settings'],
+    ['PATCH', '/api/v1/tenants/t%2F1/settings'],
+  ]);
+  for (const { init } of sent) {
+    assert.equal(init?.credentials, 'include');
+    assert.equal(init?.cache, 'no-store');
+  }
+  assert.equal(sent[0].init?.body, undefined);
+  assert.equal(new Headers(sent[1].init?.headers).get('Content-Type'), 'application/json');
+  assert.deepEqual(JSON.parse(String(sent[1].init?.body)), body);
+});
+
+test('고객 설정 서버 조회는 세션 쿠키를 싣고, 403은 로그인 처리 없이 오류로 올린다', async (t) => {
+  const realFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = realFetch; });
+  globalThis.fetch = async (url, init) => {
+    assert.equal(new URL(String(url)).pathname, '/api/v1/tenants/t1/settings');
+    assert.equal(new Headers(init?.headers).get('Cookie'), '__Host-vg_session=test-session');
+    return errorResponse(403, 'AUTH_FORBIDDEN')();
+  };
+  let authRequired = 0;
+  const api = createReadApi({ headers: { Cookie: '__Host-vg_session=test-session' }, onAuthRequired: () => (authRequired += 1) });
+  await assert.rejects(api.getTenantSettings('t1'), (error: unknown) => error instanceof ApiError && error.code === 'AUTH_FORBIDDEN');
+  assert.equal(authRequired, 0);
 });
 
 test('이력 조회는 상한 50을 싣는다', async (t) => {

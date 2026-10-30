@@ -18,6 +18,11 @@ import { canManageUsers, hasCustomerScope, isPlatform, type AccessSubject } from
 export const PLATFORM_HOME = '/tenants';
 export const CUSTOMER_HOME = '/';
 export const USERS_PATH = '/users';
+/**
+ * 고객사 계정의 자기 고객 설정(T-7). 역할과 관계없이 연다(OPERATOR · VIEWER는 조회만). 플랫폼 계정은 고객 상세
+ * (`/tenants/[id]/settings`)에서 들어간다 — 전체 고객을 고르는 메뉴는 두지 않는다.
+ */
+export const SETTINGS_PATH = '/settings';
 
 /** 업무 화면 — 대시보드 · 자산 · 보안. */
 export const BUSINESS_PATHS: readonly string[] = ['/', '/assets', '/security'];
@@ -50,7 +55,7 @@ export function homePathFor(user: AccessSubject): string {
 
 /**
  * 사이드바에 보일 경로(순서대로). 계정을 아직 모르면(null — 확인 전 · 조회 실패 · 미로그인) 아무 메뉴도 열지 않는다.
- * 업무 화면은 `businessOpen`, 고객 관리는 플랫폼, 사용자 관리는 `canManageUsers`가 연다.
+ * 업무 화면은 `businessOpen`, 고객 관리는 플랫폼, 사용자 관리는 `canManageUsers`, 고객 설정은 고객사 계정이 연다.
  */
 export function navPathsFor(user: AccessSubject | null): string[] {
   if (user === null) return [];
@@ -58,5 +63,6 @@ export function navPathsFor(user: AccessSubject | null): string[] {
     ...(businessOpen(user) ? BUSINESS_PATHS : []),
     ...(isPlatform(user) ? [PLATFORM_HOME] : []),
     ...(canManageUsers(user) ? [USERS_PATH] : []),
+    ...(user.account_type === 'TENANT' ? [SETTINGS_PATH] : []),
   ];
 }

@@ -17,6 +17,7 @@ import {
   isPlatform,
   isUnassignedManager,
   operateBlockedReason,
+  tenantSettingsAccess,
   type AccessSubject,
   type UserAdminSubject,
 } from './roles.ts';
@@ -114,6 +115,29 @@ test('고객사 사용자 대상별 관리 — 중앙 관리자 전체 · 담당
   // 대상의 고객을 모르거나 계정을 모르면 아니다.
   assert.equal(canManageUsersOf({ ...central, tenant_id: null }, null), false);
   assert.equal(canManageUsersOf(null, TENANT_A), false);
+});
+
+test('고객 설정 — 플랫폼은 담당 범위로 읽기 · 쓰기, 고객사는 자기 고객만 ADMIN 쓰기 · OPERATOR · VIEWER 읽기', () => {
+  const none = { read: false, write: false };
+  const full = { read: true, write: true };
+  assert.deepEqual(tenantSettingsAccess({ ...central, tenant_id: null }, TENANT_C), full);
+  const assigned = { ...manager(TENANT_A), tenant_id: null };
+  assert.deepEqual(tenantSettingsAccess(assigned, TENANT_A.toUpperCase()), full);
+  assert.deepEqual(tenantSettingsAccess(assigned, TENANT_B), none);
+  // 배정이 없으면 어떤 고객도 아니다.
+  assert.deepEqual(tenantSettingsAccess({ ...unassigned, tenant_id: null }, TENANT_A), none);
+
+  assert.deepEqual(tenantSettingsAccess(tenant('ADMIN', TENANT_A), TENANT_A), full);
+  assert.deepEqual(tenantSettingsAccess(tenant('OPERATOR', TENANT_A), TENANT_A), { read: true, write: false });
+  assert.deepEqual(tenantSettingsAccess(tenant('VIEWER', TENANT_A), TENANT_A), { read: true, write: false });
+  // 고객사 ADMIN이어도 다른 고객사는 아니다 — ADMIN 역할은 플랫폼 권한이 아니다.
+  assert.deepEqual(tenantSettingsAccess(tenant('ADMIN', TENANT_A), TENANT_B), none);
+  // 플랫폼 호환 역할 ADMIN · tenant_id null이어도 등급 · 배정이 없으면 아니다.
+  assert.deepEqual(
+    tenantSettingsAccess({ account_type: 'PLATFORM', role: 'ADMIN', platform_role: null, assigned_tenant_ids: [], tenant_id: null }, TENANT_A),
+    none,
+  );
+  assert.deepEqual(tenantSettingsAccess(null, TENANT_A), none);
 });
 
 test('플랫폼 여부는 account_type으로만 가른다 — 고객사 ADMIN은 플랫폼이 아니다', () => {

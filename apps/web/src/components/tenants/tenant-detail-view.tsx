@@ -108,6 +108,10 @@ export function TenantDetailView({ tenant }: { tenant: TenantDetail }) {
           <h1 className="text-2xl font-bold tracking-tight break-all">{tenant.name}</h1>
           <TenantStatusBadge status={tenant.status} />
           <span className="text-muted-foreground font-mono text-[13px]">{tenant.aws_account_id}</span>
+          {/* 보호 태그 · 알림(T-7). 읽기 · 쓰기 범위는 설정 화면과 서버가 다시 판정한다. */}
+          <Button asChild variant="outline" size="sm" className="ml-auto">
+            <Link href={`/tenants/${encodeURIComponent(tenant.tenant_id)}/settings`}>설정</Link>
+          </Button>
         </div>
       </div>
 
