@@ -3,8 +3,9 @@
 # GET /api/v1/audit-events — 조치 승인 · 종료 판단 감사 기록 조회 (T-2 B · #544, 계약: schemas.api.audit)
 #
 #   - 범위: 고객사 계정은 자기 테넌트의 기록만, 플랫폼 계정은 전부. 모든 역할이 본다(VIEWER 포함).
-#     다른 업무 라우터처럼 임시 출시 관문(require_business_access) 뒤에 둔다 — 지금 고객사 계정은 403 이다.
-#     범위는 그래도 이 라우터가 직접 건다: 관문이 걷히면(테넌트 격리 뒤) 고칠 것 없이 고객사 계정에 열린다.
+#     범위 판정은 인시던트 · 조치와 같은 auth.access.require_tenant_scope 다(소속 없는 고객사 계정은 403).
+#     그래서 인시던트 라우터처럼 임시 출시 관문 없이 붙는다(main) — 인시던트는 보는데 그 기록만 403 이면
+#     화면이 두 규칙을 따로 다뤄야 한다. 소속 없는 기록(tenant_id NULL)은 플랫폼 계정에게만 보인다.
 #   - 행위자 이메일은 보는 사람이 정한다: PLATFORM_USER 의 이메일은 플랫폼 계정에게만 싣는다.
 #   - 범위 밖 · 형식이 어긋난 incident_id 는 404 가 아니라 빈 목록이다(존재를 알리지 않는다).
 #   - 커서는 직전 쪽 마지막 기록의 (occurred_at, event_id) 를 감싼 불투명 문자열이다. 깨지면 422.
@@ -19,8 +20,7 @@ import json
 from datetime import datetime
 from typing import Optional
 
-from auth.access import is_platform_account, require_user
-from auth.service import CurrentUser
+from auth.access import require_tenant_scope
 from db.repositories import audit as audit_repo
 from db.session import get_db
 from exceptions import ApiError
@@ -35,8 +35,9 @@ from schemas.api.audit import (
 )
 from schemas.api.errors import ErrorCode
 from sqlalchemy.orm import Session
+from tenancy import TenantScope
 
-router = APIRouter(prefix="/api/v1", tags=["audit"])
+router =APIRouter(prefix="/api/v1", tags=["audit"])
 
 
 def _encode_cursor(row: audit_repo.EventRow) -> str:
@@ -103,7 +104,7 @@ def list_audit_events(
     cursor: Optional[str] = Query(default=None, min_length=1),
     limit: int = Query(default=AUDIT_EVENTS_DEFAULT_LIMIT, ge=1, le=AUDIT_EVENTS_MAX_LIMIT),
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_user),
+    scope: TenantScope = Depends(require_tenant_scope),
 ) -> AuditEventsResponse:
     since, until = _aware(since), _aware(until)
     before = None if cursor is None else _decode_cursor(cursor)
@@ -111,15 +112,11 @@ def list_audit_events(
         incident_id = canonical_id(incident_id)
         if incident_id is None:
             return AuditEventsResponse(items=[], next_cursor=None)
-    platform_viewer = is_platform_account(user)
-    scope = None if platform_viewer else user.tenant_id
-    if not platform_viewer and scope is None:
-        # 소속 없는 고객사 계정은 세션 판정을 통과하지 않는다 — 통과했다면 「전부」로 열지 않는다
-        raise ApiError(ErrorCode.AUTH_FORBIDDEN)
+    platform_viewer = scope.is_platform
     # 한 건 더 읽어 다음 쪽이 있는지 본다
     rows = audit_repo.list_events(
         db,
-        tenant_id=scope,
+        tenant_id=scope.tenant_id,
         incident_id=incident_id,
         since=since,
         until=until,

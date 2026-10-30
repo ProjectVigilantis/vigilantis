@@ -10,7 +10,7 @@
 #     회수 스캔(dispatcher)과 AI 분석 대기 스캔(agent_dispatcher)은 DISPATCH_ENABLED를
 #     Medium 승인 기한 감시와 공유해 켜고 끈다 (Issue #232·#277·#285·#447).
 #   - 모의 위협 파일 소비자는 MOCK_THREAT_INBOX_DIR 지정 시 독립 기동한다(#322).
-#   - 접근 보호(#492 PR 2): 조치 · 자산 · 인시던트 · 메트릭 라우터는 포함 시점에
+#   - 접근 보호(#492 PR 2): 조치 · 자산 · 인시던트 · 감사 기록 · 메트릭 라우터는 포함 시점에
 #     Origin(상태 변경만) → 세션 검사를 건다. 공개 경로는 /health 와 로그인 단계뿐이다.
 #     API 문서는 API_DOCS_ENABLED 일 때만 열린다. 메트릭은 임시로 플랫폼 계정만 받는다(#492).
 # ==============================================================================
@@ -199,7 +199,7 @@ def create_app() -> FastAPI:
     business = [*protected, Depends(require_business_access)]
     app.include_router(actions_router.router, dependencies=protected)
     app.include_router(assets_router.router, dependencies=protected)
-    app.include_router(audit_router.router, dependencies=business)
+    app.include_router(audit_router.router, dependencies=protected)
     app.include_router(auth_router.router)
     app.include_router(incidents_router.router, dependencies=protected)
     app.include_router(metrics_router.router, dependencies=business)

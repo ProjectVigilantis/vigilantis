@@ -271,6 +271,7 @@ TENANT_SCOPED_ROUTES = {
     ("POST", "/api/v1/incidents/{incident_id}/resolve"),
     ("POST", EXECUTE),
     ("GET", "/api/v1/assets"),
+    ("GET", "/api/v1/audit-events"),
 }
 
 
@@ -309,6 +310,7 @@ def test_business_routes_outside_tenant_scope_stay_platform_only(client_pg, logi
     assert answers == {
         ("GET", "/api/v1/incidents"): (200, None),
         ("GET", "/api/v1/assets"): (200, None),
+        ("GET", "/api/v1/audit-events"): (200, None),
         ("GET", "/api/v1/incidents/{incident_id}"): (404, "INCIDENT_NOT_FOUND"),
         ("POST", "/api/v1/incidents/{incident_id}/resolve"): (404, "INCIDENT_NOT_FOUND"),
         ("POST", EXECUTE): (404, "INCIDENT_NOT_FOUND"),
