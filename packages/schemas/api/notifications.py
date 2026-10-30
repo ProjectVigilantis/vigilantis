@@ -5,11 +5,11 @@
 읽음 표시는 사용자별이고 문의·가입 신청 상태는 바꾸지 않는다.
 """
 
-from datetime import datetime
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .assets import UtcDateTime
 from .support import InquiryCategory, NotificationKind
 
 INBOX_PAGE_SIZE = 50
@@ -25,8 +25,8 @@ class NotificationItem(BaseModel):
     subject: str
     summary: str
     inquiry_category: InquiryCategory | None = None
-    created_at: datetime
-    read_at: datetime | None = None
+    created_at: UtcDateTime
+    read_at: UtcDateTime | None = None
 
 
 class NotificationsResponse(BaseModel):

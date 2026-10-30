@@ -55,3 +55,31 @@ def test_response_shape_and_unread_count_is_not_bounded_by_page():
         NotificationsResponse(items=[], unread_count=-1)
     with pytest.raises(ValidationError):
         NotificationItem.model_validate({**item.model_dump(), "extra": 1})
+
+
+@pytest.mark.parametrize(
+    ("read_at", "expected_read_at"),
+    [
+        (None, None),
+        (
+            datetime(2026, 10, 30, 0, 1, 0, 123456, tzinfo=UTC),
+            "2026-10-30T00:01:00Z",
+        ),
+    ],
+)
+def test_response_serializes_utc_seconds_and_preserves_unread_null(read_at, expected_read_at):
+    item = NotificationItem(
+        notification_id=str(uuid.uuid4()),
+        kind="SIGNUP_REQUEST",
+        target_id=str(uuid.uuid4()),
+        subject="학원",
+        summary="가입 신청",
+        created_at=datetime.fromisoformat("2026-10-30T09:00:00.123456+09:00"),
+        read_at=read_at,
+    )
+    response = NotificationsResponse(items=[item], unread_count=int(read_at is None))
+
+    serialized = response.model_dump(mode="json")["items"][0]
+
+    assert serialized["created_at"] == "2026-10-30T00:00:00Z"
+    assert serialized["read_at"] == expected_read_at
