@@ -39,6 +39,7 @@ TENANT_B = TenantAccess(
     external_id="ext-b",
 )
 _SIGNED_KEY = re.compile(r"Credential=([^/]+)/")
+_SIGNED_REGION = re.compile(r"Credential=[^/]+/[^/]+/([^/]+)/")
 
 
 class FakeFetcher:
@@ -71,9 +72,13 @@ class FakeAws:
 
     def __init__(self):
         self.sent: list[tuple[str, str, dict]] = []
+        self.regions: list[tuple[str, str]] = []  # (동작, 서명 리전)
         self.issued = 0
         self.lifetime = timedelta(minutes=15)  # 900초 세션
-        self.deny_assume = False
+        self.deny: dict[str, str] = {}  # 동작 → 403 으로 돌려줄 오류 코드
+        self.caller_account: str | None = (
+            None  # GetCallerIdentity 가 답할 계정(없으면 서명 키의 계정)
+        )
         self._lock = threading.Lock()
 
     def assume_calls(self) -> list[dict]:
@@ -88,16 +93,23 @@ class FakeAws:
         params = {k: v[0] for k, v in parse_qs(body).items()}
         action = params.get("Action", "")
         auth = request.headers["Authorization"]
-        key = _SIGNED_KEY.search(
-            auth.decode() if isinstance(auth, bytes) else auth
-        ).group(1)
+        auth_text = auth.decode() if isinstance(auth, bytes) else auth
+        key = _SIGNED_KEY.search(auth_text).group(1)
         with self._lock:
             self.sent.append((action, key, params))
+            self.regions.append((action, _SIGNED_REGION.search(auth_text).group(1)))
             if action == "AssumeRole":
                 self.issued += 1
                 issued = self.issued
-        if action == "AssumeRole" and self.deny_assume:
-            xml = "<ErrorResponse><Error><Code>AccessDenied</Code><Message>m</Message></Error></ErrorResponse>"
+        if action in self.deny:
+            error = (
+                f"<Error><Code>{self.deny[action]}</Code><Message>m</Message></Error>"
+            )
+            xml = (
+                f"<Response><Errors>{error}</Errors><RequestID>r</RequestID></Response>"
+                if action == "DescribeInstances"  # EC2 의 오류 모양
+                else f"<ErrorResponse>{error}</ErrorResponse>"
+            )
             return AWSResponse(request.url, 403, {}, _Raw(xml))
         if action == "AssumeRole":
             account = params["RoleArn"].split(":")[4]
@@ -114,7 +126,7 @@ class FakeAws:
                 "</AssumeRoleResult></AssumeRoleResponse>"
             )
         elif action == "GetCallerIdentity":
-            account = (
+            account = self.caller_account or (
                 key[len("TENANT") :].split("-")[0]
                 if key.startswith("TENANT")
                 else "999999999999"
@@ -124,6 +136,8 @@ class FakeAws:
                 f"<Arn>arn:aws:sts::{account}:assumed-role/x/y</Arn><UserId>u</UserId>"
                 f"<Account>{account}</Account></GetCallerIdentityResult></GetCallerIdentityResponse>"
             )
+        elif action == "DescribeInstances":
+            xml = "<DescribeInstancesResponse><reservationSet/></DescribeInstancesResponse>"
         elif action == "Publish":
             xml = "<PublishResponse><PublishResult><MessageId>m</MessageId></PublishResult></PublishResponse>"
         else:
@@ -296,7 +310,7 @@ def test_failed_refresh_keeps_credentials_outside_the_mandatory_window(aws, sett
     aws.lifetime = timedelta(minutes=4)
     with tenant_scope(TENANT_A):
         client_module.account_id()
-        aws.deny_assume = True
+        aws.deny["AssumeRole"] = "AccessDenied"
         assert client_module.account_id() == "111111111111"
     keys = [k for a, k, _p in aws.sent if a == "GetCallerIdentity"]
     assert keys == ["TENANT111111111111-1", "TENANT111111111111-1"]
@@ -334,3 +348,161 @@ def test_platform_sns_client_keeps_platform_credentials_inside_scope(aws, settin
 
 def test_external_id_stays_out_of_repr():
     assert "ext-a" not in repr(TENANT_A)
+
+
+# --- 연결 확인 어댑터 · 캐시 비우기(#533 B) ---------------------------------------
+# 결과 5갈래의 분류 표는 tests/test_tenant_verification.py 가 대역 함수로 고정한다. 여기서는 어댑터가
+# 실제 세션 · 단계 순서 · 캐시를 맞게 잇는지 본다.
+
+REGION = (
+    "us-west-2"  # 테넌트 regions[0] — 플랫폼 기본 리전(ap-northeast-2)과 일부러 다르게
+)
+
+
+def _verify(access=TENANT_A, expected="111111111111"):
+    from tenant_verification import verify_connection
+
+    return verify_connection(access, expected_account_id=expected, region=REGION)
+
+
+def _actions(aws):
+    return [(action, key) for action, key, _p in aws.sent]
+
+
+def test_verify_ok_walks_the_three_steps_with_the_assumed_session(aws, settings):
+    from schemas.api.tenants import TenantVerificationResult
+
+    outcome = _verify()
+
+    assert (outcome.result, outcome.reason_code) == (TenantVerificationResult.OK, None)
+    assert _actions(aws) == [
+        ("AssumeRole", PLATFORM_KEY),
+        ("GetCallerIdentity", "TENANT111111111111-1"),
+        ("DescribeInstances", "TENANT111111111111-1"),
+    ]
+    (params,) = [p for a, _k, p in aws.sent if a == "DescribeInstances"]
+    assert params["MaxResults"] == "5"
+    assert (
+        params.get("Filter.1.Name") is None
+    )  # 범위를 좁히지 않는다 — 읽기 권한만 본다
+    # AssumeRole 은 플랫폼 리전, 고객 계정 쪽 두 단계는 테넌트의 첫 리전에서 묻는다
+    assert aws.regions == [
+        ("AssumeRole", "ap-northeast-2"),
+        ("GetCallerIdentity", REGION),
+        ("DescribeInstances", REGION),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("deny", "caller", "expected"),
+    [
+        ({"AssumeRole": "AccessDenied"}, None, ("ASSUME_DENIED", "AccessDenied")),
+        ({}, "333333333333", ("ACCOUNT_MISMATCH", "CallerAccountMismatch")),
+        (
+            {"DescribeInstances": "UnauthorizedOperation"},
+            None,
+            ("READ_DENIED", "UnauthorizedOperation"),
+        ),
+    ],
+    ids=["assume", "account", "read"],
+)
+def test_verify_stops_at_the_first_failed_step(aws, settings, deny, caller, expected):
+    aws.deny.update(deny)
+    aws.caller_account = caller
+
+    outcome = _verify()
+
+    assert (outcome.result.value, outcome.reason_code) == expected
+    sent = [a for a, _k in _actions(aws)]
+    stop = {"ASSUME_DENIED": 1, "ACCOUNT_MISMATCH": 2, "READ_DENIED": 3}[expected[0]]
+    assert sent == ["AssumeRole", "GetCallerIdentity", "DescribeInstances"][:stop]
+
+
+@pytest.mark.parametrize(
+    ("action", "code", "stop"),
+    [
+        ("AssumeRole", "InvalidClientTokenId", 1),  # 플랫폼 자격 거절 — 고객의 거절이 아니다
+        ("GetCallerIdentity", "AccessDenied", 2),  # 권한이 필요 없는 호출의 오류는 거절이 아니다
+        ("DescribeInstances", "AuthFailure", 3),
+    ],
+    ids=["assume", "account", "read"],
+)
+def test_verify_platform_side_errors_are_unreachable_not_denial(
+    aws, settings, action, code, stop
+):
+    aws.deny[action] = code
+
+    outcome = _verify()
+
+    assert (outcome.result.value, outcome.reason_code) == ("UNREACHABLE", code)
+    sent = [a for a, _k in _actions(aws)]
+    assert sent == ["AssumeRole", "GetCallerIdentity", "DescribeInstances"][:stop]
+
+
+def test_verify_without_platform_credentials_is_unreachable(aws, settings, monkeypatch):
+    """플랫폼 자신의 자격이 없으면 고객 계정의 거절이 아니다 — 아무 요청도 나가지 않는다."""
+    monkeypatch.delenv("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI")
+
+    outcome = _verify()
+
+    assert (outcome.result.value, outcome.reason_code) == (
+        "UNREACHABLE",
+        "NoCredentialsError",
+    )
+    assert aws.sent == []
+
+
+def test_verify_does_not_use_or_fill_the_session_cache(aws, settings):
+    """확인은 캐시된 자격으로 묻지 않고, 실패한 확인은 캐시를 건드리지 않는다."""
+    with tenant_scope(TENANT_A):
+        client_module.account_id()  # 캐시: TENANT…-1
+    aws.deny["DescribeInstances"] = "UnauthorizedOperation"
+
+    _verify()
+
+    assert [k for a, k in _actions(aws) if a == "GetCallerIdentity"][
+        -1
+    ] == "TENANT111111111111-2"
+    with tenant_scope(TENANT_A):
+        client_module.account_id()
+    assert [k for a, k in _actions(aws) if a == "GetCallerIdentity"][
+        -1
+    ] == "TENANT111111111111-1"
+
+
+def test_verify_ok_drops_the_tenant_cache_for_every_thread(aws, settings):
+    """통과하면 그 테넌트의 캐시를 버린다 — 이미 세션을 쥔 스레드도 다음 호출에서 다시 받는다."""
+    ready, verified, done = threading.Event(), threading.Event(), threading.Event()
+    keys = []
+
+    def worker():
+        with tenant_scope(TENANT_A):
+            client_module.account_id()  # 이 스레드가 세션을 쥔다(TENANT…-1)
+            ready.set()
+            verified.wait(timeout=10)
+            client_module.account_id()
+        keys.append([k for a, k in _actions(aws) if a == "GetCallerIdentity"][-1])
+        done.set()
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    ready.wait(timeout=10)
+    with tenant_scope(TENANT_B):
+        client_module.account_id()  # 다른 테넌트 캐시는 남는다
+    assert _verify().result.value == "OK"  # 확인 세션: TENANT…-2
+    verified.set()
+    done.wait(timeout=10)
+    thread.join()
+
+    # 발급 순서: 스레드 1 · B 2 · 확인 3 · 버린 뒤 스레드의 새 자격 4
+    assert keys == ["TENANT111111111111-4"]
+    assert (
+        len([p for p in aws.assume_calls() if p["RoleArn"] == TENANT_B.access_role_arn])
+        == 1
+    )
+    with tenant_scope(TENANT_B):
+        client_module.account_id()
+    assert (
+        len([p for p in aws.assume_calls() if p["RoleArn"] == TENANT_B.access_role_arn])
+        == 1
+    )
