@@ -18,6 +18,10 @@ from db.models import Base
 EXPECTED_TABLES = {
     # 테넌트 — 고객 계정 (Post-MVP T-4 · #485)
     "tenants",
+    # 옛 재개 규칙이 남긴 구독 보존(읽기 전용) · 모의 Marketplace 계약 · 이벤트 (Post-MVP T-16 · #528)
+    "tenant_subscription_history",
+    "mock_marketplace_agreements",
+    "mock_marketplace_events",
     # 자산·인시던트 계열 10종
     "collection_runs",
     "asset_inventory_counts",  # 회차별 유형별 자산 수 — 시계열 축 5 (2026-09-29)
@@ -99,6 +103,28 @@ def test_row_invariant_constraints_registered():
             "ck_execution_steps_sequence_positive",
         },
         "guardrail_evaluations": {"ck_guardrail_evaluations_exactly_one_reference"},
+        # 구독 칸의 모양(T-16 · #528) — 계약 TenantSubscription 의 불변식 거울
+        "tenants": {
+            "ck_tenants_amount_with_currency",
+            "ck_tenants_amount_range",
+            "ck_tenants_currency_format",
+            "ck_tenants_billing_anchor_day_range",
+            "ck_tenants_billing_anchor_with_period",
+            "ck_tenants_cancel_with_period_end",
+            # 투영의 원천(모의 Marketplace)
+            "ck_tenants_source_iff_subscription",
+            "ck_tenants_entitlement_end_with_mock",
+            "ck_tenants_mock_projection_shape",
+            "ck_tenants_app_free_is_free",
+        },
+        "mock_marketplace_agreements": {
+            "ck_mock_marketplace_agreements_source_is_mock",
+            "ck_mock_marketplace_agreements_activation_shape",
+            "ck_mock_marketplace_agreements_ended_shape",
+            "ck_mock_marketplace_agreements_expired_shape",
+            "ck_mock_marketplace_agreements_renewal_disabled_shape",
+        },
+        "mock_marketplace_events": {"ck_mock_marketplace_events_source_is_mock"},
         "metric_summaries": {"ck_metric_summaries_window_ordered"},
         "rule_evaluations": {"ck_rule_evaluations_health_score_range"},
         # 계정 종류 ↔ 소속 · 플랫폼 등급(#492). PLATFORM role=ADMIN 은 호환 제약이다
@@ -133,6 +159,14 @@ def test_tenant_assignment_is_composite_key_with_cascading_foreign_keys():
         (fk.column.table.name, fk.column.name, fk.ondelete) for fk in table.foreign_keys
     } == {("app_users", "user_id", "CASCADE"), ("tenants", "tenant_id", "CASCADE")}
     assert set(table.columns.keys()) == {"user_id", "tenant_id"}
+
+
+def test_one_open_mock_agreement_per_tenant_is_a_partial_unique_index():
+    indexes = {ix.name: ix for ix in Base.metadata.tables["mock_marketplace_agreements"].indexes}
+    open_agreement = indexes["uq_mock_marketplace_agreements_open_tenant"]
+    assert open_agreement.unique
+    assert [c.name for c in open_agreement.columns] == ["tenant_id"]
+    assert open_agreement.dialect_options["postgresql"]["where"] is not None
 
 
 def test_candidate_active_partial_unique_exists():

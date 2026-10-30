@@ -18,8 +18,11 @@
 #     소유라 플랫폼이 지울 수 없다).
 #   - `external_id` 는 플랫폼이 테넌트를 만들 때 한 번 정하고 바꾸지 않는다. 상세 응답에는
 #     칸이 없고, 생성 응답 · 연결 전 상세의 온보딩 링크 · **재발급 경로**에서만 내보낸다.
-#   - T-6(고객별 자동 조치 끄기) · T-16(구독 현황 모의)의 칸은 자리만 둔다 — 값의 뜻은
-#     각 카드가 정한다.
+#   - T-6(고객별 자동 조치 끄기) 칸의 뜻은 그 카드가 정한다. T-16(구독 · #528)의 `subscription` 칸은
+#     TenantSubscription 과 schemas.subscriptions(어휘 · 계약 기간 달력)가 정한다. 고객 자신의
+#     구독 경로(/api/v1/me/subscription)는 api/subscriptions.py 다. 진행 중(PENDING · ACTIVE)인 모의
+#     Marketplace 계약이 있거나 구독이 그 계약의 투영(`subscription_source` = MOCK_MARKETPLACE)이면
+#     PATCH 의 `subscription` 은 409 TENANT_STATE_CONFLICT 다 — 운영자 입력이 유효한 계약을 지우지 않는다.
 #
 # 경로 (전부 /api/v1)
 #   GET    /tenants                  → TenantsResponse
@@ -64,6 +67,7 @@ from typing import Annotated, Optional
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..arns import build_iam_role_arn
+from ..subscriptions import PAID_PLANS, SubscriptionSource, billing_period
 from .assets import UtcDateTime
 
 AwsAccountId = Annotated[str, Field(pattern=r"^\d{12}$")]
@@ -165,14 +169,36 @@ class TenantVerification(BaseModel):
         return self
 
 
+#: 금액 상한 — JSON 소비자(FE · JavaScript)가 정수를 정확히 읽는 최대값(2^53 - 1). DB CHECK 와 같다.
+MAX_AMOUNT_MINOR = 9_007_199_254_740_991
+
+
 class TenantSubscription(BaseModel):
-    """구독 현황(T-16 · 모의). 원천은 운영자 입력이다 — 결제 연동이 없다(#438 ③ 보류)."""
+    """지금 적용 중인 구독(T-16 · #528) — 투영이다. 결제는 없다(#438 ③ 보류).
+
+    원천(`TenantListItem.subscription_source`)은 운영자 입력(MANUAL) · 모의 Marketplace 계약의 현재 권리
+    (MOCK_MARKETPLACE) · 앱 정책 Free(APP_FREE)다. 아래 불변식은 DB CHECK 와 같다 — 조회 응답이 저장값 때문에
+    깨지지 않게 저장 규칙 그대로만 둔다. 쓰기 요청에만 거는 규칙은 TenantUpdateRequest 에 있다.
+
+    - `plan`: 문자열. `Free` · `Business` · `Enterprise` 밖의 옛 값도 보존한다. null 은 「등록 안 됨」이지 Free 가 아니다.
+    - `period_start` ~ `period_end`: 이용 기간(KST 날짜, 끝 포함). 모의 계약 투영이면 계약 기간 시각의 KST 파생값이다.
+    - `cancel_at_period_end`: 모의 계약 투영이면 「자동 갱신 끔 — 기간 끝에 앱 정책 Free 로 돌아간다」다. 운영자
+      입력(MANUAL)에서는 기록된 값일 뿐 자동 전환을 일으키지 않는다(이 변경 전의 기록 보존).
+    - `billing_anchor_day`: 모의 계약 투영이면 계약 기념일이다. 운영자 입력에서는 기록된 값일 뿐 자동 갱신을
+      일으키지 않는다(로컬 자동 갱신은 없다).
+    - `amount_minor` · `currency`: 등록된 요금(통화 최소 단위 정수 · ISO 4217). null 은 「미정」이지 0원이 아니며,
+      둘은 함께 있거나 함께 없다. 서버가 요금을 지어내지 않는다(모의 계약은 요금을 비워 둔다).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     plan: Optional[str] = Field(None, min_length=1, max_length=50)
     period_start: Optional[date] = None
     period_end: Optional[date] = None
+    cancel_at_period_end: bool = False
+    billing_anchor_day: Optional[int] = Field(None, ge=1, le=31)
+    amount_minor: Optional[int] = Field(None, ge=0, le=MAX_AMOUNT_MINOR)
+    currency: Optional[str] = Field(None, pattern=r"^[A-Z]{3}$")
 
     @model_validator(mode="after")
     def _enforce_contract(self):
@@ -182,6 +208,12 @@ class TenantSubscription(BaseModel):
             and self.period_end < self.period_start
         ):
             raise ValueError("period_end 는 period_start 보다 앞일 수 없습니다")
+        if (self.amount_minor is None) != (self.currency is None):
+            raise ValueError("amount_minor 와 currency 는 함께 있거나 함께 없습니다")
+        if self.billing_anchor_day is not None and (self.period_start is None or self.period_end is None):
+            raise ValueError("billing_anchor_day 는 이용 기간(period_start · period_end)과 함께만 있습니다")
+        if self.cancel_at_period_end and self.period_end is None:
+            raise ValueError("cancel_at_period_end 는 마지막 이용일(period_end)이 있어야 합니다")
         return self
 
 
@@ -198,6 +230,22 @@ class TenantListItem(BaseModel):
     #: 소멸하지 않은 자산 수 · 종료되지 않은 인시던트 수 — 목록에서 고객을 고르는 근거.
     asset_count: int = Field(ge=0)
     open_incident_count: int = Field(ge=0)
+    #: 구독 현황(T-16). null = 구독 정보가 등록되지 않았다(Free 가 아니다). 서비스 정지와 무관하게 계약을 따른다.
+    subscription: Optional[TenantSubscription] = None
+    #: 구독 투영의 원천. MOCK_MARKETPLACE 면 운영자 PATCH 로 바꿀 수 없다. null = 등록 안 됨.
+    subscription_source: SubscriptionSource | None = None
+    #: 모의 계약 투영의 권리 끝 시각(미포함). 원천이 MOCK_MARKETPLACE 일 때만 있다.
+    entitlement_ends_at: UtcDateTime | None = None
+
+    @model_validator(mode="after")
+    def _enforce_subscription_source(self):
+        if (self.subscription_source is SubscriptionSource.MOCK_MARKETPLACE) != (
+            self.entitlement_ends_at is not None
+        ):
+            raise ValueError("entitlement_ends_at 은 모의 계약 투영에만, 그리고 반드시 있습니다")
+        if (self.subscription_source is None) != (self.subscription is None):
+            raise ValueError("등록 안 됨(subscription_source null)은 구독 정보가 없는 것입니다")
+        return self
 
 
 class TenantsResponse(BaseModel):
@@ -221,7 +269,6 @@ class TenantDetail(TenantListItem):
     onboarding_url: Optional[str] = Field(None, pattern=r"^https://")
     suspended_at: Optional[UtcDateTime] = None
     suspended_reason: Optional[str] = Field(None, min_length=1, max_length=500)
-    subscription: Optional[TenantSubscription] = None
     created_at: UtcDateTime
     updated_at: UtcDateTime
 
@@ -333,6 +380,20 @@ class TenantUpdateRequest(BaseModel):
     """PATCH /api/v1/tenants/{tenant_id} 요청 — 보낸 칸만 바꾼다. 하나는 있어야 한다.
 
     `aws_account_id` · `access_role_arn` 은 바꾸지 않는다 — 다른 계정이면 다른 테넌트다.
+
+    `subscription` 은 **구독 전체를 바꾼다** — 보낸 객체가 새 현재 구독(원천 MANUAL)이고, 객체 안에서 뺀 칸은
+    기본값(false · null)이다. null 이면 구독을 지운다(미등록 · Free 가 아니다). 칸을 빼면 구독(예약 · 기준일 포함)은
+    그대로다. 진행 중(PENDING · ACTIVE)인 모의 Marketplace 계약이 있거나 지금 구독이 그 투영이면 409
+    TENANT_STATE_CONFLICT 다(다른 칸만 보낸 PATCH 는 받는다). 운영자 입력은 기록이고 자동 갱신 · 전환을
+    일으키지 않지만, 옛 규칙과 어긋난 값은 계속 아래로 거절한다.
+      - 기준일 · Free 전환 예약은 Business · Enterprise 에만 있다 — 옛 요금제 이름은 갱신 · 전환하지 않는다.
+      - 기준일이 없는 Business · Enterprise 도 받는다 — 운영자가 관리하는 수동 기록이고(이 변경 전의 세 칸
+        입력 그대로) 자동 갱신 대상이 아니다. 기준일을 빼는 것은 갱신 등록이 아니다.
+      - 기준일을 보내면 이용 기간이 그 기준일의 한 달과 맞아야 한다. 다음 기간이 달력(9999-12-31) 밖이면
+        받지 않는다 — 예정일을 만들 수 없는 갱신 구독을 저장하지 않는다.
+      - Free 전환 예약은 갱신 여부(기준일)와 따로다 — Business · Enterprise 이고 전환일(period_end 다음 날)이
+        달력 안이면 수동 기록에도 받는다(고객 예약과 같은 대상). 마지막 이용일이 9999-12-31 이면 받지 않는다.
+        예약이 없는 수동 기록의 9999-12-31 은 그대로 받는다.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -354,4 +415,18 @@ class TenantUpdateRequest(BaseModel):
             values = getattr(self, field)
             if values is not None and len(set(values)) != len(values):
                 raise ValueError(f"{field} 는 중복될 수 없습니다")
+        sub = self.subscription
+        if sub is not None:
+            paid = sub.plan in PAID_PLANS
+            if not paid and (sub.billing_anchor_day is not None or sub.cancel_at_period_end):
+                raise ValueError(
+                    "billing_anchor_day · cancel_at_period_end 는 Business · Enterprise 구독에만 있습니다")
+            # 예약에는 마지막 이용일이 있다(TenantSubscription 불변식). 전환일이 달력 밖이면 받지 않는다
+            if sub.cancel_at_period_end and sub.period_end == date.max:
+                raise ValueError("cancel_at_period_end 는 전환일(period_end 다음 날)이 달력 안이어야 합니다")
+            if sub.billing_anchor_day is not None:
+                # 여기까지 오면 유료 요금제이고 이용 기간 두 칸도 있다(TenantSubscription 불변식).
+                # 다음 기간의 시작일이 달력 밖이면 billing_period 가 ValueError — 검증 오류(422)다
+                if billing_period(sub.billing_anchor_day, sub.period_start) != (sub.period_start, sub.period_end):
+                    raise ValueError("이용 기간이 billing_anchor_day 기준의 한 달과 맞지 않습니다")
         return self

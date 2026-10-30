@@ -5,7 +5,8 @@
 #   - 라우터는 얇게 두고 여기서 commit 한다. **응답을 다 만든 뒤에 commit 한다** — 온보딩 링크 설정이
 #     없어 응답을 못 만들면(503) 쓰기도 남지 않는다.
 #   - 상태 전이의 받는 상태는 저장소(db.repositories.tenants)가 계약 상수로 판정한다. 0행이면 다시 읽어
-#     없으면 404 TENANT_NOT_FOUND, 있으면 409 TENANT_STATE_CONFLICT 다.
+#     없으면 404 TENANT_NOT_FOUND, 있으면 409 TENANT_STATE_CONFLICT 다. PATCH 의 `subscription` 이 진행 중인
+#     모의 Marketplace 계약 · 그 투영을 덮으려 하면 저장소가 0행으로 거절해 같은 409 다(T-16 · #528).
 #   - 연결 확인은 읽기 트랜잭션을 끝낸 뒤 AWS 에 묻고, 쓰기 직전 권한 · 대상 설정 · 상태를 다시 확인한다.
 #   - external_id 는 생성 응답과 재발급(onboarding)에서만 내보낸다. 상세 응답에는 칸이 없다(계약).
 # ==============================================================================
@@ -88,12 +89,13 @@ def _verification(tenant: models.Tenant) -> TenantVerification | None:
     )
 
 
-def _subscription(tenant: models.Tenant) -> TenantSubscription | None:
-    if tenant.plan is None and tenant.period_start is None and tenant.period_end is None:
-        return None
-    return TenantSubscription(
-        plan=tenant.plan, period_start=tenant.period_start, period_end=tenant.period_end
-    )
+def subscription_of(tenant: models.Tenant) -> TenantSubscription | None:
+    """구독 칸 → 계약. 아무 사실도 없으면(예약 없음 · 나머지 전부 NULL) null — 「등록 안 됨」이다.
+
+    고객 구독 응답(subscription_workflow)도 이것을 쓴다 — 관리자와 고객이 같은 구독을 본다.
+    """
+    sub = TenantSubscription(**{field: getattr(tenant, field) for field in TenantSubscription.model_fields})
+    return None if sub == TenantSubscription() else sub
 
 
 def _list_item(row: tenants_repo.TenantWithCounts) -> TenantListItem:
@@ -106,6 +108,9 @@ def _list_item(row: tenants_repo.TenantWithCounts) -> TenantListItem:
         last_verification=_verification(tenant),
         asset_count=row.asset_count,
         open_incident_count=row.open_incident_count,
+        subscription=subscription_of(tenant),
+        subscription_source=tenant.subscription_source,
+        entitlement_ends_at=tenant.entitlement_ends_at,
     )
 
 
@@ -121,7 +126,6 @@ def _detail(row: tenants_repo.TenantWithCounts, settings: TenantSettings) -> Ten
         onboarding_url=onboarding_url(tenant, settings) if pending else None,
         suspended_at=tenant.suspended_at,
         suspended_reason=tenant.suspended_reason,
-        subscription=_subscription(tenant),
         created_at=tenant.created_at,
         updated_at=tenant.updated_at,
     )
@@ -197,7 +201,7 @@ def _management(db: Session, actor: admin_service.Actor) -> Iterator[service.Cur
 
 def _commit_after(db: Session, build):
     """응답을 만든 뒤에만 commit 한다. 만들다 실패하면(503 등) 이 요청의 쓰기를 되돌린다 —
-    세션을 닫는 쪽(get_db)의 정리에 기대지 않는다."""
+    세션을 닫는 쪽(get_db)의 정리에 기대지 않는다. 고객 구독 쓰기(subscription_workflow)도 같은 규칙이다."""
     try:
         response = build()
     except Exception:
@@ -331,7 +335,7 @@ def update_tenant(
     with _management(db, actor) as user:
         stored_id = _load(db, tenant_id, user).tenant.tenant_id
         if not tenants_repo.update_tenant(db, stored_id, body, now=now):
-            raise _rejected(db, stored_id, user)  # 그 사이 지워졌다 → 404
+            raise _rejected(db, stored_id, user)  # 그 사이 지워졌다 → 404 · 모의 계약 보호 → 409
         return _commit_after(db, lambda: _detail(_load(db, stored_id, user), settings))
 
 
@@ -344,7 +348,10 @@ def suspend_tenant(
     settings: TenantSettings,
     now: datetime,
 ) -> TenantDetail:
-    """원격 회수 ① 앱 겹. IAM 회수(②)는 진행 중 실행이 끝난 뒤의 운영 절차다(ADR-0012 §3)."""
+    """원격 회수 ① 앱 겹. IAM 회수(②)는 진행 중 실행이 끝난 뒤의 운영 절차다(ADR-0012 §3).
+
+    고객의 서비스 이용 중단(subscription_workflow.stop_service)과 같은 전이다 — 구독 계약을 해지하지 않는다.
+    정지 중에도 모의 계약의 갱신 · 만료와 투영은 계속된다."""
     with _management(db, actor) as user:
         stored_id = _load(db, tenant_id, user).tenant.tenant_id
         if not tenants_repo.suspend_tenant(db, stored_id, reason=reason, now=now):
