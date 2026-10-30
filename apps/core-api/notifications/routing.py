@@ -30,6 +30,8 @@ from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
 
+from schemas.slack import validate_slack_webhook_url
+
 from .contracts import CHANNELS, Channel, EventSnapshot, Route, RouteDecision
 
 MAX_CONFIG_BYTES = 64 * 1024
@@ -51,7 +53,6 @@ _ACCOUNT_RE = re.compile(r"[0-9]{12}")
 _UUID_BODY = r"(?:[0-9A-Fa-f]{32}|[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12})"
 _TENANT_UUID_RE = re.compile(rf"(?:urn:uuid:)?(?:{_UUID_BODY}|\{{{_UUID_BODY}\}})")
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
-_WEBHOOK_RE = re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9]+/[A-Za-z0-9]+/[A-Za-z0-9]+")
 _SNS_ARN_RE = re.compile(
     r"arn:aws:sns:([a-z]{2}(?:-[a-z]+)+-[0-9]):([0-9]{12}):([A-Za-z0-9_-]{1,256})"
 )  # 이름에 '.' 불가 → ".fifo" 토픽은 자동 제외
@@ -69,9 +70,10 @@ def _fail(message: str) -> RouteConfigError:
 
 def validate_webhook_url(url: object) -> str:
     """엄격한 Slack 웹훅이면 그 URL(엄격 패턴이라 정규형과 동일)을 반환. 아니면 URL 을 담지 않은 RouteConfigError."""
-    if not isinstance(url, str) or _WEBHOOK_RE.fullmatch(url) is None:
-        raise _fail("invalid slack webhook url")
-    return url
+    try:
+        return validate_slack_webhook_url(url)
+    except ValueError:
+        raise _fail("invalid slack webhook url") from None
 
 
 def parse_sns_topic_arn(arn: object) -> tuple[str, str]:
