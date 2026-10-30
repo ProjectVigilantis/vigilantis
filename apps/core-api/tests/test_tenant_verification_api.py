@@ -27,7 +27,7 @@ from schemas.api.tenants import (
     TenantVerificationResult,
     TenantVerifyResponse,
 )
-from sqlalchemy import delete, select, text, update
+from sqlalchemy import delete, event, select, text, update
 from sqlalchemy.orm import Session, sessionmaker
 from tenant_verification import VerificationOutcome
 
@@ -440,6 +440,48 @@ def _resume_elsewhere(other, tenant_id):
 
 def _verified_elsewhere(other, tenant_id):
     assert tenants_repo.record_verification(other, tenant_id, result=R.OK, reason_code=None, now=NOW)
+
+
+def test_overlapping_verifications_do_not_move_the_last_verified_time_backwards(
+    committed_client, committed_auth, committed_aws, pg_engine
+):
+    tenant_id = committed_auth.make_tenant(TenantStatus.ACTIVE)
+    second_at = committed_aws.observed_at + timedelta(seconds=1)
+    last_at = second_at + timedelta(seconds=1)
+    overtaking = []
+
+    def before_lock(conn, cursor, statement, parameters, context, executemany):
+        if (
+            statement != "LOCK TABLE app_users IN EXCLUSIVE MODE"
+            or len(committed_aws.calls) != 1
+            or overtaking
+        ):
+            return
+        # 첫 요청의 AWS 응답 뒤, 쓰기 잠금을 얻기 전에 둘째 요청이 먼저 commit한다.
+        overtaking.append(None)
+        committed_aws.observed_at = second_at
+        committed_aws.outcome = READ_DENIED
+        response = _post(committed_client, "verify", tenant_id)
+        assert response.status_code == 200, response.text
+        overtaking[0] = TenantVerifyResponse.model_validate(response.json())
+        assert _fresh(committed_client, tenant_id)[2] == second_at
+        committed_aws.now = last_at
+
+    event.listen(pg_engine, "before_cursor_execute", before_lock)
+    try:
+        response = _post(committed_client, "verify", tenant_id)
+    finally:
+        event.remove(pg_engine, "before_cursor_execute", before_lock)
+
+    assert response.status_code == 200, response.text
+    body = TenantVerifyResponse.model_validate(response.json())
+    assert len(overtaking) == 1
+    assert body.verification.verified_at >= overtaking[0].verification.verified_at
+    assert body.verification.result is R.OK
+    stored = _fresh(committed_client, tenant_id)
+    assert stored[:3] == (TenantStatus.ACTIVE, R.OK, last_at)
+    assert stored[2].replace(microsecond=0) == body.verification.verified_at
+    assert committed_client.get(f"{BASE}/{tenant_id}").json() == response.json()["tenant"]
 
 
 @pytest.mark.parametrize("route,start,change", [

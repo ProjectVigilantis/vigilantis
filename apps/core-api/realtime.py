@@ -46,29 +46,37 @@ class IncidentOwnerLookup:
 
     def __init__(self, close_timeout: float) -> None:
         self._close_timeout = close_timeout
-        self._task: Optional[asyncio.Future[Optional[str]]] = None
+        self._task: Optional[asyncio.Future[tuple[Optional[str], Optional[Exception]]]] = None
 
     async def get(self, resolver: Callable[[], Awaitable[Optional[str]]]) -> Optional[str]:
         """첫 호출의 resolver만 실행된다. 예외는 모든 대기자에게 전파된다."""
         if self._task is None:
-            self._task = asyncio.ensure_future(resolver())
-            # 대기자가 모두 떠난 뒤의 실패도 "never retrieved" 경고 없이 회수한다
-            self._task.add_done_callback(_retrieve)
-        return await asyncio.shield(self._task)
+            self._task = asyncio.ensure_future(_capture(resolver))
+        # 일반 예외는 task 결과로 감싸 task 자체는 실패하지 않는다 — 대기자가 모두 떠난 뒤에도
+        # shield(Python 3.14)나 never-retrieved 경고가 원문 예외를 로그로 내보내지 않는다.
+        # 취소(CancelledError)는 감싸지 않아 그대로 전파된다.
+        value, error = await asyncio.shield(self._task)
+        if error is not None:
+            raise error
+        return value
 
     async def close(self) -> None:
         """남은 조회 task를 취소하고 전송 제한시간 1회분까지만 기다린다 — 결과는 버린다.
         취소를 늦추는 resolver가 발행 · 종료를 잡아두지 못하게 하며, 늦게 끝나는 task의 예외는
-        _retrieve 콜백이 회수한다."""
+        _capture가 결과로 감싸 회수한다."""
         task = self._task
         if task is not None and not task.done():
             task.cancel()
             await asyncio.wait([task], timeout=self._close_timeout)
 
 
-def _retrieve(task: "asyncio.Future") -> None:
-    if not task.cancelled():
-        task.exception()
+async def _capture(
+    resolver: Callable[[], Awaitable[Optional[str]]],
+) -> tuple[Optional[str], Optional[Exception]]:
+    try:
+        return await resolver(), None
+    except Exception as exc:
+        return None, exc
 
 
 # 연결별 이벤트 권한 판정 — True일 때만 전송. 예외는 fail closed(전송 안 함)로 다룬다.

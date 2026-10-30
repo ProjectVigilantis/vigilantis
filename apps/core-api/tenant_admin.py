@@ -257,9 +257,9 @@ def _verify_tenant(
     outcome = verify_connection(
         target.access, expected_account_id=target.account_id, region=target.region
     )
-    observed_at = actor.clock()
     stored_id = target.access.tenant_id
     with _management(db, actor) as user:
+        observed_at = actor.clock()
         _load(db, stored_id, user)
         # 설정 대조와 조건부 갱신 사이에도 다른 쓰기가 끼어들지 못하게 한다.
         current = tenants_repo.read_tenant_for_share(db, stored_id)
