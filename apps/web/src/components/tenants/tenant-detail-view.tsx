@@ -20,6 +20,7 @@ import { Row } from '@/components/detail-row';
 import { ErrorState } from '@/components/error-state';
 import { Panel } from '@/components/panel';
 import { StatGrid, StatTile } from '@/components/stat-tile';
+import { SubscriptionFacts } from '@/components/subscriptions/subscription-facts';
 import { TenantStatusBadge, VerificationSummary } from '@/components/tenants/tenant-badges';
 import { TenantConnectPanel } from '@/components/tenants/tenant-connect-panel';
 import { TenantUsersPanel } from '@/components/tenants/tenant-users-panel';
@@ -39,6 +40,7 @@ import {
 } from '@/lib/api/client';
 import type { LabelTone } from '@/lib/enum-labels';
 import { canAccessTenant } from '@/lib/roles';
+import { MOCK_MARKETPLACE_NOTICE, RESUME_KEEPS_SUBSCRIPTION, STOP_KEEPS_CONTRACT } from '@/lib/subscriptions';
 import {
   isStaleTenantRequest,
   SUSPEND_REASON_MAX,
@@ -63,11 +65,14 @@ export function TenantDetailView({
   tenant,
   users,
   monitoring = null,
+  renderedAt,
 }: {
   tenant: TenantDetail;
   users: UserListItem[] | null;
   /** 상세 안에 그릴 관제(자산 · 보안). 페이지가 서버에서 조회해 넘긴다. 연결 전이면 null이다. */
   monitoring?: ReactNode;
+  /** 페이지(서버 컴포넌트)가 `tenant`를 읽은 시각(ISO) — 구독 권리 끝 시각이 지났는지의 기준이다. */
+  renderedAt: string;
 }) {
   const router = useRouter();
   const { session, refresh: refreshSession } = useSession();
@@ -156,12 +161,12 @@ export function TenantDetailView({
 
       {tenant.status === 'SUSPENDED' ? (
         <div role="status" className="border-status-idle/50 bg-badge-idle-bg rounded-xl border p-4 text-sm">
-          <p className="font-bold">원격 회수 중입니다. 이 고객사 AWS 계정에서 새 수집 · 분석 · 실행을 하지 않습니다.</p>
+          <p className="font-bold">이용 중단(원격 회수) 중입니다. 이 고객사 AWS 계정에서 새 수집 · 분석 · 실행을 하지 않습니다.</p>
           <p className="text-foreground-secondary mt-1">
             {formatKst(tenant.suspended_at)} 정지 · 사유: {tenant.suspended_reason}
           </p>
           <p className="text-muted-foreground mt-1 text-xs">
-            지난 기록은 계속 볼 수 있습니다. 고객사 AWS 계정의 역할은 고객사 소유라 플랫폼이 지우지 않습니다.
+            {STOP_KEEPS_CONTRACT} 지난 기록은 계속 볼 수 있습니다. 고객사 AWS 계정의 역할은 고객사 소유라 플랫폼이 지우지 않습니다.
           </p>
         </div>
       ) : connected && tenant.status === 'ACTIVE' ? (
@@ -245,6 +250,11 @@ export function TenantDetailView({
                 </Button>
               ) : null}
             </div>
+            {actions.resume ? (
+              <p className="text-muted-foreground text-xs">
+                재개는 연결 확인이 먼저 성공해야 합니다. 실패하면 정지 상태 그대로입니다. {RESUME_KEEPS_SUBSCRIPTION}
+              </p>
+            ) : null}
           </div>
         </Panel>
         </>}
@@ -260,6 +270,15 @@ export function TenantDetailView({
             </Row>
             <Row label="등록">{formatKst(tenant.created_at)}</Row>
           </div>
+        </Panel>
+
+        <Panel title="구독" description={`조회 전용 · ${MOCK_MARKETPLACE_NOTICE}. 날짜는 KST 기준입니다.`}>
+          <SubscriptionFacts
+            subscription={tenant.subscription}
+            source={tenant.subscription_source}
+            entitlementEndsAt={tenant.entitlement_ends_at}
+            asOf={Date.parse(renderedAt)}
+          />
         </Panel>
 
         {/* 재연결과 자동 조치를 한 패널에 둔다(2026-11-02). 둘 다 한 줄짜리 설정이라 패널을 따로 두면 빈 공간만 남는다.
@@ -334,9 +353,9 @@ export function TenantDetailView({
           <div className="flex flex-col gap-3 text-sm">
             {actions.suspend ? (
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <p className="text-muted-foreground text-xs">정지하면 플랫폼이 이 계정에 더 들어가지 않습니다(구독 정지 · 원격 회수).</p>
+                <p className="text-muted-foreground text-xs">정지하면 플랫폼이 이 계정에 더 들어가지 않습니다(이용 중단 · 원격 회수). 구독 계약은 해지하지 않습니다.</p>
                 <Button type="button" size="sm" variant="destructive" disabled={disabled} onClick={() => { setFailure(null); setDialog('suspend'); }}>
-                  고객사 정지
+                  이용 중단(정지)
                 </Button>
               </div>
             ) : null}
@@ -445,11 +464,14 @@ function SuspendDialog({
     <Dialog open onOpenChange={(next) => (next || pending ? undefined : onClose())}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{name} 정지</DialogTitle>
+          <DialogTitle>{name} 이용 중단</DialogTitle>
           <DialogDescription>
-            새 수집 · 분석 · 실행을 멈춥니다. 이미 발급된 접근 세션은 만료될 때까지 남을 수 있습니다. 재개하려면 연결 확인이 다시 성공해야 합니다.
+            새 수집 · 분석 · 실행을 바로 멈춥니다. 이미 시작된 실행의 마무리와 자동 원복은 끝까지 진행합니다. 이미 발급된 접근 세션은 만료될 때까지 남을 수 있습니다.
           </DialogDescription>
         </DialogHeader>
+        <p className="text-muted-foreground text-xs">
+          {STOP_KEEPS_CONTRACT} 기록은 보존됩니다. 재개하려면 연결 확인이 다시 성공해야 하고, {RESUME_KEEPS_SUBSCRIPTION}
+        </p>
         <label className="flex flex-col gap-1.5 text-sm">
           <span className="font-medium">정지 사유(필수)</span>
           <textarea className="border-input bg-background min-h-20 rounded-md border p-2"
@@ -460,7 +482,7 @@ function SuspendDialog({
         <DialogFooter>
           <Button type="button" variant="outline" onClick={onClose} disabled={pending}>취소</Button>
           <Button type="button" variant="destructive" disabled={pending || trimmed === ''} onClick={() => onSubmit(trimmed)}>
-            {pending ? '정지하는 중…' : '정지'}
+            {pending ? '중단하는 중…' : '이용 중단'}
           </Button>
         </DialogFooter>
       </DialogContent>
