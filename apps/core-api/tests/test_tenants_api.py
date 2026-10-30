@@ -13,11 +13,13 @@ from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from auth import sessions
 from config import TenantSettings, get_tenant_settings
 from db import models
+from db.repositories import auth as auth_repo
 from db.repositories import tenants as tenants_repo
 from fastapi.routing import iter_route_contexts
-from schemas.api.auth import UserRole
+from schemas.api.auth import PlatformRole, UserRole
 from schemas.api.tenants import (
     TenantCreateResponse,
     TenantDetail,
@@ -66,7 +68,23 @@ def onboarding(client_pg):
 
 @pytest.fixture()
 def admin(login_as, onboarding):
-    return login_as(UserRole.ADMIN)
+    return login_as(UserRole.ADMIN, platform_role=PlatformRole.CENTRAL_ADMIN)
+
+
+def _assign(db, user_id: str, *tenant_ids: str) -> None:
+    """담당 배정 시드 — 저장소의 배정 교체 함수만 쓴다."""
+    auth_repo.replace_assigned_tenants(db, user_id=user_id, tenant_ids=tuple(tenant_ids), now=NOW)
+    db.commit()
+
+
+def _unassign(db, user_id: str) -> None:
+    _assign(db, user_id)
+
+
+@pytest.fixture()
+def manager(login_as, onboarding):
+    """배정이 없는 TENANT_MANAGER."""
+    return login_as(UserRole.ADMIN, platform_role=PlatformRole.TENANT_MANAGER)
 
 
 def _seed(db, status=TenantStatus.PENDING_CONNECTION, account=ACCOUNT, *, now=NOW) -> models.Tenant:
@@ -136,6 +154,141 @@ def test_state_changing_requests_from_another_origin_are_403(client_pg, db, admi
 
 def test_unauthenticated_is_401(client_pg):
     assert client_pg.get(BASE, headers={"Cookie": ""}).status_code == 401
+
+
+# 관리 권한이 필요한 요청 — 쓰기 전부와 온보딩 자격 증명(GET /{id}/onboarding)
+MANAGEMENT = [r for r in REQUESTS if r[0] != "GET" or r[1] == "/{id}/onboarding"]
+WRITES = [r for r in MANAGEMENT if r[0] != "GET"]
+
+
+def _state(db):
+    return db.execute(
+        select(models.Tenant.tenant_id, models.Tenant.name, models.Tenant.status,
+               models.Tenant.suspended_reason, models.Tenant.updated_at)
+        .order_by(models.Tenant.tenant_id)
+    ).all()
+
+
+@pytest.mark.parametrize("method,path,body", REQUESTS)
+def test_unassigned_manager_sees_and_changes_no_customer(client_pg, db, manager, method, path, body):
+    tenant = _seed(db)
+    before = _state(db)
+    resp = client_pg.request(method, BASE + path.replace("{id}", tenant.tenant_id), json=body)
+    if (method, path) == ("GET", ""):
+        assert resp.status_code == 200 and resp.json()["tenants"] == []
+    elif (method, path) == ("POST", ""):  # 생성은 중앙 관리자만
+        assert resp.status_code == 403 and _code(resp) == "AUTH_FORBIDDEN"
+    else:
+        assert resp.status_code == 404 and _code(resp) == "TENANT_NOT_FOUND"
+    assert tenant.external_id not in resp.text and "onboarding_url" not in resp.text
+    assert _state(db) == before
+
+
+def test_manager_is_confined_to_assigned_customers(client_pg, db, manager, onboarding):
+    mine, other = _seed(db), _seed(db, TenantStatus.ACTIVE, OTHER)
+    _assign(db, manager.user_id, mine.tenant_id)
+
+    listing = client_pg.get(BASE)
+    assert [t["tenant_id"] for t in listing.json()["tenants"]] == [mine.tenant_id]
+    assert other.tenant_id not in listing.text
+    # 담당 고객의 PENDING 상세 · 온보딩 · 쓰기는 된다
+    shown = client_pg.get(f"{BASE}/{mine.tenant_id}")
+    assert shown.status_code == 200 and shown.json()["onboarding_url"]
+    assert client_pg.get(f"{BASE}/{mine.tenant_id}/onboarding").json()["external_id"] == mine.external_id
+    assert client_pg.patch(f"{BASE}/{mine.tenant_id}", json={"name": "바뀜"}).status_code == 200
+    # 담당 밖 고객은 모두 없는 것과 같은 404 다
+    for method, path, body in REQUESTS[2:]:
+        resp = client_pg.request(method, BASE + path.replace("{id}", other.tenant_id), json=body)
+        assert resp.status_code == 404 and _code(resp) == "TENANT_NOT_FOUND"
+    missing = client_pg.request("GET", f"{BASE}/{MISSING}")
+    outscope = client_pg.get(f"{BASE}/{other.tenant_id}")
+    assert missing.status_code == outscope.status_code == 404
+    # request_id 는 요청마다 다르므로 상태 · code · message 만 견주고 request_id 는 따로 확인한다
+    missing_error, outscope_error = missing.json()["error"], outscope.json()["error"]
+    assert {k: missing_error[k] for k in ("code", "message")} == {
+        k: outscope_error[k] for k in ("code", "message")}
+    assert missing_error["request_id"] and outscope_error["request_id"]
+    assert missing_error["request_id"] != outscope_error["request_id"]
+    assert tenants_repo.get_tenant(db, other.tenant_id).tenant.name == "학원"
+    assert client_pg.post(BASE, json={**CREATE, "aws_account_id": "444455556666"}).status_code == 403
+    assert client_pg.delete(f"{BASE}/{mine.tenant_id}").status_code == 204
+
+
+def test_central_admin_sees_every_customer(client_pg, db, admin):
+    a, b = _seed(db), _seed(db, TenantStatus.ACTIVE, OTHER)
+    ids = {t["tenant_id"] for t in client_pg.get(BASE).json()["tenants"]}
+    assert ids == {a.tenant_id, b.tenant_id}
+
+
+def test_central_admin_keeps_the_whole_contract(client_pg, db, admin, onboarding):
+    created = TenantCreateResponse.model_validate(client_pg.post(BASE, json=CREATE).json())
+    tenant_id = created.tenant.tenant_id
+    assert created.tenant.onboarding_url is not None
+    assert TenantDetail.model_validate(client_pg.get(f"{BASE}/{tenant_id}").json()).onboarding_url
+    issued = client_pg.get(f"{BASE}/{tenant_id}/onboarding")
+    assert issued.status_code == 200 and issued.json()["external_id"] == created.external_id
+    assert client_pg.patch(f"{BASE}/{tenant_id}", json={"name": "바뀜"}).status_code == 200
+    assert client_pg.delete(f"{BASE}/{tenant_id}").status_code == 204
+    assert _tenant_count(db) == 0
+
+
+def _revoke_inside_the_lock(monkeypatch, revoke):
+    """의존성이 신원을 본 뒤, 서비스가 users 잠금을 잡는 순간 회수가 먼저 커밋된 상황을 만든다."""
+    original = auth_repo.lock_users_table
+
+    def wrapped(session):
+        revoke(session)
+        original(session)
+
+    monkeypatch.setattr(auth_repo, "lock_users_table", wrapped)
+
+
+@pytest.mark.parametrize("method,path,body", WRITES)
+def test_session_revoked_after_the_dependency_snapshot_writes_nothing(
+    client_pg, db, admin, monkeypatch, method, path, body
+):
+    tenant = _seed(db)
+    before = _state(db)
+    _revoke_inside_the_lock(
+        monkeypatch, lambda s: sessions.revoke_session(s, admin.token, now=datetime.now(UTC))
+    )
+    resp = client_pg.request(method, BASE + path.replace("{id}", tenant.tenant_id), json=body)
+    assert resp.status_code == 401 and _code(resp) == "AUTH_REQUIRED"
+    assert _state(db) == before
+
+
+@pytest.mark.parametrize("method,path,body", WRITES)
+def test_central_admin_demoted_after_the_dependency_snapshot_loses_global_writes(
+    client_pg, db, admin, monkeypatch, method, path, body
+):
+    tenant = _seed(db)
+    before = _state(db)
+
+    def demote(session):
+        session.get(models.AppUser, admin.user_id).platform_role = PlatformRole.TENANT_MANAGER
+        session.flush()
+
+    _revoke_inside_the_lock(monkeypatch, demote)
+    resp = client_pg.request(method, BASE + path.replace("{id}", tenant.tenant_id), json=body)
+    if (method, path) == ("POST", ""):
+        assert resp.status_code == 403 and _code(resp) == "AUTH_FORBIDDEN"
+    else:  # 강등되어 배정이 없다 → 범위 밖
+        assert resp.status_code == 404 and _code(resp) == "TENANT_NOT_FOUND"
+    assert _state(db) == before
+
+
+@pytest.mark.parametrize("method,path,body", [r for r in WRITES if (r[0], r[1]) != ("POST", "")])
+def test_assignment_revoked_after_the_dependency_snapshot_writes_nothing(
+    client_pg, db, manager, monkeypatch, method, path, body
+):
+    # 정지는 활성 고객만 대상이 되므로 ACTIVE 로 시드한다(나머지 쓰기는 기존 PENDING 유지)
+    tenant = _seed(db, TenantStatus.ACTIVE if path == "/{id}/suspend" else TenantStatus.PENDING_CONNECTION)
+    _assign(db, manager.user_id, tenant.tenant_id)
+    before = _state(db)
+    _revoke_inside_the_lock(monkeypatch, lambda s: _unassign(s, manager.user_id))
+    resp = client_pg.request(method, BASE + path.replace("{id}", tenant.tenant_id), json=body)
+    assert resp.status_code == 404 and _code(resp) == "TENANT_NOT_FOUND"
+    assert _state(db) == before
 
 
 # ----- 생성 ----------------------------------------------------------------------

@@ -21,6 +21,7 @@ from schemas.api.incidents import ResolutionJudgement
 from schemas.runbooks import RunbookId
 from sqlalchemy import literal, select, tuple_
 from sqlalchemy.orm import Session
+from tenancy import TenantScope
 
 from .. import models
 
@@ -131,7 +132,7 @@ class EventRow:
 def list_events(
     db: Session,
     *,
-    tenant_id: str | None,
+    scope: TenantScope,
     incident_id: str | None,
     since: datetime | None,
     until: datetime | None,
@@ -140,8 +141,9 @@ def list_events(
 ) -> list[EventRow]:
     """최신순(occurred_at · event_id 내림차순) 최대 limit 건.
 
-    tenant_id 가 있으면 그 테넌트의 기록만 — 기록에 옮겨 둔 인시던트의 테넌트로 거른다. None 은
-    범위 제한 없음(플랫폼 계정)이다. before 는 직전 쪽의 마지막 (occurred_at, event_id) — 그보다 앞선 것만.
+    scope 의 고객사들 기록만 — 기록에 옮겨 둔 인시던트의 테넌트로 거른다. 전체 범위(tenant_ids=None)만
+    제한이 없고 소속 없는(NULL) 기록도 보인다. 배정 범위는 그 고객사들뿐이고 빈 범위는 아무것도 남기지
+    않는다(전체로 넓히지 않는다). before 는 직전 쪽의 마지막 (occurred_at, event_id) — 그보다 앞선 것만.
     """
     event = models.AuditEvent
     query = (
@@ -157,8 +159,8 @@ def list_events(
         )
         .outerjoin(models.AppUser, models.AppUser.user_id == event.actor_user_id)
     )
-    if tenant_id is not None:
-        query = query.where(event.tenant_id == tenant_id)
+    if not scope.is_platform:
+        query = query.where(event.tenant_id.in_(scope.tenant_ids))
     if incident_id is not None:
         query = query.where(event.incident_id == incident_id)
     if since is not None:

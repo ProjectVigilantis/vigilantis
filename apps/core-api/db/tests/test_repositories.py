@@ -89,7 +89,7 @@ def _execution(db, incident, **overrides):
 # --- 마이그레이션 적용 상태 ----------------------------------------------------
 
 
-def test_alembic_head_applied_with_26_tables(db):
+def test_alembic_head_applied_with_27_tables(db):
     # 리비전 문자열을 적어 두면 마이그레이션마다 이 줄을 고쳐야 하고, 그 수정은
     # 검증이 아니라 손질이다. 확인할 것은 "DB가 head까지 올라와 있는가"다.
     from alembic.config import Config
@@ -106,7 +106,7 @@ def test_alembic_head_applied_with_26_tables(db):
             " WHERE table_schema='public' AND table_name != 'alembic_version'"
         )
     ).scalar_one()
-    assert count == 26  # 14종 + 서비스 전환 3종 + 사건/outbox + 인증·사용자 이력 3종 + 발송 상태·바인딩·관문 3종 + 테넌트 1종(#495) + 감사 기록 1종(#544)
+    assert count == 27  # 14종 + 서비스 전환 3종 + 사건/outbox + 인증·사용자 이력 3종 + 발송 상태·바인딩·관문 3종 + 테넌트 1종 + 담당 배정 1종 + 감사 기록 1종(#544)
 
 
 # --- 자산 계열 -----------------------------------------------------------------
@@ -784,7 +784,7 @@ def test_list_incidents_narrows_to_the_tenant_scope(db):
     theirs = _secops_incident(db, tenant_id=b.tenant_id)
     unowned = _finops_incident(db)
 
-    scoped = incidents_repo.list_incidents(db, scope=TenantScope(tenant_id=a.tenant_id))
+    scoped = incidents_repo.list_incidents(db, scope=TenantScope(tenant_ids=(a.tenant_id,)))
     every = incidents_repo.list_incidents(db, scope=ALL_TENANTS)
 
     assert [row.incident_id for row in scoped] == [mine.incident_id]

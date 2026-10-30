@@ -38,8 +38,11 @@ def migration_config(pg_engine, monkeypatch):
     get_settings.cache_clear()
 
 
-def _insert_user(conn, sub, role="VIEWER", tenant_id=None, account_type=None):
-    """raw INSERT — account_type 가 None 이면 칸 자체를 빼서(옛 리비전 모양) 넣는다."""
+def _insert_user(conn, sub, role="VIEWER", tenant_id=None, account_type=None, platform_role=None):
+    """raw INSERT — account_type · platform_role 이 None 이면 칸 자체를 뺀다(옛 리비전 모양).
+
+    head 의 PLATFORM 행은 platform_role 이 필수다(b492e7d1a605 — 이 리비전의 CHECK 와는 별개).
+    """
     cols = "user_id, issuer, cognito_sub, email, role, tenant_id, status, created_at, updated_at"
     vals = (
         "gen_random_uuid(), :issuer, :sub, :email, CAST(:role AS app_user_role), "
@@ -48,6 +51,9 @@ def _insert_user(conn, sub, role="VIEWER", tenant_id=None, account_type=None):
     if account_type is not None:
         cols += ", account_type"
         vals += ", CAST(:acct AS app_user_account_type)"
+    if platform_role is not None:
+        cols += ", platform_role"
+        vals += ", CAST(:prole AS app_user_platform_role)"
     conn.execute(
         text(f"INSERT INTO app_users ({cols}) VALUES ({vals})"),
         {
@@ -58,6 +64,7 @@ def _insert_user(conn, sub, role="VIEWER", tenant_id=None, account_type=None):
             "tenant": tenant_id,
             "now": NOW,
             "acct": account_type,
+            "prole": platform_role,
         },
     )
 
@@ -200,9 +207,12 @@ def test_check_constraints_reject_bad_shapes(db, account_type, role, has_tenant)
             db, name="t", aws_account_id="444455556666", regions=["ap-northeast-2"], now=NOW
         )
         tenant_id = tenant.tenant_id
+    # PLATFORM 은 등급을 채워 이 리비전의 CHECK(소속 · role)만 위반하게 한다
+    platform_role = "CENTRAL_ADMIN" if account_type == "PLATFORM" else None
     with pytest.raises(IntegrityError), db.begin_nested():
         _insert_user(
-            db, "bad", role=role, tenant_id=tenant_id, account_type=account_type
+            db, "bad", role=role, tenant_id=tenant_id, account_type=account_type,
+            platform_role=platform_role,
         )
 
 
@@ -213,7 +223,7 @@ def test_check_constraints_accept_the_three_valid_shapes(db):
     tenants_repo.record_verification(
         db, tenant.tenant_id, result=TenantVerificationResult.OK, reason_code=None, now=NOW
     )
-    _insert_user(db, "p", role="ADMIN", account_type="PLATFORM")
+    _insert_user(db, "p", role="ADMIN", account_type="PLATFORM", platform_role="CENTRAL_ADMIN")
     _insert_user(db, "u", account_type="UNASSIGNED")
     _insert_user(db, "t", tenant_id=tenant.tenant_id, account_type="TENANT")
     assert (

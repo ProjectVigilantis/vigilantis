@@ -1,9 +1,11 @@
 'use client';
 
 // 사용자 관리(#492 PR 3) — 목록 · 초대 · 초대 재발송 · 역할 · 활성 상태 · 로그인 세션 종료 · 이력.
-// 최소 동작 화면이다(시각 정리는 FE 담당이 이어서 한다). 조치가 끝나면 낙관적으로 고치지 않고 서버 목록을 다시 읽는다.
+// 최소 동작 화면이다. 조치가 끝나면 낙관적으로 고치지 않고 서버 목록을 다시 읽는다.
 // 실패 문구는 lib/user-admin.ts가 정한다 — 403은 "관리자만", 초대 · 재발송의 결과 불명 실패는 "메일이 나갔을 수 있다".
-// 관리 범위(#492): 플랫폼 운영자는 모든 고객사 사용자를, 고객사 ADMIN은 자기 고객사 사용자만 본다 — 범위는 서버가 정한다.
+// 관리 범위(#492): 중앙 관리자는 모든 고객사 사용자를, 고객 담당자는 배정된 고객의 사용자만, 고객사 ADMIN은 자기
+// 고객사 사용자만 본다 — 범위는 서버가 정한다. 행의 조치 버튼은 대상 고객을 다룰 수 있을 때만 그린다(lib/roles.ts
+// `canManageUsersOf`). 담당 고객이 없는 고객 담당자에게는 초대 · 조치 없이 배정 없음 안내만 보인다.
 
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
@@ -42,7 +44,15 @@ import {
   userAdminErrorMessage,
   type UserAdminAction,
 } from '@/lib/user-admin';
-import type { AccountScope, AccountType, UserEventItem, UserListItem, UserRole } from '@/types/api';
+import {
+  canManageUsers,
+  canManageUsersOf,
+  hasCustomerScope,
+  isCentralAdmin,
+  isUnassignedManager,
+  type PlatformSubject,
+} from '@/lib/roles';
+import type { CurrentUserResponse, UserEventItem, UserListItem, UserRole } from '@/types/api';
 
 const ROLES: readonly UserRole[] = ['ADMIN', 'OPERATOR', 'VIEWER'];
 
@@ -55,6 +65,7 @@ export function UsersView({ users }: { users: UserListItem[] }) {
   const { session } = useSession();
   const me = session.kind === 'user' ? session.user : null;
   const myId = me?.user_id ?? null;
+  const unassigned = isUnassignedManager(me);
   const [panel, setPanel] = useState<Panel | null>(null);
   const [done, setDone] = useState<string | null>(null);
 
@@ -76,10 +87,12 @@ export function UsersView({ users }: { users: UserListItem[] }) {
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-lg font-semibold">사용자 관리</h1>
-        {/* 초대 칸(고객 ID 입력 여부)이 계정 종류로 갈리므로 계정을 확인한 뒤에 연다. */}
-        <Button type="button" disabled={me === null} onClick={() => open({ kind: 'invite' })}>
-          사용자 초대
-        </Button>
+        {/* 초대 칸(고객 ID 입력 여부)이 계정 종류로 갈리므로 계정을 확인한 뒤에 연다. 담당 고객이 없으면 그리지 않는다. */}
+        {unassigned ? null : (
+          <Button type="button" disabled={!canManageUsers(me)} onClick={() => open({ kind: 'invite' })}>
+            사용자 초대
+          </Button>
+        )}
       </div>
 
       {done ? (
@@ -89,7 +102,13 @@ export function UsersView({ users }: { users: UserListItem[] }) {
       ) : null}
 
       {users.length === 0 ? (
-        <p className="text-sm text-muted-foreground">등록된 사용자가 없습니다.</p>
+        unassigned ? (
+          <p role="status" className="rounded-lg border p-4 text-sm">
+            담당 고객이 배정되지 않아 관리할 고객사 사용자가 없습니다. 중앙 관리자에게 담당 고객 배정을 요청해 주세요.
+          </p>
+        ) : (
+          <p className="text-sm text-muted-foreground">등록된 사용자가 없습니다.</p>
+        )
       ) : (
         <Table>
           <TableHeader>
@@ -118,38 +137,44 @@ export function UsersView({ users }: { users: UserListItem[] }) {
                   {user.last_login_at === null ? '로그인 기록 없음' : formatUserTime(user.last_login_at)}
                 </TableCell>
                 <TableCell>
-                  <div className="flex gap-1">
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      disabled={!canChangeRow(user.user_id, myId)}
-                      onClick={() => open({ kind: 'role', user })}
-                    >
-                      역할 변경
-                    </Button>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      disabled={!canChangeRow(user.user_id, myId)}
-                      onClick={() => open({ kind: 'status', user })}
-                    >
-                      {user.status === 'ACTIVE' ? '비활성화' : '활성화'}
-                    </Button>
-                    <Button type="button" size="sm" variant="outline" onClick={() => open({ kind: 'revoke', user })}>
-                      세션 종료
-                    </Button>
-                    {/* 아직 로그인한 적이 없는 사용자만 — 재발송 가능 여부의 최종 판정은 서버다(409). */}
-                    {user.last_login_at === null ? (
-                      <Button type="button" size="sm" variant="outline" onClick={() => open({ kind: 'resend', user })}>
-                        초대 재발송
+                  {/* 확인된 계정이 이 고객사 사용자를 다룰 수 없으면(배정 스냅샷 밖) 조치를 그리지 않는다. 확인 전에는
+                      기존처럼 그리고, 본인 판정이 필요한 조치는 막는다. 실제 범위는 서버(404)다. */}
+                  {me !== null && !canManageUsersOf(me, user.tenant_id) ? (
+                    <span className="text-xs text-muted-foreground">담당 범위 밖</span>
+                  ) : (
+                    <div className="flex gap-1">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={!canChangeRow(user.user_id, myId)}
+                        onClick={() => open({ kind: 'role', user })}
+                      >
+                        역할 변경
                       </Button>
-                    ) : null}
-                    <Button type="button" size="sm" variant="ghost" onClick={() => open({ kind: 'history', user })}>
-                      이력
-                    </Button>
-                  </div>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={!canChangeRow(user.user_id, myId)}
+                        onClick={() => open({ kind: 'status', user })}
+                      >
+                        {user.status === 'ACTIVE' ? '비활성화' : '활성화'}
+                      </Button>
+                      <Button type="button" size="sm" variant="outline" onClick={() => open({ kind: 'revoke', user })}>
+                        세션 종료
+                      </Button>
+                      {/* 아직 로그인한 적이 없는 사용자만 — 재발송 가능 여부의 최종 판정은 서버다(409). */}
+                      {user.last_login_at === null ? (
+                        <Button type="button" size="sm" variant="outline" onClick={() => open({ kind: 'resend', user })}>
+                          초대 재발송
+                        </Button>
+                      ) : null}
+                      <Button type="button" size="sm" variant="ghost" onClick={() => open({ kind: 'history', user })}>
+                        이력
+                      </Button>
+                    </div>
+                  )}
                 </TableCell>
               </TableRow>
             ))}
@@ -220,7 +245,7 @@ export function UsersView({ users }: { users: UserListItem[] }) {
  */
 function ActionDialog({
   action,
-  accountType = null,
+  actor = null,
   title,
   description,
   confirmLabel,
@@ -233,8 +258,8 @@ function ActionDialog({
   onDone,
 }: {
   action: UserAdminAction;
-  /** 조치하는 계정의 종류. 기존 계정 연결(복구) 안내는 플랫폼 운영자에게만 붙는다(lib/user-admin.ts). */
-  accountType?: AccountType | null;
+  /** 조치하는 계정. 기존 계정 연결(복구) 안내는 고객 범위가 있는 플랫폼 계정에게만 붙는다(lib/user-admin.ts). */
+  actor?: PlatformSubject | null;
   title: string;
   description: ReactNode;
   confirmLabel: string;
@@ -248,6 +273,7 @@ function ActionDialog({
   onDone: () => void;
 }) {
   const router = useRouter();
+  const { refresh: refreshSession } = useSession();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false);
@@ -268,8 +294,13 @@ function ActionDialog({
       await run(form);
     } catch (caught) {
       const code = caught instanceof ApiError ? caught.code : null;
-      setError(userAdminErrorMessage(action, code, accountType));
+      setError(userAdminErrorMessage(action, code, actor));
       if (code === 'USER_NOT_FOUND' || code === 'USER_STATE_CONFLICT') router.refresh();
+      // 403은 화면의 등급 · 배정 스냅샷이 낡았다는 뜻일 수 있다 — `/me`와 목록을 다시 읽어 지금 권한에 맞춘다.
+      if (code === 'AUTH_FORBIDDEN') {
+        refreshSession().catch(() => {});
+        router.refresh();
+      }
       inFlight.current = false;
       setPending(false);
       return;
@@ -327,19 +358,22 @@ function RoleSelect({ id, value, onChange }: { id: string; value: UserRole; onCh
 
 /**
  * 초대 칸은 계정 종류로 갈린다. 플랫폼 운영자는 초대할 고객의 ID(UUID)를 직접 넣는다 — 테넌트 목록 API는 있지만
- * 이 화면에는 선택 목록을 연결하지 않았다. 고객사 ADMIN은 자기 소속을 읽기 전용으로만 보고 다른 고객을 고를 수 없다.
+ * 이 화면에는 선택 목록을 연결하지 않았다. 고객 담당자는 담당 고객의 ID만 보낼 수 있다(lib/user-admin.ts
+ * `inviteRequestFor`). 고객사 ADMIN은 자기 소속을 읽기 전용으로만 보고 다른 고객을 고를 수 없다.
  */
 function InviteDialog({
   inviter,
   onClose,
   onDone,
 }: {
-  inviter: AccountScope;
+  inviter: CurrentUserResponse;
   onClose: () => void;
   onDone: (message: string) => void;
 }) {
   const [role, setRole] = useState<UserRole>('VIEWER');
   const [recover, setRecover] = useState(false);
+  // 기존 계정 연결(복구)은 고객 범위가 있는 플랫폼 계정만 — 호환 역할(ADMIN)이 아니라 등급 · 배정으로 정한다.
+  const canRecover = hasCustomerScope(inviter);
   const build = (form: FormData) =>
     inviteRequestFor(inviter, {
       email: String(form.get('email') ?? ''),
@@ -351,7 +385,7 @@ function InviteDialog({
   return (
     <ActionDialog
       action="invite"
-      accountType={inviter.account_type}
+      actor={inviter}
       title="사용자 초대"
       description={
         recover
@@ -388,7 +422,9 @@ function InviteDialog({
             className={`${INPUT_CLASS} font-mono`}
           />
           <p id="invite-tenant-hint" className="text-xs text-muted-foreground">
-            활성(ACTIVE) 상태인 고객의 ID(UUID)를 기존 운영 절차로 확인해 입력하세요.
+            {isCentralAdmin(inviter)
+              ? '활성(ACTIVE) 상태인 고객의 ID(UUID)를 기존 운영 절차로 확인해 입력하세요.'
+              : '담당 고객 중 활성(ACTIVE) 상태인 고객의 ID(UUID)를 고객 목록에서 확인해 입력하세요.'}
           </p>
         </div>
       ) : (
@@ -410,8 +446,8 @@ function InviteDialog({
         </label>
         <RoleSelect id="invite-role" value={role} onChange={setRole} />
       </div>
-      {/* 기존 계정 연결(복구)은 플랫폼 운영자만 고를 수 있다 — 고객사 ADMIN에게는 보이지 않는다(서버도 403으로 막는다). */}
-      {inviter.account_type === 'PLATFORM' ? (
+      {/* 기존 계정 연결(복구)은 고객 범위가 있는 플랫폼 계정만 고를 수 있다 — 그 밖의 계정에게는 보이지 않는다(서버도 403으로 막는다). */}
+      {canRecover ? (
         <div className="flex flex-col gap-1.5 rounded-md border p-3">
           <label className="flex items-start gap-2 text-sm">
             <input

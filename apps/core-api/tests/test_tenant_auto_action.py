@@ -132,7 +132,7 @@ def test_human_approval_still_executes_on_a_disabled_tenant(
     approved = workflows.reserve_execution(db, ExecuteActionRequest(
         incident_id=seeded.incident_id, runbook_id=RunbookId.RUNBOOK_NACL_ADD_DENY,
         idempotency_key="t6-" + uuid.uuid4().hex,
-    ), actor=audit_actor)
+    ), audit_actor=audit_actor)
     assert approved.created
     [execution] = _executions(db, seeded.incident_id)
     assert (execution.trigger_source, execution.status) == (

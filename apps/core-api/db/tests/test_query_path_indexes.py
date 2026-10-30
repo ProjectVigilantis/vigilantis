@@ -15,10 +15,13 @@
 from __future__ import annotations
 
 import sys
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import text
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.sql.expression import ClauseElement, Executable
 
 CORE_API = Path(__file__).resolve().parents[2]
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -28,9 +31,11 @@ for _p in (str(CORE_API), str(REPO_ROOT / "packages")):
 
 from db import models  # noqa: E402
 from db.repositories import assets as assets_repo  # noqa: E402
+from db.repositories import tenants as tenants_repo  # noqa: E402
 from schemas.api.assets import AssetType  # noqa: E402
 from schemas.collections import CollectionRunStatus  # noqa: E402
 from schemas.rules import RuleEvaluationResult  # noqa: E402
+from tenancy import MonitoredRegions  # noqa: E402
 
 NOW = datetime(2026, 9, 14, 6, 0, tzinfo=timezone.utc)
 
@@ -160,11 +165,26 @@ def test_latest_evaluation_by_asset_newest_then_larger_id(db):
 # --- 3. 비용이 회차 수가 아니라 리전·자산 수에 비례한다 ------------------------------
 
 
-def _plan(db, stmt) -> list[str]:
-    from sqlalchemy.dialects import postgresql
+class _Explain(Executable, ClauseElement):
+    """``EXPLAIN (ANALYZE, COSTS OFF)`` 로 감싼 문장 — 실제 실행과 같은 컴파일러 · 바인드로 돈다.
 
-    sql = str(stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
-    return [r[0] for r in db.execute(text("EXPLAIN (ANALYZE, COSTS OFF) " + sql))]
+    문장을 리터럴로 펴서(``literal_binds``) 보내면 바인드의 형 정보가 사라진다 — ``Uuid`` 리터럴은 형 변환 없는
+    ``'…'`` 로 찍혀 VALUES 안에서 text 가 되고 ``uuid = text`` 로 실패한다. 실행은 바인드마다 ``::UUID`` 같은
+    형 변환을 붙이므로(PostgreSQL 방언의 RENDER_CASTS), 진단도 같은 바인드 경로로 돌린다."""
+
+    inherit_cache = False  # 진단용 — 컴파일 캐시에 올리지 않는다
+
+    def __init__(self, stmt):
+        self.stmt = stmt
+
+
+@compiles(_Explain)
+def _compile_explain(element, compiler, **kw):
+    return "EXPLAIN (ANALYZE, COSTS OFF) " + compiler.process(element.stmt, **kw)
+
+
+def _plan(db, stmt) -> list[str]:
+    return [r[0] for r in db.execute(_Explain(stmt))]
 
 
 def _rows_touched(plan: list[str], table: str) -> int:
@@ -216,6 +236,33 @@ def test_latest_queries_touch_one_row_per_region_and_asset(db):
 
     assert _rows_touched(_plan(db, assets_repo.latest_run_per_region_stmt(regions)), "collection_runs") == 2
     assert _rows_touched(_plan(db, assets_repo.latest_rule_evaluation_by_asset_stmt()), "rule_evaluations") == 2
+
+
+def test_monitored_pairs_touch_one_row_per_pair_and_legacy_region(db):
+    """쌍 관제(MonitoredRegions)도 (고객사, 리전) 쌍 · legacy 리전마다 1행만 만진다 — 쌍마다 찍는 LATERAL
+    ``LIMIT 1`` 이 복합 인덱스 첫 항목으로 끝난다. 정렬로 돌아오거나 쌍 대신 회차를 훑으면 회차 수(40)만큼 만진다."""
+    tenant = tenants_repo.create_tenant(
+        db, name="plan", aws_account_id=f"{uuid.uuid4().int % 10**12:012d}", regions=["r1", "r2"], now=NOW
+    )
+    for i in range(40):
+        for region, owner in (("r1", tenant.tenant_id), ("r2", tenant.tenant_id), ("r3", None)):
+            _run(db, region, NOW + timedelta(minutes=5 * i)).tenant_id = owner
+    db.flush()
+    _prepare_planner(db)
+
+    stmt = assets_repo.latest_run_per_region_stmt(
+        MonitoredRegions(pairs=((tenant.tenant_id, "r1"), (tenant.tenant_id, "r2")), legacy=("r3",))
+    )
+    newest = NOW + timedelta(minutes=5 * 39)
+    assert {(r.tenant_id, r.region): r.started_at for r in db.execute(stmt).scalars()} == {
+        (tenant.tenant_id, "r1"): newest,
+        (tenant.tenant_id, "r2"): newest,
+        (None, "r3"): newest,
+    }
+    plan = _plan(db, stmt)
+    joined = "\n".join(plan)
+    assert "ix_collection_runs_region_started_at" in joined, joined
+    assert _rows_touched(plan, "collection_runs") == 2, joined  # 쌍 2개 × 1행, legacy 리전 1개 × 1행
 
 
 def _days_of_runs(db, regions: dict[str, str], days: int):

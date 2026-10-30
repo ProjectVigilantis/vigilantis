@@ -432,7 +432,7 @@ def test_a_resolved_incident_gets_no_offer(db, reserved_block, aws, audit_actor)
     workflows.run_nacl_add_deny_execution(db, execution_id)
     workflows.close_execution(db, execution_id, next_status=ExecutionStatus.SUCCESS)
     assert workflows.resolve_incident(
-        db, incident_id, ResolutionJudgement.JUSTIFIED, actor=audit_actor
+        db, incident_id, ResolutionJudgement.JUSTIFIED, audit_actor=audit_actor
     )
 
     report = dispatcher.dispatch_pending(db)
@@ -453,7 +453,7 @@ def test_an_incident_closed_while_the_guardrail_ran_is_left_alone(
     def operator_resolves(kwargs):
         aws["hooks"].pop("describe_network_acls")
         workflows.resolve_incident(
-            db, incident_id, ResolutionJudgement.JUSTIFIED, actor=audit_actor
+            db, incident_id, ResolutionJudgement.JUSTIFIED, audit_actor=audit_actor
         )
 
     aws["hooks"]["describe_network_acls"] = operator_resolves
@@ -536,7 +536,7 @@ def test_block_offer_release_round_trip(db, reserved_block, aws, audit_actor):
             runbook_id=RESTORE,
             idempotency_key=str(uuid.uuid4()),
         ),
-        actor=audit_actor,
+        audit_actor=audit_actor,
     )
     assert reservation.created
 

@@ -20,7 +20,7 @@ from enum import Enum
 from schemas.api.actions import ExecutionStatus
 from schemas.api.assets import AssetType, RelationType
 from schemas.api.audit import AuditActorKind, AuditEventAction
-from schemas.api.auth import AccountType, UserRole
+from schemas.api.auth import AccountType, PlatformRole, UserRole
 from schemas.api.incidents import (
     IncidentCategory,
     IncidentStatus,
@@ -1226,7 +1226,7 @@ class ServiceTransitionObservation(Base):
 
 
 # ==============================================================================
-# 인증 계열 2종 — Cognito 로그인 + 서버 세션 (#492 PR 1)
+# 인증 계열 — Cognito 로그인 + 서버 세션 (#492 PR 1) · 담당 고객사 배정 (#492 PR 5)
 # ==============================================================================
 
 
@@ -1264,10 +1264,17 @@ class AppUser(Base):
         DateTime(timezone=True), nullable=True
     )
     role: Mapped[UserRole] = mapped_column(_enum(UserRole, "app_user_role"))
-    # 계정 종류 — 플랫폼 권한의 유일한 원천이다(role 은 계정 안의 역할일 뿐). ORM·서버 기본값이 없다:
-    # 호출부가 반드시 정해야 하고, 빠뜨린 쓰기는 NOT NULL 이 거절한다. PLATFORM 의 role=ADMIN 은 호환 값이다.
+    # 계정 종류 — 플랫폼 계정인지의 유일한 원천이다(role 은 계정 안의 역할일 뿐). ORM·서버 기본값이 없다:
+    # 호출부가 반드시 정해야 하고, 빠뜨린 쓰기는 NOT NULL 이 거절한다. PLATFORM 의 role=ADMIN 은 호환 값이며
+    # 권한 판정에 쓰지 않는다.
     account_type: Mapped[AccountType] = mapped_column(
         _enum(AccountType, "app_user_account_type")
+    )
+    # 플랫폼 등급(#492) — 플랫폼 관리 권한의 유일한 원천이다. PLATFORM 만 값을 갖고(CHECK)
+    # TENANT · UNASSIGNED 는 NULL 이다. 서버 기본값이 없다 — 플랫폼 계정을 만드는 쪽이 정한다.
+    # CENTRAL_ADMIN 은 모든 고객사, TENANT_MANAGER 는 app_user_tenant_assignments 에 배정된 고객사만이다.
+    platform_role: Mapped[PlatformRole | None] = mapped_column(
+        _enum(PlatformRole, "app_user_platform_role"), nullable=True
     )
     # 소속 고객사(Post-MVP T-4 · #495). TENANT 계정만 값을 갖고(CHECK), PLATFORM·UNASSIGNED 는 NULL 이다.
     # NULL 자체는 권한이 아니다 — 권한은 account_type 이 정한다. 소속을 API 로 옮기지 않는다.
@@ -1288,10 +1295,32 @@ class AppUser(Base):
             "(account_type = 'TENANT') = (tenant_id IS NOT NULL)",
             name="tenant_binding_by_account_type",
         ),
+        # 호환 제약 — 플랫폼 권한의 근거가 아니다(권한은 platform_role)
         CheckConstraint(
             "account_type <> 'PLATFORM' OR role = 'ADMIN'",
             name="platform_role_is_admin",
         ),
+        CheckConstraint(
+            "(account_type = 'PLATFORM') = (platform_role IS NOT NULL)",
+            name="platform_role_by_account_type",
+        ),
+    )
+
+
+class AppUserTenantAssignment(Base):
+    """TENANT_MANAGER 의 담당 고객사 1건(#492). 명시 배정 행만 범위가 된다 — 암묵 부여는 없다.
+
+    소속(app_users.tenant_id) · 계정 종류는 배정이 아니다. 범위 판정은 등급이 TENANT_MANAGER 일 때만 이 행을 읽는다.
+    고객사가 지워지면 배정도 함께 지워진다(CASCADE) — 없는 고객사를 가리키는 배정이 남지 않는다.
+    """
+
+    __tablename__ = "app_user_tenant_assignments"
+
+    user_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("app_users.user_id", ondelete="CASCADE"), primary_key=True
+    )
+    tenant_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("tenants.tenant_id", ondelete="CASCADE"), primary_key=True, index=True
     )
 
 

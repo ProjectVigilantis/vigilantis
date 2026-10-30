@@ -186,9 +186,10 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
     connect();
   }, [connect]);
 
-  // 테넌트 격리(T-4 · T-5) 전에는 전역 실시간 연결이 플랫폼 운영자 전용이다(lib/home-path.ts `businessOpen`).
-  // `/me`가 플랫폼 계정으로 확인된 뒤에만 핸드셰이크한다 — 확인 전 · `/me` 실패 · 미로그인 · 고객사 계정은
-  // 붙지 않는다. 확인된 플랫폼 계정이 아니게 되면 정리 함수가 연결을 닫고 다시 붙지 않는다.
+  // 실시간 연결은 업무 화면과 같이 고객 범위가 있는 플랫폼 계정(중앙 관리자 · 배정된 고객 담당자) 전용이다
+  // (lib/home-path.ts `businessOpen`). `/me`로 확인된 뒤에만 핸드셰이크한다 — 확인 전 · `/me` 실패 · 미로그인 ·
+  // 고객사 계정 · 담당 고객 없는 고객 담당자는 붙지 않는다. 조건을 잃으면 정리 함수가 연결을 닫고 다시 붙지 않는다.
+  // 고객 담당자가 받는 이벤트를 담당 고객으로 거르는 것은 서버다.
   const { session } = useSession();
   const enabled = businessOpen(confirmedAccount(session));
 

@@ -279,7 +279,7 @@ def reserve_manual_revert(db, incident_id, actor):
             runbook_id=RunbookId.RUNBOOK_EC2_REVERT_SIZE,
             idempotency_key=str(uuid.uuid4()),
         ),
-        actor=actor,
+        audit_actor=actor,
     )
     db.commit()
     return reservation.response.execution_id

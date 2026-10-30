@@ -1,8 +1,8 @@
 """account_type / auto_action_resumed_at 병합 리비전 — 실제 PostgreSQL/Alembic.
 
-지키는 것: 부모 2개 · 단일 head(병합 리비전을 지난다) · 새 DB base→head · 옛 feature 단독 / 옛 dev
-단독 DB 가 각각 head 로 올라가 두 칸을 모두 갖고 시드 데이터를 보존 · 버전 = head · ORM 일치.
-병합 뒤에 리비전이 이어 붙어도(audit_events · T-2 #544) 같은 사실을 본다.
+지키는 것: 부모 2개 · 단일 head · 새 DB base→head · 옛 feature 단독 / 옛 dev 단독 DB 가
+각각 head 로 올라가 두 칸을 모두 갖고 시드 데이터를 보존 · 병합 리비전을 지난 단일 head · ORM 일치.
+병합 뒤에 리비전이 이어 붙어도(담당 배정 · audit_events 병합 포함) 같은 사실을 본다.
 테스트마다 고유 이름의 일회용 DB 를 만들고 지운다(공용 pg_engine DB 의 head 를 건드리지 않는다).
 """
 
@@ -59,11 +59,6 @@ def _columns(engine, table):
     return {c["name"] for c in inspect(engine).get_columns(table)}
 
 
-def _head(config):
-    [head] = ScriptDirectory.from_config(config).get_heads()
-    return head
-
-
 def _versions(engine):
     with engine.connect() as conn:
         return set(conn.execute(text("SELECT version_num FROM alembic_version")).scalars())
@@ -98,7 +93,12 @@ def _seed_tenant_and_user(engine, *, with_account_type):
         )
 
 
-def _assert_merged_head(config, engine, *, expected_account_type):
+def _head(config) -> str:
+    """현재 단일 head — 병합 리비전 뒤에 리비전이 붙어도(d492a544e001 등) 병합을 지나 올라간다."""
+    return ScriptDirectory.from_config(config).get_current_head()
+
+
+def _assert_merged_head(engine, config, *, expected_account_type):
     assert _versions(engine) == {_head(config)}
     assert FEATURE_COLUMN[1] in _columns(engine, FEATURE_COLUMN[0])
     assert DEV_COLUMN[1] in _columns(engine, DEV_COLUMN[0])
@@ -131,8 +131,9 @@ def test_merge_revision_joins_both_branches_into_a_single_head(merge_db):
         FEATURE_REVISION,
         DEV_REVISION,
     }
-    head = _head(config)
-    assert MERGE in {rev.revision for rev in script.walk_revisions("base", head)}
+    # 단일 head 이고 그 head 의 조상 사슬에 병합 리비전이 있다(head 를 병합으로 고정하지 않는다)
+    head = script.get_current_head()
+    assert MERGE in {rev.revision for rev in script.walk_revisions(base="base", head=head)}
     assert script.get_revision(FEATURE_REVISION).down_revision == FORK
     assert script.get_revision(DEV_REVISION).down_revision == FORK
 
@@ -155,7 +156,7 @@ def test_old_feature_only_database_upgrades_to_merge_head_keeping_data(merge_db)
     assert DEV_COLUMN[1] not in _columns(engine, DEV_COLUMN[0])
     _seed_tenant_and_user(engine, with_account_type=True)
     command.upgrade(config, "head")
-    _assert_merged_head(config, engine, expected_account_type="TENANT")
+    _assert_merged_head(engine, config, expected_account_type="TENANT")
 
 
 def test_old_dev_only_database_upgrades_to_merge_head_keeping_data(merge_db):
@@ -167,4 +168,4 @@ def test_old_dev_only_database_upgrades_to_merge_head_keeping_data(merge_db):
     _seed_tenant_and_user(engine, with_account_type=False)
     command.upgrade(config, "head")
     # 옛 dev 의 소속 사용자는 f492 백필 규칙대로 TENANT 로 분류된다(승격 없음)
-    _assert_merged_head(config, engine, expected_account_type="TENANT")
+    _assert_merged_head(engine, config, expected_account_type="TENANT")

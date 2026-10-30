@@ -19,7 +19,7 @@ import pytest
 from auth.access import require_tenant_scope
 from db import models
 from schemas.api.audit import AuditActorKind, AuditEventAction
-from schemas.api.auth import UserRole
+from schemas.api.auth import PlatformRole, UserRole
 from schemas.api.incidents import ResolutionJudgement
 from schemas.api.tenants import TenantStatus
 from schemas.runbooks import RunbookId, TriggerSource
@@ -184,19 +184,66 @@ def test_scope_comes_from_the_shared_tenant_scope_rule(
 ):
     """범위는 인시던트 · 조치와 같은 require_tenant_scope 가 정한다 — 규칙을 따로 쓰지 않는다(#548 리뷰).
 
-    플랫폼 세션이어도 그 판정이 고객사 범위를 돌려주면 그 테넌트 기록만 · 운영자 이메일 없이 나온다.
+    플랫폼 세션이어도 그 판정이 고객사 범위를 돌려주면 그 테넌트 기록만 나온다. 이메일은 범위가 아니라
+    보는 사람의 계정 종류(플랫폼)가 정하므로 실린다.
     """
     mine, other = make_tenant(), make_tenant()
     operator = make_auth_session()
     own = seed(_incident(db, make_incident, mine), window, kind=PLATFORM, user_id=operator.user_id,
                trigger=TriggerSource.USER_APPROVAL)
     seed(_incident(db, make_incident, other), window + timedelta(seconds=1))
-    client_pg.app.dependency_overrides[require_tenant_scope] = lambda: TenantScope(tenant_id=mine)
+    client_pg.app.dependency_overrides[require_tenant_scope] = lambda: TenantScope(tenant_ids=(mine,))
 
     body = _get(client_pg, since=_z(window), until=_z(window + timedelta(hours=1)))
 
     assert [item["event_id"] for item in body["items"]] == [own.event_id]
-    assert body["items"][0]["actor"] == {"kind": "PLATFORM_USER", "email": None}
+    assert body["items"][0]["actor"] == {
+        "kind": "PLATFORM_USER", "email": _email(db, operator.user_id),
+    }
+
+
+def test_assigned_manager_sees_only_assigned_tenants_with_operator_email(
+    client_pg, db, make_incident, make_tenant, make_auth_session, login_as, seed, window
+):
+    """담당자는 배정 고객사 기록만 본다(NULL 테넌트 · 미배정 제외). 플랫폼 계정이라 운영자 이메일은 보인다."""
+    mine, other = make_tenant(), make_tenant()
+    operator = make_auth_session()
+    own = seed(_incident(db, make_incident, mine), window, kind=PLATFORM, user_id=operator.user_id,
+               trigger=TriggerSource.USER_APPROVAL)
+    seed(_incident(db, make_incident, other), window + timedelta(seconds=1), kind=PLATFORM,
+         user_id=operator.user_id, trigger=TriggerSource.USER_APPROVAL)
+    seed(_incident(db, make_incident), window + timedelta(seconds=2))
+    login_as(UserRole.ADMIN, platform_role=PlatformRole.TENANT_MANAGER, assigned_tenant_ids=(mine,))
+
+    body = _get(client_pg, since=_z(window), until=_z(window + timedelta(hours=1)))
+
+    assert [item["event_id"] for item in body["items"]] == [own.event_id]
+    assert body["items"][0]["actor"] == {
+        "kind": "PLATFORM_USER", "email": _email(db, operator.user_id),
+    }
+
+
+def test_unassigned_manager_sees_nothing(
+    client_pg, db, make_incident, make_tenant, login_as, seed, window
+):
+    seed(_incident(db, make_incident, make_tenant()), window)
+    seed(_incident(db, make_incident), window + timedelta(seconds=1))
+    login_as(UserRole.ADMIN, platform_role=PlatformRole.TENANT_MANAGER)
+
+    assert _get(client_pg, since=_z(window), until=_z(window + timedelta(hours=1)))["items"] == []
+
+
+def test_null_tenant_events_are_central_only(
+    client_pg, db, make_incident, make_tenant, login_as, seed, window
+):
+    orphan = seed(_incident(db, make_incident), window)
+    login_as(UserRole.ADMIN, platform_role=PlatformRole.TENANT_MANAGER,
+             assigned_tenant_ids=(make_tenant(),))
+    assert _get(client_pg, since=_z(window), until=_z(window + timedelta(hours=1)))["items"] == []
+
+    login_as(UserRole.ADMIN)
+    body = _get(client_pg, since=_z(window), until=_z(window + timedelta(hours=1)))
+    assert [item["event_id"] for item in body["items"]] == [orphan.event_id]
 
 
 def test_unauthenticated_request_is_rejected(client_pg_anon):

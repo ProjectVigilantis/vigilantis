@@ -501,7 +501,7 @@ def reserve_recreate(db, incident_id, actor):
             runbook_id=RunbookId.RUNBOOK_SG_RECREATE,
             idempotency_key=str(uuid.uuid4()),
         ),
-        actor=actor,
+        audit_actor=actor,
     )
     db.commit()
     return reservation.response.execution_id

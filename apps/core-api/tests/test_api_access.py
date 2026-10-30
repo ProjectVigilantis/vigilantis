@@ -5,10 +5,14 @@
 #   - 경로 전수: 실제 앱의 경로를 열거해 공개 목록 밖은 전부 미인증 401임을 본다. 공개 목록은
 #     실제 경로와 정확히 대조한다 — 새 경로가 조용히 공개되거나 목록이 낡지 않게.
 #   - 역할: VIEWER 의 조치 실행 · 종료는 403 AUTH_FORBIDDEN 이고 Workflow 에 닿지 않는다(DB 무변화).
-#   - 계정 종류(#492): 인시던트 · 조치 · 자산은 요청자의 테넌트 범위로 열리고, 그 밖의 업무 경로(메트릭 등)는
-#     PLATFORM 계정만 받는다(경로 전수). 고객사 계정에게 소속 없는 MVP 기록은 범위 밖이라 상세 · 실행 · 종료가
-#     404 다. 상태 변경의 역할 검사(403)는 대상을 읽기 전이다(판정 순서: packages/schemas/api/tenants.py 머리말).
-#     고객사 계정의 /api/v1/auth · /api/v1/users 는 그대로 열린다.
+#   - 업무 범위(#492 · #533): 인시던트 · 조치 · 자산은 요청자의 고객사 범위(auth.access.tenant_scope_of)로 열린다 —
+#     CENTRAL_ADMIN 은 전체, TENANT_MANAGER 는 배정 고객사(배정 없음 = 빈 목록 · 404), 고객사(TENANT) 계정은 자기
+#     소속. 범위 밖 · 소속 없는 MVP 기록은 목록에서 빠지고 상세 · 실행 · 종료가 404 다. 상태 변경의 역할 검사(403)는
+#     대상을 읽기 전이고, 정지는 요청자가 아니라 대상 인시던트의 고객사로 Workflow 가 본다. 메트릭은 플랫폼 관리
+#     등급만 받고, 그 밖의 업무 경로도 고객사 계정에는 403 이다(경로 전수). 고객사 계정의 /api/v1/auth ·
+#     /api/v1/users 는 그대로 열린다.
+#   - 고객사 범위 판정: tenant_scope_ids · can_access_tenant · tenant_scope_of 는 명시 등급 · 배정 · 소속만 읽고
+#     닫힌 쪽으로 실패한다.
 #   - 세션: 유휴 · 최대 수명 만료, 회수(LOGOUT · SUPERSEDED), 비활성 · UNASSIGNED 사용자는 401.
 #   - Origin: 상태 변경 요청은 세션 조회 전에 403 AUTH_ORIGIN_REJECTED.
 #   - 보호 API 요청은 유휴 시간을 늘리지 않는다. 접근 로그에 user_id · role 만 남는다.
@@ -33,7 +37,7 @@ from db.repositories import auth as auth_repo
 from exceptions import ApiError
 from fastapi.routing import iter_route_contexts
 from fastapi.testclient import TestClient
-from schemas.api.auth import AccountType, SessionInfo, UserRole
+from schemas.api.auth import AccountType, PlatformRole, SessionInfo, UserRole
 from schemas.api.errors import ErrorCode
 from schemas.api.tenants import TenantStatus
 from schemas.candidates import CandidateStatus
@@ -214,8 +218,8 @@ def _business_state(db, incident, candidate):
 
 
 # 상태 변경의 판정 순서 — 역할(VIEWER 403 · 대상을 읽기 전) → 범위(404). 대상은 소속 없는 MVP 기록이라
-# 고객사 계정의 범위 밖이다. 요청자 소속 테넌트가 정지돼 있어도 409 가 아니다 — 정지는 요청자가 아니라
-# 대상 인시던트의 테넌트로 보고, 범위 밖 대상에는 그 판정까지 가지 않는다.
+# 고객사 계정의 범위 밖이다. 요청자 소속 고객사가 정지돼 있어도 409 가 아니다 — 정지는 요청자가 아니라
+# 대상 인시던트의 고객사로 보고, 범위 밖 대상에는 그 판정까지 가지 않는다.
 @pytest.mark.parametrize(("tenant_status", "role", "expected"), [
     (TenantStatus.ACTIVE, UserRole.ADMIN, (404, "INCIDENT_NOT_FOUND")),
     (TenantStatus.ACTIVE, UserRole.OPERATOR, (404, "INCIDENT_NOT_FOUND")),
@@ -242,7 +246,7 @@ def test_tenant_accounts_cannot_change_unowned_records_and_nothing_changes(
         assert (response.status_code, response.json()["error"]["code"]) == expected, url
 
     if expected[0] == 403:
-        assert (reserves, resolves) == ([], [])
+        assert (reserves, resolves) == ([], [])  # 역할 거절은 Workflow 에 닿지 않는다
     assert _business_state(db, incident, candidate) == before
 
 
@@ -251,8 +255,8 @@ def test_tenant_accounts_cannot_change_unowned_records_and_nothing_changes(
 def test_tenant_accounts_read_only_their_scope_while_metrics_stay_platform_only(
     client_pg, login_as, make_tenant, resolvable, tenant_status, role
 ):
-    """정지 테넌트를 포함한 고객사 계정은 자기 범위의 인시던트를 읽는다. 소속 없는 MVP 기록은 목록에서
-    빠지고 상세는 404 다. 메트릭은 테넌트 범위로 걸러지지 않아 플랫폼 전용(403)이다."""
+    """정지 고객사를 포함한 고객사 계정은 자기 범위를 읽는다. 소속 없는 MVP 기록은 목록에서 빠지고 상세는
+    404 다. 메트릭은 플랫폼 관리 등급만 받아 고객사 계정은 403 이다."""
     login_as(role, tenant_id=make_tenant(tenant_status))
 
     listed = client_pg.get("/api/v1/incidents")
@@ -260,11 +264,12 @@ def test_tenant_accounts_read_only_their_scope_while_metrics_stay_platform_only(
     assert resolvable.incident_id not in {item["incident_id"] for item in listed.json()["items"]}
     detail = client_pg.get(f"/api/v1/incidents/{resolvable.incident_id}")
     assert (detail.status_code, detail.json()["error"]["code"]) == (404, "INCIDENT_NOT_FOUND")
+    assert client_pg.get("/api/v1/assets").status_code == 200
     metrics = client_pg.get("/api/v1/metrics/timeseries")
     assert (metrics.status_code, metrics.json()["error"]["code"]) == (403, "AUTH_FORBIDDEN")
 
 
-# 고객사 계정에 열린 업무 경로 — 요청자의 테넌트 범위로 걸러진다. 그 밖의 업무 경로는 플랫폼 전용이다.
+# 고객사 범위로 걸러지는 업무 경로 — 고객사 계정 · 담당자에게도 열린다. 그 밖의 업무 경로는 플랫폼 전용이다.
 TENANT_SCOPED_ROUTES = {
     ("GET", "/api/v1/incidents"),
     ("GET", "/api/v1/incidents/{incident_id}"),
@@ -291,10 +296,10 @@ def test_business_routes_outside_tenant_scope_stay_platform_only(client_pg, logi
     assert TENANT_SCOPED_ROUTES <= business
     assert ("GET", "/api/v1/metrics/timeseries") in business
 
+    bodies = _valid_bodies(str(uuid.uuid4()))
     leaks = []
     for method, path in sorted(business - TENANT_SCOPED_ROUTES):
-        url = path.replace("{incident_id}", str(uuid.uuid4()))
-        response = client_pg.request(method, url, json={} if method == "POST" else None)
+        response = _send(client_pg, method, path, {}, bodies.get((method, path)))
         if (response.status_code, _error_code(response)) != (403, "AUTH_FORBIDDEN"):
             leaks.append((method, path, response.status_code))
     assert leaks == []
@@ -322,50 +327,51 @@ def test_business_routes_outside_tenant_scope_stay_platform_only(client_pg, logi
     assert client_pg.get("/api/v1/users").status_code == 200
 
 
-# --- 판정 함수(역할 · 테넌트 범위 규칙) -----------------------------------------------------
+# --- 판정 함수(등급 · 역할 · 고객사 범위 규칙) -----------------------------------------------
 
 
-def _user(account_type, role, tenant_status=None) -> auth_service.CurrentUser:
+def _user(
+    account_type, role, tenant_status=None, platform_role=None, assigned_tenant_ids=(), tenant_id=None
+) -> auth_service.CurrentUser:
     now = datetime.now(UTC)
+    if account_type is AccountType.TENANT and tenant_id is None:
+        tenant_id = str(uuid.uuid4())
     return auth_service.CurrentUser(
         user_id=str(uuid.uuid4()),
         email="u@example.com",
         role=role,
         account_type=account_type,
-        tenant_id=None if account_type is AccountType.PLATFORM else str(uuid.uuid4()),
+        tenant_id=tenant_id,
+        platform_role=platform_role,
         tenant_status=tenant_status,
         session=SessionInfo(absolute_expires_at=now, idle_expires_at=now),
+        assigned_tenant_ids=tuple(assigned_tenant_ids),
     )
 
 
-# 역할만 본다 — 정지는 요청자 소속이 아니라 대상 인시던트의 테넌트로 Workflow 가 판정한다
 @pytest.mark.parametrize(("user", "expected"), [
-    (_user(AccountType.PLATFORM, UserRole.ADMIN), None),
+    (_user(AccountType.PLATFORM, UserRole.ADMIN, platform_role=PlatformRole.CENTRAL_ADMIN), None),
+    (_user(AccountType.PLATFORM, UserRole.ADMIN, platform_role=PlatformRole.TENANT_MANAGER), None),
+    # 호환 값 role=ADMIN 만으로는 플랫폼 조치 권한이 없다 — 명시 등급이 있어야 한다
+    (_user(AccountType.PLATFORM, UserRole.ADMIN), ErrorCode.AUTH_FORBIDDEN),
     (_user(AccountType.TENANT, UserRole.ADMIN, TenantStatus.ACTIVE), None),
     (_user(AccountType.TENANT, UserRole.OPERATOR, TenantStatus.ACTIVE), None),
     (_user(AccountType.TENANT, UserRole.VIEWER, TenantStatus.ACTIVE), ErrorCode.AUTH_FORBIDDEN),
+    # 정지는 요청자 소속이 아니라 대상 인시던트의 고객사로 Workflow 가 본다 — 여기서는 등급 · 역할만
     (_user(AccountType.TENANT, UserRole.OPERATOR, TenantStatus.SUSPENDED), None),
     (_user(AccountType.TENANT, UserRole.VIEWER, TenantStatus.SUSPENDED), ErrorCode.AUTH_FORBIDDEN),
-], ids=["platform", "tenant-admin", "tenant-operator", "tenant-viewer", "suspended-operator", "suspended-viewer"])
-def test_action_role_rule_reads_role_only(user, expected):
+    (_user(AccountType.UNASSIGNED, UserRole.ADMIN), ErrorCode.AUTH_FORBIDDEN),
+], ids=[
+    "central", "manager", "platform-without-level", "tenant-admin", "tenant-operator", "tenant-viewer",
+    "suspended-operator", "suspended-viewer", "unassigned-admin",
+])
+def test_action_role_rule_reads_grade_and_role_only(user, expected):
     if expected is None:
         assert access.require_action_role(user) is user
     else:
         with pytest.raises(ApiError) as rejected:
             access.require_action_role(user)
         assert rejected.value.code is expected
-
-
-def test_tenant_scope_follows_account_type():
-    platform = _user(AccountType.PLATFORM, UserRole.ADMIN)
-    customer = _user(AccountType.TENANT, UserRole.OPERATOR, TenantStatus.SUSPENDED)
-
-    assert access.tenant_scope_of(platform) == ALL_TENANTS
-    assert access.tenant_scope_of(customer) == TenantScope(tenant_id=customer.tenant_id)
-    # 소속이 비어 있는 고객사 계정은 플랫폼 범위로 넘어가지 않는다
-    with pytest.raises(ApiError) as rejected:
-        access.tenant_scope_of(dataclasses.replace(customer, tenant_id=None))
-    assert rejected.value.code is ErrorCode.AUTH_FORBIDDEN
 
 
 @pytest.mark.parametrize(("user", "allowed"), [
@@ -380,6 +386,209 @@ def test_platform_account_rule_reads_account_type_not_role(user, allowed):
         with pytest.raises(ApiError) as rejected:
             access.require_platform_account(user)
         assert rejected.value.code is ErrorCode.AUTH_FORBIDDEN
+
+
+@pytest.mark.parametrize(
+    ("account_type", "role", "platform_role", "management", "central", "users"),
+    [
+        (AccountType.PLATFORM, UserRole.ADMIN, PlatformRole.CENTRAL_ADMIN, True, True, True),
+        (AccountType.PLATFORM, UserRole.ADMIN, PlatformRole.TENANT_MANAGER, True, False, True),
+        (AccountType.PLATFORM, UserRole.ADMIN, None, False, False, False),
+        (AccountType.TENANT, UserRole.ADMIN, None, False, False, True),
+        (AccountType.TENANT, UserRole.VIEWER, None, False, False, False),
+        (AccountType.TENANT, UserRole.VIEWER, PlatformRole.CENTRAL_ADMIN, False, False, False),
+        (AccountType.UNASSIGNED, UserRole.ADMIN, PlatformRole.CENTRAL_ADMIN, False, False, False),
+    ],
+)
+def test_management_guards_use_explicit_platform_level(
+    account_type, role, platform_role, management, central, users
+):
+    user = _user(account_type, role, platform_role=platform_role)
+    for guard, allowed in (
+        (access.require_tenant_management, management),
+        (access.require_central_admin, central),
+        (access.require_admin, users),
+    ):
+        if allowed:
+            assert guard(user) is user
+        else:
+            with pytest.raises(ApiError) as rejected:
+                guard(user)
+            assert rejected.value.code is ErrorCode.AUTH_FORBIDDEN
+
+
+_T1, _T2, _T3 = sorted(str(uuid.uuid4()) for _ in range(3))
+
+
+@pytest.mark.parametrize(("user", "scope"), [
+    # 전체(None)는 명시 CENTRAL_ADMIN 뿐이다 — 남은 배정 행이 있어도 범위는 전체다
+    (_user(AccountType.PLATFORM, UserRole.ADMIN, platform_role=PlatformRole.CENTRAL_ADMIN), None),
+    (_user(AccountType.PLATFORM, UserRole.ADMIN, platform_role=PlatformRole.TENANT_MANAGER,
+           assigned_tenant_ids=(_T1, _T2)), (_T1, _T2)),
+    # 배정 없는 담당자는 고객사가 없다(전체로 읽히지 않는다)
+    (_user(AccountType.PLATFORM, UserRole.ADMIN, platform_role=PlatformRole.TENANT_MANAGER), ()),
+    # 소속은 자기 고객사 하나 — 배정이 아니다
+    (_user(AccountType.TENANT, UserRole.ADMIN, TenantStatus.ACTIVE, tenant_id=_T3), (_T3,)),
+    # 등급 없는 PLATFORM · 미지정 · 배정만 있는 비담당자는 닫힌다(role=ADMIN · 소속 NULL 로 추론하지 않는다)
+    (_user(AccountType.PLATFORM, UserRole.ADMIN), ()),
+    (_user(AccountType.UNASSIGNED, UserRole.ADMIN), ()),
+    (_user(AccountType.TENANT, UserRole.ADMIN, TenantStatus.ACTIVE, tenant_id=_T3,
+           assigned_tenant_ids=(_T1,)), (_T3,)),
+], ids=["central", "manager", "unassigned-manager", "tenant", "platform-without-level", "unassigned",
+        "tenant-ignores-assignment-rows"])
+def test_tenant_scope_is_explicit_and_fails_closed(user, scope):
+    assert access.tenant_scope_ids(user) == scope
+    for tenant_id in (_T1, _T2, _T3):
+        expected = scope is None or tenant_id in scope
+        assert access.can_access_tenant(user, tenant_id) is expected
+        # 정규형이 아닌 표기도 같은 고객사로 본다
+        assert access.can_access_tenant(user, tenant_id.upper()) is expected
+    assert access.can_access_tenant(user, "not-a-uuid") is False
+
+
+def test_tenant_scope_of_carries_explicit_scope_ids_never_account_type():
+    central = _user(AccountType.PLATFORM, UserRole.ADMIN, platform_role=PlatformRole.CENTRAL_ADMIN)
+    manager = _user(AccountType.PLATFORM, UserRole.ADMIN, platform_role=PlatformRole.TENANT_MANAGER,
+                    assigned_tenant_ids=(_T1, _T2))
+    unassigned_manager = _user(AccountType.PLATFORM, UserRole.ADMIN, platform_role=PlatformRole.TENANT_MANAGER)
+    customer = _user(AccountType.TENANT, UserRole.OPERATOR, TenantStatus.SUSPENDED, tenant_id=_T3)
+
+    assert access.tenant_scope_of(central) == ALL_TENANTS
+    assert access.tenant_scope_of(manager) == TenantScope(tenant_ids=(_T1, _T2))
+    assert access.tenant_scope_of(customer) == TenantScope(tenant_ids=(_T3,))
+    # 전체는 명시 CENTRAL_ADMIN 뿐 — 담당 없는 담당자 · 등급 없는 PLATFORM · 소속 없는 고객사 계정은 빈 범위다
+    for closed in (
+        unassigned_manager,
+        _user(AccountType.PLATFORM, UserRole.ADMIN),
+        dataclasses.replace(customer, tenant_id=None),
+    ):
+        scope = access.tenant_scope_of(closed)
+        assert scope == TenantScope(tenant_ids=())
+        assert scope.is_platform is False
+        assert not any(scope.covers(tenant_id) for tenant_id in (_T1, _T2, _T3, None))
+    # 라우트 의존성은 같은 판정이다
+    assert access.require_tenant_scope(manager) == access.tenant_scope_of(manager)
+
+
+@pytest.mark.parametrize(("user", "allowed"), [
+    (_user(AccountType.PLATFORM, UserRole.ADMIN, platform_role=PlatformRole.CENTRAL_ADMIN), True),
+    (_user(AccountType.PLATFORM, UserRole.ADMIN, platform_role=PlatformRole.TENANT_MANAGER), True),
+    (_user(AccountType.PLATFORM, UserRole.ADMIN), False),
+    (_user(AccountType.TENANT, UserRole.ADMIN, TenantStatus.ACTIVE), False),
+    (_user(AccountType.TENANT, UserRole.ADMIN, TenantStatus.SUSPENDED), False),
+    (_user(AccountType.UNASSIGNED, UserRole.ADMIN), False),
+], ids=["central", "unassigned-manager", "platform-without-level", "tenant-admin", "suspended-tenant-admin",
+        "unassigned"])
+def test_metrics_gate_admits_platform_management_grades_only(user, allowed):
+    """메트릭 자격은 등급만 본다(배정 없는 담당자도 통과 — 범위는 라우트가 빈 범위로 건다)."""
+    if allowed:
+        assert access.require_business_access(user) is user
+    else:
+        with pytest.raises(ApiError) as rejected:
+            access.require_business_access(user)
+        assert rejected.value.code is ErrorCode.AUTH_FORBIDDEN
+
+
+# --- (b2) 담당자 범위 — 배정된 고객사만 ------------------------------------------------
+
+
+def _scoped_records(db, make_incident, make_candidate, seed_summary_lines, owners: dict) -> dict:
+    """키 → (종료 · 실행 가능한 인시던트, EXECUTABLE 후보). owners 는 키 → 소속 고객사(None = 소속 없는 MVP 기록)."""
+    records = {}
+    for key, tenant_id in owners.items():
+        incident = make_incident(db, summary_lines=seed_summary_lines)
+        incident.tenant_id = tenant_id
+        incident.agent_invocation_status = AgentInvocationStatus.SUCCEEDED
+        records[key] = (incident, make_candidate(db, incident))
+    db.commit()
+    return records
+
+
+@pytest.mark.parametrize("actor", ["central", "manager", "unassigned-manager", "tenant-viewer"])
+def test_incident_reads_follow_explicit_scope(
+    client_pg, login_as, make_tenant, db, make_incident, make_candidate, seed_summary_lines, actor
+):
+    """같은 기록을 행위자마다 다르게 본다 — 전체는 중앙 관리자뿐, 담당자는 배정만, 배정이 없으면 빈 목록 · 404."""
+    tenant_a, tenant_b = make_tenant(), make_tenant()
+    records = _scoped_records(
+        db, make_incident, make_candidate, seed_summary_lines, {"a": tenant_a, "b": tenant_b, "none": None}
+    )
+    if actor == "manager":
+        login_as(UserRole.ADMIN, platform_role=PlatformRole.TENANT_MANAGER, assigned_tenant_ids=(tenant_a,))
+    elif actor == "unassigned-manager":
+        login_as(UserRole.ADMIN, platform_role=PlatformRole.TENANT_MANAGER)
+    elif actor == "tenant-viewer":
+        login_as(UserRole.VIEWER, tenant_id=tenant_a)
+    visible = {
+        "central": {"a", "b", "none"},  # client_pg 기본 세션(CENTRAL_ADMIN)
+        "manager": {"a"},
+        "unassigned-manager": set(),
+        "tenant-viewer": {"a"},
+    }[actor]
+
+    listed = client_pg.get("/api/v1/incidents")
+    assert listed.status_code == 200
+    listed_ids = {item["incident_id"] for item in listed.json()["items"]}
+    assert {key for key, (incident, _) in records.items() if incident.incident_id in listed_ids} == visible
+    for key, (incident, _) in records.items():
+        response = client_pg.get(f"/api/v1/incidents/{incident.incident_id}")
+        expected = (200, None) if key in visible else (404, "INCIDENT_NOT_FOUND")
+        assert (response.status_code, _error_code(response)) == expected, key
+    assert client_pg.get("/api/v1/assets").status_code == 200
+
+
+@pytest.mark.parametrize("assigned", [True, False], ids=["assigned-manager", "unassigned-manager"])
+def test_manager_changes_reach_only_assigned_records(
+    client_pg, login_as, make_tenant, db, make_incident, make_candidate, seed_summary_lines, assigned
+):
+    """담당자의 실행 · 종료는 배정 고객사의 인시던트에만 닿는다. 범위 밖(다른 고객사 · 소속 없음)은 404 이고
+    아무것도 바뀌지 않는다. 배정이 없으면 모든 대상이 범위 밖이다."""
+    tenant_a, tenant_b = make_tenant(), make_tenant()
+    records = _scoped_records(
+        db, make_incident, make_candidate, seed_summary_lines,
+        {"a-execute": tenant_a, "a-resolve": tenant_a, "b": tenant_b, "none": None},
+    )
+    login_as(
+        UserRole.ADMIN, platform_role=PlatformRole.TENANT_MANAGER,
+        assigned_tenant_ids=(tenant_a,) if assigned else (),
+    )
+    in_scope = {"a-execute", "a-resolve"} if assigned else set()
+
+    for key in sorted(set(records) - in_scope):
+        incident, candidate = records[key]
+        before = _business_state(db, incident, candidate)
+        for url, body in _mutations(incident.incident_id, candidate.runbook_id.value):
+            response = client_pg.post(url, json=body)
+            assert (response.status_code, _error_code(response)) == (404, "INCIDENT_NOT_FOUND"), (key, url)
+        assert _business_state(db, incident, candidate) == before
+
+    if assigned:
+        incident, candidate = records["a-execute"]
+        execute_url, execute_body = _mutations(incident.incident_id, candidate.runbook_id.value)[0]
+        assert client_pg.post(execute_url, json=execute_body).status_code == 202
+        incident, candidate = records["a-resolve"]
+        resolve_url, resolve_body = _mutations(incident.incident_id, candidate.runbook_id.value)[1]
+        resolved = client_pg.post(resolve_url, json=resolve_body)
+        assert (resolved.status_code, resolved.json()["status"]) == (200, "RESOLVED")
+
+
+def test_manager_scope_revocation_applies_to_the_next_request(
+    client_pg, login_as, make_tenant, db, make_incident, make_candidate, seed_summary_lines
+):
+    """배정 회수는 세션을 다시 만들지 않아도 다음 요청부터 범위에서 빠진다(판정마다 DB 를 새로 읽는다)."""
+    tenant_a = make_tenant()
+    incident, _ = _scoped_records(db, make_incident, make_candidate, seed_summary_lines, {"a": tenant_a})["a"]
+    seed = login_as(UserRole.ADMIN, platform_role=PlatformRole.TENANT_MANAGER, assigned_tenant_ids=(tenant_a,))
+    detail = f"/api/v1/incidents/{incident.incident_id}"
+    assert client_pg.get(detail).status_code == 200
+
+    auth_repo.replace_assigned_tenants(db, user_id=seed.user_id, tenant_ids=(), now=datetime.now(UTC))
+    db.commit()
+
+    response = client_pg.get(detail)
+    assert (response.status_code, _error_code(response)) == (404, "INCIDENT_NOT_FOUND")
+    listed = client_pg.get("/api/v1/incidents")
+    assert incident.incident_id not in {item["incident_id"] for item in listed.json()["items"]}
 
 
 # --- (c) 무효 세션 ----------------------------------------------------------------------
@@ -519,6 +728,9 @@ def _valid_bodies(incident_id: str) -> dict[tuple[str, str], dict | None]:
         ("PUT", f"{user}/role"): {"role": "VIEWER"},
         ("PUT", f"{user}/status"): {"status": "DISABLED"},
         ("POST", f"{user}/sessions/revoke"): None,
+        ("PUT", "/api/v1/staff/{user_id}/role"): {"platform_role": "TENANT_MANAGER"},
+        ("PUT", "/api/v1/staff/{user_id}/status"): {"status": "DISABLED"},
+        ("PUT", "/api/v1/staff/{user_id}/tenants"): {"tenant_ids": []},
         ("POST", "/api/v1/tenants"): {
             "name": "학원", "aws_account_id": "123456789012", "regions": ["ap-northeast-2"],
         },
@@ -619,7 +831,7 @@ def test_protected_api_responses_carry_security_headers(
 ):
     resolve = f"/api/v1/incidents/{resolvable.incident_id}/resolve"
     body = {"resolution": "NO_FURTHER_ACTION"}
-    # 정지된 테넌트의 인시던트 — 새 실행은 플랫폼 계정도 409 다
+    # 정지된 고객사의 인시던트 — 새 실행은 중앙 관리자도 409 다
     suspended, candidate = make_executable(db)
     suspended.tenant_id = make_tenant(TenantStatus.SUSPENDED)
     db.commit()

@@ -113,8 +113,14 @@ def _with_counts():
     return select(_T, asset_count, open_incident_count).execution_options(populate_existing=True)
 
 
-def get_tenant(db: Session, tenant_id: str) -> Optional[TenantWithCounts]:
-    row = db.execute(_with_counts().where(_T.tenant_id == tenant_id)).one_or_none()
+def get_tenant(
+    db: Session, tenant_id: str, *, scope_ids: Optional[Sequence[str]] = None
+) -> Optional[TenantWithCounts]:
+    """scope_ids 가 None 이면 전체, 아니면 그 테넌트 안에서만 찾는다(범위 밖은 없는 것과 같다)."""
+    statement = _with_counts().where(_T.tenant_id == tenant_id)
+    if scope_ids is not None:
+        statement = statement.where(_T.tenant_id.in_(list(scope_ids)))
+    row = db.execute(statement).one_or_none()
     return None if row is None else TenantWithCounts(*row)
 
 
@@ -137,9 +143,15 @@ def tenant_id_for_account(db: Session, aws_account_id: str) -> Optional[str]:
     return db.scalar(select(_T.tenant_id).where(_T.aws_account_id == aws_account_id))
 
 
-def list_tenants(db: Session) -> list[TenantWithCounts]:
-    """생성 순(created_at 오름차순 · 같으면 tenant_id) — 계약 TenantsResponse 의 정렬."""
-    rows = db.execute(_with_counts().order_by(_T.created_at, _T.tenant_id))
+def list_tenants(
+    db: Session, *, scope_ids: Optional[Sequence[str]] = None
+) -> list[TenantWithCounts]:
+    """생성 순(created_at 오름차순 · 같으면 tenant_id) — 계약 TenantsResponse 의 정렬.
+    scope_ids 가 None 이면 전체, 빈 목록이면 빈 결과다."""
+    statement = _with_counts()
+    if scope_ids is not None:
+        statement = statement.where(_T.tenant_id.in_(list(scope_ids)))
+    rows = db.execute(statement.order_by(_T.created_at, _T.tenant_id))
     return [TenantWithCounts(*row) for row in rows]
 
 

@@ -22,7 +22,7 @@ import {
   approvalAssetFacts,
   isDestructiveRunbook,
 } from '@/lib/enum-labels';
-import { VIEWER_ACTION_BLOCKED } from '@/lib/roles';
+import { ACTION_FORBIDDEN } from '@/lib/roles';
 import type { ExecuteActionResponse, RunbookId } from '@/types/api';
 
 /**
@@ -52,8 +52,8 @@ export interface ExecuteOutcome {
 function messageFor(error: ApiError): { text: string; keepOpen: boolean; retryable?: false } {
   switch (error.code) {
     case 'AUTH_FORBIDDEN':
-      // 역할이 막았다(#492 PR 2) — 다시 눌러도 같은 403이므로 실행 버튼을 잠근 채 둔다.
-      return { text: VIEWER_ACTION_BLOCKED, keepOpen: true, retryable: false };
+      // 역할 또는 담당 범위가 막았다(#492 PR 2 · PR 5) — 다시 눌러도 같은 403이므로 실행 버튼을 잠근 채 둔다.
+      return { text: ACTION_FORBIDDEN, keepOpen: true, retryable: false };
     case 'IDEMPOTENCY_KEY_CONFLICT':
       return { text: '요청이 변경되었습니다. 화면을 새로고침한 뒤 다시 시도해 주세요.', keepOpen: true };
     case 'PROPOSAL_NOT_EXECUTABLE':

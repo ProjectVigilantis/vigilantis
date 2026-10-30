@@ -9,7 +9,20 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Collection, NamedTuple, Optional, Sequence
 
-from sqlalchemy import String, column, delete, func, select, true, update, values
+from sqlalchemy import (
+    String,
+    column,
+    delete,
+    false,
+    func,
+    or_,
+    select,
+    true,
+    tuple_,
+    union_all,
+    update,
+    values,
+)
 from sqlalchemy.orm import Session, aliased
 
 from schemas.api.assets import AssetType, RelationType, Verdict
@@ -20,16 +33,36 @@ from schemas.assets import MetricSummary as MetricSummaryContract
 from schemas.collections import CollectionRunStatus, unobserved_asset_types
 from schemas.rules import RuleEvaluationResult
 
-from tenancy import ALL_TENANTS, TenantScope
+from tenancy import ALL_TENANTS, MonitoredRegions, TenantScope
 
 from .. import mappers, models
 
 
 def _within_scope(stmt, tenant_column, scope: TenantScope):
-    """고객사 범위면 그 테넌트 행만 남긴다. 플랫폼 범위는 문장을 바꾸지 않는다(NULL 소속 포함 전체)."""
+    """범위 안 고객사의 행만 남긴다. 전체 범위(``tenant_ids=None``)는 문장을 바꾸지 않는다(소속 없는 행 포함).
+
+    배정 범위는 그 고객사들 중 하나에 속한 행뿐이다 — 소속 없는(NULL) 행은 ``IN`` 에 걸리지 않고,
+    빈 범위는 아무 행도 남기지 않는다(전체로 넓히지 않는다). 이 저장소의 범위 조건은 모두 여기서 만든다."""
     if scope.is_platform:
         return stmt
-    return stmt.where(tenant_column == scope.tenant_id)
+    return stmt.where(tenant_column.in_(scope.tenant_ids))
+
+
+def _within_regions(stmt, tenant_column, region_column, regions: Sequence[str] | MonitoredRegions):
+    """관제 리전 안의 행만 남긴다. 리전 목록(``Sequence[str]``)은 종전대로 리전만 본다 — 신뢰하는 기존 호출부.
+
+    ``MonitoredRegions`` 는 (소유, 리전)이 쌍 중 하나이거나, 소유가 없고(NULL) 리전이 legacy 인 행만 남긴다 —
+    고객사 기록은 그 고객사가 관제하는 리전에서만, 소속 없는 기록은 legacy(설정) 리전에서만 보인다. 리전 합집합으로
+    거르면 A(서울) · B(도쿄)를 함께 볼 때 A 의 도쿄 기록이 B 의 도쿄 때문에 들어온다. 둘 다 비면 아무 행도 남기지
+    않는다. 범위(``_within_scope``)와 별개의 조건이라 호출부가 따로 건다."""
+    if not isinstance(regions, MonitoredRegions):
+        return stmt.where(region_column.in_(regions))
+    conditions = []
+    if regions.pairs:
+        conditions.append(tuple_(tenant_column, region_column).in_(regions.pairs))
+    if regions.legacy:
+        conditions.append(tenant_column.is_(None) & region_column.in_(regions.legacy))
+    return stmt.where(or_(false(), *conditions))
 
 
 # --- CollectionRun -------------------------------------------------------------
@@ -78,11 +111,11 @@ def finish_collection_run(
 
 def latest_collection_run_per_region(
     db: Session,
-    regions: Optional[Sequence[str]] = None,
+    regions: Optional[Sequence[str] | MonitoredRegions] = None,
     *,
     scope: TenantScope = ALL_TENANTS,
 ) -> list[models.CollectionRun]:
-    """리전별로 가장 최근에 시작된 수집 실행을 1건씩. (Issue #231)
+    """(소유 × 리전)별로 가장 최근에 시작된 수집 실행을 1건씩. (Issue #231 · #533)
 
     C4(#222)로 수집이 리전 단위 독립 트랜잭션이 되면서 한 사이클에 CollectionRun 이
     리전 수만큼 생긴다. 전역 최신 1행만 보면 리전1 FAILED → 리전2 SUCCESS 순서일 때
@@ -100,73 +133,131 @@ def latest_collection_run_per_region(
     비용이 리전 수에만 비례한다. DISTINCT ON 은 인덱스가 있어도 전 행을 걸어야 했다
     (30일치 17,280행에서 24ms → 0.05ms, Issue #343).
 
-    ``scope`` 가 고객사 범위면 두 경로 모두 **최신 선택 전에** 그 테넌트의 run 으로 좁힌다.
-    선택 뒤에 거르면 다른 테넌트의 더 새 run 이 리전의 최신 자리를 차지해 자기 run 이 가려진다.
-    플랫폼 범위(기본)는 소속 없는 run 을 포함한 전체이며 문장이 달라지지 않는다.
+    **소유(tenant_id)마다 따로 고른다.** 한 리전을 여러 고객사가 함께 관제할 때 리전당 1건만 고르면
+    다른 고객사의 더 새 run 이 그 리전의 최신 자리를 차지해 앞선 고객사의 실패가 가려진다. 소속 없는
+    MVP 기록(NULL)도 한 소유로 따로 남는다. ``scope`` 는 두 경로 모두 **최신 선택 전에** 후보 run 을
+    좁힌다 — 배정 범위는 그 고객사들의 run 만(소속 없는 run 제외), 빈 범위는 결과가 없다. 전체 범위
+    (기본)는 소속 없는 run 을 포함한 모든 소유다. 결과는 (리전, 소유 — NULL 먼저) 순이다.
+    ``MonitoredRegions`` 는 (고객사, 리전) 쌍과 legacy 리전의 소속 없는 run 만 후보로 둔다(``latest_run_per_region_stmt``).
     """
+    run = models.CollectionRun
     if regions is None:
         stmt = (
-            select(models.CollectionRun)
-            .distinct(models.CollectionRun.region)  # DISTINCT ON — 리전별 첫 행
+            select(run)
+            .distinct(run.region, run.tenant_id)  # DISTINCT ON — (리전, 소유)별 첫 행
             .order_by(
-                models.CollectionRun.region,
-                models.CollectionRun.started_at.desc(),
-                models.CollectionRun.collection_run_id.desc(),
+                run.region,
+                run.tenant_id.nulls_first(),
+                run.started_at.desc(),
+                run.collection_run_id.desc(),
             )
         )
-        stmt = _within_scope(stmt, models.CollectionRun.tenant_id, scope)
-        return list(db.execute(stmt).scalars().all())
+        return list(db.execute(_within_scope(stmt, run.tenant_id, scope)).scalars().all())
     if not regions:
         return []
     return list(db.execute(latest_run_per_region_stmt(regions, scope)).scalars().all())
 
 
-def latest_run_per_region_stmt(regions: Sequence[str], scope: TenantScope = ALL_TENANTS):
-    """리전 목록 → 리전별 최신 run 1건. 실행 계획 회귀(db/tests)가 이 문장을 그대로 본다.
+def latest_run_per_region_stmt(
+    regions: Sequence[str] | MonitoredRegions, scope: TenantScope = ALL_TENANTS
+):
+    """리전 목록 → (소유 × 리전)별 최신 run 1건. 실행 계획 회귀(db/tests)가 이 문장을 그대로 본다.
 
-    고객사 범위의 테넌트 조건은 LATERAL 안쪽, ``LIMIT 1`` 앞에 둔다."""
-    wanted = values(column("region", String), name="wanted").data(
-        [(r,) for r in dict.fromkeys(regions)]  # 중복 제거, 순서 유지
-    )
+    고객사 소유의 후보는 테넌트 행에서 범위로 고른다(``_within_scope``) — (고객사, 리전)마다 LATERAL
+    ``LIMIT 1`` 을 찍고, 소유 조건이 그 안쪽 ``LIMIT 1`` 앞에 있어 범위 밖 run 이 최신 자리를 차지하지
+    못한다. 소속 없는 run 은 전체 범위에서만 리전마다 한 건 더한다. 소유 조건을 두 갈래로 나눈 것은
+    ``tenant_id = 고객사`` 를 인덱스로 찾을 수 있게 하기 위해서다(``IS NOT DISTINCT FROM`` 은 못 쓴다) —
+    run 이 없는 고객사의 (고객사, 리전)이 그 리전의 run 을 전부 훑지 않는다.
+
+    ``MonitoredRegions`` 는 고객사 × 리전을 곱해 만들지 않는다 — 받은 (고객사, 리전) 쌍을 그대로 VALUES 로 펴 쌍마다
+    LATERAL ``LIMIT 1`` 을 찍고, 소속 없는 run 은 legacy 리전의 VALUES 로 따로 찍는다(전체 범위만). 쌍 밖 — 고객사가
+    관제하지 않는 리전 — 의 run 은 후보가 아니라서 최신 자리를 차지하지 못한다. 범위는 쌍과 별개로 다시 건다."""
+    run = models.CollectionRun
+
     # 정렬 키 (started_at DESC, id DESC) 는 ix_collection_runs_region_started_at 의 순서
     # 그대로다. started_at 단독 인덱스는 #343 에서 지웠다 — 남아 있으면 플래너가 그쪽을
     # 최신순으로 훑다가 리전 필터로 수천 행을 버리는 경로를 고를 수 있었다(PR #344 리뷰).
-    candidates = _within_scope(
-        select(models.CollectionRun).where(models.CollectionRun.region == wanted.c.region),
-        models.CollectionRun.tenant_id,
-        scope,
-    )
-    latest = (
-        candidates.order_by(
-            models.CollectionRun.started_at.desc(),
-            models.CollectionRun.collection_run_id.desc(),
+    def pick(source, name: str, *conditions):
+        """source 의 행마다 conditions 에 맞는 최신 run 1건(LATERAL ``LIMIT 1``)."""
+        latest = (
+            select(run)
+            .where(*conditions)
+            .order_by(run.started_at.desc(), run.collection_run_id.desc())
+            .limit(1)
+            .lateral(name)
         )
-        .limit(1)
-        .lateral("latest")
-    )
-    return (
-        select(aliased(models.CollectionRun, latest))
-        .select_from(wanted.join(latest, true()))
-        .order_by(wanted.c.region)
+        return select(aliased(run, latest)).select_from(source.join(latest, true()))
+
+    picks = []
+    if isinstance(regions, MonitoredRegions):
+        if regions.pairs:
+            pairs = values(
+                column("tenant_id", run.tenant_id.type), column("region", String), name="pairs"
+            ).data(list(dict.fromkeys(regions.pairs)))  # 중복 제거, 순서 유지
+            owned_pairs = _within_scope(
+                select(pairs.c.tenant_id, pairs.c.region), pairs.c.tenant_id, scope
+            ).subquery("owned_pairs")
+            picks.append(
+                pick(
+                    owned_pairs,
+                    "owned",
+                    run.region == owned_pairs.c.region,
+                    run.tenant_id == owned_pairs.c.tenant_id,
+                )
+            )
+        if regions.legacy and scope.is_platform:
+            legacy_regions = values(column("region", String), name="legacy_regions").data(
+                [(r,) for r in dict.fromkeys(regions.legacy)]
+            )
+            picks.append(
+                pick(
+                    legacy_regions,
+                    "legacy",
+                    run.region == legacy_regions.c.region,
+                    run.tenant_id.is_(None),
+                )
+            )
+        if not picks:
+            return select(run).where(false())
+    else:
+        wanted = values(column("region", String), name="wanted").data(
+            [(r,) for r in dict.fromkeys(regions)]  # 중복 제거, 순서 유지
+        )
+        owners = _within_scope(
+            select(models.Tenant.tenant_id), models.Tenant.tenant_id, scope
+        ).subquery("owners")
+        picks.append(
+            pick(
+                wanted.join(owners, true()),
+                "owned",
+                run.region == wanted.c.region,
+                run.tenant_id == owners.c.tenant_id,
+            )
+        )
+        if scope.is_platform:
+            picks.append(pick(wanted, "legacy", run.region == wanted.c.region, run.tenant_id.is_(None)))
+    picked = union_all(*picks).subquery("picked")
+    return select(aliased(run, picked)).order_by(
+        picked.c.region, picked.c.tenant_id.nulls_first()
     )
 
 
 def last_finished_collection_at(
     db: Session,
-    regions: Optional[Sequence[str]] = None,
+    regions: Optional[Sequence[str] | MonitoredRegions] = None,
     *,
     scope: TenantScope = ALL_TENANTS,
 ) -> Optional[datetime]:
     """마지막으로 종료된 수집 시각 — 목록 응답의 last_collected_at 원천. (Issue #68)
 
     ``regions`` 를 주면 그 리전들로 좁힌다 — collection_status·items 와 같은 스코프를
-    유지하기 위함이다(#261). ``None`` 이면 전 리전. 고객사 ``scope`` 는 그 테넌트의
-    run 만 센다.
+    유지하기 위함이다(#261). ``None`` 이면 전 리전. ``MonitoredRegions`` 는 (소유, 리전) 쌍으로 거른다
+    (``_within_regions``). ``scope`` 는 범위 안 소유의 run 만 센다(빈 범위는 None).
     """
-    stmt = select(func.max(models.CollectionRun.finished_at))
-    stmt = _within_scope(stmt, models.CollectionRun.tenant_id, scope)
+    run = models.CollectionRun
+    stmt = _within_scope(select(func.max(run.finished_at)), run.tenant_id, scope)
     if regions is not None:
-        stmt = stmt.where(models.CollectionRun.region.in_(regions))
+        stmt = _within_regions(stmt, run.tenant_id, run.region, regions)
     return db.execute(stmt).scalar_one()
 
 
@@ -204,27 +295,27 @@ def list_assets(
     db: Session,
     *,
     asset_type: Optional[AssetType] = None,
-    regions: Optional[Sequence[str]] = None,
+    regions: Optional[Sequence[str] | MonitoredRegions] = None,
     include_absent: bool = False,
     scope: TenantScope = ALL_TENANTS,
 ) -> list[models.Asset]:
     """자산 목록. ``regions`` 를 주면 그 리전들로 좁힌다 — collection_status·
     last_collected_at 과 같은 스코프를 유지하기 위함이다(#261, ix_assets_region 활용).
-    ``None`` 이면 전 리전.
+    ``None`` 이면 전 리전. ``MonitoredRegions`` 는 (소유, 리전) 쌍으로 거른다(``_within_regions``).
 
     **소멸 자산(``absent_since`` 가 찍힌 행)은 기본으로 제외한다**(#332). 실물이 없는
     자산을 돌려주면 화면에 유령이 섞이는 데서 끝나지 않고, 판정이 낡은 메트릭으로 다시
     돌아 조치 후보까지 올라간다(rule_engine 은 이 함수의 결과를 판정 대상으로 읽는다).
     이력·감사 목적으로 소멸분까지 봐야 하면 ``include_absent=True`` 로 부른다.
 
-    고객사 ``scope`` 는 그 테넌트의 자산만 돌려준다. 플랫폼 범위(기본)는 소속 없는 자산 포함 전체다."""
+    ``scope`` 는 범위 안 고객사의 자산만 돌려준다(빈 범위는 빈 목록). 전체 범위(기본)는 소속 없는 자산 포함 전체다."""
     stmt = _within_scope(
         select(models.Asset).order_by(models.Asset.arn), models.Asset.tenant_id, scope
     )
     if asset_type is not None:
         stmt = stmt.where(models.Asset.asset_type == asset_type)
     if regions is not None:
-        stmt = stmt.where(models.Asset.region.in_(regions))
+        stmt = _within_regions(stmt, models.Asset.tenant_id, models.Asset.region, regions)
     if not include_absent:
         stmt = stmt.where(models.Asset.absent_since.is_(None))
     return list(db.execute(stmt).scalars())
@@ -392,10 +483,10 @@ def list_all_relationships(
     """전 자산의 정방향 연결 일괄 조회 — 목록 응답 조립용. 자산별 반복 질의를
     피하고 호출부가 source_asset_id로 묶는다. (Issue #68)
 
-    고객사 ``scope`` 는 출발 자산이 그 테넌트 소속이고 ``target_arn`` 이 **같은 테넌트의
-    자산으로 해석되는** 연결만 돌려준다. ``target_arn`` 은 자산 FK 가 아닌 자유 문자열이라
-    출발 자산만으로는 대상의 소속을 알 수 없다 — 다른 테넌트·소속 없는 자산·해석 안 되는
-    ARN 은 모두 뺀다. 플랫폼 범위(기본)는 필터가 없다."""
+    배정 범위는 출발 자산이 범위 안 고객사 소속이고 ``target_arn`` 이 **범위 안 고객사의 자산으로
+    해석되는** 연결만 돌려준다. ``target_arn`` 은 자산 FK 가 아닌 자유 문자열이라 출발 자산만으로는
+    대상의 소속을 알 수 없다 — 범위 밖 고객사 · 소속 없는 자산 · 해석 안 되는 ARN 은 모두 뺀다.
+    전체 범위(기본)는 필터가 없다."""
     stmt = select(models.AssetRelationship).order_by(
         models.AssetRelationship.source_asset_id,
         models.AssetRelationship.relation_type,
@@ -403,17 +494,16 @@ def list_all_relationships(
     )
     if not scope.is_platform:
         source, target = aliased(models.Asset), aliased(models.Asset)
-        stmt = stmt.join(
-            source, source.asset_id == models.AssetRelationship.source_asset_id
-        ).where(
-            source.tenant_id == scope.tenant_id,
-            select(target.asset_id)
-            .where(
-                target.arn == models.AssetRelationship.target_arn,
-                target.tenant_id == scope.tenant_id,
-            )
-            .exists(),
-        )
+        target_in_scope = _within_scope(
+            select(target.asset_id).where(target.arn == models.AssetRelationship.target_arn),
+            target.tenant_id,
+            scope,
+        ).exists()
+        stmt = _within_scope(
+            stmt.join(source, source.asset_id == models.AssetRelationship.source_asset_id),
+            source.tenant_id,
+            scope,
+        ).where(target_in_scope)
     return list(db.execute(stmt).scalars())
 
 
@@ -564,43 +654,73 @@ class SgExposureBucket(NamedTuple):
 _BUCKET_ORIGIN = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
-def _latest_judged_runs(*, regions: Sequence[str], since: datetime, bucket_seconds: int):
-    """리전 × 시간 칸마다 **판정 행을 남긴 마지막 회차** 1건 — 축 2·4 의 공통 원천(2026-09-30).
+def _within_judged_assets(stmt, scope: TenantScope, regions: Sequence[str] | MonitoredRegions):
+    """판정된 자산(``models.Asset``)을 범위로, ``MonitoredRegions`` 면 (소유, 리전) 쌍으로도 거른다 — 축 2·4 공통.
+
+    쌍 관제에서 회차만 거르면 범위 안 회차가 판정한 쌍 밖 자산(관제하지 않는 리전의 고객사 자산)이 세져 /assets 와
+    어긋난다. 리전 목록은 종전대로 회차의 리전만 본다 — 신뢰하는 기존 호출부의 결과를 바꾸지 않는다."""
+    stmt = _within_scope(stmt, models.Asset.tenant_id, scope)
+    if isinstance(regions, MonitoredRegions):
+        stmt = _within_regions(stmt, models.Asset.tenant_id, models.Asset.region, regions)
+    return stmt
+
+
+def _latest_judged_runs(
+    *,
+    regions: Sequence[str] | MonitoredRegions,
+    since: datetime,
+    bucket_seconds: int,
+    scope: TenantScope,
+):
+    """(소유 × 리전) × 시간 칸마다 **판정 행을 남긴 마지막 회차** 1건 — 축 2·4 의 공통 원천(2026-09-30).
 
     칸 안의 회차를 모두 더하면 같은 리전을 스캔 주기보다 짧게 다시 수집했을 때(즉시 스캔 ·
     재기동 직후 스캔) 건수가 회차 수만큼 부풀어 곡선이 튄다. 축 5(``asset_inventory_history``)와
-    같은 규칙으로 리전마다 마지막 회차만 남기고, 리전끼리는 호출부가 더한다. 판정 행이 없는
+    같은 규칙으로 (소유 × 리전)마다 마지막 회차만 남기고, 그 사이는 호출부가 더한다. 판정 행이 없는
     회차(실패)를 고르면 같은 칸의 앞선 판정까지 사라지므로 판정이 있는 회차 중에서 고른다.
+
+    소유(tenant_id, 소속 없음 NULL 포함)를 순위의 칸에 넣는 것은 같은 리전 · 같은 칸의 고객사들이
+    한 회차로 접히지 않게 하기 위해서다 — 리전만으로 나누면 가장 늦게 시작한 소유 하나만 남는다.
+    범위는 순위를 매기기 **전에** 건다 — 뒤에서 거르면 범위 밖 회차가 1순위를 차지해 범위 안 회차가 사라진다.
+    '판정이 있는 회차'도 범위 안 자산의 판정으로 센다 — 범위 밖 · 소속 없는 자산만 판정한 더 새 회차가 1순위를
+    차지하면 호출부가 그 판정을 모두 걸러 같은 칸의 앞선 범위 안 판정까지 사라진다. 전체 범위는 바뀌지 않는다.
+    ``MonitoredRegions`` 면 회차와 판정된 자산을 (소유, 리전) 쌍으로도 순위 전에 거른다(``_within_regions`` ·
+    ``_within_judged_assets``) — 쌍 밖 회차 · 쌍 밖 자산만 판정한 회차가 1순위를 차지하지 못한다.
     """
     run = models.CollectionRun
     bucket = func.date_bin(timedelta(seconds=bucket_seconds), run.started_at, _BUCKET_ORIGIN)
-    has_judgement = (
+    judged = (
         select(models.RuleEvaluation.rule_evaluation_id)
+        # 판정된 자산의 소유를 범위로 거르는 조인 — asset_id 는 NOT NULL FK 라 전체 범위의 존재 여부는 그대로다
+        .join(models.Asset, models.Asset.asset_id == models.RuleEvaluation.asset_id)
         .where(models.RuleEvaluation.collection_run_id == run.collection_run_id)
-        .exists()
     )
-    return (
+    has_judgement = _within_judged_assets(judged, scope, regions).exists()
+    ranked = _within_regions(
         select(
             run.collection_run_id,
             bucket.label("observed_at"),
             func.row_number()
             .over(
-                partition_by=(run.region, bucket),
+                partition_by=(run.tenant_id, run.region, bucket),
                 order_by=(run.started_at.desc(), run.collection_run_id.desc()),
             )
             .label("rn"),
-        )
-        .where(run.region.in_(regions), run.started_at >= since, has_judgement)
-        .subquery()
+        ).where(run.started_at >= since, has_judgement),
+        run.tenant_id,
+        run.region,
+        regions,
     )
+    return _within_scope(ranked, run.tenant_id, scope).subquery()
 
 
 def sg_exposure_history(
     db: Session,
     *,
-    regions: Sequence[str],
+    regions: Sequence[str] | MonitoredRegions,
     since: datetime,
     bucket_seconds: int,
+    scope: TenantScope = ALL_TENANTS,
 ) -> list[SgExposureBucket]:
     """수집 회차별 '인터넷 개방 SG' 건수 이력 — 대시보드 시계열 축 2.
 
@@ -618,11 +738,17 @@ def sg_exposure_history(
 
     판정 행이 하나도 없는 회차는 점이 없다 — **0건과 '못 봤다'를 구분하기 위해서다.**
     SG 를 봤지만 개방이 없던 회차는 판정 행이 있으므로 0 인 점이 선다.
+
+    ``scope`` 는 회차의 소유(순위 전)와 판정된 자산의 소유를 함께 좁힌다 — 범위 안 회차라도 범위 밖 ·
+    소속 없는 자산의 판정은 세지 않는다. 전체 범위(기본)의 점은 소유마다 고른 회차의 합이다.
+    ``MonitoredRegions`` 는 회차와 판정된 자산을 (소유, 리전) 쌍으로도 좁힌다.
     """
     if not regions:
         return []
 
-    runs = _latest_judged_runs(regions=regions, since=since, bucket_seconds=bucket_seconds)
+    runs = _latest_judged_runs(
+        regions=regions, since=since, bucket_seconds=bucket_seconds, scope=scope
+    )
     open_count = (
         func.count(models.RuleEvaluation.rule_evaluation_id)
         .filter(models.RuleEvaluation.verdict == Verdict.THREAT.value)
@@ -645,6 +771,7 @@ def sg_exposure_history(
         .group_by(runs.c.observed_at)
         .order_by(runs.c.observed_at)
     )
+    stmt = _within_judged_assets(stmt, scope, regions)
     return [SgExposureBucket(row.observed_at, int(row.open_count)) for row in db.execute(stmt)]
 
 
@@ -660,9 +787,10 @@ class AssetStatusBucket(NamedTuple):
 def asset_status_history(
     db: Session,
     *,
-    regions: Sequence[str],
+    regions: Sequence[str] | MonitoredRegions,
     since: datetime,
     bucket_seconds: int,
+    scope: TenantScope = ALL_TENANTS,
 ) -> list[AssetStatusBucket]:
     """수집 회차별 자산 현황(판정별 건수) 이력 — 시계열 축 4.
 
@@ -672,12 +800,14 @@ def asset_status_history(
 
     ``undecided`` 는 verdict 가 없는 판정 행(판정 대기·실패)이다. 판정 행 자체가 없는 자산
     (NACL 등 판정 비대상)은 어느 칸에도 세지 않는다 — 이력이 없는 것을 0으로 지어내지 않는다.
-    판정 행이 하나도 없는 칸은 점이 없다.
+    판정 행이 하나도 없는 칸은 점이 없다. ``scope`` 는 ``sg_exposure_history`` 와 같다(회차 · 판정된 자산).
     """
     if not regions:
         return []
 
-    runs = _latest_judged_runs(regions=regions, since=since, bucket_seconds=bucket_seconds)
+    runs = _latest_judged_runs(
+        regions=regions, since=since, bucket_seconds=bucket_seconds, scope=scope
+    )
 
     def counted(verdict: Verdict):
         return func.count(models.RuleEvaluation.rule_evaluation_id).filter(
@@ -700,10 +830,13 @@ def asset_status_history(
             models.RuleEvaluation,
             models.RuleEvaluation.collection_run_id == runs.c.collection_run_id,
         )
+        # 판정된 자산의 소유를 범위로 거르는 조인 — asset_id 는 NOT NULL FK 라 행 수는 바뀌지 않는다
+        .join(models.Asset, models.Asset.asset_id == models.RuleEvaluation.asset_id)
         .where(runs.c.rn == 1)
         .group_by(runs.c.observed_at)
         .order_by(runs.c.observed_at)
     )
+    stmt = _within_judged_assets(stmt, scope, regions)
     return [
         AssetStatusBucket(
             row.observed_at,
@@ -726,10 +859,11 @@ class ThreatEventBucket(NamedTuple):
 def threat_event_history(
     db: Session,
     *,
-    regions: Sequence[str],
+    regions: Sequence[str] | MonitoredRegions,
     since: datetime,
     until: datetime,
     bucket_seconds: int,
+    scope: TenantScope = ALL_TENANTS,
 ) -> list[ThreatEventBucket]:
     """시간 칸 × 유형별 위협 이벤트 **발생** 건수 — 시계열 축 6.
 
@@ -746,6 +880,10 @@ def threat_event_history(
     넣은 미래 시각이 오면, 거르지 않을 때 x축이 지금 이후로 늘어난다. 시작(``since``)과 같은 ``now``
     에서 나온 값을 받는다.
     이벤트가 없는 (칸, 유형) 행은 없다 — 이 축에서는 그것이 0건이다(축 docstring).
+
+    ``scope`` 는 이벤트의 소유(tenant_id)로 집계 전에 거른다 — 배정 범위는 소속 없는 이벤트를 세지 않고,
+    빈 범위는 점이 없다. 대상 ARN 의 계정으로 소유를 추론하지 않는다. ``MonitoredRegions`` 는 (이벤트 소유, ARN 리전)
+    쌍으로 집계 전에 거른다(``_within_regions``) — 소속 없는 이벤트는 legacy 리전에서만 센다.
     """
     if not regions:
         return []
@@ -756,14 +894,12 @@ def threat_event_history(
     ).label("observed_at")
     stmt = (
         select(bucket, event.event_type, func.count(event.threat_event_id).label("count"))
-        .where(
-            func.split_part(event.target_arn, ":", 4).in_(regions),
-            event.occurred_at >= since,
-            event.occurred_at <= until,
-        )
+        .where(event.occurred_at >= since, event.occurred_at <= until)
         .group_by(bucket, event.event_type)
         .order_by(bucket, event.event_type)
     )
+    stmt = _within_regions(stmt, event.tenant_id, func.split_part(event.target_arn, ":", 4), regions)
+    stmt = _within_scope(stmt, event.tenant_id, scope)
     return [
         ThreatEventBucket(
             row.observed_at,
@@ -805,15 +941,18 @@ class AssetInventoryBucket(NamedTuple):
 def asset_inventory_history(
     db: Session,
     *,
-    regions: Sequence[str],
+    regions: Sequence[str] | MonitoredRegions,
     since: datetime,
     bucket_seconds: int,
+    scope: TenantScope = ALL_TENANTS,
 ) -> list[AssetInventoryBucket]:
     """시간 칸 × 유형별 자산 수 — 시계열 축 5.
 
-    시간 칸 규칙은 ``sg_exposure_history`` 와 같다 — 리전마다 갈리는 회차를 ``bucket_seconds``
-    칸으로 묶어 합산한다. 한 칸에 **같은 리전의 회차가 둘** 들면(스캔 주기보다 짧게 재수집)
-    합산하면 자산이 두 배로 보이므로, 리전마다 그 칸의 **마지막 회차** 하나만 센다.
+    시간 칸 규칙은 ``sg_exposure_history`` 와 같다 — (소유 × 리전)마다 갈리는 회차를 ``bucket_seconds``
+    칸으로 묶어 합산한다. 한 칸에 **같은 소유 · 같은 리전의 회차가 둘** 들면(스캔 주기보다 짧게 재수집)
+    합산하면 자산이 두 배로 보이므로, (소유 × 리전)마다 그 칸의 **마지막 회차** 하나만 센다. 소유를
+    순위의 칸에 넣지 않으면 같은 리전을 관제하는 고객사들이 한 회차로 접힌다. ``scope`` 는 회차의 소유로
+    순위 전에 거른다(빈 범위는 점이 없다). ``MonitoredRegions`` 는 회차를 (소유, 리전) 쌍으로도 순위 전에 거른다.
 
     "마지막 회차"는 **스냅샷을 남긴 회차 중에서** 고른다. 실패(``FAILED``)·모르는 실패 라벨로
     스냅샷을 건너뛴 회차가 칸의 마지막에 오면, 그 회차를 고른 뒤 조인해서는 같은 칸의 앞선
@@ -827,27 +966,32 @@ def asset_inventory_history(
     run = models.CollectionRun
     counts = models.AssetInventoryCount
     bucket = func.date_bin(timedelta(seconds=bucket_seconds), run.started_at, _BUCKET_ORIGIN)
-    # 리전 × 칸마다 스냅샷을 남긴 회차 중 가장 늦게 시작한 1건. 순위를 매긴 뒤 조인하므로
+    # (소유 × 리전) × 칸마다 스냅샷을 남긴 회차 중 가장 늦게 시작한 1건. 순위를 매긴 뒤 조인하므로
     # 회차당 행이 유형 수만큼 불어나지 않는다.
     has_snapshot = (
         select(counts.collection_run_id)
         .where(counts.collection_run_id == run.collection_run_id)
         .exists()
     )
-    ranked = (
-        select(
-            run.collection_run_id,
-            bucket.label("observed_at"),
-            func.row_number()
-            .over(
-                partition_by=(run.region, bucket),
-                order_by=(run.started_at.desc(), run.collection_run_id.desc()),
-            )
-            .label("rn"),
-        )
-        .where(run.region.in_(regions), run.started_at >= since, has_snapshot)
-        .subquery()
-    )
+    ranked = _within_scope(
+        _within_regions(
+            select(
+                run.collection_run_id,
+                bucket.label("observed_at"),
+                func.row_number()
+                .over(
+                    partition_by=(run.tenant_id, run.region, bucket),
+                    order_by=(run.started_at.desc(), run.collection_run_id.desc()),
+                )
+                .label("rn"),
+            ).where(run.started_at >= since, has_snapshot),
+            run.tenant_id,
+            run.region,
+            regions,
+        ),
+        run.tenant_id,
+        scope,
+    ).subquery()
     stmt = (
         select(ranked.c.observed_at, counts.asset_type, func.sum(counts.count).label("count"))
         .select_from(ranked)
@@ -880,7 +1024,7 @@ def latest_rule_evaluation_by_asset(
 def latest_rule_evaluation_by_asset_stmt(scope: TenantScope = ALL_TENANTS):
     """자산별 최신 판정 1건 문장. 실행 계획 회귀(db/tests)가 이 문장을 그대로 본다.
 
-    고객사 ``scope`` 는 축인 자산을 그 테넌트로 좁혀 남의 자산 판정을 읽지 않는다."""
+    ``scope`` 는 축인 자산을 범위 안 고객사로 좁혀 범위 밖 · 소속 없는 자산의 판정을 읽지 않는다."""
     latest = (
         select(models.RuleEvaluation)
         .where(models.RuleEvaluation.asset_id == models.Asset.asset_id)

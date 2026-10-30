@@ -10,10 +10,12 @@
 import { ActionProposalCard } from '@/components/dashboard/action-proposal-card';
 import { DashboardView } from '@/components/dashboard/dashboard-view';
 import { AutoRefresh } from '@/components/auto-refresh';
+import { BusinessUnavailable } from '@/components/business-unavailable';
 import { ErrorState } from '@/components/error-state';
 import { orError, orNull, serverApi } from '@/lib/api/server';
 import { actionQueue, proposalRows } from '@/lib/dashboard';
-import { isPlatform } from '@/lib/roles';
+import { businessOpen } from '@/lib/home-path';
+import { isUnassignedManager } from '@/lib/roles';
 import type { IncidentResponse } from '@/types/api';
 import { unstable_rethrow } from 'next/navigation';
 
@@ -22,7 +24,9 @@ export default async function DashboardPage() {
   const renderedAt = new Date().toISOString();
   // 세션 쿠키만 실어 부르고, 401이면 로그인으로 redirect한다(lib/api/server.ts).
   const { getMe, getAssets, getIncident, getIncidents, getMetricsTimeseries } = await serverApi();
-  // 고객 계정에는 업무 데이터를 읽지 않고 현재 이용 제한을 알린다. 확인 실패도 업무 조회로 넘어가지 않는다.
+  // 고객 범위가 없는 계정(고객사 계정 · 담당 고객 없는 고객 담당자)에는 업무 데이터를 읽지 않고 이용 제한을 알린다
+  // (lib/home-path.ts `businessOpen`). 담당 고객이 없는 담당자에게는 배정 없음을 따로 말한다. 고객 담당자가 받는
+  // 데이터의 담당 범위는 서버가 정한다. 확인 실패도 업무 조회로 넘어가지 않는다.
   let user;
   try {
     user = await getMe();
@@ -30,16 +34,7 @@ export default async function DashboardPage() {
     unstable_rethrow(error);
     return <ErrorState error={error} />;
   }
-  if (!isPlatform(user)) {
-    return (
-      <section className="flex flex-col gap-4" aria-labelledby="business-unavailable">
-        <h1 id="business-unavailable" className="text-lg font-semibold">업무 화면 이용 제한</h1>
-        <p role="status" className="rounded-lg border p-4 text-sm">
-          고객사별 데이터 분리가 완료되기 전까지 업무 화면을 이용할 수 없습니다.
-        </p>
-      </section>
-    );
-  }
+  if (!businessOpen(user)) return <BusinessUnavailable unassigned={isUnassignedManager(user)} />;
 
   // 인시던트 실패는 대시보드를 죽이지 않는다 — 자산 화면과 같은 규칙(null = 조회 실패)이다.
   // 오류를 버리지 않고 들고 간다: AI 카드가 그것을 **대기 0건이 아니라 오류로** 그려야 한다(PR #351 리뷰 2).

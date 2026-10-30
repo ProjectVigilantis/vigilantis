@@ -408,7 +408,7 @@ def test_concurrent_same_key_requests_reserve_exactly_once(
     def reserve(session, request):
         session.execute(text("SET LOCAL lock_timeout = '30s'"))
         try:
-            return workflows.reserve_execution(session, request, actor=committed_actor)
+            return workflows.reserve_execution(session, request, audit_actor=committed_actor)
         except ApiError as exc:
             return exc.code
 
