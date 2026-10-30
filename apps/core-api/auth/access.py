@@ -9,13 +9,11 @@
 #     require_admin 은 사용자 관리(#492 PR 3)용 ADMIN 전용 검사다.
 #   - 계정 종류(#492): 플랫폼 권한은 account_type == PLATFORM 에서만 나온다(role · tenant_id NULL 로
 #     추론하지 않는다). require_platform_account 가 테넌트 관리 라우터의 플랫폼 전용 관문이다.
-#   - 정지 테넌트(SUSPENDED)의 TENANT 계정에 지금 열린 것은 인증 경로(/api/v1/auth — 로그인 · 로그아웃 · 활동 ·
-#     /me · 비밀번호 재설정)와 자기 테넌트 범위의 사용자 조회(/api/v1/users 의 GET)뿐이다. 조치 실행 · 종료와
-#     사용자 관리 변경은 409 TENANT_SUSPENDED. 업무 기록 조회(자산 · 인시던트 · 메트릭)는 아래 임시 관문 때문에
-#     아직 열리지 않는다(403) — 테넌트 격리 뒤의 몫이다.
-#   - 임시 출시 관문(#492): 업무 라우터(자산 · 인시던트 · 메트릭 · 조치)는 아직 테넌트 범위로 걸러지지
-#     않는다(전 고객 데이터). 그래서 require_business_access 가 PLATFORM 계정만 받는다. 고객사 계정의
-#     /api/v1/auth · /api/v1/users 는 그대로 쓴다. 업무 라우트의 테넌트 격리(T-5)가 들어오면 이 관문을 걷는다.
+#   - 인시던트 · 조치 · 자산은 요청자의 테넌트 범위로 제한한다. 정지된 고객사도 자기 기록은 조회한다.
+#     실행 · 종료의 정지 검사는 Workflow가 대상 인시던트 기준으로 범위 · 멱등 재생 뒤에 수행한다.
+#     사용자 관리 변경의 정지 검사는 auth.admin_service가 소유한다.
+#   - 메트릭과 WebSocket은 플랫폼 전용이다. require_business_access는 메트릭에 남은 임시 관문이고,
+#     WebSocket은 연결 수립 때 계정 종류를 직접 검사한다.
 #   - 통과한 신원(CurrentUser)은 request.state.current_user 에 둔다. 접근 로그(main)가 읽고,
 #     조치 실행 · 종료 라우터는 역할 검사 결과로 같은 신원을 받는다(감사 기록은 T-2).
 # ==============================================================================
@@ -32,14 +30,13 @@ from fastapi import Depends, Request
 from schemas.api.auth import AccountType, UserRole
 from schemas.api.errors import ErrorCode
 from sqlalchemy.orm import Session, sessionmaker
+from tenancy import ALL_TENANTS, TenantScope
 
 from . import service
 from .http import SESSION_COOKIE, get_clock
 
 #: 조치 실행 · 인시던트 종료를 허용하는 역할. VIEWER 는 조회만 한다.
 ACTION_ROLES = frozenset({UserRole.ADMIN, UserRole.OPERATOR})
-#: 상태를 바꾸지 않는 HTTP 메서드 — 임시 관문이 조회와 조치를 가르는 기준.
-_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 _DB = Depends(get_db)
 _SETTINGS = Depends(get_auth_settings)
@@ -79,23 +76,28 @@ def require_platform_account(user: service.CurrentUser = _USER) -> service.Curre
 
 
 def require_action_role(user: service.CurrentUser = _USER) -> service.CurrentUser:
-    """조치 실행 · 인시던트 종료 권한 — 역할(403) → 소속 테넌트 정지(409) 순. require_user 다음에 돈다."""
+    """대상을 읽기 전에 역할을 검사한다. 대상 정지는 Workflow의 범위 · 멱등 검사 뒤에 본다."""
     if user.role not in ACTION_ROLES:
         raise ApiError(ErrorCode.AUTH_FORBIDDEN)
-    if user.tenant_suspended:
-        raise ApiError(ErrorCode.TENANT_SUSPENDED)
     return user
 
 
-def require_business_access(request: Request, user: service.CurrentUser = _USER) -> service.CurrentUser:
-    """임시 출시 관문 — 업무 라우터 전체(모든 메서드)에 포함 시점에 건다.
-
-    상태 변경 요청은 조치 권한(역할 → 정지)을 먼저 판정해 정지 테넌트의 409 를 관문의 403 보다 앞세운다.
-    업무 라우터의 상태 변경은 조치 실행 · 인시던트 종료뿐이고 둘 다 require_action_role 을 요구한다.
-    """
-    if request.method not in _SAFE_METHODS:
-        require_action_role(user)
+def require_business_access(user: service.CurrentUser = _USER) -> service.CurrentUser:
+    """메트릭 조회에 남은 플랫폼 전용 관문."""
     return require_platform_account(user)
+
+
+def tenant_scope_of(user: service.CurrentUser) -> TenantScope:
+    """계정 종류로 플랫폼 권한을 판정하고 고객사에는 소속 테넌트 범위만 부여한다."""
+    if is_platform_account(user):
+        return ALL_TENANTS
+    if user.tenant_id is None:
+        raise ApiError(ErrorCode.AUTH_FORBIDDEN)
+    return TenantScope(tenant_id=user.tenant_id)
+
+
+def require_tenant_scope(user: service.CurrentUser = _USER) -> TenantScope:
+    return tenant_scope_of(user)
 
 
 def require_admin(user: service.CurrentUser = _USER) -> service.CurrentUser:

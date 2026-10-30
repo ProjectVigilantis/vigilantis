@@ -132,6 +132,11 @@ def read_tenant_for_share(db: Session, tenant_id: str) -> Optional[models.Tenant
     ).scalar_one_or_none()
 
 
+def tenant_id_for_account(db: Session, aws_account_id: str) -> Optional[str]:
+    """그 AWS 계정을 등록한 테넌트 — 상태와 무관하다. 계정은 테넌트마다 하나뿐이다(DB 유일성)."""
+    return db.scalar(select(_T.tenant_id).where(_T.aws_account_id == aws_account_id))
+
+
 def list_tenants(db: Session) -> list[TenantWithCounts]:
     """생성 순(created_at 오름차순 · 같으면 tenant_id) — 계약 TenantsResponse 의 정렬."""
     rows = db.execute(_with_counts().order_by(_T.created_at, _T.tenant_id))

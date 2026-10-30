@@ -26,6 +26,7 @@ from schemas.api.assets import (
 from schemas.collections import CollectionRunStatus
 
 from asset_mapping import to_asset_item
+from auth.access import require_tenant_scope
 from config import get_aws_settings
 from db import models
 from db.repositories import assets as assets_repo
@@ -35,6 +36,7 @@ from services.collector import (
     UNOBSERVED_TYPES_BY_FAILURE,
     VPC_SCOPE_FAILURE_LABEL,
 )
+from tenancy import TenantScope
 
 _log = logging.getLogger(__name__)
 
@@ -143,29 +145,35 @@ def _uncollected(runs: list[models.CollectionRun]) -> list[UncollectedAssetType]
 
 
 @router.get("/assets", response_model=AssetsResponse)
-def get_assets(db: Session = Depends(get_db)) -> AssetsResponse:
+def get_assets(
+    db: Session = Depends(get_db),
+    scope: TenantScope = Depends(require_tenant_scope),
+) -> AssetsResponse:
+    # 고객사 계정은 자기 테넌트의 자산·수집 회차·연결·판정만 본다. 수집 상태·마지막 수집
+    # 시각·uncollected 도 같은 범위의 run 에서만 산출해 남의 회차가 내 상태를 바꾸지 않는다.
+    # 플랫폼 계정은 소속 없는 기록 포함 전체다.
     # 관제 대상 = 설정된 리전(AWS_REGIONS). 세 필드를 모두 이 범위로 좁혀 응답 안에서
     # 리전 범위가 갈리지 않게 한다 — 수집 대상서 빠진 리전의 옛 run 이 화면을 붙잡던
     # 문제를 막는다. (Issue #261, 안성일 확정) 리전별 최신 run 을 최악 상태로 접는
     # 것은 #231 그대로 — 리전 격리(C4) 이후 실패가 실행 순서에 가려지지 않게 한다.
     regions = _configured_regions()
-    runs = assets_repo.latest_collection_run_per_region(db, regions=regions)
+    runs = assets_repo.latest_collection_run_per_region(db, regions=regions, scope=scope)
     if not runs:
         # 설정 리전 전체에 수집 이력이 없음 — 계약상 목록·last_collected_at도 비어야 한다
         return AssetsResponse(collection_status=CollectionStatus.NOT_COLLECTED)
 
     relationships: dict[str, list[models.AssetRelationship]] = defaultdict(list)
-    for rel in assets_repo.list_all_relationships(db):
+    for rel in assets_repo.list_all_relationships(db, scope=scope):
         relationships[rel.source_asset_id].append(rel)
-    evaluations = assets_repo.latest_rule_evaluation_by_asset(db)
+    evaluations = assets_repo.latest_rule_evaluation_by_asset(db, scope=scope)
 
     items = [
         to_asset_item(asset, relationships.get(asset.asset_id, []), evaluations.get(asset.asset_id))
-        for asset in assets_repo.list_assets(db, regions=regions)
+        for asset in assets_repo.list_assets(db, regions=regions, scope=scope)
     ]
     return AssetsResponse(
         collection_status=_collection_status(runs, regions),
-        last_collected_at=assets_repo.last_finished_collection_at(db, regions=regions),
+        last_collected_at=assets_repo.last_finished_collection_at(db, regions=regions, scope=scope),
         items=items,
         uncollected=_uncollected(runs),
     )

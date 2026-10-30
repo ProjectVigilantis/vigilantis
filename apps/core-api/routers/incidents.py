@@ -17,8 +17,11 @@
 #     commit 이후 INCIDENT_UPDATED를 발행하는 데까지만 한다 — 발행을 Workflow에
 #     두면 그 계층이 앱 상태(app.state.realtime)를 알아야 한다.
 #   - 접근 보호(#492 PR 2): Origin · 세션은 포함 시점(main)에 건다. 종료만 역할(ADMIN ·
-#     OPERATOR)을 여기서 검사하며, 거절되면 resolve_incident 에 닿지 않는다. 조회 2종의
-#     시그니처는 그대로 둔다 — 테스트 서버(scripts/stepper)가 db= 로 직접 부른다.
+#     OPERATOR)을 여기서 검사하며, 거절되면 대상을 읽지 않고 resolve_incident 에 닿지 않는다.
+#     조회 2종은 테스트 서버(scripts/stepper)가 db= · scope= 로 직접 부른다.
+#   - 테넌트 범위: 세 경로 모두 요청자의 범위(auth.access.tenant_scope_of)로 거른다 — 목록은 범위 밖을
+#     빼고, 상세 · 종료는 범위 밖이면 404 INCIDENT_NOT_FOUND 다. 종료의 정지 판정은 resolve_incident 가
+#     인시던트를 잠근 뒤 한다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -52,7 +55,7 @@ from schemas.executions import EXECUTION_RECOVERABLE_STATUSES
 from schemas.runbooks import ROLLBACK_RUNBOOK_BY_MAIN_ID
 
 import workflows
-from auth.access import require_action_role
+from auth.access import require_action_role, require_tenant_scope, tenant_scope_of
 from auth.service import CurrentUser
 from db import mappers, models
 from db.repositories import audit as audit_repo
@@ -63,6 +66,7 @@ from exceptions import ApiError
 from identifiers import canonical_id
 from incident_analysis import load_analysis_results
 from realtime import incident_event
+from tenancy import TenantScope
 
 router = APIRouter(prefix="/api/v1", tags=["incidents"])
 logger = logging.getLogger("vigilantis.incidents")
@@ -176,8 +180,9 @@ def list_incidents(
     status: Optional[IncidentStatus] = None,
     category: Optional[IncidentCategory] = None,
     db: Session = Depends(get_db),
+    scope: TenantScope = Depends(require_tenant_scope),
 ) -> IncidentsResponse:
-    rows = incidents_repo.list_incidents(db, status=status, category=category)
+    rows = incidents_repo.list_incidents(db, status=status, category=category, scope=scope)
     contexts = _load_threat_contexts(db, rows)
     analyses = load_analysis_results(db, rows)
     return IncidentsResponse(items=[
@@ -185,14 +190,15 @@ def list_incidents(
     ])
 
 
-def _load_incident(db: Session, incident_id: str) -> models.Incident:
+def _load_incident(db: Session, incident_id: str, scope: TenantScope) -> models.Incident:
     """형식이 어긋난 식별자도 404다 — 계약이 UUID를 요구하지 않으므로 계약 위반이
-    아니라 없는 인시던트로 본다. 조회 전 변환은 DB 캐스트 오류(500)를 막는다."""
+    아니라 없는 인시던트로 본다. 조회 전 변환은 DB 캐스트 오류(500)를 막는다.
+    범위 밖도 같은 404다 — 403 은 그 ID 가 있다는 것을 알려 준다(schemas.api.tenants 머리말)."""
     stored_id = canonical_id(incident_id)
     if stored_id is None:
         raise ApiError(ErrorCode.INCIDENT_NOT_FOUND)
     row = incidents_repo.get_incident(db, stored_id)
-    if row is None:
+    if row is None or not scope.covers(row.tenant_id):
         raise ApiError(ErrorCode.INCIDENT_NOT_FOUND)
     return row
 
@@ -266,8 +272,12 @@ def _auto_isolation_block(db: Session, row: models.Incident) -> Optional[AutoIso
 
 
 @router.get("/incidents/{incident_id}", response_model=IncidentResponse)
-def get_incident(incident_id: str, db: Session = Depends(get_db)) -> IncidentResponse:
-    return _to_detail(db, _load_incident(db, incident_id))
+def get_incident(
+    incident_id: str,
+    db: Session = Depends(get_db),
+    scope: TenantScope = Depends(require_tenant_scope),
+) -> IncidentResponse:
+    return _to_detail(db, _load_incident(db, incident_id, scope))
 
 
 @router.post("/incidents/{incident_id}/resolve", response_model=IncidentResponse)
@@ -279,11 +289,13 @@ def resolve_incident(
     user: CurrentUser = Depends(require_action_role),  # 요청자 신원 — 감사 기록(T-2 · #544)의 행위자
 ) -> IncidentResponse:
     """이미 종료된 건의 재요청도 200이며, 처음 저장된 판단을 그대로 돌려준다."""
-    row = _load_incident(db, incident_id)
+    scope = tenant_scope_of(user)
+    row = _load_incident(db, incident_id, scope)
     changed = workflows.resolve_incident(
         db, row.incident_id, payload.resolution,
         actor=audit_repo.person(user.user_id, user.account_type),
         resolution_note=payload.resolution_note,
+        scope=scope,
     )
     response = _to_detail(db, row)
     if changed:

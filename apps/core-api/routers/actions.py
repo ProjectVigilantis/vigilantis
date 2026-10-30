@@ -12,6 +12,8 @@
 #     실행을 집어 services/aws/executor.py로 넘긴다(Issue #232).
 #   - 접근 보호(#492 PR 2): Origin · 세션은 포함 시점(main)에, 역할(ADMIN · OPERATOR)은
 #     여기서 검사한다. 거절되면 reserve_execution 에 닿지 않는다 — 실행 행 · 후보 전이가 없다.
+#   - 테넌트 범위: 요청자의 범위(auth.access.tenant_scope_of)를 reserve_execution 에 넘긴다. 범위 밖
+#     404 · 대상 테넌트 정지 409 와 그 판정 순서는 Workflow 가 정한다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ from sqlalchemy.orm import Session
 from schemas.api.actions import ExecuteActionRequest, ExecuteActionResponse
 
 import workflows
-from auth.access import require_action_role
+from auth.access import require_action_role, tenant_scope_of
 from auth.service import CurrentUser
 from db.repositories import audit as audit_repo
 from db.session import get_db
@@ -43,7 +45,9 @@ def execute_action(
 ) -> ExecuteActionResponse:
     """신규 예약은 202, 같은 Key 재요청은 200 — 응답 본문은 두 경우가 같다."""
     reservation = workflows.reserve_execution(
-        db, payload, actor=audit_repo.person(user.user_id, user.account_type)
+        db, payload,
+        actor=audit_repo.person(user.user_id, user.account_type),
+        scope=tenant_scope_of(user),
     )
     if not reservation.created:
         response.status_code = status.HTTP_200_OK

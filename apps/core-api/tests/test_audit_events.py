@@ -18,7 +18,7 @@ from db.repositories import audit as audit_repo
 from db.repositories import executions as executions_repo
 from exceptions import ApiError
 from schemas.api.audit import AuditActorKind, AuditEventAction
-from schemas.api.auth import AccountType
+from schemas.api.auth import AccountType, UserRole
 from schemas.api.errors import ErrorCode
 from schemas.api.incidents import IncidentCategory, IncidentStatus, ResolutionJudgement
 from schemas.runbooks import TriggerSource
@@ -238,6 +238,37 @@ def test_http_requests_record_the_session_user(
     for event in (started, closed):
         assert (event.actor_kind, event.actor_user_id) == (
             AuditActorKind.PLATFORM_USER, platform_session.user_id,
+        )
+    assert started.execution_id == executed.json()["execution_id"]
+
+
+def test_http_requests_of_a_customer_account_record_a_tenant_user_with_its_tenant(
+    client_pg, db, login_as, make_tenant, make_incident, make_candidate
+):
+    # 업무 관문이 걷힌 뒤(#533 C) 고객사 OPERATOR 의 승인 · 종료가 실제로 TENANT_USER 기록을 남긴다
+    tenant_id = make_tenant()
+    seed = login_as(UserRole.OPERATOR, tenant_id=tenant_id)
+    incident = make_incident(db)
+    make_candidate(db, incident)
+    finops = _resolvable(db, make_incident)
+    incident.tenant_id = finops.tenant_id = tenant_id
+    db.commit()
+
+    executed = client_pg.post(
+        "/api/v1/actions/execute",
+        json=_approve_request(incident.incident_id).model_dump(mode="json"),
+    )
+    resolved = client_pg.post(
+        f"/api/v1/incidents/{finops.incident_id}/resolve",
+        json={"resolution": "NO_FURTHER_ACTION"},
+    )
+
+    assert (executed.status_code, resolved.status_code) == (202, 200), (executed.json(), resolved.json())
+    [started] = _events(db, incident.incident_id)
+    [closed] = _events(db, finops.incident_id)
+    for event in (started, closed):
+        assert (event.actor_kind, event.actor_user_id, event.tenant_id) == (
+            AuditActorKind.TENANT_USER, seed.user_id, tenant_id,
         )
     assert started.execution_id == executed.json()["execution_id"]
 
