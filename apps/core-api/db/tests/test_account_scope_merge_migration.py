@@ -2,6 +2,7 @@
 
 지키는 것: 부모 2개 · 단일 head · 새 DB base→head · 옛 feature 단독 / 옛 dev 단독 DB 가
 각각 head 로 올라가 두 칸을 모두 갖고 시드 데이터를 보존 · 병합 리비전을 지난 단일 head · ORM 일치.
+병합 뒤에 리비전이 이어 붙어도(담당 배정 · audit_events 병합 포함) 같은 사실을 본다.
 테스트마다 고유 이름의 일회용 DB 를 만들고 지운다(공용 pg_engine DB 의 head 를 건드리지 않는다).
 """
 
@@ -93,7 +94,7 @@ def _seed_tenant_and_user(engine, *, with_account_type):
 
 
 def _head(config) -> str:
-    """현재 단일 head — 병합 리비전 뒤에 리비전이 붙어도(b492e7d1a605 등) 병합을 지나 올라간다."""
+    """현재 단일 head — 병합 리비전 뒤에 리비전이 붙어도(d492a544e001 등) 병합을 지나 올라간다."""
     return ScriptDirectory.from_config(config).get_current_head()
 
 

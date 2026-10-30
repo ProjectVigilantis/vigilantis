@@ -19,6 +19,7 @@ from enum import Enum
 
 from schemas.api.actions import ExecutionStatus
 from schemas.api.assets import AssetType, RelationType
+from schemas.api.audit import AuditActorKind, AuditEventAction
 from schemas.api.auth import AccountType, PlatformRole, UserRole
 from schemas.api.incidents import (
     IncidentCategory,
@@ -1384,4 +1385,70 @@ class UserAdminEvent(Base):
     after_state: Mapped[dict] = mapped_column(JSONB)
     occurred_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow
+    )
+
+
+class AuditEvent(Base):
+    """조치 승인 · 종료 판단 감사 기록 — append-only(DB 트리거가 UPDATE·DELETE를 거절한다). (T-2 · #544)
+
+    공개 계약은 schemas.api.audit 다. 실행 행 · 종료 판단과 **같은 트랜잭션**에서 한 행씩 남고
+    (db/repositories/audit.py), 재요청(200 재생) · 거절은 행을 만들지 않는다.
+    행위자 종류는 쓰는 시점의 계정 종류를 옮겨 둔다 — 뒤에 계정 종류가 바뀌어도 그때 누가 했는지는
+    그대로다. 이메일을 보일지는 조회가 보는 사람으로 정한다(여기에 이메일을 복사하지 않는다).
+    실행의 Runbook · 대상 ARN 은 실행 행에서 읽는다(바뀌지 않는 칸이라 복사하지 않는다).
+    """
+
+    __tablename__ = "audit_events"
+
+    event_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
+    action: Mapped[AuditEventAction] = mapped_column(
+        _enum(AuditEventAction, "audit_event_action")
+    )
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+    actor_kind: Mapped[AuditActorKind] = mapped_column(
+        _enum(AuditActorKind, "audit_actor_kind")
+    )
+    # 사람만 값이 있다(SYSTEM 은 NULL). 기록이 남은 사용자는 지울 수 없다
+    actor_user_id: Mapped[str | None] = mapped_column(
+        _ID, ForeignKey("app_users.user_id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    incident_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("incidents.incident_id"), index=True
+    )
+    # 인시던트의 테넌트를 옮겨 싣는다 — 조회 범위가 이 칸을 본다
+    tenant_id: Mapped[str | None] = _tenant_fk()
+    # ACTION_EXECUTION_STARTED 만 값이 있다. 실행 하나에 시작 기록은 하나다
+    execution_id: Mapped[str | None] = mapped_column(
+        _ID, ForeignKey("action_executions.execution_id"), nullable=True, unique=True
+    )
+    trigger_source: Mapped[TriggerSource | None] = mapped_column(
+        _enum(TriggerSource, "trigger_source"), nullable=True
+    )
+    # INCIDENT_RESOLVED 만 값이 있다
+    resolution: Mapped[ResolutionJudgement | None] = mapped_column(
+        _enum(ResolutionJudgement, "resolution_judgement"), nullable=True
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "(action = 'ACTION_EXECUTION_STARTED' AND execution_id IS NOT NULL"
+            " AND trigger_source IS NOT NULL AND resolution IS NULL)"
+            " OR (action = 'INCIDENT_RESOLVED' AND resolution IS NOT NULL"
+            " AND execution_id IS NULL AND trigger_source IS NULL)",
+            name="action_shape",
+        ),
+        CheckConstraint(
+            "(actor_kind = 'SYSTEM') = (actor_user_id IS NULL)", name="actor_shape"
+        ),
+        # 사람 승인 실행만 사람이 시작하고, 자동 발동은 SYSTEM 이 시작한다. 종료 판단은 사람만 한다
+        CheckConstraint(
+            "CASE action WHEN 'ACTION_EXECUTION_STARTED'"
+            " THEN (trigger_source = 'USER_APPROVAL') = (actor_kind <> 'SYSTEM')"
+            " ELSE actor_kind <> 'SYSTEM' END",
+            name="actor_matches_trigger",
+        ),
+        # 목록은 최신순 · 같은 시각은 event_id 순이다(api/audit.py)
+        Index("ix_audit_events_occurred_at_event_id", "occurred_at", "event_id"),
     )

@@ -43,6 +43,8 @@
 #     신원은 스냅샷이라, 그 뒤 회수된 담당 · 등급 · 세션으로는 쓰지 못한다. actor 없는 호출은 서버 내부의 신뢰
 #     경로이며 명시 범위(scope, 기본 전부)를 받는다. 이미 접수 · 진행 중인 실행은 이후의 담당 변경으로 취소되지
 #     않는다(디스패처는 범위를 다시 보지 않는다).
+#   - 감사 기록(T-2 · #544)의 사람 행위자는 HTTP 에서는 위의 재판정 신원이다. 신뢰 경로는 기록할 사람을
+#     audit_actor 로 직접 밝히며, 그 값은 범위 · 정지 판정에 쓰이지 않는다(_write_context).
 # ==============================================================================
 
 from __future__ import annotations
@@ -62,6 +64,7 @@ from auth.admin_service import Actor
 from config import get_settings
 from db import mappers, models
 from db.repositories import assets as assets_repo
+from db.repositories import audit as audit_repo
 from db.repositories import auth as auth_repo
 from db.repositories import executions as executions_repo
 from db.repositories import guardrails as guardrails_repo
@@ -80,6 +83,7 @@ from schemas.api.actions import (
     ExecutionStatus,
 )
 from schemas.api.assets import AssetType, RelationType
+from schemas.api.audit import AuditActorKind
 from schemas.api.errors import ErrorCode
 from schemas.api.incidents import (
     IncidentCategory,
@@ -223,6 +227,49 @@ def _live_actor(db: Session, actor: Actor) -> auth_service.CurrentUser:
     )
     auth_access.require_action_role(user)
     return user
+
+
+@dataclass(frozen=True)
+class _WriteContext:
+    """관제자 쓰기(실행 접수 · 종료)의 판정 근거 — 범위 · 고객사 행위자 여부 · 감사 기록 행위자."""
+
+    scope: TenantScope
+    customer: bool
+    audit_actor: audit_repo.Actor
+
+
+def _write_context(
+    db: Session,
+    *,
+    scope: TenantScope,
+    actor: Actor | None,
+    audit_actor: audit_repo.Actor | None,
+) -> _WriteContext:
+    """인시던트 · 테넌트를 잠그기 전에 한 번 정한다.
+
+    actor(HTTP 자격)를 주면 범위 · 고객사 여부 · 기록 행위자를 모두 users 잠금 안에서 재판정한 같은 사용자에서
+    얻는다(_live_actor) — 그래서 명시 범위나 audit_actor 를 함께 받지 않는다. actor 가 없으면 서버 내부의 신뢰
+    호출이라 받은 scope 를 쓰고 고객사 행위자가 아니며, 기록할 사람(audit_actor, SYSTEM 아님)을 직접 밝혀야
+    한다 — audit_actor 는 기록에만 쓰고 범위 · 정지 판정에 쓰지 않는다. 인자 오류는 DB 를 읽기 전에 거절한다.
+    """
+    if actor is None:
+        if not isinstance(audit_actor, audit_repo.Actor):
+            raise TypeError("actor 없는 호출은 기록할 사람(audit_actor)을 밝혀야 합니다")
+        if audit_actor.kind is AuditActorKind.SYSTEM:
+            raise ValueError("관제자 승인 · 종료의 기록 행위자는 사람이어야 합니다")
+        return _WriteContext(scope=scope, customer=False, audit_actor=audit_actor)
+    if audit_actor is not None:
+        raise TypeError("actor 와 audit_actor 를 함께 줄 수 없습니다 — 행위자는 재판정 신원입니다")
+    if scope.tenant_ids is not None:
+        raise ValueError("actor 가 있으면 범위는 재판정 신원이 정합니다 — 명시 범위를 함께 줄 수 없습니다")
+    if not isinstance(actor, Actor):
+        raise TypeError("actor 는 HTTP 자격(auth.admin_service.Actor)이어야 합니다")
+    user = _live_actor(db, actor)
+    return _WriteContext(
+        scope=auth_access.tenant_scope_of(user),
+        customer=not auth_access.is_platform_account(user),
+        audit_actor=audit_repo.person(user.user_id, user.account_type),
+    )
 
 
 def _check_scope(db: Session, incident_id: str, scope: TenantScope) -> None:
@@ -384,9 +431,13 @@ def reserve_execution(
     *,
     scope: TenantScope = ALL_TENANTS,
     actor: Actor | None = None,
+    audit_actor: audit_repo.Actor | None = None,
 ) -> ExecutionReservation:
     """조치 실행 예약 — (행위자 재판정) → 범위 확인 → 멱등 확인 → Incident 확인 → 테넌트 정지
     → 접수 근거 확인 → 예약 → 상태 전이.
+
+    새 실행 행을 남길 때만 같은 트랜잭션에 감사 기록을 남긴다(T-2 · #544) — 같은 Key 재요청(200 재생) ·
+    거절 · 후보 선점 실패는 기록이 없다.
 
     멱등 확인이 범위 다음 맨 앞이어야 한다. 재요청 시점에는 후보가 이미 CLAIMED라, 제안
     확인을 먼저 하면 정상 재요청이 200이 아니라 409로 떨어진다. 정지보다도 앞이라 정지 전에
@@ -395,12 +446,11 @@ def reserve_execution(
     접수 근거는 Runbook 종류가 가른다 — 본편 7종은 EXECUTABLE 후보, 롤백 3종은
     복구를 열어 준 원본 실행이다.
 
-    actor 는 HTTP 요청자다 — 주면 scope 대신 users 잠금 안에서 다시 판정한 그 시점의 범위를 쓴다
-    (_live_actor). scope 는 actor 없는 서버 내부 호출의 신뢰된 명시 범위다.
+    행위자 인자는 _write_context 가 정한다 — HTTP 는 actor(자격) 하나로 users 잠금 안에서 다시 판정한 그
+    시점의 범위 · 기록 행위자를 쓰고, actor 없는 서버 내부 호출은 신뢰된 명시 범위(scope)와 audit_actor 를 준다.
     """
-    if actor is not None:
-        scope = auth_access.tenant_scope_of(_live_actor(db, actor))
-    _check_scope(db, request.incident_id, scope)
+    context = _write_context(db, scope=scope, actor=actor, audit_actor=audit_actor)
+    _check_scope(db, request.incident_id, context.scope)
     existing = executions_repo.get_by_idempotency_key(db, request.idempotency_key)
     if existing is not None:
         return _replay_or_conflict(existing, request)
@@ -457,6 +507,7 @@ def reserve_execution(
         if raced is None:
             raise  # 멱등 키가 아닌 다른 제약 위반이다 — 500으로 보고한다
         return _replay_or_conflict(raced, request)
+    audit_repo.record_execution_started(db, execution, context.audit_actor)
 
     if not is_rollback:
         claimed = incidents_repo.update_candidate_status(
@@ -484,6 +535,7 @@ def resolve_incident(
     resolution_note: str | None = None,
     scope: TenantScope = ALL_TENANTS,
     actor: Actor | None = None,
+    audit_actor: audit_repo.Actor | None = None,
 ) -> bool:
     """관제자 종료 처리 — (행위자 재판정) → 범위 → 테넌트 정지 → 상태 확인 → 잔여 제안 무효화
     → RESOLVED 전이.
@@ -495,21 +547,19 @@ def resolve_incident(
     출발 상태를 AWAITING_APPROVAL로 전제하지 않고 잠근 뒤 실제 상태를 본다 —
     허용 집합은 INCIDENT_RESOLVABLE_STATUSES(schemas/incidents.py)다.
 
-    actor · scope 는 reserve_execution 과 같다. 정지 테넌트의 종료는 고객사(TENANT) 행위자에게만 409 다 —
-    플랫폼 계정(중앙 관리자 · 범위 안의 담당자)은 해지한 고객의 열린 인시던트를 정리한다(packages/schemas/api/
-    tenants.py 머리말). 그래서 범위가 아니라 계정 종류로 가른다 — 담당자의 범위는 전체가 아니어도 플랫폼
-    운영자다. 이미 종료된 건의 재요청도 정지 뒤 자리라 고객사 행위자에게는 409 다. actor 없는 서버 내부 호출은
-    고객사 행위자가 아니다.
+    scope · actor · audit_actor 는 reserve_execution 과 같다. 정지 테넌트의 종료는 고객사(TENANT) 행위자에게만
+    409 다 — 플랫폼 계정(중앙 관리자 · 범위 안의 담당자)은 해지한 고객의 열린 인시던트를 정리한다(packages/
+    schemas/api/tenants.py 머리말). 그래서 범위가 아니라 계정 종류로 가른다 — 담당자의 범위는 전체가 아니어도
+    플랫폼 운영자다. 이미 종료된 건의 재요청도 정지 뒤 자리라 고객사 행위자에게는 409 다. actor 없는 서버 내부
+    호출은 고객사 행위자가 아니다(audit_actor 로 가르지 않는다).
+
+    종료를 확정한 요청만 같은 트랜잭션에 감사 기록을 남긴다(T-2 · #544).
     """
-    customer = False
-    if actor is not None:
-        user = _live_actor(db, actor)
-        scope = auth_access.tenant_scope_of(user)
-        customer = not auth_access.is_platform_account(user)
+    context = _write_context(db, scope=scope, actor=actor, audit_actor=audit_actor)
     incident = incidents_repo.lock_incident(db, incident_id)
-    if incident is None or not scope.covers(incident.tenant_id):
+    if incident is None or not context.scope.covers(incident.tenant_id):
         raise ApiError(ErrorCode.INCIDENT_NOT_FOUND)
-    if customer and _tenant_suspended(db, incident.tenant_id):
+    if context.customer and _tenant_suspended(db, incident.tenant_id):
         raise ApiError(ErrorCode.TENANT_SUSPENDED)
     if incident.status is IncidentStatus.RESOLVED:
         return False
@@ -545,6 +595,7 @@ def resolve_incident(
         # 통과시키지 않는다 — 제안만 무효화된 채 상태가 남는다. commit 없이 예외를
         # 던지므로 세션 정리에서 되돌아간다(여기서 rollback하지 않는 이유다)
         raise ApiError(ErrorCode.INCIDENT_NOT_RESOLVABLE)
+    audit_repo.record_incident_resolved(db, incident_id, resolution, context.audit_actor)
 
     db.commit()
     db.refresh(incident)  # UPDATE가 바꾼 상태·판단을 응답 조립 전에 되읽는다
@@ -984,6 +1035,8 @@ def reserve_auto_isolation(
         return _existing_auto_isolation(
             db, raced, execution_id=execution_id, deadline=deadline
         )
+    # 가드레일이 거절한 시도도 실행 행이 남으므로 기록한다 — 결과는 실행 상태가 말한다
+    audit_repo.record_execution_started(db, execution, audit_repo.SYSTEM)
 
     guardrails_repo.add_evaluation(
         db,
@@ -4109,6 +4162,7 @@ def initiate_auto_rollback(db: Session, origin_execution_id: str) -> RollbackIni
         # 정책은 어느 레코드에서 왔는지가 기록에 남을 때만 사후에 검증된다
         backup_record_id=record.backup_record_id,
     )
+    audit_repo.record_execution_started(db, child, audit_repo.SYSTEM)
     db.commit()
     logger.info(
         "auto_rollback_initiated",

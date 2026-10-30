@@ -12,7 +12,7 @@
 #   - 정지된 테넌트: 새 실행(복구 포함)은 플랫폼 계정도 409, 종료는 고객사 사용자만 409 — 플랫폼 계정(중앙 관리자 ·
 #     그 고객사를 맡은 담당자)은 받는다. 조회는 그대로다. 거절은 기록 · 발행을 남기지 않는다.
 #   - 쓰기 직전 재판정: 실행 · 종료는 Workflow 가 users 잠금을 잡고 세션 · 등급 · 역할 · 담당을 다시 판정한다 —
-#     의존성이 통과시킨 뒤 회수된 권한으로는 쓰지 못한다.
+#     의존성이 통과시킨 뒤 회수된 권한으로는 쓰지 못한다. 감사 기록(T-2 · #544)의 행위자도 그 재판정 신원이다.
 #   - 소속: 접수가 대상 계정을 등록한 테넌트를 인시던트에 붙이고, 실행은 모든 접수 경로(관제자 승인 ·
 #     자동 격리 · 관제자 복구 · 자동 원복)에서 인시던트의 소속을 물려받는다. 고객별 자동 조치 끄기(T-6)와
 #     조회 범위가 그 소속을 본다.
@@ -29,12 +29,14 @@ import pytest
 import workflows
 from auth import sessions as auth_sessions
 from db import models
+from db.repositories import audit as audit_repo
 from db.repositories import auth as auth_repo
 from db.repositories import executions as executions_repo
 from db.repositories import incidents as incidents_repo
 from db.repositories import notification_events as events_repo
 from db.repositories import tenants as tenants_repo
 from schemas.api.actions import ExecutionStatus
+from schemas.api.audit import AuditActorKind, AuditEventAction
 from schemas.api.auth import PlatformRole, UserRole
 from schemas.api.incidents import IncidentStatus
 from schemas.api.tenants import TenantUpdateRequest
@@ -102,7 +104,7 @@ def _executions(db, incident: models.Incident) -> list[models.ActionExecution]:
 
 
 def _effects(db, incident: models.Incident) -> tuple:
-    """거절이 남기면 안 되는 것 — 인시던트 상태 · 판단 · 시각, 제안 상태, 실행 행, 알림 사건."""
+    """거절이 남기면 안 되는 것 — 인시던트 상태 · 판단 · 시각, 제안 상태, 실행 행, 알림 사건, 감사 기록."""
     db.expire_all()
     row = db.get(models.Incident, incident.incident_id)
     return (
@@ -110,6 +112,7 @@ def _effects(db, incident: models.Incident) -> tuple:
         sorted((c.candidate_id, c.status) for c in incidents_repo.list_candidates(db, row.incident_id)),
         [e.execution_id for e in executions_repo.list_by_incident(db, row.incident_id)],
         [e.event_id for e in events_repo.list_by_incident(db, row.incident_id)],
+        [e.event_id for e in audit_repo.list_by_incident(db, row.incident_id)],
     )
 
 
@@ -660,5 +663,42 @@ def test_authority_revoked_after_the_dependencies_cannot_authorize_the_write(
 
     assert revoked == [seed.user_id]  # 의존성을 통과해 Workflow 의 쓰기 직전 잠금까지 왔다
     assert (resp.status_code, _code(resp)) == expected
+    assert _effects(db, mine) == before
+    assert published == []
+
+
+@pytest.mark.parametrize("call", ["execute", "resolve"])
+def test_manager_write_is_audited_as_that_platform_user_only_while_assigned(
+    db, client_pg, login_as, two_tenants, published, monkeypatch, call
+):
+    """담당자의 쓰기는 그 사용자(PLATFORM_USER) · 대상 고객사로 기록되고, 의존성 통과 뒤 그 배정이 회수되면
+    쓰기도 기록도 없다 — 기록 행위자와 범위가 같은 재판정 신원에서 나온다."""
+    a, b = two_tenants["a"], two_tenants["b"]
+    theirs, mine = two_tenants["theirs"], two_tenants["mine"]
+    seed = _manager(login_as, a, b)
+
+    allowed = _change(client_pg, theirs, call)
+
+    assert allowed.status_code == (202 if call == "execute" else 200), allowed.json()
+    db.expire_all()
+    [event] = audit_repo.list_by_incident(db, theirs.incident_id)
+    action = AuditEventAction.ACTION_EXECUTION_STARTED if call == "execute" else AuditEventAction.INCIDENT_RESOLVED
+    assert (event.action, event.actor_kind, event.actor_user_id, event.tenant_id) == (
+        action, AuditActorKind.PLATFORM_USER, seed.user_id, b,
+    )
+
+    real_lock = auth_repo.lock_users_table
+
+    def revoke_a_then_lock(session):
+        auth_repo.replace_assigned_tenants(session, user_id=seed.user_id, tenant_ids=(b,), now=_now())
+        real_lock(session)
+
+    monkeypatch.setattr(auth_repo, "lock_users_table", revoke_a_then_lock)
+    before = _effects(db, mine)
+    published.clear()
+
+    refused = _change(client_pg, mine, call)
+
+    assert (refused.status_code, _code(refused)) == (404, "INCIDENT_NOT_FOUND")
     assert _effects(db, mine) == before
     assert published == []

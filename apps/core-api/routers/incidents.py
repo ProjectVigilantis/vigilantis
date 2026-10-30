@@ -22,7 +22,7 @@
 #   - 테넌트 범위: 세 경로 모두 요청자의 범위(auth.access)로 거른다 — 목록은 범위 밖을 빼고, 상세 · 종료는
 #     범위 밖이면 404 INCIDENT_NOT_FOUND 다. 종료는 요청자(actor)를 resolve_incident 에 넘겨, Workflow 가
 #     인시던트를 잠그기 전에 users 잠금 안에서 세션 · 조치 권한 · 담당 고객을 다시 판정한 범위로 한 번 더
-#     거르고 정지를 판정한다.
+#     거르고 정지를 판정한다. 감사 기록(T-2 · #544)의 행위자도 그 재판정한 신원이다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -288,7 +288,7 @@ def resolve_incident(
     payload: ResolveIncidentRequest,
     request: Request,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_action_role),  # 요청자 신원 — 감사 기록(T-2)이 쓴다
+    user: CurrentUser = Depends(require_action_role),  # 대상을 읽기 전 403 판정용 스냅샷
     actor: Actor = Depends(get_actor),
 ) -> IncidentResponse:
     """이미 종료된 건의 재요청도 200이며, 처음 저장된 판단을 그대로 돌려준다."""

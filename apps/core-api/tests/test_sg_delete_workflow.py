@@ -492,7 +492,7 @@ def test_delete_that_ended_unknown_never_creates_a_rollback_child(
 # ------------------------------------------------------------------ 원복 경로
 
 
-def reserve_recreate(db, incident_id):
+def reserve_recreate(db, incident_id, actor):
     """관제자 복구 접수 — HTTP가 쓰는 것과 같은 진입점이다."""
     reservation = workflows.reserve_execution(
         db,
@@ -501,6 +501,7 @@ def reserve_recreate(db, incident_id):
             runbook_id=RunbookId.RUNBOOK_SG_RECREATE,
             idempotency_key=str(uuid.uuid4()),
         ),
+        audit_actor=actor,
     )
     db.commit()
     return reservation.response.execution_id
@@ -533,11 +534,11 @@ def deleted_origin(db, reserved_delete, aws):
     return _make
 
 
-def test_recreate_runs_the_full_restore_path(db, deleted_origin, aws):
+def test_recreate_runs_the_full_restore_path(db, deleted_origin, aws, audit_actor):
     """생성 → 기본 egress 회수 → 규칙 주입. 접수 때 서버가 백업을 자식에 결속한다."""
     incident_id, origin_id = deleted_origin()
 
-    child_id = reserve_recreate(db, incident_id)
+    child_id = reserve_recreate(db, incident_id, audit_actor)
     child = exec_repo.get_execution(db, child_id)
 
     assert child.parent_execution_id == origin_id
@@ -560,7 +561,7 @@ def test_recreate_runs_the_full_restore_path(db, deleted_origin, aws):
     assert workflows.judge_sg_recreate(db, child_id).next_status is ExecutionStatus.SUCCESS
 
 
-def test_recreate_of_an_absent_asset_passes_guardrail_three(db, deleted_origin, aws):
+def test_recreate_of_an_absent_asset_passes_guardrail_three(db, deleted_origin, aws, audit_actor):
     """③ ARN Match는 소멸 표시된 자산도 통과시킨다 — 목록 조회만 소멸분을 거른다(#332).
 
     이 전제가 깨지면(③에 소멸 필터가 들어가면) 삭제된 SG의 원복이 통째로 막힌다.
@@ -572,7 +573,7 @@ def test_recreate_of_an_absent_asset_passes_guardrail_three(db, deleted_origin, 
         asset.arn for asset in assets_repo.list_assets(db, asset_type=AssetType.SG)
     ]
 
-    child_id = reserve_recreate(db, incident_id)
+    child_id = reserve_recreate(db, incident_id, audit_actor)
     outcome = workflows.run_sg_recreate_execution(db, child_id)
 
     assert outcome.succeeded, outcome.error_summary
@@ -608,21 +609,21 @@ def test_recreate_does_not_start_without_a_bound_backup(
 # ------------------------------------------------------------------ 원복 판정
 
 
-def recreated_child(db, deleted_origin):
+def recreated_child(db, deleted_origin, actor):
     """접수만 된 원복 1건 — 판정이 보는 것은 실행 결과가 아니라 실자산이다."""
     incident_id, _ = deleted_origin()
-    return reserve_recreate(db, incident_id)
+    return reserve_recreate(db, incident_id, actor)
 
 
 def test_judges_recreate_failed_when_only_the_group_was_created(
-    db, deleted_origin, aws
+    db, deleted_origin, aws, audit_actor
 ):
     """그룹이 섰다는 것만으로 성공이라 하면 **규칙 없는 빈 SG**가 복원 완료로 닫힌다.
 
     자식이 SUCCESS면 원본까지 ROLLED_BACK으로 닫혀 인시던트가 내려가고, 절반만 선 SG를
     다시 볼 자리가 사라진다.
     """
-    child_id = recreated_child(db, deleted_origin)
+    child_id = recreated_child(db, deleted_origin, audit_actor)
     # 이름·VPC로는 찾히지만 규칙이 비어 있다 — 주입 전에 끊긴 모습이다
     aws.state["recreated"] = {
         "GroupId": NEW_GROUP,
@@ -639,13 +640,13 @@ def test_judges_recreate_failed_when_only_the_group_was_created(
 
 
 def test_judges_recreate_failed_when_the_egress_injection_never_ran(
-    db, deleted_origin, aws
+    db, deleted_origin, aws, audit_actor
 ):
     """인바운드까지 서고 아웃바운드 직전에 끊긴 모습 — 두 방향을 따로 본다.
 
     한 방향만 대조하면 절반만 복원된 SG가 완료로 닫힌다.
     """
-    child_id = recreated_child(db, deleted_origin)
+    child_id = recreated_child(db, deleted_origin, audit_actor)
     aws.state["recreated"] = {
         "GroupId": NEW_GROUP,
         "GroupName": GROUP_NAME,
@@ -661,14 +662,14 @@ def test_judges_recreate_failed_when_the_egress_injection_never_ran(
 
 
 def test_judges_recreate_success_when_the_rules_match_the_backup(
-    db, deleted_origin, aws
+    db, deleted_origin, aws, audit_actor
 ):
     """새 ID로는 찾을 수 없다 — 백업의 이름 + VPC가 재생성 SG를 찾는 유일한 좌표다.
 
     AWS는 빈 목록 키를 채워 돌려주고 순서도 보장하지 않는다. 그 차이를 불일치로 읽으면
     멀쩡히 복원된 SG가 "원복 미완"으로 확정된다.
     """
-    child_id = recreated_child(db, deleted_origin)
+    child_id = recreated_child(db, deleted_origin, audit_actor)
     aws.state["recreated"] = {
         "GroupId": NEW_GROUP,
         "GroupName": GROUP_NAME,
@@ -684,8 +685,8 @@ def test_judges_recreate_success_when_the_rules_match_the_backup(
     assert judgement.next_status is ExecutionStatus.SUCCESS
 
 
-def test_judges_recreate_failed_when_the_group_is_missing(db, deleted_origin, aws):
-    child_id = recreated_child(db, deleted_origin)
+def test_judges_recreate_failed_when_the_group_is_missing(db, deleted_origin, aws, audit_actor):
+    child_id = recreated_child(db, deleted_origin, audit_actor)
     aws.state["recreated"] = None
 
     judgement = workflows.judge_sg_recreate(db, child_id)
@@ -694,8 +695,8 @@ def test_judges_recreate_failed_when_the_group_is_missing(db, deleted_origin, aw
     assert GROUP_NAME in judgement.error_summary
 
 
-def test_defers_recreate_judgement_when_the_lookup_fails(db, deleted_origin, aws):
-    child_id = recreated_child(db, deleted_origin)
+def test_defers_recreate_judgement_when_the_lookup_fails(db, deleted_origin, aws, audit_actor):
+    child_id = recreated_child(db, deleted_origin, audit_actor)
     aws(describe_security_groups=EndpointConnectionError(endpoint_url="https://ec2"))
 
     judgement = workflows.judge_sg_recreate(db, child_id)
