@@ -28,7 +28,7 @@ def _ev(incident_id: str, event_type: WsEventType = WsEventType.INCIDENT_CREATED
     return incident_event(event_type, incident_id=incident_id, occurred_at=T0, category=category)
 
 
-async def _allow(event) -> bool:
+async def _allow(event, owner_lookup) -> bool:
     """격리 배관 테스트용 명시적 허용 판정 — 런타임 라우터는 DB 판정을 묶는다."""
     return True
 

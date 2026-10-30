@@ -329,7 +329,7 @@ def build_ws_router(*, token: str) -> APIRouter:
     return router
 
 
-async def _operator_sees_every_event(event) -> bool:
+async def _operator_sees_every_event(event, owner_lookup) -> bool:
     """WS /_stepper/ws의 이벤트 권한 — 토큰을 통과한 운영자 연결은 전역 진단이라 모든 이벤트를 받는다
     (파일 머리말 §범위). 이 연결에만 등록하는 명시 허용이며 제품 /api/v1/ws의 판정과 무관하다."""
     return True

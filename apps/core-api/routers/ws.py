@@ -53,7 +53,7 @@ from db import models
 from auth.http import SESSION_COOKIE, allowed_origins, get_clock
 from auth.service import CurrentUser
 from config import AuthSettings, Settings, get_auth_settings, get_settings
-from realtime import RealtimeManager
+from realtime import IncidentOwnerLookup, RealtimeManager
 
 router = APIRouter(prefix="/api/v1")
 logger = logging.getLogger("vigilantis.ws")
@@ -99,14 +99,17 @@ async def websocket_endpoint(
         await websocket.close(code=_CLOSE_POLICY_VIOLATION)  # 세션 없음 · 무효 — 사유를 구분하지 않는다
         return
 
-    async def authorize(event: WsEvent) -> bool:
-        # 이벤트 전송 직전마다 호출된다 — 세션 · 등급 · 담당 고객을 그때의 DB 상태로 다시 판정한다
+    async def authorize(event: WsEvent, owner_lookup: IncidentOwnerLookup) -> bool:
+        # 이벤트 전송 직전마다 호출된다 — 세션 · 등급 · 담당 고객을 그때의 DB 상태로 다시 판정한다.
+        # Incident 소유 고객만 발행 1회 안에서 연결 간에 공유한다(중앙 연결은 조회하지 않는다)
         current = await check()
         if current is None:
             return False
         if tenant_scope_ids(current) is None:  # 명시적 CENTRAL_ADMIN — 미배정 레거시 포함 전체
             return True
-        tenant_id = await run_in_threadpool(_incident_tenant_id, session_factory, event.data.incident_id)
+        tenant_id = await owner_lookup.get(
+            partial(run_in_threadpool, _incident_tenant_id, session_factory, event.data.incident_id)
+        )
         return tenant_id is not None and can_access_tenant(current, tenant_id)
 
     manager: RealtimeManager = websocket.app.state.realtime

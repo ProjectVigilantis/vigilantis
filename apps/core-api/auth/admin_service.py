@@ -10,10 +10,12 @@
 #     확인하고 rollback 한 뒤 SDK 호출). SDK 뒤 행위자 재확인이 실패하면 DB 는 쓰지 않지만 제공자
 #     부작용은 이미 있었을 수 있다 — 성공으로 취급하지 않는다. DB 실패 시 제공자 사용자를 지우지 않는다.
 #   - 이력(user_admin_events)은 상태 변경과 같은 commit 에 들어간다. 값은 UserEventState 화이트리스트뿐이다.
-#   - 관리 범위(#492): 행위자의 account_type 이 정한다(role · tenant_id NULL 로 추론하지 않는다).
+#   - 관리 범위(#492): 행위자의 account_type 과 PLATFORM 의 명시 등급(platform_role) · 담당 고객 배정이
+#     정한다(role · tenant_id NULL 로 추론하지 않는다).
 #     범위는 access.tenant_scope_ids / can_access_tenant 하나다: CENTRAL_ADMIN 은 모든 TENANT 계정,
 #     TENANT_MANAGER 는 배정된 고객사만(배정 없음 = 데이터 없음), TENANT ADMIN 은 자기 테넌트만.
-#     recover_existing 은 플랫폼 관리 권한자(매니저는 배정 테넌트)만. 범위 밖(미배정 포함) 대상과
+#     recover_existing 은 플랫폼 관리 권한자(CENTRAL_ADMIN, 배정 테넌트로 초대하는 TENANT_MANAGER)만이고
+#     TENANT ADMIN 은 403 이다. 범위 밖(미배정 포함) 대상과
 #     PLATFORM · UNASSIGNED 대상은 없는 대상과 같은 404 USER_NOT_FOUND 이고 Cognito 를 부르지 않는다.
 #     API 로 만드는 계정은 항상 TENANT 이며 소속을 옮기는 길은 없다.
 #   - 정지 테넌트의 TENANT 행위자는 조회만 한다 — 쓰기는 409 TENANT_SUSPENDED(잠금 안에서 재판정).
@@ -329,7 +331,8 @@ def invite_user(
     """초대 — 제공자 사용자를 먼저 확보한 뒤 앱 사용자(TENANT) + 이력을 한 commit 으로 만든다.
 
     기본은 새 Cognito 사용자 생성(중복이면 AuthError USER_STATE_CONFLICT 409)이다. 자동 연결은 없다.
-    recover_existing=True 는 PLATFORM ADMIN 의 명시적 선택이다(TENANT ADMIN 은 403 AUTH_FORBIDDEN, SDK 0회):
+    recover_existing=True 는 플랫폼 관리 권한자(CENTRAL_ADMIN, 배정 테넌트로 초대하는 TENANT_MANAGER)의
+    명시적 선택이다(TENANT ADMIN 은 403 AUTH_FORBIDDEN, SDK 0회):
     이미 있는 Cognito 사용자를 조회해(없으면 404) 앱에 아직 없는 신원이면 연결한다 — 이메일 소유 증명이 아니다.
     대상 테넌트(_invite_tenant)는 SDK 전에 ACTIVE 를 확인하고, 쓰기 직전 잠금 안에서 다시 확인한다.
     get_adapter 는 사전 판정을 모두 통과한 뒤에만 부른다 — Cognito 미설정(503)보다 401 · 403 · 409 · 422 · 404 가 먼저다.

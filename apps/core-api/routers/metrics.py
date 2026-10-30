@@ -295,6 +295,7 @@ class _TenantUnavailable(RuntimeError):
     """
 
     def __init__(self, tenant_id: str, status: TenantStatus | None) -> None:
+        self.status = status
         self.reason_code = f"TENANT_{status.value}" if status is not None else "TENANT_NOT_FOUND"
         super().__init__(f"고객사 {tenant_id} 자격 사용 불가 — {self.reason_code}")
 
@@ -320,25 +321,40 @@ def _ec2_refs(
 
     범위와 (소유, 리전) 쌍은 목록을 읽을 때 건다 — 범위 밖 인스턴스나 소유 고객사가 관제하지 않는 리전의
     인스턴스는 CloudWatch 대상에 오르지 않는다(그 고객사 자격으로 그 리전을 부르지 않는다). 대상마다 소유
-    고객사의 자격을 싣고, 쓸 수 없는 자격이 하나라도 있으면 부르기 전에 실패한다(_TenantUnavailable).
+    고객사의 자격을 싣는다. ACTIVE 가 아닌 고객사의 EC2 는 대상에서 빼고 나머지로 그린다. 제외 대상뿐이면
+    부르기 전에 _TenantUnavailable 로 실패한다. 소유 고객사를 찾지 못하면 제외하지 않고 실패한다.
 
     읽은 뒤 트랜잭션을 끝낸다 — 호출자는 이어서 CloudWatch 를 부르거나 기다리는데, 그동안 풀 연결을
     쥐고 있으면 CloudWatch 가 느릴 때 다른 API 까지 연결을 못 얻는다. 목록은 값으로 복사했고
     읽기만 하는 세션이라 잃을 것이 없다.
     """
-    refs = [
-        Ec2Ref(
-            arn=a.arn,
-            resource_id=a.resource_id,
-            name=a.name,
-            region=a.region,
-            access=_tenant_access(a.tenant_id, owners),
-        )
+    refs: list[Ec2Ref] = []
+    excluded: _TenantUnavailable | None = None
+    try:
+        # ORM 행이라 트랜잭션을 끝내면 만료된다 — 값 복사를 마친 뒤에 끝낸다.
         for a in assets_repo.list_assets(
             db, asset_type=AssetType.EC2, regions=regions, scope=scope
-        )
-    ]
-    db.rollback()
+        ):
+            try:
+                access = _tenant_access(a.tenant_id, owners)
+            except _TenantUnavailable as exc:
+                if exc.status is None:
+                    raise  # 소유 고객사를 못 찾는 것은 의도된 비활성이 아니다 — 축 전체를 실패로 둔다
+                excluded = excluded or exc
+                continue
+            refs.append(
+                Ec2Ref(
+                    arn=a.arn,
+                    resource_id=a.resource_id,
+                    name=a.name,
+                    region=a.region,
+                    access=access,
+                )
+            )
+    finally:
+        db.rollback()
+    if not refs and excluded is not None:
+        raise excluded  # 그릴 대상이 제외 대상뿐이면 빈 성공이 아니라 UNAVAILABLE
     return refs
 
 

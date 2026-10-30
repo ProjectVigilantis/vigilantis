@@ -1268,6 +1268,40 @@ def test_쓸_수_없는_고객사_자격은_빈_성공이_아니라_UNAVAILABLE�
     assert [p["value"] for p in body["sg_exposure"]["points"]] == [1]
 
 
+@pytest.mark.parametrize("status", [TenantStatus.SUSPENDED, TenantStatus.PENDING_CONNECTION])
+@pytest.mark.parametrize("manager", [False, True], ids=["central", "manager"])
+def test_ACTIVE가_아닌_고객사만_빠지고_나머지_고객사의_곡선은_그려진다(
+    client_pg, db, set_regions, make_tenant, login_as, owner_cloudwatch, monkeypatch, status, manager
+):
+    set_regions(SEOUL)
+    active, inactive = make_tenant(), make_tenant(status)
+    at = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(minute=1, second=0, microsecond=0)
+    active_arn = _seed_cell(db, tenant_id=active, region=SEOUL, count=1, at=at, tag="a")
+    _seed_cell(db, tenant_id=inactive, region=SEOUL, count=2, at=at, tag="b")
+    db.commit()
+    if manager:
+        _login_manager(login_as, db, [active, inactive])
+    cw = owner_cloudwatch()
+    in_transaction: list[bool] = []
+
+    def _observing(service: str, region: str):
+        in_transaction.append(db.in_transaction())  # CloudWatch 클라이언트를 만드는 호출 경계
+        return cw(service, region)
+
+    monkeypatch.setattr("services.metrics.aws_client", _observing)
+
+    body = client_pg.get(URL).json()
+
+    for axis in ("cpu", "network"):
+        assert (body[axis]["status"], body[axis]["reason_code"]) == ("READY", None), axis
+    assert set(_series_values(body, "cpu", "points")) == {active_arn}
+    assert set(_series_values(body, "network", "in_points")) == {active_arn}
+    assert _callers(cw) == [active, active]
+    assert in_transaction == [False, False]  # CPU · 네트워크 — 호출 동안 DB 트랜잭션을 쥐지 않는다
+    # DB 축은 자격과 무관하게 두 고객사를 모두 센다
+    assert _db_totals(body)["sg_exposure"] == [3]
+
+
 def test_한_고객사의_조회_실패는_전체_범위의_축을_내리고_다른_담당_범위로_번지지_않는다(
     client_pg, db, set_regions, make_tenant, login_as, owner_cloudwatch
 ):

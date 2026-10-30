@@ -38,8 +38,42 @@ from schemas.api.ws import (
 
 logger = logging.getLogger("vigilantis.realtime")
 
-# 연결별 이벤트 권한 판정 — True일 때만 전송. 예외는 fail closed(전송 안 함)로 다룬다
-EventAuthorizer = Callable[[WsEvent], Awaitable[bool]]
+class IncidentOwnerLookup:
+    """_broadcast 1회 동안만 사는 소유 고객 조회 셀 — 첫 get()이 조회 task 하나를 시작하고
+    나머지는 같은 task를 공유한다(single-flight). 이벤트 간 캐시가 아니며 사용자 · 권한 판정 ·
+    담당 범위는 담지 않는다. 대기자의 취소 · 시간 초과는 공유 task를 취소하지 않는다(shield).
+    task 취소가 스레드에서 도는 DB 작업의 중단을 보장하지는 않는다."""
+
+    def __init__(self, close_timeout: float) -> None:
+        self._close_timeout = close_timeout
+        self._task: Optional[asyncio.Future[Optional[str]]] = None
+
+    async def get(self, resolver: Callable[[], Awaitable[Optional[str]]]) -> Optional[str]:
+        """첫 호출의 resolver만 실행된다. 예외는 모든 대기자에게 전파된다."""
+        if self._task is None:
+            self._task = asyncio.ensure_future(resolver())
+            # 대기자가 모두 떠난 뒤의 실패도 "never retrieved" 경고 없이 회수한다
+            self._task.add_done_callback(_retrieve)
+        return await asyncio.shield(self._task)
+
+    async def close(self) -> None:
+        """남은 조회 task를 취소하고 전송 제한시간 1회분까지만 기다린다 — 결과는 버린다.
+        취소를 늦추는 resolver가 발행 · 종료를 잡아두지 못하게 하며, 늦게 끝나는 task의 예외는
+        _retrieve 콜백이 회수한다."""
+        task = self._task
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.wait([task], timeout=self._close_timeout)
+
+
+def _retrieve(task: "asyncio.Future") -> None:
+    if not task.cancelled():
+        task.exception()
+
+
+# 연결별 이벤트 권한 판정 — True일 때만 전송. 예외는 fail closed(전송 안 함)로 다룬다.
+# 두 번째 인자는 이 발행 1회의 공유 소유 조회 셀이다.
+EventAuthorizer = Callable[[WsEvent, IncidentOwnerLookup], Awaitable[bool]]
 
 
 class _Delivery(Enum):
@@ -216,10 +250,14 @@ class RealtimeManager:
     async def _broadcast(self, event: WsEvent) -> None:
         text = event.model_dump_json()
         connections = list(self._connections)
-        results = await asyncio.gather(
-            *(self._deliver(websocket, event, text) for websocket in connections),
-            return_exceptions=False,
-        )
+        owner_lookup = IncidentOwnerLookup(self._send_timeout)
+        try:
+            results = await asyncio.gather(
+                *(self._deliver(websocket, event, text, owner_lookup) for websocket in connections),
+                return_exceptions=False,
+            )
+        finally:
+            await owner_lookup.close()
         stale = [
             websocket
             for websocket, outcome in zip(connections, results, strict=True)
@@ -243,7 +281,9 @@ class RealtimeManager:
             },
         )
 
-    async def _deliver(self, websocket: WebSocket, event: WsEvent, text: str) -> "_Delivery":
+    async def _deliver(
+        self, websocket: WebSocket, event: WsEvent, text: str, owner_lookup: IncidentOwnerLookup
+    ) -> "_Delivery":
         """전송 직전에 연결별 권한을 다시 판정한다 — 적재 이후 담당 해제 · 등급 변경 · 세션 무효가
         반영된다. 권한 없음 · 판정 실패는 이벤트만 건너뛰고 연결은 제거하지 않는다(세션 무효는
         감시 task가 닫는다). 판정 실패는 전송하지 않는다(fail closed)."""
@@ -251,7 +291,7 @@ class RealtimeManager:
         if authorize is None:  # unregister와 경합 — 권한 상태 없는 연결에는 보내지 않는다
             return _Delivery.SKIPPED
         try:
-            allowed = await asyncio.wait_for(authorize(event), timeout=self._send_timeout)
+            allowed = await asyncio.wait_for(authorize(event, owner_lookup), timeout=self._send_timeout)
         except Exception as exc:  # noqa: BLE001 — SQL·세션 정보가 실릴 수 있어 종류만 남긴다
             logger.warning(
                 "ws_event_authorization_failed",
