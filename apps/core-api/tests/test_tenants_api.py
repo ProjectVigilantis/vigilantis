@@ -1,7 +1,7 @@
 """/api/v1/tenants — 고객(테넌트) 관리 라우터 (Post-MVP T-4). 실제 PostgreSQL + ADMIN 세션.
 
 지키는 것.
-  ① PLATFORM 계정 전용(고객사 ADMIN · OPERATOR · VIEWER 는 403) · 미인증 401 — 등록된 경로 전부. 연결 확인(verify · resume)은 아직 없다.
+  ① PLATFORM 계정 전용(고객사 ADMIN · OPERATOR · VIEWER 는 403) · 미인증 401 — 등록된 경로 전부.
   ② 받는 상태 밖은 409, 없거나 형식이 어긋난 식별자는 404 — 거절하면 DB 가 그대로다.
   ③ 온보딩 링크 설정이 없으면 링크를 싣는 응답만 503 이고, 그때 쓰기도 남지 않는다.
   ④ external_id 는 생성 응답과 재발급에서만 나간다.
@@ -46,6 +46,8 @@ REQUESTS = [
     ("DELETE", "/{id}", None),
     ("GET", "/{id}/onboarding", None),
     ("POST", "/{id}/suspend", {"reason": "해지"}),
+    ("POST", "/{id}/verify", None),
+    ("POST", "/{id}/resume", None),
 ]
 
 
@@ -121,8 +123,6 @@ def test_requests_cover_every_registered_tenants_route(client):
     }
     covered = {(method, BASE + path.replace("{id}", "{tenant_id}")) for method, path, _ in REQUESTS}
     assert covered == registered
-    # 연결 확인은 테넌트별 AssumeRole 과 함께 다음 카드다
-    assert not any(path.endswith(("/verify", "/resume")) for _, path in registered)
 
 
 @pytest.mark.parametrize("role", [UserRole.ADMIN, UserRole.OPERATOR, UserRole.VIEWER])

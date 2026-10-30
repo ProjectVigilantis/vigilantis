@@ -314,7 +314,6 @@ def test_close_cancels_pending_lookup_and_abandoned_failure_is_retrieved():
 
         waiter2 = asyncio.create_task(failing.get(fail_later))
         await started2.wait()
-        # _retrieve 콜백 뒤에 등록되므로, 이 신호가 오면 회수 콜백은 이미 실행됐다
         failing._task.add_done_callback(lambda _t: finished.set())
         task_ref = weakref.ref(failing._task)
         waiter2.cancel()
