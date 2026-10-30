@@ -50,6 +50,10 @@ EXPECTED_TABLES = {
     "user_admin_events",
     # 조치 승인 · 종료 판단 감사 기록 (T-2 · #544)
     "audit_events",
+    # 고객 설정 · 플랫폼 설정 자원 정리 대기 · 지워진 고객의 파일 바인딩 기동 증거 (T-7)
+    "tenant_settings",
+    "tenant_settings_cleanups",
+    "notification_legacy_routes",
 }
 
 

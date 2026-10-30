@@ -1063,6 +1063,30 @@ class NotificationRoute(Base):
     )
 
 
+class NotificationLegacyRoute(Base):
+    """T-7: 파일 설정 시절 바인딩 중 고객이 지워져 기동 검사가 경고로 넘긴 선언의 증거(재기동용).
+
+    발송 권한이 아니다 — 라우트 해석 · 바인딩 · claim 대조에 쓰지 않는다. 기동 검사가 같은
+    (고객, 계정, 채널, fingerprint)의 파일 선언을 TENANT_NOT_FOUND 치명 오류 대신 경고로 넘기는 근거로만
+    읽는다. 고객 설정(DB)이 원천이 되면 지워진 고객의 바인딩은 남지 않으므로 그 증거를 여기에 옮겨 둔다.
+    """
+
+    __tablename__ = "notification_legacy_routes"
+
+    aws_account_id: Mapped[str] = mapped_column(String(12), primary_key=True)
+    channel: Mapped[str] = mapped_column(String(8), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+    __table_args__ = (
+        CheckConstraint(f"channel IN ({_DELIVERY_CHANNELS})", name="channel_known"),
+        CheckConstraint("aws_account_id ~ '^[0-9]{12}$'", name="account_shape"),
+    )
+
+
 class NotificationLane(Base):
     """채널 공통 호출 관문. Slack은 모든 처리 프로세스가 이 1행으로 간격·429 대기를 공유한다.
 
@@ -1222,6 +1246,141 @@ class ServiceTransitionObservation(Base):
             "execution_id",
             text("observed_at DESC"),
         ),
+    )
+
+
+# ==============================================================================
+# T-7 고객 설정 — 보호 태그 · 알림 채널의 목표 설정과 공급자 관측, 은퇴 자원 정리 대기열
+# 공개 계약은 schemas.api.settings 다(이 행을 그대로 내보내지 않는다). 비밀값 원문은 두지 않는다.
+# ==============================================================================
+
+#: 채널 출처. NULL = 아직 정한 적 없음(기존 routes 파일 가져오기 대상), CLEARED = 명시 해제(가져오기 안 함).
+SETTINGS_SLACK_SOURCES = ("LEGACY_ENV", "MANAGED", "CLEARED")
+SETTINGS_EMAIL_SOURCES = ("LEGACY_TOPIC", "MANAGED", "CLEARED")
+SETTINGS_EMAIL_STATUSES = ("SETUP_PENDING", "SETUP_FAILED", "CONFIRMATION_PENDING", "READY")
+
+
+class TenantSettingsRecord(Base):
+    """테넌트 1개의 설정. 목표(사용자 입력)와 관측(SNS 진행)을 칸으로 나눠 둔다.
+
+    - protected_tags: NULL = 저장된 정책 없음(기본 정책), [] = 태그 보호 없음.
+    - Slack: MANAGED 는 플랫폼이 만든 Secrets Manager 비밀의 ARN · VersionId(불변 참조)와 URL 의 SHA-256 이다.
+      LEGACY_ENV 는 기존 routes 파일에서 가져온 환경 변수 이름이다(값은 프로세스 환경에만 있다).
+    - 이메일: MANAGED 는 목표 주소 · 세대(generation)와 그 세대의 관측(토픽 · 구독 · 상태)이다. 세대가 바뀌면
+      이전 세대의 관측 결과는 반영되지 않는다(email_generation CAS). LEGACY_TOPIC 은 외부에서 만든 토픽이다.
+    - updated_at 은 설정 변경 시각이다. 백그라운드 관측은 email_checked_at 만 바꾼다.
+    """
+
+    __tablename__ = "tenant_settings"
+
+    tenant_id: Mapped[str] = mapped_column(_ID, ForeignKey("tenants.tenant_id"), primary_key=True)
+    # None 은 JSON null 이 아니라 SQL NULL(저장된 정책 없음)로 쓴다
+    protected_tags: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    slack_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    slack_secret_ref: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    slack_secret_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    slack_destination_hash: Mapped[str | None] = mapped_column(CHAR(64), nullable=True)
+    email_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    email_legacy_topic_arn: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    email_address: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    email_generation: Mapped[str | None] = mapped_column(_ID, nullable=True)
+    email_region: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    email_status: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    email_topic_arn: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    email_subscription_arn: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    email_failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    email_attempts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    email_next_check_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    email_lease_token: Mapped[str | None] = mapped_column(_ID, nullable=True)
+    email_lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    email_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "protected_tags IS NULL OR jsonb_typeof(protected_tags) = 'array'",
+            name="protected_tags_is_array",
+        ),
+        CheckConstraint(
+            "((slack_source IS NULL OR slack_source = 'CLEARED')"
+            " AND slack_secret_ref IS NULL AND slack_secret_version IS NULL"
+            " AND slack_destination_hash IS NULL)"
+            " OR (slack_source = 'LEGACY_ENV' AND slack_secret_ref IS NOT NULL"
+            " AND slack_secret_version IS NULL AND slack_destination_hash IS NULL)"
+            " OR (slack_source = 'MANAGED' AND slack_secret_ref IS NOT NULL"
+            " AND slack_secret_version IS NOT NULL AND slack_destination_hash IS NOT NULL)",
+            name="slack_shape",
+        ),
+        CheckConstraint(
+            "((email_source IS NULL OR email_source IN ('LEGACY_TOPIC', 'CLEARED'))"
+            " AND email_address IS NULL AND email_generation IS NULL AND email_region IS NULL"
+            " AND email_status IS NULL AND email_topic_arn IS NULL"
+            " AND email_subscription_arn IS NULL AND email_failure_code IS NULL"
+            " AND email_next_check_at IS NULL AND email_lease_token IS NULL"
+            " AND ((email_source IS NOT NULL AND email_source = 'LEGACY_TOPIC')"
+            " = (email_legacy_topic_arn IS NOT NULL)))"
+            " OR (email_source = 'MANAGED' AND email_legacy_topic_arn IS NULL"
+            " AND email_address IS NOT NULL AND email_generation IS NOT NULL"
+            " AND email_region IS NOT NULL AND email_status IS NOT NULL"
+            " AND email_status IN ('SETUP_PENDING', 'SETUP_FAILED',"
+            " 'CONFIRMATION_PENDING', 'READY')"
+            " AND (email_status = 'SETUP_FAILED') = (email_failure_code IS NOT NULL)"
+            " AND (email_subscription_arn IS NULL OR email_topic_arn IS NOT NULL)"
+            " AND (email_status NOT IN ('CONFIRMATION_PENDING', 'READY')"
+            " OR email_subscription_arn IS NOT NULL))",
+            name="email_shape",
+        ),
+        CheckConstraint(
+            "(email_lease_token IS NULL) = (email_lease_expires_at IS NULL)",
+            name="email_lease_shape",
+        ),
+        CheckConstraint("email_attempts >= 0", name="email_attempts_non_negative"),
+        Index(
+            "ix_tenant_settings_email_due",
+            "email_next_check_at",
+            postgresql_where=text("email_source = 'MANAGED'"),
+        ),
+    )
+
+
+class TenantSettingsCleanup(Base):
+    """플랫폼이 만든 설정 자원(SNS 토픽 · Secrets Manager 비밀)의 삭제 대기 1건.
+
+    STAGING 은 저장 전에 만든 비밀이다 — 설정 저장 commit 이 이 행을 지우면 사용 중 자원이 되고, 남으면
+    (거절 · 실패 · 중단) not_before 뒤에 지운다. RETIRED 는 설정에서 빠진 자원이다. 테넌트 삭제와 무관하게
+    남도록 FK 를 두지 않는다. not_before 는 처리 임대로도 쓴다(claim 이 미래로 민다).
+    """
+
+    __tablename__ = "tenant_settings_cleanups"
+
+    cleanup_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
+    tenant_id: Mapped[str] = mapped_column(_ID)
+    resource_kind: Mapped[str] = mapped_column(String(16))
+    purpose: Mapped[str] = mapped_column(String(16))
+    region: Mapped[str] = mapped_column(String(32))
+    resource_name: Mapped[str] = mapped_column(String(512))
+    not_before: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    attempts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "resource_kind", "region", "resource_name",
+            name="uq_tenant_settings_cleanups_resource",
+        ),
+        CheckConstraint("resource_kind IN ('SNS_TOPIC', 'SECRET')", name="kind_known"),
+        CheckConstraint("purpose IN ('STAGING', 'RETIRED')", name="purpose_known"),
+        CheckConstraint("attempts >= 0", name="attempts_non_negative"),
+        Index("ix_tenant_settings_cleanups_not_before", "not_before"),
     )
 
 

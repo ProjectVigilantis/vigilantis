@@ -1,7 +1,7 @@
 """platform_role/assignment(b492e7d1a605) · audit_events(b544a7d1e2f3) 병합 리비전 — 실제 PostgreSQL/Alembic.
 
 지키는 것: 부모 2개(둘 다 그대로) · 단일 head · 새 DB base→head · 옛 b492 단독 / 옛 b544 단독 DB 가
-각각 head 로 올라가 두 갈래의 테이블을 모두 갖고 시드 데이터를 보존 · 27개 테이블 · ORM 일치.
+각각 head 로 올라가 두 갈래의 테이블을 모두 갖고 시드 데이터를 보존 · head 테이블 수 · ORM 일치.
 테스트마다 고유 이름의 일회용 DB 를 만들고 지운다(공용 pg_engine DB 의 head 를 건드리지 않는다).
 """
 
@@ -31,6 +31,8 @@ ISSUER = "https://cognito-idp.ap-northeast-2.amazonaws.com/pool-pa-merge"
 TENANT_ID = "22222222-2222-4222-8222-222222222222"
 INCIDENT_ID = "33333333-3333-4333-8333-333333333333"
 OCCURRED_AT = datetime(2026, 10, 30, 9, 0, tzinfo=UTC)
+# head 의 테이블 수 — 병합 뒤 리비전이 더한 표(T-7 고객 설정 · 정리 대기 · 파일 바인딩 증거 3종)를 포함한다
+HEAD_TABLES = 30
 
 
 @pytest.fixture()
@@ -130,7 +132,7 @@ def _seed_resolved_audit_event(conn):
 def _assert_merged_head(config, engine, *, platform_role, assignments):
     assert _versions(engine) == {_head(config)}
     tables = _tables(engine)
-    assert len(tables) == 27
+    assert len(tables) == HEAD_TABLES
     assert {ASSIGNMENTS, "audit_events"} <= tables
     with engine.connect() as conn:
         assert (
@@ -168,7 +170,7 @@ def test_fresh_database_upgrades_to_merge_head(merge_db):
     config, engine = merge_db
     command.upgrade(config, "head")
     assert _versions(engine) == {_head(config)}
-    assert len(_tables(engine)) == 27
+    assert len(_tables(engine)) == HEAD_TABLES
     with engine.connect() as conn:
         assert compare_metadata(MigrationContext.configure(conn), models.Base.metadata) == []
 

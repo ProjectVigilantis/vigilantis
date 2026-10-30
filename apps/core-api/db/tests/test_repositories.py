@@ -106,7 +106,7 @@ def test_alembic_head_applied_with_27_tables(db):
             " WHERE table_schema='public' AND table_name != 'alembic_version'"
         )
     ).scalar_one()
-    assert count == 27  # 14종 + 서비스 전환 3종 + 사건/outbox + 인증·사용자 이력 3종 + 발송 상태·바인딩·관문 3종 + 테넌트 1종 + 담당 배정 1종 + 감사 기록 1종(#544)
+    assert count == 30  # 14종 + 서비스 전환 3종 + 사건/outbox + 인증·사용자 이력 3종 + 발송 상태·바인딩·관문 3종 + 테넌트 1종 + 담당 배정 1종 + 감사 기록 1종(#544) + 고객 설정 · 정리 대기 · 파일 바인딩 증거 3종(T-7)
 
 
 # --- 자산 계열 -----------------------------------------------------------------

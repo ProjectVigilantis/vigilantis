@@ -21,6 +21,7 @@ from db import models
 
 _D = models.NotificationDelivery
 _R = models.NotificationRoute
+_LR = models.NotificationLegacyRoute
 _L = models.NotificationLane
 _E = models.NotificationEvent
 _T = models.Tenant
@@ -85,30 +86,76 @@ def sync_routes(db: Session, routes: Iterable) -> None:
     keys = set()
     for route in routes:
         keys.add((route.aws_account_id, route.channel))
-        stmt = insert(_R).values(
-            aws_account_id=route.aws_account_id,
-            channel=route.channel,
-            tenant_id=route.tenant_id,
-            fingerprint=route.fingerprint,
-            route_epoch=str(uuid.uuid4()),
-            activated_at=func.now(),
-        )
-        db.execute(stmt.on_conflict_do_update(
-            index_elements=[_R.aws_account_id, _R.channel],
-            set_={
-                "tenant_id": stmt.excluded.tenant_id,
-                "fingerprint": stmt.excluded.fingerprint,
-                "route_epoch": stmt.excluded.route_epoch,
-                "activated_at": stmt.excluded.activated_at,
-            },
-            where=or_(
-                _R.fingerprint != stmt.excluded.fingerprint,
-                _R.tenant_id != stmt.excluded.tenant_id,
-            ),
-        ))
+        _upsert_route(db, route)
     for account, channel in db.execute(select(_R.aws_account_id, _R.channel)).all():
         if (account, channel) not in keys:
             db.execute(delete(_R).where(_R.aws_account_id == account, _R.channel == channel))
+
+
+def sync_account_routes(db: Session, aws_account_id: str, routes: Iterable) -> None:
+    """한 계정의 바인딩만 sync_routes 규칙으로 맞춘다(T-7 설정 저장 · 관측 반영과 같은 트랜잭션).
+
+    routes 는 그 계정의 바인딩이다. 없는 채널의 바인딩은 지운다 — 그 채널의 대기 행은 claim 에서
+    ROUTE_CHANGED 로 막힌다. 다른 계정의 바인딩은 건드리지 않는다.
+    """
+    channels = set()
+    for route in routes:
+        if route.aws_account_id != aws_account_id:
+            raise ValueError("route account mismatch")
+        channels.add(route.channel)
+        _upsert_route(db, route)
+    stale = delete(_R).where(_R.aws_account_id == aws_account_id)
+    if channels:
+        stale = stale.where(_R.channel.not_in(sorted(channels)))
+    db.execute(stale)
+
+
+def _upsert_route(db: Session, route) -> None:
+    stmt = insert(_R).values(
+        aws_account_id=route.aws_account_id,
+        channel=route.channel,
+        tenant_id=route.tenant_id,
+        fingerprint=route.fingerprint,
+        route_epoch=str(uuid.uuid4()),
+        activated_at=func.now(),
+    )
+    db.execute(stmt.on_conflict_do_update(
+        index_elements=[_R.aws_account_id, _R.channel],
+        set_={
+            "tenant_id": stmt.excluded.tenant_id,
+            "fingerprint": stmt.excluded.fingerprint,
+            "route_epoch": stmt.excluded.route_epoch,
+            "activated_at": stmt.excluded.activated_at,
+        },
+        where=or_(
+            _R.fingerprint != stmt.excluded.fingerprint,
+            _R.tenant_id != stmt.excluded.tenant_id,
+        ),
+    ))
+
+
+def legacy_route_recorded(db: Session, route) -> bool:
+    """지워진 고객의 파일 바인딩을 앞선 기동이 경고로 넘겼다는 증거가 같은 fingerprint 로 있는가."""
+    return db.scalar(
+        select(_LR.fingerprint).where(
+            _LR.aws_account_id == route.aws_account_id,
+            _LR.channel == route.channel,
+            _LR.tenant_id == route.tenant_id,
+        )
+    ) == route.fingerprint
+
+
+def record_legacy_routes(db: Session, routes: Iterable) -> None:
+    """경고로 넘긴 파일 바인딩의 증거를 남긴다(라우트 · 바인딩 · 발송에는 쓰지 않는다)."""
+    for route in routes:
+        db.execute(
+            insert(_LR)
+            .values(
+                aws_account_id=route.aws_account_id, channel=route.channel,
+                tenant_id=route.tenant_id, fingerprint=route.fingerprint,
+            )
+            .on_conflict_do_nothing(index_elements=[_LR.aws_account_id, _LR.channel, _LR.tenant_id])
+        )
 
 
 def current_routes(db: Session, channel: str, accounts: Iterable[str]) -> dict[str, _R]:
