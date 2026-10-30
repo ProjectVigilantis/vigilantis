@@ -155,7 +155,7 @@ e492a3b5c701 ─┬─ f492c4a8d2e1 ─┬─ c492d6e8f4a2 ─┬─ b492e7d1a60
 
 | 항목 | 내용 | 근거 |
 | --- | --- | --- |
-| 공개 경로 | `GET /health`, `POST /api/v1/auth/login*`(6단계), (PR 3) `POST /api/v1/auth/password-reset` · `/password-reset/confirm`, `POST /api/v1/auth/logout`(멱등 — 세션이 없으면 지울 것이 없어 204). `GET /me` · `POST /activity`는 세션이 없으면 401이다. PR 1 · 2에서는 Cognito 미구성이면 503이었고, PR 3부터 Cognito 설정과 무관하게 동작한다(§설정). 그 밖의 `/api/v1/*`와 WebSocket은 전부 세션이 필요하다. 공개 목록은 `test_api_access.py`의 `PUBLIC_ROUTES`가 실제 앱 경로와 대조한다 — 새 경로는 목록에 넣지 않는 한 401이어야 통과한다 | [팀 결정] |
+| 공개 경로 | `GET /health`, `POST /api/v1/auth/login*`(6단계), (PR 3) `POST /api/v1/auth/password-reset` · `/password-reset/confirm`, `POST /api/v1/auth/logout`(멱등 — 세션이 없으면 지울 것이 없어 204), (#552) `POST /api/v1/signup-requests`(도입 신청 접수 — 세션 없이 Origin 검사 · UUIDv4 `Idempotency-Key` · 본문 크기 제한만 건다, §도입 신청 · 고객 문의 · 운영 알림). 같은 접두의 `GET /api/v1/signup-requests` · `PUT /api/v1/signup-requests/{request_id}/status`는 공개 경로가 아니다. `GET /me` · `POST /activity`는 세션이 없으면 401이다. PR 1 · 2에서는 Cognito 미구성이면 503이었고, PR 3부터 Cognito 설정과 무관하게 동작한다(§설정). 그 밖의 `/api/v1/*`와 WebSocket은 전부 세션이 필요하다. 공개 목록은 `test_api_access.py`의 `PUBLIC_ROUTES`가 실제 앱 경로와 대조한다 — 새 경로는 목록에 넣지 않는 한 401이어야 통과한다 | [팀 결정] [#552 구현 계약: 도입 신청 공개 접수] |
 | 세션 판정 | `auth.service.resolve_current_user(touch=False)` 하나. 보호 API · WebSocket은 유휴 시간을 늘리지 않는다. Cognito 설정을 읽지 않는다 — Cognito가 비어도 보호 API는 세션만으로 열린다 | [팀 결정] [판단] |
 | 배선 | `main.py`가 조치 · 자산 · 인시던트 · 메트릭 라우터를 `include_router(..., dependencies=[Origin, 세션])`로 포함한다. 역할은 조치 실행 · 종료 라우트의 의존성이다. 검사 순서: Origin(상태 변경만, DB 전) → 세션 → 역할 → 본문 검증 → 라우터. (#492) 메트릭 라우터는 세션 다음에 `require_business_access`(관리 등급만)를 거친다. 조치 · 자산 · 인시던트의 고객 범위는 각 라우트와 Workflow가 건다(아래 업무 범위) | [판단] |
 | 업무 범위(#492 · #533) | 조치 · 자산 · 인시던트 API는 요청자의 고객 범위(`tenant_scope_of`)로 거른다 — CENTRAL_ADMIN은 전체(소속 없는 기록 포함), TENANT_MANAGER는 배정된 고객의 기록, TENANT 계정은 자기 고객의 기록만 본다(소속이 정지된 TENANT 계정도 조회는 된다). 범위 밖 · 소속 없는 기록은 목록에서 빠지고, 상세 · 실행 · 종료는 없는 기록과 같은 404다. 메트릭(`/api/v1/metrics/timeseries`)은 관리 등급(CENTRAL_ADMIN · TENANT_MANAGER)만 쓰고 TENANT 계정은 403이다. TENANT_MANAGER의 메트릭은 모든 DB 축이 배정 고객의 기록으로 좁혀지고, CloudWatch 축은 그 자산을 소유한 고객의 자격으로만 부르며 결과 재사용도 소유 고객별로 나뉜다. 전역 WebSocket은 PLATFORM만 받는다(아래). 범위는 요청마다 세션 판정 시점의 등급 · 배정 · 소속으로 다시 만들고, 켜고 끄는 설정이 없다 | [판단] |
@@ -185,6 +185,7 @@ PLATFORM 계정은 모두 `role=ADMIN`(호환 값)이고, 아래 PLATFORM 열은
 | 고객 생성 `POST /api/v1/tenants` | 허용 | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
 | 고객 수정 · 삭제 · 정지 · 온보딩 조회 `GET /api/v1/tenants/{id}/onboarding` | 허용 | 배정 고객 | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
 | 직원 관리 · 담당 고객 배정 `/api/v1/staff*` | 허용(자기 등급 · 상태 변경은 403) | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
+| (#552) 도입 신청 관리 `GET /api/v1/signup-requests` · `PUT /api/v1/signup-requests/{request_id}/status` | 허용 | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
 | (#552) 운영 알림 `/api/v1/notifications*` | 현재 권한 범위(읽음은 사용자별) | 현재 권한 범위(읽음은 사용자별) | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
 
 TENANT 계정의 메트릭 · 실시간 연결과 고객용 업무 화면은 아직 열리지 않았다(T-4 · T-5). 정지 고객 사용자의 자기 기록 조회 요구([ADR-0012](../../../docs/adr/0012-saas-transition-account-structure-and-tenant-model.md))도 업무 API 조회 범위에서만 충족되고, 화면 · 메트릭 · 실시간 연결은 그 범위다. 이 모듈은 테넌트 데이터 격리가 완성됐다고 주장하지 않는다.
@@ -204,6 +205,9 @@ TENANT 계정의 메트릭 · 실시간 연결과 고객용 업무 화면은 아
 
 | 항목 | 내용 | 근거 |
 | --- | --- | --- |
+| 공개 접수 | `POST /api/v1/signup-requests`만 세션 없이 받는다. 이 경로에는 Origin 검사(`AUTH_ALLOWED_ORIGINS`), UUIDv4 `Idempotency-Key` 헤더 필수, 본문 크기 제한만 건다. 본문 크기는 JSON 파싱 전에 실제로 받은 바이트로 제한하고(초과 413), 한도는 기존 신청 양식의 칸 제한(이름 100 · 이메일 254 · 메모 1000자)에서 정했다. 같은 Key로 다시 보내면 같은 신청 ID로 202, 같은 Key에 다른 본문이면 409다. Key와 신청의 연결은 신청과 함께 보관하며 별도 만료 시간(TTL)을 두지 않는다 | [#552 구현 계약] |
+| 공개 접수의 한계 | 봇 방어나 이메일 소유 확인이 아니다. 요청 빈도 제한(WAF 임계값)은 정하지 않았고, 이 변경은 네트워크상 공개 허용 · 배포를 포함하지 않는다. 운영 환경의 개인정보 보존 기간과 빈도 제한 정책은 공개 출시 전에 정할 조건이다 | [#552 구현 계약] |
+| 도입 신청 관리 | 목록 · 상태 변경은 CENTRAL_ADMIN만 한다(`require_central_admin`). TENANT_MANAGER와 TENANT 계정은 403 `AUTH_FORBIDDEN`이다 | [#552 구현 계약] |
 | 운영 알림 | `GET /api/v1/notifications` · `POST /api/v1/notifications/read`는 플랫폼 관리 등급만 쓴다(라우터 의존성 `require_tenant_management`). 요청 시점에 권한이 있는 범위의 알림만 보이고, 읽음은 사용자별로 남는다. TENANT 계정은 역할과 관계없이 403 `AUTH_FORBIDDEN`이다 | [#552 구현 계약] |
 
 실제 배포 환경에서의 공개 동작과 그 검증은 이 문서가 보증하지 않는다(§테스트).

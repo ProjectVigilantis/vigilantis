@@ -52,6 +52,7 @@ FOREIGN_ORIGIN = "https://evil.example.com"
 # 세션 없이 열리는 HTTP 경로 전부. 늘리려면 여기와 auth/README.md 정책을 함께 고친다.
 PUBLIC_ROUTES = {
     ("GET", "/health"),
+    ("POST", "/api/v1/signup-requests"),
     ("POST", "/api/v1/auth/login"),
     ("POST", "/api/v1/auth/login/new-password"),
     ("POST", "/api/v1/auth/login/totp-setup"),
@@ -737,6 +738,7 @@ def _valid_bodies(incident_id: str) -> dict[tuple[str, str], dict | None]:
         ("PATCH", "/api/v1/tenants/{tenant_id}"): {"name": "x"},
         ("DELETE", "/api/v1/tenants/{tenant_id}"): None,
         ("POST", "/api/v1/tenants/{tenant_id}/suspend"): {"reason": "해지"},
+        ("PUT", "/api/v1/signup-requests/{request_id}/status"): {"status": "APPROVED"},
         ("POST", "/api/v1/notifications/read"): {"notification_ids": []},
     }
 
@@ -746,6 +748,7 @@ def _send(client, method, path, headers, body):
         path.replace("{incident_id}", str(uuid.uuid4()))
         .replace("{user_id}", str(uuid.uuid4()))
         .replace("{tenant_id}", str(uuid.uuid4()))
+        .replace("{request_id}", str(uuid.uuid4()))
     )
     return client.request(method, url, headers=headers, json=body)
 
