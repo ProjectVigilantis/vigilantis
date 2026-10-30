@@ -19,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 @unique
 class ErrorCode(str, Enum):
-    """REST 공통 오류 코드 27종. 괄호는 계약상 HTTP 상태.
+    """REST 공통 오류 코드. 괄호는 계약상 HTTP 상태.
 
     TENANT_* 5종은 /api/v1/tenants(Post-MVP T-4)와 테넌트 정지(원격 회수)의 거절이다.
     AUTH_* · ACCOUNT_* 13종은 로그인(/api/v1/auth)과 API 접근 보호(Post-MVP T-1)의 거절이다.
@@ -50,6 +50,12 @@ class ErrorCode(str, Enum):
     AUTH_PROVIDER_UNAVAILABLE = "AUTH_PROVIDER_UNAVAILABLE"  # 503 — Cognito 호출 실패(네트워크 · 5xx)
     USER_NOT_FOUND = "USER_NOT_FOUND"                        # 404 — 관리 범위 안의 고객사 사용자 없음
     USER_STATE_CONFLICT = "USER_STATE_CONFLICT"              # 409 — 테넌트별 마지막 활성 ADMIN · 중복 초대 · 상태 충돌
+    SIGNUP_REQUEST_NOT_FOUND = "SIGNUP_REQUEST_NOT_FOUND"    # 404
+    SIGNUP_REQUEST_STATE_CONFLICT = "SIGNUP_REQUEST_STATE_CONFLICT"  # 409
+    INQUIRY_NOT_FOUND = "INQUIRY_NOT_FOUND"                  # 404 — 없음 또는 담당 범위 밖
+    INQUIRY_STATE_CONFLICT = "INQUIRY_STATE_CONFLICT"        # 409
+    NOTIFICATION_NOT_FOUND = "NOTIFICATION_NOT_FOUND"        # 404 — 없음 또는 현재 조회 범위 밖
+    REQUEST_BODY_TOO_LARGE = "REQUEST_BODY_TOO_LARGE"        # 413 — 공개 접수 본문 예산 초과
     REQUEST_VALIDATION_FAILED = "REQUEST_VALIDATION_FAILED"  # 422
     INTERNAL_ERROR = "INTERNAL_ERROR"                        # 500
 

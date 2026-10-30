@@ -28,6 +28,13 @@ from schemas.api.incidents import (
     ResponseMode,
     RiskLevel,
 )
+from schemas.api.support import (
+    InquiryCategory,
+    InquiryEventAction,
+    InquiryStatus,
+    NotificationKind,
+    SignupRequestStatus,
+)
 from schemas.api.tenants import TenantStatus, TenantVerificationResult
 from schemas.api.users import UserEventAction
 from schemas.candidates import CandidateStatus
@@ -1452,3 +1459,134 @@ class AuditEvent(Base):
         # 목록은 최신순 · 같은 시각은 event_id 순이다(api/audit.py)
         Index("ix_audit_events_occurred_at_event_id", "occurred_at", "event_id"),
     )
+
+
+class SignupRequest(Base):
+    """익명 도입 신청. 키는 접수 재시도용이며 이메일 소유·남용 방지의 근거가 아니다."""
+
+    __tablename__ = "signup_requests"
+
+    request_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
+    idempotency_key: Mapped[str] = mapped_column(_ID)
+    company_name: Mapped[str] = mapped_column(String(100))
+    contact_name: Mapped[str] = mapped_column(String(100))
+    email: Mapped[str] = mapped_column(String(254))
+    phone: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    note: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    status: Mapped[SignupRequestStatus] = mapped_column(
+        _enum(SignupRequestStatus, "signup_request_status"), default=SignupRequestStatus.NEW
+    )
+    rejected_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_signup_requests_idempotency_key"),
+        CheckConstraint(
+            "(status = 'REJECTED' AND rejected_reason IS NOT NULL "
+            "AND length(btrim(rejected_reason)) > 0) OR "
+            "(status <> 'REJECTED' AND rejected_reason IS NULL)",
+            name="rejection_reason_by_status",
+        ),
+        Index("ix_signup_requests_created_at_request_id", "created_at", "request_id"),
+    )
+
+
+class Inquiry(Base):
+    """고객 문의. 작성자 표시 정보는 조회 시 현재 사용자·고객사와 조인한다."""
+
+    __tablename__ = "inquiries"
+
+    inquiry_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
+    tenant_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("tenants.tenant_id", ondelete="RESTRICT"), index=True
+    )
+    author_user_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("app_users.user_id", ondelete="RESTRICT"), index=True
+    )
+    category: Mapped[InquiryCategory] = mapped_column(_enum(InquiryCategory, "inquiry_category"))
+    title: Mapped[str] = mapped_column(String(100))
+    body: Mapped[str] = mapped_column(String(1000))
+    occurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    page_path: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    status: Mapped[InquiryStatus] = mapped_column(
+        _enum(InquiryStatus, "inquiry_status"), default=InquiryStatus.OPEN
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    __table_args__ = (
+        Index("ix_inquiries_created_at_inquiry_id", "created_at", "inquiry_id"),
+    )
+
+
+class InquiryEvent(Base):
+    """문의 처리 기록 — migration의 트리거가 일반 UPDATE·DELETE를 거절한다."""
+
+    __tablename__ = "inquiry_events"
+
+    event_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
+    inquiry_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("inquiries.inquiry_id", ondelete="RESTRICT"), index=True
+    )
+    actor_user_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("app_users.user_id", ondelete="RESTRICT"), index=True
+    )
+    action: Mapped[InquiryEventAction] = mapped_column(
+        _enum(InquiryEventAction, "inquiry_event_action")
+    )
+    before_status: Mapped[InquiryStatus | None] = mapped_column(
+        _enum(InquiryStatus, "inquiry_status"), nullable=True
+    )
+    after_status: Mapped[InquiryStatus | None] = mapped_column(
+        _enum(InquiryStatus, "inquiry_status"), nullable=True
+    )
+    note: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class OperatorNotification(Base):
+    """#552 내부 수신함. 기존 사건 발송 outbox(NotificationEvent)와 별개다."""
+
+    __tablename__ = "notifications"
+
+    notification_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
+    kind: Mapped[NotificationKind] = mapped_column(
+        _enum(NotificationKind, "operator_notification_kind")
+    )
+    target_id: Mapped[str] = mapped_column(_ID)
+    tenant_id: Mapped[str | None] = mapped_column(
+        _ID, ForeignKey("tenants.tenant_id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    subject: Mapped[str] = mapped_column(String(100))
+    summary: Mapped[str] = mapped_column(String(100))
+    inquiry_category: Mapped[InquiryCategory | None] = mapped_column(
+        _enum(InquiryCategory, "inquiry_category"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("kind", "target_id"),
+        CheckConstraint(
+            "(kind = 'SIGNUP_REQUEST' AND tenant_id IS NULL AND inquiry_category IS NULL)"
+            " OR (kind = 'INQUIRY' AND tenant_id IS NOT NULL AND inquiry_category IS NOT NULL)",
+            name="notification_target_shape",
+        ),
+        Index("ix_notifications_created_at_notification_id", "created_at", "notification_id"),
+    )
+
+
+class OperatorNotificationRead(Base):
+    __tablename__ = "notification_reads"
+
+    notification_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("notifications.notification_id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("app_users.user_id", ondelete="CASCADE"), primary_key=True
+    )
+    read_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
