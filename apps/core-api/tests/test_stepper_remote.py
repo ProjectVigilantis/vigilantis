@@ -176,6 +176,31 @@ def test_stepper_ws_accepts_valid_token_and_unregisters_on_close(stepper_client)
     assert realtime.connection_count == 0
 
 
+def test_stepper_ws_receives_published_events_of_any_incident(stepper_client):
+    """토큰 연결은 전역 진단이다 — 테넌트 소속을 모르는(DB에도 없는) 인시던트의 이벤트도 받는다.
+    제품 /api/v1/ws 는 같은 이벤트를 걸러 보내지 않는다(routers/ws.py) — 도구 연결만의 명시 허용이다."""
+    from datetime import UTC, datetime
+    from time import monotonic, sleep
+
+    from realtime import incident_event
+    from schemas.api.ws import WsEventType
+
+    realtime = stepper_client.app.state.realtime
+    event = incident_event(
+        WsEventType.INCIDENT_UPDATED, incident_id=str(uuid.uuid4()), occurred_at=datetime.now(UTC)
+    )
+    with stepper_client.websocket_connect("/_stepper/ws", headers=AUTH) as socket:
+        deadline = monotonic() + 5
+        while realtime.connection_count != 1:  # accept 뒤 등록이 끝나야 발행 대상이 된다
+            assert monotonic() < deadline, "stepper WS가 등록되지 않았다"
+            sleep(0.01)
+        realtime.publish(event)
+        received = socket.receive_json()
+    assert (received["event_id"], received["data"]["incident_id"]) == (
+        event.event_id, event.data.incident_id,
+    )
+
+
 # ------------------------------------------------------------------------------
 # 버튼 하나씩
 # ------------------------------------------------------------------------------

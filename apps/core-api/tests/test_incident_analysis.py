@@ -360,9 +360,9 @@ def test_close_and_approval_are_serialized_by_postgres(
     def act(session, action):
         if action == "close":
             return workflows.resolve_incident(
-                session, incident_id, ResolutionJudgement.NO_FURTHER_ACTION, actor=committed_actor
+                session, incident_id, ResolutionJudgement.NO_FURTHER_ACTION, audit_actor=committed_actor
             )
-        return workflows.reserve_execution(session, request, actor=committed_actor)
+        return workflows.reserve_execution(session, request, audit_actor=committed_actor)
     def contender(session):
         session.execute(text("SET LOCAL lock_timeout = '30s'"))
         try:

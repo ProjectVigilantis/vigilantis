@@ -56,8 +56,9 @@ function useAccount(): AccessSubject | null {
 
 export function ShellHeader() {
   const account = useAccount();
-  // 자산 조회와 두 인디케이터는 업무 기능이다 — 확인된 플랫폼 계정에게만 연다(lib/home-path.ts `businessOpen`).
-  // 확인 전 · 조회 실패 · 고객사 계정은 부르지도 그리지도 않는다. 주간/야간 전환과 사용자 메뉴는 그대로 둔다.
+  // 자산 조회와 두 인디케이터는 업무 기능이다 — 고객 범위가 있는 확인된 플랫폼 계정에게만 연다(lib/home-path.ts
+  // `businessOpen`). 확인 전 · 조회 실패 · 고객사 계정 · 담당 고객 없는 고객 담당자는 부르지도 그리지도 않는다.
+  // 주간/야간 전환과 사용자 메뉴는 그대로 둔다.
   const open = businessOpen(account);
   const assets = useAssetsEnvelope(open);
   const presence: AssetPresence = assets.failed

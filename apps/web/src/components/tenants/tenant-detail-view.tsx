@@ -4,12 +4,17 @@
 //
 // 상태 관문은 서버가 최종 판정한다. 그 사이 다른 관리자가 상태를 바꿨으면(TENANT_STATE_CONFLICT)
 // 화면을 다시 읽는다. 낡은 화면의 버튼으로 다시 시도하지 않게 한다(PROPOSAL_NOT_EXECUTABLE과 같은 원칙).
+//
+// 쓰기 · 온보딩 자격 증명(링크 · ExternalId)은 이 고객을 다룰 수 있는 계정만 쓴다(#492 PR 5) — 중앙 관리자, 또는 이
+// 고객이 배정된 고객 담당자(lib/roles.ts `canAccessTenant`). 확인 전 계정이나 배정 스냅샷에 없는 고객에는 버튼을 그리지
+// 않고 조회만 보인다. 실제 차단은 서버(403 · 범위 밖 404)이고, 낡은 화면의 요청이 거절되면 오류를 보인 뒤 다시 읽는다.
 
 import { ArrowLeft, ExternalLink, TriangleAlert } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useRef, useState } from 'react';
 
+import { useSession } from '@/components/auth/session-provider';
 import { CopyButton } from '@/components/copy-button';
 import { Row } from '@/components/detail-row';
 import { ErrorState } from '@/components/error-state';
@@ -30,6 +35,7 @@ import {
   verifyTenant,
 } from '@/lib/api/client';
 import type { LabelTone } from '@/lib/enum-labels';
+import { canAccessTenant } from '@/lib/roles';
 import {
   isStaleTenantRequest,
   SUSPEND_REASON_MAX,
@@ -46,12 +52,15 @@ type Busy = 'verify' | 'resume' | 'suspend' | 'remove' | 'auto' | 'onboarding' |
 
 export function TenantDetailView({ tenant }: { tenant: TenantDetail }) {
   const router = useRouter();
+  const { session, refresh: refreshSession } = useSession();
+  const canManage = session.kind === 'user' && canAccessTenant(session.user, tenant.tenant_id);
   const [busy, setBusy] = useState<Busy>(null);
   const [failure, setFailure] = useState<unknown>(null);
   const [onboarding, setOnboarding] = useState<TenantOnboardingResponse | null>(null);
   const [dialog, setDialog] = useState<'suspend' | 'remove' | null>(null);
   const inFlight = useRef(false);
-  const actions = tenantActions(tenant.status);
+  // 상태가 열어도 관리 권한이 없으면 동작을 그리지 않는다.
+  const actions = canManage ? tenantActions(tenant.status) : { verify: false, suspend: false, resume: false, remove: false };
   const verification = tenant.last_verification;
   const hint = verification ? verificationHint(verification.result, tenant.status) : null;
 
@@ -76,6 +85,9 @@ export function TenantDetailView({ tenant }: { tenant: TenantDetail }) {
       setBusy(null);
     }
     if (tenantRunFollowUp(result).refresh) router.refresh();
+    // 403은 화면의 등급 · 배정 스냅샷이 낡았다는 뜻일 수 있다 — `/me`를 다시 읽어 버튼을 지금 권한에 맞춘다.
+    // 401은 API 계층이 로그인으로 보내고, 재조회 실패는 이미 보인 오류 외에 더 알리지 않는다.
+    if (!result.ok && result.code === 'AUTH_FORBIDDEN') refreshSession().catch(() => {});
     return result;
   }
 
@@ -179,7 +191,11 @@ export function TenantDetailView({ tenant }: { tenant: TenantDetail }) {
                 고객이 역할을 지웠다면 같은 ExternalId로 역할을 다시 만들어야 다시 연결됩니다.
               </p>
             )}
-            {onboarding === null ? (
+            {!canManage ? (
+              <p className="text-muted-foreground text-xs">
+                온보딩 링크 · ExternalId는 중앙 관리자와 이 고객의 담당자만 볼 수 있습니다.
+              </p>
+            ) : onboarding === null ? (
               <Button type="button" size="sm" variant="outline" className="w-fit" disabled={disabled} onClick={showOnboarding}>
                 {busy === 'onboarding' ? '불러오는 중…' : '온보딩 링크 · ExternalId 보기'}
               </Button>
@@ -222,10 +238,12 @@ export function TenantDetailView({ tenant }: { tenant: TenantDetail }) {
         <Panel title="자동 조치" description="끄면 자동 발동(High 선차단 · Medium 1분 무응답 자동 격리)만 하지 않습니다. 수집 · 분석 · 승인 실행은 그대로입니다.">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <span className="text-sm">{tenant.auto_action_enabled ? '켜짐' : '꺼짐 · 사람이 승인한 조치만 실행'}</span>
-            <Button type="button" size="sm" variant="outline" disabled={disabled}
-              onClick={() => run('auto', () => updateTenant(tenant.tenant_id, { auto_action_enabled: !tenant.auto_action_enabled }))}>
-              {busy === 'auto' ? '바꾸는 중…' : tenant.auto_action_enabled ? '자동 조치 끄기' : '자동 조치 켜기'}
-            </Button>
+            {canManage ? (
+              <Button type="button" size="sm" variant="outline" disabled={disabled}
+                onClick={() => run('auto', () => updateTenant(tenant.tenant_id, { auto_action_enabled: !tenant.auto_action_enabled }))}>
+                {busy === 'auto' ? '바꾸는 중…' : tenant.auto_action_enabled ? '자동 조치 끄기' : '자동 조치 켜기'}
+              </Button>
+            ) : null}
           </div>
         </Panel>
       </div>

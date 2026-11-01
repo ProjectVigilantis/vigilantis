@@ -82,6 +82,7 @@ test('초대는 고객 ID · 복구 선택을 그대로 싣고 만든 고객사 
   const created: UserListItem = {
     account_type: 'TENANT',
     tenant_id: tenantId,
+    platform_role: null,
     user_id: 'u1',
     email: 'a@b.c',
     role: 'VIEWER',
@@ -127,7 +128,7 @@ test('서버 계정 조회는 세션 헤더를 전달하고 캐시하지 않는�
   const realFetch = globalThis.fetch;
   t.after(() => { globalThis.fetch = realFetch; });
   const user = {
-    account_type: 'TENANT', tenant_id: 'tenant-1', role: 'VIEWER',
+    account_type: 'TENANT', tenant_id: 'tenant-1', platform_role: null, role: 'VIEWER', assigned_tenant_ids: [],
     user_id: 'user-1', email: 'viewer@example.invalid',
     session: { absolute_expires_at: '2026-10-27T00:00:00Z', idle_expires_at: '2026-10-26T17:00:00Z' },
   };

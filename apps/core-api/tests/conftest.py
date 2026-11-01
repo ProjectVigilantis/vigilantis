@@ -11,8 +11,8 @@
 #     라우터에는 get_db 의존성 재정의로 테스트 세션을 주입한다. 테스트 종료 시
 #     외부 트랜잭션을 rollback해 전부 되돌린다 — 세션이 create_savepoint 모드라
 #     테스트 중의 commit·rollback이 외부 트랜잭션을 건드리지 않는다 (Issue #232).
-#   - /api/v1/* 접근 보호(#492 PR 2): client_pg는 PLATFORM ADMIN 세션 쿠키·허용 Origin을 기본으로
-#     싣는다(업무 라우터는 임시로 플랫폼 계정만 받는다 — #492). 세션 없는 클라이언트는 client_pg_anon,
+#   - /api/v1/* 접근 보호(#492 PR 2): client_pg는 PLATFORM(CENTRAL_ADMIN) 세션 쿠키·허용 Origin을 기본으로
+#     싣는다(업무 라우터는 임시로 전체 범위인 중앙 관리자만 받는다 — #492). 세션 없는 클라이언트는 client_pg_anon,
 #     다른 계정은 login_as(role, tenant_id=...). 고객사(TENANT) 계정은 make_tenant 로 만든 실제
 #     테넌트 행에 묶는다. WebSocket은 ws_client(commit된 세션 + 세션 확인 팩토리 재정의).
 #   - 앱 기동 시 실행 스캔 잡은 끈다(DISPATCH_ENABLED=false) — 테스트마다 스캔이
@@ -180,11 +180,15 @@ def db(pg_engine):
 # ==============================================================================
 # 인증 시드 · 통합 클라이언트 (#492 PR 2)
 #
-#   /api/v1/* 는 세션이 있어야 열린다. client_pg 는 기본으로 PLATFORM ADMIN 실세션(테스트 DB의
-#   app_users · auth_sessions 행)과 허용 Origin 을 싣는다 — 업무 라우터의 양성 테스트가 임시 관문
-#   (플랫폼 계정만)을 지난다. PLATFORM 의 역할은 ADMIN 고정이라(DB CHECK) OPERATOR · VIEWER 는
+#   /api/v1/* 는 세션이 있어야 열린다. client_pg 는 기본으로 PLATFORM(CENTRAL_ADMIN) 실세션(테스트 DB의
+#   app_users · auth_sessions 행)과 허용 Origin 을 싣는다 — 업무 라우터의 양성 테스트가 전체 범위로 돈다.
+#   PLATFORM 의 역할은 ADMIN 고정이라(DB CHECK) OPERATOR · VIEWER 는
 #   고객사(TENANT) 계정으로만 만든다 — make_auth_session(role, tenant_id=make_tenant()).
 #   tenant_id 없이 ADMIN 밖의 역할을 주면 DB CHECK 가 시드 자체를 거절한다(계정 종류를 추론하지 않는다).
+#   플랫폼 등급(#492): 시드의 PLATFORM 기본 등급은 CENTRAL_ADMIN 이다 — 범위를 정하지 않은 기존 플랫폼 행위자
+#   테스트가 계속 전역 관리자를 모델링한다. 담당자는 platform_role=TENANT_MANAGER 와 assigned_tenant_ids 로
+#   명시 배정한다(모든 고객사를 자동으로 주지 않는다 — 생략하면 배정 없음). 운영 기본값(create_user)은 배정 없는
+#   TENANT_MANAGER 다.
 #   쿠키는 Cookie 헤더로 직접 싣는다. 세션 쿠키가 Secure 라 httpx 쿠키 저장소는 http 로 보내지 않는다.
 #   세션 토큰은 헤더로만 쓴다 — assert 메시지 · 출력에 싣지 않는다(AuthSeed repr 에서도 뺀다).
 # ==============================================================================
@@ -201,6 +205,8 @@ class AuthSeed:
     role: object
     account_type: object
     tenant_id: str | None
+    platform_role: object  # PLATFORM 만 값이 있다
+    assigned_tenant_ids: tuple  # TENANT_MANAGER 에 명시 배정한 고객사(시드 순서 그대로)
     token: str = field(repr=False)
     cookie: str = field(repr=False)  # "__Host-vg_session=<token>"
     headers: dict = field(repr=False)  # Cookie + 허용 Origin
@@ -233,11 +239,22 @@ def _seed_tenant(session, status=None, *, now=None) -> str:
 
 
 def _seed_auth_session(
-    session, *, role, origin, tenant_id=None, account_type=None, status=None, now=None
+    session,
+    *,
+    role,
+    origin,
+    tenant_id=None,
+    account_type=None,
+    platform_role=None,
+    assigned_tenant_ids=(),
+    status=None,
+    now=None,
 ) -> AuthSeed:
     """사용자 + 세션을 만들고 commit한다. 만료는 auth 설정의 한도를 그대로 쓴다.
 
     계정 종류: tenant_id 를 주면 TENANT, 아니면 account_type(기본 PLATFORM — UNASSIGNED 도 고를 수 있다).
+    플랫폼 등급: PLATFORM 만 갖는다(기본 CENTRAL_ADMIN). 다른 종류에 주면 시드가 거절한다.
+    담당 배정: assigned_tenant_ids 는 TENANT_MANAGER 에만 준다(실제 테넌트 행이어야 한다).
     """
     from datetime import UTC, datetime
 
@@ -246,12 +263,18 @@ def _seed_auth_session(
     from config import get_auth_settings
     from db import models
     from db.repositories import auth as auth_repo
-    from schemas.api.auth import AccountType
+    from schemas.api.auth import AccountType, PlatformRole
 
     if tenant_id is not None:
         assert account_type in (None, AccountType.TENANT), account_type
         account_type = AccountType.TENANT
     account_type = account_type or AccountType.PLATFORM
+    if account_type is AccountType.PLATFORM:
+        platform_role = platform_role or PlatformRole.CENTRAL_ADMIN
+    else:
+        assert platform_role is None, (account_type, platform_role)
+    assigned_tenant_ids = tuple(assigned_tenant_ids)
+    assert not assigned_tenant_ids or platform_role is PlatformRole.TENANT_MANAGER, platform_role
     settings = get_auth_settings()
     now = now or datetime.now(UTC)
     suffix = uuid.uuid4().hex
@@ -262,11 +285,16 @@ def _seed_auth_session(
         email=f"{role.value.lower()}-{suffix[:8]}@example.com",
         role=role,
         account_type=account_type,
+        platform_role=platform_role,
         tenant_id=tenant_id,
         now=now,
         status=status or models.AppUserStatus.ACTIVE,
         email_verified_at=now,
     )
+    if assigned_tenant_ids:
+        auth_repo.replace_assigned_tenants(
+            session, user_id=user.user_id, tenant_ids=assigned_tenant_ids, now=now
+        )
     issued = auth_sessions.issue_session(
         session,
         user_id=user.user_id,
@@ -283,6 +311,8 @@ def _seed_auth_session(
         role=role,
         account_type=account_type,
         tenant_id=tenant_id,
+        platform_role=platform_role,
+        assigned_tenant_ids=assigned_tenant_ids,
         token=issued.token,
         cookie=cookie,
         headers={"Cookie": cookie, "Origin": origin},
@@ -318,8 +348,9 @@ def seed_tenant():
 def make_auth_session(db, allowed_origin):
     """테스트 트랜잭션(db) 안의 인증 시드 → AuthSeed.
 
-    기본은 PLATFORM ADMIN. 고객사 계정은 tenant_id=make_tenant(...) 로, 미지정 계정은
-    account_type=AccountType.UNASSIGNED 로 만든다. status · now 도 고를 수 있다.
+    기본은 PLATFORM(role=ADMIN 호환 값, platform_role=CENTRAL_ADMIN). 고객사 계정은 tenant_id=make_tenant(...) 로,
+    미지정 계정은 account_type=AccountType.UNASSIGNED 로, 담당자는 platform_role=TENANT_MANAGER 와
+    assigned_tenant_ids=(make_tenant(), ...) 로 만든다. status · now 도 고를 수 있다.
     """
     from schemas.api.auth import UserRole
 
@@ -340,7 +371,7 @@ def audit_actor(make_auth_session):
 
 @pytest.fixture()
 def platform_session(make_auth_session) -> AuthSeed:
-    """client_pg 가 기본으로 싣는 PLATFORM ADMIN 세션."""
+    """client_pg 가 기본으로 싣는 PLATFORM(CENTRAL_ADMIN) 세션."""
     return make_auth_session()
 
 
@@ -368,7 +399,7 @@ def client_pg_anon(pg_engine, db):
 
 @pytest.fixture()
 def client_pg(pg_engine, db, platform_session):
-    """통합 클라이언트 — get_db 재정의 + PLATFORM ADMIN 세션 쿠키 · 허용 Origin 기본 헤더."""
+    """통합 클라이언트 — get_db 재정의 + PLATFORM(CENTRAL_ADMIN) 세션 쿠키 · 허용 Origin 기본 헤더."""
     from fastapi.testclient import TestClient
 
     with TestClient(_pg_app(db), headers=platform_session.headers) as test_client:
@@ -401,7 +432,7 @@ class CommittedAuth:
         self._tenant_ids: list[str] = []
 
     def make(self, role=None, **kwargs) -> AuthSeed:
-        """기본은 PLATFORM ADMIN — 인자는 make_auth_session 과 같다."""
+        """기본은 PLATFORM(CENTRAL_ADMIN) — 인자는 make_auth_session 과 같다."""
         from schemas.api.auth import UserRole
 
         with self.sessions() as session:
@@ -462,7 +493,7 @@ def committed_actor(committed_auth):
 
 @pytest.fixture()
 def ws_session(committed_auth) -> AuthSeed:
-    """ws_client 가 싣는 PLATFORM ADMIN 세션(commit됨) — 전역 WebSocket 은 임시로 플랫폼 계정만 받는다."""
+    """ws_client 가 싣는 PLATFORM(CENTRAL_ADMIN) 세션(commit됨) — 전역 WebSocket 은 임시로 플랫폼 계정만 받는다."""
     return committed_auth.make()
 
 

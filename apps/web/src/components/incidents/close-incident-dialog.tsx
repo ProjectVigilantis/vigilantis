@@ -9,7 +9,7 @@ import {
 import { ApiError, resolveIncident } from '@/lib/api/client';
 import { arnShort, incidentTitle } from '@/lib/enum-labels';
 import { closureAction, closureBlockedReason } from '@/lib/incident-closure';
-import { VIEWER_ACTION_BLOCKED } from '@/lib/roles';
+import { ACTION_FORBIDDEN } from '@/lib/roles';
 import type { IncidentResponse } from '@/types/api';
 
 export function CloseIncidentDialog({
@@ -52,8 +52,8 @@ export function CloseIncidentDialog({
       if (apiError.code === 'INCIDENT_NOT_RESOLVABLE' || apiError.code === 'INCIDENT_NOT_FOUND') {
         onStale();
       } else if (apiError.code === 'AUTH_FORBIDDEN') {
-        // 역할이 막았다(#492 PR 2) — 다시 눌러도 같은 403이라 버튼을 잠근다.
-        setError(VIEWER_ACTION_BLOCKED);
+        // 역할 또는 담당 범위가 막았다(#492 PR 2 · PR 5) — 다시 눌러도 같은 403이라 버튼을 잠근다.
+        setError(ACTION_FORBIDDEN);
         setForbidden(true);
       } else {
         setError(apiError.message);

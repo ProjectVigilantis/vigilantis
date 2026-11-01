@@ -24,6 +24,7 @@ for p in (str(CORE_API), str(REPO_ROOT / "packages")):
         sys.path.insert(0, p)
 
 from schemas.assets import MetricName  # noqa: E402
+from services.aws.client import TenantAccess, current_tenant  # noqa: E402
 from services.collector import _failure_reason, _fetch_metrics  # noqa: E402
 from services.metrics import (  # noqa: E402
     Ec2Ref,
@@ -294,3 +295,80 @@ def test_마지막_페이지까지_PartialData_면_오류다():
     )
 
     assert fetched.errors == {("i-0001", MetricName.CPU_UTILIZATION): "PartialData"}
+
+
+# ---------------------------------------------------------------- 고객사 자격(#533)
+
+TENANT_A = TenantAccess("tenant-a", "arn:aws:iam::111111111111:role/vigilantis-access", "a" * 32)
+TENANT_B = TenantAccess("tenant-b", "arn:aws:iam::222222222222:role/vigilantis-access", "b" * 32)
+
+
+class _OwnerAwareFactory:
+    """`aws_client` 대역 — 클라이언트를 만든 순간의 테넌트 문맥(= 그 호출이 나간 자격)을 남긴다.
+
+    값은 소유마다 다르다(`values`: tenant_id, None = 프로세스 자격). 곡선이 다른 소유의 ARN 에
+    실리면 값으로 드러난다.
+    """
+
+    def __init__(self, values: dict[str | None, float]):
+        self.values = values
+        self.calls: list[tuple[str | None, list[str]]] = []
+
+    def __call__(self, service, region):
+        access = current_tenant()
+        owner = access.tenant_id if access is not None else None
+        factory = self
+
+        class _Client:
+            def get_metric_data(self, **kwargs):
+                queries = kwargs["MetricDataQueries"]
+                ids = sorted({q["MetricStat"]["Metric"]["Dimensions"][0]["Value"] for q in queries})
+                factory.calls.append((owner, ids))
+                return {
+                    "MetricDataResults": [
+                        {"Id": q["Id"], "StatusCode": "Complete",
+                         "Timestamps": [WINDOW_START], "Values": [factory.values[owner]]}
+                        for q in queries
+                    ]
+                }
+
+        return _Client()
+
+
+def _owned_ref(access: TenantAccess | None, account: str) -> Ec2Ref:
+    """같은 리전 · 같은 인스턴스 ID — 계정(ARN)과 소유만 다르다."""
+    return Ec2Ref(
+        arn=f"arn:aws:ec2:{REGION}:{account}:instance/i-0001",
+        resource_id="i-0001",
+        name=None,
+        region=REGION,
+        access=access,
+    )
+
+
+def test_소유마다_그_자격으로_따로_부르고_같은_인스턴스_ID의_곡선을_섞지_않는다(monkeypatch):
+    """두 고객 계정과 MVP 계정에 같은 리전 · 같은 인스턴스 ID 가 있다. 한 호출에 다른 소유의 ID 를 섞지 않고
+    (고객사 자격으로 다른 계정의 ID 를 묻지 않는다), 곡선은 소유마다 그 ARN 에 실린다."""
+    factory = _OwnerAwareFactory({"tenant-a": 11.0, "tenant-b": 22.0, None: 44.0})
+    monkeypatch.setattr("services.metrics.aws_client", factory)
+    refs = [
+        _owned_ref(TENANT_A, "111111111111"),
+        _owned_ref(None, "123456789012"),
+        _owned_ref(TENANT_B, "222222222222"),
+    ]
+    window = dict(window_start=WINDOW_START, window_end=WINDOW_END, period_seconds=PERIOD)
+
+    cpu = cpu_timeseries(refs, **window)
+    network = network_timeseries(refs, **window)
+
+    assert [(s.arn, [p.value for p in s.points]) for s in cpu] == [
+        (refs[0].arn, [11.0]), (refs[1].arn, [44.0]), (refs[2].arn, [22.0])
+    ]
+    assert [(s.arn, [p.value for p in s.in_points], [p.value for p in s.out_points]) for s in network] == [
+        (refs[0].arn, [11.0], [11.0]), (refs[1].arn, [44.0], [44.0]), (refs[2].arn, [22.0], [22.0])
+    ]
+    # 소유 × 리전마다 한 번(CPU · 네트워크 각각) — 각 호출은 자기 소유의 인스턴스만 묻는다
+    assert factory.calls == [
+        ("tenant-a", ["i-0001"]), (None, ["i-0001"]), ("tenant-b", ["i-0001"]),
+    ] * 2
+    assert current_tenant() is None  # 문맥은 조회 뒤에 남지 않는다

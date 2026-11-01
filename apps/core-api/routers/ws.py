@@ -8,8 +8,11 @@
 #     교차 출처 보호 장치다. 세션 쿠키는 그와 별개로 필요하다.
 #   - 세션 쿠키(__Host-vg_session)가 유효해야 연결을 받는다. 없거나 무효면 accept 전에
 #     1008로 닫는다(Handshake HTTP 403). 판정은 auth.access.resolve_session_user 하나다.
-#   - 임시 출시 관문(#492): 이벤트가 테넌트 범위로 걸러지지 않아 PLATFORM 계정만 받는다. 고객사(TENANT)
+#   - 임시 출시 관문(#492): PLATFORM 계정만 연결한다. 고객사(TENANT)
 #     계정의 연결은 무효 세션과 같이 다룬다 — accept 전 1008, 연결 중이면 4401(사유를 구분하지 않는다).
+#   - 이벤트 범위: 연결마다 전송 직전에 세션 · 등급 · 담당 고객을 다시 판정한다(RealtimeManager 등록 시
+#     authorize 필수). CENTRAL_ADMIN(tenant_scope_ids None)만 전체, 그 밖은 저장된 Incident.tenant_id가
+#     담당 고객일 때만 받는다. Incident 없음 · tenant_id NULL · DB 오류는 전송하지 않는다.
 #   - 연결 중에는 감시 task가 min(지금 + WS_SESSION_CHECK_SECONDS, 유휴 만료, 최대 수명)마다
 #     다시 판정하고, 무효면 4401 "AUTH_REQUIRED"로 닫는다(닫기 코드: schemas/api/ws.py).
 #     판정은 touch=False라 연결·확인 모두 유휴 시간을 늘리지 않는다.
@@ -31,18 +34,26 @@ from functools import partial
 import anyio
 from fastapi import APIRouter, Depends, WebSocket
 from fastapi.concurrency import run_in_threadpool
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.websockets import WebSocketDisconnect, WebSocketState
 
 from schemas.api.auth import SessionInfo
 from schemas.api.errors import ErrorCode
-from schemas.api.ws import WS_CLOSE_AUTH_REQUIRED
+from schemas.api.ws import WS_CLOSE_AUTH_REQUIRED, WsEvent
 
-from auth.access import get_auth_session_factory, is_platform_account, resolve_session_user
+from auth.access import (
+    can_access_tenant,
+    get_auth_session_factory,
+    is_platform_account,
+    resolve_session_user,
+    tenant_scope_ids,
+)
+from db import models
 from auth.http import SESSION_COOKIE, allowed_origins, get_clock
 from auth.service import CurrentUser
 from config import AuthSettings, Settings, get_auth_settings, get_settings
-from realtime import RealtimeManager
+from realtime import IncidentOwnerLookup, RealtimeManager
 
 router = APIRouter(prefix="/api/v1")
 logger = logging.getLogger("vigilantis.ws")
@@ -88,8 +99,21 @@ async def websocket_endpoint(
         await websocket.close(code=_CLOSE_POLICY_VIOLATION)  # 세션 없음 · 무효 — 사유를 구분하지 않는다
         return
 
+    async def authorize(event: WsEvent, owner_lookup: IncidentOwnerLookup) -> bool:
+        # 이벤트 전송 직전마다 호출된다 — 세션 · 등급 · 담당 고객을 그때의 DB 상태로 다시 판정한다.
+        # Incident 소유 고객만 발행 1회 안에서 연결 간에 공유한다(중앙 연결은 조회하지 않는다)
+        current = await check()
+        if current is None:
+            return False
+        if tenant_scope_ids(current) is None:  # 명시적 CENTRAL_ADMIN — 미배정 레거시 포함 전체
+            return True
+        tenant_id = await owner_lookup.get(
+            partial(run_in_threadpool, _incident_tenant_id, session_factory, event.data.incident_id)
+        )
+        return tenant_id is not None and can_access_tenant(current, tenant_id)
+
     manager: RealtimeManager = websocket.app.state.realtime
-    await manager.register(websocket)
+    await manager.register(websocket, authorize)
     watch = partial(
         _watch_session,
         websocket,
@@ -111,6 +135,12 @@ async def websocket_endpoint(
             group.start_soon(run_then_stop, watch)
     finally:
         manager.unregister(websocket)
+
+
+def _incident_tenant_id(session_factory: Callable[[], Session], incident_id: str) -> str | None:
+    """저장된 Incident.tenant_id — 이벤트 범위의 유일한 원천. 짧은 DB 세션 하나, 없거나 미배정이면 None."""
+    with session_factory() as db:
+        return db.scalar(select(models.Incident.tenant_id).where(models.Incident.incident_id == incident_id))
 
 
 async def _close(websocket: WebSocket, code: int, reason: str = "") -> None:

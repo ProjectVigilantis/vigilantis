@@ -15,6 +15,7 @@ from schemas.api.auth import (
     NewPasswordRequest,
     PasswordResetConfirmRequest,
     PasswordResetRequest,
+    PlatformRole,
     SessionInfo,
     TotpSetupResponse,
     UserRole,
@@ -29,6 +30,10 @@ CONTRACT_LOGIN_STEPS = {
     "COMPLETED",
 }
 CONTRACT_ROLES = {"ADMIN", "OPERATOR", "VIEWER"}
+CONTRACT_PLATFORM_ROLES = {"CENTRAL_ADMIN", "TENANT_MANAGER"}
+USER_ID = "1f0c2c1e-0000-4000-8000-000000000001"
+TENANT_A = "1f0c2c1e-0000-4000-8000-00000000000a"
+TENANT_B = "1f0c2c1e-0000-4000-8000-00000000000b"
 
 PASSWORD = "Pw-literal-for-test-1!"
 CODE = "123456"
@@ -41,6 +46,10 @@ def test_login_steps_match_contract_exactly():
 
 def test_roles_match_contract_exactly():
     assert {r.value for r in UserRole} == CONTRACT_ROLES
+
+
+def test_platform_roles_match_contract_exactly():
+    assert {r.value for r in PlatformRole} == CONTRACT_PLATFORM_ROLES
 
 
 @pytest.mark.parametrize("model, data, secret", [
@@ -160,12 +169,13 @@ def test_idle_expiry_cannot_exceed_absolute_expiry():
 
 def test_current_user_response_roundtrip():
     resp = CurrentUserResponse.model_validate({
-        "user_id": "1f0c2c1e-0000-4000-8000-000000000001",
+        "user_id": USER_ID,
         "email": "user@example.com",
         "role": "VIEWER",
         "account_type": "TENANT",
         "tenant_id": "1f0c2c1e-0000-4000-8000-000000000002",
         "session": _session(-470),
+        "assigned_tenant_ids": [],
     })
     assert CurrentUserResponse.model_validate_json(resp.model_dump_json()) == resp
 
@@ -174,20 +184,26 @@ def test_account_types_match_explicit_access_contract():
     assert {kind.value for kind in AccountType} == {"PLATFORM", "TENANT", "UNASSIGNED"}
 
 
-@pytest.mark.parametrize("account_type,tenant_id", [
-    ("PLATFORM", None),
-    ("TENANT", "1f0c2c1e-0000-4000-8000-000000000002"),
+@pytest.mark.parametrize("account_type,tenant_id,platform_role,assigned", [
+    ("PLATFORM", None, "CENTRAL_ADMIN", []),
+    ("PLATFORM", None, "TENANT_MANAGER", []),  # 배정 없는 담당자 — 고객사가 없다
+    ("PLATFORM", None, "TENANT_MANAGER", [TENANT_A, TENANT_B]),
+    ("TENANT", "1f0c2c1e-0000-4000-8000-000000000002", None, []),
 ])
-def test_current_user_serializes_assigned_scope(account_type, tenant_id):
+def test_current_user_serializes_assigned_scope(account_type, tenant_id, platform_role, assigned):
+    scope = {"account_type": account_type, "tenant_id": tenant_id, "assigned_tenant_ids": assigned}
+    if platform_role is not None:
+        scope["platform_role"] = platform_role
     response = CurrentUserResponse.model_validate({
-        "user_id": "1f0c2c1e-0000-4000-8000-000000000001",
+        "user_id": USER_ID,
         "email": "user@example.com", "role": "ADMIN",
-        "account_type": account_type, "tenant_id": tenant_id,
-        "session": _session(-470),
+        "session": _session(-470), **scope,
     })
     payload = response.model_dump(mode="json")
     assert payload["account_type"] == account_type
     assert payload["tenant_id"] == tenant_id
+    assert payload["platform_role"] == platform_role  # TENANT 는 null 로 나간다
+    assert payload["assigned_tenant_ids"] == assigned  # 순서를 그대로 싣는다
 
 
 @pytest.mark.parametrize("scope", [
@@ -197,11 +213,39 @@ def test_current_user_serializes_assigned_scope(account_type, tenant_id):
     {"account_type": "TENANT", "tenant_id": None},
     {"account_type": "TENANT", "tenant_id": "not-a-uuid"},
     {"account_type": "UNASSIGNED", "tenant_id": None},
+    # 플랫폼 등급: PLATFORM 만, 그리고 반드시 — role=ADMIN 이나 NULL 소속으로 대신하지 않는다
+    {"account_type": "PLATFORM", "tenant_id": None},
+    {"account_type": "PLATFORM", "tenant_id": None, "platform_role": None},
+    {"account_type": "PLATFORM", "tenant_id": None, "platform_role": "ADMIN"},
+    {"account_type": "PLATFORM", "tenant_id": None, "platform_role": "STAFF"},  # 없어진 등급
+    {"account_type": "TENANT", "tenant_id": "1f0c2c1e-0000-4000-8000-000000000002",
+     "platform_role": "TENANT_MANAGER"},
+    {"account_type": "UNASSIGNED", "tenant_id": None, "platform_role": "CENTRAL_ADMIN"},
 ])
 def test_current_user_rejects_missing_or_inconsistent_scope(scope):
     with pytest.raises(ValidationError):
         CurrentUserResponse.model_validate({
-            "user_id": "1f0c2c1e-0000-4000-8000-000000000001",
+            "user_id": USER_ID,
             "email": "user@example.com", "role": "ADMIN",
-            "session": _session(-470), **scope,
+            "session": _session(-470), "assigned_tenant_ids": [], **scope,
         })
+
+
+@pytest.mark.parametrize("scope,assigned", [
+    # 배정은 TENANT_MANAGER 만 — 중앙 관리자(전체 범위) · 고객사 계정(소속)은 배정이 없다
+    ({"account_type": "PLATFORM", "tenant_id": None, "platform_role": "CENTRAL_ADMIN"}, [TENANT_A]),
+    ({"account_type": "TENANT", "tenant_id": TENANT_B}, [TENANT_A]),
+    ({"account_type": "PLATFORM", "tenant_id": None, "platform_role": "TENANT_MANAGER"},
+     [TENANT_A, TENANT_A]),
+    ({"account_type": "PLATFORM", "tenant_id": None, "platform_role": "TENANT_MANAGER"}, ["not-a-uuid"]),
+    ({"account_type": "PLATFORM", "tenant_id": None, "platform_role": "TENANT_MANAGER"}, None),
+])
+def test_current_user_rejects_assignments_outside_tenant_manager(scope, assigned):
+    body = {
+        "user_id": USER_ID, "email": "user@example.com", "role": "ADMIN",
+        "session": _session(-470), **scope,
+    }
+    if assigned is not None:
+        body["assigned_tenant_ids"] = assigned
+    with pytest.raises(ValidationError):
+        CurrentUserResponse.model_validate(body)

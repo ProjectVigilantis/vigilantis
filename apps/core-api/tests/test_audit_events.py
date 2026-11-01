@@ -2,17 +2,20 @@
 
 지키는 것: 새 실행 행 1건 = 감사 기록 1건(관제자 승인 → 사람 · 자동 격리 · 자동 원복 → SYSTEM,
 가드레일이 거절한 자동 시도 포함) · 종료 확정 1건 = 기록 1건 · 같은 Key 재생 · 거절 · 이미 종료된
-재요청은 기록 없음 · 조치가 되돌아가면 기록도 함께 되돌아감 · 행위자 종류는 요청자의 계정 종류 ·
+재요청은 기록 없음 · 조치가 되돌아가면 기록도 함께 되돌아가고 기록이 실패하면 조치도 남지 않음 · 행위자
+종류는 요청자의 계정 종류 · 행위자 인자는 HTTP 자격(actor) 또는 신뢰 경로의 사람(audit_actor) 하나 ·
 행위자/발동 원천/종료 판단의 짝은 DB CHECK 가 막고 UPDATE · DELETE 는 트리거가 막는다.
 """
 
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 import workflows
+from auth.admin_service import Actor as Credential
 from db import models
 from db.repositories import audit as audit_repo
 from db.repositories import executions as executions_repo
@@ -24,6 +27,7 @@ from schemas.api.incidents import IncidentCategory, IncidentStatus, ResolutionJu
 from schemas.runbooks import TriggerSource
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, IntegrityError
+from tenancy import TenantScope
 from tests.test_auto_isolation_workflow import (
     PRE,
     SKIP,
@@ -78,6 +82,35 @@ def test_actor_shape_is_rejected_before_the_database():
         audit_repo.Actor(AuditActorKind.PLATFORM_USER, None)
 
 
+_CREDENTIAL = Credential(token="token", idle_seconds=60, clock=lambda: datetime.now(UTC))
+_PERSON = audit_repo.person(str(uuid.uuid4()), AccountType.PLATFORM)
+_BAD_ACTOR_ARGS = {
+    # 기록 행위자는 재판정한 자격의 사용자다 — 따로 받으면 두 신원이 갈린다
+    "credential-and-audit-actor": ({"actor": _CREDENTIAL, "audit_actor": _PERSON}, TypeError),
+    # 범위도 재판정 신원이 정한다 — 명시 범위를 함께 받으면 어느 쪽이 기준인지 갈린다
+    "credential-with-explicit-scope": ({"actor": _CREDENTIAL, "scope": TenantScope(tenant_ids=())}, ValueError),
+    # 감사 행위자는 자격이 아니다 — 권한 판정에 쓰지 않는다
+    "audit-actor-as-credential": ({"actor": _PERSON}, TypeError),
+    "no-identity": ({}, TypeError),
+    # 관제자 승인 · 종료는 사람이 한다
+    "system-for-a-human-decision": ({"audit_actor": audit_repo.SYSTEM}, ValueError),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_BAD_ACTOR_ARGS))
+@pytest.mark.parametrize("call", ["execute", "resolve"])
+def test_actor_arguments_are_rejected_before_the_database(call, case):
+    kwargs, error = _BAD_ACTOR_ARGS[case]
+    incident_id = str(uuid.uuid4())
+
+    # db=None — 거절 전에 DB 에 닿으면 AttributeError 로 이 검사가 실패한다
+    with pytest.raises(error):
+        if call == "execute":
+            workflows.reserve_execution(None, _approve_request(incident_id), **kwargs)
+        else:
+            workflows.resolve_incident(None, incident_id, ResolutionJudgement.JUSTIFIED, **kwargs)
+
+
 # --- 관제자 승인 -----------------------------------------------------------------
 
 
@@ -90,8 +123,8 @@ def test_user_approval_records_one_person_event(
     db.commit()
     request = _approve_request(incident.incident_id)
 
-    reservation = workflows.reserve_execution(db, request, actor=audit_actor)
-    replay = workflows.reserve_execution(db, request, actor=audit_actor)
+    reservation = workflows.reserve_execution(db, request, audit_actor=audit_actor)
+    replay = workflows.reserve_execution(db, request, audit_actor=audit_actor)
 
     assert (reservation.created, replay.created) == (True, False)
     execution = executions_repo.get_execution(db, reservation.response.execution_id)
@@ -112,7 +145,7 @@ def test_rejected_approval_leaves_no_event(db, make_incident, audit_actor):
     db.commit()
 
     with pytest.raises(ApiError) as rejected:
-        workflows.reserve_execution(db, _approve_request(incident.incident_id), actor=audit_actor)
+        workflows.reserve_execution(db, _approve_request(incident.incident_id), audit_actor=audit_actor)
     db.rollback()
 
     assert rejected.value.code is ErrorCode.PROPOSAL_NOT_EXECUTABLE
@@ -131,7 +164,7 @@ def test_reservation_rolled_back_after_the_write_takes_the_event_with_it(
     )
 
     with pytest.raises(ApiError) as lost:
-        workflows.reserve_execution(db, _approve_request(incident.incident_id), actor=audit_actor)
+        workflows.reserve_execution(db, _approve_request(incident.incident_id), audit_actor=audit_actor)
     db.rollback()
 
     assert lost.value.code is ErrorCode.PROPOSAL_NOT_EXECUTABLE
@@ -179,10 +212,10 @@ def test_resolution_records_one_event_and_a_repeat_adds_none(
     incident = _resolvable(db, make_incident, make_tenant)
 
     assert workflows.resolve_incident(
-        db, incident.incident_id, ResolutionJudgement.JUSTIFIED, actor=audit_actor
+        db, incident.incident_id, ResolutionJudgement.JUSTIFIED, audit_actor=audit_actor
     ) is True
     assert workflows.resolve_incident(
-        db, incident.incident_id, ResolutionJudgement.NO_FURTHER_ACTION, actor=audit_actor
+        db, incident.incident_id, ResolutionJudgement.NO_FURTHER_ACTION, audit_actor=audit_actor
     ) is False
 
     [event] = _events(db, incident.incident_id)
@@ -205,12 +238,46 @@ def test_unresolvable_request_leaves_no_event(db, make_incident, make_execution,
 
     with pytest.raises(ApiError) as gated:
         workflows.resolve_incident(
-            db, incident.incident_id, ResolutionJudgement.JUSTIFIED, actor=audit_actor
+            db, incident.incident_id, ResolutionJudgement.JUSTIFIED, audit_actor=audit_actor
         )
     db.rollback()
 
     assert gated.value.code is ErrorCode.INCIDENT_NOT_RESOLVABLE
     assert _events(db, incident.incident_id) == []
+
+
+class _AuditDown(Exception):
+    pass
+
+
+def _audit_down(*args, **kwargs):
+    raise _AuditDown
+
+
+def test_a_failed_audit_write_leaves_no_action_behind(
+    db, make_incident, make_candidate, audit_actor, monkeypatch
+):
+    """반대 방향 — 기록이 실패하면 같은 트랜잭션의 실행 행 · 종료 전이도 commit 되지 않는다."""
+    approval = make_incident(db)
+    make_candidate(db, approval)
+    finops = _resolvable(db, make_incident)
+    monkeypatch.setattr(workflows.audit_repo, "record_execution_started", _audit_down)
+    monkeypatch.setattr(workflows.audit_repo, "record_incident_resolved", _audit_down)
+
+    with pytest.raises(_AuditDown):
+        workflows.reserve_execution(db, _approve_request(approval.incident_id), audit_actor=audit_actor)
+    db.rollback()
+    with pytest.raises(_AuditDown):
+        workflows.resolve_incident(
+            db, finops.incident_id, ResolutionJudgement.JUSTIFIED, audit_actor=audit_actor
+        )
+    db.rollback()
+
+    db.expire_all()
+    assert executions_repo.list_by_incident(db, approval.incident_id) == []
+    row = db.get(models.Incident, finops.incident_id)
+    assert (row.status, row.resolution, row.resolved_at) == (IncidentStatus.AWAITING_APPROVAL, None, None)
+    assert _events(db, approval.incident_id) == _events(db, finops.incident_id) == []
 
 
 # --- HTTP: 행위자는 세션의 사용자 -------------------------------------------------

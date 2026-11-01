@@ -191,6 +191,8 @@ cd apps/web && npm ci && npm run dev  # 대시보드(:3000)
 
 시연은 위 절차 대신 단계 진행 테스트 서버로 한다 — `uv run python scripts/stepper/cli.py up`이 DB · LocalStack · API · FE를 한 번에 띄운다([scripts/stepper/README.md](scripts/stepper/README.md)).
 
+테넌트 연결 확인·재개 API는 ECS 태스크 역할 자격만 사용한다. 해당 자격이 없는 로컬 Compose·Stepper에서는 연결 확인 결과가 `UNREACHABLE`이며, 이 API로 테넌트를 `ACTIVE`로 전환할 수 없다.
+
 > * **대시보드는 `api`(:8000)가 떠 있어야 화면이 선다.** FE에 mock 계층이 없어 `apps/web`만 띄우면 모든 화면이 조회 오류다. BE 주소를 바꿨으면 `apps/web/.env.local`의 `NEXT_PUBLIC_API_BASE_URL`을 맞춘다([`apps/web/.env.example`](apps/web/.env.example)).
 > * **LocalStack은 재시작하면 비워진다** — 다시 띄웠으면 시드를 다시 돌린다. 호스트에서 실행할 땐 `AWS_ENDPOINT_URL`이 `http://localhost:4566`이어야 한다(`.env`의 `localstack:4566`은 compose 네트워크 안의 이름이다).
 > * **개발 표준 환경은 LocalStack이다**([ADR-0006](docs/adr/0006-localstack-team-standard-env.md)). 실 AWS 전환은 `AWS_ENDPOINT_URL` 줄을 지우고 자격증명을 교체하는 것 하나로 끝난다 — 코드에 환경 감지 분기를 두지 않는다.

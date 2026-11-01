@@ -443,13 +443,13 @@ def test_rejected_timeout_closes_the_wait_without_retry(
     # 이전 대기에 대한 뒤늦은 승인은 기존 충돌 코드다
     with pytest.raises(ApiError) as stale:
         workflows.reserve_execution(
-            db, _approve_request(seeded.incident_id), actor=audit_actor
+            db, _approve_request(seeded.incident_id), audit_actor=audit_actor
         )
     assert stale.value.code is ErrorCode.PROPOSAL_NOT_EXECUTABLE
     db.rollback()
     # 진행 중 실행이 없으므로 관제자 종료는 막지 않는다
     assert workflows.resolve_incident(
-        db, seeded.incident_id, ResolutionJudgement.NO_FURTHER_ACTION, actor=audit_actor
+        db, seeded.incident_id, ResolutionJudgement.NO_FURTHER_ACTION, audit_actor=audit_actor
     ) is True
     assert len(_executions(db, seeded.incident_id)) == 1
 
@@ -485,7 +485,7 @@ def test_failed_high_pre_mitigation_keeps_agent_analysis_reachable(
     # 분석이 끝나기 전에는 기존 종료 게이트가 그대로다
     with pytest.raises(ApiError) as gated:
         workflows.resolve_incident(
-            db, seeded.incident_id, ResolutionJudgement.NO_FURTHER_ACTION, actor=audit_actor
+            db, seeded.incident_id, ResolutionJudgement.NO_FURTHER_ACTION, audit_actor=audit_actor
         )
     assert gated.value.code is ErrorCode.INCIDENT_NOT_RESOLVABLE
     db.rollback()
@@ -507,7 +507,7 @@ def test_failed_high_pre_mitigation_keeps_agent_analysis_reachable(
     assert body["status"] == "FAILED"
     assert body["analysis_result"]["status"] == "NO_PROPOSAL"
     assert workflows.resolve_incident(
-        db, seeded.incident_id, ResolutionJudgement.NO_FURTHER_ACTION, actor=audit_actor
+        db, seeded.incident_id, ResolutionJudgement.NO_FURTHER_ACTION, audit_actor=audit_actor
     ) is True
 
 
@@ -619,7 +619,7 @@ def test_prior_user_approval_blocks_the_old_deadline(
     )
     db.commit()
     approved = workflows.reserve_execution(
-        db, _approve_request(seeded.incident_id), actor=audit_actor
+        db, _approve_request(seeded.incident_id), audit_actor=audit_actor
     )
     closure = workflows.close_execution(
         db, approved.response.execution_id, next_status=ExecutionStatus.SUCCESS
@@ -652,7 +652,7 @@ def test_post_isolation_new_action_is_distinct_from_stale_candidate(
     # 이전 대기의 승인은 충돌이다
     with pytest.raises(ApiError) as stale:
         workflows.reserve_execution(
-            db, _approve_request(seeded.incident_id), actor=audit_actor
+            db, _approve_request(seeded.incident_id), audit_actor=audit_actor
         )
     assert stale.value.code is ErrorCode.PROPOSAL_NOT_EXECUTABLE
     db.rollback()
@@ -668,7 +668,7 @@ def test_post_isolation_new_action_is_distinct_from_stale_candidate(
     )
     db.commit()
     approved = workflows.reserve_execution(
-        db, _approve_request(seeded.incident_id), actor=audit_actor
+        db, _approve_request(seeded.incident_id), audit_actor=audit_actor
     )
     assert approved.created is True
     db.expire_all()
@@ -681,7 +681,7 @@ def test_post_isolation_new_action_is_distinct_from_stale_candidate(
         incident_id=seeded.incident_id,
         runbook_id=RunbookId.RUNBOOK_EC2_UNISOLATE,
         idempotency_key="auto-iso-" + uuid.uuid4().hex,
-    ), actor=audit_actor)
+    ), audit_actor=audit_actor)
     assert recovery.created is True
     # 같은 대기의 타임아웃은 다시 발동하지 않는다
     assert _attempt(db, seeded, TIMEOUT).skipped_reason is SKIP.ALREADY_RESERVED
@@ -952,12 +952,12 @@ def _race(pg_engine, first_call, second_call, *, fail_first_commit: bool = False
 
 def _approve(incident_id: str, actor):
     request = _approve_request(incident_id)
-    return lambda session: workflows.reserve_execution(session, request, actor=actor)
+    return lambda session: workflows.reserve_execution(session, request, audit_actor=actor)
 
 
 def _reject(incident_id: str, actor):
     return lambda session: workflows.resolve_incident(
-        session, incident_id, ResolutionJudgement.NO_FURTHER_ACTION, actor=actor
+        session, incident_id, ResolutionJudgement.NO_FURTHER_ACTION, audit_actor=actor
     )
 
 

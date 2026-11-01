@@ -22,6 +22,10 @@
 # 때 화면을 다시 조회하므로(apps/web realtime-provider) 새로고침 없이 자산이 보인다. 계약에 없는
 # 이벤트를 만들지 않으려고 끊기를 쓴다.
 # 버튼은 한 번에 하나만 돈다. 처리 중에 들어온 요청은 409와 처리 중인 버튼 이름을 받는다.
+#
+# 범위: 이 도구는 토큰을 가진 운영자의 전역 진단 창구다 — 고객 계정 화면이 아니다. 조회 라우트는 제품 핸들러에
+# 전체 범위(tenancy.ALL_TENANTS)를 명시해 넘기고, WS /_stepper/ws는 이벤트를 거르지 않는 authorizer를 명시해
+# 등록한다. 제품 앱(/api/v1)의 세션 · 담당 고객 판정은 건드리지 않으며 realtime에 기본 허용 경로를 두지 않는다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -312,7 +316,7 @@ def build_ws_router(*, token: str) -> APIRouter:
             await websocket.close(code=1008)  # accept 전에 거부
             return
         manager = websocket.app.state.realtime
-        await manager.register(websocket)
+        await manager.register(websocket, _operator_sees_every_event)
         try:
             # 클라이언트 프레임은 내용 무시 — 끊김 감지만 한다(routers/ws.py와 같은 루프)
             while True:
@@ -323,6 +327,12 @@ def build_ws_router(*, token: str) -> APIRouter:
             manager.unregister(websocket)
 
     return router
+
+
+async def _operator_sees_every_event(event, owner_lookup) -> bool:
+    """WS /_stepper/ws의 이벤트 권한 — 토큰을 통과한 운영자 연결은 전역 진단이라 모든 이벤트를 받는다
+    (파일 머리말 §범위). 이 연결에만 등록하는 명시 허용이며 제품 /api/v1/ws의 판정과 무관하다."""
+    return True
 
 
 _DROP_MARGIN_SECONDS = 2.0

@@ -6,22 +6,30 @@
 #     없어 응답을 못 만들면(503) 쓰기도 남지 않는다.
 #   - 상태 전이의 받는 상태는 저장소(db.repositories.tenants)가 계약 상수로 판정한다. 0행이면 다시 읽어
 #     없으면 404 TENANT_NOT_FOUND, 있으면 409 TENANT_STATE_CONFLICT 다.
-#   - 연결 확인(verify · resume)은 여기 없다 — 테넌트별 AssumeRole 과 함께 다음 카드에서 붙인다.
+#   - 연결 확인은 읽기 트랜잭션을 끝낸 뒤 AWS 에 묻고, 쓰기 직전 권한 · 대상 설정 · 상태를 다시 확인한다.
 #   - external_id 는 생성 응답과 재발급(onboarding)에서만 내보낸다. 상세 응답에는 칸이 없다(계약).
 # ==============================================================================
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from urllib.parse import urlencode
 
+from auth import admin_service, service
+from auth.access import is_central_admin, is_tenant_manager, tenant_scope_ids
 from config import TenantSettings
 from db import models
+from db.repositories import auth as auth_repo
 from db.repositories import tenants as tenants_repo
 from exceptions import ApiError
 from identifiers import canonical_id
 from schemas.api.errors import ErrorCode
 from schemas.api.tenants import (
+    RESUMABLE_STATUSES,
+    VERIFIABLE_STATUSES,
     TenantCreateRequest,
     TenantCreateResponse,
     TenantDetail,
@@ -32,9 +40,12 @@ from schemas.api.tenants import (
     TenantSubscription,
     TenantUpdateRequest,
     TenantVerification,
+    TenantVerifyResponse,
 )
+from services.aws.client import TenantAccess
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from tenant_verification import verify_connection
 
 # 같은 계정의 두 번째 테넌트를 DB 유일성이 거절할 때의 제약 이름(db.session NAMING_CONVENTION)
 _ACCOUNT_UNIQUE = "uq_tenants_aws_account_id"
@@ -118,39 +129,69 @@ def _detail(row: tenants_repo.TenantWithCounts, settings: TenantSettings) -> Ten
 # --- 조회 ----------------------------------------------------------------------
 
 
-def _load(db: Session, tenant_id: str) -> tenants_repo.TenantWithCounts:
-    """형식이 어긋난 식별자도 404 다 — DB 캐스트 오류(500)를 막는다(routers/incidents 와 같은 결)."""
+def _load(db: Session, tenant_id: str, user: service.CurrentUser) -> tenants_repo.TenantWithCounts:
+    """형식이 어긋난 식별자도 404 다 — DB 캐스트 오류(500)를 막는다(routers/incidents 와 같은 결).
+    담당 범위 밖 고객도 404 다(존재 여부를 드러내지 않는다) — 범위는 SQL 조건으로 건다."""
     stored_id = canonical_id(tenant_id)
-    row = None if stored_id is None else tenants_repo.get_tenant(db, stored_id)
+    row = (
+        None
+        if stored_id is None
+        else tenants_repo.get_tenant(db, stored_id, scope_ids=tenant_scope_ids(user))
+    )
     if row is None:
         raise ApiError(ErrorCode.TENANT_NOT_FOUND)
     return row
 
 
-def _rejected(db: Session, tenant_id: str) -> ApiError:
+def _rejected(db: Session, tenant_id: str, user: service.CurrentUser) -> ApiError:
     """전이가 0행이었다 — 없어서인지(404), 받는 상태가 아니어서인지(409) 다시 읽어 가른다.
     0행이라 쓴 것이 없고, 저장소의 다시 읽기는 DB 값으로 덮어 읽는다(populate_existing)."""
-    _load(db, tenant_id)
+    _load(db, tenant_id, user)
     return ApiError(ErrorCode.TENANT_STATE_CONFLICT)
 
 
-def list_tenants(db: Session) -> TenantsResponse:
-    return TenantsResponse(tenants=[_list_item(row) for row in tenants_repo.list_tenants(db)])
+def list_tenants(db: Session, user: service.CurrentUser) -> TenantsResponse:
+    rows = tenants_repo.list_tenants(db, scope_ids=tenant_scope_ids(user))
+    return TenantsResponse(tenants=[_list_item(row) for row in rows])
 
 
-def get_tenant(db: Session, tenant_id: str, settings: TenantSettings) -> TenantDetail:
-    return _detail(_load(db, tenant_id), settings)
+def get_tenant(
+    db: Session, tenant_id: str, settings: TenantSettings, user: service.CurrentUser
+) -> TenantDetail:
+    """담당 고객(중앙 관리자는 전체)의 상세만 준다. PENDING_CONNECTION 상세의 onboarding_url 도 범위 안이면 준다."""
+    return _detail(_load(db, tenant_id, user), settings)
 
 
-def get_onboarding(db: Session, tenant_id: str, settings: TenantSettings) -> TenantOnboardingResponse:
-    """모든 상태에서 받는다 — 생성 때 정한 external_id 를 그대로 돌려주는 재발급이다."""
-    tenant = _load(db, tenant_id).tenant
+def get_onboarding(
+    db: Session, tenant_id: str, settings: TenantSettings, user: service.CurrentUser
+) -> TenantOnboardingResponse:
+    """모든 상태에서 받는다 — 생성 때 정한 external_id 를 그대로 돌려주는 재발급이다. 담당 범위 안에서만."""
+    tenant = _load(db, tenant_id, user).tenant
     return TenantOnboardingResponse(
         onboarding_url=onboarding_url(tenant, settings), external_id=tenant.external_id
     )
 
 
 # --- 쓰기 ----------------------------------------------------------------------
+
+
+@contextmanager
+def _management(db: Session, actor: admin_service.Actor) -> Iterator[service.CurrentUser]:
+    """관리 쓰기의 경계 — users 잠금 → 캐시 비움 → 세션 · 권한 재판정 → (본문). 예외는 전부 rollback 이다.
+    의존성이 본 신원은 스냅샷일 뿐이라, 잠금 안에서 다시 판정해야 그 사이 회수(역할 강등 · 세션 폐기)된
+    행위자가 쓰지 못한다. 본문의 commit 은 각 쓰기 함수가 한다. 이 안에는 외부 호출이 없다."""
+    try:
+        auth_repo.lock_users_table(db)
+        db.expire_all()
+        user = service.resolve_current_user(
+            db, actor.token, now=actor.clock(), idle_seconds=actor.idle_seconds, touch=False
+        )
+        if not is_tenant_manager(user):
+            raise ApiError(ErrorCode.AUTH_FORBIDDEN)
+        yield user
+    except BaseException:
+        db.rollback()
+        raise
 
 
 def _commit_after(db: Session, build):
@@ -165,59 +206,160 @@ def _commit_after(db: Session, build):
     return response
 
 
-def create_tenant(
-    db: Session, body: TenantCreateRequest, settings: TenantSettings, *, now: datetime
-) -> TenantCreateResponse:
+@dataclass(frozen=True)
+class _ConnectionTarget:
+    status: TenantStatus
+    access: TenantAccess
+    account_id: str
+    region: str
+    suspended_at: datetime | None
+    suspended_reason: str | None
+
+
+def _connection_target(tenant: models.Tenant) -> _ConnectionTarget:
+    # rollback 뒤 ORM 속성을 읽으면 SELECT 와 트랜잭션이 다시 열리므로 값만 옮긴다.
+    return _ConnectionTarget(
+        status=tenant.status,
+        access=TenantAccess(tenant.tenant_id, tenant.access_role_arn, tenant.external_id),
+        account_id=tenant.aws_account_id,
+        region=tenant.regions[0],
+        # 재개 뒤 다시 정지되면 상태명은 같아도 처음 확인을 시작한 정지가 아니다.
+        suspended_at=tenant.suspended_at,
+        suspended_reason=tenant.suspended_reason,
+    )
+
+
+def _verification_response(
+    row: tenants_repo.TenantWithCounts, settings: TenantSettings
+) -> TenantVerifyResponse:
+    detail = _detail(row, settings)
+    return TenantVerifyResponse(tenant=detail, verification=detail.last_verification)
+
+
+def _verify_tenant(
+    db: Session,
+    actor: admin_service.Actor,
+    tenant_id: str,
+    settings: TenantSettings,
+    *,
+    resume: bool,
+) -> TenantVerifyResponse:
+    accepted = RESUMABLE_STATUSES if resume else VERIFIABLE_STATUSES
+    write = tenants_repo.resume_tenant if resume else tenants_repo.record_verification
     try:
-        # SAVEPOINT — 유일성 거절이 이 쓰기만 되돌리고 세션은 계속 쓸 수 있게 둔다
-        with db.begin_nested():
-            tenant = tenants_repo.create_tenant(
-                db,
-                name=body.name,
-                aws_account_id=body.aws_account_id,
-                regions=body.regions,
-                collect_vpc_ids=body.collect_vpc_ids,
-                access_role_arn=body.access_role_arn,
-                now=now,
-            )
-    except IntegrityError as exc:
-        if getattr(getattr(exc.orig, "diag", None), "constraint_name", None) == _ACCOUNT_UNIQUE:
-            raise ApiError(ErrorCode.TENANT_ACCOUNT_CONFLICT) from exc
-        raise
-    # 새 테넌트에는 자산 · 인시던트가 없다 — 다시 세지 않는다
-    return _commit_after(db, lambda: TenantCreateResponse(
-        tenant=_detail(tenants_repo.TenantWithCounts(tenant, 0, 0), settings),
-        external_id=tenant.external_id,
-    ))
+        with _management(db, actor) as user:
+            target = _connection_target(_load(db, tenant_id, user).tenant)
+            if target.status not in accepted:
+                raise ApiError(ErrorCode.TENANT_STATE_CONFLICT)
+    finally:
+        db.rollback()
+
+    outcome = verify_connection(
+        target.access, expected_account_id=target.account_id, region=target.region
+    )
+    stored_id = target.access.tenant_id
+    with _management(db, actor) as user:
+        observed_at = actor.clock()
+        _load(db, stored_id, user)
+        # 설정 대조와 조건부 갱신 사이에도 다른 쓰기가 끼어들지 못하게 한다.
+        current = tenants_repo.read_tenant_for_share(db, stored_id)
+        if current is None:
+            raise _rejected(db, stored_id, user)
+        if _connection_target(current) != target:
+            raise ApiError(ErrorCode.TENANT_STATE_CONFLICT)
+        if not write(
+            db, stored_id, result=outcome.result, reason_code=outcome.reason_code, now=observed_at
+        ):
+            raise _rejected(db, stored_id, user)
+        return _commit_after(
+            db, lambda: _verification_response(_load(db, stored_id, user), settings)
+        )
+
+
+def verify_tenant(
+    db: Session, actor: admin_service.Actor, tenant_id: str, settings: TenantSettings
+) -> TenantVerifyResponse:
+    return _verify_tenant(db, actor, tenant_id, settings, resume=False)
+
+
+def resume_tenant(
+    db: Session, actor: admin_service.Actor, tenant_id: str, settings: TenantSettings
+) -> TenantVerifyResponse:
+    return _verify_tenant(db, actor, tenant_id, settings, resume=True)
+
+
+def create_tenant(
+    db: Session, actor: admin_service.Actor, body: TenantCreateRequest, settings: TenantSettings, *, now: datetime
+) -> TenantCreateResponse:
+    with _management(db, actor) as user:
+        # 새 고객은 어떤 담당자의 기존 범위에도 없다 — 생성은 중앙 관리자만(자동 배정 없음)
+        if not is_central_admin(user):
+            raise ApiError(ErrorCode.AUTH_FORBIDDEN)
+        try:
+            # SAVEPOINT — 유일성 거절이 이 쓰기만 되돌리고 세션은 계속 쓸 수 있게 둔다
+            with db.begin_nested():
+                tenant = tenants_repo.create_tenant(
+                    db,
+                    name=body.name,
+                    aws_account_id=body.aws_account_id,
+                    regions=body.regions,
+                    collect_vpc_ids=body.collect_vpc_ids,
+                    access_role_arn=body.access_role_arn,
+                    now=now,
+                )
+        except IntegrityError as exc:
+            if getattr(getattr(exc.orig, "diag", None), "constraint_name", None) == _ACCOUNT_UNIQUE:
+                raise ApiError(ErrorCode.TENANT_ACCOUNT_CONFLICT) from exc
+            raise
+        # 새 테넌트에는 자산 · 인시던트가 없다 — 다시 세지 않는다
+        return _commit_after(db, lambda: TenantCreateResponse(
+            tenant=_detail(tenants_repo.TenantWithCounts(tenant, 0, 0), settings),
+            external_id=tenant.external_id,
+        ))
 
 
 def update_tenant(
-    db: Session, tenant_id: str, body: TenantUpdateRequest, settings: TenantSettings, *, now: datetime
+    db: Session,
+    actor: admin_service.Actor,
+    tenant_id: str,
+    body: TenantUpdateRequest,
+    settings: TenantSettings,
+    *,
+    now: datetime,
 ) -> TenantDetail:
-    stored_id = _load(db, tenant_id).tenant.tenant_id
-    if not tenants_repo.update_tenant(db, stored_id, body, now=now):
-        raise _rejected(db, stored_id)  # 그 사이 지워졌다 → 404
-    return _commit_after(db, lambda: _detail(_load(db, stored_id), settings))
+    with _management(db, actor) as user:
+        stored_id = _load(db, tenant_id, user).tenant.tenant_id
+        if not tenants_repo.update_tenant(db, stored_id, body, now=now):
+            raise _rejected(db, stored_id, user)  # 그 사이 지워졌다 → 404
+        return _commit_after(db, lambda: _detail(_load(db, stored_id, user), settings))
 
 
 def suspend_tenant(
-    db: Session, tenant_id: str, *, reason: str, settings: TenantSettings, now: datetime
+    db: Session,
+    actor: admin_service.Actor,
+    tenant_id: str,
+    *,
+    reason: str,
+    settings: TenantSettings,
+    now: datetime,
 ) -> TenantDetail:
     """원격 회수 ① 앱 겹. IAM 회수(②)는 진행 중 실행이 끝난 뒤의 운영 절차다(ADR-0012 §3)."""
-    stored_id = _load(db, tenant_id).tenant.tenant_id
-    if not tenants_repo.suspend_tenant(db, stored_id, reason=reason, now=now):
-        raise _rejected(db, stored_id)
-    return _commit_after(db, lambda: _detail(_load(db, stored_id), settings))
+    with _management(db, actor) as user:
+        stored_id = _load(db, tenant_id, user).tenant.tenant_id
+        if not tenants_repo.suspend_tenant(db, stored_id, reason=reason, now=now):
+            raise _rejected(db, stored_id, user)
+        return _commit_after(db, lambda: _detail(_load(db, stored_id, user), settings))
 
 
-def delete_tenant(db: Session, tenant_id: str) -> None:
+def delete_tenant(db: Session, actor: admin_service.Actor, tenant_id: str) -> None:
     """연결된 적 없는 테넌트만 지운다. 그 테넌트를 가리키는 사용자 · 기록이 있으면 FK 가 막아 409 다."""
-    stored_id = _load(db, tenant_id).tenant.tenant_id
-    try:
-        with db.begin_nested():  # FK 거절이 이 삭제만 되돌린다
-            deleted = tenants_repo.delete_tenant(db, stored_id)
-    except IntegrityError as exc:
-        raise ApiError(ErrorCode.TENANT_STATE_CONFLICT) from exc
-    if not deleted:
-        raise _rejected(db, stored_id)
-    db.commit()
+    with _management(db, actor) as user:
+        stored_id = _load(db, tenant_id, user).tenant.tenant_id
+        try:
+            with db.begin_nested():  # FK 거절이 이 삭제만 되돌린다
+                deleted = tenants_repo.delete_tenant(db, stored_id)
+        except IntegrityError as exc:
+            raise ApiError(ErrorCode.TENANT_STATE_CONFLICT) from exc
+        if not deleted:
+            raise _rejected(db, stored_id, user)
+        db.commit()

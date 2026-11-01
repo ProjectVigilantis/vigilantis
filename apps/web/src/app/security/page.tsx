@@ -4,10 +4,12 @@
 // 그것을 쓰는 패널만 "조회 실패"로 그린다(null = 조회 실패, 0건과 구분). 응답을 캐시하지 않아
 // 새로고침·실시간 이벤트의 `router.refresh()`가 곧 재조회다.
 
+import { BusinessUnavailable } from '@/components/business-unavailable';
 import { ErrorState } from '@/components/error-state';
 import { SecurityView } from '@/components/security/security-view';
 import { orError, orNull, serverApi } from '@/lib/api/server';
 import { parsePreset } from '@/lib/incident-filter';
+import { isUnassignedManager } from '@/lib/roles';
 import type { IncidentListItem } from '@/types/api';
 import { unstable_rethrow } from 'next/navigation';
 
@@ -15,7 +17,17 @@ export default async function SecurityPage({ searchParams }: PageProps<'/securit
   // 제목 옆 `마지막 갱신` — 다시 그려질 때마다 새로 찍힌다(auto-refresh.tsx).
   const renderedAt = new Date().toISOString();
   // 세션 쿠키만 실어 부르고, 401이면 로그인으로 redirect한다(lib/api/server.ts).
-  const { getAssets, getIncidents, getMetricsTimeseries } = await serverApi();
+  const { getMe, getAssets, getIncidents, getMetricsTimeseries } = await serverApi();
+  // 담당 고객이 없는 고객 담당자는 업무 데이터를 하나도 읽지 않고 배정 없음을 본다 — 자산 관제와 같은 규칙이다.
+  // 계정 확인 실패도 업무 조회로 넘어가지 않는다. 고객사 계정은 기존대로 조회하고 서버의 거절(403)을 오류 화면으로 본다.
+  let user;
+  try {
+    user = await getMe();
+  } catch (error) {
+    unstable_rethrow(error);
+    return <ErrorState error={error} />;
+  }
+  if (isUnassignedManager(user)) return <BusinessUnavailable unassigned />;
   // `?tab=incidents`·`?preset=`은 구 보안 인시던트 목록(`/incidents`)에서 redirect돼 오는 딥링크다.
   const { asset, tab, preset } = await searchParams;
   // 오류를 버리지 않고 들고 간다 — 인시던트 탭이 그것을 **대기 0건이 아니라 오류로** 그려야 한다.
