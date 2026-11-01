@@ -82,6 +82,17 @@ def web_url(ports: dict) -> str:
     return f"http://localhost:{ports.get('web', DEFAULT_WEB_PORT)}"
 
 
+def web_api_url(ports: dict) -> str:
+    """FE에 심는 API 주소 — web_url과 같은 호스트 이름(localhost)이어야 한다.
+
+    브라우저에게 localhost와 127.0.0.1은 다른 사이트라, FE와 api의 이름이 다르면 api가 심는 로그인
+    쿠키(SameSite=Lax)가 다음 요청에 실리지 않아 웹 로그인이 되지 않는다. CLI 자신의 호출(api_url)은
+    127.0.0.1 그대로다 — 포트가 IPv4 loopback에만 열려 있어 localhost가 ::1로 먼저 풀리면 연결마다
+    수 초씩 헛돈다(aws_env와 같은 이유).
+    """
+    return f"http://localhost:{ports['api']}"
+
+
 def ws_url(ports: dict) -> str:
     return f"ws://{LOOPBACK}:{ports['api']}/_stepper/ws"
 
@@ -762,10 +773,10 @@ def ensure_web(ctx: Context, ports: dict) -> None:
     saved_api = ctx.state.load().get("web_api")
     if running is not None:
         # FE의 API 주소는 기동 때 고정된다 — 포트가 바뀌었으면 옛 주소를 보는 FE를 내리고 다시 띄운다
-        if running == ports["web"] and saved_api in (None, api_url(ports)):
+        if running == ports["web"] and saved_api in (None, web_api_url(ports)):
             ctx.out(f"FE: 이미 떠 있다 → {url}")
             return
-        ctx.out(f"FE: 주소가 바뀌어 다시 띄운다(FE :{running} → :{ports['web']} · API {api_url(ports)})")
+        ctx.out(f"FE: 주소가 바뀌어 다시 띄운다(FE :{running} → :{ports['web']} · API {web_api_url(ports)})")
         stop_web(ctx)
         _wait_port_closed(ctx, running)
     if ctx.port_answers(ports["web"]):
@@ -785,12 +796,12 @@ def ensure_web(ctx: Context, ports: dict) -> None:
         return
     npm = shutil.which("npm") or "npm"
     # 이 서버의 API를 가리키게 고정한다 — 프로세스 환경이 apps/web/.env.local보다 우선한다
-    env = dict(os.environ, NEXT_PUBLIC_API_BASE_URL=api_url(ports))
+    env = dict(os.environ, NEXT_PUBLIC_API_BASE_URL=web_api_url(ports))
     pid = ctx.launch_web(
         [npm, "run", "dev", "--", "-H", "localhost", "-p", str(ports["web"])],
         web_dir, env, ctx.data_root / "web.log",
     )
-    ctx.state.save(web_pid=pid, web_identity=ctx.process_identity(pid), web_api=api_url(ports))
+    ctx.state.save(web_pid=pid, web_identity=ctx.process_identity(pid), web_api=web_api_url(ports))
     waited = 0.0
     while not ctx.port_answers(ports["web"]):
         if waited >= WEB_READY_SECONDS:
