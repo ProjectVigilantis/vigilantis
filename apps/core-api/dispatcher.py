@@ -88,6 +88,14 @@
 # 주체뿐"이라는 보장은 이 전제 + 스캔 비중첩(max_instances=1)에서 성립합니다.
 # 다중 worker로 갈 때는 commit을 넘어 사는 선점(lease 컬럼 등)을 그 결정과 함께
 # 도입해야 합니다.
+#
+# 실행 1건은 **그 실행 행의 소유 테넌트 자격으로** 돕니다(#533 E, ADR-0012 §2). 선점한 행의
+# tenant_id로 문맥(services/aws/client.tenant_scope)을 세운 뒤 원복 개시·판정·실행으로 보냅니다 —
+# 요청자나 스캔 주체의 소속이 아니고, 테넌트마다 스캔을 되풀이하지도 않습니다. 리전은 지금처럼
+# 저장된 대상 ARN에서 옵니다. 스케줄러 잡은 스레드 풀에서 돌아 문맥을 물려받지 않으므로 잡 안의
+# 이 자리에서 세우고, 성공·예외 모두 되돌립니다. 소속 없는 기록(NULL)은 「테넌트 없음」으로 바깥
+# 문맥을 가립니다 — 소유를 추론하지 않습니다. 테넌트 상태는 여기서 보지 않습니다(정지 관문은
+# 따로 있고, 정지 뒤에도 종료 판정·자동 원복은 끝까지 돕니다). 자격(STS)은 첫 AWS 서명 때 받습니다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -121,6 +129,7 @@ from schemas.runbooks import (
     RunbookId,
     TriggerSource,
 )
+from services.aws.client import tenant_scope
 from sqlalchemy.orm import Session, sessionmaker
 
 logger = logging.getLogger("vigilantis.dispatcher")
@@ -627,6 +636,21 @@ def _dispatch_one(
         db.commit()
         return
 
+    # 실행 행의 소유 테넌트 자격으로 돈다(파일 헤더 · #533 E). 선점 트랜잭션 안에서 읽는다
+    owner = workflows.tenant_access_for(db, claimed.tenant_id)
+    with tenant_scope(owner):
+        _dispatch_claimed(db, claimed, publish, report, policy)
+
+
+def _dispatch_claimed(
+    db: Session,
+    claimed: models.ActionExecution,
+    publish: Publish | None,
+    report: DispatchReport,
+    policy: workflows.VerificationRetryPolicy,
+) -> None:
+    """선점한 비종료 실행 1건을 원복 개시 · 판정 · 실행으로 보낸다 — 소유 테넌트 문맥 안에서 부른다."""
+    execution_id = claimed.execution_id
     if claimed.status is ExecutionStatus.ROLLBACK_INITIATED:
         # 판정이 끝나 "되돌려야 한다"로 남은 실행이다. 재실행·재판정 대상이 아니라
         # 자동 원복 자식을 낳을 자리다 (Issue #241).

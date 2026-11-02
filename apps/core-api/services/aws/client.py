@@ -48,6 +48,8 @@
 #   - 세션: 위의 「스레드마다 하나」를 「스레드 × 테넌트」로 넓힌다. 자격은 공유하고 세션만 가른다.
 #   - 문맥은 contextvars 다. 스레드 풀로 넘기는 잡은 문맥을 잡 안에서 다시 세운다(run_in_executor 는
 #     문맥을 복사하지 않는다).
+#   - `tenant_scope(None)` 은 「테넌트 없음」(소속 없는 MVP 기록 · #533 E)을 명시한다 — 바깥 테넌트 문맥을
+#     가리고 문맥 밖과 같은 규칙(이행 스위치)을 따른다. 바깥 테넌트 자격을 물려받지 않는다.
 #   - 이행 스위치 TENANT_CONTEXT_REQUIRED: 꺼져 있으면(기본) 문맥 없는 호출은 지금처럼 프로세스
 #     자격으로 나가고, 켜지면 예외다 — 조용히 플랫폼 · 다른 테넌트 자격으로 나가지 않는다.
 #   - 플랫폼 자체 자원 호출(platform_sns_client)은 이 규칙 밖이다 — 문맥 안에서도 고객 자격을 쓰지 않는다.
@@ -125,8 +127,10 @@ _current_tenant: contextvars.ContextVar[TenantAccess | None] = contextvars.Conte
 
 
 @contextmanager
-def tenant_scope(access: TenantAccess) -> Iterator[TenantAccess]:
-    """이 블록 안의 aws_client · account_id 가 그 테넌트 자격을 쓴다. 겹치면 안쪽이 이긴다."""
+def tenant_scope(access: TenantAccess | None) -> Iterator[TenantAccess | None]:
+    """이 블록 안의 aws_client · account_id 가 그 테넌트 자격을 쓴다. 겹치면 안쪽이 이긴다.
+
+    None 은 테넌트 없음이다 — 바깥 문맥을 가리고 문맥 밖 규칙(TENANT_CONTEXT_REQUIRED)을 따른다."""
     token = _current_tenant.set(access)
     try:
         yield access

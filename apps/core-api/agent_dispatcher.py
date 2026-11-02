@@ -137,6 +137,7 @@ from db.session import get_session_factory
 from logging_config import log_context
 from realtime import incident_event
 from security import soar
+from services.aws.client import tenant_scope
 from services.aws.executor import resolve_nacl_add_deny_rule_number
 
 logger = logging.getLogger("vigilantis.agent_dispatcher")
@@ -566,12 +567,15 @@ def _dispatch_one(
                         ],
                     ) if isinstance(graph_input, SecOpsGraphInput) else {}
                 )
+                owner = workflows.tenant_access_for(db, incident.tenant_id)
                 # 현재 NACL 조회·모델 호출 동안 읽기 트랜잭션을 열어 두지 않는다.
                 db.rollback()
-                nacl_rule_numbers = (
-                    resolve_secops_rule_numbers(graph_input, open_rule_numbers=open_rule_numbers)
-                    if isinstance(graph_input, SecOpsGraphInput) else {}
-                )
+                # 후보용 AWS 조회도 인시던트 소유자의 자격으로 한다. NULL 은 호출자 문맥을 가린다(#533 E).
+                with tenant_scope(owner):
+                    nacl_rule_numbers = (
+                        resolve_secops_rule_numbers(graph_input, open_rule_numbers=open_rule_numbers)
+                        if isinstance(graph_input, SecOpsGraphInput) else {}
+                    )
             except GraphInputUnavailable as exc:
                 logger.warning(
                     "agent_graph_input_unavailable",

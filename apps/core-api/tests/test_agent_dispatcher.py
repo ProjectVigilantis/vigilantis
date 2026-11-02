@@ -1184,6 +1184,68 @@ def test_secops_target_outside_the_menu_is_logged_with_that_target(db, caplog):
     assert record.target_arn == outside
 
 
+@pytest.mark.parametrize("owned", [True, False])
+@pytest.mark.parametrize("lookup_fails", [False, True])
+def test_secops_nacl_lookup_uses_incident_owner_and_restores_caller_context(
+    db, make_tenant, monkeypatch, precheck_pass, owned, lookup_fails,
+):
+    from datetime import UTC, datetime
+
+    from botocore.exceptions import CredentialRetrievalError
+    from db.repositories import tenants as tenants_repo
+    from schemas.api.tenants import TenantVerificationResult
+    from services.aws import executor as ex
+    from services.aws.client import current_tenant, tenant_scope
+
+    incident_id = _pending_secops(db, medium=True)
+    owner = None
+    if owned:
+        now = datetime.now(UTC)
+        tenant = tenants_repo.create_tenant(
+            db, name="NACL 소유 고객", aws_account_id=ACCOUNT, regions=[REGION], now=now,
+        )
+        tenants_repo.record_verification(
+            db, tenant.tenant_id, result=TenantVerificationResult.OK, reason_code=None, now=now,
+        )
+        incidents_repo.get_incident(db, incident_id).tenant_id = tenant.tenant_id
+        owner = workflows.tenant_access_for(db, tenant.tenant_id)
+        db.commit()
+    caller = workflows.tenant_access_for(db, make_tenant())
+    db.rollback()
+    seen = []
+
+    class Ec2:
+        def describe_network_acls(self, **kwargs):
+            assert kwargs == {"NetworkAclIds": [NACL_ID]}
+            return {"NetworkAcls": [{"Entries": [
+                {"RuleNumber": 100, "Egress": False, "RuleAction": "allow"},
+            ]}]}
+
+    def aws_client(service, region):
+        assert not db.in_transaction()
+        assert (service, region) == ("ec2", REGION)
+        seen.append(current_tenant())
+        if lookup_fails:
+            raise CredentialRetrievalError(provider="test", error_msg="lookup failed")
+        return Ec2()
+
+    monkeypatch.setattr(ex, "aws_client", aws_client)
+    client = _secops_client(db, incident_id)
+    with tenant_scope(caller):
+        report = _cycle(db, client)
+        assert current_tenant() == caller
+
+    assert seen == [owner]
+    assert report.errored == 0
+    if lookup_fails:
+        assert report.failed == 1
+        assert client.sent == []
+        assert incidents_repo.get_incident(db, incident_id).status is IncidentStatus.FAILED
+    else:
+        assert report.succeeded == 1
+        assert incidents_repo.list_candidates(db, incident_id)[0].parameters["rule_number"] == 1
+
+
 def test_secops_dispatch_stores_risk_candidates_wait_and_commit_event(db, client_pg, monkeypatch):
     from schemas.api.incidents import ResponseMode
 
