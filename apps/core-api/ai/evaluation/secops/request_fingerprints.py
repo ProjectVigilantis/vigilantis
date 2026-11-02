@@ -13,7 +13,7 @@ from schemas.incidents import AgentInvocationStatus
 from ai import agent
 from ai.model_client import FakeAIModelClient, build_outbound_payload
 
-from .dataset import EvalCase, digest
+from .dataset import EvalCase, digest, fixture_nacl_rule_numbers
 from .scoring import Answer
 
 
@@ -62,7 +62,10 @@ def request_manifest(cases: list[EvalCase], answers: dict[str, Answer]) -> list[
                         rationale="조치 판단 대역이다.",
                     ),
                 ])
-                output = agent.run_secops_graph(case.graph_input, client=client)
+                output = agent.run_secops_graph(
+                    case.graph_input, client=client,
+                    nacl_rule_numbers=fixture_nacl_rule_numbers(case.graph_input),
+                )
                 if (output.invocation_status is AgentInvocationStatus.FAILED
                         or output.invocation_status.value != status
                         or len(client.request_hashes) != agent.SECOPS_MODEL_CALLS):

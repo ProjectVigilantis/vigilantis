@@ -1109,6 +1109,11 @@ def test_secops_dispatch_stores_risk_candidates_wait_and_commit_event(db, client
     from schemas.api.incidents import ResponseMode
 
     incident_id = _pending_secops(db, medium=True)
+    def resolve(target):
+        assert not db.in_transaction()
+        assert target == NACL_ARN
+        return 1, None
+    monkeypatch.setattr(agent_dispatcher, "resolve_nacl_add_deny_rule_number", resolve)
     client = _secops_client(db, incident_id)
     original_complete = client.complete
     def complete(*args):
@@ -1148,10 +1153,31 @@ def test_secops_dispatch_stores_risk_candidates_wait_and_commit_event(db, client
     assert _cycle(db, client).claimed == 0
 
 
-@pytest.mark.parametrize("kind", ["no_proposal", "rejected", "unknown_evidence", "broad_cidr", "nul"])
+@pytest.mark.parametrize("kind", [
+    "no_proposal", "rejected", "unknown_evidence", "broad_cidr", "nul", "client_unavailable", "no_slot",
+])
 def test_secops_non_executable_results_remain_readable(db, client_pg, monkeypatch, caplog, kind):
     caplog.set_level("INFO", logger="vigilantis.workflow")
     incident_id = _pending_secops(db)
+    monkeypatch.setattr(agent_dispatcher, "resolve_nacl_add_deny_rule_number", lambda target: (1, None))
+    if kind in ("client_unavailable", "no_slot"):
+        from botocore.exceptions import CredentialRetrievalError
+        from services.aws import executor as ex
+
+        class Ec2:
+            def describe_network_acls(self, **kwargs):
+                return {"NetworkAcls": [{"Entries": [
+                    {"RuleNumber": 1, "Egress": False, "RuleAction": "allow"},
+                ]}]}
+
+        def aws_client(*args):
+            assert not db.in_transaction()
+            if kind == "client_unavailable":
+                raise CredentialRetrievalError(provider="test", error_msg="private-credential-detail")
+            return Ec2()
+
+        monkeypatch.setattr(ex, "aws_client", aws_client)
+        monkeypatch.setattr(agent_dispatcher, "resolve_nacl_add_deny_rule_number", ex.resolve_nacl_add_deny_rule_number)
     monkeypatch.setattr(workflows, "_candidate_precheck", _failing_precheck)
     over = {}
     if kind == "unknown_evidence":
@@ -1164,6 +1190,17 @@ def test_secops_non_executable_results_remain_readable(db, client_pg, monkeypatc
                                                    diagnosis="추정", rationale="차단")
     report = _cycle(db, client)
     assert report.errored == 0
+    if kind in ("client_unavailable", "no_slot"):
+        assert report.failed == 1
+        assert client.sent == []
+        assert _cycle(db, client).claimed == 0
+        evidence = next(r.precheck_evidence for r in caplog.records
+                        if r.getMessage() == "nacl_rule_number_selected")
+        assert evidence["rule_number"] is None
+        assert evidence["detail"] == (
+            "acl_lookup_unavailable" if kind == "client_unavailable" else "no_eligible_inbound_rule_number"
+        )
+        assert "private-credential-detail" not in caplog.text
     data = client_pg.get(f"/api/v1/incidents/{incident_id}").json()
     completed = kind in ("no_proposal", "rejected")
     assert data["status"] == ("AWAITING_CLOSURE" if completed else "FAILED")
@@ -1206,12 +1243,13 @@ def test_secops_non_executable_results_remain_readable(db, client_pg, monkeypatc
     ("ROLLED_BACK", "AWAITING_CLOSURE"),
     ("FAILED", "FAILED"),
 ])
-def test_secops_prior_execution_controls_state_and_input(db, client_pg, status, expected):
+def test_secops_prior_execution_controls_state_and_input(db, client_pg, monkeypatch, status, expected):
     from db.repositories import executions as executions_repo
     from schemas.api.actions import ExecutionStatus
     from schemas.runbooks import TriggerSource
 
     incident_id = _pending_secops(db)
+    monkeypatch.setattr(agent_dispatcher, "resolve_nacl_add_deny_rule_number", lambda target: (1, None))
     execution = executions_repo.create_execution(
         db, incident_id=incident_id, runbook_id=RunbookId.RUNBOOK_NACL_ADD_DENY,
         target_arn=NACL_ARN, trigger_source=TriggerSource.PRE_MITIGATION_0_5S,
@@ -1272,6 +1310,10 @@ def test_secops_ssh_reaches_approval_through_localstack_guardrail(db, client_pg,
     nacl_id = None
     try:
         nacl_id = ec2.create_network_acl(VpcId=vpcs[0]["VpcId"])["NetworkAcl"]["NetworkAclId"]
+        ec2.create_network_acl_entry(
+            NetworkAclId=nacl_id, RuleNumber=100, Protocol="-1", RuleAction="allow",
+            Egress=False, CidrBlock="0.0.0.0/0",
+        )
         module = sys.modules[__name__]
         monkeypatch.setattr(module, "ACCOUNT", account)
         monkeypatch.setattr(module, "EC2_ARN", f"arn:aws:ec2:{REGION}:{account}:instance/{INSTANCE_ID}")
@@ -1284,11 +1326,13 @@ def test_secops_ssh_reaches_approval_through_localstack_guardrail(db, client_pg,
         assert data["status"] == "AWAITING_APPROVAL"
         assert data["recommendations"][0]["target_arn"] == NACL_ARN
         candidate = incidents_repo.list_candidates(db, incident_id)[0]
+        assert candidate.parameters["rule_number"] == 1
         evaluation = guardrails_repo.latest_for_candidate(db, candidate.candidate_id)
         assert [step["result"] for step in evaluation.steps] == ["PASS"] * 4
         # 분석·가드레일은 조치를 실행하지 않는다.
         entries = ec2.describe_network_acls(NetworkAclIds=[nacl_id])["NetworkAcls"][0]["Entries"]
-        assert all(entry["RuleNumber"] != 100 for entry in entries)
+        assert all(entry["RuleNumber"] != 1 for entry in entries)
+        assert any(entry["RuleNumber"] == 100 and entry["RuleAction"] == "allow" for entry in entries)
     finally:
         if nacl_id:
             ec2.delete_network_acl(NetworkAclId=nacl_id)
