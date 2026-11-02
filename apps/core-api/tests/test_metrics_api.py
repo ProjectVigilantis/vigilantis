@@ -1469,3 +1469,46 @@ def test_관제를_끊은_리전의_기록은_남아_있고_다시_관제하면_
     assert _called_cells(cw.calls[mark:], tenants) == sorted(
         [("A", SEOUL), ("A", TOKYO), ("B", TOKYO)] * 2, key=str
     )
+
+# #536 수용 기준을 고객사(TENANT) 계정 로그인 경로로 닫는다 (PR #568 리뷰)
+@pytest.mark.parametrize("role", list(UserRole))
+def test_tenant_account_aggregates_only_own_and_calls_with_own_credentials(
+    client_pg, db, set_regions, make_tenant, login_as, owner_cloudwatch, role
+):
+    set_regions(SEOUL)
+    world = _seed_owned_world(db, make_tenant)
+    login_as(role, tenant_id=world["A"].tenant_id)
+    cw = owner_cloudwatch()
+
+    body = client_pg.get(URL).json()
+
+    for axis in ("cpu", "network", *_DB_AXES):
+        assert (body[axis]["status"], body[axis]["reason_code"]) == ("READY", None), axis
+    assert _db_totals(body) == {axis: [_OWNED_COUNTS["A"]] for axis in _DB_AXES}
+    assert set(_series_values(body, "cpu", "points")) == {world["A"].ec2_arn}
+    # CPU · 네트워크 한 번씩, 둘 다 A 의 자격 — 프로세스 자격(None) · B 자격으로 나가지 않는다
+    assert _callers(cw) == [world["A"].tenant_id] * 2
+
+
+@pytest.mark.parametrize("status", [TenantStatus.SUSPENDED, TenantStatus.PENDING_CONNECTION])
+def test_tenant_account_with_unusable_credentials_gets_unavailable_cloudwatch_and_no_aws_call(
+    client_pg, db, set_regions, make_tenant, login_as, owner_cloudwatch, status
+):
+    set_regions(SEOUL)
+    tenant_id = make_tenant(status)
+    at = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(minute=1, second=0, microsecond=0)
+    run = _seed_run(db, region=SEOUL, started_at=at, tenant_id=tenant_id)
+    _seed_sg(db, run, region=SEOUL, suffix="0001", verdict="THREAT", evaluated_at=at)
+    _seed_owned_ec2(db, run)
+    db.commit()
+    login_as(UserRole.VIEWER, tenant_id=tenant_id)
+    cw = owner_cloudwatch()
+
+    body = client_pg.get(URL).json()
+
+    for axis in ("cpu", "network"):
+        assert (body[axis]["status"], body[axis]["reason_code"]) == (
+            "UNAVAILABLE", f"TENANT_{status.value}"
+        ), axis
+    assert cw.calls == []
+    assert [p["value"] for p in body["sg_exposure"]["points"]] == [1]
