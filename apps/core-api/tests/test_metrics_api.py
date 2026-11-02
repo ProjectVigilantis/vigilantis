@@ -1470,6 +1470,7 @@ def test_관제를_끊은_리전의_기록은_남아_있고_다시_관제하면_
         [("A", SEOUL), ("A", TOKYO), ("B", TOKYO)] * 2, key=str
     )
 
+
 # #536 수용 기준을 고객사(TENANT) 계정 로그인 경로로 닫는다 (PR #568 리뷰)
 @pytest.mark.parametrize("role", list(UserRole))
 def test_tenant_account_aggregates_only_own_and_calls_with_own_credentials(

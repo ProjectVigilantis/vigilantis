@@ -17,8 +17,6 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FutureTimeout
 from datetime import UTC, datetime, timedelta
 
 import main
@@ -36,6 +34,7 @@ from schemas.api.auth import AccountType, UserRole
 from schemas.api.ws import WS_CLOSE_AUTH_REQUIRED, WsEventType
 from sqlalchemy import delete, text
 from starlette.websockets import WebSocketDisconnect
+from tests.ws_receive import receive_text_bounded
 
 WS = "/api/v1/ws"
 T0 = datetime(2026, 10, 20, 9, 0, tzinfo=UTC)
@@ -158,16 +157,8 @@ def tenant_incidents(committed_auth, make_incident):
         session.commit()
 
 
-def _next_incident_id(ws, timeout: float = 5.0) -> str:
-    # TestClient 의 receive_text 는 동기 블로킹이라 authorize 가 모두 거절하면 영원히 멈춘다 — 시간 제한으로 CI 멈춤 대신 실패시킨다
-    pool = ThreadPoolExecutor(max_workers=1)
-    try:
-        text_frame = pool.submit(ws.receive_text).result(timeout=timeout)
-    except FutureTimeout:
-        pytest.fail(f"{timeout}초 안에 WebSocket 메시지를 받지 못했다 — authorize 가 모든 이벤트를 거절하는지 확인")
-    finally:
-        pool.shutdown(wait=False)
-    return json.loads(text_frame)["data"]["incident_id"]
+def _next_incident_id(ws) -> str:
+    return json.loads(receive_text_bounded(ws))["data"]["incident_id"]
 
 
 @pytest.mark.parametrize("role", [UserRole.ADMIN, UserRole.VIEWER])
@@ -241,7 +232,7 @@ def test_valid_session_connects_and_receives(committed_auth, allowed_origin):
         manager = client.app.state.realtime
         with client.websocket_connect(WS, headers={"Cookie": seed.cookie, "Origin": allowed_origin}) as ws:
             manager.publish(incident_event(WsEventType.INCIDENT_UPDATED, incident_id="inc-ok", occurred_at=T0))
-            assert json.loads(ws.receive_text())["data"] == {"incident_id": "inc-ok"}
+            assert json.loads(receive_text_bounded(ws))["data"] == {"incident_id": "inc-ok"}
             assert manager.connection_count == 1
         _wait_until(lambda: manager.connection_count == 0)
 
@@ -312,7 +303,7 @@ def test_connection_and_rechecks_never_extend_idle(committed_auth, monkeypatch):
         with client.websocket_connect(WS, headers={"Cookie": seed.cookie}) as ws:
             _wait_until(lambda: len(checks) >= 4)  # 연결 1회 + 재확인 3회 이상
             manager.publish(incident_event(WsEventType.INCIDENT_UPDATED, incident_id="inc-alive", occurred_at=T0))
-            assert json.loads(ws.receive_text())["data"] == {"incident_id": "inc-alive"}
+            assert json.loads(receive_text_bounded(ws))["data"] == {"incident_id": "inc-alive"}
             assert _last_activity(committed_auth, seed.session_id) == before
 
 
