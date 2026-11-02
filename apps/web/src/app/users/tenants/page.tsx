@@ -1,21 +1,34 @@
-// 고객사별 직원 표. 관리자 대시보드의 "고객사 직원" 숫자 · 그래프에서 넘어온다(2026-10-29 — 대시보드는 숫자와 그래프만 두고
-// 고객사 한 곳 한 줄 표는 이 화면으로 옮겼다). 직원 한 명씩 고치는 일은 계정 관리(`/users`)가 한다.
+// 고객사별 계정 표. 관리자 대시보드의 "고객사 계정" 숫자 · 그래프에서 넘어온다(2026-10-29 — 대시보드는 숫자와 그래프만 두고
+// 고객사 한 곳 한 줄 표는 이 화면으로 옮겼다). 계정 하나씩 고치는 일은 계정 관리(`/users`)가 한다.
 
 import type { Metadata } from 'next';
 import { unstable_rethrow } from 'next/navigation';
 
 import { DetailHeader } from '@/components/admin-dashboard/detail-header';
 import { StaffTable } from '@/components/admin-dashboard/staff-table';
+import { BusinessUnavailable } from '@/components/business-unavailable';
 import { ErrorState } from '@/components/error-state';
 import { staffRows } from '@/lib/admin-dashboard';
 import { serverApi } from '@/lib/api/server';
+import { businessOpen } from '@/lib/home-path';
+import { isUnassignedManager } from '@/lib/roles';
 
-export const metadata: Metadata = { title: '고객사별 직원 · Vigilantis' };
+export const metadata: Metadata = { title: '고객사별 계정 · Vigilantis' };
 
 export default async function TenantStaffPage() {
   const renderedAt = new Date().toISOString();
   // 세션 쿠키만 실어 부르고, 401이면 로그인으로 redirect한다(lib/api/server.ts).
-  const { getTenants, getUsers } = await serverApi();
+  const { getMe, getTenants, getUsers } = await serverApi();
+  // 대시보드(app/page.tsx)와 같은 관문: 고객 범위가 없는 계정(고객사 계정 · 담당 고객사 없는 관리자 직원계정)에는
+  // 데이터를 읽지 않고 이용 제한을 알린다. 계정 확인 실패도 조회로 넘어가지 않는다.
+  let user;
+  try {
+    user = await getMe();
+  } catch (error) {
+    unstable_rethrow(error);
+    return <ErrorState error={error} />;
+  }
+  if (!businessOpen(user)) return <BusinessUnavailable unassigned={isUnassignedManager(user)} />;
   let tenants;
   let users;
   try {
@@ -28,8 +41,8 @@ export default async function TenantStaffPage() {
   return (
     <div className="flex flex-col gap-6">
       <DetailHeader
-        title="고객사별 직원"
-        description="고객사마다 Vigilantis에 로그인하는 직원 계정입니다. 줄을 펼치면 이메일이 보이고, 고객사 이름을 누르면 그 고객사 직원을 관리합니다."
+        title="고객사별 계정"
+        description="고객사마다 Vigilantis에 로그인하는 계정(고객사 중앙계정 · 고객사 직원계정)입니다. 줄을 펼치면 이메일이 보이고, 고객사 이름을 누르면 그 고객사의 계정을 관리합니다."
         renderedAt={renderedAt}
       />
       <section className="bg-card ring-foreground/10 rounded-xl p-6 ring-1">

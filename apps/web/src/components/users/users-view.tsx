@@ -100,19 +100,19 @@ export function UsersView({
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-col gap-1">
           <h1 className="text-lg font-semibold">계정 관리</h1>
-          {/* 관리자 직원 계정은 서버가 운영 CLI로만 만든다(auth/README.md) — 이 화면에서 만들 수 있는 것은 고객사 직원뿐이다. */}
+          {/* 관리자 직원계정은 서버가 운영 CLI로만 만든다(auth/README.md · routers/staff.py에 생성 경로 없음). 이 화면에서 만드는 것은 고객사 계정뿐이다. */}
           {me !== null ? (
             <p className="text-muted-foreground text-sm">
               {me.account_type === 'PLATFORM'
-                ? '고객사 직원 계정을 관리합니다. 관리자 직원 계정은 아직 이 화면에서 만들 수 없습니다.'
-                : '우리 회사 직원 계정을 관리합니다.'}
+                ? '고객사 계정(고객사 중앙계정 · 고객사 직원계정)을 관리합니다. 관리자 직원계정은 아직 이 화면에서 만들 수 없습니다.'
+                : '우리 회사의 고객사 직원계정을 관리합니다.'}
             </p>
           ) : null}
         </div>
         {/* 초대 칸(고객사 ID 입력 여부)이 계정 종류로 갈리므로 계정을 확인한 뒤에 연다. 담당 고객이 없으면 그리지 않는다. */}
         {unassigned ? null : (
           <Button type="button" disabled={!canManageUsers(me)} onClick={() => open({ kind: 'invite' })}>
-            고객사 직원 초대
+            계정 초대
           </Button>
         )}
       </div>
@@ -140,7 +140,7 @@ export function UsersView({
       {users.length === 0 ? (
         unassigned ? (
           <p role="status" className="rounded-lg border p-4 text-sm">
-            담당 고객이 배정되지 않아 관리할 고객사 사용자가 없습니다. 중앙 관리자에게 담당 고객 배정을 요청해 주세요.
+            담당 고객사가 배정되지 않아 관리할 고객사 계정이 없습니다. 중앙 관리계정에서 담당 고객사를 배정받아야 합니다.
           </p>
         ) : (
           <p className="text-sm text-muted-foreground">
@@ -429,7 +429,7 @@ function InviteDialog({
     <ActionDialog
       action="invite"
       actor={inviter}
-      title="고객사 직원 초대"
+      title="계정 초대"
       description={
         recover
           ? '같은 이메일의 기존 인증 계정을 이 앱 계정으로 연결합니다.'

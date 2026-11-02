@@ -1,7 +1,7 @@
 'use client';
 
 // 고객 문의 한 건을 처리하는 자리(고객 문의함에서 펼친 문의 아래). 운영자 메모와 상태 변경, 그리고 처리 기록.
-// 처리 기록은 고치거나 지우지 않고 쌓기만 한다(계약 초안 `GET /inquiries/{id}/events`, 사용자 관리 이력과 같은 방식).
+// 처리 기록은 고치거나 지우지 않고 쌓기만 한다(`GET /inquiries/{id}/events`, 사용자 관리 이력과 같은 방식).
 // 상태를 바꾸면서 메모를 적으면 같은 기록 한 줄에 남고, [메모만 남기기]는 상태를 그대로 둔다.
 // 서버에 아직 기록 경로가 없으면(404 · 405) 그렇다고 적는다.
 
@@ -74,7 +74,7 @@ export function InquiryWork({ item }: { item: InquiryItem }) {
           value={note}
           onChange={(event) => setNote(event.target.value)}
           disabled={pending}
-          placeholder="확인한 내용이나 고객에게 안내한 내용을 남깁니다. 상태를 바꾸면 함께 기록됩니다."
+          placeholder="확인한 내용이나 고객사에 안내한 내용을 남깁니다. 상태를 바꾸면 함께 기록됩니다."
           className={cn(INPUT, 'h-auto py-2')}
         />
       </div>

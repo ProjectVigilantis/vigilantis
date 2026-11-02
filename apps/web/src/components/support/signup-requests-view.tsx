@@ -110,7 +110,7 @@ export function SignupRequestsView({ items, focusId }: { items: SignupRequestIte
                     </dl>
                     {item.status === 'APPROVED' ? (
                       <p className="bg-muted rounded-md px-3 py-2 text-sm">
-                        승인한 신청입니다. 고객사 화면에서 고객사를 추가하고, AWS 연결이 확인되면 {item.email}을 회사 관리자로
+                        승인한 신청입니다. 고객사 화면에서 고객사를 추가하고, AWS 연결이 확인되면 {item.email}을 고객사 중앙계정으로
                         초대하세요.{' '}
                         <Link href={TENANTS_PATH} className="text-primary font-semibold hover:underline">
                           고객사 화면으로

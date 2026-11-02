@@ -19,8 +19,8 @@ export const ROLE_LABELS: Record<UserRole, string> = {
 
 /** 플랫폼 계정의 권한 단계(`platform_role`). 플랫폼 계정의 호환 역할(ADMIN) 대신 이 이름을 보인다. */
 export const PLATFORM_ROLE_LABELS: Record<PlatformRole, string> = {
-  CENTRAL_ADMIN: '중앙 관리자',
-  TENANT_MANAGER: '고객 담당자',
+  CENTRAL_ADMIN: '중앙 관리계정',
+  TENANT_MANAGER: '관리자 직원계정',
 };
 
 export const STATUS_LABELS: Record<UserStatus, string> = {
@@ -35,7 +35,7 @@ export const EVENT_LABELS: Record<UserEventAction, string> = {
   STATUS_CHANGED: '상태 변경',
   SESSIONS_REVOKED: '로그인 세션 종료',
   PLATFORM_ROLE_CHANGED: '플랫폼 권한 변경',
-  TENANT_ASSIGNMENTS_CHANGED: '담당 고객 변경',
+  TENANT_ASSIGNMENTS_CHANGED: '담당 고객사 변경',
 };
 
 const KST_OFFSET_MS = 9 * 60 * 60_000;
@@ -90,7 +90,7 @@ export type UserAdminAction = 'invite' | 'resend' | 'role' | 'status' | 'revoke'
  * 고객사 ADMIN이 아니면 같은 거절이다 — 담당 고객이 없는 고객 담당자도 여기에 든다.
  */
 export const USER_ADMIN_FORBIDDEN =
-  '중앙 관리자, 담당 고객이 배정된 고객 담당자 또는 고객사 관리자만 사용자를 관리할 수 있습니다.';
+  '중앙 관리계정, 담당 고객사가 배정된 관리자 직원계정, 고객사 중앙계정만 계정을 관리할 수 있습니다.';
 
 /** 초대 메일은 DB 기록보다 먼저 나갈 수 있다 — 결과를 모르는 실패에서 "보내지 않았다"고 말하지 않는다. */
 export const INVITE_UNCERTAIN =

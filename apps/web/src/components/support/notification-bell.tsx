@@ -167,7 +167,7 @@ export function NotificationBell() {
             </Popover.Close>
             <Popover.Close asChild>
               <Link href={INQUIRIES_PATH} className="text-primary flex-1 border-l px-4 py-2.5 text-center hover:underline">
-                고객 문의함
+                고객사 문의함
               </Link>
             </Popover.Close>
           </div>

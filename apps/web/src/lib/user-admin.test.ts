@@ -29,7 +29,7 @@ import type { UserEventItem } from '../types/api.ts';
 
 const ACTIONS: UserAdminAction[] = ['invite', 'resend', 'role', 'status', 'revoke'];
 
-test('403은 "관리자만" 문구다 — 조치 화면의 조회 전용 문구가 아니다', () => {
+test('403은 "관리할 수 있는 계정만" 문구다 — 조치 화면의 조회 전용 문구가 아니다', () => {
   for (const action of ACTIONS) {
     assert.equal(userAdminErrorMessage(action, 'AUTH_FORBIDDEN'), USER_ADMIN_FORBIDDEN, action);
   }
@@ -37,8 +37,9 @@ test('403은 "관리자만" 문구다 — 조치 화면의 조회 전용 문구�
   assert.doesNotMatch(USER_ADMIN_FORBIDDEN, /조회 전용/);
   // 플랫폼 계정 전체가 아니라 등급 · 배정을 말한다 — 배정 없는 담당자가 "플랫폼 운영자라 되는데"로 읽지 않게.
   assert.doesNotMatch(USER_ADMIN_FORBIDDEN, /플랫폼 운영자/);
-  assert.match(USER_ADMIN_FORBIDDEN, /중앙 관리자/);
-  assert.match(USER_ADMIN_FORBIDDEN, /담당 고객이 배정된 고객 담당자/);
+  assert.match(USER_ADMIN_FORBIDDEN, /중앙 관리계정/);
+  assert.match(USER_ADMIN_FORBIDDEN, /담당 고객사가 배정된 관리자 직원계정/);
+  assert.match(USER_ADMIN_FORBIDDEN, /고객사 중앙계정/);
 });
 
 test('초대 · 재발송의 500 · 네트워크 실패는 메일이 나갔을 수 있다고 말한다', () => {
@@ -243,7 +244,7 @@ test('이력 한 줄 요약', () => {
         after_state: { platform_role: 'CENTRAL_ADMIN' },
       }),
     ),
-    '고객 담당자 → 중앙 관리자',
+    '관리자 직원계정 → 중앙 관리계정',
   );
   assert.equal(eventSummary(event({ action: 'PLATFORM_ROLE_CHANGED', before_state: {}, after_state: {} })), '— → —');
   // 담당 고객 배정 변경은 개수만 보인다 — 고객 ID를 이력 한 줄에 나열하지 않는다.
@@ -252,7 +253,7 @@ test('이력 한 줄 요약', () => {
     before_state: { tenant_ids: [] },
     after_state: { tenant_ids: [TENANT_UUID, OTHER_TENANT_UUID] },
   });
-  assert.equal(EVENT_LABELS[assignment.action], '담당 고객 변경');
+  assert.equal(EVENT_LABELS[assignment.action], '담당 고객사 변경');
   assert.equal(eventSummary(assignment), '0곳 → 2곳');
   assert.doesNotMatch(eventSummary(assignment), /123e4567|223e4567/);
   assert.equal(

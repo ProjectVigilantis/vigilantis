@@ -217,12 +217,12 @@ export function createReadApi(transport: ApiTransport) {
       return request<UsersResponse>('/users', undefined, transport);
     },
 
-    /** 도입 신청 목록: 플랫폼 계정만(계약 초안, types/api.ts 끝). 도입 신청 화면(app/signup-requests)이 부른다. */
+    /** 도입 신청 목록: 플랫폼 계정만(#552, types/api.ts 끝). 도입 신청 화면(app/signup-requests)이 부른다. */
     getSignupRequests(): Promise<SignupRequestsResponse> {
       return request<SignupRequestsResponse>('/signup-requests', undefined, transport);
     },
 
-    /** 고객 문의 목록: 플랫폼 계정은 전부, 고객사 계정은 자기 고객사 것(계약 초안). 고객 문의 화면(app/inquiries)이 부른다. */
+    /** 고객 문의 목록: 플랫폼 계정은 전부, 고객사 계정은 자기 고객사 것(#552). 고객 문의 화면(app/inquiries)이 부른다. */
     getInquiries(): Promise<InquiriesResponse> {
       return request<InquiriesResponse>('/inquiries', undefined, transport);
     },
@@ -405,7 +405,7 @@ export async function revokeUserSessions(userId: string): Promise<void> {
   await postJson<null>(userPath(userId, '/sessions/revoke'));
 }
 
-/* ── 도입 신청 · 고객 문의 · 관리자 알림(계약 초안 2026-10-29, types/api.ts 끝). 서버에는 아직 없다. ── */
+/* ── 도입 신청 · 고객사 문의 · 관리자 알림(#552, types/api.ts 끝). ── */
 
 /** 로그인 없이 보내는 도입 신청(랜딩 로그인 창 회원가입). 세션과 무관하므로 401이 와도 로그인으로 보내지 않는다. */
 export function submitSignupRequest(body: SignupRequestCreate): Promise<{ request_id: string }> {

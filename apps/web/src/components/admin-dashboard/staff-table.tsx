@@ -133,7 +133,7 @@ export function StaffTable({ rows, nowMs }: { rows: readonly StaffRow[]; nowMs: 
                         <button
                           type="button"
                           aria-expanded={expanded}
-                          aria-label={`${r.name} 고객사 직원 ${expanded ? '접기' : '펼치기'}`}
+                          aria-label={`${r.name} 고객사 계정 ${expanded ? '접기' : '펼치기'}`}
                           onClick={() => toggle(key)}
                           className="hover:bg-accent focus-visible:ring-ring/50 rounded-md p-1 focus-visible:ring-2 focus-visible:outline-none"
                         >

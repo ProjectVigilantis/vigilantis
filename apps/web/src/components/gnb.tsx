@@ -50,7 +50,7 @@ const NAV: Readonly<Record<string, { label: string; icon: LucideIcon }>> = {
   [TENANTS_PATH]: { label: '고객사', icon: Building2 },
   [USERS_PATH]: { label: '계정', icon: Users },
   [SIGNUP_REQUESTS_PATH]: { label: '도입 신청', icon: ClipboardList },
-  [INQUIRIES_PATH]: { label: '고객 문의', icon: LifeBuoy },
+  [INQUIRIES_PATH]: { label: '고객사 문의', icon: LifeBuoy },
 };
 
 /** 현재 계정(세션 Provider · #492). 확인 전 · 미로그인 · 조회 실패는 null이다(메뉴 · 업무 기능을 열지 않는다). */
@@ -86,7 +86,7 @@ export function ShellHeader() {
             <ConnectionIndicator />
           </div>
         ) : null}
-        {/* 도입 신청 · 고객 문의 알림은 관리자(플랫폼) 계정에게, 문의하기는 고객사 계정(관리자 · 직원)에게 둔다(2026-10-29). */}
+        {/* 도입 신청 · 고객 문의 알림은 플랫폼 계정(중앙 관리계정 · 관리자 직원계정)에게, 문의하기는 고객사 계정(고객사 중앙계정 · 직원계정)에게 둔다(2026-10-29). */}
         {isPlatform(account) ? <NotificationBell /> : null}
         {account?.account_type === 'TENANT' ? <InquiryButton /> : null}
         <ThemeToggle />

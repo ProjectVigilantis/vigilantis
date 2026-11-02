@@ -148,14 +148,14 @@ function StaffCountHistogram({ dist }: { dist: StaffCountDistribution }) {
 function StaffChart({ summary, dist }: { summary: StaffSummary | null; dist: StaffCountDistribution | null }) {
   return (
     <ChartCard
-      title="고객사 직원"
-      description="고객사 직원 계정 · 사람 수"
+      title="고객사 계정"
+      description="고객사 중앙계정 · 직원계정 수"
       aside={summary === null ? null : <span className="text-sm font-bold tabular-nums">{summary.total}명</span>}
     >
       {summary === null ? (
-        <p className="text-muted-foreground text-sm">직원 목록을 불러오지 못했습니다.</p>
+        <p className="text-muted-foreground text-sm">계정 목록을 불러오지 못했습니다.</p>
       ) : summary.total === 0 ? (
-        <p className="text-muted-foreground text-sm">등록된 고객사 직원이 없습니다.</p>
+        <p className="text-muted-foreground text-sm">등록된 고객사 계정이 없습니다.</p>
       ) : (
         <>
           {dist !== null && dist.n > 0 ? (
@@ -230,9 +230,9 @@ export function AdminDashboardView({
           href={TENANTS_PATH}
         />
         <StatTile
-          label="고객사 직원"
+          label="고객사 계정"
           value={staff === null ? null : staff.total}
-          note={staff === null ? '직원 조회 실패' : `미로그인 ${staff.neverLoggedIn} · 비활성 ${staff.disabled}`}
+          note={staff === null ? '계정 조회 실패' : `미로그인 ${staff.neverLoggedIn} · 비활성 ${staff.disabled}`}
           href={STAFF_PATH}
         />
         <StatTile

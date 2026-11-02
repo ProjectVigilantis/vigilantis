@@ -8,16 +8,29 @@ import { unstable_rethrow } from 'next/navigation';
 
 import { DetailHeader } from '@/components/admin-dashboard/detail-header';
 import { IssuesTable } from '@/components/admin-dashboard/issues-table';
+import { BusinessUnavailable } from '@/components/business-unavailable';
 import { ErrorState } from '@/components/error-state';
 import { issueRows, manualIssues } from '@/lib/admin-dashboard';
 import { orNull, serverApi } from '@/lib/api/server';
+import { businessOpen } from '@/lib/home-path';
+import { isUnassignedManager } from '@/lib/roles';
 
 export const metadata: Metadata = { title: '수동 처리가 필요한 문제 · Vigilantis' };
 
 export default async function IssuesPage() {
   const renderedAt = new Date().toISOString();
   // 세션 쿠키만 실어 부르고, 401이면 로그인으로 redirect한다(lib/api/server.ts).
-  const { getTenants, getIncidents } = await serverApi();
+  const { getMe, getTenants, getIncidents } = await serverApi();
+  // 대시보드(app/page.tsx)와 같은 관문: 고객 범위가 없는 계정(고객사 계정 · 담당 고객사 없는 관리자 직원계정)에는
+  // 데이터를 읽지 않고 이용 제한을 알린다. 계정 확인 실패도 조회로 넘어가지 않는다.
+  let user;
+  try {
+    user = await getMe();
+  } catch (error) {
+    unstable_rethrow(error);
+    return <ErrorState error={error} />;
+  }
+  if (!businessOpen(user)) return <BusinessUnavailable unassigned={isUnassignedManager(user)} />;
   const incidentsPromise = orNull(getIncidents());
   let tenants;
   try {

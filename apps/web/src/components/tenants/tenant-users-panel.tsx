@@ -28,7 +28,7 @@ export function TenantUsersPanel({
   const canInvite = status === 'ACTIVE';
 
   return (
-    <Panel title="고객사 직원" description="이 고객사에서 Vigilantis에 로그인하는 직원 계정입니다.">
+    <Panel title="고객사 계정" description="이 고객사에서 Vigilantis에 로그인하는 계정입니다(고객사 중앙계정 · 고객사 직원계정).">
       {users === null ? (
         <Muted>직원 목록을 불러오지 못했습니다.</Muted>
       ) : (

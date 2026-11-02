@@ -255,7 +255,7 @@ export function TenantDetailView({ tenant, users }: { tenant: TenantDetail; user
           <div className="flex flex-col gap-3 text-sm">
             {!canManage ? (
               <p className="text-muted-foreground text-xs">
-                온보딩 링크 · ExternalId는 중앙 관리자와 이 고객의 담당자만 볼 수 있습니다.
+                온보딩 링크 · ExternalId는 중앙 관리계정과 이 고객사를 맡은 관리자 직원계정만 볼 수 있습니다.
               </p>
             ) : onboarding === null ? (
               <Button type="button" size="sm" variant="outline" className="w-fit" disabled={disabled} onClick={showOnboarding}>

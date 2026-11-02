@@ -11,7 +11,7 @@ import { ApiError } from '@/lib/api/client';
 import { orError, serverApi } from '@/lib/api/server';
 import { notYetServed } from '@/lib/support';
 
-export const metadata: Metadata = { title: '고객 문의 · Vigilantis' };
+export const metadata: Metadata = { title: '고객사 문의 · Vigilantis' };
 
 export default async function InquiriesPage({ searchParams }: PageProps<'/inquiries'>) {
   const renderedAt = new Date().toISOString();
@@ -22,14 +22,14 @@ export default async function InquiriesPage({ searchParams }: PageProps<'/inquir
 
   return (
     <SupportPage
-      title="고객 문의"
+      title="고객사 문의"
       description="고객사 계정이 보낸 장애 · 버그 문의입니다. 처리하면서 상태를 옮기고, 답은 보낸 사람 이메일로 드립니다. 시각은 모두 KST입니다."
       renderedAt={renderedAt}
     >
       {result.value !== null ? (
         <InquiriesView items={result.value.items} focusId={typeof id === 'string' ? id : null} />
       ) : result.error instanceof ApiError && notYetServed(result.error.httpStatus) ? (
-        <NotYetServed what="고객 문의" />
+        <NotYetServed what="고객사 문의" />
       ) : (
         <ErrorState error={result.error} />
       )}

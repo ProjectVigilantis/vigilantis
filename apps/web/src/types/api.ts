@@ -1067,9 +1067,9 @@ export interface AuditEventsResponse {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 도입 신청 · 고객 문의 · 관리자 알림: FE 계약 초안(2026-10-29). 서버에는 아직 없다.
-// BE 담당(안성일)이 이슈에서 확정하면 그 계약에 맞춰 고친다. 화면: 로그인 창 회원가입(도입 신청),
-// 고객사 계정 상단바 [문의하기](고객 문의), 관리자 상단바 종 · /signup-requests · /inquiries.
+// 도입 신청 · 고객사 문의 · 관리자 알림(2026-10-29 FE 초안 → #552로 서버에 들어왔다). 원천은
+// packages/schemas/api/signup_requests.py · inquiries.py · notifications.py · support.py다. 화면: 로그인 창 회원가입(도입 신청),
+// 고객사 계정 상단바 [문의하기](고객사 문의), 관리자 상단바 종 · /signup-requests · /inquiries.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** 도입 신청의 처리 상태. 운영자가 바꾼다. */
@@ -1148,6 +1148,8 @@ export interface NotificationItem {
   kind: NotificationKind;
   /** 알림이 가리키는 신청 · 문의의 ID. */
   target_id: string;
+  /** 문의 알림이면 그 고객사 ID, 도입 신청 알림이면 null(아직 고객사가 없다). */
+  tenant_id: string | null;
   /** 누가: 신청 회사명 · 문의 고객사명. */
   subject: string;
   /** 무엇을: 신청 담당자 이름 · 문의 제목. */
@@ -1168,7 +1170,7 @@ export interface NotificationsResponse {
 export type InquiryEventAction = 'INQUIRY_CREATED' | 'STATUS_CHANGED' | 'NOTE_ADDED';
 
 /**
- * 문의 처리 기록 한 줄(계약 초안). 고치거나 지우지 않고 쌓기만 한다(사용자 관리 이력 `user_admin_events`와 같은 방식).
+ * 문의 처리 기록 한 줄. 고치거나 지우지 않고 쌓기만 한다(사용자 관리 이력 `user_admin_events`와 같은 방식).
  * 상태 변경이면 before · after가, 메모면 note가 있다. 상태를 바꾸면서 메모를 남기면 한 줄에 둘 다 있다.
  */
 export interface InquiryEventItem {

@@ -68,7 +68,7 @@ const ROLE_ORDER: Record<UserListItem['role'], number> = { ADMIN: 0, OPERATOR: 1
 /**
  * 고객사별 고객사 직원. 등록된 고객사는 직원이 0명이어도 묶음을 만든다(아무도 없다는 것도 알아야 한다).
  * 고객사 목록에 없는 `tenant_id`의 직원은 버리지 않고 ID를 이름으로 한 묶음에 담는다.
- * 관리자 · 관리자 직원(`tenant_id` 없음)은 고객사 직원이 아니라 넣지 않는다 — 실서버 `GET /users`도 그 계정을 내려 주지 않는다.
+ * 중앙 관리계정 · 관리자 직원계정(`tenant_id` 없음)은 고객사 계정이 아니라 넣지 않는다 — 실서버 `GET /users`도 그 계정을 내려 주지 않는다.
  */
 export function staffByTenant(tenants: readonly TenantListItem[], users: readonly UserListItem[]): StaffGroup[] {
   const groups = new Map<string, StaffGroup>(
@@ -244,7 +244,7 @@ export interface StaffSummary {
   activeTenantsWithoutStaff: number;
 }
 
-/** 고객사 직원 전체를 센다. 관리자 · 관리자 직원(`tenant_id` 없음)은 넣지 않는다(`staffByTenant`와 같다). */
+/** 고객사 계정 전체를 센다. 중앙 관리계정 · 관리자 직원계정(`tenant_id` 없음)은 넣지 않는다(`staffByTenant`와 같다). */
 export function staffSummary(tenants: readonly TenantListItem[], users: readonly UserListItem[]): StaffSummary {
   const staff = users.filter((u) => u.tenant_id !== null);
   const byRole: Record<UserListItem['role'], number> = { ADMIN: 0, OPERATOR: 0, VIEWER: 0 };

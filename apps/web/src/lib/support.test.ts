@@ -15,6 +15,7 @@ const base: NotificationItem = {
   notification_id: 'n1',
   kind: 'SIGNUP_REQUEST',
   target_id: 'sr 1',
+  tenant_id: null,
   subject: '이음물류',
   summary: '김담당',
   inquiry_category: null,

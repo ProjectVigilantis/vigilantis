@@ -59,8 +59,8 @@ export function TenantsView({ tenants }: { tenants: TenantListItem[] }) {
       {tenants.length === 0 ? (
         unassigned ? (
           <EmptyState
-            message="담당 고객이 배정되지 않았습니다."
-            description="배정 전에는 고객 정보 · 조치 · 고객사 사용자 관리를 이용할 수 없습니다. 중앙 관리자에게 담당 고객 배정을 요청해 주세요."
+            message="담당 고객사가 배정되지 않았습니다."
+            description="배정 전에는 고객사 정보 · 조치 · 고객사 계정 관리를 이용할 수 없습니다. 중앙 관리계정에서 담당 고객사를 배정받아야 합니다."
           />
         ) : canCreate ? (
           <EmptyState
