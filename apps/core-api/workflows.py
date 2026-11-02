@@ -655,6 +655,8 @@ class AutoIsolationSkipReason(str, Enum):
     WAIT_NOT_STARTED = "WAIT_NOT_STARTED"        # 저장된 응답 기한이 없다
     WAIT_NOT_DUE = "WAIT_NOT_DUE"                # 응답 기한이 아직 지나지 않았다
     USER_RESPONDED = "USER_RESPONDED"            # 관제자 승인 실행이 이미 commit돼 있다
+    # 테넌트가 정지됐다 — 원격 회수(ADR-0012 §3 · T-4). 끄기보다 먼저 판정한다
+    TENANT_SUSPENDED = "TENANT_SUSPENDED"
     # 테넌트가 자동 조치를 껐다 — 또는 그 기한이 꺼진 동안 지났다(T-6 · #514). 사람 승인은 그대로 받는다
     AUTO_ACTION_DISABLED = "AUTO_ACTION_DISABLED"
 
@@ -798,16 +800,20 @@ def automatic_trigger_block(
     잠근 뒤)이 같은 함수를 쓴다. 막는 것은 서버가 사람 없이 시작하는 발동뿐이다 — 수집 · 분석 · 관제자
     승인 실행 · 자동 원복은 이 함수를 지나지 않는다.
       - 테넌트 없음(tenant_id NULL · MVP 단일 계정 기록)은 막지 않는다 — 지금 동작 그대로다.
+      - 정지(SUSPENDED)면 막는다 — 끄기보다 먼저다. 원격 회수(ADR-0012 §3 ①)는 자동 조치 설정과
+        무관하게 새 발동을 막고 다시 켜도 풀리지 않으므로, 「왜 안 했나」의 답은 더 바깥의 상태여야 한다.
       - 꺼져 있으면 막는다.
       - **그 발동을 정한 시각**이 마지막으로 다시 켠 시각 이전이면 막는다 — 꺼진 동안의 판단을 다시 켠
         순간 사람 없이 실행하지 않게. 정한 시각은 High 선차단이 접수 시각(received_at = Incident
         created_at), Medium 1분 격리가 응답 기한이다. High 도 접수 때 한 번만 시도되지 않는다 — 분석
         스캔이 선점할 때마다 ANALYZING 인 High 에 선차단을 다시 건다(agent_dispatcher._dispatch_one ·
         선점 회수로 되풀이될 수 있다).
-    정지(SUSPENDED) 관문은 T-4 2단계가 이 함수에 더한다.
+    시작 전 예약(단계 0건)의 정지 관문은 이 함수가 아니라 refuse_start_if_tenant_suspended 다.
     """
     if tenant is None:
         return None
+    if tenant.status is TenantStatus.SUSPENDED:
+        return AutoIsolationSkipReason.TENANT_SUSPENDED
     if not tenant.auto_action_enabled:
         return AutoIsolationSkipReason.AUTO_ACTION_DISABLED
     resumed_at = tenant.auto_action_resumed_at
