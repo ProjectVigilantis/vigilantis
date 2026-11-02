@@ -493,7 +493,7 @@ def committed_actor(committed_auth):
 
 @pytest.fixture()
 def ws_session(committed_auth) -> AuthSeed:
-    """ws_client 가 싣는 PLATFORM(CENTRAL_ADMIN) 세션(commit됨) — 전역 WebSocket 은 임시로 플랫폼 계정만 받는다."""
+    """ws_client 가 싣는 PLATFORM(CENTRAL_ADMIN) 세션(commit됨). 고객사 계정은 make_tenant_ws_client 를 쓴다."""
     return committed_auth.make()
 
 
@@ -507,6 +507,32 @@ def ws_client(committed_auth, ws_session):
     app.dependency_overrides[get_auth_session_factory] = lambda: committed_auth.sessions
     with TestClient(app, headers={"Cookie": ws_session.cookie}) as test_client:
         yield test_client
+
+
+@pytest.fixture()
+def make_tenant_ws_client(committed_auth):
+    """고객사(TENANT) 계정의 WebSocket 클라이언트 팩토리 → (TestClient, AuthSeed).
+
+    make_tenant_ws_client(tenant_id, role=UserRole.ADMIN) — tenant_id 는 committed_auth.make_tenant() 로 만든
+    실제 테넌트다. ws_client 와 같이 세션 확인 팩토리를 commit 세션으로 바꾸고 그 계정의 세션 쿠키만 싣는다.
+    클라이언트는 테스트가 끝날 때 닫힌다.
+    """
+    from contextlib import ExitStack
+
+    from auth.access import get_auth_session_factory
+    from fastapi.testclient import TestClient
+    from schemas.api.auth import UserRole
+
+    with ExitStack() as stack:
+
+        def _make(tenant_id: str, role=UserRole.ADMIN):
+            seed = committed_auth.make(role, tenant_id=tenant_id)
+            app = _build_app()
+            app.dependency_overrides[get_auth_session_factory] = lambda: committed_auth.sessions
+            client = stack.enter_context(TestClient(app, headers={"Cookie": seed.cookie}))
+            return client, seed
+
+        yield _make
 
 
 # ==============================================================================
