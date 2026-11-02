@@ -1,7 +1,7 @@
 'use client';
 
 // 5초 넘게 스스로 움직이는 요소에는 멈춤 장치가 있어야 한다(WCAG 2.2.2). 랜딩의 반복 움직임(맥박 · 이벤트 줄 ·
-// 떠 있는 카드)을 한 번에 멈춘다. html의 data-motion으로 걸고, 화면을 떠나면 지워 다른 화면에 남기지 않는다.
+// 떠 있는 카드 · 회전 지구)을 한 번에 멈춘다. 지구는 캔버스라 data-motion을 직접 읽는다(globe-backdrop.tsx). html의 data-motion으로 걸고, 화면을 떠나면 지워 다른 화면에 남기지 않는다.
 // 버튼 이름이 상태에 따라 바뀌므로 aria-pressed는 달지 않는다. 둘 다 달면 "다시 재생, 눌림"처럼 뜻이 엇갈린다.
 
 import { Pause, Play } from 'lucide-react';

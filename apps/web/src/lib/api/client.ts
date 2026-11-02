@@ -14,6 +14,7 @@ import type {
   LoginStepResponse,
   MetricsTimeseriesResponse,
   ResolutionJudgement,
+  SignupRequestCreate,
   TenantCreateRequest,
   TenantCreateResponse,
   TenantDetail,
@@ -332,6 +333,11 @@ export function submitEmailVerification(code: string): Promise<LoginStepResponse
 
 export async function logout(): Promise<void> {
   await postJson<null>('/auth/logout', undefined, AUTH_FLOW);
+}
+
+/** 로그인 없이 보내는 도입 신청(랜딩 로그인 창 회원가입). 세션과 무관하므로 401이 와도 로그인으로 보내지 않는다. */
+export function submitSignupRequest(body: SignupRequestCreate): Promise<{ request_id: string }> {
+  return postJson<{ request_id: string }>('/signup-requests', body, AUTH_FLOW);
 }
 
 /** 유휴 연장 — **사용자 입력이 있을 때만** 부른다(components/auth/session-provider.tsx). */
