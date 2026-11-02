@@ -21,7 +21,9 @@ from agent_dispatcher import (  # noqa: E402
     verify_graph_output,
 )
 from ai.agent import run_secops_graph  # noqa: E402
+from ai.capabilities import secops_action_targets
 from ai.openai_client import build_openai_model_client  # noqa: E402
+from db.repositories import incidents as incidents_repo
 from db.session import get_session_factory  # noqa: E402
 from schemas.agents import SecOpsGraphInput  # noqa: E402
 
@@ -35,11 +37,14 @@ def main():
         graph_input = build_graph_input(db, args.incident_id)
         if not isinstance(graph_input, SecOpsGraphInput):
             parser.error("SECOPS Incident가 필요합니다")
+        open_rule_numbers = incidents_repo.list_open_nacl_rule_numbers(
+            db, target_arns=secops_action_targets(graph_input.asset_context)["RUNBOOK_NACL_ADD_DENY"],
+        )
     if args.check_input:
         print(json.dumps({"input_valid": True, "model_calls": 0,
                           "capabilities": [item.runbook_id.value for item in graph_input.capabilities]}))
         return
-    numbers = resolve_secops_rule_numbers(graph_input)
+    numbers = resolve_secops_rule_numbers(graph_input, open_rule_numbers=open_rule_numbers)
     output = verify_graph_output(
         graph_input,
         run_secops_graph(graph_input, client=build_openai_model_client(), nacl_rule_numbers=numbers),

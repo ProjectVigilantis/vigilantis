@@ -153,11 +153,15 @@ class GraphInputUnavailable(Exception):
     """그래프 입력을 만들 수 없다 — 자동 반복 없이 분석 실패로 닫는다."""
 
 
-def resolve_secops_rule_numbers(graph_input: SecOpsGraphInput) -> dict[str, int]:
+def resolve_secops_rule_numbers(
+    graph_input: SecOpsGraphInput, *, open_rule_numbers: Mapping[str, set[int]],
+) -> dict[str, int]:
     """입력 스냅샷의 허용 대상만 조회한다. 호출 전에 DB 트랜잭션을 닫아야 한다."""
     numbers = {}
     for target in secops_action_targets(graph_input.asset_context)[RunbookId.RUNBOOK_NACL_ADD_DENY.value]:
-        number, code = resolve_nacl_add_deny_rule_number(target)
+        number, code = resolve_nacl_add_deny_rule_number(
+            target, excluded_rule_numbers=open_rule_numbers.get(target, frozenset()),
+        )
         if code is not None or number is None:
             raise GraphInputUnavailable(
                 f"NACL 규칙 번호 선택 불가: {code.value if code is not None else 'SERVER_PARAMETER_UNAVAILABLE'}"
@@ -555,10 +559,17 @@ def _dispatch_one(
 
             try:
                 graph_input = build_graph_input(db, incident_id)
+                open_rule_numbers = (
+                    incidents_repo.list_open_nacl_rule_numbers(
+                        db, target_arns=secops_action_targets(graph_input.asset_context)[
+                            RunbookId.RUNBOOK_NACL_ADD_DENY.value
+                        ],
+                    ) if isinstance(graph_input, SecOpsGraphInput) else {}
+                )
                 # 현재 NACL 조회·모델 호출 동안 읽기 트랜잭션을 열어 두지 않는다.
                 db.rollback()
                 nacl_rule_numbers = (
-                    resolve_secops_rule_numbers(graph_input)
+                    resolve_secops_rule_numbers(graph_input, open_rule_numbers=open_rule_numbers)
                     if isinstance(graph_input, SecOpsGraphInput) else {}
                 )
             except GraphInputUnavailable as exc:

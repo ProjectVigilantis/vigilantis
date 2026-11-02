@@ -748,13 +748,18 @@ def _find_entry(acl: Mapping[str, Any], rule_number: int, egress: bool):
     return None
 
 
-def resolve_nacl_add_deny_rule_number(target_arn: str) -> tuple[int | None, PrecheckReasonCode | None]:
+def resolve_nacl_add_deny_rule_number(
+    target_arn: str, *, excluded_rule_numbers: set[int] | frozenset[int] = frozenset(),
+) -> tuple[int | None, PrecheckReasonCode | None]:
     """후보 준비 시 조회만 한다. 선택한 번호를 예약하거나 AWS를 변경하지 않는다."""
     target = parse_arn(target_arn)
     if target is None or target.resource_type != "network-acl":
         return None, R.PRECHECK_PARAM_INVALID
     acl, code = _network_acl(target.resource_id, target.region)
-    number = select_nacl_deny_rule_number(acl) if acl is not None else None
+    number = (
+        select_nacl_deny_rule_number(acl, excluded_rule_numbers=excluded_rule_numbers)
+        if acl is not None else None
+    )
     detail = ("acl_lookup_unavailable" if code is not None else
               "no_eligible_inbound_rule_number" if number is None else "inbound_rule_number_selected")
     if code is None and number is None:
@@ -767,7 +772,10 @@ def resolve_nacl_add_deny_rule_number(target_arn: str) -> tuple[int | None, Prec
             "target_arn": target_arn[:512],
             "precheck_evidence": {
                 "source": "candidate_describe_network_acls",
-                "selection_policy": "lowest_free_inbound_before_first_allow",
+                "selection_policy": "lowest_free_inbound_before_first_allow_excluding_open_candidates",
+                "open_candidate_rule_numbers": sorted(excluded_rule_numbers)[:40],
+                "open_candidate_rule_count": len(excluded_rule_numbers),
+                "open_candidate_rule_numbers_truncated": len(excluded_rule_numbers) > 40,
                 "detail": detail,
                 "reason_code": code.value if code is not None else None,
                 "rule_number": number,

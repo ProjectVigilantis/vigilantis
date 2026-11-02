@@ -28,13 +28,14 @@ from schemas.api.incidents import (
 from schemas.candidates import CandidateStatus, RunbookCandidateData
 from schemas.events import NormalizedThreatEvent
 from schemas.evidence import EvidenceItem
+from schemas.executions import EXECUTION_NON_TERMINAL_STATUSES
 from schemas.incidents import (
     AGENT_TERMINAL_STATUSES,
     INCIDENT_OPEN_STATUSES,
     AgentInvocationStatus,
     AgentWaitSchedule,
 )
-from schemas.runbooks import TriggerSource
+from schemas.runbooks import RunbookId, TriggerSource
 from tenancy import ALL_TENANTS, TenantScope
 
 from .. import mappers, models
@@ -547,6 +548,37 @@ def list_candidates(
     if status is not None:
         stmt = stmt.where(models.RunbookCandidate.status == status)
     return list(db.execute(stmt).scalars())
+
+
+def list_open_nacl_rule_numbers(
+    db: Session, *, target_arns: Sequence[str],
+) -> dict[str, set[int]]:
+    """동일 NACL의 승인 대기·미종료 실행 후보가 사용할 번호. 번호를 예약하지는 않는다."""
+    candidate = models.RunbookCandidate
+    execution = models.ActionExecution
+    unfinished = select(execution.execution_id).where(
+        execution.candidate_id == candidate.candidate_id,
+        execution.status.in_(EXECUTION_NON_TERMINAL_STATUSES),
+    ).exists()
+    rows = db.execute(
+        select(candidate.target_arn, candidate.parameters)
+        .join(models.Incident, models.Incident.incident_id == candidate.incident_id)
+        .where(
+            candidate.runbook_id == RunbookId.RUNBOOK_NACL_ADD_DENY,
+            candidate.target_arn.in_(target_arns),
+            or_(
+                and_(
+                    candidate.status == CandidateStatus.EXECUTABLE,
+                    models.Incident.status.in_(INCIDENT_OPEN_STATUSES),
+                ),
+                and_(candidate.status == CandidateStatus.CLAIMED, unfinished),
+            ),
+        )
+    )
+    numbers: dict[str, set[int]] = {}
+    for target_arn, parameters in rows:
+        numbers.setdefault(target_arn, set()).add(parameters["rule_number"])
+    return numbers
 
 
 def update_candidate_status(

@@ -125,11 +125,11 @@ def test_nacl_candidate_uses_server_number_before_an_existing_allow(monkeypatch,
     caplog.set_level(logging.INFO, logger="vigilantis.aws")
     if expected is None:
         with pytest.raises(GraphInputUnavailable, match="PRECHECK_INVALID_STATE"):
-            resolve_secops_rule_numbers(data)
+            resolve_secops_rule_numbers(data, open_rule_numbers={})
         assert calls == [{"NetworkAclIds": [acl_id]}]
         assert caplog.records[-1].precheck_evidence["detail"] == "no_eligible_inbound_rule_number"
         return
-    numbers = resolve_secops_rule_numbers(data)
+    numbers = resolve_secops_rule_numbers(data, open_rule_numbers={})
     assert numbers == {target: expected}
     selection = caplog.records[-1].precheck_evidence
     assert selection["source"] == "candidate_describe_network_acls"
@@ -156,6 +156,21 @@ def _failure_log(caplog):
     fields = records[0].__dict__
     assert fields["incident_id"] == "inc-1" and fields["domain"] == "SECOPS"
     return fields
+
+
+def test_secops_output_rejects_a_rule_number_not_selected_by_the_server(caplog):
+    from agent_dispatcher import verify_graph_output
+
+    data = graph_input()
+    client = FakeAIModelClient([RISK, CandidateProposalOutput(candidates=[proposal()]), SUMMARY])
+    output = run_secops_graph(data, client=client, nacl_rule_numbers={NACL: 1})
+    output.candidates[0].parameters.rule_number = 2
+    with caplog.at_level(logging.WARNING, logger="vigilantis.agent_dispatcher"):
+        checked = verify_graph_output(data, output, data.incident_id, nacl_rule_numbers={NACL: 1})
+    assert checked.invocation_status is AgentInvocationStatus.FAILED
+    assert checked.candidates == []
+    assert [r.reason_code for r in caplog.records
+            if r.getMessage() == "agent_output_contract_violation"] == ["SERVER_VALUE_MISMATCH"]
 
 
 @pytest.mark.parametrize("completed,step", [
