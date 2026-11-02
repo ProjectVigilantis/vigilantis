@@ -71,7 +71,10 @@ def test_revision_follows_the_role_audit_merge_as_single_head():
     config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
     assert script.get_revision(REVISION).down_revision == PARENT
-    assert len(script.get_heads()) == 1
+    [head] = script.get_heads()
+    assert REVISION in set(script.get_revision("f8c1a9e4f515").down_revision)
+    ancestors = {rev.revision for rev in script.walk_revisions(base="base", head=head)}
+    assert {REVISION, "f8c1a9e4f515"} <= ancestors
 
 
 def test_roundtrip_matches_orm(scratch_db):

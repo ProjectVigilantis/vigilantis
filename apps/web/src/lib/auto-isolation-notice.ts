@@ -4,7 +4,7 @@
 // FE에서 다시 계산하지 않는다. 서버의 실제 접수 판정과 화면이 갈라지면 안 된다(#521 · PR #524).
 
 import { agentWaitTimes } from './realtime-events.ts';
-import type { IncidentResponse, IsoDateTime } from '../types/api.ts';
+import type { AutoIsolationBlock, IncidentResponse, IsoDateTime } from '../types/api.ts';
 
 /**
  * B-Medium 타임아웃 창 —**고지를 그리는 조건이자 기준 시각을 래치하는 조건**이다.
@@ -21,8 +21,8 @@ export function inAgentWaitWindow(
 }
 
 export type AgentWaitNotice =
-  /** 자동 발동이 막혀 있다. 실행 예고 대신 승인이 필요하다고 알린다. */
-  | { kind: 'BLOCKED' }
+  /** 자동 발동이 막혀 있다. 실행 예고 대신 사유별 안내(`AUTO_ISOLATION_BLOCKED_NOTICES`)를 쓴다. */
+  | { kind: 'BLOCKED'; block: AutoIsolationBlock }
   /** 전환 이벤트의 `occurred_at`에서 파생한 두 시각을 보여 준다. */
   | { kind: 'SCHEDULED'; startedAt: IsoDateTime; deadlineAt: IsoDateTime }
   /** 전환 이벤트를 못 받았거나 값이 계약 밖이다. 시각 없는 고정 안내문을 쓴다. */
@@ -30,6 +30,16 @@ export type AgentWaitNotice =
 
 export const AUTO_ISOLATION_BLOCKED_NOTICE =
   '이 건은 자동으로 격리되지 않습니다. 조치하려면 제안을 검토하고 승인해 주세요.';
+
+/**
+ * 사유별 안내. 자동 조치를 끈 고객은 승인으로 조치할 수 있지만, 정지(원격 회수)된 고객은 승인 실행도
+ * 서버가 거절한다(409 `TENANT_SUSPENDED`) — 승인을 권하면 틀린 안내가 된다(ADR-0012 §3).
+ */
+export const AUTO_ISOLATION_BLOCKED_NOTICES: Record<AutoIsolationBlock, string> = {
+  AUTO_ACTION_DISABLED: AUTO_ISOLATION_BLOCKED_NOTICE,
+  TENANT_SUSPENDED:
+    '이 고객은 정지 상태라 자동으로 격리되지 않습니다. 정지 중에는 새 조치 실행도 받지 않습니다.',
+};
 
 /**
  * 창 밖이면 null. 차단 사유는 시각 유무보다 먼저 본다. 시각이 있든 없든 「실행 예정」은 틀린 말이 된다.
@@ -43,7 +53,9 @@ export function agentWaitNotice(
   agentWaitAt: IsoDateTime | null,
 ): AgentWaitNotice | null {
   if (!inAgentWaitWindow(incident)) return null;
-  if (incident.auto_isolation_block !== null) return { kind: 'BLOCKED' };
+  if (incident.auto_isolation_block !== null) {
+    return { kind: 'BLOCKED', block: incident.auto_isolation_block };
+  }
   const times = agentWaitTimes(agentWaitAt);
   return times === null ? { kind: 'UNTIMED' } : { kind: 'SCHEDULED', ...times };
 }

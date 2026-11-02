@@ -11,9 +11,9 @@
 #     Medium 승인 기한 감시와 공유해 켜고 끈다 (Issue #232·#277·#285·#447).
 #   - 모의 위협 파일 소비자는 MOCK_THREAT_INBOX_DIR 지정 시 독립 기동한다(#322).
 #   - 접근 보호(#492 PR 2): 조치 · 자산 · 인시던트 · 감사 기록 · 메트릭 라우터는 포함 시점에
-#     Origin(상태 변경만) → 세션 검사를 건다. 공개 경로는 /health 와 로그인 단계뿐이다.
+#     Origin(상태 변경만) → 세션 검사를 건다. 도입 신청 POST는 별도 공개 입력 경계(#552)다.
 #     API 문서는 API_DOCS_ENABLED 일 때만 열린다. 조치 · 자산 · 인시던트는 각 라우트가 요청자의 고객사
-#     범위로 제한하고(#533), 메트릭은 플랫폼 관리 등급(CENTRAL_ADMIN · TENANT_MANAGER)만 받는다(#492).
+#     범위로 제한하고(#533), 메트릭도 같은 방식으로 제한한다(#536).
 #   - 고객 설정(T-7)은 같은 Origin · 세션 배선을 쓰고 범위는 tenant_settings Workflow 가 건다. 알림
 #     런타임(NOTIFICATION_ENABLED)이 그 설정을 재기동 없이 읽고, 꺼져 있으면 기동 중 AWS 를 부르지 않는다.
 # ==============================================================================
@@ -44,7 +44,7 @@ from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
 import agent_dispatcher  # noqa: E402
 import dispatcher  # noqa: E402
-from auth.access import require_business_access, require_user  # noqa: E402
+from auth.access import require_user  # noqa: E402
 from auth.http import log_provider_status, register_auth_http, require_origin  # noqa: E402
 from config import get_auth_settings, get_settings  # noqa: E402
 from db.session import get_session_factory  # noqa: E402
@@ -58,7 +58,10 @@ from routers import assets as assets_router  # noqa: E402
 from routers import audit as audit_router  # noqa: E402
 from routers import auth as auth_router  # noqa: E402
 from routers import incidents as incidents_router  # noqa: E402
+from routers import inquiries as inquiries_router
 from routers import metrics as metrics_router  # noqa: E402
+from routers import notifications as notifications_router
+from routers import signup_requests as signup_requests_router
 from routers import staff as staff_router  # noqa: E402
 from routers import tenant_settings as tenant_settings_router  # noqa: E402
 from routers import tenants as tenants_router  # noqa: E402
@@ -66,6 +69,7 @@ from routers import users as users_router  # noqa: E402
 from routers import ws as ws_router  # noqa: E402
 from security.soar import start_timeout_watcher  # noqa: E402
 from services.scheduler import start_scheduler as start_scan_scheduler  # noqa: E402
+from support_http import SignupBodyLimitMiddleware
 
 _http_logger = logging.getLogger("vigilantis.http")
 
@@ -142,6 +146,8 @@ def create_app() -> FastAPI:
     docs = {} if settings.API_DOCS_ENABLED else {"docs_url": None, "redoc_url": None, "openapi_url": None}
     app = FastAPI(title="Vigilantis Core API", lifespan=lifespan, **docs)
     app.state.realtime = realtime
+    # request_context·보안 헤더·CORS 안쪽에서 파싱 전에 거절한다. 413에도 공통 헤더가 붙는다.
+    app.add_middleware(SignupBodyLimitMiddleware)
 
     @app.middleware("http")
     async def request_context(request: Request, call_next):
@@ -200,15 +206,18 @@ def create_app() -> FastAPI:
     # 실제 Cognito 경로만 공급자 설정을 요구한다. WebSocket은 연결 수립 때 직접 검사한다.
     protected = [Depends(require_origin), Depends(require_user)]
     # 조치 · 자산 · 인시던트(#533)는 세션 배선만 쓰고, 고객사 범위는 각 라우트가 auth.access.tenant_scope_of 로
-    # 받는다(auth.access 머리말). 메트릭(#492)은 세션 다음에 플랫폼 관리 등급 관문을 더하고 범위는 라우트가 건다.
+    # 받는다(auth.access 머리말). 메트릭(#536)도 세션 배선만 쓰고 범위는 라우트가 건다.
     # 사용자 · 직원 · 테넌트 관리는 각 라우터 · 서비스가 등급과 범위를 건다(고객사 ADMIN 은 사용자 관리만)
-    business = [*protected, Depends(require_business_access)]
     app.include_router(actions_router.router, dependencies=protected)
     app.include_router(assets_router.router, dependencies=protected)
     app.include_router(audit_router.router, dependencies=protected)
     app.include_router(auth_router.router)
     app.include_router(incidents_router.router, dependencies=protected)
-    app.include_router(metrics_router.router, dependencies=business)
+    app.include_router(inquiries_router.router, dependencies=protected)
+    app.include_router(metrics_router.router, dependencies=protected)
+    app.include_router(notifications_router.router, dependencies=protected)
+    # 같은 prefix의 GET/PUT은 라우터가 CENTRAL_ADMIN 관문을 건다. 공개는 POST 한 경로뿐이다.
+    app.include_router(signup_requests_router.router)
     app.include_router(staff_router.router, dependencies=protected)
     app.include_router(tenants_router.router, dependencies=protected)
     # 고객 설정(T-7) — 고객사 계정도 들어오는 별도 라우터. 등급 · 범위는 Workflow 가 auth.access 로 건다

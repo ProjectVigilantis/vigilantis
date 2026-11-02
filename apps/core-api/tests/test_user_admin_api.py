@@ -38,6 +38,7 @@ from schemas.api.tenants import TenantStatus
 from schemas.api.users import UserStatus
 from sqlalchemy import select, text
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
+from tests.test_totp_recovery_api import RECOVERY_OPS
 
 ISSUER = "https://cognito-idp.ap-northeast-2.amazonaws.com/ap-northeast-2_test"  # conftest TEST_AUTH_ISSUER
 BASE = "/api/v1/users"
@@ -174,6 +175,7 @@ REQUESTS = [
     ("PUT", "/{id}/status", {"status": "DISABLED"}),
     ("PUT", "/{id}/status", {}),
     ("POST", "/{id}/sessions/revoke", None),
+    ("POST", "/{id}/totp/reset", None),
 ]
 
 
@@ -735,7 +737,10 @@ def test_target_ops_cover_every_user_scoped_route(client):
         if route.path.startswith(BASE + "/{user_id}")
         for method in route.methods or ()
     }
-    assert {(m, BASE + p.replace("{id}", "{user_id}")) for m, p, _ in TARGET_OPS} == registered
+    # 복구는 행위자 정책이 달라 별도 표(RECOVERY_OPS)의 행동 테스트가 쓴다 — 두 표를 합쳐 등록 경로 전체와 비교한다
+    covered = {(m, BASE + p.replace("{id}", "{user_id}")) for m, p, _ in TARGET_OPS}
+    covered |= {(m, BASE + p.replace("{id}", "{user_id}")) for m, p in RECOVERY_OPS}
+    assert covered == registered
 
 
 HIDDEN = [

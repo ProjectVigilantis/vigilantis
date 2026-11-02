@@ -1,4 +1,4 @@
-// API 호출 계층 — 오류 봉투를 ApiError로 변환하고 계약 엔드포인트 5종의 타입드 함수를 제공합니다.
+// API 호출 계층 — 오류 봉투를 ApiError로 변환하고 계약 엔드포인트의 타입드 함수를 제공합니다.
 
 import type {
   AssetsResponse,
@@ -11,9 +11,14 @@ import type {
   IncidentResponse,
   IncidentStatus,
   IncidentsResponse,
+  InquiriesResponse,
   LoginStepResponse,
   MetricsTimeseriesResponse,
+  PaginationParams,
   ResolutionJudgement,
+  SignupRequestAccepted,
+  SignupRequestCreate,
+  SignupRequestsResponse,
   TenantCreateRequest,
   TenantCreateResponse,
   TenantDetail,
@@ -150,6 +155,13 @@ async function request<T>(path: string, init?: RequestInit, transport?: ApiTrans
   return (await requestWithStatus<T>(path, init, transport)).body;
 }
 
+function paginationSuffix(pagination?: PaginationParams): string {
+  const query = new URLSearchParams();
+  if (pagination?.page !== undefined) query.set('page', String(pagination.page));
+  if (pagination?.page_size !== undefined) query.set('page_size', String(pagination.page_size));
+  return query.size > 0 ? `?${query}` : '';
+}
+
 /**
  * 서버 컴포넌트도 부르는 조회(현재 계정 · 고객 관리 · 사용자 관리 포함). 전송을 주입받아 같은 경로 · 타입을 브라우저와 서버가 함께 쓴다 —
  * 서버 쪽은 `serverApi()`(lib/api/server.ts), 브라우저 쪽은 아래 모듈 export다.
@@ -214,11 +226,21 @@ export function createReadApi(transport: ApiTransport) {
     getUsers(): Promise<UsersResponse> {
       return request<UsersResponse>('/users', undefined, transport);
     },
+
+    getSignupRequests(pagination?: PaginationParams): Promise<SignupRequestsResponse> {
+      return request<SignupRequestsResponse>(`/signup-requests${paginationSuffix(pagination)}`, undefined, transport);
+    },
+
+    getInquiries(pagination?: PaginationParams): Promise<InquiriesResponse> {
+      return request<InquiriesResponse>(`/inquiries${paginationSuffix(pagination)}`, undefined, transport);
+    },
   };
 }
 
-export const { getAssets, getMetricsTimeseries, getIncidents, getIncident, getTenants, getTenant, getTenantSettings } =
-  createReadApi(BROWSER);
+export const {
+  getAssets, getMetricsTimeseries, getIncidents, getIncident, getTenants, getTenant, getTenantSettings,
+  getSignupRequests, getInquiries,
+} = createReadApi(BROWSER);
 
 /**
  * 관제자 종료 처리(#199). **Idempotency Key를 받지 않는다** — 종료는 AWS를 바꾸지 않고
@@ -354,6 +376,20 @@ export function submitEmailVerification(code: string): Promise<LoginStepResponse
 
 export async function logout(): Promise<void> {
   await postJson<null>('/auth/logout', undefined, AUTH_FLOW);
+}
+
+/**
+ * 로그인 없이 보내는 도입 신청(랜딩 로그인 창 회원가입). 세션과 무관하므로 401이 와도 로그인으로 보내지 않는다.
+ *
+ * 서버는 접수 재시도 키를 본문이 아니라 `Idempotency-Key` 헤더(UUIDv4)로 필수로 받는다. 없으면 422다.
+ * 같은 키 · 같은 값의 재전송은 처음 `request_id`를 202로 돌려주고, 같은 키 · 다른 값은 409
+ * `IDEMPOTENCY_KEY_CONFLICT`다. 키를 언제 새로 만들지는 부르는 쪽(신청서)이 정한다.
+ */
+export function submitSignupRequest(body: SignupRequestCreate, idempotencyKey: string): Promise<SignupRequestAccepted> {
+  return postJson<SignupRequestAccepted>('/signup-requests', body, {
+    ...AUTH_FLOW,
+    headers: { 'Idempotency-Key': idempotencyKey },
+  });
 }
 
 /** 유휴 연장 — **사용자 입력이 있을 때만** 부른다(components/auth/session-provider.tsx). */

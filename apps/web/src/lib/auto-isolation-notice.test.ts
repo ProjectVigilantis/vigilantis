@@ -5,6 +5,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  AUTO_ISOLATION_BLOCKED_NOTICE,
+  AUTO_ISOLATION_BLOCKED_NOTICES,
   agentWaitNotice,
   inAgentWaitWindow,
   preMitigationRecordNote,
@@ -34,16 +36,28 @@ function execution(status: ExecutionStatus): IncidentResponse['executions'][numb
 const WAIT_AT = '2026-10-28T00:00:00Z' as IsoDateTime;
 const blocked = incident({ auto_isolation_block: 'AUTO_ACTION_DISABLED' });
 
+const disabledBlock = { kind: 'BLOCKED', block: 'AUTO_ACTION_DISABLED' } as const;
+
 test('차단된 Medium은 시각이 있든 없든 실행 예고 대신 승인 필요 안내다', () => {
-  assert.deepEqual(agentWaitNotice(blocked, WAIT_AT), { kind: 'BLOCKED' });
+  assert.deepEqual(agentWaitNotice(blocked, WAIT_AT), disabledBlock);
   // 목록에서 나중에 연 직접 진입: 전환 이벤트를 못 봐 기준 시각이 없다.
-  assert.deepEqual(agentWaitNotice(blocked, null), { kind: 'BLOCKED' });
+  assert.deepEqual(agentWaitNotice(blocked, null), disabledBlock);
+  assert.equal(AUTO_ISOLATION_BLOCKED_NOTICES.AUTO_ACTION_DISABLED, AUTO_ISOLATION_BLOCKED_NOTICE);
+});
+
+test('정지된 고객의 차단은 승인을 권하지 않는다', () => {
+  // 정지 중에는 승인 실행도 409다(ADR-0012 §3) — 사유를 실어 보내고 안내문은 승인 문구를 쓰지 않는다
+  const suspended = incident({ auto_isolation_block: 'TENANT_SUSPENDED' });
+  assert.deepEqual(agentWaitNotice(suspended, WAIT_AT), { kind: 'BLOCKED', block: 'TENANT_SUSPENDED' });
+  assert.deepEqual(agentWaitNotice(suspended, null), { kind: 'BLOCKED', block: 'TENANT_SUSPENDED' });
+  assert.match(AUTO_ISOLATION_BLOCKED_NOTICES.TENANT_SUSPENDED, /정지/);
+  assert.doesNotMatch(AUTO_ISOLATION_BLOCKED_NOTICES.TENANT_SUSPENDED, /승인/);
 });
 
 test('재활성화 뒤에도 서버가 차단을 주면 차단 안내를 유지한다', () => {
   // 재활성화 이전에 정한 발동은 소급 실행하지 않는다(#514). FE는 시각을 다시 계산하지 않고 값만 따른다.
   const reenabled = incident({ auto_isolation_block: 'AUTO_ACTION_DISABLED', updated_at: '2026-10-28T09:00:00Z' });
-  assert.deepEqual(agentWaitNotice(reenabled, WAIT_AT), { kind: 'BLOCKED' });
+  assert.deepEqual(agentWaitNotice(reenabled, WAIT_AT), disabledBlock);
 });
 
 test('차단 사유가 없는 Medium은 기존 안내를 유지한다', () => {

@@ -54,6 +54,17 @@ EXPECTED_TABLES = {
     "tenant_settings",
     "tenant_settings_cleanups",
     "notification_legacy_routes",
+    # #552 — 도입 신청 · 고객 문의 · 내부 수신함 (외부 발송 outbox와 별개)
+    "signup_requests",
+    "inquiries",
+    "inquiry_events",
+    "notifications",
+    "notification_reads",
+    # #565 — 도입 신청 최종 결정 기록
+    "signup_request_decisions",
+    # TOTP 분실 복구 작업 · 신원 변경 울타리 (#515)
+    "totp_recovery_operations",
+    "totp_provider_mutations",
 }
 
 
@@ -69,6 +80,8 @@ def test_row_invariant_constraints_registered():
     """행 불변식 CheckConstraint가 모델에서 빠지면 CI(DB 없음)에서 이 테스트만이 잡는다.
     실제 거절 동작은 test_repositories.py(통합)가 확인한다."""
     expected = {
+        "signup_requests": {"ck_signup_requests_rejection_reason_by_status"},
+        "notifications": {"ck_notifications_notification_target_shape"},
         "incidents": {
             "ck_incidents_reason_codes_is_array",
             "ck_incidents_category_risk_shape",
@@ -93,6 +106,19 @@ def test_row_invariant_constraints_registered():
             "ck_app_users_tenant_binding_by_account_type",
             "ck_app_users_platform_role_is_admin",
             "ck_app_users_platform_role_by_account_type",
+        },
+        # TOTP 분실 복구 작업 — 신원 확인 진술 필수 · 확정 모양 (#515)
+        "totp_recovery_operations": {
+            "ck_totp_recovery_operations_identity_verified",
+            "ck_totp_recovery_operations_generation_positive",
+            "ck_totp_recovery_operations_revoked_count_nonnegative",
+            "ck_totp_recovery_operations_finalized_shape",
+        },
+        # 신원 변경 울타리 — 종류별 작업 · 풀림 모양 · 정리 행위자 (#515)
+        "totp_provider_mutations": {
+            "ck_totp_provider_mutations_operation_by_kind",
+            "ck_totp_provider_mutations_resolution_shape",
+            "ck_totp_provider_mutations_reconciler_shape",
         },
     }
     for table, names in expected.items():

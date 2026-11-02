@@ -8,8 +8,8 @@
 #   - 업무 범위(#492 · #533): 인시던트 · 조치 · 자산은 요청자의 고객사 범위(auth.access.tenant_scope_of)로 열린다 —
 #     CENTRAL_ADMIN 은 전체, TENANT_MANAGER 는 배정 고객사(배정 없음 = 빈 목록 · 404), 고객사(TENANT) 계정은 자기
 #     소속. 범위 밖 · 소속 없는 MVP 기록은 목록에서 빠지고 상세 · 실행 · 종료가 404 다. 상태 변경의 역할 검사(403)는
-#     대상을 읽기 전이고, 정지는 요청자가 아니라 대상 인시던트의 고객사로 Workflow 가 본다. 메트릭은 플랫폼 관리
-#     등급만 받고, 그 밖의 업무 경로도 고객사 계정에는 403 이다(경로 전수). 고객사 계정의 /api/v1/auth ·
+#     대상을 읽기 전이고, 정지는 요청자가 아니라 대상 인시던트의 고객사로 Workflow 가 본다. 메트릭도 같은 범위로
+#     열려 고객사 계정은 200 을 받고(#536), 범위 경로 밖의 업무 경로는 고객사 계정에 403 이다(경로 전수). 고객사 계정의 /api/v1/auth ·
 #     /api/v1/users 는 그대로 열린다.
 #   - 고객사 범위 판정: tenant_scope_ids · can_access_tenant · tenant_scope_of 는 명시 등급 · 배정 · 소속만 읽고
 #     닫힌 쪽으로 실패한다.
@@ -39,6 +39,7 @@ from fastapi.routing import iter_route_contexts
 from fastapi.testclient import TestClient
 from schemas.api.auth import AccountType, PlatformRole, SessionInfo, UserRole
 from schemas.api.errors import ErrorCode
+from schemas.api.metrics import MetricsTimeseriesResponse
 from schemas.api.tenants import TenantStatus
 from schemas.candidates import CandidateStatus
 from schemas.incidents import AgentInvocationStatus
@@ -52,6 +53,7 @@ FOREIGN_ORIGIN = "https://evil.example.com"
 # 세션 없이 열리는 HTTP 경로 전부. 늘리려면 여기와 auth/README.md 정책을 함께 고친다.
 PUBLIC_ROUTES = {
     ("GET", "/health"),
+    ("POST", "/api/v1/signup-requests"),
     ("POST", "/api/v1/auth/login"),
     ("POST", "/api/v1/auth/login/new-password"),
     ("POST", "/api/v1/auth/login/totp-setup"),
@@ -252,11 +254,11 @@ def test_tenant_accounts_cannot_change_unowned_records_and_nothing_changes(
 
 @pytest.mark.parametrize("tenant_status", [TenantStatus.ACTIVE, TenantStatus.SUSPENDED])
 @pytest.mark.parametrize("role", list(UserRole))
-def test_tenant_accounts_read_only_their_scope_while_metrics_stay_platform_only(
+def test_tenant_accounts_read_only_their_scope_including_metrics(
     client_pg, login_as, make_tenant, resolvable, tenant_status, role
 ):
     """정지 고객사를 포함한 고객사 계정은 자기 범위를 읽는다. 소속 없는 MVP 기록은 목록에서 빠지고 상세는
-    404 다. 메트릭은 플랫폼 관리 등급만 받아 고객사 계정은 403 이다."""
+    404 다. 메트릭 시계열도 403 이 아니라 자기 범위의 응답(200)이다(#536)."""
     login_as(role, tenant_id=make_tenant(tenant_status))
 
     listed = client_pg.get("/api/v1/incidents")
@@ -266,7 +268,8 @@ def test_tenant_accounts_read_only_their_scope_while_metrics_stay_platform_only(
     assert (detail.status_code, detail.json()["error"]["code"]) == (404, "INCIDENT_NOT_FOUND")
     assert client_pg.get("/api/v1/assets").status_code == 200
     metrics = client_pg.get("/api/v1/metrics/timeseries")
-    assert (metrics.status_code, metrics.json()["error"]["code"]) == (403, "AUTH_FORBIDDEN")
+    assert metrics.status_code == 200
+    MetricsTimeseriesResponse.model_validate(metrics.json())
 
 
 # 고객사 범위로 걸러지는 업무 경로 — 고객사 계정 · 담당자에게도 열린다. 그 밖의 업무 경로는 플랫폼 전용이다.
@@ -280,6 +283,9 @@ TENANT_SCOPED_ROUTES = {
     # 고객 설정(T-7) — 고객사 계정은 자기 고객, 담당자는 배정 고객(쓰기는 고객사 ADMIN · 관리 등급)
     ("GET", "/api/v1/tenants/{tenant_id}/settings"),
     ("PATCH", "/api/v1/tenants/{tenant_id}/settings"),
+    ("GET", "/api/v1/inquiries"),
+    ("POST", "/api/v1/inquiries"),
+    ("GET", "/api/v1/metrics/timeseries"),
 }
 
 
@@ -297,7 +303,6 @@ def test_business_routes_outside_tenant_scope_stay_platform_only(client_pg, logi
         if not path.startswith(("/api/v1/auth/", "/api/v1/users"))
     }
     assert TENANT_SCOPED_ROUTES <= business
-    assert ("GET", "/api/v1/metrics/timeseries") in business
 
     bodies = _valid_bodies(str(uuid.uuid4()))
     leaks = []
@@ -320,6 +325,9 @@ def test_business_routes_outside_tenant_scope_stay_platform_only(client_pg, logi
         ("GET", "/api/v1/incidents"): (200, None),
         ("GET", "/api/v1/assets"): (200, None),
         ("GET", "/api/v1/audit-events"): (200, None),
+        ("GET", "/api/v1/inquiries"): (200, None),
+        ("GET", "/api/v1/metrics/timeseries"): (200, None),
+        ("POST", "/api/v1/inquiries"): (201, None),
         ("GET", "/api/v1/incidents/{incident_id}"): (404, "INCIDENT_NOT_FOUND"),
         ("POST", "/api/v1/incidents/{incident_id}/resolve"): (404, "INCIDENT_NOT_FOUND"),
         ("POST", EXECUTE): (404, "INCIDENT_NOT_FOUND"),
@@ -474,25 +482,6 @@ def test_tenant_scope_of_carries_explicit_scope_ids_never_account_type():
         assert not any(scope.covers(tenant_id) for tenant_id in (_T1, _T2, _T3, None))
     # 라우트 의존성은 같은 판정이다
     assert access.require_tenant_scope(manager) == access.tenant_scope_of(manager)
-
-
-@pytest.mark.parametrize(("user", "allowed"), [
-    (_user(AccountType.PLATFORM, UserRole.ADMIN, platform_role=PlatformRole.CENTRAL_ADMIN), True),
-    (_user(AccountType.PLATFORM, UserRole.ADMIN, platform_role=PlatformRole.TENANT_MANAGER), True),
-    (_user(AccountType.PLATFORM, UserRole.ADMIN), False),
-    (_user(AccountType.TENANT, UserRole.ADMIN, TenantStatus.ACTIVE), False),
-    (_user(AccountType.TENANT, UserRole.ADMIN, TenantStatus.SUSPENDED), False),
-    (_user(AccountType.UNASSIGNED, UserRole.ADMIN), False),
-], ids=["central", "unassigned-manager", "platform-without-level", "tenant-admin", "suspended-tenant-admin",
-        "unassigned"])
-def test_metrics_gate_admits_platform_management_grades_only(user, allowed):
-    """메트릭 자격은 등급만 본다(배정 없는 담당자도 통과 — 범위는 라우트가 빈 범위로 건다)."""
-    if allowed:
-        assert access.require_business_access(user) is user
-    else:
-        with pytest.raises(ApiError) as rejected:
-            access.require_business_access(user)
-        assert rejected.value.code is ErrorCode.AUTH_FORBIDDEN
 
 
 # --- (b2) 담당자 범위 — 배정된 고객사만 ------------------------------------------------
@@ -734,6 +723,7 @@ def _valid_bodies(incident_id: str) -> dict[tuple[str, str], dict | None]:
         ("PUT", f"{user}/role"): {"role": "VIEWER"},
         ("PUT", f"{user}/status"): {"status": "DISABLED"},
         ("POST", f"{user}/sessions/revoke"): None,
+        ("POST", f"{user}/totp/reset"): {"operation_id": str(uuid.uuid4()), "identity_verified": True},
         ("PUT", "/api/v1/staff/{user_id}/role"): {"platform_role": "TENANT_MANAGER"},
         ("PUT", "/api/v1/staff/{user_id}/status"): {"status": "DISABLED"},
         ("PUT", "/api/v1/staff/{user_id}/tenants"): {"tenant_ids": []},
@@ -744,6 +734,13 @@ def _valid_bodies(incident_id: str) -> dict[tuple[str, str], dict | None]:
         ("DELETE", "/api/v1/tenants/{tenant_id}"): None,
         ("POST", "/api/v1/tenants/{tenant_id}/suspend"): {"reason": "해지"},
         ("PATCH", "/api/v1/tenants/{tenant_id}/settings"): {"protected_tags": []},
+        ("PUT", "/api/v1/signup-requests/{request_id}/status"): {"status": "APPROVED"},
+        ("POST", "/api/v1/inquiries"): {"category": "BUG", "title": "문의", "body": "확인 요청"},
+        ("PUT", "/api/v1/inquiries/{inquiry_id}/status"): {"status": "IN_PROGRESS"},
+        ("POST", "/api/v1/inquiries/{inquiry_id}/notes"): {"note": "확인 중"},
+        ("POST", "/api/v1/notifications/read"): {"notification_ids": []},
+        ("POST", "/api/v1/tenants/{tenant_id}/verify"): None,
+        ("POST", "/api/v1/tenants/{tenant_id}/resume"): None,
     }
 
 
@@ -752,6 +749,8 @@ def _send(client, method, path, headers, body):
         path.replace("{incident_id}", str(uuid.uuid4()))
         .replace("{user_id}", str(uuid.uuid4()))
         .replace("{tenant_id}", str(uuid.uuid4()))
+        .replace("{request_id}", str(uuid.uuid4()))
+        .replace("{inquiry_id}", str(uuid.uuid4()))
     )
     return client.request(method, url, headers=headers, json=body)
 
@@ -862,12 +861,10 @@ def test_protected_api_responses_carry_security_headers(
     responses["500"] = client_pg.post(resolve, json=body)
     login_as(UserRole.VIEWER, tenant_id=make_tenant(TenantStatus.SUSPENDED))
     responses["403 role"] = client_pg.post(resolve, json=body)
-    login_as(UserRole.OPERATOR, tenant_id=make_tenant())
-    responses["403 platform only"] = client_pg.get("/api/v1/metrics/timeseries")
 
     assert {label: response.status_code for label, response in responses.items()} == {
         "200": 200, "401": 401, "403 origin": 403, "404": 404, "422": 422, "500": 500, "403 role": 403,
-        "409 suspended": 409, "403 platform only": 403,
+        "409 suspended": 409,
     }
     missing = [
         label

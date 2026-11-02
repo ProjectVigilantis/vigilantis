@@ -28,13 +28,15 @@ from schemas.api.incidents import (
 from schemas.candidates import CandidateStatus, RunbookCandidateData
 from schemas.events import NormalizedThreatEvent
 from schemas.evidence import EvidenceItem
+from schemas.executions import EXECUTION_NON_TERMINAL_STATUSES
 from schemas.incidents import (
     AGENT_TERMINAL_STATUSES,
     INCIDENT_OPEN_STATUSES,
     AgentInvocationStatus,
     AgentWaitSchedule,
 )
-from schemas.runbooks import TriggerSource
+from schemas.api.tenants import TenantStatus
+from schemas.runbooks import RunbookId, TriggerSource
 from tenancy import ALL_TENANTS, TenantScope
 
 from .. import mappers, models
@@ -446,9 +448,10 @@ def list_expired_agent_waits(db: Session, *, now: datetime) -> list[str]:
         넣으면 관제자가 처리할 때까지 주기마다 다시 잡혀 잠금·거절만 반복한다.
       - 관제자 승인 실행이 있었던 건은 뺀다. 승인한 실행이 끝나고 다른 제안이 남으면 상태는
         다시 AWAITING_APPROVAL이지만 그 대기는 이미 응답됐다.
-      - 테넌트가 자동 조치를 껐거나, 그 기한이 꺼진 동안(마지막으로 켠 시각 이전) 지났으면 뺀다(T-6 ·
-        #514). 넣으면 사람이 응답할 때까지 주기마다 잠그고 건너뛰기만 반복한다. 판정의 원천은
-        workflows.automatic_trigger_block 이고 이 조건은 그 거울이다. 테넌트 없음(NULL)은 지금 그대로다.
+      - 테넌트가 정지(SUSPENDED)됐거나(T-4 · #533), 자동 조치를 껐거나, 그 기한이 꺼진 동안(마지막으로
+        켠 시각 이전) 지났으면 뺀다(T-6 · #514). 넣으면 사람이 응답할 때까지 주기마다 잠그고 건너뛰기만
+        반복한다. 판정의 원천은 workflows.automatic_trigger_block 이고 이 조건은 그 거울이다. 테넌트
+        없음(NULL)은 지금 그대로다.
     """
     tenant = models.Tenant
     return list(
@@ -465,6 +468,7 @@ def list_expired_agent_waits(db: Session, *, now: datetime) -> list[str]:
                 or_(
                     models.Incident.tenant_id.is_(None),
                     and_(
+                        tenant.status != TenantStatus.SUSPENDED,
                         tenant.auto_action_enabled.is_(True),
                         or_(
                             tenant.auto_action_resumed_at.is_(None),
@@ -547,6 +551,37 @@ def list_candidates(
     if status is not None:
         stmt = stmt.where(models.RunbookCandidate.status == status)
     return list(db.execute(stmt).scalars())
+
+
+def list_open_nacl_rule_numbers(
+    db: Session, *, target_arns: Sequence[str],
+) -> dict[str, set[int]]:
+    """동일 NACL의 승인 대기·미종료 실행 후보가 사용할 번호. 번호를 예약하지는 않는다."""
+    candidate = models.RunbookCandidate
+    execution = models.ActionExecution
+    unfinished = select(execution.execution_id).where(
+        execution.candidate_id == candidate.candidate_id,
+        execution.status.in_(EXECUTION_NON_TERMINAL_STATUSES),
+    ).exists()
+    rows = db.execute(
+        select(candidate.target_arn, candidate.parameters)
+        .join(models.Incident, models.Incident.incident_id == candidate.incident_id)
+        .where(
+            candidate.runbook_id == RunbookId.RUNBOOK_NACL_ADD_DENY,
+            candidate.target_arn.in_(target_arns),
+            or_(
+                and_(
+                    candidate.status == CandidateStatus.EXECUTABLE,
+                    models.Incident.status.in_(INCIDENT_OPEN_STATUSES),
+                ),
+                and_(candidate.status == CandidateStatus.CLAIMED, unfinished),
+            ),
+        )
+    )
+    numbers: dict[str, set[int]] = {}
+    for target_arn, parameters in rows:
+        numbers.setdefault(target_arn, set()).add(parameters["rule_number"])
+    return numbers
 
 
 def update_candidate_status(

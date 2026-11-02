@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import UTC, datetime
 
@@ -19,6 +20,7 @@ from routers.ws import _incident_tenant_id
 from schemas.api.actions import ExecutionStatus
 from realtime import execution_event, incident_event
 from schemas.api.ws import WsEventType
+from tests.ws_receive import receive_text_bounded
 
 T0 = datetime(2026, 8, 19, 10, 0, 0, tzinfo=UTC)
 
@@ -314,7 +316,6 @@ def test_close_cancels_pending_lookup_and_abandoned_failure_is_retrieved():
 
         waiter2 = asyncio.create_task(failing.get(fail_later))
         await started2.wait()
-        # _retrieve 콜백 뒤에 등록되므로, 이 신호가 오면 회수 콜백은 이미 실행됐다
         failing._task.add_done_callback(lambda _t: finished.set())
         task_ref = weakref.ref(failing._task)
         waiter2.cancel()
@@ -500,9 +501,7 @@ def _publish_ids(manager, *incident_ids):
 
 
 def _next_incident_id(ws) -> str:
-    import json
-
-    return json.loads(ws.receive_text())["data"]["incident_id"]
+    return json.loads(receive_text_bounded(ws))["data"]["incident_id"]
 
 
 def _drain_until(ws, incident_id: str) -> list[str]:

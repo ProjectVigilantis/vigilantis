@@ -397,7 +397,7 @@ def test_fake_measurements_never_establish_a_real_baseline():
     run["state"] = "COMPLETE"
     result = runner.report(run, cases, load_answers(cases), _review(run))
     assert result["quality_pass"]  # 합성 판정값의 집계가 맞다는 뜻으로 한정한다.
-    assert result["counts"]["PASS"] == 21  # 허용된 rule_number 차이는 진단값으로만 남긴다.
+    assert result["counts"]["PASS"] == 21  # AI가 낸 번호 대신 오프라인 서버 값 대역을 사용한다.
     assert not result["real_model_measurement"] and not result["baseline_candidate"]
 
 

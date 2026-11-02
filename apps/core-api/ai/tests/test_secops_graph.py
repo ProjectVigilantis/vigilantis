@@ -64,7 +64,7 @@ def test_secops_three_calls_and_typed_output():
     # 서버 초기 판정과 다른 AI 재평가를 넣어 요약 표기의 원천을 대조한다.
     reviewed = RiskReassessmentOutput(reviewed_risk_level=RiskLevel.MEDIUM)
     client = FakeAIModelClient([reviewed, CandidateProposalOutput(candidates=[proposal()]), SUMMARY])
-    output = run_secops_graph(data, client=client)
+    output = run_secops_graph(data, client=client, nacl_rule_numbers={NACL: 1})
     assert output.invocation_status is AgentInvocationStatus.SUCCEEDED
     assert output.reviewed_risk_level is RiskLevel.MEDIUM
     assert output.candidates[0].target_arn == NACL
@@ -85,12 +85,68 @@ def test_secops_three_calls_and_typed_output():
 
 def test_secops_no_proposal_keeps_summary_and_reviewed_risk():
     client = FakeAIModelClient([RISK, CandidateProposalOutput(candidates=[]), SUMMARY])
-    output = run_secops_graph(graph_input(), client=client)
+    output = run_secops_graph(graph_input(), client=client, nacl_rule_numbers={NACL: 1})
     assert output.invocation_status is AgentInvocationStatus.NO_PROPOSAL
     assert len(output.summary_lines) == 3
     assert output.reviewed_risk_level is RiskLevel.HIGH
     assert client.sent[2]["user_payload"]["candidates"] == []
     assert client.sent[2]["user_payload"]["reviewed_risk_label"] == "높음"
+
+
+@pytest.mark.parametrize("entries,expected", [
+    ([{"RuleNumber": 100, "RuleAction": "allow"}], 1),
+    ([{"RuleNumber": 1, "RuleAction": "deny"}, {"RuleNumber": 100, "RuleAction": "allow"}], 2),
+    ([{"RuleNumber": 1, "Egress": True, "RuleAction": "allow"},
+      {"RuleNumber": 100, "RuleAction": "allow"}], 1),
+    ([{"RuleNumber": 1, "RuleAction": "deny"}, {"RuleNumber": 32767, "RuleAction": "deny"}], 2),
+    ([{"RuleNumber": 1, "RuleAction": "allow"}], None),
+    ([{"RuleNumber": 1, "RuleAction": "deny"}, {"RuleNumber": 2, "RuleAction": "allow"}], None),
+])
+def test_nacl_candidate_uses_server_number_before_an_existing_allow(monkeypatch, caplog, entries, expected):
+    """서버 조회·후보·요약·precheck가 같은 빈 번호를 쓰고, 없으면 후보를 만들지 않는다."""
+    from agent_dispatcher import (
+        GraphInputUnavailable,
+        resolve_secops_rule_numbers,
+        verify_graph_output,
+    )
+    from schemas.runbook_parameters import build_precheck_parameters
+    from services.aws import executor as ex
+
+    acl_id = "acl-0abc123456789def0"
+    target = NACL.replace("acl-0abc", acl_id)
+    data = graph_input()
+    data.asset_context.relationships[0].target_arn = target
+    calls = []
+    class Ec2:
+        def describe_network_acls(self, **kwargs):
+            calls.append(kwargs)
+            return {"NetworkAcls": [{"Entries": entries}]}
+    monkeypatch.setattr(ex, "aws_client", lambda *args: Ec2())
+    caplog.set_level(logging.INFO, logger="vigilantis.aws")
+    if expected is None:
+        with pytest.raises(GraphInputUnavailable, match="PRECHECK_INVALID_STATE"):
+            resolve_secops_rule_numbers(data, open_rule_numbers={})
+        assert calls == [{"NetworkAclIds": [acl_id]}]
+        assert caplog.records[-1].precheck_evidence["detail"] == "no_eligible_inbound_rule_number"
+        return
+    numbers = resolve_secops_rule_numbers(data, open_rule_numbers={})
+    assert numbers == {target: expected}
+    selection = caplog.records[-1].precheck_evidence
+    assert selection["source"] == "candidate_describe_network_acls"
+    assert selection["rule_number"] == expected
+    client = FakeAIModelClient([
+        RISK, CandidateProposalOutput(candidates=[proposal(target_arn=target)]), SUMMARY,
+    ])
+    output = run_secops_graph(data, client=client, nacl_rule_numbers=numbers)
+    assert verify_graph_output(data, output, data.incident_id, nacl_rule_numbers=numbers) == output
+    candidate = output.candidates[0]
+    assert candidate.parameters.rule_number == expected
+    assert client.sent[2]["user_payload"]["candidates"][0]["parameters"]["rule_number"] == expected
+    params = build_precheck_parameters(
+        candidate.runbook_id, candidate.parameters, resource_id=acl_id, evidence_ids=candidate.evidence_ids,
+    )
+    assert ex.precheck(candidate.runbook_id, candidate.target_arn, params).passed
+    assert calls == [{"NetworkAclIds": [acl_id]}] * 2
 
 
 def _failure_log(caplog):
@@ -102,13 +158,28 @@ def _failure_log(caplog):
     return fields
 
 
+def test_secops_output_rejects_a_rule_number_not_selected_by_the_server(caplog):
+    from agent_dispatcher import verify_graph_output
+
+    data = graph_input()
+    client = FakeAIModelClient([RISK, CandidateProposalOutput(candidates=[proposal()]), SUMMARY])
+    output = run_secops_graph(data, client=client, nacl_rule_numbers={NACL: 1})
+    output.candidates[0].parameters.rule_number = 2
+    with caplog.at_level(logging.WARNING, logger="vigilantis.agent_dispatcher"):
+        checked = verify_graph_output(data, output, data.incident_id, nacl_rule_numbers={NACL: 1})
+    assert checked.invocation_status is AgentInvocationStatus.FAILED
+    assert checked.candidates == []
+    assert [r.reason_code for r in caplog.records
+            if r.getMessage() == "agent_output_contract_violation"] == ["SERVER_VALUE_MISMATCH"]
+
+
 @pytest.mark.parametrize("completed,step", [
     (0, "reassess_risk"), (1, "propose_candidates"), (2, "summarize_evidence"),
 ])
 def test_node_failure_stops_later_model_calls(completed, step, caplog):
     client = FakeAIModelClient([RISK, CandidateProposalOutput(candidates=[])][:completed])
     with caplog.at_level(logging.WARNING, logger="vigilantis.ai.agent"):
-        output = run_secops_graph(graph_input(), client=client)
+        output = run_secops_graph(graph_input(), client=client, nacl_rule_numbers={NACL: 1})
     assert output.invocation_status is AgentInvocationStatus.FAILED
     assert output.summary_lines == [] and output.candidates == []
     assert output.reviewed_risk_level is None
@@ -121,13 +192,13 @@ def test_node_failure_stops_later_model_calls(completed, step, caplog):
     ({"target_arn": EC2}, "TARGET_NOT_ALLOWED"),
     ({"target_arn": NACL.replace("acl-0abc", "acl-0def")}, "TARGET_NOT_ALLOWED"),
     ({"runbook_id": RunbookId.RUNBOOK_NACL_RESTORE}, "RUNBOOK_NOT_OFFERED"),
-    ({"rule_number": None}, "CANDIDATE_CONTRACT_VIOLATION"),
+    ({"cidr_block": None}, "CANDIDATE_CONTRACT_VIOLATION"),
     ({"evidence_ids": []}, "CANDIDATE_CONTRACT_VIOLATION"),
 ])
 def test_invalid_proposal_fails_whole_graph(over, reason, caplog):
     client = FakeAIModelClient([RISK, CandidateProposalOutput(candidates=[proposal(**over)]), SUMMARY])
     with caplog.at_level(logging.WARNING, logger="vigilantis.ai.agent"):
-        output = run_secops_graph(graph_input(), client=client)
+        output = run_secops_graph(graph_input(), client=client, nacl_rule_numbers={NACL: 1})
     assert output.invocation_status is AgentInvocationStatus.FAILED
     assert len(client.sent) == 2  # 잘못된 후보는 요약 생성 전에 그래프를 중단시킨다.
     # 메뉴 밖·대상 밖(주입 의심)과 형식 위반을 사유로 가른다. 대상 밖이면 그 대상을 남긴다

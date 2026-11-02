@@ -20,7 +20,14 @@ from ai.evaluation.common.usage import UsageRecordingClient
 from ai.model_client import AIModelClient
 from ai.openai_client import OpenAIModelClient
 
-from .dataset import ROOT, EvalCase, digest, load_cases, read_json
+from .dataset import (
+    ROOT,
+    EvalCase,
+    digest,
+    fixture_nacl_rule_numbers,
+    load_cases,
+    read_json,
+)
 from .request_fingerprints import request_manifest
 from .scoring import (
     Answer,
@@ -104,8 +111,11 @@ def new_run(cases: list[EvalCase], repeats: int, settings: Any, run_id: str) -> 
 def run_one(case: EvalCase, repeat: int, client: AIModelClient) -> dict[str, Any]:
     recording = UsageRecordingClient(client)
     started = time.monotonic()
-    graph_output = agent.run_secops_graph(case.graph_input, client=recording)
-    output = verify_graph_output(case.graph_input, graph_output, case.graph_input.incident_id)
+    numbers = fixture_nacl_rule_numbers(case.graph_input)
+    graph_output = agent.run_secops_graph(case.graph_input, client=recording, nacl_rule_numbers=numbers)
+    output = verify_graph_output(
+        case.graph_input, graph_output, case.graph_input.incident_id, nacl_rule_numbers=numbers,
+    )
     failure_kind = None
     if recording.last_error_phase == "transport":
         failure_kind = "TRANSPORT_ERROR"
@@ -118,6 +128,7 @@ def run_one(case: EvalCase, repeat: int, client: AIModelClient) -> dict[str, Any
     return {
         "case_id": case.case_id, "repeat": repeat,
         "data_source": "real_model" if isinstance(client, OpenAIModelClient) else "test_double",
+        "nacl_rule_number_source": "offline_fixture",
         "graph_output": graph_output.model_dump(mode="json"),
         "output": output.model_dump(mode="json"),
         "dispatcher_rejected": output != graph_output,

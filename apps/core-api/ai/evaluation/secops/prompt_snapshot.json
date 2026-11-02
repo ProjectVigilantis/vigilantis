@@ -10,5 +10,11 @@
     "qualification": "v0.5.6 9차에서 구조화 21/21·의미 168/168·내부 식별자 21/21 PASS와 최종 기능 회귀를 확인한 내용을 첫 공개 평가 기준선으로 확정했다.",
     "result": "results/README.md"
   },
-  "candidate": null
+  "candidate": {
+    "version": "v1.0.1",
+    "prompt_sha256": "f14ce9da429e12aa815854235c6744a38caca14b5e1edf651cdd91987855cc1d",
+    "rubric_sha256": "62c3c181f23e9cd4b380fd0c174d031bb6f158394705c942a8d3f3827af567e0",
+    "quality_status": "PENDING",
+    "plan": "plans/v1.0.1-nacl-rule-number.md"
+  }
 }
