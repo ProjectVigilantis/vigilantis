@@ -10,9 +10,10 @@
 #     회수 스캔(dispatcher)과 AI 분석 대기 스캔(agent_dispatcher)은 DISPATCH_ENABLED를
 #     Medium 승인 기한 감시와 공유해 켜고 끈다 (Issue #232·#277·#285·#447).
 #   - 모의 위협 파일 소비자는 MOCK_THREAT_INBOX_DIR 지정 시 독립 기동한다(#322).
-#   - 접근 보호(#492 PR 2): 조치 · 자산 · 인시던트 · 메트릭 라우터는 포함 시점에
-#     Origin(상태 변경만) → 세션 검사를 건다. 공개 경로는 /health 와 로그인 단계뿐이다.
-#     API 문서는 API_DOCS_ENABLED 일 때만 열린다. 업무 라우터는 임시로 플랫폼 계정만 받는다(#492).
+#   - 접근 보호(#492 PR 2): 조치 · 자산 · 인시던트 · 감사 기록 · 메트릭 라우터는 포함 시점에
+#     Origin(상태 변경만) → 세션 검사를 건다. 도입 신청 POST는 별도 공개 입력 경계(#552)다.
+#     API 문서는 API_DOCS_ENABLED 일 때만 열린다. 조치 · 자산 · 인시던트는 각 라우트가 요청자의 고객사
+#     범위로 제한하고(#533), 메트릭은 플랫폼 관리 등급(CENTRAL_ADMIN · TENANT_MANAGER)만 받는다(#492).
 # ==============================================================================
 
 from __future__ import annotations
@@ -52,14 +53,20 @@ from notifications.runtime import build_notification_runtime  # noqa: E402
 from realtime import RealtimeManager  # noqa: E402
 from routers import actions as actions_router  # noqa: E402
 from routers import assets as assets_router  # noqa: E402
+from routers import audit as audit_router  # noqa: E402
 from routers import auth as auth_router  # noqa: E402
 from routers import incidents as incidents_router  # noqa: E402
+from routers import inquiries as inquiries_router
 from routers import metrics as metrics_router  # noqa: E402
+from routers import notifications as notifications_router
+from routers import signup_requests as signup_requests_router
+from routers import staff as staff_router  # noqa: E402
 from routers import tenants as tenants_router  # noqa: E402
 from routers import users as users_router  # noqa: E402
 from routers import ws as ws_router  # noqa: E402
 from security.soar import start_timeout_watcher  # noqa: E402
 from services.scheduler import start_scheduler as start_scan_scheduler  # noqa: E402
+from support_http import SignupBodyLimitMiddleware
 
 _http_logger = logging.getLogger("vigilantis.http")
 
@@ -136,6 +143,8 @@ def create_app() -> FastAPI:
     docs = {} if settings.API_DOCS_ENABLED else {"docs_url": None, "redoc_url": None, "openapi_url": None}
     app = FastAPI(title="Vigilantis Core API", lifespan=lifespan, **docs)
     app.state.realtime = realtime
+    # request_context·보안 헤더·CORS 안쪽에서 파싱 전에 거절한다. 413에도 공통 헤더가 붙는다.
+    app.add_middleware(SignupBodyLimitMiddleware)
 
     @app.middleware("http")
     async def request_context(request: Request, call_next):
@@ -193,14 +202,21 @@ def create_app() -> FastAPI:
     # 셋 다 라우터 본문 · Workflow · AWS 보다 먼저 돈다. auth 라우터는 Origin을 검사하고,
     # 실제 Cognito 경로만 공급자 설정을 요구한다. WebSocket은 연결 수립 때 직접 검사한다.
     protected = [Depends(require_origin), Depends(require_user)]
-    # 임시 출시 관문(#492) — 테넌트 범위 없는 업무 라우터는 플랫폼 계정만 받는다(auth.access 머리말).
-    # 사용자 관리는 서비스가 테넌트 범위를 걸므로 고객사 ADMIN 도 쓴다
+    # 조치 · 자산 · 인시던트(#533)는 세션 배선만 쓰고, 고객사 범위는 각 라우트가 auth.access.tenant_scope_of 로
+    # 받는다(auth.access 머리말). 메트릭(#492)은 세션 다음에 플랫폼 관리 등급 관문을 더하고 범위는 라우트가 건다.
+    # 사용자 · 직원 · 테넌트 관리는 각 라우터 · 서비스가 등급과 범위를 건다(고객사 ADMIN 은 사용자 관리만)
     business = [*protected, Depends(require_business_access)]
-    app.include_router(actions_router.router, dependencies=business)
-    app.include_router(assets_router.router, dependencies=business)
+    app.include_router(actions_router.router, dependencies=protected)
+    app.include_router(assets_router.router, dependencies=protected)
+    app.include_router(audit_router.router, dependencies=protected)
     app.include_router(auth_router.router)
-    app.include_router(incidents_router.router, dependencies=business)
+    app.include_router(incidents_router.router, dependencies=protected)
+    app.include_router(inquiries_router.router, dependencies=protected)
     app.include_router(metrics_router.router, dependencies=business)
+    app.include_router(notifications_router.router, dependencies=protected)
+    # 같은 prefix의 GET/PUT은 라우터가 CENTRAL_ADMIN 관문을 건다. 공개는 POST 한 경로뿐이다.
+    app.include_router(signup_requests_router.router)
+    app.include_router(staff_router.router, dependencies=protected)
     app.include_router(tenants_router.router, dependencies=protected)
     app.include_router(users_router.router, dependencies=protected)
     app.include_router(ws_router.router)

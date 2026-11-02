@@ -10,9 +10,11 @@
 // 자리만 비우고 그 사실을 적는다.
 
 import { AdminDashboardView } from '@/components/admin-dashboard/admin-dashboard-view';
+import { BusinessUnavailable } from '@/components/business-unavailable';
 import { ErrorState } from '@/components/error-state';
 import { orNull, serverApi } from '@/lib/api/server';
-import { isPlatform } from '@/lib/roles';
+import { businessOpen } from '@/lib/home-path';
+import { isUnassignedManager } from '@/lib/roles';
 import { unstable_rethrow } from 'next/navigation';
 
 export default async function DashboardPage() {
@@ -20,7 +22,9 @@ export default async function DashboardPage() {
   const renderedAt = new Date().toISOString();
   // 세션 쿠키만 실어 부르고, 401이면 로그인으로 redirect한다(lib/api/server.ts).
   const { getMe, getTenants, getUsers, getIncidents } = await serverApi();
-  // 고객 계정에는 업무 데이터를 읽지 않고 현재 이용 제한을 알린다. 확인 실패도 업무 조회로 넘어가지 않는다.
+  // 고객 범위가 없는 계정(고객사 계정 · 담당 고객 없는 고객 담당자)에는 업무 데이터를 읽지 않고 이용 제한을 알린다
+  // (lib/home-path.ts `businessOpen`). 담당 고객이 없는 담당자에게는 배정 없음을 따로 말한다. 고객 담당자가 받는
+  // 데이터의 담당 범위는 서버가 정한다. 확인 실패도 업무 조회로 넘어가지 않는다.
   let user;
   try {
     user = await getMe();
@@ -28,16 +32,7 @@ export default async function DashboardPage() {
     unstable_rethrow(error);
     return <ErrorState error={error} />;
   }
-  if (!isPlatform(user)) {
-    return (
-      <section className="flex flex-col gap-4" aria-labelledby="business-unavailable">
-        <h1 id="business-unavailable" className="text-lg font-semibold">업무 화면 이용 제한</h1>
-        <p role="status" className="rounded-lg border p-4 text-sm">
-          고객사별 데이터 분리가 완료되기 전까지 업무 화면을 이용할 수 없습니다.
-        </p>
-      </section>
-    );
-  }
+  if (!businessOpen(user)) return <BusinessUnavailable unassigned={isUnassignedManager(user)} />;
 
   const usersPromise = orNull(getUsers());
   const incidentsPromise = orNull(getIncidents());

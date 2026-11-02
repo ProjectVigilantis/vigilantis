@@ -36,6 +36,7 @@ from schemas.service_transition import (
     ServiceTransitionPlan,
     transition_target_group_name,
 )
+from tests.audit_cleanup import purge_audit_events
 
 REGION, ACCOUNT = "ap-northeast-2", "123456789012"
 VPC, SUBNET = "vpc-0aaaaaaaaaaaaaaa1", "subnet-0aaaaaaa1"
@@ -2560,6 +2561,7 @@ def test_a_replacement_committed_between_load_and_claim_blocks_the_stale_mutatio
             check.close()
     finally:
         seed.rollback()
+        purge_audit_events(seed, execution_ids=[execution_id])
         for table in (
             models.ServiceTransitionObservation,
             models.ServiceTransitionOperation,

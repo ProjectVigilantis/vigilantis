@@ -62,12 +62,19 @@
 #      지우지 않는다.
 #   ⑥ --allow-cidr는 IPv4 CIDR이고 /24보다 넓으면 거부한다 — 로그인 없는 MVP에서 허용 IP가 출입문이다.
 #   ⑦ WAF 속도 제한(#484 · Post-MVP T-3) — IP당 RATE_LIMIT_PER_WINDOW 건 / RATE_WINDOW_SECONDS 초를
-#      허용 규칙보다 **앞**(우선순위 0)에서 센다. 허용이 먼저 맞으면 WAF가 거기서 평가를 끝내기 때문이다.
+#      허용 규칙(우선순위 2)보다 **앞**(우선순위 1)에서 센다. 허용이 먼저 맞으면 WAF가 거기서 평가를 끝내기 때문이다.
 #      NAT 공인 IP는 세지 않는다 — 웹의 서버 측 API 호출이 전부 그 IP 하나로 CloudFront를 지나므로
 #      세면 모든 사용자의 화면 요청이 한 IP에 쌓여 플랫폼이 스스로를 막는다(ADR-0010 §4).
 #      동작은 Count(세기만)로 시작한다 — 정상 사용량을 재지 않았고, 캐시가 꺼져 있어 정적 파일까지
 #      전부 센다. 관측(CloudWatch 지표 vigilantis-platform-rate) 뒤 RATE_ACTION을 Block으로 바꾼다.
 #      up을 다시 돌리면 기존 웹 ACL의 규칙도 이 정의로 맞춘다 — 규칙을 고친 뒤 재실행이 곧 적용이다.
+#      로그인 단계(/api/v1/auth/login*)와 비밀번호 재설정(/api/v1/auth/password-reset*)에는 더 낮은
+#      한도(LOGIN_RATE_LIMIT_PER_WINDOW)를 맨 앞(우선순위 0)에 따로 건다(#522 C) — 비밀번호 대입에는 전 경로
+#      한도가 넉넉하다. 로그인한 화면이 부르는 /auth/me · /auth/activity · /auth/logout 은 세지 않는다 —
+#      섞이면 관측 지표로 대입과 정상 사용을 가를 수 없다. 로그인 화면은 브라우저가 직접 부르므로 사용자
+#      IP로 세지고, NAT 제외도 같다. 경로는 URL 디코딩 뒤 맞춘다 — 앱은 %인코딩을 풀어 라우팅하므로 풀지
+#      않으면 /api/v1/auth/%6Cogin 으로 비켜 간다. 이 규칙도 Count로 시작해 같은 방식으로 관측 뒤 Block으로 바꾼다.
+#      앱 쪽 한도(AUTH_RATE_LIMITED · AUTH_CODE_FAILURE_LIMIT)는 그대로 남는다 — WAF는 그 앞의 IP 단위 거름이다.
 #   ⑧ 고객 계정의 접근 역할은 고객 태그(vigilantis:customer-access=<플랫폼 계정 ID>)로 식별한다. 다른 플랫폼
 #      계정의 태그가 달려 있거나 어느 태그도 없으면 덮어쓰지 않는다. 플랫폼 태그만 달린 역할(같은 계정의 옛
 #      플랫폼이 만든 것)은 넘겨받는다 — 고객 태그를 달고 플랫폼 태그를 떼어 옛 플랫폼의 down이 지우지 않게
@@ -192,6 +199,12 @@ WAF_ACL = f"{PREFIX}-waf"
 RATE_LIMIT_PER_WINDOW = 1000
 RATE_WINDOW_SECONDS = 300
 RATE_ACTION = "Count"  # 관측 뒤 "Block"
+# 로그인 경로 속도 제한(#522 C) — 잠정값. 사람이 5분에 로그인 단계를 100번 밟을 일은 없다. Count 관측으로 다시 정한다
+# 대입 대상인 경로만 — 로그인 6단계 · 비밀번호 재설정 2개(routers/auth.py). /me · /activity · /logout 은 뺀다
+# bytes — get_web_acl 이 SearchString 을 bytes 로 돌려준다(멱등 비교)
+LOGIN_PATH_PREFIXES = (b"/api/v1/auth/login", b"/api/v1/auth/password-reset")
+LOGIN_RATE_LIMIT_PER_WINDOW = 100
+LOGIN_RATE_ACTION = "Count"  # 관측 뒤 "Block"
 CF_COMMENT = PREFIX  # CloudFront 배포는 태그로 찾기 어렵다 — comment로 식별한다
 CF_HOSTED_ZONE_ID = "Z2FDTNDATAQYW2"  # CloudFront 별칭 레코드의 고정 호스팅 영역 ID(AWS 문서 · 전 계정 공통)
 # AWS 관리형 정책 ID(전 계정 공통)
@@ -281,27 +294,50 @@ def listener_rules(tg_api: str, tg_web: str, origin_value: str) -> list[dict]:
 
 
 def waf_rules(ipset_arn: str, nat_ipset_arn: str) -> list[dict]:
-    """IP당 속도 제한(NAT 제외) → 허용 IP만 통과 → 기본 차단(안전 가드 ⑦).
+    """로그인 경로 속도 제한 → IP당 속도 제한(둘 다 NAT 제외) → 허용 IP만 통과 → 기본 차단(안전 가드 ⑦).
 
     로그인이 없는 MVP라 허용 IP가 출입문이다(#438 ④ 전까지). 속도 규칙은 허용 규칙보다 앞이어야
-    평가된다 — 허용이 맞으면 WAF가 거기서 끝낸다.
+    평가된다 — 허용이 맞으면 WAF가 거기서 끝낸다. 로그인 규칙이 맨 앞인 것은 Block 으로 바뀌었을 때
+    더 낮은 한도가 먼저 끊게 하려는 것이다(Count 는 평가를 끝내지 않아 순서와 무관하게 둘 다 센다).
     """
+    not_nat = {"NotStatement": {"Statement": {"IPSetReferenceStatement": {"ARN": nat_ipset_arn}}}}
     return [{
-        "Name": "rate-per-ip",
+        "Name": "rate-login-per-ip",
         "Priority": 0,
+        "Statement": {"RateBasedStatement": {
+            "Limit": LOGIN_RATE_LIMIT_PER_WINDOW,
+            "EvaluationWindowSec": RATE_WINDOW_SECONDS,
+            "AggregateKeyType": "IP",
+            "ScopeDownStatement": {"AndStatement": {"Statements": [
+                {"OrStatement": {"Statements": [
+                    {"ByteMatchStatement": {
+                        "SearchString": prefix,
+                        "FieldToMatch": {"UriPath": {}},
+                        "TextTransformations": [{"Priority": 0, "Type": "URL_DECODE"}],
+                        "PositionalConstraint": "STARTS_WITH",
+                    }} for prefix in LOGIN_PATH_PREFIXES
+                ]}},
+                not_nat,
+            ]}},
+        }},
+        "Action": {LOGIN_RATE_ACTION: {}},
+        "VisibilityConfig": {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True,
+                             "MetricName": f"{PREFIX}-rate-login"},
+    }, {
+        "Name": "rate-per-ip",
+        "Priority": 1,
         "Statement": {"RateBasedStatement": {
             "Limit": RATE_LIMIT_PER_WINDOW,
             "EvaluationWindowSec": RATE_WINDOW_SECONDS,
             "AggregateKeyType": "IP",
-            "ScopeDownStatement": {"NotStatement": {"Statement": {
-                "IPSetReferenceStatement": {"ARN": nat_ipset_arn}}}},
+            "ScopeDownStatement": not_nat,
         }},
         "Action": {RATE_ACTION: {}},
         "VisibilityConfig": {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True,
                              "MetricName": f"{PREFIX}-rate"},
     }, {
         "Name": "allow-listed-ips",
-        "Priority": 1,
+        "Priority": 2,
         "Statement": {"IPSetReferenceStatement": {"ARN": ipset_arn}},
         "Action": {"Allow": {}},
         "VisibilityConfig": {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True,
@@ -1562,8 +1598,9 @@ def _ensure_waf(waf, cidrs: list[str], nat_cidr: str) -> str:
         if not _same_rules(cur["WebACL"].get("Rules", []), rules):
             waf.update_web_acl(Name=WAF_ACL, Scope="CLOUDFRONT", Id=acl["Id"], DefaultAction=_ACL_DEFAULT_ACTION,
                                Rules=rules, VisibilityConfig=_ACL_VISIBILITY, LockToken=cur["LockToken"])
-            print(f"[platform] WAF 웹 ACL {WAF_ACL} 규칙 갱신 — 속도 제한 {RATE_LIMIT_PER_WINDOW}건/"
-                  f"{RATE_WINDOW_SECONDS}초({RATE_ACTION}) → 허용 IP")
+            print(f"[platform] WAF 웹 ACL {WAF_ACL} 규칙 갱신 — 로그인 {LOGIN_RATE_LIMIT_PER_WINDOW}건"
+                  f"({LOGIN_RATE_ACTION}) · 전 경로 {RATE_LIMIT_PER_WINDOW}건/{RATE_WINDOW_SECONDS}초"
+                  f"({RATE_ACTION}) → 허용 IP")
         return acl["ARN"]
     # 바로 위에서 만든 IP 집합을 WAF 가 아직 찾지 못하면 WAFUnavailableEntityException 이다 — 새 계정의
     # 첫 up 에서 실제로 났고 재실행으로 풀렸다(#522). 기다렸다 다시 만든다. 다른 오류는 그대로 올린다
@@ -1573,7 +1610,8 @@ def _ensure_waf(waf, cidrs: list[str], nat_cidr: str) -> str:
             VisibilityConfig=_ACL_VISIBILITY, Tags=_kv_tags(WAF_ACL))["Summary"]["ARN"],
         f"WAF 웹 ACL {WAF_ACL} 생성(IP 집합 전파)", ("WAFUnavailableEntityException",), timeout=300,
     )
-    print(f"[platform] WAF 웹 ACL {WAF_ACL} 생성(기본 차단 · 속도 제한 {RATE_ACTION})")
+    print(f"[platform] WAF 웹 ACL {WAF_ACL} 생성(기본 차단 · 속도 제한 로그인 {LOGIN_RATE_ACTION} · "
+          f"전 경로 {RATE_ACTION})")
     return acl_arn
 
 

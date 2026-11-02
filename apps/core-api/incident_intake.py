@@ -60,6 +60,14 @@
 #     deduplication_key 유니크 제약이 DB에서 한 번 더 막지만 FINOPS에는 그런 제약이
 #     없으므로, 다중 worker로 갈 때 이 자리를 함께 봐야 합니다.
 #
+# 소속(tenant_id)은 새 Incident를 만들 때 한 번 정하고 옮기지 않습니다(ADR-0012 — 테넌트 하나 = 고객
+# AWS 계정 하나).
+#   - subject_arn의 계정(services/aws/executor.py parse_arn — 실행 경로와 같은 해석)을 등록한 테넌트가
+#     소속입니다. 테넌트 상태(연결 전 · 관제 중 · 정지)와 무관합니다 — 정지는 그 계정의 기록을 다른
+#     테넌트로 옮기지 않고, 상태별 관문은 기록을 읽는 쪽이 소속 테넌트의 상태로 봅니다.
+#   - 계정을 읽을 수 없거나 등록한 테넌트가 없으면 NULL(MVP 단일 계정 기록)로 둡니다.
+#   - 중복이라 돌려주는 기존 Incident의 소속은 바꾸지 않습니다. 위협 이벤트에는 소속을 쓰지 않습니다.
+#
 # [호출 경로]
 # FINOPS는 services/scheduler.py가 판정과 같은 회차의 자산 스냅샷을 조립해 부릅니다
 # (#306). AssetItem 변환은 asset_mapping.py를 목록 API와 공유합니다.
@@ -79,6 +87,7 @@ import notification_events
 from db import mappers, models
 from db.repositories import assets as assets_repo
 from db.repositories import incidents as incidents_repo
+from db.repositories import tenants as tenants_repo
 from schemas.api.incidents import IncidentCategory, RiskLevel
 from schemas.assets import MetricName
 from schemas.assets import MetricSummary as MetricSummaryContract
@@ -91,6 +100,7 @@ from schemas.evidence import (
 )
 from schemas.intake import FinOpsIncidentIntake, IncidentIntake, SecOpsIncidentIntake
 from secops_context import capture_secops_context
+from services.aws.executor import parse_arn
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -112,6 +122,14 @@ def _existing(incident: models.Incident) -> IntakeOutcome:
         incident_id=incident.incident_id, created=False, occurred_at=incident.updated_at,
         category=incident.category,
     )
+
+
+def _owning_tenant_id(db: Session, subject_arn: str) -> Optional[str]:
+    """새 Incident의 소속 — 대상 계정을 등록한 테넌트. 없으면 None(파일 머리말)."""
+    target = parse_arn(subject_arn)
+    if target is None:
+        return None
+    return tenants_repo.tenant_id_for_account(db, target.account_id)
 
 
 def _add_evidence(
@@ -177,7 +195,10 @@ def _create_finops(db: Session, intake: FinOpsIncidentIntake) -> IntakeOutcome:
         return _existing(open_incident)
 
     incident = incidents_repo.create_incident(
-        db, subject_arn=intake.subject_arn, category=IncidentCategory.FINOPS
+        db,
+        subject_arn=intake.subject_arn,
+        category=IncidentCategory.FINOPS,
+        tenant_id=_owning_tenant_id(db, intake.subject_arn),
     )
     _add_evidence(
         db,
@@ -275,6 +296,7 @@ def _create_secops(db: Session, intake: SecOpsIncidentIntake) -> IntakeOutcome:
         initial_risk_level=intake.initial_risk.initial_risk_level,
         response_mode=intake.initial_risk.response_mode,
         initial_risk_reason_codes=[c.value for c in intake.initial_risk.reason_codes],
+        tenant_id=_owning_tenant_id(db, intake.subject_arn),
     )
     _add_evidence(
         db,

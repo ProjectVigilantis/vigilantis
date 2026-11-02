@@ -49,6 +49,7 @@ from schemas.runbooks import RunbookId, TriggerSource
 from security import soar
 from sqlalchemy import delete, select
 from sqlalchemy.orm import sessionmaker
+from tests.audit_cleanup import purge_audit_events
 
 ROOT = Path(__file__).resolve().parents[3]
 GOLDEN = ROOT / "datasets/golden/secops"
@@ -75,6 +76,7 @@ def committed_sessions(pg_engine):
             models.Incident.threat_event_id.in_(threats),
         )))
         db.commit()
+        purge_audit_events(db, incident_ids=incident_ids)
         db.execute(delete(models.Evidence).where(models.Evidence.incident_id.in_(incident_ids)))
         db.execute(delete(models.Incident).where(models.Incident.incident_id.in_(incident_ids)))
         db.execute(delete(models.ThreatEvent).where(models.ThreatEvent.threat_event_id.in_(threats)))
@@ -394,6 +396,7 @@ def seed_isolation(committed_sessions, make_incident):
         for incident_id, arn in seeded:
             ids = list(s.scalars(select(models.ActionExecution.execution_id).where(
                 models.ActionExecution.incident_id == incident_id)))
+            purge_audit_events(s, incident_ids=[incident_id])
             s.execute(delete(models.ExecutionStep).where(models.ExecutionStep.execution_id.in_(ids)))
             s.execute(delete(models.ActionExecution).where(
                 models.ActionExecution.incident_id == incident_id))
@@ -903,6 +906,7 @@ def test_dispatch_now_and_scan_cannot_enter_runner_while_first_holds_after_commi
                 assert executions_repo.get_execution(check, execution_id).status is ExecutionStatus.SUCCESS
         finally:
             with committed_sessions() as cleanup:
+                purge_audit_events(cleanup, incident_ids=[incident_id])
                 cleanup.execute(delete(models.ExecutionStep).where(
                     models.ExecutionStep.execution_id == execution_id))
                 cleanup.execute(delete(models.ActionExecution).where(
@@ -1035,6 +1039,7 @@ def test_held_autoscaling_dispatch_does_not_block_main_lane_but_excludes_its_own
             assert sorted(c[1] for c in calls if c[0] == "main") == ["main-now", "main-scan"]
         finally:
             with committed_sessions() as cleanup:
+                purge_audit_events(cleanup, incident_ids=incident_ids)
                 cleanup.execute(delete(models.ExecutionStep).where(
                     models.ExecutionStep.execution_id.in_([asg_id, now_id, scan_id])))
                 cleanup.execute(delete(models.ActionExecution).where(

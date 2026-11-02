@@ -26,6 +26,7 @@ from db import models
 from db.repositories import guardrails as guardrails_repo
 from db.repositories import incidents as incidents_repo
 from exceptions import ApiError
+from tests.audit_cleanup import purge_audit_events
 
 
 def _evaluate(db, candidate, *, passed):
@@ -342,7 +343,7 @@ def test_late_analysis_cannot_reopen_closed_incident(db, client_pg, make_inciden
 @pytest.mark.parametrize("category", list(IncidentCategory))
 @pytest.mark.parametrize("winner", ["close", "approve"])
 def test_close_and_approval_are_serialized_by_postgres(
-    pg_engine, make_incident, make_candidate, winner, category,
+    pg_engine, make_incident, make_candidate, committed_actor, winner, category,
 ):
     with Session(pg_engine) as setup:
         incident = make_incident(setup, category=category)
@@ -358,8 +359,10 @@ def test_close_and_approval_are_serialized_by_postgres(
     )
     def act(session, action):
         if action == "close":
-            return workflows.resolve_incident(session, incident_id, ResolutionJudgement.NO_FURTHER_ACTION)
-        return workflows.reserve_execution(session, request)
+            return workflows.resolve_incident(
+                session, incident_id, ResolutionJudgement.NO_FURTHER_ACTION, audit_actor=committed_actor
+            )
+        return workflows.reserve_execution(session, request, audit_actor=committed_actor)
     def contender(session):
         session.execute(text("SET LOCAL lock_timeout = '30s'"))
         try:
@@ -407,6 +410,7 @@ def test_close_and_approval_are_serialized_by_postgres(
             )
     finally:
         with Session(pg_engine) as cleanup:
+            purge_audit_events(cleanup, incident_ids=[incident_id])
             cleanup.execute(delete(models.ActionExecution).where(models.ActionExecution.incident_id == incident_id))
             cleanup.execute(delete(models.RunbookCandidate).where(models.RunbookCandidate.incident_id == incident_id))
             cleanup.execute(delete(models.Incident).where(models.Incident.incident_id == incident_id))

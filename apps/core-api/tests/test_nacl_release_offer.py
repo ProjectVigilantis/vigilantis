@@ -425,13 +425,15 @@ def test_no_second_offer_after_a_rejection(db, reserved_block, aws):
     assert len(release_candidates(db, incident_id)) == 1
 
 
-def test_a_resolved_incident_gets_no_offer(db, reserved_block, aws):
+def test_a_resolved_incident_gets_no_offer(db, reserved_block, aws, audit_actor):
     """관제자가 해제 없이 닫았다 — 그 판단을 제안으로 뒤집지 않는다."""
     incident_id, execution_id = reserved_block()
     # 제안 스캔을 거치지 않고 차단만 확정한다 — 확정 직후 관제자가 먼저 닫은 상황
     workflows.run_nacl_add_deny_execution(db, execution_id)
     workflows.close_execution(db, execution_id, next_status=ExecutionStatus.SUCCESS)
-    assert workflows.resolve_incident(db, incident_id, ResolutionJudgement.JUSTIFIED)
+    assert workflows.resolve_incident(
+        db, incident_id, ResolutionJudgement.JUSTIFIED, audit_actor=audit_actor
+    )
 
     report = dispatcher.dispatch_pending(db)
 
@@ -440,7 +442,7 @@ def test_a_resolved_incident_gets_no_offer(db, reserved_block, aws):
 
 
 def test_an_incident_closed_while_the_guardrail_ran_is_left_alone(
-    db, reserved_block, aws
+    db, reserved_block, aws, audit_actor
 ):
     """가드레일이 AWS를 부르는 사이 관제자가 닫았다 — 잠근 뒤 다시 보고 저장하지 않는다."""
     incident_id, execution_id = reserved_block()
@@ -450,7 +452,9 @@ def test_an_incident_closed_while_the_guardrail_ran_is_left_alone(
 
     def operator_resolves(kwargs):
         aws["hooks"].pop("describe_network_acls")
-        workflows.resolve_incident(db, incident_id, ResolutionJudgement.JUSTIFIED)
+        workflows.resolve_incident(
+            db, incident_id, ResolutionJudgement.JUSTIFIED, audit_actor=audit_actor
+        )
 
     aws["hooks"]["describe_network_acls"] = operator_resolves
 
@@ -519,7 +523,7 @@ def test_offerable_statuses_leave_out_closed_and_unanalyzed_incidents():
 # ------------------------------------------------------- 차단 → 해제 왕복 (T2 7·8번)
 
 
-def test_block_offer_release_round_trip(db, reserved_block, aws):
+def test_block_offer_release_round_trip(db, reserved_block, aws, audit_actor):
     """차단 → [해제] 제안 → 관제자 접수 → 해제 SUCCESS. 해제 뒤에는 다시 제안하지 않는다."""
     incident_id, _ = reserved_block()
     dispatcher.dispatch_pending(db)
@@ -532,6 +536,7 @@ def test_block_offer_release_round_trip(db, reserved_block, aws):
             runbook_id=RESTORE,
             idempotency_key=str(uuid.uuid4()),
         ),
+        audit_actor=audit_actor,
     )
     assert reservation.created
 

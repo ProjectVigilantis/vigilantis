@@ -20,8 +20,10 @@ import incident_intake  # noqa: E402
 from db.repositories import assets as assets_repo  # noqa: E402
 from db.repositories import incidents as incidents_repo  # noqa: E402
 from db.repositories import notification_events as events_repo
+from db.repositories import tenants as tenants_repo  # noqa: E402
 from schemas.api.assets import AssetType  # noqa: E402
 from schemas.api.incidents import IncidentCategory, IncidentStatus  # noqa: E402
+from schemas.api.tenants import TenantStatus, TenantVerificationResult  # noqa: E402
 from schemas.assets import MetricSummary as MetricSummaryContract  # noqa: E402
 from schemas.evidence import EvidenceType  # noqa: E402
 from schemas.intake import FinOpsIncidentIntake, SecOpsIncidentIntake  # noqa: E402
@@ -523,3 +525,75 @@ def test_finops_is_not_blocked_by_open_secops_incident_on_same_asset(db):
 
     assert fin.created is True
     assert fin.incident_id != sec.incident_id
+
+
+# --- 소속 테넌트 -----------------------------------------------------------------
+#
+# 새 Incident의 소속은 subject_arn 계정을 등록한 테넌트다. 테넌트 상태와 무관하고, 등록이 없으면 NULL이며,
+# 중복이라 돌려주는 기존 Incident의 소속은 바꾸지 않는다(incident_intake.py 머리말).
+
+INTAKES = pytest.mark.parametrize(
+    "make_intake", [finops_intake, secops_intake], ids=["finops", "secops"]
+)
+
+
+def _register_tenant(db, account: str = ACCOUNT, status: TenantStatus = TenantStatus.ACTIVE) -> str:
+    """계정을 등록한 실제 테넌트 행 — 상태는 계약의 전이(연결 확인 → 정지)를 그대로 밟는다."""
+    now = datetime.now(timezone.utc)
+    tenant = tenants_repo.create_tenant(
+        db, name=f"tenant-{account}", aws_account_id=account, regions=[REGION], now=now
+    )
+    if status is not TenantStatus.PENDING_CONNECTION:
+        assert tenants_repo.record_verification(
+            db, tenant.tenant_id, result=TenantVerificationResult.OK, reason_code=None, now=now
+        )
+    if status is TenantStatus.SUSPENDED:
+        assert tenants_repo.suspend_tenant(db, tenant.tenant_id, reason="해지", now=now)
+    db.commit()
+    return tenant.tenant_id
+
+
+@INTAKES
+@pytest.mark.parametrize("status", list(TenantStatus), ids=lambda s: s.value)
+def test_new_incident_belongs_to_the_tenant_registered_for_its_account(db, make_intake, status):
+    tenant_id = _register_tenant(db, status=status)
+
+    outcome = incident_intake.create_incident_from_intake(db, make_intake())
+
+    assert outcome.created is True
+    db.expire_all()
+    assert incidents_repo.get_incident(db, outcome.incident_id).tenant_id == tenant_id
+
+
+def test_secops_ownership_is_not_written_to_the_threat_event(db):
+    _register_tenant(db)
+    intake = secops_intake()
+
+    incident_intake.create_incident_from_intake(db, intake)
+
+    stored = incidents_repo.get_threat_event_by_dedup_key(db, intake.threat_event.deduplication_key)
+    assert stored.tenant_id is None
+
+
+@INTAKES
+def test_account_without_registered_tenant_stays_unassigned(db, make_intake):
+    _register_tenant(db, account="210987654321")  # 다른 계정의 테넌트는 소속을 주지 않는다
+
+    outcome = incident_intake.create_incident_from_intake(db, make_intake())
+
+    assert outcome.created is True
+    assert incidents_repo.get_incident(db, outcome.incident_id).tenant_id is None
+
+
+@INTAKES
+def test_duplicate_returns_the_existing_incident_without_reassigning_it(db, make_intake):
+    first = incident_intake.create_incident_from_intake(db, make_intake())
+    tenant_id = _register_tenant(db)  # 기존 카드가 생긴 뒤에야 계정이 등록됐다
+
+    again = incident_intake.create_incident_from_intake(db, make_intake())
+
+    assert (again.created, again.incident_id) == (False, first.incident_id)
+    db.expire_all()
+    assert incidents_repo.get_incident(db, first.incident_id).tenant_id is None
+    assert [row.incident_id for row in incidents_repo.list_incidents(db)] == [first.incident_id]
+    assert tenants_repo.get_tenant(db, tenant_id).open_incident_count == 0

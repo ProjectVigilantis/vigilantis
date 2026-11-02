@@ -8,12 +8,14 @@ import { Plus } from 'lucide-react';
 import Link from 'next/link';
 import { useMemo, useState } from 'react';
 
+import { useSession } from '@/components/auth/session-provider';
 import { EmptyState } from '@/components/empty-state';
 import { CreateTenantDialog } from '@/components/tenants/create-tenant-dialog';
 import { TenantStatusBadge, VerificationSummary } from '@/components/tenants/tenant-badges';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { INPUT_CLASS } from '@/components/form-classes';
+import { canCreateTenant, isUnassignedManager } from '@/lib/roles';
 import { matchesTenantQuery, summarizeTenants, TENANT_STATUS_LABELS } from '@/lib/tenants';
 import { cn } from '@/lib/utils';
 import type { TenantListItem, TenantStatus } from '@/types/api';
@@ -23,6 +25,13 @@ type Filter = 'ALL' | TenantStatus;
 const FILTERS: readonly Filter[] = ['ALL', 'ACTIVE', 'PENDING_CONNECTION', 'SUSPENDED'];
 
 export function TenantsView({ tenants }: { tenants: TenantListItem[] }) {
+  const { session } = useSession();
+  const me = session.kind === 'user' ? session.user : null;
+  // 고객 추가는 중앙 관리자만 — 고객 담당자와 확인 전 계정에는 보이지 않는다. 실제 차단은 서버 403이다.
+  const canCreate = canCreateTenant(me);
+  // 목록은 서버가 범위를 정한다(중앙 관리자 전체 · 고객 담당자는 배정된 고객만). 담당 고객이 없는 담당자의 빈 목록은
+  // "등록된 고객 없음"이 아니라 배정 없음으로 보인다.
+  const unassigned = isUnassignedManager(me);
   const [creating, setCreating] = useState(false);
   const [filter, setFilter] = useState<Filter>('ALL');
   const [query, setQuery] = useState('');
@@ -36,19 +45,31 @@ export function TenantsView({ tenants }: { tenants: TenantListItem[] }) {
           <h1 className="text-2xl font-bold tracking-tight">고객사 관리</h1>
           <p className="text-muted-foreground text-sm">
             고객사 AWS 계정의 연결 상태와 원격 회수(정지)를 관리합니다. 시각은 모두 KST입니다.
+            {me?.platform_role === 'TENANT_MANAGER' ? ' 담당 고객사만 표시합니다.' : null}
           </p>
         </div>
-        <Button type="button" className="h-10 px-4" onClick={() => setCreating(true)}>
-          <Plus aria-hidden />
-          고객사 추가
-        </Button>
+        {canCreate ? (
+          <Button type="button" className="h-10 px-4" onClick={() => setCreating(true)}>
+            <Plus aria-hidden />
+            고객사 추가
+          </Button>
+        ) : null}
       </div>
 
       {tenants.length === 0 ? (
-        <EmptyState
-          message="등록된 고객사가 없습니다."
-          description="고객사를 추가하면 온보딩 링크로 고객사 AWS 계정에 접근 역할을 만들게 됩니다."
-        />
+        unassigned ? (
+          <EmptyState
+            message="담당 고객이 배정되지 않았습니다."
+            description="배정 전에는 고객 정보 · 조치 · 고객사 사용자 관리를 이용할 수 없습니다. 중앙 관리자에게 담당 고객 배정을 요청해 주세요."
+          />
+        ) : canCreate ? (
+          <EmptyState
+            message="등록된 고객사가 없습니다."
+            description="고객사를 추가하면 온보딩 링크로 고객사 AWS 계정에 접근 역할을 만들게 됩니다."
+          />
+        ) : (
+          <EmptyState message="표시할 고객사가 없습니다." />
+        )
       ) : (
         <>
           <section className="bg-card ring-foreground/10 overflow-hidden rounded-xl ring-1">
@@ -136,7 +157,7 @@ export function TenantsView({ tenants }: { tenants: TenantListItem[] }) {
         </>
       )}
 
-      {creating ? <CreateTenantDialog onClose={() => setCreating(false)} /> : null}
+      {creating && canCreate ? <CreateTenantDialog onClose={() => setCreating(false)} /> : null}
     </div>
   );
 }

@@ -31,6 +31,7 @@ def _identity(sub, proven=True):
         email=f"{sub}@example.com",
         mfa_step=MfaStep.SOFTWARE_TOKEN_MFA,
         email_proven=proven,
+        generation=0,  # 새로 만든 사용자의 인증 세대(#515)
     )
 
 

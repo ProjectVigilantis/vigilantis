@@ -42,15 +42,18 @@ export function useSession(): SessionContextValue {
   return useContext(SessionContext);
 }
 
-/** 조치 버튼(실행 · 복구 · 종료)을 막는 이유. 역할을 아직 모르면 막는다 — 서버 403이 실제 차단이다. */
+/**
+ * 조치 버튼(실행 · 복구 · 종료)을 막는 이유. 계정을 아직 모르면 막는다 — 서버 403이 실제 차단이다.
+ * 플랫폼 계정은 호환 역할(ADMIN)이 아니라 등급 · 담당 배정으로 판정한다(lib/roles.ts `canOperate`).
+ */
 export function useOperateBlockedReason(): string | null {
   const { session } = useSession();
-  return operateBlockedReason(session.kind === 'user' ? session.user.role : null);
+  return operateBlockedReason(session.kind === 'user' ? session.user : null);
 }
 
 export function useCanOperate(): boolean {
   const { session } = useSession();
-  return session.kind === 'user' && canOperate(session.user.role);
+  return session.kind === 'user' && canOperate(session.user);
 }
 
 const toState = (user: CurrentUserResponse | null): SessionState =>

@@ -51,6 +51,8 @@
 #   - 이행 스위치 TENANT_CONTEXT_REQUIRED: 꺼져 있으면(기본) 문맥 없는 호출은 지금처럼 프로세스
 #     자격으로 나가고, 켜지면 예외다 — 조용히 플랫폼 · 다른 테넌트 자격으로 나가지 않는다.
 #   - 플랫폼 자체 자원 호출(platform_sns_client)은 이 규칙 밖이다 — 문맥 안에서도 고객 자격을 쓰지 않는다.
+#   - 연결 확인(#533 B)은 캐시를 거치지 않는 세션(verification_session)으로 묻고, 통과하면
+#     forget_tenant 로 그 테넌트 캐시를 버린다 — 역할을 다시 만든 고객이 옛 자격을 물려받지 않는다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -70,6 +72,7 @@ from botocore.credentials import (
     ContainerProvider,
     CredentialProvider,
     CredentialResolver,
+    Credentials,
     DeferredRefreshableCredentials,
 )
 
@@ -144,15 +147,15 @@ class _TenantCredentials(DeferredRefreshableCredentials):
 
 
 class _TenantProvider(CredentialProvider):
-    """이미 만든 테넌트 갱신 자격을 그대로 내주는 해석기 — 스레드별 세션이 같은 자격을 쓴다."""
+    """이미 만든 테넌트 자격을 그대로 내주는 해석기 — 스레드별 세션이 같은 자격을 쓴다."""
 
     METHOD = "vigilantis-tenant"
 
-    def __init__(self, credentials: _TenantCredentials):
+    def __init__(self, credentials: Credentials):
         super().__init__()
         self._credentials = credentials
 
-    def load(self) -> _TenantCredentials:
+    def load(self) -> Credentials:
         return self._credentials
 
 
@@ -191,18 +194,50 @@ def _credentials_for(access: TenantAccess) -> _TenantCredentials:
 
 
 def _tenant_session(access: TenantAccess) -> boto3.session.Session:
-    """이 스레드 · 이 테넌트의 boto3 세션. 프로세스 프로필 · 환경 키를 보지 않는다."""
-    sessions: dict[TenantAccess, boto3.session.Session] | None = getattr(
-        _thread_local, "tenant_sessions", None
+    """이 스레드 · 이 테넌트의 boto3 세션. 프로세스 프로필 · 환경 키를 보지 않는다.
+
+    세션이 쥔 자격이 프로세스 캐시의 지금 자격과 다르면(forget_tenant 뒤) 새로 만든다 —
+    다른 스레드의 세션은 비울 수 없으므로 쓰는 쪽이 확인한다."""
+    sessions: dict[TenantAccess, tuple[_TenantCredentials, boto3.session.Session]] | None = (
+        getattr(_thread_local, "tenant_sessions", None)
     )
     if sessions is None:
         sessions = _thread_local.tenant_sessions = {}
-    session = sessions.get(access)
-    if session is None:
-        provider = _TenantProvider(_credentials_for(access))
-        session = boto3.session.Session(botocore_session=_isolated_session(provider))
-        sessions[access] = session
-    return session
+    credentials = _credentials_for(access)
+    entry = sessions.get(access)
+    if entry is None or entry[0] is not credentials:
+        session = _session_with(credentials)
+        sessions[access] = (credentials, session)
+        return session
+    return entry[1]
+
+
+def _session_with(credentials: Credentials) -> boto3.session.Session:
+    return boto3.session.Session(botocore_session=_isolated_session(_TenantProvider(credentials)))
+
+
+def forget_tenant(tenant_id: str) -> None:
+    """그 테넌트의 캐시된 자격을 버린다 — 다음 호출이 AssumeRole 부터 다시 한다.
+
+    연결 확인이 통과한 뒤 부른다(#533 B) — 고객이 역할을 지웠다 다시 만들었으면 옛 세션은 죽었다."""
+    with _tenant_credentials_lock:
+        for access in [a for a in _tenant_credentials if a.tenant_id == tenant_id]:
+            del _tenant_credentials[access]
+
+
+def verification_session(access: TenantAccess) -> boto3.session.Session:
+    """연결 확인 전용 — 캐시를 거치지 않고 지금 AssumeRole 을 한 번 불러 만든 세션(#533 B).
+
+    AssumeRole 의 실패(거절 · 플랫폼 자격 없음)는 여기서 그대로 올라간다. 세션은 갱신하지 않는다."""
+    issued = _assume_role(access)
+    return _session_with(
+        Credentials(issued["access_key"], issued["secret_key"], issued["token"])
+    )
+
+
+def session_client(session: boto3.session.Session, service: str, region: str):
+    """주어진 세션의 클라이언트 — 엔드포인트 · 공통 Config 는 aws_client 와 같다."""
+    return session.client(service, **_client_kwargs(_BOTO_CONFIG, endpoint_url(), region, {}))
 
 # 실 AWS 모드 전용. 스위치가 꺼졌는데도 남아 있는 다른 엔드포인트 설정(서비스별
 # 환경변수·~/.aws/config)을 botocore가 집지 못하게 한다. LocalStack 모드에서는

@@ -8,7 +8,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from .assets import UtcDateTime
-from .auth import AccountScope, Email, UserRole
+from .auth import AccountScope, Email, PlatformRole, UserRole
 
 
 class UserStatus(str, Enum):
@@ -22,6 +22,10 @@ class UserEventAction(str, Enum):
     ROLE_CHANGED = "ROLE_CHANGED"
     STATUS_CHANGED = "STATUS_CHANGED"
     SESSIONS_REVOKED = "SESSIONS_REVOKED"
+    #: 플랫폼 계정의 등급(platform_role) 변경.
+    PLATFORM_ROLE_CHANGED = "PLATFORM_ROLE_CHANGED"
+    #: TENANT_MANAGER 의 담당 고객사(tenant_ids) 교체 · 회수.
+    TENANT_ASSIGNMENTS_CHANGED = "TENANT_ASSIGNMENTS_CHANGED"
 
 
 class UserListItem(AccountScope):
@@ -69,10 +73,13 @@ class UserEventState(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     role: UserRole | None = None
+    platform_role: PlatformRole | None = None
     status: UserStatus | None = None
     revoked_session_count: int | None = Field(default=None, ge=0)
     recover_existing: bool | None = None
     tenant_id: UUID | None = None
+    #: 담당 고객사 배정 전후(TENANT_ASSIGNMENTS_CHANGED). 빈 목록 = 담당 없음.
+    tenant_ids: list[UUID] | None = None
 
 
 class UserEventItem(BaseModel):

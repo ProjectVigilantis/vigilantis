@@ -4,7 +4,8 @@
 #
 #   - 연결 수립: 세션 없음 · 무효 세션 · 허용 밖 Origin 은 accept 전에 1008. Origin 목록은 HTTP
 #     상태 변경 검사와 같다(AUTH_ALLOWED_ORIGINS, 비면 CORS_ALLOW_ORIGINS).
-#   - 임시 출시 관문(#492): PLATFORM 계정만 연결한다 — 고객사 · UNASSIGNED 계정은 유효 세션이어도 1008.
+#   - 계정 종류와 무관하게 유효한 세션이면 연결된다(#535). 고객사(TENANT) 계정은 자기 고객 Incident 의
+#     이벤트만 받는다 — 다른 고객 · tenant_id NULL · 없는 Incident 는 건너뛴다.
 #   - 연결 중: 감시가 짧은 주기로 다시 판정해 로그아웃 · 재로그인 회수 · 사용자 비활성 · 유휴 만료를
 #     4401 "AUTH_REQUIRED" 로 닫는다. 주기가 길어도 유휴 만료 시각에는 그 시각에 닫는다.
 #   - 연결 · 재확인은 last_activity_at 을 바꾸지 않는다.
@@ -30,9 +31,8 @@ from db.repositories import auth as auth_repo
 from fastapi.testclient import TestClient
 from realtime import incident_event
 from schemas.api.auth import AccountType, UserRole
-from schemas.api.tenants import TenantStatus
 from schemas.api.ws import WS_CLOSE_AUTH_REQUIRED, WsEventType
-from sqlalchemy import text
+from sqlalchemy import delete, text
 from starlette.websockets import WebSocketDisconnect
 
 WS = "/api/v1/ws"
@@ -113,9 +113,13 @@ def _disable_now(committed_auth, seed):
         session.commit()
 
 
-@pytest.mark.parametrize("cookie", ["none", "unknown", "revoked", "disabled"])
+@pytest.mark.parametrize("cookie", ["none", "unknown", "revoked", "disabled", "unassigned"])
 def test_handshake_without_valid_session_is_rejected(committed_auth, cookie):
-    seed = committed_auth.make()
+    # UNASSIGNED 계정은 세션이 있어도 세션 판정 자체가 거절한다(무효 세션과 같다) — 계정 종류 관문이 아니다
+    if cookie == "unassigned":
+        seed = committed_auth.make(account_type=AccountType.UNASSIGNED)
+    else:
+        seed = committed_auth.make()
     if cookie == "revoked":
         _revoke_now(committed_auth, seed)
     elif cookie == "disabled":
@@ -125,6 +129,7 @@ def test_handshake_without_valid_session_is_rejected(committed_auth, cookie):
         "unknown": {"Cookie": "__Host-vg_session=not-a-session"},
         "revoked": {"Cookie": seed.cookie},
         "disabled": {"Cookie": seed.cookie},
+        "unassigned": {"Cookie": seed.cookie},
     }[cookie]
 
     with TestClient(_app(committed_auth)) as client:
@@ -134,28 +139,55 @@ def test_handshake_without_valid_session_is_rejected(committed_auth, cookie):
         assert client.app.state.realtime.connection_count == 0
 
 
-@pytest.mark.parametrize(("account", "role"), [
-    ("tenant-active", UserRole.ADMIN),
-    ("tenant-active", UserRole.VIEWER),
-    ("tenant-suspended", UserRole.OPERATOR),
-    ("unassigned", UserRole.ADMIN),
-])
-def test_handshake_of_non_platform_account_is_rejected_before_accept(committed_auth, allowed_origin, account, role):
-    """임시 출시 관문 — 전역 큐는 테넌트 범위가 없어 PLATFORM 계정만 받는다. 고객사 계정은 유효한 세션이어도 1008."""
-    if account == "unassigned":
-        seed = committed_auth.make(role, account_type=AccountType.UNASSIGNED)
-    else:
-        status = TenantStatus.ACTIVE if account == "tenant-active" else TenantStatus.SUSPENDED
-        seed = committed_auth.make(role, tenant_id=committed_auth.make_tenant(status))
+@pytest.fixture()
+def tenant_incidents(committed_auth, make_incident):
+    """고객 A · B 의 Incident 와 tenant_id NULL(MVP 기록) Incident 를 commit한다 → (tenant_a, tenant_b, ids)."""
+    tenant_a, tenant_b = committed_auth.make_tenant(), committed_auth.make_tenant()
+    ids: dict[str, str] = {}
+    with committed_auth.sessions() as session:
+        for name, tenant_id in (("a", tenant_a), ("b", tenant_b), ("null", None)):
+            incident = make_incident(session)
+            incident.tenant_id = tenant_id
+            ids[name] = incident.incident_id
+        session.commit()
+    yield tenant_a, tenant_b, ids
+    with committed_auth.sessions() as session:
+        session.execute(delete(models.Incident).where(models.Incident.incident_id.in_(list(ids.values()))))
+        session.commit()
+
+
+def _next_incident_id(ws) -> str:
+    return json.loads(ws.receive_text())["data"]["incident_id"]
+
+
+@pytest.mark.parametrize("role", [UserRole.ADMIN, UserRole.VIEWER])
+def test_tenant_account_connects_and_receives_only_its_own_tenant_events(
+    committed_auth, allowed_origin, tenant_incidents, role
+):
+    """고객사 계정도 연결된다(#535). 다른 고객 · tenant_id NULL · 없는 Incident 이벤트는 건너뛰고 자기 고객 것만 받는다."""
+    tenant_a, _tenant_b, ids = tenant_incidents
+    seed = committed_auth.make(role, tenant_id=tenant_a)
     with TestClient(_app(committed_auth)) as client:
         manager = client.app.state.realtime
-        with (
-            pytest.raises(WebSocketDisconnect) as closed,
-            client.websocket_connect(WS, headers={"Cookie": seed.cookie, "Origin": allowed_origin}),
-        ):
-            pass
-        assert closed.value.code == 1008
-        assert manager.connection_count == 0
+        with client.websocket_connect(WS, headers={"Cookie": seed.cookie, "Origin": allowed_origin}) as ws:
+            assert manager.connection_count == 1
+            # 거부될 이벤트를 먼저 발행한다 — 새면 첫 수신이 달라져 실패한다(큐 순서)
+            for incident_id in (ids["b"], ids["null"], "inc-nonexistent", ids["a"]):
+                manager.publish(incident_event(WsEventType.INCIDENT_UPDATED, incident_id=incident_id, occurred_at=T0))
+            assert _next_incident_id(ws) == ids["a"]
+        _wait_until(lambda: manager.connection_count == 0)
+
+
+def test_tenant_ws_client_fixture_connects_and_receives_own_tenant_event(
+    committed_auth, make_tenant_ws_client, tenant_incidents
+):
+    tenant_a, _tenant_b, ids = tenant_incidents
+    client, _seed = make_tenant_ws_client(tenant_a)
+    manager = client.app.state.realtime
+    with client.websocket_connect(WS) as ws:
+        manager.publish(incident_event(WsEventType.INCIDENT_UPDATED, incident_id=ids["b"], occurred_at=T0))
+        manager.publish(incident_event(WsEventType.INCIDENT_UPDATED, incident_id=ids["a"], occurred_at=T0))
+        assert _next_incident_id(ws) == ids["a"]
 
 
 def test_handshake_with_foreign_origin_is_rejected_even_with_a_session(committed_auth):

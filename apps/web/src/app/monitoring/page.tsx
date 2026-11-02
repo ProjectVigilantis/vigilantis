@@ -4,10 +4,12 @@
 
 import { MonitoringView } from '@/components/monitoring/monitoring-view';
 import { parseAxis } from '@/lib/home-path';
+import { BusinessUnavailable } from '@/components/business-unavailable';
 import { ErrorState } from '@/components/error-state';
 import { orError, orNull, serverApi } from '@/lib/api/server';
 import { WASTE_VERDICTS } from '@/lib/dashboard';
 import { parsePreset } from '@/lib/incident-filter';
+import { isUnassignedManager } from '@/lib/roles';
 import { savingsSummary } from '@/lib/savings';
 import type { AssetItem, IncidentListItem, IncidentResponse } from '@/types/api';
 import { unstable_rethrow } from 'next/navigation';
@@ -50,7 +52,18 @@ export default async function MonitoringPage({ searchParams }: PageProps<'/monit
   // 제목 옆 `마지막 갱신` — 다시 그려질 때마다 새로 찍힌다(auto-refresh.tsx).
   const renderedAt = new Date().toISOString();
   // 세션 쿠키만 실어 부르고, 401이면 로그인으로 redirect한다(lib/api/server.ts).
-  const { getAssets, getIncident, getIncidents, getMetricsTimeseries, getTenants } = await serverApi();
+  const { getMe, getAssets, getIncident, getIncidents, getMetricsTimeseries, getTenants } = await serverApi();
+  // 담당 고객이 없는 고객 담당자는 메뉴가 없어도 주소로 들어올 수 있다 — 업무 데이터를 하나도 읽지 않고 배정 없음을
+  // 알린다(대시보드와 같은 안내, #492). 계정 확인 실패도 업무 조회로 넘어가지 않는다. 고객사 계정은 기존대로 조회하고
+  // 서버의 거절(403)을 오류 화면으로 본다.
+  let user;
+  try {
+    user = await getMe();
+  } catch (error) {
+    unstable_rethrow(error);
+    return <ErrorState error={error} />;
+  }
+  if (isUnassignedManager(user)) return <BusinessUnavailable unassigned />;
   const { axis, asset, tab, preset } = await searchParams;
   // 고객 선택 목록 — 실패해도 화면은 뜬다(선택은 아직 잠겨 있다 · monitoring-view.tsx).
   const tenantsPromise = orNull(getTenants());

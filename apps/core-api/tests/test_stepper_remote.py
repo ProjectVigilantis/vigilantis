@@ -122,6 +122,7 @@ def test_read_routes_return_what_the_product_handlers_return(
     from schemas.api.assets import AssetType
     from schemas.api.incidents import IncidentCategory, IncidentStatus
     from schemas.collections import CollectionRunStatus
+    from tenancy import ALL_TENANTS
 
     monkeypatch.setattr(stepper, "_session_factory", lambda: lambda: nullcontext(db))
     monkeypatch.setattr("routers.assets._configured_regions", lambda: ["ap-northeast-2"])
@@ -150,9 +151,11 @@ def test_read_routes_return_what_the_product_handlers_return(
     assets = stepper_client.get("/_stepper/assets", headers=AUTH)
     assert (listing.status_code, detail.status_code, assets.status_code) == (200, 200, 200)
 
-    expected_listing = incidents_router.list_incidents(status=None, category=None, db=db)
-    expected_detail = incidents_router.get_incident(incident.incident_id, db=db)
-    expected_assets = assets_router.get_assets(db=db)
+    expected_listing = incidents_router.list_incidents(
+        status=None, category=None, db=db, scope=ALL_TENANTS
+    )
+    expected_detail = incidents_router.get_incident(incident.incident_id, db=db, scope=ALL_TENANTS)
+    expected_assets = assets_router.get_assets(db=db, scope=ALL_TENANTS)
     assert listing.json() == expected_listing.model_dump(mode="json")
     assert detail.json() == expected_detail.model_dump(mode="json")
     assert assets.json() == expected_assets.model_dump(mode="json")
@@ -171,6 +174,31 @@ def test_stepper_ws_accepts_valid_token_and_unregisters_on_close(stepper_client)
         socket.send_bytes(b"ignored")
         assert realtime.connection_count == 1
     assert realtime.connection_count == 0
+
+
+def test_stepper_ws_receives_published_events_of_any_incident(stepper_client):
+    """토큰 연결은 전역 진단이다 — 테넌트 소속을 모르는(DB에도 없는) 인시던트의 이벤트도 받는다.
+    제품 /api/v1/ws 는 같은 이벤트를 걸러 보내지 않는다(routers/ws.py) — 도구 연결만의 명시 허용이다."""
+    from datetime import UTC, datetime
+    from time import monotonic, sleep
+
+    from realtime import incident_event
+    from schemas.api.ws import WsEventType
+
+    realtime = stepper_client.app.state.realtime
+    event = incident_event(
+        WsEventType.INCIDENT_UPDATED, incident_id=str(uuid.uuid4()), occurred_at=datetime.now(UTC)
+    )
+    with stepper_client.websocket_connect("/_stepper/ws", headers=AUTH) as socket:
+        deadline = monotonic() + 5
+        while realtime.connection_count != 1:  # accept 뒤 등록이 끝나야 발행 대상이 된다
+            assert monotonic() < deadline, "stepper WS가 등록되지 않았다"
+            sleep(0.01)
+        realtime.publish(event)
+        received = socket.receive_json()
+    assert (received["event_id"], received["data"]["incident_id"]) == (
+        event.event_id, event.data.incident_id,
+    )
 
 
 # ------------------------------------------------------------------------------

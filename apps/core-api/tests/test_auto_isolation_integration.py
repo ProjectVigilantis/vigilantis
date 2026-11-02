@@ -45,6 +45,7 @@ from schemas.runbooks import RunbookId, TriggerSource
 from security import soar
 from sqlalchemy import delete, select, update
 from sqlalchemy.orm import sessionmaker
+from tests.audit_cleanup import purge_audit_events
 
 ROOT = Path(__file__).resolve().parents[3]
 GOLDEN = ROOT / "datasets/golden/secops"
@@ -86,6 +87,7 @@ def committed_sessions(pg_engine):
         incident_ids = list(db.scalars(select(models.Incident.incident_id).where(
             models.Incident.threat_event_id.in_(threats))))
         db.commit()
+        purge_audit_events(db, incident_ids=incident_ids)
         db.execute(delete(models.Evidence).where(models.Evidence.incident_id.in_(incident_ids)))
         db.execute(delete(models.Incident).where(models.Incident.incident_id.in_(incident_ids)))
         db.execute(delete(models.ThreatEvent).where(models.ThreatEvent.threat_event_id.in_(threats)))
@@ -127,6 +129,7 @@ def world(committed_sessions):
     with committed_sessions() as s:
         ids = list(s.scalars(select(models.ActionExecution.execution_id).where(
             models.ActionExecution.target_arn == w.arn)))
+        purge_audit_events(s, execution_ids=ids)
         s.execute(update(models.ActionExecution).where(
             models.ActionExecution.execution_id.in_(ids)).values(backup_record_id=None))
         for table in (models.ExecutionStep, models.BackupRecord, models.GuardrailEvaluation):

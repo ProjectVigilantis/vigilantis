@@ -79,18 +79,36 @@ class AccountType(str, Enum):
     UNASSIGNED = "UNASSIGNED"
 
 
+class PlatformRole(str, Enum):
+    """플랫폼(PLATFORM) 계정의 등급 — 플랫폼 관리 권한의 유일한 원천이다(#492 PR 5).
+
+    PLATFORM 계정만 갖고(필수) TENANT · UNASSIGNED 는 없다(null). role(ADMIN · OPERATOR · VIEWER)은
+    고객사 계정 안의 역할이며, PLATFORM 의 role=ADMIN 은 호환 값일 뿐 플랫폼 권한의 근거가 아니다.
+    고객사 범위: CENTRAL_ADMIN 은 전체, TENANT_MANAGER 는 명시 배정된 고객사만이다(배정 없음 = 고객사 없음).
+    """
+
+    #: 모든 고객사 + 직원 관리(등급 · 상태 · 담당 배정). 여러 명일 수 있다.
+    CENTRAL_ADMIN = "CENTRAL_ADMIN"
+    #: 배정된 고객사만 다룬다. 직원 관리는 하지 않는다. 새로 만들거나 지정한 플랫폼 계정의 기본 등급이다(배정 없음).
+    TENANT_MANAGER = "TENANT_MANAGER"
+
+
 class AccountScope(BaseModel):
-    """접근 가능한 계정의 소속. NULL 소속만으로 플랫폼 권한을 추론하지 않는다."""
+    """접근 가능한 계정의 소속과 플랫폼 등급. NULL 소속만으로 플랫폼 권한을 추론하지 않는다."""
 
     model_config = ConfigDict(extra="forbid")
 
     account_type: Literal[AccountType.PLATFORM, AccountType.TENANT]
     tenant_id: UUID | None
+    #: PLATFORM 만 값이 있다(필수). TENANT 는 null.
+    platform_role: PlatformRole | None = None
 
     @model_validator(mode="after")
     def _validate_membership(self):
         if (self.account_type == AccountType.TENANT) != (self.tenant_id is not None):
             raise ValueError("TENANT 계정만 tenant_id를 가지며 소속은 필수입니다")
+        if (self.account_type == AccountType.PLATFORM) != (self.platform_role is not None):
+            raise ValueError("PLATFORM 계정만 platform_role을 가지며 등급은 필수입니다")
         return self
 
 
@@ -210,3 +228,14 @@ class CurrentUserResponse(AccountScope):
     email: Email
     role: UserRole
     session: SessionInfo
+    #: TENANT_MANAGER 에게 배정된 고객사(판정 시점의 DB 값). 빈 목록은 담당 고객사가 없다는 뜻이다.
+    #: CENTRAL_ADMIN(전체 범위) · TENANT(소속은 tenant_id)는 항상 빈 목록이다 — 배정이 아니다.
+    assigned_tenant_ids: list[UUID]
+
+    @model_validator(mode="after")
+    def _validate_assignments(self):
+        if self.assigned_tenant_ids and self.platform_role is not PlatformRole.TENANT_MANAGER:
+            raise ValueError("assigned_tenant_ids 는 TENANT_MANAGER 만 가집니다")
+        if len(set(self.assigned_tenant_ids)) != len(self.assigned_tenant_ids):
+            raise ValueError("assigned_tenant_ids 는 중복될 수 없습니다")
+        return self
