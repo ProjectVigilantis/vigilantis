@@ -32,12 +32,17 @@ from schemas.api.actions import ExecutionStatus
 from schemas.api.errors import ErrorCode
 from schemas.api.incidents import AutoIsolationBlock, IncidentStatus
 from schemas.api.tenants import TenantStatus, TenantUpdateRequest
-from schemas.executions import ExecutionStepResult, ExecutionStepStatus
+from schemas.executions import (
+    EXECUTION_RECOVERABLE_STATUSES,
+    ExecutionStepResult,
+    ExecutionStepStatus,
+)
 from schemas.runbooks import RunbookId, TriggerSource
 from security import soar
 from services.aws import backup as bk
 from services.aws import executor as ex
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from tests.test_auto_isolation_workflow import (
     PRE,
@@ -55,6 +60,7 @@ from tests.test_auto_rollback_workflow import (
     cycle,
     only_child,
     operations,
+    reserve_manual_revert,
     statuses,
 )
 from tests.test_auto_rollback_workflow import aws, rolled_back_origin  # noqa: F401 — 픽스처는 이름으로 등록된다
@@ -372,6 +378,39 @@ def test_suspension_waits_for_the_first_step_transaction(pg_engine):
             cleanup.commit()
 
 
+def test_first_step_recorder_holds_the_tenant_row_until_the_step_commits(
+    committed_tenant, db, pg_engine, make_incident, make_candidate, make_execution, monkeypatch
+):
+    """첫 단계 저장 전 정지 UPDATE 는 _step_recorder 가 획득한 테넌트 행 잠금을 기다린다."""
+    _, execution_id = _reserved(
+        db, make_incident, make_candidate, make_execution, committed_tenant
+    )
+    observed = []
+    real_add_step = exec_repo.add_step
+
+    def add_step_while_suspending(session, step, *, execution_id):
+        with Session(pg_engine) as admin:
+            admin.execute(text("SET lock_timeout = '1s'"))
+            with pytest.raises(OperationalError) as raised:
+                tenants_repo.suspend_tenant(
+                    admin, committed_tenant, reason="해지", now=_utcnow()
+                )
+            assert raised.value.orig.sqlstate == "55P03"
+            observed.append("lock-wait")
+            admin.rollback()
+        return real_add_step(session, step, execution_id=execution_id)
+
+    monkeypatch.setattr(exec_repo, "add_step", add_step_while_suspending)
+    record = workflows._step_recorder(db, execution_id)
+    record(ExecutionStepResult(
+        sequence=1, affected_arn=INSTANCE_ARN, step_type=ex.STEP_STOP_INSTANCE,
+        aws_operation="ec2.stop_instances", status=ExecutionStepStatus.IN_PROGRESS,
+        occurred_at=_utcnow(),
+    ))
+    assert observed == ["lock-wait"]
+    assert len(exec_repo.list_steps(db, execution_id)) == 1
+
+
 def test_pre_start_read_never_makes_a_suspension_wait(pg_engine):
     """runner 진입 전 사전 판정(lock=False)은 잠그지 않는다 — 그 트랜잭션이 열린 채 AWS 를 부르는 동안에도
     정지는 기다리지 않고 commit 되고, 첫 단계 관문이 그 정지를 본다."""
@@ -405,10 +444,10 @@ def test_pre_start_read_never_makes_a_suspension_wait(pg_engine):
 # ----- ⑤ 단계를 남긴 실행과 자동 원복 -----------------------------------------------
 
 def test_execution_with_a_step_is_judged_and_auto_rolled_back_after_suspension(
-    db, rolled_back_origin, make_tenant, aws
+    db, rolled_back_origin, aws
 ):
     """단계가 남은 실행은 정지 뒤에도 판정 → 자동 원복 접수 → 원복 실행까지 그대로 간다."""
-    tenant_id = make_tenant()
+    tenant_id = _tenant(db, account=INSTANCE_ARN.split(":")[4]).tenant_id
     incident_id, origin_id = rolled_back_origin(origin_status=ExecutionStatus.IN_PROGRESS)
     _attach_all(db, incident_id, tenant_id)
     exec_repo.add_step(db, ExecutionStepResult(
@@ -433,8 +472,8 @@ def test_execution_with_a_step_is_judged_and_auto_rolled_back_after_suspension(
     assert modify == [{"InstanceId": INSTANCE, "InstanceType": {"Value": BACKUP_TYPE}}]
 
 
-def test_auto_rollback_child_created_after_suspension_still_runs(db, rolled_back_origin, make_tenant, aws):
-    tenant_id = make_tenant()
+def test_auto_rollback_child_created_after_suspension_still_runs(db, rolled_back_origin, aws):
+    tenant_id = _tenant(db, account=INSTANCE_ARN.split(":")[4]).tenant_id
     incident_id, origin_id = rolled_back_origin()
     _attach_all(db, incident_id, tenant_id)
     _suspend(db, tenant_id)
@@ -445,6 +484,33 @@ def test_auto_rollback_child_created_after_suspension_still_runs(db, rolled_back
     assert (report.started, report.closed) == (1, 1)
     assert only_child(db, origin_id).status is ExecutionStatus.SUCCESS
     assert statuses(db, incident_id, origin_id) == (IncidentStatus.AWAITING_CLOSURE, ExecutionStatus.ROLLED_BACK)
+
+
+def test_operator_recovery_reserved_before_suspension_closes_failed_and_origin_rollback_failed(
+    db, rolled_back_origin, aws, audit_actor
+):
+    """정지 직전 관제자 복구 예약은 자식 FAILED · 원본 ROLLBACK_FAILED 로 끝나며 AWS 변경은 없다.
+
+    ROLLBACK_FAILED 는 복구를 다시 열지 않으므로 재개 뒤의 원복은 사람 몫이다.
+    """
+    tenant_id = _tenant(db, account=INSTANCE_ARN.split(":")[4]).tenant_id
+    incident_id, origin_id = rolled_back_origin()
+    _attach_all(db, incident_id, tenant_id)
+    child_id = reserve_manual_revert(db, incident_id, audit_actor)
+    _suspend(db, tenant_id)
+
+    cycle(db)
+
+    child = exec_repo.get_execution(db, child_id)
+    assert child.status is ExecutionStatus.FAILED
+    assert child.error_summary.startswith(SUSPENDED_PREFIX + ": ")
+    assert exec_repo.list_steps(db, child_id) == []
+    assert statuses(db, incident_id, origin_id)[1] is ExecutionStatus.ROLLBACK_FAILED
+    assert [
+        name for name, kwargs in aws.calls
+        if name == "modify_instance_attribute" and not kwargs.get("DryRun")
+    ] == []
+    assert ExecutionStatus.ROLLBACK_FAILED not in EXECUTION_RECOVERABLE_STATUSES
 
 
 # ----- ⑥ 다시 켜기와 무관 · 기존 동작 보존 ---------------------------------------------

@@ -315,7 +315,7 @@ export const RESPONSE_MODES = [
 export type ResponseMode = (typeof RESPONSE_MODES)[number];
 
 /**
- * 자동 발동(High 선차단·Medium 1분 격리)이 막힌 이유 — 사람이 승인해야만 조치된다(#521).
+ * 자동 발동(High 선차단·Medium 1분 격리)이 막힌 이유. 정지가 아니면 사람의 승인이 필요하다(#521).
  * `TENANT_SUSPENDED`: 테넌트가 정지됐다 — 플랫폼이 그 계정에 새로 들어가지 않는다(T-4 · #533).
  * `AUTO_ACTION_DISABLED`: 테넌트가 자동 조치를 껐거나, 그 발동을 정한 시각이 다시 켠 시각 이전이다.
  * 둘 다 해당하면 서버는 `TENANT_SUSPENDED`를 준다.

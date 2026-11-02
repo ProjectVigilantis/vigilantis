@@ -314,7 +314,7 @@ function SavingsArea({ incident }: { incident: IncidentResponse }) {
  * `_EXPECTED_MODE_BY_RISK`). 정밀 평가가 자동 행동을 바꾸려면 상태 전이 계약이 먼저 필요하다
  * (Risk Evaluator, SSOT §미해결 6번).
  *
- * 서버가 `auto_isolation_block`을 주면 자동 격리 예고를 승인 필요 안내로 바꾼다(#532). 판정 규칙은
+ * 서버가 `auto_isolation_block`을 주면 자동 격리 예고를 정지 또는 승인 필요 안내로 바꾼다(#532). 판정 규칙은
  * `@/lib/auto-isolation-notice`에 있다.
  */
 function AgentWaitNotice({
