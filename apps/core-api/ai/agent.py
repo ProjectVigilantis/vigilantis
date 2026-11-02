@@ -745,7 +745,7 @@ def run_finops_graph(
 # SecOps는 독립 State·프롬프트를 쓴다. FinOps 승인 지문에는 포함하지 않는다.
 SECOPS_MODEL_CALLS = 3
 FINOPS_MODEL_CALLS = 2
-SECOPS_PROMPT_VERSION = "v1.0.0"
+SECOPS_PROMPT_VERSION = "v1.0.1"
 
 _SECOPS_RISK_LABELS = {
     RiskLevel.HIGH: "높음",
@@ -850,8 +850,8 @@ _SECOPS_PROPOSAL_PROMPT = (
     " 대상 EC2와 조치 대상 NACL을 구분한다. 같은 VPC라는 이유로 대상을 넓히지 않는다. NACL_ADD_DENY의 tcp 후보는 해당 출발지에서"
     " 연결 서브넷으로 들어오는 TCP 전체 포트를 대상으로 한다. SSH 차단 CIDR은 관측 source_ip 하나만 포함하는 /32 또는 /128, "
     "protocol은 tcp로 정한다. required_parameters와 parameter_schema를 지켜 값을 채우고 나머지 필드는 null로 "
-    "둔다. rule_number는 1~32766 범위의 제안이며 번호 가용성 검증은 가드레일 몫이다. 번호 선택이 우선 적용이나 실제 차단을 보증하지 "
-    "않는다.\n"
+    "둔다. NACL_ADD_DENY의 rule_number는 서버가 현재 인바운드 규칙에서 첫 allow보다 작은 빈 번호로 정하므로 null로 둔다. "
+    "가드레일은 번호 가용성과 순서를 재검증하며 실제 통신 차단 효과를 보증하지 않는다.\n"
     "[선행 실행과 책임]\n"
     "선행 실행이 있으면 기록된 런북·상태·영향 대상과 후보 범위를 대조해 추가 필요성을 판단한다. 이미 수행된 범위와 구별되는 필요한 조치만 제안하고, "
     "추가로 필요한 조치가 없으면 candidates를 비운다. 실패·진행 중 기록이나 영향 정보의 부재는 미실행·미변경을 뜻하지 않는다. 확인되지 않은 "
@@ -870,6 +870,7 @@ class RiskReassessmentOutput(BaseModel):
 class _SecOpsState(TypedDict, total=False):
     graph_input: SecOpsGraphInput
     client: AIModelClient
+    nacl_rule_numbers: Mapping[str, int]
     summary_lines: list[str]
     reviewed_risk_level: RiskLevel
     proposals: list[ProposedCandidate]
@@ -962,11 +963,21 @@ def _secops_validate_candidates(state: _SecOpsState) -> dict[str, Any]:
             raise _CandidateRejected(
                 AnalysisFailureReason.TARGET_NOT_ALLOWED, "제공한 조치 대상 밖입니다"
             )
+        evidence_ids = _canonical_evidence_ids(proposal.evidence_ids, graph_input)
+        parameters = _parameter_values(proposal.runbook_id, proposal, graph_input.asset_context)
+        if proposal.runbook_id is RunbookId.RUNBOOK_NACL_ADD_DENY:
+            number = state["nacl_rule_numbers"].get(proposal.target_arn)
+            if number is None:
+                raise _CandidateRejected(
+                    AnalysisFailureReason.SERVER_PARAMETER_UNAVAILABLE,
+                    "서버가 선택한 NACL 규칙 번호가 없습니다",
+                )
+            parameters["rule_number"] = number
         return RunbookCandidateDraft(
             runbook_id=proposal.runbook_id,
             target_arn=proposal.target_arn,
-            parameters=_parameter_values(proposal.runbook_id, proposal, graph_input.asset_context),
-            evidence_ids=_canonical_evidence_ids(proposal.evidence_ids, graph_input),
+            parameters=parameters,
+            evidence_ids=evidence_ids,
         )
 
     drafts, failure = _convert_candidates(state["proposals"], convert, step="validate_candidates")
@@ -1027,10 +1038,14 @@ def _build_secops_graph():
 SECOPS_GRAPH = _build_secops_graph()
 
 
-def run_secops_graph(graph_input: SecOpsGraphInput, *, client: AIModelClient) -> AgentGraphOutput:
+def run_secops_graph(
+    graph_input: SecOpsGraphInput, *, client: AIModelClient, nacl_rule_numbers: Mapping[str, int],
+) -> AgentGraphOutput:
     """위험 재평가 → 후보 생성·계약 검증 → 요약. DB·가드레일·실행은 호출부가 소유한다.
 
     로그 문맥은 run_finops_graph와 같다.
     """
     with log_context(incident_id=graph_input.incident_id):
-        return SECOPS_GRAPH.invoke({"graph_input": graph_input, "client": client})["output"]
+        return SECOPS_GRAPH.invoke({
+            "graph_input": graph_input, "client": client, "nacl_rule_numbers": nacl_rule_numbers,
+        })["output"]

@@ -109,6 +109,11 @@ from .backup import (
 )
 from .client import aws_client
 from .errors import aws_error_code, reason_code_for, run_dry_run, watch_dry_run_protocol
+from .nacl_rules import (
+    first_inbound_allow_rule_number,
+    inbound_rule_numbers,
+    select_nacl_deny_rule_number,
+)
 
 logger = logging.getLogger("vigilantis.aws")
 
@@ -721,9 +726,10 @@ def _precheck_sg_recreate(ctx: _Ctx) -> PrecheckOutcome:
 
 
 def _network_acl(acl_id: str, region: str):
-    res, code = _call(
-        aws_client("ec2", region).describe_network_acls, NetworkAclIds=[acl_id]
-    )
+    def describe_network_acls(**kwargs):
+        return aws_client("ec2", region).describe_network_acls(**kwargs)
+
+    res, code = _call(describe_network_acls, NetworkAclIds=[acl_id])
     if code is not None:
         return None, code
     acls = res.get("NetworkAcls", [])
@@ -742,13 +748,55 @@ def _find_entry(acl: Mapping[str, Any], rule_number: int, egress: bool):
     return None
 
 
+def resolve_nacl_add_deny_rule_number(
+    target_arn: str, *, excluded_rule_numbers: set[int] | frozenset[int] = frozenset(),
+) -> tuple[int | None, PrecheckReasonCode | None]:
+    """후보 준비 시 조회만 한다. 선택한 번호를 예약하거나 AWS를 변경하지 않는다."""
+    target = parse_arn(target_arn)
+    if target is None or target.resource_type != "network-acl":
+        return None, R.PRECHECK_PARAM_INVALID
+    acl, code = _network_acl(target.resource_id, target.region)
+    number = (
+        select_nacl_deny_rule_number(acl, excluded_rule_numbers=excluded_rule_numbers)
+        if acl is not None else None
+    )
+    detail = ("acl_lookup_unavailable" if code is not None else
+              "no_eligible_inbound_rule_number" if number is None else "inbound_rule_number_selected")
+    if code is None and number is None:
+        code = R.PRECHECK_INVALID_STATE
+    numbers = sorted(inbound_rule_numbers(acl)) if acl is not None else None
+    logger.log(
+        logging.WARNING if code is not None else logging.INFO,
+        "nacl_rule_number_selected",
+        extra={
+            "target_arn": target_arn[:512],
+            "precheck_evidence": {
+                "source": "candidate_describe_network_acls",
+                "selection_policy": "lowest_free_inbound_before_first_allow_excluding_open_candidates",
+                "open_candidate_rule_numbers": sorted(excluded_rule_numbers)[:40],
+                "open_candidate_rule_count": len(excluded_rule_numbers),
+                "open_candidate_rule_numbers_truncated": len(excluded_rule_numbers) > 40,
+                "detail": detail,
+                "reason_code": code.value if code is not None else None,
+                "rule_number": number,
+                "first_inbound_allow_rule_number": (
+                    first_inbound_allow_rule_number(acl) if acl is not None else None
+                ),
+                "inbound_rule_numbers": numbers[:40] if numbers is not None else None,
+                "inbound_rule_count": len(numbers) if numbers is not None else None,
+                "inbound_rule_numbers_truncated": numbers is not None and len(numbers) > 40,
+            },
+        },
+    )
+    return number, code
+
+
 def _log_nacl_add_deny_precheck(ctx: _Ctx, acl, code, conflicting_entry) -> None:
     """판정에 사용한 응답만 남긴다. 사후 재조회나 AWS 원본 응답 전체를 기록하지 않는다."""
     observed = acl is not None and code is None
-    numbers = sorted(
-        entry["RuleNumber"] for entry in acl.get("Entries", [])
-        if not entry.get("Egress", False)
-    ) if observed else []
+    numbers = sorted(inbound_rule_numbers(acl)) if observed else []
+    first_allow = first_inbound_allow_rule_number(acl) if observed else None
+    priority_invalid = first_allow is not None and ctx.params["rule_number"] >= first_allow
     entry = None
     if conflicting_entry is not None:
         entry = {
@@ -765,10 +813,11 @@ def _log_nacl_add_deny_precheck(ctx: _Ctx, acl, code, conflicting_entry) -> None
     detail = (
         "acl_lookup_unavailable" if not observed else
         "inbound_rule_number_occupied" if conflicting_entry is not None else
+        "inbound_rule_number_not_before_first_allow" if priority_invalid else
         "inbound_rule_number_available"
     )
     logger.log(
-        logging.WARNING if code is not None or conflicting_entry is not None else logging.INFO,
+        logging.WARNING if code is not None or conflicting_entry is not None or priority_invalid else logging.INFO,
         "nacl_add_deny_precheck",
         extra={
             "runbook_id": ctx.runbook_id,
@@ -777,7 +826,7 @@ def _log_nacl_add_deny_precheck(ctx: _Ctx, acl, code, conflicting_entry) -> None
                 "source": "precheck_describe_network_acls",
                 "detail": detail,
                 "reason_code": code.value if code is not None else (
-                    R.PRECHECK_INVALID_STATE.value if conflicting_entry is not None else None
+                    R.PRECHECK_INVALID_STATE.value if conflicting_entry is not None or priority_invalid else None
                 ),
                 "parameters": {
                     key: ctx.params[key]
@@ -789,6 +838,8 @@ def _log_nacl_add_deny_precheck(ctx: _Ctx, acl, code, conflicting_entry) -> None
                 "inbound_rule_numbers": numbers[:40] if observed else None,
                 "inbound_rule_count": len(numbers) if observed else None,
                 "inbound_rule_numbers_truncated": len(numbers) > 40,
+                "first_inbound_allow_rule_number": first_allow,
+                "rule_number_before_first_allow": not priority_invalid if observed else None,
                 "conflicting_entry": entry,
             },
         },
@@ -807,17 +858,25 @@ def _precheck_nacl_add_deny(ctx: _Ctx) -> PrecheckOutcome:
     # 가리키는 규칙과 실제로 넣은 규칙이 갈린다
     conflicting_entry = _find_entry(acl, ctx.params["rule_number"], NACL_ADD_DENY_EGRESS)
     _log_nacl_add_deny_precheck(ctx, acl, None, conflicting_entry)
-    if conflicting_entry is not None:
+    first_allow = first_inbound_allow_rule_number(acl)
+    priority_invalid = first_allow is not None and ctx.params["rule_number"] >= first_allow
+    if conflicting_entry is not None or priority_invalid:
         return _fail(
             ctx,
             R.PRECHECK_INVALID_STATE,
-            verified=["NACL 존재"],
+            verified=["NACL 존재", (
+                "규칙 번호 점유(인바운드)" if conflicting_entry is not None else
+                f"규칙 번호 {ctx.params['rule_number']}가 첫 인바운드 allow {first_allow}보다 앞이 아님"
+            )],
             unverified=[_DESCRIBE_MISSES],
         )
     return _ok(
         ctx,
-        verified=["NACL 존재", "규칙 번호 미사용(인바운드)", "CIDR/프로토콜 형식"],
-        unverified=[_DESCRIBE_MISSES, "삽입 자체의 AWS 검증(DryRun 미지원 작업)"],
+        verified=["NACL 존재", "규칙 번호 미사용(인바운드)", "CIDR/프로토콜 형식", (
+            f"규칙 번호 {ctx.params['rule_number']}가 첫 인바운드 allow {first_allow}보다 앞"
+            if first_allow is not None else "인바운드 allow 없음"
+        )],
+        unverified=[_DESCRIBE_MISSES, "삽입 자체의 AWS 검증(DryRun 미지원 작업)", "실제 통신 차단 효과"],
     )
 
 

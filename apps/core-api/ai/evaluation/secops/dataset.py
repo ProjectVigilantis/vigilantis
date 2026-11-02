@@ -23,9 +23,17 @@ from schemas.evidence import EvidenceItem, SecOpsEvidenceContext
 from security.risk_evaluator import evaluate_threat
 from security.threat_normalizer import normalize_mock_input
 
+from ai.capabilities import secops_action_targets
 from ai.evaluation.common.paths import REPO_ROOT
 
 ROOT = Path(__file__).resolve().parent
+
+
+def fixture_nacl_rule_numbers(graph_input: SecOpsGraphInput) -> dict[str, int]:
+    """오프라인 계측용 서버 값 대역. 실제 NACL 조회·가용성 검증 결과가 아니다."""
+    return {
+        target: 1 for target in secops_action_targets(graph_input.asset_context)["RUNBOOK_NACL_ADD_DENY"]
+    }
 
 
 def digest(value: Any) -> str:
