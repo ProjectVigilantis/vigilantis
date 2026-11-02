@@ -13,8 +13,9 @@ ADR-0012 §3 ②(IAM 회수 = 앱 밖 운영자 권한)도 이 파일 밖이다 
     ② 인시던트 목록·상세·실행·종료 경로의 테넌트 범위(T-4 2단계 = #533 C = PR #550 · `routers/incidents.py`)
     ③ 픽스처 `make_tenant(status=None)` · `make_auth_session(role, tenant_id=...)` · `login_as(role, tenant_id=...)`
       (PR #527 conftest — 기본은 플랫폼 ADMIN, 고객사 세션은 `login_as(role, tenant_id=make_tenant())`)
-    ④ PR #527의 임시 업무 관문(`require_business_access`) 해제 — 걷는 자리는 경로별로
-      인시던트·조치·자산 목록 = PR #550(걷힘) / 메트릭 시계열 = #536(16b 보류) / WebSocket = #535(17 보류)
+    ④ PR #527의 임시 업무 관문 해제 — 경로별로
+      인시던트·조치·자산 목록 = PR #550(걷힘) / 메트릭 시계열 = #536(걷힘, `require_business_access` 삭제 ·
+      16b 보류는 #529 QA 몫) / WebSocket = #535(17 보류)
 
 분담(#529 10/28): 경로 전체 회귀는 이 파일이, 판정 순서의 **경계**(정지 전 접수 Key 재요청 200 ·
 소속 없는 MVP 기록 404)는 `test_incident_tenant_scope.py`(PR #550)가 맡는다 — 같은 기대값을 두 파일이

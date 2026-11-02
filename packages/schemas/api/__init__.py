@@ -109,6 +109,7 @@ from .tenants import (
 from .signup_requests import (
     SignupRequestAccepted,
     SignupRequestCreate,
+    SignupRequestDecisionItem,
     SignupRequestItem,
     SignupRequestsResponse,
     SignupRequestStatusRequest,
@@ -134,6 +135,7 @@ from .support import (
 __all__ = [
     "SignupRequestAccepted",
     "SignupRequestCreate",
+    "SignupRequestDecisionItem",
     "SignupRequestItem",
     "SignupRequestsResponse",
     "SignupRequestStatusRequest",

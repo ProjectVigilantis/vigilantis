@@ -8,9 +8,28 @@
 
 from enum import Enum
 
+from pydantic import BaseModel, ConfigDict, Field, computed_field
+
 SHORT_TEXT_MAX_LENGTH = 100
 SUPPORT_TEXT_MAX_LENGTH = 1000
 REJECTION_REASON_MAX_LENGTH = 500
+SUPPORT_DEFAULT_PAGE_SIZE = 20
+SUPPORT_MAX_PAGE_SIZE = 100
+
+
+class SupportPage(BaseModel):
+    """신청·문의의 권한 범위 안에서 계산한 페이지 정보."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1, le=SUPPORT_MAX_PAGE_SIZE)
+    total: int = Field(ge=0)
+
+    @computed_field
+    @property
+    def total_pages(self) -> int:
+        return (self.total + self.page_size - 1) // self.page_size
 
 
 class SignupRequestStatus(str, Enum):

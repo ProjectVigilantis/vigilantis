@@ -1551,6 +1551,37 @@ class SignupRequest(Base):
     )
 
 
+class SignupRequestDecision(Base):
+    """도입 신청의 최종 결정(승인·거절) 기록 — migration의 트리거가 일반 UPDATE·DELETE를 거절한다.
+
+    신청당 한 행이다. 결정한 사람의 이메일은 결정 시점 값을 옮겨 둔다(뒤에 계정이 바뀌어도 그대로다).
+    """
+
+    __tablename__ = "signup_request_decisions"
+
+    request_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("signup_requests.request_id", ondelete="RESTRICT"), primary_key=True
+    )
+    actor_user_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("app_users.user_id", ondelete="RESTRICT"), index=True
+    )
+    actor_email: Mapped[str] = mapped_column(String(254))
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    outcome: Mapped[SignupRequestStatus] = mapped_column(
+        _enum(SignupRequestStatus, "signup_request_status")
+    )
+    rejected_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "(outcome = 'REJECTED' AND rejected_reason IS NOT NULL "
+            "AND length(btrim(rejected_reason)) > 0) OR "
+            "(outcome = 'APPROVED' AND rejected_reason IS NULL)",
+            name="outcome_reason_shape",
+        ),
+    )
+
+
 class Inquiry(Base):
     """고객 문의. 작성자 표시 정보는 조회 시 현재 사용자·고객사와 조인한다."""
 

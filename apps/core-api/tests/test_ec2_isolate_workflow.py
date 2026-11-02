@@ -36,7 +36,7 @@ from schemas.backups import (
     SgAndTgMappingBackup,
 )
 from schemas.precheck import PrecheckReasonCode
-from schemas.runbooks import RunbookId
+from schemas.runbooks import RunbookId, TriggerSource
 from services.aws import backup as bk
 from services.aws import executor as ex
 
@@ -304,6 +304,9 @@ def execution(state, *, runbook=RunbookId.RUNBOOK_EC2_ISOLATE, **values):
         backup_record_id=None,
         parent_execution_id=None,
         incident_id="inc-1",
+        # 테넌트 없는 MVP 기록 — 첫 단계의 정지 관문(refuse_start_if_tenant_suspended)이 그대로 지난다
+        tenant_id=None,
+        trigger_source=TriggerSource.USER_APPROVAL,
     )
     for key, value in values.items():
         setattr(row, key, value)

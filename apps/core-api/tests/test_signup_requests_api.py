@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -222,7 +223,7 @@ def test_list_is_newest_first_with_full_item(client_pg, post, db):
     item = next(i for i in items if i["request_id"] == first)
     assert set(item) == {
         "request_id", "company_name", "contact_name", "email", "phone", "note",
-        "status", "rejected_reason", "created_at", "updated_at",
+        "status", "rejected_reason", "created_at", "updated_at", "decision",
     }
     assert item["status"] == "NEW" and item["rejected_reason"] is None
     assert item["created_at"].endswith("Z")
@@ -292,6 +293,9 @@ def test_new_to_new_and_approved_terminal_are_409(client_pg, post, db):
     assert put(client_pg, rid, "REJECTED", "번복").status_code == 409
     assert db.get(models.SignupRequest, rid).status is SignupRequestStatus.APPROVED
     assert db.get(models.SignupRequest, rid).updated_at == updated
+    decision = db.get(models.SignupRequestDecision, rid)
+    assert decision.outcome is SignupRequestStatus.APPROVED
+    assert count(db, models.SignupRequestDecision) == 1
 
 
 @pytest.mark.parametrize("rid", [str(uuid.uuid4()), "not-a-uuid", "1234"])
@@ -324,3 +328,127 @@ def test_management_requires_central_admin(client_pg, client_pg_anon, post, db, 
         assert put(client_pg, rid, "APPROVED").status_code == 403
         assert put(client_pg, "not-a-uuid", "APPROVED").status_code == 403
     assert db.get(models.SignupRequest, rid).status is SignupRequestStatus.NEW
+    assert db.get(models.SignupRequestDecision, rid) is None
+
+
+@pytest.mark.parametrize("outcome,reason", [("APPROVED", None), ("REJECTED", "중복 신청")])
+def test_decision_preserves_actor_email_and_is_private(
+    client_pg, post, db, platform_session, outcome, reason
+):
+    rid = seed(post)
+    actor = db.get(models.AppUser, platform_session.user_id)
+    email = actor.email
+    response = put(client_pg, rid, outcome, reason)
+    assert response.status_code == 200
+    decision = response.json()["decision"]
+    assert decision == {
+        "actor_user_id": platform_session.user_id,
+        "actor_email": email,
+        "decided_at": response.json()["updated_at"],
+        "outcome": outcome,
+        "rejected_reason": reason,
+    }
+    stored = db.get(models.SignupRequestDecision, rid)
+    assert (stored.actor_user_id, stored.actor_email, stored.outcome.value) == (
+        platform_session.user_id, email, outcome,
+    )
+    key = db.get(models.SignupRequest, rid).idempotency_key
+    assert post(key=key).json() == {"request_id": rid}
+    actor.email = "changed-after-decision@example.com"
+    db.get(models.SignupRequest, rid).company_name = "Renamed after decision"
+    db.commit()
+    item = next(i for i in client_pg.get(BASE).json()["items"] if i["request_id"] == rid)
+    assert item["decision"] == decision
+
+
+def test_decision_uses_identity_revalidated_inside_transaction(
+    client_pg, post, db, platform_session, monkeypatch
+):
+    rid = seed(post)
+    original = signup_requests_service.write_transaction
+
+    @contextmanager
+    def changed_before_reauthorization(session, actor, gate):
+        session.get(models.AppUser, platform_session.user_id).email = "at-decision@example.com"
+        session.flush()
+        with original(session, actor, gate) as user:
+            yield user
+
+    monkeypatch.setattr(signup_requests_service, "write_transaction", changed_before_reauthorization)
+    response = put(client_pg, rid, "APPROVED")
+    assert response.status_code == 200
+    assert response.json()["decision"]["actor_email"] == "at-decision@example.com"
+    assert db.get(models.SignupRequestDecision, rid).actor_email == "at-decision@example.com"
+
+
+def test_decision_failure_rolls_back_status_and_record(client_pg, post, db, monkeypatch):
+    from db.repositories import signup_requests as repo
+
+    rid = seed(post)
+    original = repo.add_decision
+
+    def fail_after_insert(*args, **kwargs):
+        original(*args, **kwargs)
+        raise OperationalError("decision write", {}, Exception("not exposed"))
+
+    monkeypatch.setattr(repo, "add_decision", fail_after_insert)
+    response = put(client_pg, rid, "APPROVED")
+    assert response.status_code == 500
+    assert db.get(models.SignupRequest, rid).status is SignupRequestStatus.NEW
+    assert db.get(models.SignupRequestDecision, rid) is None
+    assert "not exposed" not in response.text
+
+
+def test_in_review_and_legacy_decisions_have_no_fabricated_actor(client_pg, post, db):
+    reviewing = seed(post)
+    legacy = seed(post)
+    db.get(models.SignupRequest, legacy).status = SignupRequestStatus.APPROVED
+    db.commit()
+    assert put(client_pg, reviewing, "IN_REVIEW").json()["decision"] is None
+    items = {item["request_id"]: item for item in client_pg.get(BASE).json()["items"]}
+    assert items[legacy]["decision"] is None
+    assert db.get(models.SignupRequestDecision, legacy) is None
+    assert db.get(models.SignupRequestDecision, reviewing) is None
+
+
+def test_list_pages_use_stable_order_and_default_twenty(client_pg, db):
+    now = datetime(2026, 11, 2, tzinfo=UTC)
+    ids = [str(uuid.uuid4()) for _ in range(45)]
+    db.add_all([
+        models.SignupRequest(
+            request_id=rid, idempotency_key=str(uuid.uuid4()), company_name="Paged",
+            contact_name="Contact", email="page@example.com", created_at=now, updated_at=now,
+        )
+        for rid in ids
+    ])
+    db.commit()
+    seen = []
+    for page, expected_size in ((1, 20), (2, 20), (3, 5)):
+        response = client_pg.get(BASE, params={"page": page})
+        assert response.status_code == 200
+        body = response.json()
+        assert {key: body[key] for key in ("page", "page_size", "total", "total_pages")} == {
+            "page": page, "page_size": 20, "total": 45, "total_pages": 3,
+        }
+        assert len(body["items"]) == expected_size
+        seen.extend(item["request_id"] for item in body["items"])
+    assert seen == sorted(ids, reverse=True)
+    for size in (50, 100):
+        body = client_pg.get(BASE, params={"page_size": size}).json()
+        assert (body["page_size"], len(body["items"]), body["total_pages"]) == (size, 45, 1)
+    beyond = client_pg.get(BASE, params={"page": 4}).json()
+    assert (beyond["items"], beyond["total"], beyond["total_pages"]) == ([], 45, 3)
+
+
+def test_empty_signup_page_has_zero_totals(client_pg):
+    assert client_pg.get(BASE).json() == {
+        "items": [], "page": 1, "page_size": 20, "total": 0, "total_pages": 0,
+    }
+
+
+@pytest.mark.parametrize("query", [
+    {"page": 0}, {"page": -1}, {"page": "1.5"},
+    {"page_size": 0}, {"page_size": -1}, {"page_size": 101}, {"page_size": "2.5"},
+])
+def test_invalid_signup_page_is_rejected_not_clamped(client_pg, query):
+    assert client_pg.get(BASE, params=query).status_code == 422

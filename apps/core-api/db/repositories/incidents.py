@@ -35,6 +35,7 @@ from schemas.incidents import (
     AgentInvocationStatus,
     AgentWaitSchedule,
 )
+from schemas.api.tenants import TenantStatus
 from schemas.runbooks import RunbookId, TriggerSource
 from tenancy import ALL_TENANTS, TenantScope
 
@@ -447,9 +448,10 @@ def list_expired_agent_waits(db: Session, *, now: datetime) -> list[str]:
         넣으면 관제자가 처리할 때까지 주기마다 다시 잡혀 잠금·거절만 반복한다.
       - 관제자 승인 실행이 있었던 건은 뺀다. 승인한 실행이 끝나고 다른 제안이 남으면 상태는
         다시 AWAITING_APPROVAL이지만 그 대기는 이미 응답됐다.
-      - 테넌트가 자동 조치를 껐거나, 그 기한이 꺼진 동안(마지막으로 켠 시각 이전) 지났으면 뺀다(T-6 ·
-        #514). 넣으면 사람이 응답할 때까지 주기마다 잠그고 건너뛰기만 반복한다. 판정의 원천은
-        workflows.automatic_trigger_block 이고 이 조건은 그 거울이다. 테넌트 없음(NULL)은 지금 그대로다.
+      - 테넌트가 정지(SUSPENDED)됐거나(T-4 · #533), 자동 조치를 껐거나, 그 기한이 꺼진 동안(마지막으로
+        켠 시각 이전) 지났으면 뺀다(T-6 · #514). 넣으면 사람이 응답할 때까지 주기마다 잠그고 건너뛰기만
+        반복한다. 판정의 원천은 workflows.automatic_trigger_block 이고 이 조건은 그 거울이다. 테넌트
+        없음(NULL)은 지금 그대로다.
     """
     tenant = models.Tenant
     return list(
@@ -466,6 +468,7 @@ def list_expired_agent_waits(db: Session, *, now: datetime) -> list[str]:
                 or_(
                     models.Incident.tenant_id.is_(None),
                     and_(
+                        tenant.status != TenantStatus.SUSPENDED,
                         tenant.auto_action_enabled.is_(True),
                         or_(
                             tenant.auto_action_resumed_at.is_(None),

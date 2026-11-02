@@ -8,11 +8,13 @@
 #     교차 출처 보호 장치다. 세션 쿠키는 그와 별개로 필요하다.
 #   - 세션 쿠키(__Host-vg_session)가 유효해야 연결을 받는다. 없거나 무효면 accept 전에
 #     1008로 닫는다(Handshake HTTP 403). 판정은 auth.access.resolve_session_user 하나다.
-#   - 임시 출시 관문(#492): PLATFORM 계정만 연결한다. 고객사(TENANT)
-#     계정의 연결은 무효 세션과 같이 다룬다 — accept 전 1008, 연결 중이면 4401(사유를 구분하지 않는다).
+#   - 연결은 유효한 세션이면 계정 종류와 무관하게 받는다(플랫폼 · 고객사 TENANT 모두, #535).
+#     범위는 연결 시점이 아니라 authorize 가 이벤트마다 건다.
 #   - 이벤트 범위: 연결마다 전송 직전에 세션 · 등급 · 담당 고객을 다시 판정한다(RealtimeManager 등록 시
 #     authorize 필수). CENTRAL_ADMIN(tenant_scope_ids None)만 전체, 그 밖은 저장된 Incident.tenant_id가
 #     담당 고객일 때만 받는다. Incident 없음 · tenant_id NULL · DB 오류는 전송하지 않는다.
+#   - 연결 중 범위가 바뀌어도 연결을 닫지 않는다(#535 결정) — 다음 이벤트부터 새 범위로 걸러질 뿐이다.
+#     4401 은 무효 세션 전용이다.
 #   - 연결 중에는 감시 task가 min(지금 + WS_SESSION_CHECK_SECONDS, 유휴 만료, 최대 수명)마다
 #     다시 판정하고, 무효면 4401 "AUTH_REQUIRED"로 닫는다(닫기 코드: schemas/api/ws.py).
 #     판정은 touch=False라 연결·확인 모두 유휴 시간을 늘리지 않는다.
@@ -45,7 +47,6 @@ from schemas.api.ws import WS_CLOSE_AUTH_REQUIRED, WsEvent
 from auth.access import (
     can_access_tenant,
     get_auth_session_factory,
-    is_platform_account,
     resolve_session_user,
     tenant_scope_ids,
 )
@@ -91,8 +92,7 @@ async def websocket_endpoint(
             now=clock(),
             idle_seconds=auth_settings.AUTH_SESSION_IDLE_SECONDS,
         )
-        # 임시 출시 관문(#492) — 큐 하나가 전 고객의 이벤트를 모든 연결에 보낸다. 플랫폼 계정만 받는다
-        return user if user is not None and is_platform_account(user) else None
+        return user
 
     user = await check()
     if user is None:

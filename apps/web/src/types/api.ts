@@ -315,11 +315,12 @@ export const RESPONSE_MODES = [
 export type ResponseMode = (typeof RESPONSE_MODES)[number];
 
 /**
- * 자동 발동(High 선차단·Medium 1분 격리)이 막힌 이유 — 사람이 승인해야만 조치된다(#521).
+ * 자동 발동(High 선차단·Medium 1분 격리)이 막힌 이유. 정지가 아니면 사람의 승인이 필요하다(#521).
+ * `TENANT_SUSPENDED`: 테넌트가 정지됐다 — 플랫폼이 그 계정에 새로 들어가지 않는다(T-4 · #533).
  * `AUTO_ACTION_DISABLED`: 테넌트가 자동 조치를 껐거나, 그 발동을 정한 시각이 다시 켠 시각 이전이다.
- * 정지(`TENANT_SUSPENDED`)는 T-4가 더한다.
+ * 둘 다 해당하면 서버는 `TENANT_SUSPENDED`를 준다.
  */
-export const AUTO_ISOLATION_BLOCKS = ['AUTO_ACTION_DISABLED'] as const;
+export const AUTO_ISOLATION_BLOCKS = ['TENANT_SUSPENDED', 'AUTO_ACTION_DISABLED'] as const;
 export type AutoIsolationBlock = (typeof AUTO_ISOLATION_BLOCKS)[number];
 
 /**
@@ -1006,6 +1007,74 @@ export interface UserEventItem {
 
 export interface UserEventsResponse {
   items: UserEventItem[];
+}
+
+/* ───────────────────── signup_requests.py · inquiries.py ───────────────────── */
+
+/** 서버 기본값은 page=1 · page_size=20. page는 1 이상, page_size는 1–100이다. */
+export interface PaginationParams {
+  page?: number;
+  page_size?: number;
+}
+
+interface PaginationMetadata {
+  page: number;
+  page_size: number;
+  total: number;
+  /** 전체 결과가 비어 있으면 0. */
+  total_pages: number;
+}
+
+export type SignupRequestStatus = 'NEW' | 'IN_REVIEW' | 'APPROVED' | 'REJECTED';
+
+/** 판정 당시의 서버 스냅샷이다. 현재 사용자 정보로 대체하지 않는다. */
+export interface SignupRequestDecisionItem {
+  actor_user_id: string;
+  actor_email: string;
+  decided_at: IsoDateTime;
+  outcome: 'APPROVED' | 'REJECTED';
+  rejected_reason: string | null;
+}
+
+export interface SignupRequestItem {
+  request_id: string;
+  company_name: string;
+  contact_name: string;
+  email: string;
+  phone: string | null;
+  note: string | null;
+  status: SignupRequestStatus;
+  rejected_reason: string | null;
+  created_at: IsoDateTime;
+  updated_at: IsoDateTime;
+  decision: SignupRequestDecisionItem | null;
+}
+
+export interface SignupRequestsResponse extends PaginationMetadata {
+  items: SignupRequestItem[];
+}
+
+export type InquiryStatus = 'OPEN' | 'IN_PROGRESS' | 'RESOLVED';
+export type InquiryCategory = 'OUTAGE' | 'BUG' | 'OTHER';
+
+export interface InquiryItem {
+  inquiry_id: string;
+  tenant_id: string;
+  tenant_name: string;
+  author_email: string;
+  author_role: UserRole;
+  category: InquiryCategory;
+  title: string;
+  body: string;
+  occurred_at: IsoDateTime | null;
+  page_path: string | null;
+  status: InquiryStatus;
+  created_at: IsoDateTime;
+  updated_at: IsoDateTime;
+}
+
+export interface InquiriesResponse extends PaginationMetadata {
+  items: InquiryItem[];
 }
 
 /* ────────────────────────────── audit.py ────────────────────────────── */
