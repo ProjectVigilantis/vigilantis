@@ -13,7 +13,7 @@ from __future__ import annotations
 from auth import service
 from auth.access import require_tenant_management, require_user
 from db.session import get_db
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from inquiries_service import (
     add_note,
     change_status,
@@ -30,6 +30,7 @@ from schemas.api.inquiries import (
     InquiryNoteRequest,
     InquiryStatusRequest,
 )
+from schemas.api.support import SUPPORT_DEFAULT_PAGE_SIZE, SUPPORT_MAX_PAGE_SIZE
 from sqlalchemy.orm import Session
 from support_access import Actor, get_actor, require_customer, require_support_user
 
@@ -62,8 +63,12 @@ def post_inquiry(
 
 
 @router.get("", response_model=InquiriesResponse, dependencies=_SUPPORT)
-def get_inquiries(db: Session = _DB, actor: Actor = _ACTOR) -> InquiriesResponse:
-    return list_inquiries(db, actor)
+def get_inquiries(
+    db: Session = _DB, actor: Actor = _ACTOR,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=SUPPORT_DEFAULT_PAGE_SIZE, ge=1, le=SUPPORT_MAX_PAGE_SIZE),
+) -> InquiriesResponse:
+    return list_inquiries(db, actor, page=page, page_size=page_size)
 
 
 @router.put("/{inquiry_id}/status", response_model=InquiryItem, dependencies=_MANAGER)

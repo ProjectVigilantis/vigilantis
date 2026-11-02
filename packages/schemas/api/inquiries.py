@@ -29,6 +29,7 @@ from .support import (
     InquiryCategory,
     InquiryEventAction,
     InquiryStatus,
+    SupportPage,
 )
 
 #: 허용 전이(현재 상태 → 다음 상태 집합). 여기에 없는 전이는 409 INQUIRY_STATE_CONFLICT 다.
@@ -103,7 +104,7 @@ class InquiryItem(BaseModel):
     updated_at: UtcDateTime
 
 
-class InquiriesResponse(BaseModel):
+class InquiriesResponse(SupportPage):
     model_config = ConfigDict(extra="forbid")
 
     items: list[InquiryItem] = Field(default_factory=list)

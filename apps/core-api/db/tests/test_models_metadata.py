@@ -56,6 +56,8 @@ EXPECTED_TABLES = {
     "inquiry_events",
     "notifications",
     "notification_reads",
+    # #565 — 도입 신청 최종 결정 기록
+    "signup_request_decisions",
     # TOTP 분실 복구 작업 · 신원 변경 울타리 (#515)
     "totp_recovery_operations",
     "totp_provider_mutations",

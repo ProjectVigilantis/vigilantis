@@ -1008,6 +1008,74 @@ export interface UserEventsResponse {
   items: UserEventItem[];
 }
 
+/* ───────────────────── signup_requests.py · inquiries.py ───────────────────── */
+
+/** 서버 기본값은 page=1 · page_size=20. page는 1 이상, page_size는 1–100이다. */
+export interface PaginationParams {
+  page?: number;
+  page_size?: number;
+}
+
+interface PaginationMetadata {
+  page: number;
+  page_size: number;
+  total: number;
+  /** 전체 결과가 비어 있으면 0. */
+  total_pages: number;
+}
+
+export type SignupRequestStatus = 'NEW' | 'IN_REVIEW' | 'APPROVED' | 'REJECTED';
+
+/** 판정 당시의 서버 스냅샷이다. 현재 사용자 정보로 대체하지 않는다. */
+export interface SignupRequestDecisionItem {
+  actor_user_id: string;
+  actor_email: string;
+  decided_at: IsoDateTime;
+  outcome: 'APPROVED' | 'REJECTED';
+  rejected_reason: string | null;
+}
+
+export interface SignupRequestItem {
+  request_id: string;
+  company_name: string;
+  contact_name: string;
+  email: string;
+  phone: string | null;
+  note: string | null;
+  status: SignupRequestStatus;
+  rejected_reason: string | null;
+  created_at: IsoDateTime;
+  updated_at: IsoDateTime;
+  decision: SignupRequestDecisionItem | null;
+}
+
+export interface SignupRequestsResponse extends PaginationMetadata {
+  items: SignupRequestItem[];
+}
+
+export type InquiryStatus = 'OPEN' | 'IN_PROGRESS' | 'RESOLVED';
+export type InquiryCategory = 'OUTAGE' | 'BUG' | 'OTHER';
+
+export interface InquiryItem {
+  inquiry_id: string;
+  tenant_id: string;
+  tenant_name: string;
+  author_email: string;
+  author_role: UserRole;
+  category: InquiryCategory;
+  title: string;
+  body: string;
+  occurred_at: IsoDateTime | null;
+  page_path: string | null;
+  status: InquiryStatus;
+  created_at: IsoDateTime;
+  updated_at: IsoDateTime;
+}
+
+export interface InquiriesResponse extends PaginationMetadata {
+  items: InquiryItem[];
+}
+
 /* ────────────────────────────── audit.py ────────────────────────────── */
 /* GET /api/v1/audit-events — 조치 승인 · 종료 판단의 감사 기록(Post-MVP T-2 · #544). 모든 역할이 본다.
    질의: incident_id · since · until(occurred_at ∈ [since, until)) · cursor · limit(기본 50 · 1–100).
@@ -1070,10 +1138,8 @@ export interface AuditEventsResponse {
 // 도입 신청 · 고객사 문의 · 관리자 알림(2026-10-29 FE 초안 → #552로 서버에 들어왔다). 원천은
 // packages/schemas/api/signup_requests.py · inquiries.py · notifications.py · support.py다. 화면: 로그인 창 회원가입(도입 신청),
 // 고객사 계정 상단바 [문의하기](고객사 문의), 관리자 상단바 종 · /signup-requests · /inquiries.
+// 상태 · 목록 항목 · 페이지 응답(`SignupRequestItem` · `InquiryItem` 등)은 위 signup_requests.py · inquiries.py 구역에 있다(#565).
 // ─────────────────────────────────────────────────────────────────────────────
-
-/** 도입 신청의 처리 상태. 운영자가 바꾼다. */
-export type SignupRequestStatus = 'NEW' | 'IN_REVIEW' | 'APPROVED' | 'REJECTED';
 
 /** `POST /signup-requests`: 로그인 없이 받는다. 202 { request_id }. */
 export interface SignupRequestCreate {
@@ -1086,15 +1152,6 @@ export interface SignupRequestCreate {
   note: string | null;
 }
 
-export interface SignupRequestItem extends SignupRequestCreate {
-  request_id: string;
-  status: SignupRequestStatus;
-  /** REJECTED일 때만 있다. */
-  rejected_reason: string | null;
-  created_at: IsoDateTime;
-  updated_at: IsoDateTime;
-}
-
 /**
  * `PUT /signup-requests/{id}/status` 요청. REJECTED로 옮길 때는 `reason`(반려 사유)이 필수이고 비면 422,
  * 다른 상태면 null이다. 고객사 정지(`POST /tenants/{id}/suspend`의 reason, 응답 suspended_reason)와 같은 모양이다.
@@ -1103,15 +1160,6 @@ export interface SignupRequestStatusChange {
   status: SignupRequestStatus;
   reason: string | null;
 }
-
-/** `GET /signup-requests`: 플랫폼 계정만. 최근 것부터. */
-export interface SignupRequestsResponse {
-  items: SignupRequestItem[];
-}
-
-/** 문의 종류: 장애(서비스가 멈추거나 못 씀) · 버그(동작이 틀림) · 기타. */
-export type InquiryCategory = 'OUTAGE' | 'BUG' | 'OTHER';
-export type InquiryStatus = 'OPEN' | 'IN_PROGRESS' | 'RESOLVED';
 
 /** `POST /inquiries`: 고객사 계정(역할 무관)만. 소속 고객사 · 작성자는 서버가 세션에서 채운다. 201 InquiryItem. */
 export interface InquiryCreate {
@@ -1122,22 +1170,6 @@ export interface InquiryCreate {
   occurred_at: IsoDateTime | null;
   /** 문의를 보낸 화면의 경로(예: `/monitoring?axis=security`). */
   page_path: string | null;
-}
-
-export interface InquiryItem extends InquiryCreate {
-  inquiry_id: string;
-  tenant_id: string;
-  tenant_name: string;
-  author_email: string;
-  author_role: UserRole;
-  status: InquiryStatus;
-  created_at: IsoDateTime;
-  updated_at: IsoDateTime;
-}
-
-/** `GET /inquiries`: 플랫폼 계정은 전부, 고객사 계정은 자기 고객사 것만. 최근 것부터. */
-export interface InquiriesResponse {
-  items: InquiryItem[];
 }
 
 /** 관리자 알림 종류. 도입 신청 접수 · 고객 문의 접수. */

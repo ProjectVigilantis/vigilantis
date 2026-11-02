@@ -107,6 +107,15 @@ export function SignupRequestsView({ items, focusId }: { items: SignupRequestIte
                           <dd className="whitespace-pre-wrap">{item.rejected_reason ?? '기록 없음'}</dd>
                         </>
                       ) : null}
+                      {/* 판정 기록(#565): 승인 · 반려한 계정과 시각. 판정 당시의 스냅샷이고, 그 전에 처리된 건은 없다(null). */}
+                      {item.decision !== null ? (
+                        <>
+                          <dt className="text-muted-foreground">처리한 계정</dt>
+                          <dd className="wrap-anywhere">{item.decision.actor_email}</dd>
+                          <dt className="text-muted-foreground">처리 시각</dt>
+                          <dd>{formatKst(item.decision.decided_at)}</dd>
+                        </>
+                      ) : null}
                     </dl>
                     {item.status === 'APPROVED' ? (
                       <p className="bg-muted rounded-md px-3 py-2 text-sm">

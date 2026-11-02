@@ -13,7 +13,7 @@ request_id 를 202 로 다시 돌려주고, 값이 다르면 409 IDEMPOTENCY_KEY
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import (
     AfterValidator,
@@ -30,6 +30,7 @@ from .support import (
     SHORT_TEXT_MAX_LENGTH,
     SUPPORT_TEXT_MAX_LENGTH,
     SignupRequestStatus,
+    SupportPage,
 )
 
 
@@ -89,6 +90,18 @@ class SignupRequestAccepted(BaseModel):
     request_id: str
 
 
+class SignupRequestDecisionItem(BaseModel):
+    """처리자의 현재 정보가 아니라 판정 당시 DB에 보존한 사실."""
+
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    actor_user_id: str
+    actor_email: str
+    decided_at: UtcDateTime
+    outcome: Literal[SignupRequestStatus.APPROVED, SignupRequestStatus.REJECTED]
+    rejected_reason: str | None = None
+
+
 class SignupRequestItem(BaseModel):
     """중앙 관리자용 신청 한 건. 재시도 키는 싣지 않는다."""
 
@@ -104,9 +117,10 @@ class SignupRequestItem(BaseModel):
     rejected_reason: str | None = None
     created_at: UtcDateTime
     updated_at: UtcDateTime
+    decision: SignupRequestDecisionItem | None = None
 
 
-class SignupRequestsResponse(BaseModel):
+class SignupRequestsResponse(SupportPage):
     model_config = ConfigDict(extra="forbid")
 
     items: list[SignupRequestItem]

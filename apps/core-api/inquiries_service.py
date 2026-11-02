@@ -34,7 +34,12 @@ from schemas.api.inquiries import (
     InquiryNoteRequest,
     InquiryStatusRequest,
 )
-from schemas.api.support import InquiryEventAction, InquiryStatus, NotificationKind
+from schemas.api.support import (
+    SUPPORT_DEFAULT_PAGE_SIZE,
+    InquiryEventAction,
+    InquiryStatus,
+    NotificationKind,
+)
 from sqlalchemy.orm import Session
 from support_access import (
     Actor,
@@ -155,10 +160,16 @@ def create_inquiry(db: Session, actor: Actor, body: InquiryCreateRequest) -> Inq
         return _reload(db, inquiry.inquiry_id)
 
 
-def list_inquiries(db: Session, actor: Actor) -> InquiriesResponse:
+def list_inquiries(
+    db: Session, actor: Actor, *, page: int = 1, page_size: int = SUPPORT_DEFAULT_PAGE_SIZE
+) -> InquiriesResponse:
     user = authorize(db, actor, require_support_user)
-    rows = inquiries_repo.list_inquiries(db, scope_ids=tenant_scope_ids(user))
-    return InquiriesResponse(items=[_item(row) for row in rows])
+    rows, total = inquiries_repo.list_inquiries(
+        db, scope_ids=tenant_scope_ids(user), page=page, page_size=page_size
+    )
+    return InquiriesResponse(
+        items=[_item(row) for row in rows], page=page, page_size=page_size, total=total
+    )
 
 
 # --- 관리 -----------------------------------------------------------------------

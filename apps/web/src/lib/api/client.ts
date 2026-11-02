@@ -1,4 +1,4 @@
-// API 호출 계층 — 오류 봉투를 ApiError로 변환하고 계약 엔드포인트 5종의 타입드 함수를 제공합니다.
+// API 호출 계층 — 오류 봉투를 ApiError로 변환하고 계약 엔드포인트의 타입드 함수를 제공합니다.
 
 import type {
   AssetsResponse,
@@ -20,6 +20,7 @@ import type {
   LoginStepResponse,
   MetricsTimeseriesResponse,
   NotificationsResponse,
+  PaginationParams,
   ResolutionJudgement,
   SignupRequestCreate,
   SignupRequestItem,
@@ -160,6 +161,13 @@ async function request<T>(path: string, init?: RequestInit, transport?: ApiTrans
   return (await requestWithStatus<T>(path, init, transport)).body;
 }
 
+function paginationSuffix(pagination?: PaginationParams): string {
+  const query = new URLSearchParams();
+  if (pagination?.page !== undefined) query.set('page', String(pagination.page));
+  if (pagination?.page_size !== undefined) query.set('page_size', String(pagination.page_size));
+  return query.size > 0 ? `?${query}` : '';
+}
+
 /**
  * 서버 컴포넌트도 부르는 조회(현재 계정 · 고객 관리 · 사용자 관리 포함). 전송을 주입받아 같은 경로 · 타입을 브라우저와 서버가 함께 쓴다 —
  * 서버 쪽은 `serverApi()`(lib/api/server.ts), 브라우저 쪽은 아래 모듈 export다.
@@ -217,20 +225,22 @@ export function createReadApi(transport: ApiTransport) {
       return request<UsersResponse>('/users', undefined, transport);
     },
 
-    /** 도입 신청 목록: 플랫폼 계정만(#552, types/api.ts 끝). 도입 신청 화면(app/signup-requests)이 부른다. */
-    getSignupRequests(): Promise<SignupRequestsResponse> {
-      return request<SignupRequestsResponse>('/signup-requests', undefined, transport);
+    /** 도입 신청 목록: 중앙 관리계정만(#552 · 페이지 조회 #565). 도입 신청 화면(app/signup-requests)이 부른다. */
+    getSignupRequests(pagination?: PaginationParams): Promise<SignupRequestsResponse> {
+      return request<SignupRequestsResponse>(`/signup-requests${paginationSuffix(pagination)}`, undefined, transport);
     },
 
-    /** 고객 문의 목록: 플랫폼 계정은 전부, 고객사 계정은 자기 고객사 것(#552). 고객 문의 화면(app/inquiries)이 부른다. */
-    getInquiries(): Promise<InquiriesResponse> {
-      return request<InquiriesResponse>('/inquiries', undefined, transport);
+    /** 고객사 문의 목록: 플랫폼 계정은 범위 안 전부, 고객사 계정은 자기 고객사 것(#552 · 페이지 조회 #565). 고객사 문의 화면(app/inquiries)이 부른다. */
+    getInquiries(pagination?: PaginationParams): Promise<InquiriesResponse> {
+      return request<InquiriesResponse>(`/inquiries${paginationSuffix(pagination)}`, undefined, transport);
     },
   };
 }
 
-export const { getAssets, getMetricsTimeseries, getIncidents, getIncident, getTenants, getTenant } =
-  createReadApi(BROWSER);
+export const {
+  getAssets, getMetricsTimeseries, getIncidents, getIncident, getTenants, getTenant,
+  getSignupRequests, getInquiries,
+} = createReadApi(BROWSER);
 
 /**
  * 관제자 종료 처리(#199). **Idempotency Key를 받지 않는다** — 종료는 AWS를 바꾸지 않고

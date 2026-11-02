@@ -1,7 +1,8 @@
-// 도입 신청 · 고객 문의 · 관리자 알림의 표기와 이동 경로(2026-10-29). 계약은 초안이다(types/api.ts 끝).
+// 도입 신청 · 고객사 문의 · 관리자 알림의 표기와 이동 경로(2026-10-29 · 서버 계약 #552 · 페이지 조회 #565).
 //
-// 도입 신청: 로그인 창 회원가입에서 처음 쓰는 회사가 보낸다. 운영자가 검토 → 승인(고객사 추가 · 관리자 초대로 이어감) · 반려.
-// 고객 문의: 고객사 계정(관리자 · 직원 모두)이 장애 · 버그를 알린다. 운영자가 처리 중 → 해결로 옮긴다.
+// 도입 신청: 로그인 창 회원가입에서 처음 쓰는 회사가 보낸다. 중앙 관리계정이 검토 → 승인(고객사 추가 · 고객사 중앙계정
+// 초대로 이어감) · 반려.
+// 고객사 문의: 고객사 계정(중앙계정 · 직원계정 모두)이 장애 · 버그를 알린다. 플랫폼 계정이 처리 중 → 해결로 옮긴다.
 // 알림: 둘이 들어오면 관리자 상단바 종에 쌓인다. 누르면 해당 목록 화면에서 그 건을 펼친다(`?id=`).
 
 import type {
@@ -13,9 +14,28 @@ import type {
 } from '../types/api.ts';
 import type { EnumLabel } from './enum-labels.ts';
 
-/** 도입 신청함 · 고객 문의함(플랫폼 계정 전용 화면). */
+/** 도입 신청함(중앙 관리계정) · 고객사 문의함(플랫폼 계정) 화면. */
 export const SIGNUP_REQUESTS_PATH = '/signup-requests';
 export const INQUIRIES_PATH = '/inquiries';
+
+/** 신청함 · 문의함 한 쪽의 건수. 서버 기본값(20)과 같고 상한은 100이다(#565). */
+export const SUPPORT_PAGE_SIZE = 20;
+
+/**
+ * 주소의 `?page=` 값. 1 이상의 정수만 받고 그 밖(없음 · 0 · 음수 · 소수 · 글자)은 1쪽이다 — 서버는 범위 밖 page를 보정하지
+ * 않고 422로 거절하므로 보내기 전에 거른다. 마지막 쪽을 넘는 값은 서버가 빈 목록으로 돌려준다.
+ */
+export function parsePage(value: unknown): number {
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (typeof raw !== 'string' || !/^\d+$/.test(raw)) return 1;
+  const page = Number(raw);
+  return Number.isSafeInteger(page) && page >= 1 ? page : 1;
+}
+
+/** 목록의 한 쪽으로 가는 주소. 1쪽은 `?page=`를 적지 않는다. */
+export function supportPageHref(path: string, page: number): string {
+  return page <= 1 ? path : `${path}?page=${page}`;
+}
 
 export const SIGNUP_STATUS_LABELS: Record<SignupRequestStatus, EnumLabel> = {
   NEW: { label: '새 신청', tone: 'yellow' },

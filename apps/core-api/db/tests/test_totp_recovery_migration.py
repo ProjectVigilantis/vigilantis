@@ -81,7 +81,8 @@ def test_revision_follows_platform_audit_merge_and_joins_the_single_head(migrati
     script = ScriptDirectory.from_config(migration_config)
     assert script.get_revision(REVISION).down_revision == PARENT
     assert set(script.get_revision(PARENT).down_revision) == {"b492e7d1a605", "b544a7d1e2f3"}
-    assert script.get_heads() == ["f515a552e001"]
+    [head] = script.get_heads()
+    assert REVISION in {rev.revision for rev in script.walk_revisions(base="base", head=head)}
 
 
 def test_head_schema_matches_orm_and_existing_rows_get_generation_zero(pg_engine, migration_config):

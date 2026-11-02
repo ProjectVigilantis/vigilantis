@@ -9,6 +9,8 @@ import {
   notYetServed,
   notificationHref,
   notificationText,
+  parsePage,
+  supportPageHref,
 } from './support.ts';
 
 const base: NotificationItem = {
@@ -68,4 +70,17 @@ test('경로가 없는 응답(404 · 405)만 준비 중으로 읽는다', () => 
   assert.equal(notYetServed(405), true);
   assert.equal(notYetServed(500), false);
   assert.equal(notYetServed(null), false);
+});
+
+test('쪽 번호 — 1 이상의 정수만 받고 그 밖은 1쪽이다(서버는 범위 밖 page를 422로 거절한다)', () => {
+  assert.equal(parsePage(undefined), 1);
+  assert.equal(parsePage('3'), 3);
+  assert.equal(parsePage(['2', '5']), 2);
+  for (const bad of ['0', '-1', '1.5', 'abc', '', ' 2', '99999999999999999999']) assert.equal(parsePage(bad), 1, bad);
+});
+
+test('쪽 주소 — 1쪽은 ?page=를 적지 않는다', () => {
+  assert.equal(supportPageHref('/inquiries', 1), '/inquiries');
+  assert.equal(supportPageHref('/inquiries', 0), '/inquiries');
+  assert.equal(supportPageHref('/signup-requests', 4), '/signup-requests?page=4');
 });

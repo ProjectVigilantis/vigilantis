@@ -302,6 +302,45 @@ def test_list_is_newest_first(client_pg, db, tenant, make_auth_session, customer
     assert [i["inquiry_id"] for i in client_pg.get(BASE).json()["items"]] == [second, first]
 
 
+def test_inquiry_pages_count_only_authorized_rows_with_stable_order(
+    client_pg, db, make_tenant, make_auth_session
+):
+    own = make_tenant(TenantStatus.SUSPENDED)
+    foreign = make_tenant()
+    viewer = make_auth_session(UserRole.VIEWER, tenant_id=own)
+    ids = [seed_inquiry(db, make_auth_session, own, author=viewer)[0] for _ in range(25)]
+    foreign_id, _ = seed_inquiry(db, make_auth_session, foreign)
+    for inquiry_id in ids:
+        db.get(models.Inquiry, inquiry_id).created_at = datetime(2026, 11, 2, tzinfo=UTC)
+    db.commit()
+    first = client_pg.get(BASE, headers=viewer.headers).json()
+    second = client_pg.get(BASE, params={"page": 2}, headers=viewer.headers).json()
+    assert (first["page"], first["page_size"], first["total"], first["total_pages"]) == (1, 20, 25, 2)
+    assert (second["page"], second["total"], len(second["items"])) == (2, 25, 5)
+    received = first["items"] + second["items"]
+    assert [item["inquiry_id"] for item in received] == sorted(ids, reverse=True)
+    assert foreign_id not in {item["inquiry_id"] for item in received}
+    manager = manager_of(make_auth_session, own)
+    assert client_pg.get(BASE, headers=manager.headers).json()["total"] == 25
+    unassigned = manager_of(make_auth_session)
+    assert client_pg.get(BASE, headers=unassigned.headers).json() == {
+        "items": [], "page": 1, "page_size": 20, "total": 0, "total_pages": 0,
+    }
+    central = make_auth_session(UserRole.ADMIN, platform_role=PlatformRole.CENTRAL_ADMIN)
+    all_rows = client_pg.get(BASE, params={"page_size": 100}, headers=central.headers).json()
+    assert all_rows["total"] == 26 and len(all_rows["items"]) == 26
+    beyond = client_pg.get(BASE, params={"page": 3}, headers=viewer.headers).json()
+    assert beyond["items"] == [] and beyond["total"] == 25
+
+
+@pytest.mark.parametrize("query", [
+    {"page": 0}, {"page": -1}, {"page": "1.5"},
+    {"page_size": 0}, {"page_size": -1}, {"page_size": 101}, {"page_size": "2.5"},
+])
+def test_invalid_inquiry_page_is_rejected_not_clamped(client_pg, query):
+    assert client_pg.get(BASE, params=query).status_code == 422
+
+
 # --- 관리 경로: 역할 · 범위 ------------------------------------------------------------
 
 
