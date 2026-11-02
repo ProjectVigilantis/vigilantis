@@ -80,7 +80,19 @@ const HEADINGS: Record<Step, { title: string; description: string }> = {
   },
 };
 
-export function LoginFlow({ sessionEnded = false }: { sessionEnded?: boolean }) {
+/**
+ * `onSignup`이 있으면 비밀번호 단계 아래에 회원가입으로 가는 링크를 둔다(랜딩 로그인 창, login-overlay.tsx).
+ * `initialNotice`는 처음 보일 안내다(예: 초대받은 직원이 회원가입 안내에서 로그인으로 넘어올 때). 세션 종료 안내가 먼저다.
+ */
+export function LoginFlow({
+  sessionEnded = false,
+  initialNotice = null,
+  onSignup,
+}: {
+  sessionEnded?: boolean;
+  initialNotice?: string | null;
+  onSignup?: () => void;
+}) {
   const router = useRouter();
   const [step, setStep] = useState<Step>('PASSWORD');
   /** 비밀이 아닌 값이라 상태에 둔다 — 처음부터 다시 할 때 이메일을 다시 치지 않게. */
@@ -88,7 +100,7 @@ export function LoginFlow({ sessionEnded = false }: { sessionEnded?: boolean }) 
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   /** 오류가 아닌 안내(세션 종료 · 재설정 진행). 다음 제출 때 지운다. */
-  const [notice, setNotice] = useState<string | null>(sessionEnded ? SESSION_ENDED_NOTICE : null);
+  const [notice, setNotice] = useState<string | null>(sessionEnded ? SESSION_ENDED_NOTICE : initialNotice);
   const [totpSetup, setTotpSetup] = useState<TotpSetup | null>(null);
   const loginEmailRef = useRef<HTMLInputElement>(null);
 
@@ -298,6 +310,19 @@ export function LoginFlow({ sessionEnded = false }: { sessionEnded?: boolean }) 
           >
             비밀번호를 잊으셨나요?
           </Button>
+          {onSignup ? (
+            <p className="text-muted-foreground border-t pt-4 text-center text-sm">
+              계정이 없으신가요?{' '}
+              <button
+                type="button"
+                className="text-primary font-semibold hover:underline disabled:opacity-50"
+                disabled={pending}
+                onClick={onSignup}
+              >
+                회원가입
+              </button>
+            </p>
+          ) : null}
         </form>
       ) : null}
 

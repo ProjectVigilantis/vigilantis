@@ -6,6 +6,12 @@
 export const LOGIN_PATH = '/login';
 /** 로그인 전 서비스 소개(T-15). 로그인 없이 열린다(src/proxy.ts). */
 export const LANDING_PATH = '/landing';
+/**
+ * 로그인 창은 랜딩 위를 덮는 상태다(components/landing/login-overlay.tsx). 주소의 `?login=1`이 창을 연다.
+ * `LOGIN_PATH`는 이 주소로 넘기는 입구로만 남는다(app/login/page.tsx).
+ */
+export const LOGIN_PARAM = 'login';
+export const LOGIN_OVERLAY_HREF = `${LANDING_PATH}?${LOGIN_PARAM}=1`;
 /** 개인정보 처리방침 · 이용약관(T-15). 로그인 화면에서 이메일을 받기 전에 읽을 수 있어야 하므로 로그인 없이 연다. */
 export const PRIVACY_PATH = '/privacy';
 export const TERMS_PATH = '/terms';

@@ -16,6 +16,8 @@ import type {
   MetricsTimeseriesResponse,
   PaginationParams,
   ResolutionJudgement,
+  SignupRequestAccepted,
+  SignupRequestCreate,
   SignupRequestsResponse,
   TenantCreateRequest,
   TenantCreateResponse,
@@ -352,6 +354,20 @@ export function submitEmailVerification(code: string): Promise<LoginStepResponse
 
 export async function logout(): Promise<void> {
   await postJson<null>('/auth/logout', undefined, AUTH_FLOW);
+}
+
+/**
+ * 로그인 없이 보내는 도입 신청(랜딩 로그인 창 회원가입). 세션과 무관하므로 401이 와도 로그인으로 보내지 않는다.
+ *
+ * 서버는 접수 재시도 키를 본문이 아니라 `Idempotency-Key` 헤더(UUIDv4)로 필수로 받는다. 없으면 422다.
+ * 같은 키 · 같은 값의 재전송은 처음 `request_id`를 202로 돌려주고, 같은 키 · 다른 값은 409
+ * `IDEMPOTENCY_KEY_CONFLICT`다. 키를 언제 새로 만들지는 부르는 쪽(신청서)이 정한다.
+ */
+export function submitSignupRequest(body: SignupRequestCreate, idempotencyKey: string): Promise<SignupRequestAccepted> {
+  return postJson<SignupRequestAccepted>('/signup-requests', body, {
+    ...AUTH_FLOW,
+    headers: { 'Idempotency-Key': idempotencyKey },
+  });
 }
 
 /** 유휴 연장 — **사용자 입력이 있을 때만** 부른다(components/auth/session-provider.tsx). */
