@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from schemas.api.support import SignupRequestStatus
-from sqlalchemy import select
+from schemas.api.support import SUPPORT_DEFAULT_PAGE_SIZE, SignupRequestStatus
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -71,14 +71,49 @@ def insert(
     return row, True
 
 
-def list_newest(db: Session) -> list[models.SignupRequest]:
-    return list(
-        db.scalars(
-            select(models.SignupRequest).order_by(
-                models.SignupRequest.created_at.desc(), models.SignupRequest.request_id.desc()
-            )
+def list_newest(
+    db: Session, *, page: int = 1, page_size: int = SUPPORT_DEFAULT_PAGE_SIZE
+) -> tuple[list[tuple[models.SignupRequest, models.SignupRequestDecision | None]], int]:
+    total = db.scalar(select(func.count()).select_from(models.SignupRequest))
+    offset = (page - 1) * page_size
+    if offset >= total:
+        return [], total
+    rows = db.execute(
+        select(models.SignupRequest, models.SignupRequestDecision)
+        .outerjoin(
+            models.SignupRequestDecision,
+            models.SignupRequestDecision.request_id == models.SignupRequest.request_id,
         )
+        .order_by(
+                models.SignupRequest.created_at.desc(), models.SignupRequest.request_id.desc()
+        )
+        .offset(offset)
+        .limit(page_size)
     )
+    return [(request, decision) for request, decision in rows], total
+
+
+def add_decision(
+    db: Session,
+    *,
+    request_id: str,
+    actor_user_id: str,
+    actor_email: str,
+    decided_at: datetime,
+    outcome: SignupRequestStatus,
+    rejected_reason: str | None,
+) -> models.SignupRequestDecision:
+    decision = models.SignupRequestDecision(
+        request_id=request_id,
+        actor_user_id=actor_user_id,
+        actor_email=actor_email,
+        decided_at=decided_at,
+        outcome=outcome,
+        rejected_reason=rejected_reason,
+    )
+    db.add(decision)
+    db.flush()
+    return decision
 
 
 def get_for_update(db: Session, request_id: str) -> models.SignupRequest | None:

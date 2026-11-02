@@ -112,7 +112,8 @@ def _insert_blocked_recovery_state(conn, user_id) -> str:
 
 def _assert_combined_head(engine):
     with engine.connect() as conn:
-        assert conn.scalar(text("SELECT version_num FROM alembic_version")) == MERGE
+        [head] = ScriptDirectory.from_config(Config(str(CONFIG_PATH))).get_heads()
+        assert conn.scalar(text("SELECT version_num FROM alembic_version")) == head
         assert (TOTP_TABLES | INTAKE_TABLES) <= set(inspect(conn).get_table_names())
         assert compare_metadata(MigrationContext.configure(conn), models.Base.metadata) == []
 
@@ -122,7 +123,8 @@ def test_merge_revision_joins_both_unchanged_siblings_into_the_single_head():
     assert set(script.get_revision(MERGE).down_revision) == {TOTP, INTAKE}
     assert script.get_revision(TOTP).down_revision == BASE
     assert script.get_revision(INTAKE).down_revision == BASE
-    assert script.get_heads() == [MERGE]
+    [head] = script.get_heads()  # 병합 뒤에 붙은 리비전도 같은 단일 가지 위에 있다
+    assert MERGE in {rev.revision for rev in script.walk_revisions(base="base", head=head)}
 
 
 def test_fresh_database_upgrades_to_the_combined_head(merge_migration_db):

@@ -16,7 +16,7 @@ import signup_requests_service as service
 from auth.access import require_central_admin
 from auth.http import require_origin
 from db.session import get_db
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, Query
 from pydantic import UUID4
 from schemas.api.signup_requests import (
     SignupRequestAccepted,
@@ -25,6 +25,7 @@ from schemas.api.signup_requests import (
     SignupRequestsResponse,
     SignupRequestStatusRequest,
 )
+from schemas.api.support import SUPPORT_DEFAULT_PAGE_SIZE, SUPPORT_MAX_PAGE_SIZE
 from sqlalchemy.orm import Session
 from support_access import Actor, get_actor
 
@@ -54,9 +55,11 @@ def create_signup_request(
     dependencies=[Depends(require_central_admin)],
 )
 def list_signup_requests(
-    db: Session = _DB, actor: Actor = _ACTOR
+    db: Session = _DB, actor: Actor = _ACTOR,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=SUPPORT_DEFAULT_PAGE_SIZE, ge=1, le=SUPPORT_MAX_PAGE_SIZE),
 ) -> SignupRequestsResponse:
-    return service.list_requests(db, actor)
+    return service.list_requests(db, actor, page=page, page_size=page_size)
 
 
 @router.put(

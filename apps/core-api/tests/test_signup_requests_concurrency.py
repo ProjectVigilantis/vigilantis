@@ -204,6 +204,14 @@ def test_concurrent_approve_and_reject_have_one_winner_and_a_coherent_row(admin_
     assert losers[0].code == ErrorCode.SIGNUP_REQUEST_STATE_CONFLICT
     with admin_db() as db:
         row = db.get(models.SignupRequest, request_id)
+        decisions = db.scalars(
+            select(models.SignupRequestDecision)
+            .where(models.SignupRequestDecision.request_id == request_id)
+        ).all()
     assert row.status.value == bodies[winners[0]].status.value
     assert row.rejected_reason == bodies[winners[0]].reason
     assert results[winners[0]].status == row.status
+    assert len(decisions) == 1
+    assert decisions[0].outcome == row.status
+    assert decisions[0].rejected_reason == row.rejected_reason
+    assert decisions[0].actor_user_id == results[winners[0]].decision.actor_user_id
