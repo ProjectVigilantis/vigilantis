@@ -34,6 +34,7 @@ from schemas.api.auth import AccountType, UserRole
 from schemas.api.ws import WS_CLOSE_AUTH_REQUIRED, WsEventType
 from sqlalchemy import delete, text
 from starlette.websockets import WebSocketDisconnect
+from tests.ws_receive import receive_text_bounded
 
 WS = "/api/v1/ws"
 T0 = datetime(2026, 10, 20, 9, 0, tzinfo=UTC)
@@ -157,7 +158,7 @@ def tenant_incidents(committed_auth, make_incident):
 
 
 def _next_incident_id(ws) -> str:
-    return json.loads(ws.receive_text())["data"]["incident_id"]
+    return json.loads(receive_text_bounded(ws))["data"]["incident_id"]
 
 
 @pytest.mark.parametrize("role", [UserRole.ADMIN, UserRole.VIEWER])
@@ -231,7 +232,7 @@ def test_valid_session_connects_and_receives(committed_auth, allowed_origin):
         manager = client.app.state.realtime
         with client.websocket_connect(WS, headers={"Cookie": seed.cookie, "Origin": allowed_origin}) as ws:
             manager.publish(incident_event(WsEventType.INCIDENT_UPDATED, incident_id="inc-ok", occurred_at=T0))
-            assert json.loads(ws.receive_text())["data"] == {"incident_id": "inc-ok"}
+            assert json.loads(receive_text_bounded(ws))["data"] == {"incident_id": "inc-ok"}
             assert manager.connection_count == 1
         _wait_until(lambda: manager.connection_count == 0)
 
@@ -302,7 +303,7 @@ def test_connection_and_rechecks_never_extend_idle(committed_auth, monkeypatch):
         with client.websocket_connect(WS, headers={"Cookie": seed.cookie}) as ws:
             _wait_until(lambda: len(checks) >= 4)  # 연결 1회 + 재확인 3회 이상
             manager.publish(incident_event(WsEventType.INCIDENT_UPDATED, incident_id="inc-alive", occurred_at=T0))
-            assert json.loads(ws.receive_text())["data"] == {"incident_id": "inc-alive"}
+            assert json.loads(receive_text_bounded(ws))["data"] == {"incident_id": "inc-alive"}
             assert _last_activity(committed_auth, seed.session_id) == before
 
 

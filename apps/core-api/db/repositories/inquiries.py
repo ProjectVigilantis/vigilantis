@@ -16,7 +16,12 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from schemas.api.auth import UserRole
-from schemas.api.support import InquiryCategory, InquiryEventAction, InquiryStatus
+from schemas.api.support import (
+    SUPPORT_DEFAULT_PAGE_SIZE,
+    InquiryCategory,
+    InquiryEventAction,
+    InquiryStatus,
+)
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
@@ -78,12 +83,23 @@ def create_inquiry(
     return row
 
 
-def list_inquiries(db: Session, *, scope_ids: Sequence[str] | None) -> list[InquiryRow]:
+def list_inquiries(
+    db: Session, *, scope_ids: Sequence[str] | None,
+    page: int = 1, page_size: int = SUPPORT_DEFAULT_PAGE_SIZE,
+) -> tuple[list[InquiryRow], int]:
     """최신순 · 같은 시각은 inquiry_id 내림차순."""
     if scope_ids is not None and not scope_ids:
-        return []
-    statement = _select_rows(scope_ids).order_by(_I.created_at.desc(), _I.inquiry_id.desc())
-    return [InquiryRow(*row) for row in db.execute(statement).all()]
+        return [], 0
+    scoped = _select_rows(scope_ids)
+    total = db.scalar(select(func.count()).select_from(scoped.subquery()))
+    offset = (page - 1) * page_size
+    if offset >= total:
+        return [], total
+    statement = (
+        scoped.order_by(_I.created_at.desc(), _I.inquiry_id.desc())
+        .offset(offset).limit(page_size)
+    )
+    return [InquiryRow(*row) for row in db.execute(statement).all()], total
 
 
 def get_inquiry(

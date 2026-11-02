@@ -22,7 +22,8 @@ CONFIG_PATH = Path(__file__).resolve().parents[2] / "alembic.ini"
 def test_intake_revision_is_a_direct_child_of_review_fixed_baseline():
     script = ScriptDirectory.from_config(Config(str(CONFIG_PATH)))
     assert script.get_revision(REVISION).down_revision == BASE
-    assert script.get_heads() == ["f515a552e001"]
+    [head] = script.get_heads()
+    assert REVISION in {rev.revision for rev in script.walk_revisions(base="base", head=head)}
 
 
 @pytest.fixture()

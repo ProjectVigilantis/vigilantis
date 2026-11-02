@@ -27,11 +27,16 @@ from schemas.api.errors import ErrorCode
 from schemas.api.signup_requests import (
     SignupRequestAccepted,
     SignupRequestCreate,
+    SignupRequestDecisionItem,
     SignupRequestItem,
     SignupRequestsResponse,
     SignupRequestStatusRequest,
 )
-from schemas.api.support import NotificationKind, SignupRequestStatus
+from schemas.api.support import (
+    SUPPORT_DEFAULT_PAGE_SIZE,
+    NotificationKind,
+    SignupRequestStatus,
+)
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from support_access import Actor, authorize, write_transaction
@@ -100,7 +105,9 @@ def create(db: Session, idempotency_key: UUID, body: SignupRequestCreate) -> Sig
     return SignupRequestAccepted(request_id=request_id)
 
 
-def _item(row: models.SignupRequest) -> SignupRequestItem:
+def _item(
+    row: models.SignupRequest, decision: models.SignupRequestDecision | None = None
+) -> SignupRequestItem:
     return SignupRequestItem(
         request_id=row.request_id,
         company_name=row.company_name,
@@ -112,12 +119,21 @@ def _item(row: models.SignupRequest) -> SignupRequestItem:
         rejected_reason=row.rejected_reason,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        decision=(
+            SignupRequestDecisionItem.model_validate(decision) if decision is not None else None
+        ),
     )
 
 
-def list_requests(db: Session, actor: Actor) -> SignupRequestsResponse:
+def list_requests(
+    db: Session, actor: Actor, *, page: int = 1, page_size: int = SUPPORT_DEFAULT_PAGE_SIZE
+) -> SignupRequestsResponse:
     authorize(db, actor, require_central_admin)
-    return SignupRequestsResponse(items=[_item(r) for r in repo.list_newest(db)])
+    rows, total = repo.list_newest(db, page=page, page_size=page_size)
+    return SignupRequestsResponse(
+        items=[_item(row, decision) for row, decision in rows],
+        page=page, page_size=page_size, total=total,
+    )
 
 
 def change_status(
@@ -129,7 +145,7 @@ def change_status(
         # 형식이 틀린 id 도 없는 id 와 같다 — 권한 판정은 먼저 한다.
         authorize(db, actor, require_central_admin)
         raise ApiError(ErrorCode.SIGNUP_REQUEST_NOT_FOUND) from None
-    with write_transaction(db, actor, require_central_admin):
+    with write_transaction(db, actor, require_central_admin) as user:
         row = repo.get_for_update(db, canonical_id)
         if row is None:
             raise ApiError(ErrorCode.SIGNUP_REQUEST_NOT_FOUND)
@@ -138,5 +154,16 @@ def change_status(
         row.status = body.status
         row.rejected_reason = body.reason
         row.updated_at = datetime.now(UTC)
+        decision = None
+        if body.status in (SignupRequestStatus.APPROVED, SignupRequestStatus.REJECTED):
+            decision = repo.add_decision(
+                db,
+                request_id=row.request_id,
+                actor_user_id=user.user_id,
+                actor_email=user.email,
+                decided_at=row.updated_at,
+                outcome=body.status,
+                rejected_reason=body.reason,
+            )
         db.flush()
-        return _item(row)
+        return _item(row, decision)

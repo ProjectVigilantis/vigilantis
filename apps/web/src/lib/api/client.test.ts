@@ -11,14 +11,16 @@ import {
   confirmPasswordReset,
   createReadApi,
   getAssets,
+  getInquiries,
   getMe,
+  getSignupRequests,
   getUserEvents,
   inviteUser,
   requestPasswordReset,
   resendInvite,
   revokeUserSessions,
 } from './client.ts';
-import type { UserListItem } from '../../types/api.ts';
+import type { InquiriesResponse, SignupRequestItem, SignupRequestsResponse, UserListItem } from '../../types/api.ts';
 
 interface Sent {
   url: string;
@@ -109,6 +111,124 @@ test('이력 조회는 상한 50을 싣는다', async (t) => {
   assert.equal(sent[0].method, 'GET');
   assert.match(sent[0].url, /\/api\/v1\/users\/u1\/events\?limit=50$/);
 });
+
+test('신청 목록은 페이지 질의를 보내고 서버의 판정 스냅샷과 페이지 정보를 소비한다', async (t) => {
+  const pending: SignupRequestItem = {
+    request_id: 'request-new',
+    company_name: 'Customer',
+    contact_name: 'Requester',
+    email: 'requester@example.invalid',
+    phone: null,
+    note: null,
+    status: 'NEW',
+    rejected_reason: null,
+    created_at: '2026-11-01T00:00:00Z',
+    updated_at: '2026-11-01T00:00:00Z',
+    decision: null,
+  };
+  const response: SignupRequestsResponse = {
+    items: [
+      pending,
+      {
+        ...pending,
+        request_id: 'request-approved',
+        status: 'APPROVED',
+        updated_at: '2026-11-02T00:00:00Z',
+        decision: {
+          actor_user_id: 'admin-1',
+          actor_email: 'historical-admin@example.invalid',
+          decided_at: '2026-11-02T00:00:00Z',
+          outcome: 'APPROVED',
+          rejected_reason: null,
+        },
+      },
+      {
+        ...pending,
+        request_id: 'request-rejected',
+        status: 'REJECTED',
+        rejected_reason: 'Duplicate request',
+        updated_at: '2026-11-02T01:00:00Z',
+        decision: {
+          actor_user_id: 'admin-2',
+          actor_email: 'former-admin@example.invalid',
+          decided_at: '2026-11-02T01:00:00Z',
+          outcome: 'REJECTED',
+          rejected_reason: 'Duplicate request',
+        },
+      },
+    ],
+    page: 2,
+    page_size: 50,
+    total: 53,
+    total_pages: 2,
+  };
+  const sent = stubFetch(t, () => new Response(JSON.stringify(response), { status: 200 }));
+  const result: SignupRequestsResponse = await getSignupRequests({ page: 2, page_size: 50 });
+  assert.match(sent[0].url, /\/api\/v1\/signup-requests\?page=2&page_size=50$/);
+  assert.equal(sent[0].method, 'GET');
+  assert.deepEqual(result, response);
+  assert.equal(result.items[0].decision, null);
+  assert.equal(result.items[1].decision?.actor_email, 'historical-admin@example.invalid');
+  assert.equal(result.items[2].decision?.rejected_reason, 'Duplicate request');
+});
+
+test('문의 목록은 페이지 질의를 보내고 기존 문의 필드와 페이지 정보를 소비한다', async (t) => {
+  const response: InquiriesResponse = {
+    items: [{
+      inquiry_id: 'inquiry-1',
+      tenant_id: 'tenant-1',
+      tenant_name: 'Customer',
+      author_email: 'viewer@example.invalid',
+      author_role: 'VIEWER',
+      category: 'OUTAGE',
+      title: 'Unavailable dashboard',
+      body: 'The dashboard does not load.',
+      occurred_at: '2026-11-01T00:00:00Z',
+      page_path: null,
+      status: 'IN_PROGRESS',
+      created_at: '2026-11-01T00:01:00Z',
+      updated_at: '2026-11-02T00:00:00Z',
+    }],
+    page: 3,
+    page_size: 20,
+    total: 41,
+    total_pages: 3,
+  };
+  const sent = stubFetch(t, () => new Response(JSON.stringify(response), { status: 200 }));
+  const api = createReadApi({});
+  const result: InquiriesResponse = await api.getInquiries({ page: 3, page_size: 20 });
+  assert.match(sent[0].url, /\/api\/v1\/inquiries\?page=3&page_size=20$/);
+  assert.equal(sent[0].method, 'GET');
+  assert.deepEqual(result, response);
+  assert.equal(result.items[0].author_role, 'VIEWER');
+  assert.equal(result.items[0].page_path, null);
+});
+
+for (const [path, getPage] of [
+  ['/signup-requests', getSignupRequests],
+  ['/inquiries', getInquiries],
+] as const) {
+  test(`${path} — 제공한 페이지 값만 보내고 빈 결과의 total_pages=0을 유지한다`, async (t) => {
+    const cases = [
+      [undefined, '', 1, 20],
+      [{}, '', 1, 20],
+      [{ page: 4 }, '?page=4', 4, 20],
+      [{ page_size: 100 }, '?page_size=100', 1, 100],
+      [{ page: 1, page_size: undefined }, '?page=1', 1, 20],
+    ] as const;
+    let response = { items: [], page: 1, page_size: 20, total: 0, total_pages: 0 };
+    const sent = stubFetch(t, () => new Response(JSON.stringify(response), { status: 200 }));
+    for (const [pagination, , page, pageSize] of cases) {
+      response = { items: [], page, page_size: pageSize, total: 0, total_pages: 0 };
+      const result = await getPage(pagination);
+      assert.deepEqual(result, response);
+    }
+    assert.deepEqual(
+      sent.map((request) => [request.method, new URL(request.url).pathname + new URL(request.url).search, request.body]),
+      cases.map(([, query]) => ['GET', `/api/v1${path}${query}`, null]),
+    );
+  });
+}
 
 test('사용자 목록 — 401만 로그인 처리를 부르고, 403은 오류로만 올린다', async (t) => {
   let respond = errorResponse(401, 'AUTH_REQUIRED');
