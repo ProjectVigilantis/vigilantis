@@ -1008,6 +1008,74 @@ export interface UserEventsResponse {
   items: UserEventItem[];
 }
 
+/* ───────────────────── signup_requests.py · inquiries.py ───────────────────── */
+
+/** 서버 기본값은 page=1 · page_size=20. page는 1 이상, page_size는 1–100이다. */
+export interface PaginationParams {
+  page?: number;
+  page_size?: number;
+}
+
+interface PaginationMetadata {
+  page: number;
+  page_size: number;
+  total: number;
+  /** 전체 결과가 비어 있으면 0. */
+  total_pages: number;
+}
+
+export type SignupRequestStatus = 'NEW' | 'IN_REVIEW' | 'APPROVED' | 'REJECTED';
+
+/** 판정 당시의 서버 스냅샷이다. 현재 사용자 정보로 대체하지 않는다. */
+export interface SignupRequestDecisionItem {
+  actor_user_id: string;
+  actor_email: string;
+  decided_at: IsoDateTime;
+  outcome: 'APPROVED' | 'REJECTED';
+  rejected_reason: string | null;
+}
+
+export interface SignupRequestItem {
+  request_id: string;
+  company_name: string;
+  contact_name: string;
+  email: string;
+  phone: string | null;
+  note: string | null;
+  status: SignupRequestStatus;
+  rejected_reason: string | null;
+  created_at: IsoDateTime;
+  updated_at: IsoDateTime;
+  decision: SignupRequestDecisionItem | null;
+}
+
+export interface SignupRequestsResponse extends PaginationMetadata {
+  items: SignupRequestItem[];
+}
+
+export type InquiryStatus = 'OPEN' | 'IN_PROGRESS' | 'RESOLVED';
+export type InquiryCategory = 'OUTAGE' | 'BUG' | 'OTHER';
+
+export interface InquiryItem {
+  inquiry_id: string;
+  tenant_id: string;
+  tenant_name: string;
+  author_email: string;
+  author_role: UserRole;
+  category: InquiryCategory;
+  title: string;
+  body: string;
+  occurred_at: IsoDateTime | null;
+  page_path: string | null;
+  status: InquiryStatus;
+  created_at: IsoDateTime;
+  updated_at: IsoDateTime;
+}
+
+export interface InquiriesResponse extends PaginationMetadata {
+  items: InquiryItem[];
+}
+
 /* ────────────────────────────── audit.py ────────────────────────────── */
 /* GET /api/v1/audit-events — 조치 승인 · 종료 판단의 감사 기록(Post-MVP T-2 · #544). 모든 역할이 본다.
    질의: incident_id · since · until(occurred_at ∈ [since, until)) · cursor · limit(기본 50 · 1–100).
