@@ -52,6 +52,7 @@ FOREIGN_ORIGIN = "https://evil.example.com"
 # 세션 없이 열리는 HTTP 경로 전부. 늘리려면 여기와 auth/README.md 정책을 함께 고친다.
 PUBLIC_ROUTES = {
     ("GET", "/health"),
+    ("POST", "/api/v1/signup-requests"),
     ("POST", "/api/v1/auth/login"),
     ("POST", "/api/v1/auth/login/new-password"),
     ("POST", "/api/v1/auth/login/totp-setup"),
@@ -277,6 +278,8 @@ TENANT_SCOPED_ROUTES = {
     ("POST", EXECUTE),
     ("GET", "/api/v1/assets"),
     ("GET", "/api/v1/audit-events"),
+    ("GET", "/api/v1/inquiries"),
+    ("POST", "/api/v1/inquiries"),
 }
 
 
@@ -316,6 +319,8 @@ def test_business_routes_outside_tenant_scope_stay_platform_only(client_pg, logi
         ("GET", "/api/v1/incidents"): (200, None),
         ("GET", "/api/v1/assets"): (200, None),
         ("GET", "/api/v1/audit-events"): (200, None),
+        ("GET", "/api/v1/inquiries"): (200, None),
+        ("POST", "/api/v1/inquiries"): (201, None),
         ("GET", "/api/v1/incidents/{incident_id}"): (404, "INCIDENT_NOT_FOUND"),
         ("POST", "/api/v1/incidents/{incident_id}/resolve"): (404, "INCIDENT_NOT_FOUND"),
         ("POST", EXECUTE): (404, "INCIDENT_NOT_FOUND"),
@@ -738,6 +743,11 @@ def _valid_bodies(incident_id: str) -> dict[tuple[str, str], dict | None]:
         ("PATCH", "/api/v1/tenants/{tenant_id}"): {"name": "x"},
         ("DELETE", "/api/v1/tenants/{tenant_id}"): None,
         ("POST", "/api/v1/tenants/{tenant_id}/suspend"): {"reason": "해지"},
+        ("PUT", "/api/v1/signup-requests/{request_id}/status"): {"status": "APPROVED"},
+        ("POST", "/api/v1/inquiries"): {"category": "BUG", "title": "문의", "body": "확인 요청"},
+        ("PUT", "/api/v1/inquiries/{inquiry_id}/status"): {"status": "IN_PROGRESS"},
+        ("POST", "/api/v1/inquiries/{inquiry_id}/notes"): {"note": "확인 중"},
+        ("POST", "/api/v1/notifications/read"): {"notification_ids": []},
         ("POST", "/api/v1/tenants/{tenant_id}/verify"): None,
         ("POST", "/api/v1/tenants/{tenant_id}/resume"): None,
     }
@@ -748,6 +758,8 @@ def _send(client, method, path, headers, body):
         path.replace("{incident_id}", str(uuid.uuid4()))
         .replace("{user_id}", str(uuid.uuid4()))
         .replace("{tenant_id}", str(uuid.uuid4()))
+        .replace("{request_id}", str(uuid.uuid4()))
+        .replace("{inquiry_id}", str(uuid.uuid4()))
     )
     return client.request(method, url, headers=headers, json=body)
 

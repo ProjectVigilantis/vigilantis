@@ -50,6 +50,12 @@ EXPECTED_TABLES = {
     "user_admin_events",
     # 조치 승인 · 종료 판단 감사 기록 (T-2 · #544)
     "audit_events",
+    # #552 — 도입 신청 · 고객 문의 · 내부 수신함 (외부 발송 outbox와 별개)
+    "signup_requests",
+    "inquiries",
+    "inquiry_events",
+    "notifications",
+    "notification_reads",
     # TOTP 분실 복구 작업 · 신원 변경 울타리 (#515)
     "totp_recovery_operations",
     "totp_provider_mutations",
@@ -68,6 +74,8 @@ def test_row_invariant_constraints_registered():
     """행 불변식 CheckConstraint가 모델에서 빠지면 CI(DB 없음)에서 이 테스트만이 잡는다.
     실제 거절 동작은 test_repositories.py(통합)가 확인한다."""
     expected = {
+        "signup_requests": {"ck_signup_requests_rejection_reason_by_status"},
+        "notifications": {"ck_notifications_notification_target_shape"},
         "incidents": {
             "ck_incidents_reason_codes_is_array",
             "ck_incidents_category_risk_shape",

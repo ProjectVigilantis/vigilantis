@@ -1,6 +1,6 @@
 """TOTP 분실 복구 migration (#515) — 실제 PostgreSQL.
 
-지키는 것: 플랫폼 등급 · 감사 기록 병합 리비전 다음 단일 head · 왕복 ORM 일치 · 기존 사용자는 세대 0 · NONE(서버 기본값) ·
+지키는 것: 플랫폼 등급 · 감사 기록 병합 리비전을 부모로 두고 고객 접수(#552)와 합쳐지는 단일 head · 왕복 ORM 일치 · 기존 사용자는 세대 0 · NONE(서버 기본값) ·
 작업 행 CHECK · 차단 중 사용자 · 풀리지 않은 신원 변경 울타리가 있으면 downgrade 거절(이전 스키마로 차단 · 울타리가
 풀리지 않게) · TOTP_RESET 세션은 downgrade 때 ADMIN_REVOKED 로 바뀐다 · 풀리지 않은 울타리는 신원당 1개 · 울타리 CHECK.
 """
@@ -77,11 +77,11 @@ def _cleanup(pg_engine):
         conn.execute(text("DELETE FROM app_users WHERE issuer = :i"), {"i": ISSUER})
 
 
-def test_revision_follows_platform_audit_merge_as_the_single_head(migration_config):
+def test_revision_follows_platform_audit_merge_and_joins_the_single_head(migration_config):
     script = ScriptDirectory.from_config(migration_config)
     assert script.get_revision(REVISION).down_revision == PARENT
     assert set(script.get_revision(PARENT).down_revision) == {"b492e7d1a605", "b544a7d1e2f3"}
-    assert script.get_heads() == [REVISION]
+    assert script.get_heads() == ["f515a552e001"]
 
 
 def test_head_schema_matches_orm_and_existing_rows_get_generation_zero(pg_engine, migration_config):

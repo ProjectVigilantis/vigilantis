@@ -2,9 +2,9 @@
 
 Cognito Admin 인증 API로 로그인을 진행하고, **이번 로그인에서 TOTP 단계 성공 응답을 서버가 직접 받은 뒤에만** 앱 서버 세션을 발급한다. 공개 계약은 `packages/schemas/api/auth.py`, 오류 코드는 `packages/schemas/api/errors.py`다.
 
-이 문서는 PR 1(로그인 기반), PR 2(API · WebSocket 접근 보호 · 역할 검사), PR 3(ADMIN 사용자 관리 · 사용자당 세션 1개 · 비밀번호 재설정 · 새 비밀번호 정책 · 사용자 관리 이력), 계정 종류(`account_type`)에 따른 테넌트 · 플랫폼 권한(§계정 종류와 테넌트 소속), PR 5(플랫폼 계정의 권한 등급 `platform_role`과 담당 고객 배정 · 업무 API의 고객 범위 · 직원 관리 API · 운영 CLI의 직원 생성과 첫 중앙 관리자 지정 — §계정 종류와 테넌트 소속 · §접근 보호 · §직원 관리 · §플랫폼 계정 CLI), #515(TOTP 분실 복구 — §TOTP 분실 복구)의 백엔드 기준이다. 웹 화면(SSR) 쪽 처리는 `apps/web` 범위다 — PR 3 화면(사용자 관리 · 비밀번호 재설정 · 새 비밀번호 조건 · 한글 입력 경고 · 세션 종료 안내)은 최소 구현이고 시각 다듬기는 포함하지 않으며, `apps/web/src/lib/session-expiry.ts`의 시계 보정은 PR 3 범위 밖이다. 계정 종류에 따른 화면 기능(`apps/web/src/lib/home-path.ts` · `components/gnb.tsx` 포함)은 §화면이 다룬다. 분실한 TOTP의 재설정은 PR 3에서 제외했고 [#515](https://github.com/ProjectVigilantis/vigilantis/issues/515)가 관리자 API와 운영자 CLI로 더한다(§TOTP 분실 복구). 플랫폼 등급 · 담당 고객 배정과 직원 관리는 TOTP 정책 · 복구를 바꾸지 않는다. 실제 Cognito · HTTPS 배포 환경 · 환경 이전에서의 검증과 환경별 설정 · 배포 권한 반영은 이 문서가 보증하지 않는 배포 전제다(§User Pool · 앱 클라이언트 전제 · §테스트).
+이 문서는 PR 1(로그인 기반), PR 2(API · WebSocket 접근 보호 · 역할 검사), PR 3(ADMIN 사용자 관리 · 사용자당 세션 1개 · 비밀번호 재설정 · 새 비밀번호 정책 · 사용자 관리 이력), 계정 종류(`account_type`)에 따른 테넌트 · 플랫폼 권한(§계정 종류와 테넌트 소속), PR 5(플랫폼 계정의 권한 등급 `platform_role`과 담당 고객 배정 · 업무 API의 고객 범위 · 직원 관리 API · 운영 CLI의 직원 생성과 첫 중앙 관리자 지정 — §계정 종류와 테넌트 소속 · §접근 보호 · §직원 관리 · §플랫폼 계정 CLI), #515(TOTP 분실 복구 — §TOTP 분실 복구), #552(공개 도입 신청 접수와 고객 문의 · 운영 알림의 접근 판정 — §도입 신청 · 고객 문의 · 운영 알림)의 백엔드 기준이다. 웹 화면(SSR) 쪽 처리는 `apps/web` 범위다 — PR 3 화면(사용자 관리 · 비밀번호 재설정 · 새 비밀번호 조건 · 한글 입력 경고 · 세션 종료 안내)은 최소 구현이고 시각 다듬기는 포함하지 않으며, `apps/web/src/lib/session-expiry.ts`의 시계 보정은 PR 3 범위 밖이다. 계정 종류에 따른 화면 기능(`apps/web/src/lib/home-path.ts` · `components/gnb.tsx` 포함)은 §화면이 다룬다. 분실한 TOTP의 재설정은 PR 3에서 제외했고 [#515](https://github.com/ProjectVigilantis/vigilantis/issues/515)가 관리자 API와 운영자 CLI로 더한다(§TOTP 분실 복구). 플랫폼 등급 · 담당 고객 배정과 직원 관리는 TOTP 정책 · 복구를 바꾸지 않는다. 실제 Cognito · HTTPS 배포 환경 · 환경 이전에서의 검증과 환경별 설정 · 배포 권한 반영은 이 문서가 보증하지 않는 배포 전제다(§User Pool · 앱 클라이언트 전제 · §테스트).
 
-근거 표시: **[표준]** 외부 표준 · 공식 문서, **[팀 결정]** 이슈 #492 확정 정책, **[판단]** 이 구현의 선택. 동작의 근거는 현재 코드와 자동 테스트(대역 · 실제 PostgreSQL)이며, 자동 테스트가 보장하지 않는 범위(실제 Cognito · HTTPS 배포 환경)는 §테스트에 적었다.
+근거 표시: **[표준]** 외부 표준 · 공식 문서, **[팀 결정]** 이슈 #492 확정 정책, **[#552 구현 계약]** 이슈 #552 구현에 승인된 정책(팀 SSOT 등재 전), **[판단]** 이 구현의 선택. 동작의 근거는 현재 코드와 자동 테스트(대역 · 실제 PostgreSQL)이며, 자동 테스트가 보장하지 않는 범위(실제 Cognito · HTTPS 배포 환경)는 §테스트에 적었다.
 
 ## 구조
 
@@ -42,6 +42,7 @@ Cognito Admin 인증 API로 로그인을 진행하고, **이번 로그인에서 
 | `db/migrations/versions/20261029_b492e7d1a605_user_platform_role.py` | (#492) `app_users.platform_role` 추가 · 기존 PLATFORM → CENTRAL_ADMIN · CHECK · 빈 `app_user_tenant_assignments` · 이력 동작 `PLATFORM_ROLE_CHANGED` · `TENANT_ASSIGNMENTS_CHANGED`(§마이그레이션 `b492e7d1a605`) |
 | `db/migrations/versions/20261030_d492a544e001_merge_platform_roles_audit.py` | (#492) 빈 병합 revision — 플랫폼 등급 가지(`b492e7d1a605`)와 조치 감사 기록 가지(`b544a7d1e2f3`, `audit_events`, 이 모듈 밖)를 하나로 잇는다(§마이그레이션 그래프) |
 | `db/migrations/versions/20261029_d515a7c3e912_totp_recovery.py` | (#515) 회수 사유 `TOTP_RESET`, `app_users.auth_generation` · `mfa_recovery_state`, `totp_recovery_operations` · `totp_provider_mutations`, downgrade 가드(§마이그레이션 `d515a7c3e912`) |
+| `db/migrations/versions/20261030_f515a552e001_merge_totp_customer_intake.py` | (#515 · #552) 빈 병합 revision — TOTP 분실 복구 가지(`d515a7c3e912`)와 도입 신청 · 고객 문의 가지(`e552a7c3d901`)를 하나로 잇는다(§마이그레이션 그래프) |
 
 ## 로그인 흐름
 
@@ -131,39 +132,39 @@ POST /password-reset/confirm (PR 3) 이메일 · 재설정 코드 · 새 비밀�
 
 ### 마이그레이션 그래프 · 병합 `c492d6e8f4a2`
 
-`e492a3b5c701`에서 가지 둘로 갈렸다가 빈 병합 revision `c492d6e8f4a2`에서 다시 합쳐진다. 그 뒤 `b492e7d1a605`(플랫폼 등급 · 담당 고객 배정)와 `b544a7d1e2f3`(조치 감사 기록 `audit_events`, T-2 · #544, 이 모듈 밖)가 둘 다 `c492d6e8f4a2`를 부모로 갈라졌다가 빈 병합 revision `d492a544e001`에서 합쳐지고, 그 뒤에 (#515) `d515a7c3e912`가 이어진다. 현재 head는 `d515a7c3e912` 하나다.
+`e492a3b5c701`에서 가지 둘로 갈렸다가 빈 병합 revision `c492d6e8f4a2`에서 다시 합쳐진다. 그 뒤 `b492e7d1a605`(플랫폼 등급 · 담당 고객 배정)와 `b544a7d1e2f3`(조치 감사 기록 `audit_events`, T-2 · #544, 이 모듈 밖)가 둘 다 `c492d6e8f4a2`를 부모로 갈라졌다가 빈 병합 revision `d492a544e001`에서 합쳐진다. 그 뒤 (#515) `d515a7c3e912`(TOTP 분실 복구)와 (#552) `e552a7c3d901`(도입 신청 · 고객 문의 · 처리 기록 · 운영 알림)이 둘 다 `d492a544e001`을 부모로 갈라졌다가 빈 병합 revision `f515a552e001`에서 합쳐진다. 현재 head는 `f515a552e001` 하나다.
 
 ```
-e492a3b5c701 ─┬─ f492c4a8d2e1 ─┬─ c492d6e8f4a2 ─┬─ b492e7d1a605 ─┬─ d492a544e001 ── d515a7c3e912 (head)
-              └─ f514a6c3d201 ─┘                └─ b544a7d1e2f3 ─┘
+e492a3b5c701 ─┬─ f492c4a8d2e1 ─┬─ c492d6e8f4a2 ─┬─ b492e7d1a605 ─┬─ d492a544e001 ─┬─ d515a7c3e912 ─┬─ f515a552e001 (head)
+              └─ f514a6c3d201 ─┘                └─ b544a7d1e2f3 ─┘                └─ e552a7c3d901 ─┘
 ```
 
-- **가지**: 첫 갈래에서 #492 가지는 `f492c4a8d2e1`(`app_users.account_type`) 하나이고, dev 가지는 `f514a6c3d201`(`tenants.auto_action_resumed_at`, 이 모듈 밖)이다. 두 revision 모두 부모가 `e492a3b5c701`이다. 둘째 갈래의 `b492e7d1a605` · `b544a7d1e2f3`는 모두 부모가 `c492d6e8f4a2`이다. (#515) `d515a7c3e912`의 부모는 `d492a544e001` 하나다.
-- **병합**: `c492d6e8f4a2`(`db/migrations/versions/20261026_c492d6e8f4a2_merge_account_type_auto_action.py`)의 부모는 `f492c4a8d2e1` · `f514a6c3d201` 둘이고, `d492a544e001`(`db/migrations/versions/20261030_d492a544e001_merge_platform_roles_audit.py`)의 부모는 `b492e7d1a605` · `b544a7d1e2f3` 둘이다. 두 병합 revision 모두 upgrade · downgrade가 비어 있다. 각 병합의 두 가지가 서로 다른 객체를 바꾸므로 스키마 · 데이터 변경이 필요 없고, 병합하면서 기존 revision을 고치지 않았다.
-- **기존 DB**: dev 가지 끝(`f514a6c3d201`)의 DB와 #492 가지 끝(`f492c4a8d2e1`)의 DB 모두 `alembic upgrade head`가 아직 적용하지 않은 쪽 가지, 병합 revision `c492d6e8f4a2`, `b492e7d1a605` · `b544a7d1e2f3`, 병합 revision `d492a544e001`, (#515) `d515a7c3e912`를 적용해 head에 이른다. 이미 `c492d6e8f4a2`인 DB는 둘째 갈래의 두 revision과 `d492a544e001` · `d515a7c3e912`를 적용한다. `b492e7d1a605`까지 올린 DB(현재 등급 2종 스키마)는 `b544a7d1e2f3` · `d492a544e001` · `d515a7c3e912`만 적용해 등급 · 배정을 그대로 두고, `b544a7d1e2f3`까지 올린 DB는 `b492e7d1a605` · `d492a544e001` · `d515a7c3e912`를 적용한다. 이미 `d492a544e001`인 DB는 `d515a7c3e912`만 적용한다. downgrade나 `stamp` 없이 앞으로만 올린다. dev 가지 DB에는 이때 `f492c4a8d2e1`이 처음 적용되므로, 그 upgrade 규칙(소속 NULL → `UNASSIGNED`, 값 있음 → `TENANT`, 승격 없음)과 호환성 주의(`account_type`을 모르는 이전 앱 · CLI의 `app_users` INSERT 거절)가 그대로 적용된다(§마이그레이션 `f492c4a8d2e1`). UNASSIGNED 계정의 동작도 위 표 그대로다. `b492e7d1a605`를 처음 적용하는 경로에서는 그 규칙(기존 PLATFORM → CENTRAL_ADMIN, 담당 고객 배정 없음)이 적용된다(§마이그레이션 `b492e7d1a605`). 어느 경로든 마지막에 (#515) `d515a7c3e912`가 적용된다(§마이그레이션 `d515a7c3e912`).
-- **새 DB**: base → head가 같은 그래프의 모든 가지와 두 병합 revision, (#515) `d515a7c3e912`를 거친다.
-- **downgrade**: (#515) head에서 내리면 `d515a7c3e912`의 downgrade 가드가 먼저 돈다(§마이그레이션 `d515a7c3e912`). 병합 revision의 downgrade는 아무것도 바꾸지 않는다. head에서 내려갈 때 어느 가지의 downgrade가 실행되는지는 대상 revision이 정한다 — 대상의 조상이 아닌 revision만 되돌린다. 대상이 `b492e7d1a605`이면 (`d515a7c3e912`와 함께) `b544a7d1e2f3`만 되돌려 감사 기록 테이블을 지우고, 대상이 `b544a7d1e2f3`나 그보다 아래면 `b492e7d1a605`의 downgrade가 실행되어 등급 · 배정을 잃는다(§마이그레이션 `b492e7d1a605`). 그 아래 revision의 downgrade 주의점은 §마이그레이션 `f492c4a8d2e1`에 적힌 그대로다.
+- **가지**: 첫 갈래에서 #492 가지는 `f492c4a8d2e1`(`app_users.account_type`) 하나이고, dev 가지는 `f514a6c3d201`(`tenants.auto_action_resumed_at`, 이 모듈 밖)이다. 두 revision 모두 부모가 `e492a3b5c701`이다. 둘째 갈래의 `b492e7d1a605` · `b544a7d1e2f3`는 모두 부모가 `c492d6e8f4a2`이다. 셋째 갈래의 (#515) `d515a7c3e912` · (#552) `e552a7c3d901`는 모두 부모가 `d492a544e001` 하나다.
+- **병합**: `c492d6e8f4a2`(`db/migrations/versions/20261026_c492d6e8f4a2_merge_account_type_auto_action.py`)의 부모는 `f492c4a8d2e1` · `f514a6c3d201` 둘이고, `d492a544e001`(`db/migrations/versions/20261030_d492a544e001_merge_platform_roles_audit.py`)의 부모는 `b492e7d1a605` · `b544a7d1e2f3` 둘이며, `f515a552e001`(`db/migrations/versions/20261030_f515a552e001_merge_totp_customer_intake.py`)의 부모는 `d515a7c3e912` · `e552a7c3d901` 둘이다. 세 병합 revision 모두 upgrade · downgrade가 비어 있다. 각 병합의 두 가지가 서로 다른 객체를 바꾸므로 스키마 · 데이터 변경이 필요 없고, 병합하면서 기존 revision을 고치지 않았다.
+- **기존 DB**: dev 가지 끝(`f514a6c3d201`)의 DB와 #492 가지 끝(`f492c4a8d2e1`)의 DB 모두 `alembic upgrade head`가 아직 적용하지 않은 쪽 가지, 병합 revision `c492d6e8f4a2`, `b492e7d1a605` · `b544a7d1e2f3`, 병합 revision `d492a544e001`, 셋째 갈래의 두 revision, 병합 revision `f515a552e001`을 적용해 head에 이른다. 이미 `c492d6e8f4a2`인 DB는 둘째 갈래의 두 revision과 `d492a544e001`, 셋째 갈래의 두 revision과 `f515a552e001`을 적용한다. `b492e7d1a605`까지 올린 DB(현재 등급 2종 스키마)는 `b544a7d1e2f3` · `d492a544e001`, 셋째 갈래 · `f515a552e001`만 적용해 등급 · 배정을 그대로 두고, `b544a7d1e2f3`까지 올린 DB는 `b492e7d1a605` · `d492a544e001`, 셋째 갈래 · `f515a552e001`을 적용한다. 이미 `d492a544e001`인 DB는 셋째 갈래의 두 revision과 `f515a552e001`만 적용한다. (#515) `d515a7c3e912`까지 올린 DB는 `e552a7c3d901` · `f515a552e001`만 적용해 TOTP 복구 상태(세대 · 차단 상태 · 복구 작업 · 울타리)를 그대로 두고, (#552) `e552a7c3d901`까지 올린 DB는 `d515a7c3e912` · `f515a552e001`만 적용해 도입 신청 · 문의 · 운영 알림 기록을 그대로 둔다. downgrade나 `stamp` 없이 앞으로만 올린다. dev 가지 DB에는 이때 `f492c4a8d2e1`이 처음 적용되므로, 그 upgrade 규칙(소속 NULL → `UNASSIGNED`, 값 있음 → `TENANT`, 승격 없음)과 호환성 주의(`account_type`을 모르는 이전 앱 · CLI의 `app_users` INSERT 거절)가 그대로 적용된다(§마이그레이션 `f492c4a8d2e1`). UNASSIGNED 계정의 동작도 위 표 그대로다. `b492e7d1a605`를 처음 적용하는 경로에서는 그 규칙(기존 PLATFORM → CENTRAL_ADMIN, 담당 고객 배정 없음)이 적용된다(§마이그레이션 `b492e7d1a605`). `d515a7c3e912`를 처음 적용하는 경로에서는 그 규칙이 적용된다(§마이그레이션 `d515a7c3e912`). 어느 경로든 head에 이르면 (#515) `d515a7c3e912`와 (#552) `e552a7c3d901`이 모두 적용된 상태다.
+- **새 DB**: base → head가 같은 그래프의 모든 가지((#515) `d515a7c3e912` · (#552) `e552a7c3d901` 포함)와 세 병합 revision을 거친다.
+- **downgrade**: 병합 revision의 downgrade는 아무것도 바꾸지 않는다. head(`f515a552e001`)에서 셋째 갈래의 한쪽(`d515a7c3e912` 또는 `e552a7c3d901`)을 대상으로 내리면 병합 revision만 내려가고 두 가지의 스키마가 모두 남는다 — 대상이 아닌 쪽 가지도 되돌려지지 않으며, 기록 revision은 `d515a7c3e912` · `e552a7c3d901` 둘이 된다. 대상이 `d492a544e001`이거나 그보다 아래면 셋째 갈래의 두 revision이 모두 되돌려진다. 이때 (#515) `d515a7c3e912`의 downgrade는 가드부터 확인하고(§마이그레이션 `d515a7c3e912`), (#552) `e552a7c3d901`의 downgrade는 도입 신청 · 문의 · 처리 기록 · 운영 알림 테이블을 지워 그 기록을 버린다. `b492e7d1a605`의 downgrade가 실행되면 등급 · 배정을 잃는다(§마이그레이션 `b492e7d1a605`). 그 아래 revision의 downgrade 주의점은 §마이그레이션 `f492c4a8d2e1`에 적힌 그대로다.
 - **등록 링크 스키마가 있는 DB**: 이 그래프에는 `platform_enrollments`(enum `platform_enrollment_status` 포함)가 없다. 등록 링크를 제거하기 전의 #527 그래프로 올린 DB — 기록 revision이 `b492e5d7c3a1`인 DB, 또는 기록 revision은 같은 `c492d6e8f4a2`이지만 `platform_enrollments`가 있는 DB — 는 이 그래프의 자동 upgrade 경로가 지원하지 않는다. revision ID만 보고 head라고 판단하지 않는다. 이런 DB에는 이 그래프로 upgrade · downgrade · `stamp`를 실행하지 않고 이 코드를 연결하지 않는다. 그 스키마를 만든 이전 코드와 짝지어 보존하거나, 따로 승인된 전환 절차로만 다룬다.
 - **등급 3종 초안을 적용한 DB**: 기록 revision이 `b492e7d1a605`여도 이전 초안 스키마일 수 있다(§마이그레이션 `b492e7d1a605`). 이 경우도 위와 같이 이 그래프의 자동 경로 대상이 아니다 — (#515) `alembic upgrade head`로 그 초안 스키마 위에 `d515a7c3e912`를 적용하지 않는다.
-- **(#515) 게시 전 그래프로 `d515a7c3e912`를 적용한 DB**: 게시되지 않은 #515 초안에서는 `d515a7c3e912`의 부모가 `b492e7d1a605`였다. 그 초안으로 올린 DB는 기록 revision이 head와 같은 `d515a7c3e912`여도 `b544a7d1e2f3`(감사 기록)과 병합 revision `d492a544e001`이 적용되지 않은 스키마다. 이 그래프의 자동 upgrade · `stamp` 대상이 아니다. 새 앱을 연결하거나 `stamp`로 적용된 것처럼 기록하지 않는다. 데이터가 있는 DB는 그대로 보존하고 따로 승인된 전환 절차로만 다루며, 지우고 다시 만들어도 되는 것은 일회용 테스트 DB뿐이다.
+- **(#515) 게시 전 그래프로 `d515a7c3e912`를 적용한 DB**: 게시되지 않은 #515 초안에서는 `d515a7c3e912`의 부모가 `b492e7d1a605`였다. 그 초안으로 올린 DB는 기록 revision이 이 그래프와 같은 `d515a7c3e912`여도 `b544a7d1e2f3`(감사 기록)과 병합 revision `d492a544e001`이 적용되지 않은 스키마다. 이 그래프의 자동 upgrade · `stamp` 대상이 아니다. 새 앱을 연결하거나 `stamp`로 적용된 것처럼 기록하지 않는다. 데이터가 있는 DB는 그대로 보존하고 따로 승인된 전환 절차로만 다루며, 지우고 다시 만들어도 되는 것은 일회용 테스트 DB뿐이다.
 - 실제 배포 환경 DB의 현재 revision과 그 환경에서의 적용 결과는 이 문서가 보증하지 않는다(§테스트).
 
 ### 마이그레이션 `b492e7d1a605`
 
-`c492d6e8f4a2` 다음 revision이고, 병합 revision `d492a544e001`에서 감사 기록 가지와 합쳐진다(`db/migrations/versions/20261029_b492e7d1a605_user_platform_role.py`, §마이그레이션 그래프). 그 병합 revision 다음이 (#515) `d515a7c3e912`다(§마이그레이션 `d515a7c3e912`).
+`c492d6e8f4a2` 다음 revision이고, 병합 revision `d492a544e001`에서 감사 기록 가지와 합쳐진다(`db/migrations/versions/20261029_b492e7d1a605_user_platform_role.py`, §마이그레이션 그래프). 그 병합 revision을 부모로 (#515) `d515a7c3e912`(§마이그레이션 `d515a7c3e912`)와 (#552) `e552a7c3d901`이 갈라진다.
 
 - **upgrade**: ① `user_event_action`에 `PLATFORM_ROLE_CHANGED` · `TENANT_ASSIGNMENTS_CHANGED`를 더한다(`ADD VALUE IF NOT EXISTS`, autocommit 블록이라 이 값들은 나머지 단계와 따로 확정된다). ② enum `app_user_platform_role`(`CENTRAL_ADMIN` · `TENANT_MANAGER`)과 `app_users.platform_role`(NULL 허용, 서버 기본값 없음)을 만든다. ③ 기존 PLATFORM 행을 모두 `CENTRAL_ADMIN`으로 채우고 TENANT · UNASSIGNED는 NULL로 둔다. ④ CHECK `ck_app_users_platform_role_by_account_type` — `(account_type = 'PLATFORM') = (platform_role IS NOT NULL)`을 건다. ⑤ 빈 `app_user_tenant_assignments`(복합 PK `(user_id, tenant_id)`, 두 FK `ON DELETE CASCADE`, `tenant_id` 인덱스)를 만든다. 배정은 백필하지 않는다. 행 · 신원(`issuer` · `cognito_sub`) · 세션 행은 그대로이고, `ck_app_users_platform_role_is_admin`은 호환 제약으로 남는다.
 - **전환 결과**: 이전 스키마의 PLATFORM은 모든 고객에 미치는 전역 권한이었다. 기존 PLATFORM 계정은 같은 범위의 CENTRAL_ADMIN이 되어 세션을 잃지 않고 지금까지의 운영(고객 관리 · 고객 사용자 관리 · 업무 조회 · 조치)을 그대로 이어 가며, 직원 관리 · 담당 고객 배정도 갖는다. 기존 운영을 끊지 않으려는 선택이다 [판단]. upgrade 직후 TENANT_MANAGER와 배정은 0건이다. ACTIVE PLATFORM 계정이 하나라도 있던 DB에서는 CLI의 첫 중앙 관리자 지정이 필요 없다(§플랫폼 계정 CLI).
 - **downgrade**: 배정 테이블 · 인덱스 · CHECK를 지우고, `TENANT_MANAGER` 행을 `account_type=UNASSIGNED`로 바꾼 뒤 열과 enum을 지운다. 이전 스키마의 PLATFORM은 전역 권한이라, 배정으로 범위가 제한된 TENANT_MANAGER를 PLATFORM으로 남기면 모든 고객으로 권한이 넓어지기 때문이다. CENTRAL_ADMIN은 같은 전역 범위인 PLATFORM으로 남는다. UNASSIGNED가 된 이전 TENANT_MANAGER는 로그인 403 `ACCOUNT_NOT_PROVISIONED` · 기존 세션 401이다(§계정 종류와 테넌트 소속). 등급과 배정은 잃는다. 두 이력 enum 값과 그 이력 행은 남는다(PostgreSQL은 enum 값을 지우지 못하고, 이력은 append-only다).
 - **다시 upgrade**: 남은 PLATFORM 계정(이전 CENTRAL_ADMIN)은 다시 CENTRAL_ADMIN이 된다. UNASSIGNED로 내려간 이전 TENANT_MANAGER와 그 배정은 되살아나지 않으므로 이전 담당 범위도 돌아오지 않는다 — `--designate-unassigned-user-id`로 다시 지정하고 중앙 관리자가 다시 배정한다. 이력 값은 `IF NOT EXISTS`라 다시 더해도 오류가 없다.
-- **등급 3종 초안을 적용한 DB**: 같은 revision ID `b492e7d1a605`에는 게시되지 않은 이전 초안(`STAFF`를 포함한 등급 3종, 배정 테이블 없음)이 있었다. 그 초안을 적용한 DB는 기록 revision이 `b492e7d1a605`라, `alembic upgrade head`가 감사 기록 가지와 병합 revision, 그 위의 (#515) `d515a7c3e912`는 적용하려 해도 이 revision은 이미 적용된 것으로 보고 다시 실행하지 않는다 — 초안의 등급 · 배정 스키마는 고쳐지지 않는다. 이 그래프가 지원하지 않는 DB다. `app_user_platform_role`에 `STAFF` 값이 있거나 `app_user_tenant_assignments`가 없으면 그런 DB다. 이 코드를 연결하지 않고, 이 그래프로 upgrade · downgrade · `stamp`를 실행하지 않으며, DB는 그대로 보존한다. 지우고 다시 만들어도 되는 것은 일회용 테스트 DB뿐이고, 데이터를 보존해야 하는 DB의 전환은 따로 승인된 절차로만 한다.
+- **등급 3종 초안을 적용한 DB**: 같은 revision ID `b492e7d1a605`에는 게시되지 않은 이전 초안(`STAFF`를 포함한 등급 3종, 배정 테이블 없음)이 있었다. 그 초안을 적용한 DB는 기록 revision이 `b492e7d1a605`라, `alembic upgrade head`가 감사 기록 가지와 병합 revision, 그 위의 (#515) `d515a7c3e912` · (#552) `e552a7c3d901`과 병합 revision `f515a552e001`은 적용하려 해도 이 revision은 이미 적용된 것으로 보고 다시 실행하지 않는다 — 초안의 등급 · 배정 스키마는 고쳐지지 않는다. 이 그래프가 지원하지 않는 DB다. `app_user_platform_role`에 `STAFF` 값이 있거나 `app_user_tenant_assignments`가 없으면 그런 DB다. 이 코드를 연결하지 않고, 이 그래프로 upgrade · downgrade · `stamp`를 실행하지 않으며, DB는 그대로 보존한다. 지우고 다시 만들어도 되는 것은 일회용 테스트 DB뿐이고, 데이터를 보존해야 하는 DB의 전환은 따로 승인된 절차로만 한다.
 - **호환성**: upgrade 뒤에는 `platform_role`을 채우지 않는 이전 CLI의 PLATFORM 생성 · 지정을 CHECK가 거절한다. 이전 앱은 `platform_role` · 배정을 보지 않으므로 TENANT_MANAGER에게도 이전의 전역 PLATFORM 권한(모든 고객 · 고객 사용자 관리)을 준다 — upgrade한 DB에 이전 앱을 연결하지 않는다. 반대로 새 앱 · 새 CLI는 upgrade 전 DB에 `app_users.platform_role`이 없어 사용자 조회가 실패한다. 마이그레이션 · 새 앱 · 새 CLI를 함께 올린다. 실제 환경 적용과 그 검증은 이 문서가 보증하지 않는다(§테스트).
 
 ## 접근 보호 (PR 2)
 
 | 항목 | 내용 | 근거 |
 | --- | --- | --- |
-| 공개 경로 | `GET /health`, `POST /api/v1/auth/login*`(6단계), (PR 3) `POST /api/v1/auth/password-reset` · `/password-reset/confirm`, `POST /api/v1/auth/logout`(멱등 — 세션이 없으면 지울 것이 없어 204). `GET /me` · `POST /activity`는 세션이 없으면 401이다. PR 1 · 2에서는 Cognito 미구성이면 503이었고, PR 3부터 Cognito 설정과 무관하게 동작한다(§설정). 그 밖의 `/api/v1/*`와 WebSocket은 전부 세션이 필요하다. 공개 목록은 `test_api_access.py`의 `PUBLIC_ROUTES`가 실제 앱 경로와 대조한다 — 새 경로는 목록에 넣지 않는 한 401이어야 통과한다 | [팀 결정] |
+| 공개 경로 | `GET /health`, `POST /api/v1/auth/login*`(6단계), (PR 3) `POST /api/v1/auth/password-reset` · `/password-reset/confirm`, `POST /api/v1/auth/logout`(멱등 — 세션이 없으면 지울 것이 없어 204), (#552) `POST /api/v1/signup-requests`(도입 신청 접수 — 세션 없이 Origin 검사 · UUIDv4 `Idempotency-Key` · 본문 크기 제한만 건다, §도입 신청 · 고객 문의 · 운영 알림). 같은 접두의 `GET /api/v1/signup-requests` · `PUT /api/v1/signup-requests/{request_id}/status`는 공개 경로가 아니다. `GET /me` · `POST /activity`는 세션이 없으면 401이다. PR 1 · 2에서는 Cognito 미구성이면 503이었고, PR 3부터 Cognito 설정과 무관하게 동작한다(§설정). 그 밖의 `/api/v1/*`와 WebSocket은 전부 세션이 필요하다. 공개 목록은 `test_api_access.py`의 `PUBLIC_ROUTES`가 실제 앱 경로와 대조한다 — 새 경로는 목록에 넣지 않는 한 401이어야 통과한다 | [팀 결정] [#552 구현 계약: 도입 신청 공개 접수] |
 | 세션 판정 | `auth.service.resolve_current_user(touch=False)` 하나. 보호 API · WebSocket은 유휴 시간을 늘리지 않는다. Cognito 설정을 읽지 않는다 — Cognito가 비어도 보호 API는 세션만으로 열린다 | [팀 결정] [판단] |
 | 배선 | `main.py`가 조치 · 자산 · 인시던트 · 메트릭 라우터를 `include_router(..., dependencies=[Origin, 세션])`로 포함한다. 역할은 조치 실행 · 종료 라우트의 의존성이다. 검사 순서: Origin(상태 변경만, DB 전) → 세션 → 역할 → 본문 검증 → 라우터. (#492) 메트릭 라우터는 세션 다음에 `require_business_access`(관리 등급만)를 거친다. 조치 · 자산 · 인시던트의 고객 범위는 각 라우트와 Workflow가 건다(아래 업무 범위) | [판단] |
 | 업무 범위(#492 · #533) | 조치 · 자산 · 인시던트 API는 요청자의 고객 범위(`tenant_scope_of`)로 거른다 — CENTRAL_ADMIN은 전체(소속 없는 기록 포함), TENANT_MANAGER는 배정된 고객의 기록, TENANT 계정은 자기 고객의 기록만 본다(소속이 정지된 TENANT 계정도 조회는 된다). 범위 밖 · 소속 없는 기록은 목록에서 빠지고, 상세 · 실행 · 종료는 없는 기록과 같은 404다. 메트릭(`/api/v1/metrics/timeseries`)은 관리 등급(CENTRAL_ADMIN · TENANT_MANAGER)만 쓰고 TENANT 계정은 403이다. TENANT_MANAGER의 메트릭은 모든 DB 축이 배정 고객의 기록으로 좁혀지고, CloudWatch 축은 그 자산을 소유한 고객의 자격으로만 부르며 결과 재사용도 소유 고객별로 나뉜다. 전역 WebSocket은 PLATFORM만 받는다(아래). 범위는 요청마다 세션 판정 시점의 등급 · 배정 · 소속으로 다시 만들고, 켜고 끄는 설정이 없다 | [판단] |
@@ -194,8 +195,13 @@ PLATFORM 계정은 모두 `role=ADMIN`(호환 값)이고, 아래 PLATFORM 열은
 | 고객 생성 `POST /api/v1/tenants` | 허용 | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
 | 고객 수정 · 삭제 · 정지 · 온보딩 조회 `GET /api/v1/tenants/{id}/onboarding` | 허용 | 배정 고객 | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
 | 직원 관리 · 담당 고객 배정 `/api/v1/staff*` | 허용(자기 등급 · 상태 변경은 403) | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
+| (#552) 도입 신청 관리 `GET /api/v1/signup-requests` · `PUT /api/v1/signup-requests/{request_id}/status` | 허용 | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
+| (#552) 문의 등록 `POST /api/v1/inquiries` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 자기 고객(정지 포함) | 자기 고객(정지 포함) | 자기 고객(정지 포함) |
+| (#552) 문의 목록 `GET /api/v1/inquiries` | 전체 | 배정 고객의 문의 | 자기 고객의 문의(정지 포함) | 자기 고객의 문의(정지 포함) | 자기 고객의 문의(정지 포함) |
+| (#552) 문의 상태 · 메모 · 이력 `/api/v1/inquiries/{inquiry_id}/*` | 전체 | 배정 고객의 문의 | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
+| (#552) 운영 알림 `/api/v1/notifications*` | 현재 권한 범위(읽음은 사용자별) | 현재 권한 범위(읽음은 사용자별) | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
 
-TENANT 계정의 메트릭 · 실시간 연결과 고객용 업무 화면은 아직 열리지 않았다(T-4 · T-5). 정지 고객 사용자의 자기 기록 조회 요구([ADR-0012](../../../docs/adr/0012-saas-transition-account-structure-and-tenant-model.md))도 업무 API 조회 범위에서만 충족되고, 화면 · 메트릭 · 실시간 연결은 그 범위다. 이 모듈은 테넌트 데이터 격리가 완성됐다고 주장하지 않는다.
+TENANT 계정의 메트릭 · 실시간 연결과 고객용 업무 화면은 아직 열리지 않았다(T-4 · T-5). 정지 고객 사용자의 자기 기록 조회 요구([ADR-0012](../../../docs/adr/0012-saas-transition-account-structure-and-tenant-model.md))도 업무 API 조회 범위에서만 충족되고, 화면 · 메트릭 · 실시간 연결은 그 범위다. (#552) 정지 고객 사용자는 지원 문의를 등록하고 자기 고객의 문의를 조회할 수 있다 — 지원 경로만의 예외다(§도입 신청 · 고객 문의 · 운영 알림). 이 모듈은 테넌트 데이터 격리가 완성됐다고 주장하지 않는다.
 
 **기록의 고객 소속에는 한계가 있다.** 새 인시던트는 그 AWS 계정에 등록된 고객을 소속으로 받고, 그 인시던트의 실행은 인시던트의 소속을 따른다. 등록된 고객이 없는 계정의 인시던트는 소속 없이 남는다. 수집기(`start_collection_run` · `upsert_asset`)는 아직 수집 회차 · 자산 행에 고객 소속을 채우지 않는다. 그래서 실제로 수집된 자산과 그 판정 기록은 소속 없는 기록으로 남아 CENTRAL_ADMIN에게만 보이고, 배정된 TENANT_MANAGER와 TENANT 계정의 결과에는 나오지 않는다. 소속을 모르는 이전 · 미등록 기록을 고객 범위로 추정하거나 백필하지 않는다. 자산 목록과 메트릭 여섯 축은 기록을 (소속 고객, 그 고객의 관제 리전) 짝으로 고른다 — 한 고객이 관제에서 뺀 리전의 기록은 범위 안의 다른 고객(예: 같은 TENANT_MANAGER의 다른 담당 고객)이 그 리전을 관제하더라도 다시 들어오지 않는다. 소속 없는 이전 기록은 서버 설정의 관제 리전에 있는 것만 CENTRAL_ADMIN에게 보인다. 담당 범위(어느 고객을 보는가)는 이 리전 선택과 따로 판정한다. 자산 목록의 수집 상태는 범위 안의 고객별 · 리전별 최신 회차(CENTRAL_ADMIN은 소속 없는 회차 포함)를 함께 접은 값이고, 커버리지는 고객별이 아니라 리전별로 본다 — 관제 리전마다 어떤 고객이든 회차가 있는지만 볼 뿐 고객마다 수집기가 연결됐다는 근거가 아니다. 범위 필터의 자동 테스트는 소속을 명시한 기록으로 돌기 때문에, 실제 수집 데이터의 고객 소속을 보증하지 않는다. 수집기 · Workflow 같은 백그라운드 처리의 테넌트 격리도 이 범위(T-1)가 아니다.
 
@@ -205,6 +211,21 @@ TENANT 계정의 메트릭 · 실시간 연결과 고객용 업무 화면은 아
 - 회수 시점은 다음 로그인의 **완료**다. 비밀번호 · TOTP 단계에서 멈춘 로그인은 기존 세션을 건드리지 않는다. 이 변경 전에 이미 있던 사용자당 여러 세션은 일괄 회수하지 않는다(마이그레이션은 세션 행을 바꾸지 않는다). 그 세션들은 그 사용자의 다음 로그인 완료 · ADMIN 회수 · 만료 때 정리된다.
 - 교체된 브라우저는 다음 요청에서 일반 401 `AUTH_REQUIRED`를 받는다. 열린 WebSocket은 재확인 주기(기본 30초) 안에 4401로 닫힌다. 응답 · close reason에 회수 사유나 새 로그인의 기기 정보를 싣지 않는다.
 - 관제 화면을 상황판(wallboard)으로 상시 띄우려면 그 화면 전용 VIEWER 계정을 따로 둔다. 같은 계정으로 다른 곳에서 로그인하면 상황판 세션이 교체된다.
+
+## 도입 신청 · 고객 문의 · 운영 알림 (#552)
+
+계약은 `packages/schemas/api/signup_requests.py` · `inquiries.py` · `notifications.py`(공통 열거형 `support.py`), 오류 코드는 `packages/schemas/api/errors.py`다. 이 절은 접근 판정만 다룬다. 등급 · 담당 범위 판정은 `auth.access`를 그대로 쓰고, 지원 경로의 신원 재판정은 `support_access.py`가 맡는다.
+
+| 항목 | 내용 | 근거 |
+| --- | --- | --- |
+| 공개 접수 | `POST /api/v1/signup-requests`만 세션 없이 받는다. 이 경로에는 Origin 검사(`AUTH_ALLOWED_ORIGINS`), UUIDv4 `Idempotency-Key` 헤더 필수, 본문 크기 제한만 건다. 본문 크기는 JSON 파싱 전에 실제로 받은 바이트로 제한하고(초과 413), 한도는 기존 신청 양식의 칸 제한(이름 100 · 이메일 254 · 메모 1000자)에서 정했다. 같은 Key로 다시 보내면 같은 신청 ID로 202, 같은 Key에 다른 본문이면 409다. Key와 신청의 연결은 신청과 함께 보관하며 별도 만료 시간(TTL)을 두지 않는다 | [#552 구현 계약] |
+| 공개 접수의 한계 | 봇 방어나 이메일 소유 확인이 아니다. 요청 빈도 제한(WAF 임계값)은 정하지 않았고, 이 변경은 네트워크상 공개 허용 · 배포를 포함하지 않는다. 운영 환경의 개인정보 보존 기간과 빈도 제한 정책은 공개 출시 전에 정할 조건이다 | [#552 구현 계약] |
+| 도입 신청 관리 | 목록 · 상태 변경은 CENTRAL_ADMIN만 한다(`require_central_admin`). TENANT_MANAGER와 TENANT 계정은 403 `AUTH_FORBIDDEN`이다 | [#552 구현 계약] |
+| 고객 문의 | 등록 · 목록은 TENANT 계정이면 역할(ADMIN · OPERATOR · VIEWER)과 소속 테넌트 정지에 관계없이 자기 고객 범위에서 쓴다. PLATFORM 계정은 등록하지 않고(403), 목록은 CENTRAL_ADMIN 전체 · TENANT_MANAGER 배정 고객이다. 상태 변경 · 메모 · 이력은 플랫폼 관리 등급(`require_tenant_management`)만, 대상 문의가 행위자의 고객 범위 안일 때만 한다. 범위 밖 문의는 없는 문의와 같은 404다 | [#552 구현 계약] |
+| 정지 고객 예외 | 지원 문의 등록 · 조회에만 적용한다. 정지 테넌트 행위자의 사용자 관리 쓰기 409(§사용자 관리), 정지 고객 대상의 새 실행과 TENANT 계정의 인시던트 종료 409(§접근 보호)는 그대로이고, 문의가 AWS 조치나 관리 권한을 다시 열지 않는다 | [#552 구현 계약] |
+| 운영 알림 | `GET /api/v1/notifications` · `POST /api/v1/notifications/read`는 플랫폼 관리 등급만 쓴다(라우터 의존성 `require_tenant_management`). 요청 시점에 권한이 있는 범위의 알림만 보이고, 읽음은 사용자별로 남는다. TENANT 계정은 역할과 관계없이 403 `AUTH_FORBIDDEN`이다 | [#552 구현 계약] |
+
+실제 배포 환경에서의 공개 동작과 그 검증은 이 문서가 보증하지 않는다(§테스트).
 
 ## 사용자 관리 (PR 3)
 
@@ -246,7 +267,7 @@ TENANT 계정의 메트릭 · 실시간 연결과 고객용 업무 화면은 아
 | 계정 종류 부여(#492) | 사용자 관리 API로 만드는 계정은 항상 TENANT다. 이 API로 PLATFORM을 주거나 UNASSIGNED를 만들거나 소속(`tenant_id`)을 옮기는 경로가 없다(역할 · 상태 변경 요청에는 소속 칸이 없다). PLATFORM은 운영 CLI(§플랫폼 계정 CLI)로만 생긴다. `platform_role`도 이 API로 주거나 바꾸지 않는다 | [팀 결정: 명시적 플랫폼 권한 · 고객사 범위] [판단: UNASSIGNED] |
 | 초대 대상 테넌트(#492) | `tenant_id`는 스키마상 선택이고 최종 값은 서버가 정한다. 플랫폼 관리 권한자는 반드시 보낸다(없으면 422 `REQUEST_VALIDATION_FAILED`, 없는 테넌트와 TENANT_MANAGER에게 배정되지 않은 테넌트는 404 `TENANT_NOT_FOUND`). TENANT ADMIN은 생략하거나 자기 테넌트만 보낼 수 있고, 다른 값은 404 `TENANT_NOT_FOUND`다 | [팀 결정: 고객사 범위] [판단: 요청 형태 · 오류 코드] |
 | 테넌트 상태(#492) | 초대 · 재발송은 대상 테넌트가 ACTIVE일 때만 받는다(그 밖은 409 `TENANT_STATE_CONFLICT`). Cognito 호출 전에 확인하고, DB 쓰기 직전에 잠금 안에서 다시 확인한다(테넌트 행 `FOR SHARE` — commit까지 상태 전이를 막는다). 역할 · 상태 · 세션 회수 · 조회는 대상 테넌트 상태를 보지 않는다 | [판단] |
-| 정지 테넌트의 행위자(#492) | 소속 테넌트가 SUSPENDED인 TENANT 행위자의 쓰기(초대 · 재발송 · 역할 · 상태 · 세션 회수)는 409 `TENANT_SUSPENDED`이고, 잠금 안에서 다시 판정한다. 조회는 허용한다. 로그인 · 로그아웃 · 활동 · 비밀번호 재설정은 테넌트 정지와 관계없이 동작한다. 사용자 `DISABLED`는 이와 별개 상태다(로그인 403 `ACCOUNT_DISABLED` · 세션 401) | [판단] |
+| 정지 테넌트의 행위자(#492) | 소속 테넌트가 SUSPENDED인 TENANT 행위자의 쓰기(초대 · 재발송 · 역할 · 상태 · 세션 회수)는 409 `TENANT_SUSPENDED`이고, 잠금 안에서 다시 판정한다. 조회는 허용한다. 로그인 · 로그아웃 · 활동 · 비밀번호 재설정과 (#552) 지원 문의 등록 · 조회는 테넌트 정지와 관계없이 동작한다(§도입 신청 · 고객 문의 · 운영 알림). 사용자 `DISABLED`는 이와 별개 상태다(로그인 403 `ACCOUNT_DISABLED` · 세션 401) | [판단] |
 
 ### 부분 실패
 
@@ -489,7 +510,7 @@ uv run python -m auth.recover_totp --user-id <user_id> --reconcile-mutation <mut
 
 ### 마이그레이션 `d515a7c3e912`
 
-병합 revision `d492a544e001` 다음 revision이고 현재 head다(`db/migrations/versions/20261029_d515a7c3e912_totp_recovery.py`, §마이그레이션 그래프).
+병합 revision `d492a544e001`을 부모로 (#552) `e552a7c3d901`과 갈라진 가지이고, 두 가지는 빈 병합 revision `f515a552e001`(현재 head)에서 합쳐진다(`db/migrations/versions/20261029_d515a7c3e912_totp_recovery.py`, §마이그레이션 그래프).
 
 - **upgrade**: ① `auth_session_revoke_reason`에 `TOTP_RESET`을 더한다(`ADD VALUE IF NOT EXISTS`, autocommit 블록이라 이 값은 나머지 단계와 따로 확정된다). ② `app_users.auth_generation`(INTEGER NOT NULL, 서버 기본값 0)과 `app_users.mfa_recovery_state`(enum `app_user_mfa_recovery_state` — `NONE` · `RESET_PENDING` · `ENROLLMENT_REQUIRED`, NOT NULL, 서버 기본값 `NONE`)를 더한다. 기존 사용자는 세대 0 · `NONE`이다. 서버 기본값은 이 칸을 모르는 쓰기를 위해 남긴다. ③ `totp_recovery_operations` — 기본 키 `operation_id`, `(target_user_id, generation)` 유일, 상태 enum `totp_recovery_status`(`PROVIDER_PENDING` · `COMPLETED` · `PROVIDER_NOT_FOUND` · `PROVIDER_REJECTED` · `PROVIDER_UNKNOWN`), CHECK(`identity_verified` 참 · 세대 양수 · 회수 수 0 이상 · `PROVIDER_PENDING`과 `finalized_at` NULL이 짝), 대상 · 행위자 FK `RESTRICT`. ④ `totp_provider_mutations` — 종류 `RESET` · `ENROLLMENT`(`RESET`만 `operation_id`를 가진다), 풀림 `PROVIDER_RETURNED` · `OPERATOR_RECONCILED`(`resolved_at`과 짝, `reconciled_by`는 운영자 정리일 때만), 신원당 풀리지 않은 행 1개의 부분 유일 인덱스.
 - **downgrade 가드**: `mfa_recovery_state`가 `NONE`이 아닌 사용자가 있거나 풀리지 않은 울타리가 있으면 아무것도 바꾸지 않고 거절한다. 이전 스키마는 그 차단을 표현하지 못해, 그대로 내리면 삭제가 확인되지 않은 옛 TOTP 로그인이 다시 열리고, 결과 불명인 Cognito 변경이 이전 코드의 등록 · 삭제와 겹칠 수 있다.
