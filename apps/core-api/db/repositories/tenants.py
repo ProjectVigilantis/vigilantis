@@ -138,6 +138,16 @@ def read_tenant_for_share(db: Session, tenant_id: str) -> Optional[models.Tenant
     ).scalar_one_or_none()
 
 
+def get_tenant_status(db: Session, tenant_id: str) -> Optional[TenantStatus]:
+    """상태 칸만 DB 에서 바로 읽는다 — 잠그지 않고, 세션이 든 낡은 객체도 거치지 않는다.
+
+    디스패처의 runner 진입 전 정지 관문이 쓴다. 그 트랜잭션은 runner 의 백업 캡처(AWS 읽기)까지
+    이어지므로 여기서 FOR SHARE 를 걸면 정지가 AWS 호출을 기다리게 된다 — 결정적인 경계는 첫 단계
+    commit 의 FOR SHARE(read_tenant_for_share)이고, 이 읽기는 그 전에 AWS 를 부르지 않게 하는 사전 판정이다.
+    """
+    return db.scalar(select(_T.status).where(_T.tenant_id == tenant_id))
+
+
 def tenant_id_for_account(db: Session, aws_account_id: str) -> Optional[str]:
     """그 AWS 계정을 등록한 테넌트 — 상태와 무관하다. 계정은 테넌트마다 하나뿐이다(DB 유일성)."""
     return db.scalar(select(_T.tenant_id).where(_T.aws_account_id == aws_account_id))

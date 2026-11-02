@@ -26,6 +26,13 @@
 # 보냅니다(_JUDGES) — 기동 요청 접수는 성공의 경계가 아니고 그 판정이 SUCCESS와
 # ROLLBACK_INITIATED를 가르기 때문입니다. (Issue #240)
 #
+# 단계 0건이어도 **대상 테넌트가 정지(SUSPENDED)면 실행으로 넘기지 않습니다**(ADR-0012 §3 ·
+# #533). 정지는 「더 들어가지 않는다」라 자산을 만지기 전의 예약은 새 실행이고, 예약 이후의
+# 거절은 실행 상태로 전달하는 계약대로 FAILED(변경 없이 실패)로 확정합니다. 자동 원복
+# (AUTO_ON_FAILURE)은 예외 — 이미 바뀐 자산을 되돌리는 일이라 끝까지 돕니다. 관문은
+# workflows.refuse_start_if_tenant_suspended 하나이며 runner 진입 전과 첫 단계 commit 직전에
+# 같은 함수로 봅니다.
+#
 # ROLLBACK_INITIATED로 확정된 실행은 재실행·재판정 대상이 아니라 **자동 원복 자식을
 # 낳는 자리**로 갑니다(_initiate_rollback_one, Issue #241). 원본당 1회이며, 두 번째
 # 발동을 막는 것은 이 모듈이 아니라 자식 실행 행의 존재입니다 — 그래서 가드레일이
@@ -656,9 +663,36 @@ def _dispatch_one(
         db.commit()
         return
 
-    report.started += 1
     try:
-        outcome = runner(db, execution_id)
+        try:
+            # 단계 0건의 시작 관문 — 대상 테넌트가 정지면 runner 에 넘기지 않는다(백업 캡처 같은
+            # AWS 읽기도 없다). 잠그지 않는다 — 이 트랜잭션은 runner 의 백업 캡처(AWS 호출)까지
+            # 이어진다. 결정적 경계는 첫 단계를 쓰는 workflows._step_recorder 의 FOR SHARE 재확인이다.
+            # 확정은 FAILED(변경 없이 실패)다 — 예약 이후의 거절은 실행 상태로 전달하는 계약이며,
+            # 새 실행이라 다시 시작하지 않는다(ADR-0012 §3)
+            workflows.refuse_start_if_tenant_suspended(
+                db, tenant_id=claimed.tenant_id, trigger_source=claimed.trigger_source, lock=False,
+            )
+            report.started += 1
+            outcome = runner(db, execution_id)
+        except workflows.TenantSuspendedBeforeStart as refused:
+            logger.info(
+                "dispatch_refused_tenant_suspended",
+                extra={
+                    "execution_id": execution_id,
+                    "tenant_id": refused.tenant_id,
+                    "trigger_source": claimed.trigger_source.value,
+                },
+            )
+            _close_and_publish(
+                db,
+                execution_id,
+                publish,
+                report,
+                next_status=ExecutionStatus.FAILED,
+                error_summary=str(refused),
+            )
+            return
         if outcome.succeeded:
             if (
                 claimed.runbook_id is RunbookId.RUNBOOK_EC2_ISOLATE

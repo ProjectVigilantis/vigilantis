@@ -1638,16 +1638,73 @@ class ExecutionRunOutcome:
                 raise ValueError("보류 결과에는 단계 기록이 없어야 합니다")
 
 
+class TenantSuspendedBeforeStart(Exception):
+    """시작 전 예약(단계 0건)의 테넌트가 정지돼 실행을 시작하지 않았다. (ADR-0012 §3)
+
+    자산은 만지지 않았다. dispatcher 가 잡아 FAILED(변경 없이 실패)로 확정한다 — 예약 이후의
+    거절은 HTTP 오류가 아니라 실행 상태로 전달한다(schemas/api/errors.py). 문구는 실행의
+    error_summary 가 되며 dispatcher._failure_summary 와 같은 「코드: 사유」 꼴이다.
+    """
+
+    def __init__(self, tenant_id: str) -> None:
+        super().__init__(
+            f"{ErrorCode.TENANT_SUSPENDED.value}: 정지된 테넌트의 시작 전 예약은 시작하지 않습니다"
+        )
+        self.tenant_id = tenant_id
+
+
+def refuse_start_if_tenant_suspended(
+    db: Session, *, tenant_id: str | None, trigger_source: TriggerSource, lock: bool
+) -> None:
+    """단계 0건 실행의 시작 관문 — 대상 테넌트가 정지면 TenantSuspendedBeforeStart. (ADR-0012 §3)
+
+    「시작」의 경계는 첫 단계 기록이다. 단계는 AWS 호출 직전에 commit 되므로(_step_recorder) 단계가
+    없는 실행은 자산을 만지지 않았고, 정지 뒤에는 새 실행이라 시작하지 않는다. 두 자리가 같은 함수를
+    부른다. 호출부가 트랜잭션을 소유한다(여기서 commit · rollback 하지 않는다).
+      - lock=False — dispatcher 가 runner 에 넘기기 전의 사전 판정. 정지된 예약이 백업 캡처 같은 AWS
+        읽기조차 하지 않게 한다. 잠그지 않는다 — 그 트랜잭션은 백업 캡처(AWS 호출)까지 이어지므로
+        FOR SHARE 를 걸면 정지가 AWS 호출을 기다리게 된다.
+      - lock=True — 첫 단계를 쓰는 트랜잭션 안(_step_recorder)의 결정적 경계. 테넌트 행을 FOR SHARE 로
+        읽으므로(_tenant_suspended) 정지 UPDATE 는 첫 단계 commit 을 기다리고, 먼저 commit 된 정지는
+        첫 단계 전에 보인다 — 정지와 시작 사이에 단계 없는 AWS 변경이 끼지 않는다.
+      - 자동 원복(AUTO_ON_FAILURE)은 지나지 않는다 — 이미 바뀐 자산을 되돌리는 일이라 정지 뒤에 생겨도
+        끝까지 돈다. 관제자 복구는 새 실행이다(접수는 _recoverable_origin 이 409 로 막는다).
+      - 테넌트 없음(NULL · MVP 기록)은 막지 않는다.
+    """
+    if trigger_source is TriggerSource.AUTO_ON_FAILURE or tenant_id is None:
+        return
+    suspended = (
+        _tenant_suspended(db, tenant_id)
+        if lock
+        else tenants_repo.get_tenant_status(db, tenant_id) is TenantStatus.SUSPENDED
+    )
+    if suspended:
+        raise TenantSuspendedBeforeStart(tenant_id)
+
+
 def _step_recorder(db: Session, execution_id: str):
     """executor가 넘기는 단계를 그 자리에서 저장하고 commit한다.
 
     단계마다 commit하는 이유는 프로세스가 중간에 사라져도 "어디까지 갔는가"가
     남아야 하기 때문이다 — 남지 않으면 회수(dispatcher.py)가 이미 바뀐 자산을
     바뀌지 않은 것으로 본다.
+
+    첫 IN_PROGRESS 단계는 그 저장 트랜잭션 안에서 정지 관문(refuse_start_if_tenant_suspended)을
+    먼저 지난다 — runner 진입과 첫 AWS 변경 사이(백업 캡처 동안)에 commit 된 정지가 여기서 보인다.
+    관문이 던지면 단계는 남지 않고 실행은 단계 0건 그대로라 dispatcher 가 FAILED 로 확정한다.
     """
+    started = False
 
     def record(step: ExecutionStepResult) -> None:
+        nonlocal started
         if step.status is ExecutionStepStatus.IN_PROGRESS:
+            if not started:
+                execution = executions_repo.get_execution(db, execution_id)
+                refuse_start_if_tenant_suspended(
+                    db, tenant_id=execution.tenant_id, trigger_source=execution.trigger_source,
+                    lock=True,
+                )
+                started = True
             executions_repo.add_step(db, step, execution_id=execution_id)
         elif not executions_repo.update_step_result(
             db, step, execution_id=execution_id
