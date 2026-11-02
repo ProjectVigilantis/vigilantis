@@ -25,6 +25,7 @@ import type {
   SignupRequestItem,
   SignupRequestsResponse,
   SignupRequestStatus,
+  SignupRequestStatusChange,
   TenantCreateRequest,
   TenantCreateResponse,
   TenantDetail,
@@ -409,8 +410,14 @@ export function submitSignupRequest(body: SignupRequestCreate): Promise<{ reques
   return postJson<{ request_id: string }>('/signup-requests', body, AUTH_FLOW);
 }
 
-export function changeSignupRequestStatus(requestId: string, status: SignupRequestStatus): Promise<SignupRequestItem> {
-  return sendJson<SignupRequestItem>('PUT', `/signup-requests/${encodeURIComponent(requestId)}/status`, { status });
+/** 신청 상태를 옮긴다. 반려(REJECTED)면 `reason`이 필수다(서버가 빈 값을 422로 거절한다). */
+export function changeSignupRequestStatus(
+  requestId: string,
+  status: SignupRequestStatus,
+  reason: string | null = null,
+): Promise<SignupRequestItem> {
+  const body: SignupRequestStatusChange = { status, reason };
+  return sendJson<SignupRequestItem>('PUT', `/signup-requests/${encodeURIComponent(requestId)}/status`, body);
 }
 
 /** 고객사 계정이 보내는 장애 · 버그 문의. 소속 고객사 · 작성자는 서버가 세션에서 채운다. */

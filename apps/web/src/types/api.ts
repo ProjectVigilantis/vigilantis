@@ -1060,8 +1060,19 @@ export interface SignupRequestCreate {
 export interface SignupRequestItem extends SignupRequestCreate {
   request_id: string;
   status: SignupRequestStatus;
+  /** REJECTED일 때만 있다. */
+  rejected_reason: string | null;
   created_at: IsoDateTime;
   updated_at: IsoDateTime;
+}
+
+/**
+ * `PUT /signup-requests/{id}/status` 요청. REJECTED로 옮길 때는 `reason`(반려 사유)이 필수이고 비면 422,
+ * 다른 상태면 null이다. 고객사 정지(`POST /tenants/{id}/suspend`의 reason, 응답 suspended_reason)와 같은 모양이다.
+ */
+export interface SignupRequestStatusChange {
+  status: SignupRequestStatus;
+  reason: string | null;
 }
 
 /** `GET /signup-requests`: 플랫폼 계정만. 최근 것부터. */

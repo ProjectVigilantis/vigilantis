@@ -2,6 +2,7 @@
 
 // 도입 신청함(플랫폼 계정). 로그인 창 회원가입에서 들어온 신청을 상태별로 걸러 보고, 한 건을 펼쳐 검토 · 승인 · 반려한다.
 // 승인은 신청의 상태만 바꾼다. 고객사 추가와 관리자 초대는 고객사 화면에서 이어서 한다(ADR-0012: 고객사는 운영자가 만든다).
+// 반려는 사유가 있어야 한다(계약 #552): [반려]를 누르면 사유 칸이 열리고, 저장한 사유는 반려된 신청에 함께 보인다.
 // 알림을 눌러 오면(`?id=`) 그 건을 펼쳐 둔다.
 
 import Link from 'next/link';
@@ -9,13 +10,14 @@ import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 
 import { EmptyState } from '@/components/empty-state';
+import { INPUT_CLASS as INPUT, LABEL_CLASS as LABEL } from '@/components/form-classes';
 import { EnumBadge } from '@/components/status-badge';
 import { FilterChips } from '@/components/support/filter-chips';
 import { Button } from '@/components/ui/button';
 import { ApiError, changeSignupRequestStatus } from '@/lib/api/client';
 import { TENANTS_PATH } from '@/lib/home-path';
 import { SIGNUP_NEXT, SIGNUP_STATUS_LABELS } from '@/lib/support';
-import { formatKst } from '@/lib/utils';
+import { cn, formatKst } from '@/lib/utils';
 import type { SignupRequestItem, SignupRequestStatus } from '@/types/api';
 
 const ACTION_LABEL: Record<SignupRequestStatus, string> = {
@@ -33,15 +35,18 @@ export function SignupRequestsView({ items, focusId }: { items: SignupRequestIte
   const [openId, setOpenId] = useState<string | null>(focusId);
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [error, setError] = useState<{ id: string; message: string } | null>(null);
+  /** [반려]를 누른 신청. 사유 칸을 열고, 사유를 적어야 [반려 확정]이 눌린다(계약: 반려는 사유 필수). */
+  const [rejecting, setRejecting] = useState<{ id: string; reason: string } | null>(null);
 
   const shown = filter === 'ALL' ? items : items.filter((i) => i.status === filter);
   const count = (f: SignupRequestStatus | 'ALL') => (f === 'ALL' ? items.length : items.filter((i) => i.status === f).length);
 
-  const change = async (item: SignupRequestItem, status: SignupRequestStatus) => {
+  const change = async (item: SignupRequestItem, status: SignupRequestStatus, reason: string | null = null) => {
     setPendingId(item.request_id);
     setError(null);
     try {
-      await changeSignupRequestStatus(item.request_id, status);
+      await changeSignupRequestStatus(item.request_id, status, reason);
+      setRejecting(null);
       router.refresh();
     } catch (cause) {
       setError({ id: item.request_id, message: cause instanceof ApiError ? cause.message : '상태를 바꾸지 못했습니다.' });
@@ -96,6 +101,12 @@ export function SignupRequestsView({ items, focusId }: { items: SignupRequestIte
                       <dd className="whitespace-pre-wrap">{item.note ?? '적지 않음'}</dd>
                       <dt className="text-muted-foreground">받은 시각</dt>
                       <dd>{formatKst(item.created_at)}</dd>
+                      {item.status === 'REJECTED' ? (
+                        <>
+                          <dt className="text-muted-foreground">반려 사유</dt>
+                          <dd className="whitespace-pre-wrap">{item.rejected_reason ?? '기록 없음'}</dd>
+                        </>
+                      ) : null}
                     </dl>
                     {item.status === 'APPROVED' ? (
                       <p className="bg-muted rounded-md px-3 py-2 text-sm">
@@ -106,7 +117,43 @@ export function SignupRequestsView({ items, focusId }: { items: SignupRequestIte
                         </Link>
                       </p>
                     ) : null}
-                    {SIGNUP_NEXT[item.status].length > 0 ? (
+                    {rejecting?.id === item.request_id ? (
+                      <div className="flex flex-col gap-2">
+                        <label htmlFor={`reject-reason-${item.request_id}`} className={LABEL}>
+                          반려 사유
+                        </label>
+                        <textarea
+                          id={`reject-reason-${item.request_id}`}
+                          rows={3}
+                          autoFocus
+                          value={rejecting.reason}
+                          onChange={(event) => setRejecting({ id: item.request_id, reason: event.target.value })}
+                          disabled={pendingId === item.request_id}
+                          placeholder="예: 지원하지 않는 클라우드(AWS 외) 환경입니다."
+                          className={cn(INPUT, 'h-auto py-2')}
+                        />
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="destructive"
+                            disabled={pendingId === item.request_id || rejecting.reason.trim() === ''}
+                            onClick={() => void change(item, 'REJECTED', rejecting.reason.trim())}
+                          >
+                            반려 확정
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            disabled={pendingId === item.request_id}
+                            onClick={() => setRejecting(null)}
+                          >
+                            취소
+                          </Button>
+                        </div>
+                      </div>
+                    ) : SIGNUP_NEXT[item.status].length > 0 ? (
                       <div className="flex flex-wrap gap-2">
                         {SIGNUP_NEXT[item.status].map((next) => (
                           <Button
@@ -115,7 +162,11 @@ export function SignupRequestsView({ items, focusId }: { items: SignupRequestIte
                             size="sm"
                             variant={next === 'REJECTED' ? 'outline' : 'default'}
                             disabled={pendingId === item.request_id}
-                            onClick={() => void change(item, next)}
+                            onClick={() =>
+                              next === 'REJECTED'
+                                ? setRejecting({ id: item.request_id, reason: '' })
+                                : void change(item, next)
+                            }
                           >
                             {ACTION_LABEL[next]}
                           </Button>
