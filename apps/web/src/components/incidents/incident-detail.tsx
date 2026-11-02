@@ -30,7 +30,7 @@ import { Separator } from '@/components/ui/separator';
 import { useRealtime } from '@/components/realtime-provider';
 import type { ActionCandidate, ActionRequest } from '@/lib/action-request';
 import {
-  AUTO_ISOLATION_BLOCKED_NOTICE,
+  AUTO_ISOLATION_BLOCKED_NOTICES,
   agentWaitNotice,
   inAgentWaitWindow,
   preMitigationRecordNote,
@@ -333,7 +333,7 @@ function AgentWaitNotice({
   if (notice.kind === 'BLOCKED') {
     return (
       <div className="border-border bg-muted/50 flex flex-col gap-1.5 rounded-md border p-3 text-sm">
-        <p className="font-medium">{AUTO_ISOLATION_BLOCKED_NOTICE}</p>
+        <p className="font-medium">{AUTO_ISOLATION_BLOCKED_NOTICES[notice.block]}</p>
       </div>
     );
   }
