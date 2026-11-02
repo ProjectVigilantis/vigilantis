@@ -85,7 +85,7 @@ def run_pipeline(publish: Callable[[WsEvent], None] | None = None) -> dict:
 
     from db.repositories import assets as assets_repo
     from db.session import get_engine, get_session_factory
-    from services.collector import collect_and_store
+    from services.collector import collect_and_store_tenants
     from services.rule_engine import run_rule_engine
 
     # AUTOCOMMIT — 세션 레벨 advisory lock 은 트랜잭션이 아니라 커넥션에 매이므로,
@@ -102,7 +102,11 @@ def run_pipeline(publish: Callable[[WsEvent], None] | None = None) -> dict:
             logger.info("scan pipeline skipped: 다른 프로세스가 이미 실행 중(advisory lock 미획득)")
             return {"skipped": True}
 
-        store = collect_and_store()  # 수집→정형화→assets/metric_summaries upsert
+        # 수집→정형화→assets/metric_summaries upsert. ACTIVE 테넌트별 수집이다(#533 E) — ACTIVE 가 없거나
+        # 자격 획득이 실패해도 프로세스 자격의 전역 수집으로 대신하지 않는다(그 결과는 빈/FAILED 목록).
+        store = collect_and_store_tenants()
+        if not store:
+            logger.warning("scan pipeline: ACTIVE 테넌트가 없어 수집할 대상이 없다")
         session_factory = get_session_factory()
         db = session_factory()
         try:

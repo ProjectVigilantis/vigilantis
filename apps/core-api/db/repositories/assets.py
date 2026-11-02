@@ -68,6 +68,25 @@ def _within_regions(stmt, tenant_column, region_column, regions: Sequence[str] |
 # --- CollectionRun -------------------------------------------------------------
 
 
+class OwnershipConflict(Exception):
+    """같은 ARN 의 자산이 다른 고객사 소유이거나, 고객사 행을 소속 없음으로 되돌리려 한다(#533 E).
+
+    덮어쓰지도 옮기지도 않는다. 소속 없던 행의 채택(upsert_asset)만 예외다. 호출부는 그 리전 회차를 실패로 마감한다."""
+
+    def __init__(self, arn: str, existing: Optional[str], incoming: Optional[str]):
+        super().__init__(f"asset ownership conflict for {arn}")
+        self.arn = arn
+        self.existing = existing
+        self.incoming = incoming
+
+
+def _owned_by(stmt, tenant_column, tenant_id: Optional[str]):
+    """수집 단위의 소유 조건. ``None`` 은 소속 없는 기록(legacy 전역 수집)만 — 고객사 행을 건드리지 않는다."""
+    if tenant_id is None:
+        return stmt.where(tenant_column.is_(None))
+    return stmt.where(tenant_column == tenant_id)
+
+
 def start_collection_run(
     db: Session,
     *,
@@ -76,8 +95,10 @@ def start_collection_run(
     mode: str,
     lookback_days: int,
     period_seconds: int,
+    tenant_id: Optional[str] = None,
 ) -> models.CollectionRun:
     run = models.CollectionRun(
+        tenant_id=tenant_id,
         account_id=account_id,
         region=region,
         mode=mode,
@@ -334,15 +355,26 @@ def upsert_asset(
     collected_at: datetime,
     name: Optional[str] = None,
     state: Optional[str] = None,
+    tenant_id: Optional[str] = None,
 ) -> models.Asset:
     """arn 기준 upsert. 수집 회차마다 최신 관측으로 덮어쓴다(이력은 MetricSummary·
     RuleEvaluation이 회차 단위로 보존).
 
     이 함수가 불렸다는 것은 곧 **이번 회차에 관측됐다**는 뜻이므로 소멸 표시를 해제한다
-    (#332) — 자산이 지워졌다 같은 ARN 으로 되살아나는 경우도 이 경로로 돌아온다."""
+    (#332) — 자산이 지워졌다 같은 ARN 으로 되살아나는 경우도 이 경로로 돌아온다.
+
+    ``tenant_id`` 는 이 관측의 소유다(``None`` = 소속 없는 legacy 수집). 저장된 소유가 다르면
+    ``OwnershipConflict`` — 다른 고객사의 행을 덮어쓰지 않고, 고객사 행을 소속 없음으로 되돌리지도 않는다.
+    예외는 하나: 소속 없던 행을 **같은 계정에서 이번에 실제로 관측한** 테넌트가 이어받는다(관측 주도 채택).
+    수집이 계정 일치를 확인한 뒤에만 이 함수에 닿고, 관측하지 못한 자산·과거 기록은 건드리지 않는다."""
     asset = get_asset_by_arn(db, arn)
+    if asset is not None and asset.tenant_id != tenant_id:
+        if asset.tenant_id is not None or tenant_id is None or asset.account_id != account_id:
+            raise OwnershipConflict(arn, asset.tenant_id, tenant_id)
+        asset.tenant_id = tenant_id
     if asset is None:
         asset = models.Asset(
+            tenant_id=tenant_id,
             arn=arn,
             asset_type=asset_type,
             resource_id=resource_id,
@@ -377,6 +409,7 @@ def mark_absent_assets(
     observed_arns: Collection[str],
     absent_at: datetime,
     asset_types: Optional[Collection[AssetType]] = None,
+    tenant_id: Optional[str] = None,
 ) -> list[str]:
     """이번 회차가 관측하지 못한 ``region`` 의 자산에 소멸 표시를 찍고 그 ARN 을 돌려준다.
 
@@ -400,9 +433,15 @@ def mark_absent_assets(
     ``observed_arns`` 가 비어 있으면 대상 유형의 자산이 전부 표시된다. 그것이 맞는
     동작이다 — 관측에 성공한 조회가 아무것도 못 봤다면 AWS 쪽이 실제로 비어 있다.
     """
-    stmt = select(models.Asset).where(
-        models.Asset.region == region,
-        models.Asset.absent_since.is_(None),
+    # 소유가 다른 행은 이번 회차의 관측 범위 밖이다 — 같은 리전이어도 다른 고객사(또는 소속 없는 기록)를
+    # 소멸 처리하지 않는다. ``tenant_id=None`` 은 소속 없는 legacy 기록만이다.
+    stmt = _owned_by(
+        select(models.Asset).where(
+            models.Asset.region == region,
+            models.Asset.absent_since.is_(None),
+        ),
+        models.Asset.tenant_id,
+        tenant_id,
     )
     if observed_arns:
         stmt = stmt.where(models.Asset.arn.notin_(list(observed_arns)))
@@ -561,7 +600,7 @@ def get_metric_summary_for_run(
 
 
 def fresh_ec2_metric_summaries(
-    db: Session, *, region: str, not_older_than: datetime
+    db: Session, *, region: str, not_older_than: datetime, tenant_id: Optional[str] = None
 ) -> tuple[Optional[datetime], dict[str, MetricSummaryContract]]:
     """리전의 EC2 자산별 최신 메트릭 요약 중 not_older_than 이후 **창** 의 것만 돌려준다.
 
@@ -577,18 +616,22 @@ def fresh_ec2_metric_summaries(
     원본 값이 보존되므로 **실제로 CloudWatch 를 부른 시각** 을 가리킨다.
     (PR #257 리뷰에서 안성일 지적)
     """
+    # 같은 인스턴스 ID 가 다른 고객사 계정에도 있을 수 있다 — 소유 안의 자산 요약만 재사용한다.
     rows = db.execute(
-        select(models.Asset.resource_id, models.MetricSummary)
-        .join(
-            models.MetricSummary,
-            models.MetricSummary.asset_id == models.Asset.asset_id,
-        )
-        .where(
-            models.Asset.region == region,
-            models.Asset.asset_type == AssetType.EC2,
-            models.MetricSummary.window_end >= not_older_than,
-        )
-        .order_by(
+        _owned_by(
+            select(models.Asset.resource_id, models.MetricSummary)
+            .join(
+                models.MetricSummary,
+                models.MetricSummary.asset_id == models.Asset.asset_id,
+            )
+            .where(
+                models.Asset.region == region,
+                models.Asset.asset_type == AssetType.EC2,
+                models.MetricSummary.window_end >= not_older_than,
+            ),
+            models.Asset.tenant_id,
+            tenant_id,
+        ).order_by(
             models.MetricSummary.window_end.desc(),
             models.MetricSummary.collected_at.desc(),
         )

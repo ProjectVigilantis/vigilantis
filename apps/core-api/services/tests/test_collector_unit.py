@@ -180,7 +180,7 @@ def test_collect_store_region_isolates_failure_and_records(monkeypatch):
     monkeypatch.setattr(C, "collect_region", boom)
     monkeypatch.setattr(
         C, "_record_failed_region",
-        lambda region, cfg, exc, sf: recorded.update(region=region, reason=C._failure_reason(exc)),
+        lambda region, cfg, exc, sf, tenant_id=None: recorded.update(region=region, reason=C._failure_reason(exc)),
     )
     res = C._collect_store_region("bad", {"lookback_days": 14, "period_seconds": 3600}, lambda: _FakeSession())
     assert res["status"] == "FAILED"      # 이 리전만 실패로 마감(예외 삼킴 → 다른 리전 계속)
