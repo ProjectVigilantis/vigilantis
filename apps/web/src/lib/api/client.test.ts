@@ -19,13 +19,22 @@ import {
   requestPasswordReset,
   resendInvite,
   revokeUserSessions,
+  submitSignupRequest,
 } from './client.ts';
-import type { InquiriesResponse, SignupRequestItem, SignupRequestsResponse, UserListItem } from '../../types/api.ts';
+import type {
+  InquiriesResponse,
+  SignupRequestAccepted,
+  SignupRequestCreate,
+  SignupRequestItem,
+  SignupRequestsResponse,
+  UserListItem,
+} from '../../types/api.ts';
 
 interface Sent {
   url: string;
   method: string;
   body: unknown;
+  headers: Record<string, string>;
 }
 
 /** fetch를 바꿔 끼워 보낸 요청을 기록하고 정해 둔 응답을 돌려준다. 테스트가 끝나면 되돌린다. */
@@ -40,6 +49,7 @@ function stubFetch(t: { after: (fn: () => void) => void }, respond: () => Respon
       url: String(input),
       method: init?.method ?? 'GET',
       body: typeof init?.body === 'string' ? JSON.parse(init.body) : null,
+      headers: { ...(init?.headers as Record<string, string> | undefined) },
     });
     return respond();
   };
@@ -59,6 +69,37 @@ test('비밀번호 재설정 요청 · 확인은 입력값을 다듬지 않고 �
   assert.deepEqual(sent[0].body, { email: ' User@Example.com ' });
   assert.match(sent[1].url, /\/api\/v1\/auth\/password-reset\/confirm$/);
   assert.deepEqual(sent[1].body, { email: 'User@Example.com', code: '012345', new_password: ' Aa1!aaaaaaaa ' });
+});
+
+test('도입 신청은 재시도 키를 Idempotency-Key 헤더로 싣는다(없으면 서버가 422로 거절)', async (t) => {
+  const accepted: SignupRequestAccepted = { request_id: 'request-1' };
+  const sent = stubFetch(t, () => new Response(JSON.stringify(accepted), { status: 202 }));
+  const body: SignupRequestCreate = {
+    company_name: 'Example Corp',
+    contact_name: 'Kim',
+    email: 'admin@example.invalid',
+    phone: null,
+    note: null,
+  };
+  const key = '7f9c2ba4-e88f-4d6e-9a1b-3c5d7e9f1a2b';
+  const result = await submitSignupRequest(body, key);
+  assert.match(sent[0].url, /\/api\/v1\/signup-requests$/);
+  assert.equal(sent[0].method, 'POST');
+  assert.deepEqual(sent[0].body, body);
+  assert.equal(sent[0].headers['Idempotency-Key'], key);
+  assert.equal(sent[0].headers['Content-Type'], 'application/json');
+  assert.deepEqual(result, accepted);
+});
+
+test('도입 신청의 401은 로그인 이동 없이 ApiError로 올라온다(로그인 전 화면)', async (t) => {
+  stubFetch(t, errorResponse(401, 'AUTH_REQUIRED'));
+  await assert.rejects(
+    submitSignupRequest(
+      { company_name: 'c', contact_name: 'n', email: 'e@example.invalid', phone: null, note: null },
+      '7f9c2ba4-e88f-4d6e-9a1b-3c5d7e9f1a2b',
+    ),
+    (error: unknown) => error instanceof ApiError && error.httpStatus === 401,
+  );
 });
 
 test('사용자 관리 조치의 경로 · 메서드 · 본문', async (t) => {

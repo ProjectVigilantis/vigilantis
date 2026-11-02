@@ -1053,6 +1053,25 @@ export interface SignupRequestsResponse extends PaginationMetadata {
   items: SignupRequestItem[];
 }
 
+/**
+ * `POST /signup-requests`: 로그인 없이 받는다(packages/schemas/api/signup_requests.py). 재시도 키는
+ * `Idempotency-Key` 헤더로 싣는다(lib/api/client.ts `submitSignupRequest`).
+ */
+export interface SignupRequestCreate {
+  company_name: string;
+  contact_name: string;
+  /** 승인되면 이 이메일로 회사 관리자 계정을 초대한다. */
+  email: string;
+  phone: string | null;
+  /** 관제할 AWS 환경(자유 입력). */
+  note: string | null;
+}
+
+/** `POST /signup-requests` 202 응답. 처음 접수와 같은 키의 재시도 응답이 같다. */
+export interface SignupRequestAccepted {
+  request_id: string;
+}
+
 export type InquiryStatus = 'OPEN' | 'IN_PROGRESS' | 'RESOLVED';
 export type InquiryCategory = 'OUTAGE' | 'BUG' | 'OTHER';
 
@@ -1132,15 +1151,4 @@ export interface AuditEventsResponse {
   items: AuditEventItem[];
   /** 다음 쪽 질의에 그대로 돌려준다(해석하지 않는다). null 이면 마지막 쪽. */
   next_cursor: string | null;
-}
-
-/** `POST /signup-requests`: 로그인 없이 받는다. 202 { request_id }(packages/schemas/api/signup_requests.py). */
-export interface SignupRequestCreate {
-  company_name: string;
-  contact_name: string;
-  /** 승인되면 이 이메일로 회사 관리자 계정을 초대한다. */
-  email: string;
-  phone: string | null;
-  /** 관제할 AWS 환경(자유 입력). */
-  note: string | null;
 }

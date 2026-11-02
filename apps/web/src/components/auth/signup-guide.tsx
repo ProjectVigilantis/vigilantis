@@ -11,16 +11,15 @@
 //     새 비밀번호 · 2단계 인증 등록을 마친다(LoginFlow의 첫 로그인 단계). 조사한 서비스도 직원은 관리자 초대가 기본이다
 //     (Datadog: 이메일 초대 · 역할 지정 · 초대 대기 상태 · 재발송).
 //
-// 신청은 `POST /signup-requests`로 보낸다(계약 초안, types/api.ts 끝). 받으면 관리자 웹 알림 종에 뜨고 도입 신청함에 쌓인다.
-// 서버에 아직 경로가 없으면(404 · 405) 오류 대신 준비 중이라고 적는다.
+// 신청은 `POST /signup-requests`로 보낸다(types/api.ts `SignupRequestCreate`). 받으면 관리자 웹 알림 종에 뜨고 도입
+// 신청함에 쌓인다.
 
 import { ArrowLeft, Building2, CircleCheck, MailCheck } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
 
 import { INPUT_CLASS as INPUT, LABEL_CLASS as LABEL } from '@/components/form-classes';
 import { Button } from '@/components/ui/button';
-import { ApiError, submitSignupRequest } from '@/lib/api/client';
-import { notYetServed } from '@/lib/support';
+import { ApiError, newIdempotencyKey, submitSignupRequest } from '@/lib/api/client';
 import { cn } from '@/lib/utils';
 
 type View = 'CHOOSE' | 'APPLY' | 'INVITED';
@@ -139,8 +138,15 @@ const optional = (value: FormDataEntryValue | null) => {
   return text === '' ? null : text;
 };
 
-/** 도입 신청서. 보내면 접수 안내로 바뀐다. */
+/**
+ * 도입 신청서. 보내면 접수 안내로 바뀐다.
+ *
+ * 재시도 키(`Idempotency-Key`)는 입력이 바뀔 때마다 새로 만든다. 같은 값으로 다시 보내면 같은 키라, 응답만 끊긴
+ * 재전송에 서버가 처음 접수를 돌려준다(중복 접수 없음). 값을 고친 뒤 보내면 새 키라, 첫 요청이 실제로는 접수됐어도
+ * 409(같은 키 · 다른 값)에 걸리지 않는다. 제출 중 중복 클릭은 `pending`이 막는다.
+ */
 function ApplyForm() {
+  const [idempotencyKey, setIdempotencyKey] = useState(newIdempotencyKey);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sentTo, setSentTo] = useState<string | null>(null);
@@ -158,16 +164,10 @@ function ApplyForm() {
         email,
         phone: optional(form.get('phone')),
         note: optional(form.get('note')),
-      });
+      }, idempotencyKey);
       setSentTo(email);
     } catch (cause) {
-      setError(
-        cause instanceof ApiError && notYetServed(cause.httpStatus)
-          ? '신청 접수 기능이 아직 서버에 열리지 않았습니다.'
-          : cause instanceof ApiError
-            ? cause.message
-            : '신청을 보내지 못했습니다. 잠시 뒤 다시 시도해 주세요.',
-      );
+      setError(cause instanceof ApiError ? cause.message : '신청을 보내지 못했습니다. 잠시 뒤 다시 시도해 주세요.');
     } finally {
       setPending(false);
     }
@@ -189,7 +189,11 @@ function ApplyForm() {
   return (
     <div className="flex flex-col gap-5">
       <Steps steps={APPLY_STEPS} />
-      <form className="flex flex-col gap-4 border-t pt-5" onSubmit={onSubmit}>
+      <form
+        className="flex flex-col gap-4 border-t pt-5"
+        onSubmit={onSubmit}
+        onChange={() => setIdempotencyKey(newIdempotencyKey())}
+      >
         <div className="flex flex-col gap-1.5">
           <label htmlFor="apply-company" className={LABEL}>
             회사명
