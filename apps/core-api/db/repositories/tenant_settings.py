@@ -106,6 +106,25 @@ def lock_all(db: Session) -> list[_S]:
     ))
 
 
+def delete_disposable(db: Session, tenant_id: str, deletable_statuses: Iterable[object]) -> int:
+    """삭제할 수 있는 상태의 테넌트가 가진 일회용 설정 행만 지운다 — 지운 행 수.
+
+    MANAGED 채널은 플랫폼 자원(Secrets Manager · SNS 구독)을 가리키므로 남긴다(호출부의 테넌트 삭제는
+    FK 로 거절된다). LEGACY_* · CLEARED · 미정은 외부 환경 · 토픽을 가리키거나 아무것도 가리키지 않아
+    행만 지우면 된다. 바인딩 · 정리 대기열은 건드리지 않는다.
+    """
+    return db.execute(
+        delete(_S)
+        .where(
+            _S.tenant_id == tenant_id,
+            _S.tenant_id.in_(select(_T.tenant_id).where(_T.status.in_(tuple(deletable_statuses)))),
+            _S.slack_source.is_distinct_from("MANAGED"),
+            _S.email_source.is_distinct_from("MANAGED"),
+        )
+        .execution_options(**_NO_SYNC)
+    ).rowcount
+
+
 def route_rows(db: Session) -> list[tuple[str, str, _S | None]]:
     """알림 라우트 원천 — 모든 테넌트의 (tenant_id, 계정, 설정 행 또는 None)."""
     return [

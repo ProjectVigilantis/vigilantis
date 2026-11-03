@@ -23,6 +23,7 @@ from auth.access import is_central_admin, is_tenant_manager, tenant_scope_ids
 from config import TenantSettings
 from db import models
 from db.repositories import auth as auth_repo
+from db.repositories import tenant_settings as settings_repo
 from db.repositories import tenants as tenants_repo
 from exceptions import ApiError
 from identifiers import canonical_id
@@ -352,11 +353,14 @@ def suspend_tenant(
 
 
 def delete_tenant(db: Session, actor: admin_service.Actor, tenant_id: str) -> None:
-    """연결된 적 없는 테넌트만 지운다. 그 테넌트를 가리키는 사용자 · 기록이 있으면 FK 가 막아 409 다."""
+    """연결된 적 없는 테넌트만 지운다. 그 테넌트를 가리키는 사용자 · 기록(MANAGED 알림 설정 포함)이 있으면 FK 가 막아 409 다."""
     with _management(db, actor) as user:
         stored_id = _load(db, tenant_id, user).tenant.tenant_id
         try:
             with db.begin_nested():  # FK 거절이 이 삭제만 되돌린다
+                # 가져온 옛 설정(LEGACY_*)이나 태그뿐인 행이 지우기를 막지 않게 먼저 지운다.
+                # MANAGED 행은 남아 FK 가 거절하고, 아래 SAVEPOINT 가 이 삭제도 되돌린다
+                settings_repo.delete_disposable(db, stored_id, tenants_repo.DELETABLE_STATUSES)
                 deleted = tenants_repo.delete_tenant(db, stored_id)
         except IntegrityError as exc:
             raise ApiError(ErrorCode.TENANT_STATE_CONFLICT) from exc

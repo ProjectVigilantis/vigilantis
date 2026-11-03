@@ -5,6 +5,7 @@
 #   - 범위: auth.access 하나 — CENTRAL_ADMIN 전체, TENANT_MANAGER 배정 고객, 고객사 계정은 자기 고객.
 #     쓰기 역할은 access.require_admin(고객사 ADMIN · 테넌트 관리 등급)이다. 범위 밖 · 없는 · 형식이 틀린
 #     ID 는 같은 404 TENANT_NOT_FOUND, 정지 고객 쓰기는 409 TENANT_SUSPENDED 다.
+#     쓰기는 ACTIVE 에만 허용하며, 연결 전 고객은 409 TENANT_STATE_CONFLICT 로 거절한다.
 #   - 쓰기: ① 짧은 사전 판정(잠금 없음) → ② 새 Slack URL 이면 준비 기록 commit 뒤 Secrets Manager 에 새
 #     비밀을 만든다(트랜잭션 밖) → ③ app_users 잠금 안에서 세션 · 역할 · 범위 · 고객 상태를 다시 판정하고
 #     설정 · 알림 바인딩 · 정리 대기열을 한 commit 으로 바꾼다. ③이 거절 · 실패하면 준비 비밀은 바로 정리
@@ -147,6 +148,8 @@ def _writable_target(db: Session, user: service.CurrentUser, tenant_id: str, *, 
     tenant = _target(db, user, tenant_id, lock=lock)
     if tenant.status is TenantStatus.SUSPENDED:
         raise ApiError(ErrorCode.TENANT_SUSPENDED)
+    if tenant.status is not TenantStatus.ACTIVE:
+        raise ApiError(ErrorCode.TENANT_STATE_CONFLICT)
     return tenant
 
 

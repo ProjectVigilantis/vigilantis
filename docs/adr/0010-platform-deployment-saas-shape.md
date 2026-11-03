@@ -3,7 +3,7 @@
 - **Status**: Accepted
 - **Date**: 2026-10-12
 - **Amended**: 2026-10-16(1차 — 사용자 도메인 `vigilantis.dev` 연결과 웹 API 주소·CORS 반영 · 핵심 결정 불변) · 2026-10-20(2차 — 알림 발송 권한 확장) · 2026-11-03(3차 — 고객 알림 설정 권한 확장 · 접근 역할·고객 계정 권한 불변) — 하단 §개정 이력
-- **Deciders**: 최초 결정 — 김세혁(PM/Infra · `INFRA` 담당 결정)·안성일(AI·Architect · FastAPI 아키텍처·DB 검토) / 1차 개정 — 안성일 제안·김세혁 승인(PR #480) / 2차 개정 — 안성일 제안·김세혁 승인(PR #505) / 3차 개정 — 안성일 제안·승인권자 김세혁
+- **Deciders**: 최초 결정 — 김세혁(PM/Infra · `INFRA` 담당 결정)·안성일(AI·Architect · FastAPI 아키텍처·DB 검토) / 1차 개정 — 안성일 제안·김세혁 승인(PR #480) / 2차 개정 — 안성일 제안·김세혁 승인(PR #505) / 3차 개정 — 안성일 제안·김세혁 승인(PR #576)
 - **Refs**: [ADR-0006](0006-localstack-team-standard-env.md) §2(IaC Post-MVP) · [ADR-0009](0009-real-aws-smoke-environment.md)(스모크 환경 · 앱 정책) · #435 4-2·6-1 · #467(사용자 도메인·CORS) · #468(개정 취합) · #493(알림 발송 연결 · 2차 개정) · #564(고객 알림 설정 · 3차 개정)
 
 ## Context (배경)
@@ -138,4 +138,4 @@ MVP는 단일 계정(SSOT §MVP 확정 범위)이므로 계정을 가를 수 없
 
   구현은 PR #467(`scripts/provision_platform_aws.py`의 `public_origins`·`_require_custom_domain`·`_ensure_custom_domain`, `down`의 별칭 레코드 정리)이고, 배포 확인 기록은 #468과 [`docs/AWS_SMOKE_RESULT.md`](../AWS_SMOKE_RESULT.md) §11에 있다.
 - **2026-10-20 (2차 개정 — #493)** — 태스크 역할에 승인된 SNS 주제 발행을, 실행 역할에 승인된 기존 Slack 비밀 주입을 더하고 알림은 기본 끔으로 두었다(§3·§5). 검증 범위는 개인 AWS 계정의 일회용 ECS 시험 태스크에서 확인한 알림 발송 경로와 채널별 대표 수신 화면이다. 운영 절차는 [`README.md`](../../README.md)의 외부 알림 운영 (#493) 절에, 시험 근거는 [#493 시험 기록 코멘트](https://github.com/ProjectVigilantis/vigilantis/issues/493#issuecomment-6330758930)에서 관리한다.
-- **2026-11-03 (3차 개정 — #564)** — 고객이 화면에서 넣는 알림 목적지(T-7)를 위해 태스크 역할에 플랫폼 계정·리전의 T-7 전용 접두 아래 SNS 주제·Secrets Manager 비밀 관리를 더했다(§3 · Consequences). 2차 개정의 권한은 배포 때 승인한 ARN과 기동 때 주입하는 Slack 비밀을 전제로 해, 실행 중 고객이 바꾸는 목적지를 담을 수 없기 때문이다. 접근 역할·고객 계정 쪽 권한, 2차 개정의 정적 라우트와 실행 역할 주입, 권한 준비와 발송 활성화의 분리, 알림 기본 끔은 유지한다.
+- **2026-11-03 (3차 개정 — #564)** — 고객이 화면에서 넣는 알림 목적지(T-7)를 위해 태스크 역할에 플랫폼 계정·리전의 T-7 전용 접두 아래 SNS 주제·Secrets Manager 비밀 관리를 더했다(§3 · Consequences). 김세혁 [ADR 개정 승인(PR #576)](https://github.com/ProjectVigilantis/vigilantis/pull/576#pullrequestreview-5746378940). 2차 개정의 권한은 배포 때 승인한 ARN과 기동 때 주입하는 Slack 비밀을 전제로 해, 실행 중 고객이 바꾸는 목적지를 담을 수 없기 때문이다. 접근 역할·고객 계정 쪽 권한, 2차 개정의 정적 라우트와 실행 역할 주입, 권한 준비와 발송 활성화의 분리, 알림 기본 끔은 유지한다.

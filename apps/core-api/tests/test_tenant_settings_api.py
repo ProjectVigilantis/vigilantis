@@ -207,6 +207,17 @@ def test_suspended_customer_can_read_but_nobody_writes(client_pg, db, login_as, 
     assert secrets.calls == [] and _row(db, tenant_id) is None
 
 
+def test_pending_tenant_settings_write_is_409_and_tenant_stays_deletable(client_pg, db, make_tenant):
+    tenant_id = make_tenant(TenantStatus.PENDING_CONNECTION)
+    assert client_pg.get(_url(tenant_id)).status_code == 200
+
+    resp = client_pg.patch(_url(tenant_id), json={"protected_tags": []})
+
+    assert resp.status_code == 409 and _code(resp) == "TENANT_STATE_CONFLICT"
+    assert _row(db, tenant_id) is None
+    assert client_pg.delete(f"{BASE}/{tenant_id}").status_code == 204
+
+
 # ----- 쓰기 역할 · 잠금 안 재판정 ------------------------------------------------------
 
 

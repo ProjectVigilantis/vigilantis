@@ -11,8 +11,9 @@
 #   계정·역할·범위는 #553의 인증 계약을 재사용한다. 기존 관리 router의 플랫폼
 #   전용 의존성을 완화하지 않고, 저장 직전 현재 신원·범위를 다시 검사한다.
 # - 미인증 401 AUTH_REQUIRED, 역할 거부 403 AUTH_FORBIDDEN, 범위 밖·없는 대상
-#   404 TENANT_NOT_FOUND, 정지 고객 쓰기 409 TENANT_SUSPENDED, 입력 오류
-#   422 REQUEST_VALIDATION_FAILED. 내부 실패는 공통 500 INTERNAL_ERROR.
+#   404 TENANT_NOT_FOUND, 정지 고객 쓰기 409 TENANT_SUSPENDED, 연결 전 고객 쓰기
+#   409 TENANT_STATE_CONFLICT, 입력 오류 422 REQUEST_VALIDATION_FAILED.
+#   쓰기는 ACTIVE 에만 허용한다. 내부 실패는 공통 500 INTERNAL_ERROR.
 # - PATCH 생략은 유지, protected_tags 배열은 전체 교체, []는 태그 보호 없음.
 #   tags/notifications 자체의 null과 빈 PATCH는 거부한다. 채널의 null은 해제다.
 # - 태그 키는 대소문자 무시, 값은 양끝 공백 제거·대소문자 무시 후 정확 일치.

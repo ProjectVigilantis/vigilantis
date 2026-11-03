@@ -44,6 +44,7 @@ from notifications.settings_source import (
 )
 from schemas.api.incidents import RiskLevel
 from schemas.api.settings import TenantSettingsUpdateRequest
+from schemas.api.tenants import TenantVerificationResult
 from services.aws.settings_notifications import (
     SettingsProviderError,
     SettingsResources,
@@ -856,6 +857,10 @@ def test_deleted_legacy_tenant_survives_restarts_without_regaining_send_authorit
             db, name="takeover", aws_account_id=w.accounts[x], regions=["ap-northeast-2"],
             now=datetime.now(UTC),
         ).tenant_id
+        # 설정 저장은 ACTIVE 만 받는다 — 연결 확인을 거친 정상 생애 주기로 맞춘다
+        assert tenants_repo.record_verification(
+            db, y, result=TenantVerificationResult.OK, reason_code=None, now=datetime.now(UTC),
+        )
         db.commit()
     committed_auth._tenant_ids.append(y)  # world 정리(설정 행 삭제) 뒤 고객 행을 지운다
     w.accounts[y] = w.accounts[x]
@@ -871,3 +876,41 @@ def test_deleted_legacy_tenant_survives_restarts_without_regaining_send_authorit
     _drain(dispatcher, "SLACK")
     assert _deliveries(w, taken_over)["SLACK"].state == "SUCCEEDED"
     assert w.slack.posts == [WEBHOOK_A, WEBHOOK_B] and WEBHOOK_X not in w.slack.posts
+
+
+def test_pending_legacy_tenant_is_deletable_through_the_workflow_and_restarts_without_delivery(world, committed_auth):
+    from schemas.api.tenants import TenantStatus
+    from tenant_admin import delete_tenant
+
+
+    w = world
+    p = committed_auth.make_tenant(status=TenantStatus.PENDING_CONNECTION)
+    with Session(w.engine) as db:
+        w.accounts[p] = db.get(models.Tenant, p).aws_account_id
+    environ = {**ENV, "SLACK_P": WEBHOOK_X}
+    legacy = RouteRegistry.from_mapping({"routes": [
+        {"tenant_id": w.a, "aws_account_id": w.accounts[w.a], "slack_webhook_env": "SLACK_A"},
+        {"tenant_id": p, "aws_account_id": w.accounts[p], "slack_webhook_env": "SLACK_P"},
+    ]}, environ)
+    _dispatcher(w, legacy, environ).initialize()  # 연결 전 고객의 파일 라우트도 설정 행으로 가져온다
+    assert _record(w, p).slack_source == "LEGACY_ENV"
+    bound = _bindings(w, p)
+    assert "SLACK" in bound
+
+    with w.sessions() as db:
+        delete_tenant(db, w.actor, p)  # 가져온 설정 행이 지우기를 막지 않는다
+    assert _record(w, p) is None
+    assert _bindings(w, p) == bound  # 바인딩은 과거 증거로 남는다
+
+    for _ in range(2):  # 같은 파일로 재기동해도 시작이 실패하지 않는다
+        dispatcher = _dispatcher(w, legacy, environ)
+        dispatcher.initialize()
+    assert _record(w, p) is None
+    _activate_now(w)
+    fresh = _event(w, p)
+    dispatcher.discover("SLACK")
+    _open(w)
+    _drain(dispatcher, "SLACK")
+    stored = _deliveries(w, fresh).get("SLACK")
+    assert stored is None or stored.state == "BLOCKED"
+    assert WEBHOOK_X not in w.slack.posts
