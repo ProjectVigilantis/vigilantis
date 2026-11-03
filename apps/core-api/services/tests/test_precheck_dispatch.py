@@ -517,9 +517,14 @@ def test_dry_run_flag_is_always_set(aws):
 
 
 # ------------------------------------------------------------------ 런북별 실패 경로
-def test_nacl_add_deny_refuses_a_rule_number_in_use(aws):
+@pytest.mark.parametrize("rule_number,allow_number", [(100, None), (200, 100), (100, 100)])
+def test_nacl_add_deny_refuses_a_rule_number_in_use(aws, rule_number, allow_number):
+    if allow_number is not None:
+        aws(describe_network_acls={"NetworkAcls": [{"Entries": [
+            {"RuleNumber": allow_number, "Egress": False, "RuleAction": "allow"},
+        ]}]})
     _, params = VALID["RUNBOOK_NACL_ADD_DENY"]
-    outcome = run("RUNBOOK_NACL_ADD_DENY", params={**params, "rule_number": 100})
+    outcome = run("RUNBOOK_NACL_ADD_DENY", params={**params, "rule_number": rule_number})
     assert (outcome.passed, outcome.reason_code) == (False, R.PRECHECK_INVALID_STATE)
 
 

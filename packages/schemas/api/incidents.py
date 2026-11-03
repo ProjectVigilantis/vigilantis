@@ -95,11 +95,14 @@ class ResponseMode(str, Enum):
 
 @unique
 class AutoIsolationBlock(str, Enum):
-    """자동 발동(High 선차단·Medium 1분 격리)이 막힌 이유 — 사람이 승인해야만 조치된다. (Issue #521)
+    """자동 발동(High 선차단·Medium 1분 격리)이 막힌 이유. 정지가 아니면 사람의 승인이 필요하다. (Issue #521)
 
-    값은 서버 접수 관문의 건너뜀 사유와 같은 철자다. 정지(TENANT_SUSPENDED)는 T-4가 더한다.
+    값은 서버 접수 관문의 건너뜀 사유와 같은 철자다. 둘 다 해당하면 TENANT_SUSPENDED 다 —
+    정지는 자동 조치 설정과 무관한 원격 회수라 다시 켜도 풀리지 않는다(ADR-0012 §3).
     """
 
+    #: 테넌트가 정지(SUSPENDED)됐다 — 플랫폼이 그 계정에 새로 들어가지 않는다(T-4 · #533).
+    TENANT_SUSPENDED = "TENANT_SUSPENDED"
     #: 테넌트가 자동 조치를 껐다. 또는 그 발동을 정한 시각(High 접수 시각·Medium 응답 기한)이
     #: 마지막으로 다시 켠 시각 이전이다 — 꺼진 동안의 판단은 다시 켜도 사람 없이 실행하지 않는다.
     AUTO_ACTION_DISABLED = "AUTO_ACTION_DISABLED"

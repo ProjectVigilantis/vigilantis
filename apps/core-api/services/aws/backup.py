@@ -63,6 +63,7 @@ from schemas.runbook_parameters import (
 
 from .client import aws_client
 from .errors import reason_code_for
+from .nacl_rules import first_inbound_allow_rule_number
 
 logger = logging.getLogger("vigilantis.aws")
 
@@ -226,7 +227,7 @@ def capture_nacl_rule_index(
     되돌릴 때 필요한 것이 옛 값이 아니라 "우리가 넣은 것이 어느 것인가"이기 때문이다
     (schemas.backups.NaclRuleIndexBackup).
 
-    그래도 AWS를 조회한다. **슬롯이 비어 있는지 확인하는 것이 이 캡처의 일**이다 —
+    그래도 AWS를 조회한다. **슬롯 가용성과 첫 allow 앞 순서를 확인한다** —
     이미 쓰이는 번호라면 삽입은 어차피 NetworkAclEntryAlreadyExists로 거절되고(실측),
     무엇보다 그 슬롯의 규칙은 우리 것이 아니다. 확인 없이 레코드를 남기면 남의 규칙을
     가리키는 백업이 생기고, NACL_RESTORE가 그것을 근거로 삭제한다.
@@ -258,6 +259,13 @@ def capture_nacl_rule_index(
             backup_type,
             R.PRECHECK_INVALID_STATE,
             f"규칙 번호 {rule_number}가 이미 사용 중입니다(인바운드)",
+        )
+    first_allow = first_inbound_allow_rule_number(acl)
+    if first_allow is not None and rule_number >= first_allow:
+        return _fail(
+            backup_type,
+            R.PRECHECK_INVALID_STATE,
+            f"규칙 번호 {rule_number}가 첫 인바운드 allow {first_allow}보다 앞이 아닙니다",
         )
 
     try:

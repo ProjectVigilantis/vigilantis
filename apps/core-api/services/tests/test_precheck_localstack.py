@@ -69,8 +69,9 @@ def fx():
     volume = ec2.describe_volumes(
         Filters=[{"Name": "status", "Values": ["available"]}]
     )["Volumes"][0]["VolumeId"]
-    acl = ec2.describe_network_acls()["NetworkAcls"][0]["NetworkAclId"]
-    return {
+    vpc = ec2.describe_vpcs(Filters=[{"Name": "is-default", "Values": ["true"]}])["Vpcs"][0]["VpcId"]
+    acl = ec2.create_network_acl(VpcId=vpc)["NetworkAcl"]["NetworkAclId"]
+    yield {
         "ec2": ec2,
         "arn": arn,
         "instance": instance,
@@ -81,6 +82,7 @@ def fx():
             f"arn:aws:elasticloadbalancing:{region}:{account}:targetgroup/vigilantis/abc"
         ),
     }
+    ec2.delete_network_acl(NetworkAclId=acl)
 
 
 class Loader:

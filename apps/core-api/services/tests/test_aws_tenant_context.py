@@ -260,6 +260,21 @@ def test_switch_off_without_scope_keeps_the_process_credentials(
     assert [(a, k) for a, k, _p in aws.sent] == [("GetCallerIdentity", "PROCESSKEY")]
 
 
+def test_none_scope_hides_the_outer_tenant(aws, settings, monkeypatch):
+    """테넌트 없음(소속 없는 기록 · #533 E)은 바깥 테넌트 자격을 물려받지 않는다 — 문맥 밖 규칙 그대로다."""
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "PROCESSKEY")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "s")
+    with tenant_scope(TENANT_A):
+        with tenant_scope(None):
+            assert client_module.current_tenant() is None
+            client_module.aws_client("sts").get_caller_identity()
+            settings(TENANT_CONTEXT_REQUIRED=True)
+            with pytest.raises(TenantContextRequired):
+                client_module.aws_client("ec2")
+        assert client_module.current_tenant() == TENANT_A
+    assert [(a, k) for a, k, _p in aws.sent] == [("GetCallerIdentity", "PROCESSKEY")]
+
+
 def test_tenant_session_ignores_process_keys_and_profile(
     aws, settings, monkeypatch, tmp_path
 ):

@@ -174,6 +174,8 @@ class Ec2IsolateCandidateParameters(_Parameters):
 
 
 class NaclAddDenyCandidateParameters(_Parameters):
+    """번호는 서버가 현재 NACL에서 선택하고, 차단 범위는 AI가 제안한다."""
+
     rule_number: RuleNumber
     cidr_block: Ipv4Cidr
     protocol: NaclProtocol
@@ -324,11 +326,12 @@ CANDIDATE_PARAMETER_MODELS: Mapping[RunbookId, type[BaseModel]] = {
     RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED: EbsDeleteUnattachedCandidateParameters,
 }
 
-# 후보 파라미터 중 그래프가 규칙으로 계산해 채우는 키(#251). AI 출력 스키마와 capability
-# 명세에서 빠진다 — 모델에게 채우라고 하지 않은 값은 모델이 채울 자리도 두지 않는다.
-# 계산하는 곳은 ai/agent.py _server_parameter_values다.
+# 후보 파라미터 중 서버가 계산해 채우는 키. 해당 런북의 AI 몫과 capability 명세에서 빠진다.
+# 다른 런북 때문에 공용 출력 필드가 남아 있어도 이 런북에서는 모델 값을 읽지 않는다.
+# RIGHTSIZING은 그래프가 계산하고 NACL 번호는 Dispatcher가 AWS 조회 후 공급한다.
 SERVER_COMPUTED_CANDIDATE_PARAMS: Mapping[RunbookId, frozenset[str]] = {
     RunbookId.RUNBOOK_EC2_RIGHTSIZING: frozenset({"target_instance_type"}),
+    RunbookId.RUNBOOK_NACL_ADD_DENY: frozenset({"rule_number"}),
 }
 
 

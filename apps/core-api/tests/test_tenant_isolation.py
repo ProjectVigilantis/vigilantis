@@ -8,13 +8,15 @@ ADR-0012 §3 ②(IAM 회수 = 앱 밖 운영자 권한)도 이 파일 밖이다 
 판정 순서(계약 원문 `packages/schemas/api/tenants.py` 머리말 「기존 경로의 테넌트 범위」):
     역할(403) → 범위(404) → 같은 Key 재요청 → 정지(409) → 상태(409)
 
-전제(모두 `dev`에 있음 — 1~15·16a를 켠다):
+전제(모두 `dev`에 있음 — 17행 전부 켠다):
     ① `CurrentUser.account_type`·`tenant_id`(T-1 PR 4 = PR #527 · `auth/service.py`)
     ② 인시던트 목록·상세·실행·종료 경로의 테넌트 범위(T-4 2단계 = #533 C = PR #550 · `routers/incidents.py`)
     ③ 픽스처 `make_tenant(status=None)` · `make_auth_session(role, tenant_id=...)` · `login_as(role, tenant_id=...)`
-      (PR #527 conftest — 기본은 플랫폼 ADMIN, 고객사 세션은 `login_as(role, tenant_id=make_tenant())`)
-    ④ PR #527의 임시 업무 관문(`require_business_access`) 해제 — 걷는 자리는 경로별로
-      인시던트·조치·자산 목록 = PR #550(걷힘) / 메트릭 시계열 = #536(16b 보류) / WebSocket = #535(17 보류)
+      (PR #527 conftest — 기본은 플랫폼 ADMIN, 고객사 세션은 `login_as(role, tenant_id=make_tenant())`) ·
+      고객사 WS 세션은 `make_tenant_ws_client(tenant_id)`(PR #567 conftest)
+    ④ PR #527의 임시 업무 관문 해제 — 경로별로 전부 걷힘
+      인시던트·조치·자산 목록 = PR #550 / 메트릭 시계열 = #536(PR #568 · `require_business_access` 삭제 · 16b) /
+      WebSocket = #535(PR #567 · `routers/ws.py` authorize가 이벤트마다 `Incident.tenant_id`로 건다 · 17)
 
 분담(#529 10/28): 경로 전체 회귀는 이 파일이, 판정 순서의 **경계**(정지 전 접수 Key 재요청 200 ·
 소속 없는 MVP 기록 404)는 `test_incident_tenant_scope.py`(PR #550)가 맡는다 — 같은 기대값을 두 파일이
@@ -29,8 +31,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-import pytest
+from realtime import incident_event
 from schemas.api.auth import UserRole
+from schemas.api.ws import WsEventType
 from schemas.collections import CollectionRunStatus
 from tests.test_asset_tenant_scope import MVP_ACCOUNT, REGION, _collected
 from tests.test_incident_tenant_scope import (
@@ -44,8 +47,27 @@ from tests.test_incident_tenant_scope import (
     published,  # noqa: F401 — 픽스처 재사용
     two_tenants,  # noqa: F401 — 픽스처 재사용
 )
+from tests.test_metrics_api import (
+    _DB_AXES,
+    _OWNED_COUNTS,
+    SEOUL,
+    URL as METRICS,
+    _callers,
+    _db_totals,
+    _fresh_cloudwatch_cache,  # noqa: F401 — autouse 픽스처 재사용(CloudWatch 캐시는 프로세스 전역)
+    _seed_owned_world,
+    _series_values,
+    owner_cloudwatch,  # noqa: F401 — 픽스처 재사용
+    set_regions,  # noqa: F401 — 픽스처 재사용
+)
+from tests.test_ws_access import (
+    _next_incident_id,
+    tenant_incidents,  # noqa: F401 — 픽스처 재사용(commit된 A·B·NULL 인시던트)
+)
 
 INCIDENTS = "/api/v1/incidents"
+WS = "/api/v1/ws"
+T0 = datetime(2026, 10, 30, 1, 0, tzinfo=UTC)
 
 
 def _listed(client) -> set[str]:
@@ -261,13 +283,38 @@ def test_assets_hide_other_tenant(db, client_pg, login_as, make_tenant, monkeypa
     assert body["uncollected"] == []
 
 
-@pytest.mark.skip(reason="보류 — #536(메트릭 시계열 테넌트 범위) 머지 뒤 켠다(#529 16b)")
-def test_metrics_timeseries_hide_other_tenant(client_pg, db, login_as, make_tenant):
-    """16b. A-OPERATOR `GET /metrics/timeseries`(B 자산) → B 시계열 없음(필터 · 404 자리 없음) — #536."""
-    raise NotImplementedError("T-5 16b — #536 머지 뒤 채운다")
+def test_metrics_timeseries_hide_other_tenant(client_pg, db, login_as, make_tenant, set_regions, owner_cloudwatch):
+    """16b. A-OPERATOR `GET /metrics/timeseries` → 6축에 B·MVP(테넌트 없음) 기록 안 섞임(필터 · 404 자리 없음) — #536.
+
+    시드·집계 헬퍼는 PR #568의 `test_metrics_api.py` 것을 그대로 쓴다(A 1 · B 2 · MVP 4건이 같은 칸).
+    범위가 새면 DB 네 축의 합이 1을 넘고, CPU·네트워크 곡선에 B·MVP의 EC2 ARN이 실리고, CloudWatch 호출이
+    A 자격 밖(프로세스 자격 None · B 자격)으로 나간다 — 셋 다 본다."""
+    set_regions(SEOUL)
+    world = _seed_owned_world(db, make_tenant)
+    login_as(UserRole.OPERATOR, tenant_id=world["A"].tenant_id)
+    cw = owner_cloudwatch()
+
+    body = client_pg.get(METRICS).json()
+
+    for axis in ("cpu", "network", *_DB_AXES):
+        assert (body[axis]["status"], body[axis]["reason_code"]) == ("READY", None), axis
+    assert _db_totals(body) == {axis: [_OWNED_COUNTS["A"]] for axis in _DB_AXES}
+    for axis, points in (("cpu", "points"), ("network", "in_points"), ("network", "out_points")):
+        assert set(_series_values(body, axis, points)) == {world["A"].ec2_arn}, axis
+    assert _callers(cw) == [world["A"].tenant_id] * 2
 
 
-@pytest.mark.skip(reason="보류 — #535(WebSocket 테넌트 범위) 머지 뒤 켠다(#529 17 · 전제 ③ WS)")
-def test_ws_does_not_deliver_other_tenants_events(ws_client, db, make_tenant):
-    """17. A WS 연결 중 B 인시던트 갱신 → 이벤트 미수신 — #535(`ws_client`는 플랫폼 세션이라 고객사 WS 세션 픽스처도 그 카드 뒤)."""
-    raise NotImplementedError("T-5 17 — #535 머지 뒤 채운다")
+def test_ws_does_not_deliver_other_tenants_events(make_tenant_ws_client, tenant_incidents):
+    """17. A WS 연결 중 B 인시던트 갱신 → 이벤트 미수신 — #535(`routers/ws.py` authorize · PR #567).
+
+    거부될 이벤트(B · 소속 없는 MVP 기록 · 없는 인시던트)를 먼저 발행하고 A 것을 마지막에 발행한다 —
+    큐 순서라 하나라도 새면 첫 수신이 A가 아니어서 실패한다(sleep 없이 결정적). 수신 헬퍼는
+    `receive_text_bounded`라 전부 거절돼도 멈추지 않고 실패한다."""
+    tenant_a, _tenant_b, ids = tenant_incidents
+    client, _seed = make_tenant_ws_client(tenant_a, UserRole.OPERATOR)
+    manager = client.app.state.realtime
+
+    with client.websocket_connect(WS) as ws:
+        for incident_id in (ids["b"], ids["null"], "inc-nonexistent", ids["a"]):
+            manager.publish(incident_event(WsEventType.INCIDENT_UPDATED, incident_id=incident_id, occurred_at=T0))
+        assert _next_incident_id(ws) == ids["a"]

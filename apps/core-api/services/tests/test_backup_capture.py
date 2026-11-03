@@ -346,11 +346,14 @@ def test_nacl_capture_stores_the_protocol_as_an_aws_number(nacl):
     assert capture_nacl(protocol="-1").payload["protocol"] == "-1"
 
 
-def test_nacl_capture_refuses_a_slot_that_is_already_used(nacl):
+@pytest.mark.parametrize("entries", [
+    [entry()], [entry(RuleNumber=1, RuleAction="allow")],
+])
+def test_nacl_capture_refuses_a_slot_that_is_already_used(nacl, entries):
     """가드레일 ④가 같은 것을 이미 봤더라도 승인 대기 동안 제3자가 그 번호를 쓸 수
     있다. 확인 없이 레코드를 남기면 남의 규칙을 가리키는 백업이 생기고,
     NACL_RESTORE가 그것을 근거로 삭제한다 — 삭제는 되돌릴 수 없다."""
-    nacl({"NetworkAcls": [{"NetworkAclId": ACL, "Entries": [entry()]}]})
+    nacl({"NetworkAcls": [{"NetworkAclId": ACL, "Entries": entries}]})
 
     capture = capture_nacl()
 

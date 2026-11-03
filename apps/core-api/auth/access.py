@@ -25,8 +25,8 @@
 #     빠지고 상세 · 실행 · 종료는 없는 기록과 같은 404 다. 정지 고객사의 TENANT 계정도 자기 범위의 기록은 조회한다.
 #   - 정지(SUSPENDED): 실행 · 종료의 정지 판정은 요청자 소속이 아니라 대상 인시던트의 고객사로 Workflow 가 범위 ·
 #     멱등 재생 뒤에 한다. 사용자 관리 변경의 정지 판정은 auth.admin_service 몫이다.
-#   - 메트릭: require_business_access 는 메트릭 라우터의 자격 관문 — 플랫폼 관리 등급(CENTRAL_ADMIN ·
-#     TENANT_MANAGER)만 통과하고 범위는 라우트가 건다. 고객사 계정은 역할 · 정지와 관계없이 403 이다.
+#   - 메트릭(#536): 별도 자격 관문 없이 세션 배선만 쓰고, 범위는 라우트가 건다. 고객사 계정은 역할 · 정지와
+#     관계없이 자기 고객사 범위의 시계열을 받는다.
 #     WebSocket 은 연결 수립 · 재확인 때 직접 판정한다(routers/ws.py).
 #   - 통과한 신원(CurrentUser)은 request.state.current_user 에 둔다. 접근 로그(main)가 읽고,
 #     조치 실행 · 종료 라우터는 역할 검사 결과로 같은 신원을 받는다(감사 기록은 T-2).
@@ -170,14 +170,6 @@ def require_action_role(user: service.CurrentUser = _USER) -> service.CurrentUse
     if not (tenant_actor or is_tenant_manager(user)):
         raise ApiError(ErrorCode.AUTH_FORBIDDEN)
     return user
-
-
-def require_business_access(user: service.CurrentUser = _USER) -> service.CurrentUser:
-    """메트릭 라우터의 자격 관문 — 플랫폼 관리 등급(CENTRAL_ADMIN · TENANT_MANAGER)만. 그 밖은 403 AUTH_FORBIDDEN.
-
-    자격만 본다. 범위(TENANT_MANAGER 는 배정 고객사)는 라우트가 tenant_scope_of 로 건다.
-    """
-    return require_tenant_management(user)
 
 
 def require_admin(user: service.CurrentUser = _USER) -> service.CurrentUser:

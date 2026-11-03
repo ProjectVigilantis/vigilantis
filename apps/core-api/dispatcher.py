@@ -26,6 +26,13 @@
 # 보냅니다(_JUDGES) — 기동 요청 접수는 성공의 경계가 아니고 그 판정이 SUCCESS와
 # ROLLBACK_INITIATED를 가르기 때문입니다. (Issue #240)
 #
+# 단계 0건이어도 **대상 테넌트가 정지(SUSPENDED)면 실행으로 넘기지 않습니다**(ADR-0012 §3 ·
+# #533). 정지는 「더 들어가지 않는다」라 자산을 만지기 전의 예약은 새 실행이고, 예약 이후의
+# 거절은 실행 상태로 전달하는 계약대로 FAILED(변경 없이 실패)로 확정합니다. 자동 원복
+# (AUTO_ON_FAILURE)은 예외 — 이미 바뀐 자산을 되돌리는 일이라 끝까지 돕니다. 관문은
+# workflows.refuse_start_if_tenant_suspended 하나이며 runner 진입 전과 첫 단계 commit 직전에
+# 같은 함수로 봅니다.
+#
 # ROLLBACK_INITIATED로 확정된 실행은 재실행·재판정 대상이 아니라 **자동 원복 자식을
 # 낳는 자리**로 갑니다(_initiate_rollback_one, Issue #241). 원본당 1회이며, 두 번째
 # 발동을 막는 것은 이 모듈이 아니라 자식 실행 행의 존재입니다 — 그래서 가드레일이
@@ -81,6 +88,14 @@
 # 주체뿐"이라는 보장은 이 전제 + 스캔 비중첩(max_instances=1)에서 성립합니다.
 # 다중 worker로 갈 때는 commit을 넘어 사는 선점(lease 컬럼 등)을 그 결정과 함께
 # 도입해야 합니다.
+#
+# 실행 1건은 **그 실행 행의 소유 테넌트 자격으로** 돕니다(#533 E, ADR-0012 §2). 선점한 행의
+# tenant_id로 문맥(services/aws/client.tenant_scope)을 세운 뒤 원복 개시·판정·실행으로 보냅니다 —
+# 요청자나 스캔 주체의 소속이 아니고, 테넌트마다 스캔을 되풀이하지도 않습니다. 리전은 지금처럼
+# 저장된 대상 ARN에서 옵니다. 스케줄러 잡은 스레드 풀에서 돌아 문맥을 물려받지 않으므로 잡 안의
+# 이 자리에서 세우고, 성공·예외 모두 되돌립니다. 소속 없는 기록(NULL)은 「테넌트 없음」으로 바깥
+# 문맥을 가립니다 — 소유를 추론하지 않습니다. 테넌트 상태는 여기서 보지 않습니다(정지 관문은
+# 따로 있고, 정지 뒤에도 종료 판정·자동 원복은 끝까지 돕니다). 자격(STS)은 첫 AWS 서명 때 받습니다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -114,6 +129,7 @@ from schemas.runbooks import (
     RunbookId,
     TriggerSource,
 )
+from services.aws.client import tenant_scope
 from sqlalchemy.orm import Session, sessionmaker
 
 logger = logging.getLogger("vigilantis.dispatcher")
@@ -620,6 +636,21 @@ def _dispatch_one(
         db.commit()
         return
 
+    # 실행 행의 소유 테넌트 자격으로 돈다(파일 헤더 · #533 E). 선점 트랜잭션 안에서 읽는다
+    owner = workflows.tenant_access_for(db, claimed.tenant_id)
+    with tenant_scope(owner):
+        _dispatch_claimed(db, claimed, publish, report, policy)
+
+
+def _dispatch_claimed(
+    db: Session,
+    claimed: models.ActionExecution,
+    publish: Publish | None,
+    report: DispatchReport,
+    policy: workflows.VerificationRetryPolicy,
+) -> None:
+    """선점한 비종료 실행 1건을 원복 개시 · 판정 · 실행으로 보낸다 — 소유 테넌트 문맥 안에서 부른다."""
+    execution_id = claimed.execution_id
     if claimed.status is ExecutionStatus.ROLLBACK_INITIATED:
         # 판정이 끝나 "되돌려야 한다"로 남은 실행이다. 재실행·재판정 대상이 아니라
         # 자동 원복 자식을 낳을 자리다 (Issue #241).
@@ -656,9 +687,36 @@ def _dispatch_one(
         db.commit()
         return
 
-    report.started += 1
     try:
-        outcome = runner(db, execution_id)
+        try:
+            # 단계 0건의 시작 관문 — 대상 테넌트가 정지면 runner 에 넘기지 않는다(백업 캡처 같은
+            # AWS 읽기도 없다). 잠그지 않는다 — 이 트랜잭션은 runner 의 백업 캡처(AWS 호출)까지
+            # 이어진다. 결정적 경계는 첫 단계를 쓰는 workflows._step_recorder 의 FOR SHARE 재확인이다.
+            # 확정은 FAILED(변경 없이 실패)다 — 예약 이후의 거절은 실행 상태로 전달하는 계약이며,
+            # 새 실행이라 다시 시작하지 않는다(ADR-0012 §3)
+            workflows.refuse_start_if_tenant_suspended(
+                db, tenant_id=claimed.tenant_id, trigger_source=claimed.trigger_source, lock=False,
+            )
+            report.started += 1
+            outcome = runner(db, execution_id)
+        except workflows.TenantSuspendedBeforeStart as refused:
+            logger.info(
+                "dispatch_refused_tenant_suspended",
+                extra={
+                    "execution_id": execution_id,
+                    "tenant_id": refused.tenant_id,
+                    "trigger_source": claimed.trigger_source.value,
+                },
+            )
+            _close_and_publish(
+                db,
+                execution_id,
+                publish,
+                report,
+                next_status=ExecutionStatus.FAILED,
+                error_summary=str(refused),
+            )
+            return
         if outcome.succeeded:
             if (
                 claimed.runbook_id is RunbookId.RUNBOOK_EC2_ISOLATE

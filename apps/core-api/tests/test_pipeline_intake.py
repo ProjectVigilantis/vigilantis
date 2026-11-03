@@ -50,7 +50,7 @@ def pipeline(db, pg_engine, monkeypatch):
             session.commit()
             return result
 
-    monkeypatch.setattr(collector, "collect_and_store", collect)
+    monkeypatch.setattr(collector, "collect_and_store_tenants", collect)
     return factory
 
 

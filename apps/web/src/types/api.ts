@@ -315,11 +315,12 @@ export const RESPONSE_MODES = [
 export type ResponseMode = (typeof RESPONSE_MODES)[number];
 
 /**
- * 자동 발동(High 선차단·Medium 1분 격리)이 막힌 이유 — 사람이 승인해야만 조치된다(#521).
+ * 자동 발동(High 선차단·Medium 1분 격리)이 막힌 이유. 정지가 아니면 사람의 승인이 필요하다(#521).
+ * `TENANT_SUSPENDED`: 테넌트가 정지됐다 — 플랫폼이 그 계정에 새로 들어가지 않는다(T-4 · #533).
  * `AUTO_ACTION_DISABLED`: 테넌트가 자동 조치를 껐거나, 그 발동을 정한 시각이 다시 켠 시각 이전이다.
- * 정지(`TENANT_SUSPENDED`)는 T-4가 더한다.
+ * 둘 다 해당하면 서버는 `TENANT_SUSPENDED`를 준다.
  */
-export const AUTO_ISOLATION_BLOCKS = ['AUTO_ACTION_DISABLED'] as const;
+export const AUTO_ISOLATION_BLOCKS = ['TENANT_SUSPENDED', 'AUTO_ACTION_DISABLED'] as const;
 export type AutoIsolationBlock = (typeof AUTO_ISOLATION_BLOCKS)[number];
 
 /**
@@ -1074,6 +1075,25 @@ export interface SignupRequestItem {
 
 export interface SignupRequestsResponse extends PaginationMetadata {
   items: SignupRequestItem[];
+}
+
+/**
+ * `POST /signup-requests`: 로그인 없이 받는다(packages/schemas/api/signup_requests.py). 재시도 키는
+ * `Idempotency-Key` 헤더로 싣는다(lib/api/client.ts `submitSignupRequest`).
+ */
+export interface SignupRequestCreate {
+  company_name: string;
+  contact_name: string;
+  /** 승인되면 이 이메일로 회사 관리자 계정을 초대한다. */
+  email: string;
+  phone: string | null;
+  /** 관제할 AWS 환경(자유 입력). */
+  note: string | null;
+}
+
+/** `POST /signup-requests` 202 응답. 처음 접수와 같은 키의 재시도 응답이 같다. */
+export interface SignupRequestAccepted {
+  request_id: string;
 }
 
 export type InquiryStatus = 'OPEN' | 'IN_PROGRESS' | 'RESOLVED';

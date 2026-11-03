@@ -45,6 +45,9 @@
 #     않는다(디스패처는 범위를 다시 보지 않는다).
 #   - 감사 기록(T-2 · #544)의 사람 행위자는 HTTP 에서는 위의 재판정 신원이다. 신뢰 경로는 기록할 사람을
 #     audit_actor 로 직접 밝히며, 그 값은 범위 · 정지 판정에 쓰이지 않는다(_write_context).
+#   - AWS 자격(#533 E)은 요청자가 아니라 기록의 소유 테넌트다(tenant_access_for). 실행 · 판정은 dispatcher 가
+#     실행 행의 소유로 문맥을 세운 채 부르고, 가드레일 ④ 를 부르는 자리(AI 후보 · 해제 제안 · 원복)는 여기서
+#     직접 세운다. 소속 없는 기록(NULL)은 「테넌트 없음」 문맥이다 — 소유를 추론하지 않는다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -146,6 +149,7 @@ from schemas.runbooks import (
 )
 from schemas.savings import AISavingsEstimate
 from services.aws import backup, executor, rollback
+from services.aws.client import TenantAccess, tenant_scope
 from services.aws.errors import is_retryable, watch_dry_run_protocol
 from services.aws.executor import parse_arn
 from sqlalchemy.exc import IntegrityError
@@ -296,6 +300,38 @@ def _tenant_suspended(db: Session, tenant_id: str | None) -> bool:
         return False
     tenant = tenants_repo.read_tenant_for_share(db, tenant_id)
     return tenant is not None and tenant.status is TenantStatus.SUSPENDED
+
+
+def tenant_access_for(db: Session, tenant_id: str | None) -> TenantAccess | None:
+    """기록에 저장된 소유 테넌트의 접근 재료 — 실행 · 판정 · 가드레일 ④ 가 이 자격으로 나간다(#533 E).
+
+    요청자 소속이 아니라 실행 · 인시던트 행의 tenant_id 로 고른다(ADR-0012 §2). None(소속 없는 MVP
+    기록)은 None 이다 — ARN · 계정으로 소유를 추론하지 않고, tenant_scope(None) 이 바깥 문맥을 가린다.
+    상태는 보지 않는다 — 정지 관문은 따로 있고, 정지 뒤에도 종료 판정 · 자동 원복은 이 자격으로 끝까지
+    돈다(ADR-0012 §3). 역할 ARN · ExternalId 는 수정 API 가 바꾸지 않는 칸이다. 잠그지 않고 commit 하지
+    않는다 — 호출부 트랜잭션 안에서 읽는다. 자격(STS)은 여기서 받지 않는다 — 첫 AWS 서명 때 받는다.
+    """
+    if tenant_id is None:
+        return None
+    tenant = db.get(models.Tenant, tenant_id)
+    return TenantAccess(tenant.tenant_id, tenant.access_role_arn, tenant.external_id)
+
+
+def _arn_account(arn: str) -> str | None:
+    parts = arn.split(":", 5)
+    return parts[4] if len(parts) == 6 else None
+
+
+def in_owner_account(owner: TenantAccess | None, arn: str) -> bool:
+    """가드레일 ③ 의 계정 조건(ADR-0012 §2) — 대상 ARN 의 계정이 소유 테넌트의 계정인가.
+
+    테넌트 A 의 기록으로 테넌트 B 의 자원을 부르지 않게 한다. 소유 테넌트의 계정은 역할 ARN 의 계정
+    칸이다(DB CHECK role_in_tenant_account 가 aws_account_id 와 같음을 보장한다). 소유 없음(None)은
+    조건이 없다 — 지금 그대로이며 계정으로 소유를 추론하지 않는다.
+    """
+    if owner is None:
+        return True
+    return _arn_account(arn) == _arn_account(owner.access_role_arn)
 
 
 def _executable_candidate(
@@ -655,6 +691,8 @@ class AutoIsolationSkipReason(str, Enum):
     WAIT_NOT_STARTED = "WAIT_NOT_STARTED"        # 저장된 응답 기한이 없다
     WAIT_NOT_DUE = "WAIT_NOT_DUE"                # 응답 기한이 아직 지나지 않았다
     USER_RESPONDED = "USER_RESPONDED"            # 관제자 승인 실행이 이미 commit돼 있다
+    # 테넌트가 정지됐다 — 원격 회수(ADR-0012 §3 · T-4). 끄기보다 먼저 판정한다
+    TENANT_SUSPENDED = "TENANT_SUSPENDED"
     # 테넌트가 자동 조치를 껐다 — 또는 그 기한이 꺼진 동안 지났다(T-6 · #514). 사람 승인은 그대로 받는다
     AUTO_ACTION_DISABLED = "AUTO_ACTION_DISABLED"
 
@@ -798,16 +836,20 @@ def automatic_trigger_block(
     잠근 뒤)이 같은 함수를 쓴다. 막는 것은 서버가 사람 없이 시작하는 발동뿐이다 — 수집 · 분석 · 관제자
     승인 실행 · 자동 원복은 이 함수를 지나지 않는다.
       - 테넌트 없음(tenant_id NULL · MVP 단일 계정 기록)은 막지 않는다 — 지금 동작 그대로다.
+      - 정지(SUSPENDED)면 막는다 — 끄기보다 먼저다. 원격 회수(ADR-0012 §3 ①)는 자동 조치 설정과
+        무관하게 새 발동을 막고 다시 켜도 풀리지 않으므로, 「왜 안 했나」의 답은 더 바깥의 상태여야 한다.
       - 꺼져 있으면 막는다.
       - **그 발동을 정한 시각**이 마지막으로 다시 켠 시각 이전이면 막는다 — 꺼진 동안의 판단을 다시 켠
         순간 사람 없이 실행하지 않게. 정한 시각은 High 선차단이 접수 시각(received_at = Incident
         created_at), Medium 1분 격리가 응답 기한이다. High 도 접수 때 한 번만 시도되지 않는다 — 분석
         스캔이 선점할 때마다 ANALYZING 인 High 에 선차단을 다시 건다(agent_dispatcher._dispatch_one ·
         선점 회수로 되풀이될 수 있다).
-    정지(SUSPENDED) 관문은 T-4 2단계가 이 함수에 더한다.
+    시작 전 예약(단계 0건)의 정지 관문은 이 함수가 아니라 refuse_start_if_tenant_suspended 다.
     """
     if tenant is None:
         return None
+    if tenant.status is TenantStatus.SUSPENDED:
+        return AutoIsolationSkipReason.TENANT_SUSPENDED
     if not tenant.auto_action_enabled:
         return AutoIsolationSkipReason.AUTO_ACTION_DISABLED
     resumed_at = tenant.auto_action_resumed_at
@@ -1632,16 +1674,73 @@ class ExecutionRunOutcome:
                 raise ValueError("보류 결과에는 단계 기록이 없어야 합니다")
 
 
+class TenantSuspendedBeforeStart(Exception):
+    """시작 전 예약(단계 0건)의 테넌트가 정지돼 실행을 시작하지 않았다. (ADR-0012 §3)
+
+    자산은 만지지 않았다. dispatcher 가 잡아 FAILED(변경 없이 실패)로 확정한다 — 예약 이후의
+    거절은 HTTP 오류가 아니라 실행 상태로 전달한다(schemas/api/errors.py). 문구는 실행의
+    error_summary 가 되며 dispatcher._failure_summary 와 같은 「코드: 사유」 꼴이다.
+    """
+
+    def __init__(self, tenant_id: str) -> None:
+        super().__init__(
+            f"{ErrorCode.TENANT_SUSPENDED.value}: 정지된 테넌트의 시작 전 예약은 시작하지 않습니다"
+        )
+        self.tenant_id = tenant_id
+
+
+def refuse_start_if_tenant_suspended(
+    db: Session, *, tenant_id: str | None, trigger_source: TriggerSource, lock: bool
+) -> None:
+    """단계 0건 실행의 시작 관문 — 대상 테넌트가 정지면 TenantSuspendedBeforeStart. (ADR-0012 §3)
+
+    「시작」의 경계는 첫 단계 기록이다. 단계는 AWS 호출 직전에 commit 되므로(_step_recorder) 단계가
+    없는 실행은 자산을 만지지 않았고, 정지 뒤에는 새 실행이라 시작하지 않는다. 두 자리가 같은 함수를
+    부른다. 호출부가 트랜잭션을 소유한다(여기서 commit · rollback 하지 않는다).
+      - lock=False — dispatcher 가 runner 에 넘기기 전의 사전 판정. 정지된 예약이 백업 캡처 같은 AWS
+        읽기조차 하지 않게 한다. 잠그지 않는다 — 그 트랜잭션은 백업 캡처(AWS 호출)까지 이어지므로
+        FOR SHARE 를 걸면 정지가 AWS 호출을 기다리게 된다.
+      - lock=True — 첫 단계를 쓰는 트랜잭션 안(_step_recorder)의 결정적 경계. 테넌트 행을 FOR SHARE 로
+        읽으므로(_tenant_suspended) 정지 UPDATE 는 첫 단계 commit 을 기다리고, 먼저 commit 된 정지는
+        첫 단계 전에 보인다 — 정지와 시작 사이에 단계 없는 AWS 변경이 끼지 않는다.
+      - 자동 원복(AUTO_ON_FAILURE)은 지나지 않는다 — 이미 바뀐 자산을 되돌리는 일이라 정지 뒤에 생겨도
+        끝까지 돈다. 관제자 복구는 새 실행이다(접수는 _recoverable_origin 이 409 로 막는다).
+      - 테넌트 없음(NULL · MVP 기록)은 막지 않는다.
+    """
+    if trigger_source is TriggerSource.AUTO_ON_FAILURE or tenant_id is None:
+        return
+    suspended = (
+        _tenant_suspended(db, tenant_id)
+        if lock
+        else tenants_repo.get_tenant_status(db, tenant_id) is TenantStatus.SUSPENDED
+    )
+    if suspended:
+        raise TenantSuspendedBeforeStart(tenant_id)
+
+
 def _step_recorder(db: Session, execution_id: str):
     """executor가 넘기는 단계를 그 자리에서 저장하고 commit한다.
 
     단계마다 commit하는 이유는 프로세스가 중간에 사라져도 "어디까지 갔는가"가
     남아야 하기 때문이다 — 남지 않으면 회수(dispatcher.py)가 이미 바뀐 자산을
     바뀌지 않은 것으로 본다.
+
+    첫 IN_PROGRESS 단계는 그 저장 트랜잭션 안에서 정지 관문(refuse_start_if_tenant_suspended)을
+    먼저 지난다 — runner 진입과 첫 AWS 변경 사이(백업 캡처 동안)에 commit 된 정지가 여기서 보인다.
+    관문이 던지면 단계는 남지 않고 실행은 단계 0건 그대로라 dispatcher 가 FAILED 로 확정한다.
     """
+    started = False
 
     def record(step: ExecutionStepResult) -> None:
+        nonlocal started
         if step.status is ExecutionStepStatus.IN_PROGRESS:
+            if not started:
+                execution = executions_repo.get_execution(db, execution_id)
+                refuse_start_if_tenant_suspended(
+                    db, tenant_id=execution.tenant_id, trigger_source=execution.trigger_source,
+                    lock=True,
+                )
+                started = True
             executions_repo.add_step(db, step, execution_id=execution_id)
         elif not executions_repo.update_step_result(
             db, step, execution_id=execution_id
@@ -4232,6 +4331,9 @@ def _run_rollback_guardrails(
 
     판정 결과는 저장한다. 거절이 로그로만 남으면 관제 화면에서 "왜 원복이 멈췄는가"를
     답할 자리가 없다.
+
+    ③ · ④ 는 원복 실행 행의 소유 테넌트로 본다(#533 E) — 자동 원복 자식은 원본과 같은 인시던트의
+    소유를 물려받는다(executions_repo.create_execution).
     """
     request = GuardrailValidationRequest(
         validation_context=GuardrailValidationContext.ROLLBACK_EXECUTION,
@@ -4239,12 +4341,16 @@ def _run_rollback_guardrails(
         command_payload=command_payload,
     )
     loader = _DbBackupRecordLoader(db)
+    owner = tenant_access_for(db, execution.tenant_id)
     # ④의 DryRun 미적용(정상 반환)은 사유 코드가 조회 실패와 같다 — 같은 스레드에서 그 사건을
     # 따로 센다. 재평가 여부를 가르는 입력이다(_guardrail_transient_code)
-    with watch_dry_run_protocol() as dry_run_watch:
+    with watch_dry_run_protocol() as dry_run_watch, tenant_scope(owner):
         outcome = guardrails.run_guardrail_validation(
             request,
-            is_managed_arn=lambda arn: assets_repo.get_asset_by_arn(db, arn) is not None,
+            is_managed_arn=lambda arn: (
+                assets_repo.get_asset_by_arn(db, arn) is not None
+                and in_owner_account(owner, arn)
+            ),
             # 롤백 3종은 전부 백업 레코드를 읽는다 — 미배선이면 FAIL이 아니라 RuntimeError다
             precheck=lambda command: executor.precheck(
                 command.runbook_id,
@@ -5267,12 +5373,14 @@ def _draft_candidates(
     ]
 
 
-def _managed_arns(db: Session, candidates: list[RunbookCandidateData]) -> set[str]:
-    """③ ARN Match가 볼 대상 중 수집된 자산인 것. 가드레일 전에 미리 해석한다."""
+def _managed_arns(
+    db: Session, candidates: list[RunbookCandidateData], owner: TenantAccess | None
+) -> set[str]:
+    """③ ARN Match가 볼 대상 중 수집된 자산이고 소유 테넌트 계정의 것(in_owner_account). 가드레일 전에 미리 해석한다."""
     return {
         arn
         for arn in {candidate.target_arn for candidate in candidates}
-        if assets_repo.get_asset_by_arn(db, arn) is not None
+        if assets_repo.get_asset_by_arn(db, arn) is not None and in_owner_account(owner, arn)
     }
 
 
@@ -5398,21 +5506,25 @@ def record_agent_analysis(
     AGENT_WAIT의 승인 대기 시각만 기록하며 자동 격리 엔진은 기동하지 않는다.
     """
     candidates = _draft_candidates(incident_id, output)
-    managed = _managed_arns(db, candidates) if candidates else set()
-    backups = _prefetch_candidate_backups(db, candidates)
     incident_context = incidents_repo.get_incident(db, incident_id)
+    if incident_context is None:
+        raise ValueError(f"Incident를 찾을 수 없습니다: {incident_id}")
+    # 가드레일 ③ · ④ 는 인시던트의 소유 테넌트로 본다(#533 E) — 소유를 모르면 AWS 를 부르지 않는다
+    owner = tenant_access_for(db, incident_context.tenant_id)
+    managed = _managed_arns(db, candidates, owner) if candidates else set()
+    backups = _prefetch_candidate_backups(db, candidates)
     estimate_finops = (
         savings_estimator is not None
-        and incident_context is not None
         and incident_context.category is IncidentCategory.FINOPS
     )
     # 가드레일 ④가 AWS를 부르는 동안 트랜잭션을 열어 두지 않는다
     db.rollback()
 
-    guarded = [
-        (candidate, _guard_candidate(candidate, managed, backups))
-        for candidate in candidates
-    ]
+    with tenant_scope(owner):
+        guarded = [
+            (candidate, _guard_candidate(candidate, managed, backups))
+            for candidate in candidates
+        ]
 
     # 모든 후보의 가드레일 뒤, 잠금·저장 전이다. 모델 대기 중 DB transaction을 열지 않는다.
     if estimate_finops:
@@ -5771,11 +5883,14 @@ def offer_nacl_release(db: Session, execution_id: str) -> ReleaseOffer:
         db.commit()
         return _release_skipped(incident_id, execution_id, problem or "")
 
-    managed = _managed_arns(db, [candidate])
+    # 가드레일 ③ · ④ 는 차단 실행 행의 소유 테넌트로 본다(#533 E)
+    owner = tenant_access_for(db, block.tenant_id)
+    managed = _managed_arns(db, [candidate], owner)
     backups = _prefetch_candidate_backups(db, [candidate])
     # 읽기만 했다 — rollback이 아니라 commit으로 닫는 것은 dispatcher 규약이다(호출부가 같은
     # 세션에 얹어 둔 작업을 잃지 않게)
     db.commit()
 
-    outcome = _guard_candidate(candidate, managed, backups)
+    with tenant_scope(owner):
+        outcome = _guard_candidate(candidate, managed, backups)
     return _store_release_offer(db, candidate, outcome, execution_id=execution_id)

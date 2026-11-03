@@ -89,7 +89,7 @@ import ipaddress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import partial
-from typing import Callable, NamedTuple, Optional
+from typing import Callable, Mapping, NamedTuple, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -137,6 +137,8 @@ from db.session import get_session_factory
 from logging_config import log_context
 from realtime import incident_event
 from security import soar
+from services.aws.client import tenant_scope
+from services.aws.executor import resolve_nacl_add_deny_rule_number
 
 logger = logging.getLogger("vigilantis.agent_dispatcher")
 
@@ -149,7 +151,24 @@ class _UnsupportedIncident(Exception):
 
 
 class GraphInputUnavailable(Exception):
-    """그래프 입력을 만들 수 없다 — 다시 시도해도 같으므로 분석 실패로 닫는다."""
+    """그래프 입력을 만들 수 없다 — 자동 반복 없이 분석 실패로 닫는다."""
+
+
+def resolve_secops_rule_numbers(
+    graph_input: SecOpsGraphInput, *, open_rule_numbers: Mapping[str, set[int]],
+) -> dict[str, int]:
+    """입력 스냅샷의 허용 대상만 조회한다. 호출 전에 DB 트랜잭션을 닫아야 한다."""
+    numbers = {}
+    for target in secops_action_targets(graph_input.asset_context)[RunbookId.RUNBOOK_NACL_ADD_DENY.value]:
+        number, code = resolve_nacl_add_deny_rule_number(
+            target, excluded_rule_numbers=open_rule_numbers.get(target, frozenset()),
+        )
+        if code is not None or number is None:
+            raise GraphInputUnavailable(
+                f"NACL 규칙 번호 선택 불가: {code.value if code is not None else 'SERVER_PARAMETER_UNAVAILABLE'}"
+            )
+        numbers[target] = number
+    return numbers
 
 
 @dataclass
@@ -396,7 +415,8 @@ class _Violation(NamedTuple):
 
 
 def _contract_violation(
-    graph_input: AgentGraphInput, output: AgentGraphOutput
+    graph_input: AgentGraphInput, output: AgentGraphOutput,
+    nacl_rule_numbers: Mapping[str, int] | None = None,
 ) -> Optional[_Violation]:
     """ⓐ·ⓑ·ⓒ 위반의 사유 코드와 한 줄 설명. 위반이 없으면 None."""
     if (
@@ -457,6 +477,10 @@ def _contract_violation(
                 except (ValueError, AttributeError, IndexError):
                     return _Violation(AnalysisFailureReason.SSH_DENY_PARAMETER_MISMATCH,
                                       "SSH 차단의 출발지 근거를 확인할 수 없습니다")
+                if (nacl_rule_numbers is None
+                        or candidate.parameters.rule_number != nacl_rule_numbers.get(candidate.target_arn)):
+                    return _Violation(AnalysisFailureReason.SERVER_VALUE_MISMATCH,
+                                      "NACL 규칙 번호가 서버 선택값과 다릅니다")
 
     unstorable = _unstorable_field(output)
     if unstorable is not None:
@@ -466,10 +490,11 @@ def _contract_violation(
 
 
 def verify_graph_output(
-    graph_input: AgentGraphInput, output: AgentGraphOutput, incident_id: str
+    graph_input: AgentGraphInput, output: AgentGraphOutput, incident_id: str, *,
+    nacl_rule_numbers: Mapping[str, int] | None = None,
 ) -> AgentGraphOutput:
     """그래프 출력을 서비스 수용 계약에 대조하고 위반 시 분석 실패로 반환한다."""
-    found = _contract_violation(graph_input, output)
+    found = _contract_violation(graph_input, output, nacl_rule_numbers)
     if found is None:
         return output
     extra = {
@@ -535,6 +560,22 @@ def _dispatch_one(
 
             try:
                 graph_input = build_graph_input(db, incident_id)
+                open_rule_numbers = (
+                    incidents_repo.list_open_nacl_rule_numbers(
+                        db, target_arns=secops_action_targets(graph_input.asset_context)[
+                            RunbookId.RUNBOOK_NACL_ADD_DENY.value
+                        ],
+                    ) if isinstance(graph_input, SecOpsGraphInput) else {}
+                )
+                owner = workflows.tenant_access_for(db, incident.tenant_id)
+                # 현재 NACL 조회·모델 호출 동안 읽기 트랜잭션을 열어 두지 않는다.
+                db.rollback()
+                # 후보용 AWS 조회도 인시던트 소유자의 자격으로 한다. NULL 은 호출자 문맥을 가린다(#533 E).
+                with tenant_scope(owner):
+                    nacl_rule_numbers = (
+                        resolve_secops_rule_numbers(graph_input, open_rule_numbers=open_rule_numbers)
+                        if isinstance(graph_input, SecOpsGraphInput) else {}
+                    )
             except GraphInputUnavailable as exc:
                 logger.warning(
                     "agent_graph_input_unavailable",
@@ -555,10 +596,11 @@ def _dispatch_one(
                 db.rollback()
                 output = verify_graph_output(
                     graph_input,
-                    (run_secops_graph(graph_input, client=client)
+                    (run_secops_graph(graph_input, client=client, nacl_rule_numbers=nacl_rule_numbers)
                      if isinstance(graph_input, SecOpsGraphInput)
                      else run_finops_graph(graph_input, client=client)),
                     incident_id,
+                    nacl_rule_numbers=nacl_rule_numbers,
                 )
 
             savings_estimator = None

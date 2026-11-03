@@ -103,7 +103,7 @@ def test_secops_context_inbox_freezes_logs_inventory_and_actual_model_payload(db
         CandidateProposalOutput(candidates=[]),
         EvidenceSummaryOutput(observation="합성 fixture 관측", diagnosis="SSH 실패 집계", rationale="평가용"),
     ])
-    run_secops_graph(build_graph_input(db, incident_id), client=client)
+    run_secops_graph(build_graph_input(db, incident_id), client=client, nacl_rule_numbers={NACL: 1})
     assert len(client.sent) == 3
     for request in client.sent:
         assert request["user_payload"]["asset"] == payload["asset"]
