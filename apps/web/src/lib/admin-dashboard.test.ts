@@ -114,7 +114,7 @@ test('수동 처리 문제는 한 건 한 줄로 펴고, 연결 실패 먼저 ·
   assert.equal(rows[1].href, '/incidents/old');
 });
 
-test('연결 상태는 다섯 분류이고 정지 고객은 뺀다', () => {
+test('연결 상태는 여섯 분류이고 정지 고객은 빼고 미납 고객은 미납으로 센다', () => {
   const points = connectionPoints(
     [
       tenant('ok', '1', 'ACTIVE', { last_verification: verified('OK') }),
@@ -123,12 +123,13 @@ test('연결 상태는 다섯 분류이고 정지 고객은 뺀다', () => {
       tenant('unreach', '4', 'ACTIVE', { last_verification: verified('UNREACHABLE') }),
       tenant('pending', '5', 'PENDING_CONNECTION'),
       tenant('susp', '6', 'SUSPENDED', { last_verification: verified('OK') }),
+      tenant('unpaid', '7', 'UNPAID', { last_verification: verified('READ_DENIED') }),
     ],
     NOW,
   );
   assert.deepEqual(
     points.map((p) => [p.tenantId, p.state]),
-    [['ok', 'OK'], ['stale', 'STALE'], ['fail', 'FAILED'], ['unreach', 'UNREACHABLE'], ['pending', 'UNCHECKED']],
+    [['ok', 'OK'], ['stale', 'STALE'], ['fail', 'FAILED'], ['unreach', 'UNREACHABLE'], ['pending', 'UNCHECKED'], ['unpaid', 'UNPAID']],
   );
   assert.equal(points[4].hours, null);
 });

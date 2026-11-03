@@ -14,7 +14,7 @@ export function SupportPage({
   children,
 }: {
   title: string;
-  description: string;
+  description?: string;
   renderedAt: string;
   children: ReactNode;
 }) {
@@ -23,7 +23,7 @@ export function SupportPage({
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div className="flex flex-col gap-1">
           <h1 className="text-2xl font-bold tracking-tight">{title}</h1>
-          <p className="text-muted-foreground text-sm">{description}</p>
+          {description ? <p className="text-muted-foreground text-sm">{description}</p> : null}
         </div>
         <AutoRefresh renderedAt={renderedAt} />
       </div>

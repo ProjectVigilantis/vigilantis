@@ -62,7 +62,7 @@ function messageFor(error: ApiError): { text: string; keepOpen: boolean; retryab
     case 'REQUEST_VALIDATION_FAILED':
       // 422는 계약 불일치다 — 재시도로 해결되지 않는다는 것을 문장으로 말한다(§4.6).
       return {
-        text: `요청이 계약과 맞지 않습니다. 다시 시도해도 해결되지 않습니다 — ${error.message}`,
+        text: `요청이 계약과 맞지 않습니다. 다시 시도해도 해결되지 않습니다(${error.message})`,
         keepOpen: true,
       };
     default:
@@ -247,7 +247,7 @@ export function ActionExecuteDialog({
         {destructive && runbookId !== null ? (
           <p className="border-destructive text-destructive rounded-md border p-3 text-sm">
             {/* 런북 표시명이 조사에 따라 갈리므로 "은/는"을 붙이지 않고 콜론으로 끊는다. */}
-            ⚠ 파괴적 조치입니다 — <b>{RUNBOOK_LABELS[runbookId]}</b>:{' '}
+            ⚠ 파괴적 조치입니다. <b>{RUNBOOK_LABELS[runbookId]}</b>:{' '}
             {DESTRUCTIVE_WARNINGS[runbookId as (typeof DESTRUCTIVE_RUNBOOK_IDS)[number]]}
           </p>
         ) : null}

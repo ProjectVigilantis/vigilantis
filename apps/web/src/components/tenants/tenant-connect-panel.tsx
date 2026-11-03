@@ -43,9 +43,6 @@ export function TenantConnectPanel({
       <div className="flex flex-col divide-y">
         <section aria-labelledby="connect-send" className="flex flex-col gap-3 pb-5">
           <h3 id="connect-send" className="text-sm font-bold">고객사에 보낼 것</h3>
-          <p className="text-foreground-secondary text-[13px]">
-            안내문에 연결 링크가 들어 있습니다. 링크 안에 이 고객사의 ExternalId가 있어서, 고객사가 따로 입력할 값은 없습니다.
-          </p>
           <div className="flex flex-wrap gap-2">
             <CopyButton value={message} label="안내문 복사" ariaLabel="고객사 안내문 복사" variant="outline" className={OUTLINE} />
             <CopyButton value={onboardingUrl} label="링크만 복사" ariaLabel="연결 링크 복사" variant="outline" className={OUTLINE} />
@@ -72,9 +69,6 @@ export function TenantConnectPanel({
 
         <section aria-labelledby="connect-verify" className="flex flex-col gap-3 pt-5">
           <h3 id="connect-verify" className="text-sm font-bold">연결 확인</h3>
-          <p className="text-foreground-secondary text-[13px]">
-            플랫폼이 이 역할로 고객사 AWS 계정에 들어가 읽기 한 번을 해 봅니다. 성공하면 관제 중으로 바뀝니다.
-          </p>
           <div className="flex flex-wrap items-center gap-3">
             <Button type="button" className={PRIMARY} disabled={disabled} onClick={onVerify}>
               {verifying ? '확인 중…' : '연결 확인'}

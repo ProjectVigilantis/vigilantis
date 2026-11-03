@@ -67,7 +67,7 @@ test('정지는 실패가 아니라 의도한 상태라 중립 회색이다', ()
 test('목록 요약: 자산은 관제 중 고객만 더하고, 확인 문제는 실패와 확인 불가를 가른다', () => {
   assert.deepEqual(summarizeTenants(LIST), {
     total: 5,
-    byStatus: { PENDING_CONNECTION: 1, ACTIVE: 3, SUSPENDED: 1 },
+    byStatus: { PENDING_CONNECTION: 1, ACTIVE: 3, SUSPENDED: 1, UNPAID: 0 },
     activeAssets: 143,
     openIncidents: 9,
     verificationProblems: { failed: 2, unreachable: 1 },

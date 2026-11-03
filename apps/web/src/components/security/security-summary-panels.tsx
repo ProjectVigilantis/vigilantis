@@ -37,7 +37,7 @@ export function OpenSgPanel({
     <Panel
       className={className}
       title="인터넷 개방 보안 그룹"
-      description="전체 대역(0.0.0.0/0 · ::/0)에 열린 인바운드 — 누르면 자산 상세를 엽니다"
+      description="전체 대역(0.0.0.0/0 · ::/0)에 열린 인바운드"
     >
       {exposure.length === 0 ? (
         <Muted>인터넷에 열린 보안 그룹이 없습니다.</Muted>
@@ -137,7 +137,7 @@ export function ThreatSourcePanel({
     <Panel
       className={className}
       title="외부 위협 출발지"
-      description="인시던트에 기록된 출발지 — 관측된 공격자 IP와 규칙이 허용한 대역을 가릅니다"
+      description="관측된 공격자 IP · 규칙이 허용한 대역"
     >
       {paths.length === 0 ? (
         <Muted>외부에서 들어온 경로가 없습니다.</Muted>

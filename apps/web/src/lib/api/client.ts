@@ -27,6 +27,8 @@ import type {
   SignupRequestsResponse,
   SignupRequestStatus,
   SignupRequestStatusChange,
+  StaffResponse,
+  StaffTenantsResponse,
   TenantCreateRequest,
   TenantCreateResponse,
   TenantDetail,
@@ -45,6 +47,7 @@ import type {
 
 // `node --test`가 별칭을 못 풀어 상대 경로를 쓴다(realtime-events와 같은 이유).
 import { navigateToLogin } from '../auth-redirect.ts';
+import type { PlatformStatusResponse } from '../platform-status.ts';
 
 /**
  * 요청을 실어 보내는 쪽마다 다른 두 가지 — 덧붙일 헤더와 401 처리(#492 PR 2).
@@ -223,6 +226,16 @@ export function createReadApi(transport: ApiTransport) {
      */
     getUsers(): Promise<UsersResponse> {
       return request<UsersResponse>('/users', undefined, transport);
+    },
+
+    /** 플랫폼 상태(중앙 관리계정). FE 제안 계약이라 서버에 아직 없다 — 실서버는 404다(lib/platform-status.ts). */
+    getPlatformStatus(): Promise<PlatformStatusResponse> {
+      return request<PlatformStatusResponse>('/platform/status', undefined, transport);
+    },
+
+    /** 플랫폼(관리자) 직원 목록: 중앙 관리계정만(#492 PR 5). 계정 관리 화면이 중앙 관리계정에게 그린다(app/users/page.tsx). */
+    getStaff(): Promise<StaffResponse> {
+      return request<StaffResponse>('/staff', undefined, transport);
     },
 
     /** 도입 신청 목록: 중앙 관리계정만(#552 · 페이지 조회 #565). 도입 신청 화면(app/signup-requests)이 부른다. */
@@ -413,6 +426,27 @@ export async function changeUserStatus(userId: string, status: UserStatus): Prom
 
 export async function revokeUserSessions(userId: string): Promise<void> {
   await postJson<null>(userPath(userId, '/sessions/revoke'));
+}
+
+/* ── /staff (#492 PR 5): 중앙 관리계정 전용. 자기 자신은 바꿀 수 없다(서버가 거절). ── */
+
+const staffPath = (userId: string, suffix: string) => `/staff/${encodeURIComponent(userId)}${suffix}`;
+
+export async function changeStaffStatus(userId: string, status: UserStatus): Promise<void> {
+  await sendJson<null>('PUT', staffPath(userId, '/status'), { status });
+}
+
+/** 담당 고객사 조회 · 전체 교체. 대상이 관리자 직원계정(TENANT_MANAGER)이 아니거나 바뀐 것이 없으면 409다. */
+export function getStaffTenants(userId: string): Promise<StaffTenantsResponse> {
+  return request<StaffTenantsResponse>(staffPath(userId, '/tenants'));
+}
+
+export async function replaceStaffTenants(userId: string, tenantIds: string[]): Promise<void> {
+  await sendJson<null>('PUT', staffPath(userId, '/tenants'), { tenant_ids: tenantIds });
+}
+
+export function getStaffEvents(userId: string, limit = 50): Promise<UserEventsResponse> {
+  return request<UserEventsResponse>(staffPath(userId, `/events?limit=${limit}`));
 }
 
 /* ── 도입 신청 · 고객사 문의 · 관리자 알림(#552, types/api.ts 끝). ── */

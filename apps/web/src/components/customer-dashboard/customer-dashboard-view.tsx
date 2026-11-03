@@ -180,7 +180,7 @@ export function CustomerDashboardView({
           id="todo"
           className="flex-[3_1_520px] scroll-mt-6"
           title="지금 처리할 일"
-          description="보안은 위험도순, 비용은 절감액순입니다."
+          description="보안은 위험도순, 비용은 절감액순"
           aside={
             queue !== null && queue.length > QUEUE_LIMIT ? (
               <span className="text-muted-foreground text-[13px]">
@@ -192,7 +192,7 @@ export function CustomerDashboardView({
           {rows === null ? (
             incidentsErrorSlot
           ) : rows.length === 0 ? (
-            <EmptyLine text="지금 처리할 일이 없습니다. 새 위협이 들어오면 여기에 먼저 보입니다." />
+            <EmptyLine text="지금 처리할 일이 없습니다." />
           ) : (
             <ul className="-my-1 divide-y">
               {rows.slice(0, QUEUE_LIMIT).map((row) => (
@@ -214,7 +214,7 @@ export function CustomerDashboardView({
         <ChartCard
           className="flex-[2_1_340px]"
           title="최근 끝난 일"
-          description="최근 7일 동안 끝난 건입니다. 조치 결과는 상세에서 확인합니다."
+          description="최근 7일"
         >
           {done === null ? (
             <p className="text-muted-foreground text-sm">인시던트를 불러오지 못했습니다.</p>
@@ -298,7 +298,7 @@ function ThreatHoursCard({ hours, className }: { hours: ReturnType<typeof threat
   if (hours === null) {
     return (
       <ChartCard className={className} title="최근 24시간 위협 이벤트" description="1시간 단위 발생 건수">
-        <p className="text-muted-foreground text-sm">추이를 불러오지 못했습니다. 지금 상태는 위 숫자가 기준입니다.</p>
+        <p className="text-muted-foreground text-sm">추이를 불러오지 못했습니다.</p>
       </ChartCard>
     );
   }

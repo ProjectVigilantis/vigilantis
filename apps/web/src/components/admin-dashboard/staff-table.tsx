@@ -110,7 +110,7 @@ export function StaffTable({ rows, nowMs }: { rows: readonly StaffRow[]; nowMs: 
             {shown.map((r) => {
               const key = rowKey(r);
               const expanded = open.has(key);
-              const href = `/users?tenant=${encodeURIComponent(r.tenantId)}`;
+              const href = `/tenants/${encodeURIComponent(r.tenantId)}#tenant-users`;
               return (
                 <Fragment key={key}>
                   <tr className="hover:bg-muted">
@@ -126,7 +126,7 @@ export function StaffTable({ rows, nowMs }: { rows: readonly StaffRow[]; nowMs: 
                     <Count n={r.disabled} />
                     <Count n={r.neverLoggedIn} tone="warn" />
                     <td className="text-muted-foreground px-3 py-2 text-right text-xs whitespace-nowrap">
-                      {r.lastLoginAt === null ? '—' : formatAge(r.lastLoginAt, nowMs)}
+                      {r.lastLoginAt === null ? '-' : formatAge(r.lastLoginAt, nowMs)}
                     </td>
                     <td className="pr-2">
                       {r.users.length > 0 ? (

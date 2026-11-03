@@ -9,7 +9,7 @@ import { ErrorState } from '@/components/error-state';
 import { Field, INPUT } from '@/components/tenants/tenant-badges';
 import { Button } from '@/components/ui/button';
 import {
-  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+  Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog';
 import { createTenant } from '@/lib/api/client';
 import {
@@ -69,12 +69,9 @@ export function CreateTenantDialog({ onClose }: { onClose: () => void }) {
 
   return (
     <Dialog open onOpenChange={(next) => (next || inFlight.current ? undefined : onClose())}>
-      <DialogContent className="max-h-[90dvh] overflow-y-auto">
+      <DialogContent className="max-h-[90dvh] overflow-y-auto" aria-describedby={undefined}>
         <DialogHeader>
           <DialogTitle>고객사 추가</DialogTitle>
-          <DialogDescription>
-            만든 뒤 상세 화면에서 고객사에 온보딩 링크를 보내고 연결을 확인합니다. 그 전에는 수집 · 분석 · 실행을 하지 않습니다.
-          </DialogDescription>
         </DialogHeader>
         <form id="create-tenant" className="flex flex-col gap-4" onSubmit={submit} noValidate>
           <Field id="tenant-name" label="이름" error={errors.name}>
@@ -85,7 +82,7 @@ export function CreateTenantDialog({ onClose }: { onClose: () => void }) {
           <Field
             id="tenant-account"
             label="AWS 계정 ID"
-            hint="고객사 AWS 콘솔 오른쪽 위 계정 메뉴의 12자리 숫자입니다. 하이픈째 붙여 넣어도 됩니다. 추가한 뒤에는 바꿀 수 없습니다."
+            hint="12자리 숫자. 추가한 뒤에는 바꿀 수 없습니다."
             error={errors.awsAccountId}
           >
             <input id="tenant-account" className={`${INPUT} font-mono`} value={form.awsAccountId}
@@ -113,7 +110,7 @@ export function CreateTenantDialog({ onClose }: { onClose: () => void }) {
               <Field
                 id="tenant-role"
                 label="역할 이름"
-                hint={`고객사가 역할 이름 규칙 때문에 다른 이름을 써야 할 때만 넣습니다. 비우면 ${DEFAULT_ACCESS_ROLE_NAME}입니다.`}
+                hint={`비우면 ${DEFAULT_ACCESS_ROLE_NAME}`}
                 error={errors.roleName}
               >
                 <input id="tenant-role" className={`${INPUT} font-mono`} value={form.roleName}

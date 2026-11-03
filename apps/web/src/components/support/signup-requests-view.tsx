@@ -56,7 +56,7 @@ export function SignupRequestsView({ items, focusId }: { items: SignupRequestIte
   };
 
   if (items.length === 0) {
-    return <EmptyState message="받은 도입 신청이 없습니다." description="랜딩 로그인 창의 회원가입에서 신청하면 여기에 쌓입니다." />;
+    return <EmptyState message="받은 도입 신청이 없습니다." />;
   }
 
   return (

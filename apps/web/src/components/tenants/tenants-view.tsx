@@ -22,7 +22,7 @@ import type { TenantListItem, TenantStatus } from '@/types/api';
 
 type Filter = 'ALL' | TenantStatus;
 
-const FILTERS: readonly Filter[] = ['ALL', 'ACTIVE', 'PENDING_CONNECTION', 'SUSPENDED'];
+const FILTERS: readonly Filter[] = ['ALL', 'ACTIVE', 'PENDING_CONNECTION', 'SUSPENDED', 'UNPAID'];
 
 export function TenantsView({ tenants }: { tenants: TenantListItem[] }) {
   const { session } = useSession();
@@ -43,10 +43,7 @@ export function TenantsView({ tenants }: { tenants: TenantListItem[] }) {
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div className="flex flex-col gap-1">
           <h1 className="text-2xl font-bold tracking-tight">고객사 관리</h1>
-          <p className="text-muted-foreground text-sm">
-            고객사 AWS 계정의 연결 상태와 원격 회수(정지)를 관리합니다. 시각은 모두 KST입니다.
-            {me?.platform_role === 'TENANT_MANAGER' ? ' 담당 고객사만 표시합니다.' : null}
-          </p>
+          {me?.platform_role === 'TENANT_MANAGER' ? <p className="text-muted-foreground text-sm">담당 고객사만 표시합니다.</p> : null}
         </div>
         {canCreate ? (
           <Button type="button" className="h-10 px-4" onClick={() => setCreating(true)}>
@@ -65,7 +62,6 @@ export function TenantsView({ tenants }: { tenants: TenantListItem[] }) {
         ) : canCreate ? (
           <EmptyState
             message="등록된 고객사가 없습니다."
-            description="고객사를 추가하면 온보딩 링크로 고객사 AWS 계정에 접근 역할을 만들게 됩니다."
           />
         ) : (
           <EmptyState message="표시할 고객사가 없습니다." />
@@ -130,9 +126,13 @@ export function TenantsView({ tenants }: { tenants: TenantListItem[] }) {
                 </TableHeader>
                 <TableBody>
                   {rows.map((t) => (
-                    <TableRow key={t.tenant_id} className="h-13">
+                    // 행 전체가 링크다: 이름 링크의 ::after가 행을 덮는다(키보드 · 가운데 클릭은 링크 그대로).
+                    <TableRow key={t.tenant_id} className="relative h-13 cursor-pointer focus-within:bg-muted">
                       <TableCell className="pl-6 font-bold">
-                        <Link href={`/tenants/${encodeURIComponent(t.tenant_id)}`} className="hover:underline">
+                        <Link
+                          href={`/tenants/${encodeURIComponent(t.tenant_id)}`}
+                          className="after:absolute after:inset-0 focus-visible:outline-none"
+                        >
                           {t.name}
                         </Link>
                       </TableCell>

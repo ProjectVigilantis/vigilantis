@@ -4,23 +4,43 @@
 // 배정 없음 안내를 본다(components/users/users-view.tsx).
 
 import type { Metadata } from 'next';
-import { unstable_rethrow } from 'next/navigation';
+import { redirect, unstable_rethrow } from 'next/navigation';
 
 import { ErrorState } from '@/components/error-state';
+import { StaffView } from '@/components/users/staff-view';
 import { UsersView } from '@/components/users/users-view';
 import { ApiError } from '@/lib/api/client';
 import { orNull, serverApi } from '@/lib/api/server';
+import { isCentralAdmin } from '@/lib/roles';
 import { USER_ADMIN_FORBIDDEN } from '@/lib/user-admin';
 
 export const metadata: Metadata = { title: '계정 관리 · Vigilantis' };
 
 export default async function UsersPage({ searchParams }: PageProps<'/users'>) {
   // 세션 쿠키만 실어 부르고, 401이면 로그인으로 redirect한다(lib/api/server.ts).
-  const { getUsers, getTenant } = await serverApi();
+  const { getUsers, getTenant, getTenants, getMe, getStaff } = await serverApi();
   // `?tenant=<id>`는 고객 상세의 사용자 패널에서 넘어오는 딥링크다(`invite=1`이면 그 고객으로 초대 창을 연다).
   // 목록 API에 고객 필터가 없어 화면이 거른다. 고객 이름은 표시용이라 못 읽으면 ID로 적는다(고객사 ADMIN은 403).
   const { tenant: tenantParam, invite } = await searchParams;
   const tenantId = typeof tenantParam === 'string' && tenantParam !== '' ? tenantParam : null;
+
+  // 중앙 관리계정의 계정 관리는 관리자 직원계정 화면이다(2026-11-02). 고객사 계정은 고객사 상세가 다루므로
+  // 옛 딥링크(`?tenant=`)는 그 고객사 상세로 보낸다.
+  const me = await orNull(getMe());
+  if (me !== null && isCentralAdmin(me)) {
+    if (tenantId !== null) redirect(`/tenants/${encodeURIComponent(tenantId)}`);
+    // 담당 고객사 배정 창의 고객사 이름 · 상태. 못 읽으면 배정 창이 안내만 띄운다(null).
+    const tenantsPromise = orNull(getTenants());
+    let staff;
+    try {
+      staff = await getStaff();
+    } catch (error) {
+      unstable_rethrow(error); // 401 → 로그인 redirect는 삼키지 않는다
+      return <ErrorState error={error} />;
+    }
+    const tenants = await tenantsPromise;
+    return <StaffView staff={staff.items} tenants={tenants?.tenants ?? null} />;
+  }
   const tenantPromise = tenantId === null ? null : orNull(getTenant(tenantId));
   let users;
   try {

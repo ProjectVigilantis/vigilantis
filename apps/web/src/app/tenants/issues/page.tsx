@@ -45,8 +45,7 @@ export default async function IssuesPage() {
   return (
     <div className="flex flex-col gap-6">
       <DetailHeader
-        title="수동 처리가 필요한 문제"
-        description="플랫폼 자동 기능으로 풀리지 않아 직접 처리해야 하는 관제 중 고객사의 문제입니다. 오래된 것부터 놓았습니다. 시각은 모두 KST입니다."
+        title="수동 처리가 필요한 문제"
         renderedAt={renderedAt}
       />
       <section className="bg-card ring-foreground/10 rounded-xl p-6 ring-1">

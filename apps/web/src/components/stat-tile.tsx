@@ -37,12 +37,17 @@ export function StatTile({
   value: React.ReactNode;
   note?: string;
   tone?: StatTone;
-  /** 있으면 카드 전체가 그 숫자의 상세 화면으로 가는 링크다. */
+  /** 있으면 카드 전체가 그 숫자의 상세 화면으로 가는 링크다. 마우스를 올리면 상자가 아니라 제목이 강조된다(2026-11-02). */
   href?: string;
 }) {
   const body = (
     <>
-      <span className="text-muted-foreground flex items-center justify-between gap-2 text-xs font-semibold tracking-wide">
+      <span
+        className={cn(
+          'text-muted-foreground flex items-center justify-between gap-2 text-xs font-semibold tracking-wide',
+          href && 'group-hover:text-primary group-focus-visible:text-primary transition-colors',
+        )}
+      >
         {label}
         {href ? <ChevronRight aria-hidden className="size-4" /> : null}
       </span>
@@ -54,7 +59,7 @@ export function StatTile({
   return href ? (
     <Link
       href={href}
-      className={cn(box, 'hover:ring-primary/50 focus-visible:ring-ring transition-shadow focus-visible:ring-2 focus-visible:outline-none')}
+      className={cn(box, 'group focus-visible:outline-none')}
     >
       {body}
     </Link>

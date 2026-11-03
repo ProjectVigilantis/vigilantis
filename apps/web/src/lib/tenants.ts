@@ -22,6 +22,8 @@ export const TENANT_STATUS_LABELS: Record<TenantStatus, EnumLabel> = {
   // 원격 회수. 고객 계정의 역할을 지운 것이 아니라 플랫폼이 더 들어가지 않는 상태다.
   // 관리자가 일부러 내린 결정이라 빨강(실패)이 아니라 중립 회색이다(DESIGN.md §상태 색).
   SUSPENDED: { label: '정지', tone: 'gray' },
+  // 미납은 납부하면 그대로 복구되는 상태라 주황(경고 · 사람이 손볼 일)이다(2026-11-03 PM 지시, 종전 빨강).
+  UNPAID: { label: '미납', tone: 'orange' },
 };
 
 /** 연결 확인 결과: 확인한 시각의 관측값이다. `hint`는 관리자가 다음에 할 일이다. */
@@ -168,7 +170,7 @@ export interface TenantSummary {
 }
 
 export function summarizeTenants(tenants: readonly TenantListItem[]): TenantSummary {
-  const byStatus: Record<TenantStatus, number> = { PENDING_CONNECTION: 0, ACTIVE: 0, SUSPENDED: 0 };
+  const byStatus: Record<TenantStatus, number> = { PENDING_CONNECTION: 0, ACTIVE: 0, SUSPENDED: 0, UNPAID: 0 };
   let activeAssets = 0;
   let openIncidents = 0;
   let failed = 0;

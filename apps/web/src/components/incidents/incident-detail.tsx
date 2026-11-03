@@ -244,7 +244,7 @@ function SavingsArea({ incident }: { incident: IncidentResponse }) {
       {estimates.length === 0 ? (
         <p className="text-muted-foreground text-sm">
           {incident.status === 'ANALYZING'
-            ? '분석 중 — 분석이 끝나면 이 자리에 월 절감액이 생깁니다.'
+            ? '분석 중입니다. 분석이 끝나면 이 자리에 월 절감액이 생깁니다.'
             : '이 제안에는 비용 추정이 없습니다(스펙 조정 조치에만 추정이 붙습니다).'}
         </p>
       ) : (
@@ -252,7 +252,7 @@ function SavingsArea({ incident }: { incident: IncidentResponse }) {
           <div className="flex items-baseline justify-between gap-3">
             <span className="text-muted-foreground text-xs">채택 시 월 절감 예상</span>
             <span className="font-mono text-2xl font-semibold tabular-nums">
-              {best === null ? '—' : `${formatUsd(best)}`}
+              {best === null ? '-' : `${formatUsd(best)}`}
               {best === null ? null : <span className="text-muted-foreground text-sm font-normal"> /월</span>}
             </span>
           </div>
@@ -285,7 +285,7 @@ function SavingsArea({ incident }: { incident: IncidentResponse }) {
           </ul>
           {breakdowns.size > 0 ? <SavingsLegend /> : null}
           <p className="text-muted-foreground text-xs">
-            모델 추정 단가 × 730시간(온디맨드·Linux 인스턴스 비용) — 실제 청구액이 아닙니다.
+            모델 추정 단가 × 730시간(온디맨드·Linux 인스턴스 비용)이며 실제 청구액이 아닙니다.
           </p>
         </Card>
       )}
@@ -812,7 +812,7 @@ export function IncidentDetail({
             </Row>
             <Row label="종료 시각">{incident.resolved_at === null ? '기록 없음' : formatKst(incident.resolved_at)}</Row>
             <Row label="종료 사유"><span className="whitespace-pre-wrap break-words">{incident.resolution_note ?? '기록 없음'}</span></Row>
-            <p className="text-muted-foreground text-xs">종료 판단은 위협 해소·차단 해제·최적화 완료를 뜻하지 않습니다. 실제 조치 결과는 실행 이력에서 확인하세요.</p>
+            <p className="text-muted-foreground text-xs">종료 판단은 위협 해소·차단 해제·최적화 완료를 뜻하지 않습니다.</p>
           </div>
         ) : (
           <div className="flex flex-col items-start gap-2">

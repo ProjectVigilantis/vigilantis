@@ -144,10 +144,10 @@ export function issueRows(issues: readonly ManualIssue[], tenants: readonly Tena
   return rows.sort((a, b) => order[a.kind] - order[b.kind] || a.at.localeCompare(b.at));
 }
 
-/** 연결 상태 분류. 연결 상태 막대 그래프의 다섯 줄이다. */
-export type ConnectionState = 'FAILED' | 'UNREACHABLE' | 'STALE' | 'OK' | 'UNCHECKED';
+/** 연결 상태 분류. 연결 상태 막대 그래프의 여섯 줄이다. UNPAID는 확인 결과가 아니라 고객사 상태(미납)에서 온다. */
+export type ConnectionState = 'FAILED' | 'UNREACHABLE' | 'UNPAID' | 'STALE' | 'OK' | 'UNCHECKED';
 
-export const CONNECTION_STATE_ORDER: readonly ConnectionState[] = ['FAILED', 'UNREACHABLE', 'STALE', 'OK', 'UNCHECKED'];
+export const CONNECTION_STATE_ORDER: readonly ConnectionState[] = ['FAILED', 'UNREACHABLE', 'UNPAID', 'STALE', 'OK', 'UNCHECKED'];
 
 export interface ConnectionPoint {
   tenantId: string;
@@ -167,6 +167,11 @@ export function connectionPoints(tenants: readonly TenantListItem[], nowMs: numb
   for (const t of tenants) {
     if (t.status === 'SUSPENDED') continue;
     const v = t.last_verification;
+    // 미납 고객사는 연결 확인을 보내지 않지만, 대시보드 통계에서는 따로 한 줄로 센다(2026-11-02 PM 지시).
+    if (t.status === 'UNPAID') {
+      points.push({ tenantId: t.tenant_id, name: t.name, state: 'UNPAID', hours: v === null ? null : hoursSince(v.verified_at, nowMs), verifiedAt: v?.verified_at ?? null });
+      continue;
+    }
     if (v === null) {
       points.push({ tenantId: t.tenant_id, name: t.name, state: 'UNCHECKED', hours: null, verifiedAt: null });
       continue;

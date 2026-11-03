@@ -92,6 +92,7 @@ export function MonitoringView({
   initialTab,
   initialPreset,
   renderedAt,
+  embedded = false,
 }: {
   initialAxis: MonitoringAxis;
   /** 고객 목록. `null`은 조회 실패 — 선택은 어차피 잠겨 있어 이름 없이 `전체 고객`만 적는다. */
@@ -107,6 +108,8 @@ export function MonitoringView({
   initialTab?: string;
   initialPreset?: IncidentPreset;
   renderedAt: string;
+  /** 고객사 상세 안에 그린다(2026-11-02). 제목을 h2로 낮추고 고객 선택 대신 조회 범위 안내를 둔다. */
+  embedded?: boolean;
 }) {
   const [axis, setAxis] = useState(initialAxis);
 
@@ -121,7 +124,12 @@ export function MonitoringView({
     window.history.replaceState(window.history.state, '', url);
   };
 
-  const heading: ReactNode = (
+  const heading: ReactNode = embedded ? (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+      <h2 className="text-base font-semibold">관제</h2>
+      <AxisSwitch axis={axis} onChange={changeAxis} />
+    </div>
+  ) : (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
       <h1 className="text-lg font-semibold">관제</h1>
       <AxisSwitch axis={axis} onChange={changeAxis} />
@@ -129,7 +137,7 @@ export function MonitoringView({
     </div>
   );
 
-  const common = { data, incidents, incidentsError, incidentsByArn, metrics, renderedAt, heading };
+  const common = { data, incidents, incidentsError, incidentsByArn, metrics, renderedAt, heading, embedded };
 
   return axis === 'assets' ? (
     <AssetsView key="assets" {...common} {...linked('assets')} savings={savings} savingsFailed={savingsFailed} />

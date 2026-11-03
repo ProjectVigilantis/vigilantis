@@ -24,8 +24,7 @@ export default async function SignupRequestsPage({ searchParams }: PageProps<'/s
 
   return (
     <SupportPage
-      title="도입 신청"
-      description="처음 쓰는 회사가 보낸 신청입니다. 검토한 뒤 승인하면 고객사 화면에서 고객사를 추가하고 관리자를 초대합니다. 시각은 모두 KST입니다."
+      title="도입 신청"
       renderedAt={renderedAt}
     >
       {result.value !== null ? (

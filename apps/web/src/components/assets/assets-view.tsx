@@ -123,6 +123,7 @@ export function AssetsView({
   initialPreset,
   renderedAt,
   heading,
+  embedded = false,
 }: {
   data: AssetsResponse;
   /** 인시던트 목록 전량 — `인시던트` 탭이 FINOPS만 골라 쓴다. `null`은 조회 실패. */
@@ -153,6 +154,8 @@ export function AssetsView({
   renderedAt: string;
   /** 띠 위 제목 자리. 통합 관제(`monitoring-view.tsx`)가 제목 · 축 전환 · 고객 선택을 넣는다. 없으면 화면 이름이다. */
   heading?: ReactNode;
+  /** 다른 화면(고객사 상세) 안에 그린다. 띠를 화면 맨 위에 붙이지 않는다(sticky · 음수 여백 없음). */
+  embedded?: boolean;
 }) {
   const [assetType, setAssetType] = useState<string>(ALL);
   // AST-002는 이 목록이 이미 받은 단건을 그대로 넘겨 연다 — 신규 페치 없음(§4.3).
@@ -326,7 +329,7 @@ export function AssetsView({
           여기 있다: 띠만 따라오면 어느 화면의 띠인지가 스크롤과 함께 사라진다. 음수 상단 여백은 본문
           여백(셸의 `--page-pad`)을 되돌려 안 붙었을 때의 자리가 종전과 같게 한다. 띠는 전체 + 유형 7종이라 8칸이고,
           2 → 4 → 8열로 접힌다(빈 칸이 없다). z-index는 상세 Drawer(z-50)보다 낮게 둔다. */}
-      <div ref={stripRef} className="bg-background sticky top-0 z-20 -mx-(--page-pad) -mt-(--page-pad) px-(--page-pad) pt-(--page-pad) pb-3">
+      <div ref={stripRef} className={embedded ? 'pb-3' : 'bg-background sticky top-0 z-20 -mx-(--page-pad) -mt-(--page-pad) px-(--page-pad) pt-(--page-pad) pb-3'}>
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         {heading ?? <h1 className="text-lg font-semibold">자산 관제</h1>}
         <AutoRefresh renderedAt={renderedAt} />
@@ -412,8 +415,8 @@ export function AssetsView({
               : `초점 ${focusedArns.size} / ${data.items.length}건`}
           </span>
         ) : (
-          // 건수는 탭 안의 목록이 프리셋 기준으로 센다 — 여기서는 필터가 걸린다는 사실만 말한다.
-          <span>자산 인시던트(FinOps) — 위 유형·리전·낭비 후보 필터가 이 탭에도 걸립니다</span>
+          // 인시던트 탭은 건수를 탭 안의 목록이 센다. 띠 옆에는 따로 적지 않는다(2026-11-02).
+          null
         )}
       </div>
 
@@ -427,7 +430,7 @@ export function AssetsView({
             // 읽히므로, 왜 없는지와 어디서 볼 수 있는지를 함께 준다(§4.9 빈 상태는 오류가 아니다).
             <EmptyState
               message={`${ASSET_TYPE_LABELS[topologyOnlyRow.type]?.label ?? topologyOnlyRow.type} 자산 ${topologyOnlyRow.count}건은 목록에 서지 않습니다.`}
-              description="NACL · Auto Scaling 그룹 · 시작 템플릿 · 대상 그룹은 Rule 판정 대상이 아니라 목록에 없습니다. 토폴로지에서 관계로 봅니다."
+              description="NACL · Auto Scaling 그룹 · 시작 템플릿 · 대상 그룹은 Rule 판정 대상이 아니라 목록에 없습니다."
               action={
                 <Button size="sm" variant="outline" onClick={() => setTab('topology')}>
                   토폴로지에서 보기
@@ -437,7 +440,6 @@ export function AssetsView({
           ) : (
             <EmptyState
               message="조건에 맞는 자산이 없습니다."
-              description="필터를 바꾸면 다른 자산을 볼 수 있습니다."
             />
           )
         ) : (
@@ -464,13 +466,13 @@ export function AssetsView({
       {/* 요약 탭: 목록 탭 위에 있던 추이 2열과 상태 3열을 옮겨 왔다. 순서는 그대로 추이 → 상태다(2026-09-30 ·
           보안 관제와 같은 순서). 헬스 스코어가 CPU 14일 평균이라 그 원계열이 앞선다. CPU·네트워크는 같은
           CloudWatch 원계열이지만 단위가 %와 B/s라 한 격자에 겹치지 않는다. */}
-      <TabsContent value="summary" className="flex flex-col gap-4">
-      <div className="grid gap-4 lg:grid-cols-2">
+      <TabsContent value="summary" className="@container/view flex flex-col gap-4">
+      <div className="grid gap-4 @3xl/view:grid-cols-2">
         <Panel
           title="EC2 CPU 추이"
-          description={`CloudWatch 원계열 — 파선(저활성 임계 ${
+          description={`파선: 저활성 임계 ${
             metrics?.cpu.idle_cpu_avg_threshold ?? IDLE_CPU_AVG
-          }%) 아래에 머무는 인스턴스가 다운사이징 후보입니다`}
+          }%`}
         >
           {metrics === null ? (
             <Muted>추이를 불러오지 못했습니다.</Muted>
@@ -481,7 +483,7 @@ export function AssetsView({
 
         <Panel
           title="네트워크 처리량 추이"
-          description="수신·송신 합계(초당) — CPU가 낮은데 이 선이 살아 있으면 저활성 판정의 반례입니다"
+          description="수신·송신 합계(초당)"
         >
           {metrics === null ? (
             <Muted>추이를 불러오지 못했습니다.</Muted>
@@ -493,12 +495,13 @@ export function AssetsView({
 
       {/* 상태 3열 — 위 추이가 만든 **지금 상태**다. 순서가 질문 순서다: 이 EC2가 한가한가(헬스 스코어)
           → 규칙이 뭐라 했나(판정 현황) → 그래서 얼마를 아끼나(절감 예상). 셋 다 현재 회차의 값이라 한 줄에 선다. */}
-      <div className="grid gap-4 lg:grid-cols-3">
+      <div className="grid gap-4 @3xl/view:grid-cols-2 @6xl/view:grid-cols-3">
         <HealthScorePanel items={data.items} />
         <VerdictPanel items={data.items} />
         <Panel
+          className="@3xl/view:col-span-2 @6xl/view:col-span-1"
           title="절감 예상 (AI 추정)"
-          description="다운사이징 후보의 월 절감 예상액 — 모델 추정 단가 × 730시간이며 실제 청구액이 아닙니다"
+          description="모델 추정 단가 × 730시간, 실제 청구액 아님"
         >
           <SavingsCard summary={savings} failed={savingsFailed} onSelect={openAsset} />
         </Panel>

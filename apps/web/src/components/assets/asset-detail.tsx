@@ -170,7 +170,7 @@ export function AssetDetailPane({ asset, incidents, metrics, className }: AssetD
           </div>
         </>
       ) : (
-        <p className="text-muted-foreground p-6 text-sm">목록에서 자산을 고르면 상세가 여기에 보입니다.</p>
+        <p className="text-muted-foreground p-6 text-sm">선택한 자산이 없습니다.</p>
       )}
     </section>
   );

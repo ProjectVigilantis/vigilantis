@@ -7,6 +7,7 @@
 // 고객사 사용자만 본다 — 범위는 서버가 정한다. 행의 조치 버튼은 대상 고객을 다룰 수 있을 때만 그린다(lib/roles.ts
 // `canManageUsersOf`). 담당 고객이 없는 고객 담당자에게는 초대 · 조치 없이 배정 없음 안내만 보인다.
 
+import { ChevronDown } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
@@ -15,6 +16,13 @@ import { HangulWarnedInput } from '@/components/auth/hangul-warned-input';
 import { useSession } from '@/components/auth/session-provider';
 import { INPUT_CLASS, LABEL_CLASS } from '@/components/form-classes';
 import { Button } from '@/components/ui/button';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import {
   Dialog,
   DialogContent,
@@ -53,7 +61,7 @@ import {
   isUnassignedManager,
   type PlatformSubject,
 } from '@/lib/roles';
-import type { CurrentUserResponse, UserEventItem, UserListItem, UserRole } from '@/types/api';
+import type { CurrentUserResponse, UserEventItem, UserEventsResponse, UserListItem, UserRole } from '@/types/api';
 
 const ROLES: readonly UserRole[] = ['ADMIN', 'OPERATOR', 'VIEWER'];
 
@@ -65,12 +73,18 @@ export function UsersView({
   users: allUsers,
   tenantFilter = null,
   inviteOnOpen = false,
+  embedded = false,
+  canInvite = true,
 }: {
   users: UserListItem[];
   /** 고객 상세에서 넘어온 고객(`?tenant=`). 그 고객 사용자만 보이고 초대 창의 고객 ID를 채운다. 이름은 못 읽으면 null이다. */
   tenantFilter?: { id: string; name: string | null } | null;
   /** 첫 화면에서 초대 창을 연 채로 시작한다(`?invite=1`). */
   inviteOnOpen?: boolean;
+  /** 고객사 상세 패널 안에 그린다. 화면 제목 · 고객사 필터 안내 · 고객사 ID 열을 빼고 표와 조치만 남긴다. */
+  embedded?: boolean;
+  /** 초대 버튼을 그린다. 고객사 상세는 관제 중(ACTIVE)인 고객사에서만 연다(ADR-0012). */
+  canInvite?: boolean;
 }) {
   const router = useRouter();
   const { session } = useSession();
@@ -97,17 +111,19 @@ export function UsersView({
 
   return (
     <div className="flex flex-col gap-4">
+      {embedded ? (
+        canInvite && !unassigned ? (
+          <div className="flex justify-end">
+            <Button type="button" size="sm" disabled={!canManageUsers(me)} onClick={() => open({ kind: 'invite' })}>
+              직원 초대
+            </Button>
+          </div>
+        ) : null
+      ) : (
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-col gap-1">
           <h1 className="text-lg font-semibold">계정 관리</h1>
           {/* 관리자 직원계정은 서버가 운영 CLI로만 만든다(auth/README.md · routers/staff.py에 생성 경로 없음). 이 화면에서 만드는 것은 고객사 계정뿐이다. */}
-          {me !== null ? (
-            <p className="text-muted-foreground text-sm">
-              {me.account_type === 'PLATFORM'
-                ? '고객사 계정(고객사 중앙계정 · 고객사 직원계정)을 관리합니다. 관리자 직원계정은 아직 이 화면에서 만들 수 없습니다.'
-                : '우리 회사의 고객사 직원계정을 관리합니다.'}
-            </p>
-          ) : null}
         </div>
         {/* 초대 칸(고객사 ID 입력 여부)이 계정 종류로 갈리므로 계정을 확인한 뒤에 연다. 담당 고객이 없으면 그리지 않는다. */}
         {unassigned ? null : (
@@ -116,8 +132,9 @@ export function UsersView({
           </Button>
         )}
       </div>
+      )}
 
-      {tenantFilter !== null ? (
+      {tenantFilter !== null && !embedded ? (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border px-3 py-2 text-sm">
           <span>
             고객사 <span className="font-semibold">{tenantFilter.name ?? tenantFilter.id}</span>의 직원만 보는 중
@@ -151,12 +168,13 @@ export function UsersView({
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>이메일</TableHead>
-              <TableHead>고객사 ID</TableHead>
-              <TableHead>권한</TableHead>
-              <TableHead>상태</TableHead>
+              {/* 조치를 한 버튼(관리 메뉴)에 모아 남은 폭을 속성 칸에 나눈다. 관리 칸은 내용 폭만 쓴다. */}
+              <TableHead className="w-[30%]">이메일</TableHead>
+              {embedded ? null : <TableHead className="w-[20%]">고객사 ID</TableHead>}
+              <TableHead className="w-[16%]">권한</TableHead>
+              <TableHead className="w-[12%]">상태</TableHead>
               <TableHead>마지막 로그인</TableHead>
-              <TableHead>
+              <TableHead className="w-px">
                 <span className="sr-only">관리</span>
               </TableHead>
             </TableRow>
@@ -168,50 +186,49 @@ export function UsersView({
                   {user.email}
                   {user.user_id === myId ? <span className="ml-1 text-xs text-muted-foreground">(나)</span> : null}
                 </TableCell>
-                <TableCell className="font-mono text-xs">{user.tenant_id ?? '—'}</TableCell>
+                {embedded ? null : <TableCell className="font-mono text-xs">{user.tenant_id ?? '-'}</TableCell>}
                 <TableCell>{ROLE_LABELS[user.role]}</TableCell>
                 <TableCell>{STATUS_LABELS[user.status]}</TableCell>
                 <TableCell>
                   {user.last_login_at === null ? '로그인 기록 없음' : formatUserTime(user.last_login_at)}
                 </TableCell>
-                <TableCell>
+                <TableCell className="text-right">
                   {/* 확인된 계정이 이 고객사 사용자를 다룰 수 없으면(배정 스냅샷 밖) 조치를 그리지 않는다. 확인 전에는
                       기존처럼 그리고, 본인 판정이 필요한 조치는 막는다. 실제 범위는 서버(404)다. */}
                   {me !== null && !canManageUsersOf(me, user.tenant_id) ? (
                     <span className="text-xs text-muted-foreground">담당 범위 밖</span>
                   ) : (
-                    <div className="flex gap-1">
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        disabled={!canChangeRow(user.user_id, myId)}
-                        onClick={() => open({ kind: 'role', user })}
-                      >
-                        권한 변경
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        disabled={!canChangeRow(user.user_id, myId)}
-                        onClick={() => open({ kind: 'status', user })}
-                      >
-                        {user.status === 'ACTIVE' ? '비활성화' : '활성화'}
-                      </Button>
-                      <Button type="button" size="sm" variant="outline" onClick={() => open({ kind: 'revoke', user })}>
-                        세션 종료
-                      </Button>
-                      {/* 아직 로그인한 적이 없는 사용자만 — 재발송 가능 여부의 최종 판정은 서버다(409). */}
-                      {user.last_login_at === null ? (
-                        <Button type="button" size="sm" variant="outline" onClick={() => open({ kind: 'resend', user })}>
-                          초대 재발송
+                    // 메뉴는 비모달이다. 항목을 고르면 메뉴가 닫히고 확인 모달이 열린다(모달 둘이 포커스를 다투지 않게).
+                    <DropdownMenu modal={false}>
+                      <DropdownMenuTrigger asChild>
+                        <Button type="button" size="sm" variant="outline" aria-label={`${user.email} 관리`}>
+                          관리
+                          <ChevronDown aria-hidden />
                         </Button>
-                      ) : null}
-                      <Button type="button" size="sm" variant="ghost" onClick={() => open({ kind: 'history', user })}>
-                        이력
-                      </Button>
-                    </div>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent>
+                        <DropdownMenuItem
+                          disabled={!canChangeRow(user.user_id, myId)}
+                          onSelect={() => open({ kind: 'role', user })}
+                        >
+                          권한 변경
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          disabled={!canChangeRow(user.user_id, myId)}
+                          destructive={user.status === 'ACTIVE'}
+                          onSelect={() => open({ kind: 'status', user })}
+                        >
+                          {user.status === 'ACTIVE' ? '비활성화' : '활성화'}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => open({ kind: 'revoke', user })}>세션 종료</DropdownMenuItem>
+                        {/* 아직 로그인한 적이 없는 사용자만 — 재발송 가능 여부의 최종 판정은 서버다(409). */}
+                        {user.last_login_at === null ? (
+                          <DropdownMenuItem onSelect={() => open({ kind: 'resend', user })}>초대 재발송</DropdownMenuItem>
+                        ) : null}
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem onSelect={() => open({ kind: 'history', user })}>이력</DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   )}
                 </TableCell>
               </TableRow>
@@ -283,7 +300,7 @@ export function UsersView({
  * 확인 → 실행 모달. 폼이라 필드가 있으면 브라우저 기본 검사(type=email 등)를 그대로 받는다.
  * 실패하면 모달에 남아 문구를 보이고, 대상이 없거나 상태가 바뀐 경우(404 · 409)는 뒤의 목록을 다시 읽는다.
  */
-function ActionDialog({
+export function ActionDialog({
   action,
   actor = null,
   title,
@@ -552,20 +569,23 @@ function RoleDialog({
 
 type HistoryState = { kind: 'loading' } | { kind: 'error'; message: string } | { kind: 'ok'; items: UserEventItem[] };
 
-function HistorySheet({
+export function HistorySheet({
   user,
   emailOf,
   onClose,
+  load = getUserEvents,
 }: {
-  user: UserListItem;
+  user: Pick<UserListItem, 'user_id' | 'email'>;
   emailOf: (userId: string) => string;
   onClose: () => void;
+  /** 이력 원천. 고객사 계정은 `/users/{id}/events`, 관리자 직원계정은 `/staff/{id}/events`다. */
+  load?: (userId: string) => Promise<UserEventsResponse>;
 }) {
   const [history, setHistory] = useState<HistoryState>({ kind: 'loading' });
 
   useEffect(() => {
     let alive = true;
-    getUserEvents(user.user_id)
+    load(user.user_id)
       .then((res) => alive && setHistory({ kind: 'ok', items: res.items }))
       .catch((caught: unknown) => {
         if (!alive) return;
@@ -582,7 +602,7 @@ function HistorySheet({
     return () => {
       alive = false;
     };
-  }, [user.user_id]);
+  }, [user.user_id, load]);
 
   return (
     <Sheet open onOpenChange={(next) => (next ? undefined : onClose())}>

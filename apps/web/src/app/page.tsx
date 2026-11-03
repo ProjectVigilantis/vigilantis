@@ -12,16 +12,17 @@
 import { AdminDashboardView } from '@/components/admin-dashboard/admin-dashboard-view';
 import { BusinessUnavailable } from '@/components/business-unavailable';
 import { ErrorState } from '@/components/error-state';
-import { orNull, serverApi } from '@/lib/api/server';
+import { orError, orNull, serverApi } from '@/lib/api/server';
 import { businessOpen } from '@/lib/home-path';
-import { isUnassignedManager } from '@/lib/roles';
+import { scopeApiUsage } from '@/lib/platform-status';
+import { canViewPlatformStatus, isCentralAdmin, isUnassignedManager } from '@/lib/roles';
 import { unstable_rethrow } from 'next/navigation';
 
 export default async function DashboardPage() {
   // 제목 옆 `마지막 갱신` — 다시 그려질 때마다 새로 찍힌다(auto-refresh.tsx).
   const renderedAt = new Date().toISOString();
   // 세션 쿠키만 실어 부르고, 401이면 로그인으로 redirect한다(lib/api/server.ts).
-  const { getMe, getTenants, getUsers, getIncidents } = await serverApi();
+  const { getMe, getTenants, getUsers, getIncidents, getPlatformStatus } = await serverApi();
   // 고객 범위가 없는 계정(고객사 계정 · 담당 고객 없는 고객 담당자)에는 업무 데이터를 읽지 않고 이용 제한을 알린다
   // (lib/home-path.ts `businessOpen`). 담당 고객이 없는 담당자에게는 배정 없음을 따로 말한다. 고객 담당자가 받는
   // 데이터의 담당 범위는 서버가 정한다. 확인 실패도 업무 조회로 넘어가지 않는다.
@@ -34,6 +35,9 @@ export default async function DashboardPage() {
   }
   if (!businessOpen(user)) return <BusinessUnavailable unassigned={isUnassignedManager(user)} />;
 
+  // 플랫폼 상태는 중앙 관리 권한 또는 조치 권한이 있는 플랫폼 계정이 본다(lib/roles.ts `canViewPlatformStatus`).
+  // 실패(404 = API 없음 포함)해도 대시보드는 뜬다.
+  const platformPromise = canViewPlatformStatus(user) ? orError(getPlatformStatus()) : null;
   const usersPromise = orNull(getUsers());
   const incidentsPromise = orNull(getIncidents());
   let tenants;
@@ -45,6 +49,12 @@ export default async function DashboardPage() {
   }
   const users = await usersPromise;
   const incidents = await incidentsPromise;
+  const platform = platformPromise === null ? undefined : await platformPromise;
+  // 중앙 관리계정이 아니면 고객사 API 호출을 담당 고객사로 좁힌다(다른 고객사 이름 · 건수가 보이지 않게).
+  if (platform?.value && !isCentralAdmin(user)) {
+    const ids = tenants.tenants.map((t) => t.tenant_id);
+    platform.value = { ...platform.value, api_usage: scopeApiUsage(platform.value.api_usage, ids) };
+  }
 
   return (
     <AdminDashboardView
@@ -52,6 +62,7 @@ export default async function DashboardPage() {
       users={users === null ? null : users.items}
       incidents={incidents === null ? null : incidents.items}
       renderedAt={renderedAt}
+      platform={platform === undefined ? undefined : { status: platform.value, error: platform.error }}
     />
   );
 }

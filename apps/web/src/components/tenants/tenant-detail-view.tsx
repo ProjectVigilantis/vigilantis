@@ -9,10 +9,10 @@
 // 고객이 배정된 고객 담당자(lib/roles.ts `canAccessTenant`). 확인 전 계정이나 배정 스냅샷에 없는 고객에는 버튼을 그리지
 // 않고 조회만 보인다. 실제 차단은 서버(403 · 범위 밖 404)이고, 낡은 화면의 요청이 거절되면 오류를 보인 뒤 다시 읽는다.
 
-import { ArrowLeft, CircleCheck, ExternalLink, Hourglass, Radar, TriangleAlert, Users } from 'lucide-react';
+import { ArrowLeft, CircleCheck, ExternalLink, Hourglass, TriangleAlert, Users } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useRef, useState } from 'react';
+import { useRef, useState, type ReactNode } from 'react';
 
 import { useSession } from '@/components/auth/session-provider';
 import { CopyButton } from '@/components/copy-button';
@@ -24,6 +24,7 @@ import { TenantStatusBadge, VerificationSummary } from '@/components/tenants/ten
 import { TenantConnectPanel } from '@/components/tenants/tenant-connect-panel';
 import { TenantUsersPanel } from '@/components/tenants/tenant-users-panel';
 import { Button } from '@/components/ui/button';
+import { Switch } from '@/components/ui/switch';
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog';
@@ -37,7 +38,6 @@ import {
   verifyTenant,
 } from '@/lib/api/client';
 import type { LabelTone } from '@/lib/enum-labels';
-import { MONITORING_PATH, USERS_PATH } from '@/lib/home-path';
 import { canAccessTenant } from '@/lib/roles';
 import {
   isStaleTenantRequest,
@@ -48,7 +48,7 @@ import {
   verificationHint,
   type TenantRunResult,
 } from '@/lib/tenants';
-import { formatKst } from '@/lib/utils';
+import { cn, formatKst } from '@/lib/utils';
 import type {
   TenantDetail,
   TenantOnboardingResponse,
@@ -59,7 +59,16 @@ import type {
 
 type Busy = 'verify' | 'resume' | 'suspend' | 'remove' | 'auto' | 'onboarding' | null;
 
-export function TenantDetailView({ tenant, users }: { tenant: TenantDetail; users: UserListItem[] | null }) {
+export function TenantDetailView({
+  tenant,
+  users,
+  monitoring = null,
+}: {
+  tenant: TenantDetail;
+  users: UserListItem[] | null;
+  /** 상세 안에 그릴 관제(자산 · 보안). 페이지가 서버에서 조회해 넘긴다. 연결 전이면 null이다. */
+  monitoring?: ReactNode;
+}) {
   const router = useRouter();
   const { session, refresh: refreshSession } = useSession();
   const canManage = session.kind === 'user' && canAccessTenant(session.user, tenant.tenant_id);
@@ -130,25 +139,14 @@ export function TenantDetailView({ tenant, users }: { tenant: TenantDetail; user
           <TenantStatusBadge status={tenant.status} />
           <span className="text-muted-foreground font-mono text-[13px]">{tenant.aws_account_id}</span>
         </div>
-        {/* 관리자는 메뉴가 아니라 고객사에서 관제 · 계정으로 들어간다(gnb.tsx). 연결 전에는 관제할 것이 없어 관제를 감춘다. */}
+        {/* 관리자는 메뉴가 아니라 고객사에서 관제 · 계정을 본다(gnb.tsx). 관제는 지표 카드 바로 아래에 그린다(2026-11-02). */}
         <div className="flex flex-wrap items-center gap-2">
-          {pending ? null : (
-            <Button asChild variant="outline" size="sm">
-              <Link href={MONITORING_PATH}>
-                <Radar aria-hidden />
-                관제
-              </Link>
-            </Button>
-          )}
           <Button asChild variant="outline" size="sm">
-            <Link href={`${USERS_PATH}?tenant=${encodeURIComponent(tenant.tenant_id)}`}>
+            <Link href="#tenant-users">
               <Users aria-hidden />
               계정
             </Link>
           </Button>
-          {pending ? null : (
-            <span className="text-muted-foreground text-xs">관제는 고객사별 조회 범위(T-1)가 열리기 전까지 전체 고객사를 함께 보여 줍니다.</span>
-          )}
         </div>
       </div>
 
@@ -167,10 +165,9 @@ export function TenantDetailView({ tenant, users }: { tenant: TenantDetail; user
           <CircleCheck aria-hidden className="text-badge-good-fg mt-0.5 size-5 shrink-0" />
           <div className="flex flex-col gap-1">
             <p className="font-bold">연결됐습니다. 관제 중으로 바뀌었습니다.</p>
-            <p className="text-foreground-secondary text-[13px]">
-              {verification ? `${formatKst(verification.verified_at)}에 연결을 확인했습니다. ` : null}
-              고객사가 스택을 지우면 연결이 끊기니 남겨 두도록 안내하세요.
-            </p>
+            {verification ? (
+              <p className="text-foreground-secondary text-[13px]">{formatKst(verification.verified_at)}에 연결을 확인했습니다.</p>
+            ) : null}
           </div>
         </div>
       ) : verification !== null && verification.result !== 'OK' ? (
@@ -180,9 +177,6 @@ export function TenantDetailView({ tenant, users }: { tenant: TenantDetail; user
           <Hourglass aria-hidden className="text-badge-warning-fg mt-0.5 size-5 shrink-0" />
           <div className="flex flex-col gap-1">
             <p className="font-bold">아직 연결되지 않았습니다.</p>
-            <p className="text-foreground-secondary text-[13px]">
-              고객사에 안내문을 보내고, 고객사가 스택을 다 만들었다고 회신하면 [연결 확인]을 누르세요. 연결 전에는 수집 · 분석 · 실행을 하지 않습니다.
-            </p>
           </div>
         </div>
       ) : null}
@@ -205,6 +199,8 @@ export function TenantDetailView({ tenant, users }: { tenant: TenantDetail; user
         />
       </StatGrid>}
 
+      {pending ? null : monitoring}
+
       <div className="grid gap-4 lg:grid-cols-2">
         {pending && tenant.onboarding_url ? (
           <TenantConnectPanel
@@ -217,7 +213,7 @@ export function TenantDetailView({ tenant, users }: { tenant: TenantDetail; user
           />
         ) : null}
         {pending ? null : <>
-        <Panel title="연결" description="플랫폼이 고객사 AWS 계정의 역할을 ExternalId와 함께 맡아 들어갑니다. 장기 키는 받지 않습니다.">
+        <Panel title="연결">
           <div className="flex flex-col gap-3">
             <Stacked label="역할 ARN">
               <span className="font-mono text-xs">{tenant.access_role_arn}</span>
@@ -245,47 +241,9 @@ export function TenantDetailView({ tenant, users }: { tenant: TenantDetail; user
                 </Button>
               ) : null}
             </div>
-            {actions.resume ? (
-              <p className="text-muted-foreground text-xs">재개는 연결 확인이 먼저 성공해야 합니다. 실패하면 정지 상태 그대로입니다.</p>
-            ) : null}
-          </div>
-        </Panel>
-
-        <Panel title="재연결" description="고객사가 스택이나 역할을 지웠다면 같은 ExternalId로 역할을 다시 만들어야 다시 연결됩니다.">
-          <div className="flex flex-col gap-3 text-sm">
-            {!canManage ? (
-              <p className="text-muted-foreground text-xs">
-                온보딩 링크 · ExternalId는 중앙 관리계정과 이 고객사를 맡은 관리자 직원계정만 볼 수 있습니다.
-              </p>
-            ) : onboarding === null ? (
-              <Button type="button" size="sm" variant="outline" className="w-fit" disabled={disabled} onClick={showOnboarding}>
-                {busy === 'onboarding' ? '불러오는 중…' : '온보딩 링크 · ExternalId 보기'}
-              </Button>
-            ) : (
-              <div className="flex flex-col gap-2">
-                <Row label="온보딩 링크">
-                  <span className="inline-flex items-center gap-1">
-                    <a href={onboarding.onboarding_url} target="_blank" rel="noreferrer"
-                      className="inline-flex items-center gap-1 hover:underline">
-                      열기 <ExternalLink aria-hidden className="size-3" />
-                    </a>
-                    <CopyButton value={onboarding.onboarding_url} label="링크 복사" />
-                  </span>
-                </Row>
-                <Stacked label="ExternalId">
-                  <span className="inline-flex flex-wrap items-center gap-1">
-                    <code className="font-mono text-xs">{onboarding.external_id}</code>
-                    <CopyButton value={onboarding.external_id} />
-                  </span>
-                </Stacked>
-                <p className="text-muted-foreground text-xs">ExternalId는 이 고객사 전용 비밀 값입니다. 고객사 외에는 공유하지 마세요.</p>
-              </div>
-            )}
           </div>
         </Panel>
         </>}
-
-        <TenantUsersPanel tenantId={tenant.tenant_id} status={tenant.status} users={users} />
 
         <Panel title="관제 범위">
           <div className="flex flex-col gap-3">
@@ -300,17 +258,71 @@ export function TenantDetailView({ tenant, users }: { tenant: TenantDetail; user
           </div>
         </Panel>
 
-        <Panel title="자동 조치" description="끄면 자동 발동(High 선차단 · Medium 1분 무응답 자동 격리)만 하지 않습니다. 수집 · 분석 · 승인 실행은 그대로입니다.">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <span className="text-sm">{tenant.auto_action_enabled ? '켜짐' : '꺼짐 · 사람이 승인한 조치만 실행'}</span>
-            {canManage ? (
-              <Button type="button" size="sm" variant="outline" disabled={disabled}
-                onClick={() => run('auto', () => updateTenant(tenant.tenant_id, { auto_action_enabled: !tenant.auto_action_enabled }))}>
-                {busy === 'auto' ? '바꾸는 중…' : tenant.auto_action_enabled ? '자동 조치 끄기' : '자동 조치 켜기'}
-              </Button>
-            ) : null}
+        {/* 재연결과 자동 조치를 한 패널에 둔다(2026-11-02). 둘 다 한 줄짜리 설정이라 패널을 따로 두면 빈 공간만 남는다.
+            연결 전에는 재연결할 것이 없어 자동 조치만 보인다(연결은 위 연결 패널이 맡는다). */}
+        <Panel title={pending ? '자동 조치' : '재연결 · 자동 조치'} className="lg:col-span-2">
+          <div className={cn('grid gap-4 text-sm', !pending && 'lg:grid-cols-2 lg:divide-x')}>
+            {pending ? null : (
+              <div className="flex flex-col gap-2 lg:pr-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-semibold">재연결</span>
+                  {canManage && onboarding === null ? (
+                    <Button type="button" size="sm" variant="outline" disabled={disabled} onClick={showOnboarding}>
+                      {busy === 'onboarding' ? '불러오는 중…' : '온보딩 링크 · ExternalId 보기'}
+                    </Button>
+                  ) : null}
+                </div>
+                {!canManage ? (
+                  <p className="text-muted-foreground text-xs">
+                    온보딩 링크 · ExternalId는 중앙 관리계정과 이 고객사를 맡은 관리자 직원계정만 볼 수 있습니다.
+                  </p>
+                ) : onboarding !== null ? (
+                  <div className="flex flex-col gap-1.5">
+                    <Row label="온보딩 링크">
+                      <span className="inline-flex items-center gap-1">
+                        <a href={onboarding.onboarding_url} target="_blank" rel="noreferrer"
+                          className="inline-flex items-center gap-1 hover:underline">
+                          열기 <ExternalLink aria-hidden className="size-3" />
+                        </a>
+                        <CopyButton value={onboarding.onboarding_url} label="링크 복사" />
+                      </span>
+                    </Row>
+                    <Row label="ExternalId">
+                      <span className="inline-flex flex-wrap items-center gap-1">
+                        <code className="font-mono text-xs">{onboarding.external_id}</code>
+                        <CopyButton value={onboarding.external_id} />
+                      </span>
+                    </Row>
+                    <p className="text-muted-foreground text-xs">ExternalId는 이 고객사 전용 비밀 값입니다. 고객사 외에는 공유하지 마세요.</p>
+                  </div>
+                ) : null}
+              </div>
+            )}
+            <div className={cn('flex flex-col gap-2', !pending && 'lg:pl-4')}>
+              <div className="flex items-center justify-between gap-2">
+                <label htmlFor="auto-action" className="font-semibold">
+                  자동 조치
+                </label>
+                <span className="inline-flex items-center gap-2">
+                  <span className="text-muted-foreground text-xs" aria-live="polite">
+                    {busy === 'auto' ? '바꾸는 중…' : tenant.auto_action_enabled ? '켜짐' : '꺼짐'}
+                  </span>
+                  {/* 누르는 즉시 저장한다. 끄는 것이 수집 · 분석 · 승인 실행을 멈추지 않아 확인 창을 두지 않는다(종전 버튼과 같다). */}
+                  <Switch
+                    id="auto-action"
+                    checked={tenant.auto_action_enabled}
+                    disabled={!canManage || disabled}
+                    onCheckedChange={(next) => run('auto', () => updateTenant(tenant.tenant_id, { auto_action_enabled: next }))}
+                  />
+                </span>
+              </div>
+            </div>
           </div>
         </Panel>
+
+        <div id="tenant-users" className="scroll-mt-4 lg:col-span-2">
+          <TenantUsersPanel tenantId={tenant.tenant_id} tenantName={tenant.name} status={tenant.status} users={users} />
+        </div>
       </div>
 
       {actions.suspend || actions.remove ? (

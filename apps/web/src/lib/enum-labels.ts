@@ -48,7 +48,7 @@ export interface EnumLabel {
 type LabelMap<K extends string> = Record<K, EnumLabel | null>;
 
 /** 3.3 값 없음 처리 — 게이지·수치를 0으로 그리지 않고 이 문자를 쓴다. */
-export const NO_VALUE = '—';
+export const NO_VALUE = '-';
 
 export const ASSET_TYPE_LABELS: LabelMap<AssetType> = {
   EC2: { label: 'EC2', tone: 'neutral' },

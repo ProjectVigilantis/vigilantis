@@ -246,7 +246,7 @@ test('이력 한 줄 요약', () => {
     ),
     '관리자 직원계정 → 중앙 관리계정',
   );
-  assert.equal(eventSummary(event({ action: 'PLATFORM_ROLE_CHANGED', before_state: {}, after_state: {} })), '— → —');
+  assert.equal(eventSummary(event({ action: 'PLATFORM_ROLE_CHANGED', before_state: {}, after_state: {} })), '- → -');
   // 담당 고객 배정 변경은 개수만 보인다 — 고객 ID를 이력 한 줄에 나열하지 않는다.
   const assignment = event({
     action: 'TENANT_ASSIGNMENTS_CHANGED',
@@ -258,7 +258,7 @@ test('이력 한 줄 요약', () => {
   assert.doesNotMatch(eventSummary(assignment), /123e4567|223e4567/);
   assert.equal(
     eventSummary(event({ action: 'TENANT_ASSIGNMENTS_CHANGED', before_state: { tenant_ids: null }, after_state: {} })),
-    '— → —',
+    '- → -',
   );
-  assert.equal(eventSummary(event({ action: 'ROLE_CHANGED', before_state: { role: null }, after_state: {} })), '— → —');
+  assert.equal(eventSummary(event({ action: 'ROLE_CHANGED', before_state: { role: null }, after_state: {} })), '- → -');
 });

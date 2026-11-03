@@ -24,8 +24,7 @@ export default async function InquiriesPage({ searchParams }: PageProps<'/inquir
 
   return (
     <SupportPage
-      title="고객사 문의"
-      description="고객사 계정이 보낸 장애 · 버그 문의입니다. 처리하면서 상태를 옮기고, 답은 보낸 사람 이메일로 드립니다. 시각은 모두 KST입니다."
+      title="고객사 문의"
       renderedAt={renderedAt}
     >
       {result.value !== null ? (

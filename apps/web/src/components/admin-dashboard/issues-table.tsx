@@ -75,7 +75,7 @@ export function IssuesTable({ rows, nowMs }: { rows: readonly IssueRow[]; nowMs:
                   </span>
                 </td>
                 <td className="text-muted-foreground px-3 py-2 text-right text-xs whitespace-nowrap">
-                  {r.at === '' ? '—' : formatAge(r.at, nowMs)}
+                  {r.at === '' ? '-' : formatAge(r.at, nowMs)}
                 </td>
                 <td className="pr-2">
                   <ChevronRight aria-hidden className="text-muted-foreground size-4" />

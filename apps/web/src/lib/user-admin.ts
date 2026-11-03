@@ -53,7 +53,7 @@ export function formatUserTime(iso: string): string {
   return `${date} ${time} KST`;
 }
 
-const NONE = '—';
+const NONE = '-';
 const roleLabel = (role: UserRole | null | undefined) => (role ? ROLE_LABELS[role] : NONE);
 const platformRoleLabel = (role: PlatformRole | null | undefined) => (role ? PLATFORM_ROLE_LABELS[role] : NONE);
 const statusLabel = (status: UserStatus | null | undefined) => (status ? STATUS_LABELS[status] : NONE);

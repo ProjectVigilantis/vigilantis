@@ -36,7 +36,7 @@ export function InquiriesView({ items, focusId }: { items: InquiryItem[]; focusI
   const shown = items.filter((i) => i.inquiry_id === openId || (byStatus(i, status) && byCategory(i, category)));
 
   if (items.length === 0) {
-    return <EmptyState message="받은 문의가 없습니다." description="고객사 계정이 상단바의 [문의하기]로 보내면 여기에 쌓입니다." />;
+    return <EmptyState message="받은 문의가 없습니다." />;
   }
 
   return (

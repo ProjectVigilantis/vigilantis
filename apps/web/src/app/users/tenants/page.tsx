@@ -41,8 +41,7 @@ export default async function TenantStaffPage() {
   return (
     <div className="flex flex-col gap-6">
       <DetailHeader
-        title="고객사별 계정"
-        description="고객사마다 Vigilantis에 로그인하는 계정(고객사 중앙계정 · 고객사 직원계정)입니다. 줄을 펼치면 이메일이 보이고, 고객사 이름을 누르면 그 고객사의 계정을 관리합니다."
+        title="고객사별 계정"
         renderedAt={renderedAt}
       />
       <section className="bg-card ring-foreground/10 rounded-xl p-6 ring-1">

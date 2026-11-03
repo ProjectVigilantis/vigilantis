@@ -749,7 +749,9 @@ export interface MetricsTimeseriesResponse {
    고객 계정에 들어가는 경로는 verify · resume 둘뿐이고, 정지 중에는 resume 하나다. */
 
 /** 수집 · AI 분석 · 실행의 관문. SUSPENDED = 원격 회수(플랫폼이 그 계정에 더 들어가지 않는다). */
-export const TENANT_STATUSES = ['PENDING_CONNECTION', 'ACTIVE', 'SUSPENDED'] as const;
+// UNPAID(미납)는 2026-11-02 PM 결정으로 FE에 먼저 넣은 값이다. 서버 계약은 아직 없다(#572 6번).
+// 미납이면 기능을 멈추고 고객사 계정 로그인도 막는다. 90일 안에 내면 그대로 복구, 지나면 삭제한다.
+export const TENANT_STATUSES = ['PENDING_CONNECTION', 'ACTIVE', 'SUSPENDED', 'UNPAID'] as const;
 export type TenantStatus = (typeof TENANT_STATUSES)[number];
 
 /** DELETE /tenants/{id} 를 받는 상태 — 연결된 적 없는 테넌트만(계정 ID 오입력을 지우고 다시 만든다). 밖이면 TENANT_STATE_CONFLICT. */
@@ -1006,6 +1008,27 @@ export interface UserEventItem {
 
 export interface UserEventsResponse {
   items: UserEventItem[];
+}
+
+/* /api/v1/staff — 플랫폼(관리자) 직원 관리(#492 PR 5, schemas/api/staff.py). 중앙 관리계정 전용이며 그 밖은 403이다.
+   목록에는 중앙 관리계정 자신을 포함한 플랫폼 계정 전부가 온다. 직원 생성 경로는 없다(운영 CLI). */
+
+export interface StaffItem {
+  user_id: string;
+  email: string;
+  platform_role: PlatformRole;
+  status: UserStatus;
+  /** 로그인한 적이 없으면 null. */
+  last_login_at: IsoDateTime | null;
+}
+
+export interface StaffResponse {
+  items: StaffItem[];
+}
+
+/** 관리자 직원계정의 담당 고객사(`GET`·`PUT /staff/{id}/tenants`). PUT은 전체 교체이며 빈 목록은 배정 전부 해제다. */
+export interface StaffTenantsResponse {
+  tenant_ids: string[];
 }
 
 /* ───────────────────── signup_requests.py · inquiries.py ───────────────────── */

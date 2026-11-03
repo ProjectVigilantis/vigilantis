@@ -28,6 +28,7 @@ import {
 
 import { SLICE_COLOR, sliceLabel } from '@/components/dashboard/asset-composition-chart';
 import type { CompositionKey } from '@/lib/dashboard';
+import { TENANT_AGGREGATE_UNSUPPORTED } from '@/lib/monitoring-scope';
 import { ASSET_TYPE_LABELS, ASSET_TYPE_ORDER } from '@/lib/enum-labels';
 import {
   assetStatusChartState,
@@ -90,6 +91,14 @@ function ChartFrame({ children }: { children: React.ReactNode }) {
 }
 
 function Fallback({ state, empty }: { state: ChartState<unknown>; empty: string }) {
+  // 고객사 상세에서 고객사별로 나눌 수 없는 집계 축(lib/monitoring-scope.ts). 조회 실패가 아니라 아직 없는 기능이다.
+  if (state.kind === 'UNAVAILABLE' && state.reason === TENANT_AGGREGATE_UNSUPPORTED) {
+    return (
+      <p className="text-muted-foreground flex h-56 items-center justify-center px-4 text-center text-sm">
+        이 추이는 서버가 전체 고객사 합계로만 보내 줘서 아직 고객사별로 나눠 볼 수 없습니다.
+      </p>
+    );
+  }
   if (state.kind === 'UNAVAILABLE') {
     return (
       <p className="text-muted-foreground flex h-56 items-center justify-center text-center text-sm">
@@ -579,7 +588,7 @@ export function ThreatActivityChart({
       {verdictUnavailable !== null || eventsUnavailable !== null ? (
         <p className="text-xs text-badge-warning-fg">
           {verdictUnavailable !== null ? `위협 판정 조회 실패(${verdictUnavailable})` : `위협 이벤트 조회 실패(${eventsUnavailable})`}
-          — 나머지만 그렸습니다
+          . 나머지만 그렸습니다
         </p>
       ) : null}
     </div>
