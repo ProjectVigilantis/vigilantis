@@ -2,7 +2,7 @@
 // 고객사 한 곳 한 줄 표는 이 화면으로 옮겼다). 계정 하나씩 고치는 일은 계정 관리(`/users`)가 한다.
 
 import type { Metadata } from 'next';
-import { unstable_rethrow } from 'next/navigation';
+import { redirect, unstable_rethrow } from 'next/navigation';
 
 import { DetailHeader } from '@/components/admin-dashboard/detail-header';
 import { StaffTable } from '@/components/admin-dashboard/staff-table';
@@ -11,7 +11,7 @@ import { ErrorState } from '@/components/error-state';
 import { staffRows } from '@/lib/admin-dashboard';
 import { serverApi } from '@/lib/api/server';
 import { businessOpen } from '@/lib/home-path';
-import { isUnassignedManager } from '@/lib/roles';
+import { isPlatform, isUnassignedManager } from '@/lib/roles';
 
 export const metadata: Metadata = { title: '고객사별 계정 · Vigilantis' };
 
@@ -28,6 +28,8 @@ export default async function TenantStaffPage() {
     unstable_rethrow(error);
     return <ErrorState error={error} />;
   }
+  // 관리자 화면이다. 고객사 계정은 업무 화면이 열려 있어도 여기 오지 않는다(고객사 대시보드로 보낸다, 2026-11-03).
+  if (!isPlatform(user)) redirect('/');
   if (!businessOpen(user)) return <BusinessUnavailable unassigned={isUnassignedManager(user)} />;
   let tenants;
   let users;
@@ -41,7 +43,7 @@ export default async function TenantStaffPage() {
   return (
     <div className="flex flex-col gap-6">
       <DetailHeader
-        title="고객사별 계정"
+        title="고객사별 계정"
         renderedAt={renderedAt}
       />
       <section className="bg-card ring-foreground/10 rounded-xl p-6 ring-1">

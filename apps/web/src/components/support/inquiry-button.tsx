@@ -1,6 +1,7 @@
 'use client';
 
-// 고객사 계정 상단바의 [문의하기](2026-10-29). 고객사 관리자 · 직원 누구나 장애 · 버그를 운영팀에 알린다.
+// 고객사 계정 사이드바의 [문의하기](2026-10-29, 2026-11-03 상단바에서 옮김). 고객사 관리자 · 직원 누구나 장애 · 버그를 운영팀에 알린다.
+// 버튼 모양은 사이드바 메뉴 항목과 같게 부르는 쪽(gnb.tsx)이 `className`으로 준다.
 // 보낸 문의는 관리자 웹의 고객 문의함(/inquiries)에 쌓이고 관리자 알림 종에 뜬다. 소속 고객사와 작성자는 서버가 세션에서
 // 채우므로 화면은 묻지 않는다. 지금 보고 있는 화면의 경로를 함께 보내 운영자가 어디서 났는지 알게 한다.
 // 계약은 초안이다(types/api.ts 끝). 서버에 아직 경로가 없으면(404 · 405) 그렇다고 적는다.
@@ -26,18 +27,14 @@ import type { InquiryCategory } from '@/types/api';
 const CATEGORIES: InquiryCategory[] = ['OUTAGE', 'BUG', 'OTHER'];
 const TITLE_MAX = 100;
 
-export function InquiryButton() {
+export function InquiryButton({ className }: { className?: string }) {
   const [open, setOpen] = useState(false);
   return (
     <>
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        className="focus-visible:ring-ring inline-flex h-9 items-center gap-1.5 rounded-md px-2.5 text-[13px] font-semibold text-white/85 hover:bg-white/8 hover:text-white focus-visible:ring-2 focus-visible:outline-none"
-      >
-        <LifeBuoy aria-hidden className="size-4" />
-        <span className="hidden sm:inline">문의하기</span>
-        <span className="sr-only sm:hidden">문의하기</span>
+      <button type="button" onClick={() => setOpen(true)} className={className}>
+        <LifeBuoy aria-hidden className="size-4.5" />
+        {/* 가로 줄(< md)에서는 메뉴가 화면 밖으로 밀리지 않게 아이콘만 보인다 */}
+        <span className="sr-only md:not-sr-only">문의하기</span>
       </button>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="sm:max-w-lg">{open ? <InquiryForm onClose={() => setOpen(false)} /> : null}</DialogContent>

@@ -96,7 +96,8 @@ export function MonitoringView({
 }: {
   initialAxis: MonitoringAxis;
   /** 고객 목록. `null`은 조회 실패 — 선택은 어차피 잠겨 있어 이름 없이 `전체 고객`만 적는다. */
-  tenants: TenantListItem[] | null;
+  /** 고객사 선택 목록. 실패면 null, 고객사 계정처럼 고를 일이 없으면 undefined(선택 상자를 그리지 않는다). */
+  tenants: TenantListItem[] | null | undefined;
   data: AssetsResponse;
   incidents: IncidentListItem[] | null;
   incidentsError: unknown;
@@ -133,7 +134,7 @@ export function MonitoringView({
     <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
       <h1 className="text-lg font-semibold">관제</h1>
       <AxisSwitch axis={axis} onChange={changeAxis} />
-      <TenantSelect tenants={tenants} />
+      {tenants === undefined ? null : <TenantSelect tenants={tenants} />}
     </div>
   );
 

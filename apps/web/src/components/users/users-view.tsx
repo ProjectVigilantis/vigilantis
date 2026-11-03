@@ -92,6 +92,8 @@ export function UsersView({
   const myId = me?.user_id ?? null;
   const users = tenantFilter === null ? allUsers : allUsers.filter((u) => u.tenant_id === tenantFilter.id);
   const unassigned = isUnassignedManager(me);
+  // 고객사 ID는 플랫폼 측이 고객사를 구분하는 값이다. 고객사 계정은 자기 고객사 계정만 받으므로 열이 필요 없다.
+  const showTenantId = !embedded && me?.account_type === 'PLATFORM';
   const [panel, setPanel] = useState<Panel | null>(inviteOnOpen ? { kind: 'invite' } : null);
   const [done, setDone] = useState<string | null>(null);
 
@@ -170,7 +172,7 @@ export function UsersView({
             <TableRow>
               {/* 조치를 한 버튼(관리 메뉴)에 모아 남은 폭을 속성 칸에 나눈다. 관리 칸은 내용 폭만 쓴다. */}
               <TableHead className="w-[30%]">이메일</TableHead>
-              {embedded ? null : <TableHead className="w-[20%]">고객사 ID</TableHead>}
+              {showTenantId ? <TableHead className="w-[20%]">고객사 ID</TableHead> : null}
               <TableHead className="w-[16%]">권한</TableHead>
               <TableHead className="w-[12%]">상태</TableHead>
               <TableHead>마지막 로그인</TableHead>
@@ -186,7 +188,7 @@ export function UsersView({
                   {user.email}
                   {user.user_id === myId ? <span className="ml-1 text-xs text-muted-foreground">(나)</span> : null}
                 </TableCell>
-                {embedded ? null : <TableCell className="font-mono text-xs">{user.tenant_id ?? '-'}</TableCell>}
+                {showTenantId ? <TableCell className="font-mono text-xs">{user.tenant_id ?? '-'}</TableCell> : null}
                 <TableCell>{ROLE_LABELS[user.role]}</TableCell>
                 <TableCell>{STATUS_LABELS[user.status]}</TableCell>
                 <TableCell>
@@ -489,11 +491,8 @@ function InviteDialog({
           </p>
         </div>
       ) : (
-        <p className="text-sm">
-          <span className={LABEL_CLASS}>소속 고객사</span>{' '}
-          <span className="font-mono text-xs wrap-anywhere">{inviter.tenant_id}</span>
-          <span className="block text-xs text-muted-foreground">내 고객사에만 초대할 수 있습니다.</span>
-        </p>
+        // 고객사 ID는 플랫폼 측 구분 값이라 고객사 계정에게 보이지 않는다(2026-11-03). 서버가 초대자의 고객사로 채운다.
+        <p className="text-xs text-muted-foreground">내 고객사에만 초대할 수 있습니다.</p>
       )}
       <div className="flex flex-col gap-1.5">
         <label htmlFor="invite-email" className={LABEL_CLASS}>

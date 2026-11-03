@@ -2,6 +2,7 @@
 
 import type {
   AssetsResponse,
+  AuditEventsResponse,
   CurrentUserResponse,
   ErrorCode,
   ErrorResponse,
@@ -48,6 +49,8 @@ import type {
 // `node --test`가 별칭을 못 풀어 상대 경로를 쓴다(realtime-events와 같은 이유).
 import { navigateToLogin } from '../auth-redirect.ts';
 import type { PlatformStatusResponse } from '../platform-status.ts';
+import type { AssetCostsResponse } from '../asset-costs.ts';
+import type { ThreatEventsResponse, ThreatRangeDays } from '../threat-events.ts';
 
 /**
  * 요청을 실어 보내는 쪽마다 다른 두 가지 — 덧붙일 헤더와 401 처리(#492 PR 2).
@@ -233,6 +236,26 @@ export function createReadApi(transport: ApiTransport) {
       return request<PlatformStatusResponse>('/platform/status', undefined, transport);
     },
 
+    /** 위협 이벤트 목록(고객사 대시보드). FE 제안 계약이라 서버에 아직 없다 — 실서버는 404다(lib/threat-events.ts). */
+    getThreatEvents(days: ThreatRangeDays): Promise<ThreatEventsResponse> {
+      return request<ThreatEventsResponse>(`/threat-events?days=${days}`, undefined, transport);
+    },
+
+    /** 자산 유형별 최근 30일 비용(Cost Explorer). FE 제안 계약이라 서버에 아직 없다 — 실서버는 404다(lib/asset-costs.ts). */
+    getAssetCosts(): Promise<AssetCostsResponse> {
+      return request<AssetCostsResponse>('/costs/by-asset-type', undefined, transport);
+    },
+
+    /** 조치 실행 · 종료 판단 감사 기록(#544). 로그 화면(app/logs)이 부른다. 최신순이고 `next_cursor`를 그대로 돌려주면 다음 쪽이다. */
+    getAuditEvents(query: { since?: string; cursor?: string; limit?: number } = {}): Promise<AuditEventsResponse> {
+      const params = new URLSearchParams();
+      if (query.since !== undefined) params.set('since', query.since);
+      if (query.cursor !== undefined) params.set('cursor', query.cursor);
+      if (query.limit !== undefined) params.set('limit', String(query.limit));
+      const search = params.toString();
+      return request<AuditEventsResponse>(`/audit-events${search === '' ? '' : `?${search}`}`, undefined, transport);
+    },
+
     /** 플랫폼(관리자) 직원 목록: 중앙 관리계정만(#492 PR 5). 계정 관리 화면이 중앙 관리계정에게 그린다(app/users/page.tsx). */
     getStaff(): Promise<StaffResponse> {
       return request<StaffResponse>('/staff', undefined, transport);
@@ -252,7 +275,7 @@ export function createReadApi(transport: ApiTransport) {
 
 export const {
   getAssets, getMetricsTimeseries, getIncidents, getIncident, getTenants, getTenant,
-  getSignupRequests, getInquiries,
+  getSignupRequests, getInquiries, getThreatEvents, getAuditEvents,
 } = createReadApi(BROWSER);
 
 /**

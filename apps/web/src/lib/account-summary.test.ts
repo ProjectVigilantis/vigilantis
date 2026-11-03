@@ -9,7 +9,7 @@ import { accountKind } from './roles.ts';
 const TENANT_ID = '123e4567-e89b-12d3-a456-426614174000';
 const view = (fields: ReturnType<typeof accountFields>) => fields.map(({ label, value }) => [label, value]);
 
-test('고객사 직원계정 — 이메일 · 계정 종류 · 권한과 자기 고객사 ID를 보인다', () => {
+test('고객사 직원계정 — 이메일 · 계정 종류 · 권한을 보이고, 고객사 ID(플랫폼 측 구분 값)는 보이지 않는다', () => {
   const fields = accountFields({
     email: 'viewer@acme.test',
     role: 'VIEWER',
@@ -22,7 +22,6 @@ test('고객사 직원계정 — 이메일 · 계정 종류 · 권한과 자기 
     ['이메일', 'viewer@acme.test'],
     ['계정 종류', '고객사 직원계정'],
     ['권한', '조회 전용'],
-    ['고객사 ID', TENANT_ID],
   ]);
 });
 

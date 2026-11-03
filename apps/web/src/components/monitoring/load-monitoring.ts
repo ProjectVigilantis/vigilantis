@@ -53,12 +53,16 @@ function savingsTargets(
  * 자산 조회가 실패하면 그 오류를 던진다. 부르는 쪽이 잡아 화면 오류(CMN-002)로 그린다.
  * `accountId`를 주면 그 AWS 계정 몫만 남긴다(고객사 상세). 절감 예상도 거른 뒤의 자산 · 인시던트로 셈한다.
  */
-export async function loadMonitoring(api: ReadApi, { accountId }: { accountId?: string } = {}): Promise<MonitoringData> {
+export async function loadMonitoring(
+  api: ReadApi,
+  { accountId, withTenants = true }: { accountId?: string; withTenants?: boolean } = {},
+): Promise<MonitoringData> {
   const { getAssets, getIncident, getIncidents, getMetricsTimeseries, getTenants } = api;
   // 제목 옆 `마지막 갱신` — 다시 그려질 때마다 새로 찍힌다(auto-refresh.tsx).
   const renderedAt = new Date().toISOString();
   // 고객 선택 목록 — 실패해도 화면은 뜬다(선택은 아직 잠겨 있다 · monitoring-view.tsx).
-  const tenantsPromise = orNull(getTenants());
+  // 고객사 계정은 부르지 않는다(`withTenants: false`) — 플랫폼 전용 목록(403)이고 고를 고객사도 없다(2026-11-03).
+  const tenantsPromise = withTenants ? orNull(getTenants()) : Promise.resolve(undefined);
   // 오류를 버리지 않고 들고 간다 — 인시던트 탭이 그것을 **대기 0건이 아니라 오류로** 그려야 한다.
   // 401(로그인 redirect)만은 접지 않는다 — orError · orNull이 그대로 던진다.
   const incidentsPromise = orError(getIncidents());
@@ -101,7 +105,7 @@ export async function loadMonitoring(api: ReadApi, { accountId }: { accountId?: 
   const tenants = await tenantsPromise;
 
   return {
-    tenants: tenants === null ? null : tenants.tenants,
+    tenants: tenants === undefined ? undefined : tenants === null ? null : tenants.tenants,
     data: assets,
     incidents,
     incidentsError: listed.error,

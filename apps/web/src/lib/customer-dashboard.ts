@@ -1,15 +1,17 @@
-// 고객사 대시보드(미리보기 `/preview/dashboard`)의 집계. 전부 기존 계약(assets · incidents · metrics)에서 계산한다.
+// 고객사 대시보드(고객사 계정의 `/`, components/customer-dashboard/customer-dashboard-page.tsx)의 집계. 전부 기존 계약(assets · incidents · metrics)에서 계산한다.
 // 첫 화면은 "지금 괜찮은가 → 무엇을 해야 하나 → 흐름은 어떤가" 순서로 읽히게 만든다(DESIGN.md §레이아웃).
 
 import type { ProposalRow } from './dashboard.ts';
-import { INCIDENT_STATUS_LABELS } from './enum-labels.ts';
+import { ASSET_TYPE_ORDER, INCIDENT_STATUS_LABELS } from './enum-labels.ts';
 import type {
   AssetItem,
+  AssetType,
   CollectionStatus,
   IncidentListItem,
   IncidentStatus,
   ResponseMode,
   ThreatEventAxis,
+  UncollectedAssetType,
 } from '../types/api.ts';
 
 export type Posture = 'critical' | 'warning' | 'good' | 'unknown';
@@ -193,3 +195,71 @@ export function timeAgo(iso: string, nowMs: number): string {
   if (hours < 24) return `${hours}시간 전`;
   return `${Math.floor(hours / 24)}일 전`;
 }
+
+/** 자산 현황 표의 한 줄 — 유형별 개수 · 상태 요약 · 그 유형의 마지막 수집 시각(2026-11-03). */
+export interface AssetTypeRow {
+  type: AssetType;
+  count: number;
+  /** 유형마다 운영자가 먼저 묻는 한 가지(실행 중 수 · 전체 개방 수 · 용량 합계 등). */
+  detail: string;
+  /** 그 유형 자산 중 가장 최근 `collected_at`. 0건이면 null. */
+  lastCollectedAt: string | null;
+  /** 이번 수집에서 조회 자체를 못 했으면 AWS 오류 코드 원문. 이때 `count`는 믿을 수 없다. */
+  uncollectedReason: string | null;
+}
+
+function typeDetail(type: AssetType, items: readonly AssetItem[]): string {
+  let a = 0;
+  let b = 0;
+  switch (type) {
+    case 'EC2':
+      for (const i of items) {
+        if (i.state === 'running') a += 1;
+        else if (i.state === 'stopped') b += 1;
+      }
+      return `실행 ${a} · 중지 ${b}${items.length - a - b > 0 ? ` · 기타 ${items.length - a - b}` : ''}`;
+    case 'SG':
+      for (const i of items) {
+        if (i.asset_type !== 'SG') continue;
+        if (i.spec.open_to_world.length > 0) a += 1;
+        if (!i.spec.attached) b += 1;
+      }
+      return `전체 개방 ${a} · 미연결 ${b}`;
+    case 'EBS':
+      for (const i of items) {
+        if (i.asset_type !== 'EBS') continue;
+        a += i.spec.size_gib ?? 0;
+        if (i.spec.attached_instance_ids.length === 0) b += 1;
+      }
+      return `합계 ${a.toLocaleString('ko-KR')} GiB · 미연결 ${b}`;
+    case 'NACL':
+      for (const i of items) if (i.asset_type === 'NACL' && i.spec.is_default) a += 1;
+      return `기본 ${a} · 사용자 정의 ${items.length - a}`;
+    case 'AUTO_SCALING_GROUP':
+      for (const i of items) {
+        if (i.asset_type !== 'AUTO_SCALING_GROUP') continue;
+        a += i.spec.desired_capacity;
+      }
+      return `희망 용량 합계 ${a}`;
+    case 'LAUNCH_TEMPLATE':
+      return `${items.length}개 템플릿`;
+    case 'ALB_TARGET_GROUP':
+      return [...new Set(items.map((i) => (i.asset_type === 'ALB_TARGET_GROUP' ? `${i.spec.protocol ?? '?'}:${i.spec.port ?? '?'}` : '')))]
+        .filter(Boolean)
+        .join(' · ');
+  }
+}
+
+/** 유형별 자산 현황. 0건이고 수집 실패도 아닌 유형은 뺀다(없는 것을 줄로 세우지 않는다). 순서는 ASSET_TYPE_ORDER. */
+export function assetTypeRows(items: readonly AssetItem[], uncollected: readonly UncollectedAssetType[]): AssetTypeRow[] {
+  const rows: AssetTypeRow[] = [];
+  for (const type of ASSET_TYPE_ORDER) {
+    const own = items.filter((i) => i.asset_type === type);
+    const reason = uncollected.find((u) => u.asset_type === type)?.reason_code ?? null;
+    if (own.length === 0 && reason === null) continue;
+    const last = own.reduce<string | null>((m, i) => (m === null || Date.parse(i.collected_at) > Date.parse(m) ? i.collected_at : m), null);
+    rows.push({ type, count: own.length, detail: own.length === 0 ? '' : typeDetail(type, own), lastCollectedAt: last, uncollectedReason: reason });
+  }
+  return rows;
+}
+

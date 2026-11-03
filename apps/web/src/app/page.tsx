@@ -1,4 +1,5 @@
-// 메인 대시보드. 플랫폼 운영자에게는 고객 전체의 운영 현황(수동 처리가 필요한 문제 · 고객 연결 상태 · 고객사별 관제 직원)을 보인다(2026-10-29 초안 ·
+// 메인 대시보드. 고객사 계정에게는 고객사 대시보드(components/customer-dashboard/customer-dashboard-page.tsx, 2026-11-03)를,
+// 플랫폼 운영자에게는 고객 전체의 운영 현황(수동 처리가 필요한 문제 · 고객 연결 상태 · 고객사별 관제 직원)을 보인다(2026-10-29 초안 ·
 // components/admin-dashboard/admin-dashboard-view.tsx). 종전 DSH-001(화면설계서 v1.6 §4.1 — 자산 띠 · 위협 추이 ·
 // AI 조치 제안)은 고객 계정 하나를 보는 구성이라 운영자 화면에서 내렸다. 고객 하나를 들여다보는 일은 관제 화면이 한다.
 //
@@ -11,21 +12,23 @@
 
 import { AdminDashboardView } from '@/components/admin-dashboard/admin-dashboard-view';
 import { BusinessUnavailable } from '@/components/business-unavailable';
+import { CustomerDashboardPage } from '@/components/customer-dashboard/customer-dashboard-page';
 import { ErrorState } from '@/components/error-state';
 import { orError, orNull, serverApi } from '@/lib/api/server';
 import { businessOpen } from '@/lib/home-path';
 import { scopeApiUsage } from '@/lib/platform-status';
-import { canViewPlatformStatus, isCentralAdmin, isUnassignedManager } from '@/lib/roles';
+import { canViewPlatformStatus, isCentralAdmin, isPlatform, isUnassignedManager } from '@/lib/roles';
 import { unstable_rethrow } from 'next/navigation';
 
 export default async function DashboardPage() {
   // 제목 옆 `마지막 갱신` — 다시 그려질 때마다 새로 찍힌다(auto-refresh.tsx).
   const renderedAt = new Date().toISOString();
   // 세션 쿠키만 실어 부르고, 401이면 로그인으로 redirect한다(lib/api/server.ts).
-  const { getMe, getTenants, getUsers, getIncidents, getPlatformStatus } = await serverApi();
-  // 고객 범위가 없는 계정(고객사 계정 · 담당 고객 없는 고객 담당자)에는 업무 데이터를 읽지 않고 이용 제한을 알린다
-  // (lib/home-path.ts `businessOpen`). 담당 고객이 없는 담당자에게는 배정 없음을 따로 말한다. 고객 담당자가 받는
-  // 데이터의 담당 범위는 서버가 정한다. 확인 실패도 업무 조회로 넘어가지 않는다.
+  const api = await serverApi();
+  const { getMe, getTenants, getUsers, getIncidents, getPlatformStatus } = api;
+  // 담당 고객이 없는 고객 담당자에게는 업무 데이터를 읽지 않고 배정 없음을 알린다(lib/home-path.ts `businessOpen`).
+  // 고객사 계정은 고객사 대시보드를 본다(2026-11-03). 받는 데이터의 범위는 서버가 정한다.
+  // 확인 실패도 업무 조회로 넘어가지 않는다.
   let user;
   try {
     user = await getMe();
@@ -34,6 +37,7 @@ export default async function DashboardPage() {
     return <ErrorState error={error} />;
   }
   if (!businessOpen(user)) return <BusinessUnavailable unassigned={isUnassignedManager(user)} />;
+  if (!isPlatform(user)) return <CustomerDashboardPage api={api} renderedAt={renderedAt} />;
 
   // 플랫폼 상태는 중앙 관리 권한 또는 조치 권한이 있는 플랫폼 계정이 본다(lib/roles.ts `canViewPlatformStatus`).
   // 실패(404 = API 없음 포함)해도 대시보드는 뜬다.

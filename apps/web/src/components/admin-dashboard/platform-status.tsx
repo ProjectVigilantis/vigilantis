@@ -9,7 +9,7 @@
 
 import Link from 'next/link';
 
-import { ChartSection, ShareBar } from '@/components/admin-dashboard/chart-parts';
+import { ChartSection, ShareBar, TIP_ANCHOR, TipBox, tipAlign } from '@/components/admin-dashboard/chart-parts';
 import { AiCallsChart, ScanDurationChart } from '@/components/admin-dashboard/platform-charts';
 import { ChartCard } from '@/components/chart-card';
 import { formatAge } from '@/lib/admin-dashboard';
@@ -39,7 +39,14 @@ function ComponentsCard({ status, nowMs }: { status: PlatformStatusResponse; now
           const meta = COMPONENT_LABELS[c.key] ?? { label: c.key, note: '' };
           const state = STATE_LABELS[c.state];
           return (
-            <li key={c.key} className="flex items-center gap-2 py-1.5" title={c.detail ?? undefined}>
+            <li key={c.key} className={cn('flex items-center gap-2 py-1.5', c.detail && TIP_ANCHOR)}>
+              {c.detail ? (
+                // 줄에서 잘린 설명 전체를 보인다
+                <TipBox align="start">
+                  <span className="font-medium">{meta.label}</span>
+                  <span className="text-muted-foreground max-w-64 whitespace-normal">{c.detail}</span>
+                </TipBox>
+              ) : null}
               <span aria-hidden className={cn('size-2 shrink-0 rounded-full', state.dot)} />
               <span className="min-w-0 flex-1 truncate">
                 <span className="font-medium">{meta.label}</span>
@@ -192,8 +199,11 @@ function ApiUsageCard({ usage }: { usage: PlatformStatusResponse['api_usage'] })
             >
               {rows.map((t) => (
                 <div key={t.tenant_id} className="grid items-center gap-0.5" style={{ gridTemplateColumns: columns }}>
-                  <span className="truncate pr-2 text-xs" title={t.tenant_name}>
-                    {t.tenant_name}
+                  <span className={cn(TIP_ANCHOR, 'min-w-0 pr-2 text-xs')}>
+                    <span className="block truncate">{t.tenant_name}</span>
+                    <TipBox align="start">
+                      <span className="font-medium">{t.tenant_name}</span>
+                    </TipBox>
                   </span>
                   {usage.hours.map((at, i) => {
                     const n = t.hourly[i] ?? 0;
@@ -201,10 +211,22 @@ function ApiUsageCard({ usage }: { usage: PlatformStatusResponse['api_usage'] })
                     return (
                       <span
                         key={at}
-                        className="h-[22px] rounded-[2px]"
+                        className={cn(TIP_ANCHOR, 'hover:ring-foreground/60 h-[22px] rounded-[2px] hover:ring-2')}
                         style={{ background: exceeded ? 'var(--status-critical)' : LEVEL_FILL[usageLevel(n, max)] }}
-                        title={`${t.tenant_name} · ${kstHourLabel(at)} · ${n.toLocaleString('ko-KR')}건${exceeded ? ' · 기준 초과' : ''}`}
-                      />
+                      >
+                        <TipBox align={tipAlign(i, usage.hours.length)}>
+                          <span className="text-muted-foreground">{kstHourLabel(at)}</span>
+                          <span className="flex justify-between gap-6 font-medium">
+                            <span>{t.tenant_name}</span>
+                            <span className="font-mono tabular-nums">{n.toLocaleString('ko-KR')}건</span>
+                          </span>
+                          {exceeded ? (
+                            <span className="text-badge-critical-fg font-semibold">
+                              기준 시간당 {limit.toLocaleString('ko-KR')}건 초과
+                            </span>
+                          ) : null}
+                        </TipBox>
+                      </span>
                     );
                   })}
                 </div>

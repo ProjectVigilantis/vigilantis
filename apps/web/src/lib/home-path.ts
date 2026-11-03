@@ -4,14 +4,13 @@
 //
 // 첫 화면: 고객 범위가 있는 플랫폼 계정(중앙 관리자 · 배정된 고객 담당자)은 대시보드(`/`, 2026-10-29 · 종전 고객 관리
 // `/tenants`)다. 담당 고객이 없는 고객 담당자는 업무 화면이 닫혀 있어 고객 관리(`/tenants`)에서 배정 없음 안내를 본다.
-// 고객사 ADMIN은 사용자 관리(`/users`), 고객사 OPERATOR · VIEWER는 기존 `/`에서 이용 제한을 본다. 업무 데이터를
-// 조회하거나 새 홈을 만들지 않는다. 사용자 관리 메뉴는 고객 범위가 있는 플랫폼 계정과 고객사 ADMIN에게만 열린다
-// (roles.ts `canManageUsers`).
+// 고객사 계정은 역할과 관계없이 고객사 대시보드(`/`)가 첫 화면이다(2026-11-03 — 종전 ADMIN은 `/users`, 그 밖은
+// 이용 제한). 사용자 관리 메뉴는 고객 범위가 있는 플랫폼 계정과 고객사 ADMIN에게만 열린다(roles.ts `canManageUsers`).
 //
 // 역할 권한과 열린 기능은 따로 판정한다. 권한(사용자 관리 · 플랫폼 여부 · 고객 범위)은 roles.ts가 정하고,
-// 업무 기능(대시보드 · 자산 · 보안 화면, GNB 자산 조회, 실시간 연결)을 누구에게 열지는 `businessOpen`이 정한다 —
-// 고객 범위가 있는 플랫폼 계정(중앙 관리자 · 담당 고객이 하나 이상인 고객 담당자)이다. 담당 고객이 없는 고객 담당자와
-// 고객사(TENANT) 계정에는 열지 않는다. 고객 담당자가 받는 데이터 · 실시간 이벤트를 담당 고객으로 거르는 것은 서버다.
+// 업무 기능(대시보드 · 관제 화면, GNB 자산 조회, 실시간 연결)을 누구에게 열지는 `businessOpen`이 정한다 —
+// 고객사 계정과 고객 범위가 있는 플랫폼 계정(중앙 관리자 · 담당 고객이 하나 이상인 고객 담당자)이다. 담당 고객이
+// 없는 고객 담당자에게는 열지 않는다. 받는 데이터 · 실시간 이벤트를 자기 고객사 · 담당 고객으로 거르는 것은 서버다.
 // 이 판정은 셸(메뉴 · GNB 조회 · 실시간 연결)과 대시보드의 서버 측 안내만 가른다.
 
 import { canManageUsers, hasCustomerScope, isCentralAdmin, isPlatform, type AccessSubject } from './roles.ts';
@@ -29,6 +28,9 @@ export const STAFF_PATH = '/users/tenants';
 
 /** 통합 관제(MON-001) — 자산 · 보안 두 축을 한 화면에 둔다(2026-10-29). */
 export const MONITORING_PATH = '/monitoring';
+
+/** 로그(2026-11-03): 조치 실행 · 종료, 위협 유입, 인시던트 발생을 시각순으로 본다. 고객사 계정 메뉴에 있다. */
+export const LOGS_PATH = '/logs';
 
 /**
  * 사이드바의 업무 화면 — 대시보드뿐이다(2026-10-29). 관리자 화면은 고객사 · 직원의 권한과 오류를 보는 자리라
@@ -74,18 +76,23 @@ export function confirmedAccount(session: SessionView): AccessSubject | null {
 }
 
 /**
- * 업무 기능(대시보드 · 자산 · 보안 화면, GNB 자산 조회, 실시간 연결)이 열려 있나 — 고객 범위가 있는 확인된 플랫폼
- * 계정(roles.ts `hasCustomerScope`)이다. 담당 고객이 없는 고객 담당자 · 고객사 계정 · 계정 미상(null)은 닫는다.
- * 실제 차단과 담당 범위 필터는 서버(403 · 목록 · 이벤트 필터)다.
+ * 업무 기능(대시보드 · 관제 화면, GNB 자산 조회, 실시간 연결)이 열려 있나 — 고객사 계정과 고객 범위가 있는 확인된
+ * 플랫폼 계정(roles.ts `hasCustomerScope`)이다. 담당 고객이 없는 고객 담당자 · 계정 미상(null)은 닫는다.
+ * 고객사 계정은 2026-11-03부터 연다 — 서버가 자산 · 인시던트 · 실시간 이벤트를 자기 고객사로 거른다(#535 등).
+ * 실제 차단과 범위 필터는 서버(403 · 목록 · 이벤트 필터)다.
  */
 export function businessOpen(user: AccessSubject | null): boolean {
-  return hasCustomerScope(user);
+  if (user === null) return false;
+  return !isPlatform(user) || hasCustomerScope(user);
 }
+
+/** 고객사 계정의 업무 메뉴 — 대시보드와 관제. 고객사 상세가 없으니 관제를 메뉴에 둔다(관리자는 고객사 상세에서 들어간다). */
+export const CUSTOMER_BUSINESS_PATHS: readonly string[] = [CUSTOMER_HOME, MONITORING_PATH, LOGS_PATH];
 
 export function homePathFor(user: AccessSubject): string {
   // 담당 고객이 없는 고객 담당자는 대시보드가 닫혀 있어 고객 관리(배정 없음 안내)로 보낸다.
   if (isPlatform(user)) return businessOpen(user) ? PLATFORM_HOME : TENANTS_PATH;
-  return canManageUsers(user) ? USERS_PATH : CUSTOMER_HOME;
+  return CUSTOMER_HOME;
 }
 
 /**
@@ -94,13 +101,14 @@ export function homePathFor(user: AccessSubject): string {
  */
 export function navPathsFor(user: AccessSubject | null): string[] {
   if (user === null) return [];
+  if (!isPlatform(user)) return [...CUSTOMER_BUSINESS_PATHS, ...(canManageUsers(user) ? [USERS_PATH] : [])];
   return [
     ...(businessOpen(user) ? BUSINESS_PATHS : []),
     ...(isPlatform(user) ? [TENANTS_PATH] : []),
     ...(canManageUsers(user) ? [USERS_PATH] : []),
     // 도입 신청함(2026-10-29)은 중앙 관리자만 — 서버가 `require_central_admin`으로 막는다(#492).
     ...(isCentralAdmin(user) ? [SIGNUP_REQUESTS_PATH] : []),
-    // 고객 문의함은 플랫폼 계정만. 고객사 계정은 상단바 [문의하기]로 보내기만 한다.
+    // 고객 문의함은 플랫폼 계정만. 고객사 계정은 사이드바 [문의하기]로 보내기만 한다.
     ...(isPlatform(user) ? [INQUIRIES_PATH] : []),
   ];
 }

@@ -34,10 +34,14 @@ export function BarRows({ rows, labelWidth = 84 }: { rows: readonly BarRow[]; la
         return (
           <li
             key={r.key}
-            title={r.title}
-            className="grid items-center gap-2.5"
+            className={cn('grid items-center gap-2.5', r.title && TIP_ANCHOR)}
             style={{ gridTemplateColumns: `${labelWidth}px minmax(0,1fr) 36px` }}
           >
+            {r.title ? (
+              <TipBox align="start">
+                <TitleLines title={r.title} />
+              </TipBox>
+            ) : null}
             {r.href ? (
               <Link href={r.href} className="min-w-0 hover:underline">
                 {label}
@@ -72,10 +76,21 @@ export function ShareBar({ parts }: { parts: readonly SharePart[] }) {
         {shown.map((p, i) => (
           <div
             key={p.key}
-            title={`${p.label} ${p.value} (${Math.round((p.value / total) * 100)}%)`}
-            className={cn(p.fill, i === 0 && 'rounded-l-sm', i === shown.length - 1 && 'rounded-r-sm')}
+            className={cn(TIP_ANCHOR, p.fill, i === 0 && 'rounded-l-sm', i === shown.length - 1 && 'rounded-r-sm')}
             style={{ width: `${(p.value / total) * 100}%` }}
-          />
+          >
+            <TipBox align={tipAlign(i, shown.length)}>
+              <span className="flex items-center justify-between gap-6">
+                <span className="flex items-center gap-1.5">
+                  <span aria-hidden className={cn('size-2 rounded-full', p.fill)} />
+                  {p.label}
+                </span>
+                <span className="font-mono tabular-nums">
+                  {p.value} ({Math.round((p.value / total) * 100)}%)
+                </span>
+              </span>
+            </TipBox>
+          </div>
         ))}
       </div>
       <ul className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
@@ -98,6 +113,54 @@ export function MoreLink({ href, children }: { href: string; children: React.Rea
       <ChevronRight aria-hidden className="size-4" />
     </Link>
   );
+}
+
+/**
+ * 마우스를 올리면 뜨는 말풍선. 브라우저 기본 `title` 상자 대신 recharts 그래프 말풍선(platform-charts.tsx `TOOLTIP_STYLE`)과
+ * 같은 모양으로 그린다. CSS만 쓰므로 서버 컴포넌트에서도 된다 — 부모에 `TIP_ANCHOR`를 붙인다.
+ * `align`은 말풍선을 앵커의 어느 쪽에 맞출지다. 카드 오른쪽 끝 칸은 `end`로 둬야 카드 밖으로 넘치지 않는다.
+ */
+export const TIP_ANCHOR = 'group/tip relative';
+
+export function TipBox({
+  align = 'center',
+  children,
+}: {
+  align?: 'start' | 'center' | 'end';
+  children: React.ReactNode;
+}) {
+  return (
+    <span
+      role="tooltip"
+      className={cn(
+        'bg-popover text-popover-foreground pointer-events-none absolute bottom-full z-20 mb-1.5 flex w-max max-w-72 flex-col gap-1 rounded-lg border px-3 py-2 text-xs font-normal whitespace-nowrap',
+        'invisible opacity-0 transition-opacity duration-100 group-hover/tip:visible group-hover/tip:opacity-100',
+        align === 'start' && 'left-0',
+        align === 'center' && 'left-1/2 -translate-x-1/2',
+        align === 'end' && 'right-0',
+      )}
+    >
+      {children}
+    </span>
+  );
+}
+
+/** `title` 문자열("이름 · 설명 · 설명")을 말풍선 안 두 줄로 나눈다. 첫 토막이 제목, 나머지가 회색 설명이다. */
+function TitleLines({ title }: { title: string }) {
+  const [head, ...rest] = title.split(' · ');
+  return (
+    <>
+      <span className="font-medium">{head}</span>
+      {rest.length > 0 ? <span className="text-muted-foreground">{rest.join(' · ')}</span> : null}
+    </>
+  );
+}
+
+/** 칸이 가로로 늘어선 그래프에서 i번째 칸의 말풍선 정렬. 양 끝 3분의 1은 안쪽으로 붙인다. */
+export function tipAlign(i: number, count: number): 'start' | 'center' | 'end' {
+  if (i < count / 3) return 'start';
+  if (i >= (count * 2) / 3) return 'end';
+  return 'center';
 }
 
 /** 그래프 카드 안에서 묶음 하나의 작은 제목. */
@@ -165,13 +228,16 @@ export function Histogram({
         </div>
         <div className="border-axis relative h-28 flex-1 border-b">
           <div aria-hidden className="border-gridline absolute inset-x-0 top-0 border-t" />
-          {bins.map((b) => (
+          {bins.map((b, i) => (
             <div
               key={b.key}
-              title={b.title}
-              className="group absolute inset-y-0 flex items-end px-px"
+              className="group group/tip absolute inset-y-0 flex items-end px-px"
               style={{ left: `${Math.max(0, x(b.from))}%`, width: `${Math.min(100, x(b.to)) - Math.max(0, x(b.from))}%` }}
             >
+              {/* 말풍선은 막대 꼭대기가 아니라 칸 맨 위(그래프 위)에 뜬다 — 칸이 inset-y-0이라 */}
+              <TipBox align={tipAlign(i, bins.length)}>
+                <TitleLines title={b.title} />
+              </TipBox>
               <div
                 className="bg-data/45 group-hover:bg-data w-full rounded-t-[3px] transition-colors"
                 style={{ height: b.value === 0 ? 0 : `${(b.value / max) * 100}%` }}

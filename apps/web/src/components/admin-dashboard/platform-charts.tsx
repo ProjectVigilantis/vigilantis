@@ -5,21 +5,13 @@
 
 import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 
+import { BAR_CURSOR, TOOLTIP_ITEM_STYLE, TOOLTIP_LABEL_STYLE, TOOLTIP_STYLE } from '@/components/charts/tooltip-style';
 import type { HourlyCount, ScanCycle } from '@/lib/platform-status';
 
 const AXIS_INK = 'var(--muted-foreground)';
 const GRID_INK = 'color-mix(in oklch, var(--muted-foreground) 25%, transparent)';
 const OK_FILL = 'var(--primary)';
 const FAIL_FILL = 'var(--status-critical)';
-const TOOLTIP_STYLE = {
-  backgroundColor: 'var(--popover)',
-  border: '1px solid var(--border)',
-  borderRadius: '0.5rem',
-  fontSize: '0.75rem',
-  color: 'var(--popover-foreground)',
-} as const;
-/** 말풍선 글자는 막대 색이 아니라 본문 색이다 — 어두운 말풍선 위 진한 파랑 · 빨강 글자는 읽히지 않는다. */
-const TOOLTIP_ITEM_STYLE = { color: 'var(--popover-foreground)' } as const;
 
 const kst = (iso: string, withMinute: boolean) =>
   new Date(iso).toLocaleTimeString('ko-KR', {
@@ -52,9 +44,10 @@ export function ScanDurationChart({ cycles }: { cycles: readonly ScanCycle[] }) 
           />
           <Tooltip
             isAnimationActive={false}
-            cursor={{ fill: GRID_INK }}
+            cursor={BAR_CURSOR}
             contentStyle={TOOLTIP_STYLE}
             itemStyle={TOOLTIP_ITEM_STYLE}
+            labelStyle={TOOLTIP_LABEL_STYLE}
             labelFormatter={(label) => `${label} 시작`}
             formatter={(value, _key, item) => {
               const row = item.payload as (typeof rows)[number];
@@ -91,9 +84,10 @@ export function AiCallsChart({ hourly }: { hourly: readonly HourlyCount[] }) {
           />
           <Tooltip
             isAnimationActive={false}
-            cursor={{ fill: GRID_INK }}
+            cursor={BAR_CURSOR}
             contentStyle={TOOLTIP_STYLE}
             itemStyle={TOOLTIP_ITEM_STYLE}
+            labelStyle={TOOLTIP_LABEL_STYLE}
             itemSorter={(item) => (item.dataKey === 'ok' ? 0 : 1)}
             formatter={(value, key) => [`${value}건`, key === 'ok' ? '성공' : '실패']}
           />

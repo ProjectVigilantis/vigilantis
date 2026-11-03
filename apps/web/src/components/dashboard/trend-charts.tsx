@@ -11,8 +11,6 @@
 // 조회·상태 판정은 서버에서 끝내고(`lib/metrics-chart.ts`) 여기로는 **그릴 것만** 넘어온다.
 
 import {
-  Area,
-  AreaChart,
   Bar,
   CartesianGrid,
   ComposedChart,
@@ -26,9 +24,11 @@ import {
   YAxis,
 } from 'recharts';
 
+import { LINE_CURSOR, TOOLTIP_LABEL_STYLE, TOOLTIP_STYLE, TOOLTIP_WRAPPER_STYLE } from '@/components/charts/tooltip-style';
 import { SLICE_COLOR, sliceLabel } from '@/components/dashboard/asset-composition-chart';
 import type { CompositionKey } from '@/lib/dashboard';
 import { TENANT_AGGREGATE_UNSUPPORTED } from '@/lib/monitoring-scope';
+import { formatUsd } from '@/lib/savings';
 import { ASSET_TYPE_LABELS, ASSET_TYPE_ORDER } from '@/lib/enum-labels';
 import {
   assetStatusChartState,
@@ -80,9 +80,10 @@ function seriesColor(index: number): string {
   return SERIES_COLORS[index % SERIES_COLORS.length];
 }
 
-function ChartFrame({ children }: { children: React.ReactNode }) {
+/** `fill`이면 높이를 정하지 않고 부모(위치 지정된 칸)를 꽉 채운다. 옆 카드가 더 길 때 아래가 비지 않게 쓴다. */
+function ChartFrame({ children, fill = false }: { children: React.ReactNode; fill?: boolean }) {
   return (
-    <div className="h-56 w-full">
+    <div className={fill ? 'absolute inset-0' : 'h-56 w-full'}>
       <ResponsiveContainer width="100%" height="100%">
         {children as React.ReactElement}
       </ResponsiveContainer>
@@ -115,13 +116,6 @@ function Fallback({ state, empty }: { state: ChartState<unknown>; empty: string 
   );
 }
 
-const TOOLTIP_STYLE = {
-  backgroundColor: 'var(--popover)',
-  border: '1px solid var(--border)',
-  borderRadius: '0.5rem',
-  fontSize: '0.75rem',
-  color: 'var(--popover-foreground)',
-} as const;
 
 /** 축 1 — EC2별 CPU 추이. 임계선 아래에 머무는 선이 곧 다운사이징 후보다. */
 export function CpuTrendChart({
@@ -158,9 +152,11 @@ export function CpuTrendChart({
           tick={{ fontSize: 11 }}
           width={56}
         />
-        <Tooltip
+        <Tooltip wrapperStyle={TOOLTIP_WRAPPER_STYLE}
           isAnimationActive={false}
+          cursor={LINE_CURSOR}
           contentStyle={TOOLTIP_STYLE}
+          labelStyle={TOOLTIP_LABEL_STYLE}
           labelFormatter={(at) => formatTick(Number(at))}
           formatter={(value, key) => [
             `${value}%`,
@@ -241,9 +237,11 @@ export function NetworkTrendChart({
           tick={{ fontSize: 11 }}
           width={72}
         />
-        <Tooltip
+        <Tooltip wrapperStyle={TOOLTIP_WRAPPER_STYLE}
           isAnimationActive={false}
+          cursor={LINE_CURSOR}
           contentStyle={TOOLTIP_STYLE}
+          labelStyle={TOOLTIP_LABEL_STYLE}
           labelFormatter={(at) => formatTick(Number(at))}
           formatter={(value, key) => [
             formatThroughput(Number(value)),
@@ -278,18 +276,30 @@ export function NetworkTrendChart({
 
 /**
  * 축 5 — 자산 현황 추이(2026-09-29). **"내 자산이 늘었나 줄었나"** 를 본다 — 판정과 무관하게 전 유형의
- * 자산이 회차마다 몇 건 있었나. 옆 도넛(`자산 분류 비율`)과 같은 조각·색으로 쌓아(`INVENTORY_KEYS` ·
- * `SLICE_COLOR`), 맨 윗선이 전체 자산 수이고 면의 두께가 유형별 수다.
+ * 자산이 회차마다 몇 건 있었나. 전체 한 선과 유형별 선(`INVENTORY_KEYS` · `SLICE_COLOR`)을 겹쳐 그린다.
+ * 2026-11-03 PM 지시로 누적 계단 면적에서 선 그래프로 바꿨다(쌓인 면은 유형별 수가 두께로만 읽혀 비교가 어렵다).
  *
- * 면은 계단(`stepAfter`)이다 — 값은 수집 회차에만 바뀐다. 못 본 유형은 값이 비어 그 칸의 면이 끊긴다
- * (0으로 꺼지지 않는다 — `lib/metrics-chart` `InventoryRow`).
+ * 못 본 유형은 값이 비어 그 칸의 선이 끊긴다(0으로 꺼지지 않는다 — `lib/metrics-chart` `InventoryRow`).
  */
+/**
+ * 말풍선 건수 옆에 붙이는 유형별 비용(고객사 대시보드, lib/asset-costs.ts). 시점 값이 아니라 **최근 30일 합계**라
+ * 말풍선 맨 아래에 그렇게 적는다. 'FREE'는 AWS 요금이 없는 유형이다.
+ */
+export interface InventoryCosts {
+  total: number;
+  byType: Partial<Record<AssetType, number | 'FREE'>>;
+}
+
+const costText = (v: number | 'FREE' | undefined) => (v === undefined ? '' : v === 'FREE' ? '과금 없음' : formatUsd(v));
+
 function InventoryTooltip({
   active,
   payload,
+  costs,
 }: {
   active?: boolean;
   payload?: ReadonlyArray<{ payload?: InventoryRow }>;
+  costs?: InventoryCosts | null;
 }) {
   const row = payload?.[0]?.payload;
   if (!active || row === undefined) return null;
@@ -298,9 +308,16 @@ function InventoryTooltip({
       <span className="text-muted-foreground">{formatTick(row.at)}</span>
       <span className="flex justify-between gap-6 font-medium">
         <span>전체 자산</span>
-        <span className="font-mono tabular-nums">{row.total}건</span>
+        <span className="flex gap-3">
+          <span className="font-mono tabular-nums">{row.total}건</span>
+          {costs ? <span className="w-18 text-right font-mono tabular-nums">{formatUsd(costs.total)}</span> : null}
+        </span>
       </span>
-      {ASSET_TYPE_ORDER.filter((t) => row.counts[t] !== undefined).map((t) => (
+      {/* 큰 것부터: 비용을 받았으면 금액(과금 없음은 0), 아니면 그 시각의 건수. 같으면 유형 순서 그대로다. */}
+      {ASSET_TYPE_ORDER.filter((t) => row.counts[t] !== undefined)
+        .map((t, i) => ({ t, i, money: costs ? (typeof costs.byType[t] === 'number' ? (costs.byType[t] as number) : 0) : 0 }))
+        .sort((a, b) => b.money - a.money || (row.counts[b.t] ?? 0) - (row.counts[a.t] ?? 0) || a.i - b.i)
+        .map(({ t }) => (
         <span key={t} className="flex items-center justify-between gap-6">
           <span className="flex items-center gap-1.5">
             <span
@@ -310,7 +327,12 @@ function InventoryTooltip({
             />
             {ASSET_TYPE_LABELS[t]?.label ?? t}
           </span>
-          <span className="font-mono tabular-nums">{row.counts[t]}건</span>
+          <span className="flex gap-3">
+            <span className="font-mono tabular-nums">{row.counts[t]}건</span>
+            {costs ? (
+              <span className="text-muted-foreground w-18 text-right font-mono tabular-nums">{costText(costs.byType[t])}</span>
+            ) : null}
+          </span>
         </span>
       ))}
       {row.unobserved.length > 0 ? (
@@ -319,6 +341,7 @@ function InventoryTooltip({
           미관측: {row.unobserved.map((t) => ASSET_TYPE_LABELS[t]?.label ?? t).join(' · ')}
         </span>
       ) : null}
+      {costs ? <span className="text-muted-foreground border-t pt-1">비용은 최근 30일 합계</span> : null}
     </div>
   );
 }
@@ -326,13 +349,21 @@ function InventoryTooltip({
 const sliceKey = (t: AssetType): CompositionKey =>
   (INVENTORY_KEYS as readonly string[]).includes(t) ? (t as CompositionKey) : 'OTHER';
 
-export function InventoryTrendChart({ axis }: { axis: AssetInventoryAxis }) {
+export function InventoryTrendChart({
+  axis,
+  fill = false,
+  costs = null,
+}: {
+  axis: AssetInventoryAxis;
+  fill?: boolean;
+  costs?: InventoryCosts | null;
+}) {
   const state = inventoryChartState(axis);
   if (state.kind !== 'READY') return <Fallback state={state} empty="수집 회차가 아직 없습니다" />;
 
   return (
-    <ChartFrame>
-      <AreaChart data={state.data} margin={{ top: 8, right: 8, bottom: 0, left: -16 }}>
+    <ChartFrame fill={fill}>
+      <LineChart data={state.data} margin={{ top: 8, right: 8, bottom: 0, left: -16 }}>
         <CartesianGrid stroke={GRID_INK} strokeDasharray="3 3" vertical={false} />
         <XAxis
           dataKey="at"
@@ -353,32 +384,39 @@ export function InventoryTrendChart({ axis }: { axis: AssetInventoryAxis }) {
           tick={{ fontSize: 11 }}
           width={56}
         />
-        <Tooltip content={(props) => <InventoryTooltip {...props} />} isAnimationActive={false} />
-        {/* 범례는 쌓는 순서(INVENTORY_KEYS)대로 선다 — Recharts 기본은 키 이름순이라
-            옆 도넛 범례와 순서가 갈린다. */}
+        <Tooltip wrapperStyle={TOOLTIP_WRAPPER_STYLE} content={(props) => <InventoryTooltip {...props} costs={costs} />} cursor={LINE_CURSOR} isAnimationActive={false} />
         <Legend
           itemSorter={null}
           formatter={(key) => (
             <span className="text-muted-foreground text-xs">
-              {sliceLabel(String(key) as CompositionKey)}
+              {key === 'total' ? '전체' : sliceLabel(String(key) as CompositionKey)}
             </span>
           )}
         />
+        {/* 전체는 본문 색 굵은 선, 유형은 분류 색 가는 선. */}
+        <Line
+          type="linear"
+          dataKey="total"
+          name="total"
+          stroke="var(--foreground)"
+          strokeWidth={2}
+          dot={false}
+          isAnimationActive={false}
+        />
         {INVENTORY_KEYS.map((key) => (
-          <Area
+          <Line
             key={key}
-            type="stepAfter"
+            type="linear"
             dataKey={key}
             name={key}
-            stackId="inventory"
             stroke={SLICE_COLOR[key]}
-            fill={SLICE_COLOR[key]}
-            fillOpacity={0.35}
             strokeWidth={1.5}
+            dot={false}
+            connectNulls={false}
             isAnimationActive={false}
           />
         ))}
-      </AreaChart>
+      </LineChart>
     </ChartFrame>
   );
 }
@@ -436,10 +474,10 @@ export function ThreatTrendChart({ axis }: { axis: AssetStatusAxis }) {
           tick={{ fontSize: 11 }}
           width={56}
         />
-        <Tooltip content={(props) => <ThreatTooltip {...props} />} isAnimationActive={false} />
+        <Tooltip wrapperStyle={TOOLTIP_WRAPPER_STYLE} content={(props) => <ThreatTooltip {...props} />} cursor={LINE_CURSOR} isAnimationActive={false} />
         {/* 선이 하나라 범례를 두지 않는다 — 카드 제목이 이름이다. */}
         <Line
-          type="stepAfter"
+          type="linear"
           dataKey="threat"
           stroke="var(--danger)"
           strokeWidth={2}
@@ -543,7 +581,8 @@ export function ThreatActivityChart({
             tick={{ fontSize: 11 }}
             width={56}
           />
-          <Tooltip
+          <Tooltip wrapperStyle={TOOLTIP_WRAPPER_STYLE}
+            cursor={LINE_CURSOR}
             content={(props) => (
               <ThreatActivityTooltip
                 {...props}
@@ -573,7 +612,7 @@ export function ThreatActivityChart({
             />
           ))}
           <Line
-            type="stepAfter"
+            type="linear"
             dataKey="threat"
             name="threat"
             stroke="var(--danger)"

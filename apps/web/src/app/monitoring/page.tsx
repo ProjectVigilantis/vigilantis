@@ -12,7 +12,7 @@ import { MonitoringView } from '@/components/monitoring/monitoring-view';
 import { serverApi } from '@/lib/api/server';
 import { parseAxis } from '@/lib/home-path';
 import { parsePreset } from '@/lib/incident-filter';
-import { isUnassignedManager } from '@/lib/roles';
+import { isPlatform, isUnassignedManager } from '@/lib/roles';
 
 /**
  * `?asset=<arn>`은 INC-002 대상 자산에서 넘어오는 딥링크다(§4.5 액션). AST-002는 Drawer라
@@ -23,8 +23,8 @@ export default async function MonitoringPage({ searchParams }: PageProps<'/monit
   // 세션 쿠키만 실어 부르고, 401이면 로그인으로 redirect한다(lib/api/server.ts).
   const api = await serverApi();
   // 담당 고객이 없는 고객 담당자는 메뉴가 없어도 주소로 들어올 수 있다 — 업무 데이터를 하나도 읽지 않고 배정 없음을
-  // 알린다(대시보드와 같은 안내, #492). 계정 확인 실패도 업무 조회로 넘어가지 않는다. 고객사 계정은 기존대로 조회하고
-  // 서버의 거절(403)을 오류 화면으로 본다.
+  // 알린다(대시보드와 같은 안내, #492). 계정 확인 실패도 업무 조회로 넘어가지 않는다. 고객사 계정은 메뉴로 들어오며
+  // 서버가 자기 고객사 몫만 돌려준다(2026-11-03). 고객사 선택 목록은 부르지 않는다.
   let user;
   try {
     user = await api.getMe();
@@ -37,7 +37,7 @@ export default async function MonitoringPage({ searchParams }: PageProps<'/monit
 
   let loaded;
   try {
-    loaded = await loadMonitoring(api);
+    loaded = await loadMonitoring(api, { withTenants: isPlatform(user) });
   } catch (error) {
     unstable_rethrow(error); // 401 → 로그인 redirect는 삼키지 않는다
     // 자산 실패는 화면 전체 CMN-002다 — 대시보드(app/page.tsx)와 같은 규칙.

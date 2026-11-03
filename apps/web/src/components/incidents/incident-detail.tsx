@@ -10,6 +10,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 
+import { TIP_ANCHOR, TipBox } from '@/components/admin-dashboard/chart-parts';
 import { useOperateBlockedReason } from '@/components/auth/session-provider';
 import { CloseIncidentDialog } from '@/components/incidents/close-incident-dialog';
 import { CopyButton } from '@/components/copy-button';
@@ -42,7 +43,7 @@ import { closureAction, closureBlockedReason, RESOLUTION_LABELS } from '@/lib/in
 import { proposalButtons } from '@/lib/proposal-buttons';
 import { RUNBOOK_LABELS, incidentTitle } from '@/lib/enum-labels';
 import { formatUsd, savingsBreakdown, type SavingsBreakdown } from '@/lib/savings';
-import { formatKst } from '@/lib/utils';
+import { cn, formatKst } from '@/lib/utils';
 import type {
   AssetItem,
   AnalysisResultStatus,
@@ -176,21 +177,26 @@ function SavingsBar({ breakdown, scale }: { breakdown: SavingsBreakdown; scale: 
       <div
         role="img"
         aria-label={`현재 월 ${formatUsd(current)} 중 ${formatUsd(saving)}(${percent}%) 절감, 조정 후 ${formatUsd(remaining)}`}
-        className="flex h-3 gap-0.5 overflow-hidden rounded-sm"
+        // 말풍선이 막대 위로 나와야 하므로 overflow로 둥글리지 않고 양 끝 칸을 각각 둥글린다
+        className="flex h-3 gap-0.5"
       >
         {remaining > 0 ? (
           <span
-            title={`조정 후 월 비용 ${formatUsd(remaining)}`}
-            className="h-full bg-neutral-300 dark:bg-neutral-600"
+            className={cn(TIP_ANCHOR, 'h-full rounded-l-sm bg-neutral-300 last:rounded-r-sm dark:bg-neutral-600')}
             style={{ width: pct(remaining) }}
-          />
+          >
+            <TipBox align="start">조정 후 월 비용 {formatUsd(remaining)}</TipBox>
+          </span>
         ) : null}
         {saving > 0 ? (
           <span
-            title={`월 절감 예상 ${formatUsd(saving)} (${percent}%)`}
-            className="h-full"
+            className={cn(TIP_ANCHOR, 'h-full rounded-r-sm first:rounded-l-sm')}
             style={{ width: pct(saving), backgroundColor: 'var(--chart-series-3)' }}
-          />
+          >
+            <TipBox align="end">
+              월 절감 예상 {formatUsd(saving)} ({percent}%)
+            </TipBox>
+          </span>
         ) : null}
       </div>
       <div className="text-muted-foreground flex justify-between gap-3 font-mono text-xs tabular-nums">

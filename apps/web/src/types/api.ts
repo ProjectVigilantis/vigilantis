@@ -1160,7 +1160,7 @@ export interface AuditEventsResponse {
 // ─────────────────────────────────────────────────────────────────────────────
 // 도입 신청 · 고객사 문의 · 관리자 알림(2026-10-29 FE 초안 → #552로 서버에 들어왔다). 원천은
 // packages/schemas/api/signup_requests.py · inquiries.py · notifications.py · support.py다. 화면: 로그인 창 회원가입(도입 신청),
-// 고객사 계정 상단바 [문의하기](고객사 문의), 관리자 상단바 종 · /signup-requests · /inquiries.
+// 고객사 계정 사이드바 [문의하기](고객사 문의), 관리자 상단바 종 · /signup-requests · /inquiries.
 // 상태 · 목록 항목 · 페이지 응답(`SignupRequestItem` · `InquiryItem` 등)은 위 signup_requests.py · inquiries.py 구역에 있다(#565).
 // ─────────────────────────────────────────────────────────────────────────────
 

@@ -4,7 +4,7 @@
 // 고객 목록 실패는 화면 전체 CMN-002, 인시던트 목록 실패는 진행 불가 인시던트만 빠지고 그 사실을 적는다(대시보드와 같다).
 
 import type { Metadata } from 'next';
-import { unstable_rethrow } from 'next/navigation';
+import { redirect, unstable_rethrow } from 'next/navigation';
 
 import { DetailHeader } from '@/components/admin-dashboard/detail-header';
 import { IssuesTable } from '@/components/admin-dashboard/issues-table';
@@ -13,7 +13,7 @@ import { ErrorState } from '@/components/error-state';
 import { issueRows, manualIssues } from '@/lib/admin-dashboard';
 import { orNull, serverApi } from '@/lib/api/server';
 import { businessOpen } from '@/lib/home-path';
-import { isUnassignedManager } from '@/lib/roles';
+import { isPlatform, isUnassignedManager } from '@/lib/roles';
 
 export const metadata: Metadata = { title: '수동 처리가 필요한 문제 · Vigilantis' };
 
@@ -30,6 +30,8 @@ export default async function IssuesPage() {
     unstable_rethrow(error);
     return <ErrorState error={error} />;
   }
+  // 관리자 화면이다. 고객사 계정은 업무 화면이 열려 있어도 여기 오지 않는다(고객사 대시보드로 보낸다, 2026-11-03).
+  if (!isPlatform(user)) redirect('/');
   if (!businessOpen(user)) return <BusinessUnavailable unassigned={isUnassignedManager(user)} />;
   const incidentsPromise = orNull(getIncidents());
   let tenants;
@@ -45,7 +47,7 @@ export default async function IssuesPage() {
   return (
     <div className="flex flex-col gap-6">
       <DetailHeader
-        title="수동 처리가 필요한 문제"
+        title="수동 처리가 필요한 문제"
         renderedAt={renderedAt}
       />
       <section className="bg-card ring-foreground/10 rounded-xl p-6 ring-1">

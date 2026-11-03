@@ -1,4 +1,4 @@
-// 고객사 문의함(플랫폼 계정, 2026-10-29). 고객사 계정(중앙계정 · 직원계정)이 상단바 [문의하기]로 보낸 장애 · 버그 문의를 모은다.
+// 고객사 문의함(플랫폼 계정, 2026-10-29). 고객사 계정(중앙계정 · 직원계정)이 사이드바 [문의하기]로 보낸 장애 · 버그 문의를 모은다.
 // 목록은 페이지 응답이고(#565) 주소의 `?page=`가 쪽을 정한다. 관리자 상단바 알림 종에서 문의 알림을 누르면 `?id=`로 그 건을 펼친다. 계약은 #552다(types/api.ts).
 // 서버에 아직 경로가 없으면(404 · 405) 오류 대신 준비 중이라고 적는다.
 
@@ -24,7 +24,7 @@ export default async function InquiriesPage({ searchParams }: PageProps<'/inquir
 
   return (
     <SupportPage
-      title="고객사 문의"
+      title="고객사 문의"
       renderedAt={renderedAt}
     >
       {result.value !== null ? (

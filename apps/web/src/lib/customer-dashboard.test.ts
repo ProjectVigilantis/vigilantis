@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import type { IncidentListItem, ThreatEventAxis } from '../types/api.ts';
+import type { AssetItem, IncidentListItem, ThreatEventAxis } from '../types/api.ts';
 import {
+  assetTypeRows,
   coverageCounts,
   doneNote,
   postureOf,
@@ -148,3 +149,19 @@ test('상대 시각', () => {
   assert.equal(timeAgo('2026-10-20T02:30:00Z', NOW), '3시간 전');
   assert.equal(timeAgo('2026-10-18T05:30:00Z', NOW), '2일 전');
 });
+
+test('자산 현황: 유형 순서대로, 없는 유형은 빼고 수집 실패 유형은 남긴다', () => {
+  const base = { resource_role: 'PRIMARY', name: null, account_id: '1', region: 'r', relationships: [], evaluation_status: 'COMPLETED', health_score: null, verdict: null, skip_reason_code: null } as const;
+  const items = [
+    { ...base, arn: 'v1', resource_id: 'v1', state: 'in-use', asset_type: 'EBS', collected_at: '2026-11-03T01:00:00Z', spec: { volume_type: 'gp3', size_gib: 100, availability_zone: null, encrypted: true, attached_instance_ids: [] } },
+    { ...base, arn: 'i1', resource_id: 'i1', state: 'running', asset_type: 'EC2', collected_at: '2026-11-03T02:00:00Z', spec: { instance_type: null, availability_zone: null, vpc_id: null, subnet_id: null, private_ip: null, tags: {} } },
+    { ...base, arn: 'i2', resource_id: 'i2', state: 'stopped', asset_type: 'EC2', collected_at: '2026-11-03T03:00:00Z', spec: { instance_type: null, availability_zone: null, vpc_id: null, subnet_id: null, private_ip: null, tags: {} } },
+  ] as unknown as AssetItem[];
+  const rows = assetTypeRows(items, [{ asset_type: 'NACL', reason_code: 'AccessDenied' }]);
+  assert.deepEqual(rows.map((r) => r.type), ['EC2', 'EBS', 'NACL']);
+  assert.equal(rows[0].detail, '실행 1 · 중지 1');
+  assert.equal(rows[0].lastCollectedAt, '2026-11-03T03:00:00Z');
+  assert.equal(rows[1].detail, '합계 100 GiB · 미연결 1');
+  assert.deepEqual([rows[2].count, rows[2].uncollectedReason, rows[2].lastCollectedAt], [0, 'AccessDenied', null]);
+});
+

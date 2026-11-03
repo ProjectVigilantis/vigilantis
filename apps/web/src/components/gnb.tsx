@@ -1,4 +1,4 @@
-// 전역 셸: 상단바(로고 · 수집 · 실시간 · 주간/야간 · 사용자)와 사이드바(주요 화면)다(DESIGN.md §셸).
+// 전역 셸: 상단바(로고 · 서버 · 알림 · 사용자)와 사이드바(주요 화면 · 문의하기 · 설정)다(DESIGN.md §셸).
 //
 // 셸은 두 모드 모두 남색이고, 안쪽 부품(상태 칩 · 사용자 메뉴)은 어두운 바탕용 색으로 그려야 읽힌다.
 // 그래서 셸 요소에 `dark` 클래스를 달아 그 아래만 야간 토큰으로 푼다. 셸 배경색은 html에 걸린
@@ -6,7 +6,7 @@
 
 'use client';
 
-import { Building2, ClipboardList, LayoutDashboard, LifeBuoy, Shield, Users, type LucideIcon } from 'lucide-react';
+import { Activity, Building2, ClipboardList, LayoutDashboard, LifeBuoy, ScrollText, Shield, Users, type LucideIcon } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 
@@ -14,9 +14,10 @@ import { useSession } from '@/components/auth/session-provider';
 import { UserMenu } from '@/components/auth/user-menu';
 import { ConnectionIndicator } from '@/components/connection-indicator';
 import { InquiryButton } from '@/components/support/inquiry-button';
+import { SettingsMenu } from '@/components/settings-menu';
 import { NotificationBell } from '@/components/support/notification-bell';
-import { ThemeToggle } from '@/components/theme-toggle';
 import {
+  LOGS_PATH,
   MONITORING_PATH,
   TENANTS_PATH,
   USERS_PATH,
@@ -47,6 +48,9 @@ import { cn } from '@/lib/utils';
  */
 const NAV: Readonly<Record<string, { label: string; icon: LucideIcon }>> = {
   '/': { label: '대시보드', icon: LayoutDashboard },
+  // 고객사 계정 메뉴에만 있다(lib/home-path.ts `CUSTOMER_BUSINESS_PATHS`). 관리자는 고객사 상세에서 들어간다.
+  [MONITORING_PATH]: { label: '관제', icon: Activity },
+  [LOGS_PATH]: { label: '로그', icon: ScrollText },
   [TENANTS_PATH]: { label: '고객사', icon: Building2 },
   [USERS_PATH]: { label: '계정', icon: Users },
   [SIGNUP_REQUESTS_PATH]: { label: '도입 신청', icon: ClipboardList },
@@ -61,9 +65,9 @@ function useAccount(): AccessSubject | null {
 
 export function ShellHeader() {
   const account = useAccount();
-  // 자산 조회와 두 인디케이터는 업무 기능이다 — 고객 범위가 있는 확인된 플랫폼 계정에게만 연다(lib/home-path.ts
-  // `businessOpen`). 확인 전 · 조회 실패 · 고객사 계정 · 담당 고객 없는 고객 담당자는 부르지도 그리지도 않는다.
-  // 주간/야간 전환과 사용자 메뉴는 그대로 둔다.
+  // 자산 조회와 두 인디케이터는 업무 기능이다 — 고객사 계정과 고객 범위가 있는 플랫폼 계정에게 연다(lib/home-path.ts
+  // `businessOpen`). 확인 전 · 조회 실패 · 담당 고객 없는 고객 담당자는 부르지도 그리지도 않는다.
+  // 사용자 메뉴는 그대로 둔다.
   const open = businessOpen(account);
 
   return (
@@ -86,50 +90,56 @@ export function ShellHeader() {
             <ConnectionIndicator />
           </div>
         ) : null}
-        {/* 도입 신청 · 고객 문의 알림은 플랫폼 계정(중앙 관리계정 · 관리자 직원계정)에게, 문의하기는 고객사 계정(고객사 중앙계정 · 직원계정)에게 둔다(2026-10-29). */}
+        {/* 도입 신청 · 고객 문의 알림은 플랫폼 계정(중앙 관리계정 · 관리자 직원계정)에게 둔다(2026-10-29).
+            고객사 계정의 문의하기와 주간 · 야간 전환은 2026-11-03에 사이드바로 옮겼다(ShellNav). */}
         {isPlatform(account) ? <NotificationBell /> : null}
-        {account?.account_type === 'TENANT' ? <InquiryButton /> : null}
-        <ThemeToggle />
         <UserMenu />
       </div>
     </header>
   );
 }
 
-/** 넓은 화면에서는 왼쪽 세로 메뉴, 좁은 화면(< md)에서는 상단바 아래 가로 줄이다. */
+const NAV_ITEM =
+  'flex h-10 shrink-0 items-center gap-2.5 rounded-lg px-3 text-[13px] font-bold whitespace-nowrap transition-colors focus-visible:ring-ring focus-visible:ring-2 focus-visible:outline-none';
+const NAV_IDLE = 'text-white/78 hover:bg-white/8 hover:text-white';
+
+/**
+ * 넓은 화면에서는 왼쪽 세로 메뉴, 좁은 화면(< md)에서는 상단바 아래 가로 줄이다.
+ * 맨 아래(가로 줄에서는 오른쪽 끝)에 문의하기(고객사 계정만)와 설정을 둔다. 세로 메뉴는 화면 높이에 붙어 있어
+ * 본문을 내려도 아래 묶음이 보인다(상단바 4rem을 뺀 높이).
+ */
 export function ShellNav() {
   const pathname = usePathname();
   const account = useAccount();
   const items = navPathsFor(account).map((href) => ({ href, ...NAV[href] }));
-  if (items.length === 0) return null;
 
   return (
-    <nav
-      aria-label="주요 화면"
-      className="dark bg-shell-nav flex shrink-0 gap-1 overflow-x-auto p-2 [scrollbar-width:none] md:w-58 md:flex-col md:overflow-visible md:border-r md:p-4"
-    >
-      {items.map(({ href, label, icon: Icon }) => {
-        // 경계(`/` 또는 문자열 끝)까지 본다. 접두만 보면 다른 경로가 같이 활성이 된다.
-        // 인시던트 상세(`/incidents/[id]`)는 카테고리를 모르는 자리라 어느 항목도 켜지 않는다.
-        // 관제는 메뉴에 없고 고객사 상세에서 들어가므로 관제 화면에서는 `고객사`를 켠다.
-        const under = (base: string) => pathname === base || pathname.startsWith(`${base}/`);
-        const active =
-          href === '/' ? pathname === '/' : under(href) || (href === TENANTS_PATH && under(MONITORING_PATH));
-        return (
-          <Link
-            key={href}
-            href={href}
-            aria-current={active ? 'page' : undefined}
-            className={cn(
-              'flex h-10 shrink-0 items-center gap-2.5 rounded-lg px-3 text-[13px] font-bold whitespace-nowrap transition-colors',
-              active ? 'bg-primary text-white' : 'text-white/78 hover:bg-white/8 hover:text-white',
-            )}
-          >
-            <Icon aria-hidden className="size-4.5" />
-            {label}
-          </Link>
-        );
-      })}
+    <nav aria-label="주요 화면" className="dark bg-shell-nav shrink-0 md:w-58 md:border-r">
+      <div className="flex gap-1 overflow-x-auto p-2 [scrollbar-width:none] md:sticky md:top-0 md:h-[calc(100dvh-4rem)] md:flex-col md:overflow-x-visible md:overflow-y-auto md:p-4">
+        {items.map(({ href, label, icon: Icon }) => {
+          // 경계(`/` 또는 문자열 끝)까지 본다. 접두만 보면 다른 경로가 같이 활성이 된다.
+          // 인시던트 상세(`/incidents/[id]`)는 카테고리를 모르는 자리라 어느 항목도 켜지 않는다.
+          // 관제는 메뉴에 없고 고객사 상세에서 들어가므로 관제 화면에서는 `고객사`를 켠다.
+          const under = (base: string) => pathname === base || pathname.startsWith(`${base}/`);
+          const active =
+            href === '/' ? pathname === '/' : under(href) || (href === TENANTS_PATH && under(MONITORING_PATH));
+          return (
+            <Link
+              key={href}
+              href={href}
+              aria-current={active ? 'page' : undefined}
+              className={cn(NAV_ITEM, active ? 'bg-primary text-white' : NAV_IDLE)}
+            >
+              <Icon aria-hidden className="size-4.5" />
+              {label}
+            </Link>
+          );
+        })}
+        <div className="ml-auto flex shrink-0 gap-1 border-l border-white/10 pl-1 md:mt-auto md:ml-0 md:flex-col md:border-t md:border-l-0 md:pt-3 md:pl-0">
+          {account?.account_type === 'TENANT' ? <InquiryButton className={cn(NAV_ITEM, NAV_IDLE)} /> : null}
+          <SettingsMenu className={cn(NAV_ITEM, NAV_IDLE)} />
+        </div>
+      </div>
     </nav>
   );
 }
