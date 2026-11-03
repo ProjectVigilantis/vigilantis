@@ -32,7 +32,7 @@ def _bind_scheduler_to_test_db(monkeypatch, pg_engine):
 
 def _stub_pipeline(monkeypatch, called):
     monkeypatch.setattr(
-        "services.collector.collect_and_store",
+        "services.collector.collect_and_store_tenants",
         lambda: (called.__setitem__("collect", called["collect"] + 1), {"stored": 1})[1],
     )
     monkeypatch.setattr(
@@ -175,7 +175,7 @@ def test_two_ticks_do_not_overlap(pg_engine, monkeypatch):
         assert reentrant == {"skipped": True}  # 겹친 tick 은 건너뜀
         return {"stored": 1}
 
-    monkeypatch.setattr("services.collector.collect_and_store", _collect_then_reenter)
+    monkeypatch.setattr("services.collector.collect_and_store_tenants", _collect_then_reenter)
     monkeypatch.setattr(
         "services.rule_engine.run_rule_engine",
         lambda db: (called.__setitem__("judge", called["judge"] + 1), {"counts": {}, "evaluations": []})[1],
@@ -197,7 +197,7 @@ def test_lock_released_when_pipeline_raises(pg_engine, monkeypatch):
     def _boom():
         raise RuntimeError("collect boom")
 
-    monkeypatch.setattr("services.collector.collect_and_store", _boom)
+    monkeypatch.setattr("services.collector.collect_and_store_tenants", _boom)
 
     with pytest.raises(RuntimeError, match="collect boom"):
         scheduler.run_pipeline()

@@ -40,6 +40,7 @@ from schemas.guardrails import (
 )
 from schemas.runbooks import RunbookId, TriggerSource
 from services.aws import executor
+from services.aws.client import tenant_scope
 from sqlalchemy.orm import Session, sessionmaker
 
 logger = logging.getLogger("vigilantis.soar")
@@ -100,7 +101,12 @@ def prepare_isolation(db: Session, incident_id: str, trigger_source: TriggerSour
         db.rollback()
         return None
     evidence_ids = [row.evidence_id for row in incidents_repo.list_evidence(db, incident_id)]
-    managed = assets_repo.get_asset_by_arn(db, target_arn) is not None
+    # 가드레일 ③ · ④ 는 인시던트의 소유 테넌트로 본다(#533 E) — 요청자 · 감시 주체의 소속이 아니다
+    owner = workflows.tenant_access_for(db, incident.tenant_id)
+    managed = (
+        assets_repo.get_asset_by_arn(db, target_arn) is not None
+        and workflows.in_owner_account(owner, target_arn)
+    )
     supplied = workflows.resolve_isolation_parameters(db, target_arn)
     db.rollback()
     if not supplied.resolved:
@@ -119,17 +125,18 @@ def prepare_isolation(db: Session, incident_id: str, trigger_source: TriggerSour
         },
         "evidence_ids": evidence_ids,
     }
-    guarded = guardrails.run_guardrail_validation(
-        GuardrailValidationRequest(
-            validation_context=GuardrailValidationContext.AUTO_ISOLATION,
-            execution_id=execution_id,
-            command_payload=payload,
-        ),
-        is_managed_arn=lambda arn: managed and arn == target_arn,
-        precheck=lambda command: executor.precheck(
-            command.runbook_id, command.target_arn, command.parameters,
-        ),
-    )
+    with tenant_scope(owner):
+        guarded = guardrails.run_guardrail_validation(
+            GuardrailValidationRequest(
+                validation_context=GuardrailValidationContext.AUTO_ISOLATION,
+                execution_id=execution_id,
+                command_payload=payload,
+            ),
+            is_managed_arn=lambda arn: managed and arn == target_arn,
+            precheck=lambda command: executor.precheck(
+                command.runbook_id, command.target_arn, command.parameters,
+            ),
+        )
     if guarded.result.result is not GuardrailDecision.PASS:
         logger.warning("automatic_isolation_guardrail_rejected", extra={
             "incident_id": incident_id, "failed_step": guarded.result.failed_step.value,

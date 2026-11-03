@@ -45,6 +45,9 @@
 #     않는다(디스패처는 범위를 다시 보지 않는다).
 #   - 감사 기록(T-2 · #544)의 사람 행위자는 HTTP 에서는 위의 재판정 신원이다. 신뢰 경로는 기록할 사람을
 #     audit_actor 로 직접 밝히며, 그 값은 범위 · 정지 판정에 쓰이지 않는다(_write_context).
+#   - AWS 자격(#533 E)은 요청자가 아니라 기록의 소유 테넌트다(tenant_access_for). 실행 · 판정은 dispatcher 가
+#     실행 행의 소유로 문맥을 세운 채 부르고, 가드레일 ④ 를 부르는 자리(AI 후보 · 해제 제안 · 원복)는 여기서
+#     직접 세운다. 소속 없는 기록(NULL)은 「테넌트 없음」 문맥이다 — 소유를 추론하지 않는다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -146,6 +149,7 @@ from schemas.runbooks import (
 )
 from schemas.savings import AISavingsEstimate
 from services.aws import backup, executor, rollback
+from services.aws.client import TenantAccess, tenant_scope
 from services.aws.errors import is_retryable, watch_dry_run_protocol
 from services.aws.executor import parse_arn
 from sqlalchemy.exc import IntegrityError
@@ -296,6 +300,38 @@ def _tenant_suspended(db: Session, tenant_id: str | None) -> bool:
         return False
     tenant = tenants_repo.read_tenant_for_share(db, tenant_id)
     return tenant is not None and tenant.status is TenantStatus.SUSPENDED
+
+
+def tenant_access_for(db: Session, tenant_id: str | None) -> TenantAccess | None:
+    """기록에 저장된 소유 테넌트의 접근 재료 — 실행 · 판정 · 가드레일 ④ 가 이 자격으로 나간다(#533 E).
+
+    요청자 소속이 아니라 실행 · 인시던트 행의 tenant_id 로 고른다(ADR-0012 §2). None(소속 없는 MVP
+    기록)은 None 이다 — ARN · 계정으로 소유를 추론하지 않고, tenant_scope(None) 이 바깥 문맥을 가린다.
+    상태는 보지 않는다 — 정지 관문은 따로 있고, 정지 뒤에도 종료 판정 · 자동 원복은 이 자격으로 끝까지
+    돈다(ADR-0012 §3). 역할 ARN · ExternalId 는 수정 API 가 바꾸지 않는 칸이다. 잠그지 않고 commit 하지
+    않는다 — 호출부 트랜잭션 안에서 읽는다. 자격(STS)은 여기서 받지 않는다 — 첫 AWS 서명 때 받는다.
+    """
+    if tenant_id is None:
+        return None
+    tenant = db.get(models.Tenant, tenant_id)
+    return TenantAccess(tenant.tenant_id, tenant.access_role_arn, tenant.external_id)
+
+
+def _arn_account(arn: str) -> str | None:
+    parts = arn.split(":", 5)
+    return parts[4] if len(parts) == 6 else None
+
+
+def in_owner_account(owner: TenantAccess | None, arn: str) -> bool:
+    """가드레일 ③ 의 계정 조건(ADR-0012 §2) — 대상 ARN 의 계정이 소유 테넌트의 계정인가.
+
+    테넌트 A 의 기록으로 테넌트 B 의 자원을 부르지 않게 한다. 소유 테넌트의 계정은 역할 ARN 의 계정
+    칸이다(DB CHECK role_in_tenant_account 가 aws_account_id 와 같음을 보장한다). 소유 없음(None)은
+    조건이 없다 — 지금 그대로이며 계정으로 소유를 추론하지 않는다.
+    """
+    if owner is None:
+        return True
+    return _arn_account(arn) == _arn_account(owner.access_role_arn)
 
 
 def _executable_candidate(
@@ -4295,6 +4331,9 @@ def _run_rollback_guardrails(
 
     판정 결과는 저장한다. 거절이 로그로만 남으면 관제 화면에서 "왜 원복이 멈췄는가"를
     답할 자리가 없다.
+
+    ③ · ④ 는 원복 실행 행의 소유 테넌트로 본다(#533 E) — 자동 원복 자식은 원본과 같은 인시던트의
+    소유를 물려받는다(executions_repo.create_execution).
     """
     request = GuardrailValidationRequest(
         validation_context=GuardrailValidationContext.ROLLBACK_EXECUTION,
@@ -4302,12 +4341,16 @@ def _run_rollback_guardrails(
         command_payload=command_payload,
     )
     loader = _DbBackupRecordLoader(db)
+    owner = tenant_access_for(db, execution.tenant_id)
     # ④의 DryRun 미적용(정상 반환)은 사유 코드가 조회 실패와 같다 — 같은 스레드에서 그 사건을
     # 따로 센다. 재평가 여부를 가르는 입력이다(_guardrail_transient_code)
-    with watch_dry_run_protocol() as dry_run_watch:
+    with watch_dry_run_protocol() as dry_run_watch, tenant_scope(owner):
         outcome = guardrails.run_guardrail_validation(
             request,
-            is_managed_arn=lambda arn: assets_repo.get_asset_by_arn(db, arn) is not None,
+            is_managed_arn=lambda arn: (
+                assets_repo.get_asset_by_arn(db, arn) is not None
+                and in_owner_account(owner, arn)
+            ),
             # 롤백 3종은 전부 백업 레코드를 읽는다 — 미배선이면 FAIL이 아니라 RuntimeError다
             precheck=lambda command: executor.precheck(
                 command.runbook_id,
@@ -5330,12 +5373,14 @@ def _draft_candidates(
     ]
 
 
-def _managed_arns(db: Session, candidates: list[RunbookCandidateData]) -> set[str]:
-    """③ ARN Match가 볼 대상 중 수집된 자산인 것. 가드레일 전에 미리 해석한다."""
+def _managed_arns(
+    db: Session, candidates: list[RunbookCandidateData], owner: TenantAccess | None
+) -> set[str]:
+    """③ ARN Match가 볼 대상 중 수집된 자산이고 소유 테넌트 계정의 것(in_owner_account). 가드레일 전에 미리 해석한다."""
     return {
         arn
         for arn in {candidate.target_arn for candidate in candidates}
-        if assets_repo.get_asset_by_arn(db, arn) is not None
+        if assets_repo.get_asset_by_arn(db, arn) is not None and in_owner_account(owner, arn)
     }
 
 
@@ -5461,21 +5506,25 @@ def record_agent_analysis(
     AGENT_WAIT의 승인 대기 시각만 기록하며 자동 격리 엔진은 기동하지 않는다.
     """
     candidates = _draft_candidates(incident_id, output)
-    managed = _managed_arns(db, candidates) if candidates else set()
-    backups = _prefetch_candidate_backups(db, candidates)
     incident_context = incidents_repo.get_incident(db, incident_id)
+    if incident_context is None:
+        raise ValueError(f"Incident를 찾을 수 없습니다: {incident_id}")
+    # 가드레일 ③ · ④ 는 인시던트의 소유 테넌트로 본다(#533 E) — 소유를 모르면 AWS 를 부르지 않는다
+    owner = tenant_access_for(db, incident_context.tenant_id)
+    managed = _managed_arns(db, candidates, owner) if candidates else set()
+    backups = _prefetch_candidate_backups(db, candidates)
     estimate_finops = (
         savings_estimator is not None
-        and incident_context is not None
         and incident_context.category is IncidentCategory.FINOPS
     )
     # 가드레일 ④가 AWS를 부르는 동안 트랜잭션을 열어 두지 않는다
     db.rollback()
 
-    guarded = [
-        (candidate, _guard_candidate(candidate, managed, backups))
-        for candidate in candidates
-    ]
+    with tenant_scope(owner):
+        guarded = [
+            (candidate, _guard_candidate(candidate, managed, backups))
+            for candidate in candidates
+        ]
 
     # 모든 후보의 가드레일 뒤, 잠금·저장 전이다. 모델 대기 중 DB transaction을 열지 않는다.
     if estimate_finops:
@@ -5834,11 +5883,14 @@ def offer_nacl_release(db: Session, execution_id: str) -> ReleaseOffer:
         db.commit()
         return _release_skipped(incident_id, execution_id, problem or "")
 
-    managed = _managed_arns(db, [candidate])
+    # 가드레일 ③ · ④ 는 차단 실행 행의 소유 테넌트로 본다(#533 E)
+    owner = tenant_access_for(db, block.tenant_id)
+    managed = _managed_arns(db, [candidate], owner)
     backups = _prefetch_candidate_backups(db, [candidate])
     # 읽기만 했다 — rollback이 아니라 commit으로 닫는 것은 dispatcher 규약이다(호출부가 같은
     # 세션에 얹어 둔 작업을 잃지 않게)
     db.commit()
 
-    outcome = _guard_candidate(candidate, managed, backups)
+    with tenant_scope(owner):
+        outcome = _guard_candidate(candidate, managed, backups)
     return _store_release_offer(db, candidate, outcome, execution_id=execution_id)

@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import NamedTuple
 
 from botocore.exceptions import BotoCoreError, ClientError
+from sqlalchemy import select
 
 from config import get_collector_settings
 from schemas.arns import build_arn
@@ -44,7 +46,7 @@ from schemas.assets import (
 )
 
 from .aws.client import account_id as _account_id
-from .aws.client import aws_client, deployment_mode, regions
+from .aws.client import TenantAccess, aws_client, deployment_mode, regions, tenant_scope
 
 _log = logging.getLogger(__name__)
 
@@ -71,6 +73,10 @@ REGION_FAILURE_LABEL = "collect_region"
 # 없는** 것이라 UNOBSERVED_TYPES_BY_FAILURE 로 환원하지 않는다 — 범위 필터가 오타로 전량을
 # 거른 회차는 "AWS 가 비었다"와 구별되지 않기 때문이다(PR #440 리뷰: 김승철).
 VPC_SCOPE_FAILURE_LABEL = "vpc_scope"
+
+
+class AccountMismatch(RuntimeError):
+    """테넌트 문맥으로 부른 STS 의 계정이 테넌트 행의 aws_account_id 와 다르다(#533 E)."""
 
 
 def _failure_reason(exc: BaseException) -> str:
@@ -549,10 +555,17 @@ def collect_region(
     """
     cfg = cfg or _runtime_config()
 
+    account_id = _account_id(region)
+    expected = cfg.get("expected_account_id")
+    if expected is not None and account_id != expected:
+        # 테넌트 문맥의 자격이 등록 계정이 아닌 곳으로 나갔다 — 그 계정의 자원은 한 건도 읽지 않고 거절한다.
+        raise AccountMismatch(f"자격의 계정이 테넌트 등록 계정과 다르다: {account_id} != {expected}")
+    if expected is not None and "vpc_scope_error" not in cfg:
+        # 테넌트 회차: 계정 확인 뒤에야 VPC 를 읽는다. 첫 리전의 재시도 안에서 한 번 정하고 회차 안에서 재사용한다.
+        cfg["vpc_scope_error"] = _check_vpc_scope(cfg.get("vpc_scope"), cfg["regions"])
+
     ec2 = aws_client("ec2", region)
     cw = aws_client("cloudwatch", region)
-    account_id = _account_id(region)
-
     instances_raw = [
         i
         for page in ec2.get_paginator("describe_instances").paginate()
@@ -770,6 +783,7 @@ def persist_inventory(
     collection_run_id: str | None = None,
     *,
     prune_absent: bool = False,
+    tenant_id: str | None = None,
 ) -> dict:
     """AssetInventory 를 DB(CollectionRun, Asset, MetricSummary, AssetRelationship)에 적재한다.
     Repository는 commit하지 않으므로 호출부에서 트랜잭션을 관리한다.
@@ -783,6 +797,9 @@ def persist_inventory(
 
     ``collection_run_id`` 를 받은 호출(회차를 남이 연 경우)에서는 ``prune_absent`` 를
     켜도 아무것도 하지 않는다 — 회차를 마감하는 쪽이 관측 범위를 안다.
+
+    ``tenant_id`` 는 이 인벤토리의 소유다(#533 E) — 회차·자산 행에 그대로 적고, 소멸 표시는 그 소유의
+    행에만 건다. ``None`` 은 소속 없는 legacy 수집이다(소속 없는 행만 다룬다).
 
     유형별 자산 수 스냅샷(축 5)도 같은 조건에서만 남긴다. 스냅샷은 "이 회차가 리전 전체를
     이만큼 봤다"는 기록인데, 골든 적재처럼 파일 하나를 넘기는 호출은 리전의 일부만 담고
@@ -803,6 +820,7 @@ def persist_inventory(
             mode=inv.mode,
             lookback_days=inv.lookback_days,
             period_seconds=inv.period_seconds,
+            tenant_id=tenant_id,
         )
         collection_run_id = run.collection_run_id
         started_own_run = True
@@ -862,6 +880,7 @@ def persist_inventory(
             resource_id=a.instance_id,
             account_id=inv.account_id,
             region=inv.region,
+            tenant_id=tenant_id,
             spec=ec2_spec,
             collection_run_id=collection_run_id,
             collected_at=inv.collected_at,
@@ -918,6 +937,7 @@ def persist_inventory(
             resource_id=g.group_id,
             account_id=inv.account_id,
             region=inv.region,
+            tenant_id=tenant_id,
             spec=sg_spec,
             collection_run_id=collection_run_id,
             collected_at=inv.collected_at,
@@ -939,6 +959,7 @@ def persist_inventory(
             resource_id=n.nacl_id,
             account_id=inv.account_id,
             region=inv.region,
+            tenant_id=tenant_id,
             spec=nacl_spec,
             collection_run_id=collection_run_id,
             collected_at=inv.collected_at,
@@ -962,6 +983,7 @@ def persist_inventory(
             resource_id=v.volume_id,
             account_id=inv.account_id,
             region=inv.region,
+            tenant_id=tenant_id,
             spec=ebs_spec,
             collection_run_id=collection_run_id,
             collected_at=inv.collected_at,
@@ -982,6 +1004,7 @@ def persist_inventory(
             resource_id=lt.launch_template_id,
             account_id=inv.account_id,
             region=inv.region,
+            tenant_id=tenant_id,
             spec=lt_spec,
             collection_run_id=collection_run_id,
             collected_at=inv.collected_at,
@@ -1005,6 +1028,7 @@ def persist_inventory(
             resource_id=g.name,
             account_id=inv.account_id,
             region=inv.region,
+            tenant_id=tenant_id,
             spec=asg_spec,
             collection_run_id=collection_run_id,
             collected_at=inv.collected_at,
@@ -1040,6 +1064,7 @@ def persist_inventory(
             resource_id=tg.name,
             account_id=inv.account_id,
             region=inv.region,
+            tenant_id=tenant_id,
             spec=tg_spec,
             collection_run_id=collection_run_id,
             collected_at=inv.collected_at,
@@ -1137,6 +1162,7 @@ def persist_inventory(
                 observed_arns=observed_arns,
                 absent_at=inv.collected_at,
                 asset_types=[t for t in AssetType if t not in blind],
+                tenant_id=tenant_id,
             )
         if absent_marked:
             _log.info(
@@ -1163,8 +1189,10 @@ def persist_inventory(
 
 
 def collect_and_store() -> list[dict]:
-    """수집 → 정형화 → DB 적재까지. scheduler 가 이 함수를 주기 호출한다.
-    (판정은 이후 rule_engine 이 assets 테이블 및 metric_summaries 를 읽어 수행)
+    """**legacy 전역 수집** — 프로세스 자격으로 설정 리전을 수집해 소속 없는(tenant_id NULL) 기록으로 적재한다.
+
+    스케줄러는 이 함수를 부르지 않는다(``collect_and_store_tenants``). 명시적으로 부르는 개발 도구
+    (scripts/stepper)용으로만 남는다. TENANT_CONTEXT_REQUIRED 가 켜져 있으면 문맥이 없으므로 리전마다 실패한다.
 
     C4: 리전을 독립 트랜잭션으로 처리한다 — 한 리전이 실패해도 다른 리전은 커밋된다
     (기존엔 한 리전 예외 = 전체 롤백). 실패 리전은 1회 재시도 후 FAILED 로 기록한다.
@@ -1176,9 +1204,149 @@ def collect_and_store() -> list[dict]:
     return [_collect_store_region(region, cfg, session_factory) for region in cfg["regions"]]
 
 
-def _collect_store_region(region: str, cfg: dict, session_factory) -> dict:
+@dataclass(frozen=True)
+class _TenantRound:
+    """한 테넌트 회차의 설정 스냅샷 — 회차 시작에 행을 새로 읽어 만든다(#533 E)."""
+
+    access: TenantAccess
+    account_id: str
+    regions: tuple[str, ...]
+    vpc_ids: tuple[str, ...]
+
+
+def _active_tenant_ids(session_factory) -> list[str]:
+    from schemas.api.tenants import TenantStatus
+
+    from db import models
+
+    db = session_factory()
+    try:
+        return list(
+            db.scalars(
+                select(models.Tenant.tenant_id)
+                .where(models.Tenant.status == TenantStatus.ACTIVE)
+                .order_by(models.Tenant.created_at, models.Tenant.tenant_id)
+            )
+        )
+    finally:
+        db.close()
+
+
+def _read_tenant_round(tenant_id: str, session_factory) -> _TenantRound | None:
+    """지금 ACTIVE 인 테넌트의 설정을 읽는다. 그 사이 상태가 바뀌었으면 None. 읽고 바로 닫는다(AWS 호출 전)."""
+    from schemas.api.tenants import TenantStatus
+
+    from db import models
+
+    db = session_factory()
+    try:
+        row = db.execute(
+            select(models.Tenant)
+            .where(models.Tenant.tenant_id == tenant_id)
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if row is None or row.status != TenantStatus.ACTIVE:
+            return None
+        return _TenantRound(
+            access=TenantAccess(
+                tenant_id=row.tenant_id,
+                access_role_arn=row.access_role_arn,
+                external_id=row.external_id,
+            ),
+            account_id=row.aws_account_id,
+            regions=tuple(row.regions),
+            vpc_ids=tuple(row.collect_vpc_ids),
+        )
+    finally:
+        db.close()
+
+
+def _tenant_base_config(snapshot: _TenantRound) -> dict:
+    """AWS 를 부르지 않는 수집 설정 — 실패 회차를 남길 때도 쓴다.
+
+    collect_vpc_ids 가 빈 목록이면 리전의 모든 VPC 다(schemas/api/tenants.py)."""
+    settings = get_collector_settings()
+    return {
+        "regions": list(snapshot.regions),
+        "lookback_days": settings.METRIC_LOOKBACK_DAYS,
+        "period_seconds": settings.METRIC_PERIOD_SECONDS,
+        "vpc_scope": frozenset(snapshot.vpc_ids) or None,
+        # "vpc_scope_error" 는 일부러 비워 둔다 — collect_region 이 계정 확인 뒤(리전별 재시도 안)에서 채운다.
+        "expected_account_id": snapshot.account_id,
+    }
+
+
+def collect_and_store_tenants() -> list[dict]:
+    """ACTIVE 테넌트마다 그 테넌트 자격·리전·VPC 범위로 수집해 적재한다 — 스케줄러의 수집 진입점.
+
+    ACTIVE 가 없으면 빈 목록이다 — 전역 수집으로 대신하지 않는다. 테넌트 하나의 실패(자격 획득 포함)는
+    그 테넌트의 결과로 남고 뒤의 테넌트는 계속 돈다. 목록·설정·상태는 테넌트 회차마다 새로 읽는다."""
+    from db.session import get_session_factory
+
+    session_factory = get_session_factory()
+    results: list[dict] = []
+    for tenant_id in _active_tenant_ids(session_factory):
+        try:
+            results.extend(_collect_store_tenant(tenant_id, session_factory))
+        except Exception as exc:  # 테넌트 격리 — 설정 읽기 실패 등도 다음 테넌트를 막지 않는다
+            _log.exception("테넌트 %s 수집 실패 — 다음 테넌트로 계속(%s)", tenant_id, _failure_reason(exc))
+            results.append({"tenant_id": tenant_id, "status": "FAILED", "error": _failure_reason(exc)})
+    return results
+
+
+def _collect_store_tenant(tenant_id: str, session_factory) -> list[dict]:
+    """테넌트 한 회차. 상태 · 설정은 회차 시작과, 새 리전을 시작하기 전마다 다시 읽는다 — 정지되면 아직 시작하지
+    않은 리전은 수집하지 않고(ADR-0012 §회수 ①), 리전 · VPC 범위 · 역할이 바뀌었으면 바뀐 값으로 이어 간다.
+    이미 끝난 리전의 관측은 그대로 둔다."""
+    current = _read_tenant_round(tenant_id, session_factory)
+    if current is None:
+        _log.info("테넌트 %s 는 회차 시작 시점에 ACTIVE 가 아니다 — 건너뜀", tenant_id)
+        return [{"tenant_id": tenant_id, "status": "SKIPPED", "error": "TENANT_NOT_ACTIVE"}]
+    planned = current.regions
+    results: list[dict] = []
+    cfg: dict | None = None
+    for index, region in enumerate(planned):
+        if index:
+            try:
+                fresh = _read_tenant_round(tenant_id, session_factory)
+            except Exception as exc:
+                _log.exception(
+                    "테넌트 %s 설정 재조회 실패 — 남은 리전 수집 중단(%s)",
+                    tenant_id, _failure_reason(exc),
+                )
+                results.append({"tenant_id": tenant_id, "status": "FAILED", "error": _failure_reason(exc)})
+                break
+            if fresh is None:
+                _log.info("테넌트 %s 가 ACTIVE 를 벗어났다 — 남은 리전 수집 중단", tenant_id)
+                results += [
+                    {"tenant_id": tenant_id, "region": r, "status": "SKIPPED", "error": "TENANT_NOT_ACTIVE"}
+                    for r in planned[index:]
+                ]
+                break
+            if fresh != current:
+                current, cfg = fresh, None
+        if region not in current.regions:
+            results.append(
+                {"tenant_id": tenant_id, "region": region, "status": "SKIPPED", "error": "REGION_REMOVED"}
+            )
+            continue
+        if cfg is None:
+            cfg = _tenant_base_config(current)
+        with tenant_scope(current.access):
+            results.append(
+                {"tenant_id": tenant_id, **_collect_store_region(region, cfg, session_factory, tenant_id)}
+            )
+    return results
+
+
+def _collect_store_region(
+    region: str, cfg: dict, session_factory, tenant_id: str | None = None
+) -> dict:
     """한 리전을 독립 트랜잭션으로 수집·적재. core describe 가 일시 오류로 실패하면 1회
-    재시도하고, 그래도 실패하면 그 리전만 FAILED 로 기록한 뒤 예외를 삼켜 다음 리전이 계속되게 한다."""
+    재시도하고, 그래도 실패하면 그 리전만 FAILED 로 기록한 뒤 예외를 삼켜 다음 리전이 계속되게 한다.
+
+    ``tenant_id`` 가 있으면 호출부가 tenant_scope 를 세워 둔 테넌트 회차다 — 재사용 메트릭·적재·소멸 표시가
+    그 소유 안에서만 일어난다."""
     from db.repositories import assets as assets_repo
 
     db = session_factory()
@@ -1187,8 +1355,9 @@ def _collect_store_region(region: str, cfg: dict, session_factory) -> dict:
         # 입자 안에서 이미 받아 둔 요약이 있으면 그것으로 대신한다.
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=cfg["period_seconds"])
         fresh_window_end, fresh_metrics = assets_repo.fresh_ec2_metric_summaries(
-            db, region=region, not_older_than=cutoff
+            db, region=region, not_older_than=cutoff, tenant_id=tenant_id
         )
+        db.rollback()  # 읽기 트랜잭션을 AWS 호출 동안 열어 두지 않는다
         try:
             inv = collect_region(region, cfg, fresh_metrics, fresh_window_end)
         except (ClientError, BotoCoreError) as exc:
@@ -1196,20 +1365,22 @@ def _collect_store_region(region: str, cfg: dict, session_factory) -> dict:
                 raise  # 비재시도성(AccessDenied·InternalFailure 등)은 즉시 실패로
             _log.warning("리전 %s 수집 일시 실패 — 1회 재시도(%s)", region, _failure_reason(exc))
             inv = collect_region(region, cfg, fresh_metrics, fresh_window_end)
-        summary = persist_inventory(inv, db, prune_absent=True)
+        summary = persist_inventory(inv, db, prune_absent=True, tenant_id=tenant_id)
         db.commit()
         return summary
     except Exception as exc:  # 리전 격리 — 이 리전만 실패로 마감하고 다른 리전은 계속
         db.rollback()
         # 코드 버그(KeyError 등)도 여기서 삼키므로 스택트레이스를 남긴다(_log.exception).
         _log.exception("리전 %s 수집 최종 실패 — FAILED 로 기록하고 계속(%s)", region, _failure_reason(exc))
-        _record_failed_region(region, cfg, exc, session_factory)
+        _record_failed_region(region, cfg, exc, session_factory, tenant_id)
         return {"region": region, "status": "FAILED", "error": _failure_reason(exc)}
     finally:
         db.close()
 
 
-def _record_failed_region(region: str, cfg: dict, exc: BaseException, session_factory) -> None:
+def _record_failed_region(
+    region: str, cfg: dict, exc: BaseException, session_factory, tenant_id: str | None = None
+) -> None:
     """실패한 리전을 FAILED CollectionRun 으로 남긴다(다른 리전과 격리된 별도 트랜잭션).
     기록 자체가 실패해도 파이프라인을 막지 않는다."""
     from db.repositories import assets as assets_repo
@@ -1221,11 +1392,13 @@ def _record_failed_region(region: str, cfg: dict, exc: BaseException, session_fa
         # (계정은 CollectionRun.region 과 함께 이미 성공 리전 run 에서 확인 가능).
         run = assets_repo.start_collection_run(
             db,
-            account_id="unknown",
+            # 테넌트 회차는 STS 없이도 계정을 안다(등록 계정). legacy 는 모른다.
+            account_id=cfg.get("expected_account_id") or "unknown",
             region=region,
             mode=deployment_mode(),
             lookback_days=cfg["lookback_days"],
             period_seconds=cfg["period_seconds"],
+            tenant_id=tenant_id,
         )
         assets_repo.finish_collection_run(
             db,
