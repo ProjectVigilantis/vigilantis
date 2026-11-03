@@ -1307,7 +1307,15 @@ def _collect_store_tenant(tenant_id: str, session_factory) -> list[dict]:
     cfg: dict | None = None
     for index, region in enumerate(planned):
         if index:
-            fresh = _read_tenant_round(tenant_id, session_factory)
+            try:
+                fresh = _read_tenant_round(tenant_id, session_factory)
+            except Exception as exc:
+                _log.exception(
+                    "테넌트 %s 설정 재조회 실패 — 남은 리전 수집 중단(%s)",
+                    tenant_id, _failure_reason(exc),
+                )
+                results.append({"tenant_id": tenant_id, "status": "FAILED", "error": _failure_reason(exc)})
+                break
             if fresh is None:
                 _log.info("테넌트 %s 가 ACTIVE 를 벗어났다 — 남은 리전 수집 중단", tenant_id)
                 results += [

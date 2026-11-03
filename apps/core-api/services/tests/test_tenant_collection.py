@@ -416,6 +416,37 @@ def test_settings_read_failure_of_one_tenant_does_not_stop_the_next(db, world, m
     assert set(_assets(db, b)) == {_arn(ACCT_B, "i-b")}
 
 
+def test_settings_reread_failure_keeps_completed_region_summaries(db, world, monkeypatch):
+    a = _tenant(db, world, ACCT_A, regions=(SEOUL, TOKYO))
+    b = _tenant(db, world, ACCT_B, offset=1)
+    world.by_tenant[a].instances = [_instance("i-a")]
+    world.by_tenant[b].instances = [_instance("i-b")]
+    original = C._read_tenant_round
+    reads = []
+
+    def fail_on_reread(tenant_id, session_factory):
+        reads.append(tenant_id)
+        if tenant_id == a and reads.count(a) == 2:
+            raise RuntimeError("settings reread failed")
+        return original(tenant_id, session_factory)
+
+    monkeypatch.setattr(C, "_read_tenant_round", fail_on_reread)
+
+    results = C.collect_and_store_tenants()
+
+    assert [(r["tenant_id"], r.get("region"), r.get("error")) for r in results] == [
+        (a, SEOUL, None), (a, None, "RuntimeError"), (b, SEOUL, None),
+    ]
+    assert results[1] == {"tenant_id": a, "status": "FAILED", "error": "RuntimeError"}
+    assert reads == [a, a, b]
+    assert [run.region for run in _runs(db, a)] == [SEOUL]
+    assert set(_assets(db, a)) == {_arn(ACCT_A, "i-a")}
+    assert set(_assets(db, b)) == {_arn(ACCT_B, "i-b")}
+    assert {(tenant_id, region) for tenant_id, _service, region in world.calls} == {
+        (a, SEOUL), (b, SEOUL),
+    }
+
+
 def test_acquisition_failure_leaves_owned_failed_run_for_every_region(db, world):
     a = _tenant(db, world, ACCT_A, regions=(SEOUL, TOKYO))
     world.denied[a] = _denied()
