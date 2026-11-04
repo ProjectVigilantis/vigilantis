@@ -30,7 +30,8 @@ export default async function InquiriesPage({ searchParams }: PageProps<'/inquir
       {result.value !== null ? (
         <div className="flex flex-col gap-4">
           {id !== null && !result.value.items.some((item) => item.inquiry_id === id) ? <FocusMissing /> : null}
-          <InquiriesView items={result.value.items} focusId={id} />
+          {/* 알림마다 새로 그린다(key): 같은 화면에서 다른 알림을 누르면 주소만 바뀌고 펼침 · 필터 상태가 남는다(PR #578 리뷰). */}
+          <InquiriesView key={id ?? ''} items={result.value.items} focusId={id} />
           <SupportPager
             path={INQUIRIES_PATH}
             page={page}

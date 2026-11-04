@@ -21,12 +21,22 @@ const SERVER_DEFAULT: RangeHours = 72;
 
 type Load = { kind: 'loading' } | { kind: 'ready'; axis: AssetInventoryAxis } | { kind: 'failed' };
 
+/** 페이지가 그린 3일 축만 담은 기억. 다른 기간은 비워 두어 고르면 새로 부른다. */
+function seeded(initial: AssetInventoryAxis | null): Partial<Record<RangeHours, Load>> {
+  return { [SERVER_DEFAULT]: initial === null ? { kind: 'failed' } : { kind: 'ready', axis: initial } };
+}
+
 export function InventoryTrendSection({ initial, costs = null }: { initial: AssetInventoryAxis | null; costs?: InventoryCosts | null }) {
   const [hours, setHours] = useState<RangeHours>(SERVER_DEFAULT);
   // 기간마다 받은 축을 기억한다. 돌아갈 때 다시 부르지 않는다.
-  const [loads, setLoads] = useState<Partial<Record<RangeHours, Load>>>({
-    [SERVER_DEFAULT]: initial === null ? { kind: 'failed' } : { kind: 'ready', axis: initial },
-  });
+  const [loads, setLoads] = useState(() => seeded(initial));
+  // 새로고침(실시간 이벤트의 router.refresh 포함)으로 페이지가 새 축을 주면 기억을 통째로 갈아 끼운다. 3일은 새 값으로,
+  // 다른 기간은 비워서 지금 보고 있는 기간이면 바로 다시 부른다. 처음 조회가 실패했어도 다음 응답으로 회복한다(PR #578 리뷰).
+  const [source, setSource] = useState(initial);
+  if (source !== initial) {
+    setSource(initial);
+    setLoads(seeded(initial));
+  }
   const load: Load = loads[hours] ?? { kind: 'loading' };
 
   useEffect(() => {

@@ -52,12 +52,14 @@ import { MetricStrip, MetricTile } from '@/components/metric-strip';
 import { Panel } from '@/components/panel';
 import { Muted } from '@/components/panel-parts';
 import { isJudgedAsset } from '@/lib/asset-filter';
+import { ScopeWideNote } from '@/components/monitoring/scope-wide-note';
 import { StatusBadge } from '@/components/status-badge';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { inventoryCounts, IDLE_CPU_AVG } from '@/lib/dashboard';
 import { ASSET_TYPE_LABELS } from '@/lib/enum-labels';
 import type { IncidentPreset } from '@/lib/incident-filter';
+import type { ScopeWideCollection } from '@/lib/monitoring-scope';
 import type { SavingsSummary } from '@/lib/savings';
 import { formatKst } from '@/lib/utils';
 import type {
@@ -112,6 +114,7 @@ function useStickyHeight() {
 
 export function AssetsView({
   data,
+  scopeWide = null,
   incidents,
   incidentsError,
   incidentsByArn,
@@ -126,6 +129,8 @@ export function AssetsView({
   embedded = false,
 }: {
   data: AssetsResponse;
+  /** 고객사 상세에서 거르기 전 범위 전체의 수집 메타(lib/monitoring-scope.ts). 거르지 않은 화면은 null이다. */
+  scopeWide?: ScopeWideCollection | null;
   /** 인시던트 목록 전량 — `인시던트` 탭이 FINOPS만 골라 쓴다. `null`은 조회 실패. */
   incidents: IncidentListItem[] | null;
   /** 조회 실패의 오류 원본 — 인시던트 탭이 CMN-002 인라인으로 그린다. 성공이면 null. */
@@ -343,6 +348,7 @@ export function AssetsView({
           selected={assetType === ALL}
         />
         {inventory.map(({ type, count, judged, uncollectedReason }) => (
+          // 고객사 상세: 범위 전체에서 수집하지 못한 유형은 이 고객사 몫인지 모른다. 받은 자산 수는 보이되 정상이라 적지 않는다.
           <MetricTile
             key={type}
             label={ASSET_TYPE_LABELS[type]?.label ?? type}
@@ -351,7 +357,9 @@ export function AssetsView({
             note={
               uncollectedReason !== null
                 ? `수집 실패 · ${uncollectedReason}`
-                : count === 0
+                : scopeWide?.uncollected.some((u) => u.asset_type === type)
+                  ? '수집 여부 확인 불가'
+                  : count === 0
                   ? '수집된 자산 없음'
                   : judged === 0
                     ? '토폴로지 전용'
@@ -390,6 +398,7 @@ export function AssetsView({
       <div className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs">
         <StatusBadge field="collection_status" value={data.collection_status} />
         <span>갱신 {formatKst(data.last_collected_at)}</span>
+        {scopeWide !== null ? <ScopeWideNote value={scopeWide} /> : null}
         {/* 셈은 **탭마다 분모가 다르다.** 목록은 판정 대상만 담고(13건), 토폴로지는 전량을 그린다
             (16건). 목록 기준을 그대로 두면 지표 띠에서 `NACL`을 누르고 토폴로지로 넘어간 화면이
             노드 2개를 밝혀 놓고 `0 / 13건`이라고 적는다 — 보이는 것과 적힌 것이 어긋난다. */}

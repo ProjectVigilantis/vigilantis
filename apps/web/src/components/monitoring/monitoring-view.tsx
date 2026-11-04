@@ -18,6 +18,7 @@ import { AssetsView } from '@/components/assets/assets-view';
 import { SecurityView } from '@/components/security/security-view';
 import type { MonitoringAxis } from '@/lib/home-path';
 import type { IncidentPreset } from '@/lib/incident-filter';
+import type { ScopeWideCollection } from '@/lib/monitoring-scope';
 import type { SavingsSummary } from '@/lib/savings';
 import { cn } from '@/lib/utils';
 import type {
@@ -82,6 +83,7 @@ export function MonitoringView({
   initialAxis,
   tenants,
   data,
+  scopeWide = null,
   incidents,
   incidentsError,
   incidentsByArn,
@@ -99,6 +101,8 @@ export function MonitoringView({
   /** 고객사 선택 목록. 실패면 null, 고객사 계정처럼 고를 일이 없으면 undefined(선택 상자를 그리지 않는다). */
   tenants: TenantListItem[] | null | undefined;
   data: AssetsResponse;
+  /** 고객사 상세에서 거르기 전 범위 전체의 수집 메타. 거르지 않은 화면은 null이다. */
+  scopeWide?: ScopeWideCollection | null;
   incidents: IncidentListItem[] | null;
   incidentsError: unknown;
   incidentsByArn: Record<string, IncidentListItem[]> | null;
@@ -138,7 +142,7 @@ export function MonitoringView({
     </div>
   );
 
-  const common = { data, incidents, incidentsError, incidentsByArn, metrics, renderedAt, heading, embedded };
+  const common = { data, scopeWide, incidents, incidentsError, incidentsByArn, metrics, renderedAt, heading, embedded };
 
   return axis === 'assets' ? (
     <AssetsView key="assets" {...common} {...linked('assets')} savings={savings} savingsFailed={savingsFailed} />

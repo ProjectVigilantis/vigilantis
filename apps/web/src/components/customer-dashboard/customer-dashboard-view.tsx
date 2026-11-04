@@ -23,6 +23,7 @@ import { ThreatEventsCard } from '@/components/customer-dashboard/threat-events-
 import { StatGrid, StatTile } from '@/components/stat-tile';
 import {
   assetTypeRows,
+  awaitingLinks,
   postureOf,
   savingsTotal,
   timeAgo,
@@ -98,10 +99,14 @@ export function CustomerDashboardView({
   const risk = { HIGH: 0, MEDIUM: 0, LOW: 0 };
   for (const i of secops ?? []) if (i.initial_risk_level !== null) risk[i.initial_risk_level] += 1;
   const savings = rows === null ? null : savingsTotal(rows);
-  // AI 추천 조치는 관제의 인시던트 승인 대기 목록으로 간다. 보안 건이 있으면 보안 축, 없으면 자산 축이다.
-  const aiHref = awaiting?.some((i) => i.category === 'SECOPS')
-    ? '/monitoring?axis=security&tab=incidents&preset=pending'
-    : '/monitoring?tab=incidents&preset=pending';
+  // AI 추천 조치는 축마다 그 건이 모두 보이는 관제 목록으로 간다(lib/customer-dashboard.ts `awaitingLinks`). 두 축에 다 있으면
+  // 카드 전체를 한 곳에 걸 수 없어 설명줄의 축별 건수를 각각 링크로 둔다.
+  const aiLinks = queue === null ? [] : awaitingLinks(queue);
+  const AI_EMPTY_HREF = '/monitoring?tab=incidents&preset=pending';
+  const aiHref = aiLinks.length === 0 ? AI_EMPTY_HREF : aiLinks.length === 1 ? aiLinks[0].href : undefined;
+  // 상태 알림의 [보기]: 승인 대기가 있으면 그 목록(보안 먼저), 없으면 진행 중 목록이다.
+  const bannerHref =
+    aiLinks[0]?.href ?? (secops !== null && secops.length > 0 ? '/monitoring?axis=security&tab=incidents' : '/monitoring?tab=incidents');
   // 위협 이벤트 대상 ARN을 이름으로 읽는다. 이름 없는 자산은 리소스 ID로.
   const assetNames = Object.fromEntries(assets.items.map((a) => [a.arn, a.name ?? a.resource_id]));
 
@@ -133,7 +138,7 @@ export function CustomerDashboardView({
               </TipBox>
             </span>
             {queue !== null && queue.length > 0 ? (
-              <Link href={aiHref} className="text-primary inline-flex shrink-0 items-center gap-0.5 font-semibold hover:underline">
+              <Link href={bannerHref} className="text-primary inline-flex shrink-0 items-center gap-0.5 font-semibold hover:underline">
                 보기
                 <ArrowRight aria-hidden className="size-3.5" />
               </Link>
@@ -175,9 +180,23 @@ export function CustomerDashboardView({
           value={awaiting === null ? NO_VALUE : awaiting.length}
           tone={awaiting?.some((i) => i.category === 'SECOPS') ? 'critical' : undefined}
           note={
-            awaiting === null
-              ? '인시던트를 불러오지 못했습니다'
-              : `보안 ${awaiting.filter((i) => i.category === 'SECOPS').length}건 · 자산 ${awaiting.filter((i) => i.category === 'FINOPS').length}건`
+            awaiting === null ? (
+              '인시던트를 불러오지 못했습니다'
+            ) : aiHref === undefined ? (
+              // 카드가 링크가 아닐 때만 안쪽 링크를 둔다(링크 안의 링크는 HTML이 허용하지 않는다).
+              <>
+                {aiLinks.map((l, n) => (
+                  <span key={l.axis}>
+                    {n > 0 ? ' · ' : null}
+                    <Link href={l.href} className="text-primary font-semibold hover:underline">
+                      {l.axis === 'security' ? '보안' : '자산'} {l.count}건
+                    </Link>
+                  </span>
+                ))}
+              </>
+            ) : (
+              `보안 ${awaiting.filter((i) => i.category === 'SECOPS').length}건 · 자산 ${awaiting.filter((i) => i.category === 'FINOPS').length}건`
+            )
           }
         />
       </StatGrid>

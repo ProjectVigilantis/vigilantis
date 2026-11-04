@@ -52,11 +52,13 @@ import {
   SecurityIncidentStatusList,
   ThreatSourcePanel,
 } from '@/components/security/security-summary-panels';
+import { ScopeWideNote } from '@/components/monitoring/scope-wide-note';
 import { StatusBadge } from '@/components/status-badge';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { isJudgedAsset } from '@/lib/asset-filter';
 import type { IncidentPreset } from '@/lib/incident-filter';
+import type { ScopeWideCollection } from '@/lib/monitoring-scope';
 import {
   focusAssets,
   focusScope,
@@ -87,6 +89,7 @@ const FOCUS_LABEL: Record<Focus, { label: string; note: string; tone?: MetricTon
 
 export function SecurityView({
   data,
+  scopeWide = null,
   incidents,
   incidentsError,
   incidentsByArn,
@@ -99,6 +102,8 @@ export function SecurityView({
   embedded = false,
 }: {
   data: AssetsResponse;
+  /** 고객사 상세에서 거르기 전 범위 전체의 수집 메타(lib/monitoring-scope.ts). 거르지 않은 화면은 null이다. */
+  scopeWide?: ScopeWideCollection | null;
   /** 인시던트 목록 전량. `null`은 조회 실패 — 0건과 구분해 패널마다 그 사실을 적는다. */
   incidents: IncidentListItem[] | null;
   /** 조회 실패의 오류 원본 — 인시던트 탭이 CMN-002 인라인으로 그린다. 성공이면 null. */
@@ -274,6 +279,7 @@ export function SecurityView({
       <div className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs">
         <StatusBadge field="collection_status" value={data.collection_status} />
         <span>갱신 {formatKst(data.last_collected_at)}</span>
+        {scopeWide !== null ? <ScopeWideNote value={scopeWide} /> : null}
         {tab === 'list' ? (
           <>
             <span aria-live="polite">

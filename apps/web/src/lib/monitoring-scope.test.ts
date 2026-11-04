@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { TENANT_AGGREGATE_UNSUPPORTED, scopeAssets, scopeIncidents, scopeMetrics } from './monitoring-scope.ts';
+import { TENANT_AGGREGATE_UNSUPPORTED, scopeAssets, scopeIncidents, scopeMetrics, scopeWideCollection } from './monitoring-scope.ts';
 import type { AssetsResponse, IncidentListItem, MetricsTimeseriesResponse } from '../types/api.ts';
 
 const A = '111122223333';
@@ -19,6 +19,24 @@ test('자산은 account_id가 고객사 계정인 것만 남긴다', () => {
     scopeAssets(data, A).items.map((a) => a.arn),
     [arn(A, 'i-1')],
   );
+});
+
+// PR #578 리뷰: B의 EBS 수집 실패가 A 화면에 "수집 실패 · AccessDenied"로 붙고, A의 EBS 1개가 가려졌다.
+test('수집 못 한 유형은 고객사 화면에서 빼고, 범위 전체 값은 따로 넘긴다', () => {
+  const data = {
+    collection_status: 'PARTIAL',
+    last_collected_at: '2026-11-03T00:00:00Z',
+    uncollected: [{ asset_type: 'EBS', reason_code: 'AccessDenied' }],
+    items: [{ account_id: A, arn: arn(A, 'vol-1'), asset_type: 'EBS' }],
+  } as unknown as AssetsResponse;
+  const scoped = scopeAssets(data, A);
+  assert.deepEqual(scoped.uncollected, []);
+  assert.equal(scoped.items.length, 1);
+  assert.deepEqual(scopeWideCollection(data), {
+    status: 'PARTIAL',
+    lastCollectedAt: '2026-11-03T00:00:00Z',
+    uncollected: [{ asset_type: 'EBS', reason_code: 'AccessDenied' }],
+  });
 });
 
 test('인시던트는 대상 ARN의 계정 칸으로 고른다', () => {

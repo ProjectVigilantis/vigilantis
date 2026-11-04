@@ -30,7 +30,8 @@ export default async function SignupRequestsPage({ searchParams }: PageProps<'/s
       {result.value !== null ? (
         <div className="flex flex-col gap-4">
           {id !== null && !result.value.items.some((item) => item.request_id === id) ? <FocusMissing /> : null}
-          <SignupRequestsView items={result.value.items} focusId={id} />
+          {/* 알림마다 새로 그린다(key): 같은 화면에서 다른 알림을 누르면 주소만 바뀌고 펼침 · 필터 상태가 남는다(PR #578 리뷰). */}
+          <SignupRequestsView key={id ?? ''} items={result.value.items} focusId={id} />
           <SupportPager
             path={SIGNUP_REQUESTS_PATH}
             page={page}

@@ -35,7 +35,8 @@ export function StatTile({
 }: {
   label: string;
   value: React.ReactNode;
-  note?: string;
+  /** 한 줄 설명. 카드가 링크(`href`)가 아닐 때만 안에 링크를 둘 수 있다. */
+  note?: React.ReactNode;
   tone?: StatTone;
   /** 있으면 카드 전체가 그 숫자의 상세 화면으로 가는 링크다. 마우스를 올리면 상자가 아니라 제목이 강조된다(2026-11-02). */
   href?: string;

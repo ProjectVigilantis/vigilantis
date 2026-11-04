@@ -9,7 +9,7 @@ import type { ComponentProps } from 'react';
 import type { MonitoringView } from '@/components/monitoring/monitoring-view';
 import { orError, orNull, serverApi } from '@/lib/api/server';
 import { WASTE_VERDICTS } from '@/lib/dashboard';
-import { scopeAssets, scopeIncidents, scopeMetrics } from '@/lib/monitoring-scope';
+import { scopeAssets, scopeIncidents, scopeMetrics, scopeWideCollection } from '@/lib/monitoring-scope';
 import { savingsSummary } from '@/lib/savings';
 import type { AssetItem, IncidentListItem, IncidentResponse } from '@/types/api';
 
@@ -17,7 +17,16 @@ type ReadApi = Awaited<ReturnType<typeof serverApi>>;
 /** 조회로 채우는 몫. 축 · 딥링크 · 끼워 넣기 여부는 부르는 쪽이 정한다. */
 export type MonitoringData = Pick<
   ComponentProps<typeof MonitoringView>,
-  'tenants' | 'data' | 'incidents' | 'incidentsError' | 'incidentsByArn' | 'metrics' | 'savings' | 'savingsFailed' | 'renderedAt'
+  | 'tenants'
+  | 'data'
+  | 'scopeWide'
+  | 'incidents'
+  | 'incidentsError'
+  | 'incidentsByArn'
+  | 'metrics'
+  | 'savings'
+  | 'savingsFailed'
+  | 'renderedAt'
 >;
 
 /**
@@ -107,6 +116,8 @@ export async function loadMonitoring(
   return {
     tenants: tenants === undefined ? undefined : tenants === null ? null : tenants.tenants,
     data: assets,
+    // 고객사로 거른 화면이면 서버가 범위 전체로 합친 수집 메타를 따로 들고 간다(lib/monitoring-scope.ts).
+    scopeWide: accountId === undefined ? null : scopeWideCollection(allAssets),
     incidents,
     incidentsError: listed.error,
     incidentsByArn,

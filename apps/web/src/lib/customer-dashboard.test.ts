@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import type { AssetItem, IncidentListItem, ThreatEventAxis } from '../types/api.ts';
+import { byPreset, parsePreset } from './incident-filter.ts';
 import {
   assetTypeRows,
+  awaitingLinks,
   coverageCounts,
   doneNote,
   postureOf,
@@ -165,3 +167,41 @@ test('자산 현황: 유형 순서대로, 없는 유형은 빼고 수집 실패 
   assert.deepEqual([rows[2].count, rows[2].uncollectedReason, rows[2].lastCollectedAt], [0, 'AccessDenied', null]);
 });
 
+
+// PR #578 리뷰: 카드가 센 승인 대기는 이동한 목록에 전부 있어야 한다. 이동한 주소를 관제 화면과 같은 규칙(축 → 프리셋)으로 다시 걸러 본다.
+function destination(href: string, queue: IncidentListItem[]): IncidentListItem[] {
+  const params = new URL(href, 'http://x').searchParams;
+  const category = params.get('axis') === 'security' ? 'SECOPS' : 'FINOPS';
+  return byPreset(queue.filter((i) => i.category === category), parsePreset(params.get('preset') ?? undefined));
+}
+
+test('AI 추천 조치: 축마다 목록 하나, 센 건은 그 목록에 전부 있다', () => {
+  const sec = incident({ incident_id: 's' });
+  const fin = incident({ incident_id: 'f', category: 'FINOPS', initial_risk_level: null });
+  const pre = incident({ incident_id: 'p', response_mode: 'PRE_MITIGATION_0_5S' });
+  const analyzing = incident({ incident_id: 'a', status: 'ANALYZING' });
+  const cases: [string, IncidentListItem[], Record<string, string>][] = [
+    // 보안 1 + 자산 1: 예전에는 카드 2건이 보안 목록 1건으로 줄었다.
+    ['보안 + 자산', [sec, fin, analyzing], { security: 'pending', assets: 'pending' }],
+    // 선제차단 뒤 추가 승인만: 예전에는 카드 1건인데 승인 대기 목록은 0건이었다.
+    ['선제차단 뒤 승인만', [pre], { security: 'preemptive' }],
+    ['보통 승인 + 선제차단 뒤 승인', [sec, pre, analyzing], { security: '' }],
+    ['없음', [analyzing], {}],
+  ];
+  for (const [name, queue, expected] of cases) {
+    const links = awaitingLinks(queue);
+    assert.deepEqual(
+      Object.fromEntries(links.map((l) => [l.axis, new URL(l.href, 'http://x').searchParams.get('preset') ?? ''])),
+      expected,
+      name,
+    );
+    for (const link of links) {
+      const counted = queue.filter(
+        (i) => i.status === 'AWAITING_APPROVAL' && i.category === (link.axis === 'security' ? 'SECOPS' : 'FINOPS'),
+      );
+      assert.equal(link.count, counted.length, name);
+      const shown = new Set(destination(link.href, queue).map((i) => i.incident_id));
+      for (const i of counted) assert.ok(shown.has(i.incident_id), `${name}: ${i.incident_id}`);
+    }
+  }
+});
