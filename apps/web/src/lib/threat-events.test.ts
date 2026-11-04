@@ -30,6 +30,14 @@ test('세부: 실패 횟수와 분, 프로토콜과 포트', () => {
   assert.equal(threatDetail({ ...open, payload: { ...open.payload, from_port: null, to_port: null } }), 'TCP 전체 포트');
 });
 
+test('세부: 분으로 나누어떨어지지 않는 구간은 초로, 한쪽 끝만 있는 포트는 단일 포트로 적는다', () => {
+  assert.equal(threatDetail({ ...ssh, payload: { ...ssh.payload, window_seconds: 30 } }), '30초 동안 로그인 실패 42회');
+  assert.equal(threatDetail({ ...ssh, payload: { ...ssh.payload, window_seconds: 90 } }), '90초 동안 로그인 실패 42회');
+  assert.equal(threatDetail({ ...ssh, payload: { ...ssh.payload, window_seconds: 60 } }), '1분 동안 로그인 실패 42회');
+  assert.equal(threatDetail({ ...open, payload: { ...open.payload, from_port: 22, to_port: null } }), 'TCP 22');
+  assert.equal(threatDetail({ ...open, payload: { ...open.payload, from_port: null, to_port: 443 } }), 'TCP 443');
+});
+
 test('타임라인 위치는 기간 비율이고 기간 밖은 양 끝에 붙는다', () => {
   const s = '2026-11-02T04:00:00Z';
   const e = '2026-11-03T04:00:00Z';

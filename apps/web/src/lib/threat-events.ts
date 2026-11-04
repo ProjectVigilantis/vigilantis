@@ -68,14 +68,21 @@ export function threatSource(item: ThreatEventItem): { label: string; value: str
     : { label: '허용 대역', value: item.payload.source_cidr };
 }
 
+/** 집계 구간. 분으로 나누어떨어지면 분, 아니면 초로 적는다(30초를 "1분"으로 올리지 않는다). */
+function windowLabel(seconds: number): string {
+  return seconds >= 60 && seconds % 60 === 0 ? `${seconds / 60}분` : `${seconds}초`;
+}
+
 /** 유형별 한 줄 세부. 실패 횟수 · 열린 포트. */
 export function threatDetail(item: ThreatEventItem): string {
   if (item.event_type === 'SSH_BRUTE_FORCE') {
-    const minutes = Math.max(1, Math.round(item.payload.window_seconds / 60));
-    return `${minutes}분 동안 로그인 실패 ${item.payload.failed_attempt_count}회`;
+    return `${windowLabel(item.payload.window_seconds)} 동안 로그인 실패 ${item.payload.failed_attempt_count}회`;
   }
+  // 계약은 두 끝을 따로 null로 허용한다. 한쪽만 있으면 있는 값을 단일 포트로 적는다("22-null"로 적지 않는다).
   const { protocol, from_port, to_port } = item.payload;
-  const port = from_port === null ? '전체 포트' : from_port === to_port ? `${from_port}` : `${from_port}-${to_port}`;
+  const lo = from_port ?? to_port;
+  const hi = to_port ?? from_port;
+  const port = lo === null || hi === null ? '전체 포트' : lo === hi ? `${lo}` : `${lo}-${hi}`;
   return `${protocol.toUpperCase()} ${port}`;
 }
 

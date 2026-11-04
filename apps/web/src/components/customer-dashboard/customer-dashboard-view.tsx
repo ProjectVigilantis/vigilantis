@@ -33,9 +33,10 @@ import {
   COST_BUCKET_LABELS,
   COST_COLOR,
   costOfType,
+  costFailureNote,
   costPeriodLabel,
-  costSlices,
-  costTotal,
+  pastCostTypes,
+  readyCostView,
   type CostLoad,
 } from '@/lib/asset-costs';
 import { SLICE_COLOR, sliceLabel } from '@/lib/asset-slices';
@@ -235,13 +236,12 @@ function AssetStatusCard({
   const pct = (n: number) => (assets.items.length === 0 ? 0 : Math.round((n / assets.items.length) * 100));
 
   // 비용(Cost Explorer 최근 30일)을 읽었으면 막대 · 요약을 금액으로 그리고, 못 읽었으면 개수 비율로 그린 뒤 그 사유를 한 줄 적는다.
+  // 조회 성공이면 합계가 0원이어도 비용 모드다. 0원을 "못 읽음"으로 적지 않는다.
   const ready = costs.kind === 'ready' && costs.data.status === 'READY' ? costs.data : null;
-  const costSlicesNow = ready === null ? [] : costSlices(ready);
-  const readyTotal = ready === null ? null : costTotal(ready);
-  const costView =
-    ready !== null && costSlicesNow.length > 0 && readyTotal !== null
-      ? { data: ready, total: readyTotal, other: costSlicesNow.find((c) => c.bucket === 'OTHER')?.amount ?? 0 }
-      : null;
+  const readyView = ready === null ? null : readyCostView(ready);
+  const costView = ready !== null && readyView !== null ? { data: ready, ...readyView } : null;
+  // 지금 자산은 없지만 구간 안에 비용이 나간 유형. 요약에 0개 줄로 넣어 과거 비용이 빠지지 않게 한다.
+  const pastTypes = costView === null ? [] : pastCostTypes(costView.data, rows.map((r) => r.type));
   const segments =
     costView === null
       ? composition.slices.map((sl) => ({
@@ -251,13 +251,15 @@ function AssetStatusCard({
           aria: `${sliceLabel(sl.key)} ${sl.count}개 · ${pct(sl.count)}%`,
           sub: sl.members.length > 0 ? sl.members.map((m) => `${ASSET_TYPE_LABELS[m.type]?.label ?? m.type} ${m.count}`).join(' · ') : null,
         }))
-      : costSlicesNow.map((c) => ({
-          key: c.bucket,
-          color: COST_COLOR[c.bucket],
-          ratio: c.ratio,
-          aria: `${COST_BUCKET_LABELS[c.bucket]} ${formatUsd(c.amount)} · ${Math.round(c.ratio * 100)}%`,
-          sub: null,
-        }));
+      : costView.slices.length === 0
+        ? [{ key: 'NONE', color: 'var(--border)', ratio: 1, aria: `최근 30일 비용 ${formatUsd(0)}`, sub: null }]
+        : costView.slices.map((c) => ({
+            key: c.bucket,
+            color: COST_COLOR[c.bucket],
+            ratio: c.ratio,
+            aria: `${COST_BUCKET_LABELS[c.bucket]} ${formatUsd(c.amount)} · ${Math.round(c.ratio * 100)}%`,
+            sub: null,
+          }));
   const dotColor = (type: AssetType) =>
     costView === null
       ? SLICE_COLOR[sliceOf(type)]
@@ -274,6 +276,14 @@ function AssetStatusCard({
       cost: costView === null ? null : costOfType(costView.data, r.type),
       detail: r.uncollectedReason === null ? r.detail : `수집 실패 · ${r.uncollectedReason}`,
     })),
+    ...pastTypes.map((t) => ({
+      key: t as string,
+      label: ASSET_TYPE_LABELS[t]?.label ?? t,
+      color: dotColor(t),
+      count: 0,
+      cost: costView === null ? null : costOfType(costView.data, t),
+      detail: '지금은 자산 없음 · 기간 안에 나간 비용',
+    })),
     ...(costView !== null && costView.other > 0
       ? [{ key: 'OTHER', label: COST_BUCKET_LABELS.OTHER, color: COST_COLOR.OTHER, count: null, cost: costView.other, detail: '자산 유형에 묶이지 않는 요금' }]
       : []),
@@ -284,12 +294,8 @@ function AssetStatusCard({
   });
   const costNote =
     costView !== null
-      ? `Cost Explorer 기준 · ${costPeriodLabel(costView.data)} · ${timeAgo(costView.data.retrieved_at, nowMs)} 받음`
-      : costs.kind === 'missing'
-        ? '비용 API가 서버에 아직 없습니다.'
-        : costs.kind === 'failed'
-          ? '비용을 불러오지 못했습니다.'
-          : `비용을 읽지 못했습니다${costs.data.reason_code ? `(${costs.data.reason_code})` : ''}.`;
+      ? `Cost Explorer 기준 · ${costPeriodLabel(costView.data)}${costView.data.estimated ? ' · 확정 전 추정치 포함' : ''} · ${timeAgo(costView.data.retrieved_at, nowMs)} 받음`
+      : costFailureNote(costs);
 
   return (
     <ChartCard
@@ -307,10 +313,14 @@ function AssetStatusCard({
         costs={
           costView === null
             ? null
-            : { total: costView.total, byType: Object.fromEntries(rows.map((r) => [r.type, costOfType(costView.data, r.type) ?? undefined])) }
+            : {
+                total: costView.total,
+                byType: Object.fromEntries([...rows.map((r) => r.type), ...pastTypes].map((t) => [t, costOfType(costView.data, t) ?? undefined])),
+              }
         }
       />
-      {composition.total === 0 || rows.length === 0 ? (
+      {/* 자산이 지금 없어도 기간 안 비용을 읽었으면 비용 구역은 그린다(삭제한 자산의 비용). */}
+      {costView === null && (composition.total === 0 || rows.length === 0) ? (
         <p className="text-muted-foreground border-t pt-3 text-sm">수집된 자산이 없습니다.</p>
       ) : (
         <div className="flex flex-col gap-2.5 border-t pt-3">

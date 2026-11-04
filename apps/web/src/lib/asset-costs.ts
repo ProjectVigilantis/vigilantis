@@ -6,9 +6,11 @@
 //
 // 자산 유형과 Cost Explorer 항목의 대응(서버가 묶는다):
 //   EC2              SERVICE = "Amazon Elastic Compute Cloud - Compute"
-//   EBS              SERVICE = "EC2 - Other" 중 USAGE_TYPE `*EBS:*`(볼륨 · 스냅샷 · IOPS · 처리량)
-//   ALB_TARGET_GROUP SERVICE = "Elastic Load Balancing"(돈은 대상 그룹이 아니라 ALB에 붙는다)
+//   EBS              SERVICE = "EC2 - Other" 중 USAGE_TYPE 이름에 `EBS:`가 든 항목(볼륨 · 스냅샷 · IOPS · 처리량)
+//   ALB_TARGET_GROUP SERVICE = "Amazon Elastic Load Balancing"(돈은 대상 그룹이 아니라 ALB에 붙는다)
 //   OTHER            위에 들지 않는 나머지(데이터 전송 · NAT 게이트웨이 · CloudWatch 등)
+// EBS 분류는 서버 쪽 규칙이다. `GetCostAndUsage`의 차원 필터는 `EBS:` 같은 와일드카드를 받지 않으므로,
+// 서버는 SERVICE · USAGE_TYPE 기준으로 묶어 받은 뒤 USAGE_TYPE 이름을 보고 가른다.
 // 보안 그룹 · NACL · Auto Scaling 그룹 · 시작 템플릿은 AWS 요금이 없다.
 
 import type { AssetType } from '../types/api.ts';
@@ -32,7 +34,15 @@ export interface AssetCostsResponse {
   total: string | null;
   /** 네 칸 전부 싣는다(0원 포함). UNAVAILABLE이면 빈 배열. */
   items: { bucket: CostBucket; amount: string }[];
-  /** 서버가 Cost Explorer에서 받아 둔 시각. 하루 한 번 받고(호출당 과금 · 반영 지연 최대 24시간) 그 사이는 저장분을 준다. */
+  /**
+   * 구간 안에 확정되지 않은 금액(Cost Explorer 결과의 `Estimated`)이 하나라도 있으면 true. 화면은 최종 청구 금액과 구분해 "추정치"로 적는다.
+   * UNAVAILABLE이면 false.
+   */
+  estimated: boolean;
+  /**
+   * 서버가 Cost Explorer에서 받아 둔 시각. 하루 한 번 받고(호출당 과금) 그 사이는 저장분을 준다.
+   * 받은 시각이 최신이어도 AWS 비용 데이터 자체가 24시간보다 늦게 반영될 수 있어, 최근 하루 이틀 금액은 나중에 바뀔 수 있다.
+   */
   retrieved_at: IsoDateTime;
 }
 
@@ -89,6 +99,37 @@ export function costOfType(res: AssetCostsResponse, type: AssetType): number | '
 
 export function costTotal(res: AssetCostsResponse): number | null {
   return res.status === 'READY' ? toNumber(res.total) : null;
+}
+
+/**
+ * 화면이 비용 모드로 그릴지 정하는 값. 조회 성공(READY이고 합계를 읽음)이면 합계가 0원이어도 값을 준다.
+ * 막대에 그릴 조각(`slices`)이 비었는지는 조회 성공 여부와 따로 본다. 못 읽었으면 null.
+ */
+export function readyCostView(res: AssetCostsResponse): { total: number; slices: CostSlice[]; other: number } | null {
+  const total = costTotal(res);
+  if (total === null) return null;
+  const slices = costSlices(res);
+  return { total, slices, other: slices.find((c) => c.bucket === 'OTHER')?.amount ?? 0 };
+}
+
+/** 비용을 못 읽었을 때 화면에 적는 사유. 조회 성공(합계 0원 포함)이면 null이다. */
+export function costFailureNote(costs: CostLoad): string | null {
+  if (costs.kind === 'missing') return '비용 API가 서버에 아직 없습니다.';
+  if (costs.kind === 'failed') return '비용을 불러오지 못했습니다.';
+  if (readyCostView(costs.data) !== null) return null;
+  return `비용을 읽지 못했습니다${costs.data.reason_code ? `(${costs.data.reason_code})` : ''}.`;
+}
+
+/**
+ * 지금 자산 목록에는 없지만 구간 안에 비용이 나간 유형(삭제한 EC2 · EBS · ALB 등). 요약에서 빠지지 않게 따로 줄을 만든다.
+ * 순서는 COST_BUCKETS를 따른다.
+ */
+export function pastCostTypes(res: AssetCostsResponse, presentTypes: readonly AssetType[]): AssetType[] {
+  const typed: AssetType[] = ['EC2', 'EBS', 'ALB_TARGET_GROUP'];
+  return typed.filter((t) => {
+    const amount = costOfType(res, t);
+    return !presentTypes.includes(t) && typeof amount === 'number' && amount > 0;
+  });
 }
 
 /** 조회 구간을 "10/4부터 11/2까지"로 적는다. 끝 날짜는 포함하지 않는 값이라 하루 앞을 적는다. */
