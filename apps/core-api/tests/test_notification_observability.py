@@ -146,7 +146,8 @@ def test_startup_wiring_warns_through_build_notification_runtime(caplog, monkeyp
         (ACCOUNT_A, "SLACK", SECRET_MISSING),
         ("444444444444", None, OWNERSHIP_CONFLICT),
     ]
-    assert runtime.senders == {}
+    # 고객 설정(T-7)이 실행 중 채널을 켤 수 있어 발신기는 파일 라우트와 관계없이 두 채널 모두 둔다
+    assert set(runtime.senders) == {"SLACK", "SNS"}
 
 
 def test_each_undeclared_account_warns_separately(caplog):

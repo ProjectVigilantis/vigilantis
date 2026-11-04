@@ -1153,3 +1153,54 @@ export interface AuditEventsResponse {
   /** 다음 쪽 질의에 그대로 돌려준다(해석하지 않는다). null 이면 마지막 쪽. */
   next_cursor: string | null;
 }
+
+/* ────────────────────────────── settings.py ────────────────────────────── */
+
+/** 키는 대소문자 무시, 값은 양끝 공백 제거·대소문자 무시 후 정확 일치한다. */
+export interface ProtectedTagRule {
+  key: string;
+  values: string[];
+}
+
+/** 현재 이메일의 연결 상태. READY는 구독 확인·라우트 준비 상태다. */
+export type EmailNotificationStatus =
+  | 'UNSET'
+  | 'SETUP_PENDING'
+  | 'SETUP_FAILED'
+  | 'CONFIRMATION_PENDING'
+  | 'READY';
+
+export interface NotificationSettings {
+  slack_configured: boolean;
+  /** null이면 email_status는 UNSET, 주소가 있으면 UNSET 이외의 상태다. */
+  email_address: string | null;
+  email_status: EmailNotificationStatus;
+  /**
+   * 이전 방식으로 설정된 SNS 이메일 경로가 남아 있다. 받는 주소 · 구독 확인 · 발송 결과를 뜻하지 않는다.
+   * 이때도 관리 이메일은 email_address null · UNSET이며, email_address를 null로 보내면 이 경로를 해제한다.
+   */
+  legacy_sns_configured: boolean;
+}
+
+/** 생략은 유지, null은 채널 해제. 하나 이상의 필드를 보낸다. */
+export interface NotificationSettingsUpdateRequest {
+  /** 쓰기 전용. 응답·로그·오류에는 원문을 싣지 않는다. */
+  slack_webhook_url?: string | null;
+  /** SETUP_FAILED에서 같은 주소를 명시하면 연결을 재시도한다. 생략하면 상태를 유지한다. */
+  email_address?: string | null;
+}
+
+/** GET/PATCH /api/v1/tenants/{tenant_id}/settings의 200 응답. */
+export interface TenantSettings {
+  tenant_id: string;
+  protected_tags: ProtectedTagRule[];
+  notifications: NotificationSettings;
+  /** 설정을 수정한 UTC 시각. 비동기 연결 상태 확인 시각과 다르다. */
+  updated_at: IsoDateTime;
+}
+
+/** 생략은 유지. protected_tags 배열은 전체 교체하며 []로 전부 해제한다. */
+export interface TenantSettingsUpdateRequest {
+  protected_tags?: ProtectedTagRule[];
+  notifications?: NotificationSettingsUpdateRequest;
+}

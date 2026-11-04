@@ -119,6 +119,8 @@ def test_requests_cover_every_registered_tenants_route(client):
         (method, route.path)
         for route in iter_route_contexts(client.app.routes)
         if route.path == BASE or route.path.startswith(BASE + "/")
+        # 고객 설정(T-7)은 고객사 계정도 받는 별도 라우터다(test_tenant_settings_api)
+        if route.path != BASE + "/{tenant_id}/settings"
         for method in route.methods or ()
     }
     covered = {(method, BASE + path.replace("{id}", "{tenant_id}")) for method, path, _ in REQUESTS}
@@ -421,6 +423,50 @@ def test_delete_with_a_member_is_409_and_keeps_both(client_pg, db, admin, make_a
     assert resp.status_code == 409 and _code(resp) == "TENANT_STATE_CONFLICT"
     assert _tenant_count(db) == 1
     assert db.get(models.AppUser, member.user_id).tenant_id == tenant.tenant_id
+
+
+_LEGACY = dict(slack_source="LEGACY_ENV", slack_secret_ref="SLACK_ENV",
+               email_source="LEGACY_TOPIC", email_legacy_topic_arn="arn:aws:sns:ap-northeast-2:1:t")
+_MANAGED_SLACK = dict(slack_source="MANAGED", slack_secret_ref="arn:secret", slack_secret_version="v1",
+                      slack_destination_hash="a" * 64)
+_MANAGED_EMAIL = dict(email_source="MANAGED", email_address="a@example.com", email_generation=MISSING,
+                      email_region="ap-northeast-2", email_status="SETUP_PENDING")
+
+
+def _seed_settings(db, tenant_id, **columns) -> None:
+    db.add(models.TenantSettingsRecord(tenant_id=tenant_id, updated_at=NOW, email_attempts=0, **columns))
+    db.commit()
+
+
+def _settings_rows(db) -> int:
+    return db.scalar(select(func.count()).select_from(models.TenantSettingsRecord))
+
+
+@pytest.mark.parametrize("columns", [
+    _LEGACY, dict(protected_tags=[]), dict(slack_source="CLEARED", email_source="CLEARED"), {},
+], ids=["legacy", "tags-only", "cleared", "empty"])
+def test_delete_removes_a_pending_tenant_with_disposable_settings(client_pg, db, admin, columns):
+    tenant = _seed(db)
+    _seed_settings(db, tenant.tenant_id, **columns)
+    assert client_pg.delete(f"{BASE}/{tenant.tenant_id}").status_code == 204
+    assert _tenant_count(db) == 0 and _settings_rows(db) == 0
+
+
+@pytest.mark.parametrize("columns", [_MANAGED_SLACK, _MANAGED_EMAIL], ids=["slack", "email"])
+def test_delete_with_managed_settings_is_409_and_keeps_both(client_pg, db, admin, columns):
+    tenant = _seed(db)
+    _seed_settings(db, tenant.tenant_id, **columns)
+    resp = client_pg.delete(f"{BASE}/{tenant.tenant_id}")
+    assert resp.status_code == 409 and _code(resp) == "TENANT_STATE_CONFLICT"
+    assert _tenant_count(db) == 1 and _settings_rows(db) == 1
+
+
+def test_delete_blocked_by_a_member_keeps_the_disposable_settings(client_pg, db, admin, make_auth_session):
+    tenant = _seed(db)
+    _seed_settings(db, tenant.tenant_id, **_LEGACY)
+    make_auth_session(UserRole.VIEWER, tenant_id=tenant.tenant_id)
+    assert client_pg.delete(f"{BASE}/{tenant.tenant_id}").status_code == 409
+    assert _tenant_count(db) == 1 and _settings_rows(db) == 1
 
 
 # ----- 재발급 · 정지 ---------------------------------------------------------------

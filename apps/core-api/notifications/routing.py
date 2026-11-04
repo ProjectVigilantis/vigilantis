@@ -14,6 +14,8 @@
   개별 누락·충돌은 예외가 아니라 ``blocked_reason`` 코드로 차단(대체 라우트 없음).
 - ``validate_webhook_url(url) -> str`` (검증된 URL 그대로; 아니면 ``RouteConfigError``), ``validate_public_base_url(raw) -> str`` (origin).
 - ``parse_sns_topic_arn(arn) -> (region, account_id)``.
+- ``registry.declarations``: 파일의 검증된 원래 선언. T-7 에서는 이 파일이 DB 고객 설정으로 가져올 원천이고,
+  실행 중 라우트 원천은 ``notifications.settings_source`` 다(같은 차단 규칙).
 
 소유권은 설정의 (tenant_id, aws_account_id) 로만 정해진다. ARN 의 계정은 일관성 검사에만 쓰며 소유권/계정을
 추정하지 않는다. SNS 플랫폼 토픽 계정은 고객 계정과 달라도 된다.
@@ -29,6 +31,8 @@ import uuid
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
+
+from schemas.slack import validate_slack_webhook_url
 
 from .contracts import CHANNELS, Channel, EventSnapshot, Route, RouteDecision
 
@@ -51,7 +55,6 @@ _ACCOUNT_RE = re.compile(r"[0-9]{12}")
 _UUID_BODY = r"(?:[0-9A-Fa-f]{32}|[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12})"
 _TENANT_UUID_RE = re.compile(rf"(?:urn:uuid:)?(?:{_UUID_BODY}|\{{{_UUID_BODY}\}})")
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
-_WEBHOOK_RE = re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9]+/[A-Za-z0-9]+/[A-Za-z0-9]+")
 _SNS_ARN_RE = re.compile(
     r"arn:aws:sns:([a-z]{2}(?:-[a-z]+)+-[0-9]):([0-9]{12}):([A-Za-z0-9_-]{1,256})"
 )  # 이름에 '.' 불가 → ".fifo" 토픽은 자동 제외
@@ -69,9 +72,10 @@ def _fail(message: str) -> RouteConfigError:
 
 def validate_webhook_url(url: object) -> str:
     """엄격한 Slack 웹훅이면 그 URL(엄격 패턴이라 정규형과 동일)을 반환. 아니면 URL 을 담지 않은 RouteConfigError."""
-    if not isinstance(url, str) or _WEBHOOK_RE.fullmatch(url) is None:
-        raise _fail("invalid slack webhook url")
-    return url
+    try:
+        return validate_slack_webhook_url(url)
+    except ValueError:
+        raise _fail("invalid slack webhook url") from None
 
 
 def parse_sns_topic_arn(arn: object) -> tuple[str, str]:
@@ -134,11 +138,19 @@ def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 class RouteRegistry:
-    def __init__(self, routes: tuple[Route, ...], blocked: Mapping[tuple[str, str], str], owned: frozenset[str]):
+    def __init__(
+        self,
+        routes: tuple[Route, ...],
+        blocked: Mapping[tuple[str, str], str],
+        owned: frozenset[str],
+        declarations: tuple[tuple[str, str, str | None, str | None], ...] = (),
+    ):
         self._by_key = {(r.aws_account_id, r.channel): r for r in routes}
         self._blocked = dict(blocked)  # (account, channel) -> reason; "" channel = whole account
         self._owned = owned
         self.routes = tuple(sorted(routes, key=lambda r: (r.aws_account_id, r.channel, r.tenant_id)))
+        # 파일 설정의 검증된 원래 선언(tenant, account, slack_env, sns_arn) — T-7 DB 가져오기가 읽는다
+        self.declarations = declarations
 
     @property
     def blocked(self) -> Mapping[tuple[str, str], str]:
@@ -176,8 +188,8 @@ class RouteRegistry:
         # 선언 도메인 전체: 소유/목적지 충돌·시크릿 누락 등으로 막힌 항목이 선언한 유효 목적지도 포함한다.
         # (유효 라우트만으로 공유를 판정하면, 막힌 항목의 목적지로 건강한 다른 tenant 가 보내게 된다.)
         declared: dict[tuple[str, str], set[str]] = {}
-        for entry in entries:
-            tenant, account, slack_env, arn = cls._entry(entry)
+        declarations = tuple(cls._entry(entry) for entry in entries)
+        for tenant, account, slack_env, arn in declarations:
             owners.setdefault(account, set()).add(tenant)
             if slack_env is not None:
                 slack.setdefault((tenant, account), set()).add(slack_env)
@@ -234,7 +246,7 @@ class RouteRegistry:
                 if (r.channel, r.destination) in shared:
                     blocked[(r.aws_account_id, r.channel)] = DESTINATION_SHARED
             routes = [r for r in routes if (r.channel, r.destination) not in shared]
-        return cls(tuple(routes), blocked, frozenset(owners))
+        return cls(tuple(routes), blocked, frozenset(owners), declarations)
 
     @staticmethod
     def _entry(entry: object) -> tuple[str, str, str | None, str | None]:

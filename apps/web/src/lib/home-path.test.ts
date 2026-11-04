@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import {
   CUSTOMER_HOME,
   PLATFORM_HOME,
+  SETTINGS_PATH,
   USERS_PATH,
   businessOpen,
   confirmedAccount,
@@ -54,9 +55,16 @@ test('메뉴 — 고객 ADMIN만 사용자 관리를 받고, 고객은 업무 �
   assert.deepEqual(navPathsFor(assignedManager), ['/', '/assets', '/security', '/tenants', '/users']);
   // 배정 없는 담당자: 업무 화면 · 사용자 관리 없이 고객 관리(배정 없음 안내)만 — 전역 접근처럼 보이지 않는다.
   assert.deepEqual(navPathsFor(unassignedManager), ['/tenants']);
-  assert.deepEqual(navPathsFor(tenant('ADMIN')), ['/users']);
-  assert.deepEqual(navPathsFor(tenant('OPERATOR')), []);
-  assert.deepEqual(navPathsFor(tenant('VIEWER')), []);
+  // 고객 설정은 고객사 계정이면 역할과 관계없이 열린다(OPERATOR · VIEWER는 조회만 — 화면과 서버가 판정한다).
+  assert.deepEqual(navPathsFor(tenant('ADMIN')), ['/users', SETTINGS_PATH]);
+  assert.deepEqual(navPathsFor(tenant('OPERATOR')), [SETTINGS_PATH]);
+  assert.deepEqual(navPathsFor(tenant('VIEWER')), [SETTINGS_PATH]);
+});
+
+test('고객 설정 메뉴는 고객사 계정만 — 플랫폼 계정은 고객 상세에서 들어가고 전체 고객 설정 메뉴가 없다', () => {
+  for (const user of [platform, assignedManager, unassignedManager]) {
+    assert.equal(navPathsFor(user).includes(SETTINGS_PATH), false, user.platform_role ?? '');
+  }
 });
 
 test('세션 확인 전 · 조회 실패 · 미로그인 — 메뉴를 열지 않고 자산 조회 · 실시간 연결도 열지 않는다', () => {

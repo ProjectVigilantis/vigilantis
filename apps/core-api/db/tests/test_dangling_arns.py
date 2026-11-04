@@ -392,6 +392,8 @@ def test_arn_columns_cover_every_arn_column_in_models():
       존재를 요구하는 조인 키가 아니다(#493).
     - `tenants.access_role_arn` — 고객 계정의 IAM 역할이다. 수집하는 자산이 아니라
       `assets.arn` 에 나타날 일이 없고, 대조하면 매 회차 「매달림」이 된다(#485).
+    - `tenant_settings.email_*_arn` 아래 세 칸 — 알림용 SNS 토픽·구독 참조다.
+      관제 대상 자산의 조인 키가 아니므로 자산 목록과 대조하지 않는다(T-7).
     """
     from sqlalchemy import inspect as sa_inspect
 
@@ -399,6 +401,9 @@ def test_arn_columns_cover_every_arn_column_in_models():
         (models.Asset, "arn"),
         (models.NotificationEvent, "target_arn"),
         (models.Tenant, "access_role_arn"),
+        (models.TenantSettingsRecord, "email_topic_arn"),
+        (models.TenantSettingsRecord, "email_subscription_arn"),
+        (models.TenantSettingsRecord, "email_legacy_topic_arn"),
     }
     in_models = set()
     for mapper in models.Base.registry.mappers:

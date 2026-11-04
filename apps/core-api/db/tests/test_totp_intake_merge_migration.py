@@ -18,6 +18,7 @@ BASE = "d492a544e001"
 TOTP = "d515a7c3e912"
 INTAKE = "e552a7c3d901"
 MERGE = "f515a552e001"
+HEAD = "f8c1a9e4f515"  # 이 병합 뒤에 붙은 T-7 병합 리비전 — 이제 최신 head 의 조상
 TOTP_TABLES = {"totp_recovery_operations", "totp_provider_mutations"}
 INTAKE_TABLES = {"signup_requests", "inquiries", "inquiry_events", "notifications", "notification_reads"}
 CONFIG_PATH = Path(__file__).resolve().parents[2] / "alembic.ini"
@@ -121,10 +122,11 @@ def _assert_combined_head(engine):
 def test_merge_revision_joins_both_unchanged_siblings_into_the_single_head():
     script = ScriptDirectory.from_config(Config(str(CONFIG_PATH)))
     assert set(script.get_revision(MERGE).down_revision) == {TOTP, INTAKE}
+    assert set(script.get_revision(HEAD).down_revision) == {MERGE, "f7c1a9e4d201"}
     assert script.get_revision(TOTP).down_revision == BASE
     assert script.get_revision(INTAKE).down_revision == BASE
     [head] = script.get_heads()  # 병합 뒤에 붙은 리비전도 같은 단일 가지 위에 있다
-    assert MERGE in {rev.revision for rev in script.walk_revisions(base="base", head=head)}
+    assert {MERGE, HEAD} <= {rev.revision for rev in script.walk_revisions(base="base", head=head)}
 
 
 def test_fresh_database_upgrades_to_the_combined_head(merge_migration_db):

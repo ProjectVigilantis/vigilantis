@@ -96,6 +96,29 @@ export function canManageUsersOf(user: UserAdminSubject | null | undefined, tena
   return user.role === 'ADMIN' && user.tenant_id === tenantId;
 }
 
+/** 고객 설정(T-7)을 볼 수 있나 · 바꿀 수 있나. */
+export interface SettingsAccess {
+  read: boolean;
+  write: boolean;
+}
+
+const NO_SETTINGS_ACCESS: SettingsAccess = { read: false, write: false };
+
+/**
+ * 이 고객의 설정에 대한 대상별 권한. 플랫폼 계정은 `canAccessTenant`(중앙 관리자 전체 · 담당자는 배정 고객만)로
+ * 읽기 · 쓰기를 함께 갖는다. 고객사 계정은 자기 고객사만 — ADMIN은 읽기 · 쓰기, OPERATOR · VIEWER는 읽기만.
+ * 계정을 모르면(null) 아무것도 없다. 실제 판정은 서버(403 · 범위 밖 404)다.
+ */
+export function tenantSettingsAccess(user: UserAdminSubject | null | undefined, tenantId: string): SettingsAccess {
+  if (!user) return NO_SETTINGS_ACCESS;
+  if (user.account_type === 'PLATFORM') {
+    const scoped = canAccessTenant(user, tenantId);
+    return { read: scoped, write: scoped };
+  }
+  if (user.tenant_id === null || user.tenant_id.toLowerCase() !== tenantId.toLowerCase()) return NO_SETTINGS_ACCESS;
+  return { read: true, write: user.role === 'ADMIN' };
+}
+
 /**
  * 실행 · 복구 · 종료를 누를 수 있는 계정(넓은 자격). 플랫폼 계정은 등급 · 배정(`hasCustomerScope`)으로, 고객사
  * 계정은 역할(ADMIN · OPERATOR)로 판정한다. 계정을 아직 모르면(null) 누를 수 없다. 인시던트는 고객 ID를 싣지 않아

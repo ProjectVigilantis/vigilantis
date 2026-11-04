@@ -89,7 +89,7 @@ def _execution(db, incident, **overrides):
 # --- 마이그레이션 적용 상태 ----------------------------------------------------
 
 
-def test_alembic_head_applied_with_35_tables(db):
+def test_alembic_head_applied_with_38_tables(db):
     # 리비전 문자열을 적어 두면 마이그레이션마다 이 줄을 고쳐야 하고, 그 수정은
     # 검증이 아니라 손질이다. 확인할 것은 "DB가 head까지 올라와 있는가"다.
     from alembic.config import Config
@@ -106,7 +106,7 @@ def test_alembic_head_applied_with_35_tables(db):
             " WHERE table_schema='public' AND table_name != 'alembic_version'"
         )
     ).scalar_one()
-    assert count == 35  # 기존 27종 + #552 지원 업무 5종 + #515 TOTP 복구 2종 + #565 신청 결정 1종
+    assert count == 38  # 기존 27종 + #552 지원 업무 5종 + #515 TOTP 복구 2종 + T-7 고객 설정 · 정리 대기 · 파일 바인딩 증거 3종 + #565 신청 결정 1종
 
 
 # --- 자산 계열 -----------------------------------------------------------------

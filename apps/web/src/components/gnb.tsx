@@ -6,7 +6,7 @@
 
 'use client';
 
-import { Building2, LayoutDashboard, Server, Shield, Users, type LucideIcon } from 'lucide-react';
+import { Building2, LayoutDashboard, Server, Settings, Shield, Users, type LucideIcon } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 
@@ -17,6 +17,7 @@ import { ConnectionIndicator, type AssetPresence } from '@/components/connection
 import { ThemeToggle } from '@/components/theme-toggle';
 import {
   PLATFORM_HOME,
+  SETTINGS_PATH,
   USERS_PATH,
   businessOpen,
   confirmedAccount,
@@ -46,6 +47,7 @@ const NAV: Readonly<Record<string, { label: string; icon: LucideIcon }>> = {
   '/security': { label: '보안', icon: Shield },
   [PLATFORM_HOME]: { label: '고객', icon: Building2 },
   [USERS_PATH]: { label: '사용자', icon: Users },
+  [SETTINGS_PATH]: { label: '설정', icon: Settings },
 };
 
 /** 현재 계정(세션 Provider · #492). 확인 전 · 미로그인 · 조회 실패는 null이다(메뉴 · 업무 기능을 열지 않는다). */

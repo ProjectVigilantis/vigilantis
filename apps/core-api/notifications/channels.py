@@ -10,7 +10,10 @@ import json
 import re
 import socket
 import ssl
+import threading
+from collections import OrderedDict
 from collections.abc import Callable
+from dataclasses import replace
 from urllib.parse import urlsplit
 
 from botocore.exceptions import (
@@ -25,7 +28,9 @@ from botocore.exceptions import (
 from notifications.contracts import EventSnapshot, Route, SendResult
 from notifications.messages import SNS_SUBJECT, slack_payload, sns_body
 from notifications.routing import validate_webhook_url
+from notifications.settings_source import destination_hash
 from services.aws.client import platform_sns_client
+from services.aws.settings_notifications import SettingsProviderError
 
 _SLACK_READ_LIMIT = 256
 _SNS_BODY_MAX_BYTES = 262144
@@ -141,6 +146,61 @@ class SlackSender:
 
     def close(self) -> None:
         return None
+
+
+class ManagedSlackSender:
+    """T-7 관리 비밀 참조(secret_version 이 있는 라우트)의 Slack 전송. 그 밖의 라우트는 그대로 넘긴다.
+
+    URL 은 claim 이 끝난 뒤(DB 트랜잭션 밖) 불변 참조(ARN · VersionId)로 읽고, 라우트의 destination_hash 와
+    같을 때만 보낸다. 같은 참조의 값은 바뀌지 않으므로 프로세스 안에 제한된 개수만 캐시한다.
+    읽기 실패는 아직 아무것도 보내지 않은 것이라 PERMANENT · TRANSIENT 로만 나눈다(UNKNOWN 아님).
+    """
+
+    def __init__(
+        self, inner: SlackSender, read_secret: Callable[[str, str], str], *, cache_size: int = 256,
+    ) -> None:
+        self._inner = inner
+        self._read_secret = read_secret
+        self._cache: OrderedDict[tuple[str, str], str] = OrderedDict()
+        self._cache_size = cache_size
+        self._lock = threading.Lock()
+
+    def send(
+        self, event: EventSnapshot, route: Route, public_base_url: str
+    ) -> SendResult:
+        if route.secret_version is None:
+            return self._inner.send(event, route, public_base_url)
+        try:
+            url = self._resolve(route.destination, route.secret_version)
+        except SettingsProviderError as exc:
+            if exc.category in ("PERMANENT", "NOT_FOUND"):
+                return _fail("PERMANENT", "slack_secret_unavailable")
+            return _fail("TRANSIENT", "slack_secret_lookup_failed")
+        except Exception:
+            return _fail("TRANSIENT", "slack_secret_lookup_failed")
+        if route.destination_hash is None or destination_hash(url) != route.destination_hash:
+            return _fail("PERMANENT", "slack_secret_mismatch")
+        resolved = replace(route, destination=url, secret_version=None, destination_hash=None)
+        return self._inner.send(event, resolved, public_base_url)
+
+    def _resolve(self, arn: str, version: str) -> str:
+        key = (arn, version)
+        with self._lock:
+            cached = self._cache.get(key)
+            if cached is not None:
+                self._cache.move_to_end(key)
+                return cached
+        value = self._read_secret(arn, version)
+        with self._lock:
+            self._cache[key] = value
+            while len(self._cache) > self._cache_size:
+                self._cache.popitem(last=False)
+        return value
+
+    def close(self) -> None:
+        with self._lock:
+            self._cache.clear()
+        self._inner.close()
 
 
 _SNS_PERMANENT = frozenset({

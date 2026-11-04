@@ -138,7 +138,6 @@ def test_stop_failure_still_closes_each_sender_and_other_app_resources(monkeypat
 
 @pytest.mark.parametrize(("changes", "code"), [
     ({"NOTIFICATION_ENABLED": False}, "NOTIFICATION_DISABLED"),
-    ({"NOTIFICATION_ROUTES_FILE": ""}, "NOTIFICATION_ROUTES_REQUIRED"),
     ({"NOTIFICATION_MAX_BACKOFF_SECONDS": 1}, "NOTIFICATION_BACKOFF_INVALID"),
     ({"NOTIFICATION_LEASE_SECONDS": 1}, "NOTIFICATION_LEASE_TOO_SHORT"),
 ])
