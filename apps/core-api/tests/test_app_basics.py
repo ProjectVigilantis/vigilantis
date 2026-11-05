@@ -123,17 +123,23 @@ def test_lifespan_starts_and_stops_all_schedulers(monkeypatch):
         started.append("timeout")
         return FakeScheduler("timeout")
 
+    def fake_subscription():
+        # 구독 만기 처리는 발행하는 이벤트가 없다 — publish 를 받지 않는다(T-16 · #528)
+        started.append("subscription")
+        return FakeScheduler("subscription")
+
     monkeypatch.setattr(main_module, "start_scan_scheduler", fake_scan)
     monkeypatch.setattr(main_module.dispatcher, "start_dispatcher", fake_dispatch)
     monkeypatch.setattr(main_module.agent_dispatcher, "start_agent_dispatcher", fake_agent)
     monkeypatch.setattr(main_module, "start_timeout_watcher", fake_timeout)
+    monkeypatch.setattr(main_module, "start_subscription_scheduler", fake_subscription)
 
     with TestClient(main_module.create_app()) as test_client:
         assert publishers[0] == publishers[1] == publishers[2] == publishers[3]
         assert callable(publishers[0])
-        assert set(started) == {"scan", "dispatch", "agent", "timeout"}
+        assert set(started) == {"scan", "dispatch", "agent", "timeout", "subscription"}
         assert test_client.get("/health").status_code == 200
-    assert set(stopped) == {"scan", "dispatch", "agent", "timeout"}
+    assert set(stopped) == {"scan", "dispatch", "agent", "timeout", "subscription"}
 
 
 def test_lifespan_shuts_down_already_started_when_a_scheduler_raises(monkeypatch):

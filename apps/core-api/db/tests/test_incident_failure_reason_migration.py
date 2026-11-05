@@ -21,7 +21,7 @@ from sqlalchemy import inspect, select, text
 from sqlalchemy.exc import IntegrityError
 
 REVISION = "b434c7e2a915"
-PARENT = "f565c8d1a9e3"
+PARENT = "f528f565e001"
 CONFIG_PATH = Path(__file__).resolve().parents[2] / "alembic.ini"
 
 

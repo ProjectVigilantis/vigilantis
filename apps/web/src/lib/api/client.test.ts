@@ -6,6 +6,7 @@ import { test } from 'node:test';
 
 import {
   ApiError,
+  cancelMyRenewal,
   changeUserRole,
   changeUserStatus,
   confirmPasswordReset,
@@ -13,13 +14,16 @@ import {
   getAssets,
   getInquiries,
   getMe,
+  getMySubscription,
   getSignupRequests,
   getTenantSettings,
   getUserEvents,
   inviteUser,
+  purchaseMySubscription,
   requestPasswordReset,
   resendInvite,
   revokeUserSessions,
+  stopMyService,
   submitSignupRequest,
   updateTenantSettings,
 } from './client.ts';
@@ -373,6 +377,58 @@ test('계정 조회 실패 — SSR 401은 redirect를 전파하고 503은 계정
 test('브라우저 계정 조회는 기존 401 null 계약을 유지한다', async (t) => {
   stubFetch(t, errorResponse(401, 'AUTH_REQUIRED'));
   assert.equal(await getMe(), null);
+});
+
+const SUBSCRIPTION = {
+  tenant_name: '학원',
+  service_status: 'ACTIVE',
+  subscription: null,
+  source: null,
+  entitlement_ends_at: null,
+  agreement: null,
+  next_renewal_date: null,
+  expiry_date: null,
+  mock_marketplace_enabled: true,
+  can_manage: true,
+  available_actions: [],
+};
+
+test('자기 구독: 조회 · 구매 요청 · 갱신 끄기 · 중단의 경로 · 메서드 · 본문이고, tenant_id는 싣지 않는다', async (t) => {
+  const sent = stubFetch(t, () => new Response(JSON.stringify(SUBSCRIPTION), { status: 200 }));
+  assert.deepEqual(await getMySubscription(), SUBSCRIPTION);
+  assert.deepEqual(await purchaseMySubscription('Business'), SUBSCRIPTION);
+  await cancelMyRenewal();
+  await stopMyService('계약 종료');
+  const path = (s: Sent) => new URL(s.url).pathname + new URL(s.url).search;
+  assert.deepEqual(
+    sent.map((s) => [s.method, path(s), s.body]),
+    [
+      ['GET', '/api/v1/me/subscription', null],
+      ['POST', '/api/v1/me/subscription/purchase', { plan: 'Business' }],
+      ['POST', '/api/v1/me/subscription/cancel', null],
+      ['POST', '/api/v1/me/subscription/stop', { reason: '계약 종료' }],
+    ],
+  );
+  assert.equal(JSON.stringify(sent).includes('tenant_id'), false);
+});
+
+test('자기 구독 조회 실패는 Free · 미등록 응답으로 바뀌지 않고 오류로 올라간다', async (t) => {
+  let respond = errorResponse(500, 'INTERNAL_ERROR');
+  stubFetch(t, () => respond());
+  let authRequired = 0;
+  const api = createReadApi({ onAuthRequired: () => (authRequired += 1) });
+
+  await assert.rejects(api.getMySubscription(), (error: unknown) => error instanceof ApiError && error.httpStatus === 500);
+  assert.equal(authRequired, 0);
+
+  respond = errorResponse(401, 'AUTH_REQUIRED');
+  await assert.rejects(api.getMySubscription(), (error: unknown) => error instanceof ApiError && error.code === 'AUTH_REQUIRED');
+  assert.equal(authRequired, 1);
+});
+
+test('구독 쓰기의 403은 오류로 올라간다(화면이 버튼을 숨겼어도 판정은 서버다)', async (t) => {
+  stubFetch(t, errorResponse(403, 'AUTH_FORBIDDEN'));
+  await assert.rejects(purchaseMySubscription('Enterprise'), (error: unknown) => error instanceof ApiError && error.code === 'AUTH_FORBIDDEN');
 });
 
 /** 방금 비운 포트 — 연결하면 실제 Node 연결 거부 오류(`cause.code = ECONNREFUSED`)가 난다. */

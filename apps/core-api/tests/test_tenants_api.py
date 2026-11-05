@@ -14,19 +14,21 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from auth import sessions
-from config import TenantSettings, get_tenant_settings
+import subscription_workflow
+from config import SubscriptionSettings, TenantSettings, get_tenant_settings
 from db import models
 from db.repositories import auth as auth_repo
 from db.repositories import tenants as tenants_repo
 from fastapi.routing import iter_route_contexts
-from schemas.api.auth import PlatformRole, UserRole
+from schemas.api.auth import AccountType, PlatformRole, UserRole
+from schemas.api.subscriptions import SubscriptionPurchaseRequest
 from schemas.api.tenants import (
     TenantCreateResponse,
     TenantDetail,
     TenantStatus,
     TenantVerificationResult,
 )
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 
 BASE = "/api/v1/tenants"
 ACCOUNT = "123456789012"
@@ -522,3 +524,145 @@ def test_tenant_deleted_between_read_and_transition_is_404_not_409(client_pg, db
 def test_suspend_without_reason_is_422(client_pg, db, admin):
     tenant = _seed(db, TenantStatus.ACTIVE)
     assert client_pg.post(f"{BASE}/{tenant.tenant_id}/suspend", json={}).status_code == 422
+
+
+# ----- 구독 (T-16 · #528) ----------------------------------------------------------
+
+PAID_SUB = {"plan": "Business", "period_start": "2026-10-31", "period_end": "2026-11-29",
+            "cancel_at_period_end": True, "billing_anchor_day": 31, "amount_minor": 990000, "currency": "KRW"}
+MOCK_ON = SubscriptionSettings(_env_file=None, SUBSCRIPTION_MOCK_MARKETPLACE_ENABLED=True)
+
+
+def test_new_tenant_starts_free_and_the_list_carries_every_subscription_field(client_pg, db, admin):
+    created = client_pg.post(BASE, json=CREATE).json()["tenant"]
+    free = {"plan": "Free", "period_start": None, "period_end": None, "cancel_at_period_end": False,
+            "billing_anchor_day": None, "amount_minor": None, "currency": None}
+    assert (created["subscription"], created["subscription_source"], created["entitlement_ends_at"]) == (
+        free, "APP_FREE", None)
+    [row] = client_pg.get(BASE).json()["tenants"]
+    assert (row["subscription"], row["subscription_source"]) == (free, "APP_FREE")
+
+
+def test_list_shows_null_for_an_unregistered_legacy_tenant(client_pg, db, admin):
+    tenant = _seed(db, TenantStatus.ACTIVE)
+    # 이 변경 전의 테넌트 — 구독이 등록되지 않았다(Free 로 읽지 않는다)
+    db.execute(update(models.Tenant).where(models.Tenant.tenant_id == tenant.tenant_id).values(
+        plan=None, subscription_source=None))
+    db.commit()
+    [row] = client_pg.get(BASE).json()["tenants"]
+    assert "subscription" in row and (row["subscription"], row["subscription_source"]) == (None, None)
+
+
+def test_patch_full_subscription_then_unrelated_patch_keeps_schedule_and_anchor(client_pg, db, admin):
+    tenant = _seed(db, TenantStatus.ACTIVE)
+    resp = client_pg.patch(f"{BASE}/{tenant.tenant_id}", json={"subscription": PAID_SUB})
+    assert resp.status_code == 200 and resp.json()["subscription"] == PAID_SUB
+    assert resp.json()["subscription_source"] == "MANUAL"
+
+    resp = client_pg.patch(f"{BASE}/{tenant.tenant_id}", json={"name": "학원 본점"})
+    assert resp.status_code == 200 and resp.json()["subscription"] == PAID_SUB
+    [row] = client_pg.get(BASE).json()["tenants"]
+    assert row["subscription"] == PAID_SUB
+
+
+def test_patch_with_the_old_shape_replaces_the_whole_subscription(client_pg, db, admin):
+    tenant = _seed(db, TenantStatus.ACTIVE)
+    assert client_pg.patch(f"{BASE}/{tenant.tenant_id}", json={"subscription": PAID_SUB}).status_code == 200
+    resp = client_pg.patch(f"{BASE}/{tenant.tenant_id}", json={
+        "subscription": {"plan": "pilot", "period_start": "2026-11-01", "period_end": "2026-12-31"}})
+    assert resp.status_code == 200
+    # 기준일 · 예약 · 요금이 옛 기간에 남지 않는다
+    assert resp.json()["subscription"] == {
+        "plan": "pilot", "period_start": "2026-11-01", "period_end": "2026-12-31", "cancel_at_period_end": False,
+        "billing_anchor_day": None, "amount_minor": None, "currency": None}
+
+
+@pytest.mark.parametrize("manual", [
+    pytest.param({"plan": "Business", "period_start": "2026-10-01", "period_end": "2026-10-31"}, id="three-fields"),
+    # 옛 규칙의 예약 · 기준일 칸이 있어도 기록일 뿐이다 — 로컬 자동 갱신 · Free 전환이 없다
+    pytest.param(PAID_SUB, id="legacy-anchor-and-cancel"),
+])
+def test_manual_records_are_never_renewed_or_converted_by_the_contract_cycle(client_pg, db, admin, manual):
+    tenant = _seed(db, TenantStatus.ACTIVE)
+    resp = client_pg.patch(f"{BASE}/{tenant.tenant_id}", json={"subscription": manual})
+    expected = {"cancel_at_period_end": False, "billing_anchor_day": None, "amount_minor": None,
+                "currency": None} | manual
+    assert resp.status_code == 200 and resp.json()["subscription"] == expected
+
+    after_end = datetime(2027, 1, 5, tzinfo=UTC)
+    subscription_workflow.process_subscription_cycle(
+        db, settings=MOCK_ON, sweep=subscription_workflow.EventSweep(), now=after_end)
+    detail = client_pg.get(f"{BASE}/{tenant.tenant_id}").json()
+    assert (detail["subscription"], detail["subscription_source"], detail["status"]) == (expected, "MANUAL", "ACTIVE")
+    shown = subscription_workflow.get_subscription(
+        db, tenant.tenant_id, can_manage=False, settings=MOCK_ON, now=after_end)
+    assert (shown.next_renewal_date, shown.expiry_date, shown.agreement) == (None, None, None)
+
+
+def _mock_agreement(db, tenant, *, activate: bool):
+    """고객사 ADMIN 의 모의 구매(→ 활성화). 운영처럼 commit 해 둔다."""
+    buyer = auth_repo.create_user(
+        db, issuer="https://issuer.example", cognito_sub=f"buyer-{tenant.tenant_id}",
+        email=f"buyer-{tenant.tenant_id[:8]}@example.com",
+        role=UserRole.ADMIN, account_type=AccountType.TENANT, tenant_id=tenant.tenant_id, now=NOW,
+        email_verified_at=NOW)
+    db.commit()
+    subscription_workflow.purchase_subscription(
+        db, tenant.tenant_id, SubscriptionPurchaseRequest(plan="Business"), requested_by_user_id=buyer.user_id,
+        authorize=lambda: None, settings=MOCK_ON, now=NOW)
+    if activate:
+        subscription_workflow.process_subscription_cycle(
+            db, settings=MOCK_ON, sweep=subscription_workflow.EventSweep(), now=NOW + timedelta(minutes=1))
+
+
+@pytest.mark.parametrize("activate", [False, True], ids=["pending", "active"])
+def test_patch_cannot_erase_a_valid_mock_agreement(client_pg, db, admin, activate):
+    tenant = _seed(db, TenantStatus.ACTIVE)
+    _mock_agreement(db, tenant, activate=activate)
+    before = client_pg.get(f"{BASE}/{tenant.tenant_id}").json()
+
+    for subscription in (PAID_SUB, {"plan": "Free"}, None):
+        resp = client_pg.patch(f"{BASE}/{tenant.tenant_id}", json={"subscription": subscription})
+        assert (resp.status_code, _code(resp)) == (409, "TENANT_STATE_CONFLICT")
+    after = client_pg.get(f"{BASE}/{tenant.tenant_id}").json()
+    assert after == before
+    assert after["subscription_source"] == ("MOCK_MARKETPLACE" if activate else "APP_FREE")
+    if activate:
+        assert after["subscription"]["plan"] == "Business" and after["entitlement_ends_at"] is not None
+    # 구독 밖의 칸만 보낸 PATCH 는 받는다
+    resp = client_pg.patch(f"{BASE}/{tenant.tenant_id}", json={"name": "학원 본점"})
+    assert resp.status_code == 200 and resp.json()["subscription"] == before["subscription"]
+
+
+@pytest.mark.parametrize("subscription", [
+    # 예약의 전환일(period_end 다음 날)이 달력 밖 — 500 이 아니라 요청 검증 오류다
+    pytest.param({"plan": "Business", "period_start": "2026-10-01", "period_end": "9999-12-31",
+                  "cancel_at_period_end": True}, id="cancel-on-last-calendar-day"),
+    pytest.param(PAID_SUB | {"period_end": "2026-11-30"}, id="period-not-one-anchored-month"),
+    pytest.param({"plan": "pilot", "period_end": "2026-12-31", "cancel_at_period_end": True}, id="legacy-cancel"),
+    pytest.param(PAID_SUB | {"currency": None}, id="amount-without-currency"),
+    pytest.param(PAID_SUB | {"amount_minor": -1}, id="negative-amount"),
+])
+def test_patch_with_an_incoherent_subscription_is_422_and_changes_nothing(client_pg, db, admin, subscription):
+    tenant = _seed(db, TenantStatus.ACTIVE)
+    resp = client_pg.patch(f"{BASE}/{tenant.tenant_id}", json={"subscription": subscription})
+    assert resp.status_code == 422 and _code(resp) == "REQUEST_VALIDATION_FAILED"
+    assert tenants_repo.get_tenant(db, tenant.tenant_id).tenant.plan == "Free"
+
+
+def test_admin_suspend_keeps_the_last_subscription(client_pg, db, admin):
+    tenant = _seed(db, TenantStatus.ACTIVE)
+    assert client_pg.patch(f"{BASE}/{tenant.tenant_id}", json={"subscription": PAID_SUB}).status_code == 200
+    resp = client_pg.post(f"{BASE}/{tenant.tenant_id}/suspend", json={"reason": "해지"})
+    assert resp.status_code == 200
+    assert (resp.json()["status"], resp.json()["subscription"]) == ("SUSPENDED", PAID_SUB)
+
+
+def test_admin_suspend_does_not_cancel_a_mock_agreement(client_pg, db, admin):
+    tenant = _seed(db, TenantStatus.ACTIVE)
+    _mock_agreement(db, tenant, activate=True)
+    before = client_pg.get(f"{BASE}/{tenant.tenant_id}").json()
+    resp = client_pg.post(f"{BASE}/{tenant.tenant_id}/suspend", json={"reason": "해지"})
+    assert resp.status_code == 200
+    assert (resp.json()["status"], resp.json()["subscription"], resp.json()["subscription_source"]) == (
+        "SUSPENDED", before["subscription"], "MOCK_MARKETPLACE")

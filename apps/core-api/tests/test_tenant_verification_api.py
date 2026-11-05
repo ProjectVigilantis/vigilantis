@@ -6,6 +6,7 @@
   - 실 DB: 저장된 행 · 응답 · GET 일치, 권한 재판정, AWS 중 변경에 대한 거절, 거절 시 무기록.
   - 트랜잭션 분리는 db 픽스처의 SAVEPOINT 로는 볼 수 없어(바깥 트랜잭션이 항상 열려 있다) 독립 commit 세션과
     별도 연결로 확인한다(committed_client).
+  - 구독(T-16 · #528): 성공한 재개만 투영을 모의 계약의 현재 권리로 맞춘다 — 거절 · 실패 · verify 는 그대로 둔다.
 """
 
 from __future__ import annotations
@@ -13,20 +14,23 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
+import subscription_workflow
 import tenant_admin
 from auth import sessions
 from auth.http import get_clock
-from config import TenantSettings, get_tenant_settings
+from config import SubscriptionSettings, TenantSettings, get_tenant_settings
 from db import models
 from db.repositories import auth as auth_repo
 from db.repositories import tenants as tenants_repo
 from db.session import get_db
 from schemas.api.auth import PlatformRole, UserRole
+from schemas.api.subscriptions import SubscriptionPurchaseRequest
 from schemas.api.tenants import (
     TenantStatus,
     TenantVerificationResult,
     TenantVerifyResponse,
 )
+from schemas.subscriptions import SubscriptionSource, service_date
 from sqlalchemy import delete, event, select, text, update
 from sqlalchemy.orm import Session, sessionmaker
 from tenant_verification import VerificationOutcome
@@ -621,3 +625,138 @@ def test_no_transaction_or_lock_is_held_while_waiting_for_aws_and_the_result_is_
     stored = _fresh(committed_client, tenant_id)  # 별도 세션에서 읽는다 — commit 된 값만 보인다
     assert stored[:2] == (TenantStatus.ACTIVE, R.OK)
     assert stored[2].replace(microsecond=0) == body.verification.verified_at
+
+
+# ----- ⑦ 재개와 모의 계약 권리 (T-16 · #528) ---------------------------------------------------
+# 재개는 구독을 바꾸지 않는다(Free 로 다시 시작하지 않는다). 성공한 재개만 같은 트랜잭션에서 투영을 계약의 현재
+# 권리로 맞춘다 — 처리 주기가 아직 반영하지 않은 만료(갱신을 끈 기간의 끝)는 그때 앱 정책 Free 가 되고, 자동 갱신 대기는
+# 처리 주기가 다음 기간을 이을 때까지 저장된 투영 그대로다. 계약 행(원천)은 건드리지 않는다.
+
+MOCK_ON = SubscriptionSettings(_env_file=None, SUBSCRIPTION_MOCK_MARKETPLACE_ENABLED=True)
+FREE = {"plan": "Free", "period_start": None, "period_end": None, "cancel_at_period_end": False,
+        "billing_anchor_day": None, "amount_minor": None, "currency": None}
+
+
+def _with_mock_rights(db, make_auth_session, purchased_at, *, renew=True, status=TenantStatus.SUSPENDED):
+    """관제 중 테넌트의 고객사 ADMIN 이 모의 구매 → 다음 주기에 활성화(→ 갱신 끄기) → status 로 둔다."""
+    tenant = _seed(db, TenantStatus.ACTIVE)
+    buyer = make_auth_session(UserRole.ADMIN, tenant_id=tenant.tenant_id)
+    subscription_workflow.purchase_subscription(
+        db, tenant.tenant_id, SubscriptionPurchaseRequest(plan="Business"), requested_by_user_id=buyer.user_id,
+        authorize=lambda: None, settings=MOCK_ON, now=purchased_at)
+    subscription_workflow.process_subscription_cycle(
+        db, settings=MOCK_ON, sweep=subscription_workflow.EventSweep(), now=purchased_at + timedelta(minutes=1))
+    if not renew:
+        subscription_workflow.cancel_renewal(
+            db, tenant.tenant_id, authorize=lambda: None, settings=MOCK_ON, now=purchased_at + timedelta(minutes=2))
+    if status is TenantStatus.SUSPENDED:
+        assert tenants_repo.suspend_tenant(db, tenant.tenant_id, reason="계약 만료", now=NOW)
+        db.commit()
+    return tenant
+
+
+def _projection(db, tenant_id):
+    t = _stored(db, tenant_id)
+    return (t.plan, t.period_start, t.period_end, t.cancel_at_period_end, t.billing_anchor_day,
+            t.subscription_source, t.entitlement_ends_at)
+
+
+def _agreement(db, tenant_id):
+    db.expire_all()
+    a = db.scalars(select(models.MockMarketplaceAgreement).where(
+        models.MockMarketplaceAgreement.tenant_id == tenant_id)).one()
+    return a.status, a.auto_renew, a.term_start, a.term_end, a.ended_at, a.updated_at
+
+
+def test_resume_keeps_live_mock_rights(client_pg, db, admin, aws, make_auth_session):
+    tenant = _with_mock_rights(db, make_auth_session, aws.start - timedelta(days=1))
+    before, agreement = _projection(db, tenant.tenant_id), _agreement(db, tenant.tenant_id)
+    assert before[5] is SubscriptionSource.MOCK_MARKETPLACE and before[6] > aws.observed_at
+
+    resp = _post(client_pg, "resume", tenant.tenant_id)
+
+    assert resp.status_code == 200
+    body = resp.json()["tenant"]
+    assert (body["status"], body["subscription"]["plan"], body["subscription_source"]) == (
+        "ACTIVE", "Business", "MOCK_MARKETPLACE")
+    assert _projection(db, tenant.tenant_id) == before
+    assert _agreement(db, tenant.tenant_id) == agreement
+    assert client_pg.get(f"{BASE}/{tenant.tenant_id}").json() == body
+
+
+def test_resume_projects_rights_that_ended_while_stopped_as_app_free(client_pg, db, admin, aws, make_auth_session):
+    # 갱신을 끈 계약의 기간 끝 시각이 정지 중에 지났고, 처리 주기는 아직 돌지 않았다
+    tenant = _with_mock_rights(db, make_auth_session, aws.start - timedelta(days=70), renew=False)
+    stale, agreement = _projection(db, tenant.tenant_id), _agreement(db, tenant.tenant_id)
+    assert stale[5] is SubscriptionSource.MOCK_MARKETPLACE and stale[6] < aws.start
+
+    resp = _post(client_pg, "resume", tenant.tenant_id)
+
+    assert resp.status_code == 200
+    body = resp.json()["tenant"]
+    assert (body["status"], body["subscription"], body["subscription_source"], body["entitlement_ends_at"]) == (
+        "ACTIVE", FREE, "APP_FREE", None)
+    assert _agreement(db, tenant.tenant_id) == agreement  # 만료 전이 · 이벤트는 처리 주기(공급자)의 몫이다
+    assert client_pg.get(f"{BASE}/{tenant.tenant_id}").json() == body
+
+
+def test_resume_keeps_a_renewal_awaiting_the_cycle_until_the_cycle_renews_it(
+    client_pg, db, admin, aws, make_auth_session
+):
+    # 자동 갱신 중인 계약의 기간 끝 시각이 정지 중에 지났고, 처리 주기는 아직 돌지 않았다(꺼짐 · 지연)
+    tenant = _with_mock_rights(db, make_auth_session, aws.start - timedelta(days=40))
+    stale, agreement = _projection(db, tenant.tenant_id), _agreement(db, tenant.tenant_id)
+    assert stale[5] is SubscriptionSource.MOCK_MARKETPLACE and stale[6] < aws.start
+
+    resp = _post(client_pg, "resume", tenant.tenant_id)
+
+    assert resp.status_code == 200
+    body = resp.json()["tenant"]
+    assert (body["status"], body["subscription"]["plan"], body["subscription_source"]) == (
+        "ACTIVE", "Business", "MOCK_MARKETPLACE")
+    # 직전 기간의 기록 그대로 — 권리 끝 시각이 지난 값이라 새로 이은 기간과 구별된다
+    assert _projection(db, tenant.tenant_id) == stale
+    assert _agreement(db, tenant.tenant_id) == agreement  # 갱신 전이 · 이벤트는 처리 주기(공급자)의 몫이다
+    assert client_pg.get(f"{BASE}/{tenant.tenant_id}").json() == body
+
+    subscription_workflow.process_subscription_cycle(
+        db, settings=MOCK_ON, sweep=subscription_workflow.EventSweep(), now=aws.observed_at)
+    renewed = _projection(db, tenant.tenant_id)
+    assert (renewed[0], renewed[1], renewed[5]) == (
+        "Business", service_date(stale[6]), SubscriptionSource.MOCK_MARKETPLACE)
+    assert renewed[6] > aws.observed_at
+
+
+def _resume_denied(db, aws, tenant, monkeypatch):
+    aws.outcome = READ_DENIED
+
+
+def _input_changed(db, aws, tenant, monkeypatch):
+    aws.during = lambda: _change(db, tenant.tenant_id, external_id="f" * 32)
+
+
+def _zero_rows(db, aws, tenant, monkeypatch):
+    monkeypatch.setattr(tenants_repo, "resume_tenant", lambda *a, **k: False)
+
+
+def _nothing(db, aws, tenant, monkeypatch):
+    pass
+
+
+@pytest.mark.parametrize("route,start,interfere,status", [
+    ("resume", TenantStatus.SUSPENDED, _resume_denied, 200),
+    ("resume", TenantStatus.SUSPENDED, _input_changed, 409),
+    ("resume", TenantStatus.SUSPENDED, _zero_rows, 409),
+    ("verify", TenantStatus.ACTIVE, _nothing, 200),
+], ids=["resume_failed", "input_changed", "zero_rows", "verify"])
+def test_only_a_successful_resume_refreshes_the_projection(
+    client_pg, db, admin, aws, make_auth_session, monkeypatch, route, start, interfere, status
+):
+    tenant = _with_mock_rights(db, make_auth_session, aws.start - timedelta(days=70), renew=False, status=start)
+    stale = _projection(db, tenant.tenant_id)
+    interfere(db, aws, tenant, monkeypatch)
+
+    resp = _post(client_pg, route, tenant.tenant_id)
+
+    assert resp.status_code == status
+    assert _projection(db, tenant.tenant_id) == stale

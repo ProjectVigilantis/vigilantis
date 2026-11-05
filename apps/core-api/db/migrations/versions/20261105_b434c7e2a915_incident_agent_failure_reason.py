@@ -5,7 +5,7 @@
 채우지 않는다. 사유는 FAILED 호출에만 둔다(CHECK).
 
 Revision ID: b434c7e2a915
-Revises: f565c8d1a9e3
+Revises: f528f565e001
 Create Date: 2026-11-05 13:00:00.000000
 """
 from __future__ import annotations
@@ -14,7 +14,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "b434c7e2a915"
-down_revision = "f565c8d1a9e3"
+down_revision = "f528f565e001"
 branch_labels = None
 depends_on = None
 

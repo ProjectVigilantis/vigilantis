@@ -8,6 +8,7 @@
 #                       로깅·CORS·WebSocket·OpenAI는 기본값이 있다.
 #   AwsSettings       : AWS 접근 설정(리전·엔드포인트). DB와 무관.
 #   CollectorSettings : CloudWatch 조회 창 설정.
+#   (그 밖에 TenantSettings · SubscriptionSettings 는 테넌트 온보딩 · 고객 구독의 선택 설정이다.)
 #
 # AWS 설정을 Settings에 합치지 않는 이유: scripts/seed_localstack.py와
 # scripts/probe_dryrun.py(#130)는 DB 없이 도는 스크립트인데, 합치면 AWS 클라이언트
@@ -349,6 +350,29 @@ class TenantSettings(BaseSettings):
         return bool(self.TENANT_ONBOARDING_TEMPLATE_URL and self.PLATFORM_PRINCIPAL_ARN)
 
 
+class SubscriptionSettings(BaseSettings):
+    """고객 구독(Post-MVP T-16 · #528)의 모의 Marketplace · 계약 처리 설정. 실제 AWS 호출 · 청구는 어느 값이든 없다.
+
+      - SUBSCRIPTION_MOCK_MARKETPLACE_ENABLED: 고객의 **새** 모의 구매 요청을 받는다. 기본 꺼짐이다(명시적으로
+        켠다 — 배포가 실수로 무료 유료 권리를 열지 않게). 이미 저장된 계약의 활성화 · 갱신 · 만료 처리는 이
+        스위치와 무관하게 계속된다 — 끈다고 저장된 계약이 멈춰 거짓으로 활성인 채 남지 않는다.
+      - SUBSCRIPTION_MOCK_ACTIVATION_OUTCOME: 모의 공급자가 대기 중(PENDING) 구매를 처리하는 결과 — SUCCEED(기본 ·
+        다음 처리 주기에 활성화) · FAIL(활성화 실패 · 권리 없음 · 재구매 가능) · HOLD(대기 유지). 서버 쪽
+        시연 · 시험용 설정이고 고객이 고를 수 없다.
+      - SUBSCRIPTION_SCHEDULER_ENABLED: 계약 처리 잡(subscription_scheduler)의 기동. 기본 켜짐이다 — 만료는 기간
+        끝에 처리돼야 하기 때문이다. SCAN_ENABLED · DISPATCH_ENABLED 와 독립이다.
+    설정은 기동 시 고정되며 바꾸려면 재기동한다.
+    """
+
+    model_config = _ENV_FILE
+
+    SUBSCRIPTION_MOCK_MARKETPLACE_ENABLED: bool = False
+    SUBSCRIPTION_MOCK_ACTIVATION_OUTCOME: Literal["SUCCEED", "FAIL", "HOLD"] = "SUCCEED"
+    SUBSCRIPTION_SCHEDULER_ENABLED: bool = True
+    # 계약 처리 주기(초). 대기 구매의 활성화 · 기간 끝의 갱신 · 만료와 투영은 그 시각 뒤 첫 주기에 저장된다
+    SUBSCRIPTION_DUE_INTERVAL_SECONDS: int = Field(default=60, gt=0)
+
+
 def _split_csv(raw: str) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
@@ -381,3 +405,9 @@ def get_collector_settings() -> CollectorSettings:
 def get_tenant_settings() -> TenantSettings:
     """검증된 TenantSettings 싱글턴. 테스트는 의존성 재정의 또는 cache_clear() 후 주입한다."""
     return TenantSettings()
+
+
+@lru_cache
+def get_subscription_settings() -> SubscriptionSettings:
+    """검증된 SubscriptionSettings 싱글턴. 테스트는 의존성 재정의 또는 cache_clear() 후 주입한다."""
+    return SubscriptionSettings()

@@ -15,6 +15,8 @@ export default async function TenantPage({ params, searchParams }: PageProps<'/t
   const { id } = await params;
   // 관제 축 전환이 주소에 `?axis=`를 적는다(monitoring-view.tsx). 새로고침해도 같은 축으로 연다.
   const { axis } = await searchParams;
+  // 구독 권리 끝 시각이 지났는지의 기준 — 읽은 시각을 서버에서 한 번 찍어 넘긴다(하이드레이션 불일치 방지).
+  const renderedAt = new Date().toISOString();
   // 세션 쿠키만 실어 부르고, 401이면 로그인으로 redirect한다(lib/api/server.ts).
   const api = await serverApi();
   const { getTenant, getUsers } = api;
@@ -46,6 +48,7 @@ export default async function TenantPage({ params, searchParams }: PageProps<'/t
   return (
     <TenantDetailView
       tenant={tenant}
+      renderedAt={renderedAt}
       monitoring={monitoring}
       users={users === null ? null : users.items.filter((u) => u.tenant_id === tenant.tenant_id)}
     />

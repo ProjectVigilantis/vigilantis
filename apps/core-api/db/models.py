@@ -50,8 +50,14 @@ from schemas.guardrails import (
 )
 from schemas.incidents import AgentInvocationStatus
 from schemas.runbooks import RunbookId, TriggerSource
+from schemas.subscriptions import (
+    MockAgreementStatus,
+    MockMarketplaceEventKind,
+    SubscriptionSource,
+)
 from sqlalchemy import (
     CHAR,
+    BigInteger,
     Boolean,
     CheckConstraint,
     Date,
@@ -61,6 +67,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    SmallInteger,
     String,
     UniqueConstraint,
     Uuid,
@@ -106,6 +113,52 @@ _ID = Uuid(as_uuid=False)  # PG native UUID, 파이썬 값은 str — 내부 계
 # 테넌트 — 고객 계정 1개 (Post-MVP T-4)
 # ==============================================================================
 
+# 구독 칸의 불변식(T-16 · #528) — 계약 TenantSubscription 의 검증과 같다. 마이그레이션
+# (20261027_a6d2f8c1b347)이 같은 식을 쓴다. 금액 상한은 계약의 MAX_AMOUNT_MINOR(2^53 - 1)다
+_SUBSCRIPTION_SHAPE = {
+    "amount_with_currency": "(amount_minor IS NULL) = (currency IS NULL)",
+    "amount_range": "amount_minor IS NULL OR amount_minor BETWEEN 0 AND 9007199254740991",
+    "currency_format": "currency IS NULL OR currency ~ '^[A-Z]{3}$'",
+    "billing_anchor_day_range": "billing_anchor_day IS NULL OR billing_anchor_day BETWEEN 1 AND 31",
+    # 기준일은 이용 기간과 함께만 있다 — 기간을 지우고 기준일만 남겨 갱신 대상이 되는 일이 없다
+    "billing_anchor_with_period": (
+        "billing_anchor_day IS NULL OR (period_start IS NOT NULL AND period_end IS NOT NULL)"
+    ),
+    # Free 전환 예약은 마지막 이용일이 있어야 전환일이 정해진다
+    "cancel_with_period_end": "NOT cancel_at_period_end OR period_end IS NOT NULL",
+}
+
+
+#: 구독 칸이 전부 비어 있다 — 「등록 안 됨」.
+_NO_SUBSCRIPTION_FACTS = (
+    "plan IS NULL AND period_start IS NULL AND period_end IS NULL AND NOT cancel_at_period_end"
+    " AND billing_anchor_day IS NULL AND amount_minor IS NULL AND currency IS NULL"
+)
+
+# 구독 투영의 원천(#528 모의 Marketplace) — 마이그레이션(20261031_d528e1f3a6b2)이 같은 식을 쓴다
+_SUBSCRIPTION_SOURCE_SHAPE = {
+    # 원천이 없으면 구독 칸도 없다(등록 안 됨) — 반대도 같다
+    "source_iff_subscription": f"(subscription_source IS NULL) = ({_NO_SUBSCRIPTION_FACTS})",
+    # 권리 끝 시각은 모의 계약 투영에만 있다
+    "entitlement_end_with_mock": (
+        "(subscription_source IS NOT DISTINCT FROM 'MOCK_MARKETPLACE') = (entitlement_ends_at IS NOT NULL)"
+    ),
+    # 모의 계약 투영은 기간이 있는 유료 요금제이고 요금을 지어내지 않는다
+    "mock_projection_shape": (
+        "subscription_source IS DISTINCT FROM 'MOCK_MARKETPLACE' OR (plan IN ('Business', 'Enterprise')"
+        " AND period_start IS NOT NULL AND period_end IS NOT NULL AND amount_minor IS NULL)"
+    ),
+    "app_free_is_free": "subscription_source IS DISTINCT FROM 'APP_FREE' OR plan = 'Free'",
+}
+
+
+def _subscription_shape_checks() -> list[CheckConstraint]:
+    return [
+        CheckConstraint(sql, name=name)
+        for name, sql in (_SUBSCRIPTION_SHAPE | _SUBSCRIPTION_SOURCE_SHAPE).items()
+    ]
+
+
 
 class Tenant(Base):
     """고객 계정 1개. 플랫폼이 이 계정의 역할에 AssumeRole + ExternalId 로 들어간다(#438 §C-1).
@@ -146,10 +199,25 @@ class Tenant(Base):
     last_verification_reason_code: Mapped[str | None] = mapped_column(
         String(200), nullable=True
     )
-    # T-16 구독 현황(모의) — 원천은 운영자 입력
+    # T-16 구독(#528) — 계약 schemas.api.tenants.TenantSubscription 의 칸 그대로인 **투영**이다. 원천은
+    # subscription_source(운영자 입력 · 모의 Marketplace 계약 · 앱 정책 Free)다. plan 은 문자열(DB enum 이
+    # 아니다) — 옛 값(basic · pilot 등)을 보존한다. NULL plan 은 「등록 안 됨」이고 Free 로 채우지 않는다
     plan: Mapped[str | None] = mapped_column(String(50), nullable=True)
     period_start: Mapped[date | None] = mapped_column(Date, nullable=True)
     period_end: Mapped[date | None] = mapped_column(Date, nullable=True)
+    cancel_at_period_end: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false")
+    )
+    billing_anchor_day: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    amount_minor: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    subscription_source: Mapped[SubscriptionSource | None] = mapped_column(
+        _enum(SubscriptionSource, "subscription_source"), nullable=True
+    )
+    # 모의 계약 투영의 권리 끝 시각(미포함) — 날짜 칸보다 정확한 원천 시각이다
+    entitlement_ends_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     suspended_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -192,6 +260,143 @@ class Tenant(Base):
         CheckConstraint(
             "period_start IS NULL OR period_end IS NULL OR period_end >= period_start",
             name="period_ordered",
+        ),
+        *_subscription_shape_checks(),
+    )
+
+
+class TenantSubscriptionHistory(Base):
+    """옛 재개 규칙(연결 확인 성공 = Free 로 다시 시작)이 Free 로 바꾸기 전에 남긴 구독 1건 (T-16 · #528).
+
+    **읽기 전용 옛 기록이다.** 지금 재개는 구독을 바꾸지 않으므로 새 행을 쓰지 않는다. 이미 적용된 DB 의
+    행을 보존하려고 테이블을 남긴다. tenants 의 구독 칸을 그대로 옮긴 것이며 청구 장부가 아니다.
+    """
+
+    __tablename__ = "tenant_subscription_history"
+
+    history_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
+    tenant_id: Mapped[str] = mapped_column(_ID, ForeignKey("tenants.tenant_id"), index=True)
+    plan: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    period_start: Mapped[date | None] = mapped_column(Date, nullable=True)
+    period_end: Mapped[date | None] = mapped_column(Date, nullable=True)
+    cancel_at_period_end: Mapped[bool] = mapped_column(Boolean)
+    billing_anchor_day: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    amount_minor: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    #: 보존한 시각 = 재개가 확정된 시각.
+    archived_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+# 모의 Marketplace 계약 · 이벤트(#528) — 마이그레이션(20261031_d528e1f3a6b2)이 같은 식을 쓴다
+_MOCK_AGREEMENT_SHAPE = {
+    "source_is_mock": "source = 'MOCK_MARKETPLACE'",
+    "buyer_ref_format": "buyer_ref ~ '^mock-buyer-[0-9a-f]{32}$'",
+    "license_ref_format": "license_ref ~ '^mock-license-[0-9a-f]{32}$'",
+    "plan_is_paid": "plan IN ('Business', 'Enterprise')",
+    "anniversary_day_range": "anniversary_day IS NULL OR anniversary_day BETWEEN 1 AND 31",
+    "renewal_disabled_shape": "auto_renew = (renewal_disabled_at IS NULL)",
+    # 활성화 시각 · 기간 · 기념일 · 기간 번호는 함께 생기고, 활성화된 계약(ACTIVE · EXPIRED)에만 있다
+    "activation_shape": (
+        "(activated_at IS NULL) = (term_start IS NULL) AND (term_start IS NULL) = (term_end IS NULL)"
+        " AND (term_end IS NULL) = (anniversary_day IS NULL) AND (activated_at IS NULL) = (term_number = 0)"
+        " AND (status IN ('ACTIVE', 'EXPIRED')) = (activated_at IS NOT NULL)"
+    ),
+    "term_ordered": "term_end IS NULL OR term_end > term_start",
+    "ended_shape": "(status IN ('PENDING', 'ACTIVE')) = (ended_at IS NULL)",
+    "failure_shape": "(status = 'FAILED') = (failure_code IS NOT NULL)",
+    # 만료는 자동 갱신을 끈 계약이 기간 끝 시각에 끝난 것이다
+    "expired_shape": "status <> 'EXPIRED' OR (NOT auto_renew AND ended_at = term_end)",
+    "revision_positive": "revision >= 1 AND term_number >= 0",
+}
+
+
+class MockMarketplaceAgreement(Base):
+    """모의 Marketplace 계약 1건 — 유료 권리의 권위 있는 원천(서버 안의 대역 · T-16 · #528).
+
+    AWS Marketplace SaaS 계약(월 단위 계약형)의 경계를 흉내 낸다. 실제 AWS 계약 · 라이선스 ARN · 구매자 계정이
+    아니다 — 식별자(agreement_id · buyer_ref · license_ref)는 서버가 만든 불투명한 모의 값이고, 구매자 참조는
+    테넌트의 관제 계정(aws_account_id)과 다르다. 상태는 서버의 모의 공급자만 바꾼다(조건부 UPDATE · revision).
+    테넌트마다 진행 중(PENDING · ACTIVE)인 계약은 하나뿐이다(부분 유일 인덱스).
+    """
+
+    __tablename__ = "mock_marketplace_agreements"
+
+    agreement_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
+    tenant_id: Mapped[str] = mapped_column(_ID, ForeignKey("tenants.tenant_id"), index=True)
+    source: Mapped[SubscriptionSource] = mapped_column(
+        _enum(SubscriptionSource, "subscription_source"), default=SubscriptionSource.MOCK_MARKETPLACE
+    )
+    buyer_ref: Mapped[str] = mapped_column(String(64))
+    license_ref: Mapped[str] = mapped_column(String(64), unique=True)
+    plan: Mapped[str] = mapped_column(String(50))
+    status: Mapped[MockAgreementStatus] = mapped_column(
+        _enum(MockAgreementStatus, "mock_agreement_status"), default=MockAgreementStatus.PENDING
+    )
+    auto_renew: Mapped[bool] = mapped_column(Boolean, default=True)
+    #: 활성화한 KST 날짜의 일(日) — 갱신 기간의 기념일.
+    anniversary_day: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    #: 0 = 활성화 전. 활성화가 1, 갱신마다 1씩 는다(이벤트 중복 제거 키).
+    term_number: Mapped[int] = mapped_column(Integer, default=0)
+    #: 모의 공급자의 쓰기마다 1씩 는다 — 조건부 UPDATE 의 기대값이다.
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    requested_by_user_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("app_users.user_id", ondelete="RESTRICT"), index=True
+    )
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    term_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    term_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    renewal_disabled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        *(CheckConstraint(sql, name=name) for name, sql in _MOCK_AGREEMENT_SHAPE.items()),
+        Index(
+            "uq_mock_marketplace_agreements_open_tenant",
+            "tenant_id",
+            unique=True,
+            postgresql_where=text("status IN ('PENDING', 'ACTIVE')"),
+        ),
+    )
+
+
+class MockMarketplaceEvent(Base):
+    """모의 공급자가 계약을 바꿀 때 같은 트랜잭션에 남기는 이벤트 1건(내구 큐 · #528).
+
+    소비자는 이벤트 내용을 옮겨 적지 않는다 — 계약의 **현재** 상태를 다시 읽어 테넌트 투영을 맞춘 뒤
+    processed_at 을 남긴다. 중복은 dedupe_key 유일성이 막고, 순서가 뒤바뀌어도 현재 상태를 읽으므로 결과가 같다.
+    """
+
+    __tablename__ = "mock_marketplace_events"
+
+    event_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
+    agreement_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("mock_marketplace_agreements.agreement_id"), index=True
+    )
+    source: Mapped[SubscriptionSource] = mapped_column(
+        _enum(SubscriptionSource, "subscription_source"), default=SubscriptionSource.MOCK_MARKETPLACE
+    )
+    kind: Mapped[MockMarketplaceEventKind] = mapped_column(
+        _enum(MockMarketplaceEventKind, "mock_marketplace_event_kind")
+    )
+    #: "<agreement_id>:<kind>:<term_number>" — 같은 전이의 두 번째 기록을 막는다.
+    dedupe_key: Mapped[str] = mapped_column(String(200), unique=True)
+    #: 공급자 쪽 사건 시각(만료면 기간 끝 시각).
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("source = 'MOCK_MARKETPLACE'", name="source_is_mock"),
+        Index(
+            "ix_mock_marketplace_events_unprocessed",
+            "created_at",
+            postgresql_where=text("processed_at IS NULL"),
         ),
     )
 

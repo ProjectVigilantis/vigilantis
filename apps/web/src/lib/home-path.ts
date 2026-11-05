@@ -12,6 +12,9 @@
 // 고객사 계정과 고객 범위가 있는 플랫폼 계정(중앙 관리자 · 담당 고객이 하나 이상인 고객 담당자)이다. 담당 고객이
 // 없는 고객 담당자에게는 열지 않는다. 받는 데이터 · 실시간 이벤트를 자기 고객사 · 담당 고객으로 거르는 것은 서버다.
 // 이 판정은 셸(메뉴 · GNB 조회 · 실시간 연결)과 대시보드의 서버 측 안내만 가른다.
+//
+// 구독(`/subscription` · T-16 #528)은 고객사 자기 구독이라 고객사 중앙계정 · 고객사 직원계정 모두에 연다(쓰기는 서버가
+// 고객사 중앙계정만 받는다). 플랫폼 계정에는 자기 구독이 없다(서버 403). 첫 화면은 바꾸지 않는다.
 
 import { canManageUsers, hasCustomerScope, isCentralAdmin, isPlatform, type AccessSubject } from './roles.ts';
 import { INQUIRIES_PATH, SIGNUP_REQUESTS_PATH } from './support.ts';
@@ -30,6 +33,7 @@ export const STAFF_PATH = '/users/tenants';
  * (`/tenants/[id]/settings`)에서 들어간다 — 전체 고객을 고르는 메뉴는 두지 않는다.
  */
 export const SETTINGS_PATH = '/settings';
+export const SUBSCRIPTION_PATH = '/subscription';
 
 /** 통합 관제(MON-001) — 자산 · 보안 두 축을 한 화면에 둔다(2026-10-29). */
 export const MONITORING_PATH = '/monitoring';
@@ -94,6 +98,11 @@ export function businessOpen(user: AccessSubject | null): boolean {
 /** 고객사 계정의 업무 메뉴 — 대시보드와 관제. 고객사 상세가 없으니 관제를 메뉴에 둔다(관리자는 고객사 상세에서 들어간다). */
 export const CUSTOMER_BUSINESS_PATHS: readonly string[] = [CUSTOMER_HOME, MONITORING_PATH, LOGS_PATH];
 
+/** 자기 구독 화면이 열려 있나 — 확인된 고객사 계정이면 역할과 관계없이 연다. */
+export function subscriptionOpen(user: AccessSubject | null): boolean {
+  return user?.account_type === 'TENANT';
+}
+
 export function homePathFor(user: AccessSubject): string {
   // 담당 고객이 없는 고객 담당자는 대시보드가 닫혀 있어 고객 관리(배정 없음 안내)로 보낸다.
   if (isPlatform(user)) return businessOpen(user) ? PLATFORM_HOME : TENANTS_PATH;
@@ -102,12 +111,18 @@ export function homePathFor(user: AccessSubject): string {
 
 /**
  * 사이드바에 보일 경로(순서대로). 계정을 아직 모르면(null — 확인 전 · 조회 실패 · 미로그인) 아무 메뉴도 열지 않는다.
- * 업무 화면은 `businessOpen`, 고객 관리는 플랫폼, 사용자 관리는 `canManageUsers`, 고객 설정은 고객사 계정이 연다.
+ * 업무 화면은 `businessOpen`, 고객 관리는 플랫폼, 사용자 관리는 `canManageUsers`가 연다.
+ * 고객 설정과 자기 구독은 고객사 계정에 연다.
  */
 export function navPathsFor(user: AccessSubject | null): string[] {
   if (user === null) return [];
   // 고객 설정은 고객사 계정이면 역할과 관계없이 연다. 플랫폼 계정은 고객사 상세에서 들어간다.
-  if (!isPlatform(user)) return [...CUSTOMER_BUSINESS_PATHS, ...(canManageUsers(user) ? [USERS_PATH] : []), SETTINGS_PATH];
+  if (!isPlatform(user)) return [
+    ...CUSTOMER_BUSINESS_PATHS,
+    ...(canManageUsers(user) ? [USERS_PATH] : []),
+    SETTINGS_PATH,
+    SUBSCRIPTION_PATH,
+  ];
   return [
     ...(businessOpen(user) ? BUSINESS_PATHS : []),
     ...(isPlatform(user) ? [TENANTS_PATH] : []),

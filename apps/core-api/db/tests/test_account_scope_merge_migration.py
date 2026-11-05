@@ -1,14 +1,16 @@
-"""account_type / auto_action_resumed_at 병합 리비전 — 실제 PostgreSQL/Alembic.
+"""account_type / auto_action_resumed_at 병합 리비전(c492d6e8f4a2)과 그 뒤의 head — 실제 PostgreSQL/Alembic.
 
 지키는 것: 부모 2개 · 단일 head · 새 DB base→head · 옛 feature 단독 / 옛 dev 단독 DB 가
 각각 head 로 올라가 두 칸을 모두 갖고 시드 데이터를 보존 · 병합 리비전을 지난 단일 head · ORM 일치.
 병합 뒤에 리비전이 이어 붙어도(담당 배정 · audit_events 병합 포함) 같은 사실을 본다.
+#528 만 적용한 DB도 계정 구분과 감사 기록을 실제로 추가하며 기존 구독 · 이력을 보존한다.
 테스트마다 고유 이름의 일회용 DB 를 만들고 지운다(공용 pg_engine DB 의 head 를 건드리지 않는다).
 """
 
 from __future__ import annotations
 
 import uuid
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -23,6 +25,8 @@ from sqlalchemy import create_engine, inspect, text
 
 MERGE = "c492d6e8f4a2"
 FEATURE_REVISION = "f492c4a8d2e1"  # app_users.account_type — 가지의 끝
+SUBSCRIPTION_REVISION = "a6d2f8c1b347"  # tenants 구독 칸 + tenant_subscription_history — 부모 f514
+HISTORY_ID = "33333333-3333-4333-8333-333333333333"
 DEV_REVISION = "f514a6c3d201"  # tenants.auto_action_resumed_at 가지
 FORK = "e492a3b5c701"
 ISSUER = "https://cognito-idp.ap-northeast-2.amazonaws.com/pool-merge"
@@ -138,7 +142,7 @@ def test_merge_revision_joins_both_branches_into_a_single_head(merge_db):
     assert script.get_revision(DEV_REVISION).down_revision == FORK
 
 
-def test_fresh_database_upgrades_base_to_merge_head(merge_db):
+def test_fresh_database_upgrades_base_to_head(merge_db):
     config, engine = merge_db
     command.upgrade(config, "head")
     assert _versions(engine) == {_head(config)}
@@ -148,7 +152,7 @@ def test_fresh_database_upgrades_base_to_merge_head(merge_db):
         assert compare_metadata(MigrationContext.configure(conn), models.Base.metadata) == []
 
 
-def test_old_feature_only_database_upgrades_to_merge_head_keeping_data(merge_db):
+def test_old_feature_only_database_upgrades_to_head_keeping_data(merge_db):
     config, engine = merge_db
     command.upgrade(config, FEATURE_REVISION)
     assert _versions(engine) == {FEATURE_REVISION}
@@ -159,7 +163,7 @@ def test_old_feature_only_database_upgrades_to_merge_head_keeping_data(merge_db)
     _assert_merged_head(engine, config, expected_account_type="TENANT")
 
 
-def test_old_dev_only_database_upgrades_to_merge_head_keeping_data(merge_db):
+def test_old_dev_only_database_upgrades_to_head_keeping_data(merge_db):
     config, engine = merge_db
     command.upgrade(config, DEV_REVISION)
     assert _versions(engine) == {DEV_REVISION}
@@ -169,3 +173,59 @@ def test_old_dev_only_database_upgrades_to_merge_head_keeping_data(merge_db):
     command.upgrade(config, "head")
     # 옛 dev 의 소속 사용자는 f492 백필 규칙대로 TENANT 로 분류된다(승격 없음)
     _assert_merged_head(engine, config, expected_account_type="TENANT")
+
+
+def test_subscription_only_database_upgrades_to_head_running_the_account_scope_branch(merge_db):
+    # #528 을 이미 적용한 DB(a6d — 부모 f514). head 로 올리면 #492 가지(f492 → c492)를 실제로
+    # 실행한다. a6d 의 부모를 c492 로 바꿨다면 이 DB 는 #492 를 이미 적용한 것으로 보여 그 가지를 건너뛴다
+    config, engine = merge_db
+    command.upgrade(config, SUBSCRIPTION_REVISION)
+    assert _versions(engine) == {SUBSCRIPTION_REVISION}
+    assert FEATURE_COLUMN[1] not in _columns(engine, FEATURE_COLUMN[0])
+    tables = set(inspect(engine).get_table_names())
+    assert "tenant_subscription_history" in tables
+    _seed_tenant_and_user(engine, with_account_type=False)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE tenants SET plan = 'Business', period_start = '2026-10-31', "
+                "period_end = '2026-11-29', cancel_at_period_end = true, billing_anchor_day = 31, "
+                "amount_minor = 990000, currency = 'KRW' WHERE tenant_id = :tenant"
+            ),
+            {"tenant": TENANT_ID},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO tenant_subscription_history (history_id, tenant_id, plan, period_start, "
+                "period_end, cancel_at_period_end, archived_at) "
+                "VALUES (:id, :tenant, 'pilot', '2026-01-01', '2026-01-31', false, now())"
+            ),
+            {"id": HISTORY_ID, "tenant": TENANT_ID},
+        )
+
+    command.upgrade(config, "head")
+
+    # 소속 사용자는 f492 백필 규칙대로 TENANT 로 분류된다(승격 없음)
+    _assert_merged_head(engine, config, expected_account_type="TENANT")
+    assert "audit_events" in inspect(engine).get_table_names()
+    with engine.connect() as conn:
+        subscription = conn.execute(
+            text(
+                "SELECT plan, period_start, period_end, cancel_at_period_end, billing_anchor_day, "
+                "amount_minor, currency FROM tenants WHERE tenant_id = :tenant"
+            ),
+            {"tenant": TENANT_ID},
+        ).one()
+        assert tuple(subscription) == (
+            "Business", date(2026, 10, 31), date(2026, 11, 29), True, 31, 990000, "KRW"
+        )
+        history = conn.execute(
+            text(
+                "SELECT history_id::text, tenant_id::text, plan, period_start, period_end "
+                "FROM tenant_subscription_history"
+            )
+        ).all()
+        assert [tuple(r) for r in history] == [
+            (HISTORY_ID, TENANT_ID, "pilot", date(2026, 1, 1), date(2026, 1, 31))
+        ]
+        assert compare_metadata(MigrationContext.configure(conn), models.Base.metadata) == []
