@@ -10,6 +10,7 @@
 #   - errors:    REST 공통 오류 봉투 (이슈 #32)
 #   - tenants:   /api/v1/tenants 관리자 API — 고객 계정 연결 · 원격 회수 (Post-MVP T-4)
 #   - auth:      /api/v1/auth 로그인 · 로그아웃 · 현재 사용자 (Post-MVP T-1)
+#   - subscriptions: /api/v1/me/subscription 고객사 사용자의 자기 구독 (Post-MVP T-16 · #528)
 # ==============================================================================
 
 from .actions import (
@@ -131,6 +132,13 @@ from .support import (
     NotificationKind,
     SignupRequestStatus,
 )
+from .subscriptions import (
+    CustomerSubscriptionResponse,
+    MockAgreement,
+    SubscriptionAction,
+    SubscriptionPurchaseRequest,
+    SubscriptionStopRequest,
+)
 
 __all__ = [
     "SignupRequestAccepted",
@@ -222,6 +230,11 @@ __all__ = [
     "TenantVerification",
     "TenantVerificationResult",
     "TenantVerifyResponse",
+    "CustomerSubscriptionResponse",
+    "MockAgreement",
+    "SubscriptionAction",
+    "SubscriptionPurchaseRequest",
+    "SubscriptionStopRequest",
     "CodeRequest",
     "CurrentUserResponse",
     "LoginRequest",

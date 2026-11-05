@@ -36,6 +36,9 @@ function tenant(over: Partial<TenantListItem> & Pick<TenantListItem, 'tenant_id'
     last_verification: null,
     asset_count: 0,
     open_incident_count: 0,
+    subscription: null,
+    subscription_source: null,
+    entitlement_ends_at: null,
     ...over,
   };
 }

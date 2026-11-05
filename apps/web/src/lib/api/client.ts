@@ -1,9 +1,11 @@
 // API 호출 계층 — 오류 봉투를 ApiError로 변환하고 계약 엔드포인트의 타입드 함수를 제공합니다.
 
 import type {
+  AssetCostsResponse,
   AssetsResponse,
   AuditEventsResponse,
   CurrentUserResponse,
+  CustomerSubscriptionResponse,
   ErrorCode,
   ErrorResponse,
   ExecuteActionRequest,
@@ -31,6 +33,7 @@ import type {
   SignupRequestStatusChange,
   StaffResponse,
   StaffTenantsResponse,
+  SubscriptionPurchasePlan,
   TenantCreateRequest,
   TenantCreateResponse,
   TenantDetail,
@@ -52,7 +55,6 @@ import type {
 // `node --test`가 별칭을 못 풀어 상대 경로를 쓴다(realtime-events와 같은 이유).
 import { navigateToLogin } from '../auth-redirect.ts';
 import type { PlatformStatusResponse } from '../platform-status.ts';
-import type { AssetCostsResponse } from '../asset-costs.ts';
 import type { ThreatEventsResponse, ThreatRangeDays } from '../threat-events.ts';
 
 /**
@@ -178,7 +180,7 @@ function paginationSuffix(pagination?: PaginationParams): string {
 }
 
 /**
- * 서버 컴포넌트도 부르는 조회(현재 계정 · 고객 관리 · 사용자 관리 포함). 전송을 주입받아 같은 경로 · 타입을 브라우저와 서버가 함께 쓴다 —
+ * 서버 컴포넌트도 부르는 조회(현재 계정 · 고객 관리 · 사용자 관리 · 자기 구독 포함). 전송을 주입받아 같은 경로 · 타입을 브라우저와 서버가 함께 쓴다 —
  * 서버 쪽은 `serverApi()`(lib/api/server.ts), 브라우저 쪽은 아래 모듈 export다.
  */
 export function createReadApi(transport: ApiTransport) {
@@ -252,9 +254,13 @@ export function createReadApi(transport: ApiTransport) {
       return request<ThreatEventsResponse>(`/threat-events?days=${days}`, undefined, transport);
     },
 
-    /** 자산 유형별 최근 30일 비용(Cost Explorer). FE 제안 계약이라 서버에 아직 없다 — 실서버는 404다(lib/asset-costs.ts). */
-    getAssetCosts(): Promise<AssetCostsResponse> {
-      return request<AssetCostsResponse>('/costs/by-asset-type', undefined, transport);
+    /**
+     * 자산 유형별 최근 30일 자원 사용 금액(Cost Explorer, #572 11번). 고객사 계정은 `tenantId`를 생략한다(자기 고객사).
+     * 플랫폼 계정은 범위 안 고객사 하나를 골라야 한다 — 없으면 422, 범위 밖이면 404다. 읽지 못해도 200 + `UNAVAILABLE`이다.
+     */
+    getAssetCosts(tenantId?: string): Promise<AssetCostsResponse> {
+      const query = tenantId === undefined ? '' : `?tenant_id=${encodeURIComponent(tenantId)}`;
+      return request<AssetCostsResponse>(`/costs/by-asset-type${query}`, undefined, transport);
     },
 
     /** 조치 실행 · 종료 판단 감사 기록(#544). 로그 화면(app/logs)이 부른다. 최신순이고 `next_cursor`를 그대로 돌려주면 다음 쪽이다. */
@@ -281,12 +287,20 @@ export function createReadApi(transport: ApiTransport) {
     getInquiries(pagination?: PaginationParams): Promise<InquiriesResponse> {
       return request<InquiriesResponse>(`/inquiries${paginationSuffix(pagination)}`, undefined, transport);
     },
+
+    /**
+     * 자기 고객사의 구독(#528). 대상 고객사는 세션이 정한다. 실패는 그대로 올린다 —
+     * 조회 실패를 Free 나 미등록으로 바꿔 그리지 않는다(미등록은 성공 응답의 `subscription: null`이다).
+     */
+    getMySubscription(): Promise<CustomerSubscriptionResponse> {
+      return request<CustomerSubscriptionResponse>('/me/subscription', undefined, transport);
+    },
   };
 }
 
 export const {
   getAssets, getMetricsTimeseries, getIncidents, getIncident, getTenants, getTenant, getTenantSettings,
-  getSignupRequests, getInquiries, getThreatEvents, getAuditEvents,
+  getSignupRequests, getInquiries, getThreatEvents, getAuditEvents, getMySubscription,
 } = createReadApi(BROWSER);
 
 /**
@@ -375,6 +389,25 @@ export function updateTenantSettings(tenantId: string, body: TenantSettingsUpdat
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
+}
+
+/* ─────────────────────── /me/subscription (T-16 · #528) ─────────────────────── */
+/* 유료 권리의 원천은 서버 안의 모의 Marketplace 계약이다 — 실제 AWS 구매 · 청구가 없다. 응답은 전부 바뀐 뒤의
+   CustomerSubscriptionResponse다. tenant_id 는 싣지 않는다 — 대상은 세션의 고객사다. 쓰기는 고객사 중앙계정만 받는다(서버 403). */
+
+/** 모의 Marketplace 구매 요청(202) — PENDING 계약만 생긴다. 활성화 · 실패는 서버 처리 주기가 정하고 그 전에는 권리가 없다. */
+export function purchaseMySubscription(plan: SubscriptionPurchasePlan): Promise<CustomerSubscriptionResponse> {
+  return postJson<CustomerSubscriptionResponse>('/me/subscription/purchase', { plan });
+}
+
+/** 활성 계약의 자동 갱신을 끈다(본문 없음). 즉시 해지가 아니다 — 권리는 지금 기간의 끝 시각까지 그대로다. */
+export function cancelMyRenewal(): Promise<CustomerSubscriptionResponse> {
+  return request<CustomerSubscriptionResponse>('/me/subscription/cancel', { method: 'POST' });
+}
+
+/** 서비스 이용을 즉시 중단한다(고객사 관리 화면의 정지와 같은 SUSPENDED). 계약은 해지하지 않는다. 재개는 중앙 관리계정 또는 해당 고객사가 배정된 관리자 직원계정이 한다. */
+export function stopMyService(reason: string): Promise<CustomerSubscriptionResponse> {
+  return postJson<CustomerSubscriptionResponse>('/me/subscription/stop', { reason });
 }
 
 /* ──────────────────────────── /auth (#492 PR 1) ──────────────────────────── */

@@ -18,6 +18,7 @@ const ready: AssetCostsResponse = {
   currency: 'USD',
   period_start: '2026-10-04',
   period_end: '2026-11-03',
+  regions: ['ap-northeast-2'],
   total: '100.00',
   items: [
     { bucket: 'EC2', amount: '75.00' },

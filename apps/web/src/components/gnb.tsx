@@ -10,6 +10,7 @@ import {
   Activity,
   Building2,
   ClipboardList,
+  CreditCard,
   LayoutDashboard,
   LifeBuoy,
   ScrollText,
@@ -32,6 +33,7 @@ import {
   MONITORING_PATH,
   SETTINGS_PATH,
   TENANTS_PATH,
+  SUBSCRIPTION_PATH,
   USERS_PATH,
   businessOpen,
   confirmedAccount,
@@ -56,6 +58,7 @@ import { cn } from '@/lib/utils';
  *
  * `고객`은 Post-MVP T-4 플랫폼 운영자 화면이다(고객 계정 연결 · 원격 회수). 관제 화면이 아니라 뒤에 둔다.
  * 2026-10-29부터 `관제`는 메뉴에서 뺐다. 관리자 화면은 고객사 · 직원의 권한과 오류를 보는 자리라 고객사 상세에서 들어간다.
+ * `구독`은 T-16(#528) 고객사 계정의 자기 구독 화면이다(모의 Marketplace 계약). 맨 뒤에 둔다.
  * 어떤 계정에게 어떤 항목을 보일지는 `navPathsFor`(lib/home-path.ts)가 정한다 — 숨김은 편의이고 차단은 서버 403이다.
  */
 const NAV: Readonly<Record<string, { label: string; icon: LucideIcon }>> = {
@@ -69,6 +72,7 @@ const NAV: Readonly<Record<string, { label: string; icon: LucideIcon }>> = {
   [SETTINGS_PATH]: { label: '고객사 설정', icon: SlidersHorizontal },
   [SIGNUP_REQUESTS_PATH]: { label: '도입 신청', icon: ClipboardList },
   [INQUIRIES_PATH]: { label: '고객사 문의', icon: LifeBuoy },
+  [SUBSCRIPTION_PATH]: { label: '구독', icon: CreditCard },
 };
 
 /** 현재 계정(세션 Provider · #492). 확인 전 · 미로그인 · 조회 실패는 null이다(메뉴 · 업무 기능을 열지 않는다). */

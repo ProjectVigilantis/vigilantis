@@ -1,7 +1,7 @@
 """T-7 tenant settings(f7c1a9e4d201)와 dev head(f515a552e001) 병합 리비전.
 
 지키는 것: 부모 2개(둘 다 그대로) · 단일 head · 새 DB / 옛 dev head DB / 옛 T-7 head DB 가 같은 head 로 올라가
-기존 행(차단 중 TOTP 복구 상태 · 접수 행 · 고객 설정)을 보존 · 38개 테이블(+ #565 신청 결정) · ORM 일치. 최신 병합은 T-7 병합과 #565 결정 리비전을 잇는다.
+기존 행(차단 중 TOTP 복구 상태 · 접수 행 · 고객 설정)을 보존 · head 테이블 수 · ORM 일치. 그 뒤 병합은 T-7 병합과 #565 결정 리비전을 잇는다.
 테스트마다 일회용 DB 를 만들고 지운다.
 """
 
@@ -36,8 +36,9 @@ DEV_ONLY_TABLES = {
     "notification_reads",
 }
 DECISIONS = "a565c8d1e901"  # dev #571 — DEV_HEAD 의 자식
-LATEST = "f565c8d1a9e3"  # MERGE(T-7 병합)와 DECISIONS 를 잇는 최신 병합
-HEAD_TABLES = 38
+LATEST = "f565c8d1a9e3"  # MERGE(T-7 병합)와 DECISIONS 를 잇는 병합 — 이제 head 의 조상(#528 병합이 뒤에 붙는다)
+# head 의 테이블 수 — dev 35종 + T-7 3종 + #528 구독 보존 · 모의 계약 · 이벤트 3종
+HEAD_TABLES = 41
 CONFIG_PATH = Path(__file__).resolve().parents[2] / "alembic.ini"
 NOW = datetime(2026, 10, 31, 9, 0, tzinfo=UTC)
 
@@ -124,10 +125,16 @@ def _insert_tenant_settings(conn, tenant_id) -> None:
     )
 
 
+def _single_head_through_latest(script) -> str:
+    [head] = script.get_heads()  # head 를 병합으로 고정하지 않는다 — 뒤에 리비전이 붙어도 깨지지 않는다
+    assert LATEST in {rev.revision for rev in script.walk_revisions(base="base", head=head)}
+    return head
+
+
 def _assert_merged_head(config, engine):
-    assert ScriptDirectory.from_config(config).get_heads() == [LATEST]
+    head = _single_head_through_latest(ScriptDirectory.from_config(config))
     with engine.connect() as conn:
-        assert conn.scalar(text("SELECT version_num FROM alembic_version")) == LATEST
+        assert conn.scalar(text("SELECT version_num FROM alembic_version")) == head
         names = set(inspect(conn).get_table_names()) - {"alembic_version"}
         assert len(names) == HEAD_TABLES
         assert (T7_TABLES | DEV_ONLY_TABLES | {"signup_request_decisions"}) <= names
@@ -188,7 +195,7 @@ def test_t7_head_database_upgrades_keeping_tenant_settings(scratch):
 
 def test_latest_merge_joins_t7_merge_and_decisions_into_the_single_head():
     script = ScriptDirectory.from_config(Config(str(CONFIG_PATH)))
-    assert script.get_heads() == [LATEST]
+    _single_head_through_latest(script)
     assert set(script.get_revision(LATEST).down_revision) == {MERGE, DECISIONS}
     assert script.get_revision(DECISIONS).down_revision == DEV_HEAD
     assert set(script.get_revision(MERGE).down_revision) == {DEV_HEAD, T7_HEAD}
