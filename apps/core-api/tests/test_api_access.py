@@ -286,6 +286,8 @@ TENANT_SCOPED_ROUTES = {
     ("GET", "/api/v1/inquiries"),
     ("POST", "/api/v1/inquiries"),
     ("GET", "/api/v1/metrics/timeseries"),
+    # 유형별 비용(#572 11번) — 고객사 계정은 자기 고객, 플랫폼 계정은 범위 안에서 고른 고객 하나
+    ("GET", "/api/v1/costs/by-asset-type"),
 }
 
 
@@ -327,6 +329,8 @@ def test_business_routes_outside_tenant_scope_stay_platform_only(client_pg, logi
         ("GET", "/api/v1/audit-events"): (200, None),
         ("GET", "/api/v1/inquiries"): (200, None),
         ("GET", "/api/v1/metrics/timeseries"): (200, None),
+        # 읽지 못해도 200 + UNAVAILABLE 이다(테스트 환경은 고객 자격을 얻지 못한다)
+        ("GET", "/api/v1/costs/by-asset-type"): (200, None),
         ("POST", "/api/v1/inquiries"): (201, None),
         ("GET", "/api/v1/incidents/{incident_id}"): (404, "INCIDENT_NOT_FOUND"),
         ("POST", "/api/v1/incidents/{incident_id}/resolve"): (404, "INCIDENT_NOT_FOUND"),

@@ -1315,3 +1315,37 @@ export interface TenantSettingsUpdateRequest {
   protected_tags?: ProtectedTagRule[];
   notifications?: NotificationSettingsUpdateRequest;
 }
+
+/** 비용을 묶는 자산 유형 칸(packages/schemas/api/costs.py `CostBucket`). 보안 그룹 · NACL · ASG · 시작 템플릿은 요금이 없어 칸이 없다. */
+export type CostBucket = 'EC2' | 'EBS' | 'ALB_TARGET_GROUP' | 'OTHER';
+
+/**
+ * `GET /api/v1/costs/by-asset-type`(#572 11번): 고객사 하나의 최근 30일 자원 사용 금액(Cost Explorer, RECORD_TYPE=Usage).
+ * 크레딧 · 환불 · 세금은 빼므로 청구 금액이 아니다. 고객사 계정은 자기 고객사, 플랫폼 계정은 `?tenant_id=`가 필요하다.
+ * 서버가 고객사마다 하루(UTC) 한 번 받아 두고, 읽지 못해도 200 + `UNAVAILABLE`이다.
+ */
+export interface AssetCostsResponse {
+  status: 'READY' | 'UNAVAILABLE';
+  /**
+   * UNAVAILABLE 사유. READY면 null. COST_EXPLORER_ACCESS_DENIED · COST_EXPLORER_NOT_ENABLED ·
+   * COST_EXPLORER_DATA_UNAVAILABLE · COST_EXPLORER_THROTTLED · COST_CURRENCY_UNSUPPORTED · TENANT_<상태> · 그 밖의 AWS 오류 코드.
+   */
+  reason_code: string | null;
+  currency: 'USD';
+  /** 조회 구간. 날짜(YYYY-MM-DD, UTC)이고 끝은 포함하지 않는다(Cost Explorer 규칙). */
+  period_start: string;
+  period_end: string;
+  /** 비용을 거른 리전 = 고객사의 관제 리전. 관제 밖 리전 · 리전 없는(global) 요금은 빠진다. */
+  regions: string[];
+  /** 네 칸의 합(반올림한 칸의 합). 소수 2자리 문자열. UNAVAILABLE이면 null. */
+  total: string | null;
+  /** 네 칸 전부(0원 포함), EC2 · EBS · ALB_TARGET_GROUP · OTHER 순서. UNAVAILABLE이면 빈 배열. */
+  items: { bucket: CostBucket; amount: string }[];
+  /** 구간 안에 확정되지 않은 금액(Cost Explorer `Estimated`)이 있으면 true. UNAVAILABLE이면 false. */
+  estimated: boolean;
+  /**
+   * 서버가 Cost Explorer에서 받은 시각(UNAVAILABLE이면 실패를 정한 시각). 하루 한 번 받고 그 사이는 저장분을 준다.
+   * AWS 비용 데이터 자체가 24시간까지 늦게 반영될 수 있어, 최근 하루 이틀 금액은 나중에 바뀔 수 있다.
+   */
+  retrieved_at: IsoDateTime;
+}

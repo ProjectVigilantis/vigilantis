@@ -57,6 +57,7 @@ from routers import actions as actions_router  # noqa: E402
 from routers import assets as assets_router  # noqa: E402
 from routers import audit as audit_router  # noqa: E402
 from routers import auth as auth_router  # noqa: E402
+from routers import costs as costs_router  # noqa: E402
 from routers import incidents as incidents_router  # noqa: E402
 from routers import inquiries as inquiries_router
 from routers import metrics as metrics_router  # noqa: E402
@@ -212,6 +213,8 @@ def create_app() -> FastAPI:
     app.include_router(assets_router.router, dependencies=protected)
     app.include_router(audit_router.router, dependencies=protected)
     app.include_router(auth_router.router)
+    # 유형별 비용(#572 11번)도 세션 배선만 쓰고, 대상 고객사와 범위는 라우트가 건다
+    app.include_router(costs_router.router, dependencies=protected)
     app.include_router(incidents_router.router, dependencies=protected)
     app.include_router(inquiries_router.router, dependencies=protected)
     app.include_router(metrics_router.router, dependencies=protected)
