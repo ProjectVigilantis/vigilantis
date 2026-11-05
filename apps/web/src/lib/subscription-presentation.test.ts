@@ -13,6 +13,8 @@ import type { CustomerSubscriptionResponse } from '../types/api.ts';
 // node --test strips TS, but TSX and the application's @/ imports need the existing compiler.
 const sourceRoot = new URL('../', import.meta.url);
 const require = createRequire(import.meta.url);
+// Node 24 also hooks require.resolve; resolve Next's CJS entry before registering ours.
+const nextLinkUrl = pathToFileURL(require.resolve('next/link')).href;
 const compilerOptions: ts.CompilerOptions = {
   module: ts.ModuleKind.ESNext,
   moduleResolution: ts.ModuleResolutionKind.Bundler,
@@ -21,8 +23,8 @@ const compilerOptions: ts.CompilerOptions = {
 };
 const hooks = registerHooks({
   resolve(specifier, context, nextResolve) {
-    if (specifier.startsWith('next/') && context.parentURL?.startsWith(sourceRoot.href)) {
-      return nextResolve(pathToFileURL(require.resolve(specifier)).href, context);
+    if (specifier === 'next/link' && context.parentURL?.startsWith(sourceRoot.href)) {
+      return nextResolve(nextLinkUrl, context);
     }
     if (specifier.startsWith('@/') || (specifier.startsWith('.') && context.parentURL?.startsWith(sourceRoot.href))) {
       const resolved = ts.resolveModuleName(specifier, fileURLToPath(context.parentURL!), compilerOptions, ts.sys).resolvedModule;
