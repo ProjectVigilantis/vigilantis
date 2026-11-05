@@ -1,10 +1,11 @@
-// 자산 유형별 비용(2026-11-03 초안): 고객사 대시보드 자산 현황의 "유형별 비용"이 최근 30일 동안 실제로 나간 돈을 보이는 자리다.
+// 자산 유형별 비용(2026-11-03 초안 · #572 11번 계약): 고객사 대시보드 자산 현황의 "유형별 비용"이 최근 30일 동안
+// 자원이 쓴 금액을 보이는 자리다.
 //
-// 서버에 이 API가 아직 없다. 원천은 AWS Cost Explorer `GetCostAndUsage`(고객사 계정 역할로 조회, 일 단위 · 비혼합 비용)이며,
-// 아래 `AssetCostsResponse`는 FE가 제안하는 계약이다. 목업(fe-mock)만 응답하고 실서버는 404라 화면이 그 사실을 적는다.
-// BE가 계약을 정하면 타입을 types/api.ts로 옮기고 이 머리말을 고친다.
+// 계약(`AssetCostsResponse` · `CostBucket`)은 types/api.ts에 있다(packages/schemas/api/costs.py). 원천은 AWS Cost Explorer
+// `GetCostAndUsage`(고객사 계정 역할로 조회, 비혼합 비용, RECORD_TYPE=Usage)라 크레딧 · 환불 · 세금이 빠진 사용 금액이고,
+// 고객사의 관제 리전(`regions`)으로 거른다. 이 파일은 화면 계산만 둔다.
 //
-// 자산 유형과 Cost Explorer 항목의 대응(서버가 묶는다):
+// 자산 유형과 Cost Explorer 항목의 대응(서버가 묶는다, apps/core-api/services/costs.py):
 //   EC2              SERVICE = "Amazon Elastic Compute Cloud - Compute"
 //   EBS              SERVICE = "EC2 - Other" 중 USAGE_TYPE 이름에 `EBS:`가 든 항목(볼륨 · 스냅샷 · IOPS · 처리량)
 //   ALB_TARGET_GROUP SERVICE = "Amazon Elastic Load Balancing"(돈은 대상 그룹이 아니라 ALB에 붙는다)
@@ -13,38 +14,11 @@
 // 서버는 SERVICE · USAGE_TYPE 기준으로 묶어 받은 뒤 USAGE_TYPE 이름을 보고 가른다.
 // 보안 그룹 · NACL · Auto Scaling 그룹 · 시작 템플릿은 AWS 요금이 없다.
 
-import type { AssetType } from '../types/api.ts';
+import type { AssetCostsResponse, AssetType, CostBucket } from '../types/api.ts';
 
-type IsoDateTime = string;
-
-export type CostBucket = 'EC2' | 'EBS' | 'ALB_TARGET_GROUP' | 'OTHER';
+export type { AssetCostsResponse, CostBucket };
 
 export const COST_BUCKETS: readonly CostBucket[] = ['EC2', 'EBS', 'ALB_TARGET_GROUP', 'OTHER'];
-
-export interface AssetCostsResponse {
-  /** UNAVAILABLE = Cost Explorer를 읽지 못했다(권한 없음 · 계정에서 꺼짐 · 호출 실패). */
-  status: 'READY' | 'UNAVAILABLE';
-  /** UNAVAILABLE 사유. 예: COST_EXPLORER_ACCESS_DENIED · COST_EXPLORER_NOT_ENABLED · COST_EXPLORER_THROTTLED. READY면 null. */
-  reason_code: string | null;
-  currency: 'USD';
-  /** 조회 구간. 날짜(YYYY-MM-DD, UTC)이고 끝은 포함하지 않는다(Cost Explorer 규칙). */
-  period_start: string;
-  period_end: string;
-  /** 구간 합계. 소수 2자리 문자열. UNAVAILABLE이면 null. */
-  total: string | null;
-  /** 네 칸 전부 싣는다(0원 포함). UNAVAILABLE이면 빈 배열. */
-  items: { bucket: CostBucket; amount: string }[];
-  /**
-   * 구간 안에 확정되지 않은 금액(Cost Explorer 결과의 `Estimated`)이 하나라도 있으면 true. 화면은 최종 청구 금액과 구분해 "추정치"로 적는다.
-   * UNAVAILABLE이면 false.
-   */
-  estimated: boolean;
-  /**
-   * 서버가 Cost Explorer에서 받아 둔 시각. 하루 한 번 받고(호출당 과금) 그 사이는 저장분을 준다.
-   * 받은 시각이 최신이어도 AWS 비용 데이터 자체가 24시간보다 늦게 반영될 수 있어, 최근 하루 이틀 금액은 나중에 바뀔 수 있다.
-   */
-  retrieved_at: IsoDateTime;
-}
 
 /** AWS 요금이 붙지 않는 유형. 화면은 금액 대신 "과금 없음"으로 적는다. */
 export const FREE_ASSET_TYPES: readonly AssetType[] = ['SG', 'NACL', 'AUTO_SCALING_GROUP', 'LAUNCH_TEMPLATE'];

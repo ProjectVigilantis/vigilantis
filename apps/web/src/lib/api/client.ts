@@ -1,6 +1,7 @@
 // API 호출 계층 — 오류 봉투를 ApiError로 변환하고 계약 엔드포인트의 타입드 함수를 제공합니다.
 
 import type {
+  AssetCostsResponse,
   AssetsResponse,
   AuditEventsResponse,
   CurrentUserResponse,
@@ -54,7 +55,6 @@ import type {
 // `node --test`가 별칭을 못 풀어 상대 경로를 쓴다(realtime-events와 같은 이유).
 import { navigateToLogin } from '../auth-redirect.ts';
 import type { PlatformStatusResponse } from '../platform-status.ts';
-import type { AssetCostsResponse } from '../asset-costs.ts';
 import type { ThreatEventsResponse, ThreatRangeDays } from '../threat-events.ts';
 
 /**
@@ -254,9 +254,13 @@ export function createReadApi(transport: ApiTransport) {
       return request<ThreatEventsResponse>(`/threat-events?days=${days}`, undefined, transport);
     },
 
-    /** 자산 유형별 최근 30일 비용(Cost Explorer). FE 제안 계약이라 서버에 아직 없다 — 실서버는 404다(lib/asset-costs.ts). */
-    getAssetCosts(): Promise<AssetCostsResponse> {
-      return request<AssetCostsResponse>('/costs/by-asset-type', undefined, transport);
+    /**
+     * 자산 유형별 최근 30일 자원 사용 금액(Cost Explorer, #572 11번). 고객사 계정은 `tenantId`를 생략한다(자기 고객사).
+     * 플랫폼 계정은 범위 안 고객사 하나를 골라야 한다 — 없으면 422, 범위 밖이면 404다. 읽지 못해도 200 + `UNAVAILABLE`이다.
+     */
+    getAssetCosts(tenantId?: string): Promise<AssetCostsResponse> {
+      const query = tenantId === undefined ? '' : `?tenant_id=${encodeURIComponent(tenantId)}`;
+      return request<AssetCostsResponse>(`/costs/by-asset-type${query}`, undefined, transport);
     },
 
     /** 조치 실행 · 종료 판단 감사 기록(#544). 로그 화면(app/logs)이 부른다. 최신순이고 `next_cursor`를 그대로 돌려주면 다음 쪽이다. */
