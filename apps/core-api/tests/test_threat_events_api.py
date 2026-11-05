@@ -164,6 +164,35 @@ def test_이벤트가_없으면_빈_목록이다(client_pg, login_as, make_tenan
     assert (body["total"], body["items"]) == (0, [])
 
 
+def test_위협_접수로_쌓인_이벤트가_그_고객사_계정에게_나온다(client_pg, login_as, make_tenant, db, now):
+    """접수(incident_intake)가 이벤트에 대상 계정의 소속을 기록해야 고객사 계정의 목록에 든다(#572 10번)."""
+    import incident_intake
+    from schemas.intake import SecOpsIncidentIntake
+
+    mine, other = make_tenant(), make_tenant()
+    account = db.get(models.Tenant, mine).aws_account_id
+    event_id = str(uuid.uuid4())
+    at = now - timedelta(hours=1)
+    incident_intake.create_incident_from_intake(db, SecOpsIncidentIntake.model_validate({
+        "title": "SSH 브루트포스 시도",
+        "threat_event": {
+            "threat_event_id": event_id, "source_event_id": f"evt-{event_id}", "event_type": "SSH_BRUTE_FORCE",
+            "target_arn": f"arn:aws:ec2:{REGION}:{account}:instance/i-0abc123456789def0",
+            "occurred_at": _z(at), "payload": SSH,
+            "deduplication_key": f"SSH_BRUTE_FORCE:{event_id}", "collected_at": _z(at),
+        },
+        "initial_risk": {
+            "threat_event_id": event_id, "initial_risk_level": "HIGH",
+            "response_mode": "PRE_MITIGATION_0_5S", "reason_codes": ["RISK_SSH_BRUTEFORCE"],
+        },
+    }))
+
+    login_as(UserRole.ADMIN, tenant_id=mine)
+    assert _ids(_get(client_pg)) == [event_id]
+    login_as(UserRole.ADMIN, tenant_id=other)
+    assert _get(client_pg)["total"] == 0
+
+
 # --- 범위 · 관제 리전 --------------------------------------------------------------
 
 
