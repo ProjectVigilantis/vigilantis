@@ -151,6 +151,33 @@ def test_unknown_evaluation_is_not_reported_as_no_proposal(
     assert candidate.status is CandidateStatus.INVALIDATED
 
 
+def test_unknown_stored_failure_reason_is_read_as_null_without_breaking_the_listing(
+    db, client_pg, make_incident,
+):
+    """사유 칸은 자유 문자열이다 — 이 판이 모르는 코드가 한 행에 있어도 목록 조회는 살아야 한다."""
+    incident = make_incident(db, status=IncidentStatus.FAILED)
+    incident.agent_invocation_status = AgentInvocationStatus.FAILED
+    incident.agent_failure_reason = "SOMETHING_NEW"
+    known = make_incident(db, status=IncidentStatus.FAILED)
+    known.agent_invocation_status = AgentInvocationStatus.FAILED
+    known.agent_failure_reason = "MODEL_UNAVAILABLE"
+    db.flush()
+    listing = client_pg.get("/api/v1/incidents")
+    assert listing.status_code == 200
+    by_id = {item["incident_id"]: item["analysis_result"] for item in listing.json()["items"]}
+    assert by_id[incident.incident_id] == {
+        "status": "FAILED", "guardrail_rejections": [], "failure_reason": None,
+    }
+    assert by_id[known.incident_id] == {
+        "status": "FAILED", "guardrail_rejections": [], "failure_reason": "MODEL_UNAVAILABLE",
+    }
+    detail = client_pg.get(f"/api/v1/incidents/{incident.incident_id}")
+    assert detail.status_code == 200
+    assert detail.json()["analysis_result"] == by_id[incident.incident_id]
+    db.refresh(incident)
+    assert incident.agent_failure_reason == "SOMETHING_NEW"  # 저장값은 그대로, 공개만 하지 않는다
+
+
 def test_analysis_listing_has_constant_query_count(db, client_pg, make_incident, make_candidate):
     statements = []
     def capture(conn, cursor, statement, parameters, context, executemany):

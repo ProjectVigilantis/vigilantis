@@ -1134,6 +1134,23 @@ def test_ipv6_ssh_source_is_closed_before_the_paid_model_call(db, client_pg, mon
     assert row.agent_failure_reason == "SOURCE_ADDRESS_UNSUPPORTED"
 
 
+def test_rule_number_resolution_failure_reads_as_server_parameter_unavailable(
+    db, client_pg, monkeypatch, caplog,
+):
+    """빈 규칙 번호가 없는 것은 입력 불가가 아니라 서버 몫 값을 못 정한 것이다 — 상태는 FAILED 그대로."""
+    incident_id = _pending_secops(db, medium=True)
+    monkeypatch.setattr(agent_dispatcher, "resolve_nacl_add_deny_rule_number",
+                        lambda *args, **kwargs: (None, None))
+
+    result = _closed_without_model(db, client_pg, caplog, incident_id, _client())
+
+    assert result == {"status": "FAILED", "guardrail_rejections": [],
+                      "failure_reason": "SERVER_PARAMETER_UNAVAILABLE"}
+    row = incidents_repo.get_incident(db, incident_id)
+    db.refresh(row)
+    assert row.agent_failure_reason == "SERVER_PARAMETER_UNAVAILABLE"
+
+
 def test_model_side_failure_still_reads_as_failed_with_its_reason(db, client_pg, monkeypatch):
     """모델 호출 실패는 조치 없음과 갈린다 — 상태는 FAILED 그대로이고 사유만 더해진다(#434)."""
     incident_id = _pending_secops(db, medium=True)

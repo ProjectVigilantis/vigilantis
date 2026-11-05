@@ -177,8 +177,10 @@ def resolve_secops_rule_numbers(
             target, excluded_rule_numbers=open_rule_numbers.get(target, frozenset()),
         )
         if code is not None or number is None:
+            # 입력 자체는 갖춰졌고 서버 몫 값(규칙 번호)만 못 정한 것이라 입력 불가와 가른다.
             raise GraphInputUnavailable(
-                f"NACL 규칙 번호 선택 불가: {code.value if code is not None else 'SERVER_PARAMETER_UNAVAILABLE'}"
+                f"NACL 규칙 번호 선택 불가: {code.value if code is not None else 'SERVER_PARAMETER_UNAVAILABLE'}",
+                reason=AnalysisFailureReason.SERVER_PARAMETER_UNAVAILABLE,
             )
         numbers[target] = number
     return numbers
