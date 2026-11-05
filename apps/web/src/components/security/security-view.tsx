@@ -33,7 +33,7 @@
 // 구 보안 인시던트 목록(INC-001 `/incidents`)은 세 번째 탭 `인시던트`다(`incidents/incidents-view.tsx`).
 // SSH 무차별 대입은 EC2에, 전체 개방은 SG에 걸리므로 `영향 EC2`·`인터넷 개방` 칸이 둘을 가른다.
 
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 
 import { AssetCard } from '@/components/assets/asset-card';
 import { AssetDetail } from '@/components/assets/asset-detail';
@@ -52,11 +52,13 @@ import {
   SecurityIncidentStatusList,
   ThreatSourcePanel,
 } from '@/components/security/security-summary-panels';
+import { ScopeWideNote } from '@/components/monitoring/scope-wide-note';
 import { StatusBadge } from '@/components/status-badge';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { isJudgedAsset } from '@/lib/asset-filter';
 import type { IncidentPreset } from '@/lib/incident-filter';
+import type { ScopeWideCollection } from '@/lib/monitoring-scope';
 import {
   focusAssets,
   focusScope,
@@ -87,6 +89,7 @@ const FOCUS_LABEL: Record<Focus, { label: string; note: string; tone?: MetricTon
 
 export function SecurityView({
   data,
+  scopeWide = null,
   incidents,
   incidentsError,
   incidentsByArn,
@@ -95,8 +98,12 @@ export function SecurityView({
   initialTab,
   initialPreset,
   renderedAt,
+  heading,
+  embedded = false,
 }: {
   data: AssetsResponse;
+  /** 고객사 상세에서 거르기 전 범위 전체의 수집 메타(lib/monitoring-scope.ts). 거르지 않은 화면은 null이다. */
+  scopeWide?: ScopeWideCollection | null;
   /** 인시던트 목록 전량. `null`은 조회 실패 — 0건과 구분해 패널마다 그 사실을 적는다. */
   incidents: IncidentListItem[] | null;
   /** 조회 실패의 오류 원본 — 인시던트 탭이 CMN-002 인라인으로 그린다. 성공이면 null. */
@@ -113,6 +120,10 @@ export function SecurityView({
   initialPreset?: IncidentPreset;
   /** 페이지가 데이터를 읽은 시각(ISO) — 제목 옆 `마지막 갱신`이 쓴다(`auto-refresh.tsx`). */
   renderedAt: string;
+  /** 띠 위 제목 자리 — 자산 관제와 같다(`assets-view.tsx`). */
+  heading?: ReactNode;
+  /** 다른 화면(고객사 상세) 안에 그린다. 띠를 화면 맨 위에 붙이지 않는다(sticky · 음수 여백 없음). */
+  embedded?: boolean;
 }) {
   const [focus, setFocus] = useState<Focus>('SG');
   const [region, setRegion] = useState<string>(ALL);
@@ -180,9 +191,9 @@ export function SecurityView({
     <Tabs value={tab} onValueChange={setTab} className="gap-4">
       {/* 화면 이름 + 지표 띠 — 한 덩이로 스크롤을 따라온다(자산 관제와 같은 틀 · 그쪽 주석 참조).
           띠는 6칸이라 3 → 6열로 접힌다(빈 칸이 없다). 칸은 전부 필터다(파일 머리말). */}
-      <div className="bg-background sticky top-0 z-20 -mx-(--page-pad) -mt-(--page-pad) px-(--page-pad) pt-(--page-pad) pb-3">
+      <div className={embedded ? 'pb-3' : 'bg-background sticky top-0 z-20 -mx-(--page-pad) -mt-(--page-pad) px-(--page-pad) pt-(--page-pad) pb-3'}>
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-lg font-semibold">보안 관제</h1>
+        {heading ?? <h1 className="text-lg font-semibold">보안 관제</h1>}
         <AutoRefresh renderedAt={renderedAt} />
       </div>
       <MetricStrip className="sm:grid-cols-3 xl:grid-cols-6">
@@ -209,27 +220,31 @@ export function SecurityView({
           읽을 것은 "위협이 얼마나 들어왔고 얼마가 남았나"다. 그 옆에 어느 SG가·무엇이 열렸나(개방 SG + 노출
           포트)와 누가·어느 대역이 들어왔나(외부 위협 출발지)가 1칸씩 선다. 전체 위협 박스는 2칸이라 넓은
           화면에서는 추이 옆에 현황을 나란히 두고, 좁아지면 아래로 쌓는다. */}
-      <div className="grid gap-4 lg:grid-cols-4">
+      <div className="@container/view">
+      <div className="grid gap-4 @3xl/view:grid-cols-2 @6xl/view:grid-cols-4">
         <Panel
-          className="lg:col-span-2"
+          className="@3xl/view:col-span-2"
           title="전체 위협 추이"
           description="위협 판정 자산(선)과 외부 위협 이벤트 발생(막대) · 보안 인시던트 처리 현황"
         >
-          <div className="grid gap-4 xl:grid-cols-5">
-            <div className="xl:col-span-3">
+          <div className="@container/threat">
+          <div className="grid gap-4 @xl/threat:grid-cols-5">
+            <div className="@xl/threat:col-span-3">
               {metrics === null ? (
                 <Muted>추이를 불러오지 못했습니다.</Muted>
               ) : (
                 <ThreatActivityChart assetStatus={metrics.asset_status} threatEvents={metrics.threat_events} />
               )}
             </div>
-            <div className="border-t pt-3 xl:col-span-2 xl:border-t-0 xl:border-l xl:pt-0 xl:pl-4">
+            <div className="border-t pt-3 @xl/threat:col-span-2 @xl/threat:border-t-0 @xl/threat:border-l @xl/threat:pt-0 @xl/threat:pl-4">
               <SecurityIncidentStatusList incidents={incidents} />
             </div>
+          </div>
           </div>
         </Panel>
         <OpenSgPanel items={data.items} onSelect={select} />
         <ThreatSourcePanel paths={paths} items={data.items} />
+      </div>
       </div>
 
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -246,7 +261,7 @@ export function SecurityView({
             value={focus}
             options={FOCUSES.map((f) => ({
               value: f,
-              label: `${FOCUS_LABEL[f].label} (${focusValue[f] ?? '—'})`,
+              label: `${FOCUS_LABEL[f].label} (${focusValue[f] ?? '-'})`,
             }))}
             onChange={(v) => setFocus(v as Focus)}
           />
@@ -264,6 +279,7 @@ export function SecurityView({
       <div className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs">
         <StatusBadge field="collection_status" value={data.collection_status} />
         <span>갱신 {formatKst(data.last_collected_at)}</span>
+        {scopeWide !== null ? <ScopeWideNote value={scopeWide} /> : null}
         {tab === 'list' ? (
           <>
             <span aria-live="polite">
@@ -271,7 +287,7 @@ export function SecurityView({
                 ? `보안 그룹 ${visible.length}건`
                 : `${FOCUS_LABEL[focus].label} ${visible.length}건`}
             </span>
-            {focus === 'SG' ? <span>EC2 · EBS 카드는 자산 관제에 있습니다</span> : null}
+            {focus === 'SG' ? <span>EC2 · EBS는 자산 축에 있습니다</span> : null}
           </>
         ) : tab === 'topology' ? (
           <span aria-live="polite">
@@ -280,8 +296,8 @@ export function SecurityView({
               : `초점 ${focusedArns.size} / ${data.items.length}건`}
           </span>
         ) : (
-          // 건수는 탭 안의 목록이 프리셋 기준으로 센다 — 여기서는 필터가 걸린다는 사실만 말한다.
-          <span>보안 인시던트(SecOps) — 위 초점·리전 필터가 이 탭에도 걸립니다</span>
+          // 인시던트 탭은 건수를 탭 안의 목록이 센다. 띠 옆에는 따로 적지 않는다(2026-11-02).
+          null
         )}
       </div>
 
@@ -292,7 +308,7 @@ export function SecurityView({
             // 읽히므로, 왜 없는지와 어디서 볼 수 있는지를 함께 준다(자산 관제와 같은 빈 상태).
             <EmptyState
               message={`NACL 자산 ${focusItems.length}건은 목록에 서지 않습니다.`}
-              description="NACL은 Rule 판정 대상이 아니라 명함 카드가 없습니다 — 토폴로지에서 관계로 봅니다."
+              description="NACL은 Rule 판정 대상이 아니라 명함 카드가 없습니다."
               action={
                 <Button size="sm" variant="outline" onClick={() => setTab('topology')}>
                   토폴로지에서 보기
@@ -302,7 +318,6 @@ export function SecurityView({
           ) : (
             <EmptyState
               message="조건에 맞는 자산이 없습니다."
-              description="띠의 다른 칸을 누르거나 리전을 바꾸면 다른 자산을 볼 수 있습니다."
             />
           )
         ) : (

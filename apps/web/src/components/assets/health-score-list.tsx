@@ -126,10 +126,10 @@ function HoverCard({
       {/* 숫자만으로는 "높으면 좋은가"를 알 수 없다 — 임계선 어느 쪽인지와 그 뜻을 함께 적는다. */}
       <span className={cn('text-[11px]', idle ? 'text-badge-warning-fg' : 'text-muted-foreground')}>
         {score === null
-          ? '점수 없음 — 관측치가 없습니다'
+          ? '점수 없음(관측치 없음)'
           : idle
-            ? `임계선 ${threshold}% 미만 — 스펙 조정 후보`
-            : `임계선 ${threshold}% 이상 — 사용 중`}
+            ? `임계선 ${threshold}% 미만, 스펙 조정 후보`
+            : `임계선 ${threshold}% 이상, 사용 중`}
       </span>
 
       <span className="flex flex-wrap items-center gap-1 border-t pt-2">

@@ -10,6 +10,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 
+import { TIP_ANCHOR, TipBox } from '@/components/admin-dashboard/chart-parts';
 import { useOperateBlockedReason } from '@/components/auth/session-provider';
 import { CloseIncidentDialog } from '@/components/incidents/close-incident-dialog';
 import { CopyButton } from '@/components/copy-button';
@@ -42,7 +43,7 @@ import { closureAction, closureBlockedReason, RESOLUTION_LABELS } from '@/lib/in
 import { proposalButtons } from '@/lib/proposal-buttons';
 import { RUNBOOK_LABELS, incidentTitle } from '@/lib/enum-labels';
 import { formatUsd, savingsBreakdown, type SavingsBreakdown } from '@/lib/savings';
-import { formatKst } from '@/lib/utils';
+import { cn, formatKst } from '@/lib/utils';
 import type {
   AssetItem,
   AnalysisResultStatus,
@@ -176,21 +177,26 @@ function SavingsBar({ breakdown, scale }: { breakdown: SavingsBreakdown; scale: 
       <div
         role="img"
         aria-label={`현재 월 ${formatUsd(current)} 중 ${formatUsd(saving)}(${percent}%) 절감, 조정 후 ${formatUsd(remaining)}`}
-        className="flex h-3 gap-0.5 overflow-hidden rounded-sm"
+        // 말풍선이 막대 위로 나와야 하므로 overflow로 둥글리지 않고 양 끝 칸을 각각 둥글린다
+        className="flex h-3 gap-0.5"
       >
         {remaining > 0 ? (
           <span
-            title={`조정 후 월 비용 ${formatUsd(remaining)}`}
-            className="h-full bg-neutral-300 dark:bg-neutral-600"
+            className={cn(TIP_ANCHOR, 'h-full rounded-l-sm bg-neutral-300 last:rounded-r-sm dark:bg-neutral-600')}
             style={{ width: pct(remaining) }}
-          />
+          >
+            <TipBox align="start">조정 후 월 비용 {formatUsd(remaining)}</TipBox>
+          </span>
         ) : null}
         {saving > 0 ? (
           <span
-            title={`월 절감 예상 ${formatUsd(saving)} (${percent}%)`}
-            className="h-full"
+            className={cn(TIP_ANCHOR, 'h-full rounded-r-sm first:rounded-l-sm')}
             style={{ width: pct(saving), backgroundColor: 'var(--chart-series-3)' }}
-          />
+          >
+            <TipBox align="end">
+              월 절감 예상 {formatUsd(saving)} ({percent}%)
+            </TipBox>
+          </span>
         ) : null}
       </div>
       <div className="text-muted-foreground flex justify-between gap-3 font-mono text-xs tabular-nums">
@@ -244,7 +250,7 @@ function SavingsArea({ incident }: { incident: IncidentResponse }) {
       {estimates.length === 0 ? (
         <p className="text-muted-foreground text-sm">
           {incident.status === 'ANALYZING'
-            ? '분석 중 — 분석이 끝나면 이 자리에 월 절감액이 생깁니다.'
+            ? '분석 중입니다. 분석이 끝나면 이 자리에 월 절감액이 생깁니다.'
             : '이 제안에는 비용 추정이 없습니다(스펙 조정 조치에만 추정이 붙습니다).'}
         </p>
       ) : (
@@ -252,7 +258,7 @@ function SavingsArea({ incident }: { incident: IncidentResponse }) {
           <div className="flex items-baseline justify-between gap-3">
             <span className="text-muted-foreground text-xs">채택 시 월 절감 예상</span>
             <span className="font-mono text-2xl font-semibold tabular-nums">
-              {best === null ? '—' : `${formatUsd(best)}`}
+              {best === null ? '-' : `${formatUsd(best)}`}
               {best === null ? null : <span className="text-muted-foreground text-sm font-normal"> /월</span>}
             </span>
           </div>
@@ -285,7 +291,7 @@ function SavingsArea({ incident }: { incident: IncidentResponse }) {
           </ul>
           {breakdowns.size > 0 ? <SavingsLegend /> : null}
           <p className="text-muted-foreground text-xs">
-            모델 추정 단가 × 730시간(온디맨드·Linux 인스턴스 비용) — 실제 청구액이 아닙니다.
+            모델 추정 단가 × 730시간(온디맨드·Linux 인스턴스 비용)이며 실제 청구액이 아닙니다.
           </p>
         </Card>
       )}
@@ -646,7 +652,7 @@ export function IncidentDetail({
   const locked =
     incident.status === 'ACTION_IN_PROGRESS' ||
     (shownOutcome !== null && !isTerminalStatus(shownOutcome.execution.status));
-  const subjectHref = subject ? `/assets?asset=${encodeURIComponent(subject.arn)}` : null;
+  const subjectHref = subject ? `/monitoring?asset=${encodeURIComponent(subject.arn)}` : null;
 
   function openAction(candidates: ActionCandidate[]) {
     setRequest({
@@ -707,7 +713,7 @@ export function IncidentDetail({
                 수집 목록에 없는 자산이면 열 상세가 없으므로 링크를 걸지 않는다. */}
             {subject ? (
               <Link
-                href={`/assets?asset=${encodeURIComponent(subject.arn)}`}
+                href={`/monitoring?asset=${encodeURIComponent(subject.arn)}`}
                 className="hover:text-primary font-medium underline-offset-4 hover:underline"
               >
                 {subject.name ?? subject.resource_id}
@@ -812,7 +818,7 @@ export function IncidentDetail({
             </Row>
             <Row label="종료 시각">{incident.resolved_at === null ? '기록 없음' : formatKst(incident.resolved_at)}</Row>
             <Row label="종료 사유"><span className="whitespace-pre-wrap break-words">{incident.resolution_note ?? '기록 없음'}</span></Row>
-            <p className="text-muted-foreground text-xs">종료 판단은 위협 해소·차단 해제·최적화 완료를 뜻하지 않습니다. 실제 조치 결과는 실행 이력에서 확인하세요.</p>
+            <p className="text-muted-foreground text-xs">종료 판단은 위협 해소·차단 해제·최적화 완료를 뜻하지 않습니다.</p>
           </div>
         ) : (
           <div className="flex flex-col items-start gap-2">

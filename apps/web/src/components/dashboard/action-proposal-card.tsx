@@ -105,7 +105,7 @@ export function ActionProposalCard({
           ) : null}
         </CardTitle>
         <CardDescription className="text-xs">
-          보안은 위험도순, 자산은 추정 절감액순 — 누르면 상세에서 판단 근거와 조치를 봅니다
+          보안은 위험도순, 자산은 추정 절감액순
         </CardDescription>
       </CardHeader>
       <CardContent className="flex min-h-0 flex-1 flex-col">{body}</CardContent>

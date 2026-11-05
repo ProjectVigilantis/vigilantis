@@ -16,7 +16,5 @@ export default async function TenantsPage() {
     unstable_rethrow(error); // 401 → 로그인 redirect는 삼키지 않는다
     return <ErrorState error={error} />;
   }
-  // 연결 확인 경과 시간의 기준 시각. 다른 조회 화면과 같이 서버가 그린 시각을 넘긴다(app/page.tsx).
-  const renderedAt = new Date().toISOString();
-  return <TenantsView tenants={data.tenants} renderedAt={renderedAt} />;
+  return <TenantsView tenants={data.tenants} />;
 }

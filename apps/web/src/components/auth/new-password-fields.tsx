@@ -21,9 +21,9 @@ import { cn } from '@/lib/utils';
 
 const CHECKS: ReadonlyArray<readonly [keyof PasswordChecks, string]> = [
   ['length', '12자 이상 256자 이하'],
-  ['upper', '영문 대문자(A–Z) 포함'],
-  ['lower', '영문 소문자(a–z) 포함'],
-  ['digit', '숫자(0–9) 포함'],
+  ['upper', '영문 대문자(A-Z) 포함'],
+  ['lower', '영문 소문자(a-z) 포함'],
+  ['digit', '숫자(0-9) 포함'],
   ['symbol', '허용된 기호 포함'],
   ['allowedOnly', '영문 · 숫자 · 허용된 기호만 사용(공백 불가)'],
 ];
@@ -35,7 +35,7 @@ function Condition({ met, children }: { met: boolean; children: React.ReactNode 
       <Icon aria-hidden className={cn('size-3.5 shrink-0', met ? 'text-emerald-600' : 'text-muted-foreground')} />
       <span>
         {children}
-        <span className="sr-only">{met ? ' — 충족' : ' — 미충족'}</span>
+        <span className="sr-only">{met ? ' (충족)' : ' (미충족)'}</span>
       </span>
     </li>
   );

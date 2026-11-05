@@ -16,29 +16,18 @@
 
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from 'recharts';
 
-import type { AssetComposition, CompositionKey, CompositionSlice } from '@/lib/dashboard';
+import { TOOLTIP_STYLE } from '@/components/charts/tooltip-style';
+import { SLICE_COLOR, sliceLabel } from '@/lib/asset-slices';
+import type { AssetComposition, CompositionSlice } from '@/lib/dashboard';
 import { ASSET_TYPE_LABELS } from '@/lib/enum-labels';
 import type { AssetType } from '@/types/api';
 
-/** 조각 색 — 옆 「자산 현황 추이」(`trend-charts.tsx` `InventoryTrendChart`)도 같은 표를 쓴다. */
-export const SLICE_COLOR: Record<CompositionKey, string> = {
-  EC2: 'var(--chart-series-1)',
-  SG: 'var(--chart-series-2)',
-  EBS: 'var(--chart-series-3)',
-  OTHER: 'color-mix(in oklch, var(--muted-foreground) 55%, transparent)',
-};
+// 조각 색 · 이름은 서버 컴포넌트도 쓰므로 lib/asset-slices.ts에 있다. 기존 가져오는 곳을 위해 다시 내보낸다.
+export { SLICE_COLOR, sliceLabel } from '@/lib/asset-slices';
 
 const typeLabel = (type: AssetType) => ASSET_TYPE_LABELS[type]?.label ?? type;
-export const sliceLabel = (key: CompositionKey) => (key === 'OTHER' ? '판정 비대상' : typeLabel(key));
 const percent = (ratio: number) => `${Math.round(ratio * 100)}%`;
 
-const TOOLTIP_STYLE = {
-  backgroundColor: 'var(--popover)',
-  border: '1px solid var(--border)',
-  borderRadius: '0.5rem',
-  fontSize: '0.75rem',
-  color: 'var(--popover-foreground)',
-} as const;
 
 function SliceTooltip({
   active,

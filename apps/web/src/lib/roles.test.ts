@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  canViewPlatformStatus,
   ACTION_FORBIDDEN,
   UNASSIGNED_ACTION_BLOCKED,
   VIEWER_ACTION_BLOCKED,
@@ -179,4 +180,13 @@ test('막는 이유 — 조회 전용 · 배정 없음 · 계정 미확인을 �
 test('서버 403 문구는 역할과 담당 범위를 함께 말한다 — 조회 전용으로 단정하지 않는다', () => {
   assert.notEqual(ACTION_FORBIDDEN, VIEWER_ACTION_BLOCKED);
   assert.match(ACTION_FORBIDDEN, /담당 고객/);
+});
+
+test('플랫폼 상태: 중앙 관리 · 조치 권한이 있는 플랫폼 계정만 본다', () => {
+  assert.equal(canViewPlatformStatus(central), true);
+  assert.equal(canViewPlatformStatus(manager(TENANT_A)), true);
+  assert.equal(canViewPlatformStatus(unassigned), false);
+  assert.equal(canViewPlatformStatus(tenant('ADMIN')), false);
+  assert.equal(canViewPlatformStatus(tenant('OPERATOR')), false);
+  assert.equal(canViewPlatformStatus(null), false);
 });

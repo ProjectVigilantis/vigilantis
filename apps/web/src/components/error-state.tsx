@@ -44,7 +44,7 @@ const PRESENTATION: Record<ErrorCode, Presentation> = {
   // note 는 서버 message 아래에 붙는다 — message 가 말하지 않은 다음 행동만 적는다
   TENANT_ACCOUNT_CONFLICT: {
     variant: 'inline',
-    note: '고객 목록에서 같은 계정 ID의 고객을 여세요. 계정 ID를 잘못 넣었다면 고쳐서 다시 추가합니다.',
+    note: '고객사 목록에서 같은 계정 ID의 고객사를 여세요. 계정 ID를 잘못 넣었다면 고쳐서 다시 추가합니다.',
   },
   TENANT_ONBOARDING_UNAVAILABLE: {
     variant: 'inline',
@@ -53,9 +53,9 @@ const PRESENTATION: Record<ErrorCode, Presentation> = {
   // 그 사이 다른 관리자가 상태를 바꿨다는 뜻 — PROPOSAL_NOT_EXECUTABLE 처럼 재조회가 원칙이다.
   TENANT_STATE_CONFLICT: {
     variant: 'inline',
-    note: '그 사이 고객 상태가 바뀌었습니다. 화면을 새로고침한 뒤 다시 시도해 주세요.',
+    note: '그 사이 고객사 상태가 바뀌었습니다. 화면을 새로고침한 뒤 다시 시도해 주세요.',
   },
-  TENANT_SUSPENDED: { variant: 'inline', note: '정지된 고객입니다. 고객을 재개한 뒤 실행할 수 있습니다.' },
+  TENANT_SUSPENDED: { variant: 'inline', note: '정지된 고객사입니다. 고객사를 재개한 뒤 실행할 수 있습니다.' },
   // 인증(#492). 로그인 화면은 자기 문구(lib/auth-errors.ts)를 쓰고, 여기는 일반 화면에 섞여 오는 경우다.
   // 미인증은 보통 여기까지 오지 않는다 — 서버 조회는 redirect, 브라우저 조회는 로그인 이동이 먼저 걸린다(PR 2).
   AUTH_REQUIRED: { variant: 'page', note: '로그인한 뒤 다시 시도해 주세요.' },

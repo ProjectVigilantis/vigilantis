@@ -9,8 +9,8 @@ test('보호책임자 이메일은 자리표시자가 아닌 실제 주소다', 
   assert.match(PRIVACY_OFFICER.email, /^[^\s@_]+@[^\s@]+\.[a-z]+$/);
 });
 
-test('문서의 역할 이름은 사용자 관리 화면과 같다', () => {
-  assert.equal(ROLE_NAMES, '관리자 · 운영자 · 조회 전용');
+test('문서의 권한 이름은 계정 관리 화면과 같다', () => {
+  assert.equal(ROLE_NAMES, '직원 관리 · 조치 · 조회 전용');
 });
 
 test('시행일은 앞자리 0 없이 연 · 월 · 일로 적는다', () => {

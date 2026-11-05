@@ -1,17 +1,13 @@
 'use client';
 
 // CMN-001 연결 인디케이터 — 화면설계서 v1.5 §4.8. GNB 우측에 붙습니다.
-// 옆의 `수집 대상` 인디케이터는 CMN-001이 아니다 — `GET /assets` 봉투 소관이다(§3.1).
 //
-// **이 칩이 말하는 것은 "관제 자산과 화면이 실시간으로 이어졌나"다(2026-09-30).** 소켓이 붙어도
-// 수집된 자산이 없으면(빈 계정 · 첫 수집 전) 화면에 흘러올 것이 없으므로 초록을 켜지 않고
-// `연결 안됨`으로 둔다. 초록은 소켓이 열렸고 **수집된 자산이 1건 이상**일 때뿐이다.
-// 봉투의 첫 응답 전에는 자산 유무를 모르므로 소켓 상태를 그대로 보이고(페이지를 열 때 회색으로
-// 깜빡이지 않게), 조회가 실패하면 "자산 없음"이 아니라 "자산 조회 실패"로 사유를 가른다.
+// **이 칩이 말하는 것은 "이 화면이 서버와 이어졌나"다(2026-10-29).** 플랫폼 운영자가 서버 연결을
+// 확인하는 자리라 실시간 소켓 상태만 본다. 종전(2026-09-30)에는 수집된 자산이 0건이면 소켓이 붙어도
+// 초록을 켜지 않았는데, 여러 고객을 보는 운영자에게 자산 유무는 서버 연결과 다른 축이라 그 조건을 뺐다.
+// 수집 상태는 고객 웹의 몫이다(collection-indicator.tsx).
 //
-// 표기는 옆 칩과 **같은 구조**다: `속성 │ 상태값 · 대상명`. 종전에는 값만 있었고 그 값에
-// 속성이 붙었다 말았다 해서(`실시간 연결됨` vs `연결 중…`) 무엇에 대한 상태인지가 상태마다
-// 다르게 읽혔다. 속성을 항상 앞에 고정하면 훑어보는 사람이 자리로 뜻을 알 수 있다.
+// 표기는 `속성 │ 상태값`이다. 속성을 항상 앞에 고정하면 훑어보는 사람이 자리로 뜻을 알 수 있다.
 
 import { useRealtime, type ConnectionState } from '@/components/realtime-provider';
 import { StatusChip, type ChipTone } from '@/components/status-chip';
@@ -19,8 +15,8 @@ import { Button } from '@/components/ui/button';
 import { apiBaseUrl } from '@/lib/api/client';
 import { websocketUrl } from '@/lib/realtime-events';
 
-/** 이 칩이 말하는 속성. 상태값이 무엇이든 바뀌지 않는다. */
-const ATTRIBUTE = '실시간';
+/** 이 칩이 말하는 속성. 상태값이 무엇이든 바뀌지 않는다. 무엇과의 연결인지가 바로 읽히게 `서버`로 둔다. */
+const ATTRIBUTE = '서버';
 
 /**
  * §4.8의 3상태에 `disabled` 하나를 더 둔다 — `NEXT_PUBLIC_API_BASE_URL`이 소켓 주소로 성립하지
@@ -54,25 +50,9 @@ function socketUrl(): string | undefined {
   return websocketUrl(apiBaseUrl()) ?? undefined;
 }
 
-/** 소켓은 열렸지만 이어진 자산이 없다 — 초록을 켜지 않는다(파일 머리말). */
-const NO_ASSETS: View = { value: '연결 안됨', tone: 'idle' };
-
-/**
- * `GET /assets` 봉투로 본 자산 유무. `pending`은 첫 응답 전(모름), `failed`는 마지막 조회 실패,
- * `none`은 조회는 됐고 0건, `present`는 1건 이상이다.
- */
-export type AssetPresence = 'pending' | 'failed' | 'none' | 'present';
-
-/** 소켓이 열렸는데 초록을 켜지 않는 사유 — 툴팁이 소켓 주소 뒤에 붙인다. */
-const NOT_LINKED_REASON: Partial<Record<AssetPresence, string>> = {
-  none: '서버에는 붙었지만 수집된 자산이 없습니다',
-  failed: '서버에는 붙었지만 자산 조회에 실패했습니다',
-};
-
-export function ConnectionIndicator({ assets }: { assets: AssetPresence }) {
+export function ConnectionIndicator() {
   const { connection, reconnect } = useRealtime();
-  const reason = connection === 'open' ? NOT_LINKED_REASON[assets] : undefined;
-  const view = reason !== undefined ? NO_ASSETS : PRESENTATION[connection];
+  const view = PRESENTATION[connection];
   const url = socketUrl();
 
   return (
@@ -81,13 +61,7 @@ export function ConnectionIndicator({ assets }: { assets: AssetPresence }) {
       label={ATTRIBUTE}
       value={view.value}
       pulse={view.pulse}
-      title={
-        url === undefined
-          ? 'NEXT_PUBLIC_API_BASE_URL이 소켓 주소로 성립하지 않습니다'
-          : reason !== undefined
-            ? `${url} — ${reason}`
-            : url
-      }
+      title={url === undefined ? 'NEXT_PUBLIC_API_BASE_URL이 소켓 주소로 성립하지 않습니다' : url}
     >
       {/* 재연결 실패가 지속되면 수동 버튼을 노출한다(§4.8 4). 자동 재시도는 계속 돈다. */}
       {connection === 'closed' ? (

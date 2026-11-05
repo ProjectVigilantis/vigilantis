@@ -750,7 +750,9 @@ export interface MetricsTimeseriesResponse {
    고객 계정에 들어가는 경로는 verify · resume 둘뿐이고, 정지 중에는 resume 하나다. */
 
 /** 수집 · AI 분석 · 실행의 관문. SUSPENDED = 원격 회수(플랫폼이 그 계정에 더 들어가지 않는다). */
-export const TENANT_STATUSES = ['PENDING_CONNECTION', 'ACTIVE', 'SUSPENDED'] as const;
+// UNPAID(미납)는 2026-11-02 PM 결정으로 FE에 먼저 넣은 값이다. 서버 계약은 아직 없다(#572 6번).
+// 미납이면 기능을 멈추고 고객사 계정 로그인도 막는다. 90일 안에 내면 그대로 복구, 지나면 삭제한다.
+export const TENANT_STATUSES = ['PENDING_CONNECTION', 'ACTIVE', 'SUSPENDED', 'UNPAID'] as const;
 export type TenantStatus = (typeof TENANT_STATUSES)[number];
 
 /** DELETE /tenants/{id} 를 받는 상태 — 연결된 적 없는 테넌트만(계정 ID 오입력을 지우고 다시 만든다). 밖이면 TENANT_STATE_CONFLICT. */
@@ -1009,6 +1011,27 @@ export interface UserEventsResponse {
   items: UserEventItem[];
 }
 
+/* /api/v1/staff — 플랫폼(관리자) 직원 관리(#492 PR 5, schemas/api/staff.py). 중앙 관리계정 전용이며 그 밖은 403이다.
+   목록에는 중앙 관리계정 자신을 포함한 플랫폼 계정 전부가 온다. 직원 생성 경로는 없다(운영 CLI). */
+
+export interface StaffItem {
+  user_id: string;
+  email: string;
+  platform_role: PlatformRole;
+  status: UserStatus;
+  /** 로그인한 적이 없으면 null. */
+  last_login_at: IsoDateTime | null;
+}
+
+export interface StaffResponse {
+  items: StaffItem[];
+}
+
+/** 관리자 직원계정의 담당 고객사(`GET`·`PUT /staff/{id}/tenants`). PUT은 전체 교체이며 빈 목록은 배정 전부 해제다. */
+export interface StaffTenantsResponse {
+  tenant_ids: string[];
+}
+
 /* ───────────────────── signup_requests.py · inquiries.py ───────────────────── */
 
 /** 서버 기본값은 page=1 · page_size=20. page는 1 이상, page_size는 1–100이다. */
@@ -1152,6 +1175,94 @@ export interface AuditEventsResponse {
   items: AuditEventItem[];
   /** 다음 쪽 질의에 그대로 돌려준다(해석하지 않는다). null 이면 마지막 쪽. */
   next_cursor: string | null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 도입 신청 · 고객사 문의 · 관리자 알림(2026-10-29 FE 초안 → #552로 서버에 들어왔다). 원천은
+// packages/schemas/api/signup_requests.py · inquiries.py · notifications.py · support.py다. 화면: 로그인 창 회원가입(도입 신청),
+// 고객사 계정 사이드바 [문의하기](고객사 문의), 관리자 상단바 종 · /signup-requests · /inquiries.
+// 상태 · 목록 항목 · 페이지 응답(`SignupRequestItem` · `InquiryItem` 등)은 위 signup_requests.py · inquiries.py 구역에 있다(#565).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** `POST /signup-requests`: 로그인 없이 받는다. 202 { request_id }. */
+export interface SignupRequestCreate {
+  company_name: string;
+  contact_name: string;
+  /** 승인되면 이 이메일로 회사 관리자 계정을 초대한다. */
+  email: string;
+  phone: string | null;
+  /** 관제할 AWS 환경(자유 입력). */
+  note: string | null;
+}
+
+/**
+ * `PUT /signup-requests/{id}/status` 요청. REJECTED로 옮길 때는 `reason`(반려 사유)이 필수이고 비면 422,
+ * 다른 상태면 null이다. 고객사 정지(`POST /tenants/{id}/suspend`의 reason, 응답 suspended_reason)와 같은 모양이다.
+ */
+export interface SignupRequestStatusChange {
+  status: SignupRequestStatus;
+  reason: string | null;
+}
+
+/** `POST /inquiries`: 고객사 계정(역할 무관)만. 소속 고객사 · 작성자는 서버가 세션에서 채운다. 201 InquiryItem. */
+export interface InquiryCreate {
+  category: InquiryCategory;
+  title: string;
+  body: string;
+  /** 문제가 생긴 시각(모르면 null). */
+  occurred_at: IsoDateTime | null;
+  /** 문의를 보낸 화면의 경로(예: `/monitoring?axis=security`). */
+  page_path: string | null;
+}
+
+/** 관리자 알림 종류. 도입 신청 접수 · 고객 문의 접수. */
+export type NotificationKind = 'SIGNUP_REQUEST' | 'INQUIRY';
+
+export interface NotificationItem {
+  notification_id: string;
+  kind: NotificationKind;
+  /** 알림이 가리키는 신청 · 문의의 ID. */
+  target_id: string;
+  /** 문의 알림이면 그 고객사 ID, 도입 신청 알림이면 null(아직 고객사가 없다). */
+  tenant_id: string | null;
+  /** 누가: 신청 회사명 · 문의 고객사명. */
+  subject: string;
+  /** 무엇을: 신청 담당자 이름 · 문의 제목. */
+  summary: string;
+  /** 문의 알림일 때만 있다. */
+  inquiry_category: InquiryCategory | null;
+  created_at: IsoDateTime;
+  read_at: IsoDateTime | null;
+}
+
+/** `GET /notifications`: 플랫폼 계정만. 최근 50건과 읽지 않은 수. */
+export interface NotificationsResponse {
+  items: NotificationItem[];
+  unread_count: number;
+}
+
+/** 문의 처리 기록의 종류: 접수 · 상태 변경 · 운영자 메모. */
+export type InquiryEventAction = 'INQUIRY_CREATED' | 'STATUS_CHANGED' | 'NOTE_ADDED';
+
+/**
+ * 문의 처리 기록 한 줄. 고치거나 지우지 않고 쌓기만 한다(사용자 관리 이력 `user_admin_events`와 같은 방식).
+ * 상태 변경이면 before · after가, 메모면 note가 있다. 상태를 바꾸면서 메모를 남기면 한 줄에 둘 다 있다.
+ */
+export interface InquiryEventItem {
+  event_id: string;
+  inquiry_id: string;
+  actor_user_id: string;
+  actor_email: string;
+  action: InquiryEventAction;
+  before_status: InquiryStatus | null;
+  after_status: InquiryStatus | null;
+  note: string | null;
+  occurred_at: IsoDateTime;
+}
+
+/** `GET /inquiries/{id}/events`: 플랫폼 계정만. 오래된 것부터. */
+export interface InquiryEventsResponse {
+  items: InquiryEventItem[];
 }
 
 /* ────────────────────────────── settings.py ────────────────────────────── */

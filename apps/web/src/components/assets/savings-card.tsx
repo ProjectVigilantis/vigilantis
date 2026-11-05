@@ -32,7 +32,7 @@ export function SavingsCard({
         message="절감 예상이 아직 없습니다."
         description={
           unestimated > 0 || failed > 0
-            ? `추정 실패 ${unestimated}건 · 조회 실패 ${failed}건 — 분석이 끝나면 이 자리에 금액이 생깁니다.`
+            ? `추정 실패 ${unestimated}건 · 조회 실패 ${failed}건. 분석이 끝나면 이 자리에 금액이 생깁니다.`
             : '다운사이징 후보가 분석되면 이 자리에 월 절감 예상액이 생깁니다.'
         }
       />
@@ -76,7 +76,7 @@ export function SavingsCard({
       {/* 금액이 안 나온 건은 0원이 아니라 **모름**이다 — 합계가 "이만큼이 전부"로 읽히지 않게 적는다. */}
       {unestimated > 0 || failed > 0 ? (
         <p className={cn('text-muted-foreground border-t pt-2 text-xs')}>
-          금액 미산출 {unestimated}건{failed > 0 ? ` · 상세 조회 실패 ${failed}건` : ''} — 합계에
+          금액 미산출 {unestimated}건{failed > 0 ? ` · 상세 조회 실패 ${failed}건` : ''}은 합계에
           포함되지 않았습니다.
         </p>
       ) : null}

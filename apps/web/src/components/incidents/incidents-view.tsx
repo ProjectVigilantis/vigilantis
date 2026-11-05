@@ -235,7 +235,7 @@ export function IncidentsView({
         </span>
         {/* 위 띠·필터가 걸려 있으면 그 사실을 말한다 — 숨긴 줄 모르면 "인시던트가 없다"로 읽힌다. */}
         {subjectArns !== null ? (
-          <span>위 자산 필터에 걸린 자산의 건만 — 전체 {items.length}건</span>
+          <span>자산 필터 적용 · 전체 {items.length}건</span>
         ) : null}
         {preset === 'HISTORY' ? (
           // 종료된 건은 실행 버튼이 없다 — 계약이 RESOLVED면 recommendations를 비우기 때문이다.

@@ -3,6 +3,9 @@
 //
 // 훅이 없어 `'use client'`를 붙이지 않는다. 서버 · 클라이언트 컴포넌트 어디서나 쓴다.
 
+import { ChevronRight } from 'lucide-react';
+import Link from 'next/link';
+
 import { cn } from '@/lib/utils';
 
 /** 문제가 있는 값만 상태 글자색으로 칠한다. 평소 값은 기본 글자색이다. */
@@ -28,17 +31,40 @@ export function StatTile({
   value,
   note,
   tone,
+  href,
 }: {
   label: string;
   value: React.ReactNode;
-  note?: string;
+  /** 한 줄 설명. 카드가 링크(`href`)가 아닐 때만 안에 링크를 둘 수 있다. */
+  note?: React.ReactNode;
   tone?: StatTone;
+  /** 있으면 카드 전체가 그 숫자의 상세 화면으로 가는 링크다. 마우스를 올리면 상자가 아니라 제목이 강조된다(2026-11-02). */
+  href?: string;
 }) {
-  return (
-    <div className="bg-card ring-foreground/10 flex flex-col gap-1.5 rounded-xl px-5 py-4 ring-1">
-      <span className="text-muted-foreground text-xs font-semibold tracking-wide">{label}</span>
+  const body = (
+    <>
+      <span
+        className={cn(
+          'text-muted-foreground flex items-center justify-between gap-2 text-xs font-semibold tracking-wide',
+          href && 'group-hover:text-primary group-focus-visible:text-primary transition-colors',
+        )}
+      >
+        {label}
+        {href ? <ChevronRight aria-hidden className="size-4" /> : null}
+      </span>
       <span className={cn('text-[30px] leading-[38px] font-bold', tone && TONE[tone])}>{value}</span>
       {note ? <span className="text-muted-foreground text-xs">{note}</span> : null}
-    </div>
+    </>
+  );
+  const box = 'bg-card ring-foreground/10 flex flex-col gap-1.5 rounded-xl px-5 py-4 ring-1';
+  return href ? (
+    <Link
+      href={href}
+      className={cn(box, 'group focus-visible:outline-none')}
+    >
+      {body}
+    </Link>
+  ) : (
+    <div className={box}>{body}</div>
   );
 }

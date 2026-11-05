@@ -12,16 +12,10 @@
 
 import { Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, YAxis } from 'recharts';
 
+import { LINE_CURSOR, TOOLTIP_LABEL_STYLE, TOOLTIP_STYLE } from '@/components/charts/tooltip-style';
 import { formatThroughput, formatTick, type NetworkRow } from '@/lib/metrics-chart';
 import type { TimeseriesPoint } from '@/types/api';
 
-const TOOLTIP_STYLE = {
-  backgroundColor: 'var(--popover)',
-  border: '1px solid var(--border)',
-  borderRadius: '0.5rem',
-  fontSize: '0.75rem',
-  color: 'var(--popover-foreground)',
-} as const;
 
 const INK = 'var(--muted-foreground)';
 
@@ -61,7 +55,9 @@ export function CpuSparkline({
         {/* 도메인을 0부터 잡는다 — 자동 범위로 두면 1%대 변동이 화면을 꽉 채워 급등으로 읽힌다. */}
         <YAxis hide domain={[0, (max: number) => Math.max(max, (threshold ?? 0) * 1.5, 10)]} />
         <Tooltip
+          cursor={LINE_CURSOR}
           contentStyle={TOOLTIP_STYLE}
+          labelStyle={TOOLTIP_LABEL_STYLE}
           labelFormatter={(at) => formatTick(Number(at))}
           formatter={(value) => [`${value}%`, 'CPU']}
         />
@@ -92,7 +88,9 @@ export function NetworkSparkline({ rows }: { rows: NetworkRow[] | null }) {
       <LineChart data={rows} margin={{ top: 4, right: 4, bottom: 0, left: 4 }}>
         <YAxis hide domain={[0, 'auto']} />
         <Tooltip
+          cursor={LINE_CURSOR}
           contentStyle={TOOLTIP_STYLE}
+          labelStyle={TOOLTIP_LABEL_STYLE}
           labelFormatter={(at) => formatTick(Number(at))}
           formatter={(value, key) => [formatThroughput(Number(value)), key === 'in' ? '수신' : '송신']}
         />

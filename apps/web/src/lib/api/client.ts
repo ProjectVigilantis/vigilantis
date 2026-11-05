@@ -2,6 +2,7 @@
 
 import type {
   AssetsResponse,
+  AuditEventsResponse,
   CurrentUserResponse,
   ErrorCode,
   ErrorResponse,
@@ -12,13 +13,24 @@ import type {
   IncidentStatus,
   IncidentsResponse,
   InquiriesResponse,
+  InquiryCreate,
+  InquiryEventItem,
+  InquiryEventsResponse,
+  InquiryItem,
+  InquiryStatus,
   LoginStepResponse,
   MetricsTimeseriesResponse,
+  NotificationsResponse,
   PaginationParams,
   ResolutionJudgement,
   SignupRequestAccepted,
   SignupRequestCreate,
+  SignupRequestItem,
   SignupRequestsResponse,
+  SignupRequestStatus,
+  SignupRequestStatusChange,
+  StaffResponse,
+  StaffTenantsResponse,
   TenantCreateRequest,
   TenantCreateResponse,
   TenantDetail,
@@ -39,6 +51,9 @@ import type {
 
 // `node --test`가 별칭을 못 풀어 상대 경로를 쓴다(realtime-events와 같은 이유).
 import { navigateToLogin } from '../auth-redirect.ts';
+import type { PlatformStatusResponse } from '../platform-status.ts';
+import type { AssetCostsResponse } from '../asset-costs.ts';
+import type { ThreatEventsResponse, ThreatRangeDays } from '../threat-events.ts';
 
 /**
  * 요청을 실어 보내는 쪽마다 다른 두 가지 — 덧붙일 헤더와 401 처리(#492 PR 2).
@@ -227,10 +242,42 @@ export function createReadApi(transport: ApiTransport) {
       return request<UsersResponse>('/users', undefined, transport);
     },
 
+    /** 플랫폼 상태(중앙 관리계정). FE 제안 계약이라 서버에 아직 없다 — 실서버는 404다(lib/platform-status.ts). */
+    getPlatformStatus(): Promise<PlatformStatusResponse> {
+      return request<PlatformStatusResponse>('/platform/status', undefined, transport);
+    },
+
+    /** 위협 이벤트 목록(고객사 대시보드). FE 제안 계약이라 서버에 아직 없다 — 실서버는 404다(lib/threat-events.ts). */
+    getThreatEvents(days: ThreatRangeDays): Promise<ThreatEventsResponse> {
+      return request<ThreatEventsResponse>(`/threat-events?days=${days}`, undefined, transport);
+    },
+
+    /** 자산 유형별 최근 30일 비용(Cost Explorer). FE 제안 계약이라 서버에 아직 없다 — 실서버는 404다(lib/asset-costs.ts). */
+    getAssetCosts(): Promise<AssetCostsResponse> {
+      return request<AssetCostsResponse>('/costs/by-asset-type', undefined, transport);
+    },
+
+    /** 조치 실행 · 종료 판단 감사 기록(#544). 로그 화면(app/logs)이 부른다. 최신순이고 `next_cursor`를 그대로 돌려주면 다음 쪽이다. */
+    getAuditEvents(query: { since?: string; cursor?: string; limit?: number } = {}): Promise<AuditEventsResponse> {
+      const params = new URLSearchParams();
+      if (query.since !== undefined) params.set('since', query.since);
+      if (query.cursor !== undefined) params.set('cursor', query.cursor);
+      if (query.limit !== undefined) params.set('limit', String(query.limit));
+      const search = params.toString();
+      return request<AuditEventsResponse>(`/audit-events${search === '' ? '' : `?${search}`}`, undefined, transport);
+    },
+
+    /** 플랫폼(관리자) 직원 목록: 중앙 관리계정만(#492 PR 5). 계정 관리 화면이 중앙 관리계정에게 그린다(app/users/page.tsx). */
+    getStaff(): Promise<StaffResponse> {
+      return request<StaffResponse>('/staff', undefined, transport);
+    },
+
+    /** 도입 신청 목록: 중앙 관리계정만(#552 · 페이지 조회 #565). 도입 신청 화면(app/signup-requests)이 부른다. */
     getSignupRequests(pagination?: PaginationParams): Promise<SignupRequestsResponse> {
       return request<SignupRequestsResponse>(`/signup-requests${paginationSuffix(pagination)}`, undefined, transport);
     },
 
+    /** 고객사 문의 목록: 플랫폼 계정은 범위 안 전부, 고객사 계정은 자기 고객사 것(#552 · 페이지 조회 #565). 고객사 문의 화면(app/inquiries)이 부른다. */
     getInquiries(pagination?: PaginationParams): Promise<InquiriesResponse> {
       return request<InquiriesResponse>(`/inquiries${paginationSuffix(pagination)}`, undefined, transport);
     },
@@ -239,7 +286,7 @@ export function createReadApi(transport: ApiTransport) {
 
 export const {
   getAssets, getMetricsTimeseries, getIncidents, getIncident, getTenants, getTenant, getTenantSettings,
-  getSignupRequests, getInquiries,
+  getSignupRequests, getInquiries, getThreatEvents, getAuditEvents,
 } = createReadApi(BROWSER);
 
 /**
@@ -439,6 +486,71 @@ export async function changeUserStatus(userId: string, status: UserStatus): Prom
 
 export async function revokeUserSessions(userId: string): Promise<void> {
   await postJson<null>(userPath(userId, '/sessions/revoke'));
+}
+
+/* ── /staff (#492 PR 5): 중앙 관리계정 전용. 자기 자신은 바꿀 수 없다(서버가 거절). ── */
+
+const staffPath = (userId: string, suffix: string) => `/staff/${encodeURIComponent(userId)}${suffix}`;
+
+export async function changeStaffStatus(userId: string, status: UserStatus): Promise<void> {
+  await sendJson<null>('PUT', staffPath(userId, '/status'), { status });
+}
+
+/** 담당 고객사 조회 · 전체 교체. 대상이 관리자 직원계정(TENANT_MANAGER)이 아니거나 바뀐 것이 없으면 409다. */
+export function getStaffTenants(userId: string): Promise<StaffTenantsResponse> {
+  return request<StaffTenantsResponse>(staffPath(userId, '/tenants'));
+}
+
+export async function replaceStaffTenants(userId: string, tenantIds: string[]): Promise<void> {
+  await sendJson<null>('PUT', staffPath(userId, '/tenants'), { tenant_ids: tenantIds });
+}
+
+export function getStaffEvents(userId: string, limit = 50): Promise<UserEventsResponse> {
+  return request<UserEventsResponse>(staffPath(userId, `/events?limit=${limit}`));
+}
+
+/* ── 도입 신청 · 고객사 문의 · 관리자 알림(#552, types/api.ts 끝). ── */
+
+/** 신청 상태를 옮긴다. 반려(REJECTED)면 `reason`이 필수다(서버가 빈 값을 422로 거절한다). */
+export function changeSignupRequestStatus(
+  requestId: string,
+  status: SignupRequestStatus,
+  reason: string | null = null,
+): Promise<SignupRequestItem> {
+  const body: SignupRequestStatusChange = { status, reason };
+  return sendJson<SignupRequestItem>('PUT', `/signup-requests/${encodeURIComponent(requestId)}/status`, body);
+}
+
+/** 고객사 계정이 보내는 장애 · 버그 문의. 소속 고객사 · 작성자는 서버가 세션에서 채운다. */
+export function submitInquiry(body: InquiryCreate): Promise<InquiryItem> {
+  return postJson<InquiryItem>('/inquiries', body);
+}
+
+const inquiryPath = (inquiryId: string, suffix: string) => `/inquiries/${encodeURIComponent(inquiryId)}${suffix}`;
+
+/** 상태를 옮긴다. `note`가 있으면 같은 처리 기록 한 줄에 메모로 남는다. */
+export function changeInquiryStatus(inquiryId: string, status: InquiryStatus, note: string | null = null): Promise<InquiryItem> {
+  return sendJson<InquiryItem>('PUT', inquiryPath(inquiryId, '/status'), { status, note });
+}
+
+/** 상태는 그대로 두고 운영자 메모만 처리 기록에 남긴다. 201, 쌓인 기록 한 줄을 돌려준다. */
+export function addInquiryNote(inquiryId: string, note: string): Promise<InquiryEventItem> {
+  return postJson<InquiryEventItem>(inquiryPath(inquiryId, '/notes'), { note });
+}
+
+/** 문의 한 건의 처리 기록(오래된 것부터). 플랫폼 계정만. */
+export function getInquiryEvents(inquiryId: string): Promise<InquiryEventsResponse> {
+  return request<InquiryEventsResponse>(inquiryPath(inquiryId, '/events'));
+}
+
+/** 관리자 알림 최근 50건과 읽지 않은 수(플랫폼 계정만). */
+export function getNotifications(): Promise<NotificationsResponse> {
+  return request<NotificationsResponse>('/notifications');
+}
+
+/** 알림을 읽음으로. `ids`가 null이면 전부. */
+export async function markNotificationsRead(ids: string[] | null): Promise<void> {
+  await postJson<null>('/notifications/read', { notification_ids: ids });
 }
 
 /** 사용자 1명의 관리 이력(최근 순으로 서버가 정한다). 상한 기본 50. */

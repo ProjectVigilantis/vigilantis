@@ -8,7 +8,7 @@ export function BusinessUnavailable({ unassigned }: { unassigned: boolean }) {
       <h1 id="business-unavailable" className="text-lg font-semibold">업무 화면 이용 제한</h1>
       <p role="status" className="rounded-lg border p-4 text-sm">
         {unassigned
-          ? '담당 고객이 배정되지 않아 볼 수 있는 고객 데이터가 없습니다. 중앙 관리자에게 담당 고객 배정을 요청해 주세요.'
+          ? '담당 고객사가 배정되지 않아 볼 수 있는 고객사 데이터가 없습니다. 중앙 관리계정에서 담당 고객사를 배정받아야 합니다.'
           : '고객사별 데이터 분리가 완료되기 전까지 업무 화면을 이용할 수 없습니다.'}
       </p>
     </section>

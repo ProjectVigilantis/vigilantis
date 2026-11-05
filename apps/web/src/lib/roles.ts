@@ -19,15 +19,42 @@ export type PlatformSubject = Pick<CurrentUserResponse, 'account_type' | 'platfo
 /** 고객사 사용자에 대한 대상별 판정 — 고객사 ADMIN의 자기 소속(`tenant_id`)까지 본다. */
 export type UserAdminSubject = AccessSubject & Pick<CurrentUserResponse, 'tenant_id'>;
 
+/**
+ * 화면 용어(2026-11-02 PM 개정 · 10/29의 관리자 · 관리자 직원 · 고객사 직원을 대체). 로그인 계정은 넷이다.
+ *   중앙 관리계정     우리 회사 쪽 총괄 계정. 거의 모든 권한을 갖는다
+ *   관리자 직원계정   중앙 관리계정 아래의 우리 회사 직원 계정. 배정된 고객사만 다룬다
+ *   고객사 중앙계정   고객사의 총괄 계정. 자기 고객사의 자산 · 계정을 다룬다
+ *   고객사 직원계정   고객사 직원의 계정. 맡은 권한(조치 · 조회 전용)만 갖는다
+ * "고객사"는 플랫폼에 등록된 회사(테넌트) 자체이고 로그인 계정이 아니다. 고객사 중앙계정과 직원계정을 함께 부를 때는
+ * "고객사 계정"이라고 쓴다.
+ *
+ * 서버 계약과의 대응(#492): 중앙 관리계정 = `PLATFORM` + `platform_role=CENTRAL_ADMIN`, 관리자 직원계정 = `PLATFORM` +
+ * `platform_role=TENANT_MANAGER`, 고객사 중앙계정 = `TENANT` + `role=ADMIN`, 고객사 직원계정 = `TENANT` + `OPERATOR` ·
+ * `VIEWER`. 플랫폼 계정의 호환 역할 `role=ADMIN`으로는 가르지 않는다.
+ */
+export type AccountKind = 'CENTRAL_ADMIN' | 'TENANT_MANAGER' | 'TENANT_ADMIN' | 'TENANT_STAFF';
+
+export const ACCOUNT_KIND_LABELS: Record<AccountKind, string> = {
+  CENTRAL_ADMIN: '중앙 관리계정',
+  TENANT_MANAGER: '관리자 직원계정',
+  TENANT_ADMIN: '고객사 중앙계정',
+  TENANT_STAFF: '고객사 직원계정',
+};
+
+export function accountKind(user: Pick<CurrentUserResponse, 'account_type' | 'platform_role' | 'role'>): AccountKind {
+  if (user.account_type === 'TENANT') return user.role === 'ADMIN' ? 'TENANT_ADMIN' : 'TENANT_STAFF';
+  return user.platform_role === 'CENTRAL_ADMIN' ? 'CENTRAL_ADMIN' : 'TENANT_MANAGER';
+}
+
 /** 조회 전용 계정의 비활성 버튼 문구. */
 export const VIEWER_ACTION_BLOCKED = '조회 전용 계정은 조치할 수 없습니다.';
 /** 담당 고객이 없는 고객 담당자의 비활성 버튼 문구. */
-export const UNASSIGNED_ACTION_BLOCKED = '담당 고객이 배정되지 않아 조치할 수 없습니다.';
+export const UNASSIGNED_ACTION_BLOCKED = '담당 고객사가 배정되지 않아 조치할 수 없습니다.';
 /**
  * 조치 요청이 서버 403 `AUTH_FORBIDDEN`으로 거절됐을 때의 문구. 이유가 역할(조회 전용)인지 담당 범위인지 응답만으로는
  * 알 수 없어 둘 다 말한다 — 플랫폼 계정에게 "조회 전용 계정"이라고 단정하지 않는다.
  */
-export const ACTION_FORBIDDEN = '이 계정으로는 이 조치를 할 수 없습니다. 조회 전용 계정이거나 담당 고객이 아닐 수 있습니다.';
+export const ACTION_FORBIDDEN = '이 계정으로는 이 조치를 할 수 없습니다. 조회 전용 계정이거나 담당 고객사가 아닐 수 있습니다.';
 const ROLE_PENDING = '권한을 확인한 뒤 조치할 수 있습니다.';
 
 /**
@@ -128,6 +155,15 @@ export function canOperate(user: AccessSubject | null | undefined): boolean {
   if (!user) return false;
   if (user.account_type === 'PLATFORM') return hasCustomerScope(user);
   return user.role === 'ADMIN' || user.role === 'OPERATOR';
+}
+
+/**
+ * 플랫폼 상태 · API 이상 호출을 볼 계정(2026-11-03 PM 지시): 중앙 관리 권한 또는 조치 권한이 있는 플랫폼 계정.
+ * 고객사 계정은 관리자 대시보드를 열지 않으므로 대상이 아니다. 권한 단계 개편 전의 임시 판정이며, 개편하면 이 함수만 고친다.
+ */
+export function canViewPlatformStatus(user: AccessSubject | null | undefined): boolean {
+  if (user?.account_type !== 'PLATFORM') return false;
+  return isCentralAdmin(user) || canOperate(user);
 }
 
 /** 조치 버튼을 막는 이유. 누를 수 있으면 null. */

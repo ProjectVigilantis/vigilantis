@@ -7,7 +7,9 @@
 // 상태 칩 안에 있으면 칩이 길어지고 무엇이 값인지 흐려진다. 칩의 모양은 `StatusChip` 하나가 쥔다 —
 // 옆의 연동 칩과 같은 부품이라 한쪽만 달라질 수 없다.
 //
-// ⚠️ 표시 이름(회사)은 봉투에서 오지 않는다 — `extra="forbid"`라 담을 필드가 없어 웹 설정값(`ORG_NAME`)을 쓴다.
+// 2026-10-29부터 플랫폼 운영자 상단바에는 `CollectionIndicator`를 그리지 않는다(gnb.tsx). 고객 한 곳의 수집 상태라
+// 고객 웹에 붙일 부품으로 남긴다(봉투 조회 `useAssetsEnvelope`도 함께).
+// 회사 이름(종전 `NEXT_PUBLIC_ORG_NAME`의 시연용 가상 회사)은 같은 날 뺐다. 이름이 필요해지면 고객(테넌트) 정보에서 받는다.
 // `권한 없음`도 계약에 없어 `COLLECTING`·`PARTIAL`·`FAILED`를 주황 하나로 묶었다(§9.2 G4에 요청).
 
 import { useEffect, useRef, useState } from 'react';
@@ -47,23 +49,13 @@ function statusLabel(status: CollectionStatus): string {
 }
 
 /**
- * 관제 대상 회사 이름. MVP는 단일 계정이라 회사도 하나이고, 기본값은 시연용 가상 회사다.
- * 실제 고객으로 바꿀 때는 `NEXT_PUBLIC_ORG_NAME`만 주면 된다(빌드 시 인라인).
+ * 수집 리전. 자산이 0건이면 리전을 알 수 없어 null이다.
+ * 계정 ID는 마우스를 올리면 보이게 `accounts`로 돌린다 — 어느 계정을 보고 있는지 확인할 길은 남긴다.
  */
-const ORG_NAME = process.env.NEXT_PUBLIC_ORG_NAME || '예시 중소기업 최고(주)';
-
-/**
- * 회사 이름 뒤에 수집 리전을 붙인다. 자산이 0건이면 리전을 알 수 없어 회사 이름만 둔다.
- * 계정 ID는 이름 자리에서 빠지는 대신 `accounts`로 돌려 마우스를 올리면 보이게 한다 — 운영자가
- * 어느 계정을 보고 있는지 확인할 길은 남긴다.
- */
-function scopeLabel(items: AssetsResponse['items']): { name: string; accounts: string | undefined } {
+function scopeLabel(items: AssetsResponse['items']): { name: string | null; accounts: string | undefined } {
   const regions = [...new Set(items.map((a) => a.region))];
   const accounts = [...new Set(items.map((a) => a.account_id))];
-  let name = ORG_NAME;
-  if (regions.length > 0) {
-    name += ` · ${regions[0]}${regions.length > 1 ? ` 외 ${regions.length - 1}` : ''}`;
-  }
+  const name = regions.length > 0 ? `${regions[0]}${regions.length > 1 ? ` 외 ${regions.length - 1}` : ''}` : null;
   return { name, accounts: accounts.length > 0 ? `AWS 계정 ${accounts.join(', ')}` : undefined };
 }
 
@@ -122,8 +114,8 @@ export function CollectionIndicator({ env, failed }: AssetsEnvelopeState) {
     return <StatusChip tone="idle" label="수집" value="확인 불가" title="수집 상태를 조회하지 못했습니다" />;
   }
 
-  // 로딩 중에는 자리만 잡는다. 288px = 기본 회사명 · 리전 1개 · `일부만 수집됨`의 실측 폭 — 좁으면 값이
-  // 들어올 때 GNB가 흔들린다. `NEXT_PUBLIC_ORG_NAME`을 바꾸거나 칩 여백을 손대면 폭도 다시 잰다.
+  // 로딩 중에는 자리만 잡는다. 288px는 회사 이름이 있던 때의 실측 폭이라 고객 웹에 붙일 때 다시 잰다 — 좁으면 값이
+  // 들어올 때 GNB가 흔들린다.
   if (!env) return <span className="h-7 w-[288px] shrink-0" aria-hidden />;
 
   const { name, accounts } = scopeLabel(env.items);
@@ -131,9 +123,11 @@ export function CollectionIndicator({ env, failed }: AssetsEnvelopeState) {
   return (
     <span className="flex shrink-0 items-center gap-2.5 whitespace-nowrap">
       {/* 식별 — 상태가 아니라 "무엇을 보고 있는가"다. 칩보다 한 단계 조용하게 둔다. */}
-      <span className="text-muted-foreground text-xs" title={accounts}>
-        {name}
-      </span>
+      {name === null ? null : (
+        <span className="text-muted-foreground text-xs" title={accounts}>
+          {name}
+        </span>
+      )}
       <StatusChip
         tone={TONE[env.collection_status]}
         label="수집"

@@ -372,7 +372,7 @@ export function OffPath({
   return (
     <div className={cn('flex min-w-0 flex-col gap-2', className ?? 'border-border border-t pt-3')}>
       <p className="text-muted-foreground text-xs">
-        트래픽 경로 밖 <span className="tabular-nums">{orphans.length}</span>건 — 어떤 EC2와도 연결이
+        트래픽 경로 밖 <span className="tabular-nums">{orphans.length}</span>건. 어떤 EC2와도 연결이
         없습니다. 비용만 발생합니다.
       </p>
       <ul className="flex flex-col gap-1">
@@ -401,7 +401,7 @@ export function OffPath({
             ))}
             {assets.length > OFF_PATH_NAMES ? (
               <span className="text-muted-foreground">
-                외 {assets.length - OFF_PATH_NAMES}개 — 자산 화면에서 전체 보기
+                외 {assets.length - OFF_PATH_NAMES}개(자산 화면에서 전체 보기)
               </span>
             ) : null}
           </li>
@@ -544,7 +544,7 @@ export function AssetGraph({
       {/* 접은 행을 **숨기지 않고 센다** — 몇 대가 화면 밖에 있는지 모르면 이 그래프가 전부라고 읽힌다. */}
       {hiddenRows > 0 ? (
         <p className="text-muted-foreground text-xs">
-          위험 신호가 큰 <span className="tabular-nums">{rows.length}</span>대만 그렸습니다 — 나머지{' '}
+          위험 신호가 큰 <span className="tabular-nums">{rows.length}</span>대만 그렸습니다. 나머지{' '}
           <span className="tabular-nums">{hiddenRows}</span>대는 자산 목록에서 전체 보기
         </p>
       ) : null}
@@ -563,18 +563,16 @@ export function AssetGraph({
       {undrawn.selectable.length > 0 ? (
         <p className="text-xs text-badge-warning-fg">
           이 그래프에 그리지 않은 외부 출발지 경로{' '}
-          <span className="tabular-nums">{undrawn.selectable.length}</span>건 —{' '}
-          {undrawn.selectable.map((p) => `${p.source} → ${arnShort(p.targetArn)}`).join(' · ')}. 대상
-          EC2를 목록에서 고르면 이 그래프에 경로가 그려집니다.
+          <span className="tabular-nums">{undrawn.selectable.length}</span>건:{' '}
+          {undrawn.selectable.map((p) => `${p.source} → ${arnShort(p.targetArn)}`).join(' · ')}
         </p>
       ) : null}
       {undrawn.offPath.length > 0 ? (
         <p className="text-xs text-badge-warning-fg">
           그릴 행이 없는 외부 출발지 경로{' '}
-          <span className="tabular-nums">{undrawn.offPath.length}</span>건 —{' '}
+          <span className="tabular-nums">{undrawn.offPath.length}</span>건:{' '}
           {undrawn.offPath.map((p) => `${p.source} → ${arnShort(p.targetArn)}`).join(' · ')}. 어떤
-          EC2에도 연결되지 않은 자원이라 그래프에 그릴 자리가 없습니다 — 목록에서 누르면 자산
-          상세로 열리며, 그 화면에는 이 경로를 그리지 않습니다.
+          EC2에도 연결되지 않은 자원이라 그래프에 그릴 자리가 없습니다.
         </p>
       ) : null}
 
@@ -582,7 +580,7 @@ export function AssetGraph({
           빈 열을 "그런 자원이 없다"로 읽고 넘어가면 조치가 필요한 상태가 조용히 지나간다. */}
       {uncollected.length > 0 ? (
         <p className="text-xs text-badge-warning-fg">
-          이번 수집에서 조회하지 못한 유형이 있습니다 —{' '}
+          이번 수집에서 조회하지 못한 유형이 있습니다:{' '}
           {uncollected
             .map(
               (u) =>
@@ -621,7 +619,7 @@ export function AssetGraph({
         {hasThreatColumn ? (
           <>
             {' '}
-            외부 출발지는 인시던트 계약의 <code>threat_context</code>에서 옵니다 —{' '}
+            외부 출발지는 인시던트 계약의 <code>threat_context</code>에서 옵니다.{' '}
             <strong>관측 출발지</strong>는 SSH 시도에서 실제로 관측된 IP(<code>SSH_BRUTE_FORCE</code>),{' '}
             <strong>노출 대역</strong>은 보안 그룹 규칙이 허용한 범위(<code>OPEN_IP</code>)이며 공격자
             IP가 아닙니다.

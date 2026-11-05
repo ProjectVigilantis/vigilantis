@@ -7,7 +7,21 @@ import { useState } from 'react';
 
 import { Button } from '@/components/ui/button';
 
-export function CopyButton({ value, label = '복사' }: { value: string; label?: string }) {
+export function CopyButton({
+  value,
+  label = '복사',
+  ariaLabel,
+  variant = 'ghost',
+  className,
+}: {
+  value: string;
+  label?: string;
+  /** 값이 여러 줄로 길면(안내문 등) 값 대신 읽힐 이름을 준다. 기본은 `라벨: 값`이다. */
+  ariaLabel?: string;
+  /** 값 옆에 붙는 작은 버튼이 기본이다. 복사가 그 자리의 주 동작이면 테두리 버튼으로 키운다. */
+  variant?: 'ghost' | 'outline';
+  className?: string;
+}) {
   const [copied, setCopied] = useState(false);
 
   async function copy() {
@@ -22,7 +36,8 @@ export function CopyButton({ value, label = '복사' }: { value: string; label?:
   }
 
   return (
-    <Button type="button" variant="ghost" size="xs" onClick={copy} aria-label={`${label}: ${value}`}>
+    <Button type="button" variant={variant} size="xs" className={className} onClick={copy}
+      aria-label={ariaLabel ?? `${label}: ${value}`}>
       {copied ? <Check aria-hidden /> : <Copy aria-hidden />}
       {copied ? '복사됨' : label}
     </Button>
