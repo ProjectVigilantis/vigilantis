@@ -782,14 +782,31 @@ export interface TenantVerification {
   reason_code: string | null;
 }
 
-/** 구독 현황(T-16 · 모의) — 원천은 운영자 입력. */
+/**
+ * 지금 적용 중인 구독(T-16 · #528) — 투영이다. 결제 · 청구는 없다.
+ * 원천(`subscription_source`)은 수동 등록(MANUAL) · 모의 Marketplace 계약의 현재 권리(MOCK_MARKETPLACE) ·
+ * 앱 정책 Free(APP_FREE)다. 모의 계약 자체는 `/me/subscription`의 `agreement`가 권위다.
+ */
 export interface TenantSubscription {
+  /** 요금제 이름. 'Free' · 'Business' · 'Enterprise' 밖의 옛 수동 등록 값도 보존된다. null = 등록 안 됨(Free 아님). */
   plan: string | null;
-  /** YYYY-MM-DD */
+  /** YYYY-MM-DD (KST) */
   period_start: string | null;
-  /** YYYY-MM-DD */
+  /** YYYY-MM-DD (KST) — 마지막 이용일(포함). */
   period_end: string | null;
+  /** 모의 계약 투영이면 「자동 갱신 끔 — 기간 끝에 앱 정책 Free」. 수동 등록(MANUAL)에서는 기록일 뿐 자동 전환이 없다. */
+  cancel_at_period_end: boolean;
+  /** 모의 계약 투영이면 계약 기념일(1–31). 수동 등록에서는 기록일 뿐 자동 갱신이 없다. */
+  billing_anchor_day: number | null;
+  /** 요금(통화의 최소 단위). null = 미정 — 0으로 그리지 않는다. */
+  amount_minor: number | null;
+  /** ISO 4217 통화 코드. */
+  currency: string | null;
 }
+
+/** 고객사 PATCH 의 구독 입력 — #528 에서 늘어난 칸은 서버 기본값(false · null)이 있어 생략할 수 있다. */
+export type TenantSubscriptionInput = Pick<TenantSubscription, 'plan' | 'period_start' | 'period_end'> &
+  Partial<Pick<TenantSubscription, 'cancel_at_period_end' | 'billing_anchor_day' | 'amount_minor' | 'currency'>>;
 
 export interface TenantListItem {
   tenant_id: string;
@@ -799,6 +816,12 @@ export interface TenantListItem {
   last_verification: TenantVerification | null;
   asset_count: number;
   open_incident_count: number;
+  /** null = 구독 정보가 등록되지 않았다(Free 가 아니다). 서비스 정지와 무관하게 계약을 따른다. */
+  subscription: TenantSubscription | null;
+  /** 구독 투영의 원천. null = 등록 안 됨(`subscription` 도 null). */
+  subscription_source: SubscriptionSource | null;
+  /** 모의 계약 투영의 권리 끝 시각(UTC · 이 시각은 포함하지 않는다). MOCK_MARKETPLACE 일 때만 있다. */
+  entitlement_ends_at: IsoDateTime | null;
 }
 
 export interface TenantsResponse {
@@ -817,7 +840,6 @@ export interface TenantDetail extends TenantListItem {
   /** SUSPENDED 일 때만 있다. */
   suspended_at: IsoDateTime | null;
   suspended_reason: string | null;
-  subscription: TenantSubscription | null;
   created_at: IsoDateTime;
   updated_at: IsoDateTime;
 }
@@ -858,7 +880,79 @@ export interface TenantUpdateRequest {
   regions?: string[];
   collect_vpc_ids?: string[];
   auto_action_enabled?: boolean;
-  subscription?: TenantSubscription | null;
+  subscription?: TenantSubscriptionInput | null;
+}
+
+/* ───────────────────── /me/subscription (T-16 · #528) ───────────────────── */
+/* 고객사 계정의 자기 구독(packages/schemas/api/subscriptions.py). 대상 고객사는 세션이 정한다 — 요청에 tenant_id 를 싣지 않는다.
+   경로: GET /me/subscription · POST /me/subscription/purchase(202) · /cancel · /stop. 응답은 전부 CustomerSubscriptionResponse.
+   조회는 고객사 중앙계정 · 고객사 직원계정 모두, 쓰기는 고객사 중앙계정만. 플랫폼 계정은 역할과 관계없이 403 이다. 결제 · 청구는 없다 —
+   유료 권리의 원천은 서버 안의 모의 Marketplace 계약이고 실제 AWS 호출 · 구매 · 청구가 없다. */
+
+/** 구독 투영의 원천. */
+export const SUBSCRIPTION_SOURCES = ['MANUAL', 'MOCK_MARKETPLACE', 'APP_FREE'] as const;
+export type SubscriptionSource = (typeof SUBSCRIPTION_SOURCES)[number];
+
+/** 모의 Marketplace 로 구매를 요청할 수 있는 요금제(월 단위 계약형). 요금제 사이 전환은 없다. */
+export const SUBSCRIPTION_PURCHASE_PLANS = ['Business', 'Enterprise'] as const;
+export type SubscriptionPurchasePlan = (typeof SUBSCRIPTION_PURCHASE_PLANS)[number];
+
+/** PENDING = 활성화 전(권리 없음) · ACTIVE = 현재 기간 끝 시각까지 권리 · FAILED · EXPIRED = 끝난 계약. */
+export const MOCK_AGREEMENT_STATUSES = ['PENDING', 'ACTIVE', 'FAILED', 'EXPIRED'] as const;
+export type MockAgreementStatus = (typeof MOCK_AGREEMENT_STATUSES)[number];
+
+/** 이 사용자가 지금 요청할 수 있는 쓰기(서버 판정 · 화면 편의). 실제 차단은 쓰기 경로가 한다. */
+export const SUBSCRIPTION_ACTIONS = ['PURCHASE', 'CANCEL_RENEWAL', 'STOP'] as const;
+export type SubscriptionAction = (typeof SUBSCRIPTION_ACTIONS)[number];
+
+export interface SubscriptionPurchaseRequest {
+  plan: SubscriptionPurchasePlan;
+}
+
+/** POST /me/subscription/stop 의 본문 — 고객사 관리 화면의 정지와 같은 사유 칸이다(필수 · 1–500자). */
+export type ServiceStopRequest = TenantSuspendRequest;
+
+/** 모의 Marketplace 계약 1건 — 서버의 모의 공급자가 가진 현재 상태(권위 있는 원천). 실제 AWS 계약 · ARN 이 아니다. */
+export interface MockAgreement {
+  agreement_id: string;
+  source: 'MOCK_MARKETPLACE';
+  plan: string;
+  status: MockAgreementStatus;
+  /** false = 자동 갱신 끔. 기간 끝 시각까지 권리는 그대로다. */
+  auto_renew: boolean;
+  requested_at: IsoDateTime;
+  activated_at: IsoDateTime | null;
+  /** 현재(또는 마지막) 기간. 끝 시각은 포함하지 않는다. ACTIVE · EXPIRED 에만 있다. */
+  term_start: IsoDateTime | null;
+  term_end: IsoDateTime | null;
+  renewal_disabled_at: IsoDateTime | null;
+  /** FAILED = 실패 시각, EXPIRED = 마지막 기간의 끝 시각. */
+  ended_at: IsoDateTime | null;
+  /** FAILED 에만 있다(예: MOCK_ACTIVATION_FAILED). 실제 결제 실패가 아니다. */
+  failure_code: string | null;
+}
+
+export interface CustomerSubscriptionResponse {
+  tenant_name: string;
+  /** 서비스 상태 — 계약과 따로다. SUSPENDED 여도 계약의 갱신 · 만료와 투영은 계속된다. */
+  service_status: TenantStatus;
+  /** 지금 적용 중인 구독(투영). null = 등록 안 됨(Free 아님). */
+  subscription: TenantSubscription | null;
+  /** 투영의 원천. null = 등록 안 됨. */
+  source: SubscriptionSource | null;
+  /** 모의 계약 투영의 권리 끝 시각(미포함). source 가 MOCK_MARKETPLACE 일 때만 있다. */
+  entitlement_ends_at: IsoDateTime | null;
+  /** 가장 최근 모의 계약(진행 중이면 그 계약). PENDING · FAILED 는 여기서만 보인다. */
+  agreement: MockAgreement | null;
+  /** 다음 자동 갱신일(YYYY-MM-DD · KST · 권리 끝 시각의 날짜). 자동 갱신 중인 모의 계약 투영에만 있다. 예정이다. */
+  next_renewal_date: string | null;
+  /** 만료일(YYYY-MM-DD · KST · 권리 끝 시각의 날짜) — 그 시각 뒤 앱 정책 Free. 자동 갱신을 끈 투영에만 있다. 예정이다. */
+  expiry_date: string | null;
+  /** 새 모의 구매 요청을 받는지(서버 설정). 실제 청구는 어느 쪽이든 없다. */
+  mock_marketplace_enabled: boolean;
+  /** 이 계정이 고객사 중앙계정인지(쓰기 인가). */
+  can_manage: boolean;
+  available_actions: SubscriptionAction[];
 }
 
 /* ─────────────────────────────── auth.py ─────────────────────────────── */

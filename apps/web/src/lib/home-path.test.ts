@@ -11,6 +11,7 @@ import {
   confirmedAccount,
   homePathFor,
   navPathsFor,
+  subscriptionOpen,
   type SessionView,
 } from './home-path.ts';
 import type { AccessSubject } from './roles.ts';
@@ -49,7 +50,7 @@ test('첫 화면 — 플랫폼은 관리자 대시보드, 고객사 계정은 �
   for (const role of TENANT_ROLES) assert.equal(homePathFor(tenant(role)), CUSTOMER_HOME, role);
 });
 
-test('메뉴 — 고객사 계정은 대시보드 · 관제(+ADMIN은 계정)를 받고, 고객 관리 · 문의함은 받지 않는다', () => {
+test('메뉴 — 고객사 계정은 업무 · 설정 · 구독(고객사 중앙계정은 계정 관리도)을 받고, 고객 관리 · 문의함은 받지 않는다', () => {
   // 관리자 메뉴에는 관제가 없다 — 고객사 상세에서 들어간다.
   // 도입 신청함은 중앙 관리자만(서버 `require_central_admin`), 고객 문의함은 플랫폼 계정이 받는다.
   assert.deepEqual(navPathsFor(platform), ['/', '/tenants', '/users', '/signup-requests', '/inquiries']);
@@ -59,15 +60,21 @@ test('메뉴 — 고객사 계정은 대시보드 · 관제(+ADMIN은 계정)를
   assert.deepEqual(navPathsFor(unassignedManager), ['/tenants', '/inquiries']);
   // 고객사 계정에게는 고객사 상세가 없어 관제를 메뉴에 둔다.
   // 고객 설정은 고객사 계정이면 역할과 관계없이 열린다(OPERATOR · VIEWER는 조회만 — 화면과 서버가 판정한다).
-  assert.deepEqual(navPathsFor(tenant('ADMIN')), ['/', '/monitoring', '/logs', '/users', SETTINGS_PATH]);
-  assert.deepEqual(navPathsFor(tenant('OPERATOR')), ['/', '/monitoring', '/logs', SETTINGS_PATH]);
-  assert.deepEqual(navPathsFor(tenant('VIEWER')), ['/', '/monitoring', '/logs', SETTINGS_PATH]);
+  assert.deepEqual(navPathsFor(tenant('ADMIN')), ['/', '/monitoring', '/logs', '/users', SETTINGS_PATH, '/subscription']);
+  assert.deepEqual(navPathsFor(tenant('OPERATOR')), ['/', '/monitoring', '/logs', SETTINGS_PATH, '/subscription']);
+  assert.deepEqual(navPathsFor(tenant('VIEWER')), ['/', '/monitoring', '/logs', SETTINGS_PATH, '/subscription']);
 });
 
 test('고객 설정 메뉴는 고객사 계정만 — 플랫폼 계정은 고객 상세에서 들어가고 전체 고객 설정 메뉴가 없다', () => {
   for (const user of [platform, assignedManager, unassignedManager]) {
     assert.equal(navPathsFor(user).includes(SETTINGS_PATH), false, user.platform_role ?? '');
   }
+});
+
+test('자기 구독 화면은 확인된 고객사 계정에만 열린다 — 플랫폼 계정에는 자기 구독이 없다', () => {
+  for (const role of TENANT_ROLES) assert.equal(subscriptionOpen(tenant(role)), true, role);
+  for (const user of [platform, assignedManager, unassignedManager]) assert.equal(subscriptionOpen(user), false);
+  assert.equal(subscriptionOpen(null), false);
 });
 
 test('세션 확인 전 · 조회 실패 · 미로그인 — 메뉴를 열지 않고 자산 조회 · 실시간 연결도 열지 않는다', () => {

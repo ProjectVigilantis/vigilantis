@@ -9,6 +9,11 @@
 #     다른 관리자가 상태를 바꿨으면 0행(False)이 되고, 호출부가 TENANT_STATE_CONFLICT로 답한다.
 #   - 연결 확인 자체(AssumeRole · GetCallerIdentity · 최소 읽기)는 하지 않는다. 그 **결과를
 #     기록하는 자리**까지다 — 테넌트별 AWS 자격은 다음 카드다.
+#   - 구독(T-16 · #528) 칸은 투영이다. 권위 있는 원천인 모의 Marketplace 계약은
+#     db.repositories.mock_marketplace 가, 계약 → 투영 계산은 subscription_workflow 가 맡는다. 여기는 행을
+#     잠그고(lock_tenant) 투영을 쓰는 자리와 운영자 PATCH 의 계약 보호까지다. 구독 쓰기는 서비스 상태(status)를
+#     바꾸지 않고, 서비스 전이(정지 · 재개 · 연결 확인)는 구독을 바꾸지 않는다.
+#   - 잠금 순서: 테넌트 행(FOR UPDATE) → 계약 행. 구매 · PATCH · 투영 · 갱신 끄기가 같은 순서로 잠근다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -25,12 +30,18 @@ from schemas.api.tenants import (
     SUSPENDABLE_STATUSES,
     VERIFIABLE_STATUSES,
     TenantStatus,
+    TenantSubscription,
     TenantUpdateRequest,
     TenantVerificationResult,
     default_access_role_arn,
 )
 from schemas.incidents import INCIDENT_OPEN_STATUSES
-from sqlalchemy import case, delete, func, literal, select, update
+from schemas.subscriptions import (
+    FREE_PLAN,
+    MOCK_AGREEMENT_OPEN_STATUSES,
+    SubscriptionSource,
+)
+from sqlalchemy import case, delete, exists, func, literal, select, update
 from sqlalchemy.orm import Session
 
 from .. import models
@@ -40,6 +51,28 @@ _T = models.Tenant
 # ExternalId 는 플랫폼이 한 번 정한다 — 추측할 수 없어야 혼동된 대리인 방지가 성립한다.
 # 16바이트 난수 = 32자 hex(DB CHECK external_id_min_length 는 16자 이상).
 _EXTERNAL_ID_BYTES = 16
+
+#: 앱 정책 Free — 기간 · 기준일 · 예약 · 요금 없음. 새 테넌트 · 모의 계약이 끝난 뒤의 도착점이다.
+APP_FREE = TenantSubscription(plan=FREE_PLAN)
+
+
+def _subscription_values(sub: Optional[TenantSubscription]) -> dict:
+    """구독 칸 전부의 값(칸 이름 = 계약 TenantSubscription 의 칸). None 이면 미등록 — 모두 비우고 예약 없음."""
+    return (sub or TenantSubscription()).model_dump()
+
+
+def projection_values(
+    sub: TenantSubscription | None,
+    source: SubscriptionSource | None,
+    entitlement_ends_at: datetime | None = None,
+) -> dict:
+    """투영 칸 전부(구독 칸 + 원천 + 권리 끝 시각). 비어 있는 구독은 원천이 없다(등록 안 됨 · DB CHECK)."""
+    values = _subscription_values(sub)
+    empty = values == _subscription_values(None)
+    return values | {
+        "subscription_source": None if empty else source,
+        "entitlement_ends_at": entitlement_ends_at,
+    }
 
 
 @dataclass(frozen=True)
@@ -70,6 +103,7 @@ def create_tenant(
 
     계정 ID · ExternalId 중복은 DB 유일성이 flush에서 거절한다(호출부가 409로 해석).
     역할 ARN 을 안 주면 계약의 기본값(`vigilantis-access`)이다.
+    구독은 앱 정책 Free(APP_FREE)로 시작한다(T-16) — 기간 · 요금 없이. 기존 테넌트의 NULL 구독은 Free 로 채우지 않는다.
     """
     row = _T(
         name=name,
@@ -78,6 +112,7 @@ def create_tenant(
         external_id=secrets.token_hex(_EXTERNAL_ID_BYTES),
         regions=list(regions),
         collect_vpc_ids=list(collect_vpc_ids),
+        **projection_values(APP_FREE, SubscriptionSource.APP_FREE),
         created_at=now,
         updated_at=now,
     )
@@ -148,6 +183,30 @@ def get_tenant_status(db: Session, tenant_id: str) -> Optional[TenantStatus]:
     return db.scalar(select(_T.status).where(_T.tenant_id == tenant_id))
 
 
+def lock_tenant(db: Session, tenant_id: str) -> models.Tenant | None:
+    """테넌트 행을 FOR UPDATE 로 읽는다(DB 값으로 덮어 읽기). 구독의 쓰기들이 이 잠금으로 줄을 선다 —
+    잠근 뒤의 다음 조회는 먼저 commit 된 계약을 본다(READ COMMITTED 의 문장별 스냅숏)."""
+    return db.execute(
+        select(_T)
+        .where(_T.tenant_id == tenant_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+
+
+def has_open_agreement(db: Session, tenant_id: str) -> bool:
+    """진행 중(PENDING · ACTIVE)인 모의 Marketplace 계약이 있는가."""
+    agreement = models.MockMarketplaceAgreement
+    return db.scalar(
+        select(
+            exists().where(
+                agreement.tenant_id == tenant_id,
+                agreement.status.in_(MOCK_AGREEMENT_OPEN_STATUSES),
+            )
+        )
+    )
+
+
 def tenant_id_for_account(db: Session, aws_account_id: str) -> Optional[str]:
     """그 AWS 계정을 등록한 테넌트 — 상태와 무관하다. 계정은 테넌트마다 하나뿐이다(DB 유일성)."""
     return db.scalar(select(_T.tenant_id).where(_T.aws_account_id == aws_account_id))
@@ -184,8 +243,11 @@ def update_tenant(
 ) -> bool:
     """보낸 칸만 바꾼다(changes.model_fields_set). 상태와 무관하다. 없는 테넌트면 False.
 
-    계정 · 역할 · 상태는 계약이 받지 않으므로 여기에도 길이 없다. `subscription` 은 세 칸을
-    한 덩어리로 바꾸고, null 이면 셋을 모두 지운다.
+    계정 · 역할 · 상태는 계약이 받지 않으므로 여기에도 길이 없다. `subscription` 은 구독 칸 전부
+    (예약 · 기준일 · 요금 포함)를 한 덩어리로 바꾸고(원천 MANUAL), null 이면 모두 지운다(미등록). 보내지 않으면
+    그대로다. **유효한 모의 계약은 지우지 않는다** — `subscription` 을 보냈는데 진행 중(PENDING · ACTIVE) 계약이
+    있거나 지금 구독이 계약의 투영이면 아무것도 바꾸지 않고 False 다(호출부가 다시 읽어 409). 행을 먼저 잠가
+    동시 구매(같은 잠금 뒤에 계약을 만든다)와 줄을 세운다.
     """
     values: dict = {
         field: getattr(changes, field)
@@ -193,12 +255,14 @@ def update_tenant(
         if field in changes.model_fields_set
     }
     if "subscription" in changes.model_fields_set:
-        sub = changes.subscription
-        values |= {
-            "plan": sub.plan if sub else None,
-            "period_start": sub.period_start if sub else None,
-            "period_end": sub.period_end if sub else None,
-        }
+        locked = lock_tenant(db, tenant_id)
+        if (
+            locked is None
+            or locked.subscription_source is SubscriptionSource.MOCK_MARKETPLACE
+            or has_open_agreement(db, tenant_id)
+        ):
+            return False
+        values |= projection_values(changes.subscription, SubscriptionSource.MANUAL)
     if changes.auto_action_enabled is True:
         # 꺼져 있던 것을 켤 때만 그 시각을 남긴다(T-6 · #514 Q2) — 이미 켜져 있으면 그대로 둔다.
         # SET 의 오른쪽은 바뀌기 전 값을 읽으므로 같은 UPDATE 안에서 판정이 맞다
@@ -283,6 +347,9 @@ def resume_tenant(
 
     OK 면 ACTIVE 로 올리고 정지 기록을 지운다. 실패면 결과만 남기고 SUSPENDED 그대로다 —
     정지 사이에 고객이 역할을 지웠을 수 있다. 상태와 확인 기록을 한 UPDATE로 쓴다.
+
+    **구독은 바꾸지 않는다**(T-16 · #528) — 정지 중에도 모의 계약의 갱신 · 만료와 투영이 계속되므로, 재개는
+    지금 권리를 그대로 이어 간다(Free 로 다시 시작하지 않고 tenant_subscription_history 에 새 행을 쓰지 않는다).
     """
     values = _verification(result, reason_code, now)
     if result is TenantVerificationResult.OK:
@@ -306,4 +373,17 @@ def delete_tenant(db: Session, tenant_id: str) -> bool:
     """
     return _changed_one(
         db, delete(_T).where(_T.tenant_id == tenant_id, _T.status.in_(DELETABLE_STATUSES))
+    )
+
+
+# --- 구독 투영 (T-16 · #528) ------------------------------------------------------
+
+
+def project_subscription(db: Session, tenant_id: str, values: dict, *, now: datetime) -> bool:
+    """투영 칸(projection_values)을 쓴다. 서비스 상태와 무관하다 — 정지 중에도 계약을 따라간다.
+
+    호출부(subscription_workflow)가 lock_tenant 로 행을 잠그고 계약의 현재 상태를 읽은 뒤 부른다.
+    """
+    return _changed_one(
+        db, update(_T).where(_T.tenant_id == tenant_id).values(**values, updated_at=now)
     )

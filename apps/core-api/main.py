@@ -5,10 +5,13 @@
 #   - 오류는 exceptions의 공통 봉투로, 접근 로그는 request_context 미들웨어가
 #     구조화 로그(logging_config)로 남긴다.
 #   - 실시간 전송(realtime.RealtimeManager)은 앱 수명주기에 묶어 기동·종료한다.
-#   - 스케줄러 넷을 같은 수명주기에 묶는다. 실시간 전송보다 늦게 열고 먼저 닫는다.
+#   - 스케줄러 다섯을 같은 수명주기에 묶는다. 실시간 전송보다 늦게 열고 먼저 닫는다.
 #     수집→판정 스캔(services.scheduler)은 SCAN_ENABLED로, 접수된 조치 실행 디스패치·
 #     회수 스캔(dispatcher)과 AI 분석 대기 스캔(agent_dispatcher)은 DISPATCH_ENABLED를
 #     Medium 승인 기한 감시와 공유해 켜고 끈다 (Issue #232·#277·#285·#447).
+#   - 고객 구독 계약 처리(subscription_scheduler)는 SUBSCRIPTION_SCHEDULER_ENABLED 로 독립 기동한다 —
+#     스캔 · 디스패치를 꺼도 모의 Marketplace 계약의 활성화 · 갱신 · 만료와 투영은 돈다(T-16 · #528).
+#   - 고객 자기 구독(/api/v1/me/subscription)은 같은 Origin → 세션 관문 뒤 고객사(TENANT) 계정만 받는다.
 #   - 모의 위협 파일 소비자는 MOCK_THREAT_INBOX_DIR 지정 시 독립 기동한다(#322).
 #   - 접근 보호(#492 PR 2): 조치 · 자산 · 인시던트 · 감사 기록 · 메트릭 라우터는 포함 시점에
 #     Origin(상태 변경만) → 세션 검사를 건다. 도입 신청 POST는 별도 공개 입력 경계(#552)다.
@@ -63,12 +66,14 @@ from routers import metrics as metrics_router  # noqa: E402
 from routers import notifications as notifications_router
 from routers import signup_requests as signup_requests_router
 from routers import staff as staff_router  # noqa: E402
+from routers import subscriptions as subscriptions_router
 from routers import tenant_settings as tenant_settings_router  # noqa: E402
 from routers import tenants as tenants_router  # noqa: E402
 from routers import users as users_router  # noqa: E402
 from routers import ws as ws_router  # noqa: E402
 from security.soar import start_timeout_watcher  # noqa: E402
 from services.scheduler import start_scheduler as start_scan_scheduler  # noqa: E402
+from subscription_scheduler import start_subscription_scheduler  # noqa: E402
 from support_http import SignupBodyLimitMiddleware
 
 _http_logger = logging.getLogger("vigilantis.http")
@@ -110,6 +115,8 @@ def create_app() -> FastAPI:
             partial(agent_dispatcher.start_agent_dispatcher, realtime.publish),
             # AI 처리와 독립적으로 저장된 Medium 승인 기한을 감시한다.
             partial(start_timeout_watcher, realtime.publish),
+            # 고객 구독 계약 처리(모의 Marketplace 활성화 · 갱신 · 만료 · 투영). 발행하는 이벤트가 없다.
+            start_subscription_scheduler,
         )
         try:
             for start in starts:
@@ -219,6 +226,7 @@ def create_app() -> FastAPI:
     # 같은 prefix의 GET/PUT은 라우터가 CENTRAL_ADMIN 관문을 건다. 공개는 POST 한 경로뿐이다.
     app.include_router(signup_requests_router.router)
     app.include_router(staff_router.router, dependencies=protected)
+    app.include_router(subscriptions_router.router, dependencies=protected)
     app.include_router(tenants_router.router, dependencies=protected)
     # 고객 설정(T-7) — 고객사 계정도 들어오는 별도 라우터. 등급 · 범위는 Workflow 가 auth.access 로 건다
     app.include_router(tenant_settings_router.router, dependencies=protected)

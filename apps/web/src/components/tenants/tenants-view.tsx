@@ -10,6 +10,7 @@ import { useMemo, useState } from 'react';
 
 import { useSession } from '@/components/auth/session-provider';
 import { EmptyState } from '@/components/empty-state';
+import { SubscriptionCell } from '@/components/subscriptions/subscription-facts';
 import { CreateTenantDialog } from '@/components/tenants/create-tenant-dialog';
 import { TenantStatusBadge, VerificationSummary } from '@/components/tenants/tenant-badges';
 import { Button } from '@/components/ui/button';
@@ -116,6 +117,7 @@ export function TenantsView({ tenants }: { tenants: TenantListItem[] }) {
                   <TableRow className="bg-secondary hover:bg-secondary">
                     <TableHead className="text-foreground-secondary pl-6 text-xs font-semibold">이름</TableHead>
                     <TableHead className="text-foreground-secondary text-xs font-semibold">상태</TableHead>
+                    <TableHead className="text-foreground-secondary text-xs font-semibold">구독</TableHead>
                     <TableHead className="text-foreground-secondary text-xs font-semibold">AWS 계정</TableHead>
                     <TableHead className="text-foreground-secondary text-xs font-semibold">마지막 연결 확인</TableHead>
                     <TableHead className="text-foreground-secondary text-right text-xs font-semibold">자산</TableHead>
@@ -137,6 +139,7 @@ export function TenantsView({ tenants }: { tenants: TenantListItem[] }) {
                         </Link>
                       </TableCell>
                       <TableCell><TenantStatusBadge status={t.status} /></TableCell>
+                      <TableCell><SubscriptionCell item={t} /></TableCell>
                       <TableCell className="text-foreground-secondary font-mono text-[13px]">{t.aws_account_id}</TableCell>
                       <TableCell><VerificationSummary verification={t.last_verification} align="start" /></TableCell>
                       <TableCell className="text-right tabular-nums">{t.asset_count}</TableCell>
@@ -145,7 +148,7 @@ export function TenantsView({ tenants }: { tenants: TenantListItem[] }) {
                   ))}
                   {rows.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={6} className="text-muted-foreground py-8 text-center">
+                      <TableCell colSpan={7} className="text-muted-foreground py-8 text-center">
                         {query.trim() === '' ? '이 상태의 고객사가 없습니다.' : '검색어와 맞는 고객사가 없습니다.'}
                       </TableCell>
                     </TableRow>

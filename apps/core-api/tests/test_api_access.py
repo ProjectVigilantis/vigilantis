@@ -10,7 +10,8 @@
 #     소속. 범위 밖 · 소속 없는 MVP 기록은 목록에서 빠지고 상세 · 실행 · 종료가 404 다. 상태 변경의 역할 검사(403)는
 #     대상을 읽기 전이고, 정지는 요청자가 아니라 대상 인시던트의 고객사로 Workflow 가 본다. 메트릭도 같은 범위로
 #     열려 고객사 계정은 200 을 받고(#536), 범위 경로 밖의 업무 경로는 고객사 계정에 403 이다(경로 전수). 고객사 계정의 /api/v1/auth ·
-#     /api/v1/users 는 그대로 열린다.
+#     /api/v1/users 는 그대로 열린다. /api/v1/me/subscription 은 반대로 고객사 계정 전용이다(플랫폼 계정 403 ·
+#     test_subscription_api).
 #   - 고객사 범위 판정: tenant_scope_ids · can_access_tenant · tenant_scope_of 는 명시 등급 · 배정 · 소속만 읽고
 #     닫힌 쪽으로 실패한다.
 #   - 세션: 유휴 · 최대 수명 만료, 회수(LOGOUT · SUPERSEDED), 비활성 · UNASSIGNED 사용자는 401.
@@ -290,7 +291,7 @@ TENANT_SCOPED_ROUTES = {
 
 
 def test_business_routes_outside_tenant_scope_stay_platform_only(client_pg, login_as, make_tenant):
-    """경로 전수 — 인증 · 사용자 관리와 범위로 걸러지는 업무 경로 밖은 고객사 ADMIN 에게 403 이다.
+    """경로 전수 — 인증 · 사용자 관리 · 자기 구독(고객사 전용)과 범위로 걸러지는 업무 경로 밖은 고객사 ADMIN 에게 403 이다.
 
     새 업무 경로가 범위 판정이나 플랫폼 관문 없이 붙으면 여기서 걸린다(포함 시점 의존성이 빠진 경우 포함).
     범위로 걸러지는 경로는 고객사 계정에게 열리고, 범위 밖(여기서는 없는) 인시던트는 404 다.
@@ -300,7 +301,7 @@ def test_business_routes_outside_tenant_scope_stay_platform_only(client_pg, logi
     business = {
         (method, path)
         for method, path in http - PUBLIC_ROUTES
-        if not path.startswith(("/api/v1/auth/", "/api/v1/users"))
+        if not path.startswith(("/api/v1/auth/", "/api/v1/users", "/api/v1/me/subscription"))
     }
     assert TENANT_SCOPED_ROUTES <= business
 
@@ -741,6 +742,9 @@ def _valid_bodies(incident_id: str) -> dict[tuple[str, str], dict | None]:
         ("POST", "/api/v1/notifications/read"): {"notification_ids": []},
         ("POST", "/api/v1/tenants/{tenant_id}/verify"): None,
         ("POST", "/api/v1/tenants/{tenant_id}/resume"): None,
+        ("POST", "/api/v1/me/subscription/purchase"): {"plan": "Business"},
+        ("POST", "/api/v1/me/subscription/cancel"): None,
+        ("POST", "/api/v1/me/subscription/stop"): {"reason": "중단"},
     }
 
 
