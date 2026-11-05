@@ -10,6 +10,7 @@ import {
   Activity,
   Building2,
   ClipboardList,
+  CreditCard,
   LayoutDashboard,
   LifeBuoy,
   ScrollText,
@@ -71,7 +72,7 @@ const NAV: Readonly<Record<string, { label: string; icon: LucideIcon }>> = {
   [SETTINGS_PATH]: { label: '고객사 설정', icon: SlidersHorizontal },
   [SIGNUP_REQUESTS_PATH]: { label: '도입 신청', icon: ClipboardList },
   [INQUIRIES_PATH]: { label: '고객사 문의', icon: LifeBuoy },
-  [SUBSCRIPTION_PATH]: { label: '구독', icon: ScrollText },
+  [SUBSCRIPTION_PATH]: { label: '구독', icon: CreditCard },
 };
 
 /** 현재 계정(세션 Provider · #492). 확인 전 · 미로그인 · 조회 실패는 null이다(메뉴 · 업무 기능을 열지 않는다). */

@@ -112,7 +112,7 @@ export function homePathFor(user: AccessSubject): string {
 /**
  * 사이드바에 보일 경로(순서대로). 계정을 아직 모르면(null — 확인 전 · 조회 실패 · 미로그인) 아무 메뉴도 열지 않는다.
  * 업무 화면은 `businessOpen`, 고객 관리는 플랫폼, 사용자 관리는 `canManageUsers`가 연다.
- * 고객 설정은 고객사 계정, 구독은 `subscriptionOpen`이 연다.
+ * 고객 설정과 자기 구독은 고객사 계정에 연다.
  */
 export function navPathsFor(user: AccessSubject | null): string[] {
   if (user === null) return [];
@@ -121,7 +121,7 @@ export function navPathsFor(user: AccessSubject | null): string[] {
     ...CUSTOMER_BUSINESS_PATHS,
     ...(canManageUsers(user) ? [USERS_PATH] : []),
     SETTINGS_PATH,
-    ...(subscriptionOpen(user) ? [SUBSCRIPTION_PATH] : []),
+    SUBSCRIPTION_PATH,
   ];
   return [
     ...(businessOpen(user) ? BUSINESS_PATHS : []),

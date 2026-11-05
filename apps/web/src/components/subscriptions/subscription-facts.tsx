@@ -3,8 +3,8 @@
 //
 // 훅이 없어 `'use client'`를 붙이지 않는다(panel.tsx와 같은 이유). 서비스 상태와 계약은 따로라 이용 중단이어도
 // 구독 칸은 지금 권리 그대로다. 원천(수동 등록 · 모의 계약 · 앱 기본 Free · 미등록)을 함께 보이고, 모의 계약
-// 투영이면 권리 끝 시각을 정확한 시각(KST)으로 보인다. 그 시각이 기준 시각(`asOf`)에 지났으면 위 값이 직전
-// 기간의 기록임을 말한다 — 요금제 이름만으로 지금 권리가 있다고 그리지 않는다.
+// 투영의 끝이 기준 시각(`asOf`)에 지났으면 직전 기간의 기록임을 말한다 — 요금제 이름만으로 지금 권리가 있다고
+// 그리지 않는다. 계약 패널과 함께 쓰는 요약에서는 정확한 시각 · 계약 설명을 그 패널에 맡긴다.
 
 import { Row } from '@/components/detail-row';
 import { EnumBadge } from '@/components/status-badge';
@@ -28,12 +28,14 @@ export function SubscriptionFacts({
   source,
   entitlementEndsAt,
   asOf,
+  presentation = 'standalone',
 }: {
   subscription: TenantSubscription | null;
   source: SubscriptionSource | null;
   entitlementEndsAt: IsoDateTime | null;
   /** 지난 권리 판정의 기준 시각(ms) — 이 값을 읽은 시각이다. 렌더 중 시계를 읽지 않는다. */
   asOf: number;
+  presentation?: 'standalone' | 'summary';
 }) {
   if (subscription === null) {
     return (
@@ -44,8 +46,9 @@ export function SubscriptionFacts({
     );
   }
   const mock = source === 'MOCK_MARKETPLACE';
+  const summary = presentation === 'summary';
   const anchor = anchorDayText(subscription.billing_anchor_day);
-  const note = sourceNote(source, subscription);
+  const note = mock && summary ? null : sourceNote(source, subscription);
   return (
     <div className="flex flex-col gap-3">
       <Row label="요금제">
@@ -59,14 +62,14 @@ export function SubscriptionFacts({
       <Row label="이용 기간">
         <span className="tabular-nums">{periodText(subscription)}</span>
       </Row>
-      {mock && entitlementEndsAt !== null ? (
-        <Row label="권리 끝 시각"><span className="tabular-nums">{formatKst(entitlementEndsAt)}</span></Row>
+      {!summary && mock && entitlementEndsAt !== null ? (
+        <Row label="권리 끝 시각"><span className="tabular-nums">{formatKst(entitlementEndsAt, '24h')}</span></Row>
       ) : null}
-      {anchor !== null ? <Row label={mock ? '계약 기념일' : '갱신 기준일(기록)'}>{anchor}</Row> : null}
+      {!summary && anchor !== null ? <Row label={mock ? '계약 기념일' : '갱신 기준일(기록)'}>{anchor}</Row> : null}
       {note !== null ? <p className="text-muted-foreground text-xs">{note}</p> : null}
       {mock && entitlementLapsed(entitlementEndsAt, asOf) ? (
         <p role="status" className="bg-badge-warning-bg text-badge-warning-fg rounded-md p-2 text-xs font-semibold">
-          {LAPSED_NOTE}
+          {summary ? '직전 기간 기록 · 서버 반영 대기' : LAPSED_NOTE}
         </p>
       ) : null}
     </div>

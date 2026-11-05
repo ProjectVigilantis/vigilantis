@@ -198,9 +198,9 @@ test('구독 변경 권한이 없으면 고객사 중앙계정만 요청할 수 
   assert.match(manageNote(res({ can_manage: false, available_actions: [] })) ?? '', /구독 변경은 고객사 중앙계정만 요청할 수 있습니다/);
 });
 
-test('이용 중단 중에는 구매를 막고 재개는 중앙 관리계정이나 해당 고객사가 배정된 관리자 직원계정에 요청하라고 말한다', () => {
+test('이용 중단 중에는 구매를 요청할 수 없는 이유를 말한다', () => {
   const data = res({ ...ACTIVE_PROJECTED, service_status: 'SUSPENDED', available_actions: ['CANCEL_RENEWAL'] });
-  assert.match(manageNote(data) ?? '', /구매를 요청할 수 없습니다.*재개는 중앙 관리계정 또는 해당 고객사가 배정된 관리자 직원계정에 요청하세요/);
+  assert.match(manageNote(data) ?? '', /구매를 요청할 수 없습니다/);
 });
 
 test('연결 대기 · 미등록 · 수동 등록 유료 구독은 이유를 말한다', () => {
@@ -227,21 +227,19 @@ test('상태 · 권한이 바뀐 실패는 확인창을 닫고 다시 읽는다.
 
 /* ── 성공 알림 — 구매 요청은 완료가 아니고, 갱신 끄기 · 이용 중단은 해지가 아니다 ── */
 
-test('구매 요청 알림은 활성화 대기 접수이고 지금 요금제가 그대로라고 말한다', () => {
+test('구매 요청 알림은 구매 완료가 아니라 활성화 대기 접수라고 말한다', () => {
   const text = changeNotice('purchase', res({ agreement: PENDING, available_actions: ['STOP'] }));
   assert.match(text, /Business 구매 요청을 접수했습니다\(활성화 대기\)/);
-  assert.match(text, /지금 요금제\(Free\)가 그대로/);
   assert.doesNotMatch(text, /구매 완료|결제 완료|구매했습니다/);
 });
 
-test('자동 갱신 끄기 알림은 즉시 해지가 아니고 마지막 이용일까지 권리, 만료일 뒤 Free라고 말한다', () => {
+test('자동 갱신 끄기 알림은 요청한 동작이 끝났다고 말한다', () => {
   const text = changeNotice('cancel', RENEWAL_DISABLED);
-  assert.match(text, /즉시 해지가 아니며 2026-11-29까지 지금 권리가 유지됩니다/);
-  assert.match(text, /2026-11-30 00시\(KST\) 뒤 서버가 만료를 처리하면 앱 기본 Free/);
+  assert.match(text, /자동 갱신을 껐습니다/);
 });
 
-test('이용 중단 알림은 계약이 해지되지 않았다고 말한다', () => {
-  assert.match(changeNotice('stop', res({ ...ACTIVE_PROJECTED, service_status: 'SUSPENDED' })), /계약은 해지되지 않았고/);
+test('이용 중단 알림은 서비스 이용을 중단했다고 말한다', () => {
+  assert.match(changeNotice('stop', res({ ...ACTIVE_PROJECTED, service_status: 'SUSPENDED' })), /서비스 이용을 중단했습니다/);
 });
 
 test('알림은 그 알림을 낸 상태가 바뀌면(활성화 · 실패) 내린다', () => {

@@ -42,7 +42,7 @@ import {
   RENEWAL_RULE,
   RESUME_KEEPS_SUBSCRIPTION,
   STOP_KEEPS_CONTRACT,
-  SUBSCRIPTION_POLL_MS,
+  stopDialogNote,
   type SubscriptionChange,
 } from '@/lib/subscriptions';
 import { SUSPEND_REASON_MAX } from '@/lib/tenants';
@@ -158,7 +158,7 @@ export function SubscriptionView({
           <EnumBadge entry={MOCK_BADGE} />
         </div>
         <p className="text-muted-foreground text-sm break-all">
-          {data.tenant_name} · 날짜 · 시각은 모두 KST입니다. 카드 정보를 받지 않고 실제 청구도 하지 않습니다.
+          {data.tenant_name} · 날짜 · 시각은 모두 KST입니다.
         </p>
       </div>
 
@@ -192,28 +192,28 @@ export function SubscriptionView({
       {awaiting ? (
         <div role="status" className="bg-badge-warning-bg text-badge-warning-fg flex flex-wrap items-center justify-between gap-2 rounded-xl p-4 text-sm">
           <span>
-            서버의 계약 처리 결과를 기다리는 중입니다. 이 화면은 {SUBSCRIPTION_POLL_MS / 1000}초마다 상태를 다시 읽을 뿐
-            처리를 앞당기지 않습니다. {PROCESSING_NOT_GUARANTEED} · 마지막 확인{' '}
-            {formatKst(new Date(checkedAt).toISOString())}
+            서버의 계약 처리 결과를 기다리는 중입니다. {PROCESSING_NOT_GUARANTEED} · 마지막 확인{' '}
+            {formatKst(new Date(checkedAt).toISOString(), '24h')}
           </span>
           <Button type="button" size="sm" variant="outline" onClick={onRefresh}>지금 확인</Button>
         </div>
       ) : null}
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <Panel title="현재 구독" description="지금 적용 중인 요금제입니다. 서버가 계약을 반영한 값만 보입니다.">
+        <Panel title="현재 구독">
           <div className="flex flex-col gap-3">
             <SubscriptionFacts
               subscription={data.subscription}
               source={data.source}
               entitlementEndsAt={data.entitlement_ends_at}
               asOf={asOf}
+              presentation="summary"
             />
             {data.next_renewal_date !== null ? (
-              <Row label="다음 자동 갱신(예정)"><span className="tabular-nums">{data.next_renewal_date} 00시(KST)</span></Row>
+              <Row label="다음 자동 갱신(예정)"><span className="tabular-nums">{data.next_renewal_date}</span></Row>
             ) : null}
             {data.expiry_date !== null ? (
-              <Row label="만료 · 앱 기본 Free(예정)"><span className="tabular-nums">{data.expiry_date} 00시(KST)</span></Row>
+              <Row label="만료 · 앱 기본 Free(예정)"><span className="tabular-nums">{data.expiry_date}</span></Row>
             ) : null}
             {can(data, 'PURCHASE') || can(data, 'CANCEL_RENEWAL') ? (
               <div className="flex flex-wrap gap-2 pt-1">
@@ -233,7 +233,7 @@ export function SubscriptionView({
           </div>
         </Panel>
 
-        <Panel title="모의 Marketplace 계약" description={MOCK_MARKETPLACE_NOTICE}>
+        <Panel title="모의 Marketplace 계약">
           <AgreementFacts data={data} asOf={asOf} />
         </Panel>
 
@@ -281,6 +281,7 @@ export function SubscriptionView({
       ) : null}
       {dialog === 'stop' ? (
         <StopDialog
+          note={stopDialogNote(data)}
           pending={pending}
           error={dialogError}
           onClose={close}
@@ -311,6 +312,10 @@ function AgreementFacts({ data, asOf }: { data: CustomerSubscriptionResponse; as
     );
   }
   const activated = agreement.status === 'ACTIVE' || agreement.status === 'EXPIRED';
+  const projectionEnd = data.source === 'MOCK_MARKETPLACE' ? data.entitlement_ends_at : null;
+  const differentBoundary = projectionEnd !== null && (
+    agreement.term_end === null || Date.parse(projectionEnd) !== Date.parse(agreement.term_end)
+  );
   return (
     <div className="flex flex-col gap-3">
       <Row label="상태">
@@ -320,22 +325,27 @@ function AgreementFacts({ data, asOf }: { data: CustomerSubscriptionResponse; as
         </span>
       </Row>
       <Row label="요금제"><span className="font-semibold">{agreement.plan}</span></Row>
-      <Row label="구매 요청"><span className="tabular-nums">{formatKst(agreement.requested_at)}</span></Row>
+      <Row label="구매 요청"><span className="tabular-nums">{formatKst(agreement.requested_at, '24h')}</span></Row>
       {activated ? (
         <>
-          <Row label="활성화"><span className="tabular-nums">{formatKst(agreement.activated_at)}</span></Row>
+          <Row label="활성화"><span className="tabular-nums">{formatKst(agreement.activated_at, '24h')}</span></Row>
           <Row label={agreement.status === 'EXPIRED' ? '마지막 기간' : '현재 기간'}>
-            <span className="tabular-nums">{formatKst(agreement.term_start)} ~ {formatKst(agreement.term_end)}</span>
+            <span className="tabular-nums">{formatKst(agreement.term_start, '24h')} ~ {formatKst(agreement.term_end, '24h')}</span>
           </Row>
           <Row label="자동 갱신">{agreement.auto_renew ? '켜짐' : '꺼짐'}</Row>
         </>
       ) : null}
+      {differentBoundary ? (
+        <Row label="현재 구독 기록의 권리 끝 시각">
+          <span className="tabular-nums">{formatKst(projectionEnd, '24h')}</span>
+        </Row>
+      ) : null}
       {agreement.renewal_disabled_at !== null ? (
-        <Row label="자동 갱신 끈 시각"><span className="tabular-nums">{formatKst(agreement.renewal_disabled_at)}</span></Row>
+        <Row label="자동 갱신 끈 시각"><span className="tabular-nums">{formatKst(agreement.renewal_disabled_at, '24h')}</span></Row>
       ) : null}
       {agreement.ended_at !== null ? (
         <Row label={agreement.status === 'FAILED' ? '실패 시각' : '만료 시각'}>
-          <span className="tabular-nums">{formatKst(agreement.ended_at)}</span>
+          <span className="tabular-nums">{formatKst(agreement.ended_at, '24h')}</span>
         </Row>
       ) : null}
       {agreement.failure_code !== null ? (
@@ -400,7 +410,7 @@ function CancelDialog({
         <DialogHeader>
           <DialogTitle>자동 갱신 끄기</DialogTitle>
           <DialogDescription>
-            즉시 해지가 아닙니다. 지금 기간 끝 시각 {formatKst(agreement.term_end)}까지 {agreement.plan} 권리가 유지되고,
+            즉시 해지가 아닙니다. 지금 기간 끝 시각 {formatKst(agreement.term_end, '24h')}까지 {agreement.plan} 권리가 유지되고,
             그 뒤 서버가 만료를 처리하면 앱 기본 Free로 돌아갑니다.
           </DialogDescription>
         </DialogHeader>
@@ -421,7 +431,7 @@ function CancelDialog({
 }
 
 /** 서비스 이용 중단 — 계약과 다른 확인창이다. 고객사 관리 화면의 정지와 같은 규칙 · 같은 사유 칸이다. 계약을 해지하지 않는다. */
-function StopDialog({ pending, error, onClose, onConfirm }: DialogProps & { onConfirm: (reason: string) => void }) {
+function StopDialog({ note, pending, error, onClose, onConfirm }: DialogProps & { note: string; onConfirm: (reason: string) => void }) {
   const [reason, setReason] = useState('');
   const trimmed = reason.trim();
   return (
@@ -434,8 +444,7 @@ function StopDialog({ pending, error, onClose, onConfirm }: DialogProps & { onCo
           </DialogDescription>
         </DialogHeader>
         <p className="text-muted-foreground text-xs">
-          {STOP_KEEPS_CONTRACT} 자동 갱신을 끄려면 [자동 갱신 끄기]를 따로 요청하세요. 재개는 중앙 관리계정 또는
-          해당 고객사가 배정된 관리자 직원계정에 요청하세요. {RESUME_KEEPS_SUBSCRIPTION}
+          {note}
         </p>
         <label className="flex flex-col gap-1.5 text-sm">
           <span className="font-medium">중단 사유(필수)</span>
