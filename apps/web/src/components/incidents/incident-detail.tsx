@@ -46,6 +46,7 @@ import { formatUsd, savingsBreakdown, type SavingsBreakdown } from '@/lib/saving
 import { cn, formatKst } from '@/lib/utils';
 import type {
   AssetItem,
+  AnalysisFailureReason,
   AnalysisResultStatus,
   IncidentResponse,
   IsoDateTime,
@@ -69,17 +70,32 @@ const ANALYSIS_LABELS: Record<AnalysisResultStatus, string> = {
   NO_PROPOSAL: 'AI 조치 제안 없음',
   GUARDRAIL_REJECTED: '모든 AI 제안이 가드레일에서 거절됨',
   FAILED: '분석 실패',
+  NO_ACTION_AVAILABLE: '제공할 자동 조치 없음',
   UNAVAILABLE: '저장된 평가 기록만으로 분석 결과를 확인할 수 없음',
+};
+
+/**
+ * 관제자가 할 일이 정해진 실패 사유만 문장으로 보여 준다(#434). 나머지 사유 코드는 상태 라벨로만
+ * 갈린다 — 내부 검증 단계의 이름은 관제자의 다음 행동을 바꾸지 않는다.
+ */
+const FAILURE_REASON_NOTICES: Partial<Record<AnalysisFailureReason, string>> = {
+  NO_ACTION_AVAILABLE: '이 위협 유형에는 제공할 자동 조치가 없습니다. 확인 뒤 종료 처리로 닫습니다.',
+  SOURCE_ADDRESS_UNSUPPORTED: 'IPv6 출발지는 NACL 차단을 지원하지 않습니다. 확인 뒤 종료 처리로 닫습니다.',
 };
 
 /** 종료 상태로 분석 성공·실패를 추정하지 않는다. 저장된 분석 결과는 종료 후에도 보여 준다. */
 function SummaryLines({ incident }: { incident: IncidentResponse }) {
   if (incident.summary_lines.length === 0) {
+    const reason = incident.analysis_result?.failure_reason;
+    const notice = reason != null ? FAILURE_REASON_NOTICES[reason] : undefined;
     return (
-      <p className="text-muted-foreground text-sm">
-        {incident.analysis_result != null ? ANALYSIS_LABELS[incident.analysis_result.status]
-          : incident.status === 'ANALYZING' ? '분석 중' : '저장된 판단 근거가 없습니다.'}
-      </p>
+      <>
+        <p className="text-muted-foreground text-sm">
+          {incident.analysis_result != null ? ANALYSIS_LABELS[incident.analysis_result.status]
+            : incident.status === 'ANALYZING' ? '분석 중' : '저장된 판단 근거가 없습니다.'}
+        </p>
+        {notice !== undefined ? <p className="text-sm">{notice}</p> : null}
+      </>
     );
   }
   return (
