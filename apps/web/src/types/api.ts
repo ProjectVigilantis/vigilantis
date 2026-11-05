@@ -1318,9 +1318,6 @@ export interface TenantSettingsUpdateRequest {
 
 // --- 위협 이벤트 목록(#572 10번) — packages/schemas/api/threat_events.py ---------------------------
 
-/** 한 번에 받는 최대 건수. 넘치면 `total`이 실제 건수를 알린다(커서는 없다). */
-export const THREAT_EVENTS_LIMIT = 500;
-
 /** 조회 기간(일). 하루 · 일주일 · 한 달. 그 밖의 값은 422다. */
 export type ThreatRangeDays = 1 | 7 | 30;
 
@@ -1357,7 +1354,7 @@ export type ThreatEventItem =
 
 /**
  * `GET /api/v1/threat-events?days=1|7|30` — 기간 [window_start, window_end] 안 이벤트를 최근 것부터
- * (같은 시각은 `threat_event_id` 내림차순). 범위는 인시던트 목록 · 메트릭과 같고(고객사 계정 = 자기 고객사),
+ * (같은 시각은 `threat_event_id` 내림차순) 최대 500건, 커서는 없다. 범위는 인시던트 목록 · 메트릭과 같고(고객사 계정 = 자기 고객사),
  * 관제 리전 · 기간 조건은 메트릭 축 6과 같다.
  */
 export interface ThreatEventsResponse {

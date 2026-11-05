@@ -966,24 +966,24 @@ def list_threat_events(
 
     거르는 조건은 ``threat_event_history``(축 6)와 같다 — 발생 시각 ``[since, until]``, (이벤트 소유, ARN 리전) 쌍의
     관제 리전(``_within_regions``), 소유 범위(``_within_scope``). 그래프의 건수와 목록의 ``total`` 이 같은 근거로 맞는다.
-    순서는 ``occurred_at`` 내림차순, 같은 시각은 ``threat_event_id`` 내림차순이다(응답 계약)."""
+    순서는 ``occurred_at`` 내림차순, 같은 시각은 ``threat_event_id`` 내림차순이다(응답 계약).
+
+    건수와 목록은 **한 문장**으로 읽는다 — 창 함수 ``count() OVER ()`` 는 ``LIMIT`` 전에 계산되어 전체 건수가 된다.
+    두 문장으로 나누면 READ COMMITTED 에서 문장마다 스냅샷이 달라, 그 사이 commit 된 이벤트 때문에 목록이 건수보다
+    길어지고 응답 계약(``total`` ≥ 항목 수)을 어겨 500 이 난다(PR #582 리뷰). 빈 결과는 건수 0 이다."""
     if not regions:
         return [], 0
 
     event = models.ThreatEvent
-
-    def _filtered(stmt):
-        stmt = stmt.where(event.occurred_at >= since, event.occurred_at <= until)
-        stmt = _within_regions(stmt, event.tenant_id, func.split_part(event.target_arn, ":", 4), regions)
-        return _within_scope(stmt, event.tenant_id, scope)
-
-    total = db.scalar(_filtered(select(func.count(event.threat_event_id))))
-    rows = db.scalars(
-        _filtered(select(event))
-        .order_by(event.occurred_at.desc(), event.threat_event_id.desc())
-        .limit(limit)
+    stmt = select(event, func.count().over().label("total")).where(
+        event.occurred_at >= since, event.occurred_at <= until
+    )
+    stmt = _within_regions(stmt, event.tenant_id, func.split_part(event.target_arn, ":", 4), regions)
+    stmt = _within_scope(stmt, event.tenant_id, scope)
+    result = db.execute(
+        stmt.order_by(event.occurred_at.desc(), event.threat_event_id.desc()).limit(limit)
     ).all()
-    return list(rows), int(total or 0)
+    return [row[0] for row in result], (int(result[0].total) if result else 0)
 
 
 def record_inventory_counts(

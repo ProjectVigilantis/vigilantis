@@ -248,6 +248,67 @@ def test_로그인하지_않으면_401(client_pg_anon):
     assert response.json()["error"]["code"] == "AUTH_REQUIRED"
 
 
+def test_건수와_목록_사이에_들어온_이벤트도_계약을_깨지_않는다(pg_engine):
+    """건수와 목록을 한 문장으로 읽는다 — 두 문장이면 사이에 commit 된 이벤트로 total < 항목 수가 되어 500 이다.
+
+    다른 연결의 commit 이 보여야 하므로 db 픽스처(되감기는 외부 트랜잭션)가 아니라 pg_engine 으로 읽는 세션과
+    쓰는 세션을 따로 연다. 읽는 연결이 위협 이벤트 문장을 하나 실행할 때마다 쓰는 세션이 1건을 commit 한다.
+    넣은 행은 끝에서 지운다. 시각은 이 테스트만의 먼 미래라 다른 테스트의 기록과 섞이지 않는다.
+    """
+    from db.repositories import assets as assets_repo
+    from sqlalchemy import delete, event as sa_event
+    from sqlalchemy.orm import Session
+    from tenancy import ALL_TENANTS, MonitoredRegions
+
+    at = datetime(2032, 1, 1, tzinfo=UTC) + timedelta(minutes=uuid.uuid4().int % 10**6)
+    inserted: list[str] = []
+
+    def _commit_one(session):
+        key = uuid.uuid4().hex
+        row = models.ThreatEvent(
+            source_event_id=key, event_type="SSH_BRUTE_FORCE",
+            target_arn=f"arn:aws:ec2:{REGION}:{LEGACY_ACCOUNT}:instance/i-{key[:12]}", payload=SSH,
+            deduplication_key=key, occurred_at=at - timedelta(seconds=len(inserted)),
+        )
+        session.add(row)
+        session.commit()
+        inserted.append(row.threat_event_id)
+
+    writer = Session(bind=pg_engine)
+    reader_conn = pg_engine.connect()
+    reader = Session(bind=reader_conn)
+
+    def _after(conn, cursor, statement, params, context, executemany):
+        if "threat_events" in statement and len(inserted) < 3:
+            _commit_one(writer)
+
+    try:
+        _commit_one(writer)
+        sa_event.listen(reader_conn, "after_cursor_execute", _after)
+        rows, total = assets_repo.list_threat_events(
+            reader, regions=MonitoredRegions(pairs=(), legacy=(REGION,)),
+            since=at - timedelta(days=1), until=at, limit=THREAT_EVENTS_LIMIT, scope=ALL_TENANTS,
+        )
+        sa_event.remove(reader_conn, "after_cursor_execute", _after)
+
+        assert len(inserted) > 1  # 읽는 도중 실제로 commit 이 끼어들었다
+        assert total == len(rows)
+        ThreatEventsResponse.model_validate({
+            "window_start": _z(at - timedelta(days=1)), "window_end": _z(at), "total": total,
+            "items": [
+                {"threat_event_id": r.threat_event_id, "event_type": r.event_type.value,
+                 "target_arn": r.target_arn, "occurred_at": _z(r.occurred_at), "payload": r.payload}
+                for r in rows
+            ],
+        })
+    finally:
+        reader.close()
+        reader_conn.close()
+        writer.execute(delete(models.ThreatEvent).where(models.ThreatEvent.threat_event_id.in_(inserted)))
+        writer.commit()
+        writer.close()
+
+
 # --- 계약 -------------------------------------------------------------------------
 
 
