@@ -681,7 +681,7 @@ class Incident(Base):
         DateTime(timezone=True), nullable=True
     )
     # 상한 초과로 IN_PROGRESS를 되돌린 횟수 — 회수마다 과금되는 재분석이 한 번 더 나가므로
-    # agent_dispatcher가 이 수로 재분석 상한을 건다(#434 §3). Python 기본값을 두지 않는 것은
+    # agent_dispatcher가 이 수로 재분석 상한을 건다(#434 §4-2). Python 기본값을 두지 않는 것은
     # Core insert가 그 칸을 실어 이 리비전 이전으로 내린 DB에서 깨지기 때문이다
     # (test_notification_events의 옛 리비전 INSERT) — 0은 server_default가 채운다
     agent_reclaim_count: Mapped[int] = mapped_column(Integer, server_default="0")

@@ -161,7 +161,7 @@ class Settings(BaseSettings):
         Literal["unset", "none", "minimal", "low", "medium", "high", "xhigh", "max"]
     ] = "low"
     OPENAI_TIMEOUT_SECONDS: float = Field(default=30.0, gt=0)
-    # 재시도 대상은 일시 오류뿐이다(ai/openai_client.py). 1이면 재시도 없음
+    # 재시도 대상은 일시 오류뿐이다(ai/model_retry.py). 1이면 재시도 없음
     OPENAI_MAX_ATTEMPTS: int = Field(default=3, ge=1)
     OPENAI_RETRY_BACKOFF_SECONDS: float = Field(default=1.0, ge=0)
     # 서버가 Retry-After로 지시한 대기의 상한. 이보다 길게 지시하면 따르지 않고

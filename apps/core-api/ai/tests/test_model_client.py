@@ -345,7 +345,7 @@ def test_builder_disables_sdk_retries():
     )
     client = build_openai_model_client(settings)
 
-    # 재시도 소유자는 래퍼 하나 — SDK 기본 2회가 살아 있으면 시도 수가 곱으로 는다
+    # 재시도 소유자는 model_retry 엔진 하나 — SDK 기본 2회가 살아 있으면 시도 수가 곱으로 는다
     assert client._client.max_retries == 0
 
 

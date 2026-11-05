@@ -5,7 +5,7 @@
 # 돌리기 위한 어댑터이며, 운영 경로(OpenAI)에는 연결하지 않습니다.
 #
 #   - anthropic SDK를 쓰지 않는다. Messages API는 HTTPS POST 하나라 openai>=3의 전송
-#     라이브러리인 httpx2로 직접 부른다(새 의존성 없음, pyproject 조율 불필요).
+#     라이브러리인 httpx2로 직접 부른다(새 의존성 없음).
 #     SDK가 해 주던 것 중 필요한 셋만 여기서 맡는다: 인증·버전 헤더, 상태 코드 분류,
 #     구조화 출력용 JSON 스키마 변환(_transform_schema — SDK lib/_parse/_transform.py와
 #     같은 규칙).

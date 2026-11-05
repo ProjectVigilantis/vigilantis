@@ -313,8 +313,8 @@ def build_openai_model_client(settings: Optional[Settings] = None) -> OpenAIMode
     if not settings.OPENAI_API_KEY:
         raise ValueError("OPENAI_API_KEY가 설정되지 않아 모델 클라이언트를 만들 수 없습니다")
     return OpenAIModelClient(
-        # 재시도 소유자는 이 래퍼 하나다 — SDK 기본 재시도(2회)와 중첩되면
-        # 최대 시도가 곱으로 늘어나므로 SDK 쪽은 0으로 끈다
+        # 재시도 소유자는 ai/model_retry.py의 엔진 하나다 — SDK 기본 재시도(2회)와
+        # 중첩되면 최대 시도가 곱으로 늘어나므로 SDK 쪽은 0으로 끈다
         client=OpenAI(
             api_key=settings.OPENAI_API_KEY,
             timeout=settings.OPENAI_TIMEOUT_SECONDS,

@@ -1,4 +1,4 @@
-"""incidents.agent_reclaim_count — IN_PROGRESS Claim을 상한 초과로 회수한 횟수 (#434 §3)
+"""incidents.agent_reclaim_count — IN_PROGRESS Claim을 상한 초과로 회수한 횟수 (#434 §4-2)
 
 회수마다 같은 Incident에 과금되는 그래프 호출이 한 번 더 나간다. 이 수가 상한에 닿으면
 PENDING으로 되돌리지 않고 FAILED로 닫는다(agent_dispatcher._reclaim_stale_claims).

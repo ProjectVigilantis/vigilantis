@@ -1,4 +1,4 @@
-"""incidents.agent_reclaim_count 마이그레이션 (#434 §3) — 실제 PostgreSQL/Alembic.
+"""incidents.agent_reclaim_count 마이그레이션 (#434 §4-2) — 실제 PostgreSQL/Alembic.
 
 기존 Incident는 남고 새 칸은 0(회수한 적 없음)이다 — 지어낸 횟수를 채우지 않는다. 왕복 뒤 ORM과 같다.
 """
