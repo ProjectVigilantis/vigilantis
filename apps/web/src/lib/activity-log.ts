@@ -1,6 +1,6 @@
 // 로그 화면(`/logs`, 2026-11-03)의 한 줄 목록. 세 원천을 시각순으로 합친다.
 //   - 조치 · 종료: GET /api/v1/audit-events(#544). 누가(고객사 사용자 · 플랫폼 운영자 · 시스템) 무엇을 실행했고 종료했나.
-//   - 위협: GET /api/v1/threat-events(FE 제안 계약, lib/threat-events.ts). 실서버에는 아직 없다.
+//   - 위협: GET /api/v1/threat-events(계약 types/api.ts `ThreatEventsResponse`, #572 10번).
 //   - 인시던트 발생: GET /api/v1/incidents의 `created_at`.
 // 원천마다 실패할 수 있어 받은 것만 합친다. 무엇이 빠졌는지는 화면이 따로 적는다.
 

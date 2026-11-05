@@ -953,6 +953,39 @@ def threat_event_history(
     ]
 
 
+def list_threat_events(
+    db: Session,
+    *,
+    regions: MonitoredRegions,
+    since: datetime,
+    until: datetime,
+    limit: int,
+    scope: TenantScope,
+) -> tuple[list[models.ThreatEvent], int]:
+    """기간 안 위협 이벤트를 최근 것부터 ``limit`` 건, 그리고 기간 안 전체 건수 — ``GET /threat-events``(#572 10번).
+
+    거르는 조건은 ``threat_event_history``(축 6)와 같다 — 발생 시각 ``[since, until]``, (이벤트 소유, ARN 리전) 쌍의
+    관제 리전(``_within_regions``), 소유 범위(``_within_scope``). 그래프의 건수와 목록의 ``total`` 이 같은 근거로 맞는다.
+    순서는 ``occurred_at`` 내림차순, 같은 시각은 ``threat_event_id`` 내림차순이다(응답 계약)."""
+    if not regions:
+        return [], 0
+
+    event = models.ThreatEvent
+
+    def _filtered(stmt):
+        stmt = stmt.where(event.occurred_at >= since, event.occurred_at <= until)
+        stmt = _within_regions(stmt, event.tenant_id, func.split_part(event.target_arn, ":", 4), regions)
+        return _within_scope(stmt, event.tenant_id, scope)
+
+    total = db.scalar(_filtered(select(func.count(event.threat_event_id))))
+    rows = db.scalars(
+        _filtered(select(event))
+        .order_by(event.occurred_at.desc(), event.threat_event_id.desc())
+        .limit(limit)
+    ).all()
+    return list(rows), int(total or 0)
+
+
 def record_inventory_counts(
     db: Session,
     *,

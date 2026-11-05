@@ -247,7 +247,7 @@ export function createReadApi(transport: ApiTransport) {
       return request<PlatformStatusResponse>('/platform/status', undefined, transport);
     },
 
-    /** 위협 이벤트 목록(고객사 대시보드). FE 제안 계약이라 서버에 아직 없다 — 실서버는 404다(lib/threat-events.ts). */
+    /** 위협 이벤트 목록(고객사 대시보드 · 로그 화면). 계약은 types/api.ts `ThreatEventsResponse`(#572 10번). */
     getThreatEvents(days: ThreatRangeDays): Promise<ThreatEventsResponse> {
       return request<ThreatEventsResponse>(`/threat-events?days=${days}`, undefined, transport);
     },

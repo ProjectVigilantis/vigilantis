@@ -286,6 +286,8 @@ TENANT_SCOPED_ROUTES = {
     ("GET", "/api/v1/inquiries"),
     ("POST", "/api/v1/inquiries"),
     ("GET", "/api/v1/metrics/timeseries"),
+    # 위협 이벤트 목록(#572 10번) — 고객사 계정은 자기 고객, 담당자는 배정 고객
+    ("GET", "/api/v1/threat-events"),
 }
 
 
@@ -327,6 +329,8 @@ def test_business_routes_outside_tenant_scope_stay_platform_only(client_pg, logi
         ("GET", "/api/v1/audit-events"): (200, None),
         ("GET", "/api/v1/inquiries"): (200, None),
         ("GET", "/api/v1/metrics/timeseries"): (200, None),
+        # days 는 필수라 질의 없이 부르면 관문을 지나 422 다(범위 판정은 test_threat_events_api 가 본다)
+        ("GET", "/api/v1/threat-events"): (422, "REQUEST_VALIDATION_FAILED"),
         ("POST", "/api/v1/inquiries"): (201, None),
         ("GET", "/api/v1/incidents/{incident_id}"): (404, "INCIDENT_NOT_FOUND"),
         ("POST", "/api/v1/incidents/{incident_id}/resolve"): (404, "INCIDENT_NOT_FOUND"),
