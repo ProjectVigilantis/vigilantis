@@ -73,7 +73,7 @@ def test_secops_context_inbox_freezes_logs_inventory_and_actual_model_payload(db
     path, (observation, logs) = submission(tmp_path)
     published = []
     consumer = MockThreatConsumer(tmp_path, lambda: nullcontext(db), published.append, interval_seconds=1)
-    assert consumer.consume_once() == {"created": 1, "existing": 0, "rejected": 0, "failed": 0}
+    assert consumer.consume_once() == {"created": 1, "existing": 0, "rejected": 0, "failed": 0, "quarantined": 0}
     assert not path.exists()
     incident_id = published[0].data.incident_id
     evidence = saved(db, incident_id)
@@ -195,7 +195,7 @@ def test_secops_context_invalid_stored_asset_retries_after_correction(db, client
     published = []
     consumer = MockThreatConsumer(tmp_path, lambda: nullcontext(db), published.append, interval_seconds=1)
 
-    assert consumer.consume_once() == {"created": 0, "existing": 0, "rejected": 0, "failed": 1}
+    assert consumer.consume_once() == {"created": 0, "existing": 0, "rejected": 0, "failed": 1, "quarantined": 0}
     assert path.read_bytes() == original_input
     assert not (tmp_path / "rejected").exists()
     assert published == []
@@ -210,7 +210,7 @@ def test_secops_context_invalid_stored_asset_retries_after_correction(db, client
 
     assets_repo.get_asset_by_arn(db, asset_arn).spec = original_spec
     db.commit()
-    assert consumer.consume_once() == {"created": 1, "existing": 0, "rejected": 0, "failed": 0}
+    assert consumer.consume_once() == {"created": 1, "existing": 0, "rejected": 0, "failed": 0, "quarantined": 0}
     assert not path.exists()
     assert len(list((tmp_path / "done").glob("*.json"))) == 1
     incident_id = published[0].data.incident_id
@@ -238,18 +238,18 @@ def test_secops_context_relationship_limit_remains_an_explicit_rejection(db, tmp
     report = consumer.consume_once()
     assert not path.exists()
     if relation_count == 64:
-        assert report == {"created": 1, "existing": 0, "rejected": 0, "failed": 0}
+        assert report == {"created": 1, "existing": 0, "rejected": 0, "failed": 0, "quarantined": 0}
         context = saved(db, published[0].data.incident_id).context
         assert len(context.related_assets) + len(context.relation_issues) == 64
     else:
-        assert report == {"created": 0, "existing": 0, "rejected": 1, "failed": 0}
+        assert report == {"created": 0, "existing": 0, "rejected": 1, "failed": 0, "quarantined": 0}
         assert len(list((tmp_path / "rejected").glob("*.json"))) == 1
         assert published == []
         for model in (models.Incident, models.ThreatEvent, models.Evidence):
             assert not list(db.scalars(select(model)))
         rejection = next(r for r in caplog.records if r.message == "mock_threat_input_rejected")
         assert rejection.error_type == "SecOpsContextLimitExceeded"
-        assert consumer.consume_once() == {"created": 0, "existing": 0, "rejected": 0, "failed": 0}
+        assert consumer.consume_once() == {"created": 0, "existing": 0, "rejected": 0, "failed": 0, "quarantined": 0}
 
 
 @pytest.mark.parametrize("case", [f"C{i:02}" for i in range(1, 8)])

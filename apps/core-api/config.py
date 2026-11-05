@@ -88,6 +88,8 @@ class Settings(BaseSettings):
     # 독립이다. 폴더 안 JSON을 소비하며 DB 결과는 앱의 조회 API에서 확인한다.
     MOCK_THREAT_INBOX_DIR: str = ""
     MOCK_THREAT_POLL_SECONDS: float = Field(default=1.0, gt=0)
+    # 같은 파일이 연속 이 횟수만큼 실패하면 failed/로 격리하고 재시도를 멈춘다.
+    MOCK_THREAT_MAX_ATTEMPTS: int = Field(default=5, ge=1)
     # #493: 명시적 opt-in. 수신처 파일에는 webhook 자체가 아닌 비밀 환경변수 이름만 둔다.
     # 아래 배포 설정은 기동 시 고정된다. T-7 고객 설정(DB)의 수신처 변경은 재기동 없이 반영된다.
     # 꺼져 있으면 발송 · 이메일 연결 관측 · 설정 자원 정리가 없고, 설정 API 도 AWS 를 부르지 않는다
