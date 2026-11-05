@@ -50,9 +50,27 @@ class SkipReason(str, Enum):
 EC2_JUDGEABLE_STATES = ("running",)
 
 
-def _is_prod(tags: dict) -> bool:
+def default_protected_tags() -> list[dict]:
+    """저장된 정책이 없을 때 적용되는 기본 보호 태그 규칙 — 호출마다 새 리스트(키·값 오름차순)."""
+    values = sorted(PROD_TAG_VALUES)
+    return [{"key": key, "values": list(values)} for key in sorted(PROD_TAG_KEYS)]
+
+
+def _is_prod(tags: dict, policy: list[dict] | None = None) -> bool:
     """운영 자산 여부. 인식 태그 키(PROD_TAG_KEYS)의 값이 PROD_TAG_VALUES 에
-    정확히 들어맞으면 True. 키·값 모두 대소문자 무시, 값은 부분일치 아님."""
+    정확히 들어맞으면 True. 키·값 모두 대소문자 무시, 값은 부분일치 아님.
+
+    policy 가 있으면(테넌트가 저장한 protected_tags) 기본값 대신 그 규칙만 쓴다:
+    규칙 간 OR · 규칙 안 values 간 OR, 키는 lower(), 값은 strip().lower() 로 양쪽을 같게 맞춘다.
+    `[]` 는 태그 보호 없음, None 은 저장된 정책 없음(기본값)."""
+    if policy is not None:
+        for rule in policy:
+            rule_key = rule["key"].lower()
+            rule_values = {v.strip().lower() for v in rule["values"]}
+            for key, value in (tags or {}).items():
+                if key.lower() == rule_key and str(value).strip().lower() in rule_values:
+                    return True
+        return False
     for key, value in (tags or {}).items():
         if key.lower() in PROD_TAG_KEYS and str(value).strip().lower() in PROD_TAG_VALUES:
             return True
@@ -61,7 +79,8 @@ def _is_prod(tags: dict) -> bool:
 
 def evaluate_ec2(cpu_avg: Optional[float], cpu_max: Optional[float], cpu_datapoints: Optional[int],
                  tags: dict | None = None, *, state: Optional[str],
-                 already_rightsized: bool = False) -> tuple[Verdict, Optional[SkipReason], Optional[float]]:
+                 already_rightsized: bool = False,
+                 protected_tag_policy: list[dict] | None = None) -> tuple[Verdict, Optional[SkipReason], Optional[float]]:
     """EC2 1대 판정 → (verdict, skip_reason, health_score). 판정 우선순위대로 검사.
 
     - **상태가 먼저다(#453).** `running` 이 아니면 지표를 보지 않고 SKIP_UNSUPPORTED_STATE 다.
@@ -85,7 +104,7 @@ def evaluate_ec2(cpu_avg: Optional[float], cpu_max: Optional[float], cpu_datapoi
         return Verdict.SKIP, SkipReason.SKIP_UNSUPPORTED_STATE, health
     if cpu_datapoints is None or cpu_datapoints < MIN_DATAPOINTS:
         return Verdict.SKIP, SkipReason.SKIP_INSUFFICIENT_DATA, health
-    if _is_prod(tags):
+    if _is_prod(tags, protected_tag_policy):
         return Verdict.SKIP, SkipReason.SKIP_PROD_PROTECTED, health
     if cpu_avg is not None and cpu_avg < IDLE_CPU_AVG:
         if cpu_max is not None and cpu_max >= SPIKE_CPU_MAX:
@@ -168,6 +187,40 @@ def _rightsized_instance_arns(db) -> set[str]:
     return set(rows)
 
 
+def _tag_policies_by_asset(db, assets) -> dict[str, list[dict]]:
+    """asset_id → 소속 테넌트가 저장한 protected_tags (이번 호출에서 한 번에 조회, 캐시 없음).
+
+    소속은 자산의 명시 tenant_id 가 그 테넌트의 aws_account_id 와 자산 account_id 로 확인될 때만 인정한다.
+    tenant_id 가 NULL 인 자산은 ADR-0012 상 「MVP 단일 계정 기록」이라 계정 ID 로 테넌트를 추정하지 않는다.
+    인정되지 않은 자산은 결과에 없고 호출부가 기본 정책을 쓴다."""
+    from sqlalchemy import select
+
+    from db import models
+    from db.repositories.tenant_settings import load_protected_tag_policies
+    from schemas.api.assets import AssetType
+
+    ec2 = [a for a in assets if a.asset_type == AssetType.EC2 and a.tenant_id]
+    claimed = {a.tenant_id for a in ec2}
+    if not claimed:
+        return {}
+    accounts = dict(
+        db.execute(
+            select(models.Tenant.tenant_id, models.Tenant.aws_account_id).where(
+                models.Tenant.tenant_id.in_(claimed)
+            )
+        ).all()
+    )
+    owned = [a for a in ec2 if accounts.get(a.tenant_id) == a.account_id]
+    if not owned:
+        return {}
+    policies = load_protected_tag_policies(db, sorted({a.tenant_id for a in owned}))
+    return {
+        a.asset_id: policies[a.tenant_id]
+        for a in owned
+        if policies.get(a.tenant_id) is not None
+    }
+
+
 def run_rule_engine(db, collection_run_id: str | None = None) -> dict:
     """assets 및 metric_summaries 테이블을 읽어 RuleEvaluation 결과(RuleEvaluationResult 계약)를 기록한다.
     반환: verdict 별 집계 + 표시 요약 + 이번 호출의 typed 판정 목록(Intake 조립용).
@@ -195,6 +248,7 @@ def run_rule_engine(db, collection_run_id: str | None = None) -> dict:
     # 거른 것과 AWS 응답에서 사라진 것(absent_since)을 같은 칸에 섞지 않기 위해서다.
     assets = assets_repo.list_assets(db)
     rightsized_arns = _rightsized_instance_arns(db)
+    tag_policies = _tag_policies_by_asset(db, assets)
     results = []
     evaluations: list[RuleEvaluationResult] = []
     counts: dict[str, int] = {}
@@ -221,6 +275,7 @@ def run_rule_engine(db, collection_run_id: str | None = None) -> dict:
             verdict, skip, health = evaluate_ec2(
                 cpu_avg, cpu_max, cpu_dp, tags,
                 state=a.state, already_rightsized=a.arn in rightsized_arns,
+                protected_tag_policy=tag_policies.get(a.asset_id),
             )
             health_int = int(round(health)) if health is not None else None
         elif a.asset_type == AssetType.SG:

@@ -280,6 +280,9 @@ TENANT_SCOPED_ROUTES = {
     ("POST", EXECUTE),
     ("GET", "/api/v1/assets"),
     ("GET", "/api/v1/audit-events"),
+    # 고객 설정(T-7) — 고객사 계정은 자기 고객, 담당자는 배정 고객(쓰기는 고객사 ADMIN · 관리 등급)
+    ("GET", "/api/v1/tenants/{tenant_id}/settings"),
+    ("PATCH", "/api/v1/tenants/{tenant_id}/settings"),
     ("GET", "/api/v1/inquiries"),
     ("POST", "/api/v1/inquiries"),
     ("GET", "/api/v1/metrics/timeseries"),
@@ -314,7 +317,8 @@ def test_business_routes_outside_tenant_scope_stay_platform_only(client_pg, logi
     answers = {}
     for method, path in sorted(TENANT_SCOPED_ROUTES):
         response = client_pg.request(
-            method, path.replace("{incident_id}", unknown), json=bodies.get((method, path))
+            method, path.replace("{incident_id}", unknown).replace("{tenant_id}", unknown),
+            json=bodies.get((method, path)),
         )
         answers[(method, path)] = (response.status_code, _error_code(response))
     assert answers == {
@@ -327,6 +331,8 @@ def test_business_routes_outside_tenant_scope_stay_platform_only(client_pg, logi
         ("GET", "/api/v1/incidents/{incident_id}"): (404, "INCIDENT_NOT_FOUND"),
         ("POST", "/api/v1/incidents/{incident_id}/resolve"): (404, "INCIDENT_NOT_FOUND"),
         ("POST", EXECUTE): (404, "INCIDENT_NOT_FOUND"),
+        ("GET", "/api/v1/tenants/{tenant_id}/settings"): (404, "TENANT_NOT_FOUND"),
+        ("PATCH", "/api/v1/tenants/{tenant_id}/settings"): (404, "TENANT_NOT_FOUND"),
     }
 
     me = client_pg.get("/api/v1/auth/me")
@@ -727,6 +733,7 @@ def _valid_bodies(incident_id: str) -> dict[tuple[str, str], dict | None]:
         ("PATCH", "/api/v1/tenants/{tenant_id}"): {"name": "x"},
         ("DELETE", "/api/v1/tenants/{tenant_id}"): None,
         ("POST", "/api/v1/tenants/{tenant_id}/suspend"): {"reason": "해지"},
+        ("PATCH", "/api/v1/tenants/{tenant_id}/settings"): {"protected_tags": []},
         ("PUT", "/api/v1/signup-requests/{request_id}/status"): {"status": "APPROVED"},
         ("POST", "/api/v1/inquiries"): {"category": "BUG", "title": "문의", "body": "확인 요청"},
         ("PUT", "/api/v1/inquiries/{inquiry_id}/status"): {"status": "IN_PROGRESS"},

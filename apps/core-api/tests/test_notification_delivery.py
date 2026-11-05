@@ -146,6 +146,8 @@ def _wipe(engine):
         for model in (
             models.NotificationDelivery, models.NotificationRoute,
             models.NotificationLane, models.NotificationEvent,
+            # 실제 lifespan 은 routes 파일을 고객 설정(T-7)으로 가져온다 — 테넌트 행보다 먼저 지운다
+            models.TenantSettingsRecord, models.TenantSettingsCleanup,
         ):
             connection.execute(delete(model))
 

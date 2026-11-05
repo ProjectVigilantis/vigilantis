@@ -301,6 +301,8 @@ def delete_tenant(db: Session, tenant_id: str) -> bool:
     **그 테넌트를 가리키는 행(사용자 · 뿌리 테이블)이 있으면 FK 가 IntegrityError 로 거절한다** —
     지우지도, 고쳐 쓰지도 않고 호출부에 올린다. 연결 전 테넌트에는 수집 기록이 없고, 고객사
     사용자는 연결(ACTIVE) 뒤에 초대하는 것이 전제라 정상 경로에서는 일어나지 않는다.
+    설정 행(tenant_settings)도 FK 로 막는다 — 일회용 행(MANAGED 가 아닌 것)은 호출부(tenant_admin)가
+    같은 SAVEPOINT 안에서 먼저 지운다.
     """
     return _changed_one(
         db, delete(_T).where(_T.tenant_id == tenant_id, _T.status.in_(DELETABLE_STATUSES))

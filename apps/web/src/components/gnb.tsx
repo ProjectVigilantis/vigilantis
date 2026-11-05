@@ -6,7 +6,18 @@
 
 'use client';
 
-import { Activity, Building2, ClipboardList, LayoutDashboard, LifeBuoy, ScrollText, Shield, Users, type LucideIcon } from 'lucide-react';
+import {
+  Activity,
+  Building2,
+  ClipboardList,
+  LayoutDashboard,
+  LifeBuoy,
+  ScrollText,
+  Shield,
+  SlidersHorizontal,
+  Users,
+  type LucideIcon,
+} from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 
@@ -19,6 +30,7 @@ import { NotificationBell } from '@/components/support/notification-bell';
 import {
   LOGS_PATH,
   MONITORING_PATH,
+  SETTINGS_PATH,
   TENANTS_PATH,
   USERS_PATH,
   businessOpen,
@@ -53,6 +65,8 @@ const NAV: Readonly<Record<string, { label: string; icon: LucideIcon }>> = {
   [LOGS_PATH]: { label: '로그', icon: ScrollText },
   [TENANTS_PATH]: { label: '고객사', icon: Building2 },
   [USERS_PATH]: { label: '계정', icon: Users },
+  // 고객사 계정 메뉴에만 있다(T-7). 사이드바 아래 [설정](화면 모드 · settings-menu.tsx)과 이름 · 아이콘을 가른다.
+  [SETTINGS_PATH]: { label: '고객사 설정', icon: SlidersHorizontal },
   [SIGNUP_REQUESTS_PATH]: { label: '도입 신청', icon: ClipboardList },
   [INQUIRIES_PATH]: { label: '고객사 문의', icon: LifeBuoy },
 };

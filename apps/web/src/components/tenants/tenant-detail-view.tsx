@@ -138,6 +138,10 @@ export function TenantDetailView({
           <h1 className="text-2xl font-bold tracking-tight break-all">{tenant.name}</h1>
           <TenantStatusBadge status={tenant.status} />
           <span className="text-muted-foreground font-mono text-[13px]">{tenant.aws_account_id}</span>
+          {/* 보호 태그 · 알림(T-7). 읽기 · 쓰기 범위는 설정 화면과 서버가 다시 판정한다. */}
+          <Button asChild variant="outline" size="sm" className="ml-auto">
+            <Link href={`/tenants/${encodeURIComponent(tenant.tenant_id)}/settings`}>설정</Link>
+          </Button>
         </div>
         {/* 관리자는 메뉴가 아니라 고객사에서 관제 · 계정을 본다(gnb.tsx). 관제는 지표 카드 바로 아래에 그린다(2026-11-02). */}
         <div className="flex flex-wrap items-center gap-2">

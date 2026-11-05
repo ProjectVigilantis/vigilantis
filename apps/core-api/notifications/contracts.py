@@ -41,7 +41,12 @@ class EventSnapshot:
 
 @dataclass(frozen=True)
 class Route:
-    """Fingerprint covers customer/account/channel/destination, never a global revision."""
+    """Fingerprint covers customer/account/channel/destination, never a global revision.
+
+    T-7 managed Slack: destination is the platform secret ARN, secret_version its immutable
+    VersionId and destination_hash the SHA-256 of the webhook URL. The sender resolves the URL
+    after claim (outside any DB transaction) and checks it against destination_hash.
+    """
 
     tenant_id: str
     aws_account_id: str
@@ -49,6 +54,8 @@ class Route:
     fingerprint: str
     destination: str = field(repr=False)
     region: str | None = None
+    secret_version: str | None = field(default=None, repr=False)
+    destination_hash: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)

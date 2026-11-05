@@ -25,6 +25,11 @@ export const USERS_PATH = '/users';
 /** 관리자 대시보드 숫자의 상세 화면 — 수동 처리가 필요한 문제 목록 · 고객사별 직원 표(2026-10-29). */
 export const ISSUES_PATH = '/tenants/issues';
 export const STAFF_PATH = '/users/tenants';
+/**
+ * 고객사 계정의 자기 고객 설정(T-7). 역할과 관계없이 연다(OPERATOR · VIEWER는 조회만). 플랫폼 계정은 고객 상세
+ * (`/tenants/[id]/settings`)에서 들어간다 — 전체 고객을 고르는 메뉴는 두지 않는다.
+ */
+export const SETTINGS_PATH = '/settings';
 
 /** 통합 관제(MON-001) — 자산 · 보안 두 축을 한 화면에 둔다(2026-10-29). */
 export const MONITORING_PATH = '/monitoring';
@@ -97,11 +102,12 @@ export function homePathFor(user: AccessSubject): string {
 
 /**
  * 사이드바에 보일 경로(순서대로). 계정을 아직 모르면(null — 확인 전 · 조회 실패 · 미로그인) 아무 메뉴도 열지 않는다.
- * 업무 화면은 `businessOpen`, 고객 관리는 플랫폼, 사용자 관리는 `canManageUsers`가 연다.
+ * 업무 화면은 `businessOpen`, 고객 관리는 플랫폼, 사용자 관리는 `canManageUsers`, 고객 설정은 고객사 계정이 연다.
  */
 export function navPathsFor(user: AccessSubject | null): string[] {
   if (user === null) return [];
-  if (!isPlatform(user)) return [...CUSTOMER_BUSINESS_PATHS, ...(canManageUsers(user) ? [USERS_PATH] : [])];
+  // 고객 설정은 고객사 계정이면 역할과 관계없이 연다. 플랫폼 계정은 고객사 상세에서 들어간다.
+  if (!isPlatform(user)) return [...CUSTOMER_BUSINESS_PATHS, ...(canManageUsers(user) ? [USERS_PATH] : []), SETTINGS_PATH];
   return [
     ...(businessOpen(user) ? BUSINESS_PATHS : []),
     ...(isPlatform(user) ? [TENANTS_PATH] : []),

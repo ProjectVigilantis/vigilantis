@@ -89,7 +89,9 @@ class Settings(BaseSettings):
     MOCK_THREAT_INBOX_DIR: str = ""
     MOCK_THREAT_POLL_SECONDS: float = Field(default=1.0, gt=0)
     # #493: 명시적 opt-in. 수신처 파일에는 webhook 자체가 아닌 비밀 환경변수 이름만 둔다.
-    # 설정은 기동 시 고정되며 변경 적용에는 재기동이 필요하다.
+    # 아래 배포 설정은 기동 시 고정된다. T-7 고객 설정(DB)의 수신처 변경은 재기동 없이 반영된다.
+    # 꺼져 있으면 발송 · 이메일 연결 관측 · 설정 자원 정리가 없고, 설정 API 도 AWS 를 부르지 않는다
+    # (새 Slack URL 저장 거절). routes 파일은 선택이며 아직 정하지 않은 고객 채널로만 가져온다.
     NOTIFICATION_ENABLED: bool = False
     NOTIFICATION_ROUTES_FILE: str = ""
     NOTIFICATION_PUBLIC_BASE_URL: str = ""

@@ -42,12 +42,17 @@
 #                 "settings": {"NOTIFICATION_READ_TIMEOUT_SECONDS": 5}}
 #                ... deploy --account <ID> --tag <태그> --notification-config <파일> [--yes]
 #                ... notification-iam --account <ID> --notification-config <파일> [--yes]   (IAM만 먼저)
-#                ... notification-revoke --account <ID> [--yes]   (알림 전용 인라인 정책 둘만 회수)
+#                ... notification-revoke --account <ID> [--yes]   (전용 인라인 정책만 회수 — 알림 둘 + 고객 설정(T-7) 하나)
 #                비밀·토픽·구독·KMS·교차 계정 정책은 만들지 않는다 — 비밀은 이미 있어야 하고 값은 PM이 넣는다.
 #                태스크 역할은 지정 토픽 sns:Publish만, 실행 역할은 지정 비밀 GetSecretValue만 받는다.
 #                deploy는 IAM을 쓰지 않고 정책이 계획과 같은지 읽기만 한다. 정책은 notification-iam/revoke만 쓰며
 #                api가 알림 꺼짐·안정·이전 태스크 종료 상태일 때만 쓴다. 처음 켜기: notification-iam → (실효 확인) →
 #                deploy --notification-config. 바꾸기/끄기: 설정 없이 deploy → 태스크 종료 확인 → iam/revoke.
+#   고객 설정(T-7): 같은 입력 JSON에 "tenant_settings": true 를 더하면 api 태스크 역할이 **접두 아래 자원만**
+#                직접 만들고 지운다 — SNS 토픽 vigilantis-t7-* 와 Secrets Manager 비밀 vigilantis/t7/* (이 계정·리전).
+#                구독은 email 프로토콜만. 계정 전체 나열·토픽 정책·KMS·고객 계정 권한은 주지 않는다. 적용·검증·회수
+#                경로는 알림 정책과 같다(notification-iam / deploy 읽기 검증 / notification-revoke). 자원 자체는 런타임이
+#                만든다 — 이 스크립트는 토픽·비밀을 만들지 않는다.
 #
 # 안전 가드 (스모크 스크립트와 같다):
 #   ① AWS_ENDPOINT_URL이 잡혀 있으면 멈춘다 — 전부 실 AWS 과금 자원이다.
@@ -117,6 +122,7 @@ from notifications.runtime import validate_notification_timing  # noqa: E402
 from notifications.routing import (  # noqa: E402
     MAX_CONFIG_BYTES, RouteConfigError, RouteRegistry, _no_duplicate_keys, parse_sns_topic_arn, validate_public_base_url,
 )
+from schemas.settings_resources import SETTINGS_SECRET_PREFIX, SETTINGS_SNS_TOPIC_PREFIX  # noqa: E402
 from services.aws.client import aws_client, default_region, endpoint_url  # noqa: E402
 
 PREFIX = "vigilantis-platform"
@@ -350,6 +356,20 @@ def waf_rules(ipset_arn: str, nat_ipset_arn: str) -> list[dict]:
 NOTIFY_POLICY_TASK = "publish-notification-topics"   # ROLE_TASK: 지정 SNS 토픽 Publish만
 NOTIFY_POLICY_EXEC = "read-notification-secrets"     # ROLE_EXEC: 지정 Slack 비밀 GetSecretValue만(앱은 읽지 않는다)
 NOTIFY_POLICIES = ((ROLE_TASK, NOTIFY_POLICY_TASK), (ROLE_EXEC, NOTIFY_POLICY_EXEC))
+# T-7 고객 설정 — api가 런타임에 Slack 비밀·메일 토픽을 직접 관리한다. 접두(packages/schemas/settings_resources.py)
+# 아래의 이 계정·리전 자원만. 입력 JSON의 "tenant_settings": true 로 켠다
+SETTINGS_POLICY_TASK = "manage-tenant-settings-resources"   # ROLE_TASK: 접두 아래 SNS 토픽·Secrets Manager 비밀만
+# notification-iam/revoke·down이 다루는 전용 인라인 정책 전부(알림 둘 + 고객 설정 하나)
+MANAGED_POLICIES = (*NOTIFY_POLICIES, (ROLE_TASK, SETTINGS_POLICY_TASK))
+# 런타임이 실제로 부르는 호출만(services/aws/settings_notifications.py · notifications/channels.py; Service Authorization
+# Reference상 전부 topic/Secret 자원 ARN으로 좁힐 수 있는 것). 계정 전체 나열(sns:ListTopics·ListSubscriptions·
+# secretsmanager:ListSecrets)·토픽 정책·태그·KMS·구독 해제·비밀 갱신은 주지 않으며(비밀은 만들고 읽고 지우기만),
+# 구독(sns:Subscribe)은 email 프로토콜 조건을 따로 건다 — settings_task_policy.
+# ListSubscriptionsByTopic은 토픽 한정 나열로, 확인(confirm) 상태를 권위 있게 읽는 데 런타임이 쓴다
+SETTINGS_SNS_ACTIONS = ("sns:CreateTopic", "sns:DeleteTopic", "sns:GetSubscriptionAttributes",
+                        "sns:ListSubscriptionsByTopic", "sns:Publish")
+SETTINGS_SUBSCRIBE_PROTOCOL = "email"
+SETTINGS_SECRET_ACTIONS = ("secretsmanager:CreateSecret", "secretsmanager:DeleteSecret", "secretsmanager:GetSecretValue")
 BASE_SECRET_ENV = ("DATABASE_URL", "OPENAI_API_KEY", "VIGILANTIS_ACCESS_EXTERNAL_ID")
 # config.Settings에서 그대로 전달할 수 있는 알림 조정값(기본값은 config.py가 소유한다)
 NOTIFY_SETTING_KEYS = (
@@ -357,7 +377,7 @@ NOTIFY_SETTING_KEYS = (
     "NOTIFICATION_BACKOFF_SECONDS", "NOTIFICATION_MAX_BACKOFF_SECONDS",
     "NOTIFICATION_CONNECT_TIMEOUT_SECONDS", "NOTIFICATION_READ_TIMEOUT_SECONDS", "NOTIFICATION_LEASE_SECONDS",
 )
-_NOTIFY_CONFIG_KEYS = {"enabled", "public_base_url", "routes", "slack_secret_arns", "settings"}
+_NOTIFY_CONFIG_KEYS = {"enabled", "public_base_url", "routes", "slack_secret_arns", "settings", "tenant_settings"}
 _RESERVED_ENV = {"HOME", "PATH", "PORT", "NOTIFICATION_ROUTES_JSON", "NOTIFICATION_ROUTES_FILE"}
 _MAX_NOTIFY_CONFIG_BYTES = 80 * 1024
 
@@ -382,6 +402,30 @@ def notification_exec_policy(secret_arns: list[str]) -> dict:
     return {"Version": "2012-10-17", "Statement": [{
         "Sid": "InjectNotificationSecretsOnly", "Effect": "Allow", "Action": "secretsmanager:GetSecretValue",
         "Resource": sorted(secret_arns)}]}
+
+
+def settings_resource_arns(account: str, region: str) -> dict[str, str]:
+    """T-7 관리 자원의 ARN 패턴 — 이 계정·리전의 접두 아래만. 비밀 ARN의 무작위 접미(-AbCdEf)도 접두 뒤 와일드카드가 덮는다."""
+    return {
+        "topics": f"arn:aws:sns:{region}:{account}:{SETTINGS_SNS_TOPIC_PREFIX}*",
+        "secrets": f"arn:aws:secretsmanager:{region}:{account}:secret:{SETTINGS_SECRET_PREFIX}*",
+    }
+
+
+def settings_task_policy(arns: dict[str, str]) -> dict:
+    """api 태스크 역할 — 접두 아래 토픽·비밀의 런타임 관리만. 구독 ARN은 토픽 ARN 뒤에 :id가 붙으므로 같은 패턴이 덮는다.
+
+    고객 계정 권한·계정 전체 나열·토픽 정책 변경은 없다. 구독은 email 프로토콜일 때만 허용해 토픽이 HTTP·SQS·Lambda
+    같은 다른 목적지로 새지 않게 한다. 자원을 만드는 것은 런타임이다 — 이 스크립트는 권한만 준다.
+    """
+    return {"Version": "2012-10-17", "Statement": [
+        {"Sid": "ManageTenantSettingsTopicsOnly", "Effect": "Allow", "Action": list(SETTINGS_SNS_ACTIONS),
+         "Resource": arns["topics"]},
+        {"Sid": "SubscribeTenantSettingsTopicsByEmailOnly", "Effect": "Allow", "Action": "sns:Subscribe",
+         "Resource": arns["topics"], "Condition": {"StringEquals": {"sns:Protocol": SETTINGS_SUBSCRIBE_PROTOCOL}}},
+        {"Sid": "ManageTenantSettingsSecretsOnly", "Effect": "Allow", "Action": list(SETTINGS_SECRET_ACTIONS),
+         "Resource": arns["secrets"]},
+    ]}
 
 
 def load_notification_config(path: str, account: str, region: str) -> Optional[dict]:
@@ -409,6 +453,8 @@ def load_notification_config(path: str, account: str, region: str) -> Optional[d
         raise bad("알 수 없는 최상위 키")
     if not isinstance(data.get("enabled"), bool):
         raise bad("enabled는 true/false를 명시해야 한다")
+    if not isinstance(data.get("tenant_settings", False), bool):
+        raise bad("tenant_settings는 true/false여야 한다")
     if not data["enabled"]:
         return None
     if not isinstance(data.get("public_base_url"), str) or "routes" not in data:
@@ -473,6 +519,8 @@ def load_notification_config(path: str, account: str, region: str) -> Optional[d
         "secret_arns": dict(sorted(refs.items())),
         "topic_arns": topics,
         "settings": {k: str(v) for k, v in sorted(raw_settings.items())},
+        # T-7 — 켜면 이 계정·리전의 접두 ARN 패턴, 아니면 빈 dict(정책을 두지 않는다 — 있으면 지운다)
+        "settings_arns": settings_resource_arns(account, region) if data.get("tenant_settings") else {},
     }
 
 
@@ -569,30 +617,38 @@ def require_notifications_quiescent(ecs) -> None:
         sys.exit(f"{why} — 알림 없이 deploy해 끄고 이전 태스크가 내려간 뒤에 정책을 바꿀 것(정책은 바꾸지 않았다)")
 
 
-def _policy_shape(doc: object) -> Optional[tuple]:
-    """우리 정책 문서의 정규형(Allow 한 문장 · Action·Resource 집합). 모양이 다르면 None."""
+def _policy_shape(doc: object) -> Optional[frozenset]:
+    """우리 정책 문서의 정규형 — Allow 문장마다 (Action 집합, Resource 집합, Condition 직렬형)의 집합. 모양이 다르면 None.
+
+    Condition은 우리가 쓴 것(settings_task_policy의 sns:Protocol)과 글자 그대로 같아야 한다 — 다른 조건이 붙거나
+    빠진 문서는 계획과 다른 것이다.
+    """
     if not isinstance(doc, dict) or set(doc) != {"Version", "Statement"} or doc["Version"] != "2012-10-17":
         return None
     stmts = doc["Statement"]
     stmts = [stmts] if isinstance(stmts, dict) else stmts
-    if not isinstance(stmts, list) or len(stmts) != 1 or not isinstance(stmts[0], dict):
+    if not isinstance(stmts, list) or not stmts:
         return None
-    s = stmts[0]
-    if set(s) - {"Sid"} != {"Effect", "Action", "Resource"} or s["Effect"] != "Allow":
-        return None
-    sets = []
-    for key in ("Action", "Resource"):
-        v = [s[key]] if isinstance(s[key], str) else s[key]
-        if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+    shapes = set()
+    for s in stmts:
+        if not isinstance(s, dict) or set(s) - {"Sid", "Condition"} != {"Effect", "Action", "Resource"} \
+                or s["Effect"] != "Allow" or not isinstance(s.get("Condition", {}), dict):
             return None
-        sets.append(frozenset(v))
-    return tuple(sets)
+        sets = []
+        for key in ("Action", "Resource"):
+            v = [s[key]] if isinstance(s[key], str) else s[key]
+            if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+                return None
+            sets.append(frozenset(v))
+        shapes.add((*sets, json.dumps(s.get("Condition"), sort_keys=True)))
+    return frozenset(shapes)
 
 
 def _notification_wanted(plan: dict) -> dict:
     return {
         NOTIFY_POLICY_TASK: (ROLE_TASK, plan["topic_arns"], notification_task_policy),
         NOTIFY_POLICY_EXEC: (ROLE_EXEC, sorted(plan["secret_arns"].values()), notification_exec_policy),
+        SETTINGS_POLICY_TASK: (ROLE_TASK, plan["settings_arns"], settings_task_policy),
     }
 
 
@@ -613,7 +669,7 @@ def verify_notification_policies(iam, plan: dict) -> None:
 
 
 def apply_notification_policies(iam, ecs, plan: dict) -> None:
-    """알림 전용 인라인 정책 둘만 맞춘다(없어야 하는 쪽은 지운다). 알림이 꺼진 안정 상태에서만 쓴다."""
+    """전용 인라인 정책(알림 둘 + 고객 설정 하나)만 계획에 맞춘다(없어야 하는 쪽은 지운다). 알림이 꺼진 안정 상태에서만 쓴다."""
     _require_notification_roles(iam)
     require_notifications_quiescent(ecs)
     for policy_name, (role, resources, build_policy) in _notification_wanted(plan).items():
@@ -625,9 +681,9 @@ def apply_notification_policies(iam, ecs, plan: dict) -> None:
 
 
 def revoke_notification_policies(iam, ecs) -> None:
-    """알림 전용 인라인 정책 둘만 지운다. 알림이 꺼진 안정 상태에서만, 태그 없는 역할·없는 역할은 건드리지 않는다."""
+    """전용 인라인 정책(알림 둘 + 고객 설정 하나)만 지운다. 알림이 꺼진 안정 상태에서만, 태그 없는 역할·없는 역할은 건드리지 않는다."""
     require_notifications_quiescent(ecs)
-    for role, policy_name in NOTIFY_POLICIES:
+    for role, policy_name in MANAGED_POLICIES:
         found = _get_role(iam, role)
         if not found or not is_platform_tagged(found.get("Tags", [])):
             print(f"[platform] IAM 역할 {role}이 없거나 플랫폼 태그가 없어 건드리지 않았다")
@@ -1938,7 +1994,7 @@ def _try(fn: Callable[[], Any], *ignore: str) -> None:
 def _delete_roles(iam, account: str) -> None:
     for role, managed, inline in (
         (ROLE_ACCESS, [_smoke_policy_arn(account)], []),
-        (ROLE_TASK, [], ["assume-access-role", NOTIFY_POLICY_TASK]),
+        (ROLE_TASK, [], ["assume-access-role", NOTIFY_POLICY_TASK, SETTINGS_POLICY_TASK]),
         (ROLE_EXEC, ["arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"],
          ["read-platform-secrets", NOTIFY_POLICY_EXEC]),
     ):
@@ -2184,7 +2240,7 @@ def main() -> None:
         return
     if args.command == "notification-revoke":
         if not args.yes:
-            print(f"[platform] 회수 예정(다른 정책은 그대로) — {', '.join(f'{r}/{p}' for r, p in NOTIFY_POLICIES)}"
+            print(f"[platform] 회수 예정(다른 정책은 그대로) — {', '.join(f'{r}/{p}' for r, p in MANAGED_POLICIES)}"
                   " — 실제로 하려면 --yes. 먼저 --notification-config 없이 deploy해 알림을 끈 뒤 회수할 것")
             return
         revoke_notification_policies(c["iam"], c["ecs"])
@@ -2196,6 +2252,7 @@ def main() -> None:
             sys.exit("enabled가 false라 적용할 정책이 없다")
         print(f"[platform] 알림 {'켬' if notification else '끔'}"
               + (f" — 토픽 {len(notification['topic_arns'])}건 · Slack 비밀 {len(notification['secret_arns'])}건"
+                 f" · 고객 설정 자원 관리(T-7) {'켬' if notification['settings_arns'] else '끔'}"
                  if notification else ""))
     if args.command == "up":
         if not args.allow_cidr:
@@ -2213,8 +2270,10 @@ def main() -> None:
             print(f"[platform] 생성 예정 {len(missing)}건 — 실제로 만들려면 --yes")
             _print_rows(missing)
         elif args.command == "notification-iam":
+            settings_arns = notification["settings_arns"]
             print(f"[platform] 적용 예정 — 인라인 정책 {NOTIFY_POLICY_TASK}(토픽 {notification['topic_arns']}) · "
-                  f"{NOTIFY_POLICY_EXEC}(비밀 {len(notification['secret_arns'])}건) — 실제로 하려면 --yes")
+                  f"{NOTIFY_POLICY_EXEC}(비밀 {len(notification['secret_arns'])}건) · {SETTINGS_POLICY_TASK}"
+                  f"({', '.join(settings_arns.values()) if settings_arns else '없음 — 있으면 지운다'}) — 실제로 하려면 --yes")
         elif args.command == "deploy":
             if notification:
                 verify_notification_policies(c["iam"], notification)
