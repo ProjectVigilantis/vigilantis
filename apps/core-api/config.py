@@ -103,9 +103,11 @@ class Settings(BaseSettings):
     NOTIFICATION_CONNECT_TIMEOUT_SECONDS: float = Field(default=3.0, gt=0, le=10)
     NOTIFICATION_READ_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0, le=30)
     NOTIFICATION_LEASE_SECONDS: float = Field(default=120.0, ge=30, le=600)
-    # 2/2 Status Check 대기 — services/aws/rollback.py의 waiter 설정 (Issue #240).
-    # 기본 15초×12회=3분으로 boto3 기본값(15초×40회=10분)보다 짧다. 판정 1건이
-    # 그만큼 다음 스캔을 미루므로(max_instances=1) 시연에서 조일 수 있어야 한다.
+    # 2/2 Status Check 예산 — 기동 요청(START_INSTANCE 기록 시각)부터 System·Instance 둘 다
+    # ok가 될 때까지 기다리는 벽시계 상한. 두 값의 곱이다(services/aws/rollback.py
+    # status_check_budget, 기본 15×12=180초). 디스패처가 주기마다 describe_instance_status를
+    # 1회 조회하므로 예산을 늘려도 다른 실행이 밀리지 않는다(PR #526, #434 1-3). 이름은
+    # waiter 시절(#240)의 것이다. 실 AWS t3.micro 2/2 실측은 128–144초였다(#434 11/3 코멘트).
     STATUS_CHECK_WAIT_DELAY_SECONDS: int = Field(default=15, gt=0)
     STATUS_CHECK_WAIT_MAX_ATTEMPTS: int = Field(default=12, ge=1)
     # EC2_ENABLE_AUTOSCALING 대기 (Issue #446) — **조회 횟수의 상한**이다. 벽시계 상한이 아니다
