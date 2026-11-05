@@ -279,7 +279,8 @@ def _verify_tenant(
         ):
             raise _rejected(db, stored_id, user)
         if resume and outcome.result is TenantVerificationResult.OK:
-            # 재개는 구독을 바꾸지 않는다 — 처리 주기가 늦어 남은 투영만 계약의 현재 권리로 맞춘다(T-16 · #528).
+            # 재개는 구독을 바꾸지 않는다 — 처리 주기가 늦어 남은 투영만 계약의 현재 권리로 맞춘다(갱신을 끈 기간이
+            # 끝났으면 Free). 자동 갱신 대기는 처리 주기가 다음 기간을 이을 때까지 그대로 둔다(T-16 · #528).
             # subscription_workflow 가 이 모듈을 가져오므로 여기서 가져온다(순환 import 회피).
             import subscription_workflow
 

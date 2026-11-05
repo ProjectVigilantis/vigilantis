@@ -590,7 +590,8 @@ def test_manual_records_are_never_renewed_or_converted_by_the_contract_cycle(cli
     assert resp.status_code == 200 and resp.json()["subscription"] == expected
 
     after_end = datetime(2027, 1, 5, tzinfo=UTC)
-    subscription_workflow.process_subscription_cycle(db, settings=MOCK_ON, now=after_end)
+    subscription_workflow.process_subscription_cycle(
+        db, settings=MOCK_ON, sweep=subscription_workflow.EventSweep(), now=after_end)
     detail = client_pg.get(f"{BASE}/{tenant.tenant_id}").json()
     assert (detail["subscription"], detail["subscription_source"], detail["status"]) == (expected, "MANUAL", "ACTIVE")
     shown = subscription_workflow.get_subscription(
@@ -610,7 +611,8 @@ def _mock_agreement(db, tenant, *, activate: bool):
         db, tenant.tenant_id, SubscriptionPurchaseRequest(plan="Business"), requested_by_user_id=buyer.user_id,
         authorize=lambda: None, settings=MOCK_ON, now=NOW)
     if activate:
-        subscription_workflow.process_subscription_cycle(db, settings=MOCK_ON, now=NOW + timedelta(minutes=1))
+        subscription_workflow.process_subscription_cycle(
+            db, settings=MOCK_ON, sweep=subscription_workflow.EventSweep(), now=NOW + timedelta(minutes=1))
 
 
 @pytest.mark.parametrize("activate", [False, True], ids=["pending", "active"])

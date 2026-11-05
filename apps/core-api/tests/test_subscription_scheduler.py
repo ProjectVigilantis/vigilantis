@@ -3,7 +3,8 @@
   ① 설정 기본값 — 새 모의 구매는 꺼짐(명시적으로 켠다), 모의 활성화 결과는 성공, 계약 처리 잡은 켜짐(만료는
      기간 끝에 처리돼야 한다). 활성화 결과는 정해진 셋만 받는다.
   ② 기동 스위치는 SUBSCRIPTION_SCHEDULER_ENABLED 하나다 — SCAN_ENABLED · DISPATCH_ENABLED 를 꺼도 뜬다.
-  ③ 잡 본체는 기동 때 고정한 설정과 UTC aware 시각을 워크플로에 넘기고 세션을 닫는다.
+  ③ 잡 본체는 기동 때 고정한 설정 · 이벤트 훑기 위치와 UTC aware 시각을 워크플로에 넘기고 세션을 닫는다.
+     훑기 위치는 잡이 기동 때 하나 만들어 주기마다 같은 것을 넘긴다(다음 주기가 이어 받는다).
   ④ 실제 lifespan 이 스캔 · 디스패치가 꺼진 채로 이 잡을 기동 · 종료한다.
 """
 
@@ -14,6 +15,7 @@ from datetime import timedelta
 
 import pytest
 import subscription_scheduler
+import subscription_workflow
 from config import SubscriptionSettings, get_collector_settings, get_settings, get_subscription_settings
 
 _KEYS = (
@@ -89,7 +91,7 @@ def test_scheduler_starts_with_scans_and_dispatch_disabled(subscription_env):
     asyncio.run(scenario())
 
 
-def test_cycle_passes_boot_settings_and_an_aware_utc_now_and_closes_the_session(monkeypatch):
+def test_cycle_passes_boot_settings_the_sweep_and_an_aware_utc_now_and_closes_the_session(monkeypatch):
     calls = []
     closed = []
 
@@ -100,20 +102,52 @@ def test_cycle_passes_boot_settings_and_an_aware_utc_now_and_closes_the_session(
         def __exit__(self, *exc):
             closed.append(True)
 
-    def fake_process(db, *, settings, now):
-        calls.append((db, settings, now))
+    def fake_process(db, *, settings, sweep, now):
+        calls.append((db, settings, sweep, now))
         return "report"
 
     monkeypatch.setattr(subscription_scheduler, "get_session_factory", lambda: FakeSession)
     monkeypatch.setattr(subscription_scheduler, "process_subscription_cycle", fake_process)
     settings = SubscriptionSettings(_env_file=None, SUBSCRIPTION_MOCK_MARKETPLACE_ENABLED=False)
+    sweep = subscription_workflow.EventSweep()
 
-    assert subscription_scheduler.run_subscription_cycle(settings) == "report"
+    assert subscription_scheduler.run_subscription_cycle(settings, sweep) == "report"
 
-    [(db, passed, now)] = calls
-    assert isinstance(db, FakeSession) and passed is settings
+    [(db, passed, passed_sweep, now)] = calls
+    assert isinstance(db, FakeSession) and passed is settings and passed_sweep is sweep
     assert now.utcoffset() == timedelta(0)
     assert closed == [True]
+
+
+def test_started_job_hands_every_cycle_the_same_event_sweep(subscription_env, monkeypatch):
+    subscription_env(SUBSCRIPTION_SCHEDULER_ENABLED="true")
+    sweeps = []
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            pass
+
+    monkeypatch.setattr(subscription_scheduler, "get_session_factory", lambda: FakeSession)
+    monkeypatch.setattr(
+        subscription_scheduler, "process_subscription_cycle",
+        lambda db, *, settings, sweep, now: sweeps.append(sweep))
+
+    async def scenario():
+        scheduler = subscription_scheduler.start_subscription_scheduler()
+        try:
+            job = scheduler.get_job(subscription_scheduler.JOB_ID)
+            job.func()  # 잡 본체를 두 주기 그대로 부른다
+            job.func()
+        finally:
+            scheduler.shutdown(wait=False)
+        await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+    first, second = sweeps
+    assert isinstance(first, subscription_workflow.EventSweep) and second is first
 
 
 def test_real_lifespan_starts_and_stops_the_due_job_with_scans_disabled(subscription_env, monkeypatch):

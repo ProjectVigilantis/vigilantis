@@ -69,7 +69,8 @@ def clock(client_pg, login_as):
 
 def _cycle(db, clock, now):
     clock["travel"](now)
-    return subscription_workflow.process_subscription_cycle(db, settings=clock["settings"], now=now)
+    return subscription_workflow.process_subscription_cycle(
+        db, settings=clock["settings"], sweep=subscription_workflow.EventSweep(), now=now)
 
 
 def _agreements(db, tenant_id):

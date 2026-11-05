@@ -10,9 +10,11 @@
 #     계약을 해지하지 않는다. 정지 중에도 계약 처리 · 투영 · 갱신 끄기는 계속되고, 재개(tenants_repo.resume_tenant)는
 #     구독을 바꾸지 않는다.
 #   - 계약 처리 주기(process_subscription_cycle)는 subscription_scheduler 가 부른다: 모의 공급자의 활성화 · 갱신 ·
-#     만료 → 이벤트 소비(투영). 예정일은 처리 완료가 아니다 — 그 시각 뒤 첫 주기에 저장된다.
-#   - 잠금 순서는 테넌트 행 → 계약 행이다(db.repositories.tenants 머리말). 구매만 그 앞에 사용자 표를 잠근다
-#     (purchase_subscription). 이벤트 소비는 이벤트 행 → 테넌트 행이고 계약 행은 잠그지 않는다.
+#     만료 → 이벤트 소비(투영). 예정일은 처리 완료가 아니다 — 그 시각 뒤 첫 주기에 저장된다. 이벤트 소비는 주기마다
+#     상한 건수까지만 하고, 주기를 건너 이어 훑는다(EventSweep — 위치는 스케줄러가 든다).
+#   - 잠금 순서는 테넌트 행 → 계약 행이다(db.repositories.tenants 머리말). 구매 · 이용 중단은 그 앞에 사용자 표를
+#     참조용(ROW SHARE)으로 잠근다(purchase_subscription · stop_service). 이벤트 소비는 이벤트 행 → 테넌트 행이고
+#     계약 행은 잠그지 않는다.
 #   - 거절은 기존 코드다: 고객사가 없으면 404 TENANT_NOT_FOUND, 지금 상태에서 할 수 없으면 409 TENANT_STATE_CONFLICT.
 # ==============================================================================
 
@@ -203,10 +205,13 @@ def _mock_projection(entitlement: mock_marketplace.Entitlement) -> dict:
 
 
 def reconcile_tenant_subscription(db: Session, tenant_id: str, *, now: datetime) -> bool:
-    """테넌트 행을 잠그고 모의 계약의 **현재** 권리를 다시 읽어 투영을 맞춘다 → 바꿨는가. commit 하지 않는다.
+    """테넌트 행을 잠그고 모의 계약의 **현재** 상태를 다시 읽어 투영을 맞춘다 → 바꿨는가. commit 하지 않는다.
 
     - 지금 권리(활성 계약의 현재 기간 안)가 있으면 그 계약을 투영한다(MOCK_MARKETPLACE).
-    - 권리가 없는데 투영이 모의 계약이면(만료 · 기간 끝 · 그 밖) 앱 정책 Free(APP_FREE)로 돌린다.
+    - 자동 갱신 중인 활성 계약의 기간 끝 시각이 지났으면(처리 주기의 갱신 대기) 지금 투영을 그대로 둔다 — 권리가
+      끝난 것이 아니다. 남은 투영은 직전 기간의 기록이고 권리 끝 시각(entitlement_ends_at)이 이미 지나 새로 이은
+      기간과 구별된다. 다음 기간은 처리 주기(공급자의 갱신 → 그 이벤트)만 잇는다.
+    - 그 밖에 권리가 없는데 투영이 모의 계약이면(만료 · 갱신을 끈 기간의 끝) 앱 정책 Free(APP_FREE)로 돌린다.
     - 그 밖(대기 · 실패 · 계약 없음)에는 지금 투영(수동 입력 · Free)을 그대로 둔다 — 대기는 권리가 아니다.
     - 유료 수동 기록(MANUAL · Free 아님)은 계약으로 덮어쓰지 않는다(구매 · PATCH 관문이 이 조합을
       막으므로 정상 경로에서는 일어나지 않는다 — 일어나면 경고만 남긴다).
@@ -215,7 +220,8 @@ def reconcile_tenant_subscription(db: Session, tenant_id: str, *, now: datetime)
     tenant = tenants_repo.lock_tenant(db, tenant_id)
     if tenant is None:
         return False
-    entitlement = mock_marketplace.current_entitlement(db, tenant_id, now=now)
+    agreement = mock_repo.open_agreement(db, tenant_id)  # 한 번 읽은 계약으로 두 판정을 한다
+    entitlement = mock_marketplace.entitlement_of(agreement, now=now)
     if entitlement is not None:
         if tenant.subscription_source is not _MOCK and tenant.plan != FREE_PLAN:
             logger.warning(
@@ -224,6 +230,8 @@ def reconcile_tenant_subscription(db: Session, tenant_id: str, *, now: datetime)
             )
             return False
         desired = _mock_projection(entitlement)
+    elif mock_marketplace.renewal_pending(agreement, now=now):
+        return False
     elif tenant.subscription_source is _MOCK:
         desired = tenants_repo.projection_values(tenants_repo.APP_FREE, SubscriptionSource.APP_FREE)
     else:
@@ -316,6 +324,10 @@ def stop_service(
     now: datetime,
 ) -> CustomerSubscriptionResponse:
     """서비스 이용 중단 = 테넌트 정지와 같은 SUSPENDED 전이. 계약 · 투영은 그대로이고 계속 처리된다."""
+    # 사용자 관리 쓰기(사용자 표 EXCLUSIVE → 소속 테넌트의 정지를 잠그지 않고 읽는다 · auth.admin_service)와 줄을
+    # 서야 한다 — 테넌트 행만 잡으면 그 쓰기가 커밋 전의 정지를 못 보고 정지 뒤에 남는다. 구매와 같은 순서 · 같은
+    # 참조용 잠금이다(EXCLUSIVE 면 테넌트 행을 쥔 채 사용자 FK 를 참조하는 신뢰 경로 쓰기와 교착한다).
+    auth_repo.lock_users_for_reference(db)
     _lock(db, tenant_id, authorize)
     if not tenants_repo.suspend_tenant(db, tenant_id, reason=body.reason, now=now):
         raise _conflict(db)
@@ -339,20 +351,49 @@ class CycleReport:
     events: EventReport = field(default_factory=EventReport)
 
 
-#: 한 주기에 소비하는 이벤트 수 — 남은 것은 다음 주기가 이어 받는다.
+#: 한 주기에 시도하는 이벤트 수의 상한 — 남은 것은 다음 주기가 이어 받는다.
 EVENT_BATCH = 200
 
 
-def process_subscription_events(db: Session, *, now: datetime, limit: int = EVENT_BATCH) -> EventReport:
-    """처리되지 않은 모의 Marketplace 이벤트를 소비한다 — 이벤트마다 그 테넌트의 투영을 현재 계약으로 맞추고
-    processed_at 을 남긴 뒤 commit 한다. 실패한 이벤트는 처리되지 않은 채 남아 다음 주기에 다시 시도된다.
+@dataclass
+class EventSweep:
+    """처리되지 않은 이벤트를 주기를 건너 키 순((created_at, event_id))으로 한 바퀴씩 훑는 위치 — 스케줄러가 든다.
+
+    한 바퀴의 끝(until)은 그 바퀴를 열 때의 마지막 미처리 이벤트다. 그 뒤에 생긴 이벤트는 다음 바퀴가 받으므로,
+    이벤트가 계속 생겨도 바퀴는 끝나고 다음 바퀴가 처음부터 다시 훑는다. 주기마다 after 다음부터 상한 건수까지 시도하고
+    위치를 넘긴다 — 계속 실패하는 앞쪽 이벤트가 한 주기 분량을 넘게 쌓여도 뒤의 이벤트를 막지 못하고, 실패한 이벤트는
+    처리되지 않은 채 남아 다음 바퀴에 다시 시도된다. 프로세스 메모리의 값이라 재기동하면 처음부터 훑는다.
+    """
+
+    #: 이 바퀴에서 마지막으로 시도한 이벤트의 키. None 이면 바퀴의 처음부터다.
+    after: mock_repo.EventKey | None = None
+    #: 이 바퀴의 끝 키. None 이면 열린 바퀴가 없다 — 다음 주기가 새 바퀴를 연다.
+    until: mock_repo.EventKey | None = None
+
+
+def process_subscription_events(
+    db: Session, *, sweep: EventSweep, now: datetime, limit: int = EVENT_BATCH
+) -> EventReport:
+    """처리되지 않은 모의 Marketplace 이벤트를 sweep 의 위치부터 최대 limit 건 소비한다 — 이벤트마다 그 테넌트의
+    투영을 현재 계약으로 맞추고 processed_at 을 남긴 뒤 commit 한다. 실패한 이벤트는 처리되지 않은 채 남아 다음
+    바퀴에 다시 시도된다. 바퀴의 끝에 닿았으면(남은 것이 상한보다 적거나 끝 키를 시도했으면) 위치를 비운다.
 
     중복 · 순서 뒤바뀜에 같은 결과다 — 이벤트 내용이 아니라 계약의 현재 상태를 읽는다.
     """
     report = EventReport()
-    event_ids = mock_repo.unprocessed_event_ids(db, limit=limit)
+    if sweep.until is None:
+        sweep.after, sweep.until = None, mock_repo.last_unprocessed_event_key(db)
+    keys = (
+        []
+        if sweep.until is None
+        else mock_repo.unprocessed_event_keys(db, after=sweep.after, until=sweep.until, limit=limit)
+    )
     db.rollback()
-    for event_id in event_ids:
+    if len(keys) < limit or keys[-1] == sweep.until:
+        sweep.after = sweep.until = None
+    else:
+        sweep.after = keys[-1]
+    for _, event_id in keys:
         try:
             claimed = mock_repo.claim_event(db, event_id)
             if claimed is None:
@@ -372,14 +413,15 @@ def process_subscription_events(db: Session, *, now: datetime, limit: int = EVEN
 
 
 def process_subscription_cycle(
-    db: Session, *, settings: SubscriptionSettings, now: datetime
+    db: Session, *, settings: SubscriptionSettings, sweep: EventSweep, now: datetime
 ) -> CycleReport:
-    """한 주기: 모의 공급자의 활성화 · 갱신 · 만료 → 이벤트 소비. 새 구매 스위치 · 서비스 상태와 무관하다."""
+    """한 주기: 모의 공급자의 활성화 · 갱신 · 만료 → 이벤트 소비. 새 구매 스위치 · 서비스 상태와 무관하다.
+    sweep 은 주기를 건너 이어지는 이벤트 훑기 위치다 — 호출부(스케줄러)가 주기마다 같은 것을 넘긴다."""
     report = CycleReport(
         provider=mock_marketplace.advance(
             db, outcome=settings.SUBSCRIPTION_MOCK_ACTIVATION_OUTCOME, now=now
         ),
-        events=process_subscription_events(db, now=now),
+        events=process_subscription_events(db, sweep=sweep, now=now),
     )
     logger.info("subscription_cycle", extra={"events": asdict(report.events)})
     return report

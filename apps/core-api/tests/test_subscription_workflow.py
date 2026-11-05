@@ -4,11 +4,15 @@
 test_subscription_api 가 본다. 기대 날짜는 달력 사실(KST · 월말 일수)에서 손으로 적었다.
   ① 구매 요청은 PENDING 이고 권리가 없다. 활성화 이벤트 + 현재 계약 읽기가 권리를 준다. 실패는 권리 없이 재구매.
   ② 자동 갱신은 원래 기념일(1/31 → 2/28·29 → 3/31)로 잇고, 놓친 기간은 지금을 포함하는 기간까지 빈틈없이 잇는다.
+     갱신은 처리 주기만 한다 — 그 전에 계약을 다시 읽어도 자동 갱신 중인 유료 투영을 Free 로 돌리지 않는다.
   ③ 갱신 끄기는 기간 끝 시각까지 권리를 두고, 그 시각에 만료 → 앱 정책 Free 다.
   ④ 서비스 중단 · 재개는 계약을 해지 · 동결 · 초기화하지 않는다. 새 구매 스위치를 꺼도 저장된 계약은 처리된다.
   ⑤ 구매 거절 — 쓰기가 남지 않는다. 운영자의 유료 수동 기록을 덮지 않는다.
-  ⑥ 이벤트 — 중복 · 순서 뒤바뀜에 같은 결과, 한 건 장애 격리.
+  ⑥ 이벤트 — 중복 · 순서 뒤바뀜에 같은 결과, 한 건 장애 격리. 소비는 주기마다 상한 건수까지 주기를 건너 이어 훑는다 —
+     계속 실패하는 이벤트가 한 주기 분량을 채워도 뒤의 이벤트가 진행되고, 바퀴는 열 때의 끝에서 닫혀(이벤트가 계속
+     들어와도) 실패한 이벤트를 처음부터 다시 시도한다.
   ⑦ 경쟁 — 동시 구매 · 구매와 관리자 PATCH 가 테넌트 행 잠금으로 줄을 서고 하나만 이긴다(실제 commit · 스레드).
+     이용 중단은 사용자 표 → 테넌트 행 순서로 잠가 사용자 관리 쓰기와 줄을 서고, 신뢰 경로 접수와 교착하지 않는다.
 """
 
 from __future__ import annotations
@@ -16,6 +20,8 @@ from __future__ import annotations
 import itertools
 import logging
 import threading
+import time
+import uuid
 from datetime import UTC, date, datetime, timedelta
 
 import mock_marketplace
@@ -48,7 +54,7 @@ from schemas.subscriptions import (
     MockMarketplaceEventKind,
     SubscriptionSource,
 )
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.orm import Session
 from tests.test_auto_isolation_workflow import _approve_request, _committed, _seed
 
@@ -98,7 +104,15 @@ def _purchase(db, who, *, plan="Business", settings=None, now=NOW, authorize=_al
 
 
 def _cycle(db, now, **settings):
-    return workflow.process_subscription_cycle(db, settings=_settings(**settings), now=now)
+    """처리 주기 1회 — 새 이벤트 훑기(처음부터)로 돈다."""
+    return workflow.process_subscription_cycle(
+        db, settings=_settings(**settings), sweep=workflow.EventSweep(), now=now)
+
+
+def _consume(db, now, *, sweep=None, limit=workflow.EVENT_BATCH):
+    """이벤트 소비만(공급자 처리 없음). sweep 을 넘기면 주기를 건너 그 위치에서 이어 훑는다."""
+    return workflow.process_subscription_events(
+        db, sweep=workflow.EventSweep() if sweep is None else sweep, now=now, limit=limit)
 
 
 def _get(db, tenant_id, now, *, can_manage=True, settings=None):
@@ -268,6 +282,49 @@ def test_missed_terms_catch_up_to_the_term_containing_now_without_gaps(db, buyer
     shown = _get(db, tenant_id, kst(2027, 1, 15))
     assert (shown.subscription.period_start, shown.subscription.period_end, shown.next_renewal_date) == (
         date(2026, 12, 31), date(2027, 1, 30), date(2027, 1, 31))
+
+
+@pytest.mark.parametrize("renew", [True, False], ids=["auto-renewing", "renewal-disabled"])
+def test_past_term_end_before_the_cycle_keeps_a_renewing_projection_and_ends_a_cancelled_one(db, buyer, renew):
+    """기간 끝 시각이 지났는데 공급자의 갱신 · 만료가 아직이다(처리 주기 꺼짐 · 지연). 그 사이 이벤트 소비가 계약을 다시 읽는다.
+
+    자동 갱신 중이면 갱신을 기다리는 중이지 권리가 끝난 것이 아니다 — 저장된 유료 투영을 날짜 · 권리 끝 시각까지 그대로
+    두고(쓰기 없음), 그 권리 끝 시각이 지났으므로 새로 이은 기간과 구별된다. 다음 기간은 처리 주기만 잇는다.
+    갱신을 끈 계약은 그 시각에 앱 정책 Free 다(만료 전이를 기다리지 않는다).
+    """
+    who = buyer()
+    tenant_id = _active(db, who)
+    if not renew:
+        _cancel(db, tenant_id, kst(2026, 11, 5))
+    [agreement] = _agreements(db, tenant_id)
+    activated = _events(db, agreement.agreement_id)[0]
+    updated_at, revision = _tenant(db, tenant_id).updated_at, agreement.revision
+
+    for at in (TERM_END, TERM_END + timedelta(minutes=30)):  # 정확히 끝 시각 · 그 뒤(처리 주기 전)
+        db.execute(update(models.MockMarketplaceEvent)
+                   .where(models.MockMarketplaceEvent.event_id == activated.event_id).values(processed_at=None))
+        db.commit()
+        assert _consume(db, at).processed == 1
+        shown = _get(db, tenant_id, at)
+        if renew:
+            assert _shown(shown) == (BUSINESS, SubscriptionSource.MOCK_MARKETPLACE, date(2026, 11, 30), None)
+            assert shown.entitlement_ends_at == TERM_END  # 지난 권리 끝 시각 — 직전 기간의 기록이다
+            assert _tenant(db, tenant_id).updated_at == updated_at
+        else:
+            assert _shown(shown) == (FREE, SubscriptionSource.APP_FREE, None, None)
+    [waiting] = _agreements(db, tenant_id)  # 소비는 계약을 바꾸지 않는다 — 갱신 · 만료는 공급자의 몫이다
+    assert (waiting.status, waiting.term_end, waiting.revision) == (MockAgreementStatus.ACTIVE, TERM_END, revision)
+
+    later = TERM_END + timedelta(hours=1)
+    _cycle(db, later)
+    shown = _get(db, tenant_id, later)
+    if renew:
+        assert (shown.subscription.plan, shown.subscription.period_start, shown.subscription.period_end,
+                shown.entitlement_ends_at, shown.source) == (
+            "Business", date(2026, 11, 30), date(2026, 12, 30), kst(2026, 12, 31), SubscriptionSource.MOCK_MARKETPLACE)
+    else:
+        assert (_shown(shown), shown.agreement.status) == (
+            (FREE, SubscriptionSource.APP_FREE, None, None), MockAgreementStatus.EXPIRED)
 
 
 # ----- ③ 갱신 끄기 · 만료 ------------------------------------------------------------
@@ -478,7 +535,7 @@ def test_events_are_idempotent_and_order_independent(db, buyer):
 
     # 더 오래된 활성화 이벤트가 나중에 소비돼도 결과가 같다(내용이 아니라 현재 상태를 읽는다)
     updated_at = _tenant(db, tenant_id).updated_at
-    assert workflow.process_subscription_events(db, now=kst(2026, 11, 6)).processed == 1
+    assert _consume(db, kst(2026, 11, 6)).processed == 1
     assert _shown(_get(db, tenant_id, kst(2026, 11, 6))) == expected
     assert _tenant(db, tenant_id).updated_at == updated_at
 
@@ -486,33 +543,96 @@ def test_events_are_idempotent_and_order_independent(db, buyer):
     db.execute(update(models.MockMarketplaceEvent)
                .where(models.MockMarketplaceEvent.event_id == activated.event_id).values(processed_at=None))
     db.commit()
-    assert workflow.process_subscription_events(db, now=kst(2026, 11, 7)).processed == 1
+    assert _consume(db, kst(2026, 11, 7)).processed == 1
     assert _shown(_get(db, tenant_id, kst(2026, 11, 7))) == expected
     # 같은 전이(계약 · 종류 · 기간 번호 1)의 두 번째 기록은 버린다
     assert mock_repo.record_event(
         db, agreement, MockMarketplaceEventKind.ACTIVATED, occurred_at=ACTIVATED, now=ACTIVATED) is None
 
 
-def test_one_failing_event_does_not_block_the_others(db, buyer, monkeypatch):
-    broken, healthy = buyer(), buyer()
-    _purchase(db, broken)
-    _purchase(db, healthy)
-    real = workflow.reconcile_tenant_subscription
+def _arrive(db, agreement, at) -> None:
+    """그 계약의 미처리 이벤트 1건이 그 시각에 들어온다(공급자 전이의 대역 — 소비자는 내용이 아니라 계약을 읽는다)."""
+    db.add(models.MockMarketplaceEvent(
+        agreement_id=agreement.agreement_id, source=SubscriptionSource.MOCK_MARKETPLACE,
+        kind=MockMarketplaceEventKind.RENEWED, dedupe_key=f"{agreement.agreement_id}:arrival:{uuid.uuid4().hex}",
+        occurred_at=at, created_at=at))
+    db.commit()
+
+
+def _failing(monkeypatch, tenant_ids):
+    """그 테넌트들의 투영 맞추기가 계속 실패한다(투영 저장소 장애 대역) → 진짜 함수(되돌릴 때 쓴다)."""
+    real, failing = workflow.reconcile_tenant_subscription, set(tenant_ids)
 
     def flaky(session, tenant_id, *, now):
-        if tenant_id == broken[0]:
+        if tenant_id in failing:
             raise RuntimeError("projection store unavailable")
         return real(session, tenant_id, now=now)
 
     monkeypatch.setattr(workflow, "reconcile_tenant_subscription", flaky)
-    report = _cycle(db, ACTIVATED)
-    assert (report.events.processed, report.events.errored) == (1, 1)
-    assert (_tenant(db, broken[0]).plan, _tenant(db, healthy[0]).plan) == ("Free", "Business")
+    return real
 
-    # 실패한 이벤트는 남아 다음 주기에 다시 처리된다
+
+def _unprocessed(db) -> int:
+    return db.scalar(select(func.count()).select_from(models.MockMarketplaceEvent).where(
+        models.MockMarketplaceEvent.processed_at.is_(None)))
+
+
+def test_failing_events_do_not_block_the_others_even_a_full_batch(db, buyer, monkeypatch):
+    """계속 실패하는 앞쪽 이벤트가 한 주기 분량(limit)을 다 채워도 다음 주기는 그 뒤를 이어 받는다 — 새 이벤트가
+    진행되고, 실패한 이벤트는 처리되지 않은 채 남아 바퀴가 끝나면 처음부터 다시 시도된다."""
+    broken = [_active(db, buyer()), _active(db, buyer())]
+    healthy = buyer()
+    _purchase(db, healthy)  # 활성화 이벤트가 가장 새것이다 — 그 이벤트가 투영을 바꾸는지로 진행을 본다
+    for minute, tenant_id in enumerate(broken, start=1):
+        _arrive(db, _agreements(db, tenant_id)[0], ACTIVATED + timedelta(minutes=minute))
+    mock_marketplace.advance(db, outcome="SUCCEED", now=ACTIVATED + timedelta(minutes=3))
+    real = _failing(monkeypatch, broken)
+    sweep, at = workflow.EventSweep(), ACTIVATED + timedelta(minutes=4)
+
+    reports = [_consume(db, at, sweep=sweep, limit=2) for _ in range(3)]
+
+    # 실패로 꽉 찬 주기 → 그 뒤의 새 이벤트 → 바퀴가 끝나 실패한 두 건을 다시 시도
+    assert [(r.processed, r.errored) for r in reports] == [(0, 2), (1, 0), (0, 2)]
+    assert _tenant(db, healthy[0]).plan == "Business"
+    assert _unprocessed(db) == 2
     monkeypatch.setattr(workflow, "reconcile_tenant_subscription", real)
-    assert workflow.process_subscription_events(db, now=ACTIVATED + timedelta(minutes=1)).processed == 1
-    assert _tenant(db, broken[0]).plan == "Business"
+    assert (_consume(db, at, sweep=sweep, limit=2).processed, _unprocessed(db)) == (2, 0)
+
+
+def test_each_sweep_ends_at_its_opening_boundary_while_events_keep_arriving(db, buyer, monkeypatch):
+    """주기마다 한 주기 분량씩 새 이벤트가 들어와도 바퀴는 열 때의 끝에서 닫힌다 — 다음 바퀴가 처음부터 훑어 앞쪽의
+    실패한 이벤트를 다시 시도한다. 끝이 들어오는 이벤트를 따라 밀리면 그 이벤트는 다시 시도되지 않는다."""
+    broken = [_active(db, buyer()), _active(db, buyer())]
+    steady = _agreements(db, _active(db, buyer()))[0]
+    for minute, tenant_id in enumerate(broken, start=1):
+        _arrive(db, _agreements(db, tenant_id)[0], ACTIVATED + timedelta(minutes=minute))
+    _failing(monkeypatch, broken)
+    sweep, minutes = workflow.EventSweep(), itertools.count(10)
+
+    reports = []
+    for _ in range(3):
+        for _ in range(2):  # 주기 전마다 limit 만큼 새로 들어온다
+            _arrive(db, steady, ACTIVATED + timedelta(minutes=next(minutes)))
+        reports.append(_consume(db, ACTIVATED + timedelta(hours=1), sweep=sweep, limit=2))
+
+    assert [(r.processed, r.errored) for r in reports] == [(0, 2), (2, 0), (0, 2)]
+
+
+def test_an_exactly_full_or_an_empty_sweep_ends_in_that_cycle(db, buyer, monkeypatch):
+    """처리할 것이 없는 주기는 아무것도 시도하지 않는다. 남은 것이 꼭 한 주기 분량이면 그 주기가 바퀴를 닫아 다음
+    주기가 처음부터 다시 훑는다 — 실패한 이벤트를 빈 주기 없이 바로 다시 시도하고, 같은 주기의 성공은 격리된다."""
+    sweep, at = workflow.EventSweep(), ACTIVATED + timedelta(hours=1)
+    empty = _consume(db, at, sweep=sweep, limit=2)
+    assert (empty.processed, empty.skipped, empty.errored) == (0, 0, 0)
+    broken = _active(db, buyer())
+    steady = _agreements(db, _active(db, buyer()))[0]
+    _arrive(db, _agreements(db, broken)[0], ACTIVATED + timedelta(minutes=1))
+    _arrive(db, steady, ACTIVATED + timedelta(minutes=2))
+    _failing(monkeypatch, [broken])
+
+    reports = [_consume(db, at, sweep=sweep, limit=2) for _ in range(2)]
+
+    assert [(r.processed, r.errored) for r in reports] == [(1, 1), (0, 1)]
 
 
 # ----- ⑦ 경쟁 (실제 commit · 독립 세션) -----------------------------------------------
@@ -681,14 +801,102 @@ def _overlap(holder, holder_holds, waiter, waiter_reached, release):
     return outcome["holder"], outcome["waiter"]
 
 
-def test_purchase_overlapping_a_trusted_action_reservation_completes_without_deadlock(
-    pg_engine, committed_buyer, committed_actor, make_incident, make_candidate, monkeypatch
+def _backend_pid(session: Session) -> int:
+    return session.scalar(text("SELECT pg_backend_pid()"))
+
+
+def _blockers_of(engine, pids: dict, name: str, thread: threading.Thread) -> list[int]:
+    """그 스레드의 백엔드가 잠금을 기다리면 그 잠금을 쥔 백엔드들(pg_blocking_pids) → pid 목록.
+
+    기다리지 않고 끝나 버리면 빈 목록이다. 시간 제한은 관측을 기다리는 상한일 뿐 순서의 증거가 아니다."""
+    deadline = time.monotonic() + 10
+    with engine.connect() as probe:
+        while thread.is_alive() and time.monotonic() < deadline:
+            if name in pids:
+                blockers = probe.scalar(text("SELECT pg_blocking_pids(:pid)"), {"pid": pids[name]})
+                probe.rollback()
+                if blockers:
+                    return list(blockers)
+            time.sleep(0.02)
+    return []
+
+
+def test_stop_makes_overlapping_user_management_wait_and_then_refuse(pg_engine, committed_auth):
+    """고객사 중앙계정의 이용 중단이 잠금을 쥔 채 커밋 전이면, 같은 고객사의 사용자 관리 쓰기(사용자 표 EXCLUSIVE 뒤
+    소속 테넌트의 정지를 잠그지 않고 읽는다 — admin_service._transaction)는 그 중단을 기다린다. 기다림은
+    pg_blocking_pids 로 본다. 중단이 커밋되면 그 쓰기는 정지를 보고 409 TENANT_SUSPENDED 이고 아무것도 쓰지 않는다.
+    중단이 테넌트 행만 잠그면 쓰기는 기다리지 않고 커밋 전의 ACTIVE 를 읽어 정지 뒤에 남는다.
+    """
+    tenant_id = committed_auth.make_tenant()
+    manager = committed_auth.make(UserRole.ADMIN, tenant_id=tenant_id)
+    member = committed_auth.make(UserRole.OPERATOR, tenant_id=tenant_id)
+    actor = admin_service.Actor(
+        token=manager.token,
+        idle_seconds=get_auth_settings().AUTH_SESSION_IDLE_SECONDS,
+        clock=lambda: datetime.now(UTC),
+    )
+    stopper, writer = Session(pg_engine), Session(pg_engine)
+    stop_holds, release = threading.Event(), threading.Event()
+    pids: dict = {}
+    outcome: dict = {}
+
+    def hold() -> None:  # 중단의 요청자 재판정 — 잠금을 다 쥔 뒤의 자리다
+        stop_holds.set()
+        assert release.wait(timeout=10), "중단 해제 신호가 오지 않음"
+
+    def stop():
+        pids["stopper"] = _backend_pid(stopper)  # 같은 트랜잭션 · 연결에서 잠근다
+        return workflow.stop_service(
+            stopper, tenant_id, SubscriptionStopRequest(reason="운영 중단"), authorize=hold,
+            settings=_settings(), now=datetime.now(UTC))
+
+    def manage():
+        pids["writer"] = _backend_pid(writer)
+        return admin_service.change_role(writer, actor, member.user_id, UserRole.VIEWER)
+
+    def run(name, session, call):
+        try:
+            outcome[name] = call()
+        except Exception as exc:  # noqa: BLE001 — 스레드 밖에서 단언한다
+            session.rollback()
+            outcome[name] = exc
+
+    stopping = threading.Thread(target=run, args=("stop", stopper, stop))
+    managing = threading.Thread(target=run, args=("manage", writer, manage))
+    try:
+        stopping.start()
+        assert stop_holds.wait(timeout=10)
+        managing.start()
+        blockers = _blockers_of(pg_engine, pids, "writer", managing)
+    finally:
+        release.set()
+        for thread in (stopping, managing):
+            if thread.ident is not None:
+                thread.join(timeout=30)
+        stopper.close()
+        writer.close()
+    assert not stopping.is_alive() and not managing.is_alive()
+
+    assert blockers == [pids["stopper"]], "사용자 관리 쓰기가 커밋 전의 중단을 기다려야 한다"
+    stopped, refused = outcome["stop"], outcome["manage"]
+    assert not isinstance(stopped, Exception), repr(stopped)
+    assert stopped.service_status is TenantStatus.SUSPENDED
+    assert isinstance(refused, ApiError) and refused.code is ErrorCode.TENANT_SUSPENDED, repr(refused)
+    with Session(pg_engine) as check:
+        assert check.get(models.AppUser, member.user_id).role is UserRole.OPERATOR
+        assert check.scalar(select(func.count()).select_from(models.UserAdminEvent).where(
+            models.UserAdminEvent.target_user_id == member.user_id)) == 0
+
+
+@pytest.mark.parametrize("write", ["purchase", "stop"])
+def test_customer_write_overlapping_a_trusted_action_reservation_completes_without_deadlock(
+    pg_engine, committed_buyer, committed_actor, make_incident, make_candidate, monkeypatch, write
 ):
-    """신뢰 경로의 조치 접수(actor 없음 · 사람 audit_actor)와 겹친 구매 — 둘 다 끝난다.
+    """신뢰 경로의 조치 접수(actor 없음 · 사람 audit_actor)와 겹친 구매 · 이용 중단 — 둘 다 끝난다.
 
     그 접수는 사용자 표를 잠그지 않고 테넌트 행을 FOR SHARE 로 쥔 뒤 감사 기록의 행위자 FK 로 사용자 표를
-    참조한다(workflows._write_context · reserve_execution). 접수가 테넌트 행을 쥔 채 멈춘 동안 구매가 테넌트 행
-    잠금에 닿으면 접수를 놓는다 — 구매가 그 앞에 잡은 사용자 표 잠금이 FK 참조를 막으면 교착이다.
+    참조한다(workflows._write_context · reserve_execution). 접수가 테넌트 행을 쥔 채 멈춘 동안 고객 쓰기가 테넌트 행
+    잠금에 닿으면 접수를 놓는다 — 고객 쓰기가 그 앞에 잡은 사용자 표 잠금이 FK 참조를 막으면(EXCLUSIVE) 교착이다.
     """
     tenant_id = committed_buyer[0]
     with _committed(pg_engine) as cleanup_ids:
@@ -699,8 +907,8 @@ def test_purchase_overlapping_a_trusted_action_reservation_completes_without_dea
                 models.Incident.incident_id == seeded.incident_id).values(tenant_id=tenant_id))
             setup.commit()
         request = _approve_request(seeded.incident_id)
-        action, buyer = Session(pg_engine), Session(pg_engine)
-        action_holds_tenant, purchase_reached_tenant, release = (threading.Event() for _ in range(3))
+        action, customer = Session(pg_engine), Session(pg_engine)
+        action_holds_tenant, customer_reached_tenant, release = (threading.Event() for _ in range(3))
         real_read_tenant_for_share, real_lock_tenant = tenants_repo.read_tenant_for_share, tenants_repo.lock_tenant
 
         def read_tenant_for_share(session, locked_id):
@@ -711,23 +919,28 @@ def test_purchase_overlapping_a_trusted_action_reservation_completes_without_dea
             return row
 
         def lock_tenant(session, locked_id):
-            if session is buyer:
-                purchase_reached_tenant.set()  # 사용자 표 잠금은 이미 잡았다
+            if session is customer:
+                customer_reached_tenant.set()  # 사용자 표 잠금은 이미 잡았다
             return real_lock_tenant(session, locked_id)
 
+        calls = {"purchase": lambda: _purchase(customer, committed_buyer), "stop": lambda: _stop(customer, tenant_id)}
         monkeypatch.setattr(tenants_repo, "read_tenant_for_share", read_tenant_for_share)
         monkeypatch.setattr(tenants_repo, "lock_tenant", lock_tenant)
-        reserved, purchased = _overlap(
+        reserved, written = _overlap(
             (action, lambda: workflows.reserve_execution(action, request, audit_actor=committed_actor)),
             action_holds_tenant,
-            (buyer, lambda: _purchase(buyer, committed_buyer)),
-            purchase_reached_tenant,
+            (customer, calls[write]),
+            customer_reached_tenant,
             release,
         )
 
         assert not isinstance(reserved, Exception), repr(reserved)
         assert reserved.created is True
-        assert not isinstance(purchased, Exception), repr(purchased)
-        assert purchased.agreement.status is MockAgreementStatus.PENDING
+        assert not isinstance(written, Exception), repr(written)
         with Session(pg_engine) as check:
-            assert [a.status for a in _agreements(check, tenant_id)] == [MockAgreementStatus.PENDING]
+            if write == "purchase":
+                assert written.agreement.status is MockAgreementStatus.PENDING
+                assert [a.status for a in _agreements(check, tenant_id)] == [MockAgreementStatus.PENDING]
+            else:
+                assert written.service_status is TenantStatus.SUSPENDED
+                assert _tenant(check, tenant_id).status is TenantStatus.SUSPENDED

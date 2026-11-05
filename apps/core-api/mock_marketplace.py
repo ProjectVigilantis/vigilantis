@@ -49,9 +49,11 @@ class Entitlement:
     anniversary_day: int
 
 
-def current_entitlement(db: Session, tenant_id: str, *, now: datetime) -> Entitlement | None:
-    """그 테넌트의 지금 권리. 대기 · 실패 · 만료 계약과 기간 끝 시각이 지난(아직 갱신 전) 계약은 권리가 없다."""
-    agreement = repo.open_agreement(db, tenant_id)
+def entitlement_of(
+    agreement: models.MockMarketplaceAgreement | None, *, now: datetime
+) -> Entitlement | None:
+    """진행 중 계약(repo.open_agreement)의 지금 권리. 대기 · 실패 · 만료 계약과 기간 끝 시각이 지난(아직 갱신 전)
+    계약은 권리가 없다 — 갱신을 기다리는 중인지는 renewal_pending 이 따로 판정한다."""
     if (
         agreement is None
         or agreement.status is not MockAgreementStatus.ACTIVE
@@ -65,6 +67,19 @@ def current_entitlement(db: Session, tenant_id: str, *, now: datetime) -> Entitl
         term_end=agreement.term_end,
         auto_renew=agreement.auto_renew,
         anniversary_day=agreement.anniversary_day,
+    )
+
+
+def renewal_pending(agreement: models.MockMarketplaceAgreement | None, *, now: datetime) -> bool:
+    """자동 갱신 중인 활성 계약의 기간 끝 시각이 지났고 아직 다음 기간이 이어지지 않았다 — 처리 주기의 갱신 대상이다.
+
+    권리가 끝난 것이 아니라 공급자의 갱신을 기다리는 중이다(_roll_term 이 이 판정으로 갱신한다). 갱신을 끈 계약은
+    들지 않는다 — 그 계약의 권리는 기간 끝 시각에 끝난다."""
+    return (
+        agreement is not None
+        and agreement.status is MockAgreementStatus.ACTIVE
+        and agreement.auto_renew
+        and agreement.term_end <= now
     )
 
 
@@ -215,10 +230,10 @@ def _settle_pending(
 
 def _roll_term(db: Session, agreement: models.MockMarketplaceAgreement, now: datetime) -> str | None:
     """기간 끝 시각이 지난 활성 계약 1건 → 보고 칸 이름(바뀐 것이 없으면 None)."""
+    if renewal_pending(agreement, now=now):
+        return "renewed" if _renew(db, agreement, now) else None
     if agreement.status is not MockAgreementStatus.ACTIVE or agreement.term_end > now:
         return None
-    if agreement.auto_renew:
-        return "renewed" if _renew(db, agreement, now) else None
     return "expired" if _expire(db, agreement, now) else None
 
 

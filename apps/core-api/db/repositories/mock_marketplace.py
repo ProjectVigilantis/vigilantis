@@ -22,7 +22,7 @@ from schemas.subscriptions import (
     MockMarketplaceEventKind,
     SubscriptionSource,
 )
-from sqlalchemy import select, update
+from sqlalchemy import select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -181,13 +181,31 @@ class ClaimedEvent:
     tenant_id: str
 
 
-def unprocessed_event_ids(db: Session, *, limit: int) -> list[str]:
-    return list(db.scalars(
-        select(_E.event_id)
+#: 이벤트 순서의 키 (created_at, event_id) — 같은 시각에 생긴 이벤트도 event_id 로 순서가 하나로 정해진다.
+EventKey = tuple[datetime, str]
+
+
+def last_unprocessed_event_key(db: Session) -> EventKey | None:
+    """처리되지 않은 이벤트 중 키 순으로 마지막 것. 없으면 None."""
+    row = db.execute(
+        select(_E.created_at, _E.event_id)
         .where(_E.processed_at.is_(None))
-        .order_by(_E.created_at, _E.event_id)
-        .limit(limit)
-    ))
+        .order_by(_E.created_at.desc(), _E.event_id.desc())
+        .limit(1)
+    ).one_or_none()
+    return None if row is None else (row.created_at, row.event_id)
+
+
+def unprocessed_event_keys(
+    db: Session, *, after: EventKey | None, until: EventKey, limit: int
+) -> list[EventKey]:
+    """처리되지 않은 이벤트 중 키가 after 보다 크고(None 이면 처음부터) until 이하인 것 — 키 순으로 최대 limit 건."""
+    key = tuple_(_E.created_at, _E.event_id)
+    statement = select(_E.created_at, _E.event_id).where(_E.processed_at.is_(None), key <= until)
+    if after is not None:
+        statement = statement.where(key > after)
+    rows = db.execute(statement.order_by(_E.created_at, _E.event_id).limit(limit))
+    return [(row.created_at, row.event_id) for row in rows]
 
 
 def claim_event(db: Session, event_id: str) -> ClaimedEvent | None:

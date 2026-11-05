@@ -2,7 +2,10 @@
 
 1. tenants 에 구독의 현재 사실 4칸: cancel_at_period_end(Free 전환 예약) · billing_anchor_day(자동 갱신
    기준일) · amount_minor · currency(등록된 요금). 계약 TenantSubscription 의 불변식을 CHECK 로 거울한다.
-2. tenant_subscription_history — 재개(연결 확인 성공)로 Free 가 되기 전의 구독을 남기는 최소 기록.
+2. tenant_subscription_history — 이 리비전 당시의 재개 규칙(연결 확인 성공 = 구독과 무관하게 Free 로 다시 시작)이
+   Free 로 바꾸기 전의 구독을 남기던 최소 기록. **그 무조건 Free 규칙은 이후 폐기됐다** — 이 테이블에 새 행을 쓰지
+   않는다(db.models.TenantSubscriptionHistory). 테이블과 이미 남은 행은 읽기 전용 옛 기록으로 보존한다(d528e1f3a6b2 도
+   그대로 둔다).
 
 **기존 행은 그대로 둔다.** plan · period_start · period_end 는 손대지 않고(옛 값 basic · pilot 포함),
 NULL plan 을 Free 로 채우지 않는다 — 「등록 안 됨」과 Free 는 다른 사실이다. 새 칸은 예약 없음(false) ·

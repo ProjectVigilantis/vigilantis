@@ -30,7 +30,7 @@ from schemas.api.tenants import (
     TenantVerificationResult,
     TenantVerifyResponse,
 )
-from schemas.subscriptions import SubscriptionSource
+from schemas.subscriptions import SubscriptionSource, service_date
 from sqlalchemy import delete, event, select, text, update
 from sqlalchemy.orm import Session, sessionmaker
 from tenant_verification import VerificationOutcome
@@ -629,7 +629,8 @@ def test_no_transaction_or_lock_is_held_while_waiting_for_aws_and_the_result_is_
 
 # ----- ⑦ 재개와 모의 계약 권리 (T-16 · #528) ---------------------------------------------------
 # 재개는 구독을 바꾸지 않는다(Free 로 다시 시작하지 않는다). 성공한 재개만 같은 트랜잭션에서 투영을 계약의 현재
-# 권리로 맞춘다 — 처리 주기가 아직 반영하지 않은 만료는 그때 앱 정책 Free 가 된다. 계약 행(원천)은 건드리지 않는다.
+# 권리로 맞춘다 — 처리 주기가 아직 반영하지 않은 만료(갱신을 끈 기간의 끝)는 그때 앱 정책 Free 가 되고, 자동 갱신 대기는
+# 처리 주기가 다음 기간을 이을 때까지 저장된 투영 그대로다. 계약 행(원천)은 건드리지 않는다.
 
 MOCK_ON = SubscriptionSettings(_env_file=None, SUBSCRIPTION_MOCK_MARKETPLACE_ENABLED=True)
 FREE = {"plan": "Free", "period_start": None, "period_end": None, "cancel_at_period_end": False,
@@ -643,7 +644,8 @@ def _with_mock_rights(db, make_auth_session, purchased_at, *, renew=True, status
     subscription_workflow.purchase_subscription(
         db, tenant.tenant_id, SubscriptionPurchaseRequest(plan="Business"), requested_by_user_id=buyer.user_id,
         authorize=lambda: None, settings=MOCK_ON, now=purchased_at)
-    subscription_workflow.process_subscription_cycle(db, settings=MOCK_ON, now=purchased_at + timedelta(minutes=1))
+    subscription_workflow.process_subscription_cycle(
+        db, settings=MOCK_ON, sweep=subscription_workflow.EventSweep(), now=purchased_at + timedelta(minutes=1))
     if not renew:
         subscription_workflow.cancel_renewal(
             db, tenant.tenant_id, authorize=lambda: None, settings=MOCK_ON, now=purchased_at + timedelta(minutes=2))
@@ -696,6 +698,33 @@ def test_resume_projects_rights_that_ended_while_stopped_as_app_free(client_pg, 
         "ACTIVE", FREE, "APP_FREE", None)
     assert _agreement(db, tenant.tenant_id) == agreement  # 만료 전이 · 이벤트는 처리 주기(공급자)의 몫이다
     assert client_pg.get(f"{BASE}/{tenant.tenant_id}").json() == body
+
+
+def test_resume_keeps_a_renewal_awaiting_the_cycle_until_the_cycle_renews_it(
+    client_pg, db, admin, aws, make_auth_session
+):
+    # 자동 갱신 중인 계약의 기간 끝 시각이 정지 중에 지났고, 처리 주기는 아직 돌지 않았다(꺼짐 · 지연)
+    tenant = _with_mock_rights(db, make_auth_session, aws.start - timedelta(days=40))
+    stale, agreement = _projection(db, tenant.tenant_id), _agreement(db, tenant.tenant_id)
+    assert stale[5] is SubscriptionSource.MOCK_MARKETPLACE and stale[6] < aws.start
+
+    resp = _post(client_pg, "resume", tenant.tenant_id)
+
+    assert resp.status_code == 200
+    body = resp.json()["tenant"]
+    assert (body["status"], body["subscription"]["plan"], body["subscription_source"]) == (
+        "ACTIVE", "Business", "MOCK_MARKETPLACE")
+    # 직전 기간의 기록 그대로 — 권리 끝 시각이 지난 값이라 새로 이은 기간과 구별된다
+    assert _projection(db, tenant.tenant_id) == stale
+    assert _agreement(db, tenant.tenant_id) == agreement  # 갱신 전이 · 이벤트는 처리 주기(공급자)의 몫이다
+    assert client_pg.get(f"{BASE}/{tenant.tenant_id}").json() == body
+
+    subscription_workflow.process_subscription_cycle(
+        db, settings=MOCK_ON, sweep=subscription_workflow.EventSweep(), now=aws.observed_at)
+    renewed = _projection(db, tenant.tenant_id)
+    assert (renewed[0], renewed[1], renewed[5]) == (
+        "Business", service_date(stale[6]), SubscriptionSource.MOCK_MARKETPLACE)
+    assert renewed[6] > aws.observed_at
 
 
 def _resume_denied(db, aws, tenant, monkeypatch):
