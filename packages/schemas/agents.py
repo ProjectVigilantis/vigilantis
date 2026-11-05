@@ -11,6 +11,9 @@
 #     AWS 작업 출력 불가).
 #   - 출력 invocation_status는 Terminal만: SUCCEEDED=요약 3줄+후보 1개 이상,
 #     NO_PROPOSAL=요약 3줄+후보 0개, FAILED=빈 요약+후보 0개+reviewed null.
+#   - failure_reason은 FAILED에만 온다. 이 저장소의 생산자(그래프·dispatcher 검증·입력 불가)는
+#     FAILED마다 사유를 싣고, null FAILED는 사유를 싣기 전의 생산자만 낸다. 어휘의 원천은
+#     api/analysis.py의 AnalysisFailureReason이다(공개 응답도 싣는 값이라 그쪽에 둔다).
 #   - FINOPS 출력의 reviewed_risk_level=null 규칙과 "후보 evidence_ids⊆입력 Evidence"
 #     규칙은 입력·출력을 함께 아는 Workflow가 검증한다(출력 모델 단독으로는 불가).
 #   - RULE 근거와 최상위 rule_evaluation이 같은 객체에서 나왔는지는 입력 계약이 본다
@@ -31,6 +34,7 @@ from typing import Annotated, Literal, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 from .api.actions import ExecutionStatus
+from .api.analysis import AnalysisFailureReason
 from .api.assets import AssetItem, AssetType
 from .api.incidents import IncidentCategory, RiskLevel
 from .evidence import EVIDENCE_CONTENT_MODELS, EvidenceContent, EvidenceType, bind_evidence_content
@@ -226,6 +230,7 @@ class AgentGraphOutput(BaseModel):
     summary_lines: list[Annotated[str, Field(min_length=1)]] = Field(default_factory=list)
     reviewed_risk_level: Optional[RiskLevel] = None
     candidates: list[RunbookCandidateDraft] = Field(default_factory=list)
+    failure_reason: AnalysisFailureReason | None = None
 
     @model_validator(mode="after")
     def _enforce_contract(self):
@@ -233,6 +238,9 @@ class AgentGraphOutput(BaseModel):
             raise ValueError(
                 "Graph 출력 invocation_status는 Terminal(SUCCEEDED·NO_PROPOSAL·FAILED)만 가능합니다"
             )
+        if (self.failure_reason is not None
+                and self.invocation_status is not AgentInvocationStatus.FAILED):
+            raise ValueError("failure_reason은 FAILED에만 올 수 있습니다")
 
         if self.invocation_status == AgentInvocationStatus.SUCCEEDED:
             if len(self.summary_lines) != 3 or not self.candidates:

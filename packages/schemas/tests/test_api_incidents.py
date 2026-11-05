@@ -555,9 +555,39 @@ def test_resolution_note_requires_resolution():
 
 @pytest.mark.parametrize("status", list(AnalysisResultStatus))
 def test_analysis_result_roundtrip_and_default_rejections(status):
-    dto = AnalysisResult(status=status)
-    assert dto.model_dump(mode="json") == {"status": status.value, "guardrail_rejections": []}
+    # 조치 없음은 사유 없이 오지 않는다 — 그 밖은 사유 기본값이 null이다
+    reason = "NO_ACTION_AVAILABLE" if status is AnalysisResultStatus.NO_ACTION_AVAILABLE else None
+    dto = AnalysisResult(status=status, failure_reason=reason)
+    assert dto.model_dump(mode="json") == {
+        "status": status.value, "guardrail_rejections": [], "failure_reason": reason,
+    }
     assert AnalysisResult.model_validate_json(dto.model_dump_json()) == dto
+
+
+@pytest.mark.parametrize("status, reason", [
+    ("NO_ACTION_AVAILABLE", "NO_ACTION_AVAILABLE"),
+    ("NO_ACTION_AVAILABLE", "SOURCE_ADDRESS_UNSUPPORTED"),
+    ("FAILED", "MODEL_UNAVAILABLE"),
+    ("FAILED", "GRAPH_INPUT_UNAVAILABLE"),
+    ("FAILED", None),  # 사유 기록 이전에 닫힌 분석
+])
+def test_analysis_result_carries_failure_reason_for_failed_and_no_action(status, reason):
+    data = {"status": status, "guardrail_rejections": [], "failure_reason": reason}
+    assert AnalysisResult.model_validate(data).model_dump(mode="json") == data
+
+
+@pytest.mark.parametrize("status, reason", [
+    ("NO_ACTION_AVAILABLE", None),                 # 조치 없음은 사유가 가른다
+    ("NO_ACTION_AVAILABLE", "MODEL_UNAVAILABLE"),  # 분석 고장을 조치 없음으로 보이지 않는다
+    ("FAILED", "NO_ACTION_AVAILABLE"),             # 조치 없음을 분석 실패로 보이지 않는다
+    ("FAILED", "SOURCE_ADDRESS_UNSUPPORTED"),
+    ("NO_PROPOSAL", "MODEL_UNAVAILABLE"),          # 실패하지 않은 분석에는 사유가 없다
+    ("PROPOSALS_GENERATED", "NO_ACTION_AVAILABLE"),
+    ("FAILED", "UNKNOWN_REASON"),
+])
+def test_analysis_result_rejects_reason_that_contradicts_status(status, reason):
+    with pytest.raises(ValidationError):
+        AnalysisResult.model_validate({"status": status, "failure_reason": reason})
 
 
 @pytest.mark.parametrize("reason_code", [None, "PRECHECK_AWS_ERROR"])
@@ -565,7 +595,7 @@ def test_analysis_result_serializes_public_rejection(reason_code):
     data = {"status": "GUARDRAIL_REJECTED", "guardrail_rejections": [{
         "runbook_id": "RUNBOOK_NACL_ADD_DENY", "failed_step": "AWS_DRY_RUN",
         "reason_code": reason_code,
-    }]}
+    }], "failure_reason": None}
     assert AnalysisResult.model_validate(data).model_dump(mode="json") == data
 
 

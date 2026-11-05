@@ -125,9 +125,12 @@ def _insert_tenant_settings(conn, tenant_id) -> None:
 
 
 def _assert_merged_head(config, engine):
-    assert ScriptDirectory.from_config(config).get_heads() == [LATEST]
+    script = ScriptDirectory.from_config(config)
+    # head 를 병합으로 고정하지 않는다 — 뒤에 리비전이 붙어도(#434 b434c7e2a915 등) 병합을 지나 올라간다
+    [head] = script.get_heads()
+    assert LATEST in {rev.revision for rev in script.walk_revisions(base="base", head=head)}
     with engine.connect() as conn:
-        assert conn.scalar(text("SELECT version_num FROM alembic_version")) == LATEST
+        assert conn.scalar(text("SELECT version_num FROM alembic_version")) == head
         names = set(inspect(conn).get_table_names()) - {"alembic_version"}
         assert len(names) == HEAD_TABLES
         assert (T7_TABLES | DEV_ONLY_TABLES | {"signup_request_decisions"}) <= names
@@ -188,7 +191,8 @@ def test_t7_head_database_upgrades_keeping_tenant_settings(scratch):
 
 def test_latest_merge_joins_t7_merge_and_decisions_into_the_single_head():
     script = ScriptDirectory.from_config(Config(str(CONFIG_PATH)))
-    assert script.get_heads() == [LATEST]
+    [head] = script.get_heads()
+    assert LATEST in {rev.revision for rev in script.walk_revisions(base="base", head=head)}
     assert set(script.get_revision(LATEST).down_revision) == {MERGE, DECISIONS}
     assert script.get_revision(DECISIONS).down_revision == DEV_HEAD
     assert set(script.get_revision(MERGE).down_revision) == {DEV_HEAD, T7_HEAD}

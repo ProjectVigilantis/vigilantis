@@ -2,13 +2,21 @@
 
 공개 응답(analysis_result)에는 SecOps만 싣는다(api/incidents.py 계약). 판정 자체는
 도메인과 무관해 분석 종결 로그(workflows.record_agent_analysis)도 같은 판정을 쓴다(#424).
+FAILED 호출은 저장된 사유 코드로 가른다 — 제공할 자동 조치가 없어 닫힌 건(빈 메뉴·IPv6
+SSH 출발지)은 NO_ACTION_AVAILABLE, 그 밖은 FAILED이며 둘 다 사유를 싣는다(#434).
 """
 
 from collections.abc import Sequence
 
 from sqlalchemy.orm import Session
 
-from schemas.api.analysis import AnalysisResult, AnalysisResultStatus, GuardrailRejection
+from schemas.api.analysis import (
+    NO_ACTION_FAILURE_REASONS,
+    AnalysisFailureReason,
+    AnalysisResult,
+    AnalysisResultStatus,
+    GuardrailRejection,
+)
 from schemas.api.incidents import IncidentCategory
 from schemas.guardrails import STEP_REASON_CODES, GuardrailDecision
 from schemas.incidents import AgentInvocationStatus
@@ -34,11 +42,26 @@ def _rejection(
     )
 
 
+def _stored_failure_reason(value: str | None) -> AnalysisFailureReason | None:
+    # 칸은 DB에서 자유 문자열이다(어휘가 분석 단계와 함께 는다). 이 판이 모르는 코드는
+    # 공개하지 않는다 — 목록 조회 전체가 한 행의 값 때문에 실패하지 않게 한다.
+    try:
+        return None if value is None else AnalysisFailureReason(value)
+    except ValueError:
+        return None
+
+
 def analysis_result_from(
     invocation_status: AgentInvocationStatus,
     candidates: Sequence[tuple[models.RunbookCandidate, models.GuardrailEvaluation | None]],
+    *,
+    failure_reason: AnalysisFailureReason | None,
 ) -> AnalysisResult:
-    """분석 호출 상태와 저장된 후보별 원래 평가 → 분석이 어떻게 끝났는지."""
+    """분석 호출 상태와 저장된 후보별 원래 평가·실패 사유 → 분석이 어떻게 끝났는지."""
+    if invocation_status is AgentInvocationStatus.FAILED:
+        status = (AnalysisResultStatus.NO_ACTION_AVAILABLE
+                  if failure_reason in NO_ACTION_FAILURE_REASONS else AnalysisResultStatus.FAILED)
+        return AnalysisResult(status=status, failure_reason=failure_reason)
     if invocation_status is not AgentInvocationStatus.SUCCEEDED:
         return AnalysisResult(status=AnalysisResultStatus(invocation_status.value))
     rejected = [
@@ -68,7 +91,10 @@ def load_analysis_results(
     ])
     return {
         row.incident_id: (
-            analysis_result_from(row.agent_invocation_status, evaluations.get(row.incident_id, []))
+            analysis_result_from(
+                row.agent_invocation_status, evaluations.get(row.incident_id, []),
+                failure_reason=_stored_failure_reason(row.agent_failure_reason),
+            )
             if row.category is IncidentCategory.SECOPS
             else None
         )

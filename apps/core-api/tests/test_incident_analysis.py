@@ -136,7 +136,9 @@ def test_unknown_evaluation_is_not_reported_as_no_proposal(
     assert response.status_code == 200
     data = response.json()
     for item in (listed, data):
-        assert item["analysis_result"] == {"status": "UNAVAILABLE", "guardrail_rejections": []}
+        assert item["analysis_result"] == {
+            "status": "UNAVAILABLE", "guardrail_rejections": [], "failure_reason": None,
+        }
         assert item["status"] == status.value
         assert item["initial_risk_level"] == initial_risk.value
     assert data["executions"] == []
