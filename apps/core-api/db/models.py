@@ -680,6 +680,10 @@ class Incident(Base):
     agent_invocation_started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # 분석 호출이 FAILED로 닫힌 사유 코드(schemas.api.analysis.AnalysisFailureReason, #434).
+    # 어휘가 분석 단계와 함께 늘어나므로 PG enum이 아니라 문자열로 둔다 — enum이면 코드마다
+    # 마이그레이션이 필요하다. initial_risk_reason_codes도 DB에서는 타입 없이 둔다
+    agent_failure_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     agent_wait_started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -752,6 +756,12 @@ class Incident(Base):
             "resolution_note IS NULL OR"
             " (resolution IS NOT NULL AND length(btrim(resolution_note)) > 0)",
             name="resolution_note_with_judgement",
+        ),
+        # 실패 사유는 FAILED로 닫힌 호출에만 남는다(schemas/agents.py failure_reason 계약).
+        # 선점·회수가 상태를 옮길 때 함께 비운다(repositories/incidents.py)
+        CheckConstraint(
+            "agent_failure_reason IS NULL OR agent_invocation_status = 'FAILED'",
+            name="failure_reason_when_failed",
         ),
         Index("ix_incidents_status", "status"),
         Index("ix_incidents_category", "category"),

@@ -18,6 +18,7 @@ from typing import Optional
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import Session
 
+from schemas.api.analysis import AnalysisFailureReason
 from schemas.api.incidents import (
     IncidentCategory,
     IncidentStatus,
@@ -333,6 +334,7 @@ def claim_agent_invocation(
         .values(
             agent_invocation_status=AgentInvocationStatus.IN_PROGRESS,
             agent_invocation_started_at=started_at,
+            agent_failure_reason=None,
         )
     )
     return result.rowcount == 1
@@ -345,11 +347,22 @@ def finish_agent_invocation(
     *,
     summary_lines: Optional[Sequence[str]] = None,
     reviewed_risk_level: Optional[RiskLevel] = None,
+    failure_reason: AnalysisFailureReason | None = None,
 ) -> bool:
-    """IN_PROGRESS → Terminal 3종만 허용한다. Terminal은 다시 Claim되지 않는다."""
+    """IN_PROGRESS → Terminal 3종만 허용한다. Terminal은 다시 Claim되지 않는다.
+
+    failure_reason은 FAILED일 때만 저장하고 그 밖의 Terminal에서는 비운다(#434).
+    """
     if terminal_status not in AGENT_TERMINAL_STATUSES:
         raise ValueError(f"Terminal 상태가 아닙니다: {terminal_status}")
-    values: dict = {"agent_invocation_status": terminal_status}
+    values: dict = {
+        "agent_invocation_status": terminal_status,
+        "agent_failure_reason": (
+            failure_reason.value
+            if terminal_status is AgentInvocationStatus.FAILED and failure_reason is not None
+            else None
+        ),
+    }
     if summary_lines is not None:
         values["summary_lines"] = list(summary_lines)
     if reviewed_risk_level is not None:
@@ -376,6 +389,7 @@ def reset_agent_invocation(db: Session, incident_id: str) -> bool:
         .values(
             agent_invocation_status=AgentInvocationStatus.PENDING,
             agent_invocation_started_at=None,
+            agent_failure_reason=None,
         )
     )
     return result.rowcount == 1

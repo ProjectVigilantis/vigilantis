@@ -130,6 +130,7 @@ def create_app() -> FastAPI:
                     get_session_factory(),
                     realtime.publish,
                     interval_seconds=settings.MOCK_THREAT_POLL_SECONDS,
+                    max_attempts=settings.MOCK_THREAT_MAX_ATTEMPTS,
                 )
                 threat_consumer.start()
             if settings.NOTIFICATION_ENABLED:

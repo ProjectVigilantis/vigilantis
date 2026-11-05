@@ -19,6 +19,10 @@
 #   - summary_lines는 분석 완료 시 정확히 3개, 분석 중·분석 실패 시 빈 배열.
 #   - analysis_result는 SECOPS의 저장된 분석 결과다. 무제안·전체 거절·실패를 구분하며
 #     현재 제안 목록·실행 결과·사용자 종료 판단과 독립이다. FINOPS는 null이다.
+#     분석 호출이 FAILED로 닫혔으면 failure_reason에 사유 코드를 싣고, 제공할 자동 조치가
+#     없어 닫힌 건(빈 조치 메뉴·IPv6 SSH 출발지)은 status를 NO_ACTION_AVAILABLE로 가른다.
+#     인시던트 status는 분석 실패와 같은 규칙으로 정해지고(선행 실행이 없으면 FAILED)
+#     관제자 종료 처리로 닫는다. (Issue #434)
 #   - recommendations는 AI 추천 가능(본편 7종)·Guardrail PASS 제안만 담고,
 #     Incident당 같은 runbook_id는 최대 1개 — (incident_id, runbook_id)가 외부 식별자.
 #     display_parameters는 화면 표시 전용이라 실행 요청에 되돌려 받지 않는다.

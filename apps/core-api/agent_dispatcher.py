@@ -60,7 +60,9 @@
 # FinOps는 그래프 오류·출력 검증 위반·NO_PROPOSAL·가드레일 전부 거절을 FAILED로 닫는다.
 # 뒤 둘은 관제자에게 보여 줄 실행 가능한 조치가 없어 요약을 로그로만 남긴다(#285).
 # 입력 불가도 같은 처분이다. 근거 누락·빈 메뉴를 PENDING으로 남기면 다음 스캔에서도
-# 같은 입력으로 실패를 반복하기 때문이다(GraphInputUnavailable).
+# 같은 입력으로 실패를 반복하기 때문이다(GraphInputUnavailable). 빈 메뉴와 IPv6 SSH
+# 출발지는 분석 고장이 아니라 제공할 자동 조치가 없는 것이라 사유 코드로 갈라 둔다(#434)
+# — 모델을 부르기 전에 닫고, 조회 응답이 NO_ACTION_AVAILABLE로 보여 준다.
 #
 # SecOps는 고정 THREAT 근거·초기 판정과 Incident 접수 시 보존한 자산을 조립한다.
 # 후보는 입력 근거·조치 대상·저장 가능성을 검증한 뒤 Workflow에 넘긴다.
@@ -72,9 +74,10 @@
 # 기다린다. 분석 결과와 실행 결과는 따로 보존한다(workflows.record_agent_analysis).
 # 승인 대기 시각·60초 기한을 기록하되 자동 격리 발동 엔진은 이 모듈 범위 밖이다.
 #
-# FAILED로 닫히는 자리마다 사유 코드(ai.agent.AnalysisFailureReason)를 로그에 싣는다(#424).
+# FAILED로 닫히는 자리마다 사유 코드(schemas AnalysisFailureReason)를 로그에 싣는다(#424).
 # 이 모듈은 입력 불가와 5번 검증 위반을, 그래프 안의 실패는 ai/agent.py가 남긴다. 한 건의
 # 로그 전부에는 incident_id와 선점 시각(agent_invocation_started_at)이 문맥으로 붙는다.
+# 같은 코드를 FAILED 출력의 failure_reason에도 실어 6번 저장이 인시던트에 남긴다(#434).
 #
 # 기동 worker 개수는 dispatcher.py와 같은 전제입니다 — worker 1개. 선점의 잠금 수명이
 # 2번의 commit에서 끝나므로, "그래프 진입은 한 주체뿐"이라는 보장은 그 전제 + 스캔
@@ -100,13 +103,14 @@ from schemas.agents import (
     AgentEvidenceInput,
     AgentGraphInput,
     AgentGraphOutput,
+    AnalysisFailureReason,
     FinOpsGraphInput,
     SecOpsGraphInput,
     AgentExecutionContext,
 )
 from schemas.api.actions import ExecutionStatus
 from schemas.api.incidents import IncidentCategory, ResponseMode, RiskLevel
-from schemas.events import InitialRiskEvaluationResult, expected_mode_for
+from schemas.events import InitialRiskEvaluationResult, ThreatEventType, expected_mode_for
 from schemas.runbooks import RunbookId, TriggerSource
 from schemas.api.ws import WsEvent, WsEventType
 from schemas.evidence import EvidenceItem, EvidenceType
@@ -117,7 +121,6 @@ from ai.agent import (
     FINOPS_MODEL_CALLS,
     REJECTED_TARGET_ARN_LOG_CHARS,
     SECOPS_MODEL_CALLS,
-    AnalysisFailureReason,
     run_finops_graph,
     run_secops_graph,
 )
@@ -151,7 +154,17 @@ class _UnsupportedIncident(Exception):
 
 
 class GraphInputUnavailable(Exception):
-    """그래프 입력을 만들 수 없다 — 자동 반복 없이 분석 실패로 닫는다."""
+    """그래프 입력을 만들 수 없다 — 자동 반복 없이 분석 실패로 닫는다.
+
+    reason은 인시던트에 남는 사유 코드다. 메시지(detail)는 로그에만 남긴다.
+    """
+
+    def __init__(
+        self, message: str,
+        reason: AnalysisFailureReason = AnalysisFailureReason.GRAPH_INPUT_UNAVAILABLE,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 def resolve_secops_rule_numbers(
@@ -164,8 +177,10 @@ def resolve_secops_rule_numbers(
             target, excluded_rule_numbers=open_rule_numbers.get(target, frozenset()),
         )
         if code is not None or number is None:
+            # 입력 자체는 갖춰졌고 서버 몫 값(규칙 번호)만 못 정한 것이라 입력 불가와 가른다.
             raise GraphInputUnavailable(
-                f"NACL 규칙 번호 선택 불가: {code.value if code is not None else 'SERVER_PARAMETER_UNAVAILABLE'}"
+                f"NACL 규칙 번호 선택 불가: {code.value if code is not None else 'SERVER_PARAMETER_UNAVAILABLE'}",
+                reason=AnalysisFailureReason.SERVER_PARAMETER_UNAVAILABLE,
             )
         numbers[target] = number
     return numbers
@@ -281,7 +296,8 @@ def build_graph_input(db: Session, incident_id: str) -> AgentGraphInput:
         # 조치 공간의 공백 — 판정이 조치 가능하다고 본 자산에 걸 조치가 메뉴에 없다.
         # 앞단(rule 제외·whitelist)이 고칠 문제이고 이 계층은 실패로 닫는다(Issue #285 범위 밖)
         raise GraphInputUnavailable(
-            f"조치 메뉴가 비었습니다: {asset.asset_type.value}/{rule_evaluation.verdict.value}"
+            f"조치 메뉴가 비었습니다: {asset.asset_type.value}/{rule_evaluation.verdict.value}",
+            AnalysisFailureReason.NO_ACTION_AVAILABLE,
         )
 
     return FinOpsGraphInput(
@@ -331,6 +347,14 @@ def assemble_secops_input(*, incident, threat: EvidenceItem, executions) -> SecO
         if (event.target_arn != incident.subject_arn
                 or event.threat_event_id != incident.threat_event_id):
             raise GraphInputUnavailable("위협 근거와 Incident 대상이 다릅니다")
+        # SSH 차단은 NACL CidrBlock(IPv4)으로만 실행된다. IPv6 출발지는 모델이 후보를 내도
+        # 파라미터 계약에서 거절되므로 과금 호출 전에 조치 없음으로 닫는다(#434)
+        if (event.event_type is ThreatEventType.SSH_BRUTE_FORCE
+                and ipaddress.ip_address(event.payload.source_ip).version != 4):
+            raise GraphInputUnavailable(
+                "SSH 출발지가 IPv4가 아니라 NACL 차단으로 표현할 수 없습니다",
+                AnalysisFailureReason.SOURCE_ADDRESS_UNSUPPORTED,
+            )
         context = threat.content.context
         if context is None:
             raise GraphInputUnavailable("기존 Incident에 생성 시점 근거가 없습니다")
@@ -339,7 +363,9 @@ def assemble_secops_input(*, incident, threat: EvidenceItem, executions) -> SecO
         asset = context.target.asset
         capabilities = build_secops_capabilities(asset=asset, event_type=event.event_type)
         if not capabilities:
-            raise GraphInputUnavailable("이 위협에 제공할 조치·조회 의존성이 없습니다")
+            raise GraphInputUnavailable(
+                "이 위협에 제공할 조치·조회 의존성이 없습니다", AnalysisFailureReason.NO_ACTION_AVAILABLE,
+            )
         # response_mode는 이후 타이머가 바꿀 수 있다. 초기 입력에는 초기 위험도에
         # 대응하는 원래 모드를 복원하고 현재 Incident 대응 모드는 수정하지 않는다.
         initial = InitialRiskEvaluationResult(
@@ -503,7 +529,7 @@ def verify_graph_output(
     if found.target_arn is not None:
         extra["target_arn"] = found.target_arn
     logger.warning("agent_output_contract_violation", extra=extra)
-    return AgentGraphOutput(invocation_status=AgentInvocationStatus.FAILED)
+    return AgentGraphOutput(invocation_status=AgentInvocationStatus.FAILED, failure_reason=found.reason)
 
 
 # ------------------------------------------------------------------------------
@@ -581,15 +607,18 @@ def _dispatch_one(
                     "agent_graph_input_unavailable",
                     extra={
                         "incident_id": incident_id,
-                        "reason_code": AnalysisFailureReason.GRAPH_INPUT_UNAVAILABLE.value,
+                        "reason_code": exc.reason.value,
                         "detail": str(exc),
                     },
                 )
                 db.rollback()
                 graph_input = None
+                input_failure = exc.reason
 
             if graph_input is None:
-                output = AgentGraphOutput(invocation_status=AgentInvocationStatus.FAILED)
+                output = AgentGraphOutput(
+                    invocation_status=AgentInvocationStatus.FAILED, failure_reason=input_failure,
+                )
             else:
                 # 읽기 트랜잭션을 닫는다 — autobegin으로 다시 열린 것을 여기서 끊어야
                 # 그래프 호출이 트랜잭션 밖에서 돈다

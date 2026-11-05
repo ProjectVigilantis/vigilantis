@@ -20,7 +20,7 @@ function incident(over: Partial<IncidentResponse> = {}): IncidentResponse {
     status: 'AWAITING_APPROVAL', initial_risk_level: 'MEDIUM', reviewed_risk_level: null,
     response_mode: 'AGENT_WAIT', threat_context: null,
     summary_lines: [], evidence_ids: [], executions: [],
-    analysis_result: { status: 'PROPOSALS_GENERATED', guardrail_rejections: [] },
+    analysis_result: { status: 'PROPOSALS_GENERATED', guardrail_rejections: [], failure_reason: null },
     recommendations: [{ runbook_id: 'RUNBOOK_EC2_ISOLATE', target_arn: 'arn:test',
       display_parameters: {}, ai_savings_estimate: null }],
     resolution: null, resolution_note: null, resolved_at: null, auto_isolation_block: null,

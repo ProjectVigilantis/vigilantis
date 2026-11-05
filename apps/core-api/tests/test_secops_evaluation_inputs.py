@@ -65,7 +65,7 @@ def test_frozen_evaluation_input_matches_persisted_service_input(db, client_pg, 
     prepare_observation(tmp_path, fixture.submission.observation, log_evidence=fixture.submission.log_evidence)
     published = []
     consumer = MockThreatConsumer(tmp_path, lambda: nullcontext(db), published.append, interval_seconds=1)
-    assert consumer.consume_once() == {"created": 1, "existing": 0, "rejected": 0, "failed": 0}
+    assert consumer.consume_once() == {"created": 1, "existing": 0, "rejected": 0, "failed": 0, "quarantined": 0}
     assert len(published) == 1
     incident_id = published[0].data.incident_id
     graph_input = build_graph_input(db, incident_id)
