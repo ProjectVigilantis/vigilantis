@@ -131,7 +131,7 @@ RESUMABLE_STATUSES: frozenset[TenantStatus] = frozenset({TenantStatus.SUSPENDED}
 class TenantVerificationResult(str, Enum):
     """연결 확인 1회의 결과. 확인 순서대로 처음 실패한 자리를 싣는다.
 
-    AssumeRole → `sts:GetCallerIdentity` → 계정 ID 대조 → 최소 읽기 1건.
+    AssumeRole → `sts:GetCallerIdentity` → 계정 ID 대조 → 최소 읽기 1건 → 관제 리전마다 GuardDuty 켜기.
     """
 
     OK = "OK"
@@ -146,6 +146,10 @@ class TenantVerificationResult(str, Enum):
     ACCOUNT_MISMATCH = "ACCOUNT_MISMATCH"
     #: 계정은 맞는데 최소 읽기 권한이 없다 — 권한 정책이 붙지 않았다.
     READ_DENIED = "READ_DENIED"
+    #: 읽기는 됐는데 관제 리전 중 하나라도 GuardDuty 를 켜지 못했다(T-14 B안 · #588) — 정지된 탐지기
+    #: (`DetectorDisabled`, 플랫폼이 다시 켜지 않는다) · 조직 관리 · SCP · 권한 거절(AWS 오류 코드).
+    #: 고객이 직접 켠 뒤 다시 확인하면 된다. OK 가 아니므로 ACTIVE 로 올리지 않는다.
+    GUARDDUTY_DISABLED = "GUARDDUTY_DISABLED"
     #: AWS 에 묻지 못했다(네트워크 · 스로틀링 · 5xx). 연결 여부를 판정하지 않는다.
     UNREACHABLE = "UNREACHABLE"
 

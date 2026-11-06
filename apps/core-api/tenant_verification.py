@@ -1,12 +1,15 @@
 # ==============================================================================
 # [파일 설명]  담당: 김승철 (API 계약 · BE)
-# 테넌트 연결 확인의 판정 — AWS 호출 세 단계의 결과를 계약의 결과 5갈래로 접는다.
-# (Post-MVP T-4 2단계 B · #533)
+# 테넌트 연결 확인의 판정 — AWS 호출 네 단계의 결과를 계약의 결과 6갈래로 접는다.
+# (Post-MVP T-4 2단계 B · #533, GuardDuty 단계 T-14 B안 · #588 B)
 #
 #   - 계약: packages/schemas/api/tenants.py TenantVerificationResult · TenantVerification.
 #     순서대로 처음 실패한 자리를 싣는다 — AssumeRole(ASSUME_DENIED) → GetCallerIdentity · 계정 대조
-#     (ACCOUNT_MISMATCH) → 최소 읽기 1건(READ_DENIED). 묻지 못했으면 UNREACHABLE(연결 여부를 판정하지 않는다).
-#   - 판정(judge_connection)은 AWS 를 직접 부르지 않는다. 세 단계를 호출부가 함수로 넘긴다 — 판정을 AWS 와
+#     (ACCOUNT_MISMATCH) → 최소 읽기 1건(READ_DENIED) → 관제 리전마다 GuardDuty 켜기(GUARDDUTY_DISABLED).
+#     묻지 못했으면 UNREACHABLE(연결 여부를 판정하지 않는다).
+#   - GuardDuty 단계는 리전을 순서대로 돌고 처음 켜지 못한 리전에서 멈춘다. 없으면 만들고, 정지된 탐지기는
+#     다시 켜지 않는다(services/guardduty.py). 한 리전이라도 켜지 못하면 OK 가 아니다 — ACTIVE 로 올리지 않는다.
+#   - 판정(judge_connection)은 AWS 를 직접 부르지 않는다. 네 단계를 호출부가 함수로 넘긴다 — 판정을 AWS 와
 #     따로 고정하기 위해서다(LocalStack 은 신뢰 정책 · ExternalId 를 검사하지 않아 실측으로 고정할 수 없다).
 #     실 AWS 어댑터(verify_connection)가 services/aws/client.py 테넌트 층(#533 A)의 세션을 그 자리에 넣는다.
 #   - 「묻지 못함」과 「거절됨」을 가른다. 스로틀링 · 5xx · 접속 실패 · 플랫폼 자신의 자격 문제는 고객 계정이
@@ -18,7 +21,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Final, TypeVar
 
@@ -31,6 +34,7 @@ from services.aws.client import (
     verification_session,
 )
 from services.aws.errors import aws_error_code
+from services.guardduty import ensure_detector
 
 _Session = TypeVar("_Session")
 
@@ -114,12 +118,15 @@ def judge_connection(
     assume: Callable[[], _Session],
     caller_account: Callable[[_Session], str],
     read: Callable[[_Session], object],
+    guardduty: Callable[[_Session], str | None],
 ) -> VerificationOutcome:
-    """세 단계를 순서대로 부르고 처음 실패한 자리를 판정한다.
+    """네 단계를 순서대로 부르고 처음 실패한 자리를 판정한다.
 
     assume: 플랫폼 자격으로 고객 역할을 AssumeRole 해 그 세션(또는 자격)을 돌려준다.
     caller_account: 그 세션으로 sts:GetCallerIdentity 를 불러 계정 ID 를 돌려준다.
     read: 그 세션으로 최소 읽기 1건(ec2:DescribeInstances · regions[0])을 부른다. 반환값은 보지 않는다.
+    guardduty: 그 세션으로 관제 리전마다 GuardDuty 를 켠다. 모두 켜져 있으면 None, 켜지 못한 사유가 있으면
+      그 코드를 돌려준다(AWS 오류가 아닌 판정 — 정지된 탐지기). AWS 오류는 던진다.
 
     GetCallerIdentity 는 권한이 필요 없는 호출이라 그 단계의 AWS 오류는 거절이 아니라 「확인하지 못함」이다.
     """
@@ -139,16 +146,33 @@ def judge_connection(
         read(session)
     except (ClientError, BotoCoreError) as exc:
         return _failed_at(TenantVerificationResult.READ_DENIED, exc)
+
+    try:
+        reason = guardduty(session)
+    except (ClientError, BotoCoreError) as exc:
+        return _failed_at(TenantVerificationResult.GUARDDUTY_DISABLED, exc)
+    if reason is not None:
+        return VerificationOutcome(TenantVerificationResult.GUARDDUTY_DISABLED, reason)
     return OK
 
 
+def _ensure_guardduty(session, regions: Sequence[str]) -> str | None:
+    for region in regions:
+        reason = ensure_detector(session, region)
+        if reason is not None:
+            return reason
+    return None
+
+
 def verify_connection(
-    access: TenantAccess, *, expected_account_id: str, region: str
+    access: TenantAccess, *, expected_account_id: str, regions: Sequence[str]
 ) -> VerificationOutcome:
-    """실 AWS 로 연결을 확인한다 — 플랫폼 자격 → 고객 역할 → 계정 대조 → 최소 읽기(regions[0]).
+    """실 AWS 로 연결을 확인한다 — 플랫폼 자격 → 고객 역할 → 계정 대조 → 최소 읽기(regions[0])
+    → 관제 리전마다 GuardDuty 켜기.
 
     세션 캐시를 거치지 않고, 통과하면 그 테넌트의 캐시를 버린다(services/aws/client.py 헤더).
     트랜잭션 밖에서 부른다 — AWS 응답을 기다리는 동안 테넌트 행을 잡고 있지 않는다."""
+    region = regions[0]
     outcome = judge_connection(
         expected_account_id=expected_account_id,
         assume=lambda: verification_session(access),
@@ -158,6 +182,7 @@ def verify_connection(
         read=lambda session: session_client(session, "ec2", region).describe_instances(
             MaxResults=5
         ),
+        guardduty=lambda session: _ensure_guardduty(session, regions),
     )
     if outcome.result is TenantVerificationResult.OK:
         forget_tenant(access.tenant_id)

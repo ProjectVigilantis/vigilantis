@@ -60,7 +60,8 @@
 #      대조한다. 계정 ID와 허용 IP는 저장소에 적지 않는다.
 #   ③ up·deploy·down은 --yes 없이는 아무것도 바꾸지 않는다.
 #   ④ down이 지우는 것은 플랫폼 태그 자원과 **플랫폼 VPC 안의 것**뿐이다. 스모크 환경과
-#      그 앱 정책(vigilantis-smoke-app)·비용 정책(vigilantis-smoke-app-cost)은 건드리지 않는다 — 접근
+#      그 앱 정책(vigilantis-smoke-app)·비용 정책(vigilantis-smoke-app-cost)·GuardDuty 정책
+#      (vigilantis-smoke-app-guardduty)은 건드리지 않는다 — 접근
 #      역할은 그 정책을 빌려 쓸 뿐이다. 반대로 스모크 down은 접근 역할이 그 정책을 붙잡고 있으면
 #      멈춘다 — 정리 순서는
 #      **플랫폼 down → 스모크 down**이다(ADR-0010 §7).
@@ -180,6 +181,8 @@ CUSTOMER_TAG_KEY = "vigilantis:customer-access"
 SMOKE_POLICY_NAME = "vigilantis-smoke-app"
 # 비용 조회(Cost Explorer)도 스모크 스크립트가 만든 정책을 빌린다. 앱 정책이 관리형 한도에 닿아 따로 뒀다
 SMOKE_COST_POLICY_NAME = "vigilantis-smoke-app-cost"
+# GuardDuty 켜기(연결 확인 · #588 B)도 스모크 스크립트가 만든 정책을 빌린다. 끄는 권한은 없다
+SMOKE_GUARDDUTY_POLICY_NAME = "vigilantis-smoke-app-guardduty"
 SMOKE_VPC_NAME = "vigilantis-smoke-vpc"
 SESSION_SECONDS = 900  # 원격 회수(#438 ②)의 노출 상한과 같은 값
 # WAF 허용 CIDR의 최소 접두 길이 — 이보다 넓은 범위(/0–/23)는 받지 않는다. WAF는 /0만 거절한다
@@ -1429,8 +1432,12 @@ def _smoke_policy_arn(account: str) -> str:
 
 
 def _smoke_policy_arns(account: str) -> list[str]:
-    """접근 역할이 빌려 쓰는 스모크 정책 전부: 앱 정책(조치·조회)과 비용 정책(Cost Explorer)."""
-    return [_smoke_policy_arn(account), f"arn:aws:iam::{account}:policy/{SMOKE_COST_POLICY_NAME}"]
+    """접근 역할이 빌려 쓰는 스모크 정책 전부: 앱 정책(조치·조회) · 비용 정책(Cost Explorer) · GuardDuty 정책(켜기)."""
+    return [
+        _smoke_policy_arn(account),
+        f"arn:aws:iam::{account}:policy/{SMOKE_COST_POLICY_NAME}",
+        f"arn:aws:iam::{account}:policy/{SMOKE_GUARDDUTY_POLICY_NAME}",
+    ]
 
 
 def _require_smoke_env(iam, ec2, account: str) -> None:
@@ -1446,7 +1453,7 @@ def _require_smoke_env(iam, ec2, account: str) -> None:
             iam.get_policy(PolicyArn=arn)
         except ClientError as exc:
             if _code(exc) == "NoSuchEntity":
-                # 비용 정책이 없으면 이 정책이 생기기 전에 스모크 up을 돌린 것이다. 다시 돌리면 생긴다
+                # 비용 · GuardDuty 정책이 없으면 그 정책이 생기기 전에 스모크 up을 돌린 것이다. 다시 돌리면 생긴다
                 sys.exit(f"{arn.rsplit('/', 1)[1]} 정책이 없다 — scripts/provision_smoke_aws.py up을 먼저 돌릴 것"
                          "(접근 역할은 스모크 스크립트가 만든 정책을 빌려 쓴다)." + hint)
             raise
