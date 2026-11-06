@@ -2,7 +2,8 @@
 
 지키는 것: 행동마다 정한 결과 · 행위자 · 대상 · details 만 받는다 · 거절 · 실패에만 사유가 있다 ·
 정한 칸 밖(비밀번호 · 이메일 등)은 details 에 들어가지 않는다 · 같은 트랜잭션 기록은 변경과 함께 되돌아간다 ·
-따로 남긴 기록은 요청이 되돌아가도 남고, 쓰기가 실패해도 예외를 올리지 않는다 · UPDATE · DELETE 는 트리거가,
+따로 남긴 기록은 요청이 되돌아가도 남고, DB 쓰기가 실패해도 예외를 올리지 않는다(계약 위반은 올린다) ·
+세션은 요청자 신원이 싣는다 · UPDATE · DELETE 는 트리거가,
 계약을 건너뛴 쓰기는 DB CHECK 가 막는다 · 요청 문맥(요청 식별자 · 접속지 · 브라우저 정보)은 미들웨어가 채운다.
 """
 
@@ -16,6 +17,7 @@ from pathlib import Path
 
 import platform_event_log
 import pytest
+from auth import service as auth_service
 from db import models
 from db.repositories import platform_events as repo
 from fastapi.testclient import TestClient
@@ -52,11 +54,15 @@ MIGRATION = (
 )
 
 
+TENANT = str(uuid.uuid4())
+
+
 def _record(**overrides) -> PlatformEventRecord:
     values = {
         "action": A.TENANT_SUSPEND,
         "actor_kind": PlatformActorKind.SYSTEM,
-        "target_id": str(uuid.uuid4()),
+        "tenant_id": TENANT,
+        "target_id": TENANT,
         "details": {"before": "ACTIVE", "after": "SUSPENDED"},
     }
     values.update(overrides)
@@ -196,6 +202,57 @@ def test_reason_code_exists_only_for_denied_and_failed():
     assert denied.details["reason_code"] == "FORBIDDEN"
 
 
+_USER_ACTOR = {
+    "actor_kind": PlatformActorKind.USER,
+    "actor_user_id": str(uuid.uuid4()),
+    "actor_account_type": AccountType.PLATFORM,
+    "actor_platform_role": PlatformRole.CENTRAL_ADMIN,
+}
+
+
+@pytest.mark.parametrize("action", [A.TENANT_RESUME, A.TENANT_VERIFY])
+def test_state_conflict_denial_of_verify_and_resume_needs_no_result(action):
+    # 상태 충돌은 연결 확인을 돌리기 전에 거절된다 — 결과가 없다(PR 리뷰 ③-1)
+    record = _record(
+        action=action, **_USER_ACTOR, outcome=OUT.DENIED,
+        details={"reason_code": "TENANT_STATE_CONFLICT"},
+    )
+    assert record.details == {"reason_code": "TENANT_STATE_CONFLICT"}
+
+
+@pytest.mark.parametrize(
+    "outcome, details",
+    [
+        (OUT.DENIED, {"reason_code": "TENANT_STATE_CONFLICT", "result": "OK"}),  # 돌리지 않은 확인의 결과
+        (OUT.FAILED, {"reason_code": "AccessDenied"}),  # 돌린 확인인데 결과 없음
+        (OUT.SUCCEEDED, {}),
+        (OUT.SUCCEEDED, {"result": "READ_DENIED"}),  # 성공은 OK 뿐
+        (OUT.FAILED, {"reason_code": "X", "result": "OK"}),
+    ],
+)
+@pytest.mark.parametrize("action", [A.TENANT_RESUME, A.TENANT_VERIFY])
+def test_verify_result_follows_the_outcome(action, outcome, details):
+    with pytest.raises(ValidationError):
+        _record(action=action, **_USER_ACTOR, outcome=outcome, details=details)
+    ok = _record(action=action, **_USER_ACTOR, details={"result": "OK"})
+    failed = _record(
+        action=action, **_USER_ACTOR, outcome=OUT.FAILED,
+        details={"result": "READ_DENIED", "reason_code": "UnauthorizedOperation"},
+    )
+    assert (ok.details, failed.details["result"]) == ({"result": "OK"}, "READ_DENIED")
+
+
+@pytest.mark.parametrize(
+    "tenant_id, target_id",
+    [(None, TENANT), (TENANT, None), (str(uuid.uuid4()), TENANT), (TENANT.upper(), TENANT.upper())],
+    ids=["no_tenant", "no_target", "other_tenant", "non_canonical_target"],
+)
+def test_tenant_target_is_the_tenant_of_the_row(tenant_id, target_id):
+    # 고객사가 대상이면 소속도 그 고객사다 — 한쪽만 넘기면 고객사 범위 조회(C)에서 빠진다(PR 리뷰 nit)
+    with pytest.raises(ValidationError):
+        _record(tenant_id=tenant_id, target_id=target_id)
+
+
 @pytest.mark.parametrize(
     "forbidden", ["password", "token", "email", "external_id", "secret"]
 )
@@ -305,8 +362,8 @@ def test_record_writes_one_row_with_the_request_origin(db, make_auth_session):
             db,
             A.TENANT_SUSPEND,
             _person(user_id),
-            tenant_id=None,
-            target_id=str(uuid.uuid4()),
+            tenant_id=TENANT,
+            target_id=TENANT,
             details={"before": "ACTIVE", "after": "SUSPENDED"},
         )
     finally:
@@ -503,15 +560,23 @@ def test_detached_write_failure_is_logged_not_raised(caplog):
     assert entry.error_type == "RuntimeError"
 
 
-def test_detached_contract_violation_is_swallowed_and_writes_nothing(pg_engine, caplog):
-    factory = sessionmaker(bind=pg_engine)
+def test_detached_contract_violation_is_raised_and_writes_nothing(pg_engine, caplog):
+    # 호출부 결함은 삼키지 않는다 — 삼키면 테스트에서도 운영에서도 기록이 소리 없이 빠진다(PR 리뷰 ③-2)
+    opened = []
+
+    def factory():
+        opened.append(True)
+        return sessionmaker(bind=pg_engine)()
+
     target = f"bad-{uuid.uuid4()}"
     with caplog.at_level(logging.ERROR, logger="vigilantis.platform_events"):
-        # 거절인데 사유 없음 — 계약 위반
-        assert not platform_event_log.record_detached(
-            factory, A.ACTION_BLOCK, repo.SYSTEM, outcome=OUT.DENIED, target_id=target
-        )
-    with factory() as check:
+        with pytest.raises(ValidationError):  # 거절인데 사유 없음 — 계약 위반
+            platform_event_log.record_detached(
+                factory, A.ACTION_BLOCK, repo.SYSTEM, outcome=OUT.DENIED, target_id=target
+            )
+    assert opened == []  # 세션을 열기 전에 올렸다
+    assert not [r for r in caplog.records if r.getMessage() == "platform_event_write_failed"]
+    with sessionmaker(bind=pg_engine)() as check:
         assert (
             check.scalar(
                 select(models.PlatformEvent.event_id).where(
@@ -529,3 +594,29 @@ def test_occurred_at_can_follow_the_source_row(db):
     )
     [stored] = _rows(db, row.event_id)
     assert stored.occurred_at == at
+
+
+# --- 세션(PR 리뷰 ③-3) -----------------------------------------------------------------
+
+
+def test_person_carries_the_session_of_the_request(db, make_auth_session):
+    seed = make_auth_session()
+    user = auth_service.resolve_current_user(
+        db, seed.token, now=datetime.now(UTC), idle_seconds=1800, touch=False
+    )
+    assert user.session_id == seed.session_id
+    row = repo.record_platform_event(
+        db, A.TENANT_DELETE, repo.person(user), tenant_id=TENANT, target_id=TENANT
+    )
+    [stored] = _rows(db, row.event_id)
+    assert stored.session_id == seed.session_id  # 호출부가 세션을 넘기지 않았다
+
+
+def test_explicit_session_wins_for_the_request_that_creates_it(db, make_auth_session):
+    # 로그인 성공 — 행위자는 로그인 전(ANONYMOUS)이고 세션은 그 요청에서 생긴다
+    seed = make_auth_session()
+    row = repo.record_platform_event(
+        db, A.AUTH_LOGIN, repo.ANONYMOUS, target_id=seed.user_id, session_id=seed.session_id
+    )
+    [stored] = _rows(db, row.event_id)
+    assert (stored.actor_kind, stored.session_id) == (PlatformActorKind.ANONYMOUS, seed.session_id)

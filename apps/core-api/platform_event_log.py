@@ -4,9 +4,10 @@
 #
 #   - 요청 트랜잭션이 되돌려져도 「거절됐다 · 실패했다」는 남아야 한다 — 그래서 자기 세션을 열고 commit 한다.
 #     (상태 변경의 기록은 db/repositories/platform_events.record_platform_event 를 같은 트랜잭션에서 부른다.)
-#   - 쓰기가 실패해도 예외를 올리지 않는다 — 이미 거절 · 실패 중인 응답을 막지 않는다. 대신 앱 로그
+#   - DB 쓰기가 실패해도 예외를 올리지 않는다 — 이미 거절 · 실패 중인 응답을 막지 않는다. 대신 앱 로그
 #     (stdout → CloudWatch)에 행동 · 결과 · 예외 종류만 남긴다(details 원문은 싣지 않는다).
-#   - 계약 위반(행동 · 결과 · 행위자의 짝이 틀림)도 같은 길로 삼킨다. 계약 위반은 호출부 테스트가 잡는다.
+#   - 계약 위반(행동 · 결과 · 행위자의 짝이 틀림)은 삼키지 않고 그대로 올린다 — 호출부 결함이라 그 경로를
+#     지나는 테스트 하나면 드러난다. 삼키면 테스트에서도 운영에서도 기록이 소리 없이 빠진다(PR 리뷰).
 # ==============================================================================
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from collections.abc import Callable, Mapping
 from datetime import datetime
 from typing import Any, Optional
 
-from db.repositories.platform_events import EventActor, record_platform_event
+from db.repositories.platform_events import EventActor, build_platform_event
 from schemas.platform_events import PlatformEventAction, PlatformEventOutcome
 from sqlalchemy.orm import Session
 
@@ -35,20 +36,22 @@ def record_detached(
     session_id: Optional[str] = None,
     occurred_at: Optional[datetime] = None,
 ) -> bool:
-    """한 행을 따로 남긴다. 남겼으면 True, 못 남겼으면 앱 로그에 남기고 False."""
+    """한 행을 따로 남긴다. 남겼으면 True, DB 쓰기가 실패하면 앱 로그에 남기고 False.
+
+    계약 위반은 세션을 열기 전에 ValueError(pydantic)로 올린다."""
+    row = build_platform_event(
+        action=action,
+        actor=actor,
+        outcome=outcome,
+        tenant_id=tenant_id,
+        target_id=target_id,
+        details=details,
+        session_id=session_id,
+        occurred_at=occurred_at,
+    )
     try:
         with session_factory() as session:
-            record_platform_event(
-                session,
-                action,
-                actor,
-                outcome=outcome,
-                tenant_id=tenant_id,
-                target_id=target_id,
-                details=details,
-                session_id=session_id,
-                occurred_at=occurred_at,
-            )
+            session.add(row)
             session.commit()
         return True
     except Exception as exc:  # noqa: BLE001 — 로그 쓰기 실패가 응답을 막지 않는다

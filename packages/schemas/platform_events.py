@@ -145,6 +145,9 @@ class PlatformEventDetails(BaseModel):
 
     reason_code: Optional[str] = Field(default=None, pattern=_REASON_PATTERN)
 
+    def check_outcome(self, outcome: "PlatformEventOutcome") -> None:
+        """결과에 따라 칸이 달라지는 모델이 덮어쓴다(PlatformEventRecord 가 reason_code 검사 뒤 부른다)."""
+
 
 class TransitionDetails(PlatformEventDetails):
     """무엇이 무엇으로 바뀌었나 — 상태 · 역할 · 등급 · 자동 조치 켜짐 같은 짧은 값."""
@@ -161,9 +164,25 @@ class TenantAssignmentsDetails(PlatformEventDetails):
 
 
 class TenantVerifyDetails(PlatformEventDetails):
-    """연결 확인 결과 — 다섯 갈래(TenantVerificationResult)를 그대로 싣는다."""
+    """연결 확인 결과(TenantVerificationResult)를 그대로 싣는다.
 
-    result: TenantVerificationResult
+    확인을 돌렸으면(성공 · 실패) 결과가 있고, 성공은 OK 뿐이다. 거절(상태 충돌)은 확인을 돌리기 전이라
+    결과가 없다 — 403 은 ACCESS_FORBIDDEN 으로 따로 남는다.
+    """
+
+    result: Optional[TenantVerificationResult] = None
+
+    def check_outcome(self, outcome: "PlatformEventOutcome") -> None:
+        if outcome is PlatformEventOutcome.DENIED:
+            if self.result is not None:
+                raise ValueError("거절은 연결 확인을 돌리기 전이라 result 가 없습니다")
+            return
+        if self.result is None:
+            raise ValueError("연결 확인을 돌렸으면(성공 · 실패) result 가 있습니다")
+        if (outcome is PlatformEventOutcome.SUCCEEDED) != (
+            self.result is TenantVerificationResult.OK
+        ):
+            raise ValueError("연결 확인은 결과가 OK 일 때만 성공입니다")
 
 
 class AccessDetails(PlatformEventDetails):
@@ -344,10 +363,15 @@ class PlatformEventRecord(BaseModel):
             raise ValueError("사람이 아니면 계정 종류 · 플랫폼 등급이 없습니다")
         if spec.target is None and self.target_id is not None:
             raise ValueError(f"{self.action.value} 에는 대상이 없습니다")
+        if spec.target is PlatformEventTargetType.TENANT:
+            # 고객사가 대상이면 소속도 그 고객사다 — 한쪽만 넘기면 고객사 범위 조회에서 빠진다
+            if self.tenant_id is None or self.target_id != str(self.tenant_id):
+                raise ValueError("고객사가 대상이면 tenant_id 와 target_id 가 같은 고객사입니다")
         details = spec.details.model_validate(self.details)
         failed = self.outcome is not PlatformEventOutcome.SUCCEEDED
         if failed != (details.reason_code is not None):
             raise ValueError("거절 · 실패면 reason_code 가 있고, 성공이면 없습니다")
+        details.check_outcome(self.outcome)
         # 정규화한 값으로 바꿔 둔다 — 저장하는 값이 곧 검증한 값이다
         object.__setattr__(
             self, "details", details.model_dump(mode="json", exclude_none=True)
