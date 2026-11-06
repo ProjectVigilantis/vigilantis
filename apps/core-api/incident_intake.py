@@ -66,7 +66,9 @@
 #     소속입니다. 테넌트 상태(연결 전 · 관제 중 · 정지)와 무관합니다 — 정지는 그 계정의 기록을 다른
 #     테넌트로 옮기지 않고, 상태별 관문은 기록을 읽는 쪽이 소속 테넌트의 상태로 봅니다.
 #   - 계정을 읽을 수 없거나 등록한 테넌트가 없으면 NULL(MVP 단일 계정 기록)로 둡니다.
-#   - 중복이라 돌려주는 기존 Incident의 소속은 바꾸지 않습니다. 위협 이벤트에는 소속을 쓰지 않습니다.
+#   - 중복이라 돌려주는 기존 Incident의 소속은 바꾸지 않습니다.
+#   - 새 위협 이벤트도 같은 SECOPS Incident와 같은 소속을 받습니다(#572 10번 — 고객사 계정의 위협 이벤트 목록 ·
+#     메트릭 축 6이 이 소속으로 거릅니다). 한 번 정하면 옮기지 않고, 이미 쌓인 이벤트는 다시 배정하지 않습니다.
 #
 # [호출 경로]
 # FINOPS는 services/scheduler.py가 판정과 같은 회차의 자산 스냅샷을 조립해 부릅니다
@@ -258,6 +260,10 @@ def _create_secops(db: Session, intake: SecOpsIncidentIntake) -> IntakeOutcome:
         existing = incidents_repo.get_incident_by_threat_event_id(db, seen.threat_event_id)
         if existing is not None:
             return _existing(existing)
+    # 새 이벤트와 새 Incident는 같은 소속을 받는다 — subject_arn 은 이벤트의 target_arn 이다(schemas/intake.py).
+    # 중복이라 위에서 돌아가는 경로는 소속을 읽지 않는다
+    tenant_id = _owning_tenant_id(db, intake.subject_arn)
+    if seen is not None:
         # 이벤트만 남고 Incident가 없는 조합은 이 계층이 트랜잭션 1개로 저장하는 한
         # 생기지 않는다. 남아 있다면 앞선 저장이 중간에서 끊긴 것이므로 **저장된
         # 이벤트를 기준으로** 이어서 만든다 — 새로 들어온 event의 식별자를 쓰면 있지도
@@ -274,7 +280,7 @@ def _create_secops(db: Session, intake: SecOpsIncidentIntake) -> IntakeOutcome:
             # services/scheduler.py run_pipeline). dispatcher.py의 rollback은 세션을
             # 소유한 최상위 루프가 작업 1건을 되감는 것이라 이 자리와 다르다.
             with db.begin_nested():
-                incidents_repo.insert_threat_event(db, event)
+                incidents_repo.insert_threat_event(db, event, tenant_id=tenant_id)
         except IntegrityError:
             # 같은 키가 동시에 들어온 경우 — 먼저 넣은 쪽의 Incident를 돌려준다
             seen = incidents_repo.get_threat_event_by_dedup_key(db, event.deduplication_key)
@@ -296,7 +302,7 @@ def _create_secops(db: Session, intake: SecOpsIncidentIntake) -> IntakeOutcome:
         initial_risk_level=intake.initial_risk.initial_risk_level,
         response_mode=intake.initial_risk.response_mode,
         initial_risk_reason_codes=[c.value for c in intake.initial_risk.reason_codes],
-        tenant_id=_owning_tenant_id(db, intake.subject_arn),
+        tenant_id=tenant_id,
     )
     _add_evidence(
         db,

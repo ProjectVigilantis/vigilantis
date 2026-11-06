@@ -1474,3 +1474,52 @@ export interface AssetCostsResponse {
    */
   retrieved_at: IsoDateTime;
 }
+
+// --- 위협 이벤트 목록(#572 10번) — packages/schemas/api/threat_events.py ---------------------------
+
+/** 조회 기간(일). 하루 · 일주일 · 한 달. 그 밖의 값은 422다. */
+export type ThreatRangeDays = 1 | 7 | 30;
+
+/** 전체 개방 포트. 정규화 이벤트(packages/schemas/events.py `OpenIpThreatPayload`) 그대로다. */
+export interface OpenIpPayload {
+  protocol: string;
+  from_port: number | null;
+  to_port: number | null;
+  source_cidr: string;
+}
+
+/** SSH 무차별 대입. 정규화 이벤트(`SshBruteForceThreatPayload`) 그대로다. */
+export interface SshBruteForcePayload {
+  source_ip: string;
+  failed_attempt_count: number;
+  window_seconds: number;
+}
+
+export type ThreatEventItem =
+  | {
+      threat_event_id: string;
+      event_type: 'OPEN_IP';
+      target_arn: string;
+      occurred_at: IsoDateTime;
+      payload: OpenIpPayload;
+    }
+  | {
+      threat_event_id: string;
+      event_type: 'SSH_BRUTE_FORCE';
+      target_arn: string;
+      occurred_at: IsoDateTime;
+      payload: SshBruteForcePayload;
+    };
+
+/**
+ * `GET /api/v1/threat-events?days=1|7|30` — 기간 [window_start, window_end] 안 이벤트를 최근 것부터
+ * (같은 시각은 `threat_event_id` 내림차순) 최대 500건, 커서는 없다. 범위는 인시던트 목록 · 메트릭과 같고(고객사 계정 = 자기 고객사),
+ * 관제 리전 · 기간 조건은 메트릭 축 6과 같다.
+ */
+export interface ThreatEventsResponse {
+  window_start: IsoDateTime;
+  window_end: IsoDateTime;
+  /** 기간 안 전체 건수. `items`가 상한에 걸려 잘렸으면 `items.length`보다 크다. */
+  total: number;
+  items: ThreatEventItem[];
+}

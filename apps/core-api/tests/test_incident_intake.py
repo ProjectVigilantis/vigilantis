@@ -530,7 +530,8 @@ def test_finops_is_not_blocked_by_open_secops_incident_on_same_asset(db):
 # --- 소속 테넌트 -----------------------------------------------------------------
 #
 # 새 Incident의 소속은 subject_arn 계정을 등록한 테넌트다. 테넌트 상태와 무관하고, 등록이 없으면 NULL이며,
-# 중복이라 돌려주는 기존 Incident의 소속은 바꾸지 않는다(incident_intake.py 머리말).
+# 중복이라 돌려주는 기존 Incident의 소속은 바꾸지 않는다(incident_intake.py 머리말). 새 SECOPS 위협 이벤트도
+# 같은 소속을 받고, 이미 쌓인 이벤트는 다시 배정하지 않는다(#572 10번).
 
 INTAKES = pytest.mark.parametrize(
     "make_intake", [finops_intake, secops_intake], ids=["finops", "secops"]
@@ -565,12 +566,39 @@ def test_new_incident_belongs_to_the_tenant_registered_for_its_account(db, make_
     assert incidents_repo.get_incident(db, outcome.incident_id).tenant_id == tenant_id
 
 
-def test_secops_ownership_is_not_written_to_the_threat_event(db):
-    _register_tenant(db)
+@pytest.mark.parametrize("status", list(TenantStatus), ids=lambda s: s.value)
+def test_secops_threat_event_gets_the_same_owner_as_its_incident(db, status):
+    """위협 이벤트 목록 · 메트릭 축 6 이 이벤트의 소속으로 고객사 범위를 거른다(#572 10번)."""
+    tenant_id = _register_tenant(db, status=status)
+    intake = secops_intake()
+
+    outcome = incident_intake.create_incident_from_intake(db, intake)
+
+    db.expire_all()
+    stored = incidents_repo.get_threat_event_by_dedup_key(db, intake.threat_event.deduplication_key)
+    assert stored.tenant_id == tenant_id
+    assert incidents_repo.get_incident(db, outcome.incident_id).tenant_id == tenant_id
+
+
+def test_secops_threat_event_without_registered_tenant_stays_unassigned(db):
+    _register_tenant(db, account="210987654321")  # 다른 계정의 테넌트는 소속을 주지 않는다
     intake = secops_intake()
 
     incident_intake.create_incident_from_intake(db, intake)
 
+    stored = incidents_repo.get_threat_event_by_dedup_key(db, intake.threat_event.deduplication_key)
+    assert stored.tenant_id is None
+
+
+def test_duplicate_threat_event_is_not_reassigned(db):
+    intake = secops_intake()
+    incident_intake.create_incident_from_intake(db, intake)
+    _register_tenant(db)  # 이벤트가 쌓인 뒤에야 계정이 등록됐다
+
+    again = incident_intake.create_incident_from_intake(db, intake)
+
+    assert again.created is False
+    db.expire_all()
     stored = incidents_repo.get_threat_event_by_dedup_key(db, intake.threat_event.deduplication_key)
     assert stored.tenant_id is None
 

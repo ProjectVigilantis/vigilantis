@@ -39,9 +39,13 @@ def to_threat_event(row: models.ThreatEvent) -> NormalizedThreatEvent:
     )
 
 
-def new_threat_event(contract: NormalizedThreatEvent) -> models.ThreatEvent:
+def new_threat_event(
+    contract: NormalizedThreatEvent, *, tenant_id: str | None = None
+) -> models.ThreatEvent:
+    """tenant_id 는 계약 필드가 아니다 — 호출부(incident_intake)가 대상 계정으로 정한 소속을 넘긴다."""
     return models.ThreatEvent(
         threat_event_id=contract.threat_event_id,
+        tenant_id=tenant_id,
         source_event_id=contract.source_event_id,
         event_type=contract.event_type,
         target_arn=contract.target_arn,

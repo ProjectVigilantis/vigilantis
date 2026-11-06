@@ -46,10 +46,10 @@ from .. import mappers, models
 
 
 def insert_threat_event(
-    db: Session, contract: NormalizedThreatEvent
+    db: Session, contract: NormalizedThreatEvent, *, tenant_id: Optional[str] = None
 ) -> models.ThreatEvent:
-    """중복 키 충돌(IntegrityError)은 호출부가 중복 이벤트로 해석한다."""
-    row = mappers.new_threat_event(contract)
+    """중복 키 충돌(IntegrityError)은 호출부가 중복 이벤트로 해석한다. tenant_id 는 호출부가 정한 소속이다."""
+    row = mappers.new_threat_event(contract, tenant_id=tenant_id)
     db.add(row)
     db.flush()
     return row

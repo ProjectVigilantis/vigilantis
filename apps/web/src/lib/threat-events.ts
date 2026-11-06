@@ -1,60 +1,28 @@
-// 위협 이벤트 목록(2026-11-03 초안): 고객사 대시보드의 "위협 이벤트" 칸이 이벤트 하나하나의 발생 시각을 보여 주는 자리다.
+// 위협 이벤트 목록(2026-11-03 초안 · #572 10번 계약): 고객사 대시보드의 "위협 이벤트" 칸과 로그 화면이 이벤트 하나하나의
+// 발생 시각을 보여 주는 자리다.
 //
-// 서버에 이 API가 아직 없다. 이벤트는 DB `threat_events` 테이블(apps/core-api/db/models.py `ThreatEvent`)에 쌓이지만,
-// 공개된 것은 시간 칸별 건수 축(`GET /metrics/timeseries`의 `threat_events`, 최대 14일)뿐이다.
-// 아래 `ThreatEventsResponse`는 FE가 제안하는 계약이며 목업(fe-mock)만 응답한다. 필드는 정규화된 이벤트
-// (packages/schemas/events.py `NormalizedThreatEvent`)에서 화면에 필요한 것만 골랐다. 실서버는 404를 돌려주고 화면은 그 사실을 적는다.
-// BE가 계약을 정하면 타입을 types/api.ts로 옮기고 이 머리말을 고친다.
+// 계약(`ThreatEventsResponse` · `ThreatEventItem` · `ThreatRangeDays`)은 types/api.ts에 있다(packages/schemas/api/threat_events.py).
+// 원천은 DB `threat_events`이고, 범위 · 관제 리전 · 기간 조건은 메트릭 축 6(`GET /metrics/timeseries`의 `threat_events`)과
+// 같다. 최근 것부터 최대 500건이며 넘치면 `total`이 실제 건수를 알린다. 이 파일은 화면 계산만 둔다.
 
-import type { ThreatEventKind } from '../types/api.ts';
+import type {
+  IsoDateTime,
+  OpenIpPayload,
+  SshBruteForcePayload,
+  ThreatEventItem,
+  ThreatEventKind,
+  ThreatEventsResponse,
+  ThreatRangeDays,
+} from '../types/api.ts';
 
-type IsoDateTime = string;
+export type { OpenIpPayload, SshBruteForcePayload, ThreatEventItem, ThreatEventsResponse, ThreatRangeDays };
 
 /** 조회 기간. 하루 · 일주일 · 한 달(30일). */
-export const THREAT_RANGES = [
+export const THREAT_RANGES: readonly { days: ThreatRangeDays; label: string }[] = [
   { days: 1, label: '하루' },
   { days: 7, label: '일주일' },
   { days: 30, label: '한 달' },
-] as const;
-export type ThreatRangeDays = (typeof THREAT_RANGES)[number]['days'];
-
-export interface OpenIpPayload {
-  protocol: string;
-  from_port: number | null;
-  to_port: number | null;
-  source_cidr: string;
-}
-
-export interface SshBruteForcePayload {
-  source_ip: string;
-  failed_attempt_count: number;
-  window_seconds: number;
-}
-
-export type ThreatEventItem =
-  | {
-      threat_event_id: string;
-      event_type: 'OPEN_IP';
-      target_arn: string;
-      occurred_at: IsoDateTime;
-      payload: OpenIpPayload;
-    }
-  | {
-      threat_event_id: string;
-      event_type: 'SSH_BRUTE_FORCE';
-      target_arn: string;
-      occurred_at: IsoDateTime;
-      payload: SshBruteForcePayload;
-    };
-
-/** `GET /api/v1/threat-events?days=1|7|30` — 범위 안 이벤트를 최근 것부터. 서버가 고객사 범위로 거른다. */
-export interface ThreatEventsResponse {
-  window_start: IsoDateTime;
-  window_end: IsoDateTime;
-  /** 기간 안 전체 건수. `items`가 상한에 걸려 잘렸으면 `items.length`보다 크다. */
-  total: number;
-  items: ThreatEventItem[];
-}
+];
 
 export const THREAT_KIND_LABELS: Record<ThreatEventKind, string> = {
   SSH_BRUTE_FORCE: 'SSH 무차별 대입',
