@@ -69,6 +69,8 @@ EXPECTED_TABLES = {
     # TOTP 분실 복구 작업 · 신원 변경 울타리 (#515)
     "totp_recovery_operations",
     "totp_provider_mutations",
+    # #589 — 플랫폼 활동 로그(append-only 통합 기록)
+    "platform_events",
 }
 
 
@@ -125,6 +127,15 @@ def test_row_invariant_constraints_registered():
             "ck_mock_marketplace_agreements_renewal_disabled_shape",
         },
         "mock_marketplace_events": {"ck_mock_marketplace_events_source_is_mock"},
+        # 플랫폼 활동 로그의 행 모양(#589) — 계약 PlatformEventRecord 의 불변식 거울
+        "platform_events": {
+            "ck_platform_events_actor_shape",
+            "ck_platform_events_actor_account_shape",
+            "ck_platform_events_actor_platform_role_shape",
+            "ck_platform_events_target_shape",
+            "ck_platform_events_details_object",
+            "ck_platform_events_reason_shape",
+        },
         "metric_summaries": {"ck_metric_summaries_window_ordered"},
         "rule_evaluations": {"ck_rule_evaluations_health_score_range"},
         # 계정 종류 ↔ 소속 · 플랫폼 등급(#492). PLATFORM role=ADMIN 은 호환 제약이다

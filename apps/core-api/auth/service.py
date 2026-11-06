@@ -60,6 +60,8 @@ class CurrentUser:
     #: 판정 시점에 읽은 담당 고객사(정규 UUID 문자열, 오름차순). TENANT_MANAGER 만 값이 있을 수 있다 —
     #: 빈 튜플은 담당 고객사가 없다는 뜻이다. 범위 판정은 auth.access.tenant_scope_ids 가 한다.
     assigned_tenant_ids: tuple[str, ...] = ()
+    #: 이 요청의 서버 세션 ID(내부 전용 — 공개 응답에 싣지 않는다). 활동 로그(platform_events)가 행마다 싣는다.
+    session_id: str | None = None
 
     @property
     def tenant_suspended(self) -> bool:
@@ -176,6 +178,7 @@ def resolve_current_user(
         tenant_status=tenant_status,
         session=view.info,
         assigned_tenant_ids=assigned_tenant_ids,
+        session_id=view.session_id,
     )
 
 
