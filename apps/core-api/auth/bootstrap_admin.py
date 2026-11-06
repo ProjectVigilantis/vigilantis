@@ -1,4 +1,6 @@
-"""플랫폼 계정 수명주기 운영 CLI (#492) — 플랫폼 계정은 이 CLI 로 직접 만들고 지정해서만 생긴다.
+"""플랫폼 계정 수명주기 운영 CLI (#492 · #572 1번) — 첫 중앙 관리자 생성과 장애 복구(기존 Cognito 사용자 연결 ·
+UNASSIGNED 지정)용이다. 평시 직원 초대는 중앙 관리자가 직원 관리 API(POST /api/v1/staff)에서 한다 — 만드는
+계정(배정 없는 PLATFORM · TENANT_MANAGER)은 이 CLI 의 --platform 생성과 같다.
 
     cd apps/core-api
     # 직원 계정 만들기 — --platform 필수, 등급은 담당 고객사 배정이 없는 TENANT_MANAGER. 기본은 미리보기다.

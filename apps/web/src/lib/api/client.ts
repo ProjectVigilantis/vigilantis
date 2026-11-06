@@ -31,6 +31,8 @@ import type {
   SignupRequestsResponse,
   SignupRequestStatus,
   SignupRequestStatusChange,
+  StaffInviteRequest,
+  StaffItem,
   StaffResponse,
   StaffTenantsResponse,
   SubscriptionPurchasePlan,
@@ -524,6 +526,22 @@ export async function revokeUserSessions(userId: string): Promise<void> {
 /* ── /staff (#492 PR 5): 중앙 관리계정 전용. 자기 자신은 바꿀 수 없다(서버가 거절). ── */
 
 const staffPath = (userId: string, suffix: string) => `/staff/${encodeURIComponent(userId)}${suffix}`;
+
+/**
+ * 관리자 직원계정 초대(#572 1번). 201 — 담당 고객사 없는 TENANT_MANAGER로 만들어진 직원.
+ * 이미 Cognito에 있는 이메일은 409이며 자동으로 연결하지 않는다(기존 계정 연결은 운영 CLI).
+ */
+export function inviteStaff(body: StaffInviteRequest): Promise<StaffItem> {
+  return postJson<StaffItem>('/staff', body);
+}
+
+/**
+ * 초대 메일 재발송(204). 대상이 없거나 관리자 직원계정이 아니면 404,
+ * Cognito에 사용자가 없거나 issuer · sub가 다르거나 상태가 FORCE_CHANGE_PASSWORD(첫 로그인 전)가 아니면 409다.
+ */
+export async function resendStaffInvite(userId: string): Promise<void> {
+  await postJson<null>(staffPath(userId, '/invite/resend'));
+}
 
 export async function changeStaffStatus(userId: string, status: UserStatus): Promise<void> {
   await sendJson<null>('PUT', staffPath(userId, '/status'), { status });

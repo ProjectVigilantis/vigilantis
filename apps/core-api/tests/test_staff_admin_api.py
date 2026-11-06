@@ -1,16 +1,37 @@
-"""플랫폼 직원 관리 API (#492 PR 5) — 중앙 관리자 전용, 대상은 PLATFORM 뿐, 자기 변경 · 마지막 중앙 관리자 보호."""
+"""플랫폼 직원 관리 API (#492 PR 5 · #572 1번) — 중앙 관리자 전용, 대상은 PLATFORM 뿐, 자기 변경 · 마지막 중앙 관리자 보호.
+
+(#572 1번) 직원 이메일 초대 · 재발송: 가짜 Cognito 어댑터(SDK 호출 기록)로 Cognito 호출 순서 · 중복 409 · 부분 실패를
+고정하고, 만든 계정이 운영 CLI(bootstrap_admin --platform)의 결과와 같은지 실제 CLI 실행 결과와 대조한다.
+"""
 
 from __future__ import annotations
 
+import io
+from datetime import UTC, datetime
+
+import boto3
 import pytest
+from auth import bootstrap_admin
+from auth.cognito import (
+    AuthProviderUnavailableError,
+    CognitoUser,
+    UserStateConflictError,
+)
+from botocore.stub import Stubber
+from config import AuthSettings
 from db import models
+from db.repositories import auth as auth_repo
 from schemas.api.auth import PlatformRole, UserRole
 from sqlalchemy import select, text
+from sqlalchemy.exc import SQLAlchemyError
+from tests.test_user_admin_api import FORCE, ISSUER, FakeAdapter, use_adapter
 
 BASE = "/api/v1/staff"
 CENTRAL = PlatformRole.CENTRAL_ADMIN
 MANAGER = PlatformRole.TENANT_MANAGER
 MISSING = "00000000-0000-4000-8000-000000000000"
+NEW_EMAIL = "new-staff@example.com"
+ITEM_KEYS = {"user_id", "email", "platform_role", "status", "last_login_at"}
 
 
 @pytest.fixture()
@@ -22,6 +43,32 @@ def tenant(make_tenant) -> str:
 def central_session(login_as):
     """기본 platform_session 은 TENANT_MANAGER 다 — 이 파일의 행위자는 명시적으로 CENTRAL_ADMIN 으로 로그인한다."""
     return login_as(UserRole.ADMIN, platform_role=CENTRAL)
+
+
+@pytest.fixture(autouse=True)
+def adapter(client_pg):
+    """모든 테스트에 가짜 Cognito 어댑터를 건다 — 부르지 말아야 할 경로가 불렀으면 503 대신 calls 에 남는다."""
+    fake = FakeAdapter()
+    fake.create_result = CognitoUser(NEW_EMAIL, "sub-staff-new", NEW_EMAIL, FORCE)
+    use_adapter(client_pg, fake)
+    return fake
+
+
+def invite(client_pg, email=NEW_EMAIL):
+    return client_pg.post(BASE, json={"email": email})
+
+
+def resend(client_pg, user_id):
+    return client_pg.post(f"{BASE}/{user_id}/invite/resend")
+
+
+def user_row(db, user_id):
+    db.expire_all()
+    return db.get(models.AppUser, user_id)
+
+
+def user_count(db):
+    return db.execute(text("SELECT count(*) FROM app_users")).scalar_one()
 
 
 def staff(make_auth_session, platform_role=MANAGER):
@@ -56,6 +103,9 @@ def db_state(db, user_id):
 
 REQUESTS = [
     ("GET", "", None),
+    ("POST", "", {"email": NEW_EMAIL}),
+    ("POST", "", {"email": "bad"}),
+    ("POST", "/{id}/invite/resend", None),
     ("GET", "/{id}/events", None),
     ("PUT", "/{id}/role", {"platform_role": "CENTRAL_ADMIN"}),
     ("PUT", "/{id}/role", {"platform_role": "NOPE"}),
@@ -70,26 +120,40 @@ REQUESTS = [
 @pytest.mark.parametrize("actor_role", [MANAGER])
 @pytest.mark.parametrize("method,path,body", REQUESTS)
 def test_non_central_platform_actor_is_forbidden(
-    client_pg, db, login_as, make_auth_session, actor_role, method, path, body
+    client_pg, db, login_as, make_auth_session, adapter, actor_role, method, path, body
 ):
     target = staff(make_auth_session)
     login_as(UserRole.ADMIN, platform_role=actor_role)
-    before = db_state(db, target.user_id)
+    before, count = db_state(db, target.user_id), user_count(db)
     resp = client_pg.request(method, BASE + path.replace("{id}", target.user_id), json=body)
     assert resp.status_code == 403
-    assert db_state(db, target.user_id) == before
+    assert (db_state(db, target.user_id), user_count(db)) == (before, count)
+    assert adapter.calls == []  # 권한 판정이 본문 검증 · Cognito 보다 먼저다
 
 
 @pytest.mark.parametrize("method,path,body", REQUESTS)
-def test_tenant_admin_is_forbidden(client_pg, login_as, make_auth_session, tenant, method, path, body):
+def test_tenant_admin_is_forbidden(
+    client_pg, db, login_as, make_auth_session, tenant, adapter, method, path, body
+):
     target = staff(make_auth_session)
     login_as(UserRole.ADMIN, tenant_id=tenant)
+    count = user_count(db)
     resp = client_pg.request(method, BASE + path.replace("{id}", target.user_id), json=body)
     assert resp.status_code == 403
+    assert (user_count(db), adapter.calls) == (count, [])
 
 
-def test_unauthenticated_is_401(client_pg):
-    assert client_pg.get(BASE, headers={"Cookie": ""}).status_code == 401
+def test_unauthenticated_is_401(client_pg, db, make_auth_session, adapter):
+    target = staff(make_auth_session)
+    anonymous = {"Cookie": ""}
+    assert client_pg.get(BASE, headers=anonymous).status_code == 401
+    assert client_pg.post(BASE, json={"email": NEW_EMAIL}, headers=anonymous).status_code == 401
+    assert resend_as(client_pg, target.user_id, anonymous).status_code == 401
+    assert adapter.calls == []
+
+
+def resend_as(client_pg, user_id, headers):
+    return client_pg.post(f"{BASE}/{user_id}/invite/resend", headers=headers)
 
 
 def test_central_lists_only_platform_accounts(client_pg, db, make_auth_session, tenant):
@@ -362,5 +426,189 @@ def test_staff_schemas_are_closed_and_validate_enums():
             StaffItem(**bad)
 
 
-def test_no_creation_route_exists(client_pg):
-    assert client_pg.post(BASE, json={"email": "a@example.com"}).status_code in (404, 405)
+def test_invite_request_schema_is_closed():
+    from pydantic import ValidationError
+    from schemas.api.staff import StaffInviteRequest
+
+    assert StaffInviteRequest(email=NEW_EMAIL).email == NEW_EMAIL
+    for bad in (
+        {},
+        {"email": "bad"},
+        {"email": NEW_EMAIL, "platform_role": "CENTRAL_ADMIN"},
+        {"email": NEW_EMAIL, "tenant_id": MISSING},
+        {"email": NEW_EMAIL, "recover_existing": True},
+    ):
+        with pytest.raises(ValidationError):
+            StaffInviteRequest(**bad)
+
+
+# --- 초대 · 재발송 (#572 1번) -------------------------------------------------------
+
+
+CLI_POOL = "ap-northeast-2_cli"
+CLI_SETTINGS = AuthSettings(
+    _env_file=None,
+    COGNITO_REGION="ap-northeast-2",
+    COGNITO_USER_POOL_ID=CLI_POOL,
+    COGNITO_CLIENT_ID="client-id",
+    COGNITO_CLIENT_SECRET="client-secret-zzz-9",
+)
+
+
+def cli_create_staff(db, email, sub):
+    """운영 CLI 로 직원 1명을 만든다(botocore Stubber — 실 AWS 호출 없음). 비교 기준이 되는 행을 돌려준다."""
+    client = boto3.client(
+        "cognito-idp", region_name="ap-northeast-2", aws_access_key_id="test", aws_secret_access_key="test"
+    )
+    with Stubber(client) as stubber:
+        stubber.add_response(
+            "admin_create_user",
+            {"User": {"Username": email, "UserStatus": FORCE, "Attributes": [{"Name": "sub", "Value": sub}]}},
+            {
+                "UserPoolId": CLI_POOL,
+                "Username": email,
+                "UserAttributes": [{"Name": "email", "Value": email}],
+                "DesiredDeliveryMediums": ["EMAIL"],
+            },
+        )
+        code = bootstrap_admin.run(
+            ["--platform", "--email", email, "--yes"],
+            db=db, settings=CLI_SETTINGS, client=client, out=io.StringIO(),
+        )
+        stubber.assert_no_pending_responses()
+    assert code == 0
+    return auth_repo.get_user_by_identity(db, issuer=bootstrap_admin._issuer(CLI_SETTINGS), cognito_sub=sub)
+
+
+def account_shape(row):
+    """CLI 와 API 가 같아야 하는 칸 — 신원(issuer · sub · email)과 시각은 뺀다."""
+    return (
+        row.role, row.account_type, row.platform_role, row.tenant_id, row.status, row.email_verified_at
+    )
+
+
+def test_central_invites_staff_as_cli_does_and_records_event(client_pg, db, central_session, adapter):
+    resp = invite(client_pg)
+    assert resp.status_code == 201
+    body = resp.json()
+    assert set(body) == ITEM_KEYS
+    assert (body["email"], body["platform_role"], body["status"], body["last_login_at"]) == (
+        NEW_EMAIL, "TENANT_MANAGER", "ACTIVE", None,
+    )
+    assert adapter.calls == [("create", NEW_EMAIL, False)]  # 자동 연결(get) 없음
+
+    row = user_row(db, body["user_id"])
+    assert (row.issuer, row.cognito_sub, row.email) == (ISSUER, "sub-staff-new", NEW_EMAIL)
+    assert assigned(db, row.user_id) == []
+    reference = cli_create_staff(db, "cli-staff@example.com", "sub-cli")
+    assert account_shape(row) == account_shape(reference)
+    assert (row.account_type.value, row.platform_role.value, row.tenant_id) == ("PLATFORM", "TENANT_MANAGER", None)
+
+    assert events(db, row.user_id) == [
+        ("USER_INVITED", {}, {"platform_role": "TENANT_MANAGER", "status": "ACTIVE"})
+    ]
+    listed = client_pg.get(f"{BASE}/{row.user_id}/events").json()["items"]
+    assert [(e["action"], e["actor_user_id"], e["target_user_id"]) for e in listed] == [
+        ("USER_INVITED", central_session.user_id, row.user_id)
+    ]
+    assert body in client_pg.get(BASE).json()["items"]
+    # 등급은 기존 경로로 바꾼다 — 초대 본문에는 등급 칸이 없다
+    assert client_pg.put(f"{BASE}/{row.user_id}/role", json={"platform_role": "CENTRAL_ADMIN"}).status_code == 204
+
+
+def test_invite_existing_cognito_email_is_409_without_db_write(client_pg, db, adapter):
+    adapter.create_error = UserStateConflictError()
+    count = user_count(db)
+    resp = invite(client_pg, "customer-admin@example.com")
+    assert (resp.status_code, resp.json()["error"]["code"]) == (409, "USER_STATE_CONFLICT")
+    assert adapter.calls == [("create", "customer-admin@example.com", False)]  # 자동 연결(get) 없음
+    assert user_count(db) == count
+
+
+def test_invite_existing_app_identity_is_409_without_db_write(client_pg, db, make_auth_session, adapter):
+    existing = staff(make_auth_session)
+    row = user_row(db, existing.user_id)
+    adapter.create_result = CognitoUser(row.email, row.cognito_sub, row.email, FORCE)
+    count = user_count(db)
+    resp = invite(client_pg, row.email)
+    assert (resp.status_code, resp.json()["error"]["code"]) == (409, "USER_STATE_CONFLICT")
+    assert (user_count(db), events(db, existing.user_id)) == (count, [])
+
+
+def test_invite_provider_failure_leaves_no_row(client_pg, db, adapter):
+    adapter.create_error = AuthProviderUnavailableError()
+    count = user_count(db)
+    assert invite(client_pg).status_code == 503
+    assert user_count(db) == count
+
+
+def test_invite_db_failure_is_sanitized_500_without_row(client_pg, db, adapter, monkeypatch):
+    def boom(*args, **kwargs):
+        raise SQLAlchemyError("secret-detail postgres://user:pw@host")
+
+    monkeypatch.setattr(auth_repo, "add_user_event", boom)
+    count = user_count(db)
+    resp = invite(client_pg)
+    assert (resp.status_code, resp.json()["error"]["code"]) == (500, "INTERNAL_ERROR")
+    assert "secret-detail" not in resp.text
+    assert adapter.calls == [("create", NEW_EMAIL, False)]  # Cognito 사용자는 남는다(복구는 CLI)
+    assert user_count(db) == count
+
+
+def test_invite_by_demoted_actor_after_cognito_writes_nothing(client_pg, db, central_session, adapter):
+    """SDK 뒤 잠금 안 재판정 — Cognito 는 이미 불렸지만 강등된 행위자는 403 이고 DB 는 쓰지 않는다."""
+    original = adapter.admin_create_user
+
+    def demote_then_create(email, *, resend=False):
+        auth_repo.set_platform_role(
+            db, user_id=central_session.user_id, platform_role=MANAGER, now=datetime.now(UTC)
+        )
+        db.commit()
+        return original(email, resend=resend)
+
+    adapter.admin_create_user = demote_then_create
+    count = user_count(db)
+    assert invite(client_pg).status_code == 403
+    assert (user_count(db), adapter.calls) == (count, [("create", NEW_EMAIL, False)])
+
+
+def test_central_resends_staff_invite_and_records_event(client_pg, db, make_auth_session, adapter):
+    target = staff(make_auth_session)
+    row = user_row(db, target.user_id)
+    adapter.get_result = CognitoUser(row.email, row.cognito_sub, row.email, FORCE)
+    assert resend(client_pg, target.user_id).status_code == 204
+    assert adapter.calls == [("get", row.email), ("create", row.email, True)]
+    assert events(db, target.user_id) == [("INVITE_RESENT", {}, {})]
+
+
+@pytest.mark.parametrize("state", ["confirmed", "other_sub", "missing"])
+def test_resend_without_pending_invite_is_409_without_resend(client_pg, db, make_auth_session, adapter, state):
+    target = staff(make_auth_session)
+    row = user_row(db, target.user_id)
+    adapter.get_result = {
+        "confirmed": CognitoUser(row.email, row.cognito_sub, row.email, "CONFIRMED"),
+        "other_sub": CognitoUser(row.email, "someone-else", row.email, FORCE),
+        "missing": None,
+    }[state]
+    resp = resend(client_pg, target.user_id)
+    assert (resp.status_code, resp.json()["error"]["code"]) == (409, "USER_STATE_CONFLICT")
+    assert adapter.calls == [("get", row.email)]
+    assert events(db, target.user_id) == []
+
+
+def test_resend_for_non_platform_or_missing_target_is_404_without_cognito(
+    client_pg, make_auth_session, tenant, adapter
+):
+    customer = make_auth_session(UserRole.ADMIN, tenant_id=tenant)
+    for user_id in (customer.user_id, MISSING, "not-a-uuid"):
+        resp = resend(client_pg, user_id)
+        assert (resp.status_code, resp.json()["error"]["code"]) == (404, "USER_NOT_FOUND")
+    assert adapter.calls == []
+
+
+def test_customer_invite_route_does_not_create_platform_accounts(client_pg, db, adapter):
+    """`POST /api/v1/users` 는 PLATFORM 을 만들지 않는다 — tenant_id 없는 플랫폼 행위자 요청은 422(Cognito 미호출)."""
+    count = user_count(db)
+    resp = client_pg.post("/api/v1/users", json={"email": NEW_EMAIL, "role": "ADMIN"})
+    assert resp.status_code == 422
+    assert (user_count(db), adapter.calls) == (count, [])

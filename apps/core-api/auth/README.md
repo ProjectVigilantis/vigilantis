@@ -18,19 +18,19 @@ Cognito Admin 인증 API로 로그인을 진행하고, **이번 로그인에서 
 | `password_policy.py` | (PR 3) 새 비밀번호 정책 순수 함수 `check_password` — 최초 비밀번호 변경 · 재설정 확정 공용 |
 | `password_reset.py` | (PR 3) 비밀번호 재설정 요청 · 확정, 확정 성공 뒤 앱 세션 회수 |
 | `admin_service.py` | (PR 3) ADMIN 사용자 관리 트랜잭션 소유자 — 초대 · 재발송 · 역할 · 상태 · 세션 회수 · 이력 조회. 잠금 · 행위자 재판정 · 마지막 활성 ADMIN 보호. (#492) 행위자의 고객 범위(`auth.access.tenant_scope_ids`)에 따른 관리 범위, 초대 대상 테넌트 결정 · ACTIVE 확인, 정지 테넌트 행위자의 쓰기 거절, 테넌트별 마지막 활성 ADMIN, 기존 계정 연결(`recover_existing`)의 플랫폼 관리 권한자 한정. 행위자 권한은 `auth.access`의 같은 판정(`require_admin` · `require_central_admin`)으로 가르고, 직원 관리와 이력 응답(`events_response`) · 잠금 트랜잭션을 공유한다 |
-| `staff_service.py` | (#492) 직원 관리 트랜잭션 소유자 — 목록 · 등급 · 상태 · 담당 고객 배정 · 이력. 대상은 PLATFORM만, 자기 변경 금지(잠금 안 행위자 재판정과 함께 ACTIVE 중앙 관리자를 한 명 이상 남긴다), 비활성화의 세션 회수, 등급 변경 때 배정 비움(§직원 관리) |
+| `staff_service.py` | (#492) 직원 관리 트랜잭션 소유자 — 목록 · 등급 · 상태 · 담당 고객 배정 · 이력. 대상은 PLATFORM만, 자기 변경 금지(잠금 안 행위자 재판정과 함께 ACTIVE 중앙 관리자를 한 명 이상 남긴다), 비활성화의 세션 회수, 등급 변경 때 배정 비움. (#572 1번) 직원 이메일 초대 · 재발송 — Cognito 호출은 트랜잭션 밖, 만드는 계정은 담당 고객 없는 `TENANT_MANAGER`(§직원 관리) |
 | `http.py` | 쿠키 · Origin 검사(HTTP 상태 변경 · WebSocket 공용 목록 `allowed_origins`) · 보안 헤더(`/api/v1/*`) · `AuthError` → 오류 봉투 매핑. (PR 3) 관리 · 재설정 경로용 Cognito 어댑터 조립(`get_cognito_adapter`, 설정이 비면 503) |
 | `access.py` | (PR 2) 보호 API 의존성 — 세션(`require_user`) → 역할(`require_action_role`), 신원을 `request.state.current_user`에 둔다. WebSocket 세션 판정(`resolve_session_user`, 판정마다 짧은 DB 세션). (PR 3) 사용자 관리용 `require_admin`. (#492) 플랫폼 판정 `is_platform_account` · `require_platform_account`(`/api/v1/tenants` 라우터 의존성). 등급 판정 `is_central_admin` · `is_tenant_manager`, `require_central_admin`(`/api/v1/staff` 라우터 의존성 · 고객 생성) · `require_tenant_management`(고객 수정 · 삭제 · 정지 · 온보딩 경로 의존성). 고객 범위 `tenant_scope_ids` · `can_access_tenant` · `tenant_scope_of` · `require_tenant_scope`(업무 조회 라우트 의존성). 조치 역할 `require_action_role`은 TENANT의 `role`(ADMIN · OPERATOR)과 PLATFORM의 명시 등급을 본다. (#536) 메트릭은 별도 자격 관문 없이 세션(`require_user`)과 `tenant_scope_ids`의 범위만 쓴다. `require_admin`은 TENANT ADMIN과 CENTRAL_ADMIN · TENANT_MANAGER만 통과시킨다 |
 | `../tenancy.py` | (#492 · #533) 업무 기록의 조회 범위 `TenantScope(tenant_ids)` — `None`은 명시 전체 범위(CENTRAL_ADMIN), 튜플은 그 고객들, 빈 튜플은 고객 없음. 소속 없는 기록은 전체 범위에서만 보인다(`covers`). 신원에서 범위를 만드는 것은 `access.py`다 |
 | `provider.py` | Cognito 클라이언트 · `LoginFlow` · (PR 3) 단독 어댑터(`build_adapter`) 조립(엔드포인트 고정). (#515) `build_adapter`는 일반 호출용 클라이언트(재시도 최대 2회)와 TOTP 등록 변경용 재시도 없는 클라이언트(`mutation_client`, `total_max_attempts=1`)를 함께 조립한다. 복구 전용 어댑터(`build_recovery_adapter`)는 모든 호출이 재시도 없는 클라이언트다. `LoginFlow`의 DB 관문(`DbLoginGate`) |
-| `bootstrap_admin.py` | (#492) 플랫폼 계정 생성 · UNASSIGNED 계정의 플랫폼 지정 운영 CLI. 만들거나 지정한 계정은 담당 고객이 없는 TENANT_MANAGER, 첫 중앙 관리자 지정은 ACTIVE 중앙 관리자가 0명일 때만(§플랫폼 계정 CLI) |
+| `bootstrap_admin.py` | (#492) 플랫폼 계정 생성 · UNASSIGNED 계정의 플랫폼 지정 운영 CLI. 만들거나 지정한 계정은 담당 고객이 없는 TENANT_MANAGER, 첫 중앙 관리자 지정은 ACTIVE 중앙 관리자가 0명일 때만. (#572 1번) 첫 중앙 관리자 생성과 장애 복구(기존 Cognito 사용자 연결 · UNASSIGNED 지정)용으로 남긴다 — 그 밖의 직원 초대는 직원 관리 API(§플랫폼 계정 CLI) |
 | `totp_recovery.py` | (#515) TOTP 분실 복구 코어 — `reset_totp`(판정 → 차단 commit → `AdminDeleteSoftwareToken` 1회 → 결과 기록), 운영자 울타리 정리 `reconcile_provider_mutation`, 읽기 조회(`get_recovery_operation` · `list_recovery_operations` · `get_unresolved_provider_mutation`), 로그인 관문 `DbLoginGate`. 권한 정책은 호출부가 넘기는 `authorize` 콜백이 정한다(§TOTP 분실 복구) |
 | `totp_recovery_http.py` | (#515) 복구 API 어댑터 — 행위자 판정 `require_recovery_actor`, 대상 범위 콜백 `make_authorize`, 거절 · 미완료 결과의 오류 코드 매핑 |
 | `recover_totp.py` | (#515) TOTP 초기화 · 울타리 정리 운영 CLI(§운영자 CLI · §운영자 울타리 정리) |
 | `db/repositories/totp_recovery.py` | (#515) 복구 작업 · 인증 세대 · 차단 상태 · 신원 울타리의 조건부 전이. commit하지 않는다 |
 | `routers/auth.py` | `/api/v1/auth` 라우터(얇게). (PR 3) `/password-reset` · `/password-reset/confirm`. (#492) `/me`에 `account_type` · `tenant_id` · `platform_role` · `assigned_tenant_ids` |
 | `routers/users.py` | (PR 3) `/api/v1/users` 라우터(얇게). 라우터 의존성 `require_admin`. (#492) 관리 범위는 서비스가 판정한다. 초대 · 재발송의 Cognito 어댑터는 사전 판정 뒤에 조립한다(`get_cognito_adapter_factory`). (#515) `POST /{user_id}/totp/reset` — 라우트 의존성 `require_recovery_actor`(TENANT ADMIN · CENTRAL_ADMIN만), 복구 전용 어댑터 지연 조립(`get_recovery_adapter_factory`) |
-| `routers/staff.py` | (#492) `/api/v1/staff` 라우터(얇게). 라우터 의존성 `require_central_admin`. 담당 고객 조회 · 교체(`/{user_id}/tenants`)를 포함한다. 생성 경로는 없다 |
+| `routers/staff.py` | (#492) `/api/v1/staff` 라우터(얇게). 라우터 의존성 `require_central_admin`. 담당 고객 조회 · 교체(`/{user_id}/tenants`)를 포함한다. (#572 1번) 직원 초대(`POST ""`) · 재발송(`POST /{user_id}/invite/resend`) — Cognito 어댑터는 `/api/v1/users`와 같은 지연 조립 |
 | `routers/tenants.py` · `tenant_admin.py` | (#492, 접근 판정만) 목록 · 상세 · 온보딩 조회를 행위자의 고객 범위로 거른다(범위 밖 404). 생성에 `require_central_admin`, 수정 · 삭제 · 정지 · 온보딩 조회에 `require_tenant_management`. 쓰기는 `app_users` 잠금 안에서 세션 · 등급 · 배정을 다시 판정한다(`tenant_admin._management`). 테넌트 API 자체는 이 모듈 밖이다 |
 | `main.py` | (PR 2) 포함 시점 보호 배선(Origin → 세션), 접근 로그의 `user_id` · `role`, API 문서 토글. (PR 3) 사용자 관리 라우터도 같은 배선으로 포함. (#492 · #533) 조치 · 자산 · 인시던트 라우터는 Origin → 세션 배선만 쓰고 고객 범위는 각 라우트가 건다. (#536) 메트릭 라우터도 같은 배선만 쓴다. 테넌트 라우터(`routers/tenants.py`)와 직원 라우터(`routers/staff.py`)는 Origin → 세션 배선으로만 포함하고, 플랫폼 · 등급 판정은 각 라우터의 의존성이다 |
 | `routers/ws.py` | (PR 2) WebSocket 연결 시 세션 확인 · 연결 중 재확인(4401). 닫기 코드 계약은 `packages/schemas/api/ws.py`. (#535) 유효한 세션이면 계정 종류와 무관하게 연결을 받고(TENANT 포함), 이벤트마다 보내기 직전에 세션 · 등급 · 담당 고객과 저장된 인시던트의 고객으로 다시 판정한다 |
@@ -106,7 +106,7 @@ POST /password-reset/confirm (PR 3) 이메일 · 재설정 코드 · 새 비밀�
 | MFA 선호 | 최초 등록 직후 TOTP를 선호 MFA로 지정한다. User Pool이 실수로 `OPTIONAL`이 되면 비밀번호 단계에서 토큰이 나오는데, 이 경우 앱은 세션 없이 거절한다(fail closed) | [판단] |
 | 401 · 403 | 미인증(세션 없음 · 만료 · 회수 · 비활성 사용자의 세션 · (#492) UNASSIGNED 계정의 세션)은 401 `AUTH_REQUIRED`, 인증 후 계정 종류 · 역할이 허용하지 않으면 403 `AUTH_FORBIDDEN`(PR 2 · #492) | [팀 결정] [판단: #492 UNASSIGNED 처리] |
 | 비밀값 | 비밀번호 · 코드는 `SecretStr`, 검증 오류에 입력값을 싣지 않는다(`hide_input_in_errors`). 로그에는 AWS 오류 코드와 호출 이름만 | [팀 결정] |
-| 플랫폼 계정 | 운영자가 CLI로 명시 생성 · 지정할 때만 생긴다(§플랫폼 계정 CLI). 공개 API · 화면의 등록 경로는 없다. 새로 만들거나 지정한 계정은 담당 고객이 없는 `TENANT_MANAGER`다 — 로그인은 되지만 고객 데이터를 보지 못한다. CLI가 `CENTRAL_ADMIN`을 주는 것은 운영자가 명시하고 ACTIVE 중앙 관리자가 0명일 때뿐이고, 그 밖의 등급 변경과 담당 고객 배정은 중앙 관리자가 직원 관리 API로 한다(§직원 관리). 첫 방문자를 승격하지 않고, ADMIN 역할이나 `tenant_id` NULL에서 플랫폼 권한 · 관리 권한 · 고객 범위를 추론하지 않는다 | [팀 결정: CLI 명시 생성 · 지정, 첫 방문자 승격 · 권한 추론 없음, 명시적 권한 부여 · 회수] [판단: 배정 없는 TENANT_MANAGER 기본값 · CLI 첫 중앙 관리자 지정 조건] |
+| 플랫폼 계정 | 중앙 관리자가 직원 관리 API로 이메일 초대할 때(#572 1번, §직원 관리)와 운영자가 CLI로 명시 생성 · 지정할 때(§플랫폼 계정 CLI)만 생긴다. 공개 등록 API · 자기 가입 경로는 없다. 새로 만들거나 지정한 계정은 담당 고객이 없는 `TENANT_MANAGER`다 — 로그인은 되지만 고객 데이터를 보지 못한다. CLI가 `CENTRAL_ADMIN`을 주는 것은 운영자가 명시하고 ACTIVE 중앙 관리자가 0명일 때뿐이고, 그 밖의 등급 변경과 담당 고객 배정은 중앙 관리자가 직원 관리 API로 한다(§직원 관리). 첫 방문자를 승격하지 않고, ADMIN 역할이나 `tenant_id` NULL에서 플랫폼 권한 · 관리 권한 · 고객 범위를 추론하지 않는다 | [팀 결정: 중앙 관리계정의 이메일 초대(#572), CLI 명시 생성 · 지정, 첫 방문자 승격 · 권한 추론 없음, 명시적 권한 부여 · 회수] [판단: 배정 없는 TENANT_MANAGER 기본값 · CLI 첫 중앙 관리자 지정 조건] |
 
 ## 계정 종류와 테넌트 소속 (#492)
 
@@ -303,7 +303,7 @@ TENANT 계정의 고객용 업무 화면은 아직 열리지 않았다(T-4 · T-
 | 재발송 | 앱 사용자의 issuer가 설정된 User Pool issuer와 같아야 한다. 앱 사용자의 이메일로 `AdminGetUser`를 호출해, 돌아온 Cognito 사용자의 `sub`가 앱 사용자의 `sub`와 같고 Cognito 상태가 `FORCE_CHANGE_PASSWORD`일 때만 `AdminCreateUser(MessageAction=RESEND)`를 보낸다. Cognito 쪽 이메일 값은 비교하지 않는다. AWS 문서상 RESEND는 새 임시 비밀번호를 보내고 임시 비밀번호 유효 기간을 다시 시작한다. 조건이 다르면 409(재발송 없음), 대상이 없으면 404(Cognito 미호출). SDK 호출 뒤 앱 DB의 대상 신원(issuer · `sub` · 이메일)을 다시 읽어 처음 읽은 값과 다르면 409다(재발송은 이미 나갔고 이력은 남지 않는다) | [표준] [AWS: AdminCreateUser `MessageAction`](https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_AdminCreateUser.html) |
 | Cognito 오류 | 초대 · 재발송: `UsernameExistsException` · `UnsupportedUserStateException` → 409 `USER_STATE_CONFLICT`, 발송 실패(`CodeDeliveryFailureException` · `InvalidEmailRoleAccessPolicyException`) → 503 `AUTH_EMAIL_DELIVERY_FAILED`, 요청 제한 → 429 `AUTH_RATE_LIMITED`, 그 밖 → 503 `AUTH_PROVIDER_UNAVAILABLE`. `AdminGetUser`는 `UserNotFoundException`일 때만 "없음"이고, 그 밖의 실패 · 비정상 응답은 429 · 503이다 | [판단] |
 | Cognito 미설정 | 초대 · 재발송만 503 `AUTH_PROVIDER_UNAVAILABLE`. 목록 · 역할 · 상태 · 세션 회수 · 이력은 동작한다. (#492) 어댑터는 지연 조립(`routers.users.get_cognito_adapter_factory`)이라, 서비스가 행위자 · 대상 · 테넌트 사전 판정(422 · 404 · 409)을 마친 요청만 503에 이른다 — 설정 누락이 그 거절을 가리지 않는다 | [판단] |
-| 계정 종류 부여(#492) | 사용자 관리 API로 만드는 계정은 항상 TENANT다. 이 API로 PLATFORM을 주거나 UNASSIGNED를 만들거나 소속(`tenant_id`)을 옮기는 경로가 없다(역할 · 상태 변경 요청에는 소속 칸이 없다). PLATFORM은 운영 CLI(§플랫폼 계정 CLI)로만 생긴다. `platform_role`도 이 API로 주거나 바꾸지 않는다 | [팀 결정: 명시적 플랫폼 권한 · 고객사 범위] [판단: UNASSIGNED] |
+| 계정 종류 부여(#492) | 사용자 관리 API로 만드는 계정은 항상 TENANT다. 이 API로 PLATFORM을 주거나 UNASSIGNED를 만들거나 소속(`tenant_id`)을 옮기는 경로가 없다(역할 · 상태 변경 요청에는 소속 칸이 없다). PLATFORM은 직원 관리 API의 초대(§직원 관리)와 운영 CLI(§플랫폼 계정 CLI)로만 생긴다. `platform_role`도 이 API로 주거나 바꾸지 않는다 | [팀 결정: 명시적 플랫폼 권한 · 고객사 범위] [판단: UNASSIGNED] |
 | 초대 대상 테넌트(#492) | `tenant_id`는 스키마상 선택이고 최종 값은 서버가 정한다. 플랫폼 관리 권한자는 반드시 보낸다(없으면 422 `REQUEST_VALIDATION_FAILED`, 없는 테넌트와 TENANT_MANAGER에게 배정되지 않은 테넌트는 404 `TENANT_NOT_FOUND`). TENANT ADMIN은 생략하거나 자기 테넌트만 보낼 수 있고, 다른 값은 404 `TENANT_NOT_FOUND`다 | [팀 결정: 고객사 범위] [판단: 요청 형태 · 오류 코드] |
 | 테넌트 상태(#492) | 초대 · 재발송은 대상 테넌트가 ACTIVE일 때만 받는다(그 밖은 409 `TENANT_STATE_CONFLICT`). Cognito 호출 전에 확인하고, DB 쓰기 직전에 잠금 안에서 다시 확인한다(테넌트 행 `FOR SHARE` — commit까지 상태 전이를 막는다). 역할 · 상태 · 세션 회수 · 조회는 대상 테넌트 상태를 보지 않는다 | [판단] |
 | 정지 테넌트의 행위자(#492) | 소속 테넌트가 SUSPENDED인 TENANT 행위자의 쓰기(초대 · 재발송 · 역할 · 상태 · 세션 회수)는 409 `TENANT_SUSPENDED`이고, 잠금 안에서 다시 판정한다. 조회는 허용한다. 로그인 · 로그아웃 · 활동 · 비밀번호 재설정과 (#552) 지원 문의 등록 · 조회는 테넌트 정지와 관계없이 동작한다(§도입 신청 · 고객 문의 · 운영 알림). 사용자 `DISABLED`는 이와 별개 상태다(로그인 403 `ACCOUNT_DISABLED` · 세션 401) | [판단] |
@@ -325,7 +325,7 @@ SDK 호출 뒤 잠금 안의 재확인(행위자 · 대상 신원 · 대상 테�
 
 ### 이력 (`user_admin_events`)
 
-- 동작 7종: `USER_INVITED` · `INVITE_RESENT` · `ROLE_CHANGED` · `STATUS_CHANGED` · `SESSIONS_REVOKED` · `PLATFORM_ROLE_CHANGED`(직원 관리의 등급 변경) · `TENANT_ASSIGNMENTS_CHANGED`(담당 고객 교체 · 회수). 직원 관리의 상태 변경은 `STATUS_CHANGED`로 남는다. 행위자 · 대상 · 전후 상태 · 시각을 상태 변경과 같은 commit에 넣는다.
+- 동작 7종: `USER_INVITED` · `INVITE_RESENT` · `ROLE_CHANGED` · `STATUS_CHANGED` · `SESSIONS_REVOKED` · `PLATFORM_ROLE_CHANGED`(직원 관리의 등급 변경) · `TENANT_ASSIGNMENTS_CHANGED`(담당 고객 교체 · 회수). 직원 관리의 상태 변경은 `STATUS_CHANGED`로, (#572 1번) 직원 초대 · 재발송은 고객 초대와 같은 `USER_INVITED` · `INVITE_RESENT`로 남는다(직원 초대의 after는 `platform_role` · `status`). 행위자 · 대상 · 전후 상태 · 시각을 상태 변경과 같은 commit에 넣는다.
 - 전후 상태는 `UserEventState`의 닫힌 목록(`role` · `status` · `revoked_session_count` · `recover_existing` · (#492) 초대 대상 `tenant_id` · `platform_role` · 담당 고객 `tenant_ids`)만 저장하고 모르는 키는 거절한다. 이메일 · 비밀번호 · 코드 · 토큰 · Cognito 원본 응답은 싣지 않는다.
 - append-only: `BEFORE UPDATE OR DELETE` 트리거가 수정 · 삭제를 거절한다(INSERT만 허용). 이력이 참조하는 사용자는 FK `RESTRICT`로 지울 수 없다. 테이블 소유자(DB owner)는 트리거를 끄고 우회할 수 있으므로 소유자에 대한 방어는 아니다.
 - 비밀번호 재설정 · 로그인 교체 · 로그아웃은 이력 대상이 아니다(세션 행의 `revoke_reason`으로만 남는다). 조치 실행 감사 기록(T-2)과는 별개다.
@@ -338,28 +338,34 @@ SDK 호출 뒤 잠금 안의 재확인(행위자 · 대상 신원 · 대상 테�
 | 항목 | 이 범위의 정책 |
 | --- | --- |
 | 4.1.1 신뢰할 수 있는 서버 계층에서 접근 제어 강제 | 계정 종류 · 플랫폼 등급 · 역할 · 관리 범위 판정은 서버(`auth.access` · `admin_service` · `staff_service` · `tenant_admin`)가 한다. 화면의 메뉴 숨김 · 첫 화면 분기는 편의이며 차단 근거가 아니다 |
-| 4.1.2 접근 제어 속성을 최종 사용자가 조작할 수 없음 | `account_type` · `tenant_id`는 API 입력으로 바꿀 수 없다. 초대의 `tenant_id`는 플랫폼 관리 권한자만 고르고, TENANT ADMIN은 서버가 행위자 소속으로 정한다. 기존 Cognito 계정 연결(`recover_existing`)도 플랫폼 관리 권한자만 고른다. PLATFORM 생성 · 지정과 첫 중앙 관리자 지정은 운영 CLI 직접 실행뿐이다. `platform_role`과 담당 고객 배정은 중앙 관리자가 `/api/v1/staff`에서 다른 PLATFORM 계정의 것만 바꾼다(자기 등급 · 상태 변경 403). TENANT_MANAGER는 자기 배정을 바꾸지 못한다 |
+| 4.1.2 접근 제어 속성을 최종 사용자가 조작할 수 없음 | `account_type` · `tenant_id`는 API 입력으로 바꿀 수 없다. 초대의 `tenant_id`는 플랫폼 관리 권한자만 고르고, TENANT ADMIN은 서버가 행위자 소속으로 정한다. 기존 Cognito 계정 연결(`recover_existing`)도 플랫폼 관리 권한자만 고른다. PLATFORM 계정은 중앙 관리자의 직원 초대(`POST /api/v1/staff`, #572 1번 — 등급은 TENANT_MANAGER 고정, 본문에 등급 · 소속 칸 없음)와 운영 CLI 직접 실행으로만 생기고, UNASSIGNED 지정과 첫 중앙 관리자 지정은 운영 CLI뿐이다. `platform_role`과 담당 고객 배정은 중앙 관리자가 `/api/v1/staff`에서 다른 PLATFORM 계정의 것만 바꾼다(자기 등급 · 상태 변경 403). TENANT_MANAGER는 자기 배정을 바꾸지 못한다 |
 | 4.1.3 최소 권한 | TENANT ADMIN은 자기 테넌트만, OPERATOR · VIEWER는 사용자 관리 없음. 새로 만들거나 지정한 PLATFORM 계정은 담당 고객이 없는 TENANT_MANAGER(고객 데이터 없음)이고, TENANT_MANAGER는 배정 고객만 다루며 고객 생성 · 직원 관리가 없다. 마이그레이션은 기존 PLATFORM의 전역 권한을 넓히거나 좁히지 않고 CENTRAL_ADMIN으로 옮긴다 |
 | 4.1.5 안전한 실패 | UNASSIGNED와 그 밖의 종류는 권한 없음으로 처리한다(세션 판정 401, 관리 범위 403). 소속 NULL과 빈 배정을 「전체」로 읽지 않는다. 소속 없는 기록은 전체 범위(CENTRAL_ADMIN)에서만 보인다. 등급이 없거나 PLATFORM이 아닌 계정은 플랫폼 관리 권한이 없고, `role=ADMIN`을 관리 권한으로 읽지 않는다 |
 | 4.2.1 IDOR | `user_id` 경로 대상은 관리 범위 안의 TENANT 계정만이다. 범위 밖 · PLATFORM · UNASSIGNED · 없는 대상은 같은 404 `USER_NOT_FOUND`이고 Cognito를 부르지 않는다. `/api/v1/staff`의 대상은 PLATFORM 계정만이고 그 밖은 같은 404다. 고객 · 인시던트도 범위 밖이면 없는 대상과 같은 404(`TENANT_NOT_FOUND` · `INCIDENT_NOT_FOUND`)다 |
 
 ## 직원 관리 (#492)
 
-계약은 `packages/schemas/api/staff.py`, 판정 · 잠금 · 트랜잭션은 `staff_service.py`, 라우터는 `routers/staff.py`다. `main.py`가 Origin(상태 변경만) → 세션 배선으로 포함하고, 라우터 의존성 `require_central_admin`이 본문 필드 검증보다 먼저 돈다. 미인증은 401, CENTRAL_ADMIN이 아닌 계정(TENANT_MANAGER — 배정이 있어도 — 과 TENANT 계정 전부)은 403 `AUTH_FORBIDDEN`이며 DB를 바꾸지 않는다. Cognito를 부르지 않는다.
+계약은 `packages/schemas/api/staff.py`, 판정 · 잠금 · 트랜잭션은 `staff_service.py`, 라우터는 `routers/staff.py`다. `main.py`가 Origin(상태 변경만) → 세션 배선으로 포함하고, 라우터 의존성 `require_central_admin`이 본문 필드 검증과 Cognito 어댑터 조립보다 먼저 돈다. 미인증은 401, CENTRAL_ADMIN이 아닌 계정(TENANT_MANAGER — 배정이 있어도 — 과 TENANT 계정 전부)은 403 `AUTH_FORBIDDEN`이며 DB를 바꾸지 않고 Cognito를 부르지 않는다. Cognito 의존성은 초대 · 재발송(#572 1번)에만 있다 — 어댑터는 `/api/v1/users`와 같은 지연 조립(`routers.users.get_cognito_adapter_factory`)이라 설정이 비어도 401 · 403 · 404 판정이 503보다 먼저다.
 
 | 경로 | 동작 | 이력 |
 | --- | --- | --- |
 | `GET /api/v1/staff` | PLATFORM 계정 전부(모든 등급 · 상태)의 `user_id` · `email` · `platform_role` · `status` · `last_login_at`(§사용자 관리 목록과 같은 정의). TENANT · UNASSIGNED 계정은 나오지 않는다. 담당 고객은 싣지 않는다 | — |
+| `POST /api/v1/staff` | (#572 1번) 직원 초대 `{email}` → 201 `StaffItem`(`platform_role=TENANT_MANAGER` · `status=ACTIVE` · `last_login_at=null`). Cognito 사용자를 만들고(초대 메일은 Cognito가 보낸다) 담당 고객이 없는 PLATFORM 계정을 만든다 — CLI 생성과 같은 결과 | `USER_INVITED`(after `platform_role` · `status`) |
+| `POST /api/v1/staff/{user_id}/invite/resend` | (#572 1번) 초대 재발송 → 204. 대상은 PLATFORM 계정 | `INVITE_RESENT` |
 | `PUT /api/v1/staff/{user_id}/role` | `{platform_role}`(`CENTRAL_ADMIN` · `TENANT_MANAGER`) → 204. 저장된 담당 고객을 같은 commit에서 비운다 | `PLATFORM_ROLE_CHANGED`(비운 배정이 있으면 `TENANT_ASSIGNMENTS_CHANGED`도) |
 | `PUT /api/v1/staff/{user_id}/status` | `{status}`(`ACTIVE` · `DISABLED`) → 204 | `STATUS_CHANGED` |
 | `GET /api/v1/staff/{user_id}/tenants` | 대상의 담당 고객 `{tenant_ids: [UUID...]}` | — |
 | `PUT /api/v1/staff/{user_id}/tenants` | `{tenant_ids: [UUID...]}`로 담당 고객 전체를 교체 → 204. 빈 목록은 모든 배정 회수 | `TENANT_ASSIGNMENTS_CHANGED`(전후 `tenant_ids`) |
 | `GET /api/v1/staff/{user_id}/events?limit=` | 대상의 이력, 최신순. `limit` 1–100(기본 50) | — |
 
-직원을 만들거나 초대하는 경로는 없다 — PLATFORM 계정은 운영 CLI로만 생긴다(§플랫폼 계정 CLI). 요청 본문은 닫힌 모양이라 모르는 칸이나 목록 밖 값(`platform_role: "ADMIN"` · `"STAFF"` 등)은 받지 않는다. 직원 관리 · 담당 고객 배정 웹 화면은 없고 API만 있다.
+직원은 중앙 관리자가 이메일로 초대해 만든다(#572 1번). 운영 CLI(§플랫폼 계정 CLI)는 첫 중앙 관리자 생성과 장애 복구용으로 남는다. 요청 본문은 닫힌 모양이라 모르는 칸이나 목록 밖 값(`platform_role: "ADMIN"` · `"STAFF"` 등)은 받지 않는다. 초대 본문에는 등급 · 담당 고객 칸이 없다 — 등급은 `PUT /{user_id}/role`, 배정은 `PUT /{user_id}/tenants`로 따로 바꾼다.
 
 | 항목 | 내용 | 근거 |
 | --- | --- | --- |
+| 초대(#572 1번) | 중앙 관리자만 한다(위임 없음 — #572 4번). 행위자 판정(401 · 403) 뒤 트랜잭션 밖에서 `AdminCreateUser`를 부르고, 성공하면 `app_users` 잠금 안에서 행위자를 다시 판정한 뒤 앱 계정(`account_type=PLATFORM` · `platform_role=TENANT_MANAGER` · `role=ADMIN` 호환 값 · `tenant_id` NULL · `ACTIVE` · `email_verified_at` 비어 있음)과 `USER_INVITED` 이력을 한 commit으로 만든다. 첫 로그인은 고객 초대와 같이 최초 비밀번호 변경 · TOTP 등록 · 이메일 코드를 거치고, 담당 고객이 없으므로 로그인은 되지만 고객 데이터는 보이지 않는다 | [팀 결정(#572): 중앙 관리계정의 이메일 초대 · 배정 없는 관리자 직원계정] [판단: 응답 모양 · 이력 값] |
+| 이미 있는 이메일(#572 1번) | Cognito에 이미 있는 이메일(고객사 계정 등)은 `UsernameExistsException` → 409 `USER_STATE_CONFLICT`이고 자동 연결하지 않는다 — 고객 초대와 같은 규칙. 이미 앱에 있는 신원 `(issuer, sub)`도 409다. 기존 Cognito 사용자를 직원으로 잇는 길은 운영 CLI `--existing-cognito-user`뿐이다(API에 `recover_existing`이 없다) | [제안(#572 — PM 권고와 같음, PR 리뷰에서 확정): 409 · 자동 연결 없음] [판단: 복구 경로는 CLI] |
+| 재발송(#572 1번) | 대상은 PLATFORM 계정이며 없음 · TENANT · UNASSIGNED는 404(Cognito 미호출). 제공자 검사는 §사용자 관리의 재발송과 같다 — issuer가 설정된 풀과 같고, `AdminGetUser`의 `sub`가 같고 상태가 `FORCE_CHANGE_PASSWORD`일 때만 `AdminCreateUser(RESEND)`, 조건이 다르면 409. SDK 뒤 잠금 안에서 대상 신원이 처음 읽은 값과 같을 때만 `INVITE_RESENT`를 남긴다 | [판단] |
+| 부분 실패(#572 1번) | Cognito 생성 뒤 잠금 안 재판정 실패(그 사이 강등 · 회수)나 DB 실패(500 `INTERNAL_ERROR`)면 Cognito 사용자는 남고 앱 계정 · 이력은 없다. 같은 이메일로 다시 초대하면 409다 — 자동 연결하지 않고 운영자가 CLI `--existing-cognito-user`로 연결한다(§플랫폼 계정 CLI). 재발송 뒤 DB 실패는 메일은 나갔고 이력만 없다(§사용자 관리 부분 실패와 같다) | [판단] |
 | 대상 | PLATFORM 계정만. 없는 `user_id`(UUID 형식이 아닌 값 포함) · TENANT · UNASSIGNED 계정은 같은 404 `USER_NOT_FOUND`다. 반대로 `/api/v1/users`는 PLATFORM 계정을 대상으로 받지 않는다(404) | [판단] |
 | 본인 변경 | 자기 등급 · 상태 변경은 403 `AUTH_FORBIDDEN` | [판단] |
 | 같은 값 | 현재와 같은 등급 · 상태로 바꾸는 요청은 409 `USER_STATE_CONFLICT` | [판단] |
@@ -369,7 +375,7 @@ SDK 호출 뒤 잠금 안의 재확인(행위자 · 대상 신원 · 대상 테�
 | 담당 고객 배정 | 대상은 TENANT_MANAGER뿐이다 — CENTRAL_ADMIN 대상은 409 `USER_STATE_CONFLICT`(전체 범위라 배정이 없다), TENANT · UNASSIGNED · 없는 대상은 404 `USER_NOT_FOUND`다. 요청은 전체 집합을 보내는 교체이고 빈 목록은 모든 배정 회수다. 중복 ID · 형식 오류 · 모르는 칸은 422, 없는 고객이 하나라도 있으면 404 `TENANT_NOT_FOUND`, 지금과 같은 집합이면 409이며 모두 아무것도 쓰지 않는다. 정지된 고객도 배정할 수 있다(그 고객에 대한 조작 가능 여부는 고객 · 조치 쪽 판정이 정한다). 교체와 이력은 `app_users` 잠금 안의 같은 commit이다. 배정은 계정 종류 · 소속을 바꾸지 않는다 | [판단] |
 | 등급 변경과 배정 | 등급을 바꾸면 저장된 담당 고객을 같은 commit에서 비운다 — CENTRAL_ADMIN으로 올렸다가 다시 TENANT_MANAGER로 내려도 예전 배정이 되살아나지 않는다. 비운 배정이 있으면 `TENANT_ASSIGNMENTS_CHANGED`(전 → 빈 목록)도 남긴다 | [판단] |
 | 변경의 반영 | 등급 · 배정 변경은 세션을 회수하지 않는다. 세션 판정이 요청마다 DB의 현재 `platform_role`과 배정을 읽으므로, 그 계정의 기존 세션은 다음 판정부터 새 범위로 판정된다(`/me`의 `platform_role` · `assigned_tenant_ids`도 바뀐다). 이미 처리 중인 요청, 이미 예약됐거나 실행 중인 작업, 이미 시작한 WebSocket 전송은 취소하지 않는다. 쓰기(사용자 관리 · 직원 관리 · 고객 쓰기 · 조치 예약 · 종료)는 잠금 안에서 다시 판정하므로 그 뒤에 시작한 쓰기는 막히지만, 초대 · 재발송의 Cognito 호출처럼 잠금 전에 나간 외부 호출의 결과는 남을 수 있다(§부분 실패). 열린 WebSocket은 닫히지 않고, 그 뒤 보내는 이벤트부터 새 범위로 거른다. 비활성화의 세션 회수는 재확인 주기 안에 4401로 반영된다 | [판단] |
-| 이력 | 등급 변경은 `PLATFORM_ROLE_CHANGED`(전후 `platform_role`), 배정 교체 · 회수는 `TENANT_ASSIGNMENTS_CHANGED`(전후 `tenant_ids`), 상태 변경은 `STATUS_CHANGED`로 상태 변경과 같은 commit에 `user_admin_events`에 남는다(§이력). CLI의 생성 · 지정 · 중앙 관리자 지정과 고객 삭제로 지워진 배정은 남지 않는다. 조치 실행 감사 기록(T-2)과는 별개다 | [판단] |
+| 이력 | (#572 1번) 초대는 `USER_INVITED`(after `platform_role=TENANT_MANAGER` · `status=ACTIVE`), 재발송은 `INVITE_RESENT`, 등급 변경은 `PLATFORM_ROLE_CHANGED`(전후 `platform_role`), 배정 교체 · 회수는 `TENANT_ASSIGNMENTS_CHANGED`(전후 `tenant_ids`), 상태 변경은 `STATUS_CHANGED`로 상태 변경과 같은 commit에 `user_admin_events`에 남는다(§이력). 직원 이력은 `GET /api/v1/staff/{user_id}/events`로 읽는다. CLI의 생성 · 지정 · 중앙 관리자 지정과 고객 삭제로 지워진 배정은 남지 않는다. 조치 실행 감사 기록(T-2)과는 별개다 | [판단] |
 
 ## 비밀번호 재설정 (PR 3)
 
@@ -615,9 +621,11 @@ Cognito 클라이언트는 `https://cognito-idp.{region}.amazonaws.com`으로 �
 
 ## 플랫폼 계정 CLI (#492)
 
+(#572 1번) 이 CLI는 **첫 중앙 관리자 생성과 장애 복구**(기존 Cognito 사용자 연결 · UNASSIGNED 지정)용으로 남긴다. 그 밖의 직원 초대는 중앙 관리자가 `POST /api/v1/staff`로 한다(§직원 관리) — 만드는 계정은 둘 다 담당 고객이 없는 `TENANT_MANAGER`로 같다.
+
 ```bash
 cd apps/core-api
-# 직원 — 담당 고객이 없는 TENANT_MANAGER(로그인은 되지만 고객 데이터를 보지 못한다)
+# 직원 — 담당 고객이 없는 TENANT_MANAGER(로그인은 되지만 고객 데이터를 보지 못한다). 평시 초대는 직원 관리 API
 uv run python -m auth.bootstrap_admin --platform --email ops@example.com                                         # 생성 미리보기(변경 없음)
 uv run python -m auth.bootstrap_admin --platform --email ops@example.com --yes                                   # Cognito 사용자 생성(초대 메일) + 등록
 uv run python -m auth.bootstrap_admin --platform --existing-cognito-user --email ops@example.com --yes           # 이미 있는 Cognito 사용자를 명시 연결
@@ -642,8 +650,8 @@ uv run python -m auth.bootstrap_admin --bootstrap-central-admin-user-id <user_id
 - PLATFORM 계정의 등급 · 상태 · 담당 고객 변경은 §직원 관리에서만 하고, 삭제 경로는 없다. 사용자 관리 API는 PLATFORM 계정을 대상으로 받지 않는다(404).
 - 고객사 사용자(TENANT)는 CENTRAL_ADMIN, 그 고객이 배정된 TENANT_MANAGER, 또는 그 테넌트의 ADMIN이 `POST /api/v1/users`로 초대한다(§사용자 관리).
 - 임시 비밀번호는 Cognito가 초대 메일로만 보낸다. CLI는 비밀값 · 토큰을 출력하지 않는다. 미리보기 · 결과에는 User Pool ID · 이메일 · `user_id` · 등급 · Cognito 사용자 상태 · 회수한 세션 수만 싣고, Cognito 실패는 오류 코드만 출력한다.
-- Cognito 사용자 생성 뒤 DB 등록이 실패하면 Cognito 사용자는 남는다. 이때는 `--existing-cognito-user`로 다시 연결한다.
-- PLATFORM 계정을 만드는 다른 경로(공개 등록 API · 화면 · 직원 관리 API)는 없다.
+- Cognito 사용자 생성 뒤 DB 등록이 실패하면 Cognito 사용자는 남는다. 이때는 `--existing-cognito-user`로 다시 연결한다. (#572 1번) 직원 관리 API의 초대가 Cognito 생성 뒤 실패해 Cognito 사용자만 남은 경우도 같은 방법으로 복구한다 — API는 다시 초대해도 409이고 자동 연결하지 않는다.
+- (#572 1번) PLATFORM 계정을 만드는 경로는 이 CLI와 중앙 관리자의 직원 초대(`POST /api/v1/staff`, §직원 관리) 둘이다. 공개 등록 API · 자기 가입 경로는 없다.
 
 ## 테스트
 
@@ -676,7 +684,7 @@ uv run python -m auth.bootstrap_admin --bootstrap-central-admin-user-id <user_id
 | 실제 PostgreSQL + 대역(#515) | `apps/core-api/tests/test_auth_totp_recovery.py` · `test_totp_recovery_api.py` · `test_auth_recover_totp_cli.py` · `apps/core-api/db/tests/test_totp_recovery_migration.py` · `packages/schemas/tests/test_api_totp_recovery.py` | 코어: 제공자 호출 전 차단 commit과 새 등록 요구, 차단 중 새 로그인 거절과 차단 전 흐름의 세션 미발급, 잠금을 기다리던 완료가 차단에 짐, 연결이 끊겨도 남는 울타리, 같은 `operation_id`는 새 등록 뒤에도 다시 지우지 않음, 이메일 단계 포기 뒤 새 이메일 코드, 결과 불명 · 미기록 결과의 비성공과 재시도 없음, 운영자 정리 전까지 새 변경 차단, 정리의 진술 · 대상 · 정확한 울타리 요구, 어댑터 조립 전과 잠금 안의 권한 판정, TOTP 삭제와 로그인 흐름의 각 등록 변경은 1회만 전송(시간 초과면 울타리 유지), 일반 호출은 SDK 재시도 유지. API: 행위자 · 범위 · 정지 테넌트 · 자기 대상 · 비활성 대상 · 본문 422, 204는 `COMPLETED`만, 복구 경로는 초기화 하나뿐. CLI: 읽기 전용 미리보기와 클라이언트 미조립, 대상 정책과 `--no-admin-available`, 재생, 미완료 종료 코드, 정리 모드의 진술 요구 · 모드 혼용 거절 · 정확한 대상 · 울타리, 정리 대상(모든 ACTIVE TENANT 역할은 `--no-admin-available` 없이 허용하되 초기화 제한은 유지, 비활성 · UNASSIGNED 대상 거절), 결과 불명 → 거절 → 정리 → 새 초기화. 마이그레이션: 단일 체인 · ORM 일치 · 기존 행 세대 0, downgrade 가드 2종과 `TOTP_RESET` 세션 변환, 신원당 풀리지 않은 울타리 1개, 행 모양 CHECK |
 | 실제 PostgreSQL(플랫폼 등급) | `apps/core-api/db/tests/test_user_platform_role_migration.py` · `test_user_admin.py` · `test_user_account_type_migration.py` | 부모가 `c492d6e8f4a2`이고 그래프의 head는 1개, head 스키마와 ORM 일치 · 서버 기본값 없음, 기존 PLATFORM → CENTRAL_ADMIN(전역 범위 유지) · TENANT · UNASSIGNED NULL, downgrade가 TENANT_MANAGER를 UNASSIGNED로 내려 배정 범위를 전역으로 넓히지 않음, 등급 CHECK의 거절 · 허용 형태. 저장소: 등급 없이 만든 PLATFORM은 배정 없는 TENANT_MANAGER, `set_platform_role`은 PLATFORM만 바꿈, ACTIVE 중앙 관리자 집계, 배정 전체 교체 · 모르는 대상과 중복 거절 · 고객 삭제 뒤 남는 배정 없음, PLATFORM 목록 · 마지막 로그인, 등급 · 배정 변경 이력 값 |
 | 실제 PostgreSQL(플랫폼 등급) | `apps/core-api/db/tests/test_platform_audit_merge_migration.py` | 병합 revision `d492a544e001`의 부모 2개(`b492e7d1a605` · `b544a7d1e2f3`, 둘 다 부모 `c492d6e8f4a2` 그대로)와 head 1개, 새 DB의 base → head, `b492e7d1a605`까지 올린 DB가 head에서 등급 · 배정을 보존하고 감사 기록 테이블 · 트리거를 얻음, `b544a7d1e2f3`까지 올린 DB가 head에서 기존 PLATFORM을 CENTRAL_ADMIN으로 채우고 배정을 만들지 않으며, 그 전에 남은 감사 기록의 저장 값이 그대로이고 append-only 보호도 유지됨, head 스키마와 ORM 일치. 테스트마다 일회용 DB를 만들고 지운다 |
-| 실제 PostgreSQL(플랫폼 등급) | `apps/core-api/tests/test_staff_admin_api.py` | 중앙 관리자가 아닌 PLATFORM(배정이 있는 TENANT_MANAGER 포함) · TENANT ADMIN은 모든 경로(잘못된 본문 포함) 403 · DB 불변, 미인증 401, 목록은 PLATFORM만 · 닫힌 필드, 등급 변경과 `PLATFORM_ROLE_CHANGED` 이력, `STAFF` 값 거절, 같은 값 409, 본인 변경 403, 다른 중앙 관리자의 강등 · 비활성화, 비활성화의 세션 회수와 관리 권한 즉시 상실, 배정 조회 · 교체 · 회수와 이력, 이력 실패 시 교체도 되돌림, 같은 집합 409(이력 없음), 중복 · 모르는 · 형식 오류 ID가 아무것도 바꾸지 않음, 정지 고객 배정 허용 · 계정 불변, 중앙 관리자 · 비PLATFORM 대상 배정 거절, 등급 변경이 배정을 비우고 되살리지 않음, 강등된 행위자의 배정 요청이 아무것도 쓰지 않음, TENANT · 없는 · 형식 오류 대상 404, `/api/v1/users`가 PLATFORM 대상을 받지 않음, 요청 · 응답 스키마가 닫힘, 생성 경로 없음 |
+| 실제 PostgreSQL(플랫폼 등급) | `apps/core-api/tests/test_staff_admin_api.py` | 중앙 관리자가 아닌 PLATFORM(배정이 있는 TENANT_MANAGER 포함) · TENANT ADMIN은 모든 경로(잘못된 본문 포함) 403 · DB 불변, 미인증 401, 목록은 PLATFORM만 · 닫힌 필드, 등급 변경과 `PLATFORM_ROLE_CHANGED` 이력, `STAFF` 값 거절, 같은 값 409, 본인 변경 403, 다른 중앙 관리자의 강등 · 비활성화, 비활성화의 세션 회수와 관리 권한 즉시 상실, 배정 조회 · 교체 · 회수와 이력, 이력 실패 시 교체도 되돌림, 같은 집합 409(이력 없음), 중복 · 모르는 · 형식 오류 ID가 아무것도 바꾸지 않음, 정지 고객 배정 허용 · 계정 불변, 중앙 관리자 · 비PLATFORM 대상 배정 거절, 등급 변경이 배정을 비우고 되살리지 않음, 강등된 행위자의 배정 요청이 아무것도 쓰지 않음, TENANT · 없는 · 형식 오류 대상 404, `/api/v1/users`가 PLATFORM 대상을 받지 않음, 요청 · 응답 스키마가 닫힘. (#572 1번) 초대가 CLI와 같은 배정 없는 PLATFORM · TENANT_MANAGER 계정과 `USER_INVITED` 이력을 만들고 Cognito 호출이 DB 쓰기보다 먼저임, 비중앙 행위자 · 미인증의 초대 · 재발송이 Cognito를 부르지 않음(권한 판정이 본문 검증보다 먼저), Cognito 중복 409 · 신원 중복 409에 DB 불변(자동 연결 없음), 제공자 실패 · DB 실패에 앱 계정 없음, 재발송의 제공자 조건(sub · `FORCE_CHANGE_PASSWORD`)과 `INVITE_RESENT` 이력, 비PLATFORM 대상 재발송 404 · Cognito 미호출, 초대 요청 스키마가 닫힘 |
 | 실제 PostgreSQL(플랫폼 등급) | `apps/core-api/tests/test_tenants_api.py` | 배정 없는 TENANT_MANAGER는 어떤 고객도 보거나 바꾸지 못함, TENANT_MANAGER는 배정 고객으로 한정, CENTRAL_ADMIN은 전체 고객과 전체 계약 사용, 의존성 판정 뒤 강등된 중앙 관리자는 전역 쓰기를 잃고 배정이 회수된 담당자는 아무것도 쓰지 않음 |
 | 실제 PostgreSQL + 대역(플랫폼 등급) | `apps/core-api/tests/test_user_admin_api.py` · `test_api_access.py` · `test_auth_api.py` | 배정 없는 TENANT_MANAGER는 고객 데이터 없음, TENANT_MANAGER는 배정 고객의 사용자로 한정되고 배정 교체를 따름, CENTRAL_ADMIN은 배정 없이 모든 고객에 닿음, TENANT_MANAGER의 배정 고객 `recover_existing`, 초대 · 재발송이 SDK 호출 뒤 배정을 다시 확인하고 아무것도 쓰지 않음, 두 중앙 관리자의 동시 상호 강등 · 비활성화에서 한쪽만 성공(잠금 대기 확인), 관리 판정이 `platform_role`을 보고 `role=ADMIN` · 등급 없는 PLATFORM · 다른 계정 종류의 등급 값으로 열리지 않음, `/me`의 `platform_role` · `assigned_tenant_ids`가 재로그인 없이 DB 값을 따름 |
 | 실제 PostgreSQL + 대역(플랫폼 등급) | `apps/core-api/tests/test_auth_bootstrap_admin.py` | 생성 · 지정 결과가 배정 없는 TENANT_MANAGER(지정은 세션 회수 · SDK 호출 0회), `--central-admin`은 ACTIVE 중앙 관리자가 없을 때만이고 있으면 SDK 호출 0회로 거절, 기존 TENANT_MANAGER의 중앙 관리자 지정이 배정을 비움, 부적격 대상 · 플래그 혼용 · `sub` 불일치 거절, Cognito 오류 시 변경 없음 · 오류 코드만 출력, Cognito 호출 중 DB 트랜잭션 없음, 잠금 안 재확인(그 사이 중앙 관리자가 생기면 거절) |

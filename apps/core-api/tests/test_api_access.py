@@ -733,6 +733,8 @@ def _valid_bodies(incident_id: str) -> dict[tuple[str, str], dict | None]:
         ("PUT", f"{user}/status"): {"status": "DISABLED"},
         ("POST", f"{user}/sessions/revoke"): None,
         ("POST", f"{user}/totp/reset"): {"operation_id": str(uuid.uuid4()), "identity_verified": True},
+        ("POST", "/api/v1/staff"): {"email": "staff-invitee@example.com"},
+        ("POST", "/api/v1/staff/{user_id}/invite/resend"): None,
         ("PUT", "/api/v1/staff/{user_id}/role"): {"platform_role": "TENANT_MANAGER"},
         ("PUT", "/api/v1/staff/{user_id}/status"): {"status": "DISABLED"},
         ("PUT", "/api/v1/staff/{user_id}/tenants"): {"tenant_ids": []},

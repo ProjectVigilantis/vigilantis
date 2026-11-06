@@ -1136,8 +1136,15 @@ export interface UserEventsResponse {
   items: UserEventItem[];
 }
 
-/* /api/v1/staff — 플랫폼(관리자) 직원 관리(#492 PR 5, schemas/api/staff.py). 중앙 관리계정 전용이며 그 밖은 403이다.
-   목록에는 중앙 관리계정 자신을 포함한 플랫폼 계정 전부가 온다. 직원 생성 경로는 없다(운영 CLI). */
+/* /api/v1/staff — 플랫폼(관리자) 직원 관리(#492 PR 5 · #572 1번, schemas/api/staff.py). 중앙 관리계정 전용이며 그 밖은 403이다.
+   목록에는 중앙 관리계정 자신을 포함한 플랫폼 계정 전부가 온다.
+   직원 초대는 `POST /staff`(StaffInviteRequest → 201 StaffItem), 재발송은 `POST /staff/{id}/invite/resend`(204)다(#572 1번). */
+
+/** 직원 이메일 초대(#572 1번). 만드는 계정은 담당 고객사 없는 `TENANT_MANAGER`로 고정 — 등급·배정 칸이 없다.
+ *  Cognito에 이미 있는 이메일은 409 `USER_STATE_CONFLICT`(자동 연결 없음). */
+export interface StaffInviteRequest {
+  email: string;
+}
 
 export interface StaffItem {
   user_id: string;
