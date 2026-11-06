@@ -41,6 +41,8 @@ class AnalysisFailureReason(StrEnum):
     GRAPH_INPUT_UNAVAILABLE = "GRAPH_INPUT_UNAVAILABLE"
     NO_ACTION_AVAILABLE = "NO_ACTION_AVAILABLE"                # 이 위협·자산에 제공할 조치 메뉴가 없다
     SOURCE_ADDRESS_UNSUPPORTED = "SOURCE_ADDRESS_UNSUPPORTED"  # SSH 출발지가 IPv4가 아니다(NACL CidrBlock 불가)
+    # 회수 — IN_PROGRESS가 상한을 넘겨 되돌린 횟수가 재분석 상한에 닿았다(agent_dispatcher)
+    ANALYSIS_RETRY_EXHAUSTED = "ANALYSIS_RETRY_EXHAUSTED"
 
 
 # 분석이 고장 난 것이 아니라 자동 조치가 없어 닫힌 사유 — 공개 상태 NO_ACTION_AVAILABLE로 가른다

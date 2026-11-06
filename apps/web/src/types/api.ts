@@ -501,7 +501,9 @@ export type AnalysisFailureReason =
   // 입력 — 모델 호출 전
   | 'GRAPH_INPUT_UNAVAILABLE'
   | 'NO_ACTION_AVAILABLE'
-  | 'SOURCE_ADDRESS_UNSUPPORTED';
+  | 'SOURCE_ADDRESS_UNSUPPORTED'
+  // 회수 — IN_PROGRESS 회수 횟수가 재분석 상한에 닿음
+  | 'ANALYSIS_RETRY_EXHAUSTED';
 
 /** 4단계 가드레일. 실행 순서도 이 순서다. */
 export type GuardrailStep =

@@ -684,6 +684,11 @@ class Incident(Base):
     # 어휘가 분석 단계와 함께 늘어나므로 PG enum이 아니라 문자열로 둔다 — enum이면 코드마다
     # 마이그레이션이 필요하다. initial_risk_reason_codes도 DB에서는 타입 없이 둔다
     agent_failure_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 상한 초과로 IN_PROGRESS를 되돌린 횟수 — 회수마다 과금되는 재분석이 한 번 더 나가므로
+    # agent_dispatcher가 이 수로 재분석 상한을 건다(#434 4-2). Python 기본값을 두지 않는 것은
+    # Core insert가 그 칸을 실어 이 리비전 이전으로 내린 DB에서 깨지기 때문이다
+    # (test_notification_events의 옛 리비전 INSERT) — 0은 server_default가 채운다
+    agent_reclaim_count: Mapped[int] = mapped_column(Integer, server_default="0")
     agent_wait_started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

@@ -37,9 +37,9 @@ FE는 알림의 `incident_id`로 `GET /api/v1/incidents/{id}`를 조회한다.
 정상 금액 `"0.00"`과 미산출은 다르다. 실패해도 추천 후보와 가드레일 PASS는 유지한다.
 설명 출처 `explanation_source`는 필수이며 `SERVER_TEMPLATE`만 허용한다.
 
-재시도는 [공통 모델 클라이언트](openai_client.py)의 정책을 따른다. 기본값은 시도당 timeout 30초,
-최초 포함 최대 3회이며 타임아웃·연결 오류·HTTP 408/409/429/5xx에만 재시도한다.
-일반 대기는 약 0.75–1초 → 1.5–2초, 유효한 `Retry-After`가 60초 이내이면 우선 적용한다.
+재시도는 [공통 재시도 엔진](model_retry.py)의 정책(`RetryPolicy`)을 따른다. 기본값은 시도당 timeout 30초,
+최초 포함 최대 3회이며 타임아웃·연결 오류·HTTP 408/409/429/5xx(일시 오류)에만 재시도한다.
+일반 대기는 backoff 1초 기준에 지터를 더한 값이고, 유효한 `Retry-After`가 60초 이내이면 우선 적용한다.
 인증·요청 오류, 거절, SDK 파싱 실패와 수용 검증 실패에는 재시도하지 않는다.
 SDK 파싱 실패를 포함해 사용 가능한 응답을 얻지 못하면 `MISSING_ESTIMATE`, 단가 누락·범위·산식 등
 수용 실패면 `INVALID_ESTIMATE`, 후보와 서버 비교 문맥이 다르면 `CONTEXT_MISMATCH`다.

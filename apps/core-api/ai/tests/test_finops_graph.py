@@ -30,7 +30,13 @@ from ai.agent import (
     finops_request_fingerprint,
     run_finops_graph,
 )
-from ai.model_client import AIModelRejectedError, FakeAIModelClient
+from ai.model_client import (
+    AIModelAdapterError,
+    AIModelRejectedError,
+    FailureKind,
+    FakeAIModelClient,
+)
+from ai.model_retry import RetryPolicy
 from ai.openai_client import OpenAIModelClient
 from logging_config import JsonLineFormatter
 from openai import APITimeoutError
@@ -585,6 +591,13 @@ class _RejectingClient:
         raise AIModelRejectedError("모델이 응답을 거절했습니다", phase="response")
 
 
+class _BrokenAdapterClient:
+    """어댑터가 응답 모양을 읽지 못한 경우 — 제공자 장애가 아니다."""
+
+    def complete(self, request, response_model):
+        raise AIModelAdapterError("응답에 choices가 없습니다", kind=FailureKind.RESPONSE_SHAPE)
+
+
 def _failure_fields(caplog, *outputs, graph_input=None, client=None):
     """그래프를 1회 돌려 FAILED와 실패 로그 1건을 확인하고 그 필드를 돌려준다."""
     with caplog.at_level(logging.WARNING, logger="vigilantis.ai.agent"):
@@ -607,6 +620,14 @@ def test_failure_log_names_model_refusal(caplog):
     assert fields["failed_step"] == "summarize_evidence"
     assert fields["error_class"] == "AIModelRejectedError"
     assert fields["phase"] == "response"
+
+
+def test_failure_log_keeps_adapter_defect_apart_from_provider_outage(caplog):
+    """어댑터 결함은 저장되는 사유에서 MODEL_UNAVAILABLE(제공자 장애)로 섞이지 않는다."""
+    fields = _failure_fields(caplog, client=_BrokenAdapterClient())
+
+    assert fields["reason_code"] == "MODEL_CONTRACT_VIOLATION"
+    assert fields["error_class"] == "AIModelAdapterError"
 
 
 @pytest.mark.parametrize(
@@ -746,9 +767,7 @@ def test_model_call_logs_of_one_analysis_share_the_incident_and_name_the_step(js
     client = OpenAIModelClient(
         client=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(parse=parse))),
         model="m",
-        timeout_seconds=1.0,
-        max_attempts=2,
-        retry_backoff_seconds=0.0,
+        policy=RetryPolicy(timeout_seconds=1.0, max_attempts=2, retry_backoff_seconds=0.0),
     )
     output = run_finops_graph(make_input(), client=client)
     assert output.invocation_status == AgentInvocationStatus.SUCCEEDED

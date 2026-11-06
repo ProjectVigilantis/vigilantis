@@ -297,17 +297,21 @@ def list_pending_agent_analysis(
     ]
 
 
-def list_stale_agent_claims(db: Session, *, started_before: datetime) -> list[str]:
-    """상한을 넘긴 IN_PROGRESS Claim의 Incident 식별자. 회수 대상 판단은 Workflow 몫이다.
+def list_stale_agent_claims(
+    db: Session, *, started_before: datetime
+) -> list[tuple[str, int]]:
+    """상한을 넘긴 IN_PROGRESS Claim의 (Incident 식별자, 지금까지 회수한 횟수).
+    되돌릴지 닫을지의 판단은 Workflow 몫이다.
 
     started_at이 NULL인 IN_PROGRESS도 함께 돌려준다. claim_agent_invocation은 상태와
     시각을 한 UPDATE로 쓰고 reset은 둘을 함께 되돌리므로 그 조합은 정상 경로에서 생기지
     않지만, 생겼다면 시각 비교가 NULL을 걸러내 **영원히 회수되지 않는다** — 회수만이
     그 행을 푸는 유일한 길이라 여기서 받는다.
     """
-    return list(
-        db.execute(
-            select(models.Incident.incident_id)
+    return [
+        (incident_id, reclaim_count)
+        for incident_id, reclaim_count in db.execute(
+            select(models.Incident.incident_id, models.Incident.agent_reclaim_count)
             .where(
                 models.Incident.agent_invocation_status
                 == AgentInvocationStatus.IN_PROGRESS,
@@ -317,8 +321,8 @@ def list_stale_agent_claims(db: Session, *, started_before: datetime) -> list[st
                 ),
             )
             .order_by(models.Incident.created_at)
-        ).scalars()
-    )
+        )
+    ]
 
 
 def claim_agent_invocation(
@@ -379,7 +383,10 @@ def finish_agent_invocation(
 
 
 def reset_agent_invocation(db: Session, incident_id: str) -> bool:
-    """중단된 IN_PROGRESS Claim 회수(IN_PROGRESS→PENDING). 회수 대상 판단은 Workflow 몫."""
+    """중단된 IN_PROGRESS Claim 회수(IN_PROGRESS→PENDING). 회수 대상 판단은 Workflow 몫.
+
+    회수 횟수를 같은 UPDATE에서 올린다 — 다음 회수가 상한을 볼 때 이 값을 읽는다.
+    """
     result = db.execute(
         update(models.Incident)
         .where(
@@ -390,6 +397,7 @@ def reset_agent_invocation(db: Session, incident_id: str) -> bool:
             agent_invocation_status=AgentInvocationStatus.PENDING,
             agent_invocation_started_at=None,
             agent_failure_reason=None,
+            agent_reclaim_count=models.Incident.agent_reclaim_count + 1,
         )
     )
     return result.rowcount == 1

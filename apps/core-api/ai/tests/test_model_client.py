@@ -20,20 +20,24 @@ from openai import (
     APITimeoutError,
     AuthenticationError,
     InternalServerError,
+    OpenAI,
     RateLimitError,
 )
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ai.model_client import (
+    AIModelAdapterError,
     AIModelContractError,
     AIModelRejectedError,
     AIModelRequest,
     AIModelTimeoutError,
     AIModelUnavailableError,
+    FailureKind,
     FakeAIModelClient,
     build_outbound_payload,
     mask_outbound,
 )
+from ai.model_retry import RetryPolicy
 from ai.openai_client import OpenAIModelClient, build_openai_model_client
 
 # --- 픽스처 ---------------------------------------------------------------------
@@ -77,7 +81,15 @@ class _FakeCompletions:
         return outcome
 
 
-def _completion(parsed, refusal=None, usage=(11, 7, 18), model="gpt-5.6-luna", cached=None):
+def _completion(
+    parsed,
+    refusal=None,
+    usage=(11, 7, 18),
+    model="gpt-5.6-luna",
+    cached=None,
+    finish_reason="stop",
+    **extra,
+):
     message = SimpleNamespace(parsed=parsed, refusal=refusal)
     usage_obj = SimpleNamespace(
         prompt_tokens=usage[0], completion_tokens=usage[1], total_tokens=usage[2]
@@ -85,7 +97,10 @@ def _completion(parsed, refusal=None, usage=(11, 7, 18), model="gpt-5.6-luna", c
     if cached is not None:
         usage_obj.prompt_tokens_details = SimpleNamespace(cached_tokens=cached)
     return SimpleNamespace(
-        choices=[SimpleNamespace(message=message)], usage=usage_obj, model=model
+        choices=[SimpleNamespace(message=message, finish_reason=finish_reason)],
+        usage=usage_obj,
+        model=model,
+        **extra,
     )
 
 
@@ -95,18 +110,24 @@ def _client(
     max_retry_after_seconds=60.0,
     temperature=None,
     reasoning_effort=None,
+    service_tier=None,
+    output_retries=0,
 ):
     completions = _FakeCompletions(results)
     sdk = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     client = OpenAIModelClient(
         client=sdk,
         model="gpt-5.6-luna",
-        timeout_seconds=1.0,
-        max_attempts=max_attempts,
-        retry_backoff_seconds=0.0,  # 테스트에서 실제로 대기하지 않는다
-        max_retry_after_seconds=max_retry_after_seconds,
+        policy=RetryPolicy(
+            timeout_seconds=1.0,
+            max_attempts=max_attempts,
+            retry_backoff_seconds=0.0,  # 테스트에서 실제로 대기하지 않는다
+            max_retry_after_seconds=max_retry_after_seconds,
+            output_retries=output_retries,
+        ),
         temperature=temperature,
         reasoning_effort=reasoning_effort,
+        service_tier=service_tier,
     )
     return client, completions
 
@@ -324,7 +345,7 @@ def test_builder_disables_sdk_retries():
     )
     client = build_openai_model_client(settings)
 
-    # 재시도 소유자는 래퍼 하나 — SDK 기본 2회가 살아 있으면 시도 수가 곱으로 는다
+    # 재시도 소유자는 model_retry 엔진 하나 — SDK 기본 2회가 살아 있으면 시도 수가 곱으로 는다
     assert client._client.max_retries == 0
 
 
@@ -392,9 +413,11 @@ def test_contract_failure_after_response_preserves_usage():
     )
     client, _ = _client([empty])
 
-    with pytest.raises(AIModelContractError) as excinfo:
+    # 선택지 없음은 모델 품질이 아니라 응답 모양 불일치 — 어댑터 몫(RESPONSE_SHAPE)
+    with pytest.raises(AIModelAdapterError) as excinfo:
         client.complete(_request(), Answer)
 
+    assert excinfo.value.kind is FailureKind.RESPONSE_SHAPE
     assert excinfo.value.phase == "response"
     assert excinfo.value.usage.prompt_tokens == 900
 
@@ -605,7 +628,7 @@ def test_server_directed_retry_after_is_honored(monkeypatch):
     )
     client, _ = _client([error, _completion(Answer(verdict="ok"))])
     slept = []
-    monkeypatch.setattr("ai.openai_client.time.sleep", slept.append)
+    monkeypatch.setattr("ai.model_retry.time.sleep", slept.append)
 
     client.complete(_request(), Answer)
 
@@ -618,7 +641,7 @@ def test_retry_after_ms_header_is_honored(monkeypatch):
     )
     client, _ = _client([error, _completion(Answer(verdict="ok"))])
     slept = []
-    monkeypatch.setattr("ai.openai_client.time.sleep", slept.append)
+    monkeypatch.setattr("ai.model_retry.time.sleep", slept.append)
 
     client.complete(_request(), Answer)
 
@@ -634,7 +657,7 @@ def test_retry_after_beyond_cap_falls_back_to_backoff(monkeypatch):
         [error, _completion(Answer(verdict="ok"))], max_retry_after_seconds=60.0
     )
     slept = []
-    monkeypatch.setattr("ai.openai_client.time.sleep", slept.append)
+    monkeypatch.setattr("ai.model_retry.time.sleep", slept.append)
 
     client.complete(_request(), Answer)
 
@@ -646,10 +669,12 @@ def test_backoff_carries_jitter(monkeypatch):
     client, _ = _client(
         [APITimeoutError(_REQUEST), _completion(Answer(verdict="ok"))]
     )
-    client._retry_backoff_seconds = 4.0
+    client._policy = RetryPolicy(
+        timeout_seconds=1.0, max_attempts=3, retry_backoff_seconds=4.0
+    )
     slept = []
-    monkeypatch.setattr("ai.openai_client.time.sleep", slept.append)
-    monkeypatch.setattr("ai.openai_client.random.random", lambda: 1.0)
+    monkeypatch.setattr("ai.model_retry.time.sleep", slept.append)
+    monkeypatch.setattr("ai.model_retry.random.random", lambda: 1.0)
 
     client.complete(_request(), Answer)
 
@@ -661,7 +686,7 @@ def test_connection_error_without_response_uses_backoff(monkeypatch):
         [APIConnectionError(request=_REQUEST), _completion(Answer(verdict="ok"))]
     )
     slept = []
-    monkeypatch.setattr("ai.openai_client.time.sleep", slept.append)
+    monkeypatch.setattr("ai.model_retry.time.sleep", slept.append)
 
     client.complete(_request(), Answer)
 
@@ -735,10 +760,10 @@ def test_refusal_is_rejected_not_parsed():
         client.complete(_request(), Answer)
 
 
-def test_empty_choices_is_a_contract_error():
+def test_empty_choices_is_an_adapter_error():
     client, _ = _client([SimpleNamespace(choices=[], usage=None, model="gpt-5.6-luna")])
 
-    with pytest.raises(AIModelContractError):
+    with pytest.raises(AIModelAdapterError):
         client.complete(_request(), Answer)
 
 
@@ -772,3 +797,318 @@ def test_usage_is_logged_even_on_refusal(caplog):
     records = [r for r in caplog.records if r.getMessage() == "ai_model_call"]
     assert len(records) == 1
     assert records[0].__dict__["total_tokens"] == 18
+
+
+# --- 제공자 응답 기반 분류 · 시도 기록 (#434 §4-2) ----------------------------------
+
+
+def test_insufficient_quota_is_not_retried():
+    body = {"code": "insufficient_quota", "type": "insufficient_quota", "message": "quota"}
+    error = RateLimitError("429", response=_status_response(429), body=body)
+    client, completions = _client([error, error, error], max_attempts=3)
+
+    with pytest.raises(AIModelRejectedError) as excinfo:
+        client.complete(_request(), Answer)
+
+    assert excinfo.value.kind is FailureKind.QUOTA_EXHAUSTED
+    assert excinfo.value.phase == "request"
+    assert len(completions.calls) == 1
+
+
+def test_schema_rejection_is_a_contract_error_without_retry():
+    body = {"param": "response_format", "code": "invalid_json_schema", "message": "bad"}
+    error = APIStatusError("400", response=_status_response(400), body=body)
+    client, completions = _client([error, error, error], max_attempts=3)
+
+    with pytest.raises(AIModelContractError) as excinfo:
+        client.complete(_request(), Answer)
+
+    assert excinfo.value.kind is FailureKind.SCHEMA_REJECTED
+    assert excinfo.value.phase == "request"
+    assert len(completions.calls) == 1
+
+
+def test_truncated_output_is_a_contract_error_with_usage():
+    client, completions = _client(
+        [_completion(None, usage=(500, 100, 600), finish_reason="length")]
+    )
+
+    with pytest.raises(AIModelContractError) as excinfo:
+        client.complete(_request(), Answer)
+
+    assert excinfo.value.kind is FailureKind.TRUNCATED
+    assert excinfo.value.usage.total_tokens == 600
+    assert len(completions.calls) == 1
+
+
+def test_output_retries_budget_retries_invalid_output():
+    client, completions = _client(
+        [_completion(None), _completion(Answer(verdict="ok"))], output_retries=1
+    )
+
+    response = client.complete(_request(), Answer)
+
+    assert response.output.verdict == "ok"
+    assert len(completions.calls) == 2
+    assert response.trace.attempts[0].outcome == "output_invalid"
+    assert response.trace.attempts[1].outcome == "ok"
+
+
+def test_output_retries_zero_fails_after_one_call():
+    client, completions = _client(
+        [_completion(None), _completion(Answer(verdict="ok"))], output_retries=0
+    )
+
+    with pytest.raises(AIModelContractError) as excinfo:
+        client.complete(_request(), Answer)
+
+    assert excinfo.value.kind is FailureKind.OUTPUT_INVALID
+    assert len(completions.calls) == 1
+
+
+def test_trace_records_attempts_and_models():
+    client, _ = _client(
+        [APITimeoutError(_REQUEST), _completion(Answer(verdict="ok"), model="gpt-5.6-luna-2026")],
+        max_attempts=2,
+    )
+
+    trace = client.complete(_request(), Answer).trace
+
+    assert trace.provider == "openai"
+    assert trace.attempt_count == 2
+    first = trace.attempts[0]
+    assert first.outcome == "transport_timeout"
+    assert first.retry_delay_seconds is not None
+    assert first.server_directed is False
+    assert first.elapsed_seconds >= 0
+    assert trace.requested_model == "gpt-5.6-luna"
+    assert trace.returned_model == "gpt-5.6-luna-2026"
+
+
+def test_service_tier_is_sent_and_returned_tier_recorded():
+    client, completions = _client(
+        [_completion(Answer(verdict="ok"), service_tier="priority")], service_tier="fast"
+    )
+
+    trace = client.complete(_request(), Answer).trace
+
+    assert completions.calls[0]["service_tier"] == "fast"
+    assert trace.requested_service_tier == "fast"
+    assert trace.returned_service_tier == "priority"
+
+
+def test_missing_returned_service_tier_is_none_and_unset_tier_is_not_sent():
+    client, completions = _client([_completion(Answer(verdict="ok"))])
+
+    trace = client.complete(_request(), Answer).trace
+
+    assert "service_tier" not in completions.calls[0]
+    assert trace.requested_service_tier is None
+    assert trace.returned_service_tier is None
+
+
+def test_missing_usage_is_marked_unreported():
+    completion = _completion(Answer(verdict="ok"))
+    completion.usage = None
+    client, _ = _client([completion])
+
+    usage = client.complete(_request(), Answer).usage
+
+    assert usage.total_tokens == 0
+    assert set(usage.unreported) == {
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "cached_prompt_tokens",
+    }
+
+
+def test_missing_cache_details_are_marked_unreported():
+    client, _ = _client([_completion(Answer(verdict="ok"))])
+
+    usage = client.complete(_request(), Answer).usage
+
+    assert usage.unreported == ("cached_prompt_tokens",)
+    assert usage.cache_creation_prompt_tokens is None
+
+
+def test_unclassified_exception_becomes_adapter_error(caplog):
+    client, completions = _client([AttributeError("secret-detail-in-message")])
+
+    with caplog.at_level(logging.INFO, logger="vigilantis.ai"):
+        with pytest.raises(AIModelAdapterError) as excinfo:
+            client.complete(_request(), Answer)
+
+    assert excinfo.value.kind is FailureKind.ADAPTER_ERROR
+    assert excinfo.value.__context__ is None
+    assert excinfo.value.__cause__ is None
+    records = [r for r in caplog.records if r.getMessage() == "ai_model_adapter_error"]
+    assert len(records) == 1
+    assert "secret-detail-in-message" not in json.dumps(records[0].__dict__, default=str)
+
+
+def test_exhausted_transport_retries_log_one_call_record(caplog):
+    client, _ = _client([APITimeoutError(_REQUEST)] * 3, max_attempts=3)
+
+    with caplog.at_level(logging.INFO, logger="vigilantis.ai"):
+        with pytest.raises(AIModelTimeoutError):
+            client.complete(_request(), Answer)
+
+    records = [r for r in caplog.records if r.getMessage() == "ai_model_call"]
+    assert len(records) == 1
+    assert records[0].__dict__["outcome"] == "transport_timeout"
+    assert records[0].__dict__["total_tokens"] is None
+    assert records[0].__dict__["attempts"] == 3
+
+
+def test_partial_usage_object_lists_each_absent_field():
+    completion = _completion(Answer(verdict="ok"))
+    completion.usage = SimpleNamespace(completion_tokens=7)
+    client, _ = _client([completion])
+
+    usage = client.complete(_request(), Answer).usage
+
+    assert usage.prompt_tokens == 0
+    assert usage.total_tokens == 7
+    assert {"prompt_tokens", "total_tokens", "cached_prompt_tokens"} <= set(usage.unreported)
+    assert "completion_tokens" not in usage.unreported
+
+
+def test_usage_is_summed_across_output_retries(caplog):
+    client, _ = _client(
+        [_completion(None, usage=(11, 7, 18)), _completion(Answer(verdict="ok"), usage=(5, 3, 8))],
+        output_retries=1,
+    )
+
+    with caplog.at_level(logging.INFO, logger="vigilantis.ai"):
+        response = client.complete(_request(), Answer)
+
+    assert response.usage.total_tokens == 26
+    assert response.trace.attempts[0].usage.total_tokens == 18
+    records = [r for r in caplog.records if r.getMessage() == "ai_model_call"]
+    assert records[0].__dict__["total_tokens"] == 26
+
+
+def test_error_usage_sums_attempts_and_flags_attempts_without_usage():
+    client, _ = _client(
+        [_completion(None, usage=(11, 7, 18)), APITimeoutError(_REQUEST)],
+        max_attempts=1,
+        output_retries=1,
+    )
+
+    with pytest.raises(AIModelTimeoutError) as excinfo:
+        client.complete(_request(), Answer)
+
+    assert excinfo.value.usage.total_tokens == 18
+    assert "attempts_without_usage" in excinfo.value.usage.unreported
+
+
+# --- 실제 SDK 파서 경유 ---------------------------------------------------------------
+
+
+def _real_sdk_client(bodies, output_retries=0):
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        return httpx2.Response(200, json=bodies[min(len(calls), len(bodies)) - 1])
+
+    sdk = OpenAI(
+        api_key="test-key",
+        base_url="https://unit.test/v1",
+        max_retries=0,
+        http_client=httpx2.Client(transport=httpx2.MockTransport(respond)),
+    )
+    client = OpenAIModelClient(
+        client=sdk,
+        model="gpt-5.6-luna",
+        policy=RetryPolicy(
+            timeout_seconds=1.0,
+            max_attempts=1,
+            retry_backoff_seconds=0.0,
+            output_retries=output_retries,
+        ),
+    )
+    return client, calls
+
+
+def _wire(finish_reason, content='{"verdict": "ok"}', total=600):
+    return {
+        "id": "x",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "gpt-5.6-luna",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": finish_reason,
+                "message": {"role": "assistant", "content": content},
+            }
+        ],
+        "usage": {"prompt_tokens": total - 100, "completion_tokens": 100, "total_tokens": total},
+    }
+
+
+def test_real_sdk_valid_response_succeeds():
+    client, calls = _real_sdk_client([_wire("stop", total=30)])
+
+    response = client.complete(_request(), Answer)
+
+    assert response.output.verdict == "ok"
+    assert response.usage.total_tokens == 30
+    assert len(calls) == 1
+
+
+def test_real_sdk_length_finish_is_truncated_with_usage_and_retryable_by_budget():
+    client, calls = _real_sdk_client([_wire("length", content='{"verd')])
+
+    with pytest.raises(AIModelContractError) as excinfo:
+        client.complete(_request(), Answer)
+
+    assert excinfo.value.kind is FailureKind.TRUNCATED
+    assert excinfo.value.phase == "response"
+    assert excinfo.value.usage.total_tokens == 600
+    assert excinfo.value.__context__ is None
+    assert len(calls) == 1
+
+    retrying, retry_calls = _real_sdk_client(
+        [_wire("length", content='{"verd'), _wire("stop", total=40)], output_retries=1
+    )
+    response = retrying.complete(_request(), Answer)
+    assert response.output.verdict == "ok"
+    assert len(retry_calls) == 2
+    assert response.usage.total_tokens == 640
+
+
+def test_real_sdk_content_filter_is_refusal():
+    client, calls = _real_sdk_client([_wire("content_filter", content="")])
+
+    with pytest.raises(AIModelRejectedError) as excinfo:
+        client.complete(_request(), Answer)
+
+    assert excinfo.value.kind is FailureKind.REFUSAL
+    assert excinfo.value.__context__ is None
+    assert len(calls) == 1
+
+
+def test_retryable_flag_follows_kind():
+    quota = RateLimitError(
+        "429",
+        response=_status_response(429),
+        body={"code": "insufficient_quota", "type": "insufficient_quota"},
+    )
+    schema = APIStatusError(
+        "400", response=_status_response(400), body={"param": "response_format"}
+    )
+    expectations = [
+        (APITimeoutError(_REQUEST), True),
+        (APIConnectionError(request=_REQUEST), True),
+        (quota, False),
+        (schema, False),
+        (_completion(None, refusal="거절"), False),
+    ]
+    for outcome, retryable in expectations:
+        client, _ = _client([outcome], max_attempts=1)
+        with pytest.raises(Exception) as excinfo:
+            client.complete(_request(), Answer)
+        assert excinfo.value.retryable is retryable
