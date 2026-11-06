@@ -75,6 +75,7 @@ def test_access_role_trusts_only_the_platform_task_role_with_external_id():
 def test_access_role_borrows_the_smoke_whitelist_policy():
     """권한 정책을 두 벌 두지 않는다 — 스모크 테스트의 두 방향 보증이 그 한 벌에 걸려 있다."""
     assert platform.SMOKE_POLICY_NAME == smoke.APP_POLICY
+    assert platform.SMOKE_COST_POLICY_NAME == smoke.COST_POLICY
     assert platform.SMOKE_VPC_NAME == smoke.VPC_NAME
 
 
@@ -692,6 +693,8 @@ def _client_error(code: str, operation: str) -> ClientError:
 
 _PLATFORM_TAGS = [{"Key": platform.TAG_KEY, "Value": platform.TAG_VALUE}]
 _SMOKE_POLICY = f"arn:aws:iam::{ACCOUNT}:policy/{platform.SMOKE_POLICY_NAME}"
+_SMOKE_COST_POLICY = f"arn:aws:iam::{ACCOUNT}:policy/{platform.SMOKE_COST_POLICY_NAME}"
+_SMOKE_POLICIES = [_SMOKE_POLICY, _SMOKE_COST_POLICY]
 
 
 class FakeIam:
@@ -799,7 +802,7 @@ def test_up_stops_before_creating_anything_when_the_smoke_policy_is_missing():
 def test_up_stops_before_creating_anything_when_the_smoke_vpc_is_missing():
     ec2 = RecordingEc2(smoke_vpc=None)
     with pytest.raises(SystemExit, match="스모크 VPC"):
-        platform.up({"iam": FakeIam(policies=[_SMOKE_POLICY]), "ec2": ec2}, ACCOUNT, "ap-northeast-2",
+        platform.up({"iam": FakeIam(policies=_SMOKE_POLICIES), "ec2": ec2}, ACCOUNT, "ap-northeast-2",
                     ["203.0.113.7/32"])
     assert ec2.calls == ["describe_vpcs"]
 
@@ -856,7 +859,7 @@ _ORIGIN_CERT = {"DomainName": f"origin.{_DOMAIN}",
 def test_up_stops_before_creating_anything_when_the_domain_is_not_ready(certs, zones, origin_certs, missing):
     """인증서 둘·공개 호스팅 영역이 없으면 VPC·RDS·WAF 어느 것도 바꾸기 전에 멈춘다."""
     ec2, r53 = RecordingEc2(smoke_vpc="vpc-smoke"), FakeR53(zones)
-    c = {"iam": FakeIam(policies=[_SMOKE_POLICY]), "ec2": ec2, "acm": FakeAcm(certs), "r53": r53,
+    c = {"iam": FakeIam(policies=_SMOKE_POLICIES), "ec2": ec2, "acm": FakeAcm(certs), "r53": r53,
          "acm_origin": FakeAcm(origin_certs)}
     with pytest.raises(SystemExit, match=missing):
         platform.up(c, ACCOUNT, "ap-northeast-2", ["203.0.113.7/32"], _DOMAIN)
@@ -867,7 +870,7 @@ def test_up_stops_before_creating_anything_when_the_domain_is_not_ready(certs, z
 def test_up_preview_also_checks_the_domain(monkeypatch):
     """--yes 없는 미리 보기에서 먼저 알려야 --yes 실행이 중간에 멈추지 않는다."""
     _fake_main(monkeypatch, ["up", "--account", ACCOUNT, "--allow-cidr", "203.0.113.7/32", "--domain", _DOMAIN],
-               {"iam": FakeIam(policies=[_SMOKE_POLICY]), "ec2": RecordingEc2(smoke_vpc="vpc-smoke"),
+               {"iam": FakeIam(policies=_SMOKE_POLICIES), "ec2": RecordingEc2(smoke_vpc="vpc-smoke"),
                 "acm": FakeAcm(), "route53": FakeR53([_ZONE])})
     with pytest.raises(SystemExit, match=r"인증서\(ISSUED\) 없음"):
         platform.main()
@@ -889,7 +892,7 @@ def test_up_preview_also_checks_the_smoke_environment(monkeypatch):
 
 
 def test_up_rejects_a_wide_cidr_before_touching_aws(monkeypatch):
-    iam = FakeIam(policies=[_SMOKE_POLICY])
+    iam = FakeIam(policies=_SMOKE_POLICIES)
     _fake_main(monkeypatch, ["up", "--account", ACCOUNT, "--allow-cidr", "0.0.0.0/1", "--yes"], {"iam": iam})
     with pytest.raises(SystemExit, match="넓은 범위"):
         platform.main()
@@ -1801,7 +1804,7 @@ def test_down_deletes_only_platform_tagged_alarms_and_topic():
 
 def test_up_stops_before_creating_anything_when_a_same_named_alarm_is_not_ours():
     ec2 = RecordingEc2(smoke_vpc="vpc-smoke")
-    c = {"iam": FakeIam(policies=[_SMOKE_POLICY]), "ec2": ec2, "cw": FakeCw({_API_DOWN: []}), "sns": FakeSns()}
+    c = {"iam": FakeIam(policies=_SMOKE_POLICIES), "ec2": ec2, "cw": FakeCw({_API_DOWN: []}), "sns": FakeSns()}
     with pytest.raises(SystemExit, match=_API_DOWN):
         platform.up(c, ACCOUNT, "ap-northeast-2", ["203.0.113.7/32"])
     assert ec2.calls == ["describe_vpcs"]  # VPC·NAT·RDS 어느 것도 만들지 않았다
@@ -1810,6 +1813,7 @@ def test_up_stops_before_creating_anything_when_a_same_named_alarm_is_not_ours()
 # ⑧ 계정 분리(T-8) ----------------------------------------------------------------
 CUSTOMER = "444455556666"
 _CUSTOMER_SMOKE_POLICY = f"arn:aws:iam::{CUSTOMER}:policy/{platform.SMOKE_POLICY_NAME}"
+_CUSTOMER_SMOKE_COST_POLICY = f"arn:aws:iam::{CUSTOMER}:policy/{platform.SMOKE_COST_POLICY_NAME}"
 _CUSTOMER_TAG = [{"Key": platform.CUSTOMER_TAG_KEY, "Value": ACCOUNT}]
 
 
@@ -1827,8 +1831,11 @@ def test_split_accounts_put_only_the_access_role_in_the_customer_account():
     (trusted,) = cust.trust[platform.ROLE_ACCESS]["Statement"]
     assert trusted["Principal"] == {"AWS": f"arn:aws:iam::{ACCOUNT}:role/{platform.ROLE_TASK}"}
     assert trusted["Condition"] == {"StringEquals": {"sts:ExternalId": "ext-1"}}
-    # 권한은 고객 계정의 스모크 거울 정책이고, 고객 태그가 이 플랫폼 계정을 가리킨다
-    assert cust.attached == [(platform.ROLE_ACCESS, _CUSTOMER_SMOKE_POLICY)]
+    # 권한은 고객 계정의 스모크 거울 정책과 비용 정책이고, 고객 태그가 이 플랫폼 계정을 가리킨다
+    assert cust.attached == [
+        (platform.ROLE_ACCESS, _CUSTOMER_SMOKE_POLICY),
+        (platform.ROLE_ACCESS, _CUSTOMER_SMOKE_COST_POLICY),
+    ]
     assert cust.roles[platform.ROLE_ACCESS]["Tags"] == _CUSTOMER_TAG
 
 
@@ -1874,12 +1881,13 @@ def test_customer_role_of_someone_else_is_not_overwritten(tags, reason):
 
 @pytest.mark.parametrize("customer_policies, customer_vpc, missing", [
     ([], "vpc-smoke", platform.SMOKE_POLICY_NAME),
-    ([_CUSTOMER_SMOKE_POLICY], None, "스모크 VPC"),
+    ([_CUSTOMER_SMOKE_POLICY], "vpc-smoke", platform.SMOKE_COST_POLICY_NAME),
+    ([_CUSTOMER_SMOKE_POLICY, _CUSTOMER_SMOKE_COST_POLICY], None, "스모크 VPC"),
 ])
 def test_split_up_looks_for_the_smoke_environment_in_the_customer_account(customer_policies, customer_vpc, missing):
     """플랫폼 계정에 같은 이름의 정책·VPC가 있어도 그것으로 통과하지 않는다."""
     plat_ec2, cust_ec2 = RecordingEc2(smoke_vpc="vpc-in-platform"), RecordingEc2(smoke_vpc=customer_vpc)
-    c = {"iam": FakeIam(policies=[_SMOKE_POLICY]), "ec2": plat_ec2,
+    c = {"iam": FakeIam(policies=_SMOKE_POLICIES), "ec2": plat_ec2,
          "customer": {"iam": FakeIam(account=CUSTOMER, policies=customer_policies), "ec2": cust_ec2,
                       "account": CUSTOMER}}
     with pytest.raises(SystemExit, match=missing):

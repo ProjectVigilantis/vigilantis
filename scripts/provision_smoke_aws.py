@@ -149,6 +149,12 @@ APP_USER = f"{PREFIX}-app"
 # 제외)가 한도라 코드가 부르는 조치 권한만 담은 지금 정책(2,084자)도 들어가지 않는다(#348 리뷰).
 # 관리형 한도는 6,144자이고 P2 실행 경로가 붙으며 늘어날 문장도 담는다 — 한도는 테스트가 지킨다.
 APP_POLICY = APP_USER
+# 비용 조회(services/costs.py · #572 11번)는 앱 정책과 따로 붙인다. 앱 정책은 조치·조회의 거울이고 관리형
+# 한도에 거의 닿아 있다(운영자 역할 하나를 허용하면 6,118자). Cost Explorer 엔드포인트는 us-east-1
+# 하나뿐이라 앱 정책의 조회 문장(aws:RequestedRegion = 관제 리전)에 넣으면 권한이 있어도 거절된다.
+COST_POLICY = f"{APP_USER}-cost"
+COST_ACTIONS = ("ce:GetCostAndUsage",)
+COST_REGION = "us-east-1"
 MANAGED_POLICY_MAX_CHARS = 6144
 _POLICY_VERSION_LIMIT = 5  # 관리형 정책 하나가 가질 수 있는 버전 수
 BUDGET_NAME = f"{PREFIX}-monthly"
@@ -518,6 +524,24 @@ def build_app_policy(
     return policy
 
 
+def build_cost_policy() -> dict:
+    """비용 조회 정책. services/costs.py가 부르는 Cost Explorer 작업의 거울이고, 테스트가 두 방향을 지킨다.
+
+    Cost Explorer의 조회는 자원 단위 권한이 없어 Resource가 "*"이고, 울타리는 엔드포인트 리전 하나다.
+    """
+    return {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Action": list(COST_ACTIONS),
+                "Resource": "*",
+                "Condition": {"StringEquals": {"aws:RequestedRegion": COST_REGION}},
+            }
+        ],
+    }
+
+
 # ------------------------------------------------------------------ 가드·공통
 def _require_real_aws(expected_account: str, sts=None) -> None:
     """실 AWS 전용(가드 ①) + 대상 계정 대조(가드 ②). sts: 이 호출 전용 관리자 세션의 클라이언트."""
@@ -707,6 +731,10 @@ def _user_exists(iam) -> bool:
 
 def _app_policy_arn(account: str) -> str:
     return f"arn:aws:iam::{account}:policy/{APP_POLICY}"
+
+
+def _cost_policy_arn(account: str) -> str:
+    return f"arn:aws:iam::{account}:policy/{COST_POLICY}"
 
 
 def _managed_policy_exists(iam, arn: str) -> bool:
@@ -937,14 +965,14 @@ def inventory(clients: dict, account: str) -> list[tuple[str, str, str | None]]:
     rows.append(("LoadBalancer", ALB_NAME, lb["LoadBalancerArn"] if lb else None))
     rows.append(("Volume", VOLUME_NAME, _find_volume(ec2)))
     rows.append(("IamUser", APP_USER, APP_USER if _user_exists(iam) else None))
-    policy_arn = _app_policy_arn(account)
-    rows.append(
-        (
-            "IamPolicy",
-            APP_POLICY,
-            policy_arn if _managed_policy_exists(iam, policy_arn) else None,
+    for name, policy_arn in _managed_policies(account):
+        rows.append(
+            (
+                "IamPolicy",
+                name,
+                policy_arn if _managed_policy_exists(iam, policy_arn) else None,
+            )
         )
-    )
     rows.append(
         (
             "Budget",
@@ -1370,44 +1398,58 @@ def _ensure_app_user(
     if not _user_exists(iam):
         iam.create_user(UserName=APP_USER, Tags=_tags(APP_USER))
         print(f"[smoke] IAM 사용자 {APP_USER} 생성 — 키는 만들지 않는다(ADR-0009 §2)")
-    # 이 사용자의 권한은 아래 관리형 정책 하나뿐이다(ADR-0009 §2 — 정책은 Action Whitelist의
-    # 거울). 인라인은 더 만들지 않으므로 남아 있다면 관리형 전환 전에 붙은 것이다 — 걷어야
-    # 권한이 두 문서의 합집합이 되지 않는다.
+    # 이 사용자의 권한은 아래 관리형 정책 둘뿐이다. 앱 정책은 Action Whitelist의 거울이고(ADR-0009
+    # §2), 비용 정책은 Cost Explorer 조회만 담는다(COST_POLICY). 인라인은 더 만들지 않으므로 남아
+    # 있다면 관리형 전환 전에 붙은 것이다. 걷어야 권한이 관리형 문서와 인라인의 합집합이 되지 않는다.
     for stale in iam.list_user_policies(UserName=APP_USER)["PolicyNames"]:
         iam.delete_user_policy(UserName=APP_USER, PolicyName=stale)
         print(
-            f"[smoke] 남아 있던 인라인 정책 {stale} 삭제 — 앱 권한은 관리형 정책 하나로 모은다"
+            f"[smoke] 남아 있던 인라인 정책 {stale} 삭제(앱 권한은 관리형 정책으로만 둔다)"
         )
-    document = build_app_policy(account, region, vpc_id, subnet_ids, instance_role_arns)
-    arn = _app_policy_arn(account)
+    managed = (
+        (
+            APP_POLICY,
+            _app_policy_arn(account),
+            build_app_policy(account, region, vpc_id, subnet_ids, instance_role_arns),
+        ),
+        (COST_POLICY, _cost_policy_arn(account), build_cost_policy()),
+    )
+    # 이미 붙은 정책의 재연결 멱등성에 기대지 않고 확인한 뒤 붙인다
+    attached = {
+        p["PolicyArn"]
+        for p in iam.list_attached_user_policies(UserName=APP_USER)["AttachedPolicies"]
+    }
+    for name, arn, document in managed:
+        _ensure_managed_policy(iam, name, arn, document)
+        if arn not in attached:
+            iam.attach_user_policy(UserName=APP_USER, PolicyArn=arn)
+            print(f"[smoke] 정책 {name} → 사용자 {APP_USER} 연결")
+
+
+def _ensure_managed_policy(iam, name: str, arn: str, document: dict) -> None:
     try:
         policy = iam.get_policy(PolicyArn=arn)["Policy"]
     except ClientError as exc:
         if _code(exc) != "NoSuchEntity":
             raise
         iam.create_policy(
-            PolicyName=APP_POLICY,
+            PolicyName=name,
             PolicyDocument=json.dumps(document),
-            Tags=_tags(APP_POLICY),
+            Tags=_tags(name),
         )
-        print(f"[smoke] IAM 관리형 정책 {APP_POLICY} 생성")
-    else:
-        # VPC를 다시 세웠으면 정책의 VPC ARN도 따라가야 한다 — 문서가 바뀐 때만 새 버전을 올린다.
-        # botocore가 IAM 응답의 정책 문서를 dict로 풀어 주므로 그대로 비교한다.
-        current = iam.get_policy_version(
-            PolicyArn=arn, VersionId=policy["DefaultVersionId"]
-        )["PolicyVersion"]["Document"]
-        if current != document:
-            _make_room_for_policy_version(iam, arn)
-            iam.create_policy_version(
-                PolicyArn=arn, PolicyDocument=json.dumps(document), SetAsDefault=True
-            )
-            print(f"[smoke] IAM 관리형 정책 {APP_POLICY} 새 버전을 기본으로")
-    # 이미 붙은 정책의 재연결 멱등성에 기대지 않고 확인한 뒤 붙인다
-    attached = iam.list_attached_user_policies(UserName=APP_USER)["AttachedPolicies"]
-    if all(p["PolicyArn"] != arn for p in attached):
-        iam.attach_user_policy(UserName=APP_USER, PolicyArn=arn)
-        print(f"[smoke] 정책 {APP_POLICY} → 사용자 {APP_USER} 연결")
+        print(f"[smoke] IAM 관리형 정책 {name} 생성")
+        return
+    # VPC를 다시 세웠으면 정책의 VPC ARN도 따라가야 한다 — 문서가 바뀐 때만 새 버전을 올린다.
+    # botocore가 IAM 응답의 정책 문서를 dict로 풀어 주므로 그대로 비교한다.
+    current = iam.get_policy_version(
+        PolicyArn=arn, VersionId=policy["DefaultVersionId"]
+    )["PolicyVersion"]["Document"]
+    if current != document:
+        _make_room_for_policy_version(iam, arn)
+        iam.create_policy_version(
+            PolicyArn=arn, PolicyDocument=json.dumps(document), SetAsDefault=True
+        )
+        print(f"[smoke] IAM 관리형 정책 {name} 새 버전을 기본으로")
 
 
 def _make_room_for_policy_version(iam, arn: str) -> None:
@@ -1606,32 +1648,46 @@ def _delete_app_user(iam) -> None:
 
 
 def _delete_app_policy(iam, account: str) -> None:
-    """사용자를 지워도 관리형 정책은 남는다 — 따로 걷는다. 사용자 쪽 연결은 _delete_app_user가 푼다."""
-    arn = _app_policy_arn(account)
-    if not _managed_policy_exists(iam, arn):
-        return
-    # 비기본 버전을 먼저 지워야 정책이 지워진다(기본 버전은 정책과 함께 사라진다)
-    for version in iam.list_policy_versions(PolicyArn=arn)["Versions"]:
-        if not version["IsDefaultVersion"]:
-            iam.delete_policy_version(PolicyArn=arn, VersionId=version["VersionId"])
-    iam.delete_policy(PolicyArn=arn)
-    print(f"[smoke] IAM 관리형 정책 {APP_POLICY} 삭제")
+    """사용자를 지워도 관리형 정책은 남는다 — 따로 걷는다. 사용자 쪽 연결은 _delete_app_user가 푼다.
+
+    앱 정책과 비용 정책 둘 다 걷는다."""
+    for name, arn in _managed_policies(account):
+        if not _managed_policy_exists(iam, arn):
+            continue
+        # 비기본 버전을 먼저 지워야 정책이 지워진다(기본 버전은 정책과 함께 사라진다)
+        for version in iam.list_policy_versions(PolicyArn=arn)["Versions"]:
+            if not version["IsDefaultVersion"]:
+                iam.delete_policy_version(PolicyArn=arn, VersionId=version["VersionId"])
+        iam.delete_policy(PolicyArn=arn)
+        print(f"[smoke] IAM 관리형 정책 {name} 삭제")
+
+
+def _managed_policies(account: str) -> tuple[tuple[str, str], ...]:
+    return (
+        (APP_POLICY, _app_policy_arn(account)),
+        (COST_POLICY, _cost_policy_arn(account)),
+    )
 
 
 def _roles_holding_app_policy(iam, account: str) -> list[str]:
-    """앱 정책을 붙잡고 있는 IAM 역할 — 플랫폼의 접근 역할(vigilantis-access, ADR-0010 §3)이 빌려 쓴다.
+    """앱 정책·비용 정책을 붙잡고 있는 IAM 역할. 플랫폼의 접근 역할(vigilantis-access, ADR-0010 §3)이
+    둘 다 빌려 쓴다.
 
     역할에 붙어 있으면 delete_policy가 DeleteConflict로 실패한다. 남의 역할에서 정책을 떼는 것은
     이 스크립트의 몫이 아니므로 떼지 않고 알린다.
     """
-    arn = _app_policy_arn(account)
-    if not _managed_policy_exists(iam, arn):
-        return []
-    roles = []
-    for page in iam.get_paginator("list_entities_for_policy").paginate(
-        PolicyArn=arn, EntityFilter="Role"
-    ):
-        roles += [r["RoleName"] for r in page.get("PolicyRoles", [])]
+    roles: list[str] = []
+    for _, arn in _managed_policies(account):
+        if not _managed_policy_exists(iam, arn):
+            continue
+        for page in iam.get_paginator("list_entities_for_policy").paginate(
+            PolicyArn=arn, EntityFilter="Role"
+        ):
+            roles += [
+                r["RoleName"]
+                for r in page.get("PolicyRoles", [])
+                if r["RoleName"] not in roles
+            ]
     return roles
 
 
@@ -1640,7 +1696,7 @@ def down(clients: dict, account: str) -> None:
     holders = _roles_holding_app_policy(clients["iam"], account)
     if holders:
         sys.exit(
-            f"[smoke] {APP_POLICY} 정책이 IAM 역할 {', '.join(holders)}에 붙어 있다 — 플랫폼 배포의 "
+            f"[smoke] {APP_POLICY}·{COST_POLICY} 정책이 IAM 역할 {', '.join(holders)}에 붙어 있다 — 플랫폼 배포의 "
             "접근 역할이 빌려 쓰는 중이다. 정리 순서는 플랫폼 down → 스모크 down이다"
             "(scripts/provision_platform_aws.py down, ADR-0010 §7)."
         )

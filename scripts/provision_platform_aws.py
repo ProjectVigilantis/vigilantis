@@ -60,8 +60,9 @@
 #      대조한다. 계정 ID와 허용 IP는 저장소에 적지 않는다.
 #   ③ up·deploy·down은 --yes 없이는 아무것도 바꾸지 않는다.
 #   ④ down이 지우는 것은 플랫폼 태그 자원과 **플랫폼 VPC 안의 것**뿐이다. 스모크 환경과
-#      그 앱 정책(vigilantis-smoke-app)은 건드리지 않는다 — 접근 역할은 그 정책을 빌려 쓸 뿐이다.
-#      반대로 스모크 down은 접근 역할이 그 정책을 붙잡고 있으면 멈춘다 — 정리 순서는
+#      그 앱 정책(vigilantis-smoke-app)·비용 정책(vigilantis-smoke-app-cost)은 건드리지 않는다 — 접근
+#      역할은 그 정책을 빌려 쓸 뿐이다. 반대로 스모크 down은 접근 역할이 그 정책을 붙잡고 있으면
+#      멈춘다 — 정리 순서는
 #      **플랫폼 down → 스모크 down**이다(ADR-0010 §7).
 #   ⑤ 이름이 같아도 플랫폼 태그(vigilantis:platform=true)가 없는 IAM 역할·오류 알람·알림 주제는 덮어쓰거나
 #      지우지 않는다.
@@ -177,6 +178,8 @@ CUSTOMER_TAG_KEY = "vigilantis:customer-access"
 # 접근 역할의 권한은 스모크 스크립트가 만든 Action Whitelist 거울 정책을 그대로 빌린다(ADR-0009 §2).
 # 정책을 두 벌 두면 tests/test_provision_smoke_aws.py의 두 방향 보증이 한쪽에만 걸린다
 SMOKE_POLICY_NAME = "vigilantis-smoke-app"
+# 비용 조회(Cost Explorer)도 스모크 스크립트가 만든 정책을 빌린다. 앱 정책이 관리형 한도에 닿아 따로 뒀다
+SMOKE_COST_POLICY_NAME = "vigilantis-smoke-app-cost"
 SMOKE_VPC_NAME = "vigilantis-smoke-vpc"
 SESSION_SECONDS = 900  # 원격 회수(#438 ②)의 노출 상한과 같은 값
 # WAF 허용 CIDR의 최소 접두 길이 — 이보다 넓은 범위(/0–/23)는 받지 않는다. WAF는 /0만 거절한다
@@ -1425,6 +1428,11 @@ def _smoke_policy_arn(account: str) -> str:
     return f"arn:aws:iam::{account}:policy/{SMOKE_POLICY_NAME}"
 
 
+def _smoke_policy_arns(account: str) -> list[str]:
+    """접근 역할이 빌려 쓰는 스모크 정책 전부: 앱 정책(조치·조회)과 비용 정책(Cost Explorer)."""
+    return [_smoke_policy_arn(account), f"arn:aws:iam::{account}:policy/{SMOKE_COST_POLICY_NAME}"]
+
+
 def _require_smoke_env(iam, ec2, account: str) -> None:
     """스모크 환경(앱 정책·VPC)이 먼저 있어야 한다 — **비싼 자원을 만들기 전에** 본다.
 
@@ -1433,13 +1441,15 @@ def _require_smoke_env(iam, ec2, account: str) -> None:
     계정을 갈랐으면 iam·ec2·account는 고객 계정의 것이다(_customer).
     """
     hint = " 계정을 갈랐으면 --customer-account·--customer-profile로 고객 계정을 줄 것."
-    try:
-        iam.get_policy(PolicyArn=_smoke_policy_arn(account))
-    except ClientError as exc:
-        if _code(exc) == "NoSuchEntity":
-            sys.exit(f"{SMOKE_POLICY_NAME} 정책이 없다 — scripts/provision_smoke_aws.py up을 먼저 돌릴 것"
-                     "(접근 역할은 그 Action Whitelist 거울 정책을 빌려 쓴다)." + hint)
-        raise
+    for arn in _smoke_policy_arns(account):
+        try:
+            iam.get_policy(PolicyArn=arn)
+        except ClientError as exc:
+            if _code(exc) == "NoSuchEntity":
+                # 비용 정책이 없으면 이 정책이 생기기 전에 스모크 up을 돌린 것이다. 다시 돌리면 생긴다
+                sys.exit(f"{arn.rsplit('/', 1)[1]} 정책이 없다 — scripts/provision_smoke_aws.py up을 먼저 돌릴 것"
+                         "(접근 역할은 스모크 스크립트가 만든 정책을 빌려 쓴다)." + hint)
+            raise
     if not _find_smoke_vpc(ec2):
         sys.exit(f"스모크 VPC({SMOKE_VPC_NAME})가 없다 — scripts/provision_smoke_aws.py up을 먼저 돌릴 것"
                  "(배포가 그 VPC를 관제 범위 COLLECT_VPC_IDS로 넣는다)." + hint)
@@ -1480,7 +1490,7 @@ def _ensure_roles(iam, account: str, secret_arns: list[str], external_id: str,
                   customer: Optional[dict] = None) -> dict[str, str]:
     """실행·태스크 역할은 플랫폼 계정에, 접근 역할은 고객 계정에 둔다(customer — 없으면 플랫폼 계정 자신)."""
     customer = customer or {"iam": iam, "account": account}
-    smoke_policy = _smoke_policy_arn(customer["account"])  # 존재는 up 맨 앞(_require_smoke_env)에서 확인했다
+    smoke_policies = _smoke_policy_arns(customer["account"])  # 존재는 up 맨 앞(_require_smoke_env)에서 확인했다
     exec_arn = _ensure_role(iam, ROLE_EXEC, ecs_tasks_trust_policy(), "ECS image pull and secret injection")
     iam.attach_role_policy(RoleName=ROLE_EXEC,
                            PolicyArn="arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy")
@@ -1498,7 +1508,8 @@ def _ensure_roles(iam, account: str, secret_arns: list[str], external_id: str,
 
     # 신뢰 정책의 주체(태스크 역할)는 이미 있어야 IAM이 받아 준다 — 새 역할 직후에는 전파 대기
     access_arn = _retry(ensure_access, "접근 역할 신뢰 정책(주체 전파)", ("MalformedPolicyDocument",), timeout=120)
-    customer["iam"].attach_role_policy(RoleName=ROLE_ACCESS, PolicyArn=smoke_policy)
+    for arn in smoke_policies:
+        customer["iam"].attach_role_policy(RoleName=ROLE_ACCESS, PolicyArn=arn)
     return {"exec": exec_arn, "task": task_arn, "access": access_arn}
 
 
@@ -1993,7 +2004,7 @@ def _try(fn: Callable[[], Any], *ignore: str) -> None:
 
 def _delete_roles(iam, account: str) -> None:
     for role, managed, inline in (
-        (ROLE_ACCESS, [_smoke_policy_arn(account)], []),
+        (ROLE_ACCESS, _smoke_policy_arns(account), []),
         (ROLE_TASK, [], ["assume-access-role", NOTIFY_POLICY_TASK, SETTINGS_POLICY_TASK]),
         (ROLE_EXEC, ["arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"],
          ["read-platform-secrets", NOTIFY_POLICY_EXEC]),
