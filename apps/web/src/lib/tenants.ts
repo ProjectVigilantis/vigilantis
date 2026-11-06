@@ -46,6 +46,12 @@ export const VERIFICATION_LABELS: Record<TenantVerificationResult, EnumLabel & {
     tone: 'orange',
     hint: '역할에 권한 정책이 붙지 않았습니다. 고객사에 스택의 권한 정책을 확인하게 하세요.',
   },
+  GUARDDUTY_DISABLED: {
+    label: 'GuardDuty 꺼짐',
+    tone: 'orange',
+    // 정지된 탐지기는 플랫폼이 다시 켜지 않는다(#588 Q1). 안내 페이지 · 요금 고지는 #588 D.
+    hint: '관제 리전 중 GuardDuty를 켜지 못한 곳이 있습니다(정지된 탐지기 · 조직 관리 · SCP · 권한). 고객사에 GuardDuty를 켜게 한 뒤 다시 확인하세요.',
+  },
   UNREACHABLE: {
     label: '확인 불가',
     tone: 'gray',

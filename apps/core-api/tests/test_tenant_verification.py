@@ -1,7 +1,7 @@
 # ==============================================================================
 # [파일 설명]  담당: 김승철 (API 계약 · BE)
-# 연결 확인 판정(tenant_verification.judge_connection) — AWS 대역(예외를 던지는 함수)으로 결과 5갈래를 고정한다.
-# (Post-MVP T-4 2단계 B · #533)
+# 연결 확인 판정(tenant_verification.judge_connection) — AWS 대역(예외를 던지는 함수)으로 결과 6갈래를 고정한다.
+# (Post-MVP T-4 2단계 B · #533, GuardDuty 단계 #588 B)
 #
 #   - LocalStack 은 신뢰 정책 · ExternalId 를 검사하지 않아 ASSUME_DENIED 를 재현하지 못한다 — 판정은 대역으로,
 #     실제 역할의 OK · 틀린 ExternalId 의 ASSUME_DENIED 는 학원 계정 실측(#533 수용 기준)으로 본다.
@@ -21,6 +21,7 @@ from botocore.exceptions import (
     ReadTimeoutError,
 )
 from schemas.api.tenants import TenantVerification, TenantVerificationResult
+from services.guardduty import DETECTOR_DISABLED_REASON
 from tenant_verification import (
     ACCOUNT_MISMATCH_REASON,
     PLATFORM_CREDENTIAL_ERROR_CODES,
@@ -46,8 +47,10 @@ def _raise(exc: BaseException):
     return fail
 
 
-def _judge(*, assume=None, caller=None, read=None, calls: list | None = None) -> VerificationOutcome:
-    """기본은 세 단계가 모두 통과하는 대역이다. 부른 단계를 calls 에 남긴다."""
+def _judge(
+    *, assume=None, caller=None, read=None, guardduty=None, calls: list | None = None
+) -> VerificationOutcome:
+    """기본은 네 단계가 모두 통과하는 대역이다. 부른 단계를 calls 에 남긴다."""
     calls = [] if calls is None else calls
 
     def step(name, fn, default):
@@ -64,13 +67,14 @@ def _judge(*, assume=None, caller=None, read=None, calls: list | None = None) ->
         assume=step("assume", assume, lambda: SESSION),
         caller_account=step("caller", caller, lambda _s: ACCOUNT),
         read=step("read", read, lambda _s: {"Reservations": []}),
+        guardduty=step("guardduty", guardduty, lambda _s: None),
     )
 
 
 def test_every_step_passes_is_ok_and_runs_in_contract_order():
     calls: list = []
     assert _judge(calls=calls) == VerificationOutcome(R.OK, None)
-    assert calls == ["assume", "caller", "read"]
+    assert calls == ["assume", "caller", "read", "guardduty"]
 
 
 # --- 1. AssumeRole -------------------------------------------------------------
@@ -102,7 +106,7 @@ def test_assume_refusal_is_assume_denied_and_stops_there(code):
     ReadTimeoutError(endpoint_url="https://sts.ap-northeast-2.amazonaws.com"),
     NoCredentialsError(),
 ], ids=lambda e: type(e).__name__ if not isinstance(e, ClientError) else e.response["Error"].get("Code", "no-code"))
-@pytest.mark.parametrize("step", ["assume", "caller", "read"])
+@pytest.mark.parametrize("step", ["assume", "caller", "read", "guardduty"])
 def test_not_being_able_to_ask_is_unreachable_at_every_step(exc, step):
     code = exc.response["Error"].get("Code") if isinstance(exc, ClientError) else None
     assert _judge(**{step: _raise(exc)}) == VerificationOutcome(R.UNREACHABLE, code or type(exc).__name__)
@@ -134,8 +138,28 @@ def test_caller_identity_error_is_never_a_refusal():
     "OptInRequired",  # 고객 계정에서 그 리전이 꺼져 있음 — 고객 쪽 설정
 ])
 def test_read_refusal_is_read_denied(code):
-    outcome = _judge(read=_raise(_client_error(code, status=403, operation="DescribeInstances")))
+    calls: list = []
+    outcome = _judge(read=_raise(_client_error(code, status=403, operation="DescribeInstances")), calls=calls)
     assert outcome == VerificationOutcome(R.READ_DENIED, code)
+    assert calls == ["assume", "caller", "read"]  # 읽지 못한 계정에 GuardDuty 를 켜지 않는다
+
+
+# --- 4. GuardDuty 켜기 ----------------------------------------------------------
+
+
+@pytest.mark.parametrize("code", [
+    "AccessDeniedException",  # GuardDuty 정책이 붙지 않음 · SCP 거절
+    "AccessDenied",  # 서비스 연결 역할을 만들 IAM 권한이 없음
+    "BadRequestException",  # 조직 관리 계정이 막음 · 리전 미지원
+])
+def test_guardduty_refusal_is_guardduty_disabled(code):
+    outcome = _judge(guardduty=_raise(_client_error(code, status=403, operation="CreateDetector")))
+    assert outcome == VerificationOutcome(R.GUARDDUTY_DISABLED, code)
+
+
+def test_a_suspended_detector_is_guardduty_disabled_with_its_reason():
+    outcome = _judge(guardduty=lambda _s: DETECTOR_DISABLED_REASON)
+    assert outcome == VerificationOutcome(R.GUARDDUTY_DISABLED, DETECTOR_DISABLED_REASON)
 
 
 # --- 사유 · 계약 모양 -------------------------------------------------------------
@@ -158,6 +182,7 @@ def test_non_aws_exceptions_are_not_recorded_as_a_result():
     _judge(caller=lambda _s: "444455556666"),
     _judge(read=_raise(_client_error("UnauthorizedOperation", status=403))),
     _judge(read=_raise(EndpointConnectionError(endpoint_url="https://ec2.amazonaws.com"))),
+    _judge(guardduty=lambda _s: DETECTOR_DISABLED_REASON),
 ], ids=lambda o: o.result.value)
 def test_every_outcome_fits_the_contract_shape(outcome):
     # OK ⇔ reason_code 없음 — 계약 모델과 DB CHECK(verification_shape)가 같은 짝을 요구한다

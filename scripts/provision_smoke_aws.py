@@ -155,6 +155,16 @@ APP_POLICY = APP_USER
 COST_POLICY = f"{APP_USER}-cost"
 COST_ACTIONS = ("ce:GetCostAndUsage",)
 COST_REGION = "us-east-1"
+# GuardDuty 켜기(services/guardduty.py · #588 B)도 따로 붙인다 — 앱 정책은 한도에 닿아 있고, 서비스 연결 역할
+# 생성(IAM)은 전역 서비스라 관제 리전 조건을 걸 수 없다. 끄는 작업(DeleteDetector · UpdateDetector)은 넣지 않는다.
+GUARDDUTY_POLICY = f"{APP_USER}-guardduty"
+GUARDDUTY_ACTIONS = (
+    "guardduty:ListDetectors",
+    "guardduty:GetDetector",
+    "guardduty:CreateDetector",
+)
+GUARDDUTY_SERVICE = "guardduty.amazonaws.com"
+GUARDDUTY_SERVICE_ROLE = "AWSServiceRoleForAmazonGuardDuty"
 MANAGED_POLICY_MAX_CHARS = 6144
 _POLICY_VERSION_LIMIT = 5  # 관리형 정책 하나가 가질 수 있는 버전 수
 BUDGET_NAME = f"{PREFIX}-monthly"
@@ -542,6 +552,31 @@ def build_cost_policy() -> dict:
     }
 
 
+def build_guardduty_policy(account: str, region: str) -> dict:
+    """GuardDuty 켜기 정책. services/guardduty.py가 부르는 작업의 거울이고, 테스트가 두 방향을 지킨다.
+
+    탐지기 작업은 관제 리전으로 묶는다(CreateDetector는 자원 단위 권한이 없어 Resource가 "*"다).
+    처음 켤 때 GuardDuty가 서비스 연결 역할을 만드는데, 그 권한은 그 역할 ARN과 서비스 이름으로만 연다.
+    """
+    return {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Action": list(GUARDDUTY_ACTIONS),
+                "Resource": "*",
+                "Condition": {"StringEquals": {"aws:RequestedRegion": region}},
+            },
+            {
+                "Effect": "Allow",
+                "Action": ["iam:CreateServiceLinkedRole"],
+                "Resource": f"arn:aws:iam::{account}:role/aws-service-role/{GUARDDUTY_SERVICE}/{GUARDDUTY_SERVICE_ROLE}",
+                "Condition": {"StringEquals": {"iam:AWSServiceName": GUARDDUTY_SERVICE}},
+            },
+        ],
+    }
+
+
 # ------------------------------------------------------------------ 가드·공통
 def _require_real_aws(expected_account: str, sts=None) -> None:
     """실 AWS 전용(가드 ①) + 대상 계정 대조(가드 ②). sts: 이 호출 전용 관리자 세션의 클라이언트."""
@@ -735,6 +770,10 @@ def _app_policy_arn(account: str) -> str:
 
 def _cost_policy_arn(account: str) -> str:
     return f"arn:aws:iam::{account}:policy/{COST_POLICY}"
+
+
+def _guardduty_policy_arn(account: str) -> str:
+    return f"arn:aws:iam::{account}:policy/{GUARDDUTY_POLICY}"
 
 
 def _managed_policy_exists(iam, arn: str) -> bool:
@@ -1398,9 +1437,10 @@ def _ensure_app_user(
     if not _user_exists(iam):
         iam.create_user(UserName=APP_USER, Tags=_tags(APP_USER))
         print(f"[smoke] IAM 사용자 {APP_USER} 생성 — 키는 만들지 않는다(ADR-0009 §2)")
-    # 이 사용자의 권한은 아래 관리형 정책 둘뿐이다. 앱 정책은 Action Whitelist의 거울이고(ADR-0009
-    # §2), 비용 정책은 Cost Explorer 조회만 담는다(COST_POLICY). 인라인은 더 만들지 않으므로 남아
-    # 있다면 관리형 전환 전에 붙은 것이다. 걷어야 권한이 관리형 문서와 인라인의 합집합이 되지 않는다.
+    # 이 사용자의 권한은 아래 관리형 정책 셋뿐이다. 앱 정책은 Action Whitelist의 거울이고(ADR-0009
+    # §2), 비용 정책은 Cost Explorer 조회만(COST_POLICY), GuardDuty 정책은 켜기만 담는다(GUARDDUTY_POLICY).
+    # 인라인은 더 만들지 않으므로 남아 있다면 관리형 전환 전에 붙은 것이다. 걷어야 권한이 관리형 문서와
+    # 인라인의 합집합이 되지 않는다.
     for stale in iam.list_user_policies(UserName=APP_USER)["PolicyNames"]:
         iam.delete_user_policy(UserName=APP_USER, PolicyName=stale)
         print(
@@ -1413,6 +1453,11 @@ def _ensure_app_user(
             build_app_policy(account, region, vpc_id, subnet_ids, instance_role_arns),
         ),
         (COST_POLICY, _cost_policy_arn(account), build_cost_policy()),
+        (
+            GUARDDUTY_POLICY,
+            _guardduty_policy_arn(account),
+            build_guardduty_policy(account, region),
+        ),
     )
     # 이미 붙은 정책의 재연결 멱등성에 기대지 않고 확인한 뒤 붙인다
     attached = {
@@ -1650,7 +1695,7 @@ def _delete_app_user(iam) -> None:
 def _delete_app_policy(iam, account: str) -> None:
     """사용자를 지워도 관리형 정책은 남는다 — 따로 걷는다. 사용자 쪽 연결은 _delete_app_user가 푼다.
 
-    앱 정책과 비용 정책 둘 다 걷는다."""
+    앱 정책 · 비용 정책 · GuardDuty 정책을 모두 걷는다."""
     for name, arn in _managed_policies(account):
         if not _managed_policy_exists(iam, arn):
             continue
@@ -1666,12 +1711,13 @@ def _managed_policies(account: str) -> tuple[tuple[str, str], ...]:
     return (
         (APP_POLICY, _app_policy_arn(account)),
         (COST_POLICY, _cost_policy_arn(account)),
+        (GUARDDUTY_POLICY, _guardduty_policy_arn(account)),
     )
 
 
 def _roles_holding_app_policy(iam, account: str) -> list[str]:
-    """앱 정책·비용 정책을 붙잡고 있는 IAM 역할. 플랫폼의 접근 역할(vigilantis-access, ADR-0010 §3)이
-    둘 다 빌려 쓴다.
+    """앱 정책·비용 정책·GuardDuty 정책을 붙잡고 있는 IAM 역할. 플랫폼의 접근 역할(vigilantis-access,
+    ADR-0010 §3)이 셋 다 빌려 쓴다.
 
     역할에 붙어 있으면 delete_policy가 DeleteConflict로 실패한다. 남의 역할에서 정책을 떼는 것은
     이 스크립트의 몫이 아니므로 떼지 않고 알린다.
@@ -1696,7 +1742,7 @@ def down(clients: dict, account: str) -> None:
     holders = _roles_holding_app_policy(clients["iam"], account)
     if holders:
         sys.exit(
-            f"[smoke] {APP_POLICY}·{COST_POLICY} 정책이 IAM 역할 {', '.join(holders)}에 붙어 있다 — 플랫폼 배포의 "
+            f"[smoke] {APP_POLICY}·{COST_POLICY}·{GUARDDUTY_POLICY} 정책이 IAM 역할 {', '.join(holders)}에 붙어 있다 — 플랫폼 배포의 "
             "접근 역할이 빌려 쓰는 중이다. 정리 순서는 플랫폼 down → 스모크 down이다"
             "(scripts/provision_platform_aws.py down, ADR-0010 §7)."
         )

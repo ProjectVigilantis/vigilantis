@@ -218,7 +218,8 @@ class _ConnectionTarget:
     status: TenantStatus
     access: TenantAccess
     account_id: str
-    region: str
+    # 관제 리전 전부 — 최소 읽기는 첫 리전, GuardDuty 켜기는 리전마다(#588 B). 순서까지 확인한 입력이다.
+    regions: tuple[str, ...]
     suspended_at: datetime | None
     suspended_reason: str | None
 
@@ -229,7 +230,7 @@ def _connection_target(tenant: models.Tenant) -> _ConnectionTarget:
         status=tenant.status,
         access=TenantAccess(tenant.tenant_id, tenant.access_role_arn, tenant.external_id),
         account_id=tenant.aws_account_id,
-        region=tenant.regions[0],
+        regions=tuple(tenant.regions),
         # 재개 뒤 다시 정지되면 상태명은 같아도 처음 확인을 시작한 정지가 아니다.
         suspended_at=tenant.suspended_at,
         suspended_reason=tenant.suspended_reason,
@@ -262,7 +263,7 @@ def _verify_tenant(
         db.rollback()
 
     outcome = verify_connection(
-        target.access, expected_account_id=target.account_id, region=target.region
+        target.access, expected_account_id=target.account_id, regions=target.regions
     )
     stored_id = target.access.tenant_id
     with _management(db, actor) as user:

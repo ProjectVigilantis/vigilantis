@@ -7,7 +7,7 @@ import { VERIFICATION_LABELS, VERIFICATION_STALE_HOURS, hoursSince } from './ten
 import type { IncidentListItem, TenantListItem, TenantVerificationResult, UserListItem } from '../types/api.ts';
 
 /** 다시 시도로 풀리지 않는 연결 확인 결과 — 고객 계정의 역할 · 권한을 사람이 고쳐야 한다. */
-const BLOCKING_RESULTS: ReadonlySet<TenantVerificationResult> = new Set(['ASSUME_DENIED', 'READ_DENIED', 'ACCOUNT_MISMATCH']);
+const BLOCKING_RESULTS: ReadonlySet<TenantVerificationResult> = new Set(['ASSUME_DENIED', 'READ_DENIED', 'ACCOUNT_MISMATCH', 'GUARDDUTY_DISABLED']);
 
 /** ARN의 계정 칸(`arn:partition:service:region:account:resource`). 계정이 없는 ARN(S3 등)은 null이다. */
 export function arnAccount(arn: string): string | null {

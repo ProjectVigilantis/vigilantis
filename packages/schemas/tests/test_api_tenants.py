@@ -68,7 +68,7 @@ def test_status_values_match_contract():
 
 def test_verification_results_match_contract():
     assert {r.value for r in TenantVerificationResult} == {
-        "OK", "ASSUME_DENIED", "ACCOUNT_MISMATCH", "READ_DENIED", "UNREACHABLE",
+        "OK", "ASSUME_DENIED", "ACCOUNT_MISMATCH", "READ_DENIED", "GUARDDUTY_DISABLED", "UNREACHABLE",
     }
 
 

@@ -5,6 +5,7 @@
 대역은 서명에 쓰인 액세스 키를 보고 답하므로 「어느 자격으로 나갔는가」를 그대로 본다.
 """
 
+import json
 import re
 import sys
 import threading
@@ -79,12 +80,48 @@ class FakeAws:
         self.caller_account: str | None = (
             None  # GetCallerIdentity 가 답할 계정(없으면 서명 키의 계정)
         )
+        # GuardDuty(REST-JSON) — 리전 → {탐지기 ID: 상태}. 실제처럼 계정 · 리전마다 하나다
+        self.detectors: dict[str, dict[str, str]] = {}
         self._lock = threading.Lock()
 
     def assume_calls(self) -> list[dict]:
         return [params for action, _key, params in self.sent if action == "AssumeRole"]
 
+    def _guardduty(self, request, key: str, region: str):
+        path = request.url.split("amazonaws.com", 1)[1].split("?", 1)[0]
+        action = {
+            ("GET", "/detector"): "ListDetectors",
+            ("POST", "/detector"): "CreateDetector",
+        }.get((request.method, path), "GetDetector" if path.startswith("/detector/") else "")
+        body = request.body.decode() if isinstance(request.body, bytes) else (request.body or "")
+        with self._lock:
+            self.sent.append((action, key, json.loads(body) if body else {}))
+            self.regions.append((action, region))
+        detectors = self.detectors.setdefault(region, {})
+        if action in self.deny:
+            payload = {"__type": self.deny[action], "message": "m"}
+            return AWSResponse(request.url, 403, {"x-amzn-ErrorType": self.deny[action]},
+                               _Raw(json.dumps(payload)))
+        if action == "ListDetectors":
+            payload = {"detectorIds": sorted(detectors)}
+        elif action == "CreateDetector":
+            detectors[f"d-{region}"] = "ENABLED"
+            payload = {"detectorId": f"d-{region}"}
+        elif action == "GetDetector":
+            payload = {"status": detectors[path.rsplit("/", 1)[1]], "serviceRole": "r", "createdAt": "t"}
+        else:
+            raise AssertionError(f"예상하지 않은 GuardDuty 요청: {request.method} {path}")
+        return AWSResponse(request.url, 200, {}, _Raw(json.dumps(payload)))
+
     def send(self, request):
+        if ".guardduty." in request.url or "//guardduty." in request.url:
+            auth = request.headers["Authorization"]
+            auth_text = auth.decode() if isinstance(auth, bytes) else auth
+            return self._guardduty(
+                request,
+                _SIGNED_KEY.search(auth_text).group(1),
+                _SIGNED_REGION.search(auth_text).group(1),
+            )
         body = (
             request.body.decode()
             if isinstance(request.body, bytes)
@@ -372,19 +409,22 @@ def test_external_id_stays_out_of_repr():
 REGION = (
     "us-west-2"  # 테넌트 regions[0] — 플랫폼 기본 리전(ap-northeast-2)과 일부러 다르게
 )
+SECOND_REGION = "eu-west-1"
+_STEPS = ["AssumeRole", "GetCallerIdentity", "DescribeInstances"]
+_GUARDDUTY_STEPS = ["ListDetectors", "CreateDetector"]
 
 
-def _verify(access=TENANT_A, expected="111111111111"):
+def _verify(access=TENANT_A, expected="111111111111", regions=(REGION,)):
     from tenant_verification import verify_connection
 
-    return verify_connection(access, expected_account_id=expected, region=REGION)
+    return verify_connection(access, expected_account_id=expected, regions=regions)
 
 
 def _actions(aws):
     return [(action, key) for action, key, _p in aws.sent]
 
 
-def test_verify_ok_walks_the_three_steps_with_the_assumed_session(aws, settings):
+def test_verify_ok_walks_the_four_steps_with_the_assumed_session(aws, settings):
     from schemas.api.tenants import TenantVerificationResult
 
     outcome = _verify()
@@ -394,18 +434,57 @@ def test_verify_ok_walks_the_three_steps_with_the_assumed_session(aws, settings)
         ("AssumeRole", PLATFORM_KEY),
         ("GetCallerIdentity", "TENANT111111111111-1"),
         ("DescribeInstances", "TENANT111111111111-1"),
+        ("ListDetectors", "TENANT111111111111-1"),
+        ("CreateDetector", "TENANT111111111111-1"),
     ]
+    (params,) = [p for a, _k, p in aws.sent if a == "CreateDetector"]
+    assert params["enable"] is True and "features" not in params  # 부가 보호 기능은 켜지 않는다
+    assert aws.detectors == {REGION: {f"d-{REGION}": "ENABLED"}}
     (params,) = [p for a, _k, p in aws.sent if a == "DescribeInstances"]
     assert params["MaxResults"] == "5"
     assert (
         params.get("Filter.1.Name") is None
     )  # 범위를 좁히지 않는다 — 읽기 권한만 본다
-    # AssumeRole 은 플랫폼 리전, 고객 계정 쪽 두 단계는 테넌트의 첫 리전에서 묻는다
+    # AssumeRole 은 플랫폼 리전, 고객 계정 쪽 단계는 테넌트의 첫 리전에서 묻는다
     assert aws.regions == [
         ("AssumeRole", "ap-northeast-2"),
         ("GetCallerIdentity", REGION),
         ("DescribeInstances", REGION),
+        ("ListDetectors", REGION),
+        ("CreateDetector", REGION),
     ]
+
+
+def test_verify_turns_guardduty_on_in_every_monitored_region(aws, settings):
+    aws.detectors = {SECOND_REGION: {"d-1": "ENABLED"}}  # 두 번째 리전은 이미 켜져 있다
+
+    assert _verify(regions=(REGION, SECOND_REGION)).result.value == "OK"
+
+    assert aws.regions[3:] == [
+        ("ListDetectors", REGION),
+        ("CreateDetector", REGION),
+        ("ListDetectors", SECOND_REGION),
+        ("GetDetector", SECOND_REGION),
+    ]
+    assert aws.detectors == {REGION: {f"d-{REGION}": "ENABLED"}, SECOND_REGION: {"d-1": "ENABLED"}}
+
+
+def test_verify_stops_at_the_first_region_it_cannot_turn_on(aws, settings):
+    aws.detectors = {REGION: {"d-1": "DISABLED"}}
+
+    outcome = _verify(regions=(REGION, SECOND_REGION))
+
+    assert (outcome.result.value, outcome.reason_code) == ("GUARDDUTY_DISABLED", "DetectorDisabled")
+    assert aws.detectors == {REGION: {"d-1": "DISABLED"}}  # 정지된 탐지기를 다시 켜지 않는다
+    assert SECOND_REGION not in [region for _a, region in aws.regions]
+
+
+def test_verify_guardduty_refusal_is_parsed_from_the_json_error(aws, settings):
+    aws.deny["CreateDetector"] = "AccessDeniedException"
+
+    outcome = _verify()
+
+    assert (outcome.result.value, outcome.reason_code) == ("GUARDDUTY_DISABLED", "AccessDeniedException")
 
 
 @pytest.mark.parametrize(
@@ -430,7 +509,7 @@ def test_verify_stops_at_the_first_failed_step(aws, settings, deny, caller, expe
     assert (outcome.result.value, outcome.reason_code) == expected
     sent = [a for a, _k in _actions(aws)]
     stop = {"ASSUME_DENIED": 1, "ACCOUNT_MISMATCH": 2, "READ_DENIED": 3}[expected[0]]
-    assert sent == ["AssumeRole", "GetCallerIdentity", "DescribeInstances"][:stop]
+    assert sent == _STEPS[:stop]
 
 
 @pytest.mark.parametrize(
@@ -439,8 +518,9 @@ def test_verify_stops_at_the_first_failed_step(aws, settings, deny, caller, expe
         ("AssumeRole", "InvalidClientTokenId", 1),  # 플랫폼 자격 거절 — 고객의 거절이 아니다
         ("GetCallerIdentity", "AccessDenied", 2),  # 권한이 필요 없는 호출의 오류는 거절이 아니다
         ("DescribeInstances", "AuthFailure", 3),
+        ("ListDetectors", "UnrecognizedClientException", 4),  # 스로틀링은 botocore 가 다시 물어 한 번이 아니다
     ],
-    ids=["assume", "account", "read"],
+    ids=["assume", "account", "read", "guardduty"],
 )
 def test_verify_platform_side_errors_are_unreachable_not_denial(
     aws, settings, action, code, stop
@@ -451,7 +531,7 @@ def test_verify_platform_side_errors_are_unreachable_not_denial(
 
     assert (outcome.result.value, outcome.reason_code) == ("UNREACHABLE", code)
     sent = [a for a, _k in _actions(aws)]
-    assert sent == ["AssumeRole", "GetCallerIdentity", "DescribeInstances"][:stop]
+    assert sent == (_STEPS + _GUARDDUTY_STEPS)[:stop]
 
 
 def test_verify_without_platform_credentials_is_unreachable(aws, settings, monkeypatch):

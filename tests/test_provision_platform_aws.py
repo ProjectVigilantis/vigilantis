@@ -76,6 +76,7 @@ def test_access_role_borrows_the_smoke_whitelist_policy():
     """권한 정책을 두 벌 두지 않는다 — 스모크 테스트의 두 방향 보증이 그 한 벌에 걸려 있다."""
     assert platform.SMOKE_POLICY_NAME == smoke.APP_POLICY
     assert platform.SMOKE_COST_POLICY_NAME == smoke.COST_POLICY
+    assert platform.SMOKE_GUARDDUTY_POLICY_NAME == smoke.GUARDDUTY_POLICY
     assert platform.SMOKE_VPC_NAME == smoke.VPC_NAME
 
 
@@ -694,7 +695,8 @@ def _client_error(code: str, operation: str) -> ClientError:
 _PLATFORM_TAGS = [{"Key": platform.TAG_KEY, "Value": platform.TAG_VALUE}]
 _SMOKE_POLICY = f"arn:aws:iam::{ACCOUNT}:policy/{platform.SMOKE_POLICY_NAME}"
 _SMOKE_COST_POLICY = f"arn:aws:iam::{ACCOUNT}:policy/{platform.SMOKE_COST_POLICY_NAME}"
-_SMOKE_POLICIES = [_SMOKE_POLICY, _SMOKE_COST_POLICY]
+_SMOKE_GUARDDUTY_POLICY = f"arn:aws:iam::{ACCOUNT}:policy/{platform.SMOKE_GUARDDUTY_POLICY_NAME}"
+_SMOKE_POLICIES = [_SMOKE_POLICY, _SMOKE_COST_POLICY, _SMOKE_GUARDDUTY_POLICY]
 
 
 class FakeIam:
@@ -1814,6 +1816,7 @@ def test_up_stops_before_creating_anything_when_a_same_named_alarm_is_not_ours()
 CUSTOMER = "444455556666"
 _CUSTOMER_SMOKE_POLICY = f"arn:aws:iam::{CUSTOMER}:policy/{platform.SMOKE_POLICY_NAME}"
 _CUSTOMER_SMOKE_COST_POLICY = f"arn:aws:iam::{CUSTOMER}:policy/{platform.SMOKE_COST_POLICY_NAME}"
+_CUSTOMER_SMOKE_GUARDDUTY_POLICY = f"arn:aws:iam::{CUSTOMER}:policy/{platform.SMOKE_GUARDDUTY_POLICY_NAME}"
 _CUSTOMER_TAG = [{"Key": platform.CUSTOMER_TAG_KEY, "Value": ACCOUNT}]
 
 
@@ -1831,10 +1834,11 @@ def test_split_accounts_put_only_the_access_role_in_the_customer_account():
     (trusted,) = cust.trust[platform.ROLE_ACCESS]["Statement"]
     assert trusted["Principal"] == {"AWS": f"arn:aws:iam::{ACCOUNT}:role/{platform.ROLE_TASK}"}
     assert trusted["Condition"] == {"StringEquals": {"sts:ExternalId": "ext-1"}}
-    # 권한은 고객 계정의 스모크 거울 정책과 비용 정책이고, 고객 태그가 이 플랫폼 계정을 가리킨다
+    # 권한은 고객 계정의 스모크 거울 정책 · 비용 정책 · GuardDuty 정책이고, 고객 태그가 이 플랫폼 계정을 가리킨다
     assert cust.attached == [
         (platform.ROLE_ACCESS, _CUSTOMER_SMOKE_POLICY),
         (platform.ROLE_ACCESS, _CUSTOMER_SMOKE_COST_POLICY),
+        (platform.ROLE_ACCESS, _CUSTOMER_SMOKE_GUARDDUTY_POLICY),
     ]
     assert cust.roles[platform.ROLE_ACCESS]["Tags"] == _CUSTOMER_TAG
 
@@ -1882,7 +1886,8 @@ def test_customer_role_of_someone_else_is_not_overwritten(tags, reason):
 @pytest.mark.parametrize("customer_policies, customer_vpc, missing", [
     ([], "vpc-smoke", platform.SMOKE_POLICY_NAME),
     ([_CUSTOMER_SMOKE_POLICY], "vpc-smoke", platform.SMOKE_COST_POLICY_NAME),
-    ([_CUSTOMER_SMOKE_POLICY, _CUSTOMER_SMOKE_COST_POLICY], None, "스모크 VPC"),
+    ([_CUSTOMER_SMOKE_POLICY, _CUSTOMER_SMOKE_COST_POLICY], "vpc-smoke", platform.SMOKE_GUARDDUTY_POLICY_NAME),
+    ([_CUSTOMER_SMOKE_POLICY, _CUSTOMER_SMOKE_COST_POLICY, _CUSTOMER_SMOKE_GUARDDUTY_POLICY], None, "스모크 VPC"),
 ])
 def test_split_up_looks_for_the_smoke_environment_in_the_customer_account(customer_policies, customer_vpc, missing):
     """플랫폼 계정에 같은 이름의 정책·VPC가 있어도 그것으로 통과하지 않는다."""
