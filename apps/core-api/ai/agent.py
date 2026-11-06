@@ -62,6 +62,7 @@ from security.risk_evaluator import (
 
 from ai.capabilities import secops_action_targets
 from ai.model_client import (
+    AIModelAdapterError,
     AIModelClient,
     AIModelContractError,
     AIModelError,
@@ -305,7 +306,9 @@ def _model_failure(step: str, exc: AIModelError) -> _Failure:
     """경계 예외 → 사유. 메시지는 싣지 않고 클래스 이름과 phase만 남긴다."""
     if isinstance(exc, AIModelRejectedError):
         reason = AnalysisFailureReason.MODEL_REJECTED
-    elif isinstance(exc, AIModelContractError):
+    elif isinstance(exc, (AIModelContractError, AIModelAdapterError)):
+        # 어댑터 결함(응답 모양·미분류 예외)은 제공자 장애(MODEL_UNAVAILABLE)가 아니다 —
+        # 저장되는 사유이므로 응답 파싱 실패와 같은 갈래에 둔다
         reason = AnalysisFailureReason.MODEL_CONTRACT_VIOLATION
     else:
         reason = AnalysisFailureReason.MODEL_UNAVAILABLE
