@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import io
+import logging
 from datetime import UTC, datetime
 
 import boto3
@@ -14,6 +15,7 @@ import pytest
 from auth import bootstrap_admin
 from auth.cognito import (
     AuthProviderUnavailableError,
+    AuthRateLimitedError,
     CognitoUser,
     UserStateConflictError,
 )
@@ -23,7 +25,7 @@ from db import models
 from db.repositories import auth as auth_repo
 from schemas.api.auth import PlatformRole, UserRole
 from sqlalchemy import select, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from tests.test_user_admin_api import FORCE, ISSUER, FakeAdapter, use_adapter
 
 BASE = "/api/v1/staff"
@@ -533,30 +535,83 @@ def test_invite_existing_app_identity_is_409_without_db_write(client_pg, db, mak
     resp = invite(client_pg, row.email)
     assert (resp.status_code, resp.json()["error"]["code"]) == (409, "USER_STATE_CONFLICT")
     assert (user_count(db), events(db, existing.user_id)) == (count, [])
+    # 그 sub 는 다른 앱 계정의 로그인 신원이다 — 보상 삭제하지 않는다
+    assert adapter.calls == [("create", row.email, False)]
 
 
-def test_invite_provider_failure_leaves_no_row(client_pg, db, adapter):
-    adapter.create_error = AuthProviderUnavailableError()
+@pytest.mark.parametrize("error,status", [(AuthProviderUnavailableError, 503), (AuthRateLimitedError, 429)])
+def test_invite_provider_failure_leaves_no_row(client_pg, db, adapter, error, status):
+    adapter.create_error = error()
     count = user_count(db)
-    assert invite(client_pg).status_code == 503
+    assert invite(client_pg).status_code == status
     assert user_count(db) == count
+    assert adapter.calls == [("create", NEW_EMAIL, False)]  # 만들지 않았다(sub 모름) — 보상 삭제 없음
 
 
-def test_invite_db_failure_is_sanitized_500_without_row(client_pg, db, adapter, monkeypatch):
+def test_invite_db_failure_is_sanitized_500_and_discards_created_cognito_user(client_pg, db, adapter, monkeypatch):
     def boom(*args, **kwargs):
         raise SQLAlchemyError("secret-detail postgres://user:pw@host")
 
     monkeypatch.setattr(auth_repo, "add_user_event", boom)
+    open_at_delete = []
+    original_delete = adapter.admin_delete_user
+
+    def delete_spy(username):
+        open_at_delete.append(db.in_transaction())
+        return original_delete(username)
+
+    adapter.admin_delete_user = delete_spy
     count = user_count(db)
     resp = invite(client_pg)
     assert (resp.status_code, resp.json()["error"]["code"]) == (500, "INTERNAL_ERROR")
     assert "secret-detail" not in resp.text
-    assert adapter.calls == [("create", NEW_EMAIL, False)]  # Cognito 사용자는 남는다(복구는 CLI)
+    # 만든 사용자를 sub 로 지운다(이메일이 아니다) — 신원 확인 트랜잭션은 Cognito 호출 전에 닫혔다
+    assert adapter.calls == [("create", NEW_EMAIL, False), ("delete", "sub-staff-new")]
+    assert open_at_delete == [False]
     assert user_count(db) == count
 
 
-def test_invite_by_demoted_actor_after_cognito_writes_nothing(client_pg, db, central_session, adapter):
-    """SDK 뒤 잠금 안 재판정 — Cognito 는 이미 불렸지만 강등된 행위자는 403 이고 DB 는 쓰지 않는다."""
+def test_invite_does_not_discard_when_commit_actually_landed(client_pg, db, adapter, monkeypatch):
+    """commit 이 반영된 뒤 연결 오류로 500 이 된 경우 — (issuer, sub) 의 앱 계정이 있으므로 Cognito 사용자를 지우지 않는다."""
+    real_commit = db.commit
+    lost = []
+
+    def commit_then_lose_connection():
+        real_commit()
+        if not lost and ("create", NEW_EMAIL, False) in adapter.calls:
+            lost.append(True)
+            raise OperationalError("COMMIT", {}, Exception("server closed the connection"))
+
+    monkeypatch.setattr(db, "commit", commit_then_lose_connection)
+    resp = invite(client_pg)
+    assert (resp.status_code, resp.json()["error"]["code"]) == (500, "INTERNAL_ERROR")
+    assert lost == [True]
+    assert adapter.calls == [("create", NEW_EMAIL, False)]
+    assert auth_repo.get_user_by_identity(db, issuer=ISSUER, cognito_sub="sub-staff-new") is not None
+
+
+def test_invite_discard_failure_keeps_500_and_logs_only_sub_and_code(client_pg, db, adapter, monkeypatch, caplog):
+    def boom(*args, **kwargs):
+        raise SQLAlchemyError("secret-detail")
+
+    monkeypatch.setattr(auth_repo, "add_user_event", boom)
+    failure = AuthProviderUnavailableError()
+    failure.provider_code = "InternalErrorException"
+    adapter.delete_error = failure
+    count = user_count(db)
+    with caplog.at_level(logging.WARNING, logger="auth.staff_service"):
+        resp = invite(client_pg)
+    assert (resp.status_code, resp.json()["error"]["code"]) == (500, "INTERNAL_ERROR")
+    assert adapter.calls == [("create", NEW_EMAIL, False), ("delete", "sub-staff-new")]
+    assert user_count(db) == count
+    expected = "staff invite compensation failed sub=sub-staff-new error_type=AuthProviderUnavailableError error_code=InternalErrorException"
+    assert [(r.levelno, r.getMessage()) for r in caplog.records if r.name == "auth.staff_service"] == [
+        (logging.WARNING, expected)
+    ]
+
+
+def demote_during_create(db, central_session, adapter):
+    """Cognito 생성 중에 행위자가 강등된다 — 잠금 안 재판정이 403 으로 끝난다."""
     original = adapter.admin_create_user
 
     def demote_then_create(email, *, resend=False):
@@ -567,9 +622,34 @@ def test_invite_by_demoted_actor_after_cognito_writes_nothing(client_pg, db, cen
         return original(email, resend=resend)
 
     adapter.admin_create_user = demote_then_create
+
+
+def test_invite_by_demoted_actor_after_cognito_writes_nothing(client_pg, db, central_session, adapter):
+    """SDK 뒤 잠금 안 재판정 — Cognito 는 이미 불렸지만 강등된 행위자는 403 이고 DB 는 쓰지 않는다.
+    만든 Cognito 사용자는 보상 삭제한다."""
+    demote_during_create(db, central_session, adapter)
     count = user_count(db)
     assert invite(client_pg).status_code == 403
-    assert (user_count(db), adapter.calls) == (count, [("create", NEW_EMAIL, False)])
+    assert (user_count(db), adapter.calls) == (
+        count, [("create", NEW_EMAIL, False), ("delete", "sub-staff-new")]
+    )
+
+
+def test_invite_unclassified_discard_failure_keeps_the_original_403(client_pg, db, central_session, adapter, caplog):
+    """보상 삭제의 분류되지 않은 실패(SDK 응답 디코딩 오류 등)도 원래 실패를 바꾸지 않는다 — 경고 1줄만 남는다."""
+    demote_during_create(db, central_session, adapter)
+    adapter.delete_error = RuntimeError("PRIVATE-TEXT from a broken provider body")
+    count = user_count(db)
+    with caplog.at_level(logging.WARNING, logger="auth.staff_service"):
+        resp = invite(client_pg)
+    assert (resp.status_code, resp.json()["error"]["code"]) == (403, "AUTH_FORBIDDEN")
+    assert (user_count(db), adapter.calls) == (
+        count, [("create", NEW_EMAIL, False), ("delete", "sub-staff-new")]
+    )
+    assert [(r.levelno, r.getMessage()) for r in caplog.records if r.name == "auth.staff_service"] == [
+        (logging.WARNING, "staff invite compensation failed sub=sub-staff-new error_type=RuntimeError error_code=None")
+    ]
+    assert "PRIVATE-TEXT" not in caplog.text
 
 
 def test_central_resends_staff_invite_and_records_event(client_pg, db, make_auth_session, adapter):

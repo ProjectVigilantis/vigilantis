@@ -400,6 +400,67 @@ def test_admin_create_user_error_mapping(env, code, expected):
         adapter.admin_create_user(EMAIL)
 
 
+# --- #572 1번: 직원 초대의 보상 삭제(AdminDeleteUser) ------------------------------------------
+
+
+class NoMutationClient:
+    """재시도 없는 클라이언트(mutation_client) 자리 — 닿으면 테스트가 실패한다."""
+
+    def __getattr__(self, name):
+        raise AssertionError(f"mutation client used: {name}")
+
+
+@pytest.fixture
+def delete_env():
+    """보상 삭제는 일반 재시도 클라이언트로만 보낸다 — 재시도 없는 클라이언트를 따로 두고 닿지 않음을 확인한다."""
+    client = make_client()
+    adapter = cognito.CognitoAdapter(
+        client,
+        mutation_client=NoMutationClient(),
+        user_pool_id=POOL,
+        client_id=CLIENT_ID,
+        client_secret=CLIENT_SECRET,
+        region="ap-northeast-2",
+    )
+    with Stubber(client) as stubber:
+        yield adapter, stubber
+        stubber.assert_no_pending_responses()
+
+
+def test_admin_delete_user_params_on_the_retry_client(delete_env):
+    adapter, stubber = delete_env
+    stubber.add_response("admin_delete_user", {}, {"UserPoolId": POOL, "Username": "sub-1"})
+    assert adapter.admin_delete_user("sub-1") is None
+
+
+def test_admin_delete_user_not_found_is_already_deleted(delete_env):
+    adapter, stubber = delete_env
+    add_error(stubber, "admin_delete_user", "UserNotFoundException")
+    assert adapter.admin_delete_user("sub-1") is None
+
+
+@pytest.mark.parametrize(
+    "code,status,expected",
+    [
+        ("NotAuthorizedException", 400, cognito.AuthProviderUnavailableError),
+        ("AccessDeniedException", 400, cognito.AuthProviderUnavailableError),
+        ("InternalErrorException", 500, cognito.AuthProviderUnavailableError),
+        ("UserNotFoundException", 503, cognito.AuthProviderUnavailableError),
+        ("TooManyRequestsException", 400, cognito.AuthRateLimitedError),
+    ],
+)
+def test_admin_delete_user_failures_are_classified_with_provider_code(delete_env, caplog, code, status, expected):
+    adapter, stubber = delete_env
+    add_error(stubber, "admin_delete_user", code, status)
+    with caplog.at_level(logging.DEBUG), pytest.raises(cognito.AuthError) as info:
+        adapter.admin_delete_user("sub-1")
+    assert type(info.value) is expected
+    assert (info.value.provider_code, info.value.provider_status) == (code, status)
+    assert info.value.from_provider_call
+    assert "PRIVATE-TEXT" not in caplog.text
+    assert code in caplog.text and "admin_delete_user" in caplog.text
+
+
 def test_password_reset_request_params_and_discarded_delivery_details(env):
     adapter, stubber = env
     stubber.add_response(
