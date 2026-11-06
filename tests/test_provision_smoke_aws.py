@@ -51,6 +51,7 @@ from schemas.rightsizing_policy import rightsizing_target_type
 from schemas.runbook_parameters import RuleNumber
 from services.aws import autoscaling as aws_autoscaling
 from services.aws import executor, rollback
+from services import costs as costs_service
 
 ACCOUNT = "123456789012"
 REGION = "ap-northeast-2"
@@ -71,6 +72,7 @@ _IAM_SERVICE = {
     "elbv2": "elasticloadbalancing",
     "autoscaling": "autoscaling",
     "cloudwatch": "cloudwatch",
+    "ce": "ce",
 }
 
 
@@ -278,6 +280,45 @@ def test_policy_grants_every_read_the_collector_makes():
     assert calls, "수집기 호출을 하나도 못 찾았다 — 패턴이 코드와 어긋났다"
     missing = sorted(action for action in calls if not _is_granted(action))
     assert not missing, f"앱 정책의 조회 권한에 없는 수집기 호출: {missing}"
+
+
+# 비용 조회의 거울. services/costs.py는 수집기도 실행 경로도 아니라 위 대조들에 걸리지 않는다(#581이
+# 이 권한 없이 초록불로 머지됐다). 비용 권한은 앱 정책이 아니라 비용 정책(COST_POLICY)에 둔다.
+_COSTS = REPO_ROOT / "apps" / "core-api" / "services" / "costs.py"
+
+
+def _cost_calls() -> set[str]:
+    source = _COSTS.read_text(encoding="utf-8")
+    clients = _collector_clients(source)
+    assert clients, "비용 코드의 aws_client 대입을 하나도 못 찾았다. 패턴이 코드와 어긋났다"
+    names = "|".join(sorted(clients))
+    calls = {
+        _iam_action(f"{clients[variable]}.{operation}")
+        for variable, operation in re.findall(rf"\b({names})\.([a-z0-9_]+)\(", source)
+    }
+    assert calls, "비용 코드의 AWS 호출을 하나도 못 찾았다. 패턴이 코드와 어긋났다"
+    return calls
+
+
+def test_cost_policy_grants_exactly_what_the_cost_code_calls():
+    """두 방향을 본다. 비용 코드가 호출을 더하면 정책이 따라가야 하고, 부르지 않는 권한이 끼어도 깨진다."""
+    assert set(_granted(smoke.build_cost_policy())) == _cost_calls()
+
+
+def test_cost_policy_is_fenced_to_the_cost_explorer_endpoint():
+    """Cost Explorer 엔드포인트는 us-east-1 하나다. 비용 코드가 부르는 리전과 정책의 리전 조건이 같아야 한다."""
+    assert smoke.COST_REGION == costs_service.CE_REGION
+    (statement,) = smoke.build_cost_policy()["Statement"]
+    assert statement["Condition"] == {
+        "StringEquals": {"aws:RequestedRegion": costs_service.CE_REGION}
+    }
+    assert not [a for a in statement["Action"] if "*" in a]
+
+
+def test_app_policy_does_not_carry_cost_explorer():
+    """앱 정책의 조회 문장은 관제 리전으로 묶여 있어 ce를 넣으면 us-east-1 호출이 거절된다."""
+    for policy in (POLICY, POLICY_WITH_ROLE):
+        assert not [a for a in _granted(policy) if a.startswith("ce:")]
 
 
 def test_target_registration_baseline_is_kept_and_smoke_tag_fenced():
@@ -1138,9 +1179,10 @@ def test_app_policy_is_attached_as_a_managed_policy():
     """사용자 인라인 정책(합계 2,048자)으로는 저장되지 않는다(#348 리뷰 — 2,084자)."""
     iam = FakeIam()
     smoke._ensure_app_user(iam, ACCOUNT, REGION, VPC_ID, SUBNET_IDS)
-    arn = smoke._app_policy_arn(ACCOUNT)
-    assert iam.users[smoke.APP_USER] == {arn}
+    arn, cost_arn = smoke._app_policy_arn(ACCOUNT), smoke._cost_policy_arn(ACCOUNT)
+    assert iam.users[smoke.APP_USER] == {arn, cost_arn}
     assert iam.default_document(arn) == POLICY
+    assert iam.default_document(cost_arn) == smoke.build_cost_policy()
 
     iam.writes.clear()
     smoke._ensure_app_user(
@@ -1229,7 +1271,10 @@ def test_up_clears_an_inline_policy_left_from_before_the_managed_switch():
 
     smoke._ensure_app_user(iam, ACCOUNT, REGION, VPC_ID, SUBNET_IDS)
     assert iam.inline[smoke.APP_USER] == set()
-    assert iam.users[smoke.APP_USER] == {smoke._app_policy_arn(ACCOUNT)}
+    assert iam.users[smoke.APP_USER] == {
+        smoke._app_policy_arn(ACCOUNT),
+        smoke._cost_policy_arn(ACCOUNT),
+    }
 
 
 # ⑥ 비용 알림 (ADR-0009 §3 2026-10-12 개정) ----------------------------------------------------
