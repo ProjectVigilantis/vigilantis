@@ -216,6 +216,31 @@ def _audit(
     )
 
 
+def _require_new_identity(db: Session, adapter: Any, provider_user: Any) -> None:
+    """제공자 신원 (issuer, sub) 이 앱에 이미 있으면 409 — 자동 연결하지 않는다(초대 공통, 잠금 안에서 부른다)."""
+    if (
+        auth_repo.get_user_by_identity(db, issuer=adapter.issuer, cognito_sub=provider_user.sub)
+        is not None
+    ):
+        raise ApiError(ErrorCode.USER_STATE_CONFLICT)
+
+
+def _provider_resend_invite(adapter: Any, identity: tuple[str, str, str]) -> None:
+    """재발송 공통(고객 · 직원) — 트랜잭션 밖. 앱 신원 (issuer, sub, email) 이 설정된 풀의 Cognito 사용자와 같고
+    상태가 FORCE_CHANGE_PASSWORD 일 때만 AdminCreateUser(RESEND). 조건이 다르면 409(재발송 없음)."""
+    issuer, sub, email = identity
+    if issuer != adapter.issuer:
+        raise ApiError(ErrorCode.USER_STATE_CONFLICT)
+    provider_user = adapter.admin_get_user(email)
+    if (
+        provider_user is None
+        or provider_user.sub != sub
+        or provider_user.status != FORCE_CHANGE_PASSWORD
+    ):
+        raise ApiError(ErrorCode.USER_STATE_CONFLICT)
+    adapter.admin_create_user(email, resend=True)
+
+
 # --- 조회 ----------------------------------------------------------------------
 
 
@@ -360,13 +385,7 @@ def invite_user(
         if _invite_tenant(admin, tenant_id) != target_tenant:
             raise ApiError(ErrorCode.TENANT_NOT_FOUND)
         _require_active_tenant(db, target_tenant, hold=True)
-        if (
-            auth_repo.get_user_by_identity(
-                db, issuer=adapter.issuer, cognito_sub=provider_user.sub
-            )
-            is not None
-        ):
-            raise ApiError(ErrorCode.USER_STATE_CONFLICT)
+        _require_new_identity(db, adapter, provider_user)
         now = actor.clock()
         row = auth_repo.create_user(
             db,
@@ -410,18 +429,7 @@ def resend_invite(db: Session, actor: Actor, get_adapter: Callable[[], Any], use
         identity = (target.issuer, target.cognito_sub, target.email)
     finally:
         db.rollback()
-    adapter = get_adapter()
-    issuer, sub, email = identity
-    if issuer != adapter.issuer:
-        raise ApiError(ErrorCode.USER_STATE_CONFLICT)
-    provider_user = adapter.admin_get_user(email)
-    if (
-        provider_user is None
-        or provider_user.sub != sub
-        or provider_user.status != FORCE_CHANGE_PASSWORD
-    ):
-        raise ApiError(ErrorCode.USER_STATE_CONFLICT)
-    adapter.admin_create_user(email, resend=True)
+    _provider_resend_invite(get_adapter(), identity)
     with _transaction(db, actor) as admin:
         current = _target(db, user_id, admin)
         if (current.issuer, current.cognito_sub, current.email) != identity:
