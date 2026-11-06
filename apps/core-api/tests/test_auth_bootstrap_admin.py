@@ -20,6 +20,7 @@ from db import models
 from db.repositories import auth as auth_repo
 from schemas.api.auth import AccountType, PlatformRole, UserRole
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 POOL = "ap-northeast-2_pool"
@@ -326,6 +327,77 @@ def test_cognito_error_creates_no_row_and_prints_only_the_code(db, cognito_clien
     assert users(db) == []
 
 
+def _fail_registration(monkeypatch):
+    def boom(*args, **kwargs):
+        raise SQLAlchemyError("secret-detail postgres://user:pw@host")
+
+    monkeypatch.setattr(auth_repo, "create_user", boom)
+
+
+@pytest.mark.parametrize(
+    "delete,failure",
+    [
+        ("ok", None),
+        ("not-found-4xx", None),  # 이미 없다 — 어댑터와 같이 삭제 성공으로 본다
+        ("throttled", "TooManyRequestsException"),
+        ("not-found-5xx", "UserNotFoundException"),  # 5xx 는 코드와 무관하게 실패다(어댑터와 같다)
+        ("unexpected", "RuntimeError"),  # 분류되지 않은 예외도 실패로 출력하고 종료 코드를 지킨다
+    ],
+)
+def test_db_failure_after_create_discards_the_created_cognito_user(
+    db, cognito_client, monkeypatch, delete, failure
+):
+    """이 실행이 만든 Cognito 사용자는 DB 등록 실패 시 sub 로 지운다(보상 삭제) — 열린 트랜잭션 없이."""
+    _fail_registration(monkeypatch)
+    cognito_client.stubber.add_response("admin_create_user", create_response())
+    expected = {"UserPoolId": POOL, "Username": SUB}
+    stub_error = {
+        "not-found-4xx": ("UserNotFoundException", 400),
+        "throttled": ("TooManyRequestsException", 400),
+        "not-found-5xx": ("UserNotFoundException", 500),
+    }.get(delete)
+    if delete == "ok":
+        cognito_client.stubber.add_response("admin_delete_user", {}, expected)
+    elif stub_error is not None:
+        cognito_client.stubber.add_client_error(
+            "admin_delete_user", service_error_code=stub_error[0], http_status_code=stub_error[1],
+            service_message="secret detail", expected_params=expected,
+        )
+    seen = []
+    original = cognito_client.admin_delete_user
+
+    def spy(**kwargs):
+        seen.append(db.in_transaction())
+        if delete == "unexpected":  # 예: 제공자 응답 본문 디코딩 실패 — ClientError · BotoCoreError 가 아니다
+            raise RuntimeError("secret detail")
+        return original(**kwargs)
+
+    cognito_client.admin_delete_user = spy
+    code, out = run(db, cognito_client, "--platform", "--email", EMAIL, "--yes")
+    assert code == 1 and "SQLAlchemyError" in out
+    assert seen == [False]  # Stubber 가 파라미터(Username=sub)를 확인하고, 남은 응답이 없어야 한다
+    if failure is None:
+        assert "보상 삭제: 이 실행이 만든 Cognito 사용자를 지웠다" in out and "같은 명령으로 다시 실행" in out
+    else:
+        assert "보상 삭제 실패" in out and failure in out
+        assert "남아 있을 수 있다" in out and "--existing-cognito-user" in out
+    assert "secret" not in out
+    assert users(db) == []
+
+
+def test_existing_cognito_user_db_failure_never_deletes_it(db, cognito_client, monkeypatch):
+    _fail_registration(monkeypatch)
+    cognito_client.stubber.add_response(
+        "admin_get_user", get_response(), {"UserPoolId": POOL, "Username": EMAIL}
+    )
+    deleted = []
+    cognito_client.admin_delete_user = lambda **kwargs: deleted.append(kwargs)
+    code, out = run(db, cognito_client, "--platform", "--existing-cognito-user", "--email", EMAIL, "--yes")
+    assert code == 1 and "--existing-cognito-user" in out
+    assert deleted == []
+    assert users(db) == []
+
+
 def test_missing_sub_is_rejected(db, cognito_client):
     cognito_client.stubber.add_response(
         "admin_get_user",
@@ -611,6 +683,8 @@ def test_create_central_admin_rechecks_under_lock_and_refuses_if_one_appeared(
     with Session(committed) as s:
         rival_id = seed_platform(s, sub="rival", email="r@example.com").user_id
     cognito_client.stubber.add_response("admin_create_user", create_response())
+    # 거절되면 이 실행이 만든 Cognito 사용자를 sub 로 지운다(보상 삭제) — 남은 응답이 없어야 한다
+    cognito_client.stubber.add_response("admin_delete_user", {}, {"UserPoolId": POOL, "Username": SUB})
     with Session(committed) as holder:
         auth_repo.lock_users_table(holder)
         thread, result = _run_until_lock(
@@ -623,6 +697,7 @@ def test_create_central_admin_rechecks_under_lock_and_refuses_if_one_appeared(
         holder.commit()
     thread.join(10)
     assert not thread.is_alive()
-    assert result["code"] == 2 and "--existing-cognito-user" in result["out"]
+    assert result["code"] == 2 and "보상 삭제: 이 실행이 만든 Cognito 사용자를 지웠다" in result["out"]
+    assert "--central-admin 없이" in result["out"]
     with Session(committed) as s:
         assert auth_repo.get_user_by_identity(s, issuer=ISSUER, cognito_sub=SUB) is None

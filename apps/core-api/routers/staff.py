@@ -1,18 +1,25 @@
 # ==============================================================================
 # [파일 설명]
-# /api/v1/staff — 플랫폼 직원 관리 라우터 (중앙 관리자 전용). (#492 PR 5, 계약: schemas.api.staff)
+# /api/v1/staff — 플랫폼 직원 관리 라우터 (중앙 관리자 전용). (#492 PR 5 · #572 1번, 계약: schemas.api.staff)
 #
 #   - 얇게 둔다: 판정 · 잠금 · 트랜잭션은 auth.staff_service 가 맡는다(쓰기 직전 행위자를 다시 판정).
-#   - require_central_admin 이 라우터 의존성이라 본문 검증보다 먼저 돈다. 직원 생성 경로는 없다(운영 CLI).
+#   - require_central_admin 이 라우터 의존성이라 본문 검증 · Cognito 어댑터 조립보다 먼저 돈다.
+#   - (#572 1번) 직원 초대 · 재발송의 Cognito 어댑터는 /api/v1/users 와 같은 지연 조립(get_cognito_adapter_factory)
+#     이다 — 서비스가 행위자 · 대상 판정을 마친 뒤에만 조립하므로 설정이 비어도 401 · 403 · 404 가 503 보다 먼저다.
 # ==============================================================================
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from auth import admin_service, staff_service
 from auth.access import require_central_admin
+from auth.cognito import CognitoAdapter
 from db.session import get_db
 from fastapi import APIRouter, Depends, Query, Response
 from schemas.api.staff import (
+    StaffInviteRequest,
+    StaffItem,
     StaffResponse,
     StaffRoleRequest,
     StaffStatusRequest,
@@ -22,10 +29,11 @@ from schemas.api.staff import (
 from schemas.api.users import UserEventsResponse
 from sqlalchemy.orm import Session
 
-from routers.users import get_actor
+from routers.users import get_actor, get_cognito_adapter_factory
 
 _DB = Depends(get_db)
 _ACTOR = Depends(get_actor)
+_COGNITO = Depends(get_cognito_adapter_factory)
 
 router = APIRouter(
     prefix="/api/v1/staff", tags=["staff"], dependencies=[Depends(require_central_admin)]
@@ -35,6 +43,27 @@ router = APIRouter(
 @router.get("", response_model=StaffResponse)
 def list_staff(db: Session = _DB, actor: admin_service.Actor = _ACTOR) -> StaffResponse:
     return staff_service.list_staff(db, actor)
+
+
+@router.post("", status_code=201, response_model=StaffItem)
+def invite_staff(
+    body: StaffInviteRequest,
+    db: Session = _DB,
+    actor: admin_service.Actor = _ACTOR,
+    get_adapter: Callable[[], CognitoAdapter] = _COGNITO,
+) -> StaffItem:
+    return staff_service.invite_staff(db, actor, get_adapter, email=body.email)
+
+
+@router.post("/{user_id}/invite/resend", status_code=204)
+def resend_invite(
+    user_id: str,
+    db: Session = _DB,
+    actor: admin_service.Actor = _ACTOR,
+    get_adapter: Callable[[], CognitoAdapter] = _COGNITO,
+) -> Response:
+    staff_service.resend_invite(db, actor, get_adapter, user_id)
+    return Response(status_code=204)
 
 
 @router.put("/{user_id}/role", status_code=204)

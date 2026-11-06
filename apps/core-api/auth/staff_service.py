@@ -1,9 +1,21 @@
 # ==============================================================================
 # [파일 설명]
-# 플랫폼 직원 관리 서비스 — 목록 · 권한(platform_role) 변경 · 상태 변경 · 담당 고객 배정 · 이력. (#492)
+# 플랫폼 직원 관리 서비스 — 초대 · 재발송 · 목록 · 권한(platform_role) 변경 · 상태 변경 · 담당 고객 배정 · 이력.
+# (#492 · #572 1번)
 #
 #   - 플랫폼 등급은 CENTRAL_ADMIN · TENANT_MANAGER 둘뿐이다. 직원 관리와 담당 고객 배정은 중앙 관리자만 한다.
-#     직원 생성 · 초대는 API 에 없다(운영 CLI 전용).
+#   - 초대(invite_staff, #572 1번): 중앙 관리자가 이메일로 초대하면 Cognito 사용자를 만들고(초대 메일은 Cognito 가
+#     보낸다) 담당 고객이 없는 PLATFORM · TENANT_MANAGER 앱 계정 + USER_INVITED 이력을 한 commit 으로 만든다 —
+#     운영 CLI(bootstrap_admin --platform)가 만드는 계정과 같다. Cognito 에 이미 있는 이메일은 409
+#     USER_STATE_CONFLICT 이고 자동 연결하지 않는다(고객 초대와 같은 규칙). 기존 Cognito 사용자 연결은 운영
+#     CLI(--existing-cognito-user)만 한다. 등급은 PUT /{user_id}/role 로 따로 바꾼다.
+#   - 재발송(resend_invite): 대상이 PLATFORM 이고 Cognito 상태가 FORCE_CHANGE_PASSWORD 일 때만 RESEND 한다
+#     (admin_service.resend_invite 와 같은 제공자 검사 · INVITE_RESENT 이력).
+#   - Cognito 호출은 admin_service 와 같이 DB 트랜잭션 밖 · DB 쓰기 전이다(짧은 읽기 트랜잭션으로 행위자 ·
+#     대상을 확인하고 rollback → SDK → 잠금 안 재판정 → DB 쓰기). 초대가 Cognito 생성 뒤 재판정 실패(401 · 403)나
+#     DB 실패(500)로 끝나면 이 요청이 만든 Cognito 사용자를 sub 로 지운다(보상 삭제 — PR #591 리뷰). 지우기 전에
+#     새 트랜잭션에서 (issuer, sub) 가 app_users 에 없음을 확인하고 닫는다. 응답 코드는 그대로이고, 보상 삭제가
+#     실패하면 Cognito 사용자가 남을 수 있다(경고 로그에 sub · 오류 종류 · 코드, 복구는 CLI --existing-cognito-user).
 #   - 담당 고객 배정(get_tenants · replace_tenants): 대상은 TENANT_MANAGER 뿐이다(중앙 관리자 대상은 409).
 #     요청 테넌트가 하나라도 없으면 404 TENANT_NOT_FOUND 로 아무것도 쓰지 않고, 같은 집합은 409 다. 빈 집합은
 #     모든 접근 제거다. 교체와 이력(TENANT_ASSIGNMENTS_CHANGED, before/after tenant_ids)은 같은 잠금 ·
@@ -21,12 +33,16 @@
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
+from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from db import models
 from db.repositories import auth as auth_repo
 from exceptions import ApiError
-from schemas.api.auth import AccountType, PlatformRole
+from schemas.api.auth import AccountType, PlatformRole, UserRole
 from schemas.api.errors import ErrorCode
 from schemas.api.staff import StaffItem, StaffResponse, StaffTenantsResponse
 from schemas.api.users import UserEventAction, UserEventsResponse, UserStatus
@@ -34,6 +50,9 @@ from sqlalchemy.orm import Session
 
 from . import admin_service, service, sessions
 from .admin_service import Actor
+from .cognito import AuthError
+
+logger = logging.getLogger(__name__)
 
 
 def _staff_target(db: Session, user_id: str) -> models.AppUser:
@@ -61,21 +80,136 @@ def _not_self(admin: service.CurrentUser, target: models.AppUser) -> None:
         raise ApiError(ErrorCode.AUTH_FORBIDDEN)
 
 
+def _item(user: models.AppUser, last_login_at: datetime | None) -> StaffItem:
+    return StaffItem(
+        user_id=user.user_id,
+        email=user.email,
+        platform_role=user.platform_role,
+        status=UserStatus(user.status.value),
+        last_login_at=last_login_at,
+    )
+
+
 def list_staff(db: Session, actor: Actor) -> StaffResponse:
     admin_service._authorize(db, actor, central=True)
     rows = auth_repo.list_platform_users_with_last_login(db)
-    return StaffResponse(
-        items=[
-            StaffItem(
-                user_id=user.user_id,
-                email=user.email,
-                platform_role=user.platform_role,
-                status=UserStatus(user.status.value),
-                last_login_at=last,
+    return StaffResponse(items=[_item(user, last) for user, last in rows])
+
+
+def invite_staff(
+    db: Session, actor: Actor, get_adapter: Callable[[], Any], *, email: str
+) -> StaffItem:
+    """직원 초대(#572 1번) — Cognito 사용자를 먼저 만든 뒤 배정 없는 PLATFORM · TENANT_MANAGER 계정 + 이력을
+    한 commit 으로 만든다. get_adapter 는 행위자 판정(401 · 403)을 통과한 뒤에만 부른다(Cognito 미설정 503 보다 먼저).
+    Cognito 에 이미 있으면 AuthError USER_STATE_CONFLICT(409) 로 끝나고 DB 는 쓰지 않는다 — 자동 연결 없음.
+    생성 뒤 단계가 실패하면 만든 Cognito 사용자를 지우고(_discard_created_user) 원래 오류를 그대로 던진다.
+    신원 중복 409 는 예외다 — 그 sub 는 다른 앱 계정의 로그인 신원이라 지우지 않는다."""
+    try:
+        admin_service._authorize(db, actor, central=True)
+    finally:
+        db.rollback()  # 읽기 트랜잭션을 SDK 호출 전에 끝낸다
+    adapter = get_adapter()
+    provider_user = adapter.admin_create_user(email)
+    foreign_identity = False
+    try:
+        with admin_service._transaction(db, actor, central=True) as admin:
+            # 잠금 안에서 행위자를 다시 판정했다(그 사이 강등 · 회수면 401/403 — 아래에서 보상 삭제)
+            try:
+                admin_service._require_new_identity(db, adapter, provider_user)
+            except ApiError:
+                foreign_identity = True
+                raise
+            now = actor.clock()
+            row = auth_repo.create_user(
+                db,
+                issuer=adapter.issuer,
+                cognito_sub=provider_user.sub,
+                email=email,
+                role=UserRole.ADMIN,  # PLATFORM 호환 값 — 권한 근거가 아니다(bootstrap_admin 과 같다)
+                account_type=AccountType.PLATFORM,
+                platform_role=PlatformRole.TENANT_MANAGER,
+                tenant_id=None,
+                now=now,
+                status=models.AppUserStatus.ACTIVE,
+                email_verified_at=None,
             )
-            for user, last in rows
-        ]
-    )
+            admin_service._audit(
+                db,
+                admin,
+                row.user_id,
+                UserEventAction.USER_INVITED,
+                admin_service._state(),
+                admin_service._state(platform_role=PlatformRole.TENANT_MANAGER, status=UserStatus.ACTIVE),
+                now,
+            )
+            item = _item(row, None)
+    except Exception:
+        if not foreign_identity:
+            _discard_created_user(db, adapter, provider_user.sub)
+        raise
+    return item
+
+
+def _discard_created_user(db: Session, adapter: Any, sub: str) -> None:
+    """초대의 보상 삭제(PR #591 리뷰) — 앱 계정도 Cognito 사용자도 남지 않게 한다. 응답은 바꾸지 않는다.
+
+    새 트랜잭션에서 (issuer, sub) 가 app_users 에 없음을 확인하고 닫은 뒤에만 지운다. 있으면 지우지 않는다 — 연결이
+    끊긴 commit 이 실제로 반영됐을 수 있고, 지우면 그 앱 계정이 로그인할 수 없게 된다. 확인이 실패해도 지우지 않는다.
+    최선 노력 경계다 — 확인 · 삭제의 어떤 예외(분류되지 않은 SDK 실패 포함)도 경고 로그로만 남기고 호출자의 원래
+    오류를 바꾸지 않는다. 로그에는 sub · 예외 이름 · AWS 오류 코드만 싣는다(메시지 · 응답 본문 없음).
+    """
+    try:
+        try:
+            present = (
+                auth_repo.get_user_by_identity(db, issuer=adapter.issuer, cognito_sub=sub)
+                is not None
+            )
+        finally:
+            db.rollback()  # 확인 트랜잭션을 Cognito 호출 전에 닫는다
+    except Exception as exc:  # noqa: BLE001 - 보상은 원래 실패를 바꾸지 않는다
+        logger.warning(
+            "staff invite compensation skipped sub=%s reason=identity_check_failed error_type=%s",
+            sub,
+            type(exc).__name__,
+        )
+        return
+    if present:
+        logger.warning("staff invite compensation skipped sub=%s reason=identity_present", sub)
+        return
+    try:
+        adapter.admin_delete_user(sub)
+    except Exception as exc:  # noqa: BLE001 - 보상은 원래 실패를 바꾸지 않는다
+        logger.warning(
+            "staff invite compensation failed sub=%s error_type=%s error_code=%s",
+            sub,
+            type(exc).__name__,
+            exc.provider_code if isinstance(exc, AuthError) else None,
+        )
+
+
+def resend_invite(db: Session, actor: Actor, get_adapter: Callable[[], Any], user_id: str) -> None:
+    """직원 초대 재발송 — 대상은 PLATFORM 계정(없음 · TENANT · UNASSIGNED 는 404, Cognito 미호출).
+    제공자 검사 · RESEND 는 admin_service 와 같고, 잠금 안에서 대상 신원이 처음 읽은 값과 같을 때만 이력을 남긴다."""
+    try:
+        admin_service._authorize(db, actor, central=True)
+        target = _staff_target(db, user_id)
+        identity = (target.issuer, target.cognito_sub, target.email)
+    finally:
+        db.rollback()
+    admin_service._provider_resend_invite(get_adapter(), identity)
+    with admin_service._transaction(db, actor, central=True) as admin:
+        current = _staff_target(db, user_id)
+        if (current.issuer, current.cognito_sub, current.email) != identity:
+            raise ApiError(ErrorCode.USER_STATE_CONFLICT)
+        admin_service._audit(
+            db,
+            admin,
+            current.user_id,
+            UserEventAction.INVITE_RESENT,
+            admin_service._state(),
+            admin_service._state(),
+            actor.clock(),
+        )
 
 
 def list_events(db: Session, actor: Actor, user_id: str, *, limit: int) -> UserEventsResponse:

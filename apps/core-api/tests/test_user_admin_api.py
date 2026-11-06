@@ -54,6 +54,7 @@ class FakeAdapter:
         self.create_result = CognitoUser("new@example.com", "sub-new", "new@example.com", FORCE)
         self.create_error: Exception | None = None
         self.get_result: CognitoUser | None = None
+        self.delete_error: Exception | None = None
 
     def admin_create_user(self, email, *, resend=False):
         self.calls.append(("create", email, resend))
@@ -64,6 +65,11 @@ class FakeAdapter:
     def admin_get_user(self, username):
         self.calls.append(("get", username))
         return self.get_result
+
+    def admin_delete_user(self, username):
+        self.calls.append(("delete", username))
+        if self.delete_error is not None:
+            raise self.delete_error
 
 
 def use_adapter(client, fake) -> None:

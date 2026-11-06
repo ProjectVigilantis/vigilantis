@@ -1,4 +1,9 @@
-"""플랫폼 직원 관리 계약 (#492 PR 5). 중앙 관리자만 쓴다. 직원 생성·초대 경로는 없다(운영 CLI 전용)."""
+"""플랫폼 직원 관리 계약 (#492 PR 5 · #572 1번). 중앙 관리자만 쓴다.
+
+직원 초대(`POST /api/v1/staff` `StaffInviteRequest` → 201 `StaffItem`)와 재발송(`POST /{user_id}/invite/resend` → 204)은
+#572 1번으로 열렸다. 초대 본문은 이메일만 받고 등급 · 담당 고객 · 기존 계정 연결 칸은 없다 — 등급은 `PUT /{user_id}/role`,
+배정은 `PUT /{user_id}/tenants`다. 운영 CLI(auth.bootstrap_admin)는 첫 중앙 관리자 생성과 장애 복구용으로 남는다.
+"""
 
 from __future__ import annotations
 
@@ -25,6 +30,15 @@ class StaffResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     items: list[StaffItem]
+
+
+class StaffInviteRequest(BaseModel):
+    """직원 초대(#572 1번). 만드는 계정은 담당 고객이 없는 `TENANT_MANAGER`로 고정이라 등급 · 배정 칸이 없고,
+    Cognito에 이미 있는 이메일은 409다(자동 연결 · `recover_existing` 없음 — 복구는 운영 CLI)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    email: Email
 
 
 class StaffRoleRequest(BaseModel):
