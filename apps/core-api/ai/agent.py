@@ -32,7 +32,6 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
-from enum import StrEnum
 from typing import Any, Callable, Mapping, Optional, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -40,6 +39,7 @@ from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, ValidationErr
 from schemas.agents import (
     AgentAssetContext,
     AgentGraphOutput,
+    AnalysisFailureReason,
     FinOpsGraphInput,
     RunbookCandidateDraft,
     RunbookCapability,
@@ -261,33 +261,9 @@ def finops_request_fingerprint() -> str:
 # ------------------------------------------------------------------------------
 # 실패 사유 — FAILED가 된 자리와 이유를 로그로 남긴다 (Issue #424)
 # ------------------------------------------------------------------------------
-# 운영 로그의 분류 코드이며 공개 계약이 아니다. 업무 기록(DB)에 둘지는 별도 결정이다.
-# 주입 시도로 거절된 제안(메뉴 밖 Runbook·대상 밖 ARN)과 형식 실패·모델 거절을 나중에
-# 가를 수 있게 하는 것이 목적이다.
-
-
-class AnalysisFailureReason(StrEnum):
-    """분석이 FAILED로 끝난 사유. 그래프(이 모듈)와 Workflow 검증(agent_dispatcher)이 함께 쓴다."""
-
-    # 모델 호출 — ai/model_client.py 경계 예외 3갈래. 왕복의 어느 자리인지는 phase가 가른다
-    MODEL_REJECTED = "MODEL_REJECTED"                    # 인증·요청 거절, 모델 refusal
-    MODEL_CONTRACT_VIOLATION = "MODEL_CONTRACT_VIOLATION"  # 요청 직렬화·응답 파싱 실패
-    MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"              # 제한시간·일시 오류(재시도 소진)
-    # 후보 — 모델이 지어낼 수 없는 값을 지어낸 경우
-    RUNBOOK_NOT_OFFERED = "RUNBOOK_NOT_OFFERED"          # 입력 capabilities 밖 Runbook
-    TARGET_NOT_ALLOWED = "TARGET_NOT_ALLOWED"            # 허용 대상 밖 target_arn
-    SERVER_PARAMETER_UNAVAILABLE = "SERVER_PARAMETER_UNAVAILABLE"  # 서버 몫 값을 계산 못 함
-    CANDIDATE_CONTRACT_VIOLATION = "CANDIDATE_CONTRACT_VIOLATION"  # RunbookCandidateDraft 위반
-    OUTPUT_CONTRACT_VIOLATION = "OUTPUT_CONTRACT_VIOLATION"        # AgentGraphOutput 위반
-    # Workflow 검증 — 출력 모델 단독으로 볼 수 없는 것(agent_dispatcher._contract_violation)
-    EVIDENCE_NOT_IN_INPUT = "EVIDENCE_NOT_IN_INPUT"
-    REVIEWED_RISK_MISMATCH = "REVIEWED_RISK_MISMATCH"
-    SERVER_VALUE_MISMATCH = "SERVER_VALUE_MISMATCH"
-    SSH_DENY_PARAMETER_MISMATCH = "SSH_DENY_PARAMETER_MISMATCH"
-    UNSTORABLE_VALUE = "UNSTORABLE_VALUE"
-    GRAPH_INPUT_UNAVAILABLE = "GRAPH_INPUT_UNAVAILABLE"
-    # 회수 — IN_PROGRESS가 상한을 넘겨 되돌린 횟수가 재분석 상한에 닿음(agent_dispatcher)
-    ANALYSIS_RETRY_EXHAUSTED = "ANALYSIS_RETRY_EXHAUSTED"
+# 사유 코드(AnalysisFailureReason)의 원천은 packages/schemas다. 코드는 FAILED 출력의
+# failure_reason으로 Workflow에 넘어가 인시던트에 저장되고 조회 응답에 실린다(#434).
+# 세부(details)는 로그에만 남긴다.
 
 
 @dataclass(frozen=True)
@@ -682,12 +658,14 @@ def _validate_output_contract(state: _FinOpsState) -> dict[str, Any]:
         if output is not None:
             return {"output": output}
     _log_failure(graph_input, failure)
-    return {"output": _failed_output()}
+    return {"output": _failed_output(failure)}
 
 
-def _failed_output() -> AgentGraphOutput:
-    """FAILED는 빈 요약·빈 후보·reviewed_risk_level=null이다(#49 불변식)."""
-    return AgentGraphOutput(invocation_status=AgentInvocationStatus.FAILED)
+def _failed_output(failure: _Failure) -> AgentGraphOutput:
+    """FAILED는 빈 요약·빈 후보·reviewed_risk_level=null이다(#49 불변식). 사유 코드만 싣는다."""
+    return AgentGraphOutput(
+        invocation_status=AgentInvocationStatus.FAILED, failure_reason=failure.reason,
+    )
 
 
 def _after_summarize(state: _FinOpsState) -> str:
@@ -1002,7 +980,7 @@ def _secops_validate(state: _SecOpsState) -> dict[str, Any]:
         if output is not None:
             return {"output": output}
     _log_failure(state["graph_input"], failure)
-    return {"output": _failed_output()}
+    return {"output": _failed_output(failure)}
 
 
 def _build_secops_graph():

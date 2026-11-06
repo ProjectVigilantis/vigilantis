@@ -5597,6 +5597,7 @@ def record_agent_analysis(
         reviewed_risk_level=(
             output.reviewed_risk_level if is_secops and keep_summary else None
         ),
+        failure_reason=output.failure_reason,
     ):
         raise ValueError(f"AI 호출 종료 전이 실패: {incident_id}")
     if not incidents_repo.update_incident_status(
@@ -5634,6 +5635,7 @@ def record_agent_analysis(
         guardrails_repo.candidate_evaluations_by_incident(db, [incident_id]).get(
             incident_id, []
         ),
+        failure_reason=output.failure_reason,
     )
     db.commit()
     incident = incidents_repo.get_incident(db, incident_id)
@@ -5651,6 +5653,9 @@ def record_agent_analysis(
             "guardrail_rejections": [
                 item.model_dump(mode="json") for item in analysis.guardrail_rejections
             ],
+            "failure_reason": (
+                analysis.failure_reason.value if analysis.failure_reason is not None else None
+            ),
         },
     )
     return AgentAnalysisOutcome(

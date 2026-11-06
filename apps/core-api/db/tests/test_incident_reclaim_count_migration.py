@@ -20,7 +20,7 @@ from db import models
 from schemas.api.incidents import IncidentCategory, IncidentStatus, RiskLevel
 
 REVISION = "a1b7c4d2e905"
-PARENT = "f514a6c3d201"
+PARENT = "b434c7e2a915"
 
 
 def test_existing_incidents_survive_with_zero_reclaims(pg_engine, monkeypatch):

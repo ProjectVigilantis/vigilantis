@@ -472,9 +472,38 @@ export type ResolutionJudgement = (typeof RESOLUTION_JUDGEMENTS)[number];
 
 /* ──────────────────────── analysis.py · guardrails.py ──────────────────────── */
 
+/**
+ * `NO_ACTION_AVAILABLE`은 분석 호출이 실패로 닫혔지만 원인이 분석 고장이 아니라 제공할 자동 조치가
+ * 없는 것이다(빈 조치 메뉴·IPv6 SSH 출발지, #434). 모델을 부르지 않았고 인시던트는 종료 처리 대상이다.
+ */
 export type AnalysisResultStatus =
   | 'PENDING' | 'IN_PROGRESS' | 'PROPOSALS_GENERATED' | 'NO_PROPOSAL'
-  | 'GUARDRAIL_REJECTED' | 'FAILED' | 'UNAVAILABLE';
+  | 'GUARDRAIL_REJECTED' | 'FAILED' | 'NO_ACTION_AVAILABLE' | 'UNAVAILABLE';
+
+/** 분석 호출이 FAILED로 닫힌 사유 코드(analysis.py `AnalysisFailureReason`). */
+export type AnalysisFailureReason =
+  // 모델 호출
+  | 'MODEL_REJECTED'
+  | 'MODEL_CONTRACT_VIOLATION'
+  | 'MODEL_UNAVAILABLE'
+  // 후보
+  | 'RUNBOOK_NOT_OFFERED'
+  | 'TARGET_NOT_ALLOWED'
+  | 'SERVER_PARAMETER_UNAVAILABLE'
+  | 'CANDIDATE_CONTRACT_VIOLATION'
+  | 'OUTPUT_CONTRACT_VIOLATION'
+  // 서버 검증
+  | 'EVIDENCE_NOT_IN_INPUT'
+  | 'REVIEWED_RISK_MISMATCH'
+  | 'SERVER_VALUE_MISMATCH'
+  | 'SSH_DENY_PARAMETER_MISMATCH'
+  | 'UNSTORABLE_VALUE'
+  // 입력 — 모델 호출 전
+  | 'GRAPH_INPUT_UNAVAILABLE'
+  | 'NO_ACTION_AVAILABLE'
+  | 'SOURCE_ADDRESS_UNSUPPORTED'
+  // 회수 — IN_PROGRESS 회수 횟수가 재분석 상한에 닿음
+  | 'ANALYSIS_RETRY_EXHAUSTED';
 
 /** 4단계 가드레일. 실행 순서도 이 순서다. */
 export type GuardrailStep =
@@ -513,6 +542,8 @@ export interface GuardrailRejection {
 export interface AnalysisResult {
   status: AnalysisResultStatus;
   guardrail_rejections: GuardrailRejection[];
+  /** `FAILED`·`NO_ACTION_AVAILABLE`의 사유 코드. 그 밖의 상태와 사유 기록 이전에 닫힌 건은 null. */
+  failure_reason: AnalysisFailureReason | null;
 }
 
 export interface IncidentResponse extends IncidentListItem {

@@ -24,6 +24,7 @@ from sqlalchemy.orm import sessionmaker
 import incident_intake
 import mock_threat_source
 import threat_ingress
+from logging_config import JsonLineFormatter
 from db import mappers, models
 from db.repositories import incidents as incidents_repo
 from incident_intake import IntakeOutcome
@@ -194,7 +195,7 @@ def test_inbox_retries_failed_delivery_and_continues_other_files(tmp_path, monke
     monkeypatch.setattr(mock_threat_source, "receive_threat", receive)
     consumer = MockThreatConsumer(tmp_path, MagicMock(), MagicMock(), interval_seconds=1)
     report = consumer.consume_once()
-    assert report == {"created": 1, "existing": 0, "rejected": 1, "failed": 1}
+    assert report == {"created": 1, "existing": 0, "rejected": 1, "failed": 1, "quarantined": 0}
     assert first.exists() and not second.exists()
     assert len(list((tmp_path / "done").glob("*.json"))) == 1
     assert len(list((tmp_path / "rejected").glob("*.json"))) == 1
@@ -203,6 +204,107 @@ def test_inbox_retries_failed_delivery_and_continues_other_files(tmp_path, monke
     assert consumer.consume_once()["created"] == 1
     assert not first.exists()
     assert (tmp_path / ".incomplete.tmp").exists()
+
+
+def test_file_failing_up_to_cap_is_quarantined_once_and_not_reprocessed(tmp_path, monkeypatch, caplog):
+    path = prepare_observation(tmp_path, parse_observation(_raw()))
+    calls = []
+
+    def receive(db, observation, publish):
+        calls.append(observation.event_id)
+        raise RuntimeError("secret payload detail")
+
+    monkeypatch.setattr(mock_threat_source, "receive_threat", receive)
+    consumer = MockThreatConsumer(tmp_path, MagicMock(), MagicMock(), interval_seconds=1, max_attempts=3)
+    with caplog.at_level(logging.INFO, logger="vigilantis.mock_threat_source"):
+        reports = [consumer.consume_once() for _ in range(3)]
+        assert [r["quarantined"] for r in reports] == [0, 0, 1]
+        assert consumer.consume_once() == {
+            "created": 0, "existing": 0, "rejected": 0, "failed": 0, "quarantined": 0,
+        }
+    assert len(calls) == 3
+    assert not path.exists()
+    assert len(list((tmp_path / "failed").glob("*.json"))) == 1
+    records = [r for r in caplog.records if r.message == "mock_threat_delivery_quarantined"]
+    assert len(records) == 1
+    assert records[0].levelno == logging.CRITICAL
+    assert (records[0].attempts, records[0].reason, records[0].error_type) == (
+        3, "unexpected_exception", "RuntimeError",
+    )
+    # 모든 레코드를 JSON 포맷터로 렌더링해도 예외 문자열·트레이스백이 새지 않아야 한다.
+    formatter = JsonLineFormatter()
+    rendered = "\n".join(formatter.format(r) for r in caplog.records)
+    assert "secret payload detail" not in rendered
+    assert "Traceback" not in rendered
+    assert consumer._attempts == {}
+
+
+def test_exhausted_file_is_never_redelivered_while_quarantine_move_fails(tmp_path, monkeypatch, caplog):
+    path = prepare_observation(tmp_path, parse_observation(_raw()))
+    calls = []
+
+    def receive(db, observation, publish):
+        calls.append(observation.event_id)
+        raise RuntimeError("secret payload detail")
+
+    monkeypatch.setattr(mock_threat_source, "receive_threat", receive)
+    consumer = MockThreatConsumer(tmp_path, MagicMock(), MagicMock(), interval_seconds=1, max_attempts=2)
+    real_rename = Path.rename
+
+    def broken_rename(self, target):
+        raise OSError(13, "secret path detail")
+
+    with caplog.at_level(logging.INFO, logger="vigilantis.mock_threat_source"):
+        monkeypatch.setattr(Path, "rename", broken_rename)
+        reports = [consumer.consume_once() for _ in range(5)]
+        assert len(calls) == 2
+        assert all(r["quarantined"] == 0 for r in reports)
+        assert path.exists()
+        monkeypatch.setattr(Path, "rename", real_rename)
+        assert consumer.consume_once()["quarantined"] == 1
+        assert consumer.consume_once()["quarantined"] == 0
+    assert len(calls) == 2
+    assert not path.exists()
+    assert len(list((tmp_path / "failed").glob("*.json"))) == 1
+    assert consumer._attempts == {} and consumer._pending == {}
+    rendered = "\n".join(JsonLineFormatter().format(r) for r in caplog.records)
+    assert "secret payload detail" not in rendered
+    assert "secret path detail" not in rendered
+    assert sum(r.message == "mock_threat_delivery_quarantined" for r in caplog.records) == 1
+
+
+def test_rejected_file_is_not_reprocessed_while_rejected_move_fails(tmp_path, monkeypatch, caplog):
+    path = prepare_observation(tmp_path, parse_observation(_raw()))
+    calls = []
+
+    def receive(db, observation, publish):
+        calls.append(observation.event_id)
+        raise threat_ingress.ThreatInputRejected("secret payload detail")
+
+    monkeypatch.setattr(mock_threat_source, "receive_threat", receive)
+    consumer = MockThreatConsumer(tmp_path, MagicMock(), MagicMock(), interval_seconds=1, max_attempts=2)
+    real_rename = Path.rename
+
+    def broken_rename(self, target):
+        raise OSError(13, "secret path detail")
+
+    with caplog.at_level(logging.INFO, logger="vigilantis.mock_threat_source"):
+        monkeypatch.setattr(Path, "rename", broken_rename)
+        reports = [consumer.consume_once() for _ in range(5)]
+        assert len(calls) == 1
+        assert [r["rejected"] for r in reports] == [1, 0, 0, 0, 0]
+        assert path.exists()
+        monkeypatch.setattr(Path, "rename", real_rename)
+        consumer.consume_once()
+        consumer.consume_once()
+    assert len(calls) == 1
+    assert not path.exists()
+    assert len(list((tmp_path / "rejected").glob("*.json"))) == 1
+    assert consumer._attempts == {} and consumer._pending == {}
+    assert sum(r.message == "mock_threat_input_rejected" for r in caplog.records) == 1
+    rendered = "\n".join(JsonLineFormatter().format(r) for r in caplog.records)
+    assert "secret payload detail" not in rendered
+    assert "secret path detail" not in rendered
 
 
 def test_oversize_input_is_rejected_without_opening_a_db_session(tmp_path):
@@ -396,8 +498,8 @@ def test_invalid_source_is_rejected_without_storage_or_retry(
     consumer = MockThreatConsumer(tmp_path, committed_sessions, events.append, interval_seconds=1)
 
     with caplog.at_level(logging.WARNING, logger="vigilantis.mock_threat_source"):
-        assert consumer.consume_once() == {"created": 0, "existing": 0, "rejected": 1, "failed": 0}
-        assert consumer.consume_once() == {"created": 0, "existing": 0, "rejected": 0, "failed": 0}
+        assert consumer.consume_once() == {"created": 0, "existing": 0, "rejected": 1, "failed": 0, "quarantined": 0}
+        assert consumer.consume_once() == {"created": 0, "existing": 0, "rejected": 0, "failed": 0, "quarantined": 0}
 
     assert not inbox_path.exists()
     archived = list((tmp_path / "rejected").glob("*.json"))
@@ -447,8 +549,8 @@ def test_db_data_error_is_archived_without_retry_and_next_input_is_saved(
     monkeypatch.setattr(mock_threat_source, "receive_threat", observe_receive)
     consumer = MockThreatConsumer(tmp_path, committed_sessions, events.append, interval_seconds=1)
     with caplog.at_level(logging.WARNING, logger="vigilantis.mock_threat_source"):
-        assert consumer.consume_once() == {"created": 1, "existing": 0, "rejected": 1, "failed": 0}
-        assert consumer.consume_once() == {"created": 0, "existing": 0, "rejected": 0, "failed": 0}
+        assert consumer.consume_once() == {"created": 1, "existing": 0, "rejected": 1, "failed": 0, "quarantined": 0}
+        assert consumer.consume_once() == {"created": 0, "existing": 0, "rejected": 0, "failed": 0, "quarantined": 0}
     assert calls == [raw["event_id"], normal["event_id"]]
     assert not rejected_path.exists() and not normal_path.exists()
     archived = list((tmp_path / "rejected").glob("*.json"))

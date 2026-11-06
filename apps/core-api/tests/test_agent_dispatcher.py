@@ -43,6 +43,7 @@ from db.repositories import guardrails as guardrails_repo  # noqa: E402
 from db.repositories import incidents as incidents_repo  # noqa: E402
 from logging_config import JsonLineFormatter  # noqa: E402
 from schemas.agents import AgentGraphOutput, RunbookCandidateDraft  # noqa: E402
+from schemas.api.analysis import AnalysisFailureReason  # noqa: E402
 from schemas.api.assets import AssetType  # noqa: E402
 from schemas.assets import MetricSummary as MetricSummaryContract  # noqa: E402
 from schemas.api.incidents import IncidentStatus, RiskLevel  # noqa: E402
@@ -1051,6 +1052,7 @@ def test_a_claim_reclaimed_up_to_the_limit_is_closed_as_failed_without_a_model_c
     assert incident.status is IncidentStatus.FAILED
     assert incident.agent_invocation_status is AgentInvocationStatus.FAILED
     assert incident.summary_lines == []
+    assert incident.agent_failure_reason == AnalysisFailureReason.ANALYSIS_RETRY_EXHAUSTED.value
     assert [event.event_type for event in published] == [WsEventType.INCIDENT_UPDATED]
     assert published[0].data.incident_id == incident_id
     assert client_pg.get(f"/api/v1/incidents/{incident_id}").status_code == 200
@@ -1147,7 +1149,7 @@ NACL_ID = "acl-0abc123456789def0"
 NACL_ARN = f"arn:aws:ec2:{REGION}:{ACCOUNT}:network-acl/{NACL_ID}"
 
 
-def _pending_secops(db, *, medium=False):
+def _pending_secops(db, *, medium=False, source_ip=None):
     from schemas.api.assets import RelationType
 
     _seed_asset_row(db, arn=EC2_ARN, asset_type=AssetType.EC2,
@@ -1165,7 +1167,119 @@ def _pending_secops(db, *, medium=False):
         intake.initial_risk = intake.initial_risk.model_copy(update={
             "initial_risk_level": RiskLevel.MEDIUM, "response_mode": ResponseMode.AGENT_WAIT,
         })
+    if source_ip is not None:
+        event = intake.threat_event
+        intake.threat_event = event.model_copy(update={
+            "payload": event.payload.model_copy(update={"source_ip": source_ip}),
+        })
     return incident_intake.create_incident_from_intake(db, intake).incident_id
+
+
+def _open_ip_intake() -> SecOpsIncidentIntake:
+    threat_event_id = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c63"
+    return SecOpsIncidentIntake.model_validate({
+        "title": "SSH 포트 전체 개방",
+        "threat_event": {
+            "threat_event_id": threat_event_id,
+            "source_event_id": "evt-mock-open-ip",
+            "event_type": "OPEN_IP",
+            "target_arn": SG_ARN,
+            "occurred_at": "2026-09-02T09:00:00Z",
+            "payload": {"protocol": "tcp", "from_port": 22, "to_port": 22, "source_cidr": "0.0.0.0/0"},
+            "deduplication_key": f"OPEN_IP:{GROUP_ID}:tcp:22-22:0.0.0.0/0",
+            "collected_at": "2026-09-02T09:00:01Z",
+        },
+        "initial_risk": {
+            "threat_event_id": threat_event_id,
+            "initial_risk_level": "MEDIUM",
+            "response_mode": "AGENT_WAIT",
+            "reason_codes": ["RISK_OPEN_INGRESS_WORLD"],
+        },
+    })
+
+
+def _closed_without_model(db, client_pg, caplog, incident_id, client) -> dict:
+    """모델 호출 0회로 FAILED 닫힘을 확인하고 조회 응답의 analysis_result를 돌려준다."""
+    with caplog.at_level(logging.INFO):
+        report = _cycle(db, client)
+    assert (report.claimed, report.failed, report.errored) == (1, 1, 0)
+    assert client.sent == []
+    data = client_pg.get(f"/api/v1/incidents/{incident_id}").json()
+    assert data["status"] == "FAILED"
+    [listed] = [item for item in client_pg.get("/api/v1/incidents").json()["items"]
+                if item["incident_id"] == incident_id]
+    assert listed["analysis_result"] == data["analysis_result"]
+    assert _recorded(caplog)["failure_reason"] == data["analysis_result"]["failure_reason"]
+    unavailable = [(r.incident_id, r.reason_code) for r in caplog.records
+                   if r.getMessage() == "agent_graph_input_unavailable"]
+    assert unavailable == [(incident_id, data["analysis_result"]["failure_reason"])]
+    return data["analysis_result"]
+
+
+def test_open_ip_with_empty_menu_reads_as_no_action_not_analysis_failure(db, client_pg, caplog):
+    """조치 메뉴가 빈 위협은 분석 고장이 아니라 제공할 자동 조치가 없는 것이다(#434)."""
+    _seed_asset_row(db, arn=SG_ARN, asset_type=AssetType.SG, resource_id=GROUP_ID,
+                    spec={"attached": True, "open_to_world": []}, state=None)
+    incident_id = incident_intake.create_incident_from_intake(db, _open_ip_intake()).incident_id
+
+    result = _closed_without_model(db, client_pg, caplog, incident_id, _client())
+
+    assert result == {"status": "NO_ACTION_AVAILABLE", "guardrail_rejections": [],
+                      "failure_reason": "NO_ACTION_AVAILABLE"}
+    row = incidents_repo.get_incident(db, incident_id)
+    db.refresh(row)
+    assert (row.agent_invocation_status, row.agent_failure_reason) == (
+        AgentInvocationStatus.FAILED, "NO_ACTION_AVAILABLE"
+    )
+
+
+def test_ipv6_ssh_source_is_closed_before_the_paid_model_call(db, client_pg, monkeypatch, caplog):
+    """IPv6 출발지는 NACL CidrBlock 차단으로 표현할 수 없다 — 메뉴가 있어도 모델 전에 닫는다(#434)."""
+    incident_id = _pending_secops(db, medium=True, source_ip="2001:db8::10")
+    monkeypatch.setattr(agent_dispatcher, "resolve_nacl_add_deny_rule_number",
+                        lambda *args, **kwargs: pytest.fail("규칙 번호 조회 전에 닫혀야 한다"))
+
+    result = _closed_without_model(db, client_pg, caplog, incident_id, _client())
+
+    assert result == {"status": "NO_ACTION_AVAILABLE", "guardrail_rejections": [],
+                      "failure_reason": "SOURCE_ADDRESS_UNSUPPORTED"}
+    row = incidents_repo.get_incident(db, incident_id)
+    db.refresh(row)
+    assert row.agent_failure_reason == "SOURCE_ADDRESS_UNSUPPORTED"
+
+
+def test_rule_number_resolution_failure_reads_as_server_parameter_unavailable(
+    db, client_pg, monkeypatch, caplog,
+):
+    """빈 규칙 번호가 없는 것은 입력 불가가 아니라 서버 몫 값을 못 정한 것이다 — 상태는 FAILED 그대로."""
+    incident_id = _pending_secops(db, medium=True)
+    monkeypatch.setattr(agent_dispatcher, "resolve_nacl_add_deny_rule_number",
+                        lambda *args, **kwargs: (None, None))
+
+    result = _closed_without_model(db, client_pg, caplog, incident_id, _client())
+
+    assert result == {"status": "FAILED", "guardrail_rejections": [],
+                      "failure_reason": "SERVER_PARAMETER_UNAVAILABLE"}
+    row = incidents_repo.get_incident(db, incident_id)
+    db.refresh(row)
+    assert row.agent_failure_reason == "SERVER_PARAMETER_UNAVAILABLE"
+
+
+def test_model_side_failure_still_reads_as_failed_with_its_reason(db, client_pg, monkeypatch):
+    """모델 호출 실패는 조치 없음과 갈린다 — 상태는 FAILED 그대로이고 사유만 더해진다(#434)."""
+    incident_id = _pending_secops(db, medium=True)
+    monkeypatch.setattr(agent_dispatcher, "resolve_nacl_add_deny_rule_number",
+                        lambda target, **kwargs: (1, None))
+    client = _client()  # 준비된 응답이 없어 첫 호출이 AIModelUnavailableError로 끝난다
+
+    report = _cycle(db, client)
+
+    assert (report.failed, report.errored) == (1, 0)
+    assert len(client.sent) == 1
+    data = client_pg.get(f"/api/v1/incidents/{incident_id}").json()
+    assert data["status"] == "FAILED"
+    assert data["analysis_result"] == {"status": "FAILED", "guardrail_rejections": [],
+                                       "failure_reason": "MODEL_UNAVAILABLE"}
 
 
 def _secops_client(db, incident_id, *, candidates=True, **over):
@@ -1478,6 +1592,7 @@ def test_secops_non_executable_results_remain_readable(db, client_pg, monkeypatc
     assert {
         "status": recorded["analysis_result"],
         "guardrail_rejections": recorded["guardrail_rejections"],
+        "failure_reason": recorded["failure_reason"],
     } == data["analysis_result"]
     assert recorded["incident_status"] == data["status"]
     resolved = client_pg.post(f"/api/v1/incidents/{incident_id}/resolve", json={

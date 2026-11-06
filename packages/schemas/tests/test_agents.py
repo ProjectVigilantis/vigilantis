@@ -214,6 +214,26 @@ def test_output_failed_valid():
     out = AgentGraphOutput.model_validate({"invocation_status": "FAILED"})
     assert out.summary_lines == [] and out.candidates == []
     assert out.reviewed_risk_level is None
+    assert out.failure_reason is None  # 사유를 싣기 전의 생산자
+
+
+def test_output_failed_carries_failure_reason():
+    out = AgentGraphOutput.model_validate(
+        {"invocation_status": "FAILED", "failure_reason": "SOURCE_ADDRESS_UNSUPPORTED"}
+    )
+    assert out.failure_reason.value == "SOURCE_ADDRESS_UNSUPPORTED"
+
+
+@pytest.mark.parametrize("payload", [
+    {"invocation_status": "SUCCEEDED", "summary_lines": SUMMARY3, "reviewed_risk_level": "HIGH",
+     "candidates": [DRAFT], "failure_reason": "MODEL_UNAVAILABLE"},
+    {"invocation_status": "NO_PROPOSAL", "summary_lines": SUMMARY3, "candidates": [],
+     "failure_reason": "NO_ACTION_AVAILABLE"},
+    {"invocation_status": "FAILED", "failure_reason": "UNKNOWN_REASON"},
+])
+def test_output_failure_reason_only_on_failed(payload):
+    with pytest.raises(ValidationError):
+        AgentGraphOutput.model_validate(payload)
 
 
 @pytest.mark.parametrize("payload", [
