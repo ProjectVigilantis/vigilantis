@@ -4,8 +4,9 @@
 #   - 쓰기는 support_access.write_transaction 안에서 한다(users 잠금 → 행위자 재판정 → 본문 → commit).
 #     본문의 ApiError 는 전부 rollback 이라 실패한 전이가 이력 · 알림을 남기지 않는다. 응답은 commit 전에
 #     같은 트랜잭션 안에서 만든다.
-#   - 접수(POST)는 require_customer 만 본다 — 정지 테넌트의 활성 사용자도 자기 테넌트에 접수할 수 있다
-#     (사용자 결정). admin_service._transaction 은 정지를 거절하므로 쓰지 않는다.
+#   - 접수(POST)는 require_inquiry_author(고객사 계정 + 문의 등록 권한 CREATE_INQUIRY, #572 5번)만 본다 — 정지
+#     테넌트의 활성 사용자도 자기 테넌트에 접수할 수 있다(사용자 결정). admin_service._transaction 은 정지를
+#     거절하므로 쓰지 않는다.
 #   - 접수 = 문의 + INQUIRY_CREATED 이력 + 운영자 알림을 한 트랜잭션에 쓴다.
 #   - 관리 경로(전이 · 메모 · 이력)는 대상 문의 행을 FOR UPDATE 로 잡은 뒤 조건부 UPDATE 로 전이한다.
 #     범위는 auth.access.tenant_scope_ids 하나다. 형식이 어긋난 · 없는 · 범위 밖 ID 는 같은 404 다.
@@ -44,7 +45,7 @@ from sqlalchemy.orm import Session
 from support_access import (
     Actor,
     authorize,
-    require_customer,
+    require_inquiry_author,
     require_support_user,
     write_transaction,
 )
@@ -118,7 +119,7 @@ def _event_time(db: Session, inquiry_id: str, now: datetime) -> datetime:
 
 
 def create_inquiry(db: Session, actor: Actor, body: InquiryCreateRequest) -> InquiryItem:
-    with write_transaction(db, actor, require_customer) as user:
+    with write_transaction(db, actor, require_inquiry_author) as user:
         # 테넌트 · 작성자는 판정된 신원에서만 온다. 알림 제목에 쓰는 이름은 같은 트랜잭션의 현재 값이다
         tenant = db.get(
             models.Tenant, user.tenant_id, populate_existing=True, with_for_update={"read": True}

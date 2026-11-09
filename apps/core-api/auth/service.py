@@ -12,6 +12,9 @@
 #     세션 판정마다 DB 의 현재 값을 읽는다 — 등급 변경은 다음 요청부터 바로 반영된다(세션 재발급 불필요).
 #     TENANT_MANAGER 의 담당 고객사(assigned_tenant_ids)도 판정마다 새로 읽는다 — 배정 회수가 바로 반영된다.
 #     다른 등급 · 계정 종류는 배정을 읽지 않고 빈 튜플이다(소속 tenant_id 는 배정이 아니다).
+#   - 기능별 권한(#572 5번): TENANT OPERATOR 의 부여 권한(granted_permissions)도 판정마다 새로 읽는다 — 부여 · 회수가
+#     다음 요청부터 반영된다. 다른 역할 · 계정 종류는 읽지 않고 빈 집합이다. 실제 쓸 수 있는 권한은
+#     auth.permissions.effective_permissions 가 역할 · 등급과 함께 정한다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ from datetime import datetime
 
 from db import models
 from db.repositories import auth as auth_repo
-from schemas.api.auth import AccountType, PlatformRole, SessionInfo, UserRole
+from schemas.api.auth import AccountType, FeaturePermission, PlatformRole, SessionInfo, UserRole
 from schemas.api.errors import ErrorCode
 from schemas.api.tenants import TenantStatus
 from sqlalchemy.orm import Session
@@ -60,6 +63,9 @@ class CurrentUser:
     #: 판정 시점에 읽은 담당 고객사(정규 UUID 문자열, 오름차순). TENANT_MANAGER 만 값이 있을 수 있다 —
     #: 빈 튜플은 담당 고객사가 없다는 뜻이다. 범위 판정은 auth.access.tenant_scope_ids 가 한다.
     assigned_tenant_ids: tuple[str, ...] = ()
+    #: 판정 시점에 읽은 기능별 부여 권한(#572 5번). TENANT OPERATOR 만 값이 있을 수 있다 — 빈 집합은 부여 없음이다.
+    #: 실제 권한 판정은 auth.permissions.effective_permissions 가 한다(ADMIN 은 전부, VIEWER 는 없음).
+    granted_permissions: frozenset[FeaturePermission] = frozenset()
 
     @property
     def tenant_suspended(self) -> bool:
@@ -164,6 +170,9 @@ def resolve_current_user(
         and user.platform_role is PlatformRole.TENANT_MANAGER
     ):
         assigned_tenant_ids = auth_repo.list_assigned_tenant_ids(db, user_id=user.user_id)
+    granted_permissions: frozenset[FeaturePermission] = frozenset()
+    if user.account_type is AccountType.TENANT and user.role is UserRole.OPERATOR:
+        granted_permissions = auth_repo.list_feature_permissions(db, user_id=user.user_id)
     if touch:
         db.commit()
     return CurrentUser(
@@ -176,6 +185,7 @@ def resolve_current_user(
         tenant_status=tenant_status,
         session=view.info,
         assigned_tenant_ids=assigned_tenant_ids,
+        granted_permissions=granted_permissions,
     )
 
 
