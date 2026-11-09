@@ -127,30 +127,34 @@ def test_fixed_primary_set_includes_all_seven_mvp_scenarios_and_uses_db_uuid():
 
 def test_secops_prompt_matches_explicit_snapshot():
     snapshot = read_json(ROOT / "prompt_snapshot.json")
-    active = snapshot["candidate"] or snapshot["approved"]
+    candidate = snapshot.get("candidate")
+    active = candidate or snapshot["approved"]
     assert active["version"] == agent.SECOPS_PROMPT_VERSION
     assert runner.prompt_fingerprint() == active["prompt_sha256"], (
         "프롬프트가 동결 지문과 다릅니다. baseline.md의 재검증 절차와 후보 등록을 확인하세요."
     )
-    if snapshot["candidate"] is not None:
+    if candidate is not None:
         # 후보의 실측 결과와 승인판을 구분한다. 지문 일치는 품질 승인을 뜻하지 않는다.
-        assert snapshot["candidate"]["quality_status"] in {"PENDING", "PASS", "FAIL"}
-        if snapshot["candidate"]["quality_status"] != "PENDING":
-            assert (ROOT / snapshot["candidate"]["result"]).is_file()
-        assert snapshot["candidate"]["prompt_sha256"] != snapshot["approved"]["prompt_sha256"]
-        assert (ROOT / snapshot["candidate"]["plan"]).is_file()
+        assert candidate["quality_status"] in {"PENDING", "PASS", "FAIL"}
+        if candidate["quality_status"] != "PENDING":
+            assert (ROOT / candidate["result"]).is_file()
+        assert candidate["prompt_sha256"] != snapshot["approved"]["prompt_sha256"]
+        assert (ROOT / candidate["plan"]).is_file()
     assert active["rubric_sha256"] == digest(read_json(ROOT / "rubric.json"))
 
 
-def test_candidate_snapshot_is_the_pending_evidence_first_version():
-    candidate = read_json(ROOT / "prompt_snapshot.json")["candidate"]
-    assert candidate["version"] == agent.SECOPS_PROMPT_VERSION
-    assert candidate["quality_status"] == "PENDING"
-    assert candidate["supersedes"]["version"] == "v1.1.0"
-    # 대비책의 프롬프트 지문은 근거 선행 지문과 다르고 v1.1.0 후보 지문을 그대로 재현한다.
-    fallback = runner.prompt_fingerprint(SecOpsGraphVariant.CANDIDATE_FIRST)
-    assert fallback == candidate["supersedes"]["prompt_sha256"]
-    assert fallback != candidate["prompt_sha256"]
+def test_approved_snapshot_is_the_measured_evidence_first_version():
+    snapshot = read_json(ROOT / "prompt_snapshot.json")
+    approved = snapshot["approved"]
+    assert approved["version"] == agent.SECOPS_PROMPT_VERSION
+    assert approved["measured_prompt_sha256"] == approved["prompt_sha256"]
+    assert (ROOT / approved["result"]).is_file()
+    # 대비책의 프롬프트 지문은 근거 선행 지문과 다르고 v1.1.0 지문을 그대로 재현한다.
+    fallback = snapshot["fallback"]
+    assert fallback["version"] == "v1.1.0" and fallback["graph_variant"] == "CANDIDATE_FIRST"
+    assert runner.prompt_fingerprint(SecOpsGraphVariant.CANDIDATE_FIRST) == fallback["prompt_sha256"]
+    assert fallback["prompt_sha256"] != approved["prompt_sha256"]
+    assert (ROOT / fallback["plan"]).is_file()
 
 
 def test_rubric_adds_decision_support_check_and_drops_reassessment_wording():
@@ -213,7 +217,7 @@ def test_secops_parameter_constraints_are_not_sent_to_the_model(monkeypatch):
     assert result["request_sha256"] == run["request_sha256"]
     # 대비책은 제약을 여전히 보내므로 지문이 달라진다.
     assert runner.prompt_fingerprint(SecOpsGraphVariant.CANDIDATE_FIRST) != read_json(
-        ROOT / "prompt_snapshot.json")["candidate"]["supersedes"]["prompt_sha256"]
+        ROOT / "prompt_snapshot.json")["fallback"]["prompt_sha256"]
 
 
 @pytest.mark.parametrize("change", ["prompt", "payload", "response_schema"])
