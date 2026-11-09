@@ -1304,7 +1304,8 @@ export type TriggerSource =
   | 'USER_APPROVAL' // 관제자 승인 실행
   | 'PRE_MITIGATION_0_5S' // High 위협 즉시 선차단
   | 'TIMEOUT_ISOLATION_1M' // 1분 미응답 만료 자동 격리
-  | 'AUTO_ON_FAILURE'; // 주 조치 실패 시 자동 복구
+  | 'AUTO_ON_FAILURE' // 주 조치 실패 시 자동 복구
+  | 'NACL_DENY_EXPIRED_24H'; // 차단 24시간 고정 만료 자동 해제 (T-11 · #597)
 
 export type AuditEventAction = 'ACTION_EXECUTION_STARTED' | 'INCIDENT_RESOLVED';
 

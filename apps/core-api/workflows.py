@@ -5918,3 +5918,211 @@ def offer_nacl_release(db: Session, execution_id: str) -> ReleaseOffer:
     with tenant_scope(owner):
         outcome = _guard_candidate(candidate, managed, backups)
     return _store_release_offer(db, candidate, outcome, execution_id=execution_id)
+
+
+# ==============================================================================
+# §차단 24시간 고정 만료 — 시스템 발동 해제 (Post-MVP T-11 · #597)
+# ==============================================================================
+# 차단(NACL_ADD_DENY)이 SUCCESS로 끝난 뒤 NACL_DENY_TTL이 지나면 dispatcher가 해제(NACL_RESTORE)를
+# **시스템 발동**으로 예약한다. 관제자 복구 접수(_recoverable_origin)와 같은 꼴이되 근거는 승인
+# 후보가 아니라 **원본 차단 실행**이다 — 후보 없이 실행된 차단도 같은 만료를 받는다. 사람 승인
+# 접수(reserve_execution)는 SYSTEM 행위자를 거절하고 USER_APPROVAL을 고정하므로 그 함수를 넓히지
+# 않고 옆에 둔다. 해제 후보(offer_nacl_release)는 다시 만들지 않는다.
+#
+# 파라미터는 원본에 결속된 백업 레코드에서 채우고, 그 레코드를 **예약 시점에** 해제 실행에
+# 결속한다 — 실행(run_nacl_restore_execution → load_nacl_restore_backup)은 결속된 레코드를 그대로
+# 쓰고, 삭제 직전 현물과 fingerprint를 대조한다(executor.execute_nacl_restore). 그 대조가 이
+# 경로의 가드레일 ④다. 원본 하나에 만료 해제는 한 번이다(deduplication_key). 규칙이 손으로
+# 지워져 실행이 실패해도 재시도하지 않는다 — 만료 스캔(executions_repo.list_nacl_deny_expired)이
+# 상태 불문 "해제 실행 있음"으로 그 차단을 뺀다.
+#
+# 인시던트 상태와 무관하게 고정이다 — 운영자가 "차단 유지하고 종료"한 인시던트의 차단도
+# 만료된다(NACL 인바운드 규칙 할당량 20개). 인시던트는 복구 접수와 같이 ACTION_IN_PROGRESS로
+# 옮기고 RESOLVED에서 오면 종료 판단을 지운다(_move_incident_to_in_progress). 해제가 끝나면
+# 시스템이 닫지 않고 운영자가 다시 닫는다.
+
+# 고정 24시간 단순판(SSOT §확정 결정 로그 2026-11-06). 고객별 설정 · 연장 · 예고는 범위 밖이라
+# 설정이 아니라 상수다.
+NACL_DENY_TTL = timedelta(hours=24)
+
+
+@dataclass(frozen=True)
+class ExpiryReservation:
+    """만료 해제 접수 1건의 결과 — 발행과 스캔 집계를 정하는 호출부가 읽는 값이다.
+
+    execution_id가 None이면 예약하지 않은 것이고 skipped_reason이 이유다.
+    """
+
+    incident_id: str
+    execution_id: str | None = None  # 접수한 NACL_RESTORE 실행
+    skipped_reason: str | None = None
+    incident_updated_at: datetime | None = None  # WS 봉투의 occurred_at
+
+
+def nacl_deny_expiry_deduplication_key(block_execution_id: str) -> str:
+    """원본 차단 1건에 만료 해제 접수는 하나다."""
+    return f"nacl-deny-expiry:{block_execution_id}"
+
+
+def _expiry_skipped(incident_id: str, execution_id: str, reason: str) -> ExpiryReservation:
+    # 예약하지 않은 차단은 다음 주기에 다시 걸린다 — 신호는 주기 요약의 expiry_skipped 카운터가
+    # 나르므로 행 단위 로그는 debug다(_release_skipped와 같은 규약)
+    logger.debug(
+        "nacl_deny_expiry_skipped",
+        extra={"incident_id": incident_id, "execution_id": execution_id, "reason": reason},
+    )
+    return ExpiryReservation(incident_id=incident_id, skipped_reason=reason)
+
+
+def _expiry_backup(
+    db: Session, block: models.ActionExecution
+) -> tuple[models.BackupRecord | None, NaclRuleIndexBackup | None, str | None]:
+    """원본 차단에 결속된 백업 레코드와 규칙 좌표. 쓸 수 없으면 (None, None, 사유).
+
+    _release_candidate와 같은 기준이다 — 차단 자기 행에 결속된 레코드만 쓰고, 대상 기준
+    조회로 "아마 이 규칙"을 찾지 않는다. 백업이 없으면 해제를 시작하지 않는다(ADR-0008 §1 ④).
+    """
+    record = (
+        executions_repo.get_backup_record(db, block.backup_record_id)
+        if block.backup_record_id is not None
+        else None
+    )
+    if record is None or record.execution_id != block.execution_id:
+        return None, None, "차단 실행에 결속된 백업 레코드가 없습니다"
+    if record.backup_type != executor.BACKUP_NACL_RULE_INDEX:
+        return None, None, "차단 실행의 백업 종류가 NACL 규칙 index가 아닙니다"
+    if record.target_arn != block.target_arn:
+        return None, None, "백업 레코드가 차단 대상과 다른 자원을 가리킵니다"
+    backup = executor.nacl_rule_backup(record.payload)
+    if backup is None:
+        return None, None, "백업 payload에 규칙 슬롯이 없습니다"
+    return record, backup, None
+
+
+def reserve_nacl_deny_expiry(
+    db: Session, execution_id: str, *, now: datetime | None = None
+) -> ExpiryReservation:
+    """만료된 차단 1건에 해제 실행을 시스템 발동으로 접수한다 — 잠금 → 만료 재확인 → 백업 →
+    정지 · 동시 실행 확인 → 예약 → 감사 기록 → 상태 전이 → commit. (T-11 · #597)
+
+    스캔 목록은 식별자뿐이라 잠근 뒤 만료 조건을 다시 본다 — 목록을 읽은 뒤 관제자가 해제를
+    접수했을 수 있다. **동시에** 들어오는 관제자 접수와는 인시던트 잠금으로 직렬화한다(아래 주석).
+    그 밖의 경로가 같은 규칙을 먼저 지웠더라도 해제 실행은 삭제 직전 현물 대조(fingerprint)에서
+    "규칙 없음"으로 끝난다 — 같은 규칙을 두 번 지우거나 남의 규칙을 지우는 일은 없다.
+
+    정지 테넌트의 차단은 예약하지 않는다. 실행 행을 남기면 dispatcher가 시작 관문에서 FAILED로
+    닫고(refuse_start_if_tenant_suspended) 만료 스캔은 그 차단을 다시 집지 않아 규칙이 영구히
+    남는다. 다음 주기에 다시 본다.
+    """
+    now = now or datetime.now(UTC)
+    block = executions_repo.lock_execution(db, execution_id)
+    if block is None:
+        raise ValueError(f"실행 레코드를 찾을 수 없습니다: {execution_id}")
+    if block.runbook_id is not RunbookId.RUNBOOK_NACL_ADD_DENY:
+        # 배선 오류다 — 만료로 해제되는 조치는 차단 하나뿐이다
+        raise ValueError(f"NACL_ADD_DENY 실행이 아닙니다: {block.runbook_id.value}")
+    incident_id = block.incident_id
+
+    if (
+        block.status is not ExecutionStatus.SUCCESS
+        or block.finished_at is None
+        or block.finished_at + NACL_DENY_TTL > now
+    ):
+        db.commit()
+        return _expiry_skipped(incident_id, execution_id, "만료된 SUCCESS 차단이 아닙니다")
+    record, backup, problem = _expiry_backup(db, block)
+    if record is None or backup is None:
+        db.commit()
+        return _expiry_skipped(incident_id, execution_id, problem or "")
+    # 관제자 해제 접수(reserve_execution → _executable_candidate)는 인시던트를 먼저 잠근 채 실행 행을
+    # 넣고 commit한다. 같은 잠금을 여기서 먼저 잡아야 그 접수와 직렬화된다 — 저쪽이 먼저면 아래
+    # 동시 실행 확인이 그 해제를 보고, 이쪽이 먼저면 저쪽이 무효화된 후보를 보고 409로 끝난다.
+    # 잠금 순서는 실행(차단) → 인시던트로 close_execution과 같다
+    if incidents_repo.lock_incident(db, incident_id) is None:
+        raise ValueError(f"차단이 가리키는 인시던트가 없습니다: {incident_id}")
+    if _tenant_suspended(db, block.tenant_id):
+        db.commit()
+        return _expiry_skipped(incident_id, execution_id, "테넌트가 정지 상태입니다")
+    if any(
+        row.target_arn == block.target_arn for row in executions_repo.list_non_terminal(db)
+    ):
+        # 같은 NACL에 끝나지 않은 실행(관제자 해제 · 다른 차단)이 있다 — 그 실행이 끝난 뒤의
+        # 주기가 다시 본다. 관제자 해제였으면 만료 스캔이 더는 집지 않는다
+        db.commit()
+        return _expiry_skipped(incident_id, execution_id, "같은 대상에 진행 중인 실행이 있습니다")
+
+    key = nacl_deny_expiry_deduplication_key(block.execution_id)
+    if executions_repo.get_by_deduplication_key(db, key) is not None:
+        db.commit()
+        return _expiry_skipped(incident_id, execution_id, "만료 해제가 이미 접수됐습니다")
+
+    target = parse_arn(record.target_arn)
+    if target is None:
+        db.commit()
+        return _expiry_skipped(incident_id, execution_id, "차단 대상 ARN을 읽을 수 없습니다")
+    # 실행 파라미터는 후보의 검증된 명령이 아니라 백업 레코드에서 채운다. evidence_id 자리는 원본
+    # 차단 실행이다 — 이 접수의 근거가 그 실행이고, 후보 없이 실행된 차단에도 같은 값이 있다
+    parameters = NaclRestoreParameters(
+        network_acl_id=target.resource_id,
+        rule_number=backup.rule_number,
+        egress=backup.egress,
+        evidence_id=block.execution_id,
+    )
+    command = {
+        "runbook_id": RunbookId.RUNBOOK_NACL_RESTORE.value,
+        "target_arn": record.target_arn,
+        "parameters": parameters.model_dump(mode="json"),
+        "evidence_ids": [block.execution_id],
+    }
+    try:
+        # SAVEPOINT로 감싸는 이유는 reserve_execution과 같다 — 제약 위반 뒤에도 재조회를 이어 간다
+        with db.begin_nested():
+            execution = executions_repo.create_execution(
+                db,
+                incident_id=incident_id,
+                runbook_id=RunbookId.RUNBOOK_NACL_RESTORE,
+                target_arn=record.target_arn,
+                trigger_source=TriggerSource.NACL_DENY_EXPIRED_24H,
+                deduplication_key=key,
+                backup_record_id=record.backup_record_id,
+                validated_command=command,
+            )
+    except IntegrityError:
+        raced = executions_repo.get_by_deduplication_key(db, key)
+        if raced is None:
+            raise  # 중복 방지 키가 아닌 다른 제약 위반이다
+        db.commit()
+        return _expiry_skipped(incident_id, execution_id, "만료 해제가 이미 접수됐습니다")
+    audit_repo.record_execution_started(db, execution, audit_repo.SYSTEM)
+    # 아직 서 있는 [해제] 후보는 무효화한다 — 지울 규칙이 이 실행으로 사라지므로 해제가 끝난 뒤
+    # 인시던트가 승인 대기로 되돌아가 빈 버튼을 보이지 않게. 다른 런북의 제안은 건드리지 않는다
+    for candidate in incidents_repo.list_candidates(
+        db, incident_id, status=CandidateStatus.EXECUTABLE
+    ):
+        if candidate.runbook_id is RunbookId.RUNBOOK_NACL_RESTORE:
+            incidents_repo.update_candidate_status(
+                db,
+                candidate.candidate_id,
+                expected=CandidateStatus.EXECUTABLE,
+                next_status=CandidateStatus.INVALIDATED,
+            )
+    _move_incident_to_in_progress(db, incident_id)
+    reserved_id = execution.execution_id
+    finished_at = block.finished_at
+    db.commit()
+
+    incident = incidents_repo.get_incident(db, incident_id)
+    logger.info(
+        "nacl_deny_expiry_reserved",
+        extra={
+            "incident_id": incident_id,
+            "block_execution_id": execution_id,
+            "execution_id": reserved_id,
+            "finished_at": finished_at.isoformat(),
+        },
+    )
+    return ExpiryReservation(
+        incident_id=incident_id,
+        execution_id=reserved_id,
+        incident_updated_at=incident.updated_at if incident is not None else None,
+    )
