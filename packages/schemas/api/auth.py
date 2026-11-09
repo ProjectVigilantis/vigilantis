@@ -113,15 +113,35 @@ class AccountScope(BaseModel):
 
 
 class UserRole(str, Enum):
-    """앱 역할 3종. 조치 실행(POST /api/v1/actions/execute) · 인시던트 종료
-    (POST /api/v1/incidents/{id}/resolve)는 ADMIN · OPERATOR 만 한다(PR 2)."""
+    """고객사(TENANT) 계정의 역할 3종(#572 5번).
 
-    #: 사용자 관리 · 조치 승인 · 조회. 사용자 관리 API 는 PR 3.
+    ADMIN(고객사 중앙계정)은 자기 고객사의 모든 기능과 직원 관리, OPERATOR(고객사 직원계정)는 중앙계정이 골라 준
+    기능별 권한(FeaturePermission)만, VIEWER 는 대시보드 조회만 한다 — 문의 등록 · 조치 실행 · 인시던트 종료는
+    서버가 403 AUTH_FORBIDDEN 으로 거절하고, 자산 · 인시던트 조회 API 는 막지 않는다(대시보드가 같은 API 를 쓴다).
+    """
+
     ADMIN = "ADMIN"
-    #: 조치 승인 · 조회.
     OPERATOR = "OPERATOR"
-    #: 조회 전용 — 조치 실행 · 종료 요청은 서버가 403 AUTH_FORBIDDEN 으로 거절한다.
     VIEWER = "VIEWER"
+
+
+class FeaturePermission(str, Enum):
+    """고객사 직원계정(OPERATOR)에게 기능 단위로 주는 권한(#572 5번). 고객사 중앙계정(ADMIN)이 준다.
+
+    서버 거절(403 AUTH_FORBIDDEN)은 EXECUTE_ACTION · RESOLVE_INCIDENT · CREATE_INQUIRY 의 진입점에서 한다.
+    VIEW 는 FE 가 자산 · 보안 · 감사 · 문의 메뉴를 그릴지 정하는 값이다 — 조회 API 는 서버가 막지 않는다
+    (대시보드가 같은 조회 API 를 쓰고, VIEWER 도 대시보드는 본다). EXECUTE_ACTION · RESOLVE_INCIDENT 는 VIEW 와
+    함께만 부여한다(users.VIEW_DEPENDENT_PERMISSIONS).
+    """
+
+    #: 자기 고객사의 업무 현황(자산 · 인시던트 화면) · 감사 기록 · 문의 조회.
+    VIEW = "VIEW"
+    #: 제안된 조치 실행 — POST /api/v1/actions/execute.
+    EXECUTE_ACTION = "EXECUTE_ACTION"
+    #: 인시던트 종료 — POST /api/v1/incidents/{incident_id}/resolve.
+    RESOLVE_INCIDENT = "RESOLVE_INCIDENT"
+    #: 문의 등록 — POST /api/v1/inquiries.
+    CREATE_INQUIRY = "CREATE_INQUIRY"
 
 
 class LoginRequest(BaseModel):
@@ -231,6 +251,10 @@ class CurrentUserResponse(AccountScope):
     #: TENANT_MANAGER 에게 배정된 고객사(판정 시점의 DB 값). 빈 목록은 담당 고객사가 없다는 뜻이다.
     #: CENTRAL_ADMIN(전체 범위) · TENANT(소속은 tenant_id)는 항상 빈 목록이다 — 배정이 아니다.
     assigned_tenant_ids: list[UUID]
+    #: (#572 5번) 이 계정이 지금 쓸 수 있는 기능별 권한(열거 선언 순서). TENANT ADMIN 은 네 가지 전부, OPERATOR 는
+    #: 고객사 중앙계정이 준 것, VIEWER 는 빈 목록이다. PLATFORM(CENTRAL_ADMIN · TENANT_MANAGER)은
+    #: VIEW · EXECUTE_ACTION · RESOLVE_INCIDENT — 문의 등록은 고객사 계정만 한다. 서버가 요청마다 다시 판정한다.
+    permissions: list[FeaturePermission]
 
     @model_validator(mode="after")
     def _validate_assignments(self):

@@ -10,14 +10,17 @@
 #     확인하고 rollback 한 뒤 SDK 호출). SDK 뒤 행위자 재확인이 실패하면 DB 는 쓰지 않지만 제공자
 #     부작용은 이미 있었을 수 있다 — 성공으로 취급하지 않는다. DB 실패 시 제공자 사용자를 지우지 않는다.
 #   - 이력(user_admin_events)은 상태 변경과 같은 commit 에 들어간다. 값은 UserEventState 화이트리스트뿐이다.
-#   - 관리 범위(#492): 행위자의 account_type 과 PLATFORM 의 명시 등급(platform_role) · 담당 고객 배정이
-#     정한다(role · tenant_id NULL 로 추론하지 않는다).
-#     범위는 access.tenant_scope_ids / can_access_tenant 하나다: CENTRAL_ADMIN 은 모든 TENANT 계정,
-#     TENANT_MANAGER 는 배정된 고객사만(배정 없음 = 데이터 없음), TENANT ADMIN 은 자기 테넌트만.
-#     recover_existing 은 플랫폼 관리 권한자(CENTRAL_ADMIN, 배정 테넌트로 초대하는 TENANT_MANAGER)만이고
-#     TENANT ADMIN 은 403 이다. 범위 밖(미배정 포함) 대상과
+#   - 행위자(#572 9번): 고객사 중앙계정(TENANT ADMIN)과 중앙 관리계정(CENTRAL_ADMIN)뿐이다
+#     (auth.permissions.require_user_management). 관리자 직원계정(TENANT_MANAGER)은 배정과 무관하게 403 이다.
+#     관리 범위는 access.tenant_scope_ids / can_access_tenant 하나다: CENTRAL_ADMIN 은 모든 TENANT 계정,
+#     TENANT ADMIN 은 자기 테넌트만(role · tenant_id NULL 로 추론하지 않는다).
+#     recover_existing 은 CENTRAL_ADMIN 만이고 TENANT ADMIN 은 403 이다. 범위 밖 대상과
 #     PLATFORM · UNASSIGNED 대상은 없는 대상과 같은 404 USER_NOT_FOUND 이고 Cognito 를 부르지 않는다.
 #     API 로 만드는 계정은 항상 TENANT 이며 소속을 옮기는 길은 없다.
+#   - 기능별 권한(#572 5번): OPERATOR 의 부여 권한(app_user_feature_permissions)은 change_permissions 가 통째로
+#     바꾼다(대상이 OPERATOR 가 아니면 409, 같은 목록도 409). 초대는 OPERATOR 에게만 permissions 를 받고(기본 없음),
+#     역할이 OPERATOR 에서 벗어나면 부여 행을 지운다 · OPERATOR 가 되면 빈 상태로 시작한다. 목록 · 초대 응답의
+#     permissions 는 역할을 반영한 실효 권한(auth.permissions.tenant_permissions)이다.
 #   - 정지 테넌트의 TENANT 행위자는 조회만 한다 — 쓰기는 409 TENANT_SUSPENDED(잠금 안에서 재판정).
 #   - 초대 · 재발송은 대상 테넌트가 ACTIVE 여야 한다(409 TENANT_STATE_CONFLICT). Cognito 어댑터 조립 · SDK
 #     전에 확인하고(사전 판정 실패는 SDK 0회), DB 쓰기 직전에 잠금 안에서 다시 확인한다(테넌트 행 FOR SHARE —
@@ -29,7 +32,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -39,7 +42,7 @@ from uuid import UUID
 from db import models
 from db.repositories import auth as auth_repo
 from exceptions import ApiError
-from schemas.api.auth import AccountType, UserRole
+from schemas.api.auth import AccountType, FeaturePermission, UserRole
 from schemas.api.errors import ErrorCode
 from schemas.api.tenants import TenantStatus
 from schemas.api.users import (
@@ -54,7 +57,7 @@ from schemas.api.users import (
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from . import access, service, sessions
+from . import access, permissions, service, sessions
 
 logger = logging.getLogger("vigilantis.auth")
 
@@ -75,7 +78,18 @@ def _state(**values: Any) -> dict[str, Any]:
     return UserEventState(**values).model_dump(mode="json", exclude_none=True)
 
 
-def _item(user: models.AppUser, last_login_at: datetime | None) -> UserListItem:
+def _permission_state(role: UserRole, granted: frozenset[FeaturePermission]) -> dict[str, Any]:
+    """이력에 싣는 부여 권한 — OPERATOR 상태에만 permissions 를 넣는다(다른 역할은 부여 행이 없다)."""
+    if role is not UserRole.OPERATOR:
+        return {}
+    return {"permissions": permissions.ordered(granted)}
+
+
+def _item(
+    user: models.AppUser,
+    last_login_at: datetime | None,
+    granted: frozenset[FeaturePermission] = frozenset(),
+) -> UserListItem:
     return UserListItem(
         user_id=user.user_id,
         email=user.email,
@@ -84,13 +98,15 @@ def _item(user: models.AppUser, last_login_at: datetime | None) -> UserListItem:
         tenant_id=user.tenant_id,
         status=UserStatus(user.status.value),
         last_login_at=last_login_at,
+        permissions=permissions.ordered(permissions.tenant_permissions(user.role, granted)),
     )
 
 
 def _authorize(db: Session, actor: Actor, *, central: bool = False) -> service.CurrentUser:
     """행위자 세션 판정. 무효면 401(AuthRequiredError), 관리 권한이 없으면 403 — 둘 다 rollback 한다.
 
-    권한 정책은 HTTP 의존성과 같은 auth.access 의 것 하나다(central=True 는 직원 관리용 중앙 관리자 검사).
+    권한 정책은 HTTP 의존성과 같은 것 하나다 — 고객 사용자 관리는 auth.permissions.require_user_management
+    (TENANT ADMIN · CENTRAL_ADMIN), central=True 는 직원 관리용 중앙 관리자 검사(auth.access).
     """
     try:
         admin = service.resolve_current_user(
@@ -99,7 +115,7 @@ def _authorize(db: Session, actor: Actor, *, central: bool = False) -> service.C
         if central:
             access.require_central_admin(admin)
         else:
-            access.require_admin(admin)
+            permissions.require_user_management(admin)
     except BaseException:
         db.rollback()
         raise
@@ -134,8 +150,8 @@ def _target(db: Session, user_id: str, admin: service.CurrentUser) -> models.App
 
 
 def _invite_tenant(admin: service.CurrentUser, requested: UUID | None) -> str:
-    """초대 대상 테넌트. 플랫폼 관리 권한자는 명시 필수(없으면 422)이고 접근 가능한 테넌트여야 한다
-    (TENANT_MANAGER 의 미배정 · 없는 테넌트는 404). TENANT ADMIN 은 생략하면 자기 테넌트, 다르면 404."""
+    """초대 대상 테넌트. 중앙 관리계정은 명시 필수(없으면 422)이고 접근 가능한 테넌트여야 한다(없는 테넌트는 404).
+    TENANT ADMIN 은 생략하면 자기 테넌트, 다르면 404."""
     if access.is_tenant_manager(admin):
         if requested is None:
             raise ApiError(ErrorCode.REQUEST_VALIDATION_FAILED)
@@ -250,7 +266,12 @@ def list_users(db: Session, actor: Actor) -> UsersResponse:
     if scope is not None and not scope:  # 배정 없음 = 고객 데이터 없음(전체가 아니다)
         return UsersResponse(items=[])
     rows = auth_repo.list_users_with_last_login(db, tenant_ids=scope)
-    return UsersResponse(items=[_item(user, last) for user, last in rows])
+    grants = auth_repo.list_feature_permissions_for(
+        db, user_ids=[user.user_id for user, _ in rows if user.role is UserRole.OPERATOR]
+    )
+    return UsersResponse(
+        items=[_item(user, last, grants.get(user.user_id, frozenset())) for user, last in rows]
+    )
 
 
 def list_events(db: Session, actor: Actor, user_id: str, *, limit: int) -> UserEventsResponse:
@@ -290,10 +311,48 @@ def change_role(db: Session, actor: Actor, user_id: str, role: UserRole) -> None
         if role is not UserRole.ADMIN:
             _require_other_admin_remains(db, target)
         now = actor.clock()
-        before = _state(role=target.role)
+        granted = auth_repo.list_feature_permissions(db, user_id=target.user_id)
+        before = _state(role=target.role, **_permission_state(target.role, granted))
         if not auth_repo.set_role(db, user_id=target.user_id, role=role, now=now):
             raise ApiError(ErrorCode.USER_NOT_FOUND)
-        _audit(db, admin, target.user_id, UserEventAction.ROLE_CHANGED, before, _state(role=role), now)
+        # 부여 권한은 OPERATOR 의 것이다 — 벗어나면 지우고, OPERATOR 가 되면 빈 상태로 시작한다(기본 선택 없음)
+        if granted and role is not UserRole.OPERATOR:
+            auth_repo.replace_feature_permissions(
+                db, user_id=target.user_id, permissions=frozenset(), now=now
+            )
+        after = _state(role=role, **_permission_state(role, frozenset()))
+        _audit(db, admin, target.user_id, UserEventAction.ROLE_CHANGED, before, after, now)
+
+
+def change_permissions(
+    db: Session, actor: Actor, user_id: str, requested: list[FeaturePermission]
+) -> None:
+    """OPERATOR 의 기능별 권한을 통째로 바꾼다(#572 5번). 빈 목록은 전부 회수.
+
+    대상이 OPERATOR 가 아니면(ADMIN 은 전부 · VIEWER 는 없음이 역할로 정해진다) 409 USER_STATE_CONFLICT, 지금과 같은
+    목록도 409 다. VIEW 의존(실행 · 종료는 VIEW 와 함께)은 계약(UserPermissionsRequest)이 422 로 거른다.
+    """
+    permissions_set = frozenset(requested)
+    with _transaction(db, actor) as admin:
+        target = _target(db, user_id, admin)
+        if target.role is not UserRole.OPERATOR:
+            raise ApiError(ErrorCode.USER_STATE_CONFLICT)
+        granted = auth_repo.list_feature_permissions(db, user_id=target.user_id)
+        if granted == permissions_set:
+            raise ApiError(ErrorCode.USER_STATE_CONFLICT)
+        now = actor.clock()
+        auth_repo.replace_feature_permissions(
+            db, user_id=target.user_id, permissions=permissions_set, now=now
+        )
+        _audit(
+            db,
+            admin,
+            target.user_id,
+            UserEventAction.PERMISSIONS_CHANGED,
+            _state(permissions=permissions.ordered(granted)),
+            _state(permissions=permissions.ordered(permissions_set)),
+            now,
+        )
 
 
 def change_status(db: Session, actor: Actor, user_id: str, status: UserStatus) -> None:
@@ -352,20 +411,22 @@ def invite_user(
     role: UserRole,
     tenant_id: UUID | None,
     recover_existing: bool,
+    granted_permissions: Sequence[FeaturePermission] = (),
 ) -> UserListItem:
     """초대 — 제공자 사용자를 먼저 확보한 뒤 앱 사용자(TENANT) + 이력을 한 commit 으로 만든다.
 
     기본은 새 Cognito 사용자 생성(중복이면 AuthError USER_STATE_CONFLICT 409)이다. 자동 연결은 없다.
-    recover_existing=True 는 플랫폼 관리 권한자(CENTRAL_ADMIN, 배정 테넌트로 초대하는 TENANT_MANAGER)의
-    명시적 선택이다(TENANT ADMIN 은 403 AUTH_FORBIDDEN, SDK 0회):
-    이미 있는 Cognito 사용자를 조회해(없으면 404) 앱에 아직 없는 신원이면 연결한다 — 이메일 소유 증명이 아니다.
-    대상 테넌트(_invite_tenant)는 SDK 전에 ACTIVE 를 확인하고, 쓰기 직전 잠금 안에서 다시 확인한다.
+    recover_existing=True 는 중앙 관리계정(CENTRAL_ADMIN)의 명시적 선택이다(TENANT ADMIN 은 403 AUTH_FORBIDDEN,
+    SDK 0회): 이미 있는 Cognito 사용자를 조회해(없으면 404) 앱에 아직 없는 신원이면 연결한다 — 이메일 소유 증명이 아니다.
+    granted_permissions(#572 5번)는 OPERATOR 초대의 부여 권한이다(계약이 다른 역할의 값을 422 로 거른다) — 비어 있으면
+    권한 없이 만든다. 대상 테넌트(_invite_tenant)는 SDK 전에 ACTIVE 를 확인하고, 쓰기 직전 잠금 안에서 다시 확인한다.
     get_adapter 는 사전 판정을 모두 통과한 뒤에만 부른다 — Cognito 미설정(503)보다 401 · 403 · 409 · 422 · 404 가 먼저다.
     """
+    granted = frozenset(granted_permissions)
     try:
         admin = _authorize_write(db, actor)
         if recover_existing and not access.is_tenant_manager(admin):
-            raise ApiError(ErrorCode.AUTH_FORBIDDEN)  # 기존 계정 연결은 플랫폼 관리 권한자만 — SDK 전에 거절
+            raise ApiError(ErrorCode.AUTH_FORBIDDEN)  # 기존 계정 연결은 중앙 관리계정만 — SDK 전에 거절
         target_tenant = _invite_tenant(admin, tenant_id)
         _require_active_tenant(db, target_tenant)
     finally:
@@ -399,6 +460,8 @@ def invite_user(
             status=models.AppUserStatus.ACTIVE,
             email_verified_at=None,
         )
+        if granted:
+            auth_repo.replace_feature_permissions(db, user_id=row.user_id, permissions=granted, now=now)
         _audit(
             db,
             admin,
@@ -410,10 +473,11 @@ def invite_user(
                 status=UserStatus.ACTIVE,
                 recover_existing=recover_existing,
                 tenant_id=target_tenant,
+                **_permission_state(role, granted),
             ),
             now,
         )
-        item = _item(row, None)
+        item = _item(row, None, granted)
     return item
 
 

@@ -109,9 +109,9 @@ test('renewal-off consequences have one owner and summary dates do not turn last
     next_renewal_date: null, expiry_date: '2026-12-05', available_actions: ['STOP'] as const,
   };
   const html = render({ ...off, available_actions: [...off.available_actions] });
-  assert.equal(html.split('서버가 만료를 처리하면 앱 기본 Free로 돌아갑니다').length - 1, 1);
+  assert.equal(html.split('서버가 만료를 처리하면 서비스가 정지됩니다').length - 1, 1);
   assert.match(html, /2026-11-05 ~ 2026-12-04/);
-  assert.match(html, /만료 · 앱 기본 Free\(예정\).*?2026-12-05/);
+  assert.match(html, /만료 · 서비스 정지\(예정\).*?2026-12-05/);
 });
 
 test('contract details distinguish a stale projection boundary from the renewed contract boundary', () => {

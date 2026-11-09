@@ -35,7 +35,6 @@ from ai.agent import (  # noqa: E402
     EvidenceSummaryOutput,
     ProposedCandidate,
     ProposedCandidate as SecOpsProposedCandidate,
-    RiskReassessmentOutput,
 )
 from ai.model_client import FakeAIModelClient  # noqa: E402
 from db.repositories import assets as assets_repo  # noqa: E402
@@ -569,7 +568,7 @@ def test_finops_claim_ceiling_explicitly_includes_followup_calls(monkeypatch):
 
     assert FINOPS_MODEL_CALLS == 2
     assert SAVINGS_MODEL_CALLS == 1
-    # SecOps가 3회여서 우연히 상한이 맞는 구현은 잡는다.
+    # SecOps 호출 수와 우연히 상한이 맞는 구현은 잡는다.
     monkeypatch.setattr(agent_dispatcher, "SECOPS_MODEL_CALLS", 1)
     settings = Settings(OPENAI_TIMEOUT_SECONDS=30, OPENAI_MAX_ATTEMPTS=3,
                         OPENAI_MAX_RETRY_AFTER_SECONDS=60)
@@ -1289,7 +1288,6 @@ def _secops_client(db, incident_id, *, candidates=True, **over):
                   cidr_block="203.0.113.10/32", protocol="tcp")
     values.update(over)
     return _client(
-        RiskReassessmentOutput(reviewed_risk_level=RiskLevel.HIGH),
         SecOpsCandidateProposalOutput(candidates=[SecOpsProposedCandidate(**values)] if candidates else []),
         EvidenceSummaryOutput(observation="300초 동안 SSH 실패 120회", diagnosis="SSH 공격 추정",
                               rationale="출발지 차단 필요"),
@@ -1372,7 +1370,7 @@ def test_secops_number_excludes_only_open_candidates_for_the_same_nacl(
     assert data["status"] == "AWAITING_APPROVAL"
     stored = incidents_repo.list_candidates(db, incident_id)[0]
     assert stored.parameters["rule_number"] == expected
-    assert client.sent[2]["user_payload"]["candidates"][0]["parameters"]["rule_number"] == expected
+    assert client.sent[1]["user_payload"]["candidates"][0]["parameters"]["rule_number"] == expected
 
 
 def test_secops_target_outside_the_menu_is_logged_with_that_target(db, caplog):
@@ -1386,7 +1384,6 @@ def test_secops_target_outside_the_menu_is_logged_with_that_target(db, caplog):
     output = AgentGraphOutput(
         invocation_status=AgentInvocationStatus.SUCCEEDED,
         summary_lines=["관찰", "진단", "근거"],
-        reviewed_risk_level=RiskLevel.HIGH,
         candidates=[
             RunbookCandidateDraft.model_validate(
                 {
@@ -1408,6 +1405,28 @@ def test_secops_target_outside_the_menu_is_logged_with_that_target(db, caplog):
     assert _violation_reasons(caplog) == [(incident_id, "TARGET_NOT_ALLOWED")]
     [record] = [r for r in caplog.records if r.getMessage() == "agent_output_contract_violation"]
     assert record.target_arn == outside
+
+
+def test_reviewed_risk_level_on_a_secops_output_is_rejected(db, caplog):
+    """SECOPS 출력도 reviewed_risk_level이 null이어야 한다(계약 원칙 ⓑ · ADR-0005 1차 개정).
+
+    위험 재평가 노드가 없어진 그래프는 이 값을 채우는 경로가 없으므로 검증기를 직접 부른다.
+    서버 초기 판정과 같은 값을 복사해 실어도 거절한다 — AI 정밀 평가로 보이게 되기 때문이다.
+    """
+    incident_id = _pending_secops(db)
+    graph_input = agent_dispatcher.build_graph_input(db, incident_id)
+    violating = AgentGraphOutput(
+        invocation_status=AgentInvocationStatus.NO_PROPOSAL,
+        summary_lines=["관찰", "진단", "근거"],
+        reviewed_risk_level=graph_input.initial_risk.initial_risk_level,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="vigilantis.agent_dispatcher"):
+        verified = agent_dispatcher.verify_graph_output(graph_input, violating, incident_id)
+
+    assert verified.invocation_status is AgentInvocationStatus.FAILED
+    assert verified.summary_lines == [] and verified.reviewed_risk_level is None
+    assert _violation_reasons(caplog) == [(incident_id, "REVIEWED_RISK_MISMATCH")]
 
 
 @pytest.mark.parametrize("owned", [True, False])
@@ -1505,7 +1524,7 @@ def test_secops_dispatch_stores_risk_candidates_wait_and_commit_event(db, client
     data = client_pg.get(f"/api/v1/incidents/{incident_id}").json()
     assert data["status"] == "AWAITING_APPROVAL"
     assert data["initial_risk_level"] == "MEDIUM"
-    assert data["reviewed_risk_level"] == "HIGH"
+    assert data["reviewed_risk_level"] is None  # AI 재평가 없음 — ADR-0005 1차 개정
     assert data["response_mode"] == ResponseMode.AGENT_WAIT.value
     assert data["recommendations"][0]["target_arn"] == NACL_ARN
     row = incidents_repo.get_incident(db, incident_id)
@@ -1513,7 +1532,7 @@ def test_secops_dispatch_stores_risk_candidates_wait_and_commit_event(db, client
     assert row.initial_risk_reason_codes == ["RISK_SSH_BRUTEFORCE"]
     assert (row.response_deadline_at - row.agent_wait_started_at).total_seconds() == 60
     assert len(published) == 1
-    assert len(client.sent) == 3  # SecOps 본래 3호출뿐이며 단가 호출은 없다.
+    assert len(client.sent) == 2  # SecOps는 후보·요약 2호출뿐이며 단가 호출은 없다.
     candidate = incidents_repo.list_candidates(db, incident_id)[0]
     assert candidate.ai_savings_estimate is None
     evaluation = guardrails_repo.latest_for_candidate(db, candidate.candidate_id)
@@ -1554,7 +1573,7 @@ def test_secops_non_executable_results_remain_readable(db, client_pg, monkeypatc
         over["cidr_block"] = "203.0.113.0/24"
     client = _secops_client(db, incident_id, candidates=kind != "no_proposal", **over)
     if kind == "nul":
-        client._outputs[2] = EvidenceSummaryOutput(observation="bad\x00text",
+        client._outputs[1] = EvidenceSummaryOutput(observation="bad\x00text",
                                                    diagnosis="추정", rationale="차단")
     report = _cycle(db, client)
     assert report.errored == 0
@@ -1575,7 +1594,7 @@ def test_secops_non_executable_results_remain_readable(db, client_pg, monkeypatc
     assert data["recommendations"] == []
     assert data["initial_risk_level"] == "HIGH"
     if completed:
-        assert len(data["summary_lines"]) == 3 and data["reviewed_risk_level"] == "HIGH"
+        assert len(data["summary_lines"]) == 3 and data["reviewed_risk_level"] is None
         dropped = [record for record in caplog.records if record.message == "agent_summary_dropped"]
         assert dropped == []
     else:
@@ -1642,12 +1661,17 @@ def test_secops_prior_execution_controls_state_and_input(db, client_pg, monkeypa
     # 실행 실패와 분석 성공은 독립이다. 실행 실패를 정상화하지 않고 분석은 보존한다.
     assert data["executions"][0]["status"] == status
     assert data["analysis_result"]["status"] == "NO_PROPOSAL"
-    assert len(data["summary_lines"]) == 3 and data["reviewed_risk_level"] == "HIGH"
+    assert len(data["summary_lines"]) == 3 and data["reviewed_risk_level"] is None
 
 
-def test_secops_claim_ceiling_covers_three_model_calls():
+def test_claim_ceiling_covers_the_larger_domain_call_count():
+    from ai.agent import FINOPS_MODEL_CALLS, SECOPS_MODEL_CALLS
+    from ai.rate_estimator import SAVINGS_MODEL_CALLS
     from config import Settings
 
+    # SecOps는 2회(재평가 호출 제거 — ADR-0005 1차 개정), FinOps는 후보 2회 + 단가 1회가 상한이다.
+    assert SECOPS_MODEL_CALLS == 2
+    assert FINOPS_MODEL_CALLS + SAVINGS_MODEL_CALLS == 3
     settings = Settings(OPENAI_TIMEOUT_SECONDS=30, OPENAI_MAX_ATTEMPTS=3,
                         OPENAI_MAX_RETRY_AFTER_SECONDS=60)
     assert agent_dispatcher.stale_claim_ceiling_seconds(settings) == 630

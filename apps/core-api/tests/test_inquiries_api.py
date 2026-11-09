@@ -1,6 +1,7 @@
 """/api/v1/inquiries — 고객 문의 접수 · 조회 · 전이 · 메모 · 이력 (#552). 실제 PostgreSQL.
 
-접수는 고객사(TENANT) 계정의 모든 역할이 하고, 정지 테넌트의 활성 사용자도 자기 테넌트에 접수 · 조회한다(사용자 결정).
+접수는 고객사(TENANT) 계정 중 ADMIN · CREATE_INQUIRY 를 받은 OPERATOR 가 하고(VIEWER · 권한 없는 OPERATOR 는
+403 — test_feature_permissions), 정지 테넌트의 활성 사용자도 자기 테넌트에 접수 · 조회한다(사용자 결정).
 전이 · 메모 · 이력은 플랫폼 관리 권한자(CENTRAL_ADMIN 전체 · TENANT_MANAGER 배정 고객사)뿐이며 고객사 계정은
 자기 문의도 403 이다. 범위 밖 · 형식 오류 · 없는 ID 는 같은 404 INQUIRY_NOT_FOUND 다.
 쓰기가 실패한 요청은 문의 · 이력 · 알림 어느 것도 남기지 않는다(한 트랜잭션).
@@ -75,7 +76,8 @@ def tenant(make_tenant) -> str:
 
 @pytest.fixture()
 def customer(login_as, tenant):
-    return login_as(UserRole.VIEWER, tenant_id=tenant)
+    # 문의 등록은 CREATE_INQUIRY 가 있어야 한다(#572 5번) — OPERATOR 의 시드 기본은 네 가지 전부다
+    return login_as(UserRole.OPERATOR, tenant_id=tenant)
 
 
 @pytest.fixture()
@@ -119,8 +121,8 @@ def seed_inquiry(db, make_auth_session, tenant_id: str, *, status: InquiryStatus
 # --- 접수 ----------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("role", [UserRole.ADMIN, UserRole.OPERATOR, UserRole.VIEWER])
-def test_every_tenant_role_can_submit_and_creation_is_one_coherent_write(
+@pytest.mark.parametrize("role", [UserRole.ADMIN, UserRole.OPERATOR])
+def test_admin_and_granted_operator_can_submit_and_creation_is_one_coherent_write(
     client_pg, db, login_as, make_tenant, role
 ):
     tenant_id = make_tenant()
@@ -196,7 +198,7 @@ def test_suspended_tenant_user_can_submit_and_read_only_own_tenant(client_pg, db
     suspended = make_tenant(TenantStatus.SUSPENDED)
     other = make_tenant()
     foreign_id, _ = seed_inquiry(db, make_auth_session, other)
-    seed = login_as(UserRole.VIEWER, tenant_id=suspended)
+    seed = login_as(UserRole.ADMIN, tenant_id=suspended)
 
     created = client_pg.post(BASE, json=payload())
     assert created.status_code == 201, created.text
@@ -492,7 +494,7 @@ def test_invalid_note_is_422_and_adds_no_event(client_pg, db, tenant, make_auth_
 
 def test_events_are_oldest_first_across_the_whole_lifecycle(client_pg, db, make_tenant, login_as, make_auth_session):
     tenant_id = make_tenant()
-    login_as(UserRole.VIEWER, tenant_id=tenant_id)
+    login_as(UserRole.OPERATOR, tenant_id=tenant_id)
     created = client_pg.post(BASE, json=payload()).json()
     staff = make_auth_session(UserRole.ADMIN, platform_role=PlatformRole.CENTRAL_ADMIN)
     inquiry_id = created["inquiry_id"]

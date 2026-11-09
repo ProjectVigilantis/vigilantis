@@ -6,7 +6,7 @@
 (머지 전 PR #599 리뷰로 일 단위에서 시간 단위로 바꿨다 — 같은 리비전을 제자리에서 고쳤다.)
 
 Revision ID: d572a6c1e906
-Revises: a1b7c4d2e905
+Revises: c572a1b2d905
 Create Date: 2026-11-09 10:00:00.000000
 """
 from __future__ import annotations
@@ -15,7 +15,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "d572a6c1e906"
-down_revision = "a1b7c4d2e905"
+down_revision = "c572a1b2d905"
 branch_labels = None
 depends_on = None
 

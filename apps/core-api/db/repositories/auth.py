@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from schemas.api.auth import AccountType, PlatformRole, UserRole
+from schemas.api.auth import AccountType, FeaturePermission, PlatformRole, UserRole
 from schemas.api.users import UserEventAction, UserEventState
 from sqlalchemy import delete, func, insert, select, text, update
 from sqlalchemy.orm import Session
@@ -245,6 +245,49 @@ def replace_assigned_tenants(
         db.execute(
             insert(assignment),
             [{"user_id": user_id, "tenant_id": tenant_id} for tenant_id in tenant_ids],
+        )
+    db.execute(
+        update(models.AppUser).where(models.AppUser.user_id == user_id).values(updated_at=now)
+    )
+
+
+# --- 기능별 권한(#572 5번) --------------------------------------------------------
+
+
+def list_feature_permissions(db: Session, *, user_id: str) -> frozenset[FeaturePermission]:
+    """사용자에게 부여된 기능별 권한. 역할은 보지 않는다 — OPERATOR 에게만 뜻이 있고 호출부(auth.permissions)가 가린다."""
+    grant = models.AppUserFeaturePermission
+    return frozenset(db.scalars(select(grant.permission).where(grant.user_id == user_id)))
+
+
+def list_feature_permissions_for(
+    db: Session, *, user_ids: list[str]
+) -> dict[str, frozenset[FeaturePermission]]:
+    """여러 사용자의 부여 권한을 한 번에 — 행이 없는 사용자는 결과에 없다(빈 집합으로 읽는다)."""
+    if not user_ids:
+        return {}
+    grant = models.AppUserFeaturePermission
+    grants: dict[str, set[FeaturePermission]] = {}
+    for user_id, permission in db.execute(
+        select(grant.user_id, grant.permission).where(grant.user_id.in_(user_ids))
+    ):
+        grants.setdefault(user_id, set()).add(permission)
+    return {user_id: frozenset(values) for user_id, values in grants.items()}
+
+
+def replace_feature_permissions(
+    db: Session, *, user_id: str, permissions: frozenset[FeaturePermission], now: datetime
+) -> None:
+    """사용자의 부여 권한을 permissions 로 통째로 바꾼다(빈 집합 = 전부 회수). 사용자 updated_at 을 now 로 올린다.
+
+    commit 하지 않는다. 호출부가 users 락을 쥐고 대상 역할(OPERATOR)을 먼저 확인한다 — 없는 사용자는 FK 가 거절한다.
+    """
+    grant = models.AppUserFeaturePermission
+    db.execute(delete(grant).where(grant.user_id == user_id))
+    if permissions:
+        db.execute(
+            insert(grant),
+            [{"user_id": user_id, "permission": p} for p in FeaturePermission if p in permissions],
         )
     db.execute(
         update(models.AppUser).where(models.AppUser.user_id == user_id).values(updated_at=now)

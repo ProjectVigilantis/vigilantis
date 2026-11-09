@@ -3,14 +3,15 @@
 # /api/v1/users — 고객 사용자 관리 라우터. (#492, 계약: schemas.api.users)
 #
 #   - 얇게 둔다: 판정 · 잠금 · 트랜잭션은 auth.admin_service 가 맡는다.
-#   - require_admin 이 라우터 의존성이라 본문 검증 · Cognito 어댑터 조립(설정 없으면 503)보다 먼저
-#     돈다. 고객사 ADMIN 과 플랫폼 관리 권한자(CENTRAL_ADMIN · TENANT_MANAGER)만 통과하고 그 밖은
-#     설정과 무관하게 403 이다. Cognito 의존성은 초대 · 재발송에만 있다.
-#   - 관리 범위(CENTRAL_ADMIN 전체 · TENANT_MANAGER 배정 고객사 · 고객사 ADMIN 자기 테넌트)와 정지 테넌트
-#     거절은 서비스가 행위자를 다시 판정해 건다(조회 포함) — 라우터는 범위를 계산하지 않는다(#492).
-#     recover_existing 은 플랫폼 관리 권한자(매니저는 배정 테넌트)만 쓴다. 플랫폼 직원 관리는 /api/v1/staff 다.
+#   - require_user_management(auth.permissions)가 라우터 의존성이라 본문 검증 · Cognito 어댑터 조립(설정 없으면
+#     503)보다 먼저 돈다. 고객사 중앙계정(TENANT ADMIN)과 중앙 관리계정(CENTRAL_ADMIN)만 통과하고 그 밖
+#     (관리자 직원계정 TENANT_MANAGER 포함)은 설정과 무관하게 403 이다(#572 9번). Cognito 의존성은 초대 · 재발송에만 있다.
+#   - 관리 범위(CENTRAL_ADMIN 전체 · 고객사 ADMIN 자기 테넌트)와 정지 테넌트 거절은 서비스가 행위자를 다시
+#     판정해 건다(조회 포함) — 라우터는 범위를 계산하지 않는다(#492).
+#     recover_existing 은 중앙 관리계정만 쓴다. 플랫폼 직원 관리는 /api/v1/staff 다.
 #   - 초대 · 재발송의 Cognito 어댑터는 지연 조립이다(get_cognito_adapter_factory). 서비스가 행위자 · 대상 ·
 #     테넌트 사전 판정(422 · 404 · 409)을 마친 뒤에만 조립하므로, 설정이 비어도 그 판정이 503 보다 먼저다.
+#   - (#572 5번) PUT /{user_id}/permissions 가 OPERATOR 의 기능별 권한을 통째로 바꾼다(계약: UserPermissionsRequest).
 # ==============================================================================
 
 from __future__ import annotations
@@ -20,9 +21,9 @@ from datetime import datetime
 from functools import partial
 
 from auth import admin_service
-from auth.access import require_admin
 from auth.cognito import CognitoAdapter
 from auth.http import SESSION_COOKIE, get_clock, get_cognito_adapter
+from auth.permissions import require_user_management
 from auth.provider import build_recovery_adapter
 from auth.totp_recovery_http import recover_totp, require_recovery_actor
 from config import AuthSettings, get_auth_settings
@@ -35,6 +36,7 @@ from schemas.api.users import (
     UserEventsResponse,
     UserInviteRequest,
     UserListItem,
+    UserPermissionsRequest,
     UserRoleRequest,
     UsersResponse,
     UserStatusRequest,
@@ -47,7 +49,7 @@ _SETTINGS = Depends(get_auth_settings)
 _CLOCK = Depends(get_clock)
 
 router = APIRouter(
-    prefix="/api/v1/users", tags=["users"], dependencies=[Depends(require_admin)]
+    prefix="/api/v1/users", tags=["users"], dependencies=[Depends(require_user_management)]
 )
 
 
@@ -96,6 +98,7 @@ def invite_user(
         role=body.role,
         tenant_id=body.tenant_id,
         recover_existing=body.recover_existing,
+        granted_permissions=body.permissions,
     )
 
 
@@ -118,6 +121,17 @@ def change_role(
     actor: admin_service.Actor = _ACTOR,
 ) -> Response:
     admin_service.change_role(db, actor, user_id, body.role)
+    return Response(status_code=204)
+
+
+@router.put("/{user_id}/permissions", status_code=204)
+def change_permissions(
+    user_id: str,
+    body: UserPermissionsRequest,
+    db: Session = _DB,
+    actor: admin_service.Actor = _ACTOR,
+) -> Response:
+    admin_service.change_permissions(db, actor, user_id, body.permissions)
     return Response(status_code=204)
 
 

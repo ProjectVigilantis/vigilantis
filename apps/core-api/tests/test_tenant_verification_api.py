@@ -684,8 +684,11 @@ def test_resume_keeps_live_mock_rights(client_pg, db, admin, aws, make_auth_sess
     assert client_pg.get(f"{BASE}/{tenant.tenant_id}").json() == body
 
 
-def test_resume_projects_rights_that_ended_while_stopped_as_app_free(client_pg, db, admin, aws, make_auth_session):
-    # 갱신을 끈 계약의 기간 끝 시각이 정지 중에 지났고, 처리 주기는 아직 돌지 않았다
+def test_resume_of_rights_that_ended_while_stopped_leaves_the_service_suspended_for_expiry(
+    client_pg, db, admin, aws, make_auth_session
+):
+    # 갱신을 끈 계약의 기간 끝 시각이 정지 중에 지났고, 처리 주기는 아직 돌지 않았다. 재개 직후의 투영 새로 고침이
+    # 권리 없음을 보고 만료 정지로 다시 멈춘다 — 무료 요금제는 없다(SSOT 2026-11-06). 연결 확인 기록은 남는다.
     tenant = _with_mock_rights(db, make_auth_session, aws.start - timedelta(days=70), renew=False)
     stale, agreement = _projection(db, tenant.tenant_id), _agreement(db, tenant.tenant_id)
     assert stale[5] is SubscriptionSource.MOCK_MARKETPLACE and stale[6] < aws.start
@@ -695,7 +698,9 @@ def test_resume_projects_rights_that_ended_while_stopped_as_app_free(client_pg, 
     assert resp.status_code == 200
     body = resp.json()["tenant"]
     assert (body["status"], body["subscription"], body["subscription_source"], body["entitlement_ends_at"]) == (
-        "ACTIVE", FREE, "APP_FREE", None)
+        "SUSPENDED", FREE, "APP_FREE", None)
+    assert body["suspended_reason"] == subscription_workflow.EXPIRY_SUSPENSION_REASON
+    assert resp.json()["verification"]["result"] == "OK"
     assert _agreement(db, tenant.tenant_id) == agreement  # 만료 전이 · 이벤트는 처리 주기(공급자)의 몫이다
     assert client_pg.get(f"{BASE}/{tenant.tenant_id}").json() == body
 

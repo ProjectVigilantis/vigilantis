@@ -138,6 +138,7 @@ test('초대는 고객 ID · 복구 선택을 그대로 싣고 만든 고객사 
     role: 'VIEWER',
     status: 'ACTIVE',
     last_login_at: null,
+    permissions: [],
   };
   const sent = stubFetch(t, () => new Response(JSON.stringify(created), { status: 201 }));
   const result = await inviteUser({ email: 'a@b.c', role: 'VIEWER', tenant_id: tenantId, recover_existing: false });

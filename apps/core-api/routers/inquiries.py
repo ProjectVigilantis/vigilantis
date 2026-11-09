@@ -2,9 +2,10 @@
 # /api/v1/inquiries — 고객 문의 · 처리 이력 라우터. (#552, 계약: schemas.api.inquiries)
 #
 #   - 얇게 둔다: 판정 · 범위 · 트랜잭션은 inquiries_service 가 맡는다.
-#   - 경로별 게이트가 본문 검증보다 먼저 돈다: 접수는 고객사(TENANT) 계정(역할 무관 · 정지 테넌트 포함),
-#     목록은 고객사 계정 또는 플랫폼 관리 권한자, 전이 · 메모 · 이력은 플랫폼 관리 권한자뿐이다
-#     (고객사 계정은 자기 문의도 403). 서비스가 쓰기 직전에 행위자를 다시 판정한다.
+#   - 경로별 게이트가 본문 검증보다 먼저 돈다: 접수는 문의 등록 권한(CREATE_INQUIRY, #572 5번)이 있는 고객사(TENANT)
+#     계정(ADMIN · 권한을 받은 OPERATOR — VIEWER 는 403, 정지 테넌트 포함), 목록은 고객사 계정(역할 무관) 또는
+#     플랫폼 관리 권한자, 전이 · 메모 · 이력은 플랫폼 관리 권한자뿐이다(고객사 계정은 자기 문의도 403).
+#     서비스가 쓰기 직전에 행위자를 다시 판정한다.
 #   - Origin · 인증 전역 의존성은 앱이 라우터를 붙일 때 건다.
 # ==============================================================================
 
@@ -32,7 +33,7 @@ from schemas.api.inquiries import (
 )
 from schemas.api.support import SUPPORT_DEFAULT_PAGE_SIZE, SUPPORT_MAX_PAGE_SIZE
 from sqlalchemy.orm import Session
-from support_access import Actor, get_actor, require_customer, require_support_user
+from support_access import Actor, get_actor, require_inquiry_author, require_support_user
 
 _DB = Depends(get_db)
 _ACTOR = Depends(get_actor)
@@ -41,7 +42,7 @@ _USER = Depends(require_user)
 
 # support_access 의 게이트는 CurrentUser 를 인자로 받는 함수라 의존성(require_user)에 묶어야 경로 게이트가 된다
 def customer_gate(user: service.CurrentUser = _USER) -> service.CurrentUser:
-    return require_customer(user)
+    return require_inquiry_author(user)
 
 
 def support_gate(user: service.CurrentUser = _USER) -> service.CurrentUser:

@@ -731,6 +731,7 @@ def _valid_bodies(incident_id: str) -> dict[tuple[str, str], dict | None]:
         ("POST", f"{user}/invite/resend"): None,
         ("PUT", f"{user}/role"): {"role": "VIEWER"},
         ("PUT", f"{user}/status"): {"status": "DISABLED"},
+        ("PUT", f"{user}/permissions"): {"permissions": []},
         ("POST", f"{user}/sessions/revoke"): None,
         ("POST", f"{user}/totp/reset"): {"operation_id": str(uuid.uuid4()), "identity_verified": True},
         ("POST", "/api/v1/staff"): {"email": "staff-invitee@example.com"},

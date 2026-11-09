@@ -25,7 +25,7 @@ from db.repositories import platform as platform_repo
 from db.repositories import tenants as tenants_repo
 
 REVISION = "d572a6c1e906"
-PARENT = "a1b7c4d2e905"
+PARENT = "c572a1b2d905"  # dev #601 기능 권한 표 — 병합 뒤 그 뒤로 잇는다
 TABLE = "tenant_api_calls_hourly"
 
 
