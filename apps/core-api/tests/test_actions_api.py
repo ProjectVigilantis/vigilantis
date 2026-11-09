@@ -201,7 +201,11 @@ def test_second_reservation_keeps_action_in_progress(client_pg, db, make_candida
     """이미 ACTION_IN_PROGRESS인 Incident의 두 번째 접수 — 상태 전이 rowcount 0은
     정상 경로이며, 상세는 계속 200이어야 한다."""
     incident, first = make_executable(db)
-    second = make_candidate(db, incident, runbook_id=RunbookId.RUNBOOK_SG_DELETE_ISOLATED)
+    # 두 번째 제안은 다른 대상이다. 같은 대상이면 첫 실행이 끝나기 전 409 TARGET_EXECUTION_IN_PROGRESS 다(T-10 · #595)
+    second = make_candidate(
+        db, incident, runbook_id=RunbookId.RUNBOOK_SG_DELETE_ISOLATED,
+        target_arn="arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0second00000000",
+    )
     detail = f"/api/v1/incidents/{incident.incident_id}"
 
     assert client_pg.post(URL, json=_body(incident, first.runbook_id)).status_code == 202
