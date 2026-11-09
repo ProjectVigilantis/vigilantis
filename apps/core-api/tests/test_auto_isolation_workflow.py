@@ -146,6 +146,8 @@ def _attempt(
     execution_id: str | None = None,
     rejected: bool = False,
     now: datetime | None = None,
+    target: str = SUBJECT,
+    instance_id: str = INSTANCE_ID,
 ) -> workflows.AutoIsolationReservation:
     return workflows.reserve_auto_isolation(
         session,
@@ -153,7 +155,9 @@ def _attempt(
         trigger_source=trigger,
         now=now or _utcnow(),
         execution_id=execution_id or str(uuid.uuid4()),
-        validated_command=None if rejected else _command(seeded.evidence_id),
+        validated_command=None if rejected else _command(
+            seeded.evidence_id, target=target, instance_id=instance_id
+        ),
         guardrail_result=_fail_result() if rejected else _pass_result(),
     )
 
@@ -769,6 +773,9 @@ def test_dedup_constraint_backstop_discards_the_loser(
         target_arn=SUBJECT, trigger_source=PRE,
         deduplication_key=workflows.auto_isolation_deduplication_key(PRE, seeded.incident_id),
     )
+    # 앞선 시도는 가드레일 거절로 끝난 행이다. 진행 중이면 같은 대상 관문이 키로 먼저 알아봐(T-10 · #595)
+    # 유니크 제약까지 가지 않는다. 그 경로는 test_execution_revalidation.py 가 본다
+    winner.status = ExecutionStatus.FAILED
     db.commit()
     real_lookup = executions_repo.get_by_deduplication_key
     calls = {"count": 0}
@@ -832,7 +839,10 @@ def test_repeated_timeout_and_restart_use_the_stored_deadline(
     with _committed(pg_engine) as cleanup_ids:
         with Session(pg_engine) as setup:
             overdue = _seed(setup, make_incident, make_candidate, "medium", wait="overdue_hour")
-            upcoming = _seed(setup, make_incident, make_candidate, "medium", wait="future")
+            # 다른 인스턴스다. 같은 인스턴스면 overdue 의 격리가 끝나기 전에는 대상 사유로 건너뛴다(T-10 · #595)
+            upcoming = _seed(
+                setup, make_incident, make_candidate, "medium", wait="future", subject=OTHER_SUBJECT
+            )
             cleanup_ids += [overdue.incident_id, upcoming.incident_id]
             setup.commit()
 
@@ -844,7 +854,9 @@ def test_repeated_timeout_and_restart_use_the_stored_deadline(
             execution_id = str(uuid.uuid4())
             first = _attempt(restarted, overdue, TIMEOUT, execution_id=execution_id)
             assert first.created is True
-            assert _attempt(restarted, upcoming, TIMEOUT).skipped_reason is SKIP.WAIT_NOT_DUE
+            assert _attempt(
+                restarted, upcoming, TIMEOUT, target=OTHER_SUBJECT, instance_id=OTHER_INSTANCE_ID
+            ).skipped_reason is SKIP.WAIT_NOT_DUE
 
         # commit 뒤 응답을 잃고 같은 시도를 다시 보낸 경우와 다음 감시 주기
         with Session(pg_engine) as again:
@@ -863,7 +875,10 @@ def test_repeated_timeout_and_restart_use_the_stored_deadline(
                 again, now=later
             )
             again.rollback()
-            assert _attempt(again, upcoming, TIMEOUT, now=later).created is True
+            assert _attempt(
+                again, upcoming, TIMEOUT, now=later,
+                target=OTHER_SUBJECT, instance_id=OTHER_INSTANCE_ID,
+            ).created is True
 
         with Session(pg_engine) as verify:
             for seeded in (overdue, upcoming):

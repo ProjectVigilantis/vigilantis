@@ -21,7 +21,7 @@ from schemas.api.incidents import IncidentStatus
 from schemas.executions import EXECUTION_NON_TERMINAL_STATUSES, ExecutionStepResult
 from schemas.guardrails import PrecheckReasonCode
 from schemas.runbooks import RunbookId, TriggerSource
-from sqlalchemy import exists, select, update
+from sqlalchemy import exists, func, select, update
 from sqlalchemy.orm import Session, aliased
 
 from .. import mappers, models
@@ -140,6 +140,39 @@ def list_non_terminal(db: Session) -> list[models.ActionExecution]:
         db.execute(
             select(models.ActionExecution).where(
                 models.ActionExecution.status.in_(EXECUTION_NON_TERMINAL_STATUSES)
+            )
+        ).scalars()
+    )
+
+
+# 같은 대상 실행 접수의 트랜잭션 advisory lock 네임스페이스(T-10 · #595). 두 인자(int4, int4) 꼴은
+# 한 인자(bigint) 꼴과 키 공간이 따로라(PostgreSQL 문서 「Advisory Lock Functions」) 수집 잡 · 알림 설정의
+# bigint 키(services/scheduler.py · repositories/tenant_settings.py)와 겹치지 않는다. 값은 이 용도로 고정한
+# 임의 상수다. 둘째 인자는 target_arn 의 hashtext 라 서로 다른 대상이 같은 키를 받을 수 있는데, 그때는
+# 무관한 두 접수가 잠깐 직렬화될 뿐 판정은 틀리지 않는다.
+_TARGET_LOCK_NAMESPACE = 59510
+
+
+def lock_target(db: Session, target_arn: str) -> None:
+    """같은 대상의 실행 접수를 이 트랜잭션이 끝날 때까지 직렬화한다(T-10 · #595).
+
+    대상은 실행 행이 아니라 AWS 자원이라 잠글 행이 없다(NACL 처럼 자산 행이 없는 대상도 있다). 그래서
+    행 잠금이 아니라 트랜잭션 advisory lock 이다. commit · rollback 때 저절로 풀린다. 이 잠금을 잡은 뒤
+    list_active_on_target 으로 확인하고 실행 행을 넣어야, 동시에 들어온 두 접수가 서로의 미커밋 행을
+    못 본 채 둘 다 통과하지 않는다.
+    """
+    db.execute(
+        select(func.pg_advisory_xact_lock(_TARGET_LOCK_NAMESPACE, func.hashtext(target_arn)))
+    )
+
+
+def list_active_on_target(db: Session, target_arn: str) -> list[models.ActionExecution]:
+    """같은 대상의 끝나지 않은 실행(IN_PROGRESS · ROLLBACK_INITIATED). 부분 인덱스 범위 안에서 거른다."""
+    return list(
+        db.execute(
+            select(models.ActionExecution).where(
+                models.ActionExecution.status.in_(EXECUTION_NON_TERMINAL_STATUSES),
+                models.ActionExecution.target_arn == target_arn,
             )
         ).scalars()
     )

@@ -697,8 +697,29 @@ def _dispatch_claimed(
             workflows.refuse_start_if_tenant_suspended(
                 db, tenant_id=claimed.tenant_id, trigger_source=claimed.trigger_source, lock=False,
             )
+            # 승인 대기 중 근거가 사라진 FinOps 실행도 시작하지 않는다(T-10 · #595). DB 만 읽는다.
+            # 다운사이징의 타입 대조는 백업을 잡은 뒤 runner 안에서 같은 예외로 온다
+            workflows.refuse_start_if_target_changed(db, claimed)
             report.started += 1
             outcome = runner(db, execution_id)
+        except workflows.TargetChangedBeforeStart as refused:
+            logger.info(
+                "dispatch_refused_target_changed",
+                extra={
+                    "execution_id": execution_id,
+                    "runbook_id": claimed.runbook_id.value,
+                    "reason": str(refused)[:256],
+                },
+            )
+            _close_and_publish(
+                db,
+                execution_id,
+                publish,
+                report,
+                next_status=ExecutionStatus.FAILED,
+                error_summary=str(refused),
+            )
+            return
         except workflows.TenantSuspendedBeforeStart as refused:
             logger.info(
                 "dispatch_refused_tenant_suspended",

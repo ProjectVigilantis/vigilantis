@@ -16,8 +16,16 @@
 #     본편과 동일하게 전부 지날 것을 요구한다. (Issue #241)
 #   - 접수(reserve_execution)와 실행(run_rightsizing_execution)은 갈라져 있다. 예약은
 #     IN_PROGRESS 레코드를 남기는 데까지고, 그 예약을 실행으로 넘기는 디스패치는
-#     dispatcher.py 몫이다. 실행 직전 대상 자산 재확인과 후보 INVALIDATED 전이는
-#     아직 붙지 않았다.
+#     dispatcher.py 몫이다. 후보 INVALIDATED 전이는 아직 붙지 않았다.
+#   - 같은 대상(target_arn)에는 끝나지 않은 실행을 하나만 둔다(T-10 · #595). 관제자 접수는
+#     409 TARGET_EXECUTION_IN_PROGRESS, 자동 격리는 건너뜀 사유로 거절한다. 판정과 INSERT 사이의
+#     경합은 대상 단위 advisory lock 이 막는다(_refuse_if_target_busy). 진행 중인 실행 자신의
+#     원복(자동 원복 · 원본이 ROLLBACK_INITIATED 인 관제자 복구)은 같은 실행의 연장이라 막지 않는다.
+#   - 승인을 기다리는 동안 근거가 사라진 FinOps 실행은 시작하지 않는다(T-10 · #595). 대상 자산이
+#     사라졌거나 최신 판정이 더는 후보가 아니면 첫 AWS 호출 전에 FAILED(변경 없이 실패)로 닫고
+#     (refuse_start_if_target_changed), 다운사이징은 실행 직전 백업이 잡은 타입이 탐지 당시 타입과
+#     다르면 멈춘다(run_rightsizing_execution). 확인할 근거가 없으면 막지 않는다. 바뀐 것을 확인했을
+#     때만 멈춘다.
 #   - 실행(run_rightsizing_execution)은 단계 기록까지만 커밋하고 **종료 상태는
 #     확정하지 않는다.** 확정은 close_execution 하나가 하며, 실행 종료와 Incident
 #     전이를 한 트랜잭션에 넣는다 — 실행만 먼저 옮기면 ACTION_IN_PROGRESS인데
@@ -122,12 +130,14 @@ from schemas.guardrails import (
     GuardrailValidationRequest,
     GuardrailValidationResult,
 )
+from schemas.evidence import EvidenceType
 from schemas.incidents import (
     AGENT_TERMINAL_STATUSES,
     INCIDENT_RESOLVABLE_STATUSES,
     AgentInvocationStatus,
     AgentWaitSchedule,
 )
+from schemas.intake import INCIDENT_TRIGGERING_VERDICTS
 from schemas.precheck import (
     PrecheckOutcome,
     PrecheckReasonCode,
@@ -430,6 +440,38 @@ def _recovery_backup_record_id(
     return record.backup_record_id
 
 
+def _active_on_target(
+    db: Session, target_arn: str, *, own_origin_id: str | None = None
+) -> list[models.ActionExecution]:
+    """같은 대상의 끝나지 않은 실행. 대상 잠금을 잡은 뒤 본다(T-10 · #595).
+
+    잠금(executions_repo.lock_target)은 이 트랜잭션이 끝날 때까지 유지된다. 그 안에서 확인하고 실행
+    행을 넣어야 동시에 들어온 다른 접수가 이 행을 보거나 이 트랜잭션이 끝나기를 기다린다. 잠금 순서는
+    인시던트 → (테넌트) → 대상 하나뿐이다. 대상 잠금을 잡은 채 다른 인시던트를 잠그는 경로는 없다.
+
+    own_origin_id 는 관제자 복구가 되돌릴 원본이다. 원본이 ROLLBACK_INITIATED 면 그 자신이 끝나지 않은
+    실행으로 잡히는데, 복구는 그 실행을 끝내는 일이라 막지 않는다.
+    """
+    executions_repo.lock_target(db, target_arn)
+    return [
+        row
+        for row in executions_repo.list_active_on_target(db, target_arn)
+        if row.execution_id != own_origin_id
+    ]
+
+
+def _refuse_if_target_busy(
+    db: Session, target_arn: str, *, own_origin_id: str | None = None
+) -> None:
+    """관제자 접수의 동시 실행 관문. 같은 대상에 끝나지 않은 실행이 있으면 409."""
+    if _active_on_target(db, target_arn, own_origin_id=own_origin_id):
+        logger.info(
+            "execution_refused_target_busy",
+            extra={"target_arn": target_arn[:512]},
+        )
+        raise ApiError(ErrorCode.TARGET_EXECUTION_IN_PROGRESS)
+
+
 def _move_incident_to_in_progress(db: Session, incident_id: str) -> None:
     """접수한 실행이 진행 중인 동안 Incident는 반드시 ACTION_IN_PROGRESS다.
 
@@ -503,11 +545,23 @@ def reserve_execution(
         backup_record_id = (
             _recovery_backup_record_id(db, source) if is_rollback else None
         )
+        # 같은 대상의 동시 실행은 접수 근거 확인 뒤, INSERT 전에 막는다(T-10 · #595). 근거 확인보다
+        # 앞이면 이미 끝난 제안의 재요청이 409 PROPOSAL_NOT_EXECUTABLE 대신 이 코드로 떨어진다
+        _refuse_if_target_busy(
+            db,
+            source.target_arn,
+            own_origin_id=source.execution_id if is_rollback else None,
+        )
     except ApiError as exc:
-        if exc.code in (ErrorCode.PROPOSAL_NOT_EXECUTABLE, ErrorCode.TENANT_SUSPENDED):
+        if exc.code in (
+            ErrorCode.PROPOSAL_NOT_EXECUTABLE,
+            ErrorCode.TENANT_SUSPENDED,
+            ErrorCode.TARGET_EXECUTION_IN_PROGRESS,
+        ):
             # 최초 멱등 조회와 접수 근거 확인 사이에 같은 Key의 앞선 요청이
             # commit되면 후보는 이미 CLAIMED고 롤백은 원본에 자식이 붙어 있다. 그 뒤에
-            # 테넌트가 정지됐을 수도 있다(정지는 앞선 접수의 commit을 기다린다). 어느 쪽이든
+            # 테넌트가 정지됐을 수도 있다(정지는 앞선 접수의 commit을 기다린다). 앞선 요청이 만든
+            # 실행이 같은 대상을 차지해 동시 실행 관문에 걸릴 수도 있다. 어느 쪽이든
             # 같은 Key 재요청을 409로 오판하지 않도록 키를 한 번 더 확인한다.
             # 이 재확인은 INSERT 이전에만 둔다(이후에는 같은 세션의 자기 미커밋
             # 행이 잡혀 커밋 안 된 실행을 재생하게 된다).
@@ -695,6 +749,9 @@ class AutoIsolationSkipReason(str, Enum):
     TENANT_SUSPENDED = "TENANT_SUSPENDED"
     # 테넌트가 자동 조치를 껐다 — 또는 그 기한이 꺼진 동안 지났다(T-6 · #514). 사람 승인은 그대로 받는다
     AUTO_ACTION_DISABLED = "AUTO_ACTION_DISABLED"
+    # 같은 인스턴스에 끝나지 않은 다른 실행이 있다(T-10 · #595). 다운사이징이 정지 · 기동 · 원복하는 도중에
+    # 격리가 SG 를 바꿔 끼우면 서로 덮어쓴다. 아무것도 쓰지 않으므로 Medium 은 다음 감시 주기에 다시 시도한다
+    TARGET_EXECUTION_IN_PROGRESS = "TARGET_EXECUTION_IN_PROGRESS"
 
 
 @dataclass(frozen=True)
@@ -1039,6 +1096,18 @@ def reserve_auto_isolation(
         tenant, trigger_source=trigger_source, received_at=incident.created_at,
         response_deadline_at=incident.response_deadline_at,
     ) or _auto_isolation_skip_reason(db, incident, trigger_source, now)
+    # 동시 실행 관문은 발동 조건 다음이다. 발동하지 않을 건에 대상 잠금을 잡지 않는다(T-10 · #595)
+    if reason is None:
+        busy = _active_on_target(db, incident.subject_arn)
+        # 같은 출처의 앞선 시도가 대상을 차지하고 있으면 그것은 다른 실행이 아니라 이미 접수된 이 시도다.
+        # 대상 사유로 건너뛰면 호출부(security/soar.py)가 승자 실행을 이어 보내지 않는다
+        same_attempt = next((row for row in busy if row.deduplication_key == key), None)
+        if same_attempt is not None:
+            return _existing_auto_isolation(
+                db, same_attempt, execution_id=execution_id, deadline=deadline
+            )
+        if busy:
+            reason = AutoIsolationSkipReason.TARGET_EXECUTION_IN_PROGRESS
     if reason is not None:
         db.rollback()  # Incident 잠금을 놓는다. 이 호출은 아무것도 쓰지 않았다
         logger.info(
@@ -1718,6 +1787,94 @@ def refuse_start_if_tenant_suspended(
         raise TenantSuspendedBeforeStart(tenant_id)
 
 
+# 승인을 기다리는 동안 근거가 바뀌었는지 시작 직전에 다시 보는 런북. 자산 판정에서 나온 FinOps 후보
+# 4종이다(T-10 · #595). 위협 이벤트에서 나온 NACL 차단은 판정이 없어 「위협이 아직 유효한가」를 따로
+# 정해야 하고(#435 4-1), 롤백 3종은 실행 직전에 가드레일 4단계를 이미 다시 돌며, 자동 격리는 승인 대기가
+# 없다.
+_REVALIDATED_RUNBOOKS: frozenset[RunbookId] = frozenset(
+    {
+        RunbookId.RUNBOOK_EC2_RIGHTSIZING,
+        RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED,
+        RunbookId.RUNBOOK_SG_DELETE_ISOLATED,
+        RunbookId.RUNBOOK_EC2_ENABLE_AUTOSCALING,
+    }
+)
+_CANDIDATE_VERDICTS: frozenset[str] = frozenset(v.value for v in INCIDENT_TRIGGERING_VERDICTS)
+
+# 근거가 바뀌어 시작하지 않은 실행의 error_summary 앞머리. 정지 관문(TENANT_SUSPENDED)과 같은 「코드: 사유」
+# 꼴이다. PrecheckReasonCode(DB enum · 가드레일 계약)에 넣지 않은 것은 가드레일 판정이 아니라 승인 뒤의
+# 상태 변화이기 때문이다.
+TARGET_CHANGED_BEFORE_START = "TARGET_CHANGED_BEFORE_START"
+
+
+class TargetChangedBeforeStart(Exception):
+    """승인 대기 중 제안 근거가 사라져 실행을 시작하지 않았다(T-10 · #595).
+
+    자산은 만지지 않았다. dispatcher 가 잡아 FAILED(변경 없이 실패)로 확정한다. 예약 이후의 거절은
+    HTTP 오류가 아니라 실행 상태로 전달한다(schemas/api/errors.py). 문구는 실행의 error_summary 가 된다.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(f"{TARGET_CHANGED_BEFORE_START}: {detail}"[:1024])
+
+
+def refuse_start_if_target_changed(db: Session, execution: models.ActionExecution) -> None:
+    """단계 0건 FinOps 실행의 시작 관문. 근거가 사라졌으면 TargetChangedBeforeStart(T-10 · #595).
+
+    가드레일은 AI 제안 직후 한 번 돈다(파일 머리말). 승인까지 몇 시간에서 며칠이 걸리는 사이 자산이
+    지워졌거나 부하가 올라 더는 후보가 아니면, 그 제안은 지금의 자산에 대한 것이 아니다. 두 가지를 본다.
+      - 대상 자산이 수집에서 사라졌다(absent_since. 그 유형을 실제로 관측한 회차가 못 본 시각).
+      - 대상 자산의 최신 판정이 더는 COST_CANDIDATE · UNUSED 가 아니다(SKIP 포함).
+    DB 만 읽고 잠그지 않는다. 판정은 수집 주기마다 새로 쌓이므로, 탐지 때의 판정이 아직 최신이면 그대로
+    통과한다.
+
+    확인할 근거가 없으면 막지 않는다. 자산 행이나 판정이 없는 기록(MVP 시드 · 수동 주입)은 지금 동작
+    그대로다. 바뀐 것을 확인했을 때만 멈춘다. 관제자 승인(USER_APPROVAL)이고 후보에서 온 실행만 대상이다.
+    """
+    if (
+        execution.runbook_id not in _REVALIDATED_RUNBOOKS
+        or execution.trigger_source is not TriggerSource.USER_APPROVAL
+        or execution.candidate_id is None
+    ):
+        return
+    incident = incidents_repo.get_incident(db, execution.incident_id)
+    if incident is None or incident.category is not IncidentCategory.FINOPS:
+        return
+    asset = assets_repo.get_asset_by_arn(db, incident.subject_arn)
+    if asset is None:
+        return
+    if asset.absent_since is not None:
+        raise TargetChangedBeforeStart(
+            f"대상 자산이 {asset.absent_since.isoformat()}부터 수집에서 보이지 않습니다"
+        )
+    latest = assets_repo.latest_rule_evaluation(db, asset.asset_id)
+    if latest is None or latest.verdict in _CANDIDATE_VERDICTS:
+        return
+    judged = latest.verdict or latest.skip_reason_code or latest.evaluation_status
+    raise TargetChangedBeforeStart(
+        f"대상 자산의 최신 판정({latest.evaluated_at.isoformat()})이 더는 조치 후보가 아닙니다: {judged}"
+    )
+
+
+def _detection_instance_type(db: Session, execution: models.ActionExecution) -> str | None:
+    """다운사이징 목표 타입을 계산한 기준. 탐지 당시 ASSET 근거의 인스턴스 타입(T-10 · #595).
+
+    목표 타입은 탐지 회차의 스냅샷 타입으로 계산된다(schemas/intake.py 계약 원칙). 후보 파라미터에는
+    출발 타입이 남지 않으므로 Incident 에 고정된 ASSET 근거(DetectionAssetSnapshot)에서 읽는다. 근거가
+    없거나 대상이 다르거나 타입이 비어 있으면 None. 대조하지 않는다.
+    """
+    for evidence in incidents_repo.list_evidence(db, execution.incident_id):
+        if evidence.evidence_type is not EvidenceType.ASSET:
+            continue
+        asset = (evidence.content or {}).get("asset") or {}
+        if asset.get("arn") != execution.target_arn:
+            continue
+        found = (asset.get("spec") or {}).get("instance_type")
+        if isinstance(found, str) and found.strip():
+            return found
+    return None
+
+
 def _step_recorder(db: Session, execution_id: str):
     """executor가 넘기는 단계를 그 자리에서 저장하고 commit한다.
 
@@ -1848,6 +2005,16 @@ def run_rightsizing_execution(db: Session, execution_id: str) -> ExecutionRunOut
     if not stored.stored:
         return _run_failed(
             stored.reason_code, f"스펙 JSON 백업 실패: {stored.detail or ''}".strip()
+        )
+
+    # 승인을 기다리는 사이 누가 타입을 바꿨으면 목표 타입은 지금의 인스턴스에 대한 계산이 아니다. 내린
+    # 타입으로 부팅에 성공하면 자동 원복도 걸리지 않으므로 첫 AWS 변경 전에 멈춘다(T-10 · #595). 비교하는
+    # 현재 타입은 방금 commit 한 백업의 값이다. 원복이 되돌릴 값과 같은 관측이라 따로 묻지 않는다.
+    detected = _detection_instance_type(db, execution)
+    captured = InstanceSpecBackup.model_validate(stored.record.payload or {}).instance_type
+    if detected is not None and captured != detected:
+        raise TargetChangedBeforeStart(
+            f"실행 직전 인스턴스 타입 {captured}이 탐지 당시 타입 {detected}과 다릅니다"
         )
 
     outcome = executor.execute_rightsizing(
