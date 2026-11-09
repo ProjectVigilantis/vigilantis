@@ -42,36 +42,34 @@ def request_manifest(cases: list[EvalCase], answers: dict[str, Answer]) -> list[
         answer = answers[case.case_id]
         if not answer.allowed_statuses:
             raise ValueError(f"{case.case_id}: request replay requires a decided answer")
-        for risk in sorted(answer.reviewed_risk_levels):
-            for status in sorted(answer.allowed_statuses):
-                proposals = []
-                if status == "SUCCEEDED":
-                    expected = answer.candidate
-                    if expected is None:
-                        raise ValueError(f"{case.case_id}: proposal answer missing")
-                    proposals.append(agent.ProposedCandidate(
-                        runbook_id=expected.runbook_id, target_arn=expected.target_arn,
-                        evidence_ids=expected.evidence_ids, cidr_block=expected.cidr_block,
-                        protocol=expected.protocol, rule_number=expected.rule_number_min,
-                    ))
-                client = _RequestRecorder([
-                    agent.RiskReassessmentOutput(reviewed_risk_level=risk),
-                    agent.CandidateProposalOutput(candidates=proposals),
-                    agent.EvidenceSummaryOutput(
-                        observation="동결 관측 대역이다.", diagnosis="위험 해석 대역이다.",
-                        rationale="조치 판단 대역이다.",
-                    ),
-                ])
-                output = agent.run_secops_graph(
-                    case.graph_input, client=client,
-                    nacl_rule_numbers=fixture_nacl_rule_numbers(case.graph_input),
-                )
-                if (output.invocation_status is AgentInvocationStatus.FAILED
-                        or output.invocation_status.value != status
-                        or len(client.request_hashes) != agent.SECOPS_MODEL_CALLS):
-                    raise ValueError(f"{case.case_id}: request replay did not complete {status}")
-                result.append({
-                    "case_id": case.case_id, "risk": risk, "status": status,
-                    "requests": client.request_hashes,
-                })
+        for status in sorted(answer.allowed_statuses):
+            proposals = []
+            if status == "SUCCEEDED":
+                expected = answer.candidate
+                if expected is None:
+                    raise ValueError(f"{case.case_id}: proposal answer missing")
+                proposals.append(agent.ProposedCandidate(
+                    runbook_id=expected.runbook_id, target_arn=expected.target_arn,
+                    evidence_ids=expected.evidence_ids, cidr_block=expected.cidr_block,
+                    protocol=expected.protocol, rule_number=expected.rule_number_min,
+                ))
+            # 위험 재평가 호출은 없다 — 후보·요약 2회만 재현한다(ADR-0005 1차 개정).
+            client = _RequestRecorder([
+                agent.CandidateProposalOutput(candidates=proposals),
+                agent.EvidenceSummaryOutput(
+                    observation="동결 관측 대역이다.", diagnosis="위험 해석 대역이다.",
+                    rationale="조치 판단 대역이다.",
+                ),
+            ])
+            output = agent.run_secops_graph(
+                case.graph_input, client=client,
+                nacl_rule_numbers=fixture_nacl_rule_numbers(case.graph_input),
+            )
+            if (output.invocation_status is AgentInvocationStatus.FAILED
+                    or output.invocation_status.value != status
+                    or len(client.request_hashes) != agent.SECOPS_MODEL_CALLS):
+                raise ValueError(f"{case.case_id}: request replay did not complete {status}")
+            result.append({
+                "case_id": case.case_id, "status": status, "requests": client.request_hashes,
+            })
     return result
