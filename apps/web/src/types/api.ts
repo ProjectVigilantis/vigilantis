@@ -998,7 +998,20 @@ export type LoginStep =
   | 'EMAIL_VERIFICATION_REQUIRED'
   | 'COMPLETED';
 
+/**
+ * 고객사 계정의 역할(auth.py `UserRole`, #572 5번). ADMIN = 고객사 중앙계정(모든 기능 + 직원 관리),
+ * OPERATOR = 고객사 직원계정(중앙계정이 골라 준 `FeaturePermission`만), VIEWER = 대시보드 조회만
+ * (문의 등록 · 조치 실행 · 인시던트 종료는 서버가 403 `AUTH_FORBIDDEN`).
+ */
 export type UserRole = 'ADMIN' | 'OPERATOR' | 'VIEWER';
+
+/**
+ * 기능별 권한(auth.py `FeaturePermission`, #572 5번). 고객사 중앙계정이 OPERATOR에게 준다.
+ * VIEW = 자산 · 보안(인시던트) 화면 · 감사 기록 · 문의 조회 메뉴를 그린다(조회 API는 서버가 막지 않는다 —
+ * 대시보드가 같은 API를 쓴다), EXECUTE_ACTION = 조치 실행, RESOLVE_INCIDENT = 인시던트 종료,
+ * CREATE_INQUIRY = 문의 등록. EXECUTE_ACTION · RESOLVE_INCIDENT는 VIEW와 함께만 줄 수 있다(없으면 422).
+ */
+export type FeaturePermission = 'VIEW' | 'EXECUTE_ACTION' | 'RESOLVE_INCIDENT' | 'CREATE_INQUIRY';
 
 /** 새 비밀번호 최소 길이 — User Pool 정책과 같은 값(auth.py `NEW_PASSWORD_MIN_LENGTH`). */
 export const NEW_PASSWORD_MIN_LENGTH = 12;
@@ -1031,7 +1044,8 @@ export type AccountType = 'PLATFORM' | 'TENANT';
 /**
  * 플랫폼 계정의 권한 단계(auth.py `PlatformRole`, #492 PR 5). 플랫폼 권한은 이 값과 담당 배정에서만 나온다.
  * CENTRAL_ADMIN = 중앙 관리자(전체 고객 · 고객 생성 · 직원 관리 · 담당 배정),
- * TENANT_MANAGER = 고객 담당자(배정된 고객만 조회 · 조치 · 고객사 사용자 관리 — 배정이 없으면 고객 데이터 없음).
+ * TENANT_MANAGER = 고객 담당자(배정된 고객만 조회 · 조치 — 배정이 없으면 고객 데이터 없음. 고객사 사용자 관리
+ * `/api/v1/users`는 #572 9번부터 403).
  */
 export type PlatformRole = 'CENTRAL_ADMIN' | 'TENANT_MANAGER';
 
@@ -1057,13 +1071,20 @@ export type CurrentUserResponse = AccountScope & {
    * 낡을 수 있다 — 실제 범위는 서버가 요청마다 다시 판정한다(403 · 404).
    */
   assigned_tenant_ids: string[];
+  /**
+   * 이 계정이 지금 쓸 수 있는 기능별 권한(#572 5번, 열거 선언 순서). TENANT ADMIN은 네 가지 전부, OPERATOR는
+   * 고객사 중앙계정이 준 것, VIEWER는 빈 목록이다. PLATFORM(CENTRAL_ADMIN · TENANT_MANAGER)은
+   * VIEW · EXECUTE_ACTION · RESOLVE_INCIDENT(문의 등록은 고객사 계정만). 메뉴 · 버튼을 그릴지는 이 값으로 정하고,
+   * 서버는 같은 요청을 요청마다 다시 판정해 권한이 없으면 403 `AUTH_FORBIDDEN`이다.
+   */
+  permissions: FeaturePermission[];
   session: SessionInfo;
 };
 
 /* ────────────────────────────── users.py ────────────────────────────── */
-/* /api/v1/users — 고객사 사용자 관리(#492). 중앙 관리자(CENTRAL_ADMIN)는 모든 고객사 사용자를, 고객 담당자
-   (TENANT_MANAGER)는 배정된 고객의 사용자만, 고객사 ADMIN은 자기 고객사 사용자만 관리한다. 그 밖은 서버가 403
-   `AUTH_FORBIDDEN`, 관리 범위 밖 대상은 404 `USER_NOT_FOUND`다.
+/* /api/v1/users — 고객사 사용자 관리(#492 · #572 9번). 중앙 관리계정(CENTRAL_ADMIN)은 모든 고객사 사용자를,
+   고객사 중앙계정(TENANT ADMIN)은 자기 고객사 사용자만 관리한다. 관리자 직원계정(TENANT_MANAGER)을 포함한 그 밖은
+   서버가 403 `AUTH_FORBIDDEN`, 관리 범위 밖 대상은 404 `USER_NOT_FOUND`다.
    비밀번호 재설정(/api/v1/auth/password-reset · /confirm)은 응답 본문이 없는 204라 타입이 없다. */
 
 export type UserStatus = 'ACTIVE' | 'DISABLED';
@@ -1076,7 +1097,18 @@ export type UserListItem = AccountScope & {
   status: UserStatus;
   /** 로그인한 적이 없으면 null. */
   last_login_at: IsoDateTime | null;
+  /** 기능별 권한(#572 5번) — ADMIN은 네 가지 전부, OPERATOR는 부여받은 것, VIEWER는 빈 목록. */
+  permissions: FeaturePermission[];
 };
+
+/**
+ * `PUT /api/v1/users/{user_id}/permissions` — OPERATOR의 기능별 권한을 통째로 바꾼다(#572 5번). 빈 목록은 전부 회수.
+ * EXECUTE_ACTION · RESOLVE_INCIDENT를 넣으려면 VIEW도 넣는다(없으면 422). 대상이 OPERATOR가 아니면 409
+ * `USER_STATE_CONFLICT`, 지금과 같은 목록이면 409. 성공은 204이고 이력 `PERMISSIONS_CHANGED`가 남는다.
+ */
+export interface UserPermissionsRequest {
+  permissions: FeaturePermission[];
+}
 
 export interface UsersResponse {
   items: UserListItem[];
@@ -1086,17 +1118,20 @@ export interface UserInviteRequest {
   email: string;
   role: UserRole;
   /**
-   * 초대할 고객(UUID). 스키마상 선택이지만 **플랫폼 운영자는 반드시 보낸다**(빠지면 서버가 거절).
-   * 고객 담당자는 배정된 고객만 고를 수 있다(서버가 다시 판정한다).
+   * 초대할 고객(UUID). 스키마상 선택이지만 **중앙 관리계정은 반드시 보낸다**(빠지면 서버가 거절).
    * 고객사 ADMIN은 생략한다(서버가 자기 소속으로 한정한다). 계정 종류(account_type)는 입력이 아니다.
    */
   tenant_id?: string | null;
   /**
-   * 같은 이메일의 기존 Cognito 계정을 이 앱 사용자로 연결한다. 고객 범위가 있는 플랫폼 계정(중앙 관리자 · 배정된
-   * 고객 담당자)의 명시적 선택일 때만 true다 — 그 밖의 true는 서버가 403 `AUTH_FORBIDDEN`으로 거절한다(고객사 ADMIN은
-   * 언제나 false).
+   * 같은 이메일의 기존 Cognito 계정을 이 앱 사용자로 연결한다. 중앙 관리계정(CENTRAL_ADMIN)의 명시적 선택일 때만
+   * true다 — 그 밖의 true는 서버가 403 `AUTH_FORBIDDEN`으로 거절한다(고객사 ADMIN은 언제나 false).
    */
   recover_existing: boolean;
+  /**
+   * OPERATOR 초대에만 쓴다(#572 5번). 생략 · 빈 목록 = 권한 없이 초대(기본 선택 없음 — 화면이 "업무 권한 없이
+   * 초대"를 명시적으로 확인한다). 다른 역할에 주면 422.
+   */
+  permissions?: FeaturePermission[];
 }
 
 export type UserEventAction =
@@ -1108,7 +1143,9 @@ export type UserEventAction =
   /** 플랫폼 직원 권한(`platform_role`) 변경 — 직원 관리 API(#492 PR 5)가 남긴다. */
   | 'PLATFORM_ROLE_CHANGED'
   /** 고객 담당자의 담당 고객 배정 변경 — `PUT /staff/{user_id}/tenants`(#492 PR 5)가 남긴다. */
-  | 'TENANT_ASSIGNMENTS_CHANGED';
+  | 'TENANT_ASSIGNMENTS_CHANGED'
+  /** OPERATOR 기능별 권한 교체 — `PUT /users/{user_id}/permissions`(#572 5번)가 남긴다. */
+  | 'PERMISSIONS_CHANGED';
 
 /** 이력에 실리는 값의 닫힌 목록 — 없는 항목은 null(또는 생략)이다. */
 export interface UserEventState {
@@ -1120,6 +1157,8 @@ export interface UserEventState {
   tenant_id?: string | null;
   /** 담당 고객 배정(TENANT_ASSIGNMENTS_CHANGED)의 전후 고객 ID 목록. */
   tenant_ids?: string[] | null;
+  /** OPERATOR 기능별 권한의 전후(PERMISSIONS_CHANGED · USER_INVITED · ROLE_CHANGED). 빈 목록 = 권한 없음. */
+  permissions?: FeaturePermission[] | null;
 }
 
 export interface UserEventItem {
@@ -1336,7 +1375,10 @@ export interface SignupRequestStatusChange {
   reason: string | null;
 }
 
-/** `POST /inquiries`: 고객사 계정(역할 무관)만. 소속 고객사 · 작성자는 서버가 세션에서 채운다. 201 InquiryItem. */
+/**
+ * `POST /inquiries`: 문의 등록 권한(`CREATE_INQUIRY`, #572 5번)이 있는 고객사 계정만 — ADMIN과 권한을 받은 OPERATOR.
+ * VIEWER · 권한 없는 OPERATOR · 플랫폼 계정은 403 `AUTH_FORBIDDEN`. 소속 고객사 · 작성자는 서버가 세션에서 채운다. 201 InquiryItem.
+ */
 export interface InquiryCreate {
   category: InquiryCategory;
   title: string;
