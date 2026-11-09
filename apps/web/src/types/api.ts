@@ -5,7 +5,7 @@ export type IsoDateTime = string;
 
 /* ────────────────────────────── errors.py ────────────────────────────── */
 
-/** REST 공통 오류 코드 26종. 괄호는 계약상 HTTP 상태. */
+/** REST 공통 오류 코드 28종. 괄호는 계약상 HTTP 상태. */
 export type ErrorCode =
   | 'INCIDENT_NOT_FOUND' // 404 — 요청의 테넌트 범위 밖도 404(존재를 알리지 않는다)
   | 'IDEMPOTENCY_KEY_CONFLICT' // 409
@@ -31,6 +31,8 @@ export type ErrorCode =
   | 'AUTH_RATE_LIMITED' // 429
   | 'AUTH_PROVIDER_UNAVAILABLE' // 503
   | 'USER_NOT_FOUND' // 404 — 관리 범위 안의 고객사 사용자 없음(#492)
+  | 'GROUP_NOT_FOUND' // 404 — 없는 그룹(#572 2번)
+  | 'GROUP_NAME_CONFLICT' // 409 — 같은 이름의 그룹이 이미 있다(#572 2번)
   | 'USER_STATE_CONFLICT' // 409 — 고객사별 마지막 활성 ADMIN · 중복 초대 · 상태 충돌(#492)
   | 'REQUEST_VALIDATION_FAILED' // 422
   | 'INTERNAL_ERROR'; // 500
@@ -854,6 +856,8 @@ export interface TenantListItem {
   subscription_source: SubscriptionSource | null;
   /** 모의 계약 투영의 권리 끝 시각(UTC · 이 시각은 포함하지 않는다). MOCK_MARKETPLACE 일 때만 있다. */
   entitlement_ends_at: IsoDateTime | null;
+  /** 고객사가 속한 그룹(#572 2번). null = 어느 그룹에도 없음(담당자 없음). */
+  group_id: string | null;
 }
 
 export interface TenantsResponse {
@@ -883,6 +887,31 @@ export interface TenantCreateRequest {
   access_role_arn?: string;
   regions: string[];
   collect_vpc_ids?: string[];
+  /**
+   * 생성 시 넣을 그룹. 중앙 관리계정은 생략 가능(미배정), 관리자 직원계정은 자기 담당 그룹 중 하나를 반드시 지정한다
+   * (없으면 422, 담당 밖 그룹은 403). `POST /tenants`는 관리자 직원계정(TENANT_MANAGER)에게도 열려 있다.
+   */
+  group_id?: string | null;
+}
+
+/** `PUT /tenants/{id}/group`(중앙 관리계정만) → 200 `TenantDetail`. null = 그룹에서 빼기. 없는 그룹은 404 `GROUP_NOT_FOUND`. */
+export interface TenantGroupRequest {
+  group_id: string | null;
+}
+
+/**
+ * `GET /tenants/search?q=`(플랫폼 계정만, 고객사 계정 403)의 한 건. 이름 부분 일치(대소문자 무시), 최대 20건, 이름순.
+ * 관리자 직원계정에게 담당 밖 고객사는 `accessible=false`로 나오고 이 세 칸 외 값이 없다.
+ * 담당 밖 상세·하위 경로는 403 `AUTH_FORBIDDEN`, 없는 ID는 404다(#572 7번).
+ */
+export interface TenantSearchItem {
+  tenant_id: string;
+  name: string;
+  accessible: boolean;
+}
+
+export interface TenantSearchResponse {
+  items: TenantSearchItem[];
 }
 
 /** external_id 는 상세에 없고 여기 · 연결 전 onboarding_url · 재발급(TenantOnboardingResponse)에서만 나간다. */
@@ -1067,7 +1096,7 @@ export type CurrentUserResponse = AccountScope & {
    */
   role: UserRole;
   /**
-   * 담당 고객 ID(UUID) — TENANT_MANAGER만 실제 배정 목록이고, CENTRAL_ADMIN · TENANT 계정은 언제나 빈 목록이다.
+   * 담당 그룹에 속한 고객사 ID(#572 2번) — TENANT_MANAGER만 실제 목록이고, CENTRAL_ADMIN · TENANT 계정은 언제나 빈 목록이다.
    * 빈 목록은 "전체"가 아니다: 중앙 관리자의 전체 범위는 `platform_role`로만 판정한다. 화면 편의용 스냅샷이라
    * 낡을 수 있다 — 실제 범위는 서버가 요청마다 다시 판정한다(403 · 404).
    */
@@ -1143,10 +1172,12 @@ export type UserEventAction =
   | 'SESSIONS_REVOKED'
   /** 플랫폼 직원 권한(`platform_role`) 변경 — 직원 관리 API(#492 PR 5)가 남긴다. */
   | 'PLATFORM_ROLE_CHANGED'
-  /** 고객 담당자의 담당 고객 배정 변경 — `PUT /staff/{user_id}/tenants`(#492 PR 5)가 남긴다. */
+  /** 고객 담당자의 담당 고객 직접 배정 변경 — 과거 이력 값이다(#492 PR 5). */
   | 'TENANT_ASSIGNMENTS_CHANGED'
   /** OPERATOR 기능별 권한 교체 — `PUT /users/{user_id}/permissions`(#572 5번)가 남긴다. */
-  | 'PERMISSIONS_CHANGED';
+  | 'PERMISSIONS_CHANGED'
+  /** 관리자 직원계정의 담당 그룹 배정 변경 — `PUT /staff/{user_id}/groups`와 등급 변경이 남긴다(#572 2번). */
+  | 'GROUP_ASSIGNMENTS_CHANGED';
 
 /** 이력에 실리는 값의 닫힌 목록 — 없는 항목은 null(또는 생략)이다. */
 export interface UserEventState {
@@ -1160,6 +1191,8 @@ export interface UserEventState {
   tenant_ids?: string[] | null;
   /** OPERATOR 기능별 권한의 전후(PERMISSIONS_CHANGED · USER_INVITED · ROLE_CHANGED). 빈 목록 = 권한 없음. */
   permissions?: FeaturePermission[] | null;
+  /** 담당 그룹 배정(GROUP_ASSIGNMENTS_CHANGED)의 전후 그룹 ID 목록. */
+  group_ids?: string[] | null;
 }
 
 export interface UserEventItem {
@@ -1176,7 +1209,7 @@ export interface UserEventsResponse {
   items: UserEventItem[];
 }
 
-/* /api/v1/staff — 플랫폼(관리자) 직원 관리(#492 PR 5 · #572 1번, schemas/api/staff.py). 중앙 관리계정 전용이며 그 밖은 403이다.
+/* /api/v1/staff — 플랫폼(관리자) 직원 관리(#492 PR 5 · #572 1번, schemas/api/staff.py). 직원 관리 전 경로는 중앙 관리계정만 쓴다(관리자 직원계정 403, #572 4번).
    목록에는 중앙 관리계정 자신을 포함한 플랫폼 계정 전부가 온다.
    직원 초대는 `POST /staff`(StaffInviteRequest → 201 StaffItem), 재발송은 `POST /staff/{id}/invite/resend`(204)다(#572 1번). */
 
@@ -1199,9 +1232,45 @@ export interface StaffResponse {
   items: StaffItem[];
 }
 
-/** 관리자 직원계정의 담당 고객사(`GET`·`PUT /staff/{id}/tenants`). PUT은 전체 교체이며 빈 목록은 배정 전부 해제다. */
+/** @deprecated — `/staff/{id}/tenants`는 #572 2번으로 서버에서 제거됐다(담당 범위는 그룹 `StaffGroupsResponse`).
+ *  FE 호출부(`lib/api/client.ts`)는 후속 FE 작업에서 `/groups`로 옮긴다. */
 export interface StaffTenantsResponse {
   tenant_ids: string[];
+}
+
+/** 관리자 직원계정의 담당 그룹 교체(`PUT /staff/{id}/groups`). 전체 교체이며 빈 목록은 배정 전부 해제다.
+ *  중복 ID 422, 없는 그룹 404 `GROUP_NOT_FOUND`, 같은 집합 409, 대상이 TENANT_MANAGER가 아니면 409. */
+export interface StaffGroupsRequest {
+  group_ids: string[];
+}
+
+/** 관리자 직원계정의 담당 그룹(`GET`·`PUT /staff/{id}/groups`). */
+export interface StaffGroupsResponse {
+  group_ids: string[];
+}
+
+/* ────────────────────────────── groups.py ────────────────────────────── */
+/* /api/v1/groups — 고객사 그룹(#572 2번, schemas/api/groups.py).
+   `GET /groups`(중앙 관리계정은 전체, 관리자 직원계정은 자기 담당 그룹만, 고객사 계정 403),
+   `POST /groups`(중앙 관리계정만 → 201),
+   `DELETE /groups/{id}`(중앙 관리계정만 → 204; 그룹의 고객사는 미배정이 되고 직원 배정은 함께 지워진다). */
+
+export interface GroupItem {
+  group_id: string;
+  name: string;
+  /** 그룹에 속한 고객사 수. */
+  tenant_count: number;
+  created_at: IsoDateTime;
+  updated_at: IsoDateTime;
+}
+
+export interface GroupsResponse {
+  items: GroupItem[];
+}
+
+/** 1–100자. 같은 이름은 409 `GROUP_NAME_CONFLICT`. */
+export interface GroupCreateRequest {
+  name: string;
 }
 
 /* ───────────────────── signup_requests.py · inquiries.py ───────────────────── */

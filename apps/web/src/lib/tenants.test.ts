@@ -39,6 +39,7 @@ function tenant(over: Partial<TenantListItem> & Pick<TenantListItem, 'tenant_id'
     subscription: null,
     subscription_source: null,
     entitlement_ends_at: null,
+    group_id: null,
     ...over,
   };
 }
