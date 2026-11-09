@@ -372,31 +372,6 @@ def _user(
     )
 
 
-@pytest.mark.parametrize(("user", "expected"), [
-    (_user(AccountType.PLATFORM, UserRole.ADMIN, platform_role=PlatformRole.CENTRAL_ADMIN), None),
-    (_user(AccountType.PLATFORM, UserRole.ADMIN, platform_role=PlatformRole.TENANT_MANAGER), None),
-    # 호환 값 role=ADMIN 만으로는 플랫폼 조치 권한이 없다 — 명시 등급이 있어야 한다
-    (_user(AccountType.PLATFORM, UserRole.ADMIN), ErrorCode.AUTH_FORBIDDEN),
-    (_user(AccountType.TENANT, UserRole.ADMIN, TenantStatus.ACTIVE), None),
-    (_user(AccountType.TENANT, UserRole.OPERATOR, TenantStatus.ACTIVE), None),
-    (_user(AccountType.TENANT, UserRole.VIEWER, TenantStatus.ACTIVE), ErrorCode.AUTH_FORBIDDEN),
-    # 정지는 요청자 소속이 아니라 대상 인시던트의 고객사로 Workflow 가 본다 — 여기서는 등급 · 역할만
-    (_user(AccountType.TENANT, UserRole.OPERATOR, TenantStatus.SUSPENDED), None),
-    (_user(AccountType.TENANT, UserRole.VIEWER, TenantStatus.SUSPENDED), ErrorCode.AUTH_FORBIDDEN),
-    (_user(AccountType.UNASSIGNED, UserRole.ADMIN), ErrorCode.AUTH_FORBIDDEN),
-], ids=[
-    "central", "manager", "platform-without-level", "tenant-admin", "tenant-operator", "tenant-viewer",
-    "suspended-operator", "suspended-viewer", "unassigned-admin",
-])
-def test_action_role_rule_reads_grade_and_role_only(user, expected):
-    if expected is None:
-        assert access.require_action_role(user) is user
-    else:
-        with pytest.raises(ApiError) as rejected:
-            access.require_action_role(user)
-        assert rejected.value.code is expected
-
-
 @pytest.mark.parametrize(("user", "allowed"), [
     (_user(AccountType.PLATFORM, UserRole.ADMIN), True),
     (_user(AccountType.TENANT, UserRole.ADMIN, TenantStatus.ACTIVE), False),

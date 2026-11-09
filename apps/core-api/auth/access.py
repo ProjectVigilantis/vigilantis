@@ -17,9 +17,6 @@
 #     빈 튜플이다. 고객사 단위 직접 배정은 없다 — 그룹이 유일한 근거다.
 #     계정 종류 · 소속 NULL · role 로 범위를 추론하지 않는다. 관문은 등급까지만 보고, 대상 고객사가 범위 안인지는
 #     각 호출부(서비스)가 tenant_scope_ids / can_access_tenant 로 건다.
-#   - 조치 역할: TENANT 는 role(ACTION_ROLES), PLATFORM 은 명시 등급(CENTRAL_ADMIN · TENANT_MANAGER)이다 —
-#     PLATFORM 의 호환 값 role=ADMIN 으로 판정하지 않는다. require_action_role 은 등급 · 역할만 보고 대상을 읽지
-#     않는다(403 이 범위 404 보다 앞선다).
 #   - 업무 범위(#533): 조치 · 자산 · 인시던트는 세션 배선 뒤 각 라우트가 tenant_scope_of(require_tenant_scope)로
 #     받은 tenancy.TenantScope 로 제한한다. 범위 값은 tenant_scope_ids 를 그대로 옮긴다 — 전체(ALL_TENANTS)는
 #     명시 CENTRAL_ADMIN 뿐이고 계정 종류(PLATFORM)만으로 전체를 주지 않는다. 범위 밖 · 소속 없는 기록은 목록에서
@@ -51,8 +48,6 @@ from tenancy import TenantScope
 from . import service
 from .http import SESSION_COOKIE, get_clock
 
-#: 고객사(TENANT) 계정의 조치 실행 · 인시던트 종료를 허용하는 역할. VIEWER 는 조회만 한다.
-ACTION_ROLES = frozenset({UserRole.ADMIN, UserRole.OPERATOR})
 #: 테넌트 관리 · 고객 사용자 관리 · 조치를 하는 플랫폼 등급(명시 값만 — 등급 없는 PLATFORM 은 거절).
 _TENANT_MANAGEMENT_ROLES = frozenset({PlatformRole.CENTRAL_ADMIN, PlatformRole.TENANT_MANAGER})
 
@@ -157,18 +152,6 @@ def require_tenant_management(user: service.CurrentUser = _USER) -> service.Curr
     대상 고객사의 범위 확인은 호출부 몫이다(tenant_scope_ids / can_access_tenant).
     """
     if not is_tenant_manager(user):
-        raise ApiError(ErrorCode.AUTH_FORBIDDEN)
-    return user
-
-
-def require_action_role(user: service.CurrentUser = _USER) -> service.CurrentUser:
-    """조치 실행 · 인시던트 종료 권한 — 대상을 읽기 전에 등급 · 역할만 본다(403). require_user 다음에 돈다.
-
-    TENANT 는 role 이 ADMIN · OPERATOR, PLATFORM 은 명시 등급(CENTRAL_ADMIN · TENANT_MANAGER)이다 — 호환 값
-    role=ADMIN 으로 플랫폼 권한을 판정하지 않는다. 범위(tenant_scope_of)와 대상 고객사 정지는 Workflow 몫이다.
-    """
-    tenant_actor = user.account_type is AccountType.TENANT and user.role in ACTION_ROLES
-    if not (tenant_actor or is_tenant_manager(user)):
         raise ApiError(ErrorCode.AUTH_FORBIDDEN)
     return user
 
