@@ -34,6 +34,7 @@ from schemas.subscriptions import SubscriptionSource, service_date
 from sqlalchemy import delete, event, select, text, update
 from sqlalchemy.orm import Session, sessionmaker
 from tenant_verification import VerificationOutcome
+from tests.group_scope import assign_tenants
 
 BASE = "/api/v1/tenants"
 ACCOUNT = "123456789012"
@@ -263,15 +264,16 @@ def test_unauthenticated_is_401_without_aws(client_pg, db, onboarding, aws, rout
 
 
 @pytest.mark.parametrize("route", ROUTES)
-def test_manager_outside_scope_is_404_without_aws(client_pg, db, manager, aws, route):
+def test_manager_outside_scope_is_403_without_aws(client_pg, db, manager, aws, route):
     mine, other = _seed(db, START[route]), _seed(db, START[route], OTHER)
-    auth_repo.replace_assigned_tenants(db, user_id=manager.user_id, tenant_ids=(mine.tenant_id,), now=NOW)
+    assign_tenants(db, user_id=manager.user_id, tenant_ids=(mine.tenant_id,), now=NOW)
     db.commit()
     before = _snapshot(db, other.tenant_id)
 
     unassigned = _post(client_pg, route, other.tenant_id)
 
-    assert unassigned.status_code == 404 and _code(unassigned) == "TENANT_NOT_FOUND"
+    # 담당 밖 고객은 있는 고객이라 403 이다(#572 7번) — 없는 ID 의 404 는 아래 테스트가 본다
+    assert unassigned.status_code == 403 and _code(unassigned) == "AUTH_FORBIDDEN"
     assert aws.calls == [] and _snapshot(db, other.tenant_id) == before
     assert _post(client_pg, route, mine.tenant_id).status_code == 200  # 담당 고객은 된다
     assert len(aws.calls) == 1
@@ -557,13 +559,13 @@ def _demote(other, seed):
 
 
 def _unassign(other, seed):
-    auth_repo.replace_assigned_tenants(other, user_id=seed.user_id, tenant_ids=(), now=NOW)
+    auth_repo.replace_assigned_groups(other, user_id=seed.user_id, group_ids=(), now=NOW)
 
 
 @pytest.mark.parametrize("route,revoke,assigned,status,code", [
     ("verify", _revoke_session, False, 401, "AUTH_REQUIRED"),
-    ("resume", _demote, False, 404, "TENANT_NOT_FOUND"),  # 강등되어 배정이 없다
-    ("verify", _unassign, True, 404, "TENANT_NOT_FOUND"),
+    ("resume", _demote, False, 403, "AUTH_FORBIDDEN"),  # 강등되어 담당 그룹이 없다 → 범위 밖(#572 7번)
+    ("verify", _unassign, True, 403, "AUTH_FORBIDDEN"),
 ], ids=["session_revoked", "demoted", "assignment_removed"])
 def test_authority_removed_on_another_connection_writes_nothing(
     committed_client, committed_auth, committed_aws, route, revoke, assigned, status, code

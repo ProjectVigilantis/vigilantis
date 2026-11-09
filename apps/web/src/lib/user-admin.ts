@@ -37,6 +37,7 @@ export const EVENT_LABELS: Record<UserEventAction, string> = {
   PLATFORM_ROLE_CHANGED: '플랫폼 권한 변경',
   TENANT_ASSIGNMENTS_CHANGED: '담당 고객사 변경',
   PERMISSIONS_CHANGED: '기능 권한 변경',
+  GROUP_ASSIGNMENTS_CHANGED: '담당 그룹 배정 변경',
 };
 
 const KST_OFFSET_MS = 9 * 60 * 60_000;
@@ -62,6 +63,7 @@ const statusLabel = (status: UserStatus | null | undefined) => (status ? STATUS_
 const tenantCountLabel = (ids: string[] | null | undefined) => (ids ? `${ids.length}곳` : NONE);
 /** 기능별 권한(#572 5번)도 개수만 보인다 — 권한 이름 표기는 권한 화면이 정한다. */
 const permissionCountLabel = (list: unknown[] | null | undefined) => (list ? `${list.length}개` : NONE);
+const groupCountLabel = (ids: string[] | null | undefined) => (ids ? `${ids.length}개` : NONE);
 
 /** 이력 1건의 변경 내용 한 줄. 이력에 실린 닫힌 값만 쓴다. 덧붙일 것이 없으면 빈 문자열. */
 export function eventSummary(event: UserEventItem): string {
@@ -75,6 +77,8 @@ export function eventSummary(event: UserEventItem): string {
       return `${tenantCountLabel(before.tenant_ids)} → ${tenantCountLabel(after.tenant_ids)}`;
     case 'PERMISSIONS_CHANGED':
       return `${permissionCountLabel(before.permissions)} → ${permissionCountLabel(after.permissions)}`;
+    case 'GROUP_ASSIGNMENTS_CHANGED':
+      return `${groupCountLabel(before.group_ids)} → ${groupCountLabel(after.group_ids)}`;
     case 'STATUS_CHANGED':
       return `${statusLabel(before.status)} → ${statusLabel(after.status)}`;
     case 'SESSIONS_REVOKED':

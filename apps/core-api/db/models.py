@@ -159,6 +159,22 @@ def _subscription_shape_checks() -> list[CheckConstraint]:
     ]
 
 
+class TenantGroup(Base):
+    """고객사 그룹 1개(#572 2번) — 중앙 관리계정이 만들고 고객사를 넣는다. 관리자 직원계정은 배정받은 그룹 안의
+    고객사만 다룬다. 한 단계뿐이고, 고객사는 최대 한 그룹(tenants.group_id)에 든다. 이름은 유일하다.
+    """
+
+    __tablename__ = "tenant_groups"
+
+    group_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
+    name: Mapped[str] = mapped_column(String(100), unique=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
 
 class Tenant(Base):
     """고객 계정 1개. 플랫폼이 이 계정의 역할에 AssumeRole + ExternalId 로 들어간다(#438 §C-1).
@@ -222,6 +238,11 @@ class Tenant(Base):
         DateTime(timezone=True), nullable=True
     )
     suspended_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # 고객사 그룹(#572 2번) — 최대 한 그룹. NULL = 담당 그룹 없음(담당자 없음)이며 연결 상태(status)와 별개다.
+    # 그룹을 지우면 NULL 로 돌아간다(SET NULL)
+    group_id: Mapped[str | None] = mapped_column(
+        _ID, ForeignKey("tenant_groups.group_id", ondelete="SET NULL"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow
     )
@@ -1729,7 +1750,7 @@ class AppUser(Base):
     )
     # 플랫폼 등급(#492) — 플랫폼 관리 권한의 유일한 원천이다. PLATFORM 만 값을 갖고(CHECK)
     # TENANT · UNASSIGNED 는 NULL 이다. 서버 기본값이 없다 — 플랫폼 계정을 만드는 쪽이 정한다.
-    # CENTRAL_ADMIN 은 모든 고객사, TENANT_MANAGER 는 app_user_tenant_assignments 에 배정된 고객사만이다.
+    # CENTRAL_ADMIN 은 모든 고객사, TENANT_MANAGER 는 app_user_group_assignments 로 배정된 그룹 안의 고객사만이다.
     platform_role: Mapped[PlatformRole | None] = mapped_column(
         _enum(PlatformRole, "app_user_platform_role"), nullable=True
     )
@@ -1775,20 +1796,20 @@ class AppUser(Base):
     )
 
 
-class AppUserTenantAssignment(Base):
-    """TENANT_MANAGER 의 담당 고객사 1건(#492). 명시 배정 행만 범위가 된다 — 암묵 부여는 없다.
+class AppUserGroupAssignment(Base):
+    """TENANT_MANAGER 의 담당 그룹 1건(#572 2번). 범위는 배정된 그룹에 든 고객사뿐이다 — 고객사 단위 직접 배정은 없다.
 
     소속(app_users.tenant_id) · 계정 종류는 배정이 아니다. 범위 판정은 등급이 TENANT_MANAGER 일 때만 이 행을 읽는다.
-    고객사가 지워지면 배정도 함께 지워진다(CASCADE) — 없는 고객사를 가리키는 배정이 남지 않는다.
+    사용자 · 그룹이 지워지면 배정도 함께 지워진다(CASCADE) — 없는 그룹을 가리키는 배정이 남지 않는다.
     """
 
-    __tablename__ = "app_user_tenant_assignments"
+    __tablename__ = "app_user_group_assignments"
 
     user_id: Mapped[str] = mapped_column(
         _ID, ForeignKey("app_users.user_id", ondelete="CASCADE"), primary_key=True
     )
-    tenant_id: Mapped[str] = mapped_column(
-        _ID, ForeignKey("tenants.tenant_id", ondelete="CASCADE"), primary_key=True, index=True
+    group_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("tenant_groups.group_id", ondelete="CASCADE"), primary_key=True, index=True
     )
 
 

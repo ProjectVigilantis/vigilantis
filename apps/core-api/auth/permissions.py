@@ -10,7 +10,7 @@
 #     CENTRAL_ADMIN · TENANT_MANAGER)일 때 VIEW · EXECUTE_ACTION · RESOLVE_INCIDENT 다 — 문의 등록은 고객사 계정만 한다.
 #     등급 없는 PLATFORM · 그 밖은 없음. 호환 값 role=ADMIN 으로 플랫폼 권한을 판정하지 않는다(access 와 같다).
 #   - require_permission(기능)은 require_user 다음에 도는 라우트 의존성이다 — 대상을 읽기 전에 403 AUTH_FORBIDDEN
-#     (범위 404 보다 앞선다, access.require_action_role 과 같은 자리). 쓰기 직전 users 잠금 안의 재판정은 같은
+#     (범위 404 보다 앞선다). 쓰기 직전 users 잠금 안의 재판정은 같은
 #     check_permission 을 순수 함수로 부른다(workflows._live_actor · inquiries_service).
 #   - 계정 관리 관문(9번): /api/v1/users 는 고객사 중앙계정(TENANT ADMIN, 자기 고객사)과 중앙 관리계정(CENTRAL_ADMIN,
 #     모든 고객사)만 쓴다. 관리자 직원계정(TENANT_MANAGER)은 배정과 무관하게 403 이다. access.require_admin 은

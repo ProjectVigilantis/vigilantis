@@ -1,10 +1,11 @@
-"""사용자 관리 저장소 · 감사 이력 append-only — 실제 PostgreSQL."""
+"""사용자 관리 저장소 · 담당 그룹 배정 · 고객사 그룹 · 고객사 검색(#572) · 감사 이력 append-only — 실제 PostgreSQL."""
 
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from db import models
 from db.repositories import auth as auth_repo
+from db.repositories import tenant_groups as groups_repo
 from db.repositories import tenants as tenants_repo
 from pydantic import ValidationError
 from schemas.api.auth import AccountType, PlatformRole, UserRole
@@ -221,7 +222,8 @@ def test_create_user_defaults_platform_to_unassigned_manager_and_others_to_null(
     }
     # 만들 때 배정을 주지 않는다 — 소속(member) · 계정 종류도 배정이 아니다
     for row in (defaulted, central, member, unassigned):
-        assert auth_repo.list_assigned_tenant_ids(db, user_id=row.user_id) == ()
+        assert auth_repo.list_assigned_group_ids(db, user_id=row.user_id) == ()
+        assert auth_repo.list_group_scoped_tenant_ids(db, user_id=row.user_id) == ()
     for account_type, tenant_id in (
         (AccountType.TENANT, tenant.tenant_id),
         (AccountType.UNASSIGNED, None),
@@ -270,62 +272,128 @@ def test_count_active_central_admins_counts_only_active_platform_central_admins(
     assert auth_repo.count_active_central_admins(db) == before + 2
 
 
-def test_replace_assigned_tenants_replaces_the_whole_set_in_canonical_order(db):
+def _group(db, name, *tenant_ids):
+    """고객사 그룹 1건 — 주어진 고객사를 넣는다(#572 2번)."""
+    group = groups_repo.create_group(db, name=name, now=NOW)
+    for tenant_id in tenant_ids:
+        assert groups_repo.set_tenant_group(db, tenant_id, group.group_id, now=NOW)
+    return group.group_id
+
+
+def test_replace_assigned_groups_replaces_the_whole_set_in_canonical_order(db):
     tenants = [_tenant(db, f"{n}" * 12).tenant_id for n in (1, 2, 3)]
+    groups = [_group(db, f"g{n}", tenant_id) for n, tenant_id in enumerate(tenants)]
     manager = _platform(db, "m")
     other = _platform(db, "o")
     later = NOW + timedelta(minutes=1)
-    auth_repo.replace_assigned_tenants(db, user_id=other.user_id, tenant_ids=(tenants[0],), now=NOW)
+    auth_repo.replace_assigned_groups(db, user_id=other.user_id, group_ids=(groups[0],), now=NOW)
 
-    auth_repo.replace_assigned_tenants(
-        db, user_id=manager.user_id, tenant_ids=(tenants[2], tenants[0]), now=later
+    auth_repo.replace_assigned_groups(
+        db, user_id=manager.user_id, group_ids=(groups[2], groups[0]), now=later
     )
-    assert auth_repo.list_assigned_tenant_ids(db, user_id=manager.user_id) == tuple(
+    assert auth_repo.list_assigned_group_ids(db, user_id=manager.user_id) == tuple(
+        sorted((groups[0], groups[2]))
+    )
+    # 범위는 그 그룹들에 든 고객사다(tenant_id 오름차순)
+    assert auth_repo.list_group_scoped_tenant_ids(db, user_id=manager.user_id) == tuple(
         sorted((tenants[0], tenants[2]))
     )
     assert auth_repo.get_user(db, manager.user_id).updated_at == later
 
-    # 통째로 교체 — 빠진 고객사는 회수되고, 다른 사용자의 배정은 그대로다
-    auth_repo.replace_assigned_tenants(db, user_id=manager.user_id, tenant_ids=(tenants[1],), now=later)
-    assert auth_repo.list_assigned_tenant_ids(db, user_id=manager.user_id) == (tenants[1],)
-    auth_repo.replace_assigned_tenants(db, user_id=manager.user_id, tenant_ids=(), now=later)
-    assert auth_repo.list_assigned_tenant_ids(db, user_id=manager.user_id) == ()
-    assert auth_repo.list_assigned_tenant_ids(db, user_id=other.user_id) == (tenants[0],)
+    # 통째로 교체 — 빠진 그룹은 회수되고, 다른 사용자의 배정은 그대로다
+    auth_repo.replace_assigned_groups(db, user_id=manager.user_id, group_ids=(groups[1],), now=later)
+    assert auth_repo.list_group_scoped_tenant_ids(db, user_id=manager.user_id) == (tenants[1],)
+    auth_repo.replace_assigned_groups(db, user_id=manager.user_id, group_ids=(), now=later)
+    assert auth_repo.list_assigned_group_ids(db, user_id=manager.user_id) == ()
+    assert auth_repo.list_group_scoped_tenant_ids(db, user_id=manager.user_id) == ()
+    assert auth_repo.list_assigned_group_ids(db, user_id=other.user_id) == (groups[0],)
+
+
+def test_group_scope_follows_tenant_placement_and_shared_groups(db):
+    """한 그룹을 여러 직원이 맡고, 고객사를 그룹에 넣고 빼면 그 그룹 담당자 모두의 범위가 따라간다."""
+    a, b = _tenant(db, "111111111111").tenant_id, _tenant(db, "222222222222").tenant_id
+    shared = _group(db, "광주 지사", a)
+    first, second = _platform(db, "m1"), _platform(db, "m2")
+    for row in (first, second):
+        auth_repo.replace_assigned_groups(db, user_id=row.user_id, group_ids=(shared,), now=NOW)
+    assert groups_repo.set_tenant_group(db, b, shared, now=NOW)
+    for row in (first, second):
+        assert auth_repo.list_group_scoped_tenant_ids(db, user_id=row.user_id) == tuple(sorted((a, b)))
+    assert groups_repo.set_tenant_group(db, a, None, now=NOW)  # 그룹에서 뺀다
+    for row in (first, second):
+        assert auth_repo.list_group_scoped_tenant_ids(db, user_id=row.user_id) == (b,)
+    [listed] = [row for row in groups_repo.list_groups(db) if row.group.group_id == shared]
+    assert listed.tenant_count == 1
 
 
 def test_assignment_rejects_unknown_targets_and_duplicates(db):
-    tenant = _tenant(db, "111111111111").tenant_id
+    group = _group(db, "g")
     manager = _platform(db, "m")
     missing = "00000000-0000-0000-0000-000000000000"
-    for user_id, tenant_ids in (
-        (manager.user_id, (missing,)),  # 없는 고객사
-        (missing, (tenant,)),  # 없는 사용자
-        (manager.user_id, (tenant, tenant)),  # 중복 — 복합 PK
+    for user_id, group_ids in (
+        (manager.user_id, (missing,)),  # 없는 그룹
+        (missing, (group,)),  # 없는 사용자
+        (manager.user_id, (group, group)),  # 중복 — 복합 PK
     ):
         with pytest.raises(IntegrityError), db.begin_nested():
-            auth_repo.replace_assigned_tenants(db, user_id=user_id, tenant_ids=tenant_ids, now=NOW)
-    assert auth_repo.list_assigned_tenant_ids(db, user_id=manager.user_id) == ()
+            auth_repo.replace_assigned_groups(db, user_id=user_id, group_ids=group_ids, now=NOW)
+    assert auth_repo.list_assigned_group_ids(db, user_id=manager.user_id) == ()
 
 
-def test_deleting_a_tenant_leaves_no_stale_assignment(db):
+def test_group_names_are_unique(db):
+    _group(db, "광주 지사")
+    with pytest.raises(IntegrityError, match=groups_repo.GROUP_NAME_UNIQUE), db.begin_nested():
+        _group(db, "광주 지사")
+
+
+def test_deleting_a_group_ungroups_its_tenants_and_leaves_no_stale_assignment(db):
+    kept_tenant, grouped = _tenant(db, "111111111111").tenant_id, _tenant(db, "222222222222").tenant_id
+    kept, doomed = _group(db, "kept", kept_tenant), _group(db, "doomed", grouped)
+    manager = _platform(db, "m")
+    auth_repo.replace_assigned_groups(db, user_id=manager.user_id, group_ids=(kept, doomed), now=NOW)
+    assert groups_repo.delete_group(db, doomed)
+    assert not groups_repo.delete_group(db, doomed)  # 이미 없다
+    db.flush()
+    assert auth_repo.list_assigned_group_ids(db, user_id=manager.user_id) == (kept,)
+    assert auth_repo.list_group_scoped_tenant_ids(db, user_id=manager.user_id) == (kept_tenant,)
+    # 고객사는 지워지지 않고 그룹 없음(담당자 없음)으로 돌아간다
+    assert tenants_repo.get_tenant(db, grouped).tenant.group_id is None
+
+
+def test_deleting_a_tenant_leaves_the_group_and_its_assignment(db):
     kept = _tenant(db, "111111111111").tenant_id
     pending = tenants_repo.create_tenant(
         db, name="pending", aws_account_id="222222222222", regions=["ap-northeast-2"], now=NOW
     ).tenant_id
+    group = _group(db, "g", kept, pending)
     manager = _platform(db, "m")
-    auth_repo.replace_assigned_tenants(
-        db, user_id=manager.user_id, tenant_ids=(kept, pending), now=NOW
-    )
+    auth_repo.replace_assigned_groups(db, user_id=manager.user_id, group_ids=(group,), now=NOW)
     assert tenants_repo.delete_tenant(db, pending)
     db.flush()
-    assert auth_repo.list_assigned_tenant_ids(db, user_id=manager.user_id) == (kept,)
-    assert (
-        db.execute(
-            text("SELECT count(*) FROM app_user_tenant_assignments WHERE tenant_id = :t"),
-            {"t": pending},
-        ).scalar_one()
-        == 0
-    )
+    assert auth_repo.list_assigned_group_ids(db, user_id=manager.user_id) == (group,)
+    assert auth_repo.list_group_scoped_tenant_ids(db, user_id=manager.user_id) == (kept,)
+
+
+def test_search_matches_names_case_insensitively_with_literal_wildcards(db):
+    names = ("zq9 Acme 학원", "zq9 ACME 2", "zq9 100% 학원", "zq9_lab", "zq9xlab")
+    ids = {
+        name: tenants_repo.create_tenant(
+            db, name=name, aws_account_id=f"{n}" * 12, regions=["ap-northeast-2"], now=NOW
+        ).tenant_id
+        for n, name in enumerate(names, start=1)
+    }
+
+    def found(query, limit=20):
+        return [name for _, name in tenants_repo.search_tenants(db, query, limit=limit)]
+
+    assert set(found("ZQ9 acme")) == {"zq9 Acme 학원", "zq9 ACME 2"}
+    # LIKE 와일드카드(% · _)는 글자 그대로 찾는다 — 와일드카드였다면 zq9_lab · zq9xlab 이 걸린다
+    assert found("zq9%lab") == []
+    assert found("zq9_lab") == ["zq9_lab"]
+    assert found("100% 학") == ["zq9 100% 학원"]
+    every = tenants_repo.search_tenants(db, "zq9", limit=20)
+    assert {name for _, name in every} == set(names) and {tid for tid, _ in every} == set(ids.values())
+    assert tenants_repo.search_tenants(db, "zq9", limit=2) == every[:2]  # 상한은 같은 정렬의 앞부분
 
 
 def test_list_platform_users_returns_every_platform_account_with_last_login(db):
