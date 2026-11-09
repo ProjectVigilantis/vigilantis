@@ -32,8 +32,8 @@ TENANT_ID = "22222222-2222-4222-8222-222222222222"
 INCIDENT_ID = "33333333-3333-4333-8333-333333333333"
 OCCURRED_AT = datetime(2026, 10, 30, 9, 0, tzinfo=UTC)
 # head 의 테이블 수 — 기존 27종 + TOTP 복구 2종 + 도입·문의 5종 + T-7 고객 설정 · 정리 대기 · 파일 바인딩 증거 3종 + #565 신청 결정 1종
-# + #528 옛 재개 전 구독 보존 · 모의 Marketplace 계약 · 이벤트 3종
-HEAD_TABLES = 41
+# + #528 옛 재개 전 구독 보존 · 모의 Marketplace 계약 · 이벤트 3종 + #572 6번 고객사별 API 호출 버킷 1종
+HEAD_TABLES = 42
 
 
 @pytest.fixture()
