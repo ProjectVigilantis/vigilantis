@@ -392,6 +392,8 @@ export interface RecommendationItem {
   display_parameters: Record<string, string>;
   /** RIGHTSIZING 조치에만 실린다. 그 밖의 런북에서는 null이다. */
   ai_savings_estimate: AiSavingsEstimate | null;
+  /** NACL_RESTORE의 시스템 해제 예정 시각(UTC). 지난 시각도 해제 성공을 뜻하지 않는다. */
+  expires_at?: string | null;
 }
 
 /**
