@@ -1232,12 +1232,6 @@ export interface StaffResponse {
   items: StaffItem[];
 }
 
-/** @deprecated — `/staff/{id}/tenants`는 #572 2번으로 서버에서 제거됐다(담당 범위는 그룹 `StaffGroupsResponse`).
- *  FE 호출부(`lib/api/client.ts`)는 후속 FE 작업에서 `/groups`로 옮긴다. */
-export interface StaffTenantsResponse {
-  tenant_ids: string[];
-}
-
 /** 관리자 직원계정의 담당 그룹 교체(`PUT /staff/{id}/groups`). 전체 교체이며 빈 목록은 배정 전부 해제다.
  *  중복 ID 422, 없는 그룹 404 `GROUP_NOT_FOUND`, 같은 집합 409, 대상이 TENANT_MANAGER가 아니면 409. */
 export interface StaffGroupsRequest {
