@@ -1530,3 +1530,74 @@ export interface ThreatEventsResponse {
   total: number;
   items: ThreatEventItem[];
 }
+
+// --- 플랫폼 상태 · 고객사별 API 호출 통계(#572 6번) — packages/schemas/api/platform.py --------------------
+// GET /api/v1/platform/overview?days=7 — 중앙 관리계정(PLATFORM · CENTRAL_ADMIN) 전용, 그 밖은 403 AUTH_FORBIDDEN.
+// 값은 이미 저장된 기록을 센 것이다(새 수집 없음). 날짜는 UTC "YYYY-MM-DD"다.
+
+/** UTC 날짜 문자열(예: "2026-11-09"). */
+export type IsoDate = string;
+
+/** 호출 통계 보관 기간(일, 오늘 포함) = `days`의 상한. */
+export const API_USAGE_RETENTION_DAYS = 30;
+/** `days`를 생략했을 때의 조회 기간(일). */
+export const API_USAGE_DEFAULT_WINDOW_DAYS = 7;
+
+/** 서버 TenantStatus 세 값. `UNPAID`는 FE 선행 값이라 서버 집계에는 없다. */
+export type PlatformTenantStatus = Exclude<TenantStatus, 'UNPAID'>;
+
+/** 연결 상태별 고객사 수. 세 상태가 0이어도 전부 실리고 합은 `total`이다. */
+export interface PlatformTenantCounts {
+  total: number;
+  by_status: Record<PlatformTenantStatus, number>;
+}
+
+/** 최근 `window_hours`시간(24) 안에 끝난(진행 중은 시작한) 수집 회차 수. 회차는 (고객사, 리전) 단위다. */
+export interface PlatformCollectionCounts {
+  window_hours: number;
+  success: number;
+  partial: number;
+  failed: number;
+  in_progress: number;
+}
+
+export interface PlatformIncidentCounts {
+  /** 상태가 AWAITING_APPROVAL인 인시던트 수(실행 가능한 제안이 있고 실행 중이 아님). */
+  awaiting_approval: number;
+}
+
+export interface TenantApiUsageDay {
+  day: IsoDate;
+  /** 그 날의 호출 수(1 이상 — 호출이 없는 날은 `daily`에 없다). */
+  calls: number;
+}
+
+/** 고객사 하나의 기간 안 호출 수. `daily`는 `day` 오름차순이고 합이 `total_calls`다. */
+export interface TenantApiUsage {
+  tenant_id: string;
+  tenant_name: string;
+  tenant_status: PlatformTenantStatus;
+  total_calls: number;
+  daily: TenantApiUsageDay[];
+}
+
+/**
+ * 고객사(TENANT) 계정이 세션을 통과해 `/api/*`를 부른 횟수 — 고객사 × UTC 날짜. 로그인 전 호출 · WebSocket ·
+ * 플랫폼 계정의 호출은 세지 않는다. 응답 코드와 무관하게 1회다. 기간은 [window_start, window_end] 양 끝 포함이고
+ * window_end는 조회 시각의 UTC 날짜다. 호출 0인 고객사도 `items`에 있다(total_calls 내림차순 → 이름 → ID).
+ */
+export interface ApiUsageSummary {
+  window_start: IsoDate;
+  window_end: IsoDate;
+  window_days: number;
+  retention_days: number;
+  items: TenantApiUsage[];
+}
+
+export interface PlatformOverviewResponse {
+  generated_at: IsoDateTime;
+  tenants: PlatformTenantCounts;
+  collection: PlatformCollectionCounts;
+  incidents: PlatformIncidentCounts;
+  api_usage: ApiUsageSummary;
+}
