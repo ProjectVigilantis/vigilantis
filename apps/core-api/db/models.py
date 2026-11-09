@@ -265,6 +265,29 @@ class Tenant(Base):
     )
 
 
+class TenantApiCallDaily(Base):
+    """고객사(TENANT) 계정이 세션을 통과해 `/api/*` 를 부른 횟수 — 고객사 × UTC 날짜 버킷 (#572 6번).
+
+    공개 계약은 `schemas.api.platform`(ApiUsageSummary)이다. 요청마다 `api_usage` 미들웨어가 응답 뒤에
+    한 버킷을 +1 하고(UPSERT), 보관 기간(API_USAGE_RETENTION_DAYS)을 넘은 날은 지운다. 경로별 세분화는 없다.
+    고객사가 지워지면 통계도 함께 지워진다(CASCADE) — 통계가 고객사 삭제를 막지 않는다.
+    """
+
+    __tablename__ = "tenant_api_calls_daily"
+
+    tenant_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("tenants.tenant_id", ondelete="CASCADE"), primary_key=True
+    )
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    calls: Mapped[int] = mapped_column(BigInteger)
+
+    __table_args__ = (
+        CheckConstraint("calls >= 0", name="calls_nonnegative"),
+        # 보관 기간 정리(day < 기준일)가 PK(tenant_id, day)로는 날짜 범위를 못 찾는다
+        Index("ix_tenant_api_calls_daily_day", "day"),
+    )
+
+
 class TenantSubscriptionHistory(Base):
     """옛 재개 규칙(연결 확인 성공 = Free 로 다시 시작)이 Free 로 바꾸기 전에 남긴 구독 1건 (T-16 · #528).
 

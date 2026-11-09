@@ -228,13 +228,15 @@ def activity(
     settings: AuthSettings = _SETTINGS,
     clock: Callable[[], datetime] = _CLOCK,
 ) -> Response:
-    service.resolve_current_user(
+    user = service.resolve_current_user(
         db,
         request.cookies.get(SESSION_COOKIE),
         now=clock(),
         idle_seconds=settings.AUTH_SESSION_IDLE_SECONDS,
         touch=True,
     )
+    # 호출 집계(api_usage, #572 6번)가 응답 뒤 읽는 신원 — 보호 API 의 require_user 와 같은 자리
+    request.state.current_user = user
     return Response(status_code=204)
 
 
@@ -252,6 +254,7 @@ def me(
         idle_seconds=settings.AUTH_SESSION_IDLE_SECONDS,
         touch=False,
     )
+    request.state.current_user = user
     # 테넌트 상태(tenant_status)는 내부 판정용이라 싣지 않는다. platform_role · assigned_tenant_ids 는
     # 이번 판정이 읽은 현재 값이다
     return CurrentUserResponse(
