@@ -29,6 +29,7 @@ class ErrorCode(str, Enum):
     INCIDENT_NOT_FOUND = "INCIDENT_NOT_FOUND"                # 404 — 없음 · 요청의 테넌트 범위 밖(존재를 알리지 않는다 · api/tenants.py 머리말)
     IDEMPOTENCY_KEY_CONFLICT = "IDEMPOTENCY_KEY_CONFLICT"    # 409
     PROPOSAL_NOT_EXECUTABLE = "PROPOSAL_NOT_EXECUTABLE"      # 409
+    TARGET_EXECUTION_IN_PROGRESS = "TARGET_EXECUTION_IN_PROGRESS"  # 409: 같은 대상(target_arn)에 끝나지 않은 실행이 있다(T-10 · #595)
     INCIDENT_NOT_RESOLVABLE = "INCIDENT_NOT_RESOLVABLE"      # 409
     TENANT_NOT_FOUND = "TENANT_NOT_FOUND"                    # 404
     TENANT_ACCOUNT_CONFLICT = "TENANT_ACCOUNT_CONFLICT"      # 409 — 같은 AWS 계정의 테넌트가 이미 있다(한 계정 = 한 테넌트)

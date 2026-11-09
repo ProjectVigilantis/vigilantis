@@ -1,4 +1,4 @@
-"""REST 공통 오류 봉투 계약 테스트 — 기존 26종 + #552 6종, 봉투 형태 고정."""
+"""REST 공통 오류 봉투 계약 테스트: 기존 26종 + #552 6종 + T-10 1종, 봉투 형태 고정."""
 
 import pytest
 from pydantic import ValidationError
@@ -10,6 +10,7 @@ CONTRACT_ERROR_CODES = {
     "INCIDENT_NOT_FOUND",         # 404
     "IDEMPOTENCY_KEY_CONFLICT",   # 409
     "PROPOSAL_NOT_EXECUTABLE",    # 409
+    "TARGET_EXECUTION_IN_PROGRESS",  # 409: 같은 대상에 끝나지 않은 실행 (T-10 · #595)
     "INCIDENT_NOT_RESOLVABLE",    # 409 — 종료 처리 거절 (Issue #199)
     "TENANT_NOT_FOUND",           # 404 — Post-MVP T-4
     "TENANT_ACCOUNT_CONFLICT",    # 409 — 같은 계정의 테넌트가 이미 있다
