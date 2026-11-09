@@ -1,11 +1,8 @@
 {
-  "scope": "v0.5.3 C01-C07 fixed-input graph evaluation. Candidate and NO_PROPOSAL are both structurally allowed when observations, action scope and explanation support the decision. Candidate creation is separate from current application, guardrail acceptance, approval, execution and closure. Risk expectations and typed candidate constraints remain fixed; this defines no new detector or server response policy.",
+  "scope": "v0.5.3 C01-C07 fixed-input graph evaluation. Candidate and NO_PROPOSAL are both structurally allowed when observations, action scope and explanation support the decision. Candidate creation is separate from current application, guardrail acceptance, approval, execution and closure. The risk level is the server initial judgement passed through as input; the graph re-grades nothing and its output reviewed_risk_level must be null (ADR-0005 amendment 1, #583). Typed candidate constraints remain fixed; this defines no new detector or server response policy.",
   "cases": [
     {
       "case_id": "C01",
-      "reviewed_risk_levels": [
-        "HIGH"
-      ],
       "allowed_statuses": [
         "SUCCEEDED",
         "NO_PROPOSAL"
@@ -27,9 +24,6 @@
     },
     {
       "case_id": "C02",
-      "reviewed_risk_levels": [
-        "HIGH"
-      ],
       "allowed_statuses": [
         "SUCCEEDED",
         "NO_PROPOSAL"
@@ -51,9 +45,6 @@
     },
     {
       "case_id": "C03",
-      "reviewed_risk_levels": [
-        "HIGH"
-      ],
       "allowed_statuses": [
         "SUCCEEDED",
         "NO_PROPOSAL"
@@ -75,9 +66,6 @@
     },
     {
       "case_id": "C04",
-      "reviewed_risk_levels": [
-        "MEDIUM"
-      ],
       "allowed_statuses": [
         "SUCCEEDED",
         "NO_PROPOSAL"
@@ -99,9 +87,6 @@
     },
     {
       "case_id": "C05",
-      "reviewed_risk_levels": [
-        "MEDIUM"
-      ],
       "allowed_statuses": [
         "SUCCEEDED",
         "NO_PROPOSAL"
@@ -123,9 +108,6 @@
     },
     {
       "case_id": "C06",
-      "reviewed_risk_levels": [
-        "LOW"
-      ],
       "allowed_statuses": [
         "SUCCEEDED",
         "NO_PROPOSAL"
@@ -147,9 +129,6 @@
     },
     {
       "case_id": "C07",
-      "reviewed_risk_levels": [
-        "LOW"
-      ],
       "allowed_statuses": [
         "SUCCEEDED",
         "NO_PROPOSAL"

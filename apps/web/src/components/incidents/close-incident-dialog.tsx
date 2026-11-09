@@ -27,7 +27,7 @@ export function CloseIncidentDialog({
   const [error, setError] = useState('');
   const [forbidden, setForbidden] = useState(false);
   const inFlight = useRef(false);
-  const shownRisk = incident.reviewed_risk_level ?? incident.initial_risk_level;
+  const shownRisk = incident.initial_risk_level;
   const action = closureAction(incident);
   const blockedReason = locked
     ? '진행 중인 실행이 끝난 뒤 종료할 수 있습니다.'
@@ -80,9 +80,6 @@ export function CloseIncidentDialog({
             <dt className="text-muted-foreground">위험도</dt>
             <dd className="flex items-center gap-1">
               <StatusBadge field="risk_level" value={shownRisk} />
-              {incident.reviewed_risk_level !== null && incident.reviewed_risk_level !== incident.initial_risk_level
-                ? <span className="text-muted-foreground text-xs" title="AI 정밀 평가로 갱신된 값입니다">(정밀)</span>
-                : null}
             </dd>
           </> : null}
         </dl>

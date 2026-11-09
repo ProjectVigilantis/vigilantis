@@ -354,6 +354,12 @@ class DispatchReport:
     release_skipped: int = (
         0  # 해제 후보를 저장하지 않은 건(근거 없음·경합) — 사유는 debug 로그
     )
+    expiry_reserved: int = (
+        0  # 차단 24시간 만료로 해제 실행을 시스템 발동으로 접수한 건 (T-11 · #597)
+    )
+    expiry_skipped: int = (
+        0  # 만료 해제를 접수하지 않은 건(근거 없음·정지·경합) — 사유는 debug 로그
+    )
     skipped: int = 0  # 선점 실패·이미 확정된 실행
     unsupported: int = 0  # 실행 함수·판정 함수가 아직 없는 런북
     errored: int = 0
@@ -888,6 +894,56 @@ def _offer_release_one(
         report.release_skipped += 1
 
 
+def _expire_nacl_deny_one(
+    db: Session,
+    execution_id: str,
+    publish: Publish | None,
+    report: DispatchReport,
+    policy: workflows.VerificationRetryPolicy,
+) -> None:
+    """24시간이 지난 SUCCESS 차단 1건에 해제 실행을 시스템 발동으로 접수하고 같은 주기에
+    실행한다. (T-11 · #597)
+
+    접수가 끝나면 사람 승인 실행과 같은 경로(_dispatch_one → run_nacl_restore_execution)로
+    바로 보낸다 — 다음 주기를 기다리면 "만료됐는데 규칙이 남아 있는" 10초가 매 건 생긴다.
+    접수와 실행 사이에서 죽어도 비종료 스캔이 다음 주기에 이어받는다.
+    """
+    try:
+        reserved = workflows.reserve_nacl_deny_expiry(db, execution_id)
+    except Exception:
+        logger.exception(
+            "dispatch_nacl_deny_expiry_failed", extra={"execution_id": execution_id}
+        )
+        db.rollback()
+        report.errored += 1
+        return
+    if reserved.execution_id is None:
+        report.expiry_skipped += 1
+        return
+    report.expiry_reserved += 1
+    if publish is not None:
+        publish(
+            incident_event(
+                WsEventType.INCIDENT_UPDATED,
+                incident_id=reserved.incident_id,
+                occurred_at=reserved.incident_updated_at,
+            )
+        )
+    _guard_failures(
+        reserved.execution_id,
+        report,
+        partial(
+            _dispatch_one,
+            db,
+            reserved.execution_id,
+            publish,
+            report,
+            policy,
+            lane=LANE_MAIN,
+        ),
+    )
+
+
 def _dispatch_pending(
     db: Session,
     publish: Publish | None = None,
@@ -934,6 +990,17 @@ def _dispatch_pending(
                 execution_id,
                 report,
                 partial(_offer_release_one, db, execution_id, publish, report),
+            )
+        # 만료 스캔은 해제 제안 스캔 옆이다 — 목록 시각은 한 번 읽는다(건마다 다시 재면 같은 주기
+        # 안에서 기준이 흔들린다). 접수 함수가 잠근 뒤 만료를 다시 본다(workflows.reserve_nacl_deny_expiry)
+        expired_before = datetime.now(UTC) - workflows.NACL_DENY_TTL
+        for execution_id in executions_repo.list_nacl_deny_expired(
+            db, finished_before=expired_before
+        ):
+            _guard_failures(
+                execution_id,
+                report,
+                partial(_expire_nacl_deny_one, db, execution_id, publish, report, policy),
             )
     logger.info("dispatch_cycle_done", extra=vars(report))
     return report

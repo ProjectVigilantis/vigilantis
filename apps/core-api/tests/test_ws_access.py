@@ -278,9 +278,13 @@ def test_idle_expiry_while_connected_closes_4401(committed_auth):
 
 
 def test_expiry_is_checked_at_the_expiry_time_not_the_next_interval(committed_auth):
-    """주기(1시간)보다 유휴 만료(약 1초 뒤)가 먼저면 그 시각에 다시 판정해 닫는다."""
+    """주기(1시간)보다 유휴 만료(약 3초 뒤)가 먼저면 그 시각에 다시 판정해 닫는다.
+
+    여유 3초 — 앱 생성 · lifespan 기동 뒤에 붙으므로 1초면 느린 CI 러너에서 만료된 채 연결돼 handshake 1008 이 난다.
+    닫힘 대기(_wait_until 5초) 안에 든다.
+    """
     idle = get_auth_settings().AUTH_SESSION_IDLE_SECONDS
-    seed = committed_auth.make(now=datetime.now(UTC) - timedelta(seconds=idle - 1))
+    seed = committed_auth.make(now=datetime.now(UTC) - timedelta(seconds=idle - 3))
     with TestClient(_app(committed_auth, interval=3600)) as client:
         manager = client.app.state.realtime
         with client.websocket_connect(WS, headers={"Cookie": seed.cookie}) as ws:

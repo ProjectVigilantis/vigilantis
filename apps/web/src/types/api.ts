@@ -999,7 +999,20 @@ export type LoginStep =
   | 'EMAIL_VERIFICATION_REQUIRED'
   | 'COMPLETED';
 
+/**
+ * 고객사 계정의 역할(auth.py `UserRole`, #572 5번). ADMIN = 고객사 중앙계정(모든 기능 + 직원 관리),
+ * OPERATOR = 고객사 직원계정(중앙계정이 골라 준 `FeaturePermission`만), VIEWER = 대시보드 조회만
+ * (문의 등록 · 조치 실행 · 인시던트 종료는 서버가 403 `AUTH_FORBIDDEN`).
+ */
 export type UserRole = 'ADMIN' | 'OPERATOR' | 'VIEWER';
+
+/**
+ * 기능별 권한(auth.py `FeaturePermission`, #572 5번). 고객사 중앙계정이 OPERATOR에게 준다.
+ * VIEW = 자산 · 보안(인시던트) 화면 · 감사 기록 · 문의 조회 메뉴를 그린다(조회 API는 서버가 막지 않는다 —
+ * 대시보드가 같은 API를 쓴다), EXECUTE_ACTION = 조치 실행, RESOLVE_INCIDENT = 인시던트 종료,
+ * CREATE_INQUIRY = 문의 등록. EXECUTE_ACTION · RESOLVE_INCIDENT는 VIEW와 함께만 줄 수 있다(없으면 422).
+ */
+export type FeaturePermission = 'VIEW' | 'EXECUTE_ACTION' | 'RESOLVE_INCIDENT' | 'CREATE_INQUIRY';
 
 /** 새 비밀번호 최소 길이 — User Pool 정책과 같은 값(auth.py `NEW_PASSWORD_MIN_LENGTH`). */
 export const NEW_PASSWORD_MIN_LENGTH = 12;
@@ -1032,7 +1045,8 @@ export type AccountType = 'PLATFORM' | 'TENANT';
 /**
  * 플랫폼 계정의 권한 단계(auth.py `PlatformRole`, #492 PR 5). 플랫폼 권한은 이 값과 담당 배정에서만 나온다.
  * CENTRAL_ADMIN = 중앙 관리자(전체 고객 · 고객 생성 · 직원 관리 · 담당 배정),
- * TENANT_MANAGER = 고객 담당자(배정된 고객만 조회 · 조치 · 고객사 사용자 관리 — 배정이 없으면 고객 데이터 없음).
+ * TENANT_MANAGER = 고객 담당자(배정된 고객만 조회 · 조치 — 배정이 없으면 고객 데이터 없음. 고객사 사용자 관리
+ * `/api/v1/users`는 #572 9번부터 403).
  */
 export type PlatformRole = 'CENTRAL_ADMIN' | 'TENANT_MANAGER';
 
@@ -1058,13 +1072,20 @@ export type CurrentUserResponse = AccountScope & {
    * 낡을 수 있다 — 실제 범위는 서버가 요청마다 다시 판정한다(403 · 404).
    */
   assigned_tenant_ids: string[];
+  /**
+   * 이 계정이 지금 쓸 수 있는 기능별 권한(#572 5번, 열거 선언 순서). TENANT ADMIN은 네 가지 전부, OPERATOR는
+   * 고객사 중앙계정이 준 것, VIEWER는 빈 목록이다. PLATFORM(CENTRAL_ADMIN · TENANT_MANAGER)은
+   * VIEW · EXECUTE_ACTION · RESOLVE_INCIDENT(문의 등록은 고객사 계정만). 메뉴 · 버튼을 그릴지는 이 값으로 정하고,
+   * 서버는 같은 요청을 요청마다 다시 판정해 권한이 없으면 403 `AUTH_FORBIDDEN`이다.
+   */
+  permissions: FeaturePermission[];
   session: SessionInfo;
 };
 
 /* ────────────────────────────── users.py ────────────────────────────── */
-/* /api/v1/users — 고객사 사용자 관리(#492). 중앙 관리자(CENTRAL_ADMIN)는 모든 고객사 사용자를, 고객 담당자
-   (TENANT_MANAGER)는 배정된 고객의 사용자만, 고객사 ADMIN은 자기 고객사 사용자만 관리한다. 그 밖은 서버가 403
-   `AUTH_FORBIDDEN`, 관리 범위 밖 대상은 404 `USER_NOT_FOUND`다.
+/* /api/v1/users — 고객사 사용자 관리(#492 · #572 9번). 중앙 관리계정(CENTRAL_ADMIN)은 모든 고객사 사용자를,
+   고객사 중앙계정(TENANT ADMIN)은 자기 고객사 사용자만 관리한다. 관리자 직원계정(TENANT_MANAGER)을 포함한 그 밖은
+   서버가 403 `AUTH_FORBIDDEN`, 관리 범위 밖 대상은 404 `USER_NOT_FOUND`다.
    비밀번호 재설정(/api/v1/auth/password-reset · /confirm)은 응답 본문이 없는 204라 타입이 없다. */
 
 export type UserStatus = 'ACTIVE' | 'DISABLED';
@@ -1077,7 +1098,18 @@ export type UserListItem = AccountScope & {
   status: UserStatus;
   /** 로그인한 적이 없으면 null. */
   last_login_at: IsoDateTime | null;
+  /** 기능별 권한(#572 5번) — ADMIN은 네 가지 전부, OPERATOR는 부여받은 것, VIEWER는 빈 목록. */
+  permissions: FeaturePermission[];
 };
+
+/**
+ * `PUT /api/v1/users/{user_id}/permissions` — OPERATOR의 기능별 권한을 통째로 바꾼다(#572 5번). 빈 목록은 전부 회수.
+ * EXECUTE_ACTION · RESOLVE_INCIDENT를 넣으려면 VIEW도 넣는다(없으면 422). 대상이 OPERATOR가 아니면 409
+ * `USER_STATE_CONFLICT`, 지금과 같은 목록이면 409. 성공은 204이고 이력 `PERMISSIONS_CHANGED`가 남는다.
+ */
+export interface UserPermissionsRequest {
+  permissions: FeaturePermission[];
+}
 
 export interface UsersResponse {
   items: UserListItem[];
@@ -1087,17 +1119,20 @@ export interface UserInviteRequest {
   email: string;
   role: UserRole;
   /**
-   * 초대할 고객(UUID). 스키마상 선택이지만 **플랫폼 운영자는 반드시 보낸다**(빠지면 서버가 거절).
-   * 고객 담당자는 배정된 고객만 고를 수 있다(서버가 다시 판정한다).
+   * 초대할 고객(UUID). 스키마상 선택이지만 **중앙 관리계정은 반드시 보낸다**(빠지면 서버가 거절).
    * 고객사 ADMIN은 생략한다(서버가 자기 소속으로 한정한다). 계정 종류(account_type)는 입력이 아니다.
    */
   tenant_id?: string | null;
   /**
-   * 같은 이메일의 기존 Cognito 계정을 이 앱 사용자로 연결한다. 고객 범위가 있는 플랫폼 계정(중앙 관리자 · 배정된
-   * 고객 담당자)의 명시적 선택일 때만 true다 — 그 밖의 true는 서버가 403 `AUTH_FORBIDDEN`으로 거절한다(고객사 ADMIN은
-   * 언제나 false).
+   * 같은 이메일의 기존 Cognito 계정을 이 앱 사용자로 연결한다. 중앙 관리계정(CENTRAL_ADMIN)의 명시적 선택일 때만
+   * true다 — 그 밖의 true는 서버가 403 `AUTH_FORBIDDEN`으로 거절한다(고객사 ADMIN은 언제나 false).
    */
   recover_existing: boolean;
+  /**
+   * OPERATOR 초대에만 쓴다(#572 5번). 생략 · 빈 목록 = 권한 없이 초대(기본 선택 없음 — 화면이 "업무 권한 없이
+   * 초대"를 명시적으로 확인한다). 다른 역할에 주면 422.
+   */
+  permissions?: FeaturePermission[];
 }
 
 export type UserEventAction =
@@ -1109,7 +1144,9 @@ export type UserEventAction =
   /** 플랫폼 직원 권한(`platform_role`) 변경 — 직원 관리 API(#492 PR 5)가 남긴다. */
   | 'PLATFORM_ROLE_CHANGED'
   /** 고객 담당자의 담당 고객 배정 변경 — `PUT /staff/{user_id}/tenants`(#492 PR 5)가 남긴다. */
-  | 'TENANT_ASSIGNMENTS_CHANGED';
+  | 'TENANT_ASSIGNMENTS_CHANGED'
+  /** OPERATOR 기능별 권한 교체 — `PUT /users/{user_id}/permissions`(#572 5번)가 남긴다. */
+  | 'PERMISSIONS_CHANGED';
 
 /** 이력에 실리는 값의 닫힌 목록 — 없는 항목은 null(또는 생략)이다. */
 export interface UserEventState {
@@ -1121,6 +1158,8 @@ export interface UserEventState {
   tenant_id?: string | null;
   /** 담당 고객 배정(TENANT_ASSIGNMENTS_CHANGED)의 전후 고객 ID 목록. */
   tenant_ids?: string[] | null;
+  /** OPERATOR 기능별 권한의 전후(PERMISSIONS_CHANGED · USER_INVITED · ROLE_CHANGED). 빈 목록 = 권한 없음. */
+  permissions?: FeaturePermission[] | null;
 }
 
 export interface UserEventItem {
@@ -1265,7 +1304,8 @@ export type TriggerSource =
   | 'USER_APPROVAL' // 관제자 승인 실행
   | 'PRE_MITIGATION_0_5S' // High 위협 즉시 선차단
   | 'TIMEOUT_ISOLATION_1M' // 1분 미응답 만료 자동 격리
-  | 'AUTO_ON_FAILURE'; // 주 조치 실패 시 자동 복구
+  | 'AUTO_ON_FAILURE' // 주 조치 실패 시 자동 복구
+  | 'NACL_DENY_EXPIRED_24H'; // 차단 24시간 고정 만료 자동 해제 (T-11 · #597)
 
 export type AuditEventAction = 'ACTION_EXECUTION_STARTED' | 'INCIDENT_RESOLVED';
 
@@ -1337,7 +1377,10 @@ export interface SignupRequestStatusChange {
   reason: string | null;
 }
 
-/** `POST /inquiries`: 고객사 계정(역할 무관)만. 소속 고객사 · 작성자는 서버가 세션에서 채운다. 201 InquiryItem. */
+/**
+ * `POST /inquiries`: 문의 등록 권한(`CREATE_INQUIRY`, #572 5번)이 있는 고객사 계정만 — ADMIN과 권한을 받은 OPERATOR.
+ * VIEWER · 권한 없는 OPERATOR · 플랫폼 계정은 403 `AUTH_FORBIDDEN`. 소속 고객사 · 작성자는 서버가 세션에서 채운다. 201 InquiryItem.
+ */
 export interface InquiryCreate {
   category: InquiryCategory;
   title: string;
@@ -1530,4 +1573,78 @@ export interface ThreatEventsResponse {
   /** 기간 안 전체 건수. `items`가 상한에 걸려 잘렸으면 `items.length`보다 크다. */
   total: number;
   items: ThreatEventItem[];
+}
+
+// --- 플랫폼 상태 · 고객사별 API 호출 통계(#572 6번) — packages/schemas/api/platform.py --------------------
+// GET /api/v1/platform/overview?hours=24 — 중앙 관리계정(PLATFORM · CENTRAL_ADMIN) 전용, 그 밖은 403 AUTH_FORBIDDEN.
+// 값은 이미 저장된 기록을 센 것이다(새 수집 없음). 호출 통계 구역은 lib/platform-status.ts 의 FE 제안(#578) 모양을
+// 따른다 — 시간 칸은 UTC 정시이고 KST 변환은 FE 가 한다.
+
+/** 호출 통계 보관 기간(일). 오늘과 그 전 이 일수의 칸을 남긴다. */
+export const API_USAGE_RETENTION_DAYS = 30;
+/** `hours`의 상한(= 보관 기간을 시간으로 편 값). 오늘 치를 더 남기므로 어느 시각에 조회해도 지워진 칸이 끼지 않는다. */
+export const API_USAGE_MAX_WINDOW_HOURS = API_USAGE_RETENTION_DAYS * 24;
+/** `hours`를 생략했을 때의 조회 기간(시간). */
+export const API_USAGE_DEFAULT_WINDOW_HOURS = 24;
+
+/** 서버 TenantStatus 세 값. `UNPAID`는 FE 선행 값이라 서버 집계에는 없다. */
+export type PlatformTenantStatus = Exclude<TenantStatus, 'UNPAID'>;
+
+/** 연결 상태별 고객사 수. 세 상태가 0이어도 전부 실리고 합은 `total`이다. */
+export interface PlatformTenantCounts {
+  total: number;
+  by_status: Record<PlatformTenantStatus, number>;
+}
+
+/** 최근 `window_hours`시간(24) 안에 끝난(진행 중은 시작한) 수집 회차 수. 회차는 (고객사, 리전) 단위다. */
+export interface PlatformCollectionCounts {
+  window_hours: number;
+  success: number;
+  partial: number;
+  failed: number;
+  in_progress: number;
+}
+
+/** 상태별 인시던트 수. 여섯 상태가 0이어도 전부 실리고 합은 `total`이다(`tenants.by_status`와 같은 모양). */
+export interface PlatformIncidentCounts {
+  total: number;
+  by_status: Record<IncidentStatus, number>;
+}
+
+/** 고객사 하나의 시간별 호출 수와 과다 호출 판정 입력. */
+export interface TenantApiUsage {
+  tenant_id: string;
+  tenant_name: string;
+  tenant_status: PlatformTenantStatus;
+  /** 수집 자산 수(`assets.tenant_id` 기준, 사라진 자산 제외) — 과다 호출 기준 계산의 입력. */
+  asset_count: number;
+  /** 고객사 계정 수(`app_users.tenant_id` 기준, 상태 무관) — 과다 호출 기준 계산의 입력. */
+  staff_count: number;
+  /** 한 시간에 이 건수를 넘으면 과다 호출. 계산식이 정해지기 전에는 null이라 판정을 그리지 않는다. 계산은 서버가 한다. */
+  threshold_per_hour: number | null;
+  /** `hourly`의 합. */
+  total_calls: number;
+  /** `ApiUsageSummary.hours`와 같은 길이 · 순서의 시간별 호출 수. 호출 없는 칸은 0. */
+  hourly: number[];
+}
+
+/**
+ * 고객사(TENANT) 계정이 세션을 통과해 `/api/*`를 부른 횟수 — 고객사 × UTC 1시간. 로그인 전 호출 · WebSocket ·
+ * 플랫폼 계정의 호출은 세지 않는다. 응답 코드와 무관하게 1회다. `hours`는 칸의 시작 시각(UTC 정시)을 오래된 것부터
+ * 1시간 간격으로 `window_hours`개 나열하고, 마지막 칸은 조회 시각이 속한(진행 중인) 칸이다.
+ * 호출 0인 고객사도 `items`에 있다(total_calls 내림차순 → 이름 → ID) — 상위 N · 나머지 묶기는 FE가 한다.
+ */
+export interface ApiUsageSummary {
+  window_hours: number;
+  hours: IsoDateTime[];
+  retention_days: number;
+  items: TenantApiUsage[];
+}
+
+export interface PlatformOverviewResponse {
+  generated_at: IsoDateTime;
+  tenants: PlatformTenantCounts;
+  collection: PlatformCollectionCounts;
+  incidents: PlatformIncidentCounts;
+  api_usage: ApiUsageSummary;
 }

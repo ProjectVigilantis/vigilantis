@@ -432,7 +432,7 @@ def test_every_execution_insert_in_workflows_is_recorded():
     source = WORKFLOWS.read_text(encoding="utf-8")
     blocks = source.split("\ndef ")
     creating = [block for block in blocks if "executions_repo.create_execution(" in block]
-    assert len(creating) == 3  # 관제자 승인 · 자동 격리 · 자동 원복
+    assert len(creating) == 4  # 관제자 승인 · 자동 격리 · 자동 원복 · 차단 만료 해제(T-11 · #597)
     for block in creating:
         name = block.split("(", 1)[0]
         assert block.count("executions_repo.create_execution(") == 1, name

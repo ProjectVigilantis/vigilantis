@@ -134,16 +134,13 @@ function RiskArea({
         <Row label="초기 판정">
           <StatusBadge field="risk_level" value={incident.initial_risk_level} />
         </Row>
-        <Row label="정밀 평가">
-          {incident.reviewed_risk_level !== null ? (
+        {/* ADR-0005 1차 개정(#583) 뒤 SecOps 그래프는 등급을 다시 내지 않아 새 건은 항상 null이다.
+            값이 남은 과거 행에서만 이전 방식의 결과임을 밝혀 보여 주고, null이면 행을 두지 않는다. */}
+        {incident.reviewed_risk_level !== null ? (
+          <Row label="AI 재평가(이전 방식)">
             <StatusBadge field="risk_level" value={incident.reviewed_risk_level} />
-          ) : (
-            // null은 "위험도 없음"이 아니라 아직 안 나온 것이다 — status로 갈라 적는다(§3.3).
-            <span className="text-muted-foreground">
-              {incident.status === 'ANALYZING' ? '정밀평가 진행 중' : '정밀평가 없음'}
-            </span>
-          )}
-        </Row>
+          </Row>
+        ) : null}
         {incident.response_mode !== null ? (
           <Row label="대응">
             <StatusBadge field="response_mode" value={incident.response_mode} />

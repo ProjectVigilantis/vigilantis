@@ -210,7 +210,7 @@ def test_central_can_demote_and_disable_another_central(client_pg, db, make_auth
 
 def test_disable_revokes_sessions_and_management_immediately(client_pg, db, make_auth_session, tenant):
     target = staff(make_auth_session, MANAGER)
-    users = "/api/v1/users"
+    users = "/api/v1/tenants"  # /users 는 #572 로 TENANT ADMIN·CENTRAL_ADMIN 전용이라 매니저가 쓰는 관리 경로로 확인한다
     assert client_pg.get(users, headers=target.headers).status_code == 200
     resp = client_pg.put(f"{BASE}/{target.user_id}/status", json={"status": "DISABLED"})
     assert resp.status_code == 204
