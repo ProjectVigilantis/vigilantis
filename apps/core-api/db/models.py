@@ -265,6 +265,31 @@ class Tenant(Base):
     )
 
 
+class TenantApiCallHourly(Base):
+    """고객사(TENANT) 계정이 세션을 통과해 `/api/*` 를 부른 횟수 — 고객사 × UTC 1시간 버킷 (#572 6번).
+
+    공개 계약은 `schemas.api.platform`(ApiUsageSummary)이다. 요청마다 `api_usage` 미들웨어가 응답 뒤에
+    한 버킷을 +1 하고(UPSERT), 보관 기간(오늘과 그 전 API_USAGE_RETENTION_DAYS 일, 고객사당 최대 31 × 24 칸)을 넘은 칸은 지운다.
+    경로별 세분화는 없다. 고객사가 지워지면 통계도 함께 지워진다(CASCADE) — 통계가 고객사 삭제를 막지 않는다.
+    """
+
+    __tablename__ = "tenant_api_calls_hourly"
+
+    tenant_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("tenants.tenant_id", ondelete="CASCADE"), primary_key=True
+    )
+    # 칸의 시작 시각 — UTC 정시로 내린 값만 들어온다(DB CHECK 가 거울)
+    hour: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    calls: Mapped[int] = mapped_column(BigInteger)
+
+    __table_args__ = (
+        CheckConstraint("calls >= 0", name="calls_nonnegative"),
+        CheckConstraint("date_trunc('hour', hour) = hour", name="hour_on_the_hour"),
+        # 보관 기간 정리(hour < 기준 시각)와 기간 조회가 PK(tenant_id, hour)로는 시간 범위를 못 찾는다
+        Index("ix_tenant_api_calls_hourly_hour", "hour"),
+    )
+
+
 class TenantSubscriptionHistory(Base):
     """옛 재개 규칙(연결 확인 성공 = Free 로 다시 시작)이 Free 로 바꾸기 전에 남긴 구독 1건 (T-16 · #528).
 

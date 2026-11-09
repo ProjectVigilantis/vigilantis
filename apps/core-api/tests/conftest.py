@@ -394,7 +394,10 @@ def platform_session(make_auth_session) -> AuthSeed:
 
 
 def _pg_app(test_db):
-    """get_db 를 테스트 세션으로 재정의한 앱."""
+    """get_db 와 호출 집계 세션 팩토리(api_usage)를 테스트 세션으로 재정의한 앱."""
+    from contextlib import contextmanager
+
+    import api_usage
     import db.session as db_session_module
 
     app = _build_app()
@@ -402,7 +405,14 @@ def _pg_app(test_db):
     def _override_get_db():
         yield test_db
 
+    # 호출 집계(#572 6번)는 응답 뒤 자체 세션으로 쓴다 — 테스트 트랜잭션 안의 고객사 행이 보이도록 같은 세션을
+    # 쓰되 닫지는 않는다(닫으면 다음 요청의 get_db 가 쓸 세션이 사라진다)
+    @contextmanager
+    def _usage_session():
+        yield test_db
+
     app.dependency_overrides[db_session_module.get_db] = _override_get_db
+    app.dependency_overrides[api_usage.get_usage_session_factory] = lambda: _usage_session
     return app
 
 

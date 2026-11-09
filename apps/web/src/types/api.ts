@@ -1572,3 +1572,77 @@ export interface ThreatEventsResponse {
   total: number;
   items: ThreatEventItem[];
 }
+
+// --- 플랫폼 상태 · 고객사별 API 호출 통계(#572 6번) — packages/schemas/api/platform.py --------------------
+// GET /api/v1/platform/overview?hours=24 — 중앙 관리계정(PLATFORM · CENTRAL_ADMIN) 전용, 그 밖은 403 AUTH_FORBIDDEN.
+// 값은 이미 저장된 기록을 센 것이다(새 수집 없음). 호출 통계 구역은 lib/platform-status.ts 의 FE 제안(#578) 모양을
+// 따른다 — 시간 칸은 UTC 정시이고 KST 변환은 FE 가 한다.
+
+/** 호출 통계 보관 기간(일). 오늘과 그 전 이 일수의 칸을 남긴다. */
+export const API_USAGE_RETENTION_DAYS = 30;
+/** `hours`의 상한(= 보관 기간을 시간으로 편 값). 오늘 치를 더 남기므로 어느 시각에 조회해도 지워진 칸이 끼지 않는다. */
+export const API_USAGE_MAX_WINDOW_HOURS = API_USAGE_RETENTION_DAYS * 24;
+/** `hours`를 생략했을 때의 조회 기간(시간). */
+export const API_USAGE_DEFAULT_WINDOW_HOURS = 24;
+
+/** 서버 TenantStatus 세 값. `UNPAID`는 FE 선행 값이라 서버 집계에는 없다. */
+export type PlatformTenantStatus = Exclude<TenantStatus, 'UNPAID'>;
+
+/** 연결 상태별 고객사 수. 세 상태가 0이어도 전부 실리고 합은 `total`이다. */
+export interface PlatformTenantCounts {
+  total: number;
+  by_status: Record<PlatformTenantStatus, number>;
+}
+
+/** 최근 `window_hours`시간(24) 안에 끝난(진행 중은 시작한) 수집 회차 수. 회차는 (고객사, 리전) 단위다. */
+export interface PlatformCollectionCounts {
+  window_hours: number;
+  success: number;
+  partial: number;
+  failed: number;
+  in_progress: number;
+}
+
+/** 상태별 인시던트 수. 여섯 상태가 0이어도 전부 실리고 합은 `total`이다(`tenants.by_status`와 같은 모양). */
+export interface PlatformIncidentCounts {
+  total: number;
+  by_status: Record<IncidentStatus, number>;
+}
+
+/** 고객사 하나의 시간별 호출 수와 과다 호출 판정 입력. */
+export interface TenantApiUsage {
+  tenant_id: string;
+  tenant_name: string;
+  tenant_status: PlatformTenantStatus;
+  /** 수집 자산 수(`assets.tenant_id` 기준, 사라진 자산 제외) — 과다 호출 기준 계산의 입력. */
+  asset_count: number;
+  /** 고객사 계정 수(`app_users.tenant_id` 기준, 상태 무관) — 과다 호출 기준 계산의 입력. */
+  staff_count: number;
+  /** 한 시간에 이 건수를 넘으면 과다 호출. 계산식이 정해지기 전에는 null이라 판정을 그리지 않는다. 계산은 서버가 한다. */
+  threshold_per_hour: number | null;
+  /** `hourly`의 합. */
+  total_calls: number;
+  /** `ApiUsageSummary.hours`와 같은 길이 · 순서의 시간별 호출 수. 호출 없는 칸은 0. */
+  hourly: number[];
+}
+
+/**
+ * 고객사(TENANT) 계정이 세션을 통과해 `/api/*`를 부른 횟수 — 고객사 × UTC 1시간. 로그인 전 호출 · WebSocket ·
+ * 플랫폼 계정의 호출은 세지 않는다. 응답 코드와 무관하게 1회다. `hours`는 칸의 시작 시각(UTC 정시)을 오래된 것부터
+ * 1시간 간격으로 `window_hours`개 나열하고, 마지막 칸은 조회 시각이 속한(진행 중인) 칸이다.
+ * 호출 0인 고객사도 `items`에 있다(total_calls 내림차순 → 이름 → ID) — 상위 N · 나머지 묶기는 FE가 한다.
+ */
+export interface ApiUsageSummary {
+  window_hours: number;
+  hours: IsoDateTime[];
+  retention_days: number;
+  items: TenantApiUsage[];
+}
+
+export interface PlatformOverviewResponse {
+  generated_at: IsoDateTime;
+  tenants: PlatformTenantCounts;
+  collection: PlatformCollectionCounts;
+  incidents: PlatformIncidentCounts;
+  api_usage: ApiUsageSummary;
+}

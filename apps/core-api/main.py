@@ -47,6 +47,7 @@ from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
 import agent_dispatcher  # noqa: E402
 import dispatcher  # noqa: E402
+from api_usage import TenantApiUsageMiddleware  # noqa: E402
 from auth.access import require_user  # noqa: E402
 from auth.http import log_provider_status, register_auth_http, require_origin  # noqa: E402
 from config import get_auth_settings, get_settings  # noqa: E402
@@ -65,6 +66,7 @@ from routers import incidents as incidents_router  # noqa: E402
 from routers import inquiries as inquiries_router
 from routers import metrics as metrics_router  # noqa: E402
 from routers import notifications as notifications_router
+from routers import platform as platform_router  # noqa: E402
 from routers import signup_requests as signup_requests_router
 from routers import staff as staff_router  # noqa: E402
 from routers import subscriptions as subscriptions_router
@@ -197,6 +199,9 @@ def create_app() -> FastAPI:
     # 바깥이라 미처리 예외의 500 봉투에도 헤더가 붙는다
     register_auth_http(app)
     log_provider_status(get_auth_settings())
+    # 고객사별 API 호출 집계(#572 6번) — request_context 바깥이라 응답 · 접근 로그가 끝난 뒤 그 요청의 신원
+    # (request.state.current_user)으로 센다. 기록 시간은 접근 로그의 duration_ms 에 들지 않는다
+    app.add_middleware(TenantApiUsageMiddleware)
 
     # CORS는 request_context보다 나중에 추가한다 — 나중 추가가 바깥층이라
     # 미들웨어가 만든 오류 봉투 응답에도 CORS 헤더가 붙는다.
@@ -228,6 +233,8 @@ def create_app() -> FastAPI:
     app.include_router(inquiries_router.router, dependencies=protected)
     app.include_router(metrics_router.router, dependencies=protected)
     app.include_router(notifications_router.router, dependencies=protected)
+    # 플랫폼 상태 · 호출 통계(#572 6번) — 라우터가 CENTRAL_ADMIN 관문을 건다
+    app.include_router(platform_router.router, dependencies=protected)
     # 같은 prefix의 GET/PUT은 라우터가 CENTRAL_ADMIN 관문을 건다. 공개는 POST 한 경로뿐이다.
     app.include_router(signup_requests_router.router)
     app.include_router(staff_router.router, dependencies=protected)

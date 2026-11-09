@@ -37,8 +37,8 @@ DEV_ONLY_TABLES = {
 }
 DECISIONS = "a565c8d1e901"  # dev #571 — DEV_HEAD 의 자식
 LATEST = "f565c8d1a9e3"  # MERGE(T-7 병합)와 DECISIONS 를 잇는 병합 — 이제 head 의 조상(#528 병합이 뒤에 붙는다)
-# head 의 테이블 수 — dev 35종 + T-7 3종 + #528 구독 보존 · 모의 계약 · 이벤트 3종 + #572 운영자 기능 권한 1종
-HEAD_TABLES = 42
+# head 의 테이블 수 — dev 35종 + T-7 3종 + #528 구독 보존 · 모의 계약 · 이벤트 3종 + #572 운영자 기능 권한 1종 · 6번 호출 버킷 1종
+HEAD_TABLES = 43
 CONFIG_PATH = Path(__file__).resolve().parents[2] / "alembic.ini"
 NOW = datetime(2026, 10, 31, 9, 0, tzinfo=UTC)
 
