@@ -20,7 +20,7 @@ from enum import Enum
 from schemas.api.actions import ExecutionStatus
 from schemas.api.assets import AssetType, RelationType
 from schemas.api.audit import AuditActorKind, AuditEventAction
-from schemas.api.auth import AccountType, PlatformRole, UserRole
+from schemas.api.auth import AccountType, FeaturePermission, PlatformRole, UserRole
 from schemas.api.incidents import (
     IncidentCategory,
     IncidentStatus,
@@ -1764,6 +1764,23 @@ class AppUserTenantAssignment(Base):
     )
     tenant_id: Mapped[str] = mapped_column(
         _ID, ForeignKey("tenants.tenant_id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+
+
+class AppUserFeaturePermission(Base):
+    """고객사 직원계정(TENANT OPERATOR)의 기능별 권한 1건(#572 5번). 명시 부여 행만 권한이 된다.
+
+    ADMIN 은 행 없이 네 가지 전부, VIEWER 는 행이 있어도 보지 않는다(권한 판정은 auth.permissions 가 역할을 먼저 본다).
+    역할이 OPERATOR 에서 바뀌면 서비스가 행을 지운다. 사용자가 지워지면 함께 지워진다(CASCADE).
+    """
+
+    __tablename__ = "app_user_feature_permissions"
+
+    user_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("app_users.user_id", ondelete="CASCADE"), primary_key=True
+    )
+    permission: Mapped[FeaturePermission] = mapped_column(
+        _enum(FeaturePermission, "app_user_feature_permission"), primary_key=True
     )
 
 

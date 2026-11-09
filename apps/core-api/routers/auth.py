@@ -14,7 +14,7 @@ from collections.abc import Callable
 from datetime import datetime
 
 from auth import password_reset as password_reset_service
-from auth import service
+from auth import permissions, service
 from auth.cognito import AuthFailedError, AuthFlowExpiredError, CognitoAdapter
 from auth.http import (
     FLOW_COOKIE,
@@ -252,8 +252,8 @@ def me(
         idle_seconds=settings.AUTH_SESSION_IDLE_SECONDS,
         touch=False,
     )
-    # 테넌트 상태(tenant_status)는 내부 판정용이라 싣지 않는다. platform_role · assigned_tenant_ids 는
-    # 이번 판정이 읽은 현재 값이다
+    # 테넌트 상태(tenant_status)는 내부 판정용이라 싣지 않는다. platform_role · assigned_tenant_ids · permissions 는
+    # 이번 판정이 읽은 현재 값이다 — permissions 는 관문과 같은 판정(auth.permissions.effective_permissions)이다
     return CurrentUserResponse(
         user_id=user.user_id,
         email=user.email,
@@ -263,4 +263,5 @@ def me(
         platform_role=user.platform_role,
         session=user.session,
         assigned_tenant_ids=list(user.assigned_tenant_ids),
+        permissions=permissions.ordered(permissions.effective_permissions(user)),
     )

@@ -39,8 +39,9 @@
 #     범위(404) → 같은 Key 재요청(실행만) → 대상 인시던트 테넌트의 정지(409) → 인시던트 · 제안
 #     상태(409)다(packages/schemas/api/tenants.py 머리말).
 #   - HTTP 요청은 actor(auth.admin_service.Actor)를 넘긴다. 이 계층이 쓰기 트랜잭션 첫머리에서 users 잠금을
-#     잡고 세션 · 조치 권한 · 담당 고객을 다시 판정해(_live_actor) 그 시점의 범위로 위 판정을 한다 — 의존성이 본
-#     신원은 스냅샷이라, 그 뒤 회수된 담당 · 등급 · 세션으로는 쓰지 못한다. actor 없는 호출은 서버 내부의 신뢰
+#     잡고 세션 · 기능 권한(실행 EXECUTE_ACTION · 종료 RESOLVE_INCIDENT, #572 5번) · 담당 고객을 다시 판정해
+#     (_live_actor) 그 시점의 범위로 위 판정을 한다 — 의존성이 본 신원은 스냅샷이라, 그 뒤 회수된 담당 · 등급 ·
+#     부여 권한 · 세션으로는 쓰지 못한다. actor 없는 호출은 서버 내부의 신뢰
 #     경로이며 명시 범위(scope, 기본 전부)를 받는다. 이미 접수 · 진행 중인 실행은 이후의 담당 변경으로 취소되지
 #     않는다(디스패처는 범위를 다시 보지 않는다).
 #   - 감사 기록(T-2 · #544)의 사람 행위자는 HTTP 에서는 위의 재판정 신원이다. 신뢰 경로는 기록할 사람을
@@ -62,6 +63,7 @@ from enum import Enum, unique
 import notification_events
 from ai import guardrails
 from auth import access as auth_access
+from auth import permissions as auth_permissions
 from auth import service as auth_service
 from auth.admin_service import Actor
 from config import get_settings
@@ -87,6 +89,7 @@ from schemas.api.actions import (
 )
 from schemas.api.assets import AssetType, RelationType
 from schemas.api.audit import AuditActorKind
+from schemas.api.auth import FeaturePermission
 from schemas.api.errors import ErrorCode
 from schemas.api.incidents import (
     IncidentCategory,
@@ -216,9 +219,12 @@ def _replay_or_conflict(
     return ExecutionReservation(response=_to_response(existing), created=False)
 
 
-def _live_actor(db: Session, actor: Actor) -> auth_service.CurrentUser:
+def _live_actor(
+    db: Session, actor: Actor, feature: FeaturePermission
+) -> auth_service.CurrentUser:
     """HTTP 행위자를 쓰기 트랜잭션 첫머리에서 다시 판정한다 — users 잠금 → 캐시 비움 → 세션(무효 401) ·
-    조치 권한(403) 재판정. 담당 고객은 판정 때 새로 읽는다(auth.service.resolve_current_user).
+    기능 권한(403, 라우트 의존성과 같은 auth.permissions 판정) 재판정. 담당 고객 · OPERATOR 부여 권한은 판정 때
+    새로 읽는다(auth.service.resolve_current_user).
 
     잠금은 이 트랜잭션이 끝날 때까지 유지되고, 관리 쓰기(담당 배정 · 등급 · 역할 · 상태 · 세션 폐기)도 같은 잠금을
     잡는다 — 판정과 commit 사이에 회수가 끼어들지 않는다. 인시던트 · 테넌트 행 잠금보다 먼저 잡아 관리 쓰기(정지
@@ -229,7 +235,7 @@ def _live_actor(db: Session, actor: Actor) -> auth_service.CurrentUser:
     user = auth_service.resolve_current_user(
         db, actor.token, now=actor.clock(), idle_seconds=actor.idle_seconds, touch=False
     )
-    auth_access.require_action_role(user)
+    auth_permissions.check_permission(user, feature)
     return user
 
 
@@ -248,11 +254,12 @@ def _write_context(
     scope: TenantScope,
     actor: Actor | None,
     audit_actor: audit_repo.Actor | None,
+    feature: FeaturePermission,
 ) -> _WriteContext:
     """인시던트 · 테넌트를 잠그기 전에 한 번 정한다.
 
     actor(HTTP 자격)를 주면 범위 · 고객사 여부 · 기록 행위자를 모두 users 잠금 안에서 재판정한 같은 사용자에서
-    얻는다(_live_actor) — 그래서 명시 범위나 audit_actor 를 함께 받지 않는다. actor 가 없으면 서버 내부의 신뢰
+    얻는다(_live_actor — feature 는 이 쓰기에 필요한 기능 권한이다). 그래서 명시 범위나 audit_actor 를 함께 받지 않는다. actor 가 없으면 서버 내부의 신뢰
     호출이라 받은 scope 를 쓰고 고객사 행위자가 아니며, 기록할 사람(audit_actor, SYSTEM 아님)을 직접 밝혀야
     한다 — audit_actor 는 기록에만 쓰고 범위 · 정지 판정에 쓰지 않는다. 인자 오류는 DB 를 읽기 전에 거절한다.
     """
@@ -268,7 +275,7 @@ def _write_context(
         raise ValueError("actor 가 있으면 범위는 재판정 신원이 정합니다 — 명시 범위를 함께 줄 수 없습니다")
     if not isinstance(actor, Actor):
         raise TypeError("actor 는 HTTP 자격(auth.admin_service.Actor)이어야 합니다")
-    user = _live_actor(db, actor)
+    user = _live_actor(db, actor, feature)
     return _WriteContext(
         scope=auth_access.tenant_scope_of(user),
         customer=not auth_access.is_platform_account(user),
@@ -485,7 +492,13 @@ def reserve_execution(
     행위자 인자는 _write_context 가 정한다 — HTTP 는 actor(자격) 하나로 users 잠금 안에서 다시 판정한 그
     시점의 범위 · 기록 행위자를 쓰고, actor 없는 서버 내부 호출은 신뢰된 명시 범위(scope)와 audit_actor 를 준다.
     """
-    context = _write_context(db, scope=scope, actor=actor, audit_actor=audit_actor)
+    context = _write_context(
+        db,
+        scope=scope,
+        actor=actor,
+        audit_actor=audit_actor,
+        feature=FeaturePermission.EXECUTE_ACTION,
+    )
     _check_scope(db, request.incident_id, context.scope)
     existing = executions_repo.get_by_idempotency_key(db, request.idempotency_key)
     if existing is not None:
@@ -591,7 +604,13 @@ def resolve_incident(
 
     종료를 확정한 요청만 같은 트랜잭션에 감사 기록을 남긴다(T-2 · #544).
     """
-    context = _write_context(db, scope=scope, actor=actor, audit_actor=audit_actor)
+    context = _write_context(
+        db,
+        scope=scope,
+        actor=actor,
+        audit_actor=audit_actor,
+        feature=FeaturePermission.RESOLVE_INCIDENT,
+    )
     incident = incidents_repo.lock_incident(db, incident_id)
     if incident is None or not context.scope.covers(incident.tenant_id):
         raise ApiError(ErrorCode.INCIDENT_NOT_FOUND)
