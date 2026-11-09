@@ -70,6 +70,7 @@ from routers import platform as platform_router  # noqa: E402
 from routers import signup_requests as signup_requests_router
 from routers import staff as staff_router  # noqa: E402
 from routers import subscriptions as subscriptions_router
+from routers import tenant_groups as tenant_groups_router
 from routers import tenant_settings as tenant_settings_router  # noqa: E402
 from routers import tenants as tenants_router  # noqa: E402
 from routers import threat_events as threat_events_router  # noqa: E402
@@ -240,6 +241,8 @@ def create_app() -> FastAPI:
     app.include_router(staff_router.router, dependencies=protected)
     app.include_router(subscriptions_router.router, dependencies=protected)
     app.include_router(tenants_router.router, dependencies=protected)
+    # 고객사 그룹(#572 2번) — 플랫폼 계정 관문은 라우터가, 생성 · 삭제의 중앙 관리계정 관문은 라우트가 건다
+    app.include_router(tenant_groups_router.router, dependencies=protected)
     # 고객 설정(T-7) — 고객사 계정도 들어오는 별도 라우터. 등급 · 범위는 Workflow 가 auth.access 로 건다
     app.include_router(tenant_settings_router.router, dependencies=protected)
     # 위협 이벤트 목록(#572 10번)도 세션 배선만 쓰고, 고객사 범위는 라우트가 require_tenant_scope 로 건다
