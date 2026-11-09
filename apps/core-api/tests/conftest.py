@@ -210,6 +210,7 @@ class AuthSeed:
     tenant_id: str | None
     platform_role: object  # PLATFORM 만 값이 있다
     assigned_tenant_ids: tuple  # TENANT_MANAGER 에 명시 배정한 고객사(시드 순서 그대로)
+    permissions: tuple  # TENANT OPERATOR 에 부여한 기능별 권한(#572 5번). 다른 계정은 빈 튜플
     token: str = field(repr=False)
     cookie: str = field(repr=False)  # "__Host-vg_session=<token>"
     headers: dict = field(repr=False)  # Cookie + 허용 Origin
@@ -250,6 +251,7 @@ def _seed_auth_session(
     account_type=None,
     platform_role=None,
     assigned_tenant_ids=(),
+    permissions=None,
     status=None,
     now=None,
 ) -> AuthSeed:
@@ -258,6 +260,8 @@ def _seed_auth_session(
     계정 종류: tenant_id 를 주면 TENANT, 아니면 account_type(기본 PLATFORM — UNASSIGNED 도 고를 수 있다).
     플랫폼 등급: PLATFORM 만 갖는다(기본 CENTRAL_ADMIN). 다른 종류에 주면 시드가 거절한다.
     담당 배정: assigned_tenant_ids 는 TENANT_MANAGER 에만 준다(실제 테넌트 행이어야 한다).
+    기능별 권한(#572 5번): permissions 는 TENANT OPERATOR 에만 준다. 기본(None)은 네 가지 전부 — 마이그레이션이
+    기존 OPERATOR 에게 주는 것과 같다. 권한 없는 OPERATOR 는 permissions=() 로 만든다.
     """
     from datetime import UTC, datetime
 
@@ -266,7 +270,7 @@ def _seed_auth_session(
     from config import get_auth_settings
     from db import models
     from db.repositories import auth as auth_repo
-    from schemas.api.auth import AccountType, PlatformRole
+    from schemas.api.auth import AccountType, FeaturePermission, PlatformRole, UserRole
 
     if tenant_id is not None:
         assert account_type in (None, AccountType.TENANT), account_type
@@ -278,6 +282,11 @@ def _seed_auth_session(
         assert platform_role is None, (account_type, platform_role)
     assigned_tenant_ids = tuple(assigned_tenant_ids)
     assert not assigned_tenant_ids or platform_role is PlatformRole.TENANT_MANAGER, platform_role
+    if account_type is AccountType.TENANT and role is UserRole.OPERATOR:
+        permissions = tuple(FeaturePermission) if permissions is None else tuple(permissions)
+    else:
+        assert permissions is None, (account_type, role, permissions)
+        permissions = ()
     settings = get_auth_settings()
     now = now or datetime.now(UTC)
     suffix = uuid.uuid4().hex
@@ -298,6 +307,10 @@ def _seed_auth_session(
         auth_repo.replace_assigned_tenants(
             session, user_id=user.user_id, tenant_ids=assigned_tenant_ids, now=now
         )
+    if permissions:
+        auth_repo.replace_feature_permissions(
+            session, user_id=user.user_id, permissions=frozenset(permissions), now=now
+        )
     issued = auth_sessions.issue_session(
         session,
         user_id=user.user_id,
@@ -316,6 +329,7 @@ def _seed_auth_session(
         tenant_id=tenant_id,
         platform_role=platform_role,
         assigned_tenant_ids=assigned_tenant_ids,
+        permissions=permissions,
         token=issued.token,
         cookie=cookie,
         headers={"Cookie": cookie, "Origin": origin},
@@ -353,7 +367,8 @@ def make_auth_session(db, allowed_origin):
 
     기본은 PLATFORM(role=ADMIN 호환 값, platform_role=CENTRAL_ADMIN). 고객사 계정은 tenant_id=make_tenant(...) 로,
     미지정 계정은 account_type=AccountType.UNASSIGNED 로, 담당자는 platform_role=TENANT_MANAGER 와
-    assigned_tenant_ids=(make_tenant(), ...) 로 만든다. status · now 도 고를 수 있다.
+    assigned_tenant_ids=(make_tenant(), ...) 로 만든다. OPERATOR 의 기능별 권한은 permissions=(...) 로 고른다
+    (기본 전부, () 는 없음). status · now 도 고를 수 있다.
     """
     from schemas.api.auth import UserRole
 

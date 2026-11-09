@@ -420,7 +420,7 @@ def test_me_returns_user_and_session_info(http, flow, user, tenant_id):
     body = http.get("/api/v1/auth/me").json()
     assert set(body) == {
         "user_id", "email", "role", "account_type", "tenant_id", "platform_role", "session",
-        "assigned_tenant_ids",
+        "assigned_tenant_ids", "permissions",
     }
     assert body["user_id"] == user.user_id
     assert (body["email"], body["role"]) == ("u@example.com", "OPERATOR")

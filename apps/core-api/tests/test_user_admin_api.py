@@ -4,10 +4,13 @@ user_admin_events 는 append-only(DELETE 거절 · FK RESTRICT)라 commit 시드
 그래서 독립 commit 이 필요한 동시성 테스트는 이력을 남기지 않는 경로(거절 · 잠금 보유자의 직접 쓰기)만 쓰거나,
 이 파일 전용 격리 DB(throwaway_engine)를 쓴다.
 
-관리 범위(#492): 행위자는 CENTRAL_ADMIN(모든 고객 테넌트) · 배정된 TENANT_MANAGER(배정 고객사만) ·
-고객사 ADMIN(자기 테넌트) 세 종류이고, 같은 동작을 세 행위자로 돌린다(admin 픽스처). 대상은 실제 테넌트 행에
-묶인 TENANT 계정이다. 범위 밖(미배정 포함) · PLATFORM · UNASSIGNED 대상은 없는 대상과 같은 404 이고
-Cognito 를 부르지 않는다. 배정이 없는 TENANT_MANAGER 는 고객 데이터가 없다(전체가 아니다).
+관리 범위(#492 · #572 9번): 행위자는 중앙 관리계정 CENTRAL_ADMIN(모든 고객 테넌트)과 고객사 중앙계정
+고객사 ADMIN(자기 테넌트) 두 종류뿐이고, 같은 동작을 두 행위자로 돌린다(admin 픽스처). TENANT_MANAGER 는
+배정 여부와 상관없이 모든 경로가 403 이다. 대상은 실제 테넌트 행에 묶인 TENANT 계정이다. 범위 밖 · PLATFORM ·
+UNASSIGNED 대상은 없는 대상과 같은 404 이고 Cognito 를 부르지 않는다.
+
+OPERATOR 기능별 권한(#572 5번): PUT /{id}/permissions 가 OPERATOR 의 권한을 통째로 교체한다. 목록의 permissions 는
+ADMIN 전체 · OPERATOR 부여분 · VIEWER 빈 목록이고, 역할을 바꾸면 부여분이 지워진다.
 """
 
 from __future__ import annotations
@@ -32,7 +35,7 @@ from db.repositories import tenants as tenants_repo
 from exceptions import ApiError
 from fastapi.routing import iter_route_contexts
 from routers.users import get_cognito_adapter_factory
-from schemas.api.auth import AccountType, PlatformRole, UserRole
+from schemas.api.auth import AccountType, FeaturePermission, PlatformRole, UserRole
 from schemas.api.errors import ErrorCode
 from schemas.api.tenants import TenantStatus
 from schemas.api.users import UserStatus
@@ -43,7 +46,10 @@ from tests.test_totp_recovery_api import RECOVERY_OPS
 ISSUER = "https://cognito-idp.ap-northeast-2.amazonaws.com/ap-northeast-2_test"  # conftest TEST_AUTH_ISSUER
 BASE = "/api/v1/users"
 FORCE = "FORCE_CHANGE_PASSWORD"
-ITEM_KEYS = {"user_id", "email", "role", "account_type", "platform_role", "tenant_id", "status", "last_login_at"}
+ITEM_KEYS = {
+    "user_id", "email", "role", "account_type", "platform_role", "tenant_id", "status", "last_login_at", "permissions",
+}
+ALL_PERMISSIONS = [p.value for p in FeaturePermission]  # 열거 선언 순서 — 응답 · 이력의 순서
 
 
 class FakeAdapter:
@@ -100,19 +106,15 @@ def assign(db, manager, *tenant_ids: str) -> None:
 
 @pytest.fixture()
 def manager(login_as):
-    """배정이 없는 TENANT_MANAGER — 테스트가 assign 으로 배정한다."""
+    """배정이 없는 TENANT_MANAGER — 사용자 관리 경로는 배정해도 403 이다(테스트가 assign 으로 배정한 경우를 따로 본다)."""
     return login_as(UserRole.ADMIN, platform_role=PlatformRole.TENANT_MANAGER)
 
 
-@pytest.fixture(params=["platform", "manager", "tenant"])
-def admin(request, login_as, db, tenant):
-    """같은 관리 권한의 세 행위자 — CENTRAL_ADMIN · 대상 테넌트가 배정된 TENANT_MANAGER · 대상 테넌트의 고객사 ADMIN."""
+@pytest.fixture(params=["platform", "tenant"])
+def admin(request, login_as, tenant):
+    """같은 관리 권한의 두 행위자 — 중앙 관리계정(CENTRAL_ADMIN) · 대상 테넌트의 고객사 중앙계정(고객사 ADMIN)."""
     if request.param == "platform":
         return login_as(UserRole.ADMIN, platform_role=PlatformRole.CENTRAL_ADMIN)
-    if request.param == "manager":
-        seed = login_as(UserRole.ADMIN, platform_role=PlatformRole.TENANT_MANAGER)
-        assign(db, seed, tenant)
-        return seed
     return login_as(UserRole.ADMIN, tenant_id=tenant)
 
 
@@ -161,7 +163,18 @@ def snapshot(db):
         db.execute(text("SELECT count(*) FROM user_admin_events")).scalar_one(),
         db.execute(text("SELECT count(*) FROM auth_sessions WHERE revoked_at IS NOT NULL")).scalar_one(),
         db.execute(text("SELECT tenant_id, status::text FROM tenants ORDER BY 1")).all(),
+        db.execute(text("SELECT user_id, permission::text FROM app_user_feature_permissions ORDER BY 1, 2")).all(),
     )
+
+
+def stored_permissions(db, user_id) -> list[str]:
+    """DB 에 저장된 OPERATOR 부여분 — 열거 선언 순서."""
+    granted = auth_repo.list_feature_permissions(db, user_id=user_id)
+    return [p.value for p in FeaturePermission if p in granted]
+
+
+def put_permissions(client, user_id, permissions):
+    return client.put(f"{BASE}/{user_id}/permissions", json={"permissions": permissions})
 
 
 def me_status(client, seed) -> int:
@@ -182,6 +195,9 @@ REQUESTS = [
     ("PUT", "/{id}/status", {}),
     ("POST", "/{id}/sessions/revoke", None),
     ("POST", "/{id}/totp/reset", None),
+    ("PUT", "/{id}/permissions", {"permissions": ["VIEW"]}),
+    ("PUT", "/{id}/permissions", {"permissions": ["EXECUTE_ACTION"]}),  # 의존 위반 본문도 403 이 먼저
+    ("PUT", "/{id}/permissions", {}),
 ]
 
 
@@ -215,6 +231,23 @@ def test_non_admin_is_forbidden_everywhere(
     assert adapter.calls == []
 
 
+@pytest.mark.parametrize("assigned", [False, True], ids=["unassigned", "assigned"])
+@pytest.mark.parametrize("method,path,body", REQUESTS)
+def test_tenant_manager_is_forbidden_everywhere(
+    client_pg, db, manager, tenant, make_auth_session, adapter, assigned, method, path, body
+):
+    """TENANT_MANAGER 는 대상 고객사를 배정받았어도 사용자 관리 전 경로가 403 — 본문 검증 · Cognito 전에 거절된다."""
+    target = make_auth_session(UserRole.OPERATOR, tenant_id=tenant)
+    if assigned:
+        assign(db, manager, tenant)
+    before = snapshot(db)
+    resp = client_pg.request(method, BASE + path.replace("{id}", target.user_id), json=body)
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "AUTH_FORBIDDEN"
+    assert snapshot(db) == before
+    assert adapter.calls == []
+
+
 def test_unauthenticated_is_401(client_pg):
     resp = client_pg.get(BASE, headers={"Cookie": ""})
     assert resp.status_code == 401
@@ -232,6 +265,7 @@ def test_list_users_has_last_login_without_provider_calls(client_pg, db, admin, 
     assert items[target.user_id]["status"] == "ACTIVE"
     assert (items[target.user_id]["account_type"], items[target.user_id]["tenant_id"]) == ("TENANT", tenant)
     assert items[target.user_id]["last_login_at"] is not None
+    assert items[target.user_id]["permissions"] == []  # VIEWER
     assert adapter.calls == []
 
 
@@ -282,6 +316,7 @@ def test_invite_creates_active_unverified_tenant_user_and_audit(client_pg, db, a
         "new@example.com", "OPERATOR", "ACTIVE", None,
     )
     assert (body["account_type"], body["tenant_id"]) == ("TENANT", tenant)
+    assert body["permissions"] == []  # 새 OPERATOR 는 기본 권한이 없다
     assert adapter.calls == [("create", "new@example.com", False)]
     row = user_row(db, body["user_id"])
     assert (row.role, row.status, row.email_verified_at, row.issuer, row.cognito_sub) == (
@@ -290,7 +325,8 @@ def test_invite_creates_active_unverified_tenant_user_and_audit(client_pg, db, a
     assert (row.account_type, row.tenant_id) == ("TENANT", tenant)
     assert events(db, body["user_id"]) == [
         ("USER_INVITED", {},
-         {"role": "OPERATOR", "status": "ACTIVE", "recover_existing": False, "tenant_id": tenant},
+         {"role": "OPERATOR", "status": "ACTIVE", "recover_existing": False, "tenant_id": tenant,
+          "permissions": []},
          admin.user_id)
     ]
     shown = client_pg.get(f"{BASE}/{body['user_id']}/events").json()["items"][0]
@@ -621,7 +657,7 @@ def test_change_role_updates_and_audits(client_pg, db, admin, target):
     assert client_pg.put(f"{BASE}/{target.user_id}/role", json={"role": "OPERATOR"}).status_code == 204
     assert user_row(db, target.user_id).role == "OPERATOR"
     assert events(db, target.user_id) == [
-        ("ROLE_CHANGED", {"role": "VIEWER"}, {"role": "OPERATOR"}, admin.user_id)
+        ("ROLE_CHANGED", {"role": "VIEWER"}, {"role": "OPERATOR", "permissions": []}, admin.user_id)
     ]
 
 
@@ -733,6 +769,7 @@ TARGET_OPS = [
     ("PUT", "/{id}/role", {"role": "VIEWER"}),  # PLATFORM 대상에 닿으면 DB CHECK(ADMIN 고정)가 500 으로 터진다
     ("PUT", "/{id}/status", {"status": "DISABLED"}),
     ("POST", "/{id}/sessions/revoke", None),
+    ("PUT", "/{id}/permissions", {"permissions": ["VIEW"]}),
 ]
 
 
@@ -831,11 +868,12 @@ def test_suspended_tenant_admin_reads_safe_history_but_cannot_change_anything(
     [event] = history.json()["items"]
     shown = {k: v for k, v in event["after_state"].items() if v is not None}
     assert (event["action"], event["actor_user_id"], shown) == (
-        "ROLE_CHANGED", platform.user_id, {"role": "OPERATOR"},
+        "ROLE_CHANGED", platform.user_id, {"role": "OPERATOR", "permissions": []},
     )
     # 이력 상태는 닫힌 목록뿐이다(이메일 · 토큰 · Cognito 원본 없음)
     assert set(event["before_state"]) | set(event["after_state"]) <= {
         "role", "platform_role", "status", "revoked_session_count", "recover_existing", "tenant_id", "tenant_ids",
+        "permissions",
     }
     # 고객 사용자 이벤트에는 배정 ID 가 없다(직렬화된 null 만 허용)
     assert event["before_state"].get("tenant_ids") is None and event["after_state"].get("tenant_ids") is None
@@ -922,6 +960,9 @@ def test_missing_cognito_config_403_before_503_and_ordinary_routes_work(client_p
     _without_cognito(client_pg)
     body = {"email": "a@example.com", "role": "VIEWER", "tenant_id": tenant}
     login_as(UserRole.OPERATOR, tenant_id=tenant)
+    assert client_pg.post(BASE, json=body).status_code == 403
+    assert client_pg.post(f"{BASE}/{target.user_id}/invite/resend").status_code == 403
+    login_as(UserRole.ADMIN, platform_role=PlatformRole.TENANT_MANAGER)
     assert client_pg.post(BASE, json=body).status_code == 403
     assert client_pg.post(f"{BASE}/{target.user_id}/invite/resend").status_code == 403
     login_as(UserRole.ADMIN)
@@ -1402,152 +1443,13 @@ def test_noncanonical_hidden_target_is_still_404(client_pg, db, make_auth_sessio
     assert adapter.calls == []
 
 
-# --- 배정 고객사 범위(#492): CENTRAL_ADMIN 전역, TENANT_MANAGER 는 배정된 고객사만 -----------------
-
-ID_ROUTES = [
-    ("GET", "/{id}/events", None),
-    ("POST", "/{id}/invite/resend", None),
-    ("PUT", "/{id}/role", {"role": "OPERATOR"}),
-    ("PUT", "/{id}/status", {"status": "DISABLED"}),
-    ("POST", "/{id}/sessions/revoke", None),
-]
-
-
-@pytest.mark.parametrize("assigned_elsewhere", [False, True])
-def test_unassigned_manager_has_no_customer_data(
-    client_pg, db, manager, make_tenant, target, tenant, adapter, assigned_elsewhere
-):
-    """배정이 없거나 다른 고객사만 배정된 매니저 — 목록은 비고(전체가 아니다), 대상 · 초대는 Cognito 전에 거절된다."""
-    if assigned_elsewhere:
-        assign(db, manager, make_tenant())
-    before = snapshot(db)
-    listed = client_pg.get(BASE)
-    assert (listed.status_code, listed.json()["items"]) == (200, [])
-    for method, path, body in ID_ROUTES:
-        resp = client_pg.request(method, BASE + path.replace("{id}", target.user_id), json=body)
-        assert (resp.status_code, resp.json()["error"]["code"]) == (404, "USER_NOT_FOUND"), (method, path)
-    for recover in (False, True):
-        resp = client_pg.post(BASE, json={
-            "email": "x@example.com", "role": "VIEWER", "tenant_id": tenant, "recover_existing": recover,
-        })
-        assert (resp.status_code, resp.json()["error"]["code"]) == (404, "TENANT_NOT_FOUND")
-    omitted = client_pg.post(BASE, json={"email": "x@example.com", "role": "VIEWER"})
-    assert (omitted.status_code, omitted.json()["error"]["code"]) == (422, "REQUEST_VALIDATION_FAILED")
-    assert adapter.calls == []
-    assert snapshot(db) == before
-
-
-def test_manager_is_limited_to_assigned_customers(
-    client_pg, db, manager, make_tenant, make_auth_session, tenant, target, adapter
-):
-    other_tenant = make_tenant()
-    other = make_auth_session(UserRole.VIEWER, tenant_id=other_tenant)
-    assign(db, manager, tenant)
-
-    seen = {i["user_id"]: i["tenant_id"] for i in client_pg.get(BASE).json()["items"]}
-    assert seen == {target.user_id: tenant}
-
-    # 배정 대상은 동작한다
-    assert client_pg.get(f"{BASE}/{target.user_id}/events").status_code == 200
-    assert client_pg.put(f"{BASE}/{target.user_id}/role", json={"role": "OPERATOR"}).status_code == 204
-    assert client_pg.put(f"{BASE}/{target.user_id}/status", json={"status": "DISABLED"}).status_code == 204
-    assert client_pg.post(f"{BASE}/{target.user_id}/sessions/revoke").status_code == 204
-    invited = client_pg.post(BASE, json={"email": "new@example.com", "role": "VIEWER", "tenant_id": tenant})
-    assert invited.status_code == 201
-
-    # 미배정 고객사 · 없는 고객사는 거절, 대상은 없는 대상과 같다
-    before = snapshot(db)
-    adapter.calls.clear()
-    for method, path, body in ID_ROUTES:
-        resp = client_pg.request(method, BASE + path.replace("{id}", other.user_id), json=body)
-        assert (resp.status_code, resp.json()["error"]["code"]) == (404, "USER_NOT_FOUND"), (method, path)
-    for foreign in (other_tenant, str(uuid.uuid4())):
-        for recover in (False, True):
-            resp = client_pg.post(BASE, json={
-                "email": "x@example.com", "role": "ADMIN", "tenant_id": foreign, "recover_existing": recover,
-            })
-            assert (resp.status_code, resp.json()["error"]["code"]) == (404, "TENANT_NOT_FOUND")
-    assert adapter.calls == []
-    assert snapshot(db) == before
-
-
-def test_manager_scope_follows_assignment_replacement(client_pg, db, manager, make_tenant, make_auth_session, tenant, target):
-    other_tenant = make_tenant()
-    other = make_auth_session(UserRole.VIEWER, tenant_id=other_tenant)
-    assign(db, manager, tenant, other_tenant)
-    assert {i["user_id"] for i in client_pg.get(BASE).json()["items"]} == {target.user_id, other.user_id}
-    assign(db, manager, other_tenant)
-    assert {i["user_id"] for i in client_pg.get(BASE).json()["items"]} == {other.user_id}
-    assert client_pg.get(f"{BASE}/{target.user_id}/events").status_code == 404
-
+# --- 중앙 관리계정 범위(#492 · #572 9번): CENTRAL_ADMIN 은 배정 없이 모든 고객사 -----------------
 
 def test_central_admin_reaches_every_customer_without_assignment(client_pg, db, login_as, make_tenant, make_auth_session):
     login_as(UserRole.ADMIN, platform_role=PlatformRole.CENTRAL_ADMIN)
     first, second = (make_auth_session(UserRole.VIEWER, tenant_id=make_tenant()) for _ in range(2))
     assert {first.user_id, second.user_id} <= {i["user_id"] for i in client_pg.get(BASE).json()["items"]}
     assert client_pg.get(f"{BASE}/{second.user_id}/events").status_code == 200
-
-
-def test_manager_may_recover_existing_in_assigned_tenant(client_pg, db, manager, tenant, adapter):
-    assign(db, manager, tenant)
-    adapter.get_result = CognitoUser("old@example.com", "sub-old", "old@example.com", "CONFIRMED")
-    resp = client_pg.post(BASE, json={
-        "email": "old@example.com", "role": "VIEWER", "tenant_id": tenant, "recover_existing": True,
-    })
-    assert resp.status_code == 201
-    assert adapter.calls == [("get", "old@example.com")]
-
-
-class RevokingAdapter(FakeAdapter):
-    """제공자 호출이 끝난 직후 같은 테스트 DB 에서 매니저의 배정을 모두 회수한다."""
-
-    def __init__(self, db, manager) -> None:
-        super().__init__()
-        self._db = db
-        self._manager = manager
-
-    def _revoke(self) -> None:
-        assign(self._db, self._manager)
-
-    def admin_create_user(self, email, *, resend=False):
-        result = super().admin_create_user(email, resend=resend)
-        self._revoke()
-        return result
-
-    def admin_get_user(self, username):
-        result = super().admin_get_user(username)
-        self._revoke()
-        return result
-
-
-@pytest.mark.parametrize("recover", [False, True])
-def test_invite_rechecks_assignment_after_sdk_and_writes_nothing(
-    client_pg, db, manager, tenant, recover
-):
-    assign(db, manager, tenant)
-    fake = RevokingAdapter(db, manager)
-    fake.get_result = CognitoUser("old@example.com", "sub-old", "old@example.com", "CONFIRMED")
-    use_adapter(client_pg, fake)
-    count = db.execute(text("SELECT count(*) FROM app_users")).scalar_one()
-    resp = client_pg.post(BASE, json={
-        "email": "old@example.com", "role": "VIEWER", "tenant_id": tenant, "recover_existing": recover,
-    })
-    assert (resp.status_code, resp.json()["error"]["code"]) == (404, "TENANT_NOT_FOUND")
-    assert len(fake.calls) == 1  # 제공자 결과는 이미 있었다 — DB 만 쓰지 않는다
-    assert db.execute(text("SELECT count(*) FROM app_users")).scalar_one() == count
-    assert db.execute(text("SELECT count(*) FROM user_admin_events")).scalar_one() == 0
-
-
-def test_resend_rechecks_assignment_after_sdk_and_writes_nothing(client_pg, db, manager, tenant, target):
-    assign(db, manager, tenant)
-    fake = RevokingAdapter(db, manager)
-    fake.get_result = _provider_for(db, target)
-    use_adapter(client_pg, fake)
-    email = user_row(db, target.user_id).email
-    resp = client_pg.post(f"{BASE}/{target.user_id}/invite/resend")
-    assert (resp.status_code, resp.json()["error"]["code"]) == (404, "USER_NOT_FOUND")
-    assert fake.calls == [("get", email), ("create", email, True)]  # 재발송 메일은 나갔다
-    assert events(db, target.user_id) == []
 
 
 def test_tenant_admin_recover_existing_stays_forbidden(client_pg, db, tenant_admin, tenant, adapter):
@@ -1565,3 +1467,251 @@ def test_central_admin_may_recover_existing(client_pg, login_as, tenant, adapter
         "email": "old@example.com", "role": "VIEWER", "tenant_id": tenant, "recover_existing": True,
     })
     assert resp.status_code == 201
+
+
+@pytest.mark.parametrize("operation", ["role", "status", "permissions"])
+def test_actor_demoted_to_tenant_manager_is_rechecked_under_lock_and_nothing_is_written(
+    pg_engine, committed_auth, operation
+):
+    """잠금 대기 중 CENTRAL_ADMIN 이 TENANT_MANAGER 로 내려가면 서비스의 재판정이 403 으로 거절한다(#572 9번)."""
+    tenant_id = committed_auth.make_tenant()
+    actor_seed = committed_auth.make(UserRole.ADMIN, platform_role=PlatformRole.CENTRAL_ADMIN)
+    victim = committed_auth.make(UserRole.OPERATOR, tenant_id=tenant_id, permissions=(FeaturePermission.VIEW,))
+
+    def holder_change(db):
+        assert auth_repo.set_platform_role(
+            db, user_id=actor_seed.user_id, platform_role=PlatformRole.TENANT_MANAGER, now=datetime.now(UTC)
+        )
+
+    operations = {
+        "role": lambda db: admin_service.change_role(db, _actor(actor_seed), victim.user_id, UserRole.VIEWER),
+        "status": lambda db: admin_service.change_status(
+            db, _actor(actor_seed), victim.user_id, UserStatus.DISABLED
+        ),
+        "permissions": lambda db: admin_service.change_permissions(
+            db, _actor(actor_seed), victim.user_id, [FeaturePermission.VIEW, FeaturePermission.CREATE_INQUIRY]
+        ),
+    }
+    error = _run_blocked(pg_engine, committed_auth, operations[operation], holder_change)
+
+    assert isinstance(error, ApiError) and error.code is ErrorCode.AUTH_FORBIDDEN, error
+    assert tuple(_admin_state(committed_auth, victim)) == ("OPERATOR", "ACTIVE")
+    with committed_auth.sessions() as db:
+        assert stored_permissions(db, victim.user_id) == ["VIEW"]
+        assert db.execute(
+            text("SELECT count(*) FROM user_admin_events WHERE target_user_id = :u"), {"u": victim.user_id}
+        ).scalar_one() == 0
+
+
+# --- OPERATOR 기능별 권한(#572 5번) ---------------------------------------------------------------
+
+
+@pytest.fixture()
+def operator(make_auth_session, tenant):
+    """권한이 하나도 없는 고객사 OPERATOR — 신규 OPERATOR 의 기본 상태."""
+    return make_auth_session(UserRole.OPERATOR, tenant_id=tenant, permissions=())
+
+
+def test_list_shows_effective_permissions_per_role(client_pg, db, admin, tenant, make_auth_session, adapter):
+    """ADMIN 은 네 가지 전부, OPERATOR 는 부여분(열거 순서), VIEWER 는 빈 목록."""
+    peer_admin = make_auth_session(UserRole.ADMIN, tenant_id=tenant)
+    granted = make_auth_session(
+        UserRole.OPERATOR, tenant_id=tenant, permissions=(FeaturePermission.CREATE_INQUIRY, FeaturePermission.VIEW)
+    )
+    bare = make_auth_session(UserRole.OPERATOR, tenant_id=tenant, permissions=())
+    viewer = make_auth_session(UserRole.VIEWER, tenant_id=tenant)
+    items = {i["user_id"]: i for i in client_pg.get(BASE).json()["items"]}
+    assert set(items[granted.user_id]) == ITEM_KEYS
+    assert items[peer_admin.user_id]["permissions"] == ALL_PERMISSIONS
+    assert items[granted.user_id]["permissions"] == ["VIEW", "CREATE_INQUIRY"]
+    assert items[bare.user_id]["permissions"] == []
+    assert items[viewer.user_id]["permissions"] == []
+    assert adapter.calls == []
+
+
+def test_admin_grants_and_revokes_operator_permissions_with_audit(client_pg, db, admin, operator, adapter):
+    before = snapshot(db)
+    # 입력 순서와 상관없이 열거 순서로 저장 · 이력에 남는다
+    assert put_permissions(client_pg, operator.user_id, ["EXECUTE_ACTION", "VIEW"]).status_code == 204
+    assert stored_permissions(db, operator.user_id) == ["VIEW", "EXECUTE_ACTION"]
+    item = next(i for i in client_pg.get(BASE).json()["items"] if i["user_id"] == operator.user_id)
+    assert item["permissions"] == ["VIEW", "EXECUTE_ACTION"]
+    assert put_permissions(client_pg, operator.user_id, []).status_code == 204  # 빈 목록 = 전부 회수
+    assert stored_permissions(db, operator.user_id) == []
+    assert events(db, operator.user_id) == [
+        ("PERMISSIONS_CHANGED", {"permissions": []}, {"permissions": ["VIEW", "EXECUTE_ACTION"]}, admin.user_id),
+        ("PERMISSIONS_CHANGED", {"permissions": ["VIEW", "EXECUTE_ACTION"]}, {"permissions": []}, admin.user_id),
+    ]
+    assert snapshot(db)[:4] != before[:4]  # 이력이 쌓였다
+    assert adapter.calls == []
+
+
+def test_permissions_are_replaced_wholesale(client_pg, db, admin, make_auth_session, tenant):
+    full = make_auth_session(UserRole.OPERATOR, tenant_id=tenant)  # 고객사 OPERATOR 기본은 네 가지 전부
+    assert stored_permissions(db, full.user_id) == ALL_PERMISSIONS
+    assert put_permissions(client_pg, full.user_id, ["VIEW", "CREATE_INQUIRY"]).status_code == 204
+    assert stored_permissions(db, full.user_id) == ["VIEW", "CREATE_INQUIRY"]
+    assert events(db, full.user_id)[0][1:3] == (
+        {"permissions": ALL_PERMISSIONS}, {"permissions": ["VIEW", "CREATE_INQUIRY"]},
+    )
+
+
+def test_create_inquiry_alone_is_a_valid_grant(client_pg, db, admin, operator):
+    """VIEW 를 요구하는 것은 EXECUTE_ACTION · RESOLVE_INCIDENT 뿐이다."""
+    assert put_permissions(client_pg, operator.user_id, ["CREATE_INQUIRY"]).status_code == 204
+    assert stored_permissions(db, operator.user_id) == ["CREATE_INQUIRY"]
+
+
+def test_permissions_same_list_is_409_without_event(client_pg, db, admin, make_auth_session, tenant):
+    held = make_auth_session(
+        UserRole.OPERATOR, tenant_id=tenant, permissions=(FeaturePermission.VIEW, FeaturePermission.EXECUTE_ACTION)
+    )
+    bare = make_auth_session(UserRole.OPERATOR, tenant_id=tenant, permissions=())
+    before = snapshot(db)
+    for target_id, same in ((held.user_id, ["EXECUTE_ACTION", "VIEW"]), (bare.user_id, [])):
+        resp = put_permissions(client_pg, target_id, same)
+        assert (resp.status_code, resp.json()["error"]["code"]) == (409, "USER_STATE_CONFLICT")
+    assert snapshot(db) == before
+
+
+@pytest.mark.parametrize("role", [UserRole.ADMIN, UserRole.VIEWER])
+@pytest.mark.parametrize("permissions", [[], ["VIEW"]])
+def test_permissions_on_non_operator_target_is_409(client_pg, db, admin, make_auth_session, tenant, role, permissions):
+    other = make_auth_session(role, tenant_id=tenant)
+    before = snapshot(db)
+    resp = put_permissions(client_pg, other.user_id, permissions)
+    assert (resp.status_code, resp.json()["error"]["code"]) == (409, "USER_STATE_CONFLICT")
+    assert snapshot(db) == before
+
+
+def test_tenant_admin_cannot_change_permissions_of_another_tenants_operator(
+    client_pg, db, tenant_admin, make_auth_session, make_tenant, adapter
+):
+    foreign = make_auth_session(UserRole.OPERATOR, tenant_id=make_tenant(), permissions=(FeaturePermission.VIEW,))
+    missing = put_permissions(client_pg, MISSING_UUID, ["VIEW"])
+    before = snapshot(db)
+    resp = put_permissions(client_pg, foreign.user_id, [])
+    assert (resp.status_code, resp.json()["error"]["code"]) == (404, "USER_NOT_FOUND")
+    assert resp.json()["error"]["message"] == missing.json()["error"]["message"]
+    assert stored_permissions(db, foreign.user_id) == ["VIEW"]
+    assert snapshot(db) == before
+    assert adapter.calls == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"permissions": ["EXECUTE_ACTION"]},
+        {"permissions": ["RESOLVE_INCIDENT", "CREATE_INQUIRY"]},
+        {"permissions": ["VIEW", "VIEW"]},
+        {"permissions": ["DELETE_EVERYTHING"]},
+        {"permissions": None},
+        {},
+        {"permissions": ["VIEW"], "role": "ADMIN"},
+    ],
+)
+def test_invalid_permissions_body_is_422_and_changes_nothing(client_pg, db, admin, make_auth_session, tenant, body):
+    held = make_auth_session(UserRole.OPERATOR, tenant_id=tenant, permissions=(FeaturePermission.VIEW,))
+    before = snapshot(db)
+    resp = client_pg.put(f"{BASE}/{held.user_id}/permissions", json=body)
+    assert (resp.status_code, resp.json()["error"]["code"]) == (422, "REQUEST_VALIDATION_FAILED")
+    assert snapshot(db) == before
+
+
+def test_suspended_tenant_admin_cannot_change_permissions_but_central_admin_can(
+    client_pg, db, login_as, make_auth_session, make_tenant
+):
+    parked = make_tenant(TenantStatus.SUSPENDED)
+    member = make_auth_session(UserRole.OPERATOR, tenant_id=parked, permissions=())
+    login_as(UserRole.ADMIN, tenant_id=parked)
+    before = snapshot(db)
+    resp = put_permissions(client_pg, member.user_id, ["VIEW"])
+    assert (resp.status_code, resp.json()["error"]["code"]) == (409, "TENANT_SUSPENDED")
+    assert snapshot(db) == before
+
+    central = login_as(UserRole.ADMIN, platform_role=PlatformRole.CENTRAL_ADMIN)
+    assert put_permissions(client_pg, member.user_id, ["VIEW"]).status_code == 204
+    assert stored_permissions(db, member.user_id) == ["VIEW"]
+    assert events(db, member.user_id)[0][3] == central.user_id
+
+
+def test_role_change_away_from_operator_deletes_grants_and_audits_them(client_pg, db, admin, make_auth_session, tenant):
+    held = make_auth_session(
+        UserRole.OPERATOR, tenant_id=tenant, permissions=(FeaturePermission.VIEW, FeaturePermission.RESOLVE_INCIDENT)
+    )
+    assert client_pg.put(f"{BASE}/{held.user_id}/role", json={"role": "VIEWER"}).status_code == 204
+    assert stored_permissions(db, held.user_id) == []
+    assert events(db, held.user_id) == [
+        ("ROLE_CHANGED", {"role": "OPERATOR", "permissions": ["VIEW", "RESOLVE_INCIDENT"]}, {"role": "VIEWER"},
+         admin.user_id),
+    ]
+    # 다시 OPERATOR 가 되면 예전 부여분이 돌아오지 않고 빈 목록에서 시작한다
+    assert client_pg.put(f"{BASE}/{held.user_id}/role", json={"role": "OPERATOR"}).status_code == 204
+    assert stored_permissions(db, held.user_id) == []
+    assert events(db, held.user_id)[1][1:3] == ({"role": "VIEWER"}, {"role": "OPERATOR", "permissions": []})
+    item = next(i for i in client_pg.get(BASE).json()["items"] if i["user_id"] == held.user_id)
+    assert item["permissions"] == []
+
+
+def test_role_change_to_admin_deletes_operator_grants_and_lists_every_permission(
+    client_pg, db, admin, make_auth_session, tenant
+):
+    held = make_auth_session(UserRole.OPERATOR, tenant_id=tenant, permissions=(FeaturePermission.VIEW,))
+    assert client_pg.put(f"{BASE}/{held.user_id}/role", json={"role": "ADMIN"}).status_code == 204
+    assert stored_permissions(db, held.user_id) == []  # ADMIN 의 전체 권한은 저장이 아니라 역할에서 나온다
+    assert events(db, held.user_id)[0][1:3] == (
+        {"role": "OPERATOR", "permissions": ["VIEW"]}, {"role": "ADMIN"},
+    )
+    item = next(i for i in client_pg.get(BASE).json()["items"] if i["user_id"] == held.user_id)
+    assert item["permissions"] == ALL_PERMISSIONS
+
+
+def test_invite_operator_with_permissions_grants_exactly_those(client_pg, db, admin, tenant, adapter):
+    resp = client_pg.post(BASE, json={
+        "email": "new@example.com", "role": "OPERATOR", "tenant_id": tenant,
+        "permissions": ["CREATE_INQUIRY", "VIEW"],
+    })
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["permissions"] == ["VIEW", "CREATE_INQUIRY"]
+    assert stored_permissions(db, body["user_id"]) == ["VIEW", "CREATE_INQUIRY"]
+    assert events(db, body["user_id"])[0][2]["permissions"] == ["VIEW", "CREATE_INQUIRY"]
+
+
+def test_invite_operator_without_permissions_has_none(client_pg, db, admin, tenant, adapter):
+    for n, extra in enumerate(({}, {"permissions": []})):
+        email = f"op{n}@example.com"
+        adapter.create_result = CognitoUser(email, f"sub-op{n}", email, FORCE)
+        resp = client_pg.post(BASE, json={"email": email, "role": "OPERATOR", "tenant_id": tenant, **extra})
+        assert resp.status_code == 201
+        assert resp.json()["permissions"] == []
+        assert stored_permissions(db, resp.json()["user_id"]) == []
+        assert events(db, resp.json()["user_id"])[0][2]["permissions"] == []
+
+
+@pytest.mark.parametrize("role,expected", [("VIEWER", []), ("ADMIN", ALL_PERMISSIONS)])
+def test_invite_non_operator_has_no_permissions_in_audit(client_pg, db, admin, tenant, adapter, role, expected):
+    resp = client_pg.post(BASE, json={"email": "new@example.com", "role": role, "tenant_id": tenant})
+    assert resp.status_code == 201
+    assert resp.json()["permissions"] == expected
+    assert "permissions" not in events(db, resp.json()["user_id"])[0][2]
+    assert stored_permissions(db, resp.json()["user_id"]) == []
+
+
+@pytest.mark.parametrize(
+    "role,permissions",
+    [
+        ("VIEWER", ["VIEW"]),
+        ("ADMIN", ["VIEW"]),
+        ("OPERATOR", ["EXECUTE_ACTION"]),
+        ("OPERATOR", ["VIEW", "VIEW"]),
+    ],
+)
+def test_invite_with_invalid_permissions_is_422_before_sdk(client_pg, db, admin, tenant, adapter, role, permissions):
+    before = snapshot(db)
+    resp = client_pg.post(BASE, json={
+        "email": "new@example.com", "role": role, "tenant_id": tenant, "permissions": permissions,
+    })
+    assert (resp.status_code, resp.json()["error"]["code"]) == (422, "REQUEST_VALIDATION_FAILED")
+    assert adapter.calls == []
+    assert snapshot(db) == before
