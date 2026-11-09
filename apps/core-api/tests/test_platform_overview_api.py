@@ -249,8 +249,10 @@ def test_조회_기간_밖_칸은_빠지고_호출_수_내림차순이다(client
 def test_날짜가_바뀐_첫_기록이_보관_기간_밖_칸을_지운다(client_pg, db, login_as, make_tenant, now, this_hour, monkeypatch):
     tenant = make_tenant()
     today_start = datetime(now.year, now.month, now.day, tzinfo=UTC)
-    expired = today_start - API_USAGE_RETENTION_DAYS * DAY + 23 * HOUR  # 보관 첫날 직전 칸
-    oldest_kept = today_start - (API_USAGE_RETENTION_DAYS - 1) * DAY  # 보관 첫날 0시 칸
+    oldest_kept = today_start - API_USAGE_RETENTION_DAYS * DAY  # 보관 첫날(오늘 − 30일) 0시 칸
+    expired = oldest_kept - HOUR  # 보관 첫날 직전 칸
+    # 최대 창(720시간)은 하루 중 언제 조회해도 보관 첫날 안에서 시작한다 — 지워진 칸이 0 으로 보이지 않는다(nit)
+    assert floor_to_hour(today_start + DAY - HOUR) - (API_USAGE_MAX_WINDOW_HOURS - 1) * HOUR >= oldest_kept
     platform_repo.add_call(db, tenant_id=tenant, hour=expired)
     platform_repo.add_call(db, tenant_id=tenant, hour=oldest_kept)
     login_as(UserRole.ADMIN, tenant_id=tenant)

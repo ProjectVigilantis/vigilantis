@@ -269,7 +269,7 @@ class TenantApiCallHourly(Base):
     """고객사(TENANT) 계정이 세션을 통과해 `/api/*` 를 부른 횟수 — 고객사 × UTC 1시간 버킷 (#572 6번).
 
     공개 계약은 `schemas.api.platform`(ApiUsageSummary)이다. 요청마다 `api_usage` 미들웨어가 응답 뒤에
-    한 버킷을 +1 하고(UPSERT), 보관 기간(API_USAGE_RETENTION_DAYS, 고객사당 최대 720칸)을 넘은 칸은 지운다.
+    한 버킷을 +1 하고(UPSERT), 보관 기간(오늘과 그 전 API_USAGE_RETENTION_DAYS 일, 고객사당 최대 31 × 24 칸)을 넘은 칸은 지운다.
     경로별 세분화는 없다. 고객사가 지워지면 통계도 함께 지워진다(CASCADE) — 통계가 고객사 삭제를 막지 않는다.
     """
 

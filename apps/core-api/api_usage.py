@@ -12,8 +12,8 @@
 #     소유자). 인메모리 누적 · 주기 flush 를 두지 않는 이유 — 모아 둔 분량이 없어 재기동 · 비정상 종료에 잃는 것은
 #     그 순간 기록 중이던 요청뿐이고, 상태(누적분 · 타이머)가 없어 단순하다. 기록은 최선 노력이다(아래 실패 처리).
 #     비용은 요청당 UPSERT 1문이며 응답 전송 뒤라 응답 시간에 더해지지 않는다.
-#   - 보관: 날짜가 바뀐 뒤 첫 기록에서 API_USAGE_RETENTION_DAYS 일(오늘 포함)보다 이른 칸을 같은 트랜잭션에서
-#     지운다(보관 단위는 일이라 차례도 날짜 기준). 정리 차례는 잠금 아래 하루에 한 요청만 맡는다(동시 요청은
+#   - 보관: 날짜가 바뀐 뒤 첫 기록에서 (오늘 − API_USAGE_RETENTION_DAYS 일) UTC 자정보다 이른 칸을 같은 트랜잭션에서
+#     지운다(보관 단위는 일이라 차례도 날짜 기준). 오늘과 그 전 30일이 남으므로 최대 창(720시간)이 항상 보관 안이다. 정리 차례는 잠금 아래 하루에 한 요청만 맡는다(동시 요청은
 #     스레드풀에서 겹친다) — 그 기록이 실패하면 차례를 돌려놓아 다음 기록이 다시 맡는다.
 #   - 실패(DB 오류 · 고객사 행 없음)는 로그만 남긴다 — 통계가 이미 보낸 응답이나 다음 요청을 막지 않는다.
 #     이메일 · 쿠키 · 경로는 로그에 싣지 않는다.
@@ -57,8 +57,12 @@ def _utcnow() -> datetime:
 
 
 def retention_cutoff(day: date) -> datetime:
-    """day 를 포함해 API_USAGE_RETENTION_DAYS 일을 남기는 기준 시각(UTC 자정) — 이보다 이른 칸은 지운다."""
-    first_kept = day - timedelta(days=API_USAGE_RETENTION_DAYS - 1)
+    """day 의 API_USAGE_RETENTION_DAYS 일 전 UTC 자정 — 이보다 이른 칸은 지운다.
+
+    오늘과 그 전 30일을 통째로 남겨, 하루 중 어느 시각에 720시간(API_USAGE_MAX_WINDOW_HOURS) 창을 조회해도 첫 칸이
+    지워진 칸이 아니다(PR #599 리뷰 nit). 고객사당 최대 31 × 24 칸이다.
+    """
+    first_kept = day - timedelta(days=API_USAGE_RETENTION_DAYS)
     return datetime(first_kept.year, first_kept.month, first_kept.day, tzinfo=UTC)
 
 

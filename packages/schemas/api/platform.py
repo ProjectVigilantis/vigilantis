@@ -14,7 +14,8 @@
 #   - api_usage  : 고객사(TENANT) 계정이 세션을 통과해 `/api/*` 를 부른 횟수를 **고객사 × UTC 1시간**으로 센 것
 #                  (`tenant_api_calls_hourly`). 세션 전 호출(로그인 6단계 · 비밀번호 재설정 · 로그아웃)과 WebSocket,
 #                  플랫폼 계정의 호출은 세지 않는다. 응답 코드와 무관하게 1회다(403 · 404 · 422 도 호출이다).
-#                  경로별 세분화는 없다. 보관은 API_USAGE_RETENTION_DAYS 일(오늘 포함, 고객사당 최대 720칸)이다.
+#                  경로별 세분화는 없다. 보관은 오늘과 그 전 API_USAGE_RETENTION_DAYS 일(고객사당 최대 31 × 24 칸)이라
+#                  최대 창 API_USAGE_MAX_WINDOW_HOURS 를 하루 중 언제 조회해도 지워진 칸이 끼지 않는다.
 #   - 과다 호출 기준(`threshold_per_hour`)은 고객사마다 다르다(자산 · 계정 수에 따라 평소 호출량이 다르다). 계산식은
 #                  PM 이 따로 정하므로 지금은 null 이고, 판정 입력 `asset_count` · `staff_count` 만 싣는다. 계산은 서버가
 #                  한다 — FE 는 계수를 갖지 않는다.
@@ -43,9 +44,9 @@ from .assets import UtcDateTime
 from .incidents import IncidentStatus
 from .tenants import TenantStatus
 
-#: 호출 통계 보관 기간(일, 오늘 포함).
+#: 호출 통계 보관 기간(일). 오늘과 그 전 이 일수의 칸을 남긴다.
 API_USAGE_RETENTION_DAYS = 30
-#: 조회 기간 상한(시간) = 보관 기간을 시간으로 편 값.
+#: 조회 기간 상한(시간) = 보관 기간을 시간으로 편 값. 오늘 치를 더 남기므로 어느 시각에 조회해도 보관 안이다.
 API_USAGE_MAX_WINDOW_HOURS = API_USAGE_RETENTION_DAYS * 24
 #: hours 를 생략했을 때의 조회 기간(시간) — 대시보드 기본 창.
 API_USAGE_DEFAULT_WINDOW_HOURS = 24

@@ -1578,9 +1578,9 @@ export interface ThreatEventsResponse {
 // 값은 이미 저장된 기록을 센 것이다(새 수집 없음). 호출 통계 구역은 lib/platform-status.ts 의 FE 제안(#578) 모양을
 // 따른다 — 시간 칸은 UTC 정시이고 KST 변환은 FE 가 한다.
 
-/** 호출 통계 보관 기간(일, 오늘 포함). */
+/** 호출 통계 보관 기간(일). 오늘과 그 전 이 일수의 칸을 남긴다. */
 export const API_USAGE_RETENTION_DAYS = 30;
-/** `hours`의 상한(= 보관 기간을 시간으로 편 값). */
+/** `hours`의 상한(= 보관 기간을 시간으로 편 값). 오늘 치를 더 남기므로 어느 시각에 조회해도 지워진 칸이 끼지 않는다. */
 export const API_USAGE_MAX_WINDOW_HOURS = API_USAGE_RETENTION_DAYS * 24;
 /** `hours`를 생략했을 때의 조회 기간(시간). */
 export const API_USAGE_DEFAULT_WINDOW_HOURS = 24;
