@@ -4,6 +4,7 @@
 CENTRAL_ADMIN 백필(이전과 같은 전역 범위) · TENANT · UNASSIGNED 는 NULL · 배정 백필 없음 · CHECK ·
 PLATFORM_ROLE_CHANGED · TENANT_ASSIGNMENTS_CHANGED 이력 값 · 다운그레이드가 배정 범위의 TENANT_MANAGER 를
 UNASSIGNED 로 내리고(전역 PLATFORM 으로 넓히지 않는다) 다시 올려도 배정 · 등급을 되살리지 않는다.
+배정 표는 c572e4a9b210(#572 2번 고객사 그룹)이 지우므로 배정을 다루는 왕복은 head 가 아니라 이 리비전까지 올린다.
 """
 
 from datetime import UTC, datetime
@@ -135,15 +136,6 @@ def test_head_schema_matches_orm_with_no_default(pg_engine):
         assert {"PLATFORM_ROLE_CHANGED", "TENANT_ASSIGNMENTS_CHANGED"} <= set(
             _labels(connection, "user_event_action")
         )
-        inspector = inspect(connection)
-        assert inspector.get_pk_constraint(ASSIGNMENTS)["constrained_columns"] == [
-            "user_id",
-            "tenant_id",
-        ]
-        assert {
-            (fk["referred_table"], fk["options"].get("ondelete"))
-            for fk in inspector.get_foreign_keys(ASSIGNMENTS)
-        } == {("app_users", "CASCADE"), ("tenants", "CASCADE")}
         assert (
             compare_metadata(
                 MigrationContext.configure(connection), models.Base.metadata
@@ -177,7 +169,7 @@ def test_backfill_keeps_global_scope_and_downgrade_never_widens_assignment_scope
             _insert_user(conn, "pr-platform", account_type="PLATFORM")
             _insert_user(conn, "pr-tenant", account_type="TENANT", tenant_id=tenant_id)
             _insert_user(conn, "pr-unassigned", account_type="UNASSIGNED")
-        command.upgrade(migration_config, "head")
+        command.upgrade(migration_config, REVISION)
         with pg_engine.begin() as conn:
             # 이전 PLATFORM 은 전역 권한이었다 — 같은 범위(CENTRAL_ADMIN)로 옮기고, 소속 · 미지정은 등급이 없다
             assert _rows(conn, legacy) == {
@@ -186,6 +178,15 @@ def test_backfill_keeps_global_scope_and_downgrade_never_widens_assignment_scope
                 "pr-unassigned": ("UNASSIGNED", None),
             }
             assert _assignment_count(conn) == 0  # 소속 · 계정 종류로 배정을 만들지 않는다
+            inspector = inspect(conn)
+            assert inspector.get_pk_constraint(ASSIGNMENTS)["constrained_columns"] == [
+                "user_id",
+                "tenant_id",
+            ]
+            assert {
+                (fk["referred_table"], fk["options"].get("ondelete"))
+                for fk in inspector.get_foreign_keys(ASSIGNMENTS)
+            } == {("app_users", "CASCADE"), ("tenants", "CASCADE")}
             _insert_user(conn, "pr-central", account_type="PLATFORM", platform_role="CENTRAL_ADMIN")
             _insert_user(conn, "pr-manager", account_type="PLATFORM", platform_role="TENANT_MANAGER")
             _assign(conn, "pr-manager", tenant_id)
@@ -212,7 +213,7 @@ def test_backfill_keeps_global_scope_and_downgrade_never_widens_assignment_scope
                 _labels(conn, "user_event_action")
             )
 
-        command.upgrade(migration_config, "head")
+        command.upgrade(migration_config, REVISION)
         with pg_engine.connect() as conn:
             # 다시 올려도 내린 담당자와 배정을 되살리지 않는다 — 남은 PLATFORM 만 다시 CENTRAL_ADMIN 이다
             assert _rows(conn, legacy + graded) == {
@@ -224,10 +225,11 @@ def test_backfill_keeps_global_scope_and_downgrade_never_widens_assignment_scope
             }
             assert _assignment_count(conn) == 0
     finally:
-        command.upgrade(migration_config, "head")
+        # 시드를 먼저 지운다 — 남은 직접 배정(CASCADE 로 함께 지워진다)이 있으면 head 로 올리는 c572e4a9b210 이 멈춘다
         with pg_engine.begin() as conn:
             conn.execute(text("DELETE FROM app_users WHERE issuer = :i"), {"i": ISSUER})
             conn.execute(text("DELETE FROM tenants WHERE tenant_id = :t"), {"t": tenant_id})
+        command.upgrade(migration_config, "head")
 
 
 @pytest.mark.parametrize(

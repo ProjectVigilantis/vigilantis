@@ -22,6 +22,7 @@ from schemas.api.auth import AccountType, PlatformRole, UserRole
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
+from tests.group_scope import assign_tenants
 
 POOL = "ap-northeast-2_pool"
 ISSUER = f"https://cognito-idp.ap-northeast-2.amazonaws.com/{POOL}"
@@ -99,8 +100,9 @@ def seed_tenant(db):
 
 
 def assignments(db):
+    """담당 그룹 배정(#572 2번) — (user_id, group_id)."""
     return db.execute(
-        text("SELECT user_id::text, tenant_id::text FROM app_user_tenant_assignments ORDER BY 1, 2")
+        text("SELECT user_id::text, group_id::text FROM app_user_group_assignments ORDER BY 1, 2")
     ).all()
 
 
@@ -440,7 +442,7 @@ def test_bootstrap_existing_manager_to_central_admin_clears_its_assignments(db, 
     target = seed_platform(db)  # 운영 기본값과 같은 TENANT_MANAGER
     other = seed_platform(db, sub="other-manager", email="o@example.com")
     for row in (target, other):
-        auth_repo.replace_assigned_tenants(db, user_id=row.user_id, tenant_ids=(tenant_id,), now=NOW)
+        [group_id] = assign_tenants(db, user_id=row.user_id, tenant_ids=(tenant_id,), now=NOW)
     db.commit()
     seed_session(db, target)
     code, out = run(db, cognito_client, "--bootstrap-central-admin-user-id", target.user_id, "--email", EMAIL)
@@ -459,7 +461,7 @@ def test_bootstrap_existing_manager_to_central_admin_clears_its_assignments(db, 
         "other-manager": ("ADMIN", "PLATFORM", None, "TENANT_MANAGER"),  # 다른 계정은 그대로
     }
     # 중앙 관리자에게 예전 배정을 남기지 않는다(뒤에 담당자로 내려도 되살아나지 않게) — 다른 담당자의 배정은 그대로
-    assert assignments(db) == [(other.user_id, tenant_id)]
+    assert assignments(db) == [(other.user_id, group_id)]
     # 세션은 그대로 — 판정이 매 요청 현재 등급을 읽는다
     alive = db.execute(text("SELECT count(*) FROM auth_sessions WHERE revoked_at IS NULL")).scalar()
     assert alive == 1

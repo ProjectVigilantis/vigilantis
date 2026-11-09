@@ -10,6 +10,9 @@ import type {
   ErrorResponse,
   ExecuteActionRequest,
   ExecuteActionResponse,
+  GroupCreateRequest,
+  GroupItem,
+  GroupsResponse,
   IncidentCategory,
   IncidentResponse,
   IncidentStatus,
@@ -31,15 +34,18 @@ import type {
   SignupRequestsResponse,
   SignupRequestStatus,
   SignupRequestStatusChange,
+  StaffGroupsRequest,
+  StaffGroupsResponse,
   StaffInviteRequest,
   StaffItem,
   StaffResponse,
-  StaffTenantsResponse,
   SubscriptionPurchasePlan,
   TenantCreateRequest,
   TenantCreateResponse,
   TenantDetail,
+  TenantGroupRequest,
   TenantOnboardingResponse,
+  TenantSearchResponse,
   TenantSettings,
   TenantSettingsUpdateRequest,
   TenantsResponse,
@@ -229,6 +235,16 @@ export function createReadApi(transport: ApiTransport) {
       return request<TenantDetail>(`/tenants/${encodeURIComponent(tenantId)}`, undefined, transport);
     },
 
+    /** 고객사 이름 검색(#572 7번). 담당 밖 고객사는 `accessible=false`이며 상세 접근 권한은 서버가 정한다. */
+    searchTenants(q: string): Promise<TenantSearchResponse> {
+      return request<TenantSearchResponse>(`/tenants/search?q=${encodeURIComponent(q)}`, undefined, transport);
+    },
+
+    /** 고객사 그룹(#572 2번). 중앙 관리계정은 전체, 관리자 직원계정은 자기 담당 그룹만 받는다. */
+    listGroups(): Promise<GroupsResponse> {
+      return request<GroupsResponse>('/groups', undefined, transport);
+    },
+
     /**
      * 고객 설정(T-7). 고객사 계정은 자기 고객, 플랫폼 계정은 범위 안 고객만 — 범위 밖은 404 `TENANT_NOT_FOUND`.
      * Slack은 연결 여부만 오고 URL은 오지 않는다. 화면(app/settings · app/tenants/[id]/settings)이 부른다.
@@ -302,7 +318,7 @@ export function createReadApi(transport: ApiTransport) {
 
 export const {
   getAssets, getMetricsTimeseries, getIncidents, getIncident, getTenants, getTenant, getTenantSettings,
-  getSignupRequests, getInquiries, getThreatEvents, getAuditEvents, getMySubscription,
+  searchTenants, listGroups, getSignupRequests, getInquiries, getThreatEvents, getAuditEvents, getMySubscription,
 } = createReadApi(BROWSER);
 
 /**
@@ -358,6 +374,12 @@ export function updateTenant(tenantId: string, body: TenantUpdateRequest): Promi
   });
 }
 
+/** 고객사의 그룹을 바꾼다(#572 2번, 중앙 관리계정만). null이면 그룹에서 뺀다. */
+export function setTenantGroup(tenantId: string, groupId: string | null): Promise<TenantDetail> {
+  const body: TenantGroupRequest = { group_id: groupId };
+  return sendJson<TenantDetail>('PUT', tenantPath(tenantId, '/group'), body);
+}
+
 /** 204. 연결된 적 없는(PENDING_CONNECTION) 고객만 지운다. 밖이면 TENANT_STATE_CONFLICT. */
 export async function deleteTenant(tenantId: string): Promise<void> {
   await request<null>(tenantPath(tenantId), { method: 'DELETE' });
@@ -391,6 +413,19 @@ export function updateTenantSettings(tenantId: string, body: TenantSettingsUpdat
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
+}
+
+/* ───────────────────────────── /groups (#572 2번) ───────────────────────────── */
+/* 생성 · 삭제는 중앙 관리계정만 쓴다. 목록 조회는 위 createReadApi에서 전송을 공유한다. */
+
+/** 201 — 만든 그룹. 같은 이름은 409 `GROUP_NAME_CONFLICT`다. */
+export function createGroup(body: GroupCreateRequest): Promise<GroupItem> {
+  return postJson<GroupItem>('/groups', body);
+}
+
+/** 204. 그룹의 고객사는 미배정이 되고 직원의 해당 그룹 배정도 함께 지워진다. */
+export async function deleteGroup(groupId: string): Promise<void> {
+  await request<null>(`/groups/${encodeURIComponent(groupId)}`, { method: 'DELETE' });
 }
 
 /* ─────────────────────── /me/subscription (T-16 · #528) ─────────────────────── */
@@ -547,13 +582,14 @@ export async function changeStaffStatus(userId: string, status: UserStatus): Pro
   await sendJson<null>('PUT', staffPath(userId, '/status'), { status });
 }
 
-/** 담당 고객사 조회 · 전체 교체. 대상이 관리자 직원계정(TENANT_MANAGER)이 아니거나 바뀐 것이 없으면 409다. */
-export function getStaffTenants(userId: string): Promise<StaffTenantsResponse> {
-  return request<StaffTenantsResponse>(staffPath(userId, '/tenants'));
+/** 담당 그룹 조회 · 전체 교체(#572 2번). 대상이 관리자 직원계정(TENANT_MANAGER)이 아니거나 바뀐 것이 없으면 409다. */
+export function getStaffGroups(userId: string): Promise<StaffGroupsResponse> {
+  return request<StaffGroupsResponse>(staffPath(userId, '/groups'));
 }
 
-export async function replaceStaffTenants(userId: string, tenantIds: string[]): Promise<void> {
-  await sendJson<null>('PUT', staffPath(userId, '/tenants'), { tenant_ids: tenantIds });
+export async function replaceStaffGroups(userId: string, groupIds: string[]): Promise<void> {
+  const body: StaffGroupsRequest = { group_ids: groupIds };
+  await sendJson<null>('PUT', staffPath(userId, '/groups'), body);
 }
 
 export function getStaffEvents(userId: string, limit = 50): Promise<UserEventsResponse> {

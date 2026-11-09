@@ -22,6 +22,7 @@ from db.repositories import operator_notifications as repo
 from schemas.api.auth import PlatformRole, UserRole
 from schemas.api.support import InquiryCategory, NotificationKind
 from sqlalchemy import func, select
+from tests.group_scope import assign_tenants
 
 BASE = "/api/v1/notifications"
 READ = BASE + "/read"
@@ -86,7 +87,7 @@ def _manager(make_auth_session, *tenants):
 
 
 def _assign(db, seed, *tenants):
-    auth_repo.replace_assigned_tenants(db, user_id=seed.user_id, tenant_ids=tuple(tenants), now=T0)
+    assign_tenants(db, user_id=seed.user_id, tenant_ids=tuple(tenants), now=T0)
     db.commit()
 
 
@@ -288,8 +289,8 @@ def test_assignment_removed_after_the_dependency_snapshot_writes_nothing(
     manager = _manager(make_auth_session, tenant)
     _change_between_router_dependency_and_write_authorization(
         monkeypatch,
-        lambda s: auth_repo.replace_assigned_tenants(
-            s, user_id=manager.user_id, tenant_ids=(), now=T0
+        lambda s: auth_repo.replace_assigned_groups(
+            s, user_id=manager.user_id, group_ids=(), now=T0
         ),
     )
     resp = _read(client_pg, manager, [nid])

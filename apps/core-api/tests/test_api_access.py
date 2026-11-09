@@ -372,31 +372,6 @@ def _user(
     )
 
 
-@pytest.mark.parametrize(("user", "expected"), [
-    (_user(AccountType.PLATFORM, UserRole.ADMIN, platform_role=PlatformRole.CENTRAL_ADMIN), None),
-    (_user(AccountType.PLATFORM, UserRole.ADMIN, platform_role=PlatformRole.TENANT_MANAGER), None),
-    # 호환 값 role=ADMIN 만으로는 플랫폼 조치 권한이 없다 — 명시 등급이 있어야 한다
-    (_user(AccountType.PLATFORM, UserRole.ADMIN), ErrorCode.AUTH_FORBIDDEN),
-    (_user(AccountType.TENANT, UserRole.ADMIN, TenantStatus.ACTIVE), None),
-    (_user(AccountType.TENANT, UserRole.OPERATOR, TenantStatus.ACTIVE), None),
-    (_user(AccountType.TENANT, UserRole.VIEWER, TenantStatus.ACTIVE), ErrorCode.AUTH_FORBIDDEN),
-    # 정지는 요청자 소속이 아니라 대상 인시던트의 고객사로 Workflow 가 본다 — 여기서는 등급 · 역할만
-    (_user(AccountType.TENANT, UserRole.OPERATOR, TenantStatus.SUSPENDED), None),
-    (_user(AccountType.TENANT, UserRole.VIEWER, TenantStatus.SUSPENDED), ErrorCode.AUTH_FORBIDDEN),
-    (_user(AccountType.UNASSIGNED, UserRole.ADMIN), ErrorCode.AUTH_FORBIDDEN),
-], ids=[
-    "central", "manager", "platform-without-level", "tenant-admin", "tenant-operator", "tenant-viewer",
-    "suspended-operator", "suspended-viewer", "unassigned-admin",
-])
-def test_action_role_rule_reads_grade_and_role_only(user, expected):
-    if expected is None:
-        assert access.require_action_role(user) is user
-    else:
-        with pytest.raises(ApiError) as rejected:
-            access.require_action_role(user)
-        assert rejected.value.code is expected
-
-
 @pytest.mark.parametrize(("user", "allowed"), [
     (_user(AccountType.PLATFORM, UserRole.ADMIN), True),
     (_user(AccountType.TENANT, UserRole.ADMIN, TenantStatus.ACTIVE), False),
@@ -586,7 +561,7 @@ def test_manager_scope_revocation_applies_to_the_next_request(
     detail = f"/api/v1/incidents/{incident.incident_id}"
     assert client_pg.get(detail).status_code == 200
 
-    auth_repo.replace_assigned_tenants(db, user_id=seed.user_id, tenant_ids=(), now=datetime.now(UTC))
+    auth_repo.replace_assigned_groups(db, user_id=seed.user_id, group_ids=(), now=datetime.now(UTC))
     db.commit()
 
     response = client_pg.get(detail)
@@ -738,11 +713,14 @@ def _valid_bodies(incident_id: str) -> dict[tuple[str, str], dict | None]:
         ("POST", "/api/v1/staff/{user_id}/invite/resend"): None,
         ("PUT", "/api/v1/staff/{user_id}/role"): {"platform_role": "TENANT_MANAGER"},
         ("PUT", "/api/v1/staff/{user_id}/status"): {"status": "DISABLED"},
-        ("PUT", "/api/v1/staff/{user_id}/tenants"): {"tenant_ids": []},
+        ("PUT", "/api/v1/staff/{user_id}/groups"): {"group_ids": []},
+        ("POST", "/api/v1/groups"): {"name": "광주 지사"},
+        ("DELETE", "/api/v1/groups/{group_id}"): None,
         ("POST", "/api/v1/tenants"): {
             "name": "학원", "aws_account_id": "123456789012", "regions": ["ap-northeast-2"],
         },
         ("PATCH", "/api/v1/tenants/{tenant_id}"): {"name": "x"},
+        ("PUT", "/api/v1/tenants/{tenant_id}/group"): {"group_id": None},
         ("DELETE", "/api/v1/tenants/{tenant_id}"): None,
         ("POST", "/api/v1/tenants/{tenant_id}/suspend"): {"reason": "해지"},
         ("PATCH", "/api/v1/tenants/{tenant_id}/settings"): {"protected_tags": []},
@@ -766,6 +744,7 @@ def _send(client, method, path, headers, body):
         .replace("{tenant_id}", str(uuid.uuid4()))
         .replace("{request_id}", str(uuid.uuid4()))
         .replace("{inquiry_id}", str(uuid.uuid4()))
+        .replace("{group_id}", str(uuid.uuid4()))
     )
     return client.request(method, url, headers=headers, json=body)
 

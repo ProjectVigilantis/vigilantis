@@ -28,6 +28,7 @@ class UserEventAction(str, Enum):
     TENANT_ASSIGNMENTS_CHANGED = "TENANT_ASSIGNMENTS_CHANGED"
     #: (#572 5번) OPERATOR 의 기능별 권한(permissions) 교체.
     PERMISSIONS_CHANGED = "PERMISSIONS_CHANGED"
+    GROUP_ASSIGNMENTS_CHANGED = "GROUP_ASSIGNMENTS_CHANGED"
 
 
 #: 조회(VIEW)를 함께 요구하는 권한 — 실행 · 종료 화면은 조회 위에 있다(#572 5번 제안).
@@ -140,6 +141,7 @@ class UserEventState(BaseModel):
     tenant_ids: list[UUID] | None = None
     #: (#572 5번) OPERATOR 기능별 권한 전후(PERMISSIONS_CHANGED · USER_INVITED · ROLE_CHANGED). 빈 목록 = 권한 없음.
     permissions: list[FeaturePermission] | None = None
+    group_ids: list[UUID] | None = None
 
 
 class UserEventItem(BaseModel):

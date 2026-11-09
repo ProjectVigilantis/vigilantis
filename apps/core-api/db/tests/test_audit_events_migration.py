@@ -97,7 +97,9 @@ def test_roundtrip_matches_orm_and_keeps_shared_types(scratch_db):
     command.upgrade(config, "head")
     with engine.connect() as connection:
         assert "audit_events" in inspect(connection).get_table_names()
-        assert "app_user_tenant_assignments" in inspect(connection).get_table_names()
+        # 직접 배정 표는 head 에서 고객사 그룹(#572 2번)으로 바뀌었다
+        assert "app_user_tenant_assignments" not in inspect(connection).get_table_names()
+        assert "app_user_group_assignments" in inspect(connection).get_table_names()
         assert _types(connection) == NEW_TYPES | SHARED_TYPES
         assert _append_only_objects(connection) == 2
         assert (

@@ -1,4 +1,5 @@
-"""플랫폼 직원 관리 API (#492 PR 5 · #572 1번) — 중앙 관리자 전용, 대상은 PLATFORM 뿐, 자기 변경 · 마지막 중앙 관리자 보호.
+"""플랫폼 직원 관리 API (#492 PR 5 · #572 1번 · 2번 · 4번) — 중앙 관리자 전용(관리자 직원계정은 전 경로 403), 대상은
+PLATFORM 뿐, 자기 변경 · 마지막 중앙 관리자 보호. 담당 배정은 그룹 단위다(GET|PUT /{user_id}/groups).
 
 (#572 1번) 직원 이메일 초대 · 재발송: 가짜 Cognito 어댑터(SDK 호출 기록)로 Cognito 호출 순서 · 중복 409 · 부분 실패를
 고정하고, 만든 계정이 운영 CLI(bootstrap_admin --platform)의 결과와 같은지 실제 CLI 실행 결과와 대조한다.
@@ -41,6 +42,11 @@ def tenant(make_tenant) -> str:
     return make_tenant()
 
 
+@pytest.fixture()
+def group(make_group) -> str:
+    return make_group()
+
+
 @pytest.fixture(autouse=True)
 def central_session(login_as):
     """기본 platform_session 은 TENANT_MANAGER 다 — 이 파일의 행위자는 명시적으로 CENTRAL_ADMIN 으로 로그인한다."""
@@ -78,13 +84,11 @@ def staff(make_auth_session, platform_role=MANAGER):
 
 
 def assigned(db, user_id):
-    from db.repositories import auth as auth_repo
-
-    return sorted(auth_repo.list_assigned_tenant_ids(db, user_id=user_id))
+    return sorted(auth_repo.list_assigned_group_ids(db, user_id=user_id))
 
 
 def assign(client_pg, user_id, ids):
-    return client_pg.put(f"{BASE}/{user_id}/tenants", json={"tenant_ids": ids})
+    return client_pg.put(f"{BASE}/{user_id}/groups", json={"group_ids": ids})
 
 
 def events(db, target_id):
@@ -113,9 +117,9 @@ REQUESTS = [
     ("PUT", "/{id}/role", {"platform_role": "NOPE"}),
     ("PUT", "/{id}/status", {"status": "DISABLED"}),
     ("PUT", "/{id}/status", {}),
-    ("GET", "/{id}/tenants", None),
-    ("PUT", "/{id}/tenants", {"tenant_ids": []}),
-    ("PUT", "/{id}/tenants", {"tenant_ids": ["bad"]}),
+    ("GET", "/{id}/groups", None),
+    ("PUT", "/{id}/groups", {"group_ids": []}),
+    ("PUT", "/{id}/groups", {"group_ids": ["bad"]}),
 ]
 
 
@@ -220,59 +224,74 @@ def test_disable_revokes_sessions_and_management_immediately(client_pg, db, make
     assert client_pg.put(f"{BASE}/{target.user_id}/status", json={"status": "ACTIVE"}).status_code == 204
 
 
-def test_manager_cannot_use_staff_powers_even_with_assignment(client_pg, db, make_auth_session, tenant):
+def test_manager_cannot_use_staff_powers_even_with_assignment(client_pg, db, make_auth_session, group):
     target = staff(make_auth_session)
-    assert assign(client_pg, target.user_id, [tenant]).status_code == 204
+    assert assign(client_pg, target.user_id, [group]).status_code == 204
     resp = client_pg.get(BASE, headers=target.headers)
     assert resp.status_code == 403
-    resp = client_pg.put(
-        f"{BASE}/{target.user_id}/tenants", json={"tenant_ids": []}, headers=target.headers
-    )
-    assert resp.status_code == 403
-    assert assigned(db, target.user_id) == [tenant]
+    for resp in (
+        client_pg.put(f"{BASE}/{target.user_id}/groups", json={"group_ids": []}, headers=target.headers),
+        client_pg.get(f"{BASE}/{target.user_id}/groups", headers=target.headers),
+    ):
+        assert (resp.status_code, resp.json()["error"]["code"]) == (403, "AUTH_FORBIDDEN")
+    assert assigned(db, target.user_id) == [group]
 
 
-def test_assign_get_replace_and_clear(client_pg, db, make_auth_session, make_tenant):
+def test_assign_get_replace_and_clear(client_pg, db, make_auth_session, make_group):
     target = staff(make_auth_session)
-    a, b, c = make_tenant(), make_tenant(), make_tenant()
-    assert client_pg.get(f"{BASE}/{target.user_id}/tenants").json() == {"tenant_ids": []}
+    a, b, c = make_group(), make_group(), make_group()
+    assert client_pg.get(f"{BASE}/{target.user_id}/groups").json() == {"group_ids": []}
     assert assign(client_pg, target.user_id, [b, a]).status_code == 204
-    assert client_pg.get(f"{BASE}/{target.user_id}/tenants").json() == {"tenant_ids": sorted([a, b])}
+    assert client_pg.get(f"{BASE}/{target.user_id}/groups").json() == {"group_ids": sorted([a, b])}
     assert assign(client_pg, target.user_id, [c, a]).status_code == 204
     assert assigned(db, target.user_id) == sorted([a, c])
     assert assign(client_pg, target.user_id, []).status_code == 204
-    assert client_pg.get(f"{BASE}/{target.user_id}/tenants").json() == {"tenant_ids": []}
+    assert client_pg.get(f"{BASE}/{target.user_id}/groups").json() == {"group_ids": []}
     assert assigned(db, target.user_id) == []
     log = events(db, target.user_id)
-    assert [e[0] for e in log] == ["TENANT_ASSIGNMENTS_CHANGED"] * 3
-    assert log[0][1] == {"tenant_ids": []}
-    assert log[0][2] == {"tenant_ids": sorted([a, b])}
-    assert log[2][1] == {"tenant_ids": sorted([a, c])}
-    assert log[2][2] == {"tenant_ids": []}
+    assert [e[0] for e in log] == ["GROUP_ASSIGNMENTS_CHANGED"] * 3
+    assert log[0][1] == {"group_ids": []}
+    assert log[0][2] == {"group_ids": sorted([a, b])}
+    assert log[2][1] == {"group_ids": sorted([a, c])}
+    assert log[2][2] == {"group_ids": []}
+    listed = client_pg.get(f"{BASE}/{target.user_id}/events").json()["items"]
+    assert {e["action"] for e in listed} == {"GROUP_ASSIGNMENTS_CHANGED"}
+
+
+def test_group_assignment_sets_the_manager_scope_on_the_next_request(
+    client_pg, db, make_auth_session, make_tenant, make_group
+):
+    """배정은 그 그룹에 든 고객사를 범위로 준다 — 다음 요청부터 보이고, 그룹 밖 고객사는 범위가 아니다."""
+    mine, outside = make_tenant(), make_tenant()
+    group = make_group(tenant_ids=[mine])
+    target = staff(make_auth_session)
+    me = "/api/v1/auth/me"
+    assert client_pg.get(me, headers=target.headers).json()["assigned_tenant_ids"] == []
+    assert assign(client_pg, target.user_id, [group]).status_code == 204
+    assert client_pg.get(me, headers=target.headers).json()["assigned_tenant_ids"] == [mine]
+    listed = client_pg.get("/api/v1/tenants", headers=target.headers).json()["tenants"]
+    assert [t["tenant_id"] for t in listed] == [mine] and outside not in str(listed)
 
 
 def test_assignment_event_failure_rolls_back_replacement(
-    client_pg, db, make_auth_session, make_tenant, monkeypatch
+    client_pg, db, make_auth_session, make_group, monkeypatch
 ):
-    from db.repositories import auth as auth_repo
-    from sqlalchemy.exc import SQLAlchemyError
-
     target = staff(make_auth_session)
-    kept, other = make_tenant(), make_tenant()
+    kept, other = make_group(), make_group()
     assert assign(client_pg, target.user_id, [kept]).status_code == 204
     events_before = len(events(db, target.user_id))
     replaced = []
-    real_replace = auth_repo.replace_assigned_tenants
+    real_replace = auth_repo.replace_assigned_groups
 
     def spy_replace(*args, **kwargs):
         real_replace(*args, **kwargs)
-        replaced.append(kwargs["tenant_ids"])
+        replaced.append(kwargs["group_ids"])
 
     def boom(*args, **kwargs):
         raise SQLAlchemyError("secret-detail postgres://user:pw@host")
 
     with monkeypatch.context() as patch:
-        patch.setattr(auth_repo, "replace_assigned_tenants", spy_replace)
+        patch.setattr(auth_repo, "replace_assigned_groups", spy_replace)
         patch.setattr(auth_repo, "add_user_event", boom)
         resp = assign(client_pg, target.user_id, [other])
     assert replaced == [(other,)]  # 교체가 일어난 뒤 이력 추가에서 실패했다
@@ -284,75 +303,79 @@ def test_assignment_event_failure_rolls_back_replacement(
     assert len(events(db, target.user_id)) == events_before
 
 
-def test_same_assignment_is_409_without_event(client_pg, db, make_auth_session, tenant):
+def test_same_assignment_is_409_without_event(client_pg, db, make_auth_session, group):
     target = staff(make_auth_session)
     assert assign(client_pg, target.user_id, []).status_code == 409
-    assert assign(client_pg, target.user_id, [tenant]).status_code == 204
-    assert assign(client_pg, target.user_id, [tenant]).status_code == 409
+    assert assign(client_pg, target.user_id, [group]).status_code == 204
+    assert assign(client_pg, target.user_id, [group]).status_code == 409
     assert len(events(db, target.user_id)) == 1
 
 
-def test_duplicate_unknown_and_malformed_ids_change_nothing(client_pg, db, make_auth_session, tenant):
+def test_duplicate_unknown_and_malformed_ids_change_nothing(client_pg, db, make_auth_session, group):
     target = staff(make_auth_session)
-    assert assign(client_pg, target.user_id, [tenant]).status_code == 204
-    assert assign(client_pg, target.user_id, [tenant, tenant]).status_code == 422
-    assert assign(client_pg, target.user_id, [tenant.upper(), tenant]).status_code == 422
+    assert assign(client_pg, target.user_id, [group]).status_code == 204
+    assert assign(client_pg, target.user_id, [group, group]).status_code == 422
+    assert assign(client_pg, target.user_id, [group.upper(), group]).status_code == 422
     assert assign(client_pg, target.user_id, ["not-a-uuid"]).status_code == 422
-    resp = client_pg.put(f"{BASE}/{target.user_id}/tenants", json={"tenant_ids": [], "extra": 1})
+    resp = client_pg.put(f"{BASE}/{target.user_id}/groups", json={"group_ids": [], "extra": 1})
     assert resp.status_code == 422
-    resp = assign(client_pg, target.user_id, [tenant, MISSING])
+    resp = assign(client_pg, target.user_id, [group, MISSING])
     assert resp.status_code == 404
-    assert resp.json()["error"]["code"] == "TENANT_NOT_FOUND"
-    assert assigned(db, target.user_id) == [tenant]
+    assert resp.json()["error"]["code"] == "GROUP_NOT_FOUND"
+    assert assigned(db, target.user_id) == [group]
     assert len(events(db, target.user_id)) == 1
 
 
-def test_assignment_allowed_for_suspended_customer_without_changing_accounts(
-    client_pg, db, make_auth_session, make_tenant
+def test_assignment_covers_a_suspended_customer_without_changing_accounts(
+    client_pg, db, make_auth_session, make_tenant, make_group
 ):
     from db.models import TenantStatus
 
     suspended = make_tenant(TenantStatus.SUSPENDED)
+    group = make_group(tenant_ids=[suspended])
     target = staff(make_auth_session)
     before = db.execute(
         text("SELECT account_type::text, tenant_id FROM app_users WHERE user_id = :u"),
         {"u": target.user_id},
     ).one()
-    assert assign(client_pg, target.user_id, [suspended]).status_code == 204
-    assert assigned(db, target.user_id) == [suspended]
+    assert assign(client_pg, target.user_id, [group]).status_code == 204
+    assert assigned(db, target.user_id) == [group]
+    # 범위는 소유 범위이지 활성 여부가 아니다 — 정지된 고객도 담당 범위에 든다
+    me = client_pg.get("/api/v1/auth/me", headers=target.headers).json()
+    assert me["assigned_tenant_ids"] == [suspended]
     assert db.execute(
         text("SELECT account_type::text, tenant_id FROM app_users WHERE user_id = :u"),
         {"u": target.user_id},
     ).one() == before
 
 
-def test_central_and_non_platform_targets_cannot_be_assigned(client_pg, db, make_auth_session, tenant):
+def test_central_and_non_platform_targets_cannot_be_assigned(client_pg, db, make_auth_session, tenant, group):
     central = staff(make_auth_session, CENTRAL)
-    assert assign(client_pg, central.user_id, [tenant]).status_code == 409
+    assert assign(client_pg, central.user_id, [group]).status_code == 409
     assert assigned(db, central.user_id) == []
     customer = make_auth_session(UserRole.VIEWER, tenant_id=tenant)
     for uid in (customer.user_id, MISSING, "not-a-uuid"):
-        for resp in (assign(client_pg, uid, [tenant]), client_pg.get(f"{BASE}/{uid}/tenants")):
+        for resp in (assign(client_pg, uid, [group]), client_pg.get(f"{BASE}/{uid}/groups")):
             assert resp.status_code == 404
             assert resp.json()["error"]["code"] == "USER_NOT_FOUND"
     assert assigned(db, customer.user_id) == []
 
 
-def test_role_change_clears_assignments_and_never_resurrects(client_pg, db, make_auth_session, tenant):
+def test_role_change_clears_assignments_and_never_resurrects(client_pg, db, make_auth_session, group):
     target = staff(make_auth_session)
-    assert assign(client_pg, target.user_id, [tenant]).status_code == 204
+    assert assign(client_pg, target.user_id, [group]).status_code == 204
     assert client_pg.put(f"{BASE}/{target.user_id}/role", json={"platform_role": "CENTRAL_ADMIN"}).status_code == 204
     assert assigned(db, target.user_id) == []
     assert client_pg.put(f"{BASE}/{target.user_id}/role", json={"platform_role": "TENANT_MANAGER"}).status_code == 204
-    assert client_pg.get(f"{BASE}/{target.user_id}/tenants").json() == {"tenant_ids": []}
+    assert client_pg.get(f"{BASE}/{target.user_id}/groups").json() == {"group_ids": []}
     log = events(db, target.user_id)
-    assert sorted(e[0] for e in log) == ["PLATFORM_ROLE_CHANGED"] * 2 + ["TENANT_ASSIGNMENTS_CHANGED"] * 2
-    cleared = [e for e in log if e[0] == "TENANT_ASSIGNMENTS_CHANGED" and e[1] == {"tenant_ids": [tenant]}]
-    assert [e[2] for e in cleared] == [{"tenant_ids": []}]
+    assert sorted(e[0] for e in log) == ["GROUP_ASSIGNMENTS_CHANGED"] * 2 + ["PLATFORM_ROLE_CHANGED"] * 2
+    cleared = [e for e in log if e[0] == "GROUP_ASSIGNMENTS_CHANGED" and e[1] == {"group_ids": [group]}]
+    assert [e[2] for e in cleared] == [{"group_ids": []}]
 
 
 def test_assignment_by_demoted_actor_is_rejected_and_writes_nothing(
-    client_pg, db, login_as, make_auth_session, tenant
+    client_pg, db, login_as, make_auth_session, group
 ):
     target = staff(make_auth_session)
     actor = login_as(UserRole.ADMIN, platform_role=CENTRAL)
@@ -360,7 +383,7 @@ def test_assignment_by_demoted_actor_is_rejected_and_writes_nothing(
         text("UPDATE app_users SET platform_role = 'TENANT_MANAGER' WHERE user_id = :u"),
         {"u": actor.user_id},
     )
-    assert assign(client_pg, target.user_id, [tenant]).status_code == 403
+    assert assign(client_pg, target.user_id, [group]).status_code == 403
     assert assigned(db, target.user_id) == []
     assert events(db, target.user_id) == []
 
@@ -399,17 +422,17 @@ def test_staff_schemas_are_closed_and_validate_enums():
 
     from pydantic import ValidationError
     from schemas.api.staff import (
+        StaffGroupsRequest,
         StaffItem,
         StaffResponse,
         StaffRoleRequest,
         StaffStatusRequest,
-        StaffTenantsRequest,
     )
 
-    for bad in ({"tenant_ids": [MISSING, MISSING]}, {"tenant_ids": ["x"]}, {"tenant_ids": [], "a": 1}, {}):
+    for bad in ({"group_ids": [MISSING, MISSING]}, {"group_ids": ["x"]}, {"group_ids": [], "a": 1}, {}):
         with pytest.raises(ValidationError):
-            StaffTenantsRequest(**bad)
-    assert StaffTenantsRequest(tenant_ids=[]).tenant_ids == []
+            StaffGroupsRequest(**bad)
+    assert StaffGroupsRequest(group_ids=[]).group_ids == []
     assert StaffRoleRequest(platform_role="TENANT_MANAGER").platform_role is MANAGER
     assert StaffStatusRequest(status="DISABLED").status.value == "DISABLED"
     for bad in ({"platform_role": "STAFF"}, {"platform_role": "TENANT_MANAGER", "role": "ADMIN"}, {}):

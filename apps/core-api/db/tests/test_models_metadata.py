@@ -47,9 +47,10 @@ EXPECTED_TABLES = {
     "notification_deliveries",
     "notification_routes",
     "notification_lanes",
-    # 로그인 기반·사용자 관리 이력·담당 고객사 배정 (#492)
+    # 로그인 기반·사용자 관리 이력 (#492) · 고객사 그룹 · 직원의 담당 그룹 배정 (#572 2번)
     "app_users",
-    "app_user_tenant_assignments",
+    "tenant_groups",
+    "app_user_group_assignments",
     "app_user_feature_permissions",
     "auth_sessions",
     "user_admin_events",
@@ -158,14 +159,26 @@ def test_row_invariant_constraints_registered():
         assert names <= _constraint_names(table), table
 
 
-def test_tenant_assignment_is_composite_key_with_cascading_foreign_keys():
-    """배정은 (user_id, tenant_id) 하나씩이고, 사용자 · 고객사가 지워지면 함께 지워진다(남는 배정 없음)."""
-    table = Base.metadata.tables["app_user_tenant_assignments"]
-    assert [c.name for c in table.primary_key.columns] == ["user_id", "tenant_id"]
+def test_group_assignment_is_composite_key_with_cascading_foreign_keys():
+    """배정은 (user_id, group_id) 하나씩이고, 사용자 · 그룹이 지워지면 함께 지워진다(남는 배정 없음)."""
+    table = Base.metadata.tables["app_user_group_assignments"]
+    assert [c.name for c in table.primary_key.columns] == ["user_id", "group_id"]
     assert {
         (fk.column.table.name, fk.column.name, fk.ondelete) for fk in table.foreign_keys
-    } == {("app_users", "user_id", "CASCADE"), ("tenants", "tenant_id", "CASCADE")}
-    assert set(table.columns.keys()) == {"user_id", "tenant_id"}
+    } == {("app_users", "user_id", "CASCADE"), ("tenant_groups", "group_id", "CASCADE")}
+    assert set(table.columns.keys()) == {"user_id", "group_id"}
+
+
+def test_tenant_belongs_to_at_most_one_group_that_ungroups_on_delete():
+    """고객사는 group_id 칸 하나(최대 한 그룹 · NULL = 담당 그룹 없음)이고, 그룹을 지우면 NULL 로 돌아간다."""
+    column = Base.metadata.tables["tenants"].c.group_id
+    assert column.nullable is True
+    assert {(fk.column.table.name, fk.column.name, fk.ondelete) for fk in column.foreign_keys} == {
+        ("tenant_groups", "group_id", "SET NULL")
+    }
+    groups = Base.metadata.tables["tenant_groups"]
+    assert set(groups.columns.keys()) == {"group_id", "name", "created_at", "updated_at"}
+    assert "uq_tenant_groups_name" in _constraint_names("tenant_groups")
 
 
 def test_tenant_api_calls_hourly_is_a_per_hour_bucket_removed_with_its_tenant():

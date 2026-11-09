@@ -1,9 +1,11 @@
 # ==============================================================================
 # [파일 설명]
-# /api/v1/staff — 플랫폼 직원 관리 라우터 (중앙 관리자 전용). (#492 PR 5 · #572 1번, 계약: schemas.api.staff)
+# /api/v1/staff — 플랫폼 직원 관리 라우터 (중앙 관리자 전용). (#492 PR 5 · #572 1번 · 2번 · 4번, 계약: schemas.api.staff)
 #
 #   - 얇게 둔다: 판정 · 잠금 · 트랜잭션은 auth.staff_service 가 맡는다(쓰기 직전 행위자를 다시 판정).
-#   - require_central_admin 이 라우터 의존성이라 본문 검증 · Cognito 어댑터 조립보다 먼저 돈다.
+#   - require_central_admin 이 라우터 의존성이라 본문 검증 · Cognito 어댑터 조립보다 먼저 돈다 — 관리자 직원계정의
+#     전 경로 요청은 403 이다(#572 4번 — 직원 관리 위임 없음).
+#   - (#572 2번) 담당 배정은 그룹 단위(GET|PUT /{user_id}/groups)다. 고객사 단위 배정 경로(/{user_id}/tenants)는 없다.
 #   - (#572 1번) 직원 초대 · 재발송의 Cognito 어댑터는 /api/v1/users 와 같은 지연 조립(get_cognito_adapter_factory)
 #     이다 — 서비스가 행위자 · 대상 판정을 마친 뒤에만 조립하므로 설정이 비어도 401 · 403 · 404 가 503 보다 먼저다.
 # ==============================================================================
@@ -18,13 +20,13 @@ from auth.cognito import CognitoAdapter
 from db.session import get_db
 from fastapi import APIRouter, Depends, Query, Response
 from schemas.api.staff import (
+    StaffGroupsRequest,
+    StaffGroupsResponse,
     StaffInviteRequest,
     StaffItem,
     StaffResponse,
     StaffRoleRequest,
     StaffStatusRequest,
-    StaffTenantsRequest,
-    StaffTenantsResponse,
 )
 from schemas.api.users import UserEventsResponse
 from sqlalchemy.orm import Session
@@ -88,21 +90,21 @@ def change_status(
     return Response(status_code=204)
 
 
-@router.get("/{user_id}/tenants", response_model=StaffTenantsResponse)
-def get_tenants(
+@router.get("/{user_id}/groups", response_model=StaffGroupsResponse)
+def get_groups(
     user_id: str, db: Session = _DB, actor: admin_service.Actor = _ACTOR
-) -> StaffTenantsResponse:
-    return staff_service.get_tenants(db, actor, user_id)
+) -> StaffGroupsResponse:
+    return staff_service.get_groups(db, actor, user_id)
 
 
-@router.put("/{user_id}/tenants", status_code=204)
-def replace_tenants(
+@router.put("/{user_id}/groups", status_code=204)
+def replace_groups(
     user_id: str,
-    body: StaffTenantsRequest,
+    body: StaffGroupsRequest,
     db: Session = _DB,
     actor: admin_service.Actor = _ACTOR,
 ) -> Response:
-    staff_service.replace_tenants(db, actor, user_id, body.tenant_ids)
+    staff_service.replace_groups(db, actor, user_id, body.group_ids)
     return Response(status_code=204)
 
 

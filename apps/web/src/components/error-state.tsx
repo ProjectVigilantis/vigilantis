@@ -48,6 +48,8 @@ const PRESENTATION: Record<ErrorCode, Presentation> = {
     variant: 'inline',
     note: '고객사 목록에서 같은 계정 ID의 고객사를 여세요. 계정 ID를 잘못 넣었다면 고쳐서 다시 추가합니다.',
   },
+  GROUP_NOT_FOUND: { variant: 'page', backToList: true, note: '고객사 그룹을 찾을 수 없습니다.' },
+  GROUP_NAME_CONFLICT: { variant: 'inline', note: '같은 이름의 고객사 그룹이 이미 있습니다.' },
   TENANT_ONBOARDING_UNAVAILABLE: {
     variant: 'inline',
     note: '온보딩 템플릿 주소와 플랫폼 역할이 배포 설정에 들어가기 전에는 다시 시도해도 같은 결과입니다.',

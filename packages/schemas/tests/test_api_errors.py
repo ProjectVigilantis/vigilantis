@@ -17,6 +17,8 @@ CONTRACT_ERROR_CODES = {
     "TENANT_ONBOARDING_UNAVAILABLE",  # 503 — 온보딩 링크 설정 없음
     "TENANT_STATE_CONFLICT",      # 409 — 테넌트 상태 전이 거절
     "TENANT_SUSPENDED",           # 409 — 정지된 테넌트 자산에 새 실행
+    "GROUP_NOT_FOUND",            # 404 — 고객사 그룹 (#572 2번)
+    "GROUP_NAME_CONFLICT",        # 409 — 같은 이름의 그룹
     "AUTH_REQUIRED",              # 401 — Post-MVP T-1 (#492)
     "AUTH_FAILED",                # 401
     "AUTH_CODE_INVALID",          # 401
