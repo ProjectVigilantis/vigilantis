@@ -52,12 +52,13 @@ def test_domain_of_lookup():
 
 
 def test_trigger_source_values():
-    """실행 시작 사유 4종 — ADR-0004 1차 개정으로 확정된 어휘."""
+    """실행 시작 사유 5종 — ADR-0004 1차 개정 4종 + 차단 24시간 만료(T-11 · #597)."""
     assert {t.value for t in TriggerSource} == {
         "USER_APPROVAL",
         "PRE_MITIGATION_0_5S",
         "TIMEOUT_ISOLATION_1M",
         "AUTO_ON_FAILURE",
+        "NACL_DENY_EXPIRED_24H",
     }
 
 
