@@ -473,10 +473,10 @@ def _seed_scope(committed_auth, make_incident):
 def _assign(committed_auth, user_id, tenant_ids):
     from datetime import datetime
 
-    from db.repositories import auth as auth_repo
+    from tests.group_scope import assign_tenants
 
     with committed_auth.sessions() as db:
-        auth_repo.replace_assigned_tenants(db, user_id=user_id, tenant_ids=tuple(tenant_ids), now=datetime.now(UTC))
+        assign_tenants(db, user_id=user_id, tenant_ids=tuple(tenant_ids), now=datetime.now(UTC))
         db.commit()
 
 
@@ -489,7 +489,8 @@ def scope_world(committed_auth, make_incident):
     manager, _, _, ids = world
     yield world
     with committed_auth.sessions() as db:
-        _assign_clear = models.AppUserTenantAssignment
+        # 담당 그룹(#572 2번)은 committed_auth 정리가 고객사와 함께 지운다 — 배정만 먼저 지운다
+        _assign_clear = models.AppUserGroupAssignment
         db.execute(delete(_assign_clear).where(_assign_clear.user_id == manager.user_id))
         db.execute(delete(models.Incident).where(models.Incident.incident_id.in_(list(ids.values()))))
         db.commit()

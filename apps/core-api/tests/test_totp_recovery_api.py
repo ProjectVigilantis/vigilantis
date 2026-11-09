@@ -22,6 +22,7 @@ from schemas.api.auth import AccountType, PlatformRole, UserRole
 from schemas.api.tenants import TenantStatus
 from sqlalchemy import delete, or_, select, text
 from sqlalchemy.orm import Session
+from tests.group_scope import assign_tenants
 
 ISSUER = "https://cognito-idp.ap-northeast-2.amazonaws.com/ap-northeast-2_test"  # conftest TEST_AUTH_ISSUER
 
@@ -356,7 +357,7 @@ def test_actor_demoted_between_checks_is_refused_under_the_lock(env, monkeypatch
                 assert auth_repo.set_platform_role(
                     s, user_id=admin.user_id, platform_role=PlatformRole.TENANT_MANAGER, now=now
                 )
-                auth_repo.replace_assigned_tenants(s, user_id=admin.user_id, tenant_ids=(tenant,), now=now)
+                assign_tenants(s, user_id=admin.user_id, tenant_ids=(tenant,), now=now)
             s.commit()
         return real(*args, **kwargs)
 

@@ -27,9 +27,9 @@ from schemas.rules import RuleEvaluationResult
 
 from db import models
 from db.repositories import assets as assets_repo
-from db.repositories import auth as auth_repo
 from routers import metrics as metrics_router
 from services.aws.client import TenantAccess, current_tenant
+from tests.group_scope import assign_tenants
 
 ACCOUNT = "123456789012"
 SEOUL = "ap-northeast-2"
@@ -1076,9 +1076,7 @@ def _seed_owned_world(db, make_tenant) -> dict[str | None, _Owned]:
 
 
 def _assign(db, user_id: str, tenant_ids) -> None:
-    auth_repo.replace_assigned_tenants(
-        db, user_id=user_id, tenant_ids=tuple(tenant_ids), now=datetime.now(timezone.utc)
-    )
+    assign_tenants(db, user_id=user_id, tenant_ids=tuple(tenant_ids), now=datetime.now(timezone.utc))
     db.commit()
 
 

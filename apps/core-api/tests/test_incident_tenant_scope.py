@@ -47,6 +47,7 @@ from schemas.incidents import AgentInvocationStatus
 from schemas.intake import SecOpsIncidentIntake
 from schemas.runbooks import ROLLBACK_RUNBOOK_BY_MAIN_ID, RunbookId
 from security import soar
+from tests.group_scope import assign_tenants
 from tests.test_auto_isolation_workflow import PRE, SKIP, _command, _pass_result
 
 EXECUTE = "/api/v1/actions/execute"
@@ -617,7 +618,7 @@ def _now() -> datetime:
 REVOCATIONS = pytest.mark.parametrize(("login", "revoke", "expected"), [
     pytest.param(
         lambda login_as, tenants: _manager(login_as, tenants["a"]),
-        lambda db, user_id: auth_repo.replace_assigned_tenants(db, user_id=user_id, tenant_ids=(), now=_now()),
+        lambda db, user_id: auth_repo.replace_assigned_groups(db, user_id=user_id, group_ids=(), now=_now()),
         (404, "INCIDENT_NOT_FOUND"), id="assignment",
     ),
     pytest.param(
@@ -690,7 +691,7 @@ def test_manager_write_is_audited_as_that_platform_user_only_while_assigned(
     real_lock = auth_repo.lock_users_table
 
     def revoke_a_then_lock(session):
-        auth_repo.replace_assigned_tenants(session, user_id=seed.user_id, tenant_ids=(b,), now=_now())
+        assign_tenants(session, user_id=seed.user_id, tenant_ids=(b,), now=_now())
         real_lock(session)
 
     monkeypatch.setattr(auth_repo, "lock_users_table", revoke_a_then_lock)

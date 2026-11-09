@@ -20,15 +20,16 @@ UNASSIGNED 지정)용이다. 평시 직원 초대는 중앙 관리자가 직원 
 - 새 직원은 담당 고객사 배정이 없는 TENANT_MANAGER 다(고객사 범위 없음). 이 CLI 가 주는 높은 등급은
   CENTRAL_ADMIN 하나이며, ACTIVE 중앙 관리자가 0명일 때만(첫 지정 · 전원 비활성 뒤 복구) 준다 — 사전 확인하고
   잠금 안에서 다시 센다. 이미 있으면 거절한다. 마이그레이션은 기존 PLATFORM 을 CENTRAL_ADMIN 으로 옮기므로
-  그런 DB 에서는 필요 없다. 추가 중앙 관리자 지정 · 강등과 담당 고객사 배정은 중앙 관리자가 직원 관리
-  API(/api/v1/staff)에서 한다. 이 CLI 는 담당 고객사를 배정하지 않는다.
+  그런 DB 에서는 필요 없다. 추가 중앙 관리자 지정 · 강등과 담당 그룹 배정(#572 2번)은 중앙 관리자가 직원 관리
+  API(/api/v1/staff)에서 한다. 이 CLI 는 담당 그룹을 배정하지 않는다.
 - 지정(UNASSIGNED)은 tenant_id NULL 이고 ACTIVE 인 UNASSIGNED 만 받는다. TENANT · 비활성 계정은 거절하며
   복구하지 않는다. 지정하면 account_type=PLATFORM · platform_role=TENANT_MANAGER(role=ADMIN 호환 값,
   배정 없음)로 바꾸고 기존 세션을 ADMIN_REVOKED 로 폐기한다(새 로그인 필요).
 - 중앙 관리자 지정(기존 계정)은 ACTIVE PLATFORM 계정만 받는다 — TENANT · UNASSIGNED 는 거절한다(계정 종류 ·
   소속을 바꾸지 않는다). 그 계정의 issuer 가 설정된 Cognito 풀이고, Cognito AdminGetUser(--email)의 sub 가
-  계정의 cognito_sub 와 같을 때만 바꾼다. 기존 담당 고객사 배정은 같은 트랜잭션에서 비운다 — 뒤에 담당자로
-  내려도 예전 배정이 되살아나지 않는다. 세션은 그대로 둔다 — 세션 판정이 매 요청 현재 등급 · 배정을 읽는다.
+  계정의 cognito_sub 와 같을 때만 바꾼다. 기존 담당 그룹 배정은 같은 트랜잭션에서 비운다(cleared_assignments =
+  비운 그룹 수) — 뒤에 담당자로 내려도 예전 배정이 되살아나지 않는다. 세션은 그대로 둔다 — 세션 판정이 매 요청
+  현재 등급 · 배정을 읽는다.
 - 기존 신원((issuer, sub))이 이미 app_users 에 있으면 만들기는 거절한다 — 고객사 소속을 옮기지 않는다.
 - 삭제 · 비활성화 · 강등 경로는 없다. 이 CLI 의 변경은 사용자 관리 이력(user_admin_events)에 남지 않는다
   (행위자 앱 계정이 없다).
@@ -335,9 +336,9 @@ def _bootstrap_central_admin(
         auth_repo.set_platform_role(
             db, user_id=user_id, platform_role=PlatformRole.CENTRAL_ADMIN, now=stamp
         )
-        # 중앙 관리자는 전체 범위라 배정이 필요 없다 — 남기면 뒤에 담당자로 내릴 때 예전 범위가 되살아난다
-        cleared = len(auth_repo.list_assigned_tenant_ids(db, user_id=user_id))
-        auth_repo.replace_assigned_tenants(db, user_id=user_id, tenant_ids=(), now=stamp)
+        # 중앙 관리자는 전체 범위라 담당 그룹이 필요 없다 — 남기면 뒤에 담당자로 내릴 때 예전 범위가 되살아난다
+        cleared = len(auth_repo.list_assigned_group_ids(db, user_id=user_id))
+        auth_repo.replace_assigned_groups(db, user_id=user_id, group_ids=(), now=stamp)
         db.commit()
     except SQLAlchemyError as exc:
         db.rollback()

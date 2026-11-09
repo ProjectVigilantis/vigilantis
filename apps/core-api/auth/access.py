@@ -13,7 +13,8 @@
 #     테넌트 관리(require_tenant_management — 호환을 위해 중앙 관리자도 포함한다).
 #     require_admin 은 고객 사용자 관리(#492 PR 3) 관문 — 고객사(TENANT) ADMIN 또는 테넌트 관리 등급.
 #   - 고객사 범위(#492): tenant_scope_ids 하나가 정한다. None(전체)은 명시 CENTRAL_ADMIN 뿐이고,
-#     TENANT_MANAGER 는 배정된 고객사(빈 튜플 = 없음), TENANT 는 자기 소속, 그 밖(등급 없음 등)은 빈 튜플이다.
+#     TENANT_MANAGER 는 담당 그룹에 든 고객사(#572 2번 · 3번 — 빈 튜플 = 없음), TENANT 는 자기 소속, 그 밖(등급 없음 등)은
+#     빈 튜플이다. 고객사 단위 직접 배정은 없다 — 그룹이 유일한 근거다.
 #     계정 종류 · 소속 NULL · role 로 범위를 추론하지 않는다. 관문은 등급까지만 보고, 대상 고객사가 범위 안인지는
 #     각 호출부(서비스)가 tenant_scope_ids / can_access_tenant 로 건다.
 #   - 조치 역할: TENANT 는 role(ACTION_ROLES), PLATFORM 은 명시 등급(CENTRAL_ADMIN · TENANT_MANAGER)이다 —
@@ -101,7 +102,7 @@ def is_tenant_manager(user: service.CurrentUser) -> bool:
 def tenant_scope_ids(user: service.CurrentUser) -> tuple[str, ...] | None:
     """사용자가 다룰 수 있는 고객사(정규 UUID 문자열). None = 전체이며 명시 CENTRAL_ADMIN 뿐이다.
 
-    TENANT_MANAGER 는 판정 시점의 배정(빈 튜플 = 없음), TENANT 는 자기 소속 하나, 그 밖은 빈 튜플(닫힘)이다.
+    TENANT_MANAGER 는 판정 시점의 담당 그룹에 든 고객사(빈 튜플 = 없음), TENANT 는 자기 소속 하나, 그 밖은 빈 튜플(닫힘)이다.
     """
     if is_central_admin(user):
         return None
@@ -125,7 +126,7 @@ def can_access_tenant(user: service.CurrentUser, tenant_id: str) -> bool:
 def tenant_scope_of(user: service.CurrentUser) -> TenantScope:
     """업무 기록의 조회 범위 — tenant_scope_ids 를 그대로 옮긴다.
 
-    전체(ALL_TENANTS)는 명시 CENTRAL_ADMIN 뿐이다. TENANT_MANAGER 는 배정(빈 튜플 = 아무것도 없음),
+    전체(ALL_TENANTS)는 명시 CENTRAL_ADMIN 뿐이다. TENANT_MANAGER 는 담당 그룹의 고객사(빈 튜플 = 아무것도 없음),
     TENANT 는 자기 소속, 그 밖은 빈 범위다 — 계정 종류(PLATFORM)만으로 전체를 주지 않는다.
     """
     return TenantScope(tenant_ids=tenant_scope_ids(user))

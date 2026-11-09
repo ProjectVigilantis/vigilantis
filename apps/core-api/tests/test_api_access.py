@@ -586,7 +586,7 @@ def test_manager_scope_revocation_applies_to_the_next_request(
     detail = f"/api/v1/incidents/{incident.incident_id}"
     assert client_pg.get(detail).status_code == 200
 
-    auth_repo.replace_assigned_tenants(db, user_id=seed.user_id, tenant_ids=(), now=datetime.now(UTC))
+    auth_repo.replace_assigned_groups(db, user_id=seed.user_id, group_ids=(), now=datetime.now(UTC))
     db.commit()
 
     response = client_pg.get(detail)
@@ -738,11 +738,14 @@ def _valid_bodies(incident_id: str) -> dict[tuple[str, str], dict | None]:
         ("POST", "/api/v1/staff/{user_id}/invite/resend"): None,
         ("PUT", "/api/v1/staff/{user_id}/role"): {"platform_role": "TENANT_MANAGER"},
         ("PUT", "/api/v1/staff/{user_id}/status"): {"status": "DISABLED"},
-        ("PUT", "/api/v1/staff/{user_id}/tenants"): {"tenant_ids": []},
+        ("PUT", "/api/v1/staff/{user_id}/groups"): {"group_ids": []},
+        ("POST", "/api/v1/groups"): {"name": "광주 지사"},
+        ("DELETE", "/api/v1/groups/{group_id}"): None,
         ("POST", "/api/v1/tenants"): {
             "name": "학원", "aws_account_id": "123456789012", "regions": ["ap-northeast-2"],
         },
         ("PATCH", "/api/v1/tenants/{tenant_id}"): {"name": "x"},
+        ("PUT", "/api/v1/tenants/{tenant_id}/group"): {"group_id": None},
         ("DELETE", "/api/v1/tenants/{tenant_id}"): None,
         ("POST", "/api/v1/tenants/{tenant_id}/suspend"): {"reason": "해지"},
         ("PATCH", "/api/v1/tenants/{tenant_id}/settings"): {"protected_tags": []},
@@ -766,6 +769,7 @@ def _send(client, method, path, headers, body):
         .replace("{tenant_id}", str(uuid.uuid4()))
         .replace("{request_id}", str(uuid.uuid4()))
         .replace("{inquiry_id}", str(uuid.uuid4()))
+        .replace("{group_id}", str(uuid.uuid4()))
     )
     return client.request(method, url, headers=headers, json=body)
 

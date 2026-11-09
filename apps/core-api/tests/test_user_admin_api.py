@@ -41,6 +41,7 @@ from schemas.api.tenants import TenantStatus
 from schemas.api.users import UserStatus
 from sqlalchemy import select, text
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
+from tests.group_scope import assign_tenants
 from tests.test_totp_recovery_api import RECOVERY_OPS
 
 ISSUER = "https://cognito-idp.ap-northeast-2.amazonaws.com/ap-northeast-2_test"  # conftest TEST_AUTH_ISSUER
@@ -97,10 +98,8 @@ def tenant(make_tenant) -> str:
 
 
 def assign(db, manager, *tenant_ids: str) -> None:
-    """TENANT_MANAGER 의 배정 고객사를 통째로 바꾸고 commit 한다(요청 세션이 보게)."""
-    auth_repo.replace_assigned_tenants(
-        db, user_id=manager.user_id, tenant_ids=tuple(tenant_ids), now=datetime.now(UTC)
-    )
+    """TENANT_MANAGER 의 담당 범위를 그 고객사들로 통째로 바꾸고 commit 한다(요청 세션이 보게) — 그룹 배정(#572 2번)."""
+    assign_tenants(db, user_id=manager.user_id, tenant_ids=tuple(tenant_ids), now=datetime.now(UTC))
     db.commit()
 
 
@@ -873,10 +872,11 @@ def test_suspended_tenant_admin_reads_safe_history_but_cannot_change_anything(
     # 이력 상태는 닫힌 목록뿐이다(이메일 · 토큰 · Cognito 원본 없음)
     assert set(event["before_state"]) | set(event["after_state"]) <= {
         "role", "platform_role", "status", "revoked_session_count", "recover_existing", "tenant_id", "tenant_ids",
-        "permissions",
+        "permissions", "group_ids",
     }
     # 고객 사용자 이벤트에는 배정 ID 가 없다(직렬화된 null 만 허용)
-    assert event["before_state"].get("tenant_ids") is None and event["after_state"].get("tenant_ids") is None
+    for key in ("tenant_ids", "group_ids"):
+        assert event["before_state"].get(key) is None and event["after_state"].get(key) is None
 
     adapter.get_result = _provider_for(db, member)
     before = snapshot(db)

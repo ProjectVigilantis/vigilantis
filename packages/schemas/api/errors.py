@@ -36,6 +36,8 @@ class ErrorCode(str, Enum):
     TENANT_ONBOARDING_UNAVAILABLE = "TENANT_ONBOARDING_UNAVAILABLE"  # 503 — 온보딩 링크를 만들 설정(템플릿 URL · 플랫폼 주체)이 없다
     TENANT_STATE_CONFLICT = "TENANT_STATE_CONFLICT"          # 409 — 허용되지 않은 전이 또는 ACTIVE가 아닌 테넌트로 초대·재발송
     TENANT_SUSPENDED = "TENANT_SUSPENDED"                    # 409 — 정지 테넌트 사용자의 관리 쓰기 또는 정지 자산의 새 실행·종료(플랫폼 종료는 허용 · api/tenants.py)
+    GROUP_NOT_FOUND = "GROUP_NOT_FOUND"                      # 404 — 고객사 그룹 없음 · 형식이 어긋난 그룹 ID(#572 2번 · api/groups.py)
+    GROUP_NAME_CONFLICT = "GROUP_NAME_CONFLICT"              # 409 — 같은 이름의 고객사 그룹이 이미 있다
     AUTH_REQUIRED = "AUTH_REQUIRED"                          # 401 — 세션 없음 · 만료 · 회수
     AUTH_FAILED = "AUTH_FAILED"                              # 401 — 이메일 · 비밀번호 불일치(사용자 존재 여부를 가리지 않는다)
     AUTH_CODE_INVALID = "AUTH_CODE_INVALID"                  # 401 — TOTP · 이메일 · 재설정 코드 불일치
