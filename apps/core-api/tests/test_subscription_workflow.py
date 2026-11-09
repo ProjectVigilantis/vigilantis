@@ -5,7 +5,8 @@ test_subscription_api 가 본다. 기대 날짜는 달력 사실(KST · 월말 �
   ① 구매 요청은 PENDING 이고 권리가 없다. 활성화 이벤트 + 현재 계약 읽기가 권리를 준다. 실패는 권리 없이 재구매.
   ② 자동 갱신은 원래 기념일(1/31 → 2/28·29 → 3/31)로 잇고, 놓친 기간은 지금을 포함하는 기간까지 빈틈없이 잇는다.
      갱신은 처리 주기만 한다 — 그 전에 계약을 다시 읽어도 자동 갱신 중인 유료 투영을 Free 로 돌리지 않는다.
-  ③ 갱신 끄기는 기간 끝 시각까지 권리를 두고, 그 시각에 만료 → 앱 정책 Free 다.
+  ③ 갱신 끄기는 기간 끝 시각까지 권리를 두고, 그 시각에 만료 → 투영은 APP_FREE(유료 권리 없음) · 서비스는 정지다
+     (SSOT 2026-11-06 · ADR-0012 2차 개정). 이미 정지돼 있으면 그 정지 · 사유 그대로다. 재개 뒤 재구매할 수 있다.
   ④ 서비스 중단 · 재개는 계약을 해지 · 동결 · 초기화하지 않는다. 새 구매 스위치를 꺼도 저장된 계약은 처리된다.
   ⑤ 구매 거절 — 쓰기가 남지 않는다. 운영자의 유료 수동 기록을 덮지 않는다.
   ⑥ 이벤트 — 중복 · 순서 뒤바뀜에 같은 결과, 한 건 장애 격리. 소비는 주기마다 상한 건수까지 주기를 건너 이어 훑는다 —
@@ -290,7 +291,7 @@ def test_past_term_end_before_the_cycle_keeps_a_renewing_projection_and_ends_a_c
 
     자동 갱신 중이면 갱신을 기다리는 중이지 권리가 끝난 것이 아니다 — 저장된 유료 투영을 날짜 · 권리 끝 시각까지 그대로
     두고(쓰기 없음), 그 권리 끝 시각이 지났으므로 새로 이은 기간과 구별된다. 다음 기간은 처리 주기만 잇는다.
-    갱신을 끈 계약은 그 시각에 앱 정책 Free 다(만료 전이를 기다리지 않는다).
+    갱신을 끈 계약은 그 시각에 권리가 없다(만료 전이를 기다리지 않는다) — 투영은 APP_FREE 고 서비스는 정지다.
     """
     who = buyer()
     tenant_id = _active(db, who)
@@ -311,7 +312,8 @@ def test_past_term_end_before_the_cycle_keeps_a_renewing_projection_and_ends_a_c
             assert shown.entitlement_ends_at == TERM_END  # 지난 권리 끝 시각 — 직전 기간의 기록이다
             assert _tenant(db, tenant_id).updated_at == updated_at
         else:
-            assert _shown(shown) == (FREE, SubscriptionSource.APP_FREE, None, None)
+            assert (_shown(shown), shown.service_status) == (
+                (FREE, SubscriptionSource.APP_FREE, None, None), TenantStatus.SUSPENDED)
     [waiting] = _agreements(db, tenant_id)  # 소비는 계약을 바꾸지 않는다 — 갱신 · 만료는 공급자의 몫이다
     assert (waiting.status, waiting.term_end, waiting.revision) == (MockAgreementStatus.ACTIVE, TERM_END, revision)
 
@@ -323,13 +325,13 @@ def test_past_term_end_before_the_cycle_keeps_a_renewing_projection_and_ends_a_c
                 shown.entitlement_ends_at, shown.source) == (
             "Business", date(2026, 11, 30), date(2026, 12, 30), kst(2026, 12, 31), SubscriptionSource.MOCK_MARKETPLACE)
     else:
-        assert (_shown(shown), shown.agreement.status) == (
-            (FREE, SubscriptionSource.APP_FREE, None, None), MockAgreementStatus.EXPIRED)
+        assert (_shown(shown), shown.agreement.status, shown.service_status) == (
+            (FREE, SubscriptionSource.APP_FREE, None, None), MockAgreementStatus.EXPIRED, TenantStatus.SUSPENDED)
 
 
 # ----- ③ 갱신 끄기 · 만료 ------------------------------------------------------------
 
-def test_disabling_renewal_keeps_rights_until_the_exact_term_end_then_projects_app_free(db, buyer):
+def test_disabling_renewal_keeps_rights_until_the_exact_term_end_then_expiry_suspends_the_service(db, buyer):
     who = buyer()
     tenant_id = _active(db, who)
     disabled_at = kst(2026, 11, 5)
@@ -350,9 +352,26 @@ def test_disabling_renewal_keeps_rights_until_the_exact_term_end_then_projects_a
     shown = _get(db, tenant_id, TERM_END)
     assert _shown(shown) == (FREE, SubscriptionSource.APP_FREE, None, None)
     assert (shown.agreement.status, shown.agreement.ended_at) == (MockAgreementStatus.EXPIRED, TERM_END)
-    assert shown.available_actions == [A.PURCHASE, A.STOP]
+    # 무료 요금제는 없다 — 남은 유료 권리가 없으면 서비스가 멈추고, 정지 중이라 구매 · 중단 동작이 없다
+    assert shown.service_status is TenantStatus.SUSPENDED
+    assert shown.available_actions == []
+    tenant = _tenant(db, tenant_id)
+    assert (tenant.suspended_at, tenant.suspended_reason) == (TERM_END, workflow.EXPIRY_SUSPENSION_REASON)
     # 늦게 처리돼도 만료 시각은 기간 끝 시각이다
-    assert _tenant(db, tenant_id).entitlement_ends_at is None
+    assert tenant.entitlement_ends_at is None
+    # 투영이 이미 APP_FREE 라 다시 읽어도 바꿀 것이 없다 — 정지도 다시 쓰지 않는다
+    assert workflow.reconcile_tenant_subscription(db, tenant_id, now=TERM_END + timedelta(hours=1)) is False
+    db.commit()
+    assert _tenant(db, tenant_id).suspended_at == TERM_END
+
+    # 재개(운영자 · 연결 확인 통과)는 구독을 바꾸지 않고, 재개 뒤에는 새 구매를 받는다
+    assert tenants_repo.resume_tenant(
+        db, tenant_id, result=TenantVerificationResult.OK, reason_code=None, now=kst(2026, 12, 1))
+    db.commit()
+    resumed = _get(db, tenant_id, kst(2026, 12, 1))
+    assert (resumed.service_status, _shown(resumed)) == (TenantStatus.ACTIVE, (FREE, SubscriptionSource.APP_FREE, None, None))
+    assert resumed.available_actions == [A.PURCHASE, A.STOP]
+    assert _purchase(db, who, now=kst(2026, 12, 1, 1)).agreement.status is MockAgreementStatus.PENDING
 
 
 def test_cancel_is_refused_without_an_auto_renewing_active_agreement(db, buyer):
@@ -387,6 +406,9 @@ def test_service_suspension_neither_cancels_nor_freezes_the_contract(db, buyer):
     expired = _get(db, tenant_id, kst(2026, 12, 31))
     assert (expired.service_status, _shown(expired)) == (
         TenantStatus.SUSPENDED, (FREE, SubscriptionSource.APP_FREE, None, None))
+    # 이미 정지된 테넌트의 만료는 그 정지 · 사유를 덮지 않는다
+    tenant = _tenant(db, tenant_id)
+    assert (tenant.suspended_at, tenant.suspended_reason) == (kst(2026, 11, 10), "운영 중단")
     _refused(lambda: _purchase(db, who, now=kst(2026, 12, 31, 1)))  # 정지 중 새 구매는 받지 않는다
 
 
@@ -426,7 +448,7 @@ def test_closing_new_purchases_still_processes_stored_contracts(db, buyer):
     _cycle(db, TERM_END, enabled=False)
     shown = _get(db, tenant_id, TERM_END, settings=_settings(enabled=False))
     assert (_shown(shown), shown.mock_marketplace_enabled) == ((FREE, SubscriptionSource.APP_FREE, None, None), False)
-    assert shown.available_actions == [A.STOP]  # 새 구매가 닫혀 있다
+    assert (shown.service_status, shown.available_actions) == (TenantStatus.SUSPENDED, [])  # 만료 정지 · 새 구매 닫힘
 
 
 # ----- ⑤ 구매 거절 ------------------------------------------------------------------
