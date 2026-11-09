@@ -11,7 +11,8 @@
 #   ④ 동시에 들어온 같은 대상 접수는 대상 잠금에서 기다렸다가, 앞선 실행이 commit 되면 409 로 떨어진다.
 #   ⑤ 승인 대기 중 대상 자산이 사라졌거나 최신 판정이 더는 후보가 아니면, FinOps 실행이 AWS 호출 없이
 #      FAILED 로 닫힌다. 확인할 근거(자산 · 판정)가 없으면 막지 않는다.
-#   ⑥ 다운사이징은 실행 직전 백업이 잡은 타입이 탐지 당시 타입과 다르면 변경 호출 전에 멈춘다.
+#   ⑥ 다운사이징은 실행 직전 타입(새 백업 값, 재개면 다시 읽은 값)이 탐지 당시 타입과 다르면 변경 호출 전에
+#      멈춘다. 재개 때 원복용 백업은 바꾸지 않는다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -483,3 +484,36 @@ def test_rightsizing_proceeds_when_the_type_is_unchanged_or_unknown(
     assert "stop_instances" in operations(aws)
     db.expire_all()
     assert exec_repo.list_steps(db, execution_id) != []
+
+
+@pytest.mark.parametrize("resumed_type, proceeds", [
+    ("t3.2xlarge", False),   # 중단된 사이 누가 올렸다. 지난 백업 값으로 통과하면 안 된다
+    (BACKUP_TYPE, True),     # 그대로면 재개한다
+], ids=["changed-while-down", "unchanged"])
+def test_resumed_rightsizing_rechecks_the_current_type(
+    db, make_incident, make_candidate, aws, resumed_type, proceeds
+):
+    """백업 commit 뒤 첫 단계 전에 프로세스가 죽었다(단계 0건). 디스패처가 다시 돌릴 때 결속된 백업은 지난
+    관측이므로 지금 타입을 다시 읽는다. 원복용 백업은 바꾸지 않는다."""
+    _collect(db, instance_type=BACKUP_TYPE, verdict="COST_CANDIDATE")
+    _, execution_id = _approved_rightsizing(db, make_incident, make_candidate)
+    aws(current_type=BACKUP_TYPE)
+    first = workflows.store_instance_spec_backup(db, execution_id)
+    assert first.created and exec_repo.list_steps(db, execution_id) == []
+    aws(current_type=resumed_type)
+
+    cycle(db)
+
+    db.expire_all()
+    execution = exec_repo.get_execution(db, execution_id)
+    assert execution.backup_record_id == first.record.backup_record_id
+    assert exec_repo.get_backup_record(db, execution.backup_record_id).payload["instance_type"] == BACKUP_TYPE
+    if proceeds:
+        assert "stop_instances" in operations(aws)
+        return
+    assert execution.status is ExecutionStatus.FAILED
+    assert execution.error_summary.startswith(f"{CHANGED}: ")
+    assert "t3.2xlarge" in execution.error_summary
+    assert "stop_instances" not in operations(aws)
+    assert "modify_instance_attribute" not in operations(aws)
+    assert exec_repo.list_steps(db, execution_id) == []

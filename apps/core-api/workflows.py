@@ -447,7 +447,9 @@ def _active_on_target(
 
     잠금(executions_repo.lock_target)은 이 트랜잭션이 끝날 때까지 유지된다. 그 안에서 확인하고 실행
     행을 넣어야 동시에 들어온 다른 접수가 이 행을 보거나 이 트랜잭션이 끝나기를 기다린다. 잠금 순서는
-    인시던트 → (테넌트) → 대상 하나뿐이다. 대상 잠금을 잡은 채 다른 인시던트를 잠그는 경로는 없다.
+    경로마다 다르다. 승인 · 자동 격리는 인시던트 → (테넌트) → 대상이고, 관제자 복구는 인시던트를 잠그지 않고
+    읽은 뒤 테넌트 → 원본 실행 → 대상 → 인시던트다. 그래도 교착은 없다. HTTP 예약은 app_users 잠금에서 먼저
+    줄을 서고(auth.py), 디스패처는 대상 잠금을 잡지 않는다.
 
     own_origin_id 는 관제자 복구가 되돌릴 원본이다. 원본이 ROLLBACK_INITIATED 면 그 자신이 끝나지 않은
     실행으로 잡히는데, 복구는 그 실행을 끝내는 일이라 막지 않는다.
@@ -2010,12 +2012,27 @@ def run_rightsizing_execution(db: Session, execution_id: str) -> ExecutionRunOut
     # 승인을 기다리는 사이 누가 타입을 바꿨으면 목표 타입은 지금의 인스턴스에 대한 계산이 아니다. 내린
     # 타입으로 부팅에 성공하면 자동 원복도 걸리지 않으므로 첫 AWS 변경 전에 멈춘다(T-10 · #595). 비교하는
     # 현재 타입은 방금 commit 한 백업의 값이다. 원복이 되돌릴 값과 같은 관측이라 따로 묻지 않는다.
+    # 이미 결속된 백업을 다시 쓴 경우(stored.created=False)는 다르다. 백업 commit 뒤 첫 단계 전에 프로세스가
+    # 죽어 디스패처가 단계 0건 실행을 다시 돌리는 경로라, 그 백업은 지난 관측이다. 그사이 타입이 바뀌었을 수
+    # 있으므로 지금 타입을 다시 읽어 비교한다. 원복이 쓸 백업은 그대로 둔다. 단계 0건이면 아직 AWS를 바꾸지
+    # 않았으므로(dispatcher.py 재실행 분기의 executor 계약) 그 백업이 여전히 조치 직전 값이다.
     detected = _detection_instance_type(db, execution)
-    captured = InstanceSpecBackup.model_validate(stored.record.payload or {}).instance_type
-    if detected is not None and captured != detected:
-        raise TargetChangedBeforeStart(
-            f"실행 직전 인스턴스 타입 {captured}이 탐지 당시 타입 {detected}과 다릅니다"
-        )
+    if detected is not None:
+        if stored.created:
+            current = InstanceSpecBackup.model_validate(stored.record.payload or {}).instance_type
+        else:
+            target = parse_arn(target_arn)
+            observed = backup.capture_instance_spec(target.resource_id, target.region)
+            if not observed.captured:
+                return _run_failed(
+                    observed.reason_code,
+                    f"실행 직전 인스턴스 타입 조회 실패: {observed.detail or ''}".strip(),
+                )
+            current = InstanceSpecBackup.model_validate(observed.payload or {}).instance_type
+        if current != detected:
+            raise TargetChangedBeforeStart(
+                f"실행 직전 인스턴스 타입 {current}이 탐지 당시 타입 {detected}과 다릅니다"
+            )
 
     outcome = executor.execute_rightsizing(
         target_arn,
