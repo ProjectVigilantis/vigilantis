@@ -95,8 +95,8 @@ export function statusOptionsOf(items: readonly IncidentListItem[]): IncidentSta
 
 /**
  * 위험도 셀렉트 — **`initial_risk_level` 기준**이다. 정렬 축과 같은 불변 키라(§4.4 정렬)
- * 걸러도 순서가 튀지 않고, `reviewed_risk_level`로 걸면 AI 정밀평가가 바뀔 때마다
- * 목록에서 항목이 사라진다.
+ * 걸러도 순서가 튀지 않고, `reviewed_risk_level`(이전 방식의 AI 재평가 값)로 걸면 그 값이
+ * 바뀔 때마다 목록에서 항목이 사라진다.
  *
  * FINOPS는 계약이 두 위험도를 `null`로 강제해 옵션이 비고, 호출부가 셀렉트를 감춘다.
  */

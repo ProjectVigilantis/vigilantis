@@ -67,11 +67,13 @@
 # — 모델을 부르기 전에 닫고, 조회 응답이 NO_ACTION_AVAILABLE로 보여 준다.
 #
 # SecOps는 고정 THREAT 근거·초기 판정과 Incident 접수 시 보존한 자산을 조립한다.
-# 후보는 입력 근거·조치 대상·저장 가능성을 검증한 뒤 Workflow에 넘긴다.
+# 그래프는 SECOPS_GRAPH_VARIANT로 고른다 — 기본은 근거 선행 1회 호출 뒤 코드가 실행 계획을
+# 조립하는 그래프이고, 대비책은 1단계 그래프(후보 생성 → 요약, 2회 호출)다(#583 2단계).
+# 후보는 입력 근거·조치 대상·저장 가능성을 검증한 뒤 Workflow에 넘긴다 — 두 그래프에 같은 검증이다.
 # FinOps 절감 예상만 잘못된 경우에는 INVALID로 남기고 실행 후보를 유지한다(#347).
-# SecOps의 위험도 재평가는 초기 위험도·사유·대응 모드를 덮어쓰지 않는다.
+# SecOps 그래프는 위험도를 재평가하지 않으며 초기 위험도·사유·대응 모드를 덮어쓰지 않는다.
 #
-# SecOps는 분석 자체가 실패했을 때만 요약·재평가를 비운다. 선행 실행 상태를 우선하며,
+# SecOps는 분석 자체가 실패했을 때만 요약을 비운다. 선행 실행 상태를 우선하며,
 # 실행 이력 없이 정상 분석된 무제안·전체 거절은 AWAITING_CLOSURE에서 사용자 종료를
 # 기다린다. 분석 결과와 실행 결과는 따로 보존한다(workflows.record_agent_analysis).
 # 승인 대기 시각·60초 기한을 기록하되 자동 격리 발동 엔진은 이 모듈 범위 밖이다.
@@ -122,7 +124,9 @@ import workflows
 from ai.agent import (
     FINOPS_MODEL_CALLS,
     REJECTED_TARGET_ARN_LOG_CHARS,
+    SECOPS_FALLBACK_MODEL_CALLS,
     SECOPS_MODEL_CALLS,
+    SecOpsGraphVariant,
     run_finops_graph,
     run_secops_graph,
 )
@@ -234,8 +238,11 @@ def stale_claim_ceiling_seconds(settings: Optional[Settings] = None) -> float:
     """
     settings = settings or get_settings()
     per_call = RetryPolicy.from_settings(settings).worst_case_seconds()
-    # 그래프 종료 뒤의 단가 대기도 Claim 수명에 포함한다. SecOps 호출 수에 기대지 않는다.
-    model_calls = max(FINOPS_MODEL_CALLS + SAVINGS_MODEL_CALLS, SECOPS_MODEL_CALLS)
+    # 그래프 종료 뒤의 단가 대기도 Claim 수명에 포함한다. SecOps는 스위치가 고를 수 있는 두
+    # 그래프를 모두 센다 — 상한이 SECOPS_GRAPH_VARIANT에 따라 달라지지 않게 한다.
+    model_calls = max(
+        FINOPS_MODEL_CALLS + SAVINGS_MODEL_CALLS, SECOPS_MODEL_CALLS, SECOPS_FALLBACK_MODEL_CALLS,
+    )
     return per_call * model_calls
 
 
@@ -671,7 +678,10 @@ def _dispatch_one(
                 db.rollback()
                 output = verify_graph_output(
                     graph_input,
-                    (run_secops_graph(graph_input, client=client, nacl_rule_numbers=nacl_rule_numbers)
+                    (run_secops_graph(
+                        graph_input, client=client, nacl_rule_numbers=nacl_rule_numbers,
+                        variant=SecOpsGraphVariant(get_settings().SECOPS_GRAPH_VARIANT),
+                    )
                      if isinstance(graph_input, SecOpsGraphInput)
                      else run_finops_graph(graph_input, client=client)),
                     incident_id,

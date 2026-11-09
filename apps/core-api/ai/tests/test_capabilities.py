@@ -1,14 +1,16 @@
-"""FinOps 조치 메뉴 빌더 테스트 — 축 ③ 서버 계산 가능 여부 (Issue #251).
+"""조치 메뉴 빌더 테스트 — FinOps 축 ③ 서버 계산 가능 여부 (Issue #251), SecOps NACL 대상 수 (#583).
 
 축 ①②는 골든 케이스로 test_evaluation_cases.py가 본다. 여기서는 다운사이징 목표 타입을
 규칙이 계산할 수 없는 자산에 다운사이징이 메뉴로 올라가지 않는지만 본다 — 올라가면 모델이
-고르는 순간 그래프가 값을 채우지 못해 호출 전체가 FAILED가 된다.
+고르는 순간 그래프가 값을 채우지 못해 호출 전체가 FAILED가 된다. SecOps도 같은 이유로
+코드가 1:1로 고를 수 없는 NACL 대상(둘 이상)에는 차단을 메뉴로 올리지 않는다.
 """
 
 import pytest
 
-from ai.capabilities import build_finops_capabilities
-from schemas.api.assets import AssetType, Verdict
+from ai.capabilities import build_finops_capabilities, build_secops_capabilities
+from schemas.api.assets import AssetItem, AssetType, Verdict
+from schemas.events import ThreatEventType
 from schemas.runbooks import RunbookId
 
 
@@ -45,3 +47,20 @@ def test_non_ec2_menus_do_not_depend_on_instance_type():
     assert [capability.runbook_id for capability in offered] == [
         RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED
     ]
+
+
+@pytest.mark.parametrize("nacl_count,offered", [(1, [RunbookId.RUNBOOK_NACL_ADD_DENY]), (2, [])])
+def test_secops_block_is_offered_only_for_a_single_protected_by_nacl(nacl_count, offered):
+    prefix = "arn:aws:ec2:ap-northeast-2:123456789012:"
+    asset = AssetItem.model_validate({
+        "arn": prefix + "instance/i-0abc", "resource_id": "i-0abc", "asset_type": "EC2",
+        "resource_role": "PRIMARY", "account_id": "123456789012", "region": "ap-northeast-2",
+        "state": "running", "spec": {}, "evaluation_status": "PENDING",
+        "collected_at": "2026-09-11T00:00:00Z",
+        "relationships": [
+            {"relation_type": "PROTECTED_BY", "target_arn": prefix + f"network-acl/acl-0abc{index}"}
+            for index in range(nacl_count)
+        ],
+    })
+    menu = build_secops_capabilities(asset=asset, event_type=ThreatEventType.SSH_BRUTE_FORCE)
+    assert [capability.runbook_id for capability in menu] == offered

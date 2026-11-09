@@ -55,7 +55,15 @@ SERVICE_FILES = (
 )
 
 
-def prompt_fingerprint() -> str:
+def prompt_fingerprint(variant: agent.SecOpsGraphVariant = agent.SecOpsGraphVariant.EVIDENCE_FIRST) -> str:
+    if variant is agent.SecOpsGraphVariant.EVIDENCE_FIRST:
+        # 근거 선행 호출은 파라미터 제약을 모델에 보내지 않는다(조치 메뉴는 목적 문구뿐, 파라미터는 코드가 조립).
+        # 그래서 제약 변경은 SecOps 요청을 바꾸지 않아 지문에서 뺀다.
+        return digest({
+            "evidence": agent._SECOPS_EVIDENCE_PROMPT,
+            "schemas": [agent.SecOpsEvidenceDecisionOutput.model_json_schema()],
+        })
+    # CANDIDATE_FIRST(대비책)는 1단계 구성을 그대로 지문에 건다.
     # 현재 서비스로 재조립·대조한 전체 동결 세트의 메뉴만 사용한다.
     # 공유 맵의 FinOps 전용 제약 변경이 SecOps 승인 지문을 흔들지 않게 한다.
     runbooks = {capability.runbook_id for case in load_cases()
@@ -72,14 +80,16 @@ def prompt_fingerprint() -> str:
     })
 
 
-def fingerprints(cases: list[EvalCase]) -> dict[str, Any]:
+def fingerprints(cases: list[EvalCase],
+                 variant: agent.SecOpsGraphVariant = agent.SecOpsGraphVariant.EVIDENCE_FIRST) -> dict[str, Any]:
     # 부분 측정도 전체 답지에서 선택한다. 품질 판정 분모와 대역 재구성을 혼동하지 않는다.
     answers = load_answers(load_cases())
     return {
         "inputs_sha256": input_fingerprint(cases),
         "answers_sha256": digest(read_json(ROOT / "answers.json")),
         "rubric_sha256": digest(read_json(ROOT / "rubric.json")),
-        "prompt_sha256": prompt_fingerprint(),
+        "prompt_sha256": prompt_fingerprint(variant),
+        # 요청 지문은 기본(근거 선행) 서비스 기준이다. 대비책 측정은 비교용이라 current_service가 false로 남는다.
         "request_sha256": digest(request_manifest(cases, answers)),
         # Windows autocrlf의 줄바꿈 차이를 코드 의미의 변경으로 세지 않는다.
         "service_sha256": digest({path: (REPO_ROOT / path).read_text(encoding="utf-8")
@@ -89,16 +99,23 @@ def fingerprints(cases: list[EvalCase]) -> dict[str, Any]:
     }
 
 
-def new_run(cases: list[EvalCase], repeats: int, settings: Any, run_id: str) -> dict[str, Any]:
+def variant_model_calls(variant: agent.SecOpsGraphVariant) -> int:
+    return (agent.SECOPS_MODEL_CALLS if variant is agent.SecOpsGraphVariant.EVIDENCE_FIRST
+            else agent.SECOPS_FALLBACK_MODEL_CALLS)
+
+
+def new_run(cases: list[EvalCase], repeats: int, settings: Any, run_id: str,
+            variant: agent.SecOpsGraphVariant = agent.SecOpsGraphVariant.EVIDENCE_FIRST) -> dict[str, Any]:
     if repeats < 1:
         raise ValueError("repeats must be positive")
     git = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True,
                          text=True, check=True)
-    calls = len(cases) * repeats * agent.SECOPS_MODEL_CALLS
+    calls = len(cases) * repeats * variant_model_calls(variant)
     return {
         "run_id": run_id, "created_at": datetime.now(UTC).isoformat(),
         "scope": "MVP mock SSH scenarios; graph and dispatcher contract only",
-        "git_head": git.stdout.strip(), **fingerprints(cases),
+        "graph_variant": variant.value,
+        "git_head": git.stdout.strip(), **fingerprints(cases, variant),
         "settings": {name: getattr(settings, name) for name in SETTING_NAMES},
         "case_ids": [case.case_id for case in cases], "repeats": repeats,
         "model_calls_upper_bound": calls,
@@ -107,11 +124,14 @@ def new_run(cases: list[EvalCase], repeats: int, settings: Any, run_id: str) -> 
     }
 
 
-def run_one(case: EvalCase, repeat: int, client: AIModelClient) -> dict[str, Any]:
+def run_one(case: EvalCase, repeat: int, client: AIModelClient,
+            variant: agent.SecOpsGraphVariant = agent.SecOpsGraphVariant.EVIDENCE_FIRST) -> dict[str, Any]:
     recording = UsageRecordingClient(client)
     started = time.monotonic()
     numbers = fixture_nacl_rule_numbers(case.graph_input)
-    graph_output = agent.run_secops_graph(case.graph_input, client=recording, nacl_rule_numbers=numbers)
+    graph_output = agent.run_secops_graph(
+        case.graph_input, client=recording, nacl_rule_numbers=numbers, variant=variant,
+    )
     output = verify_graph_output(
         case.graph_input, graph_output, case.graph_input.incident_id, nacl_rule_numbers=numbers,
     )
@@ -158,6 +178,25 @@ def review_template(run: dict) -> dict:
     }
 
 
+def decision_flip(outputs: dict[str, list[AgentGraphOutput]]) -> dict[str, Any]:
+    """사례별 결정 집합(후보 runbook ID 집합, 무제안은 빈 집합)의 흔들림 비율.
+
+    flip_ratio = 1 - 최빈 결정 집합의 비율. 후보↔무제안도 흔들림이다.
+    """
+    cases = {}
+    for case_id, values in outputs.items():
+        if len(values) < 2:
+            continue
+        agreement = next(item for item in field_agreement(values) if item.field == "runbook_ids")
+        cases[case_id] = {
+            "decisions": ["+".join(filter(None, value.split(","))) or "NO_PROPOSAL"
+                          for value in agreement.values],
+            "flip_ratio": round(1 - agreement.top_share, 4),
+        }
+    flipped = sum(1 for item in cases.values() if item["flip_ratio"] > 0)
+    return {"cases": cases, "cases_with_flip": flipped, "cases_measured": len(cases)}
+
+
 def report(run: dict, cases: list[EvalCase], answers: dict[str, Answer],
            review: ReviewFile | None = None) -> dict:
     """계획한 전체 실행을 분모로 삼으며, 일부 실행만으로 기준선을 통과시키지 않는다."""
@@ -194,6 +233,8 @@ def report(run: dict, cases: list[EvalCase], answers: dict[str, Answer],
     counts = {name: 0 for name in ("PASS", "FAIL", "PENDING", "TOOL_ERROR", "TRANSPORT_ERROR")}
     scores = []
     outputs: dict[str, list[AgentGraphOutput]] = {case_id: [] for case_id in case_ids}
+    # 결정 흔들림은 오류 없이 끝난 실행만 센다. 오류는 결정이 아니다.
+    stable_outputs: dict[str, list[AgentGraphOutput]] = {case_id: [] for case_id in case_ids}
     for key in sorted(planned):
         record = observed.get(key)
         if record is None:
@@ -207,6 +248,8 @@ def report(run: dict, cases: list[EvalCase], answers: dict[str, Answer],
                 counts[failure] += 1
                 scores.append({"case_id": key[0], "repeat": key[1], "verdict": failure})
                 continue
+            if failure is None:
+                stable_outputs[key[0]].append(output)
             result = score_structured(output, answers[key[0]])
             semantic = (score_summary(output, reviews.get(key), rubric)
                         if output.invocation_status is not AgentInvocationStatus.FAILED
@@ -221,8 +264,12 @@ def report(run: dict, cases: list[EvalCase], answers: dict[str, Answer],
     from config import Settings
 
     default_settings = {name: Settings.model_fields[name].default for name in SETTING_NAMES}
+    # 변종이 없는 과거 결과는 기본(근거 선행)으로 보되, 기록된 프롬프트 지문이 현재 기본 지문과 같을 때만 인정한다.
+    graph_variant = run.get("graph_variant", agent.SecOpsGraphVariant.EVIDENCE_FIRST.value)
     current_service = (
-        run.get("request_sha256") == current["request_sha256"]
+        graph_variant == agent.SecOpsGraphVariant.EVIDENCE_FIRST.value
+        and run.get("prompt_sha256") == prompt_fingerprint(agent.SecOpsGraphVariant.EVIDENCE_FIRST)
+        and run.get("request_sha256") == current["request_sha256"]
         and run["settings"] == default_settings
     )
     complete_set = set(case_ids) == {case.case_id for case in load_cases()}
@@ -232,6 +279,7 @@ def report(run: dict, cases: list[EvalCase], answers: dict[str, Answer],
     return {
         "run_id": run["run_id"], "planned": len(planned), "recorded": len(observed),
         "counts": counts, "scores": scores,
+        "graph_variant": graph_variant,
         "current_service": current_service,
         "request_fingerprint_recorded": "request_sha256" in run,
         "request_sha256": current["request_sha256"],
@@ -250,6 +298,8 @@ def report(run: dict, cases: list[EvalCase], answers: dict[str, Answer],
             case_id: [asdict(item) for item in field_agreement(values)]
             for case_id, values in outputs.items() if len(values) >= 2
         },
+        # EITHER 허용(구조화 PASS)과 별개로 같은 입력의 결정이 회차마다 바뀌는 비율을 보고한다.
+        "decision_flip": decision_flip(stable_outputs),
         "reported_tokens": {
             field: sum(record[field] for record in observed.values())
             for field in ("reported_prompt_tokens", "reported_completion_tokens", "reported_cached_prompt_tokens")

@@ -11,16 +11,16 @@
     "result": "results/README.md"
   },
   "candidate": {
-    "version": "v1.1.0",
-    "prompt_sha256": "f1afcd2ff52214ed75d0f357d321bfa1915dde67a4dceb005848993d54c5ee92",
-    "rubric_sha256": "62c3c181f23e9cd4b380fd0c174d031bb6f158394705c942a8d3f3827af567e0",
+    "version": "v2.0.0",
+    "prompt_sha256": "44d754c3d043f99070ed1afe3bc15d7d1ad31566655dcf2bde0774851f5abb2b",
+    "rubric_sha256": "818f908335f8f1d08473b8dff3be65b3ae54937e9e85745e9b283e2ceb886dab",
     "quality_status": "PENDING",
-    "plan": "plans/v1.1.0-reassess-removal.md",
+    "plan": "plans/v2.0.0-evidence-first.md",
     "supersedes": {
-      "version": "v1.0.1",
-      "prompt_sha256": "f14ce9da429e12aa815854235c6744a38caca14b5e1edf651cdd91987855cc1d",
-      "plan": "plans/v1.0.1-nacl-rule-number.md",
-      "note": "측정 전에 대체됐다. 서버 규칙 번호 변경은 v1.1.0에 그대로 포함된다."
+      "version": "v1.1.0",
+      "prompt_sha256": "f1afcd2ff52214ed75d0f357d321bfa1915dde67a4dceb005848993d54c5ee92",
+      "plan": "plans/v1.1.0-reassess-removal.md",
+      "note": "측정 전에 대체됐다. v1.1.0은 측정된 적이 없으며 CANDIDATE_FIRST 대비책 그래프의 프롬프트로 남는다."
     }
   }
 }
