@@ -1,6 +1,6 @@
 # ==============================================================================
 # [파일 설명]  담당: 안성일 (BE · 접근 보호)
-# 고객사별 API 호출 집계 (#572 6번) — 고객사(TENANT) 계정의 `/api/*` 호출을 고객사 × UTC 날짜로 센다.
+# 고객사별 API 호출 집계 (#572 6번) — 고객사(TENANT) 계정의 `/api/*` 호출을 고객사 × UTC 1시간 칸으로 센다.
 #
 #   - 자리: 순수 ASGI 미들웨어(TenantApiUsageMiddleware). 응답이 끝난 뒤 세션 관문(auth.access.require_user,
 #     routers.auth 의 /me · /activity)이 request.state.current_user 에 남긴 신원을 읽는다 — 인증 로직을 다시
@@ -12,9 +12,9 @@
 #     소유자). 인메모리 누적 · 주기 flush 를 두지 않는 이유 — 모아 둔 분량이 없어 재기동 · 비정상 종료에 잃는 것은
 #     그 순간 기록 중이던 요청뿐이고, 상태(누적분 · 타이머)가 없어 단순하다. 기록은 최선 노력이다(아래 실패 처리).
 #     비용은 요청당 UPSERT 1문이며 응답 전송 뒤라 응답 시간에 더해지지 않는다.
-#   - 보관: 날짜가 바뀐 뒤 첫 기록에서 API_USAGE_RETENTION_DAYS 일(오늘 포함)보다 오래된 버킷을 같은
-#     트랜잭션에서 지운다. 정리 차례는 잠금 아래 하루에 한 요청만 맡는다(동시 요청은 스레드풀에서 겹친다) —
-#     그 기록이 실패하면 차례를 돌려놓아 다음 기록이 다시 맡는다.
+#   - 보관: 날짜가 바뀐 뒤 첫 기록에서 API_USAGE_RETENTION_DAYS 일(오늘 포함)보다 이른 칸을 같은 트랜잭션에서
+#     지운다(보관 단위는 일이라 차례도 날짜 기준). 정리 차례는 잠금 아래 하루에 한 요청만 맡는다(동시 요청은
+#     스레드풀에서 겹친다) — 그 기록이 실패하면 차례를 돌려놓아 다음 기록이 다시 맡는다.
 #   - 실패(DB 오류 · 고객사 행 없음)는 로그만 남긴다 — 통계가 이미 보낸 응답이나 다음 요청을 막지 않는다.
 #     이메일 · 쿠키 · 경로는 로그에 싣지 않는다.
 #   - 세션 팩토리는 get_usage_session_factory 로 받는다. 테스트는 app.dependency_overrides 로 바꿔 끼운다
@@ -38,6 +38,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from db.repositories import platform as platform_repo
 from db.session import get_session_factory
+from platform_overview import floor_to_hour
 
 _logger = logging.getLogger("vigilantis.api_usage")
 
@@ -55,20 +56,21 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-def retention_cutoff(day: date) -> date:
-    """day 를 포함해 API_USAGE_RETENTION_DAYS 일을 남기는 기준일 — 이보다 이전 날짜는 지운다."""
-    return day - timedelta(days=API_USAGE_RETENTION_DAYS - 1)
+def retention_cutoff(day: date) -> datetime:
+    """day 를 포함해 API_USAGE_RETENTION_DAYS 일을 남기는 기준 시각(UTC 자정) — 이보다 이른 칸은 지운다."""
+    first_kept = day - timedelta(days=API_USAGE_RETENTION_DAYS - 1)
+    return datetime(first_kept.year, first_kept.month, first_kept.day, tzinfo=UTC)
 
 
-def record_call(db: Session, *, tenant_id: str, day: date, prune: bool) -> bool:
-    """(tenant_id, day) 버킷 +1 을 commit 한다. prune 이면 보관 기간 밖 버킷도 같은 트랜잭션에서 지운다.
+def record_call(db: Session, *, tenant_id: str, at: datetime, prune: bool) -> bool:
+    """at 가 속한 (tenant_id, UTC 정시) 칸 +1 을 commit 한다. prune 이면 보관 기간 밖 칸도 같은 트랜잭션에서 지운다.
 
     실패하면 rollback 하고 오류 종류만 로그에 남긴 뒤 False 다 — 호출부(미들웨어)는 이미 응답을 보냈다.
     """
     try:
-        platform_repo.add_call(db, tenant_id=tenant_id, day=day)
+        platform_repo.add_call(db, tenant_id=tenant_id, hour=floor_to_hour(at))
         if prune:
-            platform_repo.delete_calls_before(db, retention_cutoff(day))
+            platform_repo.delete_calls_before(db, retention_cutoff(at.astimezone(UTC).date()))
         db.commit()
         return True
     except SQLAlchemyError as exc:
@@ -125,9 +127,10 @@ class TenantApiUsageMiddleware:
                 self._pruned_day = day - timedelta(days=1)
 
     def _record(self, factory: UsageSessionFactory, tenant_id: str) -> None:
-        day = _utcnow().date()
+        now = _utcnow()
+        day = now.date()
         prune = self._claim_prune(day)
         with factory() as db:
-            recorded = record_call(db, tenant_id=tenant_id, day=day, prune=prune)
+            recorded = record_call(db, tenant_id=tenant_id, at=now, prune=prune)
         if prune and not recorded:
             self._release_prune(day)

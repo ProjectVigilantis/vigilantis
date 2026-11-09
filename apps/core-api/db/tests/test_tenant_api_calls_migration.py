@@ -1,12 +1,12 @@
-"""tenant_api_calls_daily 마이그레이션 (#572 6번) — 실제 PostgreSQL/Alembic.
+"""tenant_api_calls_hourly 마이그레이션 (#572 6번) — 실제 PostgreSQL/Alembic.
 
-내려가면 표가 없고 올라오면 ORM 과 같다. 같은 (고객사, 날짜)의 UPSERT 는 한 행에 더해지고, 고객사를 지우면
-통계도 함께 지워진다(CASCADE). 음수 호출 수는 DB 가 거절한다.
+내려가면 표가 없고 올라오면 ORM 과 같다. 같은 (고객사, 정시)의 UPSERT 는 한 행에 더해지고, 고객사를 지우면
+통계도 함께 지워진다(CASCADE). 음수 호출 수와 정시가 아닌 칸은 DB 가 거절한다.
 """
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -26,7 +26,7 @@ from db.repositories import tenants as tenants_repo
 
 REVISION = "d572a6c1e906"
 PARENT = "a1b7c4d2e905"
-TABLE = "tenant_api_calls_daily"
+TABLE = "tenant_api_calls_hourly"
 
 
 def test_round_trip_matches_orm(pg_engine, monkeypatch):
@@ -49,7 +49,8 @@ def test_round_trip_matches_orm(pg_engine, monkeypatch):
 
 
 def test_upsert_adds_to_one_bucket_and_cascades_with_tenant(pg_engine):
-    today = date(2031, 6, 15)
+    noon = datetime(2031, 6, 15, 12, tzinfo=UTC)
+    earlier = noon - timedelta(hours=1)
     with Session(pg_engine) as session:
         tenant = tenants_repo.create_tenant(
             session, name="통계 고객사", aws_account_id="210987654321", regions=["ap-northeast-2"],
@@ -59,27 +60,31 @@ def test_upsert_adds_to_one_bucket_and_cascades_with_tenant(pg_engine):
         session.commit()
     try:
         with Session(pg_engine) as session:
-            platform_repo.add_call(session, tenant_id=tenant_id, day=today)
-            platform_repo.add_call(session, tenant_id=tenant_id, day=today)
-            platform_repo.add_call(session, tenant_id=tenant_id, day=date(2031, 6, 14))
+            platform_repo.add_call(session, tenant_id=tenant_id, hour=noon)
+            platform_repo.add_call(session, tenant_id=tenant_id, hour=noon)
+            platform_repo.add_call(session, tenant_id=tenant_id, hour=earlier)
             session.commit()
             rows = session.execute(
-                select(models.TenantApiCallDaily.day, models.TenantApiCallDaily.calls)
-                .where(models.TenantApiCallDaily.tenant_id == tenant_id)
-                .order_by(models.TenantApiCallDaily.day)
+                select(models.TenantApiCallHourly.hour, models.TenantApiCallHourly.calls)
+                .where(models.TenantApiCallHourly.tenant_id == tenant_id)
+                .order_by(models.TenantApiCallHourly.hour)
             ).all()
-            assert [tuple(row) for row in rows] == [(date(2031, 6, 14), 1), (today, 2)]
+            assert [(row.hour.astimezone(UTC), row.calls) for row in rows] == [(earlier, 1), (noon, 2)]
 
-        with Session(pg_engine) as session:
-            session.add(models.TenantApiCallDaily(tenant_id=tenant_id, day=date(2031, 6, 13), calls=-1))
-            with pytest.raises(IntegrityError):
-                session.flush()
-            session.rollback()
+        for bad in (
+            dict(hour=noon - timedelta(hours=2), calls=-1),  # 음수
+            dict(hour=noon + timedelta(minutes=30), calls=1),  # 정시 아님
+        ):
+            with Session(pg_engine) as session:
+                session.add(models.TenantApiCallHourly(tenant_id=tenant_id, **bad))
+                with pytest.raises(IntegrityError):
+                    session.flush()
+                session.rollback()
     finally:
         with Session(pg_engine) as session:
             session.execute(delete(models.Tenant).where(models.Tenant.tenant_id == tenant_id))
             session.commit()
     with Session(pg_engine) as session:
         assert session.scalar(
-            select(models.TenantApiCallDaily.calls).where(models.TenantApiCallDaily.tenant_id == tenant_id)
+            select(models.TenantApiCallHourly.calls).where(models.TenantApiCallHourly.tenant_id == tenant_id)
         ) is None

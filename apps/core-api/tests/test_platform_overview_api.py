@@ -1,10 +1,10 @@
 """GET /api/v1/platform/overview 와 고객사별 API 호출 집계 (#572 6번) — 실제 PostgreSQL.
 
 지키는 것: 중앙 관리계정만 200(관리자 직원계정 · 고객사 계정 403, 미인증 401) · 상태 집계(상태별 고객사 ·
-최근 24h 수집 회차 · 승인 대기 인시던트)가 이미 저장된 행을 세는 것 · days 1..30 · 고객사(TENANT) 계정의
-`/api/*` 호출(업무 API · 403 응답 · /auth/me · /auth/activity)이 고객사 × UTC 날짜로 쌓이고 플랫폼 계정 · 미인증
-호출은 쌓이지 않는 것 · 조회 기간 밖 버킷 제외와 정렬 · 날짜가 바뀐 첫 기록의 30일 보관 정리 · 기록 실패가
-응답을 바꾸지 않는 것 · 계약 검증.
+최근 24h 수집 회차 · 상태별 인시던트)가 이미 저장된 행을 세는 것 · hours 1..720 과 시간 칸(UTC 정시, 오래된 것부터) ·
+고객사(TENANT) 계정의 `/api/*` 호출(업무 API · 403 응답 · /auth/me · /auth/activity)이 고객사 × UTC 1시간 칸에 쌓이고
+플랫폼 계정 · 미인증 호출은 쌓이지 않는 것 · 판정 입력(asset_count · staff_count)과 threshold_per_hour=null ·
+조회 기간 밖 칸 제외와 정렬 · 날짜가 바뀐 첫 기록의 30일 보관 정리 · 기록 실패가 응답을 바꾸지 않는 것 · 계약 검증.
 
 같은 DB 를 다른 테스트도 쓰므로 상태 집계는 호출 전후의 차이로 본다. 시각은 이 테스트가 고정한 지금(now)이다 —
 세션 유효 기간 안이어야 하므로 먼 미래로 옮기지 않는다.
@@ -21,9 +21,16 @@ from auth.http import get_clock
 from db import models
 from db.repositories import assets as assets_repo
 from db.repositories import platform as platform_repo
+from platform_overview import floor_to_hour
+from schemas.api.assets import AssetType
 from schemas.api.auth import PlatformRole, UserRole
 from schemas.api.incidents import IncidentStatus
-from schemas.api.platform import API_USAGE_RETENTION_DAYS, PlatformOverviewResponse
+from schemas.api.platform import (
+    API_USAGE_DEFAULT_WINDOW_HOURS,
+    API_USAGE_MAX_WINDOW_HOURS,
+    API_USAGE_RETENTION_DAYS,
+    PlatformOverviewResponse,
+)
 from schemas.api.tenants import TenantStatus
 from schemas.collections import CollectionRunStatus
 from sqlalchemy import func, select
@@ -31,6 +38,8 @@ from sqlalchemy.exc import SQLAlchemyError
 
 URL = "/api/v1/platform/overview"
 REGION = "ap-northeast-2"
+HOUR = timedelta(hours=1)
+DAY = timedelta(days=1)
 
 
 def _z(value: datetime) -> str:
@@ -39,11 +48,16 @@ def _z(value: datetime) -> str:
 
 @pytest.fixture()
 def now(client_pg, monkeypatch) -> datetime:
-    """조회 시각과 기록 시각을 같은 지금으로 고정한다 — 테스트 중 UTC 자정을 지나도 날짜가 갈리지 않는다."""
+    """조회 시각과 기록 시각을 같은 지금으로 고정한다 — 테스트 중 정시 · 자정을 지나도 칸이 갈리지 않는다."""
     fixed = datetime.now(UTC).replace(microsecond=0)
     client_pg.app.dependency_overrides[get_clock] = lambda: (lambda: fixed)
     monkeypatch.setattr(api_usage, "_utcnow", lambda: fixed)
     return fixed
+
+
+@pytest.fixture()
+def this_hour(now) -> datetime:
+    return floor_to_hour(now)
 
 
 def _get(client, **params):
@@ -60,9 +74,9 @@ def _usage(body, tenant_id):
 
 def _buckets(db):
     rows = db.execute(
-        select(models.TenantApiCallDaily.tenant_id, models.TenantApiCallDaily.day, models.TenantApiCallDaily.calls)
+        select(models.TenantApiCallHourly.tenant_id, models.TenantApiCallHourly.hour, models.TenantApiCallHourly.calls)
     ).all()
-    return {(tenant_id, day): calls for tenant_id, day, calls in rows}
+    return {(tenant_id, hour.astimezone(UTC)): calls for tenant_id, hour, calls in rows}
 
 
 def _run(db, tenant_id, status, *, at, started=None):
@@ -78,25 +92,46 @@ def _run(db, tenant_id, status, *, at, started=None):
     return run.collection_run_id
 
 
+def _asset(db, tenant_id, run_id, suffix, *, at, absent=False):
+    asset = assets_repo.upsert_asset(
+        db, arn=f"arn:aws:ec2:{REGION}:123456789012:instance/i-{tenant_id[:8]}{suffix}", asset_type=AssetType.EC2,
+        resource_id=f"i-{tenant_id[:8]}{suffix}", account_id="123456789012", region=REGION, spec={},
+        collection_run_id=run_id, collected_at=at, tenant_id=tenant_id,
+    )
+    if absent:
+        asset.absent_since = at
+        db.flush()
+
+
 # --- 플랫폼 상태 ---------------------------------------------------------------------
 
 
-def test_중앙_관리계정이_저장된_기록을_센_플랫폼_상태를_받는다(client_pg, db, make_tenant, make_incident, now):
+def test_중앙_관리계정이_저장된_기록을_센_플랫폼_상태를_받는다(
+    client_pg, db, make_tenant, make_auth_session, make_incident, now, this_hour
+):
     before = _get(client_pg)
 
     active = make_tenant(TenantStatus.ACTIVE)
     make_tenant(TenantStatus.PENDING_CONNECTION)
     make_tenant(TenantStatus.SUSPENDED)
-    recent, old = now - timedelta(hours=1), now - timedelta(hours=25)
-    _run(db, active, CollectionRunStatus.SUCCESS, at=recent)
+    recent, old = now - HOUR, now - timedelta(hours=25)
+    run = _run(db, active, CollectionRunStatus.SUCCESS, at=recent)
     _run(db, active, CollectionRunStatus.SUCCESS, at=now - timedelta(hours=23, minutes=59))
     _run(db, active, CollectionRunStatus.PARTIAL, at=recent)
     _run(db, active, CollectionRunStatus.FAILED, at=old)  # 24시간 밖
     _run(db, active, CollectionRunStatus.IN_PROGRESS, at=None, started=recent)
-    _run(db, active, CollectionRunStatus.IN_PROGRESS, at=None, started=now - timedelta(days=2))  # 24시간 밖
+    _run(db, active, CollectionRunStatus.IN_PROGRESS, at=None, started=now - 2 * DAY)  # 24시간 밖
     make_incident(db)
     make_incident(db)
     make_incident(db, status=IncidentStatus.ANALYZING)
+    make_incident(db, status=IncidentStatus.RESOLVED)
+    # 판정 입력 — 수집 자산 2개(사라진 자산 1개는 빼고), 고객사 계정 3개(상태 무관)
+    for suffix in ("a", "b"):
+        _asset(db, active, run, suffix, at=recent)
+    _asset(db, active, run, "gone", at=recent, absent=True)
+    make_auth_session(UserRole.ADMIN, tenant_id=active)
+    make_auth_session(UserRole.VIEWER, tenant_id=active)
+    make_auth_session(UserRole.OPERATOR, tenant_id=active, status=models.AppUserStatus.DISABLED)
 
     after = _get(client_pg)
 
@@ -107,31 +142,35 @@ def test_중앙_관리계정이_저장된_기록을_센_플랫폼_상태를_받�
     delta = {k: after["collection"][k] - before["collection"][k] for k in ("success", "partial", "failed", "in_progress")}
     assert delta == {"success": 2, "partial": 1, "failed": 0, "in_progress": 1}
     assert after["collection"]["window_hours"] == 24
-    assert after["incidents"]["awaiting_approval"] - before["incidents"]["awaiting_approval"] == 2
+    assert after["incidents"]["total"] - before["incidents"]["total"] == 4
+    incident_delta = {
+        status: after["incidents"]["by_status"][status] - before["incidents"]["by_status"][status]
+        for status in after["incidents"]["by_status"]
+    }
+    assert incident_delta == {
+        "ANALYZING": 1, "AWAITING_APPROVAL": 2, "ACTION_IN_PROGRESS": 0, "AWAITING_CLOSURE": 0, "RESOLVED": 1, "FAILED": 0,
+    }
     usage = after["api_usage"]
-    today = now.date()
-    assert (usage["window_days"], usage["retention_days"]) == (7, API_USAGE_RETENTION_DAYS)
-    assert (usage["window_start"], usage["window_end"]) == (str(today - timedelta(days=6)), str(today))
-    # 호출 0인 고객사도 실린다
+    assert (usage["window_hours"], usage["retention_days"]) == (API_USAGE_DEFAULT_WINDOW_HOURS, API_USAGE_RETENTION_DAYS)
+    assert usage["hours"] == [_z(this_hour - (23 - i) * HOUR) for i in range(24)]
+    # 호출 0인 고객사도 실리고, 과다 호출 기준은 계산식이 없어 null 이다
     assert _usage(after, active) == {
         "tenant_id": active, "tenant_name": db.get(models.Tenant, active).name, "tenant_status": "ACTIVE",
-        "total_calls": 0, "daily": [],
+        "asset_count": 2, "staff_count": 3, "threshold_per_hour": None, "total_calls": 0, "hourly": [0] * 24,
     }
 
 
-@pytest.mark.parametrize("days,start_offset", [(1, 0), (30, 29)])
-def test_days가_조회_기간을_정한다(client_pg, now, days, start_offset):
-    body = _get(client_pg, days=days)
-    today = now.date()
-    assert body["api_usage"]["window_days"] == days
-    assert (body["api_usage"]["window_start"], body["api_usage"]["window_end"]) == (
-        str(today - timedelta(days=start_offset)), str(today),
-    )
+@pytest.mark.parametrize("hours", [1, API_USAGE_MAX_WINDOW_HOURS])
+def test_hours가_조회_기간을_정한다(client_pg, now, this_hour, hours):
+    body = _get(client_pg, hours=hours)
+    assert body["api_usage"]["window_hours"] == hours
+    assert body["api_usage"]["hours"][0] == _z(this_hour - (hours - 1) * HOUR)
+    assert body["api_usage"]["hours"][-1] == _z(this_hour)
 
 
-@pytest.mark.parametrize("days", [0, 31, "x"])
-def test_days_범위_밖은_422다(client_pg, days):
-    response = client_pg.get(URL, params={"days": days})
+@pytest.mark.parametrize("hours", [0, API_USAGE_MAX_WINDOW_HOURS + 1, "x"])
+def test_hours_범위_밖은_422다(client_pg, hours):
+    response = client_pg.get(URL, params={"hours": hours})
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "REQUEST_VALIDATION_FAILED"
 
@@ -160,9 +199,8 @@ def test_미인증은_401이다(client_pg):
 # --- 호출 집계 -------------------------------------------------------------------------
 
 
-def test_고객사_계정의_호출만_고객사별_오늘_버킷에_쌓인다(client_pg, db, login_as, make_tenant, now):
+def test_고객사_계정의_호출만_고객사별_현재_시간_칸에_쌓인다(client_pg, db, login_as, make_tenant, now, this_hour):
     first, second = make_tenant(), make_tenant()
-    today = now.date()
 
     login_as(UserRole.VIEWER, tenant_id=first)
     assert client_pg.get("/api/v1/incidents").status_code == 200  # 업무 API
@@ -179,62 +217,57 @@ def test_고객사_계정의_호출만_고객사별_오늘_버킷에_쌓인다(c
     login_as(UserRole.ADMIN, platform_role=PlatformRole.CENTRAL_ADMIN)
     assert client_pg.get("/api/v1/auth/me").status_code == 200
 
-    body = _get(client_pg)
-    assert _buckets(db) == {(first, today): 4, (second, today): 1}
-    assert _usage(body, first)["total_calls"] == 4
-    assert _usage(body, first)["daily"] == [{"day": str(today), "calls": 4}]
-    assert _usage(body, second)["daily"] == [{"day": str(today), "calls": 1}]
+    body = _get(client_pg, hours=3)
+    assert _buckets(db) == {(first, this_hour): 4, (second, this_hour): 1}
+    assert (_usage(body, first)["total_calls"], _usage(body, first)["hourly"]) == (4, [0, 0, 4])
+    assert _usage(body, second)["hourly"] == [0, 0, 1]
     ids = [item["tenant_id"] for item in body["api_usage"]["items"]]
     assert ids.index(first) < ids.index(second)
     # 중앙 관리계정의 이 조회도 세지 않았다
-    assert _buckets(db) == {(first, today): 4, (second, today): 1}
+    assert _buckets(db) == {(first, this_hour): 4, (second, this_hour): 1}
 
 
-def test_조회_기간_밖_버킷은_빠지고_호출_수_내림차순이다(client_pg, db, make_tenant, now):
+def test_조회_기간_밖_칸은_빠지고_호출_수_내림차순이다(client_pg, db, make_tenant, now, this_hour):
     busy, quiet, idle = make_tenant(), make_tenant(), make_tenant()
-    today = now.date()
-    for day, calls in ((today - timedelta(days=7), 5), (today - timedelta(days=6), 2), (today, 1)):
+    for hour, calls in ((this_hour - 3 * HOUR, 5), (this_hour - 2 * HOUR, 2), (this_hour, 1)):
         for _ in range(calls):
-            platform_repo.add_call(db, tenant_id=quiet, day=day)
+            platform_repo.add_call(db, tenant_id=quiet, hour=hour)
     for _ in range(10):
-        platform_repo.add_call(db, tenant_id=busy, day=today)
+        platform_repo.add_call(db, tenant_id=busy, hour=this_hour - HOUR)
 
-    week = _get(client_pg, days=7)
-    assert _usage(week, quiet)["total_calls"] == 3
-    assert _usage(week, quiet)["daily"] == [
-        {"day": str(today - timedelta(days=6)), "calls": 2},
-        {"day": str(today), "calls": 1},
-    ]
-    assert (_usage(week, busy)["total_calls"], _usage(week, idle)["total_calls"]) == (10, 0)
-    ids = [item["tenant_id"] for item in week["api_usage"]["items"]]
+    three = _get(client_pg, hours=3)
+    assert three["api_usage"]["hours"] == [_z(this_hour - 2 * HOUR), _z(this_hour - HOUR), _z(this_hour)]
+    assert (_usage(three, quiet)["total_calls"], _usage(three, quiet)["hourly"]) == (3, [2, 0, 1])
+    assert (_usage(three, busy)["hourly"], _usage(three, idle)["hourly"]) == ([0, 10, 0], [0, 0, 0])
+    ids = [item["tenant_id"] for item in three["api_usage"]["items"]]
     assert ids.index(busy) < ids.index(quiet) < ids.index(idle)
 
-    month = _get(client_pg, days=30)
-    assert _usage(month, quiet)["total_calls"] == 8
+    four = _get(client_pg, hours=4)
+    assert _usage(four, quiet)["hourly"] == [5, 2, 0, 1]
 
 
-def test_날짜가_바뀐_첫_기록이_보관_기간_밖_버킷을_지운다(client_pg, db, login_as, make_tenant, now, monkeypatch):
+def test_날짜가_바뀐_첫_기록이_보관_기간_밖_칸을_지운다(client_pg, db, login_as, make_tenant, now, this_hour, monkeypatch):
     tenant = make_tenant()
-    today = now.date()
-    expired, oldest_kept = today - timedelta(days=API_USAGE_RETENTION_DAYS), today - timedelta(days=API_USAGE_RETENTION_DAYS - 1)
-    platform_repo.add_call(db, tenant_id=tenant, day=expired)
-    platform_repo.add_call(db, tenant_id=tenant, day=oldest_kept)
+    today_start = datetime(now.year, now.month, now.day, tzinfo=UTC)
+    expired = today_start - API_USAGE_RETENTION_DAYS * DAY + 23 * HOUR  # 보관 첫날 직전 칸
+    oldest_kept = today_start - (API_USAGE_RETENTION_DAYS - 1) * DAY  # 보관 첫날 0시 칸
+    platform_repo.add_call(db, tenant_id=tenant, hour=expired)
+    platform_repo.add_call(db, tenant_id=tenant, hour=oldest_kept)
     login_as(UserRole.ADMIN, tenant_id=tenant)
 
     # 앱의 첫 기록 — 오늘 기준으로 정리한다
     assert client_pg.get("/api/v1/incidents").status_code == 200
-    assert _buckets(db) == {(tenant, oldest_kept): 1, (tenant, today): 1}
+    assert _buckets(db) == {(tenant, oldest_kept): 1, (tenant, this_hour): 1}
 
     # 같은 날의 다음 기록은 정리하지 않는다
-    platform_repo.add_call(db, tenant_id=tenant, day=expired)
+    platform_repo.add_call(db, tenant_id=tenant, hour=expired)
     assert client_pg.get("/api/v1/incidents").status_code == 200
-    assert _buckets(db) == {(tenant, expired): 1, (tenant, oldest_kept): 1, (tenant, today): 2}
+    assert _buckets(db) == {(tenant, expired): 1, (tenant, oldest_kept): 1, (tenant, this_hour): 2}
 
-    # 날짜가 바뀌면 새 기준으로 다시 정리한다
-    tomorrow = today + timedelta(days=1)
-    monkeypatch.setattr(api_usage, "_utcnow", lambda: now + timedelta(days=1))
+    # 날짜가 바뀌면 새 기준으로 다시 정리한다 — 어제의 첫 보관일 칸도 빠진다
+    monkeypatch.setattr(api_usage, "_utcnow", lambda: now + DAY)
     assert client_pg.get("/api/v1/incidents").status_code == 200
-    assert _buckets(db) == {(tenant, today): 2, (tenant, tomorrow): 1}
+    assert _buckets(db) == {(tenant, this_hour): 2, (tenant, this_hour + DAY): 1}
 
 
 def test_같은_날_겹친_기록_중_하나만_정리를_맡고_실패하면_차례를_돌려놓는다(monkeypatch):
@@ -249,7 +282,7 @@ def test_같은_날_겹친_기록_중_하나만_정리를_맡고_실패하면_�
     prunes: list[bool] = []
     outcome = {"ok": True}
 
-    def fake_record(_db, *, tenant_id, day, prune):
+    def fake_record(_db, *, tenant_id, at, prune):
         barrier.wait(timeout=5)  # 둘 다 차례 판정을 마친 뒤에야 진행한다
         prunes.append(prune)
         return outcome["ok"]
@@ -266,7 +299,7 @@ def test_같은_날_겹친_기록_중_하나만_정리를_맡고_실패하면_�
     barrier = threading.Barrier(1)
     prunes.clear()
     outcome["ok"] = False
-    monkeypatch.setattr(api_usage, "_utcnow", lambda: fixed + timedelta(days=1))
+    monkeypatch.setattr(api_usage, "_utcnow", lambda: fixed + DAY)
     middleware._record(nullcontext, "t-1")
     middleware._record(nullcontext, "t-1")
     assert prunes == [True, True]
@@ -279,7 +312,7 @@ def test_같은_날_겹친_기록_중_하나만_정리를_맡고_실패하면_�
     prunes.clear()
     monkeypatch.setattr(api_usage, "_utcnow", lambda: fixed)
     middleware._record(nullcontext, "t-1")
-    monkeypatch.setattr(api_usage, "_utcnow", lambda: fixed + timedelta(days=1))
+    monkeypatch.setattr(api_usage, "_utcnow", lambda: fixed + DAY)
     middleware._record(nullcontext, "t-1")
     assert prunes == [False, False]
 

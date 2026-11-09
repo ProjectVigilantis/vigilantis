@@ -69,8 +69,8 @@ EXPECTED_TABLES = {
     # TOTP 분실 복구 작업 · 신원 변경 울타리 (#515)
     "totp_recovery_operations",
     "totp_provider_mutations",
-    # 고객사별 API 호출 수의 UTC 일 단위 버킷 (#572 6번)
-    "tenant_api_calls_daily",
+    # 고객사별 API 호출 수의 UTC 1시간 버킷 (#572 6번)
+    "tenant_api_calls_hourly",
 }
 
 
@@ -127,7 +127,10 @@ def test_row_invariant_constraints_registered():
             "ck_mock_marketplace_agreements_renewal_disabled_shape",
         },
         "mock_marketplace_events": {"ck_mock_marketplace_events_source_is_mock"},
-        "tenant_api_calls_daily": {"ck_tenant_api_calls_daily_calls_nonnegative"},
+        "tenant_api_calls_hourly": {
+            "ck_tenant_api_calls_hourly_calls_nonnegative",
+            "ck_tenant_api_calls_hourly_hour_on_the_hour",
+        },
         "metric_summaries": {"ck_metric_summaries_window_ordered"},
         "rule_evaluations": {"ck_rule_evaluations_health_score_range"},
         # 계정 종류 ↔ 소속 · 플랫폼 등급(#492). PLATFORM role=ADMIN 은 호환 제약이다
@@ -164,15 +167,16 @@ def test_tenant_assignment_is_composite_key_with_cascading_foreign_keys():
     assert set(table.columns.keys()) == {"user_id", "tenant_id"}
 
 
-def test_tenant_api_calls_daily_is_a_per_day_bucket_removed_with_its_tenant():
-    """버킷은 (tenant_id, day) 하나씩이고, 고객사가 지워지면 통계도 함께 지워진다(#572 6번)."""
-    table = Base.metadata.tables["tenant_api_calls_daily"]
-    assert [c.name for c in table.primary_key.columns] == ["tenant_id", "day"]
+def test_tenant_api_calls_hourly_is_a_per_hour_bucket_removed_with_its_tenant():
+    """칸은 (tenant_id, hour) 하나씩이고, 고객사가 지워지면 통계도 함께 지워진다(#572 6번)."""
+    table = Base.metadata.tables["tenant_api_calls_hourly"]
+    assert [c.name for c in table.primary_key.columns] == ["tenant_id", "hour"]
     assert {
         (fk.column.table.name, fk.column.name, fk.ondelete) for fk in table.foreign_keys
     } == {("tenants", "tenant_id", "CASCADE")}
-    assert set(table.columns.keys()) == {"tenant_id", "day", "calls"}
-    assert "ix_tenant_api_calls_daily_day" in {ix.name for ix in table.indexes}
+    assert set(table.columns.keys()) == {"tenant_id", "hour", "calls"}
+    assert table.c.hour.type.timezone is True
+    assert "ix_tenant_api_calls_hourly_hour" in {ix.name for ix in table.indexes}
 
 
 def test_one_open_mock_agreement_per_tenant_is_a_partial_unique_index():
