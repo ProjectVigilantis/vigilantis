@@ -214,7 +214,7 @@ test('연결 대기 · 미등록 · 수동 등록 유료 구독은 이유를 말
   );
   const manual = res({ subscription: sub({ plan: 'Pro', period_end: '2026-12-31' }), source: 'MANUAL', available_actions: ['STOP'] });
   assert.match(manageNote(manual) ?? '', /수동 등록된 구독은 이 화면에서 바꿀 수 없습니다.*중앙 관리계정 또는 해당 고객사가 배정된 관리자 직원계정에 문의하세요/);
-  assert.equal(sourceNote('MANUAL', manual.subscription), '수동 등록된 기록입니다. 자동 갱신 · Free 전환을 하지 않습니다.');
+  assert.equal(sourceNote('MANUAL', manual.subscription), '수동 등록된 기록입니다. 자동 갱신 · 만료 정지를 하지 않습니다.');
 });
 
 test('상태 · 권한이 바뀐 실패는 확인창을 닫고 다시 읽는다. 일시 오류는 확인창에 남긴다', () => {

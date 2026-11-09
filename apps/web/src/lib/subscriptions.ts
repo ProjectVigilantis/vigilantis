@@ -111,11 +111,11 @@ export function anchorDayText(day: number | null): string | null {
 
 /** 원천별 설명 한 줄(고객사 관리 · 고객사 계정의 구독 화면 공용). 등록 안 됨은 구독 칸이 이미 말한다. */
 export function sourceNote(source: SubscriptionSource | null, subscription: TenantSubscription | null): string | null {
-  if (source === 'MANUAL') return '수동 등록된 기록입니다. 자동 갱신 · Free 전환을 하지 않습니다.';
-  if (source === 'APP_FREE') return '앱 정책의 기본 Free입니다. AWS에서 구매한 요금제가 아닙니다.';
+  if (source === 'MANUAL') return '수동 등록된 기록입니다. 자동 갱신 · 만료 정지를 하지 않습니다.';
+  if (source === 'APP_FREE') return '유료 권리가 없는 상태(앱 기본 Free)입니다. AWS에서 구매한 요금제가 아닙니다.';
   if (source === 'MOCK_MARKETPLACE') {
     return subscription?.cancel_at_period_end
-      ? '자동 갱신이 꺼져 있습니다. 권리 끝 시각까지 이용하고, 그 뒤 서버가 만료를 처리하면 앱 기본 Free로 돌아갑니다.'
+      ? '자동 갱신이 꺼져 있습니다. 권리 끝 시각까지 이용하고, 그 뒤 서버가 만료를 처리하면 서비스가 정지됩니다.'
       : '모의 계약이 자동 갱신 중입니다. 권리 끝 시각 뒤 서버가 갱신을 처리하면 같은 요금제의 다음 기간이 반영됩니다.';
   }
   return null;
@@ -206,14 +206,14 @@ export function agreementNote(data: CustomerSubscriptionResponse, nowMs: number)
       }
       return agreement.auto_renew
         ? '기간 끝 시각 뒤 서버가 처리하면 같은 요금제로 한 달 갱신됩니다.'
-        : '자동 갱신이 꺼져 있습니다. 기간 끝 시각까지 권리가 유지되고, 그 뒤 서버가 만료를 처리하면 앱 기본 Free로 돌아갑니다.';
+        : '자동 갱신이 꺼져 있습니다. 기간 끝 시각까지 권리가 유지되고, 그 뒤 서버가 만료를 처리하면 서비스가 정지됩니다.';
     case 'FAILED':
       return `모의 공급자가 활성화하지 못했습니다. 유료 권리는 생기지 않았고 청구도 없습니다.${
         can(data, 'PURCHASE') ? ' 다시 구매를 요청할 수 있습니다.' : ''
       }`;
     case 'EXPIRED':
       return projectionLag(data)
-        ? '계약이 만료됐지만 현재 구독에 아직 반영되지 않았습니다. 서버가 처리하면 앱 기본 Free로 바뀝니다.'
+        ? '계약이 만료됐지만 현재 구독에 아직 반영되지 않았습니다. 서버가 처리하면 서비스가 정지됩니다.'
         : '자동 갱신을 끈 계약이 기간 끝 시각에 만료됐습니다.';
   }
 }
@@ -223,7 +223,7 @@ export function manageNote(data: CustomerSubscriptionResponse): string | null {
   if (!data.can_manage) return '구독 변경은 고객사 중앙계정만 요청할 수 있습니다.';
   if (can(data, 'PURCHASE') || data.agreement?.status === 'PENDING') return null;
   if (data.service_status === 'SUSPENDED') {
-    return '이용 중단 중에는 구매를 요청할 수 없습니다.';
+    return '서비스가 정지된 동안에는 구매를 요청할 수 없습니다. 재개는 플랫폼 운영자가 연결 확인 뒤에 합니다.';
   }
   if (data.service_status === 'PENDING_CONNECTION') return '고객 계정 연결이 확인되어 관제가 시작되면 구매를 요청할 수 있습니다.';
   if (data.source === null) return '구독 정보가 등록되지 않았습니다. 등록은 중앙 관리계정 또는 해당 고객사가 배정된 관리자 직원계정에 요청하세요.';

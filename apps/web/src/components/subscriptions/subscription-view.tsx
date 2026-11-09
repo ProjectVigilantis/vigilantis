@@ -213,7 +213,7 @@ export function SubscriptionView({
               <Row label="다음 자동 갱신(예정)"><span className="tabular-nums">{data.next_renewal_date}</span></Row>
             ) : null}
             {data.expiry_date !== null ? (
-              <Row label="만료 · 앱 기본 Free(예정)"><span className="tabular-nums">{data.expiry_date}</span></Row>
+              <Row label="만료 · 서비스 정지(예정)"><span className="tabular-nums">{data.expiry_date}</span></Row>
             ) : null}
             {can(data, 'PURCHASE') || can(data, 'CANCEL_RENEWAL') ? (
               <div className="flex flex-wrap gap-2 pt-1">
@@ -411,11 +411,11 @@ function CancelDialog({
           <DialogTitle>자동 갱신 끄기</DialogTitle>
           <DialogDescription>
             즉시 해지가 아닙니다. 지금 기간 끝 시각 {formatKst(agreement.term_end, '24h')}까지 {agreement.plan} 권리가 유지되고,
-            그 뒤 서버가 만료를 처리하면 앱 기본 Free로 돌아갑니다.
+            그 뒤 서버가 만료를 처리하면 서비스가 정지됩니다(무료 요금제는 없습니다).
           </DialogDescription>
         </DialogHeader>
         <p className="text-muted-foreground text-xs">
-          이 화면에서 자동 갱신을 다시 켤 수 없습니다. Free로 돌아가도 AWS 연결을 끊거나 기록을 지우지 않습니다.{' '}
+          이 화면에서 자동 갱신을 다시 켤 수 없습니다. 정지돼도 AWS 연결을 끊거나 기록을 지우지 않으며, 재개는 플랫폼 운영자가 연결 확인 뒤에 합니다.{' '}
           {MOCK_MARKETPLACE_NOTICE}.
         </p>
         {error !== null ? <ErrorState error={error} variant="inline" /> : null}
