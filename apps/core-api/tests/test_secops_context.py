@@ -7,9 +7,14 @@ import sys
 from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
-from agent_dispatcher import GraphInputUnavailable, build_graph_input
+from agent_dispatcher import (
+    GraphInputUnavailable,
+    assemble_secops_input,
+    build_graph_input,
+)
 from ai.agent import (
     SecOpsEvidenceDecisionOutput,
     _secops_payload,
@@ -122,6 +127,38 @@ def test_secops_context_missing_target_is_not_backfilled_on_later_collection(db,
         build_graph_input(db, outcome.incident_id)
     assert saved(db, outcome.incident_id) == evidence
     assert client_pg.get(f"/api/v1/incidents/{outcome.incident_id}").json()["initial_risk_level"] == "HIGH"
+
+
+@pytest.mark.parametrize("case, mismatch, expected_basis", [
+    ("C01", None, "COUNT_AND_RATE_MET"),
+    ("C04", None, "COUNT_ONLY_MET"),
+    ("C05", None, "RATE_ONLY_MET"),
+    ("C06", None, "NEITHER_MET"),
+    ("C07", None, "SINGLE_ATTEMPT"),
+    ("C04", "level", None),
+    ("C04", "reason", None),
+])
+def test_current_rule_basis_preserves_recorded_risk_and_is_omitted_on_mismatch(
+    db, tmp_path, case, mismatch, expected_basis,
+):
+    seed(db)
+    _, (observation, logs) = submission(tmp_path, case)
+    outcome = receive_threat(db, observation, log_evidence=logs)
+    row = incidents_repo.get_incident(db, outcome.incident_id)
+    recorded = SimpleNamespace(
+        incident_id=row.incident_id, subject_arn=row.subject_arn,
+        threat_event_id=row.threat_event_id,
+        initial_risk_level=RiskLevel.LOW if mismatch == "level" else row.initial_risk_level,
+        initial_risk_reason_codes=(["RISK_SSH_LOW_SIGNAL"] if mismatch == "reason"
+                                   else row.initial_risk_reason_codes),
+    )
+    threat = mappers.to_evidence_item(incidents_repo.list_evidence(db, outcome.incident_id)[0])
+    data = assemble_secops_input(incident=recorded, threat=threat, executions=[])
+    assert data.current_rule_risk_basis == expected_basis
+    assert data.initial_risk.initial_risk_level == recorded.initial_risk_level
+    assert data.initial_risk.reason_codes == recorded.initial_risk_reason_codes
+    if mismatch:
+        assert "current_rule_risk_basis" not in _secops_payload(data)
 
 
 def test_secops_context_legacy_evidence_is_readable_but_not_rebuilt_from_latest_assets(db, client_pg, tmp_path):

@@ -276,6 +276,21 @@ def report(run: dict, cases: list[EvalCase], answers: dict[str, Answer],
     all_pass = counts["PASS"] == len(planned) and run["state"] == "COMPLETE"
     real_measured = bool(observed) and all(record["data_source"] == "real_model" for record in observed.values())
     snapshots = sorted({name for record in observed.values() for name in record["model_snapshots"]})
+    # 케이스 수용은 계획 전체를 분모로 하는 산술 기준이다. 평가 완료·현재 서비스·운영 성공과 별개다.
+    exact_9x10 = repeats == 10 and set(case_ids) == {case.case_id for case in load_cases()}
+    acceptance_cases = {}
+    for case_id in case_ids:
+        case_counts = {name: 0 for name in counts}
+        for item in scores:
+            if item["case_id"] == case_id:
+                case_counts[item["verdict"]] += 1
+        acceptance_cases[case_id] = {
+            "planned": repeats, "recorded": sum(1 for key in observed if key[0] == case_id),
+            "counts": case_counts,
+            "threshold_met": case_counts["PASS"] >= 8 if exact_9x10 else None,
+        }
+    fully_observed = run["state"] == "COMPLETE" and len(observed) == len(planned)
+    acceptance_met = exact_9x10 and all(item["threshold_met"] for item in acceptance_cases.values())
     return {
         "run_id": run["run_id"], "planned": len(planned), "recorded": len(observed),
         "counts": counts, "scores": scores,
@@ -291,6 +306,14 @@ def report(run: dict, cases: list[EvalCase], answers: dict[str, Answer],
         "model_snapshots": snapshots,
         "baseline_candidate": (all_pass and repeats >= 3 and current_service and complete_set
                                and real_measured and len(snapshots) == 1),
+        "case_acceptance": {
+            "required_repeats": 10, "required_passes": 8,
+            "measurement": {"exact_9x10": exact_9x10, "fully_observed": fully_observed},
+            "cases": acceptance_cases,
+            "threshold_met": acceptance_met,
+            "baseline_candidate": (acceptance_met and fully_observed and current_service
+                                   and real_measured and len(snapshots) == 1),
+        },
         "reviewer": review.reviewer if review is not None else None,
         "reviewer_kind": review.reviewer_kind if review is not None else None,
         # 완전 일치율은 관측값이다. 허용 범위 안의 rule_number 차이는 결함이 아니다.

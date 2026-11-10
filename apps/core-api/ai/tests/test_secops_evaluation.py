@@ -140,6 +140,9 @@ def test_secops_prompt_matches_explicit_snapshot():
             assert (ROOT / candidate["result"]).is_file()
         assert candidate["prompt_sha256"] != snapshot["approved"]["prompt_sha256"]
         assert (ROOT / candidate["plan"]).is_file()
+        current = runner.fingerprints(load_cases())
+        assert candidate["inputs_sha256"] == current["inputs_sha256"]
+        assert candidate["request_sha256"] == current["request_sha256"]
     assert active["rubric_sha256"] == digest(read_json(ROOT / "rubric.json"))
 
 
@@ -475,6 +478,78 @@ def test_missing_runs_and_reviews_cannot_pass_and_records_cannot_duplicate():
     run["records"].append(deepcopy(run["records"][0]))
     with pytest.raises(ValueError, match="Duplicate"):
         runner.report(run, cases, load_answers(cases))
+
+
+def _ten_repeat_real_run(cases, drop=None):
+    """drop: {case_id: 제외할 repeat 목록}. 제외된 기록은 계획에는 남고 관측에서만 빠진다."""
+    drop = drop or {}
+    run = _run(cases, 10)
+    run["records"] = [runner.run_one(case, n, _client(case))
+                      for n in range(1, 11) for case in cases
+                      if n not in drop.get(case.case_id, ())]
+    for record in run["records"]:
+        record["data_source"] = "real_model"
+        record["model_snapshots"] = ["snapshot-1"]
+    run["state"] = "COMPLETE"
+    return run
+
+
+def test_case_acceptance_applies_eight_of_ten_per_case_with_missing_records_as_non_pass():
+    cases = load_cases()
+    first, second = cases[0].case_id, cases[1].case_id
+    run = _ten_repeat_real_run(cases, {first: (9, 10), second: (8, 9, 10)})
+    result = runner.report(run, cases, load_answers(cases), _review(run))
+    acceptance = result["case_acceptance"]
+    assert (acceptance["required_repeats"], acceptance["required_passes"]) == (10, 8)
+    assert acceptance["measurement"] == {"exact_9x10": True, "fully_observed": False}
+    assert acceptance["cases"][first] == {
+        "planned": 10, "recorded": 8, "threshold_met": True,
+        "counts": {"PASS": 8, "FAIL": 0, "PENDING": 2, "TOOL_ERROR": 0, "TRANSPORT_ERROR": 0}}
+    assert acceptance["cases"][second]["counts"]["PASS"] == 7
+    assert acceptance["cases"][second]["threshold_met"] is False
+    assert acceptance["cases"][cases[2].case_id]["threshold_met"] is True
+    assert acceptance["threshold_met"] is False
+    # 기존 필드는 그대로 전체 계획 분모로 판정한다.
+    assert not result["quality_pass"] and not result["baseline_candidate"]
+    assert result["repeat_requirement_met"]
+
+
+def test_case_acceptance_threshold_and_baseline_eligibility_are_independent():
+    cases = load_cases()
+    run = _ten_repeat_real_run(cases, {cases[0].case_id: (10,)})
+    result = runner.report(run, cases, load_answers(cases), _review(run))
+    # 산술 기준은 충족하지만 기록이 모자라 완전 관측이 아니므로 기준선 후보가 아니다.
+    assert result["case_acceptance"]["threshold_met"] is True
+    assert result["case_acceptance"]["measurement"]["fully_observed"] is False
+    assert not result["case_acceptance"]["baseline_candidate"]
+
+    run = _ten_repeat_real_run(cases)
+    run["state"] = "RUNNING"
+    result = runner.report(run, cases, load_answers(cases), _review(run))
+    assert result["case_acceptance"]["threshold_met"] is True
+    assert result["case_acceptance"]["measurement"]["fully_observed"] is False
+    assert not result["case_acceptance"]["baseline_candidate"]
+
+    run["state"] = "COMPLETE"
+    # 검토 누락은 PASS를 줄이지만 기록 누락이 아니므로 관측 완전성은 유지된다.
+    unreviewed = runner.report(run, cases, load_answers(cases))
+    assert unreviewed["case_acceptance"]["measurement"]["fully_observed"] is True
+    assert unreviewed["case_acceptance"]["threshold_met"] is False
+    full = runner.report(run, cases, load_answers(cases), _review(run))
+    assert full["case_acceptance"]["threshold_met"] is True
+    assert full["case_acceptance"]["baseline_candidate"] and full["baseline_candidate"]
+
+
+def test_case_acceptance_threshold_is_unknown_outside_the_exact_9x10_design():
+    cases = load_cases()
+    run = _run(cases[:1], 10)
+    run["records"] = [runner.run_one(cases[0], n, _client(cases[0])) for n in range(1, 11)]
+    partial_set = runner.report(run, cases[:1], load_answers(cases), _review(run))["case_acceptance"]
+    assert partial_set["measurement"]["exact_9x10"] is False
+    assert partial_set["threshold_met"] is False and partial_set["cases"][cases[0].case_id]["threshold_met"] is None
+    run = _run(cases, 3)
+    run["records"] = []
+    assert runner.report(run, cases, load_answers(cases))["case_acceptance"]["measurement"]["exact_9x10"] is False
 
 
 def test_fake_measurements_never_establish_a_real_baseline():

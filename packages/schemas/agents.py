@@ -39,7 +39,7 @@ from .api.analysis import AnalysisFailureReason
 from .api.assets import AssetItem, AssetType
 from .api.incidents import IncidentCategory, RiskLevel
 from .evidence import EVIDENCE_CONTENT_MODELS, EvidenceContent, EvidenceType, bind_evidence_content
-from .events import InitialRiskEvaluationResult
+from .events import InitialRiskEvaluationResult, SshRiskBasis
 from .incidents import AGENT_TERMINAL_STATUSES, AgentInvocationStatus
 from .rules import RuleEvaluationResult
 from .runbook_parameters import (
@@ -171,6 +171,13 @@ class SecOpsGraphInput(BaseModel):
     incident_id: str = Field(min_length=1)
     asset_context: AgentAssetContext
     initial_risk: InitialRiskEvaluationResult
+    current_rule_risk_basis: SshRiskBasis | None = Field(
+        None,
+        description=(
+            "저장된 관측을 현재 규칙으로 해석한 분기. 현재 등급·사유가 저장된 초기 판정과 "
+            "같을 때만 공급한다. 접수 당시 판정 근거를 보존한 값은 아니다."
+        ),
+    )
     evidences: list[AgentEvidenceInput] = Field(default_factory=list)
     # High 사전 격리가 있었던 경우에만 존재 — 격리 실패·부분 적용도 그대로 전달한다
     isolation_execution: Optional[AgentExecutionContext] = None

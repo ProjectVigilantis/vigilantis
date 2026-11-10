@@ -120,6 +120,26 @@ def test_evidence_first_is_one_call_and_the_code_assembles_the_nacl_candidate():
     assert payload["asset"] == data.asset_context.model_dump(mode="json")
 
 
+@pytest.mark.parametrize("basis, label", [
+    ("SINGLE_ATTEMPT", "현재 규칙 기준 단발 시도"),
+    ("COUNT_AND_RATE_MET", "현재 규칙 기준 반복 횟수와 빈도 조건을 모두 충족"),
+    ("COUNT_ONLY_MET", "현재 규칙 기준 반복 횟수 조건만 충족하며 빈도 조건은 미충족"),
+    ("RATE_ONLY_MET", "현재 규칙 기준 짧은 관측 창에 집중된 실패로 빈도 조건만 충족"),
+    ("NEITHER_MET", "현재 규칙 기준 반복 횟수와 빈도 조건 모두 미충족"),
+])
+def test_current_rule_basis_is_sent_as_korean_text(basis, label):
+    data = SecOpsGraphInput.model_validate({
+        **graph_input().model_dump(), "current_rule_risk_basis": basis,
+    })
+    client = FakeAIModelClient([decided([])])
+    output = run_secops_graph(data, client=client, nacl_rule_numbers={NACL: 1})
+    assert output.invocation_status is AgentInvocationStatus.NO_PROPOSAL
+    payload = client.sent[0]["user_payload"]
+    assert payload["current_rule_risk_basis"] == label
+    assert basis not in json.dumps(payload, ensure_ascii=False)
+    assert payload["initial_risk"] == data.initial_risk.model_dump(mode="json")
+
+
 def test_empty_decision_is_no_proposal_with_three_lines():
     client = FakeAIModelClient([decided([])])
     output = run_secops_graph(graph_input(), client=client, nacl_rule_numbers={NACL: 1})

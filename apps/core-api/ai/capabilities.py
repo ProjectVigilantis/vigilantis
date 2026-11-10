@@ -48,7 +48,8 @@ from __future__ import annotations
 import logging
 from typing import Mapping, Optional
 
-from schemas.agents import RunbookCapability
+from schemas.agents import AgentExecutionContext, RunbookCapability
+from schemas.api.actions import ExecutionStatus
 from schemas.api.assets import AssetItem, AssetType, RelationType, Verdict
 from schemas.events import ThreatEventType
 from services.aws.executor import parse_arn
@@ -159,7 +160,8 @@ def secops_action_targets(asset: AssetItem) -> dict[str, list[str]]:
 
 
 def build_secops_capabilities(
-    *, asset: AssetItem, event_type: ThreatEventType
+    *, asset: AssetItem, event_type: ThreatEventType,
+    prior_isolation: AgentExecutionContext | None = None,
 ) -> list[RunbookCapability]:
     """조회·실행 의존성이 연결된 SSH 차단만 제공한다.
 
@@ -175,8 +177,17 @@ def build_secops_capabilities(
     if (event_type is not ThreatEventType.SSH_BRUTE_FORCE
             or len(secops_action_targets(asset)[runbook.value]) != 1):
         return []
+    purpose = CAPABILITY_PURPOSE[runbook]
+    if (prior_isolation is not None
+            and prior_isolation.runbook_id is RunbookId.RUNBOOK_EC2_ISOLATE
+            and prior_isolation.status is ExecutionStatus.SUCCESS
+            and asset.arn in prior_isolation.affected_arns):
+        purpose = (
+            "격리 실행이 성공으로 기록된 EC2와 별개로, 같은 서브넷의 다른 호스트를 보호하기 위해 "
+            "출발지 CIDR 유입을 NACL 거부 규칙으로 차단"
+        )
     return [RunbookCapability(
         runbook_id=runbook,
-        purpose=CAPABILITY_PURPOSE[runbook],
+        purpose=purpose,
         allowed_target_asset_types=[AssetType.NACL],
     )]

@@ -74,6 +74,7 @@
             "RISK_SSH_BRUTEFORCE"
           ]
         },
+        "current_rule_risk_basis": "COUNT_AND_RATE_MET",
         "evidences": [
           {
             "evidence_id": "5956549c-9536-56ed-883a-4ddeecf2de4d",
@@ -402,6 +403,7 @@
             "RISK_SSH_BRUTEFORCE"
           ]
         },
+        "current_rule_risk_basis": "COUNT_AND_RATE_MET",
         "evidences": [
           {
             "evidence_id": "68694052-d9f6-5480-8977-f059de21b062",
@@ -730,6 +732,7 @@
             "RISK_SSH_BRUTEFORCE"
           ]
         },
+        "current_rule_risk_basis": "COUNT_AND_RATE_MET",
         "evidences": [
           {
             "evidence_id": "9697dd70-6fe2-59b7-ae07-65050bcdb074",
@@ -1058,6 +1061,7 @@
             "RISK_SSH_BRUTEFORCE"
           ]
         },
+        "current_rule_risk_basis": "COUNT_ONLY_MET",
         "evidences": [
           {
             "evidence_id": "971cf07a-e942-5dd8-b2e5-87218ff024d8",
@@ -1386,6 +1390,7 @@
             "RISK_SSH_BRUTEFORCE"
           ]
         },
+        "current_rule_risk_basis": "RATE_ONLY_MET",
         "evidences": [
           {
             "evidence_id": "f7fbbbfb-dfdc-5e7f-9a8e-e8ef9efeb4e0",
@@ -1690,6 +1695,7 @@
             "RISK_SSH_LOW_SIGNAL"
           ]
         },
+        "current_rule_risk_basis": "NEITHER_MET",
         "evidences": [
           {
             "evidence_id": "0c6bb2d0-59b0-5abd-96e1-06f7f1278985",
@@ -2018,6 +2024,7 @@
             "RISK_SSH_LOW_SIGNAL"
           ]
         },
+        "current_rule_risk_basis": "SINGLE_ATTEMPT",
         "evidences": [
           {
             "evidence_id": "b95d9874-2d69-54a1-92b9-47fcc30053ea",
@@ -2275,6 +2282,7 @@
             "RISK_SSH_BRUTEFORCE"
           ]
         },
+        "current_rule_risk_basis": "COUNT_AND_RATE_MET",
         "evidences": [
           {
             "evidence_id": "1584c755-45ef-58a0-9854-303ed9eaa224",
@@ -2528,7 +2536,7 @@
         "capabilities": [
           {
             "runbook_id": "RUNBOOK_NACL_ADD_DENY",
-            "purpose": "출발지 CIDR을 NACL 거부 규칙으로 차단",
+            "purpose": "격리 실행이 성공으로 기록된 EC2와 별개로, 같은 서브넷의 다른 호스트를 보호하기 위해 출발지 CIDR 유입을 NACL 거부 규칙으로 차단",
             "allowed_target_asset_types": [
               "NACL"
             ]
@@ -2612,6 +2620,7 @@
             "RISK_SSH_BRUTEFORCE"
           ]
         },
+        "current_rule_risk_basis": "COUNT_AND_RATE_MET",
         "evidences": [
           {
             "evidence_id": "73684085-31ad-5605-8ca0-dbf8af4a7b28",

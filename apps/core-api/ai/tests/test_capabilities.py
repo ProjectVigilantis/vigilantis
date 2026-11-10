@@ -9,6 +9,7 @@
 import pytest
 
 from ai.capabilities import build_finops_capabilities, build_secops_capabilities
+from schemas.agents import AgentExecutionContext
 from schemas.api.assets import AssetItem, AssetType, Verdict
 from schemas.events import ThreatEventType
 from schemas.runbooks import RunbookId
@@ -49,10 +50,9 @@ def test_non_ec2_menus_do_not_depend_on_instance_type():
     ]
 
 
-@pytest.mark.parametrize("nacl_count,offered", [(1, [RunbookId.RUNBOOK_NACL_ADD_DENY]), (2, [])])
-def test_secops_block_is_offered_only_for_a_single_protected_by_nacl(nacl_count, offered):
+def _secops_asset(nacl_count=1):
     prefix = "arn:aws:ec2:ap-northeast-2:123456789012:"
-    asset = AssetItem.model_validate({
+    return AssetItem.model_validate({
         "arn": prefix + "instance/i-0abc", "resource_id": "i-0abc", "asset_type": "EC2",
         "resource_role": "PRIMARY", "account_id": "123456789012", "region": "ap-northeast-2",
         "state": "running", "spec": {}, "evaluation_status": "PENDING",
@@ -62,5 +62,34 @@ def test_secops_block_is_offered_only_for_a_single_protected_by_nacl(nacl_count,
             for index in range(nacl_count)
         ],
     })
+
+
+@pytest.mark.parametrize("nacl_count,offered", [(1, [RunbookId.RUNBOOK_NACL_ADD_DENY]), (2, [])])
+def test_secops_block_is_offered_only_for_a_single_protected_by_nacl(nacl_count, offered):
+    asset = _secops_asset(nacl_count)
     menu = build_secops_capabilities(asset=asset, event_type=ThreatEventType.SSH_BRUTE_FORCE)
     assert [capability.runbook_id for capability in menu] == offered
+
+
+@pytest.mark.parametrize("runbook,status,own_target,distinct_purpose", [
+    ("RUNBOOK_EC2_ISOLATE", "SUCCESS", True, True),
+    ("RUNBOOK_EC2_ISOLATE", "FAILED", True, False),
+    ("RUNBOOK_EC2_ISOLATE", "IN_PROGRESS", True, False),
+    ("RUNBOOK_EC2_ISOLATE", "UNVERIFIED", True, False),
+    ("RUNBOOK_EC2_ISOLATE", "SUCCESS", False, False),
+    ("RUNBOOK_NACL_ADD_DENY", "SUCCESS", True, False),
+])
+def test_nacl_purpose_distinguishes_only_recorded_successful_isolation_of_this_ec2(
+    runbook, status, own_target, distinct_purpose,
+):
+    asset = _secops_asset()
+    prior = AgentExecutionContext(
+        execution_id="prior-1", runbook_id=runbook, status=status,
+        affected_arns=[asset.arn if own_target else asset.arn + "-other"],
+    )
+    [capability] = build_secops_capabilities(
+        asset=asset, event_type=ThreatEventType.SSH_BRUTE_FORCE, prior_isolation=prior,
+    )
+    assert ("다른 호스트를 보호하기 위해" in capability.purpose) is distinct_purpose
+    assert ("성공으로 기록된" in capability.purpose) is distinct_purpose
+    assert capability.runbook_id is RunbookId.RUNBOOK_NACL_ADD_DENY

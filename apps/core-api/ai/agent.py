@@ -54,6 +54,7 @@ from schemas.agents import (
 )
 from schemas.api.incidents import RiskLevel
 from schemas.evidence import EvidenceType
+from schemas.events import SshRiskBasis
 from schemas.incidents import AgentInvocationStatus
 from schemas.rightsizing_policy import rightsizing_target_type
 from schemas.runbook_parameters import (
@@ -774,6 +775,14 @@ _SECOPS_RISK_LABELS = {
     RiskLevel.LOW: "낮음",
 }
 
+_SECOPS_RISK_BASIS_LABELS = {
+    SshRiskBasis.SINGLE_ATTEMPT: "현재 규칙 기준 단발 시도",
+    SshRiskBasis.COUNT_AND_RATE_MET: "현재 규칙 기준 반복 횟수와 빈도 조건을 모두 충족",
+    SshRiskBasis.COUNT_ONLY_MET: "현재 규칙 기준 반복 횟수 조건만 충족하며 빈도 조건은 미충족",
+    SshRiskBasis.RATE_ONLY_MET: "현재 규칙 기준 짧은 관측 창에 집중된 실패로 빈도 조건만 충족",
+    SshRiskBasis.NEITHER_MET: "현재 규칙 기준 반복 횟수와 빈도 조건 모두 미충족",
+}
+
 _SECOPS_SUMMARY_PROMPT = (
     "AWS 보안 관측과 실제 분석 결과를 관제자가 판단할 수 있는 한국어 세 문장으로 쓴다.\n"
     "[이번 분석 결과의 설명]\n"
@@ -978,6 +987,8 @@ def _secops_payload(graph_input: SecOpsGraphInput) -> dict[str, Any]:
         "asset_context_at": context_at,
         "asset": graph_input.asset_context.model_dump(mode="json"),
         "initial_risk": graph_input.initial_risk.model_dump(mode="json"),
+        **({"current_rule_risk_basis": _SECOPS_RISK_BASIS_LABELS[graph_input.current_rule_risk_basis]}
+           if graph_input.current_rule_risk_basis is not None else {}),
         "evidences": evidences,
         "isolation_execution": (
             graph_input.isolation_execution.model_dump(mode="json")

@@ -147,6 +147,7 @@ from db.session import get_session_factory
 from logging_config import log_context
 from realtime import incident_event
 from security import soar
+from security.risk_evaluator import classify_ssh_risk_basis, evaluate_threat
 from services.aws.client import tenant_scope
 from services.aws.executor import resolve_nacl_add_deny_rule_number
 
@@ -421,11 +422,6 @@ def assemble_secops_input(*, incident, threat: EvidenceItem, executions) -> SecO
         if context.target is None:
             raise GraphInputUnavailable(f"생성 시점 대상 자산 근거 부족: {context.target_status}")
         asset = context.target.asset
-        capabilities = build_secops_capabilities(asset=asset, event_type=event.event_type)
-        if not capabilities:
-            raise GraphInputUnavailable(
-                "이 위협에 제공할 조치·조회 의존성이 없습니다", AnalysisFailureReason.NO_ACTION_AVAILABLE,
-            )
         # response_mode는 이후 타이머가 바꿀 수 있다. 초기 입력에는 초기 위험도에
         # 대응하는 원래 모드를 복원하고 현재 Incident 대응 모드는 수정하지 않는다.
         initial = InitialRiskEvaluationResult(
@@ -449,8 +445,20 @@ def assemble_secops_input(*, incident, threat: EvidenceItem, executions) -> SecO
                                if execution.status is ExecutionStatus.SUCCESS else []),
                 result_summary=execution.error_summary or None,
             )
+        capabilities = build_secops_capabilities(
+            asset=asset, event_type=event.event_type, prior_isolation=isolation,
+        )
+        if not capabilities:
+            raise GraphInputUnavailable(
+                "이 위협에 제공할 조치·조회 의존성이 없습니다", AnalysisFailureReason.NO_ACTION_AVAILABLE,
+            )
+        basis = None
+        if event.event_type is ThreatEventType.SSH_BRUTE_FORCE and evaluate_threat(event) == initial:
+            # 저장된 초기 판정을 다시 쓰지 않는다. 같은 등급이어도 과거 분기를 재현한 값은 아니다.
+            basis = classify_ssh_risk_basis(event.payload)
         return SecOpsGraphInput(
             incident_id=incident.incident_id, asset_context=asset, initial_risk=initial,
+            current_rule_risk_basis=basis,
             evidences=[AgentEvidenceInput(evidence_id=threat.evidence_id,
                                          evidence_type=threat.evidence_type,
                                          content=threat.content)],
