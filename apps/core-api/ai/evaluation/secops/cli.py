@@ -83,7 +83,7 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--review-template", type=Path, metavar="RUN_JSON")
     parser.add_argument("--output", type=Path, help="새 파일만 허용; 기존 결과를 덮어쓰지 않음")
     parser.add_argument("--review", type=Path, help="요약 의미 검토 파일; --report에서만 사용")
-    parser.add_argument("--cases", nargs="+", help="주평가 C01~C07 중 선택; 기본 전체")
+    parser.add_argument("--cases", nargs="+", help="주평가 C01~C09 중 선택; 기본 전체")
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--variant", choices=[item.value for item in SecOpsGraphVariant],
                         default=SecOpsGraphVariant.EVIDENCE_FIRST.value,
@@ -113,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
         selected = saved["case_ids"]
     if selected is not None:
         if len(selected) != len(set(selected)) or not selected or set(selected) - set(answers):
-            parser.error("Select unique primary case IDs from C01~C07; N01/N02 require no model call")
+            parser.error("Select unique primary case IDs from C01~C09; N01/N02 require no model call")
         by_id = {case.case_id: case for case in cases}
         cases = [by_id[case_id] for case_id in selected]
 
