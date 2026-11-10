@@ -165,7 +165,8 @@ vigilantis/
 | `inject_status_check_failure.py` | 시연용 Status Check 실패 주입 — 자동 원복 컷을 LocalStack에서 일으킨다 |
 | `probe_dryrun.py` | 런북이 쓰는 AWS 작업 전수에 DryRun을 걸어 지원 여부를 실측(ADR-0007 §6) |
 | `provision_smoke_aws.py` | 실 AWS 스모크 환경 구성·정리(up / status / down) — ADR-0009 |
-| `provision_platform_aws.py` | 플랫폼 배포 환경 구성·배포·정리 — CloudFront + WAF · 공개 ALB · ECS Fargate(api·web) · RDS, 장기 키 없이 역할 전환으로 관제 대상에 닿는다 — ADR-0010 |
+| `provision_platform_aws.py` | 플랫폼 배포 환경 구성·배포·정리 — CloudFront + WAF · 공개 ALB · ECS Fargate(api·web) · RDS(Multi-AZ) · 로그인(Cognito) · 온보딩 템플릿 버킷, 장기 키 없이 역할 전환으로 고객 계정에 닿는다 — ADR-0010 |
+| `onboarding_template.py` | 고객 온보딩 CloudFormation 템플릿(`packages/iac/onboarding/vigilantis-access.json`)을 만든다. `--check`로 저장소 파일과 대조 |
 | `qa_scan_compare.py` | 실 AWS 스모크의 수집·판정 대조(A3·A9) 조회를 `docs/AWS_SMOKE_RESULT.md` §2 순서로 출력 — **읽기 전용** |
 | `secops_log_corpus.py` | SSH 모의 로그 코퍼스 build/check + 모의 위협 inbox 준비 |
 | `finops_eval.py` · `finops_judge.py` | AI 요약 품질 계측·판정 CLI (구현은 `ai/evaluation/summary`) |
@@ -317,6 +318,25 @@ ROLLBACK;
 ```
 
 **실제 발송 시험 기록** — 2026-10-20 개인 AWS 계정의 일회용 ECS 시험 결과(공급자 receipt·대표 수신 화면·미검증 범위·정리)는 팀 환경 측정이 아니므로 [#493 시험 기록 코멘트](https://github.com/ProjectVigilantis/vigilantis/issues/493#issuecomment-6330758930)에서 관리한다.
+
+### 플랫폼 운영 배포 순서
+
+플랫폼 계정(`vigilantis-prod`)의 관리자 프로필로 repo 루트에서 돌린다. 계정 ID · 허용 IP · 이메일은 저장소에 적지 않는다.
+
+```bash
+P="uv run python scripts/provision_platform_aws.py"
+$P up --account <플랫폼 계정> --allow-cidr <IP>/32 --domain vigilantis.dev --alarm-email <주소>        # 미리 보기
+$P up --account <플랫폼 계정> --allow-cidr <IP>/32 --domain vigilantis.dev --alarm-email <주소> --yes
+aws secretsmanager put-secret-value --secret-id vigilantis-platform/openai-api-key --secret-string <키>
+$P build --account <플랫폼 계정> --tag <태그>                     # docker 필요
+$P deploy --account <플랫폼 계정> --tag <태그> --yes
+$P bootstrap-admin --account <플랫폼 계정> --email <주소> --yes    # 첫 중앙 관리자. 처음 한 번
+```
+
+- `up --yes`가 만드는 것: 멀티 AZ 네트워크(NAT AZ마다 1개) · RDS Multi-AZ · Cognito 사용자 풀과 앱 클라이언트 · 온보딩 템플릿 버킷 · ALB · WAF · CloudFront. `--domain`을 주면 ALB용 서울 리전 인증서(`origin.<도메인>`)가 없을 때 DNS 검증으로 받는다. us-east-1 인증서와 Route53 영역은 먼저 있어야 한다.
+- 첫 중앙 관리자 뒤의 계정은 화면에서 초대한다. 직원은 `POST /api/v1/staff`, 고객사 사용자는 `POST /api/v1/users`이며, 둘 다 Cognito 사용자와 DB 행을 함께 만든다.
+- 고객 계정은 고객 연결 화면의 빠른 생성 링크로 온보딩 템플릿을 올려 연결한다. 플랫폼은 고객 계정에 역할을 만들지 않는다.
+- 템플릿을 고치면 `uv run python scripts/onboarding_template.py`로 파일을 다시 만들고 `up --yes`를 다시 돌린다. 버킷의 템플릿은 `up`마다 저장소 파일로 덮어쓴다.
 
 ---
 
