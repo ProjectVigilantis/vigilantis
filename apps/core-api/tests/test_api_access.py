@@ -55,6 +55,9 @@ FOREIGN_ORIGIN = "https://evil.example.com"
 PUBLIC_ROUTES = {
     ("GET", "/health"),
     ("POST", "/api/v1/signup-requests"),
+    # AWS Marketplace 등록 랜딩(ADR-0012 2차 개정) — 구매자 브라우저가 AWS 에서 폼으로 보낸다. 세션 · Origin 이 없고
+    # 토큰을 AWS(ResolveCustomer)가 확인한다. 상품 코드가 없으면 404 다
+    ("POST", "/api/v1/marketplace/register"),
     ("POST", "/api/v1/auth/login"),
     ("POST", "/api/v1/auth/login/new-password"),
     ("POST", "/api/v1/auth/login/totp-setup"),
