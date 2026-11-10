@@ -105,7 +105,7 @@ def test_upgrade_adds_nullable_set_null_fk_without_a_new_table_and_matches_orm(s
     config, engine = scratch_db
     command.upgrade(config, PARENT)
     before = set(inspect(engine).get_table_names())
-    command.upgrade(config, "head")
+    command.upgrade(config, REVISION)
     with engine.connect() as conn:
         inspector = inspect(conn)
         assert set(inspector.get_table_names()) == before
@@ -116,6 +116,9 @@ def test_upgrade_adds_nullable_set_null_fk_without_a_new_table_and_matches_orm(s
             for fk in inspector.get_foreign_keys("signup_requests")
             if fk["constrained_columns"] == ["tenant_id"]
         } == {("tenants", "SET NULL")}
+    # 후속·병렬 revision은 표를 더할 수 있다. ORM은 그 변경까지 적용한 head와 비교한다.
+    command.upgrade(config, "head")
+    with engine.connect() as conn:
         assert compare_metadata(MigrationContext.configure(conn), models.Base.metadata) == []
 
 
