@@ -64,6 +64,7 @@ from routers import auth as auth_router  # noqa: E402
 from routers import costs as costs_router  # noqa: E402
 from routers import incidents as incidents_router  # noqa: E402
 from routers import inquiries as inquiries_router
+from routers import marketplace as marketplace_router  # noqa: E402
 from routers import metrics as metrics_router  # noqa: E402
 from routers import notifications as notifications_router
 from routers import platform as platform_router  # noqa: E402
@@ -78,6 +79,7 @@ from routers import users as users_router  # noqa: E402
 from routers import ws as ws_router  # noqa: E402
 from security.soar import start_timeout_watcher  # noqa: E402
 from services.scheduler import start_scheduler as start_scan_scheduler  # noqa: E402
+from marketplace_sync import start_marketplace_scheduler  # noqa: E402
 from subscription_scheduler import start_subscription_scheduler  # noqa: E402
 from support_http import SignupBodyLimitMiddleware
 
@@ -122,6 +124,8 @@ def create_app() -> FastAPI:
             partial(start_timeout_watcher, realtime.publish),
             # 고객 구독 계약 처리(모의 Marketplace 활성화 · 갱신 · 만료 · 투영). 발행하는 이벤트가 없다.
             start_subscription_scheduler,
+            # 실제 AWS Marketplace 알림 수신 · 권리 끝 재확인. 상품 코드가 없으면 뜨지 않는다.
+            start_marketplace_scheduler,
         )
         try:
             for start in starts:
@@ -232,6 +236,8 @@ def create_app() -> FastAPI:
     app.include_router(costs_router.router, dependencies=protected)
     app.include_router(incidents_router.router, dependencies=protected)
     app.include_router(inquiries_router.router, dependencies=protected)
+    # 등록 랜딩은 AWS 에서 오는 구매자 브라우저가 부른다 — 세션 없이 마운트하고 토큰을 AWS 가 확인한다
+    app.include_router(marketplace_router.router)
     app.include_router(metrics_router.router, dependencies=protected)
     app.include_router(notifications_router.router, dependencies=protected)
     # 플랫폼 상태 · 호출 통계(#572 6번) — 라우터가 CENTRAL_ADMIN 관문을 건다

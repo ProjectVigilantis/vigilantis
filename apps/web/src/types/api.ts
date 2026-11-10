@@ -821,7 +821,7 @@ export interface TenantVerification {
 /**
  * 지금 적용 중인 구독(T-16 · #528) — 투영이다. 결제 · 청구는 없다.
  * 원천(`subscription_source`)은 수동 등록(MANUAL) · 모의 Marketplace 계약의 현재 권리(MOCK_MARKETPLACE) ·
- * 앱 정책 Free(APP_FREE)다. 모의 계약 자체는 `/me/subscription`의 `agreement`가 권위다.
+ * 앱 정책 Free(APP_FREE) · 실제 AWS Marketplace 권리(AWS_MARKETPLACE, 상품 등록 뒤에만 생긴다)다. 모의 계약 자체는 `/me/subscription`의 `agreement`가 권위다.
  */
 export interface TenantSubscription {
   /** 요금제 이름. 'Free' · 'Business' · 'Enterprise' 밖의 옛 수동 등록 값도 보존된다. null = 등록 안 됨(Free 아님). */
@@ -953,7 +953,7 @@ export interface TenantUpdateRequest {
    유료 권리의 원천은 서버 안의 모의 Marketplace 계약이고 실제 AWS 호출 · 구매 · 청구가 없다. */
 
 /** 구독 투영의 원천. */
-export const SUBSCRIPTION_SOURCES = ['MANUAL', 'MOCK_MARKETPLACE', 'APP_FREE'] as const;
+export const SUBSCRIPTION_SOURCES = ['MANUAL', 'MOCK_MARKETPLACE', 'APP_FREE', 'AWS_MARKETPLACE'] as const;
 export type SubscriptionSource = (typeof SUBSCRIPTION_SOURCES)[number];
 
 /** 모의 Marketplace 로 구매를 요청할 수 있는 요금제(월 단위 계약형). 요금제 사이 전환은 없다. */

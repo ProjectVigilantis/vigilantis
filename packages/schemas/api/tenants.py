@@ -79,7 +79,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..arns import build_iam_role_arn
-from ..subscriptions import PAID_PLANS, SubscriptionSource, billing_period
+from ..subscriptions import CONTRACT_SOURCES, PAID_PLANS, SubscriptionSource, billing_period
 from .assets import UtcDateTime
 
 AwsAccountId = Annotated[str, Field(pattern=r"^\d{12}$")]
@@ -247,19 +247,17 @@ class TenantListItem(BaseModel):
     open_incident_count: int = Field(ge=0)
     #: 구독 현황(T-16). null = 구독 정보가 등록되지 않았다(Free 가 아니다). 서비스 정지와 무관하게 계약을 따른다.
     subscription: Optional[TenantSubscription] = None
-    #: 구독 투영의 원천. MOCK_MARKETPLACE 면 운영자 PATCH 로 바꿀 수 없다. null = 등록 안 됨.
+    #: 구독 투영의 원천. MOCK_MARKETPLACE · AWS_MARKETPLACE 면 운영자 PATCH 로 바꿀 수 없다. null = 등록 안 됨.
     subscription_source: SubscriptionSource | None = None
-    #: 모의 계약 투영의 권리 끝 시각(미포함). 원천이 MOCK_MARKETPLACE 일 때만 있다.
+    #: 계약 투영의 권리 끝 시각(미포함). 원천이 MOCK_MARKETPLACE · AWS_MARKETPLACE 일 때만 있다.
     entitlement_ends_at: UtcDateTime | None = None
     #: 고객사 그룹(#572 2번). null = 담당 그룹 없음(담당자 없음) — 연결 상태(status)와 별개다. 칸은 늘 있다(필수 · null 허용).
     group_id: str | None = Field(min_length=1)
 
     @model_validator(mode="after")
     def _enforce_subscription_source(self):
-        if (self.subscription_source is SubscriptionSource.MOCK_MARKETPLACE) != (
-            self.entitlement_ends_at is not None
-        ):
-            raise ValueError("entitlement_ends_at 은 모의 계약 투영에만, 그리고 반드시 있습니다")
+        if (self.subscription_source in CONTRACT_SOURCES) != (self.entitlement_ends_at is not None):
+            raise ValueError("entitlement_ends_at 은 계약 투영(모의 · 실제 Marketplace)에만, 그리고 반드시 있습니다")
         if (self.subscription_source is None) != (self.subscription is None):
             raise ValueError("등록 안 됨(subscription_source null)은 구독 정보가 없는 것입니다")
         return self

@@ -37,6 +37,7 @@ from schemas.api.tenants import (
 )
 from schemas.incidents import INCIDENT_OPEN_STATUSES
 from schemas.subscriptions import (
+    CONTRACT_SOURCES,
     FREE_PLAN,
     MOCK_AGREEMENT_OPEN_STATUSES,
     SubscriptionSource,
@@ -281,7 +282,7 @@ def update_tenant(
         locked = lock_tenant(db, tenant_id)
         if (
             locked is None
-            or locked.subscription_source is SubscriptionSource.MOCK_MARKETPLACE
+            or locked.subscription_source in CONTRACT_SOURCES
             or has_open_agreement(db, tenant_id)
         ):
             return False

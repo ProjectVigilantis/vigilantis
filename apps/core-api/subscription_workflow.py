@@ -26,6 +26,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 
+import marketplace
 import mock_marketplace
 from config import SubscriptionSettings
 from db import models
@@ -43,6 +44,7 @@ from schemas.api.subscriptions import (
 )
 from schemas.api.tenants import SUSPENDABLE_STATUSES, TenantStatus, TenantSubscription
 from schemas.subscriptions import (
+    CONTRACT_SOURCES,
     FREE_PLAN,
     MOCK_AGREEMENT_OPEN_STATUSES,
     MockAgreementStatus,
@@ -61,6 +63,7 @@ _MOCK = SubscriptionSource.MOCK_MARKETPLACE
 
 #: 만료 정지의 suspended_reason — 운영자 · 고객이 적는 사유와 구별되는 고정 문구다.
 EXPIRY_SUSPENSION_REASON = "모의 Marketplace 계약 만료 — 남은 유료 권리 없음"
+MARKETPLACE_EXPIRY_SUSPENSION_REASON = "AWS Marketplace 권리 종료 — 남은 유료 권리 없음"
 
 
 # --- 응답 조립 ------------------------------------------------------------------
@@ -211,6 +214,8 @@ def _mock_projection(entitlement: mock_marketplace.Entitlement) -> dict:
 def reconcile_tenant_subscription(db: Session, tenant_id: str, *, now: datetime) -> bool:
     """테넌트 행을 잠그고 모의 계약의 **현재** 상태를 다시 읽어 투영을 맞춘다 → 바꿨는가. commit 하지 않는다.
 
+    - 실제 Marketplace 권리(marketplace.current_entitlement)가 있으면 그것을 먼저 투영한다(AWS_MARKETPLACE). 실제
+      권리가 끝나면 모의 계약 만료와 같이 APP_FREE 로 돌리고 서비스를 멈춘다(사유만 다르다).
     - 지금 권리(활성 계약의 현재 기간 안)가 있으면 그 계약을 투영한다(MOCK_MARKETPLACE).
     - 자동 갱신 중인 활성 계약의 기간 끝 시각이 지났으면(처리 주기의 갱신 대기) 지금 투영을 그대로 둔다 — 권리가
       끝난 것이 아니다. 남은 투영은 직전 기간의 기록이고 권리 끝 시각(entitlement_ends_at)이 이미 지나 새로 이은
@@ -231,10 +236,22 @@ def reconcile_tenant_subscription(db: Session, tenant_id: str, *, now: datetime)
     tenant = tenants_repo.lock_tenant(db, tenant_id)
     if tenant is None:
         return False
+    # 실제 Marketplace 권리를 먼저 본다(ADR-0012 2차 개정). 상품을 등록하기 전에는 늘 None 이라 아래 판정 그대로다
+    real = marketplace.current_entitlement(db, tenant.aws_account_id, now=now)
     agreement = mock_repo.open_agreement(db, tenant_id)  # 한 번 읽은 계약으로 두 판정을 한다
     entitlement = mock_marketplace.entitlement_of(agreement, now=now)
-    if entitlement is not None:
-        if tenant.subscription_source is not _MOCK and tenant.plan != FREE_PLAN:
+    if real is not None:
+        if tenant.subscription_source not in CONTRACT_SOURCES and tenant.plan != FREE_PLAN:
+            logger.warning(
+                "marketplace_entitlement_not_projected_over_manual_record",
+                extra={"tenant_id": tenant_id, "license_arn": real.license_arn},
+            )
+            return False
+        desired = tenants_repo.projection_values(
+            marketplace.projection(real), marketplace.SOURCE, real.expires_at
+        )
+    elif entitlement is not None:
+        if tenant.subscription_source not in CONTRACT_SOURCES and tenant.plan != FREE_PLAN:
             logger.warning(
                 "mock_entitlement_not_projected_over_manual_record",
                 extra={"tenant_id": tenant_id, "agreement_id": entitlement.agreement_id},
@@ -243,9 +260,14 @@ def reconcile_tenant_subscription(db: Session, tenant_id: str, *, now: datetime)
         desired = _mock_projection(entitlement)
     elif mock_marketplace.renewal_pending(agreement, now=now):
         return False
-    elif tenant.subscription_source is _MOCK:
+    elif tenant.subscription_source in CONTRACT_SOURCES:
+        reason = (
+            MARKETPLACE_EXPIRY_SUSPENSION_REASON
+            if tenant.subscription_source is marketplace.SOURCE
+            else EXPIRY_SUSPENSION_REASON
+        )
         desired = tenants_repo.projection_values(tenants_repo.APP_FREE, SubscriptionSource.APP_FREE)
-        if tenants_repo.suspend_tenant(db, tenant_id, reason=EXPIRY_SUSPENSION_REASON, now=now):
+        if tenants_repo.suspend_tenant(db, tenant_id, reason=reason, now=now):
             logger.info("mock_entitlement_ended_service_suspended", extra={"tenant_id": tenant_id})
     else:
         return False
