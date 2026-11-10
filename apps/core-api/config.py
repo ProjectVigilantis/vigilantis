@@ -373,6 +373,48 @@ class SubscriptionSettings(BaseSettings):
     SUBSCRIPTION_DUE_INTERVAL_SECONDS: int = Field(default=60, gt=0)
 
 
+class MarketplaceSettings(BaseSettings):
+    """실제 AWS Marketplace 연동(ADR-0012 2차 개정 · marketplace.py). 상품을 등록하기 전에는 비워 둔다.
+
+      - MARKETPLACE_PRODUCT_CODE: 상품 코드. 비어 있으면 연동 전체가 꺼진다 — 등록 랜딩은 404, 알림 수신 ·
+        권리 재확인은 돌지 않고, 투영은 지금처럼 모의 계약만 본다. 상품을 등록해야 생기는 값이다.
+      - MARKETPLACE_ENTITLEMENT_REGION: GetEntitlements 리전. AWS 문서상 us-east-1 에서만 된다.
+      - MARKETPLACE_EVENTS_QUEUE_URL: EventBridge(`aws.agreement-marketplace`) 규칙이 보내는 SQS 큐. 비어 있으면
+        알림을 받지 않는다(권리 끝 시각이 지난 테넌트의 재확인은 그대로 돈다).
+      - MARKETPLACE_DIMENSION_PLANS: 가격 항목 이름 → 요금제. `business:Business,enterprise:Enterprise` 꼴.
+      - MARKETPLACE_SIGNUP_URL · MARKETPLACE_SUBSCRIPTION_URL: 등록 랜딩이 보내는 화면 주소(계정의 테넌트가
+        없으면 가입 화면, 있으면 구독 화면).
+    """
+
+    model_config = _ENV_FILE
+
+    MARKETPLACE_PRODUCT_CODE: str = ""
+    MARKETPLACE_ENTITLEMENT_REGION: str = "us-east-1"
+    MARKETPLACE_METERING_REGION: str = "us-east-1"
+    MARKETPLACE_EVENTS_QUEUE_URL: str = ""
+    MARKETPLACE_EVENTS_REGION: str = "us-east-1"
+    MARKETPLACE_DIMENSION_PLANS: str = "business:Business,enterprise:Enterprise"
+    MARKETPLACE_SIGNUP_URL: str = "/signup-requests"
+    MARKETPLACE_SUBSCRIPTION_URL: str = "/subscription"
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.MARKETPLACE_PRODUCT_CODE.strip())
+
+    @property
+    def dimension_plans(self) -> dict[str, str]:
+        """가격 항목 이름(소문자) → 요금제. 잘못된 항목은 기동 때 실패한다(조용히 무시하지 않는다)."""
+        from schemas.subscriptions import PAID_PLANS
+
+        pairs: dict[str, str] = {}
+        for item in _split_csv(self.MARKETPLACE_DIMENSION_PLANS):
+            dimension, sep, plan = item.partition(":")
+            if not sep or not dimension.strip() or plan.strip() not in PAID_PLANS:
+                raise ValueError(f"MARKETPLACE_DIMENSION_PLANS 항목이 잘못됐습니다: {item!r}")
+            pairs[dimension.strip().lower()] = plan.strip()
+        return pairs
+
+
 def _split_csv(raw: str) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
@@ -411,3 +453,9 @@ def get_tenant_settings() -> TenantSettings:
 def get_subscription_settings() -> SubscriptionSettings:
     """검증된 SubscriptionSettings 싱글턴. 테스트는 의존성 재정의 또는 cache_clear() 후 주입한다."""
     return SubscriptionSettings()
+
+
+@lru_cache
+def get_marketplace_settings() -> MarketplaceSettings:
+    """검증된 MarketplaceSettings 싱글턴. 테스트는 의존성 재정의 또는 cache_clear() 후 주입한다."""
+    return MarketplaceSettings()

@@ -1,0 +1,368 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Vigilantis customer access role. The platform assumes this role with your ExternalId to monitor and act on this account. Delete the stack to revoke access.",
+  "Parameters": {
+    "ExternalId": {
+      "Type": "String",
+      "MinLength": 16,
+      "Description": "Issued by Vigilantis for this customer. Required on every AssumeRole."
+    },
+    "PlatformPrincipalArn": {
+      "Type": "String",
+      "AllowedPattern": "^arn:aws:iam::\\d{12}:role/[\\w+=,.@/-]+$",
+      "Description": "The Vigilantis platform role allowed to assume this role."
+    },
+    "RoleName": {
+      "Type": "String",
+      "Default": "vigilantis-access",
+      "AllowedPattern": "^vigilantis-access[\\w+=,.@-]*$",
+      "Description": "Name of the access role. Must start with vigilantis-access."
+    }
+  },
+  "Resources": {
+    "AccessRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": {
+          "Ref": "RoleName"
+        },
+        "Description": "Vigilantis monitored-account access",
+        "MaxSessionDuration": 3600,
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Ref": "PlatformPrincipalArn"
+                }
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "sts:ExternalId": {
+                    "Ref": "ExternalId"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "vigilantis-access",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "autoscaling:Describe*",
+                    "cloudwatch:GetMetricData",
+                    "ec2:Describe*",
+                    "elasticloadbalancing:Describe*"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ce:GetCostAndUsage"
+                  ],
+                  "Resource": "*",
+                  "Condition": {
+                    "StringEquals": {
+                      "aws:RequestedRegion": "us-east-1"
+                    }
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:CreateImage",
+                    "ec2:ModifyInstanceAttribute",
+                    "ec2:StartInstances",
+                    "ec2:StopInstances"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:aws:ec2:*:${AWS::AccountId}:instance/*"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:CreateNetworkAclEntry",
+                    "ec2:DeleteNetworkAclEntry"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:aws:ec2:*:${AWS::AccountId}:network-acl/*"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:CreateSnapshot",
+                    "ec2:DeleteVolume"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:aws:ec2:*:${AWS::AccountId}:volume/*"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:CreateSnapshot"
+                  ],
+                  "Resource": "arn:aws:ec2:*::snapshot/*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:AuthorizeSecurityGroupEgress",
+                    "ec2:AuthorizeSecurityGroupIngress",
+                    "ec2:DeleteSecurityGroup",
+                    "ec2:ModifyNetworkInterfaceAttribute",
+                    "ec2:RevokeSecurityGroupEgress"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:aws:ec2:*:${AWS::AccountId}:security-group/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:aws:ec2:*:${AWS::AccountId}:network-interface/*"
+                    }
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:CreateSecurityGroup"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:aws:ec2:*:${AWS::AccountId}:security-group/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:aws:ec2:*:${AWS::AccountId}:vpc/*"
+                    }
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "elasticloadbalancing:DeregisterTargets",
+                    "elasticloadbalancing:RegisterTargets"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:aws:elasticloadbalancing:*:${AWS::AccountId}:targetgroup/*"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:CreateImage",
+                    "ec2:CreateLaunchTemplate"
+                  ],
+                  "Resource": [
+                    "arn:aws:ec2:*::image/*",
+                    "arn:aws:ec2:*::snapshot/*",
+                    {
+                      "Fn::Sub": "arn:aws:ec2:*:${AWS::AccountId}:launch-template/*"
+                    }
+                  ],
+                  "Condition": {
+                    "Null": {
+                      "aws:RequestTag/vigilantis:execution-id": "false",
+                      "aws:RequestTag/vigilantis:source-instance": "false"
+                    }
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:CreateTags"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:aws:ec2:*:${AWS::AccountId}:instance/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:aws:ec2:*:${AWS::AccountId}:volume/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:aws:ec2:*:${AWS::AccountId}:launch-template/*"
+                    },
+                    "arn:aws:ec2:*::image/*",
+                    "arn:aws:ec2:*::snapshot/*"
+                  ],
+                  "Condition": {
+                    "StringEquals": {
+                      "ec2:CreateAction": [
+                        "CreateImage",
+                        "CreateLaunchTemplate",
+                        "RunInstances"
+                      ]
+                    },
+                    "ForAllValues:StringEquals": {
+                      "aws:TagKeys": [
+                        "vigilantis:execution-id",
+                        "vigilantis:source-instance",
+                        "Environment",
+                        "environment",
+                        "vigilantis:smoke"
+                      ]
+                    },
+                    "Null": {
+                      "aws:TagKeys": "false"
+                    }
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "autoscaling:CreateAutoScalingGroup"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:aws:autoscaling:*:${AWS::AccountId}:autoScalingGroup:*:autoScalingGroupName/vigilantis-asg-*"
+                  },
+                  "Condition": {
+                    "Null": {
+                      "aws:RequestTag/vigilantis:execution-id": "false",
+                      "aws:RequestTag/vigilantis:source-instance": "false",
+                      "autoscaling:VPCZoneIdentifiers": "false"
+                    },
+                    "NumericLessThanEquals": {
+                      "autoscaling:MaxSize": "4",
+                      "autoscaling:MinSize": "4"
+                    },
+                    "Bool": {
+                      "autoscaling:LaunchTemplateVersionSpecified": "true"
+                    }
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "autoscaling:CreateOrUpdateTags"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:aws:autoscaling:*:${AWS::AccountId}:autoScalingGroup:*:autoScalingGroupName/vigilantis-asg-*"
+                  },
+                  "Condition": {
+                    "Null": {
+                      "aws:RequestTag/vigilantis:execution-id": "false",
+                      "aws:RequestTag/vigilantis:source-instance": "false"
+                    }
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "autoscaling:PutScalingPolicy",
+                    "autoscaling:SetInstanceProtection"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:aws:autoscaling:*:${AWS::AccountId}:autoScalingGroup:*:autoScalingGroupName/vigilantis-asg-*"
+                  },
+                  "Condition": {
+                    "Null": {
+                      "aws:ResourceTag/vigilantis:execution-id": "false"
+                    }
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:RunInstances"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:aws:ec2:*:${AWS::AccountId}:instance/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:aws:ec2:*:${AWS::AccountId}:volume/*"
+                    }
+                  ],
+                  "Condition": {
+                    "Null": {
+                      "aws:RequestTag/vigilantis:execution-id": "false",
+                      "aws:RequestTag/vigilantis:source-instance": "false"
+                    }
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:RunInstances"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:aws:ec2:*:${AWS::AccountId}:launch-template/*"
+                  },
+                  "Condition": {
+                    "Null": {
+                      "aws:ResourceTag/vigilantis:execution-id": "false"
+                    }
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:RunInstances"
+                  ],
+                  "Resource": [
+                    "arn:aws:ec2:*::image/*",
+                    "arn:aws:ec2:*::snapshot/*"
+                  ],
+                  "Condition": {
+                    "Null": {
+                      "aws:ResourceTag/vigilantis:execution-id": "false"
+                    },
+                    "StringEquals": {
+                      "ec2:Owner": {
+                        "Fn::Sub": "${AWS::AccountId}"
+                      }
+                    }
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:RunInstances"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:aws:ec2:*:${AWS::AccountId}:subnet/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:aws:ec2:*:${AWS::AccountId}:network-interface/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:aws:ec2:*:${AWS::AccountId}:security-group/*"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "vigilantis:access-role",
+            "Value": "true"
+          }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "RoleArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "AccessRole",
+          "Arn"
+        ]
+      }
+    }
+  }
+}

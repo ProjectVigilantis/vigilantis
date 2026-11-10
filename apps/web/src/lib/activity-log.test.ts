@@ -73,6 +73,7 @@ test('세 원천을 최신순으로 합치고 기간 밖 인시던트는 뺀다'
 
 test('시스템 실행은 발동 사유로 적는다', () => {
   assert.equal(actorLabel({ kind: 'SYSTEM', email: null }, 'TIMEOUT_ISOLATION_1M'), '시스템 · 1분 미응답 자동 격리');
+  assert.equal(actorLabel({ kind: 'SYSTEM', email: null }, 'NACL_DENY_EXPIRED_24H'), '시스템 · 차단 24시간 만료 해제');
   assert.equal(actorLabel({ kind: 'PLATFORM_USER', email: 'ops@vigilantis.example' }), 'ops@vigilantis.example');
 });
 

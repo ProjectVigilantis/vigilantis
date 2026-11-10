@@ -25,7 +25,7 @@ from schemas.api.errors import ErrorCode
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
-from . import access, admin_service, service
+from . import access, admin_service, permissions, service
 from .cognito import CognitoAdapter
 from .totp_recovery import (
     Authorize,
@@ -50,7 +50,8 @@ def _is_tenant_admin(user: service.CurrentUser) -> bool:
 
 
 def _allowed_actor(user: service.CurrentUser) -> bool:
-    return _is_tenant_admin(user) or access.is_central_admin(user)
+    # 고객 사용자 관리 관문(#572 9번)과 같은 자격 — TENANT ADMIN 또는 CENTRAL_ADMIN
+    return permissions.is_user_manager(user)
 
 
 _USER = Depends(access.require_user)

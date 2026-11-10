@@ -16,11 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from schemas.agents import AgentGraphOutput, SecOpsGraphInput
 from schemas.incidents import AgentInvocationStatus
 
-from ai.agent import (
-    CandidateProposalOutput,
-    EvidenceSummaryOutput,
-    RiskReassessmentOutput,
-)
+from ai.agent import CandidateProposalOutput, EvidenceSummaryOutput
 
 from .dataset import ROOT, EvalCase, digest, read_json
 
@@ -41,7 +37,6 @@ class CandidateAnswer(BaseModel):
 class Answer(BaseModel):
     model_config = ConfigDict(extra="forbid")
     case_id: str
-    reviewed_risk_levels: list[Literal["LOW", "MEDIUM", "HIGH"]] = Field(min_length=1)
     allowed_statuses: list[Literal["SUCCEEDED", "NO_PROPOSAL"]]
     action_policy: Literal["NACL_PROPOSAL", "OBSERVE", "EITHER", "PENDING"]
     risk_basis: str
@@ -80,8 +75,9 @@ def score_structured(output: AgentGraphOutput, answer: Answer) -> Score:
     reasons: list[str] = []
     if output.invocation_status is AgentInvocationStatus.FAILED:
         return Score("FAIL", ("graph_or_service_contract_failed",))
-    if not output.reviewed_risk_level or output.reviewed_risk_level.value not in answer.reviewed_risk_levels:
-        reasons.append("reviewed_risk_outside_answer")
+    # 등급은 서버 초기 판정이며 그래프는 다시 매기지 않는다 — 값이 실리면 계약 위반이다(ADR-0005 1차 개정).
+    if output.reviewed_risk_level is not None:
+        reasons.append("reviewed_risk_present")
     if any(not line.strip() for line in output.summary_lines):
         reasons.append("empty_summary_line")
     if answer.action_policy != "PENDING" and output.invocation_status.value not in answer.allowed_statuses:
@@ -145,7 +141,7 @@ class ReviewFile(BaseModel):
 @lru_cache(maxsize=1)
 def _internal_identifier_pattern() -> re.Pattern[str]:
     """계약의 필드·enum과 내부 식별자 표기를 찾되 관제용 기술 약어는 허용한다."""
-    terms = {"action_targets", "asset_context_at", "reviewed_risk_label"}
+    terms = {"action_targets", "asset_context_at", "initial_risk_label"}
 
     def collect(value):
         if isinstance(value, dict):
@@ -159,8 +155,7 @@ def _internal_identifier_pattern() -> re.Pattern[str]:
             for item in value:
                 collect(item)
 
-    for model in (SecOpsGraphInput, AgentGraphOutput, CandidateProposalOutput,
-                  EvidenceSummaryOutput, RiskReassessmentOutput):
+    for model in (SecOpsGraphInput, AgentGraphOutput, CandidateProposalOutput, EvidenceSummaryOutput):
         collect(model.model_json_schema())
     terms.difference_update({"EC2", "SG", "NACL", "EBS", "S3", "ASG", "TCP", "UDP", "ICMP", "tcp", "udp", "icmp"})
     identifiers = [re.escape(term) for term in sorted(terms) if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", term)]

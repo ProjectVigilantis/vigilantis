@@ -2,7 +2,7 @@
 
 지키는 것.
   ① PLATFORM 계정 전용(고객사 ADMIN · OPERATOR · VIEWER 는 403) · 미인증 401 — 등록된 경로 전부.
-  ② 받는 상태 밖은 409, 없거나 형식이 어긋난 식별자는 404 — 거절하면 DB 가 그대로다.
+  ② 받는 상태 밖은 409, 없거나 형식이 어긋난 식별자는 404, 있지만 담당 범위 밖이면 403(#572 7번) — 거절하면 DB 가 그대로다.
   ③ 온보딩 링크 설정이 없으면 링크를 싣는 응답만 503 이고, 그때 쓰기도 남지 않는다.
   ④ external_id 는 생성 응답과 재발급에서만 나간다.
 """
@@ -29,6 +29,7 @@ from schemas.api.tenants import (
     TenantVerificationResult,
 )
 from sqlalchemy import delete, func, select, update
+from tests.group_scope import assign_tenants
 
 BASE = "/api/v1/tenants"
 ACCOUNT = "123456789012"
@@ -42,15 +43,19 @@ MISSING = "00000000-0000-0000-0000-000000000000"
 # 등록돼야 하는 경로 전부 — 새 경로가 생기면 이 표와 권한 테스트가 함께 바뀐다
 REQUESTS = [
     ("GET", "", None),
+    ("GET", "/search?q=학원", None),
     ("POST", "", CREATE),
     ("GET", "/{id}", None),
     ("PATCH", "/{id}", {"name": "x"}),
     ("DELETE", "/{id}", None),
     ("GET", "/{id}/onboarding", None),
+    ("PUT", "/{id}/group", {"group_id": None}),
     ("POST", "/{id}/suspend", {"reason": "해지"}),
     ("POST", "/{id}/verify", None),
     ("POST", "/{id}/resume", None),
 ]
+# 고객 ID 로 여는 상세 · 하위 경로
+BY_ID = [r for r in REQUESTS if "{id}" in r[1]]
 
 
 def _settings(ready: bool) -> TenantSettings:
@@ -76,13 +81,14 @@ def admin(login_as, onboarding):
 
 
 def _assign(db, user_id: str, *tenant_ids: str) -> None:
-    """담당 배정 시드 — 저장소의 배정 교체 함수만 쓴다."""
-    auth_repo.replace_assigned_tenants(db, user_id=user_id, tenant_ids=tuple(tenant_ids), now=NOW)
+    """담당 범위 시드 — 그 고객사들이 든 그룹을 배정한다(#572 2번 · tests/group_scope)."""
+    assign_tenants(db, user_id=user_id, tenant_ids=tenant_ids, now=NOW)
     db.commit()
 
 
 def _unassign(db, user_id: str) -> None:
-    _assign(db, user_id)
+    auth_repo.replace_assigned_groups(db, user_id=user_id, group_ids=(), now=NOW)
+    db.commit()
 
 
 @pytest.fixture()
@@ -125,7 +131,9 @@ def test_requests_cover_every_registered_tenants_route(client):
         if route.path != BASE + "/{tenant_id}/settings"
         for method in route.methods or ()
     }
-    covered = {(method, BASE + path.replace("{id}", "{tenant_id}")) for method, path, _ in REQUESTS}
+    covered = {
+        (method, BASE + path.split("?")[0].replace("{id}", "{tenant_id}")) for method, path, _ in REQUESTS
+    }
     assert covered == registered
 
 
@@ -180,10 +188,13 @@ def test_unassigned_manager_sees_and_changes_no_customer(client_pg, db, manager,
     resp = client_pg.request(method, BASE + path.replace("{id}", tenant.tenant_id), json=body)
     if (method, path) == ("GET", ""):
         assert resp.status_code == 200 and resp.json()["tenants"] == []
-    elif (method, path) == ("POST", ""):  # 생성은 중앙 관리자만
+    elif method == "GET" and path.startswith("/search"):  # 검색에는 뜨지만 열 수 없다(#572 7번)
+        assert resp.status_code == 200
+        assert resp.json()["items"] == [{"tenant_id": tenant.tenant_id, "name": "학원", "accessible": False}]
+    elif (method, path) == ("POST", ""):  # 담당자의 생성은 담당 그룹 지정이 필수다
+        assert resp.status_code == 422 and _code(resp) == "REQUEST_VALIDATION_FAILED"
+    else:  # 있는 고객이지만 범위 밖이다 · 그룹 변경은 중앙 관리자만
         assert resp.status_code == 403 and _code(resp) == "AUTH_FORBIDDEN"
-    else:
-        assert resp.status_code == 404 and _code(resp) == "TENANT_NOT_FOUND"
     assert tenant.external_id not in resp.text and "onboarding_url" not in resp.text
     assert _state(db) == before
 
@@ -200,21 +211,16 @@ def test_manager_is_confined_to_assigned_customers(client_pg, db, manager, onboa
     assert shown.status_code == 200 and shown.json()["onboarding_url"]
     assert client_pg.get(f"{BASE}/{mine.tenant_id}/onboarding").json()["external_id"] == mine.external_id
     assert client_pg.patch(f"{BASE}/{mine.tenant_id}", json={"name": "바뀜"}).status_code == 200
-    # 담당 밖 고객은 모두 없는 것과 같은 404 다
-    for method, path, body in REQUESTS[2:]:
+    # 담당 밖 고객은 있는 고객이라 403 이다(#572 7번) — 내용은 싣지 않는다
+    for method, path, body in BY_ID:
         resp = client_pg.request(method, BASE + path.replace("{id}", other.tenant_id), json=body)
-        assert resp.status_code == 404 and _code(resp) == "TENANT_NOT_FOUND"
+        assert resp.status_code == 403 and _code(resp) == "AUTH_FORBIDDEN"
+        assert other.external_id not in resp.text and other.aws_account_id not in resp.text
+    # 없는 고객은 그대로 404 다
     missing = client_pg.request("GET", f"{BASE}/{MISSING}")
-    outscope = client_pg.get(f"{BASE}/{other.tenant_id}")
-    assert missing.status_code == outscope.status_code == 404
-    # request_id 는 요청마다 다르므로 상태 · code · message 만 견주고 request_id 는 따로 확인한다
-    missing_error, outscope_error = missing.json()["error"], outscope.json()["error"]
-    assert {k: missing_error[k] for k in ("code", "message")} == {
-        k: outscope_error[k] for k in ("code", "message")}
-    assert missing_error["request_id"] and outscope_error["request_id"]
-    assert missing_error["request_id"] != outscope_error["request_id"]
+    assert missing.status_code == 404 and _code(missing) == "TENANT_NOT_FOUND"
     assert tenants_repo.get_tenant(db, other.tenant_id).tenant.name == "학원"
-    assert client_pg.post(BASE, json={**CREATE, "aws_account_id": "444455556666"}).status_code == 403
+    assert client_pg.post(BASE, json={**CREATE, "aws_account_id": "444455556666"}).status_code == 422
     assert client_pg.delete(f"{BASE}/{mine.tenant_id}").status_code == 204
 
 
@@ -274,10 +280,10 @@ def test_central_admin_demoted_after_the_dependency_snapshot_loses_global_writes
 
     _revoke_inside_the_lock(monkeypatch, demote)
     resp = client_pg.request(method, BASE + path.replace("{id}", tenant.tenant_id), json=body)
-    if (method, path) == ("POST", ""):
+    if (method, path) == ("POST", ""):  # 담당자로 다시 판정됐다 — 담당 그룹 지정이 필수다
+        assert resp.status_code == 422 and _code(resp) == "REQUEST_VALIDATION_FAILED"
+    else:  # 강등되어 담당 그룹이 없다 → 범위 밖(#572 7번) · 그룹 변경은 중앙 관리자만
         assert resp.status_code == 403 and _code(resp) == "AUTH_FORBIDDEN"
-    else:  # 강등되어 배정이 없다 → 범위 밖
-        assert resp.status_code == 404 and _code(resp) == "TENANT_NOT_FOUND"
     assert _state(db) == before
 
 
@@ -291,7 +297,8 @@ def test_assignment_revoked_after_the_dependency_snapshot_writes_nothing(
     before = _state(db)
     _revoke_inside_the_lock(monkeypatch, lambda s: _unassign(s, manager.user_id))
     resp = client_pg.request(method, BASE + path.replace("{id}", tenant.tenant_id), json=body)
-    assert resp.status_code == 404 and _code(resp) == "TENANT_NOT_FOUND"
+    # 회수된 범위 밖 고객은 403 이다(#572 7번). 그룹 변경은 관문이 먼저 403 으로 막는다
+    assert resp.status_code == 403 and _code(resp) == "AUTH_FORBIDDEN"
     assert _state(db) == before
 
 
@@ -337,6 +344,121 @@ def test_create_with_role_in_another_account_is_rejected_by_the_contract(client_
     assert _tenant_count(db) == 0
 
 
+def test_central_creates_ungrouped_or_into_any_existing_group(client_pg, db, admin, make_group):
+    group_id = make_group()
+    ungrouped = client_pg.post(BASE, json=CREATE)
+    assert ungrouped.status_code == 201 and ungrouped.json()["tenant"]["group_id"] is None
+    grouped = client_pg.post(BASE, json={**CREATE, "aws_account_id": OTHER, "group_id": group_id})
+    assert grouped.status_code == 201 and grouped.json()["tenant"]["group_id"] == group_id
+    assert tenants_repo.get_tenant(db, grouped.json()["tenant"]["tenant_id"]).tenant.group_id == group_id
+    assert {t["group_id"] for t in client_pg.get(BASE).json()["tenants"]} == {None, group_id}
+
+
+def test_central_create_with_an_unknown_group_is_404_and_writes_nothing(client_pg, db, admin):
+    resp = client_pg.post(BASE, json={**CREATE, "group_id": MISSING})
+    assert resp.status_code == 404 and _code(resp) == "GROUP_NOT_FOUND"
+    assert _tenant_count(db) == 0
+
+
+def test_manager_creates_a_tenant_in_its_own_group(client_pg, db, manager, make_group):
+    group_id = make_group()
+    auth_repo.replace_assigned_groups(db, user_id=manager.user_id, group_ids=(group_id,), now=NOW)
+    db.commit()
+
+    resp = client_pg.post(BASE, json={**CREATE, "group_id": group_id})
+
+    assert resp.status_code == 201
+    created = TenantCreateResponse.model_validate(resp.json())
+    assert created.tenant.group_id == group_id
+    # 새 고객은 담당 그룹에 들었으므로 다음 요청부터 담당자의 범위다
+    assert [t["tenant_id"] for t in client_pg.get(BASE).json()["tenants"]] == [created.tenant.tenant_id]
+    assert client_pg.get(f"{BASE}/{created.tenant.tenant_id}").status_code == 200
+
+
+@pytest.mark.parametrize("kind", ["missing", "foreign", "unknown"])
+def test_manager_create_needs_one_of_its_own_groups(client_pg, db, manager, make_group, kind):
+    mine, foreign = make_group(), make_group()
+    auth_repo.replace_assigned_groups(db, user_id=manager.user_id, group_ids=(mine,), now=NOW)
+    db.commit()
+    body = {"missing": CREATE, "foreign": {**CREATE, "group_id": foreign}, "unknown": {**CREATE, "group_id": MISSING}}
+    resp = client_pg.post(BASE, json=body[kind])
+    if kind == "missing":
+        assert resp.status_code == 422 and _code(resp) == "REQUEST_VALIDATION_FAILED"
+    else:  # 담당 밖 그룹은 있든 없든 403 이다 — 그룹의 존재를 알리지 않는다
+        assert resp.status_code == 403 and _code(resp) == "AUTH_FORBIDDEN"
+    assert _tenant_count(db) == 0
+
+
+# ----- 검색 (#572 7번) --------------------------------------------------------------
+
+SEARCH_KEYS = {"tenant_id", "name", "accessible"}
+
+
+def _named(db, name: str, account: str) -> models.Tenant:
+    tenant = tenants_repo.create_tenant(db, name=name, aws_account_id=account, regions=["ap-northeast-2"], now=NOW)
+    db.commit()
+    return tenant
+
+
+def test_manager_search_shows_outside_tenants_as_inaccessible_with_only_name_and_id(client_pg, db, manager):
+    mine = _named(db, "검색 학원 본점", "100000000001")
+    theirs = _named(db, "검색 학원 지점", "100000000002")
+    _named(db, "다른 이름", "100000000003")
+    _assign(db, manager.user_id, mine.tenant_id)
+
+    resp = client_pg.get(f"{BASE}/search", params={"q": "검색 학원"})
+
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    assert all(set(item) == SEARCH_KEYS for item in items)
+    assert items == [
+        {"tenant_id": mine.tenant_id, "name": "검색 학원 본점", "accessible": True},
+        {"tenant_id": theirs.tenant_id, "name": "검색 학원 지점", "accessible": False},
+    ]
+    for leaked in (theirs.aws_account_id, theirs.external_id, "status", "asset_count", "group_id"):
+        assert leaked not in resp.text
+    # 검색에 뜬 담당 밖 고객을 열면 권한 없음이고, 없는 고객은 404 다
+    detail = client_pg.get(f"{BASE}/{theirs.tenant_id}")
+    assert detail.status_code == 403 and _code(detail) == "AUTH_FORBIDDEN"
+    assert client_pg.get(f"{BASE}/{MISSING}").status_code == 404
+    # 목록에는 여전히 담당 고객만 나온다
+    assert [t["tenant_id"] for t in client_pg.get(BASE).json()["tenants"]] == [mine.tenant_id]
+
+
+def test_central_search_is_case_insensitive_and_everything_is_accessible(client_pg, db, admin):
+    first = _named(db, "Acme Academy", "100000000011")
+    second = _named(db, "ACME Labs", "100000000012")
+    resp = client_pg.get(f"{BASE}/search", params={"q": "acme"})
+    assert resp.status_code == 200
+    assert {(i["tenant_id"], i["accessible"]) for i in resp.json()["items"]} == {
+        (first.tenant_id, True), (second.tenant_id, True)}
+
+
+def test_search_returns_at_most_twenty_by_name(client_pg, db, admin):
+    for n in range(21):
+        _named(db, f"상한 검색 {n:02d}", f"2000000000{n:02d}")
+    items = client_pg.get(f"{BASE}/search", params={"q": "상한 검색"}).json()["items"]
+    assert [i["name"] for i in items] == [f"상한 검색 {n:02d}" for n in range(20)]
+
+
+def test_search_treats_like_wildcards_as_literal_characters(client_pg, db, admin):
+    literal = _named(db, "할인%_고객사", "100000000021")
+    _named(db, "할인일반고객사", "100000000022")
+
+    for query in ("%", "_"):
+        response = client_pg.get(f"{BASE}/search", params={"q": query})
+        assert response.status_code == 200
+        assert response.json()["items"] == [
+            {"tenant_id": literal.tenant_id, "name": "할인%_고객사", "accessible": True},
+        ]
+
+
+@pytest.mark.parametrize("params", [{}, {"q": ""}, {"q": "가" * 101}])
+def test_search_without_a_valid_query_is_422(client_pg, admin, params):
+    resp = client_pg.get(f"{BASE}/search", params=params)
+    assert resp.status_code == 422 and _code(resp) == "REQUEST_VALIDATION_FAILED"
+
+
 # ----- 조회 ----------------------------------------------------------------------
 
 def test_list_is_in_creation_order_without_onboarding_settings(client_pg, db, admin, onboarding):
@@ -368,6 +490,45 @@ def test_detail_has_link_only_while_pending_and_never_external_id(client_pg, db,
     assert resp.json()["last_verification"]["result"] == "OK"
     resp = client_pg.get(f"{BASE}/{pending.tenant_id}")
     assert resp.status_code == 503 and _code(resp) == "TENANT_ONBOARDING_UNAVAILABLE"
+
+
+def _listed_ids(client_pg, **params) -> list[str]:
+    resp = client_pg.get(BASE, params=params)
+    assert resp.status_code == 200
+    return [t["tenant_id"] for t in resp.json()["tenants"]]
+
+
+def test_unassigned_only_lists_ungrouped_customers_and_assigning_moves_one_out(
+    client_pg, db, admin, make_group
+):
+    later = _seed(db, TenantStatus.ACTIVE, OTHER, now=NOW + timedelta(minutes=1))
+    first = _seed(db)
+    grouped = _seed(db, account="444455556666", now=NOW + timedelta(minutes=2))
+    group_id = make_group(tenant_ids=[grouped.tenant_id])
+
+    everything = client_pg.get(BASE).json()["tenants"]
+    assert [t["tenant_id"] for t in everything] == [first.tenant_id, later.tenant_id, grouped.tenant_id]
+    assert client_pg.get(BASE, params={"unassigned_only": "false"}).json()["tenants"] == everything
+    # 그룹 없는 행만 같은 모양 · 같은 순서로 남는다 — 연결 상태(PENDING · ACTIVE)와 무관하다
+    unassigned = client_pg.get(BASE, params={"unassigned_only": "true"}).json()["tenants"]
+    assert unassigned == [t for t in everything if t["group_id"] is None]
+    assert [t["tenant_id"] for t in unassigned] == [first.tenant_id, later.tenant_id]
+
+    assert client_pg.put(f"{BASE}/{first.tenant_id}/group", json={"group_id": group_id}).status_code == 200
+    assert _listed_ids(client_pg, unassigned_only="true") == [later.tenant_id]
+    assert client_pg.get(BASE, params={"unassigned_only": "maybe"}).status_code == 422
+
+
+def test_unassigned_only_stays_inside_the_manager_scope(client_pg, db, manager):
+    mine = _seed(db)
+    ungrouped = _seed(db, TenantStatus.ACTIVE, OTHER)  # 그룹 없는 고객은 담당 범위가 아니다
+    _assign(db, manager.user_id, mine.tenant_id)
+
+    resp = client_pg.get(BASE, params={"unassigned_only": "true"})
+
+    assert resp.status_code == 200 and resp.json() == {"tenants": []}
+    assert ungrouped.tenant_id not in resp.text
+    assert _listed_ids(client_pg) == [mine.tenant_id]
 
 
 @pytest.mark.parametrize("tenant_id", [MISSING, "not-a-uuid"])

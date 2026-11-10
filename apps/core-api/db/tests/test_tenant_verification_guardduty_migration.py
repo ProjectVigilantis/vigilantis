@@ -26,7 +26,7 @@ from db import models
 from schemas.api.tenants import TenantVerificationResult
 
 REVISION = "d588e4b1c2a7"
-PARENT = "a1b7c4d2e905"
+PARENT = "f609f610e001"
 ACCOUNT = "475763379672"
 _RESULTS = "SELECT unnest(enum_range(NULL::tenant_verification_result))::text"
 

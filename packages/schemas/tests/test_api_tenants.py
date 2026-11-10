@@ -53,6 +53,7 @@ def make_detail(**over):
         "suspended_at": None,
         "suspended_reason": None,
         "subscription": None,
+        "group_id": None,
         "created_at": "2026-10-19T00:00:00Z",
         "updated_at": "2026-10-19T03:00:00Z",
     }
@@ -156,6 +157,17 @@ def test_list_item_is_a_subset_of_detail():
     assert "external_id" not in TenantDetail.model_fields  # 생성 응답에서만 나간다
     TenantsResponse.model_validate({"tenants": [
         {k: v for k, v in make_detail().items() if k in TenantListItem.model_fields}]})
+
+
+@pytest.mark.parametrize("model", [TenantListItem, TenantDetail])
+def test_group_id_is_required_but_nullable(model):
+    # 계약은 「칸은 늘 있고 null = 담당 그룹 없음」이다(#572 2번) — 빠진 칸을 그룹 없음으로 읽지 않는다
+    payload = {k: v for k, v in make_detail().items() if k in model.model_fields}
+    assert model.model_validate(payload).group_id is None
+    assert model.model_validate({**payload, "group_id": "g-1"}).group_id == "g-1"
+    del payload["group_id"]
+    with pytest.raises(ValidationError):
+        model.model_validate(payload)
 
 
 # ----- 연결 확인 -----

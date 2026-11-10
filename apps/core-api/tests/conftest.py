@@ -191,7 +191,9 @@ def db(pg_engine):
 #   플랫폼 등급(#492): 시드의 PLATFORM 기본 등급은 CENTRAL_ADMIN 이다 — 범위를 정하지 않은 기존 플랫폼 행위자
 #   테스트가 계속 전역 관리자를 모델링한다. 담당자는 platform_role=TENANT_MANAGER 와 assigned_tenant_ids 로
 #   명시 배정한다(모든 고객사를 자동으로 주지 않는다 — 생략하면 배정 없음). 운영 기본값(create_user)은 배정 없는
-#   TENANT_MANAGER 다.
+#   TENANT_MANAGER 다. 담당 범위의 근거는 그룹뿐이라(#572 2번) assigned_tenant_ids 는 tests/group_scope.assign_tenants
+#   로 옮긴다 — 그룹 없는 고객사는 그 고객사 하나만 든 그룹에 넣고, 이미 그룹이 있는 고객사는 그 그룹을 함께 배정한다.
+#   만든 · 배정한 그룹은 AuthSeed.group_ids 다. 그룹을 직접 다루는 테스트는 make_group 으로 만든다.
 #   쿠키는 Cookie 헤더로 직접 싣는다. 세션 쿠키가 Secure 라 httpx 쿠키 저장소는 http 로 보내지 않는다.
 #   세션 토큰은 헤더로만 쓴다 — assert 메시지 · 출력에 싣지 않는다(AuthSeed repr 에서도 뺀다).
 # ==============================================================================
@@ -210,6 +212,8 @@ class AuthSeed:
     tenant_id: str | None
     platform_role: object  # PLATFORM 만 값이 있다
     assigned_tenant_ids: tuple  # TENANT_MANAGER 에 명시 배정한 고객사(시드 순서 그대로)
+    group_ids: tuple  # assigned_tenant_ids 를 담은 담당 그룹(#572 2번 — 배정한 순서)
+    permissions: tuple  # TENANT OPERATOR 에 부여한 기능별 권한(#572 5번). 다른 계정은 빈 튜플
     token: str = field(repr=False)
     cookie: str = field(repr=False)  # "__Host-vg_session=<token>"
     headers: dict = field(repr=False)  # Cookie + 허용 Origin
@@ -250,6 +254,7 @@ def _seed_auth_session(
     account_type=None,
     platform_role=None,
     assigned_tenant_ids=(),
+    permissions=None,
     status=None,
     now=None,
 ) -> AuthSeed:
@@ -257,7 +262,10 @@ def _seed_auth_session(
 
     계정 종류: tenant_id 를 주면 TENANT, 아니면 account_type(기본 PLATFORM — UNASSIGNED 도 고를 수 있다).
     플랫폼 등급: PLATFORM 만 갖는다(기본 CENTRAL_ADMIN). 다른 종류에 주면 시드가 거절한다.
-    담당 배정: assigned_tenant_ids 는 TENANT_MANAGER 에만 준다(실제 테넌트 행이어야 한다).
+    담당 배정: assigned_tenant_ids 는 TENANT_MANAGER 에만 준다(실제 테넌트 행이어야 한다). 그룹으로 옮겨 배정한다
+    (tests/group_scope.assign_tenants).
+    기능별 권한(#572 5번): permissions 는 TENANT OPERATOR 에만 준다. 기본(None)은 네 가지 전부 — 마이그레이션이
+    기존 OPERATOR 에게 주는 것과 같다. 권한 없는 OPERATOR 는 permissions=() 로 만든다.
     """
     from datetime import UTC, datetime
 
@@ -266,7 +274,7 @@ def _seed_auth_session(
     from config import get_auth_settings
     from db import models
     from db.repositories import auth as auth_repo
-    from schemas.api.auth import AccountType, PlatformRole
+    from schemas.api.auth import AccountType, FeaturePermission, PlatformRole, UserRole
 
     if tenant_id is not None:
         assert account_type in (None, AccountType.TENANT), account_type
@@ -278,6 +286,11 @@ def _seed_auth_session(
         assert platform_role is None, (account_type, platform_role)
     assigned_tenant_ids = tuple(assigned_tenant_ids)
     assert not assigned_tenant_ids or platform_role is PlatformRole.TENANT_MANAGER, platform_role
+    if account_type is AccountType.TENANT and role is UserRole.OPERATOR:
+        permissions = tuple(FeaturePermission) if permissions is None else tuple(permissions)
+    else:
+        assert permissions is None, (account_type, role, permissions)
+        permissions = ()
     settings = get_auth_settings()
     now = now or datetime.now(UTC)
     suffix = uuid.uuid4().hex
@@ -294,9 +307,16 @@ def _seed_auth_session(
         status=status or models.AppUserStatus.ACTIVE,
         email_verified_at=now,
     )
+    group_ids: tuple = ()
     if assigned_tenant_ids:
-        auth_repo.replace_assigned_tenants(
+        from tests.group_scope import assign_tenants
+
+        group_ids = assign_tenants(
             session, user_id=user.user_id, tenant_ids=assigned_tenant_ids, now=now
+        )
+    if permissions:
+        auth_repo.replace_feature_permissions(
+            session, user_id=user.user_id, permissions=frozenset(permissions), now=now
         )
     issued = auth_sessions.issue_session(
         session,
@@ -316,6 +336,8 @@ def _seed_auth_session(
         tenant_id=tenant_id,
         platform_role=platform_role,
         assigned_tenant_ids=assigned_tenant_ids,
+        group_ids=group_ids,
+        permissions=permissions,
         token=issued.token,
         cookie=cookie,
         headers={"Cookie": cookie, "Origin": origin},
@@ -342,6 +364,24 @@ def make_tenant(db):
 
 
 @pytest.fixture()
+def make_group(db):
+    """테스트 트랜잭션(db) 안의 고객사 그룹 → group_id. tenant_ids 를 주면 그 고객사들을 그룹에 넣는다. commit 한다."""
+    from datetime import UTC, datetime
+
+    from db.repositories import tenant_groups as groups_repo
+
+    def _make(name=None, *, tenant_ids=(), now=None) -> str:
+        now = now or datetime.now(UTC)
+        group = groups_repo.create_group(db, name=name or f"group-{uuid.uuid4().hex[:12]}", now=now)
+        for tenant_id in tenant_ids:
+            assert groups_repo.set_tenant_group(db, tenant_id, group.group_id, now=now)
+        db.commit()
+        return group.group_id
+
+    return _make
+
+
+@pytest.fixture()
 def seed_tenant():
     """임의 세션(격리 DB 등)에 실제 테넌트를 만드는 함수 — _seed_tenant(session, status) 그대로."""
     return _seed_tenant
@@ -353,7 +393,8 @@ def make_auth_session(db, allowed_origin):
 
     기본은 PLATFORM(role=ADMIN 호환 값, platform_role=CENTRAL_ADMIN). 고객사 계정은 tenant_id=make_tenant(...) 로,
     미지정 계정은 account_type=AccountType.UNASSIGNED 로, 담당자는 platform_role=TENANT_MANAGER 와
-    assigned_tenant_ids=(make_tenant(), ...) 로 만든다. status · now 도 고를 수 있다.
+    assigned_tenant_ids=(make_tenant(), ...) 로 만든다. OPERATOR 의 기능별 권한은 permissions=(...) 로 고른다
+    (기본 전부, () 는 없음). status · now 도 고를 수 있다.
     """
     from schemas.api.auth import UserRole
 
@@ -379,7 +420,10 @@ def platform_session(make_auth_session) -> AuthSeed:
 
 
 def _pg_app(test_db):
-    """get_db 를 테스트 세션으로 재정의한 앱."""
+    """get_db 와 호출 집계 세션 팩토리(api_usage)를 테스트 세션으로 재정의한 앱."""
+    from contextlib import contextmanager
+
+    import api_usage
     import db.session as db_session_module
 
     app = _build_app()
@@ -387,7 +431,14 @@ def _pg_app(test_db):
     def _override_get_db():
         yield test_db
 
+    # 호출 집계(#572 6번)는 응답 뒤 자체 세션으로 쓴다 — 테스트 트랜잭션 안의 고객사 행이 보이도록 같은 세션을
+    # 쓰되 닫지는 않는다(닫으면 다음 요청의 get_db 가 쓸 세션이 사라진다)
+    @contextmanager
+    def _usage_session():
+        yield test_db
+
     app.dependency_overrides[db_session_module.get_db] = _override_get_db
+    app.dependency_overrides[api_usage.get_usage_session_factory] = lambda: _usage_session
     return app
 
 
@@ -453,7 +504,7 @@ class CommittedAuth:
 
     def cleanup(self) -> None:
         from db import models
-        from sqlalchemy import delete
+        from sqlalchemy import delete, select
 
         from tests.audit_cleanup import purge_audit_events
 
@@ -468,6 +519,16 @@ class CommittedAuth:
                     delete(models.AppUser).where(models.AppUser.user_id.in_(self._user_ids))
                 )
             if self._tenant_ids:
+                # 담당 범위 시드가 만든 그룹(group_scope.assign_tenants) — 그 고객사가 든 그룹을 함께 지운다
+                session.execute(
+                    delete(models.TenantGroup).where(
+                        models.TenantGroup.group_id.in_(
+                            select(models.Tenant.group_id).where(
+                                models.Tenant.tenant_id.in_(self._tenant_ids)
+                            )
+                        )
+                    )
+                )
                 session.execute(
                     delete(models.Tenant).where(models.Tenant.tenant_id.in_(self._tenant_ids))
                 )

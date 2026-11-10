@@ -1,4 +1,10 @@
-"""#552 도입 신청 API 계약 — 익명 접수(POST)와 중앙 관리자 처리(GET · PUT status).
+"""#552 도입 신청 API 계약 — 익명 접수(POST)와 중앙 관리자 처리(GET · PUT status · POST approve).
+
+승인(#572 묶음 B)은 POST /{id}/approve 로만 한다. 한 트랜잭션에서 고객사를 만들고(이름은 저장된 company_name,
+PENDING_CONNECTION · 담당 그룹 없음) 신청을 APPROVED 로 옮겨 tenant_id 로 잇는다. 받는 상태는 NEW · IN_REVIEW 이고
+밖이면 409 SIGNUP_REQUEST_STATE_CONFLICT 다. 같은 계정의 고객사가 있으면 409 TENANT_ACCOUNT_CONFLICT, 온보딩
+설정이 없으면 503 TENANT_ONBOARDING_UNAVAILABLE 이며, 어느 거절에서도 신청 · 고객사 · 결정 기록이 바뀌지 않는다.
+PUT status 로 APPROVED 를 보내면 409 SIGNUP_REQUEST_APPROVAL_REQUIRED 다.
 
 접수 재시도 키(Idempotency-Key)는 헤더로 받는다(UUIDv4). 같은 키 · 같은 검증 결과 값이면 처음 접수한
 request_id 를 202 로 다시 돌려주고, 값이 다르면 409 IDEMPOTENCY_KEY_CONFLICT 다. 키는 접수와 같은 수명으로
@@ -32,6 +38,7 @@ from .support import (
     SignupRequestStatus,
     SupportPage,
 )
+from .tenants import AwsAccountId, TenantCreateResponse, TenantRegions, require_unique
 
 
 def _storable(value: str) -> str:
@@ -108,6 +115,8 @@ class SignupRequestItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     request_id: str
+    #: 승인으로 만든 고객사. 옛 승인 · 거절 · 미결정은 null 이고, 고객사를 지우면 null 로 돌아간다(신청 · 결정 기록은 남는다).
+    tenant_id: str | None = None
     company_name: str
     contact_name: str
     email: str
@@ -126,8 +135,45 @@ class SignupRequestsResponse(SupportPage):
     items: list[SignupRequestItem]
 
 
+class SignupRequestApproveRequest(BaseModel):
+    """POST /api/v1/signup-requests/{id}/approve 본문 — 만들 고객사의 AWS 계정과 리전만 받는다.
+
+    이름 · 그룹은 받지 않는다(이름은 저장된 company_name, 그룹은 없음). 계정 · 리전 규칙은 TenantCreateRequest 와 같다.
+    """
+
+    model_config = _CONFIG
+
+    aws_account_id: AwsAccountId
+    regions: TenantRegions
+
+    @model_validator(mode="after")
+    def _enforce_contract(self) -> SignupRequestApproveRequest:
+        require_unique("regions", self.regions)
+        return self
+
+
+class SignupRequestApproveResponse(BaseModel):
+    """승인 응답 — 승인된 신청과 만들어진 고객사(POST /tenants 생성 응답 그대로 · external_id 포함)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    request: SignupRequestItem
+    tenant: TenantCreateResponse
+
+    @model_validator(mode="after")
+    def _enforce_contract(self) -> SignupRequestApproveResponse:
+        if self.request.status is not SignupRequestStatus.APPROVED:
+            raise ValueError("승인 응답의 신청은 APPROVED 입니다")
+        if self.request.tenant_id != self.tenant.tenant.tenant_id:
+            raise ValueError("승인 응답의 신청은 만들어진 고객사를 가리킵니다")
+        return self
+
+
 class SignupRequestStatusRequest(BaseModel):
-    """PUT /api/v1/signup-requests/{id}/status 본문. 반려 사유는 REJECTED 에서만, 그리고 반드시 받는다."""
+    """PUT /api/v1/signup-requests/{id}/status 본문. 반려 사유는 REJECTED 에서만, 그리고 반드시 받는다.
+
+    APPROVED 는 형식상 받지만 서버가 409 SIGNUP_REQUEST_APPROVAL_REQUIRED 로 거절한다(승인은 POST approve).
+    """
 
     model_config = _CONFIG
 

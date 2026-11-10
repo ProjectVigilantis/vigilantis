@@ -21,7 +21,7 @@ function tenant(id: string, account: string, status: TenantListItem['status'], e
   return {
     tenant_id: id, name: `고객 ${id}`, status, aws_account_id: account,
     last_verification: null, asset_count: 0, open_incident_count: 0,
-    subscription: null, subscription_source: null, entitlement_ends_at: null, ...extra,
+    subscription: null, subscription_source: null, entitlement_ends_at: null, group_id: null, ...extra,
   };
 }
 

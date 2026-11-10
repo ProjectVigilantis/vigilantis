@@ -25,14 +25,26 @@
 #     PATCH 의 `subscription` 은 409 TENANT_STATE_CONFLICT 다 — 운영자 입력이 유효한 계약을 지우지 않는다.
 #
 # 경로 (전부 /api/v1)
-#   GET    /tenants                  → TenantsResponse
-#   POST   /tenants                  TenantCreateRequest → 201 TenantCreateResponse(PENDING_CONNECTION). 같은 계정이 있으면 TENANT_ACCOUNT_CONFLICT
+#   GET    /tenants?unassigned_only= → TenantsResponse. 관리자 직원계정은 담당 그룹 안의 고객사만(범위 밖 행은 없다).
+#                                      unassigned_only 는 생략 시 false, true 면 그 범위 안에서 group_id 가 null 인 고객사만(상태 무관)
+#   GET    /tenants/search?q=        → TenantSearchResponse(#572 7번). 이름 부분 일치(대소문자 무시) · 이름순 최대
+#                                      TENANT_SEARCH_LIMIT 건. 담당 밖 고객사도 accessible=false 로 나온다 — 고객사 ID ·
+#                                      이름 · accessible 말고는 싣지 않는다. q 는 1-100자(없거나 비면 422)
+#   POST   /tenants                  TenantCreateRequest → 201 TenantCreateResponse(PENDING_CONNECTION). 같은 계정이 있으면 TENANT_ACCOUNT_CONFLICT.
+#                                      중앙 관리계정은 group_id 를 고르거나 비운다(없는 그룹 404 GROUP_NOT_FOUND). 관리자 직원계정은
+#                                      담당 그룹 중 하나가 필수다(빠지면 422 REQUEST_VALIDATION_FAILED · 담당 밖 그룹은 403 AUTH_FORBIDDEN)
 #   GET    /tenants/{id}             → TenantDetail
 #   PATCH  /tenants/{id}             TenantUpdateRequest → TenantDetail
 #   DELETE /tenants/{id}             → 204. DELETABLE_STATUSES 밖이거나 그 테넌트를 가리키는 사용자 · 기록이 있으면 TENANT_STATE_CONFLICT
 #   GET    /tenants/{id}/onboarding  → TenantOnboardingResponse. 모든 상태(역할을 지운 고객의 재연결)
-#   온보딩 링크를 싣는 응답(생성 · 연결 전 상세 · PATCH · 재발급)은 서버에 링크 설정이 없으면 503 TENANT_ONBOARDING_UNAVAILABLE —
-#   쓰기는 응답을 만든 뒤에 확정하므로 503 이면 아무것도 바뀌지 않는다. 경로 전부 ADMIN 전용이다(T-1).
+#   PUT    /tenants/{id}/group       schemas.api.groups.TenantGroupRequest → TenantDetail. 중앙 관리계정만. null 이면 그룹에서
+#                                      뺀다. 없는 그룹은 404 GROUP_NOT_FOUND
+#   온보딩 링크를 싣는 응답(생성 · 연결 전 상세 · PATCH · 그룹 변경 · 재발급)은 서버에 링크 설정이 없으면 503
+#   TENANT_ONBOARDING_UNAVAILABLE — 쓰기는 응답을 만든 뒤에 확정하므로 503 이면 아무것도 바뀌지 않는다.
+#   경로 전부 플랫폼 계정 전용이다(고객사 계정은 403).
+#   상세 · 하위 경로({id})는 없거나 형식이 어긋난 ID 가 404 TENANT_NOT_FOUND, 있지만 담당 범위 밖이면 403 AUTH_FORBIDDEN 이다
+#   (#572 7번 — 다른 고객사가 있다는 것이 담당자에게 보이는 것은 PM 이 받아들인 대가다). 고객 설정(/tenants/{id}/settings)과
+#   아래 「기존 경로의 테넌트 범위」(인시던트 · 자산)의 범위 밖 404 는 그대로다.
 #   POST   /tenants/{id}/verify      → TenantVerifyResponse. VERIFIABLE_STATUSES 밖이면 TENANT_STATE_CONFLICT
 #   POST   /tenants/{id}/suspend     TenantSuspendRequest → TenantDetail. SUSPENDABLE_STATUSES 밖이면 TENANT_STATE_CONFLICT
 #   POST   /tenants/{id}/resume      → TenantVerifyResponse(연결 확인 성공 시 ACTIVE). RESUMABLE_STATUSES 밖이면 TENANT_STATE_CONFLICT
@@ -63,11 +75,12 @@ from __future__ import annotations
 from datetime import date
 from enum import Enum
 from typing import Annotated, Optional
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..arns import build_iam_role_arn
-from ..subscriptions import PAID_PLANS, SubscriptionSource, billing_period
+from ..subscriptions import CONTRACT_SOURCES, PAID_PLANS, SubscriptionSource, billing_period
 from .assets import UtcDateTime
 
 AwsAccountId = Annotated[str, Field(pattern=r"^\d{12}$")]
@@ -76,9 +89,14 @@ VpcId = Annotated[str, Field(pattern=r"^vpc-[0-9a-f]+$")]
 # IAM 역할 이름은 ASCII 만 받는다 — `\w` 는 유니코드 글자까지 받아 `role/역할` 이 통과한다
 RoleArn = Annotated[str, Field(pattern=r"^arn:aws:iam::\d{12}:role/[A-Za-z0-9_+=,.@/-]+$")]
 TenantName = Annotated[str, Field(min_length=1, max_length=100)]
+#: 관제받는 리전 — 하나 이상. 중복은 요청 모델의 검증기가 require_unique 로 거절한다.
+TenantRegions = Annotated[list[AwsRegion], Field(min_length=1)]
 
 #: 고객 역할 이름의 기본값. 온보딩 템플릿이 이 이름으로 만든다(#438 §C-1).
 DEFAULT_ACCESS_ROLE_NAME = "vigilantis-access"
+
+#: GET /tenants/search 결과 상한(#572 7번).
+TENANT_SEARCH_LIMIT = 20
 
 
 def default_access_role_arn(aws_account_id: str) -> str:
@@ -87,6 +105,12 @@ def default_access_role_arn(aws_account_id: str) -> str:
 
 def _role_account(role_arn: str) -> str:
     return role_arn.split(":")[4]
+
+
+def require_unique(field: str, values: list) -> None:
+    """고객사를 만드는 요청(TenantCreateRequest · 도입 신청 승인)이 같은 규칙으로 목록 중복을 거절한다."""
+    if len(set(values)) != len(values):
+        raise ValueError(f"{field} 는 중복될 수 없습니다")
 
 
 class TenantStatus(str, Enum):
@@ -236,17 +260,17 @@ class TenantListItem(BaseModel):
     open_incident_count: int = Field(ge=0)
     #: 구독 현황(T-16). null = 구독 정보가 등록되지 않았다(Free 가 아니다). 서비스 정지와 무관하게 계약을 따른다.
     subscription: Optional[TenantSubscription] = None
-    #: 구독 투영의 원천. MOCK_MARKETPLACE 면 운영자 PATCH 로 바꿀 수 없다. null = 등록 안 됨.
+    #: 구독 투영의 원천. MOCK_MARKETPLACE · AWS_MARKETPLACE 면 운영자 PATCH 로 바꿀 수 없다. null = 등록 안 됨.
     subscription_source: SubscriptionSource | None = None
-    #: 모의 계약 투영의 권리 끝 시각(미포함). 원천이 MOCK_MARKETPLACE 일 때만 있다.
+    #: 계약 투영의 권리 끝 시각(미포함). 원천이 MOCK_MARKETPLACE · AWS_MARKETPLACE 일 때만 있다.
     entitlement_ends_at: UtcDateTime | None = None
+    #: 고객사 그룹(#572 2번). null = 담당 그룹 없음(담당자 없음) — 연결 상태(status)와 별개다. 칸은 늘 있다(필수 · null 허용).
+    group_id: str | None = Field(min_length=1)
 
     @model_validator(mode="after")
     def _enforce_subscription_source(self):
-        if (self.subscription_source is SubscriptionSource.MOCK_MARKETPLACE) != (
-            self.entitlement_ends_at is not None
-        ):
-            raise ValueError("entitlement_ends_at 은 모의 계약 투영에만, 그리고 반드시 있습니다")
+        if (self.subscription_source in CONTRACT_SOURCES) != (self.entitlement_ends_at is not None):
+            raise ValueError("entitlement_ends_at 은 계약 투영(모의 · 실제 Marketplace)에만, 그리고 반드시 있습니다")
         if (self.subscription_source is None) != (self.subscription is None):
             raise ValueError("등록 안 됨(subscription_source null)은 구독 정보가 없는 것입니다")
         return self
@@ -307,17 +331,18 @@ class TenantCreateRequest(BaseModel):
     aws_account_id: AwsAccountId
     #: 생략하면 `arn:aws:iam::<계정>:role/vigilantis-access`(온보딩 템플릿 기본값).
     access_role_arn: Optional[RoleArn] = None
-    regions: list[AwsRegion] = Field(min_length=1)
+    regions: TenantRegions
     collect_vpc_ids: list[VpcId] = Field(default_factory=list)
+    #: 넣을 고객사 그룹(#572 3번). 중앙 관리계정은 생략할 수 있고(담당 그룹 없음), 관리자 직원계정은 자기 담당 그룹 중
+    #: 하나가 필수다 — 빠지면 422, 담당 밖이면 403(서버 판정 · 경로 표).
+    group_id: UUID | None = None
 
     @model_validator(mode="after")
     def _enforce_contract(self):
         if self.access_role_arn is not None and _role_account(self.access_role_arn) != self.aws_account_id:
             raise ValueError("access_role_arn 의 계정이 aws_account_id 와 다릅니다")
-        if len(set(self.regions)) != len(self.regions):
-            raise ValueError("regions 는 중복될 수 없습니다")
-        if len(set(self.collect_vpc_ids)) != len(self.collect_vpc_ids):
-            raise ValueError("collect_vpc_ids 는 중복될 수 없습니다")
+        require_unique("regions", self.regions)
+        require_unique("collect_vpc_ids", self.collect_vpc_ids)
         return self
 
 
@@ -334,6 +359,25 @@ class TenantCreateResponse(BaseModel):
         if self.tenant.status != TenantStatus.PENDING_CONNECTION:
             raise ValueError("새 테넌트는 PENDING_CONNECTION 입니다")
         return self
+
+
+class TenantSearchItem(BaseModel):
+    """GET /tenants/search 의 한 줄 — 이름과 ID, 요청자의 접근 가능 여부만 싣는다(#572 7번)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tenant_id: str = Field(min_length=1)
+    name: TenantName
+    #: 요청자가 그 고객사의 상세 · 하위 경로를 열 수 있는지(중앙 관리계정은 항상 true). false 면 상세가 403 이다.
+    accessible: bool
+
+
+class TenantSearchResponse(BaseModel):
+    """GET /api/v1/tenants/search 응답. 정렬은 이름 오름차순(같으면 tenant_id), 최대 TENANT_SEARCH_LIMIT 건."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[TenantSearchItem] = Field(max_length=TENANT_SEARCH_LIMIT)
 
 
 class TenantOnboardingResponse(BaseModel):

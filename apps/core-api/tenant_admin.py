@@ -3,13 +3,19 @@
 # /api/v1/tenants 의 판정 · 트랜잭션 · 응답 조립 (Post-MVP T-4 · 계약: schemas.api.tenants)
 #
 #   - 라우터는 얇게 두고 여기서 commit 한다. **응답을 다 만든 뒤에 commit 한다** — 온보딩 링크 설정이
-#     없어 응답을 못 만들면(503) 쓰기도 남지 않는다.
+#     없어 응답을 못 만들면(503) 쓰기도 남지 않는다. 생성 본체(create_tenant_uncommitted)는 commit 하지 않는다 —
+#     도입 신청 승인(signup_requests_service.approve)이 자기 트랜잭션 안에서 같은 본체를 부른다(#572 묶음 B).
 #   - 상태 전이의 받는 상태는 저장소(db.repositories.tenants)가 계약 상수로 판정한다. 0행이면 다시 읽어
 #     없으면 404 TENANT_NOT_FOUND, 있으면 409 TENANT_STATE_CONFLICT 다. PATCH 의 `subscription` 이 진행 중인
 #     모의 Marketplace 계약 · 그 투영을 덮으려 하면 저장소가 0행으로 거절해 같은 409 다(T-16 · #528).
 #   - 연결 확인은 읽기 트랜잭션을 끝낸 뒤 AWS 에 묻고, 쓰기 직전 권한 · 대상 설정 · 상태를 다시 확인한다.
 #     재개가 성공하면 같은 트랜잭션에서 구독 투영을 모의 계약의 현재 권리로 맞춘다(DB 만 · 서비스 상태 무관 · #528).
 #   - external_id 는 생성 응답과 재발급(onboarding)에서만 내보낸다. 상세 응답에는 칸이 없다(계약).
+#   - 범위(#572 7번): 목록은 SQL 로 범위를 건다(범위 밖 행 없음). 상세 · 하위 경로는 범위 없이 읽어 없거나 형식이 어긋난
+#     ID 는 404 TENANT_NOT_FOUND, 있지만 범위 밖이면 403 AUTH_FORBIDDEN 이다. 검색은 범위 없이 이름 · ID 와
+#     접근 가능 여부(can_access_tenant)만 싣는다.
+#   - 그룹(#572 2번 · 3번): 고객사를 그룹에 넣고 빼기는 중앙 관리계정만 한다. 생성은 중앙 관리계정(그룹 선택 · 없는 그룹
+#     404)과 관리자 직원계정(잠금 안에서 다시 읽은 담당 그룹 중 하나 필수 — 빠지면 422 · 담당 밖이면 403)이 한다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -19,25 +25,36 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from urllib.parse import urlencode
+from uuid import UUID
 
 from auth import admin_service, service
-from auth.access import is_central_admin, is_tenant_manager, tenant_scope_ids
+from auth.access import (
+    can_access_tenant,
+    is_central_admin,
+    is_tenant_manager,
+    tenant_scope_ids,
+)
 from config import TenantSettings
 from db import models
 from db.repositories import auth as auth_repo
+from db.repositories import tenant_groups as groups_repo
 from db.repositories import tenant_settings as settings_repo
 from db.repositories import tenants as tenants_repo
 from exceptions import ApiError
 from identifiers import canonical_id
 from schemas.api.errors import ErrorCode
+from schemas.api.groups import TenantGroupRequest
 from schemas.api.tenants import (
     RESUMABLE_STATUSES,
+    TENANT_SEARCH_LIMIT,
     VERIFIABLE_STATUSES,
     TenantCreateRequest,
     TenantCreateResponse,
     TenantDetail,
     TenantListItem,
     TenantOnboardingResponse,
+    TenantSearchItem,
+    TenantSearchResponse,
     TenantsResponse,
     TenantStatus,
     TenantSubscription,
@@ -113,6 +130,7 @@ def _list_item(row: tenants_repo.TenantWithCounts) -> TenantListItem:
         subscription=subscription_of(tenant),
         subscription_source=tenant.subscription_source,
         entitlement_ends_at=tenant.entitlement_ends_at,
+        group_id=tenant.group_id,
     )
 
 
@@ -138,15 +156,13 @@ def _detail(row: tenants_repo.TenantWithCounts, settings: TenantSettings) -> Ten
 
 def _load(db: Session, tenant_id: str, user: service.CurrentUser) -> tenants_repo.TenantWithCounts:
     """형식이 어긋난 식별자도 404 다 — DB 캐스트 오류(500)를 막는다(routers/incidents 와 같은 결).
-    담당 범위 밖 고객도 404 다(존재 여부를 드러내지 않는다) — 범위는 SQL 조건으로 건다."""
+    있지만 담당 범위 밖인 고객은 403 AUTH_FORBIDDEN 이다(#572 7번 — 검색에 뜬 고객을 열면 권한 없음으로 막는다)."""
     stored_id = canonical_id(tenant_id)
-    row = (
-        None
-        if stored_id is None
-        else tenants_repo.get_tenant(db, stored_id, scope_ids=tenant_scope_ids(user))
-    )
+    row = None if stored_id is None else tenants_repo.get_tenant(db, stored_id)
     if row is None:
         raise ApiError(ErrorCode.TENANT_NOT_FOUND)
+    if not can_access_tenant(user, stored_id):
+        raise ApiError(ErrorCode.AUTH_FORBIDDEN)
     return row
 
 
@@ -157,9 +173,23 @@ def _rejected(db: Session, tenant_id: str, user: service.CurrentUser) -> ApiErro
     return ApiError(ErrorCode.TENANT_STATE_CONFLICT)
 
 
-def list_tenants(db: Session, user: service.CurrentUser) -> TenantsResponse:
-    rows = tenants_repo.list_tenants(db, scope_ids=tenant_scope_ids(user))
+def list_tenants(
+    db: Session, user: service.CurrentUser, *, unassigned_only: bool = False
+) -> TenantsResponse:
+    """unassigned_only 는 담당 그룹 없는(group_id null) 고객만 — 범위는 그대로 걸린다."""
+    rows = tenants_repo.list_tenants(
+        db, scope_ids=tenant_scope_ids(user), unassigned_only=unassigned_only
+    )
     return TenantsResponse(tenants=[_list_item(row) for row in rows])
+
+
+def search_tenants(db: Session, user: service.CurrentUser, query: str) -> TenantSearchResponse:
+    """담당 밖 고객도 뜬다(#572 7번) — 이름 · ID · 접근 가능 여부만 싣는다(상태 · 계정 · 숫자 없음)."""
+    rows = tenants_repo.search_tenants(db, query, limit=TENANT_SEARCH_LIMIT)
+    return TenantSearchResponse(items=[
+        TenantSearchItem(tenant_id=tenant_id, name=name, accessible=can_access_tenant(user, tenant_id))
+        for tenant_id, name in rows
+    ])
 
 
 def get_tenant(
@@ -303,34 +333,85 @@ def resume_tenant(
     return _verify_tenant(db, actor, tenant_id, settings, resume=True)
 
 
+def _creation_group(db: Session, user: service.CurrentUser, requested: UUID | None) -> str | None:
+    """새 고객을 넣을 그룹(#572 3번). 중앙 관리계정은 고르거나 비우고(없는 그룹 404), 관리자 직원계정은 잠금 안에서
+    다시 읽은 담당 그룹 중 하나가 필수다 — 빠지면 422, 담당 밖(없는 그룹 포함)이면 403 이다."""
+    group_id = None if requested is None else str(requested)
+    if is_central_admin(user):
+        if group_id is not None and groups_repo.get_group(db, group_id) is None:
+            raise ApiError(ErrorCode.GROUP_NOT_FOUND)
+        return group_id
+    if group_id is None:
+        raise ApiError(ErrorCode.REQUEST_VALIDATION_FAILED)
+    if group_id not in user.assigned_group_ids:
+        raise ApiError(ErrorCode.AUTH_FORBIDDEN)
+    return group_id
+
+
+def create_tenant_uncommitted(
+    db: Session,
+    user: service.CurrentUser,
+    body: TenantCreateRequest,
+    settings: TenantSettings,
+    *,
+    now: datetime,
+) -> TenantCreateResponse:
+    """고객을 만들고 생성 응답(온보딩 링크 포함)까지 짓는다. **commit 하지 않는다** — 호출부가 잠금 안에서 다시 판정한
+    user 와 자기 트랜잭션으로 부르고, 응답을 받은 뒤 확정한다(POST /tenants · 도입 신청 승인). 거절은 예외다."""
+    group_id = _creation_group(db, user, body.group_id)
+    try:
+        # SAVEPOINT — 유일성 거절이 이 쓰기만 되돌리고 세션은 계속 쓸 수 있게 둔다
+        with db.begin_nested():
+            tenant = tenants_repo.create_tenant(
+                db,
+                name=body.name,
+                aws_account_id=body.aws_account_id,
+                regions=body.regions,
+                collect_vpc_ids=body.collect_vpc_ids,
+                access_role_arn=body.access_role_arn,
+                group_id=group_id,
+                now=now,
+            )
+    except IntegrityError as exc:
+        if getattr(getattr(exc.orig, "diag", None), "constraint_name", None) == _ACCOUNT_UNIQUE:
+            raise ApiError(ErrorCode.TENANT_ACCOUNT_CONFLICT) from exc
+        raise
+    # 새 테넌트에는 자산 · 인시던트가 없다 — 다시 세지 않는다
+    return TenantCreateResponse(
+        tenant=_detail(tenants_repo.TenantWithCounts(tenant, 0, 0), settings),
+        external_id=tenant.external_id,
+    )
+
+
 def create_tenant(
     db: Session, actor: admin_service.Actor, body: TenantCreateRequest, settings: TenantSettings, *, now: datetime
 ) -> TenantCreateResponse:
     with _management(db, actor) as user:
-        # 새 고객은 어떤 담당자의 기존 범위에도 없다 — 생성은 중앙 관리자만(자동 배정 없음)
+        return _commit_after(
+            db, lambda: create_tenant_uncommitted(db, user, body, settings, now=now)
+        )
+
+
+def set_tenant_group(
+    db: Session,
+    actor: admin_service.Actor,
+    tenant_id: str,
+    body: TenantGroupRequest,
+    settings: TenantSettings,
+    *,
+    now: datetime,
+) -> TenantDetail:
+    """고객을 그룹에 넣거나(group_id) 뺀다(null) — 중앙 관리계정만(#572 2번). 고객 404 가 그룹 404 보다 먼저다."""
+    with _management(db, actor) as user:
         if not is_central_admin(user):
             raise ApiError(ErrorCode.AUTH_FORBIDDEN)
-        try:
-            # SAVEPOINT — 유일성 거절이 이 쓰기만 되돌리고 세션은 계속 쓸 수 있게 둔다
-            with db.begin_nested():
-                tenant = tenants_repo.create_tenant(
-                    db,
-                    name=body.name,
-                    aws_account_id=body.aws_account_id,
-                    regions=body.regions,
-                    collect_vpc_ids=body.collect_vpc_ids,
-                    access_role_arn=body.access_role_arn,
-                    now=now,
-                )
-        except IntegrityError as exc:
-            if getattr(getattr(exc.orig, "diag", None), "constraint_name", None) == _ACCOUNT_UNIQUE:
-                raise ApiError(ErrorCode.TENANT_ACCOUNT_CONFLICT) from exc
-            raise
-        # 새 테넌트에는 자산 · 인시던트가 없다 — 다시 세지 않는다
-        return _commit_after(db, lambda: TenantCreateResponse(
-            tenant=_detail(tenants_repo.TenantWithCounts(tenant, 0, 0), settings),
-            external_id=tenant.external_id,
-        ))
+        stored_id = _load(db, tenant_id, user).tenant.tenant_id
+        group_id = None if body.group_id is None else str(body.group_id)
+        if group_id is not None and groups_repo.get_group(db, group_id) is None:
+            raise ApiError(ErrorCode.GROUP_NOT_FOUND)
+        if not groups_repo.set_tenant_group(db, stored_id, group_id, now=now):
+            raise _rejected(db, stored_id, user)  # 그 사이 지워졌다 → 404
+        return _commit_after(db, lambda: _detail(_load(db, stored_id, user), settings))
 
 
 def update_tenant(

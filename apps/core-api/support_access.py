@@ -1,7 +1,7 @@
 """#552 지원 API의 신원 재판정과 트랜잭션 경계.
 
-등급·담당 범위는 auth.access를 재사용한다. 정지 고객의 지원 문의는
-허용하지만 auth.admin_service의 정지 고객 관리 거절을 바꾸지 않는다.
+등급·담당 범위는 auth.access를, 문의 등록의 기능 권한(#572 5번)은 auth.permissions를 재사용한다.
+정지 고객의 지원 문의는 허용하지만 auth.admin_service의 정지 고객 관리 거절을 바꾸지 않는다.
 """
 
 from __future__ import annotations
@@ -11,14 +11,14 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
 
-from auth import access, service
+from auth import access, permissions, service
 from auth.admin_service import Actor
 from auth.http import SESSION_COOKIE, get_clock
 from config import AuthSettings, get_auth_settings
 from db.repositories import auth as auth_repo
 from exceptions import ApiError
 from fastapi import Depends, Request
-from schemas.api.auth import AccountType
+from schemas.api.auth import AccountType, FeaturePermission
 from schemas.api.errors import ErrorCode
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -42,10 +42,16 @@ def get_actor(
 
 
 def require_customer(user: service.CurrentUser) -> service.CurrentUser:
-    """접수는 고객사 사용자만. 활성 세션의 정지 고객사도 지원 요청은 가능하다."""
+    """고객사 사용자만(역할 무관). 활성 세션의 정지 고객사도 지원 경로는 쓸 수 있다 — 문의 목록 조회의 고객 쪽 관문."""
     if user.account_type is not AccountType.TENANT or user.tenant_id is None:
         raise ApiError(ErrorCode.AUTH_FORBIDDEN)
     return user
+
+
+def require_inquiry_author(user: service.CurrentUser) -> service.CurrentUser:
+    """접수(POST)는 고객사 사용자 중 문의 등록 권한(CREATE_INQUIRY)이 있는 계정만(#572 5번) — ADMIN, 권한을 받은
+    OPERATOR. VIEWER 와 권한 없는 OPERATOR 는 403 이다. 정지 고객사 여부는 보지 않는다(require_customer 와 같다)."""
+    return permissions.check_permission(require_customer(user), FeaturePermission.CREATE_INQUIRY)
 
 
 def require_support_user(user: service.CurrentUser) -> service.CurrentUser:

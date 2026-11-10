@@ -6,8 +6,9 @@
 #   - 결제는 없다. 유료 권리의 원천은 **모의 Marketplace 계약**(MOCK_MARKETPLACE)이다 — AWS Marketplace 의
 #     SaaS 계약(월 단위 · 계약형)을 흉내 낸 서버 안의 대역이고, 실제 AWS 호출 · 등록 · 청구가 없다. 실제
 #     Marketplace 와 메시지 형식 · 날짜 규칙이 같다고 주장하지 않는다.
-#   - 원천이 셋이다(SubscriptionSource). 수동 입력(MANUAL) · 모의 계약의 투영(MOCK_MARKETPLACE) ·
-#     앱 정책의 Free(APP_FREE). 테넌트의 구독 칸은 **투영**이고 계약 자체가 아니다 — 모의 계약의 현재 상태가
+#   - 원천이 넷이다(SubscriptionSource). 수동 입력(MANUAL) · 모의 계약의 투영(MOCK_MARKETPLACE) ·
+#     앱 정책의 Free(APP_FREE) · 실제 Marketplace 권리의 투영(AWS_MARKETPLACE, 상품 등록 뒤에만 생긴다).
+#     테넌트의 구독 칸은 **투영**이고 계약 자체가 아니다 — 모의 계약의 현재 상태가
 #     권위이며, 투영은 그 현재 상태를 다시 읽어 맞춘다(이벤트 내용을 옮겨 적지 않는다).
 #   - 요금제(`plan`)는 문자열 칸 그대로다(DB enum 이 아니다). 수동으로 넣은 옛 값(basic · pilot 등)은
 #     보존한다. plan 이 null 이면 「등록 안 됨」이지 Free 가 아니다. 요금 · 기능 · SLA 는 정하지 않았다.
@@ -27,7 +28,8 @@ from typing import Literal, get_args
 #: 앱 정책의 기본 요금제. 새 테넌트의 시작값이자 모의 계약이 끝난 뒤의 도착점이다.
 FREE_PLAN = "Free"
 
-#: 고객이 모의 Marketplace 로 구매를 요청할 수 있는 요금제. 월 단위 계약형이다. 요금제 사이 전환은 없다.
+#: 고객이 모의 Marketplace 로 구매를 요청할 수 있는 요금제. 월 단위 계약형이다. 모의 계약에는 요금제 사이 전환이
+#: 없다. 실제 Marketplace 권리는 고객이 올리고 내릴 수 있고, 가장 최근에 바뀐 권리를 따른다(marketplace.py).
 PaidPlan = Literal["Business", "Enterprise"]
 PAID_PLANS: frozenset[str] = frozenset(get_args(PaidPlan))
 
@@ -41,6 +43,15 @@ class SubscriptionSource(str, Enum):
     MOCK_MARKETPLACE = "MOCK_MARKETPLACE"
     #: 앱 정책의 Free — 새 테넌트의 시작값 · 모의 계약이 끝난 뒤의 값.
     APP_FREE = "APP_FREE"
+    #: 실제 AWS Marketplace 권리(GetEntitlements)를 투영한 값(ADR-0012 2차 개정). 상품을 등록하기 전에는 생기지
+    #: 않는다. 모의 계약보다 먼저 본다. 운영자 PATCH 로 바꿀 수 없다.
+    AWS_MARKETPLACE = "AWS_MARKETPLACE"
+
+
+#: 계약이 원천인 투영 — 권리 끝 시각이 있고, 운영자 PATCH 로 덮어쓰지 않으며, 권리가 끝나면 서비스를 멈춘다.
+CONTRACT_SOURCES: frozenset[SubscriptionSource] = frozenset(
+    {SubscriptionSource.MOCK_MARKETPLACE, SubscriptionSource.AWS_MARKETPLACE}
+)
 
 
 class MockAgreementStatus(str, Enum):

@@ -1,4 +1,4 @@
-"""REST 공통 오류 봉투 계약 테스트 — 기존 26종 + #552 6종, 봉투 형태 고정."""
+"""REST 공통 오류 봉투 계약 테스트: 기존 26종 + #552 6종 + T-10 1종, 봉투 형태 고정."""
 
 import pytest
 from pydantic import ValidationError
@@ -10,12 +10,15 @@ CONTRACT_ERROR_CODES = {
     "INCIDENT_NOT_FOUND",         # 404
     "IDEMPOTENCY_KEY_CONFLICT",   # 409
     "PROPOSAL_NOT_EXECUTABLE",    # 409
+    "TARGET_EXECUTION_IN_PROGRESS",  # 409: 같은 대상에 끝나지 않은 실행 (T-10 · #595)
     "INCIDENT_NOT_RESOLVABLE",    # 409 — 종료 처리 거절 (Issue #199)
     "TENANT_NOT_FOUND",           # 404 — Post-MVP T-4
     "TENANT_ACCOUNT_CONFLICT",    # 409 — 같은 계정의 테넌트가 이미 있다
     "TENANT_ONBOARDING_UNAVAILABLE",  # 503 — 온보딩 링크 설정 없음
     "TENANT_STATE_CONFLICT",      # 409 — 테넌트 상태 전이 거절
     "TENANT_SUSPENDED",           # 409 — 정지된 테넌트 자산에 새 실행
+    "GROUP_NOT_FOUND",            # 404 — 고객사 그룹 (#572 2번)
+    "GROUP_NAME_CONFLICT",        # 409 — 같은 이름의 그룹
     "AUTH_REQUIRED",              # 401 — Post-MVP T-1 (#492)
     "AUTH_FAILED",                # 401
     "AUTH_CODE_INVALID",          # 401
@@ -33,6 +36,7 @@ CONTRACT_ERROR_CODES = {
     "USER_STATE_CONFLICT",        # 409 — 마지막 ADMIN · 중복 · 상태 충돌
     "SIGNUP_REQUEST_NOT_FOUND",   # 404
     "SIGNUP_REQUEST_STATE_CONFLICT",  # 409
+    "SIGNUP_REQUEST_APPROVAL_REQUIRED",  # 409 — PUT status 로는 승인하지 않는다 (#572)
     "INQUIRY_NOT_FOUND",          # 404
     "INQUIRY_STATE_CONFLICT",     # 409
     "NOTIFICATION_NOT_FOUND",     # 404

@@ -30,6 +30,8 @@ const PRESENTATION: Record<ErrorCode, Presentation> = {
   // 4.9: Toast + 재조회가 원칙 — Toast는 CMN-001 소관, "해당 Incident 재조회"는 이 컴포넌트가 아니라
   // 호출 화면 책임이다. 이 오류를 받는 화면은 반드시 재조회를 붙일 것 (화면설계서 4.6·5장 원칙 2).
   PROPOSAL_NOT_EXECUTABLE: { variant: 'inline' },
+  // 같은 대상의 다른 실행이 끝나면 풀린다(T-10 · #595). 서버 message 가 다음 행동까지 말한다.
+  TARGET_EXECUTION_IN_PROGRESS: { variant: 'inline' },
   // 종료 처리(#199)가 받는 409 — 그 사이 상태가 옮겨졌다는 뜻이라 PROPOSAL_NOT_EXECUTABLE과
   // 같은 처리다: 모달을 닫고 상세를 재조회한다(재조회는 호출 화면 책임).
   INCIDENT_NOT_RESOLVABLE: { variant: 'inline' },
@@ -46,6 +48,8 @@ const PRESENTATION: Record<ErrorCode, Presentation> = {
     variant: 'inline',
     note: '고객사 목록에서 같은 계정 ID의 고객사를 여세요. 계정 ID를 잘못 넣었다면 고쳐서 다시 추가합니다.',
   },
+  GROUP_NOT_FOUND: { variant: 'page', backToList: true, note: '고객사 그룹을 찾을 수 없습니다.' },
+  GROUP_NAME_CONFLICT: { variant: 'inline', note: '같은 이름의 고객사 그룹이 이미 있습니다.' },
   TENANT_ONBOARDING_UNAVAILABLE: {
     variant: 'inline',
     note: '온보딩 템플릿 주소와 플랫폼 역할이 배포 설정에 들어가기 전에는 다시 시도해도 같은 결과입니다.',
@@ -80,6 +84,7 @@ const PRESENTATION: Record<ErrorCode, Presentation> = {
   // 여기는 일반 화면에 섞여 오는 경우다. 그 사이 다른 관리자가 바꿨을 수 있어 재조회가 원칙이다.
   USER_NOT_FOUND: { variant: 'inline', note: '화면을 새로고침한 뒤 다시 확인해 주세요.' },
   USER_STATE_CONFLICT: { variant: 'inline', note: '화면을 새로고침한 뒤 다시 확인해 주세요.' },
+  SIGNUP_REQUEST_APPROVAL_REQUIRED: { variant: 'inline' },
 };
 
 /** ApiError가 아닌 실패(네트워크 등)도 오류 화면을 그려야 하므로 INTERNAL_ERROR로 접는다. */

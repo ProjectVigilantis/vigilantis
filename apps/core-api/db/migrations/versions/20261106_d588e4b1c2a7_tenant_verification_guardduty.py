@@ -7,7 +7,7 @@ downgrade 는 이 값을 가진 행이 있으면 거절한다(되돌리면 그 �
 이전 다섯 값으로 다시 만든다. 그 CHECK 가 enum 리터럴('OK')을 담고 있어 칸의 타입을 바꾸는 동안 내렸다 다시 건다.
 
 Revision ID: d588e4b1c2a7
-Revises: a1b7c4d2e905
+Revises: f609f610e001
 Create Date: 2026-11-06 18:00:00.000000
 """
 from __future__ import annotations
@@ -16,7 +16,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "d588e4b1c2a7"
-down_revision = "a1b7c4d2e905"
+down_revision = "f609f610e001"
 branch_labels = None
 depends_on = None
 

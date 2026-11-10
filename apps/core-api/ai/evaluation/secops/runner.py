@@ -62,10 +62,9 @@ def prompt_fingerprint() -> str:
                 for capability in case.graph_input.capabilities}
     return digest({
         "summary": agent._SECOPS_SUMMARY_PROMPT,
-        "risk": agent._SECOPS_RISK_PROMPT,
         "proposal": agent._SECOPS_PROPOSAL_PROMPT,
         "schemas": [model.model_json_schema() for model in (
-            agent.EvidenceSummaryOutput, agent.RiskReassessmentOutput, agent.CandidateProposalOutput,
+            agent.EvidenceSummaryOutput, agent.CandidateProposalOutput,
         )],
         "parameter_constraints": {
             runbook: agent._PARAMETER_CONSTRAINTS.get(runbook, ()) for runbook in runbooks
@@ -246,10 +245,6 @@ def report(run: dict, cases: list[EvalCase], answers: dict[str, Answer],
                                and real_measured and len(snapshots) == 1),
         "reviewer": review.reviewer if review is not None else None,
         "reviewer_kind": review.reviewer_kind if review is not None else None,
-        "risk_agreement": {
-            case_id: [output.reviewed_risk_level.value if output.reviewed_risk_level else None
-                      for output in values] for case_id, values in outputs.items()
-        },
         # 완전 일치율은 관측값이다. 허용 범위 안의 rule_number 차이는 결함이 아니다.
         "field_agreement": {
             case_id: [asdict(item) for item in field_agreement(values)]

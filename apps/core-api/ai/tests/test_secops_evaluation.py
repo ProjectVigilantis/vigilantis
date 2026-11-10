@@ -6,12 +6,7 @@ from dataclasses import replace
 
 import pytest
 from ai import agent
-from ai.agent import (
-    CandidateProposalOutput,
-    EvidenceSummaryOutput,
-    ProposedCandidate,
-    RiskReassessmentOutput,
-)
+from ai.agent import CandidateProposalOutput, EvidenceSummaryOutput, ProposedCandidate
 from ai.evaluation.common.fingerprints import input_fingerprint
 from ai.evaluation.secops import cli, dataset, runner
 from ai.evaluation.secops.dataset import (
@@ -70,7 +65,7 @@ def cli_source_cases(isolated_sources, monkeypatch):
     return cases
 
 
-def _client(case, *, risk=None, proposal=True, **parameters):
+def _client(case, *, proposal=True, **parameters):
     data = case.graph_input
     event = data.evidences[0].content.event
     candidate = ProposedCandidate(
@@ -79,7 +74,6 @@ def _client(case, *, risk=None, proposal=True, **parameters):
         **{"rule_number": 100, "cidr_block": f"{event.payload.source_ip}/32", "protocol": "tcp", **parameters},
     )
     return FakeAIModelClient([
-        RiskReassessmentOutput(reviewed_risk_level=risk or data.initial_risk.initial_risk_level),
         CandidateProposalOutput(candidates=[candidate] if proposal else []),
         EvidenceSummaryOutput(observation="SSH 실패가 관측됐다.", diagnosis="반복 인증 시도다.",
                               rationale="출발지 차단을 제안한다."),
@@ -142,7 +136,8 @@ def test_request_manifest_covers_both_allowed_paths_without_paid_calls(monkeypat
     for case in cases:
         variants = [item for item in manifest if item["case_id"] == case.case_id]
         assert {item["status"] for item in variants} == {"SUCCEEDED", "NO_PROPOSAL"}
-        assert all(len(item["requests"]) == 3 for item in variants)
+        # 등급 호출이 없어 요청은 후보·요약 2건이다(ADR-0005 1차 개정).
+        assert all(len(item["requests"]) == 2 for item in variants)
         assert variants[0]["requests"][-1]["sha256"] != variants[1]["requests"][-1]["sha256"]
 
 
@@ -169,7 +164,7 @@ def test_request_change_requires_remeasurement(monkeypatch, change):
     cases = load_cases()
     run = _run(cases)
     if change == "prompt":
-        monkeypatch.setattr(agent, "_SECOPS_RISK_PROMPT", agent._SECOPS_RISK_PROMPT + "\n새 판단 기준")
+        monkeypatch.setattr(agent, "_SECOPS_SUMMARY_PROMPT", agent._SECOPS_SUMMARY_PROMPT + "\n새 판단 기준")
     elif change == "payload":
         original = agent._secops_payload
         monkeypatch.setattr(agent, "_secops_payload", lambda value: {**original(value), "new_context": True})
@@ -177,8 +172,8 @@ def test_request_change_requires_remeasurement(monkeypatch, change):
         monkeypatch.setitem(agent._PARAMETER_CONSTRAINTS,
                             RunbookId.RUNBOOK_NACL_ADD_DENY, ("SecOps 제약 변경",))
     else:
-        original = RiskReassessmentOutput.model_json_schema
-        monkeypatch.setattr(RiskReassessmentOutput, "model_json_schema",
+        original = CandidateProposalOutput.model_json_schema
+        monkeypatch.setattr(CandidateProposalOutput, "model_json_schema",
                             classmethod(lambda cls, **kwargs: {**original(**kwargs), "description": "새 계약 설명"}))
     result = runner.report(run, cases, load_answers(cases))
     if change != "payload":
@@ -198,7 +193,7 @@ def test_legacy_run_without_request_fingerprint_is_not_assumed_compatible():
 
 
 @pytest.mark.parametrize("token", [
-    "reviewed_risk_level", "reviewed_risk_label", "failed_attempt_count", "SSH_BRUTEFORCE",
+    "reviewed_risk_level", "initial_risk_label", "failed_attempt_count", "SSH_BRUTEFORCE",
     "RISK_SSH_BRUTEFORCE", "HIGH", "observation",
 ])
 def test_internal_summary_identifiers_fail_without_a_semantic_review(token):
@@ -272,7 +267,7 @@ def test_missing_answer_cannot_shrink_the_denominator(tmp_path):
 
 
 @pytest.mark.parametrize("change,reason", [
-    ("risk", "reviewed_risk_outside_answer"),
+    ("risk", "reviewed_risk_present"),
     ("target", "target_arn"), ("cidr", "cidr_block"), ("evidence", "evidence_ids"),
 ])
 def test_deterministic_wrong_answers_fail(change, reason):
@@ -280,7 +275,8 @@ def test_deterministic_wrong_answers_fail(change, reason):
     record = runner.run_one(cases[0], 1, _client(cases[0]))
     output = record["output"]
     if change == "risk":
-        output["reviewed_risk_level"] = "LOW"
+        # 서버 초기 판정과 같은 값이라도 출력에 실리면 실패다 — 그래프는 등급을 내지 않는다.
+        output["reviewed_risk_level"] = cases[0].graph_input.initial_risk.initial_risk_level.value
     elif change == "target":
         output["candidates"][0]["target_arn"] = cases[0].graph_input.asset_context.arn
     elif change == "cidr":
@@ -302,9 +298,9 @@ def test_current_answers_allow_proposal_and_absence_without_changing_risk(case_i
     record = runner.run_one(case, 1, _client(case, proposal=proposal))
     output = AgentGraphOutput.model_validate(record["output"])
     assert output.invocation_status.value == ("SUCCEEDED" if proposal else "NO_PROPOSAL")
-    assert output.reviewed_risk_level == case.graph_input.initial_risk.initial_risk_level
+    assert output.reviewed_risk_level is None
     assert score_structured(output, answer).verdict == "PASS"
-    assert record["model_calls"] == 3 and record["data_source"] == "test_double"
+    assert record["model_calls"] == 2 and record["data_source"] == "test_double"
 
 
 def test_dispatcher_rejection_is_preserved_after_a_valid_graph_dto():
@@ -314,7 +310,7 @@ def test_dispatcher_rejection_is_preserved_after_a_valid_graph_dto():
     assert record["output"]["invocation_status"] == "FAILED"
     assert record["dispatcher_rejected"]
     assert record["failure_kind"] == "OUTPUT_CONTRACT_FAILURE"
-    assert record["model_calls"] == 3 and record["data_source"] == "test_double"
+    assert record["model_calls"] == 2 and record["data_source"] == "test_double"
 
 
 @pytest.mark.parametrize("phase,kind", [
@@ -366,14 +362,17 @@ def test_known_summary_omission_survives_another_uncertain_check():
     assert score.verdict == "FAIL" and "observed_facts" in score.reasons
 
 
-def test_consistently_wrong_risk_is_not_a_reproducible_success():
+def test_consistently_present_reviewed_risk_is_not_a_reproducible_success():
+    """그래프는 등급을 내지 않으므로, 보존 결과에 등급이 반복해 실려 있어도 통과가 아니다."""
     cases = load_cases()
     run = _run([cases[0]], 3)
-    run["records"] = [runner.run_one(cases[0], n, _client(cases[0], risk="LOW")) for n in range(1, 4)]
+    run["records"] = [runner.run_one(cases[0], n, _client(cases[0])) for n in range(1, 4)]
+    for record in run["records"]:
+        record["output"]["reviewed_risk_level"] = "HIGH"
     run["state"] = "COMPLETE"
     result = runner.report(run, [cases[0]], load_answers(cases), _review(run))
     assert result["counts"]["FAIL"] == 3
-    assert result["risk_agreement"]["C01"] == ["LOW"] * 3
+    assert all("reviewed_risk_present" in item["structured"]["reasons"] for item in result["scores"])
     assert not result["baseline_candidate"]
 
 
@@ -409,8 +408,9 @@ def test_offline_cli_never_builds_a_paid_client(monkeypatch, capsys, cli_source_
     assert cli.main(argv) == 0
     payload = json.loads(capsys.readouterr().out)
     if argv == ["--estimate"]:
-        assert payload["model_calls_upper_bound"] == 21
-        assert payload["http_attempts_upper_bound"] == 63
+        # 7건 × 1회 × 호출 2회(후보·요약) — 재평가 호출이 빠졌다(ADR-0005 1차 개정).
+        assert payload["model_calls_upper_bound"] == 14
+        assert payload["http_attempts_upper_bound"] == 42
     assert "OPENAI_API_KEY" not in json.dumps(payload)
 
 

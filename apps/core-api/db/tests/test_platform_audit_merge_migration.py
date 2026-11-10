@@ -2,6 +2,8 @@
 
 지키는 것: 부모 2개(둘 다 그대로) · 단일 head · 새 DB base→head · 옛 b492 단독 / 옛 b544 단독 DB 가
 각각 head 로 올라가 두 갈래와 #515·#552·#565·T-7·#528 테이블을 모두 갖고 시드 데이터를 보존 · head 테이블 수 · ORM 일치.
+담당 배정 표는 c572e4a9b210(#572 2번 고객사 그룹)이 지운다 — 직접 배정을 시드한 b492 단독 DB 는 그 앞 리비전까지
+배정을 보존하는지 보고, 운영자가 배정을 비운 뒤 head 로 올린다(남아 있으면 그 리비전이 멈춘다 · test_tenant_groups_migration).
 테스트마다 고유 이름의 일회용 DB 를 만들고 지운다(공용 pg_engine DB 의 head 를 건드리지 않는다).
 """
 
@@ -27,13 +29,16 @@ PLATFORM_BRANCH = "b492e7d1a605"
 AUDIT_BRANCH = "b544a7d1e2f3"
 FORK = "c492d6e8f4a2"
 ASSIGNMENTS = "app_user_tenant_assignments"
+# 직접 배정 표를 지우는 고객사 그룹 리비전(c572e4a9b210)의 바로 앞
+BEFORE_GROUPS = "c597d1e2f3a4"
 ISSUER = "https://cognito-idp.ap-northeast-2.amazonaws.com/pool-pa-merge"
 TENANT_ID = "22222222-2222-4222-8222-222222222222"
 INCIDENT_ID = "33333333-3333-4333-8333-333333333333"
 OCCURRED_AT = datetime(2026, 10, 30, 9, 0, tzinfo=UTC)
 # head 의 테이블 수 — 기존 27종 + TOTP 복구 2종 + 도입·문의 5종 + T-7 고객 설정 · 정리 대기 · 파일 바인딩 증거 3종 + #565 신청 결정 1종
-# + #528 옛 재개 전 구독 보존 · 모의 Marketplace 계약 · 이벤트 3종
-HEAD_TABLES = 41
+# + #528 옛 재개 전 구독 보존 · 모의 Marketplace 계약 · 이벤트 3종 + #572 운영자 기능 권한 1종 · 6번 고객사별 API 호출 버킷 1종
+# + #572 고객사 그룹 · 그룹 배정 2종 − 직접 배정 1종
+HEAD_TABLES = 45  # + marketplace_licenses(ADR-0012 2차 개정)
 
 
 @pytest.fixture()
@@ -130,11 +135,12 @@ def _seed_resolved_audit_event(conn):
     )
 
 
-def _assert_merged_head(config, engine, *, platform_role, assignments):
+def _assert_merged_head(config, engine, *, platform_role):
     assert _versions(engine) == {_head(config)}
     tables = _tables(engine)
     assert len(tables) == HEAD_TABLES
-    assert {ASSIGNMENTS, "audit_events"} <= tables
+    assert {"tenant_groups", "app_user_group_assignments", "audit_events"} <= tables
+    assert ASSIGNMENTS not in tables
     with engine.connect() as conn:
         assert (
             conn.execute(
@@ -144,7 +150,6 @@ def _assert_merged_head(config, engine, *, platform_role, assignments):
             ).scalar_one()
             == platform_role
         )
-        assert conn.execute(text(f"SELECT count(*) FROM {ASSIGNMENTS}")).scalar_one() == assignments
         assert (
             conn.execute(
                 text(
@@ -191,8 +196,15 @@ def test_platform_branch_only_database_upgrades_keeping_roles_and_assignments(me
             ),
             {"t": TENANT_ID},
         )
+    # 병합을 지나 고객사 그룹 리비전 앞까지 배정이 그대로 남는다
+    command.upgrade(config, BEFORE_GROUPS)
+    assert {ASSIGNMENTS, "audit_events"} <= _tables(engine)
+    with engine.begin() as conn:
+        assert conn.execute(text(f"SELECT count(*) FROM {ASSIGNMENTS}")).scalar_one() == 1
+        # 운영자가 직접 배정을 비워야 그룹 리비전이 올라간다
+        conn.execute(text(f"DELETE FROM {ASSIGNMENTS}"))
     command.upgrade(config, "head")
-    _assert_merged_head(config, engine, platform_role="TENANT_MANAGER", assignments=1)
+    _assert_merged_head(config, engine, platform_role="TENANT_MANAGER")
 
 
 def test_audit_branch_only_database_upgrades_with_platform_backfill(merge_db):
@@ -206,7 +218,7 @@ def test_audit_branch_only_database_upgrades_with_platform_backfill(merge_db):
         _seed_resolved_audit_event(conn)
     command.upgrade(config, "head")
     # 옛 PLATFORM 은 b492 백필 규칙대로 전역 범위(CENTRAL_ADMIN)이고 배정은 만들지 않는다
-    _assert_merged_head(config, engine, platform_role="CENTRAL_ADMIN", assignments=0)
+    _assert_merged_head(config, engine, platform_role="CENTRAL_ADMIN")
     # 병합 전에 남긴 감사 기록은 칸 그대로 남고, 여전히 append-only 다
     with engine.connect() as conn:
         row = conn.execute(

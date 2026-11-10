@@ -3,8 +3,8 @@
 import pytest
 from pydantic import ValidationError
 from schemas.api.users import (
-    UserEventAction, UserEventState, UserInviteRequest, UserListItem, UserRoleRequest,
-    UserStatusRequest,
+    UserEventAction, UserEventState, UserInviteRequest, UserListItem, UserPermissionsRequest,
+    UserRoleRequest, UserStatusRequest,
 )
 
 
@@ -102,6 +102,7 @@ def test_user_list_uses_same_assigned_scope_contract(account_type, tenant_id, pl
         "email": "user@example.com", "role": "ADMIN", "status": "ACTIVE",
         "last_login_at": None, "account_type": account_type, "tenant_id": tenant_id,
         "platform_role": platform_role,
+        "permissions": ["VIEW", "EXECUTE_ACTION", "RESOLVE_INCIDENT", "CREATE_INQUIRY"],
     }
     if valid:
         assert UserListItem.model_validate(body).model_dump(mode="json") == body
@@ -120,3 +121,55 @@ def test_user_list_item_does_not_carry_assignments():
             "tenant_id": "1f0c2c1e-0000-4000-8000-000000000002", "platform_role": None,
             "assigned_tenant_ids": [],
         })
+
+
+# --- 기능별 권한(#572 5번) -----------------------------------------------------------
+
+
+@pytest.mark.parametrize("given,expected", [
+    ([], []),
+    (["CREATE_INQUIRY"], ["CREATE_INQUIRY"]),  # 문의 등록은 조회 없이 줄 수 있다
+    (["RESOLVE_INCIDENT", "VIEW"], ["VIEW", "RESOLVE_INCIDENT"]),  # 열거 선언 순서로 정렬
+    (["CREATE_INQUIRY", "EXECUTE_ACTION", "VIEW", "RESOLVE_INCIDENT"],
+     ["VIEW", "EXECUTE_ACTION", "RESOLVE_INCIDENT", "CREATE_INQUIRY"]),
+])
+def test_permissions_request_normalizes_order(given, expected):
+    body = UserPermissionsRequest.model_validate({"permissions": given})
+    assert [p.value for p in body.permissions] == expected
+
+
+@pytest.mark.parametrize("given", [
+    ["EXECUTE_ACTION"],  # 실행 · 종료는 조회와 함께만
+    ["RESOLVE_INCIDENT", "CREATE_INQUIRY"],
+    ["VIEW", "VIEW"],  # 중복
+    ["ADMIN"],  # 권한이 아닌 값
+    None,
+])
+def test_permissions_request_rejects_invalid_lists(given):
+    with pytest.raises(ValidationError):
+        UserPermissionsRequest.model_validate({"permissions": given})
+
+
+def test_permissions_request_requires_the_field():
+    with pytest.raises(ValidationError):
+        UserPermissionsRequest.model_validate({})
+
+
+def test_invite_permissions_default_to_none_and_only_for_operator():
+    base = {"email": "u@example.com", "role": "OPERATOR"}
+    assert UserInviteRequest.model_validate(base).permissions == []
+    granted = UserInviteRequest.model_validate({**base, "permissions": ["CREATE_INQUIRY", "VIEW"]})
+    assert [p.value for p in granted.permissions] == ["VIEW", "CREATE_INQUIRY"]
+    for role in ("VIEWER", "ADMIN"):
+        assert UserInviteRequest.model_validate({**base, "role": role, "permissions": []}).permissions == []
+        with pytest.raises(ValidationError):
+            UserInviteRequest.model_validate({**base, "role": role, "permissions": ["VIEW"]})
+    with pytest.raises(ValidationError):
+        UserInviteRequest.model_validate({**base, "permissions": ["EXECUTE_ACTION"]})
+
+
+def test_event_state_carries_permissions_and_action_exists():
+    assert UserEventAction("PERMISSIONS_CHANGED") is UserEventAction.PERMISSIONS_CHANGED
+    state = UserEventState.model_validate({"permissions": ["VIEW"]})
+    assert state.model_dump(mode="json", exclude_none=True) == {"permissions": ["VIEW"]}
+    assert UserEventState.model_validate({}).permissions is None

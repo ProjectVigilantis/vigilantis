@@ -35,6 +35,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..subscriptions import (
+    CONTRACT_SOURCES,
     FREE_PLAN,
     MOCK_AGREEMENT_OPEN_STATUSES,
     PAID_PLANS,
@@ -125,7 +126,7 @@ class CustomerSubscriptionResponse(BaseModel):
     subscription: TenantSubscription | None = None
     #: 투영의 원천. null = 등록 안 됨.
     source: SubscriptionSource | None = None
-    #: 모의 계약 투영의 권리 끝 시각(미포함). 원천이 MOCK_MARKETPLACE 일 때만 있다.
+    #: 계약 투영의 권리 끝 시각(미포함). 원천이 MOCK_MARKETPLACE · AWS_MARKETPLACE 일 때만 있다.
     entitlement_ends_at: UtcDateTime | None = None
     #: 가장 최근 모의 계약(진행 중이면 그 계약). 없으면 null. PENDING · FAILED 는 여기서만 보인다.
     agreement: MockAgreement | None = None
@@ -142,11 +143,16 @@ class CustomerSubscriptionResponse(BaseModel):
     @model_validator(mode="after")
     def _enforce_contract(self):
         mock = self.source is SubscriptionSource.MOCK_MARKETPLACE
-        if mock != (self.entitlement_ends_at is not None):
-            raise ValueError("entitlement_ends_at 은 모의 계약 투영에만, 그리고 반드시 있습니다")
+        if (self.source in CONTRACT_SOURCES) != (self.entitlement_ends_at is not None):
+            raise ValueError("entitlement_ends_at 은 계약 투영(모의 · 실제 Marketplace)에만, 그리고 반드시 있습니다")
         if self.next_renewal_date is not None and self.expiry_date is not None:
             raise ValueError("다음 갱신일과 만료일은 함께 있을 수 없습니다")
         sub = self.subscription
+        # 실제 Marketplace 권리의 끝 시각은 KST 자정이 아닐 수 있고 갱신 끔 여부를 모른다 — 예정일을 내지 않는다
+        if self.source is SubscriptionSource.AWS_MARKETPLACE and (
+            sub is None or sub.plan not in PAID_PLANS or sub.period_end is None
+        ):
+            raise ValueError("실제 Marketplace 투영은 기간이 있는 유료 요금제입니다")
         if mock:
             if sub is None or sub.plan not in PAID_PLANS or sub.period_end is None:
                 raise ValueError("모의 계약 투영은 기간이 있는 유료 요금제입니다")

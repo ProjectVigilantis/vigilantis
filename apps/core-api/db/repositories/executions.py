@@ -21,7 +21,7 @@ from schemas.api.incidents import IncidentStatus
 from schemas.executions import EXECUTION_NON_TERMINAL_STATUSES, ExecutionStepResult
 from schemas.guardrails import PrecheckReasonCode
 from schemas.runbooks import RunbookId, TriggerSource
-from sqlalchemy import exists, select, update
+from sqlalchemy import and_, exists, func, or_, select, update
 from sqlalchemy.orm import Session, aliased
 
 from .. import mappers, models
@@ -145,14 +145,74 @@ def list_non_terminal(db: Session) -> list[models.ActionExecution]:
     )
 
 
+# 같은 대상 실행 접수의 트랜잭션 advisory lock 네임스페이스(T-10 · #595). 두 인자(int4, int4) 꼴은
+# 한 인자(bigint) 꼴과 키 공간이 따로라(PostgreSQL 문서 「Advisory Lock Functions」) 수집 잡 · 알림 설정의
+# bigint 키(services/scheduler.py · repositories/tenant_settings.py)와 겹치지 않는다. 값은 이 용도로 고정한
+# 임의 상수다. 둘째 인자는 target_arn 의 hashtext 라 서로 다른 대상이 같은 키를 받을 수 있는데, 그때는
+# 무관한 두 접수가 잠깐 직렬화될 뿐 판정은 틀리지 않는다.
+_TARGET_LOCK_NAMESPACE = 59510
+
+
+def lock_target(db: Session, target_arn: str) -> None:
+    """같은 대상의 실행 접수를 이 트랜잭션이 끝날 때까지 직렬화한다(T-10 · #595).
+
+    대상은 실행 행이 아니라 AWS 자원이라 잠글 행이 없다(NACL 처럼 자산 행이 없는 대상도 있다). 그래서
+    행 잠금이 아니라 트랜잭션 advisory lock 이다. commit · rollback 때 저절로 풀린다. 이 잠금을 잡은 뒤
+    list_active_on_target 으로 확인하고 실행 행을 넣어야, 동시에 들어온 두 접수가 서로의 미커밋 행을
+    못 본 채 둘 다 통과하지 않는다.
+    """
+    db.execute(
+        select(func.pg_advisory_xact_lock(_TARGET_LOCK_NAMESPACE, func.hashtext(target_arn)))
+    )
+
+
+def list_active_on_target(db: Session, target_arn: str) -> list[models.ActionExecution]:
+    """같은 대상의 끝나지 않은 실행(IN_PROGRESS · ROLLBACK_INITIATED). 부분 인덱스 범위 안에서 거른다."""
+    return list(
+        db.execute(
+            select(models.ActionExecution).where(
+                models.ActionExecution.status.in_(EXECUTION_NON_TERMINAL_STATUSES),
+                models.ActionExecution.target_arn == target_arn,
+            )
+        ).scalars()
+    )
+
+
+def _no_restore_execution_for_block():
+    """차단 실행(바깥 ActionExecution)을 되돌린 NACL_RESTORE 실행이 없다 — **상태를 가리지 않고**
+    (성공·실패·진행 중) 두 가지로 센다. (T-11 · #597)
+
+      - 차단의 백업 레코드에 결속된 NACL_RESTORE — 만료 접수는 예약 때, 관제자 해제는 실행
+        시작 때 결속한다(workflows.load_nacl_restore_backup).
+      - 결속 전에 끝난 NACL_RESTORE — 같은 인시던트·같은 대상. 사람이 시도했다가 파라미터·
+        백업 문제로 실패한 해제다.
+    """
+    restore = aliased(models.ActionExecution)
+    return ~exists().where(
+        restore.runbook_id == RunbookId.RUNBOOK_NACL_RESTORE,
+        or_(
+            restore.backup_record_id == models.ActionExecution.backup_record_id,
+            and_(
+                restore.backup_record_id.is_(None),
+                restore.incident_id == models.ActionExecution.incident_id,
+                restore.target_arn == models.ActionExecution.target_arn,
+            ),
+        ),
+    )
+
+
 def list_release_offer_pending(
     db: Session, *, incident_statuses: Iterable[IncidentStatus]
 ) -> list[str]:
-    """해제 제안을 기다리는 차단 실행 — SUCCESS로 끝났는데 그 인시던트에 해제 후보가 없다.
-    (Issue #329)
+    """해제 제안을 기다리는 차단 실행 — SUCCESS로 끝났는데 그 인시던트에 해제 후보가 없고,
+    그 차단을 되돌린 해제 실행도 없다. (Issue #329 · #597)
 
     해제 후보는 **상태를 가리지 않고** 센다. 거절(REJECTED)·무효(INVALIDATED)된 제안도
     "이미 한 번 냈다"는 기록이라, 빼면 매 주기 같은 제안을 다시 만든다.
+
+    해제 실행이 있는 차단도 뺀다(_no_restore_execution_for_block) — 종료된 인시던트의 차단이
+    후보 없이 만료로 해제된 뒤 인시던트가 제안 가능 상태로 돌아오면, 이미 지운 규칙에 제안을
+    냈다가 ④에서 거절되는 기록이 매번 남는다.
 
     식별자만 돌려준다 — 처리 중 커밋이 일어나 들고 있던 행 상태는 곧 낡는다
     (list_non_terminal을 받는 dispatch_pending과 같은 이유).
@@ -173,6 +233,30 @@ def list_release_offer_pending(
                     release.incident_id == models.ActionExecution.incident_id,
                     release.runbook_id == RunbookId.RUNBOOK_NACL_RESTORE,
                 ),
+                _no_restore_execution_for_block(),
+            )
+            .order_by(models.ActionExecution.finished_at)
+        ).scalars()
+    )
+
+
+def list_nacl_deny_expired(db: Session, *, finished_before: datetime) -> list[str]:
+    """만료 해제를 기다리는 차단 실행 — SUCCESS로 끝난 지 TTL이 지났는데 그 차단을 되돌린
+    NACL_RESTORE 실행이 없다(_no_restore_execution_for_block). (T-11 · #597)
+
+    사람이 해제를 시도해 실패한 차단은 만료가 집지 않고 사람이 다시 본다. 인시던트 상태는
+    보지 않는다 — 종료된 인시던트의 차단도 만료된다(#597 §만료 기준).
+
+    식별자만 돌려준다 — list_release_offer_pending과 같은 이유.
+    """
+    return list(
+        db.execute(
+            select(models.ActionExecution.execution_id)
+            .where(
+                models.ActionExecution.runbook_id == RunbookId.RUNBOOK_NACL_ADD_DENY,
+                models.ActionExecution.status == ExecutionStatus.SUCCESS,
+                models.ActionExecution.finished_at <= finished_before,
+                _no_restore_execution_for_block(),
             )
             .order_by(models.ActionExecution.finished_at)
         ).scalars()
