@@ -29,12 +29,15 @@ class ErrorCode(str, Enum):
     INCIDENT_NOT_FOUND = "INCIDENT_NOT_FOUND"                # 404 — 없음 · 요청의 테넌트 범위 밖(존재를 알리지 않는다 · api/tenants.py 머리말)
     IDEMPOTENCY_KEY_CONFLICT = "IDEMPOTENCY_KEY_CONFLICT"    # 409
     PROPOSAL_NOT_EXECUTABLE = "PROPOSAL_NOT_EXECUTABLE"      # 409
+    TARGET_EXECUTION_IN_PROGRESS = "TARGET_EXECUTION_IN_PROGRESS"  # 409: 같은 대상(target_arn)에 끝나지 않은 실행이 있다(T-10 · #595)
     INCIDENT_NOT_RESOLVABLE = "INCIDENT_NOT_RESOLVABLE"      # 409
     TENANT_NOT_FOUND = "TENANT_NOT_FOUND"                    # 404
     TENANT_ACCOUNT_CONFLICT = "TENANT_ACCOUNT_CONFLICT"      # 409 — 같은 AWS 계정의 테넌트가 이미 있다(한 계정 = 한 테넌트)
     TENANT_ONBOARDING_UNAVAILABLE = "TENANT_ONBOARDING_UNAVAILABLE"  # 503 — 온보딩 링크를 만들 설정(템플릿 URL · 플랫폼 주체)이 없다
     TENANT_STATE_CONFLICT = "TENANT_STATE_CONFLICT"          # 409 — 허용되지 않은 전이 또는 ACTIVE가 아닌 테넌트로 초대·재발송
     TENANT_SUSPENDED = "TENANT_SUSPENDED"                    # 409 — 정지 테넌트 사용자의 관리 쓰기 또는 정지 자산의 새 실행·종료(플랫폼 종료는 허용 · api/tenants.py)
+    GROUP_NOT_FOUND = "GROUP_NOT_FOUND"                      # 404 — 고객사 그룹 없음 · 형식이 어긋난 그룹 ID(#572 2번 · api/groups.py)
+    GROUP_NAME_CONFLICT = "GROUP_NAME_CONFLICT"              # 409 — 같은 이름의 고객사 그룹이 이미 있다
     AUTH_REQUIRED = "AUTH_REQUIRED"                          # 401 — 세션 없음 · 만료 · 회수
     AUTH_FAILED = "AUTH_FAILED"                              # 401 — 이메일 · 비밀번호 불일치(사용자 존재 여부를 가리지 않는다)
     AUTH_CODE_INVALID = "AUTH_CODE_INVALID"                  # 401 — TOTP · 이메일 · 재설정 코드 불일치
@@ -52,6 +55,7 @@ class ErrorCode(str, Enum):
     USER_STATE_CONFLICT = "USER_STATE_CONFLICT"              # 409 — 테넌트별 마지막 활성 ADMIN · 중복 초대 · 상태 충돌
     SIGNUP_REQUEST_NOT_FOUND = "SIGNUP_REQUEST_NOT_FOUND"    # 404
     SIGNUP_REQUEST_STATE_CONFLICT = "SIGNUP_REQUEST_STATE_CONFLICT"  # 409
+    SIGNUP_REQUEST_APPROVAL_REQUIRED = "SIGNUP_REQUEST_APPROVAL_REQUIRED"  # 409 — PUT status 로는 승인하지 않는다. 승인은 POST approve(#572)
     INQUIRY_NOT_FOUND = "INQUIRY_NOT_FOUND"                  # 404 — 없음 또는 담당 범위 밖
     INQUIRY_STATE_CONFLICT = "INQUIRY_STATE_CONFLICT"        # 409
     NOTIFICATION_NOT_FOUND = "NOTIFICATION_NOT_FOUND"        # 404 — 없음 또는 현재 조회 범위 밖

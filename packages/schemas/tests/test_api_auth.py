@@ -176,6 +176,7 @@ def test_current_user_response_roundtrip():
         "tenant_id": "1f0c2c1e-0000-4000-8000-000000000002",
         "session": _session(-470),
         "assigned_tenant_ids": [],
+        "permissions": [],
     })
     assert CurrentUserResponse.model_validate_json(resp.model_dump_json()) == resp
 
@@ -197,13 +198,14 @@ def test_current_user_serializes_assigned_scope(account_type, tenant_id, platfor
     response = CurrentUserResponse.model_validate({
         "user_id": USER_ID,
         "email": "user@example.com", "role": "ADMIN",
-        "session": _session(-470), **scope,
+        "session": _session(-470), "permissions": ["VIEW", "EXECUTE_ACTION"], **scope,
     })
     payload = response.model_dump(mode="json")
     assert payload["account_type"] == account_type
     assert payload["tenant_id"] == tenant_id
     assert payload["platform_role"] == platform_role  # TENANT 는 null 로 나간다
     assert payload["assigned_tenant_ids"] == assigned  # 순서를 그대로 싣는다
+    assert payload["permissions"] == ["VIEW", "EXECUTE_ACTION"]  # (#572 5번) 서버가 정한 실효 권한을 그대로 싣는다
 
 
 @pytest.mark.parametrize("scope", [

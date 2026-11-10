@@ -68,7 +68,7 @@ IN_PROGRESS → SUCCESS
 
 `UNVERIFIED`는 **결과 확인 불가**다 — AWS 조회 실패로 종료 판정을 내리지 못한 채 재시도를 소진한 자리다(FE 합의 확장 · Issue #249). 종료 상태이고 **자동 원복하지 않는다**: 자산이 바뀌었을 수 있으나 성공으로도 실패로도 확정하지 않고 관제자 확인으로 넘긴다. 원본 실행 전용이라 자식(원복) 실행에는 찍히지 않는다. **시연 대본에는 나오지 않는다** — 두 트랙 모두 조회가 되는 경로만 밟기 때문이며, 상태를 6종으로 적으면 이 칸이 화면에 떴을 때 대본에 없는 값이 된다.
 
-### 실행 사유 4종 (`TriggerSource`) — 시연에서 2종이 나온다
+### 실행 사유 5종 (`TriggerSource`) — 시연에서 2종이 나온다
 
 | 값 | 나오는 곳 |
 | --- | --- |
@@ -76,6 +76,7 @@ IN_PROGRESS → SUCCESS
 | `AUTO_ON_FAILURE` | **T1 자동 원복** |
 | `PRE_MITIGATION_0_5S` | 1차 시연에 없음 — 이 값을 갖는 런북은 `RUNBOOK_EC2_ISOLATE` 하나뿐이고 P2로 제외했다 |
 | `TIMEOUT_ISOLATION_1M` | 1차 시연에 없음(§트랙 밖) |
+| `NACL_DENY_EXPIRED_24H` | 시연에 없음 — 관제자가 24시간 안에 해제하지 않은 T2 차단을 Dispatcher가 시스템 발동으로 해제할 때(T-11 · #597). 시연은 7번에서 사람이 해제한다 |
 
 > `PRE_MITIGATION_0_5S`는 **Incident의 `response_mode`로는 T2에 등장한다.** 같은 이름이지만 다른 축이다 — §T2 「실행 축과 Incident 축은 다르다」 참고. 두 축을 같은 값으로 적으면 가드레일 ②에서 거절된다.
 
@@ -200,6 +201,8 @@ FE는 `NEXT_PUBLIC_API_BASE_URL`이 가리키는 백엔드만 본다(`apps/web/s
 | 6 | 관제자 확인 | 상세에서 **판단 근거** 확인 | `GET /api/v1/incidents/{id}` | — | — |
 | 7 | **원클릭 해제** | **INC-002 상세 [승인하고 해제] → ACT-001 [실행]** | `RUNBOOK_NACL_RESTORE`<br>`trigger_source: USER_APPROVAL` | `EXECUTION_UPDATED` | **핵심 컷** |
 | 8 | 해제 완료 | 해제 실행 **성공** · Incident **종료 판단 대기**(토폴로지 색은 바뀌지 않는다 — §10/1 컷 시트) | `ec2.delete_network_acl_entry` | `EXECUTION_UPDATED` `SUCCESS` · `INCIDENT_UPDATED` Incident `AWAITING_CLOSURE` | — |
+
+> **7번을 누르지 않으면** 차단은 `finished_at` + 24시간에 만료된다(T-11 · #597). Dispatcher가 같은 `RUNBOOK_NACL_RESTORE`를 `trigger_source: NACL_DENY_EXPIRED_24H`·행위자 SYSTEM으로 접수해 같은 주기에 규칙을 지우고, 남아 있던 [해제] 후보는 무효화된다. 인시던트가 종료(RESOLVED)된 뒤에도 같다 — 복구 접수처럼 `ACTION_IN_PROGRESS`로 되돌아왔다가 해제 뒤 `AWAITING_CLOSURE`로 가며 관제자가 다시 닫는다. 시연 대본에는 나오지 않는다.
 
 ### 실행 축과 Incident 축은 다르다 (3번의 핵심)
 

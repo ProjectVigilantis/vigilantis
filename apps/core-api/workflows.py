@@ -16,8 +16,16 @@
 #     본편과 동일하게 전부 지날 것을 요구한다. (Issue #241)
 #   - 접수(reserve_execution)와 실행(run_rightsizing_execution)은 갈라져 있다. 예약은
 #     IN_PROGRESS 레코드를 남기는 데까지고, 그 예약을 실행으로 넘기는 디스패치는
-#     dispatcher.py 몫이다. 실행 직전 대상 자산 재확인과 후보 INVALIDATED 전이는
-#     아직 붙지 않았다.
+#     dispatcher.py 몫이다. 후보 INVALIDATED 전이는 아직 붙지 않았다.
+#   - 같은 대상(target_arn)에는 끝나지 않은 실행을 하나만 둔다(T-10 · #595). 관제자 접수는
+#     409 TARGET_EXECUTION_IN_PROGRESS, 자동 격리는 건너뜀 사유로 거절한다. 판정과 INSERT 사이의
+#     경합은 대상 단위 advisory lock 이 막는다(_refuse_if_target_busy). 진행 중인 실행 자신의
+#     원복(자동 원복 · 원본이 ROLLBACK_INITIATED 인 관제자 복구)은 같은 실행의 연장이라 막지 않는다.
+#   - 승인을 기다리는 동안 근거가 사라진 FinOps 실행은 시작하지 않는다(T-10 · #595). 대상 자산이
+#     사라졌거나 최신 판정이 더는 후보가 아니면 첫 AWS 호출 전에 FAILED(변경 없이 실패)로 닫고
+#     (refuse_start_if_target_changed), 다운사이징은 실행 직전 백업이 잡은 타입이 탐지 당시 타입과
+#     다르면 멈춘다(run_rightsizing_execution). 확인할 근거가 없으면 막지 않는다. 바뀐 것을 확인했을
+#     때만 멈춘다.
 #   - 실행(run_rightsizing_execution)은 단계 기록까지만 커밋하고 **종료 상태는
 #     확정하지 않는다.** 확정은 close_execution 하나가 하며, 실행 종료와 Incident
 #     전이를 한 트랜잭션에 넣는다 — 실행만 먼저 옮기면 ACTION_IN_PROGRESS인데
@@ -39,8 +47,9 @@
 #     범위(404) → 같은 Key 재요청(실행만) → 대상 인시던트 테넌트의 정지(409) → 인시던트 · 제안
 #     상태(409)다(packages/schemas/api/tenants.py 머리말).
 #   - HTTP 요청은 actor(auth.admin_service.Actor)를 넘긴다. 이 계층이 쓰기 트랜잭션 첫머리에서 users 잠금을
-#     잡고 세션 · 조치 권한 · 담당 고객을 다시 판정해(_live_actor) 그 시점의 범위로 위 판정을 한다 — 의존성이 본
-#     신원은 스냅샷이라, 그 뒤 회수된 담당 · 등급 · 세션으로는 쓰지 못한다. actor 없는 호출은 서버 내부의 신뢰
+#     잡고 세션 · 기능 권한(실행 EXECUTE_ACTION · 종료 RESOLVE_INCIDENT, #572 5번) · 담당 고객을 다시 판정해
+#     (_live_actor) 그 시점의 범위로 위 판정을 한다 — 의존성이 본 신원은 스냅샷이라, 그 뒤 회수된 담당 · 등급 ·
+#     부여 권한 · 세션으로는 쓰지 못한다. actor 없는 호출은 서버 내부의 신뢰
 #     경로이며 명시 범위(scope, 기본 전부)를 받는다. 이미 접수 · 진행 중인 실행은 이후의 담당 변경으로 취소되지
 #     않는다(디스패처는 범위를 다시 보지 않는다).
 #   - 감사 기록(T-2 · #544)의 사람 행위자는 HTTP 에서는 위의 재판정 신원이다. 신뢰 경로는 기록할 사람을
@@ -54,7 +63,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum, unique
@@ -62,6 +71,7 @@ from enum import Enum, unique
 import notification_events
 from ai import guardrails
 from auth import access as auth_access
+from auth import permissions as auth_permissions
 from auth import service as auth_service
 from auth.admin_service import Actor
 from config import get_settings
@@ -87,6 +97,7 @@ from schemas.api.actions import (
 )
 from schemas.api.assets import AssetType, RelationType
 from schemas.api.audit import AuditActorKind
+from schemas.api.auth import FeaturePermission
 from schemas.api.errors import ErrorCode
 from schemas.api.incidents import (
     IncidentCategory,
@@ -122,12 +133,14 @@ from schemas.guardrails import (
     GuardrailValidationRequest,
     GuardrailValidationResult,
 )
+from schemas.evidence import EvidenceType
 from schemas.incidents import (
     AGENT_TERMINAL_STATUSES,
     INCIDENT_RESOLVABLE_STATUSES,
     AgentInvocationStatus,
     AgentWaitSchedule,
 )
+from schemas.intake import INCIDENT_TRIGGERING_VERDICTS
 from schemas.precheck import (
     PrecheckOutcome,
     PrecheckReasonCode,
@@ -152,6 +165,7 @@ from services.aws import backup, executor, rollback
 from services.aws.client import TenantAccess, tenant_scope
 from services.aws.errors import is_retryable, watch_dry_run_protocol
 from services.aws.executor import parse_arn
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from tenancy import ALL_TENANTS, TenantScope
@@ -216,9 +230,12 @@ def _replay_or_conflict(
     return ExecutionReservation(response=_to_response(existing), created=False)
 
 
-def _live_actor(db: Session, actor: Actor) -> auth_service.CurrentUser:
+def _live_actor(
+    db: Session, actor: Actor, feature: FeaturePermission
+) -> auth_service.CurrentUser:
     """HTTP 행위자를 쓰기 트랜잭션 첫머리에서 다시 판정한다 — users 잠금 → 캐시 비움 → 세션(무효 401) ·
-    조치 권한(403) 재판정. 담당 고객은 판정 때 새로 읽는다(auth.service.resolve_current_user).
+    기능 권한(403, 라우트 의존성과 같은 auth.permissions 판정) 재판정. 담당 고객 · OPERATOR 부여 권한은 판정 때
+    새로 읽는다(auth.service.resolve_current_user).
 
     잠금은 이 트랜잭션이 끝날 때까지 유지되고, 관리 쓰기(담당 배정 · 등급 · 역할 · 상태 · 세션 폐기)도 같은 잠금을
     잡는다 — 판정과 commit 사이에 회수가 끼어들지 않는다. 인시던트 · 테넌트 행 잠금보다 먼저 잡아 관리 쓰기(정지
@@ -229,7 +246,7 @@ def _live_actor(db: Session, actor: Actor) -> auth_service.CurrentUser:
     user = auth_service.resolve_current_user(
         db, actor.token, now=actor.clock(), idle_seconds=actor.idle_seconds, touch=False
     )
-    auth_access.require_action_role(user)
+    auth_permissions.check_permission(user, feature)
     return user
 
 
@@ -248,11 +265,12 @@ def _write_context(
     scope: TenantScope,
     actor: Actor | None,
     audit_actor: audit_repo.Actor | None,
+    feature: FeaturePermission,
 ) -> _WriteContext:
     """인시던트 · 테넌트를 잠그기 전에 한 번 정한다.
 
     actor(HTTP 자격)를 주면 범위 · 고객사 여부 · 기록 행위자를 모두 users 잠금 안에서 재판정한 같은 사용자에서
-    얻는다(_live_actor) — 그래서 명시 범위나 audit_actor 를 함께 받지 않는다. actor 가 없으면 서버 내부의 신뢰
+    얻는다(_live_actor — feature 는 이 쓰기에 필요한 기능 권한이다). 그래서 명시 범위나 audit_actor 를 함께 받지 않는다. actor 가 없으면 서버 내부의 신뢰
     호출이라 받은 scope 를 쓰고 고객사 행위자가 아니며, 기록할 사람(audit_actor, SYSTEM 아님)을 직접 밝혀야
     한다 — audit_actor 는 기록에만 쓰고 범위 · 정지 판정에 쓰지 않는다. 인자 오류는 DB 를 읽기 전에 거절한다.
     """
@@ -268,7 +286,7 @@ def _write_context(
         raise ValueError("actor 가 있으면 범위는 재판정 신원이 정합니다 — 명시 범위를 함께 줄 수 없습니다")
     if not isinstance(actor, Actor):
         raise TypeError("actor 는 HTTP 자격(auth.admin_service.Actor)이어야 합니다")
-    user = _live_actor(db, actor)
+    user = _live_actor(db, actor, feature)
     return _WriteContext(
         scope=auth_access.tenant_scope_of(user),
         customer=not auth_access.is_platform_account(user),
@@ -430,6 +448,40 @@ def _recovery_backup_record_id(
     return record.backup_record_id
 
 
+def _active_on_target(
+    db: Session, target_arn: str, *, own_origin_id: str | None = None
+) -> list[models.ActionExecution]:
+    """같은 대상의 끝나지 않은 실행. 대상 잠금을 잡은 뒤 본다(T-10 · #595).
+
+    잠금(executions_repo.lock_target)은 이 트랜잭션이 끝날 때까지 유지된다. 그 안에서 확인하고 실행
+    행을 넣어야 동시에 들어온 다른 접수가 이 행을 보거나 이 트랜잭션이 끝나기를 기다린다. 잠금 순서는
+    경로마다 다르다. 승인 · 자동 격리는 인시던트 → (테넌트) → 대상이고, 관제자 복구는 인시던트를 잠그지 않고
+    읽은 뒤 테넌트 → 원본 실행 → 대상 → 인시던트다. 그래도 교착은 없다. HTTP 예약은 app_users 잠금에서 먼저
+    줄을 서고(auth.py), 디스패처는 대상 잠금을 잡지 않는다.
+
+    own_origin_id 는 관제자 복구가 되돌릴 원본이다. 원본이 ROLLBACK_INITIATED 면 그 자신이 끝나지 않은
+    실행으로 잡히는데, 복구는 그 실행을 끝내는 일이라 막지 않는다.
+    """
+    executions_repo.lock_target(db, target_arn)
+    return [
+        row
+        for row in executions_repo.list_active_on_target(db, target_arn)
+        if row.execution_id != own_origin_id
+    ]
+
+
+def _refuse_if_target_busy(
+    db: Session, target_arn: str, *, own_origin_id: str | None = None
+) -> None:
+    """관제자 접수의 동시 실행 관문. 같은 대상에 끝나지 않은 실행이 있으면 409."""
+    if _active_on_target(db, target_arn, own_origin_id=own_origin_id):
+        logger.info(
+            "execution_refused_target_busy",
+            extra={"target_arn": target_arn[:512]},
+        )
+        raise ApiError(ErrorCode.TARGET_EXECUTION_IN_PROGRESS)
+
+
 def _move_incident_to_in_progress(db: Session, incident_id: str) -> None:
     """접수한 실행이 진행 중인 동안 Incident는 반드시 ACTION_IN_PROGRESS다.
 
@@ -485,7 +537,13 @@ def reserve_execution(
     행위자 인자는 _write_context 가 정한다 — HTTP 는 actor(자격) 하나로 users 잠금 안에서 다시 판정한 그
     시점의 범위 · 기록 행위자를 쓰고, actor 없는 서버 내부 호출은 신뢰된 명시 범위(scope)와 audit_actor 를 준다.
     """
-    context = _write_context(db, scope=scope, actor=actor, audit_actor=audit_actor)
+    context = _write_context(
+        db,
+        scope=scope,
+        actor=actor,
+        audit_actor=audit_actor,
+        feature=FeaturePermission.EXECUTE_ACTION,
+    )
     _check_scope(db, request.incident_id, context.scope)
     existing = executions_repo.get_by_idempotency_key(db, request.idempotency_key)
     if existing is not None:
@@ -503,11 +561,23 @@ def reserve_execution(
         backup_record_id = (
             _recovery_backup_record_id(db, source) if is_rollback else None
         )
+        # 같은 대상의 동시 실행은 접수 근거 확인 뒤, INSERT 전에 막는다(T-10 · #595). 근거 확인보다
+        # 앞이면 이미 끝난 제안의 재요청이 409 PROPOSAL_NOT_EXECUTABLE 대신 이 코드로 떨어진다
+        _refuse_if_target_busy(
+            db,
+            source.target_arn,
+            own_origin_id=source.execution_id if is_rollback else None,
+        )
     except ApiError as exc:
-        if exc.code in (ErrorCode.PROPOSAL_NOT_EXECUTABLE, ErrorCode.TENANT_SUSPENDED):
+        if exc.code in (
+            ErrorCode.PROPOSAL_NOT_EXECUTABLE,
+            ErrorCode.TENANT_SUSPENDED,
+            ErrorCode.TARGET_EXECUTION_IN_PROGRESS,
+        ):
             # 최초 멱등 조회와 접수 근거 확인 사이에 같은 Key의 앞선 요청이
             # commit되면 후보는 이미 CLAIMED고 롤백은 원본에 자식이 붙어 있다. 그 뒤에
-            # 테넌트가 정지됐을 수도 있다(정지는 앞선 접수의 commit을 기다린다). 어느 쪽이든
+            # 테넌트가 정지됐을 수도 있다(정지는 앞선 접수의 commit을 기다린다). 앞선 요청이 만든
+            # 실행이 같은 대상을 차지해 동시 실행 관문에 걸릴 수도 있다. 어느 쪽이든
             # 같은 Key 재요청을 409로 오판하지 않도록 키를 한 번 더 확인한다.
             # 이 재확인은 INSERT 이전에만 둔다(이후에는 같은 세션의 자기 미커밋
             # 행이 잡혀 커밋 안 된 실행을 재생하게 된다).
@@ -591,7 +661,13 @@ def resolve_incident(
 
     종료를 확정한 요청만 같은 트랜잭션에 감사 기록을 남긴다(T-2 · #544).
     """
-    context = _write_context(db, scope=scope, actor=actor, audit_actor=audit_actor)
+    context = _write_context(
+        db,
+        scope=scope,
+        actor=actor,
+        audit_actor=audit_actor,
+        feature=FeaturePermission.RESOLVE_INCIDENT,
+    )
     incident = incidents_repo.lock_incident(db, incident_id)
     if incident is None or not context.scope.covers(incident.tenant_id):
         raise ApiError(ErrorCode.INCIDENT_NOT_FOUND)
@@ -695,6 +771,9 @@ class AutoIsolationSkipReason(str, Enum):
     TENANT_SUSPENDED = "TENANT_SUSPENDED"
     # 테넌트가 자동 조치를 껐다 — 또는 그 기한이 꺼진 동안 지났다(T-6 · #514). 사람 승인은 그대로 받는다
     AUTO_ACTION_DISABLED = "AUTO_ACTION_DISABLED"
+    # 같은 인스턴스에 끝나지 않은 다른 실행이 있다(T-10 · #595). 다운사이징이 정지 · 기동 · 원복하는 도중에
+    # 격리가 SG 를 바꿔 끼우면 서로 덮어쓴다. 아무것도 쓰지 않으므로 Medium 은 다음 감시 주기에 다시 시도한다
+    TARGET_EXECUTION_IN_PROGRESS = "TARGET_EXECUTION_IN_PROGRESS"
 
 
 @dataclass(frozen=True)
@@ -1039,6 +1118,18 @@ def reserve_auto_isolation(
         tenant, trigger_source=trigger_source, received_at=incident.created_at,
         response_deadline_at=incident.response_deadline_at,
     ) or _auto_isolation_skip_reason(db, incident, trigger_source, now)
+    # 동시 실행 관문은 발동 조건 다음이다. 발동하지 않을 건에 대상 잠금을 잡지 않는다(T-10 · #595)
+    if reason is None:
+        busy = _active_on_target(db, incident.subject_arn)
+        # 같은 출처의 앞선 시도가 대상을 차지하고 있으면 그것은 다른 실행이 아니라 이미 접수된 이 시도다.
+        # 대상 사유로 건너뛰면 호출부(security/soar.py)가 승자 실행을 이어 보내지 않는다
+        same_attempt = next((row for row in busy if row.deduplication_key == key), None)
+        if same_attempt is not None:
+            return _existing_auto_isolation(
+                db, same_attempt, execution_id=execution_id, deadline=deadline
+            )
+        if busy:
+            reason = AutoIsolationSkipReason.TARGET_EXECUTION_IN_PROGRESS
     if reason is not None:
         db.rollback()  # Incident 잠금을 놓는다. 이 호출은 아무것도 쓰지 않았다
         logger.info(
@@ -1718,6 +1809,94 @@ def refuse_start_if_tenant_suspended(
         raise TenantSuspendedBeforeStart(tenant_id)
 
 
+# 승인을 기다리는 동안 근거가 바뀌었는지 시작 직전에 다시 보는 런북. 자산 판정에서 나온 FinOps 후보
+# 4종이다(T-10 · #595). 위협 이벤트에서 나온 NACL 차단은 판정이 없어 「위협이 아직 유효한가」를 따로
+# 정해야 하고(#435 4-1), 롤백 3종은 실행 직전에 가드레일 4단계를 이미 다시 돌며, 자동 격리는 승인 대기가
+# 없다.
+_REVALIDATED_RUNBOOKS: frozenset[RunbookId] = frozenset(
+    {
+        RunbookId.RUNBOOK_EC2_RIGHTSIZING,
+        RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED,
+        RunbookId.RUNBOOK_SG_DELETE_ISOLATED,
+        RunbookId.RUNBOOK_EC2_ENABLE_AUTOSCALING,
+    }
+)
+_CANDIDATE_VERDICTS: frozenset[str] = frozenset(v.value for v in INCIDENT_TRIGGERING_VERDICTS)
+
+# 근거가 바뀌어 시작하지 않은 실행의 error_summary 앞머리. 정지 관문(TENANT_SUSPENDED)과 같은 「코드: 사유」
+# 꼴이다. PrecheckReasonCode(DB enum · 가드레일 계약)에 넣지 않은 것은 가드레일 판정이 아니라 승인 뒤의
+# 상태 변화이기 때문이다.
+TARGET_CHANGED_BEFORE_START = "TARGET_CHANGED_BEFORE_START"
+
+
+class TargetChangedBeforeStart(Exception):
+    """승인 대기 중 제안 근거가 사라져 실행을 시작하지 않았다(T-10 · #595).
+
+    자산은 만지지 않았다. dispatcher 가 잡아 FAILED(변경 없이 실패)로 확정한다. 예약 이후의 거절은
+    HTTP 오류가 아니라 실행 상태로 전달한다(schemas/api/errors.py). 문구는 실행의 error_summary 가 된다.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(f"{TARGET_CHANGED_BEFORE_START}: {detail}"[:1024])
+
+
+def refuse_start_if_target_changed(db: Session, execution: models.ActionExecution) -> None:
+    """단계 0건 FinOps 실행의 시작 관문. 근거가 사라졌으면 TargetChangedBeforeStart(T-10 · #595).
+
+    가드레일은 AI 제안 직후 한 번 돈다(파일 머리말). 승인까지 몇 시간에서 며칠이 걸리는 사이 자산이
+    지워졌거나 부하가 올라 더는 후보가 아니면, 그 제안은 지금의 자산에 대한 것이 아니다. 두 가지를 본다.
+      - 대상 자산이 수집에서 사라졌다(absent_since. 그 유형을 실제로 관측한 회차가 못 본 시각).
+      - 대상 자산의 최신 판정이 더는 COST_CANDIDATE · UNUSED 가 아니다(SKIP 포함).
+    DB 만 읽고 잠그지 않는다. 판정은 수집 주기마다 새로 쌓이므로, 탐지 때의 판정이 아직 최신이면 그대로
+    통과한다.
+
+    확인할 근거가 없으면 막지 않는다. 자산 행이나 판정이 없는 기록(MVP 시드 · 수동 주입)은 지금 동작
+    그대로다. 바뀐 것을 확인했을 때만 멈춘다. 관제자 승인(USER_APPROVAL)이고 후보에서 온 실행만 대상이다.
+    """
+    if (
+        execution.runbook_id not in _REVALIDATED_RUNBOOKS
+        or execution.trigger_source is not TriggerSource.USER_APPROVAL
+        or execution.candidate_id is None
+    ):
+        return
+    incident = incidents_repo.get_incident(db, execution.incident_id)
+    if incident is None or incident.category is not IncidentCategory.FINOPS:
+        return
+    asset = assets_repo.get_asset_by_arn(db, incident.subject_arn)
+    if asset is None:
+        return
+    if asset.absent_since is not None:
+        raise TargetChangedBeforeStart(
+            f"대상 자산이 {asset.absent_since.isoformat()}부터 수집에서 보이지 않습니다"
+        )
+    latest = assets_repo.latest_rule_evaluation(db, asset.asset_id)
+    if latest is None or latest.verdict in _CANDIDATE_VERDICTS:
+        return
+    judged = latest.verdict or latest.skip_reason_code or latest.evaluation_status
+    raise TargetChangedBeforeStart(
+        f"대상 자산의 최신 판정({latest.evaluated_at.isoformat()})이 더는 조치 후보가 아닙니다: {judged}"
+    )
+
+
+def _detection_instance_type(db: Session, execution: models.ActionExecution) -> str | None:
+    """다운사이징 목표 타입을 계산한 기준. 탐지 당시 ASSET 근거의 인스턴스 타입(T-10 · #595).
+
+    목표 타입은 탐지 회차의 스냅샷 타입으로 계산된다(schemas/intake.py 계약 원칙). 후보 파라미터에는
+    출발 타입이 남지 않으므로 Incident 에 고정된 ASSET 근거(DetectionAssetSnapshot)에서 읽는다. 근거가
+    없거나 대상이 다르거나 타입이 비어 있으면 None. 대조하지 않는다.
+    """
+    for evidence in incidents_repo.list_evidence(db, execution.incident_id):
+        if evidence.evidence_type is not EvidenceType.ASSET:
+            continue
+        asset = (evidence.content or {}).get("asset") or {}
+        if asset.get("arn") != execution.target_arn:
+            continue
+        found = (asset.get("spec") or {}).get("instance_type")
+        if isinstance(found, str) and found.strip():
+            return found
+    return None
+
+
 def _step_recorder(db: Session, execution_id: str):
     """executor가 넘기는 단계를 그 자리에서 저장하고 commit한다.
 
@@ -1849,6 +2028,31 @@ def run_rightsizing_execution(db: Session, execution_id: str) -> ExecutionRunOut
         return _run_failed(
             stored.reason_code, f"스펙 JSON 백업 실패: {stored.detail or ''}".strip()
         )
+
+    # 승인을 기다리는 사이 누가 타입을 바꿨으면 목표 타입은 지금의 인스턴스에 대한 계산이 아니다. 내린
+    # 타입으로 부팅에 성공하면 자동 원복도 걸리지 않으므로 첫 AWS 변경 전에 멈춘다(T-10 · #595). 비교하는
+    # 현재 타입은 방금 commit 한 백업의 값이다. 원복이 되돌릴 값과 같은 관측이라 따로 묻지 않는다.
+    # 이미 결속된 백업을 다시 쓴 경우(stored.created=False)는 다르다. 백업 commit 뒤 첫 단계 전에 프로세스가
+    # 죽어 디스패처가 단계 0건 실행을 다시 돌리는 경로라, 그 백업은 지난 관측이다. 그사이 타입이 바뀌었을 수
+    # 있으므로 지금 타입을 다시 읽어 비교한다. 원복이 쓸 백업은 그대로 둔다. 단계 0건이면 아직 AWS를 바꾸지
+    # 않았으므로(dispatcher.py 재실행 분기의 executor 계약) 그 백업이 여전히 조치 직전 값이다.
+    detected = _detection_instance_type(db, execution)
+    if detected is not None:
+        if stored.created:
+            current = InstanceSpecBackup.model_validate(stored.record.payload or {}).instance_type
+        else:
+            target = parse_arn(target_arn)
+            observed = backup.capture_instance_spec(target.resource_id, target.region)
+            if not observed.captured:
+                return _run_failed(
+                    observed.reason_code,
+                    f"실행 직전 인스턴스 타입 조회 실패: {observed.detail or ''}".strip(),
+                )
+            current = InstanceSpecBackup.model_validate(observed.payload or {}).instance_type
+        if current != detected:
+            raise TargetChangedBeforeStart(
+                f"실행 직전 인스턴스 타입 {current}이 탐지 당시 타입 {detected}과 다릅니다"
+            )
 
     outcome = executor.execute_rightsizing(
         target_arn,
@@ -5899,3 +6103,257 @@ def offer_nacl_release(db: Session, execution_id: str) -> ReleaseOffer:
     with tenant_scope(owner):
         outcome = _guard_candidate(candidate, managed, backups)
     return _store_release_offer(db, candidate, outcome, execution_id=execution_id)
+
+
+# ==============================================================================
+# §차단 24시간 고정 만료 — 시스템 발동 해제 (Post-MVP T-11 · #597)
+# ==============================================================================
+# 차단(NACL_ADD_DENY)이 SUCCESS로 끝난 뒤 NACL_DENY_TTL이 지나면 dispatcher가 해제(NACL_RESTORE)를
+# **시스템 발동**으로 예약한다. 관제자 복구 접수(_recoverable_origin)와 같은 꼴이되 근거는 승인
+# 후보가 아니라 **원본 차단 실행**이다 — 후보 없이 실행된 차단도 같은 만료를 받는다. 사람 승인
+# 접수(reserve_execution)는 SYSTEM 행위자를 거절하고 USER_APPROVAL을 고정하므로 그 함수를 넓히지
+# 않고 옆에 둔다. 해제 후보(offer_nacl_release)는 다시 만들지 않는다.
+#
+# 파라미터는 원본에 결속된 백업 레코드에서 채우고, 그 레코드를 **예약 시점에** 해제 실행에
+# 결속한다 — 실행(run_nacl_restore_execution → load_nacl_restore_backup)은 결속된 레코드를 그대로
+# 쓰고, 삭제 직전 현물과 fingerprint를 대조한다(executor.execute_nacl_restore). 그 대조가 이
+# 경로의 가드레일 ④다. 원본 하나에 만료 해제는 한 번이다(deduplication_key). 규칙이 손으로
+# 지워져 실행이 실패해도 재시도하지 않는다 — 만료 스캔(executions_repo.list_nacl_deny_expired)이
+# 상태 불문 "해제 실행 있음"으로 그 차단을 뺀다.
+#
+# 인시던트 상태와 무관하게 고정이다 — 운영자가 "차단 유지하고 종료"한 인시던트의 차단도
+# 만료된다(NACL 인바운드 규칙 할당량 20개). 인시던트는 복구 접수와 같이 ACTION_IN_PROGRESS로
+# 옮기고 RESOLVED에서 오면 종료 판단을 지운다(_move_incident_to_in_progress). 해제가 끝나면
+# 시스템이 닫지 않고 운영자가 다시 닫는다.
+
+# 고정 24시간 단순판(SSOT §확정 결정 로그 2026-11-06). 고객별 설정 · 연장 · 예고는 범위 밖이라
+# 설정이 아니라 상수다.
+NACL_DENY_TTL = timedelta(hours=24)
+
+
+@dataclass(frozen=True)
+class ExpiryReservation:
+    """만료 해제 접수 1건의 결과 — 발행과 스캔 집계를 정하는 호출부가 읽는 값이다.
+
+    execution_id가 None이면 예약하지 않은 것이고 skipped_reason이 이유다.
+    """
+
+    incident_id: str
+    execution_id: str | None = None  # 접수한 NACL_RESTORE 실행
+    skipped_reason: str | None = None
+    incident_updated_at: datetime | None = None  # WS 봉투의 occurred_at
+
+
+def nacl_deny_expiry_deduplication_key(block_execution_id: str) -> str:
+    """원본 차단 1건에 만료 해제 접수는 하나다."""
+    return f"nacl-deny-expiry:{block_execution_id}"
+
+
+def _expiry_skipped(incident_id: str, execution_id: str, reason: str) -> ExpiryReservation:
+    # 예약하지 않은 차단은 다음 주기에 다시 걸린다 — 신호는 주기 요약의 expiry_skipped 카운터가
+    # 나르므로 행 단위 로그는 debug다(_release_skipped와 같은 규약)
+    logger.debug(
+        "nacl_deny_expiry_skipped",
+        extra={"incident_id": incident_id, "execution_id": execution_id, "reason": reason},
+    )
+    return ExpiryReservation(incident_id=incident_id, skipped_reason=reason)
+
+
+def _expiry_backup(
+    db: Session, block: models.ActionExecution
+) -> tuple[models.BackupRecord | None, NaclRuleIndexBackup | None, str | None]:
+    """원본 차단에 결속된 백업 레코드와 규칙 좌표. 쓸 수 없으면 (None, None, 사유).
+
+    _release_candidate와 같은 기준이다 — 차단 자기 행에 결속된 레코드만 쓰고, 대상 기준
+    조회로 "아마 이 규칙"을 찾지 않는다. 백업이 없으면 해제를 시작하지 않는다(ADR-0008 §1 ④).
+    """
+    record = (
+        executions_repo.get_backup_record(db, block.backup_record_id)
+        if block.backup_record_id is not None
+        else None
+    )
+    if record is None or record.execution_id != block.execution_id:
+        return None, None, "차단 실행에 결속된 백업 레코드가 없습니다"
+    if record.backup_type != executor.BACKUP_NACL_RULE_INDEX:
+        return None, None, "차단 실행의 백업 종류가 NACL 규칙 index가 아닙니다"
+    if record.target_arn != block.target_arn:
+        return None, None, "백업 레코드가 차단 대상과 다른 자원을 가리킵니다"
+    backup = executor.nacl_rule_backup(record.payload)
+    if backup is None:
+        return None, None, "백업 payload에 규칙 슬롯이 없습니다"
+    return record, backup, None
+
+
+def reserve_nacl_deny_expiry(
+    db: Session, execution_id: str, *, now: datetime | None = None
+) -> ExpiryReservation:
+    """만료된 차단 1건에 해제 실행을 시스템 발동으로 접수한다 — 잠금 → 만료 재확인 → 백업 →
+    정지 · 동시 실행 확인 → 예약 → 감사 기록 → 상태 전이 → commit. (T-11 · #597)
+
+    스캔 목록은 식별자뿐이라 잠근 뒤 만료 조건을 다시 본다 — 목록을 읽은 뒤 관제자가 해제를
+    접수했을 수 있다. **동시에** 들어오는 관제자 접수와는 인시던트 잠금으로 직렬화한다(아래 주석).
+    그 밖의 경로가 같은 규칙을 먼저 지웠더라도 해제 실행은 삭제 직전 현물 대조(fingerprint)에서
+    "규칙 없음"으로 끝난다 — 같은 규칙을 두 번 지우거나 남의 규칙을 지우는 일은 없다.
+
+    정지 테넌트의 차단은 예약하지 않는다. 실행 행을 남기면 dispatcher가 시작 관문에서 FAILED로
+    닫고(refuse_start_if_tenant_suspended) 만료 스캔은 그 차단을 다시 집지 않아 규칙이 영구히
+    남는다. 다음 주기에 다시 본다.
+    """
+    now = now or datetime.now(UTC)
+    block = executions_repo.lock_execution(db, execution_id)
+    if block is None:
+        raise ValueError(f"실행 레코드를 찾을 수 없습니다: {execution_id}")
+    if block.runbook_id is not RunbookId.RUNBOOK_NACL_ADD_DENY:
+        # 배선 오류다 — 만료로 해제되는 조치는 차단 하나뿐이다
+        raise ValueError(f"NACL_ADD_DENY 실행이 아닙니다: {block.runbook_id.value}")
+    incident_id = block.incident_id
+
+    if (
+        block.status is not ExecutionStatus.SUCCESS
+        or block.finished_at is None
+        or block.finished_at + NACL_DENY_TTL > now
+    ):
+        db.commit()
+        return _expiry_skipped(incident_id, execution_id, "만료된 SUCCESS 차단이 아닙니다")
+    record, backup, problem = _expiry_backup(db, block)
+    if record is None or backup is None:
+        db.commit()
+        return _expiry_skipped(incident_id, execution_id, problem or "")
+    # 관제자 해제 접수(reserve_execution → _executable_candidate)는 인시던트를 먼저 잠근 채 실행 행을
+    # 넣고 commit한다. 같은 잠금을 여기서 먼저 잡아야 그 접수와 직렬화된다 — 저쪽이 먼저면 아래
+    # 동시 실행 확인이 그 해제를 보고, 이쪽이 먼저면 저쪽이 무효화된 후보를 보고 409로 끝난다.
+    # 잠금 순서는 실행(차단) → 인시던트로 close_execution과 같다
+    if incidents_repo.lock_incident(db, incident_id) is None:
+        raise ValueError(f"차단이 가리키는 인시던트가 없습니다: {incident_id}")
+    if _tenant_suspended(db, block.tenant_id):
+        db.commit()
+        return _expiry_skipped(incident_id, execution_id, "테넌트가 정지 상태입니다")
+    if any(
+        row.target_arn == block.target_arn for row in executions_repo.list_non_terminal(db)
+    ):
+        # 같은 NACL에 끝나지 않은 실행(관제자 해제 · 다른 차단)이 있다 — 그 실행이 끝난 뒤의
+        # 주기가 다시 본다. 관제자 해제였으면 만료 스캔이 더는 집지 않는다
+        db.commit()
+        return _expiry_skipped(incident_id, execution_id, "같은 대상에 진행 중인 실행이 있습니다")
+
+    key = nacl_deny_expiry_deduplication_key(block.execution_id)
+    if executions_repo.get_by_deduplication_key(db, key) is not None:
+        db.commit()
+        return _expiry_skipped(incident_id, execution_id, "만료 해제가 이미 접수됐습니다")
+
+    target = parse_arn(record.target_arn)
+    if target is None:
+        db.commit()
+        return _expiry_skipped(incident_id, execution_id, "차단 대상 ARN을 읽을 수 없습니다")
+    # 실행 파라미터는 후보의 검증된 명령이 아니라 백업 레코드에서 채운다. evidence_id 자리는 원본
+    # 차단 실행이다 — 이 접수의 근거가 그 실행이고, 후보 없이 실행된 차단에도 같은 값이 있다
+    parameters = NaclRestoreParameters(
+        network_acl_id=target.resource_id,
+        rule_number=backup.rule_number,
+        egress=backup.egress,
+        evidence_id=block.execution_id,
+    )
+    command = {
+        "runbook_id": RunbookId.RUNBOOK_NACL_RESTORE.value,
+        "target_arn": record.target_arn,
+        "parameters": parameters.model_dump(mode="json"),
+        "evidence_ids": [block.execution_id],
+    }
+    try:
+        # SAVEPOINT로 감싸는 이유는 reserve_execution과 같다 — 제약 위반 뒤에도 재조회를 이어 간다
+        with db.begin_nested():
+            execution = executions_repo.create_execution(
+                db,
+                incident_id=incident_id,
+                runbook_id=RunbookId.RUNBOOK_NACL_RESTORE,
+                target_arn=record.target_arn,
+                trigger_source=TriggerSource.NACL_DENY_EXPIRED_24H,
+                deduplication_key=key,
+                backup_record_id=record.backup_record_id,
+                validated_command=command,
+            )
+    except IntegrityError:
+        raced = executions_repo.get_by_deduplication_key(db, key)
+        if raced is None:
+            raise  # 중복 방지 키가 아닌 다른 제약 위반이다
+        db.commit()
+        return _expiry_skipped(incident_id, execution_id, "만료 해제가 이미 접수됐습니다")
+    audit_repo.record_execution_started(db, execution, audit_repo.SYSTEM)
+    # 아직 서 있는 [해제] 후보는 무효화한다 — 지울 규칙이 이 실행으로 사라지므로 해제가 끝난 뒤
+    # 인시던트가 승인 대기로 되돌아가 빈 버튼을 보이지 않게. 다른 런북의 제안은 건드리지 않는다
+    for candidate in incidents_repo.list_candidates(
+        db, incident_id, status=CandidateStatus.EXECUTABLE
+    ):
+        if candidate.runbook_id is RunbookId.RUNBOOK_NACL_RESTORE:
+            incidents_repo.update_candidate_status(
+                db,
+                candidate.candidate_id,
+                expected=CandidateStatus.EXECUTABLE,
+                next_status=CandidateStatus.INVALIDATED,
+            )
+    _move_incident_to_in_progress(db, incident_id)
+    reserved_id = execution.execution_id
+    finished_at = block.finished_at
+    db.commit()
+
+    incident = incidents_repo.get_incident(db, incident_id)
+    logger.info(
+        "nacl_deny_expiry_reserved",
+        extra={
+            "incident_id": incident_id,
+            "block_execution_id": execution_id,
+            "execution_id": reserved_id,
+            "finished_at": finished_at.isoformat(),
+        },
+    )
+    return ExpiryReservation(
+        incident_id=incident_id,
+        execution_id=reserved_id,
+        incident_updated_at=incident.updated_at if incident is not None else None,
+    )
+
+
+def nacl_release_expires_at(
+    db: Session,
+    candidate: models.RunbookCandidate,
+    executions: Sequence[models.ActionExecution],
+) -> datetime | None:
+    """[해제] 후보에 표시할 24시간 만료 시각 — 읽기 시점에 원본 차단 행에서만 계산한다. (#597)
+
+    후보는 원본 차단을 가리키는 열이 없다. 그래서 같은 인시던트의 차단 중 **같은 대상**이고
+    **결속된 백업의 슬롯(rule_number · egress)이 후보와 같으며** 후보보다 먼저 접수된 것을 고르되
+    (_expiry_backup — 만료 스캔과 같은 백업 기준), 먼저 만료 스캔과 같은 자격(SUCCESS이고 그 차단을
+    되돌린 해제 실행이 없다 — list_nacl_deny_expired의 _no_restore_execution_for_block)으로 거른다.
+    TTL 경과는 보지 않는다 — 아직 오지 않은 만료도 보여야 한다. 거른 뒤 정확히 하나일 때만 그
+    finished_at + TTL이고, 없거나 여럿이면(이력이 모호하다) None이다. finished_at이 없어도 None이다.
+    상태는 파생하지 않고 지난 시각도 그대로 둔다. 해제 후보가 아닌 추천도 None이다.
+    """
+    if candidate.runbook_id is not RunbookId.RUNBOOK_NACL_RESTORE:
+        return None
+    slot = (candidate.parameters.get("rule_number"), candidate.parameters.get("egress"))
+    matching: list[models.ActionExecution] = []
+    for block in executions:
+        if (
+            block.runbook_id is not RunbookId.RUNBOOK_NACL_ADD_DENY
+            or block.target_arn != candidate.target_arn
+            or block.created_at > candidate.created_at
+        ):
+            continue
+        _, backup, _ = _expiry_backup(db, block)
+        if backup is not None and (backup.rule_number, backup.egress) == slot:
+            matching.append(block)
+    if not matching:
+        return None
+    eligible_ids = set(
+        db.execute(
+            select(models.ActionExecution.execution_id).where(
+                models.ActionExecution.execution_id.in_([b.execution_id for b in matching]),
+                models.ActionExecution.status == ExecutionStatus.SUCCESS,
+                executions_repo._no_restore_execution_for_block(),
+            )
+        ).scalars()
+    )
+    eligible = [b for b in matching if b.execution_id in eligible_ids]
+    if len(eligible) != 1 or eligible[0].finished_at is None:
+        return None
+    return eligible[0].finished_at + NACL_DENY_TTL

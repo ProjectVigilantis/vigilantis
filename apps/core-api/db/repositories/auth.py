@@ -1,6 +1,6 @@
 # ==============================================================================
 # [파일 설명]
-# 인증 저장소 — app_users · app_user_tenant_assignments · auth_sessions. (#492 PR 1 · PR 5)
+# 인증 저장소 — app_users · app_user_group_assignments · auth_sessions. (#492 PR 1 · PR 5 · #572 2번)
 #
 #   - commit하지 않는다. 트랜잭션은 호출부(Workflow)가 소유한다. 생성은 flush까지 한다.
 #   - 사용자 신원은 (issuer, cognito_sub)뿐이다. email로 조회·연결하는 경로를 두지 않는다.
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from schemas.api.auth import AccountType, PlatformRole, UserRole
+from schemas.api.auth import AccountType, FeaturePermission, PlatformRole, UserRole
 from schemas.api.users import UserEventAction, UserEventState
 from sqlalchemy import delete, func, insert, select, text, update
 from sqlalchemy.orm import Session
@@ -216,35 +216,94 @@ def set_platform_role(
     return result.rowcount == 1
 
 
-# --- 담당 고객사 배정 ------------------------------------------------------------
+# --- 담당 그룹 배정 (#572 2번) ---------------------------------------------------
 
 
-def list_assigned_tenant_ids(db: Session, *, user_id: str) -> tuple[str, ...]:
-    """사용자에게 배정된 고객사 ID(정규 UUID 문자열), tenant_id 오름차순. 등급은 보지 않는다 — 호출부가 가린다."""
-    assignment = models.AppUserTenantAssignment
+def list_assigned_group_ids(db: Session, *, user_id: str) -> tuple[str, ...]:
+    """사용자에게 배정된 그룹 ID(정규 UUID 문자열), group_id 오름차순. 등급은 보지 않는다 — 호출부가 가린다."""
+    assignment = models.AppUserGroupAssignment
     return tuple(
         db.scalars(
-            select(assignment.tenant_id)
+            select(assignment.group_id)
             .where(assignment.user_id == user_id)
-            .order_by(assignment.tenant_id)
+            .order_by(assignment.group_id)
         )
     )
 
 
-def replace_assigned_tenants(
-    db: Session, *, user_id: str, tenant_ids: tuple[str, ...], now: datetime
-) -> None:
-    """사용자의 배정을 tenant_ids 로 통째로 바꾼다(빈 튜플 = 전부 회수). 사용자 updated_at 을 now 로 올린다.
+def list_group_scoped_tenant_ids(db: Session, *, user_id: str) -> tuple[str, ...]:
+    """배정된 그룹에 든 고객사 ID(정규 UUID 문자열), tenant_id 오름차순 — 담당 범위의 원천이다.
 
-    commit 하지 않는다. 호출부가 users 락을 쥐고 대상 등급 · 고객사 존재 · 중복을 먼저 확인한다 —
-    없는 사용자 · 고객사와 중복 ID 는 FK · PK 가 거절한다.
+    고객사는 최대 한 그룹에 들므로 겹치지 않는다. 그룹이 없거나 빈 그룹뿐이면 빈 튜플이다. 등급은 보지 않는다.
     """
-    assignment = models.AppUserTenantAssignment
+    assignment = models.AppUserGroupAssignment
+    return tuple(
+        db.scalars(
+            select(models.Tenant.tenant_id)
+            .join(assignment, assignment.group_id == models.Tenant.group_id)
+            .where(assignment.user_id == user_id)
+            .order_by(models.Tenant.tenant_id)
+        )
+    )
+
+
+def replace_assigned_groups(
+    db: Session, *, user_id: str, group_ids: tuple[str, ...], now: datetime
+) -> None:
+    """사용자의 담당 그룹을 group_ids 로 통째로 바꾼다(빈 튜플 = 전부 회수). 사용자 updated_at 을 now 로 올린다.
+
+    commit 하지 않는다. 호출부가 users 락을 쥐고 대상 등급 · 그룹 존재 · 중복을 먼저 확인한다 —
+    없는 사용자 · 그룹과 중복 ID 는 FK · PK 가 거절한다.
+    """
+    assignment = models.AppUserGroupAssignment
     db.execute(delete(assignment).where(assignment.user_id == user_id))
-    if tenant_ids:
+    if group_ids:
         db.execute(
             insert(assignment),
-            [{"user_id": user_id, "tenant_id": tenant_id} for tenant_id in tenant_ids],
+            [{"user_id": user_id, "group_id": group_id} for group_id in group_ids],
+        )
+    db.execute(
+        update(models.AppUser).where(models.AppUser.user_id == user_id).values(updated_at=now)
+    )
+
+
+# --- 기능별 권한(#572 5번) --------------------------------------------------------
+
+
+def list_feature_permissions(db: Session, *, user_id: str) -> frozenset[FeaturePermission]:
+    """사용자에게 부여된 기능별 권한. 역할은 보지 않는다 — OPERATOR 에게만 뜻이 있고 호출부(auth.permissions)가 가린다."""
+    grant = models.AppUserFeaturePermission
+    return frozenset(db.scalars(select(grant.permission).where(grant.user_id == user_id)))
+
+
+def list_feature_permissions_for(
+    db: Session, *, user_ids: list[str]
+) -> dict[str, frozenset[FeaturePermission]]:
+    """여러 사용자의 부여 권한을 한 번에 — 행이 없는 사용자는 결과에 없다(빈 집합으로 읽는다)."""
+    if not user_ids:
+        return {}
+    grant = models.AppUserFeaturePermission
+    grants: dict[str, set[FeaturePermission]] = {}
+    for user_id, permission in db.execute(
+        select(grant.user_id, grant.permission).where(grant.user_id.in_(user_ids))
+    ):
+        grants.setdefault(user_id, set()).add(permission)
+    return {user_id: frozenset(values) for user_id, values in grants.items()}
+
+
+def replace_feature_permissions(
+    db: Session, *, user_id: str, permissions: frozenset[FeaturePermission], now: datetime
+) -> None:
+    """사용자의 부여 권한을 permissions 로 통째로 바꾼다(빈 집합 = 전부 회수). 사용자 updated_at 을 now 로 올린다.
+
+    commit 하지 않는다. 호출부가 users 락을 쥐고 대상 역할(OPERATOR)을 먼저 확인한다 — 없는 사용자는 FK 가 거절한다.
+    """
+    grant = models.AppUserFeaturePermission
+    db.execute(delete(grant).where(grant.user_id == user_id))
+    if permissions:
+        db.execute(
+            insert(grant),
+            [{"user_id": user_id, "permission": p} for p in FeaturePermission if p in permissions],
         )
     db.execute(
         update(models.AppUser).where(models.AppUser.user_id == user_id).values(updated_at=now)

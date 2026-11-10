@@ -614,3 +614,14 @@ def test_analysis_result_rejects_invalid_or_internal_rejection_fields(over):
 def test_analysis_result_rejects_invalid_status_or_internal_fields(data):
     with pytest.raises(ValidationError):
         AnalysisResult.model_validate(data)
+
+
+def test_recommendation_expires_at_defaults_to_null_and_serializes_utc():
+    base = {"runbook_id": "RUNBOOK_NACL_RESTORE", "target_arn": "arn:aws:ec2:r:a:x/y"}
+    assert RecommendationItem.model_validate(base).expires_at is None
+
+    item = RecommendationItem.model_validate(
+        {**base, "expires_at": "2026-11-08T10:30:00+09:00"}
+    )
+    assert item.model_dump(mode="json")["expires_at"] == "2026-11-08T01:30:00Z"
+    assert RecommendationItem.model_validate(item.model_dump(mode="json")) == item

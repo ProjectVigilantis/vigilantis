@@ -35,7 +35,7 @@
 #   5. 검증      출력 모델 단독으로 볼 수 없어 계약이 Workflow 몫으로 못 박은 둘과,
 #                저장 앞단에서만 볼 수 있는 하나를 여기서 봅니다(schemas/agents.py 계약
 #                원칙) —
-#                ⓐ 후보 evidence_ids ⊆ 입력 Evidence  ⓑ FINOPS의 reviewed_risk_level=null
+#                ⓐ 후보 evidence_ids ⊆ 입력 Evidence  ⓑ reviewed_risk_level=null(두 도메인)
 #                ⓒ PostgreSQL text·jsonb가 담을 수 있는 값인가(NUL 거절)
 #                어기면 후보 하나가 아니라 **출력 전체를 FAILED로** 바꿉니다. 어긋난
 #                출력에서 성한 후보만 골라 남기면, 서버가 하지 않은 판단이 관제 화면에
@@ -498,18 +498,11 @@ def _contract_violation(
     nacl_rule_numbers: Mapping[str, int] | None = None,
 ) -> Optional[_Violation]:
     """ⓐ·ⓑ·ⓒ 위반의 사유 코드와 한 줄 설명. 위반이 없으면 None."""
-    if (
-        graph_input.domain is IncidentCategory.FINOPS
-        and output.reviewed_risk_level is not None
-    ):
+    # 두 도메인 모두 null이어야 한다 — SecOps의 AI 재평가 노드는 ADR-0005 1차 개정으로
+    # 없어졌고(#583), 서버 초기 판정을 복사해 싣는 것도 거절 대상이다.
+    if output.reviewed_risk_level is not None:
         return _Violation(AnalysisFailureReason.REVIEWED_RISK_MISMATCH,
-                          "FINOPS 출력에 reviewed_risk_level이 실렸습니다")
-
-    if (graph_input.domain is IncidentCategory.SECOPS
-            and output.invocation_status is not AgentInvocationStatus.FAILED
-            and output.reviewed_risk_level is None):
-        return _Violation(AnalysisFailureReason.REVIEWED_RISK_MISMATCH,
-                          "SECOPS 분석 결과에 재평가 위험도가 없습니다")
+                          f"{graph_input.domain.value} 출력에 reviewed_risk_level이 실렸습니다")
 
     offered = {item.evidence_id for item in graph_input.evidences}
     for candidate in output.candidates:

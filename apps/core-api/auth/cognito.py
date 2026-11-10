@@ -36,6 +36,8 @@ class AuthError(Exception):
     provider_status: int | None = None
     #: SDK 호출 실패인지. HTTP 상태 없는 SDK 실패와 로컬 응답 검증 거절을 구분한다.
     from_provider_call: bool = False
+    #: SDK 호출 실패의 AWS 오류 코드(전송 실패는 예외 이름). 로그용이며 공개 오류 매핑 · 메시지에는 싣지 않는다.
+    provider_code: str | None = None
 
     def __init__(self) -> None:
         super().__init__(self.code.value)
@@ -240,6 +242,7 @@ class CognitoAdapter:
         failure = classify_error(aws_code, status, kind)
         failure.provider_status = provider_status
         failure.from_provider_call = True
+        failure.provider_code = aws_code
         raise failure from None
 
     @staticmethod
@@ -278,6 +281,23 @@ class CognitoAdapter:
             params["UserAttributes"] = [{"Name": "email", "Value": email}]
         resp = self._call("admin_create_user", "invite", **params)
         return self._user(resp.get("User") or {}, "Attributes")
+
+    def admin_delete_user(self, username: str) -> None:
+        """Cognito 사용자를 지운다 — 직원 초대의 보상 삭제(#572 1번). 호출자는 이 요청이 만든 사용자의 sub 를 넘긴다.
+
+        없음(UserNotFoundException)은 지운 것과 같은 결과라 정상 반환한다. 그 밖의 실패는 관리 조회와 같이
+        분류해 던진다(429 · 503, AWS 오류 코드는 provider_code).
+        일반 재시도 클라이언트로 보낸다(admin_create_user 와 같다). 재시도 없는 클라이언트는 결과를 기록하는 TOTP
+        등록 변경용이다 — 재시도의 마지막 응답이 첫 시도의 적용 여부를 가리면 기록이 틀린다. 이 호출은 결과를
+        기록하지 않고 목표가 '없음' 하나다. 바뀌지 않는 sub 로 지우므로 재시도가 다른 사용자에 닿지 않고, 첫 시도가
+        적용된 뒤의 재시도는 UserNotFoundException(정상 반환)이다 — 재시도는 일시 장애에서 삭제될 기회만 늘린다.
+        """
+        self._send(
+            "admin_delete_user",
+            "admin",
+            _USER_NOT_FOUND,
+            {"UserPoolId": self._pool_id, "Username": username},
+        )
 
     def admin_delete_software_token(self, username: str) -> SoftwareTokenDeletion:
         """확인된 Cognito 신원의 TOTP를 삭제하고 결과를 분류해 돌려준다(예외로 바꾸지 않는다).

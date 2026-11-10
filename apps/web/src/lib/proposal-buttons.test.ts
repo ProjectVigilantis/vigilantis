@@ -1,10 +1,16 @@
 // 제안 조치 버튼 규칙 회귀 — `npm test`. 인시던트 분류로 문구를 가르던 자리를 되살리면 여기서 막힌다(#363).
 //
-// 지키는 것은 둘이다. ① T2 7단계 「원클릭 해제」에서 `승인하고 차단`이 나오지 않는다(핵심 컷이
-// 동작과 반대로 말하던 자리) ② 파괴적 2종의 문구가 삭제로 읽힌다
+// 지키는 것은 셋이다. ① T2 7단계 「원클릭 해제」에서 `승인하고 차단`이 나오지 않는다(핵심 컷이
+// 동작과 반대로 말하던 자리) ② 파괴적 2종의 문구가 삭제로 읽힌다 ③ 해제 예정과 성공을 구분한다.
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { createRequire, registerHooks } from 'node:module';
 import { test } from 'node:test';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import ts from 'typescript';
 
 import { DESTRUCTIVE_RUNBOOK_IDS } from './enum-labels.ts';
 import {
@@ -85,4 +91,91 @@ test('AI 추천 가능 7종 전부에 계열이 있고, 롤백 3종은 없다', 
     (id) => !(ROLLBACK_RUNBOOK_IDS as readonly string[]).includes(id),
   ).sort();
   assert.deepEqual(Object.keys(RUNBOOK_ACTION_KINDS).sort(), recommendable);
+});
+
+test('해제 후보는 서버 예정 시각을 KST 분 단위로 보이고, 지난 시각도 해제 성공으로 바꾸지 않는다', async () => {
+  // node --test의 TSX·@/ 로딩은 기존 subscription-presentation 테스트와 같은 컴파일러를 쓴다.
+  const sourceRoot = new URL('../', import.meta.url);
+  const require = createRequire(import.meta.url);
+  const nextEntries = new Map(['next/link', 'next/navigation'].map((specifier) => [
+    specifier, pathToFileURL(require.resolve(specifier)).href,
+  ]));
+  const { AppRouterContext } = require('next/dist/shared/lib/app-router-context.shared-runtime');
+  const compilerOptions: ts.CompilerOptions = {
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    jsx: ts.JsxEmit.ReactJSX,
+    paths: { '@/*': [fileURLToPath(sourceRoot) + '*'] },
+  };
+  const hooks = registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (nextEntries.has(specifier) && context.parentURL?.startsWith(sourceRoot.href)) {
+        return nextResolve(nextEntries.get(specifier)!, context);
+      }
+      if (specifier.startsWith('@/') || (specifier.startsWith('.') && context.parentURL?.startsWith(sourceRoot.href))) {
+        const resolved = ts.resolveModuleName(specifier, fileURLToPath(context.parentURL!), compilerOptions, ts.sys).resolvedModule;
+        if (resolved !== undefined) return nextResolve(pathToFileURL(resolved.resolvedFileName).href, context);
+      }
+      return nextResolve(specifier, context);
+    },
+    load(url, context, nextLoad) {
+      if (url.startsWith(sourceRoot.href) && url.endsWith('.tsx')) {
+        const source = ts.transpileModule(readFileSync(fileURLToPath(url), 'utf8'), { compilerOptions }).outputText;
+        return { format: 'module', source, shortCircuit: true };
+      }
+      return nextLoad(url, context);
+    },
+  });
+  try {
+    const { IncidentDetail } = await import('../components/incidents/incident-detail.tsx');
+    const detail: IncidentResponse = {
+      ...incident(['RUNBOOK_NACL_RESTORE']),
+      incident_id: 'release-schedule',
+      title: '차단 해제 제안',
+      subject_arn: 'arn:aws:ec2:ap-northeast-2:123456789012:instance/i-release',
+      category: 'SECOPS',
+      status: 'AWAITING_APPROVAL',
+      initial_risk_level: null,
+      reviewed_risk_level: null,
+      threat_context: null,
+      analysis_result: null,
+      summary_lines: [],
+      evidence_ids: [],
+      executions: [],
+      resolution: null,
+      resolution_note: null,
+      resolved_at: null,
+      auto_isolation_block: null,
+      created_at: '2026-11-09T00:00:00Z',
+      updated_at: '2026-11-09T00:00:00Z',
+    };
+    const router = {
+      back() {}, forward() {}, refresh() {}, push() {}, replace() {}, prefetch() {},
+      bfcacheId: 'release-schedule',
+    };
+    const render = (expiresAt?: string | null, runbookId: AiRecommendableRunbookId = 'RUNBOOK_NACL_RESTORE') =>
+      renderToStaticMarkup(createElement(AppRouterContext.Provider, { value: router },
+        createElement(IncidentDetail, {
+          incident: {
+            ...detail,
+            recommendations: [{ ...detail.recommendations[0], runbook_id: runbookId, expires_at: expiresAt }],
+          },
+          assets: [],
+        })));
+
+    for (const [expiry, scheduled] of [
+      ['2026-12-31T15:05:59Z', '2027-01-01 00:05'],
+      ['2000-01-01T15:00:00Z', '2000-01-02 00:00'],
+    ]) {
+      const html = render(expiry);
+      assert.match(html, new RegExp(`제안 조치[\\s\\S]*시스템 해제 예정 · ${scheduled} \\(KST\\)`));
+      assert.match(html, /승인하고 해제/);
+      assert.doesNotMatch(html, /해제 완료|해제 성공/);
+    }
+    assert.doesNotMatch(render(null), /시스템 해제 예정/);
+    assert.doesNotMatch(render(), /시스템 해제 예정/);
+    assert.doesNotMatch(render('2026-12-31T15:05:59Z', 'RUNBOOK_NACL_ADD_DENY'), /시스템 해제 예정/);
+  } finally {
+    hooks.deregister();
+  }
 });

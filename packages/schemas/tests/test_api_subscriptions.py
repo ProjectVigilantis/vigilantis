@@ -296,7 +296,7 @@ def test_agreement_shape_violations(over):
 
 def test_list_item_names_the_subscription_source():
     common = {"tenant_id": "t1", "name": "학원", "status": "ACTIVE", "aws_account_id": "123456789012",
-              "asset_count": 0, "open_incident_count": 0}
+              "asset_count": 0, "open_incident_count": 0, "group_id": None}
     TenantListItem.model_validate(common)
     TenantListItem.model_validate(common | {"subscription": PAID, "subscription_source": "MOCK_MARKETPLACE",
                                             "entitlement_ends_at": "2026-11-29T15:00:00Z"})

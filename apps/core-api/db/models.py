@@ -20,7 +20,7 @@ from enum import Enum
 from schemas.api.actions import ExecutionStatus
 from schemas.api.assets import AssetType, RelationType
 from schemas.api.audit import AuditActorKind, AuditEventAction
-from schemas.api.auth import AccountType, PlatformRole, UserRole
+from schemas.api.auth import AccountType, FeaturePermission, PlatformRole, UserRole
 from schemas.api.incidents import (
     IncidentCategory,
     IncidentStatus,
@@ -149,13 +149,19 @@ _NO_SUBSCRIPTION_FACTS = (
 _SUBSCRIPTION_SOURCE_SHAPE = {
     # 원천이 없으면 구독 칸도 없다(등록 안 됨) — 반대도 같다
     "source_iff_subscription": f"(subscription_source IS NULL) = ({_NO_SUBSCRIPTION_FACTS})",
-    # 권리 끝 시각은 모의 계약 투영에만 있다
-    "entitlement_end_with_mock": (
-        "(subscription_source IS NOT DISTINCT FROM 'MOCK_MARKETPLACE') = (entitlement_ends_at IS NOT NULL)"
+    # 권리 끝 시각은 계약 투영(모의 · 실제 Marketplace)에만 있다. 마이그레이션(20261110_e600b2c4d711)이 넓혔다
+    "entitlement_end_with_contract": (
+        "(subscription_source IS NOT DISTINCT FROM 'MOCK_MARKETPLACE'"
+        " OR subscription_source IS NOT DISTINCT FROM 'AWS_MARKETPLACE') = (entitlement_ends_at IS NOT NULL)"
     ),
     # 모의 계약 투영은 기간이 있는 유료 요금제이고 요금을 지어내지 않는다
     "mock_projection_shape": (
         "subscription_source IS DISTINCT FROM 'MOCK_MARKETPLACE' OR (plan IN ('Business', 'Enterprise')"
+        " AND period_start IS NOT NULL AND period_end IS NOT NULL AND amount_minor IS NULL)"
+    ),
+    # 실제 Marketplace 투영도 같다 — 요금은 AWS 청구에 있고 여기에 옮겨 적지 않는다
+    "marketplace_projection_shape": (
+        "subscription_source IS DISTINCT FROM 'AWS_MARKETPLACE' OR (plan IN ('Business', 'Enterprise')"
         " AND period_start IS NOT NULL AND period_end IS NOT NULL AND amount_minor IS NULL)"
     ),
     "app_free_is_free": "subscription_source IS DISTINCT FROM 'APP_FREE' OR plan = 'Free'",
@@ -168,6 +174,22 @@ def _subscription_shape_checks() -> list[CheckConstraint]:
         for name, sql in (_SUBSCRIPTION_SHAPE | _SUBSCRIPTION_SOURCE_SHAPE).items()
     ]
 
+
+class TenantGroup(Base):
+    """고객사 그룹 1개(#572 2번) — 중앙 관리계정이 만들고 고객사를 넣는다. 관리자 직원계정은 배정받은 그룹 안의
+    고객사만 다룬다. 한 단계뿐이고, 고객사는 최대 한 그룹(tenants.group_id)에 든다. 이름은 유일하다.
+    """
+
+    __tablename__ = "tenant_groups"
+
+    group_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
+    name: Mapped[str] = mapped_column(String(100), unique=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
 
 
 class Tenant(Base):
@@ -232,6 +254,11 @@ class Tenant(Base):
         DateTime(timezone=True), nullable=True
     )
     suspended_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # 고객사 그룹(#572 2번) — 최대 한 그룹. NULL = 담당 그룹 없음(담당자 없음)이며 연결 상태(status)와 별개다.
+    # 그룹을 지우면 NULL 로 돌아간다(SET NULL)
+    group_id: Mapped[str | None] = mapped_column(
+        _ID, ForeignKey("tenant_groups.group_id", ondelete="SET NULL"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow
     )
@@ -272,6 +299,31 @@ class Tenant(Base):
             name="period_ordered",
         ),
         *_subscription_shape_checks(),
+    )
+
+
+class TenantApiCallHourly(Base):
+    """고객사(TENANT) 계정이 세션을 통과해 `/api/*` 를 부른 횟수 — 고객사 × UTC 1시간 버킷 (#572 6번).
+
+    공개 계약은 `schemas.api.platform`(ApiUsageSummary)이다. 요청마다 `api_usage` 미들웨어가 응답 뒤에
+    한 버킷을 +1 하고(UPSERT), 보관 기간(오늘과 그 전 API_USAGE_RETENTION_DAYS 일, 고객사당 최대 31 × 24 칸)을 넘은 칸은 지운다.
+    경로별 세분화는 없다. 고객사가 지워지면 통계도 함께 지워진다(CASCADE) — 통계가 고객사 삭제를 막지 않는다.
+    """
+
+    __tablename__ = "tenant_api_calls_hourly"
+
+    tenant_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("tenants.tenant_id", ondelete="CASCADE"), primary_key=True
+    )
+    # 칸의 시작 시각 — UTC 정시로 내린 값만 들어온다(DB CHECK 가 거울)
+    hour: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    calls: Mapped[int] = mapped_column(BigInteger)
+
+    __table_args__ = (
+        CheckConstraint("calls >= 0", name="calls_nonnegative"),
+        CheckConstraint("date_trunc('hour', hour) = hour", name="hour_on_the_hour"),
+        # 보관 기간 정리(hour < 기준 시각)와 기간 조회가 PK(tenant_id, hour)로는 시간 범위를 못 찾는다
+        Index("ix_tenant_api_calls_hourly_hour", "hour"),
     )
 
 
@@ -408,6 +460,48 @@ class MockMarketplaceEvent(Base):
             "created_at",
             postgresql_where=text("processed_at IS NULL"),
         ),
+    )
+
+
+# 실제 Marketplace 권리 — 마이그레이션(20261110_e600b2c4d711)이 같은 식을 쓴다
+_MARKETPLACE_LICENSE_SHAPE = {
+    "account_format": "customer_aws_account_id ~ '^[0-9]{12}$'",
+    "plan_is_paid": "plan IS NULL OR plan IN ('Business', 'Enterprise')",
+    # 유효한 권리는 요금제와 끝 시각이 있어야 투영할 수 있다
+    "active_shape": "NOT active OR (plan IS NOT NULL AND expires_at IS NOT NULL)",
+}
+
+
+class MarketplaceLicense(Base):
+    """실제 AWS Marketplace 라이선스 1건 — GetEntitlements 로 다시 읽은 값의 사본(ADR-0012 2차 개정 · marketplace.py).
+
+    권위 있는 원천은 AWS 이고 이 행은 마지막으로 읽은 결과다. 테넌트와는 FK 가 아니라 고객 AWS 계정
+    (tenants.aws_account_id)으로 이어진다 — 등록 랜딩이 테넌트가 생기기 전에 올 수 있기 때문이다. 한 계정이
+    라이선스를 여럿 가질 수 있다(동시 계약). 그중 투영할 것은 유효한 것 가운데 요금제가 가장 최근에 바뀐
+    것이다(decided_at) — 고객이 요금제를 올리거나 내리면 그 결정을 따른다.
+    """
+
+    __tablename__ = "marketplace_licenses"
+
+    license_arn: Mapped[str] = mapped_column(String(2048), primary_key=True)
+    customer_aws_account_id: Mapped[str] = mapped_column(String(12), index=True)
+    product_code: Mapped[str] = mapped_column(String(255))
+    #: ResolveCustomer 의 Metadata.AgreementId. GetEntitlements 로만 알게 된 라이선스는 비어 있다.
+    agreement_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    #: 권리의 가격 항목 이름 그대로(Marketplace 상품 설정).
+    dimension: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    #: dimension 을 대응시킨 요금제. 대응이 없으면 비어 있고 투영하지 않는다.
+    plan: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: 마지막 GetEntitlements 에 나왔고 끝 시각 전이다.
+    active: Mapped[bool] = mapped_column(Boolean, default=False)
+    #: 요금제가 지금 값으로 바뀐 것을 처음 본 시각 — 「최근 결정」의 기준이다.
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    refreshed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = tuple(
+        CheckConstraint(sql, name=name) for name, sql in _MARKETPLACE_LICENSE_SHAPE.items()
     )
 
 
@@ -1714,7 +1808,7 @@ class AppUser(Base):
     )
     # 플랫폼 등급(#492) — 플랫폼 관리 권한의 유일한 원천이다. PLATFORM 만 값을 갖고(CHECK)
     # TENANT · UNASSIGNED 는 NULL 이다. 서버 기본값이 없다 — 플랫폼 계정을 만드는 쪽이 정한다.
-    # CENTRAL_ADMIN 은 모든 고객사, TENANT_MANAGER 는 app_user_tenant_assignments 에 배정된 고객사만이다.
+    # CENTRAL_ADMIN 은 모든 고객사, TENANT_MANAGER 는 app_user_group_assignments 로 배정된 그룹 안의 고객사만이다.
     platform_role: Mapped[PlatformRole | None] = mapped_column(
         _enum(PlatformRole, "app_user_platform_role"), nullable=True
     )
@@ -1760,20 +1854,37 @@ class AppUser(Base):
     )
 
 
-class AppUserTenantAssignment(Base):
-    """TENANT_MANAGER 의 담당 고객사 1건(#492). 명시 배정 행만 범위가 된다 — 암묵 부여는 없다.
+class AppUserGroupAssignment(Base):
+    """TENANT_MANAGER 의 담당 그룹 1건(#572 2번). 범위는 배정된 그룹에 든 고객사뿐이다 — 고객사 단위 직접 배정은 없다.
 
     소속(app_users.tenant_id) · 계정 종류는 배정이 아니다. 범위 판정은 등급이 TENANT_MANAGER 일 때만 이 행을 읽는다.
-    고객사가 지워지면 배정도 함께 지워진다(CASCADE) — 없는 고객사를 가리키는 배정이 남지 않는다.
+    사용자 · 그룹이 지워지면 배정도 함께 지워진다(CASCADE) — 없는 그룹을 가리키는 배정이 남지 않는다.
     """
 
-    __tablename__ = "app_user_tenant_assignments"
+    __tablename__ = "app_user_group_assignments"
 
     user_id: Mapped[str] = mapped_column(
         _ID, ForeignKey("app_users.user_id", ondelete="CASCADE"), primary_key=True
     )
-    tenant_id: Mapped[str] = mapped_column(
-        _ID, ForeignKey("tenants.tenant_id", ondelete="CASCADE"), primary_key=True, index=True
+    group_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("tenant_groups.group_id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+
+
+class AppUserFeaturePermission(Base):
+    """고객사 직원계정(TENANT OPERATOR)의 기능별 권한 1건(#572 5번). 명시 부여 행만 권한이 된다.
+
+    ADMIN 은 행 없이 네 가지 전부, VIEWER 는 행이 있어도 보지 않는다(권한 판정은 auth.permissions 가 역할을 먼저 본다).
+    역할이 OPERATOR 에서 바뀌면 서비스가 행을 지운다. 사용자가 지워지면 함께 지워진다(CASCADE).
+    """
+
+    __tablename__ = "app_user_feature_permissions"
+
+    user_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("app_users.user_id", ondelete="CASCADE"), primary_key=True
+    )
+    permission: Mapped[FeaturePermission] = mapped_column(
+        _enum(FeaturePermission, "app_user_feature_permission"), primary_key=True
     )
 
 
@@ -1991,6 +2102,10 @@ class SignupRequest(Base):
         _enum(SignupRequestStatus, "signup_request_status"), default=SignupRequestStatus.NEW
     )
     rejected_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # 승인으로 만들어진 고객사. 옛 승인 건·거절·미결정은 NULL이며 고객사를 지워도 신청과 결정 기록은 남는다.
+    tenant_id: Mapped[str | None] = mapped_column(
+        _ID, ForeignKey("tenants.tenant_id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow

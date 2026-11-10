@@ -4,18 +4,18 @@
 #
 # AWS를 부르지 않는다(boto3 자리는 가짜 객체). 지키는 것은 "SaaS 모양"을 이루는 울타리 다섯 묶음과
 # 구성 절차의 가드다.
-#   ① api 태스크 역할은 접근 역할 전환 하나만 — AWS 자원을 직접 만지지 않는다
-#   ② 접근 역할은 플랫폼 태스크 역할만, ExternalId가 맞을 때만 받는다
+#   ① api 태스크 역할은 고객 접근 역할(vigilantis-access*) 전환과 로그인 사용자 풀 관리뿐. AWS 자원을 직접
+#      만지지 않는다. 고객 접근 역할 자체는 온보딩 템플릿이 만든다(tests/test_onboarding_template.py)
+#   ② 로그인 사용자 풀은 auth README의 전제(MFA ON · TOTP · 관리자만 생성 · 비밀번호 12자)대로
 #   ③ ALB는 비밀 헤더가 있는 요청만 앱으로 보낸다(CloudFront 우회 차단) · 도메인이 있으면 CloudFront→ALB는
 #      origin.<도메인> HTTPS만(평문 80 리스너·SG 규칙을 걷어 낸다)
 #   ④ WAF는 기본 차단 · 허용 IP만 통과 · 허용 CIDR은 /24보다 넓으면 거부
 #   ⑤ api는 겹쳐 뜨지 않는다(min 0 · max 100) · AI 분석·조치 실행 디스패치는 명시해야 켜진다
 #      · 비밀은 값이 아니라 참조로만
-#   ⑥ 계정을 가르면(T-8) 접근 역할만 고객 계정에 · 남의 고객 역할은 덮어쓰지 않음 · 옛 플랫폼의 down이
-#      넘겨받은 역할을 지우지 않음
+#   ⑥ 고객 계정은 건드리지 않는다: 관제 범위 필터 없이 테넌트 문맥으로만 고객 계정에 닿는다
 #   ⑦ 운영 장치(T-8): 오류 알람은 배포 중 잠깐의 중단으로 울리지 않음 · api 5xx는 api 대상 그룹만 셈
 #      · DB 자동 백업 7일
-#   가드: 실 AWS·계정 대조 · 스모크 환경을 비싼 자원보다 먼저 확인 · DB 비밀번호는 RDS 생성 전에 저장
+#   가드: 실 AWS·계정 대조 · 도메인 준비를 비싼 자원보다 먼저 확인 · DB 비밀번호는 RDS 생성 전에 저장
 #         · 플랫폼 태그 없는 IAM 역할·오류 알람·알림 주제는 덮어쓰거나 지우지 않음
 #         · 자동 롤백된 배포를 성공으로 보고하지 않음 · ECS가 전부 내려간 뒤에만 클러스터 삭제
 #
@@ -47,36 +47,65 @@ def _load(name: str):
 
 
 platform = _load("provision_platform_aws")
-smoke = _load("provision_smoke_aws")
 
 ACCOUNT = "111122223333"
 
 
 # ① ---------------------------------------------------------------------------
-def test_task_role_can_only_assume_the_access_role():
-    statements = platform.task_role_policy(ACCOUNT)["Statement"]
-    assert len(statements) == 1
-    (only,) = statements
-    assert only["Effect"] == "Allow"
-    assert only["Action"] == "sts:AssumeRole"
-    assert only["Resource"] == f"arn:aws:iam::{ACCOUNT}:role/{platform.ROLE_ACCESS}"
-    # 와일드카드가 끼면 플랫폼이 다른 역할(관리자 등)로도 갈아탈 수 있다
-    assert "*" not in json.dumps(platform.task_role_policy(ACCOUNT))
+POOL_ARN = f"arn:aws:cognito-idp:ap-northeast-2:{ACCOUNT}:userpool/ap-northeast-2_Abc"
+
+
+def test_task_role_can_only_assume_customer_access_roles_and_manage_login_users():
+    assume, login = platform.task_role_policy(POOL_ARN)["Statement"]
+    assert (assume["Action"], assume["Resource"]) == ("sts:AssumeRole", f"arn:aws:iam::*:role/{platform.ROLE_ACCESS}*")
+    assert login["Resource"] == POOL_ARN
+    assert all(a.startswith("cognito-idp:Admin") for a in login["Action"])
+    actions = json.dumps(platform.task_role_policy(POOL_ARN))
+    # 고객 계정은 열려 있다. 이름 접두가 빠지면 플랫폼이 아무 역할(관리자 등)로나 갈아탈 수 있다
+    assert f"role/{platform.ROLE_ACCESS}*" in actions and '"Resource": "*"' not in actions
+
+
+def test_task_role_cognito_actions_match_the_auth_code():
+    """auth/cognito.py가 부르는 Cognito 작업과 태스크 역할의 작업이 같다(한쪽만 바뀌면 로그인이 AccessDenied)."""
+    source = (REPO_ROOT / "apps" / "core-api" / "auth" / "cognito.py").read_text(encoding="utf-8")
+    called = {f"cognito-idp:{''.join(p.capitalize() for p in name.split('_'))}"
+              for name in re.findall(r'"(admin_[a-z_]+)"', source)}
+    assert called == set(platform.COGNITO_ACTIONS)
+
+
+def test_onboarding_template_role_name_matches_the_assume_prefix():
+    pattern = platform.onboarding.build_template()["Parameters"]["RoleName"]["AllowedPattern"]
+    assert pattern.startswith(f"^{platform.ROLE_ACCESS}")
+
+
+def test_onboarding_bucket_opens_only_the_template_object():
+    (stmt,) = platform.onboarding_bucket_policy(ACCOUNT)["Statement"]
+    assert stmt["Action"] == "s3:GetObject" and stmt["Principal"] == "*"
+    assert stmt["Resource"] == (f"arn:aws:s3:::{platform.onboarding_bucket(ACCOUNT)}/"
+                                f"{platform.onboarding.TEMPLATE_KEY}")
+    assert platform.onboarding_template_url(ACCOUNT, "ap-northeast-2").endswith(platform.onboarding.TEMPLATE_KEY)
 
 
 # ② ---------------------------------------------------------------------------
-def test_access_role_trusts_only_the_platform_task_role_with_external_id():
-    (stmt,) = platform.access_trust_policy(ACCOUNT, "ext-123")["Statement"]
-    assert stmt["Principal"] == {"AWS": f"arn:aws:iam::{ACCOUNT}:role/{platform.ROLE_TASK}"}
-    assert stmt["Action"] == "sts:AssumeRole"
-    assert stmt["Condition"] == {"StringEquals": {"sts:ExternalId": "ext-123"}}
+def test_login_pool_follows_the_auth_readme():
+    pool = platform.user_pool_definition()
+    assert pool["AdminCreateUserConfig"] == {"AllowAdminCreateUserOnly": True}
+    assert pool["UsernameAttributes"] == ["email"] and pool["UsernameConfiguration"] == {"CaseSensitive": False}
+    assert pool["AccountRecoverySetting"]["RecoveryMechanisms"] == [{"Priority": 1, "Name": "verified_email"}]
+    policy = pool["Policies"]["PasswordPolicy"]
+    assert policy["MinimumLength"] >= 12 and all(policy[k] for k in (
+        "RequireUppercase", "RequireLowercase", "RequireNumbers", "RequireSymbols"))
+    mfa = platform.user_pool_mfa_config("pool-1")
+    assert mfa["MfaConfiguration"] == "ON" and mfa["SoftwareTokenMfaConfiguration"] == {"Enabled": True}
+    assert "SmsMfaConfiguration" not in mfa  # TOTP만
 
 
-def test_access_role_borrows_the_smoke_whitelist_policy():
-    """권한 정책을 두 벌 두지 않는다 — 스모크 테스트의 두 방향 보증이 그 한 벌에 걸려 있다."""
-    assert platform.SMOKE_POLICY_NAME == smoke.APP_POLICY
-    assert platform.SMOKE_COST_POLICY_NAME == smoke.COST_POLICY
-    assert platform.SMOKE_VPC_NAME == smoke.VPC_NAME
+def test_login_client_uses_only_the_admin_flow_with_a_secret():
+    client = platform.app_client_definition("pool-1")
+    assert client["GenerateSecret"] is True
+    assert set(client["ExplicitAuthFlows"]) == {"ALLOW_ADMIN_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"}
+    assert (client["EnableTokenRevocation"], client["AuthSessionValidity"], client["PreventUserExistenceErrors"]) == (
+        True, 3, "ENABLED")
 
 
 def test_exec_role_reads_only_the_given_secrets():
@@ -422,13 +451,13 @@ class FakeWaf:
 
 
 ALLOW = ["203.0.113.7/32", "198.51.100.9/32"]
-NAT = "198.51.100.9/32"
+NATS = ["198.51.100.10/32", "198.51.100.9/32"]  # AZ a·c의 NAT. WAF가 정렬해 담는 순서
 
 
 def test_new_acl_gets_the_rate_rule_and_a_separate_nat_set():
     waf = FakeWaf()
-    platform._ensure_waf(waf, ALLOW, NAT)
-    assert waf.ipsets[platform.WAF_NAT_IPSET] == [NAT]
+    platform._ensure_waf(waf, ALLOW, NATS)
+    assert waf.ipsets[platform.WAF_NAT_IPSET] == NATS
     assert [r["Name"] for r in waf.acl_rules] == RULE_NAMES
 
 
@@ -437,7 +466,7 @@ def test_new_acl_waits_while_the_new_ip_sets_propagate(monkeypatch):
     slept: list[float] = []
     monkeypatch.setattr(platform.time, "sleep", slept.append)
     waf = FakeWaf(create_acl_errors=["WAFUnavailableEntityException", "WAFUnavailableEntityException"])
-    assert platform._ensure_waf(waf, ALLOW, NAT) == "arn:acl"
+    assert platform._ensure_waf(waf, ALLOW, NATS) == "arn:acl"
     assert waf.calls.count("create_web_acl") == 3 and len(slept) == 2
     assert [r["Name"] for r in waf.acl_rules] == RULE_NAMES
 
@@ -446,7 +475,7 @@ def test_new_acl_does_not_retry_other_errors(monkeypatch):
     monkeypatch.setattr(platform.time, "sleep", lambda _: pytest.fail("다른 오류는 기다리지 않는다"))
     waf = FakeWaf(create_acl_errors=["WAFInvalidParameterException"])
     with pytest.raises(ClientError, match="WAFInvalidParameterException"):
-        platform._ensure_waf(waf, ALLOW, NAT)
+        platform._ensure_waf(waf, ALLOW, NATS)
     assert waf.calls.count("create_web_acl") == 1
 
 
@@ -455,7 +484,7 @@ def test_existing_acl_without_the_rate_rule_is_updated():
     old = [{"Name": "allow-listed-ips", "Priority": 0, "Action": {"Allow": {}},
             "Statement": {"IPSetReferenceStatement": {"ARN": f"arn:{platform.WAF_IPSET}"}}}]
     waf = FakeWaf(ipsets={platform.WAF_IPSET: ALLOW}, acl_rules=old)
-    platform._ensure_waf(waf, ALLOW, NAT)
+    platform._ensure_waf(waf, ALLOW, NATS)
     assert "update_web_acl" in waf.calls
     assert [r["Name"] for r in waf.acl_rules] == RULE_NAMES
 
@@ -464,30 +493,30 @@ def test_existing_acl_without_the_login_rule_gets_it_in_front():
     # 지금 배포된 플랫폼의 모양 — 전 경로 속도 규칙(0) · 허용(1)뿐인 웹 ACL(#484 적용 뒤)
     old = [rule for rule in platform.waf_rules(f"arn:{platform.WAF_IPSET}", f"arn:{platform.WAF_NAT_IPSET}")
            if rule["Name"] != "rate-login-per-ip"]
-    waf = FakeWaf(ipsets={platform.WAF_IPSET: ALLOW, platform.WAF_NAT_IPSET: [NAT]},
+    waf = FakeWaf(ipsets={platform.WAF_IPSET: ALLOW, platform.WAF_NAT_IPSET: NATS},
                   acl_rules=[{**rule, "Priority": n} for n, rule in enumerate(old)])
-    platform._ensure_waf(waf, ALLOW, NAT)
+    platform._ensure_waf(waf, ALLOW, NATS)
     assert waf.calls == ["update_web_acl"]
     assert [(r["Name"], r["Priority"]) for r in waf.acl_rules] == list(zip(RULE_NAMES, [0, 1, 2]))
     waf.calls.clear()
-    platform._ensure_waf(waf, ALLOW, NAT)
+    platform._ensure_waf(waf, ALLOW, NATS)
     assert waf.calls == []
 
 
 def test_second_run_changes_nothing():
     waf = FakeWaf()
-    platform._ensure_waf(waf, ALLOW, NAT)
+    platform._ensure_waf(waf, ALLOW, NATS)
     waf.calls.clear()
-    platform._ensure_waf(waf, ALLOW, NAT)
+    platform._ensure_waf(waf, ALLOW, NATS)
     assert waf.calls == []  # 응답에 기본 키가 덧붙어도 같은 규칙으로 본다
 
 
 def test_switching_to_block_is_applied_on_rerun(monkeypatch):
     waf = FakeWaf()
-    platform._ensure_waf(waf, ALLOW, NAT)
+    platform._ensure_waf(waf, ALLOW, NATS)
     monkeypatch.setattr(platform, "RATE_ACTION", "Block")
     waf.calls.clear()
-    platform._ensure_waf(waf, ALLOW, NAT)
+    platform._ensure_waf(waf, ALLOW, NATS)
     assert waf.calls == ["update_web_acl"]
     actions = {rule["Name"]: rule["Action"] for rule in waf.acl_rules}
     assert actions["rate-per-ip"] == {"Block": {}}
@@ -495,7 +524,7 @@ def test_switching_to_block_is_applied_on_rerun(monkeypatch):
 
 
 def test_down_removes_the_acl_then_both_ip_sets():
-    waf = FakeWaf(ipsets={platform.WAF_IPSET: ALLOW, platform.WAF_NAT_IPSET: [NAT]}, acl_rules=[])
+    waf = FakeWaf(ipsets={platform.WAF_IPSET: ALLOW, platform.WAF_NAT_IPSET: NATS}, acl_rules=[])
     platform._delete_waf(waf)
     assert waf.ipsets == {} and waf.acl_rules is None
     # 웹 ACL 이 두 집합을 참조한다 — 집합을 먼저 지우면 WAF 가 거절한다
@@ -638,12 +667,18 @@ def test_remaining_ignores_only_finished_things():
     assert platform.ecs_remaining([], [_t("a", "STOPPED", "DEPROVISIONING")]) == ["태스크 a(DEPROVISIONING)"]
 
 
+_ONBOARDING_URL = "https://vigilantis-platform-onboarding-1.s3.ap-northeast-2.amazonaws.com/vigilantis-access.json"
+_TASK_ARN = "arn:aws:iam::1:role/vigilantis-platform"
+# api_container의 배포 공통 인자. 각 테스트는 여기에 바꿀 것만 덮는다
+_API_KW = {"cognito": {"pool_id": "ap-northeast-2_Abc", "client_id": "client-1"},
+           "onboarding_url": _ONBOARDING_URL, "platform_principal_arn": _TASK_ARN}
+
+
 def _api(dispatch: bool = False) -> dict:
     return platform.api_container(
-        "repo/api:t", region="ap-northeast-2", cors_origin="https://d.cloudfront.net",
-        access_role_arn="arn:aws:iam::1:role/vigilantis-access", collect_vpc_ids="vpc-1",
-        dispatch_enabled=dispatch,
-        secrets_arns={"DATABASE_URL": "arn:s1", "OPENAI_API_KEY": "arn:s2", "VIGILANTIS_ACCESS_EXTERNAL_ID": "arn:s3"})
+        "repo/api:t", region="ap-northeast-2", cors_origin="https://d.cloudfront.net", dispatch_enabled=dispatch,
+        secrets_arns={"DATABASE_URL": "arn:s1", "OPENAI_API_KEY": "arn:s2", "COGNITO_CLIENT_SECRET": "arn:s3"},
+        **_API_KW)
 
 
 def test_dispatch_is_off_unless_asked():
@@ -659,11 +694,25 @@ def test_api_container_carries_secrets_only_by_reference():
     env = {e["name"]: e["value"] for e in container["environment"]}
     # 정적 키·비밀 값이 평문 환경변수로 실리지 않는다
     for forbidden in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "DATABASE_URL", "OPENAI_API_KEY",
-                      "VIGILANTIS_ACCESS_EXTERNAL_ID", "AWS_ENDPOINT_URL"):
+                      "COGNITO_CLIENT_SECRET", "AWS_ENDPOINT_URL"):
         assert forbidden not in env
-    assert {s["name"] for s in container["secrets"]} == {
-        "DATABASE_URL", "OPENAI_API_KEY", "VIGILANTIS_ACCESS_EXTERNAL_ID"}
-    assert env["COLLECT_VPC_IDS"] == "vpc-1"
+    assert {s["name"] for s in container["secrets"]} == {"DATABASE_URL", "OPENAI_API_KEY", "COGNITO_CLIENT_SECRET"}
+
+
+def test_api_reaches_customers_only_through_tenant_roles():
+    """관제 범위 필터와 플랫폼 단위 접근 역할이 없다. 문맥 없는 AWS 호출은 플랫폼 계정으로 새지 않고 예외다."""
+    env = {e["name"]: e["value"] for e in _api()["environment"]}
+    assert env["TENANT_CONTEXT_REQUIRED"] == "true"
+    for gone in ("COLLECT_VPC_IDS", "VIGILANTIS_ACCESS_ROLE_ARN", "VIGILANTIS_ACCESS_EXTERNAL_ID"):
+        assert gone not in env
+
+
+def test_api_gets_login_and_onboarding_settings():
+    env = {e["name"]: e["value"] for e in _api()["environment"]}
+    assert (env["COGNITO_REGION"], env["COGNITO_USER_POOL_ID"], env["COGNITO_CLIENT_ID"]) == (
+        "ap-northeast-2", "ap-northeast-2_Abc", "client-1")
+    assert env["TENANT_ONBOARDING_TEMPLATE_URL"] == _ONBOARDING_URL
+    assert env["PLATFORM_PRINCIPAL_ARN"] == _TASK_ARN
     assert env["LOG_FILE_ENABLED"] == "false"
     assert env["CORS_ALLOW_ORIGINS"] == "https://d.cloudfront.net"
 
@@ -692,9 +741,6 @@ def _client_error(code: str, operation: str) -> ClientError:
 
 
 _PLATFORM_TAGS = [{"Key": platform.TAG_KEY, "Value": platform.TAG_VALUE}]
-_SMOKE_POLICY = f"arn:aws:iam::{ACCOUNT}:policy/{platform.SMOKE_POLICY_NAME}"
-_SMOKE_COST_POLICY = f"arn:aws:iam::{ACCOUNT}:policy/{platform.SMOKE_COST_POLICY_NAME}"
-_SMOKE_POLICIES = [_SMOKE_POLICY, _SMOKE_COST_POLICY]
 
 
 class FakeIam:
@@ -756,15 +802,10 @@ class FakeIam:
 
 
 class RecordingEc2:
-    """describe_vpcs만 답한다 — 그 밖의 호출은 기록만 하고 AttributeError로 멈춘다."""
+    """어떤 호출도 답하지 않는다. 기록만 하고 AttributeError로 멈춘다."""
 
-    def __init__(self, smoke_vpc=None):
-        self.smoke_vpc = smoke_vpc
+    def __init__(self):
         self.calls: list[str] = []
-
-    def describe_vpcs(self, Filters):
-        self.calls.append("describe_vpcs")
-        return {"Vpcs": [{"VpcId": self.smoke_vpc}] if self.smoke_vpc else []}
 
     def __getattr__(self, name):
         self.calls.append(name)
@@ -772,39 +813,32 @@ class RecordingEc2:
 
 
 def test_existing_role_without_platform_tag_is_not_overwritten():
-    iam = FakeIam(roles={platform.ROLE_ACCESS: [{"Key": "owner", "Value": "someone-else"}]})
+    iam = FakeIam(roles={platform.ROLE_TASK: [{"Key": "owner", "Value": "someone-else"}]})
     with pytest.raises(SystemExit, match="플랫폼 태그"):
-        platform._ensure_role(iam, platform.ROLE_ACCESS, {"Statement": []}, "d")
+        platform._ensure_role(iam, platform.ROLE_TASK, {"Statement": []}, "d")
     assert iam.calls == []  # 신뢰 정책을 덮어쓰지 않았다
 
 
 def test_existing_platform_role_gets_its_trust_policy_refreshed():
-    iam = FakeIam(roles={platform.ROLE_ACCESS: _PLATFORM_TAGS})
-    arn = platform._ensure_role(iam, platform.ROLE_ACCESS, {"Statement": []}, "d")
-    assert arn.endswith(f":role/{platform.ROLE_ACCESS}")
-    assert iam.calls == [("update_assume_role_policy", platform.ROLE_ACCESS)]
+    iam = FakeIam(roles={platform.ROLE_TASK: _PLATFORM_TAGS})
+    arn = platform._ensure_role(iam, platform.ROLE_TASK, {"Statement": []}, "d")
+    assert arn.endswith(f":role/{platform.ROLE_TASK}")
+    assert iam.calls == [("update_assume_role_policy", platform.ROLE_TASK)]
 
 
 def test_down_deletes_only_platform_tagged_roles():
-    iam = FakeIam(roles={platform.ROLE_ACCESS: [], platform.ROLE_TASK: _PLATFORM_TAGS})
-    platform._delete_roles(iam, ACCOUNT)
-    assert set(iam.roles) == {platform.ROLE_ACCESS}  # 태그 없는 같은 이름 역할은 남는다
+    iam = FakeIam(roles={platform.ROLE_EXEC: [], platform.ROLE_TASK: _PLATFORM_TAGS})
+    platform._delete_roles(iam)
+    assert set(iam.roles) == {platform.ROLE_EXEC}  # 태그 없는 같은 이름 역할은 남는다
     assert iam.calls and all(role == platform.ROLE_TASK for _, role in iam.calls)
 
 
-def test_up_stops_before_creating_anything_when_the_smoke_policy_is_missing():
-    ec2 = RecordingEc2(smoke_vpc="vpc-smoke")
-    with pytest.raises(SystemExit, match=platform.SMOKE_POLICY_NAME):
-        platform.up({"iam": FakeIam(), "ec2": ec2}, ACCOUNT, "ap-northeast-2", ["203.0.113.7/32"])
-    assert ec2.calls == []  # VPC·NAT·RDS 어느 것도 만들지 않았다
-
-
-def test_up_stops_before_creating_anything_when_the_smoke_vpc_is_missing():
-    ec2 = RecordingEc2(smoke_vpc=None)
-    with pytest.raises(SystemExit, match="스모크 VPC"):
-        platform.up({"iam": FakeIam(policies=_SMOKE_POLICIES), "ec2": ec2}, ACCOUNT, "ap-northeast-2",
-                    ["203.0.113.7/32"])
-    assert ec2.calls == ["describe_vpcs"]
+def test_roles_carry_the_login_pool_and_drop_the_old_task_policy():
+    iam = FakeIam()
+    platform._ensure_roles(iam, ["arn:secret"], POOL_ARN)
+    assert set(iam.roles) == {platform.ROLE_EXEC, platform.ROLE_TASK}  # 고객 계정 역할은 만들지 않는다
+    assert iam.inline[(platform.ROLE_TASK, platform.TASK_POLICY)] == platform.task_role_policy(POOL_ARN)
+    assert ("delete_role_policy", platform.ROLE_TASK) in iam.calls  # 5차 개정 전 정책 이름을 걷는다
 
 
 _DOMAIN = "vigilantis.example"
@@ -849,29 +883,89 @@ _ORIGIN_CERT = {"DomainName": f"origin.{_DOMAIN}",
                 "CertificateArn": "arn:aws:acm:ap-northeast-2:123456789012:certificate/o"}
 
 
-@pytest.mark.parametrize("certs, zones, origin_certs, missing", [
-    ([], [_ZONE], [_ORIGIN_CERT], r"us-east-1 ACM 인증서\(ISSUED\) 없음"),
-    ([_CERT], [], [_ORIGIN_CERT], "호스팅 영역 없음"),
-    ([_CERT], [{**_ZONE, "Config": {"PrivateZone": True}}], [_ORIGIN_CERT], "호스팅 영역 없음"),  # 비공개 영역은 별칭을 못 단다
-    # CloudFront 인증서(us-east-1)만으로는 ALB에 HTTPS를 걸 수 없다 — 서울 리전 인증서가 따로 있어야 한다
-    ([_CERT], [_ZONE], [], r"ALB용 ACM 인증서\(origin\.vigilantis\.example · 이 리전 · ISSUED\) 없음"),
+@pytest.mark.parametrize("certs, zones, missing", [
+    ([], [_ZONE], r"us-east-1 ACM 인증서\(ISSUED\) 없음"),
+    ([_CERT], [], "호스팅 영역 없음"),
+    ([_CERT], [{**_ZONE, "Config": {"PrivateZone": True}}], "호스팅 영역 없음"),  # 비공개 영역은 별칭을 못 단다
 ])
-def test_up_stops_before_creating_anything_when_the_domain_is_not_ready(certs, zones, origin_certs, missing):
-    """인증서 둘·공개 호스팅 영역이 없으면 VPC·RDS·WAF 어느 것도 바꾸기 전에 멈춘다."""
-    ec2, r53 = RecordingEc2(smoke_vpc="vpc-smoke"), FakeR53(zones)
-    c = {"iam": FakeIam(policies=_SMOKE_POLICIES), "ec2": ec2, "acm": FakeAcm(certs), "r53": r53,
-         "acm_origin": FakeAcm(origin_certs)}
+def test_up_stops_before_creating_anything_when_the_domain_is_not_ready(certs, zones, missing):
+    """CloudFront 인증서·공개 호스팅 영역이 없으면 VPC·RDS·WAF 어느 것도 바꾸기 전에 멈춘다."""
+    ec2, r53 = RecordingEc2(), FakeR53(zones)
+    c = {"iam": FakeIam(), "ec2": ec2, "acm": FakeAcm(certs), "r53": r53, "acm_origin": FakeAcm([_ORIGIN_CERT])}
     with pytest.raises(SystemExit, match=missing):
         platform.up(c, ACCOUNT, "ap-northeast-2", ["203.0.113.7/32"], _DOMAIN)
-    assert ec2.calls == ["describe_vpcs"]  # 스모크 VPC 조회 말고는 아무것도 부르지 않았다
-    assert r53.calls == []  # c에 sm·rds·waf·cf가 없으니 그쪽 호출은 KeyError로 드러난다
+    assert ec2.calls == [] and r53.calls == []  # c에 sm·rds·waf·cf가 없으니 그쪽 호출은 KeyError로 드러난다
+
+
+def test_missing_origin_certificate_does_not_stop_the_preview():
+    """ALB용 서울 리전 인증서는 up --yes가 직접 받는다. 없다고 멈추지 않고 None으로 알린다."""
+    c = {"acm": FakeAcm([_CERT]), "r53": FakeR53([_ZONE]), "acm_origin": FakeAcm([])}
+    assert platform._require_custom_domain(c, _DOMAIN) == (_CERT["CertificateArn"], "Z1", None)
+
+
+class IssuingAcm:
+    """origin 인증서 요청 · 검증 레코드 · 발급 대기를 흉내 낸다. 검증 레코드는 두 번째 조회에야 나온다."""
+
+    def __init__(self, pending=()):
+        self.pending = list(pending)
+        self.calls: list[str] = []
+        self._described = 0
+
+    def get_paginator(self, name):
+        acm = self
+
+        class _P:
+            def paginate(self, CertificateStatuses):
+                rows = [] if CertificateStatuses == ["ISSUED"] else acm.pending
+                return iter([{"CertificateSummaryList": rows}])
+        return _P()
+
+    def request_certificate(self, DomainName, ValidationMethod, Tags):
+        self.calls.append(f"request:{DomainName}:{ValidationMethod}")
+        return {"CertificateArn": "arn:new"}
+
+    def describe_certificate(self, CertificateArn):
+        self._described += 1
+        record = {"Name": "_x.origin.vigilantis.example.", "Type": "CNAME", "Value": "_y.acm-validations.aws."}
+        return {"Certificate": {"DomainValidationOptions": [{"ResourceRecord": record} if self._described > 1 else {}]}}
+
+    def get_waiter(self, name):
+        acm = self
+
+        class _W:
+            def wait(self, CertificateArn, **_):
+                acm.calls.append(f"{name}:{CertificateArn}")
+        return _W()
+
+
+class RecordingR53:
+    def __init__(self):
+        self.changes: list[dict] = []
+
+    def change_resource_record_sets(self, HostedZoneId, ChangeBatch):
+        self.changes.append({"zone": HostedZoneId, **ChangeBatch["Changes"][0]})
+
+
+def test_origin_certificate_is_requested_validated_and_awaited(monkeypatch):
+    monkeypatch.setattr(platform.time, "sleep", lambda _: None)
+    acm, r53 = IssuingAcm(), RecordingR53()
+    assert platform._ensure_origin_certificate(acm, r53, "Z1", _DOMAIN) == "arn:new"
+    assert acm.calls == [f"request:origin.{_DOMAIN}:DNS", "certificate_validated:arn:new"]
+    (change,) = r53.changes
+    assert (change["zone"], change["Action"], change["ResourceRecordSet"]["Type"]) == ("Z1", "UPSERT", "CNAME")
+
+
+def test_pending_origin_certificate_is_reused_not_requested_again(monkeypatch):
+    monkeypatch.setattr(platform.time, "sleep", lambda _: None)
+    acm = IssuingAcm(pending=[{**_ORIGIN_CERT, "CertificateArn": "arn:pending"}])
+    assert platform._ensure_origin_certificate(acm, RecordingR53(), "Z1", _DOMAIN) == "arn:pending"
+    assert not [c for c in acm.calls if c.startswith("request:")]
 
 
 def test_up_preview_also_checks_the_domain(monkeypatch):
     """--yes 없는 미리 보기에서 먼저 알려야 --yes 실행이 중간에 멈추지 않는다."""
     _fake_main(monkeypatch, ["up", "--account", ACCOUNT, "--allow-cidr", "203.0.113.7/32", "--domain", _DOMAIN],
-               {"iam": FakeIam(policies=_SMOKE_POLICIES), "ec2": RecordingEc2(smoke_vpc="vpc-smoke"),
-                "acm": FakeAcm(), "route53": FakeR53([_ZONE])})
+               {"iam": FakeIam(), "ec2": RecordingEc2(), "acm": FakeAcm(), "route53": FakeR53([_ZONE])})
     with pytest.raises(SystemExit, match=r"인증서\(ISSUED\) 없음"):
         platform.main()
 
@@ -883,16 +977,8 @@ def _fake_main(monkeypatch, argv: list[str], fakes: dict) -> None:
     monkeypatch.setattr(sys, "argv", ["provision_platform_aws.py", *argv])
 
 
-def test_up_preview_also_checks_the_smoke_environment(monkeypatch):
-    """--yes 없는 미리 보기에서 먼저 알려야 --yes 실행이 중간에 멈추지 않는다."""
-    _fake_main(monkeypatch, ["up", "--account", ACCOUNT, "--allow-cidr", "203.0.113.7/32"],
-               {"iam": FakeIam(), "ec2": RecordingEc2(smoke_vpc="vpc-smoke")})
-    with pytest.raises(SystemExit, match=platform.SMOKE_POLICY_NAME):
-        platform.main()
-
-
 def test_up_rejects_a_wide_cidr_before_touching_aws(monkeypatch):
-    iam = FakeIam(policies=_SMOKE_POLICIES)
+    iam = FakeIam()
     _fake_main(monkeypatch, ["up", "--account", ACCOUNT, "--allow-cidr", "0.0.0.0/1", "--yes"], {"iam": iam})
     with pytest.raises(SystemExit, match="넓은 범위"):
         platform.main()
@@ -1215,7 +1301,8 @@ def test_verify_accepts_equivalent_shapes_and_rejects_mismatches(tmp_path):
 
 def _patch_deploy(monkeypatch):
     monkeypatch.setattr(platform, "_find_vpc", lambda ec2: "vpc")
-    monkeypatch.setattr(platform, "_find_smoke_vpc", lambda ec2: "vpc-s")
+    monkeypatch.setattr(platform, "_find_user_pool", lambda cidp: {"id": "pool-1", "arn": "arn:pool"})
+    monkeypatch.setattr(platform, "_find_app_client", lambda cidp, pool_id: "client-1")
     monkeypatch.setattr(platform, "_find_distribution", lambda cf: {"DomainName": "d.net"})
     monkeypatch.setattr(platform, "_secret_value", lambda sm, n: "x")
     monkeypatch.setattr(platform, "_find_subnets", lambda ec2, v: {})
@@ -1230,7 +1317,7 @@ def test_deploy_with_mismatched_policy_stops_before_registration_and_never_write
     plan = platform.load_notification_config(_cfg(tmp_path), ACCOUNT, REGION)
     iam = PolicyIam({}, roles=_both_roles())
     ecs = FakeEcs()
-    c = {"ec2": None, "cf": None, "sm": None, "ecr": None, "iam": iam, "ecs": ecs}
+    c = {"ec2": None, "cf": None, "sm": None, "ecr": None, "cidp": None, "iam": iam, "ecs": ecs}
     with pytest.raises(SystemExit, match="notification-iam"):
         platform.deploy(c, ACCOUNT, REGION, "t", False, plan)
     assert ecs.writes == [] and iam.puts == [] and iam.calls == []
@@ -1241,7 +1328,7 @@ def test_deploy_registration_failure_leaves_iam_unchanged(tmp_path, monkeypatch)
     plan = platform.load_notification_config(_cfg(tmp_path), ACCOUNT, REGION)
     iam = PolicyIam(_exact_docs(plan), roles=_both_roles())
     ecs = FakeEcs()
-    c = {"ec2": None, "cf": None, "sm": None, "ecr": None, "iam": iam, "ecs": ecs}
+    c = {"ec2": None, "cf": None, "sm": None, "ecr": None, "cidp": None, "iam": iam, "ecs": ecs}
     with pytest.raises(RuntimeError):
         platform.deploy(c, ACCOUNT, REGION, "t", False, plan)
     assert ecs.writes == ["register_task_definition"] and iam.puts == [] and iam.calls == []
@@ -1277,8 +1364,8 @@ def test_config_needs_explicit_enabled_true(tmp_path):
 def test_enabled_container_carries_refs_routes_and_settings(tmp_path):
     from notifications.routing import RouteRegistry
     plan = platform.load_notification_config(_cfg(tmp_path), ACCOUNT, REGION)
-    c = platform.api_container("i", region=REGION, cors_origin="https://x", access_role_arn="r", collect_vpc_ids="v",
-                               dispatch_enabled=False, secrets_arns={"DATABASE_URL": "a"}, notification=plan)
+    c = platform.api_container("i", region=REGION, cors_origin="https://x", dispatch_enabled=False,
+                               secrets_arns={"DATABASE_URL": "a"}, notification=plan, **_API_KW)
     env = {e["name"]: e["value"] for e in c["environment"]}
     assert env["NOTIFICATION_ENABLED"] == "true"
     assert env["NOTIFICATION_PUBLIC_BASE_URL"] == "https://dash.example.com"
@@ -1355,9 +1442,8 @@ def test_api_container_rejects_case_variant_secret_names(tmp_path):
     plan = platform.load_notification_config(_cfg(tmp_path), ACCOUNT, REGION)
     plan["secret_arns"] = {"database_url": SECRET}
     with pytest.raises(ValueError):
-        platform.api_container("i", region=REGION, cors_origin="https://x", access_role_arn="r",
-                               collect_vpc_ids="v", dispatch_enabled=False,
-                               secrets_arns={"DATABASE_URL": "a"}, notification=plan)
+        platform.api_container("i", region=REGION, cors_origin="https://x", dispatch_enabled=False,
+                               secrets_arns={"DATABASE_URL": "a"}, notification=plan, **_API_KW)
 
 
 @pytest.mark.parametrize("settings", [
@@ -1522,7 +1608,7 @@ def test_secret_pattern_covers_managed_secrets_with_their_random_suffix(arn):
     SECRET,                                                                            # 레거시 Slack 비밀
     f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:{platform.SECRET_OPENAI}-AbCdEf",
     f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:{platform.SECRET_DATABASE_URL}-AbCdEf",
-    f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:{platform.SECRET_EXTERNAL_ID}-AbCdEf",
+    f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:{platform.SECRET_COGNITO_CLIENT}-AbCdEf",
     f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:vigilantis/t7-AbCdEf",           # 접두 끝 슬래시 없음
     f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:x/{_SECRET_PREFIX}{_T7_TENANT}-AbCdEf",
     f"arn:aws:secretsmanager:{REGION}:999900001111:secret:{_SECRET_PREFIX}{_T7_TENANT}-AbCdEf",
@@ -1550,8 +1636,8 @@ def test_tenant_settings_plan_can_coexist_with_legacy_routes(tmp_path):
 
 def test_tenant_settings_adds_no_env_and_no_secret_reference_to_the_container(tmp_path):
     plan = platform.load_notification_config(_t7_cfg(tmp_path), ACCOUNT, REGION)
-    c = platform.api_container("i", region=REGION, cors_origin="https://x", access_role_arn="r", collect_vpc_ids="v",
-                               dispatch_enabled=False, secrets_arns={"DATABASE_URL": "a"}, notification=plan)
+    c = platform.api_container("i", region=REGION, cors_origin="https://x", dispatch_enabled=False,
+                               secrets_arns={"DATABASE_URL": "a"}, notification=plan, **_API_KW)
     env = {e["name"]: e["value"] for e in c["environment"]}
     assert env["NOTIFICATION_ENABLED"] == "true" and env["NOTIFICATION_ROUTES_JSON"] == '{"routes":[]}'
     assert [s["name"] for s in c["secrets"]] == ["DATABASE_URL"]
@@ -1623,7 +1709,7 @@ def test_deploy_with_tenant_settings_reads_iam_only_and_stops_on_mismatch(tmp_pa
     _patch_deploy(monkeypatch)
     plan = platform.load_notification_config(_t7_cfg(tmp_path), ACCOUNT, REGION)
     iam, ecs = PolicyIam({}, roles=_both_roles()), FakeEcs()
-    c = {"ec2": None, "cf": None, "sm": None, "ecr": None, "iam": iam, "ecs": ecs}
+    c = {"ec2": None, "cf": None, "sm": None, "ecr": None, "cidp": None, "iam": iam, "ecs": ecs}
     with pytest.raises(SystemExit, match="notification-iam"):
         platform.deploy(c, ACCOUNT, REGION, "t", False, plan)
     assert ecs.writes == [] and iam.puts == [] and iam.deletes == []
@@ -1651,13 +1737,13 @@ def test_iam_with_yes_and_tenant_settings_applies_only_the_dedicated_policies(tm
     platform.main()
     assert [(r, p) for r, p, _ in iam.puts] == [(platform.ROLE_TASK, platform.SETTINGS_POLICY_TASK)]
     assert iam.puts[0][2] == platform.settings_task_policy(_T7_ARNS)
-    assert ("assume-access-role" not in {p for _, p, _ in iam.puts}
+    assert (platform.TASK_POLICY not in {p for _, p, _ in iam.puts}
             and "read-platform-secrets" not in {p for _, p, _ in iam.puts})
 
 
 def test_down_removes_the_settings_policy_before_deleting_the_task_role():
     iam = NotifIam(roles={platform.ROLE_TASK: _PLATFORM_TAGS})
-    platform._delete_roles(iam, ACCOUNT)
+    platform._delete_roles(iam)
     assert (platform.ROLE_TASK, platform.SETTINGS_POLICY_TASK) in iam.deletes
     assert platform.ROLE_TASK not in iam.roles
 
@@ -1680,6 +1766,34 @@ def test_existing_db_with_one_day_of_backups_is_raised_to_a_week():
     assert events == [("modify_db_instance", platform.DB_BACKUP_DAYS)]
     # 보존 기간 변경은 옵션 없이도 바로 적용된다 — ApplyImmediately는 대기 중인 다른 변경까지 끌고 온다
     assert "ApplyImmediately" not in rds.modified
+
+
+# ⑨ 운영 장치: DB Multi-AZ(ADR-0010 5차 개정) --------------------------------------
+def test_new_db_is_multi_az():
+    events: list = []
+    rds = FakeRds(events)
+    platform._ensure_db(rds, FakeSm(events), _SUBNETS, "sg-db")
+    assert rds.created["MultiAZ"] is True
+
+
+def test_existing_single_az_db_is_switched_to_multi_az():
+    events: list = []
+    rds = FakeRds(events, exists=True)
+    rds.db.update(DBInstanceStatus="available", BackupRetentionPeriod=platform.DB_BACKUP_DAYS, MultiAZ=False,
+                  Endpoint={"Address": FakeRds.HOST})
+    sm = FakeSm(events, {platform.SECRET_DATABASE_URL: platform.database_url("pw", FakeRds.HOST)})
+    platform._ensure_db(rds, sm, _SUBNETS, "sg-db")
+    assert rds.modified == {"DBInstanceIdentifier": platform.DB_INSTANCE, "MultiAZ": True}
+
+
+def test_multi_az_db_with_a_week_of_backups_is_left_alone():
+    events: list = []
+    rds = FakeRds(events, exists=True)
+    rds.db.update(DBInstanceStatus="available", BackupRetentionPeriod=platform.DB_BACKUP_DAYS, MultiAZ=True,
+                  Endpoint={"Address": FakeRds.HOST})
+    sm = FakeSm(events, {platform.SECRET_DATABASE_URL: platform.database_url("pw", FakeRds.HOST)})
+    platform._ensure_db(rds, sm, _SUBNETS, "sg-db")
+    assert events == []
 
 
 # ⑨ 운영 장치 — 오류 알람 ----------------------------------------------------------
@@ -1803,124 +1917,272 @@ def test_down_deletes_only_platform_tagged_alarms_and_topic():
 
 
 def test_up_stops_before_creating_anything_when_a_same_named_alarm_is_not_ours():
-    ec2 = RecordingEc2(smoke_vpc="vpc-smoke")
-    c = {"iam": FakeIam(policies=_SMOKE_POLICIES), "ec2": ec2, "cw": FakeCw({_API_DOWN: []}), "sns": FakeSns()}
+    ec2 = RecordingEc2()
+    c = {"iam": FakeIam(), "ec2": ec2, "cw": FakeCw({_API_DOWN: []}), "sns": FakeSns()}
     with pytest.raises(SystemExit, match=_API_DOWN):
         platform.up(c, ACCOUNT, "ap-northeast-2", ["203.0.113.7/32"])
-    assert ec2.calls == ["describe_vpcs"]  # VPC·NAT·RDS 어느 것도 만들지 않았다
+    assert ec2.calls == []  # VPC·NAT·RDS 어느 것도 만들지 않았다
 
 
-# ⑧ 계정 분리(T-8) ----------------------------------------------------------------
-CUSTOMER = "444455556666"
-_CUSTOMER_SMOKE_POLICY = f"arn:aws:iam::{CUSTOMER}:policy/{platform.SMOKE_POLICY_NAME}"
-_CUSTOMER_SMOKE_COST_POLICY = f"arn:aws:iam::{CUSTOMER}:policy/{platform.SMOKE_COST_POLICY_NAME}"
-_CUSTOMER_TAG = [{"Key": platform.CUSTOMER_TAG_KEY, "Value": ACCOUNT}]
+# ② 네트워크: AZ별 NAT · AZ별 프라이빗 경로(ADR-0010 5차 개정) ------------------------
+class NetEc2:
+    """IGW · 경로 · NAT · 탄력적 IP만 흉내 낸다. 필터는 이름(tag:Name) · VPC · 서브넷 연결만 본다."""
+
+    def __init__(self, nats=None, tables=None):
+        self.nats = list(nats or [])
+        self.tables = list(tables or [])
+        self.addresses: list[dict] = []
+        self.calls: list[tuple] = []
+        self._n = 0
+
+    def _id(self, prefix):
+        self._n += 1
+        return f"{prefix}-{self._n}"
+
+    @staticmethod
+    def _name(tags):
+        return next((t["Value"] for t in tags if t["Key"] == "Name"), None)
+
+    def describe_internet_gateways(self, Filters):
+        return {"InternetGateways": [{"InternetGatewayId": "igw-1"}]}
+
+    def describe_route_tables(self, Filters):
+        by = {f["Name"]: f["Values"][0] for f in Filters}
+        rows = self.tables
+        if "tag:Name" in by:
+            rows = [t for t in rows if self._name(t["Tags"]) == by["tag:Name"]]
+        if "association.subnet-id" in by:
+            rows = [t for t in rows if any(a.get("SubnetId") == by["association.subnet-id"]
+                                           for a in t["Associations"])]
+        return {"RouteTables": [dict(t, Associations=list(t["Associations"])) for t in rows]}
+
+    def create_route_table(self, VpcId, TagSpecifications):
+        rt = {"RouteTableId": self._id("rtb"), "Tags": TagSpecifications[0]["Tags"], "Routes": [], "Associations": []}
+        self.tables.append(rt)
+        return {"RouteTable": rt}
+
+    def _table(self, rt_id):
+        return next(t for t in self.tables if t["RouteTableId"] == rt_id)
+
+    def create_route(self, RouteTableId, DestinationCidrBlock, **target):
+        self._table(RouteTableId)["Routes"].append({"DestinationCidrBlock": DestinationCidrBlock, **target})
+
+    def associate_route_table(self, RouteTableId, SubnetId):
+        if any(a.get("SubnetId") == SubnetId for t in self.tables for a in t["Associations"]):
+            raise _client_error("Resource.AlreadyAssociated", "AssociateRouteTable")
+        self._table(RouteTableId)["Associations"].append(
+            {"SubnetId": SubnetId, "RouteTableAssociationId": self._id("rtbassoc")})
+
+    def replace_route_table_association(self, AssociationId, RouteTableId):
+        self.calls.append(("replace_route_table_association", RouteTableId))
+        for t in self.tables:
+            for a in list(t["Associations"]):
+                if a["RouteTableAssociationId"] == AssociationId:
+                    t["Associations"].remove(a)
+                    self._table(RouteTableId)["Associations"].append(a)
+
+    def delete_route_table(self, RouteTableId):
+        self.calls.append(("delete_route_table", self._name(self._table(RouteTableId)["Tags"])))
+        self.tables = [t for t in self.tables if t["RouteTableId"] != RouteTableId]
+
+    def describe_addresses(self, Filters):
+        name = next(f["Values"][0] for f in Filters if f["Name"] == "tag:Name")
+        return {"Addresses": [a for a in self.addresses if a["Name"] == name]}
+
+    def allocate_address(self, Domain, TagSpecifications):
+        alloc = self._id("eipalloc")
+        self.addresses.append({"AllocationId": alloc, "Name": self._name(TagSpecifications[0]["Tags"])})
+        return {"AllocationId": alloc}
+
+    def create_nat_gateway(self, SubnetId, AllocationId, TagSpecifications):
+        nat = {"NatGatewayId": self._id("nat"), "SubnetId": SubnetId, "State": "available",
+               "NatGatewayAddresses": [{"PublicIp": f"198.51.100.{10 + len(self.nats)}"}]}
+        self.nats.append(nat)
+        self.calls.append(("create_nat_gateway", SubnetId))
+        return {"NatGateway": nat}
+
+    def describe_nat_gateways(self, Filters=None, NatGatewayIds=None):
+        rows = [n for n in self.nats if not NatGatewayIds or n["NatGatewayId"] in NatGatewayIds]
+        return {"NatGateways": rows}
+
+    def get_waiter(self, name):
+        class _Waiter:
+            def wait(self, **kwargs):
+                pass
+        return _Waiter()
 
 
-def test_split_accounts_put_only_the_access_role_in_the_customer_account():
-    plat, cust = FakeIam(), FakeIam(account=CUSTOMER)
-    roles = platform._ensure_roles(plat, ACCOUNT, ["arn:secret"], "ext-1", {"iam": cust, "account": CUSTOMER})
-
-    assert set(plat.roles) == {platform.ROLE_EXEC, platform.ROLE_TASK}
-    assert set(cust.roles) == {platform.ROLE_ACCESS}
-    assert roles["access"] == f"arn:aws:iam::{CUSTOMER}:role/{platform.ROLE_ACCESS}"
-    # 태스크 역할은 고객 계정의 접근 역할 하나로만 갈아탄다
-    (allowed,) = plat.inline[(platform.ROLE_TASK, "assume-access-role")]["Statement"]
-    assert allowed["Resource"] == f"arn:aws:iam::{CUSTOMER}:role/{platform.ROLE_ACCESS}"
-    # 접근 역할은 플랫폼 계정의 태스크 역할만, ExternalId가 맞을 때만 받는다
-    (trusted,) = cust.trust[platform.ROLE_ACCESS]["Statement"]
-    assert trusted["Principal"] == {"AWS": f"arn:aws:iam::{ACCOUNT}:role/{platform.ROLE_TASK}"}
-    assert trusted["Condition"] == {"StringEquals": {"sts:ExternalId": "ext-1"}}
-    # 권한은 고객 계정의 스모크 거울 정책과 비용 정책이고, 고객 태그가 이 플랫폼 계정을 가리킨다
-    assert cust.attached == [
-        (platform.ROLE_ACCESS, _CUSTOMER_SMOKE_POLICY),
-        (platform.ROLE_ACCESS, _CUSTOMER_SMOKE_COST_POLICY),
-    ]
-    assert cust.roles[platform.ROLE_ACCESS]["Tags"] == _CUSTOMER_TAG
+_NET_SUBNETS = {f"{platform.PREFIX}-{tier}-{az}": f"subnet-{tier}-{az}"
+                for tier in ("public", "private") for az in platform.PRIVATE_SUBNETS}
 
 
-def test_old_platform_access_role_is_taken_over_and_survives_the_old_platform_down():
-    cust = FakeIam(account=CUSTOMER, roles={platform.ROLE_ACCESS: _PLATFORM_TAGS})
-    trust = platform.access_trust_policy(ACCOUNT, "ext-1")
-    platform._ensure_customer_access_role(cust, ACCOUNT, trust)
-
-    # 고객 태그를 먼저 단다 — 신뢰 정책을 바꾼 뒤 끊겨도 다음 실행이 이 역할을 알아본다
-    assert [name for name, _ in cust.calls] == ["tag_role", "update_assume_role_policy", "untag_role"]
-    assert cust.trust[platform.ROLE_ACCESS] == trust
-    assert cust.roles[platform.ROLE_ACCESS]["Tags"] == _CUSTOMER_TAG
-    # 학원 계정에서 옛 플랫폼을 단일 계정 모드로 down해도 넘겨받은 역할은 남는다
-    platform._delete_roles(cust, CUSTOMER)
-    assert platform.ROLE_ACCESS in cust.roles
+def _private_routes(ec2):
+    """프라이빗 서브넷 → 그 서브넷 경로의 NAT가 놓인 공개 서브넷."""
+    nat_subnet = {n["NatGatewayId"]: n["SubnetId"] for n in ec2.nats}
+    return {a["SubnetId"]: nat_subnet[r["NatGatewayId"]]
+            for t in ec2.tables for a in t["Associations"] for r in t["Routes"] if "NatGatewayId" in r
+            if a["SubnetId"].startswith("subnet-private")}
 
 
-def test_interrupted_takeover_is_finished_on_rerun():
-    cust = FakeIam(account=CUSTOMER, roles={platform.ROLE_ACCESS: _PLATFORM_TAGS + _CUSTOMER_TAG})
-    platform._ensure_customer_access_role(cust, ACCOUNT, {"Statement": []})
-    assert [name for name, _ in cust.calls] == ["update_assume_role_policy", "untag_role"]
-    assert cust.roles[platform.ROLE_ACCESS]["Tags"] == _CUSTOMER_TAG
+def test_new_network_gets_one_nat_and_one_private_route_per_az():
+    ec2 = NetEc2()
+    ips = platform._ensure_network(ec2, "vpc-1", _NET_SUBNETS)
+    assert [c for c in ec2.calls if c[0] == "create_nat_gateway"] == [
+        ("create_nat_gateway", f"subnet-public-{az}") for az in platform.PRIVATE_SUBNETS]
+    # 각 AZ의 프라이빗 서브넷은 같은 AZ의 NAT로 나간다. 한 AZ가 죽어도 다른 AZ는 밖으로 나간다
+    assert _private_routes(ec2) == {f"subnet-private-{az}": f"subnet-public-{az}" for az in platform.PRIVATE_SUBNETS}
+    assert len(ips) == len(set(ips)) == len(platform.PRIVATE_SUBNETS)  # WAF에 NAT IP 전부가 들어간다
 
 
-def test_old_platform_down_spares_a_half_taken_over_access_role():
-    """넘겨받기가 플랫폼 태그를 떼기 전에 끊기면 두 태그가 함께 남는다 — 이미 새 플랫폼이 쓰는 역할이다."""
-    cust = FakeIam(account=CUSTOMER, roles={platform.ROLE_ACCESS: _PLATFORM_TAGS + _CUSTOMER_TAG})
-    platform._delete_roles(cust, CUSTOMER)
-    assert platform.ROLE_ACCESS in cust.roles
-    assert cust.calls == []  # 정책 분리도 하지 않았다
+def test_second_network_run_changes_nothing():
+    ec2 = NetEc2()
+    first = platform._ensure_network(ec2, "vpc-1", _NET_SUBNETS)
+    ec2.calls.clear()
+    assert platform._ensure_network(ec2, "vpc-1", _NET_SUBNETS) == first
+    assert ec2.calls == []
 
 
-@pytest.mark.parametrize("tags, reason", [
-    ([{"Key": "owner", "Value": "someone-else"}], "고객 태그"),
-    ([{"Key": platform.CUSTOMER_TAG_KEY, "Value": "999999999999"}], "999999999999"),
-])
-def test_customer_role_of_someone_else_is_not_overwritten(tags, reason):
-    cust = FakeIam(account=CUSTOMER, roles={platform.ROLE_ACCESS: tags})
-    with pytest.raises(SystemExit, match=reason):
-        platform._ensure_customer_access_role(cust, ACCOUNT, {"Statement": []})
-    assert cust.calls == []
+def test_single_nat_network_is_moved_to_per_az_routes():
+    """5차 개정 전 모양: AZ a의 NAT 하나와 두 프라이빗 서브넷이 함께 묶인 공용 경로."""
+    legacy_nat = {"NatGatewayId": "nat-old", "SubnetId": "subnet-public-a", "State": "available",
+                  "NatGatewayAddresses": [{"PublicIp": "198.51.100.9"}]}
+    legacy = {"RouteTableId": "rtb-old", "Tags": platform._tags(platform.LEGACY_PRIVATE_TABLE),
+              "Routes": [{"DestinationCidrBlock": "0.0.0.0/0", "NatGatewayId": "nat-old"}],
+              "Associations": [{"SubnetId": f"subnet-private-{az}", "RouteTableAssociationId": f"assoc-{az}"}
+                               for az in platform.PRIVATE_SUBNETS]}
+    public = {"RouteTableId": "rtb-pub", "Tags": platform._tags(f"{platform.PREFIX}-public"),
+              "Routes": [{"DestinationCidrBlock": "0.0.0.0/0", "GatewayId": "igw-1"}],
+              "Associations": [{"SubnetId": f"subnet-public-{az}", "RouteTableAssociationId": f"pub-{az}"}
+                               for az in platform.PRIVATE_SUBNETS]}
+    ec2 = NetEc2(nats=[legacy_nat], tables=[public, legacy])
+    ips = platform._ensure_network(ec2, "vpc-1", _NET_SUBNETS)
+    # AZ a의 옛 NAT는 그대로 쓰고(공인 IP가 바뀌지 않는다) AZ c에만 새로 만든다
+    assert [c for c in ec2.calls if c[0] == "create_nat_gateway"] == [("create_nat_gateway", "subnet-public-c")]
+    assert ips[0] == "198.51.100.9"
+    assert _private_routes(ec2) == {f"subnet-private-{az}": f"subnet-public-{az}" for az in platform.PRIVATE_SUBNETS}
+    # 서브넷을 다른 경로로 옮겼다. 새로 묶으려 했으면 AlreadyAssociated로 멈췄다
+    assert sum(c[0] == "replace_route_table_association" for c in ec2.calls) == len(platform.PRIVATE_SUBNETS)
+    assert ("delete_route_table", platform.LEGACY_PRIVATE_TABLE) in ec2.calls
 
 
-@pytest.mark.parametrize("customer_policies, customer_vpc, missing", [
-    ([], "vpc-smoke", platform.SMOKE_POLICY_NAME),
-    ([_CUSTOMER_SMOKE_POLICY], "vpc-smoke", platform.SMOKE_COST_POLICY_NAME),
-    ([_CUSTOMER_SMOKE_POLICY, _CUSTOMER_SMOKE_COST_POLICY], None, "스모크 VPC"),
-])
-def test_split_up_looks_for_the_smoke_environment_in_the_customer_account(customer_policies, customer_vpc, missing):
-    """플랫폼 계정에 같은 이름의 정책·VPC가 있어도 그것으로 통과하지 않는다."""
-    plat_ec2, cust_ec2 = RecordingEc2(smoke_vpc="vpc-in-platform"), RecordingEc2(smoke_vpc=customer_vpc)
-    c = {"iam": FakeIam(policies=_SMOKE_POLICIES), "ec2": plat_ec2,
-         "customer": {"iam": FakeIam(account=CUSTOMER, policies=customer_policies), "ec2": cust_ec2,
-                      "account": CUSTOMER}}
-    with pytest.raises(SystemExit, match=missing):
-        platform.up(c, ACCOUNT, "ap-northeast-2", ["203.0.113.7/32"])
-    assert plat_ec2.calls == []  # 플랫폼 계정에는 아무것도 묻거나 만들지 않았다
+def test_down_releases_old_and_per_az_nat_addresses():
+    assert platform.nat_eip_names() == [f"{platform.PREFIX}-nat"] + [
+        f"{platform.PREFIX}-nat-{az}" for az in platform.PRIVATE_SUBNETS]
 
 
-def test_customer_account_needs_its_profile(monkeypatch):
-    _fake_main(monkeypatch, ["status", "--account", ACCOUNT, "--customer-account", CUSTOMER], {})
-    with pytest.raises(SystemExit, match="함께 준다"):
+# ② 로그인(Cognito) 구성 ---------------------------------------------------------
+class FakeCognito:
+    def __init__(self, pools=(), clients=()):
+        self.pools = [dict(p) for p in pools]
+        self.clients = list(clients)
+        self.calls: list[tuple] = []
+
+    def get_paginator(self, name):
+        fake = self
+
+        class _P:
+            def paginate(self, **kwargs):
+                if name == "list_user_pools":
+                    return iter([{"UserPools": [{"Id": p["Id"], "Name": p["Name"]} for p in fake.pools]}])
+                return iter([{"UserPoolClients": [c for c in fake.clients if c["UserPoolId"] == kwargs["UserPoolId"]]}])
+        return _P()
+
+    def describe_user_pool(self, UserPoolId):
+        return {"UserPool": next(p for p in self.pools if p["Id"] == UserPoolId)}
+
+    def create_user_pool(self, **kwargs):
+        self.calls.append(("create_user_pool", kwargs["PoolName"]))
+        pool = {"Id": "ap-northeast-2_New", "Name": kwargs["PoolName"], "Arn": "arn:pool:new"}
+        self.pools.append(pool)
+        return {"UserPool": pool}
+
+    def set_user_pool_mfa_config(self, **kwargs):
+        self.calls.append(("set_user_pool_mfa_config", kwargs["MfaConfiguration"]))
+
+    def create_user_pool_client(self, **kwargs):
+        self.calls.append(("create_user_pool_client", kwargs["ClientName"]))
+        client = {"ClientId": "client-new", "ClientName": kwargs["ClientName"], "UserPoolId": kwargs["UserPoolId"]}
+        self.clients.append(client)
+        return {"UserPoolClient": {**client, "ClientSecret": "s3cr3t"}}
+
+
+def test_login_pool_client_and_secret_are_created_once():
+    events: list = []
+    cidp, sm = FakeCognito(), FakeSm(events)
+    login = platform._ensure_login(cidp, sm)
+    assert login == {"pool_id": "ap-northeast-2_New", "pool_arn": "arn:pool:new", "client_id": "client-new"}
+    assert sm.values[platform.SECRET_COGNITO_CLIENT] == "s3cr3t"  # 비밀은 Secrets Manager로만 간다
+    cidp.calls.clear()
+    assert platform._ensure_login(cidp, sm) == login
+    # 두 번째 실행은 풀 · 클라이언트를 만들지 않는다. MFA ON만 다시 맞춘다
+    assert cidp.calls == [("set_user_pool_mfa_config", "ON")]
+
+
+def test_recreated_client_replaces_the_stored_secret():
+    events: list = []
+    pool = {"Id": "p1", "Name": platform.USER_POOL, "Arn": "arn:pool"}
+    sm = FakeSm(events, {platform.SECRET_COGNITO_CLIENT: "old"})
+    platform._ensure_login(FakeCognito([pool]), sm)
+    assert sm.values[platform.SECRET_COGNITO_CLIENT] == "s3cr3t"
+
+
+# ⑩ 고객 온보딩 템플릿 배포 --------------------------------------------------------
+class FakeS3:
+    def __init__(self, exists=False):
+        self.exists = exists
+        self.calls: list[str] = []
+        self.objects: dict[str, bytes] = {}
+        self.policy = None
+        self.block = None
+
+    def head_bucket(self, Bucket):
+        if not self.exists:
+            raise _client_error("404", "HeadBucket")
+
+    def create_bucket(self, Bucket, CreateBucketConfiguration):
+        self.calls.append(f"create_bucket:{Bucket}:{CreateBucketConfiguration['LocationConstraint']}")
+        self.exists = True
+
+    def put_bucket_tagging(self, Bucket, Tagging):
+        self.calls.append("put_bucket_tagging")
+
+    def put_public_access_block(self, Bucket, PublicAccessBlockConfiguration):
+        self.block = PublicAccessBlockConfiguration
+
+    def put_bucket_policy(self, Bucket, Policy):
+        self.policy = json.loads(Policy)
+
+    def put_object(self, Bucket, Key, Body, ContentType):
+        self.objects[Key] = Body
+
+
+def test_onboarding_template_is_published_as_the_repository_file():
+    s3 = FakeS3()
+    url = platform._ensure_onboarding(s3, ACCOUNT, "ap-northeast-2")
+    assert url == platform.onboarding_template_url(ACCOUNT, "ap-northeast-2")
+    assert s3.calls[0] == f"create_bucket:{platform.onboarding_bucket(ACCOUNT)}:ap-northeast-2"
+    assert s3.objects[platform.onboarding.TEMPLATE_KEY].decode("utf-8") == \
+        platform.onboarding.TEMPLATE_PATH.read_text(encoding="utf-8")
+    assert s3.policy == platform.onboarding_bucket_policy(ACCOUNT)
+    # ACL로 여는 길은 막혀 있다. 버킷 정책(템플릿 객체 하나)만 공개를 허용한다
+    assert s3.block["BlockPublicAcls"] and s3.block["IgnorePublicAcls"]
+
+
+def test_onboarding_rerun_does_not_recreate_the_bucket():
+    s3 = FakeS3(exists=True)
+    platform._ensure_onboarding(s3, ACCOUNT, "ap-northeast-2")
+    assert not [c for c in s3.calls if c.startswith("create_bucket")]
+
+
+# ⑪ 첫 중앙 관리자 ----------------------------------------------------------------
+def test_bootstrap_admin_runs_the_auth_cli_as_central_admin():
+    command = platform.bootstrap_admin_command("ops@example.com")
+    assert command[command.index("-m") + 1] == "auth.bootstrap_admin"
+    assert {"--platform", "--central-admin", "--yes"} <= set(command)
+    assert command[command.index("--email") + 1] == "ops@example.com"
+
+
+def test_bootstrap_admin_needs_an_email(monkeypatch):
+    _fake_main(monkeypatch, ["bootstrap-admin", "--account", ACCOUNT], {})
+    with pytest.raises(SystemExit, match="--email"):
         platform.main()
-
-
-def test_customer_account_must_differ_from_the_platform_account(monkeypatch):
-    _fake_main(monkeypatch, ["status", "--account", ACCOUNT, "--customer-account", ACCOUNT,
-                             "--customer-profile", "p"], {})
-    with pytest.raises(SystemExit, match="같다"):
-        platform.main()
-
-
-def test_customer_profile_must_belong_to_the_customer_account(monkeypatch):
-    class _Sts:
-        def get_caller_identity(self):
-            return {"Account": "999999999999", "Arn": "arn:aws:iam::999999999999:user/x"}
-
-    class _Session:
-        def __init__(self, profile_name, region_name):
-            pass
-
-        def client(self, name, config=None):
-            assert name == "sts"  # 계정을 대조하기 전에는 다른 클라이언트를 만들지 않는다
-            return _Sts()
-
-    monkeypatch.setattr(platform.boto3, "Session", _Session)
-    with pytest.raises(SystemExit, match="--customer-profile"):
-        platform._customer_clients("customer-admin", CUSTOMER, "ap-northeast-2")

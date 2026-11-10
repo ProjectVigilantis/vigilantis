@@ -14,33 +14,22 @@ import type { IncidentListItem } from '@/types/api';
 /**
  * 목록 카드의 위험도 — **값 하나**만 그린다 (v1.6, 2026-08-27 PM 결정).
  *
- * 초기 판정으로 시작해 **AI 정밀 평가가 나오면 그 값으로 바뀐다**(`reviewed ?? initial`).
- * v1.5까지는 `[초기] → [정밀]` 전이 배지 2개였는데(구 §7.3), 두 값이 같을 때
- * `중간 → 중간`처럼 같은 말이 두 번 나왔다.
+ * 값은 서버 **초기 판정**(`initial_risk_level`)이다. ADR-0005 1차 개정(#583)으로 SecOps 그래프가
+ * 위험 등급을 다시 내지 않으므로 `reviewed_risk_level`은 새 건에서 항상 null이고, 과거 행에 남은
+ * 값은 INC-002 상세에서만 `AI 재평가(이전 방식)`로 보여 준다. 목록은 훑어보는 자리고 상세는
+ * 정확히 읽는 자리라는 §4.4의 분업을 따른다.
  *
- * **정보가 사라지지는 않는다** — 두 판정을 나란히 대조하는 자리는 INC-002 상세의
- * `위험도 판정` 2칸이며 거기는 그대로다(§4.5). 목록은 훑어보는 자리고 상세는 정확히 읽는
- * 자리라는 §4.4의 분업을 따른다.
- *
- * 정밀 평가가 아직 없으면 초기 판정을 그대로 쓴다 — 구 버전의 `평가 중`·`평가 실패` 문구는
- * 값이 하나가 되면서 자리를 잃었고, 그 정보는 **상태 배지**가 이미 말한다(`분석 중`·`진행 불가`).
+ * 구 버전의 `평가 중`·`평가 실패` 문구는 값이 하나가 되면서 자리를 잃었고, 그 정보는
+ * **상태 배지**가 이미 말한다(`분석 중`·`진행 불가`).
  */
 function RiskLevelLine({ incident }: { incident: IncidentListItem }) {
-  const shown = incident.reviewed_risk_level ?? incident.initial_risk_level;
-  if (shown === null) return null; // FINOPS — 계약이 두 위험도를 null로 강제한다
+  const shown = incident.initial_risk_level;
+  if (shown === null) return null; // FINOPS — 계약이 위험도를 null로 강제한다
 
   return (
     <span className="flex flex-wrap items-center gap-1 text-xs">
       <span className="text-muted-foreground">위험도</span>
       <StatusBadge field="risk_level" value={shown} />
-      {/* 정밀 평가로 바뀐 건임을 한 글자로만 밝힌다 — 어느 판정을 보고 있는지 모르면
-          상세의 2칸과 대조할 때 혼란이 된다. 초기 판정 그대로면 표식이 없다. */}
-      {incident.reviewed_risk_level !== null &&
-      incident.reviewed_risk_level !== incident.initial_risk_level ? (
-        <span className="text-muted-foreground" title="AI 정밀 평가로 갱신된 값입니다">
-          (정밀)
-        </span>
-      ) : null}
     </span>
   );
 }
@@ -59,11 +48,8 @@ export function IncidentCard({
   onExecute?: (incidentId: string) => void;
 }) {
   // 띠도 표시값을 따른다 — 배지와 띠가 서로 다른 판정을 가리키면 카드가 자기모순이 된다.
-  //
-  // ⚠️ 정렬 축은 `initial_risk_level`(불변 키) 그대로다(§4.4). 정밀 평가로 값이 바뀐 카드는
-  // 색과 자리가 어긋날 수 있다. 정렬을 reviewed로 옮기면 AI 평가가 갱신될 때마다 목록이
-  // 눈앞에서 재배치돼 누르려던 항목이 움직인다 — 설계서가 명시적으로 피한 쪽이다.
-  const bandLevel = incident.reviewed_risk_level ?? incident.initial_risk_level;
+  // 표시값·띠·정렬 축(§4.4)이 모두 `initial_risk_level`(불변 키)이라 색과 자리가 어긋나지 않는다.
+  const bandLevel = incident.initial_risk_level;
   const band = bandLevel === null ? RISK_BAND_EMPTY : RISK_BAND_CLASS[bandLevel];
 
   return (

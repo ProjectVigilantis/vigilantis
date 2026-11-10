@@ -5,11 +5,12 @@ export type IsoDateTime = string;
 
 /* ────────────────────────────── errors.py ────────────────────────────── */
 
-/** REST 공통 오류 코드 26종. 괄호는 계약상 HTTP 상태. */
+/** REST 공통 오류 코드 28종. 괄호는 계약상 HTTP 상태. */
 export type ErrorCode =
   | 'INCIDENT_NOT_FOUND' // 404 — 요청의 테넌트 범위 밖도 404(존재를 알리지 않는다)
   | 'IDEMPOTENCY_KEY_CONFLICT' // 409
   | 'PROPOSAL_NOT_EXECUTABLE' // 409
+  | 'TARGET_EXECUTION_IN_PROGRESS' // 409: 같은 대상에 끝나지 않은 실행이 있다(T-10 · #595)
   | 'INCIDENT_NOT_RESOLVABLE' // 409
   | 'TENANT_NOT_FOUND' // 404
   | 'TENANT_ACCOUNT_CONFLICT' // 409 — 같은 AWS 계정의 테넌트가 이미 있다
@@ -30,7 +31,10 @@ export type ErrorCode =
   | 'AUTH_RATE_LIMITED' // 429
   | 'AUTH_PROVIDER_UNAVAILABLE' // 503
   | 'USER_NOT_FOUND' // 404 — 관리 범위 안의 고객사 사용자 없음(#492)
+  | 'GROUP_NOT_FOUND' // 404 — 없는 그룹(#572 2번)
+  | 'GROUP_NAME_CONFLICT' // 409 — 같은 이름의 그룹이 이미 있다(#572 2번)
   | 'USER_STATE_CONFLICT' // 409 — 고객사별 마지막 활성 ADMIN · 중복 초대 · 상태 충돌(#492)
+  | 'SIGNUP_REQUEST_APPROVAL_REQUIRED' // 409 — 승인은 AWS 계정 ID·리전을 받는 전용 approve 경로로 요청
   | 'REQUEST_VALIDATION_FAILED' // 422
   | 'INTERNAL_ERROR'; // 500
 
@@ -389,6 +393,8 @@ export interface RecommendationItem {
   display_parameters: Record<string, string>;
   /** RIGHTSIZING 조치에만 실린다. 그 밖의 런북에서는 null이다. */
   ai_savings_estimate: AiSavingsEstimate | null;
+  /** NACL_RESTORE의 시스템 해제 예정 시각(UTC). 지난 시각도 해제 성공을 뜻하지 않는다. */
+  expires_at?: string | null;
 }
 
 /**
@@ -816,7 +822,7 @@ export interface TenantVerification {
 /**
  * 지금 적용 중인 구독(T-16 · #528) — 투영이다. 결제 · 청구는 없다.
  * 원천(`subscription_source`)은 수동 등록(MANUAL) · 모의 Marketplace 계약의 현재 권리(MOCK_MARKETPLACE) ·
- * 앱 정책 Free(APP_FREE)다. 모의 계약 자체는 `/me/subscription`의 `agreement`가 권위다.
+ * 앱 정책 Free(APP_FREE) · 실제 AWS Marketplace 권리(AWS_MARKETPLACE, 상품 등록 뒤에만 생긴다)다. 모의 계약 자체는 `/me/subscription`의 `agreement`가 권위다.
  */
 export interface TenantSubscription {
   /** 요금제 이름. 'Free' · 'Business' · 'Enterprise' 밖의 옛 수동 등록 값도 보존된다. null = 등록 안 됨(Free 아님). */
@@ -853,6 +859,8 @@ export interface TenantListItem {
   subscription_source: SubscriptionSource | null;
   /** 모의 계약 투영의 권리 끝 시각(UTC · 이 시각은 포함하지 않는다). MOCK_MARKETPLACE 일 때만 있다. */
   entitlement_ends_at: IsoDateTime | null;
+  /** 고객사가 속한 그룹(#572 2번). null = 어느 그룹에도 없음(담당자 없음). */
+  group_id: string | null;
 }
 
 export interface TenantsResponse {
@@ -882,6 +890,31 @@ export interface TenantCreateRequest {
   access_role_arn?: string;
   regions: string[];
   collect_vpc_ids?: string[];
+  /**
+   * 생성 시 넣을 그룹. 중앙 관리계정은 생략 가능(미배정), 관리자 직원계정은 자기 담당 그룹 중 하나를 반드시 지정한다
+   * (없으면 422, 담당 밖 그룹은 403). `POST /tenants`는 관리자 직원계정(TENANT_MANAGER)에게도 열려 있다.
+   */
+  group_id?: string | null;
+}
+
+/** `PUT /tenants/{id}/group`(중앙 관리계정만) → 200 `TenantDetail`. null = 그룹에서 빼기. 없는 그룹은 404 `GROUP_NOT_FOUND`. */
+export interface TenantGroupRequest {
+  group_id: string | null;
+}
+
+/**
+ * `GET /tenants/search?q=`(플랫폼 계정만, 고객사 계정 403)의 한 건. 이름 부분 일치(대소문자 무시), 최대 20건, 이름순.
+ * 관리자 직원계정에게 담당 밖 고객사는 `accessible=false`로 나오고 이 세 칸 외 값이 없다.
+ * 담당 밖 상세·하위 경로는 403 `AUTH_FORBIDDEN`, 없는 ID는 404다(#572 7번).
+ */
+export interface TenantSearchItem {
+  tenant_id: string;
+  name: string;
+  accessible: boolean;
+}
+
+export interface TenantSearchResponse {
+  items: TenantSearchItem[];
 }
 
 /** external_id 는 상세에 없고 여기 · 연결 전 onboarding_url · 재발급(TenantOnboardingResponse)에서만 나간다. */
@@ -921,7 +954,7 @@ export interface TenantUpdateRequest {
    유료 권리의 원천은 서버 안의 모의 Marketplace 계약이고 실제 AWS 호출 · 구매 · 청구가 없다. */
 
 /** 구독 투영의 원천. */
-export const SUBSCRIPTION_SOURCES = ['MANUAL', 'MOCK_MARKETPLACE', 'APP_FREE'] as const;
+export const SUBSCRIPTION_SOURCES = ['MANUAL', 'MOCK_MARKETPLACE', 'APP_FREE', 'AWS_MARKETPLACE'] as const;
 export type SubscriptionSource = (typeof SUBSCRIPTION_SOURCES)[number];
 
 /** 모의 Marketplace 로 구매를 요청할 수 있는 요금제(월 단위 계약형). 요금제 사이 전환은 없다. */
@@ -998,7 +1031,20 @@ export type LoginStep =
   | 'EMAIL_VERIFICATION_REQUIRED'
   | 'COMPLETED';
 
+/**
+ * 고객사 계정의 역할(auth.py `UserRole`, #572 5번). ADMIN = 고객사 중앙계정(모든 기능 + 직원 관리),
+ * OPERATOR = 고객사 직원계정(중앙계정이 골라 준 `FeaturePermission`만), VIEWER = 대시보드 조회만
+ * (문의 등록 · 조치 실행 · 인시던트 종료는 서버가 403 `AUTH_FORBIDDEN`).
+ */
 export type UserRole = 'ADMIN' | 'OPERATOR' | 'VIEWER';
+
+/**
+ * 기능별 권한(auth.py `FeaturePermission`, #572 5번). 고객사 중앙계정이 OPERATOR에게 준다.
+ * VIEW = 자산 · 보안(인시던트) 화면 · 감사 기록 · 문의 조회 메뉴를 그린다(조회 API는 서버가 막지 않는다 —
+ * 대시보드가 같은 API를 쓴다), EXECUTE_ACTION = 조치 실행, RESOLVE_INCIDENT = 인시던트 종료,
+ * CREATE_INQUIRY = 문의 등록. EXECUTE_ACTION · RESOLVE_INCIDENT는 VIEW와 함께만 줄 수 있다(없으면 422).
+ */
+export type FeaturePermission = 'VIEW' | 'EXECUTE_ACTION' | 'RESOLVE_INCIDENT' | 'CREATE_INQUIRY';
 
 /** 새 비밀번호 최소 길이 — User Pool 정책과 같은 값(auth.py `NEW_PASSWORD_MIN_LENGTH`). */
 export const NEW_PASSWORD_MIN_LENGTH = 12;
@@ -1031,7 +1077,8 @@ export type AccountType = 'PLATFORM' | 'TENANT';
 /**
  * 플랫폼 계정의 권한 단계(auth.py `PlatformRole`, #492 PR 5). 플랫폼 권한은 이 값과 담당 배정에서만 나온다.
  * CENTRAL_ADMIN = 중앙 관리자(전체 고객 · 고객 생성 · 직원 관리 · 담당 배정),
- * TENANT_MANAGER = 고객 담당자(배정된 고객만 조회 · 조치 · 고객사 사용자 관리 — 배정이 없으면 고객 데이터 없음).
+ * TENANT_MANAGER = 고객 담당자(배정된 고객만 조회 · 조치 — 배정이 없으면 고객 데이터 없음. 고객사 사용자 관리
+ * `/api/v1/users`는 #572 9번부터 403).
  */
 export type PlatformRole = 'CENTRAL_ADMIN' | 'TENANT_MANAGER';
 
@@ -1052,18 +1099,25 @@ export type CurrentUserResponse = AccountScope & {
    */
   role: UserRole;
   /**
-   * 담당 고객 ID(UUID) — TENANT_MANAGER만 실제 배정 목록이고, CENTRAL_ADMIN · TENANT 계정은 언제나 빈 목록이다.
+   * 담당 그룹에 속한 고객사 ID(#572 2번) — TENANT_MANAGER만 실제 목록이고, CENTRAL_ADMIN · TENANT 계정은 언제나 빈 목록이다.
    * 빈 목록은 "전체"가 아니다: 중앙 관리자의 전체 범위는 `platform_role`로만 판정한다. 화면 편의용 스냅샷이라
    * 낡을 수 있다 — 실제 범위는 서버가 요청마다 다시 판정한다(403 · 404).
    */
   assigned_tenant_ids: string[];
+  /**
+   * 이 계정이 지금 쓸 수 있는 기능별 권한(#572 5번, 열거 선언 순서). TENANT ADMIN은 네 가지 전부, OPERATOR는
+   * 고객사 중앙계정이 준 것, VIEWER는 빈 목록이다. PLATFORM(CENTRAL_ADMIN · TENANT_MANAGER)은
+   * VIEW · EXECUTE_ACTION · RESOLVE_INCIDENT(문의 등록은 고객사 계정만). 메뉴 · 버튼을 그릴지는 이 값으로 정하고,
+   * 서버는 같은 요청을 요청마다 다시 판정해 권한이 없으면 403 `AUTH_FORBIDDEN`이다.
+   */
+  permissions: FeaturePermission[];
   session: SessionInfo;
 };
 
 /* ────────────────────────────── users.py ────────────────────────────── */
-/* /api/v1/users — 고객사 사용자 관리(#492). 중앙 관리자(CENTRAL_ADMIN)는 모든 고객사 사용자를, 고객 담당자
-   (TENANT_MANAGER)는 배정된 고객의 사용자만, 고객사 ADMIN은 자기 고객사 사용자만 관리한다. 그 밖은 서버가 403
-   `AUTH_FORBIDDEN`, 관리 범위 밖 대상은 404 `USER_NOT_FOUND`다.
+/* /api/v1/users — 고객사 사용자 관리(#492 · #572 9번). 중앙 관리계정(CENTRAL_ADMIN)은 모든 고객사 사용자를,
+   고객사 중앙계정(TENANT ADMIN)은 자기 고객사 사용자만 관리한다. 관리자 직원계정(TENANT_MANAGER)을 포함한 그 밖은
+   서버가 403 `AUTH_FORBIDDEN`, 관리 범위 밖 대상은 404 `USER_NOT_FOUND`다.
    비밀번호 재설정(/api/v1/auth/password-reset · /confirm)은 응답 본문이 없는 204라 타입이 없다. */
 
 export type UserStatus = 'ACTIVE' | 'DISABLED';
@@ -1076,7 +1130,18 @@ export type UserListItem = AccountScope & {
   status: UserStatus;
   /** 로그인한 적이 없으면 null. */
   last_login_at: IsoDateTime | null;
+  /** 기능별 권한(#572 5번) — ADMIN은 네 가지 전부, OPERATOR는 부여받은 것, VIEWER는 빈 목록. */
+  permissions: FeaturePermission[];
 };
+
+/**
+ * `PUT /api/v1/users/{user_id}/permissions` — OPERATOR의 기능별 권한을 통째로 바꾼다(#572 5번). 빈 목록은 전부 회수.
+ * EXECUTE_ACTION · RESOLVE_INCIDENT를 넣으려면 VIEW도 넣는다(없으면 422). 대상이 OPERATOR가 아니면 409
+ * `USER_STATE_CONFLICT`, 지금과 같은 목록이면 409. 성공은 204이고 이력 `PERMISSIONS_CHANGED`가 남는다.
+ */
+export interface UserPermissionsRequest {
+  permissions: FeaturePermission[];
+}
 
 export interface UsersResponse {
   items: UserListItem[];
@@ -1086,17 +1151,20 @@ export interface UserInviteRequest {
   email: string;
   role: UserRole;
   /**
-   * 초대할 고객(UUID). 스키마상 선택이지만 **플랫폼 운영자는 반드시 보낸다**(빠지면 서버가 거절).
-   * 고객 담당자는 배정된 고객만 고를 수 있다(서버가 다시 판정한다).
+   * 초대할 고객(UUID). 스키마상 선택이지만 **중앙 관리계정은 반드시 보낸다**(빠지면 서버가 거절).
    * 고객사 ADMIN은 생략한다(서버가 자기 소속으로 한정한다). 계정 종류(account_type)는 입력이 아니다.
    */
   tenant_id?: string | null;
   /**
-   * 같은 이메일의 기존 Cognito 계정을 이 앱 사용자로 연결한다. 고객 범위가 있는 플랫폼 계정(중앙 관리자 · 배정된
-   * 고객 담당자)의 명시적 선택일 때만 true다 — 그 밖의 true는 서버가 403 `AUTH_FORBIDDEN`으로 거절한다(고객사 ADMIN은
-   * 언제나 false).
+   * 같은 이메일의 기존 Cognito 계정을 이 앱 사용자로 연결한다. 중앙 관리계정(CENTRAL_ADMIN)의 명시적 선택일 때만
+   * true다 — 그 밖의 true는 서버가 403 `AUTH_FORBIDDEN`으로 거절한다(고객사 ADMIN은 언제나 false).
    */
   recover_existing: boolean;
+  /**
+   * OPERATOR 초대에만 쓴다(#572 5번). 생략 · 빈 목록 = 권한 없이 초대(기본 선택 없음 — 화면이 "업무 권한 없이
+   * 초대"를 명시적으로 확인한다). 다른 역할에 주면 422.
+   */
+  permissions?: FeaturePermission[];
 }
 
 export type UserEventAction =
@@ -1107,8 +1175,12 @@ export type UserEventAction =
   | 'SESSIONS_REVOKED'
   /** 플랫폼 직원 권한(`platform_role`) 변경 — 직원 관리 API(#492 PR 5)가 남긴다. */
   | 'PLATFORM_ROLE_CHANGED'
-  /** 고객 담당자의 담당 고객 배정 변경 — `PUT /staff/{user_id}/tenants`(#492 PR 5)가 남긴다. */
-  | 'TENANT_ASSIGNMENTS_CHANGED';
+  /** 고객 담당자의 담당 고객 직접 배정 변경 — 과거 이력 값이다(#492 PR 5). */
+  | 'TENANT_ASSIGNMENTS_CHANGED'
+  /** OPERATOR 기능별 권한 교체 — `PUT /users/{user_id}/permissions`(#572 5번)가 남긴다. */
+  | 'PERMISSIONS_CHANGED'
+  /** 관리자 직원계정의 담당 그룹 배정 변경 — `PUT /staff/{user_id}/groups`와 등급 변경이 남긴다(#572 2번). */
+  | 'GROUP_ASSIGNMENTS_CHANGED';
 
 /** 이력에 실리는 값의 닫힌 목록 — 없는 항목은 null(또는 생략)이다. */
 export interface UserEventState {
@@ -1120,6 +1192,10 @@ export interface UserEventState {
   tenant_id?: string | null;
   /** 담당 고객 배정(TENANT_ASSIGNMENTS_CHANGED)의 전후 고객 ID 목록. */
   tenant_ids?: string[] | null;
+  /** OPERATOR 기능별 권한의 전후(PERMISSIONS_CHANGED · USER_INVITED · ROLE_CHANGED). 빈 목록 = 권한 없음. */
+  permissions?: FeaturePermission[] | null;
+  /** 담당 그룹 배정(GROUP_ASSIGNMENTS_CHANGED)의 전후 그룹 ID 목록. */
+  group_ids?: string[] | null;
 }
 
 export interface UserEventItem {
@@ -1136,8 +1212,15 @@ export interface UserEventsResponse {
   items: UserEventItem[];
 }
 
-/* /api/v1/staff — 플랫폼(관리자) 직원 관리(#492 PR 5, schemas/api/staff.py). 중앙 관리계정 전용이며 그 밖은 403이다.
-   목록에는 중앙 관리계정 자신을 포함한 플랫폼 계정 전부가 온다. 직원 생성 경로는 없다(운영 CLI). */
+/* /api/v1/staff — 플랫폼(관리자) 직원 관리(#492 PR 5 · #572 1번, schemas/api/staff.py). 직원 관리 전 경로는 중앙 관리계정만 쓴다(관리자 직원계정 403, #572 4번).
+   목록에는 중앙 관리계정 자신을 포함한 플랫폼 계정 전부가 온다.
+   직원 초대는 `POST /staff`(StaffInviteRequest → 201 StaffItem), 재발송은 `POST /staff/{id}/invite/resend`(204)다(#572 1번). */
+
+/** 직원 이메일 초대(#572 1번). 만드는 계정은 담당 고객사 없는 `TENANT_MANAGER`로 고정 — 등급·배정 칸이 없다.
+ *  Cognito에 이미 있는 이메일은 409 `USER_STATE_CONFLICT`(자동 연결 없음). */
+export interface StaffInviteRequest {
+  email: string;
+}
 
 export interface StaffItem {
   user_id: string;
@@ -1152,9 +1235,39 @@ export interface StaffResponse {
   items: StaffItem[];
 }
 
-/** 관리자 직원계정의 담당 고객사(`GET`·`PUT /staff/{id}/tenants`). PUT은 전체 교체이며 빈 목록은 배정 전부 해제다. */
-export interface StaffTenantsResponse {
-  tenant_ids: string[];
+/** 관리자 직원계정의 담당 그룹 교체(`PUT /staff/{id}/groups`). 전체 교체이며 빈 목록은 배정 전부 해제다.
+ *  중복 ID 422, 없는 그룹 404 `GROUP_NOT_FOUND`, 같은 집합 409, 대상이 TENANT_MANAGER가 아니면 409. */
+export interface StaffGroupsRequest {
+  group_ids: string[];
+}
+
+/** 관리자 직원계정의 담당 그룹(`GET`·`PUT /staff/{id}/groups`). */
+export interface StaffGroupsResponse {
+  group_ids: string[];
+}
+
+/* ────────────────────────────── groups.py ────────────────────────────── */
+/* /api/v1/groups — 고객사 그룹(#572 2번, schemas/api/groups.py).
+   `GET /groups`(중앙 관리계정은 전체, 관리자 직원계정은 자기 담당 그룹만, 고객사 계정 403),
+   `POST /groups`(중앙 관리계정만 → 201),
+   `DELETE /groups/{id}`(중앙 관리계정만 → 204; 그룹의 고객사는 미배정이 되고 직원 배정은 함께 지워진다). */
+
+export interface GroupItem {
+  group_id: string;
+  name: string;
+  /** 그룹에 속한 고객사 수. */
+  tenant_count: number;
+  created_at: IsoDateTime;
+  updated_at: IsoDateTime;
+}
+
+export interface GroupsResponse {
+  items: GroupItem[];
+}
+
+/** 1–100자. 같은 이름은 409 `GROUP_NAME_CONFLICT`. */
+export interface GroupCreateRequest {
+  name: string;
 }
 
 /* ───────────────────── signup_requests.py · inquiries.py ───────────────────── */
@@ -1186,6 +1299,7 @@ export interface SignupRequestDecisionItem {
 
 export interface SignupRequestItem {
   request_id: string;
+  tenant_id: string | null;
   company_name: string;
   contact_name: string;
   email: string;
@@ -1200,6 +1314,16 @@ export interface SignupRequestItem {
 
 export interface SignupRequestsResponse extends PaginationMetadata {
   items: SignupRequestItem[];
+}
+
+export interface SignupRequestApproveRequest {
+  aws_account_id: string;
+  regions: string[];
+}
+
+export interface SignupRequestApproveResponse {
+  request: SignupRequestItem;
+  tenant: TenantCreateResponse;
 }
 
 /**
@@ -1257,7 +1381,8 @@ export type TriggerSource =
   | 'USER_APPROVAL' // 관제자 승인 실행
   | 'PRE_MITIGATION_0_5S' // High 위협 즉시 선차단
   | 'TIMEOUT_ISOLATION_1M' // 1분 미응답 만료 자동 격리
-  | 'AUTO_ON_FAILURE'; // 주 조치 실패 시 자동 복구
+  | 'AUTO_ON_FAILURE' // 주 조치 실패 시 자동 복구
+  | 'NACL_DENY_EXPIRED_24H'; // 차단 24시간 고정 만료 자동 해제 (T-11 · #597)
 
 export type AuditEventAction = 'ACTION_EXECUTION_STARTED' | 'INCIDENT_RESOLVED';
 
@@ -1323,13 +1448,17 @@ export interface SignupRequestCreate {
 /**
  * `PUT /signup-requests/{id}/status` 요청. REJECTED로 옮길 때는 `reason`(반려 사유)이 필수이고 비면 422,
  * 다른 상태면 null이다. 고객사 정지(`POST /tenants/{id}/suspend`의 reason, 응답 suspended_reason)와 같은 모양이다.
+ * 승인은 `POST /signup-requests/{id}/approve`로만 한다. 기존 화면 호환을 위해 상태 타입은 유지하지만 APPROVED PUT은 서버가 거절한다.
  */
 export interface SignupRequestStatusChange {
   status: SignupRequestStatus;
   reason: string | null;
 }
 
-/** `POST /inquiries`: 고객사 계정(역할 무관)만. 소속 고객사 · 작성자는 서버가 세션에서 채운다. 201 InquiryItem. */
+/**
+ * `POST /inquiries`: 문의 등록 권한(`CREATE_INQUIRY`, #572 5번)이 있는 고객사 계정만 — ADMIN과 권한을 받은 OPERATOR.
+ * VIEWER · 권한 없는 OPERATOR · 플랫폼 계정은 403 `AUTH_FORBIDDEN`. 소속 고객사 · 작성자는 서버가 세션에서 채운다. 201 InquiryItem.
+ */
 export interface InquiryCreate {
   category: InquiryCategory;
   title: string;
@@ -1522,4 +1651,78 @@ export interface ThreatEventsResponse {
   /** 기간 안 전체 건수. `items`가 상한에 걸려 잘렸으면 `items.length`보다 크다. */
   total: number;
   items: ThreatEventItem[];
+}
+
+// --- 플랫폼 상태 · 고객사별 API 호출 통계(#572 6번) — packages/schemas/api/platform.py --------------------
+// GET /api/v1/platform/overview?hours=24 — 중앙 관리계정(PLATFORM · CENTRAL_ADMIN) 전용, 그 밖은 403 AUTH_FORBIDDEN.
+// 값은 이미 저장된 기록을 센 것이다(새 수집 없음). 호출 통계 구역은 lib/platform-status.ts 의 FE 제안(#578) 모양을
+// 따른다 — 시간 칸은 UTC 정시이고 KST 변환은 FE 가 한다.
+
+/** 호출 통계 보관 기간(일). 오늘과 그 전 이 일수의 칸을 남긴다. */
+export const API_USAGE_RETENTION_DAYS = 30;
+/** `hours`의 상한(= 보관 기간을 시간으로 편 값). 오늘 치를 더 남기므로 어느 시각에 조회해도 지워진 칸이 끼지 않는다. */
+export const API_USAGE_MAX_WINDOW_HOURS = API_USAGE_RETENTION_DAYS * 24;
+/** `hours`를 생략했을 때의 조회 기간(시간). */
+export const API_USAGE_DEFAULT_WINDOW_HOURS = 24;
+
+/** 서버 TenantStatus 세 값. `UNPAID`는 FE 선행 값이라 서버 집계에는 없다. */
+export type PlatformTenantStatus = Exclude<TenantStatus, 'UNPAID'>;
+
+/** 연결 상태별 고객사 수. 세 상태가 0이어도 전부 실리고 합은 `total`이다. */
+export interface PlatformTenantCounts {
+  total: number;
+  by_status: Record<PlatformTenantStatus, number>;
+}
+
+/** 최근 `window_hours`시간(24) 안에 끝난(진행 중은 시작한) 수집 회차 수. 회차는 (고객사, 리전) 단위다. */
+export interface PlatformCollectionCounts {
+  window_hours: number;
+  success: number;
+  partial: number;
+  failed: number;
+  in_progress: number;
+}
+
+/** 상태별 인시던트 수. 여섯 상태가 0이어도 전부 실리고 합은 `total`이다(`tenants.by_status`와 같은 모양). */
+export interface PlatformIncidentCounts {
+  total: number;
+  by_status: Record<IncidentStatus, number>;
+}
+
+/** 고객사 하나의 시간별 호출 수와 과다 호출 판정 입력. */
+export interface TenantApiUsage {
+  tenant_id: string;
+  tenant_name: string;
+  tenant_status: PlatformTenantStatus;
+  /** 수집 자산 수(`assets.tenant_id` 기준, 사라진 자산 제외) — 과다 호출 기준 계산의 입력. */
+  asset_count: number;
+  /** 고객사 계정 수(`app_users.tenant_id` 기준, 상태 무관) — 과다 호출 기준 계산의 입력. */
+  staff_count: number;
+  /** 한 시간에 이 건수를 넘으면 과다 호출. 계산식이 정해지기 전에는 null이라 판정을 그리지 않는다. 계산은 서버가 한다. */
+  threshold_per_hour: number | null;
+  /** `hourly`의 합. */
+  total_calls: number;
+  /** `ApiUsageSummary.hours`와 같은 길이 · 순서의 시간별 호출 수. 호출 없는 칸은 0. */
+  hourly: number[];
+}
+
+/**
+ * 고객사(TENANT) 계정이 세션을 통과해 `/api/*`를 부른 횟수 — 고객사 × UTC 1시간. 로그인 전 호출 · WebSocket ·
+ * 플랫폼 계정의 호출은 세지 않는다. 응답 코드와 무관하게 1회다. `hours`는 칸의 시작 시각(UTC 정시)을 오래된 것부터
+ * 1시간 간격으로 `window_hours`개 나열하고, 마지막 칸은 조회 시각이 속한(진행 중인) 칸이다.
+ * 호출 0인 고객사도 `items`에 있다(total_calls 내림차순 → 이름 → ID) — 상위 N · 나머지 묶기는 FE가 한다.
+ */
+export interface ApiUsageSummary {
+  window_hours: number;
+  hours: IsoDateTime[];
+  retention_days: number;
+  items: TenantApiUsage[];
+}
+
+export interface PlatformOverviewResponse {
+  generated_at: IsoDateTime;
+  tenants: PlatformTenantCounts;
+  collection: PlatformCollectionCounts;
+  incidents: PlatformIncidentCounts;
+  api_usage: ApiUsageSummary;
 }

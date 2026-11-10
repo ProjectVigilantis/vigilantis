@@ -1,6 +1,6 @@
 # ==============================================================================
 # [파일 설명]  담당: 김승철 (API 계약 · BE)
-# 테넌트 저장소 — tenants. (Post-MVP T-4 · #510)
+# 테넌트 저장소 — tenants. (Post-MVP T-4 · #510 · #572 고객사 검색)
 #
 #   - commit하지 않는다. 트랜잭션은 호출부가 소유한다. 생성은 flush까지 한다.
 #   - 시각은 호출부가 now로 넘긴다(시계를 읽지 않는다).
@@ -37,6 +37,7 @@ from schemas.api.tenants import (
 )
 from schemas.incidents import INCIDENT_OPEN_STATUSES
 from schemas.subscriptions import (
+    CONTRACT_SOURCES,
     FREE_PLAN,
     MOCK_AGREEMENT_OPEN_STATUSES,
     SubscriptionSource,
@@ -98,12 +99,14 @@ def create_tenant(
     now: datetime,
     collect_vpc_ids: Sequence[str] = (),
     access_role_arn: Optional[str] = None,
+    group_id: str | None = None,
 ) -> models.Tenant:
     """PENDING_CONNECTION 으로 만든다. external_id 는 여기서 정하고 바꾸지 않는다.
 
     계정 ID · ExternalId 중복은 DB 유일성이 flush에서 거절한다(호출부가 409로 해석).
     역할 ARN 을 안 주면 계약의 기본값(`vigilantis-access`)이다.
     구독은 앱 정책 Free(APP_FREE)로 시작한다(T-16) — 기간 · 요금 없이. 기존 테넌트의 NULL 구독은 Free 로 채우지 않는다.
+    group_id 를 안 주면 그룹 없음(담당자 없음)이다(#572). 없는 그룹은 FK 가 거절한다 — 호출부가 먼저 확인한다.
     """
     row = _T(
         name=name,
@@ -112,6 +115,7 @@ def create_tenant(
         external_id=secrets.token_hex(_EXTERNAL_ID_BYTES),
         regions=list(regions),
         collect_vpc_ids=list(collect_vpc_ids),
+        group_id=group_id,
         **projection_values(APP_FREE, SubscriptionSource.APP_FREE),
         created_at=now,
         updated_at=now,
@@ -213,15 +217,37 @@ def tenant_id_for_account(db: Session, aws_account_id: str) -> Optional[str]:
 
 
 def list_tenants(
-    db: Session, *, scope_ids: Optional[Sequence[str]] = None
+    db: Session, *, scope_ids: Optional[Sequence[str]] = None, unassigned_only: bool = False
 ) -> list[TenantWithCounts]:
     """생성 순(created_at 오름차순 · 같으면 tenant_id) — 계약 TenantsResponse 의 정렬.
-    scope_ids 가 None 이면 전체, 빈 목록이면 빈 결과다."""
+    scope_ids 가 None 이면 전체, 빈 목록이면 빈 결과다. unassigned_only 면 그 안에서 그룹 없는(group_id NULL) 행만."""
     statement = _with_counts()
     if scope_ids is not None:
         statement = statement.where(_T.tenant_id.in_(list(scope_ids)))
+    if unassigned_only:
+        statement = statement.where(_T.group_id.is_(None))
     rows = db.execute(statement.order_by(_T.created_at, _T.tenant_id))
     return [TenantWithCounts(*row) for row in rows]
+
+
+def _like_escaped(value: str) -> str:
+    # LIKE 의 와일드카드(% · _)와 이스케이프 문자를 글자 그대로 찾게 한다
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def search_tenants(db: Session, query: str, *, limit: int) -> list[tuple[str, str]]:
+    """이름에 query 가 든(대소문자 무시) 고객사의 (tenant_id, name) — 이름순 · 같으면 tenant_id, 최대 limit 건.
+
+    범위를 걸지 않는다(#572 7번 — 담당 밖 고객사도 검색에 뜬다). 접근 가능 여부는 호출부가 가린다.
+    """
+    pattern = f"%{_like_escaped(query)}%"
+    rows = db.execute(
+        select(_T.tenant_id, _T.name)
+        .where(_T.name.ilike(pattern, escape="\\"))
+        .order_by(_T.name, _T.tenant_id)
+        .limit(limit)
+    )
+    return [(tenant_id, name) for tenant_id, name in rows]
 
 
 # --- 수정 ----------------------------------------------------------------------
@@ -258,7 +284,7 @@ def update_tenant(
         locked = lock_tenant(db, tenant_id)
         if (
             locked is None
-            or locked.subscription_source is SubscriptionSource.MOCK_MARKETPLACE
+            or locked.subscription_source in CONTRACT_SOURCES
             or has_open_agreement(db, tenant_id)
         ):
             return False

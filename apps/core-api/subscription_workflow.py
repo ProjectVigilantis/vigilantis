@@ -8,7 +8,8 @@
 #     `can_manage`(고객사 중앙계정)는 인가의 결과다. 이 워크플로는 인증 · 인가를 대신하지 않는다.
 #   - 서비스 상태와 계약은 따로다. 이용 중단(stop_service)은 테넌트 정지와 같은 전이(tenants_repo.suspend_tenant)이고
 #     계약을 해지하지 않는다. 정지 중에도 계약 처리 · 투영 · 갱신 끄기는 계속되고, 재개(tenants_repo.resume_tenant)는
-#     구독을 바꾸지 않는다.
+#     구독을 바꾸지 않는다. 다만 계약이 만료되어 남은 유료 권리가 없으면 서비스도 같은 전이로 멈춘다 — 무료 요금제는
+#     없다(ADR-0012 2차 개정 §1 · SSOT 2026-11-06). 투영의 APP_FREE 는 「유료 권리 없음」의 표식이지 이용 권리가 아니다.
 #   - 계약 처리 주기(process_subscription_cycle)는 subscription_scheduler 가 부른다: 모의 공급자의 활성화 · 갱신 ·
 #     만료 → 이벤트 소비(투영). 예정일은 처리 완료가 아니다 — 그 시각 뒤 첫 주기에 저장된다. 이벤트 소비는 주기마다
 #     상한 건수까지만 하고, 주기를 건너 이어 훑는다(EventSweep — 위치는 스케줄러가 든다).
@@ -25,6 +26,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 
+import marketplace
 import mock_marketplace
 from config import SubscriptionSettings
 from db import models
@@ -42,6 +44,7 @@ from schemas.api.subscriptions import (
 )
 from schemas.api.tenants import SUSPENDABLE_STATUSES, TenantStatus, TenantSubscription
 from schemas.subscriptions import (
+    CONTRACT_SOURCES,
     FREE_PLAN,
     MOCK_AGREEMENT_OPEN_STATUSES,
     MockAgreementStatus,
@@ -57,6 +60,10 @@ from tenant_admin import subscription_of
 logger = logging.getLogger("vigilantis.subscriptions")
 
 _MOCK = SubscriptionSource.MOCK_MARKETPLACE
+
+#: 만료 정지의 suspended_reason — 운영자 · 고객이 적는 사유와 구별되는 고정 문구다.
+EXPIRY_SUSPENSION_REASON = "모의 Marketplace 계약 만료 — 남은 유료 권리 없음"
+MARKETPLACE_EXPIRY_SUSPENSION_REASON = "AWS Marketplace 권리 종료 — 남은 유료 권리 없음"
 
 
 # --- 응답 조립 ------------------------------------------------------------------
@@ -207,23 +214,44 @@ def _mock_projection(entitlement: mock_marketplace.Entitlement) -> dict:
 def reconcile_tenant_subscription(db: Session, tenant_id: str, *, now: datetime) -> bool:
     """테넌트 행을 잠그고 모의 계약의 **현재** 상태를 다시 읽어 투영을 맞춘다 → 바꿨는가. commit 하지 않는다.
 
+    - 실제 Marketplace 권리(marketplace.current_entitlement)가 있으면 그것을 먼저 투영한다(AWS_MARKETPLACE). 실제
+      권리가 끝나면 모의 계약 만료와 같이 APP_FREE 로 돌리고 서비스를 멈춘다(사유만 다르다).
     - 지금 권리(활성 계약의 현재 기간 안)가 있으면 그 계약을 투영한다(MOCK_MARKETPLACE).
     - 자동 갱신 중인 활성 계약의 기간 끝 시각이 지났으면(처리 주기의 갱신 대기) 지금 투영을 그대로 둔다 — 권리가
       끝난 것이 아니다. 남은 투영은 직전 기간의 기록이고 권리 끝 시각(entitlement_ends_at)이 이미 지나 새로 이은
       기간과 구별된다. 다음 기간은 처리 주기(공급자의 갱신 → 그 이벤트)만 잇는다.
-    - 그 밖에 권리가 없는데 투영이 모의 계약이면(만료 · 갱신을 끈 기간의 끝) 앱 정책 Free(APP_FREE)로 돌린다.
+    - 그 밖에 권리가 없는데 투영이 모의 계약이면(만료 · 갱신을 끈 기간의 끝) 투영을 APP_FREE(유료 권리 없음)로 돌리고
+      **서비스를 멈춘다**(tenants_repo.suspend_tenant · 사유 EXPIRY_SUSPENSION_REASON). 이미 정지면(고객의 이용 중단 ·
+      운영자 정지) 그 정지와 사유를 그대로 둔다. 투영이 바뀌어야 이 분기에 다시 들어오지 않으므로, 재개 뒤 다시 불러도
+      다시 멈추지 않는다 — 재개 전에 만료가 처리되지 않은 채 남아 있었다면 재개 직후의 이 호출이 멈춘다(권리가 없다).
     - 그 밖(대기 · 실패 · 계약 없음)에는 지금 투영(수동 입력 · Free)을 그대로 둔다 — 대기는 권리가 아니다.
     - 유료 수동 기록(MANUAL · Free 아님)은 계약으로 덮어쓰지 않는다(구매 · PATCH 관문이 이 조합을
       막으므로 정상 경로에서는 일어나지 않는다 — 일어나면 경고만 남긴다).
-    서비스 상태는 보지도 바꾸지도 않는다 — 정지 중에도 같은 결과이고, 재개 뒤 다시 불러도 같은 결과다(멱등).
+    정지 말고는 서비스 상태를 보지도 바꾸지도 않는다 — 정지 중에도 같은 투영이고, 같은 입력에 같은 결과다(멱등).
+    정지는 이용 중단과 같은 전이라 같은 잠금 순서를 지킨다 — 사용자 표 참조 잠금을 테넌트 행보다 먼저 잡아, 같은
+    고객사의 사용자 관리 쓰기(사용자 표 EXCLUSIVE 뒤 정지를 잠그지 않고 읽는다)가 커밋 전의 정지를 지나치지 못하게 한다.
+    테넌트 행을 먼저 잠근 호출부(cancel_renewal)는 그 앞에서 같은 잠금을 잡아 둔다.
     """
+    auth_repo.lock_users_for_reference(db)
     tenant = tenants_repo.lock_tenant(db, tenant_id)
     if tenant is None:
         return False
+    # 실제 Marketplace 권리를 먼저 본다(ADR-0012 2차 개정). 상품을 등록하기 전에는 늘 None 이라 아래 판정 그대로다
+    real = marketplace.current_entitlement(db, tenant.aws_account_id, now=now)
     agreement = mock_repo.open_agreement(db, tenant_id)  # 한 번 읽은 계약으로 두 판정을 한다
     entitlement = mock_marketplace.entitlement_of(agreement, now=now)
-    if entitlement is not None:
-        if tenant.subscription_source is not _MOCK and tenant.plan != FREE_PLAN:
+    if real is not None:
+        if tenant.subscription_source not in CONTRACT_SOURCES and tenant.plan != FREE_PLAN:
+            logger.warning(
+                "marketplace_entitlement_not_projected_over_manual_record",
+                extra={"tenant_id": tenant_id, "license_arn": real.license_arn},
+            )
+            return False
+        desired = tenants_repo.projection_values(
+            marketplace.projection(real), marketplace.SOURCE, real.expires_at
+        )
+    elif entitlement is not None:
+        if tenant.subscription_source not in CONTRACT_SOURCES and tenant.plan != FREE_PLAN:
             logger.warning(
                 "mock_entitlement_not_projected_over_manual_record",
                 extra={"tenant_id": tenant_id, "agreement_id": entitlement.agreement_id},
@@ -232,8 +260,15 @@ def reconcile_tenant_subscription(db: Session, tenant_id: str, *, now: datetime)
         desired = _mock_projection(entitlement)
     elif mock_marketplace.renewal_pending(agreement, now=now):
         return False
-    elif tenant.subscription_source is _MOCK:
+    elif tenant.subscription_source in CONTRACT_SOURCES:
+        reason = (
+            MARKETPLACE_EXPIRY_SUSPENSION_REASON
+            if tenant.subscription_source is marketplace.SOURCE
+            else EXPIRY_SUSPENSION_REASON
+        )
         desired = tenants_repo.projection_values(tenants_repo.APP_FREE, SubscriptionSource.APP_FREE)
+        if tenants_repo.suspend_tenant(db, tenant_id, reason=reason, now=now):
+            logger.info("mock_entitlement_ended_service_suspended", extra={"tenant_id": tenant_id})
     else:
         return False
     if {column: getattr(tenant, column) for column in desired} == desired:
@@ -300,11 +335,13 @@ def cancel_renewal(
     settings: SubscriptionSettings,
     now: datetime,
 ) -> CustomerSubscriptionResponse:
-    """활성 계약의 자동 갱신 끄기 — 권리는 지금 기간의 끝 시각까지 그대로이고 그 뒤 앱 정책 Free 다.
+    """활성 계약의 자동 갱신 끄기 — 권리는 지금 기간의 끝 시각까지 그대로이고 그 뒤 만료 → 서비스 정지다.
 
     서비스 상태와 무관하다(정지 중에도 받는다). 자동 갱신 중인 활성 계약이 없으면 409(이미 끔 · 대기 · 계약 없음 ·
-    수동 기록). 공급자 쪽 변경 이벤트를 같은 트랜잭션에서 소비해 투영을 바로 맞춘다.
+    수동 기록). 공급자 쪽 변경 이벤트를 같은 트랜잭션에서 소비해 투영을 바로 맞춘다 — 기간 끝 시각이 이미 지났으면
+    그 소비가 곧 만료 정지라, 이용 중단과 같은 순서(사용자 표 → 테넌트 행)로 잠근다.
     """
+    auth_repo.lock_users_for_reference(db)
     _lock(db, tenant_id, authorize)
     event_id = mock_marketplace.disable_renewal(db, tenant_id, now=now)
     if event_id is None:

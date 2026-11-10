@@ -59,6 +59,10 @@ function messageFor(error: ApiError): { text: string; keepOpen: boolean; retryab
     case 'PROPOSAL_NOT_EXECUTABLE':
       // 제안이 이미 실행됐거나 무효해진 경우 — 모달을 닫고 INC-002를 재조회한다(§4.6).
       return { text: '', keepOpen: false };
+    case 'TARGET_EXECUTION_IN_PROGRESS':
+      // 같은 대상의 다른 실행이 아직 끝나지 않았다(T-10 · #595). 제안은 그대로 유효하므로 모달을 닫지 않고
+      // 이유를 보인 채 둔다. 그 실행이 끝나면 같은 버튼으로 다시 보낼 수 있다.
+      return { text: error.message, keepOpen: true };
     case 'REQUEST_VALIDATION_FAILED':
       // 422는 계약 불일치다 — 재시도로 해결되지 않는다는 것을 문장으로 말한다(§4.6).
       return {

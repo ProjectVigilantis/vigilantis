@@ -22,6 +22,8 @@ EXPECTED_TABLES = {
     "tenant_subscription_history",
     "mock_marketplace_agreements",
     "mock_marketplace_events",
+    # 실제 AWS Marketplace 라이선스 사본(ADR-0012 2차 개정)
+    "marketplace_licenses",
     # 자산·인시던트 계열 10종
     "collection_runs",
     "asset_inventory_counts",  # 회차별 유형별 자산 수 — 시계열 축 5 (2026-09-29)
@@ -47,9 +49,11 @@ EXPECTED_TABLES = {
     "notification_deliveries",
     "notification_routes",
     "notification_lanes",
-    # 로그인 기반·사용자 관리 이력·담당 고객사 배정 (#492)
+    # 로그인 기반·사용자 관리 이력 (#492) · 고객사 그룹 · 직원의 담당 그룹 배정 (#572 2번)
     "app_users",
-    "app_user_tenant_assignments",
+    "tenant_groups",
+    "app_user_group_assignments",
+    "app_user_feature_permissions",
     "auth_sessions",
     "user_admin_events",
     # 조치 승인 · 종료 판단 감사 기록 (T-2 · #544)
@@ -69,6 +73,8 @@ EXPECTED_TABLES = {
     # TOTP 분실 복구 작업 · 신원 변경 울타리 (#515)
     "totp_recovery_operations",
     "totp_provider_mutations",
+    # 고객사별 API 호출 수의 UTC 1시간 버킷 (#572 6번)
+    "tenant_api_calls_hourly",
     # #589 — 플랫폼 활동 로그(append-only 통합 기록)
     "platform_events",
 }
@@ -113,10 +119,11 @@ def test_row_invariant_constraints_registered():
             "ck_tenants_billing_anchor_day_range",
             "ck_tenants_billing_anchor_with_period",
             "ck_tenants_cancel_with_period_end",
-            # 투영의 원천(모의 Marketplace)
+            # 투영의 원천(모의 · 실제 Marketplace)
             "ck_tenants_source_iff_subscription",
-            "ck_tenants_entitlement_end_with_mock",
+            "ck_tenants_entitlement_end_with_contract",
             "ck_tenants_mock_projection_shape",
+            "ck_tenants_marketplace_projection_shape",
             "ck_tenants_app_free_is_free",
         },
         "mock_marketplace_agreements": {
@@ -127,6 +134,15 @@ def test_row_invariant_constraints_registered():
             "ck_mock_marketplace_agreements_renewal_disabled_shape",
         },
         "mock_marketplace_events": {"ck_mock_marketplace_events_source_is_mock"},
+        "marketplace_licenses": {
+            "ck_marketplace_licenses_account_format",
+            "ck_marketplace_licenses_plan_is_paid",
+            "ck_marketplace_licenses_active_shape",
+        },
+        "tenant_api_calls_hourly": {
+            "ck_tenant_api_calls_hourly_calls_nonnegative",
+            "ck_tenant_api_calls_hourly_hour_on_the_hour",
+        },
         # 플랫폼 활동 로그의 행 모양(#589) — 계약 PlatformEventRecord 의 불변식 거울
         "platform_events": {
             "ck_platform_events_actor_shape",
@@ -162,14 +178,48 @@ def test_row_invariant_constraints_registered():
         assert names <= _constraint_names(table), table
 
 
-def test_tenant_assignment_is_composite_key_with_cascading_foreign_keys():
-    """배정은 (user_id, tenant_id) 하나씩이고, 사용자 · 고객사가 지워지면 함께 지워진다(남는 배정 없음)."""
-    table = Base.metadata.tables["app_user_tenant_assignments"]
-    assert [c.name for c in table.primary_key.columns] == ["user_id", "tenant_id"]
+def test_group_assignment_is_composite_key_with_cascading_foreign_keys():
+    """배정은 (user_id, group_id) 하나씩이고, 사용자 · 그룹이 지워지면 함께 지워진다(남는 배정 없음)."""
+    table = Base.metadata.tables["app_user_group_assignments"]
+    assert [c.name for c in table.primary_key.columns] == ["user_id", "group_id"]
     assert {
         (fk.column.table.name, fk.column.name, fk.ondelete) for fk in table.foreign_keys
-    } == {("app_users", "user_id", "CASCADE"), ("tenants", "tenant_id", "CASCADE")}
-    assert set(table.columns.keys()) == {"user_id", "tenant_id"}
+    } == {("app_users", "user_id", "CASCADE"), ("tenant_groups", "group_id", "CASCADE")}
+    assert set(table.columns.keys()) == {"user_id", "group_id"}
+
+
+def test_tenant_belongs_to_at_most_one_group_that_ungroups_on_delete():
+    """고객사는 group_id 칸 하나(최대 한 그룹 · NULL = 담당 그룹 없음)이고, 그룹을 지우면 NULL 로 돌아간다."""
+    column = Base.metadata.tables["tenants"].c.group_id
+    assert column.nullable is True
+    assert {(fk.column.table.name, fk.column.name, fk.ondelete) for fk in column.foreign_keys} == {
+        ("tenant_groups", "group_id", "SET NULL")
+    }
+    groups = Base.metadata.tables["tenant_groups"]
+    assert set(groups.columns.keys()) == {"group_id", "name", "created_at", "updated_at"}
+    assert "uq_tenant_groups_name" in _constraint_names("tenant_groups")
+
+
+def test_tenant_api_calls_hourly_is_a_per_hour_bucket_removed_with_its_tenant():
+    """칸은 (tenant_id, hour) 하나씩이고, 고객사가 지워지면 통계도 함께 지워진다(#572 6번)."""
+    table = Base.metadata.tables["tenant_api_calls_hourly"]
+    assert [c.name for c in table.primary_key.columns] == ["tenant_id", "hour"]
+    assert {
+        (fk.column.table.name, fk.column.name, fk.ondelete) for fk in table.foreign_keys
+    } == {("tenants", "tenant_id", "CASCADE")}
+    assert set(table.columns.keys()) == {"tenant_id", "hour", "calls"}
+    assert table.c.hour.type.timezone is True
+    assert "ix_tenant_api_calls_hourly_hour" in {ix.name for ix in table.indexes}
+
+
+def test_feature_permission_is_composite_key_with_cascading_user_foreign_key():
+    """기능 권한은 (user_id, permission) 하나씩이고, 사용자가 지워지면 함께 지워진다(#572 5번)."""
+    table = Base.metadata.tables["app_user_feature_permissions"]
+    assert [c.name for c in table.primary_key.columns] == ["user_id", "permission"]
+    assert {
+        (fk.column.table.name, fk.column.name, fk.ondelete) for fk in table.foreign_keys
+    } == {("app_users", "user_id", "CASCADE")}
+    assert set(table.columns.keys()) == {"user_id", "permission"}
 
 
 def test_one_open_mock_agreement_per_tenant_is_a_partial_unique_index():

@@ -1,4 +1,5 @@
-"""도입 신청 동시 접수 · 처리 (#552) — 재시도 키 유일 제약과 행 잠금이 경쟁의 관문이다. 실제 commit 하는 독립 세션을 쓴다."""
+"""도입 신청 동시 접수 · 처리 (#552) · 승인의 원자성(#572) — 재시도 키 유일 제약과 행 잠금이 경쟁의 관문이다.
+실제 commit 하는 독립 세션을 쓴다 — 확정 여부는 새 세션으로 다시 읽어 본다(테스트 SAVEPOINT 가 가리지 않는다)."""
 
 from __future__ import annotations
 
@@ -9,13 +10,23 @@ from datetime import UTC, datetime
 import pytest
 import signup_requests_service as service
 from auth import sessions as auth_sessions
+from config import TenantSettings
 from db import models
 from db.repositories import auth as auth_repo
+from db.repositories import signup_requests as signup_repo
+from db.repositories import tenants as tenants_repo
 from exceptions import ApiError
 from schemas.api.auth import AccountType, PlatformRole, UserRole
 from schemas.api.errors import ErrorCode
-from schemas.api.signup_requests import SignupRequestCreate, SignupRequestStatusRequest
+from schemas.api.signup_requests import (
+    SignupRequestApproveRequest,
+    SignupRequestApproveResponse,
+    SignupRequestCreate,
+    SignupRequestStatusRequest,
+)
+from schemas.api.support import SignupRequestStatus
 from sqlalchemy import delete, func, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 from support_access import Actor
 
@@ -169,25 +180,60 @@ def seed_central_admin(db, n):
     return issued.token
 
 
-def test_concurrent_approve_and_reject_have_one_winner_and_a_coherent_row(admin_db):
+SETTINGS = TenantSettings(
+    TENANT_ONBOARDING_TEMPLATE_URL="https://templates.example.com/vigilantis-access.yaml",
+    PLATFORM_PRINCIPAL_ARN="arn:aws:iam::999988887777:role/vigilantis-platform",
+)
+ACCOUNT = "123456789012"
+RIVAL_ACCOUNT = "210987654321"
+
+
+def actor_for(token: str) -> Actor:
+    return Actor(token=token, idle_seconds=1800, clock=lambda: datetime.now(UTC))
+
+
+def approval(account: str) -> SignupRequestApproveRequest:
+    return SignupRequestApproveRequest(aws_account_id=account, regions=["ap-northeast-2"])
+
+
+def committed(admin_db, request_id):
+    """새 세션이 보는 확정 상태 — (신청, 결정 기록들, 고객사들)."""
+    with admin_db() as db:
+        row = db.get(models.SignupRequest, request_id)
+        decisions = db.scalars(
+            select(models.SignupRequestDecision)
+            .where(models.SignupRequestDecision.request_id == request_id)
+        ).all()
+        tenants = db.scalars(select(models.Tenant)).all()
+    return row, decisions, tenants
+
+
+@pytest.mark.parametrize("rival", ["reject", "approve"])
+def test_concurrent_approval_and_rival_decision_have_one_winner_and_a_coherent_row(admin_db, rival):
     with admin_db() as db:
         tokens = [seed_central_admin(db, n) for n in (1, 2)]
         db.commit()
     with admin_db() as db:
         request_id = service.create(db, uuid.uuid4(), body()).request_id
-    bodies = [
-        SignupRequestStatusRequest(status="APPROVED"),
-        SignupRequestStatusRequest(status="REJECTED", reason="중복 신청"),
+    operations = [
+        lambda db, actor: service.approve(db, actor, request_id, approval(ACCOUNT), SETTINGS),
+        (
+            lambda db, actor: service.change_status(
+                db, actor, request_id, SignupRequestStatusRequest(status="REJECTED", reason="중복 신청")
+            )
+        ) if rival == "reject" else (
+            lambda db, actor: service.approve(db, actor, request_id, approval(RIVAL_ACCOUNT), SETTINGS)
+        ),
     ]
     barrier = threading.Barrier(2)
     results: list = [None, None]
 
     def run(i):
-        actor = Actor(token=tokens[i], idle_seconds=1800, clock=lambda: datetime.now(UTC))
+        actor = actor_for(tokens[i])
         with admin_db() as db:
             barrier.wait(10)
             try:
-                results[i] = service.change_status(db, actor, request_id, bodies[i])
+                results[i] = operations[i](db, actor)
             except ApiError as exc:
                 results[i] = exc
 
@@ -198,20 +244,73 @@ def test_concurrent_approve_and_reject_have_one_winner_and_a_coherent_row(admin_
         t.join(30)
         assert not t.is_alive()
 
-    winners = [i for i, r in enumerate(results) if not isinstance(r, ApiError)]
+    winners = [r for r in results if r is not None and not isinstance(r, ApiError)]
     losers = [r for r in results if isinstance(r, ApiError)]
     assert len(winners) == 1 and len(losers) == 1
     assert losers[0].code == ErrorCode.SIGNUP_REQUEST_STATE_CONFLICT
-    with admin_db() as db:
-        row = db.get(models.SignupRequest, request_id)
-        decisions = db.scalars(
-            select(models.SignupRequestDecision)
-            .where(models.SignupRequestDecision.request_id == request_id)
-        ).all()
-    assert row.status.value == bodies[winners[0]].status.value
-    assert row.rejected_reason == bodies[winners[0]].reason
-    assert results[winners[0]].status == row.status
+    row, decisions, tenants = committed(admin_db, request_id)
+    won = winners[0]
+    item = won.request if isinstance(won, SignupRequestApproveResponse) else won
+    assert item.status == row.status and item.rejected_reason == row.rejected_reason
     assert len(decisions) == 1
     assert decisions[0].outcome == row.status
     assert decisions[0].rejected_reason == row.rejected_reason
-    assert decisions[0].actor_user_id == results[winners[0]].decision.actor_user_id
+    assert decisions[0].actor_user_id == item.decision.actor_user_id
+    if row.status is SignupRequestStatus.APPROVED:
+        # 진 쪽은 고객사를 만들지 않았다 — 고객사는 이긴 승인의 것 하나뿐이다
+        assert [(t.tenant_id, t.aws_account_id, t.group_id) for t in tenants] == [
+            (row.tenant_id, won.tenant.tenant.aws_account_id, None)
+        ]
+        assert won.tenant.tenant.tenant_id == row.tenant_id
+    else:
+        assert (row.status, row.tenant_id, tenants) == (SignupRequestStatus.REJECTED, None, [])
+
+
+@pytest.mark.parametrize("failure", ["onboarding", "decision", "response"])
+def test_approval_failing_after_the_tenant_insert_commits_nothing(admin_db, monkeypatch, failure):
+    with admin_db() as db:
+        token = seed_central_admin(db, 1)
+        db.commit()
+    with admin_db() as db:
+        request_id = service.create(db, uuid.uuid4(), body()).request_id
+    inserted: list[str] = []
+    original_create = tenants_repo.create_tenant
+
+    def recording_create(*args, **kwargs):
+        tenant = original_create(*args, **kwargs)
+        inserted.append(tenant.tenant_id)
+        return tenant
+
+    monkeypatch.setattr(tenants_repo, "create_tenant", recording_create)
+    settings = SETTINGS
+    if failure == "onboarding":  # 고객사 INSERT 뒤, 응답의 온보딩 링크에서 503
+        settings = TenantSettings(TENANT_ONBOARDING_TEMPLATE_URL=None, PLATFORM_PRINCIPAL_ARN=None)
+        expected = ErrorCode.TENANT_ONBOARDING_UNAVAILABLE
+    elif failure == "decision":  # 고객사 · 신청 갱신 · 결정 INSERT 뒤 DB 오류
+        original_decision = signup_repo.add_decision
+
+        def fail_after_insert(*args, **kwargs):
+            original_decision(*args, **kwargs)
+            raise OperationalError("decision write", {}, Exception("not exposed"))
+
+        monkeypatch.setattr(signup_repo, "add_decision", fail_after_insert)
+        expected = ErrorCode.INTERNAL_ERROR
+    else:  # 모든 쓰기 뒤, commit 전의 응답 조립 실패
+        def fail_build(*args, **kwargs):
+            raise RuntimeError("response build failed")
+
+        monkeypatch.setattr(service, "_item", fail_build)
+        expected = RuntimeError
+
+    with admin_db() as db:
+        with pytest.raises((ApiError, RuntimeError)) as err:
+            service.approve(db, actor_for(token), request_id, approval(ACCOUNT), settings)
+    if expected is RuntimeError:
+        assert type(err.value) is RuntimeError
+    else:
+        assert isinstance(err.value, ApiError) and err.value.code is expected
+
+    assert len(inserted) == 1  # 실패는 고객사 INSERT 뒤에 일어났다
+    row, decisions, tenants = committed(admin_db, request_id)
+    assert (row.status, row.tenant_id, row.rejected_reason) == (SignupRequestStatus.NEW, None, None)
+    assert (decisions, tenants) == ([], [])

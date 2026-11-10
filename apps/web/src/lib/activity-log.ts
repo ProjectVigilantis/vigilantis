@@ -43,6 +43,7 @@ const SYSTEM_TRIGGER: Record<Exclude<TriggerSource, 'USER_APPROVAL'>, string> = 
   PRE_MITIGATION_0_5S: '시스템 · 선제 차단',
   TIMEOUT_ISOLATION_1M: '시스템 · 1분 미응답 자동 격리',
   AUTO_ON_FAILURE: '시스템 · 실패 후 자동 복구',
+  NACL_DENY_EXPIRED_24H: '시스템 · 차단 24시간 만료 해제',
 };
 
 /** 고객사 계정에는 플랫폼 운영자 이메일이 오지 않는다(계약). 그때는 "플랫폼 운영자"로 적는다. */

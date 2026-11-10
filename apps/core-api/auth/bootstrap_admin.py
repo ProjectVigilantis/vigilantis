@@ -1,4 +1,6 @@
-"""플랫폼 계정 수명주기 운영 CLI (#492) — 플랫폼 계정은 이 CLI 로 직접 만들고 지정해서만 생긴다.
+"""플랫폼 계정 수명주기 운영 CLI (#492 · #572 1번) — 첫 중앙 관리자 생성과 장애 복구(기존 Cognito 사용자 연결 ·
+UNASSIGNED 지정)용이다. 평시 직원 초대는 중앙 관리자가 직원 관리 API(POST /api/v1/staff)에서 한다 — 만드는
+계정(배정 없는 PLATFORM · TENANT_MANAGER)은 이 CLI 의 --platform 생성과 같다.
 
     cd apps/core-api
     # 직원 계정 만들기 — --platform 필수, 등급은 담당 고객사 배정이 없는 TENANT_MANAGER. 기본은 미리보기다.
@@ -18,19 +20,22 @@
 - 새 직원은 담당 고객사 배정이 없는 TENANT_MANAGER 다(고객사 범위 없음). 이 CLI 가 주는 높은 등급은
   CENTRAL_ADMIN 하나이며, ACTIVE 중앙 관리자가 0명일 때만(첫 지정 · 전원 비활성 뒤 복구) 준다 — 사전 확인하고
   잠금 안에서 다시 센다. 이미 있으면 거절한다. 마이그레이션은 기존 PLATFORM 을 CENTRAL_ADMIN 으로 옮기므로
-  그런 DB 에서는 필요 없다. 추가 중앙 관리자 지정 · 강등과 담당 고객사 배정은 중앙 관리자가 직원 관리
-  API(/api/v1/staff)에서 한다. 이 CLI 는 담당 고객사를 배정하지 않는다.
+  그런 DB 에서는 필요 없다. 추가 중앙 관리자 지정 · 강등과 담당 그룹 배정(#572 2번)은 중앙 관리자가 직원 관리
+  API(/api/v1/staff)에서 한다. 이 CLI 는 담당 그룹을 배정하지 않는다.
 - 지정(UNASSIGNED)은 tenant_id NULL 이고 ACTIVE 인 UNASSIGNED 만 받는다. TENANT · 비활성 계정은 거절하며
   복구하지 않는다. 지정하면 account_type=PLATFORM · platform_role=TENANT_MANAGER(role=ADMIN 호환 값,
   배정 없음)로 바꾸고 기존 세션을 ADMIN_REVOKED 로 폐기한다(새 로그인 필요).
 - 중앙 관리자 지정(기존 계정)은 ACTIVE PLATFORM 계정만 받는다 — TENANT · UNASSIGNED 는 거절한다(계정 종류 ·
   소속을 바꾸지 않는다). 그 계정의 issuer 가 설정된 Cognito 풀이고, Cognito AdminGetUser(--email)의 sub 가
-  계정의 cognito_sub 와 같을 때만 바꾼다. 기존 담당 고객사 배정은 같은 트랜잭션에서 비운다 — 뒤에 담당자로
-  내려도 예전 배정이 되살아나지 않는다. 세션은 그대로 둔다 — 세션 판정이 매 요청 현재 등급 · 배정을 읽는다.
+  계정의 cognito_sub 와 같을 때만 바꾼다. 기존 담당 그룹 배정은 같은 트랜잭션에서 비운다(cleared_assignments =
+  비운 그룹 수) — 뒤에 담당자로 내려도 예전 배정이 되살아나지 않는다. 세션은 그대로 둔다 — 세션 판정이 매 요청
+  현재 등급 · 배정을 읽는다.
 - 기존 신원((issuer, sub))이 이미 app_users 에 있으면 만들기는 거절한다 — 고객사 소속을 옮기지 않는다.
 - 삭제 · 비활성화 · 강등 경로는 없다. 이 CLI 의 변경은 사용자 관리 이력(user_admin_events)에 남지 않는다
   (행위자 앱 계정이 없다).
 - 기존 Cognito 사용자 연결은 운영자가 --existing-cognito-user 로 명시할 때만 한다(자동 연결 없음).
+- 이 실행이 만든 Cognito 사용자는 DB 등록이 실패하거나 잠금 안 재확인에 거절되면 sub 로 지운다(보상 삭제 —
+  직원 관리 API 초대와 같은 규칙). --existing-cognito-user 로 연결하려던 기존 사용자는 지우지 않는다.
 - 임시 비밀번호 · 비밀값 · 토큰은 출력하지 않는다. user_id · 등급 · Cognito 사용자 상태만 출력한다.
 """
 
@@ -133,6 +138,43 @@ def _cognito(call: Callable[[], dict], say: Callable[[str], None]) -> dict | Non
     except BotoCoreError as exc:
         say(f"실패: Cognito 호출 오류 {type(exc).__name__}")
     return None
+
+
+def _discard_created_user(
+    db: Session, client: Any, *, pool: str, issuer: str, sub: str, say: Callable[[str], None]
+) -> bool:
+    """이 실행이 만든 Cognito 사용자의 보상 삭제(AdminDeleteUser, Username=sub) — 지웠으면 True.
+
+    직원 관리 API 초대(staff_service._discard_created_user)와 같은 규칙이다. 새 트랜잭션에서 (issuer, sub) 가
+    app_users 에 없음을 확인하고 닫은 뒤에만 지운다 — 있으면(끊긴 commit 이 반영됐을 수 있다) · 확인이 실패하면
+    지우지 않는다. 4xx UserNotFoundException 은 이미 없는 것이라 지운 것과 같다(재시도가 앞선 시도의 삭제를 본 경우).
+    5xx 는 어댑터(CognitoAdapter._send)와 같이 코드와 무관하게 실패다. 최선 노력 경계다 — 확인 · 삭제의 어떤
+    예외도 실패로 출력하고 False 를 돌려준다(호출자의 종료 코드를 바꾸지 않는다). 출력은 예외 이름 · 오류 코드뿐이다.
+    """
+    try:
+        try:
+            present = auth_repo.get_user_by_identity(db, issuer=issuer, cognito_sub=sub) is not None
+        finally:
+            db.rollback()  # 확인 트랜잭션을 Cognito 호출 전에 닫는다
+    except Exception as exc:  # noqa: BLE001 - 보상은 원래 결과를 바꾸지 않는다
+        say(f"보상 삭제 안 함: 신원 확인 오류 {type(exc).__name__}.")
+        return False
+    if present:
+        say("보상 삭제 안 함: 그 신원((issuer, sub))의 계정이 app_users 에 있다 — 등록이 반영됐을 수 있다.")
+        return False
+    try:
+        client.admin_delete_user(UserPoolId=pool, Username=sub)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "Unknown")
+        status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        if code != "UserNotFoundException" or (status is not None and status >= 500):
+            say(f"보상 삭제 실패: Cognito 오류 {code}.")
+            return False
+    except Exception as exc:  # noqa: BLE001 - 보상은 원래 결과를 바꾸지 않는다
+        say(f"보상 삭제 실패: Cognito 호출 오류 {type(exc).__name__}.")
+        return False
+    say("보상 삭제: 이 실행이 만든 Cognito 사용자를 지웠다.")
+    return True
 
 
 def _central_admin_blocker(db: Session) -> str | None:
@@ -294,9 +336,9 @@ def _bootstrap_central_admin(
         auth_repo.set_platform_role(
             db, user_id=user_id, platform_role=PlatformRole.CENTRAL_ADMIN, now=stamp
         )
-        # 중앙 관리자는 전체 범위라 배정이 필요 없다 — 남기면 뒤에 담당자로 내릴 때 예전 범위가 되살아난다
-        cleared = len(auth_repo.list_assigned_tenant_ids(db, user_id=user_id))
-        auth_repo.replace_assigned_tenants(db, user_id=user_id, tenant_ids=(), now=stamp)
+        # 중앙 관리자는 전체 범위라 담당 그룹이 필요 없다 — 남기면 뒤에 담당자로 내릴 때 예전 범위가 되살아난다
+        cleared = len(auth_repo.list_assigned_group_ids(db, user_id=user_id))
+        auth_repo.replace_assigned_groups(db, user_id=user_id, group_ids=(), now=stamp)
         db.commit()
     except SQLAlchemyError as exc:
         db.rollback()
@@ -401,10 +443,17 @@ def run(
         say("실패: Cognito 응답에 sub 가 없다.")
         return EXIT_FAILED
 
+    issuer = _issuer(settings)
+
+    def discarded() -> bool:
+        """이 실행이 Cognito 사용자를 만들었을 때만 보상 삭제한다 — --existing-cognito-user 의 기존 사용자는 지우지 않는다."""
+        if args.existing_cognito_user:
+            return False
+        return _discard_created_user(db, client, pool=pool, issuer=issuer, sub=sub, say=say)
+
     try:
         # 확인과 삽입을 같은 잠금 안에서 — 동시 실행이 같은 신원((issuer, sub))을 둘 다 만들지 못하게 한다(이메일은 유일하지 않다)
         auth_repo.lock_users_table(db)
-        issuer = _issuer(settings)
         if auth_repo.get_user_by_identity(db, issuer=issuer, cognito_sub=sub) is not None:
             db.rollback()
             say("거절: 그 신원((issuer, sub))의 계정이 이미 app_users 에 있다. 기존 계정은 바꾸지 않았다 — UNASSIGNED 면 --designate-unassigned-user-id 로 지정한다.")
@@ -412,10 +461,14 @@ def run(
         blocker = _central_admin_blocker(db) if args.central_admin else None
         if blocker:
             db.rollback()
-            say(
-                f"거절: 그 사이 바뀌었다. {blocker} 계정은 만들지 않았다 — Cognito 사용자는 남아 있을 수 있다"
-                "(TENANT_MANAGER 로 연결하려면 --existing-cognito-user 로 다시 실행한다)."
-            )
+            say(f"거절: 그 사이 바뀌었다. {blocker} 계정은 만들지 않았다.")
+            if discarded():
+                say("TENANT_MANAGER 로 만들려면 --central-admin 없이 다시 실행한다.")
+            else:
+                say(
+                    "Cognito 사용자가 남아 있을 수 있다 — TENANT_MANAGER 로 연결하려면 "
+                    "--existing-cognito-user 로 다시 실행한다."
+                )
             return EXIT_REFUSED
         row = auth_repo.create_user(
             db,
@@ -431,7 +484,11 @@ def run(
         db.commit()
     except SQLAlchemyError as exc:
         db.rollback()
-        say(f"실패: DB 등록 오류 {type(exc).__name__}. Cognito 사용자는 남아 있을 수 있다 — --existing-cognito-user 로 다시 연결한다.")
+        say(f"실패: DB 등록 오류 {type(exc).__name__}.")
+        if discarded():
+            say("계정은 만들지 않았다 — 같은 명령으로 다시 실행한다.")
+        else:
+            say("Cognito 사용자가 남아 있을 수 있다 — 앱 계정이 없으면 --existing-cognito-user 로 다시 연결한다.")
         return EXIT_FAILED
 
     say(f"완료: user_id={row.user_id} platform_role={platform_role.value} cognito_status={status}")

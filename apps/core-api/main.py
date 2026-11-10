@@ -47,6 +47,7 @@ from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
 import agent_dispatcher  # noqa: E402
 import dispatcher  # noqa: E402
+from api_usage import TenantApiUsageMiddleware  # noqa: E402
 from auth.access import require_user  # noqa: E402
 from auth.http import log_provider_status, register_auth_http, require_origin  # noqa: E402
 from config import get_auth_settings, get_settings  # noqa: E402
@@ -64,11 +65,14 @@ from routers import auth as auth_router  # noqa: E402
 from routers import costs as costs_router  # noqa: E402
 from routers import incidents as incidents_router  # noqa: E402
 from routers import inquiries as inquiries_router
+from routers import marketplace as marketplace_router  # noqa: E402
 from routers import metrics as metrics_router  # noqa: E402
 from routers import notifications as notifications_router
+from routers import platform as platform_router  # noqa: E402
 from routers import signup_requests as signup_requests_router
 from routers import staff as staff_router  # noqa: E402
 from routers import subscriptions as subscriptions_router
+from routers import tenant_groups as tenant_groups_router
 from routers import tenant_settings as tenant_settings_router  # noqa: E402
 from routers import tenants as tenants_router  # noqa: E402
 from routers import threat_events as threat_events_router  # noqa: E402
@@ -76,6 +80,7 @@ from routers import users as users_router  # noqa: E402
 from routers import ws as ws_router  # noqa: E402
 from security.soar import start_timeout_watcher  # noqa: E402
 from services.scheduler import start_scheduler as start_scan_scheduler  # noqa: E402
+from marketplace_sync import start_marketplace_scheduler  # noqa: E402
 from subscription_scheduler import start_subscription_scheduler  # noqa: E402
 from support_http import SignupBodyLimitMiddleware
 
@@ -120,6 +125,8 @@ def create_app() -> FastAPI:
             partial(start_timeout_watcher, realtime.publish),
             # 고객 구독 계약 처리(모의 Marketplace 활성화 · 갱신 · 만료 · 투영). 발행하는 이벤트가 없다.
             start_subscription_scheduler,
+            # 실제 AWS Marketplace 알림 수신 · 권리 끝 재확인. 상품 코드가 없으면 뜨지 않는다.
+            start_marketplace_scheduler,
         )
         try:
             for start in starts:
@@ -201,6 +208,9 @@ def create_app() -> FastAPI:
     # 바깥이라 미처리 예외의 500 봉투에도 헤더가 붙는다
     register_auth_http(app)
     log_provider_status(get_auth_settings())
+    # 고객사별 API 호출 집계(#572 6번) — request_context 바깥이라 응답 · 접근 로그가 끝난 뒤 그 요청의 신원
+    # (request.state.current_user)으로 센다. 기록 시간은 접근 로그의 duration_ms 에 들지 않는다
+    app.add_middleware(TenantApiUsageMiddleware)
 
     # CORS는 request_context보다 나중에 추가한다 — 나중 추가가 바깥층이라
     # 미들웨어가 만든 오류 봉투 응답에도 CORS 헤더가 붙는다.
@@ -230,13 +240,19 @@ def create_app() -> FastAPI:
     app.include_router(costs_router.router, dependencies=protected)
     app.include_router(incidents_router.router, dependencies=protected)
     app.include_router(inquiries_router.router, dependencies=protected)
+    # 등록 랜딩은 AWS 에서 오는 구매자 브라우저가 부른다 — 세션 없이 마운트하고 토큰을 AWS 가 확인한다
+    app.include_router(marketplace_router.router)
     app.include_router(metrics_router.router, dependencies=protected)
     app.include_router(notifications_router.router, dependencies=protected)
+    # 플랫폼 상태 · 호출 통계(#572 6번) — 라우터가 CENTRAL_ADMIN 관문을 건다
+    app.include_router(platform_router.router, dependencies=protected)
     # 같은 prefix의 GET/PUT은 라우터가 CENTRAL_ADMIN 관문을 건다. 공개는 POST 한 경로뿐이다.
     app.include_router(signup_requests_router.router)
     app.include_router(staff_router.router, dependencies=protected)
     app.include_router(subscriptions_router.router, dependencies=protected)
     app.include_router(tenants_router.router, dependencies=protected)
+    # 고객사 그룹(#572 2번) — 플랫폼 계정 관문은 라우터가, 생성 · 삭제의 중앙 관리계정 관문은 라우트가 건다
+    app.include_router(tenant_groups_router.router, dependencies=protected)
     # 고객 설정(T-7) — 고객사 계정도 들어오는 별도 라우터. 등급 · 범위는 Workflow 가 auth.access 로 건다
     app.include_router(tenant_settings_router.router, dependencies=protected)
     # 위협 이벤트 목록(#572 10번)도 세션 배선만 쓰고, 고객사 범위는 라우트가 require_tenant_scope 로 건다

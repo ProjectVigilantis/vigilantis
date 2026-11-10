@@ -7,7 +7,7 @@ tenant_id · session_id · target_id 에는 FK 를 두지 않는다 — 고객�
 계정 종류 · 플랫폼 등급은 app_users 의 enum 타입을 그대로 쓴다.
 
 Revision ID: c589e7a1b2d3
-Revises: a1b7c4d2e905
+Revises: f609f610e001
 Create Date: 2026-11-06 14:00:00.000000
 """
 
@@ -18,7 +18,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision = "c589e7a1b2d3"
-down_revision = "a1b7c4d2e905"
+down_revision = "f609f610e001"
 branch_labels = None
 depends_on = None
 

@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from db.repositories import tenants as tenants_repo
 from schemas.api.auth import AccountType, LoginStep, PlatformRole, UserRole
 from sqlalchemy import text
+from tests.group_scope import assign_tenants
 
 ORIGIN = "https://app.example.com"
 ISSUER = "https://cognito-idp.ap-northeast-2.amazonaws.com/ap-northeast-2_pool"
@@ -420,7 +421,7 @@ def test_me_returns_user_and_session_info(http, flow, user, tenant_id):
     body = http.get("/api/v1/auth/me").json()
     assert set(body) == {
         "user_id", "email", "role", "account_type", "tenant_id", "platform_role", "session",
-        "assigned_tenant_ids",
+        "assigned_tenant_ids", "permissions",
     }
     assert body["user_id"] == user.user_id
     assert (body["email"], body["role"]) == ("u@example.com", "OPERATOR")
@@ -462,10 +463,10 @@ def test_me_reads_manager_assignments_fresh_on_every_request(http, db, flow, mak
         return response.json()["assigned_tenant_ids"]
 
     assert assigned() == []
-    auth_repo.replace_assigned_tenants(db, user_id=row.user_id, tenant_ids=(second, first), now=T0)
+    assign_tenants(db, user_id=row.user_id, tenant_ids=(second, first), now=T0)
     db.commit()
     assert assigned() == [first, second]
-    auth_repo.replace_assigned_tenants(db, user_id=row.user_id, tenant_ids=(second,), now=T0)
+    assign_tenants(db, user_id=row.user_id, tenant_ids=(second,), now=T0)
     db.commit()
     assert assigned() == [second]
     assert auth_repo.set_platform_role(

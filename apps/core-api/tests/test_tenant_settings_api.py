@@ -272,8 +272,8 @@ def test_revalidation_inside_the_lock_writes_nothing_and_releases_the_staged_sec
     now = datetime.now(UTC)
     changes = {
         "session-revoked": lambda s: sessions.revoke_session(s, actor.token, now=now),
-        "assignment-revoked": lambda s: auth_repo.replace_assigned_tenants(
-            s, user_id=actor.user_id, tenant_ids=(), now=now),
+        "assignment-revoked": lambda s: auth_repo.replace_assigned_groups(
+            s, user_id=actor.user_id, group_ids=(), now=now),
         "demoted-to-viewer": lambda s: s.execute(
             update(models.AppUser).where(models.AppUser.user_id == actor.user_id).values(role=UserRole.VIEWER)),
         "tenant-suspended": lambda s: s.execute(

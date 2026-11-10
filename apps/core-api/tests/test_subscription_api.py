@@ -189,7 +189,8 @@ def test_purchase_activation_renewal_disable_and_expiry_over_http(client_pg, db,
     expired = client_pg.get(BASE).json()
     assert (expired["subscription"], expired["source"], expired["entitlement_ends_at"]) == (FREE, "APP_FREE", None)
     assert (expired["agreement"]["status"], expired["agreement"]["ended_at"]) == ("EXPIRED", "2026-11-29T15:00:00Z")
-    assert expired["available_actions"] == ["PURCHASE", "STOP"]
+    # 만료 = 서비스 정지(SSOT 2026-11-06) — 정지 중이라 구매 · 중단 동작이 없다
+    assert (expired["service_status"], expired["available_actions"]) == ("SUSPENDED", [])
 
 
 # ----- ④ 정지 · 연결 전 · 닫힘 ----------------------------------------------------------
