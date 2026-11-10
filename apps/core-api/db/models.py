@@ -1976,6 +1976,10 @@ class SignupRequest(Base):
         _enum(SignupRequestStatus, "signup_request_status"), default=SignupRequestStatus.NEW
     )
     rejected_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # 승인으로 만들어진 고객사. 옛 승인 건·거절·미결정은 NULL이며 고객사를 지워도 신청과 결정 기록은 남는다.
+    tenant_id: Mapped[str | None] = mapped_column(
+        _ID, ForeignKey("tenants.tenant_id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow

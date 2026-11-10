@@ -724,7 +724,10 @@ def _valid_bodies(incident_id: str) -> dict[tuple[str, str], dict | None]:
         ("DELETE", "/api/v1/tenants/{tenant_id}"): None,
         ("POST", "/api/v1/tenants/{tenant_id}/suspend"): {"reason": "해지"},
         ("PATCH", "/api/v1/tenants/{tenant_id}/settings"): {"protected_tags": []},
-        ("PUT", "/api/v1/signup-requests/{request_id}/status"): {"status": "APPROVED"},
+        ("PUT", "/api/v1/signup-requests/{request_id}/status"): {"status": "IN_REVIEW"},
+        ("POST", "/api/v1/signup-requests/{request_id}/approve"): {
+            "aws_account_id": "123456789012", "regions": ["ap-northeast-2"],
+        },
         ("POST", "/api/v1/inquiries"): {"category": "BUG", "title": "문의", "body": "확인 요청"},
         ("PUT", "/api/v1/inquiries/{inquiry_id}/status"): {"status": "IN_PROGRESS"},
         ("POST", "/api/v1/inquiries/{inquiry_id}/notes"): {"note": "확인 중"},

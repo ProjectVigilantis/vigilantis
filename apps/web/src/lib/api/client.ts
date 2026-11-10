@@ -29,6 +29,8 @@ import type {
   PaginationParams,
   ResolutionJudgement,
   SignupRequestAccepted,
+  SignupRequestApproveRequest,
+  SignupRequestApproveResponse,
   SignupRequestCreate,
   SignupRequestItem,
   SignupRequestsResponse,
@@ -226,9 +228,13 @@ export function createReadApi(transport: ApiTransport) {
       return request<IncidentResponse>(`/incidents/${encodeURIComponent(incidentId)}`, undefined, transport);
     },
 
-    /** 고객(테넌트) 목록 · 상세(Post-MVP T-4). 서버 컴포넌트가 세션 쿠키를 실어 부른다(app/tenants). */
-    getTenants(): Promise<TenantsResponse> {
-      return request<TenantsResponse>('/tenants', undefined, transport);
+    /**
+     * 고객(테넌트) 목록 · 상세(Post-MVP T-4). 서버 컴포넌트가 세션 쿠키를 실어 부른다(app/tenants).
+     * `unassigned_only`는 생략 시 false, true면 `group_id=null`만 조회한다. 고객사 상태와는 무관하다.
+     */
+    getTenants(query: { unassigned_only?: boolean } = {}): Promise<TenantsResponse> {
+      const suffix = query.unassigned_only === undefined ? '' : `?unassigned_only=${query.unassigned_only}`;
+      return request<TenantsResponse>(`/tenants${suffix}`, undefined, transport);
     },
 
     getTenant(tenantId: string): Promise<TenantDetail> {
@@ -598,7 +604,17 @@ export function getStaffEvents(userId: string, limit = 50): Promise<UserEventsRe
 
 /* ── 도입 신청 · 고객사 문의 · 관리자 알림(#552, types/api.ts 끝). ── */
 
-/** 신청 상태를 옮긴다. 반려(REJECTED)면 `reason`이 필수다(서버가 빈 값을 422로 거절한다). */
+export function approveSignupRequest(
+  requestId: string,
+  body: SignupRequestApproveRequest,
+): Promise<SignupRequestApproveResponse> {
+  return postJson<SignupRequestApproveResponse>(`/signup-requests/${encodeURIComponent(requestId)}/approve`, body);
+}
+
+/**
+ * 신청 상태를 옮긴다. 반려(REJECTED)면 `reason`이 필수다(서버가 빈 값을 422로 거절한다).
+ * 승인은 `approveSignupRequest`(`POST /signup-requests/{id}/approve`)로만 한다. 기존 APPROVED PUT 호출은 서버가 거절한다.
+ */
 export function changeSignupRequestStatus(
   requestId: string,
   status: SignupRequestStatus,

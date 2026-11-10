@@ -6,6 +6,7 @@ import { test } from 'node:test';
 
 import {
   ApiError,
+  approveSignupRequest,
   cancelMyRenewal,
   changeUserRole,
   changeUserStatus,
@@ -107,6 +108,30 @@ test('도입 신청의 401은 로그인 이동 없이 ApiError로 올라온다(�
     ),
     (error: unknown) => error instanceof ApiError && error.httpStatus === 401,
   );
+});
+
+test('승인은 전용 경로로 계정과 리전을 보내고 계정 충돌을 그대로 전한다', async (t) => {
+  const sent = stubFetch(t, errorResponse(409, 'TENANT_ACCOUNT_CONFLICT'));
+  const body = { aws_account_id: '123456789012', regions: ['ap-northeast-2'] };
+  await assert.rejects(
+    approveSignupRequest('request/1', body),
+    (error: unknown) => error instanceof ApiError && error.code === 'TENANT_ACCOUNT_CONFLICT',
+  );
+  assert.match(sent[0].url, /\/api\/v1\/signup-requests\/request%2F1\/approve$/);
+  assert.equal(sent[0].method, 'POST');
+  assert.deepEqual(sent[0].body, body);
+});
+
+test('담당 그룹 없는 고객사 필터는 세션 전달을 유지하고 기존 목록 호출도 그대로 둔다', async (t) => {
+  const sent = stubFetch(t, () => new Response(JSON.stringify({ tenants: [] }), { status: 200 }));
+  const api = createReadApi({ headers: { Cookie: '__Host-vg_session=test-session' } });
+  await api.getTenants();
+  await api.getTenants({ unassigned_only: true });
+  await api.getTenants({ unassigned_only: false });
+  assert.match(sent[0].url, /\/api\/v1\/tenants$/);
+  assert.match(sent[1].url, /\/api\/v1\/tenants\?unassigned_only=true$/);
+  assert.match(sent[2].url, /\/api\/v1\/tenants\?unassigned_only=false$/);
+  assert.ok(sent.every((request) => request.headers.Cookie === '__Host-vg_session=test-session'));
 });
 
 test('사용자 관리 조치의 경로 · 메서드 · 본문', async (t) => {
@@ -212,6 +237,7 @@ test('이력 조회는 상한 50을 싣는다', async (t) => {
 test('신청 목록은 페이지 질의를 보내고 서버의 판정 스냅샷과 페이지 정보를 소비한다', async (t) => {
   const pending: SignupRequestItem = {
     request_id: 'request-new',
+    tenant_id: null,
     company_name: 'Customer',
     contact_name: 'Requester',
     email: 'requester@example.invalid',
@@ -229,6 +255,7 @@ test('신청 목록은 페이지 질의를 보내고 서버의 판정 스냅샷�
       {
         ...pending,
         request_id: 'request-approved',
+        tenant_id: 'tenant-created',
         status: 'APPROVED',
         updated_at: '2026-11-02T00:00:00Z',
         decision: {
@@ -265,6 +292,8 @@ test('신청 목록은 페이지 질의를 보내고 서버의 판정 스냅샷�
   assert.equal(sent[0].method, 'GET');
   assert.deepEqual(result, response);
   assert.equal(result.items[0].decision, null);
+  assert.equal(result.items[0].tenant_id, null);
+  assert.equal(result.items[1].tenant_id, 'tenant-created');
   assert.equal(result.items[1].decision?.actor_email, 'historical-admin@example.invalid');
   assert.equal(result.items[2].decision?.rejected_reason, 'Duplicate request');
 });

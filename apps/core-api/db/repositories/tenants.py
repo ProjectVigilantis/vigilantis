@@ -216,13 +216,15 @@ def tenant_id_for_account(db: Session, aws_account_id: str) -> Optional[str]:
 
 
 def list_tenants(
-    db: Session, *, scope_ids: Optional[Sequence[str]] = None
+    db: Session, *, scope_ids: Optional[Sequence[str]] = None, unassigned_only: bool = False
 ) -> list[TenantWithCounts]:
     """생성 순(created_at 오름차순 · 같으면 tenant_id) — 계약 TenantsResponse 의 정렬.
-    scope_ids 가 None 이면 전체, 빈 목록이면 빈 결과다."""
+    scope_ids 가 None 이면 전체, 빈 목록이면 빈 결과다. unassigned_only 면 그 안에서 그룹 없는(group_id NULL) 행만."""
     statement = _with_counts()
     if scope_ids is not None:
         statement = statement.where(_T.tenant_id.in_(list(scope_ids)))
+    if unassigned_only:
+        statement = statement.where(_T.group_id.is_(None))
     rows = db.execute(statement.order_by(_T.created_at, _T.tenant_id))
     return [TenantWithCounts(*row) for row in rows]
 

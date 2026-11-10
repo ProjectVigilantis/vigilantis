@@ -7,8 +7,10 @@
 #     이메일 소문자화 같은 정규화를 새로 얹지 않는다(값 규약은 스키마가 정한다).
 #   - 재시도 키 ↔ 신청 매핑은 신청과 함께 남는다. 보존 · 삭제 기준(TTL)은 정하지 않았고, 공개 전
 #     T15 에서 정해야 한다. 이 키는 스팸 방지도 이메일 소유 확인도 아니다.
-#   - 처리: 중앙 관리자만(support_access 가 쓰기 직전 행위자를 다시 판정). 승인은 판정 기록일 뿐
-#     테넌트 · 사용자 · Cognito · 이메일 발송을 만들지 않는다.
+#   - 처리: 중앙 관리자만(support_access 가 쓰기 직전 행위자를 다시 판정). 승인은 POST approve 하나다(#572 묶음 B) —
+#     한 트랜잭션에서 고객사를 만들고(tenant_admin.create_tenant_uncommitted · PENDING_CONNECTION · 그룹 없음) 신청을
+#     APPROVED 로 옮겨 그 고객사에 잇고 결정을 남긴 뒤, 응답까지 만들고서 commit 한다. 사용자 · Cognito · 이메일 발송은
+#     만들지 않는다. PUT status 는 승인하지 않는다(409 SIGNUP_REQUEST_APPROVAL_REQUIRED).
 #   - 접수 경로의 DB 오류는 분류하지 않고 내용도 싣지 않는다(개인정보 포함 가능) → 500 INTERNAL_ERROR.
 # ==============================================================================
 
@@ -18,7 +20,9 @@ import logging
 from datetime import UTC, datetime
 from uuid import UUID
 
+import tenant_admin
 from auth.access import require_central_admin
+from config import TenantSettings
 from db import models
 from db.repositories import operator_notifications
 from db.repositories import signup_requests as repo
@@ -26,6 +30,8 @@ from exceptions import ApiError
 from schemas.api.errors import ErrorCode
 from schemas.api.signup_requests import (
     SignupRequestAccepted,
+    SignupRequestApproveRequest,
+    SignupRequestApproveResponse,
     SignupRequestCreate,
     SignupRequestDecisionItem,
     SignupRequestItem,
@@ -37,20 +43,20 @@ from schemas.api.support import (
     NotificationKind,
     SignupRequestStatus,
 )
+from schemas.api.tenants import TenantCreateRequest
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from support_access import Actor, authorize, write_transaction
 
 logger = logging.getLogger(__name__)
 
+# PUT status 의 전이. 승인(APPROVED)은 여기 없다 — 고객사 생성과 한 트랜잭션인 approve 로만 간다.
 _TRANSITIONS = {
-    SignupRequestStatus.NEW: frozenset(
-        {SignupRequestStatus.IN_REVIEW, SignupRequestStatus.APPROVED, SignupRequestStatus.REJECTED}
-    ),
-    SignupRequestStatus.IN_REVIEW: frozenset(
-        {SignupRequestStatus.APPROVED, SignupRequestStatus.REJECTED}
-    ),
+    SignupRequestStatus.NEW: frozenset({SignupRequestStatus.IN_REVIEW, SignupRequestStatus.REJECTED}),
+    SignupRequestStatus.IN_REVIEW: frozenset({SignupRequestStatus.REJECTED}),
 }
+# approve 를 받는 상태. 승인 · 반려된 신청은 고객사를 지워 tenant_id 가 비어도 다시 승인하지 않는다.
+_APPROVABLE = frozenset({SignupRequestStatus.NEW, SignupRequestStatus.IN_REVIEW})
 
 
 def _same_submission(row: models.SignupRequest, body: SignupRequestCreate) -> bool:
@@ -110,6 +116,7 @@ def _item(
 ) -> SignupRequestItem:
     return SignupRequestItem(
         request_id=row.request_id,
+        tenant_id=row.tenant_id,
         company_name=row.company_name,
         contact_name=row.contact_name,
         email=row.email,
@@ -136,26 +143,32 @@ def list_requests(
     )
 
 
-def change_status(
-    db: Session, actor: Actor, request_id: str, body: SignupRequestStatusRequest
-) -> SignupRequestItem:
+def _stored_id(db: Session, actor: Actor, request_id: str) -> str:
     try:
-        canonical_id = str(UUID(request_id))
+        return str(UUID(request_id))
     except ValueError:
         # 형식이 틀린 id 도 없는 id 와 같다 — 권한 판정은 먼저 한다.
         authorize(db, actor, require_central_admin)
         raise ApiError(ErrorCode.SIGNUP_REQUEST_NOT_FOUND) from None
+
+
+def change_status(
+    db: Session, actor: Actor, request_id: str, body: SignupRequestStatusRequest
+) -> SignupRequestItem:
+    canonical_id = _stored_id(db, actor, request_id)
     with write_transaction(db, actor, require_central_admin) as user:
         row = repo.get_for_update(db, canonical_id)
         if row is None:
             raise ApiError(ErrorCode.SIGNUP_REQUEST_NOT_FOUND)
+        if body.status is SignupRequestStatus.APPROVED:
+            raise ApiError(ErrorCode.SIGNUP_REQUEST_APPROVAL_REQUIRED)
         if body.status not in _TRANSITIONS.get(row.status, frozenset()):
             raise ApiError(ErrorCode.SIGNUP_REQUEST_STATE_CONFLICT)
         row.status = body.status
         row.rejected_reason = body.reason
         row.updated_at = datetime.now(UTC)
         decision = None
-        if body.status in (SignupRequestStatus.APPROVED, SignupRequestStatus.REJECTED):
+        if body.status is SignupRequestStatus.REJECTED:
             decision = repo.add_decision(
                 db,
                 request_id=row.request_id,
@@ -167,3 +180,45 @@ def change_status(
             )
         db.flush()
         return _item(row, decision)
+
+
+def approve(
+    db: Session,
+    actor: Actor,
+    request_id: str,
+    body: SignupRequestApproveRequest,
+    settings: TenantSettings,
+) -> SignupRequestApproveResponse:
+    """승인 = 고객사 생성. 신청 잠금 → 상태 판정 → 고객사(commit 없는 생성 본체) → APPROVED · tenant_id · 결정 기록 →
+    응답(온보딩 링크 포함)을 다 만든 뒤 write_transaction 이 한 번 commit 한다. 어디서 실패해도 전부 되돌린다."""
+    canonical_id = _stored_id(db, actor, request_id)
+    with write_transaction(db, actor, require_central_admin) as user:
+        row = repo.get_for_update(db, canonical_id)
+        if row is None:
+            raise ApiError(ErrorCode.SIGNUP_REQUEST_NOT_FOUND)
+        if row.status not in _APPROVABLE:
+            raise ApiError(ErrorCode.SIGNUP_REQUEST_STATE_CONFLICT)
+        now = actor.clock()
+        created = tenant_admin.create_tenant_uncommitted(
+            db,
+            user,
+            TenantCreateRequest(
+                name=row.company_name, aws_account_id=body.aws_account_id, regions=body.regions
+            ),
+            settings,
+            now=now,
+        )
+        row.status = SignupRequestStatus.APPROVED
+        row.rejected_reason = None
+        row.tenant_id = created.tenant.tenant_id
+        row.updated_at = now
+        decision = repo.add_decision(
+            db,
+            request_id=row.request_id,
+            actor_user_id=user.user_id,
+            actor_email=user.email,
+            decided_at=now,
+            outcome=SignupRequestStatus.APPROVED,
+            rejected_reason=None,
+        )
+        return SignupRequestApproveResponse(request=_item(row, decision), tenant=created)
