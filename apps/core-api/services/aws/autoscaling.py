@@ -60,6 +60,7 @@ from .executor import (
     STEP_CREATE_IMAGE,
     STEP_CREATE_LAUNCH_TEMPLATE,
     STEP_PUT_SCALING_POLICY,
+    TENANT_PROFILE_PASS_ROLE_DETAIL,
     ExecutionOutcome,
     StepRecorder,
     _abort,
@@ -71,6 +72,7 @@ from .executor import (
     _rejected,
     _StepLog,
     _summarize,
+    _tenant_profile_needs_pass_role,
     escape_filter_value,
     parse_arn,
 )
@@ -371,6 +373,9 @@ def prepare_ec2_autoscaling_plan(
     problem = _source_problem(instance)
     if problem is not None:
         return _not_prepared(R.PRECHECK_INVALID_STATE, problem)
+    # precheck와 계획 사이에 프로파일이 붙었을 수 있다. 계획이 첫 생성 호출 앞의 마지막 자리다
+    if _tenant_profile_needs_pass_role(instance):
+        return _not_prepared(R.PRECHECK_UNAUTHORIZED, TENANT_PROFILE_PASS_ROLE_DETAIL)
 
     image_name = autoscaling_image_name(instance_id, execution_id)
     template_name = _launch_template_name(instance_id)

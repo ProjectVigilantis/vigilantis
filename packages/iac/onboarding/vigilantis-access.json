@@ -5,7 +5,6 @@
     "ExternalId": {
       "Type": "String",
       "MinLength": 16,
-      "NoEcho": true,
       "Description": "Issued by Vigilantis for this customer. Required on every AssumeRole."
     },
     "PlatformPrincipalArn": {

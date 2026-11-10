@@ -13,7 +13,11 @@
 # 만드는 자원(AMI · 시작 템플릿 · ASG · 그 ASG가 띄우는 인스턴스)에는 실행 태그가 있어야만 한다는 울타리를
 # 남긴다. tests/test_onboarding_template.py가 스모크 테스트의 작업 거울을 그대로 이 정책에 건다.
 #
-# 넣지 않은 것: iam:PassRole. 인스턴스 프로파일이 달린 인스턴스의 ASG 전환은 이 역할로는 거절된다.
+# 넣지 않은 것: iam:PassRole. 인스턴스 프로파일이 달린 인스턴스의 ASG 전환은 이 역할로는 할 수 없어,
+# 코어가 테넌트 문맥에서 precheck·계획 단계에 미리 거절한다(executor._tenant_profile_needs_pass_role).
+#
+# ExternalId에 NoEcho를 걸지 않는다. 빠른 생성 링크는 NoEcho 파라미터의 param_ 값을 버리고, AWS는
+# ExternalId를 비밀로 보지 않는다(IAM 사용 설명서 third-party 절). 막는 것은 신뢰 정책의 일치 조건이다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -150,7 +154,7 @@ def build_template() -> dict:
         "Description": "Vigilantis customer access role. The platform assumes this role with your ExternalId "
                        "to monitor and act on this account. Delete the stack to revoke access.",
         "Parameters": {
-            "ExternalId": {"Type": "String", "MinLength": 16, "NoEcho": True,
+            "ExternalId": {"Type": "String", "MinLength": 16,
                            "Description": "Issued by Vigilantis for this customer. Required on every AssumeRole."},
             "PlatformPrincipalArn": {"Type": "String", "AllowedPattern": r"^arn:aws:iam::\d{12}:role/[\w+=,.@/-]+$",
                                      "Description": "The Vigilantis platform role allowed to assume this role."},

@@ -48,6 +48,11 @@ def test_parameters_match_the_quick_create_link():
     assert link_params == set(onboarding.PARAMETERS) == set(TEMPLATE["Parameters"])
 
 
+def test_link_parameters_are_not_no_echo():
+    """빠른 생성 링크는 NoEcho 파라미터의 param_ 값을 버린다. 걸면 고객이 ExternalId를 손으로 넣어야 한다."""
+    assert [name for name, spec in TEMPLATE["Parameters"].items() if spec.get("NoEcho")] == []
+
+
 def test_role_trusts_only_the_platform_principal_with_the_external_id():
     (statement,) = TEMPLATE["Resources"]["AccessRole"]["Properties"]["AssumeRolePolicyDocument"]["Statement"]
     assert statement["Principal"] == {"AWS": {"Ref": "PlatformPrincipalArn"}}
