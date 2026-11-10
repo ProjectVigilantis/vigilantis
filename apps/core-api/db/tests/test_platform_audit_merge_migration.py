@@ -38,7 +38,7 @@ OCCURRED_AT = datetime(2026, 10, 30, 9, 0, tzinfo=UTC)
 # head 의 테이블 수 — 기존 27종 + TOTP 복구 2종 + 도입·문의 5종 + T-7 고객 설정 · 정리 대기 · 파일 바인딩 증거 3종 + #565 신청 결정 1종
 # + #528 옛 재개 전 구독 보존 · 모의 Marketplace 계약 · 이벤트 3종 + #572 운영자 기능 권한 1종 · 6번 고객사별 API 호출 버킷 1종
 # + #572 고객사 그룹 · 그룹 배정 2종 − 직접 배정 1종
-HEAD_TABLES = 44
+HEAD_TABLES = 45  # + marketplace_licenses(ADR-0012 2차 개정)
 
 
 @pytest.fixture()

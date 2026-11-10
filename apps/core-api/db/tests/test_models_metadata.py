@@ -22,6 +22,8 @@ EXPECTED_TABLES = {
     "tenant_subscription_history",
     "mock_marketplace_agreements",
     "mock_marketplace_events",
+    # 실제 AWS Marketplace 라이선스 사본(ADR-0012 2차 개정)
+    "marketplace_licenses",
     # 자산·인시던트 계열 10종
     "collection_runs",
     "asset_inventory_counts",  # 회차별 유형별 자산 수 — 시계열 축 5 (2026-09-29)
@@ -115,10 +117,11 @@ def test_row_invariant_constraints_registered():
             "ck_tenants_billing_anchor_day_range",
             "ck_tenants_billing_anchor_with_period",
             "ck_tenants_cancel_with_period_end",
-            # 투영의 원천(모의 Marketplace)
+            # 투영의 원천(모의 · 실제 Marketplace)
             "ck_tenants_source_iff_subscription",
-            "ck_tenants_entitlement_end_with_mock",
+            "ck_tenants_entitlement_end_with_contract",
             "ck_tenants_mock_projection_shape",
+            "ck_tenants_marketplace_projection_shape",
             "ck_tenants_app_free_is_free",
         },
         "mock_marketplace_agreements": {
@@ -129,6 +132,11 @@ def test_row_invariant_constraints_registered():
             "ck_mock_marketplace_agreements_renewal_disabled_shape",
         },
         "mock_marketplace_events": {"ck_mock_marketplace_events_source_is_mock"},
+        "marketplace_licenses": {
+            "ck_marketplace_licenses_account_format",
+            "ck_marketplace_licenses_plan_is_paid",
+            "ck_marketplace_licenses_active_shape",
+        },
         "tenant_api_calls_hourly": {
             "ck_tenant_api_calls_hourly_calls_nonnegative",
             "ck_tenant_api_calls_hourly_hour_on_the_hour",

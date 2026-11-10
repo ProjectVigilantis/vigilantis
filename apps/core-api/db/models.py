@@ -139,13 +139,19 @@ _NO_SUBSCRIPTION_FACTS = (
 _SUBSCRIPTION_SOURCE_SHAPE = {
     # 원천이 없으면 구독 칸도 없다(등록 안 됨) — 반대도 같다
     "source_iff_subscription": f"(subscription_source IS NULL) = ({_NO_SUBSCRIPTION_FACTS})",
-    # 권리 끝 시각은 모의 계약 투영에만 있다
-    "entitlement_end_with_mock": (
-        "(subscription_source IS NOT DISTINCT FROM 'MOCK_MARKETPLACE') = (entitlement_ends_at IS NOT NULL)"
+    # 권리 끝 시각은 계약 투영(모의 · 실제 Marketplace)에만 있다. 마이그레이션(20261110_e600b2c4d711)이 넓혔다
+    "entitlement_end_with_contract": (
+        "(subscription_source IS NOT DISTINCT FROM 'MOCK_MARKETPLACE'"
+        " OR subscription_source IS NOT DISTINCT FROM 'AWS_MARKETPLACE') = (entitlement_ends_at IS NOT NULL)"
     ),
     # 모의 계약 투영은 기간이 있는 유료 요금제이고 요금을 지어내지 않는다
     "mock_projection_shape": (
         "subscription_source IS DISTINCT FROM 'MOCK_MARKETPLACE' OR (plan IN ('Business', 'Enterprise')"
+        " AND period_start IS NOT NULL AND period_end IS NOT NULL AND amount_minor IS NULL)"
+    ),
+    # 실제 Marketplace 투영도 같다 — 요금은 AWS 청구에 있고 여기에 옮겨 적지 않는다
+    "marketplace_projection_shape": (
+        "subscription_source IS DISTINCT FROM 'AWS_MARKETPLACE' OR (plan IN ('Business', 'Enterprise')"
         " AND period_start IS NOT NULL AND period_end IS NOT NULL AND amount_minor IS NULL)"
     ),
     "app_free_is_free": "subscription_source IS DISTINCT FROM 'APP_FREE' OR plan = 'Free'",
@@ -444,6 +450,48 @@ class MockMarketplaceEvent(Base):
             "created_at",
             postgresql_where=text("processed_at IS NULL"),
         ),
+    )
+
+
+# 실제 Marketplace 권리 — 마이그레이션(20261110_e600b2c4d711)이 같은 식을 쓴다
+_MARKETPLACE_LICENSE_SHAPE = {
+    "account_format": "customer_aws_account_id ~ '^[0-9]{12}$'",
+    "plan_is_paid": "plan IS NULL OR plan IN ('Business', 'Enterprise')",
+    # 유효한 권리는 요금제와 끝 시각이 있어야 투영할 수 있다
+    "active_shape": "NOT active OR (plan IS NOT NULL AND expires_at IS NOT NULL)",
+}
+
+
+class MarketplaceLicense(Base):
+    """실제 AWS Marketplace 라이선스 1건 — GetEntitlements 로 다시 읽은 값의 사본(ADR-0012 2차 개정 · marketplace.py).
+
+    권위 있는 원천은 AWS 이고 이 행은 마지막으로 읽은 결과다. 테넌트와는 FK 가 아니라 고객 AWS 계정
+    (tenants.aws_account_id)으로 이어진다 — 등록 랜딩이 테넌트가 생기기 전에 올 수 있기 때문이다. 한 계정이
+    라이선스를 여럿 가질 수 있다(동시 계약). 그중 투영할 것은 유효한 것 가운데 요금제가 가장 최근에 바뀐
+    것이다(decided_at) — 고객이 요금제를 올리거나 내리면 그 결정을 따른다.
+    """
+
+    __tablename__ = "marketplace_licenses"
+
+    license_arn: Mapped[str] = mapped_column(String(2048), primary_key=True)
+    customer_aws_account_id: Mapped[str] = mapped_column(String(12), index=True)
+    product_code: Mapped[str] = mapped_column(String(255))
+    #: ResolveCustomer 의 Metadata.AgreementId. GetEntitlements 로만 알게 된 라이선스는 비어 있다.
+    agreement_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    #: 권리의 가격 항목 이름 그대로(Marketplace 상품 설정).
+    dimension: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    #: dimension 을 대응시킨 요금제. 대응이 없으면 비어 있고 투영하지 않는다.
+    plan: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: 마지막 GetEntitlements 에 나왔고 끝 시각 전이다.
+    active: Mapped[bool] = mapped_column(Boolean, default=False)
+    #: 요금제가 지금 값으로 바뀐 것을 처음 본 시각 — 「최근 결정」의 기준이다.
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    refreshed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = tuple(
+        CheckConstraint(sql, name=name) for name, sql in _MARKETPLACE_LICENSE_SHAPE.items()
     )
 
 
@@ -1976,6 +2024,10 @@ class SignupRequest(Base):
         _enum(SignupRequestStatus, "signup_request_status"), default=SignupRequestStatus.NEW
     )
     rejected_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # 승인으로 만들어진 고객사. 옛 승인 건·거절·미결정은 NULL이며 고객사를 지워도 신청과 결정 기록은 남는다.
+    tenant_id: Mapped[str | None] = mapped_column(
+        _ID, ForeignKey("tenants.tenant_id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow

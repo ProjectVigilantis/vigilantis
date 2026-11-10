@@ -441,6 +441,18 @@ def test_search_returns_at_most_twenty_by_name(client_pg, db, admin):
     assert [i["name"] for i in items] == [f"상한 검색 {n:02d}" for n in range(20)]
 
 
+def test_search_treats_like_wildcards_as_literal_characters(client_pg, db, admin):
+    literal = _named(db, "할인%_고객사", "100000000021")
+    _named(db, "할인일반고객사", "100000000022")
+
+    for query in ("%", "_"):
+        response = client_pg.get(f"{BASE}/search", params={"q": query})
+        assert response.status_code == 200
+        assert response.json()["items"] == [
+            {"tenant_id": literal.tenant_id, "name": "할인%_고객사", "accessible": True},
+        ]
+
+
 @pytest.mark.parametrize("params", [{}, {"q": ""}, {"q": "가" * 101}])
 def test_search_without_a_valid_query_is_422(client_pg, admin, params):
     resp = client_pg.get(f"{BASE}/search", params=params)
@@ -478,6 +490,45 @@ def test_detail_has_link_only_while_pending_and_never_external_id(client_pg, db,
     assert resp.json()["last_verification"]["result"] == "OK"
     resp = client_pg.get(f"{BASE}/{pending.tenant_id}")
     assert resp.status_code == 503 and _code(resp) == "TENANT_ONBOARDING_UNAVAILABLE"
+
+
+def _listed_ids(client_pg, **params) -> list[str]:
+    resp = client_pg.get(BASE, params=params)
+    assert resp.status_code == 200
+    return [t["tenant_id"] for t in resp.json()["tenants"]]
+
+
+def test_unassigned_only_lists_ungrouped_customers_and_assigning_moves_one_out(
+    client_pg, db, admin, make_group
+):
+    later = _seed(db, TenantStatus.ACTIVE, OTHER, now=NOW + timedelta(minutes=1))
+    first = _seed(db)
+    grouped = _seed(db, account="444455556666", now=NOW + timedelta(minutes=2))
+    group_id = make_group(tenant_ids=[grouped.tenant_id])
+
+    everything = client_pg.get(BASE).json()["tenants"]
+    assert [t["tenant_id"] for t in everything] == [first.tenant_id, later.tenant_id, grouped.tenant_id]
+    assert client_pg.get(BASE, params={"unassigned_only": "false"}).json()["tenants"] == everything
+    # 그룹 없는 행만 같은 모양 · 같은 순서로 남는다 — 연결 상태(PENDING · ACTIVE)와 무관하다
+    unassigned = client_pg.get(BASE, params={"unassigned_only": "true"}).json()["tenants"]
+    assert unassigned == [t for t in everything if t["group_id"] is None]
+    assert [t["tenant_id"] for t in unassigned] == [first.tenant_id, later.tenant_id]
+
+    assert client_pg.put(f"{BASE}/{first.tenant_id}/group", json={"group_id": group_id}).status_code == 200
+    assert _listed_ids(client_pg, unassigned_only="true") == [later.tenant_id]
+    assert client_pg.get(BASE, params={"unassigned_only": "maybe"}).status_code == 422
+
+
+def test_unassigned_only_stays_inside_the_manager_scope(client_pg, db, manager):
+    mine = _seed(db)
+    ungrouped = _seed(db, TenantStatus.ACTIVE, OTHER)  # 그룹 없는 고객은 담당 범위가 아니다
+    _assign(db, manager.user_id, mine.tenant_id)
+
+    resp = client_pg.get(BASE, params={"unassigned_only": "true"})
+
+    assert resp.status_code == 200 and resp.json() == {"tenants": []}
+    assert ungrouped.tenant_id not in resp.text
+    assert _listed_ids(client_pg) == [mine.tenant_id]
 
 
 @pytest.mark.parametrize("tenant_id", [MISSING, "not-a-uuid"])

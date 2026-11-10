@@ -25,7 +25,8 @@
 #     PATCH 의 `subscription` 은 409 TENANT_STATE_CONFLICT 다 — 운영자 입력이 유효한 계약을 지우지 않는다.
 #
 # 경로 (전부 /api/v1)
-#   GET    /tenants                  → TenantsResponse. 관리자 직원계정은 담당 그룹 안의 고객사만(범위 밖 행은 없다)
+#   GET    /tenants?unassigned_only= → TenantsResponse. 관리자 직원계정은 담당 그룹 안의 고객사만(범위 밖 행은 없다).
+#                                      unassigned_only 는 생략 시 false, true 면 그 범위 안에서 group_id 가 null 인 고객사만(상태 무관)
 #   GET    /tenants/search?q=        → TenantSearchResponse(#572 7번). 이름 부분 일치(대소문자 무시) · 이름순 최대
 #                                      TENANT_SEARCH_LIMIT 건. 담당 밖 고객사도 accessible=false 로 나온다 — 고객사 ID ·
 #                                      이름 · accessible 말고는 싣지 않는다. q 는 1-100자(없거나 비면 422)
@@ -79,7 +80,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..arns import build_iam_role_arn
-from ..subscriptions import PAID_PLANS, SubscriptionSource, billing_period
+from ..subscriptions import CONTRACT_SOURCES, PAID_PLANS, SubscriptionSource, billing_period
 from .assets import UtcDateTime
 
 AwsAccountId = Annotated[str, Field(pattern=r"^\d{12}$")]
@@ -88,6 +89,8 @@ VpcId = Annotated[str, Field(pattern=r"^vpc-[0-9a-f]+$")]
 # IAM 역할 이름은 ASCII 만 받는다 — `\w` 는 유니코드 글자까지 받아 `role/역할` 이 통과한다
 RoleArn = Annotated[str, Field(pattern=r"^arn:aws:iam::\d{12}:role/[A-Za-z0-9_+=,.@/-]+$")]
 TenantName = Annotated[str, Field(min_length=1, max_length=100)]
+#: 관제받는 리전 — 하나 이상. 중복은 요청 모델의 검증기가 require_unique 로 거절한다.
+TenantRegions = Annotated[list[AwsRegion], Field(min_length=1)]
 
 #: 고객 역할 이름의 기본값. 온보딩 템플릿이 이 이름으로 만든다(#438 §C-1).
 DEFAULT_ACCESS_ROLE_NAME = "vigilantis-access"
@@ -102,6 +105,12 @@ def default_access_role_arn(aws_account_id: str) -> str:
 
 def _role_account(role_arn: str) -> str:
     return role_arn.split(":")[4]
+
+
+def require_unique(field: str, values: list) -> None:
+    """고객사를 만드는 요청(TenantCreateRequest · 도입 신청 승인)이 같은 규칙으로 목록 중복을 거절한다."""
+    if len(set(values)) != len(values):
+        raise ValueError(f"{field} 는 중복될 수 없습니다")
 
 
 class TenantStatus(str, Enum):
@@ -247,19 +256,17 @@ class TenantListItem(BaseModel):
     open_incident_count: int = Field(ge=0)
     #: 구독 현황(T-16). null = 구독 정보가 등록되지 않았다(Free 가 아니다). 서비스 정지와 무관하게 계약을 따른다.
     subscription: Optional[TenantSubscription] = None
-    #: 구독 투영의 원천. MOCK_MARKETPLACE 면 운영자 PATCH 로 바꿀 수 없다. null = 등록 안 됨.
+    #: 구독 투영의 원천. MOCK_MARKETPLACE · AWS_MARKETPLACE 면 운영자 PATCH 로 바꿀 수 없다. null = 등록 안 됨.
     subscription_source: SubscriptionSource | None = None
-    #: 모의 계약 투영의 권리 끝 시각(미포함). 원천이 MOCK_MARKETPLACE 일 때만 있다.
+    #: 계약 투영의 권리 끝 시각(미포함). 원천이 MOCK_MARKETPLACE · AWS_MARKETPLACE 일 때만 있다.
     entitlement_ends_at: UtcDateTime | None = None
     #: 고객사 그룹(#572 2번). null = 담당 그룹 없음(담당자 없음) — 연결 상태(status)와 별개다. 칸은 늘 있다(필수 · null 허용).
     group_id: str | None = Field(min_length=1)
 
     @model_validator(mode="after")
     def _enforce_subscription_source(self):
-        if (self.subscription_source is SubscriptionSource.MOCK_MARKETPLACE) != (
-            self.entitlement_ends_at is not None
-        ):
-            raise ValueError("entitlement_ends_at 은 모의 계약 투영에만, 그리고 반드시 있습니다")
+        if (self.subscription_source in CONTRACT_SOURCES) != (self.entitlement_ends_at is not None):
+            raise ValueError("entitlement_ends_at 은 계약 투영(모의 · 실제 Marketplace)에만, 그리고 반드시 있습니다")
         if (self.subscription_source is None) != (self.subscription is None):
             raise ValueError("등록 안 됨(subscription_source null)은 구독 정보가 없는 것입니다")
         return self
@@ -320,7 +327,7 @@ class TenantCreateRequest(BaseModel):
     aws_account_id: AwsAccountId
     #: 생략하면 `arn:aws:iam::<계정>:role/vigilantis-access`(온보딩 템플릿 기본값).
     access_role_arn: Optional[RoleArn] = None
-    regions: list[AwsRegion] = Field(min_length=1)
+    regions: TenantRegions
     collect_vpc_ids: list[VpcId] = Field(default_factory=list)
     #: 넣을 고객사 그룹(#572 3번). 중앙 관리계정은 생략할 수 있고(담당 그룹 없음), 관리자 직원계정은 자기 담당 그룹 중
     #: 하나가 필수다 — 빠지면 422, 담당 밖이면 403(서버 판정 · 경로 표).
@@ -330,10 +337,8 @@ class TenantCreateRequest(BaseModel):
     def _enforce_contract(self):
         if self.access_role_arn is not None and _role_account(self.access_role_arn) != self.aws_account_id:
             raise ValueError("access_role_arn 의 계정이 aws_account_id 와 다릅니다")
-        if len(set(self.regions)) != len(self.regions):
-            raise ValueError("regions 는 중복될 수 없습니다")
-        if len(set(self.collect_vpc_ids)) != len(self.collect_vpc_ids):
-            raise ValueError("collect_vpc_ids 는 중복될 수 없습니다")
+        require_unique("regions", self.regions)
+        require_unique("collect_vpc_ids", self.collect_vpc_ids)
         return self
 
 

@@ -55,6 +55,9 @@ FOREIGN_ORIGIN = "https://evil.example.com"
 PUBLIC_ROUTES = {
     ("GET", "/health"),
     ("POST", "/api/v1/signup-requests"),
+    # AWS Marketplace 등록 랜딩(ADR-0012 2차 개정) — 구매자 브라우저가 AWS 에서 폼으로 보낸다. 세션 · Origin 이 없고
+    # 토큰을 AWS(ResolveCustomer)가 확인한다. 상품 코드가 없으면 404 다
+    ("POST", "/api/v1/marketplace/register"),
     ("POST", "/api/v1/auth/login"),
     ("POST", "/api/v1/auth/login/new-password"),
     ("POST", "/api/v1/auth/login/totp-setup"),
@@ -724,7 +727,10 @@ def _valid_bodies(incident_id: str) -> dict[tuple[str, str], dict | None]:
         ("DELETE", "/api/v1/tenants/{tenant_id}"): None,
         ("POST", "/api/v1/tenants/{tenant_id}/suspend"): {"reason": "해지"},
         ("PATCH", "/api/v1/tenants/{tenant_id}/settings"): {"protected_tags": []},
-        ("PUT", "/api/v1/signup-requests/{request_id}/status"): {"status": "APPROVED"},
+        ("PUT", "/api/v1/signup-requests/{request_id}/status"): {"status": "IN_REVIEW"},
+        ("POST", "/api/v1/signup-requests/{request_id}/approve"): {
+            "aws_account_id": "123456789012", "regions": ["ap-northeast-2"],
+        },
         ("POST", "/api/v1/inquiries"): {"category": "BUG", "title": "문의", "body": "확인 요청"},
         ("PUT", "/api/v1/inquiries/{inquiry_id}/status"): {"status": "IN_PROGRESS"},
         ("POST", "/api/v1/inquiries/{inquiry_id}/notes"): {"note": "확인 중"},

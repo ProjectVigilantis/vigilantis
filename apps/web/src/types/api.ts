@@ -34,6 +34,7 @@ export type ErrorCode =
   | 'GROUP_NOT_FOUND' // 404 — 없는 그룹(#572 2번)
   | 'GROUP_NAME_CONFLICT' // 409 — 같은 이름의 그룹이 이미 있다(#572 2번)
   | 'USER_STATE_CONFLICT' // 409 — 고객사별 마지막 활성 ADMIN · 중복 초대 · 상태 충돌(#492)
+  | 'SIGNUP_REQUEST_APPROVAL_REQUIRED' // 409 — 승인은 AWS 계정 ID·리전을 받는 전용 approve 경로로 요청
   | 'REQUEST_VALIDATION_FAILED' // 422
   | 'INTERNAL_ERROR'; // 500
 
@@ -822,7 +823,7 @@ export interface TenantVerification {
 /**
  * 지금 적용 중인 구독(T-16 · #528) — 투영이다. 결제 · 청구는 없다.
  * 원천(`subscription_source`)은 수동 등록(MANUAL) · 모의 Marketplace 계약의 현재 권리(MOCK_MARKETPLACE) ·
- * 앱 정책 Free(APP_FREE)다. 모의 계약 자체는 `/me/subscription`의 `agreement`가 권위다.
+ * 앱 정책 Free(APP_FREE) · 실제 AWS Marketplace 권리(AWS_MARKETPLACE, 상품 등록 뒤에만 생긴다)다. 모의 계약 자체는 `/me/subscription`의 `agreement`가 권위다.
  */
 export interface TenantSubscription {
   /** 요금제 이름. 'Free' · 'Business' · 'Enterprise' 밖의 옛 수동 등록 값도 보존된다. null = 등록 안 됨(Free 아님). */
@@ -954,7 +955,7 @@ export interface TenantUpdateRequest {
    유료 권리의 원천은 서버 안의 모의 Marketplace 계약이고 실제 AWS 호출 · 구매 · 청구가 없다. */
 
 /** 구독 투영의 원천. */
-export const SUBSCRIPTION_SOURCES = ['MANUAL', 'MOCK_MARKETPLACE', 'APP_FREE'] as const;
+export const SUBSCRIPTION_SOURCES = ['MANUAL', 'MOCK_MARKETPLACE', 'APP_FREE', 'AWS_MARKETPLACE'] as const;
 export type SubscriptionSource = (typeof SUBSCRIPTION_SOURCES)[number];
 
 /** 모의 Marketplace 로 구매를 요청할 수 있는 요금제(월 단위 계약형). 요금제 사이 전환은 없다. */
@@ -1299,6 +1300,7 @@ export interface SignupRequestDecisionItem {
 
 export interface SignupRequestItem {
   request_id: string;
+  tenant_id: string | null;
   company_name: string;
   contact_name: string;
   email: string;
@@ -1313,6 +1315,16 @@ export interface SignupRequestItem {
 
 export interface SignupRequestsResponse extends PaginationMetadata {
   items: SignupRequestItem[];
+}
+
+export interface SignupRequestApproveRequest {
+  aws_account_id: string;
+  regions: string[];
+}
+
+export interface SignupRequestApproveResponse {
+  request: SignupRequestItem;
+  tenant: TenantCreateResponse;
 }
 
 /**
@@ -1437,6 +1449,7 @@ export interface SignupRequestCreate {
 /**
  * `PUT /signup-requests/{id}/status` 요청. REJECTED로 옮길 때는 `reason`(반려 사유)이 필수이고 비면 422,
  * 다른 상태면 null이다. 고객사 정지(`POST /tenants/{id}/suspend`의 reason, 응답 suspended_reason)와 같은 모양이다.
+ * 승인은 `POST /signup-requests/{id}/approve`로만 한다. 기존 화면 호환을 위해 상태 타입은 유지하지만 APPROVED PUT은 서버가 거절한다.
  */
 export interface SignupRequestStatusChange {
   status: SignupRequestStatus;

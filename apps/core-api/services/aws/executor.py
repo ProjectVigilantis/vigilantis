@@ -107,7 +107,7 @@ from .backup import (
     eni_security_groups,
     registered_ports,
 )
-from .client import aws_client
+from .client import aws_client, current_tenant
 from .errors import aws_error_code, reason_code_for, run_dry_run, watch_dry_run_protocol
 from .nacl_rules import (
     first_inbound_allow_rule_number,
@@ -533,6 +533,26 @@ def _launch_template_name(instance_id: str) -> str:
 
 def _asg_name(instance_id: str) -> str:
     return f"vigilantis-asg-{instance_id}"
+
+
+TENANT_PROFILE_PASS_ROLE_DETAIL = (
+    "인스턴스 프로파일이 달린 인스턴스는 고객 계정 접근 역할로 ASG 전환할 수 없습니다"
+    "(그 역할에 iam:PassRole이 없습니다)"
+)
+
+
+def _tenant_profile_needs_pass_role(instance: Mapping[str, Any]) -> bool:
+    """고객 계정 접근 역할(scripts/onboarding_template.py)로는 프로파일을 넘길 수 없다.
+
+    프로파일을 실은 시작 템플릿으로 ASG를 만들면 AWS가 호출자에게 iam:PassRole을 요구하는데,
+    온보딩 역할에는 그 권한을 주지 않는다. 시작 템플릿 DryRun은 PassRole을 보지 않으므로
+    precheck와 계획 단계에서 미리 거절한다. 그러지 않으면 AMI·시작 템플릿을 만든 뒤 ASG 생성에서
+    실패해 고객 계정에 자원이 남는다. 테넌트 문맥 밖(스모크 · 단일 계정)은 운영자가 PassRole을 줄
+    수 있어 막지 않는다.
+    """
+    return current_tenant() is not None and bool(
+        (instance.get("IamInstanceProfile") or {}).get("Arn")
+    )
 
 
 def _preserved_source_tags(instance: Mapping[str, Any]) -> tuple[AutoscalingTag, ...]:
@@ -1146,6 +1166,13 @@ def _precheck_enable_autoscaling(ctx: _Ctx) -> PrecheckOutcome:
             ctx,
             R.PRECHECK_INVALID_STATE,
             verified=["인스턴스 존재"],
+            unverified=[_DESCRIBE_MISSES],
+        )
+    if _tenant_profile_needs_pass_role(instance):
+        return _fail(
+            ctx,
+            R.PRECHECK_UNAUTHORIZED,
+            verified=["인스턴스 running", TENANT_PROFILE_PASS_ROLE_DETAIL],
             unverified=[_DESCRIBE_MISSES],
         )
 

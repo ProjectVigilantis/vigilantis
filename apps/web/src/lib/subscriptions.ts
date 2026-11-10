@@ -49,6 +49,7 @@ export const SOURCE_LABELS: Record<SubscriptionSource, EnumLabel> = {
   MANUAL: { label: '수동 등록', tone: 'gray' },
   MOCK_MARKETPLACE: { label: '모의 Marketplace 계약', tone: 'blue' },
   APP_FREE: { label: '앱 기본 Free', tone: 'neutral' },
+  AWS_MARKETPLACE: { label: 'AWS Marketplace 계약', tone: 'blue' },
 };
 const SOURCE_UNREGISTERED: EnumLabel = { label: '미등록', tone: 'gray' };
 
@@ -113,6 +114,7 @@ export function anchorDayText(day: number | null): string | null {
 export function sourceNote(source: SubscriptionSource | null, subscription: TenantSubscription | null): string | null {
   if (source === 'MANUAL') return '수동 등록된 기록입니다. 자동 갱신 · 만료 정지를 하지 않습니다.';
   if (source === 'APP_FREE') return '유료 권리가 없는 상태(앱 기본 Free)입니다. AWS에서 구매한 요금제가 아닙니다.';
+  if (source === 'AWS_MARKETPLACE') return 'AWS Marketplace에서 구매한 요금제입니다. 결제와 갱신은 AWS에서 관리합니다.';
   if (source === 'MOCK_MARKETPLACE') {
     return subscription?.cancel_at_period_end
       ? '자동 갱신이 꺼져 있습니다. 권리 끝 시각까지 이용하고, 그 뒤 서버가 만료를 처리하면 서비스가 정지됩니다.'
