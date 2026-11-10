@@ -2,14 +2,10 @@
 # [파일 설명]  담당: 김세혁 (Infra & DevSecOps)
 # Vigilantis 플랫폼 배포 환경 구성·배포·정리 스크립트입니다. (ADR-0010)
 #
-# MVP 마감 판정(10/15(목)) 기준에 배포가 들어오면서, 플랫폼(api·web·DB)을 실 AWS에 올린다.
-# 단일 계정이지만 **실제 SaaS와 같은 모양**으로 세운다 — 플랫폼과 관제 대상(스모크 환경)을
-# VPC·역할로 가르고, 앱은 장기 키 없이 역할 전환(AssumeRole + ExternalId)으로만 관제 대상에
-# 닿는다. Post-MVP에서 계정을 가르면(#438 ①②) 접근 역할의 계정 번호만 바뀐다.
-#
-# Post-MVP T-8(#494)부터 계정을 가른다. 플랫폼 자원은 플랫폼 멤버 계정(--account)에 두고, 접근 역할
-# vigilantis-access만 고객 계정(--customer-account · 학원 계정)에 둔다. 스모크 정책·VPC도 고객 계정에서
-# 찾는다. 고객 인자를 빼면 MVP처럼 한 계정에 전부 둔다 — 학원 계정의 옛 플랫폼을 정리할 때 쓴다.
+# 플랫폼(api·web·DB·로그인)을 플랫폼 계정(--account)에 올린다. 앱은 장기 키 없이 역할 전환
+# (AssumeRole + 테넌트별 ExternalId)으로만 고객 계정에 닿는다. 고객 계정의 접근 역할은 이 스크립트가 만들지
+# 않는다. 고객이 고객 연결 화면의 빠른 생성 링크로 온보딩 템플릿(packages/iac/onboarding/)을 올려 만든다.
+# 템플릿은 up이 플랫폼 계정의 S3에 올린다(ADR-0010 5차 개정 · ADR-0012).
 #
 # 구성 (서울 리전 — 관제 대상과 같은 리전, ADR-0010 §2):
 #   브라우저 ─HTTPS─ CloudFront(기본 도메인 · --domain을 주면 그 도메인도) + WAF(IP당 속도 제한 → 허용 IP만)
@@ -18,24 +14,25 @@
 #                 ├ /api/* · /health → ECS api (태스크 1개 고정)
 #                 └ 그 밖           → ECS web
 #   ECS(프라이빗 서브넷) → RDS PostgreSQL(프라이빗) · NAT → OpenAI·AWS API
-#   api 태스크 역할(vigilantis-platform) ─AssumeRole + ExternalId─ vigilantis-access(고객 계정) → 스모크 VPC
+#   api 태스크 역할(vigilantis-platform) ─AssumeRole + 테넌트 ExternalId─ vigilantis-access*(고객 계정)
+#   로그인: Cognito 사용자 풀(MFA ON · TOTP) ─ api가 관리자 흐름으로만 부른다
 #   오류 알람(CloudWatch → SNS 메일): api·web 정상 대상 10분 연속 0 · api 5xx · DB 남은 저장 공간
 #
 # Terraform이 아니라 Boto3인 이유: IaC는 Post-MVP다(ADR-0006 §2 · #438 ⑨). 방식은
 # scripts/provision_smoke_aws.py와 같다 — 태그 식별·멱등·미리 보기·실 AWS 전용 가드.
 #
-# 실행 (repo 루트, **플랫폼 계정의 관리자 프로필**로 — 앱 키가 아니다. [고객]은 아래 고객 인자):
-#   읽기만     : uv run python scripts/provision_platform_aws.py status --account <계정 ID> [고객]
-#   세울 목록  : ... up --account <계정 ID> --allow-cidr <허용 IP>/32 [--domain <도메인>] [--alarm-email <주소>] [고객]
-#   실제 생성  : ... up --account <계정 ID> --allow-cidr <허용 IP>/32 [--domain <도메인>] [--alarm-email <주소>] [고객] --yes
+# 실행 (repo 루트, **플랫폼 계정의 관리자 프로필**로 — 앱 키가 아니다):
+#   읽기만     : uv run python scripts/provision_platform_aws.py status --account <계정 ID>
+#   세울 목록  : ... up --account <계정 ID> --allow-cidr <허용 IP>/32 [--domain <도메인>] [--alarm-email <주소>]
+#   실제 생성  : ... up --account <계정 ID> --allow-cidr <허용 IP>/32 [--domain <도메인>] [--alarm-email <주소>] --yes
 #                --domain: Route53 호스팅 영역과 us-east-1 ACM 인증서(ISSUED)가 먼저 있어야 한다.
-#                          CloudFront→ALB HTTPS용으로 서울 리전 ACM 인증서(origin.<도메인>을 덮는 것, ISSUED)도 필요하다.
+#                          ALB용 서울 리전 인증서(origin.<도메인>)는 없으면 up --yes가 DNS 검증으로 받는다.
 #                CloudFront에 별칭·인증서를 달고 Route53에 A 별칭 레코드를 만든다
 #                --alarm-email: 오류 알람을 받을 주소. SNS가 보낸 확인 메일의 링크를 눌러야 알람이 온다
 #   이미지     : ... build --account <계정 ID> --tag <태그>        (docker 필요 — ECR에 api·web 푸시)
-#   배포       : ... deploy --account <계정 ID> --tag <태그> [--enable-dispatch] [고객] --yes
-#   전부 정리  : ... down --account <계정 ID> [고객] --yes
-#   고객 인자  : --customer-account <고객 계정 ID> --customer-profile <고객 계정의 관리자 프로필>
+#   배포       : ... deploy --account <계정 ID> --tag <태그> [--enable-dispatch] --yes
+#   첫 관리자  : ... bootstrap-admin --account <계정 ID> --email <주소> --yes   (처음 한 번. 그 뒤 계정은 화면에서 초대)
+#   전부 정리  : ... down --account <계정 ID> --yes   (로그인 사용자 풀과 그 사용자도 지운다)
 #   알림(#493) : 기본 배포는 NOTIFICATION_ENABLED=false다. 켜려면 비밀 아닌 입력 JSON을 명시한다:
 #                {"enabled": true, "public_base_url": "https://…", "routes": [{tenant_id, aws_account_id,
 #                 slack_webhook_env?, sns_topic_arn?}], "slack_secret_arns": {"<env>": "<기존 비밀 ARN>"},
@@ -56,21 +53,17 @@
 #
 # 안전 가드 (스모크 스크립트와 같다):
 #   ① AWS_ENDPOINT_URL이 잡혀 있으면 멈춘다 — 전부 실 AWS 과금 자원이다.
-#   ② --account가 호출 주체의 계정과 다르면 멈춘다. --customer-account도 --customer-profile의 계정과
-#      대조한다. 계정 ID와 허용 IP는 저장소에 적지 않는다.
+#   ② --account가 호출 주체의 계정과 다르면 멈춘다. 계정 ID와 허용 IP는 저장소에 적지 않는다.
 #   ③ up·deploy·down은 --yes 없이는 아무것도 바꾸지 않는다.
-#   ④ down이 지우는 것은 플랫폼 태그 자원과 **플랫폼 VPC 안의 것**뿐이다. 스모크 환경과
-#      그 앱 정책(vigilantis-smoke-app)·비용 정책(vigilantis-smoke-app-cost)은 건드리지 않는다 — 접근
-#      역할은 그 정책을 빌려 쓸 뿐이다. 반대로 스모크 down은 접근 역할이 그 정책을 붙잡고 있으면
-#      멈춘다 — 정리 순서는
-#      **플랫폼 down → 스모크 down**이다(ADR-0010 §7).
+#   ④ down이 지우는 것은 플랫폼 태그 자원과 **플랫폼 VPC 안의 것** · 로그인 사용자 풀 · 온보딩 버킷뿐이다.
+#      고객 계정은 건드리지 않는다. 고객이 만든 접근 역할은 고객이 스택을 지워 회수한다.
 #   ⑤ 이름이 같아도 플랫폼 태그(vigilantis:platform=true)가 없는 IAM 역할·오류 알람·알림 주제는 덮어쓰거나
 #      지우지 않는다.
 #   ⑥ --allow-cidr는 IPv4 CIDR이고 /24보다 넓으면 거부한다 — 로그인 없는 MVP에서 허용 IP가 출입문이다.
 #   ⑦ WAF 속도 제한(#484 · Post-MVP T-3) — IP당 RATE_LIMIT_PER_WINDOW 건 / RATE_WINDOW_SECONDS 초를
 #      허용 규칙(우선순위 2)보다 **앞**(우선순위 1)에서 센다. 허용이 먼저 맞으면 WAF가 거기서 평가를 끝내기 때문이다.
-#      NAT 공인 IP는 세지 않는다 — 웹의 서버 측 API 호출이 전부 그 IP 하나로 CloudFront를 지나므로
-#      세면 모든 사용자의 화면 요청이 한 IP에 쌓여 플랫폼이 스스로를 막는다(ADR-0010 §4).
+#      NAT 공인 IP는 세지 않는다 — 웹의 서버 측 API 호출이 전부 NAT IP(AZ마다 하나)로 CloudFront를 지나므로
+#      세면 모든 사용자의 화면 요청이 그 IP에 쌓여 플랫폼이 스스로를 막는다(ADR-0010 §4).
 #      동작은 Count(세기만)로 시작한다 — 정상 사용량을 재지 않았고, 캐시가 꺼져 있어 정적 파일까지
 #      전부 센다. 관측(CloudWatch 지표 vigilantis-platform-rate) 뒤 RATE_ACTION을 Block으로 바꾼다.
 #      up을 다시 돌리면 기존 웹 ACL의 규칙도 이 정의로 맞춘다 — 규칙을 고친 뒤 재실행이 곧 적용이다.
@@ -81,11 +74,9 @@
 #      IP로 세지고, NAT 제외도 같다. 경로는 URL 디코딩 뒤 맞춘다 — 앱은 %인코딩을 풀어 라우팅하므로 풀지
 #      않으면 /api/v1/auth/%6Cogin 으로 비켜 간다. 이 규칙도 Count로 시작해 같은 방식으로 관측 뒤 Block으로 바꾼다.
 #      앱 쪽 한도(AUTH_RATE_LIMITED · AUTH_CODE_FAILURE_LIMIT)는 그대로 남는다 — WAF는 그 앞의 IP 단위 거름이다.
-#   ⑧ 고객 계정의 접근 역할은 고객 태그(vigilantis:customer-access=<플랫폼 계정 ID>)로 식별한다. 다른 플랫폼
-#      계정의 태그가 달려 있거나 어느 태그도 없으면 덮어쓰지 않는다. 플랫폼 태그만 달린 역할(같은 계정의 옛
-#      플랫폼이 만든 것)은 넘겨받는다 — 고객 태그를 달고 플랫폼 태그를 떼어 옛 플랫폼의 down이 지우지 않게
-#      한다. 넘겨받는 순간 신뢰 정책이 바뀌어 옛 플랫폼은 그 역할로 들어가지 못한다. 플랫폼 down은 고객
-#      계정의 역할을 지우지 않는다 — 고객 계정의 자원이다.
+#   ⑧ 고객 계정에 닿는 권한은 vigilantis-access* 이름의 역할 전환뿐이다. 계정은 열려 있으므로 문은 고객 역할의
+#      신뢰 정책(이 태스크 역할 + 테넌트별 ExternalId)이 지킨다. 배포는 TENANT_CONTEXT_REQUIRED=true라 테넌트
+#      문맥 없는 AWS 호출이 플랫폼 계정으로 새지 않는다.
 #
 # 비밀값은 출력하지 않는다. OpenAI 키 비밀은 자리만 만들고 값은 PM이 직접 넣는다:
 #   aws secretsmanager put-secret-value --secret-id vigilantis-platform/openai-api-key --secret-string <키>
@@ -110,15 +101,14 @@ from urllib.parse import urlsplit
 from pydantic import TypeAdapter
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-for _p in (str(_REPO_ROOT / "apps" / "core-api"), str(_REPO_ROOT / "packages")):
+for _p in (str(_REPO_ROOT / "apps" / "core-api"), str(_REPO_ROOT / "packages"), str(_REPO_ROOT / "scripts")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-import boto3  # noqa: E402
-from botocore.config import Config  # noqa: E402
 from botocore.exceptions import ClientError  # noqa: E402
 
 import config as app_config  # noqa: E402
+import onboarding_template as onboarding  # noqa: E402
 from notifications.runtime import validate_notification_timing  # noqa: E402
 from notifications.routing import (  # noqa: E402
     MAX_CONFIG_BYTES, RouteConfigError, RouteRegistry, _no_duplicate_keys, parse_sns_topic_arn, validate_public_base_url,
@@ -132,9 +122,10 @@ TAG_VALUE = "true"
 
 VPC_NAME = f"{PREFIX}-vpc"
 VPC_CIDR = "10.50.0.0/16"  # 기본 VPC(172.31/16)·스모크 VPC(10.42/16)와 겹치지 않게
-PUBLIC_SUBNETS = {"a": "10.50.0.0/24", "c": "10.50.1.0/24"}    # ALB·NAT
+PUBLIC_SUBNETS = {"a": "10.50.0.0/24", "c": "10.50.1.0/24"}    # ALB·NAT(AZ마다 1개)
 PRIVATE_SUBNETS = {"a": "10.50.10.0/24", "c": "10.50.11.0/24"}  # ECS·RDS
-NAT_AZ = "a"  # NAT 1개 — 비용 우선(AZ 장애 시 c의 아웃바운드도 끊기는 대가, ADR-0010 §5)
+# NAT는 AZ마다 하나, 프라이빗 경로도 AZ마다 하나다. 한 AZ가 죽어도 다른 AZ의 태스크가 밖으로 나간다(ADR-0010 5차 개정)
+LEGACY_PRIVATE_TABLE = f"{PREFIX}-private"  # 5차 개정 전 두 AZ가 함께 쓰던 경로. up이 걷어 낸다
 
 SG_ALB = f"{PREFIX}-alb"
 SG_API = f"{PREFIX}-api"
@@ -167,21 +158,29 @@ ECR_REPOS = {"api": f"{PREFIX}-api", "web": f"{PREFIX}-web"}
 SECRET_DATABASE_URL = f"{PREFIX}/database-url"
 SECRET_OPENAI = f"{PREFIX}/openai-api-key"
 SECRET_ORIGIN = f"{PREFIX}/origin-verify"        # CloudFront → ALB 비밀 헤더 값
-SECRET_EXTERNAL_ID = f"{PREFIX}/access-external-id"
+SECRET_COGNITO_CLIENT = f"{PREFIX}/cognito-client-secret"
 OPENAI_PLACEHOLDER = "SET_ME"  # 값은 PM이 직접 넣는다 — 스크립트는 키를 다루지 않는다
 
 ROLE_EXEC = f"{PREFIX}-exec"   # ECS가 이미지를 받고 비밀을 주입하는 역할
-ROLE_TASK = PREFIX              # api 컨테이너의 역할 — 접근 역할 전환 하나만 허용
+ROLE_TASK = PREFIX              # api 컨테이너의 역할. 고객 접근 역할 전환과 로그인(Cognito)만
+# 고객 계정의 접근 역할 이름 접두. 역할은 고객이 온보딩 템플릿(packages/iac/onboarding/)으로 만든다.
+# 템플릿의 RoleName 패턴과 태스크 역할의 AssumeRole 범위가 이 접두로 맞물린다(ADR-0010 5차 개정)
 ROLE_ACCESS = "vigilantis-access"
-# 고객 계정에 둔 접근 역할의 식별 태그(안전 가드 ⑧) — 값은 그 역할을 쓰는 플랫폼 계정 ID다
-CUSTOMER_TAG_KEY = "vigilantis:customer-access"
-# 접근 역할의 권한은 스모크 스크립트가 만든 Action Whitelist 거울 정책을 그대로 빌린다(ADR-0009 §2).
-# 정책을 두 벌 두면 tests/test_provision_smoke_aws.py의 두 방향 보증이 한쪽에만 걸린다
-SMOKE_POLICY_NAME = "vigilantis-smoke-app"
-# 비용 조회(Cost Explorer)도 스모크 스크립트가 만든 정책을 빌린다. 앱 정책이 관리형 한도에 닿아 따로 뒀다
-SMOKE_COST_POLICY_NAME = "vigilantis-smoke-app-cost"
-SMOKE_VPC_NAME = "vigilantis-smoke-vpc"
-SESSION_SECONDS = 900  # 원격 회수(#438 ②)의 노출 상한과 같은 값
+TASK_POLICY = "customer-access-and-login"  # ROLE_TASK 인라인 정책(task_role_policy)
+LEGACY_TASK_POLICY = "assume-access-role"  # 5차 개정 전 이름. up이 걷고 down도 지운다
+
+# 로그인(T-1 · apps/core-api/auth/README.md §User Pool · 앱 클라이언트 전제)
+USER_POOL = f"{PREFIX}-users"
+USER_POOL_CLIENT = f"{PREFIX}-api"
+TEMP_PASSWORD_DAYS = 7  # 초대 메일 임시 비밀번호 유효 기간. 지나면 재발송으로 새로 받는다
+# 앱이 부르는 Cognito 관리 작업(auth/cognito.py). 테스트가 코드와 맞춘다
+COGNITO_ACTIONS = ("cognito-idp:AdminCreateUser", "cognito-idp:AdminDeleteSoftwareToken",
+                   "cognito-idp:AdminDeleteUser", "cognito-idp:AdminGetUser",
+                   "cognito-idp:AdminInitiateAuth", "cognito-idp:AdminRespondToAuthChallenge")
+
+# 고객 온보딩 템플릿을 두는 버킷. 빠른 생성 링크는 S3 주소만 받고, 고객 계정의 CloudFormation이 읽으므로
+# 템플릿 객체 하나만 공개로 읽게 둔다(비밀은 들어 있지 않다)
+ONBOARDING_BUCKET_PREFIX = f"{PREFIX}-onboarding"
 # WAF 허용 CIDR의 최소 접두 길이 — 이보다 넓은 범위(/0–/23)는 받지 않는다. WAF는 /0만 거절한다
 MIN_ALLOW_PREFIX = 24
 
@@ -236,34 +235,21 @@ DB_FREE_BYTES_MIN = 2 * 1024 ** 3
 
 
 # ------------------------------------------------------------------ 순수 정의 (테스트 대상)
-def task_role_policy(customer_account: str) -> dict:
-    """api 태스크 역할 — **접근 역할 전환 하나뿐**이다. AWS 자원을 직접 만지는 권한은 없다.
+def task_role_policy(user_pool_arn: str) -> dict:
+    """api 태스크 역할. 고객 접근 역할 전환과 로그인 사용자 풀 관리뿐이고, AWS 자원을 직접 만지는 권한은 없다.
 
-    플랫폼이 관제 대상에 닿는 길을 이 한 줄로 좁히는 것이 SaaS 모양의 핵심이다(ADR-0010 §3).
-    원격 회수(#438 ②)는 이 문장에서 고객 역할 ARN을 빼는 것으로 한다. 계정을 가르지 않았으면
-    customer_account는 플랫폼 계정 자신이다.
+    고객 계정은 정해져 있지 않다(고객이 온보딩으로 들어온다). 그래서 계정은 열고 역할 이름 접두로 좁힌다.
+    들어가는 문은 고객 역할의 신뢰 정책(이 역할 + 테넌트별 ExternalId)이 지킨다. 회수는 고객이 스택을
+    지우거나 앱이 그 테넌트의 역할 전환을 멈추는 것으로 한다(ADR-0012).
     """
     return {
         "Version": "2012-10-17",
-        "Statement": [{
-            "Sid": "AssumeAccessRoleOnly",
-            "Effect": "Allow",
-            "Action": "sts:AssumeRole",
-            "Resource": f"arn:aws:iam::{customer_account}:role/{ROLE_ACCESS}",
-        }],
-    }
-
-
-def access_trust_policy(platform_account: str, external_id: str) -> dict:
-    """접근 역할의 신뢰 정책 — 플랫폼 계정의 태스크 역할만, ExternalId가 맞을 때만."""
-    return {
-        "Version": "2012-10-17",
-        "Statement": [{
-            "Effect": "Allow",
-            "Principal": {"AWS": f"arn:aws:iam::{platform_account}:role/{ROLE_TASK}"},
-            "Action": "sts:AssumeRole",
-            "Condition": {"StringEquals": {"sts:ExternalId": external_id}},
-        }],
+        "Statement": [
+            {"Sid": "AssumeCustomerAccessRoles", "Effect": "Allow", "Action": "sts:AssumeRole",
+             "Resource": f"arn:aws:iam::*:role/{ROLE_ACCESS}*"},
+            {"Sid": "ManageLoginUsers", "Effect": "Allow", "Action": list(COGNITO_ACTIONS),
+             "Resource": user_pool_arn},
+        ],
     }
 
 
@@ -286,6 +272,62 @@ def exec_secrets_policy(secret_arns: list[str]) -> dict:
             "Effect": "Allow",
             "Action": "secretsmanager:GetSecretValue",
             "Resource": sorted(secret_arns),
+        }],
+    }
+
+
+def user_pool_definition() -> dict:
+    """로그인 사용자 풀(create_user_pool 인자). 값의 근거는 apps/core-api/auth/README.md §User Pool 전제다."""
+    return {
+        "PoolName": USER_POOL,
+        "UserPoolTier": "ESSENTIALS",
+        "UsernameAttributes": ["email"],
+        "UsernameConfiguration": {"CaseSensitive": False},
+        "AutoVerifiedAttributes": ["email"],
+        "MfaConfiguration": "OFF",  # TOTP를 켜기 전에는 ON으로 만들 수 없다. 생성 직후 set_user_pool_mfa_config로 ON
+        "Policies": {"PasswordPolicy": {
+            "MinimumLength": 12, "RequireUppercase": True, "RequireLowercase": True,
+            "RequireNumbers": True, "RequireSymbols": True, "TemporaryPasswordValidityDays": TEMP_PASSWORD_DAYS}},
+        "AdminCreateUserConfig": {"AllowAdminCreateUserOnly": True},
+        "AccountRecoverySetting": {"RecoveryMechanisms": [{"Priority": 1, "Name": "verified_email"}]},
+        "DeletionProtection": "INACTIVE",  # down이 RDS와 함께 지운다
+        "UserPoolTags": {TAG_KEY: TAG_VALUE},
+    }
+
+
+def user_pool_mfa_config(pool_id: str) -> dict:
+    return {"UserPoolId": pool_id, "SoftwareTokenMfaConfiguration": {"Enabled": True}, "MfaConfiguration": "ON"}
+
+
+def app_client_definition(pool_id: str) -> dict:
+    """앱 클라이언트(create_user_pool_client 인자). 서버가 비밀로 서명해 관리자 흐름만 쓴다."""
+    return {
+        "UserPoolId": pool_id,
+        "ClientName": USER_POOL_CLIENT,
+        "GenerateSecret": True,
+        "ExplicitAuthFlows": ["ALLOW_ADMIN_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"],
+        "EnableTokenRevocation": True,
+        "AuthSessionValidity": 3,
+        "PreventUserExistenceErrors": "ENABLED",
+    }
+
+
+def onboarding_bucket(account: str) -> str:
+    return f"{ONBOARDING_BUCKET_PREFIX}-{account}"
+
+
+def onboarding_template_url(account: str, region: str) -> str:
+    return f"https://{onboarding_bucket(account)}.s3.{region}.amazonaws.com/{onboarding.TEMPLATE_KEY}"
+
+
+def onboarding_bucket_policy(account: str) -> dict:
+    """템플릿 객체 하나만 누구나 읽는다. 고객 계정의 CloudFormation이 빠른 생성 링크로 이 주소를 읽는다."""
+    return {
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Sid": "PublicReadOnboardingTemplate", "Effect": "Allow", "Principal": "*",
+            "Action": "s3:GetObject",
+            "Resource": f"arn:aws:s3:::{onboarding_bucket(account)}/{onboarding.TEMPLATE_KEY}",
         }],
     }
 
@@ -373,7 +415,7 @@ SETTINGS_SNS_ACTIONS = ("sns:CreateTopic", "sns:DeleteTopic", "sns:GetSubscripti
                         "sns:ListSubscriptionsByTopic", "sns:Publish")
 SETTINGS_SUBSCRIBE_PROTOCOL = "email"
 SETTINGS_SECRET_ACTIONS = ("secretsmanager:CreateSecret", "secretsmanager:DeleteSecret", "secretsmanager:GetSecretValue")
-BASE_SECRET_ENV = ("DATABASE_URL", "OPENAI_API_KEY", "VIGILANTIS_ACCESS_EXTERNAL_ID")
+BASE_SECRET_ENV = ("DATABASE_URL", "OPENAI_API_KEY", "COGNITO_CLIENT_SECRET")
 # config.Settings에서 그대로 전달할 수 있는 알림 조정값(기본값은 config.py가 소유한다)
 NOTIFY_SETTING_KEYS = (
     "NOTIFICATION_POLL_SECONDS", "NOTIFICATION_BATCH_SIZE", "NOTIFICATION_MAX_ATTEMPTS",
@@ -695,15 +737,21 @@ def revoke_notification_policies(iam, ecs) -> None:
         print(f"[platform] IAM {role}/{policy_name} 회수")
 
 
-def api_container(image: str, *, region: str, cors_origin: str, access_role_arn: str,
-                  collect_vpc_ids: str, dispatch_enabled: bool, secrets_arns: dict[str, str],
-                  notification: Optional[dict] = None) -> dict:
+def api_container(image: str, *, region: str, cors_origin: str, dispatch_enabled: bool,
+                  secrets_arns: dict[str, str], cognito: dict[str, str], onboarding_url: str,
+                  platform_principal_arn: str, notification: Optional[dict] = None) -> dict:
     env = {
         "AWS_REGION": region,
         "CORS_ALLOW_ORIGINS": cors_origin,
-        "COLLECT_VPC_IDS": collect_vpc_ids,
-        "VIGILANTIS_ACCESS_ROLE_ARN": access_role_arn,
-        "VIGILANTIS_ACCESS_SESSION_SECONDS": str(SESSION_SECONDS),
+        # 고객 계정 호출은 테넌트 문맥(고객 역할) 안에서만 나간다. 문맥 없는 호출은 플랫폼 계정으로 새지 않고
+        # 예외가 된다(services/aws/client.py · ADR-0012 §2). 관제 범위는 고객 계정 자체라 COLLECT_VPC_IDS를 두지 않는다
+        "TENANT_CONTEXT_REQUIRED": "true",
+        "COGNITO_REGION": region,
+        "COGNITO_USER_POOL_ID": cognito["pool_id"],
+        "COGNITO_CLIENT_ID": cognito["client_id"],
+        # 고객 연결 화면의 빠른 생성 링크(tenant_admin.onboarding_url)
+        "TENANT_ONBOARDING_TEMPLATE_URL": onboarding_url,
+        "PLATFORM_PRINCIPAL_ARN": platform_principal_arn,
         # AI 분석과 조치 실행 디스패치를 **한 스위치로** 켜고 끈다(config.py — 둘이 이 값을 공유한다).
         # 끄면 승인한 조치도 실행되지 않고 접수 상태로 멈춘다. 켜면 인시던트마다 OpenAI가 과금된다.
         # 기본은 끈다(배포 시 --enable-dispatch)
@@ -849,11 +897,6 @@ def is_platform_tagged(tags: list[dict]) -> bool:
     return any(t.get("Key") == TAG_KEY and t.get("Value") == TAG_VALUE for t in tags or [])
 
 
-def customer_access_owner(tags: list[dict]) -> Optional[str]:
-    """고객 계정 접근 역할의 고객 태그 값 — 그 역할을 쓰는 플랫폼 계정 ID. 태그가 없으면 None."""
-    return next((t.get("Value") for t in tags or [] if t.get("Key") == CUSTOMER_TAG_KEY), None)
-
-
 def alarm_definitions(lb_arn: str, tg_api_arn: str, tg_web_arn: str, topic_arn: str) -> list[dict]:
     """플랫폼 오류 알람의 put_metric_alarm 인자(T-8 운영 장치). ALARM과 OK 둘 다 메일로 알린다.
 
@@ -902,24 +945,6 @@ def _require_real_aws(expected_account: str) -> dict:
     return identity
 
 
-def _customer_clients(profile: str, expected_account: str, region: str) -> dict:
-    """고객 계정 관리자 세션 — 접근 역할과 스모크 정책·VPC에만 쓴다. 환경 변수·앱 클라이언트 설정을 바꾸지 않는다."""
-    session = boto3.Session(profile_name=profile, region_name=region)
-    config = Config(ignore_configured_endpoint_urls=True)
-    identity = session.client("sts", config=config).get_caller_identity()
-    if identity["Account"] != expected_account:
-        sys.exit(f"--customer-account {expected_account} ≠ --customer-profile {profile}의 계정 {identity['Account']}"
-                 " — AWS 프로필을 확인할 것.")
-    print(f"[platform] 고객 계정 {identity['Account']} · 주체 {identity['Arn']}")
-    return {"iam": session.client("iam", config=config), "ec2": session.client("ec2", config=config),
-            "account": expected_account}
-
-
-def _customer(c: dict, account: str) -> dict:
-    """접근 역할을 둘 계정(iam · ec2 · account). 고객 인자가 없으면 플랫폼 계정 자신이다(MVP 단일 계정)."""
-    return c.get("customer") or {"iam": c["iam"], "ec2": c["ec2"], "account": account}
-
-
 def _code(exc: ClientError) -> str:
     return exc.response.get("Error", {}).get("Code", "")
 
@@ -963,11 +988,6 @@ def _find_vpc(ec2) -> Optional[str]:
     return vpcs[0]["VpcId"] if vpcs else None
 
 
-def _find_smoke_vpc(ec2) -> Optional[str]:
-    vpcs = ec2.describe_vpcs(Filters=[{"Name": "tag:Name", "Values": [SMOKE_VPC_NAME]}])["Vpcs"]
-    return vpcs[0]["VpcId"] if vpcs else None
-
-
 def _find_subnets(ec2, vpc_id: str) -> dict[str, str]:
     out = {}
     for s in ec2.describe_subnets(Filters=[_vpc_filter(vpc_id)])["Subnets"]:
@@ -981,10 +1001,16 @@ def _find_sgs(ec2, vpc_id: str) -> dict[str, str]:
     return {g["GroupName"]: g["GroupId"] for g in groups if g["GroupName"] in SECURITY_GROUPS}
 
 
-def _find_nat(ec2, vpc_id: str) -> Optional[dict]:
+def _find_nats(ec2, vpc_id: str) -> dict[str, dict]:
+    """서브넷 ID → NAT. 이름이 아니라 서브넷으로 찾아 5차 개정 전의 NAT(이름 `-nat`, AZ a)도 그대로 쓴다."""
     nats = ec2.describe_nat_gateways(Filters=[_vpc_filter(vpc_id),
                                               {"Name": "state", "Values": ["pending", "available"]}])["NatGateways"]
-    return nats[0] if nats else None
+    return {n["SubnetId"]: n for n in nats}
+
+
+def nat_eip_names() -> list[str]:
+    """down이 놓아줄 탄력적 IP 이름. 5차 개정 전 이름(`-nat`)도 넣는다."""
+    return [f"{PREFIX}-nat"] + [f"{PREFIX}-nat-{az}" for az in PRIVATE_SUBNETS]
 
 
 def _find_db(rds) -> Optional[dict]:
@@ -1159,19 +1185,25 @@ def inventory(c: dict) -> list[tuple[str, str, Optional[str]]]:
         for az in table:
             name = f"{PREFIX}-{tier}-{az}"
             rows.append(("Subnet", name, subnets.get(name)))
-    nat = _find_nat(ec2, vpc_id) if vpc_id else None
-    rows.append(("NatGateway", f"{PREFIX}-nat", nat["NatGatewayId"] if nat else None))
+    nats = _find_nats(ec2, vpc_id) if vpc_id else {}
+    for az in PRIVATE_SUBNETS:
+        nat = nats.get(subnets.get(f"{PREFIX}-public-{az}", ""))
+        rows.append(("NatGateway", f"{PREFIX}-nat-{az}", nat["NatGatewayId"] if nat else None))
     sgs = _find_sgs(ec2, vpc_id) if vpc_id else {}
     rows += [("SecurityGroup", n, sgs.get(n)) for n in SECURITY_GROUPS]
     db = _find_db(c["rds"])
     rows.append(("RDS", DB_INSTANCE, f"{db['DBInstanceIdentifier']} ({db['DBInstanceStatus']})" if db else None))
     rows += [("Secret", n, _find_secret(c["sm"], n)) for n in
-             (SECRET_DATABASE_URL, SECRET_OPENAI, SECRET_ORIGIN, SECRET_EXTERNAL_ID)]
+             (SECRET_DATABASE_URL, SECRET_OPENAI, SECRET_ORIGIN, SECRET_COGNITO_CLIENT)]
     rows += [("ECR", n, _find_repo(c["ecr"], n)) for n in ECR_REPOS.values()]
     rows += [("IamRole", n, _find_role(c["iam"], n)) for n in (ROLE_EXEC, ROLE_TASK)]
-    customer = c.get("customer")
-    rows.append(("IamRole(고객)" if customer else "IamRole", ROLE_ACCESS,
-                 _find_role((customer or c)["iam"], ROLE_ACCESS)))
+    pool = _find_user_pool(c["cidp"])
+    rows.append(("CognitoPool", USER_POOL, pool["id"] if pool else None))
+    rows.append(("CognitoClient", USER_POOL_CLIENT, _find_app_client(c["cidp"], pool["id"]) if pool else None))
+    if "account" in c:
+        bucket = onboarding_bucket(c["account"])
+        rows.append(("S3(온보딩)", bucket,
+                     f"s3://{bucket}/{onboarding.TEMPLATE_KEY}" if _bucket_exists(c["s3"], bucket) else None))
     rows.append(("EcsCluster", CLUSTER, _find_cluster(c["ecs"])))
     lb = _find_lb(elbv2)
     rows.append(("LoadBalancer", ALB_NAME, lb["DNSName"] if lb else None))
@@ -1250,12 +1282,32 @@ def _ensure_route_table(ec2, vpc_id: str, name: str, subnet_ids: list[str], rout
         ec2.create_route(RouteTableId=rt_id, DestinationCidrBlock="0.0.0.0/0", **route)
     associated = {a.get("SubnetId") for a in tables[0]["Associations"]}
     for sid in subnet_ids:
-        if sid not in associated:
+        if sid in associated:
+            continue
+        # 서브넷은 경로 하나에만 묶인다. 다른 경로(5차 개정 전 공용 경로)에 묶여 있으면 옮긴다
+        held = ec2.describe_route_tables(Filters=[{"Name": "association.subnet-id", "Values": [sid]}])["RouteTables"]
+        old = next((a for t in held for a in t["Associations"] if a.get("SubnetId") == sid), None)
+        if old:
+            ec2.replace_route_table_association(AssociationId=old["RouteTableAssociationId"], RouteTableId=rt_id)
+            print(f"[platform] Subnet {sid} 경로를 {name}로 옮김")
+        else:
             ec2.associate_route_table(RouteTableId=rt_id, SubnetId=sid)
 
 
-def _ensure_network(ec2, vpc_id: str, subnets: dict[str, str]) -> str:
-    """IGW·공개 경로·NAT·프라이빗 경로. NAT의 공인 IP를 돌려준다(WAF 허용 목록에 들어간다)."""
+def _ensure_nat(ec2, subnets: dict[str, str], az: str) -> dict:
+    name = f"{PREFIX}-nat-{az}"
+    eips = _named(ec2.describe_addresses, "Addresses", name)
+    alloc = eips[0]["AllocationId"] if eips else ec2.allocate_address(
+        Domain="vpc", TagSpecifications=_tag_spec("elastic-ip", name))["AllocationId"]
+    nat_id = ec2.create_nat_gateway(SubnetId=subnets[f"{PREFIX}-public-{az}"], AllocationId=alloc,
+                                    TagSpecifications=_tag_spec("natgateway", name))["NatGateway"]["NatGatewayId"]
+    print(f"[platform] NAT {name} {nat_id} 생성, available 대기")
+    ec2.get_waiter("nat_gateway_available").wait(NatGatewayIds=[nat_id])
+    return ec2.describe_nat_gateways(NatGatewayIds=[nat_id])["NatGateways"][0]
+
+
+def _ensure_network(ec2, vpc_id: str, subnets: dict[str, str]) -> list[str]:
+    """IGW·공개 경로·AZ별 NAT·AZ별 프라이빗 경로. NAT 공인 IP 전부를 돌려준다(WAF 허용 목록에 들어간다)."""
     igws = ec2.describe_internet_gateways(Filters=[{"Name": "attachment.vpc-id", "Values": [vpc_id]}])[
         "InternetGateways"]
     if igws:
@@ -1268,20 +1320,18 @@ def _ensure_network(ec2, vpc_id: str, subnets: dict[str, str]) -> str:
     public_ids = [subnets[f"{PREFIX}-public-{az}"] for az in PUBLIC_SUBNETS]
     _ensure_route_table(ec2, vpc_id, f"{PREFIX}-public", public_ids, {"GatewayId": igw_id})
 
-    nat = _find_nat(ec2, vpc_id)
-    if not nat:
-        eips = _named(ec2.describe_addresses, "Addresses", f"{PREFIX}-nat")
-        alloc = eips[0]["AllocationId"] if eips else ec2.allocate_address(
-            Domain="vpc", TagSpecifications=_tag_spec("elastic-ip", f"{PREFIX}-nat"))["AllocationId"]
-        nat_id = ec2.create_nat_gateway(SubnetId=subnets[f"{PREFIX}-public-{NAT_AZ}"], AllocationId=alloc,
-                                        TagSpecifications=_tag_spec("natgateway", f"{PREFIX}-nat"))[
-            "NatGateway"]["NatGatewayId"]
-        print(f"[platform] NAT {nat_id} 생성 — available 대기")
-        ec2.get_waiter("nat_gateway_available").wait(NatGatewayIds=[nat_id])
-        nat = ec2.describe_nat_gateways(NatGatewayIds=[nat_id])["NatGateways"][0]
-    private_ids = [subnets[f"{PREFIX}-private-{az}"] for az in PRIVATE_SUBNETS]
-    _ensure_route_table(ec2, vpc_id, f"{PREFIX}-private", private_ids, {"NatGatewayId": nat["NatGatewayId"]})
-    return nat["NatGatewayAddresses"][0]["PublicIp"]
+    nats = _find_nats(ec2, vpc_id)
+    ips = []
+    for az in PRIVATE_SUBNETS:
+        nat = nats.get(subnets[f"{PREFIX}-public-{az}"]) or _ensure_nat(ec2, subnets, az)
+        _ensure_route_table(ec2, vpc_id, f"{PREFIX}-private-{az}", [subnets[f"{PREFIX}-private-{az}"]],
+                            {"NatGatewayId": nat["NatGatewayId"]})
+        ips.append(nat["NatGatewayAddresses"][0]["PublicIp"])
+    for table in _named(ec2.describe_route_tables, "RouteTables", LEGACY_PRIVATE_TABLE, [_vpc_filter(vpc_id)]):
+        if not table["Associations"]:  # 위에서 서브넷을 전부 옮긴 뒤에만 비어 있다
+            ec2.delete_route_table(RouteTableId=table["RouteTableId"])
+            print(f"[platform] RouteTable {LEGACY_PRIVATE_TABLE} 삭제(AZ별 경로로 대체)")
+    return ips
 
 
 def _cloudfront_prefix_list(ec2) -> str:
@@ -1380,15 +1430,22 @@ def _ensure_db(rds, sm, subnets: dict[str, str], sg_db: str) -> None:
             EngineVersion=DB_MAJOR, AllocatedStorage=DB_STORAGE_GB, StorageType="gp3",
             StorageEncrypted=True, DBName=DB_NAME, MasterUsername=DB_USER, MasterUserPassword=url.password,
             DBSubnetGroupName=DB_SUBNET_GROUP, VpcSecurityGroupIds=[sg_db], PubliclyAccessible=False,
-            MultiAZ=False, BackupRetentionPeriod=DB_BACKUP_DAYS, CopyTagsToSnapshot=True, DeletionProtection=False,
+            MultiAZ=True, BackupRetentionPeriod=DB_BACKUP_DAYS, CopyTagsToSnapshot=True, DeletionProtection=False,
             Tags=[{"Key": TAG_KEY, "Value": TAG_VALUE}, {"Key": "Name", "Value": DB_INSTANCE}])
-        print(f"[platform] RDS {DB_INSTANCE} 생성 요청 — available 대기(수 분)")
-    elif db["DBInstanceStatus"] == "available" and db.get("BackupRetentionPeriod", 0) < DB_BACKUP_DAYS:
-        # MVP 때 1일로 만든 인스턴스. 생성·수정 중에는 바꿀 수 없어 available일 때만 맞춘다.
-        # 1일 이상끼리의 보존 기간 변경은 ApplyImmediately 없이도 바로 적용된다. 그 옵션을 주면
-        # 대기 중인 다른 DB 변경까지 함께 즉시 적용되므로 넣지 않는다(PR #523 리뷰)
-        rds.modify_db_instance(DBInstanceIdentifier=DB_INSTANCE, BackupRetentionPeriod=DB_BACKUP_DAYS)
-        print(f"[platform] RDS {DB_INSTANCE} 자동 백업 보존 {db.get('BackupRetentionPeriod')}일 → {DB_BACKUP_DAYS}일")
+        print(f"[platform] RDS {DB_INSTANCE} 생성 요청(Multi-AZ), available 대기(수 분)")
+    elif db["DBInstanceStatus"] == "available":
+        # 앞선 구성으로 만든 인스턴스를 up 재실행으로 맞춘다. 생성·수정 중에는 바꿀 수 없어 available일 때만.
+        # ApplyImmediately는 넣지 않는다. 대기 중인 다른 DB 변경까지 함께 즉시 적용된다(PR #523 리뷰)
+        changes: dict = {}
+        if db.get("BackupRetentionPeriod", 0) < DB_BACKUP_DAYS:
+            # 1일 이상끼리의 보존 기간 변경은 ApplyImmediately 없이도 바로 적용된다
+            changes["BackupRetentionPeriod"] = DB_BACKUP_DAYS
+            print(f"[platform] RDS {DB_INSTANCE} 자동 백업 보존 {db.get('BackupRetentionPeriod')}일 → {DB_BACKUP_DAYS}일")
+        if not db.get("MultiAZ"):
+            changes["MultiAZ"] = True
+            print(f"[platform] RDS {DB_INSTANCE} 단일 AZ → Multi-AZ 전환 요청(다음 유지 관리 창에 적용)")
+        if changes:
+            rds.modify_db_instance(DBInstanceIdentifier=DB_INSTANCE, **changes)
     # 새로 만들었으면 호스트를 항상 다시 적는다(비밀이 지운 옛 인스턴스의 호스트를 들고 있을 수 있다)
     if not db or url.hostname == DB_HOST_PENDING:
         rds.get_waiter("db_instance_available").wait(DBInstanceIdentifier=DB_INSTANCE)
@@ -1424,93 +1481,119 @@ def _ensure_role(iam, name: str, trust: dict, description: str) -> str:
     return arn
 
 
-def _smoke_policy_arn(account: str) -> str:
-    return f"arn:aws:iam::{account}:policy/{SMOKE_POLICY_NAME}"
-
-
-def _smoke_policy_arns(account: str) -> list[str]:
-    """접근 역할이 빌려 쓰는 스모크 정책 전부: 앱 정책(조치·조회)과 비용 정책(Cost Explorer)."""
-    return [_smoke_policy_arn(account), f"arn:aws:iam::{account}:policy/{SMOKE_COST_POLICY_NAME}"]
-
-
-def _require_smoke_env(iam, ec2, account: str) -> None:
-    """스모크 환경(앱 정책·VPC)이 먼저 있어야 한다 — **비싼 자원을 만들기 전에** 본다.
-
-    접근 역할은 스모크의 Action Whitelist 거울 정책을 빌려 쓰고, 배포는 스모크 VPC를 관제 범위로
-    넣는다. 둘 중 하나라도 없으면 NAT·RDS(시간 과금)를 세운 뒤에야 멈추게 되므로 up의 맨 앞에 둔다.
-    계정을 갈랐으면 iam·ec2·account는 고객 계정의 것이다(_customer).
-    """
-    hint = " 계정을 갈랐으면 --customer-account·--customer-profile로 고객 계정을 줄 것."
-    for arn in _smoke_policy_arns(account):
-        try:
-            iam.get_policy(PolicyArn=arn)
-        except ClientError as exc:
-            if _code(exc) == "NoSuchEntity":
-                # 비용 정책이 없으면 이 정책이 생기기 전에 스모크 up을 돌린 것이다. 다시 돌리면 생긴다
-                sys.exit(f"{arn.rsplit('/', 1)[1]} 정책이 없다 — scripts/provision_smoke_aws.py up을 먼저 돌릴 것"
-                         "(접근 역할은 스모크 스크립트가 만든 정책을 빌려 쓴다)." + hint)
-            raise
-    if not _find_smoke_vpc(ec2):
-        sys.exit(f"스모크 VPC({SMOKE_VPC_NAME})가 없다 — scripts/provision_smoke_aws.py up을 먼저 돌릴 것"
-                 "(배포가 그 VPC를 관제 범위 COLLECT_VPC_IDS로 넣는다)." + hint)
-
-
-def _ensure_customer_access_role(iam, platform_account: str, trust: dict) -> str:
-    """고객 계정의 접근 역할(안전 가드 ⑧). 고객 태그로 식별하고 신뢰 정책을 이 플랫폼 계정으로 맞춘다.
-
-    플랫폼 태그만 달린 역할은 같은 계정의 옛 플랫폼이 만든 것이라 넘겨받는다. 고객 태그를 먼저 달고
-    신뢰 정책을 바꾼 뒤 플랫폼 태그를 뗀다 — 어디서 끊겨도 재실행이 마저 맞춘다.
-    """
-    description = "Vigilantis monitored-account access (SaaS customer role)"
-    role = _get_role(iam, ROLE_ACCESS)
-    if role is None:
-        arn = iam.create_role(RoleName=ROLE_ACCESS, AssumeRolePolicyDocument=json.dumps(trust),
-                              Description=description, MaxSessionDuration=3600,
-                              Tags=[{"Key": CUSTOMER_TAG_KEY, "Value": platform_account}])["Role"]["Arn"]
-        print(f"[platform] 고객 계정 IAM 역할 {ROLE_ACCESS} 생성")
-        return arn
-    tags = role.get("Tags", [])
-    owner = customer_access_owner(tags)
-    if owner is None and not is_platform_tagged(tags):
-        sys.exit(f"고객 계정의 IAM 역할 {ROLE_ACCESS}에 고객 태그({CUSTOMER_TAG_KEY})도 플랫폼 태그도 없다 — "
-                 "다른 용도의 역할일 수 있어 덮어쓰지 않는다.")
-    if owner not in (None, platform_account):
-        sys.exit(f"고객 계정의 IAM 역할 {ROLE_ACCESS}는 플랫폼 계정 {owner}의 것이다 — 덮어쓰지 않는다.")
-    if owner is None:
-        iam.tag_role(RoleName=ROLE_ACCESS, Tags=[{"Key": CUSTOMER_TAG_KEY, "Value": platform_account}])
-        print(f"[platform] 고객 계정의 옛 플랫폼 접근 역할 {ROLE_ACCESS}를 넘겨받는다 — 옛 플랫폼은 이제 이 역할로 "
-              "들어가지 못하고, 옛 플랫폼 down은 이 역할을 지우지 않는다")
-    iam.update_assume_role_policy(RoleName=ROLE_ACCESS, PolicyDocument=json.dumps(trust))
-    if is_platform_tagged(tags):
-        iam.untag_role(RoleName=ROLE_ACCESS, TagKeys=[TAG_KEY])
-    return role["Arn"]
-
-
-def _ensure_roles(iam, account: str, secret_arns: list[str], external_id: str,
-                  customer: Optional[dict] = None) -> dict[str, str]:
-    """실행·태스크 역할은 플랫폼 계정에, 접근 역할은 고객 계정에 둔다(customer — 없으면 플랫폼 계정 자신)."""
-    customer = customer or {"iam": iam, "account": account}
-    smoke_policies = _smoke_policy_arns(customer["account"])  # 존재는 up 맨 앞(_require_smoke_env)에서 확인했다
+def _ensure_roles(iam, secret_arns: list[str], user_pool_arn: str) -> dict[str, str]:
+    """실행 역할과 태스크 역할. 고객 계정의 접근 역할은 만들지 않는다(고객이 온보딩 템플릿으로 만든다)."""
     exec_arn = _ensure_role(iam, ROLE_EXEC, ecs_tasks_trust_policy(), "ECS image pull and secret injection")
     iam.attach_role_policy(RoleName=ROLE_EXEC,
                            PolicyArn="arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy")
     iam.put_role_policy(RoleName=ROLE_EXEC, PolicyName="read-platform-secrets",
                         PolicyDocument=json.dumps(exec_secrets_policy(secret_arns)))
-    task_arn = _ensure_role(iam, ROLE_TASK, ecs_tasks_trust_policy(), "Vigilantis api - assume access role only")
-    iam.put_role_policy(RoleName=ROLE_TASK, PolicyName="assume-access-role",
-                        PolicyDocument=json.dumps(task_role_policy(customer["account"])))
-    trust = access_trust_policy(account, external_id)
+    task_arn = _ensure_role(iam, ROLE_TASK, ecs_tasks_trust_policy(), "Vigilantis api - customer access and login")
+    iam.put_role_policy(RoleName=ROLE_TASK, PolicyName=TASK_POLICY,
+                        PolicyDocument=json.dumps(task_role_policy(user_pool_arn)))
+    _try(lambda: iam.delete_role_policy(RoleName=ROLE_TASK, PolicyName=LEGACY_TASK_POLICY), "NoSuchEntity")
+    return {"exec": exec_arn, "task": task_arn}
 
-    def ensure_access() -> str:
-        if customer["account"] == account:
-            return _ensure_role(iam, ROLE_ACCESS, trust, "Vigilantis monitored-account access (SaaS customer role shape)")
-        return _ensure_customer_access_role(customer["iam"], account, trust)
 
-    # 신뢰 정책의 주체(태스크 역할)는 이미 있어야 IAM이 받아 준다 — 새 역할 직후에는 전파 대기
-    access_arn = _retry(ensure_access, "접근 역할 신뢰 정책(주체 전파)", ("MalformedPolicyDocument",), timeout=120)
-    for arn in smoke_policies:
-        customer["iam"].attach_role_policy(RoleName=ROLE_ACCESS, PolicyArn=arn)
-    return {"exec": exec_arn, "task": task_arn, "access": access_arn}
+def _find_user_pool(cidp) -> Optional[dict]:
+    """→ {"id", "arn"}. 이름으로 찾는다(사용자 풀 목록은 태그로 거를 수 없다)."""
+    for page in cidp.get_paginator("list_user_pools").paginate(MaxResults=60):
+        for pool in page["UserPools"]:
+            if pool["Name"] == USER_POOL:
+                arn = cidp.describe_user_pool(UserPoolId=pool["Id"])["UserPool"]["Arn"]
+                return {"id": pool["Id"], "arn": arn}
+    return None
+
+
+def _find_app_client(cidp, pool_id: str) -> Optional[str]:
+    for page in cidp.get_paginator("list_user_pool_clients").paginate(UserPoolId=pool_id, MaxResults=60):
+        for client in page["UserPoolClients"]:
+            if client["ClientName"] == USER_POOL_CLIENT:
+                return client["ClientId"]
+    return None
+
+
+def _ensure_login(cidp, sm) -> dict[str, str]:
+    """로그인 사용자 풀 · 앱 클라이언트 · 클라이언트 비밀(Secrets Manager). → {"pool_id", "pool_arn", "client_id"}
+
+    이미 있는 풀의 설정은 바꾸지 않는다(사용자가 든 풀이다). MFA만 매번 ON으로 맞춘다. 꺼지면 앱이 세션을
+    내주지 않고 거절하므로(fail closed) 로그인이 막힌다.
+    """
+    pool = _find_user_pool(cidp)
+    if not pool:
+        created = cidp.create_user_pool(**user_pool_definition())["UserPool"]
+        pool = {"id": created["Id"], "arn": created["Arn"]}
+        print(f"[platform] Cognito 사용자 풀 {USER_POOL} {pool['id']} 생성")
+    cidp.set_user_pool_mfa_config(**user_pool_mfa_config(pool["id"]))
+    client_id = _find_app_client(cidp, pool["id"])
+    if not client_id:
+        client = cidp.create_user_pool_client(**app_client_definition(pool["id"]))["UserPoolClient"]
+        client_id = client["ClientId"]
+        # 새 클라이언트의 비밀은 이전 것과 다르다. 비밀이 이미 있으면 값을 바꾼다(출력하지 않는다)
+        if _find_secret(sm, SECRET_COGNITO_CLIENT):
+            sm.put_secret_value(SecretId=SECRET_COGNITO_CLIENT, SecretString=client["ClientSecret"])
+        else:
+            _put_secret(sm, SECRET_COGNITO_CLIENT, client["ClientSecret"])
+        print(f"[platform] Cognito 앱 클라이언트 {USER_POOL_CLIENT} 생성(비밀은 {SECRET_COGNITO_CLIENT})")
+    return {"pool_id": pool["id"], "pool_arn": pool["arn"], "client_id": client_id}
+
+
+def _bucket_exists(s3, bucket: str) -> bool:
+    try:
+        s3.head_bucket(Bucket=bucket)
+        return True
+    except ClientError as exc:
+        if _code(exc) in ("404", "NoSuchBucket", "NotFound"):
+            return False
+        raise
+
+
+def _ensure_onboarding(s3, account: str, region: str) -> str:
+    """온보딩 템플릿을 버킷에 올리고 그 주소를 돌려준다. 저장소의 템플릿이 곧 배포본이다(up마다 덮어쓴다)."""
+    bucket = onboarding_bucket(account)
+    if not _bucket_exists(s3, bucket):
+        s3.create_bucket(Bucket=bucket, CreateBucketConfiguration={"LocationConstraint": region})
+        print(f"[platform] S3 {bucket} 생성")
+    s3.put_bucket_tagging(Bucket=bucket, Tagging={"TagSet": [{"Key": TAG_KEY, "Value": TAG_VALUE}]})
+    # ACL로 여는 길은 막고, 템플릿 객체 하나만 버킷 정책으로 연다
+    s3.put_public_access_block(Bucket=bucket, PublicAccessBlockConfiguration={
+        "BlockPublicAcls": True, "IgnorePublicAcls": True, "BlockPublicPolicy": False, "RestrictPublicBuckets": False})
+    s3.put_bucket_policy(Bucket=bucket, Policy=json.dumps(onboarding_bucket_policy(account)))
+    s3.put_object(Bucket=bucket, Key=onboarding.TEMPLATE_KEY, Body=onboarding.render().encode("utf-8"),
+                  ContentType="application/json")
+    return onboarding_template_url(account, region)
+
+
+def _ensure_origin_certificate(acm, r53, zone_id: str, domain: str) -> str:
+    """origin.<도메인>을 덮는 이 리전 ACM 인증서. 없으면 DNS 검증으로 요청하고 발급까지 기다린다."""
+    host = origin_host(domain)
+    arn = _find_certificate(acm, host)
+    if arn:
+        return arn
+    pending = [c for page in acm.get_paginator("list_certificates").paginate(CertificateStatuses=["PENDING_VALIDATION"])
+               for c in page.get("CertificateSummaryList", []) if certificate_covers(c, host)]
+    if pending:
+        arn = pending[0]["CertificateArn"]
+    else:
+        arn = acm.request_certificate(DomainName=host, ValidationMethod="DNS",
+                                      Tags=[{"Key": TAG_KEY, "Value": TAG_VALUE}])["CertificateArn"]
+        print(f"[platform] ACM {host} 인증서 요청")
+
+    def validation_record() -> dict:
+        options = acm.describe_certificate(CertificateArn=arn)["Certificate"].get("DomainValidationOptions", [])
+        record = next((o.get("ResourceRecord") for o in options if o.get("ResourceRecord")), None)
+        if not record:  # 요청 직후 몇 초는 검증 레코드가 비어 있다
+            raise ClientError({"Error": {"Code": "ValidationRecordPending"}}, "DescribeCertificate")
+        return record
+
+    record = _retry(validation_record, "ACM 검증 레코드", ("ValidationRecordPending",), timeout=120)
+    r53.change_resource_record_sets(HostedZoneId=zone_id, ChangeBatch={"Changes": [{
+        "Action": "UPSERT", "ResourceRecordSet": {
+            "Name": record["Name"], "Type": record["Type"], "TTL": 300,
+            "ResourceRecords": [{"Value": record["Value"]}]}}]})
+    print(f"[platform] ACM {host} DNS 검증 레코드 등록, 발급 대기(보통 수 분)")
+    acm.get_waiter("certificate_validated").wait(CertificateArn=arn, WaiterConfig={"Delay": 15, "MaxAttempts": 80})
+    return arn
 
 
 def _ensure_logs(logs) -> None:
@@ -1650,14 +1733,14 @@ _ACL_DEFAULT_ACTION = {"Block": {}}
 _ACL_VISIBILITY = {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True, "MetricName": WAF_ACL}
 
 
-def _ensure_waf(waf, cidrs: list[str], nat_cidr: str) -> str:
+def _ensure_waf(waf, cidrs: list[str], nat_cidrs: list[str]) -> str:
     """허용 IP 집합 · NAT IP 집합 · 웹 ACL을 맞춘다. 웹 ACL이 이미 있으면 규칙을 waf_rules()로 맞춘다.
 
     규칙을 생성 때만 넣으면 waf_rules()를 고쳐도 이미 배포된 플랫폼에는 들어가지 않는다(#484).
     규칙이 이미 같으면 바꾸지 않는다 — 두 번째 실행은 변경 0이다.
     """
     ipset_arn = _ensure_ipset(waf, WAF_IPSET, cidrs, "허용 IP")
-    nat_ipset_arn = _ensure_ipset(waf, WAF_NAT_IPSET, [nat_cidr], "NAT IP(속도 제한 제외)")
+    nat_ipset_arn = _ensure_ipset(waf, WAF_NAT_IPSET, nat_cidrs, "NAT IP(속도 제한 제외)")
     rules = waf_rules(ipset_arn, nat_ipset_arn)
     acl = _find_acl(waf)
     if acl:
@@ -1739,21 +1822,22 @@ def _ensure_distribution(cf, origin_domain: str, origin_value: str, acl_arn: str
     return created["DomainName"]
 
 
-def _require_custom_domain(c: dict, domain: str) -> tuple[str, str, str]:
-    """--domain의 인증서 둘·공개 호스팅 영역을 찾는다 — 없으면 **무엇이든 바꾸기 전에** 멈춘다.
+def _require_custom_domain(c: dict, domain: str) -> tuple[str, str, Optional[str]]:
+    """--domain의 CloudFront 인증서·공개 호스팅 영역을 찾는다. 없으면 **무엇이든 바꾸기 전에** 멈춘다.
 
-    인증서 발급은 DNS 검증을 기다려야 하고 도메인 구입은 사람이 한다 — 둘 다 이 스크립트 밖이다.
-    up 끝에서야 보면 NAT·RDS(시간 과금)와 WAF 허용 목록 변경이 남은 채 멈추므로 up 맨 앞에서 본다.
-    → (CloudFront용 us-east-1 인증서, 호스팅 영역 ID, ALB용 서울 리전 인증서)
+    도메인 구입과 us-east-1 인증서는 사람이 한다. up 끝에서야 보면 NAT·RDS(시간 과금)와 WAF 허용 목록
+    변경이 남은 채 멈추므로 up 맨 앞에서 본다. ALB용 서울 리전 인증서(origin.<도메인>)는 영역이 있으면
+    up이 DNS 검증으로 직접 받는다(_ensure_origin_certificate). 없으면 세 번째 값이 None이다.
+    → (CloudFront용 us-east-1 인증서, 호스팅 영역 ID, ALB용 서울 리전 인증서 또는 None)
     """
     cert_arn = _find_certificate(c["acm"], domain)
     zone_id = _find_zone(c["r53"], domain)
-    origin_cert_arn = _find_certificate(c["acm_origin"], origin_host(domain))
-    if not (cert_arn and zone_id and origin_cert_arn):
+    if not (cert_arn and zone_id):
         sys.exit(f"--domain {domain}: us-east-1 ACM 인증서(ISSUED) {'있음' if cert_arn else '없음'} · "
-                 f"Route53 호스팅 영역 {'있음' if zone_id else '없음'} · "
-                 f"ALB용 ACM 인증서({origin_host(domain)} · 이 리전 · ISSUED) {'있음' if origin_cert_arn else '없음'}"
-                 " — 셋 다 먼저 준비할 것")
+                 f"Route53 호스팅 영역 {'있음' if zone_id else '없음'}: 둘 다 먼저 준비할 것")
+    origin_cert_arn = _find_certificate(c["acm_origin"], origin_host(domain))
+    if not origin_cert_arn:
+        print(f"[platform] ALB용 ACM 인증서({origin_host(domain)} · 이 리전)가 없다. up --yes가 DNS 검증으로 받는다")
     return cert_arn, zone_id, origin_cert_arn
 
 
@@ -1797,26 +1881,25 @@ def _ensure_custom_domain(c: dict, domain: str, cert_arn: str, zone_id: str, ori
 def up(c: dict, account: str, region: str, allow_cidrs: list[str], domain: Optional[str] = None,
        alarm_email: Optional[str] = None) -> None:
     ec2 = c["ec2"]
-    customer = _customer(c, account)
-    _require_smoke_env(customer["iam"], customer["ec2"], customer["account"])  # 무엇이든 만들기 전에
-    custom = _require_custom_domain(c, domain) if domain else None
+    custom = _require_custom_domain(c, domain) if domain else None  # 무엇이든 만들기 전에
     _require_own_alarm_resources(c["cw"], c["sns"])  # _ensure_alarms에서야 멈추면 그 앞의 VPC·RDS가 이미 선다
     vpc_id = _ensure_vpc(ec2)
     subnets = _ensure_subnets(ec2, vpc_id, region)
-    nat_ip = _ensure_network(ec2, vpc_id, subnets)
+    nat_cidrs = [f"{ip}/32" for ip in _ensure_network(ec2, vpc_id, subnets)]
+    if custom and not custom[2]:  # ALB 리스너를 세우기 전에 받아 둔다
+        custom = (custom[0], custom[1], _ensure_origin_certificate(c["acm_origin"], c["r53"], custom[1], domain))
     sgs = _ensure_sgs(ec2, vpc_id, https=bool(custom))
     origin_value = _secret_value(c["sm"], SECRET_ORIGIN) if _find_secret(c["sm"], SECRET_ORIGIN) else None
     if origin_value is None:
         _put_secret(c["sm"], SECRET_ORIGIN, secrets.token_urlsafe(32))
         origin_value = _secret_value(c["sm"], SECRET_ORIGIN)
-    if not _find_secret(c["sm"], SECRET_EXTERNAL_ID):
-        _put_secret(c["sm"], SECRET_EXTERNAL_ID, secrets.token_urlsafe(24))
-    external_id = _secret_value(c["sm"], SECRET_EXTERNAL_ID)
     _put_secret(c["sm"], SECRET_OPENAI, OPENAI_PLACEHOLDER)
     _ensure_db(c["rds"], c["sm"], subnets, sgs[SG_DB])
     _ensure_repos(c["ecr"])
-    secret_arns = [_find_secret(c["sm"], n) for n in (SECRET_DATABASE_URL, SECRET_OPENAI, SECRET_EXTERNAL_ID)]
-    _ensure_roles(c["iam"], account, [a for a in secret_arns if a], external_id, customer)
+    login = _ensure_login(c["cidp"], c["sm"])
+    secret_arns = [_find_secret(c["sm"], n) for n in (SECRET_DATABASE_URL, SECRET_OPENAI, SECRET_COGNITO_CLIENT)]
+    _ensure_roles(c["iam"], [a for a in secret_arns if a], login["pool_arn"])
+    _ensure_onboarding(c["s3"], account, region)
     _ensure_logs(c["logs"])
     _ensure_cluster(c["ecs"])
     alb = _ensure_alb(c["elbv2"], vpc_id, subnets, sgs[SG_ALB], origin_value,
@@ -1826,7 +1909,8 @@ def up(c: dict, account: str, region: str, allow_cidrs: list[str], domain: Optio
     origin = _ensure_origin_record(c["r53"], custom[1], domain, alb) if custom else None
     # 웹 컨테이너의 서버 측 API 호출도 CloudFront를 거친다 — NAT 공인 IP를 허용 목록에 넣는다
     # 속도 제한에서는 NAT IP를 뺀다(안전 가드 ⑦) — 같은 이유로 그 IP가 모든 사용자의 서버 측 호출을 싣는다
-    acl_arn = _ensure_waf(c["waf"], sorted(set(allow_cidrs) | {f"{nat_ip}/32"}), f"{nat_ip}/32")
+    # 태스크가 어느 AZ에 뜨느냐에 따라 나가는 NAT가 달라지므로 AZ별 NAT IP를 전부 넣는다
+    acl_arn = _ensure_waf(c["waf"], sorted(set(allow_cidrs) | set(nat_cidrs)), nat_cidrs)
     _ensure_distribution(c["cf"], origin or alb["dns"], origin_value, acl_arn, https=bool(origin))
     if custom:
         _ensure_custom_domain(c, domain, custom[0], custom[1], origin)
@@ -1836,8 +1920,8 @@ def up(c: dict, account: str, region: str, allow_cidrs: list[str], domain: Optio
     if _secret_value(c["sm"], SECRET_OPENAI) == OPENAI_PLACEHOLDER:
         print(f"  1. OpenAI 키 넣기  : aws secretsmanager put-secret-value --secret-id {SECRET_OPENAI} --secret-string <키>")
     print("  2. 이미지          : ... build --account <계정 ID> --tag <태그>")
-    customer_args = " --customer-account <고객 계정 ID> --customer-profile <프로필>" if c.get("customer") else ""
-    print(f"  3. 배포            : ... deploy --account <계정 ID> --tag <태그>{customer_args} --yes")
+    print("  3. 배포            : ... deploy --account <계정 ID> --tag <태그> --yes")
+    print("  4. 첫 중앙 관리자  : ... bootstrap-admin --account <계정 ID> --email <주소> --yes  (처음 한 번)")
 
 
 # ------------------------------------------------------------------ 이미지(build)
@@ -1881,6 +1965,38 @@ def _register(ecs, family: str, container: dict, *, cpu: str, memory: str, exec_
 def _network(subnets: dict[str, str], sg: str) -> dict:
     return {"awsvpcConfiguration": {"subnets": [subnets[f"{PREFIX}-private-{az}"] for az in PRIVATE_SUBNETS],
                                     "securityGroups": [sg], "assignPublicIp": "DISABLED"}}
+
+
+def bootstrap_admin_command(email: str) -> list[str]:
+    """첫 중앙 관리자 생성(apps/core-api/auth/README.md §플랫폼 계정 CLI). ACTIVE 중앙 관리자가 있으면 CLI가 거절한다."""
+    return ["uv", "run", "--no-sync", "python", "-m", "auth.bootstrap_admin",
+            "--platform", "--central-admin", "--email", email, "--yes"]
+
+
+def _run_once(ecs, task_def: str, network: dict, command: list[str], what: str) -> int:
+    """api 태스크 정의로 일회용 태스크를 돌리고 종료 코드를 돌려준다. RDS가 프라이빗이라 DB 작업은 VPC 안에서 돈다."""
+    task = ecs.run_task(cluster=CLUSTER, taskDefinition=task_def, launchType="FARGATE", networkConfiguration=network,
+                        overrides={"containerOverrides": [{"name": "api", "command": command}]})["tasks"][0]
+    print(f"[platform] {what} 태스크 실행, 종료 대기")
+    ecs.get_waiter("tasks_stopped").wait(cluster=CLUSTER, tasks=[task["taskArn"]],
+                                         WaiterConfig={"Delay": 10, "MaxAttempts": 60})
+    done = ecs.describe_tasks(cluster=CLUSTER, tasks=[task["taskArn"]])["tasks"][0]
+    return done["containers"][0].get("exitCode")
+
+
+def bootstrap_admin(c: dict, email: str) -> None:
+    ecs = c["ecs"]
+    service = _find_service(ecs, API_SERVICE)
+    vpc_id = _find_vpc(c["ec2"])
+    if not (service and vpc_id):
+        sys.exit("api 서비스가 없다. deploy를 먼저 돌릴 것")
+    network = _network(_find_subnets(c["ec2"], vpc_id), _find_sgs(c["ec2"], vpc_id)[SG_API])
+    # 지금 도는 api와 같은 태스크 정의로 돈다. 같은 이미지 · 같은 Cognito · 같은 DB
+    code = _run_once(ecs, service["taskDefinition"], network, bootstrap_admin_command(email), "첫 중앙 관리자 생성")
+    meaning = {0: "생성(초대 메일 발송)", 1: "실패", 2: "거절(이미 ACTIVE 중앙 관리자가 있다 등)"}.get(code, "알 수 없음")
+    print(f"[platform] 첫 중앙 관리자: 종료 코드 {code} {meaning}. 상세는 로그 {LOG_GROUPS['api']}")
+    if code != 0:
+        sys.exit(1)
 
 
 def _migrate(ecs, task_def: str, network: dict) -> None:
@@ -1941,33 +2057,31 @@ def deployment_problems(services: list[dict], expected: dict[str, str]) -> list[
 def deploy(c: dict, account: str, region: str, tag: str, dispatch_enabled: bool,
            notification: Optional[dict] = None) -> None:
     ec2, ecs = c["ec2"], c["ecs"]
-    customer = _customer(c, account)
     vpc_id = _find_vpc(ec2)
-    smoke_vpc = _find_smoke_vpc(customer["ec2"])
     dist = _find_distribution(c["cf"])
-    if not (vpc_id and dist):
-        sys.exit("플랫폼 VPC 또는 CloudFront가 없다 — up을 먼저 돌릴 것")
-    if not smoke_vpc:
-        sys.exit("스모크 VPC가 없다 — 관제 범위(COLLECT_VPC_IDS)를 정할 수 없다"
-                 "(계정을 갈랐으면 --customer-account·--customer-profile로 고객 계정을 줄 것)")
+    pool = _find_user_pool(c["cidp"])
+    client_id = _find_app_client(c["cidp"], pool["id"]) if pool else None
+    if not (vpc_id and dist and client_id):
+        sys.exit("플랫폼 VPC · CloudFront · Cognito 사용자 풀 중 없는 것이 있다. up을 먼저 돌릴 것")
     if _secret_value(c["sm"], SECRET_OPENAI) == OPENAI_PLACEHOLDER and dispatch_enabled:
         sys.exit(f"{SECRET_OPENAI}가 아직 자리표시값이다 — AI 분석·조치 실행 디스패치를 켜려면 키를 먼저 넣을 것")
     subnets = _find_subnets(ec2, vpc_id)
     sgs = _find_sgs(ec2, vpc_id)
     repos = {k: _find_repo(c["ecr"], n) for k, n in ECR_REPOS.items()}
     roles = {k: _find_role(c["iam"], n) for k, n in (("exec", ROLE_EXEC), ("task", ROLE_TASK))}
-    roles["access"] = _find_role(customer["iam"], ROLE_ACCESS)
     if not all(roles.values()):
         sys.exit(f"IAM 역할이 없다({', '.join(k for k, v in roles.items() if not v)}) — up을 먼저 돌릴 것")
     secret_arns = {
         "DATABASE_URL": _find_secret(c["sm"], SECRET_DATABASE_URL),
         "OPENAI_API_KEY": _find_secret(c["sm"], SECRET_OPENAI),
-        "VIGILANTIS_ACCESS_EXTERNAL_ID": _find_secret(c["sm"], SECRET_EXTERNAL_ID),
+        "COGNITO_CLIENT_SECRET": _find_secret(c["sm"], SECRET_COGNITO_CLIENT),
     }
     container = api_container(
         f"{repos['api']}:{tag}", region=region, cors_origin=",".join(public_origins(dist)),
-        access_role_arn=roles["access"], collect_vpc_ids=smoke_vpc, dispatch_enabled=dispatch_enabled,
-        secrets_arns=secret_arns, notification=notification)
+        dispatch_enabled=dispatch_enabled, secrets_arns=secret_arns,
+        cognito={"pool_id": pool["id"], "client_id": client_id},
+        onboarding_url=onboarding_template_url(account, region), platform_principal_arn=roles["task"],
+        notification=notification)
     if notification:  # deploy는 IAM을 쓰지 않는다 — 정책이 계획과 다르면 등록·마이그레이션 전에 멈춘다
         verify_notification_policies(c["iam"], notification)
     api_def = _register(ecs, API_TASK_FAMILY, container, cpu="512", memory="1024", exec_arn=roles["exec"], task_arn=roles["task"])
@@ -2002,10 +2116,9 @@ def _try(fn: Callable[[], Any], *ignore: str) -> None:
             raise
 
 
-def _delete_roles(iam, account: str) -> None:
+def _delete_roles(iam) -> None:
     for role, managed, inline in (
-        (ROLE_ACCESS, _smoke_policy_arns(account), []),
-        (ROLE_TASK, [], ["assume-access-role", NOTIFY_POLICY_TASK, SETTINGS_POLICY_TASK]),
+        (ROLE_TASK, [], [TASK_POLICY, LEGACY_TASK_POLICY, NOTIFY_POLICY_TASK, SETTINGS_POLICY_TASK]),
         (ROLE_EXEC, ["arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"],
          ["read-platform-secrets", NOTIFY_POLICY_EXEC]),
     ):
@@ -2013,12 +2126,6 @@ def _delete_roles(iam, account: str) -> None:
         if not found:
             continue
         tags = found.get("Tags", [])
-        # 안전 가드 ⑧ — 고객 태그가 먼저다. 넘겨받기가 플랫폼 태그를 떼기 전에 끊기면 두 태그가 함께
-        # 남는데, 그 역할은 이미 새 플랫폼이 쓰는 고객 접근 역할이다(PR #523 리뷰)
-        owner = customer_access_owner(tags)
-        if owner:
-            print(f"[platform] IAM 역할 {role}은 플랫폼 계정 {owner}이 쓰는 고객 접근 역할이라 건드리지 않았다")
-            continue
         if not is_platform_tagged(tags):  # 안전 가드 ⑤ — 이름만 같은 남의 역할
             print(f"[platform] IAM 역할 {role}은 플랫폼 태그가 없어 건드리지 않았다 — 확인 뒤 직접 정리할 것")
             continue
@@ -2149,26 +2256,34 @@ def down(c: dict, account: str) -> None:
 
     for name in ECR_REPOS.values():
         _try(lambda name=name: c["ecr"].delete_repository(repositoryName=name, force=True), "RepositoryNotFoundException")
-    for name in (SECRET_DATABASE_URL, SECRET_OPENAI, SECRET_ORIGIN, SECRET_EXTERNAL_ID):
+    for name in (SECRET_DATABASE_URL, SECRET_OPENAI, SECRET_ORIGIN, SECRET_COGNITO_CLIENT):
         _try(lambda name=name: c["sm"].delete_secret(SecretId=name, ForceDeleteWithoutRecovery=True),
              "ResourceNotFoundException")
+    pool = _find_user_pool(c["cidp"])
+    if pool:  # 사용자도 함께 사라진다. 다시 up하면 첫 중앙 관리자부터 만든다
+        c["cidp"].delete_user_pool(UserPoolId=pool["id"])
+        print(f"[platform] Cognito 사용자 풀 {USER_POOL} 삭제")
+    bucket = onboarding_bucket(account)
+    if _bucket_exists(c["s3"], bucket):
+        _try(lambda: c["s3"].delete_object(Bucket=bucket, Key=onboarding.TEMPLATE_KEY), "NoSuchKey")
+        c["s3"].delete_bucket(Bucket=bucket)
+        print(f"[platform] S3 {bucket} 삭제(고객 계정에 이미 만든 접근 역할은 그대로다)")
     for name in LOG_GROUPS.values():
         _try(lambda name=name: c["logs"].delete_log_group(logGroupName=name), "ResourceNotFoundException")
 
-    _delete_roles(c["iam"], account)
-    if c.get("customer"):
-        print(f"[platform] 고객 계정 {c['customer']['account']}의 {ROLE_ACCESS}는 지우지 않았다 — 고객 계정의 자원이다"
-              "(안전 가드 ⑧). 신뢰 대상인 태스크 역할이 지워져 이 플랫폼은 더 들어가지 못한다")
+    _delete_roles(c["iam"])
 
     vpc_id = _find_vpc(ec2)
     if vpc_id:
-        nat = _find_nat(ec2, vpc_id)
-        if nat:
-            ec2.delete_nat_gateway(NatGatewayId=nat["NatGatewayId"])
-            ec2.get_waiter("nat_gateway_deleted").wait(NatGatewayIds=[nat["NatGatewayId"]])
-            print("[platform] NAT 삭제")
-        for addr in _named(ec2.describe_addresses, "Addresses", f"{PREFIX}-nat"):
-            ec2.release_address(AllocationId=addr["AllocationId"])
+        nat_ids = [n["NatGatewayId"] for n in _find_nats(ec2, vpc_id).values()]
+        for nat_id in nat_ids:
+            ec2.delete_nat_gateway(NatGatewayId=nat_id)
+        if nat_ids:  # 한꺼번에 지우고 함께 기다린다. 하나씩 기다리면 대기가 NAT 수만큼 길어진다
+            ec2.get_waiter("nat_gateway_deleted").wait(NatGatewayIds=nat_ids)
+            print(f"[platform] NAT {len(nat_ids)}개 삭제")
+        for name in nat_eip_names():
+            for addr in _named(ec2.describe_addresses, "Addresses", name):
+                ec2.release_address(AllocationId=addr["AllocationId"])
         for igw in ec2.describe_internet_gateways(Filters=[{"Name": "attachment.vpc-id", "Values": [vpc_id]}])[
                 "InternetGateways"]:
             ec2.detach_internet_gateway(InternetGatewayId=igw["InternetGatewayId"], VpcId=vpc_id)
@@ -2197,7 +2312,7 @@ def down(c: dict, account: str) -> None:
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="Vigilantis 플랫폼 배포 환경 (ADR-0010)")
-    parser.add_argument("command", choices=("status", "up", "build", "deploy", "down",
+    parser.add_argument("command", choices=("status", "up", "build", "deploy", "bootstrap-admin", "down",
                                             "notification-iam", "notification-revoke"))
     parser.add_argument("--account", required=True, help="대상 AWS 계정 ID — 호출 주체(sts)와 같아야 한다")
     parser.add_argument("--allow-cidr", action="append", default=[],
@@ -2206,9 +2321,7 @@ def main() -> None:
                                          "us-east-1 ACM 인증서가 먼저 있어야 한다)")
     parser.add_argument("--alarm-email", help="up: 플랫폼 오류 알람을 받을 주소(SNS 메일 구독 — 확인 메일의 링크를 "
                                               "눌러야 알람이 온다)")
-    parser.add_argument("--customer-account", help="고객(관제 대상) 계정 ID — 주면 접근 역할을 그 계정에 두고 스모크 "
-                                                   "정책·VPC도 거기서 찾는다(T-8). 생략하면 --account 한 계정에 둔다")
-    parser.add_argument("--customer-profile", help="--customer-account의 관리자 AWS 프로필")
+    parser.add_argument("--email", help="bootstrap-admin: 첫 중앙 관리자 이메일(Cognito 초대 메일이 간다)")
     parser.add_argument("--tag", help="build·deploy: 이미지 태그")
     parser.add_argument("--enable-dispatch", action="store_true",
                         help="deploy: AI 분석과 조치 실행 디스패치를 함께 켠다(한 스위치 — 끄면 승인한 조치도 "
@@ -2221,10 +2334,8 @@ def main() -> None:
         sys.exit("--notification-config는 deploy·notification-iam에서만 쓴다")
     if args.command == "notification-iam" and not args.notification_config:
         sys.exit("notification-iam에는 --notification-config가 필요하다")
-    if bool(args.customer_account) != bool(args.customer_profile):
-        sys.exit("--customer-account와 --customer-profile은 함께 준다")
-    if args.customer_account and args.customer_account == args.account:
-        sys.exit("--customer-account가 --account와 같다 — 한 계정에 둘 거면 고객 인자를 빼고 돌릴 것")
+    if args.command == "bootstrap-admin" and not args.email:
+        sys.exit("bootstrap-admin에는 --email이 필요하다")
 
     account = _require_real_aws(args.account)["Account"]
     region = default_region()
@@ -2238,9 +2349,8 @@ def main() -> None:
         "acm": aws_client("acm", "us-east-1"), "r53": aws_client("route53", "us-east-1"),
         # ALB 인증서는 ALB와 같은 리전에 있어야 한다(CloudFront 인증서와 다르다)
         "acm_origin": aws_client("acm", region),
+        "cidp": aws_client("cognito-idp", region), "s3": aws_client("s3", region), "account": account,
     }
-    if args.customer_account:
-        c["customer"] = _customer_clients(args.customer_profile, args.customer_account, region)
     if args.command == "status":
         status(c)
         return
@@ -2270,8 +2380,6 @@ def main() -> None:
             sys.exit("up에는 --allow-cidr가 필요하다 — 허용 IP 없이 공개 진입점을 세우지 않는다")
         allow_cidrs = validate_allow_cidrs(args.allow_cidr)
         # 미리 보기에서도 먼저 본다 — --yes로 돌렸을 때 중간에 멈출 일을 여기서 알린다
-        customer = _customer(c, account)
-        _require_smoke_env(customer["iam"], customer["ec2"], customer["account"])
         if args.domain:
             _require_custom_domain(c, args.domain)
         _require_own_alarm_resources(c["cw"], c["sns"])
@@ -2285,6 +2393,9 @@ def main() -> None:
             print(f"[platform] 적용 예정 — 인라인 정책 {NOTIFY_POLICY_TASK}(토픽 {notification['topic_arns']}) · "
                   f"{NOTIFY_POLICY_EXEC}(비밀 {len(notification['secret_arns'])}건) · {SETTINGS_POLICY_TASK}"
                   f"({', '.join(settings_arns.values()) if settings_arns else '없음 — 있으면 지운다'}) — 실제로 하려면 --yes")
+        elif args.command == "bootstrap-admin":
+            print(f"[platform] 첫 중앙 관리자 생성 예정: {args.email}(api 태스크로 auth.bootstrap_admin을 돌린다."
+                  " Cognito가 임시 비밀번호 초대 메일을 보낸다). 실제로 하려면 --yes")
         elif args.command == "deploy":
             if notification:
                 verify_notification_policies(c["iam"], notification)
@@ -2300,6 +2411,8 @@ def main() -> None:
         apply_notification_policies(c["iam"], c["ecs"], notification)
     elif args.command == "deploy":
         deploy(c, account, region, args.tag, args.enable_dispatch, notification)
+    elif args.command == "bootstrap-admin":
+        bootstrap_admin(c, args.email)
     else:
         down(c, account)
 

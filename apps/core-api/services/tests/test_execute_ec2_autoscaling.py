@@ -48,6 +48,7 @@ from schemas.executions import ExecutionEffect, ExecutionStepStatus  # noqa: E40
 from schemas.precheck import PrecheckReasonCode  # noqa: E402
 from services.aws import autoscaling as asg  # noqa: E402
 from services.aws import executor as ex  # noqa: E402
+from services.aws.client import TenantAccess, tenant_scope  # noqa: E402
 
 _CREATE_LT_INPUT = (
     get_session().get_service_model("ec2").operation_model("CreateLaunchTemplate").input_shape
@@ -1668,6 +1669,43 @@ def test_precheck_does_not_invent_the_smoke_tag(aws, smoke_policy):
     tags = tag_dict(call["TagSpecifications"][0]["Tags"])
     assert "vigilantis:smoke" not in tags
     assert not policy_allows_request_tags(smoke_policy, "ec2:CreateLaunchTemplate", ":launch-template/", tags)
+
+
+TENANT = TenantAccess(
+    tenant_id="tenant-1",
+    access_role_arn=f"arn:aws:iam::{ACCOUNT}:role/vigilantis-access",
+    external_id="ext-0123456789abcdef",
+)
+
+
+def test_tenant_role_rejects_a_profile_source_before_any_creation(aws):
+    """고객 접근 역할에는 iam:PassRole이 없다. 프로파일이 달린 원본은 AMI·시작 템플릿을 만들기 전에 거절한다.
+
+    거절이 ASG 생성까지 밀리면 고객 계정에 AMI·스냅숏·시작 템플릿이 남는다(PR #607 리뷰).
+    시작 템플릿 DryRun은 PassRole을 보지 않으므로 DryRun 호출도 없어야 한다.
+    """
+    with tenant_scope(TENANT):
+        outcome = ex.precheck("RUNBOOK_EC2_ENABLE_AUTOSCALING", TARGET_ARN, PRECHECK_PARAMS)
+        plan, code, detail = prepare()
+
+    assert not outcome.passed and outcome.reason_code is R.PRECHECK_UNAUTHORIZED
+    assert plan is None and code is R.PRECHECK_UNAUTHORIZED
+    assert "iam:PassRole" in detail
+    assert not [op for op in aws.operations() if ".create_" in op]
+
+
+def test_tenant_role_still_converts_a_source_without_a_profile(aws):
+    instance = source_instance()
+    del instance["IamInstanceProfile"]
+    aws.instances[SOURCE] = instance
+
+    with tenant_scope(TENANT):
+        outcome = ex.precheck("RUNBOOK_EC2_ENABLE_AUTOSCALING", TARGET_ARN, PRECHECK_PARAMS)
+        plan, code, detail = prepare()
+
+    assert outcome.passed, outcome.verification_summary
+    assert (code, detail) == (None, None)
+    assert plan.source.iam_instance_profile_arn is None
 
 
 def test_runtime_requests_pass_the_smoke_policy_tag_fences(aws, smoke_policy):
