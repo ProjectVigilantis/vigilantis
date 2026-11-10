@@ -27,11 +27,26 @@ def _error(code: str, operation: str) -> ClientError:
     return ClientError({"Error": {"Code": code, "Message": code}}, operation)
 
 
+#: botocore DetectorFeature 전부. RUNTIME_MONITORING 만 기본으로 꺼져 있다(CreateDetector API 문서).
+ALL_FEATURES = (*guardduty.DISABLED_FEATURES, "RUNTIME_MONITORING")
+_OFF_BY_DEFAULT = {"RUNTIME_MONITORING"}
+
+
+def created_features(params: dict) -> dict[str, str]:
+    """CreateDetector 가 만든 탐지기의 부가 기능 상태 — AWS 기본값(생략하면 켜짐)을 따른다."""
+    features = {name: "DISABLED" if name in _OFF_BY_DEFAULT else "ENABLED" for name in ALL_FEATURES}
+    passed = {f["Name"]: f["Status"] for f in params.get("Features", ())}
+    if {"EKS_RUNTIME_MONITORING", "RUNTIME_MONITORING"} <= set(passed):
+        raise _error("BadRequestException", "CreateDetector")  # 둘을 함께 넘기면 거절(같은 문서)
+    return {**features, **passed}
+
+
 class FakeGuardDuty:
-    """리전 하나의 GuardDuty. detectors: 탐지기 ID → 상태."""
+    """리전 하나의 GuardDuty. detectors: 탐지기 ID → 상태. features: 탐지기 ID → 부가 기능 → 상태."""
 
     def __init__(self, detectors: dict[str, str] | None = None) -> None:
         self.detectors = dict(detectors or {})
+        self.features: dict[str, dict[str, str]] = {}
         self.calls: list[tuple[str, dict]] = []
         self.deny: dict[str, str] = {}  # 작업 → 오류 코드
         self.race = False  # CreateDetector 직전에 다른 확인이 먼저 만든 것처럼
@@ -51,6 +66,7 @@ class FakeGuardDuty:
         self._call("CreateDetector", **params)
         if self.detectors:
             raise _error("BadRequestException", "CreateDetector")  # 계정 · 리전마다 하나
+        self.features["d-new"] = created_features(params)
         self.detectors["d-new"] = "ENABLED" if params.get("Enable") else "DISABLED"
         return {"DetectorId": "d-new"}
 
@@ -80,8 +96,28 @@ def gd(monkeypatch):
 def test_no_detector_is_created_enabled(gd):
     assert ensure_detector(SESSION, REGION) is None
     assert gd.detectors == {"d-new": "ENABLED"}  # 호출을 빼면 탐지기가 생기지 않는다
-    assert gd.calls == [("ListDetectors", {}), ("CreateDetector", {"Enable": True})]
+    assert gd.names() == ["ListDetectors", "CreateDetector"]
+    assert gd.calls[1][1]["Enable"] is True
     assert gd.regions == [REGION]
+
+
+def test_a_new_detector_has_every_optional_feature_off(gd):
+    # Features 를 빼면 대역도 AWS 처럼 부가 기능을 켠다 — 그때 이 테스트가 깨진다(PR 리뷰 Features)
+    ensure_detector(SESSION, REGION)
+    assert gd.features["d-new"] == {name: "DISABLED" for name in ALL_FEATURES}
+
+
+def test_the_two_runtime_features_are_never_passed_together():
+    assert "RUNTIME_MONITORING" not in guardduty.DISABLED_FEATURES
+    assert "EKS_RUNTIME_MONITORING" in guardduty.DISABLED_FEATURES  # 빼면 기본으로 켜진다
+
+
+def test_the_feature_list_follows_botocore():
+    # botocore 가 부가 기능을 더하면 그 기능은 기본으로 켜진다 — 목록이 따라오지 않으면 여기서 깨진다
+    import botocore.session
+
+    model = botocore.session.get_session().get_service_model("guardduty")
+    assert set(model.shape_for("DetectorFeature").enum) == set(ALL_FEATURES)
 
 
 def test_an_enabled_detector_is_left_alone(gd):

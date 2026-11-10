@@ -41,6 +41,11 @@ TENANT_B = TenantAccess(
 )
 _SIGNED_KEY = re.compile(r"Credential=([^/]+)/")
 _SIGNED_REGION = re.compile(r"Credential=[^/]+/[^/]+/([^/]+)/")
+# CreateDetector 에서 Features 를 생략하면 켜지는 부가 기능(RUNTIME_MONITORING 만 기본 꺼짐 — API 문서)
+_OPTIONAL_FEATURES = (
+    "S3_DATA_EVENTS", "EKS_AUDIT_LOGS", "EBS_MALWARE_PROTECTION", "RDS_LOGIN_EVENTS",
+    "LAMBDA_NETWORK_LOGS", "EKS_RUNTIME_MONITORING", "AI_PROTECTION", "AI_ANALYST",
+)
 
 
 class FakeFetcher:
@@ -82,6 +87,10 @@ class FakeAws:
         )
         # GuardDuty(REST-JSON) — 리전 → {탐지기 ID: 상태}. 실제처럼 계정 · 리전마다 하나다
         self.detectors: dict[str, dict[str, str]] = {}
+        # 만든 탐지기의 부가 기능 — 리전 → {기능: 상태}. Features 를 생략하면 AWS 처럼 켜진다
+        self.features: dict[str, dict[str, str]] = {}
+        # 리전 하나에서만 거절할 GuardDuty 작업 — (작업, 리전) → 오류 코드
+        self.deny_in_region: dict[tuple[str, str], str] = {}
         self._lock = threading.Lock()
 
     def assume_calls(self) -> list[dict]:
@@ -94,17 +103,20 @@ class FakeAws:
             ("POST", "/detector"): "CreateDetector",
         }.get((request.method, path), "GetDetector" if path.startswith("/detector/") else "")
         body = request.body.decode() if isinstance(request.body, bytes) else (request.body or "")
+        params = json.loads(body) if body else {}
         with self._lock:
-            self.sent.append((action, key, json.loads(body) if body else {}))
+            self.sent.append((action, key, params))
             self.regions.append((action, region))
         detectors = self.detectors.setdefault(region, {})
-        if action in self.deny:
-            payload = {"__type": self.deny[action], "message": "m"}
-            return AWSResponse(request.url, 403, {"x-amzn-ErrorType": self.deny[action]},
-                               _Raw(json.dumps(payload)))
+        denied = self.deny.get(action) or self.deny_in_region.get((action, region))
+        if denied:
+            payload = {"__type": denied, "message": "m"}
+            return AWSResponse(request.url, 403, {"x-amzn-ErrorType": denied}, _Raw(json.dumps(payload)))
         if action == "ListDetectors":
             payload = {"detectorIds": sorted(detectors)}
         elif action == "CreateDetector":
+            passed = {f["name"]: f["status"] for f in params.get("features", ())}
+            self.features[region] = {**dict.fromkeys(_OPTIONAL_FEATURES, "ENABLED"), **passed}
             detectors[f"d-{region}"] = "ENABLED"
             payload = {"detectorId": f"d-{region}"}
         elif action == "GetDetector":
@@ -438,8 +450,10 @@ def test_verify_ok_walks_the_four_steps_with_the_assumed_session(aws, settings):
         ("CreateDetector", "TENANT111111111111-1"),
     ]
     (params,) = [p for a, _k, p in aws.sent if a == "CreateDetector"]
-    assert params["enable"] is True and "features" not in params  # 부가 보호 기능은 켜지 않는다
+    assert params["enable"] is True
     assert aws.detectors == {REGION: {f"d-{REGION}": "ENABLED"}}
+    # 부가 보호 기능은 모두 꺼진 채 만들어진다 — 실제 요청 본문(features)으로 본다
+    assert aws.features == {REGION: dict.fromkeys(_OPTIONAL_FEATURES, "DISABLED")}
     (params,) = [p for a, _k, p in aws.sent if a == "DescribeInstances"]
     assert params["MaxResults"] == "5"
     assert (
@@ -477,6 +491,28 @@ def test_verify_stops_at_the_first_region_it_cannot_turn_on(aws, settings):
     assert (outcome.result.value, outcome.reason_code) == ("GUARDDUTY_DISABLED", "DetectorDisabled")
     assert aws.detectors == {REGION: {"d-1": "DISABLED"}}  # 정지된 탐지기를 다시 켜지 않는다
     assert SECOND_REGION not in [region for _a, region in aws.regions]
+
+
+def test_reverify_after_a_second_region_refusal_reuses_the_first_detector(aws, settings):
+    # 리전 1 생성 → 리전 2 거절 → 권한을 고친 뒤 다시 확인 → 리전 1 은 읽기만(PR 리뷰 nit)
+    aws.deny_in_region[("CreateDetector", SECOND_REGION)] = "AccessDeniedException"
+
+    first = _verify(regions=(REGION, SECOND_REGION))
+    assert (first.result.value, first.reason_code) == ("GUARDDUTY_DISABLED", "AccessDeniedException")
+    assert aws.detectors == {REGION: {f"d-{REGION}": "ENABLED"}, SECOND_REGION: {}}
+
+    aws.deny_in_region.clear()
+    aws.regions.clear()
+    assert _verify(regions=(REGION, SECOND_REGION)).result.value == "OK"
+
+    guardduty = [step for step in aws.regions if step[0] not in _STEPS]
+    assert guardduty == [
+        ("ListDetectors", REGION),
+        ("GetDetector", REGION),  # 다시 만들지 않는다 — Features 도 다시 넘기지 않는다
+        ("ListDetectors", SECOND_REGION),
+        ("CreateDetector", SECOND_REGION),
+    ]
+    assert set(aws.features) == {REGION, SECOND_REGION}
 
 
 def test_verify_guardduty_refusal_is_parsed_from_the_json_error(aws, settings):
