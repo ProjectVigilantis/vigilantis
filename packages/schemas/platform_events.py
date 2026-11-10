@@ -106,7 +106,7 @@ class PlatformEventAction(str, Enum):
     USER_STATUS_CHANGE = "USER_STATUS_CHANGE"
     USER_SESSIONS_REVOKE = "USER_SESSIONS_REVOKE"
     USER_PLATFORM_ROLE_CHANGE = "USER_PLATFORM_ROLE_CHANGE"
-    USER_TENANT_ASSIGNMENTS_CHANGE = "USER_TENANT_ASSIGNMENTS_CHANGE"
+    USER_GROUP_ASSIGNMENTS_CHANGE = "USER_GROUP_ASSIGNMENTS_CHANGE"
     # 고객사 관리
     TENANT_CREATE = "TENANT_CREATE"
     TENANT_UPDATE = "TENANT_UPDATE"
@@ -156,8 +156,8 @@ class TransitionDetails(PlatformEventDetails):
     after: Optional[str] = Field(default=None, pattern=_STATE_PATTERN)
 
 
-class TenantAssignmentsDetails(PlatformEventDetails):
-    """담당 고객사 교체 — 전 · 후 고객사 ID 목록(정규 UUID)."""
+class GroupAssignmentsDetails(PlatformEventDetails):
+    """담당 그룹 교체 — 전 · 후 그룹 ID 목록(정규 UUID). 빈 목록은 담당 없음이다."""
 
     before: tuple[uuid.UUID, ...] = ()
     after: tuple[uuid.UUID, ...] = ()
@@ -166,16 +166,15 @@ class TenantAssignmentsDetails(PlatformEventDetails):
 class TenantVerifyDetails(PlatformEventDetails):
     """연결 확인 결과(TenantVerificationResult)를 그대로 싣는다.
 
-    확인을 돌렸으면(성공 · 실패) 결과가 있고, 성공은 OK 뿐이다. 거절(상태 충돌)은 확인을 돌리기 전이라
-    결과가 없다 — 403 은 ACCESS_FORBIDDEN 으로 따로 남는다.
+    확인을 돌렸으면(성공 · 실패) 결과가 있고, 성공은 OK 뿐이다. 거절(상태 충돌)은 결과가 있어도 없어도 된다 —
+    확인 전에 멈추면 없고, 확인 뒤 다시 읽어 충돌을 만나면 그 결과를 싣는다. 403 은 ACCESS_FORBIDDEN 으로
+    따로 남는다.
     """
 
     result: Optional[TenantVerificationResult] = None
 
     def check_outcome(self, outcome: "PlatformEventOutcome") -> None:
         if outcome is PlatformEventOutcome.DENIED:
-            if self.result is not None:
-                raise ValueError("거절은 연결 확인을 돌리기 전이라 result 가 없습니다")
             return
         if self.result is None:
             raise ValueError("연결 확인을 돌렸으면(성공 · 실패) result 가 있습니다")
@@ -248,8 +247,8 @@ ACTION_SPECS: Mapping[PlatformEventAction, ActionSpec] = {
     _A.USER_PLATFORM_ROLE_CHANGE: _spec(
         _C.USER_ADMIN, {_S}, {_USER}, _T.USER, TransitionDetails
     ),
-    _A.USER_TENANT_ASSIGNMENTS_CHANGE: _spec(
-        _C.USER_ADMIN, {_S}, {_USER}, _T.USER, TenantAssignmentsDetails
+    _A.USER_GROUP_ASSIGNMENTS_CHANGE: _spec(
+        _C.USER_ADMIN, {_S}, {_USER}, _T.USER, GroupAssignmentsDetails
     ),
     _A.TENANT_CREATE: _spec(_C.TENANT_ADMIN, {_S}, {_USER}, _T.TENANT),
     _A.TENANT_UPDATE: _spec(_C.TENANT_ADMIN, {_S}, {_USER}, _T.TENANT),

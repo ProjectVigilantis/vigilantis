@@ -212,7 +212,7 @@ _USER_ACTOR = {
 
 @pytest.mark.parametrize("action", [A.TENANT_RESUME, A.TENANT_VERIFY])
 def test_state_conflict_denial_of_verify_and_resume_needs_no_result(action):
-    # 상태 충돌은 연결 확인을 돌리기 전에 거절된다 — 결과가 없다(PR 리뷰 ③-1)
+    # 확인을 돌리기 전에 멈춘 상태 충돌 — 결과가 없다(PR 리뷰 ③-1)
     record = _record(
         action=action, **_USER_ACTOR, outcome=OUT.DENIED,
         details={"reason_code": "TENANT_STATE_CONFLICT"},
@@ -220,10 +220,20 @@ def test_state_conflict_denial_of_verify_and_resume_needs_no_result(action):
     assert record.details == {"reason_code": "TENANT_STATE_CONFLICT"}
 
 
+@pytest.mark.parametrize("result", ["OK", "READ_DENIED"])
+@pytest.mark.parametrize("action", [A.TENANT_RESUME, A.TENANT_VERIFY])
+def test_state_conflict_denial_after_the_check_keeps_its_result(action, result):
+    # 확인 뒤 다시 읽어 만난 상태 충돌 — 손에 든 결과를 싣는다. 막으면 409 가 500 이 된다(PR 리뷰 ③-1 재리뷰)
+    record = _record(
+        action=action, **_USER_ACTOR, outcome=OUT.DENIED,
+        details={"reason_code": "TENANT_STATE_CONFLICT", "result": result},
+    )
+    assert record.details == {"reason_code": "TENANT_STATE_CONFLICT", "result": result}
+
+
 @pytest.mark.parametrize(
     "outcome, details",
     [
-        (OUT.DENIED, {"reason_code": "TENANT_STATE_CONFLICT", "result": "OK"}),  # 돌리지 않은 확인의 결과
         (OUT.FAILED, {"reason_code": "AccessDenied"}),  # 돌린 확인인데 결과 없음
         (OUT.SUCCEEDED, {}),
         (OUT.SUCCEEDED, {"result": "READ_DENIED"}),  # 성공은 OK 뿐
@@ -278,10 +288,26 @@ def test_access_path_carries_no_query_string():
         )
 
 
+@pytest.mark.parametrize("side", ["before", "after"])
+def test_group_assignments_take_only_canonical_group_ids(side):
+    # 그룹 ID 는 정규 UUID 로 맞춘다 — 대문자는 소문자로, UUID 가 아니면 거절(PR 리뷰 ⑦)
+    group = uuid.uuid4()
+    base = dict(
+        action=A.USER_GROUP_ASSIGNMENTS_CHANGE,
+        actor_kind=PlatformActorKind.USER,
+        actor_user_id=str(uuid.uuid4()),
+        actor_account_type=AccountType.PLATFORM,
+        actor_platform_role=PlatformRole.CENTRAL_ADMIN,
+    )
+    assert _record(**base, details={side: [str(group).upper()]}).details[side] == [str(group)]
+    with pytest.raises(ValidationError):
+        _record(**base, details={side: ["group-a"]})
+
+
 def test_details_are_normalized_to_json():
     before, after = uuid.uuid4(), uuid.uuid4()
     record = _record(
-        action=A.USER_TENANT_ASSIGNMENTS_CHANGE,
+        action=A.USER_GROUP_ASSIGNMENTS_CHANGE,
         actor_kind=PlatformActorKind.USER,
         actor_user_id=str(uuid.uuid4()),
         actor_account_type=AccountType.PLATFORM,
