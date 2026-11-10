@@ -63,7 +63,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum, unique
@@ -165,6 +165,7 @@ from services.aws import backup, executor, rollback
 from services.aws.client import TenantAccess, tenant_scope
 from services.aws.errors import is_retryable, watch_dry_run_protocol
 from services.aws.executor import parse_arn
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from tenancy import ALL_TENANTS, TenantScope
@@ -6310,3 +6311,49 @@ def reserve_nacl_deny_expiry(
         execution_id=reserved_id,
         incident_updated_at=incident.updated_at if incident is not None else None,
     )
+
+
+def nacl_release_expires_at(
+    db: Session,
+    candidate: models.RunbookCandidate,
+    executions: Sequence[models.ActionExecution],
+) -> datetime | None:
+    """[해제] 후보에 표시할 24시간 만료 시각 — 읽기 시점에 원본 차단 행에서만 계산한다. (#597)
+
+    후보는 원본 차단을 가리키는 열이 없다. 그래서 같은 인시던트의 차단 중 **같은 대상**이고
+    **결속된 백업의 슬롯(rule_number · egress)이 후보와 같으며** 후보보다 먼저 접수된 것을 고르되
+    (_expiry_backup — 만료 스캔과 같은 백업 기준), 먼저 만료 스캔과 같은 자격(SUCCESS이고 그 차단을
+    되돌린 해제 실행이 없다 — list_nacl_deny_expired의 _no_restore_execution_for_block)으로 거른다.
+    TTL 경과는 보지 않는다 — 아직 오지 않은 만료도 보여야 한다. 거른 뒤 정확히 하나일 때만 그
+    finished_at + TTL이고, 없거나 여럿이면(이력이 모호하다) None이다. finished_at이 없어도 None이다.
+    상태는 파생하지 않고 지난 시각도 그대로 둔다. 해제 후보가 아닌 추천도 None이다.
+    """
+    if candidate.runbook_id is not RunbookId.RUNBOOK_NACL_RESTORE:
+        return None
+    slot = (candidate.parameters.get("rule_number"), candidate.parameters.get("egress"))
+    matching: list[models.ActionExecution] = []
+    for block in executions:
+        if (
+            block.runbook_id is not RunbookId.RUNBOOK_NACL_ADD_DENY
+            or block.target_arn != candidate.target_arn
+            or block.created_at > candidate.created_at
+        ):
+            continue
+        _, backup, _ = _expiry_backup(db, block)
+        if backup is not None and (backup.rule_number, backup.egress) == slot:
+            matching.append(block)
+    if not matching:
+        return None
+    eligible_ids = set(
+        db.execute(
+            select(models.ActionExecution.execution_id).where(
+                models.ActionExecution.execution_id.in_([b.execution_id for b in matching]),
+                models.ActionExecution.status == ExecutionStatus.SUCCESS,
+                executions_repo._no_restore_execution_for_block(),
+            )
+        ).scalars()
+    )
+    eligible = [b for b in matching if b.execution_id in eligible_ids]
+    if len(eligible) != 1 or eligible[0].finished_at is None:
+        return None
+    return eligible[0].finished_at + NACL_DENY_TTL

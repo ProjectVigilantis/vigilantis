@@ -217,16 +217,17 @@ def _to_detail(db: Session, row: models.Incident) -> IncidentResponse:
     executable = incidents_repo.list_candidates(
         db, row.incident_id, status=CandidateStatus.EXECUTABLE
     )
+    execution_rows = executions_repo.list_by_incident(db, row.incident_id)
     recommendations = [
         {
             "runbook_id": candidate.runbook_id,
             "target_arn": candidate.target_arn,
             "display_parameters": candidate.display_parameters,
             "ai_savings_estimate": candidate.ai_savings_estimate,
+            "expires_at": workflows.nacl_release_expires_at(db, candidate, execution_rows),
         }
         for candidate in sorted(executable, key=lambda c: c.created_at)
     ]
-    execution_rows = executions_repo.list_by_incident(db, row.incident_id)
     recovered_parent_ids = {
         execution.parent_execution_id
         for execution in execution_rows

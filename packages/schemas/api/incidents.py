@@ -214,6 +214,15 @@ class RecommendationItem(BaseModel):
             "basis.explanation_source는 필수 SERVER_TEMPLATE이다."
         ),
     )
+    expires_at: UtcDateTime | None = Field(
+        default=None,
+        description=(
+            "차단 해제(RUNBOOK_NACL_RESTORE) 제안의 자동 만료 예정 시각. 조회 시점에 원본 "
+            "차단(RUNBOOK_NACL_ADD_DENY)의 finished_at + 24시간으로 계산하며 저장하지 않는다. "
+            "원본이 없거나 SUCCESS가 아니거나 finished_at이 없으면, 그리고 해제 제안이 "
+            "아닌 추천이면 null이다. 이미 지난 시각도 그대로 내려간다."
+        ),
+    )
 
     @model_validator(mode="after")
     def _ai_recommendable_only(self):

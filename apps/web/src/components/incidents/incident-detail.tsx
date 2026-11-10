@@ -63,6 +63,14 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
+function formatReleaseExpiry(iso: string): string {
+  return formatKst(iso, '24h').replace(
+    /^(\d{4})\. (\d{1,2})\. (\d{1,2})\. (\d{2}:\d{2}):\d{2} KST$/,
+    (_, year: string, month: string, day: string, time: string) =>
+      `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')} ${time} (KST)`,
+  );
+}
+
 const ANALYSIS_LABELS: Record<AnalysisResultStatus, string> = {
   PENDING: '분석 대기',
   IN_PROGRESS: '분석 중',
@@ -800,6 +808,11 @@ export function IncidentDetail({
               <li key={rec.runbook_id}>
                 <Card className="gap-2 p-4">
                   <p className="font-medium">{RUNBOOK_LABELS[rec.runbook_id]}</p>
+                  {rec.runbook_id === 'RUNBOOK_NACL_RESTORE' && rec.expires_at != null ? (
+                    <p className="text-muted-foreground text-sm">
+                      시스템 해제 예정 · {formatReleaseExpiry(rec.expires_at)}
+                    </p>
+                  ) : null}
                   {/* display_parameters는 자유 형식 Record다 — FE가 key 표시명을 지어내지 않고 원문을 쓴다. */}
                   <dl className="flex flex-col gap-1 text-sm">
                     {Object.entries(rec.display_parameters).map(([key, value]) => (
