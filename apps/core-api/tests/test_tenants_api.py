@@ -441,6 +441,18 @@ def test_search_returns_at_most_twenty_by_name(client_pg, db, admin):
     assert [i["name"] for i in items] == [f"상한 검색 {n:02d}" for n in range(20)]
 
 
+def test_search_treats_like_wildcards_as_literal_characters(client_pg, db, admin):
+    literal = _named(db, "할인%_고객사", "100000000021")
+    _named(db, "할인일반고객사", "100000000022")
+
+    for query in ("%", "_"):
+        response = client_pg.get(f"{BASE}/search", params={"q": query})
+        assert response.status_code == 200
+        assert response.json()["items"] == [
+            {"tenant_id": literal.tenant_id, "name": "할인%_고객사", "accessible": True},
+        ]
+
+
 @pytest.mark.parametrize("params", [{}, {"q": ""}, {"q": "가" * 101}])
 def test_search_without_a_valid_query_is_422(client_pg, admin, params):
     resp = client_pg.get(f"{BASE}/search", params=params)
