@@ -80,6 +80,29 @@
                 {
                   "Effect": "Allow",
                   "Action": [
+                    "guardduty:CreateDetector",
+                    "guardduty:GetDetector",
+                    "guardduty:ListDetectors"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "iam:CreateServiceLinkedRole"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/guardduty.amazonaws.com/AWSServiceRoleForAmazonGuardDuty"
+                  },
+                  "Condition": {
+                    "StringEquals": {
+                      "iam:AWSServiceName": "guardduty.amazonaws.com"
+                    }
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
                     "ec2:CreateImage",
                     "ec2:ModifyInstanceAttribute",
                     "ec2:StartInstances",
