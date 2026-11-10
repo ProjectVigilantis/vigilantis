@@ -34,6 +34,7 @@ export type ErrorCode =
   | 'GROUP_NOT_FOUND' // 404 — 없는 그룹(#572 2번)
   | 'GROUP_NAME_CONFLICT' // 409 — 같은 이름의 그룹이 이미 있다(#572 2번)
   | 'USER_STATE_CONFLICT' // 409 — 고객사별 마지막 활성 ADMIN · 중복 초대 · 상태 충돌(#492)
+  | 'SIGNUP_REQUEST_APPROVAL_REQUIRED' // 409 — 승인은 AWS 계정 ID·리전을 받는 전용 approve 경로로 요청
   | 'REQUEST_VALIDATION_FAILED' // 422
   | 'INTERNAL_ERROR'; // 500
 
@@ -1298,6 +1299,7 @@ export interface SignupRequestDecisionItem {
 
 export interface SignupRequestItem {
   request_id: string;
+  tenant_id: string | null;
   company_name: string;
   contact_name: string;
   email: string;
@@ -1312,6 +1314,16 @@ export interface SignupRequestItem {
 
 export interface SignupRequestsResponse extends PaginationMetadata {
   items: SignupRequestItem[];
+}
+
+export interface SignupRequestApproveRequest {
+  aws_account_id: string;
+  regions: string[];
+}
+
+export interface SignupRequestApproveResponse {
+  request: SignupRequestItem;
+  tenant: TenantCreateResponse;
 }
 
 /**
@@ -1436,6 +1448,7 @@ export interface SignupRequestCreate {
 /**
  * `PUT /signup-requests/{id}/status` 요청. REJECTED로 옮길 때는 `reason`(반려 사유)이 필수이고 비면 422,
  * 다른 상태면 null이다. 고객사 정지(`POST /tenants/{id}/suspend`의 reason, 응답 suspended_reason)와 같은 모양이다.
+ * 승인은 `POST /signup-requests/{id}/approve`로만 한다. 기존 화면 호환을 위해 상태 타입은 유지하지만 APPROVED PUT은 서버가 거절한다.
  */
 export interface SignupRequestStatusChange {
   status: SignupRequestStatus;

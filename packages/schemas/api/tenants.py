@@ -25,7 +25,8 @@
 #     PATCH 의 `subscription` 은 409 TENANT_STATE_CONFLICT 다 — 운영자 입력이 유효한 계약을 지우지 않는다.
 #
 # 경로 (전부 /api/v1)
-#   GET    /tenants                  → TenantsResponse. 관리자 직원계정은 담당 그룹 안의 고객사만(범위 밖 행은 없다)
+#   GET    /tenants?unassigned_only= → TenantsResponse. 관리자 직원계정은 담당 그룹 안의 고객사만(범위 밖 행은 없다).
+#                                      unassigned_only 는 생략 시 false, true 면 그 범위 안에서 group_id 가 null 인 고객사만(상태 무관)
 #   GET    /tenants/search?q=        → TenantSearchResponse(#572 7번). 이름 부분 일치(대소문자 무시) · 이름순 최대
 #                                      TENANT_SEARCH_LIMIT 건. 담당 밖 고객사도 accessible=false 로 나온다 — 고객사 ID ·
 #                                      이름 · accessible 말고는 싣지 않는다. q 는 1-100자(없거나 비면 422)
@@ -88,6 +89,8 @@ VpcId = Annotated[str, Field(pattern=r"^vpc-[0-9a-f]+$")]
 # IAM 역할 이름은 ASCII 만 받는다 — `\w` 는 유니코드 글자까지 받아 `role/역할` 이 통과한다
 RoleArn = Annotated[str, Field(pattern=r"^arn:aws:iam::\d{12}:role/[A-Za-z0-9_+=,.@/-]+$")]
 TenantName = Annotated[str, Field(min_length=1, max_length=100)]
+#: 관제받는 리전 — 하나 이상. 중복은 요청 모델의 검증기가 require_unique 로 거절한다.
+TenantRegions = Annotated[list[AwsRegion], Field(min_length=1)]
 
 #: 고객 역할 이름의 기본값. 온보딩 템플릿이 이 이름으로 만든다(#438 §C-1).
 DEFAULT_ACCESS_ROLE_NAME = "vigilantis-access"
@@ -102,6 +105,12 @@ def default_access_role_arn(aws_account_id: str) -> str:
 
 def _role_account(role_arn: str) -> str:
     return role_arn.split(":")[4]
+
+
+def require_unique(field: str, values: list) -> None:
+    """고객사를 만드는 요청(TenantCreateRequest · 도입 신청 승인)이 같은 규칙으로 목록 중복을 거절한다."""
+    if len(set(values)) != len(values):
+        raise ValueError(f"{field} 는 중복될 수 없습니다")
 
 
 class TenantStatus(str, Enum):
@@ -320,7 +329,7 @@ class TenantCreateRequest(BaseModel):
     aws_account_id: AwsAccountId
     #: 생략하면 `arn:aws:iam::<계정>:role/vigilantis-access`(온보딩 템플릿 기본값).
     access_role_arn: Optional[RoleArn] = None
-    regions: list[AwsRegion] = Field(min_length=1)
+    regions: TenantRegions
     collect_vpc_ids: list[VpcId] = Field(default_factory=list)
     #: 넣을 고객사 그룹(#572 3번). 중앙 관리계정은 생략할 수 있고(담당 그룹 없음), 관리자 직원계정은 자기 담당 그룹 중
     #: 하나가 필수다 — 빠지면 422, 담당 밖이면 403(서버 판정 · 경로 표).
@@ -330,10 +339,8 @@ class TenantCreateRequest(BaseModel):
     def _enforce_contract(self):
         if self.access_role_arn is not None and _role_account(self.access_role_arn) != self.aws_account_id:
             raise ValueError("access_role_arn 의 계정이 aws_account_id 와 다릅니다")
-        if len(set(self.regions)) != len(self.regions):
-            raise ValueError("regions 는 중복될 수 없습니다")
-        if len(set(self.collect_vpc_ids)) != len(self.collect_vpc_ids):
-            raise ValueError("collect_vpc_ids 는 중복될 수 없습니다")
+        require_unique("regions", self.regions)
+        require_unique("collect_vpc_ids", self.collect_vpc_ids)
         return self
 
 

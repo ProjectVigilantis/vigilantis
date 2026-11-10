@@ -63,8 +63,13 @@ router = APIRouter(
 
 
 @router.get("", response_model=TenantsResponse)
-def list_tenants(db: Session = _DB, user: service.CurrentUser = _PLATFORM) -> TenantsResponse:
-    return tenant_admin.list_tenants(db, user)
+def list_tenants(
+    unassigned_only: bool = Query(default=False),
+    db: Session = _DB,
+    user: service.CurrentUser = _PLATFORM,
+) -> TenantsResponse:
+    """unassigned_only=true 면 담당 그룹 없는 고객만(담당자 범위 안에서) — 연결 상태와 무관하다."""
+    return tenant_admin.list_tenants(db, user, unassigned_only=unassigned_only)
 
 
 @router.get("/search", response_model=TenantSearchResponse)

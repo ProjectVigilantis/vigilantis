@@ -2,8 +2,8 @@
 # [파일 설명]
 # /api/v1/signup-requests — 도입 신청. (#552, 계약: schemas.api.signup_requests)
 #
-#   - 공개 접수(POST)와 중앙 관리자 처리(GET · PUT)가 한 라우터에 있어 전역 보호 의존성 없이 마운트한다.
-#     각 라우트가 의존성을 직접 건다: POST 는 Origin 만(세션 없음), 관리 라우트는 중앙 관리자 관문 + PUT 은 Origin.
+#   - 공개 접수(POST)와 중앙 관리자 처리(GET · PUT · POST approve)가 한 라우터에 있어 전역 보호 의존성 없이 마운트한다.
+#     각 라우트가 의존성을 직접 건다: 접수 POST 는 Origin 만(세션 없음), 관리 라우트는 중앙 관리자 관문 + 쓰기는 Origin.
 #   - 재시도 키는 Idempotency-Key 헤더(UUIDv4)로 받고 202 로 응답한다. 기존 actions 의 본문 키 · 200 재생과 다르다.
 #   - 얇게 둔다: 판정 · 잠금 · 트랜잭션은 signup_requests_service 가 맡는다.
 # ==============================================================================
@@ -15,11 +15,14 @@ from typing import Annotated
 import signup_requests_service as service
 from auth.access import require_central_admin
 from auth.http import require_origin
+from config import TenantSettings, get_tenant_settings
 from db.session import get_db
 from fastapi import APIRouter, Depends, Header, Query
 from pydantic import UUID4
 from schemas.api.signup_requests import (
     SignupRequestAccepted,
+    SignupRequestApproveRequest,
+    SignupRequestApproveResponse,
     SignupRequestCreate,
     SignupRequestItem,
     SignupRequestsResponse,
@@ -74,3 +77,18 @@ def change_signup_request_status(
     actor: Actor = _ACTOR,
 ) -> SignupRequestItem:
     return service.change_status(db, actor, request_id, body)
+
+
+@router.post(
+    "/{request_id}/approve",
+    response_model=SignupRequestApproveResponse,
+    dependencies=[Depends(require_origin), Depends(require_central_admin)],
+)
+def approve_signup_request(
+    request_id: str,
+    body: SignupRequestApproveRequest,
+    db: Session = _DB,
+    actor: Actor = _ACTOR,
+    settings: TenantSettings = Depends(get_tenant_settings),
+) -> SignupRequestApproveResponse:
+    return service.approve(db, actor, request_id, body, settings)

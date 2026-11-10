@@ -246,7 +246,7 @@ PLATFORM 계정은 모두 `role=ADMIN`(호환 값)이고, 아래 PLATFORM 열은
 | (#572 2번) 그룹 목록 `GET /api/v1/groups` | 전체 | 자기 담당 그룹 | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
 | (#572 2번) 그룹 생성 · 삭제 `POST /api/v1/groups` · `DELETE /api/v1/groups/{group_id}` | 허용 | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
 | 직원 관리 `/api/v1/staff*`(초대 · 재발송 · 등급 · 상태 · 이력 · (#572 2번) 담당 그룹 배정 `/{user_id}/groups`) — **직원 관리 = 중앙 관리계정만**(#572 4번) | 허용(자기 등급 · 상태 변경은 403) | 403 `AUTH_FORBIDDEN`(담당 그룹이 있어도 — 위임 없음) | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
-| (#552) 도입 신청 관리 `GET /api/v1/signup-requests` · `PUT /api/v1/signup-requests/{request_id}/status` | 허용 | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
+| (#552 · #572 8번) 도입 신청 관리 `GET /api/v1/signup-requests` · `PUT /api/v1/signup-requests/{request_id}/status` · 승인 `POST /api/v1/signup-requests/{request_id}/approve` | 허용 | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
 | (#572 6번) 플랫폼 상태 · 고객사별 호출 통계 `GET /api/v1/platform/overview` | 허용 | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` |
 | (#552) 문의 등록 `POST /api/v1/inquiries` | 403 `AUTH_FORBIDDEN` | 403 `AUTH_FORBIDDEN` | 자기 고객(정지 포함) | (#572 5번) `CREATE_INQUIRY` 권한이 있으면 자기 고객(정지 포함), 없으면 403 `AUTH_FORBIDDEN` | (#572 5번) 403 `AUTH_FORBIDDEN`(대시보드 조회만) |
 | (#552) 문의 목록 `GET /api/v1/inquiries` | 전체 | 배정 고객의 문의 | 자기 고객의 문의(정지 포함) | 자기 고객의 문의(정지 포함) | 자기 고객의 문의(정지 포함) |

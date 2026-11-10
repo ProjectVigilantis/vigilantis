@@ -3,7 +3,8 @@
 # /api/v1/tenants 의 판정 · 트랜잭션 · 응답 조립 (Post-MVP T-4 · 계약: schemas.api.tenants)
 #
 #   - 라우터는 얇게 두고 여기서 commit 한다. **응답을 다 만든 뒤에 commit 한다** — 온보딩 링크 설정이
-#     없어 응답을 못 만들면(503) 쓰기도 남지 않는다.
+#     없어 응답을 못 만들면(503) 쓰기도 남지 않는다. 생성 본체(create_tenant_uncommitted)는 commit 하지 않는다 —
+#     도입 신청 승인(signup_requests_service.approve)이 자기 트랜잭션 안에서 같은 본체를 부른다(#572 묶음 B).
 #   - 상태 전이의 받는 상태는 저장소(db.repositories.tenants)가 계약 상수로 판정한다. 0행이면 다시 읽어
 #     없으면 404 TENANT_NOT_FOUND, 있으면 409 TENANT_STATE_CONFLICT 다. PATCH 의 `subscription` 이 진행 중인
 #     모의 Marketplace 계약 · 그 투영을 덮으려 하면 저장소가 0행으로 거절해 같은 409 다(T-16 · #528).
@@ -172,8 +173,13 @@ def _rejected(db: Session, tenant_id: str, user: service.CurrentUser) -> ApiErro
     return ApiError(ErrorCode.TENANT_STATE_CONFLICT)
 
 
-def list_tenants(db: Session, user: service.CurrentUser) -> TenantsResponse:
-    rows = tenants_repo.list_tenants(db, scope_ids=tenant_scope_ids(user))
+def list_tenants(
+    db: Session, user: service.CurrentUser, *, unassigned_only: bool = False
+) -> TenantsResponse:
+    """unassigned_only 는 담당 그룹 없는(group_id null) 고객만 — 범위는 그대로 걸린다."""
+    rows = tenants_repo.list_tenants(
+        db, scope_ids=tenant_scope_ids(user), unassigned_only=unassigned_only
+    )
     return TenantsResponse(tenants=[_list_item(row) for row in rows])
 
 
@@ -341,33 +347,48 @@ def _creation_group(db: Session, user: service.CurrentUser, requested: UUID | No
     return group_id
 
 
+def create_tenant_uncommitted(
+    db: Session,
+    user: service.CurrentUser,
+    body: TenantCreateRequest,
+    settings: TenantSettings,
+    *,
+    now: datetime,
+) -> TenantCreateResponse:
+    """고객을 만들고 생성 응답(온보딩 링크 포함)까지 짓는다. **commit 하지 않는다** — 호출부가 잠금 안에서 다시 판정한
+    user 와 자기 트랜잭션으로 부르고, 응답을 받은 뒤 확정한다(POST /tenants · 도입 신청 승인). 거절은 예외다."""
+    group_id = _creation_group(db, user, body.group_id)
+    try:
+        # SAVEPOINT — 유일성 거절이 이 쓰기만 되돌리고 세션은 계속 쓸 수 있게 둔다
+        with db.begin_nested():
+            tenant = tenants_repo.create_tenant(
+                db,
+                name=body.name,
+                aws_account_id=body.aws_account_id,
+                regions=body.regions,
+                collect_vpc_ids=body.collect_vpc_ids,
+                access_role_arn=body.access_role_arn,
+                group_id=group_id,
+                now=now,
+            )
+    except IntegrityError as exc:
+        if getattr(getattr(exc.orig, "diag", None), "constraint_name", None) == _ACCOUNT_UNIQUE:
+            raise ApiError(ErrorCode.TENANT_ACCOUNT_CONFLICT) from exc
+        raise
+    # 새 테넌트에는 자산 · 인시던트가 없다 — 다시 세지 않는다
+    return TenantCreateResponse(
+        tenant=_detail(tenants_repo.TenantWithCounts(tenant, 0, 0), settings),
+        external_id=tenant.external_id,
+    )
+
+
 def create_tenant(
     db: Session, actor: admin_service.Actor, body: TenantCreateRequest, settings: TenantSettings, *, now: datetime
 ) -> TenantCreateResponse:
     with _management(db, actor) as user:
-        group_id = _creation_group(db, user, body.group_id)
-        try:
-            # SAVEPOINT — 유일성 거절이 이 쓰기만 되돌리고 세션은 계속 쓸 수 있게 둔다
-            with db.begin_nested():
-                tenant = tenants_repo.create_tenant(
-                    db,
-                    name=body.name,
-                    aws_account_id=body.aws_account_id,
-                    regions=body.regions,
-                    collect_vpc_ids=body.collect_vpc_ids,
-                    access_role_arn=body.access_role_arn,
-                    group_id=group_id,
-                    now=now,
-                )
-        except IntegrityError as exc:
-            if getattr(getattr(exc.orig, "diag", None), "constraint_name", None) == _ACCOUNT_UNIQUE:
-                raise ApiError(ErrorCode.TENANT_ACCOUNT_CONFLICT) from exc
-            raise
-        # 새 테넌트에는 자산 · 인시던트가 없다 — 다시 세지 않는다
-        return _commit_after(db, lambda: TenantCreateResponse(
-            tenant=_detail(tenants_repo.TenantWithCounts(tenant, 0, 0), settings),
-            external_id=tenant.external_id,
-        ))
+        return _commit_after(
+            db, lambda: create_tenant_uncommitted(db, user, body, settings, now=now)
+        )
 
 
 def set_tenant_group(

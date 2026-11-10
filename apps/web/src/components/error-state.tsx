@@ -84,6 +84,7 @@ const PRESENTATION: Record<ErrorCode, Presentation> = {
   // 여기는 일반 화면에 섞여 오는 경우다. 그 사이 다른 관리자가 바꿨을 수 있어 재조회가 원칙이다.
   USER_NOT_FOUND: { variant: 'inline', note: '화면을 새로고침한 뒤 다시 확인해 주세요.' },
   USER_STATE_CONFLICT: { variant: 'inline', note: '화면을 새로고침한 뒤 다시 확인해 주세요.' },
+  SIGNUP_REQUEST_APPROVAL_REQUIRED: { variant: 'inline' },
 };
 
 /** ApiError가 아닌 실패(네트워크 등)도 오류 화면을 그려야 하므로 INTERNAL_ERROR로 접는다. */

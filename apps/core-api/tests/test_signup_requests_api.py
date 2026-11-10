@@ -1,23 +1,32 @@
-"""도입 신청 API (#552) — 익명 멱등 접수, 알림과의 원자성, 중앙 관리자 처리."""
+"""도입 신청 API (#552) — 익명 멱등 접수, 알림과의 원자성, 중앙 관리자 처리, 승인과 고객사 생성(#572)."""
 
 from __future__ import annotations
 
 import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 import signup_requests_service
+from config import TenantSettings, get_tenant_settings
 from db import models
+from db.repositories import tenants as tenants_repo
 from exceptions import ApiError
 from schemas.api.auth import PlatformRole, UserRole
 from schemas.api.errors import ErrorCode
-from schemas.api.signup_requests import SignupRequestCreate
+from schemas.api.signup_requests import SignupRequestApproveResponse, SignupRequestCreate
 from schemas.api.support import NotificationKind, SignupRequestStatus
+from schemas.api.tenants import TenantStatus
 from sqlalchemy import func, select
 from sqlalchemy.exc import OperationalError
 
 BASE = "/api/v1/signup-requests"
+TENANTS = "/api/v1/tenants"
+ACCOUNT = "123456789012"
+APPROVE = {"aws_account_id": ACCOUNT, "regions": ["ap-northeast-2", "us-east-1"]}
+TEMPLATE = "https://templates.example.com/vigilantis-access.yaml"
+PRINCIPAL = "arn:aws:iam::999988887777:role/vigilantis-platform"
 BODY = {
     "company_name": "Acme",
     "contact_name": "Kim",
@@ -222,10 +231,10 @@ def test_list_is_newest_first_with_full_item(client_pg, post, db):
     assert ids.index(second) < ids.index(first)
     item = next(i for i in items if i["request_id"] == first)
     assert set(item) == {
-        "request_id", "company_name", "contact_name", "email", "phone", "note",
+        "request_id", "tenant_id", "company_name", "contact_name", "email", "phone", "note",
         "status", "rejected_reason", "created_at", "updated_at", "decision",
     }
-    assert item["status"] == "NEW" and item["rejected_reason"] is None
+    assert item["status"] == "NEW" and item["rejected_reason"] is None and item["tenant_id"] is None
     assert item["created_at"].endswith("Z")
     stamps = [(db.get(models.SignupRequest, rid).created_at, rid) for rid in ids]
     assert stamps == sorted(stamps, reverse=True)
@@ -238,21 +247,55 @@ def put(client, request_id, status, reason=None, **kwargs):
     return client.put(f"{BASE}/{request_id}/status", json=body, **kwargs)
 
 
-@pytest.mark.parametrize("target", ["IN_REVIEW", "APPROVED"])
-def test_new_moves_forward_without_reason(client_pg, post, db, target):
+def approve(client, request_id, body=APPROVE, **kwargs):
+    return client.post(f"{BASE}/{request_id}/approve", json=body, **kwargs)
+
+
+@pytest.fixture()
+def onboarding(client_pg):
+    """승인 응답의 온보딩 링크 설정을 켠다. 끄려면 configure(False)."""
+    def configure(ready: bool = True) -> None:
+        client_pg.app.dependency_overrides[get_tenant_settings] = lambda: TenantSettings(
+            TENANT_ONBOARDING_TEMPLATE_URL=TEMPLATE if ready else None,
+            PLATFORM_PRINCIPAL_ARN=PRINCIPAL if ready else None,
+        )
+
+    configure(True)
+    return configure
+
+
+def snapshot(db, rid):
+    """신청 한 건의 처리 칸과 고객사 · 결정 기록 수 — 거절된 요청 뒤에 그대로인지 본다."""
+    db.expire_all()
+    row = db.get(models.SignupRequest, rid)
+    return (
+        row.status, row.rejected_reason, row.tenant_id, row.updated_at,
+        count(db, models.Tenant), count(db, models.SignupRequestDecision),
+    )
+
+
+def test_new_moves_to_review_without_reason(client_pg, post, db):
     rid = seed(post)
-    resp = put(client_pg, rid, target)
+    resp = put(client_pg, rid, "IN_REVIEW")
     assert resp.status_code == 200
-    assert resp.json()["status"] == target and resp.json()["rejected_reason"] is None
+    assert resp.json()["status"] == "IN_REVIEW" and resp.json()["rejected_reason"] is None
     assert resp.json()["request_id"] == rid
-    assert db.get(models.SignupRequest, rid).status.value == target
+    assert db.get(models.SignupRequest, rid).status is SignupRequestStatus.IN_REVIEW
 
 
-def test_approval_only_records_decision(client_pg, post, db):
+@pytest.mark.parametrize("state", ["NEW", "IN_REVIEW", "APPROVED", "REJECTED"])
+def test_put_never_approves_and_points_to_the_approve_api(client_pg, post, db, onboarding, state):
     rid = seed(post)
-    tenants, users = count(db, models.Tenant), count(db, models.AppUser)
-    assert put(client_pg, rid, "APPROVED").status_code == 200
-    assert (count(db, models.Tenant), count(db, models.AppUser)) == (tenants, users)
+    if state == "IN_REVIEW":
+        assert put(client_pg, rid, "IN_REVIEW").status_code == 200
+    elif state == "REJECTED":
+        assert put(client_pg, rid, "REJECTED", "연락 불가").status_code == 200
+    elif state == "APPROVED":
+        assert approve(client_pg, rid).status_code == 200
+    before = snapshot(db, rid)
+    resp = put(client_pg, rid, "APPROVED")
+    assert resp.status_code == 409 and error_code(resp) == ErrorCode.SIGNUP_REQUEST_APPROVAL_REQUIRED.value
+    assert snapshot(db, rid) == before
 
 
 def test_reject_requires_trimmed_reason_and_stores_it(client_pg, post, db):
@@ -268,7 +311,7 @@ def test_reason_outside_rejection_is_422(client_pg, post):
     rid = seed(post)
     assert put(client_pg, rid, "IN_REVIEW", "x").status_code == 422
     assert put(client_pg, rid, "APPROVED", "x").status_code == 422
-    assert client_pg.put(f"{BASE}/{rid}/status", json={"status": "APPROVED", "reason": None}).status_code == 200
+    assert client_pg.put(f"{BASE}/{rid}/status", json={"status": "IN_REVIEW", "reason": None}).status_code == 200
     # 응답 칸 이름은 요청에서 추가 필드다
     extra = {"status": "REJECTED", "rejected_reason": "x"}
     assert client_pg.put(f"{BASE}/{rid}/status", json=extra).status_code == 422
@@ -280,15 +323,15 @@ def test_in_review_moves_to_decision_then_terminal(client_pg, post):
     assert put(client_pg, rid, "IN_REVIEW").status_code == 409  # 같은 상태
     assert put(client_pg, rid, "NEW").status_code == 409
     assert put(client_pg, rid, "REJECTED", "사유").status_code == 200
-    for target, reason in (("APPROVED", None), ("REJECTED", "다시"), ("IN_REVIEW", None), ("NEW", None)):
+    for target, reason in (("REJECTED", "다시"), ("IN_REVIEW", None), ("NEW", None)):
         resp = put(client_pg, rid, target, reason)
         assert resp.status_code == 409 and error_code(resp) == ErrorCode.SIGNUP_REQUEST_STATE_CONFLICT.value
 
 
-def test_new_to_new_and_approved_terminal_are_409(client_pg, post, db):
+def test_new_to_new_and_approved_terminal_are_409(client_pg, post, db, onboarding):
     rid = seed(post)
     assert put(client_pg, rid, "NEW").status_code == 409
-    assert put(client_pg, rid, "APPROVED").status_code == 200
+    assert approve(client_pg, rid).status_code == 200
     updated = db.get(models.SignupRequest, rid).updated_at
     assert put(client_pg, rid, "REJECTED", "번복").status_code == 409
     assert db.get(models.SignupRequest, rid).status is SignupRequestStatus.APPROVED
@@ -316,35 +359,62 @@ def test_put_requires_origin(client_pg, post, db):
     assert db.get(models.SignupRequest, rid).status is SignupRequestStatus.NEW
 
 
-def test_management_requires_central_admin(client_pg, client_pg_anon, post, db, login_as, make_tenant):
+def test_approve_requires_origin_before_the_body(client_pg, post, db, onboarding):
+    rid = seed(post)
+    before = snapshot(db, rid)
+    for body in (APPROVE, {"name": "x"}):
+        resp = approve(client_pg, rid, body, headers={"Origin": "https://evil.example"})
+        assert resp.status_code == 403 and error_code(resp) == ErrorCode.AUTH_ORIGIN_REJECTED.value
+    assert snapshot(db, rid) == before
+
+
+def test_management_requires_central_admin(
+    client_pg, client_pg_anon, post, db, login_as, make_tenant, onboarding, allowed_origin
+):
     rid = seed(post)
     assert client_pg_anon.get(BASE).status_code == 401
+    assert approve(client_pg_anon, rid, headers={"Origin": allowed_origin}).status_code == 401
     for seed_user in (
         lambda: login_as(UserRole.ADMIN, platform_role=PlatformRole.TENANT_MANAGER),
         lambda: login_as(UserRole.ADMIN, tenant_id=make_tenant()),
     ):
         seed_user()
+        tenants = count(db, models.Tenant)
         assert client_pg.get(BASE).status_code == 403
         assert put(client_pg, rid, "APPROVED").status_code == 403
         assert put(client_pg, "not-a-uuid", "APPROVED").status_code == 403
+        # 승인은 본문 · ID 가 틀려도 권한 판정이 먼저다
+        for request_id, body in ((rid, APPROVE), (rid, {"regions": []}), ("not-a-uuid", APPROVE)):
+            resp = approve(client_pg, request_id, body)
+            assert resp.status_code == 403 and error_code(resp) == ErrorCode.AUTH_FORBIDDEN.value
+        assert count(db, models.Tenant) == tenants
     assert db.get(models.SignupRequest, rid).status is SignupRequestStatus.NEW
     assert db.get(models.SignupRequestDecision, rid) is None
 
 
+def decide(client, rid, outcome, reason):
+    """APPROVED 는 승인 API, REJECTED 는 PUT → (응답, 신청 항목 JSON)."""
+    if outcome == "APPROVED":
+        response = approve(client, rid)
+        return response, response.json().get("request")
+    response = put(client, rid, outcome, reason)
+    return response, response.json()
+
+
 @pytest.mark.parametrize("outcome,reason", [("APPROVED", None), ("REJECTED", "중복 신청")])
 def test_decision_preserves_actor_email_and_is_private(
-    client_pg, post, db, platform_session, outcome, reason
+    client_pg, post, db, platform_session, onboarding, outcome, reason
 ):
     rid = seed(post)
     actor = db.get(models.AppUser, platform_session.user_id)
     email = actor.email
-    response = put(client_pg, rid, outcome, reason)
+    response, item = decide(client_pg, rid, outcome, reason)
     assert response.status_code == 200
-    decision = response.json()["decision"]
+    decision = item["decision"]
     assert decision == {
         "actor_user_id": platform_session.user_id,
         "actor_email": email,
-        "decided_at": response.json()["updated_at"],
+        "decided_at": item["updated_at"],
         "outcome": outcome,
         "rejected_reason": reason,
     }
@@ -362,7 +432,7 @@ def test_decision_preserves_actor_email_and_is_private(
 
 
 def test_decision_uses_identity_revalidated_inside_transaction(
-    client_pg, post, db, platform_session, monkeypatch
+    client_pg, post, db, platform_session, onboarding, monkeypatch
 ):
     rid = seed(post)
     original = signup_requests_service.write_transaction
@@ -375,13 +445,13 @@ def test_decision_uses_identity_revalidated_inside_transaction(
             yield user
 
     monkeypatch.setattr(signup_requests_service, "write_transaction", changed_before_reauthorization)
-    response = put(client_pg, rid, "APPROVED")
+    response = approve(client_pg, rid)
     assert response.status_code == 200
-    assert response.json()["decision"]["actor_email"] == "at-decision@example.com"
+    assert response.json()["request"]["decision"]["actor_email"] == "at-decision@example.com"
     assert db.get(models.SignupRequestDecision, rid).actor_email == "at-decision@example.com"
 
 
-def test_decision_failure_rolls_back_status_and_record(client_pg, post, db, monkeypatch):
+def test_rejection_decision_failure_rolls_back_status_and_record(client_pg, post, db, monkeypatch):
     from db.repositories import signup_requests as repo
 
     rid = seed(post)
@@ -392,7 +462,7 @@ def test_decision_failure_rolls_back_status_and_record(client_pg, post, db, monk
         raise OperationalError("decision write", {}, Exception("not exposed"))
 
     monkeypatch.setattr(repo, "add_decision", fail_after_insert)
-    response = put(client_pg, rid, "APPROVED")
+    response = put(client_pg, rid, "REJECTED", "연락 불가")
     assert response.status_code == 500
     assert db.get(models.SignupRequest, rid).status is SignupRequestStatus.NEW
     assert db.get(models.SignupRequestDecision, rid) is None
@@ -452,3 +522,128 @@ def test_empty_signup_page_has_zero_totals(client_pg):
 ])
 def test_invalid_signup_page_is_rejected_not_clamped(client_pg, query):
     assert client_pg.get(BASE, params=query).status_code == 422
+
+
+# --- 승인과 고객사 생성 (#572 묶음 B) -------------------------------------------------
+# 실제 commit 경계(독립 세션)의 원자성 · 동시 승인은 test_signup_requests_concurrency 가 본다.
+
+
+@pytest.mark.parametrize("state", ["NEW", "IN_REVIEW"])
+def test_approve_creates_a_pending_unassigned_tenant_and_links_the_request(
+    client_pg, post, db, platform_session, onboarding, state
+):
+    rid = seed(post, company_name="  Acme Academy ")
+    if state == "IN_REVIEW":
+        assert put(client_pg, rid, "IN_REVIEW").status_code == 200
+
+    resp = approve(client_pg, rid)
+
+    assert resp.status_code == 200
+    assert set(resp.json()) == {"request", "tenant"}
+    body = SignupRequestApproveResponse.model_validate(resp.json())
+    tenant = body.tenant.tenant
+    assert (tenant.name, tenant.status, tenant.group_id) == (
+        "Acme Academy", TenantStatus.PENDING_CONNECTION, None,
+    )
+    assert (tenant.aws_account_id, tenant.regions) == (ACCOUNT, APPROVE["regions"])
+    assert tenant.access_role_arn == f"arn:aws:iam::{ACCOUNT}:role/vigilantis-access"
+    link = urlsplit(tenant.onboarding_url)
+    assert link.netloc == "ap-northeast-2.console.aws.amazon.com"
+    assert parse_qs(link.fragment.split("?", 1)[1])["param_ExternalId"] == [body.tenant.external_id]
+    request = body.request
+    assert (request.request_id, request.status, request.tenant_id, request.rejected_reason) == (
+        rid, SignupRequestStatus.APPROVED, tenant.tenant_id, None,
+    )
+    assert (request.decision.outcome, request.decision.actor_user_id) == (
+        SignupRequestStatus.APPROVED, platform_session.user_id,
+    )
+    assert request.decision.decided_at == request.updated_at
+    stored = db.get(models.Tenant, tenant.tenant_id)
+    assert (stored.name, stored.group_id, stored.external_id) == ("Acme Academy", None, body.tenant.external_id)
+    # 다시 읽기 — 목록의 신청은 승인 응답과 같고, 고객사는 그룹 없는 연결 전 고객으로 보인다
+    listed = next(i for i in client_pg.get(BASE).json()["items"] if i["request_id"] == rid)
+    assert listed == resp.json()["request"]
+    detail = client_pg.get(f"{TENANTS}/{tenant.tenant_id}")
+    assert detail.status_code == 200 and detail.json() == resp.json()["tenant"]["tenant"]
+    unassigned = client_pg.get(TENANTS, params={"unassigned_only": "true"}).json()["tenants"]
+    assert [t["tenant_id"] for t in unassigned] == [tenant.tenant_id]
+
+
+@pytest.mark.parametrize("state", ["NEW", "IN_REVIEW"])
+def test_approval_for_a_registered_account_is_409_and_changes_nothing(
+    client_pg, post, db, onboarding, state
+):
+    existing = tenants_repo.create_tenant(
+        db, name="기존 고객", aws_account_id=ACCOUNT, regions=["ap-northeast-2"], now=datetime.now(UTC)
+    )
+    db.commit()
+    rid = seed(post)
+    if state == "IN_REVIEW":
+        assert put(client_pg, rid, "IN_REVIEW").status_code == 200
+    before = snapshot(db, rid)
+    resp = approve(client_pg, rid)
+    assert resp.status_code == 409 and error_code(resp) == ErrorCode.TENANT_ACCOUNT_CONFLICT.value
+    assert snapshot(db, rid) == before
+    assert existing.external_id not in resp.text
+
+
+@pytest.mark.parametrize("state", ["NEW", "IN_REVIEW"])
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"aws_account_id": "12345", "regions": ["ap-northeast-2"]},
+        {"aws_account_id": ACCOUNT, "regions": []},
+        {"aws_account_id": ACCOUNT, "regions": ["ap-northeast-2", "ap-northeast-2"]},
+        {"aws_account_id": ACCOUNT, "regions": ["Seoul"]},
+        {"aws_account_id": ACCOUNT},
+        {**APPROVE, "name": "다른 이름"},  # 이름은 저장된 company_name 이다
+        {**APPROVE, "group_id": None},  # 그룹은 받지 않는다
+    ],
+)
+def test_invalid_approval_body_is_422_and_changes_nothing(client_pg, post, db, onboarding, state, body):
+    rid = seed(post)
+    if state == "IN_REVIEW":
+        assert put(client_pg, rid, "IN_REVIEW").status_code == 200
+    before = snapshot(db, rid)
+    resp = approve(client_pg, rid, body)
+    assert resp.status_code == 422 and error_code(resp) == ErrorCode.REQUEST_VALIDATION_FAILED.value
+    assert snapshot(db, rid) == before
+
+
+def test_approval_without_onboarding_settings_is_503_and_writes_nothing(client_pg, post, db, onboarding):
+    rid = seed(post)
+    onboarding(False)
+    before = snapshot(db, rid)
+    resp = approve(client_pg, rid)
+    assert resp.status_code == 503 and error_code(resp) == ErrorCode.TENANT_ONBOARDING_UNAVAILABLE.value
+    assert snapshot(db, rid) == before
+
+
+@pytest.mark.parametrize("case", ["approved", "tenant_deleted", "legacy_approved", "rejected"])
+def test_decided_request_is_never_approved_again(client_pg, post, db, onboarding, case):
+    rid = seed(post)
+    if case in ("approved", "tenant_deleted"):
+        tenant_id = approve(client_pg, rid).json()["tenant"]["tenant"]["tenant_id"]
+        if case == "tenant_deleted":
+            assert client_pg.delete(f"{TENANTS}/{tenant_id}").status_code == 204
+            db.expire_all()
+            # 연결만 끊긴다(SET NULL) — 신청 · 결정 기록은 남는다
+            assert db.get(models.SignupRequest, rid).tenant_id is None
+            assert db.get(models.SignupRequestDecision, rid).outcome is SignupRequestStatus.APPROVED
+    elif case == "legacy_approved":
+        db.get(models.SignupRequest, rid).status = SignupRequestStatus.APPROVED
+        db.commit()
+    else:
+        assert put(client_pg, rid, "REJECTED", "연락 불가").status_code == 200
+    before = snapshot(db, rid)
+    # 다른 계정으로 보낸다 — 계정 충돌이 아니라 상태로 거절되는지 본다
+    resp = approve(client_pg, rid, {"aws_account_id": "210987654321", "regions": ["us-east-1"]})
+    assert resp.status_code == 409 and error_code(resp) == ErrorCode.SIGNUP_REQUEST_STATE_CONFLICT.value
+    assert snapshot(db, rid) == before
+
+
+@pytest.mark.parametrize("rid", [str(uuid.uuid4()), "not-a-uuid", "1234"])
+def test_approving_a_missing_or_malformed_id_is_404_and_creates_nothing(client_pg, db, onboarding, rid):
+    resp = approve(client_pg, rid)
+    assert resp.status_code == 404 and error_code(resp) == ErrorCode.SIGNUP_REQUEST_NOT_FOUND.value
+    assert count(db, models.Tenant) == 0
