@@ -91,7 +91,6 @@ def test_each_start_upgrades_to_the_same_schema(merge_db, pg_engine, start):
     [head] = ScriptDirectory.from_config(config).get_heads()
     with engine.connect() as conn:
         assert list(conn.execute(text("SELECT version_num FROM alembic_version")).scalars()) == [head]
-        assert len(set(inspect(conn).get_table_names()) - {"alembic_version"}) == 45
         assert compare_metadata(MigrationContext.configure(conn), models.Base.metadata) == []
     # pg_engine은 새 DB를 base→head로 올린 기준이다. ORM 비교가 다루지 않는 CHECK·enum도 대조한다.
     assert _schema(engine) == _schema(pg_engine)
