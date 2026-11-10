@@ -238,3 +238,177 @@ def test_detail_hides_recovery_once_child_execution_exists(
     assert summaries[origin.execution_id]["available_recovery_runbook_ids"] == []
     # 자식(롤백) 자신은 짝이 없어 아무것도 열지 않는다
     assert all(e["available_recovery_runbook_ids"] == [] for e in body["executions"])
+
+
+# --- 해제 제안 만료 시각 (#597) --------------------------------------------------
+
+ACL_ARN = "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0abc123456789def0"
+OTHER_ACL_ARN = "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0fff123456789def0"
+BLOCK_FINISHED = datetime(2026, 11, 7, 1, 30, 0, tzinfo=timezone.utc)
+# 독립 기대값: 차단 종료 시각 + 24시간(손으로 적은 값)
+BLOCK_EXPIRES = "2026-11-08T01:30:00Z"
+
+
+def _seed_block(db, incident, make_execution, *, status, finished_at, slot=(100, False),
+                target_arn=ACL_ARN, bind_backup=True):
+    from db.repositories import executions as exec_repo
+    from services.aws import executor
+
+    block = make_execution(
+        db, incident, runbook_id=RunbookId.RUNBOOK_NACL_ADD_DENY,
+        target_arn=target_arn, status=status,
+    )
+    block.finished_at = finished_at
+    if bind_backup:
+        record = exec_repo.create_backup_record(
+            db,
+            execution_id=block.execution_id,
+            target_arn=target_arn,
+            backup_type=executor.BACKUP_NACL_RULE_INDEX,
+            payload={
+                "rule_number": slot[0], "egress": slot[1], "cidr_block": "203.0.113.5/32",
+                "protocol": "6", "rule_action": "deny",
+            },
+        )
+        assert exec_repo.bind_backup_record(db, block.execution_id, record.backup_record_id)
+    db.flush()
+    return block
+
+
+def _release_expiry(client_pg, incident):
+    body = client_pg.get(f"/api/v1/incidents/{incident.incident_id}").json()
+    by_runbook = {r["runbook_id"]: r for r in body["recommendations"]}
+    return by_runbook["RUNBOOK_NACL_RESTORE"]["expires_at"], by_runbook
+
+
+def _seed_release(db, incident, make_candidate):
+    make_candidate(
+        db, incident, runbook_id=RunbookId.RUNBOOK_NACL_RESTORE, target_arn=ACL_ARN,
+        parameters={"rule_number": 100, "egress": False},
+    )
+
+
+def test_detail_exposes_release_expiry_from_the_original_block(
+    client_pg, db, two_incidents, make_candidate, make_execution
+):
+    secops, _ = two_incidents()
+    _seed_block(db, secops, make_execution, status=ExecutionStatus.SUCCESS,
+                finished_at=BLOCK_FINISHED)
+    _seed_release(db, secops, make_candidate)
+    make_candidate(db, secops, runbook_id=RunbookId.RUNBOOK_NACL_ADD_DENY)
+
+    expires_at, by_runbook = _release_expiry(client_pg, secops)
+
+    assert expires_at == BLOCK_EXPIRES
+    # 해제가 아닌 추천은 만료가 없다
+    assert by_runbook["RUNBOOK_NACL_ADD_DENY"]["expires_at"] is None
+
+
+def test_detail_keeps_a_past_release_expiry(
+    client_pg, db, two_incidents, make_candidate, make_execution
+):
+    secops, _ = two_incidents()
+    _seed_block(db, secops, make_execution, status=ExecutionStatus.SUCCESS,
+                finished_at=datetime(2020, 1, 1, tzinfo=timezone.utc))
+    _seed_release(db, secops, make_candidate)
+
+    assert _release_expiry(client_pg, secops)[0] == "2020-01-02T00:00:00Z"
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        pytest.param(None, id="no-original"),
+        pytest.param({"status": ExecutionStatus.FAILED, "finished_at": BLOCK_FINISHED}, id="failed"),
+        pytest.param({"status": ExecutionStatus.SUCCESS, "finished_at": None}, id="unfinished"),
+        pytest.param({"status": ExecutionStatus.SUCCESS, "finished_at": BLOCK_FINISHED,
+                      "bind_backup": False}, id="no-backup"),
+        pytest.param({"status": ExecutionStatus.SUCCESS, "finished_at": BLOCK_FINISHED,
+                      "slot": (200, False)}, id="other-slot"),
+        pytest.param({"status": ExecutionStatus.SUCCESS, "finished_at": BLOCK_FINISHED,
+                      "target_arn": OTHER_ACL_ARN}, id="other-target"),
+    ],
+)
+def test_detail_release_expiry_is_null_without_a_successful_original(
+    client_pg, db, two_incidents, make_candidate, make_execution, block
+):
+    secops, _ = two_incidents()
+    if block is not None:
+        _seed_block(db, secops, make_execution, **block)
+    _seed_release(db, secops, make_candidate)
+
+    assert _release_expiry(client_pg, secops)[0] is None
+
+
+def _release_block(db, incident, make_execution, block, *, status=ExecutionStatus.SUCCESS):
+    """block을 되돌린 NACL_RESTORE 실행 — 만료 스캔과 같이 백업 레코드 결속으로 잇는다."""
+    restore = make_execution(
+        db, incident, runbook_id=RunbookId.RUNBOOK_NACL_RESTORE,
+        target_arn=block.target_arn, status=status,
+    )
+    db.refresh(block)  # 결속은 벌크 UPDATE라 세션이 든 block 은 낡았다
+    restore.backup_record_id = block.backup_record_id
+    db.flush()
+
+
+def test_detail_release_expiry_ignores_failed_block_beside_one_success(
+    client_pg, db, two_incidents, make_candidate, make_execution
+):
+    secops, _ = two_incidents()
+    _seed_block(db, secops, make_execution, status=ExecutionStatus.FAILED,
+                finished_at=BLOCK_FINISHED + timedelta(hours=1))
+    _seed_block(db, secops, make_execution, status=ExecutionStatus.SUCCESS,
+                finished_at=BLOCK_FINISHED)
+    _seed_release(db, secops, make_candidate)
+
+    assert _release_expiry(client_pg, secops)[0] == BLOCK_EXPIRES
+
+
+def test_detail_release_expiry_is_null_when_several_blocks_are_eligible(
+    client_pg, db, two_incidents, make_candidate, make_execution
+):
+    secops, _ = two_incidents()
+    for hours in (0, 1):
+        _seed_block(db, secops, make_execution, status=ExecutionStatus.SUCCESS,
+                    finished_at=BLOCK_FINISHED + timedelta(hours=hours))
+    _seed_release(db, secops, make_candidate)
+
+    assert _release_expiry(client_pg, secops)[0] is None
+
+
+def test_detail_release_expiry_is_null_when_the_only_block_is_already_released(
+    client_pg, db, two_incidents, make_candidate, make_execution
+):
+    secops, _ = two_incidents()
+    block = _seed_block(db, secops, make_execution, status=ExecutionStatus.SUCCESS,
+                        finished_at=BLOCK_FINISHED)
+    _release_block(db, secops, make_execution, block, status=ExecutionStatus.FAILED)
+    _seed_release(db, secops, make_candidate)
+
+    assert _release_expiry(client_pg, secops)[0] is None
+
+
+def test_detail_release_expiry_skips_a_released_block_beside_an_unreleased_one(
+    client_pg, db, two_incidents, make_candidate, make_execution
+):
+    secops, _ = two_incidents()
+    released = _seed_block(db, secops, make_execution, status=ExecutionStatus.SUCCESS,
+                           finished_at=BLOCK_FINISHED + timedelta(hours=5))
+    _seed_block(db, secops, make_execution, status=ExecutionStatus.SUCCESS,
+                finished_at=BLOCK_FINISHED)
+    _release_block(db, secops, make_execution, released)
+    _seed_release(db, secops, make_candidate)
+
+    assert _release_expiry(client_pg, secops)[0] == BLOCK_EXPIRES
+
+
+def test_detail_release_expiry_is_null_when_another_incident_released_the_block(
+    client_pg, db, two_incidents, make_candidate, make_execution
+):
+    secops, finops = two_incidents()
+    block = _seed_block(db, secops, make_execution, status=ExecutionStatus.SUCCESS,
+                        finished_at=BLOCK_FINISHED)
+    _release_block(db, finops, make_execution, block)
+    _seed_release(db, secops, make_candidate)
+
+    assert _release_expiry(client_pg, secops)[0] is None

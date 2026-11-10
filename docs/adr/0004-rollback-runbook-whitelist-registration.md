@@ -2,8 +2,8 @@
 
 - **Status**: Accepted
 - **Date**: 2026-08-13
-- **Amended**: 2026-08-18 — 실행 축 어휘 교체(하단 "개정 이력" 참조, 핵심 결정 불변)
-- **Deciders**: 김세혁(PM/Infra) 확정, 안성일(AI/Guardrail) 공유 대상
+- **Amended**: 2026-08-18(1차 — 실행 축 어휘 교체) · 2026-11-09(2차 — NACL 차단의 24시간 고정 만료 해제를 승인 없는 시스템 발동 예외로 결정에 추가, `trigger_source`에 `NACL_DENY_EXPIRED_24H` 추가). 하단 "개정 이력" 참조, **핵심 결정 불변**
+- **Deciders**: 김세혁(PM/Infra) 확정, 안성일(AI/Guardrail) 공유 대상 / 2차 개정 — 안성일 제안·김세혁 승인
 
 ## Context (배경)
 
@@ -42,6 +42,8 @@
 4. **가드레일 거절 시** — 자동 재시도 없이 CRITICAL 알림 후 수동 개입으로 전환한다. (긴급 원복이 차단된 채 방치되는 것을 방지)
 
 상세 명세(파라미터 스키마·target_api·`trigger_source: AUTO_ON_FAILURE` 신설 포함)의 소재는 `packages/schemas/runbook_parameters.py`(파라미터 계약)와 [ADR-0007](0007-guardrail-dryrun-executor-precheck-contract.md) §Context·§5(`target_api` 전수 실측표)다.
+
+**NACL 차단의 24시간 만료 해제(2차 개정)** — `RUNBOOK_NACL_ADD_DENY`가 SUCCESS로 끝난 시각(`finished_at`)에서 24시간이 지나면 시스템이 `RUNBOOK_NACL_RESTORE`를 `trigger_source: NACL_DENY_EXPIRED_24H`로 시작한다. 승인 후보와 관제자 승인을 거치지 않는다. 이 예외는 NACL 차단 해제에만 적용되며, 만료 전 해제는 기존대로 관제자 승인을 거친다. 만료 시간은 고정 24시간이고 고객별 설정·연장은 없다. `RUNBOOK_NACL_RESTORE`는 롤백 3종이 아닌 SecOps 주 조치로 남으므로 위 결정 표와 공통 정책 4항의 대상이 아니다.
 
 ## Consequences (결과·트레이드오프)
 
@@ -86,3 +88,8 @@
 
   런타임 의미가 변하지 않아 supersede 없이 1차 개정으로 종결한다. 핵심 결정(롤백 3종
   Whitelist 등록·공통 정책 4항)은 불변.
+
+- **2차 개정(2026-11-09)** — NACL 차단의 24시간 고정 만료 해제를 관제자 승인 없는 시스템 발동 예외로 결정에 추가하고, `trigger_source`에 `NACL_DENY_EXPIRED_24H`를 더한다. 안성일 제안 · 김세혁 승인.
+  - **이유**: 2026-11-06 팀 결정으로 T-11 NACL 차단에 고정 24시간 만료 해제를 적용한다(#597, `docs/PROJECT_STATUS.md` §확정 결정 로그). 이 해제는 관제자 승인 없이 시작되므로, 1차 개정이 정한 `trigger_source`로 시작 사유를 구분하고 예외의 범위를 결정에 둔다.
+  - **내용**: §Decision 끝에 "NACL 차단의 24시간 만료 해제" 단락을 신설했다. 결정 표와 공통 정책 4항은 고치지 않았다.
+  - **불변**: 핵심 결정(롤백 3종 Whitelist 등록, 총 10종)과 결정 표, 롤백 공통 정책 4항, 1차 개정의 두 축 분리, `RUNBOOK_EC2_REVERT_SIZE`의 `AUTO_ON_FAILURE` 자동 원복.
