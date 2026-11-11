@@ -13,6 +13,11 @@
 # 만드는 자원(AMI · 시작 템플릿 · ASG · 그 ASG가 띄우는 인스턴스)에는 실행 태그가 있어야만 한다는 울타리를
 # 남긴다. tests/test_onboarding_template.py가 스모크 테스트의 작업 거울을 그대로 이 정책에 건다.
 #
+# GuardDuty 켜기(연결 확인 · services/guardduty.py · #588 B)도 이 정책에 둔다. 스모크는 앱 정책 한도 때문에
+# 따로 붙인 정책(build_guardduty_policy)과 작업이 같고, 리전 울타리만 걷었다. 끄는 작업(DeleteDetector ·
+# UpdateDetector)은 없다. 처음 켤 때 GuardDuty가 서비스 연결 역할을 만들어 호출자에게
+# iam:CreateServiceLinkedRole을 요구하므로, 그 역할 하나와 서비스 이름 조건으로만 연다.
+#
 # 넣지 않은 것: iam:PassRole. 인스턴스 프로파일이 달린 인스턴스의 ASG 전환은 이 역할로는 할 수 없어,
 # 코어가 테넌트 문맥에서 precheck·계획 단계에 미리 거절한다(executor._tenant_profile_needs_pass_role).
 #
@@ -53,6 +58,9 @@ READ_ACTIONS = (
 )
 COST_ACTIONS = ("ce:GetCostAndUsage",)
 COST_REGION = "us-east-1"  # Cost Explorer 엔드포인트는 이 리전 하나뿐이다
+GUARDDUTY_ACTIONS = ("guardduty:ListDetectors", "guardduty:GetDetector", "guardduty:CreateDetector")
+GUARDDUTY_SERVICE = "guardduty.amazonaws.com"
+GUARDDUTY_SERVICE_ROLE = "AWSServiceRoleForAmazonGuardDuty"
 ASG_PREFIX = "vigilantis-asg-"  # services/aws/executor._asg_name
 ASG_MAX_SIZE = 4  # schemas.runbook_parameters AutoScalingSize 상한
 
@@ -95,6 +103,11 @@ def build_customer_policy() -> dict:
         "Statement": [
             _statement(READ_ACTIONS, "*"),
             _statement(COST_ACTIONS, "*", {"StringEquals": {"aws:RequestedRegion": COST_REGION}}),
+            # GuardDuty 켜기 — 탐지기 보기 · 만들기만. 처음 켤 때 생기는 서비스 연결 역할 하나
+            _statement(GUARDDUTY_ACTIONS, "*"),
+            _statement(["iam:CreateServiceLinkedRole"],
+                       f"arn:aws:iam::{_ACCOUNT}:role/aws-service-role/{GUARDDUTY_SERVICE}/{GUARDDUTY_SERVICE_ROLE}",
+                       {"StringEquals": {"iam:AWSServiceName": GUARDDUTY_SERVICE}}),
             # 격리 · 다운사이징 · 원복
             _statement(["ec2:CreateImage", "ec2:ModifyInstanceAttribute", "ec2:StartInstances", "ec2:StopInstances"],
                        _ec2("instance")),

@@ -83,7 +83,8 @@ def test_policy_grants_every_authorization_dependency():
 
 
 def test_policy_grants_only_required_mutations_and_dependencies():
-    allowed = smoke_tests._direct_actions() | smoke_tests._active_dependencies() | set(onboarding.COST_ACTIONS)
+    allowed = (smoke_tests._direct_actions() | smoke_tests._active_dependencies() | set(onboarding.COST_ACTIONS)
+               | smoke_tests._guardduty_calls())
     extra = sorted(a for a in _granted() if a not in onboarding.READ_ACTIONS and a not in allowed)
     assert not extra, f"코드가 부르지 않는 조치 권한: {extra}"
 
@@ -91,8 +92,40 @@ def test_policy_grants_only_required_mutations_and_dependencies():
 def test_policy_never_grants_destructive_or_out_of_scope_actions():
     wildcards = [a for a in _granted() if "*" in a and a not in onboarding.READ_ACTIONS]
     assert not wildcards, wildcards
-    assert not [a for a in smoke_tests._NEVER_GRANTED if _is_granted(a)]
+    # 서비스 연결 역할 생성은 GuardDuty 켜기가 요구한다 — GuardDuty 역할 하나로만 묶였는지는 아래 테스트가 본다
+    never = [a for a in smoke_tests._NEVER_GRANTED if a != "iam:CreateServiceLinkedRole"]
+    assert not [a for a in never if _is_granted(a)]
     assert not _is_granted("iam:PassRole")
+
+
+# GuardDuty 켜기(#588 B) — 스모크의 GuardDuty 정책과 작업이 같고 리전 울타리만 없다 -----------------
+def _statements(action: str) -> list[dict]:
+    return [s for s in POLICY["Statement"] if action in s["Action"]]
+
+
+def test_guardduty_actions_match_the_code_and_the_smoke_policy():
+    """두 방향을 본다. 켜기 코드가 호출을 더하면 템플릿이 따라가야 하고, 부르지 않는 GuardDuty 권한이 끼어도 깨진다."""
+    assert set(onboarding.GUARDDUTY_ACTIONS) == set(smoke.GUARDDUTY_ACTIONS)
+    granted = {a for a in _granted() if a.startswith("guardduty:") or a == "iam:CreateServiceLinkedRole"}
+    assert granted == smoke_tests._guardduty_calls()
+
+
+def test_guardduty_cannot_be_turned_off_with_this_role():
+    """끄면 기존 탐지 결과가 지워지고 되돌릴 수 없다(#588 A). 정지 · 삭제 · 설정 바꾸기는 어느 모양으로도 없다."""
+    for action in ("guardduty:DeleteDetector", "guardduty:UpdateDetector", "guardduty:DisassociateFromMasterAccount",
+                   "guardduty:UpdateDetectorFeatureConfiguration"):
+        assert not _is_granted(action), action
+
+
+def test_guardduty_service_linked_role_is_only_the_guardduty_one():
+    """IAM 쓰기는 GuardDuty 서비스 연결 역할 하나로만 연다 — 다른 서비스의 역할도, 일반 역할도 못 만든다."""
+    (statement,) = _statements("iam:CreateServiceLinkedRole")
+    assert statement["Action"] == ["iam:CreateServiceLinkedRole"]
+    assert statement["Resource"] == {"Fn::Sub": (
+        "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/guardduty.amazonaws.com/AWSServiceRoleForAmazonGuardDuty")}
+    assert statement["Condition"] == {"StringEquals": {"iam:AWSServiceName": "guardduty.amazonaws.com"}}
+    assert (onboarding.GUARDDUTY_SERVICE, onboarding.GUARDDUTY_SERVICE_ROLE) == (
+        smoke.GUARDDUTY_SERVICE, smoke.GUARDDUTY_SERVICE_ROLE)
 
 
 def test_new_resources_need_the_execution_tags():

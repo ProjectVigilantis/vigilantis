@@ -801,12 +801,13 @@ export const TENANT_SUSPENDABLE_STATUSES: readonly TenantStatus[] = ['ACTIVE'];
 /** POST /tenants/{id}/resume 을 받는 상태 — 정지일 때만(연결 전을 올리는 길은 verify). 밖이면 TENANT_STATE_CONFLICT. */
 export const TENANT_RESUMABLE_STATUSES: readonly TenantStatus[] = ['SUSPENDED'];
 
-/** 연결 확인 1회의 결과 — AssumeRole → GetCallerIdentity → 계정 대조 → 최소 읽기 순으로 처음 실패한 자리. */
+/** 연결 확인 1회의 결과 — AssumeRole → GetCallerIdentity → 계정 대조 → 최소 읽기 → 관제 리전마다 GuardDuty 켜기 순으로 처음 실패한 자리. */
 export const TENANT_VERIFICATION_RESULTS = [
   'OK',
   'ASSUME_DENIED', // 계정 ID 오입력도 여기로 나온다 — 연결 전이면 지우고 새로 만든다
   'ACCOUNT_MISMATCH', // 정상 경로에서는 나오지 않는 방어 확인(역할 ARN 의 계정 = 테넌트 계정이 계약)
   'READ_DENIED',
+  'GUARDDUTY_DISABLED', // 관제 리전 중 하나라도 GuardDuty 를 켜지 못함(정지된 탐지기 · 조직 관리 · SCP · 권한) — 고객이 켠 뒤 다시 확인
   'UNREACHABLE',
 ] as const;
 export type TenantVerificationResult = (typeof TENANT_VERIFICATION_RESULTS)[number];

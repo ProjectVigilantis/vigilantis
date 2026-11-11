@@ -73,6 +73,7 @@ _IAM_SERVICE = {
     "autoscaling": "autoscaling",
     "cloudwatch": "cloudwatch",
     "ce": "ce",
+    "guardduty": "guardduty",
 }
 
 
@@ -319,6 +320,64 @@ def test_app_policy_does_not_carry_cost_explorer():
     """앱 정책의 조회 문장은 관제 리전으로 묶여 있어 ce를 넣으면 us-east-1 호출이 거절된다."""
     for policy in (POLICY, POLICY_WITH_ROLE):
         assert not [a for a in _granted(policy) if a.startswith("ce:")]
+
+
+# GuardDuty 켜기의 거울(#588 B). services/guardduty.py는 고객 역할 세션의 클라이언트(session_client)로 부른다.
+# CreateDetector는 처음 켤 때 서비스 연결 역할을 만들어 호출자에게 iam:CreateServiceLinkedRole을 요구한다 —
+# 코드에 IAM 호출이 없어도 정책에 있어야 하는 권한이라 여기서 함께 센다.
+_GUARDDUTY = REPO_ROOT / "apps" / "core-api" / "services" / "guardduty.py"
+_IMPLIED = {"guardduty:CreateDetector": {"iam:CreateServiceLinkedRole"}}
+GUARDDUTY_POLICY = smoke.build_guardduty_policy(ACCOUNT, REGION)
+
+
+def _guardduty_calls() -> set[str]:
+    source = _GUARDDUTY.read_text(encoding="utf-8")
+    clients = dict(re.findall(r'(\w+) = session_client\(\w+, "([a-z0-9]+)"', source))
+    assert clients, "GuardDuty 코드의 session_client 대입을 하나도 못 찾았다. 패턴이 코드와 어긋났다"
+    names = "|".join(sorted(clients))
+    calls = {
+        _iam_action(f"{clients[variable]}.{operation}")
+        for variable, operation in re.findall(rf"\b({names})\.([a-z0-9_]+)\(", source)
+    }
+    assert calls, "GuardDuty 코드의 AWS 호출을 하나도 못 찾았다. 패턴이 코드와 어긋났다"
+    return calls | {implied for call in calls for implied in _IMPLIED.get(call, ())}
+
+
+def test_guardduty_policy_grants_exactly_what_the_guardduty_code_calls():
+    """두 방향을 본다. 켜기 코드가 호출을 더하면 정책이 따라가야 하고, 부르지 않는 권한이 끼어도 깨진다."""
+    assert set(_granted(GUARDDUTY_POLICY)) == _guardduty_calls()
+
+
+def test_guardduty_policy_cannot_turn_guardduty_off():
+    """끄면 기존 탐지 결과가 지워지고 되돌릴 수 없다(#588 A). 정지 · 삭제 · 설정 바꾸기는 어느 모양으로도 없다."""
+    granted = _granted(GUARDDUTY_POLICY)
+    assert not [a for a in granted if "*" in a]
+    for action in ("guardduty:DeleteDetector", "guardduty:UpdateDetector", "guardduty:DisassociateFromMasterAccount"):
+        assert action not in granted
+
+
+def test_guardduty_detector_actions_are_fenced_to_the_monitored_region():
+    (statement,) = _statements("guardduty:CreateDetector", GUARDDUTY_POLICY)
+    assert statement["Condition"] == {"StringEquals": {"aws:RequestedRegion": REGION}}
+    assert {a for a in statement["Action"]} == set(smoke.GUARDDUTY_ACTIONS)
+
+
+def test_guardduty_service_linked_role_is_only_the_guardduty_one():
+    """IAM 쓰기는 GuardDuty 서비스 연결 역할 하나로만 연다 — 다른 서비스의 역할도, 일반 역할도 못 만든다."""
+    (statement,) = _statements("iam:CreateServiceLinkedRole", GUARDDUTY_POLICY)
+    assert statement["Action"] == ["iam:CreateServiceLinkedRole"]
+    assert statement["Resource"] == (
+        f"arn:aws:iam::{ACCOUNT}:role/aws-service-role/guardduty.amazonaws.com/AWSServiceRoleForAmazonGuardDuty"
+    )
+    assert statement["Condition"] == {"StringEquals": {"iam:AWSServiceName": "guardduty.amazonaws.com"}}
+
+
+def test_app_and_cost_policies_do_not_carry_guardduty():
+    """GuardDuty 정책을 따로 둔 까닭(앱 정책 한도 · IAM 전역)이 무너지지 않게 — 서비스 연결 역할 생성도 여기만."""
+    for policy in (POLICY, POLICY_WITH_ROLE, smoke.build_cost_policy()):
+        granted = _granted(policy)
+        assert not [a for a in granted if a.startswith("guardduty:")]
+        assert "iam:CreateServiceLinkedRole" not in granted
 
 
 def test_target_registration_baseline_is_kept_and_smoke_tag_fenced():
@@ -1180,9 +1239,11 @@ def test_app_policy_is_attached_as_a_managed_policy():
     iam = FakeIam()
     smoke._ensure_app_user(iam, ACCOUNT, REGION, VPC_ID, SUBNET_IDS)
     arn, cost_arn = smoke._app_policy_arn(ACCOUNT), smoke._cost_policy_arn(ACCOUNT)
-    assert iam.users[smoke.APP_USER] == {arn, cost_arn}
+    guardduty_arn = smoke._guardduty_policy_arn(ACCOUNT)
+    assert iam.users[smoke.APP_USER] == {arn, cost_arn, guardduty_arn}
     assert iam.default_document(arn) == POLICY
     assert iam.default_document(cost_arn) == smoke.build_cost_policy()
+    assert iam.default_document(guardduty_arn) == GUARDDUTY_POLICY
 
     iam.writes.clear()
     smoke._ensure_app_user(
@@ -1274,6 +1335,7 @@ def test_up_clears_an_inline_policy_left_from_before_the_managed_switch():
     assert iam.users[smoke.APP_USER] == {
         smoke._app_policy_arn(ACCOUNT),
         smoke._cost_policy_arn(ACCOUNT),
+        smoke._guardduty_policy_arn(ACCOUNT),
     }
 
 

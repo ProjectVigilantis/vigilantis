@@ -82,8 +82,8 @@ class FakeAws:
         app.dependency_overrides[get_clock] = lambda: (lambda: self.now)
         monkeypatch.setattr(tenant_admin, "verify_connection", self)
 
-    def __call__(self, access, *, expected_account_id, region):
-        self.calls.append((access, expected_account_id, region))
+    def __call__(self, access, *, expected_account_id, regions):
+        self.calls.append((access, expected_account_id, regions))
         self.now = self.observed_at
         if self.during is not None:
             self.during()
@@ -219,15 +219,16 @@ def test_failed_resume_keeps_suspension_and_records_the_failure(client_pg, db, a
 
 
 @pytest.mark.parametrize("route", ROUTES)
-def test_aws_gets_the_stored_snapshot_and_the_first_region(client_pg, db, admin, aws, route):
+def test_aws_gets_the_stored_snapshot_and_every_region(client_pg, db, admin, aws, route):
     tenant = _seed(db, START[route])
 
     assert _post(client_pg, route, tenant.tenant_id).status_code == 200
 
-    (access, account, region), = aws.calls
+    (access, account, regions), = aws.calls
     assert (access.tenant_id, access.access_role_arn, access.external_id) == (
         tenant.tenant_id, ROLE, tenant.external_id)
-    assert (account, region) == (ACCOUNT, REGIONS[0])
+    # 최소 읽기는 첫 리전, GuardDuty 켜기는 리전마다(#588 B) — 저장된 순서 그대로 넘긴다
+    assert (account, regions) == (ACCOUNT, tuple(REGIONS))
 
 
 def test_ok_on_pending_needs_no_onboarding_settings_but_a_failure_does(client_pg, db, admin, aws, onboarding):
@@ -302,7 +303,7 @@ def test_status_outside_the_route_is_409_without_aws(client_pg, db, admin, aws, 
 
 # ----- ③ AWS 를 기다리는 사이의 변경 --------------------------------------------------------
 
-# 입력(역할 · ExternalId · 계정 · 첫 리전) 변경은 이 SAVEPOINT 세션으로 본다. 상태 · 삭제 · 권한 회수처럼
+# 입력(역할 · ExternalId · 계정 · 관제 리전) 변경은 이 SAVEPOINT 세션으로 본다. 상태 · 삭제 · 권한 회수처럼
 # 다른 연결이 끼어드는 경합은 아래 ⑥ 의 독립 commit 세션으로 본다.
 
 @pytest.mark.parametrize("values", [
@@ -310,7 +311,8 @@ def test_status_outside_the_route_is_409_without_aws(client_pg, db, admin, aws, 
     {"external_id": "f" * 32},
     {"aws_account_id": OTHER, "access_role_arn": f"arn:aws:iam::{OTHER}:role/vigilantis-access"},
     {"regions": [REGIONS[1], REGIONS[0]]},  # regions[0] 이 달라진다
-], ids=["role", "external_id", "account", "first_region"])
+    {"regions": [*REGIONS, "eu-west-1"]},  # GuardDuty 를 켜지 않은 리전이 생긴다
+], ids=["role", "external_id", "account", "first_region", "added_region"])
 @pytest.mark.parametrize("route", ROUTES)
 def test_verification_input_changed_during_aws_is_409_and_persists_no_observation(
     client_pg, db, admin, aws, route, values
@@ -329,11 +331,17 @@ def test_verification_input_changed_during_aws_is_409_and_persists_no_observatio
     assert _snapshot(db, tenant.tenant_id) == seen["row"]
 
 
-def test_a_change_beyond_the_first_region_does_not_block_the_observation(client_pg, db, admin, aws):
+def test_guardduty_disabled_does_not_activate_and_keeps_its_reason(client_pg, db, admin, aws):
+    # 한 리전이라도 켜지 못하면 OK 가 아니다 — ACTIVE 로 올리지 않는다(#588 B)
     tenant = _seed(db)
-    aws.during = lambda: _change(db, tenant.tenant_id, regions=[REGIONS[0], "eu-west-1"])  # 확인한 리전은 그대로
-    assert _post(client_pg, "verify", tenant.tenant_id).status_code == 200
-    assert _stored(db, tenant.tenant_id).status is TenantStatus.ACTIVE
+    aws.outcome = VerificationOutcome(R.GUARDDUTY_DISABLED, "DetectorDisabled")
+    resp = _post(client_pg, "verify", tenant.tenant_id)
+    assert resp.status_code == 200
+    assert resp.json()["verification"]["result"] == "GUARDDUTY_DISABLED"
+    stored = _stored(db, tenant.tenant_id)
+    assert stored.status is TenantStatus.PENDING_CONNECTION
+    assert (stored.last_verification_result, stored.last_verification_reason_code) == (
+        R.GUARDDUTY_DISABLED, "DetectorDisabled")
 
 
 # ----- ⑤ 조건부 갱신이 0행일 때 -------------------------------------------------------------
