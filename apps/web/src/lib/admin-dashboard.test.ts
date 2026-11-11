@@ -82,6 +82,11 @@ test('인시던트 조회 실패(null)면 연결 실패만 센다', () => {
   assert.deepEqual(result.map((r) => [r.tenantId, r.stuckIncidents.length]), [['d', 0]]);
 });
 
+test('GuardDuty를 켜지 못한 관제 중 고객은 다시 시도로 풀리지 않아 수동 처리 대상이다', () => {
+  const result = manualIssues([tenant('g', '1', 'ACTIVE', { last_verification: verified('GUARDDUTY_DISABLED') })], []);
+  assert.deepEqual(result.map((r) => [r.tenantId, r.connection]), [['g', 'GuardDuty 꺼짐']]);
+});
+
 test('고객사 직원은 고객사마다 묶고(0명 고객사 포함) 권한 순으로, 관리자 계정(tenant_id 없음)은 넣지 않는다', () => {
   const groups = staffByTenant(
     [tenant('a', '1', 'ACTIVE'), tenant('b', '2', 'PENDING_CONNECTION')],
