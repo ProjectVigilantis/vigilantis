@@ -749,8 +749,11 @@ export interface AssetInventoryAxis {
   reason_code: string | null;
 }
 
-/** 위협 이벤트 유형 — 인시던트 `threat_context.event_type`과 같은 값이다. */
-export type ThreatEventKind = 'OPEN_IP' | 'SSH_BRUTE_FORCE';
+/**
+ * 위협 이벤트 유형 — packages/schemas/events.py `ThreatEventType`과 같은 값이다. 인시던트 `threat_context.event_type`은
+ * 이 가운데 OPEN_IP · SSH_BRUTE_FORCE이고, GuardDuty 탐지(#588 C)의 인시던트는 `threat_context`가 null이다.
+ */
+export type ThreatEventKind = 'OPEN_IP' | 'SSH_BRUTE_FORCE' | 'GUARDDUTY_FINDING';
 
 /**
  * 축 6 한 칸에 **발생한** 위협 이벤트 수. 0건 유형은 키가 없다. `total`은 `counts`의 합(서버 불변식).
@@ -1625,6 +1628,22 @@ export interface SshBruteForcePayload {
   window_seconds: number;
 }
 
+/**
+ * GuardDuty 탐지(#588 C). 정규화 이벤트(`GuardDutyFindingThreatPayload`) 그대로다. 대상 자원은 항목의 `target_arn`이다 —
+ * EC2 인스턴스면 인스턴스 ARN, 그 밖의 자원(`resource_type`: AccessKey · S3Bucket …)은 탐지 자체의 ARN이다.
+ * 심각도 7.0 이상 HIGH · 4.0 이상 MEDIUM · 그 아래 LOW로 판정하고, LOW는 이벤트만 남는다(인시던트 없음).
+ */
+export interface GuardDutyFindingPayload {
+  finding_id: string;
+  finding_type: string;
+  /** 0.0–10.0 */
+  severity: number;
+  resource_type: string;
+  region: string;
+  first_seen_at: IsoDateTime;
+  last_seen_at: IsoDateTime;
+}
+
 export type ThreatEventItem =
   | {
       threat_event_id: string;
@@ -1639,6 +1658,13 @@ export type ThreatEventItem =
       target_arn: string;
       occurred_at: IsoDateTime;
       payload: SshBruteForcePayload;
+    }
+  | {
+      threat_event_id: string;
+      event_type: 'GUARDDUTY_FINDING';
+      target_arn: string;
+      occurred_at: IsoDateTime;
+      payload: GuardDutyFindingPayload;
     };
 
 /**

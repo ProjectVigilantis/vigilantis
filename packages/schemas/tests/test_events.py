@@ -52,7 +52,7 @@ def make_open_ip_input(**over):
 
 
 def test_threat_event_types_match_contract_exactly():
-    assert {t.value for t in ThreatEventType} == {"OPEN_IP", "SSH_BRUTE_FORCE"}
+    assert {t.value for t in ThreatEventType} == {"OPEN_IP", "SSH_BRUTE_FORCE", "GUARDDUTY_FINDING"}
 
 
 def test_union_discriminates_by_event_type():

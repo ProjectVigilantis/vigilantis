@@ -347,8 +347,14 @@ export function inventoryChartState(axis: AssetInventoryAxis): ChartState<Invent
 
 // ── 전체 위협 추이(축 4 `threat` + 축 6)
 
+/**
+ * 막대로 쌓는 이벤트 유형. GuardDuty 탐지(#588 C)는 아직 계열 색이 없어 막대로 쌓지 않고 `events`(합계)에만 든다 —
+ * 계열 색 · 범례를 정하면 여기에 더한다.
+ */
+export type ChartedThreatEventKind = Exclude<ThreatEventKind, 'GUARDDUTY_FINDING'>;
+
 /** 이벤트 유형 순서 — 막대를 쌓는 순서이자 범례 순서다. */
-export const THREAT_EVENT_KINDS: readonly ThreatEventKind[] = ['SSH_BRUTE_FORCE', 'OPEN_IP'];
+export const THREAT_EVENT_KINDS: readonly ChartedThreatEventKind[] = ['SSH_BRUTE_FORCE', 'OPEN_IP'];
 
 /**
  * 한 시각의 전체 위협. `threat`는 판정 상태량(축 4 — 그 회차에 위협 판정인 자산 수)이고 회차가 없던

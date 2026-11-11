@@ -1,7 +1,7 @@
 # ==============================================================================
 # [파일 설명]  담당: 김승철 (API 계약 · BE)
 # 고객 계정의 GuardDuty 켜기 — 연결 확인(tenant_verification.verify_connection)의 마지막 단계입니다.
-# (T-14 B안 · #588 B)
+# (T-14 B안 · #588 B) 그리고 탐지 결과 읽기 — 테넌트 수집 주기가 리전마다 부릅니다(#588 C · read_findings).
 #
 #   - 리전 하나에 탐지기를 보고, 없으면 만든다(`CreateDetector(Enable=True)`). 있으면 상태만 본다.
 #     GuardDuty 는 리전 서비스라 탐지기가 계정 · 리전마다 하나다. 리전을 도는 것은 호출부 몫이다.
@@ -18,15 +18,26 @@
 #     (build_guardduty_policy)이 거울이다. 여기 호출을 더하면 tests/test_provision_smoke_aws.py ·
 #     tests/test_onboarding_template.py 의 대조가 정책을 따라오게 한다.
 #   - AWS 오류는 삼키지 않는다 — 판정(묻지 못함 · 거절)은 tenant_verification 이 한다.
+#
+# 결과 읽기(read_findings · #588 C)
+#   - 연결 확인과 달리 수집 주기 안에서 부른다 — 세션을 받지 않고 tenant_scope 의 클라이언트(aws_client)를 쓴다.
+#   - `ListFindings`(갱신 시각 ≥ 커서 · 이 계정 · 보관 처리 안 된 것, 갱신 시각 오름차순) → `GetFindings`(50건씩).
+#     오름차순이라 상한(READ_LIMIT)에서 끊겨도 커서가 다음 회차에 이어 읽는다. 커서와 같은 시각은 다시 읽고
+#     중복 억제가 접는다(같은 밀리초의 탐지를 잃지 않게 「초과」가 아니라 「이상」).
+#   - 탐지기가 없으면 None — 읽을 것이 없다(켜기는 연결 확인의 몫이다). 정지된 탐지기는 그대로 읽는다.
+#   - 계정 조건은 위임 관리자 계정이 멤버 계정 탐지까지 돌려주는 것을 막는다(정규화가 한 번 더 본다).
+#   - 페이지네이터를 쓰지 않는다 — 권한 거울(tests/test_provision_smoke_aws.py _guardduty_calls)이 호출 이름을
+#     소스에서 읽는다.
 # ==============================================================================
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Final
 
 from botocore.exceptions import ClientError
 
-from services.aws.client import session_client
+from services.aws.client import aws_client, session_client
 from services.aws.errors import aws_error_code
 
 #: 탐지기가 있지만 정지돼 있다 — AWS 오류가 아니라 우리가 내린 판정이라 따로 이름을 둔다.
@@ -45,6 +56,12 @@ DISABLED_FEATURES: Final[tuple[str, ...]] = (
     "AI_PROTECTION",
     "AI_ANALYST",
 )
+
+
+#: GetFindings 한 번에 넘길 수 있는 탐지 ID 수(API 상한).
+GET_FINDINGS_MAX: Final[int] = 50
+#: 한 리전 한 회차에 읽는 탐지 수 상한. 넘치면 커서가 다음 회차에 이어 읽는다.
+READ_LIMIT: Final[int] = 500
 
 
 def _first_detector(guardduty) -> str | None:
@@ -75,3 +92,42 @@ def ensure_detector(session, region: str) -> str | None:
                 raise
     status = guardduty.get_detector(DetectorId=detector_id)["Status"]
     return None if status == _ENABLED else DETECTOR_DISABLED_REASON
+
+
+def _epoch_ms(moment: datetime) -> int:
+    return int(moment.timestamp() * 1000)
+
+
+def read_findings(region: str, *, account_id: str, updated_since: datetime) -> list[dict] | None:
+    """그 리전에서 updated_since 이후 갱신된 이 계정의 탐지(GetFindings 원문). 탐지기가 없으면 None.
+
+    고르는 것은 갱신 시각 오름차순이지만 돌려주는 순서는 GetFindings 의 것이다. 최대 READ_LIMIT 건 — 남은 것은 다음 회차가 커서로 이어 읽는다."""
+    guardduty = aws_client("guardduty", region)
+    detector_id = _first_detector(guardduty)
+    if detector_id is None:
+        return None
+    criteria = {"Criterion": {
+        "updatedAt": {"GreaterThanOrEqual": _epoch_ms(updated_since)},
+        "accountId": {"Equals": [account_id]},
+        "service.archived": {"Equals": ["false"]},
+    }}
+    order = {"AttributeName": "updatedAt", "OrderBy": "ASC"}
+    finding_ids: list[str] = []
+    token = None
+    while len(finding_ids) < READ_LIMIT:
+        page = guardduty.list_findings(
+            DetectorId=detector_id, FindingCriteria=criteria, SortCriteria=order,
+            MaxResults=GET_FINDINGS_MAX, **({"NextToken": token} if token else {}),
+        )
+        finding_ids += page.get("FindingIds", [])
+        token = page.get("NextToken")
+        if not token:
+            break
+    finding_ids = finding_ids[:READ_LIMIT]
+    findings: list[dict] = []
+    for start in range(0, len(finding_ids), GET_FINDINGS_MAX):
+        findings += guardduty.get_findings(
+            DetectorId=detector_id, FindingIds=finding_ids[start:start + GET_FINDINGS_MAX],
+        ).get("Findings", [])
+    # GetFindings 는 순서를 지키지 않는다. 갱신 시각으로 다시 맞추는 것은 받는 쪽(guardduty_ingress)이다
+    return findings

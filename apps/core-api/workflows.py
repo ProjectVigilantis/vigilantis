@@ -133,6 +133,7 @@ from schemas.guardrails import (
     GuardrailValidationRequest,
     GuardrailValidationResult,
 )
+from schemas.events import ThreatEventType
 from schemas.evidence import EvidenceType
 from schemas.incidents import (
     AGENT_TERMINAL_STATUSES,
@@ -771,6 +772,8 @@ class AutoIsolationSkipReason(str, Enum):
     TENANT_SUSPENDED = "TENANT_SUSPENDED"
     # 테넌트가 자동 조치를 껐다 — 또는 그 기한이 꺼진 동안 지났다(T-6 · #514). 사람 승인은 그대로 받는다
     AUTO_ACTION_DISABLED = "AUTO_ACTION_DISABLED"
+    # 위협 유형이 자동 발동 대상이 아니다(#588 Q2 · AUTO_ISOLATION_EXCLUDED_EVENT_TYPES)
+    THREAT_TYPE_NOT_ELIGIBLE = "THREAT_TYPE_NOT_ELIGIBLE"
     # 같은 인스턴스에 끝나지 않은 다른 실행이 있다(T-10 · #595). 다운사이징이 정지 · 기동 · 원복하는 도중에
     # 격리가 SG 를 바꿔 끼우면 서로 덮어쓴다. 아무것도 쓰지 않으므로 Medium 은 다음 감시 주기에 다시 시도한다
     TARGET_EXECUTION_IN_PROGRESS = "TARGET_EXECUTION_IN_PROGRESS"
@@ -824,6 +827,23 @@ _AUTO_ISOLATION_ELIGIBILITY: dict[
         RiskLevel.MEDIUM, ResponseMode.AGENT_WAIT, IncidentStatus.AWAITING_APPROVAL,
     ),
 }
+
+#: 자동 발동(High 선차단 · Medium 1분 격리)에서 빼는 위협 유형 — 인시던트에 묶인 위협 이벤트의 유형으로 본다.
+#: GuardDuty 탐지는 1차에 인시던트와 조치 후보까지만 간다(#588 Q2 · 2026-11-09 SEC 동의). 탐지는 관측이지 침해
+#: 증거가 아니고, 이 경로는 대상 자산의 보호 태그를 아직 보지 않는다(#598). 초기 위험도 · 대응 경로는 다른 유형과
+#: 같이 저장되므로(HIGH = PRE_MITIGATION_0_5S) 이 집합이 유일한 차이다. 보는 자리는 넷이다 — 사전 판정
+#: (security/soar.prepare_isolation · AWS 를 부르기 전), 접수 관문(_auto_isolation_skip_reason · 잠근 뒤),
+#: 화면 안내(pending_automatic_block), 타임아웃 감시 대상 조회(incidents_repo.list_expired_agent_waits).
+AUTO_ISOLATION_EXCLUDED_EVENT_TYPES: frozenset[ThreatEventType] = frozenset({ThreatEventType.GUARDDUTY_FINDING})
+
+
+def auto_isolation_excluded(db: Session, incident: models.Incident) -> bool:
+    """이 인시던트의 위협 유형이 자동 발동에서 빠지는가(AUTO_ISOLATION_EXCLUDED_EVENT_TYPES). 읽기 전용이다."""
+    return (
+        incidents_repo.threat_event_type_of(db, incident.threat_event_id)
+        in AUTO_ISOLATION_EXCLUDED_EVENT_TYPES
+    )
+
 
 _ISOLATE_TARGET_TYPE = executor.RUNBOOK_SPECS[
     RunbookId.RUNBOOK_EC2_ISOLATE.value
@@ -964,7 +984,7 @@ def pending_automatic_block(
         ),
         None,
     )
-    if trigger_source is None:
+    if trigger_source is None or auto_isolation_excluded(db, incident):
         return None
     return automatic_trigger_block(
         db.get(models.Tenant, incident.tenant_id),
@@ -987,6 +1007,8 @@ def _auto_isolation_skip_reason(
         or incident.response_mode is not response_mode
     ):
         return AutoIsolationSkipReason.RISK_NOT_ELIGIBLE
+    if auto_isolation_excluded(db, incident):
+        return AutoIsolationSkipReason.THREAT_TYPE_NOT_ELIGIBLE
     if incident.status is not status:
         return AutoIsolationSkipReason.STATUS_NOT_ELIGIBLE
     if trigger_source is TriggerSource.PRE_MITIGATION_0_5S:

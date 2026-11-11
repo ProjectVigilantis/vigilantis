@@ -1,10 +1,12 @@
-"""GuardDuty 켜기(services/guardduty.ensure_detector) — 상태를 드는 GuardDuty 대역 (#588 B).
+"""GuardDuty 켜기(services/guardduty.ensure_detector · #588 B)와 탐지 결과 읽기(read_findings · #588 C) —
+상태를 드는 GuardDuty 대역.
 
 대역은 리전마다 탐지기를 들고 있고 실제 API 처럼 「계정 · 리전마다 하나」를 지킨다(두 번째 CreateDetector 는
 BadRequestException). 실 AWS 의 서비스 연결 역할 · 조직 관리 · SCP 는 학원 계정 실측(11/16 뒤)으로 본다.
 """
 
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -50,6 +52,7 @@ class FakeGuardDuty:
         self.calls: list[tuple[str, dict]] = []
         self.deny: dict[str, str] = {}  # 작업 → 오류 코드
         self.race = False  # CreateDetector 직전에 다른 확인이 먼저 만든 것처럼
+        self.findings: list[dict] = []  # 그 리전에 쌓인 탐지 원문(#588 C)
 
     def _call(self, name: str, **params):
         self.calls.append((name, params))
@@ -74,8 +77,66 @@ class FakeGuardDuty:
         self._call("GetDetector", DetectorId=DetectorId)
         return {"Status": self.detectors[DetectorId]}
 
+    # --- 탐지 결과(#588 C). 조건 · 정렬 · 쪽 나눔을 API 처럼 해석한다
+    def _matches(self, finding: dict, criterion: dict) -> bool:
+        for field, condition in criterion.items():
+            if field == "updatedAt":
+                updated = int(_parse(finding["UpdatedAt"]).timestamp() * 1000)
+                if updated < condition["GreaterThanOrEqual"]:
+                    return False
+            elif field == "accountId":
+                if finding["AccountId"] not in condition["Equals"]:
+                    return False
+            elif field == "service.archived":
+                archived = str(finding["Service"].get("Archived", False)).lower()
+                if archived not in condition["Equals"]:
+                    return False
+            else:
+                raise AssertionError(f"대역이 모르는 조건: {field}")
+        return True
+
+    def list_findings(self, *, DetectorId, FindingCriteria, SortCriteria, MaxResults, NextToken=None):
+        self._call("ListFindings", DetectorId=DetectorId, FindingCriteria=FindingCriteria,
+                   SortCriteria=SortCriteria, MaxResults=MaxResults, NextToken=NextToken)
+        assert DetectorId in self.detectors and MaxResults <= 50
+        assert SortCriteria == {"AttributeName": "updatedAt", "OrderBy": "ASC"}
+        hits = sorted((f for f in self.findings if self._matches(f, FindingCriteria["Criterion"])),
+                      key=lambda f: (_parse(f["UpdatedAt"]), f["Id"]))
+        start = int(NextToken or 0)
+        page = hits[start:start + MaxResults]
+        more = start + MaxResults < len(hits)
+        return {"FindingIds": [f["Id"] for f in page], **({"NextToken": str(start + MaxResults)} if more else {})}
+
+    def get_findings(self, *, DetectorId, FindingIds):
+        self._call("GetFindings", DetectorId=DetectorId, FindingIds=FindingIds)
+        if len(FindingIds) > 50:
+            raise _error("BadRequestException", "GetFindings")  # API 상한
+        by_id = {f["Id"]: f for f in self.findings}
+        return {"Findings": [by_id[i] for i in reversed(FindingIds)]}  # 순서를 지키지 않는다
+
     def names(self) -> list[str]:
         return [name for name, _ in self.calls]
+
+
+def _parse(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+ACCOUNT = "111122223333"
+T0 = datetime(2026, 11, 10, 0, 0, tzinfo=timezone.utc)
+
+
+def finding(fid: str, *, updated: datetime, account: str = ACCOUNT, archived: bool = False,
+            severity: float = 5.0) -> dict:
+    """GetFindings 원문 모양의 탐지 1건(필요한 칸만)."""
+    stamp = updated.isoformat().replace("+00:00", "Z")
+    return {
+        "Id": fid, "AccountId": account, "Region": REGION, "Severity": severity,
+        "Type": "UnauthorizedAccess:EC2/SSHBruteForce", "UpdatedAt": stamp, "CreatedAt": stamp,
+        "Arn": f"arn:aws:guardduty:{REGION}:{account}:detector/d-1/finding/{fid}",
+        "Resource": {"ResourceType": "Instance", "InstanceDetails": {"InstanceId": "i-0abc"}},
+        "Service": {"Archived": archived, "EventFirstSeen": stamp, "EventLastSeen": stamp},
+    }
 
 
 @pytest.fixture
@@ -156,3 +217,70 @@ def test_other_refusals_are_raised_for_the_judge(gd, operation):
     with pytest.raises(ClientError):
         ensure_detector(SESSION, REGION)
     assert gd.detectors == {}
+
+
+# --- 탐지 결과 읽기(#588 C) --------------------------------------------------------------------------------
+@pytest.fixture
+def reader(monkeypatch):
+    """수집 주기는 tenant_scope 의 aws_client 로 읽는다 — 세션을 받지 않는다."""
+    fake = FakeGuardDuty({"d-1": "ENABLED"})
+
+    def aws_client(service, region):
+        assert (service, region) == ("guardduty", REGION)
+        return fake
+
+    monkeypatch.setattr(guardduty, "aws_client", aws_client)
+    return fake
+
+
+def _read(since=T0):
+    return guardduty.read_findings(REGION, account_id=ACCOUNT, updated_since=since)
+
+
+def test_no_detector_means_nothing_to_read(reader):
+    reader.detectors = {}
+    assert _read() is None
+    assert reader.names() == ["ListDetectors"]  # 켜기는 연결 확인의 몫이다 — 여기서 만들지 않는다
+
+
+def test_reads_only_findings_updated_since_the_cursor(reader):
+    reader.findings = [finding("old", updated=T0 - timedelta(seconds=1)), finding("at", updated=T0),
+                       finding("new", updated=T0 + timedelta(hours=1))]
+    # 커서와 같은 시각은 다시 읽는다(같은 밀리초의 탐지를 잃지 않게) — 중복은 받는 쪽이 접는다
+    assert sorted(f["Id"] for f in _read()) == ["at", "new"]
+
+
+def test_other_accounts_and_archived_findings_are_not_read(reader):
+    # 위임 관리자 계정이면 멤버 계정 탐지도 돌아온다 — 조건이 계정으로 거른다
+    reader.findings = [finding("mine", updated=T0), finding("member", updated=T0, account="999988887777"),
+                       finding("archived", updated=T0, archived=True)]
+    assert [f["Id"] for f in _read()] == ["mine"]
+
+
+def test_pages_are_followed_and_details_fetched_fifty_at_a_time(reader):
+    reader.findings = [finding(f"f{i:03}", updated=T0 + timedelta(seconds=i)) for i in range(120)]
+    found = _read()
+    assert sorted(f["Id"] for f in found) == [f"f{i:03}" for i in range(120)]
+    batches = [len(params["FindingIds"]) for name, params in reader.calls if name == "GetFindings"]
+    assert batches == [50, 50, 20]  # GetFindings 는 50건이 상한이다(대역도 넘기면 거절한다)
+
+
+def test_one_round_reads_at_most_the_limit_oldest_first(reader, monkeypatch):
+    monkeypatch.setattr(guardduty, "READ_LIMIT", 60)
+    reader.findings = [finding(f"f{i:03}", updated=T0 + timedelta(seconds=i)) for i in range(120)]
+    # 오름차순이라 남은 것은 다음 회차가 커서로 이어 읽는다 — 가장 늦은 것부터 읽으면 앞의 것을 영영 놓친다
+    assert sorted(f["Id"] for f in _read()) == [f"f{i:03}" for i in range(60)]
+
+
+def test_read_never_calls_anything_but_reads(reader):
+    reader.findings = [finding("f", updated=T0)]
+    _read()
+    assert set(reader.names()) == {"ListDetectors", "ListFindings", "GetFindings"}
+
+
+def test_refusal_is_raised_to_the_caller(reader):
+    # 템플릿을 갱신하지 않은 고객 역할에는 ListFindings 가 없다 — 판정(FAILED)은 받는 쪽이 한다
+    reader.findings = [finding("f", updated=T0)]
+    reader.deny["ListFindings"] = "AccessDeniedException"
+    with pytest.raises(ClientError):
+        _read()

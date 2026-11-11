@@ -10,7 +10,9 @@
 # 계약 원칙
 #   - snake_case, UTC ISO 8601("Z") 문자열, extra 금지.
 #   - 항목은 `event_type` 으로 갈리는 닫힌 합이다. `payload` 는 정규화 이벤트의 유형별 모델 그대로다
-#     (SSH = source_ip · failed_attempt_count · window_seconds, 개방 포트 = protocol · from_port · to_port · source_cidr).
+#     (SSH = source_ip · failed_attempt_count · window_seconds, 개방 포트 = protocol · from_port · to_port · source_cidr,
+#     GuardDuty 탐지 = finding_id · finding_type · severity · resource_type · region · first_seen_at · last_seen_at — #588 C).
+#     GuardDuty 탐지는 LOW 도 목록에 있다 — 이벤트는 전부 남기고 인시던트는 MEDIUM 이상만 만든다(#588 Q3).
 #
 # 경로 (/api/v1)
 #   GET /threat-events?days=1|7|30 → ThreatEventsResponse. days 는 셋 중 하나만 받는다(그 밖은 422).
@@ -29,7 +31,12 @@ from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ..events import OpenIpThreatPayload, SshBruteForceThreatPayload, ThreatEventType
+from ..events import (
+    GuardDutyFindingThreatPayload,
+    OpenIpThreatPayload,
+    SshBruteForceThreatPayload,
+    ThreatEventType,
+)
 from .assets import UtcDateTime
 
 #: 한 번에 돌려주는 최대 건수. 넘치면 `total` 이 실제 건수를 알린다.
@@ -57,8 +64,13 @@ class SshBruteForceThreatEventItem(_ThreatEventItemBase):
     payload: SshBruteForceThreatPayload
 
 
+class GuardDutyFindingThreatEventItem(_ThreatEventItemBase):
+    event_type: Literal[ThreatEventType.GUARDDUTY_FINDING]
+    payload: GuardDutyFindingThreatPayload
+
+
 ThreatEventItem = Annotated[
-    Union[OpenIpThreatEventItem, SshBruteForceThreatEventItem],
+    Union[OpenIpThreatEventItem, SshBruteForceThreatEventItem, GuardDutyFindingThreatEventItem],
     Field(discriminator="event_type"),
 ]
 

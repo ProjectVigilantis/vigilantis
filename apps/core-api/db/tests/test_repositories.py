@@ -113,7 +113,8 @@ def test_alembic_head_applied_with_43_tables(db):
     # + 고객사별 API 호출 1시간 단위 버킷 1종(#572 6번)
     # + #572 고객사 그룹 · 그룹 배정 2종 − 직접 배정 1종
     # + 실제 AWS Marketplace 라이선스 사본 1종(ADR-0012 2차 개정)
-    assert count == 45
+    # + GuardDuty 탐지 읽기 커서 1종(#588 C)
+    assert count == 46
 
 
 # --- 자산 계열 -----------------------------------------------------------------

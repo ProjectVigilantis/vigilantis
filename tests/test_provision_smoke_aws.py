@@ -322,7 +322,8 @@ def test_app_policy_does_not_carry_cost_explorer():
         assert not [a for a in _granted(policy) if a.startswith("ce:")]
 
 
-# GuardDuty 켜기의 거울(#588 B). services/guardduty.py는 고객 역할 세션의 클라이언트(session_client)로 부른다.
+# GuardDuty의 거울(#588 B · C). services/guardduty.py는 켜기를 고객 역할 세션의 클라이언트(session_client)로, 탐지 결과
+# 읽기를 수집 주기의 tenant_scope 클라이언트(aws_client)로 부른다 — 둘 다 센다.
 # CreateDetector는 처음 켤 때 서비스 연결 역할을 만들어 호출자에게 iam:CreateServiceLinkedRole을 요구한다 —
 # 코드에 IAM 호출이 없어도 정책에 있어야 하는 권한이라 여기서 함께 센다.
 _GUARDDUTY = REPO_ROOT / "apps" / "core-api" / "services" / "guardduty.py"
@@ -332,7 +333,7 @@ GUARDDUTY_POLICY = smoke.build_guardduty_policy(ACCOUNT, REGION)
 
 def _guardduty_calls() -> set[str]:
     source = _GUARDDUTY.read_text(encoding="utf-8")
-    clients = dict(re.findall(r'(\w+) = session_client\(\w+, "([a-z0-9]+)"', source))
+    clients = dict(re.findall(r'(\w+) = (?:session_client\(\w+, |aws_client\()"([a-z0-9]+)"', source))
     assert clients, "GuardDuty 코드의 session_client 대입을 하나도 못 찾았다. 패턴이 코드와 어긋났다"
     names = "|".join(sorted(clients))
     calls = {

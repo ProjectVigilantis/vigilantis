@@ -317,6 +317,26 @@ class TenantApiCallHourly(Base):
     )
 
 
+class GuardDutyFindingCursor(Base):
+    """GuardDuty 탐지 읽기 커서 — 고객사 × 리전마다 다음 회차가 읽기 시작할 갱신 시각 (#588 C).
+
+    수집 주기(services/collector.py → guardduty_ingress.py)만 쓴다. 읽은 탐지의 가장 늦은 갱신 시각으로 앞으로만
+    옮기고, 저장에 실패한 탐지가 있으면 그 탐지의 갱신 시각에 멈춰 다음 회차가 거기서 다시 읽는다. 행이 없으면
+    처음 읽는 리전이다. 고객사가 지워지면 함께 지워진다(CASCADE).
+    """
+
+    __tablename__ = "guardduty_finding_cursors"
+
+    tenant_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("tenants.tenant_id", ondelete="CASCADE"), primary_key=True
+    )
+    region: Mapped[str] = mapped_column(String(32), primary_key=True)
+    updated_since: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+
 class TenantSubscriptionHistory(Base):
     """옛 재개 규칙(연결 확인 성공 = Free 로 다시 시작)이 Free 로 바꾸기 전에 남긴 구독 1건 (T-16 · #528).
 

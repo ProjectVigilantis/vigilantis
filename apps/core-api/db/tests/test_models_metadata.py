@@ -75,6 +75,8 @@ EXPECTED_TABLES = {
     "totp_provider_mutations",
     # 고객사별 API 호출 수의 UTC 1시간 버킷 (#572 6번)
     "tenant_api_calls_hourly",
+    # GuardDuty 탐지 읽기 커서 — 고객사 × 리전 (#588 C)
+    "guardduty_finding_cursors",
 }
 
 
