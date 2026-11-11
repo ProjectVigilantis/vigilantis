@@ -75,6 +75,8 @@ EXPECTED_TABLES = {
     "totp_provider_mutations",
     # 고객사별 API 호출 수의 UTC 1시간 버킷 (#572 6번)
     "tenant_api_calls_hourly",
+    # #589 — 플랫폼 활동 로그(append-only 통합 기록)
+    "platform_events",
 }
 
 
@@ -140,6 +142,15 @@ def test_row_invariant_constraints_registered():
         "tenant_api_calls_hourly": {
             "ck_tenant_api_calls_hourly_calls_nonnegative",
             "ck_tenant_api_calls_hourly_hour_on_the_hour",
+        },
+        # 플랫폼 활동 로그의 행 모양(#589) — 계약 PlatformEventRecord 의 불변식 거울
+        "platform_events": {
+            "ck_platform_events_actor_shape",
+            "ck_platform_events_actor_account_shape",
+            "ck_platform_events_actor_platform_role_shape",
+            "ck_platform_events_target_shape",
+            "ck_platform_events_details_object",
+            "ck_platform_events_reason_shape",
         },
         "metric_summaries": {"ck_metric_summaries_window_ordered"},
         "rule_evaluations": {"ck_rule_evaluations_health_score_range"},

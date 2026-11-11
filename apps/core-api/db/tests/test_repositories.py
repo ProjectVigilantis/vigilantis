@@ -89,7 +89,7 @@ def _execution(db, incident, **overrides):
 # --- 마이그레이션 적용 상태 ----------------------------------------------------
 
 
-def test_alembic_head_applied_with_43_tables(db):
+def test_alembic_head_applied_with_46_tables(db):
     # 리비전 문자열을 적어 두면 마이그레이션마다 이 줄을 고쳐야 하고, 그 수정은
     # 검증이 아니라 손질이다. 확인할 것은 "DB가 head까지 올라와 있는가"다.
     from alembic.config import Config
@@ -113,7 +113,8 @@ def test_alembic_head_applied_with_43_tables(db):
     # + 고객사별 API 호출 1시간 단위 버킷 1종(#572 6번)
     # + #572 고객사 그룹 · 그룹 배정 2종 − 직접 배정 1종
     # + 실제 AWS Marketplace 라이선스 사본 1종(ADR-0012 2차 개정)
-    assert count == 45
+    # + 플랫폼 활동 로그 1종(#589)
+    assert count == 46
 
 
 # --- 자산 계열 -----------------------------------------------------------------
