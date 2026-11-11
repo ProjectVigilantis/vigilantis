@@ -20,9 +20,9 @@ from dataclasses import dataclass
 from enum import Enum, unique
 from typing import Any, Mapping, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
-from .api.auth import AccountType, PlatformRole
+from .api.auth import AccountType, FeaturePermission, PlatformRole
 from .api.tenants import TenantVerificationResult
 
 #: action 칸 길이(varchar). 행동 이름이 이보다 길면 계약 테스트가 깨진다.
@@ -84,6 +84,7 @@ class PlatformEventTargetType(str, Enum):
     INQUIRY = "INQUIRY"
     COLLECTION_RUN = "COLLECTION_RUN"
     NOTIFICATION = "NOTIFICATION"
+    TENANT_GROUP = "TENANT_GROUP"
 
 
 @unique
@@ -107,7 +108,11 @@ class PlatformEventAction(str, Enum):
     USER_SESSIONS_REVOKE = "USER_SESSIONS_REVOKE"
     USER_PLATFORM_ROLE_CHANGE = "USER_PLATFORM_ROLE_CHANGE"
     USER_GROUP_ASSIGNMENTS_CHANGE = "USER_GROUP_ASSIGNMENTS_CHANGE"
+    USER_PERMISSIONS_CHANGE = "USER_PERMISSIONS_CHANGE"
     # 고객사 관리
+    TENANT_GROUP_CREATE = "TENANT_GROUP_CREATE"
+    TENANT_GROUP_DELETE = "TENANT_GROUP_DELETE"
+    TENANT_GROUP_CHANGE = "TENANT_GROUP_CHANGE"
     TENANT_CREATE = "TENANT_CREATE"
     TENANT_UPDATE = "TENANT_UPDATE"
     TENANT_SUSPEND = "TENANT_SUSPEND"
@@ -161,6 +166,38 @@ class GroupAssignmentsDetails(PlatformEventDetails):
 
     before: tuple[uuid.UUID, ...] = ()
     after: tuple[uuid.UUID, ...] = ()
+
+
+class TenantGroupChangeDetails(PlatformEventDetails):
+    """고객사의 그룹 지정 · 해제. null 은 그룹 없음이며 전 · 후를 모두 명시한다."""
+
+    before: Optional[uuid.UUID]
+    after: Optional[uuid.UUID]
+
+    @model_serializer(mode="wrap")
+    def _with_null_groups(self, handler):
+        values = handler(self)
+        # 기록 정규화의 exclude_none 에도 그룹 해제라는 사실은 남긴다.
+        if self.before is None:
+            values["before"] = None
+        if self.after is None:
+            values["after"] = None
+        return values
+
+
+class PermissionsChangeDetails(PlatformEventDetails):
+    """기능별 권한 교체 — 계약에 있는 권한 이름만 받으며 빈 목록은 전부 회수다."""
+
+    before: tuple[FeaturePermission, ...]
+    after: tuple[FeaturePermission, ...]
+
+
+class TenantGroupDeleteDetails(PlatformEventDetails):
+    """그룹 삭제로 소속이 풀린 고객사 수와 담당 배정이 지워진 직원 수. 이름은 남기지 않는다."""
+
+    tenant_count: int = Field(ge=0, strict=True)
+    #: 계정 활성 여부와 무관하게 삭제된 직원 담당 배정 수(직원당 그룹 배정은 하나).
+    staff_count: int = Field(ge=0, strict=True)
 
 
 class TenantVerifyDetails(PlatformEventDetails):
@@ -249,6 +286,16 @@ ACTION_SPECS: Mapping[PlatformEventAction, ActionSpec] = {
     ),
     _A.USER_GROUP_ASSIGNMENTS_CHANGE: _spec(
         _C.USER_ADMIN, {_S}, {_USER}, _T.USER, GroupAssignmentsDetails
+    ),
+    _A.USER_PERMISSIONS_CHANGE: _spec(
+        _C.USER_ADMIN, {_S}, {_USER}, _T.USER, PermissionsChangeDetails
+    ),
+    _A.TENANT_GROUP_CREATE: _spec(_C.TENANT_ADMIN, {_S}, {_USER}, _T.TENANT_GROUP),
+    _A.TENANT_GROUP_DELETE: _spec(
+        _C.TENANT_ADMIN, {_S}, {_USER}, _T.TENANT_GROUP, TenantGroupDeleteDetails
+    ),
+    _A.TENANT_GROUP_CHANGE: _spec(
+        _C.TENANT_ADMIN, {_S}, {_USER}, _T.TENANT, TenantGroupChangeDetails
     ),
     _A.TENANT_CREATE: _spec(_C.TENANT_ADMIN, {_S}, {_USER}, _T.TENANT),
     _A.TENANT_UPDATE: _spec(_C.TENANT_ADMIN, {_S}, {_USER}, _T.TENANT),
