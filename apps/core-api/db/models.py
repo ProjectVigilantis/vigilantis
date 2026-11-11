@@ -49,6 +49,16 @@ from schemas.guardrails import (
     PrecheckReasonCode,
 )
 from schemas.incidents import AgentInvocationStatus
+from schemas.platform_events import (
+    ACTION_MAX_LENGTH,
+    REQUEST_ID_MAX_LENGTH,
+    TARGET_ID_MAX_LENGTH,
+    USER_AGENT_MAX_LENGTH,
+    PlatformActorKind,
+    PlatformEventCategory,
+    PlatformEventOutcome,
+    PlatformEventTargetType,
+)
 from schemas.runbooks import RunbookId, TriggerSource
 from schemas.subscriptions import (
     MockAgreementStatus,
@@ -73,7 +83,7 @@ from sqlalchemy import (
     Uuid,
 )
 from sqlalchemy import Enum as SAEnum
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import INET, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import text
 
@@ -2005,6 +2015,74 @@ class AuditEvent(Base):
         ),
         # 목록은 최신순 · 같은 시각은 event_id 순이다(api/audit.py)
         Index("ix_audit_events_occurred_at_event_id", "occurred_at", "event_id"),
+    )
+
+
+class PlatformEvent(Base):
+    """플랫폼 활동 로그 한 건 — append-only(DB 트리거가 UPDATE·DELETE를 거절한다). (#589)
+
+    기록 계약은 schemas.platform_events 이고, 쓰는 곳은 db/repositories/platform_events.py 하나다.
+    상태 변경은 그 변경과 **같은 트랜잭션**에서, 거절 · 실패는 따로 짧은 트랜잭션에서 남는다.
+    행위자 계정 종류 · 플랫폼 등급은 쓰는 시점의 값을 옮겨 둔다(AuditEvent 와 같은 원칙). 이메일은 복사하지 않는다.
+    tenant_id · session_id · target_id 에는 FK 를 두지 않는다 — 고객사 삭제 · 세션 정리 뒤에도 기록은 남아야 하고,
+    append-only 라 ON DELETE SET NULL 도 쓸 수 없다. 사람(actor_user_id)만 FK(RESTRICT)로 잇는다.
+    """
+
+    __tablename__ = "platform_events"
+
+    event_id: Mapped[str] = mapped_column(_ID, primary_key=True, default=_new_id)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    category: Mapped[PlatformEventCategory] = mapped_column(
+        _enum(PlatformEventCategory, "platform_event_category")
+    )
+    # 문자열 칸이다 — 행동 목록 밖 값은 기록 계약(PlatformEventRecord)이 거절한다
+    action: Mapped[str] = mapped_column(String(ACTION_MAX_LENGTH))
+    outcome: Mapped[PlatformEventOutcome] = mapped_column(
+        _enum(PlatformEventOutcome, "platform_event_outcome")
+    )
+    actor_kind: Mapped[PlatformActorKind] = mapped_column(
+        _enum(PlatformActorKind, "platform_actor_kind")
+    )
+    actor_user_id: Mapped[str | None] = mapped_column(
+        _ID, ForeignKey("app_users.user_id", ondelete="RESTRICT"), nullable=True
+    )
+    actor_account_type: Mapped[AccountType | None] = mapped_column(
+        _enum(AccountType, "app_user_account_type"), nullable=True
+    )
+    actor_platform_role: Mapped[PlatformRole | None] = mapped_column(
+        _enum(PlatformRole, "app_user_platform_role"), nullable=True
+    )
+    session_id: Mapped[str | None] = mapped_column(_ID, nullable=True)
+    request_id: Mapped[str | None] = mapped_column(String(REQUEST_ID_MAX_LENGTH), nullable=True)
+    source_ip: Mapped[str | None] = mapped_column(INET, nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(USER_AGENT_MAX_LENGTH), nullable=True)
+    tenant_id: Mapped[str | None] = mapped_column(_ID, nullable=True)
+    target_type: Mapped[PlatformEventTargetType | None] = mapped_column(
+        _enum(PlatformEventTargetType, "platform_event_target_type"), nullable=True
+    )
+    target_id: Mapped[str | None] = mapped_column(String(TARGET_ID_MAX_LENGTH), nullable=True)
+    details: Mapped[dict] = mapped_column(JSONB, default=dict, server_default=text("'{}'::jsonb"))
+
+    __table_args__ = (
+        CheckConstraint("(actor_kind = 'USER') = (actor_user_id IS NOT NULL)", name="actor_shape"),
+        CheckConstraint(
+            "(actor_kind = 'USER') = (actor_account_type IS NOT NULL)", name="actor_account_shape"
+        ),
+        CheckConstraint(
+            "(actor_platform_role IS NOT NULL) = COALESCE(actor_account_type = 'PLATFORM', false)",
+            name="actor_platform_role_shape",
+        ),
+        CheckConstraint("(target_type IS NULL) = (target_id IS NULL)", name="target_shape"),
+        CheckConstraint("jsonb_typeof(details) = 'object'", name="details_object"),
+        # 거절 · 실패에만 사유가 있다(schemas.platform_events 와 같은 규칙)
+        CheckConstraint(
+            "(outcome = 'SUCCEEDED') = (details->>'reason_code' IS NULL)", name="reason_shape"
+        ),
+        Index("ix_platform_events_occurred_at_event_id", "occurred_at", "event_id"),
+        Index("ix_platform_events_tenant_id_occurred_at", "tenant_id", "occurred_at"),
+        Index("ix_platform_events_actor_user_id_occurred_at", "actor_user_id", "occurred_at"),
+        Index("ix_platform_events_target", "target_type", "target_id"),
+        Index("ix_platform_events_category_occurred_at", "category", "occurred_at"),
     )
 
 
