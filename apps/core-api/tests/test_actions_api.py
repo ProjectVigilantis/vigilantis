@@ -39,6 +39,13 @@ KEY = "6dbfe076-1da1-4d35-88f8-b869dce44e61"
 SUBJECT_EC2 = "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0aaa"
 DEFAULT_RUNBOOK = RunbookId.RUNBOOK_NACL_ADD_DENY
 
+def _platform_event_count(db) -> int:
+    from sqlalchemy import func, select
+
+    db.expire_all()
+    return db.scalar(select(func.count()).select_from(models.PlatformEvent))
+
+
 # Runbook별 typed 파라미터(#154) — 접수가 저장 후보를 계약으로 재검증하므로
 def _body(incident: models.Incident, runbook_id: RunbookId, key: str = KEY) -> dict:
     return {
@@ -326,6 +333,7 @@ def test_claimed_race_window_replays_existing_execution(
     monkeypatch.setattr(
         workflows.executions_repo, "get_by_idempotency_key", _blind_first
     )
+    events_before = _platform_event_count(db)
 
     response = client_pg.post(URL, json=_body(incident, candidate.runbook_id))
     assert response.status_code == 200
@@ -334,6 +342,7 @@ def test_claimed_race_window_replays_existing_execution(
 
     db.expire_all()
     assert len(executions_repo.list_by_incident(db, incident.incident_id)) == 1
+    assert _platform_event_count(db) == events_before  # 재생은 승인 활동 로그를 남기지 않는다(#589)
 
 
 def test_duplicate_key_race_recovers_to_existing_execution(
@@ -364,6 +373,7 @@ def test_duplicate_key_race_recovers_to_existing_execution(
     monkeypatch.setattr(
         workflows.executions_repo, "get_by_idempotency_key", _blind_first
     )
+    events_before = _platform_event_count(db)
 
     response = client_pg.post(URL, json=_body(incident, candidate.runbook_id))
     assert response.status_code == 200
@@ -372,6 +382,7 @@ def test_duplicate_key_race_recovers_to_existing_execution(
 
     db.expire_all()
     assert len(executions_repo.list_by_incident(db, incident.incident_id)) == 1
+    assert _platform_event_count(db) == events_before  # 진 요청은 승인 활동 로그를 남기지 않는다(#589)
     # 패배한 요청은 후보를 선점하지 않는다
     assert (
         incidents_repo.get_candidate(db, candidate.candidate_id).status

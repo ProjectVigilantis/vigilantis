@@ -420,7 +420,7 @@ def platform_session(make_auth_session) -> AuthSeed:
 
 
 def _pg_app(test_db):
-    """get_db 와 호출 집계 세션 팩토리(api_usage)를 테스트 세션으로 재정의한 앱."""
+    """get_db · 호출 집계 세션 팩토리(api_usage) · 조치 접수의 따로 남기기 팩토리를 테스트 세션으로 재정의한 앱."""
     from contextlib import contextmanager
 
     import api_usage
@@ -439,6 +439,10 @@ def _pg_app(test_db):
 
     app.dependency_overrides[db_session_module.get_db] = _override_get_db
     app.dependency_overrides[api_usage.get_usage_session_factory] = lambda: _usage_session
+    # 조치 접수의 정지 거절(#589)도 같은 세션에 남긴다 — 운영은 독립 세션이라 요청 rollback 뒤에도 남지만,
+    # 여기서는 savepoint commit 이라 테스트 트랜잭션과 함께 사라진다. 독립 세션 동작은
+    # tests/test_workflow_platform_events.py 의 commit 경로 테스트가 따로 본다
+    app.dependency_overrides[db_session_module.get_session_factory] = lambda: _usage_session
     return app
 
 
@@ -504,7 +508,7 @@ class CommittedAuth:
 
     def cleanup(self) -> None:
         from db import models
-        from sqlalchemy import delete, select
+        from sqlalchemy import delete, select, text
 
         from tests.audit_cleanup import purge_audit_events
 
@@ -512,6 +516,24 @@ class CommittedAuth:
             if self._user_ids:
                 # 이 사용자가 승인 · 종료한 감사 기록이 사용자 행을 가리킨다(FK RESTRICT)
                 purge_audit_events(session, actor_user_ids=self._user_ids)
+                # 플랫폼 활동 로그(#589)의 사람 행도 같다. 행이 있을 때만 append-only 트리거를 이 정리 트랜잭션
+                # 안에서 끈다 — ALTER 는 테이블 전체 잠금이라 다른 연결의 열린 트랜잭션을 기다리면 제한 시간에 실패한다
+                held = session.scalars(
+                    text("SELECT event_id::text FROM platform_events WHERE actor_user_id::text = ANY(:ids)"),
+                    {"ids": [str(user_id) for user_id in self._user_ids]},
+                ).all()
+                if held:
+                    session.execute(text("SET LOCAL lock_timeout = '10s'"))
+                    session.execute(
+                        text("ALTER TABLE platform_events DISABLE TRIGGER platform_events_append_only")
+                    )
+                    session.execute(
+                        text("DELETE FROM platform_events WHERE event_id::text = ANY(:ids)"),
+                        {"ids": held},
+                    )
+                    session.execute(
+                        text("ALTER TABLE platform_events ENABLE TRIGGER platform_events_append_only")
+                    )
                 session.execute(
                     delete(models.AuthSession).where(models.AuthSession.user_id.in_(self._user_ids))
                 )

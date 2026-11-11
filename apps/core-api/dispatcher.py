@@ -116,6 +116,7 @@ from db.repositories import executions as executions_repo
 from db.session import get_session_factory
 from realtime import execution_event, incident_event
 from schemas.api.actions import ExecutionStatus
+from schemas.api.errors import ErrorCode
 from schemas.api.ws import WsEvent, WsEventType
 from schemas.candidates import CandidateStatus
 from schemas.executions import (
@@ -425,10 +426,15 @@ def _close_and_publish(
     *,
     next_status: ExecutionStatus,
     error_summary: str | None = None,
+    blocked_by: ErrorCode | None = None,
 ) -> None:
-    """확정 → 카운트 → 발행. 확정이 None이면 다른 주체가 먼저 옮긴 것이다."""
+    """확정 → 카운트 → 발행. 확정이 None이면 다른 주체가 먼저 옮긴 것이다.
+
+    blocked_by 는 시작 관문이 거절한 코드다 — 확정과 같은 트랜잭션에 그 거절을 활동 로그로 남긴다(#589).
+    """
     closure = workflows.close_execution(
-        db, execution_id, next_status=next_status, error_summary=error_summary
+        db, execution_id, next_status=next_status, error_summary=error_summary,
+        blocked_by=blocked_by,
     )
     if closure is None:
         # 실행 도중 다른 주체가 먼저 확정했다 — 발행도 그쪽이 한다
@@ -742,6 +748,7 @@ def _dispatch_claimed(
                 report,
                 next_status=ExecutionStatus.FAILED,
                 error_summary=str(refused),
+                blocked_by=ErrorCode.TENANT_SUSPENDED,
             )
             return
         if outcome.succeeded:
