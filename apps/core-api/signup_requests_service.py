@@ -26,6 +26,7 @@ from config import TenantSettings
 from db import models
 from db.repositories import operator_notifications
 from db.repositories import signup_requests as repo
+from db.repositories.platform_events import ANONYMOUS, person, record_platform_event
 from exceptions import ApiError
 from schemas.api.errors import ErrorCode
 from schemas.api.signup_requests import (
@@ -44,6 +45,7 @@ from schemas.api.support import (
     SignupRequestStatus,
 )
 from schemas.api.tenants import TenantCreateRequest
+from schemas.platform_events import PlatformEventAction
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from support_access import Actor, authorize, write_transaction
@@ -97,6 +99,9 @@ def create(db: Session, idempotency_key: UUID, body: SignupRequestCreate) -> Sig
                 summary=row.contact_name,
                 inquiry_category=None,
                 created_at=now,
+            )
+            record_platform_event(
+                db, PlatformEventAction.SIGNUP_REQUEST_CREATE, ANONYMOUS, target_id=request_id
             )
         db.commit()
     except ApiError:
@@ -178,6 +183,14 @@ def change_status(
                 outcome=body.status,
                 rejected_reason=body.reason,
             )
+            record_platform_event(
+                db,
+                PlatformEventAction.SIGNUP_REQUEST_DECIDE,
+                person(user),
+                tenant_id=row.tenant_id,
+                target_id=row.request_id,
+                details={"decision": SignupRequestStatus.REJECTED.value},
+            )
         db.flush()
         return _item(row, decision)
 
@@ -220,5 +233,13 @@ def approve(
             decided_at=now,
             outcome=SignupRequestStatus.APPROVED,
             rejected_reason=None,
+        )
+        record_platform_event(
+            db,
+            PlatformEventAction.SIGNUP_REQUEST_DECIDE,
+            person(user),
+            tenant_id=created.tenant.tenant_id,
+            target_id=row.request_id,
+            details={"decision": SignupRequestStatus.APPROVED.value},
         )
         return SignupRequestApproveResponse(request=_item(row, decision), tenant=created)
