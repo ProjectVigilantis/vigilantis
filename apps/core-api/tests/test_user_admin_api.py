@@ -31,6 +31,7 @@ from auth.service import AuthRequiredError
 from config import get_auth_settings
 from db import models
 from db.repositories import auth as auth_repo
+from db.repositories import platform_events as platform_events_repo
 from db.repositories import tenants as tenants_repo
 from exceptions import ApiError
 from fastapi.routing import iter_route_contexts
@@ -39,6 +40,13 @@ from schemas.api.auth import AccountType, FeaturePermission, PlatformRole, UserR
 from schemas.api.errors import ErrorCode
 from schemas.api.tenants import TenantStatus
 from schemas.api.users import UserStatus
+from schemas.platform_events import (
+    PlatformActorKind,
+    PlatformEventAction,
+    PlatformEventCategory,
+    PlatformEventOutcome,
+    PlatformEventTargetType,
+)
 from sqlalchemy import select, text
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from tests.group_scope import assign_tenants
@@ -174,6 +182,35 @@ def stored_permissions(db, user_id) -> list[str]:
 
 def put_permissions(client, user_id, permissions):
     return client.put(f"{BASE}/{user_id}/permissions", json={"permissions": permissions})
+
+
+def permission_events(db, target_id=None) -> list[models.PlatformEvent]:
+    """USER_PERMISSIONS_CHANGE 활동 로그 행 — 대상을 주면 그 대상만, 아니면 전부(발생 순서)."""
+    stmt = (
+        select(models.PlatformEvent)
+        .where(models.PlatformEvent.action == PlatformEventAction.USER_PERMISSIONS_CHANGE.value)
+        .order_by(models.PlatformEvent.occurred_at, models.PlatformEvent.event_id)
+    )
+    if target_id is not None:
+        stmt = stmt.where(models.PlatformEvent.target_id == target_id)
+    return list(db.scalars(stmt).all())
+
+
+def assert_permission_event(row, admin, target, before, after) -> None:
+    """권한 변경 한 건의 활동 로그 전체 칸 — 행위자 · 세션은 인가된 admin, 테넌트는 영향받은 대상의 것."""
+    assert row.category is PlatformEventCategory.USER_ADMIN
+    assert row.action == "USER_PERMISSIONS_CHANGE"
+    assert row.outcome is PlatformEventOutcome.SUCCEEDED
+    assert row.actor_kind is PlatformActorKind.USER
+    assert row.actor_user_id == admin.user_id
+    assert row.actor_account_type is admin.account_type
+    assert row.actor_platform_role == admin.platform_role
+    assert row.session_id == admin.session_id
+    assert row.tenant_id == target.tenant_id
+    assert row.target_type is PlatformEventTargetType.USER
+    assert row.target_id == target.user_id
+    assert row.details == {"before": before, "after": after}
+    assert row.occurred_at is not None
 
 
 def me_status(client, seed) -> int:
@@ -1543,6 +1580,10 @@ def test_admin_grants_and_revokes_operator_permissions_with_audit(client_pg, db,
         ("PERMISSIONS_CHANGED", {"permissions": ["VIEW", "EXECUTE_ACTION"]}, {"permissions": []}, admin.user_id),
     ]
     assert snapshot(db)[:4] != before[:4]  # 이력이 쌓였다
+    granted_event, revoked_event = permission_events(db, operator.user_id)
+    assert_permission_event(granted_event, admin, operator, before=[], after=["VIEW", "EXECUTE_ACTION"])
+    assert_permission_event(revoked_event, admin, operator, before=["VIEW", "EXECUTE_ACTION"], after=[])
+    assert len(permission_events(db)) == 2
     assert adapter.calls == []
 
 
@@ -1554,6 +1595,8 @@ def test_permissions_are_replaced_wholesale(client_pg, db, admin, make_auth_sess
     assert events(db, full.user_id)[0][1:3] == (
         {"permissions": ALL_PERMISSIONS}, {"permissions": ["VIEW", "CREATE_INQUIRY"]},
     )
+    (event,) = permission_events(db, full.user_id)
+    assert_permission_event(event, admin, full, before=ALL_PERMISSIONS, after=["VIEW", "CREATE_INQUIRY"])
 
 
 def test_create_inquiry_alone_is_a_valid_grant(client_pg, db, admin, operator):
@@ -1572,6 +1615,7 @@ def test_permissions_same_list_is_409_without_event(client_pg, db, admin, make_a
         resp = put_permissions(client_pg, target_id, same)
         assert (resp.status_code, resp.json()["error"]["code"]) == (409, "USER_STATE_CONFLICT")
     assert snapshot(db) == before
+    assert permission_events(db) == []
 
 
 @pytest.mark.parametrize("role", [UserRole.ADMIN, UserRole.VIEWER])
@@ -1582,6 +1626,7 @@ def test_permissions_on_non_operator_target_is_409(client_pg, db, admin, make_au
     resp = put_permissions(client_pg, other.user_id, permissions)
     assert (resp.status_code, resp.json()["error"]["code"]) == (409, "USER_STATE_CONFLICT")
     assert snapshot(db) == before
+    assert permission_events(db) == []
 
 
 def test_tenant_admin_cannot_change_permissions_of_another_tenants_operator(
@@ -1595,7 +1640,45 @@ def test_tenant_admin_cannot_change_permissions_of_another_tenants_operator(
     assert resp.json()["error"]["message"] == missing.json()["error"]["message"]
     assert stored_permissions(db, foreign.user_id) == ["VIEW"]
     assert snapshot(db) == before
+    assert permission_events(db) == []
     assert adapter.calls == []
+
+
+@pytest.mark.parametrize("role", [UserRole.OPERATOR, UserRole.VIEWER])
+def test_non_admin_permission_change_is_403_without_event(client_pg, db, login_as, operator, tenant, role):
+    login_as(role, tenant_id=tenant)
+    before = snapshot(db)
+    resp = put_permissions(client_pg, operator.user_id, ["VIEW"])
+    assert (resp.status_code, resp.json()["error"]["code"]) == (403, "AUTH_FORBIDDEN")
+    assert snapshot(db) == before
+    assert permission_events(db) == []
+
+
+def test_permission_change_failure_after_event_flush_rolls_back_everything(
+    client_pg, db, admin, operator, monkeypatch
+):
+    """활동 로그를 flush 한 뒤 commit 이 실패하면 권한 · user_admin_events · platform_events 가 함께 되돌아간다."""
+    flushed: list[str] = []
+    original = platform_events_repo.record_platform_event
+
+    def record_then_remember(*args, **kwargs):
+        row = original(*args, **kwargs)
+        flushed.append(row.event_id)
+        return row
+
+    def boom():
+        raise SQLAlchemyError("secret-detail postgres://user:pw@host")
+
+    monkeypatch.setattr(platform_events_repo, "record_platform_event", record_then_remember)
+    monkeypatch.setattr(db, "commit", boom)
+    before = snapshot(db)
+    resp = put_permissions(client_pg, operator.user_id, ["VIEW"])
+    assert (resp.status_code, resp.json()["error"]["code"]) == (500, "INTERNAL_ERROR")
+    assert "secret-detail" not in resp.text
+    assert len(flushed) == 1  # 실패 시점에는 행이 이미 flush 되어 있었다
+    assert snapshot(db) == before
+    assert events(db, operator.user_id) == []
+    assert permission_events(db) == []
 
 
 @pytest.mark.parametrize(
@@ -1616,6 +1699,7 @@ def test_invalid_permissions_body_is_422_and_changes_nothing(client_pg, db, admi
     resp = client_pg.put(f"{BASE}/{held.user_id}/permissions", json=body)
     assert (resp.status_code, resp.json()["error"]["code"]) == (422, "REQUEST_VALIDATION_FAILED")
     assert snapshot(db) == before
+    assert permission_events(db) == []
 
 
 def test_suspended_tenant_admin_cannot_change_permissions_but_central_admin_can(
@@ -1628,11 +1712,14 @@ def test_suspended_tenant_admin_cannot_change_permissions_but_central_admin_can(
     resp = put_permissions(client_pg, member.user_id, ["VIEW"])
     assert (resp.status_code, resp.json()["error"]["code"]) == (409, "TENANT_SUSPENDED")
     assert snapshot(db) == before
+    assert permission_events(db) == []
 
     central = login_as(UserRole.ADMIN, platform_role=PlatformRole.CENTRAL_ADMIN)
     assert put_permissions(client_pg, member.user_id, ["VIEW"]).status_code == 204
     assert stored_permissions(db, member.user_id) == ["VIEW"]
     assert events(db, member.user_id)[0][3] == central.user_id
+    (event,) = permission_events(db)
+    assert_permission_event(event, central, member, before=[], after=["VIEW"])
 
 
 def test_role_change_away_from_operator_deletes_grants_and_audits_them(client_pg, db, admin, make_auth_session, tenant):

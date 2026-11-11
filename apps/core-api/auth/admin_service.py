@@ -41,6 +41,7 @@ from uuid import UUID
 
 from db import models
 from db.repositories import auth as auth_repo
+from db.repositories import platform_events as platform_events_repo
 from exceptions import ApiError
 from schemas.api.auth import AccountType, FeaturePermission, UserRole
 from schemas.api.errors import ErrorCode
@@ -54,6 +55,7 @@ from schemas.api.users import (
     UsersResponse,
     UserStatus,
 )
+from schemas.platform_events import PlatformEventAction
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -352,6 +354,18 @@ def change_permissions(
             _state(permissions=permissions.ordered(granted)),
             _state(permissions=permissions.ordered(permissions_set)),
             now,
+        )
+        # 활동 로그(#589) — 같은 세션 · 같은 commit. 행위자는 방금 재판정한 admin, tenant 는 영향받은 대상의 것이다.
+        platform_events_repo.record_platform_event(
+            db,
+            PlatformEventAction.USER_PERMISSIONS_CHANGE,
+            platform_events_repo.person(admin),
+            tenant_id=target.tenant_id,
+            target_id=target.user_id,
+            details={
+                "before": permissions.ordered(granted),
+                "after": permissions.ordered(permissions_set),
+            },
         )
 
 

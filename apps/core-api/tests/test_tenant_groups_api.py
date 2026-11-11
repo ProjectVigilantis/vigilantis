@@ -15,8 +15,14 @@ from datetime import UTC, datetime
 import pytest
 from db import models
 from db.repositories import auth as auth_repo
-from schemas.api.auth import PlatformRole, UserRole
+from schemas.api.auth import AccountType, PlatformRole, UserRole
 from schemas.api.groups import GroupItem
+from schemas.platform_events import (
+    PlatformActorKind,
+    PlatformEventCategory,
+    PlatformEventOutcome,
+    PlatformEventTargetType,
+)
 from sqlalchemy import func, select
 
 BASE = "/api/v1/groups"
@@ -37,6 +43,29 @@ def _code(resp) -> str:
 
 def _group_count(db) -> int:
     return db.scalar(select(func.count()).select_from(models.TenantGroup))
+
+
+def _events(db):
+    return list(db.scalars(
+        select(models.PlatformEvent).order_by(models.PlatformEvent.occurred_at, models.PlatformEvent.event_id)
+    ))
+
+
+def _assert_event(row, central, action, target, details, *, tenant=None):
+    assert row.action == action
+    assert row.category is PlatformEventCategory.TENANT_ADMIN
+    assert row.outcome is PlatformEventOutcome.SUCCEEDED
+    assert row.actor_kind is PlatformActorKind.USER
+    assert row.actor_user_id == central.user_id
+    assert row.actor_account_type is AccountType.PLATFORM
+    assert row.actor_platform_role is PlatformRole.CENTRAL_ADMIN
+    assert row.session_id == central.session_id
+    assert row.tenant_id == tenant
+    assert row.target_type is (
+        PlatformEventTargetType.TENANT if tenant else PlatformEventTargetType.TENANT_GROUP
+    )
+    assert row.target_id == target
+    assert row.details == details
 
 
 def _tenant_group(db, tenant_id) -> str | None:
@@ -66,6 +95,11 @@ def test_central_creates_lists_and_deletes_a_group(client_pg, db, central):
     assert client_pg.delete(f"{BASE}/{body['group_id']}").status_code == 204
     assert db.get(models.TenantGroup, body["group_id"]) is None
     assert _mine(client_pg.get(BASE).json()["items"], body["group_id"]) == []
+    created, deleted = _events(db)
+    _assert_event(created, central, "TENANT_GROUP_CREATE", body["group_id"], {})
+    _assert_event(
+        deleted, central, "TENANT_GROUP_DELETE", body["group_id"], {"tenant_count": 0, "staff_count": 0}
+    )
 
 
 def test_central_builds_a_group_scope_end_to_end(client_pg, db, central, make_auth_session, make_tenant):
@@ -109,6 +143,7 @@ def test_manager_cannot_manage_groups_even_inside_its_scope(
     assert before == (
         _group_count(db), _tenant_group(db, tenant), auth_repo.list_assigned_group_ids(db, user_id=manager.user_id)
     )
+    assert _events(db) == []
 
 
 @pytest.mark.parametrize("role", [UserRole.ADMIN, UserRole.VIEWER])
@@ -149,6 +184,7 @@ def test_central_demoted_after_the_dependency_snapshot_writes_nothing(client_pg,
     assert client_pg.post(BASE, json={"name": "새 그룹"}).status_code == 403
     assert client_pg.delete(f"{BASE}/{group_id}").status_code == 403
     assert _group_count(db) == count
+    assert _events(db) == []
 
 
 # ----- ② 조회 --------------------------------------------------------------------
@@ -186,6 +222,8 @@ def test_duplicate_name_is_409_and_keeps_one_group(client_pg, db, central):
     resp = client_pg.post(BASE, json={"name": "광주 지사"})
     assert (resp.status_code, _code(resp)) == (409, "GROUP_NAME_CONFLICT")
     assert _group_count(db) == count
+    (event,) = _events(db)
+    assert event.action == "TENANT_GROUP_CREATE"
 
 
 @pytest.mark.parametrize("body", [{}, {"name": ""}, {"name": "가" * 101}, {"name": "x", "tenant_ids": []}])
@@ -197,9 +235,10 @@ def test_create_outside_the_contract_is_422(client_pg, db, central, body):
 
 
 @pytest.mark.parametrize("group_id", [MISSING, "not-a-uuid"])
-def test_deleting_an_unknown_or_malformed_group_is_404(client_pg, central, group_id):
+def test_deleting_an_unknown_or_malformed_group_is_404(client_pg, db, central, group_id):
     resp = client_pg.delete(f"{BASE}/{group_id}")
     assert (resp.status_code, _code(resp)) == (404, "GROUP_NOT_FOUND")
+    assert _events(db) == []
 
 
 def test_placing_a_tenant_rejects_unknown_group_and_tenant(client_pg, db, central, make_tenant, make_group):
@@ -213,16 +252,37 @@ def test_placing_a_tenant_rejects_unknown_group_and_tenant(client_pg, db, centra
     for body in ({}, {"group_id": "bad"}, {"group_id": None, "x": 1}):
         assert client_pg.put(f"{TENANTS}/{tenant}/group", json=body).status_code == 422
     assert _tenant_group(db, tenant) is None
+    assert _events(db) == []
 
 
 def test_central_moves_a_tenant_between_groups_and_out(client_pg, db, central, make_tenant, make_group):
     tenant = make_tenant()
     first, second = make_group(), make_group()
+    before = None
     for group_id in (first, second, None):
         resp = client_pg.put(f"{TENANTS}/{tenant}/group", json={"group_id": group_id})
         assert resp.status_code == 200 and resp.json()["group_id"] == group_id
         assert _tenant_group(db, tenant) == group_id
         assert client_pg.get(f"{TENANTS}/{tenant}").json()["group_id"] == group_id
+        _assert_event(
+            _events(db)[-1], central, "TENANT_GROUP_CHANGE", tenant,
+            {"before": before, "after": group_id}, tenant=tenant,
+        )
+        before = group_id
+    assert len(_events(db)) == 3
+
+
+@pytest.mark.parametrize("assigned", [False, True])
+def test_reassigning_the_same_group_returns_200_without_event(
+    client_pg, db, central, make_tenant, make_group, assigned
+):
+    tenant = make_tenant()
+    group = make_group(tenant_ids=[tenant]) if assigned else None
+    response = client_pg.put(f"{TENANTS}/{tenant}/group", json={"group_id": group})
+    assert response.status_code == 200
+    assert response.json()["group_id"] == group
+    assert _tenant_group(db, tenant) == group
+    assert _events(db) == []
 
 
 # ----- ④ 삭제의 효과 ---------------------------------------------------------------
@@ -249,3 +309,47 @@ def test_deleting_a_group_ungroups_tenants_and_shrinks_manager_scope_on_the_next
     detail = client_pg.get(f"{TENANTS}/{tenant}", headers=manager.headers)
     assert (detail.status_code, _code(detail)) == (403, "AUTH_FORBIDDEN")
     assert client_pg.get("/api/v1/auth/me", headers=manager.headers).json()["assigned_tenant_ids"] == []
+    (deleted,) = _events(db)
+    _assert_event(
+        deleted, central, "TENANT_GROUP_DELETE", group_id, {"tenant_count": 1, "staff_count": 1}
+    )
+
+
+@pytest.mark.parametrize("operation", ["create", "delete", "assign"])
+def test_group_changes_and_events_roll_back_together(
+    client_pg, db, central, make_tenant, make_group, make_auth_session, monkeypatch, operation
+):
+    tenant = make_tenant()
+    group = make_group(tenant_ids=[tenant])
+    other = make_group()
+    manager = make_auth_session(UserRole.ADMIN, platform_role=PlatformRole.TENANT_MANAGER)
+    auth_repo.replace_assigned_groups(
+        db, user_id=manager.user_id, group_ids=(group,), now=datetime.now(UTC)
+    )
+    db.commit()
+    initial_count = _group_count(db)
+    original_commit = db.commit
+    flushed = []
+
+    def fail_after_event():
+        rows = _events(db)
+        if rows:
+            assert len(rows) == 1
+            flushed.append(rows[0].event_id)
+            raise RuntimeError("forced post-flush failure")
+        original_commit()
+
+    monkeypatch.setattr(db, "commit", fail_after_event)
+    if operation == "create":
+        response = client_pg.post(BASE, json={"name": "되돌릴 그룹"})
+    elif operation == "delete":
+        response = client_pg.delete(f"{BASE}/{group}")
+    else:
+        response = client_pg.put(f"{TENANTS}/{tenant}/group", json={"group_id": other})
+    assert (response.status_code, _code(response)) == (500, "INTERNAL_ERROR")
+    assert "forced post-flush failure" not in response.text
+    assert len(flushed) == 1
+    assert _events(db) == []
+    assert _group_count(db) == initial_count
+    assert _tenant_group(db, tenant) == group
+    assert auth_repo.list_assigned_group_ids(db, user_id=manager.user_id) == (group,)
