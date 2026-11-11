@@ -5,7 +5,7 @@
 >
 > **이 문서는 코드·서버·화면을 정하지 않는다.** 위협마다 「어느 보고서를 · 언제까지 · 무슨 항목으로 · 누가(플랫폼 기록 / AI 문장 / 사람 확인) 채우는가」를 적는 자리다. 공식 서식과 법 조문은 기관 링크로 가리키며 법적 검토의 완결을 주장하지 않는다. 기관 제출은 고객사가 한다(2026-11-06 결정).
 > **기록된 사실과 준수·충족 판단은 다르다.** 이 문서의 「플랫폼 기록」은 그 값이 저장돼 있다는 뜻이고, 신고 요건을 채웠다는 뜻이 아니다. 차단·격리 성공이나 인시던트 `RESOLVED`는 사고 처리 전체(원인 제거 · 복구 · 신고)의 완료가 아니다.
-> 빈칸 · `[S]` · 「공백」 · 「미확인」은 **미확인**이다 — 「없음」으로 읽지 않는다. `[S]`는 외부 문서를 요약분으로 읽은 행이라 원문으로 재확인한다. **#488 JSON 경로는 PR #616(머지 전) 계약 기준이며 이름과 구조가 리뷰 과정에서 바뀔 수 있다.**
+> 빈칸 · 「공백」 · 「미확인」은 **미확인**이다 — 「없음」으로 읽지 않는다. 외부 문서 인용은 2026-11-11 원문으로 확인했다(GuardDuty 심각도 · 보호나라 신고 양식). **#488 JSON 경로는 PR #616(머지 전) 계약 기준이며 이름과 구조가 리뷰 과정에서 바뀔 수 있다.**
 
 ---
 
@@ -20,7 +20,7 @@
 | GuardDuty 위험도 매핑(7.0↑ HIGH · 4.0–6.9 MEDIUM) · 인시던트는 MEDIUM↑ · 1차 자동 대응 없음 · **C단계(결과 읽기) 미구현** | #588 Q2 · Q3 · PR #593(켜기까지 · 11/11 머지) | 판정 규칙 확정 · 입력은 계획 |
 | 플랫폼이 보는 위협 유형과 판정 | `packages/schemas/events.py` — `ThreatEventType` · `RiskReasonCode` · `expected_mode_for` / `apps/core-api/security/risk_evaluator.py` — `_evaluate_open_ip` · `_evaluate_ssh_bruteforce` / `apps/core-api/security/soar.py`(MEDIUM 60초) / ADR-0011(High 목표 3초) | 코드 |
 | 기록이 남는 자리(실제 테이블명) | `threat_events` · `incidents`(`IncidentStatus`) · `action_executions`(`RunbookId` · `TriggerSource`) · `evidence_items`(`EvidenceItem` · 현재 SecOps 접수는 THREAT 근거를 남긴다) · `audit_events`(T-2) · `platform_events`(#592 11/11 머지 · 기능별 기록 호출은 #589 B에서 연결) | 코드 |
-| 외부 분류 | AWS GuardDuty finding type 문서(EC2 · IAM) · KISA 침해사고 신고 유형 4종(DDoS · 악성코드 감염 · 서버 해킹 · 기타) · MITRE ATT&CK v20 Enterprise IaaS 매트릭스 | 외부 · 2026-11-11 읽음 |
+| 외부 분류 | AWS GuardDuty finding type 문서(EC2 40종 · IAM 28종 — 심각도는 원문 확인) · KISA 침해사고 **통계 분류** 4종(DDoS · 악성코드 감염 · 서버 해킹 · 기타 — 과기정통부·KISA 2026 상반기 동향) · **보호나라 침해사고 신고 양식 선택지 3종(랜섬웨어 · 디도스 · 그 밖의 해킹 · 「유형을 확인할 수 없으면 그 밖의 해킹」 — `boho.or.kr/kr/report/list.do?menuNo=205034`)** · MITRE ATT&CK v20 Enterprise IaaS 매트릭스 | 외부 · 2026-11-11 읽음 |
 
 ---
 
@@ -52,10 +52,12 @@
 | B10 | 계정 탈취 · 권한 상승 · 지속화(IAM 변경) | Valid Accounts T1078 · Account Manipulation T1098 | `Persistence/PrivilegeEscalation:IAMUser/AnomalousBehavior`(M) · `Policy:IAMUser/RootCredentialUsage`(L) · `ConsoleLoginSuccess.B`(M) | 서버 해킹 | A4 | 24h |
 | B11 | 탐지 회피 · 로그 끄기 | Defense Impairment T1685 · T1578 | `Stealth:IAMUser/CloudTrailLoggingDisabled`(L) · `DefenseEvasion:IAMUser/AnomalousBehavior`(M) · `DefenseEvasion:EC2/UnusualDNSResolver`(M) | 서버 해킹(은폐) | GD(EC2 · 계획) · IAM은 A4 | 근거 훼손 → 「미확인」 칸 증가 |
 | B12 | 랜섬웨어 · 데이터 파괴 | Impact T1486 · T1485 · T1490 | — (EC2 finding 없음 · Malware Protection/S3 영역) | 악성코드(랜섬웨어) | **공백** | 24h · 개인정보면 72h |
-| B13 | 피싱 · 악성 도메인 질의 · 드라이브바이 | User Execution T1204 | `Trojan:EC2/PhishingDomainRequest!DNS`(H) · `DriveBySourceTraffic!DNS`(H) `[S]` · `Impact:EC2/MaliciousDomainRequest.Reputation`(H) | 악성코드 | GD(계획) | 내부 분석 → 감염 확인 시 24h |
+| B13 | 피싱 · 악성 도메인 질의 · 드라이브바이 | User Execution T1204 | `Trojan:EC2/PhishingDomainRequest!DNS`(H) · `Trojan:EC2/DriveBySourceTraffic!DNS`(H) · `Impact:EC2/MaliciousDomainRequest.Reputation`(H) | 악성코드 | GD(계획) | 내부 분석 → 감염 확인 시 24h |
 | B14 | Tor · 악성 IP 통신 | Stealth · C2 성격 | `UnauthorizedAccess:EC2/TorClient` · `TorRelay`(H) · `MaliciousIPCaller.Custom`(M) · `Recon:IAMUser/TorIPCaller`(M) | 서버 해킹 | GD(계획) | 24h |
 | B15 | 침투 시험 도구 사용(Kali · Parrot · Pentoo) | — | `PenTest:IAMUser/*`(M) | — | A4 | 내부 분석(승인된 시험이면 기록만) |
 | B16 | 고객사 내부자 · 권한 오남용 | Valid Accounts T1078 | — | 기타 | **공백**(고객사 측 · 플랫폼 측은 `platform_events`) | 내부 분석 · 개인정보면 72h |
+
+「KISA 유형」 칸은 통계 분류 4종이다. **실제 보호나라 신고 양식의 선택지는 셋 — 랜섬웨어 · 디도스 · 그 밖의 해킹**(「침해 유형을 확인할 수 없는 경우 그 밖의 해킹」). 따라서 신고 서식에 옮기면 B12 → 「랜섬웨어」, B6 · B7 → 「디도스」, **나머지 전부 → 「그 밖의 해킹」**이다. 양식의 단계는 유형 선택 → 동의 → 기업·신고자 정보 → 사고현황 → 대응현황이며, 뒤 두 단계의 입력 항목은 폼 안에 있어 원문으로 읽지 못했다(§3 항목표는 안성일 11/3 조사의 「담을 내용」 기준).
 
 보고서 종류는 결국 넷으로 접힌다 — **시도·관측 = 내부 분석** / **침해 확인 = 침해사고 신고(24h)** / **유출 경로에 개인정보 = 개인정보 유출 신고·통지(72h)** / **설정 오류·접근 통제 = ISMS 인증 증적**. 1차 상세화는 침해사고 신고다(#613 §3 결정 요청 3 · 안성일 동의 · 서버 1차는 개인정보 유출 신고를 AI 초안 범위에서 제외 — 팀 범위 확정과 별개).
 
@@ -116,7 +118,7 @@
 
 | 항목 | 내용 |
 | --- | --- |
-| 원천 | 지금: 모의 위협 입력 → `threat_normalizer` → `NormalizedThreatEvent`. T-14 뒤: GuardDuty `UnauthorizedAccess:EC2/SSHBruteForce`(Low · 가해 측이면 High)도 들어올 수 있다 — 매핑은 #588 C단계가 정한다(계획) |
+| 원천 | 지금: 모의 위협 입력 → `threat_normalizer` → `NormalizedThreatEvent`. T-14 뒤: GuardDuty `UnauthorizedAccess:EC2/SSHBruteForce`(Low · 가해 측이면 High)도 들어올 수 있다 — 매핑은 #588 C단계가 정한다(계획). GuardDuty 쪽 한계(원문): **22번 포트 트래픽만** 보고, VPC Flow Logs 기반 EC2 finding은 **IPv6 미지원** |
 | 신호 값 | `SshBruteForceThreatPayload` = `source_ip` · `failed_attempt_count` · `window_seconds` |
 | 판정(`_evaluate_ssh_bruteforce`) | 1회 이하 → LOW(`RISK_SSH_LOW_SIGNAL`, 속도 무관) / **10회 이상 그리고 분당 20회 이상 → HIGH**(`RISK_SSH_BRUTEFORCE`) / 둘 다 미달 → LOW / 한쪽만 충족 → MEDIUM(`RISK_SSH_BRUTEFORCE`) |
 | 응답 모드 | HIGH → `PRE_MITIGATION_0_5S` = **즉시 선차단(목표 3초 · ADR-0011)** · MEDIUM/LOW → `AGENT_WAIT`(승인 대기) · MEDIUM은 **승인 대기 시작부터 60초** 무응답이면 조건 충족 EC2 대상 자동 격리(`TIMEOUT_ISOLATION_1M`) · LOW는 자동 격리 없음 |
@@ -270,4 +272,5 @@
 | 날짜 | 내용 |
 | --- | --- |
 | 2026-11-11 | 1판 — §0 원천 · §1 분류표(#613 코멘트 `6784418428` 옮김) · §2 칸 정의 · §3 시나리오 3건(A2 SSH 무차별 대입 · B4 C&C/백도어 · B8 데이터 유출 의심) + §3-4 공통점 · §4 공백 모음. `[S]` 1행(B13)은 원문 재확인 전 |
+| 2026-11-11 | 외부 인용 원문 확인 — GuardDuty EC2 페이지에서 `DriveBySourceTraffic!DNS` High 등 인용 심각도 전부 일치(`[S]` 해제) · 보호나라 신고 양식 선택지 3종(랜섬웨어 · 디도스 · 그 밖의 해킹) 확인 → §0 · §1-2 주석 추가 · §3-1 GuardDuty SSH 한계(22번 포트 · IPv6 미지원) |
 | 2026-11-11 | PR #614 리뷰(안성일 · #613 코멘트 `6785035815`) 반영 — 테이블명 `action_executions`·`evidence_items` · 실행→근거 연결 삭제 · A1 「SG 대상 자동 격리 없음」 · A2 「즉시 선차단(목표 3초)」·MEDIUM 60초 조건·NACL 24h 예약 의미 · A3·B축 GuardDuty 「계획 입력」 · A5 #589 B 연결 필요 · §2-2 #488 JSON 계약 요약(PR #616 · 머지 전) · §2-3 시각 다섯과 사람 최초 인지 분리 · §2-4 미확인 기준 · ⓔ 항목표를 4칸(주체·JSON 경로/별도 기록·부족 자료)으로 · 공개 IP·담당부서는 사람 확인 · §3-4에 기록≠판정 · `trigger_source`/승인/결과 분리 |
