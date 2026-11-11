@@ -225,20 +225,26 @@ def normalize_guardduty_finding(
 ) -> NormalizedThreatEvent:
     """GetFindings 의 Finding 1건 → NormalizedThreatEvent. 형식이 어긋나면 ValueError.
 
-    탐지의 계정 · 리전이 읽은 테넌트 · 리전과 다르면 거절한다 — 위임 관리자 계정은 멤버 계정의 탐지도
-    돌려주는데(읽기 조건이 계정으로 거르지만) 그 탐지는 이 테넌트의 것이 아니다.
+    region 은 읽은 탐지기의 리전이다. 탐지의 계정이 읽은 테넌트 계정과 다르면 거절한다 — 위임 관리자 계정은
+    멤버 계정의 탐지도 돌려주는데(읽기 조건이 계정으로 거르지만) 그 탐지는 이 테넌트의 것이 아니다.
+
+    탐지의 Region 은 읽은 리전과 다를 수 있어 리전으로는 거절하지 않는다 — 글로벌 서비스(IAM · STS) 이벤트의
+    탐지는 다른 리전에서 탐지해도 us-east-1 로 표시된다(GuardDuty API Finding.Region). 두 값을 나눠 쓴다.
+      - 읽은 리전: 중복 키 · payload.region. 탐지 ID 는 탐지기마다 고유하고, 커서도 읽은 리전마다다.
+      - 탐지의 Region: 인스턴스 ARN(인스턴스가 있는 곳) · payload.finding_region. 없으면 읽은 리전이다.
     """
     finding_id = finding.get("Id")
     if not finding_id:
         raise ValueError("GuardDuty 탐지에 Id 가 없습니다")
     if finding.get("AccountId") != account_id:
         raise ValueError("GuardDuty 탐지의 계정이 읽은 테넌트 계정과 다릅니다")
-    if finding.get("Region") != region:
-        raise ValueError("GuardDuty 탐지의 리전이 읽은 리전과 다릅니다")
+    finding_region = finding.get("Region") or region
+    if not isinstance(finding_region, str):
+        raise ValueError("GuardDuty 탐지의 Region 이 문자열이 아닙니다")
     service = finding.get("Service") or {}
     first_seen = _guardduty_time(service.get("EventFirstSeen") or finding.get("CreatedAt"))
     last_seen = _guardduty_time(service.get("EventLastSeen") or finding.get("UpdatedAt"))
-    target_arn, resource_type = _guardduty_target_arn(finding, region, account_id)
+    target_arn, resource_type = _guardduty_target_arn(finding, finding_region, account_id)
     digest = hashlib.sha256(
         "|".join((ThreatEventType.GUARDDUTY_FINDING.value, account_id, region, finding_id)).encode("utf-8")
     ).hexdigest()
@@ -254,6 +260,7 @@ def normalize_guardduty_finding(
             severity=finding.get("Severity"),
             resource_type=resource_type,
             region=region,
+            finding_region=finding_region,
             first_seen_at=first_seen,
             last_seen_at=max(first_seen, last_seen),
         ),

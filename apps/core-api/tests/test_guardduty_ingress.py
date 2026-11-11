@@ -4,6 +4,8 @@
   - 이벤트는 전부 남기고 인시던트는 MEDIUM 이상만(Q3). 심각도 구간(Q2)은 security/tests 가 본다.
   - 같은 탐지가 갱신돼 다시 와도 한 번만 남는다(탐지 ID).
   - 커서: 처음은 INITIAL_LOOKBACK 만큼, 다음 회차는 커서부터. 저장에 실패한 탐지에서 멈춘다.
+    한도에서 끊긴 순회는 토큰으로 이어 읽고, 순회 중 갱신된 탐지는 진척으로 치지 않는다(PR 리뷰 2 · 3).
+  - 글로벌 서비스 탐지는 리전이 달라도 받는다. 다른 계정 탐지는 거절한다(PR 리뷰 1).
   - 자동 선차단 · 격리로 가지 않는다(Q2) — 접수 때 부르지 않고, 다시 거는 자리는 위협 유형 관문이 막는다.
   - 읽기 실패는 그 리전의 FAILED 로만 남는다.
 """
@@ -62,18 +64,28 @@ def _never(name):
     return _raise
 
 
-def _finding(w, fid=None, *, severity=5.0, updated=None, instance=None):
-    updated = updated or w.now - timedelta(minutes=5)
-    stamp = updated.isoformat().replace("+00:00", "Z")
+def _stamp(at: datetime) -> str:
+    return at.isoformat().replace("+00:00", "Z")
+
+
+def _finding(w, fid=None, *, severity=5.0, updated=None, instance=None, region=REGION, account=None):
+    updated = updated or w.now - timedelta(hours=1)
+    stamp = _stamp(updated)
     fid = fid or uuid.uuid4().hex
+    account = account or w.account
     return {
-        "Id": fid, "AccountId": w.account, "Region": REGION, "Severity": severity,
+        "Id": fid, "AccountId": account, "Region": region, "Severity": severity,
         "Type": "UnauthorizedAccess:EC2/SSHBruteForce", "UpdatedAt": stamp, "CreatedAt": stamp,
-        "Arn": f"arn:aws:guardduty:{REGION}:{w.account}:detector/d-1/finding/{fid}",
+        "Arn": f"arn:aws:guardduty:{REGION}:{account}:detector/d-1/finding/{fid}",
         "Resource": {"ResourceType": "Instance",
                      "InstanceDetails": {"InstanceId": instance or f"i-{fid[:12]}"}},
         "Service": {"Archived": False, "EventFirstSeen": stamp, "EventLastSeen": stamp},
     }
+
+
+def _cursor(w):
+    cursor = guardduty_repo.get_cursor(w.db, tenant_id=w.tenant_id, region=REGION)
+    return None if cursor is None else cursor.updated_since
 
 
 def _ingest(w, *, now=None, publish=None):
@@ -106,7 +118,7 @@ def test_every_finding_is_an_event_and_only_medium_and_above_become_incidents(wo
     summary = _ingest(w, publish=published.append)
 
     assert summary == {"status": "OK", "read": 3, "events_created": 3, "incidents_created": 2,
-                       "duplicates": 0, "rejected": 0, "failed": 0}
+                       "duplicates": 0, "rejected": 0, "failed": 0, "more": False}
     by_id = {e.source_event_id: e for e in _events(w)}
     assert set(by_id) == {"low", "medium", "high"}
     assert all(e.tenant_id == w.tenant_id for e in by_id.values())
@@ -156,21 +168,32 @@ def test_first_read_looks_back_one_day_and_the_cursor_moves_to_the_latest_update
     w = world
     old = _finding(w, "old", updated=w.now - guardduty_ingress.INITIAL_LOOKBACK - timedelta(minutes=1))
     recent = _finding(w, "recent", updated=w.now - timedelta(hours=1))
-    latest = _finding(w, "latest", updated=w.now - timedelta(minutes=2))
+    latest = _finding(w, "latest", updated=w.now - timedelta(minutes=10))
     w.fake.findings = [latest, old, recent]
 
     summary = _ingest(w)
 
     assert summary["read"] == 2  # 하루보다 오래된 탐지는 읽지 않는다
     assert {e.source_event_id for e in _events(w)} == {"recent", "latest"}
-    assert guardduty_repo.get_cursor(w.db, tenant_id=w.tenant_id, region=REGION) == w.now - timedelta(minutes=2)
+    assert _cursor(w) == w.now - timedelta(minutes=10)
 
     newer = _finding(w, "newer", updated=w.now + timedelta(minutes=3))
     w.fake.findings.append(newer)
-    summary = _ingest(w, now=w.now + timedelta(minutes=5))
+    summary = _ingest(w, now=w.now + timedelta(minutes=10))
     # 다음 회차는 커서부터다 — 커서와 같은 시각의 탐지는 다시 읽고 중복으로 접는다
     assert (summary["read"], summary["events_created"], summary["duplicates"]) == (2, 1, 1)
-    assert guardduty_repo.get_cursor(w.db, tenant_id=w.tenant_id, region=REGION) == w.now + timedelta(minutes=3)
+    assert _cursor(w) == w.now + timedelta(minutes=3)
+
+
+def test_findings_updated_just_before_the_round_do_not_move_the_cursor(world):
+    # 시계 차이 · 목록 반영 지연을 덮는 구간(SETTLE_MARGIN) — 저장은 하고 다음 회차가 다시 읽는다
+    w = world
+    settled = _finding(w, "settled", updated=w.now - timedelta(minutes=30))
+    fresh = _finding(w, "fresh", updated=w.now - guardduty_ingress.SETTLE_MARGIN + timedelta(seconds=1))
+    w.fake.findings = [settled, fresh]
+    assert _ingest(w)["events_created"] == 2
+    assert _cursor(w) == w.now - timedelta(minutes=30)
+    assert _ingest(w)["duplicates"] == 2
 
 
 def test_a_failed_finding_holds_the_cursor_and_is_retried_next_round(world, monkeypatch):
@@ -190,24 +213,24 @@ def test_a_failed_finding_holds_the_cursor_and_is_retried_next_round(world, monk
     summary = _ingest(w)
 
     assert (summary["incidents_created"], summary["failed"]) == (2, 1)  # 한 건의 실패가 뒤의 탐지를 막지 않는다
-    assert guardduty_repo.get_cursor(w.db, tenant_id=w.tenant_id, region=REGION) == w.now - timedelta(minutes=20)
+    assert _cursor(w) == w.now - timedelta(minutes=20)
 
     monkeypatch.setattr(guardduty_ingress, "create_incident_from_intake", real)
     summary = _ingest(w)
     assert (summary["incidents_created"], summary["duplicates"], summary["failed"]) == (1, 1, 0)
     assert {e.source_event_id for e in _events(w)} == {"first", "broken", "after"}
-    assert guardduty_repo.get_cursor(w.db, tenant_id=w.tenant_id, region=REGION) == w.now - timedelta(minutes=10)
+    assert _cursor(w) == w.now - timedelta(minutes=10)
 
 
 def test_a_rejected_finding_does_not_hold_the_cursor(world):
     w = world
     bad = _finding(w, "bad", updated=w.now - timedelta(minutes=10))
     bad["Severity"] = None
-    w.fake.findings = [bad, _finding(w, "good", updated=w.now - timedelta(minutes=5))]
+    w.fake.findings = [bad, _finding(w, "good", updated=w.now - timedelta(minutes=7))]
     summary = _ingest(w)
     assert (summary["rejected"], summary["events_created"]) == (1, 1)
     # 다시 읽어도 같은 이유로 거절된다 — 그 자리에 멈추면 뒤의 탐지를 영영 못 읽는다
-    assert guardduty_repo.get_cursor(w.db, tenant_id=w.tenant_id, region=REGION) == w.now - timedelta(minutes=5)
+    assert _cursor(w) == w.now - timedelta(minutes=7)
 
 
 def test_no_detector_and_refusals_leave_no_cursor(world):
@@ -218,6 +241,106 @@ def test_no_detector_and_refusals_leave_no_cursor(world):
     w.fake.deny["ListFindings"] = "AccessDeniedException"  # 템플릿을 갱신하지 않은 고객 역할
     assert _ingest(w) == {"status": "FAILED", "error": "AccessDeniedException"}
     assert guardduty_repo.get_cursor(w.db, tenant_id=w.tenant_id, region=REGION) is None
+
+
+# --- 리전이 다른 글로벌 서비스 탐지(PR 리뷰 1) --------------------------------------------------------------
+def _access_key(finding):
+    finding["Resource"] = {"ResourceType": "AccessKey", "AccessKeyDetails": {"UserName": "ci"}}
+    return finding
+
+
+def test_a_global_service_finding_shown_in_us_east_1_becomes_an_incident(world):
+    # ap-northeast-2 만 감시하는 테넌트 — 같은 계정의 IAM 탐지가 Region us-east-1 로 온다
+    w = world
+    w.fake.findings = [_access_key(_finding(w, "iam-medium", severity=5.5, region="us-east-1")),
+                       _access_key(_finding(w, "iam-high", severity=8.0, region="us-east-1"))]
+    summary = _ingest(w)
+    assert (summary["events_created"], summary["incidents_created"], summary["rejected"]) == (2, 2, 0)
+    by_id = {e.source_event_id: e for e in _events(w)}
+    assert (by_id["iam-medium"].payload["region"], by_id["iam-medium"].payload["finding_region"]) == (
+        REGION, "us-east-1")
+    assert _incident_of(w, by_id["iam-medium"]).initial_risk_level is RiskLevel.MEDIUM
+    high = _incident_of(w, by_id["iam-high"])
+    assert (high.initial_risk_level, high.tenant_id) == (RiskLevel.HIGH, w.tenant_id)
+
+
+def test_another_accounts_finding_is_still_rejected(world):
+    w = world
+    w.fake.leak_other_accounts = True  # 계정 조건이 빠져도 정규화가 거른다
+    w.fake.findings = [_finding(w, "mine"), _finding(w, "member", account="999988887777", region="us-east-1")]
+    summary = _ingest(w)
+    assert (summary["events_created"], summary["rejected"]) == (1, 1)
+    assert {e.source_event_id for e in _events(w)} == {"mine"}
+
+
+# --- 한도에서 끊긴 순회(PR 리뷰 2 · 3) ----------------------------------------------------------------------
+def test_more_findings_at_one_moment_than_the_limit_are_all_read_across_rounds(world, monkeypatch):
+    # 시각 T 에 한도보다 많은 탐지 + 더 늦은 탐지 — 같은 것만 되풀이 읽고 멈추면 안 된다
+    w = world
+    monkeypatch.setattr(guardduty, "READ_LIMIT", 4)
+    moment = w.now - timedelta(hours=2)
+    later = w.now - timedelta(hours=1)
+    w.fake.findings = [_finding(w, f"t{i}", updated=moment) for i in range(6)] + [
+        _finding(w, "later", updated=later)]
+
+    first = _ingest(w)
+    assert (first["read"], first["more"]) == (4, True)
+    assert _cursor(w) == w.now - guardduty_ingress.INITIAL_LOOKBACK  # 순회가 끝나기 전에는 옮기지 않는다
+
+    second = _ingest(w, now=w.now + timedelta(minutes=5))
+    assert (second["read"], second["more"], second["duplicates"]) == (3, False, 0)
+    assert {e.source_event_id for e in _events(w)} == {f"t{i}" for i in range(6)} | {"later"}
+    assert _cursor(w) == later
+    assert guardduty_repo.get_cursor(w.db, tenant_id=w.tenant_id, region=REGION).progress is None
+
+
+def test_a_finding_updated_between_listing_and_details_does_not_skip_the_next_one(world, monkeypatch):
+    # 갱신 시각이 모두 다른 5건 중 앞의 4건을 고른 뒤, 상세를 받기 전에 그중 하나가 5번째보다 늦게 갱신된다
+    w = world
+    monkeypatch.setattr(guardduty, "READ_LIMIT", 4)
+    w.fake.findings = [_finding(w, f"f{i}", updated=w.now - timedelta(hours=5 - i)) for i in range(5)]
+
+    def update_first(fake):
+        fake.before_get = None
+        fake.findings[0]["UpdatedAt"] = _stamp(w.now + timedelta(seconds=1))
+
+    w.fake.before_get = update_first
+    _ingest(w)
+    assert _cursor(w) == w.now - guardduty_ingress.INITIAL_LOOKBACK  # 아직 순회 중
+    _ingest(w, now=w.now + timedelta(minutes=5))
+    # 갱신된 탐지의 시각은 진척으로 치지 않는다 — 쳤다면 커서가 f4 를 넘었다
+    assert _cursor(w) <= w.now - timedelta(hours=1)
+    _ingest(w, now=w.now + timedelta(minutes=10))
+    assert {e.source_event_id for e in _events(w)} == {f"f{i}" for i in range(5)}
+
+
+def test_a_single_round_does_not_count_a_finding_updated_during_it(world):
+    # 끊기지 않은 순회에서도 같다 — 상세가 순회 뒤의 시각이면 커서를 그리로 옮기지 않는다
+    w = world
+    w.fake.findings = [_finding(w, "a", updated=w.now - timedelta(hours=2)),
+                       _finding(w, "b", updated=w.now - timedelta(hours=1))]
+
+    def update_a(fake):
+        fake.before_get = None
+        fake.findings[0]["UpdatedAt"] = _stamp(w.now + timedelta(seconds=1))
+
+    w.fake.before_get = update_a
+    _ingest(w)
+    assert _cursor(w) == w.now - timedelta(hours=1)
+
+
+def test_a_refused_token_restarts_the_pass(world, monkeypatch):
+    w = world
+    monkeypatch.setattr(guardduty, "READ_LIMIT", 2)
+    w.fake.findings = [_finding(w, f"f{i}", updated=w.now - timedelta(hours=3 - i)) for i in range(3)]
+    assert _ingest(w)["more"] is True
+    w.fake.stale_tokens = True  # 토큰이 만료됐다 — 처음부터 다시 읽고, 이미 남은 것은 중복으로 접힌다
+    summary = _ingest(w, now=w.now + timedelta(minutes=5))
+    assert (summary["status"], summary["read"], summary["duplicates"], summary["more"]) == ("OK", 2, 2, True)
+    w.fake.stale_tokens = False
+    summary = _ingest(w, now=w.now + timedelta(minutes=10))
+    assert (summary["events_created"], summary["more"]) == (1, False)
+    assert _cursor(w) == w.now - timedelta(hours=1)
 
 
 # --- 자동 격리 관문(#588 Q2) ----------------------------------------------------------------------------------

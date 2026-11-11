@@ -112,7 +112,10 @@ class GuardDutyFindingThreatPayload(BaseModel):
     """GuardDuty 탐지 1건(#588 C). 대상 자원 ARN 은 공통 칸 target_arn 이다.
 
     대상이 EC2 인스턴스면 인스턴스 ARN, 그 밖의 자원(IAM 키 · S3 등)은 탐지 자체의 ARN 이다 —
-    resource_type 이 어느 쪽인지 알린다(security/threat_normalizer.py)."""
+    resource_type 이 어느 쪽인지 알린다(security/threat_normalizer.py).
+
+    region 은 읽은 탐지기의 리전, finding_region 은 탐지가 표시한 리전이다 — 글로벌 서비스(IAM · STS) 이벤트의
+    탐지는 다른 리전에서 탐지해도 us-east-1 로 표시돼 둘이 다를 수 있다."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -120,7 +123,8 @@ class GuardDutyFindingThreatPayload(BaseModel):
     finding_type: str = Field(min_length=1)    # 예: UnauthorizedAccess:EC2/SSHBruteForce
     severity: float = Field(ge=0, le=GUARDDUTY_SEVERITY_MAX)
     resource_type: str = Field(min_length=1)   # GuardDuty Resource.ResourceType (Instance · AccessKey …)
-    region: str = Field(min_length=1)
+    region: str = Field(min_length=1)          # 읽은 탐지기의 리전
+    finding_region: str = Field(min_length=1)  # 탐지의 Region
     first_seen_at: UtcDateTime
     last_seen_at: UtcDateTime
 

@@ -53,6 +53,9 @@ class FakeGuardDuty:
         self.deny: dict[str, str] = {}  # 작업 → 오류 코드
         self.race = False  # CreateDetector 직전에 다른 확인이 먼저 만든 것처럼
         self.findings: list[dict] = []  # 그 리전에 쌓인 탐지 원문(#588 C)
+        self.stale_tokens = False  # 이어 읽기 토큰을 거절한다(만료된 것처럼)
+        self.before_get = None  # GetFindings 직전에 부른다 — 목록 조회와 상세 조회 사이의 갱신
+        self.leak_other_accounts = False  # 계정 조건을 무시한다 — 정규화가 다른 계정 탐지를 거절하는지 보려고
 
     def _call(self, name: str, **params):
         self.calls.append((name, params))
@@ -85,7 +88,7 @@ class FakeGuardDuty:
                 if updated < condition["GreaterThanOrEqual"]:
                     return False
             elif field == "accountId":
-                if finding["AccountId"] not in condition["Equals"]:
+                if finding["AccountId"] not in condition["Equals"] and not self.leak_other_accounts:
                     return False
             elif field == "service.archived":
                 archived = str(finding["Service"].get("Archived", False)).lower()
@@ -100,6 +103,8 @@ class FakeGuardDuty:
                    SortCriteria=SortCriteria, MaxResults=MaxResults, NextToken=NextToken)
         assert DetectorId in self.detectors and MaxResults <= 50
         assert SortCriteria == {"AttributeName": "updatedAt", "OrderBy": "ASC"}
+        if NextToken and self.stale_tokens:
+            raise _error("BadRequestException", "ListFindings")
         hits = sorted((f for f in self.findings if self._matches(f, FindingCriteria["Criterion"])),
                       key=lambda f: (_parse(f["UpdatedAt"]), f["Id"]))
         start = int(NextToken or 0)
@@ -109,6 +114,8 @@ class FakeGuardDuty:
 
     def get_findings(self, *, DetectorId, FindingIds):
         self._call("GetFindings", DetectorId=DetectorId, FindingIds=FindingIds)
+        if self.before_get is not None:
+            self.before_get(self)
         if len(FindingIds) > 50:
             raise _error("BadRequestException", "GetFindings")  # API 상한
         by_id = {f["Id"]: f for f in self.findings}
@@ -233,8 +240,12 @@ def reader(monkeypatch):
     return fake
 
 
-def _read(since=T0):
-    return guardduty.read_findings(REGION, account_id=ACCOUNT, updated_since=since)
+def _read(since=T0, token=None):
+    return guardduty.read_findings(REGION, account_id=ACCOUNT, updated_since=since, next_token=token)
+
+
+def _ids(page) -> list[str]:
+    return sorted(f["Id"] for f in page.findings)
 
 
 def test_no_detector_means_nothing_to_read(reader):
@@ -247,29 +258,58 @@ def test_reads_only_findings_updated_since_the_cursor(reader):
     reader.findings = [finding("old", updated=T0 - timedelta(seconds=1)), finding("at", updated=T0),
                        finding("new", updated=T0 + timedelta(hours=1))]
     # 커서와 같은 시각은 다시 읽는다(같은 밀리초의 탐지를 잃지 않게) — 중복은 받는 쪽이 접는다
-    assert sorted(f["Id"] for f in _read()) == ["at", "new"]
+    page = _read()
+    assert _ids(page) == ["at", "new"]
+    assert page.next_token is None  # 다 읽었다
 
 
 def test_other_accounts_and_archived_findings_are_not_read(reader):
     # 위임 관리자 계정이면 멤버 계정 탐지도 돌아온다 — 조건이 계정으로 거른다
     reader.findings = [finding("mine", updated=T0), finding("member", updated=T0, account="999988887777"),
                        finding("archived", updated=T0, archived=True)]
-    assert [f["Id"] for f in _read()] == ["mine"]
+    assert _ids(_read()) == ["mine"]
 
 
 def test_pages_are_followed_and_details_fetched_fifty_at_a_time(reader):
     reader.findings = [finding(f"f{i:03}", updated=T0 + timedelta(seconds=i)) for i in range(120)]
-    found = _read()
-    assert sorted(f["Id"] for f in found) == [f"f{i:03}" for i in range(120)]
+    assert _ids(_read()) == [f"f{i:03}" for i in range(120)]
     batches = [len(params["FindingIds"]) for name, params in reader.calls if name == "GetFindings"]
     assert batches == [50, 50, 20]  # GetFindings 는 50건이 상한이다(대역도 넘기면 거절한다)
 
 
-def test_one_round_reads_at_most_the_limit_oldest_first(reader, monkeypatch):
+def test_one_round_reads_at_most_the_limit_oldest_first_and_hands_back_the_token(reader, monkeypatch):
     monkeypatch.setattr(guardduty, "READ_LIMIT", 60)
     reader.findings = [finding(f"f{i:03}", updated=T0 + timedelta(seconds=i)) for i in range(120)]
-    # 오름차순이라 남은 것은 다음 회차가 커서로 이어 읽는다 — 가장 늦은 것부터 읽으면 앞의 것을 영영 놓친다
-    assert sorted(f["Id"] for f in _read()) == [f"f{i:03}" for i in range(60)]
+    # 오름차순이라 남은 것은 다음 회차가 이어 읽는다 — 가장 늦은 것부터 읽으면 앞의 것을 영영 놓친다
+    first = _read()
+    assert _ids(first) == [f"f{i:03}" for i in range(60)]
+    assert first.next_token is not None
+    # 쪽 크기를 남은 한도에 맞춘다 — 끊긴 자리와 토큰이 어긋나면 그 사이 탐지를 건너뛴다
+    sizes = [params["MaxResults"] for name, params in reader.calls if name == "ListFindings"]
+    assert sizes == [50, 10]
+
+
+def test_the_token_continues_the_same_listing(reader, monkeypatch):
+    # 같은 시각에 갱신된 탐지가 한도보다 많아도 이어 읽기로 앞으로 간다(PR 리뷰 2)
+    monkeypatch.setattr(guardduty, "READ_LIMIT", 60)
+    reader.findings = [finding(f"f{i:03}", updated=T0) for i in range(100)] + [
+        finding("later", updated=T0 + timedelta(seconds=1))]
+    first = _read()
+    rest = _read(token=first.next_token)
+    assert sorted(_ids(first) + _ids(rest)) == sorted([f"f{i:03}" for i in range(100)] + ["later"])
+    assert rest.next_token is None
+    continued = [params for name, params in reader.calls if name == "ListFindings"][-1]
+    assert continued["NextToken"] is not None
+    assert continued["FindingCriteria"]["Criterion"]["updatedAt"] == {"GreaterThanOrEqual": int(T0.timestamp() * 1000)}
+
+
+def test_a_refused_token_is_raised_to_the_caller(reader):
+    # 순회를 다시 시작할지는 받는 쪽(guardduty_ingress)이 정한다
+    reader.findings = [finding("f", updated=T0)]
+    reader.stale_tokens = True
+    with pytest.raises(ClientError) as exc:
+        _read(token="5")
+    assert exc.value.response["Error"]["Code"] == "BadRequestException"
 
 
 def test_read_never_calls_anything_but_reads(reader):

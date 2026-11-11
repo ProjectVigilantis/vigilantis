@@ -1632,6 +1632,8 @@ export interface SshBruteForcePayload {
  * GuardDuty 탐지(#588 C). 정규화 이벤트(`GuardDutyFindingThreatPayload`) 그대로다. 대상 자원은 항목의 `target_arn`이다 —
  * EC2 인스턴스면 인스턴스 ARN, 그 밖의 자원(`resource_type`: AccessKey · S3Bucket …)은 탐지 자체의 ARN이다.
  * 심각도 7.0 이상 HIGH · 4.0 이상 MEDIUM · 그 아래 LOW로 판정하고, LOW는 이벤트만 남는다(인시던트 없음).
+ * `region`은 읽은 탐지기의 리전, `finding_region`은 탐지가 표시한 리전이다 — 글로벌 서비스(IAM · STS) 탐지는
+ * 다른 리전에서 탐지해도 us-east-1로 표시돼 둘이 다를 수 있다.
  */
 export interface GuardDutyFindingPayload {
   finding_id: string;
@@ -1639,7 +1641,10 @@ export interface GuardDutyFindingPayload {
   /** 0.0–10.0 */
   severity: number;
   resource_type: string;
+  /** 읽은 탐지기의 리전 */
   region: string;
+  /** 탐지의 Region */
+  finding_region: string;
   first_seen_at: IsoDateTime;
   last_seen_at: IsoDateTime;
 }

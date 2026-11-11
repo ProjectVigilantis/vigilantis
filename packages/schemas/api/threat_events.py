@@ -11,7 +11,7 @@
 #   - snake_case, UTC ISO 8601("Z") 문자열, extra 금지.
 #   - 항목은 `event_type` 으로 갈리는 닫힌 합이다. `payload` 는 정규화 이벤트의 유형별 모델 그대로다
 #     (SSH = source_ip · failed_attempt_count · window_seconds, 개방 포트 = protocol · from_port · to_port · source_cidr,
-#     GuardDuty 탐지 = finding_id · finding_type · severity · resource_type · region · first_seen_at · last_seen_at — #588 C).
+#     GuardDuty 탐지 = finding_id · finding_type · severity · resource_type · region · finding_region · first_seen_at · last_seen_at — #588 C).
 #     GuardDuty 탐지는 LOW 도 목록에 있다 — 이벤트는 전부 남기고 인시던트는 MEDIUM 이상만 만든다(#588 Q3).
 #
 # 경로 (/api/v1)

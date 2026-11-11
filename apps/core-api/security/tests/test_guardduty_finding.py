@@ -50,8 +50,8 @@ def test_instance_finding_targets_the_instance_arn():
     assert event.source_event_id == "f-1"
     assert event.occurred_at == T0  # 최초 관측 시각이다
     p = event.payload
-    assert (p.finding_id, p.finding_type, p.severity, p.resource_type, p.region) == (
-        "f-1", "UnauthorizedAccess:EC2/SSHBruteForce", 5.0, "Instance", REGION)
+    assert (p.finding_id, p.finding_type, p.severity, p.resource_type, p.region, p.finding_region) == (
+        "f-1", "UnauthorizedAccess:EC2/SSHBruteForce", 5.0, "Instance", REGION, REGION)
     assert (p.first_seen_at, p.last_seen_at) == (T0, T0)
 
 
@@ -81,9 +81,31 @@ def test_same_finding_id_in_another_region_or_account_is_another_threat():
     assert len(keys) == 3
 
 
+def test_a_global_service_finding_shown_in_another_region_is_kept():
+    # 글로벌 서비스(IAM · STS) 이벤트 탐지는 다른 리전에서 탐지해도 us-east-1 로 표시된다(PR 리뷰 1)
+    access_key = {"ResourceType": "AccessKey", "AccessKeyDetails": {"UserName": "ci"}}
+    event = _norm(raw(Region="us-east-1", resource=access_key))
+    assert (event.payload.region, event.payload.finding_region) == (REGION, "us-east-1")
+    # 중복 키는 읽은 탐지기의 리전으로 — 같은 탐지를 같은 리전에서 다시 읽으면 같은 키다
+    assert event.deduplication_key == _norm(raw(resource=access_key)).deduplication_key
+    assert evaluate_threat(event).initial_risk_level is RiskLevel.MEDIUM
+
+
+def test_an_instance_arn_uses_the_region_the_finding_reports():
+    event = _norm(raw(Region="ap-northeast-1"))
+    assert event.target_arn == f"arn:aws:ec2:ap-northeast-1:{ACCOUNT}:instance/i-0abc"
+
+
+def test_a_finding_without_region_falls_back_to_the_read_region():
+    finding = raw()
+    del finding["Region"]
+    assert _norm(finding).payload.finding_region == REGION
+
+
 @pytest.mark.parametrize("override", [
     {"AccountId": "999988887777"},   # 위임 관리자 계정이 돌려준 멤버 계정 탐지
-    {"Region": "us-east-1"},
+    {"AccountId": "999988887777", "Region": "us-east-1"},  # 리전을 받아 주어도 계정은 그대로 거른다
+    {"Region": 7},
     {"Id": ""},
     {"Severity": None},
     {"Severity": 10.5},

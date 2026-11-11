@@ -1,7 +1,8 @@
 """GuardDuty 탐지 읽기 — threat_event_type 에 GUARDDUTY_FINDING, 읽기 커서 테이블 (#588 C)
 
 수집 주기가 고객 계정의 GuardDuty 탐지를 읽어 위협 이벤트로 남긴다. 위협 유형에 값 하나를 더하고, 고객사 × 리전마다
-다음 회차가 읽기 시작할 갱신 시각을 guardduty_finding_cursors 에 둔다. 고객사가 지워지면 커서도 지워진다(CASCADE).
+다음 회차가 읽을 자리를 guardduty_finding_cursors 에 둔다 — 목록 조회 조건의 시작 시각과, 한 번의 순회가 회차
+한도에서 끊겼을 때 이어 읽을 토큰 · 진척(pass_*, 끊겼을 때만 있다). 고객사가 지워지면 커서도 지워진다(CASCADE).
 
 기존 행은 건드리지 않는다. downgrade 는 새 값을 가진 위협 이벤트가 있으면 거절한다 — 이전 어휘는 GuardDuty 탐지를
 표현하지 못하고, 다른 유형으로 접으면 기록이 거짓이 된다. 없으면 커서 테이블을 지우고 타입을 이전 두 값으로 다시
@@ -37,7 +38,16 @@ def upgrade() -> None:
         sa.Column("tenant_id", _UUID, nullable=False),
         sa.Column("region", sa.String(length=32), nullable=False),
         sa.Column("updated_since", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("pass_next_token", sa.Text(), nullable=True),
+        sa.Column("pass_started_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("pass_watermark", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("pass_hold", sa.DateTime(timezone=True), nullable=True),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.CheckConstraint(
+            "(pass_next_token IS NULL) = (pass_started_at IS NULL)"
+            " AND (pass_next_token IS NOT NULL OR (pass_watermark IS NULL AND pass_hold IS NULL))",
+            name=op.f(f"ck_{_TABLE}_pass_shape"),
+        ),
         sa.PrimaryKeyConstraint("tenant_id", "region", name=op.f(f"pk_{_TABLE}")),
         sa.ForeignKeyConstraint(
             ["tenant_id"], ["tenants.tenant_id"],
