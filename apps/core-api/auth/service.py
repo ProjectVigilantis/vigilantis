@@ -69,6 +69,8 @@ class CurrentUser:
     #: 판정 시점에 읽은 기능별 부여 권한(#572 5번). TENANT OPERATOR 만 값이 있을 수 있다 — 빈 집합은 부여 없음이다.
     #: 실제 권한 판정은 auth.permissions.effective_permissions 가 한다(ADMIN 은 전부, VIEWER 는 없음).
     granted_permissions: frozenset[FeaturePermission] = frozenset()
+    #: 이 요청의 서버 세션 ID(내부 전용 — 공개 응답에 싣지 않는다). 활동 로그(platform_events)가 행마다 싣는다.
+    session_id: str | None = None
 
     @property
     def tenant_suspended(self) -> bool:
@@ -192,6 +194,7 @@ def resolve_current_user(
         assigned_tenant_ids=assigned_tenant_ids,
         assigned_group_ids=assigned_group_ids,
         granted_permissions=granted_permissions,
+        session_id=view.session_id,
     )
 
 

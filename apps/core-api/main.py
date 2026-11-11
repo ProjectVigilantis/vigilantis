@@ -54,6 +54,7 @@ from config import get_auth_settings, get_settings  # noqa: E402
 from db.session import get_session_factory  # noqa: E402
 from exceptions import register_error_handlers, unexpected_error_response  # noqa: E402
 from logging_config import request_id_var, setup_logging  # noqa: E402
+from request_origin import origin_from_request, request_origin_var  # noqa: E402
 from mock_threat_source import MockThreatConsumer  # noqa: E402
 from notifications.runtime import build_notification_runtime  # noqa: E402
 from realtime import RealtimeManager  # noqa: E402
@@ -173,6 +174,8 @@ def create_app() -> FastAPI:
         request_id = received if _REQUEST_ID_PATTERN.fullmatch(received) else uuid.uuid4().hex
         request.state.request_id = request_id
         token = request_id_var.set(request_id)
+        # 플랫폼 활동 로그(#589)가 행마다 싣는 요청 식별자 · 접속지 · 브라우저 정보
+        origin_token = request_origin_var.set(origin_from_request(request, request_id))
         started = time.perf_counter()
         status_code = 500
         try:
@@ -198,6 +201,7 @@ def create_app() -> FastAPI:
                 fields["user_id"] = user.user_id
                 fields["role"] = user.role.value
             _http_logger.info("http_request", extra=fields)
+            request_origin_var.reset(origin_token)
             request_id_var.reset(token)
 
     # /api/v1/* 보안 헤더 미들웨어와 AuthError 매핑 (#492) — CORS 보다 안쪽, request_context 보다
