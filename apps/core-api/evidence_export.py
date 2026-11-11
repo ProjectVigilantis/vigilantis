@@ -1,10 +1,10 @@
 # ==============================================================================
 # [파일 설명]
 # 인시던트 근거 내보내기(#488) — 저장된 근거 행을 사람용 Markdown · 기계용 JSON 파일로 조립한다.
-# 파일 계약: schemas.api.evidence_export. 다운로드 라우트와 감사 기록은 다음 커밋에서 연결한다.
+# 파일 계약: schemas.api.evidence_export. 라우트: routers/incidents.py.
 #
 #   - 저장된 행만 쓴다. AWS · 수집기 · 현재 자산 테이블을 다시 읽어 당시 자료를 대체하지 않는다(ADR-0005).
-#     이 모듈은 저장 행만 받아 파일 바이트를 만든다.
+#     조립 함수는 행만 받는다. export_incident_evidence 는 조회 · 감사 기록 · commit 을 소유한다.
 #   - 마스킹 2층(security 설계 검토 2026-11-09). 1층 스키마 allow-list: 행 → EvidenceItem(mappers.to_evidence_item)
 #     → model_dump. 스키마 밖 키는 직렬화에 남지 않고, 검증에서 거절된 행은 500 INTERNAL_ERROR 로 멈춘다.
 #     일부 중첩 모델은 미지정 키를 제외하는 기존 계약을 따른다. pydantic 오류문은 입력값을 실으므로 로그에는
@@ -22,7 +22,9 @@
 #   - 파일명은 저장된 incident_id(정규 UUID)와 고정 접미만 쓴다. 제목 · 고객사명 같은 사용자 문자열은 헤더에
 #     싣지 않는다(헤더 주입 · 비ASCII 인코딩 문제).
 #
-#   - HTTP 반출 경로는 여기서 열지 않는다. 권한 · 범위 검사와 감사 기록을 연결한 뒤 제공한다.
+#   - require_permission(EXECUTE_ACTION) → require_tenant_scope → _load_incident 를 통과한 행만 받는다.
+#     파일 검증 · 크기 검사 뒤 같은 세션에 감사 행을 기록하고 commit 해야 바이트를 반환한다. 기록 실패 시
+#     파일도 내주지 않는다. 성공 기록은 서버의 반출 준비 사실이며 클라이언트 수신 완료를 보장하지 않는다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -37,7 +39,10 @@ from enum import Enum
 from typing import Any, Optional
 
 from ai.model_client import mask_outbound
+from auth.service import CurrentUser
 from db import mappers, models
+from db.repositories import incidents as incidents_repo
+from db.repositories import platform_events as platform_events_repo
 from exceptions import ApiError
 from pydantic import ValidationError
 from schemas.api.errors import ErrorCode
@@ -50,6 +55,9 @@ from schemas.api.evidence_export import (
 )
 from schemas.api.incidents import IncidentCategory
 from schemas.evidence import EvidenceItem, EvidenceType, ThreatEvidence
+from schemas.platform_events import PlatformEventAction
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger("vigilantis.evidence_export")
 
@@ -334,3 +342,29 @@ def build_export_file(
         filename=export_filename(incident.incident_id, fmt),
         body=render(document, fmt),
     )
+
+
+def export_incident_evidence(
+    db: Session,
+    incident: models.Incident,
+    fmt: ExportFormat,
+    actor: CurrentUser,
+) -> ExportFile:
+    """범위 확인된 인시던트의 저장 근거를 조립하고, 감사 행 확정 이후에만 파일을 반환한다."""
+    rows = incidents_repo.list_evidence(db, incident.incident_id)
+    file = build_export_file(incident, rows, fmt)
+    try:
+        platform_events_repo.record_platform_event(
+            db,
+            PlatformEventAction.INCIDENT_EVIDENCE_EXPORT,
+            platform_events_repo.person(actor),
+            tenant_id=incident.tenant_id,
+            target_id=incident.incident_id,
+            details={"format": fmt.value, "evidence_count": len(rows)},
+        )
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        logger.error("evidence_export_audit_failed")
+        raise ApiError(ErrorCode.INTERNAL_ERROR) from None
+    return file

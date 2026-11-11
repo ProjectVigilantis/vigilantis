@@ -2,8 +2,9 @@
 # [파일 설명]
 # 인시던트 근거 내보내기(#488) — GET /api/v1/incidents/{incident_id}/evidence/export?format=md|json.
 #
-# 조립 모듈(evidence_export) 단위 — DB 없이 행 객체만으로 검증 · 플래그 · 마스킹 · Markdown · 크기 · 파일명.
-# 라우트 · 권한 · 감사 기록 통합 테스트는 HTTP 경로를 연결하는 다음 커밋에 둔다.
+# 두 층이다.
+#   1) 조립 모듈(evidence_export) 단위 — DB 없이 행 객체만으로 검증 · 플래그 · 마스킹 · Markdown · 크기 · 파일명.
+#   2) 라우트 통합 — 실제 PostgreSQL · 실제 라우터 · 권한 · 범위 · 감사 행. 기록 실패 시 파일도 반환하지 않는다.
 #
 # 계약(브리프 · security 설계 검토 2026-11-09 반영)
 #   - 의존성 순서: protected(Origin · 세션) → require_permission(EXECUTE_ACTION) → require_tenant_scope.
@@ -28,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import evidence_export
@@ -35,8 +37,11 @@ import pytest
 from db import models
 from evidence_export import ExportFormat, build_document, build_export_file, code_span, json_fence
 from exceptions import ApiError, _STATUS_BY_CODE
+from fastapi import Depends, Request
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from schemas.api.assets import AssetItem
+from schemas.api.auth import PlatformRole, UserRole
 from schemas.api.errors import ErrorCode
 from schemas.api.evidence_export import EvidenceExportDocument
 from schemas.api.incidents import IncidentCategory, IncidentStatus
@@ -52,8 +57,18 @@ from schemas.evidence import (
 )
 from schemas.events import NormalizedThreatEvent
 from schemas.mock_logs import MockLogRecord, MockSshLogEvidence
+from schemas.platform_events import (
+    EvidenceExportDetails,
+    PlatformActorKind,
+    PlatformEventAction,
+    PlatformEventOutcome,
+    PlatformEventTargetType,
+)
+from sqlalchemy import event, select
+from sqlalchemy.exc import SQLAlchemyError
 from tests.test_incident_intake import ACCOUNT, EC2_ARN, REGION, asset_payload, finops_intake
 
+EXPORT = "/api/v1/incidents/{incident_id}/evidence/export"
 MASK = "[REDACTED]"  # ai.model_client._MASK — ai/tests/test_model_client.py 와 같은 리터럴
 AWS_KEY = "AKIAIOSFODNN7EXAMPLE"  # ai/tests/test_model_client.py 와 같은 예시 키
 SOURCE_IP = "203.0.113.10"
@@ -62,12 +77,22 @@ SG_ARN = f"arn:aws:ec2:{REGION}:{ACCOUNT}:security-group/sg-0123456789abcdef0"
 RUN_ID = "1f2e3d4c-5b6a-4978-8899-aabbccddee00"
 
 
+def _code(resp) -> str:
+    return resp.json()["error"]["code"]
 
 
+def _export(client, incident_id: str, fmt: str):
+    return client.get(EXPORT.format(incident_id=incident_id), params={"format": fmt})
 
 
+def _central(login_as):
+    return login_as(UserRole.ADMIN, platform_role=PlatformRole.CENTRAL_ADMIN)
 
 
+def _manager(login_as, *tenant_ids: str):
+    return login_as(
+        UserRole.ADMIN, platform_role=PlatformRole.TENANT_MANAGER, assigned_tenant_ids=tenant_ids
+    )
 
 
 def _fingerprint(seed: str) -> str:
@@ -117,6 +142,19 @@ def _threat_event(**over) -> NormalizedThreatEvent:
     return NormalizedThreatEvent.model_validate(base)
 
 
+def _add_threat_evidence(db, incident: models.Incident, content: ThreatEvidence | dict) -> models.Evidence:
+    """THREAT 근거 1행을 직접 적재한다. dict 를 주면 스키마를 거치지 않고 그대로 넣는다(스키마 필터 테스트용)."""
+    row = models.Evidence(
+        incident_id=incident.incident_id,
+        evidence_type=EvidenceType.THREAT,
+        source_type="threat_event",
+        source_id="seed",
+        content=content if isinstance(content, dict) else content.model_dump(mode="json"),
+        occurred_at=OCCURRED_AT,
+    )
+    db.add(row)
+    db.commit()
+    return row
 
 
 # ===== 1층. 조립 모듈 단위(DB 없음) =====================================================================
@@ -408,3 +446,371 @@ def test_unit_filename_never_carries_the_title():
     file = build_export_file(incident, [], ExportFormat.MD)
     assert file.filename == f"incident-{incident.incident_id}-evidence.md"
     assert file.filename.isascii() and "evil" not in file.filename
+
+
+# ===== 2층. 라우트 통합(실제 PostgreSQL) ==========================================================
+
+def _export_events(db):
+    return list(db.scalars(select(models.PlatformEvent).where(
+        models.PlatformEvent.action == PlatformEventAction.INCIDENT_EVIDENCE_EXPORT.value,
+    )))
+
+
+@pytest.mark.parametrize("details", [
+    {"format": "csv", "evidence_count": 1},
+    {"format": "md", "evidence_count": -1},
+    {"format": "json", "evidence_count": 1, "content": "must-not-be-recorded"},
+])
+def test_export_audit_details_reject_unapproved_values(details):
+    with pytest.raises(ValidationError):
+        EvidenceExportDetails.model_validate(details)
+
+@pytest.fixture()
+def finops(db, make_tenant, make_incident):
+    """FinOps 인시던트(RULE · ASSET · METRIC 3건) — 1층과 같은 계약 객체를 실제 행으로 넣는다."""
+    tenant_id = make_tenant()
+    incident = make_incident(db, category=IncidentCategory.FINOPS)
+    incident.tenant_id = tenant_id
+    db.add_all(_finops_rows(incident))
+    db.commit()
+    return {"tenant": tenant_id, "incident": incident}
+
+
+@pytest.fixture()
+def secops(db, make_tenant, make_incident):
+    """SecOps 인시던트(THREAT 1건 — 합성 로그 발췌 포함, target_status=not_collected)."""
+    tenant_id = make_tenant()
+    incident = make_incident(db)
+    incident.tenant_id = tenant_id
+    context = SecOpsEvidenceContext(
+        captured_at=OCCURRED_AT, target_status="not_collected", log_evidence=_mock_log(),
+    )
+    _add_threat_evidence(db, incident, ThreatEvidence(event=_threat_event(), context=context))
+    return {"tenant": tenant_id, "incident": incident}
+
+
+# ----- 1. 정상 ----------------------------------------------------------------------
+
+@pytest.mark.parametrize("fmt,media", [("md", "text/markdown"), ("json", "application/json")])
+@pytest.mark.parametrize("which", ["finops", "secops"])
+def test_operator_with_execute_action_downloads_the_bundle(request, client_pg, login_as, fmt, media, which):
+    case = request.getfixturevalue(which)
+    incident = case["incident"]
+    login_as(UserRole.OPERATOR, tenant_id=case["tenant"])
+
+    resp = _export(client_pg, incident.incident_id, fmt)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"] == f"{media}; charset=utf-8"
+    assert resp.headers["content-disposition"] == (
+        f'attachment; filename="incident-{incident.incident_id}-evidence.{fmt}"'
+    )
+    assert resp.headers["cache-control"] == "no-store"
+    assert resp.headers["x-content-type-options"] == "nosniff"
+    if fmt == "json":
+        document = resp.json()
+        assert document["incident"]["incident_id"] == incident.incident_id
+        expected = 3 if which == "finops" else 1
+        assert document["export"]["evidence_count"] == expected == len(document["evidence"])
+        for item in document["evidence"]:
+            # content 밖 최상위 플래그 · 메타 — content 만 떼어 EvidenceItem 으로 되살릴 수 있어야 한다
+            assert set(item["flags"]) == {"processed", "synthetic", "excerpt", "missing"}
+            EvidenceItem.model_validate({k: v for k, v in item.items() if k != "flags"})
+
+
+# ----- 2. 범위 밖 · 형식 오류 → 404 ------------------------------------------------------
+
+def test_other_tenant_operator_gets_404_not_403(client_pg, login_as, make_tenant, secops):
+    login_as(UserRole.OPERATOR, tenant_id=make_tenant())
+    resp = _export(client_pg, secops["incident"].incident_id, "json")
+    assert (resp.status_code, _code(resp)) == (404, "INCIDENT_NOT_FOUND")
+
+
+def test_malformed_incident_id_is_404(client_pg, login_as, make_tenant):
+    login_as(UserRole.OPERATOR, tenant_id=make_tenant())
+    resp = _export(client_pg, "not-a-uuid", "json")
+    assert (resp.status_code, _code(resp)) == (404, "INCIDENT_NOT_FOUND")
+
+
+# ----- 3. 기능 권한 403 이 대상 조회보다 앞선다 --------------------------------------------
+
+@pytest.mark.parametrize("login", [
+    lambda login_as, tenant: login_as(UserRole.VIEWER, tenant_id=tenant),
+    lambda login_as, tenant: login_as(UserRole.OPERATOR, tenant_id=tenant, permissions=()),
+], ids=["viewer", "operator-without-execute-action"])
+def test_forbidden_before_target_is_read(client_pg, login_as, secops, login):
+    login(login_as, secops["tenant"])
+    for target in (secops["incident"].incident_id, str(uuid.uuid4())):
+        resp = _export(client_pg, target, "json")
+        assert (resp.status_code, _code(resp)) == (403, "AUTH_FORBIDDEN")
+
+
+# ----- 4. 플랫폼 계정 ---------------------------------------------------------------------
+
+def test_platform_without_grade_is_403(client_pg, secops):
+    """DB CHECK 가 등급 없는 PLATFORM 저장을 막으므로 신원 경계에서만 이 손상 상태를 주입한다."""
+    from auth.access import require_user
+
+    # 원래 세션 판정은 유지하되 순환 의존성 없이 그 결과의 등급만 제거한다.
+    from auth import service
+    from auth.http import SESSION_COOKIE
+    from config import get_auth_settings
+    from db.session import get_db
+    def damaged_identity(request: Request, db=Depends(get_db)):
+        user = service.resolve_current_user(
+            db, request.cookies.get(SESSION_COOKIE), now=datetime.now(UTC),
+            idle_seconds=get_auth_settings().AUTH_SESSION_IDLE_SECONDS, touch=False,
+        )
+        return replace(user, platform_role=None)
+
+    client_pg.app.dependency_overrides[require_user] = damaged_identity
+    try:
+        resp = _export(client_pg, secops["incident"].incident_id, "json")
+        assert (resp.status_code, _code(resp)) == (403, "AUTH_FORBIDDEN")
+    finally:
+        del client_pg.app.dependency_overrides[require_user]
+
+
+def test_tenant_manager_scope(client_pg, login_as, secops):
+    incident = secops["incident"]
+    _manager(login_as)  # 배정 없음
+    assert _export(client_pg, incident.incident_id, "json").status_code == 404
+    _manager(login_as, secops["tenant"])
+    assert _export(client_pg, incident.incident_id, "json").status_code == 200
+
+
+def test_central_admin_reads_unowned_mvp_incident(db, client_pg, login_as, make_incident):
+    incident = make_incident(db)
+    incident.tenant_id = None
+    _add_threat_evidence(db, incident, ThreatEvidence(event=_threat_event()))
+    _central(login_as)
+    assert _export(client_pg, incident.incident_id, "md").status_code == 200
+
+
+# ----- 5. 미인증 ---------------------------------------------------------------------------
+
+def test_anonymous_is_401(client_pg_anon, secops):
+    resp = _export(client_pg_anon, secops["incident"].incident_id, "json")
+    assert (resp.status_code, _code(resp)) == (401, "AUTH_REQUIRED")
+
+
+# ----- 6. 비밀값 ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("fmt", ["md", "json"])
+def test_secrets_are_masked_in_both_formats(db, client_pg, login_as, make_tenant, make_incident, fmt):
+    incident = make_incident(db, title="token: hunter2")
+    incident.tenant_id = make_tenant()
+    _add_threat_evidence(db, incident, ThreatEvidence(
+        event=_threat_event(),
+        context=_available_context(
+            tags={"db_password": "hunter2", "Name": "web-01", AWS_KEY: "credential-shaped-key"},
+            sg_description="token: abc12345secret for ops",
+            log_message=f"Accepted publickey for ops key {AWS_KEY} from {SOURCE_IP}",
+        ),
+    ))
+    login_as(UserRole.OPERATOR, tenant_id=incident.tenant_id)
+    resp = _export(client_pg, incident.incident_id, fmt)
+    assert resp.status_code == 200
+    assert all(secret not in resp.text for secret in ("hunter2", "abc12345secret", AWS_KEY))
+    assert resp.text.count(MASK) >= 4
+    assert SOURCE_IP in resp.text and "10.0.1.23" in resp.text and "web-01" in resp.text
+
+
+# ----- 7. 스키마 필터 ----------------------------------------------------------------------
+
+def test_keys_outside_the_schema_fail_closed(db, client_pg, login_as, secops, caplog):
+    row = db.scalar(select(models.Evidence).where(
+        models.Evidence.incident_id == secops["incident"].incident_id,
+    ))
+    row.content = {**row.content, "leaked": "stored-secret-value"}
+    db.commit()
+    login_as(UserRole.OPERATOR, tenant_id=secops["tenant"])
+    resp = _export(client_pg, secops["incident"].incident_id, "json")
+    assert (resp.status_code, _code(resp)) == (500, "INTERNAL_ERROR")
+    assert "content-disposition" not in resp.headers
+    assert "stored-secret-value" not in resp.text + caplog.text
+    assert not _export_events(db)
+
+
+# ----- 8. 마크다운 주입 --------------------------------------------------------------------
+
+def test_markdown_injection_stays_inside_fences(db, client_pg, login_as, make_tenant, make_incident):
+    hostile = "``` # heading [x](http://evil.example) | cell <img src=x>"
+    incident = make_incident(db, title=r"<img src=x> a\|tail [x](http://evil.example)")
+    incident.tenant_id = make_tenant()
+    _add_threat_evidence(db, incident, ThreatEvidence(
+        event=_threat_event(), context=_available_context(log_message=hostile),
+    ))
+    login_as(UserRole.OPERATOR, tenant_id=incident.tenant_id)
+    resp = _export(client_pg, incident.incident_id, "md")
+    assert resp.status_code == 200
+    assert any(hostile in line for block in _fenced_blocks(resp.text) for line in block)
+    outside = _outside_fences(resp.text)
+    assert [line for line in outside if line.startswith("#")] == [
+        "# 인시던트 근거 내보내기", "## 근거 1/1 — `THREAT`", "### 내용",
+    ]
+    assert r"- **제목**: `<img src=x> a\|tail [x](http://evil.example)`" in outside
+
+
+# ----- 9. 플래그 · 재조회 금지 -------------------------------------------------------------
+
+def test_missing_flags_follow_stored_fields_only(db, client_pg, login_as, secops, finops):
+    from schemas.assets import AssetType
+
+    incident = secops["incident"]
+    _add_threat_evidence(db, incident, ThreatEvidence(
+        event=_threat_event(),
+        context=SecOpsEvidenceContext(captured_at=OCCURRED_AT, target_status="absent"),
+    ))
+    _add_threat_evidence(db, incident, ThreatEvidence(event=_threat_event()))
+    login_as(UserRole.OPERATOR, tenant_id=secops["tenant"])
+    before = _export(client_pg, incident.incident_id, "json").json()
+    missing = [item["flags"]["missing"] for item in before["evidence"]]
+    assert ["target_not_collected"] in missing
+    assert ["target_absent", "log_not_attached"] in missing
+    assert ["context_not_captured"] in missing
+    asset = models.Asset(
+        arn=EC2_ARN, asset_type=AssetType.EC2, resource_id="i-0abc123456789def0",
+        account_id=ACCOUNT, region=REGION, tenant_id=secops["tenant"],
+        spec={"private_ip": "10.9.9.9", "tags": {"Name": "new-current-asset"}},
+    )
+    db.add(asset)
+    db.commit()
+    after = _export(client_pg, incident.incident_id, "json").json()
+    # 파일 생성 시각만 매 요청 달라진다. 저장 근거 · 인시던트 · 나머지 메타는 현재 자산과 무관하다.
+    before["export"].pop("generated_at")
+    after["export"].pop("generated_at")
+    assert before == after
+    metric = db.scalar(select(models.Evidence).where(
+        models.Evidence.incident_id == finops["incident"].incident_id,
+        models.Evidence.evidence_type == EvidenceType.METRIC,
+    ))
+    db.delete(metric)
+    db.commit()
+    login_as(UserRole.OPERATOR, tenant_id=finops["tenant"])
+    assert _export(client_pg, finops["incident"].incident_id, "json").json()["export"]["missing"] == [
+        "metric_evidence_absent",
+    ]
+
+
+# ----- 10. 크기 ----------------------------------------------------------------------------
+
+def test_oversized_bundle_is_413_envelope(db, client_pg, login_as, secops, monkeypatch):
+    import evidence_export
+
+    monkeypatch.setattr(evidence_export, "EVIDENCE_EXPORT_MAX_BYTES", 64)
+    login_as(UserRole.OPERATOR, tenant_id=secops["tenant"])
+    resp = _export(client_pg, secops["incident"].incident_id, "json")
+    assert (resp.status_code, _code(resp)) == (413, "EVIDENCE_EXPORT_TOO_LARGE")
+    assert "content-disposition" not in resp.headers
+    assert not _export_events(db)
+
+
+# ----- 11. format 검증 ----------------------------------------------------------------------
+
+def test_unknown_format_is_422(client_pg, login_as, secops):
+    login_as(UserRole.OPERATOR, tenant_id=secops["tenant"])
+    resp = _export(client_pg, secops["incident"].incident_id, "csv")
+    assert (resp.status_code, _code(resp)) == (422, "REQUEST_VALIDATION_FAILED")
+
+
+# ----- 12. 감사 기록(platform_events · #592) ----------------------------------------------------
+
+@pytest.mark.parametrize("fmt", ["md", "json"])
+@pytest.mark.parametrize("actor_kind", ["operator", "tenant-admin", "central", "manager"])
+def test_success_leaves_one_platform_event_in_the_same_transaction(
+    db, client_pg, login_as, secops, fmt, actor_kind,
+):
+    if actor_kind == "central":
+        actor = _central(login_as)
+    elif actor_kind == "manager":
+        actor = _manager(login_as, secops["tenant"])
+    else:
+        actor = login_as(
+            UserRole.ADMIN if actor_kind == "tenant-admin" else UserRole.OPERATOR,
+            tenant_id=secops["tenant"],
+        )
+    committed = []
+
+    def on_commit(session):
+        committed.append(session is db)
+
+    client_pg.headers.update({"X-Request-ID": "export-test", "User-Agent": "export-test-agent"})
+    event.listen(db, "after_commit", on_commit)
+    try:
+        with TestClient(
+            client_pg.app, headers=dict(client_pg.headers), client=("203.0.113.7", 50000),
+        ) as client:
+            resp = _export(client, secops["incident"].incident_id, fmt)
+    finally:
+        event.remove(db, "after_commit", on_commit)
+    assert resp.status_code == 200
+    assert committed and all(committed)
+    [record] = _export_events(db)
+    assert record.actor_kind is PlatformActorKind.USER
+    assert record.actor_user_id == actor.user_id
+    assert record.actor_account_type == actor.account_type
+    assert record.actor_platform_role == actor.platform_role
+    assert record.session_id == actor.session_id
+    assert record.tenant_id == secops["tenant"]
+    assert record.target_type is PlatformEventTargetType.INCIDENT
+    assert record.target_id == secops["incident"].incident_id
+    assert record.outcome is PlatformEventOutcome.SUCCEEDED
+    assert record.details == {"format": fmt, "evidence_count": 1}
+    assert record.request_id == "export-test"
+    assert str(record.source_ip) == "203.0.113.7"
+    assert record.user_agent == "export-test-agent"
+
+
+def test_denied_requests_leave_no_export_event(db, client_pg, login_as, secops, make_tenant):
+    login_as(UserRole.VIEWER, tenant_id=secops["tenant"])
+    assert _export(client_pg, secops["incident"].incident_id, "json").status_code == 403
+    login_as(UserRole.OPERATOR, tenant_id=make_tenant())
+    assert _export(client_pg, secops["incident"].incident_id, "json").status_code == 404
+    assert not _export_events(db)
+
+
+@pytest.mark.parametrize("failure_point", ["insert", "commit"])
+def test_audit_failure_returns_no_file_and_rolls_back(
+    db, client_pg, login_as, secops, failure_point,
+):
+    login_as(UserRole.OPERATOR, tenant_id=secops["tenant"])
+    connection = db.get_bind()
+
+    def fail_insert(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("INSERT INTO platform_events"):
+            raise SQLAlchemyError("audit storage unavailable")
+
+    def fail_commit(session):
+        raise SQLAlchemyError("audit commit unavailable")
+
+    target, name, callback = (
+        (connection, "before_cursor_execute", fail_insert)
+        if failure_point == "insert" else (db, "before_commit", fail_commit)
+    )
+    event.listen(target, name, callback)
+    try:
+        resp = _export(client_pg, secops["incident"].incident_id, "json")
+    finally:
+        event.remove(target, name, callback)
+    assert (resp.status_code, _code(resp)) == (500, "INTERNAL_ERROR")
+    assert "content-disposition" not in resp.headers
+    assert not _export_events(db)
+
+
+# ----- 13. 파일명에 사용자 문자열 없음 -------------------------------------------------------
+
+def test_filename_never_carries_the_title(db, client_pg, login_as, make_tenant, make_incident):
+    tenant_id = make_tenant()
+    incident = make_incident(db, title='evil"; filename="x.html\r\nX-Injected: 1')
+    incident.tenant_id = tenant_id
+    _add_threat_evidence(db, incident, ThreatEvidence(event=_threat_event()))
+    login_as(UserRole.OPERATOR, tenant_id=tenant_id)
+
+    resp = _export(client_pg, incident.incident_id, "md")
+
+    assert resp.status_code == 200
+    disposition = resp.headers["content-disposition"]
+    assert disposition == f'attachment; filename="incident-{incident.incident_id}-evidence.md"'
+    assert disposition.isascii() and "evil" not in disposition
+    assert "X-Injected" not in resp.headers
