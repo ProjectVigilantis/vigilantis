@@ -210,7 +210,7 @@ def test_no_inquiry_text_note_or_email_reaches_the_platform_rows(client_pg, db, 
 # --- 쓰지 않은 요청 ------------------------------------------------------------------------------
 
 
-def test_rejected_requests_write_no_platform_row(client_pg, db, make_tenant, make_auth_session, tenant, customer):
+def test_rejected_requests_write_no_inquiry_row(client_pg, db, make_tenant, make_auth_session, tenant, customer):
     foreign = _seed(db, make_auth_session, make_tenant())
     mine = _seed(db, make_auth_session, tenant)
     scoped = make_auth_session(
@@ -225,7 +225,18 @@ def test_rejected_requests_write_no_platform_row(client_pg, db, make_tenant, mak
     assert client_pg.post(f"{BASE}/{mine}/notes", json={"note": NOTE}, headers=customer.headers).status_code == 403
     assert client_pg.post(BASE, json={"category": "BUG", "title": " ", "body": BODY}).status_code == 422
 
-    assert _counts(db) == before
+    # 문의 · 문의 기록 · 알림은 그대로다. 활동 로그에는 403 한 건의 권한 거절(ACCESS_FORBIDDEN · #589 B)만 는다
+    inquiries, inquiry_events, notifications, platform_rows = _counts(db)
+    assert (inquiries, inquiry_events, notifications) == before[:3]
+    assert platform_rows == before[3] + 1
+    denied = db.execute(
+        text(
+            "SELECT action, details->>'path' FROM platform_events"
+            " WHERE category = 'ACCESS' AND actor_user_id::text = :u"
+        ),
+        {"u": customer.user_id},
+    ).all()
+    assert denied == [("ACCESS_FORBIDDEN", f"{BASE}/{mine}/notes")]
 
 
 # --- 원자성 --------------------------------------------------------------------------------------

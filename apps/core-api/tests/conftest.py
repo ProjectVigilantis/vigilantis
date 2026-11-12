@@ -511,29 +511,20 @@ class CommittedAuth:
         from sqlalchemy import delete, select, text
 
         from tests.audit_cleanup import purge_audit_events
+        from tests.platform_event_cleanup import purge_platform_events
 
         with self.sessions() as session:
+            # 플랫폼 활동 로그(#589) — 사람 행은 사용자를 FK 로 가리키고, 로그인 · 권한 거절 같은 행은 이 사용자가
+            # 대상이거나 이 고객사 소속으로만 이어진다(행위자 ANONYMOUS). 셋 다 지워야 다음 테스트로 새지 않는다
+            purge_platform_events(
+                session,
+                actor_user_ids=self._user_ids,
+                target_ids=[*self._user_ids, *self._tenant_ids],
+                tenant_ids=self._tenant_ids,
+            )
             if self._user_ids:
                 # 이 사용자가 승인 · 종료한 감사 기록이 사용자 행을 가리킨다(FK RESTRICT)
                 purge_audit_events(session, actor_user_ids=self._user_ids)
-                # 플랫폼 활동 로그(#589)의 사람 행도 같다. 행이 있을 때만 append-only 트리거를 이 정리 트랜잭션
-                # 안에서 끈다 — ALTER 는 테이블 전체 잠금이라 다른 연결의 열린 트랜잭션을 기다리면 제한 시간에 실패한다
-                held = session.scalars(
-                    text("SELECT event_id::text FROM platform_events WHERE actor_user_id::text = ANY(:ids)"),
-                    {"ids": [str(user_id) for user_id in self._user_ids]},
-                ).all()
-                if held:
-                    session.execute(text("SET LOCAL lock_timeout = '10s'"))
-                    session.execute(
-                        text("ALTER TABLE platform_events DISABLE TRIGGER platform_events_append_only")
-                    )
-                    session.execute(
-                        text("DELETE FROM platform_events WHERE event_id::text = ANY(:ids)"),
-                        {"ids": held},
-                    )
-                    session.execute(
-                        text("ALTER TABLE platform_events ENABLE TRIGGER platform_events_append_only")
-                    )
                 session.execute(
                     delete(models.AuthSession).where(models.AuthSession.user_id.in_(self._user_ids))
                 )

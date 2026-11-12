@@ -17,6 +17,7 @@ Cognito Admin 인증 API로 로그인을 진행하고, **이번 로그인에서 
 | `service.py` | 트랜잭션 소유자. 로그인 완료(사용자 조회 · 세션 발급), 현재 사용자, 활동, 로그아웃. (PR 3) 로그인 완료를 `app_users` 잠금으로 직렬화하고 그 사용자의 이전 세션을 전부 회수. (#492) `CurrentUser`에 `account_type` · `tenant_id`와 내부 전용 `tenant_status`. UNASSIGNED는 로그인 완료 403 · 세션 판정 401. `CurrentUser.platform_role`과 `assigned_tenant_ids`(TENANT_MANAGER의 담당 고객사, 정규 UUID 튜플) — 판정마다 DB의 현재 값을 읽는다(`/me`에도 싣는다). (#572 2번) `assigned_tenant_ids`는 담당 그룹에 든 고객사이고, 내부 전용 `assigned_group_ids`(담당 그룹)가 더해졌다 — TENANT_MANAGER는 세션 판정마다 그룹 배정과 고객사의 그룹을 새로 읽는다. `/me`에는 `assigned_group_ids`를 싣지 않는다. (#515) 로그인 완료가 잠금 안에서 포착한 인증 세대 · 복구 차단 상태를 대조 |
 | `password_policy.py` | (PR 3) 새 비밀번호 정책 순수 함수 `check_password` — 최초 비밀번호 변경 · 재설정 확정 공용 |
 | `password_reset.py` | (PR 3) 비밀번호 재설정 요청 · 확정, 확정 성공 뒤 앱 세션 회수 |
+| `event_log.py` | (#589 B) 로그인 · 세션의 플랫폼 활동 로그 — 어떤 일을 어느 행동 · 결과로 남기는지 한곳에 둔다. 성공은 그 쓰기와 같은 트랜잭션에, 거절 · 실패는 따로 남긴다(§활동 로그) |
 | `admin_service.py` | (PR 3) ADMIN 사용자 관리 트랜잭션 소유자 — 초대 · 재발송 · 역할 · 상태 · 세션 회수 · 이력 조회. 잠금 · 행위자 재판정 · 마지막 활성 ADMIN 보호. (#492) 행위자의 고객 범위(`auth.access.tenant_scope_ids`)에 따른 관리 범위, 초대 대상 테넌트 결정 · ACTIVE 확인, 정지 테넌트 행위자의 쓰기 거절, 테넌트별 마지막 활성 ADMIN, 기존 계정 연결(`recover_existing`)의 중앙 관리계정 한정. 행위자 권한은 HTTP 의존성과 같은 판정(`auth.permissions.require_user_management` · `auth.access.require_central_admin`)으로 가르고, 직원 관리와 이력 응답(`events_response`) · 잠금 트랜잭션을 공유한다. (#572 5번) OPERATOR 기능별 권한 교체(`change_permissions`), 초대 시 권한 부여, 역할 변경 시 권한 정리 |
 | `permissions.py` | (#572 5 · 9번) 기능별 권한 판정 — `effective_permissions`(`/me`와 관문이 같은 값) · `require_permission(기능)`(조치 실행 · 인시던트 종료 라우트 의존성) · `check_permission`(Workflow · 문의 접수의 잠금 안 재판정). 계정 관리 관문 `require_user_management` · `is_user_manager`(`/api/v1/users` 라우터 의존성 — TENANT ADMIN · CENTRAL_ADMIN만) |
 | `staff_service.py` | (#492) 직원 관리 트랜잭션 소유자 — 목록 · 등급 · 상태 · (#572 2번) 담당 그룹 배정(`get_groups` · `replace_groups`) · 이력. 모든 쓰기는 `admin_service._transaction(central=True)` 안이다(중앙 관리계정만 — #572 4번). 대상은 PLATFORM만, 자기 변경 금지(잠금 안 행위자 재판정과 함께 ACTIVE 중앙 관리계정을 한 명 이상 남긴다), 비활성화의 세션 회수, 등급 변경 때 담당 그룹 비움(`GROUP_ASSIGNMENTS_CHANGED` 함께). (#572 1번) 직원 이메일 초대 · 재발송 — Cognito 호출은 트랜잭션 밖, 만드는 계정은 담당 그룹 없는 `TENANT_MANAGER`(§직원 관리) |
@@ -462,6 +463,28 @@ SDK 호출 뒤 잠금 안의 재확인(행위자 · 대상 신원 · 대상 테�
 | 2.5.7 OTP · MFA 분실 시 등록 때와 같은 수준의 신원 확인 | (#515) TOTP 초기화는 행위자가 앱 밖에서 신원을 확인했다는 진술(`identity_verified`)을 요구하고, 초기화 뒤 새 TOTP 등록과 이메일 코드 확인을 다시 거치게 한다. 앱은 그 신원 확인의 수준을 검증하지 않으므로 이 항목의 충족을 주장하지 않는다(§TOTP 분실 복구) |
 | 3.3.3 비밀번호 변경 뒤 다른 세션 종료 | 재설정 성공 시 그 사용자의 앱 세션을 자동으로 전부 회수한다(선택이 아니라 자동). 범위는 이 앱의 세션뿐이며 연합 로그인 · 다른 신뢰 당사자까지의 종료를 주장하지 않는다 |
 | 3.3.4 사용자가 활성 세션 · 기기를 보고 재인증 뒤 로그아웃 | 미구현. ADMIN 세션 회수만으로는 이 항목을 충족하지 않는다 |
+
+## 활동 로그 (#589 B)
+
+로그인 · 세션에서 일어난 일을 `platform_events`에 남긴다. 기록 계약은 `packages/schemas/platform_events.py`, 남기는 자리는 `auth/event_log.py` 한 곳이다.
+
+| 일 | 행동 | 결과 | 남기는 자리 |
+| --- | --- | --- | --- |
+| 세션 발급(로그인 성공) | `AUTH_LOGIN` | 성공 | `service.complete_login` — 세션 발급과 같은 트랜잭션. 그 세션 ID를 싣는다 |
+| 비밀번호 단계 · 새 비밀번호 · 이메일 코드의 거절, 세션 발급의 거절(미등록 · 비활성 · 세대 불일치) | `AUTH_LOGIN` | 거절 · 실패 | `routers/auth.py` — 따로 |
+| TOTP 등록 준비 · 등록 확인 · 코드 제출의 거절 | `AUTH_MFA` | 거절 · 실패 | `routers/auth.py` — 따로 |
+| 로그아웃 | `AUTH_LOGOUT` | 성공 | `service.logout` — 세션 폐기와 같은 트랜잭션. 실제로 폐기했을 때만 |
+| 비밀번호 재설정 확정 | `AUTH_PASSWORD_RESET` | 성공 · 거절 · 실패 | `password_reset.confirm_reset` — 성공은 세션 회수와 같은 트랜잭션, 나머지는 따로 |
+
+- **행위자**: 로그인 · MFA · 재설정 시도는 로그인 전이라 `ANONYMOUS`이고, 시도한 계정은 대상(`target`)이다. 로그아웃만 그 세션의 사용자가 행위자다.
+- **대상 계정은 안정 신원 `(issuer, sub)`로만 잇는다.** 비밀번호 단계를 지난 흐름은 `LoginFlow.subject(token)`(읽기 전용 — 흐름을 꺼내지 않는다)으로, 재설정은 `AdminGetUser`가 돌려준 `sub`로 찾는다. 이메일로 앱 계정을 고르지 않으므로 **비밀번호 단계의 실패(틀린 비밀번호 · 없는 계정)는 대상 없이 남는다.**
+- **싣지 않는 것**: 입력한 이메일 · 비밀번호 · 코드 · 토큰. 남는 것은 사유 코드(`AUTH_*` · `ACCOUNT_*`)와 요청 문맥(접속지 · 브라우저 정보 · 요청 식별자)이다.
+- **남기지 않는 것**: 중간 단계의 성공, 정책에 어긋난 새 비밀번호(`AUTH_PASSWORD_POLICY`), 어긋난 단계(`AUTH_STEP_CONFLICT`), 대상 계정을 모르는 만료(`AUTH_FLOW_EXPIRED`), 재설정 요청(메일 발송 — 존재를 구분하지 않는다), TOTP 분실 복구(복구 작업 기록 `totp_recovery_operations`에만 있다).
+- **결과**: `AUTH_PROVIDER_UNAVAILABLE` · `AUTH_EMAIL_DELIVERY_FAILED` · `INTERNAL_ERROR`는 실패(`FAILED`), 그 밖의 거절은 `DENIED`다.
+- **같은 트랜잭션의 뜻**: 성공 행을 쓰지 못하면 그 쓰기도 되돌아간다 — 로그인은 세션이 생기지 않고, 로그아웃은 세션이 폐기되지 않으며(500), 재설정은 세션 회수가 되돌려져 500이다(비밀번호는 이미 바뀌었다 — §비밀번호 재설정의 승인된 한계와 같은 구간).
+- 따로 남기기가 실패하면(DB 오류) 앱 로그에만 남고 원래의 거절 응답이 그대로 나간다.
+
+권한 거절(403 `AUTH_FORBIDDEN`)은 이 모듈이 아니라 공통 오류 처리기가 `ACCESS_FORBIDDEN`으로 남긴다(`apps/core-api/access_denial_log.py`).
 
 ## TOTP 분실 복구 (#515)
 
