@@ -24,7 +24,8 @@
     않는다 — 치면 아직 읽지 않은 탐지를 건너뛴다. 순회가 시작된 뒤 갱신된 탐지는 다음 순회가 다시 읽는다.
     SETTLE_MARGIN 은 우리 시계와 GuardDuty 시계의 차이, 갱신이 목록에 보이기까지의 지연을 덮는다.
   - 저장에 실패한 탐지가 있으면 그 갱신 시각(hold) 너머로 옮기지 않는다 — 다음 순회가 거기서 다시 읽고 이미
-    남은 것은 중복으로 접힌다. 형식이 어긋나 거절한 탐지는 커서를 막지 않는다 — 다시 읽어도 같은 이유로 거절된다.
+    남은 것은 중복으로 접힌다. hold 는 상한일 뿐 진척을 만들지 않는다 — watermark 가 없으면 커서를 그대로 둔다.
+    형식이 어긋나 거절한 탐지는 커서를 막지 않는다 — 다시 읽어도 같은 이유로 거절된다.
 
 탐지 1건의 실패는 그 건만 되감고 다음 건으로 간다. AWS 오류(권한 없음 · 엔드포인트 없음)는 그 리전의 읽기만
 FAILED 로 남기고 자산 수집 결과를 바꾸지 않는다 — 템플릿을 아직 갱신하지 않은 고객 역할에는 ListFindings 가 없다.
@@ -155,12 +156,21 @@ def _store(db, page, *, tenant_id, account_id, region, since, progress, now, pub
             progress=PassProgress(page.next_token, started_at, watermark, hold),
         )
     else:
-        reached = [moment for moment in (watermark, hold) if moment is not None]
         guardduty_repo.save_cursor(
-            db, tenant_id=tenant_id, region=region, updated_since=min(reached) if reached else since,
+            db, tenant_id=tenant_id, region=region, updated_since=_reached(since, watermark, hold),
         )
     db.commit()
     return summary
+
+
+def _reached(since: datetime, watermark: datetime | None, hold: datetime | None) -> datetime:
+    """끝난 순회가 커서를 옮길 자리. 진척은 watermark 만 만들고 hold 는 그 상한이다.
+
+    watermark 가 없으면 빠짐없이 훑었다고 확인된 범위가 없으니 그대로 둔다 — hold 는 실패한 탐지의 상세
+    갱신 시각이라 순회 뒤로 가 있을 수 있고, 거기까지 옮기면 그사이에 생긴 탐지를 건너뛴다."""
+    if watermark is None:
+        return since
+    return watermark if hold is None else min(watermark, hold)
 
 
 def _store_one(db, finding, summary, *, tenant_id, account_id, region, publish) -> bool:

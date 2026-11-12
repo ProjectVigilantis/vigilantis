@@ -5,6 +5,7 @@
   - 같은 탐지가 갱신돼 다시 와도 한 번만 남는다(탐지 ID).
   - 커서: 처음은 INITIAL_LOOKBACK 만큼, 다음 회차는 커서부터. 저장에 실패한 탐지에서 멈춘다.
     한도에서 끊긴 순회는 토큰으로 이어 읽고, 순회 중 갱신된 탐지는 진척으로 치지 않는다(PR 리뷰 2 · 3).
+    실패한 탐지의 시각만으로는 커서를 옮기지 않는다(PR 리뷰 2차 1).
   - 글로벌 서비스 탐지는 리전이 달라도 받는다. 다른 계정 탐지는 거절한다(PR 리뷰 1).
   - 자동 선차단 · 격리로 가지 않는다(Q2) — 접수 때 부르지 않고, 다시 거는 자리는 위협 유형 관문이 막는다.
   - 읽기 실패는 그 리전의 FAILED 로만 남는다.
@@ -327,6 +328,38 @@ def test_a_single_round_does_not_count_a_finding_updated_during_it(world):
     w.fake.before_get = update_a
     _ingest(w)
     assert _cursor(w) == w.now - timedelta(hours=1)
+
+
+def test_a_failed_finding_alone_does_not_move_the_cursor_past_an_unread_one(world, monkeypatch):
+    # 목록이 a 만 고른 뒤 b 가 생기고 a 가 갱신된다. 상세는 a 만 읽고 a 저장이 실패한다(PR 리뷰 2차 1).
+    # 실패한 탐지의 시각(hold)은 상한일 뿐이다 — 그것만으로 커서를 옮기면 그보다 이른 b 를 건너뛴다
+    w = world
+    w.fake.findings = [_finding(w, "a", updated=w.now - timedelta(hours=1))]
+    start = w.now - guardduty_ingress.INITIAL_LOOKBACK
+
+    def add_b_then_update_a(fake):
+        fake.before_get = None
+        fake.findings.append(_finding(w, "b", updated=w.now))
+        fake.findings[0]["UpdatedAt"] = _stamp(w.now + timedelta(seconds=1))
+
+    w.fake.before_get = add_b_then_update_a
+    real = guardduty_ingress.create_incident_from_intake
+
+    def fail_a(db, intake):
+        if intake.threat_event.source_event_id == "a":
+            raise RuntimeError("저장 실패")
+        return real(db, intake)
+
+    monkeypatch.setattr(guardduty_ingress, "create_incident_from_intake", fail_a)
+    first = _ingest(w)
+    assert (first["read"], first["events_created"], first["failed"]) == (1, 0, 1)
+    assert _cursor(w) == start  # 진척으로 확인된 것이 없다 — 그대로
+
+    monkeypatch.setattr(guardduty_ingress, "create_incident_from_intake", real)
+    second = _ingest(w, now=w.now + timedelta(minutes=10))
+    assert (second["read"], second["events_created"], second["duplicates"], second["failed"]) == (2, 2, 0, 0)
+    assert sorted(e.source_event_id for e in _events(w)) == ["a", "b"]  # 각각 한 번씩
+    assert _cursor(w) == w.now + timedelta(seconds=1)
 
 
 def test_a_refused_token_restarts_the_pass(world, monkeypatch):
