@@ -427,14 +427,17 @@ def _close_and_publish(
     next_status: ExecutionStatus,
     error_summary: str | None = None,
     blocked_by: ErrorCode | None = None,
+    completion_reason: str | None = None,
 ) -> None:
     """확정 → 카운트 → 발행. 확정이 None이면 다른 주체가 먼저 옮긴 것이다.
 
     blocked_by 는 시작 관문이 거절한 코드다 — 확정과 같은 트랜잭션에 그 거절을 활동 로그로 남긴다(#589).
+    completion_reason 은 완료 사유 코드만 전달하며 ACTION_BLOCK 을 추가하지 않는다.
     """
     closure = workflows.close_execution(
         db, execution_id, next_status=next_status, error_summary=error_summary,
         blocked_by=blocked_by,
+        completion_reason=completion_reason,
     )
     if closure is None:
         # 실행 도중 다른 주체가 먼저 확정했다 — 발행도 그쪽이 한다
@@ -730,6 +733,7 @@ def _dispatch_claimed(
                 report,
                 next_status=ExecutionStatus.FAILED,
                 error_summary=str(refused),
+                completion_reason=workflows.TARGET_CHANGED_BEFORE_START,
             )
             return
         except workflows.TenantSuspendedBeforeStart as refused:

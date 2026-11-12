@@ -4084,12 +4084,14 @@ def close_execution(
     error_summary: str | None = None,
     keep_verification_hold: bool = False,
     blocked_by: ErrorCode | None = None,
+    completion_reason: str | None = None,
 ) -> ExecutionClosure | None:
     """실행 상태 확정과 Incident 전이를 **한 트랜잭션**으로 커밋한다. (Issue #232)
 
     **확정한 전이 1건마다 플랫폼 활동 로그를 같은 트랜잭션에 남긴다**(#589, _closure_event). None 이면 남기지
     않는다. blocked_by 는 시작 관문이 단계 0건 실행을 거절한 코드다(dispatcher — 정지 테넌트) — 그 거절을
-    ACTION_BLOCK 으로 함께 남기고 완료 실패의 사유로도 쓴다. error_summary 는 사유로 읽지 않는다.
+    ACTION_BLOCK 으로 함께 남기고 완료 실패의 사유로도 쓴다. completion_reason 은 완료 실패 사유 코드만
+    전달한다(대상 변화로 시작하지 않은 실행). error_summary 는 사유로 읽지 않는다.
 
     나눠 커밋하면 그 사이의 조회가 "ACTION_IN_PROGRESS인데 진행 중인 실행이 없는"
     인시던트를 보게 되고, 상세 응답 계약(api/incidents.py)이 그 조합을 거절해 상세
@@ -4224,6 +4226,7 @@ def close_execution(
         next_status=next_status,
         typed_reason=(
             blocked_by.value if blocked_by is not None
+            else completion_reason if completion_reason is not None
             else verification_reason.value
             if keep_verification_hold and verification_reason is not None else None
         ),

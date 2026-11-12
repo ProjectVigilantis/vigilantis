@@ -35,8 +35,9 @@ from schemas.api.errors import ErrorCode
 from schemas.api.incidents import IncidentCategory, IncidentStatus
 from schemas.candidates import CandidateStatus
 from schemas.evidence import EvidenceType
+from schemas.platform_events import PlatformActorKind, PlatformEventOutcome, PlatformEventTargetType
 from schemas.runbooks import RunbookId, TriggerSource
-from sqlalchemy import delete, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.orm import Session
 from tests.audit_cleanup import purge_audit_events
 from tests.test_auto_isolation_workflow import TIMEOUT, _attempt, _executions, _seed
@@ -433,6 +434,22 @@ def test_gate_ignores_threat_blocks_and_automatic_paths(db, make_incident, make_
         workflows.refuse_start_if_target_changed(db, execution)
 
 
+def _assert_target_changed_event(db, incident_id, execution_id):
+    rows = db.scalars(
+        select(models.PlatformEvent).where(
+            models.PlatformEvent.target_id.in_([str(incident_id), str(execution_id)])
+        )
+    ).all()
+    assert [
+        (row.action, row.outcome, row.actor_kind, row.target_type, row.target_id, row.details)
+        for row in rows
+    ] == [(
+        "ACTION_COMPLETE", PlatformEventOutcome.FAILED, PlatformActorKind.SYSTEM,
+        PlatformEventTargetType.EXECUTION, str(execution_id),
+        {"reason_code": "TARGET_CHANGED_BEFORE_START"},
+    )]
+
+
 def test_dispatch_closes_a_stale_approval_without_touching_aws(db, make_incident, make_candidate, aws):
     _collect(db, instance_type=BACKUP_TYPE, verdict="COST_CANDIDATE",
              evaluated_at=datetime.now(UTC) - timedelta(hours=2))
@@ -449,13 +466,14 @@ def test_dispatch_closes_a_stale_approval_without_touching_aws(db, make_incident
     assert operations(aws) == []
     assert exec_repo.list_steps(db, execution_id) == []
     assert incidents_repo.get_incident(db, incident_id).status is not IncidentStatus.ACTION_IN_PROGRESS
+    _assert_target_changed_event(db, incident_id, execution_id)
 
 
 def test_rightsizing_stops_when_the_type_changed_while_waiting(db, make_incident, make_candidate, aws):
     """탐지 때 t3.xlarge 였는데 승인 대기 중 누가 t3.2xlarge 로 올렸다. 목표 타입은 지금의 인스턴스에 대한
     계산이 아니다. 백업은 잡되 정지 · 타입 변경은 부르지 않는다."""
     _collect(db, instance_type=BACKUP_TYPE, verdict="COST_CANDIDATE")
-    _, execution_id = _approved_rightsizing(db, make_incident, make_candidate)
+    incident_id, execution_id = _approved_rightsizing(db, make_incident, make_candidate)
     aws(current_type="t3.2xlarge")
 
     cycle(db)
@@ -469,6 +487,7 @@ def test_rightsizing_stops_when_the_type_changed_while_waiting(db, make_incident
     assert "stop_instances" not in operations(aws)
     assert "modify_instance_attribute" not in operations(aws)
     assert exec_repo.list_steps(db, execution_id) == []
+    _assert_target_changed_event(db, incident_id, execution_id)
 
 
 @pytest.mark.parametrize("detected_type", [BACKUP_TYPE, None], ids=["same-type", "no-snapshot"])
