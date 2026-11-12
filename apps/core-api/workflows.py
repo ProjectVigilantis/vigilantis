@@ -6475,9 +6475,10 @@ def reserve_nacl_deny_expiry(
     if _tenant_suspended(db, block.tenant_id):
         db.commit()
         return _expiry_skipped(incident_id, execution_id, "테넌트가 정지 상태입니다")
-    if any(
-        row.target_arn == block.target_arn for row in executions_repo.list_non_terminal(db)
-    ):
+    # 같은 대상 확인은 대상 잠금 안에서 한다(T-10 · #595). 다른 인시던트의 접수는 위 인시던트 잠금으로
+    # 줄을 서지 않으므로, 잠금 없이 보면 그 접수의 미커밋 행을 못 본 채 둘 다 통과한다. 잠금 순서는
+    # 실행(차단) → 인시던트 → 대상이다
+    if _active_on_target(db, block.target_arn):
         # 같은 NACL에 끝나지 않은 실행(관제자 해제 · 다른 차단)이 있다 — 그 실행이 끝난 뒤의
         # 주기가 다시 본다. 관제자 해제였으면 만료 스캔이 더는 집지 않는다
         db.commit()
