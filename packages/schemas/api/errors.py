@@ -60,6 +60,7 @@ class ErrorCode(str, Enum):
     INQUIRY_STATE_CONFLICT = "INQUIRY_STATE_CONFLICT"        # 409
     NOTIFICATION_NOT_FOUND = "NOTIFICATION_NOT_FOUND"        # 404 — 없음 또는 현재 조회 범위 밖
     REQUEST_BODY_TOO_LARGE = "REQUEST_BODY_TOO_LARGE"        # 413 — 공개 접수 본문 예산 초과
+    EVIDENCE_EXPORT_TOO_LARGE = "EVIDENCE_EXPORT_TOO_LARGE"  # 413 — 근거 내보내기 파일이 상한(2 MiB)을 넘어 파일 대신 봉투(#488 · 잘라서 보내지 않는다)
     REQUEST_VALIDATION_FAILED = "REQUEST_VALIDATION_FAILED"  # 422
     INTERNAL_ERROR = "INTERNAL_ERROR"                        # 500
 

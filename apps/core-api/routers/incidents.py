@@ -16,11 +16,10 @@
 #   - 종료의 상태 전이·트랜잭션은 workflows.resolve_incident가 소유한다. 라우터는
 #     commit 이후 INCIDENT_UPDATED를 발행하는 데까지만 한다 — 발행을 Workflow에
 #     두면 그 계층이 앱 상태(app.state.realtime)를 알아야 한다.
-#   - 접근 보호(#492 PR 2 · #572 5번): Origin · 세션은 포함 시점(main)에 건다. 종료만 기능 권한
-#     (RESOLVE_INCIDENT — TENANT ADMIN · 권한을 받은 OPERATOR · 플랫폼 관리 권한자)을 여기서 검사하며,
-#     거절되면 대상을 읽지 않고 resolve_incident 에 닿지 않는다.
+#   - 접근 보호(#492 PR 2 · #572 5번): Origin · 세션은 포함 시점(main)에 건다. 종료(RESOLVE_INCIDENT)와
+#     근거 내보내기(EXECUTE_ACTION)는 기능 권한을 여기서 검사하며, 거절되면 대상을 읽지 않는다.
 #     조회 2종은 테스트 서버(scripts/stepper)가 db= · scope= 로 직접 부른다.
-#   - 테넌트 범위: 세 경로 모두 요청자의 범위(auth.access)로 거른다 — 목록은 범위 밖을 빼고, 상세 · 종료는
+#   - 테넌트 범위: 모든 경로를 요청자의 범위(auth.access)로 거른다 — 목록은 범위 밖을 빼고, 상세 · 종료 · 내보내기는
 #     범위 밖이면 404 INCIDENT_NOT_FOUND 다. 종료는 요청자(actor)를 resolve_incident 에 넘겨, Workflow 가
 #     인시던트를 잠그기 전에 users 잠금 안에서 세션 · 조치 권한 · 담당 고객을 다시 판정한 범위로 한 번 더
 #     거르고 정지를 판정한다. 감사 기록(T-2 · #544)의 행위자도 그 재판정한 신원이다.
@@ -32,7 +31,7 @@ import logging
 from collections.abc import Sequence
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
@@ -67,6 +66,7 @@ from db.repositories import executions as executions_repo
 from db.repositories import incidents as incidents_repo
 from db.session import get_db
 from exceptions import ApiError
+from evidence_export import ExportFormat, export_incident_evidence
 from identifiers import canonical_id
 from incident_analysis import load_analysis_results
 from realtime import incident_event
@@ -77,6 +77,7 @@ router = APIRouter(prefix="/api/v1", tags=["incidents"])
 logger = logging.getLogger("vigilantis.incidents")
 
 require_resolve_incident = require_permission(FeaturePermission.RESOLVE_INCIDENT)
+require_export_evidence = require_permission(FeaturePermission.EXECUTE_ACTION)
 
 
 def _recovery_ids(
@@ -286,6 +287,23 @@ def get_incident(
     scope: TenantScope = Depends(require_tenant_scope),
 ) -> IncidentResponse:
     return _to_detail(db, _load_incident(db, incident_id, scope))
+
+
+@router.get("/incidents/{incident_id}/evidence/export", response_class=Response)
+def export_evidence(
+    incident_id: str,
+    format: ExportFormat,
+    user: CurrentUser = Depends(require_export_evidence),
+    scope: TenantScope = Depends(require_tenant_scope),
+    db: Session = Depends(get_db),
+) -> Response:
+    row = _load_incident(db, incident_id, scope)
+    file = export_incident_evidence(db, row, format, user)
+    return Response(
+        content=file.body,
+        media_type=file.media_type,
+        headers={"Content-Disposition": f'attachment; filename="{file.filename}"'},
+    )
 
 
 @router.post("/incidents/{incident_id}/resolve", response_model=IncidentResponse)
