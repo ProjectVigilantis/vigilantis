@@ -383,14 +383,13 @@ def change_permissions(
             _state(permissions=permissions.ordered(permissions_set)),
             now,
         )
-        # 활동 로그(#589) — 같은 세션 · 같은 commit. 행위자는 방금 재판정한 admin, tenant 는 영향받은 대상의 것이다.
-        platform_events_repo.record_platform_event(
+        _platform_event(
             db,
+            admin,
             PlatformEventAction.USER_PERMISSIONS_CHANGE,
-            platform_events_repo.person(admin),
-            tenant_id=target.tenant_id,
-            target_id=target.user_id,
-            details={
+            target.user_id,
+            target.tenant_id,
+            {
                 "before": permissions.ordered(granted),
                 "after": permissions.ordered(permissions_set),
             },
