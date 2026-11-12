@@ -49,6 +49,7 @@ from schemas.api.auth import AccountType, PlatformRole, UserRole
 from schemas.api.errors import ErrorCode
 from schemas.api.staff import StaffGroupsResponse, StaffItem, StaffResponse
 from schemas.api.users import UserEventAction, UserEventsResponse, UserStatus
+from schemas.platform_events import PlatformEventAction
 from sqlalchemy.orm import Session
 
 from . import admin_service, service, sessions
@@ -145,6 +146,9 @@ def invite_staff(
                 admin_service._state(platform_role=PlatformRole.TENANT_MANAGER, status=UserStatus.ACTIVE),
                 now,
             )
+            admin_service._platform_event(
+                db, admin, PlatformEventAction.USER_INVITE, row.user_id, None
+            )
             item = _item(row, None)
     except Exception:
         if not foreign_identity:
@@ -213,6 +217,9 @@ def resend_invite(db: Session, actor: Actor, get_adapter: Callable[[], Any], use
             admin_service._state(),
             actor.clock(),
         )
+        admin_service._platform_event(
+            db, admin, PlatformEventAction.USER_INVITE_RESEND, current.user_id, None
+        )
 
 
 def list_events(db: Session, actor: Actor, user_id: str, *, limit: int) -> UserEventsResponse:
@@ -250,6 +257,14 @@ def change_platform_role(
             admin_service._state(platform_role=platform_role),
             now,
         )
+        admin_service._platform_event(
+            db,
+            admin,
+            PlatformEventAction.USER_PLATFORM_ROLE_CHANGE,
+            target.user_id,
+            None,
+            {"before": before["platform_role"], "after": platform_role.value},
+        )
         if previous:
             admin_service._audit(
                 db,
@@ -259,6 +274,14 @@ def change_platform_role(
                 admin_service._state(group_ids=list(previous)),
                 admin_service._state(group_ids=[]),
                 now,
+            )
+            admin_service._platform_event(
+                db,
+                admin,
+                PlatformEventAction.USER_GROUP_ASSIGNMENTS_CHANGE,
+                target.user_id,
+                None,
+                {"before": list(previous), "after": []},
             )
 
 
@@ -297,6 +320,14 @@ def replace_groups(db: Session, actor: Actor, user_id: str, group_ids: list[UUID
             admin_service._state(group_ids=list(requested)),
             now,
         )
+        admin_service._platform_event(
+            db,
+            admin,
+            PlatformEventAction.USER_GROUP_ASSIGNMENTS_CHANGE,
+            target.user_id,
+            None,
+            {"before": list(current), "after": list(requested)},
+        )
 
 
 def change_status(db: Session, actor: Actor, user_id: str, status: UserStatus) -> None:
@@ -327,4 +358,12 @@ def change_status(db: Session, actor: Actor, user_id: str, status: UserStatus) -
             before,
             admin_service._state(status=status),
             now,
+        )
+        admin_service._platform_event(
+            db,
+            admin,
+            PlatformEventAction.USER_STATUS_CHANGE,
+            target.user_id,
+            None,
+            {"before": before["status"], "after": status.value},
         )
