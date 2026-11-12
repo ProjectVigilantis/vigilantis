@@ -418,6 +418,12 @@ export interface ExecutionSummaryItem {
   available_recovery_runbook_ids: RollbackRunbookId[];
   /** 보류가 없으면 null. UNVERIFIED면 반드시 있고 SUCCESS·ROLLBACK_INITIATED에는 오지 않는다(#249). */
   verification_hold?: ExecutionVerificationHold | null;
+  /** 실행 행 생성(예약) 시각. AWS 조치의 실제 시작 시각이 아니다. */
+  created_at: IsoDateTime;
+  /** 기록된 완료 시각. null은 기록 부재이며 결과는 status로 판정한다. */
+  finished_at: IsoDateTime | null;
+  /** 원복의 원 실행 ID. null은 원 실행 부재이며 값이 있어도 원복 성공은 아니다. */
+  parent_execution_id: string | null;
   updated_at: IsoDateTime;
 }
 
