@@ -5,11 +5,21 @@
 // (lib/guardduty.ts `guardDutyMessage`). 사실은 코드에서 확인한 것만 적는다: 플랫폼이 하는 일은
 // apps/core-api/services/guardduty.py(없으면 만든다 · 부가 보호 기능은 끈 채 · 정지된 탐지기는 다시 켜지 않는다 ·
 // 끄는 호출 없음), 사유별 안내는 lib/guardduty.ts다. 그 동작이 바뀌면 이 문서도 함께 고친다.
+//
+// **명령줄 예시는 두지 않는다.** `aws guardduty create-detector --enable`은 기능 목록을 주지 않으면 부가 보호 기능이
+// 켜진 채 만들어진다(CreateDetector API — 플랫폼이 만들 때 기능을 모두 끈 채 넘기는 이유와 같다). 문서가 말하는
+// 요금(기본 탐지)과 고객사 청구액이 어긋나게 된다. 기능을 끄는 긴 명령을 싣는 대신, 직접 켤 때 부가 기능이 함께
+// 켜질 수 있다는 것과 끄는 자리를 §5에 적는다(#624 리뷰).
 
 import type { Metadata } from 'next';
 
 import { LegalDocument, LegalList, LegalTable, type LegalSection } from '@/components/legal/legal-document';
-import { GUARDDUTY_FEE_NOTICE, GUARDDUTY_PRICING_URL, guardDutyReason } from '@/lib/guardduty';
+import {
+  GUARDDUTY_FEE_NOTICE,
+  GUARDDUTY_PRICING_URL,
+  GUARDDUTY_SELF_ENABLE_NOTICE,
+  guardDutyReason,
+} from '@/lib/guardduty';
 import { SERVICE_NAME } from '@/lib/legal';
 
 export const metadata: Metadata = {
@@ -68,25 +78,17 @@ const SECTIONS: LegalSection[] = [
     id: 'how',
     title: '4. 켜는 방법',
     body: (
-      <>
-        <LegalList
-          numbered
-          items={[
-            '안내받은 AWS 계정으로 AWS 콘솔에 로그인합니다.',
-            '오른쪽 위 리전 목록에서 안내받은 리전을 고릅니다. GuardDuty는 리전마다 따로 켭니다.',
-            'GuardDuty 서비스를 엽니다.',
-            '처음 쓰는 리전이면 시작 화면에서 GuardDuty를 활성화합니다. 정지해 둔 리전이면 설정에서 다시 활성화합니다.',
-            '안내받은 리전이 여럿이면 리전마다 되풀이합니다.',
-            '다 켰으면 담당자에게 알려 주세요. 담당자가 연결을 다시 확인합니다.',
-          ]}
-        />
-        <p>
-          명령줄로 켤 수도 있습니다. 리전마다 한 번씩 실행합니다:{' '}
-          <code className="bg-secondary rounded px-1.5 py-0.5 font-mono text-[13px] break-all">
-            aws guardduty create-detector --enable --region 리전
-          </code>
-        </p>
-      </>
+      <LegalList
+        numbered
+        items={[
+          '안내받은 AWS 계정으로 AWS 콘솔에 로그인합니다.',
+          '오른쪽 위 리전 목록에서 안내받은 리전을 고릅니다. GuardDuty는 리전마다 따로 켭니다.',
+          'GuardDuty 서비스를 엽니다.',
+          '처음 쓰는 리전이면 시작 화면에서 GuardDuty를 활성화합니다. 정지해 둔 리전이면 설정에서 다시 활성화합니다.',
+          '안내받은 리전이 여럿이면 리전마다 되풀이합니다.',
+          '다 켰으면 담당자에게 알려 주세요. 담당자가 연결을 다시 확인합니다.',
+        ]}
+      />
     ),
   },
   {
@@ -95,6 +97,7 @@ const SECTIONS: LegalSection[] = [
     body: (
       <>
         <p>{GUARDDUTY_FEE_NOTICE}</p>
+        <p>{GUARDDUTY_SELF_ENABLE_NOTICE}</p>
         <p>
           {SERVICE_NAME} 이용 요금과는 별개이며 AWS 청구서에 나옵니다. 무료 체험이 며칠 남았는지와 예상 비용은 GuardDuty
           콘솔의 사용량 화면에서 볼 수 있습니다. 요금 기준은{' '}

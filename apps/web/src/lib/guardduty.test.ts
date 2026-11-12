@@ -5,6 +5,7 @@ import test from 'node:test';
 
 import {
   GUARDDUTY_FEE_NOTICE,
+  GUARDDUTY_SELF_ENABLE_NOTICE,
   guardDutyFailures,
   guardDutyMessage,
   guardDutyReason,
@@ -89,6 +90,13 @@ test('리전 목록이 없는 예전 기록의 안내문은 관제 리전 전부
 test('요금 고지는 고객 계정 부과와 계정 · 리전마다 30일 무료 체험을 말한다', () => {
   assert.match(GUARDDUTY_FEE_NOTICE, /고객사 AWS 계정에 부과/);
   assert.match(GUARDDUTY_FEE_NOTICE, /계정과 리전마다 처음 30일은 무료 체험/);
+});
+
+test('직접 켤 때의 주의는 부가 보호 기능이 함께 켜질 수 있다는 것과 따로 붙는 요금, 끄는 자리를 말한다', () => {
+  // 고객사가 직접 켜면 플랫폼과 달리 부가 기능이 켜질 수 있다(#624 리뷰) — 요금 고지가 기본 탐지만 말하므로 따로 알린다
+  assert.match(GUARDDUTY_SELF_ENABLE_NOTICE, /부가 보호 기능이 함께 켜질 수 있고/);
+  assert.match(GUARDDUTY_SELF_ENABLE_NOTICE, /켜진 기능마다 요금이 따로/);
+  assert.match(GUARDDUTY_SELF_ENABLE_NOTICE, /보호 플랜 설정에서 끕니다/);
 });
 
 test('안내 페이지는 고객사의 AWS 담당자가 로그인 없이 연다', () => {

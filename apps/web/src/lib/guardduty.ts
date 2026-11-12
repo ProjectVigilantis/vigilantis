@@ -12,6 +12,14 @@ import type { GuardDutyRegionFailure, TenantDetail, TenantVerification } from '.
 export const GUARDDUTY_FEE_NOTICE =
   'GuardDuty 요금은 고객사 AWS 계정에 부과됩니다. 계정과 리전마다 처음 30일은 무료 체험이고, 그 뒤에는 AWS가 분석한 로그 양에 따라 요금이 나옵니다.';
 
+/**
+ * 고객사가 직접 켤 때의 요금 주의(안내 페이지 §5). 플랫폼은 부가 보호 기능을 모두 끈 채 만들지만
+ * (services/guardduty.py `DISABLED_FEATURES`), 고객사가 콘솔이나 명령줄로 켜면 그 기능이 함께 켜질 수 있다 —
+ * CreateDetector는 기능 목록을 주지 않으면 부가 기능을 켠 채 만든다. 콘솔의 기본값은 확인하지 못해 「켜질 수 있고」로 적는다.
+ */
+export const GUARDDUTY_SELF_ENABLE_NOTICE =
+  '직접 켤 때 S3 · EKS · 맬웨어 보호 같은 부가 보호 기능이 함께 켜질 수 있고, 켜진 기능마다 요금이 따로 붙습니다. 필요 없으면 GuardDuty 콘솔의 보호 플랜 설정에서 끕니다.';
+
 export const GUARDDUTY_PRICING_URL = 'https://aws.amazon.com/guardduty/pricing/';
 
 export interface GuardDutyReason {
