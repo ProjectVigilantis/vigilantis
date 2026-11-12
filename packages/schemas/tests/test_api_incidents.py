@@ -498,12 +498,17 @@ def test_finops_rejects_threat_context(model, context):
         model.model_validate(data)
 
 
+#: threat_context 변형이 없는 위협 유형 — 출발지 IP · 노출 대역 같은 외부 경로 칸이 없어 threat_context 가 null 이다.
+#: GuardDuty 탐지(#588 C · routers/incidents._to_threat_context). 새 유형은 변형을 두거나 여기에 이유와 함께 적는다.
+CONTEXTLESS_EVENT_TYPES = {"GUARDDUTY_FINDING"}
+
+
 def test_public_threat_discriminator_covers_internal_event_types():
     from schemas.events import ThreatEventType
 
     schema = IncidentResponse.model_json_schema()
     variants = schema["properties"]["threat_context"]["anyOf"][0]["discriminator"]["mapping"]
-    assert set(variants) == {item.value for item in ThreatEventType}
+    assert set(variants) == {item.value for item in ThreatEventType} - CONTEXTLESS_EVENT_TYPES
 
 
 @pytest.mark.parametrize("status", ["NO_PROPOSAL", "GUARDRAIL_REJECTED", "UNAVAILABLE"])

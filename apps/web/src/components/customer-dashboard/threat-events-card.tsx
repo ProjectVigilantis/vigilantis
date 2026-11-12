@@ -26,9 +26,11 @@ import { cn } from '@/lib/utils';
 import type { ThreatEventKind } from '@/types/api';
 
 // 무차별 대입은 실제 공격 시도라 빨강, 전체 개방은 노출 상태라 주황이다(DESIGN.md §상태 색).
+// GuardDuty 탐지는 관측이지 침해 증거가 아니라(#588 Q2) 노랑으로 둔다.
 const KIND_FILL: Record<ThreatEventKind, string> = {
   SSH_BRUTE_FORCE: 'bg-status-critical',
   OPEN_IP: 'bg-status-serious',
+  GUARDDUTY_FINDING: 'bg-status-warning',
 };
 
 type Load =

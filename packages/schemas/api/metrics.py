@@ -349,8 +349,9 @@ class AssetInventoryAxis(BaseModel):
         return self
 
 
-#: 위협 이벤트 유형 — 인시던트 계약 `threat_context.event_type` 과 같은 값이다(incidents.py).
-ThreatEventKind = Literal["OPEN_IP", "SSH_BRUTE_FORCE"]
+#: 위협 이벤트 유형 — events.ThreatEventType 과 같은 값이다. 인시던트 계약 `threat_context.event_type` 은 이 가운데
+#: 위협 문맥이 있는 두 유형(OPEN_IP · SSH_BRUTE_FORCE)이다 — GuardDuty 탐지(#588 C)는 threat_context 가 null 이다.
+ThreatEventKind = Literal["OPEN_IP", "SSH_BRUTE_FORCE", "GUARDDUTY_FINDING"]
 
 
 class ThreatEventPoint(BaseModel):

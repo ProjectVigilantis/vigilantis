@@ -162,6 +162,9 @@ GUARDDUTY_ACTIONS = (
     "guardduty:ListDetectors",
     "guardduty:GetDetector",
     "guardduty:CreateDetector",
+    # 탐지 결과 읽기(수집 주기 · #588 C) — 같은 관제 리전 울타리 안이다
+    "guardduty:ListFindings",
+    "guardduty:GetFindings",
 )
 GUARDDUTY_SERVICE = "guardduty.amazonaws.com"
 GUARDDUTY_SERVICE_ROLE = "AWSServiceRoleForAmazonGuardDuty"
@@ -553,7 +556,7 @@ def build_cost_policy() -> dict:
 
 
 def build_guardduty_policy(account: str, region: str) -> dict:
-    """GuardDuty 켜기 정책. services/guardduty.py가 부르는 작업의 거울이고, 테스트가 두 방향을 지킨다.
+    """GuardDuty 켜기 · 탐지 결과 읽기 정책. services/guardduty.py가 부르는 작업의 거울이고, 테스트가 두 방향을 지킨다.
 
     탐지기 작업은 관제 리전으로 묶는다(CreateDetector는 자원 단위 권한이 없어 Resource가 "*"다).
     처음 켤 때 GuardDuty가 서비스 연결 역할을 만드는데, 그 권한은 그 역할 ARN과 서비스 이름으로만 연다.

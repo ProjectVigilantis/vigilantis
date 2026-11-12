@@ -10,6 +10,8 @@
 #   - 접수 = 문의 + INQUIRY_CREATED 이력 + 운영자 알림을 한 트랜잭션에 쓴다.
 #   - 관리 경로(전이 · 메모 · 이력)는 대상 문의 행을 FOR UPDATE 로 잡은 뒤 조건부 UPDATE 로 전이한다.
 #     범위는 auth.access.tenant_scope_ids 하나다. 형식이 어긋난 · 없는 · 범위 밖 ID 는 같은 404 다.
+#   - 접수 · 전이 · 메모는 쓰기가 실제로 일어난 경로에서만 플랫폼 활동 로그(#589)를 같은 트랜잭션에 남긴다 —
+#     행위자는 판정된 CurrentUser, 테넌트는 문의의 테넌트다. 본문 · 메모 텍스트는 싣지 않는다.
 #   - 이력 시각은 잠금 안에서 읽고, 직전 이력보다 앞서지 않게 맞춰 오래된 순 정렬을 안정시킨다.
 # ==============================================================================
 
@@ -22,6 +24,7 @@ from auth.access import require_tenant_management, tenant_scope_ids
 from db import models
 from db.repositories import inquiries as inquiries_repo
 from db.repositories import operator_notifications
+from db.repositories.platform_events import person, record_platform_event
 from exceptions import ApiError
 from identifiers import canonical_id
 from schemas.api.errors import ErrorCode
@@ -41,6 +44,7 @@ from schemas.api.support import (
     InquiryStatus,
     NotificationKind,
 )
+from schemas.platform_events import PlatformEventAction
 from sqlalchemy.orm import Session
 from support_access import (
     Actor,
@@ -158,6 +162,13 @@ def create_inquiry(db: Session, actor: Actor, body: InquiryCreateRequest) -> Inq
             inquiry_category=inquiry.category,
             created_at=now,
         )
+        record_platform_event(
+            db,
+            PlatformEventAction.INQUIRY_CREATE,
+            person(user),
+            tenant_id=inquiry.tenant_id,
+            target_id=inquiry.inquiry_id,
+        )
         return _reload(db, inquiry.inquiry_id)
 
 
@@ -199,6 +210,14 @@ def change_status(
             note=body.note,
             now=now,
         )
+        record_platform_event(
+            db,
+            PlatformEventAction.INQUIRY_STATUS_CHANGE,
+            person(user),
+            tenant_id=inquiry.tenant_id,
+            target_id=inquiry.inquiry_id,
+            details={"before": before.value, "after": body.status.value},
+        )
         return _reload(db, inquiry.inquiry_id)
 
 
@@ -216,6 +235,13 @@ def add_note(
             after_status=None,
             note=body.note,
             now=_event_time(db, inquiry.inquiry_id, actor.clock()),
+        )
+        record_platform_event(
+            db,
+            PlatformEventAction.INQUIRY_NOTE_ADD,
+            person(user),
+            tenant_id=inquiry.tenant_id,
+            target_id=inquiry.inquiry_id,
         )
         return _event_item(event, user.email)
 

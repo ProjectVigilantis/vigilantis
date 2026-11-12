@@ -8,7 +8,7 @@ platform_events.target_type 을 다시 써야 하고, TENANT_GROUP 을 가리키
 남겨 둔 값은 다시 upgrade 해도 IF NOT EXISTS 라 안전하다.
 
 Revision ID: e589b3a1c204
-Revises: d588e4b1c2a7
+Revises: e588c2d3f4a5
 Create Date: 2026-11-11 10:00:00.000000
 """
 from __future__ import annotations
@@ -16,7 +16,7 @@ from __future__ import annotations
 from alembic import op
 
 revision = "e589b3a1c204"
-down_revision = "d588e4b1c2a7"
+down_revision = "e588c2d3f4a5"
 branch_labels = None
 depends_on = None
 

@@ -17,9 +17,13 @@
 #     세션 · 조치 권한 · 담당 고객을 다시 판정하고, 범위 밖 404 · 대상 테넌트 정지 409 와 그 판정 순서를
 #     정한다. 감사 기록(T-2 · #544)의 행위자도 그 재판정한 신원이다. 역할 의존성의 신원은 대상을 읽기 전
 #     403 판정용 스냅샷이다.
+#   - 세션 팩토리: 정지 테넌트 거절(409)의 플랫폼 활동 로그(#589)는 요청 트랜잭션을 되돌린 뒤 따로 남긴다 —
+#     그 짧은 트랜잭션을 여는 팩토리를 reserve_execution 에 넘긴다.
 # ==============================================================================
 
 from __future__ import annotations
+
+from collections.abc import Callable
 
 from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy.orm import Session
@@ -30,7 +34,7 @@ import workflows
 from auth.admin_service import Actor
 from auth.permissions import require_permission
 from auth.service import CurrentUser
-from db.session import get_db
+from db.session import get_db, get_session_factory
 from routers.users import get_actor
 from schemas.api.auth import FeaturePermission
 
@@ -50,9 +54,12 @@ def execute_action(
     db: Session = Depends(get_db),
     user: CurrentUser = Depends(require_execute_action),  # 대상을 읽기 전 403 판정용 스냅샷
     actor: Actor = Depends(get_actor),
+    session_factory: Callable[[], Session] = Depends(get_session_factory),
 ) -> ExecuteActionResponse:
     """신규 예약은 202, 같은 Key 재요청은 200 — 응답 본문은 두 경우가 같다."""
-    reservation = workflows.reserve_execution(db, payload, actor=actor)
+    reservation = workflows.reserve_execution(
+        db, payload, actor=actor, session_factory=session_factory
+    )
     if not reservation.created:
         response.status_code = status.HTTP_200_OK
     return reservation.response

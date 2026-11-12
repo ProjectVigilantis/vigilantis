@@ -79,6 +79,7 @@ from sqlalchemy import (
     Integer,
     SmallInteger,
     String,
+    Text,
     UniqueConstraint,
     Uuid,
 )
@@ -324,6 +325,44 @@ class TenantApiCallHourly(Base):
         CheckConstraint("date_trunc('hour', hour) = hour", name="hour_on_the_hour"),
         # 보관 기간 정리(hour < 기준 시각)와 기간 조회가 PK(tenant_id, hour)로는 시간 범위를 못 찾는다
         Index("ix_tenant_api_calls_hourly_hour", "hour"),
+    )
+
+
+class GuardDutyFindingCursor(Base):
+    """GuardDuty 탐지 읽기 커서 — 고객사 × 리전(읽은 탐지기)마다 다음 회차가 읽을 자리 (#588 C).
+
+    수집 주기(services/collector.py → guardduty_ingress.py)만 쓴다. 행이 없으면 처음 읽는 리전이다. 고객사가
+    지워지면 함께 지워진다(CASCADE).
+
+      - updated_since: 목록 조회 조건(갱신 시각 ≥)의 시작. 앞으로만 옮긴다.
+      - pass_*: 한 번의 목록 순회가 한 회차 한도에서 끊겼을 때만 있다. 다음 회차는 같은 조건 · pass_next_token
+        으로 이어 읽고, 순회가 끝나야 updated_since 를 옮긴다(guardduty_ingress 머리말의 규칙).
+    """
+
+    __tablename__ = "guardduty_finding_cursors"
+    __table_args__ = (
+        CheckConstraint(
+            "(pass_next_token IS NULL) = (pass_started_at IS NULL)"
+            " AND (pass_next_token IS NOT NULL OR (pass_watermark IS NULL AND pass_hold IS NULL))",
+            name="pass_shape",
+        ),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("tenants.tenant_id", ondelete="CASCADE"), primary_key=True
+    )
+    region: Mapped[str] = mapped_column(String(32), primary_key=True)
+    updated_since: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    #: 이어 읽을 ListFindings 토큰
+    pass_next_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: 순회를 시작한 시각 — 그 뒤에 갱신된 탐지는 이 순회의 진척으로 치지 않는다
+    pass_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: 지금까지 처리한 탐지 가운데 진척으로 치는 가장 늦은 갱신 시각
+    pass_watermark: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: 저장에 실패한 탐지 가운데 가장 이른 갱신 시각 — 순회가 끝나도 커서가 이 너머로 가지 않는다
+    pass_hold: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
     )
 
 

@@ -27,10 +27,15 @@ export const THREAT_RANGES: readonly { days: ThreatRangeDays; label: string }[] 
 export const THREAT_KIND_LABELS: Record<ThreatEventKind, string> = {
   SSH_BRUTE_FORCE: 'SSH 무차별 대입',
   OPEN_IP: '전체 개방 포트',
+  GUARDDUTY_FINDING: 'GuardDuty 탐지',
 };
 
-/** 출발지: SSH는 공격 IP, 개방 포트는 허용 대역. 둘은 다른 사실이라 화면 문구도 가른다. */
+/**
+ * 출발지: SSH는 공격 IP, 개방 포트는 허용 대역. 둘은 다른 사실이라 화면 문구도 가른다.
+ * GuardDuty 탐지는 출발지 칸이 없어 탐지 유형을 둔다(#588 C).
+ */
 export function threatSource(item: ThreatEventItem): { label: string; value: string } {
+  if (item.event_type === 'GUARDDUTY_FINDING') return { label: '탐지 유형', value: item.payload.finding_type };
   return item.event_type === 'SSH_BRUTE_FORCE'
     ? { label: '출발지', value: item.payload.source_ip }
     : { label: '허용 대역', value: item.payload.source_cidr };
@@ -41,8 +46,11 @@ function windowLabel(seconds: number): string {
   return seconds >= 60 && seconds % 60 === 0 ? `${seconds / 60}분` : `${seconds}초`;
 }
 
-/** 유형별 한 줄 세부. 실패 횟수 · 열린 포트. */
+/** 유형별 한 줄 세부. 실패 횟수 · 열린 포트 · GuardDuty 심각도. */
 export function threatDetail(item: ThreatEventItem): string {
+  if (item.event_type === 'GUARDDUTY_FINDING') {
+    return `심각도 ${item.payload.severity.toFixed(1)} · ${item.payload.resource_type}`;
+  }
   if (item.event_type === 'SSH_BRUTE_FORCE') {
     return `${windowLabel(item.payload.window_seconds)} 동안 로그인 실패 ${item.payload.failed_attempt_count}회`;
   }
@@ -64,7 +72,7 @@ export function timelinePercent(at: IsoDateTime, windowStart: IsoDateTime, windo
 
 /** 유형별 건수(받은 `items` 기준). */
 export function threatKindCounts(items: readonly ThreatEventItem[]): Record<ThreatEventKind, number> {
-  const counts: Record<ThreatEventKind, number> = { SSH_BRUTE_FORCE: 0, OPEN_IP: 0 };
+  const counts: Record<ThreatEventKind, number> = { SSH_BRUTE_FORCE: 0, OPEN_IP: 0, GUARDDUTY_FINDING: 0 };
   for (const i of items) counts[i.event_type] += 1;
   return counts;
 }

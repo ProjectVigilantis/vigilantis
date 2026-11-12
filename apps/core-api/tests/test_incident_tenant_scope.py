@@ -47,6 +47,7 @@ from schemas.incidents import AgentInvocationStatus
 from schemas.intake import SecOpsIncidentIntake
 from schemas.runbooks import ROLLBACK_RUNBOOK_BY_MAIN_ID, RunbookId
 from security import soar
+from sqlalchemy import func, select
 from tests.group_scope import assign_tenants
 from tests.test_auto_isolation_workflow import PRE, SKIP, _command, _pass_result
 
@@ -115,6 +116,11 @@ def _effects(db, incident: models.Incident) -> tuple:
         [e.event_id for e in events_repo.list_by_incident(db, row.incident_id)],
         [e.event_id for e in audit_repo.list_by_incident(db, row.incident_id)],
     )
+
+
+def _platform_event_count(db) -> int:
+    db.expire_all()
+    return db.scalar(select(func.count()).select_from(models.PlatformEvent))
 
 
 def _central(login_as):
@@ -659,12 +665,14 @@ def test_authority_revoked_after_the_dependencies_cannot_authorize_the_write(
 
     monkeypatch.setattr(auth_repo, "lock_users_table", revoke_then_lock)
     before = _effects(db, mine)
+    events_before = _platform_event_count(db)
 
     resp = _change(client_pg, mine, call)
 
     assert revoked == [seed.user_id]  # 의존성을 통과해 Workflow 의 쓰기 직전 잠금까지 왔다
     assert (resp.status_code, _code(resp)) == expected
     assert _effects(db, mine) == before
+    assert _platform_event_count(db) == events_before  # 회수된 권한의 쓰기는 활동 로그도 없다(#589)
     assert published == []
 
 
@@ -687,6 +695,14 @@ def test_manager_write_is_audited_as_that_platform_user_only_while_assigned(
     assert (event.action, event.actor_kind, event.actor_user_id, event.tenant_id) == (
         action, AuditActorKind.PLATFORM_USER, seed.user_id, b,
     )
+    # 활동 로그(#589)도 같은 재판정 신원 · 대상 고객사의 한 건이다
+    target_id = allowed.json()["execution_id"] if call == "execute" else theirs.incident_id
+    [platform_event] = db.scalars(
+        select(models.PlatformEvent).where(models.PlatformEvent.target_id == target_id)
+    ).all()
+    assert (
+        platform_event.actor_user_id, platform_event.actor_platform_role, platform_event.tenant_id,
+    ) == (seed.user_id, PlatformRole.TENANT_MANAGER, b)
 
     real_lock = auth_repo.lock_users_table
 
@@ -696,10 +712,12 @@ def test_manager_write_is_audited_as_that_platform_user_only_while_assigned(
 
     monkeypatch.setattr(auth_repo, "lock_users_table", revoke_a_then_lock)
     before = _effects(db, mine)
+    events_before = _platform_event_count(db)
     published.clear()
 
     refused = _change(client_pg, mine, call)
 
     assert (refused.status_code, _code(refused)) == (404, "INCIDENT_NOT_FOUND")
     assert _effects(db, mine) == before
+    assert _platform_event_count(db) == events_before
     assert published == []
