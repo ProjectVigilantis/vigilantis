@@ -240,6 +240,7 @@ PLATFORM 계정은 모두 `role=ADMIN`(호환 값)이고, 아래 PLATFORM 열은
 | --- | --- | --- | --- | --- | --- |
 | 로그인 · `/me` · `/activity` · `/logout` · 비밀번호 재설정 | 허용 | 허용(배정이 없어도) | 허용(테넌트 정지와 무관) | 허용(테넌트 정지와 무관) | 허용(테넌트 정지와 무관) |
 | 업무 조회 `GET /api/v1/assets` · `/incidents` · `/incidents/{id}` | 전체(소속 없는 기록 포함) | 배정 고객의 기록 | 자기 고객의 기록 | 자기 고객의 기록 | 자기 고객의 기록 |
+| 근거 내보내기 `GET /api/v1/incidents/{id}/evidence/export?format=md\|json`(#488, `EXECUTE_ACTION` 관문 · 감사 기록 확정 후 반환) | 전체(소속 없는 기록 포함) | 배정 고객의 기록 | 자기 고객의 기록 | `EXECUTE_ACTION` 권한이 있으면 자기 고객의 기록, 없으면 403 | 403 `AUTH_FORBIDDEN` |
 | 메트릭 `GET /api/v1/metrics/timeseries` | 전체 | 배정 고객의 기록 | 자기 고객의 기록 | 자기 고객의 기록 | 자기 고객의 기록 |
 | 유형별 비용 `GET /api/v1/costs/by-asset-type`(#572 11번) | `?tenant_id=`로 고른 고객 하나(없으면 422) | 배정 고객 하나(`?tenant_id=` 필요 · 범위 밖은 404) | 자기 고객(`tenant_id` 생략 · 다른 고객은 404) | 자기 고객 | 자기 고객 |
 | 위협 이벤트 `GET /api/v1/threat-events`(#572 10번) | 전체(소속 없는 이벤트 포함) | 배정 고객의 이벤트 | 자기 고객의 이벤트 | 자기 고객의 이벤트 | 자기 고객의 이벤트 |

@@ -58,6 +58,7 @@ _STATUS_BY_CODE: dict[ErrorCode, int] = {
     ErrorCode.INQUIRY_STATE_CONFLICT: 409,
     ErrorCode.NOTIFICATION_NOT_FOUND: 404,
     ErrorCode.REQUEST_BODY_TOO_LARGE: 413,
+    ErrorCode.EVIDENCE_EXPORT_TOO_LARGE: 413,
     ErrorCode.REQUEST_VALIDATION_FAILED: 422,
     ErrorCode.INTERNAL_ERROR: 500,
 }
@@ -96,6 +97,7 @@ _MESSAGE_BY_CODE: dict[ErrorCode, str] = {
     ErrorCode.INQUIRY_STATE_CONFLICT: "현재 문의 상태에서는 처리할 수 없습니다.",
     ErrorCode.NOTIFICATION_NOT_FOUND: "알림을 찾을 수 없습니다.",
     ErrorCode.REQUEST_BODY_TOO_LARGE: "신청 본문이 허용 크기를 초과했습니다.",
+    ErrorCode.EVIDENCE_EXPORT_TOO_LARGE: "근거 내보내기 파일이 허용 크기를 초과했습니다.",
     ErrorCode.REQUEST_VALIDATION_FAILED: "요청 값이 계약과 다릅니다.",
     ErrorCode.INTERNAL_ERROR: "서버 내부 오류입니다.",
 }

@@ -29,6 +29,7 @@ from schemas.events import (
     RiskLevel,
     RiskReasonCode,
     SshBruteForceThreatPayload,
+    SshRiskBasis,
     ThreatEventType,
     expected_mode_for,
 )
@@ -79,23 +80,37 @@ def _evaluate_open_ip(payload: OpenIpThreatPayload) -> tuple[RiskLevel, list[Ris
     return RiskLevel.MEDIUM, codes
 
 
-def _evaluate_ssh_bruteforce(
-    payload: SshBruteForceThreatPayload,
-) -> tuple[RiskLevel, list[RiskReasonCode]]:
+def classify_ssh_risk_basis(payload: SshBruteForceThreatPayload) -> SshRiskBasis:
+    """초기 판정과 모델 입력이 공유하는 현재 규칙의 분기. 등급·저장값은 바꾸지 않는다."""
     count = payload.failed_attempt_count
     rate_per_min = count * 60.0 / payload.window_seconds
 
     if count <= SSH_SINGLE_ATTEMPT:
         # 단발 — 발생 속도 무관 LOW (S8: 1회/1초)
-        return RiskLevel.LOW, [RiskReasonCode.RISK_SSH_LOW_SIGNAL]
+        return SshRiskBasis.SINGLE_ATTEMPT
     if count >= SSH_HIGH_ATTEMPT_MIN and rate_per_min >= SSH_HIGH_RATE_PER_MIN:
         # 횟수·속도 동시 충족 (S3·S9·S10)
-        return RiskLevel.HIGH, [RiskReasonCode.RISK_SSH_BRUTEFORCE]
-    if count < SSH_HIGH_ATTEMPT_MIN and rate_per_min < SSH_HIGH_RATE_PER_MIN:
-        # 저강도·저속 — 오탐·오타 (S4: 5회/3600초)
-        return RiskLevel.LOW, [RiskReasonCode.RISK_SSH_LOW_SIGNAL]
-    # 한쪽만 충족(지속적이나 발동선 미만, 또는 짧은 버스트) → MEDIUM(관제자 확인)
-    return RiskLevel.MEDIUM, [RiskReasonCode.RISK_SSH_BRUTEFORCE]
+        return SshRiskBasis.COUNT_AND_RATE_MET
+    if count >= SSH_HIGH_ATTEMPT_MIN:
+        return SshRiskBasis.COUNT_ONLY_MET
+    if rate_per_min >= SSH_HIGH_RATE_PER_MIN:
+        return SshRiskBasis.RATE_ONLY_MET
+    return SshRiskBasis.NEITHER_MET
+
+
+def _evaluate_ssh_bruteforce(
+    payload: SshBruteForceThreatPayload,
+) -> tuple[RiskLevel, list[RiskReasonCode]]:
+    level = {
+        SshRiskBasis.SINGLE_ATTEMPT: RiskLevel.LOW,
+        SshRiskBasis.COUNT_AND_RATE_MET: RiskLevel.HIGH,
+        SshRiskBasis.COUNT_ONLY_MET: RiskLevel.MEDIUM,
+        SshRiskBasis.RATE_ONLY_MET: RiskLevel.MEDIUM,
+        SshRiskBasis.NEITHER_MET: RiskLevel.LOW,
+    }[classify_ssh_risk_basis(payload)]
+    code = (RiskReasonCode.RISK_SSH_LOW_SIGNAL if level is RiskLevel.LOW
+            else RiskReasonCode.RISK_SSH_BRUTEFORCE)
+    return level, [code]
 
 
 def evaluate_threat(event: NormalizedThreatEvent) -> InitialRiskEvaluationResult:

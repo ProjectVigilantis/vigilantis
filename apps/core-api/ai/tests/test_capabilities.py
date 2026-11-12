@@ -1,14 +1,17 @@
-"""FinOps 조치 메뉴 빌더 테스트 — 축 ③ 서버 계산 가능 여부 (Issue #251).
+"""조치 메뉴 빌더 테스트 — FinOps 축 ③ 서버 계산 가능 여부 (Issue #251), SecOps NACL 대상 수 (#583).
 
 축 ①②는 골든 케이스로 test_evaluation_cases.py가 본다. 여기서는 다운사이징 목표 타입을
 규칙이 계산할 수 없는 자산에 다운사이징이 메뉴로 올라가지 않는지만 본다 — 올라가면 모델이
-고르는 순간 그래프가 값을 채우지 못해 호출 전체가 FAILED가 된다.
+고르는 순간 그래프가 값을 채우지 못해 호출 전체가 FAILED가 된다. SecOps도 같은 이유로
+코드가 1:1로 고를 수 없는 NACL 대상(둘 이상)에는 차단을 메뉴로 올리지 않는다.
 """
 
 import pytest
 
-from ai.capabilities import build_finops_capabilities
-from schemas.api.assets import AssetType, Verdict
+from ai.capabilities import build_finops_capabilities, build_secops_capabilities
+from schemas.agents import AgentExecutionContext
+from schemas.api.assets import AssetItem, AssetType, Verdict
+from schemas.events import ThreatEventType
 from schemas.runbooks import RunbookId
 
 
@@ -45,3 +48,48 @@ def test_non_ec2_menus_do_not_depend_on_instance_type():
     assert [capability.runbook_id for capability in offered] == [
         RunbookId.RUNBOOK_EBS_DELETE_UNATTACHED
     ]
+
+
+def _secops_asset(nacl_count=1):
+    prefix = "arn:aws:ec2:ap-northeast-2:123456789012:"
+    return AssetItem.model_validate({
+        "arn": prefix + "instance/i-0abc", "resource_id": "i-0abc", "asset_type": "EC2",
+        "resource_role": "PRIMARY", "account_id": "123456789012", "region": "ap-northeast-2",
+        "state": "running", "spec": {}, "evaluation_status": "PENDING",
+        "collected_at": "2026-09-11T00:00:00Z",
+        "relationships": [
+            {"relation_type": "PROTECTED_BY", "target_arn": prefix + f"network-acl/acl-0abc{index}"}
+            for index in range(nacl_count)
+        ],
+    })
+
+
+@pytest.mark.parametrize("nacl_count,offered", [(1, [RunbookId.RUNBOOK_NACL_ADD_DENY]), (2, [])])
+def test_secops_block_is_offered_only_for_a_single_protected_by_nacl(nacl_count, offered):
+    asset = _secops_asset(nacl_count)
+    menu = build_secops_capabilities(asset=asset, event_type=ThreatEventType.SSH_BRUTE_FORCE)
+    assert [capability.runbook_id for capability in menu] == offered
+
+
+@pytest.mark.parametrize("runbook,status,own_target,distinct_purpose", [
+    ("RUNBOOK_EC2_ISOLATE", "SUCCESS", True, True),
+    ("RUNBOOK_EC2_ISOLATE", "FAILED", True, False),
+    ("RUNBOOK_EC2_ISOLATE", "IN_PROGRESS", True, False),
+    ("RUNBOOK_EC2_ISOLATE", "UNVERIFIED", True, False),
+    ("RUNBOOK_EC2_ISOLATE", "SUCCESS", False, False),
+    ("RUNBOOK_NACL_ADD_DENY", "SUCCESS", True, False),
+])
+def test_nacl_purpose_distinguishes_only_recorded_successful_isolation_of_this_ec2(
+    runbook, status, own_target, distinct_purpose,
+):
+    asset = _secops_asset()
+    prior = AgentExecutionContext(
+        execution_id="prior-1", runbook_id=runbook, status=status,
+        affected_arns=[asset.arn if own_target else asset.arn + "-other"],
+    )
+    [capability] = build_secops_capabilities(
+        asset=asset, event_type=ThreatEventType.SSH_BRUTE_FORCE, prior_isolation=prior,
+    )
+    assert ("다른 호스트를 보호하기 위해" in capability.purpose) is distinct_purpose
+    assert ("성공으로 기록된" in capability.purpose) is distinct_purpose
+    assert capability.runbook_id is RunbookId.RUNBOOK_NACL_ADD_DENY

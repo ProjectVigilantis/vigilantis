@@ -18,7 +18,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from enum import Enum, unique
-from typing import Any, Mapping, Optional
+from typing import Any, Literal, Mapping, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -119,6 +119,7 @@ class PlatformEventAction(str, Enum):
     INCIDENT_CREATE = "INCIDENT_CREATE"
     INCIDENT_ANALYZE = "INCIDENT_ANALYZE"
     INCIDENT_RESOLVE = "INCIDENT_RESOLVE"
+    INCIDENT_EVIDENCE_EXPORT = "INCIDENT_EVIDENCE_EXPORT"
     ACTION_APPROVE = "ACTION_APPROVE"
     ACTION_AUTO_TRIGGER = "ACTION_AUTO_TRIGGER"
     ACTION_BLOCK = "ACTION_BLOCK"
@@ -197,6 +198,13 @@ class DecisionDetails(PlatformEventDetails):
     decision: str = Field(pattern=_STATE_PATTERN)
 
 
+class EvidenceExportDetails(PlatformEventDetails):
+    """파일을 준비해 반출 감사 기록을 확정했다. 클라이언트의 수신 완료를 뜻하지 않는다."""
+
+    format: Literal["md", "json"]
+    evidence_count: int = Field(ge=0, strict=True)
+
+
 # --- 행동별 규칙 --------------------------------------------------------------------
 
 _S = PlatformEventOutcome.SUCCEEDED
@@ -271,6 +279,9 @@ ACTION_SPECS: Mapping[PlatformEventAction, ActionSpec] = {
     ),
     _A.INCIDENT_RESOLVE: _spec(
         _C.INCIDENT, {_S}, {_USER}, _T.INCIDENT, TransitionDetails
+    ),
+    _A.INCIDENT_EVIDENCE_EXPORT: _spec(
+        _C.INCIDENT, {_S}, {_USER}, _T.INCIDENT, EvidenceExportDetails
     ),
     _A.ACTION_APPROVE: _spec(_C.ACTION, {_S}, {_USER}, _T.EXECUTION),
     _A.ACTION_AUTO_TRIGGER: _spec(_C.ACTION, {_S}, {_SYSTEM}, _T.EXECUTION),

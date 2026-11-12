@@ -67,11 +67,13 @@
 # — 모델을 부르기 전에 닫고, 조회 응답이 NO_ACTION_AVAILABLE로 보여 준다.
 #
 # SecOps는 고정 THREAT 근거·초기 판정과 Incident 접수 시 보존한 자산을 조립한다.
-# 후보는 입력 근거·조치 대상·저장 가능성을 검증한 뒤 Workflow에 넘긴다.
+# 그래프는 SECOPS_GRAPH_VARIANT로 고른다 — 기본은 근거 선행 1회 호출 뒤 코드가 실행 계획을
+# 조립하는 그래프이고, 대비책은 1단계 그래프(후보 생성 → 요약, 2회 호출)다(#583 2단계).
+# 후보는 입력 근거·조치 대상·저장 가능성을 검증한 뒤 Workflow에 넘긴다 — 두 그래프에 같은 검증이다.
 # FinOps 절감 예상만 잘못된 경우에는 INVALID로 남기고 실행 후보를 유지한다(#347).
-# SecOps의 위험도 재평가는 초기 위험도·사유·대응 모드를 덮어쓰지 않는다.
+# SecOps 그래프는 위험도를 재평가하지 않으며 초기 위험도·사유·대응 모드를 덮어쓰지 않는다.
 #
-# SecOps는 분석 자체가 실패했을 때만 요약·재평가를 비운다. 선행 실행 상태를 우선하며,
+# SecOps는 분석 자체가 실패했을 때만 요약을 비운다. 선행 실행 상태를 우선하며,
 # 실행 이력 없이 정상 분석된 무제안·전체 거절은 AWAITING_CLOSURE에서 사용자 종료를
 # 기다린다. 분석 결과와 실행 결과는 따로 보존한다(workflows.record_agent_analysis).
 # 승인 대기 시각·60초 기한을 기록하되 자동 격리 발동 엔진은 이 모듈 범위 밖이다.
@@ -122,7 +124,9 @@ import workflows
 from ai.agent import (
     FINOPS_MODEL_CALLS,
     REJECTED_TARGET_ARN_LOG_CHARS,
+    SECOPS_FALLBACK_MODEL_CALLS,
     SECOPS_MODEL_CALLS,
+    SecOpsGraphVariant,
     run_finops_graph,
     run_secops_graph,
 )
@@ -143,6 +147,7 @@ from db.session import get_session_factory
 from logging_config import log_context
 from realtime import incident_event
 from security import soar
+from security.risk_evaluator import classify_ssh_risk_basis, evaluate_threat
 from services.aws.client import tenant_scope
 from services.aws.executor import resolve_nacl_add_deny_rule_number
 
@@ -234,8 +239,11 @@ def stale_claim_ceiling_seconds(settings: Optional[Settings] = None) -> float:
     """
     settings = settings or get_settings()
     per_call = RetryPolicy.from_settings(settings).worst_case_seconds()
-    # 그래프 종료 뒤의 단가 대기도 Claim 수명에 포함한다. SecOps 호출 수에 기대지 않는다.
-    model_calls = max(FINOPS_MODEL_CALLS + SAVINGS_MODEL_CALLS, SECOPS_MODEL_CALLS)
+    # 그래프 종료 뒤의 단가 대기도 Claim 수명에 포함한다. SecOps는 스위치가 고를 수 있는 두
+    # 그래프를 모두 센다 — 상한이 SECOPS_GRAPH_VARIANT에 따라 달라지지 않게 한다.
+    model_calls = max(
+        FINOPS_MODEL_CALLS + SAVINGS_MODEL_CALLS, SECOPS_MODEL_CALLS, SECOPS_FALLBACK_MODEL_CALLS,
+    )
     return per_call * model_calls
 
 
@@ -414,11 +422,6 @@ def assemble_secops_input(*, incident, threat: EvidenceItem, executions) -> SecO
         if context.target is None:
             raise GraphInputUnavailable(f"생성 시점 대상 자산 근거 부족: {context.target_status}")
         asset = context.target.asset
-        capabilities = build_secops_capabilities(asset=asset, event_type=event.event_type)
-        if not capabilities:
-            raise GraphInputUnavailable(
-                "이 위협에 제공할 조치·조회 의존성이 없습니다", AnalysisFailureReason.NO_ACTION_AVAILABLE,
-            )
         # response_mode는 이후 타이머가 바꿀 수 있다. 초기 입력에는 초기 위험도에
         # 대응하는 원래 모드를 복원하고 현재 Incident 대응 모드는 수정하지 않는다.
         initial = InitialRiskEvaluationResult(
@@ -442,8 +445,20 @@ def assemble_secops_input(*, incident, threat: EvidenceItem, executions) -> SecO
                                if execution.status is ExecutionStatus.SUCCESS else []),
                 result_summary=execution.error_summary or None,
             )
+        capabilities = build_secops_capabilities(
+            asset=asset, event_type=event.event_type, prior_isolation=isolation,
+        )
+        if not capabilities:
+            raise GraphInputUnavailable(
+                "이 위협에 제공할 조치·조회 의존성이 없습니다", AnalysisFailureReason.NO_ACTION_AVAILABLE,
+            )
+        basis = None
+        if event.event_type is ThreatEventType.SSH_BRUTE_FORCE and evaluate_threat(event) == initial:
+            # 저장된 초기 판정을 다시 쓰지 않는다. 같은 등급이어도 과거 분기를 재현한 값은 아니다.
+            basis = classify_ssh_risk_basis(event.payload)
         return SecOpsGraphInput(
             incident_id=incident.incident_id, asset_context=asset, initial_risk=initial,
+            current_rule_risk_basis=basis,
             evidences=[AgentEvidenceInput(evidence_id=threat.evidence_id,
                                          evidence_type=threat.evidence_type,
                                          content=threat.content)],
@@ -671,7 +686,10 @@ def _dispatch_one(
                 db.rollback()
                 output = verify_graph_output(
                     graph_input,
-                    (run_secops_graph(graph_input, client=client, nacl_rule_numbers=nacl_rule_numbers)
+                    (run_secops_graph(
+                        graph_input, client=client, nacl_rule_numbers=nacl_rule_numbers,
+                        variant=SecOpsGraphVariant(get_settings().SECOPS_GRAPH_VARIANT),
+                    )
                      if isinstance(graph_input, SecOpsGraphInput)
                      else run_finops_graph(graph_input, client=client)),
                     incident_id,

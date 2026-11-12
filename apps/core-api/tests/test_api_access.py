@@ -280,6 +280,7 @@ def test_tenant_accounts_read_only_their_scope_including_metrics(
 TENANT_SCOPED_ROUTES = {
     ("GET", "/api/v1/incidents"),
     ("GET", "/api/v1/incidents/{incident_id}"),
+    ("GET", "/api/v1/incidents/{incident_id}/evidence/export"),
     ("POST", "/api/v1/incidents/{incident_id}/resolve"),
     ("POST", EXECUTE),
     ("GET", "/api/v1/assets"),
@@ -341,6 +342,8 @@ def test_business_routes_outside_tenant_scope_stay_platform_only(client_pg, logi
         ("GET", "/api/v1/threat-events"): (422, "REQUEST_VALIDATION_FAILED"),
         ("POST", "/api/v1/inquiries"): (201, None),
         ("GET", "/api/v1/incidents/{incident_id}"): (404, "INCIDENT_NOT_FOUND"),
+        # format 은 필수다. 유효한 형식의 범위 · 권한 판정은 test_evidence_export 가 검증한다.
+        ("GET", "/api/v1/incidents/{incident_id}/evidence/export"): (422, "REQUEST_VALIDATION_FAILED"),
         ("POST", "/api/v1/incidents/{incident_id}/resolve"): (404, "INCIDENT_NOT_FOUND"),
         ("POST", EXECUTE): (404, "INCIDENT_NOT_FOUND"),
         ("GET", "/api/v1/tenants/{tenant_id}/settings"): (404, "TENANT_NOT_FOUND"),
