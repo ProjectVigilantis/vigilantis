@@ -383,6 +383,17 @@ def change_permissions(
             _state(permissions=permissions.ordered(permissions_set)),
             now,
         )
+        _platform_event(
+            db,
+            admin,
+            PlatformEventAction.USER_PERMISSIONS_CHANGE,
+            target.user_id,
+            target.tenant_id,
+            {
+                "before": permissions.ordered(granted),
+                "after": permissions.ordered(permissions_set),
+            },
+        )
 
 
 def change_status(db: Session, actor: Actor, user_id: str, status: UserStatus) -> None:

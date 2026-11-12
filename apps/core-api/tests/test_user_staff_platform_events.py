@@ -159,7 +159,7 @@ def test_sessions_revoke_records_each_request_even_when_no_sessions_remain(clien
     path = f"{USERS}/{target.user_id}/sessions/revoke"
     assert client_pg.post(path).status_code == 204
     assert_event(only_event(db, target.user_id), "USER_SESSIONS_REVOKE", admin, tenant_id=tenant, details={})
-    assert client_pg.post(path).status_code == 204  # 살아 있는 세션이 없다 — 폐기한 것이 없다
+    assert client_pg.post(path).status_code == 204  # 살아 있는 세션이 없어 폐기한 것이 없어도 요청마다 기록된다
     first, second = platform_events(db, target.user_id)
     for row in (first, second):
         assert_event(row, "USER_SESSIONS_REVOKE", admin, tenant_id=tenant, details={})

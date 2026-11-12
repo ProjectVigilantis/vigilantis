@@ -9,11 +9,9 @@
 
 from __future__ import annotations
 
-import importlib.util
 import logging
 import uuid
 from datetime import UTC, datetime
-from pathlib import Path
 
 import platform_event_log
 import pytest
@@ -28,7 +26,7 @@ from request_origin import (
     origin_from_request,
     request_origin_var,
 )
-from schemas.api.auth import AccountType, PlatformRole
+from schemas.api.auth import AccountType, FeaturePermission, PlatformRole
 from schemas.api.tenants import TenantVerificationResult
 from schemas.platform_events import (
     ACTION_MAX_LENGTH,
@@ -40,6 +38,7 @@ from schemas.platform_events import (
     PlatformEventOutcome,
     PlatformEventRecord,
     PlatformEventTargetType,
+    TenantGroupChangeDetails,
 )
 from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -48,12 +47,6 @@ from starlette.requests import Request
 
 A = PlatformEventAction
 OUT = PlatformEventOutcome
-MIGRATION = (
-    Path(__file__).resolve().parents[1]
-    / "db/migrations/versions/20261106_c589e7a1b2d3_platform_events.py"
-)
-
-
 TENANT = str(uuid.uuid4())
 
 
@@ -88,19 +81,123 @@ def test_every_action_has_one_spec_and_fits_the_column():
     assert all(spec.outcomes and spec.actors for spec in ACTION_SPECS.values())
 
 
-def test_migration_enum_values_follow_the_contract():
-    spec = importlib.util.spec_from_file_location(
-        "platform_events_migration", MIGRATION
+@pytest.mark.parametrize(
+    ("db_type", "contract"),
+    [
+        ("platform_event_category", PlatformEventCategory),
+        ("platform_event_outcome", PlatformEventOutcome),
+        ("platform_actor_kind", PlatformActorKind),
+        ("platform_event_target_type", PlatformEventTargetType),
+    ],
+)
+def test_migration_enum_values_follow_the_contract(db, db_type, contract):
+    labels = db.scalars(
+        text(
+            "SELECT e.enumlabel FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid "
+            "WHERE t.typname = :name"
+        ),
+        {"name": db_type},
     )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    assert module._CATEGORIES == tuple(c.value for c in PlatformEventCategory)
-    assert module._OUTCOMES == tuple(o.value for o in PlatformEventOutcome)
-    assert module._ACTOR_KINDS == tuple(k.value for k in PlatformActorKind)
-    assert module._TARGET_TYPES == tuple(t.value for t in PlatformEventTargetType)
+    assert set(labels) == {member.value for member in contract}
 
 
 # --- 기록 계약 ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("action", "category", "target", "details"),
+    [
+        (A.TENANT_GROUP_CREATE, "TENANT_ADMIN", "TENANT_GROUP", {}),
+        (A.TENANT_GROUP_DELETE, "TENANT_ADMIN", "TENANT_GROUP", {"tenant_ids": [TENANT], "staff_user_ids": []}),
+        (A.TENANT_GROUP_ASSIGNMENT_CHANGE, "TENANT_ADMIN", "TENANT", {"before": None, "after": TENANT}),
+        (A.USER_PERMISSIONS_CHANGE, "USER_ADMIN", "USER", {"before": [], "after": ["VIEW"]}),
+    ],
+)
+def test_new_admin_actions_accept_only_human_success(action, category, target, details):
+    values = {
+        "action": action,
+        "actor_kind": PlatformActorKind.USER,
+        "actor_user_id": str(uuid.uuid4()),
+        "actor_account_type": AccountType.PLATFORM,
+        "actor_platform_role": PlatformRole.CENTRAL_ADMIN,
+        "tenant_id": TENANT if target != "TENANT_GROUP" else None,
+        "target_id": TENANT,
+        "details": details,
+    }
+    record = PlatformEventRecord(**values)
+    assert record.category.value == category
+    assert record.target_type.value == target
+    assert record.details == details
+    for outcome in (OUT.DENIED, OUT.FAILED):
+        with pytest.raises(ValidationError):
+            PlatformEventRecord(**{**values, "outcome": outcome, "details": {**details, "reason_code": "X"}})
+    for actor in (PlatformActorKind.SYSTEM, PlatformActorKind.ANONYMOUS):
+        with pytest.raises(ValidationError):
+            PlatformEventRecord(**{
+                **values, "actor_kind": actor, "actor_user_id": None,
+                "actor_account_type": None, "actor_platform_role": None,
+            })
+    with pytest.raises(ValidationError):
+        PlatformEventRecord(**{**values, "details": {**details, "name": "사용자 입력"}})
+    with pytest.raises(ValidationError):
+        PlatformEventRecord(**values, target_type="INCIDENT")
+
+
+@pytest.mark.parametrize("before,after", [(None, TENANT), (TENANT, None), (None, None)])
+def test_group_change_details_accept_uuid_and_preserve_null(before, after):
+    details = TenantGroupChangeDetails(before=before, after=after)
+    assert details.model_dump(mode="json", exclude_none=True) == {"before": before, "after": after}
+    record = _record(
+        action=A.TENANT_GROUP_ASSIGNMENT_CHANGE,
+        actor_kind=PlatformActorKind.USER,
+        actor_user_id=str(uuid.uuid4()),
+        actor_account_type=AccountType.TENANT,
+        details={"before": before, "after": after},
+    )
+    assert record.details == {"before": before, "after": after}
+    with pytest.raises(ValidationError):
+        TenantGroupChangeDetails(before=before)
+
+
+@pytest.mark.parametrize(
+    ("action", "details"),
+    [
+        (A.TENANT_GROUP_ASSIGNMENT_CHANGE, {"before": "not-a-uuid", "after": None}),
+        (A.TENANT_GROUP_ASSIGNMENT_CHANGE, {"before": None, "after": "not-a-uuid"}),
+        (A.USER_PERMISSIONS_CHANGE, {"before": ["UNKNOWN"], "after": []}),
+        (A.USER_PERMISSIONS_CHANGE, {"before": [], "after": ["UNKNOWN"]}),
+        (A.USER_PERMISSIONS_CHANGE, {"before": []}),
+        (A.TENANT_GROUP_DELETE, {"tenant_ids": ["not-a-uuid"], "staff_user_ids": []}),
+        (A.TENANT_GROUP_DELETE, {"tenant_ids": [], "staff_user_ids": ["not-a-uuid"]}),
+        (A.TENANT_GROUP_DELETE, {"tenant_ids": []}),
+    ],
+)
+def test_new_admin_details_reject_wrong_types_and_missing_fields(action, details):
+    with pytest.raises(ValidationError):
+        _record(
+            action=action, actor_kind=PlatformActorKind.USER,
+            actor_user_id=str(uuid.uuid4()), actor_account_type=AccountType.TENANT,
+            details=details,
+        )
+
+
+def test_group_change_requires_the_affected_tenant_and_permissions_normalize_enums():
+    values = {
+        "actor_kind": PlatformActorKind.USER,
+        "actor_user_id": str(uuid.uuid4()),
+        "actor_account_type": AccountType.TENANT,
+    }
+    for tenant, target in ((None, TENANT), (TENANT, None), (TENANT, str(uuid.uuid4()))):
+        with pytest.raises(ValidationError):
+            _record(
+                **values, action=A.TENANT_GROUP_ASSIGNMENT_CHANGE, tenant_id=tenant, target_id=target,
+                details={"before": None, "after": None},
+            )
+    record = _record(
+        **values, action=A.USER_PERMISSIONS_CHANGE,
+        details={"before": [FeaturePermission.VIEW], "after": []},
+    )
+    assert record.details == {"before": ["VIEW"], "after": []}
 
 
 def test_category_and_target_type_come_from_the_action():
