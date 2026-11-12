@@ -10,6 +10,7 @@ COST_CANDIDATE 가 0대가 됐지만, 기존 테스트는 자산 개수만 >= 1 
 
 import importlib.util
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -19,7 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 if str(CORE_API) not in sys.path:
     sys.path.insert(0, str(CORE_API))
 
-from services.rule_engine import SkipReason, Verdict, evaluate_ec2  # noqa: E402
+from services.rule_engine import MIN_DATAPOINTS, SkipReason, Verdict, evaluate_ec2  # noqa: E402
 
 
 def _load_seed_module():
@@ -76,3 +77,67 @@ def test_prod_idle_is_protected_and_large():
     assert environment == "production"
     assert profile == "idle"
     assert not itype.endswith((".micro", ".small"))  # 절감 여지가 커 보이는 타입이어야 대조가 성립
+
+
+# --- 하루 창(#625) ---------------------------------------------------------------
+# 유휴 판정은 최근 하루를 본다. 시드가 「언제 수집해도 창에 하루치 무늬가 들어온다」를 지키지 못하면
+# 위의 기대 판정은 순수 함수에서만 맞고 실제 LocalStack 수집에서는 어긋난다.
+
+SEEDED_AT = datetime(2026, 11, 12, 7, 0, tzinfo=timezone.utc)
+
+
+def _window(points, collected_at):
+    """수집 시각의 하루 창 [collected_at − 24h, collected_at) 에 들어오는 값들(수집기의 조회 창과 같다)."""
+    start = collected_at - timedelta(days=1)
+    return [value for ts, value in points if start <= ts < collected_at]
+
+
+def _judge(name, profile, environment, values):
+    tags = {"Name": name, **({"Environment": environment} if environment else {})}
+    return evaluate_ec2(sum(values) / len(values), max(values), len(values), tags, state="running")[:2]
+
+
+@pytest.mark.parametrize("delay", [
+    timedelta(minutes=7),            # 시드 직후
+    timedelta(hours=5, minutes=30),  # 반나절 뒤 — 지난 표본만 넣던 시드는 여기서 데이터 부족이 된다
+    timedelta(days=3, hours=11),
+    timedelta(days=13, hours=23, minutes=59),  # 앞쪽 표본의 끝
+], ids=["just-seeded", "5h-later", "3d-later", "end-of-future"])
+@pytest.mark.parametrize("entry", SEED.INSTANCES, ids=lambda e: e[0])
+def test_a_one_day_window_sees_the_expected_verdict_whenever_it_collects(entry, delay):
+    name, _itype, _sg, profile, environment = entry
+    values = _window(SEED._cpu_points(SEEDED_AT, profile), SEEDED_AT + delay)
+
+    assert len(values) >= MIN_DATAPOINTS, "창이 비면 전부 SKIP_INSUFFICIENT_DATA 다"
+    assert _judge(name, profile, environment, values) == EXPECTED[name]
+
+
+def test_spike_peaks_exactly_once_in_every_one_day_window():
+    """두 번이면 평균이 임계치를 넘어 「정상 가동」, 0번이면 「다운사이징 후보」가 된다."""
+    points = SEED._cpu_points(SEEDED_AT, "spike")
+    first, last = points[0][0], points[-1][0]
+    collected_at = first + timedelta(days=1)
+    while collected_at <= last:
+        assert _window(points, collected_at).count(SEED.SPIKE_PEAK) == 1, collected_at
+        collected_at += timedelta(hours=1)
+
+
+def test_reinjecting_at_another_hour_writes_the_same_value_at_the_same_time():
+    """다시 주입(--metrics-only)해도 같은 시각의 값이 같다 — CloudWatch 는 같은 구간의 표본을 평균한다.
+
+    무늬를 시드한 시각에 묶으면 다시 주입할 때 스파이크가 다른 시각에 한 번 더 생기고, 그 구간 평균이
+    (최대치 + 바닥) / 2 로 깎여 스파이크 판정이 사라진다."""
+    for profile in ("idle", "normal", "spike"):
+        first = dict(SEED._cpu_points(SEEDED_AT, profile))
+        again = dict(SEED._cpu_points(SEEDED_AT + timedelta(hours=7), profile))
+        shared = first.keys() & again.keys()
+        assert len(shared) > SEED.DAY_HOURS
+        assert all(first[ts] == again[ts] for ts in shared), profile
+
+
+def test_seed_spans_the_chart_window_behind_and_two_weeks_ahead():
+    hours = SEED._hours(SEEDED_AT)
+    assert hours[0] == SEEDED_AT - timedelta(days=SEED.METRIC_PAST_DAYS)
+    assert hours[-1] == SEEDED_AT + timedelta(days=SEED.METRIC_FUTURE_DAYS) - timedelta(hours=1)
+    assert all(b - a == timedelta(hours=1) for a, b in zip(hours, hours[1:]))
+    assert len(SEED._cpu_series("idle")) == SEED.DAY_HOURS >= MIN_DATAPOINTS

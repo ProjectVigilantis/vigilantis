@@ -10,7 +10,7 @@
   "thresholds_at_authoring": {
     "IDLE_CPU_AVG": 5.0,
     "SPIKE_CPU_MAX": 40.0,
-    "MIN_DATAPOINTS": 48,
+    "MIN_DATAPOINTS": 20,
     "note": "작성 시점의 apps/core-api/services/rule_engine.py 상수. 값이 바뀌면 tests/test_golden_dataset.py가 실패하므로 본 정답을 함께 갱신할 것 (ADR-0006 임계값 결합 원칙)"
   },
   "evaluations": [
@@ -41,7 +41,7 @@
     {
       "case_id": "A4",
       "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00004",
-      "purpose": "MIN_DATAPOINTS 바로 아래(47) — cpu_avg 1.0으로 명백히 저활성이지만 데이터 부족 판정이 최우선. 우선순위가 뒤바뀌면 COST_CANDIDATE가 되어 실패",
+      "purpose": "MIN_DATAPOINTS 바로 아래(19) — cpu_avg 1.0으로 명백히 저활성이지만 데이터 부족 판정이 최우선. 우선순위가 뒤바뀌면 COST_CANDIDATE가 되어 실패",
       "evaluation_status": "COMPLETED",
       "verdict": "SKIP",
       "skip_reason_code": "SKIP_INSUFFICIENT_DATA"

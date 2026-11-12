@@ -3,7 +3,7 @@
 # 대시보드 시계열 차트(GET /api/v1/metrics/timeseries)의 CPU 축 데이터 원천입니다.
 #
 # **CloudWatch 를 그 자리에서 부른다 — 적재된 metric_summaries 를 읽지 않는다.**
-#   적재분(cpu_avg)은 METRIC_LOOKBACK_DAYS(기본 14일) 창의 평균이고, 같은 메트릭 입자
+#   적재분(cpu_avg)은 METRIC_LOOKBACK_DAYS(기본 1일) 창의 평균이고, 같은 메트릭 입자
 #   안에서는 회차 간 그대로 복사된다(#255). 그것으로 곡선을 그리면 값이 변하지 않는
 #   수평 직선이 나온다. 차트가 필요한 것은 요약 이전의 원계열이다.
 #

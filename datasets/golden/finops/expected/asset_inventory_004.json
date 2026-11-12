@@ -10,7 +10,7 @@
   "thresholds_at_authoring": {
     "IDLE_CPU_AVG": 5.0,
     "SPIKE_CPU_MAX": 40.0,
-    "MIN_DATAPOINTS": 48,
+    "MIN_DATAPOINTS": 20,
     "note": "EBS 판정(evaluate_ebs)은 이 상수들을 쓰지 않는다. tests/test_golden_dataset.py::test_thresholds_not_drifted 가 정답 파일 전체에 이 블록을 요구하므로 형식만 맞춘다"
   },
   "design_note": "EBS 전용 파일이다 — ebs_volumes 키만 담아 evaluate_ec2·evaluate_sg 분기가 결과에 섞이지 않게 했다. 케이스는 datasets/golden/README.md §EBS 판정 규칙(도입 확정 — 4차 골든셋 작성 근거)의 표에서 그대로 도출했다. 그 표는 이슈 #276의 정책 확정(2026-09-03 김승철 · DATA/Rule Engine owner)으로 2행에서 4행이 됐고, 이 파일의 E4~E8 5건이 늘어난 2행(전이·비정상 4종 + state 미상)에 해당한다. 정답지는 정답을 적는 곳이지 현재 구현을 기록하는 곳이 아니다 — E4~E8도 구현 산출을 베끼지 않고 확정 규칙에서 도출했다.\n\ncase_id 번호에 대하여: E1·E2 는 이슈 #264 본문의 E1–E6 표기를 따랐으나 **E4~E8 은 그 표기를 잇지 않는다.** #264 의 E 번호는 #276 이 답을 내기 전에 매긴 것이라 지금의 케이스 구성과 1:1로 맞지 않기 때문이다. 세 가지가 달라졌다. (1) #264 의 E3(`available` + 부착)·E5(`AVAILABLE` 대문자)는 수집 경로에서 나올 수 없는 입력이라 **제외 확정**됐다 — 그 번호를 다른 내용에 재사용하지 않도록 E3 을 비우고 E4 부터 시작한다. (2) #264 의 E4 는 `creating`·`deleting`·`error` 3종을 한 행으로 묶었고 정답을 `SKIP_ACTIVE` 로 적었는데, #276 결정 ①②가 그 답을 `SKIP_UNSUPPORTED_STATE` 로 바꾸고 `deleted` 를 집합에 추가했다. 3종을 한 케이스로 두면 부분 허용목록(예: `creating` 만 예외 처리)을 못 잡으므로 상태마다 한 건씩 나눴다. (3) #264 에는 `deleted` 가 아예 없었다 — 집합을 AWS `VolumeState` 계약(6종)에서 도출하지 않고 손으로 골랐던 결과다(#276 §배경 3).\n\n따라서 **E4~E8 의 번호는 #264 표가 아니라 이 파일 안에서만 의미를 가진다.** 대응을 굳이 적으면 #264 E4 → 이 파일 E4·E5·E6 + 새로 추가된 E7, #264 E6 → 이 파일 E8 이다.\n\n판정 커버리지: 이 5건으로 `skip_reason_code` 6종이 골든에서 전부 채워진다 — `SKIP_UNSUPPORTED_STATE` 가 마지막 미충족 값이었다. apps/core-api/tests/test_golden_assets_api.py 의 예외 목록(UNCOVERED_SKIP_REASONS)을 같은 PR 에서 지운 이유다.",

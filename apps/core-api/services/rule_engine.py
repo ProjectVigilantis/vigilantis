@@ -21,7 +21,11 @@ from schemas.asset_roles import ROLE_ISOLATION, ROLE_TAG_KEY
 # ----- 임계치 (실 계정 데이터로 재보정 대상) -----
 IDLE_CPU_AVG = 5.0        # 평균 CPU 이 값 미만이면 저활성 후보
 SPIKE_CPU_MAX = 40.0      # 평균은 낮아도 최대가 이 값 이상이면 스파이크 → 다운사이징 부적합
-MIN_DATAPOINTS = 48       # 최소 관측치(약 2일). 미만이면 데이터부족
+# 최소 관측치. 미만이면 데이터부족이다. 관찰 기간이 하루(METRIC_LOOKBACK_DAYS 1 · 1시간 입자)라 창이 내는
+# 관측치는 24개 안팎이고, 조회 창의 양 끝과 가장 최근 입자의 지연으로 23–25개로 흔들린다. 24 로 두면 조회
+# 시각에 따라 판정이 들쭉날쭉해져 20 으로 둔다 — 켜진 지 20시간쯤 된 인스턴스부터 판정한다(#625 · 종전 48).
+# 관찰 기간 · 입자를 바꾸면 이 값도 함께 본다(config.CollectorSettings).
+MIN_DATAPOINTS = 20
 
 # 운영(prod) 자산 인식 기준 (미해결 #4, 규칙 소유자 확정 2026-08-24)
 #   - 키: 대소문자 무시 비교(소문자로 저장)
@@ -85,7 +89,7 @@ def evaluate_ec2(cpu_avg: Optional[float], cpu_max: Optional[float], cpu_datapoi
 
     - **상태가 먼저다(#453).** `running` 이 아니면 지표를 보지 않고 SKIP_UNSUPPORTED_STATE 다.
       종료(`terminated`·`shutting-down`)된 인스턴스는 CloudWatch 가 지난 지표를 보관하므로
-      14일 창에서 관측치 48개·저활성을 그대로 넘겨 후보가 된다 — 그 후보는 승인 화면까지
+      관찰 창에서 최소 관측치 · 저활성을 그대로 넘겨 후보가 된다 — 그 후보는 승인 화면까지
       올라간 뒤 실행에서야 깨진다(가드레일 ④가 존재를 검사하지 않는다 · ADR-0006 이월 8행).
       `stopped`·`stopping` 도 보류한다 — RIGHTSIZING 실행이 정지 → 타입 변경 → **기동**
       순서라 꺼 둔 인스턴스를 켜 버리고, 정지 구간은 관측치가 비어 정지 자체가 저활성으로

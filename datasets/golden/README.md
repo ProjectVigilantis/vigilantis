@@ -76,6 +76,8 @@ datasets/golden/
 import할 수 없으므로 `tests/test_golden_dataset.py`가 현재 상수와 대조해 드리프트를 막는다.
 ([ADR-0006](../../docs/adr/0006-localstack-team-standard-env.md) 임계값 결합 원칙)
 
+> **최소 관측치(`MIN_DATAPOINTS`)는 20이다(#625 — 종전 48).** 유휴 판정의 관찰 기간이 14일에서 하루로 줄어 창이 내는 관측치가 24개 안팎이 됐다. 문턱 바로 아래를 지키는 A4만 새 문턱으로 옮겼다(47 → 19). A7(`dp 48`)은 입력을 바꾸지 않았다 — AI 요청 지문(`apps/core-api/ai/tests/test_savings_request_boundary.py`)이 이 입력에 묶여 있고 그 지문은 다시 만들지 않는 값이다. 그래서 A7은 이제 「문턱 정확히」가 아니라 「문턱을 넘는 값」이고, `<` 경계는 `apps/core-api/services/tests/test_rule_engine.py`의 `test_min_datapoints_boundary_is_exclusive_below`가 고정한다. 나머지 입력의 `lookback_days 14` · `dp 336` 도 작성 시점의 기록이라 그대로 둔다 — 판정은 관측치 수만 보므로 결과가 같다.
+
 ## 1차 작성 케이스 (9건)
 
 **자산 5건** — `finops/input/asset_inventory_001.json` (판정 근거: `services/rule_engine.py`)
@@ -85,7 +87,7 @@ import할 수 없으므로 `tests/test_golden_dataset.py`가 현재 상수와 �
 | A1 | EC2 | `cpu_avg 4.9 / max 10.0 / dp 336` | `COST_CANDIDATE` | 임계값 바로 아래 — 후보 선정 |
 | A2 | EC2 | `cpu_avg 5.0 / max 10.0 / dp 336` | `SKIP_ACTIVE` | 임계값 정확히 — `<`를 `<=`로 쓰면 실패 |
 | A3 | EC2 | `cpu_avg 2.0 / max 40.0 / dp 336` | `SKIP_LOW_UTIL` | 스파이크 정확히 — `>=`를 `>`로 쓰면 실패 |
-| A4 | EC2 | `cpu_avg 1.0 / dp 47` | `SKIP_INSUFFICIENT_DATA` | 관측치 부족이 최우선인지 |
+| A4 | EC2 | `cpu_avg 1.0 / dp 19` | `SKIP_INSUFFICIENT_DATA` | 관측치 부족이 최우선인지 |
 | A5 | SG | `attached true / tcp 22 전체개방` | `THREAT` | 전체개방 탐지 |
 
 **위협 4건** — `secops/input/` (정답은 Risk 규칙 확정 후 별도 PR)
@@ -107,7 +109,7 @@ import할 수 없으므로 `tests/test_golden_dataset.py`가 현재 상수와 �
 | ID | 자산 | 입력 | 판정 | 목적 |
 | --- | --- | --- | --- | --- |
 | A6 | EC2 | 이름에 `prod` 없음 / `Environment: production` 태그 / `cpu_avg 1.0` · `dp 336` | `SKIP_PROD_PROTECTED` | 태그 경로 검증 + prod 보호가 idle보다 우선 |
-| A7 | EC2 | `dp 48` (경계 정확히) / `cpu_avg 4.9` / `cpu_max 10.0` | `COST_CANDIDATE` | `<`를 `<=`로 쓰면 실패 (`cpu_max` null 가드는 `apps/core-api/services/tests/test_rule_engine.py`로 — 수집기는 avg·max를 같은 목록에서 뽑아 null max를 만들지 않는다, #243) |
+| A7 | EC2 | `dp 48` (문턱 20을 넘음 — 문턱이 48이던 때의 경계) / `cpu_avg 4.9` / `cpu_max 10.0` | `COST_CANDIDATE` | 관측치가 충분하면 저활성이 후보가 된다. `<` 경계는 `test_rule_engine.py`가 고정한다 (`cpu_max` null 가드는 `apps/core-api/services/tests/test_rule_engine.py`로 — 수집기는 avg·max를 같은 목록에서 뽑아 null max를 만들지 않는다, #243) |
 | A8 | SG | 이름 `default` / `attached false` / `tcp 22` 전체개방 | `SKIP_WHITELISTED` | 화이트리스트가 `THREAT`·`UNUSED`를 모두 이김 |
 | A9 | SG | `attached false` / 개방 없음 | `UNUSED` | 미사용 SG 정리 후보 |
 | A10 | SG | `attached true` / 개방 없음 | `SKIP_ACTIVE` | 정상 SG — 오탐 방지 음성 대조군 |

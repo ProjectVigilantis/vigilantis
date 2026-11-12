@@ -63,8 +63,17 @@ IDLE_CPU = round(IDLE_CPU_AVG * 0.4, 1)      # 평균 < IDLE_CPU_AVG → RIGHTSI
 NORMAL_CPU = round(IDLE_CPU_AVG * 7.0, 1)    # 평균 ≥ IDLE_CPU_AVG → 후보 아님
 SPIKE_BASE = round(IDLE_CPU_AVG * 0.2, 1)    # 평균은 낮게 유지
 SPIKE_PEAK = round(SPIKE_CPU_MAX * 2.0, 1)   # 최대 ≥ SPIKE_CPU_MAX → SKIP_LOW_UTIL
-METRIC_HOURS = 72                            # 최근 3일 × 1시간 해상도(CPU 판정 입자)
-SPIKE_PEAK_COUNT = 2
+# 유휴 판정은 최근 하루(METRIC_LOOKBACK_DAYS 기본 1 · 1시간 입자)를 본다(#625). 그래서 시드는 **하루치 무늬**
+# (24개)를 정하고 그것을 날마다 되풀이해 넣는다 — 어느 시각에 수집해도 창에 같은 무늬 하루치가 들어온다.
+DAY_HOURS = 24
+# 지난 쪽: 차트의 기본 조회 창(METRICS_WINDOW_HOURS 72)을 채운다.
+METRIC_PAST_DAYS = 3
+# 앞쪽: 시드한 뒤 시간이 지나도 창이 비지 않게 미래 시각의 표본을 미리 넣는다. 하루 창은 시드가 4시간만
+# 묵어도 관측치가 MIN_DATAPOINTS 아래로 떨어져(24 − 20) 전부 데이터 부족이 된다 — 14일 창일 때는 열흘 넘게
+# 버텼다. 조회는 「지금」까지만 읽으므로 미래 표본은 그 시각이 될 때까지 보이지 않는다. LocalStack 전용이다
+# (실 AWS 는 2시간보다 앞선 시각을 받지 않고, AWS/EC2 네임스페이스에 넣을 수도 없다).
+METRIC_FUTURE_DAYS = 14
+METRIC_HOURS = (METRIC_PAST_DAYS + METRIC_FUTURE_DAYS) * DAY_HOURS
 # 네트워크만 **한 시간 안에 표본 여럿**을 넣는다(15분 간격). 표본이 시간당 하나뿐이면
 # 같은 구간의 Sum 과 Average 가 같은 값이라, 차트가 어느 통계로 읽는지가 드러나지 않는다 —
 # 실 AWS 의 표본 간격은 5분(상세 모니터링이면 1분)이라 그쪽이 오히려 정상 상태다.
@@ -73,11 +82,13 @@ NET_SAMPLES_PER_HOUR = 4
 
 # 파생만으로는 보장되지 않는 불변식 2개 — 깨지면 시드가 조용히 무의미해지므로 즉시 종료.
 # (assert 금지: python -O / PYTHONOPTIMIZE 에서 제거된다)
-_spike_avg = (SPIKE_BASE * (METRIC_HOURS - SPIKE_PEAK_COUNT) + SPIKE_PEAK * SPIKE_PEAK_COUNT) / METRIC_HOURS
-if not (_spike_avg < IDLE_CPU_AVG and METRIC_HOURS >= MIN_DATAPOINTS):
+# spike 는 하루에 최대치 한 번이다. 하루 창에 두 번 들어오면 평균이 임계치를 넘어 「정상 가동」이 되고,
+# 한 번도 없으면 「다운사이징 후보」가 된다 — 24시간 간격이라 어느 24시간 창에도 정확히 한 번 들어온다.
+_spike_avg = (SPIKE_BASE * (DAY_HOURS - 1) + SPIKE_PEAK) / DAY_HOURS
+if not (_spike_avg < IDLE_CPU_AVG and DAY_HOURS >= MIN_DATAPOINTS):
     sys.exit(
-        f"[seed] 프로필 불변식 위반 — spike 평균({_spike_avg:.2f}) < IDLE_CPU_AVG({IDLE_CPU_AVG}) 이고 "
-        f"METRIC_HOURS({METRIC_HOURS}) >= MIN_DATAPOINTS({MIN_DATAPOINTS}) 여야 한다. "
+        f"[seed] 프로필 불변식 위반 — spike 하루 평균({_spike_avg:.2f}) < IDLE_CPU_AVG({IDLE_CPU_AVG}) 이고 "
+        f"하루치 표본 수({DAY_HOURS}) >= MIN_DATAPOINTS({MIN_DATAPOINTS}) 여야 한다. "
         "rule_engine 임계값 변경 시 시드 프로필도 함께 조정할 것."
     )
 
@@ -320,15 +331,35 @@ def _ensure_nacl(ec2, subnet_id: str | None) -> tuple[str, bool, int]:
 
 # ------------------------------------------------------------------ 메트릭 주입
 def _cpu_series(profile: str) -> list[float]:
+    """하루치 무늬(DAY_HOURS 개) — 유휴 판정의 관찰 창 하나가 보는 값이다.
+
+    주입(_put_metrics)이 이 무늬를 날마다 되풀이한다. test_seed_dataset_verdicts 가 이 값으로 기대 판정을 고정한다.
+    """
     if profile == "idle":
-        return [IDLE_CPU] * METRIC_HOURS
+        return [IDLE_CPU] * DAY_HOURS
     if profile == "normal":
-        return [NORMAL_CPU] * METRIC_HOURS
-    # spike: 평균은 낮게, 마지막 구간에 최대치 스파이크
-    series = [SPIKE_BASE] * METRIC_HOURS
-    for i in range(SPIKE_PEAK_COUNT):
-        series[-(i * 24 + 1)] = SPIKE_PEAK
+        return [NORMAL_CPU] * DAY_HOURS
+    # spike: 평균은 낮게, 하루에 한 번 최대치 스파이크
+    series = [SPIKE_BASE] * DAY_HOURS
+    series[-1] = SPIKE_PEAK
     return series
+
+
+def _hours(now: datetime) -> list[datetime]:
+    """표본을 넣을 시각들 — 지난 METRIC_PAST_DAYS 일부터 앞으로 METRIC_FUTURE_DAYS 일까지, 1시간 간격."""
+    start = now - timedelta(days=METRIC_PAST_DAYS)
+    return [start + timedelta(hours=i) for i in range(METRIC_HOURS)]
+
+
+def _cpu_points(now: datetime, profile: str) -> list[tuple[datetime, float]]:
+    """주입할 CPU 표본 — 하루치 무늬를 **UTC 시각의 「시」에 묶어** 되풀이한다.
+
+    어느 24시간 창에도 무늬 하루치가 들어오고, 다시 주입해도(--metrics-only) 같은 시각에 같은 값이 들어가
+    평균이 달라지지 않는다. 시드한 시각에 묶으면 다시 주입할 때 스파이크가 다른 시각에 한 번 더 생겨
+    표본 평균이 임계치 아래로 깎인다.
+    """
+    day = _cpu_series(profile)
+    return [(ts, day[ts.hour]) for ts in _hours(now)]
 
 
 def _has_metrics(cw, instance_id: str) -> bool:
@@ -367,16 +398,14 @@ def _put_metrics(cw, instance_id: str, profile: str) -> None:
     표본 하나짜리 시드에서는 검증되지 않기 때문이다(Sum 과 Average 가 같은 값이 된다).
     """
     now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-    _put_series(
-        cw, instance_id, MetricName.CPU_UTILIZATION,
-        [(now - timedelta(hours=METRIC_HOURS - i), v) for i, v in enumerate(_cpu_series(profile))],
-    )
+    hours = _hours(now)
+    _put_series(cw, instance_id, MetricName.CPU_UTILIZATION, _cpu_points(now, profile))
 
     net = {"idle": 5_000.0, "spike": 50_000.0, "normal": 5_000_000.0}[profile]  # 시간당 총 바이트
     step = timedelta(hours=1) / NET_SAMPLES_PER_HOUR
     net_points = [
-        (now - timedelta(hours=METRIC_HOURS - i) + step * s, net / NET_SAMPLES_PER_HOUR)
-        for i in range(METRIC_HOURS)
+        (ts + step * s, net / NET_SAMPLES_PER_HOUR)
+        for ts in hours
         for s in range(NET_SAMPLES_PER_HOUR)
     ]
     for metric in (MetricName.NETWORK_IN, MetricName.NETWORK_OUT):
@@ -402,7 +431,7 @@ def seed_all(ec2, cw, region: str) -> None:
         # 신규 생성 또는 메트릭 부재 시 주입 — 이전 실행이 중간에 죽었어도 재실행으로 복구된다
         if created or not _has_metrics(cw, iid):
             _put_metrics(cw, iid, profile)
-            print(f"[seed]   └ CloudWatch 메트릭 주입({METRIC_HOURS}h, {profile})")
+            print(f"[seed]   └ CloudWatch 메트릭 주입(지난 {METRIC_PAST_DAYS}일 + 앞 {METRIC_FUTURE_DAYS}일, {profile})")
 
     vol_id, created = _ensure_volume(ec2, region)
     print(f"[seed] EBS {VOLUME_NAME}: {vol_id} ({'생성' if created else '존재 — skip'})")
@@ -430,7 +459,7 @@ def reinject_metrics(ec2, cw) -> None:
         if not iid:
             sys.exit(f"[seed] {name} 없음(pending·running 기준) — 전체 시드를 먼저 실행할 것")
         _put_metrics(cw, iid, profile)
-        print(f"[seed] EC2 {name}: {iid} — 메트릭 재주입({METRIC_HOURS}h, {profile})")
+        print(f"[seed] EC2 {name}: {iid} — 메트릭 재주입(지난 {METRIC_PAST_DAYS}일 + 앞 {METRIC_FUTURE_DAYS}일, {profile})")
 
 
 # ------------------------------------------------------------------ main
