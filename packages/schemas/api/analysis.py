@@ -31,6 +31,9 @@ class AnalysisFailureReason(StrEnum):
     SERVER_PARAMETER_UNAVAILABLE = "SERVER_PARAMETER_UNAVAILABLE"  # 서버 몫 값을 계산 못 함
     CANDIDATE_CONTRACT_VIOLATION = "CANDIDATE_CONTRACT_VIOLATION"  # RunbookCandidateDraft 위반
     OUTPUT_CONTRACT_VIOLATION = "OUTPUT_CONTRACT_VIOLATION"        # AgentGraphOutput 위반
+    # decision이 메뉴와 1:1로 대응하지 않는다(메뉴 밖 action_id·중복·메뉴보다 많은 개수).
+    # 코드가 실행 계획을 조립하기 전에 검사하며 출력 재시도 없이 FAILED다(#583 2단계)
+    DECISION_MISMATCH = "DECISION_MISMATCH"
     # Workflow 검증 — 출력 모델 단독으로 볼 수 없는 것(agent_dispatcher._contract_violation)
     EVIDENCE_NOT_IN_INPUT = "EVIDENCE_NOT_IN_INPUT"
     REVIEWED_RISK_MISMATCH = "REVIEWED_RISK_MISMATCH"

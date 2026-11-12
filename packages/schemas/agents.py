@@ -14,8 +14,9 @@
 #   - failure_reason은 FAILED에만 온다. 이 저장소의 생산자(그래프·dispatcher 검증·입력 불가)는
 #     FAILED마다 사유를 싣고, null FAILED는 사유를 싣기 전의 생산자만 낸다. 어휘의 원천은
 #     api/analysis.py의 AnalysisFailureReason이다(공개 응답도 싣는 값이라 그쪽에 둔다).
-#   - FINOPS 출력의 reviewed_risk_level=null 규칙과 "후보 evidence_ids⊆입력 Evidence"
-#     규칙은 입력·출력을 함께 아는 Workflow가 검증한다(출력 모델 단독으로는 불가).
+#   - 두 도메인 출력의 reviewed_risk_level=null 규칙(ADR-0005 1차 개정)과 "후보
+#     evidence_ids⊆입력 Evidence" 규칙은 입력·출력을 함께 아는 Workflow가 검증한다
+#     (출력 모델 단독으로는 불가).
 #   - RULE 근거와 최상위 rule_evaluation이 같은 객체에서 나왔는지는 입력 계약이 본다
 #     (Issue #265). 입력 안에서 닫히는 대조라 Workflow로 미루지 않는다.
 #   - 후보 parameters는 Runbook별 typed 모델이다(#154, runbook_parameters.py).
@@ -38,7 +39,7 @@ from .api.analysis import AnalysisFailureReason
 from .api.assets import AssetItem, AssetType
 from .api.incidents import IncidentCategory, RiskLevel
 from .evidence import EVIDENCE_CONTENT_MODELS, EvidenceContent, EvidenceType, bind_evidence_content
-from .events import InitialRiskEvaluationResult
+from .events import InitialRiskEvaluationResult, SshRiskBasis
 from .incidents import AGENT_TERMINAL_STATUSES, AgentInvocationStatus
 from .rules import RuleEvaluationResult
 from .runbook_parameters import (
@@ -170,6 +171,13 @@ class SecOpsGraphInput(BaseModel):
     incident_id: str = Field(min_length=1)
     asset_context: AgentAssetContext
     initial_risk: InitialRiskEvaluationResult
+    current_rule_risk_basis: SshRiskBasis | None = Field(
+        None,
+        description=(
+            "저장된 관측을 현재 규칙으로 해석한 분기. 현재 등급·사유가 저장된 초기 판정과 "
+            "같을 때만 공급한다. 접수 당시 판정 근거를 보존한 값은 아니다."
+        ),
+    )
     evidences: list[AgentEvidenceInput] = Field(default_factory=list)
     # High 사전 격리가 있었던 경우에만 존재 — 격리 실패·부분 적용도 그대로 전달한다
     isolation_execution: Optional[AgentExecutionContext] = None

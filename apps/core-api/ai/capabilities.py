@@ -48,7 +48,8 @@ from __future__ import annotations
 import logging
 from typing import Mapping, Optional
 
-from schemas.agents import RunbookCapability
+from schemas.agents import AgentExecutionContext, RunbookCapability
+from schemas.api.actions import ExecutionStatus
 from schemas.api.assets import AssetItem, AssetType, RelationType, Verdict
 from schemas.events import ThreatEventType
 from services.aws.executor import parse_arn
@@ -159,7 +160,8 @@ def secops_action_targets(asset: AssetItem) -> dict[str, list[str]]:
 
 
 def build_secops_capabilities(
-    *, asset: AssetItem, event_type: ThreatEventType
+    *, asset: AssetItem, event_type: ThreatEventType,
+    prior_isolation: AgentExecutionContext | None = None,
 ) -> list[RunbookCapability]:
     """조회·실행 의존성이 연결된 SSH 차단만 제공한다.
 
@@ -167,13 +169,25 @@ def build_secops_capabilities(
     공급하지만(workflows.resolve_isolation_parameters), 격리는 관제자 승인 메뉴가 아니라
     선차단·자동 격리로 시스템이 발동하는 런북이다(SSOT §Action Whitelist) — 발동 경로의 몫이다.
     OPEN_IP의 SG를 NACL 또는 미부착 삭제 대상으로 추측하지 않는다.
-    빈 메뉴의 처분은 Dispatcher가 소유한다.
+    직접 PROTECTED_BY NACL이 정확히 하나일 때만 낸다. 실행 계획은 코드가 조립하므로(ai/agent.py
+    assemble_plan, #583 2단계) 대상이 둘 이상이면 1:1로 고를 수 없다 — IPv6 출발지(#434)처럼
+    과금 호출 전에 닫는다. 빈 메뉴의 처분은 Dispatcher가 소유한다.
     """
     runbook = RunbookId.RUNBOOK_NACL_ADD_DENY
-    if event_type is not ThreatEventType.SSH_BRUTE_FORCE or not secops_action_targets(asset)[runbook.value]:
+    if (event_type is not ThreatEventType.SSH_BRUTE_FORCE
+            or len(secops_action_targets(asset)[runbook.value]) != 1):
         return []
+    purpose = CAPABILITY_PURPOSE[runbook]
+    if (prior_isolation is not None
+            and prior_isolation.runbook_id is RunbookId.RUNBOOK_EC2_ISOLATE
+            and prior_isolation.status is ExecutionStatus.SUCCESS
+            and asset.arn in prior_isolation.affected_arns):
+        purpose = (
+            "격리 실행이 성공으로 기록된 EC2와 별개로, 같은 서브넷의 다른 호스트를 보호하기 위해 "
+            "출발지 CIDR 유입을 NACL 거부 규칙으로 차단"
+        )
     return [RunbookCapability(
         runbook_id=runbook,
-        purpose=CAPABILITY_PURPOSE[runbook],
+        purpose=purpose,
         allowed_target_asset_types=[AssetType.NACL],
     )]

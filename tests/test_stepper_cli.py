@@ -617,10 +617,10 @@ def test_expected_model_calls_follow_the_measured_per_card_counts():
         {"category": "FINOPS", "subject_arn": IDLE_DEV},   # 근거 요약 · 추천 · 절감 단가
         {"category": "FINOPS", "subject_arn": UNUSED_SG},  # 근거 요약 · 추천
         {"category": "FINOPS", "subject_arn": ACCOUNT_ARN + "volume/vol-1"},
-        {"category": "SECOPS", "subject_arn": IDLE},
+        {"category": "SECOPS", "subject_arn": IDLE},                     # 근거 선행 1회(#583 2단계)
     ]
     assert cli.estimate_calls(pending[:3]) == 7
-    assert cli.estimate_calls(pending) == 10
+    assert cli.estimate_calls(pending) == 8
 
 
 def _incident(incident_id: str, category: str, status: str, subject: str, executions=()):
@@ -673,7 +673,7 @@ def test_analyze_asks_with_the_estimate_and_stops_on_no(tmp_path, repo):
     ctx.confirm = lambda prompt: prompts.append(prompt) or False
 
     assert cli.main(["analyze"], ctx) == 0
-    assert "분석 대기 1건 — 예상 모델 호출 약 3회(재시도 제외 · 실제 과금)" in output
+    assert "분석 대기 1건 — 예상 모델 호출 약 1회(재시도 제외 · 실제 과금)" in output
     assert prompts and output[-1] == "누르지 않았다"
     assert not any(isinstance(call, tuple) for remote in FakeRemote.created for call in remote.calls)
 

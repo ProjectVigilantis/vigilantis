@@ -171,6 +171,12 @@ class Settings(BaseSettings):
     # 서버가 Retry-After로 지시한 대기의 상한. 이보다 길게 지시하면 따르지 않고
     # backoff로 간다 — 요청 경로에서 부르는 호출이라 무한정 붙잡지 않는다
     OPENAI_MAX_RETRY_AFTER_SECONDS: float = Field(default=60.0, ge=0)
+    # SecOps 그래프 선택(#583 2단계 대비책). EVIDENCE_FIRST는 근거 3줄+decision 1회 호출 뒤
+    # 코드가 실행 계획을 조립하고, CANDIDATE_FIRST는 1단계 그래프(후보·요약 2회 호출)다.
+    # 어느 쪽도 reviewed_risk_level을 싣지 않으므로 Workflow 검증(_contract_violation)은
+    # 같다. 값의 원천은 ai/agent.py SecOpsGraphVariant이며, 전환 기준은 미정이다
+    # (이슈 #583 "공통 — 대비책").
+    SECOPS_GRAPH_VARIANT: Literal["EVIDENCE_FIRST", "CANDIDATE_FIRST"] = "EVIDENCE_FIRST"
 
     @field_validator("CORS_ALLOW_ORIGINS", mode="after")
     @classmethod

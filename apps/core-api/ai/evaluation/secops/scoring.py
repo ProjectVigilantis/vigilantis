@@ -16,7 +16,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from schemas.agents import AgentGraphOutput, SecOpsGraphInput
 from schemas.incidents import AgentInvocationStatus
 
-from ai.agent import CandidateProposalOutput, EvidenceSummaryOutput
+from ai.agent import (
+    CandidateProposalOutput,
+    EvidenceSummaryOutput,
+    SecOpsEvidenceDecisionOutput,
+)
 
 from .dataset import ROOT, EvalCase, digest, read_json
 
@@ -155,7 +159,9 @@ def _internal_identifier_pattern() -> re.Pattern[str]:
             for item in value:
                 collect(item)
 
-    for model in (SecOpsGraphInput, AgentGraphOutput, CandidateProposalOutput, EvidenceSummaryOutput):
+    # 대비책 그래프의 모델도 유지해 decision·action_id 등과 옛 이름이 산문에 새는 것을 함께 잡는다.
+    for model in (SecOpsGraphInput, AgentGraphOutput, CandidateProposalOutput, EvidenceSummaryOutput,
+                  SecOpsEvidenceDecisionOutput):
         collect(model.model_json_schema())
     terms.difference_update({"EC2", "SG", "NACL", "EBS", "S3", "ASG", "TCP", "UDP", "ICMP", "tcp", "udp", "icmp"})
     identifiers = [re.escape(term) for term in sorted(terms) if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", term)]

@@ -45,6 +45,7 @@ from .events import (
     RiskReasonCode,
     SshBruteForceThreatInput,
     SshBruteForceThreatPayload,
+    SshRiskBasis,
     ThreatEventType,
     expected_mode_for,
 )
@@ -254,6 +255,7 @@ __all__ = [
     "SecurityGroupAsset",
     "SshBruteForceThreatInput",
     "SshBruteForceThreatPayload",
+    "SshRiskBasis",
     "STEP_REASON_CODES",
     "ThreatEventType",
     "ThreatEvidence",

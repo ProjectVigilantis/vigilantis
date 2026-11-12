@@ -13,7 +13,7 @@ from uuid import uuid4
 from agent_dispatcher import stale_claim_ceiling_seconds
 from config import Settings
 
-from ai.agent import SECOPS_MODEL_CALLS
+from ai.agent import SecOpsGraphVariant
 from ai.openai_client import build_openai_model_client
 
 from .dataset import check_sources, load_cases, read_json
@@ -24,6 +24,7 @@ from .runner import (
     report,
     review_template,
     run_one,
+    variant_model_calls,
 )
 from .scoring import ReviewFile, load_answers
 
@@ -82,12 +83,16 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--review-template", type=Path, metavar="RUN_JSON")
     parser.add_argument("--output", type=Path, help="새 파일만 허용; 기존 결과를 덮어쓰지 않음")
     parser.add_argument("--review", type=Path, help="요약 의미 검토 파일; --report에서만 사용")
-    parser.add_argument("--cases", nargs="+", help="주평가 C01~C07 중 선택; 기본 전체")
+    parser.add_argument("--cases", nargs="+", help="주평가 C01~C09 중 선택; 기본 전체")
     parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument("--variant", choices=[item.value for item in SecOpsGraphVariant],
+                        default=SecOpsGraphVariant.EVIDENCE_FIRST.value,
+                        help="CANDIDATE_FIRST는 PM이 승인한 비교 라운드 전용 대비책(건당 2회 호출)")
     parser.add_argument("--model", help="생략 시 서비스 코드 기본 모델")
     parser.add_argument("--reasoning-effort", choices=["low", "medium", "high", "unset"])
     parser.add_argument("--key-env-file", type=Path, help="--run 인증 키만 읽을 .env 경로")
     args = parser.parse_args(argv)
+    variant = SecOpsGraphVariant(args.variant)
     if args.repeats < 1:
         parser.error("--repeats must be positive")
     if args.review is not None and args.report is None:
@@ -108,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
         selected = saved["case_ids"]
     if selected is not None:
         if len(selected) != len(set(selected)) or not selected or set(selected) - set(answers):
-            parser.error("Select unique primary case IDs from C01~C07; N01/N02 require no model call")
+            parser.error("Select unique primary case IDs from C01~C09; N01/N02 require no model call")
         by_id = {case.case_id: case for case in cases}
         cases = [by_id[case_id] for case_id in selected]
 
@@ -127,14 +132,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if result["quality_pass"] else 2
     settings = _settings(args, paid=args.run)
     if args.estimate:
-        calls = len(cases) * args.repeats * SECOPS_MODEL_CALLS
+        calls = len(cases) * args.repeats * variant_model_calls(variant)
         print(_dump({
+            "graph_variant": variant.value,
             "case_ids": [case.case_id for case in cases], "repeats": args.repeats,
             "graph_runs": len(cases) * args.repeats, "model_calls_upper_bound": calls,
             "http_attempts_upper_bound": calls * settings.OPENAI_MAX_ATTEMPTS,
             "conservative_timeout_budget_seconds": len(cases) * args.repeats * stale_claim_ceiling_seconds(settings),
             "settings": {name: getattr(settings, name) for name in SETTING_NAMES},
-            **fingerprints(cases),
+            **fingerprints(cases, variant),
             "note": "요약 검토는 별도 모델 호출 없이 근거와 판정자를 기록한다. 금액은 최신 단가와 예상 토큰으로 실행 전에 산정한다.",
         }), end="")
         return 0
@@ -149,12 +155,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid4().hex[:8]
-    run = new_run(cases, args.repeats, settings, run_id)
+    run = new_run(cases, args.repeats, settings, run_id, variant)
     _create(args.output, run)
     client = build_openai_model_client(settings)
     for repeat in range(1, args.repeats + 1):
         for case in cases:
-            record = run_one(case, repeat, client)
+            record = run_one(case, repeat, client, variant)
             run["records"].append(record)
             _save_progress(args.output, run)
             print(f"{case.case_id} {repeat}/{args.repeats}: {record['output']['invocation_status']} "

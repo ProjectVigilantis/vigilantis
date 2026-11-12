@@ -12,7 +12,7 @@ function rank(level: RiskLevel | null): number {
 
 /**
  * 정렬 키는 `initial_risk_level` **하나이며 불변 키**다(통합설계 4.4 "초기 위험 판정기의 불변 결과").
- * `reviewed_risk_level`·`response_mode`로 정렬하면 정밀평가·타임아웃 전환마다 목록이 눈앞에서
+ * `reviewed_risk_level`·`response_mode`로 정렬하면 AI 재평가 값·타임아웃 전환마다 목록이 눈앞에서
  * 재배치돼 누르려던 항목이 움직인다. 불변 키라서 재정렬해도 순서가 튀지 않는다.
  *
  * 동점은 `created_at` 오름차순 — 오래 기다린 건이 먼저다(구 APR-001의 대기 시간 개념).
