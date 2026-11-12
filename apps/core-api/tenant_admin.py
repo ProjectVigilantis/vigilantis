@@ -37,6 +37,7 @@ from auth.access import (
 from config import TenantSettings
 from db import models
 from db.repositories import auth as auth_repo
+from db.repositories import platform_events as platform_events_repo
 from db.repositories import tenant_groups as groups_repo
 from db.repositories import tenant_settings as settings_repo
 from db.repositories import tenants as tenants_repo
@@ -63,6 +64,7 @@ from schemas.api.tenants import (
     TenantVerificationResult,
     TenantVerifyResponse,
 )
+from schemas.platform_events import PlatformEventAction
 from services.aws.client import TenantAccess
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -405,12 +407,22 @@ def set_tenant_group(
     with _management(db, actor) as user:
         if not is_central_admin(user):
             raise ApiError(ErrorCode.AUTH_FORBIDDEN)
-        stored_id = _load(db, tenant_id, user).tenant.tenant_id
+        tenant = _load(db, tenant_id, user).tenant
+        stored_id, before_group_id = tenant.tenant_id, tenant.group_id
         group_id = None if body.group_id is None else str(body.group_id)
         if group_id is not None and groups_repo.get_group(db, group_id) is None:
             raise ApiError(ErrorCode.GROUP_NOT_FOUND)
         if not groups_repo.set_tenant_group(db, stored_id, group_id, now=now):
             raise _rejected(db, stored_id, user)  # 그 사이 지워졌다 → 404
+        if before_group_id != group_id:
+            platform_events_repo.record_platform_event(
+                db,
+                PlatformEventAction.TENANT_GROUP_ASSIGNMENT_CHANGE,
+                platform_events_repo.person(user),
+                tenant_id=stored_id,
+                target_id=stored_id,
+                details={"before": before_group_id, "after": group_id},
+            )
         return _commit_after(db, lambda: _detail(_load(db, stored_id, user), settings))
 
 
