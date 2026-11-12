@@ -67,6 +67,9 @@ from db.repositories import incidents as incidents_repo
 from db.session import get_db
 from exceptions import ApiError
 from evidence_export import ExportFormat, export_incident_evidence
+from ai.model_client import AIModelClient
+from ai.report_draft import get_report_model_client
+from report_draft import generate_report_draft
 from identifiers import canonical_id
 from incident_analysis import load_analysis_results
 from realtime import incident_event
@@ -305,6 +308,23 @@ def export_evidence(
     return Response(
         content=file.body,
         media_type=file.media_type,
+        headers={"Content-Disposition": f'attachment; filename="{file.filename}"'},
+    )
+
+
+@router.post("/incidents/{incident_id}/report-draft", response_class=Response)
+def report_draft(
+    incident_id: str,
+    format: ExportFormat,
+    user: CurrentUser = Depends(require_export_evidence),
+    scope: TenantScope = Depends(require_tenant_scope),
+    db: Session = Depends(get_db),
+    client: AIModelClient | None = Depends(get_report_model_client),
+) -> Response:
+    row = _load_incident(db, incident_id, scope)
+    file = generate_report_draft(db, row, format, client)
+    return Response(
+        content=file.body, media_type=file.media_type,
         headers={"Content-Disposition": f'attachment; filename="{file.filename}"'},
     )
 
