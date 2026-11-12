@@ -656,7 +656,7 @@ export interface CpuSeries {
   points: TimeseriesPoint[];
 }
 
-/** 축 1. 값은 CloudWatch 원계열이다 — 적재된 14일 롤링 평균(`metric_summaries`)이 아니다. */
+/** 축 1. 값은 CloudWatch 원계열이다 — 적재된 하루 롤링 평균(`metric_summaries`)이 아니다. */
 export interface CpuAxis {
   status: AxisStatus;
   period_seconds: number | null;

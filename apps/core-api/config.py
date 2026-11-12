@@ -286,11 +286,16 @@ class CollectorSettings(BaseSettings):
     SCAN_INTERVAL_SECONDS 는 인벤토리 describe 주기다. METRIC_PERIOD_SECONDS(메트릭 입자)
     보다 짧아도 된다 — SG 전체개방 같은 위협은 빨리 봐야 하기 때문이다. 그 경우 collector 가
     같은 입자를 다시 받아오지 않도록 적재된 요약을 재사용한다(#255).
+
+    METRIC_LOOKBACK_DAYS 는 유휴 판정이 보는 관찰 기간이다. 기본은 하루다(#625 — 종전 14일. 유휴가 된
+    인스턴스가 후보로 뜨기까지 2주가 걸리던 것을 하루로 줄였다). **이 값과 METRIC_PERIOD_SECONDS 는
+    rule_engine.MIN_DATAPOINTS 와 묶여 있다** — 창이 내는 관측치 수(기본 24개)가 그 문턱보다 적으면 모든
+    인스턴스가 데이터 부족으로 넘어간다. 하나를 바꾸면 나머지를 함께 본다(test_rule_engine 이 기본값의 짝을 지킨다).
     """
 
     model_config = _ENV_ONLY
 
-    METRIC_LOOKBACK_DAYS: int = Field(default=14, gt=0)
+    METRIC_LOOKBACK_DAYS: int = Field(default=1, gt=0)
     METRIC_PERIOD_SECONDS: int = Field(default=3600, gt=0)
     SCAN_INTERVAL_SECONDS: int = Field(default=300, gt=0)
     # GET /api/v1/metrics/timeseries 의 기본 조회 창(시간). 화면은 hours 를 넘기지 않으므로 이 값이

@@ -82,7 +82,7 @@ class CpuAxis(BaseModel):
     """축 1 — EC2별 CPU 추이 + IDLE_CPU_AVG 임계선.
 
     **이 축의 값은 CloudWatch 원계열이지 `metric_summaries` 의 요약이 아니다.**
-    적재된 요약(`cpu_avg`)은 `METRIC_LOOKBACK_DAYS`(기본 14일) 창의 평균이고 같은
+    적재된 요약(`cpu_avg`)은 `METRIC_LOOKBACK_DAYS`(기본 1일) 창의 평균이고 같은
     입자 안에서는 회차 간 복사되므로, 그것으로 곡선을 그리면 수평 직선이 된다.
     """
 

@@ -473,7 +473,7 @@ export function AssetsView({
       </TabsContent>
 
       {/* 요약 탭: 목록 탭 위에 있던 추이 2열과 상태 3열을 옮겨 왔다. 순서는 그대로 추이 → 상태다(2026-09-30 ·
-          보안 관제와 같은 순서). 헬스 스코어가 CPU 14일 평균이라 그 원계열이 앞선다. CPU·네트워크는 같은
+          보안 관제와 같은 순서). 헬스 스코어가 CPU 하루 평균이라 그 원계열이 앞선다. CPU·네트워크는 같은
           CloudWatch 원계열이지만 단위가 %와 B/s라 한 격자에 겹치지 않는다. */}
       <TabsContent value="summary" className="@container/view flex flex-col gap-4">
       <div className="grid gap-4 @3xl/view:grid-cols-2">

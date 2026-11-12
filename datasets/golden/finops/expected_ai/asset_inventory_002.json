@@ -13,7 +13,7 @@
     {
       "case_id": "A7",
       "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00012",
-      "derivation": "cpu_datapoints가 MIN_DATAPOINTS(48)와 정확히 일치하는 경계 입력이다. 판정 축에서 이미 A7이 '미만(<)' 조건을 고정하고 있는데, 그 경계 자산이 AI 그래프 입력으로 옮겨져도 계약을 통과하는지는 확인된 적이 없었다. rule_evaluation.reason과 health_score가 프로덕션 계산식 그대로 실리는 자리이기도 하다.",
+      "derivation": "작성 시점에는 cpu_datapoints가 MIN_DATAPOINTS(48)와 정확히 일치하는 경계 입력이었다(#625에서 문턱이 20으로 내려가 지금은 문턱을 넘는 입력이다 — 입력은 AI 요청 지문이 묶여 있어 그대로 둔다). 판정 축에서 A7이 '미만(<)' 조건을 고정하고 있었는데, 그 경계 자산이 AI 그래프 입력으로 옮겨져도 계약을 통과하는지는 확인된 적이 없었다. rule_evaluation.reason과 health_score가 프로덕션 계산식 그대로 실리는 자리이기도 하다.",
       "expected": {
         "invocation_status": "SUCCEEDED",
         "summary_line_count": 3,

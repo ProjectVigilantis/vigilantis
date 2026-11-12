@@ -734,7 +734,7 @@ def six_skip_inventory() -> AssetInventory:
         account_id="123456789012", region="ap-northeast-2", mode="localstack",
         collected_at=now, lookback_days=14, period_seconds=3600,
         ec2_instances=[
-            Ec2Asset(  # 관측치 부족(< MIN_DATAPOINTS 48) → SKIP_INSUFFICIENT_DATA
+            Ec2Asset(  # 관측치 부족(< MIN_DATAPOINTS) → SKIP_INSUFFICIENT_DATA
                 arn="arn:aws:ec2:ap-northeast-2:123456789012:instance/i-insufficient",
                 instance_id="i-insufficient", name="new-inst", instance_type="t3.large",
                 state="running", region="ap-northeast-2", tags={"Environment": "dev"},

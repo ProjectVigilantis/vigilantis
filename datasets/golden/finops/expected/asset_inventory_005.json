@@ -10,7 +10,7 @@
   "thresholds_at_authoring": {
     "IDLE_CPU_AVG": 5.0,
     "SPIKE_CPU_MAX": 40.0,
-    "MIN_DATAPOINTS": 48,
+    "MIN_DATAPOINTS": 20,
     "note": "작성 시점의 apps/core-api/services/rule_engine.py 상수. 값이 바뀌면 tests/test_golden_dataset.py 가 실패하므로 본 정답을 함께 갱신할 것 (ADR-0006 임계값 결합 원칙)"
   },
   "design_note": "이 파일의 목적은 판정이 아니라 **관계**다 — 토폴로지 뷰(#146)가 그릴 노드 4종(NACL·Launch Template·ASG·ALB Target Group)을 골든에 처음 넣는다(#271 ③ · 설계서 §대조 8번). 판정 축은 A1~A16 과 E1~E8 이 이미 덮으므로 여기서는 중복해서 세우지 않는다. 정답이 3건뿐인 것은 누락이 아니라 계약이다 — 나머지 4종은 판정 대상이 아니라(schemas/api/assets.py _RULE_TARGET_TYPES) 항상 NOT_APPLICABLE 이고, tests/golden_contract.py::judgement_free_list_fields() 가 그 면제를 계약에서 파생시켜 1:1 대조에서 뺀다(#271 ① / PR #270). ⚠️ 앵커 EC2 두 대는 **일부러 COST_CANDIDATE 가 아니게** 잡았다(cpu_avg 18.5 · 40.0 — 둘 다 IDLE_CPU_AVG 5.0 이상). 하나라도 후보가 되면 AI 정답지의 고정 세트가 6건에서 7건이 되어 tests/test_golden_ai_dataset.py 의 가드 2종이 깨진다(#234 / PR #303). 여기서 cpu_avg 를 낮추려면 expected_ai/ 정답지를 함께 만들어야 한다. 또한 EBS 1건을 함께 담아 ATTACHED_TO 를 닫는다 — #264 가 넣은 004 의 EBS 는 골든에 없는 EC2(i-0a1b2c3d4e5f00041)를 가리켜 이 관계가 서지 않았다.",

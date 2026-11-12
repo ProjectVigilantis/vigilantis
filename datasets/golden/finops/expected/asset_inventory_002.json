@@ -10,7 +10,7 @@
   "thresholds_at_authoring": {
     "IDLE_CPU_AVG": 5.0,
     "SPIKE_CPU_MAX": 40.0,
-    "MIN_DATAPOINTS": 48,
+    "MIN_DATAPOINTS": 20,
     "note": "작성 시점의 apps/core-api/services/rule_engine.py 상수. 값이 바뀌면 tests/test_golden_dataset.py가 실패하므로 본 정답을 함께 갱신할 것 (ADR-0006 임계값 결합 원칙)"
   },
   "evaluations": [
@@ -25,7 +25,7 @@
     {
       "case_id": "A7",
       "asset_arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00012",
-      "purpose": "MIN_DATAPOINTS 정확히 일치(48) — 조건이 '미만(<)'이므로 데이터부족이 아니다. '<='로 잘못 구현하면 SKIP_INSUFFICIENT_DATA가 되어 실패. cpu_max는 A1과 같은 10.0 — 수집기(collector._summarize)는 cpu_avg와 cpu_max를 같은 데이터포인트 목록에서 뽑으므로 'avg 있고 max 없음'을 만들지 않는다(계약이 아니라 수집기 구현의 성질 — 스키마·DB는 두 값이 독립 nullable). cpu_max null 가드는 도달 불가 입력에 대한 방어 동작이라 골든이 아니라 단위 테스트 몫이다(apps/core-api/services/tests/test_rule_engine.py)",
+      "purpose": "관측치 48 — 문턱(MIN_DATAPOINTS 20)을 넘으므로 데이터부족이 아니다. 문턱이 48이던 때는 정확히 일치하는 경계 케이스였다(#625에서 20으로 내렸다). 입력은 그대로 둔다 — AI 요청 지문(apps/core-api/ai/tests/test_savings_request_boundary.py)이 이 입력에 묶여 있다. '미만(<)' 경계는 apps/core-api/services/tests/test_rule_engine.py 의 test_min_datapoints_boundary_is_exclusive_below 가 고정한다. cpu_max는 A1과 같은 10.0 — 수집기(collector._summarize)는 cpu_avg와 cpu_max를 같은 데이터포인트 목록에서 뽑으므로 'avg 있고 max 없음'을 만들지 않는다(계약이 아니라 수집기 구현의 성질 — 스키마·DB는 두 값이 독립 nullable). cpu_max null 가드는 도달 불가 입력에 대한 방어 동작이라 골든이 아니라 단위 테스트 몫이다(apps/core-api/services/tests/test_rule_engine.py)",
       "evaluation_status": "COMPLETED",
       "verdict": "COST_CANDIDATE",
       "skip_reason_code": null
