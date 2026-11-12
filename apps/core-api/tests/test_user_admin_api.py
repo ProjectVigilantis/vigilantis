@@ -184,8 +184,13 @@ def put_permissions(client, user_id, permissions):
     return client.put(f"{BASE}/{user_id}/permissions", json={"permissions": permissions})
 
 
+def permission_event_ids(db) -> set[str]:
+    """호출 시점까지 쌓인 USER_PERMISSIONS_CHANGE 행의 event_id — 활동 로그는 append-only 이고 비어 있다고 가정할 수 없다."""
+    return {row.event_id for row in permission_events(db)}
+
+
 def permission_events(db, target_id=None) -> list[models.PlatformEvent]:
-    """USER_PERMISSIONS_CHANGE 활동 로그 행 — 대상을 주면 그 대상만, 아니면 전부(발생 순서)."""
+    """USER_PERMISSIONS_CHANGE 활동 로그 행(발생 순서) — 대상을 주면 그 대상만."""
     stmt = (
         select(models.PlatformEvent)
         .where(models.PlatformEvent.action == PlatformEventAction.USER_PERMISSIONS_CHANGE.value)
@@ -1568,6 +1573,7 @@ def test_list_shows_effective_permissions_per_role(client_pg, db, admin, tenant,
 
 def test_admin_grants_and_revokes_operator_permissions_with_audit(client_pg, db, admin, operator, adapter):
     before = snapshot(db)
+    known = permission_event_ids(db)
     # 입력 순서와 상관없이 열거 순서로 저장 · 이력에 남는다
     assert put_permissions(client_pg, operator.user_id, ["EXECUTE_ACTION", "VIEW"]).status_code == 204
     assert stored_permissions(db, operator.user_id) == ["VIEW", "EXECUTE_ACTION"]
@@ -1583,7 +1589,7 @@ def test_admin_grants_and_revokes_operator_permissions_with_audit(client_pg, db,
     granted_event, revoked_event = permission_events(db, operator.user_id)
     assert_permission_event(granted_event, admin, operator, before=[], after=["VIEW", "EXECUTE_ACTION"])
     assert_permission_event(revoked_event, admin, operator, before=["VIEW", "EXECUTE_ACTION"], after=[])
-    assert len(permission_events(db)) == 2
+    assert permission_event_ids(db) == known | {granted_event.event_id, revoked_event.event_id}
     assert adapter.calls == []
 
 
@@ -1611,11 +1617,36 @@ def test_permissions_same_list_is_409_without_event(client_pg, db, admin, make_a
     )
     bare = make_auth_session(UserRole.OPERATOR, tenant_id=tenant, permissions=())
     before = snapshot(db)
+    known = permission_event_ids(db)
     for target_id, same in ((held.user_id, ["EXECUTE_ACTION", "VIEW"]), (bare.user_id, [])):
         resp = put_permissions(client_pg, target_id, same)
         assert (resp.status_code, resp.json()["error"]["code"]) == (409, "USER_STATE_CONFLICT")
     assert snapshot(db) == before
-    assert permission_events(db) == []
+    assert permission_event_ids(db) == known
+
+
+def test_permission_event_assertions_ignore_unrelated_existing_rows(
+    client_pg, db, admin, make_auth_session, tenant
+):
+    """다른 사용자의 같은 action 행이 이미 있어도 보존되고, 이 대상의 no-event · 건수 검증을 오염시키지 않는다."""
+    unrelated = make_auth_session(UserRole.OPERATOR, tenant_id=tenant, permissions=())
+    held = make_auth_session(UserRole.OPERATOR, tenant_id=tenant, permissions=(FeaturePermission.VIEW,))
+    assert put_permissions(client_pg, unrelated.user_id, ["VIEW"]).status_code == 204
+    (existing,) = permission_events(db, unrelated.user_id)
+    known = permission_event_ids(db)
+    assert existing.event_id in known
+
+    resp = put_permissions(client_pg, held.user_id, ["VIEW"])  # 동일 목록 — 이벤트 없음
+    assert (resp.status_code, resp.json()["error"]["code"]) == (409, "USER_STATE_CONFLICT")
+    assert permission_events(db, held.user_id) == []
+    assert permission_event_ids(db) == known
+    assert [r.event_id for r in permission_events(db, unrelated.user_id)] == [existing.event_id]
+
+    assert put_permissions(client_pg, held.user_id, []).status_code == 204
+    (event,) = permission_events(db, held.user_id)
+    assert_permission_event(event, admin, held, before=["VIEW"], after=[])
+    assert permission_event_ids(db) == known | {event.event_id}
+    assert existing.event_id in permission_event_ids(db)
 
 
 @pytest.mark.parametrize("role", [UserRole.ADMIN, UserRole.VIEWER])
@@ -1623,10 +1654,11 @@ def test_permissions_same_list_is_409_without_event(client_pg, db, admin, make_a
 def test_permissions_on_non_operator_target_is_409(client_pg, db, admin, make_auth_session, tenant, role, permissions):
     other = make_auth_session(role, tenant_id=tenant)
     before = snapshot(db)
+    known = permission_event_ids(db)
     resp = put_permissions(client_pg, other.user_id, permissions)
     assert (resp.status_code, resp.json()["error"]["code"]) == (409, "USER_STATE_CONFLICT")
     assert snapshot(db) == before
-    assert permission_events(db) == []
+    assert permission_event_ids(db) == known
 
 
 def test_tenant_admin_cannot_change_permissions_of_another_tenants_operator(
@@ -1635,12 +1667,13 @@ def test_tenant_admin_cannot_change_permissions_of_another_tenants_operator(
     foreign = make_auth_session(UserRole.OPERATOR, tenant_id=make_tenant(), permissions=(FeaturePermission.VIEW,))
     missing = put_permissions(client_pg, MISSING_UUID, ["VIEW"])
     before = snapshot(db)
+    known = permission_event_ids(db)
     resp = put_permissions(client_pg, foreign.user_id, [])
     assert (resp.status_code, resp.json()["error"]["code"]) == (404, "USER_NOT_FOUND")
     assert resp.json()["error"]["message"] == missing.json()["error"]["message"]
     assert stored_permissions(db, foreign.user_id) == ["VIEW"]
     assert snapshot(db) == before
-    assert permission_events(db) == []
+    assert permission_event_ids(db) == known
     assert adapter.calls == []
 
 
@@ -1648,10 +1681,11 @@ def test_tenant_admin_cannot_change_permissions_of_another_tenants_operator(
 def test_non_admin_permission_change_is_403_without_event(client_pg, db, login_as, operator, tenant, role):
     login_as(role, tenant_id=tenant)
     before = snapshot(db)
+    known = permission_event_ids(db)
     resp = put_permissions(client_pg, operator.user_id, ["VIEW"])
     assert (resp.status_code, resp.json()["error"]["code"]) == (403, "AUTH_FORBIDDEN")
     assert snapshot(db) == before
-    assert permission_events(db) == []
+    assert permission_event_ids(db) == known
 
 
 def test_permission_change_failure_after_event_flush_rolls_back_everything(
@@ -1672,13 +1706,14 @@ def test_permission_change_failure_after_event_flush_rolls_back_everything(
     monkeypatch.setattr(platform_events_repo, "record_platform_event", record_then_remember)
     monkeypatch.setattr(db, "commit", boom)
     before = snapshot(db)
+    known = permission_event_ids(db)
     resp = put_permissions(client_pg, operator.user_id, ["VIEW"])
     assert (resp.status_code, resp.json()["error"]["code"]) == (500, "INTERNAL_ERROR")
     assert "secret-detail" not in resp.text
     assert len(flushed) == 1  # 실패 시점에는 행이 이미 flush 되어 있었다
     assert snapshot(db) == before
     assert events(db, operator.user_id) == []
-    assert permission_events(db) == []
+    assert permission_event_ids(db) == known
 
 
 @pytest.mark.parametrize(
@@ -1696,10 +1731,11 @@ def test_permission_change_failure_after_event_flush_rolls_back_everything(
 def test_invalid_permissions_body_is_422_and_changes_nothing(client_pg, db, admin, make_auth_session, tenant, body):
     held = make_auth_session(UserRole.OPERATOR, tenant_id=tenant, permissions=(FeaturePermission.VIEW,))
     before = snapshot(db)
+    known = permission_event_ids(db)
     resp = client_pg.put(f"{BASE}/{held.user_id}/permissions", json=body)
     assert (resp.status_code, resp.json()["error"]["code"]) == (422, "REQUEST_VALIDATION_FAILED")
     assert snapshot(db) == before
-    assert permission_events(db) == []
+    assert permission_event_ids(db) == known
 
 
 def test_suspended_tenant_admin_cannot_change_permissions_but_central_admin_can(
@@ -1709,16 +1745,18 @@ def test_suspended_tenant_admin_cannot_change_permissions_but_central_admin_can(
     member = make_auth_session(UserRole.OPERATOR, tenant_id=parked, permissions=())
     login_as(UserRole.ADMIN, tenant_id=parked)
     before = snapshot(db)
+    known = permission_event_ids(db)
     resp = put_permissions(client_pg, member.user_id, ["VIEW"])
     assert (resp.status_code, resp.json()["error"]["code"]) == (409, "TENANT_SUSPENDED")
     assert snapshot(db) == before
-    assert permission_events(db) == []
+    assert permission_event_ids(db) == known
 
     central = login_as(UserRole.ADMIN, platform_role=PlatformRole.CENTRAL_ADMIN)
     assert put_permissions(client_pg, member.user_id, ["VIEW"]).status_code == 204
     assert stored_permissions(db, member.user_id) == ["VIEW"]
     assert events(db, member.user_id)[0][3] == central.user_id
-    (event,) = permission_events(db)
+    (event,) = permission_events(db, member.user_id)
+    assert permission_event_ids(db) == known | {event.event_id}
     assert_permission_event(event, central, member, before=[], after=["VIEW"])
 
 

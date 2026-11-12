@@ -53,7 +53,7 @@ def _events(db, *, target_id=None):
         models.PlatformEvent.action.in_([
             PlatformEventAction.TENANT_GROUP_CREATE,
             PlatformEventAction.TENANT_GROUP_DELETE,
-            PlatformEventAction.TENANT_GROUP_CHANGE,
+            PlatformEventAction.TENANT_GROUP_ASSIGNMENT_CHANGE,
         ])
     )
     if target_id is not None:
@@ -128,7 +128,7 @@ def test_central_creates_lists_and_deletes_a_group(client_pg, db, central, make_
     created, deleted = _events(db, target_id=body["group_id"])
     _assert_event(created, central, "TENANT_GROUP_CREATE", body["group_id"], {})
     _assert_event(
-        deleted, central, "TENANT_GROUP_DELETE", body["group_id"], {"tenant_count": 0, "staff_count": 0}
+        deleted, central, "TENANT_GROUP_DELETE", body["group_id"], {"tenant_ids": [], "staff_user_ids": []}
     )
     assert all(db.get(models.PlatformEvent, event_id) is not None for event_id in unrelated_ids)
 
@@ -304,7 +304,7 @@ def test_central_moves_a_tenant_between_groups_and_out(client_pg, db, central, m
         assert _tenant_group(db, tenant) == group_id
         assert client_pg.get(f"{TENANTS}/{tenant}").json()["group_id"] == group_id
         _assert_event(
-            _events(db, target_id=tenant)[-1], central, "TENANT_GROUP_CHANGE", tenant,
+            _events(db, target_id=tenant)[-1], central, "TENANT_GROUP_ASSIGNMENT_CHANGE", tenant,
             {"before": before, "after": group_id}, tenant=tenant,
         )
         before = group_id
@@ -331,18 +331,30 @@ def test_reassigning_the_same_group_returns_200_without_event(
 def test_deleting_a_group_ungroups_tenants_and_shrinks_manager_scope_on_the_next_request(
     client_pg, db, central, make_auth_session, make_tenant, make_group
 ):
-    tenant = make_tenant()
-    group_id = make_group(tenant_ids=[tenant])
+    tenant, second_tenant, outside_tenant = make_tenant(), make_tenant(), make_tenant()
+    group_id = make_group(tenant_ids=[tenant, second_tenant])
+    outside_group = make_group(tenant_ids=[outside_tenant])
     manager = make_auth_session(UserRole.ADMIN, platform_role=PlatformRole.TENANT_MANAGER)
+    disabled = make_auth_session(
+        UserRole.ADMIN, platform_role=PlatformRole.TENANT_MANAGER, status=models.AppUserStatus.DISABLED,
+    )
     auth_repo.replace_assigned_groups(db, user_id=manager.user_id, group_ids=(group_id,), now=datetime.now(UTC))
+    auth_repo.replace_assigned_groups(
+        db, user_id=disabled.user_id, group_ids=(group_id, outside_group), now=datetime.now(UTC),
+    )
     db.commit()
-    assert [t["tenant_id"] for t in client_pg.get(TENANTS, headers=manager.headers).json()["tenants"]] == [tenant]
+    assert {t["tenant_id"] for t in client_pg.get(TENANTS, headers=manager.headers).json()["tenants"]} == {
+        tenant, second_tenant,
+    }
 
     assert client_pg.delete(f"{BASE}/{group_id}").status_code == 204
 
     # 고객사는 남고 그룹 없음(담당자 없음)이 된다 — 직원 배정도 함께 지워진다
     assert client_pg.get(f"{TENANTS}/{tenant}").json()["group_id"] is None
+    assert client_pg.get(f"{TENANTS}/{second_tenant}").json()["group_id"] is None
+    assert _tenant_group(db, outside_tenant) == outside_group
     assert auth_repo.list_assigned_group_ids(db, user_id=manager.user_id) == ()
+    assert auth_repo.list_assigned_group_ids(db, user_id=disabled.user_id) == (outside_group,)
     assert client_pg.get(f"{STAFF}/{manager.user_id}/groups").json() == {"group_ids": []}
     # 세션을 다시 만들지 않아도 다음 요청부터 범위에서 빠진다
     assert client_pg.get(TENANTS, headers=manager.headers).json()["tenants"] == []
@@ -351,7 +363,8 @@ def test_deleting_a_group_ungroups_tenants_and_shrinks_manager_scope_on_the_next
     assert client_pg.get("/api/v1/auth/me", headers=manager.headers).json()["assigned_tenant_ids"] == []
     (deleted,) = _events(db, target_id=group_id)
     _assert_event(
-        deleted, central, "TENANT_GROUP_DELETE", group_id, {"tenant_count": 1, "staff_count": 1}
+        deleted, central, "TENANT_GROUP_DELETE", group_id,
+        {"tenant_ids": sorted([tenant, second_tenant]), "staff_user_ids": sorted([manager.user_id, disabled.user_id])},
     )
 
 
@@ -376,6 +389,8 @@ def test_group_changes_and_events_roll_back_together(
         rows = [row for row in _events(db) if row.event_id not in before_events]
         if rows:
             assert len(rows) == 1
+            if operation == "delete":
+                assert rows[0].details == {"tenant_ids": [tenant], "staff_user_ids": [manager.user_id]}
             flushed.append(rows[0].event_id)
             raise RuntimeError("forced post-flush failure")
         original_commit()

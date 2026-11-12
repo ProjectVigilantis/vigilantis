@@ -108,8 +108,8 @@ def test_migration_enum_values_follow_the_contract(db, db_type, contract):
     ("action", "category", "target", "details"),
     [
         (A.TENANT_GROUP_CREATE, "TENANT_ADMIN", "TENANT_GROUP", {}),
-        (A.TENANT_GROUP_DELETE, "TENANT_ADMIN", "TENANT_GROUP", {"tenant_count": 2, "staff_count": 1}),
-        (A.TENANT_GROUP_CHANGE, "TENANT_ADMIN", "TENANT", {"before": None, "after": TENANT}),
+        (A.TENANT_GROUP_DELETE, "TENANT_ADMIN", "TENANT_GROUP", {"tenant_ids": [TENANT], "staff_user_ids": []}),
+        (A.TENANT_GROUP_ASSIGNMENT_CHANGE, "TENANT_ADMIN", "TENANT", {"before": None, "after": TENANT}),
         (A.USER_PERMISSIONS_CHANGE, "USER_ADMIN", "USER", {"before": [], "after": ["VIEW"]}),
     ],
 )
@@ -148,7 +148,7 @@ def test_group_change_details_accept_uuid_and_preserve_null(before, after):
     details = TenantGroupChangeDetails(before=before, after=after)
     assert details.model_dump(mode="json", exclude_none=True) == {"before": before, "after": after}
     record = _record(
-        action=A.TENANT_GROUP_CHANGE,
+        action=A.TENANT_GROUP_ASSIGNMENT_CHANGE,
         actor_kind=PlatformActorKind.USER,
         actor_user_id=str(uuid.uuid4()),
         actor_account_type=AccountType.TENANT,
@@ -162,14 +162,14 @@ def test_group_change_details_accept_uuid_and_preserve_null(before, after):
 @pytest.mark.parametrize(
     ("action", "details"),
     [
-        (A.TENANT_GROUP_CHANGE, {"before": "not-a-uuid", "after": None}),
-        (A.TENANT_GROUP_CHANGE, {"before": None, "after": "not-a-uuid"}),
+        (A.TENANT_GROUP_ASSIGNMENT_CHANGE, {"before": "not-a-uuid", "after": None}),
+        (A.TENANT_GROUP_ASSIGNMENT_CHANGE, {"before": None, "after": "not-a-uuid"}),
         (A.USER_PERMISSIONS_CHANGE, {"before": ["UNKNOWN"], "after": []}),
         (A.USER_PERMISSIONS_CHANGE, {"before": [], "after": ["UNKNOWN"]}),
         (A.USER_PERMISSIONS_CHANGE, {"before": []}),
-        (A.TENANT_GROUP_DELETE, {"tenant_count": -1, "staff_count": 0}),
-        (A.TENANT_GROUP_DELETE, {"tenant_count": 0, "staff_count": True}),
-        (A.TENANT_GROUP_DELETE, {"tenant_count": 0}),
+        (A.TENANT_GROUP_DELETE, {"tenant_ids": ["not-a-uuid"], "staff_user_ids": []}),
+        (A.TENANT_GROUP_DELETE, {"tenant_ids": [], "staff_user_ids": ["not-a-uuid"]}),
+        (A.TENANT_GROUP_DELETE, {"tenant_ids": []}),
     ],
 )
 def test_new_admin_details_reject_wrong_types_and_missing_fields(action, details):
@@ -190,7 +190,7 @@ def test_group_change_requires_the_affected_tenant_and_permissions_normalize_enu
     for tenant, target in ((None, TENANT), (TENANT, None), (TENANT, str(uuid.uuid4()))):
         with pytest.raises(ValidationError):
             _record(
-                **values, action=A.TENANT_GROUP_CHANGE, tenant_id=tenant, target_id=target,
+                **values, action=A.TENANT_GROUP_ASSIGNMENT_CHANGE, tenant_id=tenant, target_id=target,
                 details={"before": None, "after": None},
             )
     record = _record(

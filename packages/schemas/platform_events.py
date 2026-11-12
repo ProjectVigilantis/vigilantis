@@ -112,7 +112,7 @@ class PlatformEventAction(str, Enum):
     # 고객사 관리
     TENANT_GROUP_CREATE = "TENANT_GROUP_CREATE"
     TENANT_GROUP_DELETE = "TENANT_GROUP_DELETE"
-    TENANT_GROUP_CHANGE = "TENANT_GROUP_CHANGE"
+    TENANT_GROUP_ASSIGNMENT_CHANGE = "TENANT_GROUP_ASSIGNMENT_CHANGE"
     TENANT_CREATE = "TENANT_CREATE"
     TENANT_UPDATE = "TENANT_UPDATE"
     TENANT_SUSPEND = "TENANT_SUSPEND"
@@ -194,11 +194,11 @@ class PermissionsChangeDetails(PlatformEventDetails):
 
 
 class TenantGroupDeleteDetails(PlatformEventDetails):
-    """그룹 삭제로 소속이 풀린 고객사 수와 담당 배정이 지워진 직원 수. 이름은 남기지 않는다."""
+    """그룹 삭제로 소속이 풀린 고객사와 담당 배정이 지워진 직원 ID. 이름은 남기지 않는다."""
 
-    tenant_count: int = Field(ge=0, strict=True)
-    #: 계정 활성 여부와 무관하게 삭제된 직원 담당 배정 수(직원당 그룹 배정은 하나).
-    staff_count: int = Field(ge=0, strict=True)
+    tenant_ids: tuple[uuid.UUID, ...]
+    #: 계정 활성 여부와 무관하게 삭제된 직원 담당 배정을 모두 남긴다.
+    staff_user_ids: tuple[uuid.UUID, ...]
 
 
 class TenantVerifyDetails(PlatformEventDetails):
@@ -302,7 +302,7 @@ ACTION_SPECS: Mapping[PlatformEventAction, ActionSpec] = {
     _A.TENANT_GROUP_DELETE: _spec(
         _C.TENANT_ADMIN, {_S}, {_USER}, _T.TENANT_GROUP, TenantGroupDeleteDetails
     ),
-    _A.TENANT_GROUP_CHANGE: _spec(
+    _A.TENANT_GROUP_ASSIGNMENT_CHANGE: _spec(
         _C.TENANT_ADMIN, {_S}, {_USER}, _T.TENANT, TenantGroupChangeDetails
     ),
     _A.TENANT_CREATE: _spec(_C.TENANT_ADMIN, {_S}, {_USER}, _T.TENANT),

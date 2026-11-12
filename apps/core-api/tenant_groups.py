@@ -82,7 +82,7 @@ def delete_group(db: Session, actor: admin_service.Actor, group_id: str) -> None
         if group is None:
             raise ApiError(ErrorCode.GROUP_NOT_FOUND)
         target_id = group.group_id
-        tenant_count, staff_count = groups_repo.group_member_counts(db, target_id)
+        tenant_ids, staff_user_ids = groups_repo.group_member_ids(db, target_id)
         if not groups_repo.delete_group(db, target_id):
             raise ApiError(ErrorCode.GROUP_NOT_FOUND)
         platform_events_repo.record_platform_event(
@@ -90,5 +90,5 @@ def delete_group(db: Session, actor: admin_service.Actor, group_id: str) -> None
             PlatformEventAction.TENANT_GROUP_DELETE,
             platform_events_repo.person(user),
             target_id=target_id,
-            details={"tenant_count": tenant_count, "staff_count": staff_count},
+            details={"tenant_ids": tenant_ids, "staff_user_ids": staff_user_ids},
         )

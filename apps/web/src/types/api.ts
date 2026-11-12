@@ -1466,6 +1466,10 @@ export type PlatformEventAction =
   | 'USER_SESSIONS_REVOKE'
   | 'USER_PLATFORM_ROLE_CHANGE'
   | 'USER_GROUP_ASSIGNMENTS_CHANGE'
+  | 'USER_PERMISSIONS_CHANGE'
+  | 'TENANT_GROUP_CREATE'
+  | 'TENANT_GROUP_DELETE'
+  | 'TENANT_GROUP_ASSIGNMENT_CHANGE'
   | 'TENANT_CREATE'
   | 'TENANT_UPDATE'
   | 'TENANT_SUSPEND'
@@ -1508,7 +1512,8 @@ export type PlatformEventTargetType =
   | 'SIGNUP_REQUEST'
   | 'INQUIRY'
   | 'COLLECTION_RUN'
-  | 'NOTIFICATION';
+  | 'NOTIFICATION'
+  | 'TENANT_GROUP';
 
 /**
  * 누가 · 무엇이 했나. 로그인 · MFA · 비밀번호 재설정 시도는 로그인 전이라 ANONYMOUS 이고, 시도한 계정은 target 이다.

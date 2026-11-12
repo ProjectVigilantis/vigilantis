@@ -64,8 +64,8 @@ from schemas.api.tenants import (
     TenantVerificationResult,
     TenantVerifyResponse,
 )
-from services.aws.client import TenantAccess
 from schemas.platform_events import PlatformEventAction
+from services.aws.client import TenantAccess
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from tenant_verification import verify_connection
@@ -417,7 +417,7 @@ def set_tenant_group(
         if before_group_id != group_id:
             platform_events_repo.record_platform_event(
                 db,
-                PlatformEventAction.TENANT_GROUP_CHANGE,
+                PlatformEventAction.TENANT_GROUP_ASSIGNMENT_CHANGE,
                 platform_events_repo.person(user),
                 tenant_id=stored_id,
                 target_id=stored_id,

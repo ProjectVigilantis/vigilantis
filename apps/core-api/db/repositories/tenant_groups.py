@@ -76,16 +76,19 @@ def delete_group(db: Session, group_id: str) -> bool:
     return result.rowcount == 1
 
 
-def group_member_counts(db: Session, group_id: str) -> tuple[int, int]:
-    """삭제 영향 수. 호출부의 users 잠금 안에서 세어 그룹 배치 · 직원 배정 쓰기와 직렬화한다."""
-    tenant_count = db.scalar(
-        select(func.count()).select_from(models.Tenant).where(models.Tenant.group_id == group_id)
-    )
-    staff_count = db.scalar(
-        select(func.count()).select_from(models.AppUserGroupAssignment)
+def group_member_ids(db: Session, group_id: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """삭제 영향 ID. 호출부의 users 잠금 안에서 읽어 그룹 배치 · 직원 배정 쓰기와 직렬화한다."""
+    tenant_ids = tuple(db.scalars(
+        select(models.Tenant.tenant_id)
+        .where(models.Tenant.group_id == group_id)
+        .order_by(models.Tenant.tenant_id)
+    ))
+    staff_user_ids = tuple(db.scalars(
+        select(models.AppUserGroupAssignment.user_id)
         .where(models.AppUserGroupAssignment.group_id == group_id)
-    )
-    return tenant_count, staff_count
+        .order_by(models.AppUserGroupAssignment.user_id)
+    ))
+    return tenant_ids, staff_user_ids
 
 
 def set_tenant_group(db: Session, tenant_id: str, group_id: str | None, *, now: datetime) -> bool:
