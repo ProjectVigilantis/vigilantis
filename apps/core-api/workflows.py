@@ -57,6 +57,10 @@
 #   - AWS 자격(#533 E)은 요청자가 아니라 기록의 소유 테넌트다(tenant_access_for). 실행 · 판정은 dispatcher 가
 #     실행 행의 소유로 문맥을 세운 채 부르고, 가드레일 ④ 를 부르는 자리(AI 후보 · 해제 제안 · 원복)는 여기서
 #     직접 세운다. 소속 없는 기록(NULL)은 「테넌트 없음」 문맥이다 — 소유를 추론하지 않는다.
+#   - 플랫폼 활동 로그(#589)는 새로 일어난 사실만 남긴다 — 승인 · 종료 · 분석 · 자동 발동 · 확정 · 가드레일 거절은
+#     그 변경과 같은 트랜잭션에서 commit 직전에, 관제자 접수의 정지 테넌트 거절(409)만 요청을 되돌린 뒤 따로 남긴다.
+#     같은 Key 재생 · 경합 패배 · 이미 종료 · 건너뜀 · 판정 보류 재시도는 남기지 않는다. 사람 행위자는 HTTP 의
+#     재판정 신원(등급 · 세션 포함)뿐이다 — actor 없는 신뢰 경로는 그 값을 모르므로 사람 행을 남기지 않는다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -69,6 +73,7 @@ from datetime import UTC, datetime, timedelta
 from enum import Enum, unique
 
 import notification_events
+import platform_event_log
 from ai import guardrails
 from auth import access as auth_access
 from auth import permissions as auth_permissions
@@ -82,6 +87,7 @@ from db.repositories import auth as auth_repo
 from db.repositories import executions as executions_repo
 from db.repositories import guardrails as guardrails_repo
 from db.repositories import incidents as incidents_repo
+from db.repositories import platform_events as platform_events_repo
 from db.repositories import tenants as tenants_repo
 from exceptions import ApiError
 from identifiers import canonical_id
@@ -133,6 +139,7 @@ from schemas.guardrails import (
     GuardrailValidationRequest,
     GuardrailValidationResult,
 )
+from schemas.events import ThreatEventType
 from schemas.evidence import EvidenceType
 from schemas.incidents import (
     AGENT_TERMINAL_STATUSES,
@@ -141,6 +148,7 @@ from schemas.incidents import (
     AgentWaitSchedule,
 )
 from schemas.intake import INCIDENT_TRIGGERING_VERDICTS
+from schemas.platform_events import PlatformEventAction, PlatformEventOutcome
 from schemas.precheck import (
     PrecheckOutcome,
     PrecheckReasonCode,
@@ -252,11 +260,16 @@ def _live_actor(
 
 @dataclass(frozen=True)
 class _WriteContext:
-    """관제자 쓰기(실행 접수 · 종료)의 판정 근거 — 범위 · 고객사 행위자 여부 · 감사 기록 행위자."""
+    """관제자 쓰기(실행 접수 · 종료)의 판정 근거 — 범위 · 고객사 행위자 여부 · 감사 기록 행위자.
+
+    event_actor 는 플랫폼 활동 로그(#589)의 사람 행위자다. HTTP 재판정 신원에서만 있다 — 신뢰 경로의
+    audit_actor 에는 등급 · 세션이 없어 만들지 않는다(그 경로는 사람 행을 남기지 않는다).
+    """
 
     scope: TenantScope
     customer: bool
     audit_actor: audit_repo.Actor
+    event_actor: platform_events_repo.EventActor | None = None
 
 
 def _write_context(
@@ -291,6 +304,8 @@ def _write_context(
         scope=auth_access.tenant_scope_of(user),
         customer=not auth_access.is_platform_account(user),
         audit_actor=audit_repo.person(user.user_id, user.account_type),
+        # 감사 행위자로 줄이기 전의 재판정 신원 — 등급 · 세션은 여기서만 남아 있다
+        event_actor=platform_events_repo.person(user),
     )
 
 
@@ -520,12 +535,16 @@ def reserve_execution(
     scope: TenantScope = ALL_TENANTS,
     actor: Actor | None = None,
     audit_actor: audit_repo.Actor | None = None,
+    session_factory: Callable[[], Session] | None = None,
 ) -> ExecutionReservation:
     """조치 실행 예약 — (행위자 재판정) → 범위 확인 → 멱등 확인 → Incident 확인 → 테넌트 정지
     → 접수 근거 확인 → 예약 → 상태 전이.
 
     새 실행 행을 남길 때만 같은 트랜잭션에 감사 기록을 남긴다(T-2 · #544) — 같은 Key 재요청(200 재생) ·
-    거절 · 후보 선점 실패는 기록이 없다.
+    거절 · 후보 선점 실패는 기록이 없다. 플랫폼 활동 로그(#589)도 HTTP(actor)에서 같은 자리에 ACTION_APPROVE
+    를 남긴다(원복 접수 포함). 정지 테넌트 거절(409)은 같은 Key 재확인 뒤에도 거절이고 session_factory 가
+    있을 때만 요청 트랜잭션을 되돌리고 따로 남기기로 ACTION_BLOCK 을 남긴다. session_factory 는 그 기록에만
+    쓴다 — 없으면(HTTP 라우터 밖의 actor 호출) 그 거절은 기록 없이 예전 그대로 409 로 올라간다.
 
     멱등 확인이 범위 다음 맨 앞이어야 한다. 재요청 시점에는 후보가 이미 CLAIMED라, 제안
     확인을 먼저 하면 정상 재요청이 200이 아니라 409로 떨어진다. 정지보다도 앞이라 정지 전에
@@ -584,6 +603,14 @@ def reserve_execution(
             raced = executions_repo.get_by_idempotency_key(db, request.idempotency_key)
             if raced is not None:
                 return _replay_or_conflict(raced, request)
+            if (
+                exc.code is ErrorCode.TENANT_SUSPENDED
+                and context.event_actor is not None
+                and session_factory is not None
+            ):
+                _record_suspended_block(
+                    db, session_factory, canonical_id(request.incident_id), context.event_actor
+                )
         raise
 
     try:
@@ -627,10 +654,43 @@ def reserve_execution(
             raise ApiError(ErrorCode.PROPOSAL_NOT_EXECUTABLE)
 
     _move_incident_to_in_progress(db, source.incident_id)
+    if context.event_actor is not None:
+        platform_events_repo.record_platform_event(
+            db,
+            PlatformEventAction.ACTION_APPROVE,
+            context.event_actor,
+            tenant_id=execution.tenant_id,
+            target_id=execution.execution_id,
+        )
 
     reserved = _to_response(execution)
     db.commit()
     return ExecutionReservation(response=reserved, created=True)
+
+
+def _record_suspended_block(
+    db: Session,
+    session_factory: Callable[[], Session],
+    incident_id: str,
+    actor: platform_events_repo.EventActor,
+) -> None:
+    """관제자 접수의 정지 테넌트 거절(409)을 요청 트랜잭션 밖에 남긴다 — 요청은 아무것도 쓰지 않고 끝난다.
+
+    테넌트는 rollback 전에 기록의 소속으로 읽는다(거절은 인시던트를 찾은 뒤에만 난다). rollback 이 먼저인 것은
+    _live_actor 의 app_users 잠금을 놓기 위해서다 — 따로 쓰는 세션의 FK 확인이 그 잠금을 기다리면 요청과
+    서로를 기다린다. DB 쓰기 실패는 record_detached 가 앱 로그로 남기고, 호출부는 원래 409 를 그대로 올린다.
+    """
+    tenant_id = incidents_repo.get_incident(db, incident_id).tenant_id
+    db.rollback()
+    platform_event_log.record_detached(
+        session_factory,
+        PlatformEventAction.ACTION_BLOCK,
+        actor,
+        outcome=PlatformEventOutcome.DENIED,
+        tenant_id=tenant_id,
+        target_id=incident_id,
+        details={"reason_code": ErrorCode.TENANT_SUSPENDED.value},
+    )
 
 
 def resolve_incident(
@@ -659,7 +719,8 @@ def resolve_incident(
     플랫폼 운영자다. 이미 종료된 건의 재요청도 정지 뒤 자리라 고객사 행위자에게는 409 다. actor 없는 서버 내부
     호출은 고객사 행위자가 아니다(audit_actor 로 가르지 않는다).
 
-    종료를 확정한 요청만 같은 트랜잭션에 감사 기록을 남긴다(T-2 · #544).
+    종료를 확정한 요청만 같은 트랜잭션에 감사 기록을 남긴다(T-2 · #544). HTTP(actor)는 같은 자리에 플랫폼
+    활동 로그 INCIDENT_RESOLVE(전 · 후 상태)도 남긴다(#589) — 거절 · 이미 종료는 남기지 않는다.
     """
     context = _write_context(
         db,
@@ -691,6 +752,7 @@ def resolve_incident(
     ):
         raise ApiError(ErrorCode.INCIDENT_NOT_RESOLVABLE)
 
+    previous_status = incident.status
     # 남은 제안을 함께 정리한다 — 상세 응답 계약이 RESOLVED에 빈 제안 목록을
     # 요구하므로(api/incidents.py), 두고 가면 종료 직후 조회가 500이 된다
     _invalidate_executable_candidates(db, incident_id)
@@ -708,6 +770,15 @@ def resolve_incident(
         # 던지므로 세션 정리에서 되돌아간다(여기서 rollback하지 않는 이유다)
         raise ApiError(ErrorCode.INCIDENT_NOT_RESOLVABLE)
     audit_repo.record_incident_resolved(db, incident_id, resolution, context.audit_actor)
+    if context.event_actor is not None:
+        platform_events_repo.record_platform_event(
+            db,
+            PlatformEventAction.INCIDENT_RESOLVE,
+            context.event_actor,
+            tenant_id=incident.tenant_id,
+            target_id=incident.incident_id,
+            details={"before": previous_status.value, "after": IncidentStatus.RESOLVED.value},
+        )
 
     db.commit()
     db.refresh(incident)  # UPDATE가 바꾼 상태·판단을 응답 조립 전에 되읽는다
@@ -771,6 +842,8 @@ class AutoIsolationSkipReason(str, Enum):
     TENANT_SUSPENDED = "TENANT_SUSPENDED"
     # 테넌트가 자동 조치를 껐다 — 또는 그 기한이 꺼진 동안 지났다(T-6 · #514). 사람 승인은 그대로 받는다
     AUTO_ACTION_DISABLED = "AUTO_ACTION_DISABLED"
+    # 위협 유형이 자동 발동 대상이 아니다(#588 Q2 · AUTO_ISOLATION_EXCLUDED_EVENT_TYPES)
+    THREAT_TYPE_NOT_ELIGIBLE = "THREAT_TYPE_NOT_ELIGIBLE"
     # 같은 인스턴스에 끝나지 않은 다른 실행이 있다(T-10 · #595). 다운사이징이 정지 · 기동 · 원복하는 도중에
     # 격리가 SG 를 바꿔 끼우면 서로 덮어쓴다. 아무것도 쓰지 않으므로 Medium 은 다음 감시 주기에 다시 시도한다
     TARGET_EXECUTION_IN_PROGRESS = "TARGET_EXECUTION_IN_PROGRESS"
@@ -824,6 +897,23 @@ _AUTO_ISOLATION_ELIGIBILITY: dict[
         RiskLevel.MEDIUM, ResponseMode.AGENT_WAIT, IncidentStatus.AWAITING_APPROVAL,
     ),
 }
+
+#: 자동 발동(High 선차단 · Medium 1분 격리)에서 빼는 위협 유형 — 인시던트에 묶인 위협 이벤트의 유형으로 본다.
+#: GuardDuty 탐지는 1차에 인시던트와 조치 후보까지만 간다(#588 Q2 · 2026-11-09 SEC 동의). 탐지는 관측이지 침해
+#: 증거가 아니고, 이 경로는 대상 자산의 보호 태그를 아직 보지 않는다(#598). 초기 위험도 · 대응 경로는 다른 유형과
+#: 같이 저장되므로(HIGH = PRE_MITIGATION_0_5S) 이 집합이 유일한 차이다. 보는 자리는 넷이다 — 사전 판정
+#: (security/soar.prepare_isolation · AWS 를 부르기 전), 접수 관문(_auto_isolation_skip_reason · 잠근 뒤),
+#: 화면 안내(pending_automatic_block), 타임아웃 감시 대상 조회(incidents_repo.list_expired_agent_waits).
+AUTO_ISOLATION_EXCLUDED_EVENT_TYPES: frozenset[ThreatEventType] = frozenset({ThreatEventType.GUARDDUTY_FINDING})
+
+
+def auto_isolation_excluded(db: Session, incident: models.Incident) -> bool:
+    """이 인시던트의 위협 유형이 자동 발동에서 빠지는가(AUTO_ISOLATION_EXCLUDED_EVENT_TYPES). 읽기 전용이다."""
+    return (
+        incidents_repo.threat_event_type_of(db, incident.threat_event_id)
+        in AUTO_ISOLATION_EXCLUDED_EVENT_TYPES
+    )
+
 
 _ISOLATE_TARGET_TYPE = executor.RUNBOOK_SPECS[
     RunbookId.RUNBOOK_EC2_ISOLATE.value
@@ -964,7 +1054,7 @@ def pending_automatic_block(
         ),
         None,
     )
-    if trigger_source is None:
+    if trigger_source is None or auto_isolation_excluded(db, incident):
         return None
     return automatic_trigger_block(
         db.get(models.Tenant, incident.tenant_id),
@@ -987,6 +1077,8 @@ def _auto_isolation_skip_reason(
         or incident.response_mode is not response_mode
     ):
         return AutoIsolationSkipReason.RISK_NOT_ELIGIBLE
+    if auto_isolation_excluded(db, incident):
+        return AutoIsolationSkipReason.THREAT_TYPE_NOT_ELIGIBLE
     if incident.status is not status:
         return AutoIsolationSkipReason.STATUS_NOT_ELIGIBLE
     if trigger_source is TriggerSource.PRE_MITIGATION_0_5S:
@@ -1068,6 +1160,31 @@ def _settle_rejected_isolation(
         db, incident.incident_id, expected=incident.status, next_status=target
     ):
         raise ValueError(f"Incident 상태 전이 실패: {incident.incident_id}")
+
+
+def _record_guardrail_block(
+    db: Session, incident_id: str, tenant_id: str | None, result: GuardrailValidationResult
+) -> None:
+    """가드레일이 실행 전에 거절했다는 플랫폼 활동 로그(#589 ACTION_BLOCK · SYSTEM) — 호출부 트랜잭션 안.
+
+    사유는 거절 단계의 사유 코드다. 그 코드는 계약상 선택이라(GuardrailStepResult) 없으면 거절 단계 이름을
+    싣는다 — FAIL 이면 failed_step 은 늘 있다(GuardrailValidationResult).
+    """
+    failed = _guardrail_failed_step(result)
+    reason = (
+        failed.reason_code.value
+        if failed is not None and failed.reason_code is not None
+        else result.failed_step.value
+    )
+    platform_events_repo.record_platform_event(
+        db,
+        PlatformEventAction.ACTION_BLOCK,
+        platform_events_repo.SYSTEM,
+        outcome=PlatformEventOutcome.DENIED,
+        tenant_id=tenant_id,
+        target_id=incident_id,
+        details={"reason_code": reason},
+    )
 
 
 def reserve_auto_isolation(
@@ -1221,6 +1338,17 @@ def reserve_auto_isolation(
                 None,
             ),
             occurred_at=execution.finished_at,
+        )
+    # 플랫폼 활동 로그(#589) — 거절된 시도는 발동이 아니라 가드레일 거절이다(완료도 남기지 않는다)
+    if command is None:
+        _record_guardrail_block(db, incident.incident_id, incident.tenant_id, guardrail_result)
+    else:
+        platform_events_repo.record_platform_event(
+            db,
+            PlatformEventAction.ACTION_AUTO_TRIGGER,
+            platform_events_repo.SYSTEM,
+            tenant_id=execution.tenant_id,
+            target_id=execution_id,
         )
     db.commit()
     # Core UPDATE는 세션이 든 객체를 갱신하지 않는다 — 결과·발행 값을 되읽는다
@@ -3922,6 +4050,54 @@ def _settle_rollback_origin(
     return (origin.execution_id,)
 
 
+# 원본의 완료 실패 중 확정 상태 자체가 사유인 것. UNVERIFIED(결과 확인 불가)는 같은 보류 사유로 끝난 FAILED(변경 없이
+# 실패)와 갈려야 하고, ROLLBACK_INITIATED 는 원래 조치가 실패했다는 사실이지 원복이 끝났다는 사실이 아니다
+_COMPLETE_FAILED_BY_STATUS: frozenset[ExecutionStatus] = frozenset(
+    {ExecutionStatus.UNVERIFIED, ExecutionStatus.ROLLBACK_INITIATED}
+)
+
+
+def _closure_event(
+    execution: models.ActionExecution,
+    *,
+    previous_status: ExecutionStatus,
+    next_status: ExecutionStatus,
+    typed_reason: str | None,
+) -> tuple[PlatformEventAction, PlatformEventOutcome, str | None] | None:
+    """확정 전이 1건 → 플랫폼 활동 로그의 (행동, 결과, 사유). 이 경로에 없는 전이는 None(남기지 않음).
+
+    - 원복 자식(부모 있음) IN_PROGRESS → SUCCESS · FAILED 는 그 자식의 ACTION_ROLLBACK 이다. 자식이 옮긴 원본
+      확정(ROLLED_BACK · ROLLBACK_FAILED)은 자식 행이 잇는 같은 사실이라 따로 남기지 않는다.
+    - 그 밖의 실행(차단 만료 해제 포함) IN_PROGRESS → SUCCESS 는 ACTION_COMPLETE 성공, FAILED · UNVERIFIED ·
+      ROLLBACK_INITIATED 는 실패다. FAILED 의 사유는 이미 가진 typed 사유(시작 관문 코드 · 판정 보류 사유), 없으면
+      FAILED 다. UNVERIFIED · ROLLBACK_INITIATED 의 사유는 typed 사유와 무관하게 그 상태다 — 같은 보류 사유가
+      FAILED 로도 UNVERIFIED 로도 끝나므로(_held_outcome) 사유가 상태를 덮으면 둘이 갈리지 않는다.
+    - 자동 원복을 시작하지 못한 원본(ROLLBACK_INITIATED → ROLLBACK_FAILED)은 원본의 ACTION_ROLLBACK 실패다.
+    """
+    S, F = PlatformEventOutcome.SUCCEEDED, PlatformEventOutcome.FAILED
+    rollback_failed = ExecutionStatus.ROLLBACK_FAILED.value
+    if previous_status is ExecutionStatus.IN_PROGRESS:
+        if execution.parent_execution_id is not None:
+            if next_status is ExecutionStatus.SUCCESS:
+                return PlatformEventAction.ACTION_ROLLBACK, S, None
+            if next_status is ExecutionStatus.FAILED:
+                return PlatformEventAction.ACTION_ROLLBACK, F, rollback_failed
+            return None
+        if next_status is ExecutionStatus.SUCCESS:
+            return PlatformEventAction.ACTION_COMPLETE, S, None
+        if next_status is ExecutionStatus.FAILED:
+            return PlatformEventAction.ACTION_COMPLETE, F, typed_reason or next_status.value
+        if next_status in _COMPLETE_FAILED_BY_STATUS:
+            return PlatformEventAction.ACTION_COMPLETE, F, next_status.value
+        return None
+    if (
+        previous_status is ExecutionStatus.ROLLBACK_INITIATED
+        and next_status is ExecutionStatus.ROLLBACK_FAILED
+    ):
+        return PlatformEventAction.ACTION_ROLLBACK, F, rollback_failed
+    return None
+
+
 def close_execution(
     db: Session,
     execution_id: str,
@@ -3929,8 +4105,15 @@ def close_execution(
     next_status: ExecutionStatus,
     error_summary: str | None = None,
     keep_verification_hold: bool = False,
+    blocked_by: ErrorCode | None = None,
+    completion_reason: str | None = None,
 ) -> ExecutionClosure | None:
     """실행 상태 확정과 Incident 전이를 **한 트랜잭션**으로 커밋한다. (Issue #232)
+
+    **확정한 전이 1건마다 플랫폼 활동 로그를 같은 트랜잭션에 남긴다**(#589, _closure_event). None 이면 남기지
+    않는다. blocked_by 는 시작 관문이 단계 0건 실행을 거절한 코드다(dispatcher — 정지 테넌트) — 그 거절을
+    ACTION_BLOCK 으로 함께 남기고 완료 실패의 사유로도 쓴다. completion_reason 은 완료 실패 사유 코드만
+    전달한다(대상 변화로 시작하지 않은 실행). error_summary 는 사유로 읽지 않는다.
 
     나눠 커밋하면 그 사이의 조회가 "ACTION_IN_PROGRESS인데 진행 중인 실행이 없는"
     인시던트를 보게 되고, 상세 응답 계약(api/incidents.py)이 그 조합을 거절해 상세
@@ -4058,6 +4241,38 @@ def close_execution(
                 if keep_verification_hold and verification_reason is not None else None
             ),
             occurred_at=execution.updated_at,
+        )
+    closed = _closure_event(
+        execution,
+        previous_status=previous_status,
+        next_status=next_status,
+        typed_reason=(
+            blocked_by.value if blocked_by is not None
+            else completion_reason if completion_reason is not None
+            else verification_reason.value
+            if keep_verification_hold and verification_reason is not None else None
+        ),
+    )
+    if closed is not None:
+        action, outcome, reason = closed
+        platform_events_repo.record_platform_event(
+            db,
+            action,
+            platform_events_repo.SYSTEM,
+            outcome=outcome,
+            tenant_id=execution.tenant_id,
+            target_id=execution.execution_id,
+            details=None if reason is None else {"reason_code": reason},
+        )
+    if blocked_by is not None:
+        platform_events_repo.record_platform_event(
+            db,
+            PlatformEventAction.ACTION_BLOCK,
+            platform_events_repo.SYSTEM,
+            outcome=PlatformEventOutcome.DENIED,
+            tenant_id=incident.tenant_id,
+            target_id=incident.incident_id,
+            details={"reason_code": blocked_by.value},
         )
     db.commit()
     # Core UPDATE는 세션이 든 객체를 갱신하지 않는다 — 발행에 실을 상태·시각을
@@ -4466,6 +4681,14 @@ def initiate_auto_rollback(db: Session, origin_execution_id: str) -> RollbackIni
         backup_record_id=record.backup_record_id,
     )
     audit_repo.record_execution_started(db, child, audit_repo.SYSTEM)
+    # 원복의 발동이다. 원복의 결과는 자식이 확정될 때 close_execution 이 남긴다(#589)
+    platform_events_repo.record_platform_event(
+        db,
+        PlatformEventAction.ACTION_AUTO_TRIGGER,
+        platform_events_repo.SYSTEM,
+        tenant_id=child.tenant_id,
+        target_id=child.execution_id,
+    )
     db.commit()
     logger.info(
         "auto_rollback_initiated",
@@ -4570,8 +4793,12 @@ def _run_rollback_guardrails(
         execution_id=execution.execution_id,
         validated_command=command_payload if outcome.command is not None else None,
     )
+    guardrail = _RollbackGuardrail(outcome=outcome, dry_run_not_applied=dry_run_watch.violated)
+    # 판정 불가(보류 · 재평가)는 거절이 아니다 — 확정 거절만 판정과 같은 트랜잭션에 남긴다(#589)
+    if guardrail.command is None and _guardrail_transient_code(guardrail) is None:
+        _record_guardrail_block(db, execution.incident_id, execution.tenant_id, guardrail.result)
     db.commit()
-    return _RollbackGuardrail(outcome=outcome, dry_run_not_applied=dry_run_watch.violated)
+    return guardrail
 
 
 @dataclass(frozen=True)
@@ -5828,6 +6055,26 @@ def record_agent_analysis(
             ),
         )
 
+    # 플랫폼 활동 로그(#589) — 실패는 호출 상태 FAILED 뿐이다(무제안 · 전체 거절도 분석은 끝났다). 사유 없는
+    # FAILED 생산자도 계약상 있어(schemas/agents.py) 그때는 호출 상태 값을 사유로 싣는다
+    analysis_failed = output.invocation_status is AgentInvocationStatus.FAILED
+    analysis_details = {"before": previous_status.value, "after": target.value}
+    if analysis_failed:
+        analysis_details["reason_code"] = (
+            output.failure_reason or output.invocation_status
+        ).value
+    platform_events_repo.record_platform_event(
+        db,
+        PlatformEventAction.INCIDENT_ANALYZE,
+        platform_events_repo.SYSTEM,
+        outcome=(
+            PlatformEventOutcome.FAILED if analysis_failed else PlatformEventOutcome.SUCCEEDED
+        ),
+        tenant_id=incident.tenant_id,
+        target_id=incident.incident_id,
+        details=analysis_details,
+    )
+
     # 분석이 어떻게 끝났는지를 도메인과 무관하게 남긴다(#424) — SecOps 조회 응답의
     # analysis_result와 같은 판정이다. FinOps는 무제안·전체 거절도 Incident FAILED로 닫혀
     # 응답만으로는 갈리지 않으므로 이 줄이 그 구분을 남기는 자리다.
@@ -6292,6 +6539,14 @@ def reserve_nacl_deny_expiry(
                 next_status=CandidateStatus.INVALIDATED,
             )
     _move_incident_to_in_progress(db, incident_id)
+    # 새로 예약한 해제만 남긴다 — 위의 건너뜀 · 경합 패배는 다음 주기에 다시 보는 판정일 뿐이다(#589)
+    platform_events_repo.record_platform_event(
+        db,
+        PlatformEventAction.ACTION_AUTO_TRIGGER,
+        platform_events_repo.SYSTEM,
+        tenant_id=execution.tenant_id,
+        target_id=execution.execution_id,
+    )
     reserved_id = execution.execution_id
     finished_at = block.finished_at
     db.commit()

@@ -41,7 +41,7 @@ def pipeline(db, pg_engine, monkeypatch):
     monkeypatch.setattr(db_session, "get_engine", lambda: pg_engine)
     monkeypatch.setattr(db_session, "get_session_factory", lambda: factory)
 
-    def collect():
+    def collect(publish=None):
         with factory() as session:
             result = []
             for path in sorted((GOLDEN / "input").glob("*.json")):

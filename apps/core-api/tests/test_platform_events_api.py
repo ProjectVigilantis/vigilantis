@@ -261,6 +261,61 @@ def test_filters_narrow_by_every_field(make_tenant, make_auth_session, seed, get
     assert get(action="TENANT_SUSPEND", actor_kind="ANONYMOUS")["items"] == []
 
 
+def test_user_permission_and_tenant_group_events_round_trip_with_details(
+    make_tenant, make_auth_session, seed, get
+):
+    """#617 신규 행동 4종(기록 5건) — 저장 · action/target 필터 · 응답 검증을 지나도 details 와 응답 category 가 그대로다."""
+    tenant_id = make_tenant()
+    operator = make_auth_session()
+    me = _person(operator)
+    group_id, other_group_id = str(uuid.uuid4()), str(uuid.uuid4())
+    target_user_id = str(uuid.uuid4())
+    permissions = seed(
+        A.USER_PERMISSIONS_CHANGE, 0, actor=me, target_id=target_user_id,
+        details={"before": ["VIEW", "CREATE_INQUIRY"], "after": []},
+    )
+    created = seed(A.TENANT_GROUP_CREATE, 1, actor=me, target_id=group_id)
+    changed = seed(
+        A.TENANT_GROUP_ASSIGNMENT_CHANGE, 2, actor=me, tenant_id=tenant_id, target_id=tenant_id,
+        details={"before": None, "after": group_id},
+    )
+    cleared = seed(
+        A.TENANT_GROUP_ASSIGNMENT_CHANGE, 3, actor=me, tenant_id=tenant_id, target_id=tenant_id,
+        details={"before": group_id, "after": None},
+    )
+    deleted = seed(
+        A.TENANT_GROUP_DELETE, 4, actor=me, target_id=other_group_id,
+        details={"tenant_ids": [tenant_id], "staff_user_ids": [operator.user_id, target_user_id]},
+    )
+
+    body = get(actor_user_id=operator.user_id)
+
+    assert _ids(body) == [
+        deleted.event_id, cleared.event_id, changed.event_id, created.event_id, permissions.event_id,
+    ]
+    by_id = {item["event_id"]: item for item in body["items"]}
+    assert by_id[permissions.event_id]["details"] == {"before": ["VIEW", "CREATE_INQUIRY"], "after": []}
+    assert by_id[created.event_id]["details"] == {}
+    assert by_id[changed.event_id]["details"] == {"before": None, "after": group_id}
+    assert by_id[cleared.event_id]["details"] == {"before": group_id, "after": None}
+    assert by_id[deleted.event_id]["details"] == {
+        "tenant_ids": [tenant_id], "staff_user_ids": [operator.user_id, target_user_id],
+    }
+    assert {key: (item["category"], item["target"]) for key, item in by_id.items()} == {
+        permissions.event_id: ("USER_ADMIN", {"type": "USER", "id": target_user_id}),
+        created.event_id: ("TENANT_ADMIN", {"type": "TENANT_GROUP", "id": group_id}),
+        changed.event_id: ("TENANT_ADMIN", {"type": "TENANT", "id": tenant_id}),
+        cleared.event_id: ("TENANT_ADMIN", {"type": "TENANT", "id": tenant_id}),
+        deleted.event_id: ("TENANT_ADMIN", {"type": "TENANT_GROUP", "id": other_group_id}),
+    }
+    assert _ids(get(action="USER_PERMISSIONS_CHANGE")) == [permissions.event_id]
+    assert _ids(get(action="TENANT_GROUP_CREATE")) == [created.event_id]
+    assert _ids(get(action="TENANT_GROUP_ASSIGNMENT_CHANGE")) == [cleared.event_id, changed.event_id]
+    assert _ids(get(action="TENANT_GROUP_DELETE")) == [deleted.event_id]
+    assert _ids(get(target_type="TENANT_GROUP")) == [deleted.event_id, created.event_id]
+    assert _ids(get(target_type="TENANT_GROUP", target_id=group_id)) == [created.event_id]
+
+
 def test_id_filters_accept_any_uuid_spelling_and_ignore_garbage(make_tenant, seed, get):
     tenant_id = make_tenant()
     event = seed(A.TENANT_SUSPEND, tenant_id=tenant_id, target_id=tenant_id,

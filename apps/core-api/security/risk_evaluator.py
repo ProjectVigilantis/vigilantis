@@ -13,6 +13,11 @@
 #      위협 접수 단계에서 거부되므로 이 판정기에 도달하지 않는다(도달 시 방어적으로 거절).
 #   ④ OpenIP 전체 공개 → MEDIUM(관제자 확인). SSH → 실패 횟수와 발생 속도를 함께 본다.
 #      횟수 단독(예: 100회)으로 HIGH 가 되지는 않는다(관측 창이 일정하지 않음).
+#
+# GuardDuty 탐지(#588 Q2 · 2026-11-09 안성일 동의): 심각도 7.0 이상 HIGH · 4.0 이상 MEDIUM · 그 아래 LOW.
+#   GuardDuty 의 High(7.0–8.9)와 Critical(9.0–10.0)은 HIGH 하나로 접는다. HIGH 의 response_mode 는 다른 유형과
+#   같이 PRE_MITIGATION_0_5S 로 남지만(InitialRiskEvaluationResult 가 위험도에서 파생한다) 자동 격리는 하지 않는다 —
+#   발동 관문이 위협 유형으로 막는다(workflows.AUTO_ISOLATION_EXCLUDED_EVENT_TYPES).
 # ==============================================================================
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from typing import Optional
 # schemas 는 진입점(main.py·conftest)이 sys.path 에 올린다 — collector.py·rule_engine.py 와
 # 동일하게 여기서는 부트스트랩하지 않는다. RiskLevel 은 events 가 재노출하므로 원천을 하나로 모은다.
 from schemas.events import (
+    GuardDutyFindingThreatPayload,
     InitialRiskEvaluationResult,
     NormalizedThreatEvent,
     OpenIpThreatPayload,
@@ -46,6 +52,8 @@ SENSITIVE_PORTS = (22, 3389)           # SSH·RDP — 노출 시 민감 (S1·S6)
 SSH_SINGLE_ATTEMPT = 1                 # 단발 시도는 발생 속도와 무관하게 LOW (S8)
 SSH_HIGH_ATTEMPT_MIN = 10              # HIGH 하한(횟수) — 발생 속도 조건과 AND
 SSH_HIGH_RATE_PER_MIN = 20.0           # HIGH 하한(분당 시도)
+GUARDDUTY_HIGH_MIN = 7.0               # GuardDuty 심각도 HIGH 하한(#588 Q2)
+GUARDDUTY_MEDIUM_MIN = 4.0             # GuardDuty 심각도 MEDIUM 하한
 
 
 def _hits_sensitive_port(from_port: Optional[int], to_port: Optional[int]) -> bool:
@@ -113,6 +121,18 @@ def _evaluate_ssh_bruteforce(
     return level, [code]
 
 
+def _evaluate_guardduty(
+    payload: GuardDutyFindingThreatPayload,
+) -> tuple[RiskLevel, list[RiskReasonCode]]:
+    if payload.severity >= GUARDDUTY_HIGH_MIN:
+        level = RiskLevel.HIGH
+    elif payload.severity >= GUARDDUTY_MEDIUM_MIN:
+        level = RiskLevel.MEDIUM
+    else:
+        level = RiskLevel.LOW
+    return level, [RiskReasonCode.RISK_GUARDDUTY_FINDING]
+
+
 def evaluate_threat(event: NormalizedThreatEvent) -> InitialRiskEvaluationResult:
     """정규화 위협 이벤트 → 결정적 초기 위험 판정.
 
@@ -124,6 +144,8 @@ def evaluate_threat(event: NormalizedThreatEvent) -> InitialRiskEvaluationResult
         level, codes = _evaluate_open_ip(event.payload)  # type: ignore[arg-type]
     elif event.event_type == ThreatEventType.SSH_BRUTE_FORCE:
         level, codes = _evaluate_ssh_bruteforce(event.payload)  # type: ignore[arg-type]
+    elif event.event_type == ThreatEventType.GUARDDUTY_FINDING:
+        level, codes = _evaluate_guardduty(event.payload)  # type: ignore[arg-type]
     else:  # 방어적 — ThreatEventType 확장 시 명시적으로 실패
         raise ValueError(f"지원하지 않는 위협 유형: {event.event_type}")
 

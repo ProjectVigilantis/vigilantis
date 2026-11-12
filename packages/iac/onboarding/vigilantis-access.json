@@ -82,7 +82,9 @@
                   "Action": [
                     "guardduty:CreateDetector",
                     "guardduty:GetDetector",
-                    "guardduty:ListDetectors"
+                    "guardduty:GetFindings",
+                    "guardduty:ListDetectors",
+                    "guardduty:ListFindings"
                   ],
                   "Resource": "*"
                 },

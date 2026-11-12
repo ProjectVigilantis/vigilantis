@@ -76,6 +76,21 @@ def delete_group(db: Session, group_id: str) -> bool:
     return result.rowcount == 1
 
 
+def group_member_ids(db: Session, group_id: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """삭제 영향 ID. 호출부의 users 잠금 안에서 읽어 그룹 배치 · 직원 배정 쓰기와 직렬화한다."""
+    tenant_ids = tuple(db.scalars(
+        select(models.Tenant.tenant_id)
+        .where(models.Tenant.group_id == group_id)
+        .order_by(models.Tenant.tenant_id)
+    ))
+    staff_user_ids = tuple(db.scalars(
+        select(models.AppUserGroupAssignment.user_id)
+        .where(models.AppUserGroupAssignment.group_id == group_id)
+        .order_by(models.AppUserGroupAssignment.user_id)
+    ))
+    return tenant_ids, staff_user_ids
+
+
 def set_tenant_group(db: Session, tenant_id: str, group_id: str | None, *, now: datetime) -> bool:
     """고객사를 그 그룹에 넣는다(None = 그룹에서 뺀다). 없는 고객사면 False. 고객사 updated_at 을 now 로 올린다.
 

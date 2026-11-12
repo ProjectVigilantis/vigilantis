@@ -13,6 +13,8 @@
 #      덮어쓰지 않고(OwnershipConflict), 소속 없던 같은 계정의 행은 테넌트가 이번에 관측했을 때만 이어받는다
 #      (못 본 자산 · 과거 회차는 소급하지 않는다).
 #   6. 테넌트 문맥은 회차가 끝나면(실패 포함) 복원된다.
+#   7. GuardDuty 탐지 읽기(#588 C)는 리전마다 자산 수집 뒤 같은 문맥 안에서 한다. 자산 수집이 실패한 리전은 읽지
+#      않고, 읽기의 실패는 자산 수집 결과를 바꾸지 않는다. 읽기 자체는 tests/test_guardduty_ingress.py 가 본다.
 # AWS 는 문맥(current_tenant)을 보고 답하는 스텁이다 — 문맥 없는 호출이 오면 테스트가 실패한다.
 # ==============================================================================
 
@@ -129,6 +131,15 @@ class _World:
         self.reported_account: dict[str, str] = {}
         self.sts_errors: dict[tuple[str, str], list[Exception]] = {}  # (tenant, region) → 앞에서부터 소진
         self.sts_attempts: list[tuple[str, str]] = []
+        self.guardduty_reads: list[tuple[str | None, str, str, str]] = []  # (문맥 tenant, tenant, account, region)
+        self.guardduty_result: dict | Exception = {"status": "NO_DETECTOR"}
+
+    def ingest_guardduty(self, session_factory, *, tenant_id, account_id, region, publish=None):
+        access = current_tenant()
+        self.guardduty_reads.append((access and access.tenant_id, tenant_id, account_id, region))
+        if isinstance(self.guardduty_result, Exception):
+            raise self.guardduty_result
+        return self.guardduty_result
 
     def record(self, what: str):
         self.contexts.append(what)
@@ -162,6 +173,9 @@ def world(monkeypatch, db):
     w = _World()
     monkeypatch.setattr(C, "aws_client", w.client)
     monkeypatch.setattr(C, "_account_id", w.account_id)
+    import guardduty_ingress
+
+    monkeypatch.setattr(guardduty_ingress, "ingest_region", w.ingest_guardduty)
     import db.session as db_session
 
     # 수집은 회차 · 리전마다 세션을 열고 닫는다 — 테스트 트랜잭션 세션 하나로 고정한다(commit 은 savepoint 해제)
@@ -310,6 +324,7 @@ def test_credentials_for_another_account_are_not_stored_as_this_tenant(db, world
 
     assert results[0]["error"] == "AccountMismatch"
     assert world.calls == []  # 다른 계정의 VPC · 자원을 한 건도 읽지 않았다
+    assert world.guardduty_reads == []  # 그 자격으로 탐지도 읽지 않는다
     assert _assets(db, a) == {}
     assert [(r.account_id, r.status) for r in _runs(db, a)] == [(ACCT_A, CollectionRunStatus.FAILED)]
 
@@ -674,3 +689,39 @@ def test_outer_tenant_scope_is_restored_and_worker_thread_does_not_inherit_it(db
         assert current_tenant() is outer  # 호출자 문맥은 그대로
 
     assert set(seen) == {a}
+
+
+# --- 7) GuardDuty 탐지 읽기(#588 C) ---------------------------------------------------------------------------
+
+
+def test_guardduty_is_read_per_region_inside_the_tenant_scope(db, world):
+    a = _tenant(db, world, ACCT_A, regions=(SEOUL, TOKYO))
+    b = _tenant(db, world, ACCT_B, offset=1)
+    world.guardduty_result = {"status": "OK", "read": 0}
+
+    results = C.collect_and_store_tenants()
+
+    assert world.guardduty_reads == [(a, a, ACCT_A, SEOUL), (a, a, ACCT_A, TOKYO), (b, b, ACCT_B, SEOUL)]
+    assert [r["guardduty"] for r in results] == [{"status": "OK", "read": 0}] * 3
+
+
+def test_guardduty_is_not_read_where_the_inventory_failed(db, world):
+    a = _tenant(db, world, ACCT_A)
+    world.by_tenant[a].fail_with = ClientError({"Error": {"Code": "AccessDenied", "Message": "x"}}, "Describe")
+
+    (result,) = C.collect_and_store_tenants()
+
+    assert result["status"] == "FAILED" and "guardduty" not in result
+    assert world.guardduty_reads == []
+
+
+def test_a_guardduty_crash_does_not_fail_the_region_or_the_next_one(db, world):
+    a = _tenant(db, world, ACCT_A, regions=(SEOUL, TOKYO))
+    world.by_tenant[a].instances = [_instance("i-1")]
+    world.guardduty_result = RuntimeError("boom")
+
+    results = C.collect_and_store_tenants()
+
+    assert [r["guardduty"]["status"] for r in results] == ["FAILED", "FAILED"]
+    assert [r.status for r in _runs(db, a)] == [CollectionRunStatus.SUCCESS] * 2
+    assert _arn(ACCT_A, "i-1") in _assets(db, a)

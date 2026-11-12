@@ -77,6 +77,14 @@ def prepare_isolation(db: Session, incident_id: str, trigger_source: TriggerSour
     if not eligible:
         db.rollback()
         return None
+    # GuardDuty 탐지 등 자동 발동에서 빼는 위협 유형(#588 Q2)은 가드레일 ④(AWS Dry-Run)를 부르기 전에 멈춘다.
+    # 접수 관문(reserve_auto_isolation)이 잠근 뒤 같은 함수로 다시 본다
+    if workflows.auto_isolation_excluded(db, incident):
+        logger.info("automatic_isolation_excluded_threat_type", extra={
+            "incident_id": incident_id, "trigger_source": trigger_source.value,
+        })
+        db.rollback()
+        return None
     # 테넌트가 정지됐거나(T-4 · #533) 자동 조치를 껐으면(T-6 · #514) 가드레일(④ = AWS Dry-Run)을
     # 부르기 전에 멈춘다. 사이에 바뀌는 경우는 접수 관문(reserve_auto_isolation)이 잠근 뒤 같은 함수로
     # 다시 본다
@@ -268,6 +276,7 @@ def run_timeout_cycle(
     with session_factory() as db:
         pending = incidents_repo.list_expired_agent_waits(
             db, now=datetime.now(UTC),
+            exclude_event_types=workflows.AUTO_ISOLATION_EXCLUDED_EVENT_TYPES,
         )
         db.rollback()
         report.scanned = len(pending)

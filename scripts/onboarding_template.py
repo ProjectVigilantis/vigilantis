@@ -58,7 +58,11 @@ READ_ACTIONS = (
 )
 COST_ACTIONS = ("ce:GetCostAndUsage",)
 COST_REGION = "us-east-1"  # Cost Explorer 엔드포인트는 이 리전 하나뿐이다
-GUARDDUTY_ACTIONS = ("guardduty:ListDetectors", "guardduty:GetDetector", "guardduty:CreateDetector")
+# 켜기(연결 확인 · #588 B)와 탐지 결과 읽기(수집 주기 · #588 C). 끄는 작업은 넣지 않는다
+GUARDDUTY_ACTIONS = (
+    "guardduty:ListDetectors", "guardduty:GetDetector", "guardduty:CreateDetector",
+    "guardduty:ListFindings", "guardduty:GetFindings",
+)
 GUARDDUTY_SERVICE = "guardduty.amazonaws.com"
 GUARDDUTY_SERVICE_ROLE = "AWSServiceRoleForAmazonGuardDuty"
 ASG_PREFIX = "vigilantis-asg-"  # services/aws/executor._asg_name

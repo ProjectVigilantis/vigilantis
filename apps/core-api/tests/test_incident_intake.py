@@ -625,3 +625,193 @@ def test_duplicate_returns_the_existing_incident_without_reassigning_it(db, make
     assert incidents_repo.get_incident(db, first.incident_id).tenant_id is None
     assert [row.incident_id for row in incidents_repo.list_incidents(db)] == [first.incident_id]
     assert tenants_repo.get_tenant(db, tenant_id).open_incident_count == 0
+
+# --- 플랫폼 이벤트 INCIDENT_CREATE (#589 B) ------------------------------------------------
+#
+# 실제 platform_events 행으로 본다. 새로 만든 Incident 한 건당 SYSTEM 성공 행 한 건이고,
+# 기존/중복/경쟁 반환은 행을 늘리지 않으며, 행과 Incident는 한 트랜잭션으로 함께 되감긴다.
+
+
+UNRELATED_INCIDENT_ID = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"
+
+
+@pytest.fixture()
+def unrelated_event(db):
+    """다른 테스트·요청이 이미 commit해 둔 INCIDENT_CREATE 행 — 테이블은 비어 있다고 가정할 수 없다."""
+    from db.repositories import platform_events as platform_events_repo
+    from schemas.platform_events import PlatformEventAction
+
+    platform_events_repo.record_platform_event(
+        db,
+        PlatformEventAction.INCIDENT_CREATE,
+        platform_events_repo.SYSTEM,
+        target_id=UNRELATED_INCIDENT_ID,
+    )
+    db.commit()
+    return UNRELATED_INCIDENT_ID
+
+
+def _created_events(db, incident_id):
+    """이 incident 를 대상으로 한 INCIDENT_CREATE 행만 — 테이블 전체가 아니다."""
+    from db import models
+    from sqlalchemy import select
+
+    db.expire_all()
+    return list(
+        db.scalars(
+            select(models.PlatformEvent).where(
+                models.PlatformEvent.action == "INCIDENT_CREATE",
+                models.PlatformEvent.target_id == incident_id,
+            )
+        )
+    )
+
+
+def _all_event_count(db) -> int:
+    from db import models
+    from sqlalchemy import func, select
+
+    return db.execute(select(func.count()).select_from(models.PlatformEvent)).scalar_one()
+
+
+def _assert_created_row(row, *, incident_id, tenant_id):
+    from schemas.platform_events import (
+        PlatformActorKind,
+        PlatformEventOutcome,
+        PlatformEventTargetType,
+    )
+
+    assert row.outcome is PlatformEventOutcome.SUCCEEDED
+    assert row.actor_kind is PlatformActorKind.SYSTEM
+    assert row.actor_user_id is None
+    assert row.tenant_id == tenant_id
+    assert row.target_type is PlatformEventTargetType.INCIDENT
+    assert row.target_id == incident_id
+    assert row.details == {}
+
+
+@INTAKES
+def test_new_incident_records_one_system_platform_event_with_actual_tenant(
+    db, make_intake, unrelated_event
+):
+    tenant_id = _register_tenant(db)
+    before = _all_event_count(db)
+
+    outcome = incident_intake.create_incident_from_intake(db, make_intake())
+
+    [row] = _created_events(db, outcome.incident_id)
+    _assert_created_row(row, incident_id=outcome.incident_id, tenant_id=tenant_id)
+    assert _all_event_count(db) == before + 1
+    assert len(_created_events(db, unrelated_event)) == 1  # 기존 행은 그대로
+
+
+@INTAKES
+def test_new_incident_without_tenant_records_event_with_null_tenant(
+    db, make_intake, unrelated_event
+):
+    before = _all_event_count(db)
+
+    outcome = incident_intake.create_incident_from_intake(db, make_intake())
+
+    [row] = _created_events(db, outcome.incident_id)
+    _assert_created_row(row, incident_id=outcome.incident_id, tenant_id=None)
+    assert _all_event_count(db) == before + 1
+
+
+@INTAKES
+def test_duplicate_intake_adds_no_platform_event(db, make_intake):
+    incident_intake.create_incident_from_intake(db, make_intake())
+    before = _all_event_count(db)
+
+    again = incident_intake.create_incident_from_intake(db, make_intake())
+
+    assert again.created is False
+    assert _all_event_count(db) == before
+
+
+def test_secops_orphan_continuation_records_event_for_the_new_incident(db, unrelated_event):
+    stored = secops_intake().threat_event
+    incidents_repo.insert_threat_event(db, stored)
+    db.commit()
+    before = _all_event_count(db)
+
+    outcome = incident_intake.create_incident_from_intake(db, secops_intake())
+
+    assert outcome.created is True
+    [row] = _created_events(db, outcome.incident_id)
+    _assert_created_row(row, incident_id=outcome.incident_id, tenant_id=None)
+    assert _all_event_count(db) == before + 1
+
+
+def test_secops_insert_race_adds_no_platform_event(db, monkeypatch):
+    incident_intake.create_incident_from_intake(db, secops_intake())
+    before = _all_event_count(db)
+
+    real = incidents_repo.get_threat_event_by_dedup_key
+    calls = {"n": 0}
+
+    def racing(session, key):
+        calls["n"] += 1
+        return None if calls["n"] == 1 else real(session, key)
+
+    monkeypatch.setattr(incidents_repo, "get_threat_event_by_dedup_key", racing)
+    fresh_id = "3c4d5e6f-7081-4923-a456-6789abcdef01"
+    again = secops_intake(
+        threat_event=dict(
+            secops_intake().threat_event.model_dump(mode="json"), threat_event_id=fresh_id
+        ),
+        initial_risk=dict(
+            secops_intake().initial_risk.model_dump(mode="json"), threat_event_id=fresh_id
+        ),
+    )
+    second = incident_intake.create_incident_from_intake(db, again)
+
+    assert calls["n"] == 2 and second.created is False
+    assert _all_event_count(db) == before
+
+
+@INTAKES
+def test_commit_failure_rolls_back_platform_event_with_incident(db, make_intake, unrelated_event):
+    from sqlalchemy import event
+
+    before = _all_event_count(db)
+    incidents_before = incidents_repo.list_incidents(db)
+
+    def fail_commit(session):
+        if not session.in_nested_transaction():
+            raise RuntimeError("injected business commit failure")
+
+    event.listen(db, "before_commit", fail_commit)
+    try:
+        with pytest.raises(RuntimeError, match="injected business commit failure"):
+            incident_intake.create_incident_from_intake(db, make_intake())
+    finally:
+        event.remove(db, "before_commit", fail_commit)
+        db.rollback()
+    assert incidents_repo.list_incidents(db) == incidents_before
+    assert _all_event_count(db) == before
+    assert len(_created_events(db, unrelated_event)) == 1
+
+
+@INTAKES
+def test_platform_event_insert_failure_cannot_commit_incident(db, make_intake, unrelated_event):
+    from db import models
+    from sqlalchemy import event
+    from sqlalchemy.exc import IntegrityError
+
+    before = _all_event_count(db)
+    incidents_before = incidents_repo.list_incidents(db)
+
+    def corrupt(_mapper, _connection, target):
+        target.details = {"reason_code": "X"}  # SUCCEEDED + reason_code → DB CHECK 위반
+
+    event.listen(models.PlatformEvent, "before_insert", corrupt)
+    try:
+        with pytest.raises(IntegrityError):
+            incident_intake.create_incident_from_intake(db, make_intake())
+    finally:
+        event.remove(models.PlatformEvent, "before_insert", corrupt)
+        db.rollback()
+    assert incidents_repo.list_incidents(db) == incidents_before
+    assert _all_event_count(db) == before
+    assert len(_created_events(db, unrelated_event)) == 1

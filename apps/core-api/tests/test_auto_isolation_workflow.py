@@ -796,6 +796,18 @@ def test_dedup_constraint_backstop_discards_the_loser(
     ]
     assert _auto_evaluations(db, seeded.incident_id) == []
     assert _incident(db, seeded.incident_id).status is IncidentStatus.ANALYZING
+    # 진 쪽은 발동 · 거절 활동 로그도 남기지 않는다(#589)
+    assert _platform_facts(db, seeded.incident_id, winner.execution_id, loser_id) == []
+
+
+def _platform_facts(session, *target_ids) -> list[tuple]:
+    session.expire_all()
+    return sorted(
+        (row.action, row.outcome.value, row.target_id)
+        for row in session.scalars(
+            select(models.PlatformEvent).where(models.PlatformEvent.target_id.in_(target_ids))
+        )
+    )
 
 
 # ==============================================================================
@@ -1200,6 +1212,11 @@ def test_concurrent_duplicate_attempts_keep_one_record(
             assert [(row.execution_id, row.phase, row.outcome) for row in facts] == (
                 [(first_id, "REQUESTED", None), (first_id, "RESULT", "REJECTED")]
                 if first_rejected else [(first_id, "REQUESTED", None)]
+            )
+            # 활동 로그(#589)도 이긴 시도의 사실 하나뿐이다 — 거절이면 인시던트의 가드레일 거절, 아니면 발동
+            assert _platform_facts(verify, seeded.incident_id, first_id, second_id) == (
+                [("ACTION_BLOCK", "DENIED", seeded.incident_id)]
+                if first_rejected else [("ACTION_AUTO_TRIGGER", "SUCCEEDED", first_id)]
             )
 
 

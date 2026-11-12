@@ -17,12 +17,14 @@ from __future__ import annotations
 
 from auth import admin_service, service
 from auth.access import is_central_admin, is_platform_account
+from db.repositories import platform_events as platform_events_repo
 from db.repositories import tenant_groups as groups_repo
 from exceptions import ApiError
 from identifiers import canonical_id
 from schemas.api.auth import PlatformRole
 from schemas.api.errors import ErrorCode
 from schemas.api.groups import GroupCreateRequest, GroupItem, GroupsResponse
+from schemas.platform_events import PlatformEventAction
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -53,7 +55,7 @@ def list_groups(db: Session, user: service.CurrentUser) -> GroupsResponse:
 
 
 def create_group(db: Session, actor: admin_service.Actor, body: GroupCreateRequest) -> GroupItem:
-    with admin_service._transaction(db, actor, central=True):
+    with admin_service._transaction(db, actor, central=True) as user:
         try:
             # SAVEPOINT — 유일성 거절이 이 쓰기만 되돌리고 409 로 답하게 한다
             with db.begin_nested():
@@ -62,6 +64,12 @@ def create_group(db: Session, actor: admin_service.Actor, body: GroupCreateReque
             if getattr(getattr(exc.orig, "diag", None), "constraint_name", None) == groups_repo.GROUP_NAME_UNIQUE:
                 raise ApiError(ErrorCode.GROUP_NAME_CONFLICT) from exc
             raise
+        platform_events_repo.record_platform_event(
+            db,
+            PlatformEventAction.TENANT_GROUP_CREATE,
+            platform_events_repo.person(user),
+            target_id=group.group_id,
+        )
         # 새 그룹에는 고객사가 없다 — 다시 세지 않는다
         return _item(groups_repo.GroupWithCount(group, 0))
 
@@ -69,6 +77,18 @@ def create_group(db: Session, actor: admin_service.Actor, body: GroupCreateReque
 def delete_group(db: Session, actor: admin_service.Actor, group_id: str) -> None:
     """없거나 형식이 어긋난 ID 는 404 GROUP_NOT_FOUND — 행위자 판정(401 · 403) 다음이다."""
     stored_id = canonical_id(group_id)
-    with admin_service._transaction(db, actor, central=True):
-        if stored_id is None or not groups_repo.delete_group(db, stored_id):
+    with admin_service._transaction(db, actor, central=True) as user:
+        group = None if stored_id is None else groups_repo.get_group(db, stored_id)
+        if group is None:
             raise ApiError(ErrorCode.GROUP_NOT_FOUND)
+        target_id = group.group_id
+        tenant_ids, staff_user_ids = groups_repo.group_member_ids(db, target_id)
+        if not groups_repo.delete_group(db, target_id):
+            raise ApiError(ErrorCode.GROUP_NOT_FOUND)
+        platform_events_repo.record_platform_event(
+            db,
+            PlatformEventAction.TENANT_GROUP_DELETE,
+            platform_events_repo.person(user),
+            target_id=target_id,
+            details={"tenant_ids": tenant_ids, "staff_user_ids": staff_user_ids},
+        )

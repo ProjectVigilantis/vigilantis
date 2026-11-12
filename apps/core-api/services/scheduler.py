@@ -104,7 +104,8 @@ def run_pipeline(publish: Callable[[WsEvent], None] | None = None) -> dict:
 
         # 수집→정형화→assets/metric_summaries upsert. ACTIVE 테넌트별 수집이다(#533 E) — ACTIVE 가 없거나
         # 자격 획득이 실패해도 프로세스 자격의 전역 수집으로 대신하지 않는다(그 결과는 빈/FAILED 목록).
-        store = collect_and_store_tenants()
+        # GuardDuty 탐지로 만든 인시던트는 수집 안에서 발행한다(#588 C · guardduty_ingress)
+        store = collect_and_store_tenants(publish=publish)
         if not store:
             logger.warning("scan pipeline: ACTIVE 테넌트가 없어 수집할 대상이 없다")
         session_factory = get_session_factory()

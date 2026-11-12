@@ -425,14 +425,20 @@ def test_secops_case_ids_are_unique() -> None:
     assert not duplicated, f"중복된 case_id: {duplicated}"
 
 
+#: 골든 입력(모의 위협 MockThreatEventInput)으로 낼 수 없는 사유 코드와 그 분기를 보는 자리.
+#: GuardDuty 탐지는 모의 입력이 아니라 수집 주기가 읽은 원문에서 정규화한다(#588 C) —
+#: apps/core-api/security/tests/test_guardduty_finding.py::test_severity_bands 가 구간마다 본다.
+_NOT_MOCK_REASON_CODES = {"RISK_GUARDDUTY_FINDING"}
+
+
 def test_secops_expected_covers_every_reason_code() -> None:
-    """정답 전량이 RiskReasonCode 6종을 전부 담는다.
+    """정답 전량이 모의 입력으로 낼 수 있는 RiskReasonCode 를 전부 담는다(_NOT_MOCK_REASON_CODES 제외).
 
     FinOps 쪽 기준(Verdict 4종·SkipReasonCode 5종 전량 커버)의 SecOps 대응물이다
     (PR #223 리뷰). 한 코드가 어느 정답에도 안 나오면 그 판정 분기는 골든이 못 잡는다.
     """
     used = {code for _, path in _secops_pairs() for code in _load(path)["reason_codes"]}
-    missing = {code.value for code in RiskReasonCode} - used
+    missing = {code.value for code in RiskReasonCode} - used - _NOT_MOCK_REASON_CODES
     assert not missing, (
         f"정답에 한 번도 안 나오는 RiskReasonCode: {sorted(missing)}. "
         f"그 분기를 내는 입력 케이스를 secops/input 에 추가해야 합니다."

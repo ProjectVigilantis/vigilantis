@@ -52,7 +52,7 @@ from schemas.api.incidents import (
 )
 from schemas.api.ws import WsEventType
 from schemas.candidates import CandidateStatus
-from schemas.events import SshBruteForceThreatPayload
+from schemas.events import GuardDutyFindingThreatPayload, SshBruteForceThreatPayload
 from schemas.executions import EXECUTION_RECOVERABLE_STATUSES
 from schemas.runbooks import ROLLBACK_RUNBOOK_BY_MAIN_ID
 
@@ -123,6 +123,9 @@ def _to_threat_context(
     else:
         try:
             threat = mappers.to_threat_event(event)
+            if isinstance(threat.payload, GuardDutyFindingThreatPayload):
+                # GuardDuty 탐지(#588 C)에는 출발지 IP · 노출 대역 같은 위협 문맥 칸이 없다 — 없음이 정상이다
+                return None
             if isinstance(threat.payload, SshBruteForceThreatPayload):
                 return SshBruteForceThreatContext(
                     event_type=threat.event_type.value,

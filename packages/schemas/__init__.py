@@ -37,6 +37,7 @@ from .backups import BackupType, InstanceSpecBackup, NaclRuleIndexBackup
 from .candidates import CandidateStatus, RunbookCandidateData
 from .collections import CollectionRunStatus
 from .events import (
+    GuardDutyFindingThreatPayload,
     InitialRiskEvaluationResult,
     MockThreatEventInput,
     NormalizedThreatEvent,
@@ -173,6 +174,7 @@ __all__ = [
     "Ec2RightsizingCandidateParameters",
     "Ec2RightsizingParameters",
     "Ec2UnisolateParameters",
+    "GuardDutyFindingThreatPayload",
     "NaclAddDenyCandidateParameters",
     "NaclAddDenyParameters",
     "NaclRestoreCandidateParameters",

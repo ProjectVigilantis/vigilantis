@@ -750,8 +750,11 @@ export interface AssetInventoryAxis {
   reason_code: string | null;
 }
 
-/** 위협 이벤트 유형 — 인시던트 `threat_context.event_type`과 같은 값이다. */
-export type ThreatEventKind = 'OPEN_IP' | 'SSH_BRUTE_FORCE';
+/**
+ * 위협 이벤트 유형 — packages/schemas/events.py `ThreatEventType`과 같은 값이다. 인시던트 `threat_context.event_type`은
+ * 이 가운데 OPEN_IP · SSH_BRUTE_FORCE이고, GuardDuty 탐지(#588 C)의 인시던트는 `threat_context`가 null이다.
+ */
+export type ThreatEventKind = 'OPEN_IP' | 'SSH_BRUTE_FORCE' | 'GUARDDUTY_FINDING';
 
 /**
  * 축 6 한 칸에 **발생한** 위협 이벤트 수. 0건 유형은 키가 없다. `total`은 `counts`의 합(서버 불변식).
@@ -1479,6 +1482,10 @@ export type PlatformEventAction =
   | 'USER_SESSIONS_REVOKE'
   | 'USER_PLATFORM_ROLE_CHANGE'
   | 'USER_GROUP_ASSIGNMENTS_CHANGE'
+  | 'USER_PERMISSIONS_CHANGE'
+  | 'TENANT_GROUP_CREATE'
+  | 'TENANT_GROUP_DELETE'
+  | 'TENANT_GROUP_ASSIGNMENT_CHANGE'
   | 'TENANT_CREATE'
   | 'TENANT_UPDATE'
   | 'TENANT_SUSPEND'
@@ -1521,7 +1528,8 @@ export type PlatformEventTargetType =
   | 'SIGNUP_REQUEST'
   | 'INQUIRY'
   | 'COLLECTION_RUN'
-  | 'NOTIFICATION';
+  | 'NOTIFICATION'
+  | 'TENANT_GROUP';
 
 /**
  * 누가 · 무엇이 했나. 로그인 · MFA · 비밀번호 재설정 시도는 로그인 전이라 ANONYMOUS 이고, 시도한 계정은 target 이다.
@@ -1768,6 +1776,27 @@ export interface SshBruteForcePayload {
   window_seconds: number;
 }
 
+/**
+ * GuardDuty 탐지(#588 C). 정규화 이벤트(`GuardDutyFindingThreatPayload`) 그대로다. 대상 자원은 항목의 `target_arn`이다 —
+ * EC2 인스턴스면 인스턴스 ARN, 그 밖의 자원(`resource_type`: AccessKey · S3Bucket …)은 탐지 자체의 ARN이다.
+ * 심각도 7.0 이상 HIGH · 4.0 이상 MEDIUM · 그 아래 LOW로 판정하고, LOW는 이벤트만 남는다(인시던트 없음).
+ * `region`은 읽은 탐지기의 리전, `finding_region`은 탐지가 표시한 리전이다 — 글로벌 서비스(IAM · STS) 탐지는
+ * 다른 리전에서 탐지해도 us-east-1로 표시돼 둘이 다를 수 있다.
+ */
+export interface GuardDutyFindingPayload {
+  finding_id: string;
+  finding_type: string;
+  /** 0.0–10.0 */
+  severity: number;
+  resource_type: string;
+  /** 읽은 탐지기의 리전 */
+  region: string;
+  /** 탐지의 Region */
+  finding_region: string;
+  first_seen_at: IsoDateTime;
+  last_seen_at: IsoDateTime;
+}
+
 export type ThreatEventItem =
   | {
       threat_event_id: string;
@@ -1782,6 +1811,13 @@ export type ThreatEventItem =
       target_arn: string;
       occurred_at: IsoDateTime;
       payload: SshBruteForcePayload;
+    }
+  | {
+      threat_event_id: string;
+      event_type: 'GUARDDUTY_FINDING';
+      target_arn: string;
+      occurred_at: IsoDateTime;
+      payload: GuardDutyFindingPayload;
     };
 
 /**

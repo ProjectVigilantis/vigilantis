@@ -47,5 +47,5 @@ test('타임라인 위치는 기간 비율이고 기간 밖은 양 끝에 붙는
 });
 
 test('유형별 건수', () => {
-  assert.deepEqual(threatKindCounts([ssh, ssh, open]), { SSH_BRUTE_FORCE: 2, OPEN_IP: 1 });
+  assert.deepEqual(threatKindCounts([ssh, ssh, open]), { SSH_BRUTE_FORCE: 2, OPEN_IP: 1, GUARDDUTY_FINDING: 0 });
 });

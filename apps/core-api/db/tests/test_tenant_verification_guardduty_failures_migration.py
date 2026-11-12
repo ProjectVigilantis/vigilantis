@@ -23,7 +23,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.exc import DBAPIError
 
 REVISION = "f588d1a2b3c4"
-PARENT = "d588e4b1c2a7"
+PARENT = "e589b3a1c204"
 ACCOUNT = "475763379672"
 COLUMN = "last_verification_guardduty_failures"
 SHAPE = "ck_tenants_verification_guardduty_failures_shape"

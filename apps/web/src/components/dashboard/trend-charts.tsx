@@ -42,6 +42,7 @@ import {
   threatActivityChartState,
   type ThreatActivityRow,
   type AssetStatusRow,
+  type ChartedThreatEventKind,
   type ChartState,
   type CpuLine,
   type InventoryRow,
@@ -53,7 +54,6 @@ import type {
   CpuAxis,
   NetworkAxis,
   ThreatEventAxis,
-  ThreatEventKind,
 } from '@/types/api';
 
 /**
@@ -498,11 +498,11 @@ export function ThreatTrendChart({ axis }: { axis: AssetStatusAxis }) {
  * 색: 이벤트 두 유형은 계열 1(파랑)·3(청록), 판정 선은 앱의 유일한 빨강(`--danger`)이다 — 대시보드
  * 「위협 판정 추이」와 같은 뜻의 같은 색. 세 색은 dataviz 팔레트 검사(라이트·다크, 전 쌍)를 통과했다.
  */
-const THREAT_EVENT_COLOR: Record<ThreatEventKind, string> = {
+const THREAT_EVENT_COLOR: Record<ChartedThreatEventKind, string> = {
   SSH_BRUTE_FORCE: 'var(--chart-series-1)',
   OPEN_IP: 'var(--chart-series-3)',
 };
-const THREAT_EVENT_LABEL: Record<ThreatEventKind, string> = {
+const THREAT_EVENT_LABEL: Record<ChartedThreatEventKind, string> = {
   SSH_BRUTE_FORCE: 'SSH 무차별 대입',
   OPEN_IP: '전체 대역 개방',
 };
@@ -596,7 +596,7 @@ export function ThreatActivityChart({
             itemSorter={null}
             formatter={(key) => (
               <span className="text-muted-foreground text-xs">
-                {key === 'threat' ? '위협 판정 자산' : THREAT_EVENT_LABEL[String(key) as ThreatEventKind]}
+                {key === 'threat' ? '위협 판정 자산' : THREAT_EVENT_LABEL[String(key) as ChartedThreatEventKind]}
               </span>
             )}
           />

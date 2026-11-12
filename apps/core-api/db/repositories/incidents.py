@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import datetime
 from typing import Optional
 
@@ -27,7 +27,7 @@ from schemas.api.incidents import (
     RiskLevel,
 )
 from schemas.candidates import CandidateStatus, RunbookCandidateData
-from schemas.events import NormalizedThreatEvent
+from schemas.events import NormalizedThreatEvent, ThreatEventType
 from schemas.evidence import EvidenceItem
 from schemas.executions import EXECUTION_NON_TERMINAL_STATUSES
 from schemas.incidents import (
@@ -63,6 +63,17 @@ def get_threat_event_by_dedup_key(
             models.ThreatEvent.deduplication_key == deduplication_key
         )
     ).scalar_one_or_none()
+
+
+def threat_event_type_of(db: Session, threat_event_id: Optional[str]) -> Optional[ThreatEventType]:
+    """Incident 에 묶인 위협 이벤트의 유형. 묶인 이벤트가 없으면 None."""
+    if threat_event_id is None:
+        return None
+    return db.scalar(
+        select(models.ThreatEvent.event_type).where(
+            models.ThreatEvent.threat_event_id == threat_event_id
+        )
+    )
 
 
 def get_threat_events_by_ids(
@@ -455,7 +466,9 @@ def user_approval_recorded(db: Session, incident_id: str) -> bool:
     ).first() is not None
 
 
-def list_expired_agent_waits(db: Session, *, now: datetime) -> list[str]:
+def list_expired_agent_waits(
+    db: Session, *, now: datetime, exclude_event_types: Collection[ThreatEventType] = (),
+) -> list[str]:
     """응답 기한이 지난 Medium 승인 대기의 Incident 식별자 — 타임아웃 감시 1회의 대상.
 
     식별자만 돌려준다 — 감시는 건마다 잠그고 커밋하며 도는데, 들고 있던 행은 그 사이에
@@ -474,8 +487,18 @@ def list_expired_agent_waits(db: Session, *, now: datetime) -> list[str]:
         켠 시각 이전) 지났으면 뺀다(T-6 · #514). 넣으면 사람이 응답할 때까지 주기마다 잠그고 건너뛰기만
         반복한다. 판정의 원천은 workflows.automatic_trigger_block 이고 이 조건은 그 거울이다. 테넌트
         없음(NULL)은 지금 그대로다.
+      - 자동 발동에서 빼는 위협 유형(exclude_event_types · #588 Q2 GuardDuty 탐지)은 뺀다. 판정의 원천은
+        workflows.AUTO_ISOLATION_EXCLUDED_EVENT_TYPES 이고 호출부가 넘긴다 — 같은 이유로 잡혀도 건너뛰기만 반복한다.
     """
     tenant = models.Tenant
+    excluded = (
+        select(models.ThreatEvent.threat_event_id)
+        .where(
+            models.ThreatEvent.threat_event_id == models.Incident.threat_event_id,
+            models.ThreatEvent.event_type.in_(list(exclude_event_types)),
+        )
+        .exists()
+    )
     return list(
         db.execute(
             select(models.Incident.incident_id)
@@ -487,6 +510,7 @@ def list_expired_agent_waits(db: Session, *, now: datetime) -> list[str]:
                 models.Incident.response_deadline_at <= now,
                 models.Incident.subject_arn.like(_EC2_INSTANCE_ARN_LIKE),
                 ~_user_approval_recorded(),
+                ~excluded,
                 or_(
                     models.Incident.tenant_id.is_(None),
                     and_(

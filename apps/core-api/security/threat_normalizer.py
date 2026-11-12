@@ -41,6 +41,11 @@
 # 저장 계층의 정책이고 Incident Intake(#254) 소관이다. 규칙을 바꿀 자리는
 # `_identity_parts` 하나다.
 #
+# GuardDuty 탐지(#588 C)는 모의 입력이 아니라 수집 주기가 읽은 원문(GetFindings 의 Finding 1건)에서 바로
+# 정규화한다(normalize_guardduty_finding). 같은 탐지는 GuardDuty 가 **같은 ID 를 갱신**해 다시 내보내므로
+# (횟수 · 최근 관측 시각이 바뀐다) 키는 계정 + 리전 + 탐지 ID 다 — 갱신값을 키에 넣으면 갱신마다 새 위협이
+# 된다. 그래서 첫 관측만 남고 뒤의 갱신(심각도가 바뀌어도)은 접힌다(#588 C 「중복」).
+#
 # 길이는 해시로 묶는다. 원문을 그대로 넣으면 ARN(최대 512) 하나만으로도 컬럼 상한
 # 512 에 닿아 잘릴 수 있고, **잘린 키는 서로 다른 위협을 같은 것으로 만든다**(진짜
 # 위협이 조용히 사라진다). 원문 값은 target_arn·payload 컬럼에 그대로 남아 있어
@@ -58,6 +63,7 @@ from typing import Any
 from pydantic import TypeAdapter
 
 from schemas.events import (
+    GuardDutyFindingThreatPayload,
     MockThreatEventInput,
     NormalizedThreatEvent,
     OpenIpThreatInput,
@@ -171,4 +177,93 @@ def normalize_mock_input(
     event = _INPUT_ADAPTER.validate_python(payload)
     return normalize_threat_event(
         event, collected_at=collected_at, threat_event_id=threat_event_id
+    )
+
+
+# ---------------------------------------------------------------- GuardDuty 탐지(#588 C)
+#: 대상 자원 ARN 을 만들 수 있는 GuardDuty 자원 유형. 그 밖은 탐지 자체의 ARN 을 대상으로 둔다 — IAM 키 ·
+#: S3 버킷 ARN 에는 계정이 없어 소속(incident_intake._owning_tenant_id)을 정할 수 없다.
+_GUARDDUTY_INSTANCE = "Instance"
+
+
+def _guardduty_time(value) -> datetime:
+    # GetFindings 의 시각은 ISO 8601 문자열이다(예: 2026-11-10T01:02:03.456Z)
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    else:
+        raise ValueError("GuardDuty 탐지 시각이 없습니다")
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+
+def guardduty_finding_updated_at(finding: dict) -> datetime:
+    """탐지가 마지막으로 갱신된 시각 — 읽기 커서의 축이다(services/guardduty.read_findings)."""
+    return _guardduty_time(finding.get("UpdatedAt"))
+
+
+def _guardduty_target_arn(finding: dict, region: str, account_id: str) -> tuple[str, str]:
+    resource = finding.get("Resource") or {}
+    resource_type = resource.get("ResourceType") or "Unknown"
+    instance_id = (resource.get("InstanceDetails") or {}).get("InstanceId")
+    finding_arn = finding.get("Arn") or ""
+    partition = finding_arn.split(":")[1] if finding_arn.count(":") >= 5 else "aws"
+    if resource_type == _GUARDDUTY_INSTANCE and instance_id:
+        return f"arn:{partition}:ec2:{region}:{account_id}:instance/{instance_id}", resource_type
+    if not finding_arn:
+        raise ValueError("GuardDuty 탐지에 ARN 이 없습니다")
+    return finding_arn, resource_type
+
+
+def normalize_guardduty_finding(
+    finding: dict,
+    *,
+    account_id: str,
+    region: str,
+    collected_at: datetime | None = None,
+    threat_event_id: str | None = None,
+) -> NormalizedThreatEvent:
+    """GetFindings 의 Finding 1건 → NormalizedThreatEvent. 형식이 어긋나면 ValueError.
+
+    region 은 읽은 탐지기의 리전이다. 탐지의 계정이 읽은 테넌트 계정과 다르면 거절한다 — 위임 관리자 계정은
+    멤버 계정의 탐지도 돌려주는데(읽기 조건이 계정으로 거르지만) 그 탐지는 이 테넌트의 것이 아니다.
+
+    탐지의 Region 은 읽은 리전과 다를 수 있어 리전으로는 거절하지 않는다 — 글로벌 서비스(IAM · STS) 이벤트의
+    탐지는 다른 리전에서 탐지해도 us-east-1 로 표시된다(GuardDuty API Finding.Region). 두 값을 나눠 쓴다.
+      - 읽은 리전: 중복 키 · payload.region. 탐지 ID 는 탐지기마다 고유하고, 커서도 읽은 리전마다다.
+      - 탐지의 Region: 인스턴스 ARN(인스턴스가 있는 곳) · payload.finding_region. 없으면 읽은 리전이다.
+    """
+    finding_id = finding.get("Id")
+    if not finding_id:
+        raise ValueError("GuardDuty 탐지에 Id 가 없습니다")
+    if finding.get("AccountId") != account_id:
+        raise ValueError("GuardDuty 탐지의 계정이 읽은 테넌트 계정과 다릅니다")
+    finding_region = finding.get("Region") or region
+    if not isinstance(finding_region, str):
+        raise ValueError("GuardDuty 탐지의 Region 이 문자열이 아닙니다")
+    service = finding.get("Service") or {}
+    first_seen = _guardduty_time(service.get("EventFirstSeen") or finding.get("CreatedAt"))
+    last_seen = _guardduty_time(service.get("EventLastSeen") or finding.get("UpdatedAt"))
+    target_arn, resource_type = _guardduty_target_arn(finding, finding_region, account_id)
+    digest = hashlib.sha256(
+        "|".join((ThreatEventType.GUARDDUTY_FINDING.value, account_id, region, finding_id)).encode("utf-8")
+    ).hexdigest()
+    return NormalizedThreatEvent(
+        threat_event_id=threat_event_id or str(uuid.uuid4()),
+        source_event_id=finding_id,
+        event_type=ThreatEventType.GUARDDUTY_FINDING,
+        target_arn=target_arn,
+        occurred_at=first_seen,
+        payload=GuardDutyFindingThreatPayload(
+            finding_id=finding_id,
+            finding_type=finding.get("Type") or "",
+            severity=finding.get("Severity"),
+            resource_type=resource_type,
+            region=region,
+            finding_region=finding_region,
+            first_seen_at=first_seen,
+            last_seen_at=max(first_seen, last_seen),
+        ),
+        deduplication_key=f"{ThreatEventType.GUARDDUTY_FINDING.value}|{digest}",
+        collected_at=collected_at or datetime.now(timezone.utc),
     )

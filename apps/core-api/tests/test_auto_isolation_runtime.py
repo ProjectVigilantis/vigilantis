@@ -789,7 +789,7 @@ def _factory_cm():
 def test_cycle_continues_after_per_item_error_and_counts_each(monkeypatch):
     monkeypatch.setattr(
         incidents_repo, "list_expired_agent_waits",
-        lambda db, now: ["a", "b", "c", "d"], raising=False,
+        lambda db, now, **_kw: ["a", "b", "c", "d"], raising=False,
     )
     seen = []
 

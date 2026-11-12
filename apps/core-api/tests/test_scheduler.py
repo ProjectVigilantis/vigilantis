@@ -33,7 +33,7 @@ def _bind_scheduler_to_test_db(monkeypatch, pg_engine):
 def _stub_pipeline(monkeypatch, called):
     monkeypatch.setattr(
         "services.collector.collect_and_store_tenants",
-        lambda: (called.__setitem__("collect", called["collect"] + 1), {"stored": 1})[1],
+        lambda publish=None: (called.__setitem__("collect", called["collect"] + 1), {"stored": 1})[1],
     )
     monkeypatch.setattr(
         "services.rule_engine.run_rule_engine",
@@ -169,7 +169,7 @@ def test_two_ticks_do_not_overlap(pg_engine, monkeypatch):
     called = {"collect": 0, "judge": 0}
 
     # collect_and_store 안에서 '겹친 tick' 을 모사 — 진행 중 재진입 시 건너뛰는지 본다
-    def _collect_then_reenter():
+    def _collect_then_reenter(publish=None):
         called["collect"] += 1
         reentrant = scheduler.run_pipeline()  # 락 보유 중 재진입
         assert reentrant == {"skipped": True}  # 겹친 tick 은 건너뜀
@@ -194,7 +194,7 @@ def test_lock_released_when_pipeline_raises(pg_engine, monkeypatch):
 
     _bind_scheduler_to_test_db(monkeypatch, pg_engine)
 
-    def _boom():
+    def _boom(publish=None):
         raise RuntimeError("collect boom")
 
     monkeypatch.setattr("services.collector.collect_and_store_tenants", _boom)

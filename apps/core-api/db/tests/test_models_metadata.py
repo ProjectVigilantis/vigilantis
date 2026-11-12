@@ -77,6 +77,8 @@ EXPECTED_TABLES = {
     "tenant_api_calls_hourly",
     # #589 — 플랫폼 활동 로그(append-only 통합 기록)
     "platform_events",
+    # GuardDuty 탐지 읽기 커서 — 고객사 × 리전 (#588 C)
+    "guardduty_finding_cursors",
 }
 
 
@@ -152,6 +154,8 @@ def test_row_invariant_constraints_registered():
             "ck_platform_events_details_object",
             "ck_platform_events_reason_shape",
         },
+        # GuardDuty 읽기 커서 — 이어 읽을 토큰과 순회 진척은 함께 있거나 함께 없다(#588 C)
+        "guardduty_finding_cursors": {"ck_guardduty_finding_cursors_pass_shape"},
         "metric_summaries": {"ck_metric_summaries_window_ordered"},
         "rule_evaluations": {"ck_rule_evaluations_health_score_range"},
         # 계정 종류 ↔ 소속 · 플랫폼 등급(#492). PLATFORM role=ADMIN 은 호환 제약이다

@@ -41,19 +41,21 @@ from uuid import UUID
 
 from db import models
 from db.repositories import auth as auth_repo
+from db.repositories import platform_events as platform_events_repo
 from exceptions import ApiError
 from schemas.api.auth import AccountType, FeaturePermission, UserRole
 from schemas.api.errors import ErrorCode
 from schemas.api.tenants import TenantStatus
 from schemas.api.users import (
+    UserEventAction,
     UserEventItem,
     UserEventsResponse,
     UserEventState,
-    UserEventAction,
     UserListItem,
     UsersResponse,
     UserStatus,
 )
+from schemas.platform_events import PlatformEventAction
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -232,6 +234,26 @@ def _audit(
     )
 
 
+def _platform_event(
+    db: Session,
+    admin: service.CurrentUser,
+    action: PlatformEventAction,
+    target_id: str,
+    tenant_id: str | None,
+    details: dict[str, Any] | None = None,
+) -> None:
+    """활동 로그(platform_events) — 업무 쓰기 · user_admin_events 뒤, 같은 세션 · 같은 commit 에 남긴다.
+    행위자는 방금 재판정한 admin 이고 tenant_id 는 영향받은 대상의 테넌트다(고객사 대상 없는 직원이면 None)."""
+    platform_events_repo.record_platform_event(
+        db,
+        action,
+        platform_events_repo.person(admin),
+        tenant_id=tenant_id,
+        target_id=target_id,
+        details=details,
+    )
+
+
 def _require_new_identity(db: Session, adapter: Any, provider_user: Any) -> None:
     """제공자 신원 (issuer, sub) 이 앱에 이미 있으면 409 — 자동 연결하지 않는다(초대 공통, 잠금 안에서 부른다)."""
     if (
@@ -322,6 +344,14 @@ def change_role(db: Session, actor: Actor, user_id: str, role: UserRole) -> None
             )
         after = _state(role=role, **_permission_state(role, frozenset()))
         _audit(db, admin, target.user_id, UserEventAction.ROLE_CHANGED, before, after, now)
+        _platform_event(
+            db,
+            admin,
+            PlatformEventAction.USER_ROLE_CHANGE,
+            target.user_id,
+            target.tenant_id,
+            {"before": before["role"], "after": after["role"]},
+        )
 
 
 def change_permissions(
@@ -353,6 +383,17 @@ def change_permissions(
             _state(permissions=permissions.ordered(permissions_set)),
             now,
         )
+        _platform_event(
+            db,
+            admin,
+            PlatformEventAction.USER_PERMISSIONS_CHANGE,
+            target.user_id,
+            target.tenant_id,
+            {
+                "before": permissions.ordered(granted),
+                "after": permissions.ordered(permissions_set),
+            },
+        )
 
 
 def change_status(db: Session, actor: Actor, user_id: str, status: UserStatus) -> None:
@@ -378,6 +419,14 @@ def change_status(db: Session, actor: Actor, user_id: str, status: UserStatus) -
             )
         # 재활성화는 폐기된 세션을 되살리지 않는다 — 다시 로그인해야 한다
         _audit(db, admin, target.user_id, UserEventAction.STATUS_CHANGED, before, _state(status=status), now)
+        _platform_event(
+            db,
+            admin,
+            PlatformEventAction.USER_STATUS_CHANGE,
+            target.user_id,
+            target.tenant_id,
+            {"before": before["status"], "after": status.value},
+        )
 
 
 def revoke_sessions(db: Session, actor: Actor, user_id: str) -> None:
@@ -399,6 +448,9 @@ def revoke_sessions(db: Session, actor: Actor, user_id: str) -> None:
             _state(),
             _state(revoked_session_count=count),
             now,
+        )
+        _platform_event(
+            db, admin, PlatformEventAction.USER_SESSIONS_REVOKE, target.user_id, target.tenant_id
         )
 
 
@@ -477,6 +529,7 @@ def invite_user(
             ),
             now,
         )
+        _platform_event(db, admin, PlatformEventAction.USER_INVITE, row.user_id, target_tenant)
         item = _item(row, None, granted)
     return item
 
@@ -501,4 +554,7 @@ def resend_invite(db: Session, actor: Actor, get_adapter: Callable[[], Any], use
         _require_active_tenant(db, current.tenant_id, hold=True)
         _audit(
             db, admin, current.user_id, UserEventAction.INVITE_RESENT, _state(), _state(), actor.clock()
+        )
+        _platform_event(
+            db, admin, PlatformEventAction.USER_INVITE_RESEND, current.user_id, current.tenant_id
         )
