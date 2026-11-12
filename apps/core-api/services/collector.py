@@ -1276,25 +1276,28 @@ def _tenant_base_config(snapshot: _TenantRound) -> dict:
     }
 
 
-def collect_and_store_tenants() -> list[dict]:
+def collect_and_store_tenants(publish=None) -> list[dict]:
     """ACTIVE 테넌트마다 그 테넌트 자격·리전·VPC 범위로 수집해 적재한다 — 스케줄러의 수집 진입점.
 
     ACTIVE 가 없으면 빈 목록이다 — 전역 수집으로 대신하지 않는다. 테넌트 하나의 실패(자격 획득 포함)는
-    그 테넌트의 결과로 남고 뒤의 테넌트는 계속 돈다. 목록·설정·상태는 테넌트 회차마다 새로 읽는다."""
+    그 테넌트의 결과로 남고 뒤의 테넌트는 계속 돈다. 목록·설정·상태는 테넌트 회차마다 새로 읽는다.
+
+    리전마다 자산 수집이 끝나면 같은 tenant_scope 안에서 GuardDuty 탐지를 읽는다(#588 C · guardduty_ingress).
+    그 결과는 리전 요약의 "guardduty" 에 실린다. publish 는 탐지로 새로 만든 인시던트의 INCIDENT_CREATED 발행이다."""
     from db.session import get_session_factory
 
     session_factory = get_session_factory()
     results: list[dict] = []
     for tenant_id in _active_tenant_ids(session_factory):
         try:
-            results.extend(_collect_store_tenant(tenant_id, session_factory))
+            results.extend(_collect_store_tenant(tenant_id, session_factory, publish))
         except Exception as exc:  # 테넌트 격리 — 설정 읽기 실패 등도 다음 테넌트를 막지 않는다
             _log.exception("테넌트 %s 수집 실패 — 다음 테넌트로 계속(%s)", tenant_id, _failure_reason(exc))
             results.append({"tenant_id": tenant_id, "status": "FAILED", "error": _failure_reason(exc)})
     return results
 
 
-def _collect_store_tenant(tenant_id: str, session_factory) -> list[dict]:
+def _collect_store_tenant(tenant_id: str, session_factory, publish=None) -> list[dict]:
     """테넌트 한 회차. 상태 · 설정은 회차 시작과, 새 리전을 시작하기 전마다 다시 읽는다 — 정지되면 아직 시작하지
     않은 리전은 수집하지 않고(ADR-0012 §회수 ①), 리전 · VPC 범위 · 역할이 바뀌었으면 바뀐 값으로 이어 간다.
     이미 끝난 리전의 관측은 그대로 둔다."""
@@ -1333,10 +1336,27 @@ def _collect_store_tenant(tenant_id: str, session_factory) -> list[dict]:
         if cfg is None:
             cfg = _tenant_base_config(current)
         with tenant_scope(current.access):
-            results.append(
-                {"tenant_id": tenant_id, **_collect_store_region(region, cfg, session_factory, tenant_id)}
-            )
+            summary = {"tenant_id": tenant_id, **_collect_store_region(region, cfg, session_factory, tenant_id)}
+            # 자산 수집이 실패한 리전은 읽지 않는다 — 계정 확인(다른 계정의 자격)이 그 안에서 끝나므로, 실패한
+            # 회차의 자격으로 탐지를 읽으면 남의 계정을 읽을 수 있다
+            if summary.get("status") != "FAILED":
+                summary["guardduty"] = _read_guardduty(region, current, session_factory, publish)
+            results.append(summary)
     return results
+
+
+def _read_guardduty(region: str, snapshot: _TenantRound, session_factory, publish) -> dict:
+    """그 리전의 GuardDuty 탐지 읽기(#588 C). 실패는 이 요약으로만 남고 자산 수집 결과를 바꾸지 않는다."""
+    import guardduty_ingress
+
+    try:
+        return guardduty_ingress.ingest_region(
+            session_factory, tenant_id=snapshot.access.tenant_id, account_id=snapshot.account_id,
+            region=region, publish=publish,
+        )
+    except Exception as exc:  # 리전 격리 — 탐지 읽기의 코드 오류도 다음 리전을 막지 않는다
+        _log.exception("리전 %s GuardDuty 탐지 읽기 실패(%s)", region, _failure_reason(exc))
+        return {"status": "FAILED", "error": _failure_reason(exc)}
 
 
 def _collect_store_region(

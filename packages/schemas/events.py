@@ -31,6 +31,9 @@ from .api.incidents import ResponseMode, RiskLevel
 class ThreatEventType(str, Enum):
     OPEN_IP = "OPEN_IP"
     SSH_BRUTE_FORCE = "SSH_BRUTE_FORCE"
+    # 고객 계정 GuardDuty 탐지 결과(#588 C). Mock 입력이 아니라 수집 주기가 읽어 정규화한다
+    # (services/guardduty.py · guardduty_ingress.py) — 그래서 MockThreatEventInput 에는 없다.
+    GUARDDUTY_FINDING = "GUARDDUTY_FINDING"
 
 
 @unique
@@ -112,9 +115,41 @@ class SshBruteForceThreatPayload(BaseModel):
     window_seconds: int = Field(ge=1)
 
 
+#: GuardDuty 심각도 범위. Critical(9.0–10.0)까지 담는다.
+GUARDDUTY_SEVERITY_MAX = 10.0
+
+
+class GuardDutyFindingThreatPayload(BaseModel):
+    """GuardDuty 탐지 1건(#588 C). 대상 자원 ARN 은 공통 칸 target_arn 이다.
+
+    대상이 EC2 인스턴스면 인스턴스 ARN, 그 밖의 자원(IAM 키 · S3 등)은 탐지 자체의 ARN 이다 —
+    resource_type 이 어느 쪽인지 알린다(security/threat_normalizer.py).
+
+    region 은 읽은 탐지기의 리전, finding_region 은 탐지가 표시한 리전이다 — 글로벌 서비스(IAM · STS) 이벤트의
+    탐지는 다른 리전에서 탐지해도 us-east-1 로 표시돼 둘이 다를 수 있다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    finding_id: str = Field(min_length=1)
+    finding_type: str = Field(min_length=1)    # 예: UnauthorizedAccess:EC2/SSHBruteForce
+    severity: float = Field(ge=0, le=GUARDDUTY_SEVERITY_MAX)
+    resource_type: str = Field(min_length=1)   # GuardDuty Resource.ResourceType (Instance · AccessKey …)
+    region: str = Field(min_length=1)          # 읽은 탐지기의 리전
+    finding_region: str = Field(min_length=1)  # 탐지의 Region
+    first_seen_at: UtcDateTime
+    last_seen_at: UtcDateTime
+
+    @model_validator(mode="after")
+    def _seen_in_order(self):
+        if self.last_seen_at < self.first_seen_at:
+            raise ValueError("last_seen_at 은 first_seen_at 보다 앞설 수 없습니다")
+        return self
+
+
 _PAYLOAD_BY_TYPE: dict[ThreatEventType, type[BaseModel]] = {
     ThreatEventType.OPEN_IP: OpenIpThreatPayload,
     ThreatEventType.SSH_BRUTE_FORCE: SshBruteForceThreatPayload,
+    ThreatEventType.GUARDDUTY_FINDING: GuardDutyFindingThreatPayload,
 }
 
 
@@ -128,7 +163,7 @@ class NormalizedThreatEvent(BaseModel):
     event_type: ThreatEventType
     target_arn: str = Field(min_length=1)
     occurred_at: UtcDateTime
-    payload: Union[OpenIpThreatPayload, SshBruteForceThreatPayload]
+    payload: Union[OpenIpThreatPayload, SshBruteForceThreatPayload, GuardDutyFindingThreatPayload]
     deduplication_key: str = Field(min_length=1)
     collected_at: UtcDateTime
 
@@ -189,6 +224,7 @@ class RiskReasonCode(str, Enum):
     RISK_ALL_PORTS_EXPOSED = "RISK_ALL_PORTS_EXPOSED"            # 단일 프로토콜 전 포트(0–65535) 개방
     RISK_SSH_BRUTEFORCE = "RISK_SSH_BRUTEFORCE"                  # SSH 브루트포스(횟수·속도 임계)
     RISK_SSH_LOW_SIGNAL = "RISK_SSH_LOW_SIGNAL"                  # SSH 임계 미만(오탐·오타 가능)
+    RISK_GUARDDUTY_FINDING = "RISK_GUARDDUTY_FINDING"            # GuardDuty 탐지 — 위험도는 심각도 구간(#588 Q2)
 
 
 class InitialRiskEvaluationResult(BaseModel):
