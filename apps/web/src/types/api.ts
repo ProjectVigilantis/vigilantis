@@ -1479,6 +1479,7 @@ export type PlatformEventAction =
   | 'INCIDENT_CREATE'
   | 'INCIDENT_ANALYZE'
   | 'INCIDENT_RESOLVE'
+  | 'INCIDENT_EVIDENCE_EXPORT'
   | 'ACTION_APPROVE'
   | 'ACTION_AUTO_TRIGGER'
   | 'ACTION_BLOCK'
@@ -1544,7 +1545,9 @@ export interface PlatformEventItem {
   /** 고객사 없는 일(플랫폼 계정 로그인 등)은 null. */
   tenant_id: string | null;
   target: { type: PlatformEventTargetType; id: string } | null;
-  /** 행동별 기록 계약의 값(before · after · reason_code 등). 비밀번호 · 토큰 · 이메일 칸은 없다. */
+  /** 행동별 기록 계약의 값(before · after · reason_code · changed_fields 등). 비밀번호 · 토큰 · 이메일 칸은 없다.
+   *  TENANT_UPDATE 의 changed_fields 는 값이 바뀐 칸 이름(name · regions · collect_vpc_ids · subscription)이고,
+   *  TENANT_AUTO_ACTION_CHANGE 의 before · after 는 ENABLED · DISABLED 다. */
   details: Record<string, unknown>;
   session_id: string | null;
   /** 클라이언트가 X-Request-ID 로 정할 수 있다 — 같은 값이라고 같은 요청이라는 증거가 아니다. */
