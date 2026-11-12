@@ -69,6 +69,7 @@ from routers import marketplace as marketplace_router  # noqa: E402
 from routers import metrics as metrics_router  # noqa: E402
 from routers import notifications as notifications_router
 from routers import platform as platform_router  # noqa: E402
+from routers import platform_events as platform_events_router  # noqa: E402
 from routers import signup_requests as signup_requests_router
 from routers import staff as staff_router  # noqa: E402
 from routers import subscriptions as subscriptions_router
@@ -246,6 +247,8 @@ def create_app() -> FastAPI:
     app.include_router(notifications_router.router, dependencies=protected)
     # 플랫폼 상태 · 호출 통계(#572 6번) — 라우터가 CENTRAL_ADMIN 관문을 건다
     app.include_router(platform_router.router, dependencies=protected)
+    # 플랫폼 활동 로그(#589 C) — 관리 등급 · 범위는 라우트가 건다
+    app.include_router(platform_events_router.router, dependencies=protected)
     # 같은 prefix의 GET/PUT은 라우터가 CENTRAL_ADMIN 관문을 건다. 공개는 POST 한 경로뿐이다.
     app.include_router(signup_requests_router.router)
     app.include_router(staff_router.router, dependencies=protected)

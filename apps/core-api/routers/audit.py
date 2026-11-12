@@ -12,21 +12,19 @@
 #   - 범위 밖 · 형식이 어긋난 incident_id 는 404 가 아니라 빈 목록이다(존재를 알리지 않는다).
 #   - 커서는 직전 쪽 마지막 기록의 (occurred_at, event_id) 를 감싼 불투명 문자열이다. 깨지면 422.
 #     시각 질의는 시간대가 있어야 한다(없으면 422) — 기록은 UTC 이고 해석을 서버가 추측하지 않는다.
+#     (둘 다 page_cursor — 플랫폼 활동 로그 조회와 같은 규칙이다.)
 # ==============================================================================
 
 from __future__ import annotations
 
-import base64
-import binascii
-import json
 from datetime import datetime
 from typing import Optional
 
+import page_cursor
 from auth import service
 from auth.access import is_platform_account, require_tenant_scope, require_user
 from db.repositories import audit as audit_repo
 from db.session import get_db
-from exceptions import ApiError
 from fastapi import APIRouter, Depends, Query
 from identifiers import canonical_id
 from schemas.api.audit import (
@@ -36,35 +34,10 @@ from schemas.api.audit import (
     AuditEventAction,
     AuditEventsResponse,
 )
-from schemas.api.errors import ErrorCode
 from sqlalchemy.orm import Session
 from tenancy import TenantScope
 
 router = APIRouter(prefix="/api/v1", tags=["audit"])
-
-
-def _encode_cursor(row: audit_repo.EventRow) -> str:
-    raw = json.dumps([row.event.occurred_at.isoformat(), row.event.event_id])
-    return base64.urlsafe_b64encode(raw.encode()).rstrip(b"=").decode()
-
-
-def _decode_cursor(cursor: str) -> tuple[datetime, str]:
-    try:
-        raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
-        occurred_at, event_id = json.loads(raw)
-        occurred_at = datetime.fromisoformat(occurred_at)
-        event_id = canonical_id(event_id)
-    except (binascii.Error, UnicodeDecodeError, ValueError, TypeError, AttributeError):
-        raise ApiError(ErrorCode.REQUEST_VALIDATION_FAILED) from None
-    if occurred_at.tzinfo is None or event_id is None:
-        raise ApiError(ErrorCode.REQUEST_VALIDATION_FAILED)
-    return occurred_at, event_id
-
-
-def _aware(value: Optional[datetime]) -> Optional[datetime]:
-    if value is not None and value.tzinfo is None:
-        raise ApiError(ErrorCode.REQUEST_VALIDATION_FAILED)
-    return value
 
 
 def _actor_email(row: audit_repo.EventRow, *, platform_viewer: bool) -> Optional[str]:
@@ -110,8 +83,8 @@ def list_audit_events(
     scope: TenantScope = Depends(require_tenant_scope),
     user: service.CurrentUser = Depends(require_user),
 ) -> AuditEventsResponse:
-    since, until = _aware(since), _aware(until)
-    before = None if cursor is None else _decode_cursor(cursor)
+    since, until = page_cursor.aware(since), page_cursor.aware(until)
+    before = None if cursor is None else page_cursor.decode(cursor)
     if incident_id is not None:
         incident_id = canonical_id(incident_id)
         if incident_id is None:
@@ -131,6 +104,9 @@ def list_audit_events(
     return AuditEventsResponse.model_validate(
         {
             "items": [_to_item(row, platform_viewer=platform_viewer) for row in page],
-            "next_cursor": _encode_cursor(page[-1]) if len(rows) > limit else None,
+            "next_cursor": (
+                page_cursor.encode(page[-1].event.occurred_at, page[-1].event.event_id)
+                if len(rows) > limit else None
+            ),
         }
     )

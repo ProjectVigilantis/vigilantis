@@ -1428,6 +1428,135 @@ export interface AuditEventsResponse {
   next_cursor: string | null;
 }
 
+/* ────────────────────────── api/platform_events.py ────────────────────────── */
+/* GET /api/v1/platform-events — 플랫폼 활동 로그(#589 C). 플랫폼 관리 등급(CENTRAL_ADMIN · TENANT_MANAGER)만
+   본다 — 고객사 계정은 403. 원천은 packages/schemas/api/platform_events.py · schemas/platform_events.py.
+   질의(모두 선택): since · until(occurred_at ∈ [since, until), 시간대 필수) · category · action · outcome ·
+   actor_kind · actor_user_id · tenant_id · target_type · target_id(target_type 과 함께만) · cursor ·
+   limit(기본 50 · 1–100). 최신순이고 next_cursor 가 null 이면 마지막 쪽이다. 범위 밖 · 형식이 어긋난 ID 는 빈 목록이다.
+   범위: 중앙 관리자는 전부, 담당자는 담당 고객사의 행 + 고객사 없는 본인 행(자기가 한 행 · 자기 계정의 로그인 시도 등). */
+
+export const PLATFORM_EVENTS_DEFAULT_LIMIT = 50;
+export const PLATFORM_EVENTS_MAX_LIMIT = 100;
+
+export type PlatformEventCategory =
+  | 'AUTH'
+  | 'ACCESS'
+  | 'USER_ADMIN'
+  | 'TENANT_ADMIN'
+  | 'INCIDENT'
+  | 'ACTION'
+  | 'SUPPORT'
+  | 'COLLECTION'
+  | 'NOTIFICATION';
+
+export type PlatformEventAction =
+  | 'AUTH_LOGIN'
+  | 'AUTH_MFA'
+  | 'AUTH_LOGOUT'
+  | 'AUTH_PASSWORD_RESET'
+  | 'AUTH_TOTP_RECOVERY'
+  | 'ACCESS_FORBIDDEN'
+  | 'ACCESS_OUT_OF_SCOPE'
+  | 'USER_INVITE'
+  | 'USER_INVITE_RESEND'
+  | 'USER_ROLE_CHANGE'
+  | 'USER_STATUS_CHANGE'
+  | 'USER_SESSIONS_REVOKE'
+  | 'USER_PLATFORM_ROLE_CHANGE'
+  | 'USER_GROUP_ASSIGNMENTS_CHANGE'
+  | 'TENANT_CREATE'
+  | 'TENANT_UPDATE'
+  | 'TENANT_SUSPEND'
+  | 'TENANT_RESUME'
+  | 'TENANT_VERIFY'
+  | 'TENANT_AUTO_ACTION_CHANGE'
+  | 'TENANT_DELETE'
+  | 'INCIDENT_CREATE'
+  | 'INCIDENT_ANALYZE'
+  | 'INCIDENT_RESOLVE'
+  | 'ACTION_APPROVE'
+  | 'ACTION_AUTO_TRIGGER'
+  | 'ACTION_BLOCK'
+  | 'ACTION_COMPLETE'
+  | 'ACTION_ROLLBACK'
+  | 'SIGNUP_REQUEST_CREATE'
+  | 'SIGNUP_REQUEST_DECIDE'
+  | 'INQUIRY_CREATE'
+  | 'INQUIRY_STATUS_CHANGE'
+  | 'INQUIRY_NOTE_ADD'
+  | 'COLLECTION_RUN'
+  | 'NOTIFICATION_SEND';
+
+/** 거절(DENIED) · 실패(FAILED)면 details.reason_code 가 있다. */
+export type PlatformEventOutcome =
+  | 'SUCCEEDED'
+  | 'DENIED'
+  | 'FAILED';
+
+export type PlatformActorKind =
+  | 'USER'
+  | 'SYSTEM'
+  | 'ANONYMOUS';
+
+export type PlatformEventTargetType =
+  | 'USER'
+  | 'TENANT'
+  | 'INCIDENT'
+  | 'EXECUTION'
+  | 'SIGNUP_REQUEST'
+  | 'INQUIRY'
+  | 'COLLECTION_RUN'
+  | 'NOTIFICATION';
+
+/**
+ * 누가 · 무엇이 했나. 로그인 · MFA · 비밀번호 재설정 시도는 로그인 전이라 ANONYMOUS 이고, 시도한 계정은 target 이다.
+ * email 은 지금 값이고, account_type · platform_role 은 기록 시점 값이다.
+ */
+export type PlatformEventActor =
+  | {
+      kind: 'USER';
+      user_id: string;
+      email: string;
+      account_type: AccountType | 'UNASSIGNED';
+      /** PLATFORM 계정만 있다. */
+      platform_role: PlatformRole | null;
+    }
+  | {
+      kind: 'SYSTEM' | 'ANONYMOUS';
+      user_id: null;
+      email: null;
+      account_type: null;
+      platform_role: null;
+    };
+
+export interface PlatformEventItem {
+  event_id: string;
+  occurred_at: IsoDateTime;
+  category: PlatformEventCategory;
+  action: PlatformEventAction;
+  outcome: PlatformEventOutcome;
+  actor: PlatformEventActor;
+  /** 고객사 없는 일(플랫폼 계정 로그인 등)은 null. */
+  tenant_id: string | null;
+  target: { type: PlatformEventTargetType; id: string } | null;
+  /** 행동별 기록 계약의 값(before · after · reason_code 등). 비밀번호 · 토큰 · 이메일 칸은 없다. */
+  details: Record<string, unknown>;
+  session_id: string | null;
+  /** 클라이언트가 X-Request-ID 로 정할 수 있다 — 같은 값이라고 같은 요청이라는 증거가 아니다. */
+  request_id: string | null;
+  /** 실제 접속지 설정(#589 D) 전의 행은 프록시 주소다. */
+  source_ip: string | null;
+  /** 받은 값 그대로다 — 마크업이 있을 수 있어 글자로만 출력한다. */
+  user_agent: string | null;
+}
+
+export interface PlatformEventsResponse {
+  items: PlatformEventItem[];
+  /** 다음 쪽 질의에 그대로 돌려준다(해석하지 않는다). null 이면 마지막 쪽. */
+  next_cursor: string | null;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 도입 신청 · 고객사 문의 · 관리자 알림(2026-10-29 FE 초안 → #552로 서버에 들어왔다). 원천은
 // packages/schemas/api/signup_requests.py · inquiries.py · notifications.py · support.py다. 화면: 로그인 창 회원가입(도입 신청),
