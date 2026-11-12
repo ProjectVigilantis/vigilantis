@@ -7,7 +7,7 @@
 import Link from 'next/link';
 
 import { CopyButton } from '@/components/copy-button';
-import { GUARDDUTY_FEE_NOTICE, guardDutyFailures, guardDutyMessage, guardDutyReason } from '@/lib/guardduty';
+import { GUARDDUTY_SELF_ENABLE_NOTICE, guardDutyFailures, guardDutyMessage, guardDutyReason } from '@/lib/guardduty';
 import { GUARDDUTY_GUIDE_PATH } from '@/lib/return-to';
 import type { TenantDetail } from '@/types/api';
 
@@ -44,7 +44,9 @@ export function GuardDutyGuidance({ tenant }: { tenant: TenantDetail }) {
           이 확인 기록에는 리전 목록이 없습니다. 연결을 다시 확인하면 켜지 못한 리전이 나옵니다.
         </p>
       )}
-      <p className="text-muted-foreground text-xs">{GUARDDUTY_FEE_NOTICE}</p>
+      {/* 여기는 고객사가 직접 켜야 하는 리전이다 — 직접 켤 때의 주의만 둔다. 요금 고지(GUARDDUTY_FEE_NOTICE)는
+          연결 대기 고객의 「고객사 AWS 계정에 만들어질 것」 구역이 이미 보이고, 복사하는 안내문에는 둘 다 실린다. */}
+      <p className="text-muted-foreground text-xs">{GUARDDUTY_SELF_ENABLE_NOTICE}</p>
       <div className="flex flex-wrap items-center gap-3">
         <CopyButton
           value={message}

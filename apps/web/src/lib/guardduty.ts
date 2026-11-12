@@ -73,6 +73,9 @@ export function guardDutyFailures(verification: TenantVerification | null): read
 /**
  * 관리자가 고객사에 보낼 안내문. 켜지 못한 리전과 리전별 할 일, 안내 페이지 주소, 요금 고지를 싣는다.
  * 리전 목록이 없으면(예전 기록) 관제 리전 전부를 확인해 달라고 한다.
+ *
+ * 이 글을 받는 사람이 GuardDuty를 직접 켜는 사람이다. 그래서 요금 고지 뒤에 직접 켤 때의 주의
+ * (`GUARDDUTY_SELF_ENABLE_NOTICE`)를 함께 싣는다 — 안내 페이지 링크를 열어야만 보이게 두지 않는다(#624 재리뷰).
  */
 export function guardDutyMessage(
   tenant: Pick<TenantDetail, 'aws_account_id' | 'regions'>,
@@ -93,6 +96,7 @@ export function guardDutyMessage(
     '',
     `켜는 방법: ${guideUrl}`,
     GUARDDUTY_FEE_NOTICE,
+    GUARDDUTY_SELF_ENABLE_NOTICE,
     '',
     '켠 뒤 회신 주시면 연결을 다시 확인하겠습니다.',
   ].join('\n');

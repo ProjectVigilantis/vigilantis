@@ -52,7 +52,8 @@ export const VERIFICATION_LABELS: Record<TenantVerificationResult, EnumLabel & {
     tone: 'orange',
     // 정지된 탐지기는 플랫폼이 다시 켜지 않는다(#588 Q1). 어느 리전이 왜 꺼져 있는지와 고객사에 보낼 안내문은
     // 고객 상세의 연결 패널이 보인다(components/tenants/guardduty-guidance.tsx · lib/guardduty.ts, #588 D).
-    hint: '관제 리전 중 GuardDuty를 켜지 못한 곳이 있습니다(정지된 탐지기 · 조직 관리 · SCP · 권한). 고객 상세의 리전별 안내를 고객사에 보내 켜게 한 뒤 다시 확인하세요.',
+    // 이 문구는 고객 상세 화면(상단 배너 · 「연결」 패널)에만 나오고, 리전별 안내 구역이 그 아래에 있다.
+    hint: '관제 리전 중 GuardDuty를 켜지 못한 곳이 있습니다(정지된 탐지기 · 조직 관리 · SCP · 권한). 아래 리전별 안내를 고객사에 보내 켜게 한 뒤 다시 확인하세요.',
   },
   UNREACHABLE: {
     label: '확인 불가',

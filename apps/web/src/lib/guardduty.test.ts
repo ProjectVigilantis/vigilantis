@@ -77,6 +77,8 @@ test('안내문은 켜지 못한 리전만 사유 · 할 일과 함께 싣고, �
   assert.match(message, /us-east-1: 권한 거절\(AccessDeniedException\)\. .*SCP/);
   assert.ok(lines.includes(`켜는 방법: ${GUIDE}`));
   assert.ok(lines.includes(GUARDDUTY_FEE_NOTICE));
+  // 받는 사람이 직접 켜는 사람이다 — 부가 보호 기능의 요금 주의를 링크 너머에 두지 않고 요금 고지 바로 뒤에 싣는다
+  assert.equal(lines[lines.indexOf(GUARDDUTY_FEE_NOTICE) + 1], GUARDDUTY_SELF_ENABLE_NOTICE);
 });
 
 test('리전 목록이 없는 예전 기록의 안내문은 관제 리전 전부를 확인해 달라고 한다', () => {
@@ -85,6 +87,8 @@ test('리전 목록이 없는 예전 기록의 안내문은 관제 리전 전부
     message.split('\n').filter((line) => line.startsWith('- ')),
     TENANT.regions.map((region) => `- ${region}: GuardDuty가 켜져 있는지 확인합니다.`),
   );
+  // 리전 목록이 없어도 받는 사람은 직접 켜는 사람이다
+  assert.ok(message.split('\n').includes(GUARDDUTY_SELF_ENABLE_NOTICE));
 });
 
 test('요금 고지는 고객 계정 부과와 계정 · 리전마다 30일 무료 체험을 말한다', () => {
