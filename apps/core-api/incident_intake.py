@@ -89,6 +89,7 @@ import notification_events
 from db import mappers, models
 from db.repositories import assets as assets_repo
 from db.repositories import incidents as incidents_repo
+from db.repositories import platform_events as platform_events_repo
 from db.repositories import tenants as tenants_repo
 from schemas.api.incidents import IncidentCategory, RiskLevel
 from schemas.assets import MetricName
@@ -101,6 +102,7 @@ from schemas.evidence import (
     ThreatEvidence,
 )
 from schemas.intake import FinOpsIncidentIntake, IncidentIntake, SecOpsIncidentIntake
+from schemas.platform_events import PlatformEventAction
 from secops_context import capture_secops_context
 from services.aws.executor import parse_arn
 from sqlalchemy.exc import IntegrityError
@@ -189,6 +191,17 @@ def _metric_evidence(
     )
 
 
+def _record_created(db: Session, incident: models.Incident) -> None:
+    """새 Incident의 플랫폼 이벤트 — 호출부 commit 전, 같은 세션에서 남긴다(기존/중복 반환 경로는 부르지 않는다)."""
+    platform_events_repo.record_platform_event(
+        db,
+        PlatformEventAction.INCIDENT_CREATE,
+        platform_events_repo.SYSTEM,
+        tenant_id=incident.tenant_id,
+        target_id=incident.incident_id,
+    )
+
+
 def _create_finops(db: Session, intake: FinOpsIncidentIntake) -> IntakeOutcome:
     open_incident = incidents_repo.find_open_by_subject_arn(
         db, subject_arn=intake.subject_arn, category=IncidentCategory.FINOPS
@@ -246,6 +259,7 @@ def _create_finops(db: Session, intake: FinOpsIncidentIntake) -> IntakeOutcome:
                 "verdict": intake.rule_evaluation.verdict.value,
             },
         )
+    _record_created(db, incident)
     db.commit()
     return IntakeOutcome(
         incident_id=incident.incident_id, created=True, occurred_at=incident.updated_at,
@@ -324,6 +338,7 @@ def _create_secops(db: Session, intake: SecOpsIncidentIntake) -> IntakeOutcome:
             phase=notification_events.EventPhase.CREATED,
             occurred_at=incident.created_at,
         )
+    _record_created(db, incident)
     db.commit()
     return IntakeOutcome(
         incident_id=incident.incident_id, created=True, occurred_at=incident.updated_at,

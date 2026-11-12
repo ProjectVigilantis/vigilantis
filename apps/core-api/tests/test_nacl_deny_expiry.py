@@ -34,7 +34,7 @@ from schemas.candidates import CandidateStatus  # noqa: E402
 from schemas.runbooks import RunbookId, TriggerSource  # noqa: E402
 from services.aws import executor as ex  # noqa: E402
 from audit_cleanup import purge_audit_events  # noqa: E402
-from sqlalchemy import delete, select, text, update  # noqa: E402
+from sqlalchemy import delete, func, select, text, update  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
 from test_nacl_release_offer import (  # noqa: E402,F401  (fixtures + helpers)
@@ -66,6 +66,22 @@ def restores(db, incident_id):
 
 def deletes(aws):
     return aws["calls"].count("delete_network_acl_entry")
+
+
+def platform_event_count(db):
+    """플랫폼 활동 로그(#589) 전체 행 수 — 건너뜀 · 중복 · 경합이 행을 늘리지 않는지 본다."""
+    db.expire_all()
+    return db.scalar(select(func.count()).select_from(models.PlatformEvent))
+
+
+def platform_facts(db, *target_ids):
+    db.expire_all()
+    return sorted(
+        (row.action, row.outcome.value, row.actor_kind.value, row.target_id)
+        for row in db.scalars(
+            select(models.PlatformEvent).where(models.PlatformEvent.target_id.in_(target_ids))
+        )
+    )
 
 
 @pytest.fixture()
@@ -163,14 +179,19 @@ def test_an_expired_block_is_released_in_one_cycle(db, blocked, aws):
 
 
 def test_the_expired_block_is_not_picked_up_twice(db, blocked, aws):
-    incident_id, _ = blocked()
+    incident_id, block_id = blocked()
     dispatcher.dispatch_pending(db)
+    events = platform_event_count(db)
 
     again = dispatcher.dispatch_pending(db)
+    # 스캔이 다시 집지 않아도 직접 부르면 중복 방지 키 조회가 막는다
+    direct = workflows.reserve_nacl_deny_expiry(db, block_id)
 
     assert (again.expiry_reserved, again.expiry_skipped) == (0, 0)
+    assert direct.execution_id is None and "이미 접수" in direct.skipped_reason
     assert len(restores(db, incident_id)) == 1
     assert deletes(aws) == 1
+    assert platform_event_count(db) == events
 
 
 def test_reserving_invalidates_only_the_restore_candidates(db, blocked, make_candidate, aws):
@@ -214,6 +235,7 @@ def test_a_restored_expired_block_gets_no_release_offer_afterwards(
 def test_a_block_younger_than_24_hours_is_left_alone(db, blocked, aws):
     incident_id, block_id = blocked(hours=23)
     calls = list(aws["calls"])
+    events = platform_event_count(db)
 
     report = dispatcher.dispatch_pending(db)
 
@@ -221,15 +243,18 @@ def test_a_block_younger_than_24_hours_is_left_alone(db, blocked, aws):
     assert restores(db, incident_id) == []
     assert deletes(aws) == 0 and aws["calls"] == calls
     assert len(aws["entries"]) == 1
+    assert platform_event_count(db) == events
 
 
 def test_reserving_a_young_block_directly_reserves_nothing(db, blocked, aws):
     incident_id, block_id = blocked(hours=23)
+    events = platform_event_count(db)
 
     reservation = workflows.reserve_nacl_deny_expiry(db, block_id)
 
     assert reservation.execution_id is None and reservation.skipped_reason
     assert restores(db, incident_id) == []
+    assert platform_event_count(db) == events
 
 
 # ------------------------------------------------------- 3. 종료(RESOLVED)된 인시던트의 차단도
@@ -289,12 +314,14 @@ def test_a_block_released_by_an_operator_is_not_picked_up(db, blocked, aws, audi
     release = exec_repo.get_execution(db, reservation.response.execution_id)
     assert release.status is ExecutionStatus.SUCCESS and aws["entries"] == []
     age_block(db, block_id)
+    events = platform_event_count(db)
 
     report = dispatcher.dispatch_pending(db)
 
     assert (report.expiry_reserved, report.expiry_skipped) == (0, 0)
     assert [r.execution_id for r in restores(db, incident_id)] == [release.execution_id]
     assert deletes(aws) == 1
+    assert platform_event_count(db) == events
     assert block_id not in exec_repo.list_nacl_deny_expired(
         db, finished_before=datetime.now(timezone.utc)
     )
@@ -318,12 +345,14 @@ def test_a_failed_operator_release_attempt_is_not_picked_up(
     assert block_id not in exec_repo.list_nacl_deny_expired(
         db, finished_before=datetime.now(timezone.utc)
     )
+    events = platform_event_count(db)
 
     report = dispatcher.dispatch_pending(db)
 
     assert (report.expiry_reserved, report.expiry_skipped) == (0, 0)
     assert [r.execution_id for r in restores(db, incident_id)] == [attempt.execution_id]
     assert len(aws["entries"]) == 1 and deletes(aws) == 0
+    assert platform_event_count(db) == events
 
 
 # ------------------------------------------------------- 5. 규칙을 손으로 먼저 지웠다
@@ -342,12 +371,14 @@ def test_a_rule_deleted_by_hand_is_recorded_once_and_never_retried(db, blocked, 
     assert restore.status is ExecutionStatus.SUCCESS
     assert deletes(aws) == 0
     calls = list(aws["calls"])
+    events = platform_event_count(db)
 
     second = dispatcher.dispatch_pending(db)
 
     assert (second.expiry_reserved, second.expiry_skipped) == (0, 0)
     assert [r.execution_id for r in restores(db, incident_id)] == [restore.execution_id]
     assert deletes(aws) == 0 and aws["calls"] == calls
+    assert platform_event_count(db) == events
 
 
 # ------------------------------------------------------- 6. 후보 없는 차단(자동 차단)
@@ -377,6 +408,7 @@ def test_a_suspended_tenant_block_is_skipped(db, bare_block, make_tenant, aws):
     incident.tenant_id = tenant_id
     block.tenant_id = tenant_id
     db.commit()
+    events = platform_event_count(db)
 
     report = dispatcher.dispatch_pending(db)
 
@@ -385,6 +417,63 @@ def test_a_suspended_tenant_block_is_skipped(db, bare_block, make_tenant, aws):
     assert deletes(aws) == 0 and len(aws["entries"]) == 1
     # 다음 주기에 다시 본다 — 영구히 빠지지 않는다
     assert dispatcher.dispatch_pending(db).expiry_skipped == 1
+    # 주기마다 다시 보는 판정이라 활동 로그를 남기지 않는다(#589)
+    assert platform_event_count(db) == events
+
+
+# ------------------------------------------------------- 7b. 플랫폼 활동 로그 (#589)
+
+
+def test_expiry_records_a_system_trigger_and_a_completion_not_a_rollback(db, bare_block, aws):
+    incident, block = bare_block()
+
+    dispatcher.dispatch_pending(db)
+    dispatcher.dispatch_pending(db)  # 다시 집지 않는다
+
+    [restore] = restores(db, incident.incident_id)
+    assert restore.status is ExecutionStatus.SUCCESS
+    # 원본을 가리키지 않는 해제다 — 원복(ACTION_ROLLBACK)이 아니라 완료다
+    assert platform_facts(db, restore.execution_id, block.execution_id, incident.incident_id) == [
+        ("ACTION_AUTO_TRIGGER", "SUCCEEDED", "SYSTEM", restore.execution_id),
+        ("ACTION_COMPLETE", "SUCCEEDED", "SYSTEM", restore.execution_id),
+    ]
+
+
+def test_a_stale_dedup_lookup_hits_the_real_constraint_and_keeps_the_first_reservation(
+    db, bare_block, aws, monkeypatch
+):
+    """중복 방지 키 조회가 앞선 접수를 보지 못한 경합 창을 재현한다(첫 조회만 비운다) — INSERT 는 실제 유니크
+    제약에 막히고(IntegrityError), 재조회로 물러난다. 처음 접수된 해제와 그 활동 로그만 남고 진 쪽 행은 없다.
+
+    경계: 실제 동시 접수는 인시던트 잠금이 직렬화해 이 분기까지 오지 않는다(8b가 그 대기를 본다). 여기서
+    보는 것은 그 잠금 뒤의 최후 관문 — 제약 위반 처리 분기 — 뿐이다.
+    """
+    incident, block = bare_block()
+    assert dispatcher.dispatch_pending(db).expiry_reserved == 1  # 처음 접수 → 같은 주기에 SUCCESS
+    [original] = restores(db, incident.incident_id)
+    facts = platform_facts(db, original.execution_id, block.execution_id, incident.incident_id)
+    assert facts == [
+        ("ACTION_AUTO_TRIGGER", "SUCCEEDED", "SYSTEM", original.execution_id),
+        ("ACTION_COMPLETE", "SUCCEEDED", "SYSTEM", original.execution_id),
+    ]
+    status_before = incident_status(db, incident.incident_id)
+    real_lookup = exec_repo.get_by_deduplication_key
+    calls = {"n": 0}
+
+    def stale_first(session, key):
+        calls["n"] += 1
+        return None if calls["n"] == 1 else real_lookup(session, key)
+
+    monkeypatch.setattr(workflows.executions_repo, "get_by_deduplication_key", stale_first)
+
+    reservation = workflows.reserve_nacl_deny_expiry(db, block.execution_id)
+
+    assert reservation.execution_id is None and "이미 접수" in reservation.skipped_reason
+    assert calls["n"] == 2  # 최초 조회(비움) + 제약 위반 뒤 재조회 — 재조회는 IntegrityError 분기에만 있다
+    assert [r.execution_id for r in restores(db, incident.incident_id)] == [original.execution_id]
+    assert exec_repo.get_execution(db, original.execution_id).status is ExecutionStatus.SUCCESS
+    assert incident_status(db, incident.incident_id) is status_before
+    assert platform_facts(db, original.execution_id, block.execution_id, incident.incident_id) == facts
 
 
 # ------------------------------------------------------- 8. 같은 대상이 바쁘다
@@ -395,6 +484,7 @@ def test_a_busy_target_defers_the_expiry(db, bare_block, make_incident, make_exe
     other = make_incident(db, category=IncidentCategory.SECOPS, subject_arn=ACL_ARN)
     make_execution(db, other, runbook_id=ADD_DENY, target_arn=ACL_ARN)  # IN_PROGRESS
     db.commit()
+    events = platform_event_count(db)
 
     reservation = workflows.reserve_nacl_deny_expiry(db, block.execution_id)
 
@@ -402,6 +492,7 @@ def test_a_busy_target_defers_the_expiry(db, bare_block, make_incident, make_exe
     assert "진행 중" in reservation.skipped_reason
     assert restores(db, incident.incident_id) == []
     assert len(aws["entries"]) == 1 and deletes(aws) == 0
+    assert platform_event_count(db) == events
 
 
 # ------------------------------------------------------- 8b. 관제자 해제 접수와의 직렬화
@@ -512,6 +603,8 @@ def test_expiry_waits_for_an_operator_release_reservation_and_then_skips(
             assert block_id not in exec_repo.list_nacl_deny_expired(
                 verify, finished_before=datetime.now(timezone.utc)
             )
+            # 물러난 만료 접수는 발동 활동 로그를 남기지 않는다(#589 — 관제자 행은 저장소로 직접 넣었다)
+            assert platform_facts(verify, incident_id, block_id, operator_execution_id) == []
     finally:
         with Session(pg_engine) as cleanup:
             purge_audit_events(cleanup, incident_ids=[incident_id])
