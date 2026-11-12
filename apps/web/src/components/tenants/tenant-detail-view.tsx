@@ -22,6 +22,7 @@ import { Panel } from '@/components/panel';
 import { StatGrid, StatTile } from '@/components/stat-tile';
 import { SubscriptionFacts } from '@/components/subscriptions/subscription-facts';
 import { TenantStatusBadge, VerificationSummary } from '@/components/tenants/tenant-badges';
+import { GuardDutyGuidance } from '@/components/tenants/guardduty-guidance';
 import { TenantConnectPanel } from '@/components/tenants/tenant-connect-panel';
 import { TenantUsersPanel } from '@/components/tenants/tenant-users-panel';
 import { Button } from '@/components/ui/button';
@@ -236,6 +237,7 @@ export function TenantDetailView({
               </Stacked>
             ) : null}
             {hint ? <p className="text-muted-foreground text-xs">{hint}</p> : null}
+            <GuardDutyGuidance tenant={tenant} />
 
             <div className="flex flex-wrap gap-2 pt-1">
               {actions.verify ? (

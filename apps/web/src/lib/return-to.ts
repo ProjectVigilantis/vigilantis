@@ -15,8 +15,19 @@ export const LOGIN_OVERLAY_HREF = `${LANDING_PATH}?${LOGIN_PARAM}=1`;
 /** 개인정보 처리방침 · 이용약관(T-15). 로그인 화면에서 이메일을 받기 전에 읽을 수 있어야 하므로 로그인 없이 연다. */
 export const PRIVACY_PATH = '/privacy';
 export const TERMS_PATH = '/terms';
+/**
+ * GuardDuty 켜기 안내(T-14 · #588 D). 관리자가 고객사의 AWS 담당자에게 보내는 주소라 로그인 없이 연다.
+ * 고객사마다 다른 값은 싣지 않는 고정 문서다.
+ */
+export const GUARDDUTY_GUIDE_PATH = '/guides/guardduty';
 /** 로그인 없이 열리고 셸 · 실시간 연결 없이 그리는 경로. 접근 관문(src/proxy.ts)과 화면 골격(app-shell.tsx)이 같이 쓴다. */
-export const PUBLIC_PATHS: ReadonlySet<string> = new Set([LOGIN_PATH, LANDING_PATH, PRIVACY_PATH, TERMS_PATH]);
+export const PUBLIC_PATHS: ReadonlySet<string> = new Set([
+  LOGIN_PATH,
+  LANDING_PATH,
+  PRIVACY_PATH,
+  TERMS_PATH,
+  GUARDDUTY_GUIDE_PATH,
+]);
 const FALLBACK = '/';
 /** 해석 기준 오리진. 실제 주소와 무관하게 "다른 오리진으로 빠지는가"만 본다. */
 const BASE = 'http://return-to.invalid';

@@ -231,6 +231,11 @@ class Tenant(Base):
     last_verification_reason_code: Mapped[str | None] = mapped_column(
         String(200), nullable=True
     )
+    # #588 D — GuardDuty 를 켜지 못한 관제 리전과 리전별 사유([{region, reason_code}], 관제 리전 순서).
+    # GUARDDUTY_DISABLED 에만 있다. none_as_null: 비울 때 JSON null 이 아니라 SQL NULL 로 쓴다(CHECK 가 NULL 을 본다)
+    last_verification_guardduty_failures: Mapped[list | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     # T-16 구독(#528) — 계약 schemas.api.tenants.TenantSubscription 의 칸 그대로인 **투영**이다. 원천은
     # subscription_source(운영자 입력 · 모의 Marketplace 계약 · 앱 정책 Free)다. plan 은 문자열(DB enum 이
     # 아니다) — 옛 값(basic · pilot 등)을 보존한다. NULL plan 은 「등록 안 됨」이고 Free 로 채우지 않는다
@@ -284,6 +289,16 @@ class Tenant(Base):
             " AND ((last_verification_result IS NULL OR last_verification_result = 'OK')"
             " = (last_verification_reason_code IS NULL))",
             name="verification_shape",
+        ),
+        # 리전 목록은 GUARDDUTY_DISABLED 에만 있고 비어 있지 않다(그 칸이 생기기 전의 GUARDDUTY_DISABLED 는 NULL).
+        # 결과를 문자열로 견준다 — 그 enum 값을 더한 revision 과 같은 트랜잭션에서 CHECK 를 걸 수 있게(PG: 새 enum
+        # 값은 commit 전에 쓰지 못한다)
+        CheckConstraint(
+            "last_verification_guardduty_failures IS NULL"
+            " OR (last_verification_result::text = 'GUARDDUTY_DISABLED'"
+            " AND jsonb_typeof(last_verification_guardduty_failures) = 'array'"
+            " AND jsonb_array_length(last_verification_guardduty_failures) > 0)",
+            name="verification_guardduty_failures_shape",
         ),
         # ACTIVE 는 연결 확인을 거쳐서만 된다 — 그 뒤의 실패는 상태를 내리지 않는다
         CheckConstraint(

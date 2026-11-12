@@ -1,4 +1,5 @@
 // 처리방침 · 약관(T-15) 공용 골격: 랜딩과 같은 남색 머리띠, 제목 · 시행일, 목차, 조항 본문, 바닥글.
+// 로그인 없이 여는 안내 문서(GuardDuty 켜기 안내 · T-14)도 같은 골격을 쓴다 — 시행일이 없는 문서라 `dated`를 끈다.
 // 로그인 전 화면이라 셸 · 실시간 연결 없이 그린다(lib/return-to.ts `PUBLIC_PATHS`).
 
 import { Shield } from 'lucide-react';
@@ -13,10 +14,13 @@ export function LegalDocument({
   title,
   intro,
   sections,
+  dated = true,
 }: {
   title: string;
   intro: React.ReactNode;
   sections: LegalSection[];
+  /** 시행일 줄을 보일지. 처리방침 · 약관은 보이고, 시행일이 없는 안내 문서는 끈다. */
+  dated?: boolean;
 }) {
   return (
     <div className="bg-background flex flex-1 flex-col">
@@ -40,7 +44,9 @@ export function LegalDocument({
       <article className="mx-auto flex w-full max-w-3xl flex-col gap-10 px-4 py-12 sm:px-6">
         <div className="flex flex-col gap-3">
           <h1 className="text-3xl font-bold tracking-tight">{title}</h1>
-          <p className="text-muted-foreground text-sm">시행일 {formatLegalDate(LEGAL_EFFECTIVE_DATE)}</p>
+          {dated ? (
+            <p className="text-muted-foreground text-sm">시행일 {formatLegalDate(LEGAL_EFFECTIVE_DATE)}</p>
+          ) : null}
           <div className="text-foreground-secondary text-[15px] leading-7">{intro}</div>
         </div>
 

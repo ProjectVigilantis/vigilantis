@@ -6,6 +6,7 @@ import {
   TENANT_SUSPENDABLE_STATUSES,
   type TenantListItem,
 } from '../types/api.ts';
+import { GUARDDUTY_FEE_NOTICE } from './guardduty.ts';
 import {
   DEFAULT_ACCESS_ROLE_NAME,
   TENANT_FORM_ADVANCED,
@@ -47,20 +48,20 @@ function tenant(over: Partial<TenantListItem> & Pick<TenantListItem, 'tenant_id'
 const LIST: TenantListItem[] = [
   tenant({
     tenant_id: 'a', status: 'ACTIVE', asset_count: 48, open_incident_count: 3,
-    last_verification: { result: 'OK', verified_at: '2026-10-20T00:12:00Z', reason_code: null },
+    last_verification: { result: 'OK', verified_at: '2026-10-20T00:12:00Z', reason_code: null, guardduty_failures: null },
   }),
   tenant({
     tenant_id: 'b', status: 'ACTIVE', asset_count: 31, open_incident_count: 1,
-    last_verification: { result: 'READ_DENIED', verified_at: '2026-10-19T23:40:00Z', reason_code: 'UnauthorizedOperation' },
+    last_verification: { result: 'READ_DENIED', verified_at: '2026-10-19T23:40:00Z', reason_code: 'UnauthorizedOperation', guardduty_failures: null },
   }),
   tenant({ tenant_id: 'c', status: 'PENDING_CONNECTION' }),
   tenant({
     tenant_id: 'd', status: 'SUSPENDED', asset_count: 22,
-    last_verification: { result: 'ASSUME_DENIED', verified_at: '2026-10-18T08:05:00Z', reason_code: 'AccessDenied' },
+    last_verification: { result: 'ASSUME_DENIED', verified_at: '2026-10-18T08:05:00Z', reason_code: 'AccessDenied', guardduty_failures: null },
   }),
   tenant({
     tenant_id: 'e', status: 'ACTIVE', asset_count: 64, open_incident_count: 5,
-    last_verification: { result: 'UNREACHABLE', verified_at: '2026-10-20T00:30:00Z', reason_code: 'EndpointConnectionError' },
+    last_verification: { result: 'UNREACHABLE', verified_at: '2026-10-20T00:30:00Z', reason_code: 'EndpointConnectionError', guardduty_failures: null },
   }),
 ];
 
@@ -259,7 +260,12 @@ test('고객 안내문은 계정 · 첫 리전 스택 · 역할 이름 · 링크
   );
   assert.match(message, /123456789012/);
   assert.match(message, new RegExp(`ap-northeast-2 리전의 스택 ${ONBOARDING_STACK_NAME}`));
-  assert.doesNotMatch(message, /us-east-1/);
+  // 스택은 첫 리전에만 만든다 — 다른 관제 리전은 스택을 만드는 단계(번호 줄)에 나오지 않는다
+  const lines = message.split('\n');
+  for (const step of lines.filter((line) => /^\d\./.test(line))) assert.doesNotMatch(step, /us-east-1/);
+  // GuardDuty는 관제 리전마다 켜진다 — 요금이 생기는 일이라 스택을 만들기 전에 리전 전부와 요금을 알린다(#588 D)
+  assert.match(message, /관제 리전\(ap-northeast-2, us-east-1\)에 Amazon GuardDuty가 꺼져 있으면 Vigilantis가 켭니다/);
+  assert.ok(lines.includes(GUARDDUTY_FEE_NOTICE));
   assert.match(message, /만들어지는 역할: vigilantis-access/);
   assert.equal(message.split('\n').at(-1), url);
   // 값은 링크 안에만 있다. 안내문 본문에 ExternalId를 따로 적어 퍼뜨리지 않는다.
