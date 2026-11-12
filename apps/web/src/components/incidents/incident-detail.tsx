@@ -336,10 +336,10 @@ function SavingsArea({ incident }: { incident: IncidentResponse }) {
  * Low는 같은 `AGENT_WAIT`이지만 타임아웃 자동 격리가 없어 이 블록을 뺀다(§4.5 · SSOT §3단계 위험 대응).
  *
  * 기준 등급은 **`initial_risk_level`만** 본다(2026-08-25 확정, SSOT §확정 결정 로그).
- * `reviewed_risk_level`(AI 정밀 평가)은 초기 판정을 덮어쓰지 않는 관제자 참고값이라 자동 행동을
- * 가르지 않는다 — `response_mode`도 초기 판정에서만 파생된다(`packages/schemas/events.py`
- * `_EXPECTED_MODE_BY_RISK`). 정밀 평가가 자동 행동을 바꾸려면 상태 전이 계약이 먼저 필요하다
- * (Risk Evaluator, SSOT §미해결 6번).
+ * `reviewed_risk_level`(이전 방식의 AI 재평가 값 — ADR-0005 1차 개정 이후 새 인시던트는 null)은
+ * 초기 판정을 덮어쓰지 않는 관제자 참고값이라 자동 행동을 가르지 않는다 — `response_mode`도
+ * 초기 판정에서만 파생된다(`packages/schemas/events.py` `_EXPECTED_MODE_BY_RISK`). AI 재평가가
+ * 자동 행동을 바꾸려면 상태 전이 계약이 먼저 필요하다(Risk Evaluator, SSOT §미해결 6번).
  *
  * 서버가 `auto_isolation_block`을 주면 자동 격리 예고를 정지 또는 승인 필요 안내로 바꾼다(#532). 판정 규칙은
  * `@/lib/auto-isolation-notice`에 있다.
@@ -586,7 +586,7 @@ export function IncidentDetail({
    * B-Medium 대기 기준 시각 — `AGENT_WAIT` 전환을 알린 `INCIDENT_UPDATED`의
    * `occurred_at`이다(계약 합의 2026-08-14 · #155). **수신 시각을 쓰지 않는다.**
    *
-   * 창에 **들어가는 순간 한 번만** 래치한다. 창 안에서 오는 후속 `INCIDENT_UPDATED`(정밀 평가
+   * 창에 **들어가는 순간 한 번만** 래치한다. 창 안에서 오는 후속 `INCIDENT_UPDATED`(AI 분석 결과
    * 도착 등)마다 다시 물리면 60초가 리셋돼 **서버 자동 격리보다 화면이 시간을 더 남았다고
    * 말한다**(PR #181 리뷰). 이벤트를 못 본 진입(재접속·목록에서 나중에 열기)은 null로 남고
    * 고정 안내문 fallback이 대신한다 — replay가 없는 계약의 결과다(§4.5 · ws.py).

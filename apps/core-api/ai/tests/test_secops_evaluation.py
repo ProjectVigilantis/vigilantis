@@ -6,7 +6,13 @@ from dataclasses import replace
 
 import pytest
 from ai import agent
-from ai.agent import CandidateProposalOutput, EvidenceSummaryOutput, ProposedCandidate
+from ai.agent import (
+    CandidateProposalOutput,
+    EvidenceSummaryOutput,
+    ProposedCandidate,
+    SecOpsEvidenceDecisionOutput,
+    SecOpsGraphVariant,
+)
 from ai.evaluation.common.fingerprints import input_fingerprint
 from ai.evaluation.secops import cli, dataset, runner
 from ai.evaluation.secops.dataset import (
@@ -33,6 +39,7 @@ from ai.model_client import (
 )
 from config import Settings
 from schemas.agents import AgentGraphOutput
+from schemas.api.incidents import RiskLevel
 from schemas.runbooks import RunbookId
 
 
@@ -65,7 +72,17 @@ def cli_source_cases(isolated_sources, monkeypatch):
     return cases
 
 
-def _client(case, *, proposal=True, **parameters):
+def _client(case, *, proposal=True):
+    """근거 선행 그래프의 1회 호출 대역. 실행 계획은 코드가 조립한다."""
+    return FakeAIModelClient([
+        SecOpsEvidenceDecisionOutput(
+            observation="SSH 실패가 관측됐다.", diagnosis="반복 인증 시도다.",
+            rationale="출발지 차단을 제안한다.", decision=[1] if proposal else [],
+        ),
+    ])
+
+
+def _fallback_client(case, *, proposal=True, **parameters):
     data = case.graph_input
     event = data.evidences[0].content.event
     candidate = ProposedCandidate(
@@ -101,28 +118,57 @@ def _review(run):
     return ReviewFile.model_validate(result)
 
 
-def test_fixed_primary_set_includes_all_seven_mvp_scenarios_and_uses_db_uuid():
+def test_fixed_primary_set_includes_all_nine_scenarios_and_uses_db_uuid():
     cases = load_cases()
-    assert [case.case_id for case in cases] == [f"C{i:02}" for i in range(1, 8)]
+    assert [case.case_id for case in cases] == [f"C{i:02}" for i in range(1, 10)]
     assert input_fingerprint(cases) == input_fingerprint(load_cases())
     assert set(load_answers(cases)) == {case.case_id for case in cases}
 
 
 def test_secops_prompt_matches_explicit_snapshot():
     snapshot = read_json(ROOT / "prompt_snapshot.json")
-    active = snapshot["candidate"] or snapshot["approved"]
+    candidate = snapshot.get("candidate")
+    active = candidate or snapshot["approved"]
     assert active["version"] == agent.SECOPS_PROMPT_VERSION
     assert runner.prompt_fingerprint() == active["prompt_sha256"], (
         "프롬프트가 동결 지문과 다릅니다. baseline.md의 재검증 절차와 후보 등록을 확인하세요."
     )
-    if snapshot["candidate"] is not None:
+    if candidate is not None:
         # 후보의 실측 결과와 승인판을 구분한다. 지문 일치는 품질 승인을 뜻하지 않는다.
-        assert snapshot["candidate"]["quality_status"] in {"PENDING", "PASS", "FAIL"}
-        if snapshot["candidate"]["quality_status"] != "PENDING":
-            assert (ROOT / snapshot["candidate"]["result"]).is_file()
-        assert snapshot["candidate"]["prompt_sha256"] != snapshot["approved"]["prompt_sha256"]
-        assert (ROOT / snapshot["candidate"]["plan"]).is_file()
+        assert candidate["quality_status"] in {"PENDING", "PASS", "FAIL"}
+        if candidate["quality_status"] != "PENDING":
+            assert (ROOT / candidate["result"]).is_file()
+        assert candidate["prompt_sha256"] != snapshot["approved"]["prompt_sha256"]
+        assert (ROOT / candidate["plan"]).is_file()
+        current = runner.fingerprints(load_cases())
+        assert candidate["inputs_sha256"] == current["inputs_sha256"]
+        assert candidate["request_sha256"] == current["request_sha256"]
     assert active["rubric_sha256"] == digest(read_json(ROOT / "rubric.json"))
+
+
+def test_approved_snapshot_is_the_measured_evidence_first_version():
+    snapshot = read_json(ROOT / "prompt_snapshot.json")
+    approved = snapshot["approved"]
+    # 후보가 등록된 동안 현재 프롬프트는 후보판이다. 승인판은 측정된 지문을 그대로 보존한다.
+    if snapshot.get("candidate") is None:
+        assert approved["version"] == agent.SECOPS_PROMPT_VERSION
+    assert approved["measured_prompt_sha256"] == approved["prompt_sha256"]
+    assert (ROOT / approved["result"]).is_file()
+    # 대비책의 프롬프트 지문은 근거 선행 지문과 다르고 v1.1.0 지문을 그대로 재현한다.
+    fallback = snapshot["fallback"]
+    assert fallback["version"] == "v1.1.0" and fallback["graph_variant"] == "CANDIDATE_FIRST"
+    assert runner.prompt_fingerprint(SecOpsGraphVariant.CANDIDATE_FIRST) == fallback["prompt_sha256"]
+    assert fallback["prompt_sha256"] != approved["prompt_sha256"]
+    assert (ROOT / fallback["plan"]).is_file()
+
+
+def test_rubric_adds_decision_support_check_and_drops_reassessment_wording():
+    rubric = read_json(ROOT / "rubric.json")
+    checks = {item["check_id"]: item for item in rubric["checks"]}
+    assert checks["rationale_supports_decision"]["kind"] == "required"
+    assert len(checks) == 8 + 1
+    assert "실제 재평가" not in json.dumps(rubric, ensure_ascii=False)
+    assert "서버 초기 판정" in checks["risk_reason"]["criterion"]
 
 
 def test_request_manifest_covers_both_allowed_paths_without_paid_calls(monkeypatch):
@@ -132,13 +178,20 @@ def test_request_manifest_covers_both_allowed_paths_without_paid_calls(monkeypat
     monkeypatch.setattr(cli, "build_openai_model_client", forbidden)
     cases = load_cases()
     manifest = runner.request_manifest(cases, load_answers(cases))
-    assert len(manifest) == 14
+    assert len(manifest) == 18
     for case in cases:
         variants = [item for item in manifest if item["case_id"] == case.case_id]
         assert {item["status"] for item in variants} == {"SUCCEEDED", "NO_PROPOSAL"}
-        # 등급 호출이 없어 요청은 후보·요약 2건이다(ADR-0005 1차 개정).
-        assert all(len(item["requests"]) == 2 for item in variants)
-        assert variants[0]["requests"][-1]["sha256"] != variants[1]["requests"][-1]["sha256"]
+        # 근거 선행 그래프는 건당 요청 1건이다.
+        assert all(len(item["requests"]) == agent.SECOPS_MODEL_CALLS == 1 for item in variants)
+
+
+def test_assembled_candidate_must_equal_the_frozen_answer():
+    cases = load_cases()
+    answers = load_answers(cases)
+    answers["C01"].candidate.cidr_block = "203.0.113.0/24"
+    with pytest.raises(ValueError, match="differs from the frozen answer"):
+        runner.request_manifest(cases[:1], answers)
 
 
 @pytest.mark.parametrize("change", ["prompt", "constraints"])
@@ -159,21 +212,31 @@ def test_unrelated_finops_or_file_changes_do_not_invalidate_secops_requests(monk
     assert not result["quality_pass"]
 
 
-@pytest.mark.parametrize("change", ["prompt", "payload", "response_schema", "constraints"])
+def test_secops_parameter_constraints_are_not_sent_to_the_model(monkeypatch):
+    cases = load_cases()
+    run = _run(cases)
+    monkeypatch.setitem(agent._PARAMETER_CONSTRAINTS,
+                        RunbookId.RUNBOOK_NACL_ADD_DENY, ("SecOps 제약 변경",))
+    result = runner.report(run, cases, load_answers(cases))
+    assert runner.prompt_fingerprint() == run["prompt_sha256"]
+    assert result["request_sha256"] == run["request_sha256"]
+    # 대비책은 제약을 여전히 보내므로 지문이 달라진다.
+    assert runner.prompt_fingerprint(SecOpsGraphVariant.CANDIDATE_FIRST) != read_json(
+        ROOT / "prompt_snapshot.json")["fallback"]["prompt_sha256"]
+
+
+@pytest.mark.parametrize("change", ["prompt", "payload", "response_schema"])
 def test_request_change_requires_remeasurement(monkeypatch, change):
     cases = load_cases()
     run = _run(cases)
     if change == "prompt":
-        monkeypatch.setattr(agent, "_SECOPS_SUMMARY_PROMPT", agent._SECOPS_SUMMARY_PROMPT + "\n새 판단 기준")
+        monkeypatch.setattr(agent, "_SECOPS_EVIDENCE_PROMPT", agent._SECOPS_EVIDENCE_PROMPT + "\n새 판단 기준")
     elif change == "payload":
-        original = agent._secops_payload
-        monkeypatch.setattr(agent, "_secops_payload", lambda value: {**original(value), "new_context": True})
-    elif change == "constraints":
-        monkeypatch.setitem(agent._PARAMETER_CONSTRAINTS,
-                            RunbookId.RUNBOOK_NACL_ADD_DENY, ("SecOps 제약 변경",))
+        original = agent._secops_evidence_payload
+        monkeypatch.setattr(agent, "_secops_evidence_payload", lambda value: {**original(value), "new_context": True})
     else:
-        original = CandidateProposalOutput.model_json_schema
-        monkeypatch.setattr(CandidateProposalOutput, "model_json_schema",
+        original = SecOpsEvidenceDecisionOutput.model_json_schema
+        monkeypatch.setattr(SecOpsEvidenceDecisionOutput, "model_json_schema",
                             classmethod(lambda cls, **kwargs: {**original(**kwargs), "description": "새 계약 설명"}))
     result = runner.report(run, cases, load_answers(cases))
     if change != "payload":
@@ -194,7 +257,7 @@ def test_legacy_run_without_request_fingerprint_is_not_assumed_compatible():
 
 @pytest.mark.parametrize("token", [
     "reviewed_risk_level", "initial_risk_label", "failed_attempt_count", "SSH_BRUTEFORCE",
-    "RISK_SSH_BRUTEFORCE", "HIGH", "observation",
+    "RISK_SSH_BRUTEFORCE", "HIGH", "observation", "decision",
 ])
 def test_internal_summary_identifiers_fail_without_a_semantic_review(token):
     case = load_cases()[0]
@@ -252,7 +315,7 @@ def test_source_drift_is_checked_separately_from_frozen_input_loading(isolated_s
 def test_missing_sources_do_not_block_frozen_case_loading(isolated_sources):
     assert not (isolated_sources / "datasets").exists()
     cases = load_cases()
-    assert len(cases) == 7
+    assert len(cases) == 9
     with pytest.raises(ValueError, match="Source outside repository or missing"):
         check_sources(cases)
 
@@ -287,7 +350,7 @@ def test_deterministic_wrong_answers_fail(change, reason):
     assert score.verdict == "FAIL" and reason in score.reasons
 
 
-@pytest.mark.parametrize("case_id", [f"C{i:02}" for i in range(1, 8)])
+@pytest.mark.parametrize("case_id", [f"C{i:02}" for i in range(1, 10)])
 @pytest.mark.parametrize("proposal", [True, False])
 def test_current_answers_allow_proposal_and_absence_without_changing_risk(case_id, proposal):
     cases = load_cases()
@@ -300,17 +363,46 @@ def test_current_answers_allow_proposal_and_absence_without_changing_risk(case_i
     assert output.invocation_status.value == ("SUCCEEDED" if proposal else "NO_PROPOSAL")
     assert output.reviewed_risk_level is None
     assert score_structured(output, answer).verdict == "PASS"
-    assert record["model_calls"] == 2 and record["data_source"] == "test_double"
+    assert record["model_calls"] == 1 and record["data_source"] == "test_double"
 
 
-def test_dispatcher_rejection_is_preserved_after_a_valid_graph_dto():
+@pytest.mark.parametrize("proposal", [True, False])
+def test_candidate_first_fallback_variant_is_measurable_with_two_calls(proposal):
     case = load_cases()[0]
-    record = runner.run_one(case, 1, _client(case, cidr_block="203.0.113.0/24"))
+    record = runner.run_one(case, 1, _fallback_client(case, proposal=proposal),
+                            SecOpsGraphVariant.CANDIDATE_FIRST)
+    assert record["model_calls"] == agent.SECOPS_FALLBACK_MODEL_CALLS == 2
+    assert record["output"]["invocation_status"] == ("SUCCEEDED" if proposal else "NO_PROPOSAL")
+
+
+def test_new_run_records_variant_and_sizes_calls_by_it():
+    cases = load_cases()
+    settings = Settings(_env_file=None, DATABASE_URL="unused", **{
+        name: Settings.model_fields[name].default for name in runner.SETTING_NAMES
+    })
+    default = runner.new_run(cases, 3, settings, "default")
+    fallback = runner.new_run(cases, 3, settings, "fallback", SecOpsGraphVariant.CANDIDATE_FIRST)
+    assert default["graph_variant"] == "EVIDENCE_FIRST" and default["model_calls_upper_bound"] == 27
+    assert default["http_attempts_upper_bound"] == 27 * settings.OPENAI_MAX_ATTEMPTS
+    assert fallback["graph_variant"] == "CANDIDATE_FIRST" and fallback["model_calls_upper_bound"] == 54
+    assert fallback["prompt_sha256"] != default["prompt_sha256"]
+
+
+def test_dispatcher_rejection_is_preserved_after_a_valid_graph_dto(monkeypatch):
+    case = load_cases()[0]
+    original = agent.run_secops_graph
+
+    def with_reviewed_risk(*args, **kwargs):
+        # 그래프 DTO는 유효하지만 Dispatcher 계약(등급 없음)은 어기는 출력을 만든다.
+        return original(*args, **kwargs).model_copy(update={"reviewed_risk_level": RiskLevel.HIGH})
+
+    monkeypatch.setattr(agent, "run_secops_graph", with_reviewed_risk)
+    record = runner.run_one(case, 1, _client(case))
     assert record["graph_output"]["invocation_status"] == "SUCCEEDED"
     assert record["output"]["invocation_status"] == "FAILED"
     assert record["dispatcher_rejected"]
     assert record["failure_kind"] == "OUTPUT_CONTRACT_FAILURE"
-    assert record["model_calls"] == 2 and record["data_source"] == "test_double"
+    assert record["model_calls"] == 1 and record["data_source"] == "test_double"
 
 
 @pytest.mark.parametrize("phase,kind", [
@@ -381,37 +473,171 @@ def test_missing_runs_and_reviews_cannot_pass_and_records_cannot_duplicate():
     run = _run(cases, 3)
     run["records"] = [runner.run_one(cases[0], 1, _client(cases[0]))]
     result = runner.report(run, cases, load_answers(cases))
-    assert result["planned"] == 21 and result["counts"]["PENDING"] == 21
+    assert result["planned"] == 27 and result["counts"]["PENDING"] == 27
     assert not result["quality_pass"] and not result["baseline_candidate"]
     run["records"].append(deepcopy(run["records"][0]))
     with pytest.raises(ValueError, match="Duplicate"):
         runner.report(run, cases, load_answers(cases))
 
 
+def _ten_repeat_real_run(cases, drop=None):
+    """drop: {case_id: 제외할 repeat 목록}. 제외된 기록은 계획에는 남고 관측에서만 빠진다."""
+    drop = drop or {}
+    run = _run(cases, 10)
+    run["records"] = [runner.run_one(case, n, _client(case))
+                      for n in range(1, 11) for case in cases
+                      if n not in drop.get(case.case_id, ())]
+    for record in run["records"]:
+        record["data_source"] = "real_model"
+        record["model_snapshots"] = ["snapshot-1"]
+    run["state"] = "COMPLETE"
+    return run
+
+
+def test_case_acceptance_applies_eight_of_ten_per_case_with_missing_records_as_non_pass():
+    cases = load_cases()
+    first, second = cases[0].case_id, cases[1].case_id
+    run = _ten_repeat_real_run(cases, {first: (9, 10), second: (8, 9, 10)})
+    result = runner.report(run, cases, load_answers(cases), _review(run))
+    acceptance = result["case_acceptance"]
+    assert (acceptance["required_repeats"], acceptance["required_passes"]) == (10, 8)
+    assert acceptance["measurement"] == {"exact_9x10": True, "fully_observed": False}
+    assert acceptance["cases"][first] == {
+        "planned": 10, "recorded": 8, "threshold_met": True,
+        "counts": {"PASS": 8, "FAIL": 0, "PENDING": 2, "TOOL_ERROR": 0, "TRANSPORT_ERROR": 0}}
+    assert acceptance["cases"][second]["counts"]["PASS"] == 7
+    assert acceptance["cases"][second]["threshold_met"] is False
+    assert acceptance["cases"][cases[2].case_id]["threshold_met"] is True
+    assert acceptance["threshold_met"] is False
+    # 기존 필드는 그대로 전체 계획 분모로 판정한다.
+    assert not result["quality_pass"] and not result["baseline_candidate"]
+    assert result["repeat_requirement_met"]
+
+
+def test_case_acceptance_threshold_and_baseline_eligibility_are_independent():
+    cases = load_cases()
+    run = _ten_repeat_real_run(cases, {cases[0].case_id: (10,)})
+    result = runner.report(run, cases, load_answers(cases), _review(run))
+    # 산술 기준은 충족하지만 기록이 모자라 완전 관측이 아니므로 기준선 후보가 아니다.
+    assert result["case_acceptance"]["threshold_met"] is True
+    assert result["case_acceptance"]["measurement"]["fully_observed"] is False
+    assert not result["case_acceptance"]["baseline_candidate"]
+
+    run = _ten_repeat_real_run(cases)
+    run["state"] = "RUNNING"
+    result = runner.report(run, cases, load_answers(cases), _review(run))
+    assert result["case_acceptance"]["threshold_met"] is True
+    assert result["case_acceptance"]["measurement"]["fully_observed"] is False
+    assert not result["case_acceptance"]["baseline_candidate"]
+
+    run["state"] = "COMPLETE"
+    # 검토 누락은 PASS를 줄이지만 기록 누락이 아니므로 관측 완전성은 유지된다.
+    unreviewed = runner.report(run, cases, load_answers(cases))
+    assert unreviewed["case_acceptance"]["measurement"]["fully_observed"] is True
+    assert unreviewed["case_acceptance"]["threshold_met"] is False
+    full = runner.report(run, cases, load_answers(cases), _review(run))
+    assert full["case_acceptance"]["threshold_met"] is True
+    assert full["case_acceptance"]["baseline_candidate"] and full["baseline_candidate"]
+
+
+def test_case_acceptance_threshold_is_unknown_outside_the_exact_9x10_design():
+    cases = load_cases()
+    run = _run(cases[:1], 10)
+    run["records"] = [runner.run_one(cases[0], n, _client(cases[0])) for n in range(1, 11)]
+    partial_set = runner.report(run, cases[:1], load_answers(cases), _review(run))["case_acceptance"]
+    assert partial_set["measurement"]["exact_9x10"] is False
+    assert partial_set["threshold_met"] is False and partial_set["cases"][cases[0].case_id]["threshold_met"] is None
+    run = _run(cases, 3)
+    run["records"] = []
+    assert runner.report(run, cases, load_answers(cases))["case_acceptance"]["measurement"]["exact_9x10"] is False
+
+
 def test_fake_measurements_never_establish_a_real_baseline():
     cases = load_cases()
     run = _run(cases, 3)
-    run["records"] = [runner.run_one(case, n, _client(case, rule_number=100 + n))
+    run["records"] = [runner.run_one(case, n, _client(case))
                       for n in range(1, 4) for case in cases]
     run["state"] = "COMPLETE"
     result = runner.report(run, cases, load_answers(cases), _review(run))
     assert result["quality_pass"]  # 합성 판정값의 집계가 맞다는 뜻으로 한정한다.
-    assert result["counts"]["PASS"] == 21  # AI가 낸 번호 대신 오프라인 서버 값 대역을 사용한다.
+    assert result["counts"]["PASS"] == 27  # AI가 낸 번호 대신 오프라인 서버 값 대역을 사용한다.
     assert not result["real_model_measurement"] and not result["baseline_candidate"]
 
 
-@pytest.mark.parametrize("argv", [[], ["--check-inputs"], ["--estimate"]])
-def test_offline_cli_never_builds_a_paid_client(monkeypatch, capsys, cli_source_cases, argv):
+@pytest.mark.parametrize("variant,eligible", [
+    (SecOpsGraphVariant.EVIDENCE_FIRST, True), (SecOpsGraphVariant.CANDIDATE_FIRST, False),
+])
+def test_only_evidence_first_runs_can_be_current_service_or_baseline_candidate(variant, eligible):
+    cases = load_cases()
+    settings = Settings(_env_file=None, DATABASE_URL="unused", **{
+        name: Settings.model_fields[name].default for name in runner.SETTING_NAMES
+    })
+    run = runner.new_run(cases, 3, settings, "fixture-run", variant)
+    run["records"] = [runner.run_one(case, n, _client(case)) for n in range(1, 4) for case in cases]
+    for record in run["records"]:
+        record["data_source"] = "real_model"
+        record["model_snapshots"] = ["snapshot-1"]
+    run["state"] = "COMPLETE"
+    result = runner.report(run, cases, load_answers(cases), _review(run))
+    assert result["graph_variant"] == variant.value
+    assert result["counts"]["PASS"] == 27
+    assert result["current_service"] is eligible
+    assert result["baseline_candidate"] is eligible
+    # 변종 기록이 없는 과거 결과는 기록된 프롬프트 지문이 현재 기본 지문과 같을 때만 인정한다.
+    del run["graph_variant"]
+    assert runner.report(run, cases, load_answers(cases), _review(run))["current_service"] is eligible
+
+
+@pytest.mark.parametrize("argv,calls", [
+    ([], None), (["--check-inputs"], None),
+    # 7건 × 1회 × 호출 수. 근거 선행은 1회, 대비책은 2회다.
+    (["--estimate"], 9), (["--estimate", "--variant", "EVIDENCE_FIRST"], 9),
+    (["--estimate", "--variant", "CANDIDATE_FIRST"], 18),
+])
+def test_offline_cli_never_builds_a_paid_client(monkeypatch, capsys, cli_source_cases, argv, calls):
     def forbidden(*args, **kwargs):
         raise AssertionError("paid client must not be created")
     monkeypatch.setattr(cli, "build_openai_model_client", forbidden)
     assert cli.main(argv) == 0
     payload = json.loads(capsys.readouterr().out)
-    if argv == ["--estimate"]:
-        # 7건 × 1회 × 호출 2회(후보·요약) — 재평가 호출이 빠졌다(ADR-0005 1차 개정).
-        assert payload["model_calls_upper_bound"] == 14
-        assert payload["http_attempts_upper_bound"] == 42
+    if calls is not None:
+        assert payload["model_calls_upper_bound"] == calls
+        assert payload["http_attempts_upper_bound"] == calls * 3
     assert "OPENAI_API_KEY" not in json.dumps(payload)
+
+
+def _flip_report(proposals):
+    case = load_cases()[0]
+    run = _run([case], len(proposals))
+    run["records"] = [runner.run_one(case, n, _client(case, proposal=value))
+                      for n, value in enumerate(proposals, 1)]
+    run["state"] = "COMPLETE"
+    return runner.report(run, [case], load_answers(load_cases()))
+
+
+def test_decision_flip_counts_candidate_to_no_proposal_as_a_flip_separately_from_structured_pass():
+    result = _flip_report([True, False, True])
+    flip = result["decision_flip"]
+    assert flip["cases_measured"] == 1 and flip["cases_with_flip"] == 1
+    assert flip["cases"]["C01"]["flip_ratio"] == pytest.approx(1 / 3, abs=1e-4)
+    assert flip["cases"]["C01"]["decisions"] == [
+        "RUNBOOK_NACL_ADD_DENY", "NO_PROPOSAL", "RUNBOOK_NACL_ADD_DENY",
+    ]
+    # EITHER 허용이라 구조화 판정에는 뒤집힘이 드러나지 않는다.
+    assert all(item["structured"]["verdict"] == "PASS" for item in result["scores"])
+
+
+@pytest.mark.parametrize("proposal", [True, False])
+def test_decision_flip_is_zero_when_decisions_agree(proposal):
+    flip = _flip_report([proposal] * 3)["decision_flip"]
+    assert flip["cases"]["C01"]["flip_ratio"] == 0
+    assert flip["cases_with_flip"] == 0 and flip["cases_measured"] == 1
+
+
+def test_decision_flip_needs_two_error_free_outputs():
+    assert _flip_report([True])["decision_flip"] == {
+        "cases": {}, "cases_with_flip": 0, "cases_measured": 0,
+    }
 
 
 @pytest.mark.parametrize("mode", [None, "--check-inputs", "--estimate", "--run", "--report", "--review-template"])
@@ -462,6 +688,32 @@ def test_report_cli_revalidates_saved_requests_without_paid_calls(
     monkeypatch.setattr(cli, "build_openai_model_client", forbidden)
     assert cli.main(["--report", str(run_path), "--review", str(review_path)]) == 0
     result = json.loads(capsys.readouterr().out)
-    assert result["counts"]["PASS"] == 21
+    assert result["counts"]["PASS"] == 27
     assert result["current_service"] and not result["source_files_match"]
     assert not result["real_model_measurement"] and not result["baseline_candidate"]
+
+
+def _assembled(case_id):
+    return next(case for case in load_cases() if case.case_id == case_id).graph_input
+
+
+def test_prior_execution_cases_reproduce_the_recorded_isolation_through_the_assembler():
+    ec2 = _assembled("C01").asset_context.arn
+    assert _assembled("C01").isolation_execution is None
+    success = _assembled("C08").isolation_execution
+    assert success.status.value == "SUCCESS" and success.affected_arns == [ec2]
+    assert success.runbook_id.value == "RUNBOOK_EC2_ISOLATE" and success.result_summary is None
+    failed = _assembled("C09").isolation_execution
+    assert failed.status.value == "FAILED" and failed.affected_arns == []
+    assert failed.result_summary and "권한 거부" in failed.result_summary
+
+
+def test_non_either_policy_still_rejects_a_disallowed_status():
+    cases = load_cases()
+    answer = load_answers(cases)["C08"].model_copy(update={
+        "action_policy": "NACL_PROPOSAL", "allowed_statuses": ["SUCCEEDED"],
+    })
+    record = runner.run_one(cases[7], 1, _client(cases[7], proposal=False))
+    output = AgentGraphOutput.model_validate(record["output"])
+    assert output.invocation_status.value == "NO_PROPOSAL"
+    assert score_structured(output, answer).verdict == "FAIL"

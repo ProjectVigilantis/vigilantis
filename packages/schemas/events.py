@@ -33,6 +33,17 @@ class ThreatEventType(str, Enum):
     SSH_BRUTE_FORCE = "SSH_BRUTE_FORCE"
 
 
+@unique
+class SshRiskBasis(str, Enum):
+    """현재 SSH 위험 규칙이 저장된 관측에 적용하는 분기."""
+
+    SINGLE_ATTEMPT = "SINGLE_ATTEMPT"
+    COUNT_AND_RATE_MET = "COUNT_AND_RATE_MET"
+    COUNT_ONLY_MET = "COUNT_ONLY_MET"
+    RATE_ONLY_MET = "RATE_ONLY_MET"
+    NEITHER_MET = "NEITHER_MET"
+
+
 class OpenIpThreatInput(BaseModel):
     """SG 인그레스 전체개방 Mock 이벤트 — 비공개 Threat Ingress 입력."""
 

@@ -96,7 +96,7 @@ export function appendTransition(
  * B-Medium 대기 기준 시각의 래치 규칙(§4.5 · 계약 합의 2026-08-14).
  *
  * `AGENT_WAIT` 창에 **들어갈 때 한 번만** 잡고, 창 안에서는 바꾸지 않는다 — 창 안에서 오는
- * 후속 `INCIDENT_UPDATED`(정밀 평가 도착 등)마다 다시 물리면 60초가 리셋돼 서버 자동 격리보다
+ * 후속 `INCIDENT_UPDATED`(AI 분석 결과 도착 등)마다 다시 물리면 60초가 리셋돼 서버 자동 격리보다
  * 화면이 시간을 더 남았다고 말한다(PR #181 리뷰). 창을 벗어나면 비워 다음 진입이 새로 잡는다.
  *
  * `lastEventAt`이 null이면(이벤트를 못 본 진입) null을 유지해 고정 안내문 fallback으로 간다.

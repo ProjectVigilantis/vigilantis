@@ -12,7 +12,9 @@ import pytest
 from agent_dispatcher import build_graph_input
 from ai.evaluation.secops import dataset
 from ai.evaluation.secops.dataset import load_cases, load_service_fixture
+from db.repositories import executions as executions_repo
 from mock_threat_source import MockThreatConsumer, prepare_observation
+from schemas.runbooks import TriggerSource
 from services.collector import persist_inventory
 
 
@@ -39,6 +41,9 @@ def _normalize_generated_values(actual, expected):
     for related, frozen_related in zip(context["related_assets"], frozen_context["related_assets"], strict=True):
         assert related["collection_run_id"] == collection_id
         related["collection_run_id"] = frozen_related["collection_run_id"]
+    if expected["isolation_execution"] is not None:
+        UUID(actual["isolation_execution"]["execution_id"])
+        actual["isolation_execution"]["execution_id"] = expected["isolation_execution"]["execution_id"]
 
 
 def _sort_relationship_collections(value):
@@ -68,6 +73,18 @@ def test_frozen_evaluation_input_matches_persisted_service_input(db, client_pg, 
     assert consumer.consume_once() == {"created": 1, "existing": 0, "rejected": 0, "failed": 0, "quarantined": 0}
     assert len(published) == 1
     incident_id = published[0].data.incident_id
+    prior = case.graph_input.isolation_execution
+    if prior is not None:
+        # C08·C09의 선행 격리는 합성 기록이다. 그래프 입력이 아니라 실행 행으로 넣어
+        # Dispatcher가 저장된 실행에서 같은 isolation_execution을 조립하는지 대조한다.
+        execution = executions_repo.create_execution(
+            db, incident_id=incident_id, runbook_id=prior.runbook_id,
+            target_arn=case.graph_input.asset_context.arn,
+            trigger_source=TriggerSource.PRE_MITIGATION_0_5S,
+        )
+        execution.status = prior.status
+        execution.error_summary = prior.result_summary
+        db.commit()
     graph_input = build_graph_input(db, incident_id)
     evidence = graph_input.evidences[0].content
     assert evidence.context.captured_at >= evidence.event.collected_at

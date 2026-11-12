@@ -1,7 +1,7 @@
 """동결한 모의 근거를 서비스 입력 조립 함수에 대조한다.
 
 읽기 과정에서 모델·DB·AWS를 호출하지 않는다. 합성 자산 전제와 명시적으로 주입한
-모의 위협 7건은 실제 환경의 탐지 정책을 정의하지 않는다. 원본 드리프트 검사는
+모의 위협 9건(둘은 합성 선행 격리 실행 기록 포함)은 실제 환경의 탐지 정책을 정의하지 않는다. 원본 드리프트 검사는
 CI 입력 로딩과 분리하며 계측 CLI가 명시적으로 호출한다.
 """
 
@@ -20,6 +20,7 @@ from mock_threat_source import MockThreatSubmission
 from schemas.agents import SecOpsGraphInput
 from schemas.assets import AssetInventory
 from schemas.evidence import EvidenceItem, SecOpsEvidenceContext
+from schemas.runbooks import TriggerSource
 from security.risk_evaluator import evaluate_threat
 from security.threat_normalizer import normalize_mock_input
 
@@ -110,8 +111,8 @@ def validate_case(record: dict[str, Any]) -> EvalCase:
     fixture = load_service_fixture(case_id)
     raw = fixture.submission.observation.model_dump(mode="json")
     inventory = fixture.inventory.model_dump(mode="json")
-    if len(data.evidences) != 1 or data.isolation_execution is not None:
-        raise ValueError(f"{case_id}: this service set requires one threat and no prior execution")
+    if len(data.evidences) != 1:
+        raise ValueError(f"{case_id}: this service set requires exactly one threat")
     evidence = data.evidences[0]
     event = evidence.content.event
     # 원본 초안의 inc... / te... 표기 대신 DB에 저장할 수 있는 고정 UUID를 쓴다.
@@ -153,8 +154,16 @@ def validate_case(record: dict[str, Any]) -> EvalCase:
         source_id=event.threat_event_id, content=evidence.content,
         occurred_at=event.occurred_at, collected_at=event.collected_at,
     )
+    prior = data.isolation_execution
+    # 서비스는 선행 실행 행을 조립 함수에 넘긴다. 동결한 기록을 같은 모양의 행으로 되돌려
+    # 조립 함수가 isolation_execution을 그대로 재현하는지 대조한다.
+    executions = [] if prior is None else [SimpleNamespace(
+        execution_id=prior.execution_id, runbook_id=prior.runbook_id, status=prior.status,
+        target_arn=prior.affected_arns[0] if prior.affected_arns else event.target_arn,
+        error_summary=prior.result_summary, trigger_source=TriggerSource.PRE_MITIGATION_0_5S,
+    )]
     assembled = assemble_secops_input(
-        incident=incident, threat=threat, executions=[],
+        incident=incident, threat=threat, executions=executions,
     )
     if assembled != data:
         raise ValueError(f"{case_id}: frozen graph input differs from current assembler")
@@ -164,8 +173,8 @@ def validate_case(record: dict[str, Any]) -> EvalCase:
 def load_cases(path: Path = ROOT / "inputs.json") -> list[EvalCase]:
     records = read_json(path)["cases"]
     ids = [record["case_id"] for record in records]
-    if ids != [f"C{i:02}" for i in range(1, 8)]:
-        raise ValueError("Fixed primary set must contain C01 through C07 exactly once in order")
+    if ids != [f"C{i:02}" for i in range(1, 10)]:
+        raise ValueError("Fixed primary set must contain C01 through C09 exactly once in order")
     cases = [validate_case(record) for record in records]
     identities = [case.graph_input.incident_id for case in cases]
     if len(identities) != len(set(identities)):
