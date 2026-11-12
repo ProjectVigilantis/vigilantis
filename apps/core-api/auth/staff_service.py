@@ -217,6 +217,9 @@ def resend_invite(db: Session, actor: Actor, get_adapter: Callable[[], Any], use
             admin_service._state(),
             actor.clock(),
         )
+        admin_service._platform_event(
+            db, admin, PlatformEventAction.USER_INVITE_RESEND, current.user_id, None
+        )
 
 
 def list_events(db: Session, actor: Actor, user_id: str, *, limit: int) -> UserEventsResponse:
@@ -355,4 +358,12 @@ def change_status(db: Session, actor: Actor, user_id: str, status: UserStatus) -
             before,
             admin_service._state(status=status),
             now,
+        )
+        admin_service._platform_event(
+            db,
+            admin,
+            PlatformEventAction.USER_STATUS_CHANGE,
+            target.user_id,
+            None,
+            {"before": before["status"], "after": status.value},
         )

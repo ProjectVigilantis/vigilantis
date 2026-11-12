@@ -155,12 +155,14 @@ def test_status_change_records_each_transition_and_skips_same_status(client_pg, 
     assert user_events(db, target.user_id) == ["STATUS_CHANGED"] * 2
 
 
-def test_sessions_revoke_records_event_only_when_sessions_were_revoked(client_pg, db, admin, target, tenant):
+def test_sessions_revoke_records_each_request_even_when_no_sessions_remain(client_pg, db, admin, target, tenant):
     path = f"{USERS}/{target.user_id}/sessions/revoke"
     assert client_pg.post(path).status_code == 204
     assert_event(only_event(db, target.user_id), "USER_SESSIONS_REVOKE", admin, tenant_id=tenant, details={})
     assert client_pg.post(path).status_code == 204  # 살아 있는 세션이 없다 — 폐기한 것이 없다
-    assert len(platform_events(db, target.user_id)) == 1
+    first, second = platform_events(db, target.user_id)
+    for row in (first, second):
+        assert_event(row, "USER_SESSIONS_REVOKE", admin, tenant_id=tenant, details={})
     assert user_events(db, target.user_id) == ["SESSIONS_REVOKED"] * 2
 
 
@@ -247,6 +249,29 @@ def test_staff_invite_conflict_records_nothing(client_pg, db, central, adapter, 
     assert counts(db) == before
 
 
+def test_staff_status_change_records_each_transition_and_skips_same_status(client_pg, db, central, staff_target):
+    path = f"{STAFF}/{staff_target.user_id}/status"
+    assert client_pg.put(path, json={"status": "DISABLED"}).status_code == 204
+    assert client_pg.put(path, json={"status": "DISABLED"}).status_code == 409
+    assert client_pg.put(path, json={"status": "ACTIVE"}).status_code == 204
+    first, second = platform_events(db, staff_target.user_id)
+    assert_event(first, "USER_STATUS_CHANGE", central, tenant_id=None, details={"before": "ACTIVE", "after": "DISABLED"})
+    assert_event(second, "USER_STATUS_CHANGE", central, tenant_id=None, details={"before": "DISABLED", "after": "ACTIVE"})
+    assert user_events(db, staff_target.user_id) == ["STATUS_CHANGED"] * 2
+
+
+def test_staff_resend_records_event_and_skips_state_conflict(client_pg, db, central, staff_target, adapter):
+    row = db.get(models.AppUser, staff_target.user_id)
+    adapter.get_result = CognitoUser(row.email, row.cognito_sub, row.email, "CONFIRMED")
+    before = counts(db)
+    assert client_pg.post(f"{STAFF}/{staff_target.user_id}/invite/resend").status_code == 409
+    assert counts(db) == before
+    adapter.get_result = CognitoUser(row.email, row.cognito_sub, row.email, FORCE)
+    assert client_pg.post(f"{STAFF}/{staff_target.user_id}/invite/resend").status_code == 204
+    assert_event(only_event(db, staff_target.user_id), "USER_INVITE_RESEND", central, tenant_id=None, details={})
+    assert user_events(db, staff_target.user_id) == ["INVITE_RESENT"]
+
+
 def test_staff_platform_role_change_records_event_and_skips_same_role(client_pg, db, central, staff_target):
     path = f"{STAFF}/{staff_target.user_id}/role"
     assert client_pg.put(path, json={"platform_role": "TENANT_MANAGER"}).status_code == 409
@@ -311,6 +336,8 @@ def test_group_clear_event_failure_after_role_event_rolls_back_everything(
 
 STAFF_WRITES = {
     "invite": lambda c, t, g: c.post(STAFF, json={"email": "pe-staff@example.com"}),
+    "status": lambda c, t, g: c.put(f"{STAFF}/{t.user_id}/status", json={"status": "DISABLED"}),
+    "resend": lambda c, t, g: c.post(f"{STAFF}/{t.user_id}/invite/resend"),
     "role": lambda c, t, g: c.put(f"{STAFF}/{t.user_id}/role", json={"platform_role": "CENTRAL_ADMIN"}),
     "groups": lambda c, t, g: c.put(f"{STAFF}/{t.user_id}/groups", json={"group_ids": [g]}),
 }

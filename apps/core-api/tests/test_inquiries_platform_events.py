@@ -154,7 +154,7 @@ def test_conflicting_or_noop_transition_writes_no_row(client_pg, db, tenant, mak
     assert _stored_status(db, inquiry_id) == start.value
 
 
-def test_replayed_transition_adds_no_second_row(client_pg, db, tenant, make_auth_session, central):
+def test_same_status_transition_adds_no_second_row(client_pg, db, tenant, make_auth_session, central):
     inquiry_id = _seed(db, make_auth_session, tenant)
     url = f"{BASE}/{inquiry_id}/status"
     assert client_pg.put(url, json={"status": "IN_PROGRESS"}, headers=central.headers).status_code == 200

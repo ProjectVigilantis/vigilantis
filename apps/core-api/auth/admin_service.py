@@ -438,10 +438,9 @@ def revoke_sessions(db: Session, actor: Actor, user_id: str) -> None:
             _state(revoked_session_count=count),
             now,
         )
-        if count:  # 폐기할 세션이 없었으면 platform_events 에는 사건이 아니다(user_admin_events 는 기존대로 남는다)
-            _platform_event(
-                db, admin, PlatformEventAction.USER_SESSIONS_REVOKE, target.user_id, target.tenant_id
-            )
+        _platform_event(
+            db, admin, PlatformEventAction.USER_SESSIONS_REVOKE, target.user_id, target.tenant_id
+        )
 
 
 def invite_user(
