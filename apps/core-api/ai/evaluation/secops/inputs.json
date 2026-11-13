@@ -9,7 +9,7 @@
         "risk_source": "datasets/golden/secops/expected/evt_ssh_bruteforce_001.json",
         "risk_sha256": "7acc190409fda0312a6b40ab62a271f57c1576e8415f69ad8bdb858db9bf47f0",
         "asset_source": "datasets/golden/finops/input/asset_inventory_001.json",
-        "asset_sha256": "377d4a95c5f4a786a3faf04493d8f66ea1bc32899071486da127142c081b8bfa",
+        "asset_sha256": "b379f4a6931b1fa63496e1ad1a39ec615c82664d2bbb6cc336286b322a508e37",
         "synthetic_nacl_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001",
         "synthesis": [
           "EC2 fields originate from the stated Golden inventory; direct SG/NACL and their snapshots are explicit synthetic prerequisites in inventory.json.",
@@ -1325,7 +1325,7 @@
         "risk_source": "datasets/golden/secops/expected/evt_ssh_bruteforce_007.json",
         "risk_sha256": "740f358b5151e5fa08f692e98f27023b15a8a06421706bafd76f01724b144c16",
         "asset_source": "datasets/golden/finops/input/asset_inventory_001.json",
-        "asset_sha256": "377d4a95c5f4a786a3faf04493d8f66ea1bc32899071486da127142c081b8bfa",
+        "asset_sha256": "b379f4a6931b1fa63496e1ad1a39ec615c82664d2bbb6cc336286b322a508e37",
         "synthetic_nacl_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001",
         "synthesis": [
           "EC2 fields originate from the stated Golden inventory; direct SG/NACL and their snapshots are explicit synthetic prerequisites in inventory.json.",
@@ -1630,7 +1630,7 @@
         "risk_source": "datasets/golden/secops/expected/evt_ssh_bruteforce_002.json",
         "risk_sha256": "09ac7089f4a479f1c0dab2f00ed5a3d82219b9dd4cb912e71955fd6b7dba5a3f",
         "asset_source": "datasets/golden/finops/input/asset_inventory_001.json",
-        "asset_sha256": "377d4a95c5f4a786a3faf04493d8f66ea1bc32899071486da127142c081b8bfa",
+        "asset_sha256": "b379f4a6931b1fa63496e1ad1a39ec615c82664d2bbb6cc336286b322a508e37",
         "synthetic_nacl_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001",
         "synthesis": [
           "EC2 fields originate from the stated Golden inventory; direct SG/NACL and their snapshots are explicit synthetic prerequisites in inventory.json.",
@@ -2216,7 +2216,7 @@
         "risk_source": "datasets/golden/secops/expected/evt_ssh_bruteforce_001.json",
         "risk_sha256": "7acc190409fda0312a6b40ab62a271f57c1576e8415f69ad8bdb858db9bf47f0",
         "asset_source": "datasets/golden/finops/input/asset_inventory_001.json",
-        "asset_sha256": "377d4a95c5f4a786a3faf04493d8f66ea1bc32899071486da127142c081b8bfa",
+        "asset_sha256": "b379f4a6931b1fa63496e1ad1a39ec615c82664d2bbb6cc336286b322a508e37",
         "synthetic_nacl_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001",
         "synthesis": [
           "EC2 fields originate from the stated Golden inventory; direct SG/NACL and their snapshots are explicit synthetic prerequisites in inventory.json.",
@@ -2554,7 +2554,7 @@
         "risk_source": "datasets/golden/secops/expected/evt_ssh_bruteforce_001.json",
         "risk_sha256": "7acc190409fda0312a6b40ab62a271f57c1576e8415f69ad8bdb858db9bf47f0",
         "asset_source": "datasets/golden/finops/input/asset_inventory_001.json",
-        "asset_sha256": "377d4a95c5f4a786a3faf04493d8f66ea1bc32899071486da127142c081b8bfa",
+        "asset_sha256": "b379f4a6931b1fa63496e1ad1a39ec615c82664d2bbb6cc336286b322a508e37",
         "synthetic_nacl_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001",
         "synthesis": [
           "EC2 fields originate from the stated Golden inventory; direct SG/NACL and their snapshots are explicit synthetic prerequisites in inventory.json.",
@@ -2890,7 +2890,7 @@
         "risk_source": "datasets/golden/secops/expected/evt_ssh_bruteforce_001.json",
         "risk_sha256": "7acc190409fda0312a6b40ab62a271f57c1576e8415f69ad8bdb858db9bf47f0",
         "asset_source": "datasets/golden/finops/input/asset_inventory_001.json",
-        "asset_sha256": "377d4a95c5f4a786a3faf04493d8f66ea1bc32899071486da127142c081b8bfa",
+        "asset_sha256": "b379f4a6931b1fa63496e1ad1a39ec615c82664d2bbb6cc336286b322a508e37",
         "synthetic_nacl_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001",
         "synthesis": [
           "C10 is the C01 observation (120 failures / 300 seconds, HIGH) and ALL of its matching synthetic log evidence with exactly one value changed: the source address 203.0.113.10 -> 127.0.0.1, applied consistently to the observation, the aggregate selection, all 200 corpus rows and the 12 excerpt rows.",
