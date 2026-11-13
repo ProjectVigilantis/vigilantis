@@ -246,6 +246,9 @@ def _to_detail(db: Session, row: models.Incident) -> IncidentResponse:
                 execution, recovered_parent_ids
             ),
             "verification_hold": _verification_hold(execution),
+            "created_at": execution.created_at,
+            "finished_at": execution.finished_at,
+            "parent_execution_id": execution.parent_execution_id,
             "updated_at": execution.updated_at,
         }
         for execution in execution_rows

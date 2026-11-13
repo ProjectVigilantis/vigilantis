@@ -19,6 +19,7 @@ function incident(over: Partial<IncidentResponse> = {}): IncidentResponse {
 
 function execution(status: ExecutionStatus): IncidentResponse['executions'][number] {
   return { execution_id: 'execution', runbook_id: 'RUNBOOK_NACL_ADD_DENY', status,
+    created_at: '2026-09-30T00:00:00Z', finished_at: null, parent_execution_id: null,
     available_recovery_runbook_ids: [], updated_at: '2026-09-30T00:00:00Z' };
 }
 

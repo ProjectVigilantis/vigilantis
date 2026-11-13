@@ -298,6 +298,16 @@ class ExecutionSummaryItem(BaseModel):
     available_recovery_runbook_ids: list[RunbookId] = Field(default_factory=list)
     # 판정 불가 보류 기록 — 없으면 null (Issue #249)
     verification_hold: Optional[ExecutionVerificationHold] = None
+    created_at: UtcDateTime = Field(
+        description="실행 행 생성(예약) 시각. AWS 조치의 실제 시작 시각이 아니다.",
+    )
+    finished_at: Optional[UtcDateTime] = Field(
+        None, description="기록된 완료 시각. null은 기록 부재이며 결과는 status로 판정한다.",
+    )
+    parent_execution_id: Optional[str] = Field(
+        None, min_length=1,
+        description="원복 자식이 참조하는 원 실행 ID. null은 원 실행 부재이며 값이 있어도 원복 성공은 아니다.",
+    )
     updated_at: UtcDateTime
 
     @model_validator(mode="after")
