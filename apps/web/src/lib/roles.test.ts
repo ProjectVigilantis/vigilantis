@@ -92,9 +92,9 @@ test('고객 추가는 중앙 관리자만', () => {
   assert.equal(canCreateTenant(null), false);
 });
 
-test('사용자 관리는 고객 범위가 있는 플랫폼 계정과 고객사 ADMIN — 배정 없는 담당자와 계정을 모르면 숨긴다', () => {
+test('사용자 관리는 중앙 관리계정과 고객사 ADMIN — 서버 관문(#572 9번)과 같다. 고객 담당자는 배정이 있어도 아니다', () => {
   assert.equal(canManageUsers(central), true);
-  assert.equal(canManageUsers(manager(TENANT_A)), true);
+  assert.equal(canManageUsers(manager(TENANT_A)), false);
   assert.equal(canManageUsers(unassigned), false);
   assert.equal(canManageUsers(tenant('ADMIN')), true);
   for (const role of ['OPERATOR', 'VIEWER'] as const) {

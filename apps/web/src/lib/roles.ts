@@ -104,13 +104,14 @@ export function canCreateTenant(user: PlatformSubject | null | undefined): boole
 }
 
 /**
- * 사용자 관리를 열 계정(넓은 자격) — 고객 범위가 있는 플랫폼 계정, 또는 고객사 ADMIN(자기 고객사만).
- * 담당 고객이 없는 고객 담당자와 고객사 OPERATOR · VIEWER는 아니다. 메뉴 · 첫 화면만 정한다 — 실제 차단과 관리
- * 범위는 서버(403 · 404)다. 확인 전(null)이면 열지 않는다.
+ * 사용자 관리를 열 계정 — 중앙 관리계정, 또는 고객사 ADMIN(자기 고객사만). 서버 관문(`auth.permissions.is_user_manager`,
+ * #572 9번)과 같은 판정이다. 고객 담당자(TENANT_MANAGER)와 고객사 OPERATOR · VIEWER는 아니다.
+ * 메뉴와 `GET /users` 호출 여부를 정한다. 이 판정이 서버보다 넓으면 화면을 그릴 때마다 403이 나고, 그 403은 활동
+ * 로그(`ACCESS_FORBIDDEN`)에 한 행씩 쌓인다(#589). 확인 전(null)이면 열지 않는다.
  */
 export function canManageUsers(user: AccessSubject | null | undefined): boolean {
   if (!user) return false;
-  return hasCustomerScope(user) || (user.account_type === 'TENANT' && user.role === 'ADMIN');
+  return isCentralAdmin(user) || (user.account_type === 'TENANT' && user.role === 'ADMIN');
 }
 
 /**
