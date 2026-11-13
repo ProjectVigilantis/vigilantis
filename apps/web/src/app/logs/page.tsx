@@ -6,14 +6,21 @@ import type { Metadata } from 'next';
 
 import { LogsView } from '@/components/logs/logs-view';
 import { orNull, serverApi } from '@/lib/api/server';
+import { canManageUsers } from '@/lib/roles';
 import { ROLE_LABELS } from '@/lib/user-admin';
 
 export const metadata: Metadata = { title: '로그 · Vigilantis' };
 
 export default async function LogsPage() {
-  const { getAssets, getIncidents, getUsers } = await serverApi();
-  // 계정 목록은 고객사 ADMIN만 읽는다(그 밖은 403 → null). 읽으면 조치한 직원 옆에 권한을 붙인다.
-  const [assets, incidents, users] = await Promise.all([orNull(getAssets()), orNull(getIncidents()), orNull(getUsers())]);
+  const { getAssets, getIncidents, getUsers, getMe } = await serverApi();
+  // 계정 목록은 고객사 ADMIN만 읽는다. 읽으면 조치한 직원 옆에 권한을 붙인다. 그 밖의 계정은 부르지 않는다 —
+  // 부르면 403이 활동 로그에 남고, 실시간 이벤트의 재조회마다 한 행씩 더 쌓인다(#589).
+  const me = await orNull(getMe());
+  const [assets, incidents, users] = await Promise.all([
+    orNull(getAssets()),
+    orNull(getIncidents()),
+    canManageUsers(me) ? orNull(getUsers()) : null,
+  ]);
   const assetNames = Object.fromEntries((assets?.items ?? []).map((a) => [a.arn, a.name ?? a.resource_id]));
   const staffRoles = Object.fromEntries(
     (users?.items ?? []).filter((u) => u.account_type === 'TENANT').map((u) => [u.email, ROLE_LABELS[u.role]]),

@@ -69,7 +69,8 @@ export function TenantDetailView({
   renderedAt,
 }: {
   tenant: TenantDetail;
-  users: UserListItem[] | null;
+  /** `null` = 조회 실패 · `undefined` = 볼 수 없는 계정(고객 담당자). 사용자 패널이 그 사실을 적는다. */
+  users: UserListItem[] | null | undefined;
   /** 상세 안에 그릴 관제(자산 · 보안). 페이지가 서버에서 조회해 넘긴다. 연결 전이면 null이다. */
   monitoring?: ReactNode;
   /** 페이지(서버 컴포넌트)가 `tenant`를 읽은 시각(ISO) — 구독 권리 끝 시각이 지났는지의 기준이다. */
