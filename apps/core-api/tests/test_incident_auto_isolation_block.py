@@ -15,9 +15,10 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import workflows
 from db import models
+from schemas.api.assets import AssetType
 from schemas.api.incidents import AutoIsolationBlock, IncidentCategory, IncidentStatus, ResponseMode
-from tests.test_auto_isolation_workflow import PRE, SKIP, TIMEOUT, _attempt
-from tests.test_tenant_auto_action import _seeded, _tenant, _toggle
+from tests.test_auto_isolation_workflow import INSTANCE_ID, PRE, SKIP, SUBJECT, TIMEOUT, _attempt
+from tests.test_tenant_auto_action import ACCOUNT, _seeded, _tenant, _toggle
 
 
 def _block(client, incident_id: str):
@@ -98,6 +99,38 @@ def test_finops_shows_null_even_for_a_disabled_tenant(db, client_pg, make_incide
     incident.tenant_id = tenant.tenant_id
     db.commit()
     assert _block(client_pg, incident.incident_id) is None
+
+
+@pytest.mark.parametrize("kind, trigger, assigned", [
+    ("medium", TIMEOUT, True),
+    ("medium", TIMEOUT, False),
+    ("high", PRE, True),
+])
+def test_protected_notice_tracks_the_gate_and_persisted_timeout_escalation(
+    db, client_pg, make_incident, make_candidate, kind, trigger, assigned,
+):
+    tenant = _tenant(db) if assigned else None
+    seeded = _seeded(db, make_incident, make_candidate, kind, tenant)
+    asset = models.Asset(
+        arn=SUBJECT, asset_type=AssetType.EC2, resource_id=INSTANCE_ID,
+        tenant_id=tenant.tenant_id if tenant else None, account_id=ACCOUNT,
+        region="ap-northeast-2", state="running",
+        spec={"tags": {"Environment": "production"}},
+    )
+    db.add(asset)
+    db.commit()
+    assert _block(client_pg, seeded.incident_id) == "PROTECTED_TAG"
+    assert _attempt(db, seeded, trigger).skipped_reason is SKIP.PROTECTED_TAG
+
+    # Medium은 이미 관제자에게 넘겨 감시에서 빠졌다. High 재시도는 현재 태그를 다시 본다.
+    asset.spec = {"tags": {"Environment": "dev"}}
+    db.commit()
+    expected = "PROTECTED_TAG" if trigger is TIMEOUT else None
+    assert _block(client_pg, seeded.incident_id) == expected
+    if tenant is not None:
+        _toggle(db, tenant, False)
+        db.commit()
+        assert _block(client_pg, seeded.incident_id) == "AUTO_ACTION_DISABLED"
 
 
 # ----- 계약 값 = 관문 사유 ------------------------------------------------------

@@ -18,6 +18,8 @@ from types import SimpleNamespace
 
 import incident_intake
 import pytest
+from security import soar
+from schemas.runbooks import TriggerSource
 from botocore.exceptions import ClientError
 from db import models
 from db.repositories import assets as assets_repo
@@ -484,6 +486,48 @@ def test_committed_high_intake_is_sent_once_per_configured_channel(sessions, pg_
             assert stored["SNS"].receipt_ref.startswith("msg-")
     finally:
         _remove_intake_rows(pg_engine, incident_id, *intake_rows)
+
+
+def test_protected_target_escalation_reaches_slack_and_sns_once(sessions, pg_engine):
+    slack, sns = SlackWire(), SnsWire()
+    dispatcher = make_dispatcher(
+        sessions, registry(entry(TENANT_A, ACCOUNT_A, slack="SLACK_A", sns=TOPIC_A)),
+        slack=slack, sns=sns,
+    )
+    activate(dispatcher, pg_engine)
+    incident_id, arn, threat_id, run_id = _seeded_high_intake(sessions, ACCOUNT_A)
+    try:
+        with sessions() as db:
+            asset = assets_repo.get_asset_by_arn(db, arn)
+            asset.spec = {**asset.spec, "tags": {"Environment": "production"}}
+            db.commit()
+            for _ in range(2):
+                assert soar.prepare_isolation(db, incident_id, TriggerSource.PRE_MITIGATION_0_5S) is None
+            escalation = [
+                row for row in events_repo.list_by_incident(db, incident_id)
+                if row.kind == "PROTECTED_TARGET_ESCALATION"
+            ]
+            assert len(escalation) == 1
+            event_id = escalation[0].event_id
+
+        assert dispatcher.discover() == 4  # High 생성과 에스컬레이션이 각각 두 채널로 간다.
+        assert dispatcher.discover() == 0
+        for _ in range(2):
+            open_lane(pg_engine)
+            assert dispatcher.process_one("SLACK")
+            assert dispatcher.process_one("SNS")
+        assert not dispatcher.process_one("SLACK")
+        assert not dispatcher.process_one("SNS")
+        stored = rows(pg_engine, event_id)
+        assert {channel: row.receipt_kind for channel, row in stored.items()} == {
+            "SLACK": "SLACK_POSTED", "SNS": "SNS_ACCEPTED",
+        }
+        assert all(row.state == "SUCCEEDED" and row.attempts == 1 for row in stored.values())
+        bodies = [p["body"] for p in slack.posts + sns.publishes if event_id in p["body"]]
+        assert len(bodies) == 2
+        assert all("PROTECTED_TAG" in body and incident_id in body for body in bodies)
+    finally:
+        _remove_intake_rows(pg_engine, incident_id, arn, threat_id, run_id)
 
 
 def test_no_session_or_transaction_is_open_during_external_calls(sessions, pg_engine):

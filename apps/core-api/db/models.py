@@ -1399,7 +1399,13 @@ class NotificationEvent(Base):
             " AND ((kind = 'AUTO_ISOLATION'"
             " AND trigger_source IN ('PRE_MITIGATION_0_5S', 'TIMEOUT_ISOLATION_1M')"
             " AND related_execution_id IS NULL)"
-            " OR (kind = 'AUTO_ROLLBACK' AND trigger_source = 'AUTO_ON_FAILURE')))",
+            " OR (kind = 'AUTO_ROLLBACK' AND trigger_source = 'AUTO_ON_FAILURE')))"
+            " OR (kind = 'PROTECTED_TARGET_ESCALATION' AND phase = 'CREATED'"
+            " AND execution_id IS NULL AND related_execution_id IS NULL"
+            " AND runbook_id IS NULL AND execution_status IS NULL"
+            " AND trigger_source IS NOT NULL"
+            " AND trigger_source IN ('PRE_MITIGATION_0_5S', 'TIMEOUT_ISOLATION_1M')"
+            " AND reason_code IS NOT NULL AND reason_code = 'PROTECTED_TAG')",
             name="event_shape",
         ),
         CheckConstraint(

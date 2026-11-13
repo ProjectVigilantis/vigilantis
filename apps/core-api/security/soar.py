@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import dispatcher
+import notification_events
 import workflows
 from ai import guardrails
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -107,6 +108,11 @@ def prepare_isolation(db: Session, incident_id: str, trigger_source: TriggerSour
             "incident_id": incident_id, "reason": "EC2 instance required",
         })
         db.rollback()
+        return None
+    if workflows.protected_auto_isolation_reason(db, incident) is not None:
+        workflows.record_protected_auto_isolation(
+            db, incident_id, trigger_source=trigger_source, now=datetime.now(UTC),
+        )
         return None
     evidence_ids = [row.evidence_id for row in incidents_repo.list_evidence(db, incident_id)]
     # 가드레일 ③ · ④ 는 인시던트의 소유 테넌트로 본다(#533 E) — 요청자 · 감시 주체의 소속이 아니다
@@ -277,6 +283,7 @@ def run_timeout_cycle(
         pending = incidents_repo.list_expired_agent_waits(
             db, now=datetime.now(UTC),
             exclude_event_types=workflows.AUTO_ISOLATION_EXCLUDED_EVENT_TYPES,
+            exclude_notification_kind=notification_events.EventKind.PROTECTED_TARGET_ESCALATION.value,
         )
         db.rollback()
         report.scanned = len(pending)

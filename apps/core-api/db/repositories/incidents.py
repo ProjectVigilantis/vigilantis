@@ -468,6 +468,7 @@ def user_approval_recorded(db: Session, incident_id: str) -> bool:
 
 def list_expired_agent_waits(
     db: Session, *, now: datetime, exclude_event_types: Collection[ThreatEventType] = (),
+    exclude_notification_kind: str | None = None,
 ) -> list[str]:
     """응답 기한이 지난 Medium 승인 대기의 Incident 식별자 — 타임아웃 감시 1회의 대상.
 
@@ -489,6 +490,8 @@ def list_expired_agent_waits(
         없음(NULL)은 지금 그대로다.
       - 자동 발동에서 빼는 위협 유형(exclude_event_types · #588 Q2 GuardDuty 탐지)은 뺀다. 판정의 원천은
         workflows.AUTO_ISOLATION_EXCLUDED_EVENT_TYPES 이고 호출부가 넘긴다 — 같은 이유로 잡혀도 건너뛰기만 반복한다.
+      - 보호 태그로 이미 에스컬레이션한 건은 호출부가 알림 종류를 지정해 뺀다. 승인 대기·기한은
+        그대로 보존하되 매 감시 주기마다 같은 생략을 다시 접수하지 않는다.
     """
     tenant = models.Tenant
     excluded = (
@@ -496,6 +499,16 @@ def list_expired_agent_waits(
         .where(
             models.ThreatEvent.threat_event_id == models.Incident.threat_event_id,
             models.ThreatEvent.event_type.in_(list(exclude_event_types)),
+        )
+        .exists()
+    )
+    escalated = (
+        select(models.NotificationEvent.event_id)
+        .where(
+            models.NotificationEvent.incident_id == models.Incident.incident_id,
+            models.NotificationEvent.kind == exclude_notification_kind,
+            models.NotificationEvent.execution_id.is_(None),
+            models.NotificationEvent.phase == "CREATED",
         )
         .exists()
     )
@@ -511,6 +524,7 @@ def list_expired_agent_waits(
                 models.Incident.subject_arn.like(_EC2_INSTANCE_ARN_LIKE),
                 ~_user_approval_recorded(),
                 ~excluded,
+                ~escalated,
                 or_(
                     models.Incident.tenant_id.is_(None),
                     and_(

@@ -110,6 +110,8 @@ class AutoIsolationBlock(str, Enum):
     #: 테넌트가 자동 조치를 껐다. 또는 그 발동을 정한 시각(High 접수 시각·Medium 응답 기한)이
     #: 마지막으로 다시 켠 시각 이전이다 — 꺼진 동안의 판단은 다시 켜도 사람 없이 실행하지 않는다.
     AUTO_ACTION_DISABLED = "AUTO_ACTION_DISABLED"
+    #: 보호 태그에 해당하거나, 보호 판정으로 이미 관제자에게 넘겨 타임아웃 감시에서 제외됐다.
+    PROTECTED_TAG = "PROTECTED_TAG"
 
 
 @unique

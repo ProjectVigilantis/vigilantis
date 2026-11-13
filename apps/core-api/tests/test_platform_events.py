@@ -200,6 +200,65 @@ def test_group_change_requires_the_affected_tenant_and_permissions_normalize_enu
     assert record.details == {"before": ["VIEW"], "after": []}
 
 
+_ESCALATION = {
+    "action": A.INCIDENT_ESCALATE,
+    "actor_kind": PlatformActorKind.SYSTEM,
+    "target_id": "inc-1",
+    "details": {"trigger_reason": "PROTECTED_TAG"},
+}
+
+
+def test_incident_escalate_records_a_system_success_on_the_incident():
+    record = PlatformEventRecord(**_ESCALATION)
+    assert record.category is PlatformEventCategory.INCIDENT
+    assert record.target_type is PlatformEventTargetType.INCIDENT
+    assert record.outcome is OUT.SUCCEEDED
+    assert record.details == {"trigger_reason": "PROTECTED_TAG"}
+    assert ACTION_SPECS[A.INCIDENT_ESCALATE].outcomes == {OUT.SUCCEEDED}
+    assert ACTION_SPECS[A.INCIDENT_ESCALATE].actors == {PlatformActorKind.SYSTEM}
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"details": {}},
+        {"details": {"trigger_reason": "OTHER"}},
+        {"details": {"trigger_reason": None}},
+        {"details": {"trigger_reason": "PROTECTED_TAG", "reason_code": "PROTECTED_TAG"}},
+        {"details": {"trigger_reason": "PROTECTED_TAG", "note": "x"}},
+        {"details": {"reason_code": "PROTECTED_TAG"}},
+        {"outcome": OUT.DENIED, "details": {"trigger_reason": "PROTECTED_TAG", "reason_code": "X"}},
+        {"outcome": OUT.FAILED, "details": {"trigger_reason": "PROTECTED_TAG", "reason_code": "X"}},
+        {"actor_kind": PlatformActorKind.ANONYMOUS},
+        {
+            "actor_kind": PlatformActorKind.USER,
+            "actor_user_id": str(uuid.uuid4()),
+            "actor_account_type": AccountType.PLATFORM,
+            "actor_platform_role": PlatformRole.CENTRAL_ADMIN,
+        },
+    ],
+)
+def test_incident_escalate_rejects_wrong_details_actor_or_outcome(overrides):
+    with pytest.raises(ValidationError):
+        PlatformEventRecord(**{**_ESCALATION, **overrides})
+
+
+def test_adding_escalation_leaves_existing_actions_unchanged():
+    assert PlatformEventAction.INCIDENT_RESOLVE.value == "INCIDENT_RESOLVE"
+    assert ACTION_SPECS[A.INCIDENT_CREATE].actors == {PlatformActorKind.SYSTEM}
+    assert ACTION_SPECS[A.INCIDENT_ANALYZE].outcomes == {OUT.SUCCEEDED, OUT.FAILED}
+    assert ACTION_SPECS[A.INCIDENT_RESOLVE].actors == {PlatformActorKind.USER}
+    # 기존 행동은 trigger_reason 을 받지 않는다
+    with pytest.raises(ValidationError):
+        PlatformEventRecord(
+            action=A.INCIDENT_CREATE, actor_kind=PlatformActorKind.SYSTEM,
+            target_id="inc-1", details={"trigger_reason": "PROTECTED_TAG"},
+        )
+    assert PlatformEventRecord(
+        action=A.INCIDENT_CREATE, actor_kind=PlatformActorKind.SYSTEM, target_id="inc-1"
+    ).details == {}
+
+
 def test_category_and_target_type_come_from_the_action():
     record = _record()
     assert record.category is PlatformEventCategory.TENANT_ADMIN

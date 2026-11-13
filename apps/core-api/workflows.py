@@ -87,6 +87,7 @@ from db.repositories import auth as auth_repo
 from db.repositories import executions as executions_repo
 from db.repositories import guardrails as guardrails_repo
 from db.repositories import incidents as incidents_repo
+from db.repositories import notification_events as notification_events_repo
 from db.repositories import platform_events as platform_events_repo
 from db.repositories import tenants as tenants_repo
 from exceptions import ApiError
@@ -169,6 +170,7 @@ from schemas.runbooks import (
     TriggerSource,
 )
 from schemas.savings import AISavingsEstimate
+from services import rule_engine
 from services.aws import backup, executor, rollback
 from services.aws.client import TenantAccess, tenant_scope
 from services.aws.errors import is_retryable, watch_dry_run_protocol
@@ -846,6 +848,7 @@ class AutoIsolationSkipReason(str, Enum):
     AUTO_ACTION_DISABLED = "AUTO_ACTION_DISABLED"
     # 위협 유형이 자동 발동 대상이 아니다(#588 Q2 · AUTO_ISOLATION_EXCLUDED_EVENT_TYPES)
     THREAT_TYPE_NOT_ELIGIBLE = "THREAT_TYPE_NOT_ELIGIBLE"
+    PROTECTED_TAG = "PROTECTED_TAG"
     # 같은 인스턴스에 끝나지 않은 다른 실행이 있다(T-10 · #595). 다운사이징이 정지 · 기동 · 원복하는 도중에
     # 격리가 SG 를 바꿔 끼우면 서로 덮어쓴다. 아무것도 쓰지 않으므로 Medium 은 다음 감시 주기에 다시 시도한다
     TARGET_EXECUTION_IN_PROGRESS = "TARGET_EXECUTION_IN_PROGRESS"
@@ -859,7 +862,8 @@ class AutoIsolationReservation:
       created=True면 이번 호출이 commit했고, False면 같은 execution_id의 시도가 이미
       commit돼 있었다(재시도). 실행할 접수는 IN_PROGRESS뿐이다 — FAILED는 가드레일 거절
       기록이다.
-    - skipped_reason: 아무것도 저장하지 않았다. 다른 시도가 이긴 경우(ALREADY_RESERVED)에도
+    - skipped_reason: 실행을 저장하지 않았다. 보호 태그 생략은 활동 로그와 에스컬레이션을 남긴다.
+      다른 시도가 이긴 경우(ALREADY_RESERVED)에도
       그 실행을 이 호출의 것으로 넘기지 않는다.
     - response_deadline_at: TIMEOUT 발동에서 잠근 행의 응답 기한(없으면 None).
     - occurred_at: created일 때 commit된 Incident.updated_at — 발행 시각이다.
@@ -902,7 +906,7 @@ _AUTO_ISOLATION_ELIGIBILITY: dict[
 
 #: 자동 발동(High 선차단 · Medium 1분 격리)에서 빼는 위협 유형 — 인시던트에 묶인 위협 이벤트의 유형으로 본다.
 #: GuardDuty 탐지는 1차에 인시던트와 조치 후보까지만 간다(#588 Q2 · 2026-11-09 SEC 동의). 탐지는 관측이지 침해
-#: 증거가 아니고, 이 경로는 대상 자산의 보호 태그를 아직 보지 않는다(#598). 초기 위험도 · 대응 경로는 다른 유형과
+#: 증거가 아니므로 보호 태그 예외(#598)가 있어도 자동 대응을 켜지 않는다. 초기 위험도 · 대응 경로는 다른 유형과
 #: 같이 저장되므로(HIGH = PRE_MITIGATION_0_5S) 이 집합이 유일한 차이다. 보는 자리는 넷이다 — 사전 판정
 #: (security/soar.prepare_isolation · AWS 를 부르기 전), 접수 관문(_auto_isolation_skip_reason · 잠근 뒤),
 #: 화면 안내(pending_automatic_block), 타임아웃 감시 대상 조회(incidents_repo.list_expired_agent_waits).
@@ -1037,15 +1041,14 @@ def automatic_trigger_block(
 def pending_automatic_block(
     db: Session, incident: models.Incident
 ) -> AutoIsolationSkipReason | None:
-    """이 건에 지금 걸릴 자동 발동이 테넌트 관문에 막혀 있으면 그 사유. 읽기 전용이다. (#521)
+    """이 건의 자동 발동이 막힌 사유. 접수 관문과 감시 제외 기록을 따르는 읽기 전용 조회다. (#521, #598)
 
-    인시던트 상세의 auto_isolation_block 원천이다 — 화면 안내가 서버의 실제 접수 판정과 어긋나지
-    않게 접수 관문과 같은 함수(automatic_trigger_block)를 부른다. 「지금 걸릴 발동」은 접수 관문이
+    인시던트 상세의 auto_isolation_block 원천이다. 테넌트 관문이 보호 판정보다 우선한다.
+    「지금 걸릴 발동」은 접수 관문이
     잠근 뒤 보는 발동 조건(_AUTO_ISOLATION_ELIGIBILITY · 위험도 · 대응 경로 · 상태)으로 고른다 —
-    그 밖의 건(Low · 분석 뒤 High · 이미 발동한 건 · FINOPS)과 테넌트 없음은 None 이다. 잠그지 않는다.
+    그 밖의 건(Low · 분석 뒤 High · 이미 발동한 건 · FINOPS)은 None 이다. 잠그지 않는다.
+    이미 에스컬레이션한 Medium은 보호 태그가 사라져도 감시에서 빠져 있으므로 실행을 예고하지 않는다.
     """
-    if incident.tenant_id is None:
-        return None
     trigger_source = next(
         (
             source
@@ -1058,12 +1061,37 @@ def pending_automatic_block(
     )
     if trigger_source is None or auto_isolation_excluded(db, incident):
         return None
-    return automatic_trigger_block(
-        db.get(models.Tenant, incident.tenant_id),
+    reason = automatic_trigger_block(
+        None if incident.tenant_id is None else db.get(models.Tenant, incident.tenant_id),
         trigger_source=trigger_source,
         received_at=incident.created_at,
         response_deadline_at=incident.response_deadline_at,
     )
+    if reason is not None:
+        return reason
+    if (
+        trigger_source is TriggerSource.TIMEOUT_ISOLATION_1M
+        and _protected_isolation_recorded(db, incident.incident_id)
+    ):
+        return AutoIsolationSkipReason.PROTECTED_TAG
+    return protected_auto_isolation_reason(db, incident)
+
+
+def protected_auto_isolation_reason(
+    db: Session, incident: models.Incident,
+) -> AutoIsolationSkipReason | None:
+    """수집된 태그·테넌트 정책을 FinOps와 같은 규칙으로 판단한다. 쓰기·AWS 호출은 없다."""
+    asset = assets_repo.get_asset_by_arn(db, incident.subject_arn)
+    if asset is None:
+        return None
+    # 사전 판정 때 읽은 ORM 객체가 남아 있어도 접수 관문은 DB의 현재 관측을 다시 본다.
+    db.refresh(asset)
+    if asset.asset_type is not AssetType.EC2:
+        return None
+    policies = rule_engine._tag_policies_by_asset(db, [asset])
+    if rule_engine._is_prod((asset.spec or {}).get("tags", {}), policies.get(asset.asset_id)):
+        return AutoIsolationSkipReason.PROTECTED_TAG
+    return None
 
 
 def _auto_isolation_skip_reason(
@@ -1084,7 +1112,7 @@ def _auto_isolation_skip_reason(
     if incident.status is not status:
         return AutoIsolationSkipReason.STATUS_NOT_ELIGIBLE
     if trigger_source is TriggerSource.PRE_MITIGATION_0_5S:
-        return None
+        return protected_auto_isolation_reason(db, incident)
     if incident.response_deadline_at is None:
         return AutoIsolationSkipReason.WAIT_NOT_STARTED
     if incident.response_deadline_at > now:
@@ -1092,7 +1120,7 @@ def _auto_isolation_skip_reason(
     # 상태만 보면 승인한 실행이 끝나 다른 제안이 남은 건이 다시 승인 대기로 보인다
     if incidents_repo.user_approval_recorded(db, incident.incident_id):
         return AutoIsolationSkipReason.USER_RESPONDED
-    return None
+    return protected_auto_isolation_reason(db, incident)
 
 
 def _existing_auto_isolation(
@@ -1127,6 +1155,70 @@ def _existing_auto_isolation(
         skipped_reason=AutoIsolationSkipReason.ALREADY_RESERVED,
         response_deadline_at=deadline,
     )
+
+
+def _protected_isolation_recorded(db: Session, incident_id: str) -> bool:
+    return any(
+        row.kind == notification_events.EventKind.PROTECTED_TARGET_ESCALATION.value
+        for row in notification_events_repo.list_by_incident(db, incident_id)
+    )
+
+
+def _record_protected_isolation(
+    db: Session, incident: models.Incident, trigger_source: TriggerSource, now: datetime,
+) -> bool:
+    """Incident 잠금 안에서 생략·에스컬레이션을 함께 한 번만 기록한다. commit은 호출부 몫이다."""
+    kind = notification_events.EventKind.PROTECTED_TARGET_ESCALATION
+    if _protected_isolation_recorded(db, incident.incident_id):
+        return False
+    platform_events_repo.record_platform_event(
+        db, PlatformEventAction.ACTION_BLOCK, platform_events_repo.SYSTEM,
+        outcome=PlatformEventOutcome.DENIED, tenant_id=incident.tenant_id,
+        target_id=incident.incident_id, details={"reason_code": AutoIsolationSkipReason.PROTECTED_TAG.value},
+        occurred_at=now,
+    )
+    notification_events.record(
+        db, incident=incident, kind=kind, phase=notification_events.EventPhase.CREATED,
+        trigger_source=trigger_source, reason_code=AutoIsolationSkipReason.PROTECTED_TAG.value,
+        occurred_at=now,
+    )
+    platform_events_repo.record_platform_event(
+        db, PlatformEventAction.INCIDENT_ESCALATE, platform_events_repo.SYSTEM,
+        tenant_id=incident.tenant_id, target_id=incident.incident_id,
+        details={"trigger_reason": AutoIsolationSkipReason.PROTECTED_TAG.value},
+        occurred_at=now,
+    )
+    return True
+
+
+def record_protected_auto_isolation(
+    db: Session, incident_id: str, *, trigger_source: TriggerSource, now: datetime,
+) -> None:
+    """AWS 사전 검사 없이 끝나는 보호 자산의 생략도 잠금·재판정 후 기록한다."""
+    if trigger_source not in _AUTO_ISOLATION_ELIGIBILITY:
+        raise ValueError(f"자동 격리 발동 출처가 아닙니다: {trigger_source}")
+    try:
+        incident = incidents_repo.lock_incident(db, incident_id)
+        if incident is None:
+            raise ValueError(f"Incident를 찾을 수 없습니다: {incident_id}")
+        tenant = (
+            None if incident.tenant_id is None
+            else tenants_repo.read_tenant_for_share(db, incident.tenant_id)
+        )
+        reason = automatic_trigger_block(
+            tenant, trigger_source=trigger_source, received_at=incident.created_at,
+            response_deadline_at=incident.response_deadline_at,
+        ) or _auto_isolation_skip_reason(db, incident, trigger_source, now)
+        if reason is not AutoIsolationSkipReason.PROTECTED_TAG:
+            db.rollback()
+            return
+        if _record_protected_isolation(db, incident, trigger_source, now):
+            db.commit()
+        else:
+            db.rollback()
+    except BaseException:
+        db.rollback()
+        raise
 
 
 def _settle_rejected_isolation(
@@ -1206,7 +1298,8 @@ def reserve_auto_isolation(
     FAIL이면 None을 넘긴다. now는 응답 기한과 비교하는 시각이다.
 
     입력이 계약과 다르면(판정·명령 불일치, EC2 인스턴스가 아닌 대상, 다른 대상·근거)
-    ValueError다 — 아무것도 저장하지 않는다. 건너뛸 때는 잠금을 놓고 돌아온다.
+    ValueError다 — 아무것도 저장하지 않는다. 보호 태그 생략만 활동 로그·에스컬레이션을 기록하고,
+    다른 생략은 아무것도 쓰지 않는다. 어느 쪽이든 잠금을 놓고 돌아온다.
     """
     if trigger_source not in _AUTO_ISOLATION_ELIGIBILITY:
         raise ValueError(f"자동 격리 발동 출처가 아닙니다: {trigger_source}")
@@ -1250,15 +1343,25 @@ def reserve_auto_isolation(
         if busy:
             reason = AutoIsolationSkipReason.TARGET_EXECUTION_IN_PROGRESS
     if reason is not None:
-        db.rollback()  # Incident 잠금을 놓는다. 이 호출은 아무것도 쓰지 않았다
-        logger.info(
-            "auto_isolation_skipped",
-            extra={
-                "incident_id": incident_id,
-                "trigger_source": trigger_source.value,
-                "reason": reason.value,
-            },
-        )
+        recorded = False
+        if reason is AutoIsolationSkipReason.PROTECTED_TAG:
+            try:
+                recorded = _record_protected_isolation(db, incident, trigger_source, now)
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+        else:
+            db.rollback()
+        if reason is not AutoIsolationSkipReason.PROTECTED_TAG or recorded:
+            logger.info(
+                "auto_isolation_skipped",
+                extra={
+                    "incident_id": incident_id,
+                    "trigger_source": trigger_source.value,
+                    "reason": reason.value,
+                },
+            )
         return AutoIsolationReservation(
             incident_id=incident_id,
             skipped_reason=reason,

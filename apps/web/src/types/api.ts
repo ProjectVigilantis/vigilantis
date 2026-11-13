@@ -322,9 +322,10 @@ export type ResponseMode = (typeof RESPONSE_MODES)[number];
  * 자동 발동(High 선차단·Medium 1분 격리)이 막힌 이유. 정지가 아니면 사람의 승인이 필요하다(#521).
  * `TENANT_SUSPENDED`: 테넌트가 정지됐다 — 플랫폼이 그 계정에 새로 들어가지 않는다(T-4 · #533).
  * `AUTO_ACTION_DISABLED`: 테넌트가 자동 조치를 껐거나, 그 발동을 정한 시각이 다시 켠 시각 이전이다.
- * 둘 다 해당하면 서버는 `TENANT_SUSPENDED`를 준다.
+ * `PROTECTED_TAG`: 보호 태그에 해당하거나, 보호 판정으로 이미 타임아웃 감시에서 제외됐다.
+ * 테넌트 차단 사유가 보호 태그보다 우선하며, 정지는 자동 조치 끄기보다 우선한다.
  */
-export const AUTO_ISOLATION_BLOCKS = ['TENANT_SUSPENDED', 'AUTO_ACTION_DISABLED'] as const;
+export const AUTO_ISOLATION_BLOCKS = ['TENANT_SUSPENDED', 'AUTO_ACTION_DISABLED', 'PROTECTED_TAG'] as const;
 export type AutoIsolationBlock = (typeof AUTO_ISOLATION_BLOCKS)[number];
 
 /**
@@ -1503,6 +1504,7 @@ export type PlatformEventAction =
   | 'INCIDENT_ANALYZE'
   | 'INCIDENT_RESOLVE'
   | 'INCIDENT_EVIDENCE_EXPORT'
+  | 'INCIDENT_ESCALATE'
   | 'ACTION_APPROVE'
   | 'ACTION_AUTO_TRIGGER'
   | 'ACTION_BLOCK'

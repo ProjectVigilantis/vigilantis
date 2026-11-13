@@ -435,6 +435,21 @@ def test_reason_code_never_rendered():
     assert "reasoncode" not in sns_body(event, route, BASE)
 
 
+@pytest.mark.parametrize("reason", ["PROTECTED_TAG", "LEAK-<!channel>-reasoncode"])
+def test_protected_escalation_renders_only_the_fixed_protection_reason(reason):
+    event = make_event(
+        kind="PROTECTED_TARGET_ESCALATION", phase="CREATED", outcome=None,
+        execution_id=None, runbook_id=None, execution_status=None, reason_code=reason,
+    )
+    slack = "\n".join(all_text(slack_payload(event, make_route(), BASE)))
+    sns = sns_body(event, make_route("SNS", TOPIC, "ap-northeast-2"), BASE)
+    for body in (slack, sns):
+        assert "보호 자산 대응 승인 필요" in body
+        assert ("판정 사유: 보호 태그(PROTECTED_TAG)" in body) is (reason == "PROTECTED_TAG")
+        assert "실행 ID:" not in body
+        assert "reasoncode" not in body
+
+
 def test_slack_destination_not_in_route_repr():
     assert SECRET not in repr(make_route())
 
