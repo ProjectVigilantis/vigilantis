@@ -89,7 +89,12 @@ class PlatformEventTargetType(str, Enum):
 
 @unique
 class PlatformEventAction(str, Enum):
-    """1차 행동 목록(#589 B). 결과는 outcome 칸이 싣는다 — 이름에 성공 · 실패를 넣지 않는다."""
+    """1차 행동 목록(#589 B). 결과는 outcome 칸이 싣는다 — 이름에 성공 · 실패를 넣지 않는다.
+
+    **값은 더하기만 한다.** 빼거나 이름을 바꾸면 그 값을 가진 기록이 조회되지 않는다 — action 칸은 문자열이고
+    조회 응답(schemas.api.platform_events)은 이 목록으로 검증해, 목록 밖 값이 한 행이라도 있으면 그 쪽 전체가
+    500 이다. 행은 고칠 수 없다.
+    """
 
     # 로그인 · 세션
     AUTH_LOGIN = "AUTH_LOGIN"
@@ -201,6 +206,26 @@ class TenantGroupDeleteDetails(PlatformEventDetails):
     staff_user_ids: tuple[uuid.UUID, ...]
 
 
+#: PATCH /tenants/{id} 가 받는 칸 가운데 TENANT_UPDATE 로 남기는 것. `auto_action_enabled` 는 여기 없다 —
+#: 켜고 끄는 일은 TENANT_AUTO_ACTION_CHANGE 가 전 · 후 값과 함께 따로 남긴다.
+TenantUpdateField = Literal["name", "regions", "collect_vpc_ids", "subscription"]
+
+
+class TenantUpdateDetails(PlatformEventDetails):
+    """고객사 수정에서 **값이 실제로 바뀐** 칸의 이름(이름순 · 중복 없음). 값은 싣지 않는다.
+
+    보냈지만 지금 값과 같은 칸은 들어가지 않는다. 바뀐 칸이 하나도 없으면 호출부가 행을 남기지 않는다.
+    """
+
+    changed_fields: tuple[TenantUpdateField, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _sorted_and_unique(self) -> "TenantUpdateDetails":
+        if list(self.changed_fields) != sorted(set(self.changed_fields)):
+            raise ValueError("changed_fields 는 이름순이고 중복이 없습니다")
+        return self
+
+
 class TenantVerifyDetails(PlatformEventDetails):
     """연결 확인 결과(TenantVerificationResult)를 그대로 싣는다.
 
@@ -306,7 +331,9 @@ ACTION_SPECS: Mapping[PlatformEventAction, ActionSpec] = {
         _C.TENANT_ADMIN, {_S}, {_USER}, _T.TENANT, TenantGroupChangeDetails
     ),
     _A.TENANT_CREATE: _spec(_C.TENANT_ADMIN, {_S}, {_USER}, _T.TENANT),
-    _A.TENANT_UPDATE: _spec(_C.TENANT_ADMIN, {_S}, {_USER}, _T.TENANT),
+    _A.TENANT_UPDATE: _spec(
+        _C.TENANT_ADMIN, {_S}, {_USER}, _T.TENANT, TenantUpdateDetails
+    ),
     _A.TENANT_SUSPEND: _spec(
         _C.TENANT_ADMIN, {_S}, {_USER, _SYSTEM}, _T.TENANT, TransitionDetails
     ),

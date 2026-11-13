@@ -28,7 +28,7 @@ from auth.access import (
 )
 from auth.http import get_clock
 from config import TenantSettings, get_tenant_settings
-from db.session import get_db
+from db.session import get_db, get_session_factory
 from fastapi import APIRouter, Depends, Query, Response
 from schemas.api.groups import TenantGroupRequest
 from schemas.api.tenants import (
@@ -54,6 +54,8 @@ _MANAGER = [Depends(require_tenant_management)]
 
 
 _ACTOR = Depends(get_actor)
+# 연결 확인 · 재개의 상태 충돌(409)을 요청 트랜잭션 밖에 남길 때 쓰는 세션(#589 B)
+_SESSIONS = Depends(get_session_factory)
 
 router = APIRouter(
     prefix="/api/v1/tenants",
@@ -168,8 +170,11 @@ def verify_tenant(
     db: Session = _DB,
     actor: admin_service.Actor = _ACTOR,
     settings: TenantSettings = _SETTINGS,
+    session_factory: Callable[[], Session] = _SESSIONS,
 ) -> TenantVerifyResponse:
-    return tenant_admin.verify_tenant(db, actor, tenant_id, settings)
+    return tenant_admin.verify_tenant(
+        db, actor, tenant_id, settings, session_factory=session_factory
+    )
 
 
 @router.post("/{tenant_id}/resume", response_model=TenantVerifyResponse, dependencies=_MANAGER)
@@ -178,5 +183,8 @@ def resume_tenant(
     db: Session = _DB,
     actor: admin_service.Actor = _ACTOR,
     settings: TenantSettings = _SETTINGS,
+    session_factory: Callable[[], Session] = _SESSIONS,
 ) -> TenantVerifyResponse:
-    return tenant_admin.resume_tenant(db, actor, tenant_id, settings)
+    return tenant_admin.resume_tenant(
+        db, actor, tenant_id, settings, session_factory=session_factory
+    )

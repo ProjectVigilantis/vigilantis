@@ -14,19 +14,24 @@
 #   - 범위(#572 7번): 목록은 SQL 로 범위를 건다(범위 밖 행 없음). 상세 · 하위 경로는 범위 없이 읽어 없거나 형식이 어긋난
 #     ID 는 404 TENANT_NOT_FOUND, 있지만 범위 밖이면 403 AUTH_FORBIDDEN 이다. 검색은 범위 없이 이름 · ID 와
 #     접근 가능 여부(can_access_tenant)만 싣는다.
+#   - 활동 로그(platform_events · #589 B): 생성 · 수정 · 자동 조치 켜고 끄기 · 정지 · 연결 확인 · 재개 · 삭제를 남긴다.
+#     상태가 바뀐 쓰기는 **같은 트랜잭션**에(로그를 못 쓰면 쓰기도 되돌아간다), 연결 확인 · 재개의 상태 충돌(409)은
+#     요청 트랜잭션을 되돌린 뒤 **따로**(platform_event_log.record_detached) 남긴다. 404 · 403 은 여기서 남기지 않는다.
+#     그룹 지정(set_tenant_group)의 기록은 그룹 기능 쪽 몫이다.
 #   - 그룹(#572 2번 · 3번): 고객사를 그룹에 넣고 빼기는 중앙 관리계정만 한다. 생성은 중앙 관리계정(그룹 선택 · 없는 그룹
 #     404)과 관리자 직원계정(잠금 안에서 다시 읽은 담당 그룹 중 하나 필수 — 빠지면 422 · 담당 밖이면 403)이 한다.
 # ==============================================================================
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from urllib.parse import urlencode
 from uuid import UUID
 
+import platform_event_log
 from auth import admin_service, service
 from auth.access import (
     can_access_tenant,
@@ -64,7 +69,12 @@ from schemas.api.tenants import (
     TenantVerificationResult,
     TenantVerifyResponse,
 )
-from schemas.platform_events import PlatformEventAction
+from schemas.platform_events import (
+    PlatformEventAction,
+    PlatformEventDetails,
+    PlatformEventOutcome,
+)
+from schemas.subscriptions import SubscriptionSource
 from services.aws.client import TenantAccess
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -246,6 +256,133 @@ def _commit_after(db: Session, build):
     return response
 
 
+# --- 활동 로그 (#589 B) -----------------------------------------------------------
+
+#: 자동 조치 켜짐 · 꺼짐을 TENANT_AUTO_ACTION_CHANGE 의 전 · 후 값으로 적는 말.
+_AUTO_ACTION = {True: "ENABLED", False: "DISABLED"}
+#: PATCH 가 받는 칸 가운데 값을 그대로 견주는 것(구독은 투영 칸 전부를 견준다 — _changed_fields).
+_PLAIN_UPDATE_FIELDS = ("name", "regions", "collect_vpc_ids")
+
+
+def _record(
+    db: Session,
+    user: service.CurrentUser,
+    action: PlatformEventAction,
+    tenant_id: str,
+    *,
+    outcome: PlatformEventOutcome = PlatformEventOutcome.SUCCEEDED,
+    details: dict | None = None,
+) -> None:
+    """고객사 관리 한 건을 업무 쓰기와 같은 트랜잭션에 남긴다. 행위자는 잠금 안에서 다시 판정한 user 다."""
+    platform_events_repo.record_platform_event(
+        db,
+        action,
+        platform_events_repo.person(user),
+        outcome=outcome,
+        tenant_id=tenant_id,
+        target_id=tenant_id,
+        details=details,
+    )
+
+
+def _update_snapshot(tenant: models.Tenant, body: TenantUpdateRequest) -> dict:
+    """PATCH 가 보낸 칸의 **바뀌기 전** 값. 쓰기 뒤의 다시 읽기가 같은 ORM 객체를 덮어쓰므로 값만 옮겨 둔다.
+
+    관리 쓰기는 사용자 표 잠금으로 줄을 서고, 고객 · 처리 주기의 구독 쓰기도 그 잠금을 참조용으로 잡으므로
+    (subscription_workflow) 이 값과 UPDATE 사이에 다른 쓰기가 끼어들지 않는다."""
+    sent = body.model_fields_set
+    before: dict = {}
+    if "name" in sent:
+        before["name"] = tenant.name
+    for field in ("regions", "collect_vpc_ids"):
+        if field in sent:
+            before[field] = list(getattr(tenant, field))
+    if "auto_action_enabled" in sent:
+        before["auto_action_enabled"] = tenant.auto_action_enabled
+    if "subscription" in sent:
+        wanted = tenants_repo.projection_values(body.subscription, SubscriptionSource.MANUAL)
+        before["subscription"] = {column: getattr(tenant, column) for column in wanted}
+    return before
+
+
+def _changed_fields(before: dict, body: TenantUpdateRequest) -> list[str]:
+    """TENANT_UPDATE 에 실을 칸 이름 — 보낸 칸 가운데 값이 실제로 달라진 것(이름순). 자동 조치는 따로 남는다."""
+    changed = [
+        field
+        for field in _PLAIN_UPDATE_FIELDS
+        if field in before and before[field] != getattr(body, field)
+    ]
+    if "subscription" in before and before["subscription"] != tenants_repo.projection_values(
+        body.subscription, SubscriptionSource.MANUAL
+    ):
+        changed.append("subscription")
+    return sorted(changed)
+
+
+def _record_update(
+    db: Session, user: service.CurrentUser, tenant_id: str, before: dict, body: TenantUpdateRequest
+) -> None:
+    """수정 한 번이 남기는 행 — 바뀐 칸이 있으면 TENANT_UPDATE, 자동 조치가 뒤집혔으면 TENANT_AUTO_ACTION_CHANGE.
+    지금 값과 같은 값만 보낸 PATCH 는 행을 남기지 않는다(일어난 일이 없다)."""
+    changed = _changed_fields(before, body)
+    if changed:
+        _record(
+            db, user, PlatformEventAction.TENANT_UPDATE, tenant_id, details={"changed_fields": changed}
+        )
+    was = before.get("auto_action_enabled")
+    if was is not None and was != body.auto_action_enabled:
+        _record(
+            db,
+            user,
+            PlatformEventAction.TENANT_AUTO_ACTION_CHANGE,
+            tenant_id,
+            details={"before": _AUTO_ACTION[was], "after": _AUTO_ACTION[body.auto_action_enabled]},
+        )
+
+
+def _event_reason(reason_code: str | None, fallback: str) -> str:
+    """연결 확인의 사유(AWS 오류 코드 · 예외 클래스명)를 활동 로그의 사유 코드로. 고객사 행의 사유 칸은 형식을
+    두지 않아(200자) 활동 로그 형식 밖의 값이 올 수 있다 — 그때는 결과 이름을 싣는다(기록 실패로 확인 결과까지
+    되돌리지 않는다)."""
+    if reason_code is not None:
+        try:
+            PlatformEventDetails(reason_code=reason_code)
+            return reason_code
+        except ValueError:
+            pass
+    return fallback
+
+
+def _refused_verification(
+    db: Session,
+    session_factory: Callable[[], Session],
+    action: PlatformEventAction,
+    user: service.CurrentUser,
+    tenant_id: str,
+    result: TenantVerificationResult | None = None,
+) -> ApiError:
+    """연결 확인 · 재개가 상태 충돌(409)로 끝났다 — 요청 트랜잭션 밖에 DENIED 한 행을 남기고 그 409 를 돌려준다.
+
+    rollback 이 먼저다 — 요청이 쥔 사용자 표 잠금을 놓아야 따로 쓰는 세션의 FK 확인이 기다리지 않는다
+    (workflows 의 정지 거절과 같은 순서). result 는 확인을 돌린 뒤의 충돌에만 있다. DB 쓰기 실패는
+    record_detached 가 앱 로그로 남기고, 409 는 그대로 나간다."""
+    actor = platform_events_repo.person(user)
+    db.rollback()
+    details: dict = {"reason_code": ErrorCode.TENANT_STATE_CONFLICT.value}
+    if result is not None:
+        details["result"] = result
+    platform_event_log.record_detached(
+        session_factory,
+        action,
+        actor,
+        outcome=PlatformEventOutcome.DENIED,
+        tenant_id=tenant_id,
+        target_id=tenant_id,
+        details=details,
+    )
+    return ApiError(ErrorCode.TENANT_STATE_CONFLICT)
+
+
 @dataclass(frozen=True)
 class _ConnectionTarget:
     status: TenantStatus
@@ -284,14 +421,19 @@ def _verify_tenant(
     settings: TenantSettings,
     *,
     resume: bool,
+    session_factory: Callable[[], Session],
 ) -> TenantVerifyResponse:
     accepted = RESUMABLE_STATUSES if resume else VERIFIABLE_STATUSES
     write = tenants_repo.resume_tenant if resume else tenants_repo.record_verification
+    action = PlatformEventAction.TENANT_RESUME if resume else PlatformEventAction.TENANT_VERIFY
     try:
         with _management(db, actor) as user:
             target = _connection_target(_load(db, tenant_id, user).tenant)
             if target.status not in accepted:
-                raise ApiError(ErrorCode.TENANT_STATE_CONFLICT)
+                # 확인을 돌리기 전에 멈췄다 — 결과 없는 거절로 남긴다
+                raise _refused_verification(
+                    db, session_factory, action, user, target.access.tenant_id
+                )
     finally:
         db.rollback()
 
@@ -304,10 +446,18 @@ def _verify_tenant(
         _load(db, stored_id, user)
         # 설정 대조와 조건부 갱신 사이에도 다른 쓰기가 끼어들지 못하게 한다.
         current = tenants_repo.read_tenant_for_share(db, stored_id)
+
+        def refused() -> ApiError:
+            # 확인은 돌렸지만 그 사이 고객사가 바뀌어 결과를 쓰지 못한다 — 얻은 결과를 실어 거절로 남긴다
+            return _refused_verification(
+                db, session_factory, action, user, stored_id, outcome.result
+            )
+
         if current is None:
-            raise _rejected(db, stored_id, user)
+            _load(db, stored_id, user)  # 그 사이 지워졌으면 404 · 담당에서 빠졌으면 403
+            raise refused()
         if _connection_target(current) != target:
-            raise ApiError(ErrorCode.TENANT_STATE_CONFLICT)
+            raise refused()
         if not write(
             db,
             stored_id,
@@ -316,7 +466,8 @@ def _verify_tenant(
             guardduty_failures=[asdict(failure) for failure in outcome.guardduty_failures],
             now=observed_at,
         ):
-            raise _rejected(db, stored_id, user)
+            _load(db, stored_id, user)
+            raise refused()
         if resume and outcome.result is TenantVerificationResult.OK:
             # 재개는 구독을 바꾸지 않는다 — 처리 주기가 늦어 남은 투영만 계약의 현재 권리로 맞춘다(갱신을 끈 기간이
             # 끝났으면 Free). 자동 갱신 대기는 처리 주기가 다음 기간을 이을 때까지 그대로 둔다(T-16 · #528).
@@ -324,21 +475,47 @@ def _verify_tenant(
             import subscription_workflow
 
             subscription_workflow.reconcile_tenant_subscription(db, stored_id, now=observed_at)
+        # 확인 결과(실패 포함)는 고객사 행에 남는 쓰기라 같은 트랜잭션이다. 성공은 결과가 OK 일 때뿐이다
+        ok = outcome.result is TenantVerificationResult.OK
+        _record(
+            db,
+            user,
+            action,
+            stored_id,
+            outcome=PlatformEventOutcome.SUCCEEDED if ok else PlatformEventOutcome.FAILED,
+            details={"result": outcome.result}
+            | ({} if ok else {"reason_code": _event_reason(outcome.reason_code, outcome.result.value)}),
+        )
         return _commit_after(
             db, lambda: _verification_response(_load(db, stored_id, user), settings)
         )
 
 
 def verify_tenant(
-    db: Session, actor: admin_service.Actor, tenant_id: str, settings: TenantSettings
+    db: Session,
+    actor: admin_service.Actor,
+    tenant_id: str,
+    settings: TenantSettings,
+    *,
+    session_factory: Callable[[], Session],
 ) -> TenantVerifyResponse:
-    return _verify_tenant(db, actor, tenant_id, settings, resume=False)
+    """session_factory 는 상태 충돌(409)을 요청 트랜잭션 밖에 남길 때만 쓴다(#589 B)."""
+    return _verify_tenant(
+        db, actor, tenant_id, settings, resume=False, session_factory=session_factory
+    )
 
 
 def resume_tenant(
-    db: Session, actor: admin_service.Actor, tenant_id: str, settings: TenantSettings
+    db: Session,
+    actor: admin_service.Actor,
+    tenant_id: str,
+    settings: TenantSettings,
+    *,
+    session_factory: Callable[[], Session],
 ) -> TenantVerifyResponse:
-    return _verify_tenant(db, actor, tenant_id, settings, resume=True)
+    return _verify_tenant(
+        db, actor, tenant_id, settings, resume=True, session_factory=session_factory
+    )
 
 
 def _creation_group(db: Session, user: service.CurrentUser, requested: UUID | None) -> str | None:
@@ -384,6 +561,9 @@ def create_tenant_uncommitted(
         if getattr(getattr(exc.orig, "diag", None), "constraint_name", None) == _ACCOUNT_UNIQUE:
             raise ApiError(ErrorCode.TENANT_ACCOUNT_CONFLICT) from exc
         raise
+    # 생성 행은 여기서 남긴다(#589 B) — POST /tenants 와 도입 신청 승인이 같은 본체를 지나고, 호출부의 트랜잭션이
+    # 되돌려지면(503 · 승인 실패) 함께 사라진다. 행위자는 호출부가 넘긴 user(요청자 · 승인한 직원)다
+    _record(db, user, PlatformEventAction.TENANT_CREATE, tenant.tenant_id)
     # 새 테넌트에는 자산 · 인시던트가 없다 — 다시 세지 않는다
     return TenantCreateResponse(
         tenant=_detail(tenants_repo.TenantWithCounts(tenant, 0, 0), settings),
@@ -442,9 +622,11 @@ def update_tenant(
     now: datetime,
 ) -> TenantDetail:
     with _management(db, actor) as user:
-        stored_id = _load(db, tenant_id, user).tenant.tenant_id
+        tenant = _load(db, tenant_id, user).tenant
+        stored_id, before = tenant.tenant_id, _update_snapshot(tenant, body)
         if not tenants_repo.update_tenant(db, stored_id, body, now=now):
             raise _rejected(db, stored_id, user)  # 그 사이 지워졌다 → 404 · 모의 계약 보호 → 409
+        _record_update(db, user, stored_id, before, body)
         return _commit_after(db, lambda: _detail(_load(db, stored_id, user), settings))
 
 
@@ -462,9 +644,18 @@ def suspend_tenant(
     고객의 서비스 이용 중단(subscription_workflow.stop_service)과 같은 전이다 — 구독 계약을 해지하지 않는다.
     정지 중에도 모의 계약의 갱신 · 만료와 투영은 계속된다."""
     with _management(db, actor) as user:
-        stored_id = _load(db, tenant_id, user).tenant.tenant_id
+        tenant = _load(db, tenant_id, user).tenant
+        stored_id, before = tenant.tenant_id, tenant.status
         if not tenants_repo.suspend_tenant(db, stored_id, reason=reason, now=now):
             raise _rejected(db, stored_id, user)
+        # 사유 원문은 싣지 않는다 — 운영자가 적는 글이고 이 로그는 고칠 수 없다. 원문은 고객사 행(suspended_reason)에 있다
+        _record(
+            db,
+            user,
+            PlatformEventAction.TENANT_SUSPEND,
+            stored_id,
+            details={"before": before.value, "after": TenantStatus.SUSPENDED.value},
+        )
         return _commit_after(db, lambda: _detail(_load(db, stored_id, user), settings))
 
 
@@ -482,4 +673,6 @@ def delete_tenant(db: Session, actor: admin_service.Actor, tenant_id: str) -> No
             raise ApiError(ErrorCode.TENANT_STATE_CONFLICT) from exc
         if not deleted:
             raise _rejected(db, stored_id, user)
+        # 활동 로그는 고객사를 FK 로 묶지 않는다 — 지운 뒤에도 생성 · 삭제 행이 남는다
+        _record(db, user, PlatformEventAction.TENANT_DELETE, stored_id)
         db.commit()
