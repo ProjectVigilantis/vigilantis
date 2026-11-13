@@ -3,6 +3,7 @@
 // TENANT_STATE_CONFLICT), 여기서는 서버가 받지 않을 요청의 버튼을 미리 막는 데만 쓴다.
 
 import type { EnumLabel } from './enum-labels.ts';
+import { GUARDDUTY_FEE_NOTICE } from './guardduty.ts';
 import {
   TENANT_DELETABLE_STATUSES,
   TENANT_RESUMABLE_STATUSES,
@@ -49,8 +50,10 @@ export const VERIFICATION_LABELS: Record<TenantVerificationResult, EnumLabel & {
   GUARDDUTY_DISABLED: {
     label: 'GuardDuty 꺼짐',
     tone: 'orange',
-    // 정지된 탐지기는 플랫폼이 다시 켜지 않는다(#588 Q1). 안내 페이지 · 요금 고지는 #588 D.
-    hint: '관제 리전 중 GuardDuty를 켜지 못한 곳이 있습니다(정지된 탐지기 · 조직 관리 · SCP · 권한). 고객사에 GuardDuty를 켜게 한 뒤 다시 확인하세요.',
+    // 정지된 탐지기는 플랫폼이 다시 켜지 않는다(#588 Q1). 어느 리전이 왜 꺼져 있는지와 고객사에 보낼 안내문은
+    // 고객 상세의 연결 패널이 보인다(components/tenants/guardduty-guidance.tsx · lib/guardduty.ts, #588 D).
+    // 이 문구는 고객 상세 화면(상단 배너 · 「연결」 패널)에만 나오고, 리전별 안내 구역이 그 아래에 있다.
+    hint: '관제 리전 중 GuardDuty를 켜지 못한 곳이 있습니다(정지된 탐지기 · 조직 관리 · SCP · 권한). 아래 리전별 안내를 고객사에 보내 켜게 한 뒤 다시 확인하세요.',
   },
   UNREACHABLE: {
     label: '확인 불가',
@@ -138,6 +141,9 @@ export const ONBOARDING_STACK_NAME = 'vigilantis-access';
  * 첫 리전(`regions[0]`)에 만들어진다(tenant_admin.py `onboarding_url`). 역할 이름은 계약이 정한 값이다
  * (tenants.py `DEFAULT_ACCESS_ROLE_NAME`). 역할의 권한 범위 같은 템플릿 내용은 템플릿이 저장소에 들어오기
  * 전까지 적지 않는다.
+ *
+ * 연결을 확인할 때 관제 리전에 GuardDuty 탐지기가 없으면 플랫폼이 만든다(T-14 B안 · #588). 고객 계정에 요금이
+ * 생기는 일이라 스택을 만들기 전에 알 수 있게 여기서 미리 알린다(#588 D 요금 고지).
  */
 export function onboardingMessage(
   tenant: Pick<TenantDetail, 'aws_account_id' | 'access_role_arn' | 'regions'>,
@@ -151,6 +157,9 @@ export function onboardingMessage(
     `3. ${tenant.regions[0]} 리전의 스택 ${ONBOARDING_STACK_NAME}이 CREATE_COMPLETE가 되면 회신 부탁드립니다.`,
     '',
     `만들어지는 역할: ${roleNameOf(tenant.access_role_arn)}`,
+    '',
+    `연결을 확인할 때 관제 리전(${tenant.regions.join(', ')})에 Amazon GuardDuty가 꺼져 있으면 Vigilantis가 켭니다.`,
+    GUARDDUTY_FEE_NOTICE,
     '',
     onboardingUrl,
   ].join('\n');

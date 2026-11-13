@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from urllib.parse import urlencode
 from uuid import UUID
@@ -107,6 +107,7 @@ def _verification(tenant: models.Tenant) -> TenantVerification | None:
         result=tenant.last_verification_result,
         verified_at=tenant.last_verified_at,
         reason_code=tenant.last_verification_reason_code,
+        guardduty_failures=tenant.last_verification_guardduty_failures,
     )
 
 
@@ -308,7 +309,12 @@ def _verify_tenant(
         if _connection_target(current) != target:
             raise ApiError(ErrorCode.TENANT_STATE_CONFLICT)
         if not write(
-            db, stored_id, result=outcome.result, reason_code=outcome.reason_code, now=observed_at
+            db,
+            stored_id,
+            result=outcome.result,
+            reason_code=outcome.reason_code,
+            guardduty_failures=[asdict(failure) for failure in outcome.guardduty_failures],
+            now=observed_at,
         ):
             raise _rejected(db, stored_id, user)
         if resume and outcome.result is TenantVerificationResult.OK:

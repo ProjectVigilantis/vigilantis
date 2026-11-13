@@ -19,7 +19,7 @@
 from __future__ import annotations
 
 import secrets
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
@@ -304,12 +304,19 @@ def update_tenant(
 # --- 상태 전이 ------------------------------------------------------------------
 
 
-def _verification(result: TenantVerificationResult, reason_code: Optional[str], now: datetime) -> dict:
-    # OK 와 사유의 짝은 DB CHECK(verification_shape)가 거절한다 — 여기서 고쳐 쓰지 않는다
+def _verification(
+    result: TenantVerificationResult,
+    reason_code: Optional[str],
+    guardduty_failures: Sequence[Mapping[str, str]],
+    now: datetime,
+) -> dict:
+    # OK 와 사유의 짝 · 리전 목록과 결과의 짝은 DB CHECK(verification_shape · verification_guardduty_failures_shape)가
+    # 거절한다 — 여기서 고쳐 쓰지 않는다. 리전 목록은 확인마다 통째로 바꾼다(없으면 NULL — 지난 확인의 목록을 남기지 않는다)
     return {
         "last_verification_result": result,
         "last_verified_at": now,
         "last_verification_reason_code": reason_code,
+        "last_verification_guardduty_failures": [dict(f) for f in guardduty_failures] or None,
     }
 
 
@@ -319,15 +326,18 @@ def record_verification(
     *,
     result: TenantVerificationResult,
     reason_code: Optional[str],
+    guardduty_failures: Sequence[Mapping[str, str]] = (),
     now: datetime,
 ) -> bool:
     """POST /verify 의 결과를 기록한다. VERIFIABLE_STATUSES 밖이면 False.
+
+    guardduty_failures 는 GuardDuty 를 켜지 못한 리전들({region, reason_code}) — GUARDDUTY_DISABLED 에만 준다.
 
     PENDING_CONNECTION 에서 OK 면 ACTIVE 로 올린다. **그 밖에는 상태를 바꾸지 않는다** —
     ACTIVE 의 확인 실패로 자동 정지하지 않는다(정지는 사람의 판단이다). 확인하는 사이 다른
     관리자가 정지했으면 0행이라, 정지된 테넌트에 확인 결과가 덧씌워지지 않는다.
     """
-    values = _verification(result, reason_code, now)
+    values = _verification(result, reason_code, guardduty_failures, now)
     if result is TenantVerificationResult.OK:
         # 올리는 것은 PENDING_CONNECTION 하나다 — 받는 상태 상수가 넓어져도 OK 가 정지를 풀지 않게
         # 「모두 ACTIVE 로」가 아니라 조건식으로 쓴다(정지를 푸는 길은 resume_tenant 하나다)
@@ -367,6 +377,7 @@ def resume_tenant(
     *,
     result: TenantVerificationResult,
     reason_code: Optional[str],
+    guardduty_failures: Sequence[Mapping[str, str]] = (),
     now: datetime,
 ) -> bool:
     """POST /resume — 먼저 돌린 연결 확인의 결과와 함께 받는다. RESUMABLE_STATUSES 밖이면 False.
@@ -377,7 +388,7 @@ def resume_tenant(
     **구독은 바꾸지 않는다**(T-16 · #528) — 정지 중에도 모의 계약의 갱신 · 만료와 투영이 계속되므로, 재개는
     지금 권리를 그대로 이어 간다(Free 로 다시 시작하지 않고 tenant_subscription_history 에 새 행을 쓰지 않는다).
     """
-    values = _verification(result, reason_code, now)
+    values = _verification(result, reason_code, guardduty_failures, now)
     if result is TenantVerificationResult.OK:
         values |= {"status": TenantStatus.ACTIVE, "suspended_at": None, "suspended_reason": None}
     return _changed_one(

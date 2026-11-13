@@ -816,12 +816,25 @@ export const TENANT_VERIFICATION_RESULTS = [
 ] as const;
 export type TenantVerificationResult = (typeof TENANT_VERIFICATION_RESULTS)[number];
 
+/** GuardDuty 를 켜지 못한 관제 리전 하나와 그 사유(T-14 · #588 D). */
+export interface GuardDutyRegionFailure {
+  region: string;
+  /** `DetectorDisabled`(정지된 탐지기 — 플랫폼이 다시 켜지 않는다) 또는 AWS 오류 코드 · 예외 클래스명. */
+  reason_code: string;
+}
+
 /** 마지막 연결 확인 — 그 시각의 관측값이다. 「지금 연결된다」로 읽지 않는다. */
 export interface TenantVerification {
   result: TenantVerificationResult;
   verified_at: IsoDateTime;
   /** 실패일 때만 있다(AWS 오류 코드 · 예외 클래스명). */
   reason_code: string | null;
+  /**
+   * GUARDDUTY_DISABLED 일 때 켜지 못한 관제 리전 전부와 리전별 사유(관제 리전 순서). 여기 없는 관제 리전은 그
+   * 확인에서 켜져 있었다. `reason_code` 는 첫 항목의 사유와 같다. 그 밖의 결과와, 이 칸이 생기기 전에 남은
+   * GUARDDUTY_DISABLED 기록은 null 이다.
+   */
+  guardduty_failures: GuardDutyRegionFailure[] | null;
 }
 
 /**

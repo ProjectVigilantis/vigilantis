@@ -25,7 +25,7 @@ function tenant(id: string, account: string, status: TenantListItem['status'], e
   };
 }
 
-const verified = (result: TenantVerificationResult) => ({ result, verified_at: '2026-10-29T11:00:00Z', reason_code: null });
+const verified = (result: TenantVerificationResult) => ({ result, verified_at: '2026-10-29T11:00:00Z', reason_code: null, guardduty_failures: null });
 
 function incident(id: string, account: string, status: IncidentListItem['status'], updated = '2026-10-29T10:00:00Z'): IncidentListItem {
   return {
@@ -124,7 +124,7 @@ test('연결 상태는 여섯 분류이고 정지 고객은 빼고 미납 고객
   const points = connectionPoints(
     [
       tenant('ok', '1', 'ACTIVE', { last_verification: verified('OK') }),
-      tenant('stale', '2', 'ACTIVE', { last_verification: { result: 'OK', verified_at: '2026-10-27T00:00:00Z', reason_code: null } }),
+      tenant('stale', '2', 'ACTIVE', { last_verification: { result: 'OK', verified_at: '2026-10-27T00:00:00Z', reason_code: null, guardduty_failures: null } }),
       tenant('fail', '3', 'ACTIVE', { last_verification: verified('READ_DENIED') }),
       tenant('unreach', '4', 'ACTIVE', { last_verification: verified('UNREACHABLE') }),
       tenant('pending', '5', 'PENDING_CONNECTION'),

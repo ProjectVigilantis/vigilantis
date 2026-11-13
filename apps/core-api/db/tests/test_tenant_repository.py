@@ -30,7 +30,7 @@ from schemas.api.tenants import (
     TenantUpdateRequest,
     TenantVerificationResult,
 )
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -250,6 +250,39 @@ def test_ok_without_reason_and_failure_with_reason_are_enforced_by_the_database(
     tenant = _create(db)
     with pytest.raises(IntegrityError), db.begin_nested():
         tenants_repo.record_verification(db, tenant.tenant_id, result=DENIED, reason_code=None, now=LATER)
+
+
+_FAILURES = [
+    {"region": "ap-northeast-2", "reason_code": "DetectorDisabled"},
+    {"region": "us-east-1", "reason_code": "AccessDeniedException"},
+]
+
+
+@pytest.mark.parametrize("write", ["record_verification", "resume_tenant"])
+def test_guardduty_failures_are_stored_and_replaced_by_the_next_verification(db, write):
+    # 리전 목록은 그 확인의 관측이다(#588 D) — 다음 확인이 다른 결과면 지난 목록을 남기지 않는다
+    status = TenantStatus.SUSPENDED if write == "resume_tenant" else TenantStatus.PENDING_CONNECTION
+    tenant = _in_status(db, status)
+    record = getattr(tenants_repo, write)
+    assert record(
+        db, tenant.tenant_id, result=TenantVerificationResult.GUARDDUTY_DISABLED,
+        reason_code="DetectorDisabled", guardduty_failures=_FAILURES, now=LATER)
+    assert _get(db, tenant.tenant_id).last_verification_guardduty_failures == _FAILURES
+
+    assert record(db, tenant.tenant_id, result=DENIED, reason_code="AccessDenied", now=LATER)
+    assert _get(db, tenant.tenant_id).last_verification_guardduty_failures is None
+    # JSON null 이 아니라 SQL NULL 로 비운다 — CHECK 와 조회가 NULL 을 본다
+    assert db.execute(text(
+        "SELECT last_verification_guardduty_failures IS NULL FROM tenants WHERE tenant_id = :id"
+    ), {"id": tenant.tenant_id}).scalar_one() is True
+
+
+def test_region_list_on_another_result_is_rejected_by_the_database(db):
+    tenant = _create(db)
+    with pytest.raises(IntegrityError, match="verification_guardduty_failures_shape"), db.begin_nested():
+        tenants_repo.record_verification(
+            db, tenant.tenant_id, result=DENIED, reason_code="AccessDenied",
+            guardduty_failures=_FAILURES, now=LATER)
 
 
 # ----- 정지 · 재개 ----------------------------------------------------------------

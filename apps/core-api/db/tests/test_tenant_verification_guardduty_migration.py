@@ -20,9 +20,8 @@ from alembic.migration import MigrationContext
 from config import get_settings
 from db import models
 from schemas.api.tenants import TenantVerificationResult
-from sqlalchemy import text
+from sqlalchemy import insert, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
 
 REVISION = "d588e4b1c2a7"
 PARENT = "c589e7a1b2d3"
@@ -47,12 +46,15 @@ def migration_config(pg_engine, monkeypatch):
         get_settings.cache_clear()
 
 
-def _tenant(result: TenantVerificationResult | None = None, reason: str | None = None) -> models.Tenant:
-    return models.Tenant(
-        name="학원", aws_account_id=ACCOUNT, access_role_arn=f"arn:aws:iam::{ACCOUNT}:role/vigilantis-access",
-        external_id="e" * 32, regions=["ap-northeast-2"], last_verification_result=result,
-        last_verified_at=None if result is None else datetime.now(UTC), last_verification_reason_code=reason,
-    )
+def _add_tenant(pg_engine, result: TenantVerificationResult, reason: str) -> None:
+    # 값을 준 칸만 넣는다 — 이 revision 뒤에 생긴 칸(ORM 에는 있다)을 INSERT 에 싣지 않게 Core 로 쓴다
+    with pg_engine.begin() as connection:
+        connection.execute(insert(models.Tenant).values(
+            name="학원", aws_account_id=ACCOUNT,
+            access_role_arn=f"arn:aws:iam::{ACCOUNT}:role/vigilantis-access",
+            external_id="e" * 32, regions=["ap-northeast-2"], last_verification_result=result,
+            last_verified_at=datetime.now(UTC), last_verification_reason_code=reason,
+        ))
 
 
 def test_enum_follows_the_contract_and_roundtrips(pg_engine, migration_config):
@@ -75,9 +77,7 @@ def test_enum_follows_the_contract_and_roundtrips(pg_engine, migration_config):
 
 
 def test_downgrade_refuses_while_a_guardduty_observation_remains(pg_engine, migration_config):
-    with Session(pg_engine) as session:
-        session.add(_tenant(TenantVerificationResult.GUARDDUTY_DISABLED, "DetectorDisabled"))
-        session.commit()
+    _add_tenant(pg_engine, TenantVerificationResult.GUARDDUTY_DISABLED, "DetectorDisabled")
     try:
         with pytest.raises(RuntimeError, match="GUARDDUTY_DISABLED"):
             command.downgrade(migration_config, PARENT)
@@ -89,9 +89,7 @@ def test_downgrade_refuses_while_a_guardduty_observation_remains(pg_engine, migr
 
 
 def test_downgrade_keeps_other_observations_and_the_shape_check(pg_engine, migration_config):
-    with Session(pg_engine) as session:
-        session.add(_tenant(TenantVerificationResult.READ_DENIED, "AccessDenied"))
-        session.commit()
+    _add_tenant(pg_engine, TenantVerificationResult.READ_DENIED, "AccessDenied")
     command.downgrade(migration_config, PARENT)
     try:
         with pg_engine.connect() as connection:

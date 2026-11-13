@@ -1,7 +1,7 @@
 # ==============================================================================
 # [파일 설명]  담당: 김승철 (API 계약 · BE)
 # 연결 확인 판정(tenant_verification.judge_connection) — AWS 대역(예외를 던지는 함수)으로 결과 6갈래를 고정한다.
-# (Post-MVP T-4 2단계 B · #533, GuardDuty 단계 #588 B)
+# (Post-MVP T-4 2단계 B · #533, GuardDuty 단계 #588 B · 리전별 실패 목록 #588 D)
 #
 #   - LocalStack 은 신뢰 정책 · ExternalId 를 검사하지 않아 ASSUME_DENIED 를 재현하지 못한다 — 판정은 대역으로,
 #     실제 역할의 OK · 틀린 ExternalId 의 ASSUME_DENIED 는 학원 계정 실측(#533 수용 기준)으로 본다.
@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import UTC, datetime
 
 import botocore.retries.standard as botocore_retry
@@ -26,6 +27,7 @@ from tenant_verification import (
     ACCOUNT_MISMATCH_REASON,
     PLATFORM_CREDENTIAL_ERROR_CODES,
     UNREACHABLE_ERROR_CODES,
+    RegionFailure,
     VerificationOutcome,
     judge_connection,
 )
@@ -33,6 +35,7 @@ from tenant_verification import (
 R = TenantVerificationResult
 ACCOUNT = "111122223333"
 SESSION = object()
+SEOUL, VIRGINIA, TOKYO = "ap-northeast-2", "us-east-1", "ap-northeast-1"
 
 
 def _client_error(code: str | None, *, status: int = 400, operation: str = "AssumeRole") -> ClientError:
@@ -48,16 +51,19 @@ def _raise(exc: BaseException):
 
 
 def _judge(
-    *, assume=None, caller=None, read=None, guardduty=None, calls: list | None = None
+    *, assume=None, caller=None, read=None, guardduty=None, regions=(SEOUL,),
+    calls: list | None = None,
 ) -> VerificationOutcome:
-    """기본은 네 단계가 모두 통과하는 대역이다. 부른 단계를 calls 에 남긴다."""
+    """기본은 네 단계가 모두 통과하는 대역이다. 부른 단계를 calls 에 남긴다(GuardDuty 는 리전마다 한 번).
+
+    guardduty 는 (세션, 리전) 을 받는다."""
     calls = [] if calls is None else calls
 
     def step(name, fn, default):
         def wrapped(*args):
             calls.append(name)
             if args:
-                assert args == (SESSION,), "받은 세션을 다음 단계에 그대로 넘긴다"
+                assert args[0] is SESSION, "받은 세션을 다음 단계에 그대로 넘긴다"
             return (fn or default)(*args)
 
         return wrapped
@@ -67,7 +73,8 @@ def _judge(
         assume=step("assume", assume, lambda: SESSION),
         caller_account=step("caller", caller, lambda _s: ACCOUNT),
         read=step("read", read, lambda _s: {"Reservations": []}),
-        guardduty=step("guardduty", guardduty, lambda _s: None),
+        regions=regions,
+        guardduty=step("guardduty", guardduty, lambda _s, _region: None),
     )
 
 
@@ -154,12 +161,59 @@ def test_read_refusal_is_read_denied(code):
 ])
 def test_guardduty_refusal_is_guardduty_disabled(code):
     outcome = _judge(guardduty=_raise(_client_error(code, status=403, operation="CreateDetector")))
-    assert outcome == VerificationOutcome(R.GUARDDUTY_DISABLED, code)
+    assert outcome == VerificationOutcome(R.GUARDDUTY_DISABLED, code, (RegionFailure(SEOUL, code),))
 
 
 def test_a_suspended_detector_is_guardduty_disabled_with_its_reason():
-    outcome = _judge(guardduty=lambda _s: DETECTOR_DISABLED_REASON)
-    assert outcome == VerificationOutcome(R.GUARDDUTY_DISABLED, DETECTOR_DISABLED_REASON)
+    outcome = _judge(guardduty=lambda _s, _region: DETECTOR_DISABLED_REASON)
+    assert outcome == VerificationOutcome(
+        R.GUARDDUTY_DISABLED, DETECTOR_DISABLED_REASON, (RegionFailure(SEOUL, DETECTOR_DISABLED_REASON),)
+    )
+
+
+def _per_region(answers: dict):
+    """리전별 답 — 문자열은 사유, 예외는 던지고, None(없는 리전 포함)은 켜짐."""
+
+    def guardduty(_session, region):
+        answer = answers.get(region)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    return guardduty
+
+
+def test_guardduty_visits_every_region_and_lists_each_failure_in_region_order():
+    # 켜지 못한 리전에서 멈추지 않는다 — 안내 화면이 고객이 켜야 할 리전을 한 번에 보인다(#588 D)
+    calls: list = []
+    denied = _client_error("AccessDeniedException", status=403, operation="CreateDetector")
+    outcome = _judge(
+        regions=(SEOUL, VIRGINIA, TOKYO),
+        guardduty=_per_region({SEOUL: DETECTOR_DISABLED_REASON, TOKYO: denied}),
+        calls=calls,
+    )
+    assert outcome == VerificationOutcome(
+        R.GUARDDUTY_DISABLED,
+        DETECTOR_DISABLED_REASON,  # 사유 코드는 첫 실패 리전의 것
+        (RegionFailure(SEOUL, DETECTOR_DISABLED_REASON), RegionFailure(TOKYO, "AccessDeniedException")),
+    )
+    assert calls.count("guardduty") == 3
+
+
+def test_guardduty_ok_everywhere_carries_no_region_list():
+    assert _judge(regions=(SEOUL, VIRGINIA)) == VerificationOutcome(R.OK, None, ())
+
+
+def test_unreachable_region_makes_the_whole_check_unreachable_without_a_region_list():
+    # 다 보지 못했으면 리전 목록을 남기지 않는다 — 앞 리전의 거절도 다음 확인이 다시 본다
+    calls: list = []
+    outcome = _judge(
+        regions=(SEOUL, VIRGINIA, TOKYO),
+        guardduty=_per_region({SEOUL: DETECTOR_DISABLED_REASON, VIRGINIA: _client_error("ThrottlingException")}),
+        calls=calls,
+    )
+    assert outcome == VerificationOutcome(R.UNREACHABLE, "ThrottlingException", ())
+    assert calls.count("guardduty") == 2  # 묻지 못한 리전에서 멈춘다
 
 
 # --- 사유 · 계약 모양 -------------------------------------------------------------
@@ -182,11 +236,40 @@ def test_non_aws_exceptions_are_not_recorded_as_a_result():
     _judge(caller=lambda _s: "444455556666"),
     _judge(read=_raise(_client_error("UnauthorizedOperation", status=403))),
     _judge(read=_raise(EndpointConnectionError(endpoint_url="https://ec2.amazonaws.com"))),
-    _judge(guardduty=lambda _s: DETECTOR_DISABLED_REASON),
+    _judge(guardduty=lambda _s, _region: DETECTOR_DISABLED_REASON, regions=(SEOUL, VIRGINIA)),
 ], ids=lambda o: o.result.value)
 def test_every_outcome_fits_the_contract_shape(outcome):
-    # OK ⇔ reason_code 없음 — 계약 모델과 DB CHECK(verification_shape)가 같은 짝을 요구한다
-    TenantVerification(result=outcome.result, verified_at=datetime.now(UTC), reason_code=outcome.reason_code)
+    # OK ⇔ reason_code 없음 · 리전 목록은 GUARDDUTY_DISABLED 에만 — 계약 모델과 DB CHECK 가 같은 짝을 요구한다
+    TenantVerification(
+        result=outcome.result,
+        verified_at=datetime.now(UTC),
+        reason_code=outcome.reason_code,
+        guardduty_failures=[asdict(f) for f in outcome.guardduty_failures] or None,
+    )
+
+
+@pytest.mark.parametrize("values", [
+    {"result": R.READ_DENIED, "reason_code": "AccessDenied",
+     "guardduty_failures": [{"region": SEOUL, "reason_code": "AccessDenied"}]},  # 다른 결과에 목록
+    {"result": R.GUARDDUTY_DISABLED, "reason_code": "DetectorDisabled", "guardduty_failures": []},  # 빈 목록
+    {"result": R.GUARDDUTY_DISABLED, "reason_code": "DetectorDisabled",
+     "guardduty_failures": [{"region": SEOUL, "reason_code": "AccessDeniedException"}]},  # 첫 사유와 다름
+    {"result": R.GUARDDUTY_DISABLED, "reason_code": "DetectorDisabled",
+     "guardduty_failures": [{"region": SEOUL, "reason_code": "DetectorDisabled"}] * 2},  # 같은 리전 두 번
+    {"result": R.GUARDDUTY_DISABLED, "reason_code": "DetectorDisabled",
+     "guardduty_failures": [{"region": "seoul", "reason_code": "DetectorDisabled"}]},  # 리전 형식
+], ids=["other-result", "empty", "reason-mismatch", "duplicate-region", "bad-region"])
+def test_contract_rejects_a_misshapen_region_list(values):
+    with pytest.raises(ValueError):
+        TenantVerification(verified_at=datetime.now(UTC), **values)
+
+
+def test_contract_keeps_a_guardduty_result_recorded_before_the_region_list_existed():
+    # 이 칸이 생기기 전에 남은 GUARDDUTY_DISABLED 는 목록이 없다 — 조회 응답이 저장값 때문에 깨지지 않는다
+    verification = TenantVerification(
+        result=R.GUARDDUTY_DISABLED, verified_at=datetime.now(UTC), reason_code="DetectorDisabled"
+    )
+    assert verification.guardduty_failures is None
 
 
 def test_unreachable_codes_cover_botocore_standard_retry_tables():
