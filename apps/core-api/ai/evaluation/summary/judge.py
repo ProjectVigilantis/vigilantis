@@ -194,6 +194,7 @@ def fact_sheet(payload: Mapping[str, Any]) -> dict[str, Any]:
     rule = _rule_evaluation(payload)
     return {
         "asset_type": asset.get("asset_type"),
+        "resource_role": asset.get("resource_role"),
         "arn": asset.get("arn"),
         "resource_id": asset.get("resource_id"),
         "name": asset.get("name"),

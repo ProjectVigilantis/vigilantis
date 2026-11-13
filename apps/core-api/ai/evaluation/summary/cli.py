@@ -192,6 +192,7 @@ def run(
                         if output.summary_lines
                         else None
                     ),
+                    call_records=tuple(client.run_records_json()),
                 )
             )
             print(
@@ -355,10 +356,29 @@ def main() -> int:
                     "repeats": report.repeats,
                     "payload_dedup_active": dedup_active,
                     "fixed_set": fixed_set,
+                    # 계획한 실행 수 — 오프라인 지표가 실패·누락을 분모에서 빼지 않게 한다
+                    "planned": {
+                        "case_ids": [case.case_id for case in cases],
+                        "repeats": args.repeats,
+                    },
+                    "data_source": "real_model",
+                    "call_totals": {
+                        "logical_calls": len(client.records),
+                        "unknown_usage_calls": client.unknown_usage_calls,
+                        "partial_usage_calls": client.partial_usage_calls,
+                        "usage_totals": client.usage_totals(),
+                        "physical_attempts": client.physical_attempts,
+                    },
                     "runs": [
                         {
                             "case_id": run_.case_id,
                             "invocation_status": run_.output.invocation_status.value,
+                            "failure_reason": (
+                                run_.output.failure_reason.value
+                                if run_.output.failure_reason is not None
+                                else None
+                            ),
+                            "call_records": list(run_.call_records),
                             "summary_lines": list(run_.output.summary_lines),
                             "candidates": [
                                 candidate.model_dump(mode="json")

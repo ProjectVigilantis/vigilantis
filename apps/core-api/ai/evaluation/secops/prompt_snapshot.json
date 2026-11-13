@@ -1,19 +1,19 @@
 {
   "approved": {
-    "version": "v2.0.5",
-    "measured_version": "v2.0.5",
-    "run_id": "20261110T082118Z-f739ddbd",
-    "approved_at": "2026-11-10",
-    "prompt_sha256": "b9d76896392a29c188c3f1130e464472128729be9294f7ae9762a315fbb4f118",
-    "measured_prompt_sha256": "b9d76896392a29c188c3f1130e464472128729be9294f7ae9762a315fbb4f118",
+    "version": "v2.0.7",
+    "measured_version": "v2.0.7",
+    "run_id": "20261112T034037Z-39b24855",
+    "approved_at": "2026-11-12",
+    "prompt_sha256": "fd1b56b7b03be7680ab5e34aaa2f6fcbc067de8d7d5506028cd305c3b92ad136",
+    "measured_prompt_sha256": "fd1b56b7b03be7680ab5e34aaa2f6fcbc067de8d7d5506028cd305c3b92ad136",
     "rubric_sha256": "818f908335f8f1d08473b8dff3be65b3ae54937e9e85745e9b283e2ceb886dab",
-    "inputs_sha256": "2f7135424546fa81bdab0aeba885620adc60147ddf43310d0a4d9fbba0294167",
-    "request_sha256": "9d387e7e67cd604d4c20c754d1f8700fc41edc73628989ca9909af29ad624b30",
-    "plan": "plans/v2.0.3-prior-execution.md",
-    "supersedes": "v2.0.2",
-    "qualification": "근거 선행 1회 호출 그래프의 v2.0.5 프롬프트에 모델 입력을 보강한 판을 20차(C01~C09 × 10회, 모델 호출 90회)에서 측정했다. 구조화 90/90 PASS, 최종 83 PASS / 7 FAIL(PENDING·도구 오류·전송 오류 0)이며 C02·C06 10/10, 나머지 일곱 사례 9/10으로 아홉 사례 모두 사례별 비율 기준(10회 중 8회 이상 PASS)을 충족했다(case_acceptance의 exact_9x10·fully_observed·threshold_met·baseline_candidate 모두 true). 의미 810행은 Claude Opus 5.5·GPT 6.1 sol 이중 대조에서 801행이 일치했고 갈린 9행은 작성자가 직접 판정했다. 이 결과로 9케이스 셋의 공개 평가 기준선을 확정했다.",
+    "inputs_sha256": "06d405365b964418fc7fc58146a9793196b165502dd880b079e90071bc53c0e4",
+    "answers_sha256": "53484e8a5b0fd79bc356d948294f39656a141c7ab8675820ece8028cd8fce343",
+    "request_sha256": "9781672211ce931bb634b804ca089cbb36e962ce684e41afd92bd62d6b0b5fe6",
+    "supersedes": "v2.0.5",
+    "qualification": "무제안만 정답인 C10(C01 관측 유지, 출발지 127.0.0.1)을 더한 10사례 세트에서 근거 선행 1회 호출 그래프의 v2.0.7 프롬프트를 #583 3단계 2라운드(C01~C10 × 10회, 모델 호출 100회)로 측정했다. 구조화 100/100 PASS, 최종 99 PASS / 1 FAIL(PENDING·도구 오류·전송 오류 0)이며 C04 9/10, C10을 포함한 나머지 아홉 사례 10/10으로 열 사례 모두 사례별 비율 기준(10회 중 8회 이상 PASS)을 충족했다(case_acceptance의 planned_fixed_set_x10·fully_observed·threshold_met·baseline_candidate 모두 true, current_service·source_files_match true). 의미 900행은 Claude Opus 5.5·GPT 6.1 sol 이중 대조에서 894행이 일치했고 갈린 6행은 작성자가 직접 판정했다(PASS 5·FAIL 1). 이 결과로 10케이스 셋의 공개 평가 기준선을 재고정했다.",
     "result": "results/README.md",
-    "note": "비율 기준 충족이며 전원 PASS가 아니다. FAIL 7건 — C01/8·C03/4·C04/9 action_reason(현재 적용 여부를 확인하지 말라는 지시로 읽히는 문장), C05/9 action_reason(선행 실행 기록이 없다면서 실행 여부를 확인할 수 있다고 씀), C07/6 action_reason·invented_facts(확인된 인증 실패를 미확인이라고 씀), C08/3 rationale_supports_decision·action_scope(TCP 전체 포트 범위 누락), C09/7 action_reason·rationale_supports_decision(대상 보호 미확인 누락) — 이 남아 보고서의 전원 PASS 지표 quality_pass·최상위 baseline_candidate는 false다. 측정한 소스는 HEAD acea9f8에 커밋 전 수정 파일 20개를 더한 작업 트리이며 커밋된 트리의 측정이 아니다. 같은 프롬프트의 입력 보강 전 19차 FAIL(81/90)과 7케이스 한정 승인판 v2.0.2는 history에 있다."
+    "note": "비율 기준 충족이며 전원 PASS가 아니다. FAIL 1건 — C04/6 risk_reason(입력의 현재 규칙 기준 위험 근거인 빈도 조건 미충족을 보존된 서버 초기 판정의 근거로 귀속, 작성자 판정) — 이 남아 보고서의 전원 PASS 지표 quality_pass·최상위 baseline_candidate는 false다. 측정한 소스는 112e8002에 커밋 전 수정을 더한 작업 트리이며 커밋된 트리의 측정이 아니다. 같은 10케이스 셋의 1라운드 v2.0.5 FAIL(89/100, C10 0/10)과 9케이스 승인판 v2.0.5는 history에 있다. 대비책(fallback)은 2026-11-16 이후 운영을 관찰한 뒤 제거 여부를 정한다는 작성자 결정에 따라 그대로 유지하며, 이 결정은 위 품질 지표를 바꾸지 않는다."
   },
   "fallback": {
     "version": "v1.1.0",
@@ -23,6 +23,37 @@
     "note": "CANDIDATE_FIRST 대비책 그래프의 프롬프트다. 의미 측정은 된 적 없고, 2026-11-09 1라운드 비교 측정에서 구조화 21/21 PASS·내부 식별자 19/21 FAIL(서버 사유 코드 인용 결함)이었다. 비교용이라 기준선 후보가 될 수 없다."
   },
   "history": [
+    {
+      "version": "v2.0.5",
+      "prompt_sha256": "b9d76896392a29c188c3f1130e464472128729be9294f7ae9762a315fbb4f118",
+      "rubric_sha256": "818f908335f8f1d08473b8dff3be65b3ae54937e9e85745e9b283e2ceb886dab",
+      "inputs_sha256": "06d405365b964418fc7fc58146a9793196b165502dd880b079e90071bc53c0e4",
+      "answers_sha256": "53484e8a5b0fd79bc356d948294f39656a141c7ab8675820ece8028cd8fce343",
+      "request_sha256": "dddda962795b50cee043448fdf29e133e5aea7810fe43f02b7dbccd7ec977420",
+      "quality_status": "FAIL",
+      "measured_at": "2026-11-12",
+      "run_id": "20261112T021307Z-88ef244e",
+      "result": "results/README.md",
+      "note": "#583 3단계 1라운드에서 당시 승인판 v2.0.5를 C10을 더한 10케이스 셋(C01~C10 × 10회, 모델 호출 100회)에 적용한 결과다. 89 PASS / 11 FAIL(PENDING·오류 0) — C10 0/10(10회 모두 메뉴의 NACL 후보를 제시해 무제안 정답 위반, 구조화 FAIL과 action_reason·rationale_supports_decision·action_scope FAIL), C04/5 rationale_supports_decision·action_scope FAIL로 C04 9/10, 나머지 8사례 10/10. C10이 사례별 8/10에 못 미쳐 10케이스 셋의 기준선이 되지 못했고, 메뉴 존재와 적용 가능성을 구분한 v2.0.7로 이어졌다."
+    },
+    {
+      "version": "v2.0.5",
+      "measured_version": "v2.0.5",
+      "run_id": "20261110T082118Z-f739ddbd",
+      "approved_at": "2026-11-10",
+      "prompt_sha256": "b9d76896392a29c188c3f1130e464472128729be9294f7ae9762a315fbb4f118",
+      "measured_prompt_sha256": "b9d76896392a29c188c3f1130e464472128729be9294f7ae9762a315fbb4f118",
+      "rubric_sha256": "818f908335f8f1d08473b8dff3be65b3ae54937e9e85745e9b283e2ceb886dab",
+      "inputs_sha256": "2f7135424546fa81bdab0aeba885620adc60147ddf43310d0a4d9fbba0294167",
+      "request_sha256": "9d387e7e67cd604d4c20c754d1f8700fc41edc73628989ca9909af29ad624b30",
+      "plan": "plans/v2.0.3-prior-execution.md",
+      "supersedes": "v2.0.2",
+      "quality_status": "SUPERSEDED",
+      "superseded_by": "v2.0.7",
+      "qualification": "근거 선행 1회 호출 그래프의 v2.0.5 프롬프트에 모델 입력을 보강한 판을 20차(C01~C09 × 10회, 모델 호출 90회)에서 측정했다. 구조화 90/90 PASS, 최종 83 PASS / 7 FAIL(PENDING·도구 오류·전송 오류 0)이며 C02·C06 10/10, 나머지 일곱 사례 9/10으로 아홉 사례 모두 사례별 비율 기준(10회 중 8회 이상 PASS)을 충족했다(case_acceptance의 exact_9x10·fully_observed·threshold_met·baseline_candidate 모두 true). 의미 810행은 Claude Opus 5.5·GPT 6.1 sol 이중 대조에서 801행이 일치했고 갈린 9행은 작성자가 직접 판정했다. 이 결과로 9케이스 셋의 공개 평가 기준선을 확정했다.",
+      "result": "results/README.md",
+      "note": "비율 기준 충족이며 전원 PASS가 아니다. FAIL 7건 — C01/8·C03/4·C04/9 action_reason(현재 적용 여부를 확인하지 말라는 지시로 읽히는 문장), C05/9 action_reason(선행 실행 기록이 없다면서 실행 여부를 확인할 수 있다고 씀), C07/6 action_reason·invented_facts(확인된 인증 실패를 미확인이라고 씀), C08/3 rationale_supports_decision·action_scope(TCP 전체 포트 범위 누락), C09/7 action_reason·rationale_supports_decision(대상 보호 미확인 누락) — 이 남아 보고서의 전원 PASS 지표 quality_pass·최상위 baseline_candidate는 false다. 측정한 소스는 HEAD acea9f8에 커밋 전 수정 파일 20개를 더한 작업 트리이며 커밋된 트리의 측정이 아니다. 같은 프롬프트의 입력 보강 전 19차 FAIL(81/90)과 7케이스 한정 승인판 v2.0.2는 history에 있다. 2026-11-12 C10을 더한 10케이스 셋에서 v2.0.7로 대체됐다(같은 셋의 이 판은 1라운드 89/100 FAIL)."
+    },
     {
       "version": "v2.0.2",
       "measured_version": "v2.0.2",

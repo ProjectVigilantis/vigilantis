@@ -154,6 +154,10 @@ def run_one(case: EvalCase, repeat: int, client: AIModelClient,
         "failure_kind": failure_kind,
         "error_type": recording.last_error, "error_phase": recording.last_error_phase,
         "model_calls": recording.calls,
+        # 논리 호출별 기록·SDK 물리 시도·사용량 미보고 호출. 시도 수는 trace가 없으면 None(모름)이다.
+        "call_records": recording.all_call_records_json(),
+        "physical_attempts": recording.physical_attempts,
+        "unknown_usage_calls": recording.unknown_usage_calls,
         "reported_prompt_tokens": recording.prompt_tokens,
         "reported_completion_tokens": recording.completion_tokens,
         "reported_cached_prompt_tokens": recording.cached_prompt_tokens,
@@ -182,19 +186,31 @@ def decision_flip(outputs: dict[str, list[AgentGraphOutput]]) -> dict[str, Any]:
     """사례별 결정 집합(후보 runbook ID 집합, 무제안은 빈 집합)의 흔들림 비율.
 
     flip_ratio = 1 - 최빈 결정 집합의 비율. 후보↔무제안도 흔들림이다.
+    FAILED는 결정이 아니므로(빈 후보 목록이라도 무제안이 아니다) 분모에서 빼고, 제외 건수와
+    결정 수가 2 미만이라 측정하지 못한 사례를 coverage로 드러낸다. 유효한 무제안은 그대로 결정이다.
     """
-    cases = {}
+    cases: dict[str, Any] = {}
+    unmeasured: dict[str, Any] = {}
+    excluded_failed = 0
     for case_id, values in outputs.items():
-        if len(values) < 2:
+        decided = [value for value in values if value.invocation_status is not AgentInvocationStatus.FAILED]
+        coverage = {"recorded": len(values), "decided": len(decided),
+                    "excluded_failed": len(values) - len(decided)}
+        excluded_failed += coverage["excluded_failed"]
+        if len(decided) < 2:
+            if values:
+                unmeasured[case_id] = coverage
             continue
-        agreement = next(item for item in field_agreement(values) if item.field == "runbook_ids")
+        agreement = next(item for item in field_agreement(decided) if item.field == "runbook_ids")
         cases[case_id] = {
             "decisions": ["+".join(filter(None, value.split(","))) or "NO_PROPOSAL"
                           for value in agreement.values],
             "flip_ratio": round(1 - agreement.top_share, 4),
+            **coverage,
         }
     flipped = sum(1 for item in cases.values() if item["flip_ratio"] > 0)
-    return {"cases": cases, "cases_with_flip": flipped, "cases_measured": len(cases)}
+    return {"cases": cases, "cases_with_flip": flipped, "cases_measured": len(cases),
+            "excluded_failed": excluded_failed, "unmeasured": unmeasured}
 
 
 def report(run: dict, cases: list[EvalCase], answers: dict[str, Answer],
@@ -233,8 +249,6 @@ def report(run: dict, cases: list[EvalCase], answers: dict[str, Answer],
     counts = {name: 0 for name in ("PASS", "FAIL", "PENDING", "TOOL_ERROR", "TRANSPORT_ERROR")}
     scores = []
     outputs: dict[str, list[AgentGraphOutput]] = {case_id: [] for case_id in case_ids}
-    # 결정 흔들림은 오류 없이 끝난 실행만 센다. 오류는 결정이 아니다.
-    stable_outputs: dict[str, list[AgentGraphOutput]] = {case_id: [] for case_id in case_ids}
     for key in sorted(planned):
         record = observed.get(key)
         if record is None:
@@ -248,8 +262,6 @@ def report(run: dict, cases: list[EvalCase], answers: dict[str, Answer],
                 counts[failure] += 1
                 scores.append({"case_id": key[0], "repeat": key[1], "verdict": failure})
                 continue
-            if failure is None:
-                stable_outputs[key[0]].append(output)
             result = score_structured(output, answers[key[0]])
             semantic = (score_summary(output, reviews.get(key), rubric)
                         if output.invocation_status is not AgentInvocationStatus.FAILED
@@ -272,12 +284,14 @@ def report(run: dict, cases: list[EvalCase], answers: dict[str, Answer],
         and run.get("request_sha256") == current["request_sha256"]
         and run["settings"] == default_settings
     )
-    complete_set = set(case_ids) == {case.case_id for case in load_cases()}
+    fixed_case_ids = {case.case_id for case in load_cases()}
+    complete_set = set(case_ids) == fixed_case_ids
     all_pass = counts["PASS"] == len(planned) and run["state"] == "COMPLETE"
     real_measured = bool(observed) and all(record["data_source"] == "real_model" for record in observed.values())
     snapshots = sorted({name for record in observed.values() for name in record["model_snapshots"]})
     # 케이스 수용은 계획 전체를 분모로 하는 산술 기준이다. 평가 완료·현재 서비스·운영 성공과 별개다.
-    exact_9x10 = repeats == 10 and set(case_ids) == {case.case_id for case in load_cases()}
+    # 계획이 현재 고정 세트 전체 × 정확히 10회일 때만 산술 판정을 낸다. 사례 수는 세트에서 읽는다.
+    planned_fixed_set_x10 = repeats == 10 and complete_set
     acceptance_cases = {}
     for case_id in case_ids:
         case_counts = {name: 0 for name in counts}
@@ -287,10 +301,11 @@ def report(run: dict, cases: list[EvalCase], answers: dict[str, Answer],
         acceptance_cases[case_id] = {
             "planned": repeats, "recorded": sum(1 for key in observed if key[0] == case_id),
             "counts": case_counts,
-            "threshold_met": case_counts["PASS"] >= 8 if exact_9x10 else None,
+            "threshold_met": case_counts["PASS"] >= 8 if planned_fixed_set_x10 else None,
         }
     fully_observed = run["state"] == "COMPLETE" and len(observed) == len(planned)
-    acceptance_met = exact_9x10 and all(item["threshold_met"] for item in acceptance_cases.values())
+    acceptance_met = planned_fixed_set_x10 and all(
+        item["threshold_met"] for item in acceptance_cases.values())
     return {
         "run_id": run["run_id"], "planned": len(planned), "recorded": len(observed),
         "counts": counts, "scores": scores,
@@ -308,7 +323,12 @@ def report(run: dict, cases: list[EvalCase], answers: dict[str, Answer],
                                and real_measured and len(snapshots) == 1),
         "case_acceptance": {
             "required_repeats": 10, "required_passes": 8,
-            "measurement": {"exact_9x10": exact_9x10, "fully_observed": fully_observed},
+            # 계획의 범위(planned_fixed_set_x10)와 기록의 완전성(fully_observed)은 다른 보증이다.
+            "measurement": {
+                "planned_fixed_set_x10": planned_fixed_set_x10, "fully_observed": fully_observed,
+                "fixed_case_count": len(fixed_case_ids),
+                "missing_case_ids": sorted(fixed_case_ids - set(case_ids)),
+            },
             "cases": acceptance_cases,
             "threshold_met": acceptance_met,
             "baseline_candidate": (acceptance_met and fully_observed and current_service
@@ -322,7 +342,16 @@ def report(run: dict, cases: list[EvalCase], answers: dict[str, Answer],
             for case_id, values in outputs.items() if len(values) >= 2
         },
         # EITHER 허용(구조화 PASS)과 별개로 같은 입력의 결정이 회차마다 바뀌는 비율을 보고한다.
-        "decision_flip": decision_flip(stable_outputs),
+        "decision_flip": decision_flip(outputs),
+        # 과거 기록에는 필드가 없다. 없는 값은 0이 아니라 모름이다.
+        "call_accounting": {
+            "logical_calls": sum(record["model_calls"] for record in observed.values()),
+            "unknown_usage_calls": (None if any("unknown_usage_calls" not in record for record in observed.values())
+                                    else sum(record["unknown_usage_calls"] for record in observed.values())),
+            "physical_attempts": (None if any(record.get("physical_attempts") is None
+                                              for record in observed.values())
+                                  else sum(record["physical_attempts"] for record in observed.values())),
+        },
         "reported_tokens": {
             field: sum(record[field] for record in observed.values())
             for field in ("reported_prompt_tokens", "reported_completion_tokens", "reported_cached_prompt_tokens")

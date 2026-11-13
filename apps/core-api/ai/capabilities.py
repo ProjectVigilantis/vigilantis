@@ -3,7 +3,7 @@
 # 그래프 입력의 조치 메뉴(capabilities)를 만드는 빌더입니다. (Issue #285)
 #
 # **메뉴가 곧 조치 공간입니다.** 모델은 여기 실린 Runbook만 고를 수 있고, 벗어난 후보가
-# 오면 그 건만 버리는 것이 아니라 호출 전체가 FAILED가 됩니다(ai/agent.py _to_draft).
+# 오면 그 건만 버리는 것이 아니라 호출 전체가 FAILED가 됩니다(ai/agent.py의 출력 계약 검사).
 # 반대로 비어 있으면 FinOpsGraphInput(capabilities min_length=1)을 만들 수 없어 그
 # Incident는 AI를 부르지 못합니다. 넓혀도 좁혀도 값이 나가는 자리라 축을 명시합니다.
 #
