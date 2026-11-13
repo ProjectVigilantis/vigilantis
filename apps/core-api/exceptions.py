@@ -59,6 +59,9 @@ _STATUS_BY_CODE: dict[ErrorCode, int] = {
     ErrorCode.NOTIFICATION_NOT_FOUND: 404,
     ErrorCode.REQUEST_BODY_TOO_LARGE: 413,
     ErrorCode.EVIDENCE_EXPORT_TOO_LARGE: 413,
+    ErrorCode.REPORT_DRAFT_TOO_LARGE: 413,
+    ErrorCode.REPORT_DRAFT_MODEL_UNAVAILABLE: 503,
+    ErrorCode.REPORT_DRAFT_GENERATION_FAILED: 502,
     ErrorCode.REQUEST_VALIDATION_FAILED: 422,
     ErrorCode.INTERNAL_ERROR: 500,
 }
@@ -98,6 +101,9 @@ _MESSAGE_BY_CODE: dict[ErrorCode, str] = {
     ErrorCode.NOTIFICATION_NOT_FOUND: "알림을 찾을 수 없습니다.",
     ErrorCode.REQUEST_BODY_TOO_LARGE: "신청 본문이 허용 크기를 초과했습니다.",
     ErrorCode.EVIDENCE_EXPORT_TOO_LARGE: "근거 내보내기 파일이 허용 크기를 초과했습니다.",
+    ErrorCode.REPORT_DRAFT_TOO_LARGE: "신고 초안 입력 또는 파일이 허용 크기를 초과했습니다.",
+    ErrorCode.REPORT_DRAFT_MODEL_UNAVAILABLE: "신고 초안 생성 모델을 사용할 수 없습니다.",
+    ErrorCode.REPORT_DRAFT_GENERATION_FAILED: "신고 초안을 생성하거나 검증하지 못했습니다.",
     ErrorCode.REQUEST_VALIDATION_FAILED: "요청 값이 계약과 다릅니다.",
     ErrorCode.INTERNAL_ERROR: "서버 내부 오류입니다.",
 }
