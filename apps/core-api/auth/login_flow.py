@@ -259,6 +259,15 @@ class LoginFlow:
             submits_code=True,
         )
 
+    def subject(self, flow_token: str) -> tuple[str, str] | None:
+        """진행 중인 흐름이 비밀번호 단계 뒤에 포착한 안정 신원 (issuer, sub). 흐름이 없으면 None.
+
+        읽기만 한다 — 흐름을 꺼내지 않고 만료도 판정하지 않는다. 활동 로그(#589)가 실패한 시도의 대상 계정을
+        잇는 데만 쓴다. **인증 판정에 쓰지 않는다.**"""
+        flow = self._store.peek(flow_token)
+        ticket = None if flow is None else flow.ticket
+        return None if ticket is None else (ticket.issuer, ticket.sub)
+
     # ------------------------------------------------------------------ 내부 구현
 
     def _log_rate_limited(self, username: str) -> None:

@@ -672,7 +672,16 @@ def test_authority_revoked_after_the_dependencies_cannot_authorize_the_write(
     assert revoked == [seed.user_id]  # 의존성을 통과해 Workflow 의 쓰기 직전 잠금까지 왔다
     assert (resp.status_code, _code(resp)) == expected
     assert _effects(db, mine) == before
-    assert _platform_event_count(db) == events_before  # 회수된 권한의 쓰기는 활동 로그도 없다(#589)
+    # 회수된 권한의 쓰기는 조치 · 종료의 활동 로그를 남기지 않는다(#589). 403 으로 끝난 거절만 권한 거절
+    # (ACCESS_FORBIDDEN) 한 행을 남긴다 — 범위 밖 404 · 세션 없음 401 은 남기지 않는다
+    denials = db.scalar(
+        select(func.count()).select_from(models.PlatformEvent).where(
+            models.PlatformEvent.action == "ACCESS_FORBIDDEN",
+            models.PlatformEvent.actor_user_id == seed.user_id,
+        )
+    )
+    assert denials == (1 if expected[0] == 403 else 0)
+    assert _platform_event_count(db) == events_before + denials
     assert published == []
 
 

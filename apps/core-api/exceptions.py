@@ -4,6 +4,7 @@
 # {"error": {code, message, request_id}}(schemas.api.errors)로 통일한다. (Issue #68)
 #
 #   - 내부 예외·ORM 원본·스택은 응답에 노출하지 않는다(스택은 로그로만).
+#   - 403 AUTH_FORBIDDEN 은 봉투로 바꾸기 전에 플랫폼 활동 로그에 남긴다(access_denial_log · #589 B).
 #   - 409 2종(IDEMPOTENCY_KEY_CONFLICT·PROPOSAL_NOT_EXECUTABLE)의 발생 경로는
 #     조치 실행 API 작업에서 붙는다 — 여기서는 공통 봉투 변환만 둔다.
 # ==============================================================================
@@ -13,6 +14,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import FastAPI, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
@@ -141,6 +143,12 @@ def unexpected_error_response(request: Request) -> JSONResponse:
 def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(ApiError)
     async def handle_api_error(request: Request, exc: ApiError) -> JSONResponse:
+        if exc.code is ErrorCode.AUTH_FORBIDDEN:
+            # 권한 거절을 활동 로그에 남긴다(#589 B · ACCESS_FORBIDDEN). DB 쓰기라 이벤트 루프 밖에서 한다.
+            # 이 모듈은 저장소보다 아래층이라 여기서 가져온다(순환 import 회피)
+            import access_denial_log
+
+            await run_in_threadpool(access_denial_log.record_forbidden, request)
         return api_error_response(request, exc.code)
 
     @app.exception_handler(RequestValidationError)

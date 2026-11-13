@@ -72,6 +72,11 @@ class FakeFlow:
         self.calls: list[str] = []
         self.result = StepResult(LoginStep.TOTP_REQUIRED)
         self.error: Exception | None = None
+        #: 비밀번호 단계 뒤에 포착한 안정 신원 (issuer, sub) — 활동 로그가 실패한 시도의 대상을 잇는다(#589 B)
+        self.bound: tuple[str, str] | None = None
+
+    def subject(self, token):
+        return self.bound
 
     def _go(self, name: str):
         self.calls.append(name)

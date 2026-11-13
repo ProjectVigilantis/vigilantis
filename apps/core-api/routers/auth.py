@@ -6,16 +6,20 @@
 #   - 세션 쿠키는 StepResult 가 COMPLETED + identity 일 때, service 가 세션을 발급한 뒤에만 건다.
 #   - 비밀값(SecretStr)은 LoginFlow 호출 지점에서만 벗긴다. 토큰은 어떤 본문에도 싣지 않는다.
 #   - 모든 경로에 Origin 검사(상태 변경만)가 먼저 걸리고, Cognito 라우트(로그인 · 재설정)만 설정 확인이 뒤따른다.
+#   - 활동 로그(#589 B): 실패 · 거절된 시도는 여기서 따로 남긴다(_attempt · auth.event_log.attempt_failed).
+#     TOTP 코드 단계(등록 준비 · 등록 확인 · 코드 제출)는 AUTH_MFA, 그 밖의 단계와 세션 발급의 거절은 AUTH_LOGIN 이다.
+#     성공은 세션 발급(auth.service.complete_login)이 같은 트랜잭션에 남긴다 — 중간 단계의 성공은 남기지 않는다.
 # ==============================================================================
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
+from typing import TypeVar
 
+from auth import event_log, permissions, service
 from auth import password_reset as password_reset_service
-from auth import permissions, service
-from auth.cognito import AuthFailedError, AuthFlowExpiredError, CognitoAdapter
+from auth.cognito import AuthError, AuthFailedError, AuthFlowExpiredError, CognitoAdapter
 from auth.http import (
     FLOW_COOKIE,
     SESSION_COOKIE,
@@ -30,7 +34,7 @@ from auth.http import (
 )
 from auth.login_flow import LoginFlow, StepResult
 from config import AuthSettings, get_auth_settings
-from db.session import get_db
+from db.session import get_db, get_session_factory
 from fastapi import APIRouter, Depends, Request, Response
 from schemas.api.auth import (
     CodeRequest,
@@ -43,9 +47,16 @@ from schemas.api.auth import (
     PasswordResetRequest,
     TotpSetupResponse,
 )
+from schemas.platform_events import PlatformEventAction
 from sqlalchemy.orm import Session
 
+_T = TypeVar("_T")
+_LOGIN = PlatformEventAction.AUTH_LOGIN
+_MFA = PlatformEventAction.AUTH_MFA
+
 _DB = Depends(get_db)
+# 실패 · 거절된 시도를 요청 트랜잭션 밖에 남길 때 쓰는 세션(#589 B)
+_SESSIONS = Depends(get_session_factory)
 _SETTINGS = Depends(get_auth_settings)
 _CLOCK = Depends(get_clock)
 _FLOW = Depends(get_login_flow)
@@ -67,6 +78,23 @@ def _flow_token(request: Request) -> str:
     return token
 
 
+def _attempt(
+    call: Callable[[], _T],
+    action: PlatformEventAction,
+    session_factory: Callable[[], Session],
+    *,
+    subject: event_log.Subject | None = None,
+) -> _T:
+    """로그인 흐름의 한 단계를 부르고, 거절 · 실패(AuthError)면 활동 로그에 따로 남긴 뒤 그대로 올린다.
+
+    subject 는 단계를 부르기 **전에** 읽어 둔 대상 신원이다 — 실패한 흐름은 저장소에서 사라져 뒤에는 읽을 수 없다."""
+    try:
+        return call()
+    except AuthError as exc:
+        event_log.attempt_failed(session_factory, action, exc.code, subject=subject)
+        raise
+
+
 def _step_response(
     result: StepResult,
     *,
@@ -76,19 +104,27 @@ def _step_response(
     db: Session,
     settings: AuthSettings,
     clock: Callable[[], datetime],
+    session_factory: Callable[[], Session],
 ) -> LoginStepResponse:
     if result.step is not LoginStep.COMPLETED:
         set_flow_cookie(response, flow_token)
         return LoginStepResponse(next_step=result.step)
     if result.identity is None:
         raise AuthFailedError()
-    issued = service.complete_login(
-        db,
-        result.identity,
-        previous_token=request.cookies.get(SESSION_COOKIE),
-        now=clock(),
-        max_seconds=settings.AUTH_SESSION_MAX_SECONDS,
-        idle_seconds=settings.AUTH_SESSION_IDLE_SECONDS,
+    identity = result.identity
+    # 세션 발급의 거절(미등록 · 비활성 · 세대 불일치 · 이메일 증명 없음)은 complete_login 이 되돌린 뒤 여기서 남긴다
+    issued = _attempt(
+        lambda: service.complete_login(
+            db,
+            identity,
+            previous_token=request.cookies.get(SESSION_COOKIE),
+            now=clock(),
+            max_seconds=settings.AUTH_SESSION_MAX_SECONDS,
+            idle_seconds=settings.AUTH_SESSION_IDLE_SECONDS,
+        ),
+        _LOGIN,
+        session_factory,
+        subject=(identity.issuer, identity.sub),
     )
     set_session_cookie(response, issued.token, settings.AUTH_SESSION_MAX_SECONDS)
     delete_flow_cookie(response)
@@ -100,8 +136,12 @@ def login(
     body: LoginRequest,
     response: Response,
     flow: LoginFlow = _FLOW,
+    session_factory: Callable[[], Session] = _SESSIONS,
 ) -> LoginStepResponse:
-    token, step = flow.start(body.email, body.password.get_secret_value())
+    # 비밀번호 단계의 실패는 대상 없이 남는다 — 이메일로 앱 계정을 고르지 않는다(auth.event_log)
+    token, step = _attempt(
+        lambda: flow.start(body.email, body.password.get_secret_value()), _LOGIN, session_factory
+    )
     set_flow_cookie(response, token)
     return LoginStepResponse(next_step=step)
 
@@ -112,9 +152,15 @@ def login_new_password(
     request: Request,
     response: Response,
     flow: LoginFlow = _FLOW,
+    session_factory: Callable[[], Session] = _SESSIONS,
 ) -> LoginStepResponse:
     token = _flow_token(request)
-    result = flow.submit_new_password(token, body.new_password.get_secret_value())
+    result = _attempt(
+        lambda: flow.submit_new_password(token, body.new_password.get_secret_value()),
+        _LOGIN,
+        session_factory,
+        subject=flow.subject(token),
+    )
     set_flow_cookie(response, token)
     return LoginStepResponse(next_step=result.step)
 
@@ -124,9 +170,12 @@ def login_totp_setup(
     request: Request,
     response: Response,
     flow: LoginFlow = _FLOW,
+    session_factory: Callable[[], Session] = _SESSIONS,
 ) -> TotpSetupResponse:
     token = _flow_token(request)
-    setup = flow.begin_totp_setup(token)
+    setup = _attempt(
+        lambda: flow.begin_totp_setup(token), _MFA, session_factory, subject=flow.subject(token)
+    )
     set_flow_cookie(response, token)
     return TotpSetupResponse(secret=setup.secret, otpauth_uri=setup.otpauth_uri)
 
@@ -140,11 +189,18 @@ def login_totp_setup_verify(
     db: Session = _DB,
     settings: AuthSettings = _SETTINGS,
     clock: Callable[[], datetime] = _CLOCK,
+    session_factory: Callable[[], Session] = _SESSIONS,
 ) -> LoginStepResponse:
     token = _flow_token(request)
-    result = flow.verify_totp_setup(token, body.code.get_secret_value())
+    result = _attempt(
+        lambda: flow.verify_totp_setup(token, body.code.get_secret_value()),
+        _MFA,
+        session_factory,
+        subject=flow.subject(token),
+    )
     return _step_response(
-        result, flow_token=token, request=request, response=response, db=db, settings=settings, clock=clock
+        result, flow_token=token, request=request, response=response, db=db, settings=settings, clock=clock,
+        session_factory=session_factory,
     )
 
 
@@ -157,11 +213,18 @@ def login_totp(
     db: Session = _DB,
     settings: AuthSettings = _SETTINGS,
     clock: Callable[[], datetime] = _CLOCK,
+    session_factory: Callable[[], Session] = _SESSIONS,
 ) -> LoginStepResponse:
     token = _flow_token(request)
-    result = flow.submit_totp(token, body.code.get_secret_value())
+    result = _attempt(
+        lambda: flow.submit_totp(token, body.code.get_secret_value()),
+        _MFA,
+        session_factory,
+        subject=flow.subject(token),
+    )
     return _step_response(
-        result, flow_token=token, request=request, response=response, db=db, settings=settings, clock=clock
+        result, flow_token=token, request=request, response=response, db=db, settings=settings, clock=clock,
+        session_factory=session_factory,
     )
 
 
@@ -174,11 +237,19 @@ def login_email_verification(
     db: Session = _DB,
     settings: AuthSettings = _SETTINGS,
     clock: Callable[[], datetime] = _CLOCK,
+    session_factory: Callable[[], Session] = _SESSIONS,
 ) -> LoginStepResponse:
     token = _flow_token(request)
-    result = flow.submit_email_code(token, body.code.get_secret_value())
+    # 이메일 코드는 TOTP 를 지난 뒤의 이메일 증명이다 — MFA 가 아니라 로그인 단계로 남긴다
+    result = _attempt(
+        lambda: flow.submit_email_code(token, body.code.get_secret_value()),
+        _LOGIN,
+        session_factory,
+        subject=flow.subject(token),
+    )
     return _step_response(
-        result, flow_token=token, request=request, response=response, db=db, settings=settings, clock=clock
+        result, flow_token=token, request=request, response=response, db=db, settings=settings, clock=clock,
+        session_factory=session_factory,
     )
 
 
@@ -197,6 +268,7 @@ def password_reset_confirm(
     adapter: CognitoAdapter = _ADAPTER,
     db: Session = _DB,
     clock: Callable[[], datetime] = _CLOCK,
+    session_factory: Callable[[], Session] = _SESSIONS,
 ) -> Response:
     password_reset_service.confirm_reset(
         adapter,
@@ -205,6 +277,7 @@ def password_reset_confirm(
         code=body.code.get_secret_value(),
         new_password=body.new_password.get_secret_value(),
         now=clock(),
+        session_factory=session_factory,
     )
     return Response(status_code=204)
 

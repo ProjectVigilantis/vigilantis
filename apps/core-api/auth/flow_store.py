@@ -40,6 +40,12 @@ class FlowStore(Generic[T]):
             return None
         return entry[1], entry[0] <= now
 
+    def peek(self, token: str) -> T | None:
+        """항목을 꺼내지 않고 읽는다(만료 여부는 보지 않는다). 소유권은 넘어가지 않는다 — 읽기만 한다."""
+        with self._lock:
+            entry = self._items.get(_key(token))
+        return None if entry is None else entry[1]
+
     def sweep(self, now: float) -> list[T]:
         """만료 항목을 제거하고 돌려준다(호출자가 정리 작업을 한다)."""
         with self._lock:
