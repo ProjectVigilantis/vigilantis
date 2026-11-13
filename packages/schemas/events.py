@@ -26,6 +26,16 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from .api.assets import UtcDateTime
 from .api.incidents import ResponseMode, RiskLevel
 
+# 활동 사실 타입은 api/incidents.py 도 쓰므로 순환을 피해 guardduty.py 에 둔다. 기존 소비자를 위해 다시 내보낸다.
+from .guardduty import (  # noqa: F401
+    GUARDDUTY_SOURCE_VALUE_MAX,
+    GuardDutyActivity,
+    GuardDutyConnectionDirection,
+    GuardDutyFact,
+    GuardDutyFactStatus,
+    GuardDutyResourceRole,
+)
+
 
 @unique
 class ThreatEventType(str, Enum):
@@ -117,8 +127,6 @@ class SshBruteForceThreatPayload(BaseModel):
 
 #: GuardDuty 심각도 범위. Critical(9.0–10.0)까지 담는다.
 GUARDDUTY_SEVERITY_MAX = 10.0
-
-
 class GuardDutyFindingThreatPayload(BaseModel):
     """GuardDuty 탐지 1건(#588 C). 대상 자원 ARN 은 공통 칸 target_arn 이다.
 
@@ -138,6 +146,8 @@ class GuardDutyFindingThreatPayload(BaseModel):
     finding_region: str = Field(min_length=1)  # 탐지의 Region
     first_seen_at: UtcDateTime
     last_seen_at: UtcDateTime
+    # None = 이 칸이 생기기 전에 저장된 탐지(수집 안 됨). 새로 정규화한 탐지는 항상 값이 있다
+    activity: Optional[GuardDutyActivity] = None
 
     @model_validator(mode="after")
     def _seen_in_order(self):

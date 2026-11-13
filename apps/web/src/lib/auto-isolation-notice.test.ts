@@ -40,7 +40,7 @@ const blocked = incident({ auto_isolation_block: 'AUTO_ACTION_DISABLED' });
 const disabledBlock = { kind: 'BLOCKED', block: 'AUTO_ACTION_DISABLED' } as const;
 
 test('차단된 Medium은 시각이 있든 없든 실행 예고 대신 승인 필요 안내다', () => {
-  for (const block of ['AUTO_ACTION_DISABLED', 'PROTECTED_TAG'] as const) {
+  for (const block of ['AUTO_ACTION_DISABLED', 'PROTECTED_TAG', 'THREAT_TYPE_NOT_ELIGIBLE', 'WAIT_NOT_STARTED'] as const) {
     const row = incident({ auto_isolation_block: block });
     assert.deepEqual(agentWaitNotice(row, WAIT_AT), { kind: 'BLOCKED', block });
     // 목록에서 나중에 연 직접 진입: 전환 이벤트를 못 봐 기준 시각이 없다.

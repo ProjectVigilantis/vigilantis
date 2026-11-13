@@ -7,7 +7,8 @@
 #   - 응답은 공개 계약 schemas.api.incidents로만 직렬화한다. 목록은 상세의
 #     부분집합이며 created_at 내림차순으로 전체 반환한다 — SSOT §API 계약.
 #   - SQL은 db.repositories 경유 — 라우터는 응답 조립만 한다.
-#   - recommendations는 Guardrail PASS 제안(EXECUTABLE 후보)만 담는다.
+#   - recommendations는 Guardrail PASS 제안(EXECUTABLE 후보)만 담는다. 추천 판정은 후보의 저장본을 그대로
+#     싣고, 근거 투영은 이 인시던트의 근거 행 안에서만 찾는다(workflows.recommendation_evidence). (Issue #598)
 #   - available_recovery_runbook_ids는 실행 이력에서 파생한다 — 짝(ADR-0004)이
 #     있고, 원본이 복구 가능 상태이며, 아직 복구가 접수되지 않은 실행만 노출한다.
 #     (Issue #126)
@@ -218,9 +219,8 @@ def _load_incident(db: Session, incident_id: str, scope: TenantScope) -> models.
 
 
 def _to_detail(db: Session, row: models.Incident) -> IncidentResponse:
-    evidence_ids = [
-        item.evidence_id for item in incidents_repo.list_evidence(db, row.incident_id)
-    ]
+    evidence_rows = incidents_repo.list_evidence(db, row.incident_id)
+    evidence_ids = [item.evidence_id for item in evidence_rows]
     executable = incidents_repo.list_candidates(
         db, row.incident_id, status=CandidateStatus.EXECUTABLE
     )
@@ -232,6 +232,9 @@ def _to_detail(db: Session, row: models.Incident) -> IncidentResponse:
             "display_parameters": candidate.display_parameters,
             "ai_savings_estimate": candidate.ai_savings_estimate,
             "expires_at": workflows.nacl_release_expires_at(db, candidate, execution_rows),
+            "evidence_ids": candidate.evidence_ids,
+            "recommendation_basis": candidate.recommendation_basis,
+            "recommendation_evidence": workflows.recommendation_evidence(candidate, evidence_rows),
         }
         for candidate in sorted(executable, key=lambda c: c.created_at)
     ]

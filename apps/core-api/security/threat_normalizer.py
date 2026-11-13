@@ -57,13 +57,17 @@ from __future__ import annotations
 import hashlib
 import uuid
 from datetime import datetime, timezone
-from ipaddress import ip_address, ip_network
+from ipaddress import IPv4Address, IPv6Address, ip_address, ip_network
 from typing import Any
 
 from pydantic import TypeAdapter
 
 from schemas.events import (
+    GUARDDUTY_SOURCE_VALUE_MAX,
+    GuardDutyConnectionDirection,
+    GuardDutyFactStatus,
     GuardDutyFindingThreatPayload,
+    GuardDutyResourceRole,
     MockThreatEventInput,
     NormalizedThreatEvent,
     OpenIpThreatInput,
@@ -215,6 +219,110 @@ def _guardduty_target_arn(finding: dict, region: str, account_id: str) -> tuple[
     return finding_arn, resource_type
 
 
+def _fact(source: dict, key: str, parse) -> dict:
+    """source[key] 한 칸 → GuardDutyFact 입력. 없음 · 아는 값이 아님 · 형식 불량을 서로 다른 상태로 남긴다.
+
+    키가 빠진 것만 ABSENT 다. 키가 있는데 null 이면 원문이 값을 적지 못한 것이라 INVALID 다(parse 가 거른다)."""
+    if key not in source:
+        return {"status": GuardDutyFactStatus.ABSENT}
+    raw_value = source[key]
+    try:
+        return {"status": GuardDutyFactStatus.RECORDED, "value": parse(raw_value)}
+    except _UnrecognizedValue:
+        return {
+            "status": GuardDutyFactStatus.UNRECOGNIZED,
+            "source_value": raw_value[:GUARDDUTY_SOURCE_VALUE_MAX],
+        }
+    except (TypeError, ValueError):
+        return {"status": GuardDutyFactStatus.INVALID}
+
+
+class _UnrecognizedValue(Exception):
+    """형식은 맞지만 아는 값 목록에 없다."""
+
+
+def _parse_enum(enum_type):
+    def parse(value):
+        if not isinstance(value, str):
+            raise TypeError("문자열이 아닙니다")
+        try:
+            return enum_type(value)
+        except ValueError:
+            raise _UnrecognizedValue from None
+    return parse
+
+
+def _parse_text(value):
+    if not isinstance(value, str) or not value:
+        raise ValueError("비어 있지 않은 문자열이 아닙니다")
+    return value
+
+
+def _parse_bool(value):
+    if not isinstance(value, bool):
+        raise TypeError("불리언이 아닙니다")
+    return value
+
+
+def _parse_ip(address_type):
+    def parse(value):
+        if not isinstance(value, str):
+            raise TypeError("문자열이 아닙니다")
+        return address_type(value)
+    return parse
+
+
+def _guardduty_remote_ip(network: dict) -> dict:
+    # AWS RemoteIpDetails 는 IpAddressV4 · IpAddressV6 칸이 따로 있고 칸마다 자기 주소 체계만 담는다.
+    # 키가 있는 첫 칸(V4 우선)이 결과를 정한다 — 둘 다 적혀 있어도 한 값만 남긴다.
+    if "RemoteIpDetails" not in network:
+        return {"status": GuardDutyFactStatus.ABSENT}
+    details = network["RemoteIpDetails"]
+    if not isinstance(details, dict):
+        return {"status": GuardDutyFactStatus.INVALID}
+    if "IpAddressV4" in details:
+        return _fact(details, "IpAddressV4", _parse_ip(IPv4Address))
+    return _fact(details, "IpAddressV6", _parse_ip(IPv6Address))
+
+
+def _guardduty_activity(service: dict) -> dict:
+    """Service 한 건에서 활동 사실을 읽는다 — 어긋난 값은 상태로 남기고 탐지를 거절하지 않는다."""
+    absent = {"status": GuardDutyFactStatus.ABSENT}
+    invalid = {"status": GuardDutyFactStatus.INVALID}
+    if not isinstance(service, dict):
+        return {
+            name: invalid
+            for name in ("resource_role", "action_type", "connection_direction", "remote_ip", "blocked")
+        }
+    network_facts = {"connection_direction": absent, "remote_ip": absent, "blocked": absent}
+    all_invalid = {"connection_direction": invalid, "remote_ip": invalid, "blocked": invalid}
+    # 부모 블록도 키가 빠진 것만 ABSENT 이고, 키가 있는데 null · 비객체면 그 아래 칸은 모두 INVALID 다
+    if "Action" not in service:
+        action_type = absent
+    elif not isinstance(service["Action"], dict):
+        action_type = invalid
+        network_facts = all_invalid
+    else:
+        action = service["Action"]
+        action_type = _fact(action, "ActionType", _parse_text)
+        if "NetworkConnectionAction" not in action:
+            pass
+        elif not isinstance(action["NetworkConnectionAction"], dict):
+            network_facts = all_invalid
+        else:
+            network = action["NetworkConnectionAction"]
+            network_facts = {
+                "connection_direction": _fact(network, "ConnectionDirection", _parse_enum(GuardDutyConnectionDirection)),
+                "remote_ip": _guardduty_remote_ip(network),
+                "blocked": _fact(network, "Blocked", _parse_bool),
+            }
+    return {
+        "resource_role": _fact(service, "ResourceRole", _parse_enum(GuardDutyResourceRole)),
+        "action_type": action_type,
+        **network_facts,
+    }
+
+
 def normalize_guardduty_finding(
     finding: dict,
     *,
@@ -263,6 +371,8 @@ def normalize_guardduty_finding(
             finding_region=finding_region,
             first_seen_at=first_seen,
             last_seen_at=max(first_seen, last_seen),
+            # 위의 `or {}` 는 시각 대체용이다 — 활동은 원문의 Service 를 그대로 봐야 생략(ABSENT)과 null 등(INVALID)이 갈린다
+            activity=_guardduty_activity(finding["Service"] if "Service" in finding else {}),
         ),
         deduplication_key=f"{ThreatEventType.GUARDDUTY_FINDING.value}|{digest}",
         collected_at=collected_at or datetime.now(timezone.utc),

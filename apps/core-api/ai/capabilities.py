@@ -165,9 +165,9 @@ def build_secops_capabilities(
 ) -> list[RunbookCapability]:
     """조회·실행 의존성이 연결된 SSH 차단만 제공한다.
 
-    EC2_ISOLATE는 메뉴에 내지 않는다. isolation_group_id·target_group_arn은 시스템이 자산 DB에서
-    공급하지만(workflows.resolve_isolation_parameters), 격리는 관제자 승인 메뉴가 아니라
-    선차단·자동 격리로 시스템이 발동하는 런북이다(SSOT §Action Whitelist) — 발동 경로의 몫이다.
+    EC2_ISOLATE는 AI 메뉴에 내지 않는다. 보호 자산의 승인 격리 후보는 Workflow가 별도로 공급한다
+    (#598). isolation_group_id·target_group_arn도 시스템이 자산 DB에서 공급한다
+    (workflows.resolve_isolation_parameters). 선차단·자동 격리는 자동 발동 경로의 몫이다.
     OPEN_IP의 SG를 NACL 또는 미부착 삭제 대상으로 추측하지 않는다.
     직접 PROTECTED_BY NACL이 정확히 하나일 때만 낸다. 실행 계획은 코드가 조립하므로(ai/agent.py
     assemble_plan, #583 2단계) 대상이 둘 이상이면 1:1로 고를 수 없다 — IPv6 출발지(#434)처럼

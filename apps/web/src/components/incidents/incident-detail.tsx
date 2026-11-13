@@ -15,6 +15,7 @@ import {
   useEvidenceExportBlockedReason,
   useOperateBlockedReason,
 } from '@/components/auth/session-provider';
+import { CandidateRecommendation } from '@/components/incidents/candidate-recommendation';
 import { CloseIncidentDialog } from '@/components/incidents/close-incident-dialog';
 import { CopyButton } from '@/components/copy-button';
 import { Row } from '@/components/detail-row';
@@ -88,11 +89,11 @@ function formatReleaseExpiry(iso: string): string {
 const ANALYSIS_LABELS: Record<AnalysisResultStatus, string> = {
   PENDING: '분석 대기',
   IN_PROGRESS: '분석 중',
-  PROPOSALS_GENERATED: '조치 제안 생성',
+  PROPOSALS_GENERATED: 'AI 조치 제안 생성',
   NO_PROPOSAL: 'AI 조치 제안 없음',
   GUARDRAIL_REJECTED: '모든 AI 제안이 가드레일에서 거절됨',
   FAILED: '분석 실패',
-  NO_ACTION_AVAILABLE: '제공할 자동 조치 없음',
+  NO_ACTION_AVAILABLE: 'AI가 제공할 조치 없음',
   UNAVAILABLE: '저장된 평가 기록만으로 분석 결과를 확인할 수 없음',
 };
 
@@ -101,8 +102,8 @@ const ANALYSIS_LABELS: Record<AnalysisResultStatus, string> = {
  * 갈린다 — 내부 검증 단계의 이름은 관제자의 다음 행동을 바꾸지 않는다.
  */
 const FAILURE_REASON_NOTICES: Partial<Record<AnalysisFailureReason, string>> = {
-  NO_ACTION_AVAILABLE: '이 위협 유형에는 제공할 자동 조치가 없습니다. 확인 뒤 종료 처리로 닫습니다.',
-  SOURCE_ADDRESS_UNSUPPORTED: 'IPv6 출발지는 NACL 차단을 지원하지 않습니다. 확인 뒤 종료 처리로 닫습니다.',
+  NO_ACTION_AVAILABLE: '이 위협 유형에는 AI가 제공할 조치가 없습니다.',
+  SOURCE_ADDRESS_UNSUPPORTED: 'IPv6 출발지는 NACL 차단을 지원하지 않습니다.',
 };
 
 /**
@@ -911,7 +912,10 @@ export function IncidentDetail({
 
       <AnalysisArea incident={incident} />
 
-      <Section title="판단 근거 (AI 요약)">
+      <Section title="인시던트 분석 요약">
+        <p className="text-muted-foreground text-xs">
+          인시던트 전체의 분석 기록입니다. 아래 후보별 서버 규칙 판단과는 별개입니다.
+        </p>
         <SummaryLines incident={incident} />
       </Section>
 
@@ -986,6 +990,9 @@ export function IncidentDetail({
                   <span className="text-muted-foreground font-mono text-xs break-all">
                     {rec.target_arn}
                   </span>
+                  {rec.runbook_id === 'RUNBOOK_EC2_ISOLATE' || rec.recommendation_basis != null ? (
+                    <CandidateRecommendation recommendation={rec} />
+                  ) : null}
                 </Card>
               </li>
             ))}

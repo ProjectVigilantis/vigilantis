@@ -34,6 +34,7 @@ from schemas.api.incidents import (
     RiskLevel,
 )
 from schemas.api.ws import WsEvent, WsEventType
+from schemas.candidates import CandidateStatus
 from schemas.guardrails import (
     GuardrailDecision,
     GuardrailValidationContext,
@@ -272,6 +273,9 @@ class TimeoutReport:
     skipped: int = 0
     prerequisite_blocked: int = 0
     errored: int = 0
+    protected_offered: int = 0
+    protected_rejected: int = 0
+    protected_skipped: int = 0
 
 
 def run_timeout_cycle(
@@ -302,6 +306,30 @@ def run_timeout_cycle(
                 logger.exception("automatic_isolation_timeout_failed", extra={
                     "incident_id": incident_id,
                 })
+        offers = incidents_repo.list_protected_isolation_offer_pending(
+            db,
+            notification_kind=notification_events.EventKind.PROTECTED_TARGET_ESCALATION.value,
+            incident_statuses=workflows.PROTECTED_ISOLATION_OFFERABLE_STATUSES,
+        )
+        db.rollback()
+        for incident_id in offers:
+            try:
+                offer = workflows.offer_protected_isolation(db, incident_id)
+                if offer.candidate_status is CandidateStatus.EXECUTABLE:
+                    report.protected_offered += 1
+                    if publish is not None:
+                        publish(incident_event(
+                            WsEventType.INCIDENT_UPDATED,
+                            incident_id=incident_id, occurred_at=offer.incident_updated_at,
+                        ))
+                elif offer.candidate_status is CandidateStatus.REJECTED:
+                    report.protected_rejected += 1
+                else:
+                    report.protected_skipped += 1
+            except Exception:
+                db.rollback()
+                report.errored += 1
+                logger.exception("protected_isolation_offer_failed", extra={"incident_id": incident_id})
     logger.info("automatic_isolation_timeout_cycle", extra=vars(report))
     return report
 

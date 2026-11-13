@@ -972,6 +972,11 @@ class RunbookCandidate(Base):
     display_parameters: Mapped[dict] = mapped_column(JSONB, default=dict)
     ai_savings_estimate: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     evidence_ids: Mapped[list] = mapped_column(JSONB, default=list)
+    # #598 — 서버 규칙이 생성 시점에 한 번 남긴 격리 추천 근거(schemas.recommendations).
+    # 갱신·역채움 경로가 없고 옛 후보는 NULL이다. none_as_null: 없음은 SQL NULL이다(JSON null 아님).
+    recommendation_basis: Mapped[dict | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     status: Mapped[CandidateStatus] = mapped_column(
         _enum(CandidateStatus, "candidate_status"),
         default=CandidateStatus.PENDING_VALIDATION,

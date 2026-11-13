@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from datetime import datetime, timedelta, timezone
+from ipaddress import ip_address
 from pathlib import Path
 
 import pytest
@@ -14,7 +15,13 @@ for _p in (str(_ROOT / "apps" / "core-api"), str(_ROOT / "packages")):
         sys.path.insert(0, _p)
 
 from schemas.api.incidents import ResponseMode, RiskLevel  # noqa: E402
-from schemas.events import RiskReasonCode, ThreatEventType  # noqa: E402
+from schemas.events import (  # noqa: E402
+    GuardDutyConnectionDirection,
+    GuardDutyFactStatus,
+    GuardDutyResourceRole,
+    RiskReasonCode,
+    ThreatEventType,
+)
 from security.risk_evaluator import evaluate_threat  # noqa: E402
 from security.threat_normalizer import normalize_guardduty_finding  # noqa: E402
 
@@ -127,6 +134,181 @@ def test_severity_bands(severity, level):
     result = evaluate_threat(_norm(raw(severity=severity)))
     assert result.initial_risk_level is level
     assert result.reason_codes == [RiskReasonCode.RISK_GUARDDUTY_FINDING]
+
+
+def _service(role="TARGET", action=None, count=1) -> dict:
+    service = raw()["Service"]
+    if role is not None:
+        service["ResourceRole"] = role
+    if action is not None:
+        service["Action"] = action
+    return service
+
+
+def _network(**over) -> dict:
+    block = {
+        "ConnectionDirection": "INBOUND", "Blocked": False,
+        "RemoteIpDetails": {"IpAddressV4": "198.51.100.7"},
+    }
+    block.update(over)
+    return {"ActionType": "NETWORK_CONNECTION", "NetworkConnectionAction": block}
+
+
+def _activity(service: dict):
+    return _norm(raw(Service=service)).payload.activity
+
+
+def test_activity_maps_the_source_format_from_the_same_finding():
+    activity = _activity(_service("ACTOR", _network(ConnectionDirection="OUTBOUND", Blocked=True)))
+    assert (activity.resource_role.status, activity.resource_role.value) == (
+        GuardDutyFactStatus.RECORDED, GuardDutyResourceRole.ACTOR)
+    assert activity.action_type.value == "NETWORK_CONNECTION"
+    assert activity.connection_direction.value is GuardDutyConnectionDirection.OUTBOUND
+    assert activity.remote_ip.value == ip_address("198.51.100.7")
+    assert activity.blocked.value is True
+
+
+def test_blocked_false_is_a_recorded_fact_not_an_absent_one():
+    activity = _activity(_service(action=_network(Blocked=False)))
+    assert activity.blocked.status is GuardDutyFactStatus.RECORDED
+    assert activity.blocked.value is False
+
+
+def test_ipv6_remote_address_is_kept_as_a_validated_address():
+    activity = _activity(_service(action=_network(RemoteIpDetails={"IpAddressV6": "2001:DB8::1"})))
+    assert activity.remote_ip.value == ip_address("2001:db8::1")
+
+
+@pytest.mark.parametrize("details", [
+    {"IpAddressV4": "2001:db8::2"},     # 각 칸은 자기 주소 체계만 받는다(AWS RemoteIpDetails)
+    {"IpAddressV6": "198.51.100.7"},
+])
+def test_remote_ip_in_the_wrong_family_field_is_invalid_and_the_finding_is_kept(details):
+    event = _norm(raw(Service=_service(action=_network(RemoteIpDetails=details))))
+    fact = event.payload.activity.remote_ip
+    assert (fact.status, fact.value) == (GuardDutyFactStatus.INVALID, None)
+    assert event.target_arn == f"arn:aws:ec2:{REGION}:{ACCOUNT}:instance/i-0abc"
+
+
+def test_omitted_keys_are_absent_but_explicit_nulls_are_invalid():
+    omitted = _activity(_service(role=None, action={"NetworkConnectionAction": {"RemoteIpDetails": {}}}))
+    for fact in (omitted.resource_role, omitted.action_type, omitted.connection_direction,
+                 omitted.blocked, omitted.remote_ip):
+        assert fact.status is GuardDutyFactStatus.ABSENT
+    nulls = _activity(_service(None, {
+        "ActionType": None,
+        "NetworkConnectionAction": {"ConnectionDirection": None, "Blocked": None,
+                                    "RemoteIpDetails": {"IpAddressV4": None}},
+    }) | {"ResourceRole": None})
+    for fact in (nulls.resource_role, nulls.action_type, nulls.connection_direction,
+                 nulls.blocked, nulls.remote_ip):
+        assert (fact.status, fact.value, fact.source_value) == (GuardDutyFactStatus.INVALID, None, None)
+
+
+@pytest.mark.parametrize(("action", "invalid"), [
+    ({"Action": None}, {"action_type", "connection_direction", "remote_ip", "blocked"}),
+    ({"Action": {"ActionType": "X", "NetworkConnectionAction": None}},
+     {"connection_direction", "remote_ip", "blocked"}),
+    ({"Action": {"ActionType": "X", "NetworkConnectionAction": {"RemoteIpDetails": None}}}, {"remote_ip"}),
+])
+def test_explicit_null_parent_blocks_make_their_facts_invalid(action, invalid):
+    service = _service() | action
+    activity = _activity(service)
+    names = ("action_type", "connection_direction", "remote_ip", "blocked")
+    for name in names:
+        expected = GuardDutyFactStatus.INVALID if name in invalid else (
+            GuardDutyFactStatus.RECORDED if name == "action_type" else GuardDutyFactStatus.ABSENT)
+        assert getattr(activity, name).status is expected, name
+
+
+def test_a_finding_without_any_added_fact_is_inspected_and_all_absent():
+    activity = _activity(_service(role=None))
+    assert activity is not None
+    for fact in (activity.resource_role, activity.action_type, activity.connection_direction,
+                 activity.remote_ip, activity.blocked):
+        assert (fact.status, fact.value, fact.source_value) == (GuardDutyFactStatus.ABSENT, None, None)
+
+
+def test_action_without_network_block_leaves_network_facts_absent_and_nothing_defaulted():
+    activity = _activity(_service(action={"ActionType": "AWS_API_CALL"}))
+    assert activity.action_type.value == "AWS_API_CALL"
+    assert activity.connection_direction.status is GuardDutyFactStatus.ABSENT
+    assert activity.blocked.status is GuardDutyFactStatus.ABSENT
+    assert activity.remote_ip.status is GuardDutyFactStatus.ABSENT
+
+
+def test_missing_individual_network_fields_stay_absent():
+    activity = _activity(_service(action={"ActionType": "NETWORK_CONNECTION", "NetworkConnectionAction": {}}))
+    assert activity.connection_direction.status is GuardDutyFactStatus.ABSENT
+    assert activity.blocked.status is GuardDutyFactStatus.ABSENT
+    assert activity.remote_ip.status is GuardDutyFactStatus.ABSENT
+
+
+def test_unrecognized_values_are_kept_apart_from_absent_and_invalid():
+    activity = _activity(_service("OBSERVER", _network(ConnectionDirection="SIDEWAYS")))
+    assert (activity.resource_role.status, activity.resource_role.value, activity.resource_role.source_value) == (
+        GuardDutyFactStatus.UNRECOGNIZED, None, "OBSERVER")
+    assert activity.connection_direction.status is GuardDutyFactStatus.UNRECOGNIZED
+    assert activity.connection_direction.source_value == "SIDEWAYS"
+
+
+def test_malformed_values_are_invalid_not_absent_and_do_not_reject_the_finding():
+    activity = _activity(_service(7, _network(
+        ConnectionDirection=["INBOUND"], Blocked="false",
+        RemoteIpDetails={"IpAddressV4": "198.51.100.7/24"})))
+    for fact in (activity.resource_role, activity.connection_direction, activity.blocked, activity.remote_ip):
+        assert (fact.status, fact.value, fact.source_value) == (GuardDutyFactStatus.INVALID, None, None)
+    assert activity.action_type.status is GuardDutyFactStatus.RECORDED
+
+
+@pytest.mark.parametrize("action", ["NETWORK_CONNECTION", ["x"], {"ActionType": ""}, {"ActionType": 5}])
+def test_malformed_action_shapes_are_invalid(action):
+    activity = _activity(_service(action=action))
+    assert activity.action_type.status is GuardDutyFactStatus.INVALID
+
+
+@pytest.mark.parametrize("block", ["x", {"RemoteIpDetails": "x"}])
+def test_malformed_network_blocks_make_network_facts_invalid(block):
+    action = {"ActionType": "NETWORK_CONNECTION", "NetworkConnectionAction": block}
+    activity = _activity(_service(action=action))
+    assert activity.remote_ip.status is GuardDutyFactStatus.INVALID
+    if block == "x":
+        assert activity.blocked.status is GuardDutyFactStatus.INVALID
+
+
+@pytest.mark.parametrize("service", [None, [], "", 0, False])
+def test_explicit_falsy_malformed_service_makes_every_fact_invalid_and_keeps_the_finding(service):
+    # 종전에는 `Service or {}` 로 접혀 모두 ABSENT 로 보였다. 시각은 기존 규칙대로 CreatedAt/UpdatedAt 로 대체된다
+    event = _norm(raw(Service=service))
+    activity = event.payload.activity
+    for fact in (activity.resource_role, activity.action_type, activity.connection_direction,
+                 activity.remote_ip, activity.blocked):
+        assert (fact.status, fact.value, fact.source_value) == (GuardDutyFactStatus.INVALID, None, None)
+    assert (event.payload.first_seen_at, event.payload.last_seen_at) == (T0, T0)
+
+
+def test_omitted_service_stays_absent():
+    finding = raw()
+    del finding["Service"]
+    activity = _norm(finding).payload.activity
+    for fact in (activity.resource_role, activity.action_type, activity.connection_direction,
+                 activity.remote_ip, activity.blocked):
+        assert fact.status is GuardDutyFactStatus.ABSENT
+
+
+def test_added_facts_do_not_change_dedup_target_or_baseline_fields():
+    plain = _norm(raw())
+    rich = _norm(raw(Service=_service("ACTOR", _network())))
+    assert plain.deduplication_key == rich.deduplication_key
+    assert plain.target_arn == rich.target_arn
+    assert plain.payload.model_dump(exclude={"activity"}) == rich.payload.model_dump(exclude={"activity"})
+    decided = [evaluate_threat(e).model_dump(exclude={"threat_event_id"}) for e in (plain, rich)]
+    assert decided[0] == decided[1]
+
+
+def test_unrecognized_source_value_is_truncated_to_fit_the_schema():
+    activity = _activity(_service("X" * 500))
+    assert activity.resource_role.source_value == "X" * 64
 
 
 def test_high_keeps_the_shared_mode_and_the_gate_stops_auto_isolation():

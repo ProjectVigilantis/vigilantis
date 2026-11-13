@@ -26,6 +26,8 @@
 #   - recommendations는 AI 추천 가능(본편 7종)·Guardrail PASS 제안만 담고,
 #     Incident당 같은 runbook_id는 최대 1개 — (incident_id, runbook_id)가 외부 식별자.
 #     display_parameters는 화면 표시 전용이라 실행 요청에 되돌려 받지 않는다.
+#     recommendation_basis는 후보 생성 시점의 서버 판정 저장본, recommendation_evidence는 후보가 가리키는
+#     같은 인시던트의 GuardDuty 근거 사본 투영이다. 둘 다 실행 권한 · 자동 대응과 무관하다. (Issue #598)
 #   - executions의 available_recovery_runbook_ids는 롤백 3종만 — 관제자 복구 조치.
 #     (RUNBOOK_NACL_RESTORE는 AI 추천 가능한 주 조치라 recommendations 경로)
 #     이 필드는 PR #44에서 팀 계약으로 확정됐다.
@@ -42,7 +44,8 @@
 #   - auto_isolation_block(상세만)은 서버가 사람 없이 걸 자동 발동(High 선차단·Medium 1분
 #     격리)이 지금 막혀 있으면 그 이유, 아니면 null이다. 읽을 때 서버의 실제 접수 관문과 같은
 #     판정으로 계산한다 — 화면이 「실행 예정」 안내를 끌지 정하는 근거다. 자동 발동 대상이 아닌
-#     건(Low·분석 뒤 High·이미 발동한 건·테넌트 없음)도 null이고, FINOPS는 늘 null이다.
+#     건(Low·분석 뒤 High·이미 발동한 건)도 null이고, FINOPS는 늘 null이다.
+#     서버 후보만 있어 Medium 자동 응답 기한이 시작되지 않은 건은 WAIT_NOT_STARTED로 안내한다.
 #     테넌트 설정이 바뀌어도 이벤트가 나가지 않으므로 다시 읽을 때까지 낡을 수 있다. (Issue #521)
 # ==============================================================================
 
@@ -55,6 +58,8 @@ from typing import Annotated, Literal, Optional
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
+from ..guardduty import GuardDutyActivity
+from ..recommendations import IsolationRecommendationBasis
 from ..runbooks import AI_RECOMMENDABLE_RUNBOOK_IDS, ROLLBACK_RUNBOOK_IDS, RunbookId
 from ..savings import AISavingsEstimate, validate_candidate_savings
 from .actions import ExecutionStatus
@@ -110,8 +115,12 @@ class AutoIsolationBlock(str, Enum):
     #: 테넌트가 자동 조치를 껐다. 또는 그 발동을 정한 시각(High 접수 시각·Medium 응답 기한)이
     #: 마지막으로 다시 켠 시각 이전이다 — 꺼진 동안의 판단은 다시 켜도 사람 없이 실행하지 않는다.
     AUTO_ACTION_DISABLED = "AUTO_ACTION_DISABLED"
+    #: 위협 유형 자체가 자동 발동 대상이 아니다. 관제자 승인 제안과 자동 발동을 구분한다.
+    THREAT_TYPE_NOT_ELIGIBLE = "THREAT_TYPE_NOT_ELIGIBLE"
     #: 보호 태그에 해당하거나, 보호 판정으로 이미 관제자에게 넘겨 타임아웃 감시에서 제외됐다.
     PROTECTED_TAG = "PROTECTED_TAG"
+    #: 승인 후보는 있지만 자동 격리 응답 기한이 시작되지 않았다.
+    WAIT_NOT_STARTED = "WAIT_NOT_STARTED"
 
 
 @unique
@@ -200,6 +209,27 @@ ThreatContext = Annotated[
 ]
 
 
+class GuardDutyRecommendationEvidence(BaseModel):
+    """추천 후보가 가리키는 불변 THREAT 근거(GuardDuty 탐지 사본)의 투영 (#598).
+
+    같은 인시던트의 근거 사본에서만 만들며 원문 payload나 일반 근거 조회가 아니다. 관측 사실이고 판정이 아니다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_id: str = Field(min_length=1)
+    target_arn: str = Field(min_length=1)
+    finding_id: str = Field(min_length=1)
+    finding_type: str = Field(min_length=1)
+    resource_type: str = Field(min_length=1)
+    first_seen_at: UtcDateTime
+    last_seen_at: UtcDateTime
+    activity: GuardDutyActivity | None = Field(
+        default=None,
+        description="null은 활동 사실을 읽기 전에 저장된 탐지(수집 안 됨)다. 칸별 ABSENT·UNRECOGNIZED·INVALID와 다르다.",
+    )
+
+
 class RecommendationItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -225,6 +255,39 @@ class RecommendationItem(BaseModel):
             "아닌 추천이면 null이다. 이미 지난 시각도 그대로 내려간다."
         ),
     )
+    evidence_ids: list[str] = Field(
+        default_factory=list, description="후보가 저장한 근거 ID 목록. 다른 인시던트의 근거를 따라가지 않는다.",
+    )
+    recommendation_basis: IsolationRecommendationBasis | None = Field(
+        default=None,
+        description=(
+            "서버 규칙이 후보 생성 시점에 한 번 남긴 격리 추천 판정. 조회 때 다시 계산하지 않는다. "
+            "CONDITIONALLY_RECOMMENDED도 승인 시 정당한 업무·승인된 테스트 여부 확인이 필요하다. "
+            "null은 판정 기록이 없는 후보(이전 후보 포함)이며 실행 권한과 무관하다."
+        ),
+    )
+    recommendation_evidence: GuardDutyRecommendationEvidence | None = Field(
+        default=None,
+        description=(
+            "후보가 가리키는 근거가 이 인시던트의 GuardDuty 탐지 사본 하나일 때 그 투영. "
+            "그 밖에는 null이다. 값이 있어도 판정을 뜻하지 않는다."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _basis_and_evidence_match_refs(self):
+        # 판정·근거 투영은 후보가 가리키는 사본 하나에 묶인다 — 다른 사본의 판정처럼 보이지 않게
+        if self.recommendation_basis is not None and (
+            self.runbook_id is not RunbookId.RUNBOOK_EC2_ISOLATE or len(self.evidence_ids) != 1
+        ):
+            raise ValueError(
+                "recommendation_basis는 RUNBOOK_EC2_ISOLATE이고 evidence_id가 정확히 하나일 때만 둘 수 있습니다"
+            )
+        if self.recommendation_evidence is not None and (
+            self.evidence_ids != [self.recommendation_evidence.evidence_id]
+        ):
+            raise ValueError("recommendation_evidence는 evidence_ids의 유일한 근거여야 합니다")
+        return self
 
     @model_validator(mode="after")
     def _ai_recommendable_only(self):
