@@ -116,11 +116,16 @@ _logger = logging.getLogger("vigilantis.ai.agent")
 
 # v2(#251) — 문구는 v1 그대로이고, 후보 출력 스키마와 RIGHTSIZING capability 명세에서
 # target_instance_type이 빠졌다(그래프가 규칙으로 계산한다).
-FINOPS_PROMPT_VERSION = "v2"
+#
+# v3(#583 3단계) — 요약 호출이 근거 3줄 뒤에 decision(메뉴 action_id 목록)을 내고, 후보 호출은
+# 그 decision을 전사한다. 후보에는 target_arn이 없다 — 대상은 입력 자산의 ARN으로 코드가 정한다.
+# 두 호출의 출력 모델은 FinOps 전용이라 SecOps 정상·대비책 요청 스키마는 움직이지 않는다.
+FINOPS_PROMPT_VERSION = "v3"
 
 _FINOPS_SUMMARY_SYSTEM_PROMPT = (
     "너는 AWS 비용 최적화 인시던트를 관제자에게 설명한다. 관제자는 이 세 줄과 조치 카드만 "
-    "보고 승인할지 차단할지 정한다. 아래 세 줄을 각각 한국어 한 문장으로 쓴다.\n"
+    "보고 승인할지 차단할지 정한다. 아래 세 줄을 각각 한국어 한 문장으로 먼저 쓰고, 그 세 줄이 "
+    "뒷받침하는 조치를 decision으로 마지막에 낸다.\n"
     "verdict는 규칙 엔진이 이미 내린 판정이다. 요약은 그 판정이 어떤 값에서 나왔는지를 "
     "보여 주는 것이고, 판정을 다시 내리는 자리는 승인 단계의 관제자다. 입력에 없는 값(예: "
     "최대 사용률 없음)은 없다고 적되, 규칙이 그 값 없이 내린 판정을 그대로 설명한다.\n"
@@ -129,24 +134,33 @@ _FINOPS_SUMMARY_SYSTEM_PROMPT = (
     "수)을 포함한다.\n"
     "diagnosis: 그 사실이 자산 상태에 대해 무엇을 뜻하는지 쓴다. 입력이 확정한 것은 단정으로, "
     "입력에서 추론한 것은 추정으로 구분해 쓴다.\n"
-    "rationale: available_actions 중 observation과 diagnosis가 뒷받침하는 조치 하나에 대해 "
-    "그 조치가 이 자산에 맞는 이유를 쓴다. 다른 조치는 다루지 않고, 조치의 이름과 값은 조치 "
-    "카드가 보여 준다. 입력의 판정이 후보가 아니라고 하면 왜 조치가 없는지를 쓴다.\n"
+    "CPU 사용률 값과 규칙 판정은 입력이 확정한 사실이고, 과대 스펙은 그 값에서 추론한 해석이므로 "
+    "diagnosis와 rationale 모두 추정으로 쓴다. 조치를 제시하는 판단과 자산 상태가 사실로 확정됐는지를 구별한다.\n"
+    "rationale: decision에 담은 조치가 이 자산에 맞는 이유를 쓴다. 조치가 둘 이상이면 각 조치의 "
+    "이유를 한 문장에 이어 쓰고, decision에 담은 조치만 다룬다. 조치의 이름과 값은 조치 카드가 "
+    "보여 준다.\n"
     "세 줄은 각각 새 정보를 싣는다 — 같은 사실은 한 줄에만 둔다.\n"
+    "decision: available_actions는 이 자산에 제공되는 조치 메뉴이며 항목마다 action_id(1부터)와 "
+    "목적(purpose)만 담는다. decision은 관제자에게 제시할 조치의 action_id 목록이고, 메뉴에 조치가 "
+    "있으므로 하나 이상을 담는다. 제시한다는 것은 선택지를 보인다는 뜻이며 실행 여부는 승인 단계가 "
+    "정한다. 메뉴에 있는 action_id만 쓰고 같은 값은 한 번만 쓴다. 기본은 조치 하나이며 observation과 "
+    "diagnosis가 가장 크게 뒷받침하는 조치를 고른다. 조치를 둘 이상 담는 때는 입력이 서로 다른 문제를 "
+    "가리켜 각 조치가 그 문제를 따로 해소하거나, 한 조치만으로는 문제가 해소되지 않아 함께 실행해야 "
+    "할 때다. 같은 문제를 푸는 대안끼리는 가장 맞는 하나만 담는다. 담는 근거는 입력이 뒷받침하는 "
+    "정도이며 메뉴에 있다는 사실이 아니다. action_id 번호는 세 줄에 쓰지 말고 조치의 목적으로 풀어 쓴다.\n"
     "health_score·verdict·skip_reason_code와 조치의 런북·대상·파라미터는 구조화 필드로 이미 "
     "화면에 나간다. 그 값은 근거로 인용할 때만 쓴다."
 )
 
 _FINOPS_PROPOSAL_SYSTEM_PROMPT = (
-    "너는 분석 결과를 조치 후보로 옮긴다. capabilities에 실린 Runbook만 고르고, "
-    "target_arn은 allowed_target_arns에 있는 값만 쓴다. evidence_ids에는 입력 evidences의 "
-    "evidence_id만 인용한다. 고른 Runbook의 required_parameters에 적힌 키는 "
-    "parameter_schema의 제약과 parameter_constraints를 지켜 반드시 값을 채우고, 그 목록에 "
-    "없는 키는 null로 둔다. candidates에는 summary_lines의 세 번째 줄(rationale)이 뒷받침한 "
-    "조치를 담는다 — 한 대상에 Runbook 하나가 원칙이고, 둘 이상은 대상이 서로 다르거나 함께 "
-    "실행해야 할 때다. runbook_id마다 후보는 하나만 담는다. candidates를 비우는 것은 "
-    "capabilities 중 이 자산에 적용할 Runbook이 없을 때다. 요약이 추가 확인을 권해도 후보는 "
-    "그대로 낸다 — 승인 여부는 관제자가 정한다."
+    "너는 확정된 decision을 조치 후보로 옮긴다. summary_lines와 decision은 이미 승인된 분석 "
+    "결과이며 바꾸지 말고 그대로 옮긴다. decision의 action_id마다 capabilities에서 같은 "
+    "action_id의 Runbook을 찾아 그 runbook_id로 후보를 하나씩 낸다. candidates의 개수와 "
+    "Runbook 집합은 decision이 가리키는 조치와 같다. 후보에 대상 필드는 없다 — 대상은 서버가 "
+    "정한다. evidence_ids에는 입력 evidences의 evidence_id만 인용한다. 고른 Runbook의 "
+    "required_parameters에 적힌 키는 parameter_schema의 제약과 parameter_constraints를 지켜 "
+    "반드시 값을 채우고, 그 목록에 없는 키는 null로 둔다. runbook_id마다 후보는 하나다. "
+    "요약이 추가 확인을 권해도 후보는 그대로 낸다 — 승인 여부는 관제자가 정한다."
 )
 
 # 런북별 파라미터 제약 문구. 원천은 계약 모델의 model_validator이며, 문구가 계약과 갈리지
@@ -217,6 +231,51 @@ class CandidateProposalOutput(BaseModel):
     candidates: list[ProposedCandidate]
 
 
+# FinOps 전용 출력 모델(#583 3단계). 위 세 모델은 SecOps 정상·대비책 요청 스키마의 원천이라
+# 상속·수정하지 않고 따로 둔다. 아래 docstring·description도 JSON Schema로 모델에 나간다.
+class FinOpsEvidenceDecisionOutput(BaseModel):
+    """근거 3줄(observation → diagnosis → rationale)을 먼저 쓰고, 그 근거가 뒷받침하는 조치를 decision으로 낸다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    observation: str
+    diagnosis: str
+    rationale: str
+    decision: list[StrictInt] = Field(
+        description=(
+            "관제자에게 제시할 조치의 action_id 목록(available_actions 기준, 1부터). "
+            "메뉴에 조치가 있으므로 하나 이상"
+        ),
+    )
+
+
+class FinOpsProposedCandidate(BaseModel):
+    """decision의 조치 1건을 옮긴 후보. 계약(RunbookCandidateDraft)으로 옮기기 전 단계다.
+
+    ProposedCandidate에서 target_arn만 빠졌다 — FinOps 대상은 입력 자산의 ARN으로 코드가 정한다.
+    파라미터 필드의 의미와 Strict 타입은 ProposedCandidate와 같다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    runbook_id: RunbookId
+    evidence_ids: list[str]
+    rule_number: Optional[StrictInt] = None
+    cidr_block: Optional[str] = None
+    protocol: Optional[str] = None
+    egress: Optional[StrictBool] = None
+    min_size: Optional[StrictInt] = None
+    max_size: Optional[StrictInt] = None
+
+
+class FinOpsCandidateProposalOutput(BaseModel):
+    """propose_candidates 노드가 모델에서 받는 출력. 후보는 decision의 조치와 일대일이다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidates: list[FinOpsProposedCandidate]
+
+
 # ------------------------------------------------------------------------------
 # 판 — 모델에게 나가는 지시 전부를 해시 하나로 접는다 (Issue #243)
 # ------------------------------------------------------------------------------
@@ -239,12 +298,12 @@ def finops_prompt_material(*, preserve_schema_order: bool = False) -> str:
         ("parameter_constraints", json.dumps(constraints, ensure_ascii=False, sort_keys=True)),
         (
             "summary_output_schema",
-            json.dumps(EvidenceSummaryOutput.model_json_schema(), ensure_ascii=False,
+            json.dumps(FinOpsEvidenceDecisionOutput.model_json_schema(), ensure_ascii=False,
                        sort_keys=not preserve_schema_order),
         ),
         (
             "proposal_output_schema",
-            json.dumps(CandidateProposalOutput.model_json_schema(), ensure_ascii=False,
+            json.dumps(FinOpsCandidateProposalOutput.model_json_schema(), ensure_ascii=False,
                        sort_keys=not preserve_schema_order),
         ),
     )
@@ -326,8 +385,8 @@ def _model_failure(step: str, exc: AIModelError) -> _Failure:
 
 
 def _convert_candidates(
-    proposals: list[ProposedCandidate],
-    convert: Callable[[ProposedCandidate], RunbookCandidateDraft],
+    proposals: list[ProposedCandidate] | list[FinOpsProposedCandidate],
+    convert: Callable[[Any], RunbookCandidateDraft],
     *,
     step: str,
 ) -> tuple[list[RunbookCandidateDraft], Optional[_Failure]]:
@@ -407,28 +466,11 @@ class _FinOpsState(TypedDict, total=False):
     graph_input: FinOpsGraphInput
     client: AIModelClient
     summary_lines: list[str]
-    proposals: list[ProposedCandidate]
+    decision: list[int]
+    proposals: list[FinOpsProposedCandidate]
     failure: _Failure
     output: AgentGraphOutput
 
-
-# ------------------------------------------------------------------------------
-# 입력에서 파생하는 허용 집합 — 모델이 고를 수 있는 값의 범위
-# ------------------------------------------------------------------------------
-
-
-def _allowed_target_arns(graph_input: FinOpsGraphInput) -> list[str]:
-    """조치 대상이 될 수 있는 ARN. 인시던트 자산과 그 관계 자산뿐이다.
-
-    자산 하나로 고정하지 않는 것은 FinOps 조치의 대상이 관계 자산일 수 있기 때문이다
-    (EC2에 ATTACHED_TO로 달린 EBS 볼륨 → RUNBOOK_EBS_DELETE_UNATTACHED). 순서를 보존해
-    모델에 보내는 목록이 호출마다 흔들리지 않게 한다.
-    """
-    arns = [graph_input.asset_context.arn]
-    for relationship in graph_input.asset_context.relationships:
-        if relationship.target_arn not in arns:
-            arns.append(relationship.target_arn)
-    return arns
 
 
 def _capability_payload(capability: RunbookCapability) -> dict[str, Any]:
@@ -460,7 +502,8 @@ def _capability_payload(capability: RunbookCapability) -> dict[str, Any]:
 
 
 def _parameter_values(
-    runbook_id: RunbookId, proposal: ProposedCandidate, asset: AgentAssetContext
+    runbook_id: RunbookId, proposal: ProposedCandidate | FinOpsProposedCandidate,
+    asset: AgentAssetContext,
 ) -> dict[str, Any]:
     """평평한 후보 필드에서 그 Runbook의 AI 몫 키만 추리고, 서버 몫 키를 계산해 붙인다.
 
@@ -516,27 +559,18 @@ def _canonical_evidence_ids(
     return sorted(cited, key=lambda evidence_id: position.get(evidence_id, len(position)))
 
 
-def _to_draft(proposal: ProposedCandidate, graph_input: FinOpsGraphInput) -> RunbookCandidateDraft:
-    """후보 1건을 계약으로 옮긴다. 옮길 수 없으면 예외를 올려 FAILED로 간다."""
-    offered = {capability.runbook_id for capability in graph_input.capabilities}
-    if proposal.runbook_id not in offered:
-        raise _CandidateRejected(
-            AnalysisFailureReason.RUNBOOK_NOT_OFFERED,
-            f"입력 capabilities에 없는 Runbook입니다: {proposal.runbook_id.value}",
-        )
-    if proposal.target_arn not in _allowed_target_arns(graph_input):
-        raise _CandidateRejected(
-            AnalysisFailureReason.TARGET_NOT_ALLOWED, "target_arn이 인시던트 자산·관계 자산 밖입니다"
-        )
-    is_rightsizing = proposal.runbook_id is RunbookId.RUNBOOK_EC2_RIGHTSIZING
-    if is_rightsizing and proposal.target_arn != graph_input.asset_context.arn:
-        raise _CandidateRejected(
-            AnalysisFailureReason.TARGET_NOT_ALLOWED, "다운사이징 대상의 사양 스냅샷이 없습니다"
-        )
+def _to_draft(
+    proposal: FinOpsProposedCandidate, graph_input: FinOpsGraphInput
+) -> RunbookCandidateDraft:
+    """후보 1건을 계약으로 옮긴다. 옮길 수 없으면 예외를 올려 FAILED로 간다.
+
+    Runbook이 메뉴 안인지는 호출 전에 decision 대응 검사(_decision_mismatch)가 끝냈다.
+    대상은 모델이 낸 값이 아니라 입력 자산의 ARN이다 — 다운사이징의 사양 스냅샷도 그 자산의 것이다.
+    """
     return RunbookCandidateDraft.model_validate(
         {
             "runbook_id": proposal.runbook_id.value,
-            "target_arn": proposal.target_arn,
+            "target_arn": graph_input.asset_context.arn,
             "parameters": _parameter_values(
                 proposal.runbook_id, proposal, graph_input.asset_context
             ),
@@ -591,22 +625,36 @@ def _summary_payload(graph_input: FinOpsGraphInput) -> dict[str, Any]:
     메뉴에 있는지 알아야 하기 때문이다(#243). v1 1차 실측에서 메뉴 없이 쓴 rationale의
     31/60이 카드에 없는 조치(중지·종료·삭제)를 권했다.
 
-    Runbook 이름·파라미터 명세는 싣지 않는다 — 요약 노드는 조치를 고르지 않고(그 일은
-    propose_candidates가 한다), 이름을 주면 문장이 이름을 되읽는다. purpose 문구만으로
-    "과대 스펙 EC2 다운사이징"처럼 사람 말로 조치를 가리킬 수 있다.
+    Runbook 이름·파라미터 명세는 싣지 않는다 — 요약 노드는 조치를 Runbook이 아니라 안정된
+    action_id(capabilities 순서, 1부터)로 고르고, 이름을 주면 문장이 이름을 되읽는다.
+    action_id와 purpose 문구만으로 사람 말 조치와 decision의 대응이 선다(#583 3단계).
     """
     payload = _incident_payload(graph_input)
-    payload["available_actions"] = [capability.purpose for capability in graph_input.capabilities]
+    # 인시던트에서 항상 null인 SKIP 사유는 근거 호출에서 제외한다(#583).
+    del payload["asset"]["skip_reason_code"]
+    if "rule_evaluation" in payload:
+        del payload["rule_evaluation"]["skip_reason_code"]
+    for evidence in payload["evidences"]:
+        if evidence["evidence_type"] == EvidenceType.RULE.value:
+            del evidence["content"]["evaluation"]["skip_reason_code"]
+    payload["available_actions"] = secops_available_actions(graph_input)
     return payload
 
 
-def _proposal_payload(graph_input: FinOpsGraphInput, summary_lines: list[str]) -> dict[str, Any]:
+def _proposal_payload(
+    graph_input: FinOpsGraphInput, summary_lines: list[str], decision: list[int]
+) -> dict[str, Any]:
+    """후보 호출 입력 — 받아들인 요약과 decision, action_id가 붙은 전체 capability 명세.
+
+    action_id는 요약 호출의 메뉴와 같은 색인이다. 대상 ARN 목록은 싣지 않는다 — 대상은 코드가 정한다.
+    """
     payload = _incident_payload(graph_input)
     payload["summary_lines"] = summary_lines
+    payload["decision"] = decision
     payload["capabilities"] = [
-        _capability_payload(capability) for capability in graph_input.capabilities
+        {"action_id": index + 1, **_capability_payload(capability)}
+        for index, capability in enumerate(graph_input.capabilities)
     ]
-    payload["allowed_target_arns"] = _allowed_target_arns(graph_input)
     return payload
 
 
@@ -624,24 +672,58 @@ def _summarize_evidence(state: _FinOpsState) -> dict[str, Any]:
         user_payload=_summary_payload(graph_input),
     )
     try:
-        response = state["client"].complete(request, EvidenceSummaryOutput)
+        response = state["client"].complete(request, FinOpsEvidenceDecisionOutput)
     except AIModelError as exc:
         return {"failure": _model_failure("summarize_evidence", exc)}
     summary = response.output
-    return {"summary_lines": [summary.observation, summary.diagnosis, summary.rationale]}
+    decision = list(summary.decision)
+    menu_size = len(graph_input.capabilities)
+    # 메뉴가 비어 있지 않으므로 빈 decision은 허용하지 않는다. 형식(정수)은 모델 경계가 이미
+    # 검사했고, 여기서는 메뉴와의 대응만 본다. 로그에는 모델이 낸 값 대신 건수만 싣는다
+    if (
+        not decision
+        or len(set(decision)) != len(decision)
+        or not all(1 <= action_id <= menu_size for action_id in decision)
+    ):
+        return {"failure": _Failure(
+            "summarize_evidence", AnalysisFailureReason.DECISION_MISMATCH,
+            {"decision_count": len(decision), "menu_size": menu_size},
+        )}
+    # 받아들인 decision은 고정한다 — 후보 호출의 재시도나 실패가 요약을 다시 부르지 않는다
+    return {
+        "summary_lines": [summary.observation, summary.diagnosis, summary.rationale],
+        "decision": decision,
+    }
 
 
 def _propose_candidates(state: _FinOpsState) -> dict[str, Any]:
     graph_input = state["graph_input"]
     request = AIModelRequest(
         system_prompt=_FINOPS_PROPOSAL_SYSTEM_PROMPT,
-        user_payload=_proposal_payload(graph_input, state["summary_lines"]),
+        user_payload=_proposal_payload(graph_input, state["summary_lines"], state["decision"]),
     )
     try:
-        response = state["client"].complete(request, CandidateProposalOutput)
+        response = state["client"].complete(request, FinOpsCandidateProposalOutput)
     except AIModelError as exc:
         return {"failure": _model_failure("propose_candidates", exc)}
     return {"proposals": list(response.output.candidates)}
+
+
+def _decision_mismatch(state: _FinOpsState) -> Optional[_Failure]:
+    """후보의 개수와 Runbook 집합이 decision이 가리키는 조치와 같은지 — 후보를 계약으로 옮기기 전에 본다.
+
+    decision은 중복 없는 메뉴 색인이라 기대 Runbook도 서로 다르다. 개수와 집합이 모두 같으면
+    일대일이다. 메뉴 밖 Runbook은 집합이 달라 여기서 걸린다.
+    """
+    menu = state["graph_input"].capabilities
+    expected = {menu[action_id - 1].runbook_id for action_id in state["decision"]}
+    proposals = state["proposals"]
+    if len(proposals) == len(expected) and {item.runbook_id for item in proposals} == expected:
+        return None
+    return _Failure(
+        "validate_output_contract", AnalysisFailureReason.DECISION_MISMATCH,
+        {"decision_count": len(state["decision"]), "candidate_count": len(proposals)},
+    )
 
 
 def _validate_output_contract(state: _FinOpsState) -> dict[str, Any]:
@@ -652,7 +734,7 @@ def _validate_output_contract(state: _FinOpsState) -> dict[str, Any]:
     하지 않은 판단이 관제 화면과 DB에 남는다.
     """
     graph_input = state["graph_input"]
-    failure = state.get("failure")
+    failure = state.get("failure") or _decision_mismatch(state)
     if failure is None:
         drafts, failure = _convert_candidates(
             state["proposals"],
@@ -662,9 +744,8 @@ def _validate_output_contract(state: _FinOpsState) -> dict[str, Any]:
     if failure is None:
         output, failure = _build_output(
             "validate_output_contract",
-            invocation_status=(
-                AgentInvocationStatus.SUCCEEDED if drafts else AgentInvocationStatus.NO_PROPOSAL
-            ),
+            # decision이 비어 있지 않고 후보가 그와 일대일이므로 후보가 있다 — NO_PROPOSAL 갈래는 없다
+            invocation_status=AgentInvocationStatus.SUCCEEDED,
             summary_lines=state["summary_lines"],
             candidates=drafts,
         )
@@ -759,7 +840,9 @@ FINOPS_MODEL_CALLS = 2
 # v2.0.6(철회) — 7라운드의 C09 자기모순과 C05 집중 누락을 막으려 두 문장(실패 기록의 구별 문구 금지, 짧은 창의 집중
 # 명시)을 더했으나 9라운드(10회)에서 C04 6/10이 10분 창을 '짧은 창'으로, C09 1/10이 격리 부재를 확정으로 써 각 문장이
 # 새 결함을 만들었다. 입력의 사유 코드가 횟수 근거와 빈도 근거를 구분하지 않아 프롬프트로는 가를 수 없다 — v2.0.5로 되돌렸다.
-SECOPS_PROMPT_VERSION = "v2.0.5"
+# v2.0.7 — 3단계 1라운드 C10의 루프백 출발지에 10/10 NACL 후보를 제시했다.
+# 메뉴 존재와 통신 범위의 적용 가능성을 구분한다. 후속 2라운드에서 10사례 모두 수용 비율 기준을 충족했다.
+SECOPS_PROMPT_VERSION = "v2.0.7"
 
 
 class SecOpsGraphVariant(StrEnum):
@@ -908,6 +991,10 @@ _SECOPS_EVIDENCE_PROMPT = (
     "available_actions는 이 자산에 제공되는 조치 메뉴이며 항목마다 action_id와 목적(purpose)만 담는다. decision은 사람에게 제시할 "
     "조치의 action_id 목록이다. 선택지를 사람에게 제시한다는 뜻이며 지금 실행한다는 뜻이 아니다 — 실행 여부는 가드레일 검사와 관제자 승인이 "
     "정한다. 조치는 0개 또는 1개를 담고 available_actions에 있는 action_id만 쓴다.\n"
+    "메뉴에 있다는 사실과 관측된 통신에 적용할 수 있다는 사실을 구분한다. NACL은 서브넷 경계를 지나는 "
+    "통신을 제어하며 호스트 내부 루프백 통신에는 적용되지 않는다. 관측 출발지가 루프백이면 반복 횟수가 "
+    "많아도 그 출발지의 NACL 차단을 제시하지 않는다. 관측 강도는 그대로 설명하고, 로컬 프로세스·sshd 설정·"
+    "인증 로그의 출발지 기록을 확인하도록 안내한다.\n"
     "전체 실패 횟수·전체 관측 창·단발 또는 반복 여부와 확인된 추가 근거를 함께 읽는다. 반복·집중된 실패와 긴 창의 성긴 실패를 구분하며 낮은 "
     "횟수도 짧은 창에 집중됐는지 본다. 관측 출발지에 대한 조치를 선택지로 제시할 수 있고, 추가 확인이 필요해 현재 적용을 보류하는 판단과 공존할 수 "
     "있다. 단발·낮은 빈도·위험 등급만으로 제시 여부를 고정하지 않는다. 이벤트 이름·출발지 IP·메뉴의 존재만으로 즉시 차단 필요성을 결정하지 "
@@ -999,7 +1086,9 @@ def _secops_payload(graph_input: SecOpsGraphInput) -> dict[str, Any]:
     }
 
 
-def secops_available_actions(graph_input: SecOpsGraphInput) -> list[dict[str, Any]]:
+def secops_available_actions(
+    graph_input: SecOpsGraphInput | FinOpsGraphInput,
+) -> list[dict[str, Any]]:
     """근거 호출에 싣는 조치 메뉴 — action_id(capabilities 순서, 1부터)와 목적 문구만.
 
     Runbook ID·파라미터 명세·대상 ARN은 싣지 않는다(#243 — 파일 머리 주석의 메뉴 실측).

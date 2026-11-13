@@ -1,4 +1,4 @@
-"""실제 SDK 직렬화 지문으로 승인 summary v2와 채택한 V1 단가 요청을 대조한다. 외부 호출 0회."""
+"""실제 SDK 직렬화 지문으로 측정 통과 summary v3와 채택한 V1 단가 요청을 대조한다. 외부 호출 0회."""
 
 import hashlib
 import json
@@ -14,36 +14,37 @@ from schemas.assets import AssetInventory
 from schemas.candidates import CandidateStatus, RunbookCandidateData
 
 ROOT = Path(__file__).resolve().parents[4]
-# 승인 summary v2와 2026-09-16 후보 B의 SDK 요청 지문. 현재 출력에서 재생성하지 않는다.
+# #583 3단계 2라운드 통과 summary v3와 2026-09-16 후보 B의 SDK 요청 지문.
+# 단가 요청은 그대로이며 요약·후보 요청은 실측 통과 판에 맞춰 재고정했다. 테스트 중 재생성하지 않는다.
 APPROVED_REQUESTS = {
     "A1": [
-        "a91300587fa12fc3343f56f1400d950c9fe2a58bbff086abd02fca3d7e77fce9",
-        "8a773d7024fda4832a77ef1afaf667b39290bd40f2b14bc798ce3f73172b11fb",
+        "f9883e13431f757a9dc350ed38cfae92a441957e49ba96de9067417fc9066d56",
+        "015d5bb41614cd1f33e2820e92bdd6442321ce800c9c44c2e2cccb6742cf453e",
         "52a88b16a76b73390946ebcf7cae24d01a286baa49aac0a44b46f079c2ce3fc9",
     ],
     "A7": [
-        "6628fb4b1be3dddfb9e9d89c98a77cd6aa550660d6df1c607295b72e36f7eb18",
-        "0b75edc0620c737ddb3b17e20810c09d6268a4f2045595a23719a38edde79a32",
+        "7f1b3e3f5566cc145430788f491d50835bfa9d509f1fa126aaa1994a31616cb5",
+        "0270ed7b445996cd9417297f8728b1e3a36ab4bf885d6138f44616d499fe80f5",
         "f6d5f9a653a2b9291d0d80d73d77d76af0265118967cc5d3fcd0a7406ed81880",
     ],
     "A11": [
-        "45ce00d0c670c716376ce92c7bdd060715125d8d9cb8fe97b5cfd911b4c9d37f",
-        "f8baa119fadc3f478e0b120e523380f97ecd3230500e2c8c1ba6dd76e44001da",
+        "7980b6652c002191bcc9f33f2a7274ffe41537df49bc911877eca6f474beec22",
+        "0a0f47ca10e47212ff0c2ac696f0c527ff311cbdd3e620be0b6c402f4d2df434",
         "db0acd1ab555e69776b67f5689c3c5f25cecd47f0851dbd93b1ef9998d5ea931",
     ],
     "A12": [
-        "f4208dc04f2c74fc45dd94fc65d958a4b84788f8d0a82b5866e2939e3fa0b146",
-        "d16da3ee2cf0d6e5b13216dd832fe2b651a989aec184a1328fed3e67075164bd",
+        "87467503812d56514d9416ba30bbea3aa76dd03f0f2277c1916b74f005ccd550",
+        "3af4b39b3ef57fa535d0ab7866409bd413ba4aa86a03d4d23c11ef722c247a80",
         "bab833caa199c1888350896959a5942c327f0e20247232bd39e037c5c38328ee",
     ],
     "A14": [
-        "e2a06c286985ce7975a4cb08cb82f52bb801dda6ee6c3e77bd0c963eb191b357",
-        "e88aaa47dda1a9894a9ed573f0d916456026d166fb5379ba8bb2620bf4676180",
+        "d494a8d6a84014ec63cc153d2becd001757f343bf252250b07a4392f68bf4677",
+        "0b6ae89954c1bbfcdc54d32182b87d90d0ad1c61bac6db42ea8d0845fa2c58ef",
         "f52bf4451e49f424c5568f3f05d56767f92cbb74a28ec6de22bbf0acc4741229",
     ],
     "A16": [
-        "2e8f63cdd54cad74564c10c2813a9ddf3bc5b623ae0bba1ddd61a95ef7a0de5c",
-        "4cc45b7165d53b743248472780199f1291b55f522d405892f6ff6a447629465f",
+        "130074123da0e2e971d5e6b18081de05a83741f2d634c24d4c9e7bc2022959a5",
+        "4d8e09f81c0653d65255b2efb5e84350d37a859de50806e3204c5f4cc86e37fe",
         "3a02e3480cb498012ebb24995fb69e48b74d6c7554c7ee712c64a4f9a5dd5584",
     ],
 }
@@ -69,14 +70,19 @@ def fixed_cases():
 def capture(case):
     requests = []
     asset = case.graph_input.asset_context
+    # decision은 메뉴(capabilities 순서) 안의 다운사이징 action_id다. 대상은 코드가 정하므로 후보에 없다
+    action_id = 1 + [
+        item.runbook_id.value for item in case.graph_input.capabilities
+    ].index("RUNBOOK_EC2_RIGHTSIZING")
     responses = {
-        "EvidenceSummaryOutput": {
+        "FinOpsEvidenceDecisionOutput": {
             "observation": "관측된 CPU 사용률이 낮다.",
             "diagnosis": "과대 사양일 가능성이 있다.",
             "rationale": "사양 변경을 검토할 근거다.",
+            "decision": [action_id],
         },
-        "CandidateProposalOutput": {"candidates": [{
-            "runbook_id": "RUNBOOK_EC2_RIGHTSIZING", "target_arn": asset.arn,
+        "FinOpsCandidateProposalOutput": {"candidates": [{
+            "runbook_id": "RUNBOOK_EC2_RIGHTSIZING",
             "evidence_ids": [item.evidence_id for item in case.graph_input.evidences],
         }]},
         "ProposedHourlyRates": {
@@ -106,6 +112,7 @@ def capture(case):
         )
         output = agent.run_finops_graph(case.graph_input, client=client)
         draft = output.candidates[0]
+        assert draft.target_arn == asset.arn
         candidate = RunbookCandidateData(
             candidate_id="sdk-candidate", incident_id=case.graph_input.incident_id,
             status=CandidateStatus.PENDING_VALIDATION, **draft.model_dump(),
@@ -119,7 +126,7 @@ def test_sdk_requests_match_approved_summary_and_v1_rates():
     cases = fixed_cases()
     assert [case.case_id for case in cases] == list(APPROVED_REQUESTS)
     assert agent.finops_prompt_fingerprint() == (
-        "1e2e5c45cd1b1d250ebf371ba65699827bf3c42f88f6d77080515a07c22e1cc7"
+        "a0fab6a357b80fbf87f775b6007bb411852584586a832d769cc32c691f0b4d4f"
     )
     assert rate_estimator.savings_prompt_fingerprint() == APPROVED_SAVINGS_PROMPT
     for case in cases:

@@ -384,6 +384,19 @@ def main() -> int:
                     "judge_prompt_sha256": judge_fingerprint(),
                     "judge_label": label,
                     "model_snapshots": sorted(client.model_snapshots),
+                    # 판정 호출 합계 — 화면에만 찍던 값을 남긴다. 논리 호출과 물리 시도는 다른 수다
+                    "usage": {
+                        "prompt_tokens": client.prompt_tokens,
+                        "completion_tokens": client.completion_tokens,
+                        "cached_prompt_tokens": client.cached_prompt_tokens,
+                        "logical_calls": len(client.records),
+                        "unknown_usage_calls": client.unknown_usage_calls,
+                        "partial_usage_calls": client.partial_usage_calls,
+                        "usage_totals": client.usage_totals(),
+                        "physical_attempts": client.physical_attempts,
+                        "errors": list(client.errors),
+                    },
+                    "call_records": client.all_call_records_json(),
                     "repeat": args.repeat,
                     "sources": [
                         {

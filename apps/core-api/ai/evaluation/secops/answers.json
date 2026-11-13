@@ -1,5 +1,5 @@
 {
-  "scope": "v0.5.3 C01-C09 fixed-input graph evaluation. Candidate and NO_PROPOSAL are both structurally allowed when observations, action scope and explanation support the decision. Candidate creation is separate from current application, guardrail acceptance, approval, execution and closure. The risk level is the server initial judgement passed through as input; the graph re-grades nothing and its output reviewed_risk_level must be null (ADR-0005 amendment 1, #583). Typed candidate constraints remain fixed; this defines no new detector or server response policy.",
+  "scope": "v0.5.3 C01-C10 fixed-input graph evaluation. For C01-C09 candidate and NO_PROPOSAL are both structurally allowed when observations, action scope and explanation support the decision; C10 allows only NO_PROPOSAL because its source is host loopback, which a subnet NACL cannot control. Candidate creation is separate from current application, guardrail acceptance, approval, execution and closure. The risk level is the server initial judgement passed through as input; the graph re-grades nothing and its output reviewed_risk_level must be null (ADR-0005 amendment 1, #583). Typed candidate constraints remain fixed; this defines no new detector or server response policy.",
   "cases": [
     {
       "case_id": "C01",
@@ -189,6 +189,16 @@
         "rule_number_min": 1,
         "rule_number_max": 32766
       }
+    },
+    {
+      "case_id": "C10",
+      "allowed_statuses": [
+        "NO_PROPOSAL"
+      ],
+      "action_policy": "OBSERVE",
+      "risk_basis": "C01과 같은 관측 강도다: 120*60/300=24/min; count>=10 and rate>=20 → 서버 초기 판정 HIGH. 출발지가 127.0.0.1로 바뀌었어도 횟수·창·로그 근거는 그대로이므로 강도를 축소하거나 약한 근거로 다루지 않는다. 합성 관측의 강도를 판단한다. accepted=0은 이 자료의 집계이며 실제 침해 부재나 무해함을 확정하지 않는다.",
+      "action_basis": "출발지 127.0.0.1은 호스트 자신의 루프백 주소다(RFC 1122 §3.2.1.3(g): 루프백 주소의 트래픽은 호스트 밖으로 나가지 않는다). NACL은 서브넷 경계를 오가는 트래픽만 평가하므로 이 출발지의 시도를 NACL 거부 규칙으로 통제할 수 없다. 조치 메뉴에 NACL이 있어도 범위가 맞지 않으므로 후보를 제시하면 FAIL이다. 무제안 이유는 강한 관측 신호(120회/300초, 로그 일치)를 유지한 채 NACL 차단의 범위 불일치로 설명하고, 다음 확인은 호스트 쪽(로컬 프로세스·sshd 설정과 인증 로그의 출발지 해석 등)으로 잇는다. 관측을 무해하다고 단정하거나 차단·격리가 되었다고 말하면 FAIL이다.",
+      "candidate": null
     }
   ]
 }
