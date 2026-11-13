@@ -5,7 +5,7 @@
 >
 > **이 문서는 코드·서버·화면을 정하지 않는다.** 위협마다 「어느 보고서를 · 언제까지 · 무슨 항목으로 · 누가(플랫폼 기록 / AI 문장 / 사람 확인) 채우는가」를 적는 자리다. 공식 서식과 법 조문은 기관 링크로 가리키며 법적 검토의 완결을 주장하지 않는다. 기관 제출은 고객사가 한다(2026-11-06 결정).
 > **기록된 사실과 준수·충족 판단은 다르다.** 이 문서의 「플랫폼 기록」은 그 값이 저장돼 있다는 뜻이고, 신고 요건을 채웠다는 뜻이 아니다. 차단·격리 성공이나 인시던트 `RESOLVED`는 사고 처리 전체(원인 제거 · 복구 · 신고)의 완료가 아니다.
-> 빈칸 · 「공백」 · 「미확인」은 **미확인**이다 — 「없음」으로 읽지 않는다. 외부 문서 인용은 2026-11-11 원문으로 확인했다(GuardDuty 심각도 · 보호나라 신고 양식). **#488 JSON 경로는 PR #616(머지 전) 계약 기준이며 이름과 구조가 리뷰 과정에서 바뀔 수 있다.**
+> 빈칸 · 「공백」 · 「미확인」은 **미확인**이다 — 「없음」으로 읽지 않는다. 외부 문서 인용은 2026-11-11 원문으로 확인했다(GuardDuty 심각도 · 보호나라 신고 양식). **#488 JSON 경로는 PR #616(2026-11-12 `dev` 머지) 계약 기준이다 — 후속 변경이 있으면 2판에서 맞춘다.**
 
 ---
 
@@ -16,7 +16,7 @@
 | 이 문서의 범위와 완료 조건 | #613 본문 §1·§2 · 완료 조건 6 | 확정(11/11 발행) |
 | 제출 목적 5종(ISMS/ISMS-P 인증 · 침해사고 신고 24h · 개인정보 유출 신고·통지 72h · 개인정보위 자료 제출 · 내부 분석) | 안성일 13주차 조사 — #479 코멘트(2026-11-03) §1 | 확정 |
 | ISMS 보고서 범위(근거 내보내기 · 사고 조사 · AI 신고 초안) · 제출은 고객사 | SSOT §확정 결정 로그 2026-11-06 ISMS 행 | 확정 |
-| 근거 내보내기 **계약**(JSON 최상위 `export` · `incident` · `evidence` · THREAT content = `event` + 선택 `context` · 공격 IP 미마스킹 · 2 MiB) | #488 2026-11-09 코멘트 · **PR #616 `packages/schemas/api/evidence_export.py`(머지 전)** · #613 코멘트 `6785035815`(안성일 · 필드 요약) | 잠정 — 머지 전이라 바뀔 수 있다 |
+| 근거 내보내기 **계약**(JSON 최상위 `export` · `incident` · `evidence` · THREAT content = `event` + 선택 `context` · 공격 IP 미마스킹 · 2 MiB) | #488 2026-11-09 코멘트 · **PR #616 `packages/schemas/api/evidence_export.py`(2026-11-12 머지)** · #613 코멘트 `6785035815`(안성일 · 필드 요약) | 코드 · 후속 변경은 2판에서 |
 | GuardDuty 위험도 매핑(7.0↑ HIGH · 4.0–6.9 MEDIUM) · 인시던트는 MEDIUM↑ · 1차 자동 대응 없음 · **C단계(결과 읽기) 미구현** | #588 Q2 · Q3 · PR #593(켜기까지 · 11/11 머지) | 판정 규칙 확정 · 입력은 계획 |
 | 플랫폼이 보는 위협 유형과 판정 | `packages/schemas/events.py` — `ThreatEventType` · `RiskReasonCode` · `expected_mode_for` / `apps/core-api/security/risk_evaluator.py` — `_evaluate_open_ip` · `_evaluate_ssh_bruteforce` / `apps/core-api/security/soar.py`(MEDIUM 60초) / ADR-0011(High 목표 3초) | 코드 |
 | 기록이 남는 자리(실제 테이블명) | `threat_events` · `incidents`(`IncidentStatus`) · `action_executions`(`RunbookId` · `TriggerSource`) · `evidence_items`(`EvidenceItem` · 현재 SecOps 접수는 THREAT 근거를 남긴다) · `audit_events`(T-2) · `platform_events`(#592 11/11 머지 · 기능별 기록 호출은 #589 B에서 연결) | 코드 |
@@ -49,7 +49,7 @@
 | B7 | DoS **수신**(피해) | Impact T1498/T1499 | — (Shield 영역) | DDoS | **공백** | 침해사고 24h — 플랫폼 밖 근거 |
 | B8 | 데이터 유출(DNS 터널 · 외부 반출) | Exfiltration T1048/T1537 | `Trojan:EC2/DNSDataExfiltration`(H) · `Trojan:EC2/DropPoint`(M) | 기타(정보유출) | GD(계획) | 침해사고 24h + 개인정보 포함 시 72h — **§3-3** |
 | B9 | 자격 증명 유출 · 인스턴스 역할 자격 반출 | Credential Access T1552 · T1528 | `UnauthorizedAccess:IAMUser/InstanceCredentialExfiltration.OutsideAWS`(H) · `UnauthorizedAccess:EC2/MetadataDNSRebind`(H) · `CredentialAccess:IAMUser/CompromisedCredentials`(H) | 서버 해킹(계정 탈취) | GD(EC2 1종 · 계획) · IAM은 A4 | 24h · 유출 경로면 72h |
-| B10 | 계정 탈취 · 권한 상승 · 지속화(IAM 변경) | Valid Accounts T1078 · Account Manipulation T1098 | `Persistence/PrivilegeEscalation:IAMUser/AnomalousBehavior`(M) · `Policy:IAMUser/RootCredentialUsage`(L) · `ConsoleLoginSuccess.B`(M) | 서버 해킹 | A4 | 24h |
+| B10 | 계정 탈취 · 권한 상승 · 지속화(IAM 변경) | Valid Accounts T1078 · Account Manipulation T1098 | `Persistence:IAMUser/AnomalousBehavior`(M) · `PrivilegeEscalation:IAMUser/AnomalousBehavior`(M) · `Policy:IAMUser/RootCredentialUsage`(L) · `ConsoleLoginSuccess.B`(M) | 서버 해킹 | A4 | 24h |
 | B11 | 탐지 회피 · 로그 끄기 | Defense Impairment T1685 · T1578 | `Stealth:IAMUser/CloudTrailLoggingDisabled`(L) · `DefenseEvasion:IAMUser/AnomalousBehavior`(M) · `DefenseEvasion:EC2/UnusualDNSResolver`(M) | 서버 해킹(은폐) | GD(EC2 · 계획) · IAM은 A4 | 근거 훼손 → 「미확인」 칸 증가 |
 | B12 | 랜섬웨어 · 데이터 파괴 | Impact T1486 · T1485 · T1490 | — (EC2 finding 없음 · Malware Protection/S3 영역) | 악성코드(랜섬웨어) | **공백** | 24h · 개인정보면 72h |
 | B13 | 피싱 · 악성 도메인 질의 · 드라이브바이 | User Execution T1204 | `Trojan:EC2/PhishingDomainRequest!DNS`(H) · `Trojan:EC2/DriveBySourceTraffic!DNS`(H) · `Impact:EC2/MaliciousDomainRequest.Reputation`(H) | 악성코드 | GD(계획) | 내부 분석 → 감염 확인 시 24h |
@@ -77,7 +77,7 @@
 | ⓕ 미확인 기준 | 값이 없을 때 「미확인」으로 남기는 조건(§2-4) |
 | ⓖ 추가 확인 · 정정 | 새 사실 → 추가 신고(최초 신고의 추가분임을 밝힘) · 제출본과 작업본 구분 |
 
-### 2-2. #488 JSON 계약 요약 (PR #616 · 머지 전 · 바뀔 수 있음)
+### 2-2. #488 JSON 계약 요약 (PR #616 · 2026-11-12 머지 기준)
 
 | 최상위 | 필드 | 뜻 |
 | --- | --- | --- |
@@ -102,7 +102,9 @@
 ### 2-4. 미확인 기준
 
 - `evidence`가 빈 배열이면 관측 자체가 「미확인」 — `export.missing`에 `no_evidence`가 있는지 본다.
-- `content.context`가 null · `context.target`이 null(`target_status`가 `not_collected` · `absent` · `missing_collection`) · `log_evidence`가 null이면 대상·로그 칸은 「미확인」.
+- **대상 식별자는 항상 있다** — THREAT 근거의 `evidence[].content.event.target_arn`은 접수가 필수 값으로 저장하므로(`incident_intake`), `context`가 없어도 「미확인」으로 돌리지 않는다. 기록된 ARN은 그대로 쓴다.
+- **사본에서 오는 칸만 사본 기준으로 본다** — `context.target.asset.resource_id` · `private_ip`처럼 접수 때 확보한 자산 사본에서 가져오는 칸은 `content.context`가 null이거나 `context.target`이 null(`target_status`가 `not_collected` · `absent` · `missing_collection`)이거나 그 값이 비어 있을 때만 「미확인」.
+- **로그 칸은 로그 기준으로 본다** — `context.log_evidence`가 null이면 로그 칸만 「미확인」. 대상 사본의 유무와 따로 판정한다.
 - `flags.missing[]`은 근거 1건의 누락 사유, `export.missing[]`은 묶음 누락이다. **빈 목록을 자료 전체의 완전성으로 읽지 않는다.** `synthetic=false`가 실데이터 보장이 아니고, `excerpt=true`는 발췌 정책 표시라 실제 생략 여부는 원래 건수와 실린 건수를 대조한다.
 - JSON 밖 기록(조치 · 승인 · 발송)은 연결 전까지 「연결 전 사람 확인」.
 
@@ -143,9 +145,9 @@
 | --- | --- | --- | --- |
 | 시도만 — 차단·격리로 끝, 로그인 성공 징후 없음 | **내부 분석**(보고서 없음) · ISMS 접근통제 운영 증적 | — | 플랫폼 기록만으로 닫힘 |
 | 성공 징후 — 호스트 로그인 성공 · 후속 행위(B4·B5·B8 finding 동반) | **침해사고 신고**(과기정통부/KISA) | 안 뒤 **24시간** · 추가 사실도 확인 후 24h | 정보통신서비스 제공자 해당 여부는 고객사 판단 |
-| 그 호스트가 개인정보처리시스템이고 유출 확인 | **개인정보 유출 신고·통지** | **72시간** | 1천 명 이상 · 민감/고유식별 · 외부 불법 접근 중 하나 — 이 시나리오는 「외부 불법 접근」으로 거의 자동 충족 |
+| 그 호스트가 개인정보처리시스템이고 유출 확인 | **개인정보 유출 신고·통지** | **72시간** | 1천 명 이상 · 민감/고유식별 · 외부 불법 접근 중 하나 — 이 시나리오는 「외부 불법 접근」에 **해당할 수 있다**. 해당 여부와 단서(유출 경로가 확인되고 회수·삭제 등으로 권익 침해 가능성이 현저히 낮으면 신고 생략 가능 · 개인정보 보호법 시행령 제40조 제1항) 적용은 고객사가 판단한다 |
 
-**ⓔ 침해사고 신고 항목표**
+**ⓔ 침해사고 신고 항목표** — 항목의 법령 원천은 정보통신망법 시행령 제58조의2(2024-08-14 시행)다. 24시간 안에 신고할 사항 = ① 발생 일시 · 원인 · 피해 내용 ② 조치사항 등 대응 현황 ③ 대응 담당 부서 · 연락처이고, 추가로 확인된 사실은 확인한 때부터 24시간 안에 보완 신고한다(ⓓ 「추가 사실도 확인 후 24h」의 근거). 조문은 법무법인 해설의 인용으로 확인했고 국가법령정보센터 원문은 열지 않았다. 보호나라 폼의 사고현황 · 대응현황 입력 칸은 읽지 못했다(§1-2) — 아래 표는 이 세 사항을 안성일 11/3 조사의 「담을 내용」으로 푼 것이다.
 
 | 보고서 항목 | 채우는 주체·방식 | JSON 경로 또는 별도 기록 | 부족한 확인 자료 |
 | --- | --- | --- | --- |
@@ -154,13 +156,13 @@
 | 발생 시각 | 플랫폼 기록(JSON) | `evidence[].content.event.occurred_at` · `evidence[].occurred_at` | — |
 | 플랫폼 인시던트 생성 시각 | 플랫폼 기록(JSON) | `incident.created_at` | 사람 최초 인지와 다르다 |
 | **최초 인지 시각(기산점)** | **사람 확인** | — | 사람 칸 · 법적 판단은 고객사 |
-| 피해 시스템 | 플랫폼 기록(JSON) + 사람 확인 | `evidence[].content.context.target.asset.resource_id`(인스턴스 ID) · 리전은 `subject_arn` · `private_ip`는 nullable | `context`·`target`이 null이면 미확인 · **공개 IP는 `Ec2Spec`에 없어 사람 확인** · 호스트 역할·보유 정보 |
+| 피해 시스템 | 플랫폼 기록(JSON) + 사람 확인 | **대상 ARN `evidence[].content.event.target_arn`(항상 있다)** · 인스턴스 ID `evidence[].content.context.target.asset.resource_id` · `private_ip`(nullable) · 리전은 `subject_arn` | 사본(`context.target`)이 없거나 값이 비면 **인스턴스 ID·사설 IP만** 미확인(ARN은 유지) · **공개 IP는 `Ec2Spec`에 없어 사람 확인** · 호스트 역할·보유 정보 |
 | 공격 IP · 방법 | 플랫폼 기록(JSON) · AI 문장 | `evidence[].content.event.payload.source_ip` · `.failed_attempt_count` · `.window_seconds` | 판정 코드(`RISK_SSH_BRUTEFORCE`)는 JSON 밖 — 필요하면 별도 입력 |
 | 피해 내용 | 사람 확인 | — (호스트 auth 로그는 플랫폼 미수집) | 「미확인」으로 적는다 · 확인된 사실 / 추정 / 미확인 구분은 사고 조사 페이지 |
 | 조치 내용 · 결과 | 플랫폼 기록(JSON 밖) → 연결 전 사람 확인 | `action_executions`(런북 · 시각 · 결과) · 승인은 `audit_events` · 계기는 `trigger_source` — **셋을 따로 표시** | 별도 입력 연결 필요 · 호스트 내부 조치는 사람 |
 | 추가 보고 여부 | 사람 확인 | — | 조사 진행에 따라 |
 
-**ⓕ 미확인 기준** — §2-4 그대로. 특히 `context`가 null인 SSH 근거는 대상 칸이 전부 미확인이다.
+**ⓕ 미확인 기준** — §2-4 그대로. 대상 ARN(`event.target_arn`)은 항상 기록되므로 유지하고, 사본 칸(인스턴스 ID · 사설 IP)은 사본이나 값이 없을 때, 로그 칸은 `log_evidence`가 없을 때만 미확인이다. `context`가 null이라고 대상 칸 전부를 미확인으로 두지 않는다.
 
 **ⓖ 추가 확인 · 정정** — 격리 뒤 호스트 조사에서 성공이 확인되면 「최초 신고의 추가분」으로 24h 안에 다시 신고(KISA 안내서). 플랫폼 쪽 요구: 제출한 본(스냅숏)과 그 뒤 쌓인 근거를 구분해야 한다 — **담당 협의 전 후보 · #488 확정 범위 아님**(#613 완료 조건 5로 넘김).
 
@@ -222,7 +224,7 @@
 | --- | --- | --- | --- |
 | finding 1건 | **내부 분석** + 침해사고 신고 검토 | 24h 시계 시작 여부는 「침해 확인」 시점(사람) | — |
 | 호스트에서 반출 확인(무엇이든) | **침해사고 신고**(정보유출) | 안 뒤 **24시간** | — |
-| 반출된 것에 개인정보 포함 | **개인정보 유출 신고**(개인정보위 · 전문기관) + **정보주체 통지** | 안 날부터 **72시간**(통지도 원칙 72h) | 신고 대상: 1천 명 이상 **또는** 민감·고유식별정보 **또는** 외부 불법 접근 중 하나 — 이 시나리오는 「외부 불법 접근」으로 거의 자동 충족 · 통지는 규모와 무관 |
+| 반출된 것에 개인정보 포함 | **개인정보 유출 신고**(개인정보위 · 전문기관) + **정보주체 통지** | 안 날부터 **72시간**(통지도 원칙 72h) | 신고 대상: 1천 명 이상 **또는** 민감·고유식별정보 **또는** 외부 불법 접근 중 하나 — 이 시나리오는 「외부 불법 접근」에 **해당할 수 있다** · 해당 여부와 단서(시행령 제40조 제1항 · §3-1 ⓓ) 적용은 고객사 판단 · 통지는 규모와 무관 |
 | 유출 규모 · 항목이 조사 중 | **확인된 사실로 우선 신고 뒤 추가분 신고**(개인정보 유출등 대응 안내서) | 72h 안 1차 | 「조사 중」을 숨기지 않는다 |
 
 **ⓔ 개인정보 유출 신고·통지 항목표(계획)** — 신고서 항목(유출 항목 · 규모 · 경위 · 시점 · 피해 최소화 조치와 결과 · 정보주체 구제절차 · 담당부서·연락처) 기준:
@@ -271,6 +273,7 @@
 
 | 날짜 | 내용 |
 | --- | --- |
-| 2026-11-11 | 1판 — §0 원천 · §1 분류표(#613 코멘트 `6784418428` 옮김) · §2 칸 정의 · §3 시나리오 3건(A2 SSH 무차별 대입 · B4 C&C/백도어 · B8 데이터 유출 의심) + §3-4 공통점 · §4 공백 모음. `[S]` 1행(B13)은 원문 재확인 전 |
-| 2026-11-11 | 외부 인용 원문 확인 — GuardDuty EC2 페이지에서 `DriveBySourceTraffic!DNS` High 등 인용 심각도 전부 일치(`[S]` 해제) · 보호나라 신고 양식 선택지 3종(랜섬웨어 · 디도스 · 그 밖의 해킹) 확인 → §0 · §1-2 주석 추가 · §3-1 GuardDuty SSH 한계(22번 포트 · IPv6 미지원) |
-| 2026-11-11 | PR #614 리뷰(안성일 · #613 코멘트 `6785035815`) 반영 — 테이블명 `action_executions`·`evidence_items` · 실행→근거 연결 삭제 · A1 「SG 대상 자동 격리 없음」 · A2 「즉시 선차단(목표 3초)」·MEDIUM 60초 조건·NACL 24h 예약 의미 · A3·B축 GuardDuty 「계획 입력」 · A5 #589 B 연결 필요 · §2-2 #488 JSON 계약 요약(PR #616 · 머지 전) · §2-3 시각 다섯과 사람 최초 인지 분리 · §2-4 미확인 기준 · ⓔ 항목표를 4칸(주체·JSON 경로/별도 기록·부족 자료)으로 · 공개 IP·담당부서는 사람 확인 · §3-4에 기록≠판정 · `trigger_source`/승인/결과 분리 |
+| 2026-11-11 11:31 | 1판 — §0 원천 · §1 분류표(#613 코멘트 `6784418428` 옮김) · §2 칸 정의 · §3 시나리오 3건(A2 SSH 무차별 대입 · B4 C&C/백도어 · B8 데이터 유출 의심) + §3-4 공통점 · §4 공백 모음. `[S]` 1행(B13)은 원문 재확인 전 |
+| 2026-11-11 16:15 | PR #614 1차 리뷰(안성일 · #613 코멘트 `6785035815`) 반영 — 테이블명 `action_executions`·`evidence_items` · 실행→근거 연결 삭제 · A1 「SG 대상 자동 격리 없음」 · A2 「즉시 선차단(목표 3초)」·MEDIUM 60초 조건·NACL 24h 예약 의미 · A3·B축 GuardDuty 「계획 입력」 · A5 #589 B 연결 필요 · §2-2 #488 JSON 계약 요약(PR #616 · 당시 머지 전) · §2-3 시각 다섯과 사람 최초 인지 분리 · §2-4 미확인 기준 · ⓔ 항목표를 4칸(주체·JSON 경로/별도 기록·부족 자료)으로 · 공개 IP·담당부서는 사람 확인 · §3-4에 기록≠판정 · `trigger_source`/승인/결과 분리 |
+| 2026-11-11 17:08 | 외부 인용 원문 확인 — GuardDuty EC2 페이지에서 `DriveBySourceTraffic!DNS` High 등 인용 심각도 전부 일치(`[S]` 해제) · 보호나라 신고 양식 선택지 3종(랜섬웨어 · 디도스 · 그 밖의 해킹) 확인 → §0 · §1-2 주석 추가 · §3-1 GuardDuty SSH 한계(22번 포트 · IPv6 미지원) |
+| 2026-11-13 | PR #614 2차(안성일 `5855391165`)·3차(김세혁 `5867138412`) 리뷰 반영 — §2-4 미확인 기준을 셋으로(대상 ARN `event.target_arn`은 항상 기록 → 유지 / 사본 칸은 사본·값 없을 때 / 로그 칸은 `log_evidence` 없을 때) · §3-1 ⓔ 피해 시스템 행에 `target_arn` 경로 추가 · ⓕ 「`context` null → 대상 전부 미확인」 삭제 · B10 두 유형으로 분리 · ⓔ 머리에 시행령 제58조의2 신고 사항 3가지 · ⓓ·§3-3 72h 「거의 자동 충족」 → 「해당할 수 있다 · 단서 적용은 고객사 판단」 · PR #616 머지 반영(§0 · §2-2) · 변경 이력에 시각. **PR #615(GuardDuty 탐지 읽기 · 11/12 머지)와 #613 김승철 A4 답(IAM finding 읽음)은 2판 입력** |
