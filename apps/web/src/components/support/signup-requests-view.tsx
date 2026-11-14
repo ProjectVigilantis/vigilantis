@@ -1,7 +1,9 @@
 'use client';
 
 // 도입 신청함(플랫폼 계정). 로그인 창 회원가입에서 들어온 신청을 상태별로 걸러 보고, 한 건을 펼쳐 검토 · 승인 · 반려한다.
-// 승인은 신청의 상태만 바꾼다. 고객사 추가와 관리자 초대는 고객사 화면에서 이어서 한다(ADR-0012: 고객사는 운영자가 만든다).
+// 승인하면 고객사가 함께 만들어진다(#572 8번 · POST /signup-requests/{id}/approve). [승인]을 누르면 AWS 계정 ID와 리전 칸이
+// 열리고, 만든 뒤에는 그 고객사 상세로 가서 연결(역할 생성 · 확인)을 이어 간다. 상태 변경 PUT으로 APPROVED를 보내면 서버가
+// 409 SIGNUP_REQUEST_APPROVAL_REQUIRED로 거절하므로 승인은 이 경로로만 한다.
 // 반려는 사유가 있어야 한다(계약 #552): [반려]를 누르면 사유 칸이 열리고, 저장한 사유는 반려된 신청에 함께 보인다.
 // 알림을 눌러 오면(`?id=`) 그 건을 펼쳐 둔다.
 
@@ -14,9 +16,10 @@ import { INPUT_CLASS as INPUT, LABEL_CLASS as LABEL } from '@/components/form-cl
 import { EnumBadge } from '@/components/status-badge';
 import { FilterChips } from '@/components/support/filter-chips';
 import { Button } from '@/components/ui/button';
-import { ApiError, changeSignupRequestStatus } from '@/lib/api/client';
+import { ApiError, approveSignupRequest, changeSignupRequestStatus } from '@/lib/api/client';
 import { TENANTS_PATH } from '@/lib/home-path';
 import { SIGNUP_NEXT, SIGNUP_STATUS_LABELS } from '@/lib/support';
+import { parseSignupApproveForm, type SignupApproveForm, type SignupApproveFormErrors } from '@/lib/tenants';
 import { cn, formatKst } from '@/lib/utils';
 import type { SignupRequestItem, SignupRequestStatus } from '@/types/api';
 
@@ -26,6 +29,9 @@ const ACTION_LABEL: Record<SignupRequestStatus, string> = {
   APPROVED: '승인',
   REJECTED: '반려',
 };
+
+/** 고객사 추가 창(create-tenant-dialog.tsx)과 같은 기본 리전. */
+const DEFAULT_APPROVE_REGION = 'ap-northeast-2';
 
 const FILTERS: (SignupRequestStatus | 'ALL')[] = ['ALL', 'NEW', 'IN_REVIEW', 'APPROVED', 'REJECTED'];
 
@@ -37,6 +43,10 @@ export function SignupRequestsView({ items, focusId }: { items: SignupRequestIte
   const [error, setError] = useState<{ id: string; message: string } | null>(null);
   /** [반려]를 누른 신청. 사유 칸을 열고, 사유를 적어야 [반려 확정]이 눌린다(계약: 반려는 사유 필수). */
   const [rejecting, setRejecting] = useState<{ id: string; reason: string } | null>(null);
+  /** [승인]을 누른 신청. 만들 고객사의 AWS 계정 ID와 리전을 받는다. */
+  const [approving, setApproving] = useState<{ id: string; form: SignupApproveForm; errors: SignupApproveFormErrors } | null>(
+    null,
+  );
 
   const shown = filter === 'ALL' ? items : items.filter((i) => i.status === filter);
   const count = (f: SignupRequestStatus | 'ALL') => (f === 'ALL' ? items.length : items.filter((i) => i.status === f).length);
@@ -54,6 +64,27 @@ export function SignupRequestsView({ items, focusId }: { items: SignupRequestIte
       setPendingId(null);
     }
   };
+
+  const approve = async (item: SignupRequestItem, form: SignupApproveForm) => {
+    const parsed = parseSignupApproveForm(form);
+    if (!parsed.ok) {
+      setApproving({ id: item.request_id, form, errors: parsed.errors });
+      return;
+    }
+    setApproving({ id: item.request_id, form, errors: {} });
+    setPendingId(item.request_id);
+    setError(null);
+    try {
+      const approved = await approveSignupRequest(item.request_id, parsed.request);
+      router.push(`${TENANTS_PATH}/${encodeURIComponent(approved.tenant.tenant.tenant_id)}`);
+    } catch (cause) {
+      setError({ id: item.request_id, message: cause instanceof ApiError ? cause.message : '승인하지 못했습니다.' });
+      setPendingId(null);
+    }
+  };
+
+  const setApproveField = (key: keyof SignupApproveForm) => (event: React.ChangeEvent<HTMLInputElement>) =>
+    setApproving((prev) => (prev === null ? prev : { ...prev, form: { ...prev.form, [key]: event.target.value } }));
 
   if (items.length === 0) {
     return <EmptyState message="받은 도입 신청이 없습니다." />;
@@ -117,16 +148,98 @@ export function SignupRequestsView({ items, focusId }: { items: SignupRequestIte
                         </>
                       ) : null}
                     </dl>
+                    {/* tenant_id: 승인으로 만든 고객사. #572 8번 전의 승인이거나 고객사를 지웠으면 null이다. */}
                     {item.status === 'APPROVED' ? (
                       <p className="bg-muted rounded-md px-3 py-2 text-sm">
-                        승인한 신청입니다. 고객사 화면에서 고객사를 추가하고, AWS 연결이 확인되면 {item.email}을 고객사 중앙계정으로
-                        초대하세요.{' '}
-                        <Link href={TENANTS_PATH} className="text-primary font-semibold hover:underline">
-                          고객사 화면으로
-                        </Link>
+                        {item.tenant_id !== null ? (
+                          <>
+                            AWS 연결이 확인되면 {item.email}을 고객사 중앙계정으로 초대하세요.{' '}
+                            <Link
+                              href={`${TENANTS_PATH}/${encodeURIComponent(item.tenant_id)}`}
+                              className="text-primary font-semibold hover:underline"
+                            >
+                              만든 고객사로
+                            </Link>
+                          </>
+                        ) : (
+                          <>
+                            이어진 고객사가 없는 승인입니다.{' '}
+                            <Link href={TENANTS_PATH} className="text-primary font-semibold hover:underline">
+                              고객사 화면으로
+                            </Link>
+                          </>
+                        )}
                       </p>
                     ) : null}
-                    {rejecting?.id === item.request_id ? (
+                    {approving?.id === item.request_id ? (
+                      <form
+                        className="flex flex-col gap-3"
+                        noValidate
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          void approve(item, approving.form);
+                        }}
+                      >
+                        <div className="flex flex-col gap-1">
+                          <label htmlFor={`approve-account-${item.request_id}`} className={LABEL}>
+                            AWS 계정 ID
+                          </label>
+                          <input
+                            id={`approve-account-${item.request_id}`}
+                            className={cn(INPUT, 'font-mono')}
+                            value={approving.form.awsAccountId}
+                            onChange={setApproveField('awsAccountId')}
+                            inputMode="numeric"
+                            autoComplete="off"
+                            autoFocus
+                            disabled={pendingId === item.request_id}
+                            aria-invalid={Boolean(approving.errors.awsAccountId)}
+                            aria-describedby={
+                              approving.errors.awsAccountId ? `approve-account-${item.request_id}-error` : undefined
+                            }
+                          />
+                          {approving.errors.awsAccountId ? (
+                            <p id={`approve-account-${item.request_id}-error`} className="text-destructive text-sm">
+                              {approving.errors.awsAccountId}
+                            </p>
+                          ) : null}
+                        </div>
+                        <div className="flex flex-col gap-1">
+                          <label htmlFor={`approve-regions-${item.request_id}`} className={LABEL}>
+                            리전
+                          </label>
+                          <input
+                            id={`approve-regions-${item.request_id}`}
+                            className={cn(INPUT, 'font-mono')}
+                            value={approving.form.regions}
+                            onChange={setApproveField('regions')}
+                            autoComplete="off"
+                            disabled={pendingId === item.request_id}
+                            aria-invalid={Boolean(approving.errors.regions)}
+                            aria-describedby={approving.errors.regions ? `approve-regions-${item.request_id}-error` : undefined}
+                          />
+                          {approving.errors.regions ? (
+                            <p id={`approve-regions-${item.request_id}-error`} className="text-destructive text-sm">
+                              {approving.errors.regions}
+                            </p>
+                          ) : null}
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <Button type="submit" size="sm" disabled={pendingId === item.request_id}>
+                            {pendingId === item.request_id ? '만드는 중…' : '승인하고 고객사 만들기'}
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            disabled={pendingId === item.request_id}
+                            onClick={() => setApproving(null)}
+                          >
+                            취소
+                          </Button>
+                        </div>
+                      </form>
+                    ) : rejecting?.id === item.request_id ? (
                       <div className="flex flex-col gap-2">
                         <label htmlFor={`reject-reason-${item.request_id}`} className={LABEL}>
                           반려 사유
@@ -171,11 +284,17 @@ export function SignupRequestsView({ items, focusId }: { items: SignupRequestIte
                             size="sm"
                             variant={next === 'REJECTED' ? 'outline' : 'default'}
                             disabled={pendingId === item.request_id}
-                            onClick={() =>
-                              next === 'REJECTED'
-                                ? setRejecting({ id: item.request_id, reason: '' })
-                                : void change(item, next)
-                            }
+                            onClick={() => {
+                              setError(null);
+                              if (next === 'REJECTED') setRejecting({ id: item.request_id, reason: '' });
+                              else if (next === 'APPROVED')
+                                setApproving({
+                                  id: item.request_id,
+                                  form: { awsAccountId: '', regions: DEFAULT_APPROVE_REGION },
+                                  errors: {},
+                                });
+                              else void change(item, next);
+                            }}
                           >
                             {ACTION_LABEL[next]}
                           </Button>

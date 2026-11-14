@@ -10,6 +10,7 @@ import {
   TENANT_SUSPENDABLE_STATUSES,
   TENANT_VERIFIABLE_STATUSES,
   type ErrorCode,
+  type SignupRequestApproveRequest,
   type TenantCreateRequest,
   type TenantDetail,
   type TenantListItem,
@@ -296,15 +297,41 @@ export function parseVpcIds(raw: string): { values: string[]; error: string | nu
   return { values, error: null };
 }
 
+export function parseAccountId(raw: string): { value: string; error: string | null } {
+  // 콘솔은 계정 ID를 1234-5678-9012처럼 보여 준다. 붙여 넣은 하이픈과 공백은 뺀다.
+  const value = raw.replace(/[\s-]/g, '');
+  return { value, error: ACCOUNT_ID.test(value) ? null : '계정 ID는 숫자 12자리입니다.' };
+}
+
+/** 도입 신청 승인 입력(#572 8번). 이름은 신청의 회사명, 그룹은 없음으로 서버가 정하므로 계정 ID와 리전만 받는다. */
+export interface SignupApproveForm {
+  awsAccountId: string;
+  regions: string;
+}
+
+export type SignupApproveFormErrors = Partial<Record<keyof SignupApproveForm, string>>;
+
+export function parseSignupApproveForm(
+  form: SignupApproveForm,
+): { ok: true; request: SignupRequestApproveRequest } | { ok: false; errors: SignupApproveFormErrors } {
+  const errors: SignupApproveFormErrors = {};
+  const account = parseAccountId(form.awsAccountId);
+  if (account.error !== null) errors.awsAccountId = account.error;
+  const regions = parseRegions(form.regions);
+  if (regions.error !== null) errors.regions = regions.error;
+  if (Object.keys(errors).length > 0) return { ok: false, errors };
+  return { ok: true, request: { aws_account_id: account.value, regions: regions.values } };
+}
+
 export function parseTenantForm(form: TenantForm): TenantFormResult {
   const errors: TenantFormErrors = {};
   const name = form.name.trim();
   if (name === '') errors.name = '이름을 넣으세요.';
   else if (name.length > TENANT_NAME_MAX) errors.name = `이름은 ${TENANT_NAME_MAX}자 이하입니다.`;
 
-  // 콘솔은 계정 ID를 1234-5678-9012처럼 보여 준다. 붙여 넣은 하이픈과 공백은 뺀다.
-  const awsAccountId = form.awsAccountId.replace(/[\s-]/g, '');
-  if (!ACCOUNT_ID.test(awsAccountId)) errors.awsAccountId = '계정 ID는 숫자 12자리입니다.';
+  const account = parseAccountId(form.awsAccountId);
+  const awsAccountId = account.value;
+  if (account.error !== null) errors.awsAccountId = account.error;
 
   const roleName = form.roleName.trim();
   if (roleName.startsWith('arn:')) errors.roleName = 'ARN 전체가 아니라 role/ 뒤의 이름만 넣으세요.';
