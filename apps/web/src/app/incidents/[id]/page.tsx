@@ -3,6 +3,8 @@
 import { ErrorState } from '@/components/error-state';
 import { IncidentDetail } from '@/components/incidents/incident-detail';
 import { orNull, serverApi } from '@/lib/api/server';
+import { loadIncidentAudit } from '@/lib/incident-investigation';
+import { AUDIT_EVENTS_MAX_LIMIT } from '@/types/api';
 import { unstable_rethrow } from 'next/navigation';
 
 /**
@@ -11,6 +13,8 @@ import { unstable_rethrow } from 'next/navigation';
  *
  * 자산은 조인에만 쓴다 — `subject_arn`(대상 자산 블록)과 각 제안의 `target_arn`(승인 모달, #183).
  * 실패해도 인시던트 화면은 떠야 하므로 목록만 비운다.
+ *
+ * 감사 목록(`GET /audit-events?incident_id=`)은 수행된 조치의 시작 주체 · 대상과 종료 처리자를 채운다(#622 · #544 C).
  */
 export default async function IncidentDetailPage({
   params,
@@ -20,22 +24,32 @@ export default async function IncidentDetailPage({
   // `?execution=`은 INC-001 목록에서 실행하고 넘어온 경우다(§4.4 → §4.7). ACT-002를 연 채로 연다.
   const { execution } = await searchParams;
   // 세션 쿠키만 실어 부르고, 401이면 로그인으로 redirect한다(lib/api/server.ts).
-  const { getAssets, getIncident } = await serverApi();
+  const { getAssets, getAuditEvents, getIncident } = await serverApi();
 
   let incident;
   try {
     incident = await getIncident(id);
   } catch (error) {
     unstable_rethrow(error); // 401 → 로그인 redirect는 삼키지 않는다
+    // 상세가 404면 감사 목록 결과와 상관없이 "찾을 수 없음"이다(#622 잇는 규칙 4). 그래서 상세를 먼저 읽는다.
     return <ErrorState error={error} variant="page" />;
   }
 
-  const assets = await orNull(getAssets());
+  const [assets, audit] = await Promise.all([
+    orNull(getAssets()),
+    // 감사 목록이 실패해도 상세는 뜬다. 시작 주체 · 대상 칸만 "확인 안 됨"이 된다.
+    orNull(
+      loadIncidentAudit((cursor) =>
+        getAuditEvents({ incident_id: id, cursor, limit: AUDIT_EVENTS_MAX_LIMIT }),
+      ),
+    ),
+  ]);
 
   return (
     <IncidentDetail
       incident={incident}
       assets={assets?.items ?? []}
+      audit={audit === null ? { kind: 'failed' } : { kind: 'ready', ...audit }}
       openExecutionId={typeof execution === 'string' ? execution : null}
     />
   );
