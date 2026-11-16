@@ -28,6 +28,8 @@ from schemas.platform_events import (
 URL = "/api/v1/platform-events"
 A = PlatformEventAction
 OUT = PlatformEventOutcome
+#: 수집 회차 행의 details — 이 파일은 회차를 「요청 밖에서 시스템이 남기는 행」의 본보기로 쓴다
+RUN = {"region": "ap-northeast-2", "status": "SUCCESS"}
 MANAGER = {"platform_role": PlatformRole.TENANT_MANAGER}
 
 
@@ -199,7 +201,7 @@ def test_manager_sees_assigned_tenants_and_only_own_tenantless_rows(
     seed(A.AUTH_LOGIN, 6, actor=repo.ANONYMOUS, target_id=colleague.user_id)
     seed(A.USER_PLATFORM_ROLE_CHANGE, 7, actor=_person(colleague), target_id=manager.user_id,
          details={"before": "CENTRAL_ADMIN", "after": "TENANT_MANAGER"})
-    seed(A.COLLECTION_RUN, 8, target_id=str(uuid.uuid4()))
+    seed(A.COLLECTION_RUN, 8, target_id=str(uuid.uuid4()), details=RUN)
 
     body = get()
 
@@ -394,7 +396,7 @@ def test_id_filters_accept_any_uuid_spelling_and_ignore_garbage(make_tenant, see
 
 
 def test_since_until_is_half_open(client_pg, seed, window):
-    at = [seed(A.COLLECTION_RUN, n, target_id=str(uuid.uuid4())) for n in range(3)]
+    at = [seed(A.COLLECTION_RUN, n, target_id=str(uuid.uuid4()), details=RUN) for n in range(3)]
 
     response = client_pg.get(URL, params={
         "since": _z(window + timedelta(seconds=1)), "until": _z(window + timedelta(seconds=2)),
@@ -405,7 +407,7 @@ def test_since_until_is_half_open(client_pg, seed, window):
 
 
 def test_pages_cover_every_event_once_with_ties_broken_by_event_id(seed, get):
-    rows = [seed(A.COLLECTION_RUN, n // 2, target_id=str(uuid.uuid4())) for n in range(5)]
+    rows = [seed(A.COLLECTION_RUN, n // 2, target_id=str(uuid.uuid4()), details=RUN) for n in range(5)]
     expected = [
         row.event_id
         for row in sorted(rows, key=lambda row: (row.occurred_at, row.event_id), reverse=True)
@@ -428,7 +430,7 @@ def test_pages_cover_every_event_once_with_ties_broken_by_event_id(seed, get):
 
 def test_exact_page_has_no_next_cursor(seed, get):
     for n in range(2):
-        seed(A.COLLECTION_RUN, n, target_id=str(uuid.uuid4()))
+        seed(A.COLLECTION_RUN, n, target_id=str(uuid.uuid4()), details=RUN)
 
     body = get(limit=2)
 
