@@ -75,26 +75,29 @@ export function NeedCheckRows({
       title: `담당 그룹 없음 ${n}곳 · 맡은 관리자 직원계정이 없음, 그룹에 넣으면 빠짐`,
     });
   }
-  if (apiOverCall !== undefined && apiOverCall.tenants !== null) {
+  // 기준이 없으면(미판정) 줄을 그리지 않는다. 0을 그리면 "판정했더니 0곳"으로 읽힌다(PR #644 리뷰).
+  if (apiOverCall !== undefined && apiOverCall.tenants !== null && apiOverCall.judged) {
     const names = apiOverCall.tenants;
     rows.push({
       key: 'API_OVER_CALL',
       label: 'API 이상 호출',
       value: names.length,
       dot: 'bg-status-critical',
-      title: !apiOverCall.judged
-        ? '과다 호출 기준이 없어 판정하지 않음'
-        : `최근 ${apiOverCall.windowHours}시간 중 고객사별 기준을 넘은 고객사 ${names.length}곳${
-            names.length > 0 ? `: ${names.join(', ')}` : ''
-          }`,
+      title: `최근 ${apiOverCall.windowHours}시간 중 고객사별 기준을 넘은 고객사 ${names.length}곳${
+        names.length > 0 ? `: ${names.join(', ')}` : ''
+      }`,
     });
   }
   return (
     <>
       <BarRows rows={rows} labelWidth={112} />
-      {apiOverCall !== undefined && apiOverCall.tenants === null ? (
+      {apiOverCall === undefined ? null : apiOverCall.tenants === null ? (
         <p role="status" className="text-muted-foreground text-xs">
           고객사 API 호출 집계를 불러오지 못해 API 이상 호출은 빠졌습니다.
+        </p>
+      ) : !apiOverCall.judged ? (
+        <p role="status" className="text-muted-foreground text-xs">
+          과다 호출 기준이 없어 API 이상 호출은 판정하지 않았습니다.
         </p>
       ) : null}
     </>

@@ -322,7 +322,10 @@ export function AdminDashboardView({
               toneClass: check.FAILED + apiOver > 0 ? 'text-badge-critical-fg' : needCheck > 0 ? 'text-badge-warning-fg' : undefined,
               note: `실패 ${check.FAILED} · 확인 불가 ${check.UNREACHABLE} · 미납 ${check.UNPAID}${
                 showUnassigned ? ` · 그룹 없음 ${unassigned}` : ''
-              }${apiOverCall === undefined ? '' : ` · API 이상 ${apiOver}`}`,
+              }${
+                // 기준이 없으면 0이 아니라 미판정으로 적는다. 0은 "판정했더니 없음"으로 읽힌다(PR #644 리뷰).
+                apiOverCall === undefined ? '' : apiOverCall.judged ? ` · API 이상 ${apiOver}` : ' · API 이상 미판정'
+              }`,
               href: TENANTS_PATH,
             },
           ]}
