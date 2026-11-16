@@ -15,6 +15,7 @@ import {
   matchesTenantQuery,
   ONBOARDING_STACK_NAME,
   onboardingMessage,
+  parseSignupApproveForm,
   parseTenantForm,
   roleNameOf,
   parseVpcIds,
@@ -125,6 +126,20 @@ test('정상 입력은 요청으로 바뀐다. 이름은 다듬고, 역할 이�
     collect_vpc_ids: [],
   });
   assert.equal('access_role_arn' in result.request, false);
+});
+
+test('도입 신청 승인 입력은 계정 ID와 리전만 요청으로 바꾼다(#572 8번)', () => {
+  const result = parseSignupApproveForm({ awsAccountId: ' 1234-5678-9012 ', regions: 'ap-northeast-2, ap-northeast-1' });
+  assert.ok(result.ok);
+  assert.deepEqual(result.request, { aws_account_id: '123456789012', regions: ['ap-northeast-2', 'ap-northeast-1'] });
+});
+
+test('도입 신청 승인 입력의 계정 ID · 리전 오류는 칸별로 돌려준다', () => {
+  const result = parseSignupApproveForm({ awsAccountId: '12345', regions: 'ap-northeast-2 ap-northeast-2' });
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.errors.awsAccountId, '계정 ID는 숫자 12자리입니다.');
+  assert.equal(result.errors.regions, '같은 리전이 두 번 있습니다: ap-northeast-2');
 });
 
 test('콘솔에서 하이픈째 붙여 넣은 계정 ID도 받는다', () => {
