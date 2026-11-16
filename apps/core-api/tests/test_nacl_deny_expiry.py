@@ -637,6 +637,116 @@ def test_expiry_waits_for_an_operator_release_reservation_and_then_skips(
             cleanup.commit()
 
 
+# ------------------------------------------------------- 8c. 다른 인시던트 접수와의 직렬화
+
+
+def test_expiry_waits_for_another_incidents_reservation_on_the_same_target_and_then_skips(
+    pg_engine, make_incident, make_execution
+):
+    """다른 인시던트가 같은 NACL에 실행을 넣는 동안(대상 잠금을 쥔 채 미커밋) 만료 접수는 기다리고,
+    commit 뒤에는 그 실행을 보고 물러난다. 인시던트가 달라 인시던트 잠금으로는 줄을 서지 않으므로,
+    대상 잠금(T-10 · #595)이 없으면 서로의 미커밋 행을 못 본 채 같은 NACL에 실행이 둘 선다."""
+    with Session(pg_engine) as setup:
+        incident = make_incident(
+            setup,
+            category=IncidentCategory.SECOPS,
+            subject_arn=ACL_ARN,
+            status=IncidentStatus.ACTION_IN_PROGRESS,
+        )
+        other = make_incident(setup, category=IncidentCategory.SECOPS, subject_arn=ACL_ARN)
+        incident_id, other_id = incident.incident_id, other.incident_id
+        incident_ids = [incident_id, other_id]
+        block = make_execution(
+            setup,
+            incident,
+            runbook_id=ADD_DENY,
+            target_arn=ACL_ARN,
+            status=ExecutionStatus.SUCCESS,
+            trigger_source=TriggerSource.USER_APPROVAL,
+        )
+        block_id = block.execution_id
+        record = exec_repo.create_backup_record(
+            setup,
+            execution_id=block_id,
+            target_arn=ACL_ARN,
+            backup_type=ex.BACKUP_NACL_RULE_INDEX,
+            payload={
+                "rule_number": 100,
+                "egress": False,
+                "cidr_block": CIDR,
+                "protocol": "6",
+                "rule_action": "deny",
+            },
+        )
+        assert exec_repo.bind_backup_record(setup, block_id, record.backup_record_id)
+        block.finished_at = datetime.now(timezone.utc) - timedelta(hours=25)
+        setup.commit()
+
+    outcome = {}
+    try:
+        operator, expiry = Session(pg_engine), Session(pg_engine)
+        try:
+            # 관제자 접수(reserve_execution)가 하는 순서 그대로 — 대상 잠금을 잡고 확인한 뒤 행을 넣는다
+            exec_repo.lock_target(operator, ACL_ARN)
+            exec_repo.create_execution(
+                operator,
+                incident_id=other_id,
+                runbook_id=ADD_DENY,
+                target_arn=ACL_ARN,
+                trigger_source=TriggerSource.USER_APPROVAL,
+            )  # 미커밋
+            # pid는 트랜잭션을 연 채 읽는다 — 이유는 8b와 같다
+            expiry.execute(text("SET LOCAL lock_timeout = '30s'"))
+            expiry_pid = expiry.scalar(text("SELECT pg_backend_pid()"))
+
+            def reserve():
+                outcome["result"] = workflows.reserve_nacl_deny_expiry(expiry, block_id)
+
+            thread = threading.Thread(target=reserve)
+            thread.start()
+            try:
+                assert _waiting_on_lock(pg_engine, expiry_pid), "만료 접수가 대상 잠금을 기다리지 않았다"
+                operator.commit()  # 잠금이 풀리고 만료 접수가 이 행을 본다
+            finally:
+                operator.rollback()
+                thread.join(timeout=30)
+            assert not thread.is_alive()
+        finally:
+            operator.close()
+            expiry.close()
+
+        result = outcome["result"]
+        assert result.execution_id is None
+        assert "진행 중" in result.skipped_reason
+        with Session(pg_engine) as verify:
+            assert restores(verify, incident_id) == []
+    finally:
+        with Session(pg_engine) as cleanup:
+            purge_audit_events(cleanup, incident_ids=incident_ids)
+            cleanup.execute(
+                update(models.ActionExecution)
+                .where(models.ActionExecution.incident_id.in_(incident_ids))
+                .values(backup_record_id=None, candidate_id=None)
+            )
+            cleanup.execute(
+                delete(models.BackupRecord).where(
+                    models.BackupRecord.target_arn == ACL_ARN,
+                    models.BackupRecord.execution_id.in_(
+                        select(models.ActionExecution.execution_id).where(
+                            models.ActionExecution.incident_id.in_(incident_ids)
+                        )
+                    ),
+                )
+            )
+            cleanup.execute(
+                delete(models.ActionExecution).where(
+                    models.ActionExecution.incident_id.in_(incident_ids)
+                )
+            )
+            cleanup.execute(delete(models.Incident).where(models.Incident.incident_id.in_(incident_ids)))
+            cleanup.commit()
+
+
 # ------------------------------------------------------- 9. 저장소 수준
 
 

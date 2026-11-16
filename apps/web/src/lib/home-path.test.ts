@@ -54,8 +54,8 @@ test('메뉴 — 고객사 계정은 업무 · 설정 · 구독(고객사 중앙
   // 관리자 메뉴에는 관제가 없다 — 고객사 상세에서 들어간다.
   // 도입 신청함은 중앙 관리자만(서버 `require_central_admin`), 고객 문의함은 플랫폼 계정이 받는다.
   assert.deepEqual(navPathsFor(platform), ['/', '/tenants', '/users', '/signup-requests', '/inquiries']);
-  // 배정된 담당자: 도입 신청함만 빠진다 — 각 화면의 데이터는 서버가 담당 고객으로 거른다.
-  assert.deepEqual(navPathsFor(assignedManager), ['/', '/tenants', '/users', '/inquiries']);
+  // 배정된 담당자: 도입 신청함과 계정 관리가 빠진다(`/api/v1/users`는 서버가 막는다 — #572 9번). 각 화면의 데이터는 서버가 담당 고객으로 거른다.
+  assert.deepEqual(navPathsFor(assignedManager), ['/', '/tenants', '/inquiries']);
   // 배정 없는 담당자: 업무 화면 · 사용자 관리 없이 고객 관리(배정 없음 안내)와 문의함만 — 전역 접근처럼 보이지 않는다.
   assert.deepEqual(navPathsFor(unassignedManager), ['/tenants', '/inquiries']);
   // 고객사 계정에게는 고객사 상세가 없어 관제를 메뉴에 둔다.

@@ -229,6 +229,9 @@ def test_fact_sheet_is_a_compact_view_of_the_payload(payload):
     # 식별자·가용 영역도 확정값이다 — 빠지면 요약의 정확한 인용이 결함 2로 오탐된다
     assert sheet["resource_id"] == "i-0a1b2c3d4e5f00001"
     assert sheet["availability_zone"] == "ap-northeast-2a"
+    # 생성 입력이 싣는 자원 역할도 확정값이다 — 빠지면 요약의 PRIMARY 인용이 결함 2로 오탐된다
+    assert payload["asset"]["resource_role"] == "PRIMARY"
+    assert sheet["resource_role"] == "PRIMARY"
     assert sheet["rule_evaluation"]["verdict"] == "COST_CANDIDATE"
     assert "rule evaluation" in sheet["rule_evaluation"]["reason"]
     assert "evidences" not in sheet

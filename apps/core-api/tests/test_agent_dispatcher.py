@@ -2,7 +2,7 @@
 
 **이 파일이 지키는 것은 오케스트레이션이다** — 선점·트랜잭션 경계·계약 검증 ⓐⓑ·
 상태 전이·회수·발행. 아래 넷은 다른 자리가 이미 지키므로 여기서 다시 보지 않는다.
-  - 그래프 내부 분기(SUCCEEDED·NO_PROPOSAL·FAILED)  → ai/tests/test_finops_graph.py
+  - FinOps 그래프 내부 분기(SUCCEEDED·FAILED)      → ai/tests/test_finops_graph.py
   - 가드레일 단계별 판정과 거절 사유              → ai/tests/test_guardrail_steps.py
   - AWS Dry-Run 판정                              → services/tests/test_precheck_dispatch.py
   - 계약 불변식(출력 3갈래·근거 유형)             → packages/schemas/tests
@@ -30,10 +30,11 @@ import agent_dispatcher  # noqa: E402
 import incident_intake  # noqa: E402
 import workflows  # noqa: E402
 from ai.agent import (  # noqa: E402
-    CandidateProposalOutput,
     CandidateProposalOutput as SecOpsCandidateProposalOutput,
     EvidenceSummaryOutput,
-    ProposedCandidate,
+    FinOpsCandidateProposalOutput,
+    FinOpsEvidenceDecisionOutput,
+    FinOpsProposedCandidate,
     ProposedCandidate as SecOpsProposedCandidate,
     SecOpsEvidenceDecisionOutput,
 )
@@ -74,10 +75,11 @@ RUN_ID = "1f2e3d4c-5b6a-4978-8899-aabbccddee00"
 COLLECTED_AT = "2026-09-02T09:00:00Z"
 EVALUATED_AT = "2026-09-02T09:00:05Z"
 
-SUMMARY = EvidenceSummaryOutput(
+SUMMARY = FinOpsEvidenceDecisionOutput(
     observation="3일 평균 CPU가 4.9%이고 규칙 판정은 COST_CANDIDATE다.",
     diagnosis="이 인스턴스는 할당된 스펙을 쓰지 못하고 있다.",
     rationale="관측 구간 내내 저활성이라 한 단계 낮은 유형으로 줄여도 된다.",
+    decision=[1],
 )
 
 
@@ -272,14 +274,13 @@ def _client(*outputs) -> FakeAIModelClient:
     return FakeAIModelClient(list(outputs))
 
 
-def _proposal(evidence_id: str, **over) -> ProposedCandidate:
+def _proposal(evidence_id: str, **over) -> FinOpsProposedCandidate:
     base = {
         "runbook_id": "RUNBOOK_EC2_RIGHTSIZING",
-        "target_arn": EC2_ARN,
         "evidence_ids": [evidence_id],
     }
     base.update(over)
-    return ProposedCandidate.model_validate(base)
+    return FinOpsProposedCandidate.model_validate(base)
 
 
 def _cycle(db, client, publish=None):
@@ -312,7 +313,7 @@ def test_successful_analysis_moves_the_incident_to_awaiting_approval(db, prechec
 
     with caplog.at_level(logging.INFO, logger="vigilantis.workflow"):
         report = _cycle(
-            db, _client(SUMMARY, CandidateProposalOutput(candidates=[_proposal(evidence_id)]))
+            db, _client(SUMMARY, FinOpsCandidateProposalOutput(candidates=[_proposal(evidence_id)]))
         )
     recorded = _recorded(caplog)
     assert (recorded["incident_id"], recorded["analysis_result"]) == (
@@ -338,7 +339,7 @@ def test_detail_and_list_stay_readable_after_success(db, client_pg, precheck_pas
     incident_id = _pending_incident(db)
     evidence_id = _rule_evidence_id(db, incident_id)
     _cycle(
-        db, _client(SUMMARY, CandidateProposalOutput(candidates=[_proposal(evidence_id)]))
+        db, _client(SUMMARY, FinOpsCandidateProposalOutput(candidates=[_proposal(evidence_id)]))
     )
 
     detail = client_pg.get(f"/api/v1/incidents/{incident_id}")
@@ -379,7 +380,7 @@ def test_savings_survive_db_and_fresh_app_reads_without_new_model_calls(
 
     # 서비스 기본 그래프를 그대로 사용하고 모델 응답만 대역으로 제공한다.
     model = _client(
-        SUMMARY, CandidateProposalOutput(candidates=[_proposal(evidence_id)]),
+        SUMMARY, FinOpsCandidateProposalOutput(candidates=[_proposal(evidence_id)]),
         ProposedHourlyRates.model_construct(**estimate),
     )
     order = []
@@ -406,7 +407,8 @@ def test_savings_survive_db_and_fresh_app_reads_without_new_model_calls(
     report = _cycle(db, model)
     assert report.succeeded == 1
     assert order == [
-        "EvidenceSummaryOutput", "CandidateProposalOutput", "guardrail", "ProposedHourlyRates", "lock",
+        "FinOpsEvidenceDecisionOutput", "FinOpsCandidateProposalOutput",
+        "guardrail", "ProposedHourlyRates", "lock",
     ]
 
     url = f"/api/v1/incidents/{incident_id}"
@@ -468,9 +470,9 @@ def test_unattached_sg_incident_gets_a_menu(db):
 
 def test_non_rightsizing_candidate_skips_savings(db, client_pg, precheck_pass):
     incident_id = _pending_incident(db, sg=True)
-    model = _client(SUMMARY, CandidateProposalOutput(candidates=[_proposal(
+    model = _client(SUMMARY, FinOpsCandidateProposalOutput(candidates=[_proposal(
         _rule_evidence_id(db, incident_id),
-        runbook_id=RunbookId.RUNBOOK_SG_DELETE_ISOLATED, target_arn=SG_ARN,
+        runbook_id=RunbookId.RUNBOOK_SG_DELETE_ISOLATED,
     )]))
     assert _cycle(db, model).succeeded == 1
     assert len(model.sent) == 2
@@ -486,7 +488,7 @@ def test_savings_call_failure_keeps_passed_candidate_in_db(
     from ai.rate_estimator import ProposedHourlyRates
 
     incident_id = _pending_incident(db)
-    model = _client(SUMMARY, CandidateProposalOutput(candidates=[_proposal(
+    model = _client(SUMMARY, FinOpsCandidateProposalOutput(candidates=[_proposal(
         _rule_evidence_id(db, incident_id),
     )]))
     original = model.complete
@@ -525,7 +527,8 @@ def test_savings_runs_after_all_guardrails(db, monkeypatch):
     incidents_repo.claim_agent_invocation(db, incident_id, started_at=datetime.now(UTC))
     db.commit()
     output = AgentGraphOutput(
-        invocation_status=AgentInvocationStatus.SUCCEEDED, summary_lines=list(SUMMARY.model_dump().values()),
+        invocation_status=AgentInvocationStatus.SUCCEEDED,
+        summary_lines=[SUMMARY.observation, SUMMARY.diagnosis, SUMMARY.rationale],
         candidates=[
             RunbookCandidateDraft(
                 runbook_id=RunbookId.RUNBOOK_EC2_RIGHTSIZING, target_arn=EC2_ARN,
@@ -683,7 +686,7 @@ def test_candidate_citing_evidence_outside_the_input_fails_the_whole_output(
             db,
             _client(
                 SUMMARY,
-                CandidateProposalOutput(
+                FinOpsCandidateProposalOutput(
                     candidates=[_proposal("2f0d2f2e-0000-4000-8000-000000000000")]
                 ),
             ),
@@ -758,26 +761,27 @@ def test_evidence_subset_check_reads_the_input_not_the_incident(db):
 # ------------------------------------------------------------------------------
 
 
-def test_no_proposal_closes_as_failed_with_an_empty_summary(db, client_pg, caplog):
-    """요약만 있고 후보가 0개인 것은 정상 종착이 아니라 분석 실패다."""
+def test_missing_decision_candidate_closes_as_failed_with_an_empty_summary(db, client_pg, caplog):
+    """선택한 조치의 후보가 없으면 decision 불일치로 저장·조회된다."""
     incident_id = _pending_incident(db)
 
-    model = _client(SUMMARY, CandidateProposalOutput(candidates=[]))
+    model = _client(SUMMARY, FinOpsCandidateProposalOutput(candidates=[]))
     with caplog.at_level(logging.INFO, logger="vigilantis.workflow"):
         report = _cycle(db, model)
-    # Incident는 FAILED지만 분석은 무제안으로 끝났다 — 응답에는 없는 구분을 로그가 남긴다(#424)
     recorded = _recorded(caplog)
-    assert (recorded["analysis_result"], recorded["incident_status"]) == ("NO_PROPOSAL", "FAILED")
+    assert (
+        recorded["analysis_result"], recorded["incident_status"], recorded["failure_reason"],
+    ) == ("FAILED", "FAILED", "DECISION_MISMATCH")
     assert recorded["guardrail_rejections"] == []
     assert len(model.sent) == 2
 
-    assert report.no_proposal == 1
+    assert report.failed == 1
     incident = incidents_repo.get_incident(db, incident_id)
     db.refresh(incident)
     assert incident.status is IncidentStatus.FAILED
     assert incident.summary_lines == []
-    # 그래프 오류와 구분해 남긴다 — 결함 계측·감사가 그 둘을 갈라 봐야 한다
-    assert incident.agent_invocation_status is AgentInvocationStatus.NO_PROPOSAL
+    assert incident.agent_invocation_status is AgentInvocationStatus.FAILED
+    assert incident.agent_failure_reason == AnalysisFailureReason.DECISION_MISMATCH.value
     assert client_pg.get(f"/api/v1/incidents/{incident_id}").status_code == 200
     assert client_pg.get("/api/v1/incidents").status_code == 200
 
@@ -788,7 +792,7 @@ def test_all_candidates_rejected_closes_as_failed(db, monkeypatch, caplog):
     incident_id = _pending_incident(db)
     evidence_id = _rule_evidence_id(db, incident_id)
 
-    model = _client(SUMMARY, CandidateProposalOutput(candidates=[_proposal(evidence_id)]))
+    model = _client(SUMMARY, FinOpsCandidateProposalOutput(candidates=[_proposal(evidence_id)]))
     with caplog.at_level(logging.INFO, logger="vigilantis.workflow"):
         report = _cycle(db, model)
     # 전체 거절과 그 단계·사유가 로그에 남는다 — 무제안·분석 실패와 같은 FAILED라도 갈린다(#424)
@@ -818,16 +822,21 @@ def test_all_candidates_rejected_closes_as_failed(db, monkeypatch, caplog):
     )
 
 
-def test_dropped_summary_is_logged_for_no_proposal(db, caplog):
-    """인시던트에 안 쓰는 요약은 로그로 남긴다 — 후보 0개의 이유를 볼 자리가 그것뿐이다."""
+def test_dropped_summary_is_logged_when_every_candidate_is_rejected(db, monkeypatch, caplog):
+    """가드레일 전체 거절로 저장하지 않는 요약은 로그에서 확인할 수 있다."""
+    monkeypatch.setattr(workflows, "_candidate_precheck", _failing_precheck)
     incident_id = _pending_incident(db)
+    evidence_id = _rule_evidence_id(db, incident_id)
 
     with caplog.at_level("INFO", logger="vigilantis.workflow"):
-        _cycle(db, _client(SUMMARY, CandidateProposalOutput(candidates=[])))
+        _cycle(
+            db, _client(SUMMARY, FinOpsCandidateProposalOutput(candidates=[_proposal(evidence_id)]))
+        )
 
     dropped = [r for r in caplog.records if r.msg == "agent_summary_dropped"]
     assert len(dropped) == 1
     assert dropped[0].incident_id == incident_id
+    assert dropped[0].invocation_status == "SUCCEEDED"
     assert dropped[0].summary_lines == [
         SUMMARY.observation,
         SUMMARY.diagnosis,
@@ -852,7 +861,7 @@ def test_guardrails_run_outside_a_transaction(db, monkeypatch):
     evidence_id = _rule_evidence_id(db, incident_id)
 
     _cycle(
-        db, _client(SUMMARY, CandidateProposalOutput(candidates=[_proposal(evidence_id)]))
+        db, _client(SUMMARY, FinOpsCandidateProposalOutput(candidates=[_proposal(evidence_id)]))
     )
 
     assert seen == [False]
@@ -872,7 +881,7 @@ def test_graph_is_called_outside_a_transaction(db, monkeypatch, precheck_pass):
     evidence_id = _rule_evidence_id(db, incident_id)
 
     _cycle(
-        db, _client(SUMMARY, CandidateProposalOutput(candidates=[_proposal(evidence_id)]))
+        db, _client(SUMMARY, FinOpsCandidateProposalOutput(candidates=[_proposal(evidence_id)]))
     )
 
     assert seen["in_transaction"] is False
@@ -885,7 +894,7 @@ def test_incident_updated_is_published_after_commit(db, precheck_pass):
 
     _cycle(
         db,
-        _client(SUMMARY, CandidateProposalOutput(candidates=[_proposal(evidence_id)])),
+        _client(SUMMARY, FinOpsCandidateProposalOutput(candidates=[_proposal(evidence_id)])),
         publish=published.append,
     )
 
@@ -896,7 +905,9 @@ def test_incident_updated_is_published_after_commit(db, precheck_pass):
     assert published[0].occurred_at == incident.updated_at
 
 
-UNSTORABLE_SUMMARY = EvidenceSummaryOutput(observation="관측\x00", diagnosis="진단", rationale="근거")
+UNSTORABLE_SUMMARY = FinOpsEvidenceDecisionOutput(
+    observation="관측\x00", diagnosis="진단", rationale="근거", decision=[1],
+)
 
 
 def test_analysis_log_query_failure_rolls_back_result_and_does_not_publish(
@@ -914,7 +925,7 @@ def test_analysis_log_query_failure_rolls_back_result_and_does_not_publish(
     with caplog.at_level(logging.INFO):
         report = _cycle(
             db,
-            _client(SUMMARY, CandidateProposalOutput(candidates=[_proposal(evidence_id)])),
+            _client(SUMMARY, FinOpsCandidateProposalOutput(candidates=[_proposal(evidence_id)])),
             publish=published.append,
         )
 
@@ -946,7 +957,7 @@ def test_output_with_unstorable_characters_closes_as_failed(db, precheck_pass):
         db,
         _client(
             UNSTORABLE_SUMMARY,
-            CandidateProposalOutput(candidates=[_proposal(evidence_id)]),
+            FinOpsCandidateProposalOutput(candidates=[_proposal(evidence_id)]),
         ),
     )
 
@@ -955,6 +966,7 @@ def test_output_with_unstorable_characters_closes_as_failed(db, precheck_pass):
     db.refresh(incident)
     assert incident.status is IncidentStatus.FAILED
     assert incident.agent_invocation_status is AgentInvocationStatus.FAILED
+    assert incident.agent_failure_reason == AnalysisFailureReason.UNSTORABLE_VALUE.value
     assert incident.summary_lines == []
     assert incidents_repo.list_candidates(db, incident_id) == []
 
@@ -973,7 +985,7 @@ def test_unstorable_output_is_closed_beyond_the_reclaimer_s_reach(
         db,
         _client(
             UNSTORABLE_SUMMARY,
-            CandidateProposalOutput(candidates=[_proposal(evidence_id)]),
+            FinOpsCandidateProposalOutput(candidates=[_proposal(evidence_id)]),
         ),
     )
     incident = incidents_repo.get_incident(db, incident_id)
@@ -1008,7 +1020,7 @@ def test_stale_in_progress_claim_is_returned_to_pending(db):
     db.commit()
 
     report = agent_dispatcher.dispatch_pending_analysis(
-        db, client=_client(SUMMARY, CandidateProposalOutput(candidates=[]))
+        db, client=_client(SUMMARY, FinOpsCandidateProposalOutput(candidates=[]))
     )
 
     assert report.reclaimed == 1
@@ -1088,7 +1100,7 @@ def test_a_reclaim_survives_a_later_exhausted_close_in_the_same_cycle(
             return original(session, incident_id, output, **kwargs)
         monkeypatch.setattr(workflows, "record_agent_analysis", failing_record)
 
-    report = _cycle(db, _client(SUMMARY, CandidateProposalOutput(candidates=[])))
+    report = _cycle(db, _client(SUMMARY, FinOpsCandidateProposalOutput(candidates=[])))
 
     assert report.reclaimed == 1
     assert (report.exhausted, report.errored) == ((0, 1) if close_fails else (1, 0))
@@ -1107,7 +1119,7 @@ def test_a_claim_below_the_limit_is_still_returned_to_pending(db):
         db, incident_id, reclaimed_so_far=agent_dispatcher.STALE_CLAIM_RECLAIM_LIMIT - 1
     )
 
-    report = _cycle(db, _client(SUMMARY, CandidateProposalOutput(candidates=[])))
+    report = _cycle(db, _client(SUMMARY, FinOpsCandidateProposalOutput(candidates=[])))
 
     assert (report.reclaimed, report.exhausted, report.scanned) == (1, 0, 1)
     incident = incidents_repo.get_incident(db, incident_id)
@@ -1858,7 +1870,7 @@ def test_one_analysis_shares_the_incident_and_the_claim_time_across_its_logs(
 
     monkeypatch.setattr(incidents_repo, "claim_agent_invocation", recording_claim)
 
-    model = _client(SUMMARY, CandidateProposalOutput(candidates=[_proposal(evidence_id)]))
+    model = _client(SUMMARY, FinOpsCandidateProposalOutput(candidates=[_proposal(evidence_id)]))
     original = model.complete
 
     def probing_complete(request, response_model):

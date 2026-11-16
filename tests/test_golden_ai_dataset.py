@@ -27,6 +27,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 # import 경로 추가 (tests/test_golden_dataset.py 와 동일 관례)
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,9 +36,9 @@ for _path in (ROOT / "apps" / "core-api", ROOT / "packages"):
         sys.path.insert(0, str(_path))
 
 from ai.agent import (  # noqa: E402
-    CandidateProposalOutput,
-    EvidenceSummaryOutput,
-    ProposedCandidate,
+    FinOpsCandidateProposalOutput,
+    FinOpsEvidenceDecisionOutput,
+    FinOpsProposedCandidate,
     run_finops_graph,
 )
 from ai.evaluation.cases import finops_cases  # noqa: E402
@@ -76,21 +77,23 @@ def _stub_client(case) -> FakeAIModelClient:
     """계약을 지키는 모델 응답을 그 케이스의 **입력에서** 만들어 준다.
 
     값을 손으로 적지 않는 것이 요점이다. 손으로 적으면 골든이 바뀔 때 스텁만 낡아
-    그래프가 아니라 스텁을 검증하게 된다. 요약 3줄은 EvidenceSummaryOutput 이 필드
-    3개로 받으므로 개수를 여기서 셀 필요가 없다(구조가 보장한다).
+    그래프가 아니라 스텁을 검증하게 된다. 요약 3줄은 FinOpsEvidenceDecisionOutput 이 필드
+    3개로 받으므로 개수를 여기서 셀 필요가 없다(구조가 보장한다). decision 은 고른 런북의
+    메뉴 action_id(capabilities 순서, 1부터)이고, 대상은 코드가 입력 자산으로 정한다.
     """
     graph_input = case.graph_input
     runbook_id = sorted(c.runbook_id.value for c in graph_input.capabilities)[0]
+    action_id = 1 + [c.runbook_id.value for c in graph_input.capabilities].index(runbook_id)
     return FakeAIModelClient(
         [
-            EvidenceSummaryOutput(
-                observation="관측 한 줄", diagnosis="진단 한 줄", rationale="결론 근거 한 줄"
+            FinOpsEvidenceDecisionOutput(
+                observation="관측 한 줄", diagnosis="진단 한 줄", rationale="결론 근거 한 줄",
+                decision=[action_id],
             ),
-            CandidateProposalOutput(
+            FinOpsCandidateProposalOutput(
                 candidates=[
-                    ProposedCandidate(
+                    FinOpsProposedCandidate(
                         runbook_id=runbook_id,
-                        target_arn=graph_input.asset_context.arn,
                         evidence_ids=[graph_input.evidences[0].evidence_id],
                         **_parameters_for(runbook_id),
                     )
@@ -159,9 +162,8 @@ def test_expected_ai_input_facts_match_the_converter(stem, item):
     assert spec["runbook_ids_subset_of"] == sorted(
         c.runbook_id.value for c in graph_input.capabilities
     )
-    from ai.agent import _allowed_target_arns
-
-    assert item["input_facts"]["allowed_target_arns"] == _allowed_target_arns(graph_input)
+    # 모델에 허용 대상 목록을 싣지 않는다(대상은 코드가 입력 자산으로 정한다, #583 3단계) —
+    # 정답지의 input_facts.allowed_target_arns 는 더 이상 모델 입력이 아니라 대조하지 않는다
 
 
 @pytest.mark.parametrize("stem, item", _expectation_pairs())
@@ -227,39 +229,29 @@ def test_golden_input_satisfies_the_expected_ai_spec(stem, item):
 # 아래 둘은 스텁이 계약을 깨뜨렸을 때 그래프가 FAILED 로 닫는지를 골든 입력에서 본다.
 
 
-def test_graph_rejects_a_target_arn_outside_the_input_assets():
-    """다른 골든 케이스의 ARN을 붙이면 FAILED 다 (ai/agent.py:294).
+def test_model_cannot_name_a_target_and_the_candidate_targets_the_input_asset():
+    """대상은 모델이 아니라 코드가 정한다 — 후보 출력에 대상 자리가 없고, 결과는 입력 자산이다.
 
-    allowed_target_arns 는 케이스마다 2개(자산 EC2 + 관계 SG)라 목록이 비어 있지 않다
-    — 그래서 이 불변식이 실제로 거르는지 확인할 값이 있다.
+    다른 골든 케이스의 ARN을 실어 보내는 시도는 구조화 출력 검증이 거절한다.
     """
     first, second = _cases_of("asset_inventory_003")[0], _cases_of("asset_inventory_003")[1]
     runbook_id = sorted(c.runbook_id.value for c in first.graph_input.capabilities)[0]
-    client = FakeAIModelClient(
-        [
-            EvidenceSummaryOutput(observation="관측", diagnosis="진단", rationale="근거"),
-            CandidateProposalOutput(
-                candidates=[
-                    ProposedCandidate(
-                        runbook_id=runbook_id,
-                        target_arn=second.graph_input.asset_context.arn,  # 남의 자산
-                        evidence_ids=[first.graph_input.evidences[0].evidence_id],
-                        **_parameters_for(runbook_id),
-                    )
-                ]
-            ),
-        ]
-    )
+    with pytest.raises(ValidationError):
+        FinOpsProposedCandidate(
+            runbook_id=runbook_id,
+            target_arn=second.graph_input.asset_context.arn,  # 남의 자산
+            evidence_ids=[first.graph_input.evidences[0].evidence_id],
+            **_parameters_for(runbook_id),
+        )
 
-    output = run_finops_graph(first.graph_input, client=client)
+    output = run_finops_graph(first.graph_input, client=_stub_client(first))
 
-    assert output.invocation_status is AgentInvocationStatus.FAILED
-    assert output.candidates == []
-    assert output.summary_lines == []
+    assert output.invocation_status is AgentInvocationStatus.SUCCEEDED
+    assert {c.target_arn for c in output.candidates} == {first.graph_input.asset_context.arn}
 
 
 def test_graph_rejects_a_runbook_outside_the_offered_capabilities():
-    """메뉴에 없는 런북을 고르면 FAILED 다.
+    """메뉴에 없는 런북을 고르면 FAILED(DECISION_MISMATCH)다 — decision 이 가리키지 않는 집합이다.
 
     RUNBOOK_EBS_DELETE_UNATTACHED 는 AI 추천 가능하지만 대상 자산 유형이 EBS 라
     EC2 인시던트의 capabilities 에 오르지 않는다(ai/capabilities.py:104).
@@ -270,12 +262,13 @@ def test_graph_rejects_a_runbook_outside_the_offered_capabilities():
 
     client = FakeAIModelClient(
         [
-            EvidenceSummaryOutput(observation="관측", diagnosis="진단", rationale="근거"),
-            CandidateProposalOutput(
+            FinOpsEvidenceDecisionOutput(
+                observation="관측", diagnosis="진단", rationale="근거", decision=[1]
+            ),
+            FinOpsCandidateProposalOutput(
                 candidates=[
-                    ProposedCandidate(
+                    FinOpsProposedCandidate(
                         runbook_id="RUNBOOK_EBS_DELETE_UNATTACHED",
-                        target_arn=case.graph_input.asset_context.arn,
                         evidence_ids=[case.graph_input.evidences[0].evidence_id],
                     )
                 ]
@@ -286,4 +279,5 @@ def test_graph_rejects_a_runbook_outside_the_offered_capabilities():
     output = run_finops_graph(case.graph_input, client=client)
 
     assert output.invocation_status is AgentInvocationStatus.FAILED
+    assert output.failure_reason.value == "DECISION_MISMATCH"
     assert output.candidates == []

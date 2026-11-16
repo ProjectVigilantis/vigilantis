@@ -471,8 +471,10 @@ def _active_on_target(
     잠금(executions_repo.lock_target)은 이 트랜잭션이 끝날 때까지 유지된다. 그 안에서 확인하고 실행
     행을 넣어야 동시에 들어온 다른 접수가 이 행을 보거나 이 트랜잭션이 끝나기를 기다린다. 잠금 순서는
     경로마다 다르다. 승인 · 자동 격리는 인시던트 → (테넌트) → 대상이고, 관제자 복구는 인시던트를 잠그지 않고
-    읽은 뒤 테넌트 → 원본 실행 → 대상 → 인시던트다. 그래도 교착은 없다. HTTP 예약은 app_users 잠금에서 먼저
-    줄을 서고(auth.py), 디스패처는 대상 잠금을 잡지 않는다.
+    읽은 뒤 테넌트 → 원본 실행 → 대상 → 인시던트다. 만료 해제 접수는 차단 실행 → 인시던트 → (테넌트) → 대상이다.
+    HTTP 예약끼리는 app_users 잠금에서 먼저 줄을 선다(auth.py). 이 잠금을 거치지 않는 만료 접수도
+    NACL_RESTORE 승인과 마찬가지로 인시던트를 먼저, 대상을 나중에 잠근다. 원본을 먼저 잠그는 관제자 복구는
+    인스턴스 · 보안 그룹 대상에만 열리므로, 만료 접수와 같은 유효한 NACL target_arn을 다루지 않는다.
 
     own_origin_id 는 관제자 복구가 되돌릴 원본이다. 원본이 ROLLBACK_INITIATED 면 그 자신이 끝나지 않은
     실행으로 잡히는데, 복구는 그 실행을 끝내는 일이라 막지 않는다.
@@ -6475,9 +6477,10 @@ def reserve_nacl_deny_expiry(
     if _tenant_suspended(db, block.tenant_id):
         db.commit()
         return _expiry_skipped(incident_id, execution_id, "테넌트가 정지 상태입니다")
-    if any(
-        row.target_arn == block.target_arn for row in executions_repo.list_non_terminal(db)
-    ):
+    # 같은 대상 확인은 대상 잠금 안에서 한다(T-10 · #595). 다른 인시던트의 접수는 위 인시던트 잠금으로
+    # 줄을 서지 않으므로, 잠금 없이 보면 그 접수의 미커밋 행을 못 본 채 둘 다 통과한다. 잠금 순서는
+    # 실행(차단) → 인시던트 → 대상이다
+    if _active_on_target(db, block.target_arn):
         # 같은 NACL에 끝나지 않은 실행(관제자 해제 · 다른 차단)이 있다 — 그 실행이 끝난 뒤의
         # 주기가 다시 본다. 관제자 해제였으면 만료 스캔이 더는 집지 않는다
         db.commit()

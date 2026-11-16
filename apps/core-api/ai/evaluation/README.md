@@ -8,8 +8,8 @@ AI 평가 도구·기준선·공개 실험 요약을 기능별로 관리하는 �
 | 영역 | 책임 | 안내 |
 | --- | --- | --- |
 | `common/` | 모델 호출의 사용량·실패 단계, 구조화 값 재현성, 입력 지문·경로 | 도메인별 판정 기준은 포함하지 않음 |
-| `summary/` | FinOps 요약·추천 평가, 승인 v2 스냅샷과 재통과 절차 | [기준선](summary/baseline.md) |
-| `secops/` | SecOps 위험 재평가·후보·요약 품질, 동결 입력과 요청 호환성 검사 | [기준선](secops/baseline.md) |
+| `summary/` | FinOps 요약·추천 평가, v3 기준선 스냅샷(측정 수용·팀 승인 대기)과 재통과 절차 | [기준선](summary/baseline.md) |
+| `secops/` | SecOps 근거 선행 판단(근거 3줄·decision)과 조치 후보 품질, 동결 입력과 요청 호환성 검사. 위험 재평가 노드는 #583에서 없어졌다 | [기준선](secops/baseline.md) |
 
 첫 이관 대상은 기존 FinOps summary 자료다. 기준선 본문은 `summary/baseline.md`로 옮기고,
 `docs/AI_SUMMARY_BASELINE.md`에 남겼던 이동 안내는 2026-09-30에 삭제했다.

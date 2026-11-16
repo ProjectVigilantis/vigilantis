@@ -1,6 +1,7 @@
 {
-  "version": "v2",
-  "prompt_sha256": "1e2e5c45cd1b1d250ebf371ba65699827bf3c42f88f6d77080515a07c22e1cc7",
+  "version": "v3",
+  "prompt_sha256": "a0fab6a357b80fbf87f775b6007bb411852584586a832d769cc32c691f0b4d4f",
+  "request_sha256": "f71de286f277de7450231f9610152fbadaf8f52ee158be932384b1e570453382",
   "model": "gpt-5.6-luna",
   "reasoning_effort": "low",
   "temperature": null,
@@ -10,8 +11,20 @@
     "case_ids": ["A1", "A7", "A11", "A12", "A14", "A16"],
     "input_sha256": "8fffd381a2e89d0d1c0c1b5530e7e4934e244b10978585715ba87c31731d9454"
   },
-  "approved_at": "2026-09-14",
-  "approved_by": "김세혁",
+  "scope": "골든 asset_inventory_001~003의 14일 기록 fixture에서 고른 고정 6건만 잰 기준선이다. #626 이후 새로 수집하는 1일 관측 입력은 측정 범위가 아니다.",
+  "measured_at": "2026-11-12",
+  "measured_source": "dev 112e800에 #583 3단계의 커밋 전 변경을 더한 작업 트리 — 커밋된 트리의 측정이 아니다. 원자료의 prompt_sha256·request_sha256은 현재 작업 트리의 finops_prompt_fingerprint()·finops_request_fingerprint()와 같다.",
+  "input_recheck": "#626(head 03aacc5)의 데이터를 현재 입력 빌더(cutoff 20)로 만들어 비교했다 — 고정 6건의 graph_input·요약 페이로드와 집계 지문이 측정 때와 같다. inventory 001 전체의 provenance는 바뀌었지만 그것만으로는 재측정 사유가 아니다.",
+  "approval": {
+    "measurement": {
+      "status": "ACCEPTED",
+      "accepted_at": "2026-11-12",
+      "accepted_by": "안성일(작성자)",
+      "basis": "작성자가 측정 전에 정해 둔 범위(합격선을 넘으면 기준선을 다시 고정, 유료 재측정은 최대 5라운드) 안에서 재고정했다. baseline.md §합격선을 같은 판정 호출의 v2 짝과 대조해 전부 충족한 뒤였다. 측정이 끝난 뒤 이 스냅샷을 따로 다시 승인한 기록은 아니다."
+    },
+    "team": "이 스냅샷을 담은 PR의 팀 리뷰 승인으로 정한다 — 2026-11-12 기록 시점에는 없다.",
+    "judge_calibration": "별개 항목이다 — judge.calibration(보류)."
+  },
   "judge": {
     "model": "gpt-5.6-luna",
     "reasoning_effort": "low",
@@ -26,23 +39,45 @@
       }
     }
   },
+  "semantic_review": {
+    "reviewers": ["Claude Opus 5.5 (effort high)", "GPT 6.1 sol (effort high)"],
+    "runtime_identity": "검토 에이전트의 실행 모델 ID와 토큰 사용량은 노출되지 않는다 — 미확인이며 0이 아니다.",
+    "rationale_supports_decision": {
+      "items": 120,
+      "agreement": "120/120",
+      "note": "v3·v2 출력 각 60건을 두 모델이 독립 판정했다. 문턱 없이 기록하는 값이다(finops_stage3.py)."
+    },
+    "diagnostic_labels": {
+      "rows": 360,
+      "user_adjudicated_rows": 11,
+      "note": "결함 2·3·4 × 120출력을 두 모델이 독립 판정하고, 두 판정이 갈린 11행은 사용자가 직접 판정했다. judge의 결함 플래그와 다른 판정이며 판정자 보정도 아니다. 같은 라운드 SecOps를 더한 사용자 판정은 17행, 3단계 1·2라운드 누적은 35행이다."
+    }
+  },
   "previous": {
-    "version": "v1",
+    "version": "v2",
+    "prompt_sha256": "1e2e5c45cd1b1d250ebf371ba65699827bf3c42f88f6d77080515a07c22e1cc7",
+    "request_sha256": "d4db912df457553800f07359421bd0ea2d311096eb74759c78a6342c6a578318",
     "label": "gpt-5.6-luna (reasoning_effort=low)",
-    "source": "2026-09-14 dev(d160484)에서 v1 프롬프트로 재생성한 60회 — v2와 같은 판정 호출에서 짝 비교했다(#251)",
+    "source": "2026-11-12 dev(112e800) 원본 트리의 승인 v2 프롬프트로 재생성한 60회 — v3와 같은 판정 호출에서 짝 비교했다(#583 3단계 2라운드)",
     "runs": 60,
     "failed_contract": 0,
     "failed_transport": 0,
     "no_proposal": 0,
     "fact_failed": 0,
     "fact_checked": 60,
-    "field_stability": 0.833,
-    "unstable_fields": ["RUNBOOK_EC2_RIGHTSIZING.target_instance_type"],
+    "field_stability": 1.0,
+    "unstable_fields": [],
     "readback": {
-      "lines_with_readback": 4,
+      "lines_with_readback": 10,
       "of_lines": 180,
-      "runs_with_readback": 4,
+      "runs_with_readback": 10,
       "observation_cites_input": 60,
+      "of_runs": 60
+    },
+    "decision": {
+      "flip_cases": 0,
+      "of_cases": 6,
+      "decision_mismatch": 0,
       "of_runs": 60
     },
     "restoration": {
@@ -62,11 +97,23 @@
     },
     "defects": {
       "flagged": {
-        "defect_2": 13,
+        "defect_2": 15,
         "defect_3": 3,
-        "defect_4": 2
+        "defect_4": 0
       },
       "judged": 60
+    },
+    "diagnostic_labels": {
+      "flagged": {
+        "defect_2": 3,
+        "defect_3": 0,
+        "defect_4": 0
+      },
+      "judged": 60
+    },
+    "rationale_supports_decision": {
+      "Claude Opus 5.5": "60/60 PASS",
+      "GPT 6.1 sol": "60/60 PASS"
     },
     "payload_dedup_active": true,
     "judge_prompt_sha256": "e582efcac19b88a544da17d90cccc320e152f74ac9164cf37b657d08422b76e9"
@@ -81,11 +128,12 @@
     "field_stability": 1.0,
     "unstable_fields": [],
     "readback": {
-      "lines_with_readback": 11,
+      "lines_with_readback": 79,
       "of_lines": 180,
-      "runs_with_readback": 11,
+      "runs_with_readback": 60,
       "observation_cites_input": 60,
-      "of_runs": 60
+      "of_runs": 60,
+      "note": "진단값이다. 되읽기 79줄은 모두 규칙 판정 COST_CANDIDATE를 옮긴 줄이다."
     },
     "payload_dedup_active": {
       "A1": true,
@@ -95,15 +143,22 @@
       "A14": true,
       "A16": true
     },
+    "decision": {
+      "flip_cases": 0,
+      "of_cases": 6,
+      "decision_mismatch": 0,
+      "of_runs": 60
+    },
     "generation_rounds": [
       {
         "round": 1,
-        "outcome": "실행값 흔들림 1/60 — A14 evidence_ids의 순서만 뒤집힘(집합 동일). 첫 항목이 실행 파라미터 evidence_id가 된다",
-        "fix": "그래프가 후보 evidence_ids를 입력 근거 순서로 정렬(ai/agent.py _canonical_evidence_ids) — 프롬프트·스키마 무변경이라 해시 동일"
+        "prompt_sha256": "be91c23a1f0290ff59b0265add660ecf518f1ff8267b39e25f9ce7d53167d629",
+        "outcome": "라운드 미수용. 진단 라벨(이중 모델 대조·사용자 판정)은 v3 8건, 같은 호출의 v2 0건",
+        "fix": "요약 입력에서 skip_reason_code를 뺐다(후보 입력은 유지). diagnosis·rationale이 CPU·규칙 사실과 과대 스펙 추정을 나눠 쓰게 했다. 사실표가 입력 resource_role을 보존해 맞는 PRIMARY 서술을 지어낸 사실로 세지 않게 했다"
       },
       {
         "round": 2,
-        "outcome": "합격선 전부 통과 · 필드 안정도 36/36",
+        "outcome": "합격선 전부 통과 · 필드 안정도 36/36 · decision 뒤집힘 0/6 · DECISION_MISMATCH 0/60",
         "fix": null
       }
     ],
@@ -124,28 +179,161 @@
     },
     "defects": {
       "flagged": {
-        "defect_2": 22,
+        "defect_2": 7,
         "defect_3": 1,
+        "defect_4": 1
+      },
+      "judged": 60
+    },
+    "diagnostic_labels": {
+      "flagged": {
+        "defect_2": 0,
+        "defect_3": 0,
         "defect_4": 0
       },
       "judged": 60
     },
+    "rationale_supports_decision": {
+      "Claude Opus 5.5": "60/60 PASS",
+      "GPT 6.1 sol": "60/60 PASS"
+    },
     "judge_pass": {
-      "paired_with": "previous(v1, 2026-09-14 재생성)",
+      "paired_with": "previous(v2, 2026-11-12 재생성)",
       "judge_prompt_sha256": "e582efcac19b88a544da17d90cccc320e152f74ac9164cf37b657d08422b76e9",
       "model_snapshots": ["gpt-5.6-luna"]
     }
   },
+  "history": [
+    {
+      "version": "v2",
+      "prompt_sha256": "1e2e5c45cd1b1d250ebf371ba65699827bf3c42f88f6d77080515a07c22e1cc7",
+      "approved_at": "2026-09-14",
+      "approved_by": "김세혁",
+      "quality_status": "SUPERSEDED",
+      "superseded_by": "v3",
+      "note": "2026-09-14 승인 당시 지표다. 그때의 출력 예시는 dev 112e800의 이 파일에 있다.",
+      "results": {
+        "runs": 60,
+        "failed_contract": 0,
+        "failed_transport": 0,
+        "no_proposal": 0,
+        "fact_failed": 0,
+        "fact_checked": 60,
+        "field_stability": 1.0,
+        "unstable_fields": [],
+        "readback": {
+          "lines_with_readback": 11,
+          "of_lines": 180,
+          "runs_with_readback": 11,
+          "observation_cites_input": 60,
+          "of_runs": 60
+        },
+        "payload_dedup_active": {
+          "A1": true,
+          "A7": true,
+          "A11": true,
+          "A12": true,
+          "A14": true,
+          "A16": true
+        },
+        "generation_rounds": [
+          {
+            "round": 1,
+            "outcome": "실행값 흔들림 1/60 — A14 evidence_ids의 순서만 뒤집힘(집합 동일). 첫 항목이 실행 파라미터 evidence_id가 된다",
+            "fix": "그래프가 후보 evidence_ids를 입력 근거 순서로 정렬(ai/agent.py _canonical_evidence_ids) — 프롬프트·스키마 무변경이라 해시 동일"
+          },
+          {
+            "round": 2,
+            "outcome": "합격선 전부 통과 · 필드 안정도 36/36",
+            "fix": null
+          }
+        ],
+        "restoration": {
+          "judged": 60,
+          "verdict_ok": 60,
+          "skip_reason_ok": 60,
+          "restored": {
+            "cpu_avg": 60,
+            "cpu_max": 60,
+            "cpu_datapoints": 60
+          },
+          "expected": {
+            "cpu_avg": 60,
+            "cpu_max": 60,
+            "cpu_datapoints": 60
+          }
+        },
+        "defects": {
+          "flagged": {
+            "defect_2": 22,
+            "defect_3": 1,
+            "defect_4": 0
+          },
+          "judged": 60
+        },
+        "judge_pass": {
+          "paired_with": "previous(v1, 2026-09-14 재생성)",
+          "judge_prompt_sha256": "e582efcac19b88a544da17d90cccc320e152f74ac9164cf37b657d08422b76e9",
+          "model_snapshots": ["gpt-5.6-luna"]
+        }
+      },
+      "previous": {
+        "version": "v1",
+        "label": "gpt-5.6-luna (reasoning_effort=low)",
+        "source": "2026-09-14 dev(d160484)에서 v1 프롬프트로 재생성한 60회 — v2와 같은 판정 호출에서 짝 비교했다(#251)",
+        "runs": 60,
+        "failed_contract": 0,
+        "failed_transport": 0,
+        "no_proposal": 0,
+        "fact_failed": 0,
+        "fact_checked": 60,
+        "field_stability": 0.833,
+        "unstable_fields": ["RUNBOOK_EC2_RIGHTSIZING.target_instance_type"],
+        "readback": {
+          "lines_with_readback": 4,
+          "of_lines": 180,
+          "runs_with_readback": 4,
+          "observation_cites_input": 60,
+          "of_runs": 60
+        },
+        "restoration": {
+          "judged": 60,
+          "verdict_ok": 60,
+          "skip_reason_ok": 60,
+          "restored": {
+            "cpu_avg": 60,
+            "cpu_max": 60,
+            "cpu_datapoints": 60
+          },
+          "expected": {
+            "cpu_avg": 60,
+            "cpu_max": 60,
+            "cpu_datapoints": 60
+          }
+        },
+        "defects": {
+          "flagged": {
+            "defect_2": 13,
+            "defect_3": 3,
+            "defect_4": 2
+          },
+          "judged": 60
+        },
+        "payload_dedup_active": true,
+        "judge_prompt_sha256": "e582efcac19b88a544da17d90cccc320e152f74ac9164cf37b657d08422b76e9"
+      }
+    }
+  ],
   "outputs": {
-    "note": "각 케이스 첫 회차의 요약 3줄 + 제안 카드 — 다음 판을 전수 재판정이 아니라 달라진 것만 읽는 diff 판정으로 만들기 위한 기록. 프롬프트에 예시로 쓰지 않는다(#243 §범위 밖)",
+    "note": "v3 원자료(2026-11-12 2라운드)에서 각 케이스 첫 회차의 요약 3줄 + 제안 카드 — 다음 판을 전수 재판정이 아니라 달라진 것만 읽는 diff 판정으로 만들기 위한 기록. 프롬프트에 예시로 쓰지 않는다(#243 §범위 밖)",
     "cases": {
       "A1": {
         "run_index": 0,
         "invocation_status": "SUCCEEDED",
         "summary_lines": [
-          "2026-08-05T06:00:00Z부터 2026-08-19T06:00:00Z까지 336개 데이터포인트에서 CPU 평균 사용률은 4.9%, 최대 사용률은 10.0%였고, 네트워크 평균 수신·송신량은 각각 1024.0·768.0이었다.",
-          "이 EC2는 관측 기간 동안 CPU 사용률이 낮아 과대 스펙일 가능성이 있으며, 입력에는 메모리 사용률이 없다.",
-          "낮은 CPU 사용률과 최대 사용률 10.0%가 과대 스펙 EC2 다운사이징을 뒷받침하므로 이 자산에 해당 조치를 적용할 근거가 있다."
+          "EC2 인스턴스 i-0a1b2c3d4e5f00001은 2026-08-05T06:00:00Z부터 2026-08-19T06:00:00Z까지 336개 데이터포인트에서 CPU 평균 4.9%, 최대 10.0%를 기록했고 규칙 판정은 COST_CANDIDATE이다.",
+          "CPU 사용률과 규칙 판정은 확정된 사실이며, 이 사용 패턴에서는 t3.xlarge가 과대 스펙일 가능성이 추정된다.",
+          "평균 및 최대 CPU 사용률이 낮아 과대 스펙 EC2 다운사이징이 비용 절감에 가장 부합할 것으로 추정된다."
         ],
         "proposal_cards": [
           {
@@ -161,9 +349,9 @@
         "run_index": 10,
         "invocation_status": "SUCCEEDED",
         "summary_lines": [
-          "2026-08-06T06:00:00Z부터 2026-08-20T06:00:00Z까지 48개 데이터포인트에서 CPU 평균 사용률은 4.9, 최대 사용률은 10.0이며 네트워크 인바운드 평균은 1024.0, 아웃바운드 평균은 512.0이다.",
-          "이 EC2는 현재 running 상태인 t3.xlarge 인스턴스이며, 관측 기간 동안 CPU 사용률이 낮아 과대 스펙일 가능성이 추정된다.",
-          "낮은 CPU 평균·최대 사용률이 확인되어 과대 스펙 EC2 다운사이징이 이 자산의 비용 절감 후보로 뒷받침된다."
+          "EC2 `i-0a1b2c3d4e5f00012`는 2026-08-06T06:00:00Z부터 2026-08-20T06:00:00Z까지 48개 데이터포인트에서 CPU 평균 사용률 4.9%, 최대 사용률 10.0%를 기록했으며 규칙 판정은 `COST_CANDIDATE`이다.",
+          "CPU 사용률과 규칙 판정은 입력으로 확정되며, 이 낮은 사용률에 비추어 `t3.xlarge`가 과대 스펙일 가능성이 추정되지만 고정 대수 운영 여부는 입력에 없어 Auto Scaling 전환 필요성은 확정할 수 없다.",
+          "CPU 평균 4.9%와 최대 10.0%라는 관측값이 과대 스펙 EC2 다운사이징을 가장 직접적으로 뒷받침하므로 해당 조치를 제시한다."
         ],
         "proposal_cards": [
           {
@@ -179,9 +367,9 @@
         "run_index": 20,
         "invocation_status": "SUCCEEDED",
         "summary_lines": [
-          "EC2 인스턴스 i-0a1b2c3d4e5f00021의 CPUUtilization은 2026-08-11T06:00:00Z부터 2026-08-25T06:00:00Z까지 336개 데이터포인트에서 평균 1.5%, 최대 10.0%였고 네트워크 입출력 평균은 각각 1024.0과 768.0이었다.",
-          "이 인스턴스는 현재 실행 중인 t3.large이며, 관측 기간의 낮은 CPU 사용률로 보아 컴퓨팅 용량이 과대할 가능성이 추정된다.",
-          "낮은 평균·최대 CPU 사용률이 과대 프로비저닝 가능성을 뒷받침하므로 이 자산에는 「과대 스펙 EC2 다운사이징」이 적합하다."
+          "EC2 인스턴스 i-0a1b2c3d4e5f00021은 2026-08-11T06:00:00Z부터 2026-08-25T06:00:00Z까지 336개 데이터포인트에서 CPU 평균 사용률 1.5%, 최대 사용률 10.0%를 기록했으며 규칙 판정은 COST_CANDIDATE이다.",
+          "낮은 평균 및 최대 CPU 사용률을 보면 이 t3.large 인스턴스는 과대 스펙일 가능성이 추정되며, 고정 대수 운영으로 인한 비용 낭비 여부는 입력만으로 확정할 수 없다.",
+          "CPU 사용률이 관측 기간 내내 낮아 과대 스펙 EC2 다운사이징 조치가 비용 절감에 가장 부합할 것으로 추정된다."
         ],
         "proposal_cards": [
           {
@@ -197,9 +385,9 @@
         "run_index": 30,
         "invocation_status": "SUCCEEDED",
         "summary_lines": [
-          "EC2 인스턴스 i-0a1b2c3d4e5f00022는 2026-08-11T06:00:00Z부터 2026-08-25T06:00:00Z까지 336개 데이터포인트에서 CPU 평균 1.5, 최대 10.0을 기록했고 네트워크 입출력 평균은 각각 1024.0과 768.0이었다.",
-          "해당 기간의 낮은 CPU 평균과 최대 사용률로 보아 인스턴스가 과대 스펙일 가능성이 추정된다.",
-          "관측된 낮은 CPU 사용률은 과대 스펙 EC2 다운사이징이 이 자산의 용량을 줄이는 조치로 뒷받침한다."
+          "EC2 i-0a1b2c3d4e5f00022는 2026-08-11T06:00:00Z부터 2026-08-25T06:00:00Z까지 336개 데이터포인트에서 CPU 평균 사용률 1.5%, 최대 사용률 10.0%를 기록했으며 규칙 판정은 COST_CANDIDATE이다.",
+          "CPU 사용률 값과 COST_CANDIDATE 판정은 입력으로 확정되며, 평균·최대 사용률이 낮은 점을 보면 이 EC2는 현재 용량이 과대할 가능성이 추정된다.",
+          "과대 스펙 EC2 다운사이징은 낮은 CPU 사용률로 추정되는 과대 용량을 줄이는 조치이므로 이 자산에 가장 직접적으로 부합한다."
         ],
         "proposal_cards": [
           {
@@ -215,9 +403,9 @@
         "run_index": 40,
         "invocation_status": "SUCCEEDED",
         "summary_lines": [
-          "2026-08-11T06:00:00Z부터 2026-08-25T06:00:00Z까지 336개 데이터포인트에서 CPU 평균 사용률은 1.5%, 최대 사용률은 10.0%였고 평균 네트워크 수신·송신량은 각각 1024.0·768.0이었다.",
-          "이 EC2는 해당 관측 기간에 CPU 사용률이 낮았으므로 과대 스펙일 가능성이 추정되지만, 고정 대수 운영 여부는 입력에서 확인되지 않는다.",
-          "낮은 CPU 평균·최대 사용률이 확인되어 과대 스펙 EC2 다운사이징이 이 자산의 비용 절감 후보에 부합한다."
+          "EC2 인스턴스 i-0a1b2c3d4e5f00024는 2026-08-11T06:00:00Z부터 2026-08-25T06:00:00Z까지 336개 데이터포인트에서 CPU 평균 사용률 1.5%, 최대 사용률 10.0%로 평가되어 verdict가 COST_CANDIDATE로 판정됐다.",
+          "이 인스턴스는 관측 기간 동안 CPU 자원 사용이 낮아 현재 t3.large가 과대 스펙일 가능성이 추정되며, 고정 대수 운영이나 트래픽 변동 여부는 입력만으로 확정할 수 없다.",
+          "CPU 사용률이 낮다는 근거가 과대 스펙 EC2 다운사이징 조치를 가장 직접적으로 뒷받침하므로 해당 조치를 제시한다."
         ],
         "proposal_cards": [
           {
@@ -233,9 +421,9 @@
         "run_index": 50,
         "invocation_status": "SUCCEEDED",
         "summary_lines": [
-          "EC2 인스턴스 i-0a1b2c3d4e5f00026은 2026-08-11T06:00:00Z부터 2026-08-25T06:00:00Z까지 CPU 평균 1.5, CPU 최대 10.0, 데이터포인트 336개와 네트워크 평균 유입 1024.0, 유출 768.0을 기록했다.",
-          "관측 기간 동안 CPU 사용률이 낮아 이 인스턴스가 과대 스펙일 가능성이 추정되며, 고정 대수 운영 여부와 무관하게 입력에는 최대 사용률 판정 기준 외의 추가 사용 패턴 정보가 없다.",
-          "낮은 CPU 평균과 최대값이 과대 스펙 가능성을 뒷받침하므로 과대 스펙 EC2 다운사이징이 이 자산에 맞는 조치다."
+          "2026-08-11T06:00:00Z부터 2026-08-25T06:00:00Z까지 336개 데이터포인트에서 t3.large EC2의 CPU 평균 사용률은 1.5%, 최대 사용률은 10.0%였으며 규칙 판정은 COST_CANDIDATE였다.",
+          "CPU 사용률과 규칙 판정은 확정된 사실이며, 해당 기간의 낮은 평균·최대 사용률을 근거로 이 인스턴스가 과대 스펙일 가능성이 있는 것으로 추정된다.",
+          "과대 스펙 EC2 다운사이징은 낮은 CPU 사용률로 추정되는 과잉 용량과 비용을 줄이는 조치이므로 이 자산에 가장 부합한다."
         ],
         "proposal_cards": [
           {

@@ -680,7 +680,7 @@ def test_exhausted_hold_keeps_residual_names_identifiable_from_the_plan(db, rese
 def test_public_incident_detail_on_exhausted_hold(client_pg, db, reserved, aws):
     """공개 표현 — 상세 응답이 실제로 무엇을 싣는지 고정한다.
 
-    ExecutionSummaryItem은 status와 typed verification_hold만 싣는다. error_summary와 단계는
+    실행 실패 정보는 status와 typed verification_hold로만 싣는다. error_summary와 단계는
     공개 DTO에 없으므로 잔여 자원 이름은 아직 공개 응답으로 나가지 않는다(DB의 단계 5·
     error_summary에만 있다)."""
     incident_id, _execution_id = reserved()
@@ -697,7 +697,7 @@ def test_public_incident_detail_on_exhausted_hold(client_pg, db, reserved, aws):
     assert item["verification_hold"]["attempts"] == 3
     assert set(item) == {
         "execution_id", "runbook_id", "status", "available_recovery_runbook_ids",
-        "verification_hold", "updated_at",
+        "verification_hold", "created_at", "finished_at", "parent_execution_id", "updated_at",
     }
 
 

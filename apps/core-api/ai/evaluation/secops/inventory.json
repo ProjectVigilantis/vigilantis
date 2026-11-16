@@ -864,6 +864,102 @@
           }
         }
       ]
+    },
+    "C10": {
+      "captured_at": "2026-08-19T06:30:05Z",
+      "target": {
+        "collection_run_id": "c04d7179-4e31-5492-8dd0-9dc3d9fe2a10",
+        "asset": {
+          "arn": "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0a1b2c3d4e5f00001",
+          "resource_id": "i-0a1b2c3d4e5f00001",
+          "asset_type": "EC2",
+          "resource_role": "PRIMARY",
+          "name": "golden-ec2-idle-boundary",
+          "account_id": "123456789012",
+          "region": "ap-northeast-2",
+          "state": "running",
+          "spec": {
+            "instance_type": "t3.xlarge",
+            "availability_zone": "ap-northeast-2a",
+            "vpc_id": "vpc-0a1b2c3d4e5f0f001",
+            "subnet_id": "subnet-0a1b2c3d4e5f0f001",
+            "private_ip": "10.0.1.11",
+            "tags": {
+              "Name": "golden-ec2-idle-boundary",
+              "Environment": "staging",
+              "Owner": "qa"
+            }
+          },
+          "relationships": [
+            {
+              "relation_type": "PROTECTED_BY",
+              "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001"
+            },
+            {
+              "relation_type": "SECURED_BY",
+              "target_arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00001"
+            }
+          ],
+          "evaluation_status": "PENDING",
+          "health_score": null,
+          "verdict": null,
+          "skip_reason_code": null,
+          "collected_at": "2026-08-19T06:00:00Z"
+        }
+      },
+      "related_assets": [
+        {
+          "collection_run_id": "c04d7179-4e31-5492-8dd0-9dc3d9fe2a10",
+          "asset": {
+            "arn": "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0a1b2c3d4e5f00001",
+            "resource_id": "acl-0a1b2c3d4e5f00001",
+            "asset_type": "NACL",
+            "resource_role": "RUNBOOK_SUPPORT",
+            "name": null,
+            "account_id": "123456789012",
+            "region": "ap-northeast-2",
+            "state": null,
+            "spec": {
+              "vpc_id": null,
+              "is_default": false,
+              "associated_subnet_ids": [
+                "subnet-0a1b2c3d4e5f0f001"
+              ]
+            },
+            "relationships": [],
+            "evaluation_status": "NOT_APPLICABLE",
+            "health_score": null,
+            "verdict": null,
+            "skip_reason_code": null,
+            "collected_at": "2026-08-19T06:00:00Z"
+          }
+        },
+        {
+          "collection_run_id": "c04d7179-4e31-5492-8dd0-9dc3d9fe2a10",
+          "asset": {
+            "arn": "arn:aws:ec2:ap-northeast-2:123456789012:security-group/sg-0a1b2c3d4e5f00001",
+            "resource_id": "sg-0a1b2c3d4e5f00001",
+            "asset_type": "SG",
+            "resource_role": "PRIMARY",
+            "name": null,
+            "account_id": "123456789012",
+            "region": "ap-northeast-2",
+            "state": null,
+            "spec": {
+              "description": null,
+              "vpc_id": null,
+              "attached": true,
+              "open_to_world": []
+            },
+            "relationships": [],
+            "evaluation_status": "PENDING",
+            "health_score": null,
+            "verdict": null,
+            "skip_reason_code": null,
+            "collected_at": "2026-08-19T06:00:00Z"
+          }
+        }
+      ]
     }
   }
 }

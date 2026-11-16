@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import {
   canViewPlatformStatus,
   ACTION_FORBIDDEN,
+  EVIDENCE_EXPORT_BLOCKED,
   UNASSIGNED_ACTION_BLOCKED,
   VIEWER_ACTION_BLOCKED,
   canAccessTenant,
@@ -13,6 +14,7 @@ import {
   canManageUsers,
   canManageUsersOf,
   canOperate,
+  evidenceExportBlockedReason,
   hasCustomerScope,
   isCentralAdmin,
   isPlatform,
@@ -92,9 +94,9 @@ test('고객 추가는 중앙 관리자만', () => {
   assert.equal(canCreateTenant(null), false);
 });
 
-test('사용자 관리는 고객 범위가 있는 플랫폼 계정과 고객사 ADMIN — 배정 없는 담당자와 계정을 모르면 숨긴다', () => {
+test('사용자 관리는 중앙 관리계정과 고객사 ADMIN — 서버 관문(#572 9번)과 같다. 고객 담당자는 배정이 있어도 아니다', () => {
   assert.equal(canManageUsers(central), true);
-  assert.equal(canManageUsers(manager(TENANT_A)), true);
+  assert.equal(canManageUsers(manager(TENANT_A)), false);
   assert.equal(canManageUsers(unassigned), false);
   assert.equal(canManageUsers(tenant('ADMIN')), true);
   for (const role of ['OPERATOR', 'VIEWER'] as const) {
@@ -189,4 +191,11 @@ test('플랫폼 상태: 중앙 관리 · 조치 권한이 있는 플랫폼 계�
   assert.equal(canViewPlatformStatus(tenant('ADMIN')), false);
   assert.equal(canViewPlatformStatus(tenant('OPERATOR')), false);
   assert.equal(canViewPlatformStatus(null), false);
+});
+
+test('근거 내려받기는 역할이 아니라 EXECUTE_ACTION 권한으로 판정한다 — 권한 없는 OPERATOR도 막는다(#488)', () => {
+  assert.equal(evidenceExportBlockedReason({ permissions: ['VIEW', 'EXECUTE_ACTION'] }), null);
+  assert.equal(evidenceExportBlockedReason({ permissions: ['VIEW'] }), EVIDENCE_EXPORT_BLOCKED);
+  assert.equal(evidenceExportBlockedReason({ permissions: [] }), EVIDENCE_EXPORT_BLOCKED);
+  assert.notEqual(evidenceExportBlockedReason(null), null);
 });

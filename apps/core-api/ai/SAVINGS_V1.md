@@ -87,10 +87,11 @@ A가 조기 중단되었으므로 설명 제거의 인과 효과는 확정할 �
 
 실험 B(`candidate-B-v1`), 서비스 편입판 `v0.10.0`, V1.0.0의 단가 요청은 같다.
 요청 기준은 [SDK 경계 테스트](tests/test_savings_request_boundary.py)에 작은 고정 지문으로 남겼다.
+단가 요청 지문은 그대로이고, 요약·후보 요청 지문은 summary v3에 맞춰 재고정했다.
 상세 원자료·비교 후보·실험 실행 도구는 저자의 별도 보관 자료이며 CI 실행에 필요하지 않다.
 
 - 단가 요청 지문: `b52d6a31b0b7d0a632c8b61a58c6ad7de559ee2d8c6bbc0bb163f7db30e5bbc2`
-- summary 승인 v2 지문: `1e2e5c45cd1b1d250ebf371ba65699827bf3c42f88f6d77080515a07c22e1cc7`
+- summary v3 프롬프트 지문: `a0fab6a357b80fbf87f775b6007bb411852584586a832d769cc32c691f0b4d4f` — #583 3단계 측정 수용판이며 팀 승인은 [summary 기준선](evaluation/summary/baseline.md)의 상태를 따른다. 이전 v2 지문은 [스냅샷](evaluation/summary/summary_prompt_snapshot.json)의 `history`에 있다.
 - 경로·구조 정리는 기존 SDK 요청 지문과 단가 수용·저장·조회 회귀 테스트로 무료 검증한다.
 - 프롬프트·출력 스키마·모델·입력 조건을 바꾸면 별도로 승인받아 가격 품질을 다시 측정한다.
 - 요약·추천 요청을 바꾸면 [summary 재통과 절차](evaluation/summary/baseline.md)를 적용한다.

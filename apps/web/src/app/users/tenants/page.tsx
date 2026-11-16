@@ -11,7 +11,7 @@ import { ErrorState } from '@/components/error-state';
 import { staffRows } from '@/lib/admin-dashboard';
 import { serverApi } from '@/lib/api/server';
 import { businessOpen } from '@/lib/home-path';
-import { isPlatform, isUnassignedManager } from '@/lib/roles';
+import { canManageUsers, isPlatform, isUnassignedManager } from '@/lib/roles';
 
 export const metadata: Metadata = { title: '고객사별 계정 · Vigilantis' };
 
@@ -31,6 +31,9 @@ export default async function TenantStaffPage() {
   // 관리자 화면이다. 고객사 계정은 업무 화면이 열려 있어도 여기 오지 않는다(고객사 대시보드로 보낸다, 2026-11-03).
   if (!isPlatform(user)) redirect('/');
   if (!businessOpen(user)) return <BusinessUnavailable unassigned={isUnassignedManager(user)} />;
+  // 고객사 직원 목록(`GET /users`)은 중앙 관리계정만 읽는다(서버 #572 9번). 고객 담당자는 대시보드로 보낸다 —
+  // 부르면 403이 활동 로그에 쌓인다(#589).
+  if (!canManageUsers(user)) redirect('/');
   let tenants;
   let users;
   try {

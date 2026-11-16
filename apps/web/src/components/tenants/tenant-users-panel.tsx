@@ -21,14 +21,16 @@ export function TenantUsersPanel({
   tenantId: string;
   tenantName: string | null;
   status: TenantStatus;
-  /** 이 고객 소속 사용자. `null`은 조회 실패다(0명과 구분한다). */
-  users: UserListItem[] | null;
+  /** 이 고객 소속 사용자. `null`은 조회 실패다(0명과 구분한다). `undefined`는 볼 수 없는 계정(고객 담당자)이다. */
+  users: UserListItem[] | null | undefined;
 }) {
   const canInvite = status === 'ACTIVE';
 
   return (
 <Panel title="고객사 계정">
-      {users === null ? (
+      {users === undefined ? (
+        <Muted>중앙 관리계정만 볼 수 있습니다.</Muted>
+      ) : users === null ? (
         <Muted>직원 목록을 불러오지 못했습니다.</Muted>
       ) : (
         <div className="flex flex-col gap-3">

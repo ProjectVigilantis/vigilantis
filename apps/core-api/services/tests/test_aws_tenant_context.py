@@ -483,14 +483,36 @@ def test_verify_turns_guardduty_on_in_every_monitored_region(aws, settings):
     assert aws.detectors == {REGION: {f"d-{REGION}": "ENABLED"}, SECOND_REGION: {"d-1": "ENABLED"}}
 
 
-def test_verify_stops_at_the_first_region_it_cannot_turn_on(aws, settings):
+def test_verify_visits_every_region_and_lists_the_ones_it_cannot_turn_on(aws, settings):
+    # 켜지 못한 리전에서 멈추지 않는다 — 나머지 리전도 보고, 켜지 못한 리전만 사유와 함께 싣는다(#588 D)
+    from tenant_verification import RegionFailure
+
     aws.detectors = {REGION: {"d-1": "DISABLED"}}
 
     outcome = _verify(regions=(REGION, SECOND_REGION))
 
     assert (outcome.result.value, outcome.reason_code) == ("GUARDDUTY_DISABLED", "DetectorDisabled")
-    assert aws.detectors == {REGION: {"d-1": "DISABLED"}}  # 정지된 탐지기를 다시 켜지 않는다
-    assert SECOND_REGION not in [region for _a, region in aws.regions]
+    assert outcome.guardduty_failures == (RegionFailure(REGION, "DetectorDisabled"),)
+    # 정지된 탐지기는 다시 켜지 않고, 다음 리전은 켠다
+    assert aws.detectors == {REGION: {"d-1": "DISABLED"}, SECOND_REGION: {f"d-{SECOND_REGION}": "ENABLED"}}
+    assert aws.regions[3:] == [
+        ("ListDetectors", REGION),
+        ("GetDetector", REGION),
+        ("ListDetectors", SECOND_REGION),
+        ("CreateDetector", SECOND_REGION),
+    ]
+
+
+def test_verify_lists_every_region_it_cannot_turn_on(aws, settings):
+    from tenant_verification import RegionFailure
+
+    aws.detectors = {REGION: {"d-1": "DISABLED"}, SECOND_REGION: {"d-2": "DISABLED"}}
+
+    outcome = _verify(regions=(REGION, SECOND_REGION))
+
+    assert outcome.guardduty_failures == (
+        RegionFailure(REGION, "DetectorDisabled"), RegionFailure(SECOND_REGION, "DetectorDisabled"),
+    )
 
 
 def test_reverify_after_a_second_region_refusal_reuses_the_first_detector(aws, settings):

@@ -33,7 +33,7 @@ from schemas.api.tenants import (
 from schemas.subscriptions import SubscriptionSource, service_date
 from sqlalchemy import delete, event, select, text, update
 from sqlalchemy.orm import Session, sessionmaker
-from tenant_verification import VerificationOutcome
+from tenant_verification import RegionFailure, VerificationOutcome
 from tests.group_scope import assign_tenants
 
 BASE = "/api/v1/tenants"
@@ -331,10 +331,19 @@ def test_verification_input_changed_during_aws_is_409_and_persists_no_observatio
     assert _snapshot(db, tenant.tenant_id) == seen["row"]
 
 
+_GUARDDUTY_FAILURES = [
+    {"region": "ap-northeast-2", "reason_code": "DetectorDisabled"},
+    {"region": "us-east-1", "reason_code": "AccessDeniedException"},
+]
+_GUARDDUTY_DISABLED = VerificationOutcome(
+    R.GUARDDUTY_DISABLED, "DetectorDisabled", tuple(RegionFailure(**f) for f in _GUARDDUTY_FAILURES)
+)
+
+
 def test_guardduty_disabled_does_not_activate_and_keeps_its_reason(client_pg, db, admin, aws):
     # 한 리전이라도 켜지 못하면 OK 가 아니다 — ACTIVE 로 올리지 않는다(#588 B)
     tenant = _seed(db)
-    aws.outcome = VerificationOutcome(R.GUARDDUTY_DISABLED, "DetectorDisabled")
+    aws.outcome = _GUARDDUTY_DISABLED
     resp = _post(client_pg, "verify", tenant.tenant_id)
     assert resp.status_code == 200
     assert resp.json()["verification"]["result"] == "GUARDDUTY_DISABLED"
@@ -342,6 +351,47 @@ def test_guardduty_disabled_does_not_activate_and_keeps_its_reason(client_pg, db
     assert stored.status is TenantStatus.PENDING_CONNECTION
     assert (stored.last_verification_result, stored.last_verification_reason_code) == (
         R.GUARDDUTY_DISABLED, "DetectorDisabled")
+
+
+@pytest.mark.parametrize("route", ["verify", "resume"])
+def test_guardduty_disabled_lists_the_failed_regions_in_every_response(client_pg, db, admin, aws, route):
+    # 켜지 못한 리전과 리전별 사유가 확인 응답 · 상세 · 목록에 같은 값으로 실린다(#588 D)
+    tenant = _seed(db, status=TenantStatus.SUSPENDED if route == "resume" else TenantStatus.PENDING_CONNECTION)
+    aws.outcome = _GUARDDUTY_DISABLED
+
+    resp = _post(client_pg, route, tenant.tenant_id)
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["verification"] == body["tenant"]["last_verification"]
+    assert body["verification"]["guardduty_failures"] == _GUARDDUTY_FAILURES
+    assert _stored(db, tenant.tenant_id).last_verification_guardduty_failures == _GUARDDUTY_FAILURES
+    detail = client_pg.get(f"/api/v1/tenants/{tenant.tenant_id}").json()
+    assert detail["last_verification"]["guardduty_failures"] == _GUARDDUTY_FAILURES
+    listed = next(
+        item for item in client_pg.get("/api/v1/tenants").json()["tenants"]
+        if item["tenant_id"] == tenant.tenant_id
+    )
+    assert listed["last_verification"]["guardduty_failures"] == _GUARDDUTY_FAILURES
+
+
+@pytest.mark.parametrize("after", [
+    VerificationOutcome(R.OK),
+    VerificationOutcome(R.READ_DENIED, "AccessDenied"),
+    VerificationOutcome(R.UNREACHABLE, "ThrottlingException"),
+], ids=lambda o: o.result.value)
+def test_the_next_verification_replaces_the_region_list(client_pg, db, admin, aws, after):
+    # 리전 목록은 그 확인의 관측이다 — 다음 확인이 다른 결과면 지난 목록을 남기지 않는다
+    tenant = _seed(db)
+    aws.outcome = _GUARDDUTY_DISABLED
+    assert _post(client_pg, "verify", tenant.tenant_id).status_code == 200
+
+    aws.outcome = after
+    resp = _post(client_pg, "verify", tenant.tenant_id)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["verification"]["guardduty_failures"] is None
+    assert _stored(db, tenant.tenant_id).last_verification_guardduty_failures is None
 
 
 # ----- ⑤ 조건부 갱신이 0행일 때 -------------------------------------------------------------

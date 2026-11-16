@@ -141,8 +141,13 @@ def test_detail_assembles_evidence_recommendations_executions(
     assert body["created_at"] == "2026-08-19T03:00:00Z"
 
 
+@pytest.mark.parametrize(
+    "finished_at, expected_finished_at",
+    [(None, None), (T0 + timedelta(minutes=1), "2026-08-19T03:01:00Z")],
+)
 def test_detail_assembles_execution_summaries(
-    client_pg, db, two_incidents, make_candidate, make_execution
+    client_pg, db, two_incidents, make_candidate, make_execution,
+    finished_at, expected_finished_at,
 ):
     secops, _ = two_incidents()
     make_candidate(db, secops)
@@ -153,8 +158,11 @@ def test_detail_assembles_execution_summaries(
         target_arn=SUBJECT_EC2,
         status=ExecutionStatus.SUCCESS,
         trigger_source=TriggerSource.PRE_MITIGATION_0_5S,
-        updated_at=T0 + timedelta(minutes=2),
     )
+    execution.created_at = T0
+    execution.finished_at = finished_at
+    execution.updated_at = T0 + timedelta(minutes=2)
+    db.flush()
 
     body = client_pg.get(f"/api/v1/incidents/{secops.incident_id}").json()
     assert body["executions"] == [
@@ -164,6 +172,9 @@ def test_detail_assembles_execution_summaries(
             "status": "SUCCESS",
             "available_recovery_runbook_ids": ["RUNBOOK_EC2_UNISOLATE"],
             "verification_hold": None,  # 판정 불가 보류 없음 (Issue #249)
+            "created_at": "2026-08-19T03:00:00Z",
+            "finished_at": expected_finished_at,
+            "parent_execution_id": None,
             "updated_at": "2026-08-19T03:02:00Z",
         }
     ]
@@ -223,7 +234,7 @@ def test_detail_hides_recovery_once_child_execution_exists(
         status=ExecutionStatus.SUCCESS,
         target_arn=SUBJECT_EC2,
     )
-    make_execution(
+    child = make_execution(
         db,
         secops,
         runbook_id=RunbookId.RUNBOOK_EC2_UNISOLATE,
@@ -231,10 +242,18 @@ def test_detail_hides_recovery_once_child_execution_exists(
         target_arn=SUBJECT_EC2,
         parent=origin,
     )
+    origin.created_at = T0
+    child.created_at = T0 + timedelta(minutes=3)
+    db.flush()
 
     body = client_pg.get(f"/api/v1/incidents/{secops.incident_id}").json()
 
     summaries = {e["execution_id"]: e for e in body["executions"]}
+    assert summaries[origin.execution_id]["parent_execution_id"] is None
+    assert summaries[child.execution_id]["parent_execution_id"] == origin.execution_id
+    assert summaries[child.execution_id]["created_at"] == "2026-08-19T03:03:00Z"
+    assert summaries[child.execution_id]["finished_at"] is None
+    assert summaries[child.execution_id]["status"] == "IN_PROGRESS"
     assert summaries[origin.execution_id]["available_recovery_runbook_ids"] == []
     # 자식(롤백) 자신은 짝이 없어 아무것도 열지 않는다
     assert all(e["available_recovery_runbook_ids"] == [] for e in body["executions"])

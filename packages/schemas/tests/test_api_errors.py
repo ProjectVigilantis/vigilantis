@@ -42,6 +42,9 @@ CONTRACT_ERROR_CODES = {
     "NOTIFICATION_NOT_FOUND",     # 404
     "REQUEST_BODY_TOO_LARGE",     # 413
     "EVIDENCE_EXPORT_TOO_LARGE",  # 413 — 근거 내보내기 파일 상한 초과 (#488)
+    "REPORT_DRAFT_TOO_LARGE",     # 413 — 신고 초안 입력·파일 상한
+    "REPORT_DRAFT_MODEL_UNAVAILABLE",  # 503 — 미연결·일시 장애
+    "REPORT_DRAFT_GENERATION_FAILED",  # 502 — 생성·검증 실패
     "REQUEST_VALIDATION_FAILED",  # 422
     "INTERNAL_ERROR",             # 500
 }

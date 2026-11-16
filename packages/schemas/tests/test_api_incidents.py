@@ -53,6 +53,7 @@ def make_secops_incident(**over):
                 "runbook_id": "RUNBOOK_EC2_ISOLATE",
                 "status": "SUCCESS",
                 "available_recovery_runbook_ids": ["RUNBOOK_EC2_UNISOLATE"],
+                "created_at": "2026-08-12T09:01:00Z",
                 "updated_at": "2026-08-12T09:01:01Z",
             }
         ],
@@ -152,6 +153,7 @@ def test_action_in_progress_valid():
         executions=[{
             "execution_id": "exec-1", "runbook_id": "RUNBOOK_NACL_ADD_DENY",
             "status": "IN_PROGRESS", "available_recovery_runbook_ids": [],
+            "created_at": "2026-08-12T09:01:00Z",
             "updated_at": "2026-08-12T09:02:00Z",
         }],
     ))
@@ -174,6 +176,7 @@ def make_execution_item(status, **over):
         "runbook_id": "RUNBOOK_EC2_RIGHTSIZING",
         "status": status,
         "available_recovery_runbook_ids": [],
+        "created_at": "2026-09-14T09:00:00Z",
         "updated_at": "2026-09-14T09:04:00Z",
     }
     base.update(over)
@@ -308,6 +311,7 @@ def test_awaiting_closure_valid_after_a_settled_execution():
                     "runbook_id": "RUNBOOK_EC2_RIGHTSIZING",
                     "status": "IN_PROGRESS",
                     "available_recovery_runbook_ids": [],
+                    "created_at": "2026-08-12T09:01:00Z",
                     "updated_at": "2026-08-12T09:01:01Z",
                 }
             ],
@@ -324,6 +328,7 @@ def test_awaiting_approval_rejects_in_progress_execution():
         IncidentResponse.model_validate(make_secops_incident(executions=[{
             "execution_id": "exec-2", "runbook_id": "RUNBOOK_EC2_ISOLATE",
             "status": "IN_PROGRESS", "available_recovery_runbook_ids": [],
+            "created_at": "2026-08-12T09:01:00Z",
             "updated_at": "2026-08-12T09:03:00Z",
         }]))
 
@@ -335,6 +340,7 @@ def test_recovery_ids_reject_main_runbooks():
             "execution_id": "exec-3", "runbook_id": "RUNBOOK_NACL_ADD_DENY",
             "status": "SUCCESS",
             "available_recovery_runbook_ids": ["RUNBOOK_NACL_RESTORE"],
+            "created_at": "2026-08-12T09:01:00Z",
             "updated_at": "2026-08-12T09:04:00Z",
         }]))
 

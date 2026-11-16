@@ -418,6 +418,12 @@ export interface ExecutionSummaryItem {
   available_recovery_runbook_ids: RollbackRunbookId[];
   /** 보류가 없으면 null. UNVERIFIED면 반드시 있고 SUCCESS·ROLLBACK_INITIATED에는 오지 않는다(#249). */
   verification_hold?: ExecutionVerificationHold | null;
+  /** 실행 행 생성(예약) 시각. AWS 조치의 실제 시작 시각이 아니다. */
+  created_at: IsoDateTime;
+  /** 기록된 완료 시각. null은 기록 부재이며 결과는 status로 판정한다. */
+  finished_at: IsoDateTime | null;
+  /** 원복의 원 실행 ID. null은 원 실행 부재이며 값이 있어도 원복 성공은 아니다. */
+  parent_execution_id: string | null;
   updated_at: IsoDateTime;
 }
 
@@ -816,12 +822,25 @@ export const TENANT_VERIFICATION_RESULTS = [
 ] as const;
 export type TenantVerificationResult = (typeof TENANT_VERIFICATION_RESULTS)[number];
 
+/** GuardDuty 를 켜지 못한 관제 리전 하나와 그 사유(T-14 · #588 D). */
+export interface GuardDutyRegionFailure {
+  region: string;
+  /** `DetectorDisabled`(정지된 탐지기 — 플랫폼이 다시 켜지 않는다) 또는 AWS 오류 코드 · 예외 클래스명. */
+  reason_code: string;
+}
+
 /** 마지막 연결 확인 — 그 시각의 관측값이다. 「지금 연결된다」로 읽지 않는다. */
 export interface TenantVerification {
   result: TenantVerificationResult;
   verified_at: IsoDateTime;
   /** 실패일 때만 있다(AWS 오류 코드 · 예외 클래스명). */
   reason_code: string | null;
+  /**
+   * GUARDDUTY_DISABLED 일 때 켜지 못한 관제 리전 전부와 리전별 사유(관제 리전 순서). 여기 없는 관제 리전은 그
+   * 확인에서 켜져 있었다. `reason_code` 는 첫 항목의 사유와 같다. 그 밖의 결과와, 이 칸이 생기기 전에 남은
+   * GUARDDUTY_DISABLED 기록은 null 이다.
+   */
+  guardduty_failures: GuardDutyRegionFailure[] | null;
 }
 
 /**
@@ -1483,6 +1502,7 @@ export type PlatformEventAction =
   | 'INCIDENT_CREATE'
   | 'INCIDENT_ANALYZE'
   | 'INCIDENT_RESOLVE'
+  | 'INCIDENT_EVIDENCE_EXPORT'
   | 'ACTION_APPROVE'
   | 'ACTION_AUTO_TRIGGER'
   | 'ACTION_BLOCK'
@@ -1549,7 +1569,9 @@ export interface PlatformEventItem {
   /** 고객사 없는 일(플랫폼 계정 로그인 등)은 null. */
   tenant_id: string | null;
   target: { type: PlatformEventTargetType; id: string } | null;
-  /** 행동별 기록 계약의 값(before · after · reason_code 등). 비밀번호 · 토큰 · 이메일 칸은 없다. */
+  /** 행동별 기록 계약의 값(before · after · reason_code · changed_fields 등). 비밀번호 · 토큰 · 이메일 칸은 없다.
+   *  TENANT_UPDATE 의 changed_fields 는 값이 바뀐 칸 이름(name · regions · collect_vpc_ids · subscription)이고,
+   *  TENANT_AUTO_ACTION_CHANGE 의 before · after 는 ENABLED · DISABLED 다. */
   details: Record<string, unknown>;
   session_id: string | null;
   /** 클라이언트가 X-Request-ID 로 정할 수 있다 — 같은 값이라고 같은 요청이라는 증거가 아니다. */

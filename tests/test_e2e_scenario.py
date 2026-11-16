@@ -185,6 +185,7 @@ def test_t2_restore_is_a_main_runbook_so_the_release_button_is_not_a_recovery_ac
                 "runbook_id": RunbookId.RUNBOOK_NACL_ADD_DENY.value,
                 "status": "SUCCESS",
                 "available_recovery_runbook_ids": [RunbookId.RUNBOOK_NACL_RESTORE.value],
+                "created_at": "2026-08-27T06:29:00Z",
                 "updated_at": "2026-08-27T06:30:00Z",
             }
         )

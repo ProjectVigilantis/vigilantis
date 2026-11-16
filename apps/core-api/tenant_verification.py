@@ -7,8 +7,11 @@
 #     순서대로 처음 실패한 자리를 싣는다 — AssumeRole(ASSUME_DENIED) → GetCallerIdentity · 계정 대조
 #     (ACCOUNT_MISMATCH) → 최소 읽기 1건(READ_DENIED) → 관제 리전마다 GuardDuty 켜기(GUARDDUTY_DISABLED).
 #     묻지 못했으면 UNREACHABLE(연결 여부를 판정하지 않는다).
-#   - GuardDuty 단계는 리전을 순서대로 돌고 처음 켜지 못한 리전에서 멈춘다. 없으면 만들고, 정지된 탐지기는
-#     다시 켜지 않는다(services/guardduty.py). 한 리전이라도 켜지 못하면 OK 가 아니다 — ACTIVE 로 올리지 않는다.
+#   - GuardDuty 단계는 관제 리전을 순서대로 **모두** 돈다(#588 D) — 켜지 못한 리전에서 멈추지 않고 나머지도 보고,
+#     켜지 못한 리전과 리전별 사유를 전부 싣는다(guardduty_failures). 안내 화면이 어느 리전을 고객이 켜야 하는지
+#     한 번에 보이기 위해서다. 없으면 만들고, 정지된 탐지기는 다시 켜지 않는다(services/guardduty.py).
+#     한 리전이라도 켜지 못하면 OK 가 아니다 — ACTIVE 로 올리지 않는다. 그 사이 다른 리전에는 탐지기가 생길 수 있다.
+#     한 리전이라도 「묻지 못함」이면 전체가 UNREACHABLE 이다 — 다 보지 못한 채 리전 목록을 남기지 않는다.
 #   - 판정(judge_connection)은 AWS 를 직접 부르지 않는다. 네 단계를 호출부가 함수로 넘긴다 — 판정을 AWS 와
 #     따로 고정하기 위해서다(LocalStack 은 신뢰 정책 · ExternalId 를 검사하지 않아 실측으로 고정할 수 없다).
 #     실 AWS 어댑터(verify_connection)가 services/aws/client.py 테넌트 층(#533 A)의 세션을 그 자리에 넣는다.
@@ -81,11 +84,22 @@ ACCOUNT_MISMATCH_REASON: Final[str] = "CallerAccountMismatch"
 
 
 @dataclass(frozen=True)
+class RegionFailure:
+    """GuardDuty 를 켜지 못한 관제 리전 하나(계약 GuardDutyRegionFailure 와 같은 짝)."""
+
+    region: str
+    reason_code: str
+
+
+@dataclass(frozen=True)
 class VerificationOutcome:
-    """연결 확인 1회의 판정. OK 면 reason_code 는 None(계약 TenantVerification 과 같은 짝)."""
+    """연결 확인 1회의 판정. OK 면 reason_code 는 None(계약 TenantVerification 과 같은 짝).
+
+    guardduty_failures 는 GUARDDUTY_DISABLED 에만 있고(관제 리전 순서), reason_code 는 그 첫 항목의 사유다."""
 
     result: TenantVerificationResult
     reason_code: str | None = None
+    guardduty_failures: tuple[RegionFailure, ...] = ()
 
 
 OK: Final[VerificationOutcome] = VerificationOutcome(TenantVerificationResult.OK)
@@ -118,15 +132,17 @@ def judge_connection(
     assume: Callable[[], _Session],
     caller_account: Callable[[_Session], str],
     read: Callable[[_Session], object],
-    guardduty: Callable[[_Session], str | None],
+    regions: Sequence[str],
+    guardduty: Callable[[_Session, str], str | None],
 ) -> VerificationOutcome:
     """네 단계를 순서대로 부르고 처음 실패한 자리를 판정한다.
 
     assume: 플랫폼 자격으로 고객 역할을 AssumeRole 해 그 세션(또는 자격)을 돌려준다.
     caller_account: 그 세션으로 sts:GetCallerIdentity 를 불러 계정 ID 를 돌려준다.
     read: 그 세션으로 최소 읽기 1건(ec2:DescribeInstances · regions[0])을 부른다. 반환값은 보지 않는다.
-    guardduty: 그 세션으로 관제 리전마다 GuardDuty 를 켠다. 모두 켜져 있으면 None, 켜지 못한 사유가 있으면
-      그 코드를 돌려준다(AWS 오류가 아닌 판정 — 정지된 탐지기). AWS 오류는 던진다.
+    guardduty: 그 세션으로 리전 하나의 GuardDuty 를 켠다(regions 마다 한 번씩 부른다). 켜져 있으면 None,
+      켜지 못한 사유가 있으면 그 코드를 돌려준다(AWS 오류가 아닌 판정 — 정지된 탐지기). AWS 오류는 던진다.
+      거절은 그 리전의 사유로 남기고 다음 리전으로 간다. 「묻지 못함」은 거기서 멈춰 UNREACHABLE 이다.
 
     GetCallerIdentity 는 권한이 필요 없는 호출이라 그 단계의 AWS 오류는 거절이 아니라 「확인하지 못함」이다.
     """
@@ -147,21 +163,21 @@ def judge_connection(
     except (ClientError, BotoCoreError) as exc:
         return _failed_at(TenantVerificationResult.READ_DENIED, exc)
 
-    try:
-        reason = guardduty(session)
-    except (ClientError, BotoCoreError) as exc:
-        return _failed_at(TenantVerificationResult.GUARDDUTY_DISABLED, exc)
-    if reason is not None:
-        return VerificationOutcome(TenantVerificationResult.GUARDDUTY_DISABLED, reason)
-    return OK
-
-
-def _ensure_guardduty(session, regions: Sequence[str]) -> str | None:
+    failures: list[RegionFailure] = []
     for region in regions:
-        reason = ensure_detector(session, region)
+        try:
+            reason = guardduty(session, region)
+        except (ClientError, BotoCoreError) as exc:
+            if _unreachable(exc):
+                return VerificationOutcome(TenantVerificationResult.UNREACHABLE, _reason(exc))
+            reason = _reason(exc)
         if reason is not None:
-            return reason
-    return None
+            failures.append(RegionFailure(region, reason))
+    if failures:
+        return VerificationOutcome(
+            TenantVerificationResult.GUARDDUTY_DISABLED, failures[0].reason_code, tuple(failures)
+        )
+    return OK
 
 
 def verify_connection(
@@ -182,7 +198,8 @@ def verify_connection(
         read=lambda session: session_client(session, "ec2", region).describe_instances(
             MaxResults=5
         ),
-        guardduty=lambda session: _ensure_guardduty(session, regions),
+        regions=regions,
+        guardduty=ensure_detector,
     )
     if outcome.result is TenantVerificationResult.OK:
         forget_tenant(access.tenant_id)

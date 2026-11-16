@@ -48,6 +48,8 @@
 #   POST   /tenants/{id}/verify      → TenantVerifyResponse. VERIFIABLE_STATUSES 밖이면 TENANT_STATE_CONFLICT
 #   POST   /tenants/{id}/suspend     TenantSuspendRequest → TenantDetail. SUSPENDABLE_STATUSES 밖이면 TENANT_STATE_CONFLICT
 #   POST   /tenants/{id}/resume      → TenantVerifyResponse(연결 확인 성공 시 ACTIVE). RESUMABLE_STATUSES 밖이면 TENANT_STATE_CONFLICT
+#   verify · resume 의 연결 확인이 GuardDuty 를 켜지 못하면(GUARDDUTY_DISABLED) `guardduty_failures` 에 켜지 못한 관제
+#   리전 전부와 리전별 사유가 실린다(#588 D). 목록 · 상세의 `last_verification` 도 같은 값이다.
 #   **이 라우터에서 고객 계정에 들어가는 경로는 verify · resume 둘뿐이고, 정지(SUSPENDED) 중에는 resume
 #   하나다.** 라우터 밖의 예외는 하나 — 정지 전에 시작된 실행의 마무리(종료 판정 · 자동 원복)는 정지
 #   뒤에도 끝까지 돈다(ADR-0012 §3). 멈추면 고객 자산이 반쯤 바뀐 채 남는다.
@@ -178,6 +180,16 @@ class TenantVerificationResult(str, Enum):
     UNREACHABLE = "UNREACHABLE"
 
 
+class GuardDutyRegionFailure(BaseModel):
+    """GuardDuty 를 켜지 못한 관제 리전 하나와 그 사유(T-14 · #588 D)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    region: AwsRegion
+    #: `DetectorDisabled`(정지된 탐지기 — 플랫폼이 다시 켜지 않는다) 또는 AWS 오류 코드 · 예외 클래스명.
+    reason_code: str = Field(min_length=1, max_length=200)
+
+
 class TenantVerification(BaseModel):
     """마지막 연결 확인의 결과 — 관측값이다. 「지금 연결된다」로 읽지 않는다."""
 
@@ -187,6 +199,10 @@ class TenantVerification(BaseModel):
     verified_at: UtcDateTime
     #: 실패일 때 AWS 오류 코드 또는 예외 클래스명. OK 이면 null.
     reason_code: Optional[str] = Field(None, min_length=1, max_length=200)
+    #: GUARDDUTY_DISABLED 일 때 켜지 못한 관제 리전 전부와 리전별 사유(관제 리전 순서, #588 D). 확인은 켜지 못한
+    #: 리전에서 멈추지 않고 나머지 리전도 본다 — 여기 없는 관제 리전은 그 확인에서 켜져 있었다.
+    #: `reason_code` 는 첫 항목의 사유와 같다. 그 밖의 결과와, 이 칸이 생기기 전에 남은 GUARDDUTY_DISABLED 는 null.
+    guardduty_failures: Optional[list[GuardDutyRegionFailure]] = Field(None, min_length=1)
 
     @model_validator(mode="after")
     def _enforce_contract(self):
@@ -194,6 +210,12 @@ class TenantVerification(BaseModel):
             raise ValueError("OK 이면 reason_code 는 null 입니다")
         if self.result != TenantVerificationResult.OK and self.reason_code is None:
             raise ValueError("실패 결과에는 reason_code 가 필요합니다")
+        if self.guardduty_failures is not None:
+            if self.result != TenantVerificationResult.GUARDDUTY_DISABLED:
+                raise ValueError("guardduty_failures 는 GUARDDUTY_DISABLED 에만 있습니다")
+            require_unique("guardduty_failures", [f.region for f in self.guardduty_failures])
+            if self.guardduty_failures[0].reason_code != self.reason_code:
+                raise ValueError("reason_code 는 guardduty_failures 첫 항목의 사유와 같습니다")
         return self
 
 

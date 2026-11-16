@@ -24,7 +24,11 @@ from ai.agent import (
     FINOPS_PROMPT_VERSION,
     CandidateProposalOutput,
     EvidenceSummaryOutput,
+    FinOpsCandidateProposalOutput,
+    FinOpsEvidenceDecisionOutput,
+    FinOpsProposedCandidate,
     ProposedCandidate,
+    _capability_payload,
     finops_prompt_fingerprint,
     finops_prompt_material,
     finops_request_fingerprint,
@@ -32,6 +36,7 @@ from ai.agent import (
 )
 from ai.model_client import (
     AIModelAdapterError,
+    AIModelContractError,
     AIModelRejectedError,
     FailureKind,
     FakeAIModelClient,
@@ -100,11 +105,19 @@ EBS_CAPABILITY = {
     "allowed_target_asset_types": ["EBS"],
 }
 
-SUMMARY = EvidenceSummaryOutput(
-    observation="t3.xlarge 인스턴스의 3일 평균 CPU가 3%다.",
-    diagnosis="현재 스펙에 비해 사용률이 낮아 과대 스펙으로 보인다.",
-    rationale="3일 내내 낮은 사용률이라 다운사이징으로 비용을 줄일 수 있다.",
-)
+def summary(*decision) -> FinOpsEvidenceDecisionOutput:
+    return FinOpsEvidenceDecisionOutput(
+        observation="t3.xlarge 인스턴스의 3일 평균 CPU가 3%다.",
+        diagnosis="현재 스펙에 비해 사용률이 낮아 과대 스펙으로 보인다.",
+        rationale="3일 내내 낮은 사용률이라 다운사이징으로 비용을 줄일 수 있다.",
+        decision=list(decision),
+    )
+
+
+# 메뉴 순서가 action_id다 — 1은 다운사이징, 2는 EBS 삭제
+SUMMARY = summary(1)
+SUMMARY_EBS = summary(2)
+SUMMARY_BOTH = summary(1, 2)
 
 
 def make_input(**over) -> FinOpsGraphInput:
@@ -120,18 +133,21 @@ def make_input(**over) -> FinOpsGraphInput:
     return FinOpsGraphInput.model_validate(base)
 
 
-def rightsizing_proposal(**over) -> ProposedCandidate:
+def rightsizing_proposal(**over) -> FinOpsProposedCandidate:
     base = {
         "runbook_id": "RUNBOOK_EC2_RIGHTSIZING",
-        "target_arn": EC2_ARN,
         "evidence_ids": ["ev-0001"],
     }
     base.update(over)
-    return ProposedCandidate.model_validate(base)
+    return FinOpsProposedCandidate.model_validate(base)
 
 
-def proposals(*candidates) -> CandidateProposalOutput:
-    return CandidateProposalOutput(candidates=list(candidates))
+def ebs_proposal(**over) -> FinOpsProposedCandidate:
+    return rightsizing_proposal(runbook_id="RUNBOOK_EBS_DELETE_UNATTACHED", **over)
+
+
+def proposals(*candidates) -> FinOpsCandidateProposalOutput:
+    return FinOpsCandidateProposalOutput(candidates=list(candidates))
 
 
 def run(*outputs, graph_input=None):
@@ -168,24 +184,143 @@ def test_succeeded_carries_three_summary_lines_and_candidate():
 
 
 def test_other_runbook_uses_only_summary_and_proposal_calls():
-    proposal = rightsizing_proposal(
-        runbook_id="RUNBOOK_EBS_DELETE_UNATTACHED",
-        target_arn=VOLUME_ARN,
-    )
-    output, client = run(SUMMARY, proposals(proposal))
+    output, client = run(SUMMARY_EBS, proposals(ebs_proposal()))
     assert len(client.sent) == 2
 
     assert output.invocation_status is AgentInvocationStatus.SUCCEEDED
 
 
+def test_target_is_the_input_asset_even_for_a_related_asset_runbook():
+    # 대상은 모델이 아니라 코드가 정한다 — 관계 자산(EBS 볼륨)이 있어도 입력 자산의 ARN이다
+    output, _ = run(SUMMARY_EBS, proposals(ebs_proposal()))
 
-def test_no_proposal_when_model_returns_empty_candidates():
-    output, client = run(SUMMARY, proposals())
+    assert output.candidates[0].target_arn == EC2_ARN
+    assert VOLUME_ARN not in {candidate.target_arn for candidate in output.candidates}
 
-    assert output.invocation_status == AgentInvocationStatus.NO_PROPOSAL
-    assert len(output.summary_lines) == 3
-    assert output.candidates == []
+
+def test_two_actions_in_the_decision_yield_two_candidates():
+    output, client = run(SUMMARY_BOTH, proposals(ebs_proposal(), rightsizing_proposal()))
+
+    assert output.invocation_status is AgentInvocationStatus.SUCCEEDED
+    assert {c.runbook_id.value for c in output.candidates} == {
+        "RUNBOOK_EC2_RIGHTSIZING", "RUNBOOK_EBS_DELETE_UNATTACHED",
+    }
     assert len(client.sent) == 2
+
+
+def test_empty_candidates_are_a_decision_mismatch_not_no_proposal(caplog):
+    # decision이 비어 있지 않으므로 빈 후보는 업무 판단(NO_PROPOSAL)이 아니라 전사 불일치다
+    fields = _failure_fields(caplog, SUMMARY, proposals())
+
+    assert fields["reason_code"] == "DECISION_MISMATCH"
+    assert fields["failed_step"] == "validate_output_contract"
+    assert (fields["decision_count"], fields["candidate_count"]) == (1, 0)
+
+
+# ------------------------------------------------------------------------------
+# decision — 메뉴 대응 검사와 전사
+# ------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("decision", [[], [0], [3], [-1], [1, 1], [1, 3]])
+def test_invalid_decision_fails_without_a_proposal_call(caplog, decision):
+    # 메뉴(2건)와 맞지 않는 decision은 후보 호출 없이 FAILED다 — 다른 선택을 얻으려 다시 부르지 않는다
+    fields = _failure_fields(caplog, summary(*decision), proposals(rightsizing_proposal()))
+
+    assert fields["reason_code"] == "DECISION_MISMATCH"
+    assert fields["failed_step"] == "summarize_evidence"
+    assert (fields["decision_count"], fields["menu_size"]) == (len(decision), 2)
+    # 로그에는 모델이 낸 값이 아니라 건수만 남는다
+    assert "decision" not in fields
+
+
+def test_rejected_decision_makes_exactly_one_model_call():
+    client = FakeAIModelClient([summary(), proposals(rightsizing_proposal())])
+    output = run_finops_graph(make_input(), client=client)
+
+    assert output.invocation_status == AgentInvocationStatus.FAILED
+    assert output.failure_reason.value == "DECISION_MISMATCH"
+    assert output.summary_lines == [] and output.candidates == []
+    assert len(client.sent) == 1
+
+
+@pytest.mark.parametrize("decision", [["1"], [1.5], [True], "1"])
+def test_decision_type_violations_are_model_contract_errors_not_mismatches(decision):
+    # 정수가 아닌 값은 모델 경계의 구조화 출력 검증이 거절한다 — 그래프의 대응 검사까지 오지 않는다
+    with pytest.raises(ValidationError):
+        FinOpsEvidenceDecisionOutput(
+            observation="a", diagnosis="b", rationale="c", decision=decision
+        )
+
+
+def test_model_contract_failure_on_summary_is_not_reported_as_a_mismatch(caplog):
+    class _ContractClient:
+        def complete(self, request, response_model):
+            raise AIModelContractError("정수가 아닌 decision", phase="response")
+
+    fields = _failure_fields(caplog, client=_ContractClient())
+
+    assert fields["reason_code"] == "MODEL_CONTRACT_VIOLATION"
+    assert fields["failed_step"] == "summarize_evidence"
+
+
+@pytest.mark.parametrize(
+    "decided,candidates",
+    [
+        (SUMMARY_BOTH, [rightsizing_proposal()]),                       # 개수 부족
+        (SUMMARY, [rightsizing_proposal(), ebs_proposal()]),            # 개수 초과
+        (SUMMARY, [ebs_proposal()]),                                    # 같은 개수, 다른 Runbook
+        (SUMMARY_BOTH, [rightsizing_proposal(), rightsizing_proposal()]),  # 개수는 같고 중복
+        (SUMMARY, [rightsizing_proposal(runbook_id="RUNBOOK_NACL_ADD_DENY")]),  # 메뉴 밖
+        (SUMMARY, [rightsizing_proposal(runbook_id="RUNBOOK_EC2_REVERT_SIZE")]),  # 롤백 런북
+    ],
+    ids=["missing", "extra", "wrong_runbook", "duplicate", "off_menu", "rollback"],
+)
+def test_candidates_must_match_the_decision_before_conversion(caplog, decided, candidates):
+    fields = _failure_fields(caplog, decided, proposals(*candidates))
+
+    assert fields["reason_code"] == "DECISION_MISMATCH"
+    assert fields["failed_step"] == "validate_output_contract"
+
+
+def test_mismatch_is_checked_before_candidate_contract_errors(caplog):
+    # 파라미터가 빠진 후보라도 대응이 먼저 어긋나면 사유는 DECISION_MISMATCH다
+    broken = ebs_proposal(evidence_ids=[])
+    fields = _failure_fields(caplog, SUMMARY, proposals(broken))
+
+    assert fields["reason_code"] == "DECISION_MISMATCH"
+
+
+def test_accepted_decision_stays_fixed_through_proposal_client_retries():
+    # 후보 호출이 한 번 시간 초과로 재시도돼도 요약·decision은 다시 만들지 않는다
+    calls = []
+    results = [
+        _sdk_completion(summary(2)),
+        APITimeoutError(httpx2.Request("POST", "https://api.openai.com/v1/chat/completions")),
+        _sdk_completion(proposals(ebs_proposal())),
+    ]
+
+    def parse(**kwargs):
+        calls.append(kwargs)
+        outcome = results.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    client = OpenAIModelClient(
+        client=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(parse=parse))),
+        model="m",
+        policy=RetryPolicy(timeout_seconds=1.0, max_attempts=2, retry_backoff_seconds=0.0),
+    )
+    output = run_finops_graph(make_input(), client=client)
+
+    assert output.invocation_status == AgentInvocationStatus.SUCCEEDED
+    assert [call["response_format"] for call in calls] == [
+        FinOpsEvidenceDecisionOutput, FinOpsCandidateProposalOutput, FinOpsCandidateProposalOutput,
+    ]
+    # 두 후보 시도는 같은 요청이고 받아들인 decision [2]를 싣는다
+    assert calls[1]["messages"] == calls[2]["messages"]
+    assert json.loads(calls[1]["messages"][1]["content"])["decision"] == [2]
 
 
 def test_failed_when_summary_call_fails_and_proposal_is_skipped():
@@ -245,25 +380,11 @@ def test_failed_when_rollback_runbook_is_proposed():
     assert output.invocation_status == AgentInvocationStatus.FAILED
 
 
-def test_failed_when_target_arn_is_outside_asset_and_relationships():
-    proposal = rightsizing_proposal(target_arn=OTHER_ARN)
-    output, _ = run(SUMMARY, proposals(proposal))
-
-    assert output.invocation_status == AgentInvocationStatus.FAILED
-
-
-def test_relationship_arn_is_an_allowed_target():
-    proposal = ProposedCandidate.model_validate(
-        {
-            "runbook_id": "RUNBOOK_EBS_DELETE_UNATTACHED",
-            "target_arn": VOLUME_ARN,
-            "evidence_ids": ["ev-0001"],
-        }
-    )
-    output, _ = run(SUMMARY, proposals(proposal))
-
-    assert output.invocation_status == AgentInvocationStatus.SUCCEEDED
-    assert output.candidates[0].target_arn == VOLUME_ARN
+def test_model_has_no_slot_for_the_target_arn():
+    # 대상은 코드가 정한다 — 모델이 대상을 실어 보내면 구조화 출력 검증이 거절한다
+    with pytest.raises(ValidationError):
+        rightsizing_proposal(target_arn=OTHER_ARN)
+    assert "target_arn" not in FinOpsProposedCandidate.model_fields
 
 
 def test_failed_when_required_parameter_is_missing():
@@ -312,14 +433,9 @@ def test_failed_when_the_server_cannot_compute_the_target(current):
 def test_failed_when_one_candidate_of_two_violates_contract():
     # 성한 후보만 남기고 넘기지 않는다 — NO_PROPOSAL·SUCCEEDED 둘 다 업무 판단이라
     # 형식 실패를 거기에 접으면 서버가 하지 않은 판단이 남는다
-    good = ProposedCandidate.model_validate(
-        {
-            "runbook_id": "RUNBOOK_EBS_DELETE_UNATTACHED",
-            "target_arn": VOLUME_ARN,
-            "evidence_ids": ["ev-0001"],
-        }
+    output, _ = run(
+        SUMMARY_BOTH, proposals(ebs_proposal(), rightsizing_proposal(evidence_ids=[]))
     )
-    output, _ = run(SUMMARY, proposals(good, rightsizing_proposal(target_arn=OTHER_ARN)))
 
     assert output.invocation_status == AgentInvocationStatus.FAILED
     assert output.candidates == []
@@ -385,7 +501,7 @@ def test_outbound_payload_is_masked():
         rule_evaluation=rule,
         evidences=[dict(EVIDENCE, content={"evaluation": rule})],
     )
-    _, client = run(SUMMARY, proposals(), graph_input=graph_input)
+    _, client = run(SUMMARY, proposals(rightsizing_proposal()), graph_input=graph_input)
 
     for sent in client.sent:
         assert "AKIAIOSFODNN7EXAMPLE" not in sent["user_json"]
@@ -396,16 +512,28 @@ def test_proposal_payload_carries_the_menu_and_summary():
     _, client = run(SUMMARY, proposals(rightsizing_proposal()))
     proposal_payload = client.sent[1]["user_payload"]
 
-    assert proposal_payload["allowed_target_arns"] == [EC2_ARN, VOLUME_ARN]
-    assert [c["runbook_id"] for c in proposal_payload["capabilities"]] == [
-        "RUNBOOK_EC2_RIGHTSIZING",
-        "RUNBOOK_EBS_DELETE_UNATTACHED",
+    # 대상은 코드가 정하므로 허용 대상 목록을 싣지 않는다
+    assert "allowed_target_arns" not in proposal_payload
+    assert [(c["action_id"], c["runbook_id"]) for c in proposal_payload["capabilities"]] == [
+        (1, "RUNBOOK_EC2_RIGHTSIZING"),
+        (2, "RUNBOOK_EBS_DELETE_UNATTACHED"),
     ]
     assert proposal_payload["summary_lines"] == [
         SUMMARY.observation,
         SUMMARY.diagnosis,
         SUMMARY.rationale,
     ]
+    assert proposal_payload["decision"] == [1]
+
+
+def test_proposal_capabilities_are_the_shared_payload_plus_action_id():
+    # action_id만 더하고 나머지는 SecOps와 공유하는 capability 명세 그대로다
+    graph_input = make_input()
+    _, client = run(SUMMARY, proposals(rightsizing_proposal()), graph_input=graph_input)
+    sent = client.sent[1]["user_payload"]["capabilities"]
+
+    for index, (item, capability) in enumerate(zip(sent, graph_input.capabilities), start=1):
+        assert item == {"action_id": index, **_capability_payload(capability)}
 
 
 def test_proposal_payload_carries_required_parameters_per_runbook():
@@ -456,19 +584,37 @@ def test_rule_evaluation_is_sent_when_no_evidence_carries_it():
     )
 
 
-def test_summary_payload_carries_action_purposes_but_not_runbook_ids():
+@pytest.mark.parametrize("carried_by_evidence", [True, False])
+def test_summary_payload_carries_action_purposes_but_not_runbook_ids(carried_by_evidence):
     # rationale이 카드의 조치를 설명하려면 메뉴에 무엇이 있는지 알아야 한다(#243). 다만
-    # 요약 노드는 조치를 고르지 않으므로 Runbook 이름·파라미터 명세·허용 대상은 싣지 않는다
+    # 요약 노드는 action_id로 고르므로 Runbook 이름·파라미터 명세·허용 대상은 싣지 않는다
     # — 이름을 주면 문장이 이름을 되읽고, 메뉴 전체를 열거한다(v1 2차 실측)
-    _, client = run(SUMMARY, proposals())
+    graph_input = make_input(evidences=[EVIDENCE] if carried_by_evidence else [])
+    _, client = run(SUMMARY, proposals(), graph_input=graph_input)
     summary_payload = client.sent[0]["user_payload"]
 
-    assert summary_payload["available_actions"] == ["과대 스펙 EC2 다운사이징", "미연결 EBS 볼륨 삭제"]
+    # 메뉴는 안정된 1부터의 action_id와 목적 문구뿐이다
+    assert summary_payload["available_actions"] == [
+        {"action_id": 1, "purpose": "과대 스펙 EC2 다운사이징"},
+        {"action_id": 2, "purpose": "미연결 EBS 볼륨 삭제"},
+    ]
     assert "capabilities" not in summary_payload
     assert "RUNBOOK_EC2_RIGHTSIZING" not in client.sent[0]["user_json"]
     assert "allowed_target_arns" not in summary_payload
     assert summary_payload["incident_id"] == "inc-20260831-001"
-    assert [e["evidence_id"] for e in summary_payload["evidences"]] == ["ev-0001"]
+    assert [e["evidence_id"] for e in summary_payload["evidences"]] == (
+        ["ev-0001"] if carried_by_evidence else []
+    )
+    assert "skip_reason_code" not in client.sent[0]["user_json"]
+    assert summary_payload["asset"]["verdict"] == "COST_CANDIDATE"
+    evaluation = (
+        summary_payload["evidences"][0]["content"]["evaluation"]
+        if carried_by_evidence
+        else summary_payload["rule_evaluation"]
+    )
+    assert evaluation["verdict"] == "COST_CANDIDATE"
+    assert "skip_reason_code" in client.sent[1]["user_json"]
+    assert graph_input.asset_context.skip_reason_code is None
 
 
 def test_payload_is_json_serializable_through_the_boundary():
@@ -514,23 +660,80 @@ def test_prompt_material_covers_every_instruction_surface():
         for text in texts:
             assert text in material
     # 출력 스키마 — 필드 이름이 모델에 나가므로 이름을 바꾸면 해시가 움직여야 한다
-    for field in ("observation", "diagnosis", "rationale", "min_size"):
+    for field in ("observation", "diagnosis", "rationale", "decision", "min_size"):
         assert f'"{field}"' in material
-    # 실행 목표는 서버 몫이다. 단가 추정은 추천 요청과 분리한다.
-    assert "target_instance_type" not in ProposedCandidate.model_fields
-    assert "ai_savings_estimate" not in CandidateProposalOutput.model_json_schema()["properties"]
+    # 실행 목표와 대상은 서버 몫이다. 단가 추정은 추천 요청과 분리한다.
+    assert "target_instance_type" not in FinOpsProposedCandidate.model_fields
+    assert '"target_arn"' not in material
+    assert "ai_savings_estimate" not in FinOpsCandidateProposalOutput.model_json_schema()["properties"]
 
 
-def test_summary_output_fields_are_the_three_roles():
+def test_finops_prompt_material_points_at_the_finops_schemas_not_the_legacy_ones():
+    material = finops_prompt_material()
+
+    assert json.dumps(FinOpsEvidenceDecisionOutput.model_json_schema(), ensure_ascii=False,
+                      sort_keys=True) in material
+    assert json.dumps(FinOpsCandidateProposalOutput.model_json_schema(), ensure_ascii=False,
+                      sort_keys=True) in material
+    assert json.dumps(ProposedCandidate.model_json_schema(), ensure_ascii=False,
+                      sort_keys=True) not in material
+
+
+def test_summary_output_fields_are_the_three_roles_then_the_decision():
+    # 근거 3줄이 decision보다 먼저 온다 — 스키마 속성 순서가 곧 생성 순서다
+    assert list(FinOpsEvidenceDecisionOutput.model_fields) == [
+        "observation", "diagnosis", "rationale", "decision",
+    ]
+    assert list(FinOpsEvidenceDecisionOutput.model_json_schema()["properties"]) == [
+        "observation", "diagnosis", "rationale", "decision",
+    ]
+    assert FinOpsEvidenceDecisionOutput.model_json_schema()["properties"]["decision"]["items"] == {
+        "type": "integer"
+    }
+
+
+def test_finops_proposal_fields_are_the_legacy_ones_without_the_target():
+    legacy = list(ProposedCandidate.model_fields)
+    assert list(FinOpsProposedCandidate.model_fields) == [f for f in legacy if f != "target_arn"]
+    assert list(FinOpsCandidateProposalOutput.model_fields) == ["candidates"]
+
+
+def test_legacy_models_stay_the_secops_request_schemas():
+    # SecOps 정상·대비책이 쓰는 모델은 FinOps 변경으로 움직이지 않는다
     assert list(EvidenceSummaryOutput.model_fields) == ["observation", "diagnosis", "rationale"]
+    assert "target_arn" in ProposedCandidate.model_fields
+    assert "decision" not in EvidenceSummaryOutput.model_json_schema()["properties"]
+    assert list(CandidateProposalOutput.model_fields) == ["candidates"]
+
+
+def test_summary_prompt_carries_the_multi_action_decision_criteria():
+    # 다중 조치 기준은 요약 프롬프트의 몫이다 — 후보 프롬프트는 전사만 한다
+    assert "decision" in _FINOPS_SUMMARY_SYSTEM_PROMPT
+    assert "action_id" in _FINOPS_SUMMARY_SYSTEM_PROMPT
+    assert "둘 이상" in _FINOPS_SUMMARY_SYSTEM_PROMPT
+    assert "둘 이상" not in _FINOPS_PROPOSAL_SYSTEM_PROMPT
+    assert "action_id" in _FINOPS_PROPOSAL_SYSTEM_PROMPT
+
+
+def test_finops_prompt_version_is_v3():
+    assert FINOPS_PROMPT_VERSION == "v3"
 
 
 def test_summary_request_fingerprint_detects_schema_order(monkeypatch):
     before = finops_request_fingerprint()
-    schema = CandidateProposalOutput.model_json_schema()
-    properties = schema["$defs"]["ProposedCandidate"]["properties"]
+    schema = FinOpsCandidateProposalOutput.model_json_schema()
+    properties = schema["$defs"]["FinOpsProposedCandidate"]["properties"]
     properties["rule_number"] = properties.pop("rule_number")
-    monkeypatch.setattr(CandidateProposalOutput, "model_json_schema", lambda: schema)
+    monkeypatch.setattr(FinOpsCandidateProposalOutput, "model_json_schema", lambda: schema)
+    assert finops_request_fingerprint() != before
+
+
+def test_summary_request_fingerprint_detects_decision_order(monkeypatch):
+    before = finops_request_fingerprint()
+    schema = FinOpsEvidenceDecisionOutput.model_json_schema()
+    properties = schema["properties"]
+    properties["observation"] = properties.pop("observation")
+    monkeypatch.setattr(FinOpsEvidenceDecisionOutput, "model_json_schema", lambda: schema)
     assert finops_request_fingerprint() != before
 
 
@@ -579,9 +782,6 @@ def test_parameter_constraint_text_describes_a_live_contract_rule():
 # 사유 코드로 "주입 시도로 거절된 제안"(메뉴 밖·대상 밖)과 형식 실패·모델 거절을 가른다.
 # 모델이 쓴 문자열 중 남기는 것은 대상 밖으로 거절한 target_arn뿐이다(가드레일 ③ 거절 로그와
 # 같이 512자로 자른다). 요약 등 그 밖의 값은 남지 않아야 한다.
-
-# 모델이 지어낸 대상 — 주입 시도가 지목한 대상이라 거절 로그에 남아야 한다
-INJECTED_ARN = f"arn:aws:ec2:{REGION}:{ACCOUNT}:instance/i-ignore-previous-instructions"
 
 
 class _RejectingClient:
@@ -647,7 +847,8 @@ def test_failure_log_names_the_model_call_that_failed(caplog, outputs, step, rea
     assert fields["failed_step"] == step
 
 
-def test_failure_log_separates_runbook_outside_menu(caplog):
+def test_failure_log_names_runbook_outside_menu_as_decision_mismatch(caplog):
+    # 메뉴 밖 Runbook은 decision이 가리키는 집합과 달라 대응 검사에서 걸린다 — 후보 변환까지 가지 않는다
     proposal = rightsizing_proposal(
         runbook_id="RUNBOOK_NACL_ADD_DENY",
         rule_number=100,
@@ -656,20 +857,9 @@ def test_failure_log_separates_runbook_outside_menu(caplog):
     )
     fields = _failure_fields(caplog, SUMMARY, proposals(proposal))
 
-    assert fields["reason_code"] == "RUNBOOK_NOT_OFFERED"
+    assert fields["reason_code"] == "DECISION_MISMATCH"
     assert fields["failed_step"] == "validate_output_contract"
-    assert fields["runbook_id"] == "RUNBOOK_NACL_ADD_DENY"
-
-
-@pytest.mark.parametrize("target_arn", [INJECTED_ARN, INJECTED_ARN + "x" * 1000])
-def test_failure_log_keeps_the_target_outside_asset_cut_to_512(caplog, target_arn):
-    fields = _failure_fields(
-        caplog, SUMMARY, proposals(rightsizing_proposal(target_arn=target_arn))
-    )
-
-    assert fields["reason_code"] == "TARGET_NOT_ALLOWED"
-    assert fields["runbook_id"] == "RUNBOOK_EC2_RIGHTSIZING"
-    assert fields["target_arn"] == target_arn[:512]
+    assert "runbook_id" not in fields
     assert SUMMARY.observation not in json.dumps(fields, ensure_ascii=False, default=str)
 
 
@@ -700,25 +890,18 @@ def test_failure_log_names_server_parameter_gap(caplog):
     assert fields["reason_code"] == "SERVER_PARAMETER_UNAVAILABLE"
 
 
-def test_failure_log_names_output_contract_violation(caplog):
-    # 후보 하나하나는 계약을 지키지만 출력 전체가 같은 runbook_id 중복으로 거절된다
-    ebs = ProposedCandidate.model_validate(
-        {
-            "runbook_id": "RUNBOOK_EBS_DELETE_UNATTACHED",
-            "target_arn": VOLUME_ARN,
-            "evidence_ids": ["ev-0001"],
-        }
-    )
-    fields = _failure_fields(caplog, SUMMARY, proposals(ebs, ebs))
+def test_failure_log_names_duplicate_runbooks_as_decision_mismatch(caplog):
+    # 같은 runbook_id 중복은 출력 계약까지 가기 전에 decision 대응(개수·집합)에서 걸린다
+    fields = _failure_fields(caplog, SUMMARY_EBS, proposals(ebs_proposal(), ebs_proposal()))
 
-    assert fields["reason_code"] == "OUTPUT_CONTRACT_VIOLATION"
+    assert fields["reason_code"] == "DECISION_MISMATCH"
     assert fields["failed_step"] == "validate_output_contract"
 
 
 def test_no_failure_log_when_the_analysis_succeeds(caplog):
     with caplog.at_level(logging.WARNING, logger="vigilantis.ai.agent"):
         run(SUMMARY, proposals(rightsizing_proposal()))
-        run(SUMMARY, proposals())
+        run(SUMMARY_BOTH, proposals(rightsizing_proposal(), ebs_proposal()))
 
     assert not [r for r in caplog.records if r.getMessage() == "agent_analysis_failed"]
 

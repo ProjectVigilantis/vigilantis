@@ -17,7 +17,7 @@ import { ErrorState } from '@/components/error-state';
 import { orError, orNull, serverApi } from '@/lib/api/server';
 import { businessOpen } from '@/lib/home-path';
 import { scopeApiUsage } from '@/lib/platform-status';
-import { canViewPlatformStatus, isCentralAdmin, isPlatform, isUnassignedManager } from '@/lib/roles';
+import { canManageUsers, canViewPlatformStatus, isCentralAdmin, isPlatform, isUnassignedManager } from '@/lib/roles';
 import { unstable_rethrow } from 'next/navigation';
 
 export default async function DashboardPage() {
@@ -42,7 +42,9 @@ export default async function DashboardPage() {
   // 플랫폼 상태는 중앙 관리 권한 또는 조치 권한이 있는 플랫폼 계정이 본다(lib/roles.ts `canViewPlatformStatus`).
   // 실패(404 = API 없음 포함)해도 대시보드는 뜬다.
   const platformPromise = canViewPlatformStatus(user) ? orError(getPlatformStatus()) : null;
-  const usersPromise = orNull(getUsers());
+  // 고객사 직원 목록은 중앙 관리계정만 읽는다(`canManageUsers`). 고객 담당자는 부르지 않는다(undefined = 볼 수 없음) —
+  // 부르면 자동 갱신 · 실시간 재조회마다 403이 활동 로그에 쌓인다(#589).
+  const usersPromise = canManageUsers(user) ? orNull(getUsers()) : undefined;
   const incidentsPromise = orNull(getIncidents());
   let tenants;
   try {
@@ -63,7 +65,7 @@ export default async function DashboardPage() {
   return (
     <AdminDashboardView
       tenants={tenants.tenants}
-      users={users === null ? null : users.items}
+      users={users == null ? users : users.items}
       incidents={incidents === null ? null : incidents.items}
       renderedAt={renderedAt}
       platform={platform === undefined ? undefined : { status: platform.value, error: platform.error }}

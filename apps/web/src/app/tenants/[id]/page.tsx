@@ -10,6 +10,7 @@ import { MonitoringView } from '@/components/monitoring/monitoring-view';
 import { TenantDetailView } from '@/components/tenants/tenant-detail-view';
 import { orNull, serverApi } from '@/lib/api/server';
 import { parseAxis } from '@/lib/home-path';
+import { canManageUsers } from '@/lib/roles';
 
 export default async function TenantPage({ params, searchParams }: PageProps<'/tenants/[id]'>) {
   const { id } = await params;
@@ -19,9 +20,12 @@ export default async function TenantPage({ params, searchParams }: PageProps<'/t
   const renderedAt = new Date().toISOString();
   // 세션 쿠키만 실어 부르고, 401이면 로그인으로 redirect한다(lib/api/server.ts).
   const api = await serverApi();
-  const { getTenant, getUsers } = api;
+  const { getTenant, getUsers, getMe } = api;
   // 사용자 패널의 원천. 목록 API에 고객 필터가 없어 전량을 받아 이 고객 것만 고른다. 실패해도 상세는 뜬다(null = 조회 실패).
-  const usersPromise = orNull(getUsers());
+  // 중앙 관리계정만 부른다(`canManageUsers`). 고객 담당자는 부르지 않는다(undefined = 볼 수 없음) — 부르면 상세를 그릴
+  // 때마다 403이 활동 로그에 쌓인다(#589). 계정 확인이 실패하면 조회 실패로 둔다.
+  const me = await orNull(getMe());
+  const usersPromise = me === null ? null : canManageUsers(me) ? orNull(getUsers()) : undefined;
   let tenant;
   try {
     tenant = await getTenant(id);
@@ -50,7 +54,7 @@ export default async function TenantPage({ params, searchParams }: PageProps<'/t
       tenant={tenant}
       renderedAt={renderedAt}
       monitoring={monitoring}
-      users={users === null ? null : users.items.filter((u) => u.tenant_id === tenant.tenant_id)}
+      users={users == null ? users : users.items.filter((u) => u.tenant_id === tenant.tenant_id)}
     />
   );
 }

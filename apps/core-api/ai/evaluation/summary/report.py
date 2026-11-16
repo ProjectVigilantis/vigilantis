@@ -63,6 +63,9 @@ class CaseRun:
     # 되읽기·근거 인용 진단(#243). 요약이 없는 회차(FAILED)는 None이다
     readback: Optional[ReadbackResult] = None
     observation_cites_input: Optional[bool] = None
+    # 이 회차의 논리 호출별 기록(UsageRecordingClient.run_records_json). 물리 시도 수는
+    # trace가 있을 때만 들어 있다
+    call_records: tuple[dict, ...] = ()
 
 
 @dataclass(frozen=True)

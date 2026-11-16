@@ -38,7 +38,8 @@ test('403은 "관리할 수 있는 계정만" 문구다 — 조치 화면의 조
   // 플랫폼 계정 전체가 아니라 등급 · 배정을 말한다 — 배정 없는 담당자가 "플랫폼 운영자라 되는데"로 읽지 않게.
   assert.doesNotMatch(USER_ADMIN_FORBIDDEN, /플랫폼 운영자/);
   assert.match(USER_ADMIN_FORBIDDEN, /중앙 관리계정/);
-  assert.match(USER_ADMIN_FORBIDDEN, /담당 고객사가 배정된 관리자 직원계정/);
+  // 관리자 직원계정은 배정이 있어도 계정 관리 대상이 아니다(서버 #572 9번) — 문구가 그렇다고 말하지 않게.
+  assert.doesNotMatch(USER_ADMIN_FORBIDDEN, /관리자 직원계정/);
   assert.match(USER_ADMIN_FORBIDDEN, /고객사 중앙계정/);
 });
 

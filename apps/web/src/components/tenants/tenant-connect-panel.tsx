@@ -7,8 +7,10 @@
 import { CopyButton } from '@/components/copy-button';
 import { Row } from '@/components/detail-row';
 import { Panel } from '@/components/panel';
+import { GuardDutyGuidance } from '@/components/tenants/guardduty-guidance';
 import { VerificationSummary } from '@/components/tenants/tenant-badges';
 import { Button } from '@/components/ui/button';
+import { GUARDDUTY_FEE_NOTICE } from '@/lib/guardduty';
 import { ONBOARDING_STACK_NAME, onboardingMessage, roleNameOf } from '@/lib/tenants';
 import type { TenantDetail } from '@/types/api';
 
@@ -64,7 +66,12 @@ export function TenantConnectPanel({
             <Row label="스택"><span className="font-mono text-[13px] break-all">{ONBOARDING_STACK_NAME}</span></Row>
             <Row label="리전"><span className="font-mono text-[13px]">{tenant.regions[0]}</span></Row>
             <Row label="IAM 역할"><span className="font-mono text-[13px] break-all">{roleNameOf(tenant.access_role_arn)}</span></Row>
+            {/* 스택이 아니라 연결 확인이 만든다 — 관제 리전에 탐지기가 없을 때만(T-14 B안 · #588). */}
+            <Row label="GuardDuty 탐지기"><span className="font-mono text-[13px] break-all">{tenant.regions.join(', ')}</span></Row>
           </div>
+          <p className="text-muted-foreground max-w-2xl text-xs">
+            GuardDuty 탐지기는 연결을 확인할 때 관제 리전에 없으면 만들어집니다. {GUARDDUTY_FEE_NOTICE}
+          </p>
         </section>
 
         <section aria-labelledby="connect-verify" className="flex flex-col gap-3 pt-5">
@@ -80,6 +87,7 @@ export function TenantConnectPanel({
               <Row label="실패 코드"><code className="font-mono text-[13px] break-all">{verification.reason_code}</code></Row>
             </div>
           ) : null}
+          <GuardDutyGuidance tenant={tenant} />
         </section>
       </div>
     </Panel>

@@ -205,13 +205,22 @@ function StaffCountHistogram({ dist }: { dist: StaffCountDistribution }) {
   );
 }
 
-function StaffChart({ summary, dist }: { summary: StaffSummary | null; dist: StaffCountDistribution | null }) {
+function StaffChart({
+  summary,
+  dist,
+}: {
+  /** `undefined` = 이 계정은 볼 수 없다(고객 담당자) · `null` = 조회 실패. */
+  summary: StaffSummary | null | undefined;
+  dist: StaffCountDistribution | null;
+}) {
   return (
     <ChartCard
       title="고객사 계정"
-      aside={summary === null ? null : <span className="text-sm font-bold tabular-nums">{summary.total}명</span>}
+      aside={summary == null ? null : <span className="text-sm font-bold tabular-nums">{summary.total}명</span>}
     >
-      {summary === null ? (
+      {summary === undefined ? (
+        <p className="text-muted-foreground text-sm">중앙 관리계정만 볼 수 있습니다.</p>
+      ) : summary === null ? (
         <p className="text-muted-foreground text-sm">계정 목록을 불러오지 못했습니다.</p>
       ) : summary.total === 0 ? (
         <p className="text-muted-foreground text-sm">등록된 고객사 계정이 없습니다.</p>
@@ -245,8 +254,8 @@ export function AdminDashboardView({
   platform,
 }: {
   tenants: TenantListItem[];
-  /** 고객사 직원 목록. `null`은 조회 실패 — 고객사 직원 자리가 그 사실을 적는다. */
-  users: UserListItem[] | null;
+  /** 고객사 직원 목록. `null`은 조회 실패, `undefined`는 볼 수 없는 계정(고객 담당자 — 부르지 않았다). 고객사 직원 자리가 그 사실을 적는다. */
+  users: UserListItem[] | null | undefined;
   /** 인시던트 목록(전 고객). `null`은 조회 실패 — 수동 처리에서 진행 불가 인시던트만 빠지고 그 사실을 적는다. */
   incidents: IncidentListItem[] | null;
   /** 서버가 그린 시각(ISO). 경과 시간의 기준이다. */
@@ -274,7 +283,7 @@ export function AdminDashboardView({
   const apiOver = apiOverCall?.tenants?.length ?? 0;
   // 한 고객사가 연결 문제와 API 이상 호출에 함께 걸리면 두 번 센다(줄마다 따로 세는 막대와 합이 같게).
   const needCheck = check.FAILED + check.UNREACHABLE + check.UNPAID + apiOver;
-  const staff = users === null ? null : staffSummary(tenants, users);
+  const staff = users == null ? users : staffSummary(tenants, users);
 
   return (
     // 화면 폭이 아니라 본문이 받은 폭으로 접는다(사이드바 폭 제외) — `@container/dash` (2026-11-03)
@@ -313,9 +322,15 @@ export function AdminDashboardView({
         />
         <StatTile
           label="고객사 계정"
-          value={staff === null ? null : staff.total}
-          note={staff === null ? '계정 조회 실패' : `미로그인 ${staff.neverLoggedIn} · 비활성 ${staff.disabled}`}
-          href={STAFF_PATH}
+          value={staff == null ? null : staff.total}
+          note={
+            staff === undefined
+              ? '중앙 관리계정만 볼 수 있습니다'
+              : staff === null
+                ? '계정 조회 실패'
+                : `미로그인 ${staff.neverLoggedIn} · 비활성 ${staff.disabled}`
+          }
+          href={staff === undefined ? undefined : STAFF_PATH}
         />
         <StatTile
           label="수동 처리 필요"
@@ -328,7 +343,7 @@ export function AdminDashboardView({
 
       <div className="grid gap-4 @3xl/dash:grid-cols-2 @6xl/dash:grid-cols-4">
         <TenantOverviewChart summary={summary} tenants={tenants} nowMs={nowMs} needCheck={needCheck} apiOverCall={apiOverCall} />
-        <StaffChart summary={staff} dist={users === null ? null : staffCountDistribution(tenants, users)} />
+        <StaffChart summary={staff} dist={users == null ? null : staffCountDistribution(tenants, users)} />
         <IssuesChart
           counts={issueCountsByTenant(issues)}
           connection={connectionIssues}

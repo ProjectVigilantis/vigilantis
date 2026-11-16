@@ -1,7 +1,7 @@
 """동결한 모의 근거를 서비스 입력 조립 함수에 대조한다.
 
 읽기 과정에서 모델·DB·AWS를 호출하지 않는다. 합성 자산 전제와 명시적으로 주입한
-모의 위협 9건(둘은 합성 선행 격리 실행 기록 포함)은 실제 환경의 탐지 정책을 정의하지 않는다. 원본 드리프트 검사는
+모의 위협 10건(둘은 합성 선행 격리 실행 기록 포함, C10은 출발지만 루프백으로 바꾼 C01 파생)은 실제 환경의 탐지 정책을 정의하지 않는다. 원본 드리프트 검사는
 CI 입력 로딩과 분리하며 계측 CLI가 명시적으로 호출한다.
 """
 
@@ -28,6 +28,7 @@ from ai.capabilities import secops_action_targets
 from ai.evaluation.common.paths import REPO_ROOT
 
 ROOT = Path(__file__).resolve().parent
+FIXED_CASE_IDS = [f"C{i:02}" for i in range(1, 11)]
 
 
 def fixture_nacl_rule_numbers(graph_input: SecOpsGraphInput) -> dict[str, int]:
@@ -77,6 +78,13 @@ def _source_path(relative_path: str) -> Path:
     return path
 
 
+def load_source(source: str, relative_path: str) -> Any:
+    path = _source_path(relative_path)
+    if source == "log_records":
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return read_json(path)
+
+
 def check_sources(cases: list[EvalCase]) -> None:
     """계측 시점에만 현재 원본과 동결 당시 출처 지문을 대조한다."""
     checked = set()
@@ -87,9 +95,7 @@ def check_sources(cases: list[EvalCase]) -> None:
             identity = (relative_path, expected_hash)
             if identity in checked:
                 continue
-            path = _source_path(relative_path)
-            value = ([json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
-                      if line.strip()] if source == "log_records" else read_json(path))
+            value = load_source(source, relative_path)
             if digest(value) != expected_hash:
                 raise ValueError(f"Frozen source changed: {relative_path}")
             checked.add(identity)
@@ -173,8 +179,8 @@ def validate_case(record: dict[str, Any]) -> EvalCase:
 def load_cases(path: Path = ROOT / "inputs.json") -> list[EvalCase]:
     records = read_json(path)["cases"]
     ids = [record["case_id"] for record in records]
-    if ids != [f"C{i:02}" for i in range(1, 10)]:
-        raise ValueError("Fixed primary set must contain C01 through C09 exactly once in order")
+    if ids != FIXED_CASE_IDS:
+        raise ValueError("Fixed primary set must contain C01 through C10 exactly once in order")
     cases = [validate_case(record) for record in records]
     identities = [case.graph_input.incident_id for case in cases]
     if len(identities) != len(set(identities)):
