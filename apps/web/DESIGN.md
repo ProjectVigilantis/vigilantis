@@ -110,7 +110,12 @@ typography:
   nav:
     fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif"
     fontSize: "0.8125rem"
-    fontWeight: 700
+    fontWeight: 500
+    lineHeight: "1rem"
+  nav-active:
+    fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif"
+    fontSize: "0.875rem"
+    fontWeight: 800
     lineHeight: "1rem"
   label-sm:
     fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif"
@@ -170,25 +175,24 @@ components:
     padding: "{spacing.lg}"
   nav-item:
     backgroundColor: "transparent"
-    textColor: "rgba(255, 255, 255, 0.78)"
+    textColor: "rgba(255, 255, 255, 0.70)"
     typography: "{typography.nav}"
     rounded: "{rounded.md}"
     height: "40px"
     padding: "0 12px"
   nav-item-active:
-    backgroundColor: "{colors.primary}"
-    textColor: "{colors.on-primary}"
-    typography: "{typography.nav}"
+    backgroundColor: "transparent"
+    textColor: "#ffffff"
+    typography: "{typography.nav-active}"
     rounded: "{rounded.md}"
     height: "40px"
     padding: "0 12px"
   live-indicator:
-    backgroundColor: "rgba(255, 255, 255, 0.08)"
+    backgroundColor: "transparent"
     textColor: "rgba(255, 255, 255, 0.88)"
     typography: "{typography.body-sm}"
-    rounded: "{rounded.pill}"
     height: "32px"
-    padding: "0 12px"
+    padding: "0"
   button-primary:
     backgroundColor: "{colors.primary}"
     textColor: "{colors.on-primary}"
@@ -276,7 +280,7 @@ Vigilantis는 고객 AWS 계정을 하루 24시간 지켜보는 관제 화면이
 | 가족 | 쓰는 곳 | 쓰지 않는 곳 |
 | --- | --- | --- |
 | 바탕(차가운 회색과 남색 글자) | 페이지, 카드, 표, 글자, 선 | 상태 표시 |
-| 파랑(`primary`, `data`) | 버튼, 선택된 메뉴와 필터, 링크, 포커스, 그래프의 선과 막대 | 상태 표시 |
+| 파랑(`primary`, `data`) | 버튼, 선택된 필터, 링크, 포커스, 그래프의 선과 막대 | 상태 표시 |
 | 상태 색(`status-*`) | 상태 배지, 상태 점, 히트맵 칸, 경고 배너 | 버튼, 메뉴, 장식 |
 
 주황과 빨강을 강조색으로 쓰지 않는 이유는 관제 화면에서 그 색이 이미 경고를 뜻하기 때문이다. 버튼과 메뉴가 주황이면 진짜 경고가 화면에 묻힌다. 상태 색이 상태 표시에만 남아 있어야, 화면에 빨강이 보일 때 그것이 실제 문제라는 뜻이 된다.
@@ -363,7 +367,7 @@ Vigilantis는 고객 AWS 계정을 하루 24시간 지켜보는 관제 화면이
 
 상단바(`shell-header`)에는 왼쪽에 제품 이름과 "플랫폼 운영" 같은 영역 이름을, 오른쪽에 실시간 연결 표시와 계정 메뉴를 둔다. 실시간 표시(`live-indicator`)는 초록 점과 함께 마지막 갱신 시각을 초 단위까지 보여 준다. 운영자가 화면의 숫자가 얼마나 새것인지 늘 알 수 있어야 한다.
 
-사이드바(`shell-sidebar`)의 선택된 메뉴만 파랑으로 칠한다. 사이드바 맨 아래에는 문의하기(고객사 계정만)와 설정을 두고, 주간·야간 전환은 설정 안에 있다.
+사이드바(`shell-sidebar`)의 선택된 메뉴는 바탕을 칠하지 않는다. 글자를 한 단계 키우고 굵게 해서 흰색으로 보이고, 나머지 메뉴는 보통 굵기의 흐린 흰색으로 둔다(2026-11-16 PM 결정, 이전에는 파랑으로 칠했다). 사이드바 맨 아래에는 문의하기(고객사 계정만)와 설정을 두고, 주간·야간 전환은 설정 안에 있다.
 
 ### 버튼
 
