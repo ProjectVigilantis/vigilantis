@@ -482,6 +482,9 @@ SDK 호출 뒤 잠금 안의 재확인(행위자 · 대상 신원 · 대상 테�
 - **행위자**: 로그인 · MFA · 재설정 시도는 로그인 전이라 `ANONYMOUS`이고, 시도한 계정은 대상(`target`)이다. 로그아웃은 그 세션의 사용자가, TOTP 분실 복구는 복구를 실행한 관리자(운영자 CLI는 `SYSTEM`)가 행위자다.
 - **대상 계정은 안정 신원 `(issuer, sub)`로만 잇는다.** 비밀번호 단계를 지난 흐름은 `LoginFlow.subject(token)`(읽기 전용 — 흐름을 꺼내지 않는다)으로, 재설정은 `AdminGetUser`가 돌려준 `sub`로 찾는다. 이메일로 앱 계정을 고르지 않으므로 **비밀번호 단계의 실패(틀린 비밀번호 · 없는 계정)는 대상 없이 남는다.**
 - **싣지 않는 것**: 입력한 이메일 · 비밀번호 · 코드 · 토큰. 남는 것은 사유 코드(`AUTH_*` · `ACCOUNT_*`)와 요청 문맥(접속지 · 브라우저 정보 · 요청 식별자)이다.
+- **접속지(`source_ip`)를 읽는 곳은 설정 하나가 정한다**(`CLIENT_ADDRESS_SOURCE` · `request_origin.py` · #589 D). 기본 `socket`은 소켓의 상대 주소이고, 배포가 켜는 `cloudfront-viewer-address`는 CloudFront가 오리진 요청에 싣는 `CloudFront-Viewer-Address`(「주소:포트」)의 주소**만** 읽는다. `X-Forwarded-For`는 읽지 않는다. 헤더가 없거나 둘 이상이거나 읽히지 않으면 접속지는 비고, 소켓(ALB) 주소로 물러서지 않는다. 이 값을 믿는 근거는 앱 밖에 있다 — ALB가 CloudFront를 거친 요청만 받는다(`scripts/provision_platform_aws.py`).
+  - 화면의 서버 렌더링이 대신 부른 조회(`apps/web/src/lib/api/server.ts`)는 웹 서버가 CloudFront로 다시 들어오므로, 그 요청에서 남는 거절 행(403 · 범위 밖 404)의 접속지는 **플랫폼의 나가는 주소**다. 브라우저가 직접 부르는 요청(로그인 · 상태 변경)은 실제 접속지다.
+  - 전환 전에 남은 행의 접속지는 프록시가 본 주소 그대로다(이 테이블은 고쳐 쓰지 않는다).
 - **남기지 않는 것**: 중간 단계의 성공, 정책에 어긋난 새 비밀번호(`AUTH_PASSWORD_POLICY`), 어긋난 단계(`AUTH_STEP_CONFLICT`), 대상 계정을 모르는 만료(`AUTH_FLOW_EXPIRED`), 재설정 요청(메일 발송 — 존재를 구분하지 않는다).
 - **결과**: `AUTH_PROVIDER_UNAVAILABLE` · `AUTH_EMAIL_DELIVERY_FAILED` · `INTERNAL_ERROR`는 실패(`FAILED`), 그 밖의 거절은 `DENIED`다.
 - **같은 트랜잭션은 로그인 성공과 TOTP 분실 복구의 완료다**: 로그인 성공 행을 쓰지 못하면 세션 발급도 되돌아간다 — 세션이 생기지 않으므로 안전한 쪽으로 실패한다. 복구 완료는 아래 §TOTP 분실 복구의 기록에 적는다.

@@ -783,6 +783,11 @@ def api_container(image: str, *, region: str, cors_origin: str, dispatch_enabled
     env = {
         "AWS_REGION": region,
         "CORS_ALLOW_ORIGINS": cors_origin,
+        # 활동 로그의 접속지는 CloudFront 가 싣는 CloudFront-Viewer-Address 에서만 읽는다(#589 D ·
+        # apps/core-api/request_origin.py). 소켓 주소는 ALB 주소라 쓰지 않는다. 전제는 이 파일이 만든다 —
+        # ALB 는 CloudFront 를 거친 요청만 받는다(prefix list · 비밀 헤더). 그 헤더가 오리진까지 오는지는
+        # 오리진 요청 정책(CF_ALL_VIEWER_EXCEPT_HOST)에 달렸다 — 오지 않으면 접속지 칸이 빈다
+        "CLIENT_ADDRESS_SOURCE": "cloudfront-viewer-address",
         # 고객 계정 호출은 테넌트 문맥(고객 역할) 안에서만 나간다. 문맥 없는 호출은 플랫폼 계정으로 새지 않고
         # 예외가 된다(services/aws/client.py · ADR-0012 §2). 관제 범위는 고객 계정 자체라 COLLECT_VPC_IDS를 두지 않는다
         "TENANT_CONTEXT_REQUIRED": "true",

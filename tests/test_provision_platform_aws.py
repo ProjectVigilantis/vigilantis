@@ -820,6 +820,20 @@ def test_api_gets_login_and_onboarding_settings():
     assert env["CORS_ALLOW_ORIGINS"] == "https://d.cloudfront.net"
 
 
+def test_api_reads_the_client_address_only_from_the_header_cloudfront_adds():
+    """활동 로그의 접속지(#589 D) — 소켓 주소는 ALB 주소라 쓰지 않는다. 설정값은 앱이 받는 값이어야 하고,
+    그 헤더(CloudFront-Viewer-Address)는 지금 쓰는 오리진 요청 정책이 오리진으로 넘긴다(AWS 관리형
+    AllViewerExceptHostHeader 는 viewer location 헤더를 함께 싣는다). 정책을 바꾸면 접속지 칸이 빈다."""
+    from typing import get_args
+
+    env = {e["name"]: e["value"] for e in _api()["environment"]}
+    assert env["CLIENT_ADDRESS_SOURCE"] == "cloudfront-viewer-address"
+    accepted = get_args(platform.app_config.Settings.model_fields["CLIENT_ADDRESS_SOURCE"].annotation)
+    assert env["CLIENT_ADDRESS_SOURCE"] in accepted
+    behavior = platform.distribution_config("origin.example", "secret", "arn:acl", "ref")["DefaultCacheBehavior"]
+    assert behavior["OriginRequestPolicyId"] == "b689b0a8-53d0-40ab-baf2-68738e2966ac"
+
+
 # 가드 ------------------------------------------------------------------------
 def test_refuses_to_run_against_localstack(monkeypatch):
     monkeypatch.setattr(platform, "endpoint_url", lambda: "http://localhost:4566")

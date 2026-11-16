@@ -69,6 +69,12 @@ class Settings(BaseSettings):
     # .env 로 켠다. 배포는 태스크 환경변수를 명시 목록으로 넘기므로(scripts/provision_platform_aws.py)
     # 이 값이 따라가지 않는다
     API_DOCS_ENABLED: bool = False
+    # 플랫폼 활동 로그의 접속지(source_ip)를 어디서 읽을지(#589 D · request_origin.py). 둘 중 하나만 읽는다.
+    #   socket — 소켓의 상대 주소. 앱에 바로 붙는 로컬 · 테스트의 기본값이다.
+    #   cloudfront-viewer-address — CloudFront 가 싣는 CloudFront-Viewer-Address 의 주소. **ALB 가 CloudFront 를
+    #   거친 요청만 받는 배포에서만** 켠다(scripts/provision_platform_aws.py) — 앱에 바로 닿을 수 있는 곳에서
+    #   켜면 클라이언트가 이 헤더로 접속지를 꾸밀 수 있다. 헤더가 없으면 접속지는 비고, 소켓 주소로 물러서지 않는다
+    CLIENT_ADDRESS_SOURCE: Literal["socket", "cloudfront-viewer-address"] = "socket"
     # 접수된 조치 실행 디스패치·회수 스캔 주기(초) — dispatcher.py 잡 1개가 쓴다.
     # 부분 인덱스(ix_action_executions_non_terminal) 조회 빈도다.
     # 실행·DB 대기로 밀릴 수 있어 승인부터 AWS 호출까지의 지연 상한은 아니다.
