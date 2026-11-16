@@ -211,7 +211,9 @@ test('stored candidate judgement presentation', async (t) => {
         bfcacheId: 'stored-candidate',
       };
       const html = renderToStaticMarkup(createElement(AppRouterContext.Provider, { value: router },
-        createElement(IncidentDetail, { incident, assets: [] })));
+        createElement(IncidentDetail, {
+          incident, audit: { kind: 'ready', items: [], truncated: false }, assets: [],
+        })));
       assert.match(html, /인시던트 분석 요약[\s\S]*후보별 서버 규칙 판단과는 별개[\s\S]*INCIDENT_MODEL_SUMMARY/);
       const proposals = html.slice(html.indexOf('제안 조치'));
       assert.match(proposals, /조건부 추천[\s\S]*stored-finding/);
