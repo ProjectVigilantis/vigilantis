@@ -61,7 +61,7 @@
 #      지우지 않는다.
 #   ⑥ --allow-cidr는 IPv4 CIDR이고 /24보다 넓으면 거부한다 — 로그인 없는 MVP에서 허용 IP가 출입문이다.
 #   ⑦ WAF 속도 제한(#484 · Post-MVP T-3) — IP당 RATE_LIMIT_PER_WINDOW 건 / RATE_WINDOW_SECONDS 초를
-#      허용 규칙(우선순위 2)보다 **앞**(우선순위 1)에서 센다. 허용이 먼저 맞으면 WAF가 거기서 평가를 끝내기 때문이다.
+#      허용 규칙(우선순위 3)보다 **앞**(우선순위 2)에서 센다. 허용이 먼저 맞으면 WAF가 거기서 평가를 끝내기 때문이다.
 #      NAT 공인 IP는 세지 않는다 — 웹의 서버 측 API 호출이 전부 NAT IP(AZ마다 하나)로 CloudFront를 지나므로
 #      세면 모든 사용자의 화면 요청이 그 IP에 쌓여 플랫폼이 스스로를 막는다(ADR-0010 §4).
 #      동작은 Count(세기만)로 시작한다 — 정상 사용량을 재지 않았고, 캐시가 꺼져 있어 정적 파일까지
@@ -74,6 +74,11 @@
 #      IP로 세지고, NAT 제외도 같다. 경로는 URL 디코딩 뒤 맞춘다 — 앱은 %인코딩을 풀어 라우팅하므로 풀지
 #      않으면 /api/v1/auth/%6Cogin 으로 비켜 간다. 이 규칙도 Count로 시작해 같은 방식으로 관측 뒤 Block으로 바꾼다.
 #      앱 쪽 한도(AUTH_RATE_LIMITED · AUTH_CODE_FAILURE_LIMIT)는 그대로 남는다 — WAF는 그 앞의 IP 단위 거름이다.
+#      로그인 없이 받는 도입 신청 접수(POST /api/v1/signup-requests)에도 한도(SIGNUP_RATE_LIMIT_PER_WINDOW)를
+#      따로 건다(#522 D) — 앱은 이 경로에 Origin · Idempotency-Key 만 요구하고 빈도는 세지 않는다. 접수 하나만
+#      센다: 경로는 URL 디코딩 뒤 **완전 일치**, 메서드는 POST. 같은 접두 아래의 목록(GET) · 상태 변경(PUT) ·
+#      승인(POST …/{id}/approve)은 중앙 관리자의 일이라 섞지 않는다. 신청서는 브라우저가 직접 보내므로 사용자
+#      IP로 세지고, NAT 제외도 같다. 이 규칙도 Count로 시작해 같은 방식으로 관측 뒤 Block으로 바꾼다.
 #   ⑧ 고객 계정에 닿는 권한은 vigilantis-access* 이름의 역할 전환뿐이다. 계정은 열려 있으므로 문은 고객 역할의
 #      신뢰 정책(이 태스크 역할 + 테넌트별 ExternalId)이 지킨다. 배포는 TENANT_CONTEXT_REQUIRED=true라 테넌트
 #      문맥 없는 AWS 호출이 플랫폼 계정으로 새지 않는다.
@@ -213,6 +218,14 @@ RATE_ACTION = "Count"  # 관측 뒤 "Block"
 LOGIN_PATH_PREFIXES = (b"/api/v1/auth/login", b"/api/v1/auth/password-reset")
 LOGIN_RATE_LIMIT_PER_WINDOW = 100
 LOGIN_RATE_ACTION = "Count"  # 관측 뒤 "Block"
+# 공개 신청 접수 속도 제한(#522 D) — 잠정값. 사람이 5분에 신청서를 20번 낼 일은 없고, 한 회사(같은 공인 IP)에서
+# 여럿이 내도 닿지 않는다. WAF 가 받는 하한은 10이다. Count 관측으로 다시 정한다
+# 접수 하나만 — routers/signup_requests.py 의 create_signup_request. 같은 접두의 관리 라우트(GET · PUT · …/approve)는 뺀다
+# bytes — get_web_acl 이 SearchString 을 bytes 로 돌려준다(멱등 비교)
+SIGNUP_PATH = b"/api/v1/signup-requests"
+SIGNUP_METHOD = b"POST"
+SIGNUP_RATE_LIMIT_PER_WINDOW = 20
+SIGNUP_RATE_ACTION = "Count"  # 관측 뒤 "Block"
 CF_COMMENT = PREFIX  # CloudFront 배포는 태그로 찾기 어렵다 — comment로 식별한다
 CF_HOSTED_ZONE_ID = "Z2FDTNDATAQYW2"  # CloudFront 별칭 레코드의 고정 호스팅 영역 ID(AWS 문서 · 전 계정 공통)
 # AWS 관리형 정책 ID(전 계정 공통)
@@ -345,11 +358,12 @@ def listener_rules(tg_api: str, tg_web: str, origin_value: str) -> list[dict]:
 
 
 def waf_rules(ipset_arn: str, nat_ipset_arn: str) -> list[dict]:
-    """로그인 경로 속도 제한 → IP당 속도 제한(둘 다 NAT 제외) → 허용 IP만 통과 → 기본 차단(안전 가드 ⑦).
+    """로그인 경로 → 공개 신청 접수 → IP당 속도 제한(셋 다 NAT 제외) → 허용 IP만 통과 → 기본 차단(안전 가드 ⑦).
 
     로그인이 없는 MVP라 허용 IP가 출입문이다(#438 ④ 전까지). 속도 규칙은 허용 규칙보다 앞이어야
-    평가된다 — 허용이 맞으면 WAF가 거기서 끝낸다. 로그인 규칙이 맨 앞인 것은 Block 으로 바뀌었을 때
-    더 낮은 한도가 먼저 끊게 하려는 것이다(Count 는 평가를 끝내지 않아 순서와 무관하게 둘 다 센다).
+    평가된다 — 허용이 맞으면 WAF가 거기서 끝낸다. 경로 규칙 둘이 전 경로 규칙보다 앞인 것은 Block 으로
+    바뀌었을 때 더 낮은 한도가 먼저 끊게 하려는 것이다(Count 는 평가를 끝내지 않아 순서와 무관하게 다 센다).
+    로그인과 신청 접수는 경로가 겹치지 않아 둘 사이의 순서에는 뜻이 없다.
     """
     not_nat = {"NotStatement": {"Statement": {"IPSetReferenceStatement": {"ARN": nat_ipset_arn}}}}
     return [{
@@ -375,8 +389,34 @@ def waf_rules(ipset_arn: str, nat_ipset_arn: str) -> list[dict]:
         "VisibilityConfig": {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True,
                              "MetricName": f"{PREFIX}-rate-login"},
     }, {
-        "Name": "rate-per-ip",
+        "Name": "rate-signup-per-ip",
         "Priority": 1,
+        "Statement": {"RateBasedStatement": {
+            "Limit": SIGNUP_RATE_LIMIT_PER_WINDOW,
+            "EvaluationWindowSec": RATE_WINDOW_SECONDS,
+            "AggregateKeyType": "IP",
+            "ScopeDownStatement": {"AndStatement": {"Statements": [
+                {"ByteMatchStatement": {
+                    "SearchString": SIGNUP_PATH,
+                    "FieldToMatch": {"UriPath": {}},
+                    "TextTransformations": [{"Priority": 0, "Type": "URL_DECODE"}],
+                    "PositionalConstraint": "EXACTLY",
+                }},
+                {"ByteMatchStatement": {
+                    "SearchString": SIGNUP_METHOD,
+                    "FieldToMatch": {"Method": {}},
+                    "TextTransformations": [{"Priority": 0, "Type": "NONE"}],
+                    "PositionalConstraint": "EXACTLY",
+                }},
+                not_nat,
+            ]}},
+        }},
+        "Action": {SIGNUP_RATE_ACTION: {}},
+        "VisibilityConfig": {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True,
+                             "MetricName": f"{PREFIX}-rate-signup"},
+    }, {
+        "Name": "rate-per-ip",
+        "Priority": 2,
         "Statement": {"RateBasedStatement": {
             "Limit": RATE_LIMIT_PER_WINDOW,
             "EvaluationWindowSec": RATE_WINDOW_SECONDS,
@@ -388,7 +428,7 @@ def waf_rules(ipset_arn: str, nat_ipset_arn: str) -> list[dict]:
                              "MetricName": f"{PREFIX}-rate"},
     }, {
         "Name": "allow-listed-ips",
-        "Priority": 2,
+        "Priority": 3,
         "Statement": {"IPSetReferenceStatement": {"ARN": ipset_arn}},
         "Action": {"Allow": {}},
         "VisibilityConfig": {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True,
@@ -1749,8 +1789,8 @@ def _ensure_waf(waf, cidrs: list[str], nat_cidrs: list[str]) -> str:
             waf.update_web_acl(Name=WAF_ACL, Scope="CLOUDFRONT", Id=acl["Id"], DefaultAction=_ACL_DEFAULT_ACTION,
                                Rules=rules, VisibilityConfig=_ACL_VISIBILITY, LockToken=cur["LockToken"])
             print(f"[platform] WAF 웹 ACL {WAF_ACL} 규칙 갱신 — 로그인 {LOGIN_RATE_LIMIT_PER_WINDOW}건"
-                  f"({LOGIN_RATE_ACTION}) · 전 경로 {RATE_LIMIT_PER_WINDOW}건/{RATE_WINDOW_SECONDS}초"
-                  f"({RATE_ACTION}) → 허용 IP")
+                  f"({LOGIN_RATE_ACTION}) · 신청 접수 {SIGNUP_RATE_LIMIT_PER_WINDOW}건({SIGNUP_RATE_ACTION}) · "
+                  f"전 경로 {RATE_LIMIT_PER_WINDOW}건/{RATE_WINDOW_SECONDS}초({RATE_ACTION}) → 허용 IP")
         return acl["ARN"]
     # 바로 위에서 만든 IP 집합을 WAF 가 아직 찾지 못하면 WAFUnavailableEntityException 이다 — 새 계정의
     # 첫 up 에서 실제로 났고 재실행으로 풀렸다(#522). 기다렸다 다시 만든다. 다른 오류는 그대로 올린다
@@ -1761,7 +1801,7 @@ def _ensure_waf(waf, cidrs: list[str], nat_cidrs: list[str]) -> str:
         f"WAF 웹 ACL {WAF_ACL} 생성(IP 집합 전파)", ("WAFUnavailableEntityException",), timeout=300,
     )
     print(f"[platform] WAF 웹 ACL {WAF_ACL} 생성(기본 차단 · 속도 제한 로그인 {LOGIN_RATE_ACTION} · "
-          f"전 경로 {RATE_ACTION})")
+          f"신청 접수 {SIGNUP_RATE_ACTION} · 전 경로 {RATE_ACTION})")
     return acl_arn
 
 
