@@ -24,6 +24,7 @@ import { SubscriptionFacts } from '@/components/subscriptions/subscription-facts
 import { TenantStatusBadge, VerificationSummary } from '@/components/tenants/tenant-badges';
 import { GuardDutyGuidance } from '@/components/tenants/guardduty-guidance';
 import { TenantConnectPanel } from '@/components/tenants/tenant-connect-panel';
+import { TenantGroupField } from '@/components/tenants/tenant-group-field';
 import { TenantUsersPanel } from '@/components/tenants/tenant-users-panel';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
@@ -272,6 +273,9 @@ export function TenantDetailView({
                 : <span className="font-mono text-xs break-all">{tenant.collect_vpc_ids.join(', ')}</span>}
             </Row>
             <Row label="등록">{formatKst(tenant.created_at)}</Row>
+            <Row label="담당 그룹">
+              <TenantGroupField key={tenant.group_id ?? ''} tenantId={tenant.tenant_id} groupId={tenant.group_id} />
+            </Row>
           </div>
         </Panel>
 
