@@ -135,6 +135,16 @@ test('담당 그룹 없는 고객사 필터는 세션 전달을 유지하고 기
   assert.ok(sent.every((request) => request.headers.Cookie === '__Host-vg_session=test-session'));
 });
 
+test('플랫폼 상태는 서버 계약 경로 /platform/overview를 부르고 hours는 줄 때만 붙인다', async (t) => {
+  const sent = stubFetch(t, () => new Response(JSON.stringify({}), { status: 200 }));
+  const api = createReadApi({ headers: { Cookie: '__Host-vg_session=test-session' } });
+  await api.getPlatformOverview();
+  await api.getPlatformOverview({ hours: 48 });
+  assert.match(sent[0].url, /\/api\/v1\/platform\/overview$/);
+  assert.match(sent[1].url, /\/api\/v1\/platform\/overview\?hours=48$/);
+  assert.ok(sent.every((request) => request.method === 'GET' || request.method === undefined));
+});
+
 test('사용자 관리 조치의 경로 · 메서드 · 본문', async (t) => {
   const sent = stubFetch(t, noContent);
   await resendInvite('u/1');

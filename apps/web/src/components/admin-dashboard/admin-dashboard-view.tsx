@@ -7,7 +7,8 @@
 // 넘어간 상세 화면에서 본다(수동 처리 문제 `ISSUES_PATH` · 고객사 목록 · 고객사별 직원 `STAFF_PATH`). 그래프 아래 링크는 숫자 카드와
 // 겹쳐 뺐다(2026-11-02) — 목록으로 가는 길은 숫자 카드다.
 //   숫자 카드 4개(고객사 · 고객사 직원 · 확인 필요 · 수동 처리 필요) → 그래프 4장(고객사 상태 · 고객사 직원 · 확인 필요 · 수동 처리 문제)
-//   확인 필요(2026-11-03) = 연결 실패 · 확인 불가 · 미납 + API 이상 호출(플랫폼 상태를 받는 계정만, 기준 초과 고객사).
+//   확인 필요(2026-11-03) = 연결 실패 · 확인 불가 · 미납 + 담당 그룹 없음(중앙 관리계정만, #572 8번)
+//   + API 이상 호출(플랫폼 상태를 받는 계정만, 기준 초과 고객사).
 // 고객이 수백 곳으로 늘어도 높이가 고정된다: 그래프는 분류별 건수와 상위 5곳만 그린다.
 //
 // 훅이 없어 `'use client'`를 붙이지 않는다.
@@ -20,7 +21,7 @@ import { PlatformStatusSection } from '@/components/admin-dashboard/platform-sta
 import { AutoRefresh } from '@/components/auto-refresh';
 import { ChartCard } from '@/components/chart-card';
 import { StatTile } from '@/components/stat-tile';
-import { NeedCheckRows, needCheckCounts, type ApiOverCall } from '@/components/tenants/tenant-charts';
+import { NeedCheckRows, needCheckCounts, unassignedTenantCount, type ApiOverCall } from '@/components/tenants/tenant-charts';
 import {
   issueCountsByTenant,
   issueRows,
@@ -34,8 +35,8 @@ import {
 import { ISSUES_PATH, STAFF_PATH, TENANTS_PATH } from '@/lib/home-path';
 import { summarizeTenants, TENANT_STATUS_LABELS } from '@/lib/tenants';
 import { cn } from '@/lib/utils';
-import { overCallTenants, type PlatformStatusResponse } from '@/lib/platform-status';
-import type { IncidentListItem, TenantListItem, UserListItem } from '@/types/api';
+import { hasOverCallThreshold, overCallTenants } from '@/lib/platform-status';
+import type { IncidentListItem, PlatformOverviewResponse, TenantListItem, UserListItem } from '@/types/api';
 
 /** 그래프에 이름으로 올리는 고객사 수. 나머지는 상세 화면에서 본다. */
 const TOP_N = 5;
@@ -54,7 +55,7 @@ function IssuesChart({
   const total = connection + stuck;
   return (
     <ChartCard
-      title="수동 처리가 필요한 문제"
+      title="수동 처리가 필요한 문제"
       aside={<span className="text-sm font-bold tabular-nums">{total}건</span>}
     >
       {total === 0 ? (
@@ -126,12 +127,14 @@ function TenantOverviewChart({
   nowMs,
   needCheck,
   apiOverCall,
+  showUnassigned,
 }: {
   summary: ReturnType<typeof summarizeTenants>;
   tenants: readonly TenantListItem[];
   nowMs: number;
   needCheck: number;
   apiOverCall?: ApiOverCall;
+  showUnassigned: boolean;
 }) {
   return (
     <ChartCard title="고객사 · 확인 필요" className="@3xl/dash:col-span-2">
@@ -146,7 +149,7 @@ function TenantOverviewChart({
           <p className="flex items-baseline justify-between text-sm font-semibold">
             확인 필요 <span className="tabular-nums">{needCheck}곳</span>
           </p>
-          <NeedCheckRows tenants={tenants} nowMs={nowMs} apiOverCall={apiOverCall} />
+          <NeedCheckRows tenants={tenants} nowMs={nowMs} apiOverCall={apiOverCall} showUnassigned={showUnassigned} />
         </div>
       </div>
     </ChartCard>
@@ -215,7 +218,7 @@ function StaffChart({
 }) {
   return (
     <ChartCard
-      title="고객사 계정"
+      title="고객사 계정"
       aside={summary == null ? null : <span className="text-sm font-bold tabular-nums">{summary.total}명</span>}
     >
       {summary === undefined ? (
@@ -252,6 +255,7 @@ export function AdminDashboardView({
   incidents,
   renderedAt,
   platform,
+  showUnassigned = false,
 }: {
   tenants: TenantListItem[];
   /** 고객사 직원 목록. `null`은 조회 실패, `undefined`는 볼 수 없는 계정(고객 담당자 — 부르지 않았다). 고객사 직원 자리가 그 사실을 적는다. */
@@ -260,8 +264,10 @@ export function AdminDashboardView({
   incidents: IncidentListItem[] | null;
   /** 서버가 그린 시각(ISO). 경과 시간의 기준이다. */
   renderedAt: string;
-  /** 플랫폼 상태. 중앙 관리 · 조치 권한이 있는 플랫폼 계정에게만 넘어온다(없으면 그 구역을 그리지 않는다). */
-  platform?: { status: PlatformStatusResponse | null; error: unknown };
+  /** 플랫폼 상태. 중앙 관리계정에게만 넘어온다(`undefined`면 그 구역을 그리지 않는다). `null`은 조회 실패. */
+  platform?: PlatformOverviewResponse | null;
+  /** 확인 필요에 담당 그룹 없음을 센다(중앙 관리계정). */
+  showUnassigned?: boolean;
 }) {
   const nowMs = Date.parse(renderedAt);
   const summary = summarizeTenants(tenants);
@@ -271,18 +277,19 @@ export function AdminDashboardView({
   const stuckIssues = rows.length - connectionIssues;
   const check = needCheckCounts(tenants, nowMs);
   // API 이상 호출은 플랫폼 상태를 받는 계정에만 있다. 조회 실패면 이름 목록이 null이라 줄을 빼고 그 사실을 적는다.
-  const usage = platform?.status?.api_usage;
+  const usage = platform?.api_usage;
   const apiOverCall: ApiOverCall | undefined =
     platform === undefined
       ? undefined
       : {
           tenants: usage ? overCallTenants(usage).map((t) => t.tenant_name) : null,
           windowHours: usage?.window_hours ?? 24,
-          limit: usage?.threshold_per_hour ?? null,
+          judged: usage ? hasOverCallThreshold(usage.items) : false,
         };
   const apiOver = apiOverCall?.tenants?.length ?? 0;
-  // 한 고객사가 연결 문제와 API 이상 호출에 함께 걸리면 두 번 센다(줄마다 따로 세는 막대와 합이 같게).
-  const needCheck = check.FAILED + check.UNREACHABLE + check.UNPAID + apiOver;
+  const unassigned = showUnassigned ? unassignedTenantCount(tenants) : 0;
+  // 한 고객사가 여러 줄(연결 문제 · 담당 그룹 없음 · API 이상 호출)에 함께 걸리면 줄마다 센다(막대 합과 같게).
+  const needCheck = check.FAILED + check.UNREACHABLE + check.UNPAID + unassigned + apiOver;
   const staff = users == null ? users : staffSummary(tenants, users);
 
   return (
@@ -290,12 +297,12 @@ export function AdminDashboardView({
     <div className="@container/dash flex flex-col gap-6">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div className="flex flex-col gap-1">
-          <h1 className="text-2xl font-bold tracking-tight">대시보드</h1>
+          <h1 className="text-2xl font-bold tracking-tight">대시보드</h1>
         </div>
         <AutoRefresh renderedAt={renderedAt} />
       </div>
 
-      {platform === undefined ? null : <PlatformStatusSection status={platform.status} error={platform.error} nowMs={nowMs} />}
+      {platform === undefined ? null : <PlatformStatusSection status={platform} />}
 
       {platform === undefined ? null : <h2 className="-mb-3 text-lg font-semibold">고객사 운영</h2>}
 
@@ -314,7 +321,10 @@ export function AdminDashboardView({
               value: needCheck,
               toneClass: check.FAILED + apiOver > 0 ? 'text-badge-critical-fg' : needCheck > 0 ? 'text-badge-warning-fg' : undefined,
               note: `실패 ${check.FAILED} · 확인 불가 ${check.UNREACHABLE} · 미납 ${check.UNPAID}${
-                apiOverCall === undefined ? '' : ` · API 이상 ${apiOver}`
+                showUnassigned ? ` · 그룹 없음 ${unassigned}` : ''
+              }${
+                // 기준이 없으면 0이 아니라 미판정으로 적는다. 0은 "판정했더니 없음"으로 읽힌다(PR #644 리뷰).
+                apiOverCall === undefined ? '' : apiOverCall.judged ? ` · API 이상 ${apiOver}` : ' · API 이상 미판정'
               }`,
               href: TENANTS_PATH,
             },
@@ -342,7 +352,7 @@ export function AdminDashboardView({
       </div>
 
       <div className="grid gap-4 @3xl/dash:grid-cols-2 @6xl/dash:grid-cols-4">
-        <TenantOverviewChart summary={summary} tenants={tenants} nowMs={nowMs} needCheck={needCheck} apiOverCall={apiOverCall} />
+        <TenantOverviewChart summary={summary} tenants={tenants} nowMs={nowMs} needCheck={needCheck} apiOverCall={apiOverCall} showUnassigned={showUnassigned} />
         <StaffChart summary={staff} dist={users == null ? null : staffCountDistribution(tenants, users)} />
         <IssuesChart
           counts={issueCountsByTenant(issues)}

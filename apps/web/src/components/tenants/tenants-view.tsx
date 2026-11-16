@@ -16,14 +16,19 @@ import { TenantStatusBadge, VerificationSummary } from '@/components/tenants/ten
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { INPUT_CLASS } from '@/components/form-classes';
-import { canCreateTenant, isUnassignedManager } from '@/lib/roles';
+import { canCreateTenant, isCentralAdmin, isUnassignedManager } from '@/lib/roles';
 import { matchesTenantQuery, summarizeTenants, TENANT_STATUS_LABELS } from '@/lib/tenants';
 import { cn } from '@/lib/utils';
 import type { TenantListItem, TenantStatus } from '@/types/api';
 
-type Filter = 'ALL' | TenantStatus;
+// `UNASSIGNED`(담당 그룹 없음, #572 8번)는 상태가 아니라 그룹 배정 축이다. `group_id`가 null인 고객사이며
+// GET /tenants?unassigned_only=true와 같은 집합이다. 중앙 관리계정만 이 칸을 본다. 관리자 직원계정은 미배정 고객사를 받지 않는다.
+type Filter = 'ALL' | TenantStatus | 'UNASSIGNED';
 
-const FILTERS: readonly Filter[] = ['ALL', 'ACTIVE', 'PENDING_CONNECTION', 'SUSPENDED', 'UNPAID'];
+const STATUS_FILTERS: readonly Filter[] = ['ALL', 'ACTIVE', 'PENDING_CONNECTION', 'SUSPENDED', 'UNPAID'];
+
+const matchesFilter = (t: TenantListItem, filter: Filter) =>
+  filter === 'ALL' || (filter === 'UNASSIGNED' ? t.group_id === null : t.status === filter);
 
 export function TenantsView({ tenants }: { tenants: TenantListItem[] }) {
   const { session } = useSession();
@@ -36,8 +41,11 @@ export function TenantsView({ tenants }: { tenants: TenantListItem[] }) {
   const [creating, setCreating] = useState(false);
   const [filter, setFilter] = useState<Filter>('ALL');
   const [query, setQuery] = useState('');
+  const showUnassigned = isCentralAdmin(me);
+  const filters = showUnassigned ? [...STATUS_FILTERS, 'UNASSIGNED' as const] : STATUS_FILTERS;
   const summary = useMemo(() => summarizeTenants(tenants), [tenants]);
-  const rows = tenants.filter((t) => (filter === 'ALL' || t.status === filter) && matchesTenantQuery(t, query));
+  const unassignedCount = useMemo(() => tenants.filter((t) => t.group_id === null).length, [tenants]);
+  const rows = tenants.filter((t) => matchesFilter(t, filter) && matchesTenantQuery(t, query));
 
   return (
     <div className="flex flex-col gap-6">
@@ -88,9 +96,9 @@ export function TenantsView({ tenants }: { tenants: TenantListItem[] }) {
                 ) : null}
               </div>
               <div role="group" aria-label="상태 필터" className="flex flex-wrap gap-1.5">
-                {FILTERS.map((f) => {
-                  const count = f === 'ALL' ? summary.total : summary.byStatus[f];
-                  const label = f === 'ALL' ? '전체' : TENANT_STATUS_LABELS[f].label;
+                {filters.map((f) => {
+                  const count = f === 'ALL' ? summary.total : f === 'UNASSIGNED' ? unassignedCount : summary.byStatus[f];
+                  const label = f === 'ALL' ? '전체' : f === 'UNASSIGNED' ? '담당 그룹 없음' : TENANT_STATUS_LABELS[f].label;
                   const on = filter === f;
                   return (
                     <button
@@ -137,6 +145,9 @@ export function TenantsView({ tenants }: { tenants: TenantListItem[] }) {
                         >
                           {t.name}
                         </Link>
+                        {showUnassigned && t.group_id === null ? (
+                          <span className="text-badge-warning-fg ml-2 text-xs font-medium whitespace-nowrap">그룹 없음</span>
+                        ) : null}
                       </TableCell>
                       <TableCell><TenantStatusBadge status={t.status} /></TableCell>
                       <TableCell><SubscriptionCell item={t} /></TableCell>
